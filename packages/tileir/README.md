@@ -196,6 +196,19 @@ store. Lowering turns it into an `IfElse` the way it turns a loop into a
   it is refused by name; a pointer ladder built inside is not reused after the
   loop. The table numbers a `ForLoop` in reading order: results, induction
   variable, carried values, body.
+- **What the recording refuses on sight** (knives C1 and D-1). The handler
+  keeps one row per value handle, its element format and its shape, and
+  holds every element-wise operand to what the operation declares. A
+  mismatch is refused when the kernel is recorded, naming the operation by
+  its depth-first position in `TileProg.ops` (`MakeToken(0)` is #0) and its
+  dialect name; before, only `tileiras` refused such a program:
+  ``tileir: kernel `vadd_half`: op #6 `addf`: lhs is tile<128xf64>, declared tile<64xf64>``.
+  A Dawn panic carries no source position, so the number is the way back
+  to the body. `d_fork2`'s two chains are held to their promise as well:
+  writes the recording cannot show to be disjoint within one block (bases a
+  non-constant distance apart, overlapping ranges, a scatter, an atomic, a
+  view or a pointer it cannot follow to a parameter) are refused at the
+  `join_tokens`. Design §6.21 has the rules and what is not checked.
 
 ## Bytecode
 

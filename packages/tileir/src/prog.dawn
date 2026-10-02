@@ -15,9 +15,10 @@
 # `ops` is where the chain starts. Nothing else orders them; Tile IR gives
 # program order no meaning between memory operations.
 use std/list
+use std/map
 use std/str
 use std/gpu.{F64, F32, F16, I32, I64}
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, sub, add_i, rounding_name, Overflow, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, sub, add_i, d_fork2, select, lt, arange, rounding_name, Overflow, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -789,6 +790,409 @@ fn last(xs: List[Int]) -> Int = xs[len(xs) - 1]
 
 fn but_last(xs: List[Int]) -> List[Int] = list.take(xs, len(xs) - 1)
 
+# ---- the handle table and the fork check (knives C1 and D-1) ----
+#
+# docs/tile-backend-design.md 6.21 is the long form of what follows.
+
+# An index value as a sum of ATOMS: `konst` plus `coeff * atom` for each
+# `(atom, coeff)` in `terms`, where an atom is a handle the arithmetic below
+# does not see through (a block id, a loop's induction variable, a value
+# read from memory, a product of two non-constant handles). Two handles
+# whose forms differ by a constant are a constant apart in every block and
+# every iteration; that is the whole of what the fork check asks.
+type Lin = {
+  terms: List[(Int, Int)],
+  konst: Int,
+}
+
+# What the recording knows about one value handle: the element format it
+# carries (`ptr<f64>` for a pointer tile) and its shape (`[]` for rank 0).
+# Tokens and views have no row: nothing element-wise takes one, and a view's
+# type needs the tensor view's, which the lowering has and this does not.
+#
+# `affine` is RESERVED for knife D-2 and is `None` in every row this knife
+# writes. D-2 fills it with the handle's value as a `Lin` whose atoms are the
+# block ids (and loop induction variables), so that each parameter's write
+# addresses can be summarized as `A * block + F` when the kernel is recorded
+# (research-tile-disjoint-writes 3.2). D-1 below computes the same form on
+# demand, from the recorded operations, for the few handles a fork's writes
+# name; D-2 is the knife that keeps it per handle.
+type Held = {
+  dtype: String,
+  shape: List[Int],
+  affine: Option[Lin],
+}
+
+fn hold(held: Map[Int, Held], h: Int, dtype: String, shape: List[Int]) -> Map[Int, Held] =
+  map.insert(held, h, Held { dtype: dtype, shape: shape, affine: None })
+
+fn ptr_of(dtype: String) -> String = "ptr<${dtype}>"
+
+# `to[k]` gets `from[k]`'s row, for each `k` whose source has one: a loop's
+# carried values and results are its inits again, and an `if`'s results are
+# what its then branch yields.
+fn copy_held(held: Map[Int, Held], from: List[Int], to: List[Int]) -> Map[Int, Held] =
+  list.fold(range(0, len(to)), held, (m, k) => match map.get(m, from[k]) {
+    Some(x) -> map.insert(m, to[k], x)
+    None -> m
+  })
+
+# A reduction's results, its operands without dimension `dim`; its region
+# arguments, rank 0 of each operand's format (two per operand).
+fn reduce_held(held: Map[Int, Held], operands: List[Int], dim: Int, results: List[Int]) -> Map[Int, Held] =
+  list.fold(range(0, len(results)), held, (m, k) => match map.get(m, operands[k]) {
+    Some(x) -> hold(m, results[k], x.dtype, list.map(list.filter(range(0, len(x.shape)), j => j != dim), j => x.shape[j]))
+    None -> m
+  })
+
+fn args_held(held: Map[Int, Held], operands: List[Int], args: List[Int]) -> Map[Int, Held] =
+  list.fold(range(0, len(args)), held, (m, k) => match map.get(m, operands[k / 2]) {
+    Some(x) -> hold(m, args[k], x.dtype, [])
+    None -> m
+  })
+
+# The values an `if`'s then branch yields: its last operation's.
+fn then_yields(on_true: List[TileOp]) -> List[Int] = match on_true[len(on_true) - 1] {
+  Yield(values) -> values
+  _ -> []
+}
+
+# How many operations `ops` holds counted the way `TileProg.ops` reads
+# depth first: one for each, plus everything inside a region, its closing
+# `Continue` / `Yield` included.
+fn op_count(ops: List[TileOp]) -> Int =
+  list.fold(ops, 0, (n, op) => n + 1 + match op {
+    For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> op_count(body)
+    Loop(_inits, _carried, _results, body) -> op_count(body)
+    Reduce(_results, _dim, _shape, _identities, _operands, _args, body) -> op_count(body)
+    Scan(_results, _dim, _reverse, _shape, _identities, _operands, _args, body) -> op_count(body)
+    If(_results, _cond, on_true, on_false) -> op_count(on_true) + op_count(on_false)
+    _ -> 0
+  })
+
+## The number a refusal gives the operation being recorded: its position in
+## `TileProg.ops` read depth first (a region, then its body, then what
+## follows it), with the entry's `MakeToken(0)` as #0. So `vadd`'s `addf` is
+## #6: the block id, the two index operations of `tile_at` and two loads
+## come before it. Every region still open counts once for itself, ahead of
+## its body, because that is where the finished program will put it.
+fn op_number(frames: List[Frame], ops: List[TileOp]) -> Int = {
+  let before = list.fold(frames, 0, (n, f) => n + 1 + match f {
+    LoopFrame(outer, _iv, _lower, _upper, _step, _unsigned, _inits, _carried) -> op_count(outer)
+    WhileFrame(outer, _inits, _carried) -> op_count(outer)
+    ReduceFrame(outer, _dim, _shape, _identities, _operands, _args) -> op_count(outer)
+    ScanFrame(outer, _dim, _reverse, _shape, _identities, _operands, _args) -> op_count(outer)
+    ThenFrame(outer, _cond) -> op_count(outer)
+    ElseFrame(outer, _cond, on_true) -> op_count(outer) + op_count(on_true)
+  })
+  before + op_count(ops) + 1
+}
+
+# A refusal that names the operation as well as the kernel (knife C1,
+# research-cutile-rs-api 借-11): `op #k` is `op_number`'s and `op` the
+# operation's dialect name. The message has no source position because a
+# Dawn panic carries none on either backend (measured, 6.21); the number is
+# the cheapest way back to the kernel body.
+fn refuse_at(name: String, frames: List[Frame], ops: List[TileOp], op: String, what: String) -> Never =
+  refuse(name, "op #${op_number(frames, ops)} `${op}`: ${what}")
+
+fn tile_text(dtype: String, shape: List[Int]) -> String =
+  if len(shape) == 0 {
+    "tile<${dtype}>"
+  } else {
+    "tile<${join(list.map(shape, d => "${d}"), "x")}x${dtype}>"
+  }
+
+# One operand of an element-wise operation against what the operation
+# declares it to be. A handle with no row (a token, a view, a value read
+# through one) is not compared: the check refuses only what it can see is
+# wrong, and every such program is one `tileiras` refuses too.
+fn check_operand(name: String, frames: List[Frame], ops: List[TileOp], held: Map[Int, Held],
+  op: String, role: String, h: Int, dtype: String, shape: List[Int]) -> Unit =
+  match map.get(held, h) {
+    Some(x) ->
+      if x.dtype != dtype || x.shape != shape {
+        refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, declared ${tile_text(dtype, shape)}")
+      } else {
+        ()
+      }
+    None -> ()
+  }
+
+# ---- D-1: the two chains a fork joins write no element in common
+
+fn lin_const(v: Int) -> Lin = Lin { terms: [], konst: v }
+
+# `ts` with `coeff` more of `atom`.
+fn atom_of(t: (Int, Int)) -> Int = {
+  let (x, _c) = t
+  x
+}
+
+fn bump(ts: List[(Int, Int)], atom: Int, coeff: Int) -> List[(Int, Int)] =
+  if list.any(ts, t => atom_of(t) == atom) {
+    list.map(ts, t => {
+      let (x, c) = t
+      if x == atom { (x, c + coeff) } else { (x, c) }
+    })
+  } else {
+    ts ++ [(atom, coeff)]
+  }
+
+fn lin_add(a: Lin, b: Lin) -> Lin = {
+  let terms = list.fold(b.terms, a.terms, (ts, t) => {
+    let (atom, coeff) = t
+    bump(ts, atom, coeff)
+  })
+  Lin {
+    terms: list.filter(terms, t => {
+      let (_x, c) = t
+      c != 0
+    }),
+    konst: a.konst + b.konst,
+  }
+}
+
+fn lin_scale(a: Lin, k: Int) -> Lin =
+  if k == 0 {
+    lin_const(0)
+  } else {
+    Lin {
+      terms: list.map(a.terms, t => {
+        let (x, c) = t
+        (x, c * k)
+      }),
+      konst: a.konst * k,
+    }
+  }
+
+# `h` as a sum of atoms, read off the operations that defined it.
+fn lin_of(defs: Map[Int, TileOp], h: Int) -> Lin = match map.get(defs, h) {
+  Some(IdxConst(_d, v)) -> lin_const(v)
+  Some(IdxAdd(_d, a, b)) -> lin_add(lin_of(defs, a), lin_of(defs, b))
+  Some(IdxMul(_d, a, b)) -> {
+    let la = lin_of(defs, a)
+    let lb = lin_of(defs, b)
+    if len(la.terms) == 0 {
+      lin_scale(lb, la.konst)
+    } else if len(lb.terms) == 0 {
+      lin_scale(la, lb.konst)
+    } else {
+      Lin { terms: [(h, 1)], konst: 0 }
+    }
+  }
+  _ -> Lin { terms: [(h, 1)], konst: 0 }
+}
+
+# What one write may touch, as simply as the check needs it: `Span` is the
+# elements `base + lo` to `base + hi` of a parameter (the hull of a strided
+# tile's lanes, which is exact for a contiguous one); `Whole` is somewhere in
+# a parameter, at addresses the recording does not follow (a scatter, an
+# atomic, a view); `Unnamed` is a write whose target is not a parameter the
+# recording can name (an alloca, a global, a pointer made from an integer).
+type Write =
+  | Span(param: Int, base: Lin, lo: Int, hi: Int)
+  | Whole(param: Int)
+  | Unnamed
+
+# The parameter a pointer tile points into, when it was spread from one and
+# only offset or recast since.
+fn ptr_param(defs: Map[Int, TileOp], h: Int) -> Option[Int] = match map.get(defs, h) {
+  Some(MakePtrs(_d, param, _dtype, _shape)) -> Some(param)
+  Some(PtrAdd(_d, _dtype, _shape, ptrs, _offs)) -> ptr_param(defs, ptrs)
+  Some(PtrCast(_d, _from, _to, _shape, ptrs)) -> ptr_param(defs, ptrs)
+  _ -> None
+}
+
+fn view_param(defs: Map[Int, TileOp], h: Int) -> Option[Int] = match map.get(defs, h) {
+  Some(TensorViewOf(_d, param, _dtype, _base, _shape, _strides, _ds, _dst)) -> Some(param)
+  Some(PartitionViewOf(_d, _dtype, view, _ts, _dm, _p)) -> view_param(defs, view)
+  Some(StridedViewOf(_d, _dtype, view, _ts, _tr, _dm, _p)) -> view_param(defs, view)
+  Some(GatherViewOf(_d, _dtype, view, _ts, _sd, _p)) -> view_param(defs, view)
+  _ -> None
+}
+
+fn named(p: Option[Int]) -> Write = match p {
+  Some(param) -> Whole(param)
+  None -> Unnamed
+}
+
+# The lowest and the highest element offset a tile of `shape` laid out by
+# `strides` reaches from its base.
+fn span_of(param: Int, base: Lin, shape: List[Int], strides: List[Int]) -> Write = {
+  let reach = list.map(range(0, len(shape)), k => (shape[k] - 1) * strides[k])
+  Span(param, base, list.fold(reach, 0, (n, r) => if r < 0 { n + r } else { n }),
+    list.fold(reach, 0, (n, r) => if r > 0 { n + r } else { n }))
+}
+
+# The writes one operation performs, at any depth (a loop's body writes
+# what it writes).
+fn writes_of(defs: Map[Int, TileOp], op: TileOp) -> List[Write] = match op {
+  Store(_t, param, _dtype, base, shape, strides, _v, _m, _ti, _h) -> [span_of(param, lin_of(defs, base), shape, strides)]
+  StoreAt(_t, _dtype, shape, ptrs, _v, _m, _ti) -> match map.get(defs, ptrs) {
+    # `ptr_offset(ptrs(p, ..), lanes(base, shape, strides))` is a store at
+    # `base` written the long way, and is read as one
+    Some(PtrAdd(_d, _dt, _s, root, offs)) -> match (map.get(defs, root), map.get(defs, offs)) {
+      (Some(MakePtrs(_d2, param, _dt2, _s2)), Some(Lanes(_d3, base, lshape, lstrides))) ->
+        if lshape == shape { [span_of(param, lin_of(defs, base), lshape, lstrides)] } else { [Whole(param)] }
+      _ -> [named(ptr_param(defs, ptrs))]
+    }
+    _ -> [named(ptr_param(defs, ptrs))]
+  }
+  Scatter(_t, param, _dtype, _i, _s, _v, _m, _ti) -> [Whole(param)]
+  AtomicRMW(_d, _t, param, _dtype, _mode, _i, _s, _v, _m, _ti) -> [Whole(param)]
+  AtomicCAS(_d, _t, param, _dtype, _i, _s, _c, _v, _m, _ti) -> [Whole(param)]
+  StoreView(_t, _dtype, view, _ix, _v, _ti) -> [named(view_param(defs, view))]
+  AtomicRedViewOf(_t, _dtype, view, _ix, _mode, _scope, _v, _ti) -> [named(view_param(defs, view))]
+  For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> writes_in(defs, body)
+  Loop(_inits, _carried, _results, body) -> writes_in(defs, body)
+  _ -> []
+}
+
+fn writes_in(defs: Map[Int, TileOp], body: List[TileOp]) -> List[Write] = {
+  let none: List[Write] = []
+  list.fold(body, none, (ws, o) => ws ++ writes_of(defs, o))
+}
+
+# Every operation of `ops` at any depth, regions before their bodies.
+fn flat(ops: List[TileOp]) -> List[TileOp] = {
+  let none: List[TileOp] = []
+  list.fold(ops, none, (acc, op) => acc ++ [op] ++ match op {
+    For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> flat(body)
+    Loop(_inits, _carried, _results, body) -> flat(body)
+    Reduce(_results, _dim, _shape, _identities, _operands, _args, body) -> flat(body)
+    Scan(_results, _dim, _reverse, _shape, _identities, _operands, _args, body) -> flat(body)
+    If(_results, _cond, on_true, on_false) -> flat(on_true) ++ flat(on_false)
+    _ -> none
+  })
+}
+
+# Everything recorded so far, at any depth: the regions still open
+# contribute what they hold.
+fn recorded(frames: List[Frame], ops: List[TileOp]) -> List[TileOp] = {
+  let none: List[TileOp] = []
+  list.fold(frames, none, (acc, f) => acc ++ match f {
+    LoopFrame(outer, _iv, _lower, _upper, _step, _unsigned, _inits, _carried) -> flat(outer)
+    WhileFrame(outer, _inits, _carried) -> flat(outer)
+    ReduceFrame(outer, _dim, _shape, _identities, _operands, _args) -> flat(outer)
+    ScanFrame(outer, _dim, _reverse, _shape, _identities, _operands, _args) -> flat(outer)
+    ThenFrame(outer, _cond) -> flat(outer)
+    ElseFrame(outer, _cond, on_true) -> flat(outer) ++ flat(on_true)
+  }) ++ flat(ops)
+}
+
+# The token an operation of the chain answers, and the ones it was ordered
+# after. A loop answers its last result and was ordered after its last
+# init: the token rides through every loop as the last carried value.
+fn tok_step(op: TileOp) -> Option[(Int, List[Int])] = match op {
+  Load(_d, t, _p, _dt, _b, _s, _st, _m, _pd, ti, _h) -> Some((t, [ti]))
+  Store(t, _p, _dt, _b, _s, _st, _v, _m, ti, _h) -> Some((t, [ti]))
+  Gather(_d, t, _p, _dt, _i, _s, _m, _pd, ti) -> Some((t, [ti]))
+  Scatter(t, _p, _dt, _i, _s, _v, _m, ti) -> Some((t, [ti]))
+  AtomicRMW(_d, t, _p, _dt, _mode, _i, _s, _v, _m, ti) -> Some((t, [ti]))
+  AtomicCAS(_d, t, _p, _dt, _i, _s, _c, _v, _m, ti) -> Some((t, [ti]))
+  LoadAt(_d, t, _dt, _s, _ps, _m, _pd, ti) -> Some((t, [ti]))
+  StoreAt(t, _dt, _s, _ps, _v, _m, ti) -> Some((t, [ti]))
+  Print(t, _f, _dt, _s, _a, ti) -> Some((t, [ti]))
+  AtomicRedViewOf(t, _dt, _v, _ix, _mode, _scope, _val, ti) -> Some((t, [ti]))
+  LoadView(_d, t, _dt, _v, _ix, ti) -> Some((t, [ti]))
+  StoreView(t, _dt, _v, _ix, _val, ti) -> Some((t, [ti]))
+  JoinToks(t, toks) -> Some((t, toks))
+  For(_iv, _lower, _upper, _step, _unsigned, inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
+  Loop(inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
+  _ -> None
+}
+
+# The tokens `tok` is ordered after, itself included, walking the chain
+# back until it leaves what was recorded (the entry token, or a token a
+# region open around the fork carries in).
+fn tok_ancestry(chain: Map[Int, (TileOp, List[Int])], tok: Int, seen: List[Int]) -> List[Int] =
+  if list.contains(seen, tok) {
+    seen
+  } else {
+    match map.get(chain, tok) {
+      Some((_op, before)) -> list.fold(before, seen ++ [tok], (s, t) => tok_ancestry(chain, t, s))
+      None -> seen ++ [tok]
+    }
+  }
+
+# Why two writes might touch one element, or `None` when they cannot.
+fn overlap(a: Write, b: Write) -> Option[String] = match (a, b) {
+  (Unnamed, _) -> Some("a write whose target is not a parameter (an alloca, a global, or a pointer made from an integer) cannot be told apart from the other chain's")
+  (_, Unnamed) -> Some("a write whose target is not a parameter (an alloca, a global, or a pointer made from an integer) cannot be told apart from the other chain's")
+  (Whole(p), Whole(q)) -> if p != q { None } else { Some("both write parameter ${p} at addresses the recording does not follow") }
+  (Whole(p), Span(q, _b, _lo, _hi)) -> if p != q { None } else { Some("both write parameter ${p}, one at addresses the recording does not follow") }
+  (Span(p, _b, _lo, _hi), Whole(q)) -> if p != q { None } else { Some("both write parameter ${p}, one at addresses the recording does not follow") }
+  (Span(p, ba, alo, ahi), Span(q, bb, blo, bhi)) ->
+    if p != q {
+      None
+    } else {
+      let d = lin_add(ba, lin_scale(bb, 0 - 1))
+      if len(d.terms) != 0 {
+        Some("both write parameter ${p}, from bases that are not a constant distance apart")
+      } else if d.konst + ahi < blo || bhi < d.konst + alo {
+        None
+      } else {
+        Some("both write parameter ${p}: counted from the second chain's base, the first writes elements ${d.konst + alo} to ${d.konst + ahi} and the second ${blo} to ${bhi}")
+      }
+    }
+}
+
+# D-1: the chains `toks` end are unordered against each other wherever
+# they do not share history, so a write one of them issued after the fork
+# and a write another issued after it must not reach one element. Within
+# one block the block id is the same atom on both sides and cancels, which
+# is why this is decidable at recording time and needs no grid.
+fn check_fork(name: String, frames: List[Frame], ops: List[TileOp], toks: List[Int]) -> Unit = {
+  let all = recorded(frames, ops)
+  let no_defs: Map[Int, TileOp] = map.empty()
+  let defs = list.fold(all, no_defs, (m, op) => list.fold(defined(op), m, (m2, h) => map.insert(m2, h, op)))
+  let no_chain: Map[Int, (TileOp, List[Int])] = map.empty()
+  let chain = list.fold(all, no_chain, (m, op) => match tok_step(op) {
+    Some((t, before)) -> map.insert(m, t, (op, before))
+    None -> m
+  })
+  let none: List[Int] = []
+  let ancestry = list.map(toks, t => tok_ancestry(chain, t, none))
+  let no_pairs: List[(Int, Int)] = []
+  let pairs = list.fold(range(0, len(toks)), no_pairs, (ps, i) => ps ++ list.map(range(i + 1, len(toks)), j => (i, j)))
+  let nothing: Option[String] = None
+  let why = list.fold(pairs, nothing, (found, pr) => match found {
+    Some(_w) -> found
+    None -> {
+      let (i, j) = pr
+      first_overlap(writes_after(chain, defs, ancestry[i], ancestry[j]),
+        writes_after(chain, defs, ancestry[j], ancestry[i]))
+    }
+  })
+  match why {
+    Some(w) -> refuse_at(name, frames, ops, "join_tokens", "the chains it joins are unordered and may write the same element: ${w}")
+    None -> ()
+  }
+}
+
+# The writes of the chain whose tokens are `mine` that the chain whose
+# tokens are `theirs` is not ordered after.
+fn writes_after(chain: Map[Int, (TileOp, List[Int])], defs: Map[Int, TileOp], mine: List[Int], theirs: List[Int]) -> List[Write] = {
+  let none: List[Write] = []
+  list.fold(list.filter(mine, t => not list.contains(theirs, t)), none, (ws, t) => match map.get(chain, t) {
+    Some((op, _before)) -> ws ++ writes_of(defs, op)
+    None -> ws
+  })
+}
+
+# The first reason a write of `wi` and one of `wj` might meet.
+fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
+  let nothing: Option[String] = None
+  list.fold(wi, nothing, (found, a) => match found {
+    Some(_w) -> found
+    None -> list.fold(wj, nothing, (f, b) => match f {
+      Some(_w) -> f
+      None -> overlap(a, b)
+    })
+  })
+}
+
 ## Run `body` once under a handler that records what it issues, and answer
 ## the record. `params` is the dtype name of each entry parameter in order;
 ## the body's `param(d, pos)` values must agree with it (position in range,
@@ -852,6 +1256,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       var opened_top: Bool = true
       var callee: String = ""
       var calls: List[Call] = []
+      var held: Map[Int, Held] = map.empty()
       t_call_enter(called_name) => {
         if depth == 0 {
           callee = called_name
@@ -876,6 +1281,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_block_id(axis) => {
         if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [BlockId(d, axis)]
@@ -887,6 +1293,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_param(name, params, param, dtype, "load")
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
@@ -911,6 +1318,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         if list.any(open, is_pure_region) { refuse(name, "a gather inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "gather")
         check_shape(name, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
@@ -935,6 +1343,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_param(name, params, param, dtype, "atomic")
         check_shape(name, shape)
         check_rmw_mode(name, mode)
+        held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
@@ -947,6 +1356,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "atomic")
         check_shape(name, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
@@ -956,6 +1366,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_constf(dtype, shape, value) => {
         check_shape(name, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [ConstF(d, dtype, shape, value)]
@@ -964,6 +1375,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_consti(dtype, shape, value) => {
         check_shape(name, shape)
         check_int_dtype(name, dtype)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [ConstI(d, dtype, shape, value)]
@@ -971,6 +1383,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_iota(n) => {
         check_shape(name, [n])
+        held = hold(held, next, "i32", [n])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Iota(d, n)]
@@ -979,6 +1392,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_lanes(base, shape, strides) => {
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        held = hold(held, next, "i32", shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Lanes(d, base, shape, strides)]
@@ -987,6 +1401,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_unaryf(op, dtype, shape, a) => {
         check_shape(name, shape)
         check_unary(name, op)
+        check_operand(name, frames, ops, held, op, "operand", a, dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [UnaryF(d, op, dtype, shape, a)]
@@ -995,6 +1411,9 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_binaryf(op, dtype, shape, a, b) => {
         check_shape(name, shape)
         check_binary(name, op)
+        check_operand(name, frames, ops, held, op, "lhs", a, dtype, shape)
+        check_operand(name, frames, ops, held, op, "rhs", b, dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [BinaryF(d, op, dtype, shape, a, b)]
@@ -1002,6 +1421,10 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_fma(dtype, shape, a, b, c) => {
         check_shape(name, shape)
+        check_operand(name, frames, ops, held, "fma", "lhs", a, dtype, shape)
+        check_operand(name, frames, ops, held, "fma", "rhs", b, dtype, shape)
+        check_operand(name, frames, ops, held, "fma", "accumulator", c, dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Fma(d, dtype, shape, a, b, c)]
@@ -1009,6 +1432,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_mmaf(dtype, m, k, n, a, b, c) => {
         check_shape(name, [m, k, n])
+        held = hold(held, next, dtype, [m, n])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MmaF(d, dtype, m, k, n, a, b, c)]
@@ -1036,6 +1460,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         check_shape(name, [m, k, n, k / block])
+        held = hold(held, next, "f32", [m, n])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MmaFScaled(d, dtype, scale, m, k, n, block, a, b, c, sa, sb)]
@@ -1043,6 +1468,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_mmai(m, k, n, a, b, c) => {
         check_shape(name, [m, k, n])
+        held = hold(held, next, "i32", [m, n])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MmaI(d, m, k, n, a, b, c)]
@@ -1051,6 +1477,9 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_cmpf(pred, dtype, shape, a, b) => {
         check_shape(name, shape)
         check_pred(name, pred)
+        check_operand(name, frames, ops, held, "cmpf", "lhs", a, dtype, shape)
+        check_operand(name, frames, ops, held, "cmpf", "rhs", b, dtype, shape)
+        held = hold(held, next, "i1", shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [CmpF(d, pred, dtype, shape, a, b)]
@@ -1059,6 +1488,9 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_cmpi(pred, shape, a, b) => {
         check_shape(name, shape)
         check_int_pred(name, pred)
+        check_operand(name, frames, ops, held, "cmpi", "lhs", a, "i32", shape)
+        check_operand(name, frames, ops, held, "cmpi", "rhs", b, "i32", shape)
+        held = hold(held, next, "i1", shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [CmpI(d, pred, shape, a, b)]
@@ -1068,6 +1500,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, shape)
         check_unary_int(name, op)
         check_int_dtype(name, dtype)
+        check_operand(name, frames, ops, held, op, "operand", a, dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [UnaryI(d, op, dtype, shape, a)]
@@ -1077,6 +1511,9 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, shape)
         check_binary_int(name, op)
         check_int_dtype(name, dtype)
+        check_operand(name, frames, ops, held, op, "lhs", a, dtype, shape)
+        check_operand(name, frames, ops, held, op, "rhs", b, dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [BinaryI(d, op, dtype, shape, a, b)]
@@ -1086,6 +1523,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, shape)
         check_convert(name, op)
         check_ftof(name, op, from, to)
+        check_operand(name, frames, ops, held, op, "operand", a, from, shape)
+        held = hold(held, next, to, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Convert(d, op, from, to, shape, a)]
@@ -1094,6 +1533,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_repack(op, from, to, shape, a) => {
         check_shape(name, shape)
         check_repack(name, op, from, to, shape)
+        held = hold(held, next, to, repack_shape(name, from, to, shape))
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Repack(d, op, from, to, shape, repack_shape(name, from, to, shape), a)]
@@ -1101,24 +1541,31 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_select(dtype, shape, cond, a, b) => {
         check_shape(name, shape)
+        check_operand(name, frames, ops, held, "select", "condition", cond, "i1", shape)
+        check_operand(name, frames, ops, held, "select", "value if true", a, dtype, shape)
+        check_operand(name, frames, ops, held, "select", "value if false", b, dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Select(d, dtype, shape, cond, a, b)]
         d
       }
       t_idx_const(value) => {
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [IdxConst(d, value)]
         d
       }
       t_idx_add(a, b) => {
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [IdxAdd(d, a, b)]
         d
       }
       t_idx_mul(a, b) => {
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [IdxMul(d, a, b)]
@@ -1138,6 +1585,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         let base = next + 1
         next = mint(name, next, 1 + len(all))
         let carried = list.map(range(0, len(all)), k => base + k)
+        held = copy_held(hold(held, iv, "i32", []), all, carried)
         frames = frames ++ [LoopFrame(ops, iv, lower, upper, step, unsigned, all, carried)]
         ops = []
         tok = last(carried)
@@ -1158,6 +1606,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
             next = mint(name, next, len(inits))
             let results = list.map(range(0, len(inits)), k => base + k)
             let body = inner ++ [Continue(outs ++ [tok])]
+            held = copy_held(held, inits, results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [For(iv, lower, upper, step, unsigned, inits, carried, results, body)]
             tok = last(results)
@@ -1179,6 +1628,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         let base = next
         next = mint(name, next, len(all))
         let carried = list.map(range(0, len(all)), k => base + k)
+        held = copy_held(held, all, carried)
         frames = frames ++ [WhileFrame(ops, all, carried)]
         ops = []
         tok = last(carried)
@@ -1207,6 +1657,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
             # it stands now), or fall through to the continue below
             let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])
             let body = inner ++ [exit, Continue(outs ++ [tok])]
+            held = copy_held(held, inits, results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [Loop(inits, carried, results, body)]
             let after_loop = last(results)
@@ -1235,6 +1686,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        check_operand(name, frames, ops, held, "spread", "operand", src, dtype, [])
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Spread(d, dtype, shape, src)]
@@ -1266,6 +1719,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         let base = next
         next = mint(name, next, 2 * len(operands))
         let args = list.map(range(0, 2 * len(operands)), k => base + k)
+        held = args_held(held, operands, args)
         frames = frames ++ [ReduceFrame(ops, dim, shape, identities, operands, args)]
         ops = []
         args
@@ -1283,6 +1737,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
             let base = next
             next = mint(name, next, len(operands))
             let results = list.map(range(0, len(operands)), k => base + k)
+            held = reduce_held(held, operands, dim, results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [Reduce(results, dim, shape, identities, operands, args, inner ++ [Yield(yields)])]
             results
@@ -1316,6 +1771,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         let base = next
         next = mint(name, next, 2 * len(operands))
         let args = list.map(range(0, 2 * len(operands)), k => base + k)
+        held = args_held(held, operands, args)
         frames = frames ++ [ScanFrame(ops, dim, reverse, shape, identities, operands, args)]
         ops = []
         args
@@ -1333,6 +1789,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
             let base = next
             next = mint(name, next, len(operands))
             let results = list.map(range(0, len(operands)), k => base + k)
+            held = copy_held(held, operands, results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [Scan(results, dim, reverse, shape, identities, operands, args, inner ++ [Yield(yields)])]
             results
@@ -1344,6 +1801,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, from)
         check_shape(name, to)
         check_extract(name, from, to, len(indices))
+        held = hold(held, next, dtype, to)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Extract(d, dtype, from, to, src, indices)]
@@ -1353,6 +1811,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, sub)
         check_shape(name, whole)
         check_insert(name, sub, whole, len(indices))
+        held = hold(held, next, dtype, whole)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Insert(d, dtype, sub, whole, src, dst, indices)]
@@ -1361,6 +1820,9 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_powi(dtype, exp_dtype, shape, a, n) => {
         check_shape(name, shape)
         check_powi(name, dtype, exp_dtype)
+        check_operand(name, frames, ops, held, "powi", "base", a, dtype, shape)
+        check_operand(name, frames, ops, held, "powi", "exponent", n, exp_dtype, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PowI(d, dtype, exp_dtype, shape, a, n)]
@@ -1370,6 +1832,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, lhs_shape)
         check_shape(name, rhs_shape)
         check_cat(name, dim, lhs_shape, rhs_shape)
+        held = hold(held, next, dtype, list.map(range(0, len(lhs_shape)), k => if k == dim { lhs_shape[k] + rhs_shape[k] } else { lhs_shape[k] }))
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Cat(d, dtype, dim, lhs_shape, rhs_shape, lhs, rhs)]
@@ -1378,6 +1841,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_permute(dtype, shape, perm, src) => {
         check_shape(name, shape)
         check_perm(name, shape, perm)
+        held = hold(held, next, dtype, list.map(range(0, len(perm)), k => shape[perm[k]]))
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Permute(d, dtype, shape, perm, src)]
@@ -1385,6 +1849,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_num_blocks(axis) => {
         if axis < 0 || axis > 2 { refuse(name, "num_blocks axis is 0, 1 or 2, got ${axis}") } else { () }
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [NumBlocks(d, axis)]
@@ -1403,6 +1868,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         if len(toks) < 2 { refuse(name, "join_tokens wants two or more tokens, got ${len(toks)}") } else { () }
+        check_fork(name, frames, ops, toks)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [JoinToks(d, toks)]
@@ -1412,6 +1878,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_ptrs(param, dtype, shape) => {
         check_param(name, params, param, dtype, "pointer tile")
         check_shape(name, shape)
+        held = hold(held, next, ptr_of(dtype), shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MakePtrs(d, param, dtype, shape)]
@@ -1419,6 +1886,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_ptr_offset(dtype, shape, ptrs, offs) => {
         check_shape(name, shape)
+        held = hold(held, next, ptr_of(dtype), shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PtrAdd(d, dtype, shape, ptrs, offs)]
@@ -1426,6 +1894,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_ptr_to_int(dtype, shape, ptrs) => {
         check_shape(name, shape)
+        held = hold(held, next, "i64", shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PtrInt(d, dtype, shape, ptrs)]
@@ -1433,6 +1902,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_int_to_ptr(dtype, shape, ints) => {
         check_shape(name, shape)
+        held = hold(held, next, ptr_of(dtype), shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [IntPtr(d, dtype, shape, ints)]
@@ -1440,6 +1910,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_ptr_to_ptr(from, to, shape, ptrs) => {
         check_shape(name, shape)
+        held = hold(held, next, ptr_of(to), shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PtrCast(d, from, to, shape, ptrs)]
@@ -1453,6 +1924,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         check_shape(name, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         let tv = next + 1
         next = mint(name, next, 2)
@@ -1469,6 +1941,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_shape(name, shape)
         check_int_dtype(name, dtype)
         check_assume(name, pred, shape)
+        held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Assume(d, pred, dtype, shape, src)]
@@ -1550,6 +2023,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
               ()
             }
         }
+        held = hold(held, next, ptr_of(dtype), shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [GetGlobal(d, sym, dtype, shape)]
@@ -1574,6 +2048,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        held = hold(held, next, ptr_of(dtype), shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
@@ -1740,6 +2215,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [TensorShapeOf(d, view, dim)]
@@ -1751,6 +2227,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        held = hold(held, next, "i32", [])
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [IndexSpaceShapeOf(d, view, dim)]
@@ -1791,6 +2268,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
             let base = next
             next = mint(name, next, len(yields))
             let results = list.map(range(0, len(yields)), k => base + k)
+            held = copy_held(held, then_yields(on_true), results)
             frames = list.take(frames, len(frames) - 1)
             ops = outer ++ [If(results, cond, on_true, ops ++ [Yield(yields)])]
             results
@@ -2814,4 +3292,143 @@ test "a global declared twice, one declared inside a region, an empty one, and a
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "the global `a` holds f64, and get_global reads it as i32") }
   }
+}
+
+# ---- knives C1 and D-1: the handle table and the fork check
+
+# vadd with the sum declared over 64 lanes of two 128-lane tiles: a body
+# the typed surface accepts (a shape is a value, not a type) and that
+# `tileiras` refused before C1, because `addf`'s operand and result types
+# disagree. Now the recording refuses it, naming the operation.
+fn vadd_half(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 128)
+  let ta = load(a, base, [128])
+  let tb = load(b, base, [128])
+  store(out, base, [64], addf(F64, [64], ta, tb))
+}
+
+test "knife C1: an element-wise operation whose operand shape is not the one it declares is refused when recorded, by number and name" {
+  let r = catch_panic(() => trace_kernel("vadd_half", ["f64", "f64", "f64"], () => vadd_half(param(F64, 0), param(F64, 1), param(F64, 2))))
+  match r {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "tileir: kernel `vadd_half`: op #6 `addf`: lhs is tile<128xf64>, declared tile<64xf64>" }
+  }
+}
+
+test "knife C1: op #k is the operation's position in the recorded program read depth first" {
+  # the same body with the shapes agreeing records; its #6 is the addf the
+  # refusal above names
+  let p = trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
+  match p.ops[6] {
+    BinaryF(_d, op, _dt, _s, _a, _b) -> { assert op == "addf" }
+    _ -> { assert false }
+  }
+  # inside a loop body: the For counts once ahead of its body
+  let r = catch_panic(() => trace_kernel("in_loop", ["f64"], () => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let one = idx_const(1)
+    let _t = d_for(zero, one, one, load(x, zero, [8]), (_i, acc) => mul(F64, [4], acc, acc))
+    ()
+  }))
+  match r {
+    Ok(_) -> { assert false }
+    # #0 the token, #1 #2 the two index constants, #3 the load, #4 the
+    # For, #5 the mulf in its body
+    Err(e) -> { assert e.message == "tileir: kernel `in_loop`: op #5 `mulf`: lhs is tile<8xf64>, declared tile<4xf64>" }
+  }
+}
+
+# Below the typed surface, where the format is a string: a body that issues
+# `t_binaryf` itself (or a typed function of dev.dawn that hands the wrong
+# name down, the way run.sh's load-dtype-f64 mutant does for `load`).
+fn raw_dtype_mismatch() -> Unit !Dev = {
+  let t = t_constf("f64", [8], 1.0)
+  let _s = t_binaryf("addf", "f32", [8], t, t)
+  ()
+}
+
+test "knife C1: an operand whose element format is not the one the operation declares is refused" {
+  assert refusal(raw_dtype_mismatch) == "tileir: kernel `raw`: op #2 `addf`: lhs is tile<8xf64>, declared tile<8xf32>"
+  # a select's condition is an i1 tile of the select's shape
+  let sel = refusal(() => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    let c = lt(F64, [4], f_const(F64, [4], 0.0), f_const(F64, [4], 1.0))
+    let _s = select(F64, [8], c, t, t)
+    ()
+  })
+  assert str.contains(sel, "`select`: condition is tile<4xi1>, declared tile<8xi1>")
+  # a conversion's operand is a tile of its source format and shape
+  let cv = refusal(() => {
+    let x = param(F64, 0)
+    let _h = float_to_float(F64, F32, [16], load(x, idx_const(0), [8]))
+    ()
+  })
+  assert str.contains(cv, "`ftof`: operand is tile<8xf64>, declared tile<16xf64>")
+}
+
+# Two stores issued as the two chains of a fork. `gap` is how far the
+# second one's base is from the first's, so 64 is the token_join kernel's
+# disjoint halves and 32 makes them overlap by 32 elements.
+fn forked(gap: Int) -> Unit !Dev = {
+  let x = param(F64, 0)
+  let base = tile_at(block_id(0), 128)
+  let t = load(x, base, [64])
+  d_fork2(() => store(x, base, [64], t), () => store(x, idx_add(base, idx_const(gap)), [64], t))
+}
+
+test "knife D-1: the two chains of a fork may not write one element, and halves that do not meet are recorded" {
+  let ok = trace_kernel("raw", ["f64"], () => forked(64))
+  assert list.any(ok.ops, op => match op {
+    JoinToks(_d, toks) -> len(toks) == 2
+    _ -> false
+  })
+  assert refusal(() => forked(32))
+    == "tileir: kernel `raw`: op #9 `join_tokens`: the chains it joins are unordered and may write the same element: both write parameter 0: counted from the second chain's base, the first writes elements -32 to 31 and the second 0 to 63"
+  # the same element from both sides, the plainest overlap
+  assert str.contains(refusal(() => forked(0)), "the first writes elements 0 to 63 and the second 0 to 63")
+  # one past the end is not an overlap
+  let _edge = trace_kernel("raw", ["f64"], () => forked(0 - 64))
+  ()
+}
+
+test "knife D-1: a write the recording cannot place is refused in a fork, and writes to two parameters are not compared" {
+  let two = trace_kernel("two", ["f64", "f64"], () => {
+    let x = param(F64, 0)
+    let y = param(F64, 1)
+    let t = load(x, idx_const(0), [8])
+    d_fork2(() => store(x, idx_const(0), [8], t), () => store(y, idx_const(0), [8], t))
+  })
+  assert len(two.ops) > 0
+  # bases a block-dependent distance apart cannot be shown disjoint
+  let apart = refusal(() => {
+    let x = param(F64, 0)
+    let b = block_id(0)
+    let t = load(x, idx_const(0), [8])
+    d_fork2(() => store(x, b, [8], t), () => store(x, idx_mul(b, idx_const(2)), [8], t))
+  })
+  assert str.contains(apart, "from bases that are not a constant distance apart")
+  # a scatter writes where its index tile says
+  let sc = refusal(() => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    d_fork2(() => scatter(x, arange(8), [8], t), () => store(x, idx_const(64), [8], t))
+  })
+  assert str.contains(sc, "one at addresses the recording does not follow")
+  # a store inside a loop in one chain is that chain's write
+  let looped = refusal(() => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    d_fork2(() => {
+      let zero = idx_const(0)
+      let one = idx_const(1)
+      let _r = d_for(zero, one, one, t, (_i, acc) => {
+        store(x, idx_const(4), [8], acc)
+        acc
+      })
+      ()
+    }, () => store(x, idx_const(0), [8], t))
+  })
+  assert str.contains(looped, "the first writes elements 4 to 11 and the second 0 to 7")
 }
