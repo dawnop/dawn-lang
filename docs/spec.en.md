@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5c54109a1bbfdcd7 -->
+<!-- doc-check: translation-of docs/spec.md @ 4e2851078279196d -->
 
 # Dawn Language Specification
 
@@ -47,6 +47,43 @@ line's last token decides whether it continues), and interpolation is single-lin
 block comments every line can be tokenized on its own, "what is the last token of this line" never
 depends on earlier text, and `dawn fmt` needs no indentation rule for comments that span lines.
 Gleam and Zig likewise have only line comments.
+
+**Doc comments.** A whole-line comment that starts with `##` is a doc comment (so is `###`; the third
+`#` belongs to the text); a comment that starts with a single `#` means nothing to the toolchain.
+
+- **Whole line**: apart from indentation (spaces, tabs), the line holding a doc comment holds only that
+  comment. A `##` written after code (a trailing comment) is not a doc comment, and for the attachment
+  rule its line is a code line.
+- **Text**: drop the `##` and at most one space after it; the rest is the line's text. Further leading
+  spaces are kept (for indented code and lists). A line of just `##` is an empty text line. The texts of
+  consecutive lines are joined with newlines. The toolchain does not parse the text and hands it to
+  consumers as written; the site and editors render it as Markdown.
+- **Attaching to a declaration**: the contiguous doc-comment lines right above a declaration's first line
+  form that declaration's doc. A blank line, a plain `#` line or a code line (including a code line with
+  a trailing comment) breaks the run; a `##` above the break does not belong to the declaration.
+- **Declarations that take a doc**: top-level `fn`, `type`, `const`, `trait`, `effect`; a trait's
+  associated types, associated effects and methods; an effect's operations; a type's constructors (read
+  above the constructor's own line, so a constructor on the `type` line reads the type's block); methods
+  inside an impl. Record fields, impl headers, local declarations (`let`, local fn, lambda) and `test`
+  blocks take no doc; a `##` written above them is only a comment, and is not an error.
+- **Module doc**: the contiguous doc comments from line 1 of the file are the module's doc if the line
+  after them is not the first line of a top-level declaration (`fn`, `type`, `const`, `trait`, `effect` or
+  `impl`); otherwise they are that declaration's doc (an `impl` header publishes no doc, but a block right
+  above an `impl` is still not the module doc). A blank line, a plain `#` line, a `use` line or a `test`
+  block after them leaves them the module doc. To document both the module and the first declaration,
+  separate the two blocks with a blank line. A file whose line 1 is not a doc comment (for example a
+  maintainer's `#` header) has no module doc.
+- **What is published**: `dawn doc` publishes the module doc and the docs of `pub` declarations: `fn`,
+  `type`, `const`, `trait` (with associated types and associated effects), `effect` (with operations).
+  Docs on constructors, trait methods and impl methods are shown today only by editor hover; docs on
+  `pub(pkg)` and private declarations are for the editor only (§10.4).
+
+Rationale: a doc comment is still a comment. Whether a comment is a doc depends only on its own line
+(does it start with `##`, is there code before it), so, as above, every line can be tokenized on its own
+and `dawn fmt` needs no rule of its own for it; attachment is decided by the single line rule "contiguous,
+right above", with no extra node in the syntax tree. If a trailing `##` counted too, the next line's
+declaration would claim it, though it speaks about the code on its own line. Rust's, Zig's and Gleam's
+`///` all have this same shape.
 
 ### 1.3 Identifiers and naming conventions
 
