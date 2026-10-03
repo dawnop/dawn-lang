@@ -556,6 +556,14 @@ fn qual_fn(cx: Cx, target: Expr, name: String) -> Option[Sig] = {
   map.get(cx.module_fn_sigs, (alias_name, name))
 }
 
+## `m.f` as written, for a hint that has to be code at the use site.
+fn qual_spelling(target: Expr, name: String) -> String =
+  match target {
+    EVar(n, _, _) -> n ++ "." ++ name
+    ECtor(n, _, _) -> n ++ "." ++ name
+    _ -> name
+  }
+
 # ---- tests ----
 
 test "scalar and container types resolve" {
@@ -4229,6 +4237,7 @@ fn emitted_fn_name(s: Sig, written: String) -> String = if s.is_builtin { writte
 pub(pkg) fn check_fn_value(
   initial: Cx,
   name: String,
+  spelled: String,
   f: Sig,
   expected: Option[Ty],
   lo: Int,
@@ -4286,9 +4295,7 @@ pub(pkg) fn check_fn_value(
   }
   let (eps, eret, eeff) = match exp {
     None ->
-      return (cerr_h(cx, "cannot infer the type parameter(s) of `" ++ name ++
-          "` used as a value here", lo, hi,
-        "wrap it in a lambda with annotated parameters: (x: Int) => " ++ name ++ "(x)"),
+      return (fn_value_infer_err(cx, name, spelled, f, lo, hi),
         TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
     Some(v) -> v
   }
@@ -4434,17 +4441,89 @@ fn eta_bounded_fn_value(
   (cx1, inst, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), inst))
 }
 
+## `f` used as a value with nothing to instantiate it from (#428). What is
+## missing is said by kind: a signature with only an effect variable has no
+## type parameters, and "cannot infer the type parameter(s)" sent the reader
+## looking for brackets that are not there.
+fn fn_value_infer_err(cx: Cx, name: String, spelled: String, f: Sig, lo: Int, hi: Int) -> Cx = {
+  let evar: Option[String] = match f.eff {
+    EffVar(n, _) -> Some(n)
+    _ -> None
+  }
+  let what = match evar {
+    Some(n) ->
+      if len(f.tparams) == 0 { "the effect variable `" ++ n ++ "`" } else {
+        "the type parameter(s) and the effect variable `" ++ n ++ "`"
+      }
+    None -> "the type parameter(s)"
+  }
+  cerr_o(cx, "cannot infer " ++ what ++ " of `" ++ name ++ "` used as a value here", lo, hi,
+    fn_value_eta_hint(cx, spelled, f))
+}
+
+## The lambda that would stand for `f` here, written with its own parameter
+## names and types, or None when no lambda can. A fixed `(x: Int) => f(x)`
+## template matched one-parameter functions over Int and nothing else.
+##
+## Effect variables are dropped from the annotations: a lambda cannot name
+## `e`, and the pure instance is the one an annotation without a row asks
+## for. Type parameters stay as written and the hint says to replace them,
+## because no choice of type is ours to make. A type parameter that no
+## parameter mentions is fixed by nothing a lambda annotates, so there the
+## hint is left out rather than offering a wrapper that fails the same way.
+fn fn_value_eta_hint(cx: Cx, spelled: String, f: Sig) -> Option[String] = {
+  if len(f.param_names) != len(f.param_tys) { return None }
+  var tnames: List[String] = []
+  for tp in f.tparams {
+    match tp {
+      TyVar(n, id) -> {
+        var seen = false
+        for pt in f.param_tys {
+          if ty_mentions_var(pt, id) { seen = true }
+        }
+        if not seen { return None }
+        tnames = tnames ++ [n]
+      }
+      _ -> ()
+    }
+  }
+  var em: Map[Int, Eff] = map.empty()
+  for ev in f.eparams {
+    match ev {
+      EffVar(_, id) -> { em = map.insert(em, id, EPure) }
+      _ -> ()
+    }
+  }
+  match f.eff {
+    EffVar(_, id) -> { em = map.insert(em, id, EPure) }
+    _ -> ()
+  }
+  let no_tys: Map[Int, Ty] = map.empty()
+  var params: List[String] = []
+  var i = 0
+  for pt in f.param_tys {
+    params = params ++ [f.param_names[i] ++ ": " ++ ty_show(cx.adts, subst(pt, no_tys, em))]
+    i = i + 1
+  }
+  let eta = "(" ++ join(params, ", ") ++ ") => " ++ spelled ++ "(" ++ join(f.param_names, ", ") ++ ")"
+  if len(tnames) == 0 {
+    Some("wrap it in a lambda with annotated parameters: " ++ eta)
+  } else {
+    Some("wrap it in a lambda, with a concrete type for " ++ join(tnames, ", ") ++ ": " ++ eta)
+  }
+}
+
 test "fn values instantiate from the expected type" {
   let cx = test_cx()
   let bs = builtins()
   # len: List[T] -> Int as a value with expected fn(List[Int]) -> Int
   let len_sig = map.get(bs, "len").expect("len")
-  let (cx1, t1, _) = check_fn_value(cx, "len", len_sig,
+  let (cx1, t1, _) = check_fn_value(cx, "len", "len", len_sig,
     Some(TyFn([TyList(TyInt)], TyInt, EPure)), 0, 3)
   assert len(cx1.diags) == 0
   assert t1 == TyFn([TyList(TyInt)], TyInt, EPure)
   # without context the generic cannot instantiate
-  let (cx2, t2, _) = check_fn_value(cx, "len", len_sig, None, 0, 3)
+  let (cx2, t2, _) = check_fn_value(cx, "len", "len", len_sig, None, 0, 3)
   assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `len`")
   # a bounded sig eta-expands once the expected type settles its subject; the
   # bound is Eq because that one answers structurally, so the exemplar needs no
@@ -4458,7 +4537,7 @@ test "fn values instantiate from the expected type" {
     owner: None, trait_id: None, op_of: None, inferring: false
   }
   let want = TyFn([TyList(TyInt)], TyList(TyInt), EPure)
-  let (cx3, t3, x3) = check_fn_value(cx, "sortish", bounded, Some(want), 0, 4)
+  let (cx3, t3, x3) = check_fn_value(cx, "sortish", "sortish", bounded, Some(want), 0, 4)
   assert len(cx3.diags) == 0
   assert t3 == want
   match x3 {
@@ -4479,12 +4558,12 @@ test "fn values instantiate from the expected type" {
   }
   # without an expected type the subject is unknown, so the bound has nothing
   # to be discharged at and the wrapper cannot be written
-  let (cx3b, _, _) = check_fn_value(cx, "sortish", bounded, None, 0, 4)
+  let (cx3b, _, _) = check_fn_value(cx, "sortish", "sortish", bounded, None, 0, 4)
   assert cx3b.diags[0].msg ==
     "cannot infer the type parameter(s) of `sortish` used as a value here"
   # a non-generic sig passes through untouched
   let join_sig = map.get(bs, "join").expect("join")
-  let (cx4, t4, _) = check_fn_value(cx, "join", join_sig, None, 0, 4)
+  let (cx4, t4, _) = check_fn_value(cx, "join", "join", join_sig, None, 0, 4)
   assert t4 == TyFn([TyList(TyString), TyString], TyString, EPure)
 }
 
@@ -5547,7 +5626,7 @@ fn check_field_expr(
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
   match qual_fn(cx, target, fname) {
-    Some(s) -> return check_fn_value(cx, fname, s, expected, lo, hi)
+    Some(s) -> return check_fn_value(cx, fname, qual_spelling(target, fname), s, expected, lo, hi)
     None -> ()
   }
   # `m.NAME` where `m` is a whole-module alias: a qualified constant
@@ -5923,7 +6002,7 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
     }
     None -> {
       match lookup_fn_sig(cx1, name) {
-        Some(s) -> check_fn_value(cx1, name, s, expected, lo, hi)
+        Some(s) -> check_fn_value(cx1, name, name, s, expected, lo, hi)
         None -> {
           let cx2 = if set.has(cx1.frame.initializing, name) { own_initializer_err(cx1, name, lo, hi) } else {
             let pool = fn_pool(cx1)
