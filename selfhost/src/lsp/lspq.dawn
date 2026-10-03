@@ -1740,7 +1740,19 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             Some(XCtor(_, _, _, _, _, _, _, _)) -> {
               q = walk_ctor_call(qc, q, args0, None, flo, fhi, te)
             }
-            _ -> { q = walk_apply_value(qc, q, target, args, te) }
+            # `x |> m.f`, `(m.f)(x)`: a module function in callee position is
+            # the static call `m.f(x)`, the same `XCallFn` a bare `f` gets, so
+            # it is answered as one: the signature at the name's span, the
+            # typed arguments, the parameter-name hints. A default or a named
+            # argument can wrap the call in a block, hence `call_node`.
+            _ ->
+              match call_node(te) {
+                Some(XCallFn(_, fname, _, _, _, _, _, _, _)) -> {
+                  q = walk_named_call(qc, q, fname, flo, fhi, args, call_node(te))
+                  q = hint_named_call(qc, q, fname, args0, fhi, ahi, te)
+                }
+                _ -> { q = walk_apply_value(qc, q, target, args, te) }
+              }
           }
         _ -> { q = walk_apply_value(qc, q, target, args, te) }
       }
@@ -1861,6 +1873,14 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XConstRef(owner, cname, _, _, cty)) -> {
           q = offer_at(q, flo, fhi, const_text(qc, owner, cname, cty), site_of_const_in(qc, owner, cname))
         }
+        # `let g = m.f`: a module function used as a value (#66), answered as
+        # the bare `f`'s `XFnValue` is. Only the name is offered: the receiver
+        # is an alias, not a value.
+        Some(XFnValue(owner, fname, _, _, _, _)) ->
+          match sig_by_owner(qc, owner, fname, None) {
+            Some(s) -> { q = offer_sig_at(qc, q, flo, fhi, s, site_of_sig(qc, s)) }
+            None -> ()
+          }
         _ -> { q = walk_e(qc, q, target, None) }
       }
     EInt(v, lo, hi) ->
