@@ -1161,5 +1161,122 @@ with open(sys.argv[1], "w") as f:
 PYEOF
 pair_expect_exit 0 "check (15,000 nested calls)" check "$DEEP_NEST"
 
+# ---- leg 12: hover folds an expression to the same value on both servers ----
+#
+# Hover shows the value of a closed, pure expression (docs/lsp-hover-design.md
+# §C5), folded by the comptime interpreter under the editor's budget,
+# ir/interp `ct_hover`: the same fuel on both hosts, and a call depth of 1,500,
+# which is the native host's own limit. The JVM's limit is far higher, so a
+# JVM server that folded with its host's budget would answer `down(1600)`
+# where the native one cannot, and VS Code and the Playground would disagree
+# about the same line. Leg 4 runs the session's hovers on native too, but
+# against the previous release, and an Emit-Change can stand in for it; this
+# leg has no such hatch, for the reason given at the top: two backends that
+# disagree at one commit are a bug. Each hover point must answer the same on
+# both, a value must actually be shown (so two servers that folded nothing
+# cannot agree vacuously), and the call just past the editor's depth must
+# show none on either.
+echo "== hover folds, JVM vs native =="
+cat > "$OUT/evals.dawn" <<'EOF'
+const LIMIT: Int = 10
+
+fn fib(n: Int) -> Int = if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+
+fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }
+
+fn spin(n: Int) -> Int = {
+  var i = 0
+  var acc = 0
+  while i < n {
+    acc = acc + i
+    i = i + 1
+  }
+  acc
+}
+
+pub fn probe(k: Int) -> Int = {
+  let a = fib(15) + 1
+  let b = "n=${fib(10)} limit=${LIMIT}"
+  let c = map([1, 2, 3], x => x * x)
+  let e = k + 1
+  let h = spin(60000) + 3
+  let i = down(1600) + 4
+  let j = down(1400) + 5
+  let _ = b
+  a + j + e + h + i + len(c)
+}
+EOF
+if python3 - "$DAWNC" "$OUT/evals.dawn" <<'PYEOF'
+import json, subprocess, sys
+
+sys.path.insert(0, "scripts")
+from lsp_hover import hover_code
+
+dawnc, path = sys.argv[1:]
+text = open(path).read()
+uri = "file://" + path
+points = [
+    ("fib(15) + 1", 8),
+    ('"n=', 0),
+    ("map([1, 2, 3]", 3),
+    ("k + 1", 2),
+    ("spin(60000) + 3", 12),
+    ("down(1600) + 4", 11),
+    ("down(1400) + 5", 11),
+]
+
+def pos(needle, delta):
+    i = text.index(needle) + delta
+    line = text.count("\n", 0, i)
+    return {"line": line, "character": i - (text.rfind("\n", 0, i) + 1)}
+
+msgs = [{"jsonrpc": "2.0", "id": 0, "method": "initialize",
+         "params": {"processId": None, "rootUri": None, "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+            "uri": uri, "languageId": "dawn", "version": 1, "text": text}}}]
+for k, (needle, delta) in enumerate(points):
+    msgs.append({"jsonrpc": "2.0", "id": k + 1, "method": "textDocument/hover",
+                 "params": {"textDocument": {"uri": uri}, "position": pos(needle, delta)}})
+msgs.append({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None})
+msgs.append({"jsonrpc": "2.0", "method": "exit", "params": {}})
+payload = b"".join(b"Content-Length: %d\r\n\r\n%s" % (len(b), b)
+                   for b in (json.dumps(m).encode() for m in msgs))
+
+def hovers(cmd):
+    data = subprocess.run(cmd, input=payload, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, timeout=300).stdout
+    got, i = {}, 0
+    while True:
+        j = data.find(b"\r\n\r\n", i)
+        if j < 0:
+            break
+        n = int(data[i:j].decode().split(":", 1)[1])
+        f = json.loads(data[j + 4:j + 4 + n].decode())
+        i = j + 4 + n
+        if isinstance(f.get("id"), int) and 1 <= f["id"] <= len(points):
+            got[f["id"]] = hover_code(f.get("result"))
+    return [got.get(k + 1) for k in range(len(points))]
+
+jvm = hovers(["./bin/dawn", "lsp"])
+native = hovers([dawnc, "lsp"])
+bad = 0
+for (needle, _), j, n in zip(points, jvm, native):
+    if j != n:
+        print("FAIL: hover at %r: jvm %r, native %r" % (needle, j, n))
+        bad = 1
+if not any(j and " = " in j for j in jvm):
+    print("FAIL: no hover showed a value: %r" % (jvm,))
+    bad = 1
+deep = jvm[[p for p, _ in points].index("down(1600) + 4")]
+if deep is None or " = " in deep:
+    print("FAIL: down(1600) folded past the editor's depth: %r" % (deep,))
+    bad = 1
+if not bad:
+    print("OK   hover folds agree at %d points: %s" % (len(points), "; ".join(map(str, jvm))))
+sys.exit(bad)
+PYEOF
+then :; else fail=1; fi
+
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, and native comptime stops at its depth limit"
+echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, native comptime stops at its depth limit, and hover folds to the same values on both"

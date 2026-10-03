@@ -11,6 +11,7 @@ use check/types.{Adts, adt_of, sig_render}
 use check/identity
 use check/identity.{Named, FunctionDecl}
 use driver/analyze.{Program, LocDiag, rendered_diags}
+use ir/interp.{ct_world_empty}
 use front/parser
 use front/token.{Diag, mk_diag, DiagOwner}
 use front/ast.{module_fns, module_consts, vis_exported}
@@ -90,7 +91,7 @@ test "the dump prints where a diagnostic sits in the revision it dumps" {
   let owner = DiagOwner { module: "g", decl: identity.path_text([Named(FunctionDecl, "g")]) }
   let raised = Diag { ..mk_diag("m", 16, 20, ""), owner: Some(owner) }
   let prog = Program { modules: [], diags: [LocDiag { path: "g.dawn", d: raised }],
-    decl_spans: map.from([("g", identity.declaration_spans(m))]) }
+    decl_spans: map.from([("g", identity.declaration_spans(m))]), ct_world: ct_world_empty() }
   let start = str.index_of(source, "fn g").expect("g is in the source")
   assert render(prog) ==
     "D\tg.dawn\t" ++ to_string(start + 16) ++ "\t" ++ to_string(start + 20) ++ "\tm\t\n"

@@ -62,6 +62,22 @@ pub(pkg) fn value_text(adts: Adts, t: Ty, v: CValue) -> Option[String] =
     }
   }
 
+## Whether `v` is written exactly as `src` already says it, spaces aside: the
+## value of `Some(Plus)` or `[1, 2, 3]` repeats its own source, and a hover that
+## folds an expression shows nothing it would only echo (docs/lsp-hover-design.md
+## §C5.6; gopls shows a constant's value only where it differs from the
+## spelling). Rendered just past the source's length, so a long value stops
+## early and compares unequal rather than costing a whole render.
+pub(pkg) fn value_echoes(adts: Adts, t: Ty, v: CValue, src: String) -> Bool =
+  match v {
+    VClosure(_, _, _) -> false
+    VDict(_, _) -> false
+    _ -> squeezed(render(adts, t, v, str.len(src) + 1)) == squeezed(src)
+  }
+
+fn squeezed(s: String) -> String =
+  str.replace(str.replace(str.replace(str.replace(s, " ", ""), "\n", ""), "\t", ""), "\r", "")
+
 fn suffix(t: Ty, v: CValue, cut: Bool) -> String =
   match v {
     VInt(n) -> if not is_char(t) && n >= 10 { "  (0x" ++ hex(n) ++ ")" } else { "" }

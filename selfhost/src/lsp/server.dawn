@@ -31,7 +31,8 @@ use driver/incremental
 use driver/fsmem
 use std/memfs
 use compiler_plan/envmem
-use ir/interp.{CtOpts, ct_default}
+use ir/interp.{CtOpts, ct_default, ct_hover}
+use lsp/lspeval.{with_value}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{
   StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text, std_file_of
@@ -2729,10 +2730,13 @@ fn scope_of(qc: QCx, home: DocHome) -> Option[LinkScope] =
     }
   }
 
-## The markdown a hover replies with: `lspdoc.hover_markdown` over the target.
-fn hover_value(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (String, LspState) !Fs !Env = {
+## The markdown a hover replies with: `lspdoc.hover_markdown` over the target,
+## whose text gains the value of a closed, pure expression (§C5). The budget is
+## the editor's on this host (`ct_hover`), so the JVM and native servers fold
+## to the same answer.
+fn hover_value(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (String, LspState) !Fs !Env !io = {
   let (doc, st2) = target_doc(st, d, analysis, qc, t)
-  (hover_markdown(t.hover, doc), st2)
+  (hover_markdown(with_value(qc, t, ct_hover(st.host.ct)), doc), st2)
 }
 
 ## `textDocument/inlayHint`: the hints `lspq.inlay_hints` finds inside the
@@ -3554,6 +3558,139 @@ test "hover reads a std constant's value from std's own comptime results" {
   }))
 }
 
+# ---- folded values on hover (docs/lsp-hover-design.md §C5) ----
+
+fn eval_probe_text() -> String =
+  join([
+    "const LIMIT: Int = 10",
+    "",
+    "fn fib(n: Int) -> Int = if n < 2 { n } else { fib(n - 1) + fib(n - 2) }",
+    "",
+    "fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }",
+    "",
+    "fn spin(n: Int) -> Int = {",
+    "  var i = 0",
+    "  var acc = 0",
+    "  while i < n {",
+    "    acc = acc + i",
+    "    i = i + 1",
+    "  }",
+    "  acc",
+    "}",
+    "",
+    "fn noisy(n: Int) -> Int !io = n + 1",
+    "",
+    "fn probe(k: Int) -> Int !io = {",
+    "  let a = fib(15) + 1",
+    "  let b = \"n=\${fib(10)} limit=\${LIMIT}\"",
+    "  let c = map([1, 2, 3], x => x * x)",
+    "  let d = {",
+    "    let z = 3",
+    "    z * z",
+    "  }",
+    "  let e = k + 1",
+    "  let f = noisy(1) + 2",
+    "  let g = map([1, 2], x => noisy(x))",
+    "  let h = spin(60000) + 3",
+    "  let i = down(1600) + 4",
+    "  let j = down(1400) + 5",
+    "  let l = [1, 2, 3]",
+    "  let m = if 1 > 2 { () } else { () }",
+    "  let n = if 1 > 3 { return 0 } else { 5 * 2 }",
+    "  println(to_string(a))",
+    "  a + j",
+    "}",
+    ""
+  ], "\n")
+
+## The code line of a hover's single fence: the type, and the value after
+## ` = ` when the expression was folded.
+fn eval_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> String !Fs !Env !io = {
+  let md = hover_probe_at(st, d, text, needle, skip)
+  let body = match str.strip_prefix(md, "```dawn\n") {
+    Some(x) -> x
+    None -> panic("hover at ${needle} is not one fence: ${md}")
+  }
+  match str.strip_suffix(body, "\n```") {
+    Some(x) -> x
+    None -> panic("hover at ${needle} is not one fence: ${md}")
+  }
+}
+
+test "hover folds a closed, pure expression and shows its value after the type" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = eval_probe_text()
+    let d = def_probe_doc_named(st, "evals.dawn", text)
+    # a call of the module's own function, with A1's hexadecimal
+    assert eval_probe_at(st, d, text, "fib(15) + 1", 8) == "Int = 611  (0x263)"
+    # interpolation reading a constant: the string the program would build
+    assert eval_probe_at(st, d, text, "\"n=", 0) == "String = \"n=55 limit=10\""
+    # an effect-polymorphic callee, instantiated with a pure lambda
+    assert eval_probe_at(st, d, text, "map([1, 2, 3]", 3) == "List[Int] = [1, 4, 9]"
+    # a block binds its own `z`, so the whole block is closed ...
+    assert eval_probe_at(st, d, text, "{\n    let z", 0) == "Int = 9"
+    # ... but `z * z` alone names a `z` bound outside it, and the cursor's
+    # innermost node is folded, never an ancestor
+    assert eval_probe_at(st, d, text, "z * z", 2) == "Int"
+    # just under the editor's depth: folded
+    assert eval_probe_at(st, d, text, "down(1400) + 5", 11) == "Int = 1405  (0x57D)"
+  }))
+}
+
+test "hover shows the type alone where it may not fold or folding fails" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = eval_probe_text()
+    let d = def_probe_doc_named(st, "evals.dawn", text)
+    # a free local: nothing to fold, and no line saying so
+    assert eval_probe_at(st, d, text, "k + 1", 2) == "Int"
+    # an effect declared on the callee, though its body does nothing: the
+    # judgement reads the row, so the interpreter never runs it
+    assert eval_probe_at(st, d, text, "noisy(1) + 2", 9) == "Int"
+    # an effectful lambda handed to an effect-polymorphic callee
+    assert eval_probe_at(st, d, text, "map([1, 2], x", 3) == "List[Int]"
+    # past the fuel: a build would fold this, a hover gives up
+    assert eval_probe_at(st, d, text, "spin(60000) + 3", 12) == "Int"
+    # past the depth, 1,600 calls where the editor allows 1,500 on every host
+    assert eval_probe_at(st, d, text, "down(1600) + 4", 11) == "Int"
+    # a value that only repeats its source, and Unit, say nothing new
+    assert eval_probe_at(st, d, text, "[1, 2, 3]\n", 0) == "List[Int]"
+    assert eval_probe_at(st, d, text, "if 1 > 2", 0) == "Unit"
+    # `return` leaves the expression: in place this `if` may return from
+    # `probe`, so its other branch's 10 is not what it means
+    assert eval_probe_at(st, d, text, "if 1 > 3", 0) == "Int"
+    # io, and the call's Unit
+    assert eval_probe_at(st, d, text, "println(", 7) == "Unit"
+  }))
+}
+
+test "hover folds nothing in a module with errors" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = join([
+      "fn ok() -> Int = 6 * 7",
+      "",
+      "fn bad() -> Int = \"no\"",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "evalbroken.dawn", text)
+    assert eval_probe_at(st, d, text, "6 * 7", 2) == "Int"
+  }))
+}
+
 # ---- literals on hover (docs/lsp-hover-design.md §4) ----
 
 fn literal_probe_text() -> String =
@@ -3672,7 +3809,7 @@ test "on a constant's name the constant answers, on its literal the literal does
 # ---- doc comments on hover (docs/lsp-hover-design.md §A3) ----
 
 ## The reply's markdown at `needle` + `skip`: what `textDocument/hover` sends.
-fn hover_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> String !Fs !Env = {
+fn hover_probe_at(st: LspState, d: Doc, text: String, needle: String, skip: Int) -> String !Fs !Env !io = {
   let off = match str.index_of(text, needle) {
     Some(i) -> i + skip
     None -> panic("probe text has no ${needle}")
