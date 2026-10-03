@@ -23,7 +23,7 @@ use driver/analyze.{
   rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
   project_module_path,
-  ParseMemo, no_parses, load_entries_reusing
+  ParseMemo, no_parses, load_entries_reusing, use_candidates
 }
 use compiler_plan/source
 use compiler_plan/source.{canon, canon_identity}
@@ -38,9 +38,12 @@ use driver/stdlib.{
 }
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
-use lsp/lspq.{QCx, Target, DocHome, DocHere, DocFile, DocStd, find_target, typed_trees, inlay_hints}
-use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown}
-use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links}
+use lsp/lspq.{
+  QCx, Target, DocHome, DocHere, DocFile, DocStd, DocSite, DeclAt, ModuleDoc,
+  find_target, typed_trees, inlay_hints, item_doc_site, sig_doc_site, decl_lo_named
+}
+use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown, cut_doc}
+use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of}
 use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
@@ -630,7 +633,11 @@ type LspState = {
   doc_memo: Map[String, DocMemo],
   # which inlay hints the client asked for in `initializationOptions`
   # (`inlay_opts_of`, docs/lsp-hover-design.md §A4.3)
-  inlay: InlayOpts
+  inlay: InlayOpts,
+  # whether the client applies `CompletionList.itemDefaults.data` (LSP 3.17);
+  # then a completion reply names the document once instead of on every item
+  # (`client_defaults_item_data`, docs/lsp-hover-design.md §D7.2)
+  default_item_data: Bool
 }
 
 ## One text's comment table, kept with the text it was lexed from: a lookup
@@ -818,7 +825,8 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
     watch_manifests: false,
     related_information: false,
     doc_memo: map.empty(),
-    inlay: default_inlay_opts()
+    inlay: default_inlay_opts(),
+    default_item_data: false
   }
   # The newest text of the one document whose analysis has not run yet.
   #
@@ -1262,13 +1270,14 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ..st,
       watch_manifests: client_watches_files(params),
       related_information: client_relates_diagnostics(params),
-      inlay: inlay_opts_of(params)
+      inlay: inlay_opts_of(params),
+      default_item_data: client_defaults_item_data(params)
     }
     respond(id, jobj([("capabilities", jobj([
       ("textDocumentSync", JInt(1)),
       ("hoverProvider", JBool(true)),
       ("completionProvider", jobj([
-        ("resolveProvider", JBool(false)),
+        ("resolveProvider", JBool(true)),
         ("triggerCharacters", JArr([JStr("!")]))
       ])),
       ("signatureHelpProvider", jobj([
@@ -1304,12 +1313,18 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     st = refresh_manifests(st, watched_manifests(params))
   } else if method == "textDocument/completion" {
     respond(id, handle_completion(st, params))
+  } else if method == "completionItem/resolve" {
+    let (reply, st2) = handle_completion_resolve(st, params)
+    respond(id, reply)
+    st = st2
   } else if method == "textDocument/hover" {
     let (reply, st2) = handle_hover(st, params)
     respond(id, reply)
     st = st2
   } else if method == "textDocument/signatureHelp" {
-    respond(id, handle_signature_help(st, params))
+    let (reply, st2) = handle_signature_help(st, params)
+    respond(id, reply)
+    st = st2
   } else if method == "textDocument/definition" {
     respond(id, handle_definition(st, params))
   } else if method == "textDocument/documentSymbol" {
@@ -1955,6 +1970,17 @@ fn client_relates_diagnostics(params: Json) -> Bool = {
   }
 }
 
+## Whether the client said it applies a completion list's `itemDefaults.data`
+## to the items that carry none (LSP 3.17,
+## `textDocument.completion.completionList.itemDefaults`).
+fn client_defaults_item_data(params: Json) -> Bool = {
+  let td = get_or_null(get_or_null(params, "capabilities"), "textDocument")
+  match oget(get_or_null(get_or_null(td, "completion"), "completionList"), "itemDefaults") {
+    Some(JArr(xs)) -> list.contains(xs, JStr("data"))
+    _ -> false
+  }
+}
+
 ## The inlay hints the client asked for: `initializationOptions.inlayHints`,
 ## four optional booleans over `default_inlay_opts`. A key that is missing or
 ## not a boolean keeps its default; read once, at `initialize`
@@ -2199,9 +2225,29 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
                   Some(s2) -> { fields = fields ++ [("sortText", JStr(s2))] }
                   None -> ()
                 }
+                if may_have_item_doc(it.kind) {
+                  match it.from {
+                    Some(mp) -> {
+                      fields = fields ++ [("data", jobj([("uri", JStr(d.uri)), ("module", JStr(mp))]))]
+                    }
+                    None -> if not st.default_item_data {
+                      fields = fields ++ [("data", jobj([("uri", JStr(d.uri))]))]
+                    }
+                  }
+                }
                 items = items ++ [jobj(fields)]
               }
-              JArr(items)
+              # A client that applies `itemDefaults.data` is told the document
+              # once; every item then costs no bytes for its resolve.
+              if st.default_item_data {
+                jobj([
+                  ("isIncomplete", JBool(false)),
+                  ("itemDefaults", jobj([("data", jobj([("uri", JStr(d.uri))]))])),
+                  ("items", JArr(items))
+                ])
+              } else {
+                JArr(items)
+              }
             }
             None -> JArr([])
           }
@@ -2210,6 +2256,113 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
     None -> JArr([])
   }
 }
+
+## The completion kinds a declaration with a `##` doc can stand behind:
+## Function, Class, Interface, Module, EnumMember, Constant, TypeParameter
+## (an effect). Only these items carry `data`, so a list's keywords, locals and
+## builtin types cost no bytes for a resolve that could never find a doc.
+fn may_have_item_doc(kind: Int) -> Bool =
+  kind == 3 || kind == 7 || kind == 8 || kind == 9 || kind == 20 || kind == 21 || kind == 23
+
+## `completionItem/resolve` (docs/lsp-hover-design.md §D7): the item as the
+## client sent it, with `documentation` added when its declaration has a doc.
+## The doc is the one hover shows, links resolved and cut the same way, without
+## hover's fence: the item's `detail` already carries the signature. It is
+## found here rather than in `textDocument/completion` because a list offers
+## hundreds of names from dozens of modules, and reading every one's doc
+## would lex every one of those modules for the one or two a reader stops on.
+##
+## `data` carries the document's uri and, for an item a `use` line offered, the
+## module it came from; label and kind say the rest. A module that line has
+## not loaded yet is read from the file it would load.
+fn handle_completion_resolve(st: LspState, params: Json) -> (Json, LspState) !Fs !Proc !Env !io = {
+  let data = get_or_null(params, "data")
+  let label = ostr(params, "label")
+  let kind = oint(params, "kind")
+  # with list defaults the client sends a keyword back with the document's data
+  # too; no declaration stands behind one, so nothing is looked up
+  if not may_have_item_doc(kind) { return (params, st) }
+  let from = match oget(data, "module") {
+    Some(JStr(mp)) -> Some(mp)
+    _ -> None
+  }
+  let (doc, st2) = match map.get(st.docs, ostr(data, "uri")) {
+    Some(d) ->
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, d, analysis) {
+            Some(qc) ->
+              match item_doc_site(qc, label, kind, from) {
+                Some(site) -> site_doc(st, d, analysis, qc, site)
+                None ->
+                  match from {
+                    Some(mp) -> unloaded_doc(st, d, analysis, qc, mp, label, kind)
+                    None -> (None, st)
+                  }
+              }
+            None -> (None, st)
+          }
+        None -> (None, st)
+      }
+    None -> (None, st)
+  }
+  match doc {
+    Some(text) -> (with_field(params, "documentation", markdown(cut_doc(text))), st2)
+    None -> (params, st2)
+  }
+}
+
+## The doc of `label` (or, for a Module item, of the module) in module `mp`,
+## which the program has not loaded: the file the `use` line being written
+## would load, read and parsed for this alone. Its links stay as written, since
+## nothing has checked the module whose scope they would resolve in.
+fn unloaded_doc(
+  st: LspState,
+  d: Doc,
+  analysis: Analysis,
+  qc: QCx,
+  mp: String,
+  label: String,
+  kind: Int
+) -> (Option[String], LspState) !Fs !Proc !Env !io = {
+  let candidates = match analysis.modules {
+    Some(modules) -> modules
+    None -> use_candidates(qc.entry.path)
+  }
+  let file = match map.get(candidates, mp) {
+    Some(f) -> f
+    None -> return (None, st)
+  }
+  let (key, text) = match def_source(st, d, analysis.workspace_key, analysis.definition_root, Some(file)) {
+    Some(InBuffer(d2)) -> ("doc ${d2.uri}", d2.text)
+    Some(OnDisk(p, t)) -> ("file ${p}", t)
+    None -> return (None, st)
+  }
+  let (m, _) = source_parser.parse_module(text)
+  let (src, st2) = doc_src_memo(st, key, text)
+  if kind == 9 { return (blank_none(module_doc_of(src, m)), st2) }
+  match decl_lo_named(m, label) {
+    Some(lo) -> (doc_in(src, lo), st2)
+    None -> (None, st2)
+  }
+}
+
+## A doc of blank lines only is no doc (`lspdoc.doc_in` says why).
+fn blank_none(doc: Option[String]) -> Option[String] =
+  match doc {
+    Some(t) -> if str.trim(t) == "" { None } else { Some(t) }
+    None -> None
+  }
+
+## LSP's `MarkupContent` in Markdown.
+fn markdown(value: String) -> Json = jobj([("kind", JStr("markdown")), ("value", JStr(value))])
+
+## `j` with `key` set to `v`; a value that is not an object is returned as is.
+fn with_field(j: Json, key: String, v: Json) -> Json =
+  match j {
+    JObj(m) -> JObj(map.insert(m, key, v))
+    _ -> j
+  }
 
 fn handle_hover(st: LspState, params: Json) -> (Json, LspState) !Fs !Env !io = {
   match doc_of(st, params) {
@@ -2243,7 +2396,7 @@ fn handle_hover(st: LspState, params: Json) -> (Json, LspState) !Fs !Env !io = {
 ## rather than substrings, since a client resolves a substring label by
 ## searching and `a: Int` would be found inside `aa: Int`. `null` when the
 ## cursor is in no call this can resolve (`lspc.signature_at` says which).
-fn handle_signature_help(st: LspState, params: Json) -> Json !io = {
+fn handle_signature_help(st: LspState, params: Json) -> (Json, LspState) !Fs !Env !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -2264,22 +2417,35 @@ fn handle_signature_help(st: LspState, params: Json) -> Json !io = {
                     labels = labels ++ [jobj([("label", JArr([JInt(at), JInt(end)]))])]
                     at = end
                   }
-                  jobj([
-                    ("signatures", JArr([jobj([
-                      ("label", JStr(head ++ join(ps, ", ") ++ tail)),
-                      ("parameters", JArr(labels))
-                    ])])),
+                  var sig_fields: List[(String, Json)] = [
+                    ("label", JStr(head ++ join(ps, ", ") ++ tail)),
+                    ("parameters", JArr(labels))
+                  ]
+                  # the function's doc, whole: Dawn has no per-parameter doc
+                  # syntax to fill `ParameterInformation.documentation` from
+                  # (docs/lsp-hover-design.md §D7)
+                  let (doc, st2) = match sig_doc_site(qc, s) {
+                    Some(site) -> site_doc(st, d, analysis, qc, site)
+                    None -> (None, st)
+                  }
+                  match doc {
+                    Some(text) -> { sig_fields = sig_fields ++ [("documentation", markdown(cut_doc(text)))] }
+                    None -> ()
+                  }
+                  let reply = jobj([
+                    ("signatures", JArr([jobj(sig_fields)])),
                     ("activeSignature", JInt(0)),
                     ("activeParameter", JInt(active))
                   ])
+                  (reply, st2)
                 }
-                None -> JNull
+                None -> (JNull, st)
               }
-            None -> JNull
+            None -> (JNull, st)
           }
-        None -> JNull
+        None -> (JNull, st)
       }
-    None -> JNull
+    None -> (JNull, st)
   }
 }
 
@@ -2410,11 +2576,15 @@ fn def_source(
 ## from the text its spans index: this document, std's own copy of a std
 ## module (embedded or not), or another project file the way go to definition
 ## reads it. The key names the file for `doc_src_memo`.
-fn target_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (Option[String], LspState) !Fs !Env = {
-  let site = match t.doc {
-    Some(s) -> s
-    None -> return (None, st)
+fn target_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (Option[String], LspState) !Fs !Env =
+  match t.doc {
+    Some(site) -> site_doc(st, d, analysis, qc, site)
+    None -> (None, st)
   }
+
+## The doc at `site`, links resolved: what hover, completion resolve and
+## signature help all show, so the three never disagree about a declaration.
+fn site_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, site: DocSite) -> (Option[String], LspState) !Fs !Env = {
   let found: Option[(String, String)] = match site.home {
     DocHere -> Some(("doc ${d.uri}", d.text))
     DocStd(mp) -> {
@@ -2432,17 +2602,34 @@ fn target_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (
         None -> None
       }
   }
-  match found {
-    Some(kt) -> {
-      let (key, text) = kt
-      if not may_have_doc(text, site.lo) { return (None, st) }
-      let (src, st2) = doc_src_memo(st, key, text)
-      match doc_in(src, site.lo) {
-        Some(doc) -> (Some(linked_doc(st2, d, analysis, qc, site.home, doc)), st2)
-        None -> (None, st2)
-      }
+  let (key, text) = match found {
+    Some(kt) -> kt
+    None -> return (None, st)
+  }
+  let (doc, st2) = match site.at {
+    DeclAt(lo) -> {
+      if not may_have_doc(text, lo) { return (None, st) }
+      let (src, st1) = doc_src_memo(st, key, text)
+      (doc_in(src, lo), st1)
     }
-    None -> (None, st)
+    ModuleDoc -> {
+      # a module doc opens the file, so a text that does not start with `##`
+      # has none, and is not lexed
+      if not str.starts_with(str.trim_start(text), "##") { return (None, st) }
+      let m = match scope_of(qc, site.home) {
+        Some(sc) -> sc.m
+        None -> {
+          let (pm, _) = source_parser.parse_module(text)
+          pm
+        }
+      }
+      let (src, st1) = doc_src_memo(st, key, text)
+      (blank_none(module_doc_of(src, m)), st1)
+    }
+  }
+  match doc {
+    Some(text2) -> (Some(linked_doc(st2, d, analysis, qc, site.home, text2)), st2)
+    None -> (None, st2)
   }
 }
 
@@ -2763,7 +2950,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       watch_manifests: false,
       related_information: false,
       doc_memo: map.empty(),
-      inlay: default_inlay_opts()
+      inlay: default_inlay_opts(),
+      default_item_data: false
     }
     let path = "std/cursor.dawn"
     let text = match io.read_file(path) {
@@ -2862,7 +3050,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     watch_manifests: false,
     related_information: false,
     doc_memo: map.empty(),
-    inlay: default_inlay_opts()
+    inlay: default_inlay_opts(),
+    default_item_data: false
   }
 }
 
@@ -3639,6 +3828,251 @@ test "the comment table is kept per text, and a changed text is lexed again" {
     }
     assert len(map.keys(st.doc_memo)) <= DOC_MEMO_FILES
   }))
+}
+
+# ---- docs in completion, signature help and `use` lines (§D7) ----
+
+## A std of one module, `std/docprobe`, with a module doc and declarations
+## with and without docs of their own.
+fn d7_probe_std() -> StdCtx !Fs !Env !io = {
+  let root = "/tmp/dawn-selfhost-lsp-def/d7std"
+  let _ = io.mkdirs(root)
+  def_probe_put("${root}/modules.txt", "docprobe\n")
+  def_probe_put("${root}/docprobe.dawn", join([
+    "## Probes things.",
+    "## See [`probe`].",
+    "",
+    "## Probes `n`.",
+    "pub fn probe(n: Int) -> Int = n",
+    "",
+    "## How far a probe reaches.",
+    "pub const REACH: Int = 9",
+    "",
+    "pub fn bare(n: Int) -> Int = n",
+    "",
+    "## A tool.",
+    "pub trait Tool[T] {",
+    "  fn wield(t: T) -> Int",
+    "}",
+    "",
+    "## Asks.",
+    "pub effect Ask {",
+    "  fn ask() -> Int",
+    "}",
+    ""
+  ], "\n"))
+  match load_std(root) {
+    Ok(sc) -> sc
+    Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+  }
+}
+
+fn d7_probe_text() -> String =
+  join([
+    "use std/docprobe",
+    "use std/docprobe.{probe, REACH, Tool, Ask}",
+    "",
+    "## Local and documented.",
+    "fn local_fn(k: Int) -> Int = k",
+    "",
+    "fn plain_fn(k: Int) -> Int = k",
+    "",
+    "fn f() -> Int = probe(local_fn(1)) + plain_fn(2) + docprobe.bare(REACH)",
+    ""
+  ], "\n")
+
+## The position of `needle` + `skip` in `d`, as a request's params carry it.
+fn d7_params(d: Doc, needle: String, skip: Int) -> Json = {
+  let off = match str.index_of(d.text, needle) {
+    Some(i) -> i + skip
+    None -> panic("probe text has no ${needle}")
+  }
+  let (line, ch) = lsp_position(d.view, d.ls, off)
+  jobj([("textDocument", jobj([("uri", JStr(d.uri))])), ("position", jpos(line, ch))])
+}
+
+## The completion item labelled `label` at `needle` + `skip`.
+fn d7_item(st: LspState, d: Doc, needle: String, skip: Int, label: String) -> Json !Fs !Proc !Env !io = {
+  let items = match handle_completion(st, d7_params(d, needle, skip)) {
+    JArr(xs) -> xs
+    other -> panic("completion replied ${render(other)}")
+  }
+  match list.find(items, it => ostr(it, "label") == label) {
+    Some(it) -> it
+    None -> panic("no completion item ${label} at ${needle}")
+  }
+}
+
+## The item labelled `label` in a completion reply of either shape.
+fn d7_item_in(reply: Json, label: String) -> Json = {
+  let items = match reply {
+    JArr(xs) -> xs
+    other -> match get_or_null(other, "items") {
+      JArr(xs) -> xs
+      _ -> panic("completion replied ${render(other)}")
+    }
+  }
+  list.find(items, it => ostr(it, "label") == label).expect("no completion item ${label}")
+}
+
+## What `completionItem/resolve` puts in `documentation`, or "-" for none.
+fn d7_resolved(st: LspState, item: Json) -> String !Fs !Proc !Env !io = {
+  let (reply, _) = handle_completion_resolve(st, item)
+  match oget(reply, "documentation") {
+    Some(doc) -> {
+      if ostr(doc, "kind") != "markdown" { panic("documentation is not markdown") }
+      ostr(doc, "value")
+    }
+    None -> "-"
+  }
+}
+
+test "completion resolve adds the doc hover shows, and only where there is one" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let st0 = def_probe_state(d7_probe_std())
+    let d = def_probe_doc_named(st0, "d7user.dawn", d7_probe_text())
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let at = "probe(local"
+    # the list itself carries no doc: that is resolve's to fetch
+    let local = d7_item(st, d, at, 2, "local_fn")
+    assert oget(local, "documentation") == None
+    assert ostr(get_or_null(local, "data"), "uri") == d.uri
+    assert d7_resolved(st, local) == "Local and documented."
+    # the resolved item is the one sent, plus its doc
+    let (back, _) = handle_completion_resolve(st, local)
+    assert ostr(back, "label") == "local_fn" && oint(back, "kind") == 3
+    assert ostr(back, "detail") == ostr(local, "detail")
+    # a std function imported by name: std's doc, its link resolved in std
+    assert d7_resolved(st, d7_item(st, d, at, 2, "probe")) == "Probes `n`."
+    # no doc, no field
+    assert d7_resolved(st, d7_item(st, d, at, 2, "plain_fn")) == "-"
+    # a keyword has nothing to resolve, and no data to resolve it with
+    let kw = d7_item(st, d, at, 2, "let")
+    assert oget(kw, "data") == None
+    assert d7_resolved(st, kw) == "-"
+    # an item for a document the server does not have resolves to itself
+    let gone = jobj([("label", JStr("local_fn")), ("kind", JInt(3)),
+      ("data", jobj([("uri", JStr("file:///nowhere.dawn"))]))])
+    assert d7_resolved(st, gone) == "-"
+  })))
+}
+
+test "a client that applies itemDefaults.data is told the document once" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let st0 = def_probe_state(d7_probe_std())
+    let d = def_probe_doc_named(st0, "d7defaults.dawn", d7_probe_text())
+    let caps = jobj([("capabilities", jobj([("textDocument", jobj([("completion", jobj([
+      ("completionList", jobj([("itemDefaults", JArr([JStr("commitCharacters"), JStr("data")]))]))
+    ]))]))]))])
+    assert client_defaults_item_data(caps)
+    assert not client_defaults_item_data(jobj([]))
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d), default_item_data: true }
+    let reply = handle_completion(st, d7_params(d, "probe(local", 2))
+    assert ostr(get_or_null(get_or_null(reply, "itemDefaults"), "data"), "uri") == d.uri
+    let items = match get_or_null(reply, "items") {
+      JArr(xs) -> xs
+      other -> panic("completion replied ${render(other)}")
+    }
+    let local = list.find(items, it => ostr(it, "label") == "local_fn").expect("local_fn offered")
+    # no item names the document itself; the client fills it in from the default
+    assert list.all(items, it => oget(it, "data") == None)
+    let filled = with_field(local, "data", jobj([("uri", JStr(d.uri))]))
+    assert d7_resolved(st, filled) == "Local and documented."
+    # a keyword comes back with the default data as well, and resolves to itself
+    let kw = jobj([("label", JStr("let")), ("kind", JInt(14)), ("data", jobj([("uri", JStr(d.uri))]))])
+    let (same, _) = handle_completion_resolve(st, kw)
+    assert same == kw
+    # an item a `use` line offered keeps its own data, module and all
+    let m = d7_item_in(handle_completion(st, d7_params(d, "docprobe\n", 3)), "docprobe")
+    assert ostr(get_or_null(m, "data"), "module") == "std/docprobe"
+  })))
+}
+
+test "completion resolve on a use line: the module's doc, and its members'" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let st0 = def_probe_state(d7_probe_std())
+    let d = def_probe_doc_named(st0, "d7use.dawn", d7_probe_text())
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let file = path_to_uri(canon_identity("/tmp/dawn-selfhost-lsp-def/d7std/docprobe.dawn"))
+    # a module path, offered one segment at a time, carries the module it names
+    let m = d7_item(st, d, "docprobe\n", 3, "docprobe")
+    assert oint(m, "kind") == 9
+    assert ostr(get_or_null(m, "data"), "module") == "std/docprobe"
+    assert d7_resolved(st, m) == "Probes things.\nSee [`probe`](${file}#L5,8)."
+    # the names inside `.{ }`, from the module that declares them
+    let reach = d7_item(st, d, "REACH, Tool", 1, "bare")
+    assert ostr(get_or_null(reach, "data"), "module") == "std/docprobe"
+    assert d7_resolved(st, reach) == "-"
+    let item = (label: String, kind: Int) => jobj([("label", JStr(label)), ("kind", JInt(kind)),
+      ("data", jobj([("uri", JStr(d.uri)), ("module", JStr("std/docprobe"))]))])
+    assert d7_resolved(st, item("REACH", 21)) == "How far a probe reaches."
+    assert d7_resolved(st, item("Tool", 8)) == "A tool."
+    assert d7_resolved(st, item("Ask", 23)) == "Asks."
+    assert d7_resolved(st, item("nothing", 3)) == "-"
+  })))
+}
+
+test "completion resolve reads a module the use line has not loaded from its file" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let dir = "/tmp/dawn-selfhost-lsp-def/d7sib"
+    let _ = io.mkdirs(dir)
+    def_probe_put("${dir}/sib.dawn", join([
+      "## A sibling.",
+      "",
+      "## Helps.",
+      "pub fn help() -> Int = 1",
+      ""
+    ], "\n"))
+    let st0 = def_probe_state(d7_probe_std())
+    let d = def_probe_doc_named(st0, "d7sib/user.dawn", "fn main() -> Int = 0\n")
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let item = (label: String, kind: Int) => jobj([("label", JStr(label)), ("kind", JInt(kind)),
+      ("data", jobj([("uri", JStr(d.uri)), ("module", JStr("sib"))]))])
+    assert d7_resolved(st, item("sib", 9)) == "A sibling."
+    assert d7_resolved(st, item("help", 3)) == "Helps."
+    assert d7_resolved(st, item("main", 3)) == "-"
+  })))
+}
+
+test "signature help carries the function's doc, whole, and nothing without one" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let st0 = def_probe_state(d7_probe_std())
+    let d = def_probe_doc_named(st0, "d7sig.dawn", d7_probe_text())
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    let sig_doc = (needle: String, skip: Int) => {
+      let (reply, _) = handle_signature_help(st, d7_params(d, needle, skip))
+      let sigs = match get_or_null(reply, "signatures") {
+        JArr(xs) -> xs
+        other -> panic("signatureHelp replied ${render(other)}")
+      }
+      match oget(sigs[0], "documentation") {
+        Some(doc) -> ostr(doc, "value")
+        None -> "-"
+      }
+    }
+    assert sig_doc("probe(local", 6) == "Probes `n`."
+    assert sig_doc("local_fn(1)", 9) == "Local and documented."
+    assert sig_doc("plain_fn(2)", 9) == "-"
+    assert sig_doc("bare(REACH", 5) == "-"
+  })))
+}
+
+test "hover on a use line: the module's doc on its path, a name's on the name" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let st = def_probe_state(d7_probe_std())
+    let text = d7_probe_text()
+    let d = def_probe_doc_named(st, "d7hover.dawn", text)
+    let file = path_to_uri(canon_identity("/tmp/dawn-selfhost-lsp-def/d7std/docprobe.dawn"))
+    assert hover_probe_at(st, d, text, "docprobe\n", 0) ==
+      "```dawn\nuse std/docprobe\n```\n\n---\n\nProbes things.\nSee [`probe`](${file}#L5,8)."
+    assert hover_probe_at(st, d, text, "probe, REACH", 0) ==
+      "```dawn\nfn probe(n: Int) -> Int\n```\n\n---\n\nProbes `n`."
+    assert hover_probe_at(st, d, text, "REACH, Tool", 0) ==
+      "```dawn\nconst REACH: Int = 9\n```\n\n---\n\nHow far a probe reaches."
+    assert hover_probe_at(st, d, text, "Tool,", 0) ==
+      "```dawn\ntrait Tool[T]\n```\n\n---\n\nA tool."
+    assert hover_probe_at(st, d, text, "Ask}", 0) == "```dawn\neffect Ask\n```\n\n---\n\nAsks."
+  })))
 }
 
 # ---- inlay hints (docs/lsp-hover-design.md §A4) ----

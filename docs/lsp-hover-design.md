@@ -2,7 +2,8 @@
 
 > 状态：current。本线的总纲：除类型之外，hover 与 inlay 还能告诉读者什么、按什么刀序做。
 > A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）；
-> A5（文档里的 `` [`name`] `` 链接可点，文档注释 D4）已落地（§A5）。
+> A5（文档里的 `` [`name`] `` 链接可点，文档注释 D4）已落地（§A5）；D7（补全项文档、signatureHelp 文档、
+> `use` 行的模块文档，文档注释 D7）见 §D7。
 > B 组立项时在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
@@ -353,8 +354,7 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
   那一点写下的新声明，它没有 `##` 时说明作者没打算替它另写说明，把 `B` 的文档挂上去会让读者以为那是 `A`
   的承诺；链上多条文档还要定一条先后与合并规则，那是一份新的语义。重开条件：出现「别名的文档总是空、
   读者总得跳一次」的实际抱怨。
-- **模块文档进 `use` 行 hover**（`module_doc_of`）：`front/docs` 已经能给，但 `use` 行的 hover 今天只回
-  `use std/list`，加文档是独立的一小刀，留到有需要时做。
+- **模块文档进 `use` 行 hover**（`module_doc_of`）：A3 时留作独立的一小刀，文档注释 D7 做了，见 §D7.3。
 - **字段文档**：A3 时不做（`dawn doc` 当时不给字段文档，hover 不另立规则）；文档注释 D2 让 `dawn doc` 发布字段文档后，
   hover 随之补上，见 A3.2。
 - **把文档渲染成 HTML、改写 markdown**：编辑器自己渲染 markdown；Playground 按纯文本显示正文。
@@ -525,10 +525,122 @@ Playground 的 LSP 跑在服务器上，`file://` 指的是服务器上的路径
 
 ### A5.4 不做的（A5 内，理由）
 
-- **补全项、signatureHelp 里的链接**：那两处还没有文档（裁决 D7），有了文档时用同一个 `linked_doc`。
+- **补全项、signatureHelp 里的链接**：D7 给这两处加文档时走的就是同一个 `linked_doc`（§D7.1）。
 - **`[name]`（不带反引号）**：调研 §3.2 的候选之一。仓里 `##` 正文写方括号的地方多是区间与类型参数
   （`[0, len)`、`List[T]`），认它会把这些读成坏链接；只认带反引号的一种，链接与非链接一眼可分。
 - **链到 packages 的站点页**：packages 还没有 API 页（裁决 P2/P3 之后再说）。
+
+## D7. 补全项、signatureHelp 与 `use` 行的文档（文档注释 D7）
+
+裁决是文档注释那条线的 D7 行，调研 §3.9 的表：补全项带文档、signatureHelp 带函数整体文档、`use` 行
+hover 显示模块文档，三件都用 hover 已有的那一份文档（A3 的读法、A5 的链接、A3.5 的截断）。
+
+### D7.1 一份文档，三个出口
+
+`server.dawn` 的 `site_doc(DocSite)` 是唯一的取文档入口：按 `DocHome` 找文本（A3.3 那张表）、经
+`doc_src_memo` 取注释表、读出文档、改写链接。hover（`target_doc`）、补全的 resolve、signatureHelp 都调它，
+所以同一个声明在三处显示的是同一段文字。`DocSite` 从 `{ home, lo }` 改成 `{ home, at }`，
+`at` 是 `DeclAt(lo)`（声明的文档，原来的语义）或 `ModuleDoc`（模块文档，`front/docs.module_doc_of`）。
+
+| 出口 | 回包里的位置 | 内容 |
+|---|---|---|
+| hover | `contents.value` | 围栏 + `---` + 文档（A3.1，不变） |
+| `completionItem/resolve` | `documentation`（`MarkupContent`，markdown） | 只有文档，没有围栏：签名已在 `detail` |
+| signatureHelp | `signatures[0].documentation`（markdown） | 只有文档：签名就是 `label` |
+
+三处都过 `cut_doc`（A3.5 的截断）。没有文档时不加字段：resolve 原样回送收到的项，signatureHelp 的
+`SignatureInformation` 只有 `label` 与 `parameters`，与 D7 之前逐字节相同。
+
+### D7.2 补全：resolve 时才取文档
+
+- 服务端声明 `completionProvider.resolveProvider: true`。补全列表本身**不带文档**：一张列表有几百个名字，
+  来自几十个模块，列表时就取文档等于每次补全都要词法这些模块（调研 §3.9）；读者只会停在一两项上，
+  客户端对那一项发 `completionItem/resolve`。
+- **`data` 里放什么**：文档的 uri，和 `use` 行补出来的项所属的模块路径（`module`）。标签与 kind 已在项上，
+  三者足以找到声明，不放 offset、签名或别的大对象。只有可能有声明文档的 kind（Function、Class、Interface、
+  Module、EnumMember、Constant、TypeParameter 即 effect）带 `data`；关键字、局部变量、builtin 类型不带。
+- **uri 只说一次**：每项都带 uri 让补全回包变大（实测 2,100 项的列表从 185 KB 到 266 KB，§D7.6）。客户端在
+  `initialize` 声明 `textDocument.completion.completionList.itemDefaults` 含 `"data"`（LSP 3.17）时，回包改成
+  `CompletionList`，`itemDefaults.data` 放一次 `{uri}`，代码里补出来的项不再带 `data`，只有 `use` 行的项带自己的
+  `{uri, module}`（项自己的值优先于默认值，规范如此）。没声明的客户端照旧收到数组、每项带 `data`。VS Code 的
+  languageclient 与 Playground 都声明了。这时客户端会把默认 `data` 也套到关键字上，所以 resolve 先按 kind 过滤，
+  不可能有文档的项原样回送、不查任何东西。
+- **找声明**（`lspq.item_doc_site`）：
+  - `module` 在：Module 项读该模块的模块文档；其他项在该模块的 parse 树里按名字找顶层声明
+    （`decl_lo_named`：fn、type 与别名、const、trait、effect，然后是构造器）。
+  - `module` 不在（代码里补出来的项）：按 kind 在文档的作用域里解析，读的就是 hover 的落点：Function 走
+    `sig_of` 再 `site_of_sig`（与 hover 同序：本模块、std、builtin），Class 走 `adts_by_name`，EnumMember 走
+    `ctors_by_name`，Constant 走 `site_of_const`；trait、effect、别名先找本模块声明，再找按名字导入的。
+    同名时 kind 区分：与函数同名的局部变量是 Variable，没有文档；记录类型与它的构造器同名，kind 不同。
+  - 模块还没载入（`use` 行正在写的那个模块，按定义它不在程序里）：按补全时用的同一份候选表找到文件，
+    经 `def_source` 读文本、parse 一次、按名字找声明。这种文档的链接原样保留：没有检查过的模块就没有
+    可用来解析链接的作用域。
+- 复用 A3 的 `doc_memo`：resolve 与 hover 共用同一张按文本记忆的注释表。
+
+### D7.3 `use` 行
+
+- **模块路径上 hover**：`use std/list` 的 `std/list` 上，回 `use std/list` 的围栏加模块文档。模块在程序里
+  或在 std 里时有文本（`holder_by_path`）；用它的 parse 树判断「开头的 `##` 块属于模块而不是第一个声明」
+  （`module_doc_of` 的规则）。预检：文本去掉开头空白后不以 `##` 开头的，不词法。没有模块文档的模块，
+  回包与之前逐字节相同。
+- **选择性导入的名字上 hover**：fn、type、构造器、const 原来就带文档（A3.2）；trait 与 effect 原来在
+  `use` 行上没有 hover，现在按声明给 `trait Tool[T]`、`effect Ask` 加文档，并能跳到声明。
+
+### D7.4 signatureHelp
+
+只给函数整体的文档（`SignatureInformation.documentation`）。**不做逐参数文档**（`ParameterInformation.documentation`）：
+Dawn 没有 `@param` 一类记号，引入它就是调研 §3.3 否掉的约定小节；具名实参让参数名本身成了 API，参数的说明
+写在正文里用反引号已经够读。文档的位置与 hover 在被调用者名字上读到的相同（`sig_doc_site` 即 `site_of_sig`）。
+
+### D7.5 Playground
+
+- **网关**（`playground/lsp_gateway.py`）：自己拼给子进程的 `initialize` 加上
+  `completionList.itemDefaults: ["data"]`（§D7.2），补全回包里 uri 只出现一次。白名单放行 `completionItem/resolve`，照 A4 对 inlayHint 的做法逐字段重建：
+  只有 `label`（非空、≤ 256）、`kind`（1–25）、`data` 过网关；`data.uri` 必须是 Playground 那一个文档，
+  `data.module` 必须是由 `/` 连起来的单词字符段（不可能是文件路径或 URI）。回包也重建：只留 `label`、`kind`、
+  `detail`、`data` 与 markdown/plaintext 的 `documentation`，服务端以后若加 `command`、`additionalTextEdits`
+  也不会漏过去。capabilities 的 `resolveProvider` 改为 `true`。
+- **play-ui**（`site/play-ui/src/lsp.ts`）：`initialize` 声明 `resolveSupport` 与 `itemDefaults: ['data']`，收到
+  `CompletionList` 时把 `itemDefaults.data` 补给没有自己 `data` 的项。带 `data` 的项给 CM6 一个 `info` 函数，选中该项时才发 resolve（懒加载），
+  正文经 hover 的 `docText` 转成纯文本（`file://` 链接只留代码 span），用 hover 的 `docNode` 画成
+  `.dp-completion-doc`。info 面板固定宽度、超高滚动，在列表里上下移动只换文字、不改面板大小；字比 hover 小一号、
+  颜色用 `--muted`。没有文档或请求过期时不显示面板。Playground 的网关不放行 signatureHelp，这一半只在编辑器里有。
+
+### D7.6 实测
+
+本机 16 核，WSL2，GraalVM CE 21；测量时机器上还有别的写者在跑，load average 35–50，所以只看交错对照，不看绝对值。
+改前 = 父提交 `9fb834d0` 的工具链，与改后交错跑。三个缓冲区（`--uri untitled:*`）：`plain2000`（2,000 个无文档函数，
+补全列表 2,100 项）、`docs2000`（同样 2,000 个函数，每个两行 `##`，每轮先改文本，所以每次 resolve 都是注释表的未命中）、
+`stdfold`（一行 `use std/list`，补全落在 prelude 的 `fold` 上，约 100 项）。
+
+**补全列表本身**（`lsp-workspace-contract` 的客户端，同一缓冲区上三个服务端轮流请求，丢掉前 20% 作预热）：
+
+| 缓冲区 | 改前 | 改后，每项带 `data` | 改后，`itemDefaults` | 回包字节（改前 / 每项 / 默认值） |
+|---|---|---|---|---|
+| `plain2000`（60 轮） | 139.4 ms | 140.9 ms | 128.0 ms | 185,481 / 266,250 / 185,572 |
+| `stdfold`（200 轮） | 2.46 ms | 3.12 ms | 2.80 ms | 8,819 / 11,446 / 8,908 |
+
+大列表上没有可测差异；小列表上每项带 `data` 多出约 0.6 ms，是多序列化的那 30% 字节，声明了 `itemDefaults` 的客户端
+（VS Code、Playground）回包与改前只差几十字节。
+
+**resolve**（`lsp-bench.py` 的 `resolve` 列，11 轮、预热 3 轮、每格 n = 8，两遍）：
+
+| 缓冲区 | resolve 中位数 | 说明 |
+|---|---|---|
+| `plain2000` | 5.3 / 9.3 ms | `f1999` 无文档：字符串预检即答，时间是重取分析快照与解析 kind |
+| `docs2000` | 18.5 / 10.7 ms | 8,000 行、4,000 条文档注释，每轮改文本后第一次取文档要词法整段（A3.4 的最坏情形） |
+| `stdfold` | 2.1 / 1.2 ms | std 的注释表在会话里只词法一次 |
+
+同一组跑里 hover、definition、inlay 的中位数前后落在两遍之间的波动里。
+
+### D7.7 不做的（D7 内，理由）
+
+- **逐参数文档**：见 D7.4。
+- **列表时就带文档**（不用 resolve）：见 D7.2；VS Code 与 CM6 都支持懒取，只有不支持 resolve 的客户端看不到文档，
+  它们本来也只显示 `detail`。
+- **补全项的 `detail` 改成带文档的长文本**：`detail` 是一行签名，客户端把它画在列表里，放文档会把列表撑乱。
+- **没载入模块的文档链接**：见 D7.2 最后一条；要解析就得先检查那个模块，那是一次分析，不是一次 resolve。
+- **`use java` 行**：Java 类没有 `##`。
 
 ## 5. 门禁与契约
 
@@ -565,6 +677,17 @@ Playground 的 LSP 跑在服务器上，`file://` 指的是服务器上的路径
 - A4：Playground 网关白名单放行 `textDocument/inlayHint`（range 逐字段重建后转发，capabilities 多一个
   `inlayHintProvider`），`playground/test/lsp_contract.py` 加一条（多余的键不过网关）；`site/play-ui` selftest 加六条
   （回包校验、class、decoration 位置、请求形状与坏项过滤）。
+- D7：`lsp/server` 六条，都经 JSON 回包：resolve 带文档（本模块、按名字导入的 std 函数），无文档的声明与关键字不带、
+  未知文档原样回送；声明了 `itemDefaults` 的客户端收到 `CompletionList`、uri 只在默认值里出现一次，关键字带着默认
+  `data` 回来也原样回送；`use` 行补出的模块与成员（模块文档带解析后的链接、const、trait、effect，无文档的 fn 不带）；
+  没载入的同目录模块从文件读；signatureHelp 带文档与不带；`use` 行 hover 的模块路径与选择性导入的 fn、const、
+  trait、effect。负控：resolve 不填 `documentation` 时前两条变红（见报告）。
+- D7：`scripts/selfhost-lsp-diff.sh` 会话加一次 resolve（util 的 `helper`）和一次 `use std/list` 上的 hover；上一 release
+  对 resolve 回 `-32601`，`use` 行只回围栏；补全项多了 `data`，`initialize` 的 `resolveProvider` 变为 `true`。
+  提交里写 `Emit-Change(lsp)`。
+- D7：网关合约加两条（resolve 的项逐字段重建、多余字段与服务端的 `command` 不过网关；data 指向别的文档或模块路径
+  不合法时拒绝）；`site/play-ui` selftest 加七条（有 data 才有 info、列表不触发 resolve、请求形状、回包、链接去目标、
+  `itemDefaults.data` 补给缺 data 的项、无文档不显示）。`lsp-bench.py` 加 `resolve` 一栏。
 
 ## 6. 实测
 
@@ -616,4 +739,5 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | A3 | 已落地 | `597dfb3a` |
 | A4 | 已落地 | `5c07b1e6` |
 | A5（文档注释 D4） | 已落地 | |
+| D7（文档注释 D7） | 合入后由协调者回填 | |
 | B 组 | 未立项 | |

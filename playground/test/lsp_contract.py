@@ -200,6 +200,7 @@ def initialize(ws, request_id=1):
         "definitionProvider",
         "inlayHintProvider",
     }, response
+    assert capabilities["completionProvider"].get("resolveProvider") is True, response
     ws.send_json(note("initialized", {"untrusted": True}))
 
 
@@ -284,6 +285,26 @@ def diagnostics_params_contract():
                 f"{invalid!r}"
             )
     ok("diagnostics version is optional, int32-bounded and params-whitelisted")
+
+    # completionItem/resolve: an item whose data names another document, or a
+    # module that is not a module path, never reaches the child
+    for bad in (
+        {"label": "x", "data": {"uri": "file:///etc/passwd"}},
+        {"label": "x", "data": {"uri": URI, "module": "../etc/passwd"}},
+        {"label": "x", "data": {"uri": URI, "module": "std//io"}},
+        {"label": "x", "kind": True},
+        {"label": "", "kind": 3},
+    ):
+        try:
+            gateway.completion_item_value(bad)
+        except gateway.GatewayError:
+            pass
+        else:
+            raise AssertionError(f"resolve item crossed the gateway: {bad!r}")
+    assert gateway.completion_item_value({"label": "x", "kind": 3, "detail": "d"}) == {
+        "label": "x", "kind": 3,
+    }
+    ok("completion resolve items are rebuilt and their data confined to the document")
 
 
 def read_text(path):
@@ -842,6 +863,19 @@ def main():
             }))
             hints = ws.recv_json()["result"]
             assert hints == [{"position": {"line": 0, "character": 3}, "label": ": Int", "kind": 1}], hints
+            # a resolve carries the item back; only label, kind and the data the
+            # server put on it reach the child, and only the item and its doc
+            # come back
+            ws.send_json(rpc(6, "completionItem/resolve", {
+                "label": "println", "kind": 3, "detail": "fn println(s: String)",
+                "sortText": "2println", "insertText": "println",
+                "data": {"uri": URI, "module": "std/io", "path": "/etc/passwd"},
+            }))
+            resolved = ws.recv_json()["result"]
+            assert resolved == {
+                "label": "println", "kind": 3, "data": {"uri": URI, "module": "std/io"},
+                "documentation": {"kind": "markdown", "value": "Prints `s`."},
+            }, resolved
 
             ws.send_frame(9, b"contract-ping")
             fin, opcode, payload = ws.recv_frame()
@@ -854,7 +888,12 @@ def main():
             assert init["params"] == {
                 "processId": None,
                 "rootUri": None,
-                "capabilities": {"general": {"positionEncodings": ["utf-16"]}},
+                "capabilities": {
+                    "general": {"positionEncodings": ["utf-16"]},
+                    "textDocument": {
+                        "completion": {"completionList": {"itemDefaults": ["data"]}}
+                    },
+                },
                 "clientInfo": {"name": "dawn-playground", "version": "1"},
             }, init
             opened = next(item for item in audit if item.get("method") == "textDocument/didOpen")
@@ -864,6 +903,10 @@ def main():
                 "textDocument": {"uri": URI},
                 "range": {"start": {"line": 0, "character": 3}, "end": {"line": 9, "character": 0}},
             }, inlay
+            resolve = next(item for item in audit if item.get("method") == "completionItem/resolve")
+            assert resolve["params"] == {
+                "label": "println", "kind": 3, "data": {"uri": URI, "module": "std/io"},
+            }, resolve
             ok("fragmentation, LSP lifecycle, sync, queries and one-buffer filtering")
 
             first_stream, response = upgrade_when_available(port)

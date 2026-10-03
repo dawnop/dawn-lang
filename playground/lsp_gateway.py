@@ -636,6 +636,78 @@ def require_range(params: dict[str, Any]) -> dict[str, dict[str, int]]:
     return {"start": position_value(value.get("start")), "end": position_value(value.get("end"))}
 
 
+# What a completion item may carry back to `completionItem/resolve`: a label
+# and kind no longer than the server ever sends, and the `data` the server put
+# on it (docs/lsp-hover-design.md §D7), which names the Playground document and
+# at most a module path. A module path is segments of word characters joined
+# by `/`, so nothing that reads as a file path or a URI fits in it.
+MAX_COMPLETION_LABEL = 256
+MAX_MODULE_PATH = 256
+MODULE_PATH_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/"
+)
+
+
+def completion_item_value(params: dict[str, Any]) -> dict[str, Any]:
+    """A resolve request's item, rebuilt so only label, kind and data cross.
+
+    The browser sends the item back whole, and everything it holds besides
+    those three (detail, sortText, anything a client adds) is either what the
+    server sent or what the server does not read; neither needs to reach it.
+    """
+    label = params.get("label")
+    if not isinstance(label, str) or not label or len(label) > MAX_COMPLETION_LABEL:
+        raise GatewayError(1008, "completion item label must be a short string")
+    item: dict[str, Any] = {"label": label}
+    kind = params.get("kind")
+    if kind is not None:
+        if not isinstance(kind, int) or isinstance(kind, bool) or not 1 <= kind <= 25:
+            raise GatewayError(1008, "completion item kind must be an LSP kind")
+        item["kind"] = kind
+    data = params.get("data")
+    if data is None:
+        return item
+    if not isinstance(data, dict) or data.get("uri") != DOCUMENT_URI:
+        raise GatewayError(1008, "completion item data must name the Playground document")
+    safe: dict[str, Any] = {"uri": DOCUMENT_URI}
+    module = data.get("module")
+    if module is not None:
+        if (
+            not isinstance(module, str)
+            or not module
+            or len(module) > MAX_MODULE_PATH
+            or not set(module) <= MODULE_PATH_CHARS
+            or "" in module.split("/")
+        ):
+            raise GatewayError(1008, "completion item module must be a module path")
+        safe["module"] = module
+    item["data"] = safe
+    return item
+
+
+def resolved_item_value(result: Any) -> Any:
+    """The resolved item, as the browser may read it: the item it sent and a
+    Markdown or plain-text `documentation`. Anything else the server added
+    (an edit, a command) is not part of the Playground's surface."""
+    if result is None:
+        return None
+    if not isinstance(result, dict) or not isinstance(result.get("label"), str):
+        raise ChildProtocolError("completion resolve result is not an item")
+    safe = {key: result[key] for key in ("label", "kind", "detail", "data") if key in result}
+    documentation = result.get("documentation")
+    if isinstance(documentation, dict):
+        if documentation.get("kind") in {"markdown", "plaintext"} and isinstance(
+            documentation.get("value"), str
+        ):
+            safe["documentation"] = {
+                "kind": documentation["kind"],
+                "value": documentation["value"],
+            }
+    elif isinstance(documentation, str):
+        safe["documentation"] = documentation
+    return safe
+
+
 def position_value(position: Any) -> dict[str, int]:
     if not isinstance(position, dict):
         raise GatewayError(1008, "position must be an object")
@@ -704,7 +776,15 @@ class ClientProtocol:
                     "params": {
                         "processId": None,
                         "rootUri": None,
-                        "capabilities": {"general": {"positionEncodings": ["utf-16"]}},
+                        # The browser applies a completion list's
+                        # itemDefaults.data, so the server names the document
+                        # once per list instead of once per item (§D7.2).
+                        "capabilities": {
+                            "general": {"positionEncodings": ["utf-16"]},
+                            "textDocument": {
+                                "completion": {"completionList": {"itemDefaults": ["data"]}}
+                            },
+                        },
                         "clientInfo": {"name": "dawn-playground", "version": "1"},
                     },
                 }
@@ -829,6 +909,19 @@ class ClientProtocol:
                 }
             )
 
+        # A completion item's doc is fetched when the list shows that item
+        # (docs/lsp-hover-design.md §D7). The request is about an item, not a
+        # position, so it carries no document but the one in its data.
+        if method == "completionItem/resolve":
+            if len(self.pending) >= HARD_PENDING_REQUESTS:
+                raise GatewayError(1008, "too many pending LSP requests")
+            request_id = self._request_id(message)
+            item = completion_item_value(require_params(message))
+            self.pending[request_id] = method
+            return compact_json(
+                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": item}
+            )
+
         raise GatewayError(1008, "method is not allowed")
 
     def from_child(self, body: bytes) -> bytes:
@@ -913,7 +1006,7 @@ class ClientProtocol:
                             "positionEncoding": "utf-16",
                             "textDocumentSync": 1,
                             "completionProvider": {
-                                "resolveProvider": False,
+                                "resolveProvider": True,
                                 "triggerCharacters": ["!"],
                             },
                             "hoverProvider": True,
@@ -935,6 +1028,8 @@ class ClientProtocol:
                 if isinstance(location, dict) and location.get("uri") == DOCUMENT_URI:
                     safe.append(location)
             message = {**message, "result": safe}
+        if method == "completionItem/resolve" and "result" in message:
+            message = {**message, "result": resolved_item_value(message["result"])}
         return compact_json(message)
 
 

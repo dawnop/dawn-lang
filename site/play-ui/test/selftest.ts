@@ -9,6 +9,9 @@ import {
   DAWN_LSP_PROTOCOL,
   DAWN_LSP_URI,
   DawnLspClient,
+  completionInfo,
+  completionInfoText,
+  completionOf,
   hoverParts,
   hoverText,
   inlayClass,
@@ -428,6 +431,49 @@ socket.receive({ id: inlayRequest.id, result: [
 expect('inlay hint response keeps the well-formed hints', await inlay, [
   { position: { line: 0, character: 3 }, label: ': Int', kind: 1 },
 ])
+
+// ---- completion docs (docs/lsp-hover-design.md §D7) ----
+{
+  const data = { uri: DAWN_LSP_URI, module: 'std/list' }
+  const withDoc = completionOf({ label: 'reverse', kind: 3, detail: 'fn reverse', data }, client)
+  const keyword = completionOf({ label: 'let', kind: 14 }, client)
+  expect('an item with data gets a lazy info pane, one without gets none', [
+    typeof withDoc?.info, keyword != null && 'info' in keyword,
+  ], ['function', false])
+  // the list never asked for a doc: only selecting the item does
+  expect('no resolve was sent with the list', socket.sent.some((m) => m.method === 'completionItem/resolve'), false)
+  const doc = client.completionDoc({ label: 'reverse', kind: 3, detail: 'fn reverse', sortText: '1reverse', data })
+  await tick()
+  const resolveRequest = socket.sent.at(-1)!
+  expect('resolve sends the item back with only what the server reads', [resolveRequest.method, resolveRequest.params], [
+    'completionItem/resolve', { label: 'reverse', kind: 3, data },
+  ])
+  socket.receive({ id: resolveRequest.id, result: {
+    label: 'reverse', kind: 3, data,
+    documentation: { kind: 'markdown', value: 'A reversed copy; see [`map`](file:///srv/std/list.dawn#L65,8).' },
+  } })
+  const markdown = await doc
+  expect('resolve answers the documentation', markdown, 'A reversed copy; see [`map`](file:///srv/std/list.dawn#L65,8).')
+  expect('the info pane shows it as hover does, server paths dropped',
+    completionInfoText(markdown), 'A reversed copy; see `map`.')
+  // a list with LSP 3.17 defaults: items without data of their own take the list's
+  const listed = client.completion(3)
+  await tick()
+  const listRequest = socket.sent.at(-1)!
+  socket.receive({ id: listRequest.id, result: {
+    isIncomplete: false,
+    itemDefaults: { data: { uri: DAWN_LSP_URI } },
+    items: [{ label: 'reverse', kind: 3 }, { label: 'list', kind: 9, data }],
+  } })
+  expect('list defaults fill in data an item lacks, and leave its own', (await listed).map((item) => item.data), [
+    { uri: DAWN_LSP_URI }, data,
+  ])
+  const none = completionInfo(client, { label: 'plain', kind: 3, data })
+  await tick()
+  const noneRequest = socket.sent.at(-1)!
+  socket.receive({ id: noneRequest.id, result: { label: 'plain', kind: 3, data } })
+  expect('an item without a doc shows no info pane', await none, null)
+}
 
 const staleHover = client.hover(0).then(() => 'resolved', () => 'rejected')
 await tick()

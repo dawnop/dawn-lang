@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Differential for the language server against the previous release (the N-1
 # oracle since kotlin-final): a scripted LSP session (initialize,
-# open/change/close, hover, definition, completion, symbols, signature help,
+# open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover, inlay hints, formatting over a two-module project + a standalone buffer) runs
+# on hover and on `use` lines, inlay hints, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 #
@@ -297,6 +297,7 @@ for needle, occ, delta in [
     ("area(s)", 1, 6),      # local var use
     ("Shape", 1, 1),        # selective import name (use line)
     ("use util", 1, 5),     # module path on use line
+    ("use std/list", 1, 6), # a std module path: its module doc (§D7)
     ("total} of", 1, 1),    # interpolated var
     ("acc + x", 1, 1),      # lambda param use
     ("Circle(r) -> p.x", 1, 8),  # match binder
@@ -339,6 +340,9 @@ req("textDocument/completion", at(app_uri, app_text, "compute(LIMIT)", 1, 4))
 # after a destructuring let, and inside a match arm
 req("textDocument/completion", at(app_uri, app_text, "lo + hi", 1, 0))
 req("textDocument/completion", at(app_uri, app_text, "a + b + mid", 1, 0))
+# resolve: the doc of a completion item, fetched apart from the list
+# (docs/lsp-hover-design.md §D7); util's `helper` has a two-line `##`
+req("completionItem/resolve", {"label": "helper", "kind": 3, "data": {"uri": app_uri}})
 
 req("textDocument/documentSymbol", tdoc(app_uri))
 
