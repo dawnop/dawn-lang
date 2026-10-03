@@ -33,9 +33,9 @@ use driver/stdlib.{
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
-  analyze_program, rendered_diags, dawn_files_under
+  analyze_program, rendered_diags, dawn_files_under, planner_diags
 }
-use driver/clifail.{fail_compile}
+use driver/clifail.{fail_compile, fail_planner}
 use compiler_plan/source
 use compiler_plan/buildinfo
 use pkg/vendor
@@ -83,6 +83,7 @@ use ir/lower
 use c/rc
 use c/infer
 use c/cdriver
+use c/binfo
 use jvm/jreflect.{jsig_real, jsig_for}
 use check/jsig.{JsigLease}
 use check/tast.{TModule}
@@ -756,7 +757,8 @@ fn usage() -> String = join([
   "  dawn version -m <project-dir>...     print the build manifest: each package's real",
   "                                       name, version ((devel) when undeclared) and",
   "                                       source digest, without building",
-  "  dawn version -m <file.jar>...        print the build manifest a built jar carries",
+  "  dawn version -m <file>...            print the build manifest a built jar, native",
+  "                                       binary or wasm module carries",
   "",
   "options (run/test/build):",
   "  --cp <jars>                          third-party jars for `use java`, separated by the",
@@ -940,24 +942,6 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
     program_args: program_args
   }
 }
-
-# Planner diagnostics have the same rendering fields but belong to an
-# independent package type. Keep the conversion at the CLI boundary.
-fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
-  var out: List[LocDiag] = []
-  for ld in ds {
-    out = out ++ [LocDiag {
-      path: ld.path,
-      d: mk_diag(ld.d.msg, ld.d.lo, ld.d.hi, ld.d.hint)
-    }]
-  }
-  out
-}
-
-## Planner diagnostics end the command the way any compile failure does.
-## `pkg/pkgcmd` takes this as a parameter because it sits below the driver.
-fn fail_planner(ds: List[source.LocDiag]) -> Unit !Fs !Exit !Console !io =
-  fail_compile(planner_diags(ds))
 
 ## Render the lexer diagnostics that made `fmt` refuse a file, say plainly that
 ## nothing was written, and exit 1. Separate from `fail_compile` because the
@@ -1710,22 +1694,10 @@ fn run_native_image(
 }
 
 ## The build manifest a jar of `target` carries (docs/build-info-design.md):
-## a project directory's is `buildinfo.build_rows` of its plan, the same rows
-## `dawn version -m <dir>` prints; a single file's is `buildinfo.file_rows`
-## over `root_files`, the texts its load read. Re-planned here rather than
-## threaded out of the load, because planning is cheap and the plan is a
-## function of the same files the load just read.
-fn build_manifest(target: String, root_files: List[(String, String)]) -> Result[String, String] !Fs !Proc !Env = {
-  let rows = if io.is_dir(target) {
-    buildinfo.build_rows(source.source_plan(source.ProjectDirectory(target)))
-  } else {
-    buildinfo.file_rows(source.source_plan(source.SourceFile(target)), root_files)
-  }
-  match rows {
-    Ok(rs) -> Ok(buildinfo.render_file(VERSION, rs))
-    Err(e) -> Err("cannot write the build manifest: " ++ e)
-  }
-}
+## `buildinfo.product_file`, which the native driver writes into its products
+## too.
+fn build_manifest(target: String, root_files: List[(String, String)]) -> Result[String, String] !Fs !Proc !Env =
+  buildinfo.product_file(VERSION, target, root_files)
 
 ## `selfhost build <target> [-o out] [--native] [--std <dir>] [--vendor <pkg>]...`:
 ## pack the compiled program as an executable jar (java-deps vendored into
@@ -2128,9 +2100,15 @@ fn lower_size(m: CModule) -> Int = {
 ## supported entry that the fixpoint and dozens of gates call, and renaming it
 ## would buy nothing for those call sites. `scripts/doc-check.py` holds the
 ## fixpoint script to the entry named here.
+##
+## `--build-info <file.c>` also writes the C unit that embeds the program's
+## build manifest (c/binfo), for a script that links the emitted C itself, as
+## `release-native.sh` and `native-fixpoint.sh` do. It is a second file and
+## not part of the emitted C, which stays what the differentials compare.
 fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_flag: Option[String] = None
   var out = ""
+  var info_out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -2139,6 +2117,9 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       i = i + 2
     } else if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--build-info" && i + 1 < len(rest) {
+      info_out = rest[i + 1]
       i = i + 2
     } else {
       refuse_second_target("dawn emitc", target, rest[i])
@@ -2160,6 +2141,16 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let text = match cdriver.c_text(std, prog) {
     Ok(s) -> s
     Err(e) -> return cli_error(e ++ " in " ++ t)
+  }
+  if info_out != "" {
+    let unit = match binfo.unit_for(VERSION, t, loaded) {
+      Ok(u) -> u
+      Err(e) -> return cli_error(e)
+    }
+    match io.write_file(info_out, unit) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error("cannot write " ++ info_out ++ ": " ++ e.message)
+    }
   }
   if out == "" {
     console_print(text)
@@ -2272,19 +2263,20 @@ pub fn main() -> Unit !io =
   io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
       io.with_exit_real(() => io.with_console_real(() => dispatch())))))
 
-## `dawn version`, and `dawn version -m <project-dir | jar>...`: the
+## `dawn version`, and `dawn version -m <project-dir | jar | binary>...`: the
 ## toolchain's version line (`version_line`), then for each project the build
-## manifest its plan resolves to and for each jar the one it carries
-## (compiler_plan/buildinfo, docs/build-info-design.md). Nothing is built; the
-## header line repeats the argument as given, so the output depends on argv
-## and the sources (or the jar) and on nothing else.
+## manifest its plan resolves to and for each jar, native binary or wasm module
+## the one it carries (compiler_plan/buildinfo, c/binfo,
+## docs/build-info-design.md). Nothing is built and nothing is run; the header
+## line repeats the argument as given, so the output depends on argv and the
+## sources (or the file) and on nothing else.
 fn run_version(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let none: List[String] = []
   let targets = match rest {
     [] -> return console_println(version_line(jarw.own_build_info()))
     [flag, ..ts] -> if flag == "-m" { ts } else { none }
   }
-  if targets == [] { return cli_error("usage: dawn version [-m <project-dir | jar>...]") }
+  if targets == [] { return cli_error("usage: dawn version [-m <project-dir | jar | binary>...]") }
   for t in targets {
     if not io.exists(t) { return cli_error("no such file or directory: ${t}") }
   }
@@ -2297,7 +2289,17 @@ fn run_version(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
         Err(e) -> return cli_error(e)
       }
     } else {
-      match jar_listing(t) {
+      # an ELF or wasm magic says which reader; everything else is offered to
+      # the jar reader, whose refusal names the file as not a jar
+      let native: Option[Bytes] = match io.read_bytes(t) {
+        Ok(data) -> if binfo.is_product(data) { Some(data) } else { None }
+        Err(_) -> None
+      }
+      let listed = match native {
+        Some(data) -> binfo.listing(t, data)
+        None -> jar_listing(t)
+      }
+      match listed {
         Ok(text) -> console_print(text)
         Err(e) -> return cli_error(e)
       }
@@ -2700,7 +2702,7 @@ test "`dawn version` without -m prints the version, and refuses anything else" {
   let (status, err, out) = cli_read(() => run_version([]))
   assert status == None && err == ""
   assert str.starts_with(out, "dawn ${VERSION} (selfhost)") && str.ends_with(out, "\n")
-  let usage = (Some(2), "error: usage: dawn version [-m <project-dir | jar>...]\n", "")
+  let usage = (Some(2), "error: usage: dawn version [-m <project-dir | jar | binary>...]\n", "")
   assert cli_read(() => run_version(["-m"])) == usage
   assert cli_read(() => run_version(["--json", "."])) == usage
   assert cli_read(() => run_version(["-m", NO_SUCH]))

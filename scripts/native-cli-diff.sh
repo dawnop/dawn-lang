@@ -534,6 +534,13 @@ fi
 pair "check (a clean target)" check packages/sha2
 pair "check (diagnostics)" check "$OUT/broken.dawn"
 
+# version -m: one Planner and one listing format (docs/build-info-design.md
+# §八). The binary under test is listed from outside by both drivers, so the
+# JVM's reading of its manifest section and the native one are compared too
+# (or both refusals, when the binary was linked without the manifest unit).
+pair "version -m (a project)" version -m packages/sha2
+pair "version -m (the binary under test)" version -m "$DAWNC"
+
 # ---- leg 3: add, against HEAD's JVM driver ----
 # Both sides edit a fresh copy of the same project, so the summary line and
 # the rewritten dawn.toml must both come out identical.

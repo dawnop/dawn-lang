@@ -689,6 +689,13 @@ tool19_validate() {
     echo "release-native.sh must contain exactly two identical static cc invocations" >&2
     errors=1
   fi
+  # both links carry the build manifest unit (docs/build-info-design.md §八):
+  # the artifact's `dawnc --version` digest and check 2b read it
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  if [ "$(grep -F -c -- '-pthread -static "$WORK/build_info.c"' "$script_file")" -ne 2 ]; then
+    echo "release-native.sh must link the build manifest unit into both candidates" >&2
+    errors=1
+  fi
 
   # shellcheck disable=SC2016 # literal source in the guarded script
   for line in \
@@ -757,9 +764,15 @@ tool19_expect_reject() {
   fi
 }
 
-sed 's/ -static \\/ \\/' \
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed 's/ -static "\$WORK\/build_info.c" \\/ "$WORK\/build_info.c" \\/' \
   "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-static.sh"
 tool19_expect_reject "removing -static" "$tool19_dir/native.no-static.sh"
+
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed 's/ "\$WORK\/build_info.c" \\/ \\/' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-build-info.sh"
+tool19_expect_reject "removing the build manifest unit" "$tool19_dir/native.no-build-info.sh"
 
 # shellcheck disable=SC2016 # mutate literal source in the guarded script
 sed '/cmp -s "$CANDIDATE_A" "$CANDIDATE_B"/d' \
