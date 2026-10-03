@@ -5,9 +5,48 @@ Pure Dawn readers for raw DEFLATE, gzip and ZIP, plus CRC-32.
 The package manager uses them for downloaded source archives; no module
 imports Java.
 
-Package version **2.0.0** folds each `_bounded` twin into its base function as
-a defaulted parameter, `cap: Option[Int] = None`. It is a major release because
-four public functions are gone:
+Package version **3.0.0** gives every entry point a finite default ceiling,
+`deflate.DEFAULT_CAP`, 16 MiB of output. `cap: None` is now the explicit way to
+have no ceiling, and `cap: Some(n)` any other one. No signature changed shape;
+only what an omitted `cap` means did, which is why this is a major release:
+
+| 2.x call | 2.x meaning | 3.0.0 meaning | 3.0.0 spelling of the 2.x meaning |
+| --- | --- | --- | --- |
+| `deflate.inflate(src)` | no ceiling | 16 MiB | `deflate.inflate(src, cap: None)` |
+| `deflate.inflate_from(src, from)` | no ceiling | 16 MiB | `deflate.inflate_from(src, from, cap: None)` |
+| `gzip.gunzip(src)` | no ceiling | 16 MiB over all members | `gzip.gunzip(src, cap: None)` |
+| `zip.read(src, m)` | no ceiling | 16 MiB | `zip.read(src, m, cap: None)` |
+| `zip.entries(src)` | no ceiling, and no way to set one | 16 MiB over all entries | `zip.entries(src, cap: None)` |
+
+Calls that already pass `cap: Some(n)` behave exactly as in 2.x.
+
+**The default ceiling (decided).** This package has only one-shot entry
+points, so a caller who forgets a ceiling does not read slowly, it runs out of
+memory: DEFLATE expands up to about 1032:1, so a megabyte of input can become a
+gigabyte. The default is 16 MiB rather than 64 or 256 because the ceiling
+counts output bytes, and the output buffer (`bytes.Buf`) costs well over one
+byte of memory per output byte today; 16 MiB is the size measured to stay
+inside the toolchain's own `-Xmx2g` for any input. A caller with a known larger
+budget, like the package fetcher, passes it. A refusal by the default names it
+and both ways out:
+
+```
+deflate: the output exceeds the 16777216 byte limit (stopped at 16776967 bytes); the default cap is 16777216 bytes: pass cap: Some(n) for a larger limit, or cap: None for no limit
+```
+
+The default is recognised by value, so an explicit `cap: Some(DEFAULT_CAP)`
+gets the same note. Only ceiling refusals carry it; a damaged stream is not
+fixed by a larger limit.
+
+`zip.entries` applies its `cap` to all entries together, not to each. A
+central directory may point many records at the same compressed bytes, so a
+per-entry ceiling times the entry count is no ceiling; each entry is read
+against what the earlier ones left, as `gzip.gunzip` does for members.
+
+### 2.0.0
+
+Package version 2.0.0 folded each `_bounded` twin into its base function as a
+defaulted parameter:
 
 | 1.x | 2.0.0 |
 | --- | --- |
@@ -16,18 +55,11 @@ four public functions are gone:
 | `gzip.gunzip_bounded(src, Some(n))` | `gzip.gunzip(src, cap: Some(n))` |
 | `zip.read_bounded(src, m, Some(n))` | `zip.read(src, m, cap: Some(n))` |
 
-Calls without a ceiling (`inflate(src)`, `gunzip(src)`, `read(src, m)`) are
-unchanged. Every unsuffixed 1.x function only forwarded `None` to its twin, so
-the pair said nothing one function with a default cannot; Kotlin's and Swift's
-API guidelines both prefer the default to a family of variants. The version is
+Every unsuffixed 1.x function only forwarded `None` to its twin, so the pair
+said nothing one function with a default cannot; Kotlin's and Swift's API
+guidelines both prefer the default to a family of variants. The version is
 raised in the same change as the API so MVS never sees different package
 contents under the same name/version.
-
-**Open: the default ceiling.** `cap` defaults to `None`, no ceiling, because
-that is what the unsuffixed names always did, and this release changes only
-how a ceiling is spelled. Whether a decompressor should instead default to a
-finite ceiling, so that a caller who forgets one is not exposed to a
-decompression bomb, is a separate safety decision that has not been made.
 
 ## Gzip contract
 
@@ -52,10 +84,10 @@ verify its trailer, then appended once to the aggregate buffer.
 
 The `deflate` module exposes two entry points:
 
-- `inflate(src, cap: Option[Int] = None)` decodes a stream beginning at byte
-  zero;
-- `inflate_from(src, from: Int = 0, cap: Option[Int] = None)` is the cursor
-  form used by containers, and also returns the end offset.
+- `inflate(src, cap: Option[Int] = Some(DEFAULT_CAP))` decodes a stream
+  beginning at byte zero;
+- `inflate_from(src, from: Int = 0, cap: Option[Int] = Some(DEFAULT_CAP))` is
+  the cursor form used by containers, and also returns the end offset.
 
 `inflate_from` decodes directly from `from` in the original `Bytes` and returns
 the absolute byte index immediately after that DEFLATE stream, not a length
@@ -73,3 +105,7 @@ it.
 `java.util.zip`, runs the member-boundary corpus on both JVM and native, and
 carries behavioral mutants for the member loop, trailer cursor, aggregate cap,
 reserved flags, FHCRC verification and the per-member FHCRC checksum origin.
+Its last two legs run a 512 MB bomb inside a 256 MB heap: once with an
+explicit ceiling, and once with none passed, through `deflate.inflate`,
+`gzip.gunzip` (alone and after a small member) and `zip.entries`, so that
+putting the default back to `None` is an OutOfMemoryError, not a pass.

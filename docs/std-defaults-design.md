@@ -212,6 +212,9 @@ hover 与 completion 的 detail 走同一个 `sig_render`，自动带上默认�
 | K7–K18 | B1 之后的 Dev load/store 五连合并，按 `scripts/tile-golden/kernels.dawn` 的段落与其它文件切 | K6 | 无；golden 逐字节不动 |
 | K19 | B2：`parse_int` 迁 `std/fmt` 并吞 `parse_int_radix` | 无 | `doc --builtins` 等，实测见 §7.4；builtin-decl-contract 镜像少两项 |
 
+K3 之后 inflate 3.0.0 把这四族（另加 `zip.entries`）的 `cap` 默认从 `None` 改为 `Some(DEFAULT_CAP)`，
+签名形状不变，见 [inflate-default-cap-design.md](inflate-default-cap-design.md)。
+
 T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的仍是后缀名（`float_to_int_sat`、
 `float_to_float_zero` / `_down` / `_up` / `_away`）；K2 把它们并成
 `float_to_int(.., saturating: Bool = false)` 与 `float_to_float(.., rounding: Rounding = NearestEven)`，

@@ -14,14 +14,22 @@
 # lookup table to build and is impossible to get subtly wrong in a way that
 # still decodes most streams.
 #
-# The ceiling is a defaulted trailing parameter, `cap: Option[Int] = None`, not
-# a `_bounded` twin of each entry point. Version 1 had the twins, and every
-# unsuffixed half only forwarded `None`; Kotlin's and Swift's API guidelines
-# both prefer one function with a defaulted parameter to a family of
-# variants, and the 2026-10-02 survey of std default parameters found nothing
-# the suffixes bought. The default is `None` because no ceiling is what the
-# unsuffixed names always did. Whether a decompressor should default to a
-# ceiling at all is a separate safety question, left open in the README.
+# The ceiling is a defaulted trailing parameter, `cap: Option[Int] =
+# Some(DEFAULT_CAP)`, not a `_bounded` twin of each entry point. Version 1 had
+# the twins, and every unsuffixed half only forwarded `None`; Kotlin's and
+# Swift's API guidelines both prefer one function with a defaulted parameter to
+# a family of variants, and the 2026-10-02 survey of std default parameters
+# found nothing the suffixes bought.
+#
+# The default is a finite ceiling, 16 MiB, and `cap: None` is the explicit way
+# to have none (3.0.0; 2.x defaulted to `None`). This package has only
+# one-shot entry points, so a caller who forgets a ceiling does not read
+# slowly, it runs out of memory: a megabyte of DEFLATE expands to a gigabyte.
+# 16 MiB rather than 64 or 256 because the ceiling counts bytes and the output
+# buffer costs well over one byte of memory per output byte today; 16 MiB is
+# the size measured to stay inside the toolchain's own `-Xmx2g` for any input,
+# so forgetting the ceiling cannot crash the process. Callers with a known
+# larger budget, like the package fetcher, pass it explicitly.
 
 use std/bytes
 use std/bytes.{Buf}
@@ -204,6 +212,11 @@ fn clen_order() -> List[Int] =
 # `Option[Int]` so that a caller cannot express a negative one, and a negative
 # `Some` is refused rather than read as unlimited.
 
+## The ceiling an entry point applies when its caller passes no `cap`:
+## 16 MiB of output. `cap: None` is no ceiling at all, and `cap: Some(n)` any
+## other one.
+pub const DEFAULT_CAP: Int = 16777216
+
 fn limit_of(cap: Option[Int]) -> Result[Int, String] =
   match cap {
     None -> Ok(-1)
@@ -219,16 +232,31 @@ fn over_limit(out: Buf, add: Int, lim: Int) -> Bool = lim >= 0 && bytes.size(out
 ## the buffer was built would report the full expansion. Two implementations
 ## that refuse the same streams are told apart by nothing else.
 fn too_big(out: Buf, lim: Int) -> String =
-  "deflate: the output exceeds the " ++ to_string(lim) ++ " byte limit (stopped at " ++
-  to_string(bytes.size(out)) ++ " bytes)"
+  with_default_hint("deflate: the output exceeds the " ++ to_string(lim) ++
+      " byte limit (stopped at " ++ to_string(bytes.size(out)) ++ " bytes)", lim)
+
+## What a refusal by the default ceiling adds: the caller never chose the
+## number, so the message names it and both ways out. A legitimately large
+## input stopped by a limit nobody wrote would otherwise look like damage.
+##
+## "The default" is recognised by value, so an explicit `Some(DEFAULT_CAP)`
+## reads the same; the advice is still true of it.
+fn with_default_hint(e: String, lim: Int) -> String =
+  if lim == DEFAULT_CAP {
+    e ++ "; the default cap is " ++ to_string(DEFAULT_CAP) ++
+      " bytes: pass cap: Some(n) for a larger limit, or cap: None for no limit"
+  } else {
+    e
+  }
 
 ## How many whole bytes of `src` the reader has consumed: a partly spent byte
 ## counts, because nothing after it can be read independently.
 fn consumed(b: Bits) -> Int = if b.bit == 0 { b.pos } else { b.pos + 1 }
 
 ## Decompress a raw DEFLATE stream that begins at byte zero. `cap` is a
-## ceiling on the uncompressed size; `None`, the default, is no ceiling.
-pub fn inflate(src: Bytes, cap: Option[Int] = None) -> Result[Bytes, String] =
+## ceiling on the uncompressed size, `DEFAULT_CAP` unless given; `None` is no
+## ceiling.
+pub fn inflate(src: Bytes, cap: Option[Int] = Some(DEFAULT_CAP)) -> Result[Bytes, String] =
   match inflate_from(src, cap: cap) {
     Ok(p) -> {
       let (out, _) = p
@@ -246,7 +274,9 @@ pub fn inflate(src: Bytes, cap: Option[Int] = None) -> Result[Bytes, String] =
 ## part of the member. Gzip needs the cursor form because slicing off the
 ## remaining suffix for every concatenated member would copy that suffix every
 ## time and make many small members quadratic in the archive size.
-pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = None) -> Result[(Bytes, Int), String] = {
+##
+## `cap` limits the output of this call alone, `DEFAULT_CAP` unless given.
+pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = Some(DEFAULT_CAP)) -> Result[(Bytes, Int), String] = {
   if from < 0 || from > bytes.len(src) {
     return Err("deflate: start offset " ++ to_string(from) ++ " is out of range")
   }
@@ -470,8 +500,10 @@ fn raw(xs: List[Int]) -> Bytes = {
 # one's complement, and the two literal bytes.
 fn stored_hi() -> Bytes = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105])
 
-test "the defaults decode from byte zero with no ceiling" {
+test "the defaults decode from byte zero under the default ceiling" {
   assert inflate(stored_hi()) == Ok(bytes.utf8("hi"))
+  assert inflate(stored_hi(), cap: None) == Ok(bytes.utf8("hi"))
+  assert inflate_from(stored_hi(), cap: None) == Ok((bytes.utf8("hi"), 7))
   let suffixed = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105, 0xCC])
   assert inflate_from(suffixed) == Ok((bytes.utf8("hi"), 7))
   assert inflate_from(suffixed, cap: Some(2)) == Ok((bytes.utf8("hi"), 7))
@@ -529,6 +561,87 @@ test "the output ceiling is checked before the buffer grows, not after" {
   }
   match inflate(stored_hi(), cap: Some(-1)) {
     Err(e) -> { assert str.contains(e, "negative output limit") }
+    Ok(_) -> { assert false }
+  }
+}
+
+## A compression bomb in one fixed-Huffman block: the literal `a`, then
+## `copies` back-references of length 258 at distance 1, then end-of-block.
+## Each reference is 13 bits and expands to 258 bytes, the ratio RFC 1951
+## allows at most, so 65 100 of them are about 106 KB that decode to just
+## over 16 MiB.
+fn bomb(copies: Int) -> Bytes = {
+  var w = BitW { out: bytes.buf(), acc: 0, n: 0 }
+  w = bits_lsb(w, 1, 1)
+  w = bits_lsb(w, 1, 2)
+  # literal 97: fixed code 0x30 + 97, 8 bits
+  w = code_msb(w, 0x30 + 97, 8)
+  var i = 0
+  while i < copies {
+    # length 258 is symbol 285, fixed code 0xC0 + 5 in 8 bits; distance 1 is
+    # distance code 0, 5 bits; neither has extra bits
+    w = code_msb(w, 0xC5, 8)
+    w = code_msb(w, 0, 5)
+    i = i + 1
+  }
+  w = code_msb(w, 0, 7)
+  if w.n > 0 { w = bits_lsb(w, 0, 8 - w.n) }
+  bytes.freeze(w.out)
+}
+
+type BitW = { out: Buf, acc: Int, n: Int }
+
+## `count` bits of `v`, low bit first: how header fields are packed.
+fn bits_lsb(w0: BitW, v: Int, count: Int) -> BitW = {
+  var w = w0
+  var i = 0
+  while i < count {
+    w = bit(w, (v >>> i) & 1)
+    i = i + 1
+  }
+  w
+}
+
+## A Huffman code of `count` bits, high bit first (RFC 1951 3.1.1).
+fn code_msb(w0: BitW, v: Int, count: Int) -> BitW = {
+  var w = w0
+  var i = count - 1
+  while i >= 0 {
+    w = bit(w, (v >>> i) & 1)
+    i = i - 1
+  }
+  w
+}
+
+fn bit(w: BitW, b: Int) -> BitW = {
+  let acc = w.acc | (b << w.n)
+  if w.n == 7 {
+    BitW { out: bytes.put(w.out, acc), acc: 0, n: 0 }
+  } else {
+    BitW { ..w, acc: acc, n: w.n + 1 }
+  }
+}
+
+test "the bomb builder makes a stream this reader expands" {
+  assert inflate(bomb(2)) == Ok(bytes.utf8(str.repeat("a", 517)))
+}
+
+test "the default ceiling refuses a bomb and names the default and the ways out" {
+  assert DEFAULT_CAP == 16777216
+  # 65 027 copies is the last that fits: 1 + 258 * 65 027 = 16 776 967, and
+  # the next run would land past 16 777 216, so it is refused unwritten.
+  match inflate(bomb(65100)) {
+    Err(e) -> {
+      assert e ==
+        "deflate: the output exceeds the 16777216 byte limit (stopped at 16776967 bytes); " ++
+        "the default cap is 16777216 bytes: pass cap: Some(n) for a larger limit, " ++
+        "or cap: None for no limit"
+    }
+    Ok(_) -> { assert false }
+  }
+  # An explicit ceiling that is not the default says only what it is.
+  match inflate(bomb(65100), cap: Some(1000)) {
+    Err(e) -> { assert e == "deflate: the output exceeds the 1000 byte limit (stopped at 775 bytes)" }
     Ok(_) -> { assert false }
   }
 }
