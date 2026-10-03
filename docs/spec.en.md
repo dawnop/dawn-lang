@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ d7225235a43b189e -->
+<!-- doc-check: translation-of docs/spec.md @ cbe80a1c0bdea292 -->
 
 # Dawn Language Specification
 
@@ -2976,7 +2976,14 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    interpreter can hold it, not which traits it supports. To prepare byte data at compile
    time, compute a `List[Int]` or a `String` and turn it into `Bytes` where it is used.
 3. Evaluation has a step budget (10⁸ steps by default, tunable with `--comptime-fuel`);
-   exceeding it is an error — which guarantees compilation always terminates.
+   exceeding it is an error — which guarantees compilation always terminates. A
+   primitive whose output grows with its input is charged by the size of what it
+   produces, before it allocates: a String `++` by the code points of its result, a
+   List `++` by the elements of its right operand (the left one is shared, see §2.2),
+   and `range`, list slicing, `join`, `code_points`/`from_code_points`, case mapping,
+   string slicing and quoting by the elements or code points they produce. The budget
+   so bounds memory and the time of one step as well: doubling `s = s ++ s` pays the
+   length of its result each time, not a few steps.
 4. There is no Java interop and no io inside comptime (constraint 1 guarantees this
    automatically).
 5. Pure does not mean foldable: some pure builtins are refused at comptime too, because the
