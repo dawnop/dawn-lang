@@ -46,8 +46,14 @@ fn slurp(path: String) -> String !Fs =
 
 # Strip the throwaway temp directory out of diagnostics so users see a clean
 # "prog.dawn:line:col" instead of /var/folders/.../dawn-play-<uuid>/prog.dawn.
+# The run phase's output goes through it too. The compiler no longer bakes
+# the path it was handed into a position (dawn-lang #401: an `x!` failure
+# says `at prog.dawn:4`), so this is defence in depth: a runtime error that
+# names a file under the staging directory, or the directory itself, still
+# does not hand the server's work root to the browser. The bare directory
+# reads as `.`, which is what it is relative to the files the user sees.
 fn strip_dir(text: String, dir: String) -> String =
-  join(str.split(text, "${dir}/"), "")
+  join(str.split(join(str.split(text, "${dir}/"), ""), dir), ".")
 
 # Prepend the sudo-whitelisted sandbox wrapper. The wrapper takes the working
 # directory as its first argument, then the command to run inside a throwaway
@@ -165,12 +171,12 @@ pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
           let finished = proc.waitFor(timeout_secs(), secs)
           if finished {
             let ms = (System.nanoTime() - started) / 1000000
-            let (out, cut) = truncate(slurp(run_out))
+            let (out, cut) = truncate(strip_dir(slurp(run_out), dir))
             Compiled(out, proc.exitValue(), cut, ms)
           } else {
             proc.destroyForcibly()
             proc.waitFor()
-            let (out, _) = truncate(slurp(run_out))
+            let (out, _) = truncate(strip_dir(slurp(run_out), dir))
             Timeout(out)
           }
         }

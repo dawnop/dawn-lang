@@ -27,6 +27,10 @@ export PLAY_COMPILE_TIMEOUT=60
 # fail-closed since the audit). There is no systemd-run wrapper on a dev box or
 # in CI, so this harness is exactly the caller that has to say so.
 export PLAY_UNSAFE_LOCAL=1
+# The work root is this run's own, so the run-output case below can name the
+# exact directory that must not reach a response (dawn-lang #401).
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-work.XXXXXX")
+export PLAY_WORK_ROOT="$WORK"
 # The port is asked of the kernel, not fixed: two copies of this test on one
 # machine (another checkout, an external gate run) would otherwise race for it,
 # and a fixed low port also collides with WSL2's WinNAT reservations (the bind
@@ -65,7 +69,7 @@ SRV=$!
 # runner is outside the terminal's process group now, so ^C no longer reaches
 # it; the signal traps route through exit so the EXIT trap still kills it.
 # `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}"; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -81,7 +85,7 @@ fail=0
 # parser reads 0 and 0.0 as equal, so the integer fields are checked on `raw`.
 check() { # name, curl-data, python-assertion, [endpoint (default: run)]
   body=$(curl -s --noproxy '*' -X POST --data "$2" "http://127.0.0.1:$PORT/${4:-run}")
-  if printf '%s' "$body" | python3 -c "import sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); assert ($3), d" 2>/dev/null; then
+  if printf '%s' "$body" | python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); assert ($3), d" 2>/dev/null; then
     pass=$((pass + 1)); echo "  ok  $1"
   else
     fail=$((fail + 1)); echo "FAIL  $1"; echo "        $body"
@@ -112,6 +116,15 @@ check "compile error, path sanitized" \
 check "runtime panic, exit 1" \
   '{"code":"pub fn main() -> Unit !io = panic(\"boom\")"}' \
   'd["phase"]=="run" and d["exit"]==1 and "panic: boom" in d["output"]'
+
+# A failing `x!` prints the position the compiler baked into the program.
+# That used to be the path the runner handed `dawn build`, which is under the
+# work root, so a user saw the server's directory. The position is now the
+# file's own name, and the run output goes through the same strip as the
+# compile output, so neither the work root nor the staging directory shows.
+check "run output never names the work root" \
+  '{"code":"fn f() -> Option[Int] = None\npub fn main() -> Unit !io = println(to_string(f()!))"}' \
+  'd["phase"]=="run" and d["exit"]==1 and "unwrapped None from f() at prog.dawn:2" in d["output"] and os.environ["PLAY_WORK_ROOT"] not in d["output"] and "dawn-play-" not in d["output"]'
 
 check "infinite loop times out" \
   '{"code":"fn s(n: Int) -> Unit !io = s(n+1)\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}' \
