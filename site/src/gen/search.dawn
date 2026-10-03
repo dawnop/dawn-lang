@@ -58,6 +58,7 @@ use gen/tutorial.{chapter_titles, chapter_sections}
 use gen/examples.{gallery_examples, must_describe}
 use gen/copy.{load_copy, plain, body_text}
 use gen/gpu.{prose_sections, copy_file}
+use gen/packages.{read_packages, summary_text, row_id}
 
 ## One row of the index.
 pub type Row = { group: String, title: String, detail: String, note: String, href: String }
@@ -184,8 +185,8 @@ fn tutorial_index(blocks: List[Block], lang: Lang, detail: String) -> List[Row] 
 
 ## The gallery, one row per example, plus the site's own pages.
 ##
-## The nav table is read rather than restated: the eight entries a reader can
-## click in the header are eight pages the search has to be able to reach, and
+## The nav table is read rather than restated: the nine entries a reader can
+## click in the header are nine pages the search has to be able to reach, and
 ## a nav item added without a row here would be a page the panel cannot find.
 fn examples_index(lang: Lang, detail: String, home: String) -> List[Row] !Fs = {
   var rows: List[Row] = []
@@ -240,6 +241,25 @@ fn gpu_index(lang: Lang, detail: String) -> List[Row] !Fs = {
     })
 }
 
+## The packages page, one row per package: the name `use` lines spell, with
+## its README's first sentence as the note, landing on its row of the table.
+##
+## In the "examples" group, as the cuTile page's rows are, for the reason
+## given there. Read from the manifests and READMEs only, not from the `dawn
+## doc` documents the page also reads: those are written by site/build.sh,
+## and `dawn test site` runs without them.
+fn packages_index(lang: Lang, detail: String) -> List[Row] !Fs = {
+  let page = lang_path(lang, "packages.html")
+  list.map(read_packages(), p =>
+      Row {
+        group: "examples",
+        title: p.use_as,
+        detail: detail,
+        note: note_of(summary_text(p)),
+        href: "${page}#${row_id(p.dir)}",
+      })
+}
+
 # ---- the words the rows carry ----------------------------------------------
 #
 # The `detail` of a section row is the name of the document it is in, which is
@@ -261,6 +281,7 @@ type Words = {
   gallery: String,
   home: String,
   gpu: String,
+  packages: String,
 }
 
 fn words(lang: Lang) -> Words =
@@ -273,6 +294,7 @@ fn words(lang: Lang) -> Words =
       gallery: "Site",
       home: "Home",
       gpu: "cuTile backend",
+      packages: "Packages",
     }
     Zh -> Words {
       spec: "规范",
@@ -282,6 +304,7 @@ fn words(lang: Lang) -> Words =
       gallery: "站点",
       home: "首页",
       gpu: "cuTile 后端",
+      packages: "包",
     }
   }
 
@@ -426,6 +449,7 @@ pub fn index_rows(api: Json, lang: Lang, c: Corpus) -> List[Row] !Fs = {
     ++ tutorial_index(c.tutorial, lang, w.tutorial)
     ++ examples_index(lang, w.gallery, w.home)
     ++ gpu_index(lang, w.gpu)
+    ++ packages_index(lang, w.packages)
 }
 
 ## The index for one language, as the bytes that go into /assets/.
@@ -706,6 +730,26 @@ test "the cuTile page and its sections are rows of the index" {
     let zh = list.filter(index_rows(probe_api(), Zh, read_corpus(Zh)), r => r.href == "zh/gpu.html")
     assert list.map(zh, r => r.title) == ["GPU", "Dawn 的 cuTile 后端"]
     assert str.starts_with(zh[1].note, "Dawn 里的 GPU kernel")
+  })
+}
+
+## Every package is a row in each language, landing on its row of the
+## packages page with its README's first sentence as the note.
+test "each package is a row of the index, on its row of the packages page" {
+  io.with_fs_real(() => {
+    let n = len(read_packages())
+    for lang in [En, Zh] {
+      let page = lang_path(lang, "packages.html")
+      let rows = list.filter(index_rows(probe_api(), lang, read_corpus(lang)),
+        r => str.starts_with(r.href, page ++ "#pkg-"))
+      assert len(rows) == n
+      for r in rows {
+        assert r.group == "examples"
+        assert r.note != ""
+      }
+    }
+    let en = list.filter(index_rows(probe_api(), En, read_corpus(En)), r => r.href == "packages.html#pkg-tea-dom")
+    assert list.map(en, r => r.title) == ["tea_dom"]
   })
 }
 
