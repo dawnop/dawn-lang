@@ -6,12 +6,13 @@ cd "$(dirname "$0")/.."
 mkdir -p site/build
 ./bin/dawn doc --stdlib > site/build/stdlib.json
 
-# The cuTile page's line maps: which public call of each golden kernel wrote
-# which Tile IR line. The generator reads the recording (site/gpu-map/
-# calls.txt), because it is a pure function of files on disk; this traces
-# every kernel again through packages/tileir and stops the build when the
-# recording is not what tileir says today (site/gpu-map/record.py says why).
-echo "=== checking the cuTile line maps ==="
+# The cuTile page's call map: which call of flash_attn wrote which Tile IR
+# line, and where that call is in its source. The generator reads the
+# recording (site/gpu-map/flash_attn.map), because it is a pure function of
+# files on disk; this traces the kernel again through packages/tileir, parses
+# kernels.dawn again, and stops the build when the recording is not what the
+# two say today (site/gpu-map/record.py says why).
+echo "=== checking the cuTile call map ==="
 python3 site/gpu-map/record.py
 
 # The Playground editor bundle (CodeMirror 6 + Dawn mode). Built locally with

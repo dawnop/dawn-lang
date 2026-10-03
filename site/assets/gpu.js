@@ -1,145 +1,86 @@
-/* The cuTile page's script (gen/gpu.dawn links it, deferred): the kernel
-   picker and the replay on the line map, the coverage cards' count-up, and
-   the mutants' flight into the gate that catches them.
+/* The cuTile page's script (gen/gpu.dawn links it, deferred): picking a call
+   on the call map, and the coverage cards' count-up.
 
-   The page is complete without it. The map of `vadd`, every figure at its
-   final number and every mutant at its gate are in the markup; the picker
-   and the replay button are `hidden` there and shown from here, because
-   without a script they would be controls that do nothing.
+   The page is complete without it. Every row of flash_attn already has the
+   Tile IR its calls wrote beside it, and every card is at its final number;
+   this only lets a reader point at one call. Clicking a call's name marks
+   its whole span in the source and the Tile IR lines it wrote itself; a
+   region call (a loop, a scan) marks its header, terminator and brace, and
+   the lines its body's calls wrote more faintly. Clicking it again, or
+   pressing Escape, lets go; clicking a line of Tile IR picks the call that
+   wrote it. Nothing moves and nothing is filled: an underline and an edge.
 
-   It carries no words. Every label is in the markup, in the page's language,
-   and a kernel fetched from gpu/k/<name>.json brings numbers, names and code,
-   which read the same in both. With reduced motion every animation is its
-   end state, as home.js does it. */
+   It carries no words: the one sentence about clicking is in the markup,
+   `hidden` until this shows it. With reduced motion the cards are their end
+   state, as home.js does it. */
 (function () {
   "use strict";
   var theme = window.dawnTheme;
   var still = theme ? theme.still() : true;
 
-  function esc(s) {
-    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-  function line(n, html) { return '<span class="gm-l"><i>' + n + "</i>" + html + "</span>"; }
-  function codes(xs) {
-    return xs.map(function (x) { return "<code>" + esc(x) + "</code>"; }).join("");
-  }
+  function each(root, sel, f) { Array.prototype.forEach.call(root.querySelectorAll(sel), f); }
 
-  /* ---- the line map ---- */
+  /* ---- the call map ---- */
 
-  /* A fetched kernel, drawn the way gen/gpu.map_rows draws vadd: the same
-     classes, the same per-line pieces (`src` is already highlighted by the
-     generator), so the two cannot look different. */
-  function draw(map, k) {
-    var rows = k.rows.map(function (r, i) {
-      var d = [];
-      for (var n = r.d[0]; n < r.d[1]; n++) d.push(line(k.first + n, k.src[n]));
-      var t = [];
-      r.i.forEach(function (g) {
-        for (var n = g[0]; n < g[1]; n++) t.push(line(n, esc(k.ir[n - 1])));
-      });
-      var calls = r.c.length ? '<span class="gm-calls">' + codes(r.c) + "</span>" : "";
-      return '<li class="gm-row g' + (i % 6) + '" tabindex="0" data-ops="' + r.o +
-        '" aria-describedby="gm-t' + i + '"><div class="gm-d"><pre><code>' + d.join("\n") +
-        "</code></pre>" + calls + '</div><div class="gm-t" id="gm-t' + i + '"><pre><code>' +
-        t.join("\n") + "</code></pre></div></li>";
-    });
-    map.querySelector(".gm-rows").innerHTML = rows.join("\n");
-    var set = function (key, html) {
-      var el = map.querySelector('[data-f="' + key + '"]');
-      if (el) el.innerHTML = html;
-    };
-    set("src", "kernels.dawn:" + k.first + "–" + (k.first + k.src.length - 1));
-    set("ir", esc(k.name) + ".mlir");
-    set("count", k.ops);
-    set("calls", k.calls);
-    set("ops", k.ops);
-    set("lines", k.lines);
-    set("bytes", k.bytes);
-    set("rows", k.cites.length);
-    set("cites", codes(k.cites));
-    set("mutantn", k.mutants.length);
-    set("mutants", codes(k.mutants));
-    map.querySelectorAll(".gm-names").forEach(function (p, i) {
-      p.hidden = (i === 0 ? k.cites : k.mutants).length === 0;
-    });
-  }
-
-  /* The recording, replayed: the Tile IR column empties, then each row in
-     source order lights up and its lines come back one at a time while the
-     counter adds the operations that row's calls recorded. */
-  var playing = 0;
-  function replay(map) {
-    var token = ++playing;
-    var rows = Array.prototype.slice.call(map.querySelectorAll(".gm-row"));
-    var count = map.querySelector('[data-f="count"]');
-    var total = rows.reduce(function (n, r) { return n + +r.getAttribute("data-ops"); }, 0);
-    var finish = function () {
-      map.classList.remove("gm-playing");
-      rows.forEach(function (r) { r.classList.remove("gm-on"); });
-      map.querySelectorAll(".gm-t .gm-l").forEach(function (l) { l.classList.remove("gm-off"); });
-      count.textContent = total;
-    };
-    if (still) { finish(); return; }
-    map.classList.add("gm-playing");
-    map.querySelectorAll(".gm-t .gm-l").forEach(function (l) { l.classList.add("gm-off"); });
-    var lines = map.querySelectorAll(".gm-t .gm-l").length || 1;
-    var per = Math.max(18, Math.min(90, 2600 / lines));
-    var ops = 0;
-    count.textContent = 0;
-    var r = 0;
-    function nextRow() {
-      if (token !== playing) return;
-      if (r > 0) rows[r - 1].classList.remove("gm-on");
-      if (r >= rows.length) { setTimeout(finish, 350); return; }
-      var row = rows[r++];
-      row.classList.add("gm-on");
-      var ls = row.querySelectorAll(".gm-t .gm-l");
-      var add = +row.getAttribute("data-ops");
-      var j = 0;
-      function nextLine() {
-        if (token !== playing) return;
-        if (j < ls.length) {
-          ls[j++].classList.remove("gm-off");
-          count.textContent = ops + Math.round(add * j / ls.length);
-          setTimeout(nextLine, per);
-        } else {
-          ops += add;
-          count.textContent = ops;
-          setTimeout(nextRow, per * 2);
-        }
-      }
-      nextLine();
-    }
-    nextRow();
-  }
-
-  function lineMap() {
-    var map = document.querySelector(".gpu-map");
+  function callMap() {
+    var map = document.querySelector(".km");
     if (!map) return;
-    var pick = map.querySelector(".gm-pick");
-    var select = pick && pick.querySelector("select");
-    var button = map.querySelector(".gm-replay");
-    if (button) {
-      button.hidden = false;
-      button.addEventListener("click", function () { replay(map); });
+    var parent = {};
+    each(map, ".km-c", function (c) { parent[c.getAttribute("data-c")] = c.getAttribute("data-p"); });
+    /* whether call `k` is `id` or inside it, by the recording's tree */
+    function under(k, id) {
+      for (var n = 0; k !== null && k !== undefined && n < 64; n++) {
+        if (k === id) return true;
+        k = parent[k];
+      }
+      return false;
     }
-    if (!select || !window.fetch) return;
-    pick.hidden = false;
-    var base = map.getAttribute("data-map-base");
-    select.addEventListener("change", function () {
-      var name = select.value;
-      playing++;
-      map.classList.add("gm-loading");
-      fetch(base + encodeURIComponent(name) + ".json")
-        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-        .then(function (k) {
-          if (select.value !== name) return;
-          draw(map, k);
-          map.classList.remove("gm-loading");
-          replay(map);
-        })
-        .catch(function () { map.classList.remove("gm-loading"); });
+    var picked = null;
+    function clear() {
+      each(map, ".km-on", function (e) { e.classList.remove("km-on"); });
+      each(map, ".km-hit, .km-in", function (e) { e.classList.remove("km-hit", "km-in"); });
+      each(map, '.km-c[aria-pressed="true"]', function (e) { e.setAttribute("aria-pressed", "false"); });
+      picked = null;
+    }
+    function pick(id) {
+      var again = picked === id;
+      clear();
+      if (again || id === null) return;
+      picked = id;
+      each(map, ".km-c[data-c=\"" + id + "\"]", function (e) { e.setAttribute("aria-pressed", "true"); });
+      each(map, "[data-k]", function (e) {
+        if (e.getAttribute("data-k").split(" ").indexOf(id) >= 0) e.classList.add("km-on");
+      });
+      var first = null;
+      each(map, ".km-ir .km-l[data-o]", function (e) {
+        var o = e.getAttribute("data-o");
+        if (o === id) {
+          e.classList.add("km-hit");
+          if (!first) first = e;
+        } else if (+o >= 0 && under(o, id)) {
+          e.classList.add("km-in");
+        }
+      });
+      if (first && first.scrollIntoView) first.scrollIntoView({ block: "nearest", behavior: still ? "auto" : "smooth" });
+    }
+    each(map, ".km-c", function (c) {
+      c.setAttribute("role", "button");
+      c.setAttribute("tabindex", "0");
+      c.setAttribute("aria-pressed", "false");
     });
+    map.addEventListener("click", function (ev) {
+      var c = ev.target.closest(".km-c");
+      if (c) { pick(c.getAttribute("data-c")); return; }
+      var l = ev.target.closest(".km-ir .km-l[data-o]");
+      if (l && +l.getAttribute("data-o") >= 0) pick(l.getAttribute("data-o"));
+    });
+    map.addEventListener("keydown", function (ev) {
+      var c = ev.target.closest && ev.target.closest(".km-c");
+      if (c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); pick(c.getAttribute("data-c")); }
+      else if (ev.key === "Escape") clear();
+    });
+    map.classList.add("km-live");
+    each(map, ".km-note", function (n) { n.hidden = false; });
   }
 
   /* ---- the coverage cards ---- */
@@ -175,28 +116,7 @@
     Array.prototype.forEach.call(figs, function (f) { io.observe(f); });
   }
 
-  /* ---- the mutants ---- */
-
-  /* Every mutant is a dot already sitting in the gate that catches it. With
-     motion, they start at the left edge and fly in, once, staggered, when the
-     pipeline comes into view; each one's gate is the markup's. */
-  function trap() {
-    var net = document.querySelector(".gpu-trap");
-    if (!net || still || !("IntersectionObserver" in window)) return;
-    net.classList.add("gt-wait");
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) {
-        if (!e.isIntersecting) return;
-        io.unobserve(e.target);
-        void net.offsetWidth;
-        net.classList.remove("gt-wait");
-        net.classList.add("gt-fly");
-      });
-    }, { threshold: 0.4 });
-    io.observe(net);
-  }
-
-  function start() { lineMap(); cards(); trap(); }
+  function start() { callMap(); cards(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();

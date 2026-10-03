@@ -1,47 +1,52 @@
 #!/usr/bin/env python3
-"""Which public call of each golden kernel wrote which line of its Tile IR.
+"""Which call of flash_attn wrote which line of its Tile IR, and where that call is in the source.
 
-    python3 site/gpu-map/record.py            # check calls.txt against a fresh trace
-    python3 site/gpu-map/record.py --record   # rewrite calls.txt
+    python3 site/gpu-map/record.py            # check flash_attn.map against a fresh recording
+    python3 site/gpu-map/record.py --record   # rewrite flash_attn.map
 
-The cuTile page (site/src/gen/gpu.dawn) lines every Dawn line of a kernel up
-with the Tile IR lines it produced. The Dawn half of that is text the
-generator can read; the other half needs packages/tileir to run the kernel,
-and the generator is a pure function of files on disk (site/build.sh says
-why: scripts/site-dist-diff.sh runs it on two backends and compares). So the
-trace is RECORDED here, into calls.txt beside this file, and site/build.sh
-runs this script without `--record` on every build: a recording that no
-longer matches what tileir says is a red build, never a stale page.
+The cuTile page (site/src/gen/gpu.dawn) shows one kernel, scripts/tile-golden's
+`flash_attn`, with every call in its source beside the Tile IR lines that call
+wrote. Two programs know half each, and neither half is guessed:
 
-Why a copy of kernels.dawn and not an import: its kernels are private and its
-`trace` answers the program alone, while `prog.trace_calls` answers the
-program and the side table. So the copy is edited, and every edit is an exact
-text that must match exactly as often as stated, or this script stops and
-names it: a kernels.dawn that moved under it is a failure here, not a
-recording of something else.
+  - packages/tileir knows which call issued which operation, because it ran
+    them: `prog.trace_calls` keeps the tree of the kernel's calls (a call
+    inside a `d_for3` or a `d_scan` closure is that region call's child) and
+    `render.line_map` carries it to lines of the text. That needs the kernel
+    to RUN, so it is a Dawn harness over a copy of kernels.dawn.
+  - Dawn's own parser knows where each call is: `dawn parse` gives every call
+    node its code point span and the span of its callee's name.
 
-  1. `trace_kernel(` becomes `trace_calls(` in every dispatch arm, and
-     `trace` answers `(TileProg, List[Call])`;
-  2. the imports only the old `main` used are dropped, and its `main` and
-     `trace_twice` are cut;
-  3. a `main` is appended that traces every kernel the dispatch names, in
-     the dispatch's order, and prints its line map.
+The two are paired strictly, level by level of the tree: under each parent,
+the names of the kernel's calls in the order they ran must be EXACTLY the
+names the parser finds in evaluation order (arguments left to right, each
+call after its arguments, a closure handed to a call being that call's
+children). Anything else stops here with both lists printed: a helper with
+an effect, a call under host control flow, a closure bound before the call
+that runs it, a call of a closure. Which names are calls at all is read off
+packages/tileir/src/dev.dawn (its `called("<name>"` marks); every other call,
+`permute(..)` or `neg_inf()`, records nothing and is looked through.
 
-The dispatch is read for the kernel names too (`"<name>" ->`), so a kernel
-added to kernels.dawn is in the next recording without anybody listing it.
+The generator is a pure function of files on disk (site/build.sh says why:
+scripts/site-dist-diff.sh runs it on two backends and compares), so the pairing
+is RECORDED into flash_attn.map beside this file, and site/build.sh runs this
+script without `--record` on every build: a kernels.dawn or a tileir that moved
+under the recording is a red build, never a stale page.
 
-calls.txt, one block per kernel in dispatch order:
+flash_attn.map:
 
-    kernel vadd
-    head 1-4                 lines no call wrote: module, entry, make_token
-      block_id 1-2 4-5       a call: its TileOps [1, 2), its lines [4, 5)
-      tile_at 2-4 5-7
-      ...
-    tail 24-27               return and the two closing braces
+    kernel flash_attn
+    fn 2380-2406                    the function's lines in kernels.dawn
+    ops 38                          operations recorded, make_token included
+    head 1-4                        lines no call wrote: module, entry, make_token
+    call 0 -1 block_id 2381:12-2381:23 2381:12-2381:20 4-5
+    ...
+    tail 92-95                      return and the two closing braces
 
-Every range is half-open; lines count from 1 and operations from 0 (the
-entry token is operation 0). A kernel the line map refuses has one
-`error <why>` line instead of the rest, and the page leaves it out.
+A call line is its row, its parent's row (-1 at the top of the body), its
+name, its span and its name's span in kernels.dawn (line:column, both from 1,
+columns in code points, the end exclusive), then the lines of Tile IR it wrote
+itself, its children's left out (half-open, from 1). A region call has its
+header, its terminator and its closing brace.
 """
 
 from pathlib import Path
@@ -53,20 +58,20 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 GOLDEN = ROOT / "scripts" / "tile-golden"
-OUT = Path(__file__).resolve().parent / "calls.txt"
+DEV = ROOT / "packages" / "tileir" / "src" / "dev.dawn"
+NAME = "flash_attn"
+OUT = Path(__file__).resolve().parent / f"{NAME}.map"
 
-TRACE_SIG = "fn trace(name: String) -> TileProg = match name {\n"
 CUT_AT = "# Trace `name` twice and answer the record, or panic if the two runs differ.\n"
 
 # (old, new, how many times old must occur)
 EDITS = [
     ("use tileir/prog.{TileProg, trace_kernel}\n",
-     "use tileir/prog.{TileProg, Call, trace_calls}\n", 1),
+     "use tileir/prog.{TileProg, trace_kernel, trace_calls, op_count}\n", 1),
     ("use tileir/render.{render}\n",
      "use tileir/render.{render, line_map}\n", 1),
     ("use tileir/bytecode.{encode, bytecode_version}\n", "", 1),
     ("use std/io.{with_fs_real, write_bytes}\n", "", 1),
-    (TRACE_SIG, "fn trace(name: String) -> (TileProg, List[Call]) = match name {\n", 1),
 ]
 
 MAIN = '''
@@ -76,27 +81,22 @@ fn spans(rs: List[(Int, Int)]) -> String =
     acc ++ " ${a}-${b}"
   })
 
-fn kernel_names() -> List[String] = [
-%NAMES%
-]
-
 pub fn main() -> Unit !io = {
-  for name in kernel_names() {
-    let (p, calls) = trace(name)
-    println("kernel ${name}")
-    match line_map(p, calls) {
-      Ok(m) -> {
-        if m.text != render(p) { panic("${name}: the line map's text is not render's") } else { () }
-        println("head${spans(m.head)}")
-        for k in range(0, len(calls)) {
-          let c = calls[k]
-          println("  ${c.name} ${c.ops_from}-${c.ops_to}${spans(m.calls[k].lines)}")
-        }
-        let (ta, tb) = m.tail
-        println("tail ${ta}-${tb}")
+  let (p, calls) = %TRACE%
+  if p != trace("%NAME%") { panic("%NAME%: the call marks changed the program") } else { () }
+  match line_map(p, calls) {
+    Ok(m) -> {
+      if m.text != render(p) { panic("%NAME%: the line map's text is not render's") } else { () }
+      println("ops ${op_count(p.ops)}")
+      println("head${spans(m.head)}")
+      for k in range(0, len(calls)) {
+        let c = calls[k]
+        println("call ${k} ${c.parent} ${c.name}${spans(m.calls[k].lines)}")
       }
-      Err(e) -> println("error ${e}")
+      let (ta, tb) = m.tail
+      println("tail ${ta}-${tb}")
     }
+    Err(e) -> panic("%NAME%: ${e}")
   }
 }
 '''
@@ -107,8 +107,9 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
-def harness_source() -> tuple[str, list[str]]:
-    src = KERNELS.read_text(encoding="utf-8")
+# ---- the run: tileir's tree of calls and the lines each wrote ----
+
+def harness_source(src: str) -> str:
     for old, new, times in EDITS:
         if src.count(old) != times:
             fail(f"kernels.dawn has {src.count(old)} of {old.strip()!r}, expected {times}")
@@ -116,25 +117,22 @@ def harness_source() -> tuple[str, list[str]]:
     if src.count(CUT_AT) != 1:
         fail(f"kernels.dawn has {src.count(CUT_AT)} of {CUT_AT.strip()!r}, expected 1")
     src = src[:src.index(CUT_AT)]
-    start = src.index("fn trace(name: String) -> (TileProg, List[Call]) = match name {\n")
-    end = src.index("\n}\n", start)
-    body = src[start:end]
-    names = re.findall(r'^  "([A-Za-z0-9_]+)" ->', body, re.M)
-    arms = body.count("trace_kernel(")
-    if arms != len(names) or src.count("trace_kernel(") != arms:
-        fail(f"the dispatch has {len(names)} arms and {arms} trace_kernel calls; "
-             f"the file has {src.count('trace_kernel(')}")
-    src = src[:start] + body.replace("trace_kernel(", "trace_calls(") + src[end:]
-    listed = ",\n".join(f'  "{n}"' for n in names)
-    return src + MAIN.replace("%NAMES%", listed), names
+    # the kernel's dispatch arm, traced with the side table instead
+    arm = re.search(r'^  "' + NAME + r'" ->\n((?:    .*\n)+)', src, re.M)
+    if not arm:
+        fail(f"kernels.dawn's dispatch has no arm for {NAME}")
+    call = " ".join(l.strip() for l in arm.group(1).splitlines())
+    if call.count("trace_kernel(") != 1 or not call.startswith(f'trace_kernel("{NAME}"'):
+        fail(f"the {NAME} arm is not one trace_kernel call: {call}")
+    traced = call.replace("trace_kernel(", "trace_calls(")
+    return src + MAIN.replace("%TRACE%", traced).replace("%NAME%", NAME)
 
 
-def trace() -> str:
-    src, names = harness_source()
+def run_harness(src: str) -> str:
     with tempfile.TemporaryDirectory(prefix="gpu-map.") as work:
         proj = Path(work)
         (proj / "src").mkdir()
-        (proj / "src" / "main.dawn").write_text(src, encoding="utf-8")
+        (proj / "src" / "main.dawn").write_text(harness_source(src), encoding="utf-8")
         (proj / "dawn.toml").write_text(
             "schema = 1\nname = \"gpu_map\"\n\n[deps]\n"
             f"tileir = \"{ROOT / 'packages' / 'tileir'}\"\n"
@@ -144,35 +142,194 @@ def trace() -> str:
                            capture_output=True, text=True, cwd=ROOT)
     if r.returncode != 0:
         fail("the harness did not run:\n" + (r.stderr or r.stdout)[-2000:])
-    out = r.stdout
-    seen = re.findall(r"^kernel (\S+)$", out, re.M)
-    if seen != names:
-        fail(f"the harness printed {len(seen)} kernels, the dispatch names {len(names)}")
-    # Every mapped kernel's ranges must end where its golden ends.
-    for block in out.split("kernel ")[1:]:
-        name, _, rest = block.partition("\n")
-        tail = re.search(r"^tail \d+-(\d+)$", rest, re.M)
-        if tail:
-            golden = (GOLDEN / f"{name}.mlir").read_text(encoding="utf-8")
-            if int(tail.group(1)) - 1 != golden.count("\n"):
-                fail(f"{name}: the map ends at line {int(tail.group(1)) - 1}, "
-                     f"{name}.mlir has {golden.count(chr(10))} lines")
+    return r.stdout
+
+
+# ---- the parse: where each call is ----
+
+class Node:
+    def __init__(self, depth, text, lo, hi):
+        self.depth, self.text, self.lo, self.hi = depth, text, lo, hi
+        self.kids = []
+
+    @property
+    def kind(self):
+        return self.text.split(" ", 1)[0]
+
+
+def parse_tree(dump: str, name: str) -> Node:
+    """The `Fn <name>` subtree of a `dawn parse` dump."""
+    root, stack, inside = None, [], False
+    for raw in dump.splitlines():
+        body = raw.lstrip(" ")
+        depth = (len(raw) - len(body)) // 2
+        if depth == 1:
+            inside = body.startswith(f"Fn {name} ")
+        if not inside:
+            continue
+        m = re.search(r" @(\d+)\.\.(\d+)$", body)
+        node = Node(depth, body, int(m.group(1)) if m else None, int(m.group(2)) if m else None)
+        while stack and stack[-1].depth >= depth:
+            stack.pop()
+        if stack:
+            stack[-1].kids.append(node)
+        else:
+            root = node
+        stack.append(node)
+    if root is None:
+        fail(f"`dawn parse` has no `Fn {name}` in kernels.dawn")
+    return root
+
+
+def static_calls(n: Node, dev: set) -> list:
+    """The calls of `dev` under `n` in evaluation order, each a dict with its
+    span, its name's span and its children (the calls in a closure it takes)."""
+    kind = n.kind
+    if kind == "Lambda":
+        fail(f"a closure at {n.lo}..{n.hi} is not an argument of a call that runs it")
+    if kind in ("If", "Match", "For", "While") and any_call(n, dev):
+        fail(f"a call under host control flow at {n.lo}..{n.hi}")
+    if kind in ("Apply", "MethodCall"):
+        if kind == "Apply":
+            head, args = n.kids[0], n.kids[1:]
+            callee = head.text.split(" ")[1] if head.kind == "Var" else None
+            name_span = (head.lo, head.hi)
+        else:
+            head, args = None, n.kids
+            callee = n.text.split(" ")[1]
+            m = re.search(r"name@(\d+)\.\.(\d+)", n.text)
+            name_span = (int(m.group(1)), int(m.group(2)))
+        before, closures = [], []
+        for a in args:
+            inner = a.kids[0] if a.kind == "Arg" and a.kids else a
+            if inner.kind == "Lambda":
+                if callee not in dev:
+                    fail(f"a closure at {inner.lo}..{inner.hi} is handed to `{callee}`, which is not a call the recording sees")
+                for k in inner.kids:
+                    if k.kind != "LParam":
+                        closures += static_calls(k, dev)
+            else:
+                before += static_calls(a, dev)
+        if head is not None and head.kind != "Var":
+            before = static_calls(head, dev) + before
+        if callee in dev:
+            return before + [{"name": callee, "span": (n.lo, n.hi), "name_span": name_span, "kids": closures}]
+        if closures:
+            fail(f"`{callee}` takes a closure the recording does not see into")
+        return before
+    out = []
+    for k in n.kids:
+        out += static_calls(k, dev)
     return out
 
 
+def any_call(n: Node, dev: set) -> bool:
+    if n.kind == "Apply" and n.kids and n.kids[0].kind == "Var" and n.kids[0].text.split(" ")[1] in dev:
+        return True
+    if n.kind == "MethodCall" and n.text.split(" ")[1] in dev:
+        return True
+    return any(any_call(k, dev) for k in n.kids)
+
+
+# ---- the pairing ----
+
+def pair(static: list, rows: list) -> list:
+    """Each row of the run with the static call it is, level by level."""
+    kids = {}
+    for r in rows:
+        kids.setdefault(r["parent"], []).append(r)
+    paired = {}
+
+    def walk(sl, parent):
+        ran = kids.get(parent, [])
+        if [s["name"] for s in sl] != [r["name"] for r in ran]:
+            under = "the top of the body" if parent < 0 else f"row {parent} (`{rows[parent]['name']}`)"
+            fail(f"under {under} the source calls {[s['name'] for s in sl]} "
+                 f"and the recording ran {[r['name'] for r in ran]}")
+        for s, r in zip(sl, ran):
+            paired[r["id"]] = s
+            walk(s["kids"], r["id"])
+
+    walk(static, -1)
+    if len(paired) != len(rows):
+        fail(f"{len(rows) - len(paired)} recorded call(s) sit under no call of the source")
+    return [paired[r["id"]] for r in rows]
+
+
+def place(src: str):
+    starts = [0] + [m.end() for m in re.finditer("\n", src)]
+
+    def at(off):
+        lo, hi = 0, len(starts) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if starts[mid] <= off:
+                lo = mid
+            else:
+                hi = mid - 1
+        return f"{lo + 1}:{off - starts[lo] + 1}"
+    return at
+
+
+def record() -> str:
+    src = KERNELS.read_text(encoding="utf-8")
+    dev = set(re.findall(r'called\("([a-z_0-9]+)"', DEV.read_text(encoding="utf-8")))
+    ran = run_harness(src)
+    p = subprocess.run([str(ROOT / "bin" / "dawn"), "parse", str(KERNELS)],
+                       capture_output=True, text=True, cwd=ROOT)
+    if p.returncode != 0:
+        fail("`dawn parse` failed:\n" + (p.stderr or p.stdout)[-2000:])
+    fn = parse_tree(p.stdout, NAME)
+    body = [k for k in fn.kids if k.kind == "Block"]
+    if len(body) != 1:
+        fail(f"{NAME} is not a function with a block body")
+    static = static_calls(body[0], dev)
+    rows, head, tail, ops = [], None, None, None
+    for line in ran.splitlines():
+        w = line.split(" ")
+        if w[0] == "call":
+            rows.append({"id": int(w[1]), "parent": int(w[2]), "name": w[3], "lines": w[4:]})
+        elif w[0] == "head":
+            head = " ".join(w[1:])
+        elif w[0] == "tail":
+            tail = w[1]
+        elif w[0] == "ops":
+            ops = w[1]
+    if head is None or tail is None or ops is None:
+        fail("the harness printed no head, tail or ops line:\n" + ran[-1000:])
+    paired = pair(static, rows)
+    at = place(src)
+    for s in paired:
+        if src[s["name_span"][0]:s["name_span"][1]] != s["name"]:
+            fail(f"the parser's name span for `{s['name']}` holds {src[s['name_span'][0]:s['name_span'][1]]!r}")
+    golden = (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8")
+    if int(tail.split("-")[1]) - 1 != golden.count("\n"):
+        fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")
+    first = src[:fn.lo].count("\n") + 1
+    last = src[:fn.hi].count("\n") + 1
+    out = [f"kernel {NAME}", f"fn {first}-{last}", f"ops {ops}", f"head {head}"]
+    for r, s in zip(rows, paired):
+        (a, b), (na, nb) = s["span"], s["name_span"]
+        out.append(" ".join(["call", str(r["id"]), str(r["parent"]), r["name"],
+                             f"{at(a)}-{at(b)}", f"{at(na)}-{at(nb)}"] + r["lines"]))
+    out.append(f"tail {tail}")
+    return "\n".join(out) + "\n"
+
+
 def main() -> None:
-    record = sys.argv[1:] == ["--record"]
+    write = sys.argv[1:] == ["--record"]
     if sys.argv[1:] not in ([], ["--record"]):
         fail("usage: record.py [--record]")
-    fresh = trace()
-    if record:
+    fresh = record()
+    calls = fresh.count("\ncall ")
+    if write:
         OUT.write_text(fresh, encoding="utf-8")
-        print(f"recorded {fresh.count('kernel ')} kernels into {OUT.relative_to(ROOT)}")
+        print(f"recorded {calls} calls of {NAME} into {OUT.relative_to(ROOT)}")
         return
     if not OUT.exists() or OUT.read_text(encoding="utf-8") != fresh:
-        fail(f"{OUT.relative_to(ROOT)} is not what packages/tileir traces today; "
+        fail(f"{OUT.relative_to(ROOT)} is not what packages/tileir and the parser say today; "
              "run `python3 site/gpu-map/record.py --record` and commit the result")
-    print(f"OK: {OUT.relative_to(ROOT)} matches a fresh trace of {fresh.count('kernel ')} kernels")
+    print(f"OK: {OUT.relative_to(ROOT)} matches a fresh recording of {calls} calls")
 
 
 if __name__ == "__main__":

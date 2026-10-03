@@ -6,7 +6,7 @@ page reads `home.md`, so a section that is missing or renamed fails the build
 instead of rendering an empty page. The Chinese translation is `gpu.zh.md`,
 with the same keys and a digest of this file.
 
-Every section says one or two sentences; the figures, the line map and the
+Every section says one or two sentences; the figures, the call map and the
 ledgers say the rest. What is not here, on purpose: every number. The
 coverage counts, the golden kernel count and the device ledgers are read from
 `scripts/tileir-features/`, `scripts/tile-golden/` and
@@ -53,39 +53,35 @@ One kernel, line by line
 
 ## kernel-body
 
-Each Dawn line sits beside the Tile IR it recorded, paired call by call by the recording itself. Point at a line to light up its share, or replay the recording.
+Every line of one kernel, a fused attention, sits beside the Tile IR its calls wrote, each run under the call that wrote it. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table. In each run the bold line is the operation the call is for; the lines above it are addressing the lowering added.
+
+## kernel-kind
+
+one loop, two scans inside it
 
 ## kernel-left
 
 Dawn source
 
+## kernel-call
+
+call
+
 ## kernel-right
 
 the Tile IR it recorded
 
-## kernel-pick
+## kernel-note
 
-Kernel
-
-## kernel-mapped
-
-{n} of {total} golden kernels map line by line
-
-## kernel-replay
-
-Replay the recording
-
-## kernel-ops
-
-ops recorded
+Click a call's name to mark its whole span and the Tile IR it wrote. A loop or a scan marks its own header, terminator and brace, and more faintly the lines its body's calls wrote. Click a line of Tile IR to find its call.
 
 ## fact-calls
 
-Dawn calls
+calls
 
 ## fact-ops
 
-operations recorded
+operations
 
 ## fact-lines
 
@@ -93,15 +89,15 @@ lines of Tile IR
 
 ## fact-bytes
 
-bytes of bytecode
+bytes
 
 ## fact-rows
 
-rows of the coverage tables cite it
+cited by {n} coverage rows
 
 ## fact-mutants
 
-mutants are run against it
+{n} mutants
 
 ## coverage-title
 
@@ -133,7 +129,7 @@ Three gates
 
 ## gates-body
 
-Each layer catches what the one before it cannot, and each has to turn its own mutants red. Every dot below is one of them, at the layer it was written against.
+Each layer catches what the one before it cannot, and each has to turn its own mutants red. Each dot is one of them, at the gate it was written against.
 
 ## gates-caught
 
