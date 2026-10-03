@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 98dc857ef1ea8dcf -->
+<!-- doc-check: translation-of docs/spec.md @ b768612f8f234fd8 -->
 
 # Dawn Language Specification
 
@@ -3282,7 +3282,7 @@ functions (§11, the "bytes" group): `utf8(s) -> Bytes` (the UTF-8 bytes of a st
 `decode_utf8_checked(b) -> Result[String, Utf8Error]` (strict decoding, see §11),
 `bytes.len`, `bytes.at(b, i) -> Int` (0..255, out of range panics),
 `bytes.slice(b, start, end)` (`[start,end)`, subscripts clamped into range),
-`bytes.index_of(b, needle, from) -> Option[Int]`. `index_of` clamps a negative `from`
+`bytes.index_of(b, needle, from = 0) -> Option[Int]`. `index_of` clamps a negative `from`
 to zero; a non-empty `needle` is searched from that byte offset for its first complete
 match. An empty `needle` matches at every valid position in `[0, len(b)]` (so
 `from == len(b)` returns `Some(len(b))`), but `from > len(b)` returns `None` even for an
@@ -3994,11 +3994,15 @@ one-generation forwarder discipline of CONTRIBUTING §7 and removed in the next 
 hex and base64 are pure Dawn byte arithmetic (no `use java`, so both backends share one
 definition), and the rules are normative: `to_hex` writes two digits per byte and **lower
 case** is the canonical spelling, `from_hex` accepts either case and nothing else;
-`to_base64` uses the standard alphabet of RFC 4648 section 4 and pads with `=`, `to_base64_url`
-uses the url/filename-safe alphabet of section 5 and **does not pad with `=`**; the two decoders
-each recognise only their own alphabet (guessing the alphabet would turn misspelled input
-into wrong bytes), padding is optional, but the spare low bits of the final group must be
-zero — otherwise one byte string would have several spellings. The decoders in this family
+the encoding of `to_base64(b, enc: Base64 = Standard)` and `from_base64(s, enc: Base64 = Standard)`
+is a value, `Standard | StandardRaw | Url | UrlRaw` (Go's four `encoding/base64` values of the
+same names): `Standard*` uses the standard alphabet of RFC 4648 section 4, `Url*` the
+url/filename-safe alphabet of section 5, `*Raw` **does not pad with `=`** and the other two pad
+to a multiple of four. The decoder accepts only the spellings `to_base64(_, enc)` can write: a
+padded encoding **requires** its padding, a `*Raw` one **refuses** `=`, and each recognises only
+its own alphabet (guessing the encoding would turn misspelled input into wrong bytes); the
+spare low bits of the final group must be zero — otherwise one byte string would have
+several spellings. The decoders in this family
 all fall under criterion 2: text from outside is to be validated, not asserted.
 
 `Bytes` and `Buf` are in §9.5.1; there are also the operator `Bytes ++ Bytes` and
@@ -4478,7 +4482,7 @@ The reasons, the roadmap and the measurements are in
 **The `Gpu` effect** has seven operations (`gpu_alloc`, `gpu_upload`, `gpu_download`,
 `gpu_launch`, `gpu_module_global`, `gpu_free`, `gpu_sync`), monomorphic and handle-level; a
 program uses the typed functions over them: `alloc`, `upload`, `download`, `free`, `launch`,
-`launch3`, `module_global` and `sync`.
+`module_global` and `sync`.
 
 - Every operation answers `Result[_, ForeignError]`. Above the operations std mints three
   refusals of its own, byte-identical under every handler: `gpu.bad_length` (`alloc`'s length
@@ -4486,8 +4490,8 @@ program uses the typed functions over them: `alloc`, `upload`, `download`, `free
   `gpu.bad_grid` (an axis of the grid below 1). All three are minted before any handler is
   asked. Every other answer is the raw outcome of the device the handler stands for: the
   seam sits below the error surface.
-- **`launch` names a kernel by a string**: `launch(kernel, grid, args)` is
-  `launch3(kernel, grid, 1, 1, args)`; the grid counts tile blocks; `args` are buffer handles
+- **`launch` names a kernel by a string**: `launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`;
+  `grid`, `gy` and `gz` are the three axes of the grid, counting tile blocks; `args` are buffer handles
   (`handle_of(t)`), in the order of the entry parameters. The binding from names to kernels
   is the table the handler is installed with, and a name not in it answers `gpu.no_kernel`
   under both handlers. The language checks neither that this name is the one `trace_kernel`
@@ -4502,7 +4506,8 @@ program uses the typed functions over them: `alloc`, `upload`, `download`, `free
 **The two handlers**:
 
 ```dawn
-pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu,
+  globals: Map[String, List[(String, String, List[Float])]] = map.empty()) -> T
 pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e) -> T !io
 ```
 
@@ -4520,6 +4525,11 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   writes nothing. Every input is read before any write-back. The grid is not read.
 - A buffer holds what memory of its format would hold: `upload` and write-back both round to
   the buffer's format, and `download` answers what is held unchanged.
+- `globals` maps a kernel name to the globals its module exports (symbol name, format, the
+  contents the declaration gives them); `module_global` answers from it, and a name not in it
+  answers `gpu.no_module_symbol`. Left out, no module exports a global. It comes after `body`
+  (a defaulted parameter comes after the ones without a default), so a trailing block lands on
+  `globals` and `body` is written in the parentheses.
 - **The real device `with_gpu_real` is implemented on the native target only**. The runtime
   `dlopen`s `libcuda.so.1` at the first operation that needs the device and opens one context
   on device 0; when `body` returns it releases the context and the library, and with them

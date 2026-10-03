@@ -63,17 +63,19 @@ pub fn main() -> Unit !io = {
   io.println("foobar       = " ++ bytes.to_base64(utf8("foobar")))
 
   io.println("-- base64 url-safe, unpadded --")
-  io.println("f            = " ++ bytes.to_base64_url(utf8("f")))
-  io.println("fo           = " ++ bytes.to_base64_url(utf8("fo")))
-  io.println("foo          = " ++ bytes.to_base64_url(utf8("foo")))
+  io.println("f            = " ++ bytes.to_base64(utf8("f"), enc: bytes.UrlRaw))
+  io.println("fo           = " ++ bytes.to_base64(utf8("fo"), enc: bytes.UrlRaw))
+  io.println("foo          = " ++ bytes.to_base64(utf8("foo"), enc: bytes.UrlRaw))
   # 0xFB 0xFF is 62 and 63 in the last two positions: the two symbols the two
   # alphabets disagree about, and the whole reason there are two.
   io.println("62 and 63    = " ++ bytes.to_base64(bytes.slice(all_bytes(), 251, 253)))
-  io.println("62 and 63 url= " ++ bytes.to_base64_url(bytes.slice(all_bytes(), 251, 253)))
+  io.println("62 and 63 url= " ++ bytes.to_base64(bytes.slice(all_bytes(), 251, 253), enc: bytes.UrlRaw))
 
   io.println("-- from_base64 (spec 4.8, criterion 2) --")
   io.println("padded       = " ++ dec(bytes.from_base64("Zg==")))
   io.println("unpadded     = " ++ dec(bytes.from_base64("Zg")))
+  io.println("raw          = " ++ dec(bytes.from_base64("Zg", enc: bytes.StandardRaw)))
+  io.println("raw, padded  = " ++ dec(bytes.from_base64("Zg==", enc: bytes.StandardRaw)))
   io.println("one pad      = " ++ dec(bytes.from_base64("Zm8=")))
   io.println("no pad       = " ++ dec(bytes.from_base64("Zm9v")))
   io.println("empty        = " ++ dec(bytes.from_base64("")))
@@ -85,12 +87,15 @@ pub fn main() -> Unit !io = {
   io.println("other set    = " ++ dec(bytes.from_base64("-_==")))
   io.println("space        = " ++ dec(bytes.from_base64("Zm 9v")))
 
-  io.println("-- from_base64_url --")
-  io.println("unpadded     = " ++ dec(bytes.from_base64_url("_w")))
-  io.println("padded too   = " ++ dec(bytes.from_base64_url("_w==")))
-  io.println("other set    = " ++ dec(bytes.from_base64_url("/w==")))
+  io.println("-- from_base64, url-safe --")
+  io.println("raw          = " ++ dec(bytes.from_base64("_w", enc: bytes.UrlRaw)))
+  io.println("raw, padded  = " ++ dec(bytes.from_base64("_w==", enc: bytes.UrlRaw)))
+  io.println("padded       = " ++ dec(bytes.from_base64("_w==", enc: bytes.Url)))
+  io.println("unpadded     = " ++ dec(bytes.from_base64("_w", enc: bytes.Url)))
+  io.println("other set    = " ++ dec(bytes.from_base64("/w==", enc: bytes.Url)))
   io.println("round trip   = " ++
       to_string(bytes.from_base64(bytes.to_base64(all_bytes())) == Some(all_bytes())))
   io.println("round trip u = " ++
-      to_string(bytes.from_base64_url(bytes.to_base64_url(all_bytes())) == Some(all_bytes())))
+      to_string(bytes.from_base64(bytes.to_base64(all_bytes(), enc: bytes.UrlRaw), enc: bytes.UrlRaw)
+          == Some(all_bytes())))
 }
