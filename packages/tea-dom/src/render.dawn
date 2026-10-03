@@ -307,7 +307,9 @@ test "script and style hold raw text, and refuse their own end tag" {
   match catch_panic(() => to_html(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> {
-      assert e.message == "tea_dom/render: a <script> holds text containing its own end tag"
+      # the message ends with where the panic is written (spec 8.2)
+      assert str.starts_with(e.message,
+        "tea_dom/render: a <script> holds text containing its own end tag at ")
     }
   }
   let bad_css: Node[ProbeMsg] = el("style", kids: [text("</style")])
@@ -321,12 +323,12 @@ test "a name that would break the markup is refused" {
   let spaced: Node[ProbeMsg] = el("p", [("on click", "x")])
   match catch_panic(() => to_html(spaced)) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert e.message == "tea_dom/render: not a valid prop name: \"on click\"" }
+    Err(e) -> { assert str.starts_with(e.message, "tea_dom/render: not a valid prop name: \"on click\" at ") }
   }
   let tagged: Node[ProbeMsg] = el("p><script")
   match catch_panic(() => to_html(tagged)) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert e.message == "tea_dom/render: not a valid tag name: \"p><script\"" }
+    Err(e) -> { assert str.starts_with(e.message, "tea_dom/render: not a valid tag name: \"p><script\" at ") }
   }
   let empty: Node[ProbeMsg] = el("p", [("", "x")])
   match catch_panic(() => to_html(empty)) {

@@ -117,9 +117,11 @@ check "compile error, path sanitized" \
   '{"code":"pub fn main() -> Unit !io = println(nope)"}' \
   'not d["ok"] and d["phase"]=="compile" and "prog.dawn" in d["output"] and "/var/" not in d["output"] and "T/dawn-play" not in d["output"]'
 
-check "runtime panic, exit 1" \
+# The panic names where it was called (spec 8.2), from the tree's own path,
+# so the user sees the line and column of the program they typed.
+check "runtime panic names its call site, exit 1" \
   '{"code":"pub fn main() -> Unit !io = panic(\"boom\")"}' \
-  'd["phase"]=="run" and d["exit"]==1 and "panic: boom" in d["output"]'
+  'd["phase"]=="run" and d["exit"]==1 and "panic: boom at prog.dawn:1:29\n" in d["output"]'
 
 # A failing `x!` prints the position the compiler baked into the program.
 # That used to be the path the runner handed `dawn build`, which is under the

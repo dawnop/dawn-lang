@@ -1,0 +1,49 @@
+# Every failure that is written at a call says where (#396).
+#
+# `panic`, `todo`, `expect`, `e!` and `assert` carry ` at <path>:<line>:<col>`,
+# filled in by the checker from the call's own position and folded into the
+# message before lowering (docs/source-location-design.md section 5). Neither
+# backend knows what a position is; this file is where both are held to the
+# same words. The messages come back as values, so `.expect` pins them --
+# the only check here not derived from a backend -- and the last one is left
+# uncaught, so `stderr` and `exit` hold the uncaught form equal between them.
+#
+# The path is the entry file's name, not the path this harness ran it by: a
+# single file is named from its own directory (L1, #401). A column counts code
+# points, so the line with a multi-byte character before the call is where a
+# backend counting bytes or UTF-16 units would come out different.
+
+fn none() -> Option[Int] !io = None
+
+fn said(f: fn() -> Int !io) -> String !io =
+  match catch_panic(f) {
+    Ok(v) -> "no panic: " ++ to_string(v)
+    Err(e) -> e.message
+  }
+
+fn literal() -> Int !io = panic("boom")
+
+fn built(n: Int) -> Int !io = panic("bad n: ${to_string(n)}")
+
+fn passed(msg: String) -> Int !io = panic(msg)
+
+fn pending() -> Int !io = todo()
+
+fn expected() -> Int !io = none().expect("wanted a value")
+
+fn unwrapped() -> Int !io = none()!
+
+fn wide() -> Int !io = if "ä🎈" == "" { 0 } else { panic("wide") }
+
+pub fn main() -> Unit !io = {
+  println(said(() => literal()))
+  println(said(() => built(3)))
+  println(said(() => passed("handed in")))
+  println(said(() => pending()))
+  println(said(() => expected()))
+  println(said(() => unwrapped()))
+  println(said(() => wide()))
+  println("-- and a success passes through --")
+  println(said(() => 7))
+  let _ = literal()
+}

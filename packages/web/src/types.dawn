@@ -1059,7 +1059,7 @@ test "a refused header names what it refused without repeating it verbatim" {
   # with_header words the refusal the same way; only the delivery differs
   match catch_panic(() => with_header(raw(200, "text/plain", ""), "Location", "/a\r\nb")) {
     Ok(_) -> { assert false }
-    Err(m) -> { assert m.message == "illegal value for header Location: /a\\r\\nb" }
+    Err(m) -> { assert str.starts_with(m.message, "illegal value for header Location: /a\\r\\nb at ") }
   }
 }
 
@@ -1183,7 +1183,9 @@ test "the 422 wording separates name from complaint, by configuration" {
 }
 
 # Whether building the response panicked, and with what. Every constructor
-# refusal is a panic, so this is the one question the tests below ask.
+# refusal is a panic, so this is the one question the tests below ask. The
+# message ends with where the panic is written (spec 8.2), which the tests
+# below leave out of what they compare.
 fn refusal(build: fn() -> Response) -> Option[String] =
   match catch_panic(build) {
     Ok(_) -> None
@@ -1201,7 +1203,7 @@ test "every constructor refuses a status outside 200..599" {
   assert refusal(() => binary(1000, "application/octet-stream", bytes.utf8("x"))) != None
   assert refusal(() => redirect(42, "/x")) != None
   match refusal(() => text(101, "x")) {
-    Some(m) -> { assert m == "illegal response status 101: a final response is 200..599" }
+    Some(m) -> { assert str.starts_with(m, "illegal response status 101: a final response is 200..599 at ") }
     None -> { assert false }
   }
   # the edges are in, and so is every status the framework itself renders
@@ -1216,7 +1218,7 @@ test "a content type that cannot travel is refused where it is passed in" {
   # Content-Type verbatim; this was the one unchecked path in 3.1.0, caught
   # only at the write boundary
   match refusal(() => raw(200, "text/plain\r\nX-Evil: 1", "")) {
-    Some(m) -> { assert m == "illegal Content-Type: text/plain\\r\\nX-Evil: 1" }
+    Some(m) -> { assert str.starts_with(m, "illegal Content-Type: text/plain\\r\\nX-Evil: 1 at ") }
     None -> { assert false }
   }
   # an obs-fold passes the JDK's own checkValue and not valid_header_value
@@ -1247,7 +1249,7 @@ test "a Content-Length must be the body's length, where the body has one" {
     "content-length", "4")) == None
   # a disagreement used to be rewritten by the JDK on GET and sent as-is on HEAD
   match refusal(() => with_header(text(200, "hello"), "Content-Length", "11")) {
-    Some(m) -> { assert m == "header Content-Length says 11 but the body is 5 bytes" }
+    Some(m) -> { assert str.starts_with(m, "header Content-Length says 11 but the body is 5 bytes at ") }
     None -> { assert false }
   }
   # a byte count is 1*DIGIT: no sign, no space, not empty

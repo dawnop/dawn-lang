@@ -49,6 +49,7 @@ use check/types.{
 }
 use check/cx.{ModExports, Cx}
 use check/identity
+use check/tast_positions
 use driver/analyze.{Program, CheckedMod}
 use driver/stdlib.{StdCtx, std_file_of}
 use ir/interp.{CtOut}
@@ -1787,7 +1788,9 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
               None -> ()
             }
           }
-          q = walk_method_children(qc, q, target, args, targs)
+          # a sited failure's trailing site is not something the author wrote
+          let (written, _) = tast_positions.split_site(bname, targs)
+          q = walk_method_children(qc, q, target, args, written)
         }
         Some(XJava(call, _, _, _)) -> {
           match sig_of(qc, name) {
@@ -2084,7 +2087,8 @@ fn walk_named_call(
         Some(s) -> { q = offer_sig(qc, q, clo, chi, s, None, None) }
         None -> ()
       }
-      q = walk_call_args(qc, q, args, targs)
+      let (written, _) = tast_positions.split_site(bname, targs)
+      q = walk_call_args(qc, q, args, written)
     }
     Some(XCallDyn(_, _, targs, _, _, _, _)) -> {
       match sig_of(qc, callee) {

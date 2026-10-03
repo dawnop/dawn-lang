@@ -1,6 +1,7 @@
 # 源码位置：路径规范、panic 位置与 `dbg`
 
-> 状态：**current**（L1 已落地，L2 至 L4 为已裁决、未实现的刀序）。2026-10-03，分支 `fix/source-position-paths`，关 #401。
+> 状态：**current**（L1、L2 已落地，L3、L4 为已裁决、未实现的刀序）。2026-10-03：L1 分支 `fix/source-position-paths`，关 #401；
+> L2 分支 `feat/panic-call-site`，关 #396（第五节）。
 > 依据：裁决 `agent-handoff/ruling-source-location-20261003.md`，调研 `agent-handoff/research-debug-print-report-20261003.md`
 > （仓库行号指 `9fb834d0`，外部出处抓取于 2026-10-03）。本文是那份调研 §一至§三的压缩，加上 L1 的落地说明。
 
@@ -17,7 +18,7 @@ lower、两个后端、comptime 解释器都只把这条消息当普通字符串
 后端看不到「位置」这个概念。Core 本身没有 span，这是既有裁决（`docs/native-backend-plan.md`
 「保持 Core 无 span 是有意的」；审计文 03 的 Core golden 判据）。
 
-`panic`、`todo`、`assert` 今天都**不带位置**；std 的 `Cx` 没有 `src_path`，std 里的 `!` 也不带位置。
+`panic`、`todo`、`assert` 在 L2 之前都**不带位置**（L2 之后见第五节）；std 的 `Cx` 没有 `src_path`，std 里的 `!` 也不带位置。
 
 ### 1.2 缺陷：烘进产物的是命令行上的原样路径（#401）
 
@@ -79,8 +80,8 @@ comptime 中恒等、不打印。`[deps]` 加载的模块与 std 里出现 `dbg`
 
 | 刀 | 内容 | spec | 关联 |
 |---|---|---|---|
-| **L1**（本刀） | 位置路径规范；Playground 运行输出 `strip_dir`；两个 cwd 构建字节相同的负控 | 否 | 关 #401 |
-| L2 | `panic`/`todo`/`assert` 带调用点位置（`site` 加列）；Core golden 对位置后缀归一；两后端各一测 | §8.2 删「Dawn 层栈迹」，改为 `panic: <msg> at <path>:<line>:<col>` | 关 #396 |
+| **L1**（已落地） | 位置路径规范；Playground 运行输出 `strip_dir`；两个 cwd 构建字节相同的负控 | 否 | 关 #401 |
+| **L2**（已落地，第五节） | `panic`/`todo`/`assert` 带调用点位置（`site` 加列）；Core golden 对位置后缀归一；两后端各一测 | §8.2 删「Dawn 层栈迹」，改为 `panic: <msg> at <path>:<line>:<col>` | 关 #396 |
 | L3 | `dbg` 内建 + `dbg_line` intrinsic；`[deps]`/std 拒绝；仓内门禁；comptime 恒等 | 新增小节 | |
 | L4 | `caller()` 默认参数 + std `Loc`；`panic`/`todo` 签名加 `at` | 独立设计文档 | |
 
@@ -142,7 +143,79 @@ comptime 中恒等、不打印。`[deps]` 加载的模块与 std 里出现 `dbg`
 位置串变了的只有含 `e!` 的非 std 模块。对真父提交的编译器实测：`emit selfhost`（Core 里 4 处字面量）、`emit playground`（它的 `web` 依赖，修前是绝对路径）、
 `emit packages/web`、`emit examples/interop/interop.dawn` 变，其余 emit 语料、run-diff 转写与 LSP 会话不变。每个动了的 label 一行 `Emit-Change`。
 
-## 五、不做的（理由）
+## 五、L2：失败带调用点位置
+
+### 5.1 规则
+
+| 失败 | 消息 | 位置指向 |
+|---|---|---|
+| `panic(m)` | `<m> at <path>:<line>:<col>` | `panic` 这个名字 |
+| `todo()` | `not yet implemented at <path>:<line>:<col>` | `todo` |
+| `expect(o, m)` / `o.expect(m)` | `<m> at …` | 调用表达式的起点：函数式是 `expect`，方法式是 `o` |
+| `o!` | `unwrapped None from f() at …`（L1 起已有位置，本刀加列） | `o` 的起点 |
+| `assert e`（只在 test 块） | `assertion failed: <e 的源文本> at …` | `assert` 关键字 |
+
+- 未捕获时两后端都打印 `panic: <消息>`，所以是 `panic: boom at src/main.dawn:4:3`。
+- 行、列从 1 起，列按**码点**计，与诊断箭头 `--> path:line:col` 是同一把尺子（`front/diag.dawn` 的 `snippet`）。
+  实现上与 `line_at` 共用行表：`tast_positions.line_col`。
+- 位置是消息的一部分：`catch_panic` 得到的 `ForeignError.message` 带它（调研 §3.5 已裁「拼进消息，不做独立字段」）。
+- **std 里的失败不带位置**（std 的 `site_path` 是 None，与 L1 同一条规则），形状与修前逐字节相同：`todo` 仍是 `todo` intrinsic，
+  后端给它的固定文案不变。L4 之后 std 的失败报调用者的行。
+- 把 `panic`/`todo`/`expect` 当函数值用（`let f = panic`）时，经值调用**不带位置**：位置属于调用点，函数值没有调用点。
+  这与「函数当值用丢默认值」是同一个丢失规则，L4 的 `caller()` 也会这样丢。
+- 编译器自己（selfhost 是普通项目）的 panic 从此也带 `src/<模块>.dawn:L:C`，内部错误报告因此能直接定位。
+
+**`x!` 同刀加列**：一致性是唯一理由，也足够。spec §8.2 给出一个格式 `at <path>:<line>:<col>`，若 `!` 独留
+`at path:line`，读者就得记住「哪种失败有列」，而 grep 位置、编辑器点击跳转的工具也得认两种形状。
+列的代价为零（同一个行表、同一个 resolver），而 `!` 恰恰是一行里最常连写的（`a()!.b()!`），一行多个调用点时只有列能分清是哪一个。
+
+### 5.2 落点
+
+- `check/tast_positions.dawn`：`site` 加列（`line_col`）；`XCallBuiltin` 臂对 `panic`/`todo`/`expect` 在**作者写的实参之后**
+  追加一个 `XStr(site)`（`sited_call`），`TSAssert` 臂把 site 接在断言源文本后面。`split_site` 是把它取下的唯一入口。
+  按实参个数判别（`panic` 1、`todo` 0、`expect` 2，多一个才是带位置的），所以同一棵树解析两遍也不会带两次位置。
+- `ir/lower.dawn`：`XCallBuiltin` 臂最先调 `unsite`，把位置并进消息后按普通调用降低：字面量消息并成**一个** `CStr`
+  （Core 里仍是一个常量，热路径上的 `expect("…")` 不多一次拼接），非字面量消息是 `msg ++ " at …"`；带位置的 `todo()`
+  降成 `panic("not yet implemented at …")`。
+- `lsp/lspq.dawn`：两处把作者实参与类型化实参配对的地方先 `split_site`，悬停、签名帮助看到的仍是作者写的形状。
+- **零改动**：Core 结构、两个后端（`jvm/emit.dawn`、`c/emitc.dawn`）、解释器（`ir/interp.dawn`）、运行时。
+
+为什么是「多一个实参」而不是在 `tast_positions` 里直接把消息改写成 `msg ++ site`：类型化树也是 LSP 遍历的对象，它按位置把
+AST 实参与 TAST 实参配对（`walk_call_args` 要求个数相等）。消息节点一旦变形，悬停在 `panic("bad ${x}")` 的 `x` 上就拿不到类型。
+多一个尾随实参让作者写的每个节点保持原样，只需在两个配对点剥掉。为什么不让后端去拼：违背「语言只说 primitive，后端只管映射」，
+而且要在三个地方（两个后端加解释器）各实现一遍。
+
+### 5.3 comptime
+
+位置在降低之前就进了消息，解释器跑的是降低后的 Core，所以 comptime 的失败与运行期逐字相同：
+`comptime: panicked: too big at src/m.dawn:1:34`。在源码顺序上**晚于**引用它的常量声明的函数也一样（它的声明出口在被解释之前已经过了）。
+钉在 `ir/interp_test.dawn` 的「a comptime failure names its call site」。
+
+### 5.4 Core golden 归一
+
+裁决：「纯移动不应动 golden」。L2 之后，selfhost 每个 panic 调用点的消息都是带行列的 Core 字符串常量，
+不归一的话，在一个模块顶上加一行注释就会让该模块的 Core dump 变。`scripts/selfhost-core-diff.sh` 在比较前把两侧 dump 里的
+` at <file>.dawn:<n>:<n>` 换成 ` at <file>.dawn:<line>:<col>`（无列的旧形状换成 `:<line>`，以便基线是 L2 之前的版本时也能比）。
+**路径保留**：模块换了文件是新闻。`--raw` 关掉归一，`--out` 永远保存原样 dump。负控与实测见 L2 报告。
+
+### 5.5 测试与负控
+
+- 两后端：`scripts/spike-native/panic_site.dawn`（`panic` 字面量 / 插值 / 传入的消息、`todo`、`expect`、`!`、码点列，
+  最后一个不捕获）。`.expect` 手写、两后端都对它比；`stderr` 与 `exit` 两后端互比。
+- 单元：`tast_positions` 的行列、尾随实参、二次解析不重复、std 不带、`assert` 文本；`interp_test` 的 comptime 文案。
+- 负控：`panic_site.expect` 里一个列号加一，两后端的 `jvm`、`native` 检查都红；`sited_arity` 去掉 `todo`，
+  `panic_site` 两后端都红（`not yet implemented` 没了位置），`dawn test selfhost` 818 条里红 2 条（尾随实参与 comptime 文案两测）。
+- 现有断言消息全文的测试改为断言「消息 + ` at `」前缀（`web`、`tea-core`、`tea-dom`、编译器自己的三处）或写出完整位置
+  （单文件的示例与契约探针，位置是固定的）。
+
+### 5.6 差分
+
+消息里多了位置，凡是含非 std 失败调用点的产物都变。以真父提交 `2117a241` 编出的工具链做不被遮的对照（同一份源码、同一份 std）：
+十个 `emit *` 语料全变（每个都有 `assert`、`expect`、`!` 或 `panic`，`__emit` 连 test 块一起编），`strings` 比对差异只在消息串；
+run-diff 只有 `test playground (with [deps])`（`web` 的测试改为断言带位置的消息，旧编译器编出来会红）与 `test failing fixture`
+（失败断言多了 ` at failing.dawn:8:3`）两个转写变；LSP 108 条消息一致。逐 label 的 `Emit-Change` 在提交正文。
+
+## 六、不做的（理由）
 
 - **运行期栈迹**（JVM LineNumberTable、native `#line` + unwinder）：见 3.1(c)。将来「调试信息」专项另议，那时的消费者是调试器，不是 panic 消息。
 - **JVM 上打印白给的函数级栈**：只有一个后端有，会成为两个后端的行为差异。
@@ -155,3 +228,7 @@ comptime 中恒等、不打印。`[deps]` 加载的模块与 std 里出现 `dbg`
 - **L1 在消费者处剥路径代替编译器规范化**：每个消费者都要记得剥，而且剥不掉「两个 cwd 产物不同」；
   Playground 的 `strip_dir` 只是纵深防御，不是修法。
 - **L1 用 `-ffile-prefix-map` 式的命令行重映射**：把可复现交给调用者记得传参，默认值仍然是错的。
+- **L2 把位置作为 `ForeignError` 的独立字段**：调研 §3.5 已否，按错误模型决定看 `kind`，没有人应当按位置做决定。
+- **L2 给运行期索引越界、除零、`unreachable match` 加位置**：这些失败由 std 或降低生成，没有作者写下的调用点；
+  下标 `c[i]` 的失败在 std 的 `Index` impl 里，L4 的 `caller()` 才是它的路。
+- **L2 在 Core golden 里归一路径**：同一个模块换了文件不是纯移动。

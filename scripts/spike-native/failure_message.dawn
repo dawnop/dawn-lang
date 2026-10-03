@@ -16,6 +16,11 @@
 #      lines are the JVM's answers; a runtime that truncates answers 512/257
 #      and a dangling lead byte (0xC3 = 195).
 #
+# Every message ends with its panic's call site (spec 8.2), so the payloads
+# are 29 bytes longer than what the program builds, the tail checked is the
+# site behind "|END", and the last byte of the straddle is the site's last
+# digit; the cut at byte 512 still lands inside the 2-byte characters.
+#
 # `!io` on `n` so nothing folds at compile time: both backends fold with the
 # same interpreter, and the question is what the *runtime* hands back.
 use std/str
@@ -36,7 +41,7 @@ fn probe(k: Int) -> Unit !io = {
   })
   println("k=" ++ to_string(k) ++
       " len=" ++ to_string(str.len(e.message)) ++
-      " tail_ok=" ++ to_string(str.ends_with(e.message, "|END")))
+      " tail_ok=" ++ to_string(str.ends_with(e.message, "|END at failure_message.dawn:40:5")))
 }
 
 pub fn main() -> Unit !io = {

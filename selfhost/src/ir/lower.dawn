@@ -37,9 +37,10 @@ use check/types.{
   is_ground, expandable, sub_goals
 }
 use check/identity
+use check/tast_positions
 use check/tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
-  tex_ty,
+  tex_ty, x_lo, x_hi,
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
@@ -3601,7 +3602,14 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st1, CTuple(vs, ty))
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
-    XCallBuiltin(name, args, wits, evid, _, _, ty) -> {
+    XCallBuiltin(name, args, wits, evid, lo, hi, ty) -> {
+      # a failure that carries its call site (check/tast_positions) has the
+      # site folded into its message here, and is lowered as the call it
+      # then is; nothing below this arm sees a site
+      match unsite(name, args, wits, evid, lo, hi, ty) {
+        Some(plain) -> return lower_expr(st, plain)
+        None -> ()
+      }
       # the handler-local slot (docs/handler-state-design.md). The checker
       # types these four in the program's terms -- a read node carries what the
       # slot holds, a write's second argument carries what is being stored --
@@ -4294,6 +4302,57 @@ fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
     _ -> panic("lower: `?` on a non-ADT")
   }
 }
+
+## A sited `panic`/`todo`/`expect` call as the plain call it means, its
+## site appended to the message; `None` for every other call.
+##
+## A literal message stays one literal, so a sited `panic("boom")` is the
+## same single `CStr` in Core that it was before it had a site, and an
+## `expect` on a hot path pays no concatenation for it. `todo` becomes the
+## `panic` it always was, with the text both backends give a bare `todo`
+## (still the intrinsic std's calls reach, since std carries no site).
+fn unsite(
+  name: String,
+  args: List[TExpr],
+  wits: List[WitRef],
+  evid: List[TExpr],
+  lo: Int,
+  hi: Int,
+  ty: Ty
+) -> Option[TExpr] =
+  match tast_positions.split_site(name, args) {
+    (_, None) -> None
+    (written, Some(site)) ->
+      if name == "todo" {
+        Some(XCallBuiltin("panic", [XStr([TSPText("not yet implemented" ++ site)], lo, lo)],
+          wits, evid, lo, hi, ty))
+      } else {
+        let last = len(written) - 1
+        let msg = written[last]
+        Some(XCallBuiltin(name, list.take(written, last) ++ [with_site(msg, site)],
+          wits, evid, lo, hi, ty))
+      }
+  }
+
+fn with_site(msg: TExpr, site: String) -> TExpr =
+  match msg {
+    XStr(parts, lo, hi) -> {
+      let n = len(parts)
+      if n > 0 {
+        match parts[n - 1] {
+          TSPText(v) -> XStr(list.take(parts, n - 1) ++ [TSPText(v ++ site)], lo, hi)
+          _ -> XStr(parts ++ [TSPText(site)], lo, hi)
+        }
+      } else {
+        XStr([TSPText(site)], lo, hi)
+      }
+    }
+    _ -> {
+      let lo = x_lo(msg)
+      XBinary(BConcat, msg, XStr([TSPText(site)], lo, lo), None, lo, lo, lo, x_hi(msg),
+        TyString)
+    }
+  }
 
 ## `e!` -- take the payload or panic with the recorded message.
 fn lower_unwrap(st: LSt, operand: TExpr, msg: String, ty: Ty) -> (LSt, CExpr) = {
