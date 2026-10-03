@@ -376,50 +376,26 @@ def contract(server, env):
 # ---- mutants ---------------------------------------------------------------
 #
 # Each removes one piece of the walk this contract exists for, and must turn
-# its owning case red. (name, owning label, file, anchor, replacement); the
-# anchor must occur exactly once.
+# its owning case red. The anchors are in lsp-resolution-coverage/mutate.py,
+# where the preflight proves them before any build; this is (mutant, owner).
 
-LSPQ = "selfhost/src/lsp/lspq.dawn"
+MUTATE = os.path.join(ROOT, "scripts", "lsp-resolution-coverage", "mutate.py")
 
 MUTANTS = [
-    ("drop-qualified-fn-value", "qualified function value", LSPQ,
-     """        Some(XFnValue(owner, fname, _, _, _, _)) -> {
-          q = offer_alias_receiver(qc, q, target)
-          match sig_by_owner(qc, owner, fname, None) {
-            Some(s) -> { q = offer_sig_at(qc, q, flo, fhi, s, site_of_sig(qc, s)) }
-            None -> ()
-          }
-        }
-""", ""),
-    ("drop-written-types", "written type in a param", LSPQ,
-     """fn offer_type_name(qc: QCx, q: Q, name: String, lo: Int, hi: Int) -> Q = {
-""", """fn offer_type_name(qc: QCx, q: Q, name: String, lo: Int, hi: Int) -> Q = {
-  if true { return q }
-"""),
-    ("drop-arm-names", "handler arm op", LSPQ,
-     """fn offer_arm_names(qc: QCx, q0: Q, eff_name: String, arms: List[HandlerArm]) -> Q = {
-""", """fn offer_arm_names(qc: QCx, q0: Q, eff_name: String, arms: List[HandlerArm]) -> Q = {
-  if true { return q0 }
-"""),
-    ("drop-alias-segment", "alias segment of a call", LSPQ,
-     "    Some(path) -> if spelled(qc, lo, hi, mod_alias) {",
-     "    Some(path) -> if false {"),
+    ('drop-qualified-fn-value', 'qualified function value'),
+    ('drop-written-types', 'written type in a param'),
+    ('drop-arm-names', 'handler arm op'),
+    ('drop-alias-segment', 'alias segment of a call'),
 ]
 
 
-def build_mutant(dawn, work, name, path, anchor, replacement):
+def build_mutant(dawn, work, name):
     d = os.path.join(work, name)
     os.makedirs(d)
     shutil.copytree(os.path.join(ROOT, "selfhost"), os.path.join(d, "selfhost"))
     os.symlink(os.path.join(ROOT, "packages"), os.path.join(d, "packages"))
     os.symlink(os.path.join(ROOT, "compiler-plan"), os.path.join(d, "compiler-plan"))
-    target = os.path.join(d, path)
-    with open(target) as f:
-        text = f.read()
-    if text.count(anchor) != 1:
-        raise SystemExit("%s: mutation anchor occurs %d times" % (name, text.count(anchor)))
-    with open(target, "w") as f:
-        f.write(text.replace(anchor, replacement))
+    subprocess.run([sys.executable, MUTATE, name, d], check=True)
     jar = os.path.join(d, "compiler.jar")
     r = subprocess.run([dawn, "build", os.path.join(d, "selfhost"), "-o", jar],
                        capture_output=True, text=True)
@@ -449,8 +425,8 @@ def main():
         return 0
     work = tempfile.mkdtemp(prefix="lsp-resolution-mutants.")
     try:
-        for name, owner, path, anchor, replacement in MUTANTS:
-            cmd = build_mutant(dawn, work, name, path, anchor, replacement)
+        for name, owner in MUTANTS:
+            cmd = build_mutant(dawn, work, name)
             print("PASS  %s mutant compiles" % name)
             del failures[:]
             contract(cmd, env)
