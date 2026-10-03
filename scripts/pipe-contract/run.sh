@@ -113,8 +113,11 @@ assess() { # compiler
     grep -cF 'cannot call a value of type Bool' || true)
   same or_rhs_message "$got" 1
 
+  # `n |> m.f` is the call `m.f(n)`, so its arity error names the declaration
+  # exactly as the bare `n |> f` does. The function-value spelling of the same
+  # mistake says `this function takes ...` and carries no name.
   got=$("$c" __check "$cases/module_member.dawn" 2>&1 |
-    grep -cF 'this function takes 2 argument(s), got 1' || true)
+    grep -cF '`starts_with` takes 2 argument(s), got 1' || true)
   same module_member "$got" 1
 
   # both spellings, the written one and the one the pipe writes for you
@@ -225,7 +228,7 @@ mutants=(
   "parse-rhs-one-level-tighter"
   "hoist-left-before-callee"
   "allow-record-apply"
-  "route-qualified-name-into-call"
+  "apply-qualified-callee-as-value"
   "drop-lsp-qualified-ctor"
   "drop-lsp-qualified-call-children"
   "negative-control-tighter-than-or"

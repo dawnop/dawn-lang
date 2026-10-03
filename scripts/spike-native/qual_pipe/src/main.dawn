@@ -1,0 +1,33 @@
+# A module alias is not a value, so `m.f` in callee position is the static call
+# `m.f(x)`, exactly as a bare `f` is (spec §4.4, §10.3). Applied as a function
+# value instead, every line below was refused: a function value has no defaults
+# and no parameter names, cannot infer its type or effect parameters, and an
+# effect operation has no value form. Both backends must print what the
+# written-out call prints.
+use m
+use m.{Tell}
+
+fn told(n: Int) -> Int = {
+  with handle Tell { tell(x) => x * 2 }
+  n |> m.tell
+}
+
+fn continued() -> Int = {
+  with v <- m.use_it
+  v + 1
+}
+
+pub fn main() -> Unit !io = {
+  println(show(5 |> m.zero))
+  println(show((m.zero)(7)))
+  println(show((m.sum3)(1, c: 2)))
+  println("piped" |> m.id)
+  println(show(((x: Int) => x + 1) |> m.apply_to))
+  let traced = ((x: Int) => {
+    println("in the callback")
+    x + 2
+  }) |> m.apply_to
+  println(show(traced))
+  println(show(told(5)))
+  println(show(continued()))
+}

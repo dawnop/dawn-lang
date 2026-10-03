@@ -140,15 +140,14 @@ MUTATIONS = {
         "  if spelling == CApply && ad.is_record {\n",
         "  if false && ad.is_record {\n",
     ),
-    # 10: a bare `m.f` on the right is a *value* the pipe applies, not a call
-    # it builds. Routing it into a call would make `n |> str.starts_with` mean
-    # `str.starts_with(n)`: its diagnostic names the declaration instead of
-    # reporting the arity of the function value (#66).
-    "route-qualified-name-into-call": (
-        PARSER,
-        OTHER_ARM,
-        "      EFieldAcc(t, fname, flo, fhi, _, fhi2) ->\n"
-        "        EMethod(t, fname, [pos_arg(left)], flo, fhi, e_lo(left), fhi2)\n" + OTHER_ARM,
+    # 10: a module function in callee position is a call by name, not a value
+    # the pipe applies (spec §4.4, §10.3): `n |> str.starts_with` is
+    # `str.starts_with(n)`. Without the checker's branch the same spelling falls
+    # through to applying a function value, whose arity error has no name.
+    "apply-qualified-callee-as-value": (
+        CHECKER,
+        "          return check_module_call(cx, al, fname, args0, expected, flo, fhi, lo, hi)\n",
+        "          if false { return check_module_call(cx, al, fname, args0, expected, flo, fhi, lo, hi) }\n",
     ),
     # 11: the editor maps the typed children of a module-qualified call. Its
     # typed argument list carries no receiver, so it is the same length as the

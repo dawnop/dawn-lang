@@ -7067,6 +7067,27 @@ fn check_apply(
     }
     _ -> ()
   }
+  # A module alias is not a value (spec §10.3), so `m.f` in callee position
+  # names a function exactly as a bare `f` does: `x |> m.f`, `(m.f)(x)` and
+  # `with v <- m.f` are the static call `m.f(x)`, with its defaults, argument
+  # names, inference and effect operations. Unlike a record's `r.f` (spec §2.4)
+  # there is nothing to disambiguate. An unexported name or a constant keeps
+  # the value path below and its Dawn answer.
+  match target {
+    EFieldAcc(recv, fname, flo, fhi, _, _) ->
+      match qual_fn(cx, recv, fname) {
+        Some(_) -> {
+          let al = match recv {
+            EVar(n, _, _) -> n
+            ECtor(n, _, _) -> n
+            _ -> ""
+          }
+          return check_module_call(cx, al, fname, args0, expected, flo, fhi, lo, hi)
+        }
+        None -> ()
+      }
+    _ -> ()
+  }
   # a name: `f(x)`. check_call keeps the split a name has always had -- a local
   # holding a function value calls dynamically, anything else statically -- and
   # decides whether argument names are usable: they name a signature's
