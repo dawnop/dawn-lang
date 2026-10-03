@@ -811,6 +811,18 @@ jobs:
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
 
+      # `dbg` is refused by the compiler in std and in a [deps] package, and
+      # this tree's five source roots are what every user runs or depends on
+      # without the compiler seeing them as dependencies, so the same rule is
+      # held here (docs/source-location-design.md section 6.4). A lexer's
+      # reading rather than a grep: the word is in these sources as text.
+      # Measured locally 2026-10-03: 0.49s and 0.02s. The 360s claim above is
+      # not restated.
+      - name: no dbg in the tree's own sources
+        run: |
+          python3 scripts/check-no-dbg.py
+          python3 scripts/check-no-dbg.py --selftest
+
       # anchor-guard.py: an audit anchor may not change kind or literal
       # without an `Anchor-Change(<ID>):` line since the last release, and a
       # script that reads source text by spelling may not arrive unregistered

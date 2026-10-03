@@ -51,7 +51,8 @@
 #   jvm     the JVM's stdout matches <name>.expect
 #   native  the native binary's stdout matches <name>.expect
 #   diff    the two backends' stdout agree
-#   stderr  the two backends' stderr agree
+#   stderr  the two backends' stderr agree (and match <name>.expect-stderr,
+#           where an entry has one)
 #   exit    the two backends' exit codes agree
 #   asan    the same program, under AddressSanitizer, is clean
 #
@@ -331,11 +332,19 @@ run_corpus() {
       "$(diff -u --label jvm "$work/$name.jvm" --label native "$work/$name.native")"
   fi
 
-  if diff -q "$work/$name.jvm.err" "$work/$name.native.err" >/dev/null; then
-    verdict "$name:stderr" ok
-  else
+  # With <name>.expect-stderr the two are also held to a written answer, for
+  # a program whose subject *is* its stderr (`dbg`). Agreement alone would
+  # pass two backends that wrote the same wrong line.
+  if ! diff -q "$work/$name.jvm.err" "$work/$name.native.err" >/dev/null; then
     verdict "$name:stderr" bad \
       "$(diff -u --label jvm "$work/$name.jvm.err" --label native "$work/$name.native.err")"
+  elif [ -f "$here/$name.expect-stderr" ] &&
+    ! diff -q "$here/$name.expect-stderr" "$work/$name.jvm.err" >/dev/null; then
+    verdict "$name:stderr" bad \
+      "$(diff -u --label "$name.expect-stderr" "$here/$name.expect-stderr" \
+        --label "both backends" "$work/$name.jvm.err")"
+  else
+    verdict "$name:stderr" ok
   fi
 
   if [ "$jvm_rc" -eq "$nat_rc" ]; then

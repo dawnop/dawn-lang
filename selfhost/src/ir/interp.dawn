@@ -999,7 +999,7 @@ fn call_named(
 # published as "a `const` cannot use this" -- while `const Z = parse_int_radix
 # ("ff", 16)` folds to `Some(255)`, through std/fmt's Core like any other call.
 
-## Every name the chain below has an arm for -- 42 of them, 12 emitted by
+## Every name the chain below has an arm for -- 43 of them, 13 emitted by
 ## lowering and 30 writable by a user.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
@@ -1013,6 +1013,7 @@ fn interp_arms() -> List[String] = [
   # `java_hash` are the three it emits that are refused instead, below
   "java_eq", "show", "quote", "str_of_int", "str_of_bool",
   "str_of_bytes", "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
+  "dbg_line",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
   "len", "get", "range", "sort_by", "join",
@@ -1355,6 +1356,12 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # body reaches a function value with two rows in one slot folds here, and
     # a refusal would make that fold a diagnostic instead of an answer.
     Ok((st, env, ev_append_value(args[0], args[1])))
+  } else if name == "dbg_line" {
+    # `dbg` is the identity, and its line is no part of what a `const`
+    # computes (docs/source-location-design.md section 6.5): nothing is
+    # written and nothing is refused. Every other io primitive is refused
+    # because a compile must not act on the world; this one does not act.
+    Ok((st, env, VUnit))
   } else if name == "panic" {
     cerr(st, env, "panicked: ${as_str(args[0])}")
   } else if name == "todo" {
@@ -2923,7 +2930,7 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 42
+  assert len(arms) == 43
   assert len(rejects) == 69
   assert len(after) == 18
 }

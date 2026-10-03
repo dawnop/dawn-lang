@@ -1089,6 +1089,16 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       write their own arms (`inline_intrinsics`): the JVM
 ##                       freezes a stack over `jdk.internal.vm.Continuation`,
 ##                       native switches stacks instead (design 11.9, 11.10).
+##   dbg_line            the stderr line a `dbg(x)` writes, which `lower_dbg`
+##                       expands the builtin into. Not `io_eprintln`, which is
+##                       the same instructions on both backends: the comptime
+##                       interpreter refuses every io primitive and has to
+##                       answer this one with nothing, since `dbg` is the
+##                       identity while a `const` is folded
+##                       (docs/source-location-design.md section 6). Not a
+##                       builtin either, so no source can spell an unrowed
+##                       write to stderr except through `dbg`, whose call site
+##                       the checker vets
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 89
@@ -1104,7 +1114,8 @@ pub fn internal_intrinsics() -> List[String] = [
   "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
   "cell_new", "cell_get", "cell_set", "cell_take",
-  "ctl_yield", "ctl_run"
+  "ctl_yield", "ctl_run",
+  "dbg_line"
 ]
 
 # ---- who implements a primitive ----
@@ -1198,7 +1209,10 @@ pub fn inline_intrinsics() -> List[String] = [
   # while native leaves the frames where they are and switches stacks
   # (docs/oneshot-design.md §11.9, §11.10). What they share is the
   # descriptor, because lowering boxes every payload to `erased_ctl_ty`
-  "ctl_yield", "ctl_run"
+  "ctl_yield", "ctl_run",
+  # a `dbg` line, which is the io runtime's stderr write on both backends
+  # under a name of its own (the comptime interpreter's reason, above)
+  "dbg_line"
 ]
 
 ## The primitives only the JVM owes an arm for.
@@ -1237,7 +1251,7 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## representation is `Int`, so the bridge is the identity and lowering drops
 ## it. A backend never learns the name.
 pub fn lowered_intrinsics() -> List[String] = {
-  var out = ["parse_float", "char_unchecked"]
+  var out = ["parse_float", "char_unchecked", "dbg"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries", "fold"] {
     out = out ++ ["map_${op}"]
@@ -1315,13 +1329,13 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   # 3. the sizes the comments above quote. A count written in prose is what
   #    went wrong in `internal_intrinsics`, whose comment gave two different
   #    answers for the same list in the same paragraph.
-  assert len(inline) == 38
+  assert len(inline) == 39
   assert len(host) == 2
-  assert len(gone) == 20
+  assert len(gone) == 21
   assert len(staged) == 0
-  # and the five groups account for all 131 names, with none left over
-  assert len(map.keys(it)) == 110
-  assert len(internal) == 21
+  # and the five groups account for all 133 names, with none left over
+  assert len(map.keys(it)) == 111
+  assert len(internal) == 22
 }
 
 # ---- trait witnesses ----
@@ -3603,6 +3617,11 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
     XCallBuiltin(name, args, wits, evid, lo, hi, ty) -> {
+      # first, because its trailing argument is a line's head and not the
+      # failure suffix `unsite` below would fold into a message
+      if name == "dbg" {
+        return lower_dbg(st, args, wits, ty)
+      }
       # a failure that carries its call site (check/tast_positions) has the
       # site folded into its message here, and is lowered as the call it
       # then is; nothing below this arm sees a site
@@ -4333,6 +4352,40 @@ fn unsite(
           wits, evid, lo, hi, ty))
       }
   }
+
+## `dbg(x)` as the block it means (docs/source-location-design.md section
+## 6.3): bind the argument, write its line, answer it.
+##
+##   { let t = x; dbg_line("[src/m.dawn:4:11] x + 1 = " ++ show(t)); t }
+##
+## `show` and not `to_string`: the nested rendering, so a String reads as the
+## literal it is (`"a"`), which is the question a debug line answers. A call
+## with no head (a context built by hand; the checker refuses `dbg` in std)
+## writes the rendering alone.
+fn lower_dbg(st: LSt, args: List[TExpr], wits: List[WitRef], ty: Ty) -> (LSt, CExpr) = {
+  let (written, head) = tast_positions.split_site("dbg", args)
+  let arg = written[0]
+  let t = tex_ty(arg)
+  let (st1, v) = lower_expr(st, arg)
+  let (st2, sym) = fresh_sym(st1)
+  let held = CLocal(sym, t)
+  let (st3, shown) = match t {
+    TyVar(_, _) ->
+      if len(wits) == 1 {
+        let (sw, d) = witness_value(st2, wits[0])
+        rel_through_dict(sw, show_rel(), d, [held], t)
+      } else {
+        show_at(st2, held, t)
+      }
+    _ -> show_at(st2, held, t)
+  }
+  let line = match head {
+    Some(h) -> cat(CStr(h), shown)
+    None -> shown
+  }
+  (st3, CBlock([CSLet(sym, t, v), CSDiscard(CIntrinsic("dbg_line", [line], TyUnit))],
+    Some(held), ty))
+}
 
 fn with_site(msg: TExpr, site: String) -> TExpr =
   match msg {

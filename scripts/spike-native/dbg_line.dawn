@@ -1,0 +1,45 @@
+# `dbg` hands its argument back and writes one line to stderr (L3,
+# docs/source-location-design.md section 6):
+#
+#   [<path>:<line>:<col>] <the argument's source text> = <show of the value>
+#
+# The head is filled in by the checker and the rendering by lowering, so
+# neither backend knows what `dbg` is: both see one `dbg_line` write. stdout
+# shows the values came back unchanged, `.expect` pins it, and
+# `.expect-stderr` pins every debug line on both backends -- the column of
+# the call after `ä🎈` counts code points, the text of a call wrapped over
+# three lines is one line, a String renders quoted (`show`, not
+# `to_string`), and a generic function renders through its `Show` witness.
+
+type Point = { x: Int, label: String }
+derive Show
+
+fn twice(n: Int) -> Int = dbg(n * 2)
+
+fn echo[T: Show](v: T) -> T = dbg(v)
+
+fn inc(n: Int) -> Int = n + 1
+
+pub fn main() -> Unit !io = {
+  let a = dbg(1 + 2)
+  let s = dbg("hé")
+  let p = dbg(Point { x: a, label: s })
+  let xs = [1, 2, 3] |> dbg
+  let n = xs
+    |> len
+    |> inc
+    |> dbg
+  let w = dbg(twice(
+    a +
+      1))
+  let o = echo(Some(4))
+  let wide = if "ä🎈" == "" { 0 } else { dbg(dbg(5) + 1) }
+  println(to_string(a))
+  println(s)
+  println(to_string(p))
+  println(to_string(xs))
+  println(to_string(n))
+  println(to_string(w))
+  println(to_string(o))
+  println(to_string(wide))
+}

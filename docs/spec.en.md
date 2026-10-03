@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 94bd43e8af6a1a80 -->
+<!-- doc-check: translation-of docs/spec.md @ da907160ca4cc7f1 -->
 
 # Dawn Language Specification
 
@@ -2092,6 +2092,8 @@ outside effect position, and is refused everywhere inside one (§6.3).
    not exist.
 4. A pure function is **guaranteed**: same arguments return the same value, no observable side
    effects. The compiler may fold it, deduplicate it, and call it at comptime on that basis.
+   The one exception is `dbg` (§8.3): the stderr line it writes is defined as a diagnostic side
+   channel and not a side effect of the program, which is why its type is pure.
    Named effects are inside that guarantee too: a function value's type carries its full effect
    row, and the only thing that can subtract a label from a row is the `with handle` that really
    answered it (§6.5), so a function whose signature says pure cannot run somebody else's handler
@@ -3108,6 +3110,43 @@ index or a missing key (assertion, §4.8; the semantics are fixed by that type's
 impl, `List`/`Map` as above); `Int` division by zero (`/` and `%`) panics — being a panic,
 `catch_fault` does not intercept it (§4.3, numeric edge semantics).
 
+### 8.3 Debug output: `dbg`
+
+`dbg[T: Show](x: T) -> T` returns `x` unchanged and writes one line to stderr:
+
+```text
+[<path>:<line>:<col>] <the argument's source text> = <show(x)>
+```
+
+```dawn
+let n = dbg(a * 2)        # stderr: [src/main.dawn:4:11] a * 2 = 8
+let m = xs |> len |> dbg  # stderr: [src/main.dawn:5:11] xs |> len = 3
+```
+
+- **Pure by type, the identity by semantics.** The value of `dbg(x)` is `x`; the line is a
+  **diagnostic side channel** and not part of the program's semantics: it is not in the effect
+  row (no `!io` is required, and it may be written in a pure function), no handler intercepts
+  it, and its count and order are not guaranteed to survive future optimisations. This is the
+  **only** place in the language where a type says pure while output is written (it is the
+  exception to rule 4 of §6.2).
+- `<path>:<line>:<col>` follows the rule and the ruler of §8.2's location suffix, and points at
+  the start of the call (the name `dbg`; for a pipe `e |> dbg`, the start of `e`).
+- The argument text is the call site's source as written, not a re-printing. An argument that
+  spans lines is folded onto one: a run of white space that crosses a line break becomes one
+  space, or nothing just inside a bracket (`twice(\n  a +\n    1)` reads `twice(a + 1)`).
+- Rendering uses `Show` (the nested rendering, so a `String` is quoted); a type with no `Show`
+  is a compile error, the same discipline as interpolation.
+- At comptime it is the identity: the constant folds as usual and nothing is printed at compile
+  time (§7).
+- **It belongs to the program being debugged.** `dbg` in a module loaded through `[deps]`, or
+  in std, is a compile error; the same package checked as a project of its own may use it.
+  There is no build mode that strips `dbg`: its semantics are the identity, so stripping it
+  would change nothing but the output.
+- It can only be called, not used as a function value (`let f = dbg` is a compile error): a
+  function value has no call site and no argument text. To pass it, wrap it in a lambda:
+  `(x) => dbg(x)`.
+- It takes one argument. To see several values, pass a tuple: `dbg((a, b))`.
+
 ---
 
 ## 9. Java interop
@@ -3967,7 +4006,7 @@ The **prelude** is the high-traffic core of that, implicitly available without a
 constructors of `List`/`Option`/`Result`, `println`/`print`, `map`/`filter`/`fold`, the
 `sort` family (std/list), `parse_int` (std/fmt), and the builtin
 <!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
-`discard`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
+`discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
 `sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
 `char_is_lower`/`char_is_space`/`args`/`cast`, all within one screen (for the full set see
