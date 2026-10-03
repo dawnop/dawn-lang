@@ -1,65 +1,53 @@
-# The cuTile page's line maps: every Dawn line of a golden kernel set beside
-# the Tile IR lines it recorded.
+# The cuTile page's call map: every call in flash_attn's source set beside the
+# Tile IR lines that call wrote.
 #
 # Where the pairing comes from, and why nothing here guesses it. Which Tile IR
-# line a kernel's call wrote is packages/tileir's to say: `trace_calls` keeps
-# a side table of the outermost public calls and the operations each issued,
-# `lower_spans` and `line_map` carry that through the lowering and the
-# renderer, and site/gpu-map/record.py records the answer for every kernel in
-# site/gpu-map/calls.txt (checked against a fresh trace on every build). What
-# that recording cannot say is which SOURCE LINE a call is on: tileir runs the
-# kernel and never sees its text. That half is done here, from the text, and
-# it is the only half that could go wrong quietly, so it is strict instead of
-# clever:
+# line a call wrote is packages/tileir's to say: `trace_calls` keeps the tree
+# of the kernel's calls (a call inside a `d_for3` or `d_scan` closure is that
+# region call's child) and `line_map` carries it to the rendered lines. Where
+# each call is in the source is Dawn's parser's to say: `dawn parse` gives
+# each call node its span. site/gpu-map/record.py pairs the two strictly and
+# records the answer in site/gpu-map/flash_attn.map, and site/build.sh checks
+# that recording against a fresh one on every build, so this module reads a
+# file and never runs either.
 #
-#   - the body is scanned for calls in evaluation order (arguments left to
-#     right, every call after its own arguments: a call is emitted at its
-#     closing parenthesis), and the names must be EXACTLY the recording's,
-#     in order. One name too many (a host helper, `list.map`), one too few or
-#     one out of place, and the kernel is not drawn;
-#   - a call inside a closure that is an argument of another call runs inside
-#     that call (`d_for`'s body, `d_if`'s branches), which is also how the
-#     recording counts it, so it is absorbed into the outer call's row. A
-#     closure that is not an argument of a call is refused: when it runs is
-#     not something the text says;
-#   - a constructor application (`Some(..)`) is not a call: it cannot
-#     perform an effect, so it cannot have recorded anything. Nor is a call
-#     of a function that kernels.dawn or packages/tileir's dev.dawn defines
-#     with no effect in its signature (`neg_inf()`, `row_major(..)`): the
-#     checker would refuse it a `Dev` operation, so it records nothing, and
-#     that is read off its definition rather than guessed from its name. A
-#     function defined with an effect (`sum_of`, a kernel-local `!Dev`
-#     helper) is still a call the recording does not know, so the kernel is
-#     refused; so is a builtin or a std function, whose definition is in
-#     neither file;
-#   - strings with interpolation, unbalanced brackets, a body that is not a
-#     block, and a dispatch arm that is more than one call are refused too.
+# What it does check, because a file can be edited by hand or left behind by
+# a kernels.dawn that moved: every call's name is at its name span in the
+# text it is shown beside, every span is inside the function and inside its
+# parent's, and every Tile IR line is owned exactly once (by the head, the
+# tail or one call). A map that fails any of these stops the build.
 #
-# A row is a run of source lines that one or more calls span, so a call that
-# breaks across lines is one row. Blank and comment lines join the row below
-# them. The signature row owns what no call wrote at the top (the module,
-# the entry, `make_token`), the closing brace owns `return` and the braces.
-# Every Tile IR line is owned by exactly one row, which `align` checks again
-# rather than trusting the recording's arithmetic.
+# Rows are source lines, which is what a reader scans. A call's own Tile IR
+# goes on the line its name is on; a region call's terminator and closing
+# brace go on the line its span ends on, after its body, where the text puts
+# them. That is the whole layout rule, so the default page reads with no
+# script at all; a click only highlights what this already put on the page.
 
 use std/str
 use std/list
-use json/value.{JStr}
-use json/render.{render}
 
 # ---- the recording ----
 
-## One public call as site/gpu-map/calls.txt records it: its name, the
-## TileOps it issued and the Tile IR lines they became (1-based, half-open).
-pub type TCall = { name: String, ops_from: Int, ops_to: Int, lines: List[(Int, Int)] }
+## A position in kernels.dawn: line and column, both from 1, columns in code
+## points.
+pub type Pos = { line: Int, col: Int }
 
-## One kernel's block of calls.txt. `error` is "" when the line map exists.
-pub type Traced = {
+## One call as flash_attn.map records it: its row, its parent's row (-1 at
+## the top of the body), its name, its span `[from, to)` and its name's
+## `[from, name_to)`, and the Tile IR lines it wrote itself (1-based,
+## half-open, its children's left out).
+pub type MCall = { id: Int, parent: Int, name: String, from: Pos, to: Pos, name_from: Pos, name_to: Pos, lines: List[(Int, Int)] }
+
+## The whole recording: the kernel, the function's lines in kernels.dawn
+## (both included), how many operations it recorded, and who owns each line.
+pub type Recorded = {
   name: String,
+  first: Int,
+  last: Int,
+  ops: Int,
   head: List[(Int, Int)],
-  calls: List[TCall],
+  calls: List[MCall],
   tail: (Int, Int),
-  error: String,
 }
 
 fn parse_range(s: String) -> Option[(Int, Int)] =
@@ -72,447 +60,190 @@ fn parse_range(s: String) -> Option[(Int, Int)] =
     None -> None
   }
 
-fn parse_ranges(toks: List[String]) -> Result[List[(Int, Int)], String] = {
-  var out: List[(Int, Int)] = []
-  var bad = ""
-  for t in toks {
-    match parse_range(t) {
-      Some(r) -> {
-        out = out ++ [r]
+fn parse_pos(s: String) -> Option[Pos] =
+  match str.split_once(s, ":") {
+    Some((a, b)) ->
+      match (parse_int(a), parse_int(b)) {
+        (Some(l), Some(c)) -> if l > 0 && c > 0 { Some(Pos { line: l, col: c }) } else { None }
+        _ -> None
       }
-      None -> {
-        if bad == "" {
-          bad = t
-        }
-      }
-    }
+    None -> None
   }
-  if bad != "" { Err("`${bad}` is not a range") } else { Ok(out) }
+
+# `l:c-l:c`
+fn parse_span(s: String) -> Option[(Pos, Pos)] =
+  match str.split_once(s, "-") {
+    Some((a, b)) ->
+      match (parse_pos(a), parse_pos(b)) {
+        (Some(x), Some(y)) -> if before_or_at(x, y) { Some((x, y)) } else { None }
+        _ -> None
+      }
+    None -> None
+  }
+
+fn parse_ranges(toks: List[String]) -> Option[List[(Int, Int)]] = {
+  let rs = map(toks, parse_range)
+  if list.all(rs, r => r != None) {
+    Some(map(rs, r => unwrap_or(r, (0, 0))))
+  } else {
+    None
+  }
 }
 
 fn words(s: String) -> List[String] = filter(str.split(s, " "), w => w != "")
 
-fn empty_traced(name: String) -> Traced = Traced { name: name, head: [], calls: [], tail: (0, 0), error: "" }
+## Whether `a` is at or before `b` in the text.
+pub fn before_or_at(a: Pos, b: Pos) -> Bool = a.line < b.line || (a.line == b.line && a.col <= b.col)
 
-## calls.txt as blocks, in its order. A line that is none of the five shapes
-## record.py writes is an error rather than a line skipped.
-pub fn parse_calls(text: String) -> Result[List[Traced], String] = {
-  var out: List[Traced] = []
-  var cur: Option[Traced] = None
+## flash_attn.map as a `Recorded`. Every line has to be one of the six shapes
+## record.py writes, in its order, and every call its row number in turn; a
+## line of any other shape is an error rather than a line skipped.
+pub fn parse_map(text: String) -> Result[Recorded, String] = {
+  var rec = Recorded { name: "", first: 0, last: 0, ops: 0 - 1, head: [], calls: [], tail: (0, 0) }
   var bad = ""
   var n = 0
   for raw in str.split(text, "\n") {
     n = n + 1
-    if bad == "" && raw != "" {
-      let ws = words(raw)
-      let at = n
-      let fail = (why: String) => "calls.txt line ${at}: ${why}"
-      if str.starts_with(raw, "kernel ") {
-        match cur {
-          Some(t) -> {
-            out = out ++ [t]
-          }
-          None -> ()
-        }
-        cur = Some(empty_traced(str.drop(raw, 7)))
-      } else {
-        match cur {
-          None -> {
-            bad = fail("a record before any `kernel` line")
-          }
-          Some(t) -> {
-            if str.starts_with(raw, "  ") && len(ws) >= 2 {
-              match (parse_range(ws[1]), parse_ranges(list.drop(ws, 2))) {
-                (Some((a, b)), Ok(rs)) -> {
-                  cur = Some(Traced { ..t, calls: t.calls ++ [TCall { name: ws[0], ops_from: a, ops_to: b, lines: rs }] })
-                }
-                _ -> {
-                  bad = fail("`${raw}` is not a call")
-                }
-              }
-            } else if ws[0] == "head" {
-              match parse_ranges(list.drop(ws, 1)) {
-                Ok(rs) -> {
-                  cur = Some(Traced { ..t, head: rs })
-                }
-                Err(e) -> {
-                  bad = fail(e)
-                }
-              }
-            } else if ws[0] == "tail" && len(ws) == 2 {
-              match parse_range(ws[1]) {
-                Some(r) -> {
-                  cur = Some(Traced { ..t, tail: r })
-                }
-                None -> {
-                  bad = fail("`${raw}` is not a tail")
-                }
-              }
-            } else if ws[0] == "error" {
-              cur = Some(Traced { ..t, error: str.drop(raw, 6) })
-            } else {
-              bad = fail("`${raw}` is none of kernel, head, a call, tail or error")
-            }
-          }
-        }
-      }
-    }
-  }
-  match cur {
-    Some(t) -> {
-      out = out ++ [t]
-    }
-    None -> ()
-  }
-  if bad != "" { Err(bad) } else { Ok(out) }
-}
-
-# ---- the dispatch ----
-
-## The function each kernel name dispatches to in kernels.dawn's `trace`,
-## or why it cannot be read: `"<name>" ->` followed by
-## `trace_kernel("<name>", [..], () => <fn>(..))`. An arm whose closure is a
-## block, or that names the kernel differently, is not one call.
-fn arm_fn(nm: String, text: String) -> Result[String, String] =
-  match str.split_once(text, "() => ") {
-    None -> Err("its dispatch arm has no `() =>` closure")
-    Some((_, after)) -> {
-      let cs = code_points(after)
-      var i = 0
-      while i < len(cs) && is_ident_cp(cs[i]) {
-        i = i + 1
-      }
-      if i == 0 || i >= len(cs) || cs[i] != '(' {
-        Err("its dispatch arm is not one call")
-      } else if not str.contains(text, "trace_kernel(\"${nm}\"") {
-        Err("its dispatch arm traces another name")
-      } else {
-        Ok(str.slice(after, 0, i))
-      }
-    }
-  }
-
-pub fn dispatch(src: String) -> List[(String, Result[String, String])] = {
-  var out: List[(String, Result[String, String])] = []
-  var name = ""
-  var arm = ""
-  var on = false
-  for l in str.split(src, "\n") {
-    if str.starts_with(l, "fn trace(name: String)") {
-      on = true
-    } else if on && l == "}" {
-      if name != "" {
-        out = out ++ [(name, arm_fn(name, arm))]
-      }
-      on = false
-      name = ""
-    } else if on {
-      let s = str.trim(l)
-      match str.strip_prefix(l, "  \"") {
-        Some(rest) ->
-          match str.split_once(rest, "\" ->") {
-            Some((nm, tail)) -> {
-              if name != "" {
-                out = out ++ [(name, arm_fn(name, arm))]
-              }
-              name = nm
-              arm = tail
-            }
-            None -> {
-              arm = arm ++ " " ++ s
-            }
-          }
-        None -> {
-          arm = arm ++ " " ++ s
-        }
-      }
-    }
-  }
-  out
-}
-
-# ---- the source scan ----
-
-fn is_ident_start(c: Char) -> Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
-
-fn is_ident_cp(c: Char) -> Bool = is_ident_start(c) || (c >= '0' && c <= '9')
-
-fn keywords() -> List[String] =
-  ["if", "else", "match", "for", "while", "in", "let", "var", "fn", "not", "and", "or", "return", "with", "handle"]
-
-## One call the scan found: its (possibly dotted) name, the body line it is
-## named on and the line its closing parenthesis is on (0-based, body lines).
-pub type SCall = { name: String, open: Int, close: Int }
-
-# An open bracket: `call` (a name directly before its parenthesis), or a
-# plain `(`, `[` or `{`, and the line a call was named on.
-type Open = { kind: String, name: String, line: Int }
-
-## The calls of `lines` in evaluation order, or why the text cannot be read
-## that way.
-pub fn scan_calls(lines: List[String], pure: List[String]) -> Result[List[SCall], String] = {
-  var out: List[SCall] = []
-  var stack: List[Open] = []
-  # the stack depths at which a closure body is open; calls closed while any
-  # is open ran inside the call that took the closure
-  var lambdas: List[Int] = []
-  var bad = ""
-  var ln = 0
-  for line in lines {
-    let cs = code_points(line)
-    let n = len(cs)
-    var i = 0
-    while bad == "" && i < n {
-      let c = cs[i]
-      if c == '#' {
-        i = n
-      } else if c == '"' || c == '`' {
-        # a string: skipped whole, and refused if it interpolates
-        var j = i + 1
-        while j < n && cs[j] != c {
-          if cs[j] == '\\' {
-            j = j + 1
-          } else if c == '"' && cs[j] == '$' && j + 1 < n && cs[j + 1] == '{' {
-            bad = "line ${ln + 1}: a string interpolates"
-          }
-          j = j + 1
-        }
-        if j >= n {
-          bad = "line ${ln + 1}: a string runs past its line"
-        }
-        i = j + 1
-      } else if is_ident_start(c) {
-        var j = i
-        while j < n && (is_ident_cp(cs[j]) || (cs[j] == '.' && j + 1 < n && is_ident_start(cs[j + 1]))) {
-          j = j + 1
-        }
-        let word = str.slice(line, i, j)
-        # a constructor (`Some(..)`, `Rows(..)`) builds a value and records
-        # nothing, so its parenthesis is a plain one
-        let ctor = cs[i] >= 'A' && cs[i] <= 'Z'
-        if j < n && cs[j] == '(' && not ctor && not list.contains(keywords(), word) && not list.contains(pure, word) {
-          stack = stack ++ [Open { kind: "call", name: word, line: ln }]
-          i = j + 1
-        } else {
-          i = j
-        }
-      } else if c == '(' || c == '[' || c == '{' {
-        stack = stack ++ [Open { kind: str.from_char(c), name: "", line: ln }]
-        i = i + 1
-      } else if c == ')' || c == ']' || c == '}' {
-        if len(stack) == 0 {
-          bad = "line ${ln + 1}: `${str.from_char(c)}` closes nothing"
-        } else {
-          let top = stack[len(stack) - 1]
-          let want = if c == ')' { "(" } else if c == ']' { "[" } else { "{" }
-          let is_call = top.kind == "call"
-          if (is_call && c != ')') || (not is_call && top.kind != want) {
-            bad = "line ${ln + 1}: `${str.from_char(c)}` closes the wrong bracket"
-          } else {
-            stack = list.take(stack, len(stack) - 1)
-            # a closure body ends with the bracket that holds it
-            while len(lambdas) > 0 && lambdas[len(lambdas) - 1] > len(stack) {
-              lambdas = list.take(lambdas, len(lambdas) - 1)
-            }
-            if is_call && len(lambdas) == 0 {
-              out = out ++ [SCall { name: top.name, open: top.line, close: ln }]
-            }
-          }
-        }
-        i = i + 1
-      } else if c == ',' {
-        if len(lambdas) > 0 && lambdas[len(lambdas) - 1] == len(stack) {
-          lambdas = list.take(lambdas, len(lambdas) - 1)
-        }
-        i = i + 1
-      } else if c == '=' && i + 1 < n && cs[i + 1] == '>' {
-        if list.any(stack, o => o.kind == "call") {
-          lambdas = lambdas ++ [len(stack)]
-        } else {
-          bad = "line ${ln + 1}: a closure that is not an argument of a call"
-        }
-        i = i + 2
-      } else {
-        i = i + 1
-      }
-    }
-    ln = ln + 1
-  }
-  if bad == "" && len(stack) != 0 {
-    bad = "the body ends with ${len(stack)} bracket(s) open"
-  }
-  if bad != "" { Err(bad) } else { Ok(out) }
-}
-
-## The functions `src` defines at the top level with no effect in their
-## signature: `fn <name>` or `pub fn <name>` at the start of a line, read
-## through to the `=` that ends the signature, holding no `!`. A signature
-## with no `->`, or a name defined twice with different answers, is not
-## counted pure: those are refused rather than skipped.
-pub fn pure_fns(src: String) -> List[String] = {
-  var pure: List[String] = []
-  var effectful: List[String] = []
-  let lines = str.split(src, "\n")
-  var k = 0
-  while k < len(lines) {
-    let l = lines[k]
-    let rest =
-      match str.strip_prefix(l, "pub fn ") {
-        Some(r) -> Some(r)
-        None -> str.strip_prefix(l, "fn ")
-      }
-    match rest {
-      Some(r) -> {
-        let cs = code_points(r)
-        var j = 0
-        while j < len(cs) && is_ident_cp(cs[j]) {
-          j = j + 1
-        }
-        let name = str.slice(r, 0, j)
-        # the signature: this line and the ones after it, up to the `=` after
-        # the return type
-        var sig = r
-        var e = k
-        while not str.contains(sig, ") -> ") && e + 1 < len(lines) && e < k + 8 {
-          e = e + 1
-          sig = sig ++ " " ++ str.trim(lines[e])
-        }
-        let ret =
-          match str.split_once(sig, ") -> ") {
-            Some((_a, after)) ->
-              match str.split_once(after, " =") {
-                Some((ty, _b)) -> Some(ty)
-                None -> if str.ends_with(after, "=") { Some(after) } else { None }
-              }
-            None -> None
-          }
-        match ret {
-          Some(ty) -> {
-            if str.contains(ty, "!") {
-              effectful = effectful ++ [name]
-            } else {
-              pure = pure ++ [name]
-            }
+    let ws = words(raw)
+    let at = n
+    let fail = (why: String) => "flash_attn.map line ${at}: ${why}"
+    if bad == "" && len(ws) > 0 {
+      if ws[0] == "kernel" && len(ws) == 2 && n == 1 {
+        rec = Recorded { ..rec, name: ws[1] }
+      } else if rec.name == "" {
+        bad = fail("the first line is not `kernel <name>`")
+      } else if ws[0] == "fn" && len(ws) == 2 {
+        match parse_range(ws[1]) {
+          Some((a, b)) -> {
+            rec = Recorded { ..rec, first: a, last: b }
           }
           None -> {
-            effectful = effectful ++ [name]
+            bad = fail("`${raw}` is not the function's lines")
           }
         }
+      } else if ws[0] == "ops" && len(ws) == 2 {
+        rec = Recorded { ..rec, ops: unwrap_or(parse_int(ws[1]), 0 - 1) }
+      } else if ws[0] == "head" {
+        match parse_ranges(list.drop(ws, 1)) {
+          Some(rs) -> {
+            rec = Recorded { ..rec, head: rs }
+          }
+          None -> {
+            bad = fail("`${raw}` is not a head")
+          }
+        }
+      } else if ws[0] == "tail" && len(ws) == 2 {
+        match parse_range(ws[1]) {
+          Some(r) -> {
+            rec = Recorded { ..rec, tail: r }
+          }
+          None -> {
+            bad = fail("`${raw}` is not a tail")
+          }
+        }
+      } else if ws[0] == "call" && len(ws) >= 6 {
+        match (parse_int(ws[1]), parse_int(ws[2]), parse_span(ws[4]), parse_span(ws[5]), parse_ranges(list.drop(ws, 6))) {
+          (Some(id), Some(parent), Some((from, to)), Some((nf, nt)), Some(rs)) -> {
+            if id != len(rec.calls) {
+              bad = fail("call ${id} is not row ${len(rec.calls)}")
+            } else {
+              let c = MCall { id: id, parent: parent, name: ws[3], from: from, to: to, name_from: nf, name_to: nt, lines: rs }
+              rec = Recorded { ..rec, calls: rec.calls ++ [c] }
+            }
+          }
+          _ -> {
+            bad = fail("`${raw}` is not a call")
+          }
+        }
+      } else {
+        bad = fail("`${raw}` is none of kernel, fn, ops, head, call or tail")
       }
-      None -> ()
     }
-    k = k + 1
   }
-  let eff = effectful
-  filter(pure, x => not list.contains(eff, x))
+  if bad != "" {
+    Err(bad)
+  } else if rec.first == 0 || rec.ops < 0 || rec.tail == (0, 0) || len(rec.head) == 0 {
+    Err("flash_attn.map has no fn, ops, head or tail line")
+  } else {
+    Ok(rec)
+  }
 }
 
 # ---- the map ----
 
-## One row of the map: body lines `[src_from, src_to)` of the kernel's source
-## (0-based, the signature's first line is 0), the Tile IR lines they wrote,
-## the calls on them in order, and how many TileOps those calls recorded.
-pub type Row = { src_from: Int, src_to: Int, ir: List[(Int, Int)], calls: List[String], ops: Int }
+## One run of Tile IR lines on the page: who wrote it (a call's row, or -1 for
+## the head and -2 for the tail) and the lines, 1-based, half-open.
+pub type Seg = { owner: Int, ir: (Int, Int) }
 
-## A kernel lined up with its Tile IR: its name and function, the line of
-## kernels.dawn its source starts on, both texts as lines, and the rows.
+## One source line of the kernel (its number in kernels.dawn) and the runs of
+## Tile IR shown beside it, in Tile IR order.
+pub type Row = { line: Int, segs: List[Seg] }
+
+## The kernel lined up with its Tile IR: its name, the line of kernels.dawn
+## its source starts on, both texts as lines, the calls and the rows.
 pub type KernelMap = {
   name: String,
-  fn_name: String,
   first: Int,
   src: List[String],
   ir: List[String],
+  calls: List[MCall],
   rows: List[Row],
-  calls: Int,
   ops: Int,
 }
 
-## The function `fn_name` cut out of `lines` (a source split into lines)
-## with the line it starts on (1-based): from `fn <name>(` through the first
-## lone `}`. Only a block body is a function here; an expression body has no
-## closing line to cut at.
-pub fn cut_kernel(lines: List[String], fn_name: String) -> Result[(Int, List[String]), String] = {
-  let head = "fn ${fn_name}("
-  var first = 0
-  var i = 0
-  while first == 0 && i < len(lines) {
-    if str.starts_with(lines[i], head) {
-      first = i + 1
-    }
-    i = i + 1
-  }
-  if first == 0 {
-    Err("no `${head}` in kernels.dawn")
-  } else {
-    var out: List[String] = []
-    var done = false
-    var k = first - 1
-    while not done && k < len(lines) {
-      out = out ++ [lines[k]]
-      if lines[k] == "}" {
-        done = true
-      } else if k > first - 1 && str.starts_with(lines[k], "fn ") {
-        k = len(lines)
-      }
-      k = k + 1
-    }
-    if done { Ok((first, out)) } else { Err("`${fn_name}` is not a block body closed by a lone `}`") }
-  }
-}
+# The owner value of the head's lines and of the tail's.
+fn head_owner() -> Int = 0 - 1
 
-fn merged(rs: List[(Int, Int)]) -> List[(Int, Int)] = {
-  var out: List[(Int, Int)] = []
-  for r in rs {
-    let (a, b) = r
-    if a < b {
-      if len(out) > 0 {
-        let (pa, pb) = out[len(out) - 1]
-        if pb == a {
-          out = list.take(out, len(out) - 1) ++ [(pa, b)]
+fn tail_owner() -> Int = 0 - 2
+
+# The text of `src` (the function's lines, the first being kernels.dawn's
+# line `first`) from `a` to `b`, on one line.
+fn text_at(src: List[String], first: Int, a: Pos, b: Pos) -> String =
+  if a.line != b.line || a.line < first || a.line - first >= len(src) {
+    ""
+  } else {
+    str.slice(src[a.line - first], a.col - 1, b.col - 1)
+  }
+
+## `rec` against the function's text (`src`, starting at kernels.dawn's line
+## `first`) and its golden (`ir`, one string a line), or why the two do not
+## fit.
+pub fn check(rec: Recorded, first: Int, src: List[String], ir: List[String]) -> Result[KernelMap, String] = {
+  let last = first + len(src) - 1
+  let fault = list.find(rec.calls, c => call_fault(rec, first, last, src, c) != "")
+  if rec.first != first || rec.last != last {
+    Err("the recording is of lines ${rec.first}-${rec.last}, the function is ${first}-${last}: record again")
+  } else {
+    match fault {
+      Some(c) -> Err(call_fault(rec, first, last, src, c))
+      None -> {
+        let n_ir = len(ir)
+        let none: List[(Int, Int)] = []
+        let all = rec.head ++ [rec.tail] ++ list.fold(rec.calls, none, (acc, c) => acc ++ c.lines)
+        let count = (k: Int) => len(filter(all, r => {
+          let (a, b) = r
+          a <= k && k < b
+        }))
+        let outside = filter(all, r => {
+          let (a, b) = r
+          a < 1 || b > n_ir + 1
+        })
+        let doubled = list.find(range(1, n_ir + 1), k => count(k) != 1)
+        if len(outside) > 0 {
+          let (_a, b) = outside[0]
+          Err("the recording names line ${b - 1} of a ${n_ir}-line golden")
         } else {
-          out = out ++ [r]
-        }
-      } else {
-        out = out ++ [r]
-      }
-    }
-  }
-  out
-}
-
-fn is_blank(l: String) -> Bool = {
-  let s = str.trim(l)
-  s == "" || str.starts_with(s, "#")
-}
-
-## Line `src` (the kernel's function, as cut) up with `ir` (its golden) by
-## the recording `t`, or say why it does not line up.
-pub fn align(t: Traced, fn_name: String, first: Int, src: List[String], ir: List[String], pure: List[String]) -> Result[KernelMap, String] = {
-  if t.error != "" {
-    Err("tileir has no line map for it: ${t.error}")
-  } else {
-    # the signature ends at the first line that opens the body
-    var sig_end = 0 - 1
-    var k = 0
-    for l in src {
-      if sig_end < 0 && str.ends_with(l, "{") {
-        sig_end = k
-      }
-      k = k + 1
-    }
-    if sig_end < 0 || sig_end >= len(src) - 1 {
-      Err("its signature does not open a block")
-    } else {
-      let body = list.slice(src, sig_end + 1, len(src) - 1)
-      match scan_calls(body, pure) {
-        Err(e) -> Err(e)
-        Ok(found) -> {
-          let theirs = map(t.calls, c => c.name)
-          let ours = map(found, c => c.name)
-          if theirs != ours {
-            Err(first_difference(ours, theirs))
-          } else {
-            rows_of(t, fn_name, first, src, ir, sig_end, body, found)
+          match doubled {
+            Some(k) -> Err("line ${k} of its Tile IR is owned ${count(k)} times")
+            None -> Ok(KernelMap {
+              name: rec.name,
+              first: first,
+              src: src,
+              ir: ir,
+              calls: rec.calls,
+              rows: rows_of(rec, first, last),
+              ops: rec.ops,
+            })
           }
         }
       }
@@ -520,309 +251,199 @@ pub fn align(t: Traced, fn_name: String, first: Int, src: List[String], ir: List
   }
 }
 
-fn first_difference(ours: List[String], theirs: List[String]) -> String = {
-  var k = 0
-  while k < len(ours) && k < len(theirs) && ours[k] == theirs[k] {
-    k = k + 1
-  }
-  let o = if k < len(ours) { "`${ours[k]}`" } else { "nothing" }
-  let r = if k < len(theirs) { "`${theirs[k]}`" } else { "nothing" }
-  "call ${k + 1}: the text says ${o}, the recording says ${r}"
-}
-
-fn rows_of(t: Traced, fn_name: String, first: Int, src: List[String], ir: List[String], sig_end: Int,
-  body: List[String], found: List[SCall]) -> Result[KernelMap, String] = {
-  # owner[k]: the index of the first call of the run of overlapping call
-  # spans that covers body line k, or -1
-  let nb = len(body)
-  var owner: List[Int] = []
-  for k in range(0, nb) {
-    owner = owner ++ [0 - 1]
-  }
-  var run = 0 - 1
-  var run_end = 0 - 1
-  var c = 0
-  for f in found {
-    if f.open > run_end {
-      run = c
-    }
-    if f.close > run_end {
-      run_end = f.close
-    }
-    var next: List[Int] = []
-    var k = 0
-    for o in owner {
-      next = next ++ [if k >= f.open && k <= f.close { run } else { o }]
-      k = k + 1
-    }
-    owner = next
-    c = c + 1
-  }
-  # a run's lines are consecutive; a blank line joins the row below it
-  var rows: List[Row] = [Row { src_from: 0, src_to: sig_end + 1, ir: t.head, calls: [], ops: 1 }]
-  var pending = sig_end + 1
-  var k = 0
-  while k < nb {
-    if owner[k] < 0 && is_blank(body[k]) {
-      k = k + 1
+# Why call `c` does not fit the text, or "".
+fn call_fault(rec: Recorded, first: Int, last: Int, src: List[String], c: MCall) -> String = {
+  let inside_fn = c.from.line >= first && c.to.line <= last
+  let named = text_at(src, first, c.name_from, c.name_to) == c.name
+  let name_inside = before_or_at(c.from, c.name_from) && before_or_at(c.name_to, c.to)
+  let parent_ok = c.parent >= 0 - 1 && c.parent < c.id
+  let in_parent =
+    if c.parent >= 0 && c.parent < c.id {
+      let p = rec.calls[c.parent]
+      before_or_at(p.from, c.from) && before_or_at(c.to, p.to)
     } else {
-      var e = k + 1
-      while e < nb && owner[k] >= 0 && owner[e] == owner[k] {
-        e = e + 1
-      }
-      var calls: List[TCall] = []
-      if owner[k] >= 0 {
-        var j = 0
-        for f in found {
-          if f.open >= k && f.close < e {
-            calls = calls ++ [t.calls[j]]
-          }
-          j = j + 1
-        }
-      }
-      var lines: List[(Int, Int)] = []
-      var ops = 0
-      for x in calls {
-        lines = lines ++ x.lines
-        ops = ops + x.ops_to - x.ops_from
-      }
-      rows = rows ++ [Row { src_from: pending, src_to: sig_end + 1 + e, ir: merged(lines), calls: map(calls, x => x.name), ops: ops }]
-      pending = sig_end + 1 + e
-      k = e
+      true
     }
-  }
-  # trailing blank lines join the closing brace
-  rows = rows ++ [Row { src_from: pending, src_to: len(src), ir: [t.tail], calls: [], ops: 0 }]
-  # every Tile IR line in exactly one row
-  let n_ir = len(ir)
-  var seen: List[Int] = []
-  for x in range(0, n_ir + 2) {
-    seen = seen ++ [0]
-  }
-  var bad = ""
-  for r in rows {
-    for g in r.ir {
-      let (a, b) = g
-      if a < 1 || b > n_ir + 1 {
-        bad = "the recording names line ${b - 1} of a ${n_ir}-line golden"
-      } else {
-        var next: List[Int] = []
-        var x = 0
-        for v in seen {
-          next = next ++ [if x >= a && x < b { v + 1 } else { v }]
-          x = x + 1
-        }
-        seen = next
-      }
-    }
-  }
-  var doubled = 0
-  for x in range(1, n_ir + 1) {
-    if doubled == 0 && seen[x] != 1 {
-      doubled = x
-    }
-  }
-  var used = 0
-  var total_ops = 0
-  for r in rows {
-    used = used + len(r.calls)
-    total_ops = total_ops + r.ops
-  }
-  if bad != "" {
-    Err(bad)
-  } else if doubled > 0 {
-    Err("line ${doubled} of its Tile IR is owned by ${seen[doubled]} rows")
-  } else if used != len(found) {
-    Err("a call spans two rows")
+  if not inside_fn {
+    "call ${c.id} (`${c.name}`) is outside the function"
+  } else if not named {
+    "call ${c.id} (`${c.name}`): the text at ${c.name_from.line}:${c.name_from.col} is `${text_at(src, first, c.name_from, c.name_to)}`"
+  } else if not name_inside {
+    "call ${c.id} (`${c.name}`): its name is outside its span"
+  } else if not parent_ok {
+    "call ${c.id} (`${c.name}`) names row ${c.parent} as its parent"
+  } else if not in_parent {
+    "call ${c.id} (`${c.name}`) is not inside its parent's span"
   } else {
-    Ok(KernelMap {
-      name: t.name,
-      fn_name: fn_name,
-      first: first,
-      src: src,
-      ir: ir,
-      rows: rows,
-      calls: len(found),
-      ops: total_ops,
-    })
+    ""
   }
 }
 
-# ---- the map as data, for the picker ----
-
-## A string as a JSON string.
-pub fn json_str(s: String) -> String = render(JStr(value: s))
-
-## Integers as a JSON array.
-pub fn json_ints(xs: List[Int]) -> String = "[" ++ join(map(xs, x => "${x}"), ",") ++ "]"
-
-## One kernel's map as the JSON the page's script draws from: the source
-## lines already highlighted (`hl`), the Tile IR lines, the rows, and
-## `extra`, more members already rendered (`"key":value`), for what the page
-## says about the kernel beside its map.
-pub fn map_json(m: KernelMap, hl: List[String], extra: List[String]) -> String = {
-  let row = (r: Row) =>
-    "{\"d\":${json_ints([r.src_from, r.src_to])},\"i\":["
-    ++ join(map(r.ir, g => {
-      let (a, b) = g
-      json_ints([a, b])
-    }), ",")
-    ++ "],\"c\":[" ++ join(map(r.calls, json_str), ",") ++ "],\"o\":${r.ops}}"
-  "{\"name\":${json_str(m.name)},\"fn\":${json_str(m.fn_name)},\"first\":${m.first},\"calls\":${m.calls},\"ops\":${m.ops},"
-    ++ "\"src\":[" ++ join(map(hl, json_str), ",") ++ "],"
-    ++ "\"ir\":[" ++ join(map(m.ir, json_str), ",") ++ "],"
-    ++ "\"rows\":[" ++ join(map(m.rows, row), ",") ++ "]"
-    ++ join(map(extra, e => "," ++ e), "") ++ "}"
-}
-
-## Every kernel of the recording, lined up or refused: the dispatch says
-## which function each name runs, `golden` answers a kernel's Tile IR text.
-## `pure` is the functions a call of which records nothing ([pure_fns] of
-## kernels.dawn and of dev.dawn).
-pub fn map_kernels(kernels_src: String, traced: List[Traced], golden: fn(String) -> String, pure: List[String]) -> List[(String, Result[KernelMap, String])] = {
-  let arms = dispatch(kernels_src)
-  let lines = str.split(kernels_src, "\n")
-  map(traced, t => {
-    let found = filter(arms, a => {
-      let (nm, _r) = a
-      nm == t.name
+# The rows: one per source line, each with the runs anchored on it. A call's
+# first run is on its name's line; a later run (a region's terminator and
+# brace, after its body) on the line its span ends on. The head is on the
+# signature's line and the tail on the closing brace's.
+fn rows_of(rec: Recorded, first: Int, last: Int) -> List[Row] = {
+  var anchored: List[(Int, Seg)] = []
+  for r in rec.head {
+    anchored = anchored ++ [(first, Seg { owner: head_owner(), ir: r })]
+  }
+  for c in rec.calls {
+    var k = 0
+    for r in c.lines {
+      let at = if k == 0 { c.name_from.line } else { c.to.line }
+      anchored = anchored ++ [(at, Seg { owner: c.id, ir: r })]
+      k = k + 1
+    }
+  }
+  anchored = anchored ++ [(last, Seg { owner: tail_owner(), ir: rec.tail })]
+  let all = anchored
+  map(range(first, last + 1), l => {
+    let here = map(filter(all, x => {
+      let (at, _s) = x
+      at == l
+    }), x => {
+      let (_at, s) = x
+      s
     })
-    let r: Result[KernelMap, String] =
-      if len(found) != 1 {
-        Err("kernels.dawn dispatches it ${len(found)} times")
-      } else {
-        let (_nm, arm) = found[0]
-        match arm {
-          Err(e) -> Err(e)
-          Ok(fn_name) ->
-            match cut_kernel(lines, fn_name) {
-              Err(e) -> Err(e)
-              Ok((first, src)) -> {
-                let ir = str.split(str.trim_end(golden(t.name)), "\n")
-                align(t, fn_name, first, src, ir, pure)
-              }
-            }
-        }
-      }
-    (t.name, r)
+    Row { line: l, segs: sort_by(here, (x, y) => {
+      let (a, _b) = x.ir
+      let (c, _d) = y.ir
+      a - c
+    }) }
   })
 }
 
+## The Tile IR lines of a run, in order.
+pub fn seg_lines(s: Seg) -> List[Int] = {
+  let (a, b) = s.ir
+  range(a, b)
+}
+
+## The rows of `calls` whose span covers `[a, b)` of line `l`, in row order:
+## the call the text is in, and every call around it.
+pub fn covering(calls: List[MCall], l: Int, a: Int, b: Int) -> List[Int] =
+  map(filter(calls, c => before_or_at(c.from, Pos { line: l, col: a }) && before_or_at(Pos { line: l, col: b }, c.to)), c => c.id)
+
+## Where line `l` (`n` code points long) is cut for the calls on it: every
+## call's start, end and name end that falls on it, and its two ends, in
+## order and once each.
+pub fn cuts(calls: List[MCall], l: Int, n: Int) -> List[Int] = {
+  var at: List[Int] = [1, n + 1]
+  for c in calls {
+    for p in [c.from, c.to, c.name_from, c.name_to] {
+      if p.line == l && p.col >= 1 && p.col <= n + 1 {
+        at = at ++ [p.col]
+      }
+    }
+  }
+  list.unique(sort(at))
+}
+
+## The call whose name is exactly `[a, b)` of line `l`, if there is one.
+pub fn named_at(calls: List[MCall], l: Int, a: Int, b: Int) -> Option[MCall] =
+  list.find(calls, c => c.name_from.line == l && c.name_from.col == a && c.name_to.col == b)
+
 # ---- tests ----
 
-fn vadd_src() -> List[String] =
+fn sample_map() -> String =
+  "kernel k\nfn 10-15\nops 6\nhead 1-4\n"
+  ++ "call 0 -1 load 11:11-11:32 11:11-11:15 4-12\n"
+  ++ "call 1 -1 d_for 12:11-13:26 12:11-12:16 12-13 15-17\n"
+  ++ "call 2 1 addf 13:5-13:25 13:5-13:9 13-15\n"
+  ++ "call 3 -1 store 14:3-14:20 14:3-14:8 17-20\n"
+  ++ "tail 20-23\n"
+
+fn sample_src() -> List[String] =
   [
-    "fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {",
-    "  let blk = tile_at(block_id(0), 128)",
-    "  let ta = load(a, blk, [128])",
-    "  let tb = load(b, blk, [128])",
-    "  store(out, blk, [128], addf(F64, [128], ta, tb))",
+    "fn k(x: Param[F64]) -> Unit !Dev = {",
+    "  let t = load(x, z, [8], s, q)",
+    "  let a = d_for(z, o, o, t, (i, u) =>",
+    "    addf(F64, [8], u, u))",
+    "  store(x, z, a, b)",
     "}",
   ]
 
-fn vadd_calls() -> String =
-  "kernel vadd\nhead 1-4\n  block_id 1-2 4-5\n  tile_at 2-4 5-7\n  load 4-5 7-15\n  load 5-6 15-19\n"
-  ++ "  addf 6-7 19-20\n  store 7-8 20-24\ntail 24-27\n"
+fn sample_ir() -> List[String] = map(range(0, 22), k => "line ${k + 1}")
 
-fn ir_of(n: Int) -> List[String] = map(range(0, n), k => "line ${k + 1}")
-
-fn traced_vadd(text: String) -> Traced =
-  match parse_calls(text) {
-    Ok([t]) -> t
-    _ -> panic("not one kernel")
-  }
-
-test "calls are read in evaluation order: arguments first, left to right" {
-  match scan_calls(list.slice(vadd_src(), 1, 5), []) {
-    Ok(cs) -> {
-      assert map(cs, c => c.name) == ["block_id", "tile_at", "load", "load", "addf", "store"]
-      assert map(cs, c => c.open) == [0, 0, 1, 2, 3, 3]
-    }
-    Err(e) -> panic(e)
-  }
+fn must_parse(text: String) -> Recorded = match parse_map(text) {
+  Ok(r) -> r
+  Err(e) -> panic(e)
 }
 
-test "vadd lines up: every Dawn line owns Tile IR and every Tile IR line has one owner" {
-  match align(traced_vadd(vadd_calls()), "vadd", 50, vadd_src(), ir_of(26), []) {
+test "a recording reads back call by call, with its tree and its spans" {
+  let r = must_parse(sample_map())
+  assert r.name == "k"
+  assert (r.first, r.last, r.ops) == (10, 15, 6)
+  assert map(r.calls, c => (c.name, c.parent)) == [("load", 0 - 1), ("d_for", 0 - 1), ("addf", 1), ("store", 0 - 1)]
+  assert r.calls[1].lines == [(12, 13), (15, 17)]
+  assert r.calls[1].to == Pos { line: 13, col: 26 }
+}
+
+test "the rows put a call's first run on its name's line and a region's later run where its span ends" {
+  match check(must_parse(sample_map()), 10, sample_src(), sample_ir()) {
     Ok(m) -> {
-      assert len(m.rows) == 6
-      assert map(m.rows, r => (r.src_from, r.src_to)) == [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
-      assert map(m.rows, r => r.ir) == [[(1, 4)], [(4, 7)], [(7, 15)], [(15, 19)], [(19, 24)], [(24, 27)]]
-      assert map(m.rows, r => r.calls) == [[], ["block_id", "tile_at"], ["load"], ["load"], ["addf", "store"], []]
-      assert m.calls == 6
-      assert m.ops == 8
+      assert map(m.rows, r => r.line) == [10, 11, 12, 13, 14, 15]
+      assert map(m.rows, r => map(r.segs, s => s.owner)) == [[0 - 1], [0], [1], [2, 1], [3], [0 - 2]]
+      assert m.rows[3].segs[1].ir == (15, 17)
     }
     Err(e) -> panic(e)
   }
 }
 
-## The negative controls: a recording shifted by one line, a source with one
-## call more, and a recording that ends short are each refused.
+## The negative controls: a name that is not at its span, a child outside its
+## parent, a line owned twice, a function that moved and a golden that is
+## shorter are each refused.
 test "a recording that does not fit the text is refused, not drawn" {
-  let shifted = str.replace(vadd_calls(), "  load 5-6 15-19", "  load 5-6 16-19")
-  match align(traced_vadd(shifted), "vadd", 50, vadd_src(), ir_of(26), []) {
+  let src = sample_src()
+  let ir = sample_ir()
+  let shifted = str.replace(sample_map(), "11:11-11:15", "11:12-11:16")
+  match check(must_parse(shifted), 10, src, ir) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "line 15 of its Tile IR is owned by 0 rows") }
+    Err(e) -> { assert str.contains(e, "the text at 11:12 is `oad(`") }
   }
-  let extra = list.take(vadd_src(), 4) ++ ["  let tc = load(b, blk, [128])"] ++ list.drop(vadd_src(), 4)
-  match align(traced_vadd(vadd_calls()), "vadd", 50, extra, ir_of(26), []) {
+  let escaped = str.replace(sample_map(), "call 2 1 addf 13:5-13:25", "call 2 1 addf 13:5-14:2")
+  match check(must_parse(escaped), 10, src, ir) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert e == "call 5: the text says `load`, the recording says `addf`" }
+    Err(e) -> { assert str.contains(e, "not inside its parent") }
   }
-  match align(traced_vadd(vadd_calls()), "vadd", 50, vadd_src(), ir_of(27), []) {
+  let doubled = str.replace(sample_map(), " 13-15\n", " 12-15\n")
+  match check(must_parse(doubled), 10, src, ir) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "line 27 of its Tile IR is owned by 0 rows") }
+    Err(e) -> { assert str.contains(e, "line 12 of its Tile IR is owned 2 times") }
+  }
+  match check(must_parse(sample_map()), 11, src, ir) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "record again") }
+  }
+  match check(must_parse(sample_map()), 10, src, list.take(ir, 21)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "names line 22 of a 21-line golden") }
   }
 }
 
-test "a call of a function with no effect records nothing; one with an effect is refused" {
-  let src = "fn neg_inf() -> Float = 0.0 - 1.0 / 0.0\n"
-    ++ "pub fn row_major(shape: List[Int]) -> List[Int] = {\n"
-    ++ "fn sum_of(t: Tile[F64]) -> Tile[F64] !Dev =\n"
-    ++ "fn split(a: Int,\n  b: Int) -> Int = a\n"
-    ++ "fn takes(body: fn() -> Unit !Dev) -> Int = 0\n"
-  assert pure_fns(src) == ["neg_inf", "row_major", "split"]
-  let body = ["  let x = f_const(F64, [1], neg_inf())", "  let y = sum_of(x)"]
-  match scan_calls(body, pure_fns(src)) {
-    Ok(cs) -> { assert map(cs, c => c.name) == ["f_const", "sum_of"] }
-    Err(e) -> panic(e)
-  }
-}
-
-test "a closure outside a call, an interpolating string and an open bracket are refused" {
-  match scan_calls(["  let f = (x) => addf(F64, [1], x, x)"], []) {
-    Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "a closure that is not an argument of a call") }
-  }
-  match scan_calls(["  d_print(\"x=\${x}\")"], []) {
-    Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "a string interpolates") }
-  }
-  match scan_calls(["  store(out, blk, [128], t"], []) {
-    Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "bracket(s) open") }
-  }
-}
-
-test "a loop's body belongs to the d_for row" {
-  let body = ["  let acc = d_for(lo, up, one, first, (k, t) => addf(F64, [128], t, load(x, k, [128])))"]
-  match scan_calls(body, []) {
-    Ok(cs) -> { assert map(cs, c => c.name) == ["d_for"] }
-    Err(e) -> panic(e)
-  }
-}
-
-test "calls.txt lines that are none of the five shapes are an error" {
-  match parse_calls("kernel k\nhead 1-4\n  load x-5 4-5\n") {
+test "a map line of any other shape is an error" {
+  match parse_map("kernel k\nfn 10-14\ncall 0 -1 load 11:11 11:11-11:15 4-12\n") {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e, "line 3") }
   }
-  match parse_calls("head 1-4\n") {
+  match parse_map("head 1-4\n") {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.contains(e, "before any `kernel` line") }
+    Err(e) -> { assert str.contains(e, "not `kernel <name>`") }
   }
-  match parse_calls("kernel k\nerror no line map\n") {
-    Ok([t]) -> { assert t.error == "no line map" }
-    _ -> { assert false }
+  match parse_map(str.replace(sample_map(), "call 2 1", "call 7 1")) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "call 7 is not row 2") }
+  }
+}
+
+test "a line is cut where the calls on it start, end and name themselves" {
+  let r = must_parse(sample_map())
+  assert cuts(r.calls, 13, 25) == [1, 5, 9, 25, 26]
+  assert covering(r.calls, 13, 5, 9) == [1, 2]
+  assert covering(r.calls, 11, 1, 11) == []
+  match named_at(r.calls, 13, 5, 9) {
+    Some(c) -> { assert c.name == "addf" }
+    None -> { assert false }
   }
 }

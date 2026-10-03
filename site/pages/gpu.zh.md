@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ a1acb11a76a123b5 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 39bd3fb898e9dd89 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -48,39 +48,35 @@ Dawn 里的 GPU kernel 是一个带 `!Dev` 效果的普通函数。运行一次�
 
 ## kernel-body
 
-每一行 Dawn 都摆在它记录下的 Tile IR 旁边，配对按调用逐个来自记录本身。指向一行就能点亮它那一份，也可以把记录重放一遍。
+一个融合注意力 kernel 的每一行，都摆在它的调用写出的 Tile IR 旁边，每一段挂在写出它的那个调用名下。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表。每段里加粗的那一行是这个调用真正要做的操作，它上面的几行是 lowering 补上的寻址。
+
+## kernel-kind
+
+一个循环，里面两次扫描
 
 ## kernel-left
 
 Dawn 源码
 
+## kernel-call
+
+调用
+
 ## kernel-right
 
 它记录下的 Tile IR
 
-## kernel-pick
+## kernel-note
 
-Kernel
-
-## kernel-mapped
-
-{total} 个 golden kernel 中有 {n} 个逐行对上
-
-## kernel-replay
-
-重放记录
-
-## kernel-ops
-
-已记录操作
+点一个调用名，会标出它的整段源码和它写出的 Tile IR。循环或扫描只标出自己的头、终结和括号，体内调用写出的行用更淡的边线标出。点一行 Tile IR，可以找到写出它的调用。
 
 ## fact-calls
 
-次 Dawn 调用
+个调用
 
 ## fact-ops
 
-个记录下的操作
+个操作
 
 ## fact-lines
 
@@ -88,15 +84,15 @@ Kernel
 
 ## fact-bytes
 
-字节的字节码
+字节
 
 ## fact-rows
 
-条覆盖表记录引用它
+被 {n} 条覆盖记录引用
 
 ## fact-mutants
 
-个变异体针对它运行
+{n} 个变异体
 
 ## coverage-title
 
@@ -128,7 +124,7 @@ Tile IR 版本里每个公开 opcode、类型 tag 和属性值都有一行，记
 
 ## gates-body
 
-每一层都抓得到前一层抓不到的问题，而且每一层都必须让自己的变异体变红。下面每个点都是其中一个，落在它所针对的那一层。
+每一层都抓得到前一层抓不到的问题，而且每一层都必须让自己的变异体变红。每个点是其中一个，落在它所针对的那一道门。
 
 ## gates-caught
 
