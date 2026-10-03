@@ -347,6 +347,7 @@ TRANSLATIONS = {
     "site/pages/home.zh.md": "site/pages/home.md",
     "site/pages/stdlib.zh.md": "site/pages/stdlib.md",
     "site/pages/gpu.zh.md": "site/pages/gpu.md",
+    "site/pages/packages.zh.md": "site/pages/packages.md",
 }
 
 SPEC_CONTRACTS = (

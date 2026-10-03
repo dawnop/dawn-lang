@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 
 mkdir -p site/build
 ./bin/dawn doc --stdlib > site/build/stdlib.json
+# The same for every package, for packages.html (site/package-docs.sh).
+site/package-docs.sh site/build/packages
 
 # The cuTile page's call map: which call of flash_attn wrote which Tile IR
 # line, and where that call is in its source. The generator reads the

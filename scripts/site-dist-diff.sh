@@ -39,8 +39,9 @@
 # pinned stdout the gallery renders, and the three tile directories under
 # scripts/ (tileir-features, tile-golden, tile-gpu-diff) whose coverage
 # tables, goldens and device ledgers the cuTile page (site/src/gen/gpu.dawn)
-# counts and prints -- is copied. The toolchain (bin/dawn,
-# selfhost/src, std/, runtime/c) cannot be, because the JVM leg runs through
+# counts and prints -- is copied, and so is compiler-plan/, a dependency of
+# the generator itself (the packages page reads manifests through it). The
+# toolchain (bin/dawn, selfhost/src, std/, runtime/c) cannot be, because the JVM leg runs through
 # `bin/dawn`, which rebuilds itself from the recursive Planner source closure on
 # demand. So the toolchain is fingerprinted instead, before and after; a change there aborts
 # with "toolchain moved" rather than being reported as a backend divergence.
@@ -85,14 +86,16 @@ mkdir -p "$SNAP"
 # site/dist is the product, not an input; node_modules is npm's, and the
 # generator only ever reads site/play-ui/dist.
 tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' \
-  docs examples site packages scripts/example-main-contract/registry.json \
+  docs examples site packages compiler-plan scripts/example-main-contract/registry.json \
   scripts/tileir-features scripts/tile-golden scripts/tile-gpu-diff \
   | tar -xf - -C "$SNAP"
-# site/build/stdlib.json is generated, not tracked (site/build.sh makes it).
-# Regenerating it into the snapshot keeps the run self-contained and keeps this
+# site/build/stdlib.json and site/build/packages/ are generated, not tracked
+# (site/build.sh makes them).
+# Regenerating them into the snapshot keeps the run self-contained and keeps this
 # script from writing anything into the working tree.
 mkdir -p "$SNAP/site/build"
 ./bin/dawn doc --stdlib > "$SNAP/site/build/stdlib.json"
+site/package-docs.sh "$SNAP/site/build/packages"
 
 echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 

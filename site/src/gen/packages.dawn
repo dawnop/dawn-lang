@@ -1,0 +1,361 @@
+# packages/*/{dawn.toml, README.md} and site/build/packages/*.json (from
+# `dawn doc packages/<dir>`) -> packages.html.
+#
+# One table, a row per package: the alias `use` lines spell, the manifest
+# name and version, the first paragraph of its README, its modules, the
+# packages it depends on, and the two ways to depend on it.
+#
+# Why every cell is read and none is written. The packages move on their own:
+# a major bump renames one (`web5` became `web6`), a dependency comes or goes,
+# a module is added. A table copied by hand would be right on the day it was
+# written. Read at build time it cannot disagree with the tree it was built
+# from, the same reason gen/gpu reads the tile ledgers.
+#
+# Why the manifest is read through compiler_plan's `manifestv.validate`, and
+# not by a few lines of string matching here. That function is the one channel
+# every manifest read in the toolchain goes through, so the name, version and
+# dependencies printed here are the ones the toolchain resolves, `[deps.<alias>]`
+# url tables included. A second reader would be a second opinion about what a
+# `dawn.toml` says.
+#
+# Why the summary is the README's first paragraph and not a manifest key.
+# schema 1 rejects unknown keys, and four of these packages are in the
+# compiler's own closure, so a `description` key would have to be released and
+# seeded before any package could carry it. Each README opens with one
+# sentence for this reason (packages/*/README.md, P1).
+#
+# The modules come from `dawn doc`, as stdlib.html's entries do: site/build.sh
+# writes one document per package. Only their paths are read here; the
+# entries render through gen/api when each package gets a page of its own.
+
+use std/str
+use std/list
+use std/io
+use std/io.{Fs}
+use json/parser.{parse}
+use json/value.{Json, error_text}
+use md/parser
+use md/ast.{Inline, Para}
+use html/escape.{escape_html}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell, section_crumb, chip, repo_url}
+use html/render.{split_head, inline_run, inline_text}
+use gen/common.{must_read, must_list, write_page}
+use gen/copy.{Copy, load_copy, line, plain}
+use gen/api.{jget, jarr, field}
+use compiler_plan/manifestv.{validate, semv_show, VPath, VUrl}
+use fspath/fspath
+
+# ---- reading a package ----
+
+## One package as the table shows it. `dir` is its directory under
+## packages/, `use_as` the name a consumer's `use` lines spell, `deps` each
+## dependency's alias with the directory under packages/ it resolves to ("" if
+## it is not one of these packages).
+pub type Package = {
+  dir: String,
+  use_as: String,
+  name: String,
+  version: String,
+  summary: List[Inline],
+  deps: List[(String, String)],
+}
+
+## The alias a package is used under: its directory with `-` spelled `_`,
+## which is what every consumer in this repository writes (`tea_core =
+## "../tea-core"`). Not the manifest name: `json2` is used as `json`, which
+## is what keeps `use json/...` lines still across a major bump.
+pub fn alias_of(dir: String) -> String = str.replace(dir, "-", "_")
+
+## The directories under packages/ that hold a manifest, in order.
+pub fn package_dirs() -> List[String] !Fs =
+  list.sort(filter(must_list("packages"), d => io.exists("packages/${d}/dawn.toml")))
+
+## A README's first paragraph after its `#` title: the one-sentence summary
+## each README opens with. A README that does not open that way stops the
+## build, as an unparsable doc comment does.
+pub fn first_paragraph(path: String, text: String) -> List[Inline] =
+  match parser.parse(text) {
+    Ok(bs) ->
+      match split_head(bs).body {
+        [Para(items), ..] -> items
+        _ -> panic("${path}: the first block after the title is not a paragraph")
+      }
+    Err(e) -> panic("${path}: ${e}")
+  }
+
+## Where a dependency path resolves, as a directory under packages/, or ""
+## when it is not one. `path` is as `validate` hands it back: already joined
+## onto the depending package's directory (`packages/web/../json`).
+pub fn dep_dir(path: String) -> String = {
+  let full = fspath.normalize(path)
+  match str.strip_prefix(full, "packages/") {
+    Some(d) -> if str.contains(d, "/") { "" } else { d }
+    None -> ""
+  }
+}
+
+## Read one package's manifest and README.
+pub fn read_package(dir: String) -> Package !Fs = {
+  let root = "packages/${dir}"
+  let text = must_read("${root}/dawn.toml")
+  let m =
+    match validate(root, text) {
+      Ok(m) -> m
+      Err(ds) -> panic("${root}/dawn.toml does not validate: " ++ join(map(ds, d => d.msg), "; "))
+    }
+  let readme = "${root}/README.md"
+  Package {
+    dir: dir,
+    use_as: alias_of(dir),
+    name: m.name,
+    version:
+      match m.version {
+        Some(v) -> semv_show(v)
+        None -> ""
+      },
+    summary: first_paragraph(readme, must_read(readme)),
+    deps: map(m.deps, d =>
+        match d {
+          VPath(a, path, _, _) -> (a, dep_dir(path))
+          VUrl(a, _, _, _, _, _, _) -> (a, "")
+        }),
+  }
+}
+
+## Every package, in directory order.
+pub fn read_packages() -> List[Package] !Fs = map(package_dirs(), d => read_package(d))
+
+## The README summary as plain text: what the search index's note is.
+pub fn summary_text(p: Package) -> String = inline_text(p.summary)
+
+## The module paths `dawn doc` documented for a package, as it spells them.
+## A package's document also carries the modules of its dependencies that it
+## reaches (tea-dom's lists `json2/value` and `tea_core/tree` beside its own
+## `node`), so [own_modules] keeps the ones with a source file here.
+pub fn doc_module_paths(doc: Json) -> List[String] = map(jarr(jget(doc, "modules")), m => field(m, "path"))
+
+## The modules of `dir` among `paths`: those whose source is in the
+## package's own `src/`.
+fn own_modules(dir: String, paths: List[String]) -> List[String] !Fs =
+  filter(paths, m => io.exists("packages/${dir}/src/${m}.dawn"))
+
+## Module paths as `use` spells them, sorted: the alias, a slash, the path.
+pub fn module_paths(use_as: String, paths: List[String]) -> List[String] =
+  list.sort(map(paths, m => "${use_as}/${m}"))
+
+fn read_doc(dir: String) -> Json !Fs = {
+  let path = "site/build/packages/${dir}.json"
+  let text =
+    match io.read_file(path) {
+      Ok(t) -> t
+      Err(_) -> panic("${path} missing: run site/build.sh (it runs dawn doc for every package)")
+    }
+  match parse(text) {
+    Ok(v) -> v
+    Err(e) -> panic("${path}: " ++ error_text(e))
+  }
+}
+
+# ---- the page ----
+
+## The page's anchor for a package's row.
+pub fn row_id(dir: String) -> String = "pkg-${dir}"
+
+fn gh_tree(dir: String) -> String = "${repo_url()}/tree/main/packages/${dir}"
+
+## A link the README's first paragraph makes: relative ones are relative to
+## the package's directory, which on this site is GitHub's copy of it.
+fn readme_url(dir: String, u: String) -> String =
+  if str.contains(u, "://") || str.starts_with(u, "#") || str.starts_with(u, "mailto:") {
+    u
+  } else {
+    "${repo_url()}/blob/main/packages/${dir}/${u}"
+  }
+
+## The release's source archive, the url a consumer's `dawn add` fetches.
+## Without a version the build was not told which release it is, and the
+## note names the shape instead of a file.
+pub fn archive_url(version: String) -> String =
+  if version == "" { "" } else { "${repo_url()}/archive/refs/tags/v${version}.zip" }
+
+fn archive_html(version: String) -> String = {
+  let u = archive_url(version)
+  if u == "" {
+    "<code>" ++ escape_html("${repo_url()}/archive/refs/tags/v<version>.zip") ++ "</code>"
+  } else {
+    """<a href="${u}"><code>""" ++ escape_html(u) ++ "</code></a>"
+  }
+}
+
+## The two dependency lines: a path into a checkout, and `dawn add` on a
+## release archive, its flags on a continuation line so the column stays
+## narrow. `--as` only when the alias is not the manifest name,
+## because without it the key `dawn add` writes is the manifest name.
+pub fn use_lines(p: Package) -> (String, String) = {
+  let path = p.use_as ++ ` = "<dawn-lang>/packages/` ++ p.dir ++ `"`
+  let as_flag = if p.use_as == p.name { "" } else { " --as ${p.use_as}" }
+  (path, "dawn add <archive> \\\n  --subdir packages/${p.dir}${as_flag}")
+}
+
+fn deps_html(c: Copy, p: Package, known: List[String]) -> String =
+  if len(p.deps) == 0 {
+    """<span class="pkg-none">""" ++ escape_html(plain(c, "deps-none")) ++ "</span>"
+  } else {
+    join(map(p.deps, d => {
+      let (a, dir) = d
+      let code = "<code>" ++ escape_html(a) ++ "</code>"
+      if dir != "" && list.contains(known, dir) { """<a href="#${row_id(dir)}">${code}</a>""" } else { code }
+    }), " ")
+  }
+
+fn row_html(c: Copy, p: Package, mods: List[String], known: List[String]) -> String = {
+  let (path, add) = use_lines(p)
+  let mod_html = join(map(mods, m => "<code>" ++ escape_html(m) ++ "</code>"), " ")
+  """<tr id="${row_id(p.dir)}"><td class="key"><a href="${gh_tree(p.dir)}"><code>${escape_html(p.use_as)}</code></a></td>"""
+    ++ """<td class="pkg-name"><code>${escape_html(p.name)}</code></td><td class="pkg-ver">${escape_html(p.version)}</td>"""
+    ++ """<td class="pkg-sum"><p>""" ++ inline_run(p.summary, u => readme_url(p.dir, u)) ++ "</p>"
+    ++ """<p class="pkg-mods">${mod_html}</p></td>"""
+    ++ """<td class="pkg-deps">${deps_html(c, p, known)}</td>"""
+    ++ """<td class="pkg-use"><span class="pkg-use-k">""" ++ escape_html(plain(c, "use-path")) ++ "</span>"
+    ++ "<code>" ++ escape_html(path) ++ "</code>"
+    ++ """<span class="pkg-use-k">""" ++ escape_html(plain(c, "use-archive")) ++ "</span>"
+    ++ "<code>" ++ escape_html(add) ++ "</code></td></tr>"
+}
+
+fn table_html(c: Copy, rows: List[(Package, List[String])]) -> String = {
+  let p = (k: String) => escape_html(plain(c, k))
+  let known = map(rows, r => {
+    let (pk, _) = r
+    pk.dir
+  })
+  let body = join(map(rows, r => {
+    let (pk, mods) = r
+    row_html(c, pk, mods, known)
+  }), "\n")
+  """<div class="table-wrap pkg-table"><table>
+<thead><tr><th>${p("th-package")}</th><th>${p("th-name")}</th><th>${p("th-version")}</th><th>${p("th-summary")}</th><th>${p("th-deps")}</th><th>${p("th-use")}</th></tr></thead>
+<tbody>
+${body}
+</tbody>
+</table></div>"""
+}
+
+## The copy file of one language.
+pub fn copy_file(lang: Lang) -> String =
+  match lang {
+    En -> "site/pages/packages.md"
+    Zh -> "site/pages/packages.zh.md"
+  }
+
+## The page as markup, in one language, without writing it. `rows` pairs each
+## package with its module paths; `version` is the release the build was
+## told it is ("" when it was not).
+pub fn packages_page(a: Assets, lang: Lang, rows: List[(Package, List[String])]) -> String !Fs = {
+  let root =
+    match lang {
+      En -> "."
+      Zh -> ".."
+    }
+  let c = load_copy(copy_file(lang))
+  let mu = (u: String) => u
+  let note = str.replace(line(c, "use-note", mu), "{archive}", archive_html(a.version))
+  let count = "${len(rows)} " ++ line(c, "chip-packages", mu)
+  let head = PageHead {
+    crumbs: [section_crumb(lang, root, "packages", false)],
+    title: line(c, "title", mu),
+    lede: line(c, "lede", mu),
+    meta: [chip(count), chip(line(c, "chip-source", mu))],
+    extra: "",
+    cls: "",
+  }
+  let main = `<main class="wrap page pkg-page">` ++ "\n" ++ table_html(c, rows) ++ "\n"
+    ++ """<div class="pkg-notes"><p>${note}</p>""" ++ "\n<p>" ++ line(c, "name-note", mu) ++ "</p></div>\n</main>"
+  shell(a, lang, "packages.html", plain(c, "title") ++ " — Dawn", root, "packages", head, main)
+}
+
+## Write the page: English at the site root, Chinese under `/zh/`. The
+## entries are the same in both: they are the packages' own text.
+pub fn gen_packages(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
+  let rows = map(read_packages(), p =>
+      (p, module_paths(p.use_as, own_modules(p.dir, doc_module_paths(read_doc(p.dir))))))
+  let dst =
+    match lang {
+      En -> "${out}/packages.html"
+      Zh -> "${out}/zh/packages.html"
+    }
+  write_page(dst, packages_page(a, lang, rows))
+}
+
+# ---- tests ----
+
+test "the alias is the directory as `use` spells it" {
+  assert alias_of("tea-dom") == "tea_dom"
+  assert alias_of("json") == "json"
+}
+
+test "a path dependency lands on a sibling package or on nothing" {
+  assert dep_dir("packages/web/../json") == "json"
+  assert dep_dir("packages/tea-dom/../tea-core") == "tea-core"
+  assert dep_dir("packages/x/../../site") == ""
+  assert dep_dir("packages/x/../json/sub") == ""
+}
+
+test "the summary is the paragraph after the title" {
+  let items = first_paragraph("R.md", "# packages/x\n\nDoes `one` thing.\n\nMore.\n")
+  assert inline_text(items) == "Does one thing."
+}
+
+test "the dependency lines alias a renamed package and leave the rest alone" {
+  let p = (dir: String, name: String) =>
+    Package { dir: dir, use_as: alias_of(dir), name: name, version: "1.0.0", summary: [], deps: [] }
+  assert use_lines(p("json", "json2")) ==
+    (`json = "<dawn-lang>/packages/json"`, "dawn add <archive> \\\n  --subdir packages/json --as json")
+  assert use_lines(p("tea-core", "tea_core")) ==
+    (`tea_core = "<dawn-lang>/packages/tea-core"`, "dawn add <archive> \\\n  --subdir packages/tea-core")
+}
+
+test "the archive is the release's tag zip, and none without a release" {
+  assert archive_url("0.82.0") == repo_url() ++ "/archive/refs/tags/v0.82.0.zip"
+  assert archive_url("") == ""
+}
+
+## Every package in the tree reads: its manifest validates, its README opens
+## with a summary, and its path dependencies resolve to rows of the table. A
+## package added without a README, or with one that opens on a list, is a
+## red test here before it is a stopped build.
+test "every package under packages/ reads, and its sibling dependencies are rows" {
+  io.with_fs_real(() => {
+    let ps = read_packages()
+    assert len(ps) > 0
+    let dirs = map(ps, p => p.dir)
+    for p in ps {
+      assert p.name != ""
+      assert p.version != ""
+      assert str.trim(summary_text(p)) != ""
+      for d in p.deps {
+        let (_, dir) = d
+        assert list.contains(dirs, dir)
+      }
+    }
+  })
+}
+
+test "module paths are spelled as `use` spells them, sorted" {
+  let doc = parse(`{"modules":[{"path":"value"},{"path":"lexer"}]}`)
+  match doc {
+    Ok(j) -> {
+      assert module_paths("json", doc_module_paths(j)) == ["json/lexer", "json/value"]
+    }
+    Err(_) -> {
+      assert false
+    }
+  }
+}
+
+## The dependency modules a package's document carries are not its own:
+## tea-dom's lists json2's and tea_core's beside its own.
+test "only a package's own modules are its rows' modules" {
+  io.with_fs_real(() => {
+    assert own_modules("tea-dom", ["tea_core/tree", "node", "json2/value", "dsl"]) == ["node", "dsl"]
+  })
+}
