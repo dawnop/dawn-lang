@@ -274,6 +274,20 @@ fn burn(st: ESt, env: Env) -> ER =
     Ok((ESt { ..st, fuel: st.fuel - 1 }, env, VUnit))
   }
 
+## Charge `n` steps at once: what a primitive that produces `n` elements or
+## code points pays, *before* it allocates them (spec §7.2 item 3).
+##
+## A step is otherwise one Core node, and that alone bounds neither memory nor
+## the time of a single step: `s = s ++ s` costs a few nodes per turn while its
+## result doubles, so a fuel of 10^5 built a 512 MB string before this charge
+## existed, and twice that took the JVM down with an OutOfMemoryError that no
+## barrier catches. Charging the size first is what makes the budget bound the
+## allocation too; catching the failure after it happened is not an option,
+## since a host that ran out of memory is not one to trust afterwards.
+##
+## The unit is the one the language defines and both hosts agree on, elements
+## for a List and code points for a String, so a fold runs out of fuel at the
+## same place on the JVM and native compilers.
 fn burn_n(st: ESt, env: Env, n: Int) -> ER = {
   let cost = if n > 0 { n } else { 0 }
   let left = st.fuel - cost
@@ -1135,6 +1149,9 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "to_string" || name == "str_of_int" || name == "str_of_bool" {
     Ok((st, env, VStr(stringify(args[0]))))
   } else if name == "show" {
+    # Not charged by size: a String never reaches this arm (lowering renders a
+    # known String through `quote`, which is charged; lower.show_erased), and
+    # every other value it can render is a scalar of bounded length.
     match show_value(args[0]) {
       Some(s) -> Ok((st, env, VStr(s)))
       None -> cerr(st, env, "`show` cannot render this value at comptime")
@@ -1148,7 +1165,9 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # the nested rendering of a String, which a synthesised `show` body reaches
     # for every String field
   } else if name == "quote" {
-    Ok((st, env, VStr(quote_str(as_str(args[0])))))
+    let s = as_str(args[0])
+    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    Ok((st1, env, VStr(quote_str(s))))
   } else if name == "len" {
     Ok((st, env, VInt(len(as_list(args[0])))))
   } else if name == "get" {
@@ -1177,7 +1196,8 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     let xs = as_list(args[0])
     let from = as_int(args[1])
     let to = as_int(args[2])
-    Ok((st, env, VList(list.take(list.drop(xs, from), to - from))))
+    let (st1, _, _) = burn_n(st, env, (if to < len(xs) { to } else { len(xs) }) - from)?
+    Ok((st1, env, VList(list.take(list.drop(xs, from), to - from))))
     # the placeholder a match or if result slot is declared with; every path
     # assigns before reading, so its value is never observed
   } else if name == "null_ref" {
@@ -1197,9 +1217,16 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     let (st1, sorted) = merge_sort(icx, st, env, as_list(args[0]), args[1])?
     Ok((st1, env, VList(sorted)))
   } else if name == "join" {
+    let sep = as_str(args[1])
     var parts: List[String] = []
-    for x in as_list(args[0]) { parts = parts ++ [as_str(x)] }
-    Ok((st, env, VStr(join(parts, as_str(args[1])))))
+    var size = 0
+    for x in as_list(args[0]) {
+      let p = as_str(x)
+      size = size + str.len(p) + (if len(parts) > 0 { str.len(sep) } else { 0 })
+      parts = parts ++ [p]
+    }
+    let (st1, _, _) = burn_n(st, env, size)?
+    Ok((st1, env, VStr(join(parts, sep))))
     # ---- the cursor family ----
     #
     # A position is opaque, so nothing outside std/cursor can see the number
@@ -1247,7 +1274,8 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     if from < 0 || to > str.len(s) || from > to {
       cerr(st, env, "panicked: cursor_slice: invalid cursor range")
     } else {
-      Ok((st, env, VStr(str.slice(s, from, to))))
+      let (st1, _, _) = burn_n(st, env, to - from)?
+      Ok((st1, env, VStr(str.slice(s, from, to))))
     }
     # case folding is a Unicode table rather than a walk, so it stays a backend
     # primitive -- but calling it is not reflecting into one: this is the same
@@ -1259,13 +1287,17 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # been written down anywhere that would run it. Moving std off the
     # intrinsics is what asked the question.
   } else if name == "code_points" {
+    let s = as_str(args[0])
+    let (st1, _, _) = burn_n(st, env, str.len(s))?
     var out: List[CValue] = []
-    for cp in code_points(as_str(args[0])) { out = out ++ [VInt(char.code(cp))] }
-    Ok((st, env, VList(out)))
+    for cp in code_points(s) { out = out ++ [VInt(char.code(cp))] }
+    Ok((st1, env, VList(out)))
   } else if name == "from_code_points" {
+    let vs = as_list(args[0])
+    let (st1, _, _) = burn_n(st, env, len(vs))?
     var cps: List[Char] = []
-    for v in as_list(args[0]) { cps = cps ++ [as_char(v)] }
-    Ok((st, env, VStr(from_code_points(cps))))
+    for v in vs { cps = cps ++ [as_char(v)] }
+    Ok((st1, env, VStr(from_code_points(cps))))
   } else if name == "char_is_letter" {
     Ok((st, env, VBool(char_is_letter(as_char(args[0])))))
   } else if name == "char_is_digit" {
@@ -1279,9 +1311,13 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "char_is_space" {
     Ok((st, env, VBool(char_is_space(as_char(args[0])))))
   } else if name == "str_lower" {
-    Ok((st, env, VStr(str.to_lower(as_str(args[0])))))
+    let s = as_str(args[0])
+    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    Ok((st1, env, VStr(str.to_lower(s))))
   } else if name == "str_upper" {
-    Ok((st, env, VStr(str.to_upper(as_str(args[0])))))
+    let s = as_str(args[0])
+    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    Ok((st1, env, VStr(str.to_upper(s))))
   } else if name == "float_of_decimal" {
     # std/fmt.atod's raw conversion, reached through the program's own std
     # Core after atod's scanner accepted and trimmed the text. The host's
@@ -1640,12 +1676,21 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
     match lv {
       VStr(a) ->
         match rv {
-          VStr(b) -> return Ok((st2, env2, VStr(a ++ b)))
+          VStr(b) -> {
+            # a String concat copies both sides, so it pays for the result
+            let (st3, _, _) = burn_n(st2, env2, str.len(a) + str.len(b))?
+            return Ok((st3, env2, VStr(a ++ b)))
+          }
           _ -> ()
         }
       VList(a) ->
         match rv {
-          VList(b) -> return Ok((st2, env2, VList(a ++ b)))
+          VList(b) -> {
+            # a List concat appends the right side onto the shared left one
+            # (spec §2.2), so the right side is what it allocates
+            let (st3, _, _) = burn_n(st2, env2, len(b))?
+            return Ok((st3, env2, VList(a ++ b)))
+          }
           _ -> ()
         }
       _ -> ()

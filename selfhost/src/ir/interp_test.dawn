@@ -865,3 +865,119 @@ test "fuel exhaustion becomes a diagnostic" {
   assert len(out.diags) == 1
   assert str.contains(out.diags[0].msg, "fuel exhausted")
 }
+
+## Check `src` as module `name` and fold its consts with `fuel`: the
+## diagnostics' messages and the folded consts. The size-charge tests below
+## fold one source twice, once short of the charge and once with room for it.
+fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, CValue]) !io = {
+  let (m, pdiags) = parser.parse_module(src)
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(Some(name), Some("size.dawn")), m, env)
+  # a source that does not check is a broken test, never a passing one
+  if len(pdiags) > 0 || len(cx1.diags) > 0 { return (["the size source was rejected"], map.empty()) }
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, name, ct_fuel(fuel))
+  var msgs: List[String] = []
+  for d in out.diags { msgs = msgs ++ [d.msg] }
+  (msgs, out.consts)
+}
+
+## A 1,024-code-point String `s` and a 1,024-element List `xs`, an optional
+## `setup` line, then `op` added up forty times. Built by doubling, the inputs
+## cost about 4,000 steps with the size charge; forty applications cost a few
+## hundred steps without it and about 40,000 with it, so a fuel of 20,000
+## tells the two apart. `some(x)` observes a String without paying for it.
+fn size_src(setup: String, op: String) -> String =
+  "fn base(k: Int) -> String = {\n" ++
+  "  var s = \"xxxxxxxx\"\n" ++
+  "  var i = 0\n" ++
+  "  while i < k {\n" ++
+  "    s = s ++ s\n" ++
+  "    i = i + 1\n" ++
+  "  }\n" ++
+  "  s\n" ++
+  "}\n" ++
+  "fn some(x: String) -> Int = if x == \"\" { 0 } else { 1 }\n" ++
+  "fn q[T: Show](x: T) -> String = to_string(x)\n" ++
+  "fn count(s: String, xs: List[Int]) -> Int = {\n" ++
+  "  " ++ setup ++ "\n" ++
+  "  var n = 0\n" ++
+  "  var i = 0\n" ++
+  "  while i < 40 {\n" ++
+  "    n = n + " ++ op ++ "\n" ++
+  "    i = i + 1\n" ++
+  "  }\n" ++
+  "  n\n" ++
+  "}\n" ++
+  "const V: Int = count(base(7), range(0, 1024))\n"
+
+fn exhausted(msg: String) -> Bool =
+  msg == "comptime: fuel exhausted — evaluation did not finish within the step budget"
+
+## Short of the charge the fold runs out of fuel with the message it always
+## had; with room for it the fold answers `want`.
+fn charged(name: String, setup: String, op: String, want: Int) -> Bool !io = {
+  let src = size_src(setup, op)
+  let (short, _) = fold_src(name, src, 20000)
+  let (msgs, consts) = fold_src(name, src, 200000)
+  len(short) == 1 && exhausted(short[0]) && len(msgs) == 0 &&
+    map.get(consts, "V") == Some(VInt(want))
+}
+
+test "doubling a String or a List runs out of fuel instead of memory" {
+  # grow(26) is a 512 MB String: before the size charge it folded inside a
+  # fuel of 10^5, and grow(29) took the JVM down with an OutOfMemoryError
+  let src = "fn grow(n: Int) -> Int = {\n" ++
+    "  var s = \"xxxxxxxx\"\n" ++
+    "  var i = 0\n" ++
+    "  while i < n {\n" ++
+    "    s = s ++ s\n" ++
+    "    i = i + 1\n" ++
+    "  }\n" ++
+    "  if s == \"\" { 0 } else { i }\n" ++
+    "}\n" ++
+    "fn grow_list(n: Int) -> Int = {\n" ++
+    "  var xs = [1, 2, 3, 4, 5, 6, 7, 8]\n" ++
+    "  var i = 0\n" ++
+    "  while i < n {\n" ++
+    "    xs = xs ++ xs\n" ++
+    "    i = i + 1\n" ++
+    "  }\n" ++
+    "  len(xs)\n" ++
+    "}\n" ++
+    "const S: Int = grow(26) + 2\n" ++
+    "const L: Int = grow_list(26) + 3\n" ++
+    "const SMALL: Int = grow(6) + grow_list(6)\n"
+  let (msgs, consts) = fold_src("m", src, 100000)
+  assert len(msgs) == 2
+  assert exhausted(msgs[0])
+  assert exhausted(msgs[1])
+  assert map.get(consts, "SMALL") == Some(VInt(6 + 512))
+}
+
+test "a String concat pays for its result, a List concat for its right side" {
+  assert charged("m", "", "some(s ++ \"y\")", 40)
+  assert charged("m", "", "len(xs ++ xs) - 1024", 40 * 1024)
+  # the left side of a List concat is shared, not copied: appending a short
+  # list to a long one stays cheap
+  let (msgs, consts) = fold_src("m", size_src("", "len(xs ++ [1, 2]) - 1024"), 20000)
+  assert len(msgs) == 0
+  assert map.get(consts, "V") == Some(VInt(40 * 2))
+}
+
+test "list slices, joins and code point conversions pay for what they produce" {
+  assert charged("m", "",
+    "match xs {\n      [_, ..rest] -> len(rest)\n      [] -> 0\n    }", 40 * 1023)
+  assert charged("m", "", "some(join([s, s], \",\"))", 40)
+  assert charged("m", "", "len(code_points(s))", 40 * 1024)
+  assert charged("m", "let cs = code_points(s)", "some(from_code_points(cs))", 40)
+}
+
+test "case mapping, slicing and quoting a String pay for what they produce" {
+  assert charged("std/t", "", "some(str_lower(s))", 40)
+  assert charged("std/t", "", "some(str_upper(s))", 40)
+  assert charged("std/t", "", "some(cursor_slice(s, 1, 1024))", 40)
+  assert charged("m", "", "some(q(s))", 40)
+}
