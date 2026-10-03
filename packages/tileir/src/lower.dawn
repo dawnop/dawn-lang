@@ -527,6 +527,10 @@ fn permuted_shape(shape: List[Int], perm: List[Int]) -> List[Int] =
 # and their types; `closed` the handles a finished loop body defined, kept
 # so that a reference to one after the loop is refused by name; `memo` the
 # ladders in scope; `body` the instructions of the region being built.
+# `owners` is beside `body`, one entry each: the operation each instruction
+# came from. `at` is the number of the operation being lowered and `next_op`
+# the number the next one takes, both counted as `TileProg.ops` reads depth
+# first (prog's `op_number`), which is the order this lowering visits them.
 type L = {
   next: Int,
   names: Map[Int, Ref],
@@ -534,11 +538,29 @@ type L = {
   closed: Map[Int, Unit],
   memo: Map[String, Ref],
   body: List[Instr],
+  owners: List[Owner],
+  at: Int,
+  next_op: Int,
 }
+
+## Which operation of the program an instruction of `Kernel.body` came from:
+## `op` is the operation's number with `TileProg.ops` read depth first, a
+## region before its body (prog's `op_number`, `MakeToken(0)` being 0), and
+## `inner` is the same for each body of a region instruction, in the order
+## the text prints them (an `if` has two). A pointer ladder is the operation
+## that FIRST needed it, because that is where it is emitted.
+pub type Owner = { op: Int, inner: List[List[Owner]] } derive Show
 
 fn fresh(l: L) -> (L, Int) = (L { ..l, next: l.next + 1 }, l.next)
 
-fn emit(l: L, i: Instr) -> L = L { ..l, body: l.body ++ [i] }
+fn emit(l: L, i: Instr) -> L = L { ..l, body: l.body ++ [i], owners: l.owners ++ [Owner { op: l.at, inner: [] }] }
+
+# A region instruction, with the owners of the bodies it holds.
+fn emit_region(l: L, i: Instr, inner: List[List[Owner]]) -> L =
+  L { ..l, body: l.body ++ [i], owners: l.owners ++ [Owner { op: l.at, inner: inner }] }
+
+# An empty instruction list for a region's body, in the scope of `l`.
+fn opened(l: L) -> L = L { ..l, body: [], owners: [] }
 
 fn bind(l: L, handle: Int, r: Ref, t: Ty) -> L =
   L { ..l, names: map.insert(l.names, handle, r), tys: map.insert(l.tys, handle, t) }
@@ -702,7 +724,10 @@ fn index_pointers(l0: L, param: Int, dtype: String, index: Int, shape: List[Int]
   }
 }
 
-fn lower_op(l0: L, op: TileOp) -> L = match op {
+# One operation lowered, as the next one in depth-first order.
+fn lower_op(l: L, op: TileOp) -> L = lower_one(L { ..l, at: l.next_op, next_op: l.next_op + 1 }, op)
+
+fn lower_one(l0: L, op: TileOp) -> L = match op {
   MakeToken(dst) -> {
     let (l1, t) = define(l0, dst, Token)
     emit(l1, MakeTok(t))
@@ -1266,7 +1291,7 @@ fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, 
   let (l1, res) = define_all(l0, results, tys)
   let (l2, ivn) = define(l1, iv, i32_scalar())
   let (l3, args) = define_all(l2, carried, tys)
-  let inner0 = L { ..l3, body: [] }
+  let inner0 = opened(l3)
   let inner = list.fold(body, inner0, lower_op)
   match inner.body[len(inner.body) - 1] {
     Cont(values, _tys) ->
@@ -1279,7 +1304,7 @@ fn lower_for(l0: L, iv: Int, lower: Int, upper: Int, step: Int, unsigned: Bool, 
   }
   # close the body's scope: what it bound is gone, its numbers stay spent
   let l4 = close_scope(l1, inner)
-  emit(l4, ForLoop(res, tys, ivn, lo, up, st, unsigned, init_refs, args, inner.body))
+  emit_region(l4, ForLoop(res, tys, ivn, lo, up, st, unsigned, init_refs, args, inner.body), [inner.owners])
 }
 
 # Lower a `loop`. `lower_for` without the induction variable and the three
@@ -1300,7 +1325,7 @@ fn lower_loop(l0: L, inits: List[Int], carried: List[Int], results: List[Int], b
   let tys = list.map(inits, h => ty_of(l0, h))
   let (l1, res) = define_all(l0, results, tys)
   let (l2, args) = define_all(l1, carried, tys)
-  let inner0 = L { ..l2, body: [] }
+  let inner0 = opened(l2)
   let inner = list.fold(body, inner0, lower_op)
   match inner.body[len(inner.body) - 1] {
     Cont(values, _tys) ->
@@ -1312,7 +1337,7 @@ fn lower_loop(l0: L, inits: List[Int], carried: List[Int], results: List[Int], b
     _ -> panic("tileir: a loop body ends in something other than continue")
   }
   let l3 = close_scope(l1, inner)
-  emit(l3, WhileLoop(res, tys, init_refs, args, inner.body))
+  emit_region(l3, WhileLoop(res, tys, init_refs, args, inner.body), [inner.owners])
 }
 
 # The handles a finished region defined, closed: what `lower_for` does on
@@ -1321,7 +1346,7 @@ fn lower_loop(l0: L, inits: List[Int], carried: List[Int], results: List[Int], b
 fn close_scope(before: L, inner: L) -> L = {
   let opened = list.filter(map.keys(inner.names), h => not map.has(before.names, h))
   let closed = list.fold(opened, before.closed, (m, h) => map.insert(m, h, ()))
-  L { ..before, next: inner.next, closed: closed }
+  L { ..before, next: inner.next, closed: closed, next_op: inner.next_op }
 }
 
 # The values a region's terminator yields, or a refusal when the region does
@@ -1359,7 +1384,7 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identitie
   # arguments): only the RESULT loses the reduced dimension.
   let arg_tys = list.map(range(0, len(args)), k => rank0_of(operand_tys[k / 2]))
   let (l2, argv) = define_all(l1, args, arg_tys)
-  let inner = list.fold(body, L { ..l2, body: [] }, lower_op)
+  let inner = list.fold(body, opened(l2), lower_op)
   let ytys = yielded(inner.body, "a reduction's body")
   if len(ytys) != len(operands) {
     panic("tileir: a reduction over ${len(operands)} operand(s) yields ${len(ytys)}")
@@ -1369,7 +1394,7 @@ fn lower_reduce(l0: L, results: List[Int], dim: Int, shape: List[Int], identitie
   let l3 = close_scope(l1, inner)
   # `shape` is the shape the record carried; the operand types say it again
   let _shape = shape
-  emit(l3, ReduceTile(res, res_tys, dim, identities, operand_refs, operand_tys, argv, inner.body))
+  emit_region(l3, ReduceTile(res, res_tys, dim, identities, operand_refs, operand_tys, argv, inner.body), [inner.owners])
 }
 
 # Lower a scan. The same shape as a reduction, with one difference that is
@@ -1387,7 +1412,7 @@ fn lower_scan(l0: L, results: List[Int], dim: Int, reverse: Bool, shape: List[In
   let (l1, res) = define_all(l0, results, operand_tys)
   let arg_tys = list.map(range(0, len(args)), k => rank0_of(operand_tys[k / 2]))
   let (l2, argv) = define_all(l1, args, arg_tys)
-  let inner = list.fold(body, L { ..l2, body: [] }, lower_op)
+  let inner = list.fold(body, opened(l2), lower_op)
   let ytys = yielded(inner.body, "a scan's body")
   if len(ytys) != len(operands) {
     panic("tileir: a scan over ${len(operands)} operand(s) yields ${len(ytys)}")
@@ -1396,7 +1421,7 @@ fn lower_scan(l0: L, results: List[Int], dim: Int, reverse: Bool, shape: List[In
   }
   let l3 = close_scope(l1, inner)
   let _shape = shape
-  emit(l3, ScanTile(res, operand_tys, dim, reverse, identities, operand_refs, operand_tys, argv, inner.body))
+  emit_region(l3, ScanTile(res, operand_tys, dim, reverse, identities, operand_refs, operand_tys, argv, inner.body), [inner.owners])
 }
 
 # Lower an `if`. Its result types are the types of what its then-branch
@@ -1409,7 +1434,7 @@ fn lower_scan(l0: L, results: List[Int], dim: Int, reverse: Bool, shape: List[In
 fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_false: List[TileOp]) -> L = {
   let c = ref_of(l0, cond, "if condition")
   let cond_ty = ty_of(l0, cond)
-  let probe = list.fold(on_true, L { ..l0, body: [] }, lower_op)
+  let probe = list.fold(on_true, opened(l0), lower_op)
   let tys = yielded(probe.body, "an if's then branch")
   if len(tys) != len(results) {
     panic("tileir: an if defining ${len(results)} result(s) yields ${len(tys)}")
@@ -1417,9 +1442,9 @@ fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_fals
     ()
   }
   let (l1, res) = define_all(l0, results, tys)
-  let then_inner = list.fold(on_true, L { ..l1, body: [] }, lower_op)
+  let then_inner = list.fold(on_true, opened(l1), lower_op)
   let l2 = close_scope(l1, then_inner)
-  let else_inner = list.fold(on_false, L { ..l2, body: [] }, lower_op)
+  let else_inner = list.fold(on_false, opened(l2), lower_op)
   let etys = yielded(else_inner.body, "an if's else branch")
   if len(etys) != len(tys) {
     panic("tileir: an if whose then branch yields ${len(tys)} value(s) has an else branch yielding ${len(etys)}")
@@ -1427,7 +1452,7 @@ fn lower_if(l0: L, results: List[Int], cond: Int, on_true: List[TileOp], on_fals
     ()
   }
   let l3 = close_scope(l2, else_inner)
-  emit(l3, IfElse(res, tys, c, cond_ty, then_inner.body, else_inner.body))
+  emit_region(l3, IfElse(res, tys, c, cond_ty, then_inner.body, else_inner.body), [then_inner.owners, else_inner.owners])
 }
 
 ## `prog` as a `Kernel`: its operations in order, each memory operation
@@ -1439,22 +1464,18 @@ pub fn lower(prog: TileProg) -> Kernel = {
   k
 }
 
-## `lower(prog)`, and beside it which instructions each operation became:
-## one half-open range of `Kernel.body` per entry of `prog.ops`, in order.
-## The ranges are consecutive and the closing `Ret` is in none of them. A
-## pointer ladder belongs to the operation that FIRST needed it, because that
-## is where it is emitted; a later operation that reuses it is just its own
-## instruction. This is the same loop `lower` runs, not a second one, so the
-## table and the instructions cannot disagree.
-pub fn lower_spans(prog: TileProg) -> (Kernel, List[(Int, Int)]) = {
-  var l = L { next: 0, names: map.empty(), tys: map.empty(), closed: map.empty(), memo: map.empty(), body: [] }
-  var spans: List[(Int, Int)] = []
+## `lower(prog)`, and beside it which operation each instruction came from:
+## one `Owner` per instruction of `Kernel.body` but the closing `Ret`, which
+## no operation issued, nested the way the instructions are. This is the same
+## loop `lower` runs, not a second one, so the table and the instructions
+## cannot disagree.
+pub fn lower_spans(prog: TileProg) -> (Kernel, List[Owner]) = {
+  var l = L { next: 0, names: map.empty(), tys: map.empty(), closed: map.empty(), memo: map.empty(), body: [],
+    owners: [], at: 0, next_op: 0 }
   for op in prog.ops {
-    let before = len(l.body)
     l = lower_op(l, op)
-    spans = spans ++ [(before, len(l.body))]
   }
-  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints }, spans)
+  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints }, l.owners)
 }
 
 ## The values an instruction defines, in definition order.

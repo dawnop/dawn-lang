@@ -886,10 +886,11 @@ fn then_yields(on_true: List[TileOp]) -> List[Int] = match on_true[len(on_true) 
   _ -> []
 }
 
-# How many operations `ops` holds counted the way `TileProg.ops` reads
-# depth first: one for each, plus everything inside a region, its closing
-# `Continue` / `Yield` included.
-fn op_count(ops: List[TileOp]) -> Int =
+## How many operations `ops` holds counted the way `TileProg.ops` reads
+## depth first: one for each, plus everything inside a region, its closing
+## `Continue` / `Yield` included. Of a whole program's `ops`, one more than
+## the largest number a `Call` range or a refusal's `op #k` can name.
+pub fn op_count(ops: List[TileOp]) -> Int =
   list.fold(ops, 0, (n, op) => n + 1 + match op {
     For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> op_count(body)
     Loop(_inits, _carried, _results, body) -> op_count(body)
@@ -1283,26 +1284,77 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev,
   prog
 }
 
-## One public call of a kernel body as the recording saw it, from the side
-## table `trace_calls` keeps: the name of the public function (dev.dawn's
-## `called` marks), and the half-open ranges of `TileProg.ops` and
-## `TileProg.globals` it issued. Only the OUTERMOST calls are rows: what
-## `tile_at` issues through `idx_const` and `idx_mul` is `tile_at`'s, and
-## what a `d_for` body issues is inside the `For` the `d_for` row owns.
-## `ops_from` counts the leading `MakeToken(0)`, so the first call of a body
-## starts at 1. A call that opened or closed with a region open (only a body
-## that issues `t_*` operations itself can do that) has both op bounds -1.
+## One call the KERNEL made, as the recording saw it, from the side table
+## `trace_calls` keeps: the name of the public function (dev.dawn's `called`
+## marks), the call it was made inside, and the half-open ranges of
+## operations and of `TileProg.globals` it issued, its children's included.
+##
+## A row is a call the kernel body wrote: one at the top of the body, or one
+## inside a closure the kernel handed to a region function (dev.dawn's body
+## marks say which those are). What a public function calls on its own
+## behalf is not a row: `tile_at`'s `idx_const` and `idx_mul` are
+## `tile_at`'s operations. `parent` is the row of the region call whose
+## closure this call is in (`d_for`, `d_scan`, ...), or -1 at the top of the
+## body, and it is always an EARLIER row: the rows are in the order the
+## calls started.
+##
+## `ops_from` and `ops_to` number operations the way `TileProg.ops` reads
+## depth first, a region before its body (the numbering a refusal's `op #k`
+## uses), with the entry's `MakeToken(0)` as 0, so the first call of a body
+## starts at 1. A call's range holds its children's ranges, and what is left
+## of it once they are taken out is what the call issued itself: for a region
+## call, the region and its terminator.
 pub type Call = {
   name: String,
+  parent: Int,
   ops_from: Int,
   ops_to: Int,
   globals_from: Int,
   globals_to: Int,
 } derive Show
 
-## `trace_kernel`, and beside the program the side table of the body's
-## public calls in the order they returned (which is the order they
-## started, as only outermost calls are kept). The program is the one
+# What a mark leaves open on the call-mark stack of `trace_calls`: a row of
+# the side table (a call the kernel made), a call the library made, a
+# closure of the kernel's own, or a closure inside a call the library made.
+type Mark =
+  | Row(at: Int)
+  | Inner
+  | KernelBody
+  | InnerBody
+
+# The row the innermost open call the kernel made is, or -1.
+fn open_row(marks: List[Mark]) -> Int =
+  list.fold(marks, 0 - 1, (r, m) => match m {
+    Row(at) -> at
+    _ -> r
+  })
+
+# Whether the innermost open mark is a call the kernel made: a closure run
+# there is the kernel's own.
+fn in_row(marks: List[Mark]) -> Bool =
+  if len(marks) == 0 {
+    false
+  } else {
+    match marks[len(marks) - 1] {
+      Row(_at) -> true
+      _ -> false
+    }
+  }
+
+# Whether a call marked now is the kernel's: at the top of the body, or
+# directly inside one of its closures.
+fn kernel_side(marks: List[Mark]) -> Bool =
+  if len(marks) == 0 {
+    true
+  } else {
+    match marks[len(marks) - 1] {
+      KernelBody -> true
+      _ -> false
+    }
+  }
+
+## `trace_kernel`, and beside the program the side table of the calls the
+## kernel made, in the order they started. The program is the one
 ## `trace_kernel` answers: it is the same handler, and the marks put nothing
 ## into `ops`.
 pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> (TileProg, List[Call]) = {
@@ -1313,34 +1365,44 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       var ops: List[TileOp] = []
       var globals: List[Global] = []
       var frames: List[Frame] = []
-      var depth: Int = 0
-      var opened: Int = 0
-      var opened_globals: Int = 0
-      var opened_top: Bool = true
-      var callee: String = ""
+      var marks: List[Mark] = []
       var calls: List[Call] = []
       var held: Map[Int, Held] = map.empty()
       t_call_enter(called_name) => {
-        if depth == 0 {
-          callee = called_name
-          opened = len(ops)
-          opened_globals = len(globals)
-          opened_top = len(frames) == 0
+        if kernel_side(marks) {
+          let at = op_number(frames, ops)
+          calls = calls ++ [Call { name: called_name, parent: open_row(marks), ops_from: at, ops_to: at,
+            globals_from: len(globals), globals_to: len(globals) }]
+          marks = marks ++ [Row(len(calls) - 1)]
         } else {
-          ()
+          marks = marks ++ [Inner]
         }
-        depth = depth + 1
       }
       t_call_exit() => {
-        depth = depth - 1
-        if depth == 0 {
-          let top = opened_top && len(frames) == 0
-          let lo = if top { opened + 1 } else { 0 - 1 }
-          let hi = if top { len(ops) + 1 } else { 0 - 1 }
-          calls = calls ++ [Call { name: callee, ops_from: lo, ops_to: hi, globals_from: opened_globals, globals_to: len(globals) }]
-        } else {
-          ()
+        if len(marks) == 0 { refuse(name, "a call mark closes nothing") } else { () }
+        match marks[len(marks) - 1] {
+          Row(k) -> {
+            let at = op_number(frames, ops)
+            let ng = len(globals)
+            let rows = calls
+            calls = list.map(range(0, len(rows)), j => if j == k { Call { ..rows[j], ops_to: at, globals_to: ng } } else { rows[j] })
+          }
+          Inner -> ()
+          _ -> refuse(name, "a call mark closes a body")
         }
+        marks = list.take(marks, len(marks) - 1)
+      }
+      t_body_enter() => {
+        marks = marks ++ [if in_row(marks) { KernelBody } else { InnerBody }]
+      }
+      t_body_exit() => {
+        if len(marks) == 0 { refuse(name, "a body mark closes nothing") } else { () }
+        match marks[len(marks) - 1] {
+          KernelBody -> ()
+          InnerBody -> ()
+          _ -> refuse(name, "a body mark closes a call")
+        }
+        marks = list.take(marks, len(marks) - 1)
       }
       t_block_id(axis) => {
         if axis < 0 || axis > 2 { refuse(name, "block_id axis is 0, 1 or 2, got ${axis}") } else { () }
@@ -1928,9 +1990,11 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_shape_of(h) => {
         # The row, as `Held` describes it (a view's included). A handle
         # with no row is refused under the number of the operation about
-        # to be recorded and the public call asking, which is the call
-        # that needed the shape; outside one, under the query's own name.
-        let asking = if depth > 0 { callee } else { "t_shape_of" }
+        # to be recorded and the kernel's call asking (the innermost one
+        # open, which is the call that needed the shape); outside one,
+        # under the query's own name.
+        let row = open_row(marks)
+        let asking = if row >= 0 { calls[row].name } else { "t_shape_of" }
         match map.get(held, h) {
           Some(x) -> (x.dtype, x.shape)
           None -> refuse_at(name, frames, ops, asking, "handle ${h} has no recorded shape: it is a token, or no operation answered it")
@@ -2375,6 +2439,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
     }
     body()
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
+    if len(marks) != 0 { refuse(name, "the body ended with ${len(marks)} call or body mark(s) still open") } else { () }
     (globals, ops, calls)
   }
   (TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }, calls)

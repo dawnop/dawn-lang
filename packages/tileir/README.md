@@ -28,9 +28,9 @@ bf16 answers what `std/narrow.round_bf16` of the f64 sum answers;
 | Module | Contents |
 |------|------|
 | `dev` | `pub effect Dev` (handle-level, monomorphic device operations), the handle types (`Tile[D]`, `Param[D]`, `Idx`, `Scalar[D]`, `Ptrs[D]`, the view types and others, all opaque, with `D` a phantom format parameter) and the typed functions over them; the groups are below |
-| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body, hints = [])` is the recording handler, with a region stack; `trace_calls` is the same handler answering, beside the program, a side table `List[Call]` of which outermost public call issued which operations; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
-| `lower` | `lower(prog) -> Kernel`: the linear instruction table `Instr` (a region operation's body is a nested table), values numbered densely from 0, operands `Arg(pos)` / `Val(id)`, types `Ty`; the pointer ladders, deduplication, SSA renumbering and region scoping all live here; `lower_spans` also answers which instructions each operation became |
-| `render` | `render(prog) -> String`: one `cuda_tile.module @m` holding the module's globals and one `entry @<name>`; one line per `Instr`, a region as a header line, a body indented two spaces, and a closing brace; `line_map(prog, calls)` cuts that text into the lines each public call is answerable for |
+| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body, hints = [])` is the recording handler, with a region stack; `trace_calls` is the same handler answering, beside the program, a side table `List[Call]`: the tree of calls the kernel made, each with the operations it issued; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
+| `lower` | `lower(prog) -> Kernel`: the linear instruction table `Instr` (a region operation's body is a nested table), values numbered densely from 0, operands `Arg(pos)` / `Val(id)`, types `Ty`; the pointer ladders, deduplication, SSA renumbering and region scoping all live here; `lower_spans` also answers which operation each instruction came from (`Owner`, nested as the instructions are) |
+| `render` | `render(prog) -> String`: one `cuda_tile.module @m` holding the module's globals and one `entry @<name>`; one line per `Instr`, a region as a header line, a body indented two spaces, and a closing brace; `line_map(prog, calls)` cuts that text into the lines each call of the side table's tree is answerable for |
 | `bytecode` | `encode(prog) -> Bytes`: `cuda-tile` bytecode, regions included; `BYTECODE_MAJOR` / `BYTECODE_MINOR` pin the version in the header, and `bytecode_version()` answers `"13.4"` |
 
 The full public surface (signatures and doc comments) is whatever
@@ -60,31 +60,46 @@ follow; `dawn doc` is the authority on numbers and names.
 | Shape query | `t_shape_of` | none yet: it is there for the knife that drops shapes a function can read off its operands |
 | Module globals | `t_global` `t_get_global` | `d_global` `global_ptrs` |
 | Assertions and debugging | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
-| Call marks | `t_call_enter` `t_call_exit` | none: every public function wraps its own body in them, and only `trace_calls` reads them |
+| Call marks | `t_call_enter` `t_call_exit` `t_body_enter` `t_body_exit` | none: every public function wraps its own body in the first pair, every closure a public function takes runs inside the second, and only `trace_calls` reads them |
 
 #### The call marks, for a handler of `Dev` written outside this package
 
-Since 0.3.0 `Dev` has `t_call_enter(name: String) -> Unit` and
-`t_call_exit() -> Unit`. A handler has to answer every operation of the
-effect, so a handler written against 0.2.0 no longer compiles until it
-answers these two; that is why the version moved from 0.2.0 to 0.3.0 (a
-0.x minor may break, as `docs/std-defaults-design.md` 7.3 records for
-0.1.0 to 0.2.0). What a handler owes them:
+`Dev` has two pairs of operations that carry no device operation:
+`t_call_enter(name: String)` / `t_call_exit()` since 0.3.0, and
+`t_body_enter()` / `t_body_exit()` since 0.5.0. A handler has to answer
+every operation of the effect, so a handler written against 0.4.0 no longer
+compiles until it answers the second pair; that is why the version moved to
+0.5.0 (a 0.x minor is its own compatibility class,
+`docs/package-design.md` §6.3, as was 0.1.0 to 0.2.0). What a handler owes
+them:
 
-- Answer both with `()` and record nothing. They carry no device
+- Answer all four with `()` and record nothing. They carry no device
   operation: a handler that emits an instruction, a token or a handle for
   them changes the program every other handler sees. `prog.trace_kernel`
-  is held to that by every golden, which did not move a byte when they
-  were added.
-- They come in balanced, properly nested pairs around the body of each
+  is held to that by every golden, which did not move a byte when either
+  pair was added.
+- The call pair comes balanced and properly nested around the body of each
   public function, in call order, with the function's own name; a private
-  helper is never marked. A handler that keeps its own side table should
-  keep only the outermost pair, as `prog.trace_calls` does, because the
-  inner ones (`idx_const` inside `tile_at`) are already inside the outer
-  one's operations.
+  helper is never marked.
+- The body pair comes balanced around each closure a public function takes
+  (`d_for` to `d_for4`, `d_loop`, `d_loop2`, the reductions, the scans,
+  `d_if`, `d_fork2`), directly inside that function's call pair, and around
+  nothing else.
+- So the marks say which calls the KERNEL wrote: a call marked at the top
+  of the body, or directly inside a body pair whose enclosing call is one
+  the kernel wrote, is the kernel's; any other call is one the library made
+  on its own behalf (`idx_mul` inside `tile_at`), and its operations are
+  the enclosing kernel call's. That is the tree `prog.trace_calls` keeps,
+  each call under the region call whose closure it is in. A handler that
+  keeps only the outermost calls can ignore the body pair.
 - A kernel body that calls `t_*` operations directly issues operations
   outside any pair. A side table has nothing to attribute them to, and
   `render.line_map` refuses such a program rather than guessing.
+
+The side table numbers operations the way `TileProg.ops` reads depth first,
+a region before its body, which is the number a refusal's `op #k` already
+used. Before 0.5.0 a `Call`'s range counted top-level operations only and
+held no `parent`; a region's body was all one row.
 
 #### `t_shape_of`, for a handler of `Dev` written outside this package
 
