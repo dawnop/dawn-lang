@@ -20,6 +20,12 @@
 # about the same ones. The one member rule is `member_doc_of`: a constructor
 # or field written on its owner's line has no doc of its own, because the block
 # above that line documents the owner (spec §1.2).
+#
+# Which spans of a doc are `[`name`]` links (`doc_links`, `rewrite_links`) is
+# here too: it is a scan of the comment's text, the same for `dawn doc` (which
+# fails on a link that resolves to nothing) and hover (which makes them
+# clickable). What a link resolves to needs a checked module's import tables
+# and is `driver/doclinks`.
 
 use std/str
 use std/list
@@ -103,6 +109,148 @@ pub fn doc_of(ds: DocSrc, lo: Int) -> Option[String] = {
     }
   }
   if len(acc) == 0 { None } else { Some(join(list.reverse(acc), "\n")) }
+}
+
+## The 1-based line of the first line of a doc `doc_of` read for the
+## declaration starting at `lo`: the block ends on the line above that
+## declaration, one source line per doc line.
+pub fn doc_first_line(ds: DocSrc, lo: Int, doc: String) -> Int =
+  line_of(ds.starts, lo) - len(str.split(doc, "\n"))
+
+## One `` [`name`] `` link in a doc's text (spec §1.2): what is between the
+## backticks, and the 0-based line of the doc it sits on.
+pub type DocLink = { text: String, line: Int }
+
+## The links of a doc, in the order they are written. A link is `[`, one
+## backtick, text with no backtick, one backtick, `]`, on one line; a plain
+## code span is never one, and neither is the same spelling followed by `(` or
+## `[` (an ordinary Markdown link or reference whose label happens to be code)
+## nor, at the start of a line, by `:` (a reference definition). Fenced code
+## blocks and code spans are skipped the way a Markdown reader skips them, so
+## `[`x`]` inside an example is example text.
+pub fn doc_links(doc: String) -> List[DocLink] = {
+  var out: List[DocLink] = []
+  let lines = str.split(doc, "\n")
+  let prose = prose_lines(lines)
+  for ln in range(0, len(lines)) {
+    if prose[ln] {
+      for sp in line_links(code_points(lines[ln])) {
+        let (_, _, text) = sp
+        out = out ++ [DocLink { text: text, line: ln }]
+      }
+    }
+  }
+  out
+}
+
+## `doc` with every link rewritten by `f`, which is handed the link's text and
+## answers the replacement for the whole `[`text`]`, or None to keep it. The
+## same scan as `doc_links`, so what is rewritten is exactly what is a link.
+pub fn rewrite_links(doc: String, f: fn(String) -> Option[String]) -> String = {
+  let lines = str.split(doc, "\n")
+  let prose = prose_lines(lines)
+  var out: List[String] = []
+  for ln in range(0, len(lines)) {
+    let line = lines[ln]
+    if not prose[ln] {
+      out = out ++ [line]
+      continue
+    }
+    let cs = code_points(line)
+    var parts: List[String] = []
+    var at = 0
+    for sp in line_links(cs) {
+      let (lo, hi, text) = sp
+      match f(text) {
+        Some(to) -> {
+          parts = parts ++ [from_code_points(map(range(at, lo), k => cs[k])), to]
+          at = hi
+        }
+        None -> ()
+      }
+    }
+    parts = parts ++ [from_code_points(map(range(at, len(cs)), k => cs[k]))]
+    out = out ++ [join(parts, "")]
+  }
+  join(out, "\n")
+}
+
+## Which lines of a doc are prose rather than inside a fenced code block (a
+## fence line itself is not prose).
+fn prose_lines(lines: List[String]) -> List[Bool] = {
+  var out: List[Bool] = []
+  var fence = ""
+  for line in lines {
+    let t = str.trim_start(line)
+    if fence != "" {
+      if str.starts_with(t, fence) { fence = "" }
+      out = out ++ [false]
+    } else if str.starts_with(t, "```") {
+      fence = "```"
+      out = out ++ [false]
+    } else if str.starts_with(t, "~~~") {
+      fence = "~~~"
+      out = out ++ [false]
+    } else {
+      out = out ++ [true]
+    }
+  }
+  out
+}
+
+## The length of the run of backticks at `i`.
+fn tick_run(cs: List[Char], i: Int) -> Int = {
+  var j = i
+  while j < len(cs) && cs[j] == '`' { j = j + 1 }
+  j - i
+}
+
+## Where a run of exactly `n` backticks starts at or after `from`, or -1.
+fn tick_close(cs: List[Char], from: Int, n: Int) -> Int = {
+  var i = from
+  while i < len(cs) {
+    if cs[i] == '`' {
+      let r = tick_run(cs, i)
+      if r == n { return i }
+      i = i + r
+    } else {
+      i = i + 1
+    }
+  }
+  -1
+}
+
+## The links on one line: where each `[` starts, where the span ends (one past
+## its `]`), and the text between the backticks.
+fn line_links(cs: List[Char]) -> List[(Int, Int, String)] = {
+  var out: List[(Int, Int, String)] = []
+  var first = 0
+  while first < len(cs) && (cs[first] == ' ' || cs[first] == '\t') { first = first + 1 }
+  var i = 0
+  while i < len(cs) {
+    let c = cs[i]
+    if c == '\\' {
+      i = i + 2
+    } else if c == '[' && i + 1 < len(cs) && cs[i + 1] == '`' && tick_run(cs, i + 1) == 1 {
+      let close = tick_close(cs, i + 2, 1)
+      let shut = close > i + 2 && close + 1 < len(cs) && cs[close + 1] == ']'
+      let after: Option[Char] = if shut && close + 2 < len(cs) { Some(cs[close + 2]) } else { None }
+      let labelled = after == Some('(') || after == Some('[') || (after == Some(':') && i == first)
+      if shut && not labelled {
+        out = out ++ [(i, close + 2, from_code_points(map(range(i + 2, close), k => cs[k])))]
+        i = close + 2
+      } else {
+        i = i + 1
+      }
+    } else if c == '`' {
+      let r = tick_run(cs, i)
+      let close = tick_close(cs, i + r, r)
+      i = if close < 0 { i + r } else { close + r }
+    } else {
+      i = i + 1
+    }
+  }
+  out
 }
 
 ## The doc of a member starting at `lo` whose owner starts at `owner_lo`: a
@@ -333,6 +481,47 @@ test "a member on its owner's line has no doc of its own" {
   let p = module_types(m)[1]
   assert member_doc_of(ds, p.lo, p.ctors[0].lo) == None
   assert member_doc_of(ds, p.ctors[0].lo, p.ctors[0].fields[1].lo) == None
+}
+
+test "a link is [`name`] and nothing that merely looks like one" {
+  let texts = (d: String) => map(doc_links(d), l => l.text)
+  assert texts("See [`list.map`] and [`Option.Some`].") == ["list.map", "Option.Some"]
+  # a plain code span, a bracketed word and an ordinary link are not links
+  assert texts("`xs[i]` and [i] and [`x`](https://example.org) and [`y`][ref]") == []
+  # a code span that holds the spelling is code
+  assert texts("write `` [`x`] `` to link") == []
+  # a reference definition at the start of a line is not a use, a colon in
+  # prose is
+  assert texts("[`x`]: #anchor\nsee [`y`]: it") == ["y"]
+  # two backticks are a code span inside brackets, not a link
+  assert texts("[``a``]") == []
+  # fenced code is example text
+  assert texts("Before [`a`].\n```dawn\nlet v = xs[`b`]\n```\nAfter [`c`].") == ["a", "c"]
+  # the line within the doc is kept, for the error that names it
+  assert map(doc_links("one\ntwo [`b`]\n[`c`]"), l => l.line) == [1, 2]
+  # an empty pair of backticks is not a link
+  assert texts("[``]") == []
+}
+
+test "rewriting touches the links and nothing else" {
+  let f = (t: String) => {
+    let kept: Option[String] = None
+    if t == "keep" { kept } else { Some("<" ++ t ++ ">") }
+  }
+  assert rewrite_links("a [`x`] b [`keep`] c [`y.z`]", f) == "a <x> b [`keep`] c <y.z>"
+  # a fenced example and an ordinary link stay as written
+  assert rewrite_links("[`x`](u)\n```\n[`x`]\n```\n[`x`]", f) == "[`x`](u)\n```\n[`x`]\n```\n<x>"
+}
+
+test "a doc's first line counts back from its declaration" {
+  let text = "## One.\n## Two.\nfn f() -> Int = 1\n"
+  let ds = doc_src_of(text)
+  let lo = match str.index_of(text, "fn f") {
+    Some(i) -> i
+    None -> panic("no fn f")
+  }
+  let d = doc_of(ds, lo).expect("doc")
+  assert doc_first_line(ds, lo, d) == 1
 }
 
 test "a member off its owner's line reads the block above its own line" {

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ dab107f8122dc1e1 -->
+<!-- doc-check: translation-of docs/spec.md @ 98dc857ef1ea8dcf -->
 
 # Dawn Language Specification
 
@@ -82,13 +82,40 @@ Gleam and Zig likewise have only line comments.
   associated effects and methods), `effect` (with operations). Impls publish no doc: `dawn doc` lists an
   impl only as `Trait[Type]`, and docs on impl headers and impl methods are shown only by editor hover;
   docs on `pub(pkg)` and private declarations are for the editor only (§10.4).
+- **Links**: `` [`name`] `` in the text is a reference to a declaration. This is the only spelling: a
+  plain code span is not a link; followed by `(` or `[` it is an ordinary Markdown link; and
+  nothing inside a fenced code block counts. `name` is resolved **in the scope of the module the doc is
+  written in**, that is, the way that module's code could spell the name:
+  - this module's top-level declarations (private ones included), bare, or qualified by the last segment
+    of the module's path (`io.exit` written inside std/io);
+  - a module alias bound by `use`, then a dot: `list.map`, which sees only the names that module exports to
+    this one; the alias on its own (`list`) names the module;
+  - a selectively imported name, by its local name when renamed with `as`;
+  - the prelude: builtin functions, the prelude traits and their methods, `Option`/`Result`/`ForeignError`
+    and their constructors, the builtin types;
+  - members: `Type.Ctor`, `Type.field`, `Trait.method`, `Trait.Item`, `Effect.op`, with `Owner` resolved by
+    the rules above, also written `module.Owner.member`; constructors, effect operations and trait methods
+    may also be written bare, as in code.
+
+  The case of the first letter decides whether a type or a value is looked for first (a record type and
+  its constructor of the same name: the type); there are no disambiguation prefixes. A module that is not
+  imported cannot be linked to, and a `use` written only for a doc is an unused import (a compile error),
+  so what a link can see is what the code can see. `dawn doc` resolves the links in every doc it
+  publishes: when one resolves to nothing it reports each one as `module:line` with the reason, prints no
+  JSON and exits non-zero; the resolved ones go in a `links` array beside that doc (the target's module
+  path, name and kind). Compiling (`check`, `run`, `build`) does not read links.
 
 Rationale: a doc comment is still a comment. Whether a comment is a doc depends only on its own line
 (does it start with `##`, is there code before it), so, as above, every line can be tokenized on its own
 and `dawn fmt` needs no rule of its own for it; attachment is decided by the single line rule "contiguous,
 right above", with no extra node in the syntax tree. If a trailing `##` counted too, the next line's
 declaration would claim it, though it speaks about the code on its own line. Rust's, Zig's and Gleam's
-`///` all have this same shape.
+`///` all have this same shape. The link notation is Rust's and KDoc's `` [`name`] ``: in CommonMark it is an
+undefined reference and renders literally, so a renderer that does not know it still reads it. Names in
+backticks are not all taken as links: most of what this repository writes in backticks is code, and which
+of it counted as a link would be impossible to predict. Resolution lives in the tooling, not the compiler:
+comments carry no meaning, and `dawn run` should neither refuse to compile over a typo in a comment nor
+pay for reading one.
 
 ### 1.3 Identifiers and naming conventions
 

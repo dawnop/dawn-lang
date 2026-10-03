@@ -1,0 +1,407 @@
+# What a doc comment's `[`name`]` link points at (spec §1.2): the name is
+# resolved in the scope of the module the doc is written in, the way code in
+# that module would spell it, and answers a declaration (its module path, its
+# name, its kind and where its name is spelled) or a reason it answers none.
+#
+# Why here, in driver/: the scope is the module's import tables -- which alias
+# names which module, which names a selective `use` brought in, renamed or
+# not -- and those exist only on a checked module's `Cx`; the declarations a
+# link lands on are other modules' parse trees. `front/` sees neither,
+# `check/` must not do this at all (a link is tooling: `dawn run` does not pay
+# for reading comments, nor refuse to compile over a typo in one), and the two
+# consumers -- `doc.dawn`, which fails `dawn doc` on a link that resolves to
+# nothing, and `lsp/`, which turns links in a hover into jumps -- both import
+# driver/. One resolver, so a link `dawn doc` accepts is the link hover
+# follows. The text scan (which spans of a doc are links) is plain lexing over
+# the comment and stays in `front/docs`.
+#
+# Deliberately not the checker's own name resolution: that answers types and
+# signatures, while a link wants a *declaration site*, members included
+# (`Type.Ctor`, `Type.field`, `Trait.method`, `Effect.op`), and a module alias
+# on its own. Visibility follows the code a reader could write: through a
+# module alias only what that module exports to this one; this module's own
+# declarations, private ones included, by bare name or by the module's own
+# last path segment (`io.exit` inside std/io), which is how a caller spells it.
+
+use std/str
+use std/map
+use std/set
+use front/ast.{
+  Module, TypeDeclR, EffectDeclR, TraitView,
+  module_fns, module_types, module_consts, module_traits, module_effects
+}
+use check/cx.{Cx, ModExports}
+use check/types.{
+  prelude_traits, prelude_trait_ids, prelude_adts, trait_of, adt_of, AdtI, TraitI,
+  builtin_type_visible
+}
+
+## Where a link lands. `module` is the declaring module's path, or "" for a
+## name the prelude provides with no module of its own (a builtin function,
+## a prelude trait, `Option`, `Int`). `name` is the declaration's name, or
+## `Owner.member` for a member, or "" for a module. `kind` is one of `module`,
+## `fn`, `type`, `ctor`, `field`, `const`, `trait`, `method`, `assoc`,
+## `effect`, `op`. `nlo..nhi` spans the name in the declaring module's text,
+## -1 when there is no text (the prelude) or the target is a whole module.
+pub(pkg) type LinkTarget = { module: String, name: String, kind: String, nlo: Int, nhi: Int }
+
+## The module a doc is written in: its path, its parse tree and its checked
+## state, whose import tables are the link's scope.
+pub(pkg) type LinkScope = { path: String, m: Module, cx: Cx }
+
+fn target(module: String, name: String, kind: String, nlo: Int, nhi: Int) -> LinkTarget =
+  LinkTarget { module: module, name: name, kind: kind, nlo: nlo, nhi: nhi }
+
+fn prelude(name: String, kind: String) -> LinkTarget = target("", name, kind, -1, -1)
+
+fn is_ident(s: String) -> Bool = {
+  let cs = code_points(s)
+  if len(cs) == 0 { return false }
+  if not (char_is_letter(cs[0]) || cs[0] == '_') { return false }
+  for c in cs {
+    if not (char_is_alnum(c) || c == '_') { return false }
+  }
+  true
+}
+
+fn is_upper_name(s: String) -> Bool =
+  match get(code_points(s), 0) {
+    Some(c) -> char_is_upper(c)
+    None -> false
+  }
+
+## The last segment of a module path: what `use a/b` binds by default, and so
+## how this module's own declarations are spelled qualified.
+fn own_alias(path: String) -> String = {
+  let segs = str.split(path, "/")
+  segs[len(segs) - 1]
+}
+
+## Resolve one link's text in `sc`. `mods` holds the parse tree of every
+## module the scope can name (the program's and std's), by module path.
+pub(pkg) fn resolve_link(sc: LinkScope, mods: Map[String, Module], text: String) -> Result[LinkTarget, String] = {
+  let segs = str.split(text, ".")
+  for s in segs {
+    if not is_ident(s) { return Err("it is not a name or a dotted path of names") }
+  }
+  let head = segs[0]
+  if len(segs) == 1 { return bare(sc, mods, head) }
+  if is_upper_name(head) {
+    if len(segs) > 2 { return Err("a link names at most `Owner.member`") }
+    return owned(sc, mods, head, segs[1])
+  }
+  # a lowercase head is a module: an alias this module binds, or its own name
+  let (mp, gate) = match map.get(sc.cx.module_aliases, head) {
+    Some(p) -> (p, map.get(sc.cx.module_exports, head))
+    None ->
+      if head == own_alias(sc.path) {
+        (sc.path, None)
+      } else {
+        return Err("`${head}` is not a module this module imports")
+      }
+  }
+  let m = match map.get(mods, mp) {
+    Some(m) -> m
+    None -> return Err("module `${mp}` is not loaded")
+  }
+  if len(segs) == 2 {
+    return match decl_named(m, mp, segs[1], gate) {
+      Some(t) -> Ok(t)
+      None -> Err(missing(m, mp, segs[1], gate))
+    }
+  }
+  if len(segs) > 3 { return Err("a link names at most `module.Owner.member`") }
+  if not exported(gate, segs[1]) { return Err(missing(m, mp, segs[1], gate)) }
+  member_of(m, mp, segs[1], segs[2], gate)
+}
+
+## Why `name` is not in module `mp` as this module sees it.
+fn missing(m: Module, mp: String, name: String, gate: Option[ModExports]) -> String =
+  match gate {
+    Some(_) ->
+      if decl_named(m, mp, name, None) != None {
+        "module `${mp}` does not export `${name}` to this module"
+      } else {
+        "module `${mp}` declares no `${name}`"
+      }
+    None -> "module `${mp}` declares no `${name}`"
+  }
+
+## Whether a top-level name passes `gate`, the exports one module sees of
+## another; no gate is the module itself or a name a selective `use` already
+## admitted.
+fn exported(gate: Option[ModExports], name: String) -> Bool =
+  match gate {
+    None -> true
+    Some(e) ->
+      map.has(e.fns, name) || map.has(e.types_by_name, name) || map.has(e.aliases, name) ||
+      map.has(e.consts, name) || map.has(e.ctors, name) || map.has(e.traits_by_name, name) ||
+      map.has(e.effects, name)
+  }
+
+fn ctor_exported(gate: Option[ModExports], name: String) -> Bool =
+  match gate {
+    None -> true
+    Some(e) -> map.has(e.ctors, name)
+  }
+
+## A bare name: this module's declarations and their members, then what a
+## selective `use` brought in (with the constructors of a type it brought),
+## then a module alias, then the prelude.
+fn bare(sc: LinkScope, mods: Map[String, Module], name: String) -> Result[LinkTarget, String] = {
+  match decl_named(sc.m, sc.path, name, None) {
+    Some(t) -> return Ok(t)
+    None -> ()
+  }
+  match map.get(sc.cx.imported_names, name) {
+    Some(mp) -> {
+      let declared = unwrap_or(map.get(sc.cx.import_renames, name), name)
+      match map.get(mods, mp) {
+        Some(m) ->
+          match decl_named(m, mp, declared, None) {
+            Some(t) -> return Ok(t)
+            None -> ()
+          }
+        None -> ()
+      }
+    }
+    None -> ()
+  }
+  if is_upper_name(name) {
+    for local in sort(map.keys(sc.cx.imported_names)) {
+      let mp = unwrap_or(map.get(sc.cx.imported_names, local), "")
+      let declared = unwrap_or(map.get(sc.cx.import_renames, local), local)
+      match map.get(mods, mp) {
+        Some(m) ->
+          match type_named(m, declared) {
+            Some(td) -> {
+              for c in td.ctors {
+                if c.name == name { return Ok(target(mp, "${td.name}.${c.name}", "ctor", c.nlo, c.nhi)) }
+              }
+            }
+            None -> ()
+          }
+        None -> ()
+      }
+    }
+  }
+  if map.has(sc.cx.module_aliases, name) {
+    return Ok(target(unwrap_or(map.get(sc.cx.module_aliases, name), ""), "", "module", -1, -1))
+  }
+  if name == own_alias(sc.path) { return Ok(target(sc.path, "", "module", -1, -1)) }
+  match prelude_bare(sc.cx, name) {
+    Some(t) -> Ok(t)
+    None -> Err("nothing in this module's scope is called `${name}`")
+  }
+}
+
+## `Owner.member` with the owner spelled bare: this module's, a selectively
+## imported one, or the prelude's (`Option.Some`, `Ord.cmp`).
+fn owned(sc: LinkScope, mods: Map[String, Module], owner: String, member: String) -> Result[LinkTarget, String] = {
+  if owner_named(sc.m, owner) { return member_of(sc.m, sc.path, owner, member, None) }
+  match map.get(sc.cx.imported_names, owner) {
+    Some(mp) -> {
+      let declared = unwrap_or(map.get(sc.cx.import_renames, owner), owner)
+      match map.get(mods, mp) {
+        Some(m) -> if owner_named(m, declared) { return member_of(m, mp, declared, member, None) }
+        None -> ()
+      }
+    }
+    None -> ()
+  }
+  match prelude_owned(owner, member) {
+    Some(r) -> r
+    None -> Err("`${owner}` is not a type, trait or effect in scope here")
+  }
+}
+
+fn type_named(m: Module, name: String) -> Option[TypeDeclR] = {
+  for td in module_types(m) {
+    if td.name == name { return Some(td) }
+  }
+  None
+}
+
+fn trait_named(m: Module, name: String) -> Option[TraitView] = {
+  for tv in module_traits(m) {
+    if tv.name == name { return Some(tv) }
+  }
+  None
+}
+
+fn effect_named(m: Module, name: String) -> Option[EffectDeclR] = {
+  for ed in module_effects(m) {
+    if ed.name == name { return Some(ed) }
+  }
+  None
+}
+
+fn owner_named(m: Module, name: String) -> Bool =
+  type_named(m, name) != None || trait_named(m, name) != None || effect_named(m, name) != None
+
+## A name declared in `m` (module path `mp`), top-level first and then the
+## members a bare name reaches -- a constructor, an effect operation, a trait
+## method -- which is the order the namespaces are searched in. `gate` limits
+## the search to what `m` exports to the linking module.
+fn decl_named(m: Module, mp: String, name: String, gate: Option[ModExports]) -> Option[LinkTarget] = {
+  if not exported(gate, name) { return None }
+  match type_named(m, name) {
+    Some(td) -> return Some(target(mp, name, "type", td.nlo, td.nhi))
+    None -> ()
+  }
+  match trait_named(m, name) {
+    Some(tv) -> return Some(target(mp, name, "trait", tv.nlo, tv.nhi))
+    None -> ()
+  }
+  match effect_named(m, name) {
+    Some(ed) -> return Some(target(mp, name, "effect", ed.nlo, ed.nhi))
+    None -> ()
+  }
+  for fd in module_fns(m) {
+    if fd.name == name { return Some(target(mp, name, "fn", fd.nlo, fd.nhi)) }
+  }
+  for cd in module_consts(m) {
+    if cd.name == name { return Some(target(mp, name, "const", cd.nlo, cd.nhi)) }
+  }
+  for td in module_types(m) {
+    for c in td.ctors {
+      if c.name == name && ctor_exported(gate, name) {
+        return Some(target(mp, "${td.name}.${c.name}", "ctor", c.nlo, c.nhi))
+      }
+    }
+  }
+  for ed in module_effects(m) {
+    for op in ed.ops {
+      if op.name == name { return Some(target(mp, "${ed.name}.${op.name}", "op", op.nlo, op.nhi)) }
+    }
+  }
+  for tv in module_traits(m) {
+    for tm in tv.methods {
+      if tm.name == name { return Some(target(mp, "${tv.name}.${tm.name}", "method", tm.nlo, tm.nhi)) }
+    }
+  }
+  None
+}
+
+## `owner.member` in `m`: a type's constructor or field, a trait's method or
+## associated member, an effect's operation.
+fn member_of(m: Module, mp: String, owner: String, member: String, gate: Option[ModExports]) -> Result[LinkTarget, String] = {
+  let full = "${owner}.${member}"
+  match type_named(m, owner) {
+    Some(td) -> {
+      for c in td.ctors {
+        if c.name == member && ctor_exported(gate, c.name) {
+          return Ok(target(mp, full, "ctor", c.nlo, c.nhi))
+        }
+      }
+      for c in td.ctors {
+        for f in c.fields {
+          if f.name == member && ctor_exported(gate, c.name) {
+            return Ok(target(mp, full, "field", f.lo, f.lo + str.len(f.name)))
+          }
+        }
+      }
+      return Err("type `${owner}` has no constructor or field `${member}` this module can see")
+    }
+    None -> ()
+  }
+  match trait_named(m, owner) {
+    Some(tv) -> {
+      for tm in tv.methods {
+        if tm.name == member { return Ok(target(mp, full, "method", tm.nlo, tm.nhi)) }
+      }
+      for ad in tv.assoc {
+        if ad.name == member { return Ok(target(mp, full, "assoc", ad.nlo, ad.nhi)) }
+      }
+      for ad in tv.eff_assoc {
+        if ad.name == member { return Ok(target(mp, full, "assoc", ad.nlo, ad.nhi)) }
+      }
+      return Err("trait `${owner}` has no member `${member}`")
+    }
+    None -> ()
+  }
+  match effect_named(m, owner) {
+    Some(ed) -> {
+      for op in ed.ops {
+        if op.name == member { return Ok(target(mp, full, "op", op.nlo, op.nhi)) }
+      }
+      return Err("effect `${owner}` has no operation `${member}`")
+    }
+    None -> ()
+  }
+  Err("module `${mp}` declares no type, trait or effect `${owner}`")
+}
+
+## A bare name the prelude provides: a function (builtin, or std's prelude
+## harvest), a prelude trait or one of its methods, a prelude type
+## (`Option`, `Result`, `ForeignError`) or one of its constructors, or a
+## builtin type this module may name.
+fn prelude_bare(cx: Cx, name: String) -> Option[LinkTarget] = {
+  if not is_upper_name(name) {
+    let builtin = map.has(cx.bins, name) && (cx.is_std_module || not set.has(cx.hidden_bins, name))
+    if map.has(cx.std_fns, name) || builtin { return Some(prelude(name, "fn")) }
+    for t in prelude_trait_list() {
+      for pr in t.methods {
+        let (mname, _) = pr
+        if mname == name { return Some(prelude("${t.name}.${mname}", "method")) }
+      }
+    }
+    return None
+  }
+  for t in prelude_trait_list() {
+    if t.name == name { return Some(prelude(name, "trait")) }
+  }
+  for a in prelude_adt_list() {
+    if a.name == name { return Some(prelude(name, "type")) }
+  }
+  for a in prelude_adt_list() {
+    for c in a.ctors {
+      if c.name == name { return Some(prelude("${a.name}.${c.name}", "ctor")) }
+    }
+  }
+  match map.get(cx.btypes, name) {
+    Some(info) -> if builtin_type_visible(info, cx.is_std_module) { return Some(prelude(name, "type")) }
+    None -> ()
+  }
+  None
+}
+
+fn prelude_owned(owner: String, member: String) -> Option[Result[LinkTarget, String]] = {
+  let full = "${owner}.${member}"
+  for t in prelude_trait_list() {
+    if t.name == owner {
+      for pr in t.methods {
+        let (mname, _) = pr
+        if mname == member { return Some(Ok(prelude(full, "method"))) }
+      }
+      for a in t.assoc {
+        if a == member { return Some(Ok(prelude(full, "assoc"))) }
+      }
+      return Some(Err("trait `${owner}` has no member `${member}`"))
+    }
+  }
+  for a in prelude_adt_list() {
+    if a.name == owner {
+      for c in a.ctors {
+        if c.name == member { return Some(Ok(prelude(full, "ctor"))) }
+      }
+      for c in a.ctors {
+        for f in c.fields {
+          if f.name == member { return Some(Ok(prelude(full, "field"))) }
+        }
+      }
+      return Some(Err("type `${owner}` has no constructor or field `${member}`"))
+    }
+  }
+  None
+}
+
+fn prelude_trait_list() -> List[TraitI] = {
+  let ts = prelude_traits()
+  map(prelude_trait_ids(), tid => trait_of(ts, tid))
+}
+
+fn prelude_adt_list() -> List[AdtI] = {
+  let adts = prelude_adts()
+  map(sort(map.keys(adts)), aid => adt_of(adts, aid))
+}

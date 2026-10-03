@@ -29,7 +29,7 @@
 use std/cursor
 use std/cursor.{Cursor}
 
-## Number of Unicode code points in `s` (not UTF-16 units, and not `chars`' list length).
+## Number of Unicode code points in `s` (not UTF-16 units, and not [`chars`]' list length).
 pub fn len(s: String) -> Int = count(s, cursor.start(s), 0)
 
 fn count(s: String, c: Cursor, n: Int) -> Int =
@@ -108,9 +108,9 @@ pub fn ends_with(s: String, suffix: String) -> Bool =
 ##
 ## Inquiry (spec §4.8, criterion 2): "no such prefix" is a branch the caller
 ## takes, not a bug. Testing and peeling in one call is the point -- the pair
-## `starts_with` plus a hand-computed `slice(s, 16, len(s))` is what put
+## [`starts_with`] plus a hand-computed `slice(s, 16, len(s))` is what put
 ## magic offsets in 33 call sites, and an offset that is one out still compiles.
-## No arithmetic happens here either: `cursor.skip` walks past the prefix.
+## No arithmetic happens here either: [`cursor.skip`] walks past the prefix.
 pub fn strip_prefix(s: String, prefix: String) -> Option[String] =
   if starts_with(s, prefix) {
     Some(cursor.slice(s, cursor.skip(s, cursor.start(s), prefix), cursor.end(s)))
@@ -119,7 +119,7 @@ pub fn strip_prefix(s: String, prefix: String) -> Option[String] =
   }
 
 ## `s` with `suffix` removed, or `None` when `s` does not end with it.
-## The mirror of `strip_prefix`, and the answer to `- 5` meaning `len(".dawn")`.
+## The mirror of [`strip_prefix`], and the answer to `- 5` meaning `len(".dawn")`.
 pub fn strip_suffix(s: String, suffix: String) -> Option[String] =
   if ends_with(s, suffix) {
     Some(cursor.slice(s, cursor.start(s), cursor.back(s, cursor.end(s), len(suffix))))
@@ -131,9 +131,9 @@ pub fn strip_suffix(s: String, suffix: String) -> Option[String] =
 ##
 ## The answer is a *position* in `[0, len]`, not the index of an element: an
 ## empty `sub` occurs at position 0 of the empty string, and `len(s)` is a
-## legal answer here (see `last_index_of`) though no character lives there.
+## legal answer here (see [`last_index_of`]) though no character lives there.
 ## "Index" in the name is the unit it counts in -- code points, not UTF-16
-## units and not bytes -- and `cursor.find` is the one that answers with a
+## units and not bytes -- and [`cursor.find`] is the one that answers with a
 ## position you can slice at directly.
 pub fn index_of(s: String, sub: String) -> Option[Int] = idx(s, sub, cursor.start(s), 0)
 
@@ -199,7 +199,7 @@ pub fn repeat(s: String, n: Int) -> String = {
 ## times over: `len(s)` to clamp with, `code_points(s)` to materialise every
 ## character of it as a `List[Char]`, and a rebuild. So `slice(s, 0, 1)` cost
 ## and allocated in proportion to a string it was asked for one character of.
-## `at` went through `cursor.seek` and this did not; positions are what the
+## [`at`] went through [`cursor.seek`] and this did not; positions are what the
 ## cursor layer is for, and it clamps on its own (criterion 3), which is why no
 ## length is needed to clamp against.
 pub fn slice(s: String, from: Int, to: Int) -> String = {
@@ -215,7 +215,7 @@ pub fn slice(s: String, from: Int, to: Int) -> String = {
 ## The first `n` characters, or all of them when there are fewer. `n` is
 ## clamped into `[0, len]`, so this never panics: it names a stretch rather
 ## than asserting that position `n` exists (spec §4.8, criterion 3), the same
-## way `slice` and `list.take` do.
+## way [`slice`] and `list.take` do.
 ##
 ## `truncate` would be this function under another name, so there is no
 ## `truncate`.
@@ -225,7 +225,7 @@ pub fn take(s: String, n: Int) -> String = slice(s, 0, n)
 ## so this never panics. This is the "the rest of it" that 50 call sites spell
 ## `slice(x, i, str.len(x))`.
 ##
-## O(len(s) - n): what it returns, and nothing on top. Spelled through `slice`
+## O(len(s) - n): what it returns, and nothing on top. Spelled through [`slice`]
 ## it also paid a `len(s)` to name the far end, which is the one thing the end
 ## cursor already is.
 pub fn drop(s: String, n: Int) -> String =
@@ -234,11 +234,11 @@ pub fn drop(s: String, n: Int) -> String =
 ## The character at `i`. Panics when `i` is out of range -- `i` is a position
 ## the caller says exists, exactly like `xs[i]` and `bytes.at`
 ## (spec §4.8, criterion 1); `get`-style inquiry about a character is
-## `cursor.char` on a position you already hold.
+## [`cursor.char`] on a position you already hold.
 ##
 ## A `Char`, not a one-character string: it is the currency `code_points` and
-## `from_char` trade in, and `chars` is the function that answers with strings.
-## `cursor.char` stays an `Int` one layer down, because it answers `-1` past
+## [`from_char`] trade in, and [`chars`] is the function that answers with strings.
+## [`cursor.char`] stays an `Int` one layer down, because it answers `-1` past
 ## the end and a sentinel cannot live in a type whose every value is a
 ## character (spec §4.8).
 pub fn at(s: String, i: Int) -> Char = {
@@ -268,7 +268,7 @@ fn pad_fill(pad: List[Char], plen: Int, need: Int, i: Int, acc: List[Char]) -> L
   else { pad_fill(pad, plen, need, i + 1, acc ++ [get(pad, i % plen).expect("cycle in range")]) }
 
 ## `s` right-padded with `pad` until it is `width` code points wide. The mirror
-## of `pad_start`, with the same clauses: `s` comes back unchanged when it is
+## of [`pad_start`], with the same clauses: `s` comes back unchanged when it is
 ## already wide enough or `pad` is empty, and the filler is truncated to land
 ## exactly on width.
 pub fn pad_end(s: String, width: Int, pad: String) -> String = {
@@ -314,7 +314,7 @@ fn chars_go(s: String, c: Cursor, acc: List[String]) -> List[String] =
 
 ## `s` cut at each occurrence of `sep`, left to right. Adjacent separators yield
 ## empty pieces, and the result always has one more piece than there were
-## separators. An empty `sep` yields the characters, as `chars` does.
+## separators. An empty `sep` yields the characters, as [`chars`] does.
 pub fn split(s: String, sep: String) -> List[String] =
   if sep == "" {
     chars(s)
@@ -333,14 +333,14 @@ fn split_go(s: String, sep: String, at: Cursor, acc: List[String]) -> List[Strin
 ## `s` cut in two at the *first* occurrence of `sep`: what came before it and
 ## what came after, or `None` when `sep` does not occur.
 ##
-## Inquiry (spec §4.8, criterion 2), the same shape as `strip_prefix`: "no
-## separator" is a branch the caller takes. `split` answers a different
+## Inquiry (spec §4.8, criterion 2), the same shape as [`strip_prefix`]: "no
+## separator" is a branch the caller takes. [`split`] answers a different
 ## question -- it has no way to say "there was no separator", because one piece
 ## is also what a string with no separator yields, and the two are different
 ## answers to `key=value` parsing.
 ##
 ## Testing and cutting in one call is the point. The pair
-## `index_of` plus two `slice` calls is three passes and two chances to be one
+## [`index_of`] plus two [`slice`] calls is three passes and two chances to be one
 ## out; this is one pass and no arithmetic. An empty `sep` occurs at the start,
 ## so it answers `("", s)`.
 pub fn split_once(s: String, sep: String) -> Option[(String, String)] =
@@ -350,7 +350,7 @@ pub fn split_once(s: String, sep: String) -> Option[(String, String)] =
   }
 
 ## `s` cut in two at the *last* occurrence of `sep`. The mirror of
-## `split_once`, and the one to reach for when the separator also occurs inside
+## [`split_once`], and the one to reach for when the separator also occurs inside
 ## the left part: `rsplit_once("a/b/c.d", "/")` is `("a/b", "c.d")`.
 pub fn rsplit_once(s: String, sep: String) -> Option[(String, String)] =
   match last_at(s, sep, cursor.start(s), None) {
@@ -374,7 +374,7 @@ fn last_at(s: String, sep: String, c: Cursor, best: Option[Cursor]) -> Option[Cu
 
 ## `s` with every occurrence of `from` replaced by `to`, left to right and
 ## non-overlapping. An empty `from` splices `to` between the characters, the
-## same way `split` with an empty separator yields them.
+## same way [`split`] with an empty separator yields them.
 pub fn replace(s: String, from: String, to: String) -> String =
   join(split(s, from), to)
 

@@ -259,6 +259,11 @@ expect('a documented hover reads code, blank line, doc', hoverText(documented),
   'fn helper(n: Int) -> Int\n\n`n` past the limit.\n\nExample:\nhelper(1)')
 expect('an undocumented hover has no doc', hoverParts('```dawn\nInt\n0xFF = 255\n```'), { code: 'Int\n0xFF = 255', doc: '' })
 expect('a plain-text hover is all code', hoverParts({ kind: 'plaintext', value: 'Int' }), { code: 'Int', doc: '' })
+// a doc link the server resolved (§A5) shows as its code span; the file:// URI
+// names a path on the Playground's server and does not reach the tooltip
+expect('a resolved doc link keeps its code and drops its target',
+  hoverParts('```dawn\nfn f() -> Int\n```\n\n---\n\nSee [`g`](file:///srv/play/main.dawn#L3,4) and [`h`].').doc,
+  'See `g` and [`h`].')
 
 // ---- inlay hints (docs/lsp-hover-design.md §A4) ----
 expect('an inlay hint keeps its label, kind and the padding that is on', inlayHintOf({

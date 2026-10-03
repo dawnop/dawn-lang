@@ -949,6 +949,18 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   ()
 }
 
+## `dawn doc`'s answer: the JSON on stdout, or every doc link that resolves
+## to nothing on stderr and exit 1, with no JSON (spec §1.2).
+fn print_doc(out: doc.DocOut) -> Unit !Exit !Console !io =
+  match out {
+    Ok(j) -> console_print(j)
+    Err(es) -> {
+      for e in es { console_eprintln("error: ${e}") }
+      let _ = io.exit(1)
+      ()
+    }
+  }
+
 ## Maven and lock setup is neither a usage mistake nor a source diagnostic.
 ## It fails the command at status 1 after any target lease has been released.
 fn fail_target_setup(msg: String) -> Unit !Exit !Console !io = {
@@ -1868,11 +1880,11 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     Err(e) -> fail_std(e)
   }
   if stdlib_mode {
-    console_print(doc.stdlib_json(std))
+    print_doc(doc.stdlib_json(std))
     return
   }
   if builtins_mode {
-    console_print(doc.builtins_json(std))
+    print_doc(doc.builtins_json(std))
     return
   }
   if not io.exists(target) {
@@ -1894,7 +1906,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     }
   }
   if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
-  console_print(doc.project_json(prog))
+  print_doc(doc.project_json(prog, std))
 }
 
 ## Lowering coverage gate (docs/native-backend-plan.md Phase 0): lower every

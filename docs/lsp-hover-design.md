@@ -1,7 +1,8 @@
 # LSP 悬停与内联提示：设计（A1–A4）
 
 > 状态：current。本线的总纲：除类型之外，hover 与 inlay 还能告诉读者什么、按什么刀序做。
-> A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）。
+> A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）；
+> A5（文档里的 `` [`name`] `` 链接可点，文档注释 D4）已落地（§A5）。
 > B 组立项时在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
@@ -479,6 +480,56 @@ VS Code 扩展不改：四个默认值就是扩展想要的，`vscode-languagecl
 - **`workspace/inlayHint/refresh`**：服务端按序回答、每次请求现算，没有后台缓存要通知客户端刷新
   （sourcekit-lsp 那种模式是另一种架构）。
 
+## A5. 文档链接（文档注释 D4）
+
+文档正文里的 `` [`name`] `` 是对声明的引用（spec §1.2「链接」）。记号、解析规则与 `dawn doc` 的失败在 spec 与
+文档注释裁决里定；这里只记 hover 这一侧。
+
+### A5.1 解析与落点
+
+- **解析器只有一个**：`selfhost/src/driver/doclinks.dawn` 的 `resolve_link`，`dawn doc` 与 hover 共用。它要的是
+  文档所在模块的导入表（`CheckedMod.cx` 的 `module_aliases`、`module_exports`、`imported_names`、
+  `import_renames`）与其他模块的 parse 树。`front/` 两样都看不到；`check/` 不该做（注释不影响语义，`dawn run`
+  不为它付费）；`driver/` 是同时拿得到二者、且 `doc.dawn` 与 `lsp/` 都能导入的最低一层。哪些文本是链接
+  （扫描）只读注释文本，留在 `front/docs`（`doc_links`、`rewrite_links`），两边同一份。
+- **作用域按文档所在的模块**，不是按被 hover 的文档：hover 一个 std 函数时，它文档里的链接在那个 std 模块里
+  解析（`DocHome` 已经记着文本来自哪个模块：`DocHere` 是当前文档，`DocFile(path)` 是工程里的那个模块，
+  `DocStd(mp)` 是 `StdCtx.mods` 里那个模块的 `Cx`）。
+
+### A5.2 渲染成什么
+
+解析到的链接改写成 Markdown 链接，目标是声明所在文件的 `file://` URI，片段 `#L<行>,<列>`（1 起）指到声明的名字：
+
+````
+Twice [`plain`](file:///work/app.dawn#L7,4), unlike [`linkprobe.probe`](file:///work/std/linkprobe.dawn#L2,8)
+````
+
+- 文件与行的查找就是 go to definition 那一条（`def_source`：本文档、同一 source root 里打开着的缓冲区、
+  否则磁盘），所以链接跳到的地方与在名字上按 F12 一样。整个模块（`[`list`]`）指到文件第 1 行。
+- 片段格式：VS Code 打开 hover 里的 `file:` 链接时认 `#L<line>,<col>`；不认片段的客户端照样打开文件。
+- **为什么不学 gopls 链到文档站**：gopls 把 `[Name]` 链到 pkg.go.dev（或它自带的文档服务），前提是每个包都
+  有一个文档页。Dawn 只有 std 上站（`stdlib.html`），工程与 packages 没有；而编辑器里的读者要的是声明本身，
+  跳到声明正是 hover 旁边 go to definition 的语义。站点锚点的规则只在 `site/src/gen/stdlib.dawn` 一处，
+  编译器里再抄一份就是会悄悄漂移的第二份。
+- **不改写的情形**：解析不到的链接、目标没有文件的链接（prelude 名字；std 用内嵌副本时没有目录）按原样留下。
+  CommonMark 把它渲染成带方括号的代码，不认识 Markdown 的客户端看到的也是原文。hover 不报错：报错是
+  `dawn doc` 的事，编辑器里一段坏链接不应该让 hover 失败。
+- 不含 `` [` `` 的文档不做任何解析，回包与 D4 之前逐字节相同；含链接的才建模块表、逐个解析。改写在截断
+  （A3.5）之前，链接只会让行变长，截断仍按整行。
+
+### A5.3 Playground
+
+Playground 的 LSP 跑在服务器上，`file://` 指的是服务器上的路径，浏览器打不开，也不该给人看。
+`site/play-ui/src/lsp.ts` 的 `docText`（tooltip 本来就把文档当纯文本显示）把这种链接还原成它的代码 span，
+丢掉目标，selftest 加一条。网关不改：它不解析 hover 正文。
+
+### A5.4 不做的（A5 内，理由）
+
+- **补全项、signatureHelp 里的链接**：那两处还没有文档（裁决 D7），有了文档时用同一个 `linked_doc`。
+- **`[name]`（不带反引号）**：调研 §3.2 的候选之一。仓里 `##` 正文写方括号的地方多是区间与类型参数
+  （`[0, len)`、`List[T]`），认它会把这些读成坏链接；只认带反引号的一种，链接与非链接一眼可分。
+- **链到 packages 的站点页**：packages 还没有 API 页（裁决 P2/P3 之后再说）。
+
 ## 5. 门禁与契约
 
 - `./bin/dawn test selfhost`：`lsp/lspv` 五条（每种值、记录与和类、十六进制阈值、截断、函数值）；
@@ -564,4 +615,5 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | A2 | 已落地 | `30419580` |
 | A3 | 已落地 | `597dfb3a` |
 | A4 | 已落地 | `5c07b1e6` |
+| A5（文档注释 D4） | 已落地 | |
 | B 组 | 未立项 | |

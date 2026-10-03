@@ -28,11 +28,11 @@ use std/char
 ## whose UTF-8 encoding is that single byte, and there is none. Anything that
 ## decompresses writes bytes it computed, so this is the missing half.
 ##
-## It is a value like everything else -- `put` returns the buffer rather than
+## It is a value like everything else -- [`put`] returns the buffer rather than
 ## mutating it -- and it inherits `array_push`'s clause: the backend extends in
 ## place exactly when the version it is handed is the only one that could be
 ## reading the frontier, so building a megabyte is linear and not quadratic.
-## `buf_at` is here because the callers that need this are decompressors, and an
+## [`buf_at`] is here because the callers that need this are decompressors, and an
 ## LZ77 back-reference reads output that was written a moment ago.
 pub opaque type Buf = Array[Int]
 
@@ -56,7 +56,7 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
 
 ## How many bytes have been written.
 ##
-## `size` and not `len`: a named exception to one-concept-one-name, because
+## `size` and not [`len`]: a named exception to one-concept-one-name, because
 ## `len(b: Bytes)` above already holds that name and Dawn has no overloading
 ## (CONTRIBUTING §naming; history in `docs/stdlib-naming.md`).
 pub fn size(b: Buf) -> Int = array_len(b)
@@ -64,7 +64,7 @@ pub fn size(b: Buf) -> Int = array_len(b)
 ## The byte at `i`, as 0..255. Out of range panics, exactly as `at(b: Bytes, i)`
 ## does — it is the same question asked of the half-built buffer.
 ##
-## `buf_at` and not `at` for the reason `size` is not `len`, and not `get`
+## `buf_at` and not [`at`] for the reason [`size`] is not [`len`], and not `get`
 ## because `get` is criterion 2's word and this asserts (spec §4.8). The second
 ## named exception to one-concept-one-name (CONTRIBUTING §naming; history and
 ## the rejected alternative in `docs/stdlib-naming.md`).
@@ -83,10 +83,10 @@ pub fn utf8(s: String) -> Bytes = bytes_utf8(s)
 ## gone. That is the right answer for text on its way to a human and the wrong
 ## one for input something is about to trust, which is how the overlong `c0 af`
 ## turns into `/` on any path that decodes before it checks.
-## `decode_utf8_checked` is the other half.
+## [`decode_utf8_checked`] is the other half.
 pub fn decode_utf8_lossy(b: Bytes) -> String = bytes_decode_utf8(b)
 
-## Why `decode_utf8_checked` refused. `offset` is the byte position where the
+## Why [`decode_utf8_checked`] refused. `offset` is the byte position where the
 ## first malformed sequence begins, which is also how many leading bytes of the
 ## input were valid UTF-8.
 ##
@@ -100,7 +100,7 @@ pub type Utf8Error = { offset: Int } derive Show
 
 ## `b` decoded as UTF-8, or `Err` at the first sequence that is not.
 ##
-## The exact complement of `decode_utf8_lossy`: this answers `Ok` for precisely
+## The exact complement of [`decode_utf8_lossy`]: this answers `Ok` for precisely
 ## the inputs that one returns unchanged, and the `Ok` string is the one it
 ## would have produced. Nothing is rewritten on the way to the caller, so an
 ## application that must not act on bytes it was not sent asks this one.
@@ -283,7 +283,7 @@ fn hex_val(c: Char) -> Int =
 
 ## `b` as hexadecimal: two digits per byte, most significant first, nothing
 ## between them. Lower case, which is the canonical spelling this library
-## produces -- `from_hex` reads either case, `to_hex` writes one.
+## produces -- [`from_hex`] reads either case, `to_hex` writes one.
 pub fn to_hex(b: Bytes) -> String = {
   var out: List[Char] = []
   var i = 0
@@ -444,8 +444,8 @@ pub fn to_base64(b: Bytes) -> String = b64_encode(b, false, true)
 ## `s` read as standard-alphabet Base64, or `None` when it is not.
 ##
 ## Inquiry (spec §4.8, criterion 2). Padding is optional on the way in even
-## though `to_base64` always writes it; the url-safe alphabet is not accepted
-## here -- `from_base64_url` is the function that reads it.
+## though [`to_base64`] always writes it; the url-safe alphabet is not accepted
+## here -- [`from_base64_url`] is the function that reads it.
 pub fn from_base64(s: String) -> Option[Bytes] = b64_decode(s, false)
 
 ## `b` as Base64 with the url- and filename-safe alphabet (`A-Za-z0-9-_`,
@@ -456,7 +456,7 @@ pub fn to_base64_url(b: Bytes) -> String = b64_encode(b, true, false)
 
 ## `s` read as url-safe Base64, with or without padding, or `None` when it is
 ## not. The standard alphabet's `+` and `/` are rejected here, as `-` and `_`
-## are by `from_base64`: which alphabet a string is in is the caller's claim,
+## are by [`from_base64`]: which alphabet a string is in is the caller's claim,
 ## and a decoder that guesses turns a mismatch into wrong bytes.
 pub fn from_base64_url(s: String) -> Option[Bytes] = b64_decode(s, true)
 

@@ -209,6 +209,18 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !Fs !Exit !Console !io = {
   ()
 }
 
+## `dawn doc`'s answer: the JSON on stdout, or every doc link that resolves
+## to nothing on stderr and exit 1, with no JSON (spec §1.2).
+fn print_doc(out: doc.DocOut) -> Unit !Exit !Console !io =
+  match out {
+    Ok(j) -> console_print(j)
+    Err(es) -> {
+      for e in es { console_eprintln("error: ${e}") }
+      let _ = io.exit(1)
+      ()
+    }
+  }
+
 type RunArgs = { std_flag: Option[String], target: String, program_args: List[String] }
 
 fn run_usage() -> String =
@@ -825,11 +837,11 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     Err(e) -> fail_std(e)
   }
   if stdlib_mode {
-    console_print(doc.stdlib_json(std))
+    print_doc(doc.stdlib_json(std))
     return
   }
   if builtins_mode {
-    console_print(doc.builtins_json(std))
+    print_doc(doc.builtins_json(std))
     return
   }
   if not io.exists(target) {
@@ -838,7 +850,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
-  console_print(doc.project_json(prog))
+  print_doc(doc.project_json(prog, std))
 }
 
 ## `dawnc test [--std <dir>] <target> | --stdlib` -- the native mirror of

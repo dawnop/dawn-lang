@@ -176,9 +176,9 @@ pub fn round_f32(x: Float, mode: Rounding = NearestEven) -> Float = round_binary
 
 ## `x` rounded to TensorFloat-32 in the direction `mode` names: binary32's
 ## exponent range with eleven significand bits instead of twenty-four. It is
-## a rounding and not a storage format in this module's sense -- `tf32_bits`
+## a rounding and not a storage format in this module's sense -- [`tf32_bits`]
 ## puts it in a 32-bit word with thirteen zero bits at the bottom, which is
-## where the hardware keeps it. `NearestAway` is what the device answers for
+## where the hardware keeps it. [`NearestAway`] is what the device answers for
 ## `ftof` from f32 to tf32 under `nearest_away` (measured, knife T17).
 pub fn round_tf32(x: Float, mode: Rounding = NearestEven) -> Float = round_binary(x, 11, -126, 127, mode)
 
@@ -186,15 +186,15 @@ pub fn round_tf32(x: Float, mode: Rounding = NearestEven) -> Float = round_binar
 ## SATURATING at the largest finite value.
 ##
 ## The format is an ordinary IEEE binary format at eight bits, infinities
-## and all, so `round_binary` is the arithmetic; what is not IEEE is the top
+## and all, so [`round_binary`] is the arithmetic; what is not IEEE is the top
 ## end. An IEEE conversion sends everything above the midpoint 61440 to
-## infinity, and this format has an infinity to send it to (`f8e5m2_bits`
-## and `f8e5m2_of_bits` keep the two 0x7C encodings, because a value ALREADY
+## infinity, and this format has an infinity to send it to ([`f8e5m2_bits`]
+## and [`f8e5m2_of_bits`] keep the two 0x7C encodings, because a value ALREADY
 ## in the format can be one). The device does not: knife TA converted
 ## 1e30, -1e30 and an infinity on a B200 and got 57344, -57344 and 57344.
 ##
 ## So the codec and this function part company at exactly two inputs, and
-## the reason is that they answer different questions. `f8e5m2_of_bits` says
+## the reason is that they answer different questions. [`f8e5m2_of_bits`] says
 ## what an octet MEANS; this says what `ftof` DOES, and `ftof` saturates.
 ## The two fp8 formats below say the same thing and f4E2M1FN says it too, so
 ## saturation is this assembler's rule for the narrow floats and not a
@@ -209,7 +209,7 @@ pub fn round_f8e5m2(x: Float) -> Float =
 
 ## `x` rounded to f8E4M3FN: four significand bits, exponents -6..8.
 ##
-## FN is the whole of what this function adds to `round_binary`. The format
+## FN is the whole of what this function adds to [`round_binary`]. The format
 ## has no infinity: the all-ones exponent field is a normal exponent, and
 ## only the single encoding with an all-ones significand under it is taken,
 ## as NaN. So the largest finite value is 1.75 * 2^8 = 448 rather than the
@@ -256,7 +256,7 @@ pub fn round_f8e4m3fn(x: Float) -> Float =
 ##     one value that is not a plausible answer to any finite input, so a
 ##     corpus that reads it back knows it hit this arm.
 ##
-## The rounding itself is `round_binary`'s: two significand bits (the
+## The rounding itself is [`round_binary`]'s: two significand bits (the
 ## hidden one included), minimum normal exponent 0 and maximum 2, so the
 ## subnormal grid is 2^-1 and 0.5 is the one subnormal. Types.td's own
 ## example says the same in bits: 0001 is 0.5 and 0011 is 1.5.
@@ -272,7 +272,7 @@ pub fn round_f4e2m1(x: Float) -> Float =
 ##
 ## The value set is the 255 powers 2^-127 .. 2^127 and NaN, and that is all
 ## of it: no sign bit, no significand, no zero, no infinity. So this is not
-## a `round_binary` at some width, it is a different function, and its
+## a [`round_binary`] at some width, it is a different function, and its
 ## rounding mode is different too -- `ftof` accepts only `zero` and
 ## `positive_inf` for this target (Ops.td's FToFOp), never the
 ## `nearest_even` every other conversion here takes. This is the `zero` one,
@@ -292,9 +292,9 @@ pub fn round_f4e2m1(x: Float) -> Float =
 ## clamps UP to 2^-127; that arm was a guess too and the device agrees with
 ## it (2^-140 answers 2^-127).
 ##
-## `f8e8m0_bits` is NOT changed to match: it answers what an octet means,
+## [`f8e8m0_bits`] is NOT changed to match: it answers what an octet means,
 ## and zero and the negatives are still not values of this format. The two
-## functions answer different questions, and `round_f8e5m2` records the same
+## functions answer different questions, and [`round_f8e5m2`] records the same
 ## split at the other end of the range.
 pub fn round_f8e8m0(x: Float) -> Float =
   if x != x {
@@ -572,7 +572,7 @@ fn exponent(x: Float) -> Int = {
 
 ## The 16-bit pattern of the bfloat16 value `x`: the sign bit, eight exponent
 ## bits biased by 127, seven significand bits, as the value sits in memory.
-## `x` is a value of the format, as `round_bf16` leaves it. For a Float off
+## `x` is a value of the format, as [`round_bf16`] leaves it. For a Float off
 ## the bf16 grid the answer is the pattern with the extra significand bits
 ## dropped (truncation toward zero, what reading the high half of a binary32
 ## gives), NOT the nearest bf16: round first. A value beyond the format's
@@ -607,7 +607,7 @@ pub fn bf16_bits(x: Float) -> Int =
 ## The 16-bit pattern of the IEEE binary16 value `x`: the sign bit, five
 ## exponent bits biased by 15, ten significand bits, as the value sits in
 ## memory. The bfloat16 function's shape at binary16's widths, and the same
-## contract: `x` is a value of the format, as `round_fp16` leaves it, and a
+## contract: `x` is a value of the format, as [`round_fp16`] leaves it, and a
 ## Float off the binary16 grid answers the pattern with the extra
 ## significand bits dropped rather than the nearest binary16. A value beyond
 ## the format's range answers the infinity of its sign; NaN answers the
@@ -684,12 +684,12 @@ pub fn bf16_of_bits(bits: Int) -> Float = {
 ## The 32-bit pattern of the binary32 value `x`: the sign bit, eight
 ## exponent bits biased by 127, twenty-three significand bits. The bfloat16
 ## function's shape at binary32's widths and the same contract: `x` is a
-## value of the format, as `round_f32` leaves it, and a Float off the grid
+## value of the format, as [`round_f32`] leaves it, and a Float off the grid
 ## answers the pattern with the extra bits dropped rather than the nearest
 ## binary32.
 ##
 ## This is the codec the module's header said would arrive "when something
-## needs it". `tf32_bits` is what needs it: TensorFloat-32 lives in a
+## needs it". [`tf32_bits`] is what needs it: TensorFloat-32 lives in a
 ## binary32 word.
 pub fn f32_bits(x: Float) -> Int =
   if x != x {
@@ -738,7 +738,7 @@ pub fn f32_of_bits(bits: Int) -> Float = {
 ## sign, binary32's eight exponent bits and ten significand bits) and the
 ## hardware keeps it in a 32-bit slot, so a tf32 buffer is a buffer of
 ## 32-bit words and this is how one is laid out. `x` is a value of the
-## format, as `round_tf32` leaves it.
+## format, as [`round_tf32`] leaves it.
 pub fn tf32_bits(x: Float) -> Int = f32_bits(x) & 0xFFFFE000
 
 ## The TensorFloat-32 value whose 32-bit pattern is the low 32 bits of
@@ -795,7 +795,7 @@ pub fn f8e5m2_of_bits(bits: Int) -> Float = {
 ## 2^-9.
 ##
 ## THE ALL-ONES EXPONENT IS A NORMAL EXPONENT here, which is the whole
-## difference from `f8e5m2_bits`: `0x7F` and `0xFF` are the format's only
+## difference from [`f8e5m2_bits`]: `0x7F` and `0xFF` are the format's only
 ## two NaN encodings and everything below them is finite, so `0x7E` is 448
 ## and not an infinity. A value beyond the range answers the canonical NaN
 ## `0x7F`, because there is no infinity to answer with.
@@ -844,9 +844,9 @@ pub fn f8e4m3fn_of_bits(bits: Int) -> Float = {
 ## The value set is small enough to lay out whole, and this does: the
 ## magnitude picks one of eight patterns and the sign is the top bit.
 ##
-## `x` is a value of the format, as `round_f4e2m1` leaves it. Anything else
+## `x` is a value of the format, as [`round_f4e2m1`] leaves it. Anything else
 ## is not on the grid and answers the nibble of the nearest value below it
-## in magnitude, which is what `f8e8m0_bits` does with the same problem.
+## in magnitude, which is what [`f8e8m0_bits`] does with the same problem.
 pub fn f4e2m1_bits(x: Float) -> Int = {
   let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
   let a = magnitude(x)
@@ -890,7 +890,7 @@ pub fn f4e2m1_of_bits(bits: Int) -> Float = {
 ## The octet of the f8E8M0FNU value `x`: the biased exponent alone, `e + 127`
 ## for `x = 2^e`, and `0xFF` for NaN. There is no sign bit and no
 ## significand, so an octet is a value and the codec is a shift.
-## `x` is a value of the format, as `round_f8e8m0` leaves it; anything else
+## `x` is a value of the format, as [`round_f8e8m0`] leaves it; anything else
 ## answers NaN rather than the nearest power of two.
 pub fn f8e8m0_bits(x: Float) -> Int =
   if x != x || x <= 0.0 || x == 1.0 / 0.0 {
