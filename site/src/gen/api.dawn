@@ -1,0 +1,449 @@
+# The entries of an API reference page, as `dawn doc` describes them: one
+# function, type, constant, trait or effect each, with its signature, its doc
+# comment rendered as Markdown, its members' docs, its examples, and its doc
+# links turned into links to the entries they name.
+#
+# Why this is a module of its own. It was the middle of gen/stdlib.dawn, and
+# the standard library is no longer the only thing `dawn doc` documents that
+# the site shows: packages/* are read with the same command and the same JSON
+# shape (gen/packages.dawn). Two copies of these renderers would be two
+# spellings of one anchor rule, and an anchor a doc link or the search index
+# names has to be the id the page emits. What stays in gen/stdlib is what only
+# that page has: the prelude groups, the module order, std/gpu's reference
+# kernels, the page's chrome and the search rows over all of it.
+#
+# The anchors are page-relative: `link_anchor` assumes the entries of the
+# page it renders on, and `linked` stops the build on a link whose target the
+# page does not carry (`Pg.anchors`). The page decides which entries it has.
+
+use std/str
+use std/map
+use std/set
+use json/value.{Json, JNull, JBool, JStr, JArr, JObj}
+use md/parser
+use html/escape.{escape_html}
+use html/render.{render_doc}
+use hl/dawn.{highlight_dawn}
+use gen/common.{map_doc_url}
+
+# ---- reading the compiler's JSON ----
+
+pub fn jget(j: Json, key: String) -> Json =
+  match j {
+    JObj(entries) -> unwrap_or(map.get(entries, key), JNull)
+    _ -> JNull
+  }
+
+pub fn jstr(j: Json) -> String =
+  match j {
+    JStr(s) -> s
+    _ -> ""
+  }
+
+pub fn jbool(j: Json) -> Bool =
+  match j {
+    JBool(b) -> b
+    _ -> false
+  }
+
+pub fn jarr(j: Json) -> List[Json] =
+  match j {
+    JArr(items) -> items
+    _ -> []
+  }
+
+pub fn field(j: Json, key: String) -> String = jstr(jget(j, key))
+
+# ---- pieces of an entry ----
+
+## A module path as an HTML id fragment: `std/str` -> `std-str`.
+pub fn slug(path: String) -> String = str.replace(path, "/", "-")
+
+## A doc comment, rendered as the Markdown it is. Multi-line prose used to be
+## escaped whole and flattened into one table cell; paragraphs, bullets and
+## `code` spans all survive this way.
+##
+## An unparsable doc comment is a hard error, like every other Markdown this
+## generator reads: the site build is the lint.
+fn prose(pg: Pg, text: String, links: List[Json]) -> String =
+  if str.trim(text) == "" {
+    ""
+  } else {
+    match parser.parse(text) {
+      Ok(bs) -> linked(pg, render_doc(bs, u => map_doc_url(".", pg.docs, u)).html, links)
+      Err(e) -> panic("a doc comment is not Markdown: ${e}\n---\n${text}")
+    }
+  }
+
+## The prose of an object `dawn doc` wrote: its `doc` and its `links`.
+pub fn doc_prose(pg: Pg, j: Json) -> String = prose(pg, field(j, "doc"), jarr(jget(j, "links")))
+
+## What rendering any doc on the page needs: the `docs/` files a doc may link
+## to, every anchor the page carries, which a `[`name`]` link lands on, and
+## the heading an entry's examples go under (one, many), in the page's
+## language.
+pub type Pg = { docs: List[String], anchors: Set[String], examples: (String, String) }
+
+## An entry's examples (spec §3.4: the bodies of the tests named by its
+## declaration, as `dawn doc` wrote them) as Dawn code blocks under one
+## heading. An entry with none renders nothing, so its bytes are what they
+## were before examples existed.
+fn examples_html(pg: Pg, j: Json) -> String = {
+  let srcs = jarr(jget(j, "examples"))
+  if len(srcs) == 0 { return "" }
+  let (one, many) = pg.examples
+  let title = if len(srcs) == 1 { one } else { many }
+  var out = """<div class="api-examples">""" ++ "\n" ++
+    """<p class="api-examples-title">""" ++ escape_html(title) ++ "</p>\n"
+  for src in srcs {
+    out = out ++ """<pre class="dawn api-example"><code>""" ++ highlight_dawn(jstr(src)) ++ "</code></pre>\n"
+  }
+  out ++ "</div>\n"
+}
+
+# ---- doc links (spec §1.2) ----
+#
+# `dawn doc` has already resolved every `[`name`]` in a doc, and refused to
+# answer over one that resolves to nothing; what is left here is where on this
+# page each target is. The Markdown renderer does not know the spelling -- to
+# it `[`x`]` is a bracket, a code span and a bracket -- so the rendered
+# `[<code>x</code>]` is rewritten afterwards. A link-shaped text inside a
+# fenced example renders inside `<pre>` with its backticks and is left alone.
+
+## The id on this page a link's target is anchored at, by the same rules
+## [api_rows] uses: a member (constructor, field, method, operation, associated
+## member) lands on its owner's entry. None for a prelude name the page has no
+## entry for: a builtin type, or `Option` and its constructors.
+pub fn link_anchor(t: Json) -> Option[String] = {
+  let module = field(t, "module")
+  let name = field(t, "name")
+  let kind = field(t, "kind")
+  let owner = str.split(name, ".")[0]
+  if module == "" {
+    return match kind {
+      "fn" -> Some("p-${name}")
+      "trait" -> Some("prelude-trait-${name}")
+      "method" -> Some("prelude-trait-${owner}")
+      "assoc" -> Some("prelude-trait-${owner}")
+      _ -> None
+    }
+  }
+  let base = slug(module)
+  match kind {
+    "module" -> Some("m-${base}")
+    "type" -> Some("${base}-type-${name}")
+    "ctor" -> Some("${base}-type-${owner}")
+    "field" -> Some("${base}-type-${owner}")
+    "trait" -> Some("${base}-trait-${name}")
+    "method" -> Some("${base}-trait-${owner}")
+    "assoc" -> Some("${base}-trait-${owner}")
+    "effect" -> Some("${base}-effect-${name}")
+    "op" -> Some("${base}-effect-${owner}")
+    _ -> Some("${base}-${name}")
+  }
+}
+
+## `html` with each of `links` turned into a link to its entry. A target whose
+## anchor this page does not carry is a std doc pointing at something the
+## reference leaves out (a private helper, an internal module), which is a
+## broken link on the page as surely as a misspelled one, so the build stops.
+## A prelude name with no entry at all keeps its code span and loses the
+## brackets.
+fn linked(pg: Pg, html: String, links: List[Json]) -> String = {
+  var out = html
+  for l in links {
+    let text = field(l, "text")
+    let code = "<code>" ++ escape_html(text) ++ "</code>"
+    let to = match link_anchor(jget(l, "target")) {
+      Some(a) ->
+        if set.has(pg.anchors, a) {
+          """<a href="#${a}">""" ++ code ++ "</a>"
+        } else {
+          panic("a doc links [`${text}`] to #${a}, which this page does not carry")
+        }
+      None -> code
+    }
+    out = str.replace(out, "[" ++ code ++ "]", to)
+  }
+  out
+}
+
+## A doc's text with its links' brackets taken off, for a reader that does
+## not render Markdown links (the search index's one-line note).
+pub fn unlinked(j: Json) -> String = {
+  var text = field(j, "doc")
+  for l in jarr(jget(j, "links")) {
+    let t = field(l, "text")
+    text = str.replace(text, "[`${t}`]", "`${t}`")
+  }
+  text
+}
+
+## One documented entry: its qualified spelling as the anchor, the declaration
+## exactly as the compiler renders it, then the prose, then its members' docs.
+fn entry(
+  pg: Pg,
+  title: String,
+  id: String,
+  sig: String,
+  doc: Json,
+  members: List[(String, Json)]
+) -> String =
+  """<div class="api-item" id="${id}">""" ++ "\n" ++
+  """<h3 class="api-name"><a href="#${id}">""" ++ escape_html(title) ++ "</a></h3>\n" ++
+  """<pre class="dawn api-sig"><code>""" ++ highlight_dawn(sig) ++ "</code></pre>\n" ++
+  """<div class="api-doc">""" ++ "\n" ++ doc_prose(pg, doc) ++ "</div>\n" ++
+  examples_html(pg, doc) ++ members_html(pg, members) ++ "</div>"
+
+## The members of an entry that have a doc of their own, each under its
+## declaration as the entry's signature spells it: `(label, member)` pairs
+## from [member_docs], the member being the object `dawn doc` wrote for it. A
+## member without one is already in the signature above and gets no row, so
+## an entry with no member docs renders what it always did.
+fn members_html(pg: Pg, members: List[(String, Json)]) -> String =
+  if len(members) == 0 {
+    ""
+  } else {
+    var rows: List[String] = []
+    for pr in members {
+      let (label, m) = pr
+      rows = rows ++ ["<dt><code>" ++ highlight_dawn(label) ++ "</code></dt>\n<dd>\n"
+          ++ doc_prose(pg, m) ++ examples_html(pg, m) ++ "</dd>\n"]
+    }
+    """<dl class="api-members">""" ++ "\n" ++ join(rows, "") ++ "</dl>\n"
+  }
+
+## The member rows worth a line: those with a doc of their own, or an
+## example (a constructor's, `test T.Ctor`). A member on its owner's line has
+## no doc (spec §1.2), so `dawn doc` writes null for it and nothing here has to
+## tell a member's doc from its type's.
+pub fn member_docs(members: List[(String, Json)]) -> List[(String, Json)] =
+  filter(members, pr => {
+    let (_, m) = pr
+    str.trim(field(m, "doc")) != "" || len(jarr(jget(m, "examples"))) > 0
+  })
+
+pub fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "${qual}.${name}" }
+
+pub fn fn_entry(pg: Pg, qual: String, id_base: String, f: Json) -> String =
+  entry(pg, qualify(qual, field(f, "name")), id_base ++ "-" ++ field(f, "name"),
+    field(f, "sig"), f, [])
+
+fn ctor_decl(c: Json) -> String = {
+  let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
+  if len(fs) == 0 { field(c, "name") } else { field(c, "name") ++ "(" ++ join(fs, ", ") ++ ")" }
+}
+
+fn record_decl(head: String, c: Json) -> String = {
+  let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
+  "type ${head} = { " ++ join(fs, ", ") ++ " }"
+}
+
+## The declaration, reassembled from what the compiler reported. A type with no
+## constructors keeps its representation to itself — `pub opaque type Cursor`
+## is the whole point of `Cursor` — and that absence is the documentation.
+pub fn type_decl(t: Json) -> String = {
+  let ps = map(jarr(jget(t, "typeParams")), p => jstr(p))
+  let name = field(t, "name")
+  let head = if len(ps) == 0 { name } else { name ++ "[" ++ join(ps, ", ") ++ "]" }
+  let ctors = jarr(jget(t, "ctors"))
+  match get(ctors, 0) {
+    None -> "type ${head}"
+    Some(first) ->
+      if jbool(jget(t, "record")) {
+        record_decl(head, first)
+      } else {
+        "type ${head} = " ++ join(map(ctors, c => ctor_decl(c)), " | ")
+      }
+  }
+}
+
+## `-type-` in the anchor, not just the name: `std/bytes` has both a `Buf`
+## type and a `buf()` function, and ids that differ only in case are one
+## careless lowercase away from colliding.
+pub fn type_entry(pg: Pg, id_base: String, t: Json) -> String =
+  entry(pg, field(t, "name"), id_base ++ "-type-" ++ field(t, "name"), type_decl(t), t,
+    type_members(t))
+
+## A type's constructor and field docs, in declaration order. A record's
+## fields are spelled as the record spells them, a variant's as `Ctor.field`.
+## A record's one constructor never has a doc: it starts on the `type` line.
+pub fn type_members(t: Json) -> List[(String, Json)] = {
+  let record = jbool(jget(t, "record"))
+  var out: List[(String, Json)] = []
+  for c in jarr(jget(t, "ctors")) {
+    out = out ++ member_docs([(ctor_decl(c), c)])
+    for f in jarr(jget(c, "fields")) {
+      let fname = if record { field(f, "name") } else { field(c, "name") ++ "." ++ field(f, "name") }
+      out = out ++ member_docs([(fname ++ ": " ++ field(f, "type"), f)])
+    }
+  }
+  out
+}
+
+pub fn const_entry(pg: Pg, qual: String, id_base: String, c: Json) -> String = {
+  let name = field(c, "name")
+  entry(pg, qualify(qual, name), "${id_base}-${name}", "const ${name}: " ++ field(c, "type"), c, [])
+}
+
+pub fn trait_entry(pg: Pg, id_base: String, t: Json) -> String = {
+  let name = field(t, "name")
+  let tp = field(t, "typeParam")
+  var body = ""
+  for a in jarr(jget(t, "assoc")) {
+    body = body ++ "\n  type " ++ jstr(a)
+  }
+  for m in jarr(jget(t, "methods")) {
+    body = body ++ "\n  " ++ field(m, "sig")
+  }
+  let methods = map(jarr(jget(t, "methods")), m => (field(m, "sig"), m))
+  entry(pg, name, "${id_base}-trait-${name}", "trait ${name}[${tp}] {${body}\n}", t,
+    member_docs(methods))
+}
+
+## Dead for every std module today — nothing there declares a `pub effect` yet
+## — and here so that the day one appears it lands on the page instead of
+## silently missing, which is the same reason `doc` emits the empty array.
+pub fn effect_entry(pg: Pg, id_base: String, e: Json) -> String = {
+  let name = field(e, "name")
+  var body = ""
+  for op in jarr(jget(e, "ops")) {
+    body = body ++ "\n  " ++ field(op, "sig")
+  }
+  let ops = map(jarr(jget(e, "ops")), op => (field(op, "sig"), op))
+  entry(pg, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", e, member_docs(ops))
+}
+
+# ---- tests ----
+
+## A JSON object from its entries, in order: what the tests here and in the
+## pages that use these renderers build their synthetic `dawn doc` output from.
+pub fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))
+
+## A page with no docs to link to, no anchors and the English example
+## headings: enough to render an entry whose doc links nothing.
+pub fn no_pg() -> Pg = Pg { docs: [], anchors: set.empty(), examples: ("Example", "Examples") }
+
+fn plain_prose(text: String) -> String = prose(no_pg(), text, [])
+
+fn member_labels(ms: List[(String, Json)]) -> List[(String, String)] =
+  map(ms, pr => {
+    let (label, m) = pr
+    (label, field(m, "doc"))
+  })
+
+test "module paths become id fragments and call-site aliases" {
+  assert slug("std/str") == "std-str"
+  assert qualify("str", "trim") == "str.trim"
+  # the prelude's names have no module to qualify them with
+  assert qualify("", "println") == "println"
+}
+
+test "a type with no constructors keeps its representation to itself" {
+  let opaque = jobj([("name", JStr("Cursor")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("ctors", JArr([]))])
+  assert type_decl(opaque) == "type Cursor"
+}
+
+test "records and sums reassemble into their declarations" {
+  let field_of = (n: String, t: String) =>
+    jobj([("name", JStr(n)), ("type", JStr(t))])
+  let rec = jobj([("name", JStr("Pair")), ("record", JBool(true)),
+    ("typeParams", JArr([JStr("A"), JStr("B")])),
+    ("ctors", JArr([jobj([("name", JStr("Pair")),
+      ("fields", JArr([field_of("a", "A"), field_of("b", "B")]))])]))])
+  assert type_decl(rec) == "type Pair[A, B] = { a: A, b: B }"
+
+  let sum = jobj([("name", JStr("Shape")), ("record", JBool(false)),
+    ("typeParams", JArr([])),
+    ("ctors", JArr([
+      jobj([("name", JStr("Circle")), ("fields", JArr([field_of("r", "Float")]))]),
+      jobj([("name", JStr("Dot")), ("fields", JArr([]))])
+    ]))])
+  assert type_decl(sum) == "type Shape = Circle(r: Float) | Dot"
+}
+
+test "member docs render under their declarations, and a member without one gets no row" {
+  let fld = (n: String, t: String, d: Json) =>
+    jobj([("name", JStr(n)), ("type", JStr(t)), ("doc", d)])
+  let sum = jobj([("name", JStr("Shape")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("doc", JStr("A shape.")),
+    ("ctors", JArr([
+      jobj([("name", JStr("Circle")), ("doc", JStr("A *round* one.")),
+        ("fields", JArr([fld("r", "Float", JStr("The radius."))]))]),
+      jobj([("name", JStr("Dot")), ("doc", JNull), ("fields", JArr([]))])
+    ]))])
+  assert member_labels(type_members(sum)) == [("Circle(r: Float)", "A *round* one."), ("Circle.r: Float", "The radius.")]
+  let html = type_entry(no_pg(), "std-x", sum)
+  assert str.contains(html, `<dl class="api-members">`)
+  assert str.contains(html, "<dd>\n<p>A <em>round</em> one.</p>\n</dd>")
+  assert len(str.split(html, "<dt>")) == 3
+
+  # a record: fields spelled bare, an undocumented one left out
+  let rec = jobj([("name", JStr("P")), ("record", JBool(true)),
+    ("typeParams", JArr([])), ("doc", JStr("A pair.")),
+    ("ctors", JArr([jobj([("name", JStr("P")), ("doc", JNull),
+      ("fields", JArr([fld("a", "Int", JNull), fld("b", "Int", JStr("The second."))]))])]))])
+  assert member_labels(type_members(rec)) == [("b: Int", "The second.")]
+  # none documented: the entry it always was
+  let bare = jobj([("name", JStr("Q")), ("record", JBool(true)),
+    ("typeParams", JArr([])), ("doc", JStr("A one.")),
+    ("ctors", JArr([jobj([("name", JStr("Q")), ("doc", JNull),
+      ("fields", JArr([fld("a", "Int", JNull)]))])]))])
+  assert not str.contains(type_entry(no_pg(), "std-x", bare), "api-members")
+
+  # a trait's methods; none documented is the entry it always was
+  let meth = (sig: String, d: Json) => jobj([("name", JStr("m")), ("sig", JStr(sig)), ("doc", d)])
+  let tr = (ms: List[Json]) => jobj([("name", JStr("Tr")), ("typeParam", JStr("T")),
+    ("assoc", JArr([])), ("methods", JArr(ms)), ("doc", JStr("A trait."))])
+  let with_doc = trait_entry(no_pg(), "std-x", tr([meth("fn m(t: T) -> Int", JStr("Measures `t`.")),
+    meth("fn n(t: T) -> Int", JNull)]))
+  assert str.contains(with_doc, "<dd>\n<p>Measures <code>t</code>.</p>\n</dd>")
+  assert len(str.split(with_doc, "<dt>")) == 2
+  let without = trait_entry(no_pg(), "std-x", tr([meth("fn n(t: T) -> Int", JNull)]))
+  assert not str.contains(without, "api-members")
+  assert str.ends_with(without, "</div>\n</div>")
+}
+
+test "an entry's examples render as Dawn code under one heading, and none renders nothing" {
+  let f = (ex: List[String]) => {
+    let base = [("name", JStr("inc")), ("sig", JStr("fn inc(x: Int) -> Int")), ("doc", JStr("Adds one."))]
+    jobj(if len(ex) == 0 { base } else { base ++ [("examples", JArr(map(ex, e => JStr(e))))] })
+  }
+  let one = fn_entry(no_pg(), "m", "std-m", f(["assert inc(1) == 2"]))
+  assert str.contains(one, `<div class="api-examples">` ++ "\n" ++ `<p class="api-examples-title">Example</p>` ++
+      "\n" ++ `<pre class="dawn api-example"><code>` ++ highlight_dawn("assert inc(1) == 2") ++ "</code></pre>\n</div>\n")
+  # after the prose, inside the entry
+  assert str.ends_with(one, "</div>\n</div>")
+  let two = fn_entry(no_pg(), "m", "std-m", f(["assert inc(1) == 2", "let y = inc(0)\nassert y == 1"]))
+  assert str.contains(two, ">Examples</p>")
+  assert len(str.split(two, `<pre class="dawn api-example">`)) == 3
+  # without examples the entry is the bytes it always was
+  let none = fn_entry(no_pg(), "m", "std-m", f([]))
+  assert not str.contains(none, "api-example")
+  assert str.ends_with(none, "<p>Adds one.</p>\n</div>\n</div>")
+  # a constructor with an example and no doc still gets its row
+  let sum = jobj([("name", JStr("Shape")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("doc", JStr("A shape.")),
+    ("ctors", JArr([
+      jobj([("name", JStr("Dot")), ("doc", JNull), ("fields", JArr([])),
+        ("examples", JArr([JStr("assert Dot == Dot")]))])
+    ]))])
+  let html = type_entry(no_pg(), "std-x", sum)
+  assert str.contains(html, "<dt><code>" ++ highlight_dawn("Dot") ++ "</code></dt>\n<dd>\n<div class=\"api-examples\">")
+}
+
+test "a doc comment is rendered as Markdown, not escaped whole" {
+  let html = plain_prose("First line, `code` and *em*.\n\nA second paragraph.")
+  assert str.contains(html, "<code>code</code>")
+  assert str.contains(html, "<em>em</em>")
+  assert str.contains(html, "<p>A second paragraph.</p>")
+  # an empty doc contributes nothing at all
+  assert plain_prose("") == ""
+}
+
+test "a marker comment never reaches the html, a stray < still escapes" {
+  # end to end (parse then render): the two halves of the same rule
+  assert plain_prose("状态：权威。<!-- doc-check: version -->") == "<p>状态：权威。</p>\n"
+  assert plain_prose("a < b") == "<p>a &lt; b</p>\n"
+}
