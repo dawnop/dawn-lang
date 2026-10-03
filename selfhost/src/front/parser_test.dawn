@@ -13,7 +13,7 @@ use front/ast.{
   OpAdd, OpMul,
   PLit, POr, PCtor, PQual, PTuple, PList,
   SLetPat, SWhile,
-  DFn, DType, DConst, DUseModule, DImpl,
+  DFn, DType, DConst, DUseModule, DImpl, DTest, example_spelling,
   TQual, TNamed, TFn, Vis, VisPrivate, VisPkg, VisPub
 }
 
@@ -1757,4 +1757,47 @@ test "a pattern may begin with a bar, and a line-leading bar is never a bitwise 
   # a trailing bar still wraps a bitwise or
   let (_, ds2) = parse_module("fn g(a: Int, b: Int) -> Int =\n  a |\n    b")
   assert ds2 == []
+}
+
+test "a test named by a declaration carries the name, and a second one is numbered" {
+  let src = join([
+    "test inc { assert true }",
+    "test \"plain\" { assert true }",
+    "test Shape.Circle { assert true }",
+    "test inc { assert true }",
+    "test LIMIT { assert true }",
+    ""
+  ], "\n")
+  let (m, ds) = parse_module(src)
+  assert ds == []
+  var labels: List[String] = []
+  var ofs: List[String] = []
+  for d in m.decls {
+    match d {
+      DTest(name, _, _, _, nlo, nhi, of) -> {
+        labels = labels ++ [name]
+        ofs = ofs ++ [match of {
+          Some(e) -> example_spelling(e) ++ "@" ++ str.slice(src, nlo, nhi)
+          None -> "-"
+        }]
+      }
+      _ -> { assert false }
+    }
+  }
+  assert labels == ["example inc", "plain", "example Shape.Circle", "example inc #2", "example LIMIT"]
+  # the name's span is the name as written, `T.Ctor` whole
+  assert ofs == ["inc@inc", "-", "Shape.Circle@Shape.Circle", "inc@inc", "LIMIT@LIMIT"]
+  # the dump says which declaration, after the label
+  assert str.contains(rendered("test inc { assert true }"), "Test example inc of=inc name@5..8 @0..24")
+}
+
+test "a test is named by a string or by one declaration name, never by a path" {
+  for bad in ["test f.g { }", "test T.C.D { }", "test { }", "test 3 { }"] {
+    let (_, ds) = parse_module(bad)
+    assert len(ds) == 1
+  }
+  let (_, ds) = parse_module("test f.g { }")
+  assert ds[0].msg == "a test is named by a declaration of this module, not by a path"
+  let (_, ds2) = parse_module("test { }")
+  assert ds2[0].msg == "expected a test name: a string, or a declaration of this module, found `{`"
 }

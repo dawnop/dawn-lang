@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ b768612f8f234fd8 -->
+<!-- doc-check: translation-of docs/spec.md @ 46dcec071fe28cda -->
 
 # Dawn Language Specification
 
@@ -104,6 +104,10 @@ Gleam and Zig likewise have only line comments.
   publishes: when one resolves to nothing it reports each one as `module:line` with the reason, prints no
   JSON and exits non-zero; the resolved ones go in a `links` array beside that doc (the target's module
   path, name and kind). Compiling (`check`, `run`, `build`) does not read links.
+- **Examples**: a declaration's runnable examples are not written in its doc comment but as tests named
+  by the declaration (`test f { ... }`, §3.4); `dawn doc` publishes a `pub` declaration's examples beside
+  its doc (`examples`). A ```` ```dawn ```` fence in the text is only an illustration: it is neither
+  compiled nor run.
 
 Rationale: a doc comment is still a comment. Whether a comment is a doc depends only on its own line
 (does it start with `##`, is there code before it), so, as above, every line can be tokenized on its own
@@ -826,6 +830,10 @@ it, or install a handler. It is a *private* effect in a public surface that is a
 test "precedence" {
   assert eval("2+3*4") == Ok(14)
 }
+
+test eval {
+  assert eval("1") == Ok(1)
+}
 ```
 
 - `test` blocks are compiled and run only by `dawn test`; `dawn build` strips them.
@@ -833,6 +841,44 @@ test "precedence" {
 - `assert expr`: `expr` is a `Bool`; on failure it reports the source text and the values of the
   sub-expressions on either side (the compiler takes `==` and the comparison operators apart to
   give a good failure message).
+
+**Tests named by a declaration.** Instead of a string, `test` may be followed by the name of a top-level
+declaration of this module, and the test **is that declaration's example**:
+
+- There are three spellings: `test f` (a function), `test T` (a type, type alias, trait or effect; a
+  constant's name also starts with a capital, so `test LIMIT`), and `test T.Ctor` (the constructor `Ctor`
+  of type `T`). No paths (`test a.b`, `test T.C.D`), and a bare capitalized name always means a top-level
+  declaration, never a constructor (a record and its constructor share a name, so a bare one would have
+  two readings).
+- The name may only refer to a top-level declaration of **this module** (private ones included) or to one
+  of its constructors. One that resolves to nothing is a compile error, reported on the name after `test`
+  with the reason: nothing in this module is declared with that name, the name is imported from another
+  module, the type has no such constructor, the name before the dot is not a type, or the name is two
+  declarations of this module. An imported name does not count: an example belongs to the module that
+  declares it.
+- A declaration may have several examples. `dawn test` reports them as `example f`; the second and third
+  with the same name, in the order written, as `example f #2` and `example f #3`.
+- Otherwise it is the same as a test named by a string: the same scope (it sees this module's private
+  declarations), run by `dawn test`, stripped by `dawn build`.
+- `dawn doc` publishes the examples of `pub` declarations and of their constructors: after `doc` (and
+  `links`) the object gains an `examples` array holding, in the order written, the source of each test
+  body without its outer braces. A body written on one line loses its leading and trailing whitespace; a
+  body over several lines loses the line of the `{` and the line of the `}` when nothing but the brace is
+  on them, the indentation all of its non-blank lines share and every line's trailing whitespace, while
+  blank lines stay blank and comments are kept. An object with no example has no such key; examples of
+  private declarations are not published.
+
+Rationale: an example should be code, not text inside a comment. Written as a test, `dawn fmt`, the
+editor and diagnostics all work on it as usual, renaming or deleting the declaration it names is
+immediately a compile error, and a published example therefore always compiles and passes. The shape is
+Zig's decltest rather than Rust's code blocks in `///` that a tool extracts and runs: those need a
+language of block attributes of their own (`ignore`, `no_run`, `should_panic`), mapping diagnostics from
+the comment's text back to source positions, and a tool that rebuilds code across lines, against §1.2's
+"every comment line tokenizes on its own". The name may only refer to this module: a test block already
+belongs to its module, so naming a declaration elsewhere means the example is in the wrong place, and
+if imported names counted, the same example would change owners as `use` lines come and go. A
+constructor is `T.Ctor` rather than a bare `Ctor` so that "a bare name is a top-level declaration" has
+no exceptions.
 
 ### 3.5 trait and impl
 
@@ -4663,4 +4709,5 @@ fn sum(xs: List[Int]) -> Int = {
 test "dist is symmetric" {
   assert dist(p, q) == dist(q, p)
 }
+test dist { assert dist(p, p) == 0.0 }   # named by a declaration: dist's example (§3.4)
 ```

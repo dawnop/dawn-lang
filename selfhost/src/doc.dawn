@@ -9,6 +9,12 @@
 # command instead of printing JSON. This is the only place links are checked:
 # the compiler does not read comments, and the site build, which runs
 # `dawn doc --stdlib`, is how std's links are held to it.
+#
+# A pub declaration's examples -- the bodies of the tests named by it (spec
+# §3.4) -- are written as `examples` after its doc and links, and only when it
+# has one, so every declaration without an example is the bytes it was before
+# examples existed. The checker has already refused a test whose name lands on
+# nothing; what is left here is filing each body under its declaration.
 
 use std/char
 use std/str
@@ -18,7 +24,8 @@ use std/set
 use std/io
 use std/io.{Fs, Env}
 use front/docs.{
-  DocSrc, doc_src_of, doc_of, member_doc_of, module_doc_of, doc_first_line, doc_links
+  DocSrc, doc_src_of, doc_of, member_doc_of, module_doc_of, doc_first_line, doc_links,
+  module_examples
 }
 use front/ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub
@@ -179,6 +186,19 @@ fn w_links(w: W, lk: Lk, doc: Option[String], first: Int) -> W = {
   close_arr(w1, true)
 }
 
+## The examples of the declaration spelled `key` (`f`, `T`, `T.Ctor`) as an
+## `examples` array of their source texts, in the order written. None writes
+## no key.
+fn w_examples(w: W, ex: Map[String, List[String]], key: String) -> W =
+  match map.get(ex, key) {
+    Some(srcs) -> {
+      var w1 = open_arr(w_key(w, "examples"))
+      for src in srcs { w1 = w_str(w1, src) }
+      close_arr(w1, true)
+    }
+    None -> w
+  }
+
 ## A declaration's doc, read from the declaration starting at `lo`, written
 ## as `doc` (null when there is none) and then its `links`.
 fn w_doc(w: W, lk: Lk, d: Option[String], lo: Int) -> W = {
@@ -297,7 +317,9 @@ fn owned_doc(ds: DocSrc, owner_lo: Int, los: List[Int]) -> Option[String] =
     None -> None
   }
 
-fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
+## One module's pub API. `ex` is its examples by declaration spelling
+## (`front/docs.module_examples`).
+fn module_json(w: W, cm: CheckedMod, lk: Lk, ex: Map[String, List[String]]) -> W = {
   let ds = lk.ds
   var w1 = open_obj(w)
   w1 = w_field(w1, "path", cm.mod_path)
@@ -321,6 +343,7 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
       }
       w1 = w_field(w1, "sig", sig)
       w1 = w_doc(w1, lk, doc_of(ds, fd.lo), fd.lo)
+      w1 = w_examples(w1, ex, fd.name)
       w1 = close_obj(w1)
     }
   }
@@ -367,6 +390,7 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
               None -> []
             }
             w1 = w_member_doc(w1, lk, owned_doc(ds, td.lo, clos), clos)
+            w1 = w_examples(w1, ex, "${td.name}.${c.name}")
             w1 = close_obj(w1)
           }
         }
@@ -374,6 +398,7 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
       }
       w1 = close_arr(w1, cany)
       w1 = w_doc(w1, lk, doc_of(ds, td.lo), td.lo)
+      w1 = w_examples(w1, ex, td.name)
       w1 = close_obj(w1)
     }
   }
@@ -392,6 +417,7 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
       }
       w1 = w_field(w1, "type", ty)
       w1 = w_doc(w1, lk, doc_of(ds, cd.lo), cd.lo)
+      w1 = w_examples(w1, ex, cd.name)
       w1 = close_obj(w1)
     }
   }
@@ -439,6 +465,7 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
       }
       w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name, map(td.methods, m => (m.name, m.lo)), lk)
       w1 = w_doc(w1, lk, doc_of(ds, td.lo), td.lo)
+      w1 = w_examples(w1, ex, td.name)
       w1 = close_obj(w1)
     }
   }
@@ -469,6 +496,7 @@ fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
       }
       w1 = close_arr(w1, len(ed.ops) > 0)
       w1 = w_doc(w1, lk, doc_of(ds, ed.lo), ed.lo)
+      w1 = w_examples(w1, ex, ed.name)
       w1 = close_obj(w1)
     }
   }
@@ -513,7 +541,7 @@ pub(pkg) fn project_json(prog: Program, std: StdCtx) -> DocOut !Fs = {
       Ok(t) -> t
       Err(e) -> panic("cannot re-read " ++ cm.path ++ ": " ++ e.message)
     }
-    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)))
+    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)), module_examples(text, cm.m))
   }
   w = close_arr(w, len(prog.modules) > 0)
   w = close_obj(w)
@@ -928,7 +956,7 @@ pub(pkg) fn stdlib_json(std: StdCtx) -> DocOut = {
     if list.contains(internal_std_modules(), mp) { continue }
     any = true
     let cm = std_checked_mod(mp, cx, tm, ct, m)
-    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)))
+    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)), module_examples(text, m))
   }
   w = close_arr(w, any)
   w = close_obj(w)
@@ -1038,7 +1066,8 @@ test "a pub type's constructors and fields, and a pub trait's methods, carry the
     ], "\n")
     let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
-    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text))))
+    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text)),
+      module_examples(text, prog.modules[0].m)))
     let want = join([
       "{",
       "  \"path\": \"main\",",
@@ -1306,7 +1335,63 @@ test "a doc without links writes the bytes it wrote before links existed" {
     }
     let text = "## Plain `code`, [brackets] and [a link](https://example.org).\npub fn f() -> Int = 1\n"
     let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
-    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text))))
+    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text)),
+      module_examples(text, prog.modules[0].m)))
     assert not str.contains(j, "\"links\"")
+  }))
+}
+
+test "a pub declaration's examples follow its doc, and nothing else gains a key" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "## Adds one.",
+      "pub fn inc(x: Int) -> Int = x + 1",
+      "",
+      "pub fn dec(x: Int) -> Int = x - 1",
+      "",
+      "fn helper() -> Int = 0",
+      "",
+      "pub type Shape = Circle(r: Int) | Dot",
+      "",
+      "test inc {",
+      "  assert inc(1) == 2",
+      "}",
+      "",
+      "test helper { assert helper() == 0 }",
+      "test \"plain\" { assert dec(1) == 0 }",
+      "test inc { assert inc(-1) == 0 }",
+      "test Shape.Circle {",
+      "  let c = Circle(2)",
+      "  assert c != Dot",
+      "}",
+      ""
+    ], "\n")
+    let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 0
+    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text)),
+      module_examples(text, prog.modules[0].m)))
+    let inc = join([
+      "      \"name\": \"inc\",",
+      "      \"sig\": \"fn inc(x: Int) -> Int\",",
+      "      \"doc\": \"Adds one.\",",
+      "      \"examples\": [",
+      "        \"assert inc(1) == 2\",",
+      "        \"assert inc(-1) == 0\"",
+      "      ]",
+      "    },"
+    ], "\n")
+    assert str.contains(j, inc)
+    # a declaration without an example is the bytes it always was
+    assert str.contains(j, "      \"name\": \"dec\",\n      \"sig\": \"fn dec(x: Int) -> Int\",\n      \"doc\": null\n    }")
+    # a constructor's example is on the constructor
+    assert str.contains(j, "          \"doc\": null,\n          \"examples\": [\n            \"let c = Circle(2)\\nassert c != Dot\"\n          ]")
+    # a private declaration's example is not published, and neither is a string test
+    assert not str.contains(j, "helper")
+    assert not str.contains(j, "dec(1)")
+    assert len(str.split(j, "\"examples\"")) == 3
   }))
 }

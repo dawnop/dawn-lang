@@ -586,6 +586,20 @@ pub type EffectDeclR = {
   nhi: Int
 }
 
+## What a test named by a declaration (`test f { ... }`, spec §3.4) names: a
+## top-level declaration of its own module, or `Type.Ctor`, one of a type's
+## constructors. Only the spelling: the parser cannot know what the module
+## declares, so `passes.pass_decl_tests` resolves it and refuses a name that
+## lands on nothing.
+pub type ExampleOf = { name: String, ctor: Option[String] }
+
+## A test's declaration as it is written after `test`: `f`, `T`, `T.Ctor`.
+pub fn example_spelling(of: ExampleOf) -> String =
+  match of.ctor {
+    Some(c) -> "${of.name}.${c}"
+    None -> of.name
+  }
+
 pub type Decl =
   | DFn(f: FnDecl)
   | DEffect(e: EffectDeclR)
@@ -637,7 +651,11 @@ pub type Decl =
     nlo: Int,
     nhi: Int
   )
-  | DTest(name: String, body: Expr, lo: Int, hi: Int, nlo: Int, nhi: Int)
+# `name` is what `dawn test` reports: the string, or for a test named by a
+# declaration `example f` (`example f #2` for the second one, and so on),
+# which the parser settles. `example_of` is that declaration, and `nlo`/`nhi`
+# then span its name instead of a string.
+  | DTest(name: String, body: Expr, lo: Int, hi: Int, nlo: Int, nhi: Int, example_of: Option[ExampleOf])
 
 pub type Module = { decls: List[Decl] }
 
@@ -899,14 +917,22 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
   out
 }
 
-pub type TestView = { name: String, body: Expr, lo: Int, hi: Int, nlo: Int, nhi: Int }
+pub type TestView = {
+  name: String,
+  body: Expr,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int,
+  example_of: Option[ExampleOf]
+}
 
 pub fn module_tests(m: Module) -> List[TestView] = {
   var out: List[TestView] = []
   for d in m.decls {
     match d {
-      DTest(name, body, lo, hi, nlo, nhi) -> {
-        out = out ++ [TestView { name: name, body: body, lo: lo, hi: hi, nlo: nlo, nhi: nhi }]
+      DTest(name, body, lo, hi, nlo, nhi, of) -> {
+        out = out ++ [TestView { name: name, body: body, lo: lo, hi: hi, nlo: nlo, nhi: nhi, example_of: of }]
       }
       _ -> ()
     }
