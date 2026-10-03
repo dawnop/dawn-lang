@@ -12,12 +12,13 @@
 # rather than by scanning for a body with the same span: a key names one
 # declaration, and a span only happens to.
 
+use std/list
 use std/map
 use std/str
 use front/ast.{
   Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, TypeParamDecl,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TypeDeclR, ImportName,
-  HandlerCell, HandlerArm,
+  HandlerCell, HandlerArm, EffectDeclR,
   TNamed, TQual, TAssoc, TTuple, TFn,
   StrPart, SPText, SPInterp,
   EInt, EChar, EFloat, EStr, EVar, EApply, EMethod, ELambda,
@@ -28,7 +29,7 @@ use front/ast.{
   PBind, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
-  e_lo, e_hi, pat_lo, pat_hi, module_fns, module_impls, module_traits
+  e_lo, e_hi, pat_lo, pat_hi, t_hi, module_fns, module_impls, module_traits
 }
 use check/tast.{
   TExpr, TPat, TStmt, TStrPart, TArm, TFun,
@@ -139,11 +140,29 @@ pub type DocAt = DeclAt(lo: Int) | ModuleDoc
 
 ## One walk over the module. `inlay` is the collector `inlay_hints` hands in;
 ## a hover query has none, and every hint site then costs one `match` and
-## renders nothing.
-type Q = { offset: Int, best: Option[Target], in_for_pattern: Bool, inlay: Option[InlayRun] }
+## renders nothing. `found` is the collector `resolutions` hands in, in the
+## same way.
+##
+## `tps` is the type parameters the declaration being walked binds: a written
+## type resolves against them before anything else, as the checker's
+## `cx.resolve_named` does, and the walk has no `Cx` of its own to ask.
+type Q = {
+  offset: Int,
+  best: Option[Target],
+  in_for_pattern: Bool,
+  inlay: Option[InlayRun],
+  found: Option[List[Resolution]],
+  tps: List[TpBinder]
+}
+
+## A type parameter in scope, at the span of its name where it is declared.
+type TpBinder = { name: String, lo: Int, hi: Int }
+
+fn new_q(offset: Int) -> Q =
+  Q { offset: offset, best: None, in_for_pattern: false, inlay: None, found: None, tps: [] }
 
 fn query(qc: QCx, offset: Int) -> Q = {
-  var q = Q { offset: offset, best: None, in_for_pattern: false, inlay: None }
+  var q = new_q(offset)
   for d in qc.entry.m.decls { q = visit_decl(qc, q, d) }
   q
 }
@@ -151,6 +170,41 @@ fn query(qc: QCx, offset: Int) -> Q = {
 pub(pkg) fn find_target(qc: QCx, offset: Int) -> Option[Target] = query(qc, offset).best
 
 pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_for_pattern
+
+# ---- resolutions (docs/lsp-references-design.md §T0) ----
+#
+# The same walk again, collecting instead of answering: every span the walk
+# resolves to a declaration, with that declaration's site. Semantic tokens and
+# references are two readings of this list, and neither wants hover text, so a
+# collection renders no signature (`live` is false for every span of it).
+
+## One name the walk resolved: its span, and the site of the declaration it
+## names, `def_path` read as `Target.def_path` is.
+pub(pkg) type Resolution = { lo: Int, hi: Int, def: (Int, Int), def_path: Option[String] }
+
+## The resolved names starting in `lo..=hi`, by offset. A top-level
+## declaration whose span misses the range is not walked, as for inlay hints;
+## the ones `decl_bounds` has no span for (types, effects, `use` lines) hold
+## names too and are always walked, which costs a declaration's header.
+pub(pkg) fn resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = {
+  let none: List[Resolution] = []
+  var q = Q { ..new_q(-1), found: Some(none) }
+  for d in qc.entry.m.decls {
+    let walk = match decl_bounds(d) {
+      Some(b) -> {
+        let (dlo, dhi) = b
+        dhi >= lo && dlo <= hi
+      }
+      None -> true
+    }
+    if walk { q = visit_decl(qc, q, d) }
+  }
+  var out: List[Resolution] = []
+  for r in q.found.unwrap_or(none) {
+    if r.lo >= lo && r.lo <= hi { out = out ++ [r] }
+  }
+  sort_by(out, (a, b) => a.lo - b.lo)
+}
 
 # ---- inlay hints (docs/lsp-hover-design.md §A4) ----
 #
@@ -168,7 +222,7 @@ type InlayRun = { lo: Int, hi: Int, opts: InlayOpts, hints: List[Hint] }
 pub(pkg) fn inlay_hints(qc: QCx, lo: Int, hi: Int, opts: InlayOpts) -> List[Hint] = {
   let run = InlayRun { lo: lo, hi: hi, opts: opts, hints: [] }
   # an offset no span contains: every hover offer is refused at its first test
-  var q = Q { offset: -1, best: None, in_for_pattern: false, inlay: Some(run) }
+  var q = Q { ..new_q(-1), inlay: Some(run) }
   for d in qc.entry.m.decls {
     let walk = match decl_bounds(d) {
       Some(b) -> {
@@ -565,9 +619,18 @@ fn hint_method_call(
 fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q =
   offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None, doc: None })
 
+## Can an offer at `lo..hi` become the answer? Only when it holds the offset,
+## which no span does in a collection or an inlay run. A rendering that is
+## not read is skipped on this: a signature costs a type printer per
+## parameter, and a walk offers one at every call it passes.
+fn live(q: Q, lo: Int, hi: Int) -> Bool = q.offset >= lo && q.offset < hi
+
 ## A callable's signature, rendered for hover and kept whole for signature help.
 fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[String]) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: render_sig(qc, s), def: def, def_path: dp, sig: Some(s), doc: None })
+  offer_target(q, Target {
+    lo: lo, hi: hi, hover: if live(q, lo, hi) { render_sig(qc, s) } else { "" }, def: def, def_path: dp,
+    sig: Some(s), doc: None
+  })
 
 ## A declaration resolved to where it is: the jump target and the doc's home.
 ## The two are separate because an embedded std module has a text but no file:
@@ -585,10 +648,19 @@ fn offer_at(q: Q, lo: Int, hi: Int, hover: String, s: Site) -> Q =
 
 fn offer_sig_at(qc: QCx, q: Q, lo: Int, hi: Int, sg: Sig, s: Site) -> Q =
   offer_target(q, Target {
-    lo: lo, hi: hi, hover: render_sig(qc, sg), def: s.def, def_path: s.dp, sig: Some(sg), doc: s.doc
+    lo: lo, hi: hi, hover: if live(q, lo, hi) { render_sig(qc, sg) } else { "" }, def: s.def,
+    def_path: s.dp, sig: Some(sg), doc: s.doc
   })
 
 fn offer_target(q: Q, t: Target) -> Q = {
+  match q.found {
+    Some(rs) ->
+      return match t.def {
+        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: t.lo, hi: t.hi, def: d, def_path: t.def_path }]) }
+        None -> q
+      }
+    None -> ()
+  }
   let lo = t.lo
   let hi = t.hi
   if q.offset < lo || q.offset >= hi { return q }
@@ -690,6 +762,14 @@ fn site_in(h: Holder, nlo: Int, nhi: Int, lo: Int) -> Site = {
 fn site_of_sig(qc: QCx, s: Sig) -> Site = {
   match s.trait_id {
     Some(tid) -> return site_of_trait_method(qc, tid, s.name)
+    None -> ()
+  }
+  # an operation is declared in its effect, not as a function
+  match s.op_of {
+    Some(o) -> {
+      let (eid, _) = o
+      return site_of_op(qc, eid, s.name)
+    }
     None -> ()
   }
   if s.is_builtin { return no_site() }
@@ -997,48 +1077,581 @@ fn render_ctor(qc: QCx, c: CtorI) -> String = ctor_render(qc.entry.cx.adts, c)
 
 type WrittenTypeUse = WtStorage | WtReturn
 
-fn visit_written_type(q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -> Q = {
+## A type as its author wrote it, resolved the way `cx.resolve_named` and
+## `cx.resolve_qual` resolve it -- hard-reserved builtin, type parameter,
+## alias, builtin, ADT -- but read-only: the checker's resolver writes
+## diagnostics and records spans, and the analysis it ran already has both.
+## A builtin has no declaration and stays silent here, except a return-only
+## one at a return position, which has always answered with what it is.
+fn visit_written_type(qc: QCx, q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -> Q = {
   var q = q0
   match tref {
-    TNamed(name, args, _, lo, hi) -> {
-      if type_use == WtReturn && len(args) == 0 {
-        match builtin_type_at(name) {
-          Some(info) ->
-            if builtin_type_hard_reserved(info) {
+    TNamed(name, args, eargs, lo, hi) -> {
+      let nhi = lo + str.len(name)
+      match builtin_type_at(name) {
+        Some(info) ->
+          if builtin_type_hard_reserved(info) {
+            if type_use == WtReturn && len(args) == 0 {
               let (d, dp) = no_def()
               q = offer(q, lo, hi, builtin_type_render(info), d, dp)
             }
-          None -> ()
-        }
+          } else {
+            q = offer_type_name(qc, q, name, lo, nhi)
+          }
+        None -> { q = offer_type_name(qc, q, name, lo, nhi) }
       }
-      for arg in args { q = visit_written_type(q, arg, WtStorage) }
+      for arg in args { q = visit_written_type(qc, q, arg, WtStorage) }
+      for ea in eargs { q = offer_row(qc, q, ea.lo, ea.hi) }
     }
-    TQual(_, _, args, _, _, _) -> {
-      for arg in args { q = visit_written_type(q, arg, WtStorage) }
+    TQual(qual, name, args, eargs, lo, _) -> {
+      q = offer_qual_type(qc, q, qual, name, lo)
+      for arg in args { q = visit_written_type(qc, q, arg, WtStorage) }
+      for ea in eargs { q = offer_row(qc, q, ea.lo, ea.hi) }
     }
     TAssoc(_, _, _, _) -> ()
     TTuple(elems, _, _) -> {
-      for elem in elems { q = visit_written_type(q, elem, WtStorage) }
+      for elem in elems { q = visit_written_type(qc, q, elem, WtStorage) }
     }
-    TFn(params, ret, _, _, _) -> {
-      for param in params { q = visit_written_type(q, param, WtStorage) }
-      q = visit_written_type(q, ret, WtReturn)
+    TFn(params, ret, _, _, hi) -> {
+      for param in params { q = visit_written_type(qc, q, param, WtStorage) }
+      q = visit_written_type(qc, q, ret, WtReturn)
+      q = offer_row(qc, q, t_hi(ret), hi)
     }
   }
   q
 }
 
-fn visit_param_types(q0: Q, params: List[Param]) -> Q = {
+fn visit_param_types(qc: QCx, q0: Q, params: List[Param]) -> Q = {
   var q = q0
-  for param in params { q = visit_written_type(q, param.tref, WtStorage) }
+  for param in params { q = visit_written_type(qc, q, param.tref, WtStorage) }
   q
 }
 
-fn visit_lambda_param_types(q0: Q, params: List[LambdaParam]) -> Q = {
+fn visit_lambda_param_types(qc: QCx, q0: Q, params: List[LambdaParam]) -> Q = {
   var q = q0
   for param in params {
     match param.ann {
-      Some(tref) -> { q = visit_written_type(q, tref, WtStorage) }
+      Some(tref) -> { q = visit_written_type(qc, q, tref, WtStorage) }
+      None -> ()
+    }
+  }
+  q
+}
+
+# ---- written names (docs/lsp-references-design.md §T0) ----
+#
+# The names a declaration's header and a few expression forms spell without a
+# typed node to pair them with: written types, effect rows, `with handle E`,
+# a handler arm's operation, the module alias of a qualified access, a
+# record literal's field names, a call's argument names. Each is resolved from
+# the entry module's tables, exactly as far as the checker resolved it.
+
+## The spelling at `lo..hi` is `text`: the span is this revision's and the
+## arithmetic that made it (a name's length from its start) holds.
+fn spelled(qc: QCx, lo: Int, hi: Int, text: String) -> Bool = spelling(qc, lo, hi) == text
+
+## A bare type name, at the span of the name.
+fn offer_type_name(qc: QCx, q: Q, name: String, lo: Int, hi: Int) -> Q = {
+  if not spelled(qc, lo, hi, name) { return q }
+  # type parameters shadow everything
+  for b in q.tps {
+    if b.name == name { return offer(q, lo, hi, "type parameter " ++ name, Some((b.lo, b.hi)), None) }
+  }
+  match map.get(qc.entry.cx.aliases, name) {
+    Some(al) -> return offer_at(q, lo, hi, alias_text(qc, al.name, al.is_opaque, map.get(qc.entry.cx.alias_resolved, name)),
+      site_of_alias(qc, al.owner, al.name, al.nlo, al.nhi))
+    None -> ()
+  }
+  match map.get(qc.entry.cx.btypes, name) {
+    Some(_) -> return q
+    None -> ()
+  }
+  match map.get(qc.entry.cx.adts_by_name, name) {
+    Some(aid) -> offer_at(q, lo, hi, type_text(qc, aid), site_of_type(qc, aid))
+    None -> q
+  }
+}
+
+## `m.T`: the alias at its own span, then the type the exporter names `T`.
+fn offer_qual_type(qc: QCx, q0: Q, qual: String, name: String, lo: Int) -> Q = {
+  let q = offer_module_alias(qc, q0, qual, lo, lo + str.len(qual))
+  let nlo = lo + str.len(qual) + 1
+  let nhi = nlo + str.len(name)
+  if not spelled(qc, nlo, nhi, name) { return q }
+  match map.get(qc.entry.cx.module_exports, qual) {
+    Some(exp) -> {
+      match map.get(exp.aliases, name) {
+        Some(al) -> return offer_at(q, nlo, nhi, alias_text(qc, al.name, al.is_opaque, map.get(exp.alias_resolved, name)),
+          site_of_alias(qc, al.owner, al.name, al.nlo, al.nhi))
+        None -> ()
+      }
+      match map.get(exp.types_by_name, name) {
+        Some(aid) -> offer_at(q, nlo, nhi, type_text(qc, aid), site_of_type(qc, aid))
+        None -> q
+      }
+    }
+    None -> q
+  }
+}
+
+## What a written type name hovers with: its declaration's own line.
+fn type_text(qc: QCx, aid: Int) -> String = {
+  let a = adt_of(qc.entry.cx.adts, aid)
+  let summary = join(map(a.ctors, c => c.name), " | ")
+  let derives =
+    if len(a.derives) > 0 {
+      " derive ${join(map(a.derives, t => trait_of(qc.entry.cx.traits, t).name), ", ")}"
+    } else {
+      ""
+    }
+  "type " ++ a.name ++ " = " ++ summary ++ derives
+}
+
+fn alias_text(qc: QCx, name: String, opaque: Bool, target: Option[Ty]) -> String =
+  if opaque { "opaque type " ++ name }
+  else {
+    match target {
+      Some(t) -> "alias " ++ name ++ " = " ++ show_ty(qc, t)
+      None -> "alias " ++ name
+    }
+  }
+
+## An alias declared in the module whose class is `owner` ("" for a context
+## built outside a program, which can only be the entry's own).
+fn site_of_alias(qc: QCx, owner: String, name: String, nlo: Int, nhi: Int) -> Site = {
+  let o = if owner == "" { qc.entry.class_name } else { owner }
+  match holder_by_class(qc, o) {
+    Some(h) -> site_in(h, nlo, nhi, unwrap_or(decl_lo_named(h.m, name), nlo))
+    None -> no_site()
+  }
+}
+
+## A trait's declaration, and the line hover shows for it.
+fn trait_ref(qc: QCx, tid: Int) -> Option[(String, Site)] = {
+  let tr = trait_of(qc.entry.cx.traits, tid)
+  let owner = match tr.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
+        match d {
+          DTrait(n, tp, _, _, _, _, _, _, lo, _, nlo, nhi) ->
+            if n == tr.name { return Some(("trait " ++ n ++ "[" ++ tp ++ "]", site_in(h, nlo, nhi, lo))) }
+          _ -> ()
+        }
+      }
+      None
+    }
+    None -> None
+  }
+}
+
+## A trait named by a bound (`[T: Ord]`).
+fn offer_trait_name(qc: QCx, q: Q, name: String, lo: Int, hi: Int) -> Q =
+  match map.get(qc.entry.cx.traits_by_name, name) {
+    Some(tid) ->
+      match trait_ref(qc, tid) {
+        Some(r) -> {
+          let (text, site) = r
+          offer_at(q, lo, hi, text, site)
+        }
+        None -> q
+      }
+    None -> q
+  }
+
+## A function's or an impl's type parameters: each name, at its declaration,
+## with its bounds; and the binders a written type in its scope resolves to.
+fn visit_tparams(qc: QCx, q0: Q, tparams: List[TypeParamDecl]) -> (Q, List[TpBinder]) = {
+  var q = q0
+  var out: List[TpBinder] = []
+  for tp in tparams {
+    let b = TpBinder { name: tp.name, lo: tp.lo, hi: tp.lo + str.len(tp.name) }
+    if spelled(qc, b.lo, b.hi, b.name) {
+      out = out ++ [b]
+      q = offer(q, b.lo, b.hi, "type parameter " ++ b.name, Some((b.lo, b.hi)), None)
+    }
+    for bd in tp.bounds { q = offer_trait_name(qc, q, bd.name, bd.lo, bd.hi) }
+  }
+  (q, out)
+}
+
+## The binders of a type's or a trait's parameter list, which the parse keeps
+## as names only: read back off the text of the `[...]` that follows the
+## declared name at `from`, in order. An effect binder (`!e`) is not a type
+## parameter and is skipped; a name the text does not spell where the list
+## says is not offered.
+fn bracket_binders(qc: QCx, q0: Q, from: Int, names: List[String]) -> (Q, List[TpBinder]) = {
+  var q = q0
+  var out: List[TpBinder] = []
+  let cps = qc.cps
+  let n = len(cps)
+  var i = from
+  while i < n && (cps[i] == ' ' || cps[i] == '\t') { i = i + 1 }
+  if i >= n || cps[i] != '[' || len(names) == 0 { return (q, out) }
+  i = i + 1
+  var k = 0
+  var after_bang = false
+  while i < n && cps[i] != ']' && k < len(names) {
+    let c = cps[i]
+    if is_ident_char(c) {
+      let s0 = i
+      while i < n && is_ident_char(cps[i]) { i = i + 1 }
+      if not after_bang {
+        let word = slice_cps(cps, s0, i)
+        if word == names[k] {
+          let b = TpBinder { name: word, lo: s0, hi: i }
+          out = out ++ [b]
+          q = offer(q, s0, i, "type parameter " ++ word, Some((s0, i)), None)
+          k = k + 1
+        }
+      }
+      after_bang = false
+    } else {
+      after_bang = c == '!'
+      i = i + 1
+    }
+  }
+  (q, out)
+}
+
+## A whole-module alias (`helper` in `helper.f`), as the `use` line that made
+## it answers: the module it names. Anything else of that spelling is not an
+## alias, since an alias and the module's other names share one namespace
+## (spec §10.3).
+fn offer_module_alias(qc: QCx, q: Q, mod_alias: String, lo: Int, hi: Int) -> Q =
+  match map.get(qc.entry.cx.module_aliases, mod_alias) {
+    Some(path) -> if spelled(qc, lo, hi, mod_alias) { offer_target(q, module_target(qc, path, lo, hi)) } else { q }
+    None -> q
+  }
+
+## The receiver of a qualified access, when it is a module alias.
+fn offer_alias_receiver(qc: QCx, q: Q, recv: Expr) -> Q =
+  match recv {
+    EVar(n, lo, hi) -> offer_module_alias(qc, q, n, lo, hi)
+    _ -> q
+  }
+
+## A module as a `use` line names it: its path, its file (from the module's
+## start), and its module doc.
+fn module_target(qc: QCx, path: String, lo: Int, hi: Int) -> Target = {
+  let (udef, upath) = match map.get(qc.exports_env, path) {
+    Some(e) ->
+      match e.src_path {
+        Some(sp) -> {
+          let d0: Option[(Int, Int)] = Some((0, 0))
+          (d0, Some(sp))
+        }
+        # std exports carry no src_path, so the bundle's record answers for
+        # them; an embedded std has no file and offers no jump
+        None ->
+          match std_file_of(qc.std, path) {
+            Some(f) -> {
+              let d0: Option[(Int, Int)] = Some((0, 0))
+              (d0, Some(f))
+            }
+            None -> no_def()
+          }
+      }
+    None -> no_def()
+  }
+  Target {
+    lo: lo, hi: hi, hover: "use ${path}", def: udef, def_path: upath, sig: None,
+    doc: module_doc_site(qc, path)
+  }
+}
+
+## The declared effect an atom of a row names: `E` through this module's
+## effect table, `m.E` through the alias's exports, as `cx.resolve_named_effect`
+## reads them. `io`, an effect variable and a projection (`T.E`) name no
+## declaration.
+fn effect_id_of(qc: QCx, atom: String) -> Option[Int] =
+  match str.split_once(atom, ".") {
+    Some(pr) -> {
+      let (m, e) = pr
+      match map.get(qc.entry.cx.module_exports, m) {
+        Some(exp) -> map.get(exp.effects, e)
+        None -> None
+      }
+    }
+    None -> map.get(qc.entry.cx.effects, atom)
+  }
+
+## The `effect` declaration behind an id, with the module that holds it.
+fn effect_decl_of(qc: QCx, eid: Int) -> Option[(EffectDeclR, Holder)] = {
+  let info = match map.get(qc.entry.cx.effect_infos, eid) {
+    Some(i) -> i
+    None -> return None
+  }
+  let owner = match info.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
+        match d {
+          DEffect(e) -> if e.name == info.name { return Some((e, h)) }
+          _ -> ()
+        }
+      }
+      None
+    }
+    None -> None
+  }
+}
+
+fn site_of_effect(qc: QCx, eid: Int) -> Site =
+  match effect_decl_of(qc, eid) {
+    Some(pr) -> {
+      let (e, h) = pr
+      site_in(h, e.nlo, e.nhi, e.lo)
+    }
+    None -> no_site()
+  }
+
+fn site_of_op(qc: QCx, eid: Int, op: String) -> Site =
+  match effect_decl_of(qc, eid) {
+    Some(pr) -> {
+      let (e, h) = pr
+      for o in e.ops {
+        if o.name == op { return site_in(h, o.nlo, o.nhi, o.lo) }
+      }
+      no_site()
+    }
+    None -> no_site()
+  }
+
+## One atom of a row or of `with handle`, written at `lo..hi`: a qualified one
+## answers on both segments, the alias as a module and the name as the effect.
+fn offer_effect_atom(qc: QCx, q0: Q, atom: String, lo: Int, hi: Int) -> Q = {
+  if not spelled(qc, lo, hi, atom) { return q0 }
+  let (q, nlo) = match str.split_once(atom, ".") {
+    Some(pr) -> {
+      let (m, _) = pr
+      (offer_module_alias(qc, q0, m, lo, lo + str.len(m)), lo + str.len(m) + 1)
+    }
+    None -> (q0, lo)
+  }
+  match effect_id_of(qc, atom) {
+    Some(eid) ->
+      match map.get(qc.entry.cx.effect_infos, eid) {
+        Some(info) -> offer_at(q, nlo, hi, "effect ${info.name}", site_of_effect(qc, eid))
+        None -> q
+      }
+    None -> q
+  }
+}
+
+## The atoms of the effect rows written in `from..to`, each with its span. The
+## parse keeps a row as its atoms' names only (`FnDecl.effs`), so the spans
+## are read back off the text: `!` opens a row, a name in it is an atom, and
+## `=` or `{` -- the body -- ends the search. The callers start it past
+## everything else a header can hold, so the only `!` it can meet is a row's.
+fn effect_atoms(cps: List[Char], from: Int, to: Int) -> List[(String, Int, Int)] = {
+  var out: List[(String, Int, Int)] = []
+  let end = if to < len(cps) { to } else { len(cps) }
+  var i = if from < 0 { 0 } else { from }
+  var in_row = false
+  while i < end {
+    let c = cps[i]
+    if c == '#' {
+      while i < end && cps[i] != '\n' { i = i + 1 }
+    } else if c == '=' || c == '{' {
+      return out
+    } else if c == '!' {
+      in_row = true
+      i = i + 1
+    } else if in_row && is_ident_char(c) {
+      let s0 = i
+      while i < end && (is_ident_char(cps[i]) || cps[i] == '.') { i = i + 1 }
+      out = out ++ [(slice_cps(cps, s0, i), s0, i)]
+    } else {
+      i = i + 1
+    }
+  }
+  out
+}
+
+fn offer_row(qc: QCx, q0: Q, from: Int, to: Int) -> Q = {
+  var q = q0
+  for a in effect_atoms(qc.cps, from, to) {
+    let (atom, lo, hi) = a
+    q = offer_effect_atom(qc, q, atom, lo, hi)
+  }
+  q
+}
+
+## Where a declaration's own row starts: past its return type, or past the
+## parameter list when it has none -- the list may hold `!` of its own, in a
+## function-typed parameter.
+fn row_start(qc: QCx, ret: Option[TypeRef], params_end: Int) -> Int =
+  match ret {
+    Some(r) -> t_hi(r)
+    None -> {
+      let cps = qc.cps
+      var i = params_end
+      while i < len(cps) && cps[i] != ')' { i = i + 1 }
+      i + 1
+    }
+  }
+
+## Where a parameter list's last entry ends, or the name before it when it is
+## empty (`(` and `)` then sit between that and the row).
+fn params_end(nhi: Int, params: List[Param]) -> Int =
+  if len(params) == 0 { nhi } else { params[len(params) - 1].hi }
+
+## The arguments of a call written with a name (`f(dy: 5)`), each at the name:
+## the parameter it fills, at the declaration of that parameter.
+fn offer_arg_names(qc: QCx, q0: Q, sg: Option[Sig], args: List[Arg]) -> Q = {
+  let s = match sg {
+    Some(s) -> s
+    None -> return q0
+  }
+  var q = q0
+  for a in args {
+    match a.name {
+      Some(n) ->
+        if e_lo(a.e) != a.lo {
+          match list.index_of(s.param_names, n) {
+            Some(i) -> {
+              let ty = match get(s.param_tys, i) {
+                Some(t) -> show_ty(qc, t)
+                None -> "?"
+              }
+              q = offer_at(q, a.lo, a.lo + str.len(n), n ++ ": " ++ ty, site_of_param(qc, s, i))
+            }
+            None -> ()
+          }
+        }
+      None -> ()
+    }
+  }
+  q
+}
+
+## The `i`th parameter of the function behind `s`, where it is declared. Only
+## a top-level function takes a named argument (`ast.Param.default` says why
+## the others refuse one), so only its declaration is looked in.
+fn site_of_param(qc: QCx, s: Sig, i: Int) -> Site = {
+  if s.is_builtin || s.trait_id != None || s.op_of != None { return no_site() }
+  let owner = match s.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
+        match d {
+          DFn(f) ->
+            if f.name == s.name {
+              return match get(f.params, i) {
+                Some(p) -> {
+                  let st = site_in(h, p.lo, p.hi, p.lo)
+                  Site { ..st, doc: None }
+                }
+                None -> no_site()
+              }
+            }
+          _ -> ()
+        }
+      }
+      no_site()
+    }
+    None -> no_site()
+  }
+}
+
+## A `let`/`var` binding at its own name, which is where it is declared.
+fn offer_binding(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
+  match sym_get(qc, sid) {
+    Some(sym) -> {
+      let kw = if sym.mutable { "var" } else { "let" }
+      offer(q, lo, hi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty), Some((sym.dlo, sym.dhi)), None)
+    }
+    None -> q
+  }
+
+## Field `fi` of constructor `ci`, at a span that names it.
+fn offer_ctor_field(qc: QCx, q: Q, aid: Int, ci: Int, fi: Int, lo: Int, hi: Int) -> Q = {
+  let a = adt_of(qc.entry.cx.adts, aid)
+  match get(a.ctors, ci) {
+    Some(c) ->
+      match get(c.fields, fi) {
+        Some(f) ->
+          if spelled(qc, lo, hi, f.name) {
+            offer_at(q, lo, hi, f.name ++ ": " ++ show_ty(qc, f.ty), site_of_ctor_field(qc, aid, ci, fi))
+          } else {
+            q
+          }
+        None -> q
+      }
+    None -> q
+  }
+}
+
+fn site_of_ctor_field(qc: QCx, aid: Int, ci: Int, fi: Int) -> Site =
+  match type_decl_of(qc, aid) {
+    Some(pr) -> {
+      let (t, h) = pr
+      match get(t.ctors, ci) {
+        Some(c) ->
+          match get(c.fields, fi) {
+            Some(f) -> site_in(h, f.lo, f.hi, f.lo)
+            None -> no_site()
+          }
+        None -> no_site()
+      }
+    }
+    None -> no_site()
+  }
+
+## The names a construction writes its arguments under (`Point { x: 1 }`,
+## `Circle(r: 2.0)`). `{ x }` is also the local `x`, which the argument's own
+## walk already answered for on that span, so a name that starts its
+## expression is left to it.
+fn offer_field_names(qc: QCx, q0: Q, aid: Int, ci: Int, args: List[Arg]) -> Q = {
+  let a = adt_of(qc.entry.cx.adts, aid)
+  let c = match get(a.ctors, ci) {
+    Some(c) -> c
+    None -> return q0
+  }
+  var q = q0
+  for arg in args {
+    match arg.name {
+      Some(n) ->
+        if e_lo(arg.e) != arg.lo {
+          match field_index(c, n) {
+            Some(fi) -> { q = offer_ctor_field(qc, q, aid, ci, fi, arg.lo, arg.lo + str.len(n)) }
+            None -> ()
+          }
+        }
+      None -> ()
+    }
+  }
+  q
+}
+
+## The operation each arm of `with handle E` answers, at the arm's name.
+fn offer_arm_names(qc: QCx, q0: Q, eff_name: String, arms: List[HandlerArm]) -> Q = {
+  let eid = match effect_id_of(qc, eff_name) {
+    Some(e) -> e
+    None -> return q0
+  }
+  let owner = match map.get(qc.entry.cx.effect_infos, eid) {
+    Some(info) -> info.owner
+    None -> return q0
+  }
+  var q = q0
+  for arm in arms {
+    match sig_by_owner(qc, owner, arm.name, None) {
+      Some(s) -> {
+        if spelled(qc, arm.nlo, arm.nhi, arm.name) {
+          q = offer_sig_at(qc, q, arm.nlo, arm.nhi, s, site_of_op(qc, eid, arm.name))
+        }
+      }
       None -> ()
     }
   }
@@ -1048,7 +1661,8 @@ fn visit_lambda_param_types(q0: Q, params: List[LambdaParam]) -> Q = {
 # ---- declarations ----
 
 fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
-  var q = q0
+  # a declaration's type parameters are its own: none is in scope at the next
+  var q = Q { ..q0, tps: [] }
   match d {
     DFn(f) -> {
       q = visit_fn_decl(qc, q, f, [identity.Named(identity.FunctionDecl, f.name)])
@@ -1058,7 +1672,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       q = walk_e(qc, q, body, tf_body(tf))
     }
     DConst(name, _, ann, init, lo, _, nlo, nhi) -> {
-      q = visit_written_type(q, ann, WtStorage)
+      q = visit_written_type(qc, q, ann, WtStorage)
       match map.get(qc.entry.cx.consts, name) {
         Some(t) -> {
           q = offer_at(q, nlo, nhi, const_text(qc, qc.entry.mod_path, name, t), here(nlo, nhi, lo))
@@ -1073,30 +1687,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     DUseModule(segs, selective, _, _, _, nlo, nhi) -> {
       let path = join(segs, "/")
       let exp = map.get(qc.exports_env, path)
-      let (udef, upath) = match exp {
-        Some(e) ->
-          match e.src_path {
-            Some(sp) -> {
-              let d0: Option[(Int, Int)] = Some((0, 0))
-              (d0, Some(sp))
-            }
-            # std exports carry no src_path, so the bundle's record answers for
-            # them; an embedded std has no file and offers no jump
-            None ->
-              match std_file_of(qc.std, path) {
-                Some(f) -> {
-                  let d0: Option[(Int, Int)] = Some((0, 0))
-                  (d0, Some(f))
-                }
-                None -> no_def()
-              }
-          }
-        None -> no_def()
-      }
-      q = offer_target(q, Target {
-        lo: nlo, hi: nhi, hover: "use ${path}", def: udef, def_path: upath, sig: None,
-        doc: module_doc_site(qc, path)
-      })
+      q = offer_target(q, module_target(qc, path, nlo, nhi))
       match exp {
         Some(e) ->
           match selective {
@@ -1110,10 +1701,17 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     }
     DTrait(name, tp, _, _, methods, _, _, _, lo, _, nlo, nhi) -> {
       q = offer_at(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", here(nlo, nhi, lo))
+      let (qb, bs) = bracket_binders(qc, q, nhi, [tp])
+      q = Q { ..qb, tps: bs }
       let tid = map.get(qc.entry.cx.traits_by_name, name)
       for m in methods {
-        q = visit_param_types(q, m.params)
-        q = visit_written_type(q, m.ret, WtReturn)
+        q = visit_param_types(qc, q, m.params)
+        q = visit_written_type(qc, q, m.ret, WtReturn)
+        let row_end = match m.body {
+          Some(b) -> e_lo(b)
+          None -> m.hi
+        }
+        q = offer_row(qc, q, t_hi(m.ret), row_end)
         match tid {
           Some(t) -> {
             let tr = trait_of(qc.entry.cx.traits, t)
@@ -1138,8 +1736,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     DEffect(e) -> {
       q = offer_at(q, e.nlo, e.nhi, "effect ${e.name}", here(e.nlo, e.nhi, e.lo))
       for op in e.ops {
-        q = visit_param_types(q, op.params)
-        q = visit_written_type(q, op.ret, WtReturn)
+        q = visit_param_types(qc, q, op.params)
+        q = visit_written_type(qc, q, op.ret, WtReturn)
         match map.get(qc.entry.cx.fns, op.name) {
           Some(sg) -> { q = offer_sig_at(qc, q, op.nlo, op.nhi, sg, here(op.nlo, op.nhi, op.lo)) }
           None -> ()
@@ -1148,18 +1746,22 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     }
     DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, _, _, _) -> {
       q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
-      q = visit_written_type(q, subject, WtStorage)
-      for binding in assoc { q = visit_written_type(q, binding.tref, WtStorage) }
+      let (qb, bs) = visit_tparams(qc, q, tparams)
+      q = Q { ..qb, tps: bs }
+      q = visit_written_type(qc, q, subject, WtStorage)
+      for binding in assoc { q = visit_written_type(qc, q, binding.tref, WtStorage) }
       let head = impl_head(tparams, trait_name, subject)
       for m in methods { q = visit_fn_decl(qc, q, m, method_path(head, m.name)) }
     }
     DType(t) -> {
+      let (qb, bs) = bracket_binders(qc, q, t.nhi, t.tparams)
+      q = Q { ..qb, tps: bs }
       match t.alias_target {
-        Some(target) -> { q = visit_written_type(q, target, WtStorage) }
+        Some(target) -> { q = visit_written_type(qc, q, target, WtStorage) }
         None -> ()
       }
       for ctor in t.ctors {
-        for field in ctor.fields { q = visit_written_type(q, field.tref, WtStorage) }
+        for field in ctor.fields { q = visit_written_type(qc, q, field.tref, WtStorage) }
       }
       let info = map.get(qc.entry.cx.adts_by_name, t.name)
       let summary = match info {
@@ -1337,12 +1939,15 @@ fn tconst_init(qc: QCx, name: String) -> Option[TExpr] =
   }
 
 fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
-  var q = q0
-  q = visit_param_types(q, f.params)
+  # an impl method sees its impl's parameters as well as its own
+  let (qb, bs) = visit_tparams(qc, q0, f.tparams)
+  var q = Q { ..qb, tps: q0.tps ++ bs }
+  q = visit_param_types(qc, q, f.params)
   match f.ret {
-    Some(ret) -> { q = visit_written_type(q, ret, WtReturn) }
+    Some(ret) -> { q = visit_written_type(qc, q, ret, WtReturn) }
     None -> ()
   }
+  q = offer_row(qc, q, row_start(qc, f.ret, params_end(f.nhi, f.params)), e_lo(f.body))
   match sig_of(qc, f.name) {
     Some(s) -> { q = offer_sig_at(qc, q, f.nlo, f.nhi, s, here(f.nlo, f.nhi, f.lo)) }
     None -> ()
@@ -1368,7 +1973,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     }
     None -> ()
   }
-  walk_e(qc, q, f.body, tf_body(tf))
+  Q { ..walk_e(qc, q, f.body, tf_body(tf)), tps: q0.tps }
 }
 
 ## Hover and definition on one selective-import entry. A renamed entry
@@ -1641,9 +2246,10 @@ fn literal_string(parts: List[StrPart]) -> Option[String] = {
 
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
-  # generic fallback: the expression's own type
+  # generic fallback: the expression's own type, which names no declaration
+  # and so is only worth printing where it can be the answer
   match te {
-    Some(t) -> { q = offer(q, e_lo(pe), e_hi(pe), show_ty(qc, tex_ty(t)), None, None) }
+    Some(t) -> if live(q, e_lo(pe), e_hi(pe)) { q = offer(q, e_lo(pe), e_hi(pe), show_ty(qc, tex_ty(t)), None, None) }
     None -> ()
   }
   match pe {
@@ -1693,10 +2299,13 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             }
           }
         }
+        # no typed node: a qualified access's receiver, which the checker
+        # never typed because it is a module alias rather than a value
+        None -> { q = offer_module_alias(qc, q, name, lo, hi) }
         _ -> ()
       }
     ELambda(params, body, _, _, _) -> {
-      q = visit_lambda_param_types(q, params)
+      q = visit_lambda_param_types(qc, q, params)
       match te {
         Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
           q = offer_lambda_params(qc, q, params, psyms)
@@ -1715,6 +2324,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         EVar(callee, vlo, vhi) -> {
           q = walk_named_call(qc, q, callee, vlo, vhi, args, te)
           q = hint_named_call(qc, q, callee, args0, vhi, ahi, te)
+          q = offer_arg_names(qc, q, call_sig(qc, callee, te), args0)
         }
         ECtor(cname, clo, chi) -> { q = walk_ctor_call(qc, q, args0, None, clo, chi, te) }
         # `recv.member(args)`, whose callee is never a value: the checker
@@ -1738,6 +2348,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             # constructor's signature belongs at the *name's* span, which is
             # what `flo`/`fhi` carry.
             Some(XCtor(_, _, _, _, _, _, _, _)) -> {
+              q = offer_alias_receiver(qc, q, recv)
               q = walk_ctor_call(qc, q, args0, None, flo, fhi, te)
             }
             # `x |> m.f`, `(m.f)(x)`: a module function in callee position is
@@ -1748,8 +2359,10 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             _ ->
               match call_node(te) {
                 Some(XCallFn(_, fname, _, _, _, _, _, _, _)) -> {
+                  q = offer_alias_receiver(qc, q, recv)
                   q = walk_named_call(qc, q, fname, flo, fhi, args, call_node(te))
                   q = hint_named_call(qc, q, fname, args0, fhi, ahi, te)
+                  q = offer_arg_names(qc, q, call_sig(qc, fname, te), args0)
                 }
                 _ -> { q = walk_apply_value(qc, q, target, args, te) }
               }
@@ -1782,11 +2395,13 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       q = hint_method_call(qc, q, target, name, args0, nhi, mhi, te)
       # module-qualified (alias.fn) and UFCS calls carry the resolved sig
       match te {
+        # `x.g()` where `g` is a renamed import (`use m.{f as g}`) calls `f`
         Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
-          if fname == name {
+          if fname == name || map.get(qc.entry.cx.import_renames, name) == Some(fname) {
             match sig_by_owner(qc, owner, fname, trait_id) {
               Some(s) -> {
                 q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
+                q = offer_arg_names(qc, q, Some(s), args0)
               }
               None -> ()
             }
@@ -1817,8 +2432,19 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
           q = walk_list(qc, q, args, opt_list(call.args))
         }
+        # an operation called through a module alias (`m.ask()`) is an
+        # `XApply` on the evidence by the time it is typed, so it is found by
+        # the alias's surface; anything else by name
         _ -> {
-          match sig_of(qc, name) {
+          let qualified = match target {
+            EVar(qual, _, _) -> map.get(qc.entry.cx.module_fn_sigs, (qual, name))
+            _ -> None
+          }
+          let found = match qualified {
+            Some(s) -> Some(s)
+            None -> sig_of(qc, name)
+          }
+          match found {
             Some(s) -> {
               q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
             }
@@ -1871,16 +2497,19 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         # `m.NAME`: a module-qualified constant (LANG-06 step 3). The receiver
         # is a module alias, not a value, so only the name is offered.
         Some(XConstRef(owner, cname, _, _, cty)) -> {
+          q = offer_alias_receiver(qc, q, target)
           q = offer_at(q, flo, fhi, const_text(qc, owner, cname, cty), site_of_const_in(qc, owner, cname))
         }
         # `let g = m.f`: a module function used as a value (#66), answered as
         # the bare `f`'s `XFnValue` is. Only the name is offered: the receiver
         # is an alias, not a value.
-        Some(XFnValue(owner, fname, _, _, _, _)) ->
+        Some(XFnValue(owner, fname, _, _, _, _)) -> {
+          q = offer_alias_receiver(qc, q, target)
           match sig_by_owner(qc, owner, fname, None) {
             Some(s) -> { q = offer_sig_at(qc, q, flo, fhi, s, site_of_sig(qc, s)) }
             None -> ()
           }
+        }
         _ -> { q = walk_e(qc, q, target, None) }
       }
     EInt(v, lo, hi) ->
@@ -2007,11 +2636,13 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         i = i + 1
       }
     }
-    EHandle(_, cells, arms, rest, _, _, _, _) -> {
+    EHandle(ename, cells, arms, rest, enlo, enhi, _, _) -> {
+      q = offer_effect_atom(qc, q, ename, enlo, enhi)
+      q = offer_arm_names(qc, q, ename, arms)
       let (tstmts, trest) = handle_parts(te)
       var i = 0
       for c in cells {
-        q = visit_written_type(q, c.ann, WtStorage)
+        q = visit_written_type(qc, q, c.ann, WtStorage)
         let tc = opt_get3(tstmts, i)
         q = offer_cell_decl(qc, q, tc, c)
         q = walk_e(qc, q, c.init, cell_init_of(tc))
@@ -2019,7 +2650,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       }
       let tarms = handle_arm_nodes(opt_get3(tstmts, len(cells)))
       for arm in arms {
-        q = visit_lambda_param_types(q, arm.params)
+        q = visit_lambda_param_types(qc, q, arm.params)
         q = walk_handler_arm(qc, q, arm, arm_node_at(tarms, arm.lo, arm.hi))
       }
       q = walk_rest(qc, q, rest, trest)
@@ -2167,6 +2798,7 @@ fn walk_ctor_call(
         q = walk_e(qc, q, a2.e, opt_get(written, i))
         i = i + 1
       }
+      q = offer_field_names(qc, q, aid, ci, args)
     }
     Some(XConstRef(owner, cname, _, _, _)) -> {
       match map.get(qc.entry.cx.consts, cname) {
@@ -2342,10 +2974,12 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
     PRecord(_, args, _, nlo, nhi, _, _) -> {
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
-    PQual(_, _, args, _, nlo, nhi, _, _) -> {
+    PQual(qual, _, args, _, nlo, nhi, lo, _) -> {
+      q = offer_module_alias(qc, q, qual, lo, lo + str.len(qual))
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
-    PQualRecord(_, _, args, _, nlo, nhi, _, _) -> {
+    PQualRecord(qual, _, args, _, nlo, nhi, lo, _) -> {
+      q = offer_module_alias(qc, q, qual, lo, lo + str.len(qual))
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
     PTuple(elems, _, _) -> {
@@ -2455,6 +3089,18 @@ fn visit_ctor_pat(
               None -> None
             }
             q = visit_pat(qc, q, pa.pat, sub)
+            # a field written by name (`Point { x: px }`) answers as the
+            # field; `{ x }` is the binding too, which already answers there
+            match pa.name {
+              Some(n) ->
+                if pa.nlo != pat_lo(pa.pat) {
+                  match fi {
+                    Some(ix) -> { q = offer_ctor_field(qc, q, aid, ci, ix, pa.nlo, pa.nhi) }
+                    None -> ()
+                  }
+                }
+              None -> ()
+            }
             pos = pos + 1
           }
         }
@@ -2481,8 +3127,16 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
   var q = q0
   match ps {
     SLet(name, _, ann, init, lo, _) -> {
+      match ts {
+        Some(TSLet(Some(sid), _, _, _, _)) ->
+          match let_name_end(qc.cps, lo, name) {
+            Some(at) -> { q = offer_binding(qc, q, sid, at - str.len(name), at) }
+            None -> ()
+          }
+        _ -> ()
+      }
       match ann {
-        Some(tref) -> { q = visit_written_type(q, tref, WtStorage) }
+        Some(tref) -> { q = visit_written_type(qc, q, tref, WtStorage) }
         None ->
           match ts {
             Some(TSLet(Some(sid), _, _, _, _)) ->
@@ -2525,8 +3179,9 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
         }
       }
     SLocalFn(name, params, ret, _, body, nlo, nhi, lo, hi) -> {
-      q = visit_lambda_param_types(q, params)
-      q = visit_written_type(q, ret, WtReturn)
+      q = visit_lambda_param_types(qc, q, params)
+      q = visit_written_type(qc, q, ret, WtReturn)
+      q = offer_row(qc, q, t_hi(ret), e_lo(body))
       match ts {
         Some(TSLocalFn(sid, _, psyms, _, tbody, _, _, _)) -> {
           match sym_get(qc, sid) {

@@ -40,7 +40,7 @@ use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
 use lsp/lspq.{
   QCx, Target, DocHome, DocHere, DocFile, DocStd, DocSite, DeclAt, ModuleDoc,
-  find_target, typed_trees, inlay_hints, item_doc_site, sig_doc_site, decl_lo_named
+  find_target, typed_trees, inlay_hints, item_doc_site, sig_doc_site, decl_lo_named, resolutions
 }
 use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown, cut_doc}
 use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of}
@@ -3587,6 +3587,62 @@ test "hover on a literal shows its type and a value line in the one fence" {
     # interpolated name still answers as itself
     assert def_probe_at(st, d, text, "\"n = ", 1).hover == "String"
     assert def_probe_at(st, d, text, "MASK}", 0).hover == "const MASK: Int = 255  (0xFF)"
+  }))
+}
+
+## Where `needle` + `skip` is in the probe text.
+fn probe_offset(text: String, needle: String, skip: Int) -> Int =
+  match str.index_of(text, needle) {
+    Some(i) -> i + skip
+    None -> panic("probe text has no ${needle}")
+  }
+
+# The collection `resolutions` makes for references and semantic tokens
+# (docs/lsp-references-design.md §T0) is the definition walk read another way:
+# each name it reports is one definition answers for, with the same site, and
+# the names T0 added -- a written type, a row's effect, an operation call --
+# are among them.
+test "a collection reports the names definition resolves, at the same sites" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = join([
+      "effect Ask {",
+      "  fn ask() -> Int",
+      "}",
+      "",
+      "type Box = { v: Int }",
+      "",
+      "fn open(b: Box) -> Int !Ask = b.v + ask()",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "collect.dawn", text)
+    let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
+    let rs = resolutions(qc, 0, str.len(text))
+    var starts: List[Int] = []
+    for r in rs {
+      starts = starts ++ [r.lo]
+      let t = find_target(qc, r.lo).expect("definition answers at ${r.lo}")
+      if (t.lo, t.hi) == (r.lo, r.hi) { assert t.def == Some(r.def) }
+    }
+    let ty = probe_offset(text, "Box) ->", 0)
+    let row = probe_offset(text, "Ask = b", 0)
+    let call = probe_offset(text, "ask()", 0)
+    assert list.contains(starts, ty)
+    assert list.contains(starts, row)
+    assert list.contains(starts, call)
+    for r in rs {
+      if r.lo == ty { assert r.def == (probe_offset(text, "Box =", 0), probe_offset(text, "Box =", 3)) }
+      if r.lo == call { assert r.def == (probe_offset(text, "ask() -> Int", 0), probe_offset(text, "ask() -> Int", 3)) }
+    }
+    # a range keeps the names that start inside it, and only those
+    let one = resolutions(qc, row, row)
+    assert len(one) == 1
+    assert one[0].lo == row
   }))
 }
 
