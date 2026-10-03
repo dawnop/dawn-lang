@@ -48,6 +48,7 @@ use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of}
 use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
+use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts}
@@ -1291,7 +1292,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ("documentSymbolProvider", JBool(true)),
       ("documentFormattingProvider", JBool(true)),
       ("codeActionProvider", JBool(true)),
-      ("inlayHintProvider", JBool(true))
+      ("inlayHintProvider", JBool(true)),
+      ("semanticTokensProvider", semantic_tokens_provider())
     ]))]))
   } else if method == "initialized" {
     if st.watch_manifests { send(manifest_watch_registration()) }
@@ -1339,6 +1341,10 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     respond(id, handle_code_action(st, params))
   } else if method == "textDocument/inlayHint" {
     respond(id, handle_inlay_hint(st, params))
+  } else if method == "textDocument/semanticTokens/full" {
+    respond(id, handle_semantic_tokens(st, params, false))
+  } else if method == "textDocument/semanticTokens/range" {
+    respond(id, handle_semantic_tokens(st, params, true))
   } else if method == "shutdown" {
     respond(id, JNull)
   } else {
@@ -2773,6 +2779,57 @@ fn handle_inlay_hint(st: LspState, params: Json) -> Json = {
         None -> JNull
       }
     None -> JNull
+  }
+}
+
+## The legend and the two requests answered (docs/lsp-references-design.md
+## §T1): `full` and `range`, no `delta`, whose saving is the payload while the
+## cost is the walk.
+fn semantic_tokens_provider() -> Json =
+  jobj([
+    ("legend", jobj([
+      ("tokenTypes", JArr(map(token_types(), t => JStr(t)))),
+      ("tokenModifiers", JArr(map(token_modifiers(), m => JStr(m))))
+    ])),
+    ("full", JBool(true)),
+    ("range", JBool(true))
+  ])
+
+## `textDocument/semanticTokens/full` and `/range`: `lsptok.semantic_tokens`
+## in LSP's relative encoding over UTF-16 columns. A document with no analysis
+## (unknown, not yet analyzed, its workspace still loading) answers with no
+## tokens rather than an error: the grammar's colours stand until one exists.
+fn handle_semantic_tokens(st: LspState, params: Json, ranged: Bool) -> Json = {
+  let none: List[Json] = []
+  let empty = jobj([("data", JArr(none))])
+  match doc_of(st, params) {
+    Some(d) ->
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, d, analysis) {
+            Some(qc) -> {
+              let (lo, hi) = if ranged {
+                let r = get_or_null(params, "range")
+                let rs = get_or_null(r, "start")
+                let re = get_or_null(r, "end")
+                (lsp_offset(d.view, d.ls, oint(rs, "line"), oint(rs, "character")),
+                  lsp_offset(d.view, d.ls, oint(re, "line"), oint(re, "character")))
+              } else {
+                (0, len(d.view.cps))
+              }
+              var rows: List[(Int, Int, Int, Int, Int)] = []
+              for t in semantic_tokens(qc, lo, hi) {
+                let (line, col) = lsp_position(d.view, d.ls, t.lo)
+                let (eline, ecol) = lsp_position(d.view, d.ls, t.hi)
+                if eline == line && ecol > col { rows = rows ++ [(line, col, ecol - col, t.ty, t.mods)] }
+              }
+              jobj([("data", JArr(map(encode_tokens(rows), n => JInt(n))))])
+            }
+            None -> empty
+          }
+        None -> empty
+      }
+    None -> empty
   }
 }
 

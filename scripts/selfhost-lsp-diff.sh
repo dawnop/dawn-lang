@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints (left-out defaults among them), folded values of closed pure
+# on hover and on `use` lines, inlay hints (left-out defaults among them), semantic tokens (full and a range), folded values of closed pure
 # expressions on hover, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -540,6 +540,11 @@ req("textDocument/inlayHint", {"textDocument": {"uri": inlays_uri}, "range": {
     "end": {"line": inlays_text.count("\n") + 1, "character": 0}}})
 xs_line = pos(inlays_text, "let xs")["line"]
 req("textDocument/inlayHint", {"textDocument": {"uri": inlays_uri}, "range": {
+    "start": {"line": xs_line, "character": 0},
+    "end": {"line": xs_line + 1, "character": 0}}})
+# semantic tokens over the same file: all of it, then the same two lines
+req("textDocument/semanticTokens/full", {"textDocument": {"uri": inlays_uri}})
+req("textDocument/semanticTokens/range", {"textDocument": {"uri": inlays_uri}, "range": {
     "start": {"line": xs_line, "character": 0},
     "end": {"line": xs_line + 1, "character": 0}}})
 note("textDocument/didClose", tdoc(inlays_uri))
