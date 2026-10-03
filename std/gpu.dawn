@@ -754,24 +754,26 @@ pub fn download[D](t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
 ## Release `t`. Its handle answers nothing afterwards.
 pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handle_of(t))
 
-## Run the kernel named `kernel` over a `gx` by `gy` by `gz` grid of tile
+# The two extra axes come after `args` rather than next to `grid` because a
+# parameter with a default goes after every parameter without one: put
+# before `args`, they would have to be named at every one-dimensional call
+# to reach `args` positionally, which is every call but the 2D and 3D few.
+
+## Run the kernel named `kernel` over a `grid` by `gy` by `gz` grid of tile
 ## blocks with `args` as its arguments, in order. A kernel reads the three
-## axes with `block_id(0)` / `block_id(1)` / `block_id(2)`.
+## axes with `block_id(0)` / `block_id(1)` / `block_id(2)`; a one-dimensional
+## launch leaves `gy` and `gz` at 1, so a kernel that only reads
+## `block_id(0)` sees the grid it always did.
 ## `Err(kind: "gpu.bad_grid")` for an axis below one, before any handler is
 ## asked; a name no handler knows is the handler's refusal
 ## (`gpu.no_kernel` from the fake device).
-pub fn launch3(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
-  if gx < 1 || gy < 1 || gz < 1 {
+pub fn launch(kernel: String, grid: Int, args: List[Int], gy: Int = 1, gz: Int = 1) -> Result[Unit, ForeignError] !Gpu =
+  if grid < 1 || gy < 1 || gz < 1 {
     Err(refuse("gpu.bad_grid",
-      "gpu.launch: a grid has at least one block along each axis, got (${gx}, ${gy}, ${gz})"))
+      "gpu.launch: a grid has at least one block along each axis, got (${grid}, ${gy}, ${gz})"))
   } else {
-    gpu_launch(kernel, gx, gy, gz, args)
+    gpu_launch(kernel, grid, gy, gz, args)
   }
-
-## [`launch3`] over a one-dimensional grid: `gy` and `gz` are 1, so a kernel
-## that only reads `block_id(0)` sees the grid it always did.
-pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
-  launch3(kernel, grid, 1, 1, args)
 
 ## The module-level global named `name`, in the module that defines
 ## `kernel`, as a tensor of format `d` over the global's own storage.
@@ -917,6 +919,12 @@ fn bad_global_size(who: String, name: String, nbytes: Int, dtype: String, width:
 # pipe here turned every pipe-contract assertion red). This sits above the
 # doc comment rather than between it and the function, where it cut the
 # doc off `with_gpu_fake`.
+#
+# `globals` is last, after `body`, because a parameter with a default goes
+# after every parameter without one. The price is that a trailing block
+# fills `globals`, not `body` (a trailing block fills the last declared
+# parameter, spec 4.3), so `body` is passed in the parentheses, which is how
+# every caller already passes it.
 
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is its format and a `List[Float]`
@@ -952,18 +960,14 @@ fn bad_global_size(who: String, name: String, nbytes: Int, dtype: String, width:
 ## real device can, and this is a place where the model is narrower than
 ## the thing modelled.
 ##
+## `globals` maps a kernel name to the STATIC GLOBALS its module exports,
+## each a symbol name, an element format and the contents its declaration
+## gives them, in declaration order. A kernel with no entry exports none,
+## which is every kernel when `globals` is left out.
+##
 ## Pure. Two installations share nothing.
-pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T =
-  with_gpu_fake_globals(kernels, map.empty(), body)
-
-## [`with_gpu_fake`] over a device whose modules also declare STATIC GLOBALS.
-## `globals` maps a kernel name to the globals its module exports, each a
-## symbol name, an element format and the contents its declaration gives
-## them, in declaration order. A kernel with no entry exports none, which is
-## what [`with_gpu_fake`] installs.
-pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
-  globals: Map[String, List[(String, String, List[Float])]],
-  body: fn() -> T !Gpu) -> T = {
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu,
+  globals: Map[String, List[(String, String, List[Float])]] = map.empty()) -> T = {
   with handle Gpu {
     var next: Int = 1
     var store: Map[Int, (String, List[Float])] = map.empty()
@@ -1688,6 +1692,46 @@ test "launch refuses a grid of zero above the effect; the fake device refuses wh
     == ["gpu.bad_grid", "gpu.no_kernel", "gpu.no_arguments", "gpu.no_such_buffer", "ok"]
 }
 
+# Each launch below, as the grid the handler was handed or the kind it was
+# refused with.
+fn launch_grids() -> List[String] !Gpu =
+  list.map([
+    # one-dimensional: `gy` and `gz` stay 1
+    launch("k", 4, []),
+    launch("k", 4, [], gy: 2),
+    launch("k", 4, [], gy: 2, gz: 3),
+    launch("k", 4, [], gz: 3),
+    launch("k", 4, [], 5, 6),
+    # every axis is checked, the defaulted ones included
+    launch("k", 4, [], gy: 0)
+  ], r => match r {
+    Ok(_) -> "ok"
+    Err(e) -> "${e.kind}: ${e.message}"
+  })
+
+test "launch hands the handler a grid whose second and third axes default to one" {
+  let grids = {
+    with handle Gpu {
+      gpu_alloc(_dtype, _len) => Ok(1)
+      gpu_upload(_handle, _data) => Ok(())
+      gpu_download(_handle) => Ok([])
+      gpu_launch(_kernel, gx, gy, gz, _args) => Err(refuse("test.grid", "${gx} ${gy} ${gz}"))
+      gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
+      gpu_free(_handle) => Ok(())
+      gpu_sync() => Ok(())
+    }
+    launch_grids()
+  }
+  assert grids == [
+    "test.grid: 4 1 1",
+    "test.grid: 4 2 1",
+    "test.grid: 4 2 3",
+    "test.grid: 4 1 3",
+    "test.grid: 4 5 6",
+    "gpu.bad_grid: gpu.launch: a grid has at least one block along each axis, got (4, 0, 1)"
+  ]
+}
+
 fn too_few_buffers() -> Result[Unit, ForeignError] !Gpu = {
   let a = alloc(F64, 2)?
   launch("vadd", 1, [handle_of(a)])
@@ -1777,10 +1821,10 @@ fn global_lookups() -> List[String] !Gpu =
   ]
 
 test "the fake device answers a lookup for the globals its module declares, and refuses the rest" {
-  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_lookups)
+  assert with_gpu_fake(syms_kernels(), global_lookups, globals: syms_globals())
     == ["ok:4", "ok:4", "gpu.no_module_symbol", "gpu.no_module_symbol"]
-  # `with_gpu_fake` is `with_gpu_fake_globals` over a device whose modules
-  # declare none, so every lookup under it is refused
+  # left out, `globals` is a device whose modules declare none, so every
+  # lookup under it is refused
   assert with_gpu_fake(syms_kernels(), global_lookups)
     == ["gpu.no_module_symbol", "gpu.no_module_symbol", "gpu.no_module_symbol", "gpu.no_module_symbol"]
 }
@@ -1800,7 +1844,7 @@ fn global_is_storage() -> Result[(List[Float], List[Float], List[Float]), Foreig
 
 test "a module global is one storage under every lookup of its name, and free leaves it there" {
   let want = syms_tables()[2]
-  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_is_storage)
+  assert with_gpu_fake(syms_kernels(), global_is_storage, globals: syms_globals())
     == Ok((want, [9.0, 8.0, 7.0, 6.0], [9.0, 8.0, 7.0, 6.0]))
 }
 
@@ -1822,7 +1866,7 @@ test "the fake device's reference is handed the tables the caller installed it w
   # sym_diff uses to ask a REAL device whether a host write reached it.
   let ts = syms_tables()
   let want = list.map(range(0, 12), k => ts[k / 4][k % 4] + 1.0)
-  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_launch_reads_the_write) == Ok(want)
+  assert with_gpu_fake(syms_kernels(), global_launch_reads_the_write, globals: syms_globals()) == Ok(want)
 }
 
 fn global_as_bf16() -> String !Gpu = match module_global(BF16, "k", "shown") {
@@ -1836,8 +1880,8 @@ test "the fake device's globals are held to the format their declaration used" {
   # bf16 where the declaration said f64: the fake device's store holds values
   # and not bytes, so it cannot reinterpret one format's storage as another's
   # and says so rather than answering something a real device would not.
-  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_as_bf16) == "gpu.bad_global_dtype"
-  assert with_gpu_fake_globals(syms_kernels(), syms_globals(), global_as_declared) == "ok:4"
+  assert with_gpu_fake(syms_kernels(), global_as_bf16, globals: syms_globals()) == "gpu.bad_global_dtype"
+  assert with_gpu_fake(syms_kernels(), global_as_declared, globals: syms_globals()) == "ok:4"
 }
 
 fn real_refusals() -> List[String] !Gpu = {

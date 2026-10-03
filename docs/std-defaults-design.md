@@ -242,8 +242,9 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 | K1 | 已落地 | `31ec7b26`（rebase 合入 main 后的哈希；分支上原为 `fd99b635`） |
 | K2 | 已落地 | `3e31f40f`（main 上的哈希；分支上原为 `fa6c493e`） |
 | K3 | 已落地 | `711bdb15`（main 上的哈希） |
-| K4 | 已落地（web 6.0，见 §7.5） | 合入后由协调者回填 |
-| K5–K18 | 未开工 | |
+| K4 | 已落地（web 6.0，见 §7.5） | `1419b700`（main 上的哈希，PR #398） |
+| K5 | 已落地（见 §7.6） | 合入后由协调者回填 |
+| K6–K18 | 未开工 | |
 | K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | `04f65114`（main 上的哈希；分支上原为 `25ff1f19`） |
 
 ### 7.1 K1 落地记录
@@ -387,3 +388,51 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 - **负控。** 把 `error_response` 的默认临时改成 `ErrorFormat { ..default_errors(), detail_key: "detail" }`：
   `dawn test packages/web` 红 2 个（`the error body's key is the default one, and configurable`、
   `an HttpError out of range renders as the neutral 500, headers kept`），还原后 88/88 全绿。
+
+### 7.6 K5 落地记录
+
+- **面。** `std/gpu`：`launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)` 吞掉 `launch3`；
+  `with_gpu_fake(kernels, body, globals: Map[String, List[(String, String, List[Float])]] = map.empty())`
+  吞掉 `with_gpu_fake_globals`。`std/bytes`：`pub type Base64 = Standard | StandardRaw | Url | UrlRaw`，
+  `to_base64(b, enc: Base64 = Standard)`、`from_base64(s, enc: Base64 = Standard)` 吞掉 `to_base64_url` /
+  `from_base64_url`。只加默认：`str.pad_start` / `pad_end` 的 `pad: String = " "`，`bytes.index_of` 的
+  `from: Int = 0`。四个名字删除，不留别名。
+- **形参顺序。** 报告 A4 的顺序原样采用，没有和尾块规则冲突需要裁的地方：两个默认都放在每次都传的形参之后
+  （K0–K4 的先例），所以 `launch` 的 `gy` / `gz` 在 `args` 之后而不是挨着 `grid`，`globals` 在 `body` 之后。
+  代价同报告：尾块填最后一个声明的形参（spec §4.3），`with_gpu_fake(ks) { .. }` 会把块填给 `globals`
+  而类型错；今天没有一处这样写，`body` 都在括号里。两处的理由写在 `std/gpu.dawn` 函数上方的 `#` 注释里
+  （放在 `##` 块之上，放在中间会把文档从函数上切掉，pub-doc-check 实测会红）。B3 落地后可把 `body` 挪回末位。
+- **builtin。** 四个函数和两个只加默认的函数都是 std 里的 Dawn 函数，不在 `types.dawn` 的 intrinsic 表或
+  builtin 声明镜像里（`bytes_*` 是它们之下的原语），所以不需要 K19 那样的迁移。
+- **base64 的宽严。** 照 Go `encoding/base64`：补齐的编码（`Standard`、`Url`）**要求** padding，
+  `StdEncoding.DecodeString("Zg")` 在 Go 是 `illegal base64 data`，这里是 `None`；`*Raw` **拒绝** `=`
+  （不在它的字母表里）。比 Go 默认多严两处：末组空余低位非零即拒（Go 要 `.Strict()` 才拒），不跳过 `\r` / `\n`
+  （Go 跳过）。两处都是原来就有的行为，保留。**这是 `from_base64(s)` 的行为变更**：K5 之前它对 padding
+  宽容（「可有可无」），理由是 url 编码器不补 `=`；现在调用方用 `enc` 说出拼写，那条理由不再成立，宽容
+  反而让一串字节有两个拼写。api-diff 看不见这一条（签名只多了带默认的形参），所以写在这里和 spec §11。
+  仓内受影响的调用：site 的 `play_hash` 读回编辑器 `btoa` 写的串，`btoa` 总是补齐，不受影响；dawnop-site
+  只用 `to_base64_url` 编码（`pad4(..)`），解码走 `java.util.Base64`，不受影响。dawnop-site 下次升钉把
+  `pad4(bytes.to_base64_url(x))` 写成 `bytes.to_base64(x, enc: bytes.Url)`，`pad4` 可删。
+- **`std/moved.txt`。** 四个名字都在 v0.82.0 发布过，登四行（since 0.83.0、until 0.93.0）。
+  `from_base64_url` 的提示写明 `UrlRaw` 与 `Url` 各拒对方的拼写，因为旧函数两种都收。
+- **调用方。** `scripts/tile-gpu-diff` 的 `int_diff` / `mm_diff` / `stride_diff` 各 1 处 `launch3`（加导入）、
+  `sym_diff` 2 处 `with_gpu_fake_globals`（加导入）；`examples/projects/gpu_fake` 1 处（加导入、一段注释）；
+  `scripts/spike-native/bytes_codec` 8 处 `*_url`（`.expect` 加了 Go 语义的四行、改了一个节标题）；
+  std 自身测试 `with_gpu_fake_globals` 5 处、`*_url` 9 处。`site/src/html/play.dawn` 只改注释。
+  `packages/tileref`、`scripts/tile-golden/kernels.dawn`、site 的 gpu 页不用这四个名字，0 处。
+  一维的 `launch(k, g, hs)` 与两参的 `with_gpu_fake(ks, body)` 全仓零改动。
+- **测试。** std/gpu 加「launch 把 grid 交给 handler，第二、三轴默认 1」：一个把 grid 写进拒绝文案的 handler，
+  断言默认、具名 `gy`、具名 `gz`、按位置五参与默认轴也参与 `gpu.bad_grid` 检查。此前 std 测试里没有一处
+  看得见 grid 的第二轴（假设备不读 grid）。std/bytes 加「base64 reads padding the way Go's encoding/base64 does」
+  并改写两组原有测试；std/str、std/bytes 各加省略默认的断言。
+- **负控。** `launch` 的 `gy` 默认改 2：`dawn test --stdlib` 红 1 个（上面那个新测试）。`to_base64` 默认改
+  `Url`：`dawn test --stdlib` 红 2 个 bytes 测试，`dawn test site` 红 3 个（`html/play` 两个、`gen/tutorial`
+  一个，钉住编辑器线格式的那几条），`spike-native/bytes_codec` 两行对不上。均已还原。
+- **Emit-Change（实测）。** 以真父提交 `efd93090` 现编的工具链作无遮蔽对照：十个 `emit` 语料全动（每个程序多出
+  `std.bytes$Base64` 的五个类，std 类型的类不论用没用都发出；site 的 `html/play` 调用经 `$default$1`；selfhost
+  另有 stdsrc 重生成）；`doc --builtins` 动；`doc site`、run-diff 其余 label、fmt-diff、lsp 不动（lsp 对照里
+  只有两行 `file://` 根路径不同，是对照放在另一目录的产物）；param-diff 0 处形参名变化。
+- **不做的。** `str.index_of` 不加 `from`：它今天没有 `from` 形参，加形参是新功能而不是默认收敛，且 str 的
+  位置是 `Cursor` 不是 `Int`（B1 的 `cursor.find` 那条线）。`with_gpu_real` 不加 `globals`：真设备的全局是
+  cubin 自己声明的，宿主没有表可给。base64 不加 Go 的 `WithPadding(rune)` 自定义填充字符与 MIME 换行：
+  没有调用方，四个值覆盖了 RFC 4648 的全部变体。

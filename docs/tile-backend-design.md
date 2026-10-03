@@ -360,7 +360,8 @@ bf16 的打包发生在操作**之下**、真 handler 里（§4.4 的 `Bytes` �
 > 是 `launch3(kernel, grid, 1, 1, args)`；`b298a193`（2026-09-06，刀 TG，§6.13）加了第七个操作
 > `gpu_module_global(kernel, name, dtype) -> Result[(Int, Int), ForeignError]`。「字节码到模块句柄」
 > 没有做成操作：模块仍在安装 handler 时按 kernel 名给（§4.5）。今天的声明在 `std/gpu.dawn:698-706`，
-> 规范表述在 spec.md §12.6。
+> 规范表述在 spec.md §12.6。2026-10-03 的 K5（`docs/std-defaults-design.md` §7.6）把 `launch3` 并进
+> `launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`，三维 launch 写 `launch(k, gx, hs, gy: gy, gz: gz)`。
 
 ### 4.2 `with_gpu_real` 形态（刀 4 已落地）
 
@@ -460,8 +461,9 @@ pub fn reference_kernels() -> Map[String, (Int, WideRefFn)]
 > **2026-10-02 注：可分配格式已变。** 上面列的六种是写这段时 `element_bytes` 认识的格式；
 > `6ffb9bde`（2026-09-05）又加了 `i64`、`tf32`、`i16`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`，今天是
 > 12 个（`std/gpu.dawn:280-294`，假设备的拒绝文案在 `std/gpu.dawn:956`）。`F32` 能写进类型、不能
-> 分配。带模块全局的假设备是 `with_gpu_fake_globals`（`std/gpu.dawn:947`），`with_gpu_fake` 是它
-> 全局表为空的特例（`std/gpu.dawn:939`）。当前形状见 spec.md §12.6。
+> 分配。带模块全局的假设备原是 `with_gpu_fake_globals`，K5（2026-10-03，`docs/std-defaults-design.md`
+> §7.6）把它并进 `with_gpu_fake(kernels, body, globals = map.empty())`，全局表是末位的默认形参。
+> 当前形状见 spec.md §12.6。
 
 ### 4.4 intrinsic 与运行时落点（刀 4 已落地）
 

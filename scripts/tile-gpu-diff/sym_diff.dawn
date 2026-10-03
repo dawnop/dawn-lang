@@ -63,7 +63,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, with_gpu_fake_globals, with_gpu_real, WideRefFn, last_out}
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out}
 use tileref/ref.{global_syms_tables, global_syms_ref}
 use std/list
 use std/map
@@ -424,8 +424,8 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
   # 1. the kernel itself: three globals, three segments, the declarations'
   #    own tables
   let bufs = case_bufs(n)
-  let plain_fake = with_gpu_fake_globals(kernels_with(global_syms_tables(n)), fake_globals(),
-    () => run_kernel(bufs))
+  let plain_fake = with_gpu_fake(kernels_with(global_syms_tables(n)), () => run_kernel(bufs),
+    globals: fake_globals())
   let plain_real = with_gpu_real(cubins, () => run_kernel(bufs))
   let v = verdict(plain_fake, plain_real)
   let (_fs, fout, _fnote) = plain_fake
@@ -440,8 +440,8 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
 
   # 2. the symbols: what the host can look up, read, write, and read back
   #    through a launch
-  let sym_fake = with_gpu_fake_globals(kernels_with(written_tables(n)), fake_globals(),
-    () => symbols(n))
+  let sym_fake = with_gpu_fake(kernels_with(written_tables(n)), () => symbols(n),
+    globals: fake_globals())
   let sym_real = with_gpu_real(cubins, () => symbols(n))
   let sv = sym_verdict(sym_fake, sym_real)
   io.println("symbols ${KERNEL} declared=${DECLARED} probed=${len(sym_names())}")

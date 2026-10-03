@@ -204,14 +204,15 @@ pub fn at(b: Bytes, i: Int) -> Int = {
 ## `from > to` yields empty, so this never panics.
 pub fn slice(b: Bytes, from: Int, to: Int) -> Bytes = bytes_slice(b, from, to)
 
-## Where the first occurrence of `sub` at or after `from` begins, or `None`.
+## Where the first occurrence of `sub` at or after `from` (the start unless
+## given) begins, or `None`.
 ##
 ## A *position* in `[0, len]` counted in bytes, not the index of an element: an
 ## empty needle matches at the start when that position exists, and `len(b)` is
 ## a legal answer though no byte lives there. A negative `from` is clamped to
 ## zero; a `from` past `len(b)` is a miss, including for an empty needle. Pure
 ## Dawn over bytes_len/bytes_at — the search loop is not an intrinsic.
-pub fn index_of(b: Bytes, sub: Bytes, from: Int) -> Option[Int] = {
+pub fn index_of(b: Bytes, sub: Bytes, from: Int = 0) -> Option[Int] = {
   let hlen = bytes_len(b)
   let nlen = bytes_len(sub)
   let start = if from < 0 { 0 } else { from }
@@ -385,20 +386,25 @@ fn b64_encode(b: Bytes, url: Bool, pad: Bool) -> String = {
   from_code_points(out)
 }
 
-# One decoder for both alphabets. It accepts a trailing `=` run or no padding
-# at all -- the padded and unpadded spellings of the same bytes have to read
-# back the same, since the url-safe encoder here omits padding -- but it
-# rejects everything else: a wrong number of `=`, a symbol after them, a
-# leftover group of one character (which encodes no byte), and a final group
-# whose unused low bits are not zero. That last check is what makes decoding
-# injective: without it `AB==` and `AC==` would both be one byte.
-fn b64_decode(s: String, url: Bool) -> Option[Bytes] = {
+# One decoder for all four encodings, and it reads exactly the spellings its
+# encoder writes, as Go's encoding/base64 does: a padded encoding requires
+# the `=` run that makes the input a multiple of four characters, and a raw
+# one rejects `=` outright, since it is not in its alphabet. Beyond Go's
+# default it also rejects a final group whose unused low bits are not zero
+# (Go's `Strict()` mode), which is what makes decoding injective: without it
+# `AB==` and `AC==` would both be one byte. Rejected as well: a symbol after
+# the padding, a leftover group of one character (it encodes no byte), and
+# the `\r` and `\n` Go skips.
+fn b64_decode(s: String, url: Bool, padded: Bool) -> Option[Bytes] = {
   var out = buf()
   var acc = 0
   var have = 0
   var pad = 0
   for c in code_points(s) {
     if c == '=' {
+      if not padded {
+        return None
+      }
       pad = pad + 1
     } else if pad > 0 {
       return None
@@ -419,12 +425,12 @@ fn b64_decode(s: String, url: Bool) -> Option[Bytes] = {
     }
   }
   if have == 2 {
-    if acc % 16 != 0 || (pad != 0 && pad != 2) {
+    if acc % 16 != 0 || pad != (if padded { 2 } else { 0 }) {
       return None
     }
     out = put(out, acc / 16)
   } else if have == 3 {
-    if acc % 4 != 0 || (pad != 0 && pad != 1) {
+    if acc % 4 != 0 || pad != (if padded { 1 } else { 0 }) {
       return None
     }
     out = put(out, acc / 1024)
@@ -437,28 +443,43 @@ fn b64_decode(s: String, url: Bool) -> Option[Bytes] = {
   Some(freeze(out))
 }
 
-## `b` as Base64 with the standard alphabet (`A-Za-z0-9+/`, RFC 4648 §4) and
-## `=` padding to a multiple of four characters.
-pub fn to_base64(b: Bytes) -> String = b64_encode(b, false, true)
-
-## `s` read as standard-alphabet Base64, or `None` when it is not.
+## One of RFC 4648's Base64 encodings: an alphabet and whether `=` pads the
+## text to a multiple of four characters. These are Go's four
+## `encoding/base64` values under the same names.
 ##
-## Inquiry (spec §4.8, criterion 2). Padding is optional on the way in even
-## though [`to_base64`] always writes it; the url-safe alphabet is not accepted
-## here -- [`from_base64_url`] is the function that reads it.
-pub fn from_base64(s: String) -> Option[Bytes] = b64_decode(s, false)
+## - `Standard`: the standard alphabet (`A-Za-z0-9+/`, §4), padded.
+## - `StandardRaw`: the standard alphabet, unpadded.
+## - `Url`: the url- and filename-safe alphabet (`A-Za-z0-9-_`, §5), padded.
+## - `UrlRaw`: the url-safe alphabet, unpadded, which is the shape a JWT
+##   segment, a signature parameter and a path component want: `=` has to be
+##   percent-encoded in a query and means nothing in a file name.
+pub type Base64 = Standard | StandardRaw | Url | UrlRaw
 
-## `b` as Base64 with the url- and filename-safe alphabet (`A-Za-z0-9-_`,
-## RFC 4648 §5) and **no** padding, which is the shape a JWT segment, a
-## signature parameter and a path component all want -- `=` has to be
-## percent-encoded in a query and means nothing in a file name.
-pub fn to_base64_url(b: Bytes) -> String = b64_encode(b, true, false)
+fn b64_url(enc: Base64) -> Bool = match enc {
+  Standard -> false
+  StandardRaw -> false
+  Url -> true
+  UrlRaw -> true
+}
 
-## `s` read as url-safe Base64, with or without padding, or `None` when it is
-## not. The standard alphabet's `+` and `/` are rejected here, as `-` and `_`
-## are by [`from_base64`]: which alphabet a string is in is the caller's claim,
-## and a decoder that guesses turns a mismatch into wrong bytes.
-pub fn from_base64_url(s: String) -> Option[Bytes] = b64_decode(s, true)
+fn b64_padded(enc: Base64) -> Bool = match enc {
+  Standard -> true
+  StandardRaw -> false
+  Url -> true
+  UrlRaw -> false
+}
+
+## `b` as Base64 in the encoding `enc`.
+pub fn to_base64(b: Bytes, enc: Base64 = Standard) -> String = b64_encode(b, b64_url(enc), b64_padded(enc))
+
+## `s` read as Base64 in the encoding `enc`, or `None` when it is not.
+##
+## Inquiry (spec §4.8, criterion 2). Only the spellings `to_base64(_, enc)`
+## writes are accepted: a padded encoding requires its padding and a raw one
+## refuses it, and neither alphabet is read for the other. Which encoding a
+## string is in is the caller's claim, and a decoder that guesses turns a
+## mismatch into wrong bytes.
+pub fn from_base64(s: String, enc: Base64 = Standard) -> Option[Bytes] = b64_decode(s, b64_url(enc), b64_padded(enc))
 
 # ---- iteration (prelude Iter, #44 knife 2) ----
 
@@ -564,6 +585,8 @@ test "at asserts the index exists; slice names a stretch and clamps" {
 test "index_of answers a byte offset, and an empty needle is at every one" {
   var b: Bytes = utf8("abcabc")
   assert index_of(b, utf8("abc"), 0) == Some(0)
+  assert index_of(b, utf8("abc")) == Some(0)
+  assert index_of(b, utf8("c")) == Some(2)
   assert index_of(b, utf8("abc"), 1) == Some(3)
   assert index_of(b, utf8("c"), 0) == Some(2)
   assert index_of(b, utf8("c"), 3) == Some(5)
@@ -648,32 +671,71 @@ test "base64 answers RFC 4648's vectors, in both of its alphabets" {
   assert from_base64("Zm9vYg==") == Some(utf8("foob"))
   assert from_base64("Zm9vYmE=") == Some(utf8("fooba"))
   assert from_base64("Zm9vYmFy") == Some(utf8("foobar"))
-  # the url-safe encoder writes the same characters and omits the padding
-  assert to_base64_url(utf8("")) == ""
-  assert to_base64_url(utf8("f")) == "Zg"
-  assert to_base64_url(utf8("fo")) == "Zm8"
-  assert to_base64_url(utf8("foo")) == "Zm9v"
-  assert to_base64_url(utf8("foobar")) == "Zm9vYmFy"
+  # leaving the encoding out is writing `Standard`
+  assert to_base64(utf8("f"), enc: Standard) == "Zg=="
+  assert from_base64("Zg==", enc: Standard) == Some(utf8("f"))
+  # the raw encodings write the same characters and omit the padding
+  assert to_base64(utf8(""), enc: StandardRaw) == ""
+  assert to_base64(utf8("f"), enc: StandardRaw) == "Zg"
+  assert to_base64(utf8("fo"), enc: StandardRaw) == "Zm8"
+  assert to_base64(utf8("foo"), enc: StandardRaw) == "Zm9v"
+  assert to_base64(utf8("foobar"), enc: UrlRaw) == "Zm9vYmFy"
+  assert to_base64(utf8("f"), enc: UrlRaw) == "Zg"
+  assert to_base64(utf8("f"), enc: Url) == "Zg=="
   # the two alphabets differ in exactly the last two symbols, which 0xFB 0xFF
   # is chosen to reach: it encodes to values 62 and 63
   let high = freeze(put(put(buf(), 0xFB), 0xFF))
   assert to_base64(high) == "+/8="
-  assert to_base64_url(high) == "-_8"
+  assert to_base64(high, enc: StandardRaw) == "+/8"
+  assert to_base64(high, enc: Url) == "-_8="
+  assert to_base64(high, enc: UrlRaw) == "-_8"
   assert from_base64("+/8=") == Some(high)
-  assert from_base64_url("-_8") == Some(high)
-  assert from_base64_url("-_8=") == Some(high)
-  # which alphabet a string is in is the caller's claim, so neither decoder
+  assert from_base64("+/8", enc: StandardRaw) == Some(high)
+  assert from_base64("-_8=", enc: Url) == Some(high)
+  assert from_base64("-_8", enc: UrlRaw) == Some(high)
+  # which alphabet a string is in is the caller's claim, so no decoder
   # guesses -- a mismatch is None rather than different bytes
   assert from_base64("-_8=") == None
-  assert from_base64_url("+/8=") == None
+  assert from_base64("+/8=", enc: Url) == None
+  assert from_base64("-_8", enc: StandardRaw) == None
+  assert from_base64("+/8", enc: UrlRaw) == None
+}
+
+test "base64 reads padding the way Go's encoding/base64 does" {
+  # A padded encoding requires its padding (Go's StdEncoding and URLEncoding
+  # answer "illegal base64 data" for `Zg`), and a raw one refuses it (`=` is
+  # not in RawStdEncoding's or RawURLEncoding's alphabet).
+  assert from_base64("Zg") == None
+  assert from_base64("Zm8") == None
+  assert from_base64("_w", enc: Url) == None
+  assert from_base64("_w==", enc: Url) == Some(freeze(put(buf(), 0xFF)))
+  assert from_base64("_w", enc: UrlRaw) == Some(freeze(put(buf(), 0xFF)))
+  assert from_base64("_w==", enc: UrlRaw) == None
+  assert from_base64("Zg", enc: StandardRaw) == Some(utf8("f"))
+  assert from_base64("Zg==", enc: StandardRaw) == None
+  assert from_base64("Zm8=", enc: StandardRaw) == None
+  # a full group needs no padding in either kind, and nothing is nothing
+  assert from_base64("Zm9v", enc: StandardRaw) == Some(utf8("foo"))
+  assert from_base64("Zm9v", enc: Url) == Some(utf8("foo"))
+  assert from_base64("", enc: Url) == Some(utf8(""))
+  assert from_base64("", enc: UrlRaw) == Some(utf8(""))
+  # every encoding reads back what it writes
+  var every = buf()
+  for i in range(0, 256) {
+    every = put(every, i)
+  }
+  let all = freeze(every)
+  assert from_base64(to_base64(all)) == Some(all)
+  assert from_base64(to_base64(all, enc: StandardRaw), enc: StandardRaw) == Some(all)
+  assert from_base64(to_base64(all, enc: Url), enc: Url) == Some(all)
+  assert from_base64(to_base64(all, enc: UrlRaw), enc: UrlRaw) == Some(all)
 }
 
 test "from_base64 refuses everything that is not one spelling of some bytes" {
-  # padding is optional on the way in, because the url-safe encoder omits it
-  assert from_base64("AQ==") == from_base64("AQ")
-  assert from_base64("Zm9vYg") == Some(utf8("foob"))
+  assert from_base64("AQ==") == Some(freeze(put(buf(), 0x01)))
+  assert from_base64("Zm9vYg==") == Some(utf8("foob"))
   assert from_base64("") == Some(utf8(""))
-  # ... but the amount of it is not free: a group of two takes two `=`
+  # the amount of padding is not free: a group of two takes two `=`
   assert from_base64("AQ=") == None
   assert from_base64("AQ===") == None
   assert from_base64("Zm9vYg=") == None
@@ -684,6 +746,7 @@ test "from_base64 refuses everything that is not one spelling of some bytes" {
   # a leftover group of one character encodes no byte at all
   assert from_base64("A") == None
   assert from_base64("ZZZZA") == None
+  assert from_base64("A", enc: StandardRaw) == None
   # nothing may follow the padding
   assert from_base64("A=B") == None
   assert from_base64("AQ==A") == None
@@ -691,15 +754,17 @@ test "from_base64 refuses everything that is not one spelling of some bytes" {
   # two characters and would both be one byte, but only one of them has zero
   # in the bits the byte does not reach -- without the check they would decode
   # to the same 0x01 and no encoder could ever produce `AB`.
-  assert from_base64("AQ") == Some(freeze(put(buf(), 0x01)))
-  assert from_base64("AA") == Some(freeze(put(buf(), 0x00)))
-  assert from_base64("AB") == None
+  assert from_base64("AQ", enc: StandardRaw) == Some(freeze(put(buf(), 0x01)))
+  assert from_base64("AA==") == Some(freeze(put(buf(), 0x00)))
+  assert from_base64("AB", enc: StandardRaw) == None
+  assert from_base64("AB==") == None
   assert from_base64("AC==") == None
-  assert from_base64("AAB") == None
-  assert from_base64("AAA") == Some(freeze(put(put(buf(), 0x00), 0x00)))
+  assert from_base64("AAB=") == None
+  assert from_base64("AAA=") == Some(freeze(put(put(buf(), 0x00), 0x00)))
   # whitespace is not ignored the way some decoders ignore it
   assert from_base64("Zm 9v") == None
   assert from_base64("Zm9v\n") == None
+  assert from_base64("Zm9v\r\n") == None
   assert from_base64(" Zm9v") == None
   # and neither is anything else outside the alphabet
   assert from_base64("Zm9*") == None

@@ -2638,7 +2638,7 @@ fn slurp(p: String) -> String !io = {
 `decode_latin1(b) -> String`（解码，见 §11）、
 `decode_utf8_checked(b) -> Result[String, Utf8Error]`（严格解码，见 §11）、
 `bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
-（`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
+（`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from = 0) -> Option[Int]`。
 `index_of` 把负的 `from` 钳到 0；非空 `needle` 从该字节下标起找首次完整命中。
 空 `needle` 在合法位置 `[0, len(b)]` 命中（所以 `from == len(b)` 返回 `Some(len(b))`），
 但 `from > len(b)` 即使对空 `needle` 也返回 `None`。
@@ -3177,11 +3177,13 @@ UTF-8。两者对「什么算非法」的判断是同一个：`decode_utf8_check
 按 CONTRIBUTING §7 的一代 forwarder 纪律保留，下个版本删除。
 
 hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份定义），规则是规范性的：
-`to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；`to_base64`
-用 RFC 4648 section 4 的标准字母表并以 `=` 补齐，`to_base64_url` 用 section 5 的
-url/文件名安全字母表且
-**不补 `=`**；两个解码器各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding
-可有可无，但末组的空余低位必须为零——否则同一串字节会有多个拼写。这一族的解码器都属判据 2：
+`to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；
+`to_base64(b, enc: Base64 = Standard)` 与 `from_base64(s, enc: Base64 = Standard)` 的编码是值
+`Standard | StandardRaw | Url | UrlRaw`（Go `encoding/base64` 的四个同名值）：`Standard*` 用
+RFC 4648 section 4 的标准字母表，`Url*` 用 section 5 的 url/文件名安全字母表，`*Raw` **不补
+`=`**，另两个以 `=` 补齐到 4 的倍数。解码器只认 `to_base64(_, enc)` 写得出的拼写：补齐的编码
+**要求** padding，`*Raw` **拒绝** `=`，也只认自己的字母表（猜编码会把拼错的输入变成错的字节）；
+末组的空余低位必须为零——否则同一串字节会有多个拼写。这一族的解码器都属判据 2：
 外来文本是要校验的，不是要断言的。
 
 `Bytes` 与 `Buf` 见 §9.5.1；另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体
@@ -3547,14 +3549,14 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 
 **`Gpu` 效果**有七个操作（`gpu_alloc`、`gpu_upload`、`gpu_download`、`gpu_launch`、
 `gpu_module_global`、`gpu_free`、`gpu_sync`），单态、句柄级；程序用的是其上的类型化函数
-`alloc`、`upload`、`download`、`free`、`launch`、`launch3`、`module_global`、`sync`。
+`alloc`、`upload`、`download`、`free`、`launch`、`module_global`、`sync`。
 
 - 每个操作答 `Result[_, ForeignError]`。std 在操作之上自己发三种拒绝，在每个 handler 下字节相同：
   `gpu.bad_length`（`alloc` 的长度小于 1）、`gpu.length_mismatch`（`upload` 的数据长度不等于
   `size(t)`）、`gpu.bad_grid`（grid 某一轴小于 1）。这三种都在问 handler 之前发出。其余答复是
   handler 所代表的设备的原样结果：接缝在错误面之下。
-- **`launch` 以字符串点名 kernel**：`launch(kernel, grid, args)` 是 `launch3(kernel, grid, 1, 1, args)`；
-  grid 计 tile block 的个数；`args` 是缓冲句柄（`handle_of(t)`），按入口参数的顺序。
+- **`launch` 以字符串点名 kernel**：`launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`，
+  `grid`、`gy`、`gz` 是 grid 的三根轴，计 tile block 的个数；`args` 是缓冲句柄（`handle_of(t)`），按入口参数的顺序。
   名字到 kernel 的绑定是安装 handler 时交给它的表，名字不在表里，两个 handler 都答
   `gpu.no_kernel`。语言不检查这个名字与 `trace_kernel` 用的名字一致，也不检查 `args` 的个数与
   格式与入口签名一致：那是程序的责任。
@@ -3565,7 +3567,8 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 **两个 handler**：
 
 ```dawn
-pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T
+pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu,
+  globals: Map[String, List[(String, String, List[Float])]] = map.empty()) -> T
 pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e) -> T !io
 ```
 
@@ -3578,6 +3581,9 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   `[(实参位置, 内容)]`，每一对按**该**缓冲的格式舍入（`round_to`）后写回；有位置越界则答
   `gpu.bad_write_back`，什么也不写。所有输入在任何一次写回之前读完。grid 不被读取。
 - 缓冲持有它的格式的内存会持有的值：`upload` 与写回都按缓冲格式舍入，`download` 原样答出。
+- `globals` 把 kernel 名映到它所在模块导出的全局（符号名、格式、声明给的内容），`module_global`
+  从这里答，表里没有的名字答 `gpu.no_module_symbol`；省略即每个模块都不导出全局。它排在 `body`
+  之后（带默认的形参排在不带默认的之后），所以尾块落在 `globals` 上，`body` 写在括号里。
 - **真设备 `with_gpu_real` 只在 native 目标上有实现**。运行时在第一个需要设备的操作时
   `dlopen("libcuda.so.1")` 并在 device 0 上开一个上下文；`body` 返回后释放上下文与库，程序
   没有 `free` 的缓冲随之释放。一个 kernel 的 cubin 在它第一次被 launch（或被 `module_global`
