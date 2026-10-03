@@ -160,4 +160,15 @@ patch）。原示例用 `tea_dom/dsl` 的 `on_value`，而 dsl 是写在 node �
 
 ## 实测
 
-（见下。）
+2026-10-03，本机（WSL2，16 核），父提交 `9fb834d0` 与 D5 提交各自的工具链，顺序各跑 3 次，墙钟：
+
+| 命令 | 父提交 | D5 |
+|---|---|---|
+| `dawn doc --stdlib` | 4.10 / 4.57 / 4.92 s | 3.94 / 3.76 / 5.20 s |
+| `dawn check selfhost` | 17.73 / 18.26 / 17.35 s | 16.21 / 16.28 / 16.55 s |
+
+差别在噪声以内（D5 一侧略快不是这刀的功劳）。仓里今天只有一个 decltest，新 pass 对没有 decltest 的模块是一次
+`module_tests` 遍历；`dawn doc` 每个模块多一次 `module_examples`（同样只遍历测试）。
+
+输出不变的部分（与父提交逐字节比）：`dawn doc --stdlib`、`--builtins`、`dawn doc site`，以及除 tea-dom 外的 9 个包；
+`__emit` 的 packages/web、packages/json 与五个 examples。
