@@ -6,7 +6,8 @@
 # What stays here is pure and judged on its own: a type that is too long or
 # carries an error is not shown, an effect row is shown only when it names an
 # effect and is not polymorphic, a parameter name only where it tells the
-# reader something the call does not already spell.
+# reader something the call does not already spell, and a left-out default
+# argument as the text its author wrote (§B1), never as a value.
 #
 # Types and rows render the way hover renders them (`ty_show`, `eff_suffix`),
 # so one type never reads two ways between a hint and the hover beside it.
@@ -20,14 +21,23 @@ pub type InlayOpts = {
   let_types: Bool,
   lambda_param_types: Bool,
   call_effects: Bool,
-  param_names: Bool
+  param_names: Bool,
+  default_args: Bool
 }
 
 ## Types and effects on, parameter names off: Dawn has named arguments, so an
 ## author who wants a reader to see a name can write it (gopls keeps these off
-## for the same reason).
+## for the same reason). Left-out defaults on: unlike a parameter name, the
+## call does not spell them at all, and an argument passed without a trace in
+## the source is what a reader cannot recover by reading it (§B1).
 pub fn default_inlay_opts() -> InlayOpts =
-  InlayOpts { let_types: true, lambda_param_types: true, call_effects: true, param_names: false }
+  InlayOpts {
+    let_types: true,
+    lambda_param_types: true,
+    call_effects: true,
+    param_names: false,
+    default_args: true
+  }
 
 ## LSP 3.17's `InlayHintKind`: Type = 1, Parameter = 2. An effect row is a
 ## `HintType`: in Dawn it is part of the function type (`fn() -> T !Fs`).
@@ -85,6 +95,35 @@ pub fn param_hint(at: Int, pname: String, arg_var: Option[String], shown: Int) -
     Some(Hint { at: at, label: pname ++ ":", kind: HintParam, pad_left: false, pad_right: true })
   }
 
+## The arguments a call leaves to their defaults, as one hint: `name: text`
+## for each, in declaration order, joined by `, `. `text` is the default as
+## its author spelled it (`Sig.param_defaults`), not a value: a default may
+## read the parameters before it (`from: start(s)` names the callee's `s`), so
+## it is the callee's expression, shown the way signature help shows it.
+## A text past `TYPE_HINT_SHOWN` code points is `…`: the hint's news is that
+## an argument goes in at all, which a dropped hint would hide, and the whole
+## text is one signature help away. `after_arg` says written arguments come
+## before the hint inside the parentheses, so it opens with `, `; `bare` says
+## the call has no parentheses to sit in (`x |> f`), so it brings its own.
+pub fn default_args_hint(at: Int, omitted: List[(String, String)], after_arg: Bool, bare: Bool) -> Option[Hint] = {
+  if len(omitted) == 0 { return None }
+  var parts: List[String] = []
+  for o in omitted {
+    let (pname, text) = o
+    let shown = if str.len(text) > TYPE_HINT_SHOWN { "…" } else { text }
+    parts = parts ++ [pname ++ ": " ++ shown]
+  }
+  let body = join(parts, ", ")
+  let label = if bare {
+    "(" ++ body ++ ")"
+  } else if after_arg {
+    ", " ++ body
+  } else {
+    body
+  }
+  Some(Hint { at: at, label: label, kind: HintParam, pad_left: false, pad_right: false })
+}
+
 test "a type hint is the type after a colon, unless long or erroneous" {
   match type_hint(7, "List[Int]") {
     Some(h) -> {
@@ -139,4 +178,33 @@ test "a parameter name is hidden for one argument and for a same-named variable"
   assert param_hint(5, "gap", Some("gap"), 2) == None
   assert param_hint(5, "gap", Some("width"), 2) != None
   assert param_hint(5, "_", None, 2) == None
+}
+
+test "left-out defaults are one hint, comma-led after a written argument" {
+  match default_args_hint(9, [("from", "start(s)")], true, false) {
+    Some(h) -> {
+      assert h.label == ", from: start(s)"
+      assert h.at == 9
+      assert h.kind == HintParam
+      assert not h.pad_left
+      assert not h.pad_right
+    }
+    None -> { assert false }
+  }
+  match default_args_hint(4, [("a", "1"), ("b", "\" \"")], false, false) {
+    Some(h) -> { assert h.label == "a: 1, b: \" \"" }
+    None -> { assert false }
+  }
+  match default_args_hint(4, [("a", "1")], false, true) {
+    Some(h) -> { assert h.label == "(a: 1)" }
+    None -> { assert false }
+  }
+  assert default_args_hint(4, [], true, false) == None
+}
+
+test "a default's text past the bound is elided, not dropped" {
+  match default_args_hint(0, [("why", str.repeat("x", 26)), ("n", str.repeat("y", 25))], false, false) {
+    Some(h) -> { assert h.label == "why: …, n: " ++ str.repeat("y", 25) }
+    None -> { assert false }
+  }
 }

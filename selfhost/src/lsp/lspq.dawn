@@ -44,7 +44,7 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyAdt, TyFn, Sig, Sym, CtorI,
-  ty_show, sig_render, ctor_render, trait_of, adt_of,
+  ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
 use check/cx.{ModExports, Cx}
@@ -56,7 +56,7 @@ use front/lexer.{slice_cps}
 use lsp/lspv.{
   value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
 }
-use lsp/lspinlay.{InlayOpts, Hint, type_hint, effect_hint, param_hint}
+use lsp/lspinlay.{InlayOpts, Hint, type_hint, effect_hint, param_hint, default_args_hint}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -389,10 +389,72 @@ fn call_sig(qc: QCx, callee: String, te: Option[TExpr]) -> Option[Sig] =
     _ -> None
   }
 
-## The effect hint and the parameter names of one call. `first` as in
-## `hint_param_names`; `name_hi` is the end of the callee's name.
+## The arguments a call leaves to their defaults, as one hint inside its
+## parentheses after the last argument written there (docs/lsp-hover-design.md
+## §B1). Which parameter each written argument fills is the checker's own rule
+## (`types.arg_slots`), with `first` receiver slots in front -- so a named
+## argument out of order, a pipe's argument and a trailing block (which fills
+## the last parameter) land where the call lands them. A call where an
+## argument lands nowhere, or a parameter with no default is left out, is an
+## error the diagnostics already report, and gets no hint.
+fn hint_default_args(qc: QCx, q: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int) -> Q = {
+  let want = match inlay_opts(q) {
+    Some(o) -> o.default_args
+    None -> false
+  }
+  if not want || len(s.param_defaults) == 0 { return q }
+  let unnamed: Option[String] = None
+  var given: List[Option[String]] = []
+  var r = 0
+  while r < first {
+    given = given ++ [unnamed]
+    r = r + 1
+  }
+  for a in args { given = given ++ [a.name] }
+  let trailing = len(args) > 0 && args[len(args) - 1].trailing
+  var filled: Map[Int, Bool] = map.empty()
+  for pick in arg_slots(s.param_names, given, trailing) {
+    match pick {
+      SlotAt(idx) -> { filled = map.insert(filled, idx, true) }
+      _ -> return q
+    }
+  }
+  var omitted: List[(String, String)] = []
+  var pi = 0
+  for pn in s.param_names {
+    if not map.has(filled, pi) {
+      match get(s.param_defaults, pi) {
+        Some(Some(text)) -> { omitted = omitted ++ [(pn, text)] }
+        _ -> return q
+      }
+    }
+    pi = pi + 1
+  }
+  if len(omitted) == 0 { return q }
+  # a pipe's argument sits left of the name, outside the parentheses
+  var last = -1
+  for a in args {
+    if not a.trailing && a.lo >= name_hi && a.hi > last { last = a.hi }
+  }
+  if last >= 0 { return add_hint(q, default_args_hint(last, omitted, true, false)) }
+  let cps = qc.cps
+  let n = len(cps)
+  var j = name_hi
+  while j < n && (cps[j] == ' ' || cps[j] == '\t') { j = j + 1 }
+  if j < n && cps[j] == '(' {
+    add_hint(q, default_args_hint(j + 1, omitted, false, false))
+  } else {
+    # `x |> f` and `f { ... }`: no parentheses, so the hint brings its own
+    add_hint(q, default_args_hint(name_hi, omitted, false, true))
+  }
+}
+
+## The left-out defaults, the effect hint and the parameter names of one
+## call. `first` as in `hint_param_names`; `name_hi` is the end of the
+## callee's name. The defaults go in first: with no parentheses they share the
+## effect hint's offset, and they read before it.
 fn hint_call(qc: QCx, q0: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int, call_hi: Int) -> Q = {
-  var q = q0
+  var q = hint_default_args(qc, q0, s, args, first, name_hi)
   match inlay_opts(q) {
     Some(o) -> {
       if o.call_effects {
@@ -426,10 +488,22 @@ fn hint_dyn_call(qc: QCx, q: Q, sid: Int, args: List[Arg], name_hi: Int, call_hi
 ## module-qualified call, where the receiver is an alias and not a value. Read
 ## off the first typed argument's span rather than the list's length, which a
 ## default left out makes shorter than the parameter list.
+##
+## A left-out first parameter is filled by a node the checker spans over the
+## whole call, which starts where the receiver does; it is told apart by what
+## it calls (`f$default$0`) or, when the call binds its arguments first, by
+## the local it reads (`default$0`), and is never a receiver.
 fn receiver_slots(recv: Expr, targs: List[TExpr]) -> Int =
   match get(targs, 0) {
-    Some(t0) -> if x_lo(t0) == e_lo(recv) { 1 } else { 0 }
+    Some(t0) -> if x_lo(t0) == e_lo(recv) && not is_default_fill(t0) { 1 } else { 0 }
     None -> 0
+  }
+
+fn is_default_fill(t: TExpr) -> Bool =
+  match t {
+    XCallFn(_, fname, _, _, _, _, _, _, _) -> str.contains(fname, "\$default\$")
+    XLocal(_, name, _, _, _) -> str.starts_with(name, "default\$")
+    _ -> false
   }
 
 ## The hints of `f(args)`, `EApply` over a name.

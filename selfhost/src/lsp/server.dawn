@@ -1982,7 +1982,7 @@ fn client_defaults_item_data(params: Json) -> Bool = {
 }
 
 ## The inlay hints the client asked for: `initializationOptions.inlayHints`,
-## four optional booleans over `default_inlay_opts`. A key that is missing or
+## five optional booleans over `default_inlay_opts`. A key that is missing or
 ## not a boolean keeps its default; read once, at `initialize`
 ## (docs/lsp-hover-design.md §A4.3 says why not `workspace/configuration`).
 fn inlay_opts_of(params: Json) -> InlayOpts = {
@@ -1992,7 +1992,8 @@ fn inlay_opts_of(params: Json) -> InlayOpts = {
     let_types: json_flag(j, "letTypes", d.let_types),
     lambda_param_types: json_flag(j, "lambdaParamTypes", d.lambda_param_types),
     call_effects: json_flag(j, "callEffects", d.call_effects),
-    param_names: json_flag(j, "parameterNames", d.param_names)
+    param_names: json_flag(j, "parameterNames", d.param_names),
+    default_args: json_flag(j, "defaultArguments", d.default_args)
   }
 }
 
@@ -4282,5 +4283,159 @@ test "inlay hints: a trailing block puts the effect after the call's parentheses
       "each([1])« !Fs» { n«: Int» =>",
       "let m«: Int» = n + 1"
     ]
+  }))
+}
+
+# ---- left-out default arguments (docs/lsp-hover-design.md §B1) ----
+
+fn defaults_probe_text() -> String =
+  join([
+    "use std/str",
+    "use std/cursor",
+    "",
+    "fn pad(s: String, width: Int, fill: String = \" \") -> String = s ++ fill",
+    "fn zero(n: Int = 0, m: Int = 1) -> Int = n + m",
+    "fn mid(s: String, gap: Int = 1, last: Int = 0) -> Int = gap + last",
+    "fn each(xs: List[Int], step: Int = 1, f: fn(Int) -> Unit) -> Unit = { for x in xs { f(x + step) } }",
+    "fn wordy(n: Int, why: String = \"a default far wider than any hint shows\") -> Int = n",
+    "",
+    "fn run(s: String) -> Int = {",
+    "  let a = pad(s, 4)",
+    "  let b = zero()",
+    "  let c = pad(width: 4, s: \"x\")",
+    "  let d = mid(s, last: 2)",
+    "  each([1]) { n =>",
+    "    let _ = n",
+    "  }",
+    "  let e = s.pad(4)",
+    "  let f = str.pad_start(s, 4)",
+    "  let g = cursor.find(s, \"a\")",
+    "  let h = \"x\" |> pad(2)",
+    "  let i = 5 |> zero",
+    "  let j = wordy(1)",
+    "  let k = pad(s, 4, \"-\")",
+    "  let l = zero(1, m: 2)",
+    "  str.len(a ++ c ++ e ++ f ++ h) + b + d + i + j + str.len(k) + l + (if g == None { 0 } else { 1 })",
+    "}",
+    ""
+  ], "\n")
+
+## The probe's hinted lines with only the left-out-default hints kept, so the
+## let types around them do not crowd the assertions.
+fn defaults_probe(st: LspState, d: Doc) -> List[String] = {
+  let st1 = LspState {
+    ..st,
+    inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false }
+  }
+  inlay_probe(st1, d, 0, 0, 30, 0)
+}
+
+test "inlay hints: a left-out default shows its written text, after the last argument" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st, "defaults.dawn", defaults_probe_text())
+    let got = defaults_probe(st, d)
+    # by position, and with nothing written: the hint opens the parentheses
+    assert list.contains(got, "let a = pad(s, 4«, fill: \" \"»)")
+    assert list.contains(got, "let b = zero(«n: 0, m: 1»)")
+    # named out of order, and a default left out between written ones
+    assert list.contains(got, "let c = pad(width: 4, s: \"x\"«, fill: \" \"»)")
+    assert list.contains(got, "let d = mid(s, last: 2«, gap: 1»)")
+    # a trailing block fills the last parameter; the hint stays in the parentheses
+    assert list.contains(got, "each([1]«, step: 1») { n =>")
+    # UFCS: the receiver fills the first parameter
+    assert list.contains(got, "let e = s.pad(4«, fill: \" \"»)")
+    # std, module-qualified; a default that reads an earlier parameter is the
+    # callee's text, `s` being `find`'s own
+    assert list.contains(got, "let f = str.pad_start(s, 4«, pad: \" \"»)")
+    assert list.contains(got, "let g = cursor.find(s, \"a\"«, from: start(s)»)")
+    # a pipe's argument is outside the parentheses; with none, the hint brings its own
+    assert list.contains(got, "let h = \"x\" |> pad(2«, fill: \" \"»)")
+    assert list.contains(got, "let i = 5 |> zero«(m: 1)»")
+    # past the bound the text is elided, the argument still shown
+    assert list.contains(got, "let j = wordy(1«, why: …»)")
+    # nothing left out, nothing shown
+    assert not list.any(got, l => str.contains(l, "let k ") || str.contains(l, "let l "))
+    assert len(got) == 11
+  }))
+}
+
+test "inlay hints: a left-out default is a parameter hint with no padding, and can be turned off" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st0, "defaults.dawn", defaults_probe_text())
+    let params = jobj([
+      ("textDocument", jobj([("uri", JStr(d.uri))])),
+      ("range", jobj([("start", jpos(11, 0)), ("end", jpos(11, 99))]))
+    ])
+    let st1 = LspState {
+      ..st0,
+      docs: map.insert(st0.docs, d.uri, d),
+      inlay: InlayOpts { ..st0.inlay, let_types: false }
+    }
+    match handle_inlay_hint(st1, params) {
+      JArr(hs) -> {
+        assert len(hs) == 1
+        assert get_or_null(hs[0], "label") == JStr("n: 0, m: 1")
+        assert get_or_null(hs[0], "kind") == JInt(2)
+        assert get_or_null(hs[0], "paddingLeft") == JNull
+        assert get_or_null(hs[0], "paddingRight") == JNull
+      }
+      _ -> { assert false }
+    }
+    let off = LspState {
+      ..st0,
+      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+        ("defaultArguments", JBool(false))
+      ]))]))]))
+    }
+    assert defaults_probe(off, d) == []
+  }))
+}
+
+test "inlay hints: a module-qualified call that leaves out its first parameter has no receiver" {
+  io.with_fs_real(() => no_host(() => {
+    # the default that fills `lo` is spanned over the whole call, so it starts
+    # where the alias does, as a UFCS receiver would
+    let root = "/tmp/dawn-selfhost-lsp-def/dfltstd"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "dfltprobe\n")
+    def_probe_put("${root}/dfltprobe.dawn", "pub fn span(lo: Int = 0, hi: Int = 9) -> Int = hi - lo\n")
+    let cstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(cstd)
+    let text = join([
+      "use std/dfltprobe as df",
+      "",
+      "fn r() -> Int = df.span() + df.span(hi: 3)",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "dfltuser.dawn", text)
+    assert defaults_probe(st, d) == ["fn r() -> Int = df.span(«lo: 0, hi: 9») + df.span(hi: 3«, lo: 0»)"]
+  }))
+}
+
+test "inlay hints: a call in error gets no default hint" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let text = join([
+      "fn pad(s: String, width: Int, fill: String = \" \") -> String = s ++ fill",
+      "fn run() -> String = {",
+      "  let a = pad(\"x\")",
+      "  let b = pad(\"x\", 1, \"-\", 9)",
+      "  let c = pad(\"x\", 1, nope: 2)",
+      "  let e = pad(\"x\", 1, width: 2)",
+      "  a ++ b ++ c ++ e",
+      "}",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "defaults_err.dawn", text)
+    # a required parameter missing and one argument too many, which the
+    # checker types as an error node; a name that is not a parameter and a
+    # parameter given twice, which it still types as a call to `pad` with the
+    # argument in error -- and whose `fill` is left out all the same
+    assert defaults_probe(st, d) == []
   }))
 }

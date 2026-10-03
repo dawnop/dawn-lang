@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints, formatting over a two-module project + a standalone buffer) runs
+# on hover and on `use` lines, inlay hints (left-out defaults among them), formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 #
@@ -182,6 +182,40 @@ pub fn load(p: String) -> String !Fs !Ask = {
     Ok(t) -> "${t}${padded}${got}${len(long)}${peek()}"
     Err(_) -> ""
   }
+}
+EOF
+
+# Left-out default arguments (docs/lsp-hover-design.md §B1): by position,
+# named out of order, a trailing block, UFCS, a pipe, a std default that reads an earlier parameter, a text past the
+# bound, and a module-qualified call that leaves out its first parameter --
+# whose default fill starts where the alias does and must not be taken for a
+# UFCS receiver. On by default; the session does not mention the key.
+cat > "$OUT/proj/src/dflt.dawn" <<'EOF'
+pub fn span(lo: Int = 0, hi: Int = 9) -> Int = hi - lo
+EOF
+
+cat > "$OUT/proj/src/defaults.dawn" <<'EOF'
+use std/cursor
+use std/str
+use dflt as df
+use util.{pad_to}
+
+fn each(xs: List[Int], step: Int = 1, f: fn(Int) -> Unit) -> Unit = {
+  for x in xs { f(x + step) }
+}
+
+pub fn run(s: String) -> Int = {
+  let a = pad_to(s, 4)
+  let b = pad_to(width: 2, s: "x", why: "w")
+  each([1]) { n =>
+    let _ = n
+  }
+  let c = s.pad_to(3)
+  let d = "x" |> pad_to(2)
+  let e = df.span()
+  let f = df.span(hi: 3)
+  let g = cursor.find(s, "a")
+  str.len(a ++ b ++ c ++ d) + e + f + (if g == None { 0 } else { 1 })
 }
 EOF
 
@@ -444,6 +478,17 @@ req("textDocument/inlayHint", {"textDocument": {"uri": inlays_uri}, "range": {
     "start": {"line": xs_line, "character": 0},
     "end": {"line": xs_line + 1, "character": 0}}})
 note("textDocument/didClose", tdoc(inlays_uri))
+
+# left-out defaults: the whole file, with the session's default options
+defaults_path = f"{out_dir}/proj/src/defaults.dawn"
+defaults_uri = "file://" + defaults_path
+defaults_text = open(defaults_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": defaults_uri, "languageId": "dawn", "version": 1, "text": defaults_text}})
+req("textDocument/inlayHint", {"textDocument": {"uri": defaults_uri}, "range": {
+    "start": {"line": 0, "character": 0},
+    "end": {"line": defaults_text.count("\n") + 1, "character": 0}}})
+note("textDocument/didClose", tdoc(defaults_uri))
 
 # formatting: a lexable but unformatted file
 note("textDocument/didOpen", {"textDocument": {
