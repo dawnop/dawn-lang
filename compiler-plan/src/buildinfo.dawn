@@ -16,7 +16,7 @@
 # That is what lets the next cut write it into a jar without breaking B==C.
 
 use std/io
-use std/io.{Fs}
+use std/io.{Fs, Proc, Env}
 use std/str
 use std/map
 use std/bytes
@@ -246,6 +246,30 @@ pub const SCHEMA: String = "dawn-build-info 1"
 ## the design document's 4.4.
 pub fn render_file(version: String, rows: List[BuildRow]) -> String =
   SCHEMA ++ "\n" ++ "toolchain\tdawn " ++ version ++ "\n" ++ rows_text(rows)
+
+## The build-info file a product of `target` carries: a project directory's
+## rows are `build_rows` of its plan, the same rows `dawn version -m <dir>`
+## prints; a single file's are `file_rows` over `root_files`, the texts its
+## load read. Re-planned rather than threaded out of the load, because
+## planning is cheap and the plan is a function of the same files the load
+## just read. One function for every product (a jar, a native binary, a wasm
+## module) and both drivers, so that one program built two ways says the same
+## thing about what it is made of.
+pub fn product_file(
+  version: String,
+  target: String,
+  root_files: List[(String, String)]
+) -> Result[String, String] !Fs !Proc !Env = {
+  let rows = if io.is_dir(target) {
+    build_rows(source.source_plan(ProjectDirectory(target)))
+  } else {
+    file_rows(source.source_plan(SourceFile(target)), root_files)
+  }
+  match rows {
+    Ok(rs) -> Ok(render_file(version, rs))
+    Err(e) -> Err("cannot write the build manifest: " ++ e)
+  }
+}
 
 ## A build-info file read back: the VERSION of the toolchain that wrote it and
 ## its rows text, byte for byte as written.

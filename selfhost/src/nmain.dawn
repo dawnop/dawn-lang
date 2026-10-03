@@ -39,11 +39,12 @@ use driver/stdlib.{
 }
 use ir/interp.{ct_default}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
-use driver/analyze.{Program, LocDiag, load_target, analyze_program, rendered_diags, dawn_files_under}
-use driver/clifail.{fail_compile}
+use driver/analyze.{Program, LocDiag, LoadResult, load_target, analyze_program, rendered_diags, dawn_files_under}
+use driver/clifail.{fail_compile, fail_planner}
 use check/identity
 use check/tast.{TModule}
 use c/cdriver
+use c/binfo
 use version.{VERSION}
 use front/fmt
 use doc
@@ -58,6 +59,7 @@ use compiler_plan/consolemem.{ConsoleWrite, Stderr}
 use compiler_plan/exitmem
 use compiler_plan/envmem.{AskedGet}
 use compiler_plan/source
+use compiler_plan/buildinfo
 
 fn native_lsp_standalone_lease() -> JsigLease !io = jsig_refused_lease()
 
@@ -80,6 +82,8 @@ fn usage() -> String =
     "                                              ... as a reactor: no _start, one",
     "                                              exported `dawn_turn` the host calls",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
+    "                                              (--build-info <file.c>: also the",
+    "                                              unit embedding the build manifest)",
     "  dawnc run   [--std <dir>] <target> [-- <args>...]",
     "                                              compile and run",
     "  dawnc test  [--std <dir>] <target>          compile the test blocks and run them",
@@ -90,7 +94,11 @@ fn usage() -> String =
     "                                              add a dependency to dawn.toml",
     "  dawnc cache verify                          check every cached package's hash",
     "  dawnc lsp   [--std <dir>]                   speak LSP over stdin/stdout",
-    "  dawnc version                               print the version",
+    "  dawnc version                               print the version and the digest of",
+    "                                              the sources this binary was built from",
+    "  dawnc version -m <project-dir | binary>...  print a build manifest: a project's,",
+    "                                              or the one a native binary or wasm",
+    "                                              module carries",
     "",
     "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
     "--std <dir> names the std to compile against. Without it, DAWN_STD names one if",
@@ -259,14 +267,16 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
   RunArgs { std_flag: std_flag, target: target, program_args: program_args }
 }
 
-## `--std <dir>` and `-o <out>` plus exactly one target, kept out of run.
+## `--std <dir>`, `-o <out>` and `--build-info <file.c>` plus exactly one
+## target, kept out of run.
 fn parse_compile_tail(
   cmd: String,
   usage_text: String,
   rest: List[String]
-) -> (Option[String], String, String) !Exit !Console !io = {
+) -> (Option[String], String, String, String) !Exit !Console !io = {
   var std_flag: Option[String] = None
   var out = ""
+  var info_out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -276,6 +286,9 @@ fn parse_compile_tail(
     } else if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
       i = i + 2
+    } else if rest[i] == "--build-info" && i + 1 < len(rest) {
+      info_out = rest[i + 1]
+      i = i + 2
     } else {
       refuse_second_target(cmd, target, rest[i])
       target = rest[i]
@@ -283,7 +296,7 @@ fn parse_compile_tail(
     }
   }
   if target == "" { cli_error(usage_text) }
-  (std_flag, out, target)
+  (std_flag, out, target, info_out)
 }
 
 ## `build`'s tail: `parse_compile_tail` plus `--target <t>` and `--reactor`. A
@@ -361,6 +374,13 @@ fn load_or_die(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
   }
 
 fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Console !io = {
+  let (_, prog) = analyzed_load(std, target)
+  prog
+}
+
+## `analyzed`, and the load it analyzed: a product's build manifest digests the
+## root files that load read (`binfo.unit_for`).
+fn analyzed_load(std: StdCtx, target: String) -> (LoadResult, Program) !Fs !Proc !Env !Exit !Console !io = {
   if not io.exists(target) {
     cli_error("no such file or directory: ${target}")
   }
@@ -370,17 +390,38 @@ fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Consol
   let loaded = load_target(std, target)
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
-  prog
+  (loaded, prog)
 }
 
 fn emitted(std_flag: Option[String], target: String) -> String !Fs !Proc !Env !Exit !Console !io = {
+  let (text, _) = emitted_with(std_flag, target, false)
+  text
+}
+
+## The emitted C and, when `with_info`, the C unit that embeds the program's
+## build manifest (c/binfo); `""` in its place otherwise. A product that is
+## kept (`build`, `emitc --build-info`) carries a manifest; one that is run
+## and thrown away (`run`, `test`) does not pay for planning and digesting.
+fn emitted_with(
+  std_flag: Option[String],
+  target: String,
+  with_info: Bool
+) -> (String, String) !Fs !Proc !Env !Exit !Console !io = {
   let std = load_or_die(std_flag)
-  let prog = analyzed(std, target)
-  match cdriver.c_text(std, prog) {
+  let (loaded, prog) = analyzed_load(std, target)
+  let text = match cdriver.c_text(std, prog) {
     Ok(s) -> s
     Err(e) -> {
       cli_error(e ++ " in " ++ target)
       ""
+    }
+  }
+  if not with_info { return (text, "") }
+  match binfo.unit_for(VERSION, target, loaded) {
+    Ok(u) -> (text, u)
+    Err(e) -> {
+      cli_error(e)
+      (text, "")
     }
   }
 }
@@ -399,7 +440,7 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String) -> Unit !Fs !Proc !Env !Exit !Console !io = cc_build_for(ctext, out, false, false)
+fn cc_build(ctext: String, out: String) -> Unit !Fs !Proc !Env !Exit !Console !io = cc_build_for(ctext, "", out, false, false)
 
 ## The reactor's only export, appended to the emitted C.
 ##
@@ -494,8 +535,14 @@ fn cc_command(wasm: Bool) -> String !Env =
     }
   }
 
-fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !Fs !Proc !Env !Exit !Console !io =
-  cc_build_with(cc_command(wasm), ctext, out, wasm, reactor)
+fn cc_build_for(
+  ctext: String,
+  info: String,
+  out: String,
+  wasm: Bool,
+  reactor: Bool
+) -> Unit !Fs !Proc !Env !Exit !Console !io =
+  cc_build_with(cc_command(wasm), ctext, info, out, wasm, reactor)
 
 ## Stage the C sources and drive `cc` over them.
 ##
@@ -504,9 +551,14 @@ fn cc_build_for(ctext: String, out: String, wasm: Bool, reactor: Bool) -> Unit !
 ## assembler, and a test can only hold them element by element if the name at
 ## the front of each is one the test chose (the tests at the bottom of this
 ## file do exactly that, with `Proc` answered from a table).
+##
+## `info` is the build manifest unit (`binfo.manifest_unit`) or `""` for none.
+## It is one more C file in the link row, after the runtime, and not a part of
+## `main.c`: see c/binfo for why the manifest stays out of the emitted C.
 fn cc_build_with(
   cc: String,
   ctext: String,
+  info: String,
   out: String,
   wasm: Bool,
   reactor: Bool
@@ -523,6 +575,13 @@ fn cc_build_with(
     match cdriver.runtime_source(f) {
       Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
       None -> panic("embedded runtime is missing ${f}")
+    }
+  }
+  let info_files: List[String] = if info == "" { [] } else { ["${work}/dawn_build_info.c"] }
+  if info != "" {
+    match wrote {
+      Ok(_) -> { wrote = io.write_file(info_files[0], info) }
+      Err(_) -> ()
     }
   }
   match wrote {
@@ -601,15 +660,16 @@ fn cc_build_with(
       "-fno-strict-aliasing", "-Wno-parentheses-equality"
     ] ++ model ++ [
       "-I", work,
-      "-o", out, "${work}/main.c", "${work}/dawn_rt.c",
+      "-o", out, "${work}/main.c", "${work}/dawn_rt.c"
+    ] ++ info_files ++ [
       "${work}/dawn_rt_wasi_eh.o", "${work}/dawn_rt_wasi_tag.o", "-lm"
     ]
   } else {
     [
       cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
       "-I", work,
-      "-o", out, "${work}/main.c", "${work}/dawn_rt.c", "-lm"
-    ]
+      "-o", out, "${work}/main.c", "${work}/dawn_rt.c"
+    ] ++ info_files ++ ["-lm"]
   }
   # cc is done with the staging directory the moment it succeeds, and nothing
   # else ever removed it: 125 of them, a megabyte each (the emitted C plus the
@@ -655,12 +715,18 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 }
 
 fn cmd_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  let (std_flag, out, target) = parse_compile_tail(
+  let (std_flag, out, target, info_out) = parse_compile_tail(
     "dawn emitc",
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
     rest
   )
-  let text = emitted(std_flag, target)
+  let (text, unit) = emitted_with(std_flag, target, info_out != "")
+  if info_out != "" {
+    match io.write_file(info_out, unit) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error("cannot write " ++ info_out ++ ": " ++ e.message)
+    }
+  }
   if out == "" {
     console_print(text)
   } else {
@@ -688,7 +754,8 @@ fn cmd_build(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     out0
   }
-  cc_build_for(reactor_wrapped(emitted(std_flag, target), reactor), out, wasm, reactor)
+  let (text, unit) = emitted_with(std_flag, target, true)
+  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor)
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
@@ -961,6 +1028,83 @@ fn cmd_test(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   build_and_exec(ctext, "dawnc-test", "tests", "tests", [])
 }
 
+## `dawnc version`, and `dawnc version -m <project-dir | binary>...`: the JVM
+## driver's `run_version`, doubled at the argument handling as this module's
+## header says, over the same work (`buildinfo` for a directory, `binfo` for a
+## file). A jar is the one input it does not read: its reader is the JDK's zip
+## support, and the jar is the JVM toolchain's product.
+fn cmd_version(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  let none: List[String] = []
+  let targets = match rest {
+    [] -> return console_println(version_line(own_build_info()))
+    [flag, ..ts] -> if flag == "-m" { ts } else { none }
+  }
+  if targets == [] { return cli_error("usage: dawn version [-m <project-dir | binary>...]") }
+  for t in targets {
+    if not io.exists(t) { return cli_error("no such file or directory: ${t}") }
+  }
+  for t in targets {
+    if io.is_dir(t) {
+      let plan = source.source_plan(source.ProjectDirectory(t))
+      if len(plan.diags) > 0 { return fail_planner(plan.diags) }
+      match buildinfo.build_rows(plan) {
+        Ok(rows) -> console_print(buildinfo.render(t ++ ": dawn " ++ VERSION, rows))
+        Err(e) -> return cli_error(e)
+      }
+    } else {
+      let listed: Result[String, String] = match io.read_bytes(t) {
+        Err(e) -> Err("cannot read ${t}: ${e.message}")
+        Ok(data) ->
+          if binfo.is_product(data) {
+            binfo.listing(t, data)
+          } else {
+            Err("cannot read ${t} as a native binary or wasm module: not an ELF " ++
+                "executable or a wasm module (a jar's build manifest is read by `dawn version -m`)")
+          }
+      }
+      match listed {
+        Ok(text) -> console_print(text)
+        Err(e) -> return cli_error(e)
+      }
+    }
+  }
+}
+
+## Where this process's own executable is, on the one system that says so
+## without a call this backend lacks. Elsewhere the read fails and
+## `own_build_info` answers `None`.
+const SELF_EXE: String = "/proc/self/exe"
+
+## The build manifest of the binary this toolchain is running as, read from the
+## file and not compiled in, as `jarw.own_build_info` reads the jar (ruling
+## 5.4(1)). `None` when there is none to read: a binary linked without the
+## manifest unit, one built by a dawn from before build manifests, or a system
+## with no `/proc/self/exe`.
+fn own_build_info() -> Option[String] !Fs =
+  match io.read_bytes(SELF_EXE) {
+    Ok(data) ->
+      match binfo.read_manifest(data) {
+        Ok(found) -> found
+        Err(_) -> None
+      }
+    Err(_) -> None
+  }
+
+## `dawnc --version`: VERSION, and the short digest of the manifest this binary
+## carries, the native twin of `main.version_line`. Absent, not wrong, when
+## there is no manifest to read.
+fn version_line(own: Option[String]) -> String = {
+  let base = "dawnc " ++ VERSION ++ " (native)"
+  match own {
+    None -> base
+    Some(text) ->
+      match buildinfo.parse_file(text) {
+        Ok(bf) -> base ++ " " ++ buildinfo.short_digest(buildinfo.manifest_digest(bf.rows))
+        Err(_) -> base
+      }
+  }
+}
+
 ## The native driver's outermost frame installs the file system, process,
 ## environment and exit handlers once, as main.dawn's does; every subcommand
 ## runs under all four. The process one matters most here: the C driver's
@@ -1003,8 +1147,10 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
           standalone: native_lsp_standalone_lease,
           project: native_lsp_target_lease
         })
-      } else if mode == "version" || mode == "--version" {
-        console_println("dawnc " ++ VERSION ++ " (native)")
+      } else if mode == "version" {
+        cmd_version(rest)
+      } else if mode == "--version" {
+        console_println(version_line(own_build_info()))
       } else {
         fail_usage()
       }
@@ -1205,7 +1351,7 @@ test "the native build is one command line, and this is every flag in it" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-cc", "int main(void) { return 0; }\n", out, false, false))
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false))
       }
     )
     # no probe: nothing here is cross-compiled, so nothing is asked
@@ -1245,6 +1391,42 @@ test "the native build is one command line, and this is every flag in it" {
   })
 }
 
+test "a build with a manifest links one more C file, after the runtime" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-info-")
+    with d <- bracket(dir, scrub)
+    let out = "${d}/prog"
+    let unit = binfo.manifest_unit("dawn-build-info 1\n")
+    let (_, log) = procmem.with_proc_table(
+      [procmem.exited(0)],
+      () => {
+        with handle Exit {
+          exit_now(c) resume k => panic("cc_build_with exited with ${c}")
+        }
+        io.with_console_real(() =>
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", unit, out, false, false))
+      }
+    )
+    let argv = procmem.call_argv(log, 0)
+    let work = argv[8]
+    # the native row of the test above, with the unit between the runtime and -lm
+    assert len(argv) == 15
+    assert argv[12] == "${work}/dawn_rt.c"
+    assert argv[13] == "${work}/dawn_build_info.c"
+    assert argv[14] == "-lm"
+  })
+}
+
+test "dawnc's version line carries the digest of the manifest it reads, or none" {
+  let base = "dawnc " ++ VERSION ++ " (native)"
+  assert version_line(None) == base
+  let rows = [buildinfo.MainRow("(unnamed)", "(devel)", "s1:aa")]
+  let text = buildinfo.render_file("0.0.1", rows)
+  assert version_line(Some(text)) ==
+    base ++ " " ++ buildinfo.short_digest(buildinfo.manifest_digest(buildinfo.rows_text(rows)))
+  assert version_line(Some("garbage\n")) == base
+}
+
 test "the wasm build is four command lines, and these are every flag in them" {
   io.with_fs_real(() => {
     let dir = scratch("dawn-cc-wasm-")
@@ -1264,7 +1446,7 @@ test "the wasm build is four command lines, and these are every flag in them" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, false))
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, false))
       }
     )
     # the probe, the C++ shim, the exception tag, the compile-and-link
@@ -1362,7 +1544,7 @@ test "a reactor build is the same link plus one flag" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-clang", "int main(void) { return 0; }\n", out, true, true))
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, true))
       }
     )
     assert len(log) == 4

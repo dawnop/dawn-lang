@@ -1,0 +1,461 @@
+# The build manifest of a native or wasm product (docs/build-info-design.md
+# §八): how `dawnc build` puts one into the file, and how `dawn version -m`
+# finds it again without running the file.
+#
+# A jar is a container with named entries, so P2 put the manifest in one. An
+# executable is a container too, and the choice was between a named section
+# and a run of bytes behind a magic number in the program's read-only data.
+# The section wins on three counts:
+#
+#   - Nothing has to be guessed. A magic number has to be searched for, and
+#     the binary that searches for it (dawnc, reading itself for `--version`)
+#     holds the reader's own copy of the magic in its data; every scheme for
+#     telling the two apart is a rule about bytes the format does not have. A
+#     section is looked up by name in a table the format defines.
+#   - It costs the program nothing. The ELF section is not allocated (flags
+#     "", like `.comment`), so it is never mapped and moves no address of the
+#     code or data around it; `strip` keeps it, and `objcopy
+#     --remove-section` takes it out of a binary that then runs exactly as
+#     before (the negative control in the P3 report).
+#   - It can be read without dawn: `readelf -p .dawn.build-info <bin>`. That
+#     is the reason P2 gave the jar a `Dawn-Version` attribute next to its
+#     entry, and a format's own tool is the better half of it.
+#
+# wasm has the same thing under another name, a custom section, which the
+# task named `dawn.build-info`. Both are written by one C translation unit of
+# file-scope assembly, because C has no portable way to say "a section that is
+# not loaded": `__attribute__((section))` makes an allocated ELF section, and
+# on wasm it makes a data segment, not a custom section (clang 20, measured).
+# wasm-ld turns an input section named `.custom_section.<name>` into a custom
+# section `<name>`; the name is quoted because the assembler stops a bare name
+# at the `-`.
+#
+# Any other object format (Mach-O) gets an empty unit: the build works and the
+# product has no manifest, which `version -m` reports as such. Reading
+# Mach-O is not done (§七, what is not done).
+#
+# The unit is a separate file handed to cc, not part of the emitted C: the
+# manifest names VERSION and package digests, and the emitted C is held byte
+# for byte against the previous release (prev-diff-native) and between the
+# JVM and native drivers (native-cli-diff, native-fixpoint). It sits where the
+# jar's entry sits, in the container and not in the code, for the same
+# reason P2 kept it out of `__emit`.
+
+use std/str
+use std/bytes
+use std/io.{Fs, Proc, Env}
+use compiler_plan/buildinfo
+use driver/analyze.{LoadResult, root_sources}
+
+## The ELF section a native product carries its manifest in.
+pub const ELF_SECTION: String = ".dawn.build-info"
+
+## The wasm custom section a wasm product carries its manifest in.
+pub const WASM_SECTION: String = "dawn.build-info"
+
+## The bytes of `text` as an assembler `.byte` list, sixteen to a line, each
+## line one C string literal of the `__asm__` statement.
+fn byte_lines(text: String) -> List[String] = {
+  let b = bytes.utf8(text)
+  let n = bytes.len(b)
+  var lines: List[String] = []
+  var i = 0
+  while i < n {
+    var vals: List[String] = []
+    var j = i
+    while j < n && j < i + 16 {
+      vals = vals ++ [to_string(bytes.at(b, j))]
+      j = j + 1
+    }
+    lines = lines ++ ["  \".byte " ++ join(vals, ",") ++ "\\n\""]
+    i = j
+  }
+  lines
+}
+
+## The C translation unit that embeds `text` (a `buildinfo.render_file`) in
+## the product cc links it into: an unallocated ELF section, or a wasm custom
+## section, or on any other object format nothing. The program never refers to
+## it; it is there to be read from outside.
+pub fn manifest_unit(text: String) -> String = {
+  let data = byte_lines(text)
+  join(
+    [
+      "/* The build manifest of this program (docs/build-info-design.md), put",
+      "   here by dawn and read by `dawn version -m`. Nothing in the program refers",
+      "   to it. */",
+      "#if defined(__wasm__)",
+      "__asm__(",
+      "  \".section \\\".custom_section." ++ WASM_SECTION ++ "\\\",\\\"\\\",@\\n\""
+    ] ++ data ++ [
+      "  \".text\\n\");",
+      "#elif defined(__ELF__)",
+      "__asm__(",
+      "  \".pushsection \\\"" ++ ELF_SECTION ++ "\\\",\\\"\\\",@progbits\\n\""
+    ] ++ data ++ [
+      "  \".popsection\\n\");",
+      "#endif",
+      "typedef int dawn_build_info_unit;"
+    ],
+    "\n"
+  ) ++ "\n"
+}
+
+## The manifest unit for a product of `target`, whose load was `loaded`: the
+## same `buildinfo.product_file` a jar of it carries, so one program built for
+## the JVM and natively lists the same rows. `version` is the VERSION of the
+## toolchain writing it, and nothing else about that toolchain (design 4.4).
+pub fn unit_for(
+  version: String,
+  target: String,
+  loaded: LoadResult
+) -> Result[String, String] !Fs !Proc !Env =
+  match buildinfo.product_file(version, target, root_sources(loaded)) {
+    Ok(text) -> Ok(manifest_unit(text))
+    Err(e) -> Err(e)
+  }
+
+## What a file holds, as far as finding a manifest in it goes.
+pub type Container =
+  | Elf
+  | Wasm
+  | Other
+
+## Which container `data` is, from its first bytes.
+pub fn container_of(data: Bytes) -> Container =
+  if starts(data, [127, 69, 76, 70]) {
+    Elf
+  } else if starts(data, [0, 97, 115, 109]) {
+    Wasm
+  } else {
+    Other
+  }
+
+fn starts(data: Bytes, magic: List[Int]) -> Bool = {
+  if bytes.len(data) < len(magic) { return false }
+  var i = 0
+  while i < len(magic) {
+    if bytes.at(data, i) != magic[i] { return false }
+    i = i + 1
+  }
+  true
+}
+
+## Whether `data` is a file this module reads: an ELF executable or a wasm
+## module.
+pub fn is_product(data: Bytes) -> Bool =
+  match container_of(data) {
+    Other -> false
+    _ -> true
+  }
+
+## The section that holds the manifest in a container, for messages.
+pub fn section_name(c: Container) -> String =
+  match c {
+    Elf -> "section " ++ ELF_SECTION
+    Wasm -> "custom section " ++ WASM_SECTION
+    Other -> "no section"
+  }
+
+## The manifest text a native or wasm product carries: `Ok(None)` when the
+## file is an ELF executable or a wasm module without one, `Err` when it is
+## neither, or is cut short, or its section is not UTF-8.
+pub fn read_manifest(data: Bytes) -> Result[Option[String], String] = {
+  let found = match container_of(data) {
+    Elf -> elf_section(data, ELF_SECTION)
+    Wasm -> wasm_custom_section(data, WASM_SECTION)
+    Other -> return Err("not an ELF executable or a wasm module")
+  }
+  match found {
+    Err(e) -> Err(e)
+    Ok(None) -> Ok(None)
+    Ok(Some(b)) ->
+      match bytes.decode_utf8_checked(b) {
+        Ok(t) -> Ok(Some(t))
+        Err(_) -> Err("its build manifest section is not UTF-8")
+      }
+  }
+}
+
+## `dawn version -m <file>` for a native binary or a wasm module whose bytes
+## are `data`: the manifest it carries, laid out as the listing of a jar or a
+## project directory is (`buildinfo.render_listing`), the header naming the
+## VERSION of the toolchain that wrote it. The rows are the file's own, not
+## recomputed, so two listings diff.
+pub fn listing(path: String, data: Bytes) -> Result[String, String] =
+  match read_manifest(data) {
+    Err(e) -> Err("cannot read ${path} as a native binary or wasm module: ${e}")
+    Ok(None) ->
+      Err("${path} carries no build manifest (${section_name(container_of(data))}): it was " ++
+          "not linked by `dawnc build`, or was built by a dawn from before build manifests")
+    Ok(Some(text)) ->
+      match buildinfo.parse_file(text) {
+        Ok(bf) -> Ok(buildinfo.render_listing(path ++ ": dawn " ++ bf.version, bf.rows))
+        Err(e) -> Err("${path}: ${e}")
+      }
+  }
+
+## A little-endian unsigned field of `width` bytes at `at`, or `None` past the
+## end. Every read below goes through here, so a truncated or lying header is
+## an error and never an out-of-range panic.
+fn le(data: Bytes, at: Int, width: Int) -> Option[Int] = {
+  if at < 0 || at + width > bytes.len(data) { return None }
+  var v = 0
+  var i = width - 1
+  while i >= 0 {
+    v = v * 256 + bytes.at(data, at + i)
+    i = i - 1
+  }
+  Some(v)
+}
+
+## The NUL-terminated name at `at`, or `None` when it runs off the end.
+fn c_name(data: Bytes, at: Int) -> Option[String] = {
+  let n = bytes.len(data)
+  if at < 0 || at >= n { return None }
+  var end = at
+  while end < n && bytes.at(data, end) != 0 { end = end + 1 }
+  if end >= n { return None }
+  Some(bytes.decode_latin1(bytes.slice(data, at, end)))
+}
+
+## The contents of the ELF section called `name`. Only little-endian files are
+## read, in both classes; the section count escape for files with more than
+## 0xff00 sections is not, since no linker writes one for a program this
+## size, and such a file reads as cut short rather than as wrong.
+fn elf_section(data: Bytes, name: String) -> Result[Option[Bytes], String] = {
+  let short: Result[Option[Bytes], String] = Err("the ELF file is cut short or its section table is damaged")
+  if bytes.len(data) < 6 { return short }
+  if bytes.at(data, 5) != 1 { return Err("only little-endian ELF files are read") }
+  let wide = match bytes.at(data, 4) {
+    1 -> false
+    2 -> true
+    _ -> return Err("unknown ELF class ${bytes.at(data, 4)}")
+  }
+  # header fields: (section table offset, entry size, count, name table index)
+  let (shoff_at, shoff_w, ent_at) = if wide { (40, 8, 58) } else { (32, 4, 46) }
+  let shoff = le(data, shoff_at, shoff_w)
+  let shentsize = le(data, ent_at, 2)
+  let shnum = le(data, ent_at + 2, 2)
+  let shstrndx = le(data, ent_at + 4, 2)
+  match (shoff, shentsize, shnum, shstrndx) {
+    (Some(off), Some(ent), Some(num), Some(strndx)) -> {
+      if num == 0 { return Ok(None) }
+      if strndx >= num { return short }
+      # a section header: (name offset, file offset, size)
+      let (off_at, off_w) = if wide { (24, 8) } else { (16, 4) }
+      let header = (i: Int) =>
+        match (le(data, off + i * ent, 4), le(data, off + i * ent + off_at, off_w),
+          le(data, off + i * ent + off_at + off_w, off_w)) {
+          (Some(n), Some(o), Some(s)) -> Some((n, o, s))
+          _ -> None
+        }
+      let names_at = match header(strndx) {
+        Some((_, o, _)) -> o
+        None -> return short
+      }
+      var i = 0
+      while i < num {
+        match header(i) {
+          None -> return short
+          Some((n, o, s)) ->
+            match c_name(data, names_at + n) {
+              None -> return short
+              Some(nm) ->
+                if nm == name {
+                  if o + s > bytes.len(data) { return short }
+                  return Ok(Some(bytes.slice(data, o, o + s)))
+                }
+            }
+        }
+        i = i + 1
+      }
+      Ok(None)
+    }
+    _ -> short
+  }
+}
+
+## An unsigned LEB128 at `at`: `(value, position after it)`, or `None` when it
+## runs off the end or past the five bytes a u32 may take.
+fn leb_u32(data: Bytes, at: Int) -> Option[(Int, Int)] = {
+  var v = 0
+  var scale = 1
+  var i = at
+  while i < bytes.len(data) && i < at + 5 {
+    let b = bytes.at(data, i)
+    v = v + (b % 128) * scale
+    scale = scale * 128
+    i = i + 1
+    if b < 128 { return Some((v, i)) }
+  }
+  None
+}
+
+## The contents of the wasm custom section called `name`. A module is a
+## sequence of `(id, size, payload)` after its 8-byte preamble; a custom
+## section (id 0) begins its payload with its name.
+fn wasm_custom_section(data: Bytes, name: String) -> Result[Option[Bytes], String] = {
+  let short: Result[Option[Bytes], String] = Err("the wasm module is cut short or a section size is damaged")
+  let n = bytes.len(data)
+  var i = 8
+  if n < i { return short }
+  while i < n {
+    let id = bytes.at(data, i)
+    let (size, body) = match leb_u32(data, i + 1) {
+      Some(p) -> p
+      None -> return short
+    }
+    let end = body + size
+    if end > n { return short }
+    if id == 0 {
+      match leb_u32(data, body) {
+        None -> return short
+        Some((nlen, nat)) -> {
+          if nat + nlen > end { return short }
+          if bytes.decode_latin1(bytes.slice(data, nat, nat + nlen)) == name {
+            return Ok(Some(bytes.slice(data, nat + nlen, end)))
+          }
+        }
+      }
+    }
+    i = end
+  }
+  Ok(None)
+}
+
+# ---- tests ----
+
+fn nul() -> String = str.from_char('\u{0000}')
+
+fn blen(s: String) -> Int = bytes.len(bytes.utf8(s))
+
+## A minimal little-endian ELF64 file: the header, then one section header per
+## `(name, contents)` after a null one and a name table, contents laid out
+## after the headers. Enough for the reader, which looks at nothing else.
+fn tiny_elf(sections: List[(String, String)]) -> Bytes = {
+  var names = nul() ++ ".shstrtab" ++ nul()
+  var name_at: List[Int] = []
+  for (nm, _) in sections {
+    name_at = name_at ++ [blen(names)]
+    names = names ++ nm ++ nul()
+  }
+  let count = len(sections) + 2
+  let shoff = 64
+  var data_at = shoff + 64 * count
+  var b = bytes.buf()
+  b = put_le(put_le(b, 0x464C457F, 4), 0x010102, 4)
+  b = put_le(b, 0, 8)
+  b = put_le(b, 0, 24)
+  b = put_le(b, shoff, 8)
+  b = put_le(b, 0, 10)
+  b = put_le(b, 64, 2)
+  b = put_le(b, count, 2)
+  b = put_le(b, 1, 2)
+  # the null section, then the name table, then the named ones
+  b = put_le(b, 0, 64)
+  b = section_header(b, 1, data_at, blen(names))
+  data_at = data_at + blen(names)
+  var i = 0
+  for (_, body) in sections {
+    b = section_header(b, name_at[i], data_at, blen(body))
+    data_at = data_at + blen(body)
+    i = i + 1
+  }
+  b = bytes.put_bytes(b, bytes.utf8(names))
+  for (_, body) in sections { b = bytes.put_bytes(b, bytes.utf8(body)) }
+  bytes.freeze(b)
+}
+
+fn section_header(b: bytes.Buf, name: Int, at: Int, size: Int) -> bytes.Buf =
+  put_le(put_le(put_le(put_le(put_le(b, name, 4), 0, 20), at, 8), size, 8), 0, 24)
+
+fn put_le(b0: bytes.Buf, v0: Int, width: Int) -> bytes.Buf = {
+  var b = b0
+  var v = v0
+  var i = 0
+  while i < width {
+    b = bytes.put(b, v % 256)
+    v = v / 256
+    i = i + 1
+  }
+  b
+}
+
+## A wasm module of custom sections only.
+fn tiny_wasm(sections: List[(String, String)]) -> Bytes = {
+  var b = bytes.put_bytes(bytes.buf(), bytes.utf8(nul() ++ "asm"))
+  b = put_le(b, 1, 4)
+  for (nm, body) in sections {
+    let payload = 1 + blen(nm) + blen(body)
+    b = bytes.put(bytes.put(b, 0), payload)
+    b = bytes.put(b, blen(nm))
+    b = bytes.put_bytes(bytes.put_bytes(b, bytes.utf8(nm)), bytes.utf8(body))
+  }
+  bytes.freeze(b)
+}
+
+test "the manifest unit carries the text's bytes once per object format" {
+  let unit = manifest_unit("ab\n")
+  assert str.contains(unit, "\".section \\\".custom_section.dawn.build-info\\\",\\\"\\\",@\\n\"")
+  assert str.contains(unit, "\".pushsection \\\".dawn.build-info\\\",\\\"\\\",@progbits\\n\"")
+  # `a`, `b`, newline, written twice: once under each #if arm
+  assert len(str.split(unit, "\".byte 97,98,10\\n\"")) == 3
+  # sixteen to a line
+  let long = manifest_unit("aaaaaaaaaaaaaaaaa")
+  assert str.contains(long, "\".byte 97,97,97,97,97,97,97,97,97,97,97,97,97,97,97,97\\n\"\n  \".byte 97\\n\"")
+}
+
+test "a manifest section reads back out of an ELF file, and its absence is not an error" {
+  let text = "dawn-build-info 1\ntoolchain\tdawn 1.2.3\n"
+  let with = tiny_elf([(".comment", "GCC"), (ELF_SECTION, text)])
+  assert is_product(with)
+  assert read_manifest(with) == Ok(Some(text))
+  assert read_manifest(tiny_elf([(".comment", "GCC")])) == Ok(None)
+  # a name that only starts like ours is not ours
+  assert read_manifest(tiny_elf([(ELF_SECTION ++ "x", text)])) == Ok(None)
+  # cut short anywhere: an error, never a panic
+  for cut in [3, 20, 70, bytes.len(with) - 2] {
+    match read_manifest(bytes.slice(with, 0, cut)) {
+      Err(_) -> ()
+      Ok(_) -> panic("an ELF file cut at ${cut} read as whole")
+    }
+  }
+}
+
+test "a manifest custom section reads back out of a wasm module" {
+  let text = "dawn-build-info 1\n"
+  assert read_manifest(tiny_wasm([("name", "x"), (WASM_SECTION, text)])) == Ok(Some(text))
+  assert read_manifest(tiny_wasm([("producers", "clang")])) == Ok(None)
+  let m = tiny_wasm([(WASM_SECTION, text)])
+  match read_manifest(bytes.slice(m, 0, bytes.len(m) - 1)) {
+    Err(_) -> ()
+    Ok(_) -> panic("a wasm module cut short read as whole")
+  }
+}
+
+test "a file that is neither ELF nor wasm is refused by name" {
+  assert not is_product(bytes.utf8("PK\u{0003}\u{0004}"))
+  assert read_manifest(bytes.utf8("PK\u{0003}\u{0004}")) ==
+    Err("not an ELF executable or a wasm module")
+  assert read_manifest(bytes.utf8("")) == Err("not an ELF executable or a wasm module")
+}
+
+test "a product's listing is its manifest laid out as a jar's, or a refusal that names the section" {
+  let rows = [buildinfo.MainRow("app", "(devel)", "s1:aa"), buildinfo.JavaRow("g:a:1")]
+  let text = buildinfo.render_file("9.8.7", rows)
+  let want = buildinfo.render("bin: dawn 9.8.7", rows)
+  assert listing("bin", tiny_elf([(ELF_SECTION, text)])) == Ok(want)
+  assert listing("bin", tiny_wasm([(WASM_SECTION, text)])) == Ok(want)
+  assert listing("bin", tiny_elf([])) == Err("bin carries no build manifest (section " ++
+      ".dawn.build-info): it was not linked by `dawnc build`, or was built by a dawn from " ++
+      "before build manifests")
+  assert listing("m.wasm", tiny_wasm([])) == Err("m.wasm carries no build manifest (custom " ++
+      "section dawn.build-info): it was not linked by `dawnc build`, or was built by a dawn " ++
+      "from before build manifests")
+  # a section of ours that is not a manifest: the schema refusal, not a guess
+  match listing("bin", tiny_elf([(ELF_SECTION, "garbage\n")])) {
+    Err(e) -> { assert str.starts_with(e, "bin: not a dawn build manifest") }
+    Ok(_) -> panic("a section that is not a manifest listed as one")
+  }
+}

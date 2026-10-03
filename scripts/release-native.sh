@@ -31,6 +31,13 @@
 #   3. it compiles and runs a   -- 1 and 2 are both satisfied by a shell script
 #      program, from a bare        that echoes a version string. This is the
 #      directory                   one that says the artifact is a compiler.
+#   2b. it carries the build    -- `dawnc version` reads its own manifest
+#       manifest the toolchain     section; a link that dropped the unit, or a
+#       that built it wrote        manifest the JVM reader cannot find, prints a
+#                                  version without a digest or a different one.
+#                                  The oracle is the other reader: the toolchain
+#                                  that emitted the unit lists the artifact with
+#                                  `version -m`, which runs nothing.
 #   4. it emits the same C as   -- the toolchain that built it and the artifact
 #      the toolchain that          agree about the compiler's own source; the
 #      built it                    A == B leg of native-fixpoint.sh, which no
@@ -89,13 +96,18 @@ CANDIDATE_A="$WORK/candidate-a"
 CANDIDATE_B="$WORK/candidate-b"
 
 echo "building $(basename "$OUT") ($VERSION) from selfhost/src/nmain.dawn..."
+# --build-info writes a second C file, the unit that puts the build manifest in
+# a section of the binary (docs/build-info-design.md §八); nmain.c itself is
+# the same C either way.
 if [ -n "$JAR" ]; then
   # release.yml hands us the jar it is about to publish, so the binary is that
   # jar's own output rather than a second toolchain built beside it.
-  java -Xss512m -jar "$JAR" __emitc selfhost/src/nmain.dawn -o "$WORK/nmain.c"
+  DAWN_JVM=(java -Xss512m -jar "$JAR")
 else
-  ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$WORK/nmain.c"
+  DAWN_JVM=(./bin/dawn)
 fi
+"${DAWN_JVM[@]}" __emitc selfhost/src/nmain.dawn -o "$WORK/nmain.c" \
+  --build-info "$WORK/build_info.c"
 
 # -static because the failure it removes is invisible here: a dynamically
 # linked binary built on the runner's glibc refuses to start on an older one,
@@ -103,9 +115,9 @@ fi
 # side of the release would ever see it. Measured cost on 2026-08-04: 2.9 MB ->
 # 3.7 MB, link time unchanged (15.3 s both ways), zero linker warnings -- the
 # runtime calls nothing that needs NSS or dlopen.
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static \
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
   -I "$ROOT/runtime/c" -o "$CANDIDATE_A" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static \
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
   -I "$ROOT/runtime/c" -o "$CANDIDATE_B" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
 
 for candidate in "$CANDIDATE_A" "$CANDIDATE_B"; do
@@ -211,11 +223,24 @@ if [ "$rc" != 0 ]; then
   echo "FAIL: the artifact exited $rc instead of printing a version"
   echo "      output: $got"
   fail=1
-elif [ "$got" != "$want" ]; then
+elif [ "${got% b1:*}" != "$want" ]; then
   echo "FAIL: the artifact says '$got', this tree says '$want'"
   fail=1
 else
   echo "OK   it runs and reports $VERSION"
+fi
+
+# ---- check 2b: it carries the manifest its builder wrote ----
+listed=$("${DAWN_JVM[@]}" version -m "$ARTIFACT" 2>&1 | sed -n 's/^\tbuild\tb1:\([0-9a-f]\{12\}\).*$/\1/p' || true)
+if [ -z "$listed" ]; then
+  echo "FAIL: the toolchain that built the artifact finds no build manifest in it"
+  "${DAWN_JVM[@]}" version -m "$ARTIFACT" 2>&1 | head -5 || true
+  fail=1
+elif [ "$got" != "$want b1:$listed" ]; then
+  echo "FAIL: the artifact says '$got', its manifest lists b1:$listed"
+  fail=1
+else
+  echo "OK   it reads its own build manifest: b1:$listed"
 fi
 
 # ---- check 3: it is a compiler ----

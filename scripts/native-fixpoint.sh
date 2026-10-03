@@ -5,6 +5,12 @@
 #   B = A compiles the native driver itself; its C must equal A's byte for byte
 #   C = B compiles the native driver again; B == C is the fixed point
 #
+# Each generation also writes the build manifest unit (`--build-info`,
+# docs/build-info-design.md §八) and links it in. The unit is a function of the
+# sources, so it is held to the same A == B == C as the C; that is also the one
+# place where the JVM and the native builds of buildinfo/sha2 are compared
+# over a whole tree.
+#
 # One full pass costs a few minutes (the native compiler chews the whole
 # compiler twice), so this is a milestone gate, not an every-push gate --
 # run it whenever emitc/rc/lower or the runtime change shape.
@@ -123,27 +129,51 @@ assert_inputs_unchanged() {
 }
 
 java -Xss512m -jar "$root/build/dawn-selfhost.jar" __emitc \
-  "$root/selfhost/src/nmain.dawn" -o "$work/A.c"
+  "$root/selfhost/src/nmain.dawn" -o "$work/A.c" --build-info "$work/A.info.c"
 assert_inputs_unchanged "after generation A"
-"$cc_bin" "${ccflags[@]}" -o "$work/dawnc-A" "$work/A.c" "$root/runtime/c/dawn_rt.c" -lm
+"$cc_bin" "${ccflags[@]}" -o "$work/dawnc-A" "$work/A.c" "$root/runtime/c/dawn_rt.c" \
+  "$work/A.info.c" -lm
 
 # generation B: A compiles the driver itself; the C must match A's exactly
 assert_inputs_unchanged "before generation B"
-"$work/dawnc-A" emitc "$root/selfhost/src/nmain.dawn" -o "$work/B.c"
+"$work/dawnc-A" emitc "$root/selfhost/src/nmain.dawn" -o "$work/B.c" \
+  --build-info "$work/B.info.c"
 assert_inputs_unchanged "after generation B"
 if ! cmp -s "$work/A.c" "$work/B.c"; then
   echo "FAIL: the native compiler emits different C than the JVM toolchain (A != B)" >&2
   diff "$work/A.c" "$work/B.c" | head -40 >&2
   exit 1
 fi
-"$cc_bin" "${ccflags[@]}" -o "$work/dawnc-B" "$work/B.c" "$root/runtime/c/dawn_rt.c" -lm
+if ! cmp -s "$work/A.info.c" "$work/B.info.c"; then
+  echo "FAIL: the native compiler writes a different build manifest than the JVM toolchain (A != B)" >&2
+  diff "$work/A.info.c" "$work/B.info.c" | head -40 >&2
+  exit 1
+fi
+"$cc_bin" "${ccflags[@]}" -o "$work/dawnc-B" "$work/B.c" "$root/runtime/c/dawn_rt.c" \
+  "$work/B.info.c" -lm
 
 # generation C: B compiles the driver; B == C is the fixed point
-"$work/dawnc-B" emitc "$root/selfhost/src/nmain.dawn" -o "$work/C.c"
+"$work/dawnc-B" emitc "$root/selfhost/src/nmain.dawn" -o "$work/C.c" \
+  --build-info "$work/C.info.c"
 assert_inputs_unchanged "after generation C"
 if ! cmp -s "$work/B.c" "$work/C.c"; then
   echo "FAIL: no fixed point (B != C)" >&2
   diff "$work/B.c" "$work/C.c" | head -40 >&2
+  exit 1
+fi
+if ! cmp -s "$work/B.info.c" "$work/C.info.c"; then
+  echo "FAIL: no fixed point for the build manifest (B != C)" >&2
+  diff "$work/B.info.c" "$work/C.info.c" | head -40 >&2
+  exit 1
+fi
+
+# the fixed-point compiler reads the manifest it was linked with, and the JVM
+# reader finds the same one in the file without running it
+self_line="$("$work/dawnc-B" --version)"
+listed="$(java -Xss512m -jar "$root/build/dawn-selfhost.jar" version -m "$work/dawnc-B" \
+  | sed -n 's/^\tbuild\tb1:\([0-9a-f]\{12\}\).*$/\1/p')"
+if [ -z "$listed" ] || [ "$self_line" != "${self_line% b1:*} b1:$listed" ]; then
+  echo "FAIL: dawnc-B says '$self_line', its manifest lists b1:${listed:-<none>}" >&2
   exit 1
 fi
 
@@ -168,4 +198,5 @@ if ! cmp -s "$work/smoke.expect" "$work/smoke.out"; then
 fi
 
 echo "OK: native fixed point -- the native compiler rebuilt itself byte-identically (B == C)"
+echo "OK: build manifest -- A == B == C, and dawnc-B reports b1:$listed"
 echo "OK: standalone smoke -- built and ran hello with embedded std + runtime"

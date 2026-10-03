@@ -228,14 +228,31 @@ fn synthetic(path: String, msg: String, hint: String) -> LocDiag =
   LocDiag { path: path, d: mk_diag(msg, 0, 0, hint) }
 
 # Planner diagnostics use a package-local record to keep this frontend out of
-# compiler_plan's dependency graph. Convert only where loading adopts them.
-fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
+# compiler_plan's dependency graph. Convert only where loading adopts them, and
+# at the CLI boundary (`clifail.fail_planner`).
+pub(pkg) fn planner_diags(ds: List[source.LocDiag]) -> List[LocDiag] = {
   var out: List[LocDiag] = []
   for ld in ds {
     out = out ++ [LocDiag {
       path: ld.path,
       d: mk_diag(ld.d.msg, ld.d.lo, ld.d.hi, ld.d.hint)
     }]
+  }
+  out
+}
+
+## The root package's sources as a load read them: `(position path, text)` for
+## every loaded module that belongs to no `[deps]` package. A single-file
+## product's build manifest digests these (`buildinfo.file_rows`), because a
+## file has no package tree to walk and its load may have read siblings
+## through `use`.
+pub(pkg) fn root_sources(loaded: LoadResult) -> List[(String, String)] = {
+  var out: List[(String, String)] = []
+  for lm in loaded.modules {
+    match lm.pkg {
+      None -> { out = out ++ [(lm.site_path, lm.text)] }
+      Some(_) -> ()
+    }
   }
   out
 }

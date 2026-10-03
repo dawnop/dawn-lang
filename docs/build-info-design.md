@@ -1,9 +1,9 @@
 # 构建来源：构建清单与 `dawn version -m`
 
-> 状态：**current**（P1、P2 已落地；P3 为已裁决、未实现的刀序）。2026-10-03，P1 分支 `feat/build-info-planner`，P2 分支 `feat/build-info-jar`。
+> 状态：**current**（P1、P2、P3 已落地）。2026-10-03，P1 分支 `feat/build-info-planner`，P2 分支 `feat/build-info-jar`，P3 分支 `feat/build-info-native`。
 > 依据：裁决 `agent-handoff/ruling-build-provenance-20261003.md`，调研
 > `agent-handoff/research-build-provenance-report-20261003.md`（§一现状、§二一名一份、§4.2 摘要与 B==C、§五刀序）。
-> 本文是那份调研的压缩，加上 P1、P2 的落地说明。P2 推翻了调研 §4.2 的一处取法（产物的工具链行写什么），见 4.4。
+> 本文是那份调研的压缩，加上 P1、P2、P3 的落地说明。P2 推翻了调研 §4.2 的一处取法（产物的工具链行写什么），见 4.4。
 
 ## 一、问题
 
@@ -29,7 +29,7 @@ L1（#401，[source-location-design.md](source-location-design.md)）之后，�
 |---|---|---|
 | P1 | compiler-plan 的 `PkgR` 带声明版本与来源；位置无关的源码摘要；`dawn version -m <project dir>` 不构建，只跑 Planner 打印清单 | 本文落地 |
 | P2（含原 P0） | `jarw` 写 `META-INF/dawn/build-info`（另加 MANIFEST 属性 `Dawn-Version`）；`dawn version -m <jar>`；`--version` 打 `VERSION` + 工具链源码摘要短串，读的是自己 jar 里的 build-info；删掉 `--help` 的「and commit」；Playground `/health` 带摘要 | 本文落地（第六节） |
-| P3 | dawnc 的 native/wasm 产物同样内嵌（只读数据段 / wasm custom section）；`version -m <bin>`；native-fixpoint 实跑 | 未实现 |
+| P3 | dawnc 的 native/wasm 产物同样内嵌（不分配的 ELF 段 `.dawn.build-info` / wasm custom section `dawn.build-info`）；`version -m <bin>`；dawnc 的 `version` 带 `b1:`；native-fixpoint 实跑 | 本文落地（第八节） |
 
 P 线与 L2 至 L4 没有代码依赖。
 
@@ -161,7 +161,7 @@ std 以 `stdsrc` 的形式嵌在 selfhost 源码树里，已在工具链 `main` 
 `dawn version` 不带参数时照旧打印版本；带了 `-m` 以外的参数现在是用法错误（修前会忽略参数照打版本）。
 `--version`/`-V` 不变。`dawn version -m` 的错误面：目标不是目录报 `not a directory`；Planner 有诊断时照 `dawn lock` 的样子渲染诊断后退出；
 项目没有 `src/` 报 `has no src/ folder`；摘要失败（符号链接、读不了）报 `error:` 加原因。
-JVM 驱动先做；dawnc 的 `version` 仍只打版本，随 P3 补。
+JVM 驱动先做；dawnc 的 `version` 由 P3 补上（第八节）。
 
 ## 六、P2 的落地
 
@@ -240,9 +240,9 @@ sources it was built from」**，不兑现，理由：提交号不是源码的�
 
 - **`--std`/`DAWN_STD` 指定的 std 目录**不在清单里。bin/dawn 总是把 `DAWN_STD` 设成检出的 `std/`，所以经 bin/dawn 构建的用户程序编进的是
   那个目录的 std，而工具链行只说 `VERSION`。`std/VERSION` 与工具链 `VERSION` 由测试保持相等，内容一般也与 `stdsrc` 同步，但清单不证明这一点。
-  要证明需要一行 `std`（std 目录的摘要），留给 P3 一起议。
-- **`dawn build --native`**（GraalVM native-image）：中间 jar 里有清单，native-image 默认不收资源，二进制里没有。P3 与 dawnc 产物一起做。
-- **dawnc 的 `version`** 仍只打版本（P3）。
+  要证明需要一行 `std`（std 目录的摘要）。P3 的结论：不加，见 8.5。
+- **`dawn build --native`**（GraalVM native-image）：中间 jar 里有清单，native-image 默认不收资源，二进制里没有。P3 的结论：记下不做，见 8.5。
+- **dawnc 的 `version`**：P3 已补（8.3）。
 
 ## 七、不做的（理由）
 
@@ -263,3 +263,96 @@ sources it was built from」**，不兑现，理由：提交号不是源码的�
 - **`--help` 兑现「commit」**：提交号不是源码的函数，见 6.2。
 - **清单进 `__emit` 的 class 目录或 Core**：那会让 emit 语料与 Core golden 随依赖版本动，正是 L1 与本线都在避开的。
 - **0.x→1.x 不换名被 MVS 当成同一个包**：调研 §二的顺带观察，裁决另起内部调研，不在本线。
+- **native 产物的清单放在带魔数的只读数据里**：要靠搜索找，读者自己（dawnc 读自己）的数据里就有一份魔数；改用段名查表，见 8.1。
+- **清单进 `emitc` 的 C 文本**：C 文本受 prev-diff-native、native-cli-diff、native-fixpoint 逐字节比较，工具链行的 `VERSION` 一发版就变，见 8.1。
+- **Mach-O（macOS）的清单段**：没有在跑的 macOS native 门禁，读者也要另写一套 Mach-O 解析；那里链出的产物没有清单，`version -m` 报「没有」，不报错的东西。
+- **`dawnc version -m <jar>`**：jar 是 JVM 工具链的产物，读它靠 JDK 的 zip；要在 native 里读得再写一个 zip 读者。dawnc 遇到 jar 报错并指向 `dawn version -m`。
+
+## 八、P3 的落地
+
+### 8.1 放在哪里：不分配的 ELF 段，与 wasm custom section
+
+任务给了两条路：ELF 段，或带魔数的只读数据。选段，理由三条（也写在 `selfhost/src/c/binfo.dawn` 文件头）：
+
+1. **不用猜。** 魔数要在整个文件里搜，而 dawnc 读自己（`--version`）时，它的只读数据里就躺着读者代码自己的那份魔数，
+   怎么把两者分开都是格式本身没有的规矩。段是在格式定义的表里按名字查。
+2. **对程序零成本。** 段的标志是空（与 `.comment` 一样不分配），不映射进内存，也不挪动代码与数据的任何地址；
+   `strip` 保留它，`objcopy --remove-section .dawn.build-info` 删掉它后二进制照常运行（8.4）。
+3. **不用 dawn 也读得出来**：`readelf -p .dawn.build-info <bin>`。这正是 P2 给 jar 加 `Dawn-Version` 属性的理由，格式自带的工具更好。
+
+wasm 的对应物是 custom section，名字按任务定为 `dawn.build-info`。两种都由**同一个 C 编译单元**写出：文件作用域的 `__asm__`，
+`#if defined(__wasm__)` 一支、`#elif defined(__ELF__)` 一支，内容是 `render_file` 的字节逐个 `.byte`。不用 C 的
+`__attribute__((section))`，因为它在 ELF 上给的是**要分配**的段，在 wasm 上给的是数据段而不是 custom section（clang 20 实测，
+custom section 只有经汇编 `.section ".custom_section.<名>"` 才出得来；名字要加引号，否则汇编器在 `-` 处截断）。
+其它目标格式（Mach-O）两支都不进，单元为空，产物没有清单。
+
+**这个单元是单独一个文件，不并进 `emitc` 的 C 文本。** 理由与 P2 不让清单进 `__emit` 相同：C 文本被 prev-diff-native（对上一 release）、
+native-cli-diff（JVM 对 native）与 native-fixpoint（A==B==C）逐字节比较；清单的工具链行写 `VERSION`，并进 C 文本就意味着每次发版
+所有 C 语料都动。清单在「容器」里，不在「代码」里：jar 是条目，二进制是段，C 是 class 目录的对应物。
+
+### 8.2 谁写
+
+| 路径 | 怎么写 |
+|---|---|
+| `dawnc build`（native 与 `--target wasm`，含 `--reactor`） | `cc_build_with` 多一个参数：清单单元的文本，暂存为 `dawn_build_info.c`，排在 `dawn_rt.c` 之后进同一条链接命令 |
+| `dawnc emitc --build-info <file.c>` / `dawn __emitc --build-info <file.c>` | 另写出这个单元，给自己调 `cc` 的脚本用：`release-native.sh` 与 `native-fixpoint.sh` 都改为带它链接 |
+| `dawnc run` / `dawnc test` | 不写：产物跑完即删，不为它规划与摘要 |
+
+内容一律是 `buildinfo.product_file(VERSION, target, root_files)`：P2 的 `build_manifest` 原样搬进 compiler-plan，jar、native、wasm
+三种产物与两个驱动走同一个函数，`root_files` 由 `driver/analyze.root_sources` 从这次加载里取。所以同一个程序编成 jar 和编成二进制，
+`version -m` 列出的行逐字节相同（8.4 实测）。工具链行仍只写 `VERSION`，4.4 的理由对 native-fixpoint 原样成立：A 由 JVM 写、B 由 dawnc-A 写，
+写构建者摘要就会 A≠B。
+
+dawnc 自己是 `selfhost/src/nmain.dawn` 的单文件构建，按 6.4 的规则 `main` 行是 `(unnamed)`、摘要覆盖加载读到的 selfhost 根包文件，
+`dep`/`java` 行照 selfhost 的 Planner 写（含 `java` 两行，超集，dawnc 里并没有 Java）。所以 dawnc 的 `b1:` 与 JVM 工具链的 `b1:` 不同：
+二者本来就是不同的源码集合。
+
+### 8.3 谁读
+
+- `dawn version -m <file>`：文件开头是 ELF 魔数或 wasm 魔数就走 `c/binfo`，否则照旧当 jar。输出与 jar、目录同形（`binfo.listing`），
+  首行的版本取自清单的工具链行，各行不重算。
+- `dawnc version -m <project-dir | binary>...`：参数处理照 nmain 的惯例另写一份，活是同一个（目录走 `buildinfo`，文件走 `binfo`）。
+  jar 不读，报错指向 `dawn version -m`（见第七节）。
+- `dawnc --version` / `dawnc version`：`dawnc 0.82.0 (native) b1:381a846adffa`。读的是 `/proc/self/exe`，即**自己这个文件**里的段，
+  不编进常量（裁决 5.4(1) 的 ii，与 `jarw.own_build_info` 同理）。读不到（没有 `/proc` 的系统、没链清单单元的二进制、旧 dawn 编的）时
+  只打旧格式，不报错。
+- ELF 读者只读小端，两种位宽都读；段数超过 0xff00 的扩展编号不读（没有链接器会给这么大的程序写出它），按「被截断」报。
+  任何越界都是 `Err`，不是 panic（单测把文件从四处截断）。
+
+错误面：没有段 `<p> carries no build manifest (section .dawn.build-info): it was not linked by \`dawnc build\`, or was built by a dawn from before build manifests`
+（wasm 写 `custom section dawn.build-info`）；段内容不是清单时报 `parse_file` 的原因；既不是 ELF 也不是 wasm 的文件在 dawnc 上报
+`not an ELF executable or a wasm module`，在 dawn 上交给 jar 读者。
+
+### 8.4 负控与实测（2026-10-03）
+
+- **两处、两 cwd、两缓存根字节相同。** 一个 url 依赖项目（`lib 1.1.0`，`file://` tar.gz），两份检出 `w1/app`、`w2/app`：一次 cwd=`w1`、
+  `DAWN_PKG_CACHE=c1`、目标写相对路径；一次 cwd=上级、`c2`、目标写 `w2/app` 的绝对路径。`dawnc build` 的二进制 `cmp` 相同；
+  `--target wasm` 的两份 `.wasm` 也相同（前提是 `-o` 的**文件名**相同：wasm-ld 把输出文件名写进 `name` section，这是既有行为，与清单无关）。
+  **先证会红**：第三份检出只在 `dawn.toml` 末尾加一行注释，二进制与 `w1` 的差 79 字节；删掉 `.dawn.build-info` 与 `.note.gnu.build-id`
+  两段后二者 `cmp` 相同。即清单的变化只落在清单段与 build-id（链接器对整个输出取的哈希）上，程序本身没有一字节动。
+- **同一程序两种产物，清单相同**：同一项目 `dawn build` 出的 jar 与 `dawnc build` 出的二进制，`dawn version -m` 除首行参数名外逐字节相同；
+  同一二进制 `dawn version -m` 与 `dawnc version -m` 的输出 `cmp` 相同（JVM 读者与 native 读者对拍）。
+- **native-fixpoint 实跑**：`A.info.c == B.info.c == C.info.c`，`dawnc-B --version` 的 `b1:381a846adffa` 等于 JVM 读 `dawnc-B` 列出的
+  `build` 行前 12 位；本地另编一份 dawnc 也报同一个值。**先证会红**：把 nmain 写清单时的版本改成 `VERSION ++ "-mutant"`，fixpoint 红在
+  「the native compiler writes a different build manifest than the JVM toolchain (A != B)」。
+- **release-native.sh**：两次独立 `-static` 链接字节相同仍成立（清单单元不含时间与路径）；新检查 2b（产物自报的 `b1:` 等于构建它的工具链
+  `version -m` 读出的）绿。**先证会红**：链接行去掉清单单元，2b 红在「the toolchain that built the artifact finds no build manifest in it」。
+- **剥掉后照常运行**：`objcopy --remove-section .dawn.build-info` 后 native 程序照常输出，`version -m` 报上面的「carries no build manifest」，exit 2；
+  `llvm-objcopy --remove-section dawn.build-info` 后 wasm 在 node WASI 下照常输出，`version -m` 同样报错。`strip` 后段仍在、仍能读。
+
+### 8.5 P2 备注 4 的三项
+
+- **`--std`/`DAWN_STD` 的 std 目录：不加 `std` 行。** 一行 `std` 只能在**构建时**知道（取决于环境变量），`dawn version -m <dir>` 只看源码，
+  于是同一棵树的目录清单与产物清单就会因 `DAWN_STD` 是否设置而不同，`version -m selfhost` 对 `--version` 的复算（release.yml 依赖它）也会断：
+  bin/dawn 总设 `DAWN_STD`，release 配方的构建也经它。另外 std 目录的 `VERSION` 与工具链不同时加载就报 `std version mismatch`，
+  剩下没被证明的只是「同一 VERSION 下改过的 std 目录」。重开条件与形状：确有人需要区分时，只在**所用 std 与工具链内嵌的 stdsrc 内容不同**
+  时写一行 `std\t<s1>`，相同时不写，这样经 bin/dawn 的常规构建不受影响；那要每次构建多读一遍 std 目录，属另一刀。
+- **`dawn build --native`（GraalVM）：记下不做。** 产物是 native-image 的输出，不经 `cc`，链不进本节的单元；要做只能事后
+  `objcopy --add-section`（多一个外部工具依赖，macOS 上还不是 ELF）或让 native-image 收资源（读者要解析 GraalVM 的资源格式）。
+  这条路径本身少用，dawnc 才是 native 的正路。中间 jar 的清单仍在，构建者可以先 `version -m` 那个 jar。
+- **dawnc 的 `version`：做了**，见 8.3。
+
+### 8.6 CI 墙钟
+
+见 P3 报告（`agent-handoff/build-info-p3-report-20261003.md`）。量级：每次 `dawnc build` 多一次 Planner 与摘要（毫秒到亚秒），
+release-native 与 native-fixpoint 各多一个几百字节的 C 单元（`cc` 时间可忽略），native-cli-diff 多两对 `version -m`。
