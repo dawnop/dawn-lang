@@ -17,6 +17,13 @@
 # plain string to everything below: lowering folds the suffix in and no
 # backend or interpreter learns what a position is.
 #
+# `dbg` rides the same seam with a different shape: its trailing argument is
+# the `[<path>:<line>:<col>] <argument text> = ` its line starts with (section
+# 6 of the same document). The argument text is the source between the
+# argument's own first and last position, sliced here for the reason the
+# position is resolved here: it is read off the revision being resolved, so
+# no parser table has to carry it and a shadowing `fn dbg` never sees one.
+#
 # The panic below is the guard on the other half of the seam. A span the
 # checker forgot to measure stays absolute, which reads as an offset past the
 # end of its own declaration; that is a compiler bug and not a program's, so
@@ -24,6 +31,7 @@
 # coordinate system.
 use std/list
 use std/map
+use std/str
 use check/types.{Sym, TyInt, TyNever}
 use check/tast.{
   TExpr, TStmt, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TConst,
@@ -33,7 +41,8 @@ use check/tast.{
   XCtorValue, XField, XListLit, XTupleLit, XPropagate, XUnwrap, XIndex,
   XReturn, XBreak, XContinue, XComptime, XBinary, XUnary,
   XIf, XMatch, XBlock, XError,
-  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor, BAdd
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor, BAdd,
+  x_lo, x_hi
 }
 
 ## What one declaration's offsets are measured from.
@@ -48,17 +57,19 @@ pub type Resolver = {
   # the module's position path (`Cx.site_path`): baked into the program, so
   # it is the tree's name for the file and never the command line's (#401)
   path: Option[String],
-  line_starts: List[Int]
+  line_starts: List[Int],
+  # the revision's text, which a `dbg` call's argument is sliced from
+  source: String
 }
 
 ## The resolver for a declaration the span view names.
-pub fn owned(lo: Int, hi: Int, path: Option[String], line_starts: List[Int]) -> Resolver =
-  Resolver { base: lo, span: Some(hi - lo), path: path, line_starts: line_starts }
+pub fn owned(lo: Int, hi: Int, path: Option[String], line_starts: List[Int], source: String) -> Resolver =
+  Resolver { base: lo, span: Some(hi - lo), path: path, line_starts: line_starts, source: source }
 
 ## The resolver for a declaration it does not: a duplicate, or one under a
 ## duplicated parent. Its tree is already in file coordinates.
-pub fn unowned(path: Option[String], line_starts: List[Int]) -> Resolver =
-  Resolver { base: 0, span: None, path: path, line_starts: line_starts }
+pub fn unowned(path: Option[String], line_starts: List[Int], source: String) -> Resolver =
+  Resolver { base: 0, span: None, path: path, line_starts: line_starts, source: source }
 
 fn at(r: Resolver, off: Int) -> Int =
   match r.span {
@@ -103,9 +114,56 @@ fn site(r: Resolver, pos: Int) -> String =
     None -> ""
   }
 
+## The `[<path>:<line>:<col>] <argument text> = ` a `dbg` line starts with,
+## or None in a module with no position path. The checker refuses `dbg` in
+## std, so a call that gets None here is one in a context built by hand.
+fn dbg_head(r: Resolver, pos: Int, arg: TExpr) -> Option[String] =
+  match r.path {
+    Some(p) -> {
+      let (line, col) = line_col(r.line_starts, pos)
+      Some("[" ++ p ++ ":" ++ to_string(line) ++ ":" ++ to_string(col) ++ "] " ++
+          arg_text(r.source, x_lo(arg), x_hi(arg)) ++ " = ")
+    }
+    None -> None
+  }
+
+## The source of an argument as one line of a `dbg`: the text as written,
+## except that a run of white space that crosses a line break is one space,
+## or nothing just inside a bracket. A `dbg` line is then one line however
+## the argument was laid out (a vertical pipe, a call wrapped after its `(`),
+## and the text is still the author's own tokens rather than a printer's
+## guess at them (section 6.2).
+fn arg_text(source: String, lo: Int, hi: Int) -> String = {
+  var out: List[Char] = []
+  var gap: List[Char] = []
+  var broke = false
+  var prev = ' '
+  for c in code_points(str.slice(source, lo, hi)) {
+    if char_is_space(c) {
+      gap = gap ++ [c]
+      if c == '\n' { broke = true }
+    } else {
+      let joined: List[Char] = if not broke {
+        gap
+      } else if prev == '(' || prev == '[' || c == ')' || c == ']' {
+        []
+      } else {
+        [' ']
+      }
+      out = out ++ joined ++ [c]
+      gap = []
+      broke = false
+      prev = c
+    }
+  }
+  from_code_points(out)
+}
+
 ## The builtins that fail with a message written at their call, and how many
 ## arguments the author writes for each. The arity is what tells a call that
 ## carries its site from one that does not (a call in std carries none).
+## `dbg` is here too: what it carries is its line's head rather than a
+## failure's suffix, by the same trailing argument.
 fn sited_arity(name: String) -> Option[Int] =
   if name == "panic" {
     Some(1)
@@ -113,6 +171,8 @@ fn sited_arity(name: String) -> Option[Int] =
     Some(0)
   } else if name == "expect" {
     Some(2)
+  } else if name == "dbg" {
+    Some(1)
   } else {
     None
   }
@@ -130,7 +190,12 @@ fn sited_call(r: Resolver, name: String, args: List[TExpr], start: Int) -> List[
   match sited_arity(name) {
     Some(n) ->
       if len(args) == n && r.path != None {
-        args ++ [XStr([TSPText(site(r, start))], start, start)]
+        let tag = if name == "dbg" {
+          dbg_head(r, start, args[0]).expect("a module with a position path")
+        } else {
+          site(r, start)
+        }
+        args ++ [XStr([TSPText(tag)], start, start)]
       } else {
         args
       }
@@ -303,7 +368,7 @@ pub fn symbols(r: Resolver, syms: Map[Int, Sym], first: Int, limit: Int) -> Map[
 }
 
 test "an owned tree comes back at the declaration it was measured from" {
-  let r = owned(100, 130, Some("m.dawn"), [0, 40, 90])
+  let r = owned(100, 130, Some("m.dawn"), [0, 40, 90], "")
   let inner = XBinary(BAdd, XInt(1, 4, 5), XInt(2, 8, 9), None, 6, 7, 4, 9, TyInt)
   assert expr(r, inner) ==
     XBinary(BAdd, XInt(1, 104, 105), XInt(2, 108, 109), None, 106, 107, 104, 109, TyInt)
@@ -312,21 +377,21 @@ test "an owned tree comes back at the declaration it was measured from" {
 }
 
 test "an unowned tree is already in file coordinates" {
-  let r = unowned(Some("m.dawn"), [0, 40])
+  let r = unowned(Some("m.dawn"), [0, 40], "")
   assert expr(r, XUnit(41, 44)) == XUnit(41, 44)
 }
 
 test "an unwrap message names the line the declaration sits on now" {
   let starts = [0, 40, 90]
-  let here = owned(100, 130, Some("src/m.dawn"), starts)
-  let moved = owned(45, 75, Some("src/m.dawn"), starts)
+  let here = owned(100, 130, Some("src/m.dawn"), starts, "")
+  let moved = owned(45, 75, Some("src/m.dawn"), starts, "")
   let raw = XUnwrap(XUnit(0, 1), "unwrapped None from f()", 0, 4, TyInt)
   assert expr(here, raw) ==
     XUnwrap(XUnit(100, 101), "unwrapped None from f() at src/m.dawn:3:11", 100, 104, TyInt)
   assert expr(moved, raw) ==
     XUnwrap(XUnit(45, 46), "unwrapped None from f() at src/m.dawn:2:6", 45, 49, TyInt)
   # a context with no source names no site, the way the checker named none
-  let anonymous = owned(100, 130, None, starts)
+  let anonymous = owned(100, 130, None, starts, "")
   assert expr(anonymous, raw) == XUnwrap(XUnit(100, 101), "unwrapped None from f()", 100, 104, TyInt)
 }
 
@@ -340,7 +405,7 @@ test "a column counts from its own line, and the first line starts at one" {
 
 test "panic, todo and expect carry their site as one trailing argument" {
   let starts = [0, 40, 90]
-  let r = owned(100, 130, Some("src/m.dawn"), starts)
+  let r = owned(100, 130, Some("src/m.dawn"), starts, "")
   let msg = XStr([TSPText("boom")], 6, 12)
   let call = XCallBuiltin("panic", [msg], [], [], 0, 13, TyNever)
   let site = XStr([TSPText(" at src/m.dawn:3:11")], 100, 100)
@@ -349,11 +414,11 @@ test "panic, todo and expect carry their site as one trailing argument" {
   assert split_site("panic", [XStr([TSPText("boom")], 106, 112), site]) ==
     ([XStr([TSPText("boom")], 106, 112)], Some(" at src/m.dawn:3:11"))
   # resolving twice does not site a call twice
-  assert expr(unowned(Some("src/m.dawn"), starts), resolved) == resolved
+  assert expr(unowned(Some("src/m.dawn"), starts, ""), resolved) == resolved
   assert expr(r, XCallBuiltin("todo", [], [], [], 4, 10, TyNever)) ==
     XCallBuiltin("todo", [XStr([TSPText(" at src/m.dawn:3:15")], 104, 104)], [], [], 104, 110, TyNever)
   # std has no position path, so its calls stay as written
-  let in_std = owned(100, 130, None, starts)
+  let in_std = owned(100, 130, None, starts, "")
   assert expr(in_std, call) == XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyNever)
   assert split_site("panic", [msg]) == ([msg], None)
   # a builtin that does not fail with a written message is never sited
@@ -361,14 +426,47 @@ test "panic, todo and expect carry their site as one trailing argument" {
   assert expr(r, other) == XCallBuiltin("len", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyInt)
 }
 
+test "a dbg call carries its line's head: site, then the argument as written" {
+  # `dbg(n * 2)` at offset 40 of a two-line file, inside a declaration at 30
+  let src = "fn twice(n: Int) -> Int =\n  let y = 1\n  dbg(n * 2)\n"
+  let starts = [0, 26, 38]
+  let r = owned(30, 52, Some("src/m.dawn"), starts, src)
+  let arg = XBinary(BAdd, XLocal(1, "n", 14, 15, TyInt), XInt(2, 18, 19), None, 16, 17, 14, 19, TyInt)
+  let call = XCallBuiltin("dbg", [arg], [], [], 10, 20, TyInt)
+  let head = "[src/m.dawn:3:3] n * 2 = "
+  match expr(r, call) {
+    XCallBuiltin(_, args, _, _, lo, _, _) -> {
+      assert lo == 40
+      assert len(args) == 2
+      assert split_site("dbg", args) == ([args[0]], Some(head))
+    }
+    _ -> panic("not a builtin call")
+  }
+  # a module with no position path (std, which refuses `dbg` anyway) adds none
+  let in_std = owned(30, 52, None, starts, src)
+  match expr(in_std, call) {
+    XCallBuiltin(_, args, _, _, _, _, _) -> { assert len(args) == 1 }
+    _ -> panic("not a builtin call")
+  }
+}
+
+test "an argument written over several lines is one line of text" {
+  let src = "twice(\n    a +\n      1)"
+  assert arg_text(src, 0, 25) == "twice(a + 1)"
+  # a break between two tokens is a space, and spacing within a line is kept
+  assert arg_text("xs\n  |>  len", 0, 13) == "xs |>  len"
+  assert arg_text("[1,\n 2\n]", 0, 9) == "[1, 2]"
+  assert arg_text("\"ä🎈\" ++ s", 0, 9) == "\"ä🎈\" ++ s"
+}
+
 test "an assertion's text carries its site" {
-  let r = owned(100, 130, Some("src/m.dawn"), [0, 40, 90])
+  let r = owned(100, 130, Some("src/m.dawn"), [0, 40, 90], "")
   let raw = TSAssert(XBool(true, 7, 11), Some("true"), 0, 11)
   assert stmt(r, raw) == TSAssert(XBool(true, 107, 111), Some("true at src/m.dawn:3:11"), 100, 111)
   let unnamed = TSAssert(XBool(true, 7, 11), None, 0, 11)
   assert stmt(r, unnamed) ==
     TSAssert(XBool(true, 107, 111), Some("assertion failed at src/m.dawn:3:11"), 100, 111)
-  assert stmt(owned(100, 130, None, [0, 40, 90]), unnamed) == TSAssert(XBool(true, 107, 111), None, 100, 111)
+  assert stmt(owned(100, 130, None, [0, 40, 90], ""), unnamed) == TSAssert(XBool(true, 107, 111), None, 100, 111)
 }
 
 test "symbols move with the tree that reads them" {
@@ -376,7 +474,7 @@ test "symbols move with the tree that reads them" {
     Sym { name: "x", ty: TyInt, mutable: false, dlo: dlo, dhi: dhi,
       dict_of: None, ev_of: None, cell_of: None }
   let before = map.from([(7, sym(0, 1)), (9, sym(4, 5)), (11, sym(60, 61))])
-  let after = symbols(owned(100, 130, None, []), before, 7, 11)
+  let after = symbols(owned(100, 130, None, [], ""), before, 7, 11)
   assert map.get(after, 7) == Some(sym(100, 101))
   assert map.get(after, 9) == Some(sym(104, 105))
   # outside the interval the declaration minted, nothing is touched

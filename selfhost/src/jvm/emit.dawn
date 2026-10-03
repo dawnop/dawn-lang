@@ -3490,6 +3490,13 @@ fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -
     invoke_rt(g1.mv, rt_show_show())
   } else if name == "quote" {
     invoke_rt(g1.mv, rt_show_quote())
+  } else if name == "dbg_line" {
+    # a `dbg` line is the io runtime's stderr write; the name is lowering's
+    # own so that comptime can skip it (lower.internal_intrinsics)
+    match rt_intrinsic_ref(gx.adts, gx.intrs, "io_eprintln") {
+      Some(r) -> invoke_rt(g1.mv, r)
+      None -> panic("codegen: io_eprintln has no runtime method, so dbg_line has none")
+    }
   } else if name == "cast" {
     # The check moves off this stack and into a method (codegen.gen_cast says
     # why), with the target passed along as the `Class` the CHECKCAST would

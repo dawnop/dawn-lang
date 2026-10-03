@@ -4250,6 +4250,14 @@ pub(pkg) fn check_fn_value(
       "wrap it in a lambda: (" ++ ps2 ++ ") => " ++ name ++ "(" ++ ps2 ++ ")"),
       TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
   }
+  # `dbg` prints the place it is called from and the text of its argument,
+  # and a function value has neither: the line a call through it would print
+  # names nothing the reader wrote (docs/source-location-design.md 6.1).
+  if f.is_builtin && f.name == "dbg" {
+    return (cerr_h(cx, "`dbg` cannot be used as a value", lo, hi,
+      "call it where the value is, `dbg(e)` or `e |> dbg`, or wrap it in a lambda: (x) => dbg(x)"),
+      TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
+  }
   if len(f.param_tys) > fn_max_params() {
     return (check_value_arity(cx, len(f.param_tys), lo, hi), TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
   }
@@ -7956,6 +7964,59 @@ fn arrange_call_args(
   (pop_scope(cx2), lets, txs2)
 }
 
+## `dbg` belongs to the program being debugged and never to one somebody else
+## depends on (docs/source-location-design.md section 6.4). Its line is
+## declared outside the program's semantics, which is a promise a package
+## cannot make on behalf of its dependants; so a module loaded through
+## `[deps]`, and std, which every program depends on, may not call it. A
+## publish step that strips it is what other languages have instead, and
+## Dawn has no publish step: the load is where a package becomes somebody
+## else's.
+fn refuse_dbg_outside_the_program(cx: Cx, lo: Int, hi: Int) -> Cx =
+  if cx.is_std_module {
+    cerr_h(cx, "`dbg` cannot be used in std", lo, hi,
+      "`dbg` is for debugging a program locally, and every program depends on std")
+  } else {
+    match cx.dep_package {
+      Some(p) ->
+        cerr_h(cx, "`dbg` cannot be used in package `" ++ p ++ "`, which is loaded through [deps]",
+          lo, hi, "`dbg` is for debugging a program locally; remove it from the package, " ++
+            "or debug the package as a project of its own")
+      None -> cx
+    }
+  }
+
+test "dbg is the program's own: refused in a [deps] package, in std, and as a value" {
+  let src = "fn f(n: Int) -> Int = dbg(n + 1)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let base = seed_prelude(test_cx())
+  let (own, _) = check_module(base, m, env)
+  assert len(own.diags) == 0
+  let (dep, _) = check_module(Cx { ..base, dep_package: Some("json") }, m, env)
+  assert map(dep.diags, d => d.msg) ==
+    ["`dbg` cannot be used in package `json`, which is loaded through [deps]"]
+  assert map(dep.diags, d => d.hint) == ["`dbg` is for debugging a program locally; remove it " ++
+      "from the package, or debug the package as a project of its own"]
+  # at the name, the way an undefined function is reported
+  assert map(dep.diags, d => (d.lo, d.hi)) == [(22, 25)]
+  let (in_std, _) = check_module(Cx { ..base, is_std_module: true }, m, env)
+  assert map(in_std.diags, d => d.msg) == ["`dbg` cannot be used in std"]
+  assert msgs_of("fn f() -> fn(Int) -> Int = dbg\n") == ["`dbg` cannot be used as a value"]
+  # a user function of the name is the user's, and nothing about it is refused
+  let (shadow, _) = parser.parse_module("fn dbg(n: Int) -> Int = n\nfn f(n: Int) -> Int = dbg(n)\n")
+  let (dep2, _) = check_module(Cx { ..base, dep_package: Some("json") }, shadow, env)
+  assert len(dep2.diags) == 0
+}
+
+test "dbg renders through Show, and says so when there is none" {
+  assert msgs_of("type P = { x: Int }\nfn f(p: P) -> P = dbg(p)\n") == ["no impl of `Show` for `P`"]
+  assert hints_of("type P = { x: Int }\nfn f(p: P) -> P = dbg(p)\n") ==
+    ["define `impl Show[P] { ... }` in the module declaring `P` or `Show`"]
+  assert msgs_of("type P = { x: Int }\nderive Show\nfn f(p: P) -> P = dbg(p)\n") == []
+}
+
 ## A named call f(args) (the Kotlin checkCall): a local fn value, else a
 ## top-level / std / builtin signature with two-round argument inference,
 ## trait witnesses and effect instantiation. `resolved_sig` bypasses locals
@@ -8173,6 +8234,9 @@ fn check_call(
       i2 = i2 + 1
     }
     if all_ok { wits = ws }
+  }
+  if s.is_builtin && s.name == "dbg" {
+    cx1 = refuse_dbg_outside_the_program(cx1, clo, chi)
   }
   if s.is_builtin && s.name == "cast" {
     # T is bound here (an unbound type param already errored above). It must be
@@ -12723,7 +12787,7 @@ fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> En
   let decl = identity.path_text(path)
   match identity.span_at(view, decl) {
     None -> Entered { cx: unowned(cx),
-      resolver: tast_positions.unowned(cx.site_path, cx.line_starts), decl: decl }
+      resolver: tast_positions.unowned(cx.site_path, cx.line_starts, cx.source), decl: decl }
     Some(sp) -> {
       # A diagnostic names the view it resolves against by module path, which
       # only the driver can supply. The typed tree names nothing: it is
@@ -12737,7 +12801,7 @@ fn enter_decl(cx: Cx, view: identity.DeclSpans, path: List[identity.Part]) -> En
       # continues its slots instead of reissuing them. A body whose header was
       # never entered starts at zero, which is still its own numbering.
       Entered { cx: enter_decl_owner(entered, path, sp.lo, sp.hi),
-        resolver: tast_positions.owned(sp.lo, sp.hi, cx.site_path, cx.line_starts), decl: decl }
+        resolver: tast_positions.owned(sp.lo, sp.hi, cx.site_path, cx.line_starts, cx.source), decl: decl }
     }
   }
 }

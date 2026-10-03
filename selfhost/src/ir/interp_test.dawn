@@ -846,6 +846,29 @@ test "a comptime failure names its call site, in the words the program would pri
   ]
 }
 
+test "dbg is the identity in a const, and writes nothing" {
+  # its line is no part of what a program computes (spec 8.3), so the fold
+  # neither refuses it the way it refuses io nor prints it at compile time;
+  # `dbg_line` has an arm that answers Unit, and the value comes through
+  let src = "fn f(n: Int) -> Int = dbg(n * 2)\n" ++
+    "const A: Int = comptime { dbg(f(3)) + 1 }\n" ++
+    "const B: String = comptime { dbg(\"s\") }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let cx0 = Cx { ..cx_new(Some("m"), Some("src/m.dawn")), line_starts: lexer.line_starts_of(src),
+    source: src }
+  let (cx1, tm) = check_module(cx0, m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VInt(7))
+  assert map.get(out.consts, "B") == Some(VStr("s"))
+}
+
 test "float folds agree with the backends on signed zero and NaN" {
   # every one of these had (or could have had) a comptime answer that differed
   # from what the emitted program computes: Double.compare puts -0.0 below

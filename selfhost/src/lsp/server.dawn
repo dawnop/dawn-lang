@@ -3994,6 +3994,25 @@ test "a client that applies itemDefaults.data is told the document once" {
   })))
 }
 
+test "dbg is a builtin the editor offers and explains, and its argument hovers as written" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st0 = def_probe_state(std)
+    let text = "pub fn main() -> Unit !io = println(to_string(dbg(40 + 2)))\n"
+    let d = def_probe_doc_named(st0, "dbgprobe.dawn", text)
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    assert def_probe_at(st, d, text, "dbg(", 0).hover == "fn dbg[T: Show](x: T) -> T"
+    # the head the declaration's exit appends is taken back off before the
+    # written arguments are paired with the typed ones (`split_site`)
+    assert def_probe_at(st, d, text, "40", 0).hover == "Int\n40  (0x28)"
+    let item = d7_item(st, d, "dbg(", 2, "dbg")
+    assert ostr(item, "detail") == "fn dbg[T: Show](x: T) -> T"
+  })))
+}
+
 test "completion resolve on a use line: the module's doc, and its members'" {
   io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
     let st0 = def_probe_state(d7_probe_std())

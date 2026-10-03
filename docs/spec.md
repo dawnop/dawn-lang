@@ -1682,7 +1682,8 @@ fn light(c: Color) -> Int =
 3. 标了 `!io` 但体是纯的 → 允许（预留演化空间）。Dawn 只有一种诊断等级，没有 lint；
    「多余 `!io`」将来要么做成错误，要么不做。
 4. 纯函数**保证**：给定相同参数返回相同值、无可观测副作用。
-   编译器可据此折叠、消重、在 comptime 调用。具名效果也在这条保证之内：
+   编译器可据此折叠、消重、在 comptime 调用。唯一的例外是 `dbg`（§8.3）：它写的 stderr 行
+   定义为诊断旁路、不算程序的副作用，所以它的类型是纯的。具名效果也在这条保证之内：
    函数值的类型带着完整的效果行，能从行里减去一个标签的只有真正应答了它的那个
    `with handle`（§6.5），所以签名为纯的函数跑不出别人的 handler 臂。
 5. 函数值的效果**在调用点应答**，不在写下它的地方。闭包的行就是它体内发出的效果，
@@ -2492,6 +2493,34 @@ let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expe
 `get`/`map.get` 返回 `Option`（问询）；下标 `c[i]` 越界/缺键 panic（断言，§4.8；语义由该类型的 `Index` impl 定，`List`/`Map` 如上）；
 `Int` 除零（`/` 与 `%`）panic——是 panic 故 `catch_fault` 不拦（§4.3 数值边缘语义）。
 
+### 8.3 调试输出：`dbg`
+
+`dbg[T: Show](x: T) -> T` 原样返回 `x`，并向 stderr 写一行：
+
+```text
+[<path>:<line>:<col>] <实参的源码文本> = <show(x)>
+```
+
+```dawn
+let n = dbg(a * 2)        # stderr: [src/main.dawn:4:11] a * 2 = 8
+let m = xs |> len |> dbg  # stderr: [src/main.dawn:5:11] xs |> len = 3
+```
+
+- **类型为纯，语义为恒等。** `dbg(x)` 的值就是 `x`；那一行是**诊断旁路**，不属于程序语义：
+  不进效果行（不要求 `!io`，纯函数里也能写），handler 截不到，不保证在将来的优化下条数与顺序不变。
+  这是全语言**唯一**一个类型说纯、实际写输出的特例（§6.2 规则 4 的例外即此）。
+- `<path>:<line>:<col>` 与 §8.2 的位置后缀同一规则同一把尺子，指向调用的起点（`dbg` 这个名字；
+  管道 `e |> dbg` 是 `e` 的起点）。
+- 实参文本取自调用点的原文，不是反打印。跨行的实参折成一行：跨过换行的一段空白变成一个空格，
+  紧挨括号内侧的则去掉（`twice(\n  a +\n    1)` 写作 `twice(a + 1)`）。
+- 渲染用 `Show`（嵌套渲染，`String` 带引号），类型没有 `Show` 是编译错误，与插值同一条纪律。
+- comptime 中它就是恒等：常量照常折叠，编译期什么也不打印（§7）。
+- **只属于正在调试的程序。** 由 `[deps]` 加载的模块里、std 里出现 `dbg` 是编译错误；
+  同一个包作为独立项目检查时可以用。没有剥离 `dbg` 的构建模式：语义恒等，剥不剥结果不变。
+- 只能调用，不能当函数值（`let f = dbg` 是编译错误）：函数值没有调用点，也没有实参文本。
+  要传就包一层 lambda：`(x) => dbg(x)`。
+- 只有一个实参。要看几个值，传一个元组：`dbg((a, b))`。
+
 ---
 
 ## 9. Java 互操作
@@ -3155,7 +3184,7 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、`parse_int`（std/fmt）、内建的
 <!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
-`discard`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
+`discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
 `sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
 `char_is_lower`/`char_is_space`/`args`/`cast`，共一屏以内

@@ -3143,6 +3143,13 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
     tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
     tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
+    # The debug print (docs/source-location-design.md section 6): `x` back,
+    # and `[<path>:<line>:<col>] <argument text> = <show(x)>` on stderr. Pure
+    # by type although it writes, the one such entry in this table, because
+    # the line is declared a diagnostic side channel rather than an effect the
+    # program has (spec section 8.3). Lowering expands it, so no backend sees
+    # the name; what they see is `dbg_line` below.
+    tp1b(bsig("dbg", [t], ["x"], t), t, SHOW_ID),
     bsig("join", [TyList(TyString), TyString], ["xs", "sep"], TyString),
     bsig("code_points", [TyString], ["s"], TyList(ty_char())),
     bsig("from_code_points", [TyList(ty_char())], ["cs"], TyString),
@@ -4535,7 +4542,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 110
+  assert map_size2(bs) == 111
 }
 
 test "the reclaim's failure is a value, under the one name left" {

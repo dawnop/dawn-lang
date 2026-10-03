@@ -156,7 +156,7 @@ MUTATIONS = {
         CHECKER,
         "syms: tast_positions.symbols(entered.resolver, after.syms, "
         "mint_cursor(entered.cx), mint_cursor(after))",
-        "syms: tast_positions.symbols(tast_positions.unowned(after.src_path, after.line_starts), "
+        "syms: tast_positions.symbols(tast_positions.unowned(after.src_path, after.line_starts, after.source), "
         "after.syms, mint_cursor(entered.cx), mint_cursor(after))"),),
 
     # body-executor.py: the scheduler consumes every role's executor result.
