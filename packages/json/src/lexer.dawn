@@ -38,6 +38,8 @@ fn char_of_code(n: Int) -> Char = char.of(n).expect("a Unicode scalar value")
 # so there is no arithmetic to read a position out of one; slicing from the
 # start and measuring is the sanctioned way. It is O(n), which is why it is only
 # ever called on the failure path — a parse produces at most one error.
+## The code-point offset of `i` in `src`, as `JsonError.offset` reports it.
+## O(n) in the offset: meant for the failure path, not for every token.
 pub fn offset(src: String, i: Cursor) -> Int =
   str.len(cursor.slice(src, cursor.start(src), i))
 
@@ -50,6 +52,9 @@ pub fn offset(src: String, i: Cursor) -> Int =
 # running out, whichever scanner noticed it. The kinds a position cannot decide
 # (Trailing, Depth, NumberRange) are passed in by their one call site each,
 # through `err_kind`.
+## A `JsonError` at `i` carrying `msg`, of kind `Truncated` when `i` is at
+## the end of `src` and `Syntax` otherwise. `err_kind` is the same with the
+## kind stated.
 pub fn err_at(src: String, i: Cursor, msg: String) -> JsonError =
   err_kind(src, i, if cursor.done(src, i) { Truncated } else { Syntax }, msg)
 
@@ -57,8 +62,12 @@ pub fn err_at(src: String, i: Cursor, msg: String) -> JsonError =
 pub fn err_kind(src: String, i: Cursor, kind: JsonErrorKind, msg: String) -> JsonError =
   JsonError { kind: kind, offset: offset(src, i), message: msg }
 
+## Whether the code point `c` is an ASCII digit `0`-`9`; -1 (the end of
+## the document, as `peek` reports it) is not.
 pub fn is_digit(c: Int) -> Bool = c >= char.code('0') && c <= char.code('9')
 
+## The first cursor at or after `i` that is not JSON whitespace (space, tab,
+## line feed, carriage return). At the end of the document it is the end.
 pub fn skip_ws(src: String, i: Cursor) -> Cursor = {
   # `cursor.char` and not `peek`: the parser asks this at every value, every
   # array element and every object member, so the wrapper's frame is a frame
@@ -145,6 +154,9 @@ fn simple_escape(e: Int) -> Option[String] =
 # Appending a one-element list is a bounded copy, but the bound is a pvec push
 # plus a concat plus the allocation of the singleton, and paying it per
 # character of every key and every string value dwarfed the scan itself.
+## The JSON string literal whose opening quote is at `start`, escapes
+## decoded, with the cursor just past its closing quote; an `Err` for an
+## unterminated literal, a raw control character, or a malformed escape.
 pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), JsonError] = {
   var i = cursor.next(src, start)
   # where the run of unescaped characters in progress began
@@ -332,6 +344,10 @@ fn scan_exp(src: String, i: Cursor) -> Result[Cursor, JsonError] = {
 # integer through a double is what silently turned 9007199254740993 into
 # ...992. Only the caller knows whether this literal is an Int or a Float, so
 # only the caller can pick a lossless conversion — see `number_of` in parser.
+## The JSON number literal starting at `start`, as its source text, with
+## the cursor just past it; an `Err` when the text breaks the JSON number
+## grammar. The text and not a value, so the caller picks a lossless
+## conversion (Int or Float).
 pub fn scan_number(src: String, start: Cursor) -> Result[(String, Cursor), JsonError] = {
   let i0 = if peek(src, start) == char.code('-') { cursor.next(src, start) } else { start }
   let i1 = scan_int_part(src, i0)?
