@@ -26,10 +26,16 @@
 # ## What it does
 #
 # One small Dawn program (live.dawn), compiled to C once, then built and run
-# against four runtimes: the tree's own, and one copy per mutation in
-# matrix.txt. Every build answers a roster of four assertions -- three off a
-# plain build, one off a sanitized one -- and the red set is compared with the
-# record in both directions. A recorded red that stays green fails, an
+# against several runtimes: the tree's own, and one copy per mutation in
+# matrix.txt. Every build answers the roster in matrix.txt -- most of it off a
+# plain build, `no_leaks` off a sanitized one -- and the red set is compared
+# with the record in both directions.
+#
+# A second program (refuse.dawn) answers one more assertion, `refusal_by_name`:
+# run under `ulimit -v`, it holds more continuations than the address space has
+# carrier stacks for, and the runtime has to refuse in one line naming address
+# space and exit 1. Plain build only: AddressSanitizer reserves terabytes of
+# shadow and cannot run under an address-space limit at all. A recorded red that stays green fails, an
 # unrecorded red fails, and a `counted` mutant that reddens nothing fails, which
 # is what makes deleting the counter a red rather than a quieter gate.
 #
@@ -40,10 +46,10 @@
 #
 # ## Cost
 #
-# One `dawn __emitc`, eight `cc` invocations and eight process runs; ~15s
-# locally. It rides in the `contracts` job for the reason the atomic-write step
-# does: it wants both a JVM compile and a `cc`, and that job is not the critical
-# path.
+# Two `dawn __emitc`, then three `cc` invocations and three process runs per
+# runtime; ~15s locally with six runtimes (2026-10-04). It rides in the
+# `contracts` job for the reason the atomic-write step does: it wants both a JVM
+# compile and a `cc`, and that job is not the critical path.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -65,6 +71,10 @@ warn=(-Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable
 # reads.
 run_timeout=60
 
+# The address-space limit refuse.dawn runs under, the one array-contract and
+# map-reuse-contract use. refuse.dawn says why it runs out where it does.
+refuse_vlimit=4000000
+
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -75,6 +85,11 @@ build_plain() { # runtime-dir output
     -o "$2" "$work/live.c" "$1/dawn_rt.c" -lm
 }
 
+build_refuse() { # runtime-dir output
+  "$cc_bin" "${cflags[@]}" -O1 "${warn[@]}" -I "$1" \
+    -o "$2" "$work/refuse.c" "$1/dawn_rt.c" -lm
+}
+
 # -O0 and frame pointers so a leak report names the Dawn function rather than
 # whatever it was inlined into; the answers are read off the plain build.
 build_asan() { # runtime-dir output
@@ -82,7 +97,7 @@ build_asan() { # runtime-dir output
     "${warn[@]}" -I "$1" -o "$2" "$work/live.c" "$1/dawn_rt.c" -lm
 }
 
-# The roster, in the order matrix.txt names it. `dir` holds the two binaries and
+# The roster, in the order matrix.txt names it. `dir` holds the three binaries and
 # receives the transcripts; the verdicts go to $dir/observed.txt as the same
 # `<name> PASS|FAIL` stream whichever build produced them.
 observe() { # dir
@@ -105,6 +120,18 @@ observe() { # dir
   verdict "$dir" spent_ticket_refused \
     "$(grep -qxF 'dawn: continuation discarded after it was already used' \
       "$dir/err.txt" && echo y)"
+
+  # The subshell keeps the limit off everything after it.
+  set +e
+  (ulimit -v "$refuse_vlimit" && exec timeout "$run_timeout" "$dir/refuse") \
+    > "$dir/refuse.out" 2> "$dir/refuse.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail "the refusal build did not finish in ${run_timeout}s"
+  [ "$rc" -lt 128 ] || fail "the refusal build died on signal $((rc - 128))"
+  verdict "$dir" refusal_by_name \
+    "$([ "$rc" -eq 1 ] && [ ! -s "$dir/refuse.out" ] &&
+      cmp -s "$work/refuse.expect.err" "$dir/refuse.err" && echo y)"
 
   set +e
   ASAN_OPTIONS=detect_leaks=1 timeout "$run_timeout" "$dir/asan" \
@@ -142,18 +169,22 @@ field assert > "$work/roster.txt"
 
 echo "== emit =="
 "$root/bin/dawn" __emitc "$here/live.dawn" -o "$work/live.c"
+"$root/bin/dawn" __emitc "$here/refuse.dawn" -o "$work/refuse.c"
+printf '%s\n' "dawn: cannot make a continuation carrier: each live continuation reserves 512 MiB of address space (is \`ulimit -v\` set?)" \
+  > "$work/refuse.expect.err"
 
 echo "== baseline =="
 mkdir -p "$work/base"
 build_plain "$root/runtime/c" "$work/base/plain"
 build_asan "$root/runtime/c" "$work/base/asan"
+build_refuse "$root/runtime/c" "$work/base/refuse"
 observe "$work/base"
 cat "$work/base/observed.txt"
 awk '{ print $1 }' "$work/base/observed.txt" > "$work/ran.txt"
 diff -u "$work/roster.txt" "$work/ran.txt" ||
   fail "matrix.txt names a different roster than run.sh observes"
 if grep -q ' FAIL$' "$work/base/observed.txt"; then
-  cat "$work/base/err.txt" "$work/base/asan.err" >&2
+  cat "$work/base/err.txt" "$work/base/asan.err" "$work/base/refuse.err" >&2
   fail "the unmutated runtime does not satisfy the contract"
 fi
 
@@ -173,6 +204,8 @@ while IFS=$'\t' read -r _ mutation role; do
   build_plain "$dir" "$dir/plain" > "$dir/cc.out" 2>&1 ||
     { cat "$dir/cc.out" >&2; fail "$mutation did not compile"; }
   build_asan "$dir" "$dir/asan" >> "$dir/cc.out" 2>&1 ||
+    { cat "$dir/cc.out" >&2; fail "$mutation did not compile"; }
+  build_refuse "$dir" "$dir/refuse" >> "$dir/cc.out" 2>&1 ||
     { cat "$dir/cc.out" >&2; fail "$mutation did not compile"; }
   observe "$dir"
 

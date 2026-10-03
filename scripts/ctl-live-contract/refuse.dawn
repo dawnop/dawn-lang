@@ -1,0 +1,40 @@
+# The second program the ctl-live contract compiles: eight continuations
+# suspended at once and all held, run under a 4,000,000 KB `ulimit -v`. Every
+# live continuation reserves a carrier stack of DAWN_CTL_STACK_BYTES, which is
+# 512 MiB of address space (runtime/c/dawn_rt.c), and a native process already
+# reserves about 1.7 GB before the first one (the 512 MiB main stack and the
+# 1 GiB slab), so the limit runs out at the fifth carrier. Eight is twice the
+# measured four for margin: the refusal has to happen, and where exactly is
+# not what is being asked.
+#
+# What is asked is how it ends: one line naming address space, exit status 1.
+# The runtime used to print its line and then let the report at exit add a
+# second one about the continuations still held, and that report's `_exit(70)`
+# replaced the 1 (measured on 2026-10-04). Nothing reaches stdout, because the
+# refusal comes before the first print.
+use std/io
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+type Held = Ready(v: Int) | Waiting(k: fn(Int) -> Held)
+
+fn escaping(i: Int) -> Held = {
+  with handle Ask { ask(n) resume k => Waiting(k) }
+  Ready(ask(i) + 1)
+}
+
+fn finish(h: Held) -> Int = match h {
+  Ready(v) -> v
+  Waiting(k) -> finish(k(1))
+}
+
+pub fn main() -> Unit !io = {
+  var hs: List[Held] = []
+  for i in range(0, 8) { hs = hs ++ [escaping(i)] }
+  io.println("holding ${to_string(len(hs))}")
+  var s = 0
+  for h in hs { s = s + finish(h) }
+  io.println("sum ${to_string(s)}")
+}

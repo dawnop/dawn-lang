@@ -1072,8 +1072,9 @@ pair_expect_error "error: not a directory: $PKGHASH_MISSING"$'\n' \
 # The one judgment here where the two drivers are meant to answer differently.
 # A comptime call nests host frames, and the native compiler's host stack is
 # not the JVM's -Xss512m: every native subcommand runs inside io's `Exit`
-# handler, a `ctl` handler, so the whole compiler runs on a 64 MiB
-# continuation carrier. Native therefore folds with a lower call depth
+# handler, a `ctl` handler, so the whole compiler runs on a continuation
+# carrier, which was 64 MiB when this leg was written (512 MiB since
+# 2026-10-04, see leg 11). Native therefore folds with a lower call depth
 # (ir/interp NATIVE_CALL_DEPTH, #417); before it did, `down(20000)` below
 # folded on the JVM and killed dawnc with SIGSEGV and no output at all.
 #
@@ -1134,6 +1135,31 @@ EOF
     echo "OK   comptime depth (heaviest shape under the native limit, exit 0)"
   fi
 fi
+
+# ---- leg 11: deep source nesting fits the compiler's stack ----
+#
+# Parsing and checking recurse on the source's nesting, and no counter bounds
+# that: only the stack does. The native compiler runs on a continuation
+# carrier (leg 10), and while that carrier was 64 MiB a right-nested input of
+# about 62 KB, inside the Playground LSP's 64 KiB source limit, killed `dawnc
+# check` and `dawnc lsp` with SIGSEGV and no output. The carrier is now
+# DAWN_CTL_STACK_BYTES = DAWN_STACK_BYTES (runtime/c/dawn_rt.c), the JVM's
+# -Xss512m. 15,000 nested calls is 45 KB of source; measured on 2026-10-04 it
+# checks in about 1 s and 195 MB on the native compiler and crashes it from
+# about 10,000 levels on a 64 MiB carrier, so shrinking the carrier back turns
+# this red. This shape and not nested parentheses: those cost the same stack
+# per level but 20 to 30 s at the depth that crashed.
+echo "== deep source nesting, JVM and native =="
+DEEP_NEST="$OUT/deep_nest.dawn"
+python3 - "$DEEP_NEST" <<'PYEOF'
+import sys
+n = 15000
+with open(sys.argv[1], "w") as f:
+    f.write("fn g(x: Int) -> Int = x\n")
+    f.write("fn f() -> Int = " + "g(" * n + "1" + ")" * n + "\n")
+    f.write('pub fn main() -> Unit !io = println("${f()}")\n')
+PYEOF
+pair_expect_exit 0 "check (15,000 nested calls)" check "$DEEP_NEST"
 
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
 echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, and native comptime stops at its depth limit"

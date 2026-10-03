@@ -12,7 +12,9 @@ The first three are the standing form of knife 5's hand-run negative controls
 was observed to do when it was run by hand. The last two are knife 6's, and
 they are here rather than hand-run for the same reason: `discard` running the
 releases is a behaviour with no other watcher, and a runtime that stopped
-running them prints exactly what a correct one prints on stdout.
+running them prints exactly what a correct one prints on stdout. The last
+one is the refusal path's exit status, which went to 70 for the same want of
+a flag until 2026-10-04.
 """
 
 from pathlib import Path
@@ -89,6 +91,17 @@ MUTATIONS = {
   }
 """,
         "",
+    ),
+    # The refusal path forgets to mark the process as dying, which is what it
+    # did before 2026-10-04: exit(1) then runs the report at exit, a second
+    # line about the continuations still held goes to stderr, and `_exit(70)`
+    # replaces the status the refusal asked for.
+    "ctl-refusal-reports-live": (
+        """static _Noreturn void dawn_ctl_carrier_refused(const char *why) {
+  dawn_ctl_dying = true;
+""",
+        """static _Noreturn void dawn_ctl_carrier_refused(const char *why) {
+""",
     ),
 }
 

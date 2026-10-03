@@ -321,16 +321,18 @@ pub fn ct_world_add(
 # 128m trades this diagnostic for a raw StackOverflowError.
 const MAX_CALL_DEPTH: Int = 100000
 
-# The native compiler's, far lower, because its stack is 8 times smaller and
+# The native compiler's, far lower, because its stack was 8 times smaller and
 # its frames are bigger. Every native subcommand runs inside io's `Exit`
 # handler, a `ctl` handler, so the whole compiler runs on a continuation
-# carrier: 64 MiB (DAWN_CTL_STACK_BYTES in runtime/c/dawn_rt.c), not the 512
-# MiB main stack. Measured 2026-10-03 on several call shapes (issue #417):
-# the deepest comptime recursion that folds before the host stack runs out is
-# 10,400 for `1 + f(n - 1)`, 5,800 for a `match` on a list, and 5,200 for a
-# body with a block, a `let` and a `match` -- 2,800 of the last before ceval's
-# arms became separate functions. 1,500 leaves a factor of 3.5 under the
-# heaviest of them, so the counter, not the stack, is what stops the run.
+# carrier (DAWN_CTL_STACK_BYTES in runtime/c/dawn_rt.c). That was 64 MiB when
+# this was measured; since 2026-10-04 it is the 512 MiB of DAWN_STACK_BYTES,
+# so the figures below are a floor, not yet re-measured on the larger stack.
+# Measured 2026-10-03 on several call shapes (issue #417): the deepest
+# comptime recursion that folds before the host stack runs out is 10,400 for
+# `1 + f(n - 1)`, 5,800 for a `match` on a list, and 5,200 for a body with a
+# block, a `let` and a `match` -- 2,800 of the last before ceval's arms became
+# separate functions. 1,500 leaves a factor of 3.5 under the heaviest of them,
+# so the counter, not the stack, is what stops the run.
 const NATIVE_CALL_DEPTH: Int = 1500
 
 const MAX_FAILURE_FRAMES: Int = 16
