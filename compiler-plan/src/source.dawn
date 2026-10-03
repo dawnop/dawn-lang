@@ -16,8 +16,8 @@ use diagnostic.{Diag, diag}
 use envmem
 use procmem
 use manifestv.{
-  ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, mcoord_show, validate,
-  check_v2_name
+  ManifestV, VPath, VUrl, SemV, MCoord, semv_show, semv_lt, semv_compat_class, mcoord_show,
+  validate, check_v2_name
 }
 use pkgfetch
 use fspath/fspath
@@ -518,13 +518,58 @@ fn url_pkg_root(
   }
 }
 
+## The selected requirement for one name: the highest version, the first
+## requirement at that version on a tie (MVS, package-design.md §4.5).
+fn max_req(rlist: List[UrlReq]) -> UrlReq = {
+  var win = rlist[0]
+  for r in rlist { if semv_lt(win.version, r.version) { win = r } }
+  win
+}
+
+## One diagnostic per requirement whose compatibility class is not the
+## selected version's (package-design.md §6.3). This is a check after
+## selection, not a constraint inside it: selection stays one pass with no
+## upper bounds and no backtracking, and a graph that crosses a class fails
+## instead of quietly handing `win` to a requirer it may break. A selected
+## major of 2 or more under a name that does not carry it is left to the
+## v2-in-name rule, which reports it after this: telling the lagging side to
+## raise its requirement to a version that rule refuses would be wrong advice.
+## So in practice this catches 0.x and 0 to 1. The report sits on the lagging manifest,
+## because raising that requirement is the fix: the other side cannot be
+## lowered under MVS without also lowering whatever made it ask for more.
+fn class_conflicts(name: String, rlist: List[UrlReq], win: UrlReq) -> List[LocDiag] = {
+  if len(check_v2_name(name, win.version, 0, 0)) > 0 { return [] }
+  let want = semv_compat_class(win.version)
+  var out: List[LocDiag] = []
+  var seen: Set[(String, String)] = set.empty()
+  for r in rlist {
+    let have = semv_compat_class(r.version)
+    let key = (r.mf_path, semv_show(r.version))
+    if have != want && not set.has(seen, key) {
+      seen = set.insert(seen, key)
+      out = out ++ [LocDiag { path: r.mf_path, d: diag(
+        "package `" ++ name ++ "` is required at " ++ semv_show(r.version) ++ " by " ++
+          r.mf_path ++ " and at " ++ semv_show(win.version) ++ " by " ++ win.mf_path ++
+          ", and " ++ have ++ " is not compatible with " ++ want,
+        0,
+        0,
+        "one version per package is selected, so " ++ r.mf_path ++ " would get " ++
+          semv_show(win.version) ++ ": raise its `" ++ name ++ "` requirement to " ++
+          semv_show(win.version) ++ " (a 0.x minor, a 0.0.x patch and 0 to 1 break like a major)"
+      ) }]
+    }
+  }
+  out
+}
+
 ## Minimal Version Selection over `[deps.<alias>]` requirements (the Kotlin
 ## selectUrlDeps, package-design.md §4.5): walk the whole requirement graph —
 ## every version any reachable manifest mentions — then pick the maximum
 ## required version per name. The name is the package's own manifest name, not
 ## the consumer's alias (§4.3: the alias is local sugar), so two consumers
 ## spelling one package differently still share a single selection. Same
-## version under two hashes is an integrity error. Returns name → chosen
+## version under two hashes is an integrity error, and so are requirements on
+## one name in two compatibility classes (`class_conflicts`). Returns name → chosen
 ## package root (None = errored) plus hash:subdir → real name for the linker.
 fn select_url_deps(
   root_dir: String,
@@ -601,8 +646,7 @@ fn select_url_deps(
   var resolved: Map[String, Option[String]] = map.empty()
   for name in map.keys(reqs) {
     let rlist = map.get(reqs, name).expect("reqs")
-    var win = rlist[0]
-    for r in rlist { if semv_lt(win.version, r.version) { win = r } }
+    let win = max_req(rlist)
     var conflict = false
     for r in rlist { if r.version == win.version && r.hash != win.hash { conflict = true } }
     if conflict {
@@ -613,6 +657,12 @@ fn select_url_deps(
         0,
         "the same version must mean the same content everywhere; align the `hash` values"
       ) }]
+      resolved = map.insert(resolved, name, None)
+      continue
+    }
+    let crossed = class_conflicts(name, rlist, win)
+    if len(crossed) > 0 {
+      diags = diags ++ crossed
       resolved = map.insert(resolved, name, None)
       continue
     }
@@ -1042,6 +1092,88 @@ test "mirror failure state retries another url but not another alias" {
   let subdir_failed = remember_subdir_failure(url_failures_empty(), hash, "one")
   assert subdir_failure_seen(subdir_failed, hash, "one")
   assert not subdir_failure_seen(subdir_failed, hash, "two")
+}
+
+fn req_at(version: String, mf_path: String) -> UrlReq = {
+  let parts = str.split(version, ".")
+  UrlReq {
+    url: "file:///" ++ version ++ ".zip",
+    version: SemV {
+      major: parse_int(parts[0]).expect("major"),
+      minor: parse_int(parts[1]).expect("minor"),
+      patch: parse_int(parts[2]).expect("patch")
+    },
+    hash: "h-" ++ version,
+    subdir: "",
+    mf_path: mf_path
+  }
+}
+
+## The selection and the class check for requirements `a` (from a/dawn.toml)
+## and `b` (from b/dawn.toml) on one name.
+fn select_pair(a: String, b: String) -> (String, List[LocDiag]) = {
+  let rlist = [req_at(a, "a/dawn.toml"), req_at(b, "b/dawn.toml")]
+  let win = max_req(rlist)
+  (semv_show(win.version), class_conflicts("foo", rlist, win))
+}
+
+test "requirements on one name across compatibility classes are rejected" {
+  for pair in [("0.3.0", "1.0.0"), ("0.1.0", "0.2.0"), ("0.0.1", "0.0.2")] {
+    let (lo, hi) = pair
+    for flip in [false, true] {
+      let (got, ds) = if flip { select_pair(hi, lo) } else { select_pair(lo, hi) }
+      # selection itself is unchanged: still the maximum
+      assert got == hi
+      assert len(ds) == 1
+      # the report sits on the lagging manifest, and it names both
+      let lag = if flip { "b/dawn.toml" } else { "a/dawn.toml" }
+      let lead = if flip { "a/dawn.toml" } else { "b/dawn.toml" }
+      assert ds[0].path == lag
+      assert ds[0].d.msg == "package `foo` is required at " ++ lo ++ " by " ++ lag ++
+        " and at " ++ hi ++ " by " ++ lead ++ ", and " ++
+        semv_compat_class(req_at(lo, "").version) ++ " is not compatible with " ++
+        semv_compat_class(req_at(hi, "").version)
+      # the hint says which side to raise, and to what
+      assert str.contains(ds[0].d.hint, lag ++ " would get " ++ hi)
+      assert str.contains(ds[0].d.hint, "raise its `foo` requirement to " ++ hi)
+    }
+  }
+  let (_, ds) = select_pair("0.3.0", "1.0.0")
+  assert ds[0].d.msg ==
+    "package `foo` is required at 0.3.0 by a/dawn.toml and at 1.0.0 by b/dawn.toml, " ++
+    "and 0.3.x is not compatible with 1.x"
+}
+
+test "requirements on one name within a compatibility class select the highest" {
+  for pair in [("0.3.0", "0.3.4"), ("1.0.0", "1.7.0")] {
+    let (lo, hi) = pair
+    assert select_pair(lo, hi) == (hi, [])
+    assert select_pair(hi, lo) == (hi, [])
+  }
+  # one lagging manifest asking twice is reported once; a third requirer in
+  # the selected class is not reported at all
+  let rlist = [
+    req_at("0.2.0", "a/dawn.toml"),
+    req_at("0.2.0", "a/dawn.toml"),
+    req_at("0.3.0", "b/dawn.toml"),
+    req_at("0.3.1", "c/dawn.toml")
+  ]
+  let win = max_req(rlist)
+  assert semv_show(win.version) == "0.3.1"
+  let ds = class_conflicts("foo", rlist, win)
+  assert len(ds) == 1
+  assert ds[0].path == "a/dawn.toml"
+}
+
+test "a major the name does not carry is left to the v2-in-name rule" {
+  # `foo` at 2.0.0 is refused by `check_v2_name`; advising the 1.0.0 side to
+  # raise to it would point at a version that cannot be selected
+  let (got, ds) = select_pair("1.0.0", "2.0.0")
+  assert got == "2.0.0"
+  assert ds == []
+  # under a name that carries the major the classes are compared as usual
+  let rlist = [req_at("1.0.0", "a/dawn.toml"), req_at("2.0.0", "b/dawn.toml")]
+  assert len(class_conflicts("foo2", rlist, max_req(rlist))) == 1
 }
 
 ## `st` with a link at `at` to `target` and `files` readable through it.
