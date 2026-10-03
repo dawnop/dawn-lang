@@ -59,6 +59,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [jvm-operand-jump-design.md](jvm-operand-jump-design.md) | current | #80 的 JVM 操作数循环跳转栈纪律：局部暂存保留求值顺序，不改变 native RC。 |
 | [parser-recovery-design.md](parser-recovery-design.md) | current | 诊断批 P1（#190 #192 #193 #195 第 1 步）：语句同步按括号深度、字面量缺逗号就地恢复、头部记录字面量要括号、`=`/`..` 专门诊断、未闭合括号按缩进启发报在开括号。只改无效输入的诊断。 |
 | [diag-notes-design.md](diag-notes-design.md) | current | #195 第 2 步：诊断的次级位置 `Diag.notes`（`Note = { msg, lo, hi }`），与主 span 同一套 owner 相对偏移；CLI 渲染 `note:` 块，LSP 按 client 能力出 `relatedInformation`；首个使用者是未闭合括号。 |
+| [source-location-design.md](source-location-design.md) | current | #401 与 #396 一线：烘进产物的位置用展示路径（项目根相对 `src/main.dawn`、单文件入口目录相对 `p.dawn`、`[deps]` 为 `<包名>/<路径>`，std 无），同一项目从任何 cwd 构建字节相同；Playground 运行输出也剥工作目录。L1 已落地，L2 `panic`/`todo`/`assert` 带位置、L3 `dbg`、L4 `caller()` 默认参数为已裁刀序；不做运行期栈迹。 |
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 与已落地的完整 v2 launcher generation：framed digests、pre/post re-plan、可恢复 commit-marker。 |
 | [builtin-fn-value-lowering-design.md](builtin-fn-value-lowering-design.md) | current | #283 #185 #186：builtin 取作函数值时按直接调用的同一条 lowering 走（包装体是一次 `XCallBuiltin`）；comptime 解释器按 lowering 的三分对齐（有臂 / lowering 已改写 / 拒绝）；`parse_float` 的原语改为 internal intrinsic `float_of_decimal`，不再按模块路径认。 |

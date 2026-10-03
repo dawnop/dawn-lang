@@ -37,6 +37,8 @@ use check/tast.{
 pub type Resolver = {
   base: Int,
   span: Option[Int],
+  # the module's position path (`Cx.site_path`): baked into the program, so
+  # it is the tree's name for the file and never the command line's (#401)
   path: Option[String],
   line_starts: List[Int]
 }
@@ -234,13 +236,13 @@ test "an unowned tree is already in file coordinates" {
 
 test "an unwrap message names the line the declaration sits on now" {
   let starts = [0, 40, 90]
-  let here = owned(100, 130, Some("m.dawn"), starts)
-  let moved = owned(45, 75, Some("m.dawn"), starts)
+  let here = owned(100, 130, Some("src/m.dawn"), starts)
+  let moved = owned(45, 75, Some("src/m.dawn"), starts)
   let raw = XUnwrap(XUnit(0, 1), "unwrapped None from f()", 0, 4, TyInt)
   assert expr(here, raw) ==
-    XUnwrap(XUnit(100, 101), "unwrapped None from f() at m.dawn:3", 100, 104, TyInt)
+    XUnwrap(XUnit(100, 101), "unwrapped None from f() at src/m.dawn:3", 100, 104, TyInt)
   assert expr(moved, raw) ==
-    XUnwrap(XUnit(45, 46), "unwrapped None from f() at m.dawn:2", 45, 49, TyInt)
+    XUnwrap(XUnit(45, 46), "unwrapped None from f() at src/m.dawn:2", 45, 49, TyInt)
   # a context with no source names no site, the way the checker named none
   let anonymous = owned(100, 130, None, starts)
   assert expr(anonymous, raw) == XUnwrap(XUnit(100, 101), "unwrapped None from f()", 100, 104, TyInt)

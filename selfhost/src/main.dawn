@@ -51,6 +51,7 @@ use java "java.lang.Thread"
 use java "java.lang.management.ManagementFactory"
 use java "java.util.List"
 use std/set
+use std/memfs
 use jvm/codegen.{
   no_override, gen_adt
 }
@@ -2467,4 +2468,67 @@ test "`dawn run` stops taking options at the target" {
     let _ = parse_run_args(["prog.dawn", "--closure"])
     ()
   }) == (Some(2), usage, "")
+}
+
+# ---- the position path is the tree's, not the command line's (#401) ----
+
+## A program whose only runtime failure is an `expr!` on line 4, the one
+## construct that bakes a source position into the classes it compiles to.
+const SITE_PROGRAM: String =
+  "fn f() -> Option[Int] = None\n\npub fn main() -> Unit !io = {\n  println(to_string(f()!))\n}\n"
+
+## `dawn __emit <target> -o /out`, run with `cwd` as the working directory of
+## both the file system and the environment, and every class it wrote, by
+## path. The two answer together because they are one fact on a host: a
+## relative target is read against the directory `io.cwd()` names.
+fn emit_from(cwd: String, target: String, sources: List[(String, String)]) -> List[(String, Bytes)] !io = {
+  var files = memfs.empty(cwd)
+  for pr in sources {
+    let (p, t) = pr
+    files = memfs.put(files, p, t)
+  }
+  let (outcome, table) = memfs.with_fs(files, () =>
+      procmem.with_proc_table([], () =>
+          envmem.with_env_table(cwd, [], () =>
+              consolemem.with_console_table(() =>
+                  exitmem.with_exit_capture(() => run_emitrt([target, "-o", "/out"]))))))
+  let (((status, console), _), _) = outcome
+  if status != None { panic("__emit ${target} from ${cwd} stopped: " ++ consolemem.err_text(console)) }
+  var out: List[(String, Bytes)] = []
+  for p in memfs.file_paths(table) {
+    if str.starts_with(p, "/out/") {
+      out = out ++ [(p, map.get(table.files, p).expect("listed"))]
+    }
+  }
+  out
+}
+
+fn classes_say(classes: List[(String, Bytes)], text: String) -> Bool = {
+  for c in classes {
+    let (_, bs) = c
+    if str.contains(bytes.decode_utf8_lossy(bs), text) { return true }
+  }
+  false
+}
+
+test "a project compiles to the same bytes from any working directory" {
+  # `dawn build .` inside the project and `dawn build proj` beside it used to
+  # bake `./src/main.dawn` and `proj/src/main.dawn` into `f()!`'s message, so
+  # the same tree gave two different jars depending on where the command ran.
+  let sources = [("/w/proj/src/main.dawn", SITE_PROGRAM)]
+  let inside = emit_from("/w/proj", ".", sources)
+  let beside = emit_from("/w", "proj", sources)
+  let absolute = emit_from("/elsewhere", "/w/proj", sources)
+  assert len(inside) > 0
+  assert inside == beside && inside == absolute
+  assert classes_say(inside, "unwrapped None from f() at src/main.dawn:4")
+}
+
+test "a single file names itself from its own directory, and no absolute path is baked" {
+  let sources = [("/w/single/sub/p.dawn", SITE_PROGRAM)]
+  let absolute = emit_from("/elsewhere", "/w/single/sub/p.dawn", sources)
+  let relative = emit_from("/w/single/sub", "p.dawn", sources)
+  assert absolute == relative
+  assert classes_say(absolute, "unwrapped None from f() at p.dawn:4")
+  assert not classes_say(absolute, "/w/single")
 }
