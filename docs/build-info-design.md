@@ -1,9 +1,9 @@
 # 构建来源：构建清单与 `dawn version -m`
 
-> 状态：**current**（P1 已落地；P2、P3 为已裁决、未实现的刀序）。2026-10-03，分支 `feat/build-info-planner`。
+> 状态：**current**（P1、P2 已落地；P3 为已裁决、未实现的刀序）。2026-10-03，P1 分支 `feat/build-info-planner`，P2 分支 `feat/build-info-jar`。
 > 依据：裁决 `agent-handoff/ruling-build-provenance-20261003.md`，调研
 > `agent-handoff/research-build-provenance-report-20261003.md`（§一现状、§二一名一份、§4.2 摘要与 B==C、§五刀序）。
-> 本文是那份调研的压缩，加上 P1 的落地说明。
+> 本文是那份调研的压缩，加上 P1、P2 的落地说明。P2 推翻了调研 §4.2 的一处取法（产物的工具链行写什么），见 4.4。
 
 ## 一、问题
 
@@ -23,12 +23,12 @@ L1（#401，[source-location-design.md](source-location-design.md)）之后，�
 
 ## 二、裁决与刀序
 
-采「产物内嵌构建清单 + `dawn version -m`」；位置串不带版本，panic 不加构建行（理由见第六节）。
+采「产物内嵌构建清单 + `dawn version -m`」；位置串不带版本，panic 不加构建行（理由见第七节）。
 
 | 刀 | 内容 | 状态 |
 |---|---|---|
 | P1 | compiler-plan 的 `PkgR` 带声明版本与来源；位置无关的源码摘要；`dawn version -m <project dir>` 不构建，只跑 Planner 打印清单 | 本文落地 |
-| P2（含原 P0） | `jarw` 写 `META-INF/dawn/build-info`（另加 MANIFEST 属性 `Dawn-Version`）；`dawn version -m <jar>`；`--version` 打 `VERSION` + 工具链源码摘要短串，读的是自己 jar 里的 build-info；兑现或删掉 `--help` 的「and commit」；Playground `/health` 带摘要 | 未实现 |
+| P2（含原 P0） | `jarw` 写 `META-INF/dawn/build-info`（另加 MANIFEST 属性 `Dawn-Version`）；`dawn version -m <jar>`；`--version` 打 `VERSION` + 工具链源码摘要短串，读的是自己 jar 里的 build-info；删掉 `--help` 的「and commit」；Playground `/health` 带摘要 | 本文落地（第六节） |
 | P3 | dawnc 的 native/wasm 产物同样内嵌（只读数据段 / wasm custom section）；`version -m <bin>`；native-fixpoint 实跑 | 未实现 |
 
 P 线与 L2 至 L4 没有代码依赖。
@@ -49,11 +49,13 @@ selfhost: dawn 0.82.0
 	dep	sha2	2.0.0	s1:d3992400…
 	java	io.get-coursier:interface:1.0.28
 	java	org.ow2.asm:asm:9.7.1
+	build	b1:2bfef5fb…
 
 $ dawn version -m app             # 一个 url 依赖
 app: dawn 0.82.0
 	main	app	(devel)	s1:a6b8abe3…
 	dep	lib	1.1.0	s1:9a0e7ad6…	d1:d68f38e3…
+	build	b1:…
 ```
 
 `inflate3` 与 `json2` 是真名：selfhost 的 manifest 用别名 `inflate`、`json` 引它们，清单不写别名。
@@ -74,8 +76,11 @@ app: dawn 0.82.0
   源码与 manifest 的函数，与工作目录、缓存根、`[deps]` 声明顺序都无关。
 - 依赖表是**传递闭包**：路径依赖的依赖、url 依赖的依赖都列，与产物里实际链接的包一一对应。
 
-P2 往产物里写时在最前面加一行 schema（`dawn-build-info 1`，与 package-design「每个文件第一行写 schema 版本」一致），
-再加一行工具链；P1 不构建产物，没有工具链源码摘要可打，首行只有 `VERSION`。
+`dawn version -m` 的输出最后还有一行 `\tbuild\tb1:<64 位十六进制>`：上面各行（每行连同换行符）的 SHA-256，
+叫**清单摘要**（P2 加，见 6.2）。它是 `dawn --version` 末尾那串短摘要的全长，用来把一个工具链和它的源码、它的 jar 对上。
+
+P2 往产物里写的文件在这些行前面加两行：schema 行 `dawn-build-info 1`（与 package-design「每个文件第一行写 schema 版本」一致）
+与工具链行 `toolchain\tdawn <VERSION>`（写这个 jar 的工具链的 `VERSION`）。`build` 行不写进文件，读的时候现算。
 
 ## 四、源码摘要（`s1:`）
 
@@ -113,20 +118,32 @@ selfhost 的 `../compiler-plan` 正属此类。
 同一个包无论走路径还是走 url 引入，`s1` 相同，可以直接比。所以 url 行两个都写：`s1` 用来跨来源比较，
 `d1` + `subdir` 用来回溯到 manifest。
 
-### 4.4 B==C 推导（给 P2）
+### 4.4 B==C 推导，与产物的工具链行为什么只有 `VERSION`
 
-P2 里工具链的身份取**自身源码摘要**，不取「构建我的那个 jar」的哈希。记 `S` 为 HEAD 的 selfhost 源码，
-`id(S)` 为 `(VERSION, s1 摘要)`，`J(x)` 为编译器 `x` 编出来的 jar：
+记 `S` 为 HEAD 的 selfhost 源码，`R(S)` 为它的清单行（第三节，只是源码与 manifest 的函数），`J(x)` 为编译器 `x` 编出来的 jar。
 
-- 种子编出 A，A 的清单写 `id(S)`；A 编出 B，B 的清单写的仍是被编的源码 `S` 的 `id(S)`；B 编出 C，同上。
-  清单只是被编源码的函数，B 与 C 的清单逐字节相同，B==C 的推导与没有清单时一样成立。
-- 反过来，若写的是「构建者 jar 的 sha256」：B 记 `sha(A)`，C 记 `sha(B)`，A≠B，于是 B≠C。P2 的负控就是把
-  取法故意改成这样，fixpoint 应当红。
+- 种子编出 A，A 编出 B，B 编出 C。B 与 C 编的都是 `S`，清单行都是 `R(S)`；工具链行都是 `toolchain\tdawn <HEAD 的 VERSION>`
+  （A 与 B 都由 `S` 编成，`VERSION` 是 `S` 里的常量）。清单整份是被编源码的函数，B==C 的推导与没有清单时一样成立。
+- 工具链自己的身份（`--version` 打的那串）取**自己 jar 里清单行的摘要**，即 `b1(R(S))`。它也只是 `S` 的函数：
+  任何由 `S` 编成的工具链，不论谁编的，都报同一个值。
+- 若写「构建者 jar 的 sha256」：B 记 `sha(A)`，C 记 `sha(B)`，A≠B，于是 B≠C。P2 的负控就是这么改的，`build-release-jar.sh` 红在 `cmp`（6.5）。
 - 时间戳同理不能写（破可复现）。`jarw` 的条目时间已经钉死在 2020-01-01，build-info 条目照用。
 
-工具链的 `s1` 要覆盖整个工具链源码：selfhost 自己（`main` 行）与它的传递依赖（compiler-plan、fspath、json、
-sha2、inflate3 等 `dep` 行）。P2 的工具链摘要短串取「清单行（不含首行）的 SHA-256」即可，具体在 P2 定。
-std 以 `stdsrc` 的形式嵌在 selfhost 源码树里，已在 `main` 行的 `src/` 之内。
+**调研 §4.2 原本想在产物的工具链行写构建者的身份**（构建者 jar 里清单行的摘要，即「B 里写 A 的自我身份」），P2 没有这么做，理由是两条：
+
+1. **过渡期 B≠C。** 种子 v0.82.0 早于 P2，它编出的 A 没有清单。A 编 B 时读不到自己的身份，只能写「未知」；B 有清单，B 编 C 时写 `b1(R(S))`。
+   于是 B≠C，fixpoint 与 release 在 P2 合入到下一次推进种子之间一直红。`selfhost/src` 不能等种子。
+2. **清单格式一改就再红一次。** 即使种子已经会写清单，A 的清单行是**种子的代码**算的，B 的是 **HEAD 的代码**算的。
+   B 的工具链行 = `b1(种子算的 R(S))`，C 的 = `b1(HEAD 算的 R(S))`。将来只要改了摘要定义或行的渲染（加一列、改排序），二者就不同，
+   B≠C 要等到种子再推进一次才恢复。这等于给清单格式加了一条「改了就要发版过渡」的约束，与 `selfhost/src` 只准用种子已支持的语言特性是同一类负担，没有必要背。
+
+所以产物只写构建者的 `VERSION`（与 MANIFEST 的 `Dawn-Version` 相同），不写构建者的摘要。代价是：一个用户程序的 jar
+只能说「由 dawn 0.82.0 编成」，分不出是 release 还是之后某个 main 构建编的。工具链本身仍然可以完全追溯：
+`dawn --version` 打它自己的 `b1:` 短串，`dawn version -m <它的 jar>` 打全长与所有行，`dawn version -m selfhost` 对一棵检出算出同一个值。
+若将来确实需要产物记构建者摘要，前提是先把「格式一改就红」解决掉（例如让 B==C 的比较排除工具链行，那要改 release 配方的
+`cmp`，是另一个裁决）。
+
+std 以 `stdsrc` 的形式嵌在 selfhost 源码树里，已在工具链 `main` 行的 `src/` 之内。
 
 ## 五、P1 的落地
 
@@ -146,7 +163,88 @@ std 以 `stdsrc` 的形式嵌在 selfhost 源码树里，已在 `main` 行的 `s
 项目没有 `src/` 报 `has no src/ folder`；摘要失败（符号链接、读不了）报 `error:` 加原因。
 JVM 驱动先做；dawnc 的 `version` 仍只打版本，随 P3 补。
 
-## 六、不做的（理由）
+## 六、P2 的落地
+
+### 6.1 jar 里的东西
+
+`dawn build` 写的每个 jar 多两样，都在 `jvm/jarw.dawn`：
+
+- MANIFEST 属性 `Dawn-Version: <VERSION>`，放在 `Add-Exports` 之后、`Class-Path` 之前。只为了 `unzip -p x.jar META-INF/MANIFEST.MF`
+  不用 dawn 就能看出版本，不是主体。
+- 条目 `META-INF/dawn/build-info`，紧跟 MANIFEST，写在所有 class 之前，同一套钉死的时间戳与 STORED 写法。内容由
+  `compiler_plan/buildinfo.render_file` 生成。工具链自己的 jar 照录（摘要随源码变）：
+
+```
+dawn-build-info 1
+toolchain	dawn 0.82.0
+	main	selfhost	(devel)	s1:2fb073b9…
+	dep	compiler_plan	(devel)	s1:ba541ef8…
+	dep	fspath	1.0.0	s1:344d5ab7…
+	dep	inflate3	3.0.0	s1:dd803a17…
+	dep	json2	2.0.1	s1:d1f6e54e…
+	dep	sha2	2.0.0	s1:d3992400…
+	java	io.get-coursier:interface:1.0.28
+	java	org.ow2.asm:asm:9.7.1
+```
+
+清单不经 Core、不经 `__emit` 的 class 目录，所以 emit 语料、Core golden、prev-diff 都看不见它；它只在 jar 里。
+
+### 6.2 清单摘要 `b1:` 与 `--version`
+
+- `b1:` = SHA-256（清单行文本），清单行文本 = 每行 `render_row` 加换行，从 `main` 到最后一行 `java`，不含 schema 行、工具链行、`build` 行。
+  `buildinfo.manifest_digest`。P1 备注 2 的定义。
+- `dawn --version` 打 `dawn 0.82.0 (selfhost) b1:2bfef5fb3622`：`VERSION`，加上**自己 jar** 的清单摘要前 12 位（`short_digest`）。
+  「自己 jar」是装着入口类 `main.class` 的那个 jar（`jarw.own_build_info`，经 jar: URL 读条目），不是 class path 上第一个
+  `META-INF/dawn/build-info`：问的是「我是谁」，class path 上可以有别的 dawn 产物。裁决 5.4(1) 选的 (ii)：读，不编进常量。
+- 读不到（不是从 jar 跑的、jar 是旧 dawn 写的没有清单、清单读不懂）时只打 `dawn 0.82.0 (selfhost)`：缺省，不报错，也不猜。
+- `dawn version` 不带参数与 `--version` 同一行。
+
+`--help` 原来写「print the toolchain version and commit」，从 M8 起就没打过 commit。**删掉「commit」，改成「and the digest of the
+sources it was built from」**，不兑现，理由：提交号不是源码的函数。tarball、`git archive`、脏树、补丁都没有可信的提交号；
+要拿就得在构建时读 git（裁决 5.4 的 (iii)），那是把构建机的状态写进产物，正是第七节不做的事。清单摘要对同一份源码给同一个值，
+对 tarball 与检出给同一个值，`dawn version -m selfhost` 能在任何一棵树上复算，这是提交号做不到的。
+
+### 6.3 `dawn version -m <jar>`
+
+`-m` 后的参数是目录就照 P1 跑 Planner，是文件就当 jar 读条目；两者输出同一形状：首行 `<参数>: dawn <VERSION>`，各行，最后 `build` 行。
+读 jar 时首行的 `VERSION` 是**写这个 jar 的工具链**的（清单工具链行），各行逐字节取自 jar，不重算，所以两份列表可以直接 diff。
+对工具链自己：`dawn version -m build/dawn-selfhost.jar` 与 `dawn version -m selfhost` 除首行外相同，`build` 行的前 12 位就是 `--version` 末尾那串。
+
+错误面：参数不存在 `no such file or directory: <p>`（P1 时是 `not a directory`）；打不开为 jar `cannot read <p> as a jar: <原因>`；
+是 jar 但没有条目 `<p> carries no build manifest (META-INF/dawn/build-info): it was not written by \`dawn build\`, or was written by a dawn from before build manifests`；
+条目 schema 不认识或形状不对，报 `parse_file` 的原因（不认识的 schema 拒绝，不猜它的行）。
+
+### 6.4 单文件 `dawn build x.dawn`
+
+单文件没有 `dawn.toml`，P1 的 `build_rows` 对它返回 Err。P2 的决定：
+
+- `main` 行写 `(unnamed)`、`(devel)`，摘要取**这次加载实际读进来的根包源文件**：入口文件加上它经 `use` 读到的同目录（或同 `src/`）文件，
+  每个以 `(unnamed)/<位置路径>` 命名（位置路径就是 L1 的 `site_path`，已经与 cwd 无关），帧与 `s1` 相同（`buildinfo.file_rows`、`texts_digest`）。
+  P1 建议的「只写 main 行」只够没有 `use` 的单文件；只摘要入口文件会漏掉它读到的兄弟文件，等于少说了产物的内容。
+- 文件若在某个项目的 `src/` 下，加载会链接那个项目的 `[deps]`，所以 `dep`/`java` 行照 Planner 写（可能是实际用到的超集，
+  超集不影响「同摘要即同源码」）。
+- 不对整个目录做摘要：单文件的目录可能是 `~` 或 `examples/`，与这次构建无关的文件不该进摘要，也不该被读一遍。
+
+项目目录的 `--closure` 构建仍用 `build_rows`（整棵 `src/`），与 `version -m <dir>` 一致；也是超集。
+
+### 6.5 负控与实测
+
+- **两处、两 cwd、两缓存根字节相同**：`main.dawn` 测试「a jar's build manifest is the same bytes from two places…」，同一项目两份临时检出，
+  不同 cwd、不同 `DAWN_PKG_CACHE`，`build_manifest` 输出相同且不含检出路径。CLI 层：带 url 依赖的项目在两个 cwd、两个缓存根下
+  各 `dawn build`，`unzip -p … META-INF/dawn/build-info` 逐字节相同（数字在 P2 报告里）。
+- **误用构建者 jar 哈希时 B==C 变红**：把工具链行改成写构建者 jar 的 sha256，`scripts/build-release-jar.sh` 在 `cmp stage-b stage-c` 处红；复原后绿。
+- **清单被删时报清楚的错**：`jarw` 测试（没有条目是 `Ok(None)`，不是 jar 是 `Err`）与 `main.dawn` 测试（条目不是清单时报 schema 错），
+  CLI 层用 `zip -d` 删掉条目后 `version -m` 报上面的「carries no build manifest」。
+
+### 6.6 没有覆盖的
+
+- **`--std`/`DAWN_STD` 指定的 std 目录**不在清单里。bin/dawn 总是把 `DAWN_STD` 设成检出的 `std/`，所以经 bin/dawn 构建的用户程序编进的是
+  那个目录的 std，而工具链行只说 `VERSION`。`std/VERSION` 与工具链 `VERSION` 由测试保持相等，内容一般也与 `stdsrc` 同步，但清单不证明这一点。
+  要证明需要一行 `std`（std 目录的摘要），留给 P3 一起议。
+- **`dawn build --native`**（GraalVM native-image）：中间 jar 里有清单，native-image 默认不收资源，二进制里没有。P3 与 dawnc 产物一起做。
+- **dawnc 的 `version`** 仍只打版本（P3）。
+
+## 七、不做的（理由）
 
 - **位置串带版本**（`web6@6.0.0/server.dawn`）：路径依赖的版本不可信、没有哈希；改动落在 emit 语料与 Core golden 上，
   web 每次升版都动；`@` 串不是任何文件系统路径；等于重开 L1 刚定的形状。
@@ -160,4 +258,8 @@ JVM 驱动先做；dawnc 的 `version` 仍只打版本，随 P3 补。
   不是编译器的事。
 - **在 `source_plan` 里算摘要**：见第五节，给每次编译加一次全量读。
 - **`version -m <file.dawn>`**：单文件没有 manifest，也就没有依赖表；`main` 行只剩一个摘要，用 `dawn __pkghash` 已能回答。
+  （`dawn build x.dawn` 的 jar 有清单，见 6.4，`version -m <那个 jar>` 能读。）
+- **产物的工具链行写构建者的清单摘要**：过渡期与清单格式每次改动都破 B==C，见 4.4。
+- **`--help` 兑现「commit」**：提交号不是源码的函数，见 6.2。
+- **清单进 `__emit` 的 class 目录或 Core**：那会让 emit 语料与 Core golden 随依赖版本动，正是 L1 与本线都在避开的。
 - **0.x→1.x 不换名被 MVS 当成同一个包**：调研 §二的顺带观察，裁决另起内部调研，不在本线。

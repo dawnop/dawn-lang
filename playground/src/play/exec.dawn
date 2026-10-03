@@ -189,55 +189,82 @@ pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
 
 # The compiler release this runner compiles with, for /health and so for the
 # version the editor shows: "0.81.0" out of `dawn --version`'s
-# "dawn 0.81.0 (selfhost)". Asked once at startup, not per request, because
-# the answer only changes with a redeploy, which restarts this process.
+# "dawn 0.81.0 (selfhost)", and the build, "b1:2bfef5fb3622", the short digest
+# of the sources that compiler was built from, which `--version` appends when
+# its jar carries a build manifest (docs/build-info-design.md). The version
+# alone cannot tell a release from a later main build: both say 0.81.0.
+# Asked once at startup, not per request, because the answer only changes
+# with a redeploy, which restarts this process.
 #
 # The probe runs before the socket opens and redeploy.sh gives the whole
 # restart 28 seconds of health checks, so it has a 5-second budget of its
 # own instead of the compile budget. A probe that fails or times out answers
-# "", and /health still says ok: the version is a label, not a liveness test.
+# "" for both, and /health still says ok: they are labels, not a liveness test.
 # Unsandboxed: it runs the operator's own binary with a fixed argv.
-pub fn compiler_version() -> String !io = with_fs_real(() => {
+pub type CompilerId = { version: String, build: String }
+
+pub fn compiler_id() -> CompilerId !io = with_fs_real(() => {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   let out = "${temp_root()}/dawn-play-version-${id}.txt"
   let p = ProcessBuilder.new([dawn_bin(), "--version"])
   p.redirectErrorStream(true)
   p.redirectOutput(File.new(out))
-  let version = match p.start() {
-    None -> ""
+  let unknown = CompilerId { version: "", build: "" }
+  let got = match p.start() {
+    None -> unknown
     Some(proc) -> {
       let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
       if proc.waitFor(5, secs) {
-        version_of(slurp(out))
+        id_of(slurp(out))
       } else {
         proc.destroyForcibly()
         proc.waitFor()
-        ""
+        unknown
       }
     }
   }
   cleanup(out)
-  version
+  got
 })
 
-# The second word of the first `dawn <version> ...` line. bin/dawn may print
-# toolchain chatter ("resolving 2 java-deps ...") before it.
-fn version_of(text: String) -> String = {
-  var found = ""
+# The words after "dawn " on the first line that starts with it. bin/dawn may
+# print toolchain chatter ("resolving 2 java-deps ...") before it.
+fn dawn_words(text: String) -> List[String] = {
   for line in str.split(text, "\n") {
-    if found == "" {
-      let rest = str.strip_prefix(line, "dawn ").unwrap_or("")
-      found = match str.split_once(rest, " ") {
-        Some((v, _)) -> v
-        None -> rest
-      }
+    match str.strip_prefix(line, "dawn ") {
+      Some(rest) -> return str.split(str.trim(rest), " ")
+      None -> ()
     }
   }
-  str.trim(found)
+  []
+}
+
+# The second word of the `dawn <version> ...` line.
+fn version_of(text: String) -> String =
+  match dawn_words(text) {
+    [v, ..] -> str.trim(v)
+    [] -> ""
+  }
+
+# The version and the `b1:` word after it, if there is one: an older compiler
+# prints none, and then the build is "" like an unknown version.
+fn id_of(text: String) -> CompilerId = {
+  var build = ""
+  for w in dawn_words(text) {
+    if build == "" && str.starts_with(w, "b1:") { build = str.trim(w) }
+  }
+  CompilerId { version: version_of(text), build: build }
 }
 
 test "version_of skips launcher chatter" {
   assert version_of("resolving 2 java-deps from x\ndawn 0.81.0 (selfhost)\n") == "0.81.0"
   assert version_of("dawn 0.81.0") == "0.81.0"
   assert version_of("no such file\n") == ""
+}
+
+test "id_of takes the build digest when the compiler prints one" {
+  assert id_of("resolving 2 java-deps from x\ndawn 0.83.0 (selfhost) b1:2bfef5fb3622\n") ==
+    CompilerId { version: "0.83.0", build: "b1:2bfef5fb3622" }
+  assert id_of("dawn 0.81.0 (selfhost)\n") == CompilerId { version: "0.81.0", build: "" }
+  assert id_of("no such file\n") == CompilerId { version: "", build: "" }
 }

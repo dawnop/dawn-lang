@@ -22,6 +22,7 @@ use std/map
 use std/bytes
 use std/memfs
 use sha2/sha256
+use sha2/sha256.{Digest}
 use fspath/fspath
 use manifestv.{SemV, semv_show, mcoord_show, validate}
 use source
@@ -50,6 +51,15 @@ fn show_version(v: Option[SemV]) -> String =
 
 fn zero_byte() -> Bytes = bytes.utf8(str.from_char('\u{0000}'))
 
+## One entry of a source digest, framed as `d1` frames a file.
+fn frame(digest: Digest, entry: String, content: Bytes) -> Digest = {
+  var d = sha256.update(digest, bytes.utf8(entry))
+  d = sha256.update(d, zero_byte())
+  d = sha256.update(d, bytes.utf8(to_string(bytes.len(content))))
+  d = sha256.update(d, zero_byte())
+  sha256.update(d, content)
+}
+
 ## The `s1:` source digest of one package: its `manifest` (when present) and
 ## every regular file under `src_root`, each named `<name>/dawn.toml` or
 ## `<name>/src/<relative path>`, sorted by that name and framed as `d1` frames
@@ -75,13 +85,19 @@ pub fn source_digest(name: String, manifest: String, src_root: String) -> Result
       Ok(b) -> b
       Err(e) -> return Err("cannot read " ++ path ++ ": " ++ e.message)
     }
-    digest = sha256.update(digest, bytes.utf8(entry))
-    digest = sha256.update(digest, zero_byte())
-    digest = sha256.update(digest, bytes.utf8(to_string(bytes.len(content))))
-    digest = sha256.update(digest, zero_byte())
-    digest = sha256.update(digest, content)
+    digest = frame(digest, entry, content)
   }
   Ok("s1:" ++ sha256.finish(digest))
+}
+
+## The `s1:` digest of sources already in hand rather than on disk: each
+## `(entry name, text)` framed as `source_digest` frames a file, in name order.
+## A single-file build has no package tree to walk, only the files its load
+## read, and this is how its main row names them (see `file_rows`).
+pub fn texts_digest(entries: List[(String, String)]) -> String = {
+  var digest = sha256.new()
+  for (entry, text) in sort(entries) { digest = frame(digest, entry, bytes.utf8(text)) }
+  "s1:" ++ sha256.finish(digest)
 }
 
 ## Every package in the plan's graph, transitively, keyed by real name. The
@@ -135,7 +151,16 @@ pub fn build_rows(plan: SourcePlan) -> Result[List[BuildRow], String] !Fs = {
     Ok(d) -> d
     Err(e) -> return Err(e)
   }
-  var rows: List[BuildRow] = [MainRow(name, version, main_digest)]
+  match dep_rows(plan) {
+    Ok(rest) -> Ok([MainRow(name, version, main_digest)] ++ rest)
+    Err(e) -> Err(e)
+  }
+}
+
+## Every row after `main`: the source packages of the plan by real name, then
+## the Java coordinates.
+fn dep_rows(plan: SourcePlan) -> Result[List[BuildRow], String] !Fs = {
+  var rows: List[BuildRow] = []
   var all: Map[String, PkgR] = map.empty()
   for key in map.keys(plan.pkgs) {
     all = collect_pkgs(map.get(plan.pkgs, key).expect("resolved package"), all)
@@ -152,6 +177,24 @@ pub fn build_rows(plan: SourcePlan) -> Result[List[BuildRow], String] !Fs = {
   Ok(rows)
 }
 
+## The manifest of a single-file build. A file is not a package: it has no
+## dawn.toml to take a name or a version from, and its sources are not a
+## `src/` tree but the files its load actually read, which `loaded` lists as
+## `(position path, text)` pairs (the `site_path` of each module of the root,
+## so already free of the working directory). The main row is `(unnamed)`,
+## `(devel)` and the digest of exactly those texts, each named
+## `(unnamed)/<position path>`; the packages and Java coordinates are the
+## plan's, since a file inside a project links that project's `[deps]`.
+pub fn file_rows(plan: SourcePlan, loaded: List[(String, String)]) -> Result[List[BuildRow], String] !Fs = {
+  if len(plan.diags) > 0 { return Err("cannot list a build manifest for a plan with diagnostics") }
+  var entries: List[(String, String)] = []
+  for (site, text) in loaded { entries = entries ++ [(UNNAMED ++ "/" ++ site, text)] }
+  match dep_rows(plan) {
+    Ok(rest) -> Ok([MainRow(UNNAMED, DEVEL, texts_digest(entries))] ++ rest)
+    Err(e) -> Err(e)
+  }
+}
+
 ## One row as `go version -m` lays one out: a tab, then tab-separated fields.
 pub fn render_row(r: BuildRow) -> String =
   "\t" ++ join(
@@ -165,11 +208,80 @@ pub fn render_row(r: BuildRow) -> String =
     "\t"
   )
 
-## A header line and the rows under it, each line ending in a newline.
-pub fn render(header: String, rows: List[BuildRow]) -> String = {
-  var out = header ++ "\n"
+## The rows, one line each, each ending in a newline: the part of a build
+## manifest that says what was built, and the bytes `manifest_digest` covers.
+pub fn rows_text(rows: List[BuildRow]) -> String = {
+  var out = ""
   for r in rows { out = out ++ render_row(r) ++ "\n" }
   out
+}
+
+## The `b1:` digest of a manifest: SHA-256 over its rows text. Every row is a
+## function of sources and manifests (no path, no time, no builder), so this
+## is too, and one value names "a build of exactly these sources". It is what
+## `dawn --version` prints for the toolchain itself, cut to `short_digest`.
+pub fn manifest_digest(rows: String) -> String = "b1:" ++ sha256.hex(bytes.utf8(rows))
+
+## The length `--version` and the Playground show: twelve hex digits, git's
+## habit for a short commit name, after the `b1:` tag.
+pub fn short_digest(digest: String) -> String = str.take(digest, 3 + 12)
+
+## What `dawn version -m` prints for one target: a header line, the rows, and
+## a closing `build` row with the manifest digest, so a toolchain's
+## `--version` can be matched against the listing of its jar or its sources.
+pub fn render_listing(header: String, rows: String) -> String =
+  header ++ "\n" ++ rows ++ "\tbuild\t" ++ manifest_digest(rows) ++ "\n"
+
+## `render_listing` over rows not yet rendered.
+pub fn render(header: String, rows: List[BuildRow]) -> String = render_listing(header, rows_text(rows))
+
+## The first line of every build-info file a product carries. A reader that
+## does not know the number refuses the file rather than guess at its rows
+## (package-design: every file states its schema on its first line).
+pub const SCHEMA: String = "dawn-build-info 1"
+
+## The file a `dawn build` product carries (docs/build-info-design.md): the
+## schema line, the toolchain line, then the rows. The toolchain line holds the
+## builder's VERSION and nothing else; why not the builder's own digest is
+## the design document's 4.4.
+pub fn render_file(version: String, rows: List[BuildRow]) -> String =
+  SCHEMA ++ "\n" ++ "toolchain\tdawn " ++ version ++ "\n" ++ rows_text(rows)
+
+## A build-info file read back: the VERSION of the toolchain that wrote it and
+## its rows text, byte for byte as written.
+pub type BuildFile = { version: String, rows: String }
+
+## Read a build-info file. The rows are checked for shape (a tab first, a
+## newline last) and otherwise kept as written, so a listing of a product
+## shows what the product says even when this toolchain would compute it
+## differently.
+pub fn parse_file(text: String) -> Result[BuildFile, String] = {
+  let lines = str.split(text, "\n")
+  if len(lines) < 2 || lines[0] != SCHEMA {
+    return Err("not a dawn build manifest (expected a first line `" ++ SCHEMA ++ "`, got `" ++
+        str.take(lines[0], 40) ++ "`)")
+  }
+  let version = match str.strip_prefix(lines[1], "toolchain\tdawn ") {
+    Some(v) -> v
+    None -> return Err("malformed build manifest: the second line is not `toolchain<TAB>dawn <version>`")
+  }
+  if version == "" || not str.ends_with(text, "\n") {
+    return Err("malformed build manifest: it does not end in a newline")
+  }
+  # `text` ends in a newline, so the last piece of the split is the empty one
+  # after it; every piece between the toolchain line and that is a row
+  var rows = ""
+  var i = 2
+  while i < len(lines) - 1 {
+    let line = lines[i]
+    if not str.starts_with(line, "\t") {
+      return Err("malformed build manifest: a row does not start with a tab: `" ++
+          str.take(line, 40) ++ "`")
+    }
+    rows = rows ++ line ++ "\n"
+    i = i + 1
+  }
+  Ok(BuildFile { version: version, rows: rows })
 }
 
 # ---- tests ----
@@ -333,7 +445,67 @@ test "a url row carries its manifest hash and subdir after the digest" {
   assert render_row(row) == "\tdep\tweb6\t6.0.0\ts1:aa\td1:bb\tsubdir=packages/web"
   assert render_row(UrlDepRow("lib", "1.1.0", "s1:aa", "d1:bb", "")) ==
     "\tdep\tlib\t1.1.0\ts1:aa\td1:bb"
-  assert render("x: dawn 0.0.0", [JavaRow("g:a:1")]) == "x: dawn 0.0.0\n\tjava\tg:a:1\n"
+  let rows = "\tjava\tg:a:1\n"
+  assert render("x: dawn 0.0.0", [JavaRow("g:a:1")]) ==
+    "x: dawn 0.0.0\n" ++ rows ++ "\tbuild\t" ++ manifest_digest(rows) ++ "\n"
+}
+
+test "the manifest digest covers the rows and is cut to twelve digits for display" {
+  # the SHA-256 of the one-row text, spelled out: a test that recomputes it
+  # with the producer would only say the producer agrees with itself
+  let rows = "\tjava\tg:a:1\n"
+  let d = manifest_digest(rows)
+  assert d == "b1:" ++ sha256.hex(bytes.utf8(rows))
+  assert str.len(d) == 3 + 64
+  assert short_digest(d) == str.take(d, 15)
+  assert manifest_digest("") == "b1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  assert manifest_digest(rows ++ "\tjava\tg:b:1\n") != d
+}
+
+test "a build-info file reads back to the version and the rows it was written with" {
+  let rows = [MainRow("app", "1.0.0", "s1:aa"), PathDepRow("lib", DEVEL, "s1:bb"), JavaRow("g:a:1")]
+  let text = render_file("9.8.7", rows)
+  assert text == "dawn-build-info 1\ntoolchain\tdawn 9.8.7\n" ++
+    "\tmain\tapp\t1.0.0\ts1:aa\n\tdep\tlib\t(devel)\ts1:bb\n\tjava\tg:a:1\n"
+  assert parse_file(text) == Ok(BuildFile { version: "9.8.7", rows: rows_text(rows) })
+  # a file with no rows is still a file
+  assert parse_file("dawn-build-info 1\ntoolchain\tdawn 1.0.0\n") ==
+    Ok(BuildFile { version: "1.0.0", rows: "" })
+}
+
+test "a build-info file of another schema or shape is refused, not guessed at" {
+  let refused = (t: String) => match parse_file(t) {
+    Ok(_) -> false
+    Err(_) -> true
+  }
+  assert refused("")
+  assert refused("dawn-build-info 2\ntoolchain\tdawn 1.0.0\n")
+  assert refused("dawn-build-info 1\n")
+  assert refused("dawn-build-info 1\ntoolchain dawn 1.0.0\n")
+  assert refused("dawn-build-info 1\ntoolchain\tdawn 1.0.0")
+  assert refused("dawn-build-info 1\ntoolchain\tdawn 1.0.0\nmain\tapp\n")
+  assert refused("dawn-build-info 1\ntoolchain\tdawn 1.0.0\n\tmain\tapp\n\n")
+}
+
+test "a single file's main row digests the texts its load read, named by position" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/f/p.dawn", "pub fn main() -> Unit !io = ()\n")
+  let (got, _) = memfs.with_fs(st, () => procmem.with_proc_table([], () => {
+    let (rows, _) = envmem.with_env_table(envmem.TABLE_CWD, [], () =>
+        file_rows(source.source_plan(SourceFile("/f/p.dawn")),
+          [("p.dawn", "pub fn main() -> Unit !io = ()\n"), ("q.dawn", "pub fn q() -> Int = 1\n")]))
+    rows
+  }))
+  let (rows, _) = got
+  let main = texts_digest([
+    ("(unnamed)/q.dawn", "pub fn q() -> Int = 1\n"),
+    ("(unnamed)/p.dawn", "pub fn main() -> Unit !io = ()\n")
+  ])
+  assert rows == Ok([MainRow(UNNAMED, DEVEL, main)])
+  # the same framing as a package on disk: one file named alike digests alike
+  var one = memfs.empty(memfs.BASE)
+  one = memfs.put(one, "/g/src/main.dawn", "x\n")
+  assert digest_in(one, "(unnamed)", "/g") == texts_digest([("(unnamed)/src/main.dawn", "x\n")])
 }
 
 test "a project with no src/ folder has no manifest" {

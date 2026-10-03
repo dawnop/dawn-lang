@@ -133,8 +133,8 @@ def tree_version():
 
 
 def check_health(api, r):
-    """/health answers {"ok": true, "version": "<release>"}, and the release is
-    the one in the tree.
+    """/health answers {"ok": true, "version": "<release>", "build": "b1:..."},
+    and the release is the one in the tree.
 
     The lambda pair below only proves the runner is newer than v0.43; the
     version field pins it to the release this tree is about to ship, which is
@@ -169,6 +169,15 @@ def check_health(api, r):
         version == want,
         f"/health version is the tree's VERSION ({want})",
         f"runner reports {version!r}, selfhost/src/version.dawn says {want!r}",
+    )
+    # The short build-manifest digest of the runner's compiler. Only its shape
+    # is checked: which main commit a deployment was built from is not this
+    # tree's to know, and the version above already pins the release.
+    build = health.get("build")
+    r.check(
+        isinstance(build, str) and re.fullmatch(r"b1:[0-9a-f]{12}", build) is not None,
+        "/health build is a short build-manifest digest (b1: and 12 hex digits)",
+        f"runner reports build {build!r}: its compiler predates build manifests, redeploy it",
     )
 
 

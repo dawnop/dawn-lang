@@ -303,13 +303,17 @@ if [ "$jar_sha" != "$sidecar_sha" ]; then
 fi
 
 jar_version_file="$work/jar-version.txt"
-expected_jar_version_file="$work/expected-jar-version.txt"
 if ! java -Xss512m -jar "$jar_file" --version > "$jar_version_file"; then
   die "the $tag release JAR does not run"
 fi
-printf 'dawn %s (selfhost)\n' "${tag#v}" > "$expected_jar_version_file"
-if ! cmp -s "$expected_jar_version_file" "$jar_version_file"; then
-  die "release JAR did not report exactly 'dawn ${tag#v} (selfhost)'"
+# Since build manifests (docs/build-info-design.md) the line ends in the short
+# digest of the sources the jar was built from. Releases from before them print
+# no digest, and this script may be pointed at one; any b1: digest is accepted
+# here because release.yml already matched it against the tagged sources.
+version_re=$(printf '%s' "${tag#v}" | sed 's/[.]/\\./g')
+if ! grep -Eqx "dawn ${version_re} \(selfhost\)( b1:[0-9a-f]{12})?" "$jar_version_file" \
+  || [ "$(wc -l < "$jar_version_file" | tr -d ' ')" -ne 1 ]; then
+  die "release JAR did not report 'dawn ${tag#v} (selfhost)' and at most a build digest"
 fi
 
 archive_dir="$work/tag-archive"

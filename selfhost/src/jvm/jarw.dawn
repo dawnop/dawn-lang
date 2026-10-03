@@ -1,16 +1,28 @@
 # Deterministic executable-jar writer for `selfhost build`: manifest first,
-# then each class entry, with every timestamp and stored-entry field pinned —
-# so the same class list always produces the same jar bytes across JDKs. The
-# standalone closure check relies on that: the jar the self-hosted compiler
-# builds of itself must equal, byte for byte, the jar it was launched from.
+# then the build manifest, then each class entry, with every timestamp and
+# stored-entry field pinned — so the same class list always produces the same
+# jar bytes across JDKs. The standalone closure check relies on that: the jar
+# the self-hosted compiler builds of itself must equal, byte for byte, the jar
+# it was launched from.
+#
+# The build manifest (`META-INF/dawn/build-info`, docs/build-info-design.md) is
+# written and read here, beside the manifest, because where it sits in a jar
+# is a JVM-artifact fact; what it says is compiler_plan/buildinfo's. It is a
+# function of sources only, which is what keeps the closure check above true
+# with it in the jar.
 
 use std/str
 use std/bytes
+use std/io
 use java "java.io.FileOutputStream"
 use java "java.util.zip.ZipOutputStream"
 use java "java.util.zip.ZipEntry"
 use java "java.util.zip.CRC32"
 use java "java.time.LocalDateTime"
+use java "java.util.jar.JarFile"
+use java "java.io.InputStream"
+use java "java.lang.ClassLoader"
+use java "java.net.URI"
 
 const ZIP_METHOD_STORED: Int = 0
 
@@ -53,11 +65,25 @@ fn dotted(cls: String) -> String = {
 ## attribute is inert without a class that uses the package, and the
 ## alternative is a manifest whose shape depends on the program -- one more
 ## thing for `write_jar` to be told and for a reader to explain.
-fn manifest_text(main_class: String, cp_entries: List[String]) -> String =
+##
+## `Dawn-Version` is the VERSION of the toolchain that wrote the jar, there so
+## that `unzip -p x.jar META-INF/MANIFEST.MF` answers "which dawn" without a
+## dawn. It is the one line of the build manifest a manifest attribute can
+## hold; the rest is in `BUILD_INFO_ENTRY`.
+fn manifest_text(main_class: String, cp_entries: List[String], dawn_version: String) -> String =
   "Manifest-Version: 1.0" ++ crlf() ++
   "Main-Class: " ++ dotted(main_class) ++ crlf() ++
   "Add-Exports: java.base/jdk.internal.vm" ++ crlf() ++
+  "Dawn-Version: " ++ dawn_version ++ crlf() ++
   class_path_lines(cp_entries) ++ crlf()
+
+## Where a jar keeps its build manifest.
+pub const BUILD_INFO_ENTRY: String = "META-INF/dawn/build-info"
+
+## What a jar says about how it was made, besides its classes: the writer's
+## VERSION for the manifest attribute, and the build manifest's text
+## (`buildinfo.render_file`), written as given.
+pub type JarStamp = { dawn_version: String, build_info: String }
 
 fn stored_entry(name: String, bs: Bytes) -> ZipEntry !io = {
   let crc = CRC32.new()
@@ -135,9 +161,14 @@ fn class_path_lines(entries: List[String]) -> String = {
 
 ## Write `classes` (internal name → bytes, no ".class" suffix) as an
 ## executable jar with `Main-Class: <main_class>`.
-pub fn write_jar(path: String, main_class: String, classes: List[(String, Bytes)]) -> Unit !io = {
+pub fn write_jar(
+  path: String,
+  main_class: String,
+  classes: List[(String, Bytes)],
+  stamp: JarStamp
+) -> Unit !io = {
   let none: List[String] = []
-  write_jar_cp(path, main_class, classes, none)
+  write_jar_cp(path, main_class, classes, none, stamp)
 }
 
 ## Same, with manifest Class-Path entries (relative to the jar's directory) —
@@ -146,7 +177,8 @@ pub fn write_jar_cp(
   path: String,
   main_class: String,
   classes: List[(String, Bytes)],
-  cp_entries: List[String]
+  cp_entries: List[String],
+  stamp: JarStamp
 ) -> Unit !io = {
   let fos = match catch_fault(() => FileOutputStream.new(path)) {
     Ok(f) -> f
@@ -154,10 +186,72 @@ pub fn write_jar_cp(
   }
   with file <- bracket(fos, close_file)
   with zos <- bracket(ZipOutputStream.new(file), close_zip)
-  put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest_text(main_class, cp_entries)))
+  put(zos, "META-INF/MANIFEST.MF",
+    bytes.utf8(manifest_text(main_class, cp_entries, stamp.dawn_version)))
+  put(zos, BUILD_INFO_ENTRY, bytes.utf8(stamp.build_info))
   for pair in classes {
     let (nm, bs) = pair
     put(zos, "${nm}.class", bs)
+  }
+}
+
+fn close_jar(jf: JarFile) -> Unit !io = {
+  let _ = jf.close()
+  ()
+}
+
+fn close_stream(ins: InputStream) -> Unit !io = {
+  let _ = ins.close()
+  ()
+}
+
+fn stream_text(ins: InputStream) -> String !io = {
+  with s <- bracket(ins, close_stream)
+  bytes.decode_utf8_lossy(s.readAllBytes().expect("entry bytes"))
+}
+
+fn jar_entry_text(jf: JarFile) -> Option[String] !io = {
+  with j <- bracket(jf, close_jar)
+  match j.getEntry(BUILD_INFO_ENTRY) {
+    Some(e) -> Some(stream_text(j.getInputStream(e).expect("entry stream")))
+    None -> None
+  }
+}
+
+## The build manifest of the jar at `path`: `Ok(None)` when it is a jar
+## without one (built by `jar`, by another tool, or by a dawn from before
+## there was one), `Err` when it cannot be opened as a jar at all.
+pub fn read_build_info(path: String) -> Result[Option[String], String] !io =
+  match catch_fault(() => jar_entry_text(JarFile.new(path))) {
+    Ok(t) -> Ok(t)
+    Err(e) -> Err(e.message)
+  }
+
+## The build manifest of the jar this toolchain is running from, which is
+## what `dawn --version` reports (ruling 5.4(1): read, not compiled in).
+##
+## Found through the jar that holds the entry class, not by asking the class
+## path for the first `BUILD_INFO_ENTRY`: the question is "what am I", and a
+## class path can hold other dawn-built jars. A jar: URL is opened by the JDK,
+## which also undoes any percent-encoding in the path. `None` when the
+## toolchain is not running from a jar (a classes directory, a native image)
+## or its jar has no entry, i.e. it was built by a dawn without build-info.
+pub fn own_build_info() -> Option[String] !io = {
+  let loader = ClassLoader.getSystemClassLoader().expect("system loader")
+  let url = match loader.getResource("main.class") {
+    Some(u) -> u.toString().expect("url string")
+    None -> return None
+  }
+  if not str.starts_with(url, "jar:") { return None }
+  let bang = match str.index_of(url, "!/") {
+    Some(i) -> i
+    None -> return None
+  }
+  let entry = str.take(url, bang) ++ "!/" ++ BUILD_INFO_ENTRY
+  match catch_fault(() => stream_text(
+    URI.create(entry).expect("uri").toURL().expect("url").openStream().expect("stream"))) {
+    Ok(t) -> Some(t)
+    Err(_) -> None
   }
 }
 
@@ -165,15 +259,41 @@ test "the manifest opens the internal package the driving loop needs" {
   # The attribute the JVM launcher reads. Spelled out rather than compared
   # against the producer: a test that rebuilds the string it is checking says
   # only that concatenation works.
-  let lines = str.split(str.strip_suffix(manifest_text("main", []), crlf())
+  let lines = str.split(str.strip_suffix(manifest_text("main", [], "1.2.3"), crlf())
       .unwrap_or(""), crlf())
   assert lines[0] == "Manifest-Version: 1.0"
   assert lines[1] == "Main-Class: main"
   assert lines[2] == "Add-Exports: java.base/jdk.internal.vm"
+  assert lines[3] == "Dawn-Version: 1.2.3"
   # and it survives the wrapping a reader undoes, at every jar shape
-  assert unwrap_manifest(manifest_text("a/b/Main", ["x.jar"])) ==
+  assert unwrap_manifest(manifest_text("a/b/Main", ["x.jar"], "1.2.3")) ==
     "Manifest-Version: 1.0Main-Class: a.b.MainAdd-Exports: " ++
-    "java.base/jdk.internal.vmClass-Path: x.jar"
+    "java.base/jdk.internal.vmDawn-Version: 1.2.3Class-Path: x.jar"
+}
+
+test "a jar's build manifest reads back as written, and its absence is not an error" {
+  let dir = match io.with_fs_real(() => io.temp_dir("", "dawn-jarw-")) {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: ${e.message}")
+  }
+  let jar = "${dir}/a.jar"
+  write_jar(jar, "main", [("main", bytes.utf8("not a class"))],
+    JarStamp { dawn_version: "1.2.3", build_info: "dawn-build-info 1\nx\n" })
+  assert read_build_info(jar) == Ok(Some("dawn-build-info 1\nx\n"))
+  # a jar some other tool wrote: a manifest and nothing of ours
+  let other = "${dir}/other.jar"
+  let fos = FileOutputStream.new(other)
+  let zos = ZipOutputStream.new(fos)
+  put(zos, "META-INF/MANIFEST.MF", bytes.utf8("Manifest-Version: 1.0${crlf()}${crlf()}"))
+  close_zip(zos)
+  assert read_build_info(other) == Ok(None)
+  # not a jar at all
+  match read_build_info("${dir}/no-such.jar") {
+    Ok(_) -> panic("a missing jar read as one")
+    Err(_) -> ()
+  }
+  for f in [jar, other] { let _ = io.with_fs_real(() => io.delete(f)) }
+  let _ = io.with_fs_real(() => io.delete(dir))
 }
 
 test "dotted turns an internal name into a binary name" {

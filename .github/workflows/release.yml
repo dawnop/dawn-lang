@@ -199,10 +199,20 @@ jobs:
             echo "::error::tag '$GITHUB_REF_NAME' does not exactly name source version '$VERSION'"
             exit 1
           fi
+          # --version ends in the short digest of the build manifest the jar
+          # carries (docs/build-info-design.md). The expected digest is
+          # computed by listing this checkout's selfhost sources, so the
+          # comparison also says the jar was built from the tagged tree.
+          BUILD=$(java -Xss512m -jar dawn-selfhost.jar version -m selfhost \
+            | sed -nE 's/^\tbuild\t(b1:[0-9a-f]{12})[0-9a-f]{52}$/\1/p')
+          if [ -z "$BUILD" ]; then
+            echo "::error::'version -m selfhost' printed no build digest"
+            exit 1
+          fi
           OUT=$(java -Xss512m -jar dawn-selfhost.jar --version)
           echo "$OUT"
-          if [ "$OUT" != "dawn $VERSION (selfhost)" ]; then
-            echo "::error::--version said '$OUT', expected 'dawn $VERSION (selfhost)'"
+          if [ "$OUT" != "dawn $VERSION (selfhost) $BUILD" ]; then
+            echo "::error::--version said '$OUT', expected 'dawn $VERSION (selfhost) $BUILD'"
             exit 1
           fi
 
