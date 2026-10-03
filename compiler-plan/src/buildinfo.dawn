@@ -247,16 +247,45 @@ pub const SCHEMA: String = "dawn-build-info 1"
 pub fn render_file(version: String, rows: List[BuildRow]) -> String =
   SCHEMA ++ "\n" ++ "toolchain\tdawn " ++ version ++ "\n" ++ rows_text(rows)
 
+## What a product links, as far as its manifest goes. A jar runs on a
+## classpath that holds the `[java-deps]` jars, so its manifest lists their
+## coordinates. A product of the C backend, a native binary or a wasm module,
+## links no Java at all: that backend refuses `use java` outright, so the
+## coordinates name nothing the product contains and its manifest leaves the
+## `java` rows out (#431). The source rows are the same for both, so one
+## program built both ways still lists the same packages.
+pub type Product =
+  | JarProduct
+  | CProduct
+
+## The rows a product of kind `product` carries, out of a plan's rows.
+pub fn product_rows(product: Product, rows: List[BuildRow]) -> List[BuildRow] =
+  match product {
+    JarProduct -> rows
+    CProduct -> {
+      var kept: List[BuildRow] = []
+      for r in rows {
+        match r {
+          JavaRow(_) -> ()
+          _ -> { kept = kept ++ [r] }
+        }
+      }
+      kept
+    }
+  }
+
 ## The build-info file a product of `target` carries: a project directory's
 ## rows are `build_rows` of its plan, the same rows `dawn version -m <dir>`
 ## prints; a single file's are `file_rows` over `root_files`, the texts its
-## load read. Re-planned rather than threaded out of the load, because
-## planning is cheap and the plan is a function of the same files the load
-## just read. One function for every product (a jar, a native binary, a wasm
-## module) and both drivers, so that one program built two ways says the same
-## thing about what it is made of.
+## load read; either way cut to what a `product` links (`product_rows`).
+## Re-planned rather than threaded out of the load, because planning is cheap
+## and the plan is a function of the same files the load just read. One
+## function for every product (a jar, a native binary, a wasm module) and both
+## drivers, so that one program built two ways says the same thing about the
+## sources it is made of.
 pub fn product_file(
   version: String,
+  product: Product,
   target: String,
   root_files: List[(String, String)]
 ) -> Result[String, String] !Fs !Proc !Env = {
@@ -266,7 +295,7 @@ pub fn product_file(
     file_rows(source.source_plan(SourceFile(target)), root_files)
   }
   match rows {
-    Ok(rs) -> Ok(render_file(version, rs))
+    Ok(rs) -> Ok(render_file(version, product_rows(product, rs)))
     Err(e) -> Err("cannot write the build manifest: " ++ e)
   }
 }
@@ -536,4 +565,64 @@ test "a project with no src/ folder has no manifest" {
   var st = memfs.empty(memfs.BASE)
   st = memfs.put(st, "/r/dawn.toml", "schema = 1\nname = \"r\"\n")
   assert rows_in_table(st, [], "/r") == Err("project /r has no src/ folder (expected /r/src)")
+}
+
+## `product_file` over a table, with no child process and no environment.
+fn product_file_in_table(
+  seed: memfs.MemFs,
+  product: Product,
+  target: String,
+  root_files: List[(String, String)]
+) -> String !io = {
+  let (got, _) = memfs.with_fs(seed, () => procmem.with_proc_table([], () => {
+    let (file, _) = envmem.with_env_table(envmem.TABLE_CWD, [], () =>
+        product_file("9.8.7", product, target, root_files))
+    file
+  }))
+  let (file, calls) = got
+  if calls != [] { panic("a path-only plan spawned a process") }
+  match file {
+    Ok(f) -> f
+    Err(e) -> panic("product file: " ++ e)
+  }
+}
+
+test "a jar lists the Java coordinates it runs with, a native or wasm product none" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/j/app/dawn.toml",
+    "schema = 1\nname = \"app\"\n\n[deps]\nlib = \"../lib\"\n\n[java-deps]\n" ++
+      "asm = \"org.ow2.asm:asm:9.7.1\"\n")
+  st = memfs.put(st, "/j/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  st = lib_tree(st, "/j/lib", "pub fn tag() -> Int = 1\n")
+  let main = "\tmain\tapp\t(devel)\t" ++ digest_in(st, "app", "/j/app") ++ "\n"
+  let lib = "\tdep\tlib\t(devel)\t" ++ digest_in(st, "lib", "/j/lib") ++ "\n"
+  let head = "dawn-build-info 1\ntoolchain\tdawn 9.8.7\n"
+  assert product_file_in_table(st, JarProduct, "/j/app", []) ==
+    head ++ main ++ lib ++ "\tjava\torg.ow2.asm:asm:9.7.1\n"
+  assert product_file_in_table(st, CProduct, "/j/app", []) == head ++ main ++ lib
+  # a single file inside the project links the project's [java-deps] on the
+  # JVM and still nothing of them natively
+  let files = [("src/main.dawn", "pub fn main() -> Unit !io = ()\n")]
+  let file_main = "\tmain\t(unnamed)\t(devel)\t" ++
+    texts_digest([("(unnamed)/src/main.dawn", "pub fn main() -> Unit !io = ()\n")]) ++ "\n"
+  assert product_file_in_table(st, JarProduct, "/j/app/src/main.dawn", files) ==
+    head ++ file_main ++ lib ++ "\tjava\torg.ow2.asm:asm:9.7.1\n"
+  assert product_file_in_table(st, CProduct, "/j/app/src/main.dawn", files) ==
+    head ++ file_main ++ lib
+}
+
+test "a product's rows drop only the java rows, in order" {
+  let rows = [
+    MainRow("app", DEVEL, "s1:aa"),
+    JavaRow("g:a:1"),
+    PathDepRow("lib", DEVEL, "s1:bb"),
+    UrlDepRow("u", "1.0.0", "s1:cc", "d1:dd", ""),
+    JavaRow("g:b:2")
+  ]
+  assert product_rows(JarProduct, rows) == rows
+  assert product_rows(CProduct, rows) == [
+    MainRow("app", DEVEL, "s1:aa"),
+    PathDepRow("lib", DEVEL, "s1:bb"),
+    UrlDepRow("u", "1.0.0", "s1:cc", "d1:dd", "")
+  ]
 }

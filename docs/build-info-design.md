@@ -1,6 +1,6 @@
 # 构建来源：构建清单与 `dawn version -m`
 
-> 状态：**current**（P1、P2、P3 已落地）。2026-10-03，P1 分支 `feat/build-info-planner`，P2 分支 `feat/build-info-jar`，P3 分支 `feat/build-info-native`。
+> 状态：**current**（P1、P2、P3 已落地）。2026-10-03，P1 分支 `feat/build-info-planner`，P2 分支 `feat/build-info-jar`，P3 分支 `feat/build-info-native`；2026-10-04 #431：native/wasm 产物不写 `java` 行（8.7），分支 `fix/binfo-no-java-rows`。
 > 依据：裁决 `agent-handoff/ruling-build-provenance-20261003.md`，调研
 > `agent-handoff/research-build-provenance-report-20261003.md`（§一现状、§二一名一份、§4.2 摘要与 B==C、§五刀序）。
 > 本文是那份调研的压缩，加上 P1、P2、P3 的落地说明。P2 推翻了调研 §4.2 的一处取法（产物的工具链行写什么），见 4.4。
@@ -266,6 +266,10 @@ sources it was built from」**，不兑现，理由：提交号不是源码的�
 - **native 产物的清单放在带魔数的只读数据里**：要靠搜索找，读者自己（dawnc 读自己）的数据里就有一份魔数；改用段名查表，见 8.1。
 - **清单进 `emitc` 的 C 文本**：C 文本受 prev-diff-native、native-cli-diff、native-fixpoint 逐字节比较，工具链行的 `VERSION` 一发版就变，见 8.1。
 - **Mach-O（macOS）的清单段**：没有在跑的 macOS native 门禁，读者也要另写一套 Mach-O 解析；那里链出的产物没有清单，`version -m` 报「没有」，不报错的东西。
+- **只列可达的依赖**（#431 时顺带考虑过）：清单今天是 Planner 的函数，`dep` 行是 MVS 选出的整张包图，与编译器内部的可达性分析无关。
+  改成「只列可达的」就要把清单挪到分析之后，行集随 `reach`/std 裁剪这类优化的改动而变，同一份源码换一版编译器 `b1:` 就动，
+  `version -m <dir>`（不分析、只规划）与产物的清单也从此对不上。`java` 行是另一回事：C 后端拒绝 `use java`，那些坐标在 native/wasm 产物里
+  **一定**不在，按产物种类去掉不需要任何分析（8.7）。重开条件：有人确需「这个二进制里实际链了哪些包」，而且愿意让清单随编译器版本变。
 - **`dawnc version -m <jar>`**：jar 是 JVM 工具链的产物，读它靠 JDK 的 zip；要在 native 里读得再写一个 zip 读者。dawnc 遇到 jar 报错并指向 `dawn version -m`。
 
 ## 八、P3 的落地
@@ -298,13 +302,13 @@ native-cli-diff（JVM 对 native）与 native-fixpoint（A==B==C）逐字节比�
 | `dawnc emitc --build-info <file.c>` / `dawn __emitc --build-info <file.c>` | 另写出这个单元，给自己调 `cc` 的脚本用：`release-native.sh` 与 `native-fixpoint.sh` 都改为带它链接 |
 | `dawnc run` / `dawnc test` | 不写：产物跑完即删，不为它规划与摘要 |
 
-内容一律是 `buildinfo.product_file(VERSION, target, root_files)`：P2 的 `build_manifest` 原样搬进 compiler-plan，jar、native、wasm
+内容一律是 `buildinfo.product_file(VERSION, product, target, root_files)`：P2 的 `build_manifest` 原样搬进 compiler-plan，jar、native、wasm
 三种产物与两个驱动走同一个函数，`root_files` 由 `driver/analyze.root_sources` 从这次加载里取。所以同一个程序编成 jar 和编成二进制，
-`version -m` 列出的行逐字节相同（8.4 实测）。工具链行仍只写 `VERSION`，4.4 的理由对 native-fixpoint 原样成立：A 由 JVM 写、B 由 dawnc-A 写，
+`version -m` 列出的 `main`/`dep` 行逐字节相同（8.4 实测）；`java` 行只有 jar 有，见 8.7。工具链行仍只写 `VERSION`，4.4 的理由对 native-fixpoint 原样成立：A 由 JVM 写、B 由 dawnc-A 写，
 写构建者摘要就会 A≠B。
 
 dawnc 自己是 `selfhost/src/nmain.dawn` 的单文件构建，按 6.4 的规则 `main` 行是 `(unnamed)`、摘要覆盖加载读到的 selfhost 根包文件，
-`dep`/`java` 行照 selfhost 的 Planner 写（含 `java` 两行，超集，dawnc 里并没有 Java）。所以 dawnc 的 `b1:` 与 JVM 工具链的 `b1:` 不同：
+`dep` 行照 selfhost 的 Planner 写（P3 落地时还写了 `java` 两行，#431 去掉，见 8.7）。所以 dawnc 的 `b1:` 与 JVM 工具链的 `b1:` 不同：
 二者本来就是不同的源码集合。
 
 ### 8.3 谁读
@@ -356,3 +360,22 @@ dawnc 自己是 `selfhost/src/nmain.dawn` 的单文件构建，按 6.4 的规则
 
 见 P3 报告（`agent-handoff/build-info-p3-report-20261003.md`）。量级：每次 `dawnc build` 多一次 Planner 与摘要（毫秒到亚秒），
 release-native 与 native-fixpoint 各多一个几百字节的 C 单元（`cc` 时间可忽略），native-cli-diff 多两对 `version -m`。
+
+### 8.7 native / wasm 产物不写 `java` 行（#431，2026-10-04）
+
+P3 落地时三种产物写同一张行表，`java` 行照 Planner 抄进 native 与 wasm 产物：release 的 dawnc 列着 `io.get-coursier:interface` 与
+`org.ow2.asm:asm`，二进制里一字节 Java 都没有。清单要回答的是「这个产物由什么构成」，列它不含的东西就是错的。
+
+改法：`buildinfo.product_file` 多一个参数 `Product`（`JarProduct | CProduct`），`product_rows` 按它取行：jar 原样，C 后端的产物
+（native 与 wasm 共用，二者都经 `c/binfo.unit_for`）去掉 `JavaRow`，其余行的次序不动。取舍：
+
+- **按产物种类，不按目标三分。** native 与 wasm 的行集相同，理由也相同（C 后端拒绝 `use java`，`emitc.dawn` 的 `CForeign` 分支），
+  分成三种只会多一个永远同值的分支。`unit_for` 本来就不知道这次是 native 还是 wasm，也不需要知道。
+- **去掉，不改写成别的行。** 没有「本产物未链 Java」这种行：缺省就是没有，与 Mach-O 没有清单段同一个道理。
+- **`version -m <dir>` 不变**，仍列 `java` 行：目录不是产物，它的清单是项目的全部声明，jar 构建出来与它逐字节一致（release.yml
+  用 `version -m selfhost` 复算 jar 的 `--version`，依赖的正是这一点）。代价是 native 产物的清单不再等于其项目目录的清单；
+  需要比对的地方（release-native 检查 2b、native-fixpoint）比的都是产物对产物，不受影响。
+- **jar 逐字节不变**：真父 `fe36f2e1` 与本提交各自 `dawn build` 一个带 `[java-deps]` 的项目，两个 jar `cmp` 相同。
+- **dawnc 的 `b1:` 会变**（行少了两行），A==B==C 仍成立：三代都经同一个 `unit_for`，JVM 与 native 两边一起变。
+
+只列可达依赖的那条路没有走，理由在第七节。
