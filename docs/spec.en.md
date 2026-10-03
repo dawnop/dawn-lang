@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ecea9b1a0384e022 -->
+<!-- doc-check: translation-of docs/spec.md @ 94bd43e8af6a1a80 -->
 
 # Dawn Language Specification
 
@@ -1521,9 +1521,14 @@ The pipeline **introduces no node of its own**, and so:
   for any call.** `x |> One(1, 2)` reports an arity error, `x |> k` (with `k: Int`) reports "not a
   function", `x |> Point { ... }` reports "not callable", and `x |> Point(1)` reports that a record
   must be built with braces (§2.4).
-- **A module's functions are still not bare function values** (§10.3): `x |> m.f` reports that the
-  module exports no such value. Only `x |> m.f(a)`, with the `(...)`, is a call; the difference
-  between the two has nothing to do with the pipeline.
+- **A module function in callee position is a call by name** (§10.3): a module alias is not a
+  value, so `x |> m.f` means the same as `x |> f`, namely `m.f(x)`. Defaults, named arguments,
+  inference of type parameters and effects at the call site, and effect operations all work as
+  usual, and the diagnostics read as they do for the bare name. `(m.f)(x)` and `with v <- m.f`
+  are the same. This differs from a record's `x |> r.f` (§2.4): a module alias never shares a name
+  with a binding, so there is nothing to disambiguate. Only when **used as a value**
+  (`let g = m.f`, `map(xs, m.f)`) is `m.f` a function value, which, like a bare `f` used as a
+  value, carries no defaults and no parameter names.
 - A **function-valued field** of a record is called dynamically as usual: `x |> r.callback` is
   `r.callback(x)`.
 
@@ -3824,7 +3829,9 @@ use java "java.lang.Math"      # Java interop (§9), form unchanged
   never ambiguous — `lexer` is either a binding (a UFCS dot call, §4) or a module alias
   (qualified access), and it can never be both.
 - Qualified access supports `alias.fn(args)` in **expression position** (calling a pub
-  function) and `alias.T[...]` in **type position** (LANG-06, 2026-07-30): a lower-case
+  function; `alias.fn` in callee position, as in `x |> alias.fn`, `(alias.fn)(x)` or
+  `with v <- alias.fn`, is the same call, and `alias.fn` in any other expression position is a
+  function value, §4.4) and `alias.T[...]` in **type position** (LANG-06, 2026-07-30): a lower-case
   name in type position can only be a module alias, so there is no ambiguity; it may point
   at an exported ADT/record or a `pub alias` (the latter expands according to the declaring
   side's resolution). **Pattern position** likewise supports qualified constructors
