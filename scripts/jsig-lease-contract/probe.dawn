@@ -4,6 +4,7 @@
 # shares the production lease constructor and exists only to see getResource
 # before and after the public close closure runs.
 
+use std/str
 use compiler/check/jsig.{Jsig}
 use compiler/jvm/jreflect.{JsigResourceProbe, jsig_real, jsig_for, jsig_resource_probe}
 
@@ -113,7 +114,8 @@ pub fn main() -> Unit !io = {
       bracket(guarded, probe => probe.lease.close(), fail_after_load))
   let caught = match outcome {
     Ok(_) -> false
-    Err(error) -> error.message == "intentional lease failure"
+    # the message ends with where the panic is written (spec 8.2)
+    Err(error) -> str.starts_with(error.message, "intentional lease failure at ")
   }
   require(caught, "FAIL bracket-close: intentional panic was not preserved")
   require(not guarded.resource_visible(resource),

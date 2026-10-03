@@ -16,6 +16,7 @@ use std/str
 use std/map
 use std/set
 use front/parser
+use front/lexer
 use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of}
 use check/tast.{TExpr, TFun, XError}
@@ -815,6 +816,32 @@ test "comptime failures become diagnostics; blocks in bodies fold" {
     vals = vals ++ [map.get(out.blocks, k).expect("block")]
   }
   assert vals == [VInt(42)]
+}
+
+test "a comptime failure names its call site, in the words the program would print" {
+  # the site is folded into the message before anything evaluates it, so the
+  # interpreter says what a backend says; `g` is declared after the constant
+  # that reaches it, and its site is still the one in its own declaration
+  let src = "fn f(n: Int) -> Int = if n > 2 { panic(\"too big\") } else { n }\n" ++
+    "const A: Int = comptime { f(3) }\n" ++
+    "const B: Int = comptime { g() }\n" ++
+    "fn g() -> Int = todo()\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let cx0 = Cx { ..cx_new(Some("m"), Some("src/m.dawn")), line_starts: lexer.line_starts_of(src) }
+  let (cx1, tm) = check_module(cx0, m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert map(out.diags, d => d.msg) == [
+    "comptime: panicked: too big at src/m.dawn:1:34",
+    "comptime: a nested comptime block did not fold",
+    "comptime: panicked: not yet implemented at src/m.dawn:4:17",
+    "comptime: a nested comptime block did not fold"
+  ]
 }
 
 test "float folds agree with the backends on signed zero and NaN" {

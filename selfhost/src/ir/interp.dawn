@@ -2467,7 +2467,8 @@ test "lowering invariant panics cross both comptime lowering boundaries" {
   let icx0 = probe_icx()
   match catch_panic(() => fold_expr(icx0, 1000, empty_cache(), XError(3, 4), 3, 4)) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert e.message == "lower: XError reached lowering" }
+    # the compiler's own panics carry their site like any program's
+    Err(e) -> { assert str.starts_with(e.message, "lower: XError reached lowering at src/ir/lower.dawn:") }
   }
 
   let bad = test_tfun("bad", [], TyUnit, XError(5, 6))
@@ -2478,7 +2479,7 @@ test "lowering invariant panics cross both comptime lowering boundaries" {
   let env: Env = map.empty()
   match catch_panic(() => call_named(icx, fresh_st(1000), env, "probe", "bad", [])) {
     Ok(_) -> { assert false }
-    Err(e) -> { assert e.message == "lower: XError reached lowering" }
+    Err(e) -> { assert str.starts_with(e.message, "lower: XError reached lowering at src/ir/lower.dawn:") }
   }
 }
 

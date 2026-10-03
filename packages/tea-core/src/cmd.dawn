@@ -26,6 +26,7 @@
 # from meaning "never".
 
 use std/list
+use std/str
 
 ## What a turn asks for besides a new model.
 ##
@@ -199,8 +200,9 @@ test "a runaway chain panics rather than truncating" {
   match catch_panic(() => fold_msg(blank(), Spin, probe_step)) {
     Ok(_) -> { assert false }
     Err(e) -> {
-      assert e.message
-        == "tea_core/cmd: a turn's commands asked for more than 64 messages"
+      # the message ends with where the panic is written (spec 8.2)
+      assert str.starts_with(e.message,
+        "tea_core/cmd: a turn's commands asked for more than 64 messages at ")
     }
   }
 }
@@ -211,8 +213,9 @@ test "the limit counts every commanded message, batch fan-out included" {
   match catch_panic(() => fold_msg(blank(), Bump, fan_out)) {
     Ok(_) -> { assert false }
     Err(e) -> {
-      assert e.message
-        == "tea_core/cmd: a turn's commands asked for more than 64 messages"
+      # the message ends with where the panic is written (spec 8.2)
+      assert str.starts_with(e.message,
+        "tea_core/cmd: a turn's commands asked for more than 64 messages at ")
     }
   }
   # And one message under the limit is allowed, which is what says the

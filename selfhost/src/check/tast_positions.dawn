@@ -10,13 +10,21 @@
 # base answers for a tree assembled from several modules. The declaration's
 # own exit is the last moment one base is the right one for the whole tree.
 #
+# The same exit is where a failure learns where it was written. `e!`,
+# `panic`, `todo`, `expect` and `assert` all report `at <path>:<line>:<col>`
+# (docs/source-location-design.md section 5), and that suffix is a fact about
+# a revision exactly the way an absolute span is. The message itself stays a
+# plain string to everything below: lowering folds the suffix in and no
+# backend or interpreter learns what a position is.
+#
 # The panic below is the guard on the other half of the seam. A span the
 # checker forgot to measure stays absolute, which reads as an offset past the
 # end of its own declaration; that is a compiler bug and not a program's, so
 # it stops here rather than reaching a backend as a position in the wrong
 # coordinate system.
+use std/list
 use std/map
-use check/types.{Sym, TyInt}
+use check/types.{Sym, TyInt, TyNever}
 use check/tast.{
   TExpr, TStmt, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TConst,
   TSPText, TSPInterp, TLEExpr, TLESpread, TLEIf,
@@ -64,24 +72,85 @@ fn at(r: Resolver, off: Int) -> Int =
       }
   }
 
-## 1-based line of a position, the checker's `line_of` on the same table.
-fn line_at(line_starts: List[Int], pos: Int) -> Int = {
+## 1-based line and column of a position, on the checker's line table. The
+## column counts code points from the line's start, the currency positions
+## and line starts are both in, so it is the column the diagnostic arrow
+## (`--> path:line:col`) prints for the same position.
+fn line_col(line_starts: List[Int], pos: Int) -> (Int, Int) = {
   var line = 1
+  var start = 0
   for s in line_starts {
-    if s <= pos && s > 0 { line = line + 1 }
+    if s <= pos && s > 0 {
+      line = line + 1
+      if s > start { start = s }
+    }
   }
-  line
+  (line, pos - start + 1)
 }
 
-## The `at <path>:<line>` half of an `expr!` panic message. The checker knows
-## the producing call and says so; where that call sits is a fact about a
-## revision, so it is derived here, against the revision being resolved. A
-## declaration that only moved therefore reports the line it moved to, which
-## is what a message baked at check time could not do.
+## The ` at <path>:<line>:<col>` suffix of a failure message. The checker
+## knows the failure and says so; where it sits is a fact about a revision,
+## so it is derived here, against the revision being resolved. A declaration
+## that only moved therefore reports the line it moved to, which is what a
+## message baked at check time could not do. A module with no position path
+## (std) names no site.
 fn site(r: Resolver, pos: Int) -> String =
   match r.path {
-    Some(p) -> " at " ++ p ++ ":" ++ to_string(line_at(r.line_starts, pos))
+    Some(p) -> {
+      let (line, col) = line_col(r.line_starts, pos)
+      " at " ++ p ++ ":" ++ to_string(line) ++ ":" ++ to_string(col)
+    }
     None -> ""
+  }
+
+## The builtins that fail with a message written at their call, and how many
+## arguments the author writes for each. The arity is what tells a call that
+## carries its site from one that does not (a call in std carries none).
+fn sited_arity(name: String) -> Option[Int] =
+  if name == "panic" {
+    Some(1)
+  } else if name == "todo" {
+    Some(0)
+  } else if name == "expect" {
+    Some(2)
+  } else {
+    None
+  }
+
+## A sited builtin's call with its site, as one trailing `XStr` after the
+## written arguments.
+##
+## Why an extra argument rather than the message rewritten here: the typed
+## tree is also what the language server walks, pairing written arguments
+## with typed ones, and a message turned into `msg ++ site` would no longer
+## be the node the author wrote. A trailing argument leaves every written one
+## as it was; `split_site` is how both readers take it back off, and lowering
+## is the only one that keeps it.
+fn sited_call(r: Resolver, name: String, args: List[TExpr], start: Int) -> List[TExpr] =
+  match sited_arity(name) {
+    Some(n) ->
+      if len(args) == n && r.path != None {
+        args ++ [XStr([TSPText(site(r, start))], start, start)]
+      } else {
+        args
+      }
+    None -> args
+  }
+
+## The written arguments of a builtin call, and the site it carries if any:
+## `(args, None)` for every call but a sited one from a module with a path.
+pub fn split_site(name: String, args: List[TExpr]) -> (List[TExpr], Option[String]) =
+  match sited_arity(name) {
+    Some(n) ->
+      if len(args) == n + 1 {
+        match args[n] {
+          XStr([TSPText(s)], _, _) -> (list.take(args, n), Some(s))
+          _ -> (args, None)
+        }
+      } else {
+        (args, None)
+      }
+    None -> (args, None)
   }
 
 fn exprs(r: Resolver, xs: List[TExpr]) -> List[TExpr] = map(xs, x => expr(r, x))
@@ -134,8 +203,11 @@ pub fn expr(r: Resolver, e: TExpr) -> TExpr =
       XFnValue(owner, name, builtin, ty, at(r, lo), at(r, hi))
     XCallDyn(sym, name, args, evs, lo, hi, ty) ->
       XCallDyn(sym, name, exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), ty)
-    XCallBuiltin(name, args, wits, evs, lo, hi, ty) ->
-      XCallBuiltin(name, exprs(r, args), wits, exprs(r, evs), at(r, lo), at(r, hi), ty)
+    XCallBuiltin(name, args, wits, evs, lo, hi, ty) -> {
+      let start = at(r, lo)
+      XCallBuiltin(name, sited_call(r, name, exprs(r, args), start), wits, exprs(r, evs),
+        start, at(r, hi), ty)
+    }
     XCallFn(owner, name, args, wits, evs, trait_id, lo, hi, ty) ->
       XCallFn(owner, name, exprs(r, args), wits, exprs(r, evs), trait_id, at(r, lo), at(r, hi), ty)
     XApply(target, args, evs, lo, hi, ty) ->
@@ -184,7 +256,17 @@ pub fn stmt(r: Resolver, s: TStmt) -> TStmt =
       TSLocalFn(sym, name, params, pnames, expr(r, body), captures, at(r, lo), at(r, hi))
     TSAssign(sym, name, value, lo, hi) -> TSAssign(sym, name, expr(r, value), at(r, lo), at(r, hi))
     TSExpr(e, lo, hi) -> TSExpr(expr(r, e), at(r, lo), at(r, hi))
-    TSAssert(cond, src, lo, hi) -> TSAssert(expr(r, cond), src, at(r, lo), at(r, hi))
+    TSAssert(cond, src, lo, hi) -> {
+      # the site rides on the condition's text, which is the message lowering
+      # writes; `assertion failed` is lowering's own text for a missing one
+      let start = at(r, lo)
+      let suffix = site(r, start)
+      let sited = match src {
+        Some(t) -> Some(t ++ suffix)
+        None -> if suffix == "" { None } else { Some("assertion failed" ++ suffix) }
+      }
+      TSAssert(expr(r, cond), sited, start, at(r, hi))
+    }
     TSWhile(cond, body, jumps, lo, hi) ->
       TSWhile(expr(r, cond), expr(r, body), jumps, at(r, lo), at(r, hi))
     TSFor(pat, item_ty, from, to, wit, body, jumps, lo, hi) ->
@@ -240,12 +322,53 @@ test "an unwrap message names the line the declaration sits on now" {
   let moved = owned(45, 75, Some("src/m.dawn"), starts)
   let raw = XUnwrap(XUnit(0, 1), "unwrapped None from f()", 0, 4, TyInt)
   assert expr(here, raw) ==
-    XUnwrap(XUnit(100, 101), "unwrapped None from f() at src/m.dawn:3", 100, 104, TyInt)
+    XUnwrap(XUnit(100, 101), "unwrapped None from f() at src/m.dawn:3:11", 100, 104, TyInt)
   assert expr(moved, raw) ==
-    XUnwrap(XUnit(45, 46), "unwrapped None from f() at src/m.dawn:2", 45, 49, TyInt)
+    XUnwrap(XUnit(45, 46), "unwrapped None from f() at src/m.dawn:2:6", 45, 49, TyInt)
   # a context with no source names no site, the way the checker named none
   let anonymous = owned(100, 130, None, starts)
   assert expr(anonymous, raw) == XUnwrap(XUnit(100, 101), "unwrapped None from f()", 100, 104, TyInt)
+}
+
+test "a column counts from its own line, and the first line starts at one" {
+  let starts = [0, 40, 90]
+  assert line_col(starts, 0) == (1, 1)
+  assert line_col(starts, 39) == (1, 40)
+  assert line_col(starts, 40) == (2, 1)
+  assert line_col(starts, 104) == (3, 15)
+}
+
+test "panic, todo and expect carry their site as one trailing argument" {
+  let starts = [0, 40, 90]
+  let r = owned(100, 130, Some("src/m.dawn"), starts)
+  let msg = XStr([TSPText("boom")], 6, 12)
+  let call = XCallBuiltin("panic", [msg], [], [], 0, 13, TyNever)
+  let site = XStr([TSPText(" at src/m.dawn:3:11")], 100, 100)
+  let resolved = expr(r, call)
+  assert resolved == XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112), site], [], [], 100, 113, TyNever)
+  assert split_site("panic", [XStr([TSPText("boom")], 106, 112), site]) ==
+    ([XStr([TSPText("boom")], 106, 112)], Some(" at src/m.dawn:3:11"))
+  # resolving twice does not site a call twice
+  assert expr(unowned(Some("src/m.dawn"), starts), resolved) == resolved
+  assert expr(r, XCallBuiltin("todo", [], [], [], 4, 10, TyNever)) ==
+    XCallBuiltin("todo", [XStr([TSPText(" at src/m.dawn:3:15")], 104, 104)], [], [], 104, 110, TyNever)
+  # std has no position path, so its calls stay as written
+  let in_std = owned(100, 130, None, starts)
+  assert expr(in_std, call) == XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyNever)
+  assert split_site("panic", [msg]) == ([msg], None)
+  # a builtin that does not fail with a written message is never sited
+  let other = XCallBuiltin("len", [msg], [], [], 0, 13, TyInt)
+  assert expr(r, other) == XCallBuiltin("len", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyInt)
+}
+
+test "an assertion's text carries its site" {
+  let r = owned(100, 130, Some("src/m.dawn"), [0, 40, 90])
+  let raw = TSAssert(XBool(true, 7, 11), Some("true"), 0, 11)
+  assert stmt(r, raw) == TSAssert(XBool(true, 107, 111), Some("true at src/m.dawn:3:11"), 100, 111)
+  let unnamed = TSAssert(XBool(true, 7, 11), None, 0, 11)
+  assert stmt(r, unnamed) ==
+    TSAssert(XBool(true, 107, 111), Some("assertion failed at src/m.dawn:3:11"), 100, 111)
+  assert stmt(owned(100, 130, None, [0, 40, 90]), unnamed) == TSAssert(XBool(true, 107, 111), None, 100, 111)
 }
 
 test "symbols move with the tree that reads them" {

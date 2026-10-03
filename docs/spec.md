@@ -697,7 +697,7 @@ test eval {
 - `test` 块只被 `dawn test` 编译执行，`dawn build` 剥除。
 - 块内允许 `!io`。
 - `assert expr`：`expr` 为 `Bool`；失败时报告源文本与两侧子表达式的值
-  （编译器对 `==`、比较运算符做拆解以给出好的失败信息）。
+  （编译器对 `==`、比较运算符做拆解以给出好的失败信息），末尾是断言的位置（§8.2）。
 
 **以声明命名的测试。** `test` 后面除了字符串，还可以写本模块一个顶层声明的名字，这个测试**就是
 该声明的示例**：
@@ -2451,13 +2451,26 @@ fn as_http[T](r: Result[T, String], status: Int) -> Result[T, HttpError] =
 
 ### 8.2 不可恢复：panic
 
-`panic(msg)`：打印消息与 Dawn 层栈迹，进程以非零退出。
-`todo()` 等价于 `panic("not yet implemented")` 且能通过任意类型检查
+`panic(msg)`：向 stderr 打印 `panic: <msg> at <path>:<line>:<col>`，进程以非零退出。
+不打印栈。
+`todo()` 等价于在同一处写 `panic("not yet implemented")`，且能通过任意类型检查
 （返回类型为底类型 `Never`）。
+
+**位置后缀**：`panic`、`todo`、`expect`、后缀 `!` 与 `assert`（§3.4）失败时，消息末尾是
+调用点的位置 ` at <path>:<line>:<col>`，由编译器在编译期按调用点填入：
+
+- `<path>` 只取决于源码树，不取决于命令行与工作目录：项目里相对项目根（`src/main.dawn`），
+  单文件相对入口文件所在目录（`p.dawn`），`[deps]` 包是 `<包名>/<包内路径>`。
+- `<line>`、`<col>` 从 1 起，列按码点计，与诊断的 `--> path:line:col` 同一把尺子。
+  指向失败表达式的起点：`panic`/`todo` 的名字、`o.expect(..)` 与 `o!` 的 `o`、`assert` 关键字。
+- 位置是消息的一部分，`catch_panic` 拿到的 `message` 同样带它（§9.8）。
+- std 里的失败不带位置；把 `panic` 当函数值传递、经值调用时也不带。
+- 没有运行期栈迹：Core 不带 span，位置只在编译期知道的调用点上
+  （理由见 `docs/source-location-design.md`）。
 
 **后缀 `!`**：`o!` 把 `Option[T]` 解成 `T`，`None` 则 panic。语义同
 `expect(o, msg)`，唯一区别是**消息由编译器生成**——含产生 `None` 的调用与源位置
-（`unwrapped None from URI.create() at src/http.dawn:23`），故不必为它编造占位串。
+（`unwrapped None from URI.create() at src/http.dawn:23:13`），故不必为它编造占位串。
 
 ```dawn
 let uri = URI.create(url)!                      # 而不是 .expect("uri")
@@ -2850,8 +2863,8 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
   屏障再记一笔是记了一笔没人欠的账。
 - **panic 是语言自己定义的失败**，由实参决定：求值是严格的、次序是规定的，一个纯闭包
   在给定实参上 panic 与否、消息是什么都已确定，所以折叠与消重纯调用不改变捕获的结果，
-  捕获几次也不可观察。消息里的源码文本（`assert` 的表达式）是程序的一部分，与字符串字面量
-  同理；消息里的**后端**成分由上面的载荷契约排除（两后端逐字节相同）。comptime 仍无条件拒绝
+  捕获几次也不可观察。消息里的源码文本（`assert` 的表达式）与调用点位置（§8.2，只取决于
+  源码树）是程序的一部分，与字符串字面量同理；消息里的**后端**成分由上面的载荷契约排除（两后端逐字节相同）。comptime 仍无条件拒绝
   `catch_panic`（§7），编译器不会把构建机上的消息折进产物。
 
 于是**三个屏障共用一条行**：§9.8.2 的 `bracket` 什么都不观察，`catch_fault` 观察的失败

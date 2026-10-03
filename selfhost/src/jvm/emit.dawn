@@ -1800,11 +1800,17 @@ fn check_lowered_pairing(module: String, declared: List[String], lowered: List[S
   }
 }
 
-## The pairing panic's message, or "" when the two lists pair up.
+## The pairing panic's message without its site, or "" when the two lists
+## pair up. The site is this file's own, so it is checked to be there and then
+## left out of what the tests compare.
 fn pairing_panic(declared: List[String], lowered: List[String]) -> String =
   match catch_panic(() => check_lowered_pairing("app/M", declared, lowered)) {
     Ok(_) -> ""
-    Err(e) -> e.message
+    Err(e) ->
+      match str.index_of(e.message, " at src/jvm/emit.dawn:") {
+        Some(i) -> str.slice(e.message, 0, i)
+        None -> "no site: " ++ e.message
+      }
   }
 
 test "a lowered list shorter than the declared one is the pairing invariant" {

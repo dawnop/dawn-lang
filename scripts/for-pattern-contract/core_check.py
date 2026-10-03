@@ -149,7 +149,8 @@ def check_bottom(text: str) -> None:
     panic = panics[0]
     if panic == 0 or body[panic - 1].strip() != "discard":
         raise CoreError("nonreturning source is not preserved as a discarded Never expression")
-    if count(body, r'^\s+str "source-stop"$') != 1:
+    # the message carries its call site (docs/source-location-design.md 5.1)
+    if count(body, r'^\s+str "source-stop at bottom\.dawn:\d+:\d+"$') != 1:
         raise CoreError("nonreturning iterable source is not lowered exactly once")
     if any("unreachable-body" in line for line in body):
         raise CoreError("unreachable for body was lowered after a Never source")
@@ -190,7 +191,7 @@ GOOD_BOTTOM = """fn bottom.consume -> Unit
   block : Unit
     discard
       intrinsic panic : Never
-        str "source-stop"
+        str "source-stop at bottom.dawn:2:16"
 """
 
 

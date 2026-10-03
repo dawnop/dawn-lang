@@ -1347,9 +1347,12 @@ test "pumping a streaming body tells EOF, a failed transfer and a panic apart" {
   assert bytes.len(sink2.toByteArray().expect("bytes")) == 0
 
   # a bug in this program: not a java.lang.Exception, so it goes straight past
-  # the inner catch_fault to the outer catch_panic (spec §9.8) with its message
-  assert pump_with(test_stream_of(bytes.utf8("x")), None, _up => panic("pump bug")) ==
-    PumpPanicked("pump bug")
+  # the inner catch_fault to the outer catch_panic (spec §9.8) with its message,
+  # which ends with where the panic is written (spec 8.2)
+  match pump_with(test_stream_of(bytes.utf8("x")), None, _up => panic("pump bug")) {
+    PumpPanicked(m) -> { assert str.starts_with(m, "pump bug at ") }
+    _ -> { assert false }
+  }
 }
 
 test "a stream of stated length that ends early is a truncation, not a success" {
@@ -1383,7 +1386,7 @@ test "a stream's Content-Length is its stated length, and an unsized stream has 
   }
   match catch_panic(() => with_header(sized(), "Content-Length", "5")) {
     Ok(_) -> { assert false }
-    Err(m) -> { assert m.message == "header Content-Length says 5 but the body is 4 bytes" }
+    Err(m) -> { assert str.starts_with(m.message, "header Content-Length says 5 but the body is 4 bytes at ") }
   }
   # next to chunked framing a Content-Length is the RFC 9112 §6.1 violation
   match catch_panic(() => with_header(unsized(), "Content-Length", "4")) {
