@@ -523,6 +523,36 @@ test "consts evaluate in declaration order and fold across references" {
   assert map.get(out.consts, "C") == Some(VStr("x3"))
 }
 
+test "a default that reads earlier parameters folds at comptime" {
+  # `f$default$k` takes the parameters before it (spec §3.1); the interpreter
+  # runs it as the ordinary module function it is, fed by the call's own
+  # bindings -- including an earlier default, a closure over a parameter, and
+  # a call written out of declaration order
+  let src = "fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int = mid\n" ++
+    "fn adder(n: Int, f: fn(Int) -> Int = (x) => x + n) -> Int = f(1)\n" ++
+    "fn pair[T](a: T, b: T = a) -> List[T] = [a, b]\n" ++
+    "const A: Int = span(0)\n" ++
+    "const B: Int = span(hi: 4, lo: 2)\n" ++
+    "const C: Int = span(1, mid: 7)\n" ++
+    "const D: Int = adder(41)\n" ++
+    "const E: List[String] = pair(\"x\")\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VInt(5))
+  assert map.get(out.consts, "B") == Some(VInt(3))
+  assert map.get(out.consts, "C") == Some(VInt(7))
+  assert map.get(out.consts, "D") == Some(VInt(42))
+  assert map.get(out.consts, "E") == Some(VList([VStr("x"), VStr("x")]))
+}
+
 test "one module's lowering cache outlives the expression that filled it" {
   # `helper` is called from two consts, and each of the last two consts lifts
   # a lambda of its own. Both halves of the cache are read from the run that

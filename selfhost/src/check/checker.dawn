@@ -108,6 +108,7 @@ use check/passes.{
 use front/suggest
 use front/effect_name
 use front/parser
+use front/token.{Diag}
 
 # ---- scopes and symbols ----
 
@@ -7796,18 +7797,20 @@ fn arity_msg(callee: String, min_n: Int, max_n: Int, got: Int) -> String = {
   "`" ++ callee ++ "` takes " ++ takes ++ " argument(s), got " ++ to_string(got)
 }
 
-## The call an omitted defaulted argument becomes: `f$default$k()`, resolved
-## to the declaring module. The synthesized function repeats the callee's type
+## The call an omitted defaulted argument becomes: `f$default$k(p0, .., pk-1)`,
+## resolved to the declaring module, given the values of the parameters before
+## it (`prefix`, spec §3.1). The synthesized function repeats the callee's type
 ## parameters and bounds, so this is an instantiated call like any other: the
 ## result type is the parameter's type under this call's substitution, and the
 ## witnesses are this call's own -- the same row, read in the same order, so
-## the parent's list is the callee's list. It is pure and zero-parameter, so
-## it needs no evidence.
+## the parent's list is the callee's list. It is pure, so it needs no
+## evidence.
 fn default_call(
   cx: Cx,
   s: Sig,
   callee: String,
   idx: Int,
+  prefix: List[TExpr],
   m: Map[Int, Ty],
   em: Map[Int, Eff],
   wits: List[WitRef],
@@ -7816,8 +7819,120 @@ fn default_call(
 ) -> TExpr = {
   let none_tid: Option[Int] = None
   let pty = reduce_instantiated(cx, subst(s.param_tys[idx], m, em), m)
-  XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), [], wits, [], none_tid,
+  XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), prefix, wits, [], none_tid,
     owner_off(cx, lo), owner_off(cx, hi), pty)
+}
+
+## The arguments of a signature call in parameter order, and the `let`s that
+## run before the call. `cx` is the call's entry context (node offsets are
+## measured against it), `cx1` the current one. Three shapes:
+##
+## - Every written argument already sits in parameter order and no omitted
+##   parameter after the first takes a default: the arguments as written, an
+##   omitted first parameter's `f$default$0()` in its hole, no `let`s. This
+##   is what every call emitted before defaults could read parameters.
+## - Written order and parameter order differ (named arguments, spec §4.3):
+##   arguments evaluate in written order, so each is bound to a local first,
+##   in written order, and the call reads the locals in parameter order.
+## - An omitted parameter k > 0 takes a default: `f$default$k` takes the
+##   values of the first k parameters, which must each be computed once and
+##   before it. So the written arguments are bound in written order, then
+##   each omitted default in declaration order, each reading the locals of
+##   the parameters before it (spec §3.1).
+##
+## `bindable` is false when slot assignment already failed and reported; the
+## call is an error then, and the arguments are left as they are.
+fn arrange_call_args(
+  cx: Cx,
+  cx1: Cx,
+  s: Sig,
+  callee: String,
+  args0: List[Arg],
+  slot_of: List[Option[Int]],
+  tx_slots: List[Option[TExpr]],
+  m: Map[Int, Ty],
+  em: Map[Int, Eff],
+  wits: List[WitRef],
+  bindable: Bool,
+  lo: Int,
+  hi: Int
+) -> (Cx, List[TStmt], List[TExpr]) = {
+  var mono = true
+  var reads_params = false
+  var prev = -1
+  var pi = 0
+  for so in slot_of {
+    match so {
+      Some(wi) -> {
+        if wi < prev { mono = false }
+        prev = wi
+      }
+      None -> if pi > 0 && param_has_default(s, pi) { reads_params = true }
+    }
+    pi = pi + 1
+  }
+  let err = XError(owner_off(cx, lo), owner_off(cx, hi))
+  if not bindable || (mono && not reads_params) {
+    var txs: List[TExpr] = []
+    var pd = 0
+    for so in slot_of {
+      let sl = match so {
+        Some(wi) -> tx_slots[wi]
+        None ->
+          if param_has_default(s, pd) {
+            Some(default_call(cx1, s, callee, pd, txs, m, em, wits, lo, hi))
+          } else {
+            no_texpr()
+          }
+      }
+      txs = txs ++ [sl.unwrap_or(err)]
+      pd = pd + 1
+    }
+    return (cx1, [], txs)
+  }
+  # the bindings live in the wrapper block, and in a scope of their own --
+  # two such calls in one function must not collide on the names
+  var cx2 = push_scope(cx1)
+  var lets: List[TStmt] = []
+  var locs: List[Option[TExpr]] = []
+  var wi2 = 0
+  for a0 in args0 {
+    match tx_slots[wi2] {
+      Some(ax) -> {
+        let t = tex_ty(ax)
+        let nm = "arg\$${to_string(wi2)}"
+        let (cxd, sidw) = declare(cx2, nm, t, false, a0.lo, a0.hi)
+        cx2 = cxd
+        lets = lets ++ [TSLet(Some(sidw), nm, ax, owner_off(cx, a0.lo), owner_off(cx, a0.hi))]
+        locs = locs ++ [Some(XLocal(sidw, nm, owner_off(cx, a0.lo), owner_off(cx, a0.hi), t))]
+      }
+      None -> { locs = locs ++ [no_texpr()] }
+    }
+    wi2 = wi2 + 1
+  }
+  var txs2: List[TExpr] = []
+  var pk = 0
+  for so in slot_of {
+    match so {
+      Some(wi) -> { txs2 = txs2 ++ [locs[wi].unwrap_or(err)] }
+      None ->
+        if not param_has_default(s, pk) {
+          txs2 = txs2 ++ [err]
+        } else if not reads_params {
+          txs2 = txs2 ++ [default_call(cx1, s, callee, pk, [], m, em, wits, lo, hi)]
+        } else {
+          let dx = default_call(cx1, s, callee, pk, txs2, m, em, wits, lo, hi)
+          let t = tex_ty(dx)
+          let nm = "default\$${to_string(pk)}"
+          let (cxd, sidd) = declare(cx2, nm, t, false, lo, hi)
+          cx2 = cxd
+          lets = lets ++ [TSLet(Some(sidd), nm, dx, owner_off(cx, lo), owner_off(cx, hi))]
+          txs2 = txs2 ++ [XLocal(sidd, nm, owner_off(cx, lo), owner_off(cx, hi), t)]
+        }
+    }
+    pk = pk + 1
+  }
+  (pop_scope(cx2), lets, txs2)
 }
 
 ## A named call f(args) (the Kotlin checkCall): a local fn value, else a
@@ -8068,89 +8183,9 @@ fn check_call(
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
   let ret = reduce_instantiated(cx1, subst(s.ret, m, em), m)
-  # The call node's arguments are in parameter order; an all-positional call
-  # already is, so this is the identity it always was. An unfilled parameter
-  # with a default becomes a call of its synthesized `f$default$k` -- pure and
-  # zero-parameter, so where it sits in the evaluation order is unobservable.
-  var txs2: List[TExpr] = []
-  var pi2 = 0
-  for so in slot_of {
-    let sl = match so {
-      Some(wi) -> tx_slots[wi]
-      None ->
-        if param_has_default(s, pi2) {
-          let value = default_call(cx1, s, callee, pi2, m, em, wits, lo, hi)
-          Some(value)
-        } else {
-          no_texpr()
-        }
-    }
-    match sl {
-      Some(ax) -> { txs2 = txs2 ++ [ax] }
-      None -> { txs2 = txs2 ++ [XError(owner_off(cx, lo), owner_off(cx, hi))] }
-    }
-    pi2 = pi2 + 1
-  }
-  # Arguments evaluate in written order (spec §4.3). When a named argument
-  # landed out of written order, every argument is bound to a local first, in
-  # written order, and the call reads the locals in parameter order. A call
-  # whose written order already is parameter order wraps nothing and emits
-  # exactly what it always did.
-  var arg_lets: List[TStmt] = []
-  if named_present && not args_broken {
-    var mono = true
-    var prev = -1
-    for so in slot_of {
-      match so {
-        Some(wi) -> {
-          if wi < prev { mono = false }
-          prev = wi
-        }
-        None -> ()
-      }
-    }
-    if not mono {
-      # the bindings live in the wrapper block, and in a scope of their own --
-      # two reordered calls in one function must not collide on the names
-      cx1 = push_scope(cx1)
-      var locs: List[Option[TExpr]] = []
-      var wi2 = 0
-      for a0 in args0 {
-        match tx_slots[wi2] {
-          Some(ax) -> {
-            let t = tex_ty(ax)
-            let nm = "arg\$${to_string(wi2)}"
-            let (cxd, sidw) = declare(cx1, nm, t, false, a0.lo, a0.hi)
-            cx1 = cxd
-            arg_lets = arg_lets ++ [TSLet(Some(sidw), nm, ax, owner_off(cx, a0.lo), owner_off(cx, a0.hi))]
-            locs = locs ++ [Some(XLocal(sidw, nm, owner_off(cx, a0.lo), owner_off(cx, a0.hi), t))]
-          }
-          None -> { locs = locs ++ [no_texpr()] }
-        }
-        wi2 = wi2 + 1
-      }
-      cx1 = pop_scope(cx1)
-      txs2 = []
-      var pi3 = 0
-      for so in slot_of {
-        let sl = match so {
-          Some(wi) -> locs[wi]
-          None ->
-            if param_has_default(s, pi3) {
-              let value = default_call(cx1, s, callee, pi3, m, em, wits, lo, hi)
-              Some(value)
-            } else {
-              no_texpr()
-            }
-        }
-        match sl {
-          Some(lx) -> { txs2 = txs2 ++ [lx] }
-          None -> { txs2 = txs2 ++ [XError(owner_off(cx, lo), owner_off(cx, hi))] }
-        }
-        pi3 = pi3 + 1
-      }
-    }
-  }
+  let (arranged_cx, arg_lets, txs2) =
+    arrange_call_args(cx, cx1, s, callee, args0, slot_of, tx_slots, m, em, wits, not args_broken, lo, hi)
+  cx1 = arranged_cx
   # the evidence the callee's *written* labels need, in effect-id order. A
   # label that arrived by instantiating an effect variable is not here: it
   # belongs to the variable's own slot, which `evidence_var_args` fills with a
@@ -11159,7 +11194,10 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   let (cx7, _, _) = check_expr(cx, short, no_expected())
   assert cx7.diags[0].msg == "`move2` takes 2 argument(s), got 1"
   # a defaulted parameter may be omitted: the slot becomes a call of the
-  # synthesized `move2$default$1`, and the range shows in the arity message
+  # synthesized `move2$default$1`, and the range shows in the arity message.
+  # That function takes the parameter before it (spec §3.1), so the written
+  # argument is bound once, the default is bound reading it, and the call
+  # reads both locals
   let sg2 = Sig { ..sg, param_defaults: [None, Some("false")] }
   var cxd = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg2) }
   let omitted = EApply(EVar("move2", 0, 5), [pos_arg(EInt(1, 6, 7))], 0, 8)
@@ -11167,14 +11205,27 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   assert t8 == TyUnit
   assert len(cx8.diags) == 0
   match n8 {
-    XCallFn(_, _, cargs, ..) ->
-      match cargs[1] {
-        XCallFn(_, dn, dargs, ..) -> {
+    XBlock(stmts8, tail8, ..) -> {
+      assert len(stmts8) == 2
+      match stmts8[1] {
+        TSLet(_, _, XCallFn(_, dn, dargs, ..), _, _) -> {
           assert dn == "move2\$default\$1"
-          assert len(dargs) == 0
+          assert len(dargs) == 1
+          match dargs[0] {
+            XLocal(_, an, ..) -> { assert an == "arg\$0" }
+            _ -> { assert false }
+          }
         }
         _ -> { assert false }
       }
+      match tail8 {
+        Some(XCallFn(_, nm8, cargs, ..)) -> {
+          assert nm8 == "move2"
+          assert map(cargs, a => tex_ty(a)) == [TyInt, TyBool]
+        }
+        _ -> { assert false }
+      }
+    }
     _ -> { assert false }
   }
   let none8 = EApply(EVar("move2", 0, 5), [], 0, 7)
@@ -11212,6 +11263,148 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     }
     _ -> { assert false }
   }
+}
+
+## The names a call's wrapper block binds, in the order it binds them, and
+## the call it ends in. A call that binds nothing answers no names.
+fn wrapper_lets(n: TExpr) -> (List[String], Option[TExpr]) =
+  match n {
+    XBlock(stmts, tail, ..) ->
+      (map(stmts, st => match st {
+        TSLet(_, nm, _, _, _) -> nm
+        _ -> "?"
+      }), tail)
+    _ -> ([], Some(n))
+  }
+
+fn arg_local_names(xs: List[TExpr]) -> List[String] =
+  map(xs, x => match x {
+    XLocal(_, nm, ..) -> nm
+    _ -> "?"
+  })
+
+test "omitted defaults run after the written arguments, in declaration order" {
+  var cx = seed_prelude(test_cx())
+  cx = push_scope(cx)
+  # f(a: Int, b: Int = a, c: Bool, d: Int = b): two defaults that read
+  # parameters, one of them an earlier default
+  let sg = Sig {
+    name: "f",
+    param_tys: [TyInt, TyInt, TyBool, TyInt],
+    param_names: ["a", "b", "c", "d"],
+    param_defaults: [None, Some("a"), None, Some("b")],
+    ret: TyInt,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    eparams: [],
+    owner: Some("m"),
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+  cx = Cx { ..cx, fns: map.insert(cx.fns, "f", sg) }
+  let named_arg = (n: String, e: Expr) => Arg { name: Some(n), e: e, trailing: false, lo: e_lo(e), hi: e_hi(e) }
+  # written as `f(c: true, a: 1)`: the written arguments first, in written
+  # order, then each omitted default in declaration order
+  let call = EApply(EVar("f", 0, 1), [named_arg("c", EBool(true, 2, 6)), named_arg("a", EInt(1, 7, 8))], 0, 9)
+  let (cx1, t1, n1) = check_expr(cx, call, no_expected())
+  assert len(cx1.diags) == 0
+  assert t1 == TyInt
+  let (lets, tail) = wrapper_lets(n1)
+  assert lets == ["arg\$0", "arg\$1", "default\$1", "default\$3"]
+  match n1 {
+    XBlock(stmts, ..) -> {
+      # each default takes the parameters before it, in parameter order --
+      # the written locals and the earlier default alike
+      match stmts[2] {
+        TSLet(_, _, XCallFn(_, dn, dargs, ..), _, _) -> {
+          assert dn == "f\$default\$1"
+          assert arg_local_names(dargs) == ["arg\$1"]
+        }
+        _ -> { assert false }
+      }
+      match stmts[3] {
+        TSLet(_, _, XCallFn(_, dn, dargs, ..), _, _) -> {
+          assert dn == "f\$default\$3"
+          assert arg_local_names(dargs) == ["arg\$1", "default\$1", "arg\$0"]
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  match tail {
+    Some(XCallFn(_, nm, cargs, ..)) -> {
+      assert nm == "f"
+      assert arg_local_names(cargs) == ["arg\$1", "default\$1", "arg\$0", "default\$3"]
+    }
+    _ -> { assert false }
+  }
+  # every argument given: no default runs, and the call binds nothing
+  let full = EApply(EVar("f", 0, 1),
+    [pos_arg(EInt(1, 2, 3)), pos_arg(EInt(2, 4, 5)), pos_arg(EBool(true, 6, 10)), pos_arg(EInt(3, 11, 12))], 0, 13)
+  let (cx2, _, n2) = check_expr(cx, full, no_expected())
+  assert len(cx2.diags) == 0
+  let (lets2, _) = wrapper_lets(n2)
+  assert lets2 == []
+  # an omitted *first* parameter reads nothing, so nothing is bound for it:
+  # the call is what it was before defaults could read parameters
+  let sg0 = Sig { ..sg, name: "g", param_defaults: [Some("1"), None, None, None] }
+  let cx0 = Cx { ..cx, fns: map.insert(cx.fns, "g", sg0) }
+  let first = EApply(EVar("g", 0, 1),
+    [named_arg("b", EInt(2, 2, 3)), named_arg("c", EBool(true, 4, 8)), named_arg("d", EInt(3, 9, 10))], 0, 11)
+  let (cx3, _, n3) = check_expr(cx0, first, no_expected())
+  assert len(cx3.diags) == 0
+  match n3 {
+    XCallFn(_, _, cargs3, ..) ->
+      match cargs3[0] {
+        XCallFn(_, dn3, dargs3, ..) -> {
+          assert dn3 == "g\$default\$0"
+          assert dargs3 == []
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "a default reads the parameters before it, and names the ones it cannot" {
+  # earlier parameters, an earlier default, by name and out of order
+  assert msgs_of("fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int = mid\n" ++
+      "fn use_it() -> Int = span(1) + span(1, mid: 0) + span(hi: 4, lo: 2)\n") == []
+  # a lambda in a default closes over an earlier parameter
+  assert msgs_of("fn adder(n: Int, f: fn(Int) -> Int = (x) => x + n) -> Int = f(1)\n") == []
+  # generics: the earlier parameter's type is the type parameter
+  assert msgs_of("fn pair[T](a: T, b: T = a) -> (T, T) = (a, b)\nfn p() -> (Int, Int) = pair(1)\n") == []
+  # the tail block fills the last parameter; the default between reads the first
+  assert msgs_of("fn each(xs: List[Int], n: Int = len(xs), body: fn(Int) -> Int) -> Int = body(n)\n" ++
+      "fn q() -> Int = each([1, 2]) { x => x * 2 }\n") == []
+  # its own parameter
+  let own = "fn bump(a: Int = a + 1) -> Int = a\n"
+  assert msgs_of(own) == ["the default of parameter `a` refers to `a` itself"]
+  assert str.contains(hints_of(own)[0], "sees only the parameters declared before it")
+  # a parameter declared after it, as a value and as a callee
+  let later = "fn window(lo: Int = hi - 1, hi: Int) -> Int = lo + hi\n"
+  assert msgs_of(later) == ["the default of parameter `lo` refers to `hi`, which is declared after it"]
+  assert str.contains(hints_of(later)[0], "declare `hi` before `lo`")
+  assert msgs_of("fn ap(a: Int = h(1), h: fn(Int) -> Int) -> Int = a\n") ==
+    ["the default of parameter `a` refers to `h`, which is declared after it"]
+  # a local of the same name inside the default resolves, and is not touched
+  assert msgs_of("fn shadow(a: Int = { let b = 2\n b }, b: Int) -> Int = a + b\n") == []
+  # any other unknown name is still an unknown name
+  assert msgs_of("fn typo(a: Int, b: Int = aa) -> Int = b\n") == ["undefined variable: aa"]
+}
+
+test "a default that reads a parameter is still pure" {
+  # calling an earlier pure function parameter is pure
+  assert msgs_of("fn app(g: fn(Int) -> Int, x: Int = g(1)) -> Int = x\n") == []
+  # calling one whose row is a variable is not: the default would carry the
+  # row of whatever the caller passed
+  let ms = msgs_of("fn run(g: fn() -> Int !e, x: Int = g()) -> Int !e = x + g()\n")
+  assert len(ms) == 1
+  assert str.starts_with(ms[0], "a parameter default must be pure, but it calls `g`")
 }
 
 test "the prelude Iter names its cursor `c`, which is what a caller writes" {
@@ -11911,9 +12104,13 @@ fn verify_effects(
   cx1
 }
 
-## The signature of the function a defaulted parameter synthesizes: zero
-## parameters, the parameter's type, pure -- `f$default$k` in f's module.
-## `$` is not in the identifier lexicon, so the name cannot collide.
+## The signature of the function a defaulted parameter synthesizes: the
+## parameters declared before it, the parameter's type, pure -- `f$default$k`
+## in f's module, taking f's first k parameters (spec §3.1). The arity is k
+## whether or not the expression reads them: a caller in another module sees
+## f's signature and not the default's body, so the shape has to follow from
+## the signature alone. `$` is not in the identifier lexicon, so the name
+## cannot collide.
 ##
 ## It repeats the parent's type parameters and bounds verbatim (#207 §4.3):
 ## the parameter's type may mention them, and generics are erased before Core,
@@ -11925,8 +12122,8 @@ fn verify_effects(
 pub fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
   Sig {
     name: fname ++ "\$default\$" ++ to_string(k),
-    param_tys: [],
-    param_names: [],
+    param_tys: list.take(parent.param_tys, k),
+    param_names: list.take(parent.param_names, k),
     param_defaults: [],
     ret: pty,
     eff: EPure,
@@ -11959,25 +12156,43 @@ pub fn strip_param_defaults(d: FnDecl) -> FnDecl = {
 
 fn no_tdefault() -> Option[TDefault] = None
 
-## Check each parameter default in the declaring module's scope (#207 §4.2):
-## no parameters, a pure frame of its own. The expression becomes the body of
-## the synthesized `f$default$k`, so what is in scope here is exactly what is
-## in scope there -- a reference to a sibling parameter is an ordinary
-## `undefined variable`, by construction rather than by a rule.
+## Check each parameter default in the declaring module's scope plus the
+## parameters declared before it (#207 §4.2, spec §3.1): a pure frame of its
+## own, holding exactly what the synthesized `f$default$k` binds -- its first
+## k parameters, which a call fills with the arguments (or the earlier
+## defaults) it has already evaluated. So a default may read an earlier
+## parameter, close over it in a lambda, or pass it on.
+##
+## A parameter at or after k is not in scope, by construction: the default is
+## what the parameter is when the argument is omitted, so it runs before the
+## parameter has a value, and the ones after it have not been evaluated yet.
+## Such a name resolves to nothing and would read as an ordinary `undefined
+## variable`; `explain_param_refs` re-words exactly those diagnostics.
 ##
 ## The frame does carry the function's type parameters and their bounds
 ## (`default_sig` repeats them), so a parameter whose type mentions them takes
 ## a default like any other; `enter_fn` mints the dictionary symbols and they
 ## are carried out here, because the synthesized function has to bind the very
-## symbols its body was checked against.
+## symbols its body was checked against. The parameter symbols are carried out
+## for the same reason.
 pub(pkg) fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefault) !io = {
   let p = d.params[k]
   let de = p.default.expect("parameter default boundary requires a default expression")
   let pty = s.param_tys[k]
   let dsig = default_sig(s, d.name, k, pty)
   var cxd = enter_fn(cx, dsig, p.lo, p.hi)
+  var psyms: List[Int] = []
+  var i = 0
+  while i < k {
+    let q = d.params[i]
+    let (cxa, sid) = declare(cxd, q.name, s.param_tys[i], false, q.lo, q.hi)
+    cxd = cxa
+    psyms = psyms ++ [sid]
+    i = i + 1
+  }
+  let before = len(cxd.diags)
   let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
-  cxd = cxe
+  cxd = explain_param_refs(cxe, before, d, k)
   if not assignable(cxd, dt, pty) {
     let param_text = ty_show(cxd.adts, pty)
     let default_text = ty_show(cxd.adts, dt)
@@ -11995,8 +12210,59 @@ pub(pkg) fn check_param_default(cx: Cx, d: FnDecl, s: Sig, k: Int) -> (Cx, TDefa
     }
   }
   let dsyms = dict_sym_list(cxd, dsig)
-  (pop_scope(cxd), TDefault { body: dx, dict_syms: dsyms })
+  (pop_scope(cxd), TDefault { body: dx, param_syms: psyms, dict_syms: dsyms })
 }
+
+## Re-word the diagnostics a default raised (from index `before` on) that are
+## a reference to its own parameter or to one declared after it. Those names
+## are left out of the default's scope on purpose (see `check_param_default`),
+## so they resolve to nothing; a bare `undefined variable: limit` would send
+## the reader looking for a typo in a name that is plainly declared two
+## columns away. Only an unresolved name is re-worded: a local of the same
+## name inside the default, or a module function, resolves and is not touched.
+fn explain_param_refs(cx: Cx, before: Int, d: FnDecl, k: Int) -> Cx = {
+  if len(cx.diags) == before { return cx }
+  let own = d.params[k].name
+  var later: Set[String] = set.empty()
+  var i = k + 1
+  while i < len(d.params) {
+    later = set.insert(later, d.params[i].name)
+    i = i + 1
+  }
+  var out = list.take(cx.diags, before)
+  for dg in list.drop(cx.diags, before) {
+    let name = unresolved_name(dg.msg)
+    if name == own {
+      out = out ++ [Diag { ..dg,
+        msg: "the default of parameter `" ++ own ++ "` refers to `" ++ own ++ "` itself",
+        hint: "a default is the value `" ++ own ++ "` takes when the argument is omitted, " ++
+          "so `" ++ own ++ "` has no value yet; a default sees only the parameters declared before it" }]
+    } else if name != "" && set.has(later, name) {
+      out = out ++ [Diag { ..dg,
+        msg: "the default of parameter `" ++ own ++ "` refers to `" ++ name ++
+          "`, which is declared after it",
+        hint: "defaults are evaluated in declaration order and see only the parameters " ++
+          "declared before them; declare `" ++ name ++ "` before `" ++ own ++ "`, or pass `" ++
+          own ++ "` explicitly" }]
+    } else {
+      out = out ++ [dg]
+    }
+  }
+  Cx { ..cx, diags: out }
+}
+
+## The name an unresolved-name diagnostic is about, or "" for any other
+## diagnostic. The two prefixes are the ones `check_var` and `check_call` raise
+## for a name that resolves to nothing (a value, or a callee). They are spelled
+## out at those sites rather than shared through a constant because the
+## checker corpus's coverage ledger keys each `cerr` site by its message
+## expression; the "a default reads the parameters before it" test goes red if
+## the two spellings drift apart.
+fn unresolved_name(msg: String) -> String =
+  match str.strip_prefix(msg, "undefined variable: ") {
+    Some(name) -> name
+    None -> str.strip_prefix(msg, "undefined function: ").unwrap_or("")
+  }
 
 fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]]) !io = {
   var cx1 = cx
@@ -12996,8 +13262,8 @@ test "a typed span cuts the source the declaration actually holds" {
 pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
   var cx1 = products.cx
   var fns_out = products.functions
-  # Synthesize the default-value functions (#207 §4.4): one zero-parameter
-  # pure function per defaulted parameter, appended as ordinary module
+  # Synthesize the default-value functions (#207 §4.4): one pure function per
+  # defaulted parameter, taking the parameters before it, appended as ordinary module
   # functions -- lowering, both backends and the comptime interpreter treat
   # them like anything else declared here. The signature is also bound into
   # the fn table so the drivers' program-wide descriptor tables pick it up;
@@ -13012,7 +13278,7 @@ pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
           synth = synth ++ [TFun {
             name: ds.name,
             sig: ds,
-            param_syms: [],
+            param_syms: dd.param_syms,
             # the signature repeats the parent's bounds, so the body binds one
             # dictionary per bound -- the same symbols `check_param_defaults`
             # checked it against. Leaving these empty while the signature

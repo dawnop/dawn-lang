@@ -2,7 +2,7 @@
 
 > 状态：current。本线的总纲：分组裁决、刀序与每刀的回填位置。K0（签名渲染默认表达式、
 > LSP `textDocument/signatureHelp`）、K1（`std/narrow` 的 `Rounding`）与 K2（tileir Dev 属性族与
-> `trace_kernel` 的 `hints`）已落地；其余各刀落地时回填 §7「状态」并在这里改写被
+> `trace_kernel` 的 `hints`）已落地；K6（B1，默认值看得见前面的形参）的语言设计在 §8；其余各刀落地时回填 §7「状态」并在这里改写被
 > 事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2），
 > 默认参数本身的语义见 [spec.md](spec.md) 3.1 节与 [named-args-design.md](named-args-design.md)。
 
@@ -31,7 +31,7 @@ dev.addf_down(F32, s, a, b)                      # 「向下舍入且 ftz」根�
    `last_index_of` 在那两门语言里也是独立函数）。啰嗦主要在 packages：tileir 的 Dev 面、
    inflate 的 `*_bounded`、web 的 `*_with`。
 2. **三条硬限制决定能合什么：** (a) 默认值看不见同一函数的其他形参（spec 3.1 节，「以后放宽
-   不是破坏性变更」）；(b) builtin 签名不带默认（`Sig.param_defaults` 对非顶层 fn 恒空）；
+   不是破坏性变更」；K6 已放宽到「看得见前面的形参」，见 §8）；(b) builtin 签名不带默认（`Sig.param_defaults` 对非顶层 fn 恒空）；
    (c) 尾块填最后一个声明的形参，所以「body 放最后、默认值放 body 前」会逼所有
    `f(a, () => ...)` 调用改写。(a)(b) 挡住了 `cursor.find`、`parse_int_radix` 与 Dev 的
    load/store 族，归 B 组；(c) 决定 A 组把默认形参放在 body 之后。
@@ -209,7 +209,7 @@ hover 与 completion 的 detail 走同一个 `sig_render`，自动带上默认�
 | K4 | A3：web 三族 | 无 | 无；web 6.0，dawnop-site 下次升钉改 8 处 |
 | K5 | A4 + A7 + A8：gpu `launch` / `with_gpu_fake`、bytes base64、`pad_*` / `bytes.index_of` 加默认 | K0 | `doc --builtins`，可能 `doc site`；改 std 公开面必跑 run-diff |
 | K6 | B1 语言能力（spec 3.1 节改写、checker、两个后端、interp），同刀只落 `cursor.find` | 无 | `doc --builtins`；`spike-native` 加默认引用形参的用例 |
-| K7–K18 | B1 之后的 Dev load/store 五连合并，按 `scripts/tile-golden/kernels.dawn` 的段落与其它文件切 | K6 | 无；golden 逐字节不动 |
+| K7–K18 | B1 之后的 Dev load/store 五连合并，按 `scripts/tile-golden/kernels.dawn` 的段落与其它文件切 | 原为 K6；2026-10-03 的 Tile 形状裁决改走指针路逃生口 `strides: Option[List[Int]] = None`，不再依赖 K6 | 无；golden 逐字节不动 |
 | K19 | B2：`parse_int` 迁 `std/fmt` 并吞 `parse_int_radix` | 无 | `doc --builtins` 等，实测见 §7.4；builtin-decl-contract 镜像少两项 |
 
 K3 之后 inflate 3.0.0 把这四族（另加 `zip.entries`）的 `cap` 默认从 `None` 改为 `Some(DEFAULT_CAP)`，
@@ -246,8 +246,9 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 | K2 | 已落地 | `3e31f40f`（main 上的哈希；分支上原为 `fa6c493e`） |
 | K3 | 已落地 | `711bdb15`（main 上的哈希） |
 | K4 | 已落地（web 6.0，见 §7.5） | `1419b700`（main 上的哈希，PR #398） |
-| K5 | 已落地（见 §7.6） | 合入后由协调者回填 |
-| K6–K18 | 未开工 | |
+| K5 | 已落地（见 §7.6） | `399577e0`（main 上的哈希，PR #402） |
+| K6 | 已落地（B1，见 §8；同刀只落 `cursor.find`，见 §7.7） | 合入后由协调者回填 |
+| K7–K18 | 未开工 | |
 | K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | `04f65114`（main 上的哈希；分支上原为 `25ff1f19`） |
 
 ### 7.1 K1 落地记录
@@ -439,3 +440,138 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
   位置是 `Cursor` 不是 `Int`（B1 的 `cursor.find` 那条线）。`with_gpu_real` 不加 `globals`：真设备的全局是
   cubin 自己声明的，宿主没有表可给。base64 不加 Go 的 `WithPadding(rune)` 自定义填充字符与 MIME 换行：
   没有调用方，四个值覆盖了 RFC 4648 的全部变体。
+
+### 7.7 K6 落地记录
+
+- **面。** 语言：默认值看得见声明在它前面的形参（§8，spec §3.1）。std：只落
+  `cursor.find(s, sub, from: Cursor = start(s))`，`std/str` 的 `contains` / `split_once` 两处改成两参。
+- **调用方。** 仓内 2 处（上面两处）；`std/cursor` 自己的测试加两条省略 `from` 的断言。全仓其余 `find` 调用都传真起点，不动。
+- **测试。** checker 三条（调用点的绑定顺序与 `f$default$k` 的实参、引用前参 / 具名乱序 / 闭包 / 泛型 /
+  尾块 / 自身与后参报错 / 遮蔽、纯性）；`interp_test` 一条（comptime 折叠）；checker-corpus
+  `default_params` 例改写（`bad_param_ref` 变成合法的 `ok_param_ref`，加自身与后参两例）；spike-native
+  新语料 `default_sees_params`（两后端、手写 `.expect`、ASan）。
+- **负控。** ①默认值的 `let` 按反序排：stage 1 编不出 selfhost（`codegen: symbol 225 has no slot`），反序在
+  结构上不可能，因为后一个默认值读前一个的局部量。②按形参序穿插求值（写出的实参在形参循环里绑）：
+  `dawn test selfhost` 红 2 个（本刀的绑定顺序测试、#207 的具名写序测试），spike-native 的
+  `default_sees_params`（`ratio(c: .., a: 0)` 少一行 `eval c`）与 `named_args` 两后端都红。③去掉
+  `explain_param_refs`：selfhost 红 1 个（报错测试），checker-corpus 两行变回 `undefined variable`。均已还原。
+- **Emit-Change（实测）。** 以真父提交 `90f4987d` 现编的工具链作无遮蔽对照：`emit site`、`emit playground`、
+  `emit packages/web`、`emit packages/json`、`emit selfhost`、`emit examples/projects/calc.dawn`、
+  `emit examples/errors/barriers.dawn` 动（省掉 k > 0 默认值的调用点多出绑定块：std/fmt 的
+  `parse_int` 的 `radix`、K1–K5 的各个默认，以及 `cursor.find` 本身），其余三个 `emit` 语料不动；
+  `doc --builtins` 动（`find` 的签名与文档）；run-diff 其余 label、`doc site`、lsp、fmt-diff 不动；
+  param-diff 0 处形参名变化。api-diff：Additions 1（`find` 的 `from` 得到默认），Breaking 0。
+
+## 8. K6：默认值看得见前面的形参（B1）
+
+### 8.1 规则
+
+默认值表达式在「声明处的作用域 + 声明在它前面的形参」里检查与求值（spec §3.1）：
+
+```dawn
+pub fn find(s: String, sub: String, from: Cursor = start(s)) -> Option[Cursor]
+fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int   # 前面的默认值也是形参
+```
+
+- **前面的形参**：写出的实参或更早的默认值，一视同仁。
+- **本形参自己、后面的形参**：检查期错误，报错照录（措辞与提示的来由见 §8.5）：
+
+  ```
+  error: the default of parameter `a` refers to `a` itself
+    = hint: a default is the value `a` takes when the argument is omitted, so `a` has no value yet; a default sees only the parameters declared before it
+  error: the default of parameter `lo` refers to `hi`, which is declared after it
+    = hint: defaults are evaluated in declaration order and see only the parameters declared before them; declare `hi` before `lo`, or pass `lo` explicitly
+  ```
+
+- **遮蔽**：默认值里自己 `let` 的同名局部量照常解析，不算引用形参；后面的形参若与本模块某个
+  函数同名，名字解析到那个函数（作用域里本来就有它），不报错——与「默认值在声明处的作用域
+  求值」是同一条规则，不另设例外。
+- **闭包**：默认值里的 lambda 按值捕获前面的形参，与任何 lambda 相同。
+- **纯性不变**：调用前面的函数型形参可以，只要这次调用是纯的；`g: fn() -> Int !e` 的
+  `g()` 带上 `e`，照「a parameter default must be pure」拒。
+- **泛型**：前面形参的类型可以提及类型参数，`fn pair[T](a: T, b: T = a)` 成立；合成函数原样
+  带 tparams 与 bound（K0 之前的 #207 放宽），调用点按自己的实例化与见证去调，没有新机制。
+- **不破坏**：K6 之前每个默认值都看不见任何形参，放宽以后它们原样合法、含义不变。
+
+### 8.2 求值顺序
+
+**写出的实参先按书写顺序全部求值，然后省掉的默认值按声明序逐个求值。**
+
+- 与具名实参乱序：`span(mid: 1, lo: 3)` 先求 `1`、再求 `3`（书写序），然后求 `hi` 的默认值
+  `lo + 10`。默认值看到的永远是「声明在它前面的形参」，与实参写成什么顺序无关。
+- 与尾块：尾块是写出的实参，同样在默认值之前求值；它填最后一个形参（spec §4.3），排在任何
+  默认形参之后，所以没有默认值看得见它。`fn each(xs, n: Int = len(xs), body)` 写
+  `each(xs) { k => .. }` 时块填 `body`、`n` 读 `xs`。
+- 为什么不按形参序穿插：那样默认值会夹在写出的实参中间求值，「写序」（#207 裁决 1）就不再
+  对写出的实参成立——`f(a, c: tap())` 里 `tap()` 的 io 会排到 `b` 的默认值之后。先全部写出的、
+  后全部默认的，书写序与声明序各管一段，互不打断。Kotlin 是同一个顺序（调用点按书写序求实参，
+  `f$default` 里按声明序补默认值）。
+- 看得见吗：默认值是纯的，顺序只在 panic 时看得见（哪个先 panic、panic 前写出的实参的 io
+  有没有发生）。`scripts/spike-native/default_sees_params.dawn` 的 `ratio` / `two` 两后端对拍钉住。
+
+### 8.3 实现：`f$default$k` 接收前 k 个形参
+
+- **签名**（`checker.default_sig`）：`f$default$k` 的形参是 `f` 的前 k 个形参，**不论默认值读没读**。
+  理由：别的模块的调用点只看得见 `f` 的 `Sig`，看不见默认值的函数体；元数只由签名决定，调用点
+  才知道该传什么。代价是一个只读 `s` 的默认值也接收 `sub`——一次多余的传参，换来不必把「默认值
+  读了哪些形参」写进 `Sig`、不必让增量与导出面多带一张表。
+- **检查**（`checker.check_param_default`）：`enter_fn(default_sig)` 后按序 `declare` 前 k 个形参，
+  符号存进 `TDefault.param_syms`，合成 `TFun` 时绑它们（与 `dict_syms` 同一个道理：函数体是对着
+  这些符号检查的）。后面的形参不在作用域里，它们的「undefined variable / function」由
+  `explain_param_refs` 改写成 §8.1 的两条报错。
+- **调用点**（`checker.arrange_call_args`，从 `check_call` 拆出，`check_call` 要守 HotSpot 的
+  8000 字节 HugeMethodLimit，#241）：三种形状。①写序即形参序、且只省了第一个形参（或没省）：
+  原样，`f$default$0()` 零元，与 K6 前逐字节相同。②具名乱序：写出的实参按书写序绑局部量，
+  调用按形参序读（#207 原有）。③省了第 k > 0 个形参：写出的实参按书写序绑 `arg$i`，然后每个
+  省掉的默认值按声明序绑 `default$k = f$default$k(前 k 个局部量)`，最后按形参序调 `f`。
+- **Core lowering、JVM 后端、native C 后端、comptime 解释器：零改动。** 合成函数是普通模块函数，
+  绑定是普通 `TSLet`，四处原本就会。四处一致由测试钉住而不是由代码保证：`interp_test` 的
+  comptime 折叠、`spike-native` 的两后端对拍与手写 `.expect`。只改了 `jvm/emit.dawn` 一处注释
+  （「zero-argument」）。
+
+### 8.4 用例
+
+同刀只落 `std/cursor.find(s, sub, from: Cursor = start(s))`：`std/str` 的 `contains` 与 `split_once`
+两处 `cursor.find(s, x, cursor.start(s))` 改成两参，`rsplit` 那处传的是真起点，不动。后续候选
+（不在本刀）：
+
+| 候选 | 形状 | 备注 |
+|---|---|---|
+| web `serve_app_with` | `cfg` 的默认要读 `port` | C 组裁决不合（`port` 与 `cfg.port` 两个真相），B1 只是让它**写得出来**，不改变裁决 |
+| `str.slice(s, from, to: Int = len(s))` | Kotlin `substring` 同形 | 调研时仓内 4 处受益，已有 `drop`，优先级低 |
+| tileir Dev load/store 五连 `strides = row_major(shape)` | 原 K7–K18 | 2026-10-03 的形状裁决改走 `strides: Option[List[Int]] = None` 指针路逃生口，不再等 B1；若批次里仍想要「默认按行主序」，B1 现成可用 |
+| dawnop-site 的 `cursor.find(s, x, cursor.start(s))` | 调研计 7 处里 5 处 | 下次升钉时顺手改，不改也照编 |
+
+### 8.5 报错为什么改写而不是另起一套作用域
+
+后面的形参与本形参不进默认值的作用域，所以引用它们本来就是一个「解析不到的名字」。另起一套
+（例如在 `Frame` 上记一张「声明了但还不能用」的名字表）会让 `Frame` 多一个字段，而 `Frame` 的
+字段集就是 isolated body 的恢复集（`cx.dawn` 的 `Frame` 注释与 drop-restore 矩阵），为一条报错
+扩恢复集不值。`explain_param_refs` 只在默认值检查期间新增的诊断里找「undefined variable: X」
+「undefined function: X」且 X 是本形参或后面形参的，改写消息与提示。两个前缀在
+`check_var` / `check_call` 与 `unresolved_name` 各写一遍、不抽常量：checker-corpus 的覆盖账按
+`cerr` 调用点的消息表达式原文认人，抽成常量会让这三个调用点从账上「消失」（实测
+`uncovered.txt` 多出三行）。漂移由单测兜：措辞一改，「a default reads the parameters before it」
+那条测试就红。
+解析得到的名字（局部量、模块函数）不受影响。
+
+### 8.6 先例
+
+- **Kotlin**：允许引用前面的形参（官方文档的例子就是 `read(b: ByteArray, off: Int = 0, len: Int = b.size)`），
+  引用后面的形参是编译错误；JVM 上合成 `f$default(全部形参, mask, marker)`，在里面按声明序补默认值。
+  Dawn 每个默认值一个合成函数，所以「前 k 个」就够。
+- **JavaScript**：默认值按形参从左到右初始化，前面的可见；引用后面的形参在**运行期**抛 TDZ
+  `ReferenceError`。Dawn 在检查期拒。
+- **Scala**：只能引用前面**参数列表**里的形参，同一列表内不行。
+- **Swift、Python、C++**：不允许引用其他形参（Python 的默认值在定义时求一次；C++ 标准明文禁止
+  默认实参使用形参）。
+
+### 8.7 不做的（理由）
+
+- **`f$default$k` 只接收默认值真正读到的形参。** 元数会依赖默认值的函数体，跨模块调用点看不见；
+  要么把读集写进 `Sig`（导出面、增量记忆、`sig_render` 的读者都要跟），要么调用点猜。多传几个
+  参数的代价远小于此。
+- **默认值看得见后面的形参（Kotlin 之外的「全体可见」）。** 那要求默认值之间按依赖拓扑排序、
+  还要查环；声明序是读者一眼看得懂的唯一顺序。
+- **按形参序穿插求值默认值。** 破坏写出实参的「写序」，见 §8.2。
+- **函数值保留默认。** 不变（§2.3），`let g = find` 的类型仍是三参。
