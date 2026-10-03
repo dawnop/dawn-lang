@@ -31,7 +31,14 @@
 # GraphQL search index, and on 2026-09-29 it answered 500, so #231 missed that
 # night's entry. The open issues are listed with `gh api
 # repos/<repo>/issues?state=open&per_page=100` and filtered by exact title
-# with jq (pull requests, which that endpoint also returns, are dropped).
+# (pull requests, which that endpoint also returns, are dropped).
+#
+# THE JSON IS READ BY PYTHON, NOT JQ. The two reads below (the first open
+# issue with the title, and the `body` of an issue or comment) are a few lines
+# of `python3 -c`, so the script needs nothing beyond what the repository's
+# other scripts already need; scripts/gates-external/release_evidence.py
+# replaced jq the same way. The output is what the jq filters printed:
+# `<number> <comments>` or nothing, and the body raw or empty when absent.
 # Every API read is tried three times with a backoff (5s, then 15s;
 # NIGHTLY_ISSUE_BACKOFF=0 in the self-test).
 #
@@ -56,6 +63,35 @@ api() {
   done
   echo "error: gh api $1 failed three times" >&2
   return 1
+}
+
+# The first open issue (not a pull request) titled $1, read from stdin, as
+# "<number> <comments>"; nothing when there is none.
+first_issue() {
+  python3 -c '
+import json, sys
+def text(v):
+    return v if isinstance(v, str) else json.dumps(v)
+for i in json.load(sys.stdin):
+    if i.get("pull_request") is None and i.get("title") == sys.argv[1]:
+        print(text(i.get("number")) + " " + text(i.get("comments")))
+        break
+else:
+    print()
+' "$1"
+}
+
+# The `body` of the issue or comment object on stdin, or of the first element
+# when it is a list; empty when absent or null.
+body_of() {
+  python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+if isinstance(v, list):
+    v = v[0] if v else None
+b = v.get("body") if isinstance(v, dict) else None
+print(b if isinstance(b, str) else ("" if b in (None, False) else json.dumps(b)))
+'
 }
 
 verdict_of() {
@@ -85,9 +121,7 @@ report() {
   fi
 
   listing=$(api "repos/$repo/issues?state=open&per_page=100")
-  read -r number comments < <(printf '%s' "$listing" | jq -r --arg t "$title" \
-    'map(select(.pull_request == null and .title == $t)) | .[0]
-     | if . == null then "" else "\(.number) \(.comments)" end') || true
+  read -r number comments < <(printf '%s' "$listing" | first_issue "$title") || true
 
   if [ -z "${number:-}" ]; then
     gh issue create --repo "$repo" --title "$title" --body-file "$posted"
@@ -97,9 +131,9 @@ report() {
 
   if [ "${comments:-0}" -gt 0 ]; then
     last=$(api "repos/$repo/issues/$number/comments?per_page=1&page=$comments" |
-      jq -r '.[0].body // ""' | verdict_of)
+      body_of | verdict_of)
   else
-    last=$(api "repos/$repo/issues/$number" | jq -r '.body // ""' | verdict_of)
+    last=$(api "repos/$repo/issues/$number" | body_of | verdict_of)
   fi
 
   if [ "$last" = "$verdict" ]; then
