@@ -888,7 +888,21 @@ pub(pkg) type CheckedMod = {
 ## A diagnostic raised inside a declaration carries an offset from that
 ## declaration, so nothing may render `diags` without this map; `rendered_diags`
 ## is the only reader that puts the two together.
-pub(pkg) type Program = { modules: List[CheckedMod], diags: List[LocDiag], decl_spans: Map[String, identity.DeclSpans] }
+##
+## `ct_world` is the comptime world once every module has joined it: what an
+## editor folds one expression against after the fact (`interp.eval_closed`,
+## docs/lsp-hover-design.md §C5). A module's own run saw the world before it,
+## and this one differs only by that module and the ones after it; a body can
+## name neither of the later ones (modules form a DAG), and its own functions
+## are the ones `module_icx` puts first anyway. Keeping the finished world
+## costs a reference, where rebuilding the one before each module would mean
+## knowing which modules' comptime ran, which the program does not record.
+pub(pkg) type Program = {
+  modules: List[CheckedMod],
+  diags: List[LocDiag],
+  decl_spans: Map[String, identity.DeclSpans],
+  ct_world: CtWorld
+}
 
 ## Every diagnostic of this program in absolute positions of this revision.
 ## Reached from each render site rather than from program assembly on purpose:
@@ -1022,7 +1036,7 @@ pub(pkg) fn analyze_observed(
     diags = diags ++ step.diags
     out = out ++ [step.checked]
   }
-  Program { modules: out, diags: diags, decl_spans: carry.decl_spans }
+  Program { modules: out, diags: diags, decl_spans: carry.decl_spans, ct_world: carry.ct_world }
 }
 
 ## The comptime world once `checked` has joined it. Only a module whose

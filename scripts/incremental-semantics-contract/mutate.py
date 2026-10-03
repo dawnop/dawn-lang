@@ -309,8 +309,8 @@ MUTATIONS = {
     # without the views renders declaration-relative offsets as
     # absolute and says nothing about it.
     "identity/drop-render-view": ((ANALYZE,
-        "Program { modules: out, diags: diags, decl_spans: carry.decl_spans }",
-        "Program { modules: out, diags: diags, decl_spans: map.empty() }"),),
+        "Program { modules: out, diags: diags, decl_spans: carry.decl_spans, ct_world: carry.ct_world }",
+        "Program { modules: out, diags: diags, decl_spans: map.empty(), ct_world: carry.ct_world }"),),
     # A module that imports an effect writes the provider's id into its
     # own table; this has it derive one from the name in the importing
     # scope instead.

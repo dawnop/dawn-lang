@@ -3,7 +3,8 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints (left-out defaults among them), formatting over a two-module project + a standalone buffer) runs
+# on hover and on `use` lines, inlay hints (left-out defaults among them), folded values of closed pure
+# expressions on hover, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 #
@@ -123,7 +124,8 @@ EOF
 # (docs/lsp-hover-design.md §4): an Int in decimal, with underscores, in 0x
 # and 0b; a Char written plainly, as an escape and as a \u{...}; a Float that
 # is exactly a double and one that is not; a string with escapes, and one
-# with an interpolation, which is an expression and keeps the type alone.
+# with an interpolation, which is an expression: closed and pure here, so hover
+# folds it (§C5).
 cat > "$OUT/proj/src/literals.dawn" <<'EOF'
 const MASK: Int = 0xFF
 
@@ -134,6 +136,47 @@ pub fn chars() -> List[Char] = ['é', '\n', '\u{1F600}']
 pub fn floats() -> List[Float] = [1.5, 1.1]
 
 pub fn strings() -> List[String] = ["héllo\n", "n = ${MASK}"]
+EOF
+
+# Folded values on hover (docs/lsp-hover-design.md §C5): a closed, pure
+# expression shows its value after the type; one that names an outer local,
+# calls something with an effect, runs past the editor's fuel or depth, only
+# repeats its source, is Unit, or may `return` out of itself shows the type
+# alone. scripts/native-cli-diff.sh runs this session on the native server too.
+cat > "$OUT/proj/src/evals.dawn" <<'EOF'
+const LIMIT: Int = 10
+
+fn fib(n: Int) -> Int = if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+
+fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }
+
+fn spin(n: Int) -> Int = {
+  var i = 0
+  var acc = 0
+  while i < n {
+    acc = acc + i
+    i = i + 1
+  }
+  acc
+}
+
+fn noisy(n: Int) -> Int !io = n + 1
+
+pub fn probe(k: Int) -> Int !io = {
+  let a = fib(15) + 1
+  let b = "n=${fib(10)} limit=${LIMIT}"
+  let c = map([1, 2, 3], x => x * x)
+  let e = k + 1
+  let f = noisy(1) + 2
+  let h = spin(60000) + 3
+  let i = down(1600) + 4
+  let j = down(1400) + 5
+  let l = [1, 2, 3]
+  let m = if 1 > 2 { () } else { () }
+  let n = if 1 > 3 { return 0 } else { 5 * 2 }
+  println("${a}${b}${c}${e}${f}${h}${i}${l}${m}${n}")
+  a + j
+}
 EOF
 
 # Inlay hints (docs/lsp-hover-design.md §A4): inferred let types, one per
@@ -459,10 +502,32 @@ for needle, occ, delta in [
     ("1.5", 1, 1),              # exactly a double
     ("1.1", 1, 1),              # not exactly a double
     ('"héllo', 1, 2),           # a string: code points and UTF-8 bytes
-    ('"n = ', 1, 1),            # interpolated: the type alone
+    ('"n = ', 1, 1),            # interpolated: an expression, folded (§C5)
 ]:
     req("textDocument/hover", at(lits_uri, lits_text, needle, occ, delta))
 note("textDocument/didClose", tdoc(lits_uri))
+
+# folded values on hover
+evals_path = f"{out_dir}/proj/src/evals.dawn"
+evals_uri = "file://" + evals_path
+evals_text = open(evals_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": evals_uri, "languageId": "dawn", "version": 1, "text": evals_text}})
+for needle, occ, delta in [
+    ("fib(15) + 1", 1, 8),      # a call of the module's own function
+    ('"n=', 1, 0),              # interpolation reading a constant
+    ("map([1, 2, 3]", 1, 3),    # effect-polymorphic callee, pure lambda
+    ("k + 1", 1, 2),            # an outer local: the type alone
+    ("noisy(1) + 2", 1, 9),     # a callee declared !io: the type alone
+    ("spin(60000) + 3", 1, 12), # past the fuel: the type alone
+    ("down(1600) + 4", 1, 11),  # past the depth: the type alone
+    ("down(1400) + 5", 1, 11),  # under the depth: folded
+    ("[1, 2, 3]\n", 1, 0),      # only repeats its source: the type alone
+    ("if 1 > 2", 1, 0),         # Unit: the type alone
+    ("if 1 > 3", 1, 0),         # may return out of itself: the type alone
+]:
+    req("textDocument/hover", at(evals_uri, evals_text, needle, occ, delta))
+note("textDocument/didClose", tdoc(evals_uri))
 
 # inlay hints: the whole file, then two lines of it
 inlays_path = f"{out_dir}/proj/src/inlays.dawn"

@@ -1,0 +1,395 @@
+# What hover adds when the cursor rests on an expression that computes
+# something (docs/lsp-hover-design.md §C5): its value, folded by the comptime
+# interpreter, when the expression is closed and pure. Two halves, and they
+# are kept apart on purpose.
+#
+# The judgement (`fold_refusal`) is static and decided on the typed tree, by
+# the source positions only the language server has: a local is the
+# expression's own exactly when its binding site lies inside the expression's
+# span, and an effect is ruled out by the callee's declared row. The checker
+# decided purity once already, but per frame, and kept nothing of it in the
+# tree, so it is decided again here. The interpreter cannot decide either: it
+# has no spans, and a free local reaches it only as a symbol it cannot find,
+# which it reports as its own bug. Worse, a `?` or a `return` whose branch did
+# not escape folds to a value that is not what the expression means where it
+# is written. So the judgement is what keeps a hover honest, not only safe.
+#
+# The fold (`ir/interp.eval_closed`) is the same interpreter a `comptime`
+# block runs on, under the editor's budget (`ct_hover`) and behind its panic
+# barrier. Its own refusals (io builtins, Map and Set, `cmp`, cells) are the
+# second net under the judgement, never the first.
+#
+# What the reader sees is deliberately narrower than what the two halves
+# know. A refusal, a fold that runs out of fuel or depth, a panic: all of them
+# show the type alone, as hover did before, and say nothing about why. On the
+# examples corpus two of three fallback hovers are refused (most of them name
+# an outer local), and a line saying so on each would be noise; the type is
+# still right. A value that only repeats its source (`[1, 2, 3]`), and `Unit`,
+# are left out for the same reason. The cursor's innermost node is the one
+# folded, never an ancestor, so the highlighted range is what the value is of.
+
+use std/map
+use std/set
+use std/str
+use check/tast.{
+  TExpr, TStmt, WitRef, WForward, WConcrete, WApply,
+  TSPInterp, TLEExpr, TLESpread, TLEIf,
+  XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
+  XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue,
+  XField, XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak,
+  XContinue, XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
+  tex_ty
+}
+use check/types.{
+  Ty, Eff, TyVar, TyAssoc, TyAdt, TyOpaque, TyList, TyMap, TySet, TyTuple, TyFn,
+  TyUnit, TyNever, EPure, EffVar, EUnion, eff_labels, eff_base, eff_vars
+}
+use check/cx.{is_const_serializable}
+use front/lexer.{slice_cps}
+use ir/interp.{CtOpts, ConstScope, eval_closed}
+use lsp/lspq.{QCx, Target, sym_get, sig_by_owner}
+use lsp/lspv.{value_text, value_echoes}
+
+## The hover text for `t` with the value of its expression appended
+## (`Int = 611  (0x263)`, A1's shape), or `t.hover` unchanged whenever there
+## is no value worth showing. `opts` is the budget, `ct_hover` of the host's.
+pub(pkg) fn with_value(qc: QCx, t: Target, opts: CtOpts) -> String !io =
+  match t.expr {
+    None -> t.hover
+    Some(e) ->
+      match folded_text(qc, t.lo, t.hi, e, opts) {
+        Some(v) -> t.hover ++ " = " ++ v
+        None -> t.hover
+      }
+  }
+
+## The rendered value of `e`, spanning `lo..hi` in the analyzed document, or
+## None: refused, failed, or nothing to say.
+fn folded_text(qc: QCx, lo: Int, hi: Int, e: TExpr, opts: CtOpts) -> Option[String] !io = {
+  let cm = qc.entry
+  # A1's condition: a module with errors holds `XError`, which lowering
+  # refuses by panicking, and its types are not to be trusted anyway
+  if len(cm.cx.diags) > 0 { return None }
+  if fold_refusal(qc, lo, hi, e) != None { return None }
+  let scope = ConstScope { path: cm.mod_path, imported: cm.cx.imported_names,
+    renames: cm.cx.import_renames }
+  let r = eval_closed(cm.tm, qc.prog.ct_world, scope, cm.ct, qc.std.fn_decls, qc.std.by_owner,
+    qc.std.impl_fns, qc.std.std_names, cm.cx.adts, cm.cx.traits, cm.cx.impl_table, cm.class_name,
+    e, opts)
+  match r {
+    Err(_) -> None
+    Ok(v) -> {
+      let t = tex_ty(e)
+      let src = if lo >= 0 && hi <= len(qc.cps) && lo < hi { slice_cps(qc.cps, lo, hi) } else { "" }
+      if value_echoes(cm.cx.adts, t, v, src) { None } else { value_text(cm.cx.adts, t, v) }
+    }
+  }
+}
+
+## Why `e` (spanning `lo..hi`) may not be folded for a hover, or None when it
+## may. The reason is for tests and for whoever reads this code; hover never
+## shows it. Three groups: nothing to fold (`trivial`, `unit`, a type that is
+## no value), something from outside the expression (`open: ...`), and
+## something the expression could do (`effect: ...`).
+pub(pkg) fn fold_refusal(qc: QCx, lo: Int, hi: Int, e: TExpr) -> Option[String] = {
+  let t = tex_ty(e)
+  match t {
+    TyUnit -> { return Some("unit") }
+    TyNever -> { return Some("no value: never returns") }
+    TyFn(_, _, _) -> { return Some("no value: a function") }
+    _ -> ()
+  }
+  if ty_has_var(t) { return Some("no value: generic type") }
+  # the set of values a `const` may hold: what the interpreter can hand back
+  # and lspv can render
+  if not is_const_serializable(qc.entry.cx, t, set.empty()) { return Some("no value: not serializable") }
+  if not computes(e) { return Some("trivial") }
+  refusal_e(qc, lo, hi, e, false, false)
+}
+
+## A literal, a variable, a constant or a function already says what it is
+## (A1 and A2 answer those); only an expression that computes is worth a fold.
+fn computes(e: TExpr) -> Bool =
+  match e {
+    XInt(..) -> false
+    XChar(..) -> false
+    XFloat(..) -> false
+    XBool(..) -> false
+    XUnit(..) -> false
+    XLocal(..) -> false
+    XConstRef(..) -> false
+    XFnValue(..) -> false
+    XCtorValue(..) -> false
+    XComptime(..) -> false
+    XStr(parts, _, _) -> {
+      for p in parts {
+        match p {
+          TSPInterp(_, _) -> { return true }
+          _ -> ()
+        }
+      }
+      false
+    }
+    _ -> true
+  }
+
+fn ty_has_var(t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> true
+    TyAssoc(_, _, _) -> true
+    TyAdt(_, args) -> any_var(args)
+    TyOpaque(_, _, _, args, _) -> any_var(args)
+    TyList(x) -> ty_has_var(x)
+    TyMap(k, v) -> ty_has_var(k) || ty_has_var(v)
+    TySet(x) -> ty_has_var(x)
+    TyTuple(xs) -> any_var(xs)
+    TyFn(ps, r, _) -> any_var(ps) || ty_has_var(r)
+    _ -> false
+  }
+
+fn any_var(ts: List[Ty]) -> Bool = {
+  for t in ts {
+    if ty_has_var(t) { return true }
+  }
+  false
+}
+
+# ---- purity: read off the declared rows ----
+
+## A row a fold may run: no declared effect, no io, no associated effect.
+## Effect variables pass here; the call site checks what instantiates them.
+fn row_ok(e: Eff) -> Bool =
+  if len(eff_labels(e)) > 0 { false } else {
+    match eff_base(e) {
+      EPure -> true
+      EffVar(_, _) -> true
+      EUnion(_, assocs, io) -> not io && len(assocs) == 0
+      _ -> false
+    }
+  }
+
+fn row_pure(e: Eff) -> Bool = row_ok(e) && len(eff_vars(e)) == 0
+
+## The row of a callable value's type; anything else carries none.
+fn ty_row_pure(t: Ty) -> Bool =
+  match t {
+    TyFn(_, _, r) -> row_pure(r)
+    _ -> true
+  }
+
+## A call whose callee declares `row`: pure, or polymorphic (`map`'s `!e`) with
+## every function argument pure, which makes the instantiation pure too.
+fn call_refusal(row: Eff, args: List[TExpr], what: String) -> Option[String] = {
+  if not row_ok(row) { return Some("effect: `" ++ what ++ "` has an effect") }
+  if len(eff_vars(row)) > 0 {
+    for a in args {
+      if not ty_row_pure(tex_ty(a)) { return Some("effect: an effectful argument to `" ++ what ++ "`") }
+    }
+  }
+  None
+}
+
+# ---- closedness: binding sites inside the span ----
+
+## A local is the expression's own when it is bound inside it: a `let`, a
+## pattern, a lambda's parameter, a local function. Evidence, a forwarded
+## dictionary and a handler's state are never the expression's own, wherever
+## the symbol was minted.
+fn local_refusal(qc: QCx, lo: Int, hi: Int, sid: Int, name: String) -> Option[String] =
+  match sym_get(qc, sid) {
+    Some(sym) ->
+      if sym.dict_of != None || sym.ev_of != None || sym.cell_of != None {
+        Some("open: `" ++ name ++ "` is evidence or handler state")
+      } else if sym.dlo >= lo && sym.dhi <= hi { None } else { Some("open: refers to the local `" ++ name ++ "`") }
+    None -> Some("open: unknown symbol `" ++ name ++ "`")
+  }
+
+## A witness forwarded from an enclosing generic function is a dictionary the
+## expression does not have.
+fn wit_refusal(w: WitRef) -> Option[String] =
+  match w {
+    WForward(_) -> Some("open: a forwarded trait dictionary")
+    WConcrete(_, _) -> None
+    WApply(_, _, args) -> wits_refusal(args)
+  }
+
+fn wits_refusal(ws: List[WitRef]) -> Option[String] = {
+  for w in ws {
+    match wit_refusal(w) {
+      Some(r) -> { return Some(r) }
+      None -> ()
+    }
+  }
+  None
+}
+
+fn owit_refusal(w: Option[WitRef]) -> Option[String] =
+  match w {
+    Some(x) -> wit_refusal(x)
+    None -> None
+  }
+
+fn or_else(a: Option[String], b: fn() -> Option[String]) -> Option[String] =
+  match a {
+    Some(r) -> Some(r)
+    None -> b()
+  }
+
+fn all_refusal(qc: QCx, lo: Int, hi: Int, xs: List[TExpr], in_fn: Bool, in_loop: Bool) -> Option[String] = {
+  for x in xs {
+    match refusal_e(qc, lo, hi, x, in_fn, in_loop) {
+      Some(r) -> { return Some(r) }
+      None -> ()
+    }
+  }
+  None
+}
+
+fn opt_refusal(qc: QCx, lo: Int, hi: Int, x: Option[TExpr], in_fn: Bool, in_loop: Bool) -> Option[String] =
+  match x {
+    Some(y) -> refusal_e(qc, lo, hi, y, in_fn, in_loop)
+    None -> None
+  }
+
+## The walk. `in_fn` is true inside a lambda or a local function of the
+## expression's own, where `return` and `?` leave that function and not the
+## expression; `in_loop` likewise for `break` and `continue`.
+fn refusal_e(qc: QCx, lo: Int, hi: Int, e: TExpr, in_fn: Bool, in_loop: Bool) -> Option[String] =
+  match e {
+    XLocal(sid, name, _, _, _) -> local_refusal(qc, lo, hi, sid, name)
+    XEvRead(..) -> Some("open: reads handler evidence")
+    XJava(..) -> Some("effect: a Java call")
+    XError(..) -> Some("open: an error node")
+    XReturn(v, _, _) ->
+      if not in_fn { Some("open: `return` leaves the expression") } else { opt_refusal(qc, lo, hi, v, in_fn, in_loop) }
+    XBreak(..) -> if in_loop { None } else { Some("open: `break` leaves the expression") }
+    XContinue(..) -> if in_loop { None } else { Some("open: `continue` leaves the expression") }
+    XPropagate(x, _, _, _) ->
+      if not in_fn { Some("open: `?` leaves the expression") } else { refusal_e(qc, lo, hi, x, in_fn, in_loop) }
+    XUnwrap(x, ..) -> refusal_e(qc, lo, hi, x, in_fn, in_loop)
+    XStr(parts, _, _) -> {
+      for p in parts {
+        match p {
+          TSPInterp(x, w) -> {
+            match or_else(owit_refusal(w), () => refusal_e(qc, lo, hi, x, in_fn, in_loop)) {
+              Some(r) -> { return Some(r) }
+              None -> ()
+            }
+          }
+          _ -> ()
+        }
+      }
+      None
+    }
+    XCallDyn(sid, name, args, ..) ->
+      or_else(local_refusal(qc, lo, hi, sid, name), () =>
+          match sym_get(qc, sid) {
+            Some(sym) ->
+              if not ty_row_pure(sym.ty) { Some("effect: `" ++ name ++ "` has an effect") } else {
+                all_refusal(qc, lo, hi, args, in_fn, in_loop)
+              }
+            None -> Some("open: unknown callee")
+          })
+    XApply(target, args, ..) ->
+      if not ty_row_pure(tex_ty(target)) { Some("effect: the callee has an effect") } else {
+        all_refusal(qc, lo, hi, [target] ++ args, in_fn, in_loop)
+      }
+    XCallBuiltin(name, args, wits, ..) -> {
+      if str.starts_with(name, "cell_") { return Some("effect: handler state") }
+      let row = match map.get(qc.bins, name) {
+        Some(s) -> s.eff
+        None -> EPure
+      }
+      or_else(call_refusal(row, args, name), () =>
+          or_else(wits_refusal(wits), () => all_refusal(qc, lo, hi, args, in_fn, in_loop)))
+    }
+    XCallFn(owner, name, args, wits, _, trait_id, ..) -> {
+      # no signature is a synthesized callee, a parameter default's thunk
+      # (`f$default$k`), whose body is the default the checker held pure; the
+      # interpreter's own refusals are the net there
+      let row = match sig_by_owner(qc, owner, name, trait_id) {
+        Some(s) -> s.eff
+        None -> EPure
+      }
+      or_else(call_refusal(row, args, name), () =>
+          or_else(wits_refusal(wits), () => all_refusal(qc, lo, hi, args, in_fn, in_loop)))
+    }
+    XLambda(_, _, body, ..) -> refusal_e(qc, lo, hi, body, true, false)
+    XCtor(_, _, written, _, spread, ..) ->
+      or_else(all_refusal(qc, lo, hi, written, in_fn, in_loop), () =>
+          opt_refusal(qc, lo, hi, spread, in_fn, in_loop))
+    XField(x, ..) -> refusal_e(qc, lo, hi, x, in_fn, in_loop)
+    XListLit(elems, ..) -> {
+      for el in elems {
+        let r = match el {
+          TLEExpr(x) -> refusal_e(qc, lo, hi, x, in_fn, in_loop)
+          TLESpread(x) -> refusal_e(qc, lo, hi, x, in_fn, in_loop)
+          TLEIf(arms) -> {
+            var out: Option[String] = None
+            for a in arms {
+              if out == None { out = all_refusal(qc, lo, hi, [a.cond, a.body], in_fn, in_loop) }
+            }
+            out
+          }
+        }
+        match r {
+          Some(x) -> { return Some(x) }
+          None -> ()
+        }
+      }
+      None
+    }
+    XTupleLit(xs, ..) -> all_refusal(qc, lo, hi, xs, in_fn, in_loop)
+    XIndex(t, i, w, ..) -> or_else(wit_refusal(w), () => all_refusal(qc, lo, hi, [t, i], in_fn, in_loop))
+    # a block the module's own run folded: the fold reads its value
+    XComptime(..) -> None
+    XBinary(_, l, r, w, ..) -> or_else(owit_refusal(w), () => all_refusal(qc, lo, hi, [l, r], in_fn, in_loop))
+    XUnary(_, x, ..) -> refusal_e(qc, lo, hi, x, in_fn, in_loop)
+    XIf(c, t, el, ..) ->
+      or_else(all_refusal(qc, lo, hi, [c, t], in_fn, in_loop), () => opt_refusal(qc, lo, hi, el, in_fn, in_loop))
+    XMatch(scrut, arms, ..) -> {
+      match refusal_e(qc, lo, hi, scrut, in_fn, in_loop) {
+        Some(r) -> { return Some(r) }
+        None -> ()
+      }
+      for a in arms {
+        let g = opt_refusal(qc, lo, hi, a.guard, in_fn, in_loop)
+        match or_else(g, () => refusal_e(qc, lo, hi, a.body, in_fn, in_loop)) {
+          Some(r) -> { return Some(r) }
+          None -> ()
+        }
+      }
+      None
+    }
+    XBlock(stmts, tail, ..) -> {
+      for s in stmts {
+        match refusal_s(qc, lo, hi, s, in_fn, in_loop) {
+          Some(r) -> { return Some(r) }
+          None -> ()
+        }
+      }
+      opt_refusal(qc, lo, hi, tail, in_fn, in_loop)
+    }
+    _ -> None
+  }
+
+fn refusal_s(qc: QCx, lo: Int, hi: Int, s: TStmt, in_fn: Bool, in_loop: Bool) -> Option[String] =
+  match s {
+    TSLet(_, _, init, _, _) -> refusal_e(qc, lo, hi, init, in_fn, in_loop)
+    TSLetPat(_, init, _, _) -> refusal_e(qc, lo, hi, init, in_fn, in_loop)
+    TSLocalFn(_, _, _, _, body, ..) -> refusal_e(qc, lo, hi, body, true, false)
+    TSAssign(sid, name, value, _, _) ->
+      or_else(local_refusal(qc, lo, hi, sid, name), () => refusal_e(qc, lo, hi, value, in_fn, in_loop))
+    TSExpr(x, _, _) -> refusal_e(qc, lo, hi, x, in_fn, in_loop)
+    TSAssert(c, _, _, _) -> refusal_e(qc, lo, hi, c, in_fn, in_loop)
+    TSWhile(c, body, ..) -> all_refusal(qc, lo, hi, [c, body], in_fn, true)
+    TSFor(_, _, from, to, w, body, ..) -> {
+      let bounds = match to {
+        Some(x) -> [from, x]
+        None -> [from]
+      }
+      or_else(owit_refusal(w), () =>
+          or_else(all_refusal(qc, lo, hi, bounds, in_fn, in_loop), () => refusal_e(qc, lo, hi, body, in_fn, true)))
+    }
+  }

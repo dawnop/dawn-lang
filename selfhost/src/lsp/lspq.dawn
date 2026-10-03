@@ -115,7 +115,11 @@ pub type Target = {
   sig: Option[Sig],
   # where the declaration's `##` doc is read from, when the target is a
   # declaration (docs/lsp-hover-design.md §A3); None for locals and literals
-  doc: Option[DocSite]
+  doc: Option[DocSite],
+  # the typed expression, when the generic fallback is what answered: the one
+  # thing hover may fold into a value (`lspeval`, §C5). Every other target
+  # names a declaration, a binding or a literal, which has its own text
+  expr: Option[TExpr]
 }
 
 ## The module text a declaration's doc lives in. The query only names it: the
@@ -617,7 +621,7 @@ fn hint_method_call(
 # ---- the offer rule: innermost span containing the offset, later ties win ----
 
 fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None, doc: None })
+  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp, sig: None, doc: None, expr: None })
 
 ## Can an offer at `lo..hi` become the answer? Only when it holds the offset,
 ## which no span does in a collection or an inlay run. A rendering that is
@@ -629,7 +633,7 @@ fn live(q: Q, lo: Int, hi: Int) -> Bool = q.offset >= lo && q.offset < hi
 fn offer_sig(qc: QCx, q: Q, lo: Int, hi: Int, s: Sig, def: Option[(Int, Int)], dp: Option[String]) -> Q =
   offer_target(q, Target {
     lo: lo, hi: hi, hover: if live(q, lo, hi) { render_sig(qc, s) } else { "" }, def: def, def_path: dp,
-    sig: Some(s), doc: None
+    sig: Some(s), doc: None, expr: None
   })
 
 ## A declaration resolved to where it is: the jump target and the doc's home.
@@ -644,12 +648,12 @@ fn here(nlo: Int, nhi: Int, lo: Int) -> Site =
   Site { def: Some((nlo, nhi)), dp: None, doc: Some(DocSite { home: DocHere, at: DeclAt(lo) }) }
 
 fn offer_at(q: Q, lo: Int, hi: Int, hover: String, s: Site) -> Q =
-  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: s.def, def_path: s.dp, sig: None, doc: s.doc })
+  offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: s.def, def_path: s.dp, sig: None, doc: s.doc, expr: None })
 
 fn offer_sig_at(qc: QCx, q: Q, lo: Int, hi: Int, sg: Sig, s: Site) -> Q =
   offer_target(q, Target {
     lo: lo, hi: hi, hover: if live(q, lo, hi) { render_sig(qc, sg) } else { "" }, def: s.def,
-    def_path: s.dp, sig: Some(sg), doc: s.doc
+    def_path: s.dp, sig: Some(sg), doc: s.doc, expr: None
   })
 
 fn offer_target(q: Q, t: Target) -> Q = {
@@ -686,7 +690,7 @@ pub(pkg) fn sig_of(qc: QCx, name: String) -> Option[Sig] =
   }
 
 ## The Sig behind a resolved call: the owning module's surface.
-fn sig_by_owner(qc: QCx, owner: Option[String], name: String, trait_id: Option[Int]) -> Option[Sig] = {
+pub(pkg) fn sig_by_owner(qc: QCx, owner: Option[String], name: String, trait_id: Option[Int]) -> Option[Sig] = {
   match trait_id {
     Some(tid) -> {
       let tr = trait_of(qc.entry.cx.traits, tid)
@@ -1054,7 +1058,7 @@ fn const_decl_span(m: Module, name: String) -> Option[(Int, Int, Int)] = {
 
 fn syms_of(qc: QCx) -> Map[Int, Sym] = qc.entry.tm.syms
 
-fn sym_get(qc: QCx, id: Int) -> Option[Sym] = map.get(qc.entry.tm.syms, id)
+pub(pkg) fn sym_get(qc: QCx, id: Int) -> Option[Sym] = map.get(qc.entry.tm.syms, id)
 
 ## The typed tree of the declaration at `path`, spelled from the syntax the
 ## walk holds: `[Named(FunctionDecl, f)]`, an impl method under its impl head,
@@ -1359,7 +1363,7 @@ fn module_target(qc: QCx, path: String, lo: Int, hi: Int) -> Target = {
   }
   Target {
     lo: lo, hi: hi, hover: "use ${path}", def: udef, def_path: upath, sig: None,
-    doc: module_doc_site(qc, path)
+    doc: module_doc_site(qc, path), expr: None
   }
 }
 
@@ -2249,7 +2253,13 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   # generic fallback: the expression's own type, which names no declaration
   # and so is only worth printing where it can be the answer
   match te {
-    Some(t) -> if live(q, e_lo(pe), e_hi(pe)) { q = offer(q, e_lo(pe), e_hi(pe), show_ty(qc, tex_ty(t)), None, None) }
+    Some(t) ->
+      if live(q, e_lo(pe), e_hi(pe)) {
+        q = offer_target(q, Target {
+          lo: e_lo(pe), hi: e_hi(pe), hover: show_ty(qc, tex_ty(t)), def: None, def_path: None,
+          sig: None, doc: None, expr: Some(t)
+        })
+      }
     None -> ()
   }
   match pe {
