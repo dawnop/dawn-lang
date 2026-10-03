@@ -25,12 +25,30 @@ use fspath/fspath
 ## A resolved `[deps]` package: its manifest name, src/ root, and its own
 ## dependencies. Packages reached through different consumers but the same
 ## directory share one entry, preserving one package instance per path.
+##
+## `version` is what a build manifest reports for the package: for a url
+## dependency the version MVS selected (the archive's own dawn.toml, when it
+## names one, was already checked to agree), for a path dependency whatever its
+## dawn.toml declares, None when it declares nothing. `origin` says which of the
+## two it was; see docs/build-info-design.md §4.3 for why a url package keeps
+## its manifest `hash` beside the source digest computed from it.
 pub type PkgR = {
   name: String,
   root: String,
   deps: Map[String, PkgR],
-  java_deps: List[MCoord]
+  java_deps: List[MCoord],
+  version: Option[SemV],
+  origin: PkgOrigin
 }
+
+## Where a resolved package came from. A url package carries the `hash` and
+## `subdir` the winning requirement named; the url itself is left out, since
+## one hash may be served by several mirrors and the content is the same.
+pub type PkgOrigin = FromPath | FromUrl(hash: String, subdir: String)
+
+## The requirement MVS selected for one package name, and the cache directory
+## it unpacked to.
+type UrlWin = { root: String, version: SemV, hash: String, subdir: String }
 
 ## A planner diagnostic paired with the path where it should be reported.
 pub type LocDiag = { path: String, d: Diag }
@@ -569,12 +587,13 @@ fn class_conflicts(name: String, rlist: List[UrlReq], win: UrlReq) -> List[LocDi
 ## the consumer's alias (§4.3: the alias is local sugar), so two consumers
 ## spelling one package differently still share a single selection. Same
 ## version under two hashes is an integrity error, and so are requirements on
-## one name in two compatibility classes (`class_conflicts`). Returns name → chosen
-## package root (None = errored) plus hash:subdir → real name for the linker.
+## one name in two compatibility classes (`class_conflicts`). Returns name → the
+## chosen requirement and its package root (None = errored) plus hash:subdir →
+## real name for the linker.
 fn select_url_deps(
   root_dir: String,
   mfc0: Map[String, Option[ManifestV]]
-) -> (Map[String, Option[String]], Map[String, String], List[LocDiag],
+) -> (Map[String, Option[UrlWin]], Map[String, String], List[LocDiag],
   Map[String, Option[ManifestV]]) !Fs !Proc !Env = {
   var mfc = mfc0
   var reqs: Map[String, List[UrlReq]] = map.empty()
@@ -643,7 +662,7 @@ fn select_url_deps(
       None -> ()
     }
   }
-  var resolved: Map[String, Option[String]] = map.empty()
+  var resolved: Map[String, Option[UrlWin]] = map.empty()
   for name in map.keys(reqs) {
     let rlist = map.get(reqs, name).expect("reqs")
     let win = max_req(rlist)
@@ -707,7 +726,8 @@ fn select_url_deps(
           ) }]
           resolved = map.insert(resolved, name, None)
         } else {
-          resolved = map.insert(resolved, name, Some(rt))
+          let picked = UrlWin { root: rt, version: win.version, hash: win.hash, subdir: win.subdir }
+          resolved = map.insert(resolved, name, Some(picked))
         }
       }
     }
@@ -730,7 +750,7 @@ fn resolve_src_deps(
   dir: String,
   cache0: Map[String, Option[PkgR]],
   visiting: Set[String],
-  url_resolved: Map[String, Option[String]],
+  url_resolved: Map[String, Option[UrlWin]],
   url_names: Map[String, String],
   names0: Map[String, String],
   mfc0: Map[String, Option[ManifestV]]
@@ -752,8 +772,11 @@ fn resolve_src_deps(
           VPath(a, _, _, _) -> a
           VUrl(a, _, _, _, _, _, _) -> a
         }
-        let ddir_opt: Option[String] = match dep {
-          VPath(_, d, _, _) -> Some(d)
+        # A url dependency resolves to the requirement MVS selected, which may
+        # be another consumer's: its version and hash describe the package,
+        # this consumer's request does not.
+        let ddir_opt: Option[(String, Option[UrlWin])] = match dep {
+          VPath(_, d, _, _) -> Some((d, None))
           VUrl(_, _, _, hash, sub_opt, _, _) -> {
             let sub = sub_opt.unwrap_or("")
             let nm = match map.get(url_names, hash ++ ":" ++ sub) {
@@ -761,7 +784,8 @@ fn resolve_src_deps(
               None -> aname
             }
             match map.get(url_resolved, nm) {
-              Some(o) -> o
+              Some(Some(w)) -> Some((w.root, Some(w)))
+              Some(None) -> None
               None -> None
             }
           }
@@ -771,7 +795,7 @@ fn resolve_src_deps(
           None -> true
         }
         if unresolved { continue } # selection already errored
-        let ddir_given = ddir_opt.expect("dep dir")
+        let (ddir_given, url_win) = ddir_opt.expect("dep dir")
         # The directory is resolved once, where it enters the graph, and read
         # through that spelling from here on: the package's identity, its
         # manifest, its src/ and its own relative dependencies. A kernel
@@ -833,7 +857,15 @@ fn resolve_src_deps(
                 name: dm.name,
                 root: canon_identity(ddir ++ "/src"),
                 deps: tdeps,
-                java_deps: dm.java_deps
+                java_deps: dm.java_deps,
+                version: match url_win {
+                  Some(w) -> Some(w.version)
+                  None -> dm.version
+                },
+                origin: match url_win {
+                  Some(w) -> FromUrl(w.hash, w.subdir)
+                  None -> FromPath
+                }
               }
               cache = map.insert(cache, dcanon, Some(info))
               names = map.insert(names, dm.name, dcanon)
@@ -948,13 +980,17 @@ test "Java coordinates follow the final source graph order once" {
     name: "grand",
     root: "/canonical/grand/src",
     deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "grandchild", version: "1", aname: "ga" }]
+    java_deps: [MCoord { group: "g", artifact: "grandchild", version: "1", aname: "ga" }],
+    version: None,
+    origin: FromPath
   }
   let grand_b = PkgR {
     name: "grand",
     root: "/canonical/grand/src",
     deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "must-not-repeat", version: "1", aname: "gb" }]
+    java_deps: [MCoord { group: "g", artifact: "must-not-repeat", version: "1", aname: "gb" }],
+    version: None,
+    origin: FromPath
   }
   let child_a = PkgR {
     name: "child_a",
@@ -963,13 +999,17 @@ test "Java coordinates follow the final source graph order once" {
     java_deps: [
       MCoord { group: "g", artifact: "root-1", version: "1", aname: "duplicate-alias" },
       MCoord { group: "g", artifact: "child-a", version: "1", aname: "ca" }
-    ]
+    ],
+    version: None,
+    origin: FromPath
   }
   let child_b = PkgR {
     name: "child_b",
     root: "/canonical/child-b/src",
     deps: map.insert(no_deps, "grand", grand_b),
-    java_deps: [MCoord { group: "g", artifact: "child-b", version: "1", aname: "cb" }]
+    java_deps: [MCoord { group: "g", artifact: "child-b", version: "1", aname: "cb" }],
+    version: None,
+    origin: FromPath
   }
   var roots: Map[String, PkgR] = map.empty()
   roots = map.insert(roots, "z_first", child_a)
@@ -1010,13 +1050,17 @@ test "mixed manifest declaration order reaches SourcePlan Java coordinates" {
     name: "remote",
     root: "/canonical/remote/src",
     deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "url", version: "1", aname: "url" }]
+    java_deps: [MCoord { group: "g", artifact: "url", version: "1", aname: "url" }],
+    version: None,
+    origin: FromPath
   }
   let path_pkg = PkgR {
     name: "local",
     root: "/canonical/local/src",
     deps: no_deps,
-    java_deps: [MCoord { group: "g", artifact: "path", version: "1", aname: "path" }]
+    java_deps: [MCoord { group: "g", artifact: "path", version: "1", aname: "path" }],
+    version: None,
+    origin: FromPath
   }
 
   let url_first_text = "schema = 1\nname = \"app\"\n\n[deps.remote]\n" ++

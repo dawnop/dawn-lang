@@ -37,6 +37,7 @@ use driver/analyze.{
 }
 use driver/clifail.{fail_compile}
 use compiler_plan/source
+use compiler_plan/buildinfo
 use pkg/vendor
 use jvm/jarw
 use front/fmt
@@ -726,6 +727,9 @@ fn usage() -> String = join([
   "  dawn cache verify                    re-hash every cached package against its name",
   "  dawn lock [--check] [<dir>]          freeze (or verify) the resolved [java-deps] closure",
   "  dawn --version                       print the toolchain version and commit",
+  "  dawn version -m <project-dir>...     print the build manifest: each package's real",
+  "                                       name, version ((devel) when undeclared) and",
+  "                                       source digest, without building",
   "",
   "options (run/test/build):",
   "  --cp <jars>                          third-party jars for `use java`, separated by the",
@@ -2217,6 +2221,31 @@ pub fn main() -> Unit !io =
   io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
       io.with_exit_real(() => io.with_console_real(() => dispatch())))))
 
+## `dawn version`, and `dawn version -m <project-dir>...`: the toolchain
+## version, then for each project the build manifest its plan resolves to
+## (compiler_plan/buildinfo, docs/build-info-design.md). Nothing is built; the
+## header line repeats the argument as given, so the output depends on argv
+## and the sources and on nothing else.
+fn run_version(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  let none: List[String] = []
+  let dirs = match rest {
+    [] -> return console_println("dawn " ++ VERSION ++ " (selfhost)")
+    [flag, ..ds] -> if flag == "-m" { ds } else { none }
+  }
+  if dirs == [] { return cli_error("usage: dawn version [-m <project-dir>...]") }
+  for dir in dirs {
+    if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
+  }
+  for dir in dirs {
+    let plan = source.source_plan(source.ProjectDirectory(dir))
+    if len(plan.diags) > 0 { return fail_planner(plan.diags) }
+    match buildinfo.build_rows(plan) {
+      Ok(rows) -> console_print(buildinfo.render(dir ++ ": dawn " ++ VERSION, rows))
+      Err(e) -> return cli_error(e)
+    }
+  }
+}
+
 fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
   match args() {
     [] -> {
@@ -2282,7 +2311,9 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
             Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e.message)
           }
         }
-      } else if mode == "--version" || mode == "-V" || mode == "version" {
+      } else if mode == "version" {
+        run_version(rest)
+      } else if mode == "--version" || mode == "-V" {
         console_println("dawn " ++ VERSION ++ " (selfhost)")
       } else if mode == "--help" || mode == "-h" || mode == "help" {
         console_print(usage())
@@ -2452,6 +2483,58 @@ test "`dawn build` refuses an argv that does not name exactly one target" {
   assert cli_read(() => run_build(["a.dawn", "b.dawn"]))
     == (Some(2), "error: dawn build takes one target, got `a.dawn` and `b.dawn`; " ++
         "a bare word after the target is not a flag this subcommand knows\n", "")
+}
+
+## A two-package project written under a fresh temporary directory: `app`,
+## with no version, depending on the path package `lib` 0.2.0. Returns the
+## directory both sit in.
+fn version_project() -> String !Fs = {
+  let root = match io.temp_dir("", "dawn-version-m-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: ${e.message}")
+  }
+  for (rel, text) in [
+    ("app/dawn.toml", "schema = 1\nname = \"app\"\n\n[deps]\nl = \"../lib\"\n"),
+    ("app/src/main.dawn", "pub fn main() -> Unit !io = ()\n"),
+    ("lib/dawn.toml", "schema = 1\nname = \"lib\"\nversion = \"0.2.0\"\n"),
+    ("lib/src/util.dawn", "pub fn tag() -> Int = 1\n")
+  ] {
+    let path = "${root}/${rel}"
+    let _ = io.mkdirs(fspath.parent(path).expect("a parent"))
+    match io.write_file(path, text) {
+      Ok(_) -> ()
+      Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+    }
+  }
+  root
+}
+
+test "`dawn version -m` prints the build manifest, the same from two checkouts" {
+  let one = io.with_fs_real(() => version_project())
+  let two = io.with_fs_real(() => version_project())
+  let digest = (name: String, dir: String) =>
+    match io.with_fs_real(() => buildinfo.source_digest(name, "${dir}/dawn.toml", "${dir}/src")) {
+      Ok(d) -> d
+      Err(e) -> panic("digest: " ++ e)
+    }
+  let rows = "\tmain\tapp\t(devel)\t" ++ digest("app", "${one}/app") ++ "\n" ++
+    "\tdep\tlib\t0.2.0\t" ++ digest("lib", "${one}/lib") ++ "\n"
+  assert cli_read(() => run_version(["-m", "${one}/app"]))
+    == (None, "", "${one}/app: dawn ${VERSION}\n" ++ rows)
+  # the second checkout differs only in the header, which repeats the argument
+  assert cli_read(() => run_version(["-m", "${two}/app"]))
+    == (None, "", "${two}/app: dawn ${VERSION}\n" ++ rows)
+  io.with_fs_real(() => pkgfetch.delete_tree(one))
+  io.with_fs_real(() => pkgfetch.delete_tree(two))
+}
+
+test "`dawn version` without -m prints the version, and refuses anything else" {
+  assert cli_read(() => run_version([])) == (None, "", "dawn ${VERSION} (selfhost)\n")
+  let usage = (Some(2), "error: usage: dawn version [-m <project-dir>...]\n", "")
+  assert cli_read(() => run_version(["-m"])) == usage
+  assert cli_read(() => run_version(["--json", "."])) == usage
+  assert cli_read(() => run_version(["-m", NO_SUCH]))
+    == (Some(2), "error: not a directory: " ++ NO_SUCH ++ "\n", "")
 }
 
 test "`dawn run` stops taking options at the target" {
