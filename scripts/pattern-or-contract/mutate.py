@@ -89,7 +89,8 @@ MUTATIONS = {
     "drop-qualified-pattern-queries": (
         "src/lsp/lspq.dawn",
         ((
-            """    PQual(_, _, args, _, nlo, nhi, _, _) -> {
+            """    PQual(qual, _, args, _, nlo, nhi, lo, _) -> {
+      q = offer_module_alias(qc, q, qual, lo, lo + str.len(qual))
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
 """,

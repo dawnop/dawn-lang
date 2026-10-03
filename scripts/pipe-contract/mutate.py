@@ -172,6 +172,7 @@ MUTATIONS = {
     "drop-lsp-qualified-ctor": (
         LSPQ,
         "            Some(XCtor(_, _, _, _, _, _, _, _)) -> {\n"
+        "              q = offer_alias_receiver(qc, q, recv)\n"
         "              q = walk_ctor_call(qc, q, args0, None, flo, fhi, te)\n"
         "            }\n",
         "",
