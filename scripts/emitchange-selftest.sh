@@ -30,6 +30,7 @@ fmt
 doc --builtins
 add (maven coordinate)
 cli error (doc $TMP/nope)
+test playground (with [deps])
 EOF
 export EMITCHANGE_LABELS="$OUT/labels.txt"
 
@@ -75,6 +76,8 @@ accepts "a label containing parentheses" \
   'Emit-Change(add (maven coordinate)): the summary names the resolved version'
 accepts "a label containing a flag" \
   'Emit-Change(doc --builtins): bracket joins the builtin table'
+accepts "a registered label that spells a bracket (matched by equality, not as a glob)" \
+  'Emit-Change(test playground (with [deps])): a test asserts a new message'
 accepts "prose that merely mentions the word" \
   'Emit-Change, as REL-02 defines it, is a commit-message line'
 accepts "no declarations at all" ''

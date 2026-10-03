@@ -191,8 +191,16 @@ emitchange_load() {
       continue
     fi
 
+    # A registered label is a name even when it spells a glob character:
+    # declarations are matched by equality (declared_for), never as patterns,
+    # so `test playground (with [deps])` names exactly one check. Without this
+    # that label could never be declared at all.
     case "$scope" in
       *'*'* | *'?'* | *'['*)
+        if _ec_registered "$scope"; then
+          _EC_DECLS+="$scope"$'\t'"$line"$'\n'
+          continue
+        fi
         echo "FAIL glob in the scope of: $line" >&2
         echo "     Scope read as: '$scope'" >&2
         echo "     A glob covers labels that did not exist when it was written, so the" >&2
