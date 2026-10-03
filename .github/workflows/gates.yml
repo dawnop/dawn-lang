@@ -297,6 +297,8 @@ name: gates
 # still 120s under the pole, so nothing here asks for a split.
 # On 2026-10-04 it went up to 16,348s: test-compiler gained the
 # eval_closed barrier mutant (+60s planning value, one compiling mutant).
+# The same day it went up to 16,460s: lsp-workspace gained the
+# resolution-coverage step (+112s planning value, docs/lsp-references-design.md).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -320,7 +322,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 16348s (the most this file's `3x` claims may add up to)
+# push-total: 16460s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2379,8 +2381,13 @@ jobs:
     # whose steps digest is this job's (gate-observations --since
     # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
     # 5s, 605s (790s before), and the timeout to 3x that.
-    # budget: 3x 605s worst observed plus a tenth (run 36680145356)
-    timeout-minutes: 31
+    # 2026-10-04: the resolution-coverage step (T0 of
+    # docs/lsp-references-design.md) took 56s locally, its positive and four
+    # mutant builds. Planning allowance, as for source-resolution above:
+    # 605 + 2 * 56 = 717s, timeout 3x that. Restate from the observation once
+    # the step has a week of main runs.
+    # budget: 3x 717s planning allowance (605s worst observed, run 36680145356, plus 2 x 56s)
+    timeout-minutes: 36
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2450,6 +2457,16 @@ jobs:
       # key names the first instance. One server, ~3s locally (2026-09-27).
       - name: lsp typed-tree pairing by declaration key
         run: ./scripts/lsp-decl-pairing.py
+
+      # Which written names go-to-definition resolves, one assertion per name
+      # (docs/lsp-references-design.md §五): written types, effect rows,
+      # `with handle`, handler arms, operation calls, module alias segments,
+      # field and argument names. selfhost-lsp-diff.sh compares against the
+      # previous release, which had these same holes, so it cannot hold them
+      # closed. Four mutants, each built from a private selfhost copy, must
+      # turn their own case red. 56s locally (2026-10-04).
+      - name: lsp resolution coverage and mutants
+        run: ./scripts/lsp-resolution-coverage.py --mutants
 
       # Analysis and completion must consume one captured source plan. Both
       # fail-closed edges carry compiling mutants: loader replanning and LSP
