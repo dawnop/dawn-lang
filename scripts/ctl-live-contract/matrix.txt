@@ -23,6 +23,7 @@ assert	exit_status
 assert	no_live_continuations_at_exit
 assert	releases_ran
 assert	spent_ticket_refused
+assert	refusal_by_name
 assert	no_leaks
 
 control	answers
@@ -72,6 +73,16 @@ red	ctl-discard-skips-releases	releases_ran
 role	ctl-discard-ignores-the-ticket	counted
 owner	ctl-discard-ignores-the-ticket	spent_ticket_refused
 red	ctl-discard-ignores-the-ticket	spent_ticket_refused
+
+# The refusal that ends the process has to be the process's last word. When a
+# carrier cannot be made (refuse.dawn runs out of address space on purpose),
+# the runtime prints one line and exits 1; without `dawn_ctl_dying` set first,
+# exit(1) runs the report at exit, which adds a line about the continuations
+# still held and turns the status into 70. That was the runtime until
+# 2026-10-04, and this mutant puts it back.
+role	ctl-refusal-reports-live	counted
+owner	ctl-refusal-reports-live	refusal_by_name
+red	ctl-refusal-reports-live	refusal_by_name
 
 # The positive control. A baton has exactly one waiter, so waking one rather
 # than all of them is the same handoff, and the whole roster has to stay green

@@ -2743,11 +2743,34 @@ static void *dawn_ctl_carrier_main(void *arg) {
   return NULL;
 }
 
-/* 64 MiB of address space, not memory: the pages are touched only as the
- * stack grows, the same arrangement DAWN_STACK_BYTES describes. Smaller than
- * the big stack because a remainder is a block's tail rather than a whole
- * program, and because there is one of these per live activation. */
-#define DAWN_CTL_STACK_BYTES ((size_t)64 << 20)
+/* Every stack that runs Dawn code is the same size, DAWN_STACK_BYTES, for the
+ * reason dawn_rt.h gives there: general tail calls are not implemented and a
+ * big stack is the substitute, matching the JVM's -Xss512m. A remainder is
+ * not "a block's tail" in general: the compiler wraps its whole run in
+ * `io.with_exit_real`, so the native compiler and its LSP live entirely on a
+ * carrier, and on the JVM a Continuation mounts on a platform thread whose
+ * stack is the same -Xss. The earlier 64 MiB was an unmeasured guess; it let
+ * a ~62 KB right-nested input crash `dawnc lsp` with SIGSEGV, and gave a
+ * deep recursion inside a `ctl` block an eighth of the depth the same program
+ * has on the JVM.
+ *
+ * It is address space, not memory: pages are touched only as the stack
+ * grows, so resident size does not change with this number (measured equal
+ * at 64 and 512 MiB). The price is under RLIMIT_AS (`ulimit -v`), where the
+ * number of live continuations is the headroom divided by 512 MiB: 4 under a
+ * 4,000,000 KB limit, measured. Running out is refused by name below. */
+#define DAWN_CTL_STACK_BYTES DAWN_STACK_BYTES
+
+/* The process ends here on purpose, so it is "dying" in the sense the
+ * report at exit reads: without the flag, exit(1) runs dawn_ctl_report, which
+ * adds a second line about the continuations still held and turns the status
+ * into 70. */
+static _Noreturn void dawn_ctl_carrier_refused(const char *why) {
+  dawn_ctl_dying = true;
+  fflush(stdout);
+  fprintf(stderr, "dawn: cannot make a continuation carrier%s\n", why);
+  exit(1);
+}
 
 static dawn_carrier *dawn_ctl_carrier_new(dawn_ctl *f) {
   pthread_attr_t at;
@@ -2755,22 +2778,21 @@ static dawn_carrier *dawn_ctl_carrier_new(dawn_ctl *f) {
   memset(c, 0, sizeof *c);
   c->act = f;
   if (pthread_mutex_init(&c->m, NULL) != 0 || pthread_cond_init(&c->cv, NULL) != 0) {
-    fputs("dawn: cannot make a continuation carrier\n", stderr);
-    exit(1);
+    dawn_ctl_carrier_refused("");
   }
   if (!dawn_ctl_report_registered) {
     atexit(dawn_ctl_report);
     dawn_ctl_report_registered = true;
   }
   if (pthread_attr_init(&at) != 0) {
-    fputs("dawn: cannot make a continuation carrier\n", stderr);
-    exit(1);
+    dawn_ctl_carrier_refused("");
   }
   (void)pthread_attr_setstacksize(&at, DAWN_CTL_STACK_BYTES);
   if (pthread_create(&c->th, &at, dawn_ctl_carrier_main, c) != 0) {
     pthread_attr_destroy(&at);
-    fputs("dawn: cannot make a continuation carrier\n", stderr);
-    exit(1);
+    dawn_ctl_carrier_refused(
+        ": each live continuation reserves 512 MiB of address space "
+        "(is `ulimit -v` set?)");
   }
   pthread_attr_destroy(&at);
   c->spawned = true;
