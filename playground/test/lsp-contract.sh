@@ -4,6 +4,10 @@ cd "$(dirname "$0")/../.."
 sh -n playground/sandbox/run-lsp-sandboxed.sh
 bash -n playground/deploy/redeploy.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B playground/deploy/lsp-measure.py --self-test
+# The live check of a deployed Playground talks to the internet, so only its
+# offline half runs here: how a sample's recorded output is compared with
+# what the runner prints for its prog.dawn buffer.
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/play-live-check.py --self-test
 PYTHONDONTWRITEBYTECODE=1 \
   PLAY_LSP_CONTRACT_OMIT_FAKE_VERSION=0 \
   python3 -B playground/test/lsp_contract.py

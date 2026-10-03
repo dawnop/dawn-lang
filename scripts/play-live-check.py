@@ -20,6 +20,9 @@ with no nginx in front wants `--runner-only`, which skips the static checks and
 talks to `PLAY_BASE_URL` with no `/api` prefix. Exit status is 0 only when
 every check passed.
 
+`--self-test` runs the offline cases of the sample comparison below and talks
+to no server.
+
 `PLAY_API_URL` is where the runner checks go, while the static checks stay on
 `PLAY_BASE_URL`. It is the `/api` base itself (no trailing `/run`). The public
 pages are on a CDN and the Playground service is not (docs/site-cdn-design.md),
@@ -68,6 +71,27 @@ NEW_LAMBDA = "pub fn main() -> Unit !io = println(to_string(map([1, 2], c => c +
 OLD_LAMBDA = "pub fn main() -> Unit !io = println(to_string(map([1, 2], fn(c) => c + 1)))"
 NEW_LAMBDA_OUT = "[2, 3]\n"
 OLD_LAMBDA_DIAG = "a lambda has no `fn` prefix"
+
+
+# The Playground compiles its buffer as `prog.dawn` (playground/src/play/
+# exec.dawn), while each sample's `.out` is recorded by running the sample
+# under its own name. Since a failure carries `at <file>:<line>:<col>` (L2,
+# #425), a sample whose output names a position differs in the file name
+# alone. Only that sample's own name, directly followed by `:<line>`, becomes
+# `prog.dawn`; the line and column stay, and nothing else is rewritten.
+PLAYGROUND_FILE = b"prog.dawn"
+
+
+def playground_expected(sample_name, expected):
+    """`expected` as the Playground prints it: the sample's file name is prog.dawn."""
+    own = re.escape(sample_name.encode())
+    return re.sub(
+        rb"(?<![\w./-])" + own + rb"(?=:[0-9])", PLAYGROUND_FILE, expected
+    )
+
+
+def sample_matches(sample_name, expected, actual, rewrite=playground_expected):
+    return actual == rewrite(sample_name, expected)
 
 
 class Results:
@@ -202,10 +226,11 @@ def check_runner(api, r, pace):
             r.check(False, name, f"phase={got.get('phase')} output={got.get('output')!r}")
             continue
         actual = got.get("output", "").encode()
+        want = playground_expected(dawn.name, expected)
         r.check(
-            actual == expected,
+            actual == want,
             name,
-            "" if actual == expected else f"expected {expected!r}\ngot      {actual!r}",
+            "" if actual == want else f"expected {want!r}\ngot      {actual!r}",
         )
 
     # Version discriminants, both directions.
@@ -268,14 +293,74 @@ def check_site(base, r):
         )
 
 
+def self_test():
+    """The sample comparison, offline: what it forgives and what it still catches."""
+    out = b"caught: boom at barriers.dawn:50:46\n"
+    cases = (
+        # (label, sample name, expected, actual, should match)
+        ("own name becomes prog.dawn", "barriers.dawn", out,
+         b"caught: boom at prog.dawn:50:46\n", True),
+        ("no position, no rewrite", "hello.dawn", b"hello\n", b"hello\n", True),
+        ("a different line stays red", "barriers.dawn", out,
+         b"caught: boom at prog.dawn:51:46\n", False),
+        ("a different column stays red", "barriers.dawn", out,
+         b"caught: boom at prog.dawn:50:47\n", False),
+        ("the sample's own name in the output stays red", "barriers.dawn", out,
+         out, False),
+        ("another sample's name is not rewritten", "hello.dawn", out,
+         b"caught: boom at prog.dawn:50:46\n", False),
+        ("a longer name ending in it is not rewritten", "barriers.dawn",
+         b"at my_barriers.dawn:50:46\n", b"at my_prog.dawn:50:46\n", False),
+        ("the name without a position is not rewritten", "barriers.dawn",
+         b"see barriers.dawn\n", b"see prog.dawn\n", False),
+        ("the name before a colon but no line is not rewritten", "barriers.dawn",
+         b"barriers.dawn: done\n", b"prog.dawn: done\n", False),
+        ("other text still differs", "barriers.dawn", out,
+         b"caught: bang at prog.dawn:50:46\n", False),
+    )
+    failed = 0
+    for label, name, expected, actual, should in cases:
+        if sample_matches(name, expected, actual) != should:
+            failed += 1
+            print(f"FAIL   {label}")
+        else:
+            print(f"  ok   {label}")
+    # Negative control: the byte-for-byte comparison this replaced fails the
+    # first case, which is the failure the deploy of 2026-10-04 saw.
+    label, name, expected, actual, _ = cases[0]
+    if sample_matches(name, expected, actual, rewrite=lambda _n, e: e):
+        failed += 1
+        print("FAIL   the comparison without the rewrite turns the first case red")
+    else:
+        print("  ok   the comparison without the rewrite turns the first case red")
+    # The tree's own sample that names a position, so a renamed sample or
+    # a re-recorded .out cannot leave the cases above about nothing.
+    barriers = (SAMPLES / "barriers.out").read_bytes()
+    rewritten = playground_expected("barriers.dawn", barriers)
+    if rewritten == barriers or b"barriers.dawn:" in rewritten:
+        failed += 1
+        print("FAIL   barriers.out names its own file and every mention is rewritten")
+    else:
+        print("  ok   barriers.out names its own file and every mention is rewritten")
+    print(f"\nself-test: {failed} failed")
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the sample comparison's offline cases and exit",
+    )
     ap.add_argument(
         "--runner-only",
         action="store_true",
         help="check only the runner, and talk to it directly (no /api prefix, no static site)",
     )
     args = ap.parse_args()
+    if args.self_test:
+        return self_test()
 
     base = os.environ.get("PLAY_BASE_URL", DEFAULT_BASE).rstrip("/")
     api = base if args.runner_only else DEFAULT_API
