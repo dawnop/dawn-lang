@@ -15,9 +15,18 @@
 # rather than guessed at.
 #
 # `read` takes its ceiling as a defaulted `cap` rather than through a
-# `read_bounded` twin; deflate.dawn's header says why.
+# `read_bounded` twin, and the default is `deflate.DEFAULT_CAP`, not no
+# ceiling; deflate.dawn's header says why.
+#
+# `entries` takes one ceiling over every entry together, not one per entry.
+# Entries may overlap: a central directory can point many records at the same
+# compressed bytes (Fifield's "A better zip bomb", USENIX WOOT 2019), so a
+# per-entry ceiling multiplied by the entry count is no ceiling. Charging each
+# entry against what earlier ones left is the same rule `gzip.gunzip` applies
+# to concatenated members.
 
 use std/bytes
+use std/bytes.{Buf}
 use std/str
 use deflate
 use crc32
@@ -266,14 +275,15 @@ pub fn headers(src: Bytes) -> Result[List[Meta], String] = {
   Ok(out)
 }
 
-## One entry's bytes, with a ceiling on how big they may get. `None`, the
-## default, is no ceiling; a directory entry is empty.
+## One entry's bytes, with a ceiling on how big they may get:
+## `deflate.DEFAULT_CAP` unless given, and `None` is no ceiling. A directory
+## entry is empty.
 ##
 ## The ceiling matters even though `m.size` is right there: that number is the
 ## archive's claim about itself, checked afterwards, and a bomb is a small
 ## compressed member with a large true expansion and whatever `size` its writer
 ## felt like putting in the directory.
-pub fn read(src: Bytes, m: Meta, cap: Option[Int] = None) -> Result[Bytes, String] = {
+pub fn read(src: Bytes, m: Meta, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -> Result[Bytes, String] = {
   if m.is_dir { return Ok(bytes.utf8("")) }
   if m.flags & FLAG_ENCRYPTED != 0 { return Err("zip: encrypted entry: " ++ m.name) }
   if not in_range(src, m.local, 30) || u32(src, m.local) != LOCAL_SIG {
@@ -303,8 +313,8 @@ pub fn read(src: Bytes, m: Meta, cap: Option[Int] = None) -> Result[Bytes, Strin
               to_string(lim) ++ ")")
         }
         if m.size > lim {
-          return Err("zip: " ++ m.name ++ ": the output exceeds the " ++
-              to_string(lim) ++ " byte limit (stopped at 0 bytes)")
+          return Err(with_default_hint("zip: " ++ m.name ++ ": the output exceeds the " ++
+              to_string(lim) ++ " byte limit (stopped at 0 bytes)", lim))
         }
       }
     }
@@ -338,20 +348,48 @@ pub fn read(src: Bytes, m: Meta, cap: Option[Int] = None) -> Result[Bytes, Strin
   Ok(out)
 }
 
+## What a refusal by the default ceiling adds, as in deflate and gzip: the
+## default's value and both ways out. A deflate member read against the whole
+## default already carries it; a stored member, or a later entry read against
+## what `entries` has left, gets it here. Only ceiling refusals are annotated.
+fn with_default_hint(e: String, lim: Int) -> String =
+  if lim == deflate.DEFAULT_CAP && str.contains(e, " byte limit (stopped at ") &&
+  not str.contains(e, "; the default cap is ") {
+    e ++ "; the default cap is " ++ to_string(deflate.DEFAULT_CAP) ++
+      " bytes: pass cap: Some(n) for a larger limit, or cap: None for no limit"
+  } else {
+    e
+  }
+
 ## Every entry in the archive, fully unpacked, in central directory order. An
 ## archive with no entries reads as the empty list: that is a legal zip, and
 ## whether it is an acceptable one is the caller's question.
-pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
+##
+## `cap` is one ceiling over all entries' output together,
+## `deflate.DEFAULT_CAP` unless given; `None` is no ceiling. Each entry is read
+## against what the earlier ones left, so entries that share compressed bytes
+## are each paid for.
+pub fn entries(src: Bytes, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -> Result[List[Entry], String] = {
+  let lim = match cap {
+    None -> -1
+    Some(n) -> {
+      if n < 0 { return Err("zip: a negative output limit (" ++ to_string(n) ++ ")") }
+      n
+    }
+  }
   let ms = match headers(src) {
     Ok(hs) -> hs
     Err(e) -> return Err(e)
   }
   var out: List[Entry] = []
+  var total = 0
   for m in ms {
-    let data = match read(src, m) {
+    let left: Option[Int] = if lim < 0 { None } else { Some(lim - total) }
+    let data = match read(src, m, cap: left) {
       Ok(d) -> d
-      Err(e) -> return Err(e)
+      Err(e) -> return Err(with_default_hint(e, lim))
     }
+    total = total + bytes.len(data)
     out = out ++ [Entry { name: m.name, is_dir: m.is_dir, data: data }]
   }
   Ok(out)
@@ -420,8 +458,8 @@ test "stored entries honor the output ceiling before their bytes are copied" {
     local: 0,
   }
 
-  # The default is no ceiling.
   assert read(src, stored) == Ok(payload)
+  assert read(src, stored, cap: None) == Ok(payload)
   assert read(src, stored, cap: Some(1)) == Ok(payload)
   assert read(src, stored, cap: Some(0)) ==
     Err("zip: stored: the output exceeds the 0 byte limit (stopped at 0 bytes)")
@@ -443,4 +481,113 @@ test "stored entries honor the output ceiling before their bytes are copied" {
   }
   assert read(src, inconsistent, cap: Some(0)) ==
     Err("zip: inconsistent unpacked to 1 bytes, the directory says 0")
+}
+
+## `v` as `n` little-endian bytes.
+fn le(b0: Buf, v: Int, n: Int) -> Buf = {
+  var b = b0
+  var i = 0
+  while i < n {
+    b = bytes.put(b, (v >>> (8 * i)) & 0xFF)
+    i = i + 1
+  }
+  b
+}
+
+## An archive with one stored local entry holding `data` and one central
+## directory record per name, every record pointing at that same entry: the
+## overlap a "better zip bomb" is made of, at a size a test can afford.
+fn overlapping(data: Bytes, names: List[String]) -> Bytes = {
+  let crc = crc32.sum(data)
+  let n = bytes.len(data)
+  var b = le(bytes.buf(), LOCAL_SIG, 4)
+  b = le(b, 20, 2)
+  b = le(b, 0, 2)
+  b = le(b, METHOD_STORED, 2)
+  b = le(b, 0, 4)
+  b = le(b, crc, 4)
+  b = le(b, n, 4)
+  b = le(b, n, 4)
+  b = le(b, 0, 4)
+  b = bytes.put_bytes(b, data)
+  let cd = bytes.size(b)
+  for name in names {
+    let nb = bytes.utf8(name)
+    b = le(b, CD_SIG, 4)
+    b = le(b, 20, 2)
+    b = le(b, 20, 2)
+    b = le(b, 0, 2)
+    b = le(b, METHOD_STORED, 2)
+    b = le(b, 0, 4)
+    b = le(b, crc, 4)
+    b = le(b, n, 4)
+    b = le(b, n, 4)
+    b = le(b, bytes.len(nb), 2)
+    b = le(b, 0, 2)
+    b = le(b, 0, 2)
+    b = le(b, 0, 2)
+    b = le(b, 0, 2)
+    b = le(b, 0, 4)
+    b = le(b, 0, 4)
+    b = bytes.put_bytes(b, nb)
+  }
+  let cd_size = bytes.size(b) - cd
+  b = le(b, EOCD_SIG, 4)
+  b = le(b, 0, 4)
+  b = le(b, len(names), 2)
+  b = le(b, len(names), 2)
+  b = le(b, cd_size, 4)
+  b = le(b, cd, 4)
+  b = le(b, 0, 2)
+  bytes.freeze(b)
+}
+
+test "entries share one ceiling, so overlapping entries are each paid for" {
+  let src = overlapping(bytes.utf8("x"), ["a", "b"])
+  let both = [
+    Entry { name: "a", is_dir: false, data: bytes.utf8("x") },
+    Entry { name: "b", is_dir: false, data: bytes.utf8("x") },
+  ]
+  assert entries(src) == Ok(both)
+  assert entries(src, cap: None) == Ok(both)
+  assert entries(src, cap: Some(2)) == Ok(both)
+  # Each entry alone fits a ceiling of 1; together they do not, and the second
+  # is refused with the budget the first left it.
+  assert entries(src, cap: Some(1)) ==
+    Err("zip: b: the output exceeds the 0 byte limit (stopped at 0 bytes)")
+  assert entries(src, cap: Some(-1)) == Err("zip: a negative output limit (-1)")
+}
+
+test "the default ceiling refuses a large stored entry and names the default" {
+  # One byte over the default, stored: refused from the directory's claim,
+  # before the entry's bytes are sliced out.
+  let size = deflate.DEFAULT_CAP + 1
+  let src = bytes.utf8("PK\u{0003}\u{0004}" ++ str.repeat("\u{0000}", 26) ++ str.repeat("x", size))
+  let big = Meta {
+    name: "big",
+    is_dir: false,
+    flags: 0,
+    method: METHOD_STORED,
+    crc: 0,
+    csize: size,
+    size: size,
+    local: 0,
+  }
+  let refusal =
+    "zip: big: the output exceeds the 16777216 byte limit (stopped at 0 bytes); " ++
+    "the default cap is 16777216 bytes: pass cap: Some(n) for a larger limit, " ++
+    "or cap: None for no limit"
+  assert read(src, big) == Err(refusal)
+  assert read(src, big, cap: Some(16)) ==
+    Err("zip: big: the output exceeds the 16 byte limit (stopped at 0 bytes)")
+}
+
+test "entries add the default note when a later entry hits what is left" {
+  # Two overlapping 9 MiB entries: the first fits the default, the second is
+  # read against the 7 MiB it left, a number the caller never saw.
+  let src = overlapping(bytes.utf8(str.repeat("x", 9437184)), ["a", "b"])
+  assert entries(src) ==
+    Err("zip: b: the output exceeds the 7340032 byte limit (stopped at 0 bytes); " ++
+        "the default cap is 16777216 bytes: pass cap: Some(n) for a larger limit, " ++
+        "or cap: None for no limit")
 }

@@ -6,10 +6,12 @@
 # wrapper was a Java stream class.
 #
 # `gunzip` takes its ceiling as a defaulted `cap` rather than through a
-# `gunzip_bounded` twin; deflate.dawn's header says why.
+# `gunzip_bounded` twin, and the default is `deflate.DEFAULT_CAP`, not no
+# ceiling; deflate.dawn's header says why.
 
 use std/bytes
 use std/bytes.{Buf}
+use std/str
 use deflate
 use crc32
 
@@ -128,14 +130,29 @@ fn limit_of(cap: Option[Int]) -> Result[Int, String] =
 fn remaining_limit(lim: Int, out: Buf) -> Option[Int] =
   if lim < 0 { None } else { Some(lim - bytes.size(out)) }
 
+## A refusal by the aggregate default ceiling names the default and the ways
+## out, as deflate's own refusals do. The first member is decoded against the
+## whole default, so deflate has already said it; a later member is decoded
+## against what is left, a number the caller never saw, so the note is added
+## here. Only ceiling refusals are annotated: a damaged stream is not fixed by
+## a larger limit.
+fn with_default_hint(e: String, lim: Int) -> String =
+  if lim == deflate.DEFAULT_CAP && str.contains(e, " byte limit (stopped at ") &&
+  not str.contains(e, "; the default cap is ") {
+    e ++ "; the default cap is " ++ to_string(deflate.DEFAULT_CAP) ++
+      " bytes: pass cap: Some(n) for a larger limit, or cap: None for no limit"
+  } else {
+    e
+  }
+
 ## Decompress every gzip member and concatenate their uncompressed payloads in
 ## member order. Bytes after the final trailer are another member or damage;
 ## they are never ignored.
 ##
-## `cap` is one ceiling over the aggregate uncompressed output; `None`, the
-## default, is no ceiling. Each member receives only the remaining budget, so
-## concatenation cannot reset the limit.
-pub fn gunzip(src: Bytes, cap: Option[Int] = None) -> Result[Bytes, String] = {
+## `cap` is one ceiling over the aggregate uncompressed output,
+## `deflate.DEFAULT_CAP` unless given; `None` is no ceiling. Each member
+## receives only the remaining budget, so concatenation cannot reset the limit.
+pub fn gunzip(src: Bytes, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -> Result[Bytes, String] = {
   let n = bytes.len(src)
   if n == 0 { return Err("gzip: too short to be an archive") }
   let lim = match limit_of(cap) {
@@ -147,7 +164,7 @@ pub fn gunzip(src: Bytes, cap: Option[Int] = None) -> Result[Bytes, String] = {
   while cursor < n {
     let parsed = match member(src, cursor, remaining_limit(lim, out)) {
       Ok(m) -> m
-      Err(e) -> return Err(e)
+      Err(e) -> return Err(with_default_hint(e, lim))
     }
     out = bytes.put_bytes(out, parsed.out)
     cursor = parsed.next

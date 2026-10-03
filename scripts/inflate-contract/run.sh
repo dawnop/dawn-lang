@@ -148,3 +148,18 @@ else
   echo "FAIL: the output ceiling did not bind before the memory was spent" >&2
   exit 1
 fi
+
+# The same bomb with no `cap` at all, through deflate, gzip (alone and after a
+# small member) and zip, in the same heap. Version 2 of the package defaulted
+# to no ceiling, and under that default every one of these is an
+# OutOfMemoryError; the default ceiling has to refuse each of them and say so.
+# This is the leg that goes red if the default is ever put back to `None`.
+default_out="$work/bomb-default.txt"
+if "$java" -Xss512m -Xmx256m -jar "$work/probe.jar" --bomb-default 512 \
+    > "$default_out" 2>&1 && [ "$(tail -n 1 "$default_out")" = "mismatches 0" ]; then
+  echo "PASS  the default ceiling refuses a 512MB bomb inside a 256MB heap, at every entry point"
+else
+  sed 's/^/  | /' "$default_out" >&2
+  echo "FAIL: the default ceiling did not refuse the bomb at every entry point" >&2
+  exit 1
+fi
