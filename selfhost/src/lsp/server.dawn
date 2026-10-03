@@ -33,19 +33,22 @@ use std/memfs
 use compiler_plan/envmem
 use ir/interp.{ct_default}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
-use driver/stdlib.{StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text}
+use driver/stdlib.{
+  StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text, std_file_of
+}
 use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
-use lsp/lspq.{QCx, Target, DocHere, DocFile, DocStd, find_target, typed_trees, inlay_hints}
-use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc}
-use front/docs.{DocSrc, doc_src_of}
+use lsp/lspq.{QCx, Target, DocHome, DocHere, DocFile, DocStd, find_target, typed_trees, inlay_hints}
+use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown}
+use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links}
+use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts}
 use front/ast.{
-  Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
+  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
 use front/token.{Diag, Note, mk_diag}
 use front/fmt
@@ -2434,11 +2437,106 @@ fn target_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (
       let (key, text) = kt
       if not may_have_doc(text, site.lo) { return (None, st) }
       let (src, st2) = doc_src_memo(st, key, text)
-      (doc_in(src, site.lo), st2)
+      match doc_in(src, site.lo) {
+        Some(doc) -> (Some(linked_doc(st2, d, analysis, qc, site.home, doc)), st2)
+        None -> (None, st2)
+      }
     }
     None -> (None, st)
   }
 }
+
+## A hover doc with its `[`name`]` links turned into Markdown links to the
+## declarations they name (docs/lsp-hover-design.md §A5): resolved by the
+## resolver `dawn doc` uses, in the scope of the module the doc is written in,
+## and pointed at the declaration's file and line as a `file://` URI with a
+## `#L<line>,<column>` fragment, which is what an editor opens a hover link
+## with. A link that resolves to nothing, or to something with no file (the
+## prelude, a std read from the embedded copy), stays as written: CommonMark
+## renders it as bracketed code, which is also what it looks like to a client
+## that renders no Markdown at all.
+fn linked_doc(st: LspState, d: Doc, analysis: Analysis, qc: QCx, home: DocHome, doc: String) -> String !Fs !Env = {
+  if not str.contains(doc, "[`") { return doc }
+  let sc = match scope_of(qc, home) {
+    Some(s) -> s
+    None -> return doc
+  }
+  var mods: Map[String, Module] = map.empty()
+  for tr in qc.std.srcs {
+    let (mp, _, m) = tr
+    mods = map.insert(mods, mp, m)
+  }
+  for cm in qc.prog.modules { mods = map.insert(mods, cm.mod_path, cm.m) }
+  mods = map.insert(mods, qc.entry.mod_path, qc.entry.m)
+  var to: Map[String, String] = map.empty()
+  for l in doc_links(doc) {
+    if map.has(to, l.text) { continue }
+    match resolve_link(sc, mods, l.text) {
+      Ok(t) -> {
+        let def_path: Option[Option[String]] =
+          if t.module == qc.entry.mod_path {
+            Some(None)
+          } else {
+            var found: Option[Option[String]] = None
+            for cm in qc.prog.modules {
+              if cm.mod_path == t.module && found == None { found = Some(Some(cm.path)) }
+            }
+            if found == None && t.module != "" {
+              match std_file_of(qc.std, t.module) {
+                Some(f) -> { found = Some(Some(f)) }
+                None -> ()
+              }
+            }
+            found
+          }
+        match def_path {
+          Some(dp) -> {
+            let lo = if t.nlo < 0 { 0 } else { t.nlo }
+            match def_source(st, d, analysis.workspace_key, analysis.definition_root, dp) {
+              Some(InBuffer(d2)) -> {
+                let (line, ch) = lsp_position(d2.view, d2.ls, lo)
+                to = map.insert(to, l.text, "${d2.uri}#L${line + 1},${ch + 1}")
+              }
+              Some(OnDisk(path, text)) -> {
+                let (line, ch) = lsp_position(view_of(text), line_starts_of(text), lo)
+                to = map.insert(to, l.text, "${path_to_uri(path)}#L${line + 1},${ch + 1}")
+              }
+              None -> ()
+            }
+          }
+          None -> ()
+        }
+      }
+      Err(_) -> ()
+    }
+  }
+  let uris = to
+  rewrite_links(doc, text => match map.get(uris, text) {
+    Some(uri) -> Some(link_markdown(text, uri))
+    None -> None
+  })
+}
+
+## The module a doc is written in, with the import tables its links resolve
+## against: the analyzed document, another program file, or a std module.
+fn scope_of(qc: QCx, home: DocHome) -> Option[LinkScope] =
+  match home {
+    DocHere -> Some(LinkScope { path: qc.entry.mod_path, m: qc.entry.m, cx: qc.entry.cx })
+    DocFile(path) -> {
+      for cm in qc.prog.modules {
+        if cm.path == path { return Some(LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }) }
+      }
+      None
+    }
+    DocStd(mp) -> {
+      for i in range(0, len(qc.std.mods)) {
+        let (smp, cx, _, _) = qc.std.mods[i]
+        let (_, _, m) = qc.std.srcs[i]
+        if smp == mp { return Some(LinkScope { path: mp, m: m, cx: cx }) }
+      }
+      None
+    }
+  }
 
 ## The markdown a hover replies with: `lspdoc.hover_markdown` over the target.
 fn hover_value(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> (String, LspState) !Fs !Env = {
@@ -3465,6 +3563,52 @@ test "hover reads a std declaration's doc from std's text, file or embedded" {
     assert def_probe_at(est, ed, etext, "list.reverse", 5).def == None
     let rev = hover_probe_at(est, ed, etext, "list.reverse", 5)
     assert str.ends_with(rev, "\n```\n\n---\n\nA reversed copy; the input is not changed.")
+  }))
+}
+
+test "hover turns a doc's [`name`] links into links to the declarations" {
+  io.with_fs_real(() => no_host(() => {
+    let root = "/tmp/dawn-selfhost-lsp-def/doclinks"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "linkprobe\n")
+    def_probe_put("${root}/linkprobe.dawn", join([
+      "## Probes `n`; see [`REACH`].",
+      "pub fn probe(n: Int) -> Int = n",
+      "",
+      "## How far a probe reaches.",
+      "pub const REACH: Int = 9",
+      ""
+    ], "\n"))
+    let pstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(pstd)
+    let text = join([
+      "use std/linkprobe",
+      "",
+      "## Twice [`plain`], unlike [`linkprobe.probe`]; [`Pt.x`], [`Option.Some`],",
+      "## and [`nowhere`] is not a link.",
+      "fn double(n: Int) -> Int = plain(n) * 2",
+      "",
+      "fn plain(n: Int) -> Int = n",
+      "",
+      "type Pt = { x: Int }",
+      "",
+      "fn f() -> Int = double(linkprobe.probe(1))",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "doclinks.dawn", text)
+    let file = path_to_uri(canon_identity("${root}/linkprobe.dawn"))
+    # this module's declarations point into the buffer, std's into its file;
+    # a prelude name and a broken link stay as written
+    assert hover_probe_at(st, d, text, "double(linkprobe", 1) ==
+      "```dawn\nfn double(n: Int) -> Int\n```\n\n---\n\n" ++
+      "Twice [`plain`](${d.uri}#L7,4), unlike [`linkprobe.probe`](${file}#L2,8); " ++
+      "[`Pt.x`](${d.uri}#L9,13), [`Option.Some`],\nand [`nowhere`] is not a link."
+    # a std doc's links resolve in std's module, not in the document's
+    assert hover_probe_at(st, d, text, "probe(1)", 1) ==
+      "```dawn\nfn probe(n: Int) -> Int\n```\n\n---\n\nProbes `n`; see [`REACH`](${file}#L5,11)."
   }))
 }
 

@@ -2,6 +2,13 @@
 # (with `##` doc comments) or the builtin reference as JSON on stdout, byte
 # for byte what `dawn doc` prints. The JSON writer mirrors JsonWriter (pretty,
 # 2-space indent, key and value on one line, deterministic).
+#
+# Every doc it publishes is also checked for `[`name`]` links (spec §1.2): each
+# one is resolved in the doc's own module (`driver/doclinks`) and written as a
+# `links` array beside the doc, and one that resolves to nothing fails the
+# command instead of printing JSON. This is the only place links are checked:
+# the compiler does not read comments, and the site build, which runs
+# `dawn doc --stdlib`, is how std's links are held to it.
 
 use std/char
 use std/str
@@ -9,12 +16,15 @@ use std/list
 use std/map
 use std/set
 use std/io
-use std/io.{Fs}
-use front/docs.{DocSrc, doc_src_of, doc_of, member_doc_of, module_doc_of}
+use std/io.{Fs, Env}
+use front/docs.{
+  DocSrc, doc_src_of, doc_of, member_doc_of, module_doc_of, doc_first_line, doc_links
+}
 use front/ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub
 }
 use driver/analyze.{Program, CheckedMod, analyze_standalone}
+use driver/doclinks.{LinkScope, LinkTarget, resolve_link}
 use check/cx.{Cx}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use check/tast.{TModule}
@@ -27,10 +37,29 @@ use check/types.{
 }
 
 # ---- the JSON writer (JsonWriter, as a threaded record) ----
+#
+# `errs` rides along with the writer rather than beside it: every doc the
+# output carries passes through here, and a link in one that resolves to
+# nothing is recorded where the doc is written (`w_links`), which is the one
+# place that knows both the module and the line. A non-empty `errs` makes the
+# whole command fail (`DocOut`), so the JSON built alongside is never printed.
 
-type W = { parts: List[String], indent: Int, need_comma: Bool, trailing_key: Bool }
+type W = {
+  parts: List[String],
+  indent: Int,
+  need_comma: Bool,
+  trailing_key: Bool,
+  errs: List[String]
+}
 
-fn w_new() -> W = W { parts: [], indent: 0, need_comma: false, trailing_key: false }
+fn w_new() -> W = W { parts: [], indent: 0, need_comma: false, trailing_key: false, errs: [] }
+
+## What `dawn doc` prints: the JSON, or one line per doc link that resolves
+## to nothing (`<module>:<line>: doc link [`name`] <why>`), in which case the
+## command prints no JSON and fails.
+pub(pkg) alias DocOut = Result[String, List[String]]
+
+fn w_out(w: W) -> DocOut = if len(w.errs) > 0 { Err(w.errs) } else { Ok(w_done(w)) }
 
 fn pad(w: W) -> W = W { ..w, parts: w.parts ++ [str.repeat("  ", w.indent)] }
 
@@ -96,6 +125,75 @@ fn w_field_opt(w: W, k: String, v: Option[String]) -> W = {
   }
 }
 
+# ---- doc links (spec §1.2) ----
+
+## What resolving a doc's links needs: the module the doc is written in (its
+## scope), the parse tree of every module a link may land in, by module path,
+## and the module's comment table, which places a doc's lines in the file.
+type Lk = { sc: LinkScope, mods: Map[String, Module], ds: DocSrc }
+
+fn lk_of(cm: CheckedMod, mods: Map[String, Module], ds: DocSrc) -> Lk =
+  Lk { sc: LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }, mods: mods, ds: ds }
+
+## The links of `doc`, whose first line is line `first` of its module, as a
+## `links` array right after the doc, one entry per distinct link text in the
+## order first written. A doc with no links writes no key, so every object
+## whose doc links nothing is the bytes it was before links existed. A link
+## that resolves to nothing goes to `w.errs` instead.
+fn w_links(w: W, lk: Lk, doc: Option[String], first: Int) -> W = {
+  let d = match doc {
+    Some(t) -> t
+    None -> return w
+  }
+  var w1 = w
+  var found: List[(String, LinkTarget)] = []
+  var texts: List[String] = []
+  for l in doc_links(d) {
+    match resolve_link(lk.sc, lk.mods, l.text) {
+      Ok(t) ->
+        if not list.contains(texts, l.text) {
+          texts = texts ++ [l.text]
+          found = found ++ [(l.text, t)]
+        }
+      Err(why) -> {
+        let at = "${lk.sc.path}:${first + l.line}"
+        w1 = W { ..w1, errs: w1.errs ++ ["${at}: doc link [`${l.text}`] does not resolve: ${why}"] }
+      }
+    }
+  }
+  if len(found) == 0 { return w1 }
+  w1 = w_key(w1, "links")
+  w1 = open_arr(w1)
+  for pr in found {
+    let (text, t) = pr
+    w1 = open_obj(w1)
+    w1 = w_field(w1, "text", text)
+    w1 = w_key(w1, "target")
+    w1 = open_obj(w1)
+    w1 = w_field(w1, "module", t.module)
+    w1 = w_field(w1, "name", t.name)
+    w1 = w_field(w1, "kind", t.kind)
+    w1 = close_obj(w1)
+    w1 = close_obj(w1)
+  }
+  close_arr(w1, true)
+}
+
+## A declaration's doc, read from the declaration starting at `lo`, written
+## as `doc` (null when there is none) and then its `links`.
+fn w_doc(w: W, lk: Lk, d: Option[String], lo: Int) -> W = {
+  let first = match d {
+    Some(t) -> doc_first_line(lk.ds, lo, t)
+    None -> 0
+  }
+  w_links(w_field_opt(w, "doc", d), lk, d, first)
+}
+
+## `w_doc` for a member found by name: `los` holds its declaration's `lo`, or
+## nothing when the parse tree has no such member.
+fn w_member_doc(w: W, lk: Lk, d: Option[String], los: List[Int]) -> W =
+  w_doc(w, lk, d, unwrap_or(get(los, 0), 0))
+
 fn w_done(w: W) -> String = {
   var s = join(w.parts, "")
   while str.starts_with(s, "\n") { s = str.drop(s, 1) }
@@ -144,7 +242,7 @@ fn adt_by_name(adts: Adts, owner: String, name: String) -> Option[AdtI] = {
 ## The trait's methods as the checker registered them, each with the `##`
 ## block above its declaration: `decls` is the parse tree's `(name, lo)` per
 ## method, matched by name because the checker's record carries no span.
-fn trait_methods_json(w: W, cx: Cx, owner: String, name: String, decls: List[(String, Int)], ds: DocSrc) -> W = {
+fn trait_methods_json(w: W, cx: Cx, owner: String, name: String, decls: List[(String, Int)], lk: Lk) -> W = {
   var w1 = w_key(w, "methods")
   w1 = open_arr(w1)
   var any = false
@@ -162,7 +260,8 @@ fn trait_methods_json(w: W, cx: Cx, owner: String, name: String, decls: List[(St
         w1 = w_field(w1, "name", mname)
         w1 = w_field(w1, "sig", sig_render(cx.adts, cx.traits, ms.sig))
         w1 = w_field_bool(w1, "hasDefault", ms.has_default)
-        w1 = w_field_opt(w1, "doc", member_doc(ds, los_named(decls, mname)))
+        let los = los_named(decls, mname)
+        w1 = w_member_doc(w1, lk, member_doc(lk.ds, los), los)
         w1 = close_obj(w1)
       }
     }
@@ -198,13 +297,14 @@ fn owned_doc(ds: DocSrc, owner_lo: Int, los: List[Int]) -> Option[String] =
     None -> None
   }
 
-fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
+fn module_json(w: W, cm: CheckedMod, lk: Lk) -> W = {
+  let ds = lk.ds
   var w1 = open_obj(w)
   w1 = w_field(w1, "path", cm.mod_path)
   # written only when the module has one, so a project of files that open with
   # a plain `#` header emits exactly the bytes it did before module docs existed
   match module_doc_of(ds, cm.m) {
-    Some(d) -> { w1 = w_field(w1, "doc", d) }
+    Some(d) -> { w1 = w_links(w_field(w1, "doc", d), lk, Some(d), 1) }
     None -> ()
   }
   w1 = w_key(w1, "fns")
@@ -220,7 +320,7 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
         None -> fd.name
       }
       w1 = w_field(w1, "sig", sig)
-      w1 = w_field_opt(w1, "doc", doc_of(ds, fd.lo))
+      w1 = w_doc(w1, lk, doc_of(ds, fd.lo), fd.lo)
       w1 = close_obj(w1)
     }
   }
@@ -258,7 +358,7 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
               w1 = open_obj(w1)
               w1 = w_field(w1, "name", f.name)
               w1 = w_field(w1, "type", ty_show(cm.cx.adts, f.ty))
-              w1 = w_field_opt(w1, "doc", owned_doc(ds, flo, flos))
+              w1 = w_member_doc(w1, lk, owned_doc(ds, flo, flos), flos)
               w1 = close_obj(w1)
             }
             w1 = close_arr(w1, len(c.fields) > 0)
@@ -266,14 +366,14 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
               Some(d) -> [d.lo]
               None -> []
             }
-            w1 = w_field_opt(w1, "doc", owned_doc(ds, td.lo, clos))
+            w1 = w_member_doc(w1, lk, owned_doc(ds, td.lo, clos), clos)
             w1 = close_obj(w1)
           }
         }
         None -> ()
       }
       w1 = close_arr(w1, cany)
-      w1 = w_field_opt(w1, "doc", doc_of(ds, td.lo))
+      w1 = w_doc(w1, lk, doc_of(ds, td.lo), td.lo)
       w1 = close_obj(w1)
     }
   }
@@ -291,7 +391,7 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
         None -> ""
       }
       w1 = w_field(w1, "type", ty)
-      w1 = w_field_opt(w1, "doc", doc_of(ds, cd.lo))
+      w1 = w_doc(w1, lk, doc_of(ds, cd.lo), cd.lo)
       w1 = close_obj(w1)
     }
   }
@@ -310,7 +410,7 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
       for ad in td.assoc {
         w1 = open_obj(w1)
         w1 = w_field(w1, "name", ad.name)
-        w1 = w_field_opt(w1, "doc", doc_of(ds, ad.lo))
+        w1 = w_doc(w1, lk, doc_of(ds, ad.lo), ad.lo)
         w1 = close_obj(w1)
       }
       w1 = close_arr(w1, len(td.assoc) > 0)
@@ -332,13 +432,13 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
             }
             None -> ()
           }
-          w1 = w_field_opt(w1, "doc", doc_of(ds, ad.lo))
+          w1 = w_doc(w1, lk, doc_of(ds, ad.lo), ad.lo)
           w1 = close_obj(w1)
         }
         w1 = close_arr(w1, true)
       }
-      w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name, map(td.methods, m => (m.name, m.lo)), ds)
-      w1 = w_field_opt(w1, "doc", doc_of(ds, td.lo))
+      w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name, map(td.methods, m => (m.name, m.lo)), lk)
+      w1 = w_doc(w1, lk, doc_of(ds, td.lo), td.lo)
       w1 = close_obj(w1)
     }
   }
@@ -364,11 +464,11 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
           None -> op.name
         }
         w1 = w_field(w1, "sig", sig)
-        w1 = w_field_opt(w1, "doc", doc_of(ds, op.lo))
+        w1 = w_doc(w1, lk, doc_of(ds, op.lo), op.lo)
         w1 = close_obj(w1)
       }
       w1 = close_arr(w1, len(ed.ops) > 0)
-      w1 = w_field_opt(w1, "doc", doc_of(ds, ed.lo))
+      w1 = w_doc(w1, lk, doc_of(ds, ed.lo), ed.lo)
       w1 = close_obj(w1)
     }
   }
@@ -389,7 +489,21 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
   close_obj(w1)
 }
 
-pub(pkg) fn project_json(prog: Program) -> String !Fs = {
+## Every std module's parse tree by module path: where a link into std lands.
+fn std_modules(std: StdCtx) -> Map[String, Module] = {
+  var mods: Map[String, Module] = map.empty()
+  for tr in std.srcs {
+    let (mp, _, m) = tr
+    mods = map.insert(mods, mp, m)
+  }
+  mods
+}
+
+## A project's pub API. `std` is the library the project was checked against,
+## which a link in the project's docs may land in.
+pub(pkg) fn project_json(prog: Program, std: StdCtx) -> DocOut !Fs = {
+  var mods = std_modules(std)
+  for cm in prog.modules { mods = map.insert(mods, cm.mod_path, cm.m) }
   var w = w_new()
   w = open_obj(w)
   w = w_key(w, "modules")
@@ -399,11 +513,11 @@ pub(pkg) fn project_json(prog: Program) -> String !Fs = {
       Ok(t) -> t
       Err(e) -> panic("cannot re-read " ++ cm.path ++ ": " ++ e.message)
     }
-    w = module_json(w, cm, doc_src_of(text))
+    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)))
   }
   w = close_arr(w, len(prog.modules) > 0)
   w = close_obj(w)
-  w_done(w)
+  w_out(w)
 }
 
 # ---- builtin reference (Doc.kt BUILTIN_GROUPS, verbatim) ----
@@ -610,8 +724,9 @@ fn builtin_groups_json(w0: W, std: StdCtx, traits: Traits) -> W = {
   w
 }
 
-pub(pkg) fn builtins_json(std: StdCtx) -> String = {
+pub(pkg) fn builtins_json(std: StdCtx) -> DocOut = {
   let traits = prelude_traits()
+  let mods = std_modules(std)
   var w = w_new()
   w = open_obj(w)
   w = w_key(w, "types")
@@ -623,7 +738,7 @@ pub(pkg) fn builtins_json(std: StdCtx) -> String = {
   w = builtin_groups_json(w, std, traits)
   for i in range(0, len(std.srcs)) {
     let (mod_path, text, m) = std.srcs[i]
-    let (mp, cx, _tm, _ct) = std.mods[i]
+    let (mp, cx, tm, ct) = std.mods[i]
     # the two lists are filled in the same loop, in the same order (see
     # stdlib_json); if that ever stops being true the reference would render
     # one module's signatures against another's tables
@@ -637,6 +752,7 @@ pub(pkg) fn builtins_json(std: StdCtx) -> String = {
     # lists them teaches an API nobody may write, so they stay out of it.
     if list.contains(internal_std_modules(), mod_path) { continue }
     let ds = doc_src_of(text)
+    let lk = lk_of(std_checked_mod(mp, cx, tm, ct, m), mods, ds)
     let exp = match map.get(std.exports, mod_path) {
       Some(e) -> e
       None -> panic("std module without exports: ${mod_path}")
@@ -656,7 +772,7 @@ pub(pkg) fn builtins_json(std: StdCtx) -> String = {
         w = open_obj(w)
         w = w_field(w, "name", fd.name)
         w = w_field(w, "sig", sig_render(std.adts, mtraits, sig))
-        w = w_field(w, "doc", unwrap_or(doc_of(ds, fd.lo), ""))
+        w = w_str_doc(w, lk, doc_of(ds, fd.lo), fd.lo)
         w = close_obj(w)
       }
     }
@@ -681,11 +797,11 @@ pub(pkg) fn builtins_json(std: StdCtx) -> String = {
           w = open_obj(w)
           w = w_field(w, "name", op.name)
           w = w_field(w, "sig", sig_render(std.adts, mtraits, sig))
-          w = w_field(w, "doc", unwrap_or(doc_of(ds, op.lo), ""))
+          w = w_str_doc(w, lk, doc_of(ds, op.lo), op.lo)
           w = close_obj(w)
         }
         w = close_arr(w, len(ed.ops) > 0)
-        w = w_field(w, "doc", unwrap_or(doc_of(ds, ed.lo), ""))
+        w = w_str_doc(w, lk, doc_of(ds, ed.lo), ed.lo)
         w = close_obj(w)
       }
     }
@@ -698,7 +814,16 @@ pub(pkg) fn builtins_json(std: StdCtx) -> String = {
   w = internal_builtins_json(w, std.adts, traits)
   w = close_arr(w, true)
   w = close_obj(w)
-  w_done(w)
+  w_out(w)
+}
+
+## `w_doc` in `--builtins`' shape, where a missing doc is "" rather than null.
+fn w_str_doc(w: W, lk: Lk, d: Option[String], lo: Int) -> W = {
+  let first = match d {
+    Some(t) -> doc_first_line(lk.ds, lo, t)
+    None -> 0
+  }
+  w_links(w_field(w, "doc", unwrap_or(d, "")), lk, d, first)
 }
 
 # ---- the standard library reference (`--stdlib`) ----
@@ -777,8 +902,9 @@ fn std_checked_mod(mp: String, cx: Cx, tm: TModule, ct: CtOut, m: Module) -> Che
 ## wants `sort` under lists, not under "builtin". What the split does carry is
 ## how a name is *written* — `groups` are visible with no `use`, `modules` are
 ## qualified — and that is a difference the reader has to know.
-pub(pkg) fn stdlib_json(std: StdCtx) -> String = {
+pub(pkg) fn stdlib_json(std: StdCtx) -> DocOut = {
   let traits = prelude_traits()
+  let mods = std_modules(std)
   var w = w_new()
   w = open_obj(w)
   w = w_key(w, "groups")
@@ -801,12 +927,19 @@ pub(pkg) fn stdlib_json(std: StdCtx) -> String = {
     if mp != sp { panic("std module lists out of step: " ++ mp ++ " vs " ++ sp) }
     if list.contains(internal_std_modules(), mp) { continue }
     any = true
-    w = module_json(w, std_checked_mod(mp, cx, tm, ct, m), doc_src_of(text))
+    let cm = std_checked_mod(mp, cx, tm, ct, m)
+    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)))
   }
   w = close_arr(w, any)
   w = close_obj(w)
-  w_done(w)
+  w_out(w)
 }
+
+fn ok_json(out: DocOut) -> String =
+  match out {
+    Ok(j) -> j
+    Err(es) -> panic("doc links that resolve to nothing:\n" ++ join(es, "\n"))
+  }
 
 test "the reference leaves out the representation modules" {
   # the real handler stays: `load_std("std")` names a relative directory, so
@@ -820,7 +953,7 @@ test "the reference leaves out the representation modules" {
       Ok(s) -> s
       Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
-    let j = builtins_json(std)
+    let j = ok_json(builtins_json(std))
     for internal in internal_std_modules() {
       assert not str.contains(j, quote(internal))
     }
@@ -838,7 +971,7 @@ test "the standard library reference carries what --builtins cannot" {
       Ok(s) -> s
       Err(e) -> panic("std: ${std_load_error_text(e)}")
     }
-    let j = stdlib_json(std)
+    let j = ok_json(stdlib_json(std))
     # the prelude's own names, unqualified
     assert str.contains(j, quote("catch_fault"))
     # the prelude traits and their methods, which live in no module at all
@@ -905,7 +1038,7 @@ test "a pub type's constructors and fields, and a pub trait's methods, carry the
     ], "\n")
     let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
-    let j = w_done(module_json(w_new(), prog.modules[0], doc_src_of(text)))
+    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text))))
     let want = join([
       "{",
       "  \"path\": \"main\",",
@@ -1010,5 +1143,170 @@ test "a pub type's constructors and fields, and a pub trait's methods, carry the
     ], "\n")
     if j != want { println(j) }
     assert j == want
+  }))
+}
+
+## The links of one standalone module's docs, `text -> module|name|kind`, or
+## its broken-link lines.
+fn probe_links(std: StdCtx, text: String) -> Result[List[String], List[String]] !Fs !Env !io = {
+  let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
+  if len(prog.diags) > 0 { panic("the probe does not check: ${prog.diags[0].d.msg}") }
+  let cm = prog.modules[0]
+  var mods = std_modules(std)
+  mods = map.insert(mods, cm.mod_path, cm.m)
+  let ds = doc_src_of(text)
+  let lk = lk_of(cm, mods, ds)
+  var w = w_new()
+  var out: List[String] = []
+  for fd in module_fns(cm.m) {
+    match doc_of(ds, fd.lo) {
+      Some(d) -> {
+        w = w_doc(w, lk, Some(d), fd.lo)
+        for l in doc_links(d) {
+          match resolve_link(lk.sc, mods, l.text) {
+            Ok(t) -> { out = out ++ ["${l.text} -> ${t.module}|${t.name}|${t.kind}"] }
+            Err(_) -> ()
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  if len(w.errs) > 0 { Err(w.errs) } else { Ok(out) }
+}
+
+test "a doc link resolves in its module's scope, to a declaration and its kind" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "use std/list",
+      "use std/str.{trim}",
+      "use std/bytes.{Utf8Error as Bad}",
+      "",
+      "## [`list`] [`list.map`] [`trim`] [`Bad`] [`Bad.offset`] [`main.helper`] [`helper`]",
+      "## [`Shape`] [`Circle`] [`Shape.Circle`] [`Shape.r`] [`LIMIT`]",
+      "## [`Size`] [`Size.size`] [`size`] [`Ask`] [`ask`] [`Ask.ask`]",
+      "## [`sort`] [`println`] [`Option`] [`Some`] [`Option.Some`] [`Ord`] [`Ord.cmp`] [`cmp`] [`Int`]",
+      "pub fn helper(xs: List[Int]) -> List[Int] = if trim(\" \") == \"\" { list.take(xs, 1) } else { xs }",
+      "",
+      "pub type Shape = Circle(r: Float) | Dot",
+      "",
+      "pub const LIMIT: Int = 3",
+      "",
+      "pub trait Size[T] {",
+      "  fn size(t: T) -> Int",
+      "}",
+      "",
+      "pub effect Ask {",
+      "  fn ask() -> Int",
+      "}",
+      "",
+      "fn cut(c: Bad) -> Bad = c",
+      ""
+    ], "\n")
+    let got = match probe_links(std, text) {
+      Ok(ls) -> ls
+      Err(es) -> panic(join(es, "\n"))
+    }
+    assert got == [
+      "list -> std/list||module",
+      "list.map -> std/list|map|fn",
+      "trim -> std/str|trim|fn",
+      "Bad -> std/bytes|Utf8Error|type",
+      "Bad.offset -> std/bytes|Utf8Error.offset|field",
+      "main.helper -> main|helper|fn",
+      "helper -> main|helper|fn",
+      "Shape -> main|Shape|type",
+      "Circle -> main|Shape.Circle|ctor",
+      "Shape.Circle -> main|Shape.Circle|ctor",
+      "Shape.r -> main|Shape.r|field",
+      "LIMIT -> main|LIMIT|const",
+      "Size -> main|Size|trait",
+      "Size.size -> main|Size.size|method",
+      "size -> main|Size.size|method",
+      "Ask -> main|Ask|effect",
+      "ask -> main|Ask.ask|op",
+      "Ask.ask -> main|Ask.ask|op",
+      "sort -> |sort|fn",
+      "println -> |println|fn",
+      "Option -> |Option|type",
+      "Some -> |Option.Some|ctor",
+      "Option.Some -> |Option.Some|ctor",
+      "Ord -> |Ord|trait",
+      "Ord.cmp -> |Ord.cmp|method",
+      "cmp -> |Ord.cmp|method",
+      "Int -> |Int|type"
+    ]
+  }))
+}
+
+test "a doc link that resolves to nothing names its module, line and reason" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "use std/list",
+      "use std/str.{trim}",
+      "",
+      "## Fine: [`list.map`].",
+      "## [`str.trim`] [`list.nope`] [`nope`]",
+      "## [`a == b`] [`Shape.nope`] [`list.Cursor.at`] `[not a link]` [`x`](https://example.org)",
+      "pub fn helper(xs: List[Int]) -> List[Int] = if trim(\" \") == \"\" { list.take(xs, 1) } else { xs }",
+      "",
+      "pub type Shape = Dot",
+      ""
+    ], "\n")
+    assert probe_links(std, text) == Err([
+      "main:5: doc link [`str.trim`] does not resolve: `str` is not a module this module imports",
+      "main:5: doc link [`list.nope`] does not resolve: module `std/list` declares no `nope`",
+      "main:5: doc link [`nope`] does not resolve: nothing in this module's scope is called `nope`",
+      "main:6: doc link [`a == b`] does not resolve: it is not a name or a dotted path of names",
+      "main:6: doc link [`Shape.nope`] does not resolve: type `Shape` has no constructor or field `nope` this module can see",
+      "main:6: doc link [`list.Cursor.at`] does not resolve: module `std/list` declares no `Cursor`"
+    ])
+  }))
+}
+
+test "a link through a module alias sees only what that module exports" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    # std/str has private helpers; a caller cannot name them, so neither can a link
+    let private = match get(filter(module_fns(std_module(std, "std/str")), f => f.vis != VisPub), 0) {
+      Some(f) -> f.name
+      None -> panic("std/str has no private function to probe with")
+    }
+    let text = "use std/str\n\n## [`str.${private}`]\npub fn f() -> Int = str.len(\"\")\n"
+    assert probe_links(std, text) == Err([
+      "main:3: doc link [`str.${private}`] does not resolve: module `std/str` does not export `${private}` to this module"
+    ])
+  }))
+}
+
+fn std_module(std: StdCtx, mp: String) -> Module = {
+  for tr in std.srcs {
+    let (p, _, m) = tr
+    if p == mp { return m }
+  }
+  panic("no std module ${mp}")
+}
+
+test "a doc without links writes the bytes it wrote before links existed" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(s) -> s
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = "## Plain `code`, [brackets] and [a link](https://example.org).\npub fn f() -> Int = 1\n"
+    let prog = analyze_standalone("<doc-test>", text, std, ct_default(), jsig_refused())
+    let j = w_done(module_json(w_new(), prog.modules[0], lk_of(prog.modules[0], std_modules(std), doc_src_of(text))))
+    assert not str.contains(j, "\"links\"")
   }))
 }

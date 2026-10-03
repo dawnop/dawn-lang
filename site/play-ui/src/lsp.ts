@@ -790,12 +790,19 @@ export function hoverParts(contents: unknown): HoverParts {
   return { code: fenced[1], doc: docText(rest) }
 }
 
-/** The doc as plain text: fence lines and horizontal rules go, the rest stays. */
+/**
+ * The doc as plain text: fence lines and horizontal rules go, and a Markdown
+ * link keeps its label and loses its target. The server turns a doc's
+ * [`name`] links into `file://` links to the declaration
+ * (docs/lsp-hover-design.md §A5), which name paths on the Playground's
+ * server: nothing a browser tab can open, and not something to show.
+ */
 function docText(markdown: string): string {
   return markdown
     .split('\n')
     .filter((line) => !/^\s*```/.test(line) && !/^\s*-{3,}\s*$/.test(line))
     .join('\n')
+    .replace(/\[(`[^`\n]+`)\]\([^)\s]*\)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }

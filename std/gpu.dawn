@@ -1,7 +1,7 @@
-## The host side of a GPU: a `Gpu` effect whose operations a handler answers,
+## The host side of a GPU: a [`Gpu`] effect whose operations a handler answers,
 ## typed tensors over it, a fake device that answers every operation from
 ## host memory so a `!Gpu` program runs on a machine with no GPU at all, and
-## the real device, `with_gpu_real`, which answers the same operations from
+## the real device, [`with_gpu_real`], which answers the same operations from
 ## the CUDA driver through the native runtime. The device side (kernels,
 ## Tile IR) is not here; see docs/tile-backend-design.md.
 #
@@ -35,11 +35,11 @@ use std/narrow
 
 ## Marker types for element formats: values with no content, passed where a
 ## function needs to know the format of a tensor it is about to create.
-## `Dtype` is implemented for each; nothing else is. A marker names a format
+## [`Dtype`] is implemented for each; nothing else is. A marker names a format
 ## a buffer holds; the values a program moves in and out are `Float` under
-## every format (`upload` / `download`), so a marker is not std/narrow's
-## value type of the same name (`narrow.BF16` is a number, `gpu.BF16` is a
-## label), the way `gpu.F32` was never `narrow.F32`.
+## every format ([`upload`] / [`download`]), so a marker is not std/narrow's
+## value type of the same name ([`narrow.BF16`] is a number, [`gpu.BF16`] is a
+## label), the way [`gpu.F32`] was never [`narrow.F32`].
 pub type F64 = F64
 
 ## The 32-bit float format. Neither handler moves it in this release, so a
@@ -47,32 +47,32 @@ pub type F64 = F64
 pub type F32 = F32
 
 ## The bfloat16 format: two bytes an element. A buffer of it holds bf16
-## values; `upload` rounds each Float to the nearest one (ties to even, the
-## conversion a device's own load would perform) and `download` answers each
+## values; [`upload`] rounds each Float to the nearest one (ties to even, the
+## conversion a device's own load would perform) and [`download`] answers each
 ## exactly, as a Float. The device's `addf` over bf16 tiles is then
-## `narrow.round_bf16` of the exact sum, bit for bit (tile-backend-design
+## [`narrow.round_bf16`] of the exact sum, bit for bit (tile-backend-design
 ## 3.2's theorem), which is what the fake device computes.
 pub type BF16 = BF16
 
 ## The 32-bit signed integer format: four bytes an element. A buffer of it
-## holds two's-complement i32 values; `upload` truncates each Float toward
-## zero and wraps it into the range (`round_to`), and `download` answers each
+## holds two's-complement i32 values; [`upload`] truncates each Float toward
+## zero and wraps it into the range ([`round_to`]), and [`download`] answers each
 ## exactly, as a Float.
 ##
 ## The `List[Float]` channel is LOSSLESS for this format. A binary64
 ## significand holds 53 bits, and every i32 (and every u32) value fits in
-## fewer, so a value crosses `upload` / `download` unrounded and the fake
+## fewer, so a value crosses [`upload`] / [`download`] unrounded and the fake
 ## device's buffer holds exactly what the real device's does. That is not
 ## true of `bf16`, and it is why an integer kernel can be held to the bit
 ## without a word about tolerance.
 pub type I32 = I32
 
 ## The IEEE binary16 format: two bytes an element. A buffer of it holds
-## binary16 values; `upload` rounds each Float to the nearest one (ties to
-## even) and `download` answers each exactly. The bf16 story with binary16's
+## binary16 values; [`upload`] rounds each Float to the nearest one (ties to
+## even) and [`download`] answers each exactly. The bf16 story with binary16's
 ## widths, including the double-rounding theorem: the device's `addf` over
 ## an f16 tile with `rounding<nearest_even>` is bit for bit
-## `narrow.round_fp16` of the exact sum, which is what the fake device
+## [`narrow.round_fp16`] of the exact sum, which is what the fake device
 ## computes. `mmaf` is NOT covered by it -- the theorem is about one
 ## operation, and a matrix multiply sums over K in an order the dialect
 ## does not specify -- so an f16 GEMM is a tolerance claim and an f16 `addf`
@@ -80,23 +80,23 @@ pub type I32 = I32
 pub type F16 = F16
 
 ## The 8-bit signed integer format: one byte an element, holding a
-## two's-complement value in [-128, 127]. `upload` truncates each Float
-## toward zero and wraps it into that range, `download` answers each
+## two's-complement value in [-128, 127]. [`upload`] truncates each Float
+## toward zero and wraps it into that range, [`download`] answers each
 ## exactly. This is the format `mmai`'s operands are.
 pub type I8 = I8
 
 ## The 8-bit UNSIGNED integer format: one byte an element, holding a value
-## in [0, 255]. The BYTES are `I8`'s bytes -- a buffer of either format is a
+## in [0, 255]. The BYTES are [`I8`]'s bytes -- a buffer of either format is a
 ## run of octets and the runtime copies them without knowing which -- and
 ## the difference is entirely in what a Float means on the way in and out:
-## `upload` wraps into [0, 255] and `download` reads the octet unsigned, so
-## 200 crosses as 200 here and as -56 under `I8`.
+## [`upload`] wraps into [0, 255] and [`download`] reads the octet unsigned, so
+## 200 crosses as 200 here and as -56 under [`I8`].
 ##
 ## There is no `u8` TILE: the dialect's 8-bit integer type is `i8` and its
 ## signedness is an attribute of an operation, not of a type. A kernel over
 ## a `Tensor[U8]` therefore declares its parameter `Param[I8]` and widens
 ## with `exti` (unsigned), which reads the octet as [0, 255]; the pairing is
-## the host's, and `launch` takes handles rather than typed tensors, so
+## the host's, and [`launch`] takes handles rather than typed tensors, so
 ## nothing has to be told twice.
 pub type U8 = U8
 
@@ -110,10 +110,10 @@ pub type U8 = U8
 # at three.
 
 ## The 16-bit signed integer format: two bytes an element, holding a
-## two's-complement value in [-32768, 32767]. `upload` truncates each Float
-## toward zero and wraps it into that range, `download` answers each
+## two's-complement value in [-32768, 32767]. [`upload`] truncates each Float
+## toward zero and wraps it into that range, [`download`] answers each
 ## exactly. The `List[Float]` channel is lossless for it, as it is for
-## `I32`, so an i16 kernel is a bit-exact claim and the wrap at 2^15 is part
+## [`I32`], so an i16 kernel is a bit-exact claim and the wrap at 2^15 is part
 ## of what is being claimed.
 pub type I16 = I16
 
@@ -124,13 +124,13 @@ pub type I16 = I16
 ## stay inside +/-2^52 for the host to say anything bit-exact about it, and
 ## the wrap at 2^63 has no evidence here at all. That is a corpus's debt and
 ## it is named where the corpus is (scripts/tile-gpu-diff/dtype_diff.dawn),
-## not paid by widening the channel: `upload` and `download` traffic in
+## not paid by widening the channel: [`upload`] and [`download`] traffic in
 ## Float under every format and changing that is a different knife.
 pub type I64 = I64
 
 ## TensorFloat-32: binary32's eight exponent bits with ten significand bits
 ## instead of twenty-three, in a 32-bit slot whose bottom thirteen bits are
-## zero (`narrow.tf32_bits`). Four bytes an element, and `upload` rounds
+## zero ([`narrow.tf32_bits`]). Four bytes an element, and [`upload`] rounds
 ## each Float to the nearest one.
 ##
 ## It is the input format of the tensor cores rather than a format
@@ -142,7 +142,7 @@ pub type TF32 = TF32
 
 ## The OCP fp8 format with four exponent bits and three significand bits,
 ## and no infinity: one byte an element, values up to 448, and the two
-## all-ones encodings are its only NaNs (`narrow.round_f8e4m3fn` says what
+## all-ones encodings are its only NaNs ([`narrow.round_f8e4m3fn`] says what
 ## an overflow answers and why that answer is a choice).
 pub type F8E4M3FN = F8E4M3FN
 
@@ -176,9 +176,9 @@ pub type F8E8M0FNU = F8E8M0FNU
 ## `pack` / `unpack` lay a tile down the same way). A two's-complement
 ## value in [-8, 7].
 ##
-## `dtype_bytes` answers 1 for it, which is the ONE place in this trait
+## [`dtype_bytes`] answers 1 for it, which is the ONE place in this trait
 ## where the number is not the element's own width: it is the byte two of
-## them share. `element_bits` is the width, and it is what `pack` and
+## them share. [`element_bits`] is the width, and it is what `pack` and
 ## `unpack` compute their shapes from.
 pub type I4 = I4
 
@@ -188,7 +188,7 @@ pub type I4 = I4
 ## two NaN encodings). Sixteen encodings and sixteen values: +/-0, +/-0.5,
 ## +/-1, +/-1.5, +/-2, +/-3, +/-4, +/-6.
 ##
-## `narrow.round_f4e2m1` is the host reading of a conversion into it and
+## [`narrow.round_f4e2m1`] is the host reading of a conversion into it and
 ## records which of its answers are choices rather than measurements.
 pub type F4E2M1FN = F4E2M1FN
 
@@ -280,7 +280,7 @@ impl Dtype[F4E2M1FN] {
 ## (8), `i32` and `tf32` (4), `bf16`, `f16` and `i16` (2), `i8`, `u8`,
 ## `f8E4M3FN`, `f8E5M2` and `f8E8M0FNU` (1). `f32` is not among them, nor
 ## are the sub-byte tile formats `i4` and `f4E2M1FN`. Both handlers consult
-## this and nothing else to accept a `gpu_alloc`, so they refuse the same
+## this and nothing else to accept a [`gpu_alloc`], so they refuse the same
 ## formats with `gpu.unsupported_dtype`.
 pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
   "f64" -> Some(8)
@@ -299,13 +299,13 @@ pub fn element_bytes(dtype: String) -> Option[Int] = match dtype {
 }
 
 ## The BITS one element of the named format occupies, or `None` for a name
-## this release does not know. Every format `element_bytes` accepts answers
+## this release does not know. Every format [`element_bytes`] accepts answers
 ## eight times what it answers; the two that answer here and not there are
 ## the sub-byte ones, `i4` and `f4E2M1FN`, which are tile formats and never
 ## buffer formats.
 ##
-## The two functions are therefore not one function twice. `element_bytes`
-## says what `gpu_alloc` will hand out and `element_bits` says how wide a
+## The two functions are therefore not one function twice. [`element_bytes`]
+## says what [`gpu_alloc`] will hand out and `element_bits` says how wide a
 ## lane is, and `pack` / `unpack` are the operations that need the second
 ## one: they scale a rank-1 tile's lane count by the ratio of two widths,
 ## and half a byte is a ratio the first function cannot express.
@@ -331,7 +331,7 @@ pub fn element_bits(dtype: String) -> Option[Int] = match dtype {
 ##
 ## The `i32` arm is the whole of what "a 32-bit buffer holds" means here:
 ## `to_int` truncates toward zero (spec: `to_int(-2.7) == -2`, which is the
-## dialect's own `nearest_int_to_zero`), and `wrap_i32` is the two's
+## dialect's own `nearest_int_to_zero`), and [`wrap_i32`] is the two's
 ## complement wrap the device's `addi` and `muli` perform. A reference that
 ## truncated without wrapping would disagree with the device on every sum
 ## that leaves the range, which is the case a corpus above 2^31 exists for.
@@ -362,7 +362,7 @@ pub fn wrap_i32(n: Int) -> Int = {
 }
 
 ## `n` as a two's-complement 16-bit signed integer: the low sixteen bits,
-## read as a signed value, in [-32768, 32767]. `wrap_i32`'s shape two octets
+## read as a signed value, in [-32768, 32767]. [`wrap_i32`]'s shape two octets
 ## wide, and what the device's `addi` and `muli` over an i16 tile do.
 pub fn wrap_i16(n: Int) -> Int = {
   let low = n & 0xFFFF
@@ -370,19 +370,19 @@ pub fn wrap_i16(n: Int) -> Int = {
 }
 
 ## `n` as a two's-complement 8-bit SIGNED integer: the low eight bits read
-## as a signed value, in [-128, 127]. `wrap_i32`'s shape one octet wide.
+## as a signed value, in [-128, 127]. [`wrap_i32`]'s shape one octet wide.
 pub fn wrap_i8(n: Int) -> Int = {
   let low = n & 0xFF
   if low >= 0x80 { low - 0x100 } else { low }
 }
 
 ## `n` as an 8-bit UNSIGNED integer: the low eight bits, in [0, 255]. The
-## same octet `wrap_i8` answers, read the other way: `wrap_u8(-56)` is 200
+## same octet [`wrap_i8`] answers, read the other way: `wrap_u8(-56)` is 200
 ## and `wrap_i8(200)` is -56.
 pub fn wrap_u8(n: Int) -> Int = n & 0xFF
 
 ## `n` as a two's-complement 4-bit SIGNED integer: the low nibble read as a
-## value in [-8, 7]. `wrap_i32`'s shape at half an octet, and what the
+## value in [-8, 7]. [`wrap_i32`]'s shape at half an octet, and what the
 ## device's `trunc_i4` leaves behind.
 pub fn wrap_i4(n: Int) -> Int = {
   let low = n & 0xF
@@ -419,7 +419,7 @@ fn nibble_shift(k: Int) -> Int = 4 * k
 pub fn nibble_at(w: Int, k: Int) -> Int = (w >>> nibble_shift(k)) & 0xF
 
 ## `w` with its `k`th 4-bit lane set to the low nibble of `v`; the lane is
-## assumed clear, so this is the inverse of `nibble_at` when a word is
+## assumed clear, so this is the inverse of [`nibble_at`] when a word is
 ## built up from zero.
 pub fn nibble_into(w: Int, k: Int, v: Int) -> Int = w | ((v & 0xF) << nibble_shift(k))
 
@@ -439,7 +439,7 @@ pub fn nibble_word(f: fn(Int) -> Int) -> Float = {
 
 ## `xs` as the bytes a bf16 buffer holds: each value rounded to the nearest
 ## bfloat16, then its 16-bit pattern, low byte first. The rounding is this
-## function's: `narrow.bf16_bits` truncates a value off the grid, and a
+## function's: [`narrow.bf16_bits`] truncates a value off the grid, and a
 ## truncating upload would put a different number on the device than the
 ## fake device holds.
 pub fn pack_bf16(xs: List[Float]) -> Bytes = {
@@ -459,7 +459,7 @@ pub fn unpack_bf16(b: Bytes) -> List[Float] =
 # ---- the i32 wire format ----
 
 ## `xs` as the bytes an i32 buffer holds: each value truncated toward zero
-## and wrapped into the 32-bit range (`round_to`'s `i32` arm), then its
+## and wrapped into the 32-bit range ([`round_to`]'s `i32` arm), then its
 ## 32-bit two's-complement pattern, low byte first. The little-endian order
 ## is the device's, so the runtime copies bytes and knows nothing about the
 ## format, exactly as it does for `bf16`.
@@ -484,13 +484,13 @@ pub fn unpack_i32(b: Bytes) -> List[Float] =
 
 ## `xs` as the bytes an f16 buffer holds: each value rounded to the nearest
 ## IEEE binary16, then its 16-bit pattern, low byte first. The rounding is
-## this function's, for `pack_bf16`'s reason: `narrow.fp16_bits` truncates a
+## this function's, for [`pack_bf16`]'s reason: [`narrow.fp16_bits`] truncates a
 ## value off the grid, and a truncating upload would put a different number
 ## on the device than the fake device holds.
 ##
-## The one line that separates this from `pack_bf16` is the codec it calls.
-## Getting that line wrong is invisible to `round_to` (which rounds through
-## `narrow.round_fp16` either way) and shows only on the device, which is
+## The one line that separates this from [`pack_bf16`] is the codec it calls.
+## Getting that line wrong is invisible to [`round_to`] (which rounds through
+## [`narrow.round_fp16`] either way) and shows only on the device, which is
 ## what scripts/tile-gpu-diff's f16-rounds-like-bf16 is for.
 pub fn pack_f16(xs: List[Float]) -> Bytes = {
   var b = bytes.buf()
@@ -576,7 +576,7 @@ pub fn unpack_i16(b: Bytes) -> List[Float] =
 ## `List[Float]` and a binary64 significand does not reach the top of an
 ## i64. `to_int` of a Float above 2^53 is some value, and nothing here can
 ## tell which of the neighbouring integers was meant. A caller that wants
-## bit-exactness owes a corpus inside +/-2^52; `TF32`'s and `I64`'s doc
+## bit-exactness owes a corpus inside +/-2^52; [`TF32`]'s and [`I64`]'s doc
 ## comments say so and scripts/tile-gpu-diff/dtype_diff.dawn is where the
 ## debt is paid.
 pub fn pack_i64(xs: List[Float]) -> Bytes = {
@@ -675,7 +675,7 @@ pub fn unpack_f8e8m0(b: Bytes) -> List[Float] =
 ## a type error and not a launch failure.
 pub opaque type Tensor[D] = (Int, Int)
 
-## The handle a handler issued for `t`, as `launch` wants it.
+## The handle a handler issued for `t`, as [`launch`] wants it.
 pub fn handle_of[D](t: Tensor[D]) -> Int = {
   let p: (Int, Int) = t
   let (h, _n) = p
@@ -768,7 +768,7 @@ pub fn launch3(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Re
     gpu_launch(kernel, gx, gy, gz, args)
   }
 
-## `launch3` over a one-dimensional grid: `gy` and `gz` are 1, so a kernel
+## [`launch3`] over a one-dimensional grid: `gy` and `gz` are 1, so a kernel
 ## that only reads `block_id(0)` sees the grid it always did.
 pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, ForeignError] !Gpu =
   launch3(kernel, grid, 1, 1, args)
@@ -783,10 +783,10 @@ pub fn launch(kernel: String, grid: Int, args: List[Int]) -> Result[Unit, Foreig
 ## from the fake device). That is the whole observable difference between
 ## the two symbol visibilities, and it is the reason this operation exists.
 ##
-## The tensor SHARES the module's storage: `upload` writes what the next
-## launch reads and `download` reads what the last one wrote. Two lookups of
+## The tensor SHARES the module's storage: [`upload`] writes what the next
+## launch reads and [`download`] reads what the last one wrote. Two lookups of
 ## one symbol answer the SAME handle, so a program cannot hold two aliases
-## of one global and see them disagree, and `free` on that handle is
+## of one global and see them disagree, and [`free`] on that handle is
 ## ACCEPTED AND DOES NOTHING: the memory belongs to the module and the
 ## handle to the installation, so it is still the handle the next lookup
 ## answers.
@@ -815,7 +815,7 @@ pub fn sync() -> Result[Unit, ForeignError] !Gpu = gpu_sync()
 ## Element-wise addition of the first two arguments, each sum rounded to
 ## the format of the last (the output): the host-side reference for the
 ## `vadd` kernels of every format, and the first entry of
-## `reference_kernels`. `dtypes` is the format of each argument buffer in
+## [`reference_kernels`]. `dtypes` is the format of each argument buffer in
 ## order, as the fake device passes it; the device's `addf` rounds its
 ## result to the tile's format, and so does this.
 pub fn vadd_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
@@ -872,7 +872,7 @@ pub alias WideRefFn = fn(List[String], List[List[Float]]) -> List[(Int, List[Flo
 ## nowhere else.
 pub fn last_out(f: RefFn) -> WideRefFn = (dts, ins) => [(len(ins) - 1, f(dts, ins))]
 
-## The reference implementations the fake device answers `launch` with, by
+## The reference implementations the fake device answers [`launch`] with, by
 ## kernel name. Each entry carries the exact number of buffers the device
 ## kernel takes beside its body: three for `vadd` / `vadd_bf16` (two inputs
 ## and one output), two for `sum` (one input and one output). Every other
@@ -920,32 +920,32 @@ fn bad_global_size(who: String, name: String, nbytes: Int, dtype: String, width:
 
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is its format and a `List[Float]`
-## holding values of that format, and the formats are `element_bytes`'s
+## holding values of that format, and the formats are [`element_bytes`]'s
 ## (`gpu.unsupported_dtype` otherwise); a handle that was never issued or
-## was freed answers `gpu.no_such_buffer`. `gpu_launch` looks `kernel` up in
+## was freed answers `gpu.no_such_buffer`. [`gpu_launch`] looks `kernel` up in
 ## `kernels`, hands the reference implementation the format and the contents
 ## of every argument buffer in order, and stores each `(position, contents)`
-## pair it returns (`WideRefFn`) as the contents of the argument at that
+## pair it returns ([`WideRefFn`]) as the contents of the argument at that
 ## position; a position outside the arguments answers `gpu.bad_write_back`
 ## and nothing is written. Every input is read before any write-back, so an
-## in-place kernel sees what its loads would. A `RefFn` that answers only
-## the last argument is wrapped with `last_out`. Before the body is called,
+## in-place kernel sees what its loads would. A [`RefFn`] that answers only
+## the last argument is wrapped with [`last_out`]. Before the body is called,
 ## its entry's arity must equal the number of buffers (`gpu.bad_arity`
 ## otherwise); the grid is not consulted, a reference implementation
 ## computes the whole buffer at once; an unknown name answers
 ## `gpu.no_kernel`. A buffer holds what memory of its format would: what
-## `gpu_upload` stores and what a launch writes is rounded to the buffer's
-## format (`round_to`), which for `f64` is the data as given. The length
-## check is `upload`'s, above the operation, and is the same code under
+## [`gpu_upload`] stores and what a launch writes is rounded to the buffer's
+## format ([`round_to`]), which for `f64` is the data as given. The length
+## check is [`upload`]'s, above the operation, and is the same code under
 ## every handler.
 ##
-## `gpu_module_global` answers from `globals`, and a name that is not in
+## [`gpu_module_global`] answers from `globals`, and a name that is not in
 ## that kernel's list is `gpu.no_module_symbol`: a fake device's list holds
 ## the globals a module EXPORTS, which is the same set a driver's symbol
 ## lookup can see, so a `private` global is left out of it exactly as it is
 ## left out of a cubin's exported symbols. The handle it answers is an
 ## ordinary buffer of this store holding the global's declared contents, so
-## `upload` and `download` reach it the way they reach any other; the
+## [`upload`] and [`download`] reach it the way they reach any other; the
 ## element FORMAT it is asked for must be the one the declaration used
 ## (`gpu.bad_global_dtype` otherwise), because this store holds values and
 ## not bytes and cannot reinterpret one format's storage as another's. A
@@ -956,11 +956,11 @@ fn bad_global_size(who: String, name: String, nbytes: Int, dtype: String, width:
 pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T !Gpu) -> T =
   with_gpu_fake_globals(kernels, map.empty(), body)
 
-## `with_gpu_fake` over a device whose modules also declare STATIC GLOBALS.
+## [`with_gpu_fake`] over a device whose modules also declare STATIC GLOBALS.
 ## `globals` maps a kernel name to the globals its module exports, each a
 ## symbol name, an element format and the contents its declaration gives
 ## them, in declaration order. A kernel with no entry exports none, which is
-## what `with_gpu_fake` installs.
+## what [`with_gpu_fake`] installs.
 pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
   globals: Map[String, List[(String, String, List[Float])]],
   body: fn() -> T !Gpu) -> T = {
@@ -1101,14 +1101,14 @@ pub fn with_gpu_fake_globals[T](kernels: Map[String, (Int, WideRefFn)],
 # ---- the real device ----
 
 ## `xs` as the bytes a buffer of the named format holds, through that
-## format's packer: `pack_bf16`, `pack_f16`, `pack_tf32`, `pack_f8e4m3fn`,
-## `pack_f8e5m2`, `pack_f8e8m0`, `pack_i32`, `pack_i16`, `pack_i64`,
-## `pack_i8` or `pack_u8`, one for each format `element_bytes` accepts
+## format's packer: [`pack_bf16`], [`pack_f16`], [`pack_tf32`], [`pack_f8e4m3fn`],
+## [`pack_f8e5m2`], [`pack_f8e8m0`], [`pack_i32`], [`pack_i16`], [`pack_i64`],
+## [`pack_i8`] or [`pack_u8`], one for each format [`element_bytes`] accepts
 ## except `f64`, and any other name panics. `f64` is not here, and the
 ## caller must not ask: an f64 buffer crosses as an `Array[Float]` the
 ## runtime copies double for double, and there is no byte packing for it.
 ##
-## The pairing with `unpack_from` is what makes a format's round trip a
+## The pairing with [`unpack_from`] is what makes a format's round trip a
 ## property of one line rather than of the handler; the handler asks by
 ## name and never spells a format twice.
 pub fn pack_to(dtype: String, xs: List[Float]) -> Bytes = match dtype {
@@ -1127,7 +1127,7 @@ pub fn pack_to(dtype: String, xs: List[Float]) -> Bytes = match dtype {
 }
 
 ## The values a buffer of the named format holds, from its bytes: the
-## inverse of `pack_to` on every value the format can hold.
+## inverse of [`pack_to`] on every value the format can hold.
 pub fn unpack_from(dtype: String, b: Bytes) -> List[Float] = match dtype {
   "bf16" -> unpack_bf16(b)
   "f16" -> unpack_f16(b)
@@ -1174,24 +1174,24 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## Run `body` against the machine's GPU through the CUDA driver. `kernels`
 ## maps a kernel name to the cubin that defines an entry of that name (the
 ## `tileiras` output for one `packages/tileir` program), the way
-## `with_gpu_fake`'s table maps a name to a reference implementation.
+## [`with_gpu_fake`]'s table maps a name to a reference implementation.
 ##
 ## Handles are the same currency as the fake device's: they count up from 1
 ## per installation, a buffer is `(device pointer, element count, format)`
 ## in a table the handler owns, and a handle never issued or already freed
-## answers `gpu.no_such_buffer` before the device is asked. `gpu_alloc`
-## accepts the formats `element_bytes` knows, and answers
+## answers `gpu.no_such_buffer` before the device is asked. [`gpu_alloc`]
+## accepts the formats [`element_bytes`] knows, and answers
 ## `gpu.unsupported_dtype` otherwise, as the fake device does. An f64 buffer
 ## crosses to the runtime as an `Array[Float]` the runtime copies double for
-## double; EVERY OTHER format crosses as `Bytes`, packed here (`pack_to`)
-## and unpacked here (`unpack_from`), so the runtime copies bytes and knows
+## double; EVERY OTHER format crosses as `Bytes`, packed here ([`pack_to`])
+## and unpacked here ([`unpack_from`]), so the runtime copies bytes and knows
 ## nothing about the format. Six of those packings ROUND (`bf16`, `f16`,
 ## `tf32`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`); four are exact in both
 ## directions for the values the format holds (`i32`, `i16`, `i8`, `u8`,
-## each truncating and wrapping on the way in as `round_to` does); and
+## each truncating and wrapping on the way in as [`round_to`] does); and
 ## `i64` is exact only within +/-2^53, since the `List[Float]` channel cannot
 ## carry the top of its range.
-## `gpu_launch` looks the name up first (`gpu.no_kernel`), then the
+## [`gpu_launch`] looks the name up first (`gpu.no_kernel`), then the
 ## arguments (`gpu.no_arguments`, `gpu.no_such_buffer`), and only then
 ## touches the device: the cubin is handed to the driver the first time its
 ## kernel is launched and the module handle is kept for the rest of the
@@ -1200,11 +1200,11 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Arra
 ## (1, 1, 1) and no shared memory, which is how a Tile IR kernel is
 ## launched.
 ##
-## `gpu_module_global` loads that kernel's module the same way (so a lookup
+## [`gpu_module_global`] loads that kernel's module the same way (so a lookup
 ## on a program that never launches loads it, and a launch afterwards reuses
 ## it) and asks the driver for the symbol: `cuModuleGetGlobal` answers a
 ## device address and a byte size, and the handle registered over them is a
-## borrowed one. `gpu_free` on it does nothing and leaves both the handle
+## borrowed one. [`gpu_free`] on it does nothing and leaves both the handle
 ## and the storage alone, since the memory belongs to the module and goes
 ## when the context does; every other operation treats it as any other
 ## buffer. A symbol the

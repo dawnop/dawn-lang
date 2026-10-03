@@ -1,8 +1,8 @@
 ## The outside world: console, files, environment and subprocesses.
-## The file system is the named effect `Fs`, running another program is
-## `Proc` and the process environment is `Env`, each with a production handler
+## The file system is the named effect [`Fs`], running another program is
+## [`Proc`] and the process environment is [`Env`], each with a production handler
 ## `with_*_real`. The console and ending the process are `!io` today; the
-## effects that will carry them, `Console` and `Exit`, are declared below and
+## effects that will carry them, [`Console`] and [`Exit`], are declared below and
 ## their consumers are a release away. Everything that can fail answers
 ## `Result[T, ForeignError]` (spec §9.8.1).
 #
@@ -52,7 +52,7 @@ pub fn eprint(s: String) -> Unit !io = io_eprint(s)
 ## End the process with an exit status. Nothing after the call runs.
 ##
 ## The result remains `Unit`, as it was when the body was `io_exit` directly:
-## `exit_now` answers `Never`, and `Never` is under every type, so the public
+## [`exit_now`] answers `Never`, and `Never` is under every type, so the public
 ## contract this function had before the operation existed is the one it still
 ## has. What changed is the row -- a caller now owes `!Exit`, and somebody above
 ## it has to say what ending the process means.
@@ -89,7 +89,7 @@ pub fn cwd() -> String !Env = env_cwd()
 ## cannot be represented by the host environment API, including an embedded NUL.
 pub fn getenv(name: String) -> Option[String] !Env = env_get(name)
 
-## Read a whole file as bytes. The text half is `read_file`.
+## Read a whole file as bytes. The text half is [`read_file`].
 pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !Fs = fs_read_bytes(path)
 
 ## Write bytes to a file, creating missing parent directories.
@@ -97,7 +97,7 @@ pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !
   fs_write_bytes(path, content)
 
 ## The two normal outcomes of deleting a path. Host failures are not outcomes:
-## they stay in `delete`'s `Err` branch.
+## they stay in [`delete`]'s `Err` branch.
 pub type DeleteOutcome = Deleted | NotFound
 
 ## Delete a file or an empty directory. A missing path is `Ok(NotFound)`;
@@ -130,7 +130,7 @@ pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !Fs =
 ## Move `src` onto `dst`, replacing it. Atomic when the two are on one
 ## filesystem and an error when they are not -- which is the whole point: the
 ## caller is publishing something it has already verified, and a move that can
-## be observed half-done would defeat that. Stage with `temp_dir` under the
+## be observed half-done would defeat that. Stage with [`temp_dir`] under the
 ## destination's own directory to stay on one filesystem.
 pub fn rename(src: String, dst: String) -> Result[Unit, ForeignError] !Fs = fs_rename(src, dst)
 
@@ -174,10 +174,10 @@ pub fn is_symlink(path: String) -> Bool !Fs = fs_is_symlink(path)
 ##
 ## `path` has to be absolute and has to exist. A relative one is
 ## `"io.relative_path"`, another failure kind std mints itself, and for
-## `list_dir`'s reason: the check happens first, so it never reaches a backend
+## [`list_dir`]'s reason: the check happens first, so it never reaches a backend
 ## and every backend words it the same. It is refused rather than resolved
-## because resolving it would read the working directory, which is `Env`'s
-## answer and not `Fs`'s; a caller that wants a relative path resolved joins
+## because resolving it would read the working directory, which is [`Env`]'s
+## answer and not [`Fs`]'s; a caller that wants a relative path resolved joins
 ## it to `cwd()` itself and owes `!Env` where it does. A path that does not
 ## exist, or that the host cannot spell (an embedded NUL), is the `Err` the
 ## backend raised.
@@ -195,12 +195,12 @@ pub fn real_path(path: String) -> Result[String, ForeignError] !Fs =
 ## Write `content` to `path` so that a reader ever only sees the old file or
 ## the new one, never a half-written one and never nothing at all.
 ##
-## The staging file is created by `temp_file` in the destination's own
+## The staging file is created by [`temp_file`] in the destination's own
 ## directory -- the host picks its name, so nothing can be squatting on it, and
-## the shared directory is what keeps the final `rename` on one filesystem and
+## the shared directory is what keeps the final [`rename`] on one filesystem and
 ## therefore atomic. What is written is read back and compared before anything
 ## is published, the destination's permissions are carried over when it already
-## exists, and only then does a single `rename` install it. Any step that fails
+## exists, and only then does a single [`rename`] install it. Any step that fails
 ## takes the staging file away and leaves the destination exactly as it was.
 ##
 ## What this does **not** promise:
@@ -210,7 +210,7 @@ pub fn real_path(path: String) -> Result[String, ForeignError] !Fs =
 ##   can observe on a running system, which is what a manifest rewrite needs;
 ##   surviving a crash is a different (and much more expensive) property.
 ## - **Anything about concurrent writers.** Two of these racing both succeed
-##   and the last `rename` wins. Detecting that someone else changed the file
+##   and the last [`rename`] wins. Detecting that someone else changed the file
 ##   since it was read is a compare-and-set, and that is a different primitive
 ##   with a different signature.
 ## - **Link identity.** A destination with other hard links to it is detached:
@@ -338,7 +338,7 @@ fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
 ## Exactly `n` bytes of standard input, shorter only at end of input -- so a
 ## short read is how end of input is reported.
 ##
-## This reads the stream directly while `read_line` reads a buffered reader
+## This reads the stream directly while [`read_line`] reads a buffered reader
 ## over it. A program that used both would lose whatever the reader had already
 ## buffered; pick one.
 pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
@@ -348,7 +348,7 @@ pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
 ##
 ## **End of input is not readiness.** When the writer has gone away this
 ## answers `false`, exactly as a silent-but-open stream does; the difference
-## is reported by `read_stdin`, which stays the only reader. A loop driven by
+## is reported by [`read_stdin`], which stays the only reader. A loop driven by
 ## this alone would therefore spin once its input ended -- the third branch is
 ## not optional:
 ##
@@ -370,11 +370,11 @@ pub fn stdin_ready(timeout_ms: Int) -> Bool !io = io_stdin_ready(timeout_ms)
 ## file give the same message.
 ##
 ## The sort happens here, not in the backends: the `io_list_names` intrinsic
-## answers whatever order the OS gave, and one `list.sort` over the language's
+## answers whatever order the OS gave, and one [`list.sort`] over the language's
 ## own `Ord[String]` is what makes every backend agree.
 ##
 ## Its `kind` is `"io.not_a_directory"`, one of the three failure kinds std
-## mints itself (`run`'s `io.no_program` and `delete`'s
+## mints itself ([`run`]'s `io.no_program` and [`delete`]'s
 ## `io.invalid_delete_path` are the others): every other one in this module is
 ## whatever the backend called it, and this failure never reaches a backend,
 ## because the check happens first. It is spelled as a name rather than a
@@ -402,7 +402,7 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !Fs =
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
 ##
 ## An empty `argv` is `"io.no_program"`, another failure kind std mints itself,
-## and for `list_dir`'s reason: the check happens first, so the failure never
+## and for [`list_dir`]'s reason: the check happens first, so the failure never
 ## reaches a backend and every backend words it the same.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !Proc =
   if len(argv) == 0 {
@@ -443,7 +443,7 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 
 ## The file system, as operations a handler answers. Names carry an `fs_`
 ## prefix because `use std/io.{Fs}` brings every operation into the importing
-## module's own namespace (spec §6.5), where `mkdirs` or `read_bytes` is a
+## module's own namespace (spec §6.5), where [`mkdirs`] or [`read_bytes`] is a
 ## name a module may well have taken for a helper of its own.
 ##
 ## The Bool queries answer `false` for whatever the host cannot spell, as
@@ -475,7 +475,7 @@ pub effect Fs {
 ##
 ## This is the production handler: a program's `main` (or the innermost
 ## boundary that owns a whole unit of file work) installs it once, and
-## everything beneath sees `Fs`. A test installs arms of its own instead.
+## everything beneath sees [`Fs`]. A test installs arms of its own instead.
 pub fn with_fs_real[T, !e](body: fn() -> T !Fs !e) -> T !io = {
   with handle Fs {
     fs_is_dir(path) => io_is_dir(path)
@@ -542,9 +542,9 @@ pub fn with_fs_real[T, !e](body: fn() -> T !Fs !e) -> T !io = {
 ## Running another program, as the one operation a handler answers. The name
 ## carries a `proc_` prefix for the reason the `fs_` ones do: `use
 ## std/io.{Proc}` brings the operation into the importing module's own
-## namespace (spec §6.5), where `run` is a name a module may well have taken.
+## namespace (spec §6.5), where [`run`] is a name a module may well have taken.
 ##
-## The arguments are `run`'s, and so is the answer: an exit status for a child
+## The arguments are [`run`]'s, and so is the answer: an exit status for a child
 ## that ran, an `Err` for one that could not be started. Nothing here declares
 ## effects of its own (spec §6.5); what an arm does is charged where the
 ## handler is installed.
@@ -553,10 +553,10 @@ pub effect Proc {
 }
 
 ## Run `body` against real processes. The arm is the host primitive behind
-## `run`, through the barrier that sits inside `run` today.
+## [`run`], through the barrier that sits inside [`run`] today.
 ##
 ## This is the production handler: a program installs it at the boundary that
-## owns a whole unit of work, and everything beneath sees `Proc`. A test
+## owns a whole unit of work, and everything beneath sees [`Proc`]. A test
 ## installs an arm of its own instead.
 pub fn with_proc_real[T, !e](body: fn() -> T !Proc !e) -> T !io = {
   with handle Proc {
@@ -606,7 +606,7 @@ pub fn with_proc_real[T, !e](body: fn() -> T !Proc !e) -> T !io = {
 ## The process environment, as the two operations a handler answers. The names
 ## carry an `env_` prefix for the reason the `fs_` and `proc_` ones do: `use
 ## std/io.{Env}` brings every operation into the importing module's own
-## namespace (spec §6.5), where `cwd` and `get` are names a module may well
+## namespace (spec §6.5), where [`cwd`] and `get` are names a module may well
 ## have taken for something of its own.
 ##
 ## `env_get` answers `None` for a name the host has no value for and for one
@@ -623,7 +623,7 @@ pub effect Env {
 ##
 ## This is the production handler: a program installs it at the boundary that
 ## owns a whole unit of work, innermost of the three this module offers, and
-## everything beneath sees `Env`. A test installs arms of its own instead.
+## everything beneath sees [`Env`]. A test installs arms of its own instead.
 pub fn with_env_real[T, !e](body: fn() -> T !Env !e) -> T !io = {
   with handle Env {
     env_cwd() => io_cwd()
@@ -689,11 +689,11 @@ pub ctl effect Exit {
 }
 
 ## Run `body` on a host that can really end this process. The arm calls the
-## exit primitive and never resumes, so nothing after a call to `exit_now`
+## exit primitive and never resumes, so nothing after a call to [`exit_now`]
 ## runs, here or anywhere below.
 ##
 ## This is the production handler: a program installs it at the boundary that
-## owns a whole unit of work, and everything beneath sees `Exit`. A test
+## owns a whole unit of work, and everything beneath sees [`Exit`]. A test
 ## installs an arm that answers the status as a value instead, and the test
 ## process goes on running.
 pub fn with_exit_real[T, !e](body: fn() -> T !Exit !e) -> T !io = {
@@ -786,7 +786,7 @@ pub effect Console {
 ## the `io.*` function of the same meaning.
 ##
 ## This is the production handler: a program installs it at the boundary that
-## owns a whole unit of work, and everything beneath sees `Console`. A test
+## owns a whole unit of work, and everything beneath sees [`Console`]. A test
 ## installs arms of its own instead, and can then say what a program printed
 ## and which stream it went to.
 pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {

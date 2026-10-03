@@ -14,6 +14,7 @@
 
 use std/str
 use std/map
+use std/set
 use std/io
 use std/io.{Fs}
 use json/parser.{parse}
@@ -135,45 +136,134 @@ fn slug(path: String) -> String = str.replace(path, "/", "-")
 ##
 ## An unparsable doc comment is a hard error, like every other Markdown this
 ## generator reads: the site build is the lint.
-fn prose(docs: List[String], text: String) -> String =
+fn prose(pg: Pg, text: String, links: List[Json]) -> String =
   if str.trim(text) == "" {
     ""
   } else {
     match parser.parse(text) {
-      Ok(bs) -> render_doc(bs, u => map_doc_url(".", docs, u)).html
+      Ok(bs) -> linked(pg, render_doc(bs, u => map_doc_url(".", pg.docs, u)).html, links)
       Err(e) -> panic("a doc comment is not Markdown: ${e}\n---\n${text}")
     }
   }
 
+## The prose of an object `dawn doc` wrote: its `doc` and its `links`.
+fn doc_prose(pg: Pg, j: Json) -> String = prose(pg, field(j, "doc"), jarr(jget(j, "links")))
+
+## What rendering any doc on the page needs: the `docs/` files a doc may link
+## to, and every anchor the page carries, which a `[`name`]` link lands on.
+type Pg = { docs: List[String], anchors: Set[String] }
+
+fn pg_of(docs: List[String], api: Json) -> Pg =
+  Pg { docs: docs, anchors: set.from(map(api_rows(api), r => r.anchor)) }
+
+# ---- doc links (spec §1.2) ----
+#
+# `dawn doc` has already resolved every `[`name`]` in a doc, and refused to
+# answer over one that resolves to nothing; what is left here is where on this
+# page each target is. The Markdown renderer does not know the spelling -- to
+# it `[`x`]` is a bracket, a code span and a bracket -- so the rendered
+# `[<code>x</code>]` is rewritten afterwards. A link-shaped text inside a
+# fenced example renders inside `<pre>` with its backticks and is left alone.
+
+## The id on this page a link's target is anchored at, by the same rules
+## [api_rows] uses: a member (constructor, field, method, operation, associated
+## member) lands on its owner's entry. None for a prelude name the page has no
+## entry for: a builtin type, or `Option` and its constructors.
+fn link_anchor(t: Json) -> Option[String] = {
+  let module = field(t, "module")
+  let name = field(t, "name")
+  let kind = field(t, "kind")
+  let owner = str.split(name, ".")[0]
+  if module == "" {
+    return match kind {
+      "fn" -> Some("p-${name}")
+      "trait" -> Some("prelude-trait-${name}")
+      "method" -> Some("prelude-trait-${owner}")
+      "assoc" -> Some("prelude-trait-${owner}")
+      _ -> None
+    }
+  }
+  let base = slug(module)
+  match kind {
+    "module" -> Some("m-${base}")
+    "type" -> Some("${base}-type-${name}")
+    "ctor" -> Some("${base}-type-${owner}")
+    "field" -> Some("${base}-type-${owner}")
+    "trait" -> Some("${base}-trait-${name}")
+    "method" -> Some("${base}-trait-${owner}")
+    "assoc" -> Some("${base}-trait-${owner}")
+    "effect" -> Some("${base}-effect-${name}")
+    "op" -> Some("${base}-effect-${owner}")
+    _ -> Some("${base}-${name}")
+  }
+}
+
+## `html` with each of `links` turned into a link to its entry. A target whose
+## anchor this page does not carry is a std doc pointing at something the
+## reference leaves out (a private helper, an internal module), which is a
+## broken link on the page as surely as a misspelled one, so the build stops.
+## A prelude name with no entry at all keeps its code span and loses the
+## brackets.
+fn linked(pg: Pg, html: String, links: List[Json]) -> String = {
+  var out = html
+  for l in links {
+    let text = field(l, "text")
+    let code = "<code>" ++ escape_html(text) ++ "</code>"
+    let to = match link_anchor(jget(l, "target")) {
+      Some(a) ->
+        if set.has(pg.anchors, a) {
+          """<a href="#${a}">""" ++ code ++ "</a>"
+        } else {
+          panic("a doc links [`${text}`] to #${a}, which the standard library page does not carry")
+        }
+      None -> code
+    }
+    out = str.replace(out, "[" ++ code ++ "]", to)
+  }
+  out
+}
+
+## A doc's text with its links' brackets taken off, for a reader that does
+## not render Markdown links (the search index's one-line note).
+fn unlinked(j: Json) -> String = {
+  var text = field(j, "doc")
+  for l in jarr(jget(j, "links")) {
+    let t = field(l, "text")
+    text = str.replace(text, "[`${t}`]", "`${t}`")
+  }
+  text
+}
+
 ## One documented entry: its qualified spelling as the anchor, the declaration
 ## exactly as the compiler renders it, then the prose, then its members' docs.
 fn entry(
-  docs: List[String],
+  pg: Pg,
   title: String,
   id: String,
   sig: String,
-  doc: String,
-  members: List[(String, String)]
+  doc: Json,
+  members: List[(String, Json)]
 ) -> String =
   """<div class="api-item" id="${id}">""" ++ "\n" ++
   """<h3 class="api-name"><a href="#${id}">""" ++ escape_html(title) ++ "</a></h3>\n" ++
   """<pre class="dawn api-sig"><code>""" ++ highlight_dawn(sig) ++ "</code></pre>\n" ++
-  """<div class="api-doc">""" ++ "\n" ++ prose(docs, doc) ++ "</div>\n" ++
-  members_html(docs, members) ++ "</div>"
+  """<div class="api-doc">""" ++ "\n" ++ doc_prose(pg, doc) ++ "</div>\n" ++
+  members_html(pg, members) ++ "</div>"
 
 ## The members of an entry that have a doc of their own, each under its
-## declaration as the entry's signature spells it: `(label, doc)` pairs from
-## [member_docs]. A member without one is already in the signature above and
-## gets no row, so an entry with no member docs renders what it always did.
-fn members_html(docs: List[String], members: List[(String, String)]) -> String =
+## declaration as the entry's signature spells it: `(label, member)` pairs
+## from [member_docs], the member being the object `dawn doc` wrote for it. A
+## member without one is already in the signature above and gets no row, so
+## an entry with no member docs renders what it always did.
+fn members_html(pg: Pg, members: List[(String, Json)]) -> String =
   if len(members) == 0 {
     ""
   } else {
     var rows: List[String] = []
     for pr in members {
-      let (label, doc) = pr
+      let (label, m) = pr
       rows = rows ++ ["<dt><code>" ++ highlight_dawn(label) ++ "</code></dt>\n<dd>\n"
-          ++ prose(docs, doc) ++ "</dd>\n"]
+          ++ doc_prose(pg, m) ++ "</dd>\n"]
     }
     """<dl class="api-members">""" ++ "\n" ++ join(rows, "") ++ "</dl>\n"
   }
@@ -181,17 +271,17 @@ fn members_html(docs: List[String], members: List[(String, String)]) -> String =
 ## The member rows worth a line: those with a doc of their own. A member on
 ## its owner's line has none (spec §1.2), so `dawn doc` writes null for it and
 ## nothing here has to tell a member's doc from its type's.
-fn member_docs(members: List[(String, String)]) -> List[(String, String)] =
+fn member_docs(members: List[(String, Json)]) -> List[(String, Json)] =
   filter(members, pr => {
-    let (_, doc) = pr
-    str.trim(doc) != ""
+    let (_, m) = pr
+    str.trim(field(m, "doc")) != ""
   })
 
 fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "${qual}.${name}" }
 
-fn fn_entry(docs: List[String], qual: String, id_base: String, f: Json) -> String =
-  entry(docs, qualify(qual, field(f, "name")), id_base ++ "-" ++ field(f, "name"),
-    field(f, "sig"), field(f, "doc"), [])
+fn fn_entry(pg: Pg, qual: String, id_base: String, f: Json) -> String =
+  entry(pg, qualify(qual, field(f, "name")), id_base ++ "-" ++ field(f, "name"),
+    field(f, "sig"), f, [])
 
 fn ctor_decl(c: Json) -> String = {
   let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
@@ -225,33 +315,32 @@ fn type_decl(t: Json) -> String = {
 ## `-type-` in the anchor, not just the name: `std/bytes` has both a `Buf`
 ## type and a `buf()` function, and ids that differ only in case are one
 ## careless lowercase away from colliding.
-fn type_entry(docs: List[String], id_base: String, t: Json) -> String =
-  entry(docs, field(t, "name"), id_base ++ "-type-" ++ field(t, "name"), type_decl(t),
-    field(t, "doc"), type_members(t))
+fn type_entry(pg: Pg, id_base: String, t: Json) -> String =
+  entry(pg, field(t, "name"), id_base ++ "-type-" ++ field(t, "name"), type_decl(t), t,
+    type_members(t))
 
 ## A type's constructor and field docs, in declaration order. A record's
 ## fields are spelled as the record spells them, a variant's as `Ctor.field`.
 ## A record's one constructor never has a doc: it starts on the `type` line.
-fn type_members(t: Json) -> List[(String, String)] = {
+fn type_members(t: Json) -> List[(String, Json)] = {
   let record = jbool(jget(t, "record"))
-  var out: List[(String, String)] = []
+  var out: List[(String, Json)] = []
   for c in jarr(jget(t, "ctors")) {
-    out = out ++ member_docs([(ctor_decl(c), field(c, "doc"))])
+    out = out ++ member_docs([(ctor_decl(c), c)])
     for f in jarr(jget(c, "fields")) {
       let fname = if record { field(f, "name") } else { field(c, "name") ++ "." ++ field(f, "name") }
-      out = out ++ member_docs([(fname ++ ": " ++ field(f, "type"), field(f, "doc"))])
+      out = out ++ member_docs([(fname ++ ": " ++ field(f, "type"), f)])
     }
   }
   out
 }
 
-fn const_entry(docs: List[String], qual: String, id_base: String, c: Json) -> String = {
+fn const_entry(pg: Pg, qual: String, id_base: String, c: Json) -> String = {
   let name = field(c, "name")
-  entry(docs, qualify(qual, name), "${id_base}-${name}", "const ${name}: " ++ field(c, "type"),
-    field(c, "doc"), [])
+  entry(pg, qualify(qual, name), "${id_base}-${name}", "const ${name}: " ++ field(c, "type"), c, [])
 }
 
-fn trait_entry(docs: List[String], id_base: String, t: Json) -> String = {
+fn trait_entry(pg: Pg, id_base: String, t: Json) -> String = {
   let name = field(t, "name")
   let tp = field(t, "typeParam")
   var body = ""
@@ -261,23 +350,22 @@ fn trait_entry(docs: List[String], id_base: String, t: Json) -> String = {
   for m in jarr(jget(t, "methods")) {
     body = body ++ "\n  " ++ field(m, "sig")
   }
-  let methods = map(jarr(jget(t, "methods")), m => (field(m, "sig"), field(m, "doc")))
-  entry(docs, name, "${id_base}-trait-${name}", "trait ${name}[${tp}] {${body}\n}", field(t, "doc"),
+  let methods = map(jarr(jget(t, "methods")), m => (field(m, "sig"), m))
+  entry(pg, name, "${id_base}-trait-${name}", "trait ${name}[${tp}] {${body}\n}", t,
     member_docs(methods))
 }
 
 ## Dead for every std module today — nothing there declares a `pub effect` yet
 ## — and here so that the day one appears it lands on the page instead of
 ## silently missing, which is the same reason `doc` emits the empty array.
-fn effect_entry(docs: List[String], id_base: String, e: Json) -> String = {
+fn effect_entry(pg: Pg, id_base: String, e: Json) -> String = {
   let name = field(e, "name")
   var body = ""
   for op in jarr(jget(e, "ops")) {
     body = body ++ "\n  " ++ field(op, "sig")
   }
-  let ops = map(jarr(jget(e, "ops")), op => (field(op, "sig"), field(op, "doc")))
-  entry(docs, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", field(e, "doc"),
-    member_docs(ops))
+  let ops = map(jarr(jget(e, "ops")), op => (field(op, "sig"), op))
+  entry(pg, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", e, member_docs(ops))
 }
 
 ## The impls a module registers. Coherence is program-wide — it does not ask
@@ -302,7 +390,7 @@ fn sub(id: String, title: String) -> String =
 
 # ---- the three generated sections ----
 
-fn prelude_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
+fn prelude_html(pg: Pg, root: Json) -> (String, List[TocEntry]) = {
   var html: List[String] = []
   var toc: List[TocEntry] = []
   for g in jarr(jget(root, "groups")) {
@@ -311,16 +399,16 @@ fn prelude_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
     toc = toc ++ [TocEntry { level: 3, id: gid, text: name }]
     html = html ++ [sub(gid, name)]
     for f in jarr(jget(g, "fns")) {
-      html = html ++ [fn_entry(docs, "", "p", f) ++ "\n"]
+      html = html ++ [fn_entry(pg, "", "p", f) ++ "\n"]
     }
   }
   (join(html, ""), toc)
 }
 
-fn traits_html(docs: List[String], root: Json) -> String = {
+fn traits_html(pg: Pg, root: Json) -> String = {
   var html: List[String] = []
   for t in jarr(jget(root, "traits")) {
-    html = html ++ [trait_entry(docs, "prelude", t) ++ "\n"]
+    html = html ++ [trait_entry(pg, "prelude", t) ++ "\n"]
   }
   join(html, "")
 }
@@ -362,7 +450,7 @@ fn fns_in_order(path: String, m: Json) -> (List[Json], List[Json]) = {
     filter(fns, f => is_reference_kernel(path, field(f, "name"))))
 }
 
-fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocEntry]) = {
+fn modules_html(c: Chrome, pg: Pg, root: Json) -> (String, List[TocEntry]) = {
   var html: List[String] = []
   var toc: List[TocEntry] = []
   for m in modules_in_order(root) {
@@ -371,22 +459,22 @@ fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocE
     # the call-site alias is the file's own name: `use std/str` binds `str`
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
     toc = toc ++ [TocEntry { level: 3, id: id, text: path }]
-    html = html ++ [sub(id, path) ++ prose(docs, field(m, "doc")) ++ impls_html(c, m)]
+    html = html ++ [sub(id, path) ++ doc_prose(pg, m) ++ impls_html(c, m)]
     for t in jarr(jget(m, "types")) {
-      html = html ++ [type_entry(docs, slug(path), t) ++ "\n"]
+      html = html ++ [type_entry(pg, slug(path), t) ++ "\n"]
     }
     for t in jarr(jget(m, "traits")) {
-      html = html ++ [trait_entry(docs, slug(path), t) ++ "\n"]
+      html = html ++ [trait_entry(pg, slug(path), t) ++ "\n"]
     }
     for c in jarr(jget(m, "consts")) {
-      html = html ++ [const_entry(docs, qual, slug(path), c) ++ "\n"]
+      html = html ++ [const_entry(pg, qual, slug(path), c) ++ "\n"]
     }
     for e in jarr(jget(m, "effects")) {
-      html = html ++ [effect_entry(docs, slug(path), e) ++ "\n"]
+      html = html ++ [effect_entry(pg, slug(path), e) ++ "\n"]
     }
     let (used, refs) = fns_in_order(path, m)
     for f in used {
-      html = html ++ [fn_entry(docs, qual, slug(path), f) ++ "\n"]
+      html = html ++ [fn_entry(pg, qual, slug(path), f) ++ "\n"]
     }
     if len(refs) > 0 {
       # Closed, and opened by site/assets/search.js when a search result or
@@ -394,7 +482,7 @@ fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocE
       html = html ++ [`<details class="api-refs">` ++ "\n<summary>" ++ c.refs_pre
           ++ "${len(refs)}" ++ c.refs_post ++ "</summary>\n"]
       for f in refs {
-        html = html ++ [fn_entry(docs, qual, slug(path), f) ++ "\n"]
+        html = html ++ [fn_entry(pg, qual, slug(path), f) ++ "\n"]
       }
       html = html ++ ["</details>\n"]
     }
@@ -435,7 +523,7 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     let name = field(g, "name")
     rows = rows ++ [api_row(name, "prelude group", "", "g-${name}")]
     for f in jarr(jget(g, "fns")) {
-      rows = rows ++ [api_row(field(f, "name"), field(f, "sig"), field(f, "doc"),
+      rows = rows ++ [api_row(field(f, "name"), field(f, "sig"), unlinked(f),
         "p-" ++ field(f, "name"))]
     }
   }
@@ -446,10 +534,10 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     let path = field(m, "path")
     let base = slug(path)
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
-    rows = rows ++ [api_row(path, "module", field(m, "doc"), "m-${base}")]
+    rows = rows ++ [api_row(path, "module", unlinked(m), "m-${base}")]
     for t in jarr(jget(m, "types")) {
       rows = rows
-        ++ [api_row(field(t, "name"), type_decl(t), field(t, "doc"),
+        ++ [api_row(field(t, "name"), type_decl(t), unlinked(t),
           "${base}-type-" ++ field(t, "name"))]
     }
     for t in jarr(jget(m, "traits")) {
@@ -458,19 +546,19 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     for c in jarr(jget(m, "consts")) {
       let name = field(c, "name")
       rows = rows
-        ++ [api_row(qualify(qual, name), "const ${name}: " ++ field(c, "type"), field(c, "doc"),
+        ++ [api_row(qualify(qual, name), "const ${name}: " ++ field(c, "type"), unlinked(c),
           "${base}-${name}")]
     }
     for e in jarr(jget(m, "effects")) {
       rows = rows
-        ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), field(e, "doc"),
+        ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), unlinked(e),
           "${base}-effect-" ++ field(e, "name"))]
     }
     let (used, refs) = fns_in_order(path, m)
     for f in used ++ refs {
       let name = field(f, "name")
       rows = rows
-        ++ [api_row(qualify(qual, name), field(f, "sig"), field(f, "doc"), "${base}-${name}")]
+        ++ [api_row(qualify(qual, name), field(f, "sig"), unlinked(f), "${base}-${name}")]
     }
   }
   rows
@@ -478,7 +566,7 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
 
 fn trait_row(base: String, t: Json) -> ApiRow = {
   let name = field(t, "name")
-  api_row(name, "trait ${name}[" ++ field(t, "typeParam") ++ "]", field(t, "doc"),
+  api_row(name, "trait ${name}[" ++ field(t, "typeParam") ++ "]", unlinked(t),
     "${base}-trait-${name}")
 }
 
@@ -513,6 +601,7 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       Err(e) -> panic("stdlib.json: " ++ error_text(e))
     }
   let docs = doc_files()
+  let pg = pg_of(docs, api)
   let mu = (u: String) => map_doc_url(root, docs, u)
   # The title and the opening paragraph go into the band above the page; the
   # rest of the intro opens the article.
@@ -527,11 +616,11 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       _ -> ("", parts.body)
     }
   let intro = render_doc(rest, mu)
-  let (pre, pre_toc) = prelude_html(docs, api)
-  let (mods, mod_toc) = modules_html(c, docs, api)
+  let (pre, pre_toc) = prelude_html(pg, api)
+  let (mods, mod_toc) = modules_html(c, pg, api)
   let body = intro.html ++
     section("prelude", c.prelude_title, c.prelude_intro, pre) ++
-    section("prelude-traits", c.traits_title, c.traits_intro, traits_html(docs, api)) ++
+    section("prelude-traits", c.traits_title, c.traits_intro, traits_html(pg, api)) ++
     section("modules", c.modules_title, c.modules_intro, mods)
   let toc = intro.toc ++
     [TocEntry { level: 2, id: "prelude", text: c.prelude_title }] ++ pre_toc ++
@@ -557,6 +646,16 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
 }
 
 fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))
+
+fn no_pg() -> Pg = Pg { docs: [], anchors: set.empty() }
+
+fn plain_prose(text: String) -> String = prose(no_pg(), text, [])
+
+fn member_labels(ms: List[(String, Json)]) -> List[(String, String)] =
+  map(ms, pr => {
+    let (label, m) = pr
+    (label, field(m, "doc"))
+  })
 
 test "each language's intro reads its own file and lands in its own place" {
   assert stdlib_source("d", En) == ("site/pages/stdlib.md", "d/stdlib.html", ".")
@@ -614,8 +713,8 @@ test "member docs render under their declarations, and a member without one gets
         ("fields", JArr([fld("r", "Float", JStr("The radius."))]))]),
       jobj([("name", JStr("Dot")), ("doc", JNull), ("fields", JArr([]))])
     ]))])
-  assert type_members(sum) == [("Circle(r: Float)", "A *round* one."), ("Circle.r: Float", "The radius.")]
-  let html = type_entry([], "std-x", sum)
+  assert member_labels(type_members(sum)) == [("Circle(r: Float)", "A *round* one."), ("Circle.r: Float", "The radius.")]
+  let html = type_entry(no_pg(), "std-x", sum)
   assert str.contains(html, `<dl class="api-members">`)
   assert str.contains(html, "<dd>\n<p>A <em>round</em> one.</p>\n</dd>")
   assert len(str.split(html, "<dt>")) == 3
@@ -625,34 +724,34 @@ test "member docs render under their declarations, and a member without one gets
     ("typeParams", JArr([])), ("doc", JStr("A pair.")),
     ("ctors", JArr([jobj([("name", JStr("P")), ("doc", JNull),
       ("fields", JArr([fld("a", "Int", JNull), fld("b", "Int", JStr("The second."))]))])]))])
-  assert type_members(rec) == [("b: Int", "The second.")]
+  assert member_labels(type_members(rec)) == [("b: Int", "The second.")]
   # none documented: the entry it always was
   let bare = jobj([("name", JStr("Q")), ("record", JBool(true)),
     ("typeParams", JArr([])), ("doc", JStr("A one.")),
     ("ctors", JArr([jobj([("name", JStr("Q")), ("doc", JNull),
       ("fields", JArr([fld("a", "Int", JNull)]))])]))])
-  assert not str.contains(type_entry([], "std-x", bare), "api-members")
+  assert not str.contains(type_entry(no_pg(), "std-x", bare), "api-members")
 
   # a trait's methods; none documented is the entry it always was
   let meth = (sig: String, d: Json) => jobj([("name", JStr("m")), ("sig", JStr(sig)), ("doc", d)])
   let tr = (ms: List[Json]) => jobj([("name", JStr("Tr")), ("typeParam", JStr("T")),
     ("assoc", JArr([])), ("methods", JArr(ms)), ("doc", JStr("A trait."))])
-  let with_doc = trait_entry([], "std-x", tr([meth("fn m(t: T) -> Int", JStr("Measures `t`.")),
+  let with_doc = trait_entry(no_pg(), "std-x", tr([meth("fn m(t: T) -> Int", JStr("Measures `t`.")),
     meth("fn n(t: T) -> Int", JNull)]))
   assert str.contains(with_doc, "<dd>\n<p>Measures <code>t</code>.</p>\n</dd>")
   assert len(str.split(with_doc, "<dt>")) == 2
-  let without = trait_entry([], "std-x", tr([meth("fn n(t: T) -> Int", JNull)]))
+  let without = trait_entry(no_pg(), "std-x", tr([meth("fn n(t: T) -> Int", JNull)]))
   assert not str.contains(without, "api-members")
   assert str.ends_with(without, "</div>\n</div>")
 }
 
 test "a doc comment is rendered as Markdown, not escaped whole" {
-  let html = prose([], "First line, `code` and *em*.\n\nA second paragraph.")
+  let html = plain_prose("First line, `code` and *em*.\n\nA second paragraph.")
   assert str.contains(html, "<code>code</code>")
   assert str.contains(html, "<em>em</em>")
   assert str.contains(html, "<p>A second paragraph.</p>")
   # an empty doc contributes nothing at all
-  assert prose([], "") == ""
+  assert plain_prose("") == ""
 }
 
 ## The anchors [api_rows] hands the search index have to be ids this page
@@ -667,9 +766,9 @@ test "a doc comment is rendered as Markdown, not escaped whole" {
 test "every index anchor is an id the page carries, and there are as many of each" {
   let api = probe_api()
   let rows = api_rows(api)
-  let (pre, _) = prelude_html([], api)
-  let (mods, _) = modules_html(chrome(En, "."), [], api)
-  let html = pre ++ traits_html([], api) ++ mods
+  let (pre, _) = prelude_html(no_pg(), api)
+  let (mods, _) = modules_html(chrome(En, "."), no_pg(), api)
+  let html = pre ++ traits_html(no_pg(), api) ++ mods
   for r in rows {
     assert str.contains(html, "id=\"" ++ r.anchor ++ "\"")
   }
@@ -711,7 +810,7 @@ test "std/gpu's reference kernels sit in a closed group, still anchored and inde
   let api = jobj([("groups", JArr([])), ("traits", JArr([])),
     ("modules", JArr([module_json("std/gpu", ["vadd_ref", "alloc", "sum_ref"]),
       module_json("std/str", ["trim_ref"])]))])
-  let (html, _) = modules_html(chrome(En, "."), [], api)
+  let (html, _) = modules_html(chrome(En, "."), no_pg(), api)
   # the function a caller uses comes first, outside the group
   let parts = str.split(html, `<details class="api-refs">`)
   assert len(parts) == 2
@@ -773,6 +872,51 @@ fn probe_api() -> Json =
 
 test "a marker comment never reaches the html, a stray < still escapes" {
   # end to end (parse then render): the two halves of the same rule
-  assert prose([], "状态：权威。<!-- doc-check: version -->") == "<p>状态：权威。</p>\n"
-  assert prose([], "a < b") == "<p>a &lt; b</p>\n"
+  assert plain_prose("状态：权威。<!-- doc-check: version -->") == "<p>状态：权威。</p>\n"
+  assert plain_prose("a < b") == "<p>a &lt; b</p>\n"
+}
+
+fn link_json(text: String, module: String, name: String, kind: String) -> Json =
+  jobj([("text", JStr(text)),
+    ("target", jobj([("module", JStr(module)), ("name", JStr(name)), ("kind", JStr(kind))]))])
+
+## Every kind of target lands on an id the page carries: the anchor rules
+## here and in [api_rows] are one set of rules, and a member lands on its
+## owner. Built from the same synthetic document as the anchor test above.
+test "a doc link lands on the entry that holds its target" {
+  let pg = pg_of([], probe_api())
+  let lands = (module: String, name: String, kind: String) =>
+    match link_anchor(jget(link_json(name, module, name, kind), "target")) {
+      Some(a) -> if set.has(pg.anchors, a) { a } else { "missing #" ++ a }
+      None -> "none"
+    }
+  assert lands("std/str", "", "module") == "m-std-str"
+  assert lands("std/str", "trim", "fn") == "std-str-trim"
+  assert lands("std/str", "WIDTH", "const") == "std-str-WIDTH"
+  assert lands("std/str", "Case", "type") == "std-str-type-Case"
+  assert lands("std/str", "Case.Upper", "ctor") == "std-str-type-Case"
+  assert lands("std/str", "Case.width", "field") == "std-str-type-Case"
+  assert lands("std/str", "Split", "trait") == "std-str-trait-Split"
+  assert lands("std/str", "Split.split", "method") == "std-str-trait-Split"
+  assert lands("std/str", "Ask", "effect") == "std-str-effect-Ask"
+  assert lands("std/str", "Ask.ask", "op") == "std-str-effect-Ask"
+  assert lands("", "println", "fn") == "p-println"
+  assert lands("", "Show", "trait") == "prelude-trait-Show"
+  assert lands("", "Show.show", "method") == "prelude-trait-Show"
+  # a prelude type has no entry on this page
+  assert lands("", "Int", "type") == "none"
+  assert lands("", "Option.Some", "ctor") == "none"
+}
+
+test "a doc's links render as links to their entries, and nothing else moves" {
+  let pg = pg_of([], probe_api())
+  let doc = jobj([("doc", JStr("Like [`str.trim`], not [`Int`]; `[x]` and\n\n```\n[`str.trim`]\n```")),
+    ("links", JArr([link_json("str.trim", "std/str", "trim", "fn"), link_json("Int", "", "Int", "type")]))])
+  let html = doc_prose(pg, doc)
+  assert str.contains(html, `Like <a href="#std-str-trim"><code>str.trim</code></a>, not <code>Int</code>;`)
+  # a code span is still a code span, and the fenced example keeps its text
+  assert str.contains(html, "<code>[x]</code>")
+  assert str.contains(html, "[`str.trim`]")
+  # the search index's note reads the names without the brackets
+  assert unlinked(doc) == "Like `str.trim`, not `Int`; `[x]` and\n\n```\n`str.trim`\n```"
 }
