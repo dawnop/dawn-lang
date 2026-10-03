@@ -7,6 +7,7 @@
 #   ./scripts/selfhost-core-diff.sh --base <rev>       # <rev> vs HEAD
 #   ./scripts/selfhost-core-diff.sh --base A --head B  # A vs B
 #   ./scripts/selfhost-core-diff.sh --out <dir> ...    # keep both dumps and the full diff
+#   ./scripts/selfhost-core-diff.sh --raw ...          # compare without the site normalisation
 #
 # Exit 0: no module's Core differs. Exit 1: some did, and they are listed.
 # Exit 2: the comparison could not be made.
@@ -63,9 +64,22 @@
 # #401 the baked path is the tree's own (`src/main.dawn:164`) whatever the
 # directory or the spelling, so a side whose compiler predates that fix is the
 # only one the shared path still protects. The lowering below is always handed
-# the relative `selfhost` as well. No normalisation is applied: line numbers
-# left Core with #142, and generated names are derived from declarations, not
-# from a global counter (the note beside `ty_key` in `selfhost/src/ir/core.dawn`).
+# the relative `selfhost` as well. Generated names are derived from
+# declarations, not from a global counter (the note beside `ty_key` in
+# `selfhost/src/ir/core.dawn`), so they need no normalisation.
+#
+# ## The one normalisation: failure sites
+#
+# Line numbers left Core's nodes with #142, but they are back in its string
+# constants: every `e!`, `panic`, `todo`, `expect` and `assert` outside std
+# carries ` at <path>:<line>:<col>` in its message (docs/source-location-
+# design.md section 5). A declaration that only moved changes those numbers
+# and nothing else, and the question this diff answers is whether the
+# program's meaning moved. So before comparing, both sides have every
+# ` at <file>.dawn:<n>:<n>` in a dump rewritten to ` at <file>.dawn:<line>:<col>`
+# (and the column-less form older revisions baked to ` at <file>.dawn:<line>`).
+# The path is kept: a module that moved to another file is news. `--raw`
+# compares the dumps as written; `--out` always keeps them as written.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -75,9 +89,10 @@ usage() {
   exit 2
 }
 
-base="" head=HEAD out=""
+base="" head=HEAD out="" raw=0
 while [ $# -gt 0 ]; do
   case $1 in
+    --raw) raw=1; shift ;;
     --base) [ $# -ge 2 ] || usage; base=$2; shift 2 ;;
     --head) [ $# -ge 2 ] || usage; head=$2; shift 2 ;;
     --out) [ $# -ge 2 ] || usage; out=$2; shift 2 ;;
@@ -175,6 +190,22 @@ dump_side() { # <rev> <side>
 dump_side "$base_sha" base
 dump_side "$head_sha" head
 
+# The site normalisation (see above), into a copy: `--out` keeps the dumps
+# as lowering wrote them.
+CMP="$WORK"
+if [ "$raw" = 0 ]; then
+  CMP="$WORK/normalised"
+  for side in base head; do
+    ( cd "$WORK/$side" && find . -name '*.core' ) | while read -r rel; do
+      mkdir -p "$(dirname "$CMP/$side/$rel")"
+      sed -E \
+        -e 's/( at [^ "]+\.dawn):[0-9]+:[0-9]+/\1:<line>:<col>/g' \
+        -e 's/( at [^ "]+\.dawn):[0-9]+/\1:<line>/g' \
+        "$WORK/$side/$rel" > "$CMP/$side/$rel"
+    done
+  done
+fi
+
 # Compare dump by dump. A module appears once per target that reaches it
 # (std.list under every program and under selfhost); it is listed once, with
 # the targets it moved under.
@@ -183,7 +214,7 @@ dump_side "$head_sha" head
 : > "$WORK/moved"
 : > "$WORK/full.diff"
 while read -r rel; do
-  b="$WORK/base/$rel" h="$WORK/head/$rel"
+  b="$CMP/base/$rel" h="$CMP/head/$rel"
   target=${rel#./}; target=${target%%/*}
   module=$(basename "$rel" .core)
   if [ ! -f "$b" ]; then
@@ -197,7 +228,8 @@ while read -r rel; do
 done < <(sort -u "$WORK/base.list" "$WORK/head.list")
 
 compared=$(sort -u "$WORK/base.list" "$WORK/head.list" | wc -l | tr -d ' ')
-echo "Core IR: base $(git -C "$ROOT" rev-parse --short "$base_sha") vs head $(git -C "$ROOT" rev-parse --short "$head_sha"), $compared dump(s) compared"
+if [ "$raw" = 0 ]; then how="failure sites normalised"; else how="raw"; fi
+echo "Core IR: base $(git -C "$ROOT" rev-parse --short "$base_sha") vs head $(git -C "$ROOT" rev-parse --short "$head_sha"), $compared dump(s) compared ($how)"
 
 if [ -n "$out" ]; then
   mkdir -p "$out"
