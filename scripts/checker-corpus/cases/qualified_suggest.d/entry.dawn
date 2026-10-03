@@ -1,0 +1,59 @@
+# checker.dawn: did-you-mean on an unknown qualified name (#427) and what a
+# function value whose instantiation is unknown says about it (#428)
+use lib as m
+
+pub fn callee_typo() -> Int = 5 |> m.zerox
+
+pub fn value_typo() -> fn(Int) -> Int = m.zerox
+
+pub fn call_typo() -> Int = m.zerox(5)
+
+pub fn const_typo() -> Int = m.LIMT
+
+pub fn const_call() -> Int = m.LIMIT(1)
+
+pub fn ctor_typo() -> m.Shade = m.Ligt
+
+pub fn ctor_ok() -> m.Shade = m.Light
+
+# only an effect variable to infer: not a type parameter, and the eta form
+# instantiates it pure
+pub fn effect_only() -> Int = {
+  let g = m.apply_to
+  1
+}
+
+pub fn type_only() -> Int = {
+  let g = m.pick
+  1
+}
+
+pub fn both() -> Int = {
+  let g = m.each_of
+  1
+}
+
+# the type parameter is in the return type only, so no lambda can fix it
+pub fn return_only() -> Int = {
+  let g = m.made
+  1
+}
+
+# the continuation's parameter is a function; the block keeps `m.use_it` a
+# value rather than a call by name
+pub fn continuation() -> Int = {
+  with v <- { m.apply_to }
+  v(1)
+}
+
+pub fn generic_continuation() -> Int = {
+  with v <- { m.use_it }
+  v + 1
+}
+
+pub fn bare_effect_only() -> Int = {
+  let g = apply_local
+  1
+}
+
+fn apply_local(f: fn(Int) -> Int !e) -> Int !e = f(1)
