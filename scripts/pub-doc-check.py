@@ -96,7 +96,9 @@ def missing(label, dump, owned):
                 raise ValueError(f"{label}/{path}: no `{kind}` list in the dump")
             for decl in m[kind]:
                 if decl.get("doc") is None:
-                    found.append(f"{label}/{path}.{decl['name']}")
+                    # std's module paths already read `std/gpu`
+                    where = path if path.startswith(label + "/") else f"{label}/{path}"
+                    found.append(f"{where}.{decl['name']}")
     return found
 
 
@@ -168,6 +170,10 @@ def self_test():
            missing("p", bare, {"m"}), ["p/m.f", "p/m.T", "p/m.E"])
     expect("unowned check sees dependency modules",
            missing("p", bare, None), ["p/m.f", "p/m.T", "p/m.E", "p/dep2/x.h"])
+    expect("a path that already names its package is not prefixed twice",
+           missing("std", {"modules": [{"path": "std/gpu", "fns": [], "types": [
+               {"name": "RefFn", "doc": None}], "consts": [], "traits": [],
+               "effects": []}]}, None), ["std/gpu.RefFn"])
     try:
         missing("p", {"modules": [{"path": "m", "fns": []}]}, None)
         expect("a dump without a kind is refused", "accepted", "refused")
