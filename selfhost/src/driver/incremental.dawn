@@ -25,12 +25,17 @@
 # collision. Until 2026-09-30 the whole carry was compared, so an edit that
 # changed one module's exports re-checked every module after it, importer or
 # not.
+#
+# Comptime reads past all three: a const may run another module's body, and
+# that body another's, none of it visible in an export surface. The
+# interpreter records which modules it read (`CtOut.reads`), and a step is
+# kept only while each of those was reused too (`comptime_reads_hold`).
 
 use std/io.{Fs, Env}
 use std/map
 use driver/analyze.{
   LoadedModule, LoadResult, Program, CheckedMod, ModuleStep, AnalysisCarry,
-  initial_carry, analyze_module_step
+  initial_carry, analyze_module_step, world_after
 }
 use driver/stdlib.{StdCtx, std_module_of}
 use check/cx.{ModExports, Cx}
@@ -207,6 +212,27 @@ fn reads_hold(e: Entry, exports: Map[String, ModExports], seen: Set[String], fre
   }
 }
 
+## Whether every other module the step's comptime read is as it was. Comptime
+## reaches past the `use` lines: a const calling `b.f` runs `b.f`'s body, and
+## whatever `b.f` calls in turn, none of which shows in an export surface, so
+## the surfaces `reads_hold` compares cannot answer for it. The interpreter
+## records the modules it read (`CtOut.reads`); one placed in this analysis is
+## unchanged when its step was reused, since a step that was run again may
+## have new bodies or constants even under the same surface. One not placed
+## is std, fixed by the owner. A run that missed a lookup into another module
+## depends on modules it cannot name, so it is never kept.
+fn comptime_reads_hold(e: Entry, seen: Set[String], rechecked: Set[String], baseline: AnalysisCarry) -> Bool = {
+  let ct = e.step.checked.ct
+  if ct.missed { return false }
+  for p in set.to_list(ct.reads) {
+    let holds = if set.has(seen, p) { not set.has(rechecked, p) } else {
+      map.has(baseline.ct_world.consts, p)
+    }
+    if not holds { return false }
+  }
+  true
+}
+
 ## The rows a step added to the intern table, in the order it interned
 ## them. Each is a declaration of the step's own module: a module interns only
 ## what it declares (`cx.mint`, `cx.enter_decl_owner`), so no other step can
@@ -242,11 +268,12 @@ type Kept = { identities: Map[Int, Minted], minted: Option[List[(Int, Minted)]] 
 ## be a collision the current table no longer produces.
 fn kept(
   e: Entry, raw: LoadedModule, identity: Option[String], carry: AnalysisCarry,
-  seen: Set[String], fresh: Set[String],
+  seen: Set[String], fresh: Set[String], rechecked: Set[String], baseline: AnalysisCarry,
   impls_is: Option[Option[String]], ids_is: Option[Option[String]]
 ) -> Option[Kept] = {
   if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }
   if not reads_hold(e, carry.exports, seen, fresh) { return None }
+  if not comptime_reads_hold(e, seen, rechecked, baseline) { return None }
   if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }
   if ids_is == Some(e.pred) { return Some(Kept { identities: e.step.after.identities, minted: e.minted }) }
   if len(e.step.diags) > 0 { return None }
@@ -277,6 +304,9 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
   # one the previous analysis gave them.
   var seen: Set[String] = set.empty()
   var fresh: Set[String] = set.empty()
+  # the modules this analysis ran again rather than reused, by path: their
+  # bodies and constants may differ from the previous analysis's
+  var rechecked: Set[String] = set.empty()
   var pred: Option[String] = None
   var diags = loaded.diags
   var modules: List[CheckedMod] = []
@@ -292,7 +322,7 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
     let previous = map.get(session.memo, raw.mod_path)
     let reuse: Option[(Entry, Kept)] = match previous {
       Some(e) ->
-        match kept(e, raw, identity, carry, seen, fresh, impls_is, ids_is) {
+        match kept(e, raw, identity, carry, seen, fresh, rechecked, session.baseline, impls_is, ids_is) {
           Some(k) -> Some((e, k))
           None -> None
         }
@@ -309,7 +339,9 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
         carry = AnalysisCarry { ..carry,
           exports: map.insert(carry.exports, path, own),
           impls: e.step.after.impls,
-          identities: k.identities }
+          identities: k.identities,
+          ct_world: world_after(carry.ct_world, e.step.checked, e.step.comptime_runs == 1,
+            identity != None) }
         # the cold step's context ends on the table the carry now holds
         let cx: Cx = e.step.checked.cx
         let checked_mod = if ids_is == Some(e.pred) { e.step.checked } else {
@@ -357,12 +389,14 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
           None -> ()
         }
         if not same_own { fresh = set.insert(fresh, path) }
+        rechecked = set.insert(rechecked, path)
         impls_is = next_impls
         ids_is = next_ids
         carry = AnalysisCarry { ..carry,
           exports: map.insert(carry.exports, path, own),
           impls: impls,
-          identities: ids }
+          identities: ids,
+          ct_world: computed.after.ct_world }
         Entry {
           raw: raw, std_identity: identity, pred: pred, reads: reads, std_names: std_names,
           impls_in: impls_in, ids_in: ids_in, minted: None, step: computed

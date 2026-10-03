@@ -30,7 +30,10 @@ use check/tast.{TFun, TModule}
 use check/cx.{ModExports, cx_new, Cx, moved_module_key}
 use check/checker.{check_module, exports_of}
 use check/identity.{Minted}
-use ir/interp.{eval_comptime, note_direct_fn, note_trait_fn, CtOut, ct_default}
+use ir/interp.{
+  eval_comptime, eval_comptime_in, note_direct_fn, note_trait_fn, CtOut, ct_default, CtWorld,
+  ConstScope, ct_world_empty, ct_world_add
+}
 use ir/core.{VStr, VBool, CValue}
 use front/parser
 use front/lexer
@@ -103,7 +106,11 @@ pub(pkg) type StdCtx = {
   # already holds them is a duplicate-impl error per impl: 15 of the 17 that
   # survived the identity fix, all of them saying a std module conflicts with
   # itself.
-  impls_before: Map[String, Impls]
+  impls_before: Map[String, Impls],
+  # every std module's constant scope and folded values: where a program's
+  # comptime starts (`CtWorld`), so a std body it calls names std's
+  # constants rather than the program's
+  ct_world: CtWorld
 }
 
 pub fn prelude_names() -> List[String] =
@@ -590,6 +597,7 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
   var srcs: List[(String, String, Module)] = []
   var dir_modules: Map[String, String] = map.empty()
   var impls_before: Map[String, Impls] = map.empty()
+  var ct_world = ct_world_empty()
   for entry in texts {
     let (n, text) = entry
     let mod_path = "std/${n}"
@@ -626,8 +634,10 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
     }
     # std folds with no host FFI: it has no `use java` at all, and ct_default()
     # is where that stops being a convention
-    let ct = eval_comptime(tm, fn_decls, by_owner, impl_fns, set.empty(), cx1.adts,
-      cx1.traits, cx1.impl_table, mod_path, ct_default())
+    let scope = ConstScope { path: mod_path, imported: cx1.imported_names,
+      renames: cx1.import_renames }
+    let ct = eval_comptime_in(tm, ct_world, scope, fn_decls, by_owner, impl_fns, set.empty(),
+      cx1.adts, cx1.traits, cx1.impl_table, mod_path, ct_default())
     if len(ct.diags) > 0 {
       return Err(StdLoadError {
         origin: origin, declared: declared, why: StdModuleEval(mod_path, ct.diags[0].msg)
@@ -642,6 +652,7 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
       impl_fns = note_trait_fn(impl_fns, mod_path, f)
     }
     by_owner = map.insert(by_owner, mod_path, own)
+    ct_world = ct_world_add(ct_world, mod_path, scope, tm, ct.consts, false)
     for fname in map.keys(exp.fns) {
       if is_prelude(fname) {
         # only from the owning module: a prelude-named export elsewhere
@@ -695,7 +706,8 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
       StdEmbedded -> None
     },
     dir_modules: dir_modules,
-    impls_before: impls_before
+    impls_before: impls_before,
+    ct_world: ct_world
   })
 }
 
