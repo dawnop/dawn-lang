@@ -40,11 +40,17 @@ use driver/analyze.{use_candidates}
 
 ## One completion item, ready to serialize. `kind` is the LSP CompletionItemKind
 ## code (Function=3, Variable=6, Class=7, Interface=8, Keyword=14, EnumMember=20).
+## `from` is the module path a `use` line offered the item from: the module
+## itself for a Module=9 path, the module declaring it for a name inside
+## `.{ }`. It travels in the item's `data` so `completionItem/resolve` finds the
+## declaration whose doc the item shows (docs/lsp-hover-design.md §D7); an item
+## offered in code is resolved in the document's own scope and carries none.
 pub type CItem = {
   label: String,
   kind: Int,
   detail: Option[String],
-  sort_text: Option[String]
+  sort_text: Option[String],
+  from: Option[String]
 }
 
 # ---- the lexical spot the cursor sits in (mirrors the tokenizer's rules) ----
@@ -472,14 +478,19 @@ fn in_incomplete_for_pattern(text: String, pos: Int) -> Bool = {
 
 type Items = { out: List[CItem], seen: Set[String] }
 
-fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String) -> Items = {
+fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String) -> Items =
+  add_from(it, name, kind, detail, rank, None)
+
+## `add` for an item a `use` line offers out of module `from`.
+fn add_from(it: Items, name: String, kind: Int, detail: Option[String], rank: String, from: Option[String]) -> Items = {
   if name == "_" || set.has(it.seen, name) { return it }
   Items {
     out: it.out ++ [CItem {
       label: name,
       kind: kind,
       detail: detail,
-      sort_text: Some(rank ++ name)
+      sort_text: Some(rank ++ name),
+      from: from
     }],
     seen: set.insert(it.seen, name)
   }
@@ -533,7 +544,7 @@ fn use_completions(
   if str.trim(from_code_points(rest)) == "" && path != "" {
     let d: Option[String] =
       Some("`use " ++ path ++ " as <name>` — rename the module in this file")
-    return [CItem { label: "as", kind: 14, detail: d, sort_text: Some("0as") }]
+    return [CItem { label: "as", kind: 14, detail: d, sort_text: Some("0as"), from: None }]
   }
   let none2: List[CItem] = []
   none2
@@ -550,7 +561,7 @@ fn seg_items(it0: Items, prefix: List[String], paths: List[String], rank: String
     let segs = str.split(mp, "/")
     if len(segs) > d && list.take(segs, d) == prefix {
       if len(segs) == d + 1 {
-        it = add(it, segs[d], 9, Some(mp), rank)
+        it = add_from(it, segs[d], 9, Some(mp), rank, Some(mp))
       } else {
         let dir = join(list.take(segs, d + 1), "/")
         it = add(it, "${segs[d]}/", 19, Some("${dir}/…"), rank)
@@ -619,7 +630,7 @@ fn import_items(
       match map.get(candidates, path) {
         Some(f) ->
           match io.read_file(f) {
-            Ok(text) -> declared_items(it, text)
+            Ok(text) -> declared_items(it, text, path)
             Err(_) -> none
           }
         None -> none
@@ -630,20 +641,21 @@ fn import_items(
 ## A checked module's exports, with the signatures the checker rendered.
 fn exported_items(qc: QCx, it0: Items, ex: ModExports) -> List[CItem] = {
   var it = it0
+  let from = Some(ex.mod_path)
   let adts = qc.entry.cx.adts
   for pr in map.entries(ex.fns) {
     let (name, sig) = pr
-    it = add(it, name, 3, Some(sig_render(adts, qc.entry.cx.traits, sig)), "0")
+    it = add_from(it, name, 3, Some(sig_render(adts, qc.entry.cx.traits, sig)), "0", from)
   }
-  for name in map.keys(ex.types_by_name) { it = add(it, name, 7, Some("type ${name}"), "0") }
-  for name in map.keys(ex.aliases) { it = add(it, name, 7, Some("alias ${name}"), "0") }
-  for name in map.keys(ex.ctors) { it = add(it, name, 20, Some("constructor"), "0") }
+  for name in map.keys(ex.types_by_name) { it = add_from(it, name, 7, Some("type ${name}"), "0", from) }
+  for name in map.keys(ex.aliases) { it = add_from(it, name, 7, Some("alias ${name}"), "0", from) }
+  for name in map.keys(ex.ctors) { it = add_from(it, name, 20, Some("constructor"), "0", from) }
   for pr in map.entries(ex.consts) {
     let (name, ty) = pr
-    it = add(it, name, 21, Some("const " ++ name ++ ": " ++ ty_show(adts, ty)), "0")
+    it = add_from(it, name, 21, Some("const " ++ name ++ ": " ++ ty_show(adts, ty)), "0", from)
   }
-  for name in map.keys(ex.traits_by_name) { it = add(it, name, 8, Some("trait ${name}"), "0") }
-  for name in map.keys(ex.effects) { it = add(it, name, 23, Some("effect ${name}"), "0") }
+  for name in map.keys(ex.traits_by_name) { it = add_from(it, name, 8, Some("trait ${name}"), "0", from) }
+  for name in map.keys(ex.effects) { it = add_from(it, name, 23, Some("effect ${name}"), "0", from) }
   it.out
 }
 
@@ -656,11 +668,12 @@ fn exported_items(qc: QCx, it0: Items, ex: ModExports) -> List[CItem] = {
 ## module belongs to, and a name the next keystroke may not write is worse
 ## than one fewer suggestion. A same-package module is loaded, and so read
 ## above, whenever the document is checked as part of its project.
-fn declared_items(it0: Items, text: String) -> List[CItem] = {
+fn declared_items(it0: Items, text: String, path: String) -> List[CItem] = {
   var it = it0
+  let from = Some(path)
   let (m, _) = parser.parse_module(text)
   for d in module_fns(m) {
-    if d.vis == VisPub { it = add(it, d.name, 3, Some("fn ${d.name}"), "0") }
+    if d.vis == VisPub { it = add_from(it, d.name, 3, Some("fn ${d.name}"), "0", from) }
   }
   for d in module_types(m) {
     if d.vis == VisPub {
@@ -668,18 +681,18 @@ fn declared_items(it0: Items, text: String) -> List[CItem] = {
         Some(_) -> "alias "
         None -> "type "
       }
-      it = add(it, d.name, 7, Some(kind ++ d.name), "0")
-      for c in d.ctors { it = add(it, c.name, 20, Some("constructor of ${d.name}"), "0") }
+      it = add_from(it, d.name, 7, Some(kind ++ d.name), "0", from)
+      for c in d.ctors { it = add_from(it, c.name, 20, Some("constructor of ${d.name}"), "0", from) }
     }
   }
   for d in module_consts(m) {
-    if d.vis == VisPub { it = add(it, d.name, 21, Some("const ${d.name}"), "0") }
+    if d.vis == VisPub { it = add_from(it, d.name, 21, Some("const ${d.name}"), "0", from) }
   }
   for d in module_traits(m) {
-    if d.vis == VisPub { it = add(it, d.name, 8, Some("trait ${d.name}"), "0") }
+    if d.vis == VisPub { it = add_from(it, d.name, 8, Some("trait ${d.name}"), "0", from) }
   }
   for d in module_effects(m) {
-    if d.vis == VisPub { it = add(it, d.name, 23, Some("effect ${d.name}"), "0") }
+    if d.vis == VisPub { it = add_from(it, d.name, 23, Some("effect ${d.name}"), "0", from) }
   }
   it.out
 }

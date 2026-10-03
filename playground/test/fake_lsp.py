@@ -151,6 +151,17 @@ def main():
                 "id": request_id,
                 "result": [{"position": start, "label": ": Int", "kind": 1}],
             })
+        elif method == "completionItem/resolve":
+            # the item back with a doc, and a field the gateway must not pass on
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    **message.get("params", {}),
+                    "documentation": {"kind": "markdown", "value": "Prints `s`."},
+                    "command": {"title": "x", "command": "rm"},
+                },
+            })
         elif method == "textDocument/definition":
             send({
                 "jsonrpc": "2.0",

@@ -51,6 +51,8 @@ interface LspCompletionItem {
   detail?: string
   sortText?: string
   insertText?: string
+  /** What the server put on the item for `completionItem/resolve`, sent back as is. */
+  data?: Record<string, unknown>
 }
 
 interface LspHover {
@@ -185,7 +187,15 @@ function completionItemOf(value: unknown): LspCompletionItem | null {
     ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
     ...(typeof item.sortText === 'string' ? { sortText: item.sortText } : {}),
     ...(typeof item.insertText === 'string' ? { insertText: item.insertText } : {}),
+    ...(asRecord(item.data) != null ? { data: item.data } : {}),
   }
+}
+
+/** A `MarkupContent` or bare string's text; '' for anything else. */
+function markupValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  const record = asRecord(value)
+  return typeof record?.value === 'string' ? record.value : ''
 }
 
 export function lspWebSocketUrl(endpoint: string, baseHref: string): string {
@@ -342,10 +352,29 @@ export class DawnLspClient {
       return value.map(completionItemOf).filter((item): item is LspCompletionItem => item != null)
     }
     const record = asRecord(value)
-    return Array.isArray(record?.items)
-      ? record.items.map(completionItemOf)
-        .filter((item: LspCompletionItem | null): item is LspCompletionItem => item != null)
-      : []
+    if (!Array.isArray(record?.items)) return []
+    // LSP 3.17 list defaults: the server names the document once
+    // (docs/lsp-hover-design.md §D7.2), and an item without data of its own
+    // takes it
+    const data = asRecord(asRecord(record.itemDefaults)?.data)
+    return record.items.map(completionItemOf)
+      .filter((item: LspCompletionItem | null): item is LspCompletionItem => item != null)
+      .map((item: LspCompletionItem) => item.data == null && data != null ? { ...item, data } : item)
+  }
+
+  /**
+   * A completion item's doc, as the server's Markdown, or '' when it has none
+   * (docs/lsp-hover-design.md §D7). Asked for when the list shows the item,
+   * never with the list: the server reads a doc only for the item a reader
+   * stops on. The item goes back with only what the server reads.
+   */
+  async completionDoc(item: LspCompletionItem, timeoutMs = 1000): Promise<string> {
+    const value = await this.queryWith('completionItem/resolve', () => ({
+      label: item.label,
+      ...(item.kind != null ? { kind: item.kind } : {}),
+      ...(item.data != null ? { data: item.data } : {}),
+    }), timeoutMs)
+    return markupValue(asRecord(value)?.documentation)
   }
 
   async hover(offset: number, timeoutMs = 1000): Promise<LspHover | null> {
@@ -418,7 +447,14 @@ export class DawnLspClient {
           textDocument: {
             hover: { contentFormat: ['markdown', 'plaintext'] },
             inlayHint: { dynamicRegistration: false },
-            completion: { completionItem: { snippetSupport: false } },
+            completion: {
+              completionItem: {
+                snippetSupport: false,
+                documentationFormat: ['markdown', 'plaintext'],
+                resolveSupport: { properties: ['documentation'] },
+              },
+              completionList: { itemDefaults: ['data'] },
+            },
           },
         },
       }, INITIALIZE_TIMEOUT_MS).then(() => {
@@ -711,7 +747,11 @@ function completionType(kind: number | undefined): string {
   return kind == null ? 'text' : types[kind] ?? 'text'
 }
 
-function completionOf(item: LspCompletionItem): Completion | null {
+/**
+ * An item with `data` may have a doc, and its `info` fetches it when the list
+ * selects it; an item without has none to fetch and shows no info pane.
+ */
+export function completionOf(item: LspCompletionItem, client?: DawnLspClient): Completion | null {
   if (typeof item.label !== 'string' || item.label.length === 0) return null
   return {
     label: item.label,
@@ -720,6 +760,29 @@ function completionOf(item: LspCompletionItem): Completion | null {
     ...(typeof item.sortText === 'string' ? { sortText: item.sortText } : {}),
     ...(typeof item.insertText === 'string' ? { apply: item.insertText } : {}),
     ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
+    ...(client != null && item.data != null ? { info: () => completionInfo(client, item) } : {}),
+  }
+}
+
+/** The text the info pane shows for a resolved doc: hover's (`docText`). */
+export function completionInfoText(markdown: string): string {
+  return docText(markdown)
+}
+
+/**
+ * The info pane beside the completion list: the item's doc, as hover shows
+ * one (`docText`, then `docNode`), or nothing when it has none or the
+ * question went stale.
+ */
+export async function completionInfo(
+  client: DawnLspClient,
+  item: LspCompletionItem,
+): Promise<HTMLElement | null> {
+  try {
+    const doc = completionInfoText(await client.completionDoc(item, 1000))
+    return doc ? docNode(doc, 'dp-completion-doc') : null
+  } catch {
+    return null
   }
 }
 
@@ -750,7 +813,8 @@ export function lspCompletionSource(
     if (!shouldAsk || !client.isReady()) return staticResult
     try {
       const items = await client.completion(context.pos, 750)
-      const server = items.map(completionOf).filter((item): item is Completion => item != null)
+      const server = items.map((item) => completionOf(item, client))
+        .filter((item): item is Completion => item != null)
       if (server.length === 0) return staticResult
       const base = staticResult ?? {
         from: word?.from ?? context.pos,
@@ -820,9 +884,9 @@ export function hoverText(contents: unknown): string {
 }
 
 /** The doc's text with each inline `code` span as a <code> element. */
-function docNode(doc: string): HTMLElement {
+function docNode(doc: string, className = 'dp-hover-doc'): HTMLElement {
   const node = document.createElement('div')
-  node.className = 'dp-hover-doc'
+  node.className = className
   doc.split(/(`[^`\n]+`)/).forEach((piece) => {
     if (/^`[^`\n]+`$/.test(piece)) {
       const code = document.createElement('code')

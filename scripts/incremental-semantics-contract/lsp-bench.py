@@ -9,6 +9,14 @@ Two inlay columns (docs/lsp-hover-design.md §A4.5): `inlay` asks for the
 whole entry buffer, the acceptance case of the A4 cut; `inlay_view` asks for
 the INLAY_VIEW_LINES lines from the needle's, the way an editor asks for what
 is on screen.
+
+`resolve` (docs/lsp-hover-design.md §D7) sends `completionItem/resolve` for
+one item of that round's completion list: the one labelled with the needle's
+identifier when the list has it with `data`, else the first item with `data`.
+Its time is the doc lookup alone; `completion` stays the list, which carries
+no docs. `--item-defaults` initializes as a client that applies
+`CompletionList.itemDefaults.data`, so the list names the document once
+rather than on every item; without it every item carries its own `data`.
 """
 import argparse
 import hashlib
@@ -17,6 +25,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import statistics
 import sys
 import time
@@ -28,7 +37,7 @@ sys.path.insert(0, str(ROOT / "scripts/lsp-workspace-contract"))
 from workspace import LspClient, did_open, did_change, position
 
 
-QUERIES = ("hover", "definition", "completion", "inlay", "inlay_view")
+QUERIES = ("hover", "definition", "completion", "inlay", "inlay_view", "resolve")
 
 # An editor viewport's worth of lines, for `inlay_view`.
 INLAY_VIEW_LINES = 60
@@ -41,6 +50,28 @@ def inlay_ranges(text, target):
     return {"inlay": {"start": {"line": 0, "character": 0}, "end": {"line": last, "character": 0}},
             "inlay_view": {"start": {"line": start, "character": 0},
                            "end": {"line": start + INLAY_VIEW_LINES, "character": 0}}}
+
+
+def resolve_item(items, needle):
+    """The completion item `resolve` asks about: the needle's own name if the
+    list offers it with data, else the first item that has data, else None.
+    A list with `itemDefaults.data` gives that data to every item lacking
+    its own, the way a client applies it."""
+    default = None
+    if isinstance(items, dict):
+        default = (items.get("itemDefaults") or {}).get("data")
+        items = items.get("items")
+    if not isinstance(items, list):
+        return None
+    if default is not None:
+        items = [item if not isinstance(item, dict) or "data" in item else {**item, "data": default}
+                 for item in items]
+    with_data = [item for item in items if isinstance(item, dict) and "data" in item]
+    word = re.match(r"[A-Za-z_][A-Za-z0-9_]*", needle)
+    for item in with_data:
+        if word and item.get("label") == word.group(0):
+            return item
+    return with_data[0] if with_data else None
 
 
 def rss(pid):
@@ -124,7 +155,16 @@ def selftest():
     assert ranges["inlay"]["end"] == {"line": 3, "character": 0}
     assert ranges["inlay_view"]["start"]["line"] == 1
     assert ranges["inlay_view"]["end"]["line"] == 1 + INLAY_VIEW_LINES
-    print("OK: benchmark diagnostics (6 controls), latency percentiles (4 controls), analysis traces (6 controls), inlay ranges")
+    items = [{"label": "let", "kind": 14}, {"label": "a", "kind": 3, "data": {}},
+             {"label": "helper", "kind": 3, "data": {}}]
+    assert resolve_item(items, "helper(n)")["label"] == "helper"
+    assert resolve_item(items, "other")["label"] == "a"
+    assert resolve_item({"items": items}, "helper")["label"] == "helper"
+    assert resolve_item(items[:1], "let") is None
+    assert resolve_item(None, "x") is None
+    listed = {"itemDefaults": {"data": {"uri": "u"}}, "items": [{"label": "helper", "kind": 3}]}
+    assert resolve_item(listed, "helper") == {"label": "helper", "kind": 3, "data": {"uri": "u"}}
+    print("OK: benchmark diagnostics (6 controls), latency percentiles (4 controls), analysis traces (6 controls), inlay ranges, resolve item (6 controls)")
 
 
 def main():
@@ -137,6 +177,8 @@ def main():
     parser.add_argument("--uri", help="non-file URI for a single standalone buffer")
     parser.add_argument("--error-round", type=int,
                         help="append a type error in this round, then restore clean input")
+    parser.add_argument("--item-defaults", action="store_true",
+                        help="advertise completionList.itemDefaults [\"data\"] at initialize")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -160,7 +202,7 @@ def main():
         "command": command, "cwd": str(ROOT), "platform": platform.platform(),
         "warmup_rounds": 3, "rounds": args.rounds,
         "latency_percentiles": "median; p95 nearest rank ceil(0.95*n); post-warmup clean samples only",
-        "uri": args.uri, "error_round": args.error_round,
+        "uri": args.uri, "error_round": args.error_round, "item_defaults": args.item_defaults,
         "sources": {str(path): hashlib.sha256(text.encode()).hexdigest() for path, text in texts.items()},
         "note": "overlay-only comment edits and optional type-error recovery; barrier excludes debounce; RSS is process-wide",
     }
@@ -168,7 +210,8 @@ def main():
     client = LspClient(command, ROOT)
     rows = []
     try:
-        client.initialize()
+        client.initialize({"textDocument": {"completion": {"completionList": {"itemDefaults": ["data"]}}}}
+                          if args.item_defaults else None)
         mark = client.mark()
         for path in files:
             client.send(did_open(uris[path], texts[path]))
@@ -216,6 +259,16 @@ def main():
                         raise RuntimeError("invalid prefix execution trace")
                     row["prefix_counts"] = dict(zip(("reused", "checked", "retained"), map(int, counts[0])))
                 for method in QUERIES:
+                    if method == "resolve":
+                        item = resolve_item(row["replies"]["completion"], args.needle)
+                        if item is None:
+                            raise RuntimeError("completion offered no item with data to resolve")
+                        start = time.perf_counter_ns()
+                        reply = client.result("completionItem/resolve", item)
+                        row["query_ns"][method] = time.perf_counter_ns() - start
+                        row["replies"][method] = {"label": item["label"],
+                                                  "documentation": isinstance(reply, dict) and "documentation" in reply}
+                        continue
                     if method in ranges:
                         params = {"textDocument": {"uri": uris[entry]}, "range": ranges[method]}
                         wire = "textDocument/inlayHint"

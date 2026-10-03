@@ -126,9 +126,15 @@ pub type Target = {
 ## very texts std's spans index.
 pub type DocHome = DocHere | DocFile(path: String) | DocStd(mod_path: String)
 
-## `lo` is an offset on the declaration's first line, which is all
-## `front/docs.doc_of` reads (the `##` block ends on the line above it).
-pub type DocSite = { home: DocHome, lo: Int }
+## Which doc of the text at `home` is meant (`at`).
+pub type DocSite = { home: DocHome, at: DocAt }
+
+## `DeclAt(lo)`: a declaration's, with `lo` an offset on its first line, which
+## is all `front/docs.doc_of` reads (the `##` block ends on the line above it).
+## `ModuleDoc`: the module's own, the block that opens the file
+## (`front/docs.module_doc_of`), which a module path on a `use` line and a
+## module offered by completion show (docs/lsp-hover-design.md §D7).
+pub type DocAt = DeclAt(lo: Int) | ModuleDoc
 
 ## One walk over the module. `inlay` is the collector `inlay_hints` hands in;
 ## a hover query has none, and every hint site then costs one `match` and
@@ -497,7 +503,7 @@ fn no_site() -> Site = Site { def: None, dp: None, doc: None }
 
 ## A declaration of the entry document, at its own name.
 fn here(nlo: Int, nhi: Int, lo: Int) -> Site =
-  Site { def: Some((nlo, nhi)), dp: None, doc: Some(DocSite { home: DocHere, lo: lo }) }
+  Site { def: Some((nlo, nhi)), dp: None, doc: Some(DocSite { home: DocHere, at: DeclAt(lo) }) }
 
 fn offer_at(q: Q, lo: Int, hi: Int, hover: String, s: Site) -> Q =
   offer_target(q, Target { lo: lo, hi: hi, hover: hover, def: s.def, def_path: s.dp, sig: None, doc: s.doc })
@@ -601,7 +607,7 @@ fn std_holder(qc: QCx, mp: String, m: Module) -> Holder =
 
 ## A declaration found in `h`: named at `nlo..nhi`, starting on the line of `lo`.
 fn site_in(h: Holder, nlo: Int, nhi: Int, lo: Int) -> Site = {
-  let doc = Some(DocSite { home: h.home, lo: lo })
+  let doc = Some(DocSite { home: h.home, at: DeclAt(lo) })
   if h.jump { Site { def: Some((nlo, nhi)), dp: h.def_path, doc: doc } } else { Site { ..no_site(), doc: doc } }
 }
 
@@ -766,6 +772,118 @@ fn holder_by_path(qc: QCx, mod_path: String) -> Option[Holder] = {
   None
 }
 
+## The module doc of the module at `mod_path`, when the program or std holds
+## it: what a module path on a `use` line hovers with.
+fn module_doc_site(qc: QCx, mod_path: String) -> Option[DocSite] =
+  match holder_by_path(qc, mod_path) {
+    Some(h) -> Some(DocSite { home: h.home, at: ModuleDoc })
+    None -> None
+  }
+
+## The offset the top-level declaration named `name` starts at in `m`, or the
+## one a constructor of that name starts at: functions, types and aliases,
+## constants, traits and effects share one namespace per module, so a name
+## names one of them. Read off the parse alone, which is all a module that a
+## `use` line is about to import has (`lsp/server.dawn` reads the doc of one
+## the program has not loaded through this).
+pub(pkg) fn decl_lo_named(m: Module, name: String) -> Option[Int] = {
+  for d in m.decls {
+    match d {
+      DFn(f) -> if f.name == name { return Some(f.lo) }
+      DType(t) -> if t.name == name { return Some(t.lo) }
+      DConst(n, _, _, _, lo, _, _, _) -> if n == name { return Some(lo) }
+      DTrait(n, _, _, _, _, _, _, _, lo, _, _, _) -> if n == name { return Some(lo) }
+      DEffect(e) -> if e.name == name { return Some(e.lo) }
+      _ -> ()
+    }
+  }
+  for d in m.decls {
+    match d {
+      DType(t) -> {
+        for c in t.ctors {
+          if c.name == name { return Some(c.lo) }
+        }
+      }
+      _ -> ()
+    }
+  }
+  None
+}
+
+## The doc site of `name` as module `mod_path` declares it.
+fn member_doc_site(qc: QCx, mod_path: String, name: String) -> Option[DocSite] = {
+  let h = match holder_by_path(qc, mod_path) {
+    Some(h) -> h
+    None -> return None
+  }
+  match decl_lo_named(h.m, name) {
+    Some(lo) -> Some(DocSite { home: h.home, at: DeclAt(lo) })
+    None -> None
+  }
+}
+
+## Where a completion item's doc is read (docs/lsp-hover-design.md §D7), from
+## what the item carries back to `completionItem/resolve`: its label, its LSP
+## kind, and for an item a `use` line offered the module path it came from.
+## The sites are hover's, so an item's doc is the doc its name hovers with.
+##
+## The kind is what tells apart the items one label can stand for: a local
+## (Variable) shadows a function of its name and has no doc, a record type and
+## its constructor share a name. `None` is an item with no declaration behind
+## it (a keyword, a builtin, a local) or one whose module is not loaded, which
+## the server then reads from the file a `use` line would load.
+pub(pkg) fn item_doc_site(qc: QCx, label: String, kind: Int, from: Option[String]) -> Option[DocSite] =
+  match from {
+    Some(mp) -> if kind == 9 { module_doc_site(qc, mp) } else { member_doc_site(qc, mp, label) }
+    None -> scope_doc_site(qc, label, kind)
+  }
+
+## An item offered in code, as the entry module's scope resolves its label.
+fn scope_doc_site(qc: QCx, label: String, kind: Int) -> Option[DocSite] = {
+  if kind == 3 {
+    return match sig_of(qc, label) {
+      Some(s) -> site_of_sig(qc, s).doc
+      None -> None
+    }
+  }
+  if kind == 9 {
+    return match map.get(qc.entry.cx.module_aliases, label) {
+      Some(mp) -> module_doc_site(qc, mp)
+      None -> None
+    }
+  }
+  if kind == 7 {
+    match map.get(qc.entry.cx.adts_by_name, label) {
+      Some(aid) -> return site_of_type(qc, aid).doc
+      None -> ()
+    }
+  }
+  if kind == 20 {
+    match map.get(qc.entry.cx.ctors_by_name, label) {
+      Some(k) -> {
+        let (aid, _) = k
+        return site_of_ctor(qc, aid, label).doc
+      }
+      None -> ()
+    }
+  }
+  if kind == 21 { return site_of_const(qc, label).doc }
+  if kind != 7 && kind != 8 && kind != 20 && kind != 23 { return None }
+  # a trait, an effect, an alias: declared here, or brought in by name
+  match decl_lo_named(qc.entry.m, label) {
+    Some(lo) -> return Some(DocSite { home: DocHere, at: DeclAt(lo) })
+    None -> ()
+  }
+  match map.get(qc.entry.cx.imported_names, label) {
+    Some(mp) -> member_doc_site(qc, mp, unwrap_or(map.get(qc.entry.cx.import_renames, label), label))
+    None -> None
+  }
+}
+
+## The doc site of a callable's declaration, for signature help: the doc its
+## name hovers with.
+pub(pkg) fn sig_doc_site(qc: QCx, s: Sig) -> Option[DocSite] = site_of_sig(qc, s).doc
+
 ## A constant's name span and the offset its declaration starts at.
 fn const_decl_span(m: Module, name: String) -> Option[(Int, Int, Int)] = {
   for d in m.decls {
@@ -900,7 +1018,10 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
           }
         None -> no_def()
       }
-      q = offer(q, nlo, nhi, "use ${path}", udef, upath)
+      q = offer_target(q, Target {
+        lo: nlo, hi: nhi, hover: "use ${path}", def: udef, def_path: upath, sig: None,
+        doc: module_doc_site(qc, path)
+      })
       match exp {
         Some(e) ->
           match selective {
@@ -1220,6 +1341,25 @@ fn visit_selective_at(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
       q = offer_at(q, imp.lo, imp.hi, const_text(qc, exp.mod_path, imp.name, t), site_of_const_in(qc, exp.mod_path, imp.name))
     }
     None -> ()
+  }
+  # a trait or an effect has no table that renders it, so its declaration does
+  if map.has(exp.traits_by_name, imp.name) || map.has(exp.effects, imp.name) {
+    match holder_by_path(qc, exp.mod_path) {
+      Some(h) -> {
+        for d in h.m.decls {
+          match d {
+            DTrait(n, tp, _, _, _, _, _, _, lo, _, nlo, nhi) -> if n == imp.name {
+              q = offer_at(q, imp.lo, imp.hi, "trait " ++ n ++ "[" ++ tp ++ "]", site_in(h, nlo, nhi, lo))
+            }
+            DEffect(e) -> if e.name == imp.name {
+              q = offer_at(q, imp.lo, imp.hi, "effect ${e.name}", site_in(h, e.nlo, e.nhi, e.lo))
+            }
+            _ -> ()
+          }
+        }
+      }
+      None -> ()
+    }
   }
   q
 }
