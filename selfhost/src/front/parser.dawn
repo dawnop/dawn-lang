@@ -45,7 +45,7 @@ use front/ast.{
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
-  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
+  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module, ExampleOf, example_spelling,
   Vis, VisPrivate, VisPkg, VisPub,
   e_lo, e_hi, t_hi, pat_lo, pat_hi
 }
@@ -227,7 +227,7 @@ pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List
   }
   # A clean parse has nothing to relocate, so it never pays for the scan.
   let diags = if len(st.diags) == 0 { st.diags } else { place_unclosed(toks, cps, st.diags) }
-  (Module { decls: decls }, diags, cps, toks)
+  (Module { decls: number_examples(decls) }, diags, cps, toks)
 }
 
 # ---- unclosed delimiters (#195) ----
@@ -668,15 +668,68 @@ fn has_lower(v: String) -> Bool = {
   false
 }
 
+## `test "name" { ... }`, or `test f { ... }`: a test named by a declaration
+## of this module, which makes it that declaration's example (spec §3.4). The
+## name is `f` (a function), `T` (a type, trait, effect or constant -- all
+## TYPEIDENTs) or `T.Ctor`, one of a type's constructors. A bare `Ctor` is not
+## a third spelling: a record and its constructor share a name, and a bare
+## capital name always meaning a top-level declaration keeps the rule one line
+## long. Whether the name lands on anything is the checker's question
+## (`passes.pass_decl_tests`); the label is `example <name>` here, and the
+## module loop numbers a second example of the same name (`number_examples`).
 fn test_decl(p: P, st: St) -> PR[Decl] = {
   let (st1, kw) = adv(p, st)
-  let (st2, name_tok) = want(p, st1, STRING, "a test name string")?
+  let k = kind_of(p, st1)
+  if k == IDENT || k == TYPEIDENT {
+    let (st2, first) = adv(p, st1)
+    let (st3, ctor, hi) =
+      if k == TYPEIDENT && at_kind(p, st2, DOT) && kind_ahead(p, st2, 1) == TYPEIDENT {
+        let (st2b, c) = adv(p, adv1(p, st2))
+        (st2b, Some(c.text), c.hi)
+      } else {
+        let none: Option[String] = None
+        (st2, none, first.hi)
+      }
+    if at_kind(p, st3, DOT) {
+      let k2 = kind_ahead(p, st3, 1)
+      let end = if k2 == IDENT || k2 == TYPEIDENT { tok_at(p, st3.pos, 1).hi } else { cur(p, st3).hi }
+      return Err((st3, pd_h("a test is named by a declaration of this module, not by a path",
+        first.lo, end,
+        "write `test f`, `test T` or `test T.Ctor`, or name it with a string")))
+    }
+    let of = ExampleOf { name: first.text, ctor: ctor }
+    let (st4, body) = block_expr(p, st3)?
+    return Ok((st4, DTest("example " ++ example_spelling(of), body, kw.lo, e_hi(body), first.lo, hi, Some(of))))
+  }
+  let (st2, name_tok) = want(p, st1, STRING, "a test name: a string, or a declaration of this module")?
   if has_code_seg(name_tok.segs) {
     return Err((st2, pd("test names cannot contain interpolation", name_tok.lo, name_tok.hi)))
   }
   let name = seg_text(name_tok.segs)
   let (st3, body) = block_expr(p, st2)?
-  Ok((st3, DTest(name, body, kw.lo, e_hi(body), name_tok.lo, name_tok.hi)))
+  Ok((st3, DTest(name, body, kw.lo, e_hi(body), name_tok.lo, name_tok.hi, None)))
+}
+
+## The label of every test named by a declaration, numbered in the order they
+## are written: the first example of `f` is `example f`, the second
+## `example f #2`. One name per test is what `dawn test` reports a failure
+## under, so two examples of one declaration must not read the same.
+fn number_examples(decls: List[Decl]) -> List[Decl] = {
+  var seen: List[String] = []
+  var out: List[Decl] = []
+  for d in decls {
+    match d {
+      DTest(name, body, lo, hi, nlo, nhi, Some(of)) -> {
+        let key = example_spelling(of)
+        seen = seen ++ [key]
+        let n = len(filter(seen, k => k == key))
+        let label = if n == 1 { name } else { "${name} #${to_string(n)}" }
+        out = out ++ [DTest(label, body, lo, hi, nlo, nhi, Some(of))]
+      }
+      _ -> { out = out ++ [d] }
+    }
+  }
+  out
 }
 
 # ---- type declarations ----

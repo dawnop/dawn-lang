@@ -29,7 +29,7 @@ use gen/common.{must_read, write_page, map_doc_url, doc_files}
 
 # ---- the page's own words ----
 #
-# Everything on this page except these ten strings and site/pages/stdlib.md
+# Everything on this page except these twelve strings and site/pages/stdlib.md
 # is generated from `dawn doc --stdlib`, so the two of them together are the
 # whole of what a translator has to touch. The strings live in one record
 # rather than as literals down in the code that emits them: a table has the
@@ -52,6 +52,8 @@ type Chrome = {
   modules_intro: String,
   refs_pre: String,
   refs_post: String,
+  example_one: String,
+  example_many: String,
 }
 
 fn chrome(lang: Lang, root: String) -> Chrome =
@@ -77,6 +79,8 @@ fn chrome(lang: Lang, root: String) -> Chrome =
         "(<code>use std/str.{trim}</code>).</p>\n",
       refs_pre: "Reference kernels: ",
       refs_post: " host-side answers the GPU backend's tests compare against",
+      example_one: "Example",
+      example_many: "Examples",
     }
     Zh -> Chrome {
       impls_lead: "本模块登记的 impl（全程序可见，不必 use）：",
@@ -94,6 +98,8 @@ fn chrome(lang: Lang, root: String) -> Chrome =
         "也可以选择性引入单个名字（<code>use std/str.{trim}</code>）。</p>\n",
       refs_pre: "参考 kernel：",
       refs_post: " 个宿主端参考答案，供 GPU 后端的测试对照",
+      example_one: "示例",
+      example_many: "示例",
     }
   }
 
@@ -150,11 +156,31 @@ fn prose(pg: Pg, text: String, links: List[Json]) -> String =
 fn doc_prose(pg: Pg, j: Json) -> String = prose(pg, field(j, "doc"), jarr(jget(j, "links")))
 
 ## What rendering any doc on the page needs: the `docs/` files a doc may link
-## to, and every anchor the page carries, which a `[`name`]` link lands on.
-type Pg = { docs: List[String], anchors: Set[String] }
+## to, every anchor the page carries, which a `[`name`]` link lands on, and
+## the heading an entry's examples go under (one, many), in the page's
+## language.
+type Pg = { docs: List[String], anchors: Set[String], examples: (String, String) }
 
-fn pg_of(docs: List[String], api: Json) -> Pg =
-  Pg { docs: docs, anchors: set.from(map(api_rows(api), r => r.anchor)) }
+fn pg_of(docs: List[String], api: Json, c: Chrome) -> Pg =
+  Pg { docs: docs, anchors: set.from(map(api_rows(api), r => r.anchor)),
+    examples: (c.example_one, c.example_many) }
+
+## An entry's examples (spec §3.4: the bodies of the tests named by its
+## declaration, as `dawn doc` wrote them) as Dawn code blocks under one
+## heading. An entry with none renders nothing, so its bytes are what they
+## were before examples existed.
+fn examples_html(pg: Pg, j: Json) -> String = {
+  let srcs = jarr(jget(j, "examples"))
+  if len(srcs) == 0 { return "" }
+  let (one, many) = pg.examples
+  let title = if len(srcs) == 1 { one } else { many }
+  var out = """<div class="api-examples">""" ++ "\n" ++
+    """<p class="api-examples-title">""" ++ escape_html(title) ++ "</p>\n"
+  for src in srcs {
+    out = out ++ """<pre class="dawn api-example"><code>""" ++ highlight_dawn(jstr(src)) ++ "</code></pre>\n"
+  }
+  out ++ "</div>\n"
+}
 
 # ---- doc links (spec §1.2) ----
 #
@@ -248,7 +274,7 @@ fn entry(
   """<h3 class="api-name"><a href="#${id}">""" ++ escape_html(title) ++ "</a></h3>\n" ++
   """<pre class="dawn api-sig"><code>""" ++ highlight_dawn(sig) ++ "</code></pre>\n" ++
   """<div class="api-doc">""" ++ "\n" ++ doc_prose(pg, doc) ++ "</div>\n" ++
-  members_html(pg, members) ++ "</div>"
+  examples_html(pg, doc) ++ members_html(pg, members) ++ "</div>"
 
 ## The members of an entry that have a doc of their own, each under its
 ## declaration as the entry's signature spells it: `(label, member)` pairs
@@ -263,18 +289,19 @@ fn members_html(pg: Pg, members: List[(String, Json)]) -> String =
     for pr in members {
       let (label, m) = pr
       rows = rows ++ ["<dt><code>" ++ highlight_dawn(label) ++ "</code></dt>\n<dd>\n"
-          ++ doc_prose(pg, m) ++ "</dd>\n"]
+          ++ doc_prose(pg, m) ++ examples_html(pg, m) ++ "</dd>\n"]
     }
     """<dl class="api-members">""" ++ "\n" ++ join(rows, "") ++ "</dl>\n"
   }
 
-## The member rows worth a line: those with a doc of their own. A member on
-## its owner's line has none (spec §1.2), so `dawn doc` writes null for it and
-## nothing here has to tell a member's doc from its type's.
+## The member rows worth a line: those with a doc of their own, or an
+## example (a constructor's, `test T.Ctor`). A member on its owner's line has
+## no doc (spec §1.2), so `dawn doc` writes null for it and nothing here has to
+## tell a member's doc from its type's.
 fn member_docs(members: List[(String, Json)]) -> List[(String, Json)] =
   filter(members, pr => {
     let (_, m) = pr
-    str.trim(field(m, "doc")) != ""
+    str.trim(field(m, "doc")) != "" || len(jarr(jget(m, "examples"))) > 0
   })
 
 fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "${qual}.${name}" }
@@ -601,7 +628,7 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       Err(e) -> panic("stdlib.json: " ++ error_text(e))
     }
   let docs = doc_files()
-  let pg = pg_of(docs, api)
+  let pg = pg_of(docs, api, c)
   let mu = (u: String) => map_doc_url(root, docs, u)
   # The title and the opening paragraph go into the band above the page; the
   # rest of the intro opens the article.
@@ -647,7 +674,7 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
 
 fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))
 
-fn no_pg() -> Pg = Pg { docs: [], anchors: set.empty() }
+fn no_pg() -> Pg = Pg { docs: [], anchors: set.empty(), examples: ("Example", "Examples") }
 
 fn plain_prose(text: String) -> String = prose(no_pg(), text, [])
 
@@ -743,6 +770,36 @@ test "member docs render under their declarations, and a member without one gets
   let without = trait_entry(no_pg(), "std-x", tr([meth("fn n(t: T) -> Int", JNull)]))
   assert not str.contains(without, "api-members")
   assert str.ends_with(without, "</div>\n</div>")
+}
+
+test "an entry's examples render as Dawn code under one heading, and none renders nothing" {
+  let f = (ex: List[String]) => {
+    let base = [("name", JStr("inc")), ("sig", JStr("fn inc(x: Int) -> Int")), ("doc", JStr("Adds one."))]
+    jobj(if len(ex) == 0 { base } else { base ++ [("examples", JArr(map(ex, e => JStr(e))))] })
+  }
+  let one = fn_entry(no_pg(), "m", "std-m", f(["assert inc(1) == 2"]))
+  assert str.contains(one, `<div class="api-examples">` ++ "\n" ++ `<p class="api-examples-title">Example</p>` ++
+      "\n" ++ `<pre class="dawn api-example"><code>` ++ highlight_dawn("assert inc(1) == 2") ++ "</code></pre>\n</div>\n")
+  # after the prose, inside the entry
+  assert str.ends_with(one, "</div>\n</div>")
+  let two = fn_entry(no_pg(), "m", "std-m", f(["assert inc(1) == 2", "let y = inc(0)\nassert y == 1"]))
+  assert str.contains(two, ">Examples</p>")
+  assert len(str.split(two, `<pre class="dawn api-example">`)) == 3
+  # without examples the entry is the bytes it always was
+  let none = fn_entry(no_pg(), "m", "std-m", f([]))
+  assert not str.contains(none, "api-example")
+  assert str.ends_with(none, "<p>Adds one.</p>\n</div>\n</div>")
+  # a constructor with an example and no doc still gets its row
+  let sum = jobj([("name", JStr("Shape")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("doc", JStr("A shape.")),
+    ("ctors", JArr([
+      jobj([("name", JStr("Dot")), ("doc", JNull), ("fields", JArr([])),
+        ("examples", JArr([JStr("assert Dot == Dot")]))])
+    ]))])
+  let html = type_entry(no_pg(), "std-x", sum)
+  assert str.contains(html, "<dt><code>" ++ highlight_dawn("Dot") ++ "</code></dt>\n<dd>\n<div class=\"api-examples\">")
+  # the Chinese page's heading
+  assert chrome(Zh, "..").example_one == "示例"
 }
 
 test "a doc comment is rendered as Markdown, not escaped whole" {
@@ -884,7 +941,7 @@ fn link_json(text: String, module: String, name: String, kind: String) -> Json =
 ## here and in [api_rows] are one set of rules, and a member lands on its
 ## owner. Built from the same synthetic document as the anchor test above.
 test "a doc link lands on the entry that holds its target" {
-  let pg = pg_of([], probe_api())
+  let pg = pg_of([], probe_api(), chrome(En, "."))
   let lands = (module: String, name: String, kind: String) =>
     match link_anchor(jget(link_json(name, module, name, kind), "target")) {
       Some(a) -> if set.has(pg.anchors, a) { a } else { "missing #" ++ a }
@@ -909,7 +966,7 @@ test "a doc link lands on the entry that holds its target" {
 }
 
 test "a doc's links render as links to their entries, and nothing else moves" {
-  let pg = pg_of([], probe_api())
+  let pg = pg_of([], probe_api(), chrome(En, "."))
   let doc = jobj([("doc", JStr("Like [`str.trim`], not [`Int`]; `[x]` and\n\n```\n[`str.trim`]\n```")),
     ("links", JArr([link_json("str.trim", "std/str", "trim", "fn"), link_json("Int", "", "Int", "type")]))])
   let html = doc_prose(pg, doc)

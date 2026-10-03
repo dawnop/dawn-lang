@@ -1,0 +1,140 @@
+# A test named by a declaration (`test f { ... }`, spec §3.4) is that
+# declaration's example, so the name has to land on one. This module decides
+# whether it does, and says why not when it does not.
+#
+# Why its own pass and not part of checking the test's body: the name is a
+# fact about the module's declarations, not about the body, and an example
+# whose name lands on nothing is wrong whatever the body says. Checking it
+# with the headers also puts the error ahead of every body diagnostic, the way
+# `pass_main_check` does for `main`, and keeps it out of the body scheduler and
+# its reference twin in scripts/incremental-semantics-contract.
+#
+# Why the parse tree and not the checker's tables: the rule is "a top-level
+# declaration of this module", and the parse tree is exactly that list. The
+# tables also hold what imports and the prelude bound, which is the one thing
+# the rule leaves out -- an example of `trim` belongs in the module that
+# declares `trim` -- and they are only consulted to say so in the error.
+
+use std/list
+use std/map
+use front/suggest
+use front/ast.{
+  Module, ExampleOf, module_fns, module_types, module_consts, module_traits, module_effects,
+  module_tests, example_spelling
+}
+use check/cx.{Cx, cerr_o, test_cx}
+use front/parser
+
+## A top-level declaration a test can be named by: its name, what kind of
+## declaration it is (as an error spells it), and for a type its constructors.
+type Named = { name: String, kind: String, ctors: List[String] }
+
+fn declared(m: Module) -> List[Named] = {
+  let none: List[String] = []
+  var out: List[Named] = []
+  for f in module_fns(m) { out = out ++ [Named { name: f.name, kind: "a function", ctors: none }] }
+  for t in module_types(m) {
+    let kind = match t.alias_target {
+      Some(_) -> if t.is_opaque { "an opaque type" } else { "a type alias" }
+      None -> "a type"
+    }
+    out = out ++ [Named { name: t.name, kind: kind, ctors: map(t.ctors, c => c.name) }]
+  }
+  for c in module_consts(m) { out = out ++ [Named { name: c.name, kind: "a constant", ctors: none }] }
+  for t in module_traits(m) { out = out ++ [Named { name: t.name, kind: "a trait", ctors: none }] }
+  for e in module_effects(m) { out = out ++ [Named { name: e.name, kind: "an effect", ctors: none }] }
+  out
+}
+
+## Why `of` names nothing it may, as (message, hint), or None when it lands on
+## exactly one declaration of `m` (and, for `T.Ctor`, on one of `T`'s
+## constructors).
+pub(pkg) fn example_problem(cx: Cx, m: Module, of: ExampleOf) -> Option[(String, Option[String])] = {
+  let decls = declared(m)
+  let spelled = example_spelling(of)
+  let hits = filter(decls, d => d.name == of.name)
+  if len(hits) == 0 {
+    match map.get(cx.imported_names, of.name) {
+      Some(from) -> {
+        return Some(("`test ${spelled}` names `${of.name}`, which this module imports from `${from}`",
+          Some("an example belongs in the module that declares `${of.name}`; " ++
+              "give this test a string name to keep it here")))
+      }
+      None -> ()
+    }
+    let hint = unwrap_or(suggest.hint(of.name, map(decls, d => d.name)),
+      "a test named by a declaration is its example: name a function, type, trait, " ++
+        "effect or constant declared here, or give the test a string name")
+    return Some(("`test ${spelled}`: nothing in this module is declared as `${of.name}`", Some(hint)))
+  }
+  if len(hits) > 1 {
+    return Some(("`test ${spelled}`: `${of.name}` names more than one declaration of this module (" ++
+        join(map(hits, d => d.kind), " and ") ++ ")",
+      Some("give the test a string name")))
+  }
+  let d = hits[0]
+  match of.ctor {
+    None -> None
+    Some(c) ->
+      if d.kind != "a type" {
+        Some(("`test ${spelled}`: `${of.name}` is ${d.kind}, and only a type has constructors to name",
+          None))
+      } else if list.contains(d.ctors, c) {
+        None
+      } else {
+        Some(("`test ${spelled}`: type `${of.name}` has no constructor `${c}`",
+          suggest.hint(c, d.ctors)))
+      }
+  }
+}
+
+## Pass 4.5 (after `main`, before the public surface): every test named by a
+## declaration names one of this module's (spec §3.4). The error sits on the
+## name after `test`.
+pub(pkg) fn pass_decl_tests(cx: Cx, m: Module) -> Cx = {
+  var cx1 = cx
+  for t in module_tests(m) {
+    match t.example_of {
+      Some(of) ->
+        match example_problem(cx, m, of) {
+          Some(p) -> {
+            let (msg, hint) = p
+            cx1 = cerr_o(cx1, msg, t.nlo, t.nhi, hint)
+          }
+          None -> ()
+        }
+      None -> ()
+    }
+  }
+  cx1
+}
+
+test "a test's declaration name lands on this module's declaration, or says why not" {
+  let text = join([
+    "pub fn inc(x: Int) -> Int = x + 1",
+    "pub type Shape = Circle(r: Int) | Dot",
+    "alias Size = Int",
+    "const LIMIT: Int = 3",
+    "trait Named[T] { fn name(x: T) -> String }",
+    "effect Ask { fn ask() -> Int }",
+    ""
+  ], "\n")
+  let (m, ds) = parser.parse_module(text)
+  assert ds == []
+  let cx = Cx { ..test_cx(), imported_names: map.insert(test_cx().imported_names, "trim", "std/str") }
+  let at = (name: String, ctor: Option[String]) => example_problem(cx, m, ExampleOf { name: name, ctor: ctor })
+  for n in ["inc", "Shape", "Size", "LIMIT", "Named", "Ask"] { assert at(n, None) == None }
+  assert at("Shape", Some("Circle")) == None
+  assert at("nope", None) == Some(("`test nope`: nothing in this module is declared as `nope`",
+    Some("a test named by a declaration is its example: name a function, type, trait, effect or " ++
+        "constant declared here, or give the test a string name")))
+  assert at("inx", None) == Some(("`test inx`: nothing in this module is declared as `inx`",
+    Some("did you mean `inc`?")))
+  assert at("trim", None) == Some(("`test trim` names `trim`, which this module imports from `std/str`",
+    Some("an example belongs in the module that declares `trim`; give this test a string name to keep it here")))
+  assert at("Shape", Some("Square")) == Some(("`test Shape.Square`: type `Shape` has no constructor `Square`", None))
+  assert at("Shape", Some("Circl")) == Some(("`test Shape.Circl`: type `Shape` has no constructor `Circl`",
+    Some("did you mean `Circle`?")))
+  assert at("Ask", Some("ask")) == Some(("`test Ask.ask`: `Ask` is an effect, and only a type has constructors to name", None))
+  assert at("Size", Some("X")) == Some(("`test Size.X`: `Size` is a type alias, and only a type has constructors to name", None))
+}

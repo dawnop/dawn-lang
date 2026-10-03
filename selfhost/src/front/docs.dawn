@@ -26,6 +26,12 @@
 # fails on a link that resolves to nothing) and hover (which makes them
 # clickable). What a link resolves to needs a checked module's import tables
 # and is `driver/doclinks`.
+#
+# A declaration's examples are here for the same two consumers: a test named
+# by the declaration (`test f { ... }`, spec §3.4) is one, and what a reader
+# is shown is its body's source text, cut out of the file and dedented
+# (`example_source`). Whether the name lands on a declaration is the
+# checker's (`check/decltests`); this only files each body under the name.
 
 use std/str
 use std/list
@@ -40,7 +46,11 @@ use front/ast.{
   module_consts,
   module_traits,
   module_effects,
-  module_impls
+  module_impls,
+  module_tests,
+  example_spelling,
+  e_lo,
+  e_hi
 }
 
 ## 1-based line number of code-point offset `off` (count of line starts <= off).
@@ -305,6 +315,76 @@ pub fn module_doc_of(ds: DocSrc, m: Module) -> Option[String] = {
   } else {
     Some(join(acc, "\n"))
   }
+}
+
+# ---- examples (spec §3.4) ----
+
+## What an example shows: the source of a test body spanning `lo`..`hi` (the
+## braces included), as it reads inside the braces. A body on one line is
+## that line, trimmed. Otherwise the line the `{` ends and the line the `}`
+## starts are dropped when nothing else is on them, every line loses the
+## indentation all of its non-blank lines share, blank lines become empty, and
+## trailing spaces go. Comments in the body stay: they are part of the example.
+pub fn example_source(text: String, lo: Int, hi: Int) -> String = {
+  let inner = str.slice(text, lo + 1, hi - 1)
+  if not str.contains(inner, "\n") { return str.trim(inner) }
+  var lines = map(str.split(inner, "\n"), l => str.trim_end(l))
+  if len(lines) > 0 && lines[0] == "" { lines = list.drop(lines, 1) }
+  if len(lines) > 0 && lines[len(lines) - 1] == "" { lines = list.take(lines, len(lines) - 1) }
+  var common = -1
+  for l in lines {
+    if l != "" {
+      let lead = str.len(l) - str.len(str.trim_start(l))
+      if common < 0 || lead < common { common = lead }
+    }
+  }
+  let cut = if common < 0 { 0 } else { common }
+  join(map(lines, l => if l == "" { "" } else { str.drop(l, cut) }), "\n")
+}
+
+## Every example in `m` (parsed from `text`), filed under the spelling of the
+## declaration its test names (`f`, `T`, `T.Ctor`), in the order written.
+pub fn module_examples(text: String, m: Module) -> Map[String, List[String]] = {
+  var out: Map[String, List[String]] = map.empty()
+  for t in module_tests(m) {
+    match t.example_of {
+      Some(of) -> {
+        let key = example_spelling(of)
+        let src = example_source(text, e_lo(t.body), e_hi(t.body))
+        out = map.insert(out, key, unwrap_or(map.get(out, key), []) ++ [src])
+      }
+      None -> ()
+    }
+  }
+  out
+}
+
+test "an example is its test body's source, inside the braces and dedented" {
+  let text = join([
+    "pub fn inc(x: Int) -> Int = x + 1",
+    "pub type Shape = Circle(r: Int) | Dot",
+    "",
+    "test inc {",
+    "  # one more",
+    "  let y = inc(1)",
+    "",
+    "    assert y == 2   ",
+    "}",
+    "",
+    "test \"not an example\" { assert true }",
+    "test inc { assert inc(2) == 3 }",
+    "test Shape.Circle {",
+    "  assert Circle(1) != Dot }",
+    ""
+  ], "\n")
+  let (m, ds) = parser.parse_module(text)
+  assert ds == []
+  let ex = module_examples(text, m)
+  assert map.get(ex, "inc") == Some(["# one more\nlet y = inc(1)\n\n  assert y == 2", "assert inc(2) == 3"])
+  # the `}` shares its line with code, so that line stays
+  assert map.get(ex, "Shape.Circle") == Some(["assert Circle(1) != Dot"])
+  assert map.get(ex, "Shape") == None
+  assert len(map.keys(ex)) == 2
 }
 
 test "a documented first declaration is not also the module's doc" {

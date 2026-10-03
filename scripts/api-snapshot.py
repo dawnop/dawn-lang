@@ -31,7 +31,9 @@ What goes in, and why the shape is ours rather than `dawn doc`'s:
     snapshot, not a documentation archive: prose churns every release, it
     would dominate both the file size and any diff of two files, and
     `api-diff.py` deliberately never reads it. A link is part of the prose it
-    sits in, so it goes where the prose goes.
+    sits in, so it goes where the prose goes. So are a declaration's
+    `examples` (the bodies of the tests named by it, spec 3.4): what an
+    example shows is documentation, and a body edit is not an API change.
   * a builtin's `comptime` flag ("ok" / "refused") is kept. Whether a `const`
     may call a builtin is part of what a program can rely on, and spec 7.2
     sends readers to that flag rather than listing the names, so it is surface
@@ -65,22 +67,24 @@ SCHEMA = 1
 # snapshot keeps. Anything outside the union is a surface this file would be
 # blind to, and the script stops rather than pretend otherwise.
 DOC_KEYS = {"modules", "groups", "traits"}
-# `links` rides beside every `doc` and is dropped with it (DOC_ONLY).
+# `links` rides beside every `doc` and is dropped with it (DOC_ONLY); so do
+# `examples`, which a pub fn, type, constructor, const, trait or effect carries
+# when a test is named by it.
 MODULE_KEYS = {"path", "doc", "links", "fns", "types", "consts", "traits", "effects", "impls"}
 ENTRY_KEYS = {
-    "fns": {"name", "sig", "comptime", "doc", "links"},
-    "consts": {"name", "type", "doc", "links"},
-    "types": {"name", "record", "typeParams", "ctors", "doc", "links"},
-    "traits": {"name", "typeParam", "assoc", "effectAssoc", "methods", "doc", "links"},
-    "effects": {"name", "ops", "doc", "links"},
+    "fns": {"name", "sig", "comptime", "doc", "links", "examples"},
+    "consts": {"name", "type", "doc", "links", "examples"},
+    "types": {"name", "record", "typeParams", "ctors", "doc", "links", "examples"},
+    "traits": {"name", "typeParam", "assoc", "effectAssoc", "methods", "doc", "links", "examples"},
+    "effects": {"name", "ops", "doc", "links", "examples"},
 }
-CTOR_KEYS = {"name", "fields", "doc", "links"}
+CTOR_KEYS = {"name", "fields", "doc", "links", "examples"}
 FIELD_KEYS = {"name", "type", "doc", "links"}
 ASSOC_KEYS = {"name", "doc", "links"}
 EFFECT_ASSOC_KEYS = {"name", "default", "doc", "links"}
 METHOD_KEYS = {"name", "sig", "hasDefault", "doc", "links"}
 OP_KEYS = {"name", "sig", "doc", "links"}
-DOC_ONLY = {"doc", "links"}
+DOC_ONLY = {"doc", "links", "examples"}
 GROUP_KEYS = {"name", "fns"}
 
 KINDS = ("fns", "types", "consts", "traits", "effects")
@@ -251,9 +255,11 @@ CLEAN_DOC = {
         "path": "m",
         "doc": "prose that must not reach the snapshot",
         "fns": [{"name": "f", "sig": "fn f() -> Int !io", "doc": "see [`g`]",
-                 "links": [{"text": "g", "target": {"module": "m", "name": "g", "kind": "fn"}}]}],
+                 "links": [{"text": "g", "target": {"module": "m", "name": "g", "kind": "fn"}}],
+                 "examples": ["assert f() == 1"]}],
         "types": [{"name": "T", "record": True, "typeParams": [], "doc": "prose",
-                   "ctors": [{"name": "T", "doc": "prose",
+                   "examples": ["let t = T { a: 1 }"],
+                   "ctors": [{"name": "T", "doc": "prose", "examples": ["assert T { a: 1 } == T { a: 1 }"],
                               "fields": [{"name": "a", "type": "Int", "doc": None}]}]}],
         "traits": [{"name": "Tr", "typeParam": "W", "assoc": [{"name": "It", "doc": None}],
                     "methods": [{"name": "go", "sig": "fn go[W: Tr](w: W) -> W",
@@ -288,6 +294,7 @@ def self_test(verbose: bool = True) -> int:
         (paths == ["<builtins>/io", "<prelude>", "m"], f"unexpected modules {paths}"),
         ("doc" not in json.dumps(modules), "a doc comment survived into the snapshot"),
         ("links" not in json.dumps(modules), "a doc's links survived into the snapshot"),
+        ("examples" not in json.dumps(modules), "a declaration's examples survived into the snapshot"),
         ("dep/mod" not in paths, "a dependency's module was not filtered out"),
         (modules[2]["traits"][0]["assoc"] == ["It"], "the object assoc form was not flattened"),
         (modules[1]["traits"][0]["assoc"] == ["Item"], "the string assoc form was not kept"),
