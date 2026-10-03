@@ -165,8 +165,8 @@ T1 验收时按报告 5.1 的测法（与 inlay_full 交错对比）复测。
 ### T1.4 行为变化与 Emit-Change
 
 `initialize` 的回复多了 `semanticTokensProvider`（legend、`full: true`、`range: true`），其余能力不变。`selfhost-lsp-diff.sh` 的会话在 inlays.dawn 上
-加了一次 `full` 与一次 `range`（与那里的 inlayHint 同两行），上一 release 回 `-32601`。用 `origin/main`（`fe6f6cb2`）编出的服务端做真父对照：
-117 条消息里只有这三条不同，hover、definition、inlayHint 逐字节不变，所以提交里写一行 `Emit-Change(lsp)`。
+加了一次 `full` 与一次 `range`（与那里的 inlayHint 同两行），上一 release 回 `-32601`。用真父编出的服务端逐消息对照：基于 `fe6f6cb2` 时 117 条消息、rebase 到 `ff7a77b2`（C5-2 合入）后 132 条消息，
+两次都只有这三条不同，hover、definition、inlayHint 逐字节不变，所以提交里写一行 `Emit-Change(lsp)`。
 
 ### T1.5 性能（本机实测）
 
