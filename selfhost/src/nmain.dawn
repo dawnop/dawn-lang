@@ -37,7 +37,7 @@ use driver/stdlib.{
   StdCtx, StdLoadError, load_chosen_std, cli_std_choice, std_choice_text, std_load_error_text,
   std_load_is_bug
 }
-use ir/interp.{ct_default}
+use ir/interp.{ct_native}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{Program, LocDiag, load_target, analyze_program, rendered_diags, dawn_files_under}
 use driver/clifail.{fail_compile}
@@ -368,7 +368,7 @@ fn analyzed(std: StdCtx, target: String) -> Program !Fs !Proc !Env !Exit !Consol
     cli_error("source files must end in .dawn: ${target}")
   }
   let loaded = load_target(std, target)
-  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  let prog = analyze_program(loaded, std, ct_native(), jsig_refused())
   if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   prog
 }
@@ -647,7 +647,7 @@ fn cmd_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var all: List[LocDiag] = []
   for target in targets {
     let loaded = load_target(std, target)
-    let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+    let prog = analyze_program(loaded, std, ct_native(), jsig_refused())
     all = all ++ rendered_diags(prog)
   }
   if len(all) > 0 { return fail_compile(all) }
@@ -848,7 +848,7 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     return cli_error("no such file or directory: ${target}")
   }
   let loaded = load_target(std, target)
-  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  let prog = analyze_program(loaded, std, ct_native(), jsig_refused())
   if len(prog.diags) > 0 { fail_doc(rendered_diags(prog)) }
   print_doc(doc.project_json(prog, std))
 }
@@ -1001,7 +1001,8 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
       } else if mode == "lsp" {
         run_lsp(lsp_std_flag(rest), LspLeaseHost {
           standalone: native_lsp_standalone_lease,
-          project: native_lsp_target_lease
+          project: native_lsp_target_lease,
+          ct: ct_native()
         })
       } else if mode == "version" || mode == "--version" {
         console_println("dawnc " ++ VERSION ++ " (native)")

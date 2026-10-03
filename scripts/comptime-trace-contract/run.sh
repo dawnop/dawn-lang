@@ -124,8 +124,8 @@ elif name == "omit-default-frame":
     )
 elif name == "omit-impl-frame":
     replace_once(
-        "          let frame = FImpl(owner, trait_frame_name(icx, tid), tid, ty_key(subject), m)",
-        "          let frame = FDirect(owner, m)",
+        "  let frame = FImpl(owner, trait_frame_name(icx, tid), tid, ty_key(subject), m)",
+        "  let frame = FDirect(owner, m)",
     )
 elif name == "remove-frame-cap":
     replace_once("const MAX_FAILURE_FRAMES: Int = 16", "const MAX_FAILURE_FRAMES: Int = 100000")

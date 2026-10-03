@@ -57,7 +57,7 @@ use ir/core.{
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CUpdate, update_values,
   CReturn, CBreak, CContinue, CForeign, CDup, CDictRef, CDictApply, CDictArg, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
-  CDirect, CDynamic, CMethod, CImpl, CDefault,
+  CCallee, CUpdField, CUnOp, CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
   CBinOp
@@ -135,21 +135,30 @@ alias ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)]
 
 alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
 
-## How much a comptime run may do. `fuel` is the whole of it since the
-## compile-time Java route went with `unsafe_pure` (docs/effects-window-design.md
-## 6): a `use java` call is `!io`, a const or comptime block is pure, and no
-## source can put the one inside the other, so there is no host call left for
-## a flag to grant.
-pub type CtOpts = { fuel: Int }
+## How much a comptime run may do: `fuel` bounds the steps, `depth` the nested
+## calls. There is no host-call flag since the compile-time Java route went
+## with `unsafe_pure` (docs/effects-window-design.md 6): a `use java` call is
+## `!io`, a const or comptime block is pure, and no source can put the one
+## inside the other, so there is no host call left for a flag to grant.
+##
+## `depth` is a field rather than one constant because it answers to the host
+## stack the interpreter runs on, and the two compilers do not have the same
+## one (see MAX_CALL_DEPTH). The interpreter is shared code and cannot tell
+## which backend compiled it, so the entry that knows says: main.dawn takes
+## `ct_default`, nmain.dawn `ct_native`.
+pub type CtOpts = { fuel: Int, depth: Int }
 
 pub const DEFAULT_FUEL: Int = 100000000
 
-## Defaults: all the fuel a real compile gets.
-pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL }
+## Defaults: all the fuel a real compile gets, at the JVM compiler's depth.
+pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL, depth: MAX_CALL_DEPTH }
+
+## Defaults for the native compiler: the same fuel, the depth its stack holds.
+pub fn ct_native() -> CtOpts = CtOpts { ..ct_default(), depth: NATIVE_CALL_DEPTH }
 
 ## Defaults with the fuel dialled down (the fuel tests, and callers that want
 ## a comptime run bounded well below a real compile's).
-pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { fuel: n }
+pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel: n }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
@@ -187,7 +196,9 @@ type ICx = {
   scope: ConstScope,
   # the owner of the body being evaluated: `owner` until a call crosses into
   # another module, whose constants its body then names
-  body: String
+  body: String,
+  # how many calls may nest (CtOpts.depth)
+  max_depth: Int
 }
 
 ## How a body names constants: the module it belongs to (`path`, the key
@@ -270,15 +281,29 @@ pub fn ct_world_add(
   out
 }
 
-# A deliberate constant, not a value derived from the stack. Measured
-# 2026-07-31 (docs/audit/ceval-trampoline-verdict.md 4): the interpreter's own
-# frames exhaust -Xss below 128m before this counter fires, so the limit only
-# binds at -Xss >= 128m -- at the shipped 512m it is what actually stops
-# runaway comptime recursion. Anyone lowering -Xss below 128m trades this
-# diagnostic for a raw StackOverflowError. Do not make it dynamic: the measured
-# depth-per-stack is JIT-dependent, and a limit you only learn by running is
-# worse than an honest constant.
+# Deliberate constants, not values derived from the stack. Do not make them
+# dynamic: the measured depth-per-stack is JIT-dependent on the JVM and
+# shape-dependent everywhere, and a limit you only learn by running is worse
+# than an honest constant.
+#
+# The JVM compiler's. Measured 2026-07-31 (docs/audit/ceval-trampoline-verdict.md
+# 4): the interpreter's own frames exhaust -Xss below 128m before this counter
+# fires, so the limit only binds at -Xss >= 128m -- at the shipped 512m it is
+# what actually stops runaway comptime recursion. Anyone lowering -Xss below
+# 128m trades this diagnostic for a raw StackOverflowError.
 const MAX_CALL_DEPTH: Int = 100000
+
+# The native compiler's, far lower, because its stack is 8 times smaller and
+# its frames are bigger. Every native subcommand runs inside io's `Exit`
+# handler, a `ctl` handler, so the whole compiler runs on a continuation
+# carrier: 64 MiB (DAWN_CTL_STACK_BYTES in runtime/c/dawn_rt.c), not the 512
+# MiB main stack. Measured 2026-10-03 on several call shapes (issue #417):
+# the deepest comptime recursion that folds before the host stack runs out is
+# 10,400 for `1 + f(n - 1)`, 5,800 for a `match` on a list, and 5,200 for a
+# body with a block, a `let` and a `match` -- 2,800 of the last before ceval's
+# arms became separate functions. 1,500 leaves a factor of 3.5 under the
+# heaviest of them, so the counter, not the stack, is what stops the run.
+const NATIVE_CALL_DEPTH: Int = 1500
 
 const MAX_FAILURE_FRAMES: Int = 16
 
@@ -816,9 +841,9 @@ fn call_cfun(
   caps: Map[Int, CValue],
   args: List[CValue]
 ) -> ER !io = {
-  if st.depth + 1 > MAX_CALL_DEPTH {
+  if st.depth + 1 > icx.max_depth {
     return framed(
-      cerrh(st, env, "call depth limit (" ++ to_string(MAX_CALL_DEPTH) ++ ") exceeded",
+      cerrh(st, env, "call depth limit (" ++ to_string(icx.max_depth) ++ ") exceeded",
         "deep recursion does not fit comptime; use a loop or fold"),
       frame)
   }
@@ -1587,6 +1612,12 @@ fn eval_all(
   Ok((st1, env1, vals))
 }
 
+## The dispatcher. Every arm that binds anything is its own function, and that
+## is a measured decision about the native backend, not a style: a C function
+## reserves one owned slot per local of *every* arm, so the old single-body
+## ceval took 3,920 bytes of C stack per activation whichever arm ran, and a
+## comptime call nests two to six of them. Split, an activation pays for the
+## arm it takes. See the MAX_CALL_DEPTH comment for the numbers.
 fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
   let (st, env, _) = burn(st0, env0)?
   match e {
@@ -1595,233 +1626,312 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CBool(v) -> Ok((st, env, VBool(v)))
     CStr(v) -> Ok((st, env, VStr(v)))
     CUnit -> Ok((st, env, VUnit))
-    CLocal(sym, _) ->
-      match map.get(env, sym) {
-        Some(v) -> Ok((st, env, v))
-        None -> cerr(st, env, "symbol " ++ to_string(sym) ++ " is not bound (interpreter bug)")
-      }
+    CLocal(sym, _) -> ceval_local(st, env, sym)
     # boxing is a backend's business; every value here is already uniform
     CBox(inner, _) -> ceval(icx, st, env, inner)
     CUnbox(inner, _) -> ceval(icx, st, env, inner)
     CDup(inner, _) -> ceval(icx, st, env, inner)
-    CClosure(name, owner, caps, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, caps)?
-      let (st2, cf) = get_cfun(icx, st1, env1, owner, name)?
-      var cenv: Map[Int, CValue] = map.empty()
-      var i = 0
-      for p in cf.captures {
-        if i < len(vals) { cenv = map.insert(cenv, p.sym, vals[i]) }
-        i = i + 1
-      }
-      Ok((st2, env1, VClosure(owner, name, cenv)))
-    }
-    CFnRef(_, name, _) ->
-      cerr(st, env, "`" ++ name ++ "` reached comptime unlifted (interpreter bug)")
-    CCall(callee, args, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, args)?
-      match callee {
-        CDirect(owner, name) -> call_named(icx, st1, env1, owner, name, vals)
-        CDynamic(target) -> {
-          let (st2, env2, f) = ceval(icx, st1, env1, target)?
-          apply_fn(icx, st2, env2, f, vals)
-        }
-        # dispatch: the dictionary names its slot table, the slot names an
-        # ordinary function, and the dictionary rides along as the trailing
-        # argument -- which is exactly what the JVM's dictionary class does
-        CMethod(dexpr, _, m, idx, _nev) -> {
-          let (st2, env2, dv) = ceval(icx, st1, env1, dexpr)?
-          match dv {
-            VDict(key, _) ->
-              match map.get(st2.cache.dicts, key) {
-                Some(dd) ->
-                  if idx >= len(dd.slots) {
-                    cerr(st2, env2, "`" ++ m ++ "` has no slot " ++ to_string(idx))
-                  } else {
-                    match dd.slots[idx] {
-                      CSlotFn(o, n) -> call_named(icx, st2, env2, o, n, vals ++ [dv])
-                      CSlotDefault(o, _) ->
-                        match map.get(icx.traits, dd.trait_id) {
-                          Some(_) ->
-                            call_default(icx, st2, env2, o, dd.trait_id, m, vals ++ [dv])
-                          None -> cerr(st2, env2, "unknown trait behind `" ++ m ++ "`")
-                        }
-                    }
-                  }
-                None -> cerr(st2, env2, "no dictionary registered for `" ++ key ++ "`")
-              }
-            _ -> cerr(st2, env2, "`" ++ m ++ "` dispatched on a non-dictionary")
-          }
-        }
-        CImpl(owner, tid, subject, m) -> {
-          let frame = FImpl(owner, trait_frame_name(icx, tid), tid, ty_key(subject), m)
-          match get_trait_cfun(icx, st1, env1, tid, subject_key(subject), m) {
-            Err(err) -> Err(frame_error(err, frame))
-            Ok(pair) -> {
-              let (st2, cf) = pair
-              let no_caps: Map[Int, CValue] = map.empty()
-              call_cfun(icx, st2, env1, cf, frame, no_caps, vals)
-            }
-          }
-        }
-        CDefault(owner, tid, m) -> call_default(icx, st1, env1, owner, tid, m, vals)
-      }
-    }
-    CIntrinsic(name, args, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, args)?
-      call_builtin(icx, st1, env1, name, vals)
-    }
-    CCtor(adt, ci, args, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, args)?
-      Ok((st1, env1, VAdt(adt, ci, vals)))
-    }
-    # Copy and overwrite: a value is immutable here, so the copy is the
-    # field list, and the result is the one the whole constructor would build.
-    CUpdate(base, _, _, fields, _) -> {
-      let (st1, env1, bv) = ceval(icx, st, env, base)?
-      let (st2, env2, vals) = eval_all(icx, st1, env1, update_values(fields))?
-      let (aid, ci, kept) = as_adt(bv)
-      var out: List[CValue] = []
-      var i = 0
-      var k = 0
-      for f in fields {
-        match f.value {
-          Some(_) -> {
-            out = out ++ [vals[k]]
-            k = k + 1
-          }
-          None -> { out = out ++ [kept[i]] }
-        }
-        i = i + 1
-      }
-      Ok((st2, env2, VAdt(aid, ci, out)))
-    }
-    CField(target, _, _, idx, _) -> {
-      let (st1, env1, v) = ceval(icx, st, env, target)?
-      let (_, _, fields) = as_adt(v)
-      Ok((st1, env1, fields[idx]))
-    }
-    CIsCtor(target, _, ci) -> {
-      let (st1, env1, v) = ceval(icx, st, env, target)?
-      let (_, vci, _) = as_adt(v)
-      Ok((st1, env1, VBool(vci == ci)))
-    }
-    CTagOf(target, _) -> {
-      let (st1, env1, v) = ceval(icx, st, env, target)?
-      let (_, vci, _) = as_adt(v)
-      Ok((st1, env1, VInt(vci)))
-    }
-    CTuple(elems, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, elems)?
-      Ok((st1, env1, VTuple(vals)))
-    }
-    CTupleGet(target, idx, _) -> {
-      let (st1, env1, v) = ceval(icx, st, env, target)?
-      match v {
-        VTuple(xs) -> Ok((st1, env1, xs[idx]))
-        _ -> cerr(st1, env1, "tuple projection on a non-tuple (interpreter bug)")
-      }
-    }
-    CListLit(elems, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, elems)?
-      Ok((st1, env1, VList(vals)))
-    }
+    CClosure(name, owner, caps, _) -> ceval_closure(icx, st, env, name, owner, caps)
+    CFnRef(_, name, _) -> unlifted_fn(st, env, name)
+    CCall(callee, args, _) -> ceval_call(icx, st, env, callee, args)
+    CIntrinsic(name, args, _) -> ceval_intrinsic(icx, st, env, name, args)
+    CCtor(adt, ci, args, _) -> ceval_ctor(icx, st, env, adt, ci, args)
+    CUpdate(base, _, _, fields, _) -> ceval_update(icx, st, env, base, fields)
+    CField(target, _, _, idx, _) -> ceval_field(icx, st, env, target, idx)
+    CIsCtor(target, _, ci) -> ceval_is_ctor(icx, st, env, target, ci)
+    CTagOf(target, _) -> ceval_tag_of(icx, st, env, target)
+    CTuple(elems, _) -> ceval_tuple(icx, st, env, elems)
+    CTupleGet(target, idx, _) -> ceval_tuple_get(icx, st, env, target, idx)
+    CListLit(elems, _) -> ceval_list_lit(icx, st, env, elems)
     CBinary(op, l, r, _) -> eval_binary(icx, st, env, op, l, r)
-    CUnary(op, operand, _) -> {
-      let (st1, env1, v) = ceval(icx, st, env, operand)?
-      match op {
-        CNot -> Ok((st1, env1, VBool(not as_bool(v))))
-        CNeg ->
-          match v {
-            VInt(n) -> Ok((st1, env1, VInt(-n)))
-            # `-f`, not `0.0 - f`: the subtraction loses the sign of zero
-            # (0.0 - 0.0 is +0.0), while the backends emit a true negate
-            VFloat(f) -> Ok((st1, env1, VFloat(-f)))
-            _ -> cerr(st1, env1, "negation needs a number")
-          }
-        CBnot ->
-          match v {
-            VInt(n) -> Ok((st1, env1, VInt(bnot_int(n))))
-            _ -> cerr(st1, env1, "`~` needs an Int")
-          }
-      }
-    }
-    CIf(cond, thn, els, _) -> {
-      let (st1, env1, cv) = ceval(icx, st, env, cond)?
-      if as_bool(cv) {
-        ceval(icx, st1, env1, thn)
-      } else {
-        match els {
-          Some(eb) -> ceval(icx, st1, env1, eb)
-          None -> Ok((st1, env1, VUnit))
-        }
-      }
-    }
-    CBlock(stmts, tail, _) -> {
-      var st1 = st
-      var env1 = env
-      for s in stmts {
-        let (st2, env2) = exec_cstmt(icx, st1, env1, s)?
-        st1 = st2
-        env1 = env2
-      }
-      match tail {
-        Some(x) -> ceval(icx, st1, env1, x)
-        None -> Ok((st1, env1, VUnit))
-      }
-    }
-    CConstRef(owner, name, _) ->
-      # resolved as the emitters resolve it ("" = the body's own module's
-      # view, otherwise the declaring module's path), against the module the
-      # running body belongs to rather than the one being folded
-      match const_lookup(icx, owner, name) {
-        Some(pr) -> {
-          let (path, v) = pr
-          Ok((note_read(icx, st, path), env, v))
-        }
-        None ->
-          cerr(note_miss(st), env, "const `" ++ owner ++ "." ++ name ++ "` failed to evaluate")
-      }
-    # a comptime block nested in what is being folded: the driver folded it
-    # first, exactly as codegen would have
-    CComptime(lo, hi, _) ->
-      match map.get(icx.blocks, (lo, hi)) {
-        Some(v) -> Ok((st, env, v))
-        None -> cerr(st, env, "a nested comptime block did not fold")
-      }
-    CReturn(v) ->
-      match v {
-        Some(x) -> {
-          let (st1, env1, rv) = ceval(icx, st, env, x)?
-          Err((st1, env1, KReturn(rv)))
-        }
-        None -> Err((st, env, KReturn(VUnit)))
-      }
+    CUnary(op, operand, _) -> ceval_unary(icx, st, env, op, operand)
+    CIf(cond, thn, els, _) -> ceval_if(icx, st, env, cond, thn, els)
+    CBlock(stmts, tail, _) -> ceval_block(icx, st, env, stmts, tail)
+    CConstRef(owner, name, _) -> ceval_const_ref(icx, st, env, owner, name)
+    CComptime(lo, hi, _) -> ceval_comptime(icx, st, env, lo, hi)
+    CReturn(v) -> ceval_return(icx, st, env, v)
     CBreak(id) -> Err((st, env, KBreak(id)))
     CContinue(id) -> Err((st, env, KContinue(id)))
     CForeign(j, _) -> eval_java(st, env, j)
     # A dictionary is a value here, the same three ways Core builds one: a
     # statically registered singleton, a construction from its parts', and a
     # part read back out of the one a slot body was handed.
-    CDictRef(key, _, _, _) -> {
-      let no_args: List[CValue] = []
-      Ok((st, env, VDict(key, no_args)))
-    }
-    CDictApply(key, args, _) -> {
-      let (st1, env1, vals) = eval_all(icx, st, env, args)?
-      Ok((st1, env1, VDict(key, vals)))
-    }
-    CDictArg(dexpr, _, _, idx, _) -> {
-      let (st1, env1, dv) = ceval(icx, st, env, dexpr)?
-      match dv {
-        VDict(_, args) ->
-          if idx < len(args) {
-            Ok((st1, env1, args[idx]))
+    CDictRef(key, _, _, _) -> ceval_dict_ref(st, env, key)
+    CDictApply(key, args, _) -> ceval_dict_apply(icx, st, env, key, args)
+    CDictArg(dexpr, _, _, idx, _) -> ceval_dict_arg(icx, st, env, dexpr, idx)
+  }
+}
+
+fn ceval_local(st: ESt, env: Env, sym: Int) -> ER =
+  match map.get(env, sym) {
+    Some(v) -> Ok((st, env, v))
+    None -> cerr(st, env, "symbol " ++ to_string(sym) ++ " is not bound (interpreter bug)")
+  }
+
+fn unlifted_fn(st: ESt, env: Env, name: String) -> ER =
+  cerr(st, env, "`" ++ name ++ "` reached comptime unlifted (interpreter bug)")
+
+fn ceval_closure(
+  icx: ICx,
+  st: ESt,
+  env: Env,
+  name: String,
+  owner: String,
+  caps: List[CExpr]
+) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, caps)?
+  let (st2, cf) = get_cfun(icx, st1, env1, owner, name)?
+  var cenv: Map[Int, CValue] = map.empty()
+  var i = 0
+  for p in cf.captures {
+    if i < len(vals) { cenv = map.insert(cenv, p.sym, vals[i]) }
+    i = i + 1
+  }
+  Ok((st2, env1, VClosure(owner, name, cenv)))
+}
+
+fn ceval_call(icx: ICx, st: ESt, env: Env, callee: CCallee, args: List[CExpr]) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, args)?
+  match callee {
+    CDirect(owner, name) -> call_named(icx, st1, env1, owner, name, vals)
+    CDynamic(target) -> ceval_dynamic(icx, st1, env1, target, vals)
+    CMethod(dexpr, _, m, idx, _nev) -> ceval_method(icx, st1, env1, dexpr, m, idx, vals)
+    CImpl(owner, tid, subject, m) -> call_impl(icx, st1, env1, owner, tid, subject, m, vals)
+    CDefault(owner, tid, m) -> call_default(icx, st1, env1, owner, tid, m, vals)
+  }
+}
+
+fn ceval_dynamic(icx: ICx, st: ESt, env: Env, target: CExpr, vals: List[CValue]) -> ER !io = {
+  let (st2, env2, f) = ceval(icx, st, env, target)?
+  apply_fn(icx, st2, env2, f, vals)
+}
+
+## dispatch: the dictionary names its slot table, the slot names an ordinary
+## function, and the dictionary rides along as the trailing argument -- which
+## is exactly what the JVM's dictionary class does
+fn ceval_method(
+  icx: ICx,
+  st1: ESt,
+  env1: Env,
+  dexpr: CExpr,
+  m: String,
+  idx: Int,
+  vals: List[CValue]
+) -> ER !io = {
+  let (st2, env2, dv) = ceval(icx, st1, env1, dexpr)?
+  match dv {
+    VDict(key, _) ->
+      match map.get(st2.cache.dicts, key) {
+        Some(dd) ->
+          if idx >= len(dd.slots) {
+            cerr(st2, env2, "`" ++ m ++ "` has no slot " ++ to_string(idx))
           } else {
-            cerr(st1, env1, "dictionary argument " ++ to_string(idx) ++ " is missing")
+            match dd.slots[idx] {
+              CSlotFn(o, n) -> call_named(icx, st2, env2, o, n, vals ++ [dv])
+              CSlotDefault(o, _) ->
+                match map.get(icx.traits, dd.trait_id) {
+                  Some(_) -> call_default(icx, st2, env2, o, dd.trait_id, m, vals ++ [dv])
+                  None -> cerr(st2, env2, "unknown trait behind `" ++ m ++ "`")
+                }
+            }
           }
-        _ -> cerr(st1, env1, "dictionary argument read from a non-dictionary")
+        None -> cerr(st2, env2, "no dictionary registered for `" ++ key ++ "`")
       }
+    _ -> cerr(st2, env2, "`" ++ m ++ "` dispatched on a non-dictionary")
+  }
+}
+
+fn call_impl(
+  icx: ICx,
+  st1: ESt,
+  env1: Env,
+  owner: String,
+  tid: Int,
+  subject: Ty,
+  m: String,
+  vals: List[CValue]
+) -> ER !io = {
+  let frame = FImpl(owner, trait_frame_name(icx, tid), tid, ty_key(subject), m)
+  match get_trait_cfun(icx, st1, env1, tid, subject_key(subject), m) {
+    Err(err) -> Err(frame_error(err, frame))
+    Ok(pair) -> {
+      let (st2, cf) = pair
+      let no_caps: Map[Int, CValue] = map.empty()
+      call_cfun(icx, st2, env1, cf, frame, no_caps, vals)
     }
+  }
+}
+
+fn ceval_intrinsic(icx: ICx, st: ESt, env: Env, name: String, args: List[CExpr]) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, args)?
+  call_builtin(icx, st1, env1, name, vals)
+}
+
+fn ceval_ctor(icx: ICx, st: ESt, env: Env, adt: Int, ci: Int, args: List[CExpr]) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, args)?
+  Ok((st1, env1, VAdt(adt, ci, vals)))
+}
+
+## Copy and overwrite: a value is immutable here, so the copy is the field
+## list, and the result is the one the whole constructor would build.
+fn ceval_update(icx: ICx, st: ESt, env: Env, base: CExpr, fields: List[CUpdField]) -> ER !io = {
+  let (st1, env1, bv) = ceval(icx, st, env, base)?
+  let (st2, env2, vals) = eval_all(icx, st1, env1, update_values(fields))?
+  let (aid, ci, kept) = as_adt(bv)
+  var out: List[CValue] = []
+  var i = 0
+  var k = 0
+  for f in fields {
+    match f.value {
+      Some(_) -> {
+        out = out ++ [vals[k]]
+        k = k + 1
+      }
+      None -> { out = out ++ [kept[i]] }
+    }
+    i = i + 1
+  }
+  Ok((st2, env2, VAdt(aid, ci, out)))
+}
+
+fn ceval_field(icx: ICx, st: ESt, env: Env, target: CExpr, idx: Int) -> ER !io = {
+  let (st1, env1, v) = ceval(icx, st, env, target)?
+  let (_, _, fields) = as_adt(v)
+  Ok((st1, env1, fields[idx]))
+}
+
+fn ceval_is_ctor(icx: ICx, st: ESt, env: Env, target: CExpr, ci: Int) -> ER !io = {
+  let (st1, env1, v) = ceval(icx, st, env, target)?
+  let (_, vci, _) = as_adt(v)
+  Ok((st1, env1, VBool(vci == ci)))
+}
+
+fn ceval_tag_of(icx: ICx, st: ESt, env: Env, target: CExpr) -> ER !io = {
+  let (st1, env1, v) = ceval(icx, st, env, target)?
+  let (_, vci, _) = as_adt(v)
+  Ok((st1, env1, VInt(vci)))
+}
+
+fn ceval_tuple(icx: ICx, st: ESt, env: Env, elems: List[CExpr]) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, elems)?
+  Ok((st1, env1, VTuple(vals)))
+}
+
+fn ceval_tuple_get(icx: ICx, st: ESt, env: Env, target: CExpr, idx: Int) -> ER !io = {
+  let (st1, env1, v) = ceval(icx, st, env, target)?
+  match v {
+    VTuple(xs) -> Ok((st1, env1, xs[idx]))
+    _ -> cerr(st1, env1, "tuple projection on a non-tuple (interpreter bug)")
+  }
+}
+
+fn ceval_list_lit(icx: ICx, st: ESt, env: Env, elems: List[CExpr]) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, elems)?
+  Ok((st1, env1, VList(vals)))
+}
+
+fn ceval_unary(icx: ICx, st: ESt, env: Env, op: CUnOp, operand: CExpr) -> ER !io = {
+  let (st1, env1, v) = ceval(icx, st, env, operand)?
+  match op {
+    CNot -> Ok((st1, env1, VBool(not as_bool(v))))
+    CNeg ->
+      match v {
+        VInt(n) -> Ok((st1, env1, VInt(-n)))
+        # `-f`, not `0.0 - f`: the subtraction loses the sign of zero
+        # (0.0 - 0.0 is +0.0), while the backends emit a true negate
+        VFloat(f) -> Ok((st1, env1, VFloat(-f)))
+        _ -> cerr(st1, env1, "negation needs a number")
+      }
+    CBnot ->
+      match v {
+        VInt(n) -> Ok((st1, env1, VInt(bnot_int(n))))
+        _ -> cerr(st1, env1, "`~` needs an Int")
+      }
+  }
+}
+
+fn ceval_if(
+  icx: ICx,
+  st: ESt,
+  env: Env,
+  cond: CExpr,
+  thn: CExpr,
+  els: Option[CExpr]
+) -> ER !io = {
+  let (st1, env1, cv) = ceval(icx, st, env, cond)?
+  if as_bool(cv) {
+    ceval(icx, st1, env1, thn)
+  } else {
+    match els {
+      Some(eb) -> ceval(icx, st1, env1, eb)
+      None -> Ok((st1, env1, VUnit))
+    }
+  }
+}
+
+fn ceval_block(icx: ICx, st: ESt, env: Env, stmts: List[CStmt], tail: Option[CExpr]) -> ER !io = {
+  var st1 = st
+  var env1 = env
+  for s in stmts {
+    let (st2, env2) = exec_cstmt(icx, st1, env1, s)?
+    st1 = st2
+    env1 = env2
+  }
+  match tail {
+    Some(x) -> ceval(icx, st1, env1, x)
+    None -> Ok((st1, env1, VUnit))
+  }
+}
+
+## Resolved as the emitters resolve it ("" = the body's own module's view,
+## otherwise the declaring module's path), against the module the running body
+## belongs to rather than the one being folded.
+fn ceval_const_ref(icx: ICx, st: ESt, env: Env, owner: String, name: String) -> ER =
+  match const_lookup(icx, owner, name) {
+    Some(pr) -> {
+      let (path, v) = pr
+      Ok((note_read(icx, st, path), env, v))
+    }
+    None -> cerr(note_miss(st), env, "const `" ++ owner ++ "." ++ name ++ "` failed to evaluate")
+  }
+
+## a comptime block nested in what is being folded: the driver folded it
+## first, exactly as codegen would have
+fn ceval_comptime(icx: ICx, st: ESt, env: Env, lo: Int, hi: Int) -> ER =
+  match map.get(icx.blocks, (lo, hi)) {
+    Some(v) -> Ok((st, env, v))
+    None -> cerr(st, env, "a nested comptime block did not fold")
+  }
+
+fn ceval_return(icx: ICx, st: ESt, env: Env, v: Option[CExpr]) -> ER !io =
+  match v {
+    Some(x) -> {
+      let (st1, env1, rv) = ceval(icx, st, env, x)?
+      Err((st1, env1, KReturn(rv)))
+    }
+    None -> Err((st, env, KReturn(VUnit)))
+  }
+
+fn ceval_dict_ref(st: ESt, env: Env, key: String) -> ER = {
+  let no_args: List[CValue] = []
+  Ok((st, env, VDict(key, no_args)))
+}
+
+fn ceval_dict_apply(icx: ICx, st: ESt, env: Env, key: String, args: List[CExpr]) -> ER !io = {
+  let (st1, env1, vals) = eval_all(icx, st, env, args)?
+  Ok((st1, env1, VDict(key, vals)))
+}
+
+fn ceval_dict_arg(icx: ICx, st: ESt, env: Env, dexpr: CExpr, idx: Int) -> ER !io = {
+  let (st1, env1, dv) = ceval(icx, st, env, dexpr)?
+  match dv {
+    VDict(_, args) ->
+      if idx < len(args) {
+        Ok((st1, env1, args[idx]))
+      } else {
+        cerr(st1, env1, "dictionary argument " ++ to_string(idx) ++ " is missing")
+      }
+    _ -> cerr(st1, env1, "dictionary argument read from a non-dictionary")
   }
 }
 
@@ -2502,7 +2612,8 @@ fn eval_module_in(
     syms: tm.syms,
     world: world,
     scope: scope,
-    body: owner
+    body: owner,
+    max_depth: opts.depth
   }
   for c in tm.consts {
     # a comptime block inside the initializer folds first
@@ -2565,7 +2676,8 @@ fn probe_icx() -> ICx = {
     syms: no_syms,
     world: ct_world_empty(),
     scope: alone("probe"),
-    body: "probe"
+    body: "probe",
+    max_depth: MAX_CALL_DEPTH
   }
 }
 

@@ -31,7 +31,7 @@ use driver/incremental
 use driver/fsmem
 use std/memfs
 use compiler_plan/envmem
-use ir/interp.{ct_default}
+use ir/interp.{CtOpts, ct_default}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{
   StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text, std_file_of
@@ -422,10 +422,13 @@ fn hex_digit(v: Int) -> Char =
 
 ## Host-specific Java setup without leaking Java-backed modules into this
 ## shared server. A project failure is already located at dawn.toml/dawn.lock
-## so the server can publish it as an ordinary project diagnostic.
+## so the server can publish it as an ordinary project diagnostic. `ct` is the
+## other host-specific fact: how deep comptime may recurse on this host's
+## stack (ir/interp `ct_default` vs `ct_native`).
 pub type LspLeaseHost = {
   standalone: fn() -> JsigLease !io,
-  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io
+  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io,
+  ct: CtOpts
 }
 
 ## Analysis policy is fixed before any lease-backed owner is created. The
@@ -666,8 +669,8 @@ fn analysis_session(st: LspState, js: Jsig) -> incremental.Session = {
   let config = st.analysis_config
   validate_analysis_config(config)
   match config.mode {
-    Legacy -> incremental.new(st.std, ct_default(), js, config.max_modules)
-    Cold -> incremental.disable_reuse(incremental.new(st.std, ct_default(), js, config.max_modules))
+    Legacy -> incremental.new(st.std, st.host.ct, js, config.max_modules)
+    Cold -> incremental.disable_reuse(incremental.new(st.std, st.host.ct, js, config.max_modules))
   }
 }
 
@@ -1724,7 +1727,7 @@ fn install_workspace(
 ## every revision; it owns no session a close of another URI could replace.
 fn standalone_analysis(st: LspState, source_path: String, text: String) -> Program !Fs !Env !io = {
   let lease = st.standalone.expect("standalone LSP lease used after shutdown")
-  analyze_standalone(source_path, text, st.std, ct_default(), lease.jsig)
+  analyze_standalone(source_path, text, st.std, st.host.ct, lease.jsig)
 }
 
 fn standalone_doc(
@@ -2944,7 +2947,8 @@ test "a bundled std buffer keeps its std identity through the document seam" {
       standalone: Some(jsig_refused_lease()),
       host: LspLeaseHost {
         standalone: () => jsig_refused_lease(),
-        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+        project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
+        ct: ct_default()
       },
       analysis_config: legacy_analysis_config(),
       lifecycle: Running,
@@ -3044,7 +3048,8 @@ fn def_probe_state(std: StdCtx) -> LspState = {
     standalone: Some(jsig_refused_lease()),
     host: LspLeaseHost {
       standalone: () => jsig_refused_lease(),
-      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease())
+      project: (_plan: source.SourcePlan) => Ok(jsig_refused_lease()),
+      ct: ct_default()
     },
     analysis_config: legacy_analysis_config(),
     lifecycle: Running,

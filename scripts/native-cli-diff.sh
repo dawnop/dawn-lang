@@ -1060,5 +1060,73 @@ PKGHASH_MISSING="$OUT/no-such-package"
 pair_expect_error "error: not a directory: $PKGHASH_MISSING"$'\n' \
   "__pkghash (missing path)" __pkghash "$PKGHASH_MISSING"
 
+# ---- leg 10: comptime recursion stops at the native depth limit ----
+#
+# The one judgment here where the two drivers are meant to answer differently.
+# A comptime call nests host frames, and the native compiler's host stack is
+# not the JVM's -Xss512m: every native subcommand runs inside io's `Exit`
+# handler, a `ctl` handler, so the whole compiler runs on a 64 MiB
+# continuation carrier. Native therefore folds with a lower call depth
+# (ir/interp NATIVE_CALL_DEPTH, #417); before it did, `down(20000)` below
+# folded on the JVM and killed dawnc with SIGSEGV and no output at all.
+#
+# Two judgments. Past the limit, native answers with the depth diagnostic,
+# not a signal. Just under the limit it reports, the heaviest call shape
+# measured when the limit was set still folds -- so neither raising the limit
+# nor fattening the interpreter's frames can put the stack back in front of
+# the counter without this leg going red.
+echo "== comptime depth limit, JVM and native =="
+DEPTH_DEEP="$OUT/depth_deep.dawn"
+cat > "$DEPTH_DEEP" <<'EOF'
+fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }
+
+const D: Int = down(20000)
+
+pub fn main() -> Unit !io = println("${D}")
+EOF
+./bin/dawn check "$DEPTH_DEEP" > "$OUT/j.txt" 2>&1 && PAIR_J=0 || PAIR_J=$?
+"$DAWNC" check "$DEPTH_DEEP" > "$OUT/n.txt" 2>&1 && PAIR_N=0 || PAIR_N=$?
+NATIVE_DEPTH=$(sed -n 's/^error: comptime: call depth limit (\([0-9]*\)) exceeded$/\1/p' "$OUT/n.txt" | head -1)
+if [ "$PAIR_J" != 0 ] || [ "$PAIR_N" != 1 ] || [ -z "$NATIVE_DEPTH" ]; then
+  echo "FAIL: comptime depth (past the native limit): want JVM exit 0, native exit 1 with the depth diagnostic; got jvm=$PAIR_J native=$PAIR_N"
+  head -5 "$OUT/j.txt"
+  head -5 "$OUT/n.txt"
+  fail=1
+else
+  echo "OK   comptime depth (past the native limit): JVM folds it, native stops at $NATIVE_DEPTH"
+  # a block, a `let` and a `match` per level: the heaviest of the shapes
+  # measured for NATIVE_CALL_DEPTH, and ten calls of headroom for `rec`'s own
+  DEPTH_HEAVY="$OUT/depth_heavy.dawn"
+  cat > "$DEPTH_HEAVY" <<EOF
+fn rec(n: Int) -> Int = {
+  if n == 0 { return 0 }
+  let a = n * 2
+  match a % 3 {
+    0 -> {
+      let b = rec(n - 1)
+      b + 1
+    }
+    _ -> {
+      let c = [a, n]
+      let b = rec(n - 1)
+      b + len(c)
+    }
+  }
+}
+
+const D: Int = rec($((NATIVE_DEPTH - 10)))
+
+pub fn main() -> Unit !io = println("\${D}")
+EOF
+  "$DAWNC" check "$DEPTH_HEAVY" > "$OUT/n.txt" 2>&1 && PAIR_N=0 || PAIR_N=$?
+  if [ "$PAIR_N" != 0 ]; then
+    echo "FAIL: comptime depth (heaviest shape under the native limit) exits $PAIR_N, want 0"
+    head -5 "$OUT/n.txt"
+    fail=1
+  else
+    echo "OK   comptime depth (heaviest shape under the native limit, exit 0)"
+  fi
+fi
+
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, and the test reports account for themselves"
+echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, and native comptime stops at its depth limit"
