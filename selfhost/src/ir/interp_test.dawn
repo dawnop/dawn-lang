@@ -28,7 +28,8 @@ use ir/core.{
 use ir/lower
 use ir/interp.{
   eval_comptime, eval_module, program_sigs, note_direct_fn, note_trait_fn, ct_fuel, ct_default,
-  ct_native, eval_closed, ct_hover, HOVER_FUEL, HOVER_DEPTH, CtOpts, CtOut, CtWorld, ConstScope,
+  eval_closed, ct_hover, ct_lsp, LSP_DEPTH, DEFAULT_FUEL, HOVER_FUEL, HOVER_DEPTH, CtOpts, CtOut,
+  CtWorld, ConstScope,
   ct_world_empty, ct_world_add, eval_comptime_in,
 }
 
@@ -897,11 +898,9 @@ test "float folds agree with the backends on signed zero and NaN" {
   assert map.get(out.consts, "F") == Some(VBool(true))
 }
 
-## The depth a run may reach is the caller's to say (#417): the native
-## compiler's stack holds far fewer interpreted calls than the JVM's, so the
-## same const folds under one set of options and is refused under the other.
-## Both halves matter -- a limit that never reaches the counter passes the
-## first assertion and fails the second.
+## The depth a run may reach is the caller's to say: the compilers take
+## `ct_default`, an editor less. Both halves matter -- a limit that never
+## reaches the counter passes the first assertion and fails the second.
 test "the call depth limit comes from the options" {
   let src = "fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }\n" ++
     "const D: Int = down(1600)\n"
@@ -912,13 +911,28 @@ test "the call depth limit comes from the options" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let jvm = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+  let full = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", ct_default())
-  assert len(jvm.diags) == 0
-  let native = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
-    cx1.traits, cx1.impl_table, "m", ct_native())
-  assert len(native.diags) == 1
-  assert str.contains(native.diags[0].msg, "call depth limit (1500) exceeded")
+  assert len(full.diags) == 0
+  let shallow = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", CtOpts { ..ct_default(), depth: 1500 })
+  assert len(shallow.diags) == 1
+  assert str.contains(shallow.diags[0].msg, "call depth limit (1500) exceeded")
+}
+
+## One limit for both compilers (ruling of 2026-10-04): the number is the one
+## scripts/native-cli-diff.sh leg 10 drives both drivers against.
+test "the compilers' call depth limit is 11,000" {
+  assert ct_default().depth == 11000
+}
+
+## A language server's analysis gets a build's fuel and a smaller depth, and
+## the editor budget is the same whichever of the two it starts from.
+test "the language server budget is a build's fuel at 5,000 calls" {
+  assert LSP_DEPTH == 5000
+  assert ct_lsp() == CtOpts { fuel: DEFAULT_FUEL, depth: LSP_DEPTH }
+  assert ct_lsp().depth < ct_default().depth
+  assert ct_hover(ct_lsp()) == ct_hover(ct_default())
 }
 
 test "fuel exhaustion becomes a diagnostic" {
@@ -1126,15 +1140,13 @@ const CLOSED_SRC: String = "fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + 
   "fn bad() -> Int = 1\n"
 
 test "the editor budget is one answer on both compilers, under the host's depth" {
-  let jvm = ct_hover(ct_default())
-  let native = ct_hover(ct_native())
-  assert jvm == native
-  assert jvm.fuel == HOVER_FUEL
-  assert jvm.depth == HOVER_DEPTH
+  let hover = ct_hover(ct_default())
+  assert hover.fuel == HOVER_FUEL
+  assert hover.depth == HOVER_DEPTH
   assert HOVER_FUEL == 100000
   assert HOVER_DEPTH == 1500
-  # the native compiler's stack is the one that bounds both
-  assert HOVER_DEPTH <= ct_native().depth
+  # the compilers' own limit bounds the editor's
+  assert HOVER_DEPTH <= ct_default().depth
   # and a host shallower than the editor budget keeps its own limit
   assert ct_hover(CtOpts { fuel: 5, depth: 10 }) == CtOpts { fuel: HOVER_FUEL, depth: 10 }
 }

@@ -795,9 +795,11 @@ lowering 与解释器遇到不变式被破坏时 panic（ARC-06），构建期�
 ### C5.3 预算：`HOVER_FUEL`、`HOVER_DEPTH`、`ct_hover`
 
 - `HOVER_FUEL = 100000`、`HOVER_DEPTH = 1500`，`ct_hover(host) = { fuel: HOVER_FUEL, depth: min(HOVER_DEPTH, host.depth) }`。
-  JVM 与 native 同值（裁决第 2 条及 10-04 追裁：同一份代码在 VS Code 与 Playground 给同一答案；1,500 即 native
-  宿主上限 `NATIVE_CALL_DEPTH`）。`min` 只是防御：今天两端都取到 1,500，宿主上限将来若更低，以宿主为准。
-- **常量放解释器侧，不放 lsp 侧**：深度是关于解释器宿主栈的断言，不能超过 `NATIVE_CALL_DEPTH`，而知道栈能撑多深的
+  JVM 与 native 同值（裁决第 2 条及 10-04 追裁：同一份代码在 VS Code 与 Playground 给同一答案；1,500 是当时的
+  native 宿主上限 `NATIVE_CALL_DEPTH`。2026-10-04 起两端宿主上限统一为 `MAX_CALL_DEPTH = 11,000`、语言服务取
+  `ct_lsp()` 的 5,000，见 [audit/ceval-trampoline-verdict.md](audit/ceval-trampoline-verdict.md) §5.2 翻案；
+  hover 仍是 1,500）。`min` 只是防御：宿主上限将来若更低，以宿主为准。
+- **常量放解释器侧，不放 lsp 侧**：深度是关于解释器宿主栈的断言，不能超过 `MAX_CALL_DEPTH`，而知道栈能撑多深的
   是 `ir/interp`；lsp 已经从这里取 `ct_default`，常量放在 lsp 等于把数字放到离它所服从的上限隔一层的地方。
   两个编辑器调用方（C5-2 的 hover、之后 C4 的默认实参值 inlay）都经 `ct_hover` 取预算。
 - 预算由调用方以 `CtOpts` 传入，入口不自己选：测试要用别的预算证明「是预算拦下的」（同一表达式加 fuel 或加深度
@@ -805,8 +807,8 @@ lowering 与解释器遇到不变式被破坏时 panic（ARC-06），构建期�
 
 ### C5.4 测试与负控
 
-- `ir/interp_test` 五条：预算两端相同且不超宿主深度（`ct_hover(ct_default()) == ct_hover(ct_native())`、
-  浅宿主保留自己的深度）；求值（调本模块函数加 const、表达式内嵌的 comptime 块读运行留下的值）；fuel 耗尽与深度
+- `ir/interp_test` 五条：预算两端相同且不超宿主深度（当时是 `ct_hover(ct_default()) == ct_hover(ct_native())`，
+  `ct_native` 删除后改为 `HOVER_DEPTH <= ct_default().depth`；浅宿主保留自己的深度）；求值（调本模块函数加 const、表达式内嵌的 comptime 块读运行留下的值）；fuel 耗尽与深度
   超限回 `Err`，同一表达式放宽预算后求得值；跨模块纯函数经 `CtWorld` 求得值，换成空世界回 `Err`；注入 `XError`
   （表达式本身，lowering 在解释器启动前 panic）与把被调函数体换成 `XError`（解释器按需 lowering 时 panic）都回
   `Err("panic: lower: XError reached lowering")`，之后入口照常可用。
@@ -868,7 +870,8 @@ lowering 与解释器遇到不变式被破坏时 panic（ARC-06），构建期�
 
 ### C5.9 预算与两端一致
 
-`server.hover_value` 以 `ct_hover(st.host.ct)` 调用：JVM 的宿主深度 100,000、native 的 1,500，`ct_hover` 两端都取
+`server.hover_value` 以 `ct_hover(st.host.ct)` 调用：两端的宿主预算都是 `ct_lsp()`（深度 5,000；2026-10-04 之前是
+JVM 100,000、native 1,500），`ct_hover` 两端都取
 fuel 10⁵、深度 1,500。同一份代码在 VS Code（JVM）与 Playground（native）给同一答案，由
 `scripts/native-cli-diff.sh` 第 12 腿逐点对拍（下节）。
 

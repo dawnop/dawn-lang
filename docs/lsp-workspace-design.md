@@ -278,8 +278,10 @@ pub type LspLeaseHost = {
 }
 ```
 
-`ct` 是 2026-10-03 加的（#417）：comptime 的调用深度随宿主栈不同，JVM 传 `ct_default()`，
-native 传 `ct_native()`，见 [audit/ceval-trampoline-verdict.md](audit/ceval-trampoline-verdict.md) §5.2。
+`ct` 是 2026-10-03 加的（#417）：当时 comptime 的调用深度随宿主栈不同，JVM 传 `ct_default()`，
+native 传 `ct_native()`。2026-10-04 起两端宿主上限统一，`ct_native` 删除，两个语言服务都传
+`ct_lsp()`（深度 5,000，低于构建的 11,000，因为 Playground 会话限 256M），见
+[audit/ceval-trampoline-verdict.md](audit/ceval-trampoline-verdict.md) §5.2 翻案。
 
 - JVM project factory 使用 `fetch_checked` + `jsig_for`；`jsig_for` 的宿主/I/O failure 由
   `catch_fault` 转为 `dawn.toml` 诊断，compiler invariant panic 不会被降格成用户错误。

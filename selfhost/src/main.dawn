@@ -87,7 +87,7 @@ use c/binfo
 use jvm/jreflect.{jsig_real, jsig_for}
 use check/jsig.{JsigLease}
 use check/tast.{TModule}
-use ir/interp.{CtOut, CtOpts, ct_default, ct_fuel, DEFAULT_FUEL}
+use ir/interp.{CtOut, CtOpts, ct_default, ct_fuel, ct_lsp, DEFAULT_FUEL}
 use check/cx.{Cx}
 use java "java.io.File"
 use java "java.util.Map"
@@ -670,8 +670,9 @@ fn host_classpath() -> String !io =
 ## 614 MB on `check selfhost`, at no wall-time cost. Keep this in step with
 ## bin/dawn's DAWN_JVM_OPTS, which carries the full measurement.
 ##
-## `-Xss512m` is load-bearing, not slack: ir/interp.dawn pins MAX_CALL_DEPTH at
-## 100000, which only binds below the real stack limit from -Xss 128m up.
+## `-Xss512m` is load-bearing, not slack: it is the stack a compiled program's
+## deep non-tail recursion runs on. General tail calls are not done and a big
+## stack stands in for them (docs/native-backend-plan.md).
 ## `--add-exports java.base/jdk.internal.vm=ALL-UNNAMED` is what lets a
 ## `ctl` handler's driving loop reach `jdk.internal.vm.Continuation`
 ## (docs/oneshot-design.md §3.5, `jvm/rtclasses.gen_ctl_class`). It is stated
@@ -2384,7 +2385,7 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
         run_lsp(lsp_std_flag(rest), LspLeaseHost {
           standalone: lsp_standalone_lease,
           project: lsp_target_lease,
-          ct: ct_default()
+          ct: ct_lsp()
         })
       } else if mode == "lock" {
         pkgcmd.run_lock(rest, fail_planner)

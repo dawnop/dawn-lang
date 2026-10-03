@@ -1067,22 +1067,25 @@ PKGHASH_MISSING="$OUT/no-such-package"
 pair_expect_error "error: not a directory: $PKGHASH_MISSING"$'\n' \
   "__pkghash (missing path)" __pkghash "$PKGHASH_MISSING"
 
-# ---- leg 10: comptime recursion stops at the native depth limit ----
+# ---- leg 10: comptime recursion stops at one depth limit on both ----
 #
-# The one judgment here where the two drivers are meant to answer differently.
-# A comptime call nests host frames, and the native compiler's host stack is
-# not the JVM's -Xss512m: every native subcommand runs inside io's `Exit`
-# handler, a `ctl` handler, so the whole compiler runs on a continuation
-# carrier, which was 64 MiB when this leg was written (512 MiB since
-# 2026-10-04, see leg 11). Native therefore folds with a lower call depth
-# (ir/interp NATIVE_CALL_DEPTH, #417); before it did, `down(20000)` below
-# folded on the JVM and killed dawnc with SIGSEGV and no output at all.
+# A comptime call nests host frames, and the two compilers' host stacks hold
+# different numbers of them: the native compiler runs on a 512 MiB
+# continuation carrier (every subcommand runs inside io's `Exit` handler, a
+# `ctl` handler; see leg 11), the JVM one on -Xss512m, and the native frames
+# are the bigger ones. Until 2026-10-04 each compiler had its own limit (JVM
+# 100,000, native 1,500), so a recursion between the two folded on one and
+# was refused by the other. ir/interp MAX_CALL_DEPTH is now one number, set
+# under what the native stack holds, and both drivers must give a program
+# near it the same answer.
 #
-# Two judgments. Past the limit, native answers with the depth diagnostic,
-# not a signal. Just under the limit it reports, the heaviest call shape
-# measured when the limit was set still folds -- so neither raising the limit
-# nor fattening the interpreter's frames can put the stack back in front of
-# the counter without this leg going red.
+# Three judgments, each the same bytes and exit code from both drivers. Past
+# the limit, both answer with the depth diagnostic, not a signal. The
+# heaviest call shape measured when the limit was set folds ten calls under
+# it (headroom for `rec`'s own caller), so neither raising the limit nor
+# fattening the interpreter's frames can put the native stack back in front
+# of the counter without this going red. At the limit, the same shape is
+# refused by both, so the limit both report is the one both enforce.
 echo "== comptime depth limit, JVM and native =="
 DEPTH_DEEP="$OUT/depth_deep.dawn"
 cat > "$DEPTH_DEEP" <<'EOF'
@@ -1092,20 +1095,18 @@ const D: Int = down(20000)
 
 pub fn main() -> Unit !io = println("${D}")
 EOF
-./bin/dawn check "$DEPTH_DEEP" > "$OUT/j.txt" 2>&1 && PAIR_J=0 || PAIR_J=$?
-"$DAWNC" check "$DEPTH_DEEP" > "$OUT/n.txt" 2>&1 && PAIR_N=0 || PAIR_N=$?
-NATIVE_DEPTH=$(sed -n 's/^error: comptime: call depth limit (\([0-9]*\)) exceeded$/\1/p' "$OUT/n.txt" | head -1)
-if [ "$PAIR_J" != 0 ] || [ "$PAIR_N" != 1 ] || [ -z "$NATIVE_DEPTH" ]; then
-  echo "FAIL: comptime depth (past the native limit): want JVM exit 0, native exit 1 with the depth diagnostic; got jvm=$PAIR_J native=$PAIR_N"
-  head -5 "$OUT/j.txt"
+pair_expect_exit 1 "comptime depth (past the limit)" check "$DEPTH_DEEP"
+DEPTH_LIMIT=$(sed -n 's/^error: comptime: call depth limit (\([0-9]*\)) exceeded$/\1/p' "$OUT/n.txt" | head -1)
+if [ -z "$DEPTH_LIMIT" ]; then
+  echo "FAIL: comptime depth (past the limit): no depth diagnostic"
   head -5 "$OUT/n.txt"
   fail=1
 else
-  echo "OK   comptime depth (past the native limit): JVM folds it, native stops at $NATIVE_DEPTH"
   # a block, a `let` and a `match` per level: the heaviest of the shapes
-  # measured for NATIVE_CALL_DEPTH, and ten calls of headroom for `rec`'s own
-  DEPTH_HEAVY="$OUT/depth_heavy.dawn"
-  cat > "$DEPTH_HEAVY" <<EOF
+  # measured for MAX_CALL_DEPTH
+  depth_heavy() { # n -> path of a program folding rec(n)
+    local f="$OUT/depth_heavy_$1.dawn"
+    cat > "$f" <<EOF
 fn rec(n: Int) -> Int = {
   if n == 0 { return 0 }
   let a = n * 2
@@ -1122,18 +1123,16 @@ fn rec(n: Int) -> Int = {
   }
 }
 
-const D: Int = rec($((NATIVE_DEPTH - 10)))
+const D: Int = rec($1)
 
 pub fn main() -> Unit !io = println("\${D}")
 EOF
-  "$DAWNC" check "$DEPTH_HEAVY" > "$OUT/n.txt" 2>&1 && PAIR_N=0 || PAIR_N=$?
-  if [ "$PAIR_N" != 0 ]; then
-    echo "FAIL: comptime depth (heaviest shape under the native limit) exits $PAIR_N, want 0"
-    head -5 "$OUT/n.txt"
-    fail=1
-  else
-    echo "OK   comptime depth (heaviest shape under the native limit, exit 0)"
-  fi
+    echo "$f"
+  }
+  pair_expect_exit 0 "comptime depth (heaviest shape, ten under the limit of $DEPTH_LIMIT)" \
+    check "$(depth_heavy $((DEPTH_LIMIT - 10)))"
+  pair_expect_exit 1 "comptime depth (heaviest shape, at the limit of $DEPTH_LIMIT)" \
+    check "$(depth_heavy "$DEPTH_LIMIT")"
 fi
 
 # ---- leg 11: deep source nesting fits the compiler's stack ----
@@ -1165,11 +1164,11 @@ pair_expect_exit 0 "check (15,000 nested calls)" check "$DEEP_NEST"
 #
 # Hover shows the value of a closed, pure expression (docs/lsp-hover-design.md
 # §C5), folded by the comptime interpreter under the editor's budget,
-# ir/interp `ct_hover`: the same fuel on both hosts, and a call depth of 1,500,
-# which is the native host's own limit. The JVM's limit is far higher, so a
-# JVM server that folded with its host's budget would answer `down(1600)`
-# where the native one cannot, and VS Code and the Playground would disagree
-# about the same line. Leg 4 runs the session's hovers on native too, but
+# ir/interp `ct_hover`: the same fuel and a call depth of 1,500 on both hosts,
+# below the 5,000 both language servers give their own analysis (`ct_lsp`).
+# A server that folded a hover with that budget would answer `down(1600)`,
+# and one whose host budget drifted from the other's would make VS Code and
+# the Playground disagree about the same line. Leg 4 runs the session's hovers on native too, but
 # against the previous release, and an Emit-Change can stand in for it; this
 # leg has no such hatch, for the reason given at the top: two backends that
 # disagree at one commit are a bug. Each hover point must answer the same on
@@ -1279,4 +1278,4 @@ PYEOF
 then :; else fail=1; fi
 
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, native comptime stops at its depth limit, and hover folds to the same values on both"
+echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, comptime stops at one depth limit on both, and hover folds to the same values on both"
