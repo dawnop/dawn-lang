@@ -403,12 +403,16 @@
 #                            take the mode (f64 to f32)
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
-# matrix.txt records. Both halves cost real time -- one local run measured
-# 204s for 51 kernels (102 JVM starts, and nothing else) against 175s for
-# the 12 mutants (a native rebuild each) -- so splitting by kind would leave
-# one job carrying the slower half. `--shard I/N` takes every Nth item of the
-# mixed list instead, which also spreads the outliers (`reverse` alone costs
-# five average kernels).
+# matrix.txt records. Both halves cost real time, so splitting by kind would
+# leave one job carrying the slower half. The cost model, as measured
+# 2026-10-03: a kernel is two JVM starts and two native runs, 6.5 to 11s on
+# CI (the fast and the slow runner, about 1.5x apart) and about 6.5s here
+# (knife T17's full run); a mutant is one `__emitc` and one cc of the whole
+# program plus its runs, 39 to 50s on CI at -O2 and 33.6s here, 16.7s here
+# at -O0 (mutant_project); each shard also pays one -O2 clean build and the
+# JVM's first start, 25 to 48s on CI. `--shard I/N` takes every Nth item of
+# the mixed list, which divides both halves at once and also spreads the
+# outliers (`reverse` alone costs five average kernels).
 #
 # What is divided is the items, never a verdict. A kernel's four runs, its
 # two goldens and its assembly all happen inside one shard, and a mutant's
@@ -719,10 +723,13 @@ run_jvm() { # project, out, args... ; returns the program's exit code
   "$root/bin/dawn" run "$project" -- "$@" > "$out" 2> "$out.err"
 }
 
-build_native() { # project, bin
+# The clean build is -O2 and the goldens are compared against what it
+# prints. A mutant's build is -O0 (mutant_project below says why); <opt> is
+# that one difference.
+build_native() { # project, bin[, opt]
   "$root/bin/dawn" __emitc "$1" -o "$2.c" > "$2.emit" 2>&1 ||
     { cat "$2.emit" >&2; fail "native emit failed for $1"; }
-  "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  "$cc_bin" -std=c11 "${3:--O2}" -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -I "$root/runtime/c" -o "$2" "$2.c" "$rt_obj" -lm > "$2.cc" 2>&1 ||
     { cat "$2.cc" >&2; fail "native compile failed for $1"; }
 }
@@ -944,6 +951,22 @@ done
 # build); the package is forked into a repository-shaped tree so that the
 # registry's paths resolve in it as they do in the checkout. <module> names
 # the file the entry edits, for the md5 line, and is held to it.
+#
+# The mutant's native build is -O0. A mutant's verdict is "red, and red in
+# the named way", never the speed of the code, and the whole-program C file
+# is one translation unit, so cc was most of every mutant's cost: measured
+# 2026-10-03 on one tree, all 77 mutants, cc 21.73s a mutant at -O2, 13.29s
+# at -O1 and 5.59s at -O0, the mutant stage 2617s, 1930s and 1316s. The
+# level was taken only because what every mutant observed was the same file
+# for file at all three: each kernel's exit code, stdout, stderr and
+# bytecode on both backends, tileiras's log on the mutant's bytes, the
+# emitted C, and the PASS line (1281 files, 0 differences). -O1 was as
+# faithful and slower. The comparison caught a deliberately wrong red
+# (`sum` crashing with SIGSEGV under a 16 KiB stack instead of refusing)
+# that a loosened verdict let through. docs/tile-backend-design.md 6.5 has
+# the table. A mutant added later is only ever built at -O0, and that is
+# the right way round: a red that held at one level and not another would
+# be a verdict about the C compiler, not about packages/tileir.
 mutant_project() { # name, module
   local name="$1" module="$2"
   local tree="$work/tree-$name"
@@ -957,7 +980,7 @@ mutant_project() { # name, module
   [ "$before" != "$after" ] || fail "mutant $name: mutate.py left packages/tileir/src/$module as it was"
   echo "      $name: packages/tileir/src/$module md5 $before -> $after"
   project "$work/m-$name" "$pkg"
-  build_native "$work/m-$name" "$work/m-$name.bin"
+  build_native "$work/m-$name" "$work/m-$name.bin" -O0
 }
 
 # Run one kernel's text under a mutant on both backends into

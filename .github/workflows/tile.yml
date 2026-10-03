@@ -127,6 +127,12 @@ on:
       - 'bin/dawn'
       - '.github/workflows/tile.yml'
       - '.github/actions/**'
+      # Documentation is not a tile input: no build, golden or device program
+      # reads a .md file, and scripts/tile-gpu-diff/inputs.py leaves them out
+      # of the ledger digest for the same reason. A README-only change ran
+      # all seven shards once in the week of 09-26 (PR #384).
+      - '!packages/tileir/**/*.md'
+      - '!packages/tileref/**/*.md'
   pull_request:
     paths:
       - 'packages/tileir/**'
@@ -146,6 +152,12 @@ on:
       - 'bin/dawn'
       - '.github/workflows/tile.yml'
       - '.github/actions/**'
+      # Documentation is not a tile input: no build, golden or device program
+      # reads a .md file, and scripts/tile-gpu-diff/inputs.py leaves them out
+      # of the ledger digest for the same reason. A README-only change ran
+      # all seven shards once in the week of 09-26 (PR #384).
+      - '!packages/tileir/**/*.md'
+      - '!packages/tileref/**/*.md'
   schedule:
     # 05:20 UTC, twenty minutes behind nightly.yml so the two do not contend
     # for runners. GitHub's cron is best effort and drops runs at busy times,
@@ -230,6 +242,26 @@ jobs:
   # 5499s in all, 785.6s a shard and 786s rounded up, so 827s a shard. The
   # path total moves by seven times that one second, 6692s -> 6699s; the
   # timeout is unchanged (2481s is still 42 minutes).
+  #
+  # THE COST MODEL ABOVE IS OUT OF DATE, and knife C (2026-10-03) says by
+  # how much. Read off shard logs of 09-26 .. 10-03, a kernel costs 6.5 to
+  # 11s (the fast and the slow runner, about 1.5x apart), a mutant at -O2
+  # 27 to 39s on the fast runner and 40 to 52s on the slow one, growing
+  # about a quarter in that week as packages/tileir and packages/tileref
+  # grew, and the fixed part of a shard is about 80s, not 41s: the toolchain
+  # and the wheels about 45s plus one -O2 clean build and the JVM's first
+  # start, 25 to 48s. The seven shards observed 798 to 954s at the median
+  # and up to 1076s, against the 827s claimed. The mutant's cost was its
+  # whole-program cc, so run.sh now builds mutants at -O0 (the clean build
+  # and every golden stay -O2): one local tree, all 77 mutants, 33.6s a
+  # mutant at -O2 and 16.7s at -O0, the mutant stage 2617s and 1316s, and
+  # every mutant observing the same exit codes, outputs, bytecode and
+  # tileiras logs file for file at both (run.sh's mutant_project has the
+  # rest). Scaled to CI that is about 19s a mutant on the fast runner and
+  # 25s on the slow one, eleven mutants a shard, so a shard should come down
+  # by about 210 to 275s: the worst observation 1076s to about 800s. That is
+  # a projection. The claims below stay at 827s until three main runs have
+  # been observed at -O0, and are then restated from those observations.
   #
   # The split cannot reach the verdicts. A kernel's four runs, its two goldens
   # and its assembly all happen inside one shard, and each mutant compares
