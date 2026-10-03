@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 46dcec071fe28cda -->
+<!-- doc-check: translation-of docs/spec.md @ d7225235a43b189e -->
 
 # Dawn Language Specification
 
@@ -732,11 +732,36 @@ column(kids, align: 1, gap: 12)
 
 - **The default expression must be pure** (neither `!io` nor a named effect): otherwise the
   function's effect row would depend on whether the call site passes the argument — one
-  signature, two rows, which a type system cannot have.
-- **Evaluated in the declaring scope**: it may refer to this module's private functions and
-  `const`s, and it **cannot see the function's other parameters** (the default is checked in
-  a scope with no parameters, so referring to one is an ordinary `undefined variable`). That
-  restriction can be lifted later without breaking anything.
+  signature, two rows, which a type system cannot have. If an earlier parameter is a
+  function, a default may call it, on the same condition that the call is pure:
+  `fn app(g: fn(Int) -> Int, x: Int = g(1))` is legal, `fn run(g: fn() -> Int !e, x: Int = g())`
+  is refused (calling `g` brings in the effect variable `e`).
+- **Evaluated in the declaring scope plus the parameters before it** (2026-10-03, K6): it may
+  refer to this module's private functions and `const`s, and to the parameters **declared
+  before it**, including an earlier parameter's own default (the Kotlin and JavaScript rule):
+
+  ```dawn
+  fn find(s: String, sub: String, from: Cursor = start(s)) -> Option[Cursor]
+  fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int
+  ```
+
+  Referring to **the parameter itself** or to one **declared after it** is a check-time error,
+  each with its own message: "the default of parameter `a` refers to `a` itself", "the default
+  of parameter `lo` refers to `hi`, which is declared after it". The reason is evaluation order:
+  a default is the parameter's value when the argument is omitted, so when it runs the
+  parameter has no value yet, and the later ones have not been evaluated. A lambda in a default
+  may capture earlier parameters (by value, as lambdas do); a local the default `let`s under the
+  same name shadows as usual and is not a reference to the parameter. Before this rule (#207
+  until K6) a default could see no parameter at all; lifting that broke nothing: every old
+  default is still legal and means the same.
+- **Evaluation order**: within one call, **the written arguments all evaluate first, in
+  written order** (§4.3, out-of-order named arguments included), **then** the omitted defaults
+  evaluate one by one **in declaration order**, each seeing the values of the parameters before
+  it — written arguments or earlier defaults, whatever order the named arguments were written
+  in. A tail block is a written argument, so it too evaluates before the defaults; it fills the
+  last parameter, after every defaulted one, so no default sees it. Defaults are pure, so the
+  order is only visible when a default panics (pinned on both backends by
+  `scripts/spike-native/default_sees_params.dawn`).
 - **A parameter's type may mention the function's type parameters**
   (`fn join[T](xs: List[T] = []) -> T`): the synthesized `f$default$k` repeats the function's
   type parameters and their bounds verbatim, and a call that omits the argument calls it at
@@ -748,10 +773,16 @@ column(kids, align: 1, gap: 12)
   be skipped by naming `b` (the positional prefix takes slots left to right and cannot jump).
   A skipped required parameter reports "missing argument(s) for `f`: …"; a count outside the
   range reports "`f` takes 1 to 3 argument(s), got 0".
-- **Implementation shape**: each defaulted parameter synthesizes a zero-parameter pure
-  function `f$default$k` in the declaring module (`$` is not in the identifier lexicon, so
-  source code cannot spell it); a call that omits the argument simply calls it — both
-  backends and the comptime interpreter treat it as an ordinary top-level function.
+- **Implementation shape**: each defaulted parameter synthesizes a pure function
+  `f$default$k` in the declaring module (`$` is not in the identifier lexicon, so source code
+  cannot spell it) **whose parameters are `f`'s first k parameters** — whether or not the
+  default reads them; the arity follows from the signature alone, so a call site in another
+  module knows how to call it from `f`'s signature. A call that omits an argument first binds
+  the written arguments to locals in written order, then binds each omitted default to a local
+  in declaration order (`f$default$k` takes the first k locals), and finally calls `f` in
+  parameter order; when only the first parameter is omitted, `f$default$0` takes nothing and
+  the call binds nothing. Both backends and the comptime interpreter treat `f$default$k` as an
+  ordinary top-level function and the bindings as ordinary `let`s, with no special handling.
 - **Using the function as a value loses the defaults**: after `let g = f`, `g`'s type is the
   full `fn(A, B, C) -> R` — the same discipline as "a bare constructor used as a function
   value loses its field names" (§2.3).
@@ -1319,6 +1350,7 @@ From lowest to highest:
   arguments evaluate in the order they are **written** (as in Python / C# / Scala / Swift /
   Kotlin); named arguments reorder the **slotting**, not the evaluation — in
   `R { b: f(), a: g() }`, `f()` runs before `g()` and each value lands on its own field.
+  Omitted defaults evaluate after every written argument, in declaration order (§3.1).
   `..base` can only be written first, and evaluates first. Binary operators evaluate left to
   right (`&&`/`||` still short-circuit). Before this rule, constructors evaluated in
   **declaration order** and the C backend left argument order to C (gcc goes right to left)

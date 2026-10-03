@@ -1,0 +1,95 @@
+# A default value may read the parameters declared before it (spec §3.1, K6):
+# `f$default$k` takes f's first k parameters, and a call that omits the
+# argument binds what it has evaluated and hands it over -- on both backends,
+# and in the comptime interpreter (the consts at the bottom).
+#
+# What this pins, beyond "it computes the right number":
+#
+# - an earlier *default* is a parameter like any other (`span`'s `mid` reads
+#   `hi`, which may itself be the default);
+# - a named call written out of declaration order still feeds each default the
+#   parameters before it in *declaration* order;
+# - a lambda in a default closes over an earlier parameter;
+# - the type parameter and its bound reach the default (`echo`);
+# - the tail block fills the last parameter while a default before it reads the
+#   first (`each`);
+# - a default from another module reads its parameters too (`cursor.find`);
+# - the order: every written argument runs first, in written order, and only
+#   then the omitted defaults, in declaration order. A default is pure, so the
+#   one way to see when it ran is to let it panic: `ratio` prints both written
+#   arguments before its default divides by zero, and `two` names the first
+#   default that refuses.
+use std/io
+use std/cursor
+use std/str
+
+fn tap(label: String, v: Int) -> Int !io = {
+  io.println("eval " ++ label)
+  v
+}
+
+fn caught(f: fn() -> Int !io) -> String !io =
+  match catch_panic(f) {
+    Err(e) -> "panic: " ++ e.message
+    Ok(v) -> to_string(v)
+  }
+
+fn span(lo: Int, hi: Int = lo + 10, mid: Int = (lo + hi) / 2) -> Int = lo * 10000 + hi * 100 + mid
+
+fn label(name: String, width: Int = str.len(name) + 2, line: String = "-") -> String =
+  name ++ ":" ++ to_string(width) ++ line
+
+fn adder(n: Int, f: fn(Int) -> Int = (x) => x + n) -> Int = f(100)
+
+trait Twice[T] {
+  fn twice(x: T) -> T
+}
+
+impl Twice[Int] {
+  fn twice(x: Int) -> Int = x * 2
+}
+
+impl Twice[String] {
+  fn twice(x: String) -> String = x ++ x
+}
+
+fn echo[T: Twice](x: T, y: T = twice(x)) -> List[T] = [x, y]
+
+fn each(xs: List[Int], n: Int = len(xs), body: fn(Int) -> Int) -> Int = body(n)
+
+fn ratio(a: Int, b: Int = 100 / a, c: Int) -> Int = b + c
+
+fn must(x: Int, who: String) -> Int = if x < 0 { panic(who ++ " refuses " ++ to_string(x)) } else { x }
+
+fn two(a: Int, b: Int = must(a, "b"), c: Int = must(b - 1, "c")) -> Int = a + b + c
+
+const SPAN: Int = span(2)
+
+const ECHO: List[String] = echo("ab")
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(span(2)))
+  io.println(to_string(span(2, 30)))
+  io.println(to_string(span(2, mid: 7)))
+  io.println(to_string(span(mid: 1, lo: 3)))
+  io.println(to_string(span(hi: 50, lo: 4)))
+  io.println(label("ab"))
+  io.println(label(line: "=", name: "abc"))
+  io.println(to_string(adder(5)))
+  io.println(to_string(adder(5, (x) => x)))
+  io.println(to_string(echo(21)) ++ " " ++ to_string(echo("ha")))
+  io.println(to_string(each([1, 2, 3]) { k => k * 7 }))
+  io.println(to_string(each([1, 2, 3], 10) { k => k * 7 }))
+  let s = "a[b[c"
+  let found = match cursor.find(s, "[") {
+    Some(c) -> cursor.offset(s, c)
+    None -> -1
+  }
+  io.println("find " ++ to_string(found))
+  io.println(caught(() => ratio(tap("a", 4), c: tap("c", 1))))
+  io.println(caught(() => ratio(c: tap("c", 1), a: tap("a", 0))))
+  io.println(caught(() => two(tap("a", 3))))
+  io.println(caught(() => two(tap("a", 0))))
+  io.println(caught(() => two(tap("a", -1))))
+  io.println(to_string(SPAN) ++ " " ++ to_string(ECHO))
+}
