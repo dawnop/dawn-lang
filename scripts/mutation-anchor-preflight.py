@@ -40,6 +40,7 @@ ADAPTERS = {
     "jsig-lease-contract": (".", "fixture-a.jar", "fixture-b.jar"),
     "list-elems-contract": (".",),
     "lsp-lifecycle-contract": (".",),
+    "lsp-resolution-coverage": (".",),
     "map-reuse-contract": (".",),
     "narrow-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
