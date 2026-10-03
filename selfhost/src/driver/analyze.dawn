@@ -50,6 +50,14 @@ pub type LoadedModule = {
   m: Module,
   pdiags: List[Diag],
   pkg: Option[source.PkgR],
+  # The path a source position baked into the program names (`at
+  # src/main.dawn:4`), as opposed to `path`, which is how this run spelled
+  # the file and is what diagnostics print. Relative to the project root, to
+  # the entry file's directory when there is no project, or `<package>/<path
+  # in package>` for a `[deps]` module, so that it depends on the tree alone
+  # and never on the working directory or the spelling on the command line
+  # (docs/source-location-design.md §四).
+  site_path: String,
   # The program's entry module: `src/main.dawn` of a project, or the file a
   # command named. Only this module's `main` is the entry point and carries
   # its constraints (spec §10.5); a `main` anywhere else is an ordinary
@@ -117,6 +125,21 @@ fn bad_segments(mod_path: String) -> List[String] = {
   }
   out
 }
+
+## The position path of a module of the tree under `root_abs`: the module
+## path, which is already the file relative to the source root, as a file
+## again, under `src/` when that root is a project's. Read from the module
+## path rather than from `file`, because the module path is the one spelling
+## the loader has already made independent of how the file was reached.
+fn tree_site(root_abs: String, mod_path: String) -> String =
+  if str.ends_with(root_abs, "/src") { "src/" ++ mod_path ++ ".dawn" } else { mod_path ++ ".dawn" }
+
+## The last segment of a path: what a file with no tree around it is called.
+fn base_name(path: String) -> String =
+  match str.last_index_of(path, "/") {
+    Some(i) -> str.drop(path, i + 1)
+    None -> path
+  }
 
 ## module path = file path relative to root, minus extension.
 fn module_path_of(root_abs: String, file_abs: String) -> String = {
@@ -527,6 +550,7 @@ fn resolve(
             m: parsed.m,
             pdiags: parsed.pdiags,
             pkg: None,
+            site_path: tree_site(root_abs, mod_path),
             entry: entry == Some(c)
           }
           loaded_as = set.insert(loaded_as, (c, mod_path))
@@ -674,6 +698,12 @@ fn resolve(
                 m: m2,
                 pdiags: pdiags2,
                 pkg: dep_pkg,
+                # a package module's path already leads with the package's
+                # real name: `<package>/<path in package>`
+                site_path: match dep_pkg {
+                  Some(_) -> mod_path ++ ".dawn"
+                  None -> tree_site(root_abs, mod_path)
+                },
                 entry: false
               }
               loaded_as = set.insert(loaded_as, (dep_canon, mod_path))
@@ -1026,6 +1056,9 @@ pub(pkg) fn analyze_module_step(
     std_fns: std.std_fns,
     moved: std.moved,
     line_starts: mf.line_starts,
+    # what a position baked into this module's code names; the bundled std
+    # names none, as it never has
+    site_path: if is_std { None } else { Some(mf.site_path) },
     # names the span view a diagnostic raised in this module resolves against
     mod_path: Some(mf.mod_path),
     identities: before.identities,
@@ -1251,6 +1284,9 @@ pub(pkg) fn analyze_standalone(
     m: m,
     pdiags: pdiags,
     pkg: None,
+    # a buffer with no tree around it is named by its file name, the
+    # single-file rule with the buffer's own directory as the root
+    site_path: base_name(path),
     # a single document analysed on its own is its own program's entry
     entry: true
   }
@@ -1949,7 +1985,7 @@ test "module identity carry keeps exporting owners across header reorder" {
     let second = "pub type Second = { value: Int }\npub fn second_of[T](x: T) -> T = x\n"
     for text in [first ++ second, second ++ first] {
       let (syntax, pd) = parser.parse_module(text)
-      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
+      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn", site_path: "library.dawn",
         text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
@@ -1967,7 +2003,7 @@ test "module identity carry keeps exporting owners across header reorder" {
       binders = binders ++ [binder]
       let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = dep.first_of(x)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
-      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
+      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn", site_path: "consumer.dawn",
         text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
@@ -1983,7 +2019,7 @@ test "module identity carry keeps exporting owners across header reorder" {
     # its key is a different integer.
     let renamed_text = "pub type First = { value: Int }\npub fn renamed_of[T](x: T) -> T = x\n" ++ second
     let (renamed_ast, renamed_pd) = parser.parse_module(renamed_text)
-    let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn",
+    let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn", site_path: "library.dawn",
       text: renamed_text, line_starts: lexer.line_starts_of(renamed_text), m: renamed_ast, pdiags: renamed_pd, pkg: None, entry: false }
     let renamed_step = analyze_module_step(renamed_input, initial, std, ct_default(), jsig_refused(), None)
     assert len(renamed_step.diags) == 0
@@ -2015,7 +2051,7 @@ test "a consumer names a provider's effect without minting the provider's identi
     var binders: List[Int] = []
     for text in [asks ++ generic, generic ++ asks] {
       let (syntax, pd) = parser.parse_module(text)
-      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn",
+      let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn", site_path: "effects.dawn",
         text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
@@ -2038,7 +2074,7 @@ test "a consumer names a provider's effect without minting the provider's identi
         "fn handled() -> Int = { with handle dep.Ask { ask() => 21 }\n consume() }\n" ++
         "fn relay[!f](g: fn() -> Int !f) -> Int !f = dep.twice(g)\n"
       let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
-      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn",
+      let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn", site_path: "consumer.dawn",
         text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       # The effect the consumer resolved is the provider's declaration, by

@@ -53,18 +53,19 @@
 # ## One directory, used twice
 #
 # Each side is checked out with `git worktree add` at the *same* path, one
-# after the other, and bootstrapped from its own seed there. Not two
-# directories side by side: a panic site bakes the path it was compiled from.
-# Measured 2026-08-04 -- `__lower --dump D /abs/path/to/selfhost` puts
+# after the other, and bootstrapped from its own seed there. This used to be
+# load-bearing: a panic site baked the path it was compiled from. Measured
+# 2026-08-04 -- `__lower --dump D /abs/path/to/selfhost` put
 #
 #   str "unwrapped None at /home/dawn/workspace/dawn-lang/selfhost/src/main.dawn:164"
 #
-# in main.core where the relative form puts `selfhost/src/main.dawn:164`. The
-# lowering below is always handed the relative `selfhost`, and the directory
-# is the same on both sides anyway, so no module differs for where it was
-# built. No normalisation is applied: line numbers left Core with #142, and
-# generated names are derived from declarations, not from a global counter
-# (the note beside `ty_key` in `selfhost/src/ir/core.dawn`).
+# in main.core where the relative form put `selfhost/src/main.dawn:164`. Since
+# #401 the baked path is the tree's own (`src/main.dawn:164`) whatever the
+# directory or the spelling, so a side whose compiler predates that fix is the
+# only one the shared path still protects. The lowering below is always handed
+# the relative `selfhost` as well. No normalisation is applied: line numbers
+# left Core with #142, and generated names are derived from declarations, not
+# from a global counter (the note beside `ty_key` in `selfhost/src/ir/core.dawn`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
