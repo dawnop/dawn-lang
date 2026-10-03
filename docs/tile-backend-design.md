@@ -4202,7 +4202,9 @@ tileir: kernel `raw`: op #5 `mmaf`: rhs is tile<16x16xf64>, whose K (dimension 0
 
 - 判词：golden 预测逐字节不动。预检：一个进程把 191 个 kernel 各记录两次、渲染并编码（JVM），与
   `scripts/tile-golden` 下的 `.mlir` / `.tilebc` 逐字节比较，191 个全同；同一程序换 origin/main 的 tileir，
-  输出也与本刀逐字节相同。全量 `run.sh` 在本刀代码上另跑。
+  输出也与本刀逐字节相同。全量 `scripts/tile-golden/run.sh`（本机，tileiras 13.4.92，sm_86，72 min）：191 个 kernel 的 trace、文本
+  golden、字节码 golden、`tileiras` 汇编全过，**逐字节不动**，268 个变异体全过；flash_attn 合入后补跑
+  `run.sh --only flash_attn` 亦全过。sm_86 台账在最终代码上重录一次，各档计数与上一行逐字相同。
 - 新检查确实被 golden kernel 走到，所以上面的「不动」不是因为没走到。在副本里把左操作数的 K 改查第 0 维，
   逐个 kernel 记录，191 个里 15 个在记录期被拒（`matmul`、gpt / llama / gqa 各层、`lora_out`）；把 view 读出值的
   行记成 tile 形状的两倍，渲染里含 `load_view_tko` 的 11 个 kernel 里 4 个被拒（`view_conv1d`、`view_conv2d`、
