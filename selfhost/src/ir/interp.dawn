@@ -141,20 +141,18 @@ alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
 ## `!io`, a const or comptime block is pure, and no source can put the one
 ## inside the other, so there is no host call left for a flag to grant.
 ##
-## `depth` is a field rather than one constant because it answers to the host
-## stack the interpreter runs on, and the two compilers do not have the same
-## one (see MAX_CALL_DEPTH). The interpreter is shared code and cannot tell
-## which backend compiled it, so the entry that knows says: main.dawn takes
-## `ct_default`, nmain.dawn `ct_native`.
+## `depth` is a field rather than a constant because a caller may ask for less
+## than the compiler's own limit: an editor folding one expression takes
+## `ct_hover`. The compilers themselves take `ct_default`, the JVM and the
+## native one alike, so one program gets one answer from both (see
+## MAX_CALL_DEPTH).
 pub type CtOpts = { fuel: Int, depth: Int }
 
 pub const DEFAULT_FUEL: Int = 100000000
 
-## Defaults: all the fuel a real compile gets, at the JVM compiler's depth.
+## Defaults: all the fuel and all the depth a real compile gets, on either
+## compiler.
 pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL, depth: MAX_CALL_DEPTH }
-
-## Defaults for the native compiler: the same fuel, the depth its stack holds.
-pub fn ct_native() -> CtOpts = CtOpts { ..ct_default(), depth: NATIVE_CALL_DEPTH }
 
 ## Defaults with the fuel dialled down (the fuel tests, and callers that want
 ## a comptime run bounded well below a real compile's).
@@ -168,7 +166,7 @@ pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel: n }
 ##
 ## They live here rather than in lsp/ because the depth is a claim about the
 ## interpreter's host stack, not about editors: it may not exceed
-## NATIVE_CALL_DEPTH, and it is this module that knows what the stack holds.
+## MAX_CALL_DEPTH, and it is this module that knows what the stack holds.
 ## lsp/ imports from here already (`ct_default`); a constant there would put
 ## the number one layer away from the limit it answers to. Every editor
 ## caller (hover now, the default-argument inlay later) takes them through
@@ -179,14 +177,34 @@ pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel: n }
 ## 40 ms on native, where 10^6 costs 360 ms.
 pub(pkg) const HOVER_FUEL: Int = 100000
 
-## 1,500 nested calls: the native compiler's limit, so the JVM answers no
-## deeper than the native one can.
+## 1,500 nested calls: the native compiler's limit when this was set. The
+## limit is MAX_CALL_DEPTH on both compilers now, but an editor's fold runs in
+## a language server session with a memory cap, and 1,500 calls of the
+## heaviest measured shape stay near 70 MB where the full limit costs several
+## times that (docs/audit/ceval-trampoline-verdict.md 5.2).
 pub(pkg) const HOVER_DEPTH: Int = 1500
 
 ## The editor budget on a given host. The depth also stays under the host's
-## own: equal on both today, and the smaller of the two if they ever part.
+## own, should a host ever pass a smaller one.
 pub(pkg) fn ct_hover(host: CtOpts) -> CtOpts =
   CtOpts { fuel: HOVER_FUEL, depth: if host.depth < HOVER_DEPTH { host.depth } else { HOVER_DEPTH } }
+
+## 5,000 nested calls: what a language server's own analysis (the comptime
+## behind its diagnostics) may reach, below MAX_CALL_DEPTH because a
+## Playground session runs under MemoryMax=256M and a build does not. Measured
+## 2026-10-04 on the native server (docs/audit/ceval-trampoline-verdict.md
+## 5.2): the heaviest stack shape stays near 207 MB at the full 11,000, but a
+## recursion that holds a list per level (`match xs { [h, ..t] -> ...` over a
+## range) is 254 MB at 4,999 and is killed at 10,990. This bounds what depth
+## alone costs, not what a session may allocate: a const can exhaust the cap
+## at any depth, and then the cgroup ends that one session.
+pub(pkg) const LSP_DEPTH: Int = 5000
+
+## The budget behind a language server's diagnostics, on either compiler: a
+## build's fuel, the smaller depth. Both servers take it, so VS Code and the
+## Playground refuse the same program; between 5,000 and MAX_CALL_DEPTH that
+## is a program `check` folds.
+pub(pkg) fn ct_lsp() -> CtOpts = CtOpts { ..ct_default(), depth: LSP_DEPTH }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
@@ -309,31 +327,31 @@ pub fn ct_world_add(
   out
 }
 
-# Deliberate constants, not values derived from the stack. Do not make them
+# A deliberate constant, not a value derived from the stack. Do not make it
 # dynamic: the measured depth-per-stack is JIT-dependent on the JVM and
 # shape-dependent everywhere, and a limit you only learn by running is worse
 # than an honest constant.
 #
-# The JVM compiler's. Measured 2026-07-31 (docs/audit/ceval-trampoline-verdict.md
-# 4): the interpreter's own frames exhaust -Xss below 128m before this counter
-# fires, so the limit only binds at -Xss >= 128m -- at the shipped 512m it is
-# what actually stops runaway comptime recursion. Anyone lowering -Xss below
-# 128m trades this diagnostic for a raw StackOverflowError.
-const MAX_CALL_DEPTH: Int = 100000
-
-# The native compiler's, far lower, because its stack was 8 times smaller and
-# its frames are bigger. Every native subcommand runs inside io's `Exit`
-# handler, a `ctl` handler, so the whole compiler runs on a continuation
-# carrier (DAWN_CTL_STACK_BYTES in runtime/c/dawn_rt.c). That was 64 MiB when
-# this was measured; since 2026-10-04 it is the 512 MiB of DAWN_STACK_BYTES,
-# so the figures below are a floor, not yet re-measured on the larger stack.
-# Measured 2026-10-03 on several call shapes (issue #417): the deepest
-# comptime recursion that folds before the host stack runs out is 10,400 for
-# `1 + f(n - 1)`, 5,800 for a `match` on a list, and 5,200 for a body with a
-# block, a `let` and a `match` -- 2,800 of the last before ceval's arms became
-# separate functions. 1,500 leaves a factor of 3.5 under the heaviest of them,
-# so the counter, not the stack, is what stops the run.
-const NATIVE_CALL_DEPTH: Int = 1500
+# One limit for both compilers, so `dawn check` and `dawnc check` give one
+# program one answer, and the native compiler sets it. Both stacks are
+# 512 MiB: the JVM compiler runs on -Xss512m, and every native subcommand runs
+# inside io's `Exit` handler, a `ctl` handler, so the whole native compiler
+# runs on a continuation carrier of DAWN_CTL_STACK_BYTES (runtime/c/dawn_rt.c),
+# which is the same number. The native frames are the bigger ones. Measured 2026-10-04 with the counter
+# out of the way (docs/audit/ceval-trampoline-verdict.md 5.2), the deepest
+# comptime recursion that folds before the host stack runs out:
+#
+#   shape (per level)               native     JVM
+#   `1 + f(n - 1)`                  79,765     291,786
+#   through a closure               46,259     320,937
+#   a block, a `let` and a `match`  41,171     247,089
+#
+# 11,000 is the heaviest native figure over 3.5, rounded down to a thousand,
+# so the counter, not the stack, is what stops the run on either compiler.
+# It was 100,000 on the JVM and 1,500 on native until then; deep recursion
+# was never part of what comptime promises (the diagnostic's hint is "use a
+# loop or fold").
+const MAX_CALL_DEPTH: Int = 11000
 
 const MAX_FAILURE_FRAMES: Int = 16
 
@@ -1654,7 +1672,7 @@ fn eval_all(
 ## reserves one owned slot per local of *every* arm, so the old single-body
 ## ceval took 3,920 bytes of C stack per activation whichever arm ran, and a
 ## comptime call nests two to six of them. Split, an activation pays for the
-## arm it takes. See the MAX_CALL_DEPTH comment for the numbers.
+## arm it takes. docs/audit/ceval-trampoline-verdict.md 5.2 has the numbers.
 fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
   let (st, env, _) = burn(st0, env0)?
   match e {
