@@ -796,6 +796,11 @@ export function hoverParts(contents: unknown): HoverParts {
  * [`name`] links into `file://` links to the declaration
  * (docs/lsp-hover-design.md §A5), which name paths on the Playground's
  * server: nothing a browser tab can open, and not something to show.
+ *
+ * A link the server left as written loses its brackets too. That is every
+ * link in a std doc on the Playground: the std there is the copy compiled
+ * into the toolchain, which has no file to point at, so the server keeps the
+ * `` [`name`] `` it was given and the tooltip showed the brackets.
  */
 function docText(markdown: string): string {
   return markdown
@@ -803,6 +808,7 @@ function docText(markdown: string): string {
     .filter((line) => !/^\s*```/.test(line) && !/^\s*-{3,}\s*$/.test(line))
     .join('\n')
     .replace(/\[(`[^`\n]+`)\]\([^)\s]*\)/g, '$1')
+    .replace(/\[(`[^`\n]+`)\](?!\()/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
