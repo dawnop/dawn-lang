@@ -480,7 +480,8 @@ kernels=(
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
-  insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg)
+  insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg
+  flash_attn)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

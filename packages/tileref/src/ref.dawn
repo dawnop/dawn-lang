@@ -2004,6 +2004,49 @@ fn bt_dot(a: List[Float], b: List[Float], k: Int, i: Int, j: Int) -> Float =
 
 fn ref_neg_inf() -> Float = 0.0 - 1.0 / 0.0
 
+## FlashAttention's ONLINE softmax, `softmax(scale * q k^T) v` for `m`
+## queries against `n` keys of `d` features, one query row at a time and
+## the keys `bk` at a time: the running maximum `mx`, the running sum `l`
+## of the exponentials and the running weighted sum `acc` of the values,
+## the first two rescaled by `exp(mx_old - mx_new)` whenever a block raises
+## the maximum, and `acc / l` at the end. `ins` is `[q, k, v, old o]`.
+##
+## A second opinion on the fused kernel, and deliberately not the
+## three-launch chain (`matmul_bt_ref`, `row_softmax_ref`, `matmul_ref`):
+## that chain is what this is held to on the host, by the test at the end
+## of this file, so the two references are two algorithms that must agree
+## rather than one algorithm written twice. The first block's rescale is
+## `exp(-inf)`, which `ref_exp` answers 0.0, so nothing special-cases it.
+pub fn flash_attn_ref(m: Int, n: Int, d: Int, bk: Int, scale: Float, dtypes: List[String],
+  ins: List[List[Float]]) -> List[Float] = {
+  let q = ins[0]
+  let k = ins[1]
+  let v = ins[2]
+  let dt = dtypes[3]
+  var out: List[Float] = []
+  for i in range(0, m) {
+    var mx = ref_neg_inf()
+    var l = 0.0
+    var acc = list.map(range(0, d), _c => 0.0)
+    for b in range(0, n / bk) {
+      let keys = range(b * bk, b * bk + bk)
+      let s = list.map(keys, j => scale * bt_dot(q, k, d, i, j))
+      let block_max = list.fold(s, ref_neg_inf(), (a, x) => if x > a { x } else { a })
+      let mx_new = if block_max > mx { block_max } else { mx }
+      let alpha = ref_exp(mx - mx_new)
+      let p = list.map(s, x => ref_exp(x - mx_new))
+      l = l * alpha + list.fold(p, 0.0, (a, x) => a + x)
+      let before = acc
+      acc = list.map(range(0, d), c =>
+          before[c] * alpha + list.fold(range(0, bk), 0.0, (a, t) => a + p[t] * v[(b * bk + t) * d + c]))
+      mx = mx_new
+    }
+    let total = l
+    out = out ++ list.map(acc, x => round_to(dt, x / total))
+  }
+  out
+}
+
 ## leetgpu 53 (Causal Self-Attention): `scale * (q k^T)` where the key is
 ## not in the query's future, `-inf` where it is. `ins` is `[q, k, old s]`.
 pub fn causal_scores_ref(m: Int, k: Int, n: Int, scale: Float, dtypes: List[String],
@@ -5101,4 +5144,40 @@ test "the strided, gather and atomic-reduction references answer what a reader c
   # has to carry a negative contribution at all.
   assert at(7) == [0.0 - 1.0, 0.0 - 1.0]
   assert at(8) == [0.0, 0.0]
+}
+
+test "the online softmax answers what the three-launch chain does, including when a later block raises the maximum" {
+  let m = 4
+  let n = 8
+  let d = 4
+  let bk = 2
+  let scale = 0.5
+  # Keys grow with their position, so for most rows a later block holds a
+  # larger score than the first one did and the rescale is not a no-op.
+  let q = list.map(range(0, m * d), i => (to_float((i * 3 + 7) % 19) - 9.0) * 0.1)
+  let k = list.map(range(0, n * d), i => (to_float((i * 5 + 7) % 19) - 4.0) * 0.1 * to_float(1 + i / d))
+  let v = list.map(range(0, n * d), i => (to_float((i * 7 + 7) % 19) - 9.0) * 0.1)
+  let dts = ["f64", "f64", "f64"]
+  let s = matmul_bt_ref(m, d, n, scale, dts, [q, k, list.map(range(0, m * n), _i => 0.0)])
+  let p = row_softmax_ref(m, n, ["f64", "f64"], [s, s])
+  let old = list.map(range(0, m * d), _i => 0.0)
+  let want = matmul_ref(m, n, d, dts, [p, v, old])
+  let got = flash_attn_ref(m, n, d, bk, scale, ["f64", "f64", "f64", "f64"], [q, k, v, old])
+  assert len(got) == m * d
+  for i in range(0, m * d) {
+    assert close(got[i], want[i], 1.0e-13)
+  }
+  # how many rows have their maximum OUTSIDE the first block: the rows on
+  # which the online form had to rescale what it had already summed
+  let raised = list.fold(range(0, m), 0, (acc, i) => {
+    let first = list.fold(range(0, bk), ref_neg_inf(), (a, j) => if s[i * n + j] > a { s[i * n + j] } else { a })
+    let whole = list.fold(range(0, n), ref_neg_inf(), (a, j) => if s[i * n + j] > a { s[i * n + j] } else { a })
+    if whole > first { acc + 1 } else { acc }
+  })
+  assert raised > 0
+  # one block of every key is the textbook softmax with nothing to rescale
+  let single = flash_attn_ref(m, n, d, n, scale, ["f64", "f64", "f64", "f64"], [q, k, v, old])
+  for i in range(0, m * d) {
+    assert close(single[i], want[i], 1.0e-13)
+  }
 }

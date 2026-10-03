@@ -1056,7 +1056,8 @@ sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   kv_scores kv_context attn_bwd_mmt attn_bwd_ds lin_attn_s lin_attn_out
   ols_gram ols_elim ols_beta
   gpt_ln gpt_qkv gpt_scores gpt_context gpt_dense gpt_fc gpt_gelu gpt_down
-  llama_rms llama_qkv llama_rope llama_scores llama_out llama_ffn llama_down)
+  llama_rms llama_qkv llama_rope llama_scores llama_out llama_ffn llama_down
+  flash_attn)
 
 # `vadd` is assembled with the first milestone's pair above, so it is not in
 # `sequenced` (that list is what the assemble loop walks) but it IS the
@@ -2097,7 +2098,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the twenty-two multi-launch problems and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the twenty-two multi-launch problems, the fused attention and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -2346,6 +2347,9 @@ esac
 # it is two launches whose second does not read the first's output, and it
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
+# `flash` is in neither list: it is ONE launch, so there is no earlier
+# launch for its answer to depend on, and its corpus claim is the
+# `probe flash` line held further down instead.
 for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha xattn gqa grpo kmeans \
   kv attnbwd linattn ols gpt2 llama; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
@@ -2459,23 +2463,45 @@ for c in gpt2 llama; do
   seq_reds="$seq_reds second-launch-sees-stale-buffer:$c launch-order-swapped:$c"
   seq_reds="$seq_reds last-launch-dropped:$c grid-of-later-launch-copied-from-the-first:$c"
 done
+# `flash` is one launch, so the only one of the four that can change it is
+# the one that drops that launch: the stale-buffer mutant puts back an
+# output nothing has written yet, and there is no second launch to reorder
+# or to hand the first one's grid.
+seq_reds="$seq_reds last-launch-dropped:flash"
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=80 $seq_reds" ] ||
-    { printf 'wanted: red=80 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=81 $seq_reds" ] ||
+    { printf 'wanted: red=81 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 80 of the 92 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 81 of the 96 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 23 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 24 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (23 of 23)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (24 of 24)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
+
+# The fused attention kernel's two corpus claims, both on the fake device and
+# so both independent of the driver. Every query row's maximum score must be
+# outside the first FA_BK keys (otherwise the online rescale only ever
+# multiplies by exp(0) and a kernel without it would pass), and the online
+# softmax's answer must be inside the tolerance of the three launches it
+# replaces, over the same buffers.
+flash_probe="$(sed -n 's/^probe flash //p' "$work/seq.out" | tail -n 1)"
+case "$flash_probe" in
+  rows_raised=64\ fused_vs_three_launch=*) ;;
+  *) fail "the fused attention's corpus no longer raises every row's maximum after the first key block: $flash_probe" ;;
+esac
+flash_miss="${flash_probe#*fused_vs_three_launch=}"
+flash_miss="${flash_miss%% *}"
+python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) <= 1.0 else 1)" "$flash_miss" ||
+  fail "the online softmax is outside the tolerance of the three-launch chain on the fake device: $flash_probe"
+echo "PASS  corpus: every row's maximum rises after the first key block, and the online softmax is ${flash_miss} tolerances from the three launches"
 
 # The measurement the composition's doc comment claims: 7.1.26's absolute
 # error is at most 1.5e-7. `erf_sweep` puts the device's erf beside an

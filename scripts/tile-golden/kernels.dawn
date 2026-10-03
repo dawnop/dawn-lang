@@ -2330,6 +2330,81 @@ fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   store_strided(o, idx_mul(bm, idx_const(ATT_T * ATT_D)), sh, [ATT_D, 1], acc)
 }
 
+# FlashAttention (Dao et al. 2022): the same softmax(Q K^T / sqrt(d)) V as
+# the three launches above, in ONE launch that never writes S or P. Each
+# block owns FA_BQ queries and walks the keys and values FA_BK at a time,
+# carrying three tiles across the walk: the running maximum `m` of each
+# query's scores, the running sum `l` of their exponentials, and the
+# running weighted sum `acc` of the values. The final answer is `acc / l`.
+#
+# Why the ONLINE softmax. A softmax needs the maximum of the whole row
+# before its first exponential (that is what keeps `exp` from overflowing),
+# and the three-launch version gets it by writing the whole score row to
+# memory and reading it back. The online form instead subtracts the maximum
+# seen SO FAR, and when a later block raises it, rescales what is already
+# summed by `exp(m_old - m_new)`. In exact arithmetic that factor turns
+# every term already summed into the one the larger maximum would have
+# given, so the answer is the same softmax (in floating point it is within
+# the tolerance of it: the `probe flash` line of scripts/tile-gpu-diff's
+# seq_diff measures how far), and the score matrix only ever exists one
+# FA_BQ by FA_BK block at a time, in registers.
+#
+# Two choices here that a reader of the textbook form should know about.
+#
+# A row statistic lives in a whole tile, the same value in every column.
+# The surface has no reshape, so the reduction that answers a [FA_BQ] vector
+# cannot be widened back to the rows it came from. A max over a row is
+# instead the larger of its inclusive prefix and suffix maxima (both scans
+# keep the shape, and lane j of the two together has seen the whole row),
+# and a sum over a row is the product with a block of ones, which `mmaf`
+# writes into every column at once. Neither is an approximation: a max is
+# exact in any order, and the ones-product is a sum in an unspecified order,
+# the same tolerance tier every `mmaf` here already is.
+#
+# FA_BK is ATT_D. With the key block as wide as a head, the scores, the
+# probabilities, the statistics and the accumulator are all one FA_BQ by
+# ATT_D shape, so the factor that rescales `l` rescales `acc` without a
+# second copy.
+#
+# Format and shape: f64, ATT_M by ATT_D queries against ATT_N keys, which
+# are knife 16's. The same format as the three launches is what lets the
+# host compare the two algorithms at one tolerance (packages/tileref's
+# `flash_attn_ref` is this loop on the host, held to the three references
+# chained), and sm_86 assembles f64 `mmaf` the way it does for the rest of
+# the attention family. The FlashAttention of the paper is f16 operands with
+# an f32 accumulator; that is a different tolerance, not a different
+# algorithm.
+const FA_BQ: Int = 32
+const FA_BK: Int = ATT_D
+
+fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let bm = block_id(0)
+  let sh = [FA_BQ, FA_BK]
+  let rows = idx_mul(bm, idx_const(FA_BQ * ATT_D))
+  let tq = load_strided(q, rows, sh, [ATT_D, 1])
+  let zero = f_const(F64, sh, 0.0)
+  let ones = f_const(F64, sh, 1.0)
+  let scale = f_const(F64, sh, ATT_INV_SQRT_D)
+  let m0 = f_const(F64, sh, neg_inf())
+  let (_m, l, acc) = d_for3(idx_const(0), idx_const(ATT_N / FA_BK), idx_const(1), m0, zero, zero, (j, m, l, acc) => {
+    let keys = idx_mul(j, idx_const(FA_BK * ATT_D))
+    let tk = load_strided(k, keys, sh, permute([ATT_D, 1], [1, 0]))
+    let tv = load_strided(v, keys, sh, [ATT_D, 1])
+    let qk = mmaf(F64, FA_BQ, ATT_D, FA_BK, tq, tk, zero)
+    let s = mul(F64, sh, qk, scale)
+    let prefix_max = d_scan(F64, sh, 1, false, s, neg_inf(), (best, e) => s_maxf(F64, best, e))
+    let suffix_max = d_scan(F64, sh, 1, true, s, neg_inf(), (best, e) => s_maxf(F64, best, e))
+    let row_max = maxf(F64, sh, prefix_max, suffix_max)
+    let m_new = maxf(F64, sh, m, row_max)
+    let p = exp(F64, sh, sub(F64, sh, s, m_new))
+    let alpha = exp(F64, sh, sub(F64, sh, m, m_new))
+    let l_new = mmaf(F64, FA_BQ, FA_BK, ATT_D, p, ones, mul(F64, sh, l, alpha))
+    let acc_new = mmaf(F64, FA_BQ, FA_BK, ATT_D, p, tv, mul(F64, sh, acc, alpha))
+    (m_new, l_new, acc_new)
+  })
+  store_strided(o, rows, sh, [ATT_D, 1], div(F64, sh, acc, l))
+}
+
 # leetgpu 37 (Matrix Power): one square product, launched P-1 times with the
 # host ping-ponging between two accumulators. The only kernel here that is
 # the WHOLE of its problem: the sequence's length is the problem's exponent,
@@ -5350,6 +5425,9 @@ fn trace(name: String) -> TileProg = match name {
   "attn_context" ->
     trace_kernel("attn_context", ["f64", "f64", "f64"],
       () => attn_context(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "flash_attn" ->
+    trace_kernel("flash_attn", ["f64", "f64", "f64", "f64"],
+      () => flash_attn(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
   "matpow_step" ->
     trace_kernel("matpow_step", ["f64", "f64", "f64"],
       () => matpow_step(param(F64, 0), param(F64, 1), param(F64, 2)))
