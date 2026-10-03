@@ -273,9 +273,13 @@ target loader 能解析 ASM 时叠加数据签名，不能借 system loader 泄�
 ```dawn
 pub type LspLeaseHost = {
   standalone: fn() -> JsigLease !io,
-  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io
+  project: fn(source.SourcePlan) -> Result[JsigLease, LocDiag] !io,
+  ct: CtOpts
 }
 ```
+
+`ct` 是 2026-10-03 加的（#417）：comptime 的调用深度随宿主栈不同，JVM 传 `ct_default()`，
+native 传 `ct_native()`，见 [audit/ceval-trampoline-verdict.md](audit/ceval-trampoline-verdict.md) §5.2。
 
 - JVM project factory 使用 `fetch_checked` + `jsig_for`；`jsig_for` 的宿主/I/O failure 由
   `catch_fault` 转为 `dawn.toml` 诊断，compiler invariant panic 不会被降格成用户错误。

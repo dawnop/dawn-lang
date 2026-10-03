@@ -27,6 +27,7 @@ use ir/core.{
 use ir/lower
 use ir/interp.{
   eval_comptime, eval_module, program_sigs, note_direct_fn, note_trait_fn, ct_fuel, ct_default,
+  ct_native,
 }
 
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
@@ -843,6 +844,30 @@ test "float folds agree with the backends on signed zero and NaN" {
   assert map.get(out.consts, "D") == Some(VBool(false))
   assert map.get(out.consts, "E") == Some(VBool(false))
   assert map.get(out.consts, "F") == Some(VBool(true))
+}
+
+## The depth a run may reach is the caller's to say (#417): the native
+## compiler's stack holds far fewer interpreted calls than the JVM's, so the
+## same const folds under one set of options and is refused under the other.
+## Both halves matter -- a limit that never reaches the counter passes the
+## first assertion and fails the second.
+test "the call depth limit comes from the options" {
+  let src = "fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }\n" ++
+    "const D: Int = down(1600)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let jvm = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_default())
+  assert len(jvm.diags) == 0
+  let native = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_native())
+  assert len(native.diags) == 1
+  assert str.contains(native.diags[0].msg, "call depth limit (1500) exceeded")
 }
 
 test "fuel exhaustion becomes a diagnostic" {

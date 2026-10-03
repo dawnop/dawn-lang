@@ -86,7 +86,7 @@ use c/cdriver
 use jvm/jreflect.{jsig_real, jsig_for}
 use check/jsig.{JsigLease}
 use check/tast.{TModule}
-use ir/interp.{CtOut, CtOpts, ct_default, DEFAULT_FUEL}
+use ir/interp.{CtOut, CtOpts, ct_default, ct_fuel, DEFAULT_FUEL}
 use check/cx.{Cx}
 use java "java.io.File"
 use java "java.util.Map"
@@ -815,7 +815,7 @@ fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !Console 
       i = i + 1
     }
   }
-  (CtOpts { fuel: fuel }, out)
+  (ct_fuel(fuel), out)
 }
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
@@ -933,7 +933,7 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
   }
   RunArgs {
     cpjars: cpjars,
-    opts: CtOpts { fuel: fuel },
+    opts: ct_fuel(fuel),
     closure: closure,
     std_flag: std_flag,
     target: target,
@@ -2381,7 +2381,8 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
       } else if mode == "lsp" {
         run_lsp(lsp_std_flag(rest), LspLeaseHost {
           standalone: lsp_standalone_lease,
-          project: lsp_target_lease
+          project: lsp_target_lease,
+          ct: ct_default()
         })
       } else if mode == "lock" {
         pkgcmd.run_lock(rest, fail_planner)
