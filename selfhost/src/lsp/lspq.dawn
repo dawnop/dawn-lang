@@ -183,32 +183,60 @@ pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_
 # collection renders no signature (`live` is false for every span of it).
 
 ## One name the walk resolved: its span, and the site of the declaration it
-## names, `def_path` read as `Target.def_path` is.
-pub(pkg) type Resolution = { lo: Int, hi: Int, def: (Int, Int), def_path: Option[String] }
+## names, `def_path` read as `Target.def_path` is. `role` is what the walk
+## knew, at a local's own declaration, that the site alone does not say.
+pub(pkg) type Resolution = { lo: Int, hi: Int, def: (Int, Int), def_path: Option[String], role: LocalRole }
+
+## A local declared at its own name: a parameter, a local `fn`, a mutable
+## binding (`var`, a handler's state cell), a `let`. Only a declaration carries
+## one; a use of the local names the same site, and a reader looks the role up
+## there. `NoRole` is every other name, a pattern binder included, which is
+## its own site and needs no tag. Semantic tokens read it
+## (docs/lsp-references-design.md §T1): a top-level declaration is found again
+## by its name's span in its module, and a local has no such table. A `let`
+## carries one because its site is the statement, not the name.
+pub(pkg) type LocalRole = NoRole | LetRole | ParamRole | FnRole | MutableRole
 
 ## The resolved names starting in `lo..=hi`, by offset. A top-level
-## declaration whose span misses the range is not walked, as for inlay hints;
-## the ones `decl_bounds` has no span for (types, effects, `use` lines) hold
-## names too and are always walked, which costs a declaration's header.
+## declaration whose span misses the range is not walked, as for inlay hints.
 pub(pkg) fn resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = {
-  let none: List[Resolution] = []
-  var q = Q { ..new_q(-1), found: Some(none) }
-  for d in qc.entry.m.decls {
-    let walk = match decl_bounds(d) {
-      Some(b) -> {
-        let (dlo, dhi) = b
-        dhi >= lo && dlo <= hi
-      }
-      None -> true
-    }
-    if walk { q = visit_decl(qc, q, d) }
-  }
   var out: List[Resolution] = []
-  for r in q.found.unwrap_or(none) {
+  for r in walked_resolutions(qc, lo, hi) {
     if r.lo >= lo && r.lo <= hi { out = out ++ [r] }
   }
   sort_by(out, (a, b) => a.lo - b.lo)
 }
+
+## Everything the walk of the declarations `lo..=hi` reaches resolved, in walk
+## order and unclipped: a local used inside the range may be declared outside
+## it, in the same declaration, and the declaration's role is read from here.
+pub(pkg) fn walked_resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = {
+  let none: List[Resolution] = []
+  var q = Q { ..new_q(-1), found: Some(none) }
+  for d in qc.entry.m.decls {
+    let (dlo, dhi) = decl_span(d)
+    if dhi >= lo && dlo <= hi { q = visit_decl(qc, q, d) }
+  }
+  q.found.unwrap_or(none)
+}
+
+## Where a top-level declaration is written, from its first token to its last.
+## Every name the walk resolves under a declaration lies inside it, a type's
+## and an effect's included, so a range request walks only what it overlaps
+## (docs/lsp-references-design.md §T1: walking every type and effect header
+## of a 12k-line buffer was most of a viewport request's cost).
+pub(pkg) fn decl_span(d: Decl) -> (Int, Int) =
+  match d {
+    DFn(f) -> (f.lo, f.hi)
+    DEffect(e) -> (e.lo, e.hi)
+    DType(t) -> (t.lo, t.hi)
+    DConst(_, _, _, _, lo, hi, _, _) -> (lo, hi)
+    DTrait(_, _, _, _, _, _, _, _, lo, hi, _, _) -> (lo, hi)
+    DImpl(_, _, _, _, _, _, _, _, lo, hi) -> (lo, hi)
+    DUseJava(_, lo, hi, _, _) -> (lo, hi)
+    DUseModule(_, _, _, lo, hi, _, _) -> (lo, hi)
+    DTest(_, _, lo, hi, _, _, _) -> (lo, hi)
+  }
 
 # ---- inlay hints (docs/lsp-hover-design.md §A4) ----
 #
@@ -660,7 +688,7 @@ fn offer_target(q: Q, t: Target) -> Q = {
   match q.found {
     Some(rs) ->
       return match t.def {
-        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: t.lo, hi: t.hi, def: d, def_path: t.def_path }]) }
+        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: t.lo, hi: t.hi, def: d, def_path: t.def_path, role: NoRole }]) }
         None -> q
       }
     None -> ()
@@ -675,6 +703,30 @@ fn offer_target(q: Q, t: Target) -> Q = {
 }
 
 fn no_def() -> (Option[(Int, Int)], Option[String]) = (None, None)
+
+## A call of a local (a parameter, a local `fn`, a `let` holding a lambda),
+## collected as a use of that local. Only a collection takes it: hover and
+## definition at such a call answer as they did before T1, and a local that
+## shadows a top-level function of its name is R1's to resolve for them
+## (docs/lsp-references-design.md §T1). Collected ahead of the walk's own
+## offer at the same span, so a token reads the local.
+fn collect_local_call(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
+  match q.found {
+    Some(rs) ->
+      match sym_get(qc, sid) {
+        Some(sym) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: (sym.dlo, sym.dhi), def_path: None, role: NoRole }]) }
+        None -> q
+      }
+    None -> q
+  }
+
+## A local of the entry document at its own declaration, `lo..hi`: offered as
+## `offer` would, and collected with its role.
+fn offer_local(q: Q, role: LocalRole, lo: Int, hi: Int, hover: String, def: (Int, Int)) -> Q =
+  match q.found {
+    Some(rs) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: def, def_path: None, role: role }]) }
+    None -> offer(q, lo, hi, hover, Some(def), None)
+  }
 
 # ---- name resolution helpers ----
 
@@ -1573,7 +1625,8 @@ fn offer_binding(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
   match sym_get(qc, sid) {
     Some(sym) -> {
       let kw = if sym.mutable { "var" } else { "let" }
-      offer(q, lo, hi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty), Some((sym.dlo, sym.dhi)), None)
+      let role = if sym.mutable { MutableRole } else { LetRole }
+      offer_local(q, role, lo, hi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty), (sym.dlo, sym.dhi))
     }
     None -> q
   }
@@ -1965,8 +2018,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
           Some(sid) ->
             match sym_get(qc, sid) {
               Some(sym) -> {
-                q = offer(q, p.lo, p.hi, p.name ++ ": " ++ show_ty(qc, sym.ty),
-                  Some((p.lo, p.hi)), None)
+                q = offer_local(q, ParamRole, p.lo, p.hi, p.name ++ ": " ++ show_ty(qc, sym.ty), (p.lo, p.hi))
               }
               None -> ()
             }
@@ -2074,8 +2126,7 @@ fn offer_lambda_params(qc: QCx, q0: Q, params: List[LambdaParam], psyms: List[In
       Some(sid) ->
         match sym_get(qc, sid) {
           Some(sym) -> {
-            q = offer(q, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
-              Some((p.lo, p.hi)), None)
+            q = offer_local(q, ParamRole, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty), (p.lo, p.hi))
           }
           None -> ()
         }
@@ -2176,8 +2227,13 @@ fn offer_cell(qc: QCx, q0: Q, sid: Int, lo: Int, hi: Int) -> Q =
       match sym.cell_of {
         Some(co) -> {
           let (_, ct) = co
-          offer(q0, lo, hi, "var " ++ sym.name ++ ": " ++ show_ty(qc, ct),
-            Some((sym.dlo, sym.dhi)), None)
+          let hover = "var " ++ sym.name ++ ": " ++ show_ty(qc, ct)
+          # the declaration is the one span that is its own site
+          if (lo, hi) == (sym.dlo, sym.dhi) {
+            offer_local(q0, MutableRole, lo, hi, hover, (sym.dlo, sym.dhi))
+          } else {
+            offer(q0, lo, hi, hover, Some((sym.dlo, sym.dhi)), None)
+          }
         }
         None -> q0
       }
@@ -2768,7 +2824,8 @@ fn walk_named_call(
       let (written, _) = tast_positions.split_site(bname, targs)
       q = walk_call_args(qc, q, args, written)
     }
-    Some(XCallDyn(_, _, targs, _, _, _, _)) -> {
+    Some(XCallDyn(sid, _, targs, _, _, _, _)) -> {
+      q = collect_local_call(qc, q, sid, clo, chi)
       match sig_of(qc, callee) {
         Some(s) -> {
           q = offer_sig_at(qc, q, clo, chi, s, site_of_sig(qc, s))
@@ -3213,8 +3270,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
         Some(TSLocalFn(sid, _, psyms, _, tbody, _, _, _)) -> {
           match sym_get(qc, sid) {
             Some(sym) -> {
-              q = offer(q, nlo, nhi, "fn " ++ name ++ ": " ++ show_ty(qc, sym.ty),
-                Some((nlo, nhi)), None)
+              q = offer_local(q, FnRole, nlo, nhi, "fn " ++ name ++ ": " ++ show_ty(qc, sym.ty), (nlo, nhi))
               # the desugared lambda's own type, at the whole-statement span
               q = offer(q, lo, hi, show_ty(qc, sym.ty), None, None)
             }
@@ -3227,8 +3283,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
               Some(pid) ->
                 match sym_get(qc, pid) {
                   Some(sym) -> {
-                    q = offer(q, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
-                      Some((p.lo, p.hi)), None)
+                    q = offer_local(q, ParamRole, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty), (p.lo, p.hi))
                   }
                   None -> ()
                 }

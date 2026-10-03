@@ -1,0 +1,359 @@
+# Semantic tokens (docs/lsp-references-design.md §T1): what kind of name each
+# resolved identifier is, for the distinctions a grammar cannot make. Case
+# only splits Dawn's value names from its type-level ones, so TextMate and the
+# Playground paint a type, a constructor, a trait, an effect and a constant
+# alike; the checker knows which is which.
+#
+# The kind is read off the declaration a name resolves to, not off the node
+# the walk stood on. `lspq.walked_resolutions` already pairs every name with
+# its declaration site, renders nothing, and is the table references will be
+# read from too; a top-level declaration is found again by the start of its
+# name in its own module, which is one map per module per request, where
+# tagging every offer in the walk would have touched every arm of it. Locals
+# have no such table, so the walk tags the one thing their site does not say
+# (parameter, local fn, mutable) at their declaration, and a use looks that up.
+#
+# Only names are sent, never keywords, literals, comments or operators: the
+# grammar colours those correctly already, and the Playground's 256 KiB
+# message cap leaves no room for them (research report §2.4). A name with no
+# declaration behind it (a builtin type or function, std read from the
+# embedded copy) gets no token and keeps its grammar colour.
+
+use std/map
+use front/ast.{
+  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DEffect, Param, TypeParamDecl
+}
+use lsp/lspq.{
+  QCx, Resolution, LocalRole, NoRole, ParamRole, FnRole, MutableRole, walked_resolutions, decl_span
+}
+
+## The legend's token types, in the order their indices mean. LSP's standard
+## names only, so a client colours them with no configuration; what each Dawn
+## kind maps to, and why, is the table in the design (§T1).
+pub(pkg) fn token_types() -> List[String] = [
+  "namespace", "type", "struct", "enum", "interface", "typeParameter", "parameter",
+  "variable", "property", "enumMember", "function", "method", "class"
+]
+
+## The legend's modifiers, bit `i` meaning entry `i`. `mutable` is the one
+## that is not in LSP's list (rust-analyzer's name for it); a client that does
+## not know it ignores the bit.
+pub(pkg) fn token_modifiers() -> List[String] = ["declaration", "readonly", "defaultLibrary", "mutable"]
+
+const T_NAMESPACE: Int = 0
+const T_TYPE: Int = 1
+const T_STRUCT: Int = 2
+const T_ENUM: Int = 3
+const T_INTERFACE: Int = 4
+const T_TYPE_PARAMETER: Int = 5
+const T_PARAMETER: Int = 6
+const T_VARIABLE: Int = 7
+const T_PROPERTY: Int = 8
+const T_ENUM_MEMBER: Int = 9
+const T_FUNCTION: Int = 10
+const T_METHOD: Int = 11
+const T_CLASS: Int = 12
+
+const M_DECLARATION: Int = 1
+const M_READONLY: Int = 2
+const M_DEFAULT_LIBRARY: Int = 4
+const M_MUTABLE: Int = 8
+
+## One token in code points of the analyzed text, `lo..hi` on one line: the
+## server turns it into UTF-16 and LSP's relative encoding (`encode_tokens`).
+pub(pkg) type Token = { lo: Int, hi: Int, ty: Int, mods: Int }
+
+## What a declaration's name is, as found in its module. `declares` is false
+## for the one name the walk offers as its own site without declaring it: the
+## trait an `impl` names.
+type Kind = { ty: Int, mods: Int, declares: Bool }
+
+fn kind(ty: Int, mods: Int) -> Kind = Kind { ty: ty, mods: mods, declares: true }
+
+## The tokens of the names starting in `lo..hi` (code points, `hi`
+## excluded), by offset, none overlapping another.
+pub(pkg) fn semantic_tokens(qc: QCx, lo: Int, hi: Int) -> List[Token] = {
+  let rs = walked_resolutions(qc, lo, hi)
+  # each local's role, at its declaration
+  var roles: Map[Int, LocalRole] = map.empty()
+  for r in rs {
+    if r.role != NoRole && r.def_path == None {
+      let (dlo, _) = r.def
+      roles = map.insert(roles, dlo, r.role)
+    }
+  }
+  # another module's names, indexed whole on first use; this document's, one
+  # declaration at a time, since a viewport's names mostly land near it
+  var indexes: Map[String, Map[Int, Kind]] = map.empty()
+  var own: Map[Int, Map[Int, Kind]] = map.empty()
+  let decls = qc.entry.m.decls
+  # the declaration the last lookup landed in, which the next one mostly does
+  var last = -1
+  var last_index: Map[Int, Kind] = map.empty()
+  var cands: List[(Token, Int)] = []
+  for r in rs {
+    if in_range(r, lo, hi) {
+      let (dlo, _) = r.def
+      var index: Map[Int, Kind] = map.empty()
+      match r.def_path {
+        Some(key) -> {
+          if not map.has(indexes, key) {
+            indexes = map.insert(indexes, key, match module_at(qc, key) {
+              Some(m) -> decl_index(m.decls)
+              None -> map.empty()
+            })
+          }
+          index = unwrap_or(map.get(indexes, key), index)
+        }
+        None -> {
+          let hit = last >= 0 && {
+            let (a, b) = decl_span(decls[last])
+            dlo >= a && dlo <= b
+          }
+          if hit {
+            index = last_index
+          } else {
+            match decl_holding(decls, dlo) {
+              Some(i) -> {
+                if not map.has(own, i) { own = map.insert(own, i, decl_index([decls[i]])) }
+                index = unwrap_or(map.get(own, i), index)
+                last = i
+                last_index = index
+              }
+              None -> ()
+            }
+          }
+        }
+      }
+      match classify(qc, r, index, roles) {
+        Some(k) -> {
+          for run in name_runs(qc.cps, r.lo, r.hi, k.ty == T_NAMESPACE) {
+            let (a, b) = run
+            cands = cands ++ [(Token { lo: a, hi: b, ty: k.ty, mods: k.mods }, r.hi - r.lo)]
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  # one name offered twice (a record pun is a field and a local) keeps the
+  # innermost offer, as hover does; a token never starts inside another
+  let sorted = sort_by(cands, (x, y) => {
+    let (a, wa) = x
+    let (b, wb) = y
+    if a.lo != b.lo { a.lo - b.lo } else { wa - wb }
+  })
+  var out: List[Token] = []
+  var end = -1
+  for c in sorted {
+    let (t, _) = c
+    if t.lo >= end {
+      out = out ++ [t]
+      end = t.hi
+    }
+  }
+  out
+}
+
+## Does a resolved name start inside the requested range?
+fn in_range(r: Resolution, lo: Int, hi: Int) -> Bool = r.lo >= lo && r.lo < hi
+
+## The kind of the name at `r`, or None for a site no declaration table knows.
+fn classify(qc: QCx, r: Resolution, index: Map[Int, Kind], roles: Map[Int, LocalRole]) -> Option[Kind] = {
+  let (dlo, dhi) = r.def
+  let lib = match r.def_path {
+    Some(p) -> if map.has(qc.std.dir_modules, p) { M_DEFAULT_LIBRARY } else { 0 }
+    None -> 0
+  }
+  # a module names its own file at line 0, column 0, a span no name has
+  if dlo == 0 && dhi == 0 && r.def_path != None { return Some(kind(T_NAMESPACE, lib)) }
+  # a local's declaration carries its role; a `let`'s site is its statement,
+  # so the name is not where the site starts
+  let own = r.def_path == None && (r.lo == dlo || r.role != NoRole)
+  match map.get(index, dlo) {
+    Some(k) -> {
+      let decl = if own && k.declares { M_DECLARATION } else { 0 }
+      return Some(Kind { ..k, mods: k.mods + lib + decl })
+    }
+    None -> ()
+  }
+  if r.def_path != None { return None }
+  # the rest is declared inside a declaration of this document: a local, or a
+  # type parameter, which case tells apart (spec §1)
+  let decl = if own { M_DECLARATION } else { 0 }
+  if dlo < len(qc.cps) && is_upper(qc.cps[dlo]) { return Some(kind(T_TYPE_PARAMETER, decl)) }
+  match map.get(roles, dlo) {
+    Some(ParamRole) -> Some(kind(T_PARAMETER, decl))
+    Some(FnRole) -> Some(kind(T_FUNCTION, decl))
+    Some(MutableRole) -> Some(kind(T_VARIABLE, decl + M_MUTABLE))
+    _ -> Some(kind(T_VARIABLE, decl))
+  }
+}
+
+## The position in `decls` (in source order) of the declaration whose span
+## holds offset `at`.
+fn decl_holding(decls: List[Decl], at: Int) -> Option[Int] = {
+  var a = 0
+  var b = len(decls) - 1
+  while a <= b {
+    let mid = (a + b) / 2
+    let (dlo, dhi) = decl_span(decls[mid])
+    if at < dlo {
+      b = mid - 1
+    } else if at > dhi {
+      a = mid + 1
+    } else {
+      return Some(mid)
+    }
+  }
+  None
+}
+
+## The module a definition site names: the program file at `path`, or the std
+## module read from it.
+fn module_at(qc: QCx, path: String) -> Option[Module] = {
+  for cm in qc.prog.modules {
+    if cm.path == path { return Some(cm.m) }
+  }
+  match map.get(qc.std.dir_modules, path) {
+    Some(mp) -> {
+      for tr in qc.std.srcs {
+        let (smp, _, m) = tr
+        if smp == mp { return Some(m) }
+      }
+      None
+    }
+    None -> None
+  }
+}
+
+## Every name of `decls` a definition can land on, by the offset its name
+## starts at: the sites `lspq` answers definition with.
+fn decl_index(decls: List[Decl]) -> Map[Int, Kind] = {
+  var ix: Map[Int, Kind] = map.empty()
+  for d in decls {
+    match d {
+      DFn(f) -> {
+        ix = map.insert(ix, f.nlo, kind(T_FUNCTION, 0))
+        ix = index_params(ix, f.params)
+        ix = index_tparams(ix, f.tparams)
+      }
+      DType(t) -> {
+        let ty = match t.alias_target {
+          Some(_) -> T_TYPE
+          None -> if t.is_record { T_STRUCT } else { T_ENUM }
+        }
+        ix = map.insert(ix, t.nlo, kind(ty, 0))
+        for c in t.ctors {
+          # a record's constructor is spelled as its type: one name, one kind
+          ix = map.insert(ix, c.nlo, kind(if t.is_record { T_STRUCT } else { T_ENUM_MEMBER }, 0))
+          for fd in c.fields { ix = map.insert(ix, fd.lo, kind(T_PROPERTY, 0)) }
+        }
+      }
+      DConst(_, _, _, _, _, _, nlo, _) -> { ix = map.insert(ix, nlo, kind(T_VARIABLE, M_READONLY)) }
+      DTrait(_, _, _, _, methods, _, _, _, _, _, nlo, _) -> {
+        ix = map.insert(ix, nlo, kind(T_INTERFACE, 0))
+        for tm in methods {
+          ix = map.insert(ix, tm.nlo, kind(T_METHOD, 0))
+          ix = index_params(ix, tm.params)
+        }
+      }
+      DImpl(tparams, _, tlo, _, _, methods, _, _, _, _) -> {
+        ix = map.insert(ix, tlo, Kind { ty: T_INTERFACE, mods: 0, declares: false })
+        ix = index_tparams(ix, tparams)
+        for f in methods {
+          ix = map.insert(ix, f.nlo, kind(T_METHOD, 0))
+          ix = index_params(ix, f.params)
+          ix = index_tparams(ix, f.tparams)
+        }
+      }
+      DEffect(e) -> {
+        ix = map.insert(ix, e.nlo, kind(T_INTERFACE, 0))
+        for op in e.ops {
+          ix = map.insert(ix, op.nlo, kind(T_METHOD, 0))
+          ix = index_params(ix, op.params)
+        }
+      }
+      DUseJava(_, _, _, nlo, _) -> { ix = map.insert(ix, nlo, kind(T_CLASS, 0)) }
+      _ -> ()
+    }
+  }
+  ix
+}
+
+fn index_params(ix0: Map[Int, Kind], params: List[Param]) -> Map[Int, Kind] = {
+  var ix = ix0
+  for p in params { ix = map.insert(ix, p.lo, kind(T_PARAMETER, 0)) }
+  ix
+}
+
+fn index_tparams(ix0: Map[Int, Kind], tparams: List[TypeParamDecl]) -> Map[Int, Kind] = {
+  var ix = ix0
+  for tp in tparams { ix = map.insert(ix, tp.lo, kind(T_TYPE_PARAMETER, 0)) }
+  ix
+}
+
+fn is_upper(c: Char) -> Bool = c >= 'A' && c <= 'Z'
+
+fn is_name_char(c: Char) -> Bool =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+
+## The names inside a resolved span. A span is a name, or starts with one
+## (a field's declaration runs on over its type, which has its own token);
+## only a module path (`use std/str`) is several, each a namespace.
+fn name_runs(cps: List[Char], lo: Int, hi: Int, all: Bool) -> List[(Int, Int)] = {
+  let n = len(cps)
+  let end = if hi > n { n } else { hi }
+  var out: List[(Int, Int)] = []
+  var i = lo
+  while i < end {
+    if is_name_char(cps[i]) {
+      let s = i
+      while i < end && is_name_char(cps[i]) { i = i + 1 }
+      out = out ++ [(s, i)]
+      if not all { return out }
+    } else if not all {
+      return out
+    } else {
+      i = i + 1
+    }
+  }
+  out
+}
+
+## LSP's relative encoding of rows `(line, character, length, type,
+## modifiers)` sorted by position, in the client's columns: five integers per
+## token, line and start relative to the token before.
+pub(pkg) fn encode_tokens(rows: List[(Int, Int, Int, Int, Int)]) -> List[Int] = {
+  var out: List[Int] = []
+  var pl = 0
+  var pc = 0
+  for row in rows {
+    let (line, ch, length, ty, mods) = row
+    let dl = line - pl
+    let dc = if dl == 0 { ch - pc } else { ch }
+    out = out ++ [dl, dc, length, ty, mods]
+    pl = line
+    pc = ch
+  }
+  out
+}
+
+test "rows encode relative to the token before, the column only on the same line" {
+  assert encode_tokens([]) == []
+  assert encode_tokens([(0, 4, 3, 10, 1), (0, 9, 1, 6, 0), (2, 2, 5, 1, 0)]) == [0, 4, 3, 10, 1, 0, 5, 1, 6, 0, 2, 2, 5, 1, 0]
+}
+
+test "a span reads as its leading name, a module path as each of its segments" {
+  let cps = code_points("l: Expr std/str")
+  assert name_runs(cps, 0, 7, false) == [(0, 1)]
+  assert name_runs(cps, 8, 15, true) == [(8, 11), (12, 15)]
+  assert name_runs(cps, 1, 7, false) == []
+}
+
+test "the legend lists every index the classifier hands out" {
+  assert len(token_types()) == T_CLASS + 1
+  assert len(token_modifiers()) == 4
+  assert get(token_types(), T_ENUM_MEMBER) == Some("enumMember")
+  assert get(token_modifiers(), 3) == Some("mutable")
+}
