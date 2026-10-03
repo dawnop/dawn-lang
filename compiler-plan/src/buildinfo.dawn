@@ -1,0 +1,343 @@
+# The build manifest: which packages, at which versions and with which source,
+# a project's build is made of (docs/build-info-design.md).
+#
+# Since #401 the positions baked into a product name a package by its real
+# name only, so the product no longer says which checkout or which archive a
+# package came from. One name is one copy program-wide (MVS plus the linker's
+# names table), so the name is unambiguous inside one product; what was
+# missing is a side table from the name to a version and a content digest.
+# This module computes that table from a `SourcePlan`.
+#
+# The digest is computed here, on demand, and not in `source_plan`: planning
+# runs on every compile and every LSP project rebuild, and the digest reads the
+# whole tree. Nothing written here may depend on where a tree sits: entries are
+# named `<real name>/<package path>`, rows are sorted, and no path, cache root
+# or url appears, so the table is a function of sources and manifests alone.
+# That is what lets the next cut write it into a jar without breaking B==C.
+
+use std/io
+use std/io.{Fs}
+use std/str
+use std/map
+use std/bytes
+use std/memfs
+use sha2/sha256
+use fspath/fspath
+use manifestv.{SemV, semv_show, mcoord_show, validate}
+use source
+use source.{SourcePlan, PkgR, FromPath, FromUrl, ProjectDirectory, SourceFile}
+use pkgfetch
+
+## The version a package without a declared one reports (Go's word for it).
+pub const DEVEL: String = "(devel)"
+
+## The name the root reports when it has no dawn.toml to take one from. The
+## parentheses keep it apart from every real package name.
+pub const UNNAMED: String = "(unnamed)"
+
+## One line of the manifest. `version` is already shown: a semver or `DEVEL`.
+pub type BuildRow =
+  | MainRow(name: String, version: String, digest: String)
+  | PathDepRow(name: String, version: String, digest: String)
+  | UrlDepRow(name: String, version: String, digest: String, hash: String, subdir: String)
+  | JavaRow(coord: String)
+
+fn show_version(v: Option[SemV]) -> String =
+  match v {
+    Some(s) -> semv_show(s)
+    None -> DEVEL
+  }
+
+fn zero_byte() -> Bytes = bytes.utf8(str.from_char('\u{0000}'))
+
+## The `s1:` source digest of one package: its `manifest` (when present) and
+## every regular file under `src_root`, each named `<name>/dawn.toml` or
+## `<name>/src/<relative path>`, sorted by that name and framed as `d1` frames
+## a file (`name \0 size \0 bytes`). The directory the package sits in appears
+## in no name, so one tree in two places has one digest.
+pub fn source_digest(name: String, manifest: String, src_root: String) -> Result[String, String] !Fs = {
+  var entries: List[(String, String)] = []
+  if io.is_symlink(manifest) {
+    return Err("symbolic link in package tree: dawn.toml\n" ++
+        "  the source digest refuses symlinks, as the d1 hash does")
+  }
+  if io.exists(manifest) { entries = entries ++ [(name ++ "/dawn.toml", manifest)] }
+  let files = match pkgfetch.collect_files(src_root, "") {
+    Ok(fs) -> sort(fs)
+    Err(e) -> return Err(e)
+  }
+  # `dawn.toml` sorts before every `src/...`, and one prefix keeps the order
+  # of the sorted relative paths, so the list is already in name order.
+  for rel in files { entries = entries ++ [(name ++ "/src/" ++ rel, src_root ++ "/" ++ rel)] }
+  var digest = sha256.new()
+  for (entry, path) in entries {
+    let content = match io.read_bytes(path) {
+      Ok(b) -> b
+      Err(e) -> return Err("cannot read " ++ path ++ ": " ++ e.message)
+    }
+    digest = sha256.update(digest, bytes.utf8(entry))
+    digest = sha256.update(digest, zero_byte())
+    digest = sha256.update(digest, bytes.utf8(to_string(bytes.len(content))))
+    digest = sha256.update(digest, zero_byte())
+    digest = sha256.update(digest, content)
+  }
+  Ok("s1:" ++ sha256.finish(digest))
+}
+
+## Every package in the plan's graph, transitively, keyed by real name. The
+## linker already refused a name owned by two directories, so the first copy
+## met is the only one.
+fn collect_pkgs(pkg: PkgR, acc0: Map[String, PkgR]) -> Map[String, PkgR] = {
+  if map.has(acc0, pkg.name) { return acc0 }
+  var acc = map.insert(acc0, pkg.name, pkg)
+  for key in map.keys(pkg.deps) {
+    acc = collect_pkgs(map.get(pkg.deps, key).expect("resolved package"), acc)
+  }
+  acc
+}
+
+fn dep_row(pkg: PkgR) -> Result[BuildRow, String] !Fs = {
+  let dir = fspath.parent(pkg.root).unwrap_or(pkg.root)
+  let digest = match source_digest(pkg.name, dir ++ "/dawn.toml", pkg.root) {
+    Ok(d) -> d
+    Err(e) -> return Err("package `" ++ pkg.name ++ "`: " ++ e)
+  }
+  let version = show_version(pkg.version)
+  Ok(match pkg.origin {
+    FromPath -> PathDepRow(pkg.name, version, digest)
+    FromUrl(hash, subdir) -> UrlDepRow(pkg.name, version, digest, hash, subdir)
+  })
+}
+
+## The manifest of a project plan: the root, then every source package by
+## real name, then every Java coordinate. Only a clean project plan has one;
+## a plan with diagnostics did not decide which packages it is made of.
+pub fn build_rows(plan: SourcePlan) -> Result[List[BuildRow], String] !Fs = {
+  match plan.target {
+    SourceFile(_) -> return Err("a build manifest needs a project directory, not a source file")
+    ProjectDirectory(_) -> ()
+  }
+  if len(plan.diags) > 0 { return Err("cannot list a build manifest for a plan with diagnostics") }
+  if not io.is_dir(plan.source_root) {
+    return Err("project " ++ plan.project ++ " has no src/ folder (expected " ++
+        plan.source_root ++ ")")
+  }
+  let manifest = plan.project ++ "/dawn.toml"
+  let (name, version) = match io.read_file(manifest) {
+    Err(_) -> (UNNAMED, DEVEL)
+    Ok(text) ->
+      match validate(plan.project, text) {
+        Ok(m) -> (m.name, show_version(m.version))
+        Err(_) -> return Err("cannot read the manifest " ++ manifest)
+      }
+  }
+  let main_digest = match source_digest(name, manifest, plan.source_root) {
+    Ok(d) -> d
+    Err(e) -> return Err(e)
+  }
+  var rows: List[BuildRow] = [MainRow(name, version, main_digest)]
+  var all: Map[String, PkgR] = map.empty()
+  for key in map.keys(plan.pkgs) {
+    all = collect_pkgs(map.get(plan.pkgs, key).expect("resolved package"), all)
+  }
+  for dep_name in sort(map.keys(all)) {
+    match dep_row(map.get(all, dep_name).expect("collected package")) {
+      Ok(r) -> { rows = rows ++ [r] }
+      Err(e) -> return Err(e)
+    }
+  }
+  var coords: List[String] = []
+  for c in plan.java_coords { coords = coords ++ [mcoord_show(c)] }
+  for c in sort(coords) { rows = rows ++ [JavaRow(c)] }
+  Ok(rows)
+}
+
+## One row as `go version -m` lays one out: a tab, then tab-separated fields.
+pub fn render_row(r: BuildRow) -> String =
+  "\t" ++ join(
+    match r {
+      MainRow(n, v, d) -> ["main", n, v, d]
+      PathDepRow(n, v, d) -> ["dep", n, v, d]
+      UrlDepRow(n, v, d, h, sub) ->
+        if sub == "" { ["dep", n, v, d, h] } else { ["dep", n, v, d, h, "subdir=" ++ sub] }
+      JavaRow(c) -> ["java", c]
+    },
+    "\t"
+  )
+
+## A header line and the rows under it, each line ending in a newline.
+pub fn render(header: String, rows: List[BuildRow]) -> String = {
+  var out = header ++ "\n"
+  for r in rows { out = out ++ render_row(r) ++ "\n" }
+  out
+}
+
+# ---- tests ----
+
+use envmem
+use procmem
+
+## `source_plan` then `build_rows` over a table, rendered one row per line:
+## the tree is `seed`, the environment holds only `vars`, and a child process
+## would panic for want of a reply.
+fn rows_in_table(
+  seed: memfs.MemFs,
+  vars: List[(String, String)],
+  dir: String
+) -> Result[List[String], String] !io = {
+  let (got, _) = memfs.with_fs(seed, () => procmem.with_proc_table([], () => {
+    let (rows, _) = envmem.with_env_table(envmem.TABLE_CWD, vars, () =>
+        build_rows(source.source_plan(ProjectDirectory(dir))))
+    rows
+  }))
+  let (rows, calls) = got
+  if calls != [] { panic("a path-only plan spawned a process") }
+  match rows {
+    Ok(rs) -> {
+      var lines: List[String] = []
+      for r in rs { lines = lines ++ [render_row(r)] }
+      Ok(lines)
+    }
+    Err(e) -> Err(e)
+  }
+}
+
+fn lines_or_panic(r: Result[List[String], String]) -> List[String] =
+  match r {
+    Ok(ls) -> ls
+    Err(e) -> panic("rows: " ++ e)
+  }
+
+fn digest_in(seed: memfs.MemFs, name: String, dir: String) -> String !io = {
+  let (got, _) = memfs.with_fs(seed, () =>
+      source_digest(name, dir ++ "/dawn.toml", dir ++ "/src"))
+  match got {
+    Ok(d) -> d
+    Err(e) -> panic("digest: " ++ e)
+  }
+}
+
+## A small package tree under `dir`: a manifest and two source files, one of
+## them in a subdirectory, so the walk and the sort both have work to do.
+fn lib_tree(st0: memfs.MemFs, dir: String, body: String) -> memfs.MemFs = {
+  var st = memfs.put(st0, dir ++ "/dawn.toml", "schema = 1\nname = \"lib\"\n")
+  st = memfs.put(st, dir ++ "/src/util.dawn", body)
+  memfs.put(st, dir ++ "/src/deep/x.dawn", "pub fn x() -> Int = 2\n")
+}
+
+test "a source digest does not depend on where the tree sits" {
+  var st = memfs.empty(memfs.BASE)
+  st = lib_tree(st, "/a/checkout/lib", "pub fn tag() -> Int = 1\n")
+  st = lib_tree(st, "/elsewhere/cache/d1-0000/packages/lib", "pub fn tag() -> Int = 1\n")
+  let here = digest_in(st, "lib", "/a/checkout/lib")
+  let there = digest_in(st, "lib", "/elsewhere/cache/d1-0000/packages/lib")
+  assert str.starts_with(here, "s1:")
+  assert str.len(here) == 3 + 64
+  assert here == there
+}
+
+test "a source digest changes with one byte, a file name, or the package name" {
+  var st = memfs.empty(memfs.BASE)
+  st = lib_tree(st, "/p/one", "pub fn tag() -> Int = 1\n")
+  st = lib_tree(st, "/p/two", "pub fn tag() -> Int = 2\n")
+  st = lib_tree(st, "/p/three", "pub fn tag() -> Int = 1\n")
+  st = memfs.put(st, "/p/three/src/extra.dawn", "")
+  let base = digest_in(st, "lib", "/p/one")
+  assert digest_in(st, "lib", "/p/two") != base
+  # an empty file still names an entry
+  assert digest_in(st, "lib", "/p/three") != base
+  # the name is part of every entry
+  assert digest_in(st, "lib2", "/p/one") != base
+}
+
+test "the manifest names path packages by real name and an undeclared version as (devel)" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/w/app/dawn.toml",
+    "schema = 1\nname = \"app\"\n\n[deps]\nlocal = \"../lib\"\nmid = \"../mid\"\n")
+  st = memfs.put(st, "/w/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  st = lib_tree(st, "/w/lib", "pub fn tag() -> Int = 1\n")
+  # `mid` declares a version and reaches `lib` again under another alias
+  st = memfs.put(st, "/w/mid/dawn.toml",
+    "schema = 1\nname = \"mid\"\nversion = \"0.3.0\"\n\n[deps]\nl = \"../lib\"\n")
+  st = memfs.put(st, "/w/mid/src/m.dawn", "pub fn m() -> Int = 3\n")
+  let lines = lines_or_panic(rows_in_table(st, [], "/w/app"))
+  let lib = digest_in(st, "lib", "/w/lib")
+  let mid = digest_in(st, "mid", "/w/mid")
+  let app = digest_in(st, "app", "/w/app")
+  assert lines == [
+    "\tmain\tapp\t(devel)\t" ++ app,
+    "\tdep\tlib\t(devel)\t" ++ lib,
+    "\tdep\tmid\t0.3.0\t" ++ mid
+  ]
+}
+
+test "the manifest is the same for one project planned from two places" {
+  # the whole project, dependencies included, copied under a second root
+  var st = memfs.empty(memfs.BASE)
+  for root in ["/first", "/second/deeper"] {
+    st = memfs.put(st, root ++ "/app/dawn.toml",
+      "schema = 1\nname = \"app\"\nversion = \"1.2.3\"\n\n[deps]\nlib = \"../lib\"\n")
+    st = memfs.put(st, root ++ "/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+    st = lib_tree(st, root ++ "/lib", "pub fn tag() -> Int = 1\n")
+  }
+  let first = lines_or_panic(rows_in_table(st, [], "/first/app"))
+  assert len(first) == 2
+  assert first == lines_or_panic(rows_in_table(st, [], "/second/deeper/app"))
+}
+
+test "a root without dawn.toml is unnamed and in development" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/q/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  assert lines_or_panic(rows_in_table(st, [], "/q")) ==
+    ["\tmain\t(unnamed)\t(devel)\t" ++ digest_in(st, "(unnamed)", "/q")]
+}
+
+test "a url package reports the version MVS selected, not the one its consumer asked for" {
+  # `app` asks for lib 1.0.0, `mid` (a path package) for lib 1.1.0. The
+  # archives' own manifests name no version, so the row's version can only
+  # have come from the selection, and the hash with it. Both entries are warm
+  # in a cache of the test's own, with their urls recorded, so nothing fetches.
+  let old_hash = "d1:" ++ str.repeat("a", 64)
+  let new_hash = "d1:" ++ str.repeat("b", 64)
+  var st = memfs.empty(memfs.BASE)
+  let archives = [
+    (old_hash, "old", "pub fn tag() -> Int = 0\n"),
+    (new_hash, "new", "pub fn tag() -> Int = 1\n")
+  ]
+  for (hash, tag, body) in archives {
+    let entry = pkgfetch.cache_dir("/cache", hash)
+    st = memfs.put(st, entry ++ "/pkg/dawn.toml", "schema = 1\nname = \"lib\"\n")
+    st = memfs.put(st, entry ++ "/pkg/src/util.dawn", body)
+    st = memfs.put(st, "/cache/.origins/" ++ str.replace(hash, ":", "-"),
+      "file:///lib-" ++ tag ++ ".zip\n")
+  }
+  st = memfs.put(st, "/w/app/dawn.toml",
+    "schema = 1\nname = \"app\"\n\n[deps]\nmid = \"../mid\"\n\n[deps.lib]\n" ++
+      "url = \"file:///lib-old.zip\"\nversion = \"1.0.0\"\nhash = \"" ++ old_hash ++
+      "\"\nsubdir = \"pkg\"\n")
+  st = memfs.put(st, "/w/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  st = memfs.put(st, "/w/mid/dawn.toml",
+    "schema = 1\nname = \"mid\"\n\n[deps.lib]\n" ++
+      "url = \"file:///lib-new.zip\"\nversion = \"1.1.0\"\nhash = \"" ++ new_hash ++
+      "\"\nsubdir = \"pkg\"\n")
+  st = memfs.put(st, "/w/mid/src/m.dawn", "pub fn m() -> Int = 3\n")
+  let lines = lines_or_panic(rows_in_table(st, [("DAWN_PKG_CACHE", "/cache")], "/w/app"))
+  let lib = digest_in(st, "lib", pkgfetch.cache_dir("/cache", new_hash) ++ "/pkg")
+  assert lines[1] == "\tdep\tlib\t1.1.0\t" ++ lib ++ "\t" ++ new_hash ++ "\tsubdir=pkg"
+  assert lines[2] == "\tdep\tmid\t(devel)\t" ++ digest_in(st, "mid", "/w/mid")
+  assert len(lines) == 3
+}
+
+test "a url row carries its manifest hash and subdir after the digest" {
+  let row = UrlDepRow("web6", "6.0.0", "s1:aa", "d1:bb", "packages/web")
+  assert render_row(row) == "\tdep\tweb6\t6.0.0\ts1:aa\td1:bb\tsubdir=packages/web"
+  assert render_row(UrlDepRow("lib", "1.1.0", "s1:aa", "d1:bb", "")) ==
+    "\tdep\tlib\t1.1.0\ts1:aa\td1:bb"
+  assert render("x: dawn 0.0.0", [JavaRow("g:a:1")]) == "x: dawn 0.0.0\n\tjava\tg:a:1\n"
+}
+
+test "a project with no src/ folder has no manifest" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/r/dawn.toml", "schema = 1\nname = \"r\"\n")
+  assert rows_in_table(st, [], "/r") == Err("project /r has no src/ folder (expected /r/src)")
+}
