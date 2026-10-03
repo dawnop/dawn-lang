@@ -4230,6 +4230,58 @@ tileir: kernel `raw`: op #5 `mmaf`: rhs is tile<16x16xf64>, whose K (dimension 0
 - mma 的 m、n 与累加器：理由见第三节。
 - 给 `t_shape_of` 包一个类型化的公开函数：C3 之前没有调用者，等用的那一刀按它要的签名加。
 
+### 6.23 调用树：体标记、先序编号与逐行归属（刀 M1）
+
+裁决出处：agent-handoff 的 `ruling-source-span-map-20261003.md` M1 行，调研
+`research-gpumap-call-spans-report-20261003.md` §一、§三、§八 K1 行。GPU 页要把 flash_attn 的每一次调用对到它写出的
+Tile IR 行，而 `trace_calls` 原来只留执行层面最外层的调用：`d_for3` 闭包里的 20 次调用都在它的 `called` 括号
+里面，全被并进 `d_for3` 那一行。只有 tileir 知道哪个 op 是谁发出的，所以这一刀落在包里，站点只做配对与展示。
+
+**一、体标记。** `Dev` 多一对 `t_body_enter()` / `t_body_exit()`，不发任何操作。接闭包的 16 个公开函数
+（`d_for`…`d_for4`、`d_loop`、`d_loop2`、四个单操作数归约与两个扫描、`d_reduce2`、`d_scan2`、`d_if`、`d_fork2`）
+把用户闭包的 18 处调用都改经私有的 `user_body`，由它括上这一对标记。判定规则只有一条：调用标记出现在 body 顶层，
+或直接出现在一对体标记里、而这对体标记又直接处在一个 kernel 调用里，这次调用才是 kernel 的；其余嵌套调用
+（`tile_at` 里的 `idx_mul`）是库自己的，其操作归外层调用。原型借用了 `t_call_enter("@body")` 加保留名，正式实现
+用独立的一对操作：保留名会让一个名字有两种含义，而 handler 本来就要逐臂回答。
+
+**二、先序编号。** `Call` 多一个 `parent`（更早的行号或 -1），`ops_from/ops_to` 改用 `op_number` 那套编号：区域
+先于其体，`MakeToken` 为 0，和拒绝消息里的 `op #k` 是同一个数。由于记录顺序就是先序，一个调用的区间是连续的，
+并且包含它所有子调用的区间；减去子区间，剩下的就是它自己发出的部分。区域调用自己剩下的是区域 op 和终结
+（`Continue` / `Yield`）。原来那种「在别人开的区域里开或关就给 -1」的情形随之消失。
+
+**三、逐行归属。** `lower_spans` 改为回答 `Owner` 树：每条指令来自哪个 op，区域指令再按体嵌套。`L` 多了
+`owners`、`at`、`next_op` 三个字段；`lower_if` 的探测遍历照旧整体丢弃，不影响编号。`kernel_lines` 在唯一的排版
+处给每一行标出所属 op：区域的头、`} else {` 和闭括号归区域 op，体内各行归各自的 op。`line_map` 把每行交给包含
+其 op 的最内层调用，输出带 `parent` 的 `CallLines` 树。出错情形一律返回 `Err`：父子区间越界、同父兄弟重叠、op 或
+global 无主。用 `regions`、`nested`、`scanned` 等测试 kernel，加上全部 192 个 golden kernel 逐个跑 `line_map`：
+192 个都成立，没有无主的 op。C1′ 之后 view 也走 `called`，没有在体前发出无主 op；C2 若让几何标记在 body 之前
+建视图，那些 op 要并进 `head`，届时由那一刀处理。
+
+**四、实测。**
+
+- golden 字节：全量 `scripts/tile-golden/run.sh`（含 `tileiras` 一层）通过：192 个 kernel 的 `.mlir` 与 `.tilebc` 两个后端
+  逐字节不动，192 个都能汇编成 cubin，269 个变异体全红；本机墙钟 1:18:41。
+  标记不进 `ops`，所以这是预期结果；tileir 在 `TILE_PATHS` 里，输入摘要因此变了，sm_86 台账重录一行。
+- 包测试：`dawn test packages/tileir` 161 → 166 项全过。新增的有：区域函数全集下 `trace_calls` 与 `trace_kernel`
+  记录的程序相等；手写一对体标记不改变程序；`d_for` / `d_scan` 的嵌套归属（区域只留头、终结和括号）；两层
+  `d_for` 套 `d_reduce`；每个区域函数的闭包都算 body；哨兵 oracle。哨兵法只作测试用：在每两个调用之间插一个
+  `d_assert("@@k")`，按渲染文本的顺序切槽，和 `line_map` 的归属逐槽比较。它用的是文本序，不依赖 op 编号，
+  可以独立证明先序编号与排版一致。
+- 站点（`site/gpu-map/record.py`）：flash_attn 共 34 个调用，34 个与 `dawn parse` 的调用节点 span 配上；
+  38 个 op 没有落空；94 行 IR 每行只归属一次。负控：去掉 `d_scan` 的体标记后，配对器报
+  `under row 18 (`d_scan`) the source calls ['s_maxf'] and the recording ran []` 并拒绝。
+
+**五、版本。** `Dev` 多了一对操作，包外写的 handler 不补这两臂就编译不过。0.x 的 minor 是独立的兼容类
+（`docs/package-design.md` §6.3），所以接在 C1′ 的 0.4.0 之后升到 0.5.0。`Call` 与 `CallLines` 的字段、
+`lower_spans` 的返回类型也随这一升一起变。
+
+**不做的（理由）：**
+
+- 在生产路径里插哨兵：生产代码里塞指令不干净，而 `Owner` 树本身就是精确答案。哨兵只留作测试 oracle。
+- L4 的 `caller()`（调研 (b)）：它依赖还没设计的 L4，还要改约 196 个签名。到 M5 再把站点的静态配对整块替换掉。
+- 支持 kernel 内 `!Dev` helper、宿主循环和先绑定的闭包：flash_attn 用不到；到 M5 有调用点之后这些会自然放开。
+- 把位置信息写进 Tile IR 的 `loc` / Debug 节：只有行加起点列，给不出调用区间；而且默认开启会动 golden（M6，默认关）。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
