@@ -2390,71 +2390,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
         None -> ()
       }
-    EMethod(target, name, args0, nlo, nhi, _, mhi) -> {
-      let args = arg_exprs(args0)
-      q = hint_method_call(qc, q, target, name, args0, nhi, mhi, te)
-      # module-qualified (alias.fn) and UFCS calls carry the resolved sig
-      match te {
-        # `x.g()` where `g` is a renamed import (`use m.{f as g}`) calls `f`
-        Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
-          if fname == name || map.get(qc.entry.cx.import_renames, name) == Some(fname) {
-            match sig_by_owner(qc, owner, fname, trait_id) {
-              Some(s) -> {
-                q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
-                q = offer_arg_names(qc, q, Some(s), args0)
-              }
-              None -> ()
-            }
-          }
-          q = walk_method_children(qc, q, target, args, targs)
-        }
-        Some(XCallBuiltin(bname, targs, _, _, _, _, _)) -> {
-          if bname == name {
-            match map.get(qc.bins, name) {
-              Some(s) -> { q = offer_sig(qc, q, nlo, nhi, s, None, None) }
-              None -> ()
-            }
-          }
-          # a sited failure's trailing site is not something the author wrote
-          let (written, _) = tast_positions.split_site(bname, targs)
-          q = walk_method_children(qc, q, target, args, written)
-        }
-        Some(XJava(call, _, _, _)) -> {
-          match sig_of(qc, name) {
-            Some(s) -> {
-              q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
-            }
-            None -> ()
-          }
-          match call.target {
-            Some(tt) -> { q = walk_e(qc, q, target, Some(tt)) }
-            None -> { q = walk_e(qc, q, target, None) }
-          }
-          q = walk_list(qc, q, args, opt_list(call.args))
-        }
-        # an operation called through a module alias (`m.ask()`) is an
-        # `XApply` on the evidence by the time it is typed, so it is found by
-        # the alias's surface; anything else by name
-        _ -> {
-          let qualified = match target {
-            EVar(qual, _, _) -> map.get(qc.entry.cx.module_fn_sigs, (qual, name))
-            _ -> None
-          }
-          let found = match qualified {
-            Some(s) -> Some(s)
-            None -> sig_of(qc, name)
-          }
-          match found {
-            Some(s) -> {
-              q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
-            }
-            None -> ()
-          }
-          q = walk_e(qc, q, target, None)
-          q = walk_list(qc, q, args, no_texprs(args))
-        }
-      }
-    }
+    EMethod(target, name, args0, nlo, nhi, _, mhi) -> { q = walk_method(qc, q, target, name, args0, nlo, nhi, mhi, te) }
     EListLit(elems, _, _) -> {
       let es = elem_exprs(elems)
       match te {
@@ -2675,6 +2611,87 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       }
     }
     _ -> ()
+  }
+  q
+}
+
+## `recv.name(args)`: a UFCS or module-qualified call, a builtin, a Java
+## member or an operation through a module alias. Its own function so that
+## `walk_e` stays under HotSpot's huge-method limit (scripts/method-size-gate.py).
+fn walk_method(
+  qc: QCx,
+  q0: Q,
+  target: Expr,
+  name: String,
+  args0: List[Arg],
+  nlo: Int,
+  nhi: Int,
+  mhi: Int,
+  te: Option[TExpr]
+) -> Q = {
+  var q = q0
+  let args = arg_exprs(args0)
+  q = hint_method_call(qc, q, target, name, args0, nhi, mhi, te)
+  # module-qualified (alias.fn) and UFCS calls carry the resolved sig
+  match te {
+    # `x.g()` where `g` is a renamed import (`use m.{f as g}`) calls `f`
+    Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
+      if fname == name || map.get(qc.entry.cx.import_renames, name) == Some(fname) {
+        match sig_by_owner(qc, owner, fname, trait_id) {
+          Some(s) -> {
+            q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
+            q = offer_arg_names(qc, q, Some(s), args0)
+          }
+          None -> ()
+        }
+      }
+      q = walk_method_children(qc, q, target, args, targs)
+    }
+    Some(XCallBuiltin(bname, targs, _, _, _, _, _)) -> {
+      if bname == name {
+        match map.get(qc.bins, name) {
+          Some(s) -> { q = offer_sig(qc, q, nlo, nhi, s, None, None) }
+          None -> ()
+        }
+      }
+      # a sited failure's trailing site is not something the author wrote
+      let (written, _) = tast_positions.split_site(bname, targs)
+      q = walk_method_children(qc, q, target, args, written)
+    }
+    Some(XJava(call, _, _, _)) -> {
+      match sig_of(qc, name) {
+        Some(s) -> {
+          q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
+        }
+        None -> ()
+      }
+      match call.target {
+        Some(tt) -> { q = walk_e(qc, q, target, Some(tt)) }
+        None -> { q = walk_e(qc, q, target, None) }
+      }
+      q = walk_list(qc, q, args, opt_list(call.args))
+    }
+    # an operation called through a module alias (`m.ask()`) is an
+    # `XApply` on the evidence by the time it is typed, so it is found by
+    # the alias's surface; anything else by name
+    _ -> {
+      let qualified = match target {
+        EVar(qual, _, _) -> map.get(qc.entry.cx.module_fn_sigs, (qual, name))
+        _ -> None
+      }
+      let found = match qualified {
+        Some(s) -> Some(s)
+        None -> sig_of(qc, name)
+      }
+      match found {
+        Some(s) -> {
+          q = offer_sig_at(qc, q, nlo, nhi, s, site_of_sig(qc, s))
+        }
+        None -> ()
+      }
+      q = walk_e(qc, q, target, None)
+      q = walk_list(qc, q, args, no_texprs(args))
+    }
   }
   q
 }
