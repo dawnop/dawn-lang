@@ -2,7 +2,7 @@
 #   {"ok": true,  "phase": "run",     "exit": 0, "output": "...", "truncated": false, "ms": 620}
 #   {"ok": false, "phase": "compile", "output": "<Dawn diagnostics>"}
 #   {"ok": false, "phase": "timeout", "output": "<partial output>"}
-# GET /health answers {"ok": true, "version": "0.81.0"}.
+# GET /health answers {"ok": true, "version": "0.81.0", "build": "b1:2bfef5fb3622"}.
 # Everything is a JSON object built from the vendored M4 json library and
 # rendered with its RFC-8259 string escaping — no hand-rolled quoting.
 # `exit` and `ms` are `JInt`, not `JNum`: a `JNum` renders as a float
@@ -70,11 +70,29 @@ pub fn render_check(o: Outcome) -> String =
   }
 
 # /health: liveness plus the compiler release (`version`, from
-# exec.compiler_version), which the editor shows in its toolbar. An unknown
-# version is left out rather than sent empty.
-pub fn render_health(version: String) -> String = {
-  let known: List[(String, Json)] = if version == "" { [] } else { [("version", JStr(version))] }
+# exec.compiler_id), which the editor shows in its toolbar, and the short
+# digest of the sources that compiler was built from (`build`), which tells a
+# release from a later build of the same version. Either, when unknown, is
+# left out rather than sent empty.
+pub fn render_health(version: String, build: String) -> String = {
+  var known: List[(String, Json)] = []
+  if version != "" { known = known ++ [("version", JStr(version))] }
+  if build != "" { known = known ++ [("build", JStr(build))] }
   obj([("ok", JBool(true))] ++ known)
+}
+
+test "health names what it knows and leaves out what it does not" {
+  # compared as parsed objects: the field order is the map's, not a promise
+  let parsed = (v: String, b: String) => match parse(render_health(v, b)) {
+    Ok(j) -> j
+    Err(e) -> panic("health is not JSON: " ++ error_text(e))
+  }
+  assert parsed("0.83.0", "b1:2bfef5fb3622") == JObj(map.from([
+    ("ok", JBool(true)), ("version", JStr("0.83.0")), ("build", JStr("b1:2bfef5fb3622"))
+  ]))
+  assert parsed("0.81.0", "") ==
+    JObj(map.from([("ok", JBool(true)), ("version", JStr("0.81.0"))]))
+  assert parsed("", "") == JObj(map.from([("ok", JBool(true))]))
 }
 
 pub fn render_error(message: String) -> String =

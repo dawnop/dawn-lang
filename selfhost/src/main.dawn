@@ -40,6 +40,7 @@ use compiler_plan/source
 use compiler_plan/buildinfo
 use pkg/vendor
 use jvm/jarw
+use jvm/jarw.{JarStamp}
 use front/fmt
 use doc
 use lsp/server.{LspLeaseHost, run_lsp, lsp_std_flag}
@@ -269,6 +270,24 @@ fn collect_program(
   closure: Bool,
   std_tests: Bool
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !Fs !Proc !Env !Exit !Console !io = {
+  let (classes, entry, tests_info, _) =
+    collect_program_roots(target, std_flag, opts, closure, std_tests)
+  (classes, entry, tests_info)
+}
+
+## `collect_program`, plus the root package's sources as the load read them:
+## `(position path, text)` for every loaded module that belongs to no
+## `[deps]` package. `dawn build` of a single file digests these for its build
+## manifest (`buildinfo.file_rows`), because a file has no package tree to
+## walk and its load may have read sibling files through `use`.
+fn collect_program_roots(
+  target: String,
+  std_flag: Option[String],
+  opts: CtOpts,
+  closure: Bool,
+  std_tests: Bool
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])], List[(String, String)]) !Fs !Proc !Env !Exit !Console !io = {
+  var root_files: List[(String, String)] = []
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
@@ -306,6 +325,12 @@ fn collect_program(
         } else {
           load_target(std, target)
         }
+      for lm in loaded.modules {
+        match lm.pkg {
+          None -> { root_files = root_files ++ [(lm.site_path, lm.text)] }
+          Some(_) -> ()
+        }
+      }
       let prog = analyze_program(loaded, std, opts, jsig_real())
       if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
       mods = prog.modules
@@ -587,7 +612,7 @@ fn collect_program(
   for outer in vendor.vendored_outers() {
     classes = classes ++ vendor.rt_class_family(outer)
   }
-  (classes, entry, tests_info)
+  (classes, entry, tests_info, root_files)
 }
 
 ## The JVM this process is running on, not whatever `java` PATH resolves to.
@@ -726,10 +751,12 @@ fn usage() -> String = join([
   "                                       → [deps.<name>]), or a local package path (→ [deps])",
   "  dawn cache verify                    re-hash every cached package against its name",
   "  dawn lock [--check] [<dir>]          freeze (or verify) the resolved [java-deps] closure",
-  "  dawn --version                       print the toolchain version and commit",
+  "  dawn --version                       print the toolchain version and the digest of",
+  "                                       the sources it was built from",
   "  dawn version -m <project-dir>...     print the build manifest: each package's real",
   "                                       name, version ((devel) when undeclared) and",
   "                                       source digest, without building",
+  "  dawn version -m <file.jar>...        print the build manifest a built jar carries",
   "",
   "options (run/test/build):",
   "  --cp <jars>                          third-party jars for `use java`, separated by the",
@@ -1682,6 +1709,24 @@ fn run_native_image(
   console_println("wrote " ++ bin_out ++ " (standalone binary, run it directly: ./" ++ bin_out ++ ")")
 }
 
+## The build manifest a jar of `target` carries (docs/build-info-design.md):
+## a project directory's is `buildinfo.build_rows` of its plan, the same rows
+## `dawn version -m <dir>` prints; a single file's is `buildinfo.file_rows`
+## over `root_files`, the texts its load read. Re-planned here rather than
+## threaded out of the load, because planning is cheap and the plan is a
+## function of the same files the load just read.
+fn build_manifest(target: String, root_files: List[(String, String)]) -> Result[String, String] !Fs !Proc !Env = {
+  let rows = if io.is_dir(target) {
+    buildinfo.build_rows(source.source_plan(source.ProjectDirectory(target)))
+  } else {
+    buildinfo.file_rows(source.source_plan(source.SourceFile(target)), root_files)
+  }
+  match rows {
+    Ok(rs) -> Ok(buildinfo.render_file(VERSION, rs))
+    Err(e) -> Err("cannot write the build manifest: " ++ e)
+  }
+}
+
 ## `selfhost build <target> [-o out] [--native] [--std <dir>] [--vendor <pkg>]...`:
 ## pack the compiled program as an executable jar (java-deps vendored into
 ## lib/ beside it), or hand it to native-image. Each `--vendor` names an
@@ -1731,9 +1776,14 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     "${stem}.jar"
   }
-  let (classes, entry, _) = collect_program(target, std_flag, opts, closure, false)
+  let (classes, entry, _, root_files) =
+    collect_program_roots(target, std_flag, opts, closure, false)
   if entry == "" {
     return cli_error("${target} has no pub fn main() -> Unit !io to use as an entry point")
+  }
+  let build_info = match build_manifest(target, root_files) {
+    Ok(t) -> t
+    Err(e) -> return cli_error(e)
   }
   # dedupe defensively: ZipOutputStream throws on a repeated entry name
   var seen: Set[String] = set.empty()
@@ -1765,7 +1815,8 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   # no std resources any more: the toolchain's own jar carries std as the
   # compiled stdsrc module, so embedding happens by being a source file
-  jarw.write_jar_cp(jar_path, entry, all, cp_entries)
+  jarw.write_jar_cp(jar_path, entry, all, cp_entries,
+    JarStamp { dawn_version: VERSION, build_info: build_info })
   if native {
     let bin_out = if out != "" { out } else { stem }
     return run_native_image(jar_path, bin_out, user_cp, entry)
@@ -2221,28 +2272,72 @@ pub fn main() -> Unit !io =
   io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
       io.with_exit_real(() => io.with_console_real(() => dispatch())))))
 
-## `dawn version`, and `dawn version -m <project-dir>...`: the toolchain
-## version, then for each project the build manifest its plan resolves to
+## `dawn version`, and `dawn version -m <project-dir | jar>...`: the
+## toolchain's version line (`version_line`), then for each project the build
+## manifest its plan resolves to and for each jar the one it carries
 ## (compiler_plan/buildinfo, docs/build-info-design.md). Nothing is built; the
 ## header line repeats the argument as given, so the output depends on argv
-## and the sources and on nothing else.
+## and the sources (or the jar) and on nothing else.
 fn run_version(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let none: List[String] = []
-  let dirs = match rest {
-    [] -> return console_println("dawn " ++ VERSION ++ " (selfhost)")
-    [flag, ..ds] -> if flag == "-m" { ds } else { none }
+  let targets = match rest {
+    [] -> return console_println(version_line(jarw.own_build_info()))
+    [flag, ..ts] -> if flag == "-m" { ts } else { none }
   }
-  if dirs == [] { return cli_error("usage: dawn version [-m <project-dir>...]") }
-  for dir in dirs {
-    if not io.is_dir(dir) { return cli_error("not a directory: ${dir}") }
+  if targets == [] { return cli_error("usage: dawn version [-m <project-dir | jar>...]") }
+  for t in targets {
+    if not io.exists(t) { return cli_error("no such file or directory: ${t}") }
   }
-  for dir in dirs {
-    let plan = source.source_plan(source.ProjectDirectory(dir))
-    if len(plan.diags) > 0 { return fail_planner(plan.diags) }
-    match buildinfo.build_rows(plan) {
-      Ok(rows) -> console_print(buildinfo.render(dir ++ ": dawn " ++ VERSION, rows))
-      Err(e) -> return cli_error(e)
+  for t in targets {
+    if io.is_dir(t) {
+      let plan = source.source_plan(source.ProjectDirectory(t))
+      if len(plan.diags) > 0 { return fail_planner(plan.diags) }
+      match buildinfo.build_rows(plan) {
+        Ok(rows) -> console_print(buildinfo.render(t ++ ": dawn " ++ VERSION, rows))
+        Err(e) -> return cli_error(e)
+      }
+    } else {
+      match jar_listing(t) {
+        Ok(text) -> console_print(text)
+        Err(e) -> return cli_error(e)
+      }
     }
+  }
+}
+
+## `dawn version -m <jar>`: the build manifest the jar carries, laid out as
+## the listing of a project directory is, with the header naming the VERSION
+## of the toolchain that wrote the jar. Nothing is recomputed; the rows are
+## the jar's own, so two listings can be diffed to see what changed.
+fn jar_listing(path: String) -> Result[String, String] !io =
+  match jarw.read_build_info(path) {
+    Err(e) -> Err("cannot read ${path} as a jar: ${e}")
+    Ok(None) ->
+      Err("${path} carries no build manifest (${jarw.BUILD_INFO_ENTRY}): it was not " ++
+          "written by `dawn build`, or was written by a dawn from before build manifests")
+    Ok(Some(text)) ->
+      match buildinfo.parse_file(text) {
+        Ok(bf) -> Ok(buildinfo.render_listing(path ++ ": dawn " ++ bf.version, bf.rows))
+        Err(e) -> Err("${path}: ${e}")
+      }
+  }
+
+## `dawn --version`: VERSION, and the short digest of the build manifest this
+## toolchain's own jar carries -- the identity of the sources it was built
+## from, which tells two builds of one VERSION apart (a release and any main
+## commit after it print the same VERSION). Read from the jar rather than
+## compiled in (ruling 5.4(1)), so it is absent, not wrong, for a toolchain
+## that has no manifest: one built by a dawn from before build manifests, or
+## one running from a classes directory.
+fn version_line(own: Option[String]) -> String = {
+  let base = "dawn " ++ VERSION ++ " (selfhost)"
+  match own {
+    None -> base
+    Some(text) ->
+      match buildinfo.parse_file(text) {
+        Ok(bf) -> base ++ " " ++ buildinfo.short_digest(buildinfo.manifest_digest(bf.rows))
+        Err(_) -> base
+      }
   }
 }
 
@@ -2314,7 +2409,7 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
       } else if mode == "version" {
         run_version(rest)
       } else if mode == "--version" || mode == "-V" {
-        console_println("dawn " ++ VERSION ++ " (selfhost)")
+        console_println(version_line(jarw.own_build_info()))
       } else if mode == "--help" || mode == "-h" || mode == "help" {
         console_print(usage())
       } else {
@@ -2519,22 +2614,96 @@ test "`dawn version -m` prints the build manifest, the same from two checkouts" 
     }
   let rows = "\tmain\tapp\t(devel)\t" ++ digest("app", "${one}/app") ++ "\n" ++
     "\tdep\tlib\t0.2.0\t" ++ digest("lib", "${one}/lib") ++ "\n"
+  let build = "\tbuild\t" ++ buildinfo.manifest_digest(rows) ++ "\n"
   assert cli_read(() => run_version(["-m", "${one}/app"]))
-    == (None, "", "${one}/app: dawn ${VERSION}\n" ++ rows)
+    == (None, "", "${one}/app: dawn ${VERSION}\n" ++ rows ++ build)
   # the second checkout differs only in the header, which repeats the argument
   assert cli_read(() => run_version(["-m", "${two}/app"]))
-    == (None, "", "${two}/app: dawn ${VERSION}\n" ++ rows)
+    == (None, "", "${two}/app: dawn ${VERSION}\n" ++ rows ++ build)
   io.with_fs_real(() => pkgfetch.delete_tree(one))
   io.with_fs_real(() => pkgfetch.delete_tree(two))
 }
 
+## `build_manifest` of one project, run in a host environment whose working
+## directory is `cwd` and whose package cache root is `cache`.
+fn manifest_from(cwd: String, cache: String, target: String) -> String !io = {
+  let none: List[(String, String)] = []
+  let (got, _) = io.with_fs_real(() => procmem.with_proc_table([], () => {
+    let (text, _) = envmem.with_env_table(cwd, [("DAWN_PKG_CACHE", cache)], () =>
+        build_manifest(target, none))
+    text
+  }))
+  match got {
+    Ok(t) -> t
+    Err(e) -> panic("manifest: " ++ e)
+  }
+}
+
+test "a jar's build manifest is the same bytes from two places, two working directories and two caches" {
+  # The negative control the build manifest owes the reproducibility checks:
+  # it holds no checkout directory, no working directory and no cache root. The
+  # same project in two temporary checkouts, each planned from a different
+  # working directory with a different package cache root. (The CLI-level
+  # half, two real working directories and relative targets, is a jar `cmp`
+  # in the P2 report; the file system here is the host's, which resolves a
+  # relative name against the process's directory, not the table's.)
+  let one = io.with_fs_real(() => version_project())
+  let two = io.with_fs_real(() => version_project())
+  let first = manifest_from(one, "${one}/cache-a", "${one}/app")
+  let second = manifest_from("/", "${two}/cache-b", "${two}/app")
+  assert str.starts_with(first, "dawn-build-info 1\ntoolchain\tdawn ${VERSION}\n\tmain\tapp\t")
+  assert first == second
+  assert not str.contains(first, one)
+  io.with_fs_real(() => pkgfetch.delete_tree(one))
+  io.with_fs_real(() => pkgfetch.delete_tree(two))
+}
+
+test "`dawn version -m` reads the manifest a jar carries and refuses what is not one" {
+  let dir = io.with_fs_real(() => version_project())
+  let rows = [buildinfo.MainRow("app", "1.0.0", "s1:aa"), buildinfo.JavaRow("g:a:1")]
+  let text = buildinfo.render_file("9.8.7", rows)
+  let jar = "${dir}/app.jar"
+  jarw.write_jar(jar, "main", [], JarStamp { dawn_version: "9.8.7", build_info: text })
+  # the header names the toolchain that wrote the jar, not the one reading it
+  let rows_text = buildinfo.rows_text(rows)
+  assert cli_read(() => run_version(["-m", jar])) == (None, "",
+    "${jar}: dawn 9.8.7\n" ++ rows_text ++ "\tbuild\t" ++
+      buildinfo.manifest_digest(rows_text) ++ "\n")
+  # an entry that is not a manifest is refused with the reader's reason (a jar
+  # with no entry at all is jarw's own test: this writer cannot make one)
+  let bare = "${dir}/bare.jar"
+  jarw.write_jar(bare, "main", [], JarStamp { dawn_version: "9.8.7", build_info: "" })
+  assert cli_read(() => run_version(["-m", bare])) == (Some(2),
+    "error: ${bare}: not a dawn build manifest (expected a first line " ++
+      "`dawn-build-info 1`, got ``)\n", "")
+  let plain = "${dir}/app/src/main.dawn"
+  let (status, err, out) = cli_read(() => run_version(["-m", plain]))
+  assert status == Some(2) && out == ""
+  assert str.starts_with(err, "error: cannot read ${plain} as a jar: ")
+  io.with_fs_real(() => pkgfetch.delete_tree(dir))
+}
+
+test "`--version` adds the short manifest digest of the toolchain's own jar when it has one" {
+  let base = "dawn ${VERSION} (selfhost)"
+  assert version_line(None) == base
+  let text = buildinfo.render_file("0.0.1", [buildinfo.MainRow("selfhost", "(devel)", "s1:aa")])
+  let rows = "\tmain\tselfhost\t(devel)\ts1:aa\n"
+  assert version_line(Some(text)) ==
+    base ++ " " ++ str.take(buildinfo.manifest_digest(rows), 15)
+  assert str.len(version_line(Some(text))) == str.len(base) + 1 + 3 + 12
+  # a manifest this toolchain cannot read is no digest, not a failure
+  assert version_line(Some("garbage\n")) == base
+}
+
 test "`dawn version` without -m prints the version, and refuses anything else" {
-  assert cli_read(() => run_version([])) == (None, "", "dawn ${VERSION} (selfhost)\n")
-  let usage = (Some(2), "error: usage: dawn version [-m <project-dir>...]\n", "")
+  let (status, err, out) = cli_read(() => run_version([]))
+  assert status == None && err == ""
+  assert str.starts_with(out, "dawn ${VERSION} (selfhost)") && str.ends_with(out, "\n")
+  let usage = (Some(2), "error: usage: dawn version [-m <project-dir | jar>...]\n", "")
   assert cli_read(() => run_version(["-m"])) == usage
   assert cli_read(() => run_version(["--json", "."])) == usage
   assert cli_read(() => run_version(["-m", NO_SUCH]))
-    == (Some(2), "error: not a directory: " ++ NO_SUCH ++ "\n", "")
+    == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
 }
 
 test "`dawn run` stops taking options at the target" {

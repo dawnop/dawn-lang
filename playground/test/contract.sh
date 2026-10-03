@@ -95,10 +95,14 @@ check() { # name, curl-data, python-assertion, [endpoint (default: run)]
 health=$(curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" || true)
 echo "health: $health"
 # The editor's toolbar shows this version; a release always has three parts.
-if printf '%s' "$health" | python3 -c "import sys,json,re; d=json.load(sys.stdin); assert d['ok'] is True and re.fullmatch(r'[0-9]+[.][0-9]+[.][0-9]+', d['version']), d" 2>/dev/null; then
-  pass=$((pass + 1)); echo "  ok  health carries the compiler version"
+# `build` is the short build-manifest digest the runner's compiler prints last
+# on its --version line (docs/build-info-design.md); the runner here compiles
+# with $DAWN_BIN, so the two must be the same word.
+want_build=$("$DAWN_BIN" --version 2>/dev/null | sed -n 's/^dawn .* \(b1:[0-9a-f]*\)$/\1/p' | tail -n 1)
+if printf '%s' "$health" | WANT_BUILD="$want_build" python3 -c "import os,sys,json,re; d=json.load(sys.stdin); assert d['ok'] is True and re.fullmatch(r'[0-9]+[.][0-9]+[.][0-9]+', d['version']) and re.fullmatch(r'b1:[0-9a-f]{12}', d['build']) and d['build'] == os.environ['WANT_BUILD'], d" 2>/dev/null; then
+  pass=$((pass + 1)); echo "  ok  health carries the compiler version and build"
 else
-  fail=$((fail + 1)); echo "FAIL  health carries the compiler version"
+  fail=$((fail + 1)); echo "FAIL  health carries the compiler version and build (want build '$want_build')"
 fi
 
 check "hello runs, exit 0" \
