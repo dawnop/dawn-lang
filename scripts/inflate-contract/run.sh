@@ -163,3 +163,41 @@ else
   echo "FAIL: the default ceiling did not refuse the bomb at every entry point" >&2
   exit 1
 fi
+
+# The package fetcher, end to end, in the toolchain's own heap (#405).
+#
+# Everything above calls the package; this calls `dawn add`, which is where a
+# hostile archive actually arrives: a `[deps]` url is fetched and unpacked
+# before its d1 hash can be checked. pkgfetch hands the decompressor a byte
+# ceiling, and a byte ceiling is only a memory ceiling if the heap can hold
+# that many bytes in the decompressor's representation. Its tar.gz ceiling was
+# 256 MiB, and a megabyte of gzipped 0xFF took the compiler down with an
+# OutOfMemoryError instead of being refused; this leg is red on that tree.
+#
+# DAWN_JVM_OPTS is cleared so the heap is the one bin/dawn pins, which is the
+# heap the promise is about. The pass condition is the ceiling's own words,
+# and an OutOfMemoryError anywhere in the output is a failure even if the
+# words appear too.
+pkg_case() { # kind
+  local kind=$1 dir="$work/pkg-$1" out
+  mkdir -p "$dir/proj/src" "$dir/cache"
+  printf 'schema = 1\nname = "victim"\nversion = "0.1.0"\n' > "$dir/proj/dawn.toml"
+  printf 'pub fn main() -> Unit = ()\n' > "$dir/proj/src/main.dawn"
+  python3 "$here/pkgbomb.py" "$kind" "$dir/bomb.$kind" 1024
+  out="$dir/out.txt"
+  if env -u DAWN_JVM_OPTS DAWN_PKG_CACHE="$dir/cache" \
+      "$root/bin/dawn" add "file://$dir/bomb.$kind" --dir "$dir/proj" > "$out" 2>&1; then
+    sed 's/^/  | /' "$out" >&2
+    echo "FAIL: dawn add accepted a 1 GiB $kind bomb" >&2
+    exit 1
+  fi
+  if grep -q 'OutOfMemoryError' "$out" || ! grep -Fq 'byte limit (stopped at' "$out"; then
+    sed 's/^/  | /' "$out" | grep -v '^  | *at ' >&2
+    echo "FAIL: a 1 GiB $kind bomb was not refused by pkgfetch's ceiling in the toolchain heap" >&2
+    exit 1
+  fi
+  echo "PASS  dawn add refuses a 1 GiB $kind bomb by its ceiling, inside the toolchain heap"
+}
+
+pkg_case targz
+pkg_case zip
