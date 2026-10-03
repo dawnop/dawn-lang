@@ -23,6 +23,31 @@ pub fn semv_lt(a: SemV, b: SemV) -> Bool =
     a.patch < b.patch
   }
 
+## The compatibility class of a version: Cargo's left-most non-zero
+## component. `1.7.0` is in `1.x`, `0.3.4` in `0.3.x`, and `0.0.2` is a class
+## of its own, so a 0.x minor, a 0.0.x patch and the step from 0 to 1 break
+## the way a major does. Version selection still picks one version per name;
+## `source.select_url_deps` rejects a graph whose requirements on one name
+## span two classes (package-design.md §6.3). The class is spelled the way
+## the diagnostic shows it.
+pub fn semv_compat_class(v: SemV) -> String =
+  if v.major > 0 {
+    to_string(v.major) ++ ".x"
+  } else if v.minor > 0 {
+    "0." ++ to_string(v.minor) ++ ".x"
+  } else {
+    semv_show(v)
+  }
+
+test "the compatibility class is the left-most non-zero component" {
+  assert semv_compat_class(SemV { major: 1, minor: 7, patch: 0 }) == "1.x"
+  assert semv_compat_class(SemV { major: 2, minor: 0, patch: 3 }) == "2.x"
+  assert semv_compat_class(SemV { major: 0, minor: 3, patch: 4 }) == "0.3.x"
+  assert semv_compat_class(SemV { major: 0, minor: 3, patch: 0 }) == "0.3.x"
+  assert semv_compat_class(SemV { major: 0, minor: 0, patch: 2 }) == "0.0.2"
+  assert semv_compat_class(SemV { major: 0, minor: 0, patch: 0 }) == "0.0.0"
+}
+
 fn all_digits(s: String) -> Bool = {
   if s == "" { return false }
   for c in str.chars(s) {

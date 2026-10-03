@@ -328,8 +328,9 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
   方言默认就是 `zero`，K2 之前也是这样。签名里的 `= NearestEven` 在这一个目标上不是字面意义，注释写明。
 - **调用方。** `scripts/tile-golden/kernels.dawn` 32 处（另加导入列表），`examples/projects/gpu_fake` 3 处，
   tileir 自身测试 5 处；`packages/tileref` 与 `scripts/tile-gpu-diff/*.dawn` 不依赖 tileir，0 处。
-- **版本。** `packages/tileir` 0.1.0 → 0.2.0。v2-in-name 规则只管 major ≥ 2（`docs/package-design.md`）；0.x 的
-  minor 升级按 semver 惯例本就允许破坏，不改包名。
+- **版本。** `packages/tileir` 0.1.0 → 0.2.0。v2-in-name 规则只管 major ≥ 2；0.x 的 minor 是另一个兼容类，
+  可以破坏、不改包名，版本选择不会把 0.2 交给要 0.1 的消费者，而是报错（`docs/package-design.md` §六.3
+  「0.x 与兼容类」）。
 - **未做。** 写入器与渲染器学会其余组合（`subf` 的定向舍入、`divf` 的 ftz、`addi` 的 `no_wrap` 等）：方言都允许，
   但每一个都要层 1 的回答，属于 Tile IR 覆盖刀，不属于本线。Dev 的 `load_hinted` / `store_hinted` 等 load/store
   五连归 B 组（K7–K18），本刀不动。
