@@ -21,7 +21,7 @@ use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of, exported_impl}
 use check/identity
 use check/identity.{Minted, EffectDecl}
-use ir/interp.{eval_comptime, CtOut, CtOpts, ct_default}
+use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add}
 use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
 use std/memfs
@@ -103,7 +103,7 @@ fn seg_ok(s: String) -> Bool = {
   }
   true
 }
-use ir/core.{CValue}
+use ir/core.{CValue, VInt}
 
 ## The segments of a module path that are not legal path segments, in order.
 ##
@@ -903,7 +903,13 @@ pub type AnalysisCarry = {
   # step returned. `ModuleStep.after` is what a session keeps, so a view put
   # here is reachable from every consumer a step is reachable from, and one
   # reused prefix step carries the views of the modules before it unchanged.
-  decl_spans: Map[String, identity.DeclSpans]
+  decl_spans: Map[String, identity.DeclSpans],
+  # What a module's comptime may call and name beyond std's function tables:
+  # every clean module before it, with std's constants (spec §7.2 item 1). It
+  # advances per module, like the exports, but no `use` gates it: a call two
+  # modules away (a calls b.f, which calls c.g) reads c's body through b.
+  # What a step actually read of it is `CtOut.reads`.
+  ct_world: CtWorld
 }
 
 ## The enclosing module interval includes context construction and export
@@ -926,7 +932,7 @@ pub(pkg) fn initial_carry(std: StdCtx) -> AnalysisCarry = {
   # when one of them is analyzed again as an ordinary module.
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
   AnalysisCarry { exports: std.exports, impls: std.impls,
-    identities: std.identities, decl_spans: no_spans }
+    identities: std.identities, decl_spans: no_spans, ct_world: std.ct_world }
 }
 
 fn analysis_event(
@@ -953,7 +959,7 @@ fn empty_tmodule() -> TModule = {
 fn empty_ctout() -> CtOut = {
   let no_c: Map[String, CValue] = map.empty()
   let no_b: Map[(Int, Int), CValue] = map.empty()
-  CtOut { diags: [], consts: no_c, blocks: no_b }
+  CtOut { diags: [], consts: no_c, blocks: no_b, reads: set.empty(), missed: false }
 }
 
 ## A loaded module under the identity it actually has, plus whether that
@@ -1001,6 +1007,19 @@ pub(pkg) fn analyze_observed(
   }
   Program { modules: out, diags: diags, decl_spans: carry.decl_spans }
 }
+
+## The comptime world once `checked` has joined it. Only a module whose
+## comptime ran joins, which is a module that checked clean: a body with an
+## error in it holds `XError`, which lowering refuses by panicking. A module
+## calling into one gets a comptime diagnostic instead, and has an error to
+## report anyway, since the one it imports does. A std source checked as a
+## program module is in the world already, as std.
+pub(pkg) fn world_after(w: CtWorld, checked: CheckedMod, ran: Bool, is_std: Bool) -> CtWorld =
+  if ran && not is_std {
+    let scope = ConstScope { path: checked.mod_path, imported: checked.cx.imported_names,
+      renames: checked.cx.import_renames }
+    ct_world_add(w, checked.class_name, scope, checked.tm, checked.ct.consts, true)
+  } else { w }
 
 ## One exact transition of the original loop. Even a parse failure publishes
 ## its recovered exports and carry. Keep the full impl-table fold: local_impls
@@ -1082,8 +1101,10 @@ pub(pkg) fn analyze_module_step(
     tm = tm1
     if len(cx.diags) == 0 {
       analysis_event(observer, mf.mod_path, AnalyzeComptime, true)
-      ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns, std.std_names,
-        cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
+      let scope = ConstScope { path: mf.mod_path, imported: cx.imported_names,
+        renames: cx.import_renames }
+      ct = eval_comptime_in(tm, before.ct_world, scope, std.fn_decls, std.by_owner,
+        std.impl_fns, std.std_names, cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
       comptime_runs = 1
       analysis_event(observer, mf.mod_path, AnalyzeComptime, false)
     }
@@ -1116,7 +1137,8 @@ pub(pkg) fn analyze_module_step(
     diags: diags,
     after: AnalysisCarry { exports: exports, impls: impls,
       identities: cx.identities,
-      decl_spans: map.insert(before.decl_spans, mf.mod_path, spans) },
+      decl_spans: map.insert(before.decl_spans, mf.mod_path, spans),
+      ct_world: world_after(before.ct_world, checked, comptime_runs == 1, is_std) },
     check_runs: check_runs,
     comptime_runs: comptime_runs
   }
@@ -1452,6 +1474,93 @@ test "a two-module project analyzes end to end" {
     # jsig_refused: a project with no `use java` analyzes without any oracle
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
+  })
+}
+
+## The folded value of `name` in the module at `mod_path`.
+fn folded(prog: Program, mod_path: String, name: String) -> Option[CValue] = {
+  for cm in prog.modules {
+    if cm.mod_path == mod_path { return map.get(cm.ct.consts, name) }
+  }
+  None
+}
+
+test "comptime calls the functions of the modules before it" {
+  in_mem(() => {
+    # spec 7.2 item 1: a const may call any pure function, the dependency
+    # modules' included. Each const below crosses a module boundary in a
+    # different way, and the folding module declares its own `K`, `BASE` and
+    # `LIMIT`, so a callee that read its constants in the caller's terms
+    # would fold the wrong number rather than fail.
+    let base = "/tmp/dawn-selfhost-analyze/comptime-xmod"
+    mkdirs("${base}/pk/src")
+    mkdirs("${base}/app/src/deep")
+    mkdirs("${base}/app/src/lib")
+    put("${base}/pk/dawn.toml", "schema = 1\nname = \"pk\"\n")
+    put("${base}/pk/src/arith.dawn", "pub const SCALE: Int = 10\n" ++
+        "pub fn scaled(x: Int) -> Int = x * SCALE\n" ++
+        "pub fn sum_sq(xs: List[Int]) -> Int = fold(map(xs, (x) => x * x), 0, (a, b) => a + b)\n")
+    put("${base}/app/dawn.toml", "schema = 1\nname = \"app\"\n[deps]\npk = \"../pk\"\n")
+    put("${base}/app/src/deep/c.dawn",
+      "pub const BASE: Int = 100\npub fn base_plus(x: Int) -> Int = x + BASE\n")
+    put("${base}/app/src/deep/b.dawn",
+      "use deep/c\npub const BASE: Int = 7\npub fn via(x: Int) -> Int = c.base_plus(x) + BASE\n")
+    put("${base}/app/src/lib/shape.dawn", "use pk/arith.{SCALE as K}\n" ++
+        "pub trait Area[T] {\n  fn area(x: T) -> Int\n  fn twice(x: T) -> Int = area(x) * 2\n}\n" ++
+        "pub type Sq = { side: Int }\n" ++
+        "impl Area[Sq] {\n  fn area(x: Sq) -> Int = x.side * x.side\n}\n" ++
+        "pub const LIMIT: Int = 3\n" ++
+        "pub fn by_k(x: Int) -> Int = x * K + LIMIT\n")
+    put("${base}/app/src/main.dawn", "use deep/b\nuse lib/shape.{Sq, area, twice}\n" ++
+        "use lib/shape\nuse pk/arith\n" ++
+        "const K: Int = 1000\nconst BASE: Int = 2000\nconst LIMIT: Int = 3000\n" ++
+        "const CHAIN: Int = b.via(1)\n" ++
+        "const IMPL: Int = area(Sq { side: 4 })\n" ++
+        "const DEFAULT: Int = twice(Sq { side: 3 })\n" ++
+        "const QUALIFIED: Int = shape.LIMIT + 1\n" ++
+        "const PKG: Int = arith.sum_sq([1, 2, 3]) + arith.scaled(4)\n" ++
+        "const SCOPED: Int = shape.by_k(2)\n" ++
+        "const BLOCK: Int = comptime { arith.scaled(arith.SCALE) }\n" ++
+        "pub fn main() -> Unit !io = println(to_string(K + BASE + LIMIT + CHAIN + IMPL +\n" ++
+        "  DEFAULT + QUALIFIED + PKG + SCOPED + BLOCK))\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let prog = analyze_program(load_directory("${base}/app"), std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 0
+    # c's BASE inside c's body, b's inside b's: two modules deep
+    assert folded(prog, "main", "CHAIN") == Some(VInt(108))
+    assert folded(prog, "main", "IMPL") == Some(VInt(16))
+    assert folded(prog, "main", "DEFAULT") == Some(VInt(18))
+    assert folded(prog, "main", "QUALIFIED") == Some(VInt(4))
+    # a path dependency's functions, lambdas lifted from its bodies included
+    assert folded(prog, "main", "PKG") == Some(VInt(54))
+    # `K` is shape's renamed import and `LIMIT` its own, not main's
+    assert folded(prog, "main", "SCOPED") == Some(VInt(23))
+    assert folded(prog, "main", "BLOCK") == Some(VInt(100))
+    let main_ct = prog.modules[len(prog.modules) - 1].ct
+    assert set.has(main_ct.reads, "deep/c")
+    assert set.has(main_ct.reads, "pk/arith")
+    assert not main_ct.missed
+  })
+}
+
+test "comptime still refuses another module's effectful function" {
+  in_mem(() => {
+    let root = "/tmp/dawn-selfhost-analyze/comptime-xmod-io"
+    mkdirs("${root}/src")
+    put("${root}/src/nums.dawn",
+      "pub fn doubled(x: Int) -> Int = x * 2\npub fn loud() -> Int !io = {\n  println(\"x\")\n  1\n}\n")
+    put("${root}/src/main.dawn", "use nums\nconst Q: Int = nums.doubled(21)\n" ++
+        "const X: Int = nums.loud()\npub fn main() -> Unit !io = println(to_string(Q + X))\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 1
+    assert str.contains(prog.diags[0].d.msg, "must be pure")
   })
 }
 

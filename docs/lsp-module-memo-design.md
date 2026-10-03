@@ -290,3 +290,27 @@ LSP A/B（`09851075` 不带观察的服务端对本刀带观察的服务端）�
 - **identities 仍按相等比较**：(b) 的签名改动加了一个默认参数，驻留一条 `ParameterDefault` 路径，表就不等；按相等比较会让 `check/types` 之后的模块照旧全部重检，M2 的收益归零。10.4 的两个附加条件代价为零且保持冷检一致。
 - **把 impl 表也按读集合键控**：impl 在全程序生效（孤儿规则只限制写在哪里，不限制谁用），`contract/module_memo`「module memo checks a module again when the impl table changes, whatever it imports」就是不导入 `p` 却用 `p` 的 impl 的例子。
 - **体级或声明级复用、关闭文件跳过体**：见第八节。
+
+## 十一、comptime 的跨模块读（#416，2026-10-03）
+
+#416 让 comptime 兑现 spec §7.2 第 1 条：`const Q: Int = nums.doubled(21)` 可以调前面模块的函数。`AnalysisCarry` 因此多了第五个字段 `ct_world`（`ir/interp.CtWorld`）：
+前面每个干净模块（`cx.diags` 为空、跑过 comptime 的）的直接函数、impl 方法与 trait 默认体、符号表、常量作用域与折叠值，外加 std 的常量作用域与值（`StdCtx.ct_world`）。
+
+**它不能按 `use` 键控。** a 的 const 调 `b.via`，`b.via` 调 `c.plus`，a 只 `use b`；c 的体内编辑不改变任何导出面。所以 10.2 的「每行 `use` 找到的面不变」管不住它。
+解释器在运行时记下自己读了哪些别的模块（`lower_into` 下降了谁的体、`CConstRef` 从谁那里取了值），放进 `CtOut.reads`（模块路径集合）；某次跨模块查找落空则置 `CtOut.missed`。复用条件加一条（`comptime_reads_hold`）：
+
+- `reads` 里的每个路径：本轮已放进 carry 的，必须是本轮**复用**的步骤（重检过的模块即使导出面相同，体或常量值也可能变了，按变了算）；不在本轮的，必须是 std（基线 `ct_world` 里有）。
+- `missed` 为真的步骤一律重检：它的结果取决于它叫不出名字的模块。落空必然伴随一条 comptime 诊断，这种步骤本来就少。
+
+复用时 `ct_world` 由 `analyze.world_after` 用步骤自己的 `CheckedMod` 重拼，与冷路径同一个函数。
+
+**取舍**：重检过但体没变的模块也让读过它的步骤重检。替代方案是重检后比较 `TModule` 与常量表，可以省掉「上游导出面变了、它被迫重检、体其实没变」这一类，但比较本身要走整棵类型树。被读的模块通常就是正在编辑的那个，这一类不常见，所以先不比较。
+
+**常量按被调方的模块解析。** 别的模块的体里，裸名 `BASE` 指那个模块自己的常量或它选择性导入的常量，不是正在折叠的模块的。解释器记着「当前在跑谁的体」（`ICx.body`，`call_cfun` 跨模块时切换），
+按与 `cdriver.merged_consts` 相同的规则逐次查找。以前的 `CConstRef` 只按简单名查折叠模块自己的表：跨模块调用打通后，同名常量会静默折出错误的值，而不是报错。顺带地，`m.MAX` 这种限定常量在 comptime 里也能用了（以前报 `failed to evaluate`）。
+
+**键的选择**：函数体按 owner（类名，Core 的 `CDirect(owner, name)` 带的就是它）进 `by_owner`，不进扁平的 `fns`。扁平表是 std 预导入名的后备，两个模块各有一个 `helper` 时按名合并会互相覆盖；
+跨模块调用到 Core 时总是带 owner 的，用不着它。常量按模块路径（`CConstRef` 与 `imported_names` 带的是路径）；包模块的类名（`dawn$pkg$...`）与路径不同，`CtWorld.scopes` 记着两者的对应。
+
+测试：`driver/analyze`「comptime calls the functions of the modules before it」（两层链、impl 与默认体、限定常量、path dep 包含 lambda、被调方的重命名导入与同名常量、comptime 块）、
+「comptime still refuses another module's effectful function」；`contract/module_memo`「module memo folds a const again when a module its comptime reached changes」（c 的体、c 的常量、b 的体各改一次，a 重检、z 复用，逐项对冷）。

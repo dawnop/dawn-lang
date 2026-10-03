@@ -7,7 +7,9 @@
 # file's path through the host (#207, docs/fs-real-path-design.md R3), and
 # (2026-10-03) the context naming the module's position path, which is a
 # deliberate change of the positions the typed tree bakes (#401,
-# docs/source-location-design.md §四).
+# docs/source-location-design.md §四), and (2026-10-03) comptime reaching the
+# functions and constants of the modules before it, which is a deliberate
+# change of what a const folds to (#416, docs/lsp-module-memo-design.md §十一).
 # Injected into a private subject, never linked into the production compiler.
 pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io = {
   var diags = loaded.diags
@@ -27,6 +29,8 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
   # whichever of the two wrote it.
   var impls = std.impls
   var views: Map[String, identity.DeclSpans] = map.empty()
+  # what comptime may call and name: std's constants, then every clean module
+  var world = std.ct_world
   for mf0 in loaded.modules {
     # The one place a module's identity is settled, and the reason it is here
     # rather than in the loaders: only this function holds the std, and the
@@ -76,8 +80,11 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
       cx = cx1
       tm = tm1
       if len(cx.diags) == 0 {
-        ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns, std.std_names,
-          cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
+        let scope = ConstScope { path: mf.mod_path, imported: cx.imported_names,
+          renames: cx.import_renames }
+        ct = eval_comptime_in(tm, world, scope, std.fn_decls, std.by_owner, std.impl_fns,
+          std.std_names, cx.adts, cx.traits, cx.impl_table, mf.class_name, opts)
+        if not is_std { world = ct_world_add(world, mf.class_name, scope, tm, ct.consts, true) }
       }
       for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
       for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }

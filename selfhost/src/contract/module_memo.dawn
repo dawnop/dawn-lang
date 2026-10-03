@@ -30,6 +30,7 @@ use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/checkdump
 use check/jsig.{jsig_refused}
 use ir/interp.{ct_default}
+use ir/core.{CValue, VInt}
 use front/parser
 use check/identity
 use front/lexer
@@ -486,6 +487,54 @@ test "module memo rechecks std identity and refuses a negative bound" {
     match result {
       Err(_) -> ()
       Ok(_) -> { assert false }
+    }
+  }))
+}
+
+## The folded value of `name` in the module at `mod_path`.
+fn folded(prog: Program, mod_path: String, name: String) -> Option[CValue] = {
+  for cm in prog.modules {
+    if cm.mod_path == mod_path { return map.get(cm.ct.consts, name) }
+  }
+  None
+}
+
+test "module memo folds a const again when a module its comptime reached changes" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # a's const runs b's body, which runs c's. Neither shows in a's export
+    # reads: a imports b alone, and an edit inside c's body leaves every
+    # surface as it was. z imports c but folds nothing from it, so it keeps
+    # its step through every edit below.
+    let c = source("c", "pub const BASE: Int = 100\npub fn plus(x: Int) -> Int = x + BASE\n")
+    let b = source("b", "use c\npub fn via(x: Int) -> Int = c.plus(x) * 2\n")
+    let a = source("a", "use b\npub const Q: Int = b.via(1)\n")
+    let z = source("z", "use c\npub fn f() -> Int = c.plus(1)\npub const Z: Int = 5\n")
+    let loaded = LoadResult { modules: [c, b, a, z], diags: [] }
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
+    assert len(warm.program.diags) == 0
+    assert folded(warm.program, "a", "Q") == Some(VInt(202))
+    let again = incremental.analyze(warm.session, loaded)
+    assert again.stats.reused_modules == 4
+    let body = source("c", "pub const BASE: Int = 100\npub fn plus(x: Int) -> Int = x + BASE + 1\n")
+    let value = source("c", "pub const BASE: Int = 200\npub fn plus(x: Int) -> Int = x + BASE\n")
+    let middle = source("b", "use c\npub fn via(x: Int) -> Int = c.plus(x) * 3\n")
+    let edits = [
+      # c's body, two modules away from a: c and a run again, b and z do not
+      (LoadResult { modules: [body, b, a, z], diags: [] }, 204, 2),
+      # c's constant, which c's body names
+      (LoadResult { modules: [value, b, a, z], diags: [] }, 402, 2),
+      # b's body, which a calls directly
+      (LoadResult { modules: [c, middle, a, z], diags: [] }, 303, 2)
+    ]
+    for edit in edits {
+      let (input, q, checked) = edit
+      let result = incremental.analyze(warm.session, input)
+      assert result.stats.checked_modules == checked
+      assert result.stats.reused_modules == len(input.modules) - checked
+      assert folded(result.program, "a", "Q") == Some(VInt(q))
+      assert folded(result.program, "z", "Z") == Some(VInt(5))
+      assert agrees_with_cold(result.program, input, std)
     }
   }))
 }

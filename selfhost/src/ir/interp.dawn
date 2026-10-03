@@ -112,7 +112,12 @@ pub(pkg) type LowerCache = {
   # what `CMethod` looks a slot up in
   dicts: Map[String, CDictDef],
   # seeds the lifted-lambda counter so names stay unique across the module
-  next_lam: Int
+  next_lam: Int,
+  # the other modules (by path) whose bodies or constants the run read, and
+  # whether a lookup into another module found nothing. Kept beside the
+  # bodies because it accumulates exactly as they do: once per module run.
+  reads: Set[String],
+  missed: Bool
 }
 
 ## One expression's evaluation. Fuel and depth are the per-evaluation half and
@@ -175,7 +180,94 @@ type ICx = {
   # which `by_owner` is not, since two impls in one module can both define
   # `eq`.
   impl_fns: Map[(Int, String, String), (String, TFun)],
-  syms: Map[Int, Sym]
+  syms: Map[Int, Sym],
+  # the modules analyzed before this one, and how the folding module itself
+  # names constants
+  world: CtWorld,
+  scope: ConstScope,
+  # the owner of the body being evaluated: `owner` until a call crosses into
+  # another module, whose constants its body then names
+  body: String
+}
+
+## How a body names constants: the module it belongs to (`path`, the key
+## `CtWorld.consts` files that module's values under) and the selective
+## imports it wrote. A qualified reference (`m.MAX`) carries the declaring
+## module's path and needs neither table. The same resolution as the
+## emitters' (`cdriver.merged_consts`), done per lookup instead of as one
+## merged table, because a comptime run moves between modules' bodies.
+pub type ConstScope = {
+  path: String,
+  # local name → the module path it was imported from
+  imported: Map[String, String],
+  # local name → declared name, for each `Name as Local`
+  renames: Map[String, String]
+}
+
+## What one module's comptime can reach beyond its own declarations and the
+## std function tables: the modules analyzed before it (spec §7.2 item 1,
+## "including dependency modules"). Bodies are filed by owner, the name Core
+## calls them by; constants by module path, the name a `CConstRef` carries.
+## std's bodies stay in their own tables (`by_owner`, `std_fns`), so only
+## their scopes and constants are here.
+pub type CtWorld = {
+  # owner → direct functions, as `by_owner` holds std's
+  owners: Map[String, Map[String, TFun]],
+  # impl methods and trait defaults, by the identity Core names them with
+  impl_fns: Map[(Int, String, String), (String, TFun)],
+  # every direct signature lowering may consult, std's included: what
+  # `program_sigs` would build from all of the above, kept as it grows
+  # rather than rebuilt for each module
+  sigs: Map[(String, String), Sig],
+  # owner → the symbol table its bodies were checked against
+  syms: Map[String, Map[Int, Sym]],
+  # owner → how its bodies name constants
+  scopes: Map[String, ConstScope],
+  # module path → its folded constants
+  consts: Map[String, Map[String, CValue]]
+}
+
+pub fn ct_world_empty() -> CtWorld = {
+  let no_owners: Map[String, Map[String, TFun]] = map.empty()
+  let no_syms: Map[String, Map[Int, Sym]] = map.empty()
+  let no_scopes: Map[String, ConstScope] = map.empty()
+  let no_consts: Map[String, Map[String, CValue]] = map.empty()
+  let no_sigs: Map[(String, String), Sig] = map.empty()
+  CtWorld { owners: no_owners, impl_fns: no_impls(), sigs: no_sigs, syms: no_syms,
+    scopes: no_scopes, consts: no_consts }
+}
+
+## A module joins the world once it has folded. `bodies` is false for a std
+## module, whose functions the std tables already hold.
+pub fn ct_world_add(
+  w: CtWorld,
+  owner: String,
+  scope: ConstScope,
+  tm: TModule,
+  consts: Map[String, CValue],
+  bodies: Bool
+) -> CtWorld = {
+  var sigs = w.sigs
+  for f in tm.fns {
+    if is_direct_fn(f) { sigs = map.insert(sigs, (owner, f.name), f.sig) }
+  }
+  var out = CtWorld { ..w,
+    sigs: sigs,
+    scopes: map.insert(w.scopes, owner, scope),
+    consts: map.insert(w.consts, scope.path, consts) }
+  if bodies {
+    var own: Map[String, TFun] = map.empty()
+    var impl_fns = w.impl_fns
+    for f in tm.fns {
+      own = note_direct_fn(own, f)
+      impl_fns = note_trait_fn(impl_fns, owner, f)
+    }
+    out = CtWorld { ..out,
+      owners: map.insert(w.owners, owner, own),
+      impl_fns: impl_fns,
+      syms: map.insert(w.syms, owner, tm.syms) }
+  }
+  out
 }
 
 # A deliberate constant, not a value derived from the stack. Measured
@@ -473,15 +565,41 @@ fn lower_into(
   owner: String,
   f: TFun
 ) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io = {
+  # another module's body lowers against the symbol table it was checked
+  # with; std's are not kept, and lower as they always have
+  let syms = if owner == icx.owner { icx.syms } else {
+    map.get(icx.world.syms, owner).unwrap_or(icx.syms)
+  }
   let (cf, lifted, dicts, next) =
     lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, icx.prog_fns,
-      icx.syms, st.cache.next_lam)
+      syms, st.cache.next_lam)
   var tbl = map.insert(st.cache.fns, cache_key(owner, f), cf)
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = st.cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  Ok((ESt { ..st, cache: LowerCache { fns: tbl, dicts: dts, next_lam: next } }, cf))
+  let st1 = ESt { ..st, cache: LowerCache { ..st.cache, fns: tbl, dicts: dts, next_lam: next } }
+  Ok((note_read(icx, st1, owner_path(icx, owner)), cf))
 }
+
+## The module path behind an owner, for the read set: a world module's scope
+## knows it, and std's owner is its path.
+fn owner_path(icx: ICx, owner: String) -> String =
+  match map.get(icx.world.scopes, owner) {
+    Some(sc) -> sc.path
+    None -> owner
+  }
+
+## Record that this run read another module. Its own module is not a read:
+## a step always depends on its own input.
+fn note_read(icx: ICx, st: ESt, path: String) -> ESt =
+  if path == icx.scope.path || set.has(st.cache.reads, path) { st } else {
+    ESt { ..st, cache: LowerCache { ..st.cache, reads: set.insert(st.cache.reads, path) } }
+  }
+
+## Record that a lookup found nothing. What it would have found depends on
+## modules this run cannot name, so the read set no longer bounds the result.
+fn note_miss(st: ESt) -> ESt =
+  if st.cache.missed { st } else { ESt { ..st, cache: LowerCache { ..st.cache, missed: true } } }
 
 ## The subject half of that identity: its *head*, because an impl method's
 ## `impl_of` names the declared subject (`List[T]`) while a `CImpl` node names
@@ -553,8 +671,13 @@ fn get_trait_cfun(
   tid: Int,
   subject_key: String,
   method: String
-) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io =
-  match map.get(icx.impl_fns, (tid, subject_key, method)) {
+) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io = {
+  # this module's and std's first, then the modules before it
+  let found = match map.get(icx.impl_fns, (tid, subject_key, method)) {
+    Some(pair) -> Some(pair)
+    None -> map.get(icx.world.impl_fns, (tid, subject_key, method))
+  }
+  match found {
     Some(pair) -> {
       let (owner, f) = pair
       match map.get(st.cache.fns, cache_key(owner, f)) {
@@ -563,16 +686,26 @@ fn get_trait_cfun(
       }
     }
     None ->
-      match cerr(st, env, "missing impl method `" ++ method ++ "`") {
+      match cerr(note_miss(st), env, "missing impl method `" ++ method ++ "`") {
         Err(t) -> Err(t)
         Ok(_) -> panic("unreachable")
       }
   }
+}
 
 ## The checker's resolution order, as the interpreter sees it: the named owner
-## first, then the flat table (module fns over std fns).
+## (std's tables, then the modules before this one), then the flat table
+## (module fns over std fns).
 fn find_fn(icx: ICx, owner: String, name: String) -> Option[(String, TFun)] = {
   match map.get(icx.by_owner, owner) {
+    Some(tbl) ->
+      match map.get(tbl, name) {
+        Some(f) -> return Some((owner, f))
+        None -> ()
+      }
+    None -> ()
+  }
+  match map.get(icx.world.owners, owner) {
     Some(tbl) ->
       match map.get(tbl, name) {
         Some(f) -> return Some((owner, f))
@@ -615,12 +748,62 @@ fn get_cfun(
       }
     }
     None ->
-      match cerr(st, env, "missing function `" ++ name ++ "`") {
+      match cerr(note_miss(st), env, "missing function `" ++ name ++ "`") {
         Err(t) -> Err(t)
         Ok(_) -> panic("unreachable")
       }
   }
 }
+
+# ---- constants ----
+
+## A constant's value and the module path it was read from. The folding
+## module's own constants are the ones folded so far (`icx.consts`), so an
+## initializer still sees only earlier constants.
+fn const_lookup(icx: ICx, owner: String, name: String) -> Option[(String, CValue)] = {
+  if owner != "" {
+    if owner == icx.scope.path {
+      return match map.get(icx.consts, name) {
+        Some(v) -> Some((owner, v))
+        None -> None
+      }
+    }
+    return world_const(icx, owner, name)
+  }
+  if icx.body == icx.owner {
+    match map.get(icx.consts, name) {
+      Some(v) -> return Some((icx.scope.path, v))
+      None -> ()
+    }
+    return imported_const(icx, icx.scope, name)
+  }
+  match map.get(icx.world.scopes, icx.body) {
+    Some(sc) ->
+      match world_const(icx, sc.path, name) {
+        Some(found) -> Some(found)
+        None -> imported_const(icx, sc, name)
+      }
+    None -> None
+  }
+}
+
+fn world_const(icx: ICx, path: String, name: String) -> Option[(String, CValue)] =
+  match map.get(icx.world.consts, path) {
+    Some(vals) ->
+      match map.get(vals, name) {
+        Some(v) -> Some((path, v))
+        None -> None
+      }
+    None -> None
+  }
+
+## A simple name a selective import brought in, found under the name its
+## declaring module gave it (spec §10.2).
+fn imported_const(icx: ICx, sc: ConstScope, name: String) -> Option[(String, CValue)] =
+  match map.get(sc.imported, name) {
+    Some(from) -> world_const(icx, from, map.get(sc.renames, name).unwrap_or(name))
+    None -> None
+  }
 
 # ---- calls ----
 
@@ -661,7 +844,9 @@ fn call_cfun(
     if i < len(args) { fenv = map.insert(fenv, e.sym, args[i]) }
     i = i + 1
   }
-  match ceval(icx, ESt { ..st, depth: st.depth + 1 }, fenv, cf.body) {
+  # a body names constants in its own module's terms
+  let bicx = if cf.owner == icx.body { icx } else { ICx { ..icx, body: cf.owner } }
+  match ceval(bicx, ESt { ..st, depth: st.depth + 1 }, fenv, cf.body) {
     Ok(t) -> {
       let (st1, _, v) = t
       Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
@@ -1585,14 +1770,16 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
       }
     }
     CConstRef(owner, name, _) ->
-      # `consts` is the folding module's view: its own constants plus the ones
-      # it imported, keyed by simple name. A qualified reference names another
-      # module, and comptime cannot see into a module it did not import, so a
-      # miss here is the honest answer rather than a lookup by owner.
-      match map.get(icx.consts, name) {
-        Some(v) -> Ok((st, env, v))
+      # resolved as the emitters resolve it ("" = the body's own module's
+      # view, otherwise the declaring module's path), against the module the
+      # running body belongs to rather than the one being folded
+      match const_lookup(icx, owner, name) {
+        Some(pr) -> {
+          let (path, v) = pr
+          Ok((note_read(icx, st, path), env, v))
+        }
         None ->
-          cerr(st, env, "const `" ++ owner ++ "." ++ name ++ "` failed to evaluate")
+          cerr(note_miss(st), env, "const `" ++ owner ++ "." ++ name ++ "` failed to evaluate")
       }
     # a comptime block nested in what is being folded: the driver folded it
     # first, exactly as codegen would have
@@ -1921,7 +2108,15 @@ fn exec_loop(
 pub type CtOut = {
   diags: List[Diag],
   consts: Map[String, CValue],
-  blocks: Map[(Int, Int), CValue]
+  blocks: Map[(Int, Int), CValue],
+  # The other modules, by path, whose bodies or constants the run read, and
+  # whether some lookup into another module found nothing. Together they
+  # bound what the result depends on beyond the module's own input: an
+  # analysis that remembers this step may keep it while none of these
+  # modules changed, and never once `missed` is set and anything before it
+  # did (driver/incremental).
+  reads: Set[String],
+  missed: Bool
 }
 
 ## One module's evaluation in progress: what it has produced, and what
@@ -1937,7 +2132,7 @@ pub(pkg) type CtRun = {
 fn empty_cache() -> LowerCache = {
   let no_fns: Map[String, CFun] = map.empty()
   let no_dicts: Map[String, CDictDef] = map.empty()
-  LowerCache { fns: no_fns, dicts: no_dicts, next_lam: 0 }
+  LowerCache { fns: no_fns, dicts: no_dicts, next_lam: 0, reads: set.empty(), missed: false }
 }
 
 ## An evaluation seeded from what the module has lowered so far. Fuel and
@@ -1969,7 +2164,7 @@ fn fold_expr(
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = cache.dicts
   for d in dicts { dts = map.insert(dts, d.key, d) }
-  let st = st_from(fuel, LowerCache { fns: tbl, dicts: dts, next_lam: next })
+  let st = st_from(fuel, LowerCache { ..cache, fns: tbl, dicts: dts, next_lam: next })
   match ceval(icx, st, env, ce) {
     Ok(r) -> {
       let (st1, _, v) = r
@@ -2186,7 +2381,33 @@ pub fn eval_comptime(
   owner: String,
   opts: CtOpts
 ) -> CtOut !io =
-  eval_module(tm, std_fns, by_owner, std_impl_fns, std_names, adts, traits,
+  eval_comptime_in(tm, ct_world_empty(), alone(owner), std_fns, by_owner, std_impl_fns,
+    std_names, adts, traits, impls, owner, opts)
+
+## The scope of a module that imports no constants, filed under its owner.
+fn alone(owner: String) -> ConstScope = {
+  let none: Map[String, String] = map.empty()
+  ConstScope { path: owner, imported: none, renames: none }
+}
+
+## The same, for a module in a program: `world` holds the modules analyzed
+## before it, whose functions and constants its comptime may use, and `scope`
+## says how this module names constants.
+pub fn eval_comptime_in(
+  tm: TModule,
+  world: CtWorld,
+  scope: ConstScope,
+  std_fns: Map[String, TFun],
+  by_owner: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
+  std_names: Set[String],
+  adts: Adts,
+  traits: Traits,
+  impls: Impls,
+  owner: String,
+  opts: CtOpts
+) -> CtOut !io =
+  eval_module_in(tm, world, scope, std_fns, by_owner, std_impl_fns, std_names, adts, traits,
     impls, owner, opts).out
 
 ## The same run, with the cache still attached. Only this module's tests have
@@ -2205,6 +2426,23 @@ pub(pkg) fn eval_module(
   impls: Impls,
   owner: String,
   opts: CtOpts
+) -> CtRun !io =
+  eval_module_in(tm, ct_world_empty(), alone(owner), std_fns, by_owner, std_impl_fns,
+    std_names, adts, traits, impls, owner, opts)
+
+fn eval_module_in(
+  tm: TModule,
+  world: CtWorld,
+  scope: ConstScope,
+  std_fns: Map[String, TFun],
+  std_owners: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
+  std_names: Set[String],
+  adts: Adts,
+  traits: Traits,
+  impls: Impls,
+  owner: String,
+  opts: CtOpts
 ) -> CtRun !io = {
   let fuel = opts.fuel
   # std is implicitly visible, so a const may call it; a local definition
@@ -2214,26 +2452,43 @@ pub(pkg) fn eval_module(
   # the owner each flat name came from, so a std function lowered on demand
   # resolves its own module's calls before falling back
   var owner_of: Map[String, String] = map.empty()
-  for o in map.keys(by_owner) {
-    let tbl = map.get(by_owner, o).expect("owner table")
+  for o in map.keys(std_owners) {
+    let tbl = map.get(std_owners, o).expect("owner table")
     for n in map.keys(tbl) { owner_of = map.insert(owner_of, n, o) }
   }
   for f in tm.fns {
     if is_direct_fn(f) { owner_of = map.insert(owner_of, f.name, owner) }
   }
-  let prog_fns = program_sigs(by_owner, tm, owner)
+  # The modules before this one are found by owner, in `world.owners`, after
+  # std's (`find_fn`). A call into one of them is always qualified by the
+  # time it is Core (`CDirect(owner, name)`), so the flat table, which is the
+  # fallback for std's unqualified prelude, stays std's and this module's:
+  # two modules may each define `helper`. Their impl bodies likewise stay in
+  # `world.impl_fns`, read after `impl_fns` (`get_trait_cfun`); coherence
+  # makes that key unique program-wide. Neither is merged here, which would
+  # cost every module a walk over every module before it.
+  var prog_fns = world.sigs
+  if map.len(prog_fns) == 0 {
+    # a run with no world (std's own tests, the interpreter's) names its
+    # tables directly
+    prog_fns = program_sigs(std_owners, tm, owner)
+  } else {
+    for f in tm.fns {
+      if is_direct_fn(f) { prog_fns = map.insert(prog_fns, (owner, f.name), f.sig) }
+    }
+  }
   # this module's own impl methods and trait defaults join std's
   var impl_fns = std_impl_fns
   for f in tm.fns { impl_fns = note_trait_fn(impl_fns, owner, f) }
   let empty_c: Map[String, CValue] = map.empty()
   let empty_b: Map[(Int, Int), CValue] = map.empty()
   var run = CtRun {
-    out: CtOut { diags: [], consts: empty_c, blocks: empty_b },
+    out: CtOut { diags: [], consts: empty_c, blocks: empty_b, reads: set.empty(), missed: false },
     cache: empty_cache()
   }
   let base = ICx {
     fns: fns,
-    by_owner: by_owner,
+    by_owner: std_owners,
     owner_of: owner_of,
     std_names: std_names,
     adts: adts,
@@ -2244,7 +2499,10 @@ pub(pkg) fn eval_module(
     impls: impls,
     prog_fns: prog_fns,
     impl_fns: impl_fns,
-    syms: tm.syms
+    syms: tm.syms,
+    world: world,
+    scope: scope,
+    body: owner
   }
   for c in tm.consts {
     # a comptime block inside the initializer folds first
@@ -2272,7 +2530,7 @@ pub(pkg) fn eval_module(
     run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
       fuel, t.body, run)
   }
-  run
+  CtRun { ..run, out: CtOut { ..run.out, reads: run.cache.reads, missed: run.cache.missed } }
 }
 
 # ---- tests ----
@@ -2304,7 +2562,10 @@ fn probe_icx() -> ICx = {
     impls: cx.impl_table,
     prog_fns: map.empty(),
     impl_fns: no_impls(),
-    syms: no_syms
+    syms: no_syms,
+    world: ct_world_empty(),
+    scope: alone("probe"),
+    body: "probe"
   }
 }
 
