@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, streaming_sized, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
+use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -718,10 +718,10 @@ fn serve_through(
   let app = fold(rev(middleware), core, (h, m) => m(h))
   match catch_panic(() => app(req)) {
     Ok(Ok(r)) -> r
-    Ok(Err(e)) -> error_response_with(errors, e)
+    Ok(Err(e)) -> error_response(e, fmt: errors)
     Err(m) -> {
       println("request panicked: ${m.message}")
-      error_response_with(errors, http_error(500, errors.internal_message))
+      error_response(http_error(500, errors.internal_message), fmt: errors)
     }
   }
 }
@@ -800,7 +800,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
     Ok(r) -> r
     Err(m) -> {
       println("request panicked: ${m.message}")
-      error_response_with(errors, http_error(500, errors.internal_message))
+      error_response(http_error(500, errors.internal_message), fmt: errors)
     }
   }
   write_response(ex, response)
@@ -1374,7 +1374,7 @@ test "a stream of stated length that ends early is a truncation, not a success" 
 }
 
 test "a stream's Content-Length is its stated length, and an unsized stream has none" {
-  let sized = () => streaming_sized(200, "video/mp4", test_stream_of(bytes.utf8("abcd")), 4)
+  let sized = () => streaming(200, "video/mp4", test_stream_of(bytes.utf8("abcd")), length: Some(4))
   let unsized = () => streaming(200, "video/mp4", test_stream_of(bytes.utf8("abcd")))
   # the stated length is the one a handler may repeat
   match catch_panic(() => with_header(sized(), "Content-Length", "4")) {
@@ -1391,7 +1391,7 @@ test "a stream's Content-Length is its stated length, and an unsized stream has 
     Err(m) -> { assert str.contains(m.message, "unknown length") }
   }
   # a byte count is not negative
-  match catch_panic(() => streaming_sized(200, "video/mp4", test_stream_of(bytes.utf8("")), -1)) {
+  match catch_panic(() => streaming(200, "video/mp4", test_stream_of(bytes.utf8("")), length: Some(-1))) {
     Ok(_) -> { assert false }
     Err(m) -> { assert str.contains(m.message, "illegal stream length -1") }
   }
@@ -1400,9 +1400,9 @@ test "a stream's Content-Length is its stated length, and an unsized stream has 
 test "a sized stream goes out with its exact Content-Length, and a short one ends short" {
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   srv.createContext("/whole", ex =>
-      write_response(ex, streaming_sized(200, "application/octet-stream", test_stream_of(bytes.utf8("streamed")), 8)))
+      write_response(ex, streaming(200, "application/octet-stream", test_stream_of(bytes.utf8("streamed")), length: Some(8))))
   srv.createContext("/short", ex =>
-      write_response(ex, streaming_sized(200, "application/octet-stream", test_stream_of(bytes.utf8("abc")), 10)))
+      write_response(ex, streaming(200, "application/octet-stream", test_stream_of(bytes.utf8("abc")), length: Some(10))))
   srv.start()
   let port = srv.getAddress()!.getPort()
   let whole = test_connect("GET", "http://127.0.0.1:${port}/whole")
