@@ -241,8 +241,10 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 | K0 | 已落地 | `8938471f`（PR #375 rebase 合入 main 后的哈希；分支上原为 `c53d7e85`） |
 | K1 | 已落地 | `31ec7b26`（rebase 合入 main 后的哈希；分支上原为 `fd99b635`） |
 | K2 | 已落地 | `3e31f40f`（main 上的哈希；分支上原为 `fa6c493e`） |
-| K3–K18 | 未开工 | |
-| K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | `25ff1f19`（分支哈希；合入 main 时若经 rebase，由协调者回填） |
+| K3 | 已落地 | `711bdb15`（main 上的哈希） |
+| K4 | 已落地（web 6.0，见 §7.5） | 合入后由协调者回填 |
+| K5–K18 | 未开工 | |
+| K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | `04f65114`（main 上的哈希；分支上原为 `25ff1f19`） |
 
 ### 7.1 K1 落地记录
 
@@ -364,3 +366,24 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 - **负控。** 把默认 radix 临时改成 16：`dawn test --stdlib` 红 3 个 fmt 测试，`dawn test selfhost` 红 4 个
   （`driver/stdlib` 的折叠测试、`pkgfetch` 与 `json2` 的整数解析）。**checker-corpus 不红**：它只录检查器
   诊断，没有一例渲染 `parse_int` 的默认值，所以它看不见默认值本身，这不是本刀能补的盲区。
+
+### 7.5 K4 落地记录
+
+- **面。** `error_response(e, fmt: ErrorFormat = default_errors())`、
+  `query_int_bounded(req, name, default, lo, hi, fmt: ErrorFormat = default_errors())`、
+  `streaming(status, content_type, stream, length: Option[Int] = None)`；删 `error_response_with`、
+  `query_int_bounded_with`、`streaming_sized`，不留别名。`fmt` 从首位挪到尾位是有意的：带默认的放在每次都传的
+  形参之后，省略时丢的是尾巴而不是让其余实参错位；配置过措辞的调用改成具名 `fmt: f`。`length: Some(n)` 的 `n`
+  为负仍 panic，`Option` 只回答「长度知不知道」。理由写在 `packages/web/src/types.dawn` 相应函数前的注释与
+  README 的 6.0 节。
+- **版本。** major：manifest `name = "web6"`、`version = "6.0.0"`（v2-in-name 规则）；仓内消费者经
+  `web = { path = ... }` 别名，`use web/...` 不改。
+- **调用方。** 全在 `packages/web` 自身：`server.dawn` 生产代码 3 处（`error_response_with(errors, ..)`）加导入列表、
+  测试 5 处 `streaming_sized`；`types.dawn` 测试 `error_response_with` 4 处、`query_int_bounded_with` 3 处；
+  `middleware.dawn` 两处注释。`playground`、`site`、`examples` 0 处。dawnop-site 下次升钉改 8 处
+  `query_int_bounded_with(f, req, ..)` → `query_int_bounded(req, .., fmt: f)`，写在 README 迁移段。
+- **不在本刀。** `serve_app_with`（`cfg` 的默认要读 `port`，等 K6 的 B1）、`json_ok`（C 组，固定的是首参）、
+  `hi < 0` 哨兵改 `Option[Int]`（另一裁决）。README 6.0 节同样写明。
+- **负控。** 把 `error_response` 的默认临时改成 `ErrorFormat { ..default_errors(), detail_key: "detail" }`：
+  `dawn test packages/web` 红 2 个（`the error body's key is the default one, and configurable`、
+  `an HttpError out of range renders as the neutral 500, headers kept`），还原后 88/88 全绿。

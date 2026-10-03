@@ -306,32 +306,34 @@ pub fn raw(status: Int, content_type: String, body: String) -> Response =
 pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
   build(status, content_type, Binary(raw))
 
+# `length` used to be a second function, `streaming_sized`, and a negative
+# length its panic; one constructor with a defaulted `Option` says the same
+# thing (web 6.0, docs/std-defaults-design.md A3). `Some(n)` keeps the panic on a
+# negative `n`: the option says whether a length is known, not what one is.
 ## A streaming body: a live InputStream pumped to the socket in constant
-## memory, chunked (the length is unknown up front). The server closes the
-## stream after pumping, including when the client disconnects mid-download.
+## memory. The server closes the stream after pumping, including when the
+## client disconnects mid-download.
 ##
-## The length being unknown is a limit, not just a framing choice: an upstream
-## that ends early with a clean EOF is indistinguishable here from one that
-## delivered everything, so a truncated object is served as a complete one. A
-## failed *read* is caught and logged (web/server.pump_stream); a short but
-## orderly one cannot be, since telling them apart needs a length to compare
-## against. When the length is known up front, `streaming_sized` carries it.
-pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
-  build(status, content_type, Stream(stream, None))
-
-## A streaming body of a stated length: the same constant-memory pump, but
-## framed with an exact Content-Length instead of chunked, so the client knows
-## how much is coming (a progress bar, a range it can resume) and can tell a
-## short body from a complete one. The server counts what it pumped: an
-## upstream that ends early is logged as a truncation, and the connection ends
-## short of the promised length, which is how the client learns of it; one that
-## runs long is cut off by the JDK's fixed-length stream and logged as a failed
-## transfer. A negative length panics.
-pub fn streaming_sized(status: Int, content_type: String, stream: InputStream, length: Int) -> Response = {
-  if length < 0 {
-    panic("illegal stream length ${length}: a byte count is not negative")
+## With `length` absent the body is chunked, and that is a limit, not just a
+## framing choice: an upstream that ends early with a clean EOF is
+## indistinguishable here from one that delivered everything, so a truncated
+## object is served as a complete one. A failed *read* is caught and logged
+## (web/server.pump_stream); a short but orderly one cannot be, since telling
+## them apart needs a length to compare against.
+##
+## With `length: Some(n)` the body is framed with an exact Content-Length
+## instead, so the client knows how much is coming (a progress bar, a range it
+## can resume) and can tell a short body from a complete one. The server counts
+## what it pumped: an upstream that ends early is logged as a truncation, and
+## the connection ends short of the promised length, which is how the client
+## learns of it; one that runs long is cut off by the JDK's fixed-length stream
+## and logged as a failed transfer. A negative length panics.
+pub fn streaming(status: Int, content_type: String, stream: InputStream, length: Option[Int] = None) -> Response = {
+  match length {
+    Some(n) if n < 0 -> panic("illegal stream length ${n}: a byte count is not negative")
+    _ -> ()
   }
-  build(status, content_type, Stream(stream, Some(length)))
+  build(status, content_type, Stream(stream, length))
 }
 
 # ---- header hygiene ----
@@ -471,7 +473,7 @@ fn framing_problem(r: ResponseRep, name: String, value: String) -> Option[String
         Binary(b) -> length_mismatch(name, n, bytes.len(b))
         Stream(_, Some(k)) -> length_mismatch(name, n, k)
         Stream(_, None) -> Some("header " ++ name ++
-            " on a stream of unknown length: the server frames it chunked (streaming_sized states a length)")
+            " on a stream of unknown length: the server frames it chunked (`streaming(.., length: Some(n))` states a length)")
       }
   }
 }
@@ -670,11 +672,17 @@ pub fn default_errors() -> ErrorFormat =
 # whoever built the error; the client gets the same neutral 500 a panic gets,
 # and the error's headers still ride along, since the CORS stamp is on them and
 # an error the page cannot read is the case LIB-10 was about.
+# `fmt` sits last and defaulted (web 6.0): `error_response_with(fmt, e)` and
+# `error_response(e)` were one function under two names, the second fixing the
+# first's leading argument. A defaulted parameter goes after the ones every call
+# passes, so the wording moved from first to last; a call that configured it
+# now names it, `error_response(e, fmt: f)`.
 ## The server's rendering of the Err branch and of its own 404/405, worded by
-## `fmt`. The error's own headers ride along (through the with_header guard),
-## so a 401 can carry its WWW-Authenticate challenge. An error whose status is
-## outside 200..599 renders as a 500 with `fmt.internal_message`.
-pub fn error_response_with(fmt: ErrorFormat, e: HttpError) -> Response = {
+## `fmt` (the neutral `default_errors()` unless the application configured
+## something else). The error's own headers ride along (through the with_header
+## guard), so a 401 can carry its WWW-Authenticate challenge. An error whose
+## status is outside 200..599 renders as a 500 with `fmt.internal_message`.
+pub fn error_response(e: HttpError, fmt: ErrorFormat = default_errors()) -> Response = {
   let (status, message) = match status_problem(e.status) {
     None -> (e.status, e.message)
     Some(_) -> (500, fmt.internal_message)
@@ -685,11 +693,6 @@ pub fn error_response_with(fmt: ErrorFormat, e: HttpError) -> Response = {
     with_header(r, k, v)
   })
 }
-
-## `error_response_with` under the default wording — what a handler that
-## renders an HttpError itself should call unless the application configured
-## something else.
-pub fn error_response(e: HttpError) -> Response = error_response_with(default_errors(), e)
 
 # ---- request accessors ----
 
@@ -753,13 +756,17 @@ pub fn query_all(req: Request, name: String) -> List[String] =
     None -> []
   }
 
+# `fmt` is last and defaulted for the reason `error_response` gives; it was
+# `query_int_bounded_with`'s first argument until web 6.0.
 ## Strict pagination reader in the shape of FastAPI's Query(ge=lo, le=hi): an
 ## absent param yields the default; a present one that is non-integer or out of
 ## [lo, hi] is a 422. hi < 0 means no upper bound (FastAPI's `page` is ge=1 with
 ## no le). `fmt.param_separator` joins the parameter's name to the complaint —
 ## FastAPI's own error handler uses a fullwidth colon there, which is why the
-## separator is configurable rather than written in.
-pub fn query_int_bounded_with(fmt: ErrorFormat, req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
+## separator is configurable rather than written in. Without `fmt` the wording is
+## `default_errors()` ("size: Input should be less than or equal to 100").
+pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: Int,
+  fmt: ErrorFormat = default_errors()) -> Result[Int, HttpError] =
   match query(req, name) {
     None -> Ok(default)
     Some(s) -> {
@@ -777,11 +784,6 @@ pub fn query_int_bounded_with(fmt: ErrorFormat, req: Request, name: String, defa
       }
     }
   }
-
-## `query_int_bounded_with` under the default wording ("size: Input should be
-## less than or equal to 100").
-pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
-  query_int_bounded_with(default_errors(), req, name, default, lo, hi)
 
 ## A request header, looked up case-insensitively (the name is lowercased
 ## here; the server lowercases keys when building the map). Of a repeated name
@@ -837,6 +839,9 @@ test "query_int_bounded: absent uses default, out-of-range and non-int are 422" 
   }
   # absent -> default
   assert query_int_bounded(mk(map.empty()), "page", 1, 1, -1) == Ok(1)
+  # leaving `fmt` out is writing the default wording
+  assert query_int_bounded(mk(map.from([("page", ["0"])])), "page", 1, 1, -1) ==
+    query_int_bounded(mk(map.from([("page", ["0"])])), "page", 1, 1, -1, fmt: default_errors())
   # in range
   assert query_int_bounded(mk(map.from([("size", ["20"])])), "size", 10, 1, 100) == Ok(20)
   # below min -> 422
@@ -1140,10 +1145,10 @@ test "the error body's key is the default one, and configurable" {
   # an application whose clients read {"detail": ...} (FastAPI's shape, which
   # this used to be hardcoded to) states it
   let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail" }
-  assert response_body(error_response_with(fastapi, e)) == Text("{\"detail\":\"nope\"}")
+  assert response_body(error_response(e, fmt: fastapi)) == Text("{\"detail\":\"nope\"}")
   # the configured rendering is otherwise the same response
-  assert response_status(error_response_with(fastapi, e)) == 404
-  assert response_content_type(error_response_with(fastapi, e)) == "application/json; charset=utf-8"
+  assert response_status(error_response(e, fmt: fastapi)) == 404
+  assert response_content_type(error_response(e, fmt: fastapi)) == "application/json; charset=utf-8"
 }
 
 test "the 422 wording separates name from complaint, by configuration" {
@@ -1161,17 +1166,17 @@ test "the 422 wording separates name from complaint, by configuration" {
   # pydantic's own joiner is a fullwidth colon with no space; an application
   # reproducing FastAPI byte-for-byte configures that
   let pydantic = ErrorFormat { ..default_errors(), param_separator: "：" }
-  match query_int_bounded_with(pydantic, over, "size", 10, 1, 50) {
+  match query_int_bounded(over, "size", 10, 1, 50, fmt: pydantic) {
     Err(e) -> { assert e.message == "size：Input should be less than or equal to 50" }
     Ok(_) -> { assert false }
   }
-  match query_int_bounded_with(pydantic, mk(map.from([("page", ["abc"])])), "page", 1, 1, -1) {
+  match query_int_bounded(mk(map.from([("page", ["abc"])])), "page", 1, 1, -1, fmt: pydantic) {
     Err(e) -> {
       assert e.message == "page：Input should be a valid integer, unable to parse string as an integer"
     }
     Ok(_) -> { assert false }
   }
-  match query_int_bounded_with(pydantic, mk(map.from([("page", ["0"])])), "page", 1, 1, -1) {
+  match query_int_bounded(mk(map.from([("page", ["0"])])), "page", 1, 1, -1, fmt: pydantic) {
     Err(e) -> { assert e.message == "page：Input should be greater than or equal to 1" }
     Ok(_) -> { assert false }
   }
@@ -1280,7 +1285,7 @@ test "an HttpError out of range renders as the neutral 500, headers kept" {
   # what LIB-10 was about
   assert response_headers(r) == [("Vary", "Origin")]
   let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail", internal_message: "oops" }
-  assert response_body(error_response_with(fastapi, HttpError { ..bad, status: 1000 })) ==
+  assert response_body(error_response(HttpError { ..bad, status: 1000 }, fmt: fastapi)) ==
     Text("{\"detail\":\"oops\"}")
   # in range is untouched
   assert response_status(error_response(http_error(418, "teapot"))) == 418

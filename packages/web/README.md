@@ -88,7 +88,7 @@ site.
 ## Responses (5.0)
 
 `Response` is opaque. It comes from the constructors (`text`, `json_response`,
-`json_ok`, `raw`, `binary`, `streaming`, `streaming_sized`, `redirect`,
+`json_ok`, `raw`, `binary`, `streaming`, `redirect`,
 `attachment`, `error_response`) and from `with_header`, and it is read with
 `response_status`, `response_content_type`, `response_headers` and
 `response_body`. There is no literal, so there is no response that skipped the
@@ -130,8 +130,8 @@ invariant twice. WAI, Plug, http4s and Ktor draw the line the same way.
 `streaming(status, content_type, stream)` is chunked: the length is unknown,
 and so an upstream that ends early with a clean EOF looks exactly like one that
 delivered everything. When the length is known (an object store's
-`Content-Length`), `streaming_sized(status, content_type, stream, length)` sends
-it as an exact `Content-Length`. The server counts what it pumps; a short
+`Content-Length`), `streaming(status, content_type, stream, length: Some(n))`
+sends it as an exact `Content-Length` (`streaming_sized` until 6.0). The server counts what it pumps; a short
 upstream is logged as a truncation, and the connection ends before the promised
 length, so the client can tell as well.
 
@@ -207,7 +207,7 @@ opted out of CORS entirely (the `no-cors` tag, which also drops the
 `Access-Control-*` stamping).
 
 The stamp covers the `Err` branch as well: an `HttpError` gets the same headers,
-and `error_response_with` renders them onto the response. Until 2.2 the error
+and `error_response` renders them onto the response. Until 2.2 the error
 branch was written `next(req)?`, which handed the `Err` past the stamp — a
 cross-origin `4xx`/`5xx` arrived with no `Access-Control-*` at all and the
 browser refused to let the page read the error body.
@@ -290,7 +290,7 @@ serve_app_with(ServerConfig { host: "127.0.0.1", port: 8001, max_body: DEFAULT_M
   routes, middleware)
 ```
 
-and passes the same value to `error_response_with` / `query_int_bounded_with`
+and passes the same value as `fmt:` to `error_response` / `query_int_bounded`
 where it renders errors itself. Since 5.2 `ErrorFormat` no longer derives
 `Show`, because a function field cannot be printed. Code that calls
 `default_errors()` or builds the value with `..default_errors()` is unaffected
@@ -303,3 +303,45 @@ Chinese `500` message and pydantic's fullwidth colon, and `ServerConfig` had no
 server, so an application that worded its own errors in another language still
 answered in English for an oversized body, an unknown path, a wrong method or
 a dot segment, sometimes on the same route as its own `401`.
+
+## Defaulted parameters (6.0)
+
+Three pairs of functions that differed by one argument are one function each,
+with that argument defaulted and last:
+
+| 5.x | 6.0 |
+|---|---|
+| `error_response(e)` / `error_response_with(fmt, e)` | `error_response(e, fmt: ErrorFormat = default_errors())` |
+| `query_int_bounded(req, name, default, lo, hi)` / `query_int_bounded_with(fmt, req, name, default, lo, hi)` | `query_int_bounded(req, name, default, lo, hi, fmt: ErrorFormat = default_errors())` |
+| `streaming(status, ct, stream)` / `streaming_sized(status, ct, stream, n)` | `streaming(status, ct, stream, length: Option[Int] = None)` |
+
+`fmt` moved from first to last on purpose: a defaulted parameter goes after
+the ones every call passes, so that leaving it out drops a suffix rather than
+shifting the rest. A call that configured the wording now names it. A negative
+`length: Some(n)` still panics; `None` is the chunked stream it always was.
+`error_response_with`, `query_int_bounded_with` and `streaming_sized` are gone,
+with no aliases. The package is `web6 / 6.0.0`; a consumer keeps its
+`use web/...` lines through its `web = ...` alias.
+
+Migrating:
+
+```dawn
+# 5.x
+let page = query_int_bounded_with(site_errors(), req, "page", 1, 1, -1)?
+let r = error_response_with(site_errors(), e)
+let s = streaming_sized(200, ct, stream, n)
+# 6.0
+let page = query_int_bounded(req, "page", 1, 1, -1, fmt: site_errors())?
+let r = error_response(e, fmt: site_errors())
+let s = streaming(200, ct, stream, length: Some(n))
+```
+
+Calls without a format (`error_response(e)`, `query_int_bounded(req, ...)`,
+`streaming(status, ct, stream)`) are unchanged.
+
+Not in 6.0: `serve_app` / `serve_app_with` stay two functions, because a
+defaulted `cfg` would have to read `port`, an earlier parameter, which defaults
+cannot do yet; `json_ok(j)` stays, since the value it fixes (`200`) is the
+*first* argument of `json_response`; and the `hi < 0` "no upper bound" sentinel
+of `query_int_bounded` is still an `Int`, since replacing it with an
+`Option[Int]` is a separate decision.
