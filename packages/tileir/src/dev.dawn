@@ -560,11 +560,21 @@ pub opaque type Ptrs[D] = Int
 ## `t_call_enter(name)` and `t_call_exit()` record nothing a kernel computes.
 ## Every public function below wraps its body in `called(name, ..)`, which
 ## brackets it with the two, so a handler can tell which public call issued
-## which operations: `prog.trace_calls` keeps the outermost ones as a side
-## table beside the program, and every other handler answers `()`. They are
-## the only way that is known exactly, because the mapping is not one to
+## which operations: `prog.trace_calls` keeps the kernel's own calls as a
+## side table beside the program, and every other handler answers `()`. They
+## are the only way that is known exactly, because the mapping is not one to
 ## one (`tile_at` issues `t_idx_const` and `t_idx_mul`, `addf` issues
 ## `t_binaryf`, `d_for` a whole region).
+##
+## `t_body_enter()` and `t_body_exit()` record nothing either. Every public
+## function that takes a closure (`d_for` to `d_for4`, `d_loop`, `d_loop2`,
+## the reductions, the scans, `d_if`, `d_fork2`) runs that closure between
+## the two, and runs nothing else between them. A call marked inside a body
+## is one the KERNEL wrote, in the region the closure fills; a call marked
+## anywhere else inside another call is one the library made on its own
+## behalf (`idx_mul` inside `tile_at`). That difference is what lets
+## `prog.trace_calls` keep a tree of the kernel's calls rather than only the
+## outermost ones.
 pub effect Dev {
   fn t_block_id(axis: Int) -> Int
   fn t_load(param: Int, dtype: String, base: Int, shape: List[Int], strides: List[Int],
@@ -652,6 +662,8 @@ pub effect Dev {
   fn t_index_space_shape(view: Int, dim: Int) -> Int
   fn t_call_enter(name: String) -> Unit
   fn t_call_exit() -> Unit
+  fn t_body_enter() -> Unit
+  fn t_body_exit() -> Unit
 }
 
 # `body` bracketed by the two call marks, under the public function's own
@@ -661,6 +673,19 @@ fn called[T](name: String, body: fn() -> T !Dev) -> T !Dev = {
   t_call_enter(name)
   let r = body()
   t_call_exit()
+  r
+}
+
+# A closure the KERNEL passed to a region function, run between the two body
+# marks: what it issues is the kernel's own calls inside that region, not the
+# region function's. Every public function that takes a closure runs it
+# through this and through nothing else, so a handler can tell the two apart
+# (`prog.trace_calls` keeps the calls inside a body as children of the region
+# call).
+fn user_body[T](f: fn() -> T !Dev) -> T !Dev = {
+  t_body_enter()
+  let r = f()
+  t_body_exit()
   r
 }
 
@@ -2169,7 +2194,8 @@ pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
     let h: Int = init
     let outs = loop_handles(lower, upper, step, unsigned_cmp, [h], (i, inside) => {
       let t: Tile[D] = inside[0]
-      let r: Int = body(i, t)
+      let rt: Tile[D] = user_body(() => body(i, t))
+      let r: Int = rt
       [r]
     })
     let out: Tile[D] = outs[0]
@@ -2184,7 +2210,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
     let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb], (i, inside) => {
       let ta: Tile[A] = inside[0]
       let tb: Tile[B] = inside[1]
-      let (ra, rb) = body(i, ta, tb)
+      let (ra, rb) = user_body(() => body(i, ta, tb))
       let xa: Int = ra
       let xb: Int = rb
       [xa, xb]
@@ -2207,7 +2233,7 @@ pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B]
       let ta: Tile[A] = inside[0]
       let tb: Tile[B] = inside[1]
       let tc: Tile[C] = inside[2]
-      let (ra, rb, rc) = body(i, ta, tb, tc)
+      let (ra, rb, rc) = user_body(() => body(i, ta, tb, tc))
       let xa: Int = ra
       let xb: Int = rb
       let xc: Int = rc
@@ -2232,7 +2258,7 @@ pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile
       let tb: Tile[B] = inside[1]
       let tc: Tile[C] = inside[2]
       let te: Tile[E] = inside[3]
-      let (ra, rb, rc, re) = body(i, ta, tb, tc, te)
+      let (ra, rb, rc, re) = user_body(() => body(i, ta, tb, tc, te))
       let xa: Int = ra
       let xb: Int = rb
       let xc: Int = rc
@@ -2283,7 +2309,7 @@ pub fn d_loop[D](init: Tile[D],
     let h: Int = init
     let outs = while_handles([h], inside => {
       let t: Tile[D] = inside[0]
-      let (done, nxt) = body(t)
+      let (done, nxt) = user_body(() => body(t))
       let c: Int = done
       let r: Int = nxt
       (c, [r])
@@ -2302,7 +2328,7 @@ pub fn d_loop2[A, B](a: Tile[A], b: Tile[B],
     let outs = while_handles([ha, hb], inside => {
       let ta: Tile[A] = inside[0]
       let tb: Tile[B] = inside[1]
-      let (done, ra, rb) = body(ta, tb)
+      let (done, ra, rb) = user_body(() => body(ta, tb))
       let c: Int = done
       let xa: Int = ra
       let xb: Int = rb
@@ -2513,7 +2539,8 @@ pub fn d_reduce[D: Dtype](d: D, shape: List[Int], t: Tile[D], identity: Float,
     let args = t_reduce_begin(0, shape, [IdF(dtype_name(d), identity)], [h])
     let acc: Scalar[D] = args[0]
     let e: Scalar[D] = args[1]
-    let r: Int = body(acc, e)
+    let rs: Scalar[D] = user_body(() => body(acc, e))
+    let r: Int = rs
     let outs = t_reduce_end([r])
     let out: Scalar[D] = outs[0]
     out
@@ -2536,7 +2563,8 @@ pub fn d_reduce_dim[D: Dtype](d: D, shape: List[Int], dim: Int, t: Tile[D], iden
     let args = t_reduce_begin(dim, shape, [IdF(dtype_name(d), identity)], [h])
     let acc: Scalar[D] = args[0]
     let e: Scalar[D] = args[1]
-    let r: Int = body(acc, e)
+    let rs: Scalar[D] = user_body(() => body(acc, e))
+    let r: Int = rs
     let outs = t_reduce_end([r])
     let out: Tile[D] = outs[0]
     out
@@ -2558,7 +2586,8 @@ pub fn d_reduce_i(shape: List[Int], t: Tile[I32], identity: Int,
     let args = t_reduce_begin(0, shape, [IdI("i32", identity)], [h])
     let acc: Scalar[I32] = args[0]
     let e: Scalar[I32] = args[1]
-    let r: Int = body(acc, e)
+    let rs: Scalar[I32] = user_body(() => body(acc, e))
+    let r: Int = rs
     let outs = t_reduce_end([r])
     let out: Scalar[I32] = outs[0]
     out
@@ -2576,7 +2605,8 @@ pub fn d_reduce_dim_i(shape: List[Int], dim: Int, t: Tile[I32], identity: Int,
     let args = t_reduce_begin(dim, shape, [IdI("i32", identity)], [h])
     let acc: Scalar[I32] = args[0]
     let e: Scalar[I32] = args[1]
-    let r: Int = body(acc, e)
+    let rs: Scalar[I32] = user_body(() => body(acc, e))
+    let r: Int = rs
     let outs = t_reduce_end([r])
     let out: Tile[I32] = outs[0]
     out
@@ -2597,7 +2627,7 @@ pub fn d_reduce2[A: Dtype](a: A, shape: List[Int], values: Tile[A], idxs: Tile[I
     let ev: Scalar[A] = args[1]
     let ai: Scalar[I32] = args[2]
     let ei: Scalar[I32] = args[3]
-    let (rv, ri) = body(av, ai, ev, ei)
+    let (rv, ri) = user_body(() => body(av, ai, ev, ei))
     let xv: Int = rv
     let xi: Int = ri
     let outs = t_reduce_end([xv, xi])
@@ -2638,7 +2668,8 @@ pub fn d_scan[D: Dtype](d: D, shape: List[Int], dim: Int, reverse: Bool, t: Tile
     let args = t_scan_begin(dim, reverse, shape, [IdF(dtype_name(d), identity)], [h])
     let acc: Scalar[D] = args[0]
     let e: Scalar[D] = args[1]
-    let r: Int = body(acc, e)
+    let rs: Scalar[D] = user_body(() => body(acc, e))
+    let r: Int = rs
     let outs = t_scan_end([r])
     let out: Tile[D] = outs[0]
     out
@@ -2657,7 +2688,8 @@ pub fn d_scan_i(shape: List[Int], dim: Int, reverse: Bool, t: Tile[I32], identit
     let args = t_scan_begin(dim, reverse, shape, [IdI("i32", identity)], [h])
     let acc: Scalar[I32] = args[0]
     let e: Scalar[I32] = args[1]
-    let r: Int = body(acc, e)
+    let rs: Scalar[I32] = user_body(() => body(acc, e))
+    let r: Int = rs
     let outs = t_scan_end([r])
     let out: Tile[I32] = outs[0]
     out
@@ -2689,7 +2721,7 @@ pub fn d_scan2[D: Dtype](d: D, shape: List[Int], dim: Int, reverse: Bool, a: Til
     let ea: Scalar[D] = args[1]
     let ab: Scalar[D] = args[2]
     let eb: Scalar[D] = args[3]
-    let (ra, rb) = body(aa, ab, ea, eb)
+    let (ra, rb) = user_body(() => body(aa, ab, ea, eb))
     let xa: Int = ra
     let xb: Int = rb
     let outs = t_scan_end([xa, xb])
@@ -2708,9 +2740,11 @@ pub fn d_scan2[D: Dtype](d: D, shape: List[Int], dim: Int, reverse: Bool, a: Til
 pub fn d_if[D](cond: Scalar[I1], on_true: fn() -> Tile[D] !Dev, on_false: fn() -> Tile[D] !Dev) -> Tile[D] !Dev = called("d_if", () => {
   let c: Int = cond
   t_if_begin(c)
-  let th: Int = on_true()
+  let tt: Tile[D] = user_body(on_true)
+  let th: Int = tt
   t_if_else([th])
-  let el: Int = on_false()
+  let te: Tile[D] = user_body(on_false)
+  let el: Int = te
   let outs = t_if_end([el])
   let out: Tile[D] = outs[0]
   out
@@ -2799,10 +2833,10 @@ pub fn num_blocks(axis: Int) -> Idx !Dev = called("num_blocks", () => {
 ## body that just issues its stores in order gets the line it already had.
 pub fn d_fork2(a: fn() -> Unit !Dev, b: fn() -> Unit !Dev) -> Unit !Dev = called("d_fork2", () => {
   let start = t_tok_get()
-  a()
+  user_body(a)
   let after_a = t_tok_get()
   t_tok_set(start)
-  b()
+  user_body(b)
   let after_b = t_tok_get()
   let _joined = t_tok_join([after_a, after_b])
   ()
@@ -3304,6 +3338,8 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
     var next: Int = 100
     t_call_enter(_name) => ()
     t_call_exit() => ()
+    t_body_enter() => ()
+    t_body_exit() => ()
     t_block_id(_axis) => {
       let h = next
       next = next + 1
@@ -3683,6 +3719,8 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     var log: List[String] = []
     t_call_enter(_name) => ()
     t_call_exit() => ()
+    t_body_enter() => ()
+    t_body_exit() => ()
     t_block_id(axis) => {
       log = log ++ ["block_id ${axis}"]
       0
@@ -4330,6 +4368,8 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       var log: List[String] = []
       t_call_enter(_name) => ()
       t_call_exit() => ()
+      t_body_enter() => ()
+      t_body_exit() => ()
       t_block_id(_axis) => 0
       t_load(_param, _dtype, _base, _shape, _strides, _mask, _pad, _hints) => 1
       t_store(_param, _dtype, _base, _shape, _strides, _v, _mask, _hints) => ()

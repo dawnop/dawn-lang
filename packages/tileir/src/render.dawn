@@ -18,9 +18,10 @@ use std/list
 use std/str
 use std/gpu.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
-  Dev, Param, param, block_id, tile_at, load, store, addf, idx_const, d_for, d_global, global_ptrs, load_ptrs, t_block_id }
-use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+  Dev, Param, param, block_id, tile_at, load, store, addf, idx_const, d_for, d_global, global_ptrs, load_ptrs, t_block_id,
+  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, s_maxf, f_const, lt, d_assert, spread, mul, s_gt }
+use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -532,26 +533,37 @@ fn mixed(dims: List[Int], dyn: List[Ref]) -> List[String] = {
 
 # An instruction at `indent` columns: one line, or for a region its header,
 # its body two columns further in, and the closing brace; an `if` is two
-# regions and the brace between them says which is which.
-fn lines(indent: String, i: Instr) -> List[String] = match i {
+# regions and the brace between them says which is which. Each line comes
+# with the operation that owns it, read off `o` (`no_owner()` when nobody
+# asked): a region's header and braces are the region operation's, and each
+# line of a body is that body's own.
+fn lines(indent: String, i: Instr, o: Owner) -> List[(String, Int)] = match i {
   ForLoop(_res, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, body) ->
-    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+    [(indent ++ line(i), o.op)] ++ block(indent ++ "  ", body, inner_of(o, 0)) ++ [(indent ++ "}", o.op)]
   WhileLoop(_res, _tys, _inits, _carried, body) ->
-    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+    [(indent ++ line(i), o.op)] ++ block(indent ++ "  ", body, inner_of(o, 0)) ++ [(indent ++ "}", o.op)]
   ReduceTile(_res, _tys, _dim, _identities, _operands, _operand_tys, _args, body) ->
-    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+    [(indent ++ line(i), o.op)] ++ block(indent ++ "  ", body, inner_of(o, 0)) ++ [(indent ++ "}", o.op)]
   ScanTile(_res, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, body) ->
-    [indent ++ line(i)] ++ block(indent ++ "  ", body) ++ [indent ++ "}"]
+    [(indent ++ line(i), o.op)] ++ block(indent ++ "  ", body, inner_of(o, 0)) ++ [(indent ++ "}", o.op)]
   IfElse(_res, _tys, _cond, _cond_ty, on_true, on_false) ->
-    [indent ++ line(i)] ++ block(indent ++ "  ", on_true) ++ [indent ++ "} else {"]
-    ++ block(indent ++ "  ", on_false) ++ [indent ++ "}"]
-  _ -> [indent ++ line(i)]
+    [(indent ++ line(i), o.op)] ++ block(indent ++ "  ", on_true, inner_of(o, 0)) ++ [(indent ++ "} else {", o.op)]
+    ++ block(indent ++ "  ", on_false, inner_of(o, 1)) ++ [(indent ++ "}", o.op)]
+  _ -> [(indent ++ line(i), o.op)]
 }
 
-fn block(indent: String, body: List[Instr]) -> List[String] = {
-  let none: List[String] = []
-  list.fold(body, none, (acc, i) => acc ++ lines(indent, i))
+fn block(indent: String, body: List[Instr], owners: List[Owner]) -> List[(String, Int)] = {
+  let none: List[(String, Int)] = []
+  list.fold(range(0, len(body)), none, (acc, k) => acc ++ lines(indent, body[k], owner_at(owners, k)))
 }
+
+# The owner of a line no operation issued, and of every line when the
+# caller did not ask (`render_kernel`).
+fn no_owner() -> Owner = Owner { op: 0 - 1, inner: [] }
+
+fn owner_at(owners: List[Owner], k: Int) -> Owner = if k < len(owners) { owners[k] } else { no_owner() }
+
+fn inner_of(o: Owner, k: Int) -> List[Owner] = if k < len(o.inner) { o.inner[k] } else { [] }
 
 fn join(lines: List[String]) -> String = list.fold(lines, "", (acc, l) => acc ++ l ++ "\n")
 
@@ -586,15 +598,16 @@ fn global_line(g: Global) -> String = {
 ## because `global` operations are directly nested in the module and the
 ## `get_global` in the entry names them. The text ends with a newline.
 pub fn render_kernel(k: Kernel) -> String = {
-  let (text, _spans) = kernel_lines(k)
+  let (text, _owners) = kernel_lines(k, [])
   join(text)
 }
 
-# The lines `render_kernel` joins, and beside them the 1-based, half-open
-# line range of each instruction of `k.body` (a region's range holds its
-# header, its body and its closing brace). The one place the text is laid
-# out, so the ranges are the text's and not a recount of it.
-fn kernel_lines(k: Kernel) -> (List[String], List[(Int, Int)]) = {
+# The lines `render_kernel` joins, and beside them the operation each line
+# is owned by, from `owners` (`lower_spans`' table for `k.body`), or -1: the
+# module, the globals, the entry, the closing `return` and the two braces,
+# and every line when `owners` is empty. The one place the text is laid out,
+# so the owners are the text's and not a recount of it.
+fn kernel_lines(k: Kernel, owners: List[Owner]) -> (List[String], List[Int]) = {
   var args: List[String] = []
   var i = 0
   for dt in k.params {
@@ -602,88 +615,139 @@ fn kernel_lines(k: Kernel) -> (List[String], List[(Int, Int)]) = {
     i = i + 1
   }
   let head = commas(args)
-  var out = ["cuda_tile.module @m {"] ++ list.map(k.globals, global_line)
+  let top = ["cuda_tile.module @m {"] ++ list.map(k.globals, global_line)
     ++ ["  entry @${k.name}(${head})${hints_attr(k.hints)} {"]
-  var spans: List[(Int, Int)] = []
-  for ins in k.body {
-    let before = len(out)
-    out = out ++ lines("    ", ins)
-    spans = spans ++ [(before + 1, len(out) + 1)]
-  }
-  (out ++ ["  }", "}"], spans)
+  let body = block("    ", k.body, owners)
+  let text = top ++ list.map(body, x => {
+    let (t, _o) = x
+    t
+  }) ++ ["  }", "}"]
+  let own = list.map(top, _t => 0 - 1) ++ list.map(body, x => {
+    let (_t, o) = x
+    o
+  }) ++ [0 - 1, 0 - 1]
+  (text, own)
 }
 
-## The lines of `render(prog)` one public call of the body is answerable for:
-## its globals' lines and its operations' lines, each a 1-based half-open
-## range, in that order, empty ranges left out.
-pub type CallLines = { name: String, lines: List[(Int, Int)] } derive Show
+## The lines of `render(prog)` one call the kernel made is answerable for,
+## its children's left out: its globals' lines and the lines of the
+## operations it issued itself, each a 1-based half-open range, in text
+## order, empty ranges left out. `parent` is the call's row's `parent`, so
+## the rows are the side table's tree. A region call (`d_for`, `d_scan`)
+## has the region's header line, its terminator and its closing brace; the
+## lines between are its children's.
+pub type CallLines = { name: String, parent: Int, lines: List[(Int, Int)] } derive Show
 
 ## `render(prog)` cut into who wrote each line. `head` is the module line,
 ## the entry line and `make_token`, which no call issued; `calls` is one row
-## per row of `trace_calls`' side table; `tail` is `return` and the two
-## closing braces. Every line of `text` is in exactly one of them.
+## per row of `trace_calls`' side table, in its order; `tail` is `return`
+## and the two closing braces. Every line of `text` is in exactly one of
+## them.
 pub type LineMap = { text: String, head: List[(Int, Int)], calls: List[CallLines], tail: (Int, Int) } derive Show
 
 ## The line map of `prog` from the side table `calls` that `trace_calls`
-## answered with it: `TileOp` ranges through `lower_spans` to instructions,
-## instructions through the layout `render_kernel` uses to lines. An `Err`
-## names the first operation or global no call (or two calls) issued, which
-## is what a body that calls `t_*` directly, or a side table that is not this
-## program's, looks like.
+## answered with it: operations through `lower_spans` to instructions,
+## instructions through the layout `render_kernel` uses to lines, and every
+## operation to the innermost call whose range holds it. An `Err` names the
+## first thing that does not fit: a row whose range is not inside its
+## parent's, two rows of one parent that overlap, or an operation or a
+## global no call issued, which is what a body that calls `t_*` directly, or
+## a side table that is not this program's, looks like.
 pub fn line_map(prog: TileProg, calls: List[Call]) -> Result[LineMap, String] = {
-  let (k, op_spans) = lower_spans(prog)
-  let (text, instr_spans) = kernel_lines(k)
-  let n_ops = len(prog.ops)
+  let (k, owners) = lower_spans(prog)
+  let (text, line_ops) = kernel_lines(k, owners)
+  let n_ops = op_count(prog.ops)
   let n_globals = len(prog.globals)
-  let none: List[(Int, Int)] = []
-  # instructions [a, b) as lines, or no range when there are none
-  let instr_lines = (a: Int, b: Int) => if a < b {
-    let (la, _x) = instr_spans[a]
-    let (_y, lb) = instr_spans[b - 1]
-    [(la, lb)]
-  } else {
-    none
-  }
-  let op_lines = (a: Int, b: Int) => if a < b {
-    let (ia, _x) = op_spans[a]
-    let (_y, ib) = op_spans[b - 1]
-    instr_lines(ia, ib)
-  } else {
-    none
-  }
-  match list.find(calls, c => c.ops_from < 0) {
-    Some(c) -> Err("the call `${c.name}` opened or closed inside a region it did not open")
+  match tree_fault(prog.name, calls, n_ops, n_globals) {
+    Some(e) -> Err(e)
     None -> {
-      let (next_op, next_global, bad) = list.fold(calls, (1, 0, ""), (st, c) => {
-        let (o, g, b) = st
-        if b != "" {
-          st
-        } else if c.ops_from != o {
-          (o, g, "operations ${o}..${c.ops_from} of `${prog.name}` belong to no public call (the next is `${c.name}`)")
-        } else if c.globals_from != g {
-          (o, g, "globals ${g}..${c.globals_from} of `${prog.name}` belong to no public call (the next is `${c.name}`)")
-        } else {
-          (c.ops_to, c.globals_to, "")
-        }
+      # the innermost row holding each operation and each global: a later
+      # row is deeper than every row it is inside, and two rows of one
+      # parent do not overlap, so the last row to claim one is its owner
+      let op_row = list.fold(range(0, len(calls)), list.map(range(0, n_ops), _x => 0 - 1), (acc, j) => {
+        let c = calls[j]
+        list.map(range(0, n_ops), p => if p >= c.ops_from && p < c.ops_to { j } else { acc[p] })
       })
-      if bad != "" {
-        Err(bad)
-      } else if next_op != n_ops {
-        Err("operations ${next_op}..${n_ops} of `${prog.name}` belong to no public call")
-      } else if next_global != n_globals {
-        Err("globals ${next_global}..${n_globals} of `${prog.name}` belong to no public call")
-      } else {
-        let entry = 2 + n_globals
-        let head = [(1, 2), (entry, entry + 1)] ++ op_lines(0, 1)
-        let rows = list.map(calls, c => {
-          let gl = if c.globals_from < c.globals_to { [(2 + c.globals_from, 2 + c.globals_to)] } else { none }
-          CallLines { name: c.name, lines: merge_ranges(gl ++ op_lines(c.ops_from, c.ops_to)) }
-        })
-        let (ret_at, _r) = instr_spans[len(instr_spans) - 1]
-        Ok(LineMap { text: join(text), head: merge_ranges(head), calls: rows, tail: (ret_at, len(text) + 1) })
+      let global_row = list.fold(range(0, len(calls)), list.map(range(0, n_globals), _x => 0 - 1), (acc, j) => {
+        let c = calls[j]
+        list.map(range(0, n_globals), g => if g >= c.globals_from && g < c.globals_to { j } else { acc[g] })
+      })
+      let lost_op = list.find(range(1, n_ops), p => op_row[p] < 0)
+      let lost_global = list.find(range(0, n_globals), g => global_row[g] < 0)
+      match (lost_op, lost_global) {
+        (Some(p), _) -> Err("operation #${p} of `${prog.name}` belongs to no public call")
+        (None, Some(g)) -> Err("global ${g} of `${prog.name}` belongs to no public call")
+        (None, None) -> {
+          # who owns each line: -2 the head, -3 the tail, else a row
+          let entry = 2 + n_globals
+          let n_lines = len(text)
+          let who = list.map(range(1, n_lines + 1), n => {
+            let op = line_ops[n - 1]
+            if n == 1 || n == entry {
+              0 - 2
+            } else if n < entry {
+              global_row[n - 2]
+            } else if op == 0 {
+              0 - 2
+            } else if op > 0 {
+              op_row[op]
+            } else {
+              0 - 3
+            }
+          })
+          let ranges_of = (w: Int) => merge_ranges(list.map(list.filter(range(1, n_lines + 1), n => who[n - 1] == w), n => (n, n + 1)))
+          let tail = ranges_of(0 - 3)
+          if len(tail) != 1 {
+            Err("`${prog.name}`'s text has lines no operation owns before its end")
+          } else {
+            let rows = list.map(range(0, len(calls)), j => CallLines { name: calls[j].name, parent: calls[j].parent, lines: ranges_of(j) })
+            Ok(LineMap { text: join(text), head: ranges_of(0 - 2), calls: rows, tail: tail[0] })
+          }
+        }
       }
     }
   }
+}
+
+# The first way `calls` is not a tree of nested ranges over a program of
+# `n_ops` operations and `n_globals` globals, or `None`: every row's parent
+# is an earlier row or -1, its ranges are inside its parent's (or the
+# program's), and it starts no earlier than where the previous row of the
+# same parent ended.
+fn tree_fault(name: String, calls: List[Call], n_ops: Int, n_globals: Int) -> Option[String] = {
+  var fault: Option[String] = None
+  var j = 0
+  for c in calls {
+    let here = j
+    let (lo, hi, glo, ghi) =
+      if c.parent >= 0 && c.parent < here {
+        let p = calls[c.parent]
+        (p.ops_from, p.ops_to, p.globals_from, p.globals_to)
+      } else {
+        (1, n_ops, 0, n_globals)
+      }
+    let prev = list.filter(list.take(calls, here), x => x.parent == c.parent)
+    let (after, gafter) = if len(prev) == 0 { (lo, glo) } else { (prev[len(prev) - 1].ops_to, prev[len(prev) - 1].globals_to) }
+    let why =
+      if c.parent < 0 - 1 || c.parent >= here {
+        Some("row ${here} (`${c.name}`) names row ${c.parent} as its parent")
+      } else if c.ops_from > c.ops_to || c.globals_from > c.globals_to {
+        Some("row ${here} (`${c.name}`) ends before it starts")
+      } else if c.ops_from < after || c.ops_to > hi || c.globals_from < gafter || c.globals_to > ghi {
+        Some("row ${here} (`${c.name}`) is not inside its parent, or overlaps the row before it, in `${name}`")
+      } else {
+        let fine: Option[String] = None
+        fine
+      }
+    match fault {
+      None -> {
+        fault = why
+      }
+      Some(_f) -> ()
+    }
+    j = j + 1
+  }
+  fault
 }
 
 # Adjacent ranges joined and empty ones dropped, order kept.
@@ -1325,11 +1389,12 @@ fn must_map(prog: TileProg, calls: List[Call]) -> LineMap = match line_map(prog,
   Err(e) -> panic(e)
 }
 
-test "the side table holds vadd's six calls in source order, the outermost ones only" {
+test "the side table holds vadd's six calls in source order, the kernel's own only" {
   let (p, calls) = vadd_calls()
   # tile_at's idx_const and idx_mul are its own, not rows of their own
   assert names_of(calls) == ["block_id", "tile_at", "load", "load", "addf", "store"]
   assert list.map(calls, c => (c.ops_from, c.ops_to)) == [(1, 2), (2, 4), (4, 5), (5, 6), (6, 7), (7, 8)]
+  assert list.all(calls, c => c.parent == 0 - 1)
   assert len(p.ops) == 8
 }
 
@@ -1349,6 +1414,7 @@ test "every line of vadd's text belongs to exactly one call, the prologue or the
   assert m.tail == (24, 27)
   # the first load builds the offset ladder both later memory operations reuse
   assert list.map(m.calls, c => c.lines) == [[(4, 5)], [(5, 7)], [(7, 15)], [(15, 19)], [(19, 20)], [(20, 24)]]
+  assert list.all(m.calls, c => c.parent == 0 - 1)
 }
 
 test "a side table shifted by one operation is refused, not drawn" {
@@ -1390,12 +1456,192 @@ fn summed(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store(out, tile_at(b, 128), [128], acc)
 }
 
-test "a loop is one row: what its body calls belongs to the d_for" {
-  let (p, calls) = trace_calls("summed", ["f64", "f64"], () => summed(param(F64, 0), param(F64, 1)))
-  assert names_of(calls) == ["block_id", "tile_at", "load", "idx_const", "idx_const", "d_for", "tile_at", "store"]
-  let m = must_map(p, calls)
+# The rows of `calls` as (name, parent) pairs.
+fn tree_of(calls: List[Call]) -> List[(String, Int)] = list.map(calls, c => (c.name, c.parent))
+
+# The text of the lines `rs` (1-based, half-open) name, each trimmed.
+fn texts(m: LineMap, rs: List[(Int, Int)]) -> List[String] = {
+  let all = str.split(m.text, "\n")
+  let none: List[String] = []
+  list.fold(rs, none, (acc, r) => {
+    let (a, b) = r
+    acc ++ list.map(range(a, b), n => str.trim(all[n - 1]))
+  })
+}
+
+fn every_line_once(m: LineMap) -> Bool = {
   let n = len(str.split(m.text, "\n")) - 1
-  assert list.all(range(1, n + 1), k => owners(all_ranges(m), k) == 1)
+  list.all(range(1, n + 1), k => owners(all_ranges(m), k) == 1)
+}
+
+test "what a loop's body calls are the d_for's children, and the d_for keeps its header, its continue and its brace" {
+  let (p, calls) = trace_calls("summed", ["f64", "f64"], () => summed(param(F64, 0), param(F64, 1)))
+  assert tree_of(calls) == [("block_id", 0 - 1), ("tile_at", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1),
+    ("idx_const", 0 - 1), ("d_for", 0 - 1), ("tile_at", 5), ("load", 5), ("addf", 5), ("tile_at", 0 - 1), ("store", 0 - 1)]
+  # a call's range holds its children's
+  assert calls[5].ops_from < calls[6].ops_from && calls[8].ops_to < calls[5].ops_to
+  let m = must_map(p, calls)
+  assert every_line_once(m)
+  let own = texts(m, m.calls[5].lines)
+  assert len(own) == 3
+  assert str.contains(own[0], " = for ")
+  assert str.starts_with(own[1], "continue ")
+  assert own[2] == "}"
+  # the body's lines are the children's, in the order the body issued them
+  assert list.all([6, 7, 8], k => len(m.calls[k].lines) > 0)
+}
+
+fn scanned(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load(x, idx_const(0), [8])
+  store(out, idx_const(0), [8], d_scan(F64, [8], 0, false, t, 0.0, (best, e) => s_maxf(F64, best, e)))
+}
+
+test "a call inside a scan's closure is the d_scan's child, and the d_scan keeps its header, its yield and its brace" {
+  let (p, calls) = trace_calls("scanned", ["f64", "f64"], () => scanned(param(F64, 0), param(F64, 1)))
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1), ("d_scan", 0 - 1), ("s_maxf", 3),
+    ("store", 0 - 1)]
+  let m = must_map(p, calls)
+  assert every_line_once(m)
+  let own = texts(m, m.calls[3].lines)
+  assert len(own) == 3
+  assert str.contains(own[0], " = scan ")
+  assert str.starts_with(own[1], "yield ")
+  assert own[2] == "}"
+  assert len(texts(m, m.calls[4].lines)) == 1
+  assert str.contains(texts(m, m.calls[4].lines)[0], " = maxf ")
+}
+
+fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let z = idx_const(0)
+  let one = idx_const(1)
+  let first = load(x, z, [8])
+  let acc = d_for(z, one, one, first, (i, t) =>
+      d_for(z, one, one, t, (_j, u) => addf(F64, [8], u, spread(F64, [8], d_reduce(F64, [8], u, 0.0, (a, e) => s_maxf(F64, a, e))))))
+  store(out, z, [8], acc)
+}
+
+test "regions inside regions nest the rows: each call's parent is the region whose closure it is in" {
+  let (p, calls) = trace_calls("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("d_for", 0 - 1), ("d_for", 3),
+    ("d_reduce", 4), ("s_maxf", 5), ("spread", 4), ("addf", 4), ("store", 0 - 1)]
+  let m = must_map(p, calls)
+  assert every_line_once(m)
+}
+
+# A kernel that calls every region function that takes a closure, each
+# closure doing something, so that every body mark is on the way.
+fn regions(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let z = idx_const(0)
+  let t = load(x, z, [8])
+  let c = lt(F64, [8], t, t)
+  let r = d_reduce(F64, [8], t, 0.0, (a, e) => s_maxf(F64, a, e))
+  let s = d_scan(F64, [8], 0, true, t, 0.0, (a, e) => s_maxf(F64, a, e))
+  let stop = s_gt(F64, r, r)
+  let w = d_loop(s, u => (stop, mul(F64, [8], u, u)))
+  let v = d_if(stop, () => addf(F64, [8], w, w), () => mul(F64, [8], w, w))
+  d_assert([8], c, "never")
+  d_fork2(() => store(out, z, [8], v), () => store(out, idx_const(8), [8], v))
+}
+
+test "the marks put nothing into the program: trace_calls records what trace_kernel records" {
+  let (p, _calls) = vadd_calls()
+  assert p == trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd_body())
+  # the body marks neither: every region function that takes a closure
+  let (q, calls) = trace_calls("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
+  assert q == trace_kernel("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
+  assert every_line_once(must_map(q, calls))
+  # and a pair issued by hand around a call is nothing either
+  let bare = trace_kernel("bare", ["f64"], () => {
+    let _b = block_id(0)
+    ()
+  })
+  let marked = trace_kernel("bare", ["f64"], () => {
+    t_body_enter()
+    let _b = block_id(0)
+    t_body_exit()
+  })
+  assert bare == marked
+}
+
+test "every region function's closure is a body: what it calls is the region call's child" {
+  let (_q, calls) = trace_calls("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("lt", 0 - 1), ("d_reduce", 0 - 1), ("s_maxf", 3),
+    ("d_scan", 0 - 1), ("s_maxf", 5), ("s_gt", 0 - 1), ("d_loop", 0 - 1), ("mul", 8), ("d_if", 0 - 1), ("addf", 10),
+    ("mul", 10), ("d_assert", 0 - 1), ("d_fork2", 0 - 1), ("store", 14), ("idx_const", 14), ("store", 14)]
+}
+
+# The sentinel oracle: a kernel with a `d_assert` between every two calls it
+# makes, its message a marker. Cut at the sentinels' lines, the text falls
+# into slots in the order the body ran, and each slot is one call's (or the
+# head's or the tail's) by how the body is written, which is the
+# expectation below. That is a second reading of who wrote which line,
+# from text order alone, against the map's, from operation numbers.
+fn sentinels(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let z = f_const(F64, [8], 0.0)
+  let c = lt(F64, [8], z, z)
+  let s = (m: String) => d_assert([8], c, "@@" ++ m)
+  s("1")
+  let i0 = idx_const(0)
+  s("2")
+  let t = load(x, i0, [8])
+  s("3")
+  let n = idx_const(2)
+  s("4")
+  let acc = d_for(i0, n, n, t, (k, u) => {
+    s("5")
+    let v = load(x, k, [8])
+    s("6")
+    let w = d_scan(F64, [8], 0, false, v, 0.0, (a, e) => {
+      s("7")
+      let r = s_maxf(F64, a, e)
+      s("8")
+      r
+    })
+    s("9")
+    let y = addf(F64, [8], u, w)
+    s("10")
+    y
+  })
+  s("11")
+  store(out, i0, [8], acc)
+  s("12")
+}
+
+test "the map agrees with sentinels: every line is the call that ran between the two sentinels around it" {
+  let (p, calls) = trace_calls("sentinels", ["f64", "f64"], () => sentinels(param(F64, 0), param(F64, 1)))
+  let m = must_map(p, calls)
+  assert every_line_once(m)
+  let lines = str.split(m.text, "\n")
+  let n = len(lines) - 1
+  # the map's reading of each line
+  let who = list.map(range(1, n + 1), k => {
+    let inside = (rs: List[(Int, Int)]) => owners(rs, k) == 1
+    if inside(m.head) {
+      "head"
+    } else if inside([m.tail]) {
+      "tail"
+    } else {
+      match list.find(m.calls, c => inside(c.lines)) {
+        Some(c) -> c.name
+        None -> "nobody"
+      }
+    }
+  })
+  # the slots between sentinel lines, each the names the map gives its lines
+  let none: List[List[String]] = [[]]
+  let slots = list.fold(range(0, n), none, (acc, k) => {
+    if str.contains(lines[k], "\"@@") {
+      assert who[k] == "d_assert"
+      let fresh: List[String] = []
+      acc ++ [fresh]
+    } else {
+      let last = acc[len(acc) - 1]
+      let here = if len(last) > 0 && last[len(last) - 1] == who[k] { last } else { last ++ [who[k]] }
+      list.take(acc, len(acc) - 1) ++ [here]
+    }
+  })
+  assert slots == [["head", "f_const", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_for"], ["load"], ["d_scan"],
+    ["s_maxf"], ["d_scan"], ["addf"], ["d_for"], ["store"], ["tail"]]
 }
 
 fn tabled(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
