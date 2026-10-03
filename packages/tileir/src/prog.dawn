@@ -18,7 +18,7 @@ use std/list
 use std/map
 use std/str
 use std/gpu.{F64, F32, F16, I32, I64}
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, sub, add_i, d_fork2, select, lt, arange, rounding_name, Overflow, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -805,10 +805,23 @@ type Lin = {
   konst: Int,
 }
 
-# What the recording knows about one value handle: the element format it
-# carries (`ptr<f64>` for a pointer tile) and its shape (`[]` for rank 0).
-# Tokens and views have no row: nothing element-wise takes one, and a view's
-# type needs the tensor view's, which the lowering has and this does not.
+# What the recording knows about one handle: the element format it carries
+# (`ptr<f64>` for a pointer tile) and its shape (`[]` for rank 0). `what`
+# says which of three things the row describes, because a view has a row
+# too (knife C1') and a view is not a tile:
+#
+# - `TileRow`: a value, and the row is its type. A tile read through a view
+#   (`load_view`, `load_gather`) is one: the view's tile shape in the view's
+#   format, which is what the lowering's `view_tile_of` gives it.
+# - `TensorViewRow`: a `tensor_view`. `shape` is the TENSOR's extent along
+#   each dimension, `DYN_DIM` where an operand carries it.
+# - `GridViewRow(what)`: a partition, strided or gather/scatter view (`what`
+#   names which). `shape` is the TILE one `load_view` or `store_view` moves,
+#   not the tensor and not the grid.
+#
+# Tokens are the only handles with no row. A view row is never an operand
+# of an element-wise operation (`check_operand` refuses one by what it is),
+# and `t_shape_of` answers it as written here.
 #
 # `affine` is RESERVED for knife D-2 and is `None` in every row this knife
 # writes. D-2 fills it with the handle's value as a `Lin` whose atoms are the
@@ -821,10 +834,26 @@ type Held = {
   dtype: String,
   shape: List[Int],
   affine: Option[Lin],
+  what: HeldAs,
 }
 
+type HeldAs =
+  | TileRow
+  | TensorViewRow
+  | GridViewRow(what: String)
+
 fn hold(held: Map[Int, Held], h: Int, dtype: String, shape: List[Int]) -> Map[Int, Held] =
-  map.insert(held, h, Held { dtype: dtype, shape: shape, affine: None })
+  map.insert(held, h, Held { dtype: dtype, shape: shape, affine: None, what: TileRow })
+
+fn hold_view(held: Map[Int, Held], h: Int, what: HeldAs, dtype: String, shape: List[Int]) -> Map[Int, Held] =
+  map.insert(held, h, Held { dtype: dtype, shape: shape, affine: None, what: what })
+
+# What a row is, in a refusal's words.
+fn held_noun(x: Held) -> String = match x.what {
+  TileRow -> tile_text(x.dtype, x.shape)
+  TensorViewRow -> "a tensor view"
+  GridViewRow(what) -> "a ${what}"
+}
 
 fn ptr_of(dtype: String) -> String = "ptr<${dtype}>"
 
@@ -904,15 +933,49 @@ fn tile_text(dtype: String, shape: List[Int]) -> String =
   }
 
 # One operand of an element-wise operation against what the operation
-# declares it to be. A handle with no row (a token, a view, a value read
-# through one) is not compared: the check refuses only what it can see is
-# wrong, and every such program is one `tileiras` refuses too.
+# declares it to be. A view is refused by what it is; a handle with no row
+# (a token, or a number no operation answered) is not compared: the check
+# refuses only what it can see is wrong, and every such program is one
+# `tileiras` refuses too. Since knife C1' a tile read through a view has a
+# row, so it is compared like any other.
 fn check_operand(name: String, frames: List[Frame], ops: List[TileOp], held: Map[Int, Held],
   op: String, role: String, h: Int, dtype: String, shape: List[Int]) -> Unit =
-  match map.get(held, h) {
+  match tile_row(name, frames, ops, held, op, role, h) {
     Some(x) ->
       if x.dtype != dtype || x.shape != shape {
         refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, declared ${tile_text(dtype, shape)}")
+      } else {
+        ()
+      }
+    None -> ()
+  }
+
+# `h`'s row where a tile is expected: `None` for no row, and a refusal for a
+# view's.
+fn tile_row(name: String, frames: List[Frame], ops: List[TileOp], held: Map[Int, Held],
+  op: String, role: String, h: Int) -> Option[Held] =
+  match map.get(held, h) {
+    Some(x) -> match x.what {
+      TileRow -> Some(x)
+      _ -> refuse_at(name, frames, ops, op, "${role} is ${held_noun(x)}, not a tile")
+    }
+    None -> None
+  }
+
+# One matrix operand of an `mma` against the K it declares (knife C1'): the
+# left one is `[m, k]` and K is its dimension 1, the right one `[k, n]` and
+# K is its dimension 0. Only K is held here, because K is the dimension the
+# two operands must AGREE on; a wrong m or n is a wrong result type, which
+# the lowering's types and `tileiras` already say. A handle with no row is
+# not compared, as in `check_operand`.
+fn check_k(name: String, frames: List[Frame], ops: List[TileOp], held: Map[Int, Held],
+  op: String, role: String, h: Int, axis: Int, k: Int) -> Unit =
+  match tile_row(name, frames, ops, held, op, role, h) {
+    Some(x) ->
+      if len(x.shape) != 2 {
+        refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, which is not a matrix")
+      } else if x.shape[axis] != k {
+        refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, whose K (dimension ${axis}) is ${x.shape[axis]}, declared k = ${k}")
       } else {
         ()
       }
@@ -1432,6 +1495,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_mmaf(dtype, m, k, n, a, b, c) => {
         check_shape(name, [m, k, n])
+        check_k(name, frames, ops, held, "mmaf", "lhs", a, 1, k)
+        check_k(name, frames, ops, held, "mmaf", "rhs", b, 0, k)
         held = hold(held, next, dtype, [m, n])
         let d = next
         next = mint(name, next, 1)
@@ -1460,6 +1525,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         check_shape(name, [m, k, n, k / block])
+        check_k(name, frames, ops, held, "mmaf_scaled", "lhs", a, 1, k)
+        check_k(name, frames, ops, held, "mmaf_scaled", "rhs", b, 0, k)
         held = hold(held, next, "f32", [m, n])
         let d = next
         next = mint(name, next, 1)
@@ -1468,6 +1535,8 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       }
       t_mmai(m, k, n, a, b, c) => {
         check_shape(name, [m, k, n])
+        check_k(name, frames, ops, held, "mmai", "lhs", a, 1, k)
+        check_k(name, frames, ops, held, "mmai", "rhs", b, 0, k)
         held = hold(held, next, "i32", [m, n])
         let d = next
         next = mint(name, next, 1)
@@ -1856,6 +1925,17 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         d
       }
       t_tok_get() => tok
+      t_shape_of(h) => {
+        # The row, as `Held` describes it (a view's included). A handle
+        # with no row is refused under the number of the operation about
+        # to be recorded and the public call asking, which is the call
+        # that needed the shape; outside one, under the query's own name.
+        let asking = if depth > 0 { callee } else { "t_shape_of" }
+        match map.get(held, h) {
+          Some(x) -> (x.dtype, x.shape)
+          None -> refuse_at(name, frames, ops, asking, "handle ${h} has no recorded shape: it is a token, or no operation answered it")
+        }
+      }
       t_tok_set(t) => {
         tok = t
         ()
@@ -2095,6 +2175,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        held = hold_view(held, next, TensorViewRow, dtype, shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [TensorViewOf(d, param, dtype, base, shape, strides, dyn_shape, dyn_strides)]
@@ -2106,6 +2187,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         # target dimension being in range) is in the lowering, which is
         # where a handle's type is known.
         check_view_record(name, dtype, tile_shape, dim_map, padding, "partition view")
+        held = hold_view(held, next, GridViewRow("partition view"), dtype, tile_shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PartitionViewOf(d, dtype, view, tile_shape, dim_map, padding)]
@@ -2127,6 +2209,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           Some(t) -> refuse(name, "traversal strides must be strictly positive but got ${t} in ${show(traversal)}")
           None -> ()
         }
+        held = hold_view(held, next, GridViewRow("strided view"), dtype, tile_shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [StridedViewOf(d, dtype, view, tile_shape, traversal, dim_map, padding)]
@@ -2144,6 +2227,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        held = hold_view(held, next, GridViewRow("gather/scatter view"), dtype, tile_shape)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [GatherViewOf(d, dtype, view, tile_shape, sparse_dim, padding)]
@@ -2184,6 +2268,18 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           refuse(name, "a load inside a reduce, scan or if region has no memory order")
         } else {
           ()
+        }
+        # The tile a grid view moves, in the view's format: the type the
+        # lowering gives the result (`view_tile_of`). `load_gather` comes
+        # here too, and a gather/scatter view's tile is its result as well.
+        # A handle that is not a grid view leaves the result without a
+        # row; the lowering refuses that program by name.
+        held = match map.get(held, view) {
+          Some(x) -> match x.what {
+            GridViewRow(_w) -> hold(held, next, x.dtype, x.shape)
+            _ -> held
+          }
+          None -> held
         }
         let d = next
         let tv = next + 1
@@ -3366,6 +3462,125 @@ test "knife C1: an operand whose element format is not the one the operation dec
     ()
   })
   assert str.contains(cv, "`ftof`: operand is tile<8xf64>, declared tile<16xf64>")
+}
+
+# ---- knife C1': views and what is read through them have rows
+
+# A view's tile read and then added as if it were half as wide. Before C1'
+# the read had no row and the recording let the `addf` through to
+# `tileiras`.
+fn view_read_half() -> Unit !Dev = {
+  let x = t_idx_const(0)
+  let tv = t_tensor_view(0, "f64", x, [64], [1], [], [])
+  let v = t_partition_view("f64", tv, [8], [0], NoPadding)
+  let t = t_load_view("f64", v, [x])
+  let _s = t_binaryf("addf", "f64", [4], t, t)
+  ()
+}
+
+fn refusal_in(params: List[String], body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", params, body)) {
+  Ok(_) -> "accepted"
+  Err(e) -> e.message
+}
+
+# What `t_shape_of` answers for `h`, written where a test can read it back:
+# the name of a global, the only string a recorded program keeps.
+fn note_shape(h: Int) -> Unit !Dev = {
+  let (dt, s) = t_shape_of(h)
+  t_global("${dt} ${show(s)} #${h}", "f64", [0.0], 8, true, false)
+}
+
+fn shapes_noted() -> Unit !Dev = {
+  let zero = t_idx_const(0)
+  let tv = t_tensor_view(0, "f64", zero, [DYN_DIM, 4], [4, 1], [zero], [])
+  let g = t_gather_view("f64", tv, [8, 4], 0, NoPadding)
+  let pv = t_strided_view("f64", tv, [2, 4], [1, 4], [0, 1], PadZero)
+  let rows = t_load_view("f64", g, [t_iota(8), zero])
+  let cell = t_load_view("f64", pv, [zero, zero])
+  note_shape(tv)
+  note_shape(g)
+  note_shape(pv)
+  note_shape(rows)
+  note_shape(cell)
+  note_shape(zero)
+}
+
+test "knife C1': a tile read through a view has the view's tile as its row, and an operand of the wrong shape is refused" {
+  assert refusal(view_read_half) == "tileir: kernel `raw`: op #5 `addf`: lhs is tile<8xf64>, declared tile<4xf64>"
+  # the same through a gather load
+  let g = refusal(() => {
+    let tv = t_tensor_view(0, "f64", t_idx_const(0), [64, 4], [4, 1], [], [])
+    let gv = t_gather_view("f64", tv, [8, 4], 0, NoPadding)
+    let t = t_load_view("f64", gv, [t_iota(8), t_idx_const(0)])
+    let _s = t_binaryf("mulf", "f64", [8], t, t)
+    ()
+  })
+  assert str.contains(g, "`mulf`: lhs is tile<8x4xf64>, declared tile<8xf64>")
+  # a view is not a tile, whatever its row says
+  let v = refusal(() => {
+    let zero = t_idx_const(0)
+    let tv = t_tensor_view(0, "f64", zero, [8], [1], [], [])
+    let pv = t_partition_view("f64", tv, [8], [0], NoPadding)
+    let _s = t_binaryf("addf", "f64", [8], pv, tv)
+    ()
+  })
+  assert v == "tileir: kernel `raw`: op #4 `addf`: lhs is a partition view, not a tile"
+}
+
+test "knife C1': t_shape_of answers each handle's row, a view's as Held says, and refuses a token by number" {
+  let p = trace_kernel("noted", ["f64"], shapes_noted)
+  assert list.map(p.globals, g => g.sym) == [
+    "f64 [-1, 4] #2",
+    "f64 [8, 4] #3",
+    "f64 [2, 4] #4",
+    "f64 [8, 4] #6",
+    "f64 [2, 4] #8",
+    "i32 [] #1",
+  ]
+  # a token has no row: outside a public call the query names itself, and
+  # the number is the operation about to be recorded
+  assert refusal(() => note_shape(t_tok_get()))
+    == "tileir: kernel `raw`: op #1 `t_shape_of`: handle 0 has no recorded shape: it is a token, or no operation answered it"
+  # inside a public call it names the call that asked (no function asks
+  # yet, so the marks are issued by hand)
+  let inside = refusal(() => {
+    t_call_enter("addf")
+    note_shape(t_tok_get())
+    t_call_exit()
+  })
+  assert inside == "tileir: kernel `raw`: op #1 `addf`: handle 0 has no recorded shape: it is a token, or no operation answered it"
+}
+
+test "knife C1': an mma whose operands disagree on K is refused, by the side that disagrees with the declared k" {
+  let r = refusal(() => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let a = load(x, zero, [16, 8])
+    let b = load(x, zero, [16, 16])
+    let c = load(x, zero, [16, 16])
+    let _d = mmaf(F64, 16, 8, 16, a, b, c)
+    ()
+  })
+  assert r == "tileir: kernel `raw`: op #5 `mmaf`: rhs is tile<16x16xf64>, whose K (dimension 0) is 16, declared k = 8"
+  let l = refusal(() => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let a = load(x, zero, [16, 8])
+    let c = load(x, zero, [16, 16])
+    let _d = mmaf(F64, 16, 16, 16, a, c, c)
+    ()
+  })
+  assert str.contains(l, "`mmaf`: lhs is tile<16x8xf64>, whose K (dimension 1) is 8, declared k = 16")
+  # the same rule for the integer one
+  let i = refusal_in(["i8", "i32"], () => {
+    let x = t_idx_const(0)
+    let a = t_load(0, "i8", x, [16, 32], [32, 1], None, None, [])
+    let b = t_load(0, "i8", x, [16, 16], [16, 1], None, None, [])
+    let c = t_load(1, "i32", x, [16, 16], [16, 1], None, None, [])
+    let _d = t_mmai(16, 32, 16, a, b, c)
+    ()
+  })
+  assert str.contains(i, "`mmai`: rhs is tile<16x16xi8>, whose K (dimension 0) is 16, declared k = 32")
 }
 
 # Two stores issued as the two chains of a fork. `gap` is how far the

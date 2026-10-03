@@ -44,8 +44,8 @@ put.
 The table puts every `Dev` operation in a group and names some of the typed
 functions of each (a kernel body calls those, not the `t_*` operations). It
 was generated from `effects[0].ops` of `./bin/dawn doc packages/tileir`, and a
-script checked that the groups cover every operation exactly once (73
-operations on 2026-10-03). When an operation is added, its group has to
+script checked that the groups cover every operation exactly once (74
+operations on 2026-10-03, after knife C1' added `t_shape_of`). When an operation is added, its group has to
 follow; `dawn doc` is the authority on numbers and names.
 
 | Group | `Dev` operations | Typed functions (examples) |
@@ -57,6 +57,7 @@ follow; `dawn doc` is the authority on numbers and names.
 | Arithmetic, comparison and conversion | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int` `float_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
 | Regions | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `d_scan` `d_if` |
 | Tokens | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
+| Shape query | `t_shape_of` | none yet: it is there for the knife that drops shapes a function can read off its operands |
 | Module globals | `t_global` `t_get_global` | `d_global` `global_ptrs` |
 | Assertions and debugging | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
 | Call marks | `t_call_enter` `t_call_exit` | none: every public function wraps its own body in them, and only `trace_calls` reads them |
@@ -84,6 +85,20 @@ answers these two; that is why the version moved from 0.2.0 to 0.3.0 (a
 - A kernel body that calls `t_*` operations directly issues operations
   outside any pair. A side table has nothing to attribute them to, and
   `render.line_map` refuses such a program rather than guessing.
+
+#### `t_shape_of`, for a handler of `Dev` written outside this package
+
+Since 0.4.0 `Dev` has `t_shape_of(h: Int) -> (String, List[Int])`, which is
+why the version moved from 0.3.2 to 0.4.0 for the reason the call marks
+gave above: a handler written against 0.3.x does not compile until it
+answers it. It is a query and issues nothing. The recording handler answers
+the element format and shape it holds for `h`: a tile's own type (a tile
+read through a view included), a tensor view's tensor extents (`DYN_DIM`
+where an operand carries one), or the tile a partition, strided or
+gather/scatter view moves. For a token it refuses, naming the kernel and the
+number of the operation about to be recorded. Nothing in this package calls
+it yet, so a handler that only replays or counts operations may answer any
+fixed pair.
 
 Since knife K2, the attributes of an operation (rounding mode, flush to zero,
 NaN propagation, integer `overflow`, a loop's unsigned comparison, a global's
@@ -196,9 +211,14 @@ store. Lowering turns it into an `IfElse` the way it turns a loop into a
   it is refused by name; a pointer ladder built inside is not reused after the
   loop. The table numbers a `ForLoop` in reading order: results, induction
   variable, carried values, body.
-- **What the recording refuses on sight** (knives C1 and D-1). The handler
-  keeps one row per value handle, its element format and its shape, and
-  holds every element-wise operand to what the operation declares. A
+- **What the recording refuses on sight** (knives C1, C1' and D-1). The
+  handler keeps one row per value handle, its element format and its shape,
+  and holds every element-wise operand to what the operation declares. Since
+  C1' views have rows too, so a tile read through `load_view` or
+  `load_gather` is held like any other, a view passed where a tile belongs is
+  refused as what it is, and an `mmaf`, `mmaf_scaled` or `mmai` whose left
+  operand's dimension 1 or right operand's dimension 0 is not the declared
+  `k` is refused. A
   mismatch is refused when the kernel is recorded, naming the operation by
   its depth-first position in `TileProg.ops` (`MakeToken(0)` is #0) and its
   dialect name; before, only `tileiras` refused such a program:

@@ -447,6 +447,18 @@ pub opaque type Ptrs[D] = Int
 ## typed surface has one client for them, `d_fork2`. Everything else keeps
 ## the chain a line.
 ##
+## `t_shape_of(h)` is the other state query (knife C1'): the element format
+## and the shape the handler holds for handle `h`, issuing nothing. For a
+## tile it is the tile's type, `[]` for rank 0, a tile read through a view
+## included. For a `tensor_view` it is the tensor's extent along each
+## dimension (`DYN_DIM` where an operand carries it); for a partition,
+## strided or gather/scatter view, the tile one `load_view` or
+## `store_view` moves. A token has no shape, and the recording handler
+## refuses the question under the kernel's name and the number of the
+## operation about to be recorded. It is here so that a public function
+## can read the shape off an operand rather than take it as an argument;
+## no function does yet.
+##
 ## `t_ptrs` / `t_ptr_offset` / `t_ptr_to_int` / `t_int_to_ptr` /
 ## `t_ptr_to_ptr` / `t_load_ptrs` are the pointer surface. `t_ptrs(param,
 ## dtype, shape)` answers a tile of `shape` every lane of which is the
@@ -610,6 +622,7 @@ pub effect Dev {
   fn t_tok_get() -> Int
   fn t_tok_set(tok: Int) -> Unit
   fn t_tok_join(toks: List[Int]) -> Int
+  fn t_shape_of(h: Int) -> (String, List[Int])
   fn t_ptrs(param: Int, dtype: String, shape: List[Int]) -> Int
   fn t_ptr_offset(dtype: String, shape: List[Int], ptrs: Int, offs: Int) -> Int
   fn t_ptr_to_int(dtype: String, shape: List[Int], ptrs: Int) -> Int
@@ -3498,6 +3511,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_tok_get() => 0
+    t_shape_of(_h) => ("f64", [])
     t_tok_set(_tok) => ()
     t_tok_join(_toks) => {
       let h = next
@@ -3826,6 +3840,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_tok_get() => {
       log = log ++ ["tok_get"]
       60
+    }
+    t_shape_of(h) => {
+      log = log ++ ["shape_of ${h}"]
+      ("f64", [])
     }
     t_tok_set(tok) => {
       log = log ++ ["tok_set ${tok}"]
@@ -4375,6 +4393,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_permute(_dtype, _shape, _perm, _src) => 52
       t_num_blocks(_axis) => 53
       t_tok_get() => 60
+      t_shape_of(_h) => ("f64", [])
       t_tok_set(_tok) => ()
       t_tok_join(_toks) => 61
       t_ptrs(_param, _dtype, _shape) => 70
