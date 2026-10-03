@@ -181,11 +181,26 @@ pub fn tree_hash(root: String) -> Result[String, String] !Fs = {
 ## `dawn build` is the thing that follows it. The numbers are far above any
 ## real source package (the largest thing this fetches is a GitHub tag
 ## archive) and far below anything that endangers the machine.
+##
+## `MAX_EXPANDED_BYTES` is the one of these that is a memory ceiling, and it is
+## not a byte count of the archive: it bounds what is decompressed into memory
+## at once -- one zip entry, or the whole tar stream, which is gunzipped before
+## the ustar walk starts. Decompression builds into `bytes.Buf`, which is
+## `Array[Int]` today, so every output byte costs about 32 B of JVM heap at
+## worst (0x80..0xFF are each a boxed Long). Measured under the toolchain's own
+## `-Xmx2g`, a 1 MB gzip of 0xFF bytes is refused at a 64 MiB ceiling only
+## after 13 s of collecting in a full heap, and is an OutOfMemoryError at
+## 80 MiB. The tar.gz ceiling used to be 256 MiB, which is how one hostile url
+## took `dawn add` down instead of being refused (#405). 32 MiB needs about
+## 1 GiB at the worst byte, half the heap, and is still above this
+## repository's own tag tarball (25 MB) and far above any single file in it.
+## `MAX_ARCHIVE_BYTES` stays a byte count: the download and the zip's total on
+## disk are held at one byte per byte, or not held at all.
 const FETCH_CONNECT_TIMEOUT_SECS: Int = 30
 const FETCH_REQUEST_TIMEOUT_SECS: Int = 300
 const MAX_ARCHIVE_BYTES: Int = 268435456
 const MAX_ENTRIES: Int = 65536
-const MAX_ENTRY_BYTES: Int = 67108864
+const MAX_EXPANDED_BYTES: Int = 33554432
 
 fn too_big(what: String, n: Int, limit: Int) -> String =
   "archive rejected: " ++ what ++ " (" ++ to_string(n) ++ " exceeds the " ++
@@ -309,8 +324,8 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
   }
   var declared = 0
   for m in metas {
-    if m.size > MAX_ENTRY_BYTES {
-      return Err(too_big("entry " ++ m.name, m.size, MAX_ENTRY_BYTES))
+    if m.size > MAX_EXPANDED_BYTES {
+      return Err(too_big("entry " ++ m.name, m.size, MAX_EXPANDED_BYTES))
     }
     declared = declared + m.size
     if declared > MAX_ARCHIVE_BYTES {
@@ -330,7 +345,7 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
       mkdirs(out)
     } else {
       var room = MAX_ARCHIVE_BYTES - total
-      if room > MAX_ENTRY_BYTES { room = MAX_ENTRY_BYTES }
+      if room > MAX_EXPANDED_BYTES { room = MAX_EXPANDED_BYTES }
       let data = match zip.read(bs, m, cap: Some(room)) {
         Ok(d) -> d
         Err(e) -> return Err(e)
@@ -414,7 +429,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
   # this learned about a bomb after paying for it. The caller has already
   # matched the gzip magic, so a failure here is a broken archive and its
   # reason is worth printing.
-  let raw = match gzip.gunzip(gz, cap: Some(MAX_ARCHIVE_BYTES)) {
+  let raw = match gzip.gunzip(gz, cap: Some(MAX_EXPANDED_BYTES)) {
     Ok(b) -> b
     Err(e) -> return Err(e ++
         "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
