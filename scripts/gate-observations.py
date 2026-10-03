@@ -19,7 +19,10 @@ person to read, and writes a JSON file that `check-gate-budgets.py
 rather than by name (see WHICH JOB A RUN WAS below).
 
     scripts/gate-observations.py --out /tmp/observed.json
-    scripts/check-gate-budgets.py --observed /tmp/observed.json
+    scripts/gate-observations.py --workflow tile.yml --allow-empty \
+        --out /tmp/tile-observed.json
+    scripts/check-gate-budgets.py --observed /tmp/observed.json \
+        --observed /tmp/tile-observed.json
     scripts/gate-observations.py --restep /tmp/observed.json --out /tmp/o2.json
 
 Neither runs in CI: this one needs the API (and a token), and a gate that
@@ -50,6 +53,9 @@ and keeping them here means that report reads the same API answers, through
 the same reader, as the audit does. `--allow-empty` writes a report with no
 runs instead of failing: a path-triggered workflow (tile.yml) can go a week
 without a push that touches its paths, and that is an answer, not an error.
+The report names the workflow it read ("workflow"), and that is how
+check-gate-budgets.py knows which file's claims it may be held to: since
+2026-10-03 the nightly audit passes it one report per workflow.
 
 WHICH JOB A RUN WAS (issue #244). A job's name is not its identity. Until
 2026-09-26 the audit held each budget line to the worst run of the job with

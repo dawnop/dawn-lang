@@ -105,6 +105,17 @@ jobs:
   # tile.yml skips them on a push whose tree already passed (its header).
   # The push totals are read with git from the full-history checkout above;
   # measured locally, 0.24s for the 68 runs of 09-16 .. 09-30.
+  #
+  # 2026-10-03: the audit reads tile.yml's seven days too. Until then it
+  # read ci.yml alone, so each of tile.yml's eight claims printed "no
+  # observation in this window" every night while its shards ran up to 980s
+  # on main against 827s claims, and nothing went red. tile.yml's jobs are
+  # matched by name (gatesplan does not model them), each file is held only
+  # to its own workflow's report, and a missing report is refused, not
+  # read as a quiet week (check-gate-budgets.py's OBSERVED_FROM). Measured
+  # locally 2026-10-03 on the slow link: 1m40s for the 57 tile.yml runs of
+  # seven days (the ci.yml read beside it, 134 runs, took 7m01s), 0.13s to
+  # compare both. The timeout stays a runaway stop.
   budget-observations:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -139,10 +150,17 @@ jobs:
           # --runs is a ceiling well above a week of main pushes, so the
           # seven days bound the window and not the default of 25 runs
           # (about two days on 2026-09-23).
+          # tile.yml is read as well, into its own report: its jobs never
+          # run inside ci.yml, and check-gate-budgets.py refuses a tree whose
+          # tile.yml claims arrive without a tile.yml report. --allow-empty
+          # because a week with no tile.yml run on main is an answer.
           python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
               --since "$since" --runs 150 --out obs.json > budgets.txt 2>&1 &&
+            python3 scripts/gate-observations.py --repo "$GITHUB_REPOSITORY" \
+              --workflow tile.yml --allow-empty --since "$since" --runs 150 \
+              --out tile-obs.json >> budgets.txt 2>&1 &&
             python3 scripts/check-gate-budgets.py --observed obs.json \
-              >> budgets.txt 2>&1 || status=$?
+              --observed tile-obs.json >> budgets.txt 2>&1 || status=$?
           cat budgets.txt
           exit "${status:-0}"
 

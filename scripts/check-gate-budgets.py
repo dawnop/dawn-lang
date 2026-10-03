@@ -67,6 +67,7 @@ On 2026-09-03 twenty-one of gates.yml's budget lines were under their job's
 own worst run since 09-02, native-diff's by 562s, and every gate was green.
 
     --observed <file>   compare each claim with what the job actually took
+                        (once per workflow: ci.yml's report and tile.yml's)
 
 The file is written by scripts/gate-observations.py, which reads the Actions
 API. That is why this mode is not in CI: a gate that needs the network and a
@@ -74,7 +75,10 @@ token is a gate that goes red for the network. It is the audit to run by hand
 before restating a budget line, and it is what a restatement cites:
 
     scripts/gate-observations.py --since 2026-09-02T00:00:00Z --out /tmp/obs.json
-    scripts/check-gate-budgets.py --observed /tmp/obs.json
+    scripts/gate-observations.py --workflow tile.yml --allow-empty \
+        --since 2026-09-02T00:00:00Z --out /tmp/tile-obs.json
+    scripts/check-gate-budgets.py --observed /tmp/obs.json \
+        --observed /tmp/tile-obs.json
 
 A `3x <N>s` claim is refused when the observed maximum is above N. A `floor`
 claim is refused when three times the observation no longer fits inside the
@@ -100,6 +104,20 @@ line and compared with nothing. Jobs gatesplan does not model (gates.yml's
 `plan`) and the jobs of other workflows (ci.yml's `secrets`) have no digest
 and are still matched by name. --observed therefore needs PyYAML; the
 default invocation and --selftest do not.
+
+WHOSE RUNS (2026-10-03). Each file is held to one workflow's report:
+gates.yml's and ci.yml's claims to ci.yml's runs (gates.yml is called from
+ci.yml, so its jobs are ci.yml's), tile.yml's to tile.yml's own, and any
+other file to ci.yml's by name, as before. Until then the audit took one
+report, ci.yml's, and tile.yml's jobs are never in it: for a week every one
+of its eight claims read "no observation in this window" while its shards
+ran past them (980s on main against 827s), and the nightly stayed green. So
+--observed is given once per workflow, and a file whose workflow has no
+report is refused rather than noted, since an omitted report and a quiet
+week otherwise print the same lines. A report with no runs in it (written
+with gate-observations.py --allow-empty) is the quiet week, and is a note
+per claim. tile.yml's jobs are not modelled by gatesplan, so they are
+matched by name.
 
 THE TOTAL. Every rule above is about one job, and one month showed that no
 set of per-job rules holds the sum. Between 2026-08-25 and 2026-09-24 the
@@ -165,6 +183,16 @@ TOTAL_FILES = {"push-total": "gates.yml", "path-total": "tile.yml"}
 # their claims are checked against the 3x rule and not against the pole. Their
 # timeouts are checked like everyone else's.
 POLE_EXEMPT = {"ci.yml", "release.yml"}
+
+# Whose runs each file's claims are held to under --observed. gates.yml is a
+# workflow ci.yml calls, so its jobs run, and are listed, as ci.yml's; tile.yml
+# runs as itself. Any other file is read against ci.yml's runs by name, as it
+# always was. Every workflow named here must arrive as a report of its own:
+# until 2026-10-03 the nightly audit read ci.yml only, and tile.yml's eight
+# claims printed "no observation in this window" every night for a week in
+# which its shards ran up to 980s on main against an 827s claim.
+OBSERVED_FROM = {"ci.yml": "ci.yml", "gates.yml": "ci.yml", "tile.yml": "tile.yml"}
+DEFAULT_SOURCE = "ci.yml"
 
 
 def workflow_path(root, name):
@@ -390,6 +418,60 @@ class ShapedObservations:
             lines.append(f"{count} run(s) of `{then}` count for `{now}`:"
                          " the same steps under another name")
         return lines
+
+
+def load_reports(reports, digests):
+    """[gate-observations.py report] -> {workflow: ShapedObservations}.
+
+    A report says which workflow it read ("workflow"; ci.yml when absent,
+    which is what every report written before 2026-10-03 was). Only the
+    report that gates.yml's jobs arrive through is keyed by steps; the
+    others hold jobs gatesplan does not model, so they are matched by name.
+    Two reports of one workflow are refused: which window wins would be an
+    accident of argument order.
+    """
+    observed = {}
+    for report in reports:
+        workflow = report.get("workflow") or DEFAULT_SOURCE
+        if workflow in observed:
+            raise SystemExit(
+                f"two observation reports read {workflow}; pass one per"
+                " workflow so it is clear which window the claims are held to")
+        keyed = digests if workflow == OBSERVED_FROM[RUN_POLE_FILE] else {}
+        observed[workflow] = ShapedObservations(report, keyed)
+    return observed
+
+
+def audit_observed(texts, observed):
+    """-> (problems, notes) of every file's claims against its own runs.
+
+    `texts` is {file: workflow text}, `observed` what load_reports returns.
+    A file whose source workflow has no report is refused rather than noted:
+    an omitted report looks exactly like a quiet week, every claim reading
+    "no observation", and that is how tile.yml went unaudited. A report with
+    no runs in it (gate-observations.py --allow-empty) is the quiet week, and
+    stays a note per claim.
+    """
+    problems = []
+    notes = []
+    for name, text in texts.items():
+        records = collect_budgets(text, name)
+        if not records:
+            continue
+        source = OBSERVED_FROM.get(name, DEFAULT_SOURCE)
+        if source not in observed:
+            problems.append(
+                f"{name}: its {len(records)} budget line(s) are held to"
+                f" {source} runs, and no {source} report was given, so every"
+                " one of them would read as unobserved. Pass --observed a"
+                f" report from `gate-observations.py --workflow {source}"
+                " --allow-empty` as well")
+            continue
+        found, said = check_observed(
+            records, observed[source].for_file(name), name)
+        problems.extend(found)
+        notes.extend(said)
+    return problems, notes
 
 
 def current_digests():
@@ -780,6 +862,65 @@ jobs:
     except SystemExit:
         print("  refused: a report written before steps digests existed")
 
+    # 2026-10-03: whose runs a file is held to. tile.yml's jobs never appear
+    # in ci.yml's runs, so with ci.yml's report alone every tile.yml claim
+    # read "no observation" and the audit stayed green over shards that ran
+    # past them. The first case reproduces that reading, so the cases after
+    # it are known to be about the fix and not about a blind spot that went
+    # away by itself.
+    tile_text = """\
+jobs:
+  shard:
+    # budget: 3x 827s planning value
+    timeout-minutes: 42
+"""
+    ci_report = shaped(current_run)
+
+    def tile_report(seconds):
+        return {"workflow": "tile.yml",
+                "per_run": [{"id": 9, "jobs": {"shard": seconds}, "steps": {}}]}
+
+    alone = ShapedObservations(ci_report, today)
+    blind_found, blind_notes = check_observed(
+        collect_budgets(tile_text, "tile.yml"), alone.for_file("tile.yml"),
+        "tile.yml")
+    if blind_found or len(blind_notes) != 1:
+        failures.append(
+            "ci.yml's runs alone no longer read a tile.yml claim as unobserved;"
+            " the cases below no longer show what they claim to")
+    else:
+        print("  shown: ci.yml's runs alone read a tile.yml claim as unobserved")
+    source_files = {RUN_POLE_FILE: shaped_text, "tile.yml": tile_text}
+    source_cases = [
+        # (label, reports, want red, text a refusal must carry)
+        ("a tile.yml claim under its own run, ci.yml's report beside it",
+         [ci_report, tile_report(980)], True, "declares 827s but ran 980s"),
+        ("the tile.yml report left out",
+         [ci_report], True, "no tile.yml report was given"),
+        ("the ci.yml report left out",
+         [tile_report(800)], True, "no ci.yml report was given"),
+        ("a tile.yml run within its claim",
+         [ci_report, tile_report(800)], False, None),
+        ("a week with no tile.yml run (an --allow-empty report)",
+         [ci_report, {"workflow": "tile.yml", "per_run": []}], False, None),
+    ]
+    for label, reports, want_red, says in source_cases:
+        found, _notes = audit_observed(
+            source_files, load_reports(reports, today))
+        if bool(found) != want_red or (
+                says is not None and not any(says in f for f in found)):
+            failures.append(
+                f"per-workflow audit: {label}: expected"
+                f" {'red with ' + repr(says) if want_red else 'green'},"
+                f" got {found or 'green'}")
+        else:
+            print(f"  {'refused' if want_red else 'accepted'}: {label}")
+    try:
+        load_reports([ci_report, tile_report(800), tile_report(900)], today)
+        failures.append("two tile.yml reports were both accepted")
+    except SystemExit:
+        print("  refused: two reports of one workflow")
+
     # The totals. The clean tree is two files, each carrying its own line and
     # claims under it; every mutant moves one thing, and the claim that pushes
     # the sum over is the one a new job would be.
@@ -854,7 +995,8 @@ jobs:
         return 1
     count = (len(mutants) + len(pole_mutants) + len(observed_mutants)
              + len(totals_mutants)
-             + sum(1 for case in shaped_cases if case[4]) + 1)
+             + sum(1 for case in shaped_cases if case[4]) + 1
+             + sum(1 for case in source_cases if case[2]) + 1)
     print(f"selftest: {count} mutant(s) refused, clean inputs accepted")
     return 0
 
@@ -865,9 +1007,11 @@ def main():
     ap.add_argument(
         "--observed",
         type=Path,
+        action="append",
         default=None,
-        help="a scripts/gate-observations.py report; refuse every claim under"
-        " the maximum it records (manual audit, not run in CI)",
+        help="a scripts/gate-observations.py report, once per workflow (ci.yml"
+        " and tile.yml); refuse every claim under the maximum its own"
+        " workflow's report records (the nightly audit, not run on a push)",
     )
     args = ap.parse_args()
 
@@ -876,16 +1020,21 @@ def main():
         return selftest(root)
 
     observations = None
-    if args.observed is not None:
-        report = json.loads(args.observed.read_text(encoding="utf-8"))
-        observations = ShapedObservations(report, current_digests())
-        print(
-            f"observations: {len(report['jobs'])} job name(s) over"
-            f" {observations.runs} run(s)"
-            f" ({report.get('oldest_run_created', '?')}"
-            f" .. {report.get('newest_run_created', '?')}),"
-            f" held to claims by steps digest"
-        )
+    if args.observed:
+        reports = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in args.observed]
+        observations = load_reports(reports, current_digests())
+        for report in reports:
+            workflow = report.get("workflow") or DEFAULT_SOURCE
+            keyed = ("by steps digest"
+                     if workflow == OBSERVED_FROM[RUN_POLE_FILE] else "by name")
+            print(
+                f"observations: {workflow}: {len(report['jobs'])} job name(s)"
+                f" over {observations[workflow].runs} run(s)"
+                f" ({report.get('oldest_run_created', '?')}"
+                f" .. {report.get('newest_run_created', '?')}),"
+                f" held to claims {keyed}"
+            )
 
     workflows, skipped = budgeted_workflows(root)
     if skipped:
@@ -908,19 +1057,19 @@ def main():
     problems = list(pole_problems)
     notes = []
     checked = 0
+    budgeted = {}
     for name in workflows:
         path = workflow_path(root, name)
         checked += 1
         text = path.read_text(encoding="utf-8")
+        budgeted[name] = text
         problems.extend(check_text(text, name))
         if pole is not None and name not in POLE_EXEMPT:
             problems.extend(check_claims_under_pole(text, name, pole))
-        if observations is not None:
-            found, said = check_observed(
-                collect_budgets(text, name), observations.for_file(name), name
-            )
-            problems.extend(found)
-            notes.extend(said)
+    if observations is not None:
+        found, said = audit_observed(budgeted, observations)
+        problems.extend(found)
+        notes.extend(said)
 
     if not checked:
         print("no workflow files found -- this check saw nothing", file=sys.stderr)
@@ -930,8 +1079,11 @@ def main():
     for note in notes:
         print(f"note: {note}")
     if observations is not None:
-        for line in observations.summary():
-            print(f"note: {line}")
+        for workflow, seen in sorted(observations.items()):
+            if workflow != OBSERVED_FROM[RUN_POLE_FILE]:
+                continue  # matched by name: no shape to have left anything out
+            for line in seen.summary():
+                print(f"note: {workflow}: {line}")
     if problems:
         for problem in problems:
             print(problem, file=sys.stderr)
