@@ -19,7 +19,7 @@ use front/parser
 use front/lexer
 use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of}
-use check/tast.{TExpr, TFun, XError}
+use check/tast.{TExpr, TFun, TModule, XError}
 use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
 use ir/core.{
   CValue, VInt, VBool, VStr, VList, VAdt, CCall, CDirect, CImpl, CDefault,
@@ -28,7 +28,8 @@ use ir/core.{
 use ir/lower
 use ir/interp.{
   eval_comptime, eval_module, program_sigs, note_direct_fn, note_trait_fn, ct_fuel, ct_default,
-  ct_native,
+  ct_native, eval_closed, ct_hover, HOVER_FUEL, HOVER_DEPTH, CtOpts, CtOut, CtWorld, ConstScope,
+  ct_world_empty, ct_world_add, eval_comptime_in,
 }
 
 fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
@@ -1032,4 +1033,151 @@ test "case mapping, slicing and quoting a String pay for what they produce" {
   assert charged("std/t", "", "some(str_upper(s))", 40)
   assert charged("std/t", "", "some(cursor_slice(s, 1, 1024))", 40)
   assert charged("m", "", "some(q(s))", 40)
+}
+
+# ---- eval_closed: one expression, for an editor (docs/lsp-hover-design.md, C5) ----
+
+## A module checked on its own and folded the way the build folds it, with
+## everything `eval_closed` needs to fold one more expression in it.
+type Closed = {
+  tm: TModule,
+  cx: Cx,
+  ct: CtOut,
+  world: CtWorld,
+  scope: ConstScope,
+  # what a module importing this one sees of it
+  exp: ModExports
+}
+
+fn no_imports(path: String) -> ConstScope = {
+  let none: Map[String, String] = map.empty()
+  ConstScope { path: path, imported: none, renames: none }
+}
+
+## Check `src` as module `name` against `env`, and run its comptime at the
+## build's budget inside `world`.
+fn closed_mod(name: String, src: String, env: Map[String, ModExports], world: CtWorld) -> Closed !io = {
+  let (m, pdiags) = parser.parse_module(src)
+  let (cx1, tm) = check_module(cx_new(Some(name), Some(name ++ ".dawn")), m, env)
+  # a source that does not check is a broken test, never a passing one
+  if len(pdiags) > 0 || len(cx1.diags) > 0 { panic("the test module `" ++ name ++ "` was rejected") }
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let scope = no_imports(name)
+  let ct = eval_comptime_in(tm, world, scope, no_fns, no_owner, no_impls(), set.empty(),
+    cx1.adts, cx1.traits, cx1.impl_table, name, ct_default())
+  if len(ct.diags) > 0 { panic("the test module `" ++ name ++ "` did not fold") }
+  Closed { tm: tm, cx: cx1, ct: ct, world: world, scope: scope,
+    exp: exports_of(cx1, m, name, name) }
+}
+
+## The body of the function `name`: the expression a test points the editor
+## entry at. A function body rather than a const initializer, so the build's
+## own run never folds it and only `eval_closed` decides what it costs.
+fn body_of(tm: TModule, name: String) -> TExpr = {
+  for f in tm.fns {
+    if f.name == name { return f.body }
+  }
+  panic("no function `" ++ name ++ "` in the test module")
+}
+
+fn fold_closed(c: Closed, owner: String, e: TExpr, opts: CtOpts) -> Result[CValue, String] !io = {
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  eval_closed(c.tm, c.world, c.scope, c.ct, no_fns, no_owner, no_impls(), set.empty(), c.cx.adts,
+    c.cx.traits, c.cx.impl_table, owner, e, opts)
+}
+
+const CLOSED_SRC: String = "fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }\n" ++
+  "fn spin(n: Int) -> Int = {\n" ++
+  "  var i = 0\n" ++
+  "  while i < n { i = i + 1 }\n" ++
+  "  i\n" ++
+  "}\n" ++
+  "const BASE: Int = 7\n" ++
+  "fn value() -> Int = down(10) + BASE\n" ++
+  "fn block() -> Int = comptime { down(3) } * 2\n" ++
+  "fn busy() -> Int = spin(50000)\n" ++
+  "fn deep() -> Int = down(1600)\n" ++
+  "fn calls_bad() -> Int = bad() + 1\n" ++
+  "fn bad() -> Int = 1\n"
+
+test "the editor budget is one answer on both compilers, under the host's depth" {
+  let jvm = ct_hover(ct_default())
+  let native = ct_hover(ct_native())
+  assert jvm == native
+  assert jvm.fuel == HOVER_FUEL
+  assert jvm.depth == HOVER_DEPTH
+  assert HOVER_FUEL == 100000
+  assert HOVER_DEPTH == 1500
+  # the native compiler's stack is the one that bounds both
+  assert HOVER_DEPTH <= ct_native().depth
+  # and a host shallower than the editor budget keeps its own limit
+  assert ct_hover(CtOpts { fuel: 5, depth: 10 }) == CtOpts { fuel: HOVER_FUEL, depth: 10 }
+}
+
+test "an editor fold answers what a comptime block in the module would" {
+  let c = closed_mod("m", CLOSED_SRC, map.empty(), ct_world_empty())
+  let hover = ct_hover(ct_default())
+  # a call into the module and a const the module's run folded
+  assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(VInt(17))
+  # a comptime block inside the expression reads the value the run kept
+  assert fold_closed(c, "m", body_of(c.tm, "block"), hover) == Ok(VInt(6))
+}
+
+test "an editor fold that runs out of fuel or depth is an Err, not a diagnostic" {
+  let c = closed_mod("m", CLOSED_SRC, map.empty(), ct_world_empty())
+  let hover = ct_hover(ct_default())
+  let busy = body_of(c.tm, "busy")
+  assert fold_closed(c, "m", busy, hover) ==
+    Err("fuel exhausted — evaluation did not finish within the step budget")
+  # the same expression with more fuel: it was the budget, not the expression
+  assert fold_closed(c, "m", busy, CtOpts { ..hover, fuel: 10000000 }) == Ok(VInt(50000))
+  let deep = body_of(c.tm, "deep")
+  assert fold_closed(c, "m", deep, hover) == Err("call depth limit (1500) exceeded")
+  assert fold_closed(c, "m", deep, CtOpts { ..hover, depth: 1700 }) == Ok(VInt(1600))
+}
+
+test "an editor fold calls another module's pure function through the world" {
+  let lib = closed_mod("lib", "pub fn doubled(n: Int) -> Int = n * 2\n", map.empty(),
+    ct_world_empty())
+  let world = ct_world_add(ct_world_empty(), "lib", no_imports("lib"), lib.tm, lib.ct.consts, true)
+  let c = closed_mod("app", "use lib\nfn probe() -> Int = lib.doubled(21)\n",
+    map.from([("lib", lib.exp)]), world)
+  let e = body_of(c.tm, "probe")
+  assert fold_closed(c, "app", e, ct_hover(ct_default())) == Ok(VInt(42))
+  # without the world the call has nowhere to go, and says so as an Err
+  let alone = Closed { ..c, world: ct_world_empty() }
+  match fold_closed(alone, "app", e, ct_hover(ct_default())) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+}
+
+fn lowering_panic(r: Result[CValue, String]) -> Bool =
+  match r {
+    Ok(_) -> false
+    Err(reason) ->
+      str.starts_with(reason, "panic: lower: XError reached lowering at src/ir/lower.dawn:")
+  }
+
+test "a lowering panic inside an editor fold comes back as an Err" {
+  # scripts/comptime-eval-closed-contract removes the barrier and requires
+  # this test to fail on the raw panic: the half that says the barrier holds
+  let c = closed_mod("m", CLOSED_SRC, map.empty(), ct_world_empty())
+  let hover = ct_hover(ct_default())
+  # the expression itself: lowering it panics before the interpreter starts.
+  # The reason keeps the panic's call site (` at src/ir/lower.dawn:L:C`), the
+  # place a bug report needs; only the file is pinned, since L:C moves with
+  # every edit to lowering
+  assert lowering_panic(fold_closed(c, "m", XError(3, 4), hover))
+  # a body the interpreter lowers on demand: the panic comes from inside the run
+  var fns: List[TFun] = []
+  for f in c.tm.fns {
+    fns = fns ++ [if f.name == "bad" { TFun { ..f, body: XError(5, 6) } } else { f }]
+  }
+  let poisoned = Closed { ..c, tm: TModule { ..c.tm, fns: fns } }
+  assert lowering_panic(fold_closed(poisoned, "m", body_of(c.tm, "calls_bad"), hover))
+  # and the entry is still usable afterwards: nothing was kept
+  assert fold_closed(c, "m", body_of(c.tm, "value"), hover) == Ok(VInt(17))
 }
