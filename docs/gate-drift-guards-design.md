@@ -5,6 +5,7 @@
 > 2026-09-25 追加「总量棘轮」一节（门禁总量调研推荐的 (a1)+(c)，用户同日批准）：push-total / path-total 上限、`Gate-Budget` / `Gate-Retire` 声明、nightly 总量报表。
 > 2026-09-26 追加「棘轮第二轮」一节：nightly 点名的五条欠声明里四条贴 pole，按 #166 的先例拆片（#242）。
 > 2026-09-26 再追加「审计按 steps 摘要认祖先」一节（#244）：观测按 job 的 `run:` 多重集摘要归属，不按名字；第二轮写进 gates.yml 头注的改名规则随之撤掉。
+> 2026-10-03 追加「审计读 tile.yml」一节：nightly 审计此前只读 ci.yml，tile.yml 的 8 条声明一周没被比过；现在每个 workflow 一份观测报告，缺报告即红。
 
 三条要治的是同一种病：门禁判断「这个提交对不对」时依赖一份手写的参照物（源码里的一段字面量、`# budget:` 行里的秒数、一个钉住的外部提交），
 参照物自己过期时门禁**仍然是绿的**。每一条都补一个「参照物过期即红」的检查，并且都放在不会误伤 push 的位置。
@@ -447,3 +448,50 @@ nightly 审计（run 36232986458，50 次 main 运行，09-19T11:23Z 到 09-26T0
 - **tile 率的分母只数碰了 tile 路径的 push**：凡是碰了都会触发，比率恒等于 100%。
 - **tile job 秒 / ci job 秒 的量纲一致比值**：可作为以后的补充；本刀按裁决保留 20% 的触发率限值。
 - **比值用今天的 push-total 一个数**：上周的运行跑在上周的声明下，拿今天的数去除，比值的周环比就退化成中位的周环比。
+
+## 审计读 tile.yml（2026-10-03）
+
+调研与裁决在 `agent-handoff/research-ci-pole-report-20261003.md` 与 `ruling-ci-pole-20261003.md`（本机，不进仓）。本节只记落地的做法与数字。
+
+**盲区。** 9(b) 的 nightly 审计只把 ci.yml 的观测喂给 `check-gate-budgets.py --observed`。gates.yml 是 ci.yml 调用的 workflow，它的 job 就是 ci.yml 的 job，所以能比；
+tile.yml 自己单独跑，它的 job 从不出现在 ci.yml 的运行里。于是 tile.yml 的 8 条声明（dedupe 加七片 tile-golden）每晚都只打印
+`no observation in this window`，退出码不受影响。同一周七片的声明都是 827 s 的 planning value，main 上实测最坏 918–1052 s，审计一直是绿的。
+nightly 的总量报表（上一节）倒是读了 tile.yml，但它只算总量与触发率，不比单条声明。
+
+**做法。**
+
+- `check-gate-budgets.py --observed` 可以给多次，每次一份 `gate-observations.py` 报告；报告自带 `"workflow"` 字段（旧报告没有时按 ci.yml 读）。
+- 每个文件只比它自己那个 workflow 的报告（`OBSERVED_FROM`）：gates.yml 与 ci.yml 比 ci.yml 的报告，tile.yml 比 tile.yml 的报告，其余文件照旧按名字比 ci.yml 的报告。
+  只有 ci.yml 的报告按 steps 摘要认祖先（上一节 #244 的规则只对 gates.yml 建模的 job 有意义）；tile.yml 的 job 不在 gatesplan 里，按名字匹配。
+  这条规则原本就写在 `check-gate-budgets.py` 头注里（未建模的 job 按名字），实跑确认 8 条声明全部对上了观测（dedupe 309 s，七片 918–1052 s）。
+- **缺报告即红。** 某个文件有预算行、而它那个 workflow 没有报告，就判红并点名该补哪条 `gate-observations.py --workflow <wf> --allow-empty`。
+  漏传的报告与一个安静的星期打印出来的东西一模一样（每条都是 no observation），这正是盲区持续一周的原因。没有运行的报告（`--allow-empty`）才是安静的星期，仍然只记 note。
+- 同一个 workflow 给两份报告也判红：哪个窗口生效不能取决于参数顺序。
+- `nightly.yml` 的审计步多读一次 `--workflow tile.yml --allow-empty`（同样 7 天、`--runs 150`），两份报告一起传给审计。
+
+**自测（`--selftest`，在 tree-policy 里每次 push 跑）。** 新增 7 个用例：先复现旧读法（只有 ci.yml 的报告时，tile.yml 的一条 827 s 声明对着自己 980 s 的运行仍只是 note），
+再证明修复：两份报告时红；去掉 tile.yml 报告时红（点名缺 tile.yml 报告）；去掉 ci.yml 报告时红；tile 运行在声明内、tile 报告为空时都绿；同一 workflow 两份报告时拒绝。
+变异体负控：把 `OBSERVED_FROM` 里 tile.yml 改回读 ci.yml，自测两条红；把缺报告从红降成 note，自测两条红。
+
+**真数据（本机，2026-10-03，7 天窗口 09-26T12:49Z .. 10-03T11:22Z）。** ci.yml 134 次运行、tile.yml 57 次运行。
+
+- 修复前的脚本（origin/main）同样两份数据只读 ci.yml：gates.yml 五条红，tile.yml 9 行全是 `no observation`。
+- 修复后：gates.yml 那五条（下面的补述之前）加 tile-golden-1..7 七条红：983 / 1052 / 1009 / 1000 / 1048 / 936 / 918 s，对 827 s 声明。dedupe 与 tile-shards-complete 在声明内。
+  只给 ci.yml 的报告时，审计不再静默，而是报「no tile.yml report was given」。
+- 同提交里 gates.yml 五条按「7 天最坏 + 十分之一，进到 5 s」补述，timeout 取 3 倍：incremental-memo-3 515 → 830 s（最坏 754 s，run 36906542838，慢 runner，各步约为中位的 1.7 倍）、
+  docs 380 → 490 s（443 s）、test-compiler 375 → 425 s（384 s）、wasm-target 330 → 380 s（343 s）、compiler-weight-contract 255 → 285 s（259 s）。
+  push-total 15,733 → 16,288 s（+555 s，提交里带 `Gate-Budget(push-total)` 行）。最高声明仍是 incremental-memo-3 的 830 s，距 pole 120 s，不需要拆片。
+  补述后同一份数据上 gates.yml 一条不红，只剩 tile 七片。
+- tile.yml 的声明本刀不改：诚实声明是 1,052 × 1.1 ≈ 1,160 s，静态检查当场越 pole。合入后第一晚 #274 会把 tile 七片报出来，这是预期的；
+  收敛靠裁决里的刀 C（mutant 构建降优化级后按观测重述），不靠抬 pole。
+
+**墙钟。** push 路径为零：`check-gate-budgets.py` 的默认调用不读报告，tree-policy 只多跑 7 个自测用例（毫秒级）。
+nightly 的审计步多一次 tile.yml 读取，本机慢链路实测 1 分 40 秒（57 次运行；同链路上 ci.yml 的 134 次运行要 7 分 01 秒），两份报告一起比对 0.13 s。
+`budget-observations` 的 30 分钟 timeout 是失控上限，不变。
+
+### 不做的（理由）
+
+- **把 tile.yml 的观测并进 ci.yml 的报告再按名字查**：两边 job 名今天不冲突，但任何一个同名 job 都会让一个文件的声明被另一个 workflow 的运行判，而且仍然看不出报告漏传。
+- **审计 tile.yml 的 PR 运行**：一周 tile 的 job 秒三分之二在 PR 上，但声明的口径一直是 main 上的运行（`--branch main`），改口径要另裁。
+- **在 tile.yml 头注里同步写一段**：改 tile.yml 会触发七片 tile 运行，而这一刀不动它的任何声明；头注留给刀 C 重述 claim 时一起改。
+
