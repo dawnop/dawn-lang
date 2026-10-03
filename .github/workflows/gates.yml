@@ -299,6 +299,8 @@ name: gates
 # eval_closed barrier mutant (+60s planning value, one compiling mutant).
 # The same day it went up to 16,460s: lsp-workspace gained the
 # resolution-coverage step (+112s planning value, docs/lsp-references-design.md).
+# The same day it went up to 16,538s: lsp-workspace gained the
+# semantic-tokens step (+78s planning value, docs/lsp-references-design.md §T1).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -322,7 +324,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 16460s (the most this file's `3x` claims may add up to)
+# push-total: 16538s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2386,8 +2388,11 @@ jobs:
     # mutant builds. Planning allowance, as for source-resolution above:
     # 605 + 2 * 56 = 717s, timeout 3x that. Restate from the observation once
     # the step has a week of main runs.
-    # budget: 3x 717s planning allowance (605s worst observed, run 36680145356, plus 2 x 56s)
-    timeout-minutes: 36
+    # 2026-10-04: the semantic-tokens step (T1 of the same design) took 39s
+    # locally, its positive and four mutant builds: 717 + 2 * 39 = 795s,
+    # timeout 3x that. Restated with the one above.
+    # budget: 3x 795s planning allowance (605s worst observed, run 36680145356, plus 2 x 56s and 2 x 39s)
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2467,6 +2472,16 @@ jobs:
       # turn their own case red. 56s locally (2026-10-04).
       - name: lsp resolution coverage and mutants
         run: ./scripts/lsp-resolution-coverage.py --mutants
+
+      # What kind semanticTokens gives each name, token by token
+      # (docs/lsp-references-design.md §T1): the two programs above, a range
+      # inside one declaration, a line with characters past the BMP ahead of
+      # its names. selfhost-lsp-diff.sh only sees that the reply changed;
+      # the previous release has none. Four mutants, each built from a
+      # private selfhost copy, must turn their own case red. 39s locally
+      # (2026-10-04).
+      - name: lsp semantic tokens and mutants
+        run: ./scripts/lsp-semantic-tokens.py --mutants
 
       # Analysis and completion must consume one captured source plan. Both
       # fail-closed edges carry compiling mutants: loader replanning and LSP

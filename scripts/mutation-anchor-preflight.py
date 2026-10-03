@@ -41,6 +41,7 @@ ADAPTERS = {
     "list-elems-contract": (".",),
     "lsp-lifecycle-contract": (".",),
     "lsp-resolution-coverage": (".",),
+    "lsp-semantic-tokens": (".",),
     "map-reuse-contract": (".",),
     "narrow-contract": (".",),
     "lsp-workspace-contract": ("selfhost",),
