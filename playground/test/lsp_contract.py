@@ -652,6 +652,101 @@ def remote_restart_contract():
     ok("attempt-count, retry-bound, timeout and health-ceiling mutants turn red")
 
 
+NATIVE_GUARD_START = 'NATIVE_VERSION=$("$NATIVE_BIN" version)\n'
+NATIVE_GUARD_VERSION = "0.83.0"
+# (what `dawnc version` prints, whether the guard must let the deploy go on).
+# Since the build digest landed, `dawnc version` appends ` b1:<12 hex>`; an
+# artifact built before that prints the bare line. Both are this tree's
+# version. The suffix, when present, is exact: anything else in that slot is
+# not a build digest and the guard has no business reading past it.
+NATIVE_GUARD_CASES = (
+    ("dawnc 0.83.0 (native) b1:2bfef5fb3622", True),
+    ("dawnc 0.83.0 (native)", True),
+    ("dawnc 0.82.0 (native) b1:2bfef5fb3622", False),
+    ("dawnc 0.82.0 (native)", False),
+    ("dawnc 0x83y0 (native)", False),
+    ("dawnc 0.83.0 (native) b1:2BFEF5FB3622", False),
+    ("dawnc 0.83.0 (native) b1:2bfef5fb36", False),
+    ("dawnc 0.83.0 (native) b1:2bfef5fb36220", False),
+    ("dawnc 0.83.0 (native) b1:2bfef5fb362g", False),
+    ("dawnc 0.83.0 (native) b1:", False),
+    ("dawnc 0.83.0 (native) b1:2bfef5fb3622 extra", False),
+    ("dawnc 0.83.0 (native)  b1:2bfef5fb3622", False),
+    ("dawnc 0.83.0 (native) b2:2bfef5fb3622", False),
+    ("", False),
+)
+
+
+def native_guard_block(redeploy):
+    """The version guard of redeploy.sh, from the `dawnc version` call to its `fi`."""
+    start = redeploy.index(NATIVE_GUARD_START)
+    end = redeploy.index("\nfi\n", start) + len("\nfi\n")
+    return redeploy[start:end]
+
+
+def run_native_guard(block, printed):
+    with tempfile.TemporaryDirectory(prefix="dawn-native-guard-") as temp:
+        stub = os.path.join(temp, "dawnc")
+        with open(stub, "w", encoding="utf-8") as stream:
+            stream.write('#!/bin/sh\nprintf "%s\\n" "$PRINTED"\n')
+        os.chmod(stub, 0o755)
+        script = (
+            "set -euo pipefail\n"
+            f"NATIVE_BIN={shlex.quote(stub)}\n"
+            f"VERSION={NATIVE_GUARD_VERSION}\n"
+            + block
+            + "echo GUARD_PASSED\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": "/usr/bin:/bin", "PRINTED": printed},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=3,
+        )
+    return result
+
+
+def assert_native_guard(block):
+    for printed, passes in NATIVE_GUARD_CASES:
+        result = run_native_guard(block, printed)
+        passed = result.returncode == 0 and result.stdout.endswith("GUARD_PASSED\n")
+        assert passed == passes, (printed, passes, result.returncode, result.stdout)
+        if not passes:
+            assert result.returncode == 1, (printed, result.returncode, result.stdout)
+            assert "error: native artifact says" in result.stdout, (printed, result.stdout)
+
+
+def native_version_guard_contract():
+    """Run redeploy.sh's native version guard against stubbed `dawnc version`.
+
+    The guard used to compare the whole line to `dawnc <V> (native)`; once the
+    binary started printing its build digest after that, every deploy stopped
+    there. Running the guard's own text keeps the test about the shipped code.
+    """
+    block = native_guard_block(read_text(os.path.join(DEPLOY, "redeploy.sh")))
+    assert_native_guard(block)
+    ok("native version guard accepts this version with or without an exact b1 digest")
+
+    # The guard as it stood before the digest: one whole-line comparison.
+    whole_line = (
+        NATIVE_GUARD_START
+        + 'if [ "$NATIVE_VERSION" != "dawnc $VERSION (native)" ]; then\n'
+        + "  echo \"error: native artifact says '$NATIVE_VERSION'\" >&2\n"
+        + "  exit 1\n"
+        + "fi\n"
+    )
+    any_tail = mutate_once(
+        block, "^\\ b1:[0123456789abcdef]{12}$", "^\\ b1:"
+    )
+    any_length = mutate_once(block, "{12}$", "+$")
+    expect_contract_red("whole-line guard", lambda: assert_native_guard(whole_line))
+    expect_contract_red("unchecked digest", lambda: assert_native_guard(any_tail))
+    expect_contract_red("any digest length", lambda: assert_native_guard(any_length))
+    ok("whole-line, unchecked-digest and digest-length guard mutants turn red")
+
+
 def measurement_evidence_contract():
     """Keep the checked-in 10x development evidence complete and public-safe."""
     with open(MEASUREMENT, encoding="utf-8", newline="") as stream:
@@ -717,6 +812,7 @@ def measurement_evidence_contract():
 def main():
     deployment_contract()
     remote_restart_contract()
+    native_version_guard_contract()
     measurement_evidence_contract()
     diagnostics_params_contract()
     port = free_port()

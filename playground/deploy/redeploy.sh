@@ -37,8 +37,14 @@ if [ ! -x "$NATIVE_BIN" ]; then
 fi
 VERSION=$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' selfhost/src/version.dawn)
 NATIVE_VERSION=$("$NATIVE_BIN" version)
-if [ "$NATIVE_VERSION" != "dawnc $VERSION (native)" ]; then
-  echo "error: native artifact says '$NATIVE_VERSION', expected dawnc $VERSION (native)" >&2
+# A binary that carries a build manifest appends its digest, ` b1:<12 hex>`;
+# one built without it prints the bare line. Either is this tree's version.
+# The digest is matched exactly, so a malformed tail still stops the deploy;
+# the hex digits are spelled out because a range follows the locale's order.
+NATIVE_BUILD=${NATIVE_VERSION#"dawnc $VERSION (native)"}
+if [ "$NATIVE_BUILD" = "$NATIVE_VERSION" ] ||
+    ! [[ -z "$NATIVE_BUILD" || "$NATIVE_BUILD" =~ ^\ b1:[0123456789abcdef]{12}$ ]]; then
+  echo "error: native artifact says '$NATIVE_VERSION', expected dawnc $VERSION (native) [b1:<12 hex>]" >&2
   exit 1
 fi
 
