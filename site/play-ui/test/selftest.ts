@@ -263,7 +263,12 @@ expect('a plain-text hover is all code', hoverParts({ kind: 'plaintext', value: 
 // names a path on the Playground's server and does not reach the tooltip
 expect('a resolved doc link keeps its code and drops its target',
   hoverParts('```dawn\nfn f() -> Int\n```\n\n---\n\nSee [`g`](file:///srv/play/main.dawn#L3,4) and [`h`].').doc,
-  'See `g` and [`h`].')
+  'See `g` and `h`.')
+// one the server left as written (the Playground's std is compiled in and has
+// no file to link to) loses its brackets the same way
+expect('an unresolved doc link keeps its code and drops its brackets',
+  hoverParts('```dawn\nfn len(s: String) -> Int\n```\n\n---\n\nCounts what [`code_points`] yields; see [`str.take`].').doc,
+  'Counts what `code_points` yields; see `str.take`.')
 
 // ---- inlay hints (docs/lsp-hover-design.md §A4) ----
 expect('an inlay hint keeps its label, kind and the padding that is on', inlayHintOf({
