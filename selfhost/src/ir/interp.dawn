@@ -160,6 +160,34 @@ pub fn ct_native() -> CtOpts = CtOpts { ..ct_default(), depth: NATIVE_CALL_DEPTH
 ## a comptime run bounded well below a real compile's).
 pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel: n }
 
+## What an editor may spend folding one expression it was pointed at
+## (docs/lsp-hover-design.md, C5): far below a build's budget, because the
+## answer is wanted while the user waits and a refusal costs nothing. Both
+## numbers are the same on the JVM and native compilers, so the same code
+## shows the same value in VS Code and in the Playground.
+##
+## They live here rather than in lsp/ because the depth is a claim about the
+## interpreter's host stack, not about editors: it may not exceed
+## NATIVE_CALL_DEPTH, and it is this module that knows what the stack holds.
+## lsp/ imports from here already (`ct_default`); a constant there would put
+## the number one layer away from the limit it answers to. Every editor
+## caller (hover now, the default-argument inlay later) takes them through
+## `ct_hover`.
+##
+## 10^5 steps: on the 996 hover points of the examples corpus it shows one
+## value fewer than 10^6, and its worst case is about 15 ms hot on the JVM and
+## 40 ms on native, where 10^6 costs 360 ms.
+pub(pkg) const HOVER_FUEL: Int = 100000
+
+## 1,500 nested calls: the native compiler's limit, so the JVM answers no
+## deeper than the native one can.
+pub(pkg) const HOVER_DEPTH: Int = 1500
+
+## The editor budget on a given host. The depth also stays under the host's
+## own: equal on both today, and the smaller of the two if they ever part.
+pub(pkg) fn ct_hover(host: CtOpts) -> CtOpts =
+  CtOpts { fuel: HOVER_FUEL, depth: if host.depth < HOVER_DEPTH { host.depth } else { HOVER_DEPTH } }
+
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
 type ICx = {
@@ -2540,7 +2568,14 @@ pub(pkg) fn eval_module(
   eval_module_in(tm, ct_world_empty(), alone(owner), std_fns, by_owner, std_impl_fns,
     std_names, adts, traits, impls, owner, opts)
 
-fn eval_module_in(
+## The context every fold in one module starts from: the module's own
+## functions over std's, the owner each flat name came from, the signature and
+## impl tables lowering consults, and the world before the module. Nothing in
+## it depends on what the module has folded so far; the run fills `consts` and
+## `blocks` in as it goes, and `eval_closed` with what a finished run produced.
+## One assembly for both, so an expression folded for an editor resolves a
+## call the way the same expression in a `comptime` block would.
+fn module_icx(
   tm: TModule,
   world: CtWorld,
   scope: ConstScope,
@@ -2552,9 +2587,8 @@ fn eval_module_in(
   traits: Traits,
   impls: Impls,
   owner: String,
-  opts: CtOpts
-) -> CtRun !io = {
-  let fuel = opts.fuel
+  depth: Int
+) -> ICx = {
   # std is implicitly visible, so a const may call it; a local definition
   # still shadows it, matching the checker's local → std → builtin order
   var fns = std_fns
@@ -2590,20 +2624,16 @@ fn eval_module_in(
   # this module's own impl methods and trait defaults join std's
   var impl_fns = std_impl_fns
   for f in tm.fns { impl_fns = note_trait_fn(impl_fns, owner, f) }
-  let empty_c: Map[String, CValue] = map.empty()
-  let empty_b: Map[(Int, Int), CValue] = map.empty()
-  var run = CtRun {
-    out: CtOut { diags: [], consts: empty_c, blocks: empty_b, reads: set.empty(), missed: false },
-    cache: empty_cache()
-  }
-  let base = ICx {
+  let no_consts: Map[String, CValue] = map.empty()
+  let no_blocks: Map[(Int, Int), CValue] = map.empty()
+  ICx {
     fns: fns,
     by_owner: std_owners,
     owner_of: owner_of,
     std_names: std_names,
     adts: adts,
-    consts: empty_c,
-    blocks: empty_b,
+    consts: no_consts,
+    blocks: no_blocks,
     owner: owner,
     traits: traits,
     impls: impls,
@@ -2613,8 +2643,33 @@ fn eval_module_in(
     world: world,
     scope: scope,
     body: owner,
-    max_depth: opts.depth
+    max_depth: depth
   }
+}
+
+fn eval_module_in(
+  tm: TModule,
+  world: CtWorld,
+  scope: ConstScope,
+  std_fns: Map[String, TFun],
+  std_owners: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
+  std_names: Set[String],
+  adts: Adts,
+  traits: Traits,
+  impls: Impls,
+  owner: String,
+  opts: CtOpts
+) -> CtRun !io = {
+  let fuel = opts.fuel
+  let empty_c: Map[String, CValue] = map.empty()
+  let empty_b: Map[(Int, Int), CValue] = map.empty()
+  var run = CtRun {
+    out: CtOut { diags: [], consts: empty_c, blocks: empty_b, reads: set.empty(), missed: false },
+    cache: empty_cache()
+  }
+  let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
+    traits, impls, owner, opts.depth)
   for c in tm.consts {
     # a comptime block inside the initializer folds first
     run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
@@ -2643,6 +2698,76 @@ fn eval_module_in(
   }
   CtRun { ..run, out: CtOut { ..run.out, reads: run.cache.reads, missed: run.cache.missed } }
 }
+
+## Fold one closed expression of a checked module, outside any `comptime`
+## block: what an editor shows for the expression under the cursor
+## (docs/lsp-hover-design.md, C5). `e` must name nothing bound outside itself
+## and call nothing with an effect; the caller decides that, since only it has
+## the source positions to decide by. The rest of the context is the one the
+## module's own run had (`module_icx`): its functions, the world before it,
+## and, from `ct`, the constants and comptime blocks that run folded. So `e`
+## means here what it would mean inside a `comptime` block in that module.
+##
+## The budget is the caller's (`ct_hover` for an editor), and every way the
+## fold can fail comes back as `Err(reason)`: the reason is one line, without
+## the `comptime: ` prefix a build diagnostic carries. That includes a panic.
+## Lowering reports a broken invariant by panicking (ARC-06), and so does the
+## interpreter, and in a build that is right: the compiler stops. Here the
+## process is a language server, and one hover must not take it down, so the
+## whole fold runs under `catch_panic`. It is the second line, not the
+## first: a module with errors holds `XError`, which lowering refuses by
+## panicking, so a caller folds only in a module that checked clean, as the
+## build does. The barrier is for whatever that rule does not foresee.
+##
+## Nothing is kept. The lowering cache starts empty and is dropped, so one
+## fold cannot change what the next one sees.
+pub(pkg) fn eval_closed(
+  tm: TModule,
+  world: CtWorld,
+  scope: ConstScope,
+  ct: CtOut,
+  std_fns: Map[String, TFun],
+  std_owners: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
+  std_names: Set[String],
+  adts: Adts,
+  traits: Traits,
+  impls: Impls,
+  owner: String,
+  e: TExpr,
+  opts: CtOpts
+) -> Result[CValue, String] !io = {
+  let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
+    traits, impls, owner, opts.depth)
+  let icx = ICx { ..base, consts: ct.consts, blocks: ct.blocks }
+  match catch_panic(() => fold_expr(icx, opts.fuel, empty_cache(), e, 0, 0)) {
+    Ok(pr) -> {
+      let (_, r) = pr
+      match r {
+        Ok(v) -> Ok(v)
+        Err(d) -> Err(closed_reason(d.msg))
+      }
+    }
+    Err(fault) -> Err("panic: " ++ first_line(fault.message))
+  }
+}
+
+fn closed_reason(msg: String) -> String = {
+  let first = first_line(msg)
+  match str.strip_prefix(first, "comptime: ") {
+    Some(r) -> r
+    None -> first
+  }
+}
+
+fn first_line(s: String) -> String =
+  match str.split_once(s, "\n") {
+    Some(pr) -> {
+      let (a, _) = pr
+      a
+    }
+    None -> s
+  }
 
 # ---- tests ----
 

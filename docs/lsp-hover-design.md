@@ -4,6 +4,7 @@
 > A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）；
 > A5（文档里的 `` [`name`] `` 链接可点，文档注释 D4）已落地（§A5）；D7（补全项文档、signatureHelp 文档、
 > `use` 行的模块文档，文档注释 D7）见 §D7。B1（省略的默认实参作 inlay hint）已落地（§B1）。
+> C5（纯且闭合表达式的 hover 求值）的解释器入口 C5-1 已落地，LSP 接线 C5-2 未落地（§C5）。
 > B 组立项时在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
@@ -756,6 +757,71 @@ K6 起默认值可以引用声明在它前面的形参：`fn find(s: String, sub
 - **提示可点击插入（`textEdits`）**：把默认值抄进调用就失去了「随被调者的默认值变」的意义，没有理由鼓励。
 - **构造器的默认字段**：Dawn 的记录与构造器字段没有默认值。
 
+## C5. 纯且闭合表达式的 hover 求值
+
+光标停在一个复合表达式上时，若它闭合（不引用表达式外绑定的局部）且纯（被调方效果行为空），hover 在类型后面
+给出它的值。立项依据是 2026-10-03 的调研与裁决（仓外协作档）：判据、UI 与预算都在那里定了，这里只记落码时的
+取舍。分两刀：**C5-1** 是解释器入口（本节 C5.1–C5.4，已落地），**C5-2** 是 LSP 接线（判据、`Target.expr`、
+hover 拼接，未落地）。前置 E1（#416，comptime 跨模块调用）、E2（#417，native 深度上限）、E3（#418，fuel 按
+分配大小计）均已合入。
+
+### C5.1 入口：`ir/interp.eval_closed`
+
+- `pub(pkg) fn eval_closed(tm, world, scope, ct, std 三张表, std_names, adts, traits, impls, owner, e, opts)
+  -> Result[CValue, String] !io`：对一个已检查模块里的闭合表达式 `e` 求值。闭合与纯由调用方判（只有它有
+  span 可判），入口不重判；解释器自己的动态兜底（拒绝 io builtin、Map/Set、`cmp`、cell、ctl）照旧生效。
+- **上下文与构建期同一份**：`eval_module_in` 里组装 `ICx` 的那段抽成 `module_icx`，构建期的模块运行与
+  `eval_closed` 共用；后者再填上模块那次运行已经折好的 `ct.consts` 与 `ct.blocks`。所以 `e` 在这里的含义就是
+  它写在该模块一个 `comptime` 块里时的含义，表达式里嵌的 `comptime { … }` 读的是那次运行留下的值。
+  E1 的 `CtWorld` 一并接上：调工程里先分析的模块的纯函数，与构建期 comptime 走同一条路（`world.owners`）。
+  传入的 `world` 是「本模块之前」的那一份，与 `eval_comptime_in` 相同。
+- **不留状态**：lowering 缓存每次从空开始、用完即弃，一次求值不影响下一次看到的东西。实测里中位数在
+  个位毫秒（调研 §3.2），缓存的失效条件比求值本身复杂，不做（调研 6.3）。
+- **失败一律回 `Err(原因)`**：原因是一行、去掉构建期诊断的 `comptime: ` 前缀，C5-2 直接拼成 A1 同形的
+  `(not evaluated: 原因)`。fuel 耗尽、深度超限、解释器拒绝都在这条路上。
+
+### C5.2 `catch_panic` 屏障
+
+lowering 与解释器遇到不变式被破坏时 panic（ARC-06），构建期这是对的：编译器该停。hover 跑在语言服务进程里，
+一次 hover 不能把进程带走，所以整个 `fold_expr` 套在 `catch_panic` 里，panic 回 `Err("panic: <消息首行>")`。
+首行保留 L2（#425）给 panic 加上的调用点后缀 ` at src/ir/lower.dawn:L:C`，不剥：这类 panic 只在编译器有 bug 时出现，
+读者要做的是报 bug，调用点正是报告里最有用的一行；剥掉它就得在解释器里再写一份「消息末尾哪段是调用点」的解析，
+与 `catch_panic` 交出的消息形状（L2 的调研已定：调用点是消息的一部分）各说各话。测试只钉住消息与文件，不钉行列。
+它是**第二道**防线：模块有错时 TAST 里有 `XError`，lowering 必 panic，所以调用方与 A1 一样只在模块无错时求值；
+屏障兜的是这条规则没预见到的情形。调研的负控已经证明去掉它时注入的 lowering panic 让 LSP 进程退出，
+所以它进门禁（C5.4）。JVM 的 `OutOfMemoryError` 不归它管：E3 让 fuel 在分配之前按大小扣，内存由 fuel 界住。
+
+### C5.3 预算：`HOVER_FUEL`、`HOVER_DEPTH`、`ct_hover`
+
+- `HOVER_FUEL = 100000`、`HOVER_DEPTH = 1500`，`ct_hover(host) = { fuel: HOVER_FUEL, depth: min(HOVER_DEPTH, host.depth) }`。
+  JVM 与 native 同值（裁决第 2 条及 10-04 追裁：同一份代码在 VS Code 与 Playground 给同一答案；1,500 即 native
+  宿主上限 `NATIVE_CALL_DEPTH`）。`min` 只是防御：今天两端都取到 1,500，宿主上限将来若更低，以宿主为准。
+- **常量放解释器侧，不放 lsp 侧**：深度是关于解释器宿主栈的断言，不能超过 `NATIVE_CALL_DEPTH`，而知道栈能撑多深的
+  是 `ir/interp`；lsp 已经从这里取 `ct_default`，常量放在 lsp 等于把数字放到离它所服从的上限隔一层的地方。
+  两个编辑器调用方（C5-2 的 hover、之后 C4 的默认实参值 inlay）都经 `ct_hover` 取预算。
+- 预算由调用方以 `CtOpts` 传入，入口不自己选：测试要用别的预算证明「是预算拦下的」（同一表达式加 fuel 或加深度
+  就求得出值）。
+
+### C5.4 测试与负控
+
+- `ir/interp_test` 五条：预算两端相同且不超宿主深度（`ct_hover(ct_default()) == ct_hover(ct_native())`、
+  浅宿主保留自己的深度）；求值（调本模块函数加 const、表达式内嵌的 comptime 块读运行留下的值）；fuel 耗尽与深度
+  超限回 `Err`，同一表达式放宽预算后求得值；跨模块纯函数经 `CtWorld` 求得值，换成空世界回 `Err`；注入 `XError`
+  （表达式本身，lowering 在解释器启动前 panic）与把被调函数体换成 `XError`（解释器按需 lowering 时 panic）都回
+  `Err("panic: lower: XError reached lowering")`，之后入口照常可用。
+- 变异负控 `scripts/comptime-eval-closed-contract/run.sh`：在 selfhost 的私有副本里去掉屏障、编译并跑测试，要求
+  恰好上面最后一条变红，且 FAIL 行下面是逃出来的 panic 原文。测试运行器按条接住 panic，所以证据是「panic 原文
+  出现在这条测试名下」而不是进程退出；在没有这层 try/catch 的宿主（语言服务）里，这就是进程退出。
+- 构建期 comptime 行为零变化：`module_icx` 是纯搬移，prev-diff、prev-diff-native、lsp-diff 无字节差异，
+  没有 `Emit-Change`。
+
+### C5.5 不做的（C5-1 内，理由）
+
+- **入口内重判闭合与纯**：判据要 span 与 TAST 的绑定信息，是 lspq 的事；解释器侧重判就是第二份判据，会漂。
+- **入口内自选预算**：见 C5.3 末条；编辑器的预算只有一处定义（`ct_hover`），入口只执行。
+- **跨请求缓存 lowering 结果**：见 C5.1。
+- **接住 JVM 的 `OutOfMemoryError`**：OOM 之后 JVM 状态不可信，E3 已在分配之前用 fuel 拦（调研 6.3）。
+
 ## 5. 门禁与契约
 
 - `./bin/dawn test selfhost`：`lsp/lspv` 五条（每种值、记录与和类、十六进制阈值、截断、函数值）；
@@ -855,4 +921,6 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | A5（文档注释 D4） | 已落地 | |
 | D7（文档注释 D7） | 合入后由协调者回填 | |
 | B1（省略的默认实参 inlay） | 已落地 | 合入后由协调者回填 |
+| C5-1（解释器入口 `eval_closed`） | 已落地 | 合入后由协调者回填 |
+| C5-2（hover 接线） | 未落地 | |
 | B 组其余 | 未立项 | |

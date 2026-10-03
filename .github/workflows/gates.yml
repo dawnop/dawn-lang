@@ -295,6 +295,8 @@ name: gates
 # was restated to its worst in the seven days to 10-03T11:22Z plus a tenth
 # (+555s). incremental-memo-3's 754s is a slow runner, and its 830s is
 # still 120s under the pole, so nothing here asks for a split.
+# On 2026-10-04 it went up to 16,348s: test-compiler gained the
+# eval_closed barrier mutant (+60s planning value, one compiling mutant).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -318,7 +320,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 16288s (the most this file's `3x` claims may add up to)
+# push-total: 16348s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1442,8 +1444,15 @@ jobs:
     # 10-03T11:22Z holds a 384s run whose steps digest is this job's (run
     # 36867095968). Restated to that plus a tenth, rounded up to 5s,
     # 425s (375s before), and the timeout to 3x that.
-    # budget: 3x 425s worst observed plus a tenth (run 36867095968)
-    timeout-minutes: 22
+    # 2026-10-04, the eval_closed barrier mutant (docs/lsp-hover-design.md
+    # C5.4) joins: one compiling mutant of the comptime-trace kind, a copy of
+    # selfhost compiled and tested once. That step's four mutants took 226s
+    # at worst, about 57s each; this one measured 33s off CI, where the
+    # selfhost tests it repeats took 57s.
+    # Planning value 425 + 60 = 485s until a week of runs of the new steps
+    # exists, and the timeout to 3x that.
+    # budget: 3x 485s planning value (425s worst observed, run 36867095968, plus one 60s mutant)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -1466,6 +1475,12 @@ jobs:
       # both main and release call this workflow.
       - name: comptime trace contract
         run: ./scripts/comptime-trace-contract/run.sh
+
+      # The panic barrier around ir/interp `eval_closed`, the editor's fold
+      # entry: removed in a compiled mutant, the same injected lowering panic
+      # must escape the unit test that says the barrier holds.
+      - name: comptime eval_closed barrier contract
+        run: ./scripts/comptime-eval-closed-contract/run.sh
 
       # The self-hosting proof: seed → A → B → C, cmp B C — the compiler
       # reproduces itself byte-identically from its own output.
