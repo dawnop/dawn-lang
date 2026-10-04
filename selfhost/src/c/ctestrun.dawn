@@ -80,17 +80,23 @@ fn preamble() -> List[String] =
 ## adapter with no captures: `dawn_catch_panic` calls through `dawn_clo`, and a
 ## Unit-returning body still owes the erased boundary a slot.
 ##
-## Only the environment parameter is declared. The barrier enters a function
-## value through a `(dawn_clo*, void*)` cast and passes the evidence pack
-## second, and an adapter that reads neither argument ignores it; that was the
-## shape while the pack was a literal null here too.
+## Both parameters are declared although neither is read. The barrier enters
+## a function value through a `void* (*)(dawn_clo*, void*)` cast, passing the
+## evidence pack second (dawn_rt.c, `dawn_run_caught`), and a call through a
+## pointer of a different function type is undefined in C (C11 6.3.2.3p8)
+## whatever the calling convention makes of it. clang's
+## `-fsanitize=function` reports a one-parameter thunk here on every native
+## test binary (#502); gcc's UBSan does not check this, which is how it lasted.
+## The pack arrives owned, but it is the NULL `dawn_test_one` hands the
+## barrier, so there is nothing to drop.
 fn one_test(i: Int, sym: String, label: String) -> List[String] = {
   let n = to_string(i)
   [
     str_static_def("dawn_test_pass_${n}", pass_line(label)),
     str_static_def("dawn_test_fail_${n}", fail_line(label)),
-    "static void* dawn_test_thunk_" ++ n ++ "(dawn_clo* env) {",
+    "static void* dawn_test_thunk_" ++ n ++ "(dawn_clo* env, void* ev) {",
     "  (void)env;",
+    "  (void)ev;",
     "  return (void*)dawn_box_unit(" ++ sym ++ "());",
     "}",
     ""
@@ -178,5 +184,5 @@ test "the program-wide position and the module-local index are different numbers
   let c = runner([("alpha", 0, "a :: x"), ("beta", 0, "b :: y")])
   assert str.contains(c, "dawn_alpha__dawn_3test_30()")
   assert str.contains(c, "dawn_beta__dawn_3test_30()")
-  assert str.contains(c, "static void* dawn_test_thunk_1(dawn_clo* env)")
+  assert str.contains(c, "static void* dawn_test_thunk_1(dawn_clo* env, void* ev)")
 }
