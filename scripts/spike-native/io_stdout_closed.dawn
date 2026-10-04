@@ -1,0 +1,28 @@
+# A closed stdout does not end the program (#468).
+#
+# `prog | head -1`: once `head` has its line and leaves, every write to the
+# pipe fails. On the JVM, print goes through System.out, a PrintStream, which
+# swallows the IOException (it only feeds `checkError`) and HotSpot keeps
+# SIGPIPE from killing the process, so the program runs to its end and exits
+# 0. Native died of SIGPIPE at the first flush (exit 141) and never ran the
+# rest. The native runtime now handles the signal and ignores the failed
+# write, the way PrintStream does.
+#
+# The harness runs this with stdout already closed (io_stdout_closed.
+# stdout-closed, see run.sh), so the first flush fails rather than whichever
+# one happens to come after a reader left; stdout is therefore empty on both
+# sides and this file's .expect is empty. What is checked is stderr, written
+# only after the failing writes, and the exit code. Writing more than a pipe
+# buffer's worth matters only for the `prog | head` shape, but it keeps the
+# program honest about not stopping at the first failure.
+use std/io
+
+pub fn main() -> Unit !io = {
+  io.print("no newline, so this one sits in the buffer")
+  for i in 0..20000 {
+    io.println("line ${i}")
+  }
+  io.eprintln("after the writes")
+  io.print("and a last one at exit")
+  io.eprintln("done")
+}

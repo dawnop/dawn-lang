@@ -19,6 +19,7 @@ use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "java.util.Objects"
+use java "java.lang.Long"
 use jvm/ops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
   ACC_VOLATILE,
@@ -1795,10 +1796,25 @@ fn gen_io_copy_permissions(cw: ClassWriter) -> Unit !io = {
 ## It reads the raw stream, while io_read_line reads a BufferedReader over it.
 ## Mixing the two in one process loses whatever the reader has buffered; nothing
 ## does, and a language server frames its own messages precisely to avoid it.
+##
+##     System.in.readNBytes((int) Math.min(Math.max(n, 0L), Integer.MAX_VALUE))
+##
+## The clamp is the whole of the code, and it is there because `n` is an
+## upper bound the caller will accept, not a size: `read_stdin(1 << 40)` on a
+## short input has to return the short read. A bare L2I kept the low 32 bits,
+## so 1 << 40 read nothing and 1 << 31 threw IllegalArgumentException.
+## `readNBytes(int)` grows its buffer with what arrives rather than allocating
+## `len` up front, so the clamped maximum costs nothing on a short input; a
+## negative `n` reads nothing, as 0 does. The one bound left is the JVM's:
+## a byte array holds under 2^31 bytes, so a single call returns at most that.
 fn gen_io_stdin(cw: ClassWriter) -> Unit !io = {
   let rv = open_static(cw, "io_read_stdin", "(J)[B")
   rv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
   rv.visitVarInsn(OP_LLOAD, 0)
+  rv.visitInsn(OP_LCONST_0)
+  rv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "max", "(JJ)J", false)
+  rv.visitLdcInsn(Long.valueOf(2147483647).expect("boxed"))
+  rv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "min", "(JJ)J", false)
   rv.visitInsn(OP_L2I)
   rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/InputStream", "readNBytes", "(I)[B", false)
   rv.visitInsn(OP_ARETURN)

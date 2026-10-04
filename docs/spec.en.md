@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 485f34e0550b8641 -->
+<!-- doc-check: translation-of docs/spec.md @ 21c0c4e6f44f76ec -->
 
 # Dawn Language Specification
 
@@ -4278,6 +4278,21 @@ behaviours are:
 - `io.getenv(name)` returns `None` when the variable is unset or when the name cannot be
   represented by the host environment API. In particular, a name containing U+0000 must
   neither fault nor query the prefix before the NUL; it returns `None` directly
+- `io.read_line()` breaks lines by `BufferedReader.readLine`'s rules, the same on both
+  backends: `\n`, `\r` and `\r\n` all end a line, and the terminator is not part of the
+  result; a last line with no terminator is still a line, and end of input is `None`. A `\r`
+  hands the line over at once without reading ahead (a terminal that has sent `\r` is waiting
+  for an answer, and a read-ahead would hang), and a `\n` right after it is dropped by the
+  next call
+- `io.read_stdin(n)` returns exactly `n` bytes, shorter only at end of input. `n` is the most
+  the caller will take, not a size to allocate up front: a huge `n` on a short input returns
+  the bytes there are, and `n <= 0` returns empty `Bytes`. On the JVM one call returns at
+  most `2^31 - 1` bytes (the most a byte array holds)
+- A closed standard output (`head` exiting first in `prog | head -1`) **does not end the
+  program**: both backends swallow the failed write, the program runs to its end, and its
+  exit code is unaffected. On the JVM this is `PrintStream`'s behaviour (the exception only
+  goes into `checkError`); the native runtime handles SIGPIPE, and a failed write only sets
+  stdio's error flag. Child processes the program starts get the default SIGPIPE disposition
 - `io.stdin_ready(timeout_ms)` answers exactly one thing: **whether at least one byte is
   readable right now**. **End of input does not count as ready** — a write end that is
   already closed and "connected but silent" give the same `false`, and the difference

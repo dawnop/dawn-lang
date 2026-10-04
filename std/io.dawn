@@ -59,7 +59,11 @@ pub fn eprint(s: String) -> Unit !io = io_eprint(s)
 pub fn exit(code: Int) -> Unit !Exit = exit_now(code)
 
 ## Read one line from stdin; `None` at end of input.
-## The intrinsic maps Java's `null`-or-line straight onto `Option`.
+## A line ends at `\n`, at `\r`, or at `\r\n`, and the terminator is not part
+## of it; a last line with no terminator is still a line. These are
+## `BufferedReader.readLine`'s rules on both backends. A `\r` ends the line
+## without waiting for the next byte, and a `\n` right after it is dropped by
+## the next call.
 pub fn read_line() -> Option[String] !io = io_read_line()
 
 ## Whether `path` names a directory. Invalid host path spellings, including an
@@ -337,6 +341,11 @@ fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
 
 ## Exactly `n` bytes of standard input, shorter only at end of input -- so a
 ## short read is how end of input is reported.
+##
+## `n` is the most the caller will take, not a size to allocate: a huge `n`
+## on a short input returns what there is, and `n <= 0` returns empty Bytes.
+## On the JVM one call returns at most `2^31 - 1` bytes, the most a byte
+## array holds.
 ##
 ## This reads the stream directly while [`read_line`] reads a buffered reader
 ## over it. A program that used both would lose whatever the reader had already
