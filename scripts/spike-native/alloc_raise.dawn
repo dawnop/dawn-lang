@@ -1,0 +1,68 @@
+# A tuple or constructor whose argument raises must not leak the object the
+# native backend already allocated for it (#482).
+#
+# The leaking shape was a single running argument with a scalar result: an
+# operand row with nothing to reorder kept the call inline, so its text landed
+# in the field store after `dawn_adt_new`, and a raise caught by the barrier
+# discarded the frame with the new object in a plain C temporary. Each shape
+# below takes that path: a tuple (the issue's program), a record and a sum
+# constructor whose later argument panics, Int division by zero as an operand,
+# a call that never returns, and a fault from the outside world stopped by
+# `catch_fault` rather than `catch_panic`.
+#
+# The fault comes from `raw.read_file` on a path that does not exist, the one
+# way a corpus program can raise a fault on native (stdext/raw.dawn).
+use std/raw
+
+type Rec = { a: Int, b: String }
+
+type Shape =
+  | Dot(x: Int)
+  | Seg(x: Int, y: Int)
+
+fn boom(k: Int) -> Int !io = if k > 0 { k } else { panic("boom") }
+
+fn never(k: Int) -> Never !io = panic("never ${k}")
+
+fn pair(k: Int) -> (Int, Int) !io = (boom(k), 1)
+
+fn rec(k: Int) -> Rec !io = Rec { a: boom(k), b: "x" }
+
+fn seg(k: Int) -> Shape !io = Seg(1, boom(k))
+
+fn quot(k: Int) -> Shape !io = Seg(7, 7 / k)
+
+fn gone(k: Int) -> Rec !io = Rec { a: 1, b: never(k) }
+
+fn size(path: String) -> Int !io = if raw.read_file(path) == "" { 0 } else { 1 }
+
+fn sized(path: String) -> (String, Int) !io = ("size", size(path))
+
+fn shape(s: Shape) -> String =
+  match s {
+    Dot(x) -> "Dot(${x})"
+    Seg(x, y) -> "Seg(${x}, ${y})"
+  }
+
+fn report(r: Result[String, ForeignError]) -> Unit !io =
+  match r {
+    Ok(v) -> println(v)
+    Err(e) -> println(e.message)
+  }
+
+pub fn main() -> Unit !io = {
+  report(catch_panic(() => to_string(pair(0))))
+  report(catch_panic(() => to_string(pair(2))))
+  report(catch_panic(() => rec(0).b))
+  report(catch_panic(() => rec(3).b))
+  report(catch_panic(() => shape(seg(0))))
+  report(catch_panic(() => shape(seg(4))))
+  report(catch_panic(() => shape(quot(0))))
+  report(catch_panic(() => shape(quot(7))))
+  report(catch_panic(() => gone(0).b))
+  let r: Result[(String, Int), ForeignError] = catch_fault(() => sized("/no/such/dawn/path"))
+  match r {
+    Ok(p) -> println(to_string(p))
+    Err(_) -> println("fault caught")
+  }
+}
