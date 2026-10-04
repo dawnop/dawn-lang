@@ -66,8 +66,8 @@ CUT_AT = "# Trace `name` twice and answer the record, or panic if the two runs d
 
 # (old, new, how many times old must occur)
 EDITS = [
-    ("use tileir/prog.{TileProg, trace_kernel}\n",
-     "use tileir/prog.{TileProg, trace_kernel, trace_calls, op_count}\n", 1),
+    ("use tileir/prog.{TileProg, ",
+     "use tileir/prog.{TileProg, trace_calls, op_count, erase, ", 1),
     ("use tileir/render.{render}\n",
      "use tileir/render.{render, line_map}\n", 1),
     ("use tileir/bytecode.{encode, bytecode_version}\n", "", 1),
@@ -117,15 +117,42 @@ def harness_source(src: str) -> str:
     if src.count(CUT_AT) != 1:
         fail(f"kernels.dawn has {src.count(CUT_AT)} of {CUT_AT.strip()!r}, expected 1")
     src = src[:src.index(CUT_AT)]
-    # the kernel's dispatch arm, traced with the side table instead
-    arm = re.search(r'^  "' + NAME + r'" ->\n((?:    .*\n)+)', src, re.M)
+    # the kernel's dispatch arm, traced with the side table instead: its
+    # `traceN` call becomes `trace_calls` over the same markers, erased
+    arm = re.search(r'^  "' + NAME + r'" -> \{\n((?:    .*\n)+)  \}\n', src, re.M)
     if not arm:
         fail(f"kernels.dawn's dispatch has no arm for {NAME}")
-    call = " ".join(l.strip() for l in arm.group(1).splitlines())
-    if call.count("trace_kernel(") != 1 or not call.startswith(f'trace_kernel("{NAME}"'):
-        fail(f"the {NAME} arm is not one trace_kernel call: {call}")
-    traced = call.replace("trace_kernel(", "trace_calls(")
+    body = " ".join(l.strip() for l in arm.group(1).splitlines())
+    m = re.fullmatch(r'let \(p, _e\) = trace([1-5])\((.*)\) p', body)
+    if not m:
+        fail(f"the {NAME} arm is not one traceN call answered as `p`: {body}")
+    args = split_args(m.group(2))
+    count = int(m.group(1))
+    if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != NAME:
+        fail(f"the {NAME} arm does not trace {NAME} itself with {count} markers: {body}")
+    markers = args[1:-1]
+    formats = [re.match(r'(?:In|Out|Shared)\(([A-Z0-9]+)', k).group(1) for k in markers]
+    params = ", ".join(f"param({d}, {k})" for k, d in enumerate(formats))
+    erased = ", ".join(f"erase({k})" for k in markers)
+    traced = f'trace_calls("{NAME}", [], () => {NAME}({params}), markers: [{erased}])'
     return src + MAIN.replace("%TRACE%", traced).replace("%NAME%", NAME)
+
+
+def split_args(s: str) -> list:
+    """A call's argument text cut at its top-level commas."""
+    out, depth, cur = [], 0, ""
+    for c in s:
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += c
+    out.append(cur.strip())
+    return out
 
 
 def run_harness(src: str) -> str:

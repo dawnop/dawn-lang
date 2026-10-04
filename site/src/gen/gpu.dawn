@@ -1202,7 +1202,7 @@ test "the golden kernels are the ones kernels.dawn dispatches" {
     for l in str.split(must_read(kernels_file()), "\n") {
       match str.strip_prefix(l, "  \"") {
         Some(rest) ->
-          match str.strip_suffix(rest, "\" ->") {
+          match str.strip_suffix(str.trim_end(str.replace(rest, " -> {", " ->")), "\" ->") {
             Some(name) -> {
               if not str.contains(name, "\"") {
                 arms = arms ++ [name]
@@ -1301,7 +1301,8 @@ test "the nav marks GPU as the page you are on" {
 ## flash_attn against the files it comes from: its rows' source is
 ## kernels.dawn's function as the page's other cut reads it, its Tile IR is
 ## the golden's, every golden line is in exactly one run, and the calls of
-## the loop's body are the d_for3's children.
+## the loop's body are the d_for3's children (the named reductions inside it
+## take no closure, so they have none of their own).
 test "flash_attn lines up with its golden, call by call" {
   with_fs_real(() => {
     let f = load_facts()
@@ -1318,15 +1319,12 @@ test "flash_attn lines up with its golden, call by call" {
     }
     assert sort(owned) == range(1, len(m.ir) + 1)
     assert map(m.rows, r => r.line) == range(cut.first, cut.last + 1)
-    # the loop's body is the d_for3's, and each scan's closure the scan's
+    # the loop's body is the d_for3's, and nothing else has children
     let loops = filter(m.calls, c => c.name == "d_for3")
     assert len(loops) == 1
     let body = filter(m.calls, c => c.parent == loops[0].id)
-    assert len(body) == 18
+    assert len(body) == 20
     assert len(filter(m.calls, c => c.parent >= 0)) == 20
-    for c in filter(m.calls, c => c.name == "s_maxf") {
-      assert m.calls[c.parent].name == "d_scan"
-    }
     # a region call keeps its header on its own line and its terminator and
     # brace on the line its span ends on
     assert len(loops[0].lines) == 2
@@ -1338,25 +1336,33 @@ test "flash_attn lines up with its golden, call by call" {
 # What each call of flash_attn is for, as the Tile IR operation the lowering
 # writes for it: an oracle the recording does not produce, so a map whose
 # runs are moved one call along is red here even though every line is still
-# owned once.
-fn op_for(name: String) -> String =
+# owned once. A constant writes nothing where it is called and is made where
+# it is used (tileir 0.8.0), so `f_const` is for no line at all, and a call
+# that takes one may end in it: `broadcast` of a constant is that constant
+# at the wider shape, and `mmaf` and `mul` write theirs just ahead of the
+# operation. A reduction with `keepdims` ends in the reshape that keeps the
+# dimension.
+fn ops_for(name: String) -> List[String] =
   match name {
-    "block_id" -> "get_tile_block_id"
-    "idx_const" -> "constant"
-    "f_const" -> "constant"
-    "idx_mul" -> "muli"
-    "load_strided" -> "load_ptr_tko"
-    "store_strided" -> "store_ptr_tko"
-    "mmaf" -> "mmaf"
-    "mul" -> "mulf"
-    "sub" -> "subf"
-    "div" -> "divf"
-    "exp" -> "exp"
-    "maxf" -> "maxf"
-    "s_maxf" -> "maxf"
-    "d_for3" -> "for"
-    "d_scan" -> "scan"
-    _ -> "?"
+    "load_cell" -> ["load_view_tko"]
+    "load_at" -> ["load_view_tko"]
+    "store_cell" -> ["store_view_tko"]
+    "idx_const" -> ["constant"]
+    "zeros" -> ["constant"]
+    "f_const" -> []
+    "broadcast" -> ["broadcast", "constant"]
+    "permute_tile" -> ["permute"]
+    "mmaf" -> ["mmaf"]
+    "mul" -> ["mulf"]
+    "sub" -> ["subf"]
+    "addf" -> ["addf"]
+    "div" -> ["divf"]
+    "exp" -> ["exp"]
+    "maxf" -> ["maxf"]
+    "reduce_max" -> ["reshape"]
+    "reduce_sum" -> ["reshape"]
+    "d_for3" -> ["for"]
+    _ -> ["?"]
   }
 
 ## Every run's result line is the operation its call is for, and the page
@@ -1367,15 +1373,20 @@ test "every call's Tile IR is the operation it is for, and the page marks it as 
     let f = load_facts()
     let m = f.flash
     for c in m.calls {
-      let (a, b) = c.lines[0]
-      let res = filter(range(a, b), n => not str.starts_with(str.trim(m.ir[n - 1]), "}"))
-      let text = str.trim(m.ir[res[len(res) - 1] - 1])
-      let op =
-        match str.split_once(text, " = ") {
-          Some((_l, r)) -> r
-          None -> text
-        }
-      assert str.starts_with(op, op_for(c.name) ++ " ")
+      let want = ops_for(c.name)
+      if len(want) == 0 {
+        assert c.lines == []
+      } else {
+        let (a, b) = c.lines[0]
+        let res = filter(range(a, b), n => not str.starts_with(str.trim(m.ir[n - 1]), "}"))
+        let text = str.trim(m.ir[res[len(res) - 1] - 1])
+        let op =
+          match str.split_once(text, " = ") {
+            Some((_l, r)) -> r
+            None -> text
+          }
+        assert list.any(want, w => str.starts_with(op, w ++ " "))
+      }
     }
     let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
     for c in m.calls {
@@ -1424,7 +1435,7 @@ test "the facts beside the map are the map's and the files' numbers" {
       }
     assert kf.bytes == size
     assert kf.lines == len(m.ir)
-    assert kf.calls == 34
+    assert kf.calls == 33
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }

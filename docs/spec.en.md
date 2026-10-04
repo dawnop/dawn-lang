@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 9fcaac164abd697e -->
+<!-- doc-check: translation-of docs/spec.md @ 49c1a70fc3bc748d -->
 
 # Dawn Language Specification
 
@@ -4640,8 +4640,8 @@ The reasons, the roadmap and the measurements are in
 `fn(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev`.
 
 - It does not execute on the device, and it computes no number on the host. Every `Dev`
-  operation produces or consumes **handles**: opaque types such as `Tile[D]`, `Idx`,
-  `Scalar[D]` and `Param[D]`, whose phantom parameter `D` is a format marker (§2.7). Handles
+  operation produces or consumes **handles**: opaque types such as `Tile[D]` (of any rank; a
+  scalar is rank 0), `Idx` and `Param[D]`, whose phantom parameter `D` is a format marker (§2.7). Handles
   are issued by the handler; using one kind of handle as another, or a host `Int` as a
   handle, is a type error.
 - **Recording**: `tileir/prog`'s `trace_kernel(name, params, body)` runs `body` exactly once,
