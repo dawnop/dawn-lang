@@ -1065,6 +1065,26 @@ test "list slices, joins and code point conversions pay for what they produce" {
   assert charged("m", "let cs = code_points(s)", "some(from_code_points(cs))", 40)
 }
 
+## A range's length is `to - from`, and that subtraction wraps when the
+## length does not fit in an Int. The charge used to read the wrapped value as
+## a count of nothing, so the fold went on to build 2^63 elements uncharged
+## and the compiler ran out of memory instead of fuel.
+test "a range too long for an Int runs out of fuel instead of memory" {
+  let src = "const A: Int = len(range(-2, 9223372036854775807))\n" ++
+    "const B: Int = len(range(-9223372036854775807 - 1, 9223372036854775807))\n" ++
+    "const E: Int = len(range(5, -9223372036854775807 - 1))\n" ++
+    "const F: Int = len(range(3, 3))\n" ++
+    "const G: Int = len(range(-3, 4))\n"
+  let (msgs, consts) = fold_src("m", src, 1000)
+  assert len(msgs) == 2
+  assert exhausted(msgs[0])
+  assert exhausted(msgs[1])
+  # an empty or reversed range is free, and a short one folds as before
+  assert map.get(consts, "E") == Some(VInt(0))
+  assert map.get(consts, "F") == Some(VInt(0))
+  assert map.get(consts, "G") == Some(VInt(7))
+}
+
 test "case mapping, slicing and quoting a String pay for what they produce" {
   assert charged("std/t", "", "some(str_lower(s))", 40)
   assert charged("std/t", "", "some(str_upper(s))", 40)
