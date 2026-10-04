@@ -1,3 +1,8 @@
+// The Playground's LSP client and its CodeMirror glue. Every reply is checked
+// against the text it was asked about, so a late answer never describes newer
+// text. Inlay hints get their own hover route: a widget's document position is
+// also the position of the code beside it, so only the DOM under the pointer
+// tells the two apart.
 import type {
   Completion,
   CompletionContext,
@@ -7,10 +12,13 @@ import type {
 import type { Diagnostic } from '@codemirror/lint'
 import type { Extension, Range } from '@codemirror/state'
 import {
+  closeHoverTooltip,
   Decoration,
   type DecorationSet,
   EditorView,
   hoverTooltip,
+  type HoverTooltipSource,
+  type Tooltip,
   ViewPlugin,
   type ViewUpdate,
   WidgetType,
@@ -67,6 +75,12 @@ export interface LspInlayHint {
   kind?: number
   paddingLeft?: boolean
   paddingRight?: boolean
+  tooltip?: string | { kind: 'plaintext' | 'markdown'; value: string }
+}
+
+interface InlayHover {
+  hint: LspInlayHint
+  dom: HTMLElement
 }
 
 /**
@@ -187,12 +201,18 @@ export function inlayHintOf(value: unknown): LspInlayHint | null {
   const hint = asRecord(value)
   const position = positionOf(hint?.position)
   if (hint == null || position == null || typeof hint.label !== 'string' || !hint.label) return null
+  const markup = asRecord(hint.tooltip)
+  const tooltip = typeof hint.tooltip === 'string' ? hint.tooltip
+    : (markup?.kind === 'plaintext' || markup?.kind === 'markdown') && typeof markup.value === 'string'
+      ? { kind: markup.kind, value: markup.value } as const
+      : undefined
   return {
     position,
     label: hint.label,
     ...(typeof hint.kind === 'number' ? { kind: hint.kind } : {}),
     ...(hint.paddingLeft === true ? { paddingLeft: true } : {}),
     ...(hint.paddingRight === true ? { paddingRight: true } : {}),
+    ...(tooltip != null ? { tooltip } : {}),
   }
 }
 
@@ -1016,36 +1036,90 @@ function docNode(doc: string, className = 'dp-hover-doc'): HTMLElement {
   return node
 }
 
-export function lspHover(client: DawnLspClient): Extension {
-  return hoverTooltip(async (view, offset) => {
+const inlayHoverTooltips = new WeakSet<Tooltip>()
+
+function hoverResult(contents: unknown, from: number, to: number, inlayDOM?: HTMLElement): Tooltip | null {
+  const parts = hoverParts(contents)
+  if (!hoverText(contents).trim()) return null
+  const tooltip: Tooltip = {
+    pos: from,
+    end: Math.max(from, to),
+    above: true,
+    create: () => {
+      const dom = document.createElement('div')
+      dom.className = 'dp-hover'
+      const code = document.createElement('div')
+      code.className = 'dp-hover-code'
+      code.textContent = parts.code.trim()
+      dom.appendChild(code)
+      if (parts.doc) dom.appendChild(docNode(parts.doc))
+      return { dom, ...(inlayDOM ? { getCoords: () => inlayDOM.getBoundingClientRect() } : {}) }
+    },
+  }
+  if (inlayDOM) inlayHoverTooltips.add(tooltip)
+  return tooltip
+}
+
+/** A widget's offset and side also occur over code; its DOM decides the route. */
+export function lspHoverSource(
+  client: Pick<DawnLspClient, 'isReady' | 'hover'>,
+  inlayAt: (view: EditorView) => InlayHover | null,
+): HoverTooltipSource {
+  return async (view, offset) => {
+    const inlay = inlayAt(view)
+    if (inlay != null) return hoverResult(inlay.hint.tooltip, offset, offset, inlay.dom)
     if (!client.isReady()) return null
     const snapshot = view.state.doc.toString()
     try {
       const hover = await client.hover(offset, 1000)
-      if (hover == null || view.state.doc.toString() !== snapshot) return null
-      const parts = hoverParts(hover.contents)
-      if (!hoverText(hover.contents).trim()) return null
+      if (hover == null || view.state.doc.toString() !== snapshot || inlayAt(view) != null) return null
       const from = hover.range ? lspPositionToOffset(snapshot, hover.range.start) : offset
       const to = hover.range ? lspPositionToOffset(snapshot, hover.range.end) : offset
-      return {
-        pos: from,
-        end: Math.max(from, to),
-        above: true,
-        create: () => {
-          const dom = document.createElement('div')
-          dom.className = 'dp-hover'
-          const code = document.createElement('div')
-          code.className = 'dp-hover-code'
-          code.textContent = parts.code.trim()
-          dom.appendChild(code)
-          if (parts.doc) dom.appendChild(docNode(parts.doc))
-          return { dom }
-        },
-      }
+      return hoverResult(hover.contents, from, to)
     } catch {
       return null
     }
-  }, { hoverTime: 350 })
+  }
+}
+
+export function lspHover(client: DawnLspClient): Extension {
+  const hover = hoverTooltip(lspHoverSource(client, (view) => view.plugin(pointer)?.inlay ?? null), {
+    hoverTime: 350,
+    // A hint can be replaced by a refresh without any document change. Its
+    // tooltip must release the old DOM anchor; ordinary code hovers stay put.
+    hideOn: (_tr, tooltip) => inlayHoverTooltips.has(tooltip),
+  })
+  const pointer = ViewPlugin.fromClass(class {
+    private target: Node | null = null
+
+    get inlay(): InlayHover | null {
+      return inlayHoverTarget(this.view.contentDOM, this.target)
+    }
+
+    private mousemove = (event: MouseEvent): void => {
+      const target = event.target as Node | null
+      // Keep the route while entering the tooltip itself, so it stays open.
+      if (!this.view.contentDOM.contains(target)) return
+      const previous = this.inlay?.dom
+      this.target = target
+      if (this.inlay?.dom !== previous) {
+        // CodeMirror retains hovers at the same document position/range. A
+        // code/widget transition must also close it and cancel pending work.
+        this.view.dispatch({ effects: closeHoverTooltip(hover) })
+      }
+    }
+
+    constructor(readonly view: EditorView) {
+      // Widget.ignoreEvent filters editor event handlers and observers, but
+      // hoverTooltip listens to raw DOM events. Track its target before it runs.
+      view.dom.addEventListener('mousemove', this.mousemove, true)
+    }
+
+    destroy(): void {
+      this.view.dom.removeEventListener('mousemove', this.mousemove, true)
+    }
+  })
+  return [pointer, hover]
 }
 
 function localLocation(
@@ -1119,6 +1193,18 @@ export function lspDefinition(client: DawnLspClient): Extension {
  */
 const INLAY_DEBOUNCE_MS = 300
 
+const inlayWidgetHints = new WeakMap<Node, LspInlayHint>()
+
+/** Find the actual hint under the pointer, including targets inside its span. */
+export function inlayHoverTarget(contentDOM: HTMLElement, target: Node | null): InlayHover | null {
+  if (!contentDOM.contains(target)) return null
+  for (let node = target; node != null && node !== contentDOM; node = node.parentNode) {
+    const hint = inlayWidgetHints.get(node)
+    if (hint != null) return { hint, dom: node as HTMLElement }
+  }
+  return null
+}
+
 class InlayWidget extends WidgetType {
   constructor(readonly hint: LspInlayHint) { super() }
 
@@ -1127,12 +1213,14 @@ class InlayWidget extends WidgetType {
       && other.hint.kind === this.hint.kind
       && other.hint.paddingLeft === this.hint.paddingLeft
       && other.hint.paddingRight === this.hint.paddingRight
+      && JSON.stringify(other.hint.tooltip) === JSON.stringify(this.hint.tooltip)
   }
 
   toDOM(): HTMLElement {
     const node = document.createElement('span')
     node.className = inlayClass(this.hint)
     node.textContent = this.hint.label
+    inlayWidgetHints.set(node, this.hint)
     return node
   }
 
