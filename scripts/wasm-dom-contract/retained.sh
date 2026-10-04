@@ -226,7 +226,7 @@ fi
 if [ "$record" -eq 0 ]; then
   if ! cmp -s "$expected" "$work/jvm.txt"; then
     echo "FAIL: retained JVM session changed:" >&2
-    diff -u "$expected" "$work/jvm.txt" | head -40 >&2
+    diff -u "$expected" "$work/jvm.txt" | sed -n '1,40p' >&2
     exit 1
   fi
   echo "OK   retained JVM: 13 lines in one process, byte for byte"
@@ -244,7 +244,7 @@ if ! run_wasm "$root" "$work/base.wasm" "$work/wasm.txt"; then
 fi
 if ! cmp -s "$work/jvm.txt" "$work/wasm.txt"; then
   echo "FAIL: retained JVM and wasm sessions disagree:" >&2
-  diff -u "$work/jvm.txt" "$work/wasm.txt" | head -40 >&2
+  diff -u "$work/jvm.txt" "$work/wasm.txt" | sed -n '1,40p' >&2
   exit 1
 fi
 
@@ -256,7 +256,7 @@ fi
 
 if ! cmp -s "$expected" "$work/wasm.txt"; then
   echo "FAIL: retained wasm session changed:" >&2
-  diff -u "$expected" "$work/wasm.txt" | head -40 >&2
+  diff -u "$expected" "$work/wasm.txt" | sed -n '1,40p' >&2
   exit 1
 fi
 echo "OK   retained wasm: 13 separate dawn_turn calls, byte for byte"
@@ -305,7 +305,7 @@ run_mutant() { # <name> <tree-root> <oracle: any|line-five|after-nine>
   fi
   if ! cmp -s "$jvm_out" "$wasm_out"; then
     echo "FAIL: $name mutant disagrees between JVM and wasm:" >&2
-    diff -u "$jvm_out" "$wasm_out" | head -40 >&2
+    diff -u "$jvm_out" "$wasm_out" | sed -n '1,40p' >&2
     exit 1
   fi
 
@@ -321,7 +321,7 @@ run_mutant() { # <name> <tree-root> <oracle: any|line-five|after-nine>
       awk 'NR != 5' "$jvm_out" >"$work/$name-actual-rest.txt"
       if ! cmp -s "$work/$name-expected-rest.txt" "$work/$name-actual-rest.txt"; then
         echo "FAIL: $name mutant changed lines other than the post-panic event:" >&2
-        diff -u "$expected" "$jvm_out" | head -40 >&2
+        diff -u "$expected" "$jvm_out" | sed -n '1,40p' >&2
         exit 1
       fi
       if [ "$(sed -n '5p' "$expected")" = "$(sed -n '5p' "$jvm_out")" ]; then
@@ -334,7 +334,7 @@ run_mutant() { # <name> <tree-root> <oracle: any|line-five|after-nine>
       head -n 9 "$jvm_out" >"$work/$name-actual-head.txt"
       if ! cmp -s "$work/$name-expected-head.txt" "$work/$name-actual-head.txt"; then
         echo "FAIL: $name mutant changed the init-state lines, not only the kept-tree ones:" >&2
-        diff -u "$expected" "$jvm_out" | head -40 >&2
+        diff -u "$expected" "$jvm_out" | sed -n '1,40p' >&2
         exit 1
       fi
       if cmp -s "$expected" "$jvm_out"; then

@@ -67,11 +67,11 @@ runtime_input_stamp() {
 stamp_is_v2() {
   local stamp="$1"
   [ "$(printf '%s\n' "$stamp" | wc -l | tr -d '[:space:]')" -eq 5 ] || return 1
-  printf '%s\n' "$stamp" | sed -n '1p' | grep -qx 'dawn-selfhost-stamp-v2' || return 1
-  printf '%s\n' "$stamp" | sed -n '2p' | grep -qxE 'source=[0-9a-f]{64}' || return 1
-  printf '%s\n' "$stamp" | sed -n '3p' | grep -qxE 'bootstrap=[0-9a-f]{64}' || return 1
-  printf '%s\n' "$stamp" | sed -n '4p' | grep -qxE 'inputs=[0-9a-f]{64}' || return 1
-  printf '%s\n' "$stamp" | sed -n '5p' | grep -qxE 'jar=[0-9a-f]{64}' || return 1
+  printf '%s\n' "$stamp" | sed -n '1p' | grep -x 'dawn-selfhost-stamp-v2' >/dev/null || return 1
+  printf '%s\n' "$stamp" | sed -n '2p' | grep -xE 'source=[0-9a-f]{64}' >/dev/null || return 1
+  printf '%s\n' "$stamp" | sed -n '3p' | grep -xE 'bootstrap=[0-9a-f]{64}' >/dev/null || return 1
+  printf '%s\n' "$stamp" | sed -n '4p' | grep -xE 'inputs=[0-9a-f]{64}' >/dev/null || return 1
+  printf '%s\n' "$stamp" | sed -n '5p' | grep -xE 'jar=[0-9a-f]{64}' >/dev/null || return 1
 }
 
 # generation A: the JVM toolchain emits the native driver
@@ -141,12 +141,12 @@ assert_inputs_unchanged "before generation B"
 assert_inputs_unchanged "after generation B"
 if ! cmp -s "$work/A.c" "$work/B.c"; then
   echo "FAIL: the native compiler emits different C than the JVM toolchain (A != B)" >&2
-  diff "$work/A.c" "$work/B.c" | head -40 >&2
+  diff "$work/A.c" "$work/B.c" | sed -n '1,40p' >&2
   exit 1
 fi
 if ! cmp -s "$work/A.info.c" "$work/B.info.c"; then
   echo "FAIL: the native compiler writes a different build manifest than the JVM toolchain (A != B)" >&2
-  diff "$work/A.info.c" "$work/B.info.c" | head -40 >&2
+  diff "$work/A.info.c" "$work/B.info.c" | sed -n '1,40p' >&2
   exit 1
 fi
 "$cc_bin" "${ccflags[@]}" -o "$work/dawnc-B" "$work/B.c" "$root/runtime/c/dawn_rt.c" \
@@ -158,12 +158,12 @@ fi
 assert_inputs_unchanged "after generation C"
 if ! cmp -s "$work/B.c" "$work/C.c"; then
   echo "FAIL: no fixed point (B != C)" >&2
-  diff "$work/B.c" "$work/C.c" | head -40 >&2
+  diff "$work/B.c" "$work/C.c" | sed -n '1,40p' >&2
   exit 1
 fi
 if ! cmp -s "$work/B.info.c" "$work/C.info.c"; then
   echo "FAIL: no fixed point for the build manifest (B != C)" >&2
-  diff "$work/B.info.c" "$work/C.info.c" | head -40 >&2
+  diff "$work/B.info.c" "$work/C.info.c" | sed -n '1,40p' >&2
   exit 1
 fi
 

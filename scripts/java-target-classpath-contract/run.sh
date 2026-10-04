@@ -349,7 +349,7 @@ expect_setup_error() {
   capture "$label" "$dawn" check "$target"
   if [ "$CAPTURE_STATUS" -ne 1 ] || [ -s "$work/$label.out" ] ||
       ! grep -Fq "$needle" "$work/$label.err" ||
-      ! head -n 1 "$work/$label.err" | grep -Fq 'error:'; then
+      ! head -n 1 "$work/$label.err" | grep -F 'error:' >/dev/null; then
     cat "$work/$label.out" >&2
     cat "$work/$label.err" >&2
     fail "$label did not fail closed on stderr with exit 1"

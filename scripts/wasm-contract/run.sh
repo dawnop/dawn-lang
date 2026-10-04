@@ -122,7 +122,7 @@ for prog in hello stress failure; do
     echo "OK   $prog: wasm stdout == native stdout ($(wc -c <"$work/$prog.wasm.out") bytes)"
   else
     echo "FAIL: $prog stdout differs between native and wasm" >&2
-    diff "$work/$prog.native.out" "$work/$prog.wasm.out" | head -20 >&2
+    diff "$work/$prog.native.out" "$work/$prog.wasm.out" | sed -n '1,20p' >&2
     fail=1
   fi
   if grep -q '^rc-balance: 0$' "$work/$prog.wasm.err"; then

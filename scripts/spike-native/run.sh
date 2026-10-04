@@ -156,7 +156,7 @@ verdict() {
     known_hit=$((known_hit + 1))
   else
     printf '  %-28s FAIL\n' "$id"
-    if [ "$#" -gt 0 ]; then printf '%s\n' "$@" | head -30; fi
+    if [ "$#" -gt 0 ]; then printf '%s\n' "$@" | sed -n '1,30p'; fi
     fail=1
   fi
 }

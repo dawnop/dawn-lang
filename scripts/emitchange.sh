@@ -115,7 +115,7 @@ _ec_registered() { # label
 _ec_suggest() { # scope
   local head=${1%% *} all near
   all=$(grep -v -e '^#' -e '^$' "$(_ec_labels_file)")
-  near=$(printf '%s\n' "$all" | { grep -F -- "$head" || true; } | head -8)
+  near=$(printf '%s\n' "$all" | { grep -F -- "$head" || true; } | sed -n '1,8p')
   if [ -n "$near" ]; then
     printf '%s\n' "$near" | sed 's/^/         /'
   else

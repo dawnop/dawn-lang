@@ -73,7 +73,7 @@ fail=0
 say_fail() {
   printf '  %-34s FAIL\n' "$1"
   shift
-  if [ "$#" -gt 0 ]; then printf '%s\n' "$@" | head -30; fi
+  if [ "$#" -gt 0 ]; then printf '%s\n' "$@" | sed -n '1,30p'; fi
   fail=1
 }
 
@@ -161,7 +161,7 @@ check_corpus() {
       say_fail "$name:run" "exit $rc" "$(head -20 "$work/$name.err")"
     elif ! diff -q "$expect" "$out" > /dev/null; then
       say_fail "$name:transcript" \
-        "$(diff -u --label expect "$expect" --label actual "$out" | head -25)"
+        "$(diff -u --label expect "$expect" --label actual "$out" | sed -n '1,25p')"
     fi
     # A failed `main` blocks only the transcript, which is the thing that reads
     # its output; the assertions below are a separate program run and answer

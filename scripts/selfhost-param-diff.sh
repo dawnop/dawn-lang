@@ -74,7 +74,7 @@ if seed_doc "$OUT/canary" > "$OUT/canary.txt" 2>&1; then
 fi
 if ! grep -Fq param_diff_canary_missing "$OUT/canary.txt"; then
   echo "FAIL the canary run failed, but not on the canary's missing module:"
-  sed 's/^/     /' "$OUT/canary.txt" | head -10
+  sed 's/^/     /' "$OUT/canary.txt" | sed -n '1,10p'
   exit 1
 fi
 

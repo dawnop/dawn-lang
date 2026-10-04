@@ -180,7 +180,7 @@ dump_side() { # <rev> <side>
       if ! cmp -s "$f" "$dest/$p/$(basename "$f")"; then
         echo "error: [$2] $(basename "$f") lowers differently under $first and $p." >&2
         echo "       std's Core has become target-dependent -- that is the news." >&2
-        diff -u "$f" "$dest/$p/$(basename "$f")" | head -40 >&2
+        diff -u "$f" "$dest/$p/$(basename "$f")" | sed -n '1,40p' >&2
         exit 2
       fi
     done

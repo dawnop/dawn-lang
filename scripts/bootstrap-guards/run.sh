@@ -262,7 +262,7 @@ tool17_asset_block() {
 }
 
 tool17_line_number() {
-  grep -nF "$2" "$1" | head -n 1 | cut -d: -f1
+  grep -nF "$2" "$1" | sed -n 1p | cut -d: -f1
 }
 
 tool17_validate() {
