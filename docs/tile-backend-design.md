@@ -4523,8 +4523,14 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
   切分视图丢掉来处），std/gpu 六个在原地改、跑测试、恢复（不查别名、In 与 In 也算别名、不查 In 跟随、忽略给定
   网格、不比较两个 Out、不查尺寸），每个都有测试变红。类型层四个：格式不符、少一个张量、体的元数不符、标记格式
   与体不符，各是一条编译错误，同一程序改对后编译通过。
-- golden：`kernels.dawn` 一行未动、`lower` / `render` / `bytecode` 未动，预测 191 个逐字节不动，以全量
-  `scripts/tile-golden/run.sh` 为准（结果见报告与下面的回填）。
+- golden：`kernels.dawn` 一行未动、`lower` / `render` / `bytecode` 未动，预测逐字节不动。全量
+  `scripts/tile-golden/run.sh`（本机，`tileiras` 13.4.92，sm_86，49 min 54 s）：192 个 kernel（191 个加 flash_attn）的
+  trace、两后端文本 golden、两后端字节码 golden、`tileiras` 汇编各 192 PASS，**逐字节不动**；269 个变异体全部按名变红。
+- sm_86 台账：在代码提交上跑 `scripts/tile-gpu-diff/run.sh` 一次通过（27 min 57 s），新行 `#` 之后除 `inputs` 外
+  逐字与上一行相同（脚本比对）：设备看到的仍是原来那些程序；摘要变了只因 `packages/tileir` 与 `std/gpu` 是 tile 输入。
+  `run.sh --check` 通过。sm_90 / sm_100 台账归所有者。
+- 墙钟：`trace_kernel` 路径不碰角色表（空表时 `check_write` 第一句返回），新增的只有 `aims` 在指针 / 视图操作上的
+  一次 map 插入；golden 单价由编译主导，规划值不动。
 
 **七、版本。** `tileir` 0.5.0 → 0.5.1：只加名字（`trace1`…`trace5`、`Arg`、`Cells`、`cells`、`FREE_AXIS`），
 `trace_kernel` / `trace_calls` 的签名与记录结果不变，私有的 `Write.Whole` 改名 `AnyOf` 只为把 `Whole` 让给公开面；
@@ -4603,7 +4609,7 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
 | **T17 `loop` 内 `return`、`ftoi` 饱和、`ftof` 舍入表与 `rmw.xchg`**（已落地，13.4 覆盖刀的第二把，§6.20） | 「13.4 给旧操作码的三处新形状在本机 3080 上各有一个与独立宿主参考逐位相同的 kernel：block 在循环中途结束整个 kernel，第几轮、走哪个出口由设备自己的 store 说出来；`saturating` 改变的是哪几格，是量出来的（本机只有 NaN 格）；`ftof` 每一对格式收哪几种舍入，是 360 格逐格问过汇编器的；而 `xchg` 这个从 13.1 起就能拼、一直没有 kernel 要的模式有了第一个客户」（今天写不出：`return` 只能在 entry 与 `if` 里，`ftoi` 的 flags 字恒为 0，`ftof` 只写得出默认模式，`rmw.xchg` 是三本账里最后一行 `deferred`） | **零新 opcode**。`dev.dawn`：`t_return_if` 与 `d_return_if`、`float_to_int_sat`、`float_to_float_zero` / `_down` / `_up` / `_away`；`prog.dawn`：`Return` 与 `return_passes`（`for` / 归约 / 扫描里拒），`ftof_mode` / `ftof_modes` / `check_ftof`（13.4 的表）；`lower.dawn`：`Return` 降成 `Ret`，`yielded` 认 `Ret`；`bytecode.dawn`：`ROUND_NEAREST_AWAY`、`FTOI_FLAG_SATURATING`、`ftoi_flag_word`、`ftof_rounding_of`；`render.dawn` 两处拼法。`std/narrow`：`round_binary_away`、`round_tf32_away`（内联测试）；`packages/tileref`：`loop_return_ref`、`attr_sat_ref`、`attr_ftof_ref`、`attr_xchg_ref`。kernel 四个：`loop_return` 进 `loop_diff`（4 → 5），`attr_sat` / `attr_ftof` / `attr_xchg` 进 `attr_diff`（8 → 11）。三本账：`return` / `ftof` 升层 3，三个属性取值改 `implemented`，`rounding.zero` 升层 3，`no-client-kernel` 退休；`tile.yml` 分到第七片 | 层 0/1 四个新 golden、`FUNC GLOBAL` 四个，`tileiras` 一次通过（sm_86）；层 2 本机五个 loop kernel、十一个属性 kernel 全 `identical:exact`（`attr_approx` 照旧容差），`loop_return` 的出口 `74r,100b,1r,100r` 与语料自数逐字相同，十个新 probe 计数都钉在零以上；`ftof` 表 360 / 360 与 verifier 一致；`check.py --self-test` 绿；不分片全量 268 项 3356 s 绿，`tile.yml` 分到七片，规划值 945 → 826 s，path-total 6580 → 6692 s | 层 1 两条：`loop-return-as-break`（零操作数 `break` 与携带三个值的 loop 类型不符）、`ftof-zero-as-nearest-away`（f64 到 f32 不收 `nearest_away`）。层 2 四条：`loop-return-dropped`（只有 `loop_return` 红）、`ftoi-saturating-bit-dropped`（`attr_sat` 的 NaN 格红，`nan_zero=0`）、`ftof-away-as-nearest-even`（`attr_ftof` 红，`tf32_away=0`）、`rmw-xchg-as-add`（`attr_xchg` 红）。`loop-break-condition-inverted` 的红集加上 `loop_return` | 2（实报 1） |
 | **C1 + D-1 记录期形状检查与块内 fork 不相交**（已落地，cuTile 借鉴第一刀，§6.21） | 「一个逐元素操作的操作数形状与它声明的不符，在记录期就被拒，消息带 kernel 名、操作序号与操作名；`d_fork2` 的两支写同一元素也在记录期被拒」 | `packages/tileir/src/prog.dawn` 的记录 handler（句柄表、逐元素检查、`t_tok_join` 的 fork 检查） | 191 个 golden 逐字节不动；包测试五项新增 | 四条：去格式比较、去形状比较、去 fork 检查、消息去序号 | 1 |
 | **C1′ view 补行、`t_shape_of`、mma 的 K**（已落地，§6.22） | 「经 view 读出的值的形状不符在记录期被拒；任何有行的句柄都能问出它的格式与形状；mma 两个操作数的 K 不一致在记录期被拒」 | `packages/tileir/src/prog.dawn`（`Held.what`、view 与 `load_view` 的行、`t_shape_of` 臂、`check_k`）、`dev.dawn`（`Dev` 加一条、三个测试 handler 各一臂）、`tileir` 0.4.0 | 191 个 golden 逐字节不动；包测试三项新增 | 四条：`load_view` 不记行、`t_shape_of` 不拒、去 K 检查、view 当 tile | 0.5 |
-| **C2 + D-3 + D-5 参数标记：角色与几何、`trace1`…`trace5`、类型化入口**（已落地，§6.24） | 「一个 kernel 的参数格式只写一次，写错是编译错误；写进 In 参数在记录期被拒；Out 格子推出网格，两个 Out 切出两个网格、In 跟随的轴块数不符在记录期被拒；发射时 Out/Shared 与别的参数同一缓冲、网格与格子不符、张量短于格子都在问设备之前被拒」 | `packages/tileir/src/prog.dawn`（`Cells`、`Arg`、`trace1`…`trace5`、记录 handler 的角色与 `aims`）、`std/gpu.dawn`（`EntryArg`、`Entry1`…`Entry5`、`entry_grid`、`launch_entry1`…`launch_entry5`）、`tileir` 0.5.1 | 191 个 golden 逐字节不动；包测试六项、std 测试两项新增；补测 tile 1024 > extent 1000 在 sm_86 上成立 | 十四条：tileir 四个、std/gpu 六个变异体，类型层四条编译错误 | 1 |
+| **C2 + D-3 + D-5 参数标记：角色与几何、`trace1`…`trace5`、类型化入口**（已落地，§6.24） | 「一个 kernel 的参数格式只写一次，写错是编译错误；写进 In 参数在记录期被拒；Out 格子推出网格，两个 Out 切出两个网格、In 跟随的轴块数不符在记录期被拒；发射时 Out/Shared 与别的参数同一缓冲、网格与格子不符、张量短于格子都在问设备之前被拒」 | `packages/tileir/src/prog.dawn`（`Cells`、`Arg`、`trace1`…`trace5`、记录 handler 的角色与 `aims`）、`std/gpu.dawn`（`EntryArg`、`Entry1`…`Entry5`、`entry_grid`、`launch_entry1`…`launch_entry5`）、`tileir` 0.5.1 | 192 个 golden 逐字节不动；sm_86 台账各档计数不变；包测试六项、std 测试两项新增；补测 tile 1024 > extent 1000 在 sm_86 上成立 | 十四条：tileir 四个、std/gpu 六个变异体，类型层四条编译错误 | 1 |
 
 ## 8. 风险
 
