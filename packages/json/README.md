@@ -19,7 +19,7 @@ fn reformat(text: String) -> String =
 - A number with no `.`, `e` or `E` is a `JInt`, so ids, money in minor units
   and epoch milliseconds above 2^53 are not rounded; any other number is a
   `JNum`. An integer wider than 64 bits is a `NumberRange` error that carries
-  the literal.
+  the literal; its `message` quotes only the first 64 characters of it.
 - Objects keep insertion order. `render` writes compact output.
 - `parse` never panics. A `JsonError` has a `kind` to branch on (`Syntax`,
   `Truncated`, `Trailing`, `Depth`, `NumberRange`), a code-point `offset` and

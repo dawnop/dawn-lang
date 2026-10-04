@@ -3,6 +3,13 @@
 Newest first. The manifest name is `json2` from 2.0.0 on; consumers keep
 `use json/...` by aliasing the dependency as `json`.
 
+## 2.0.2 (2026-10-05)
+
+A number error's `message` quotes at most the first 64 characters of the
+literal, then `...`. It used to quote the whole literal, so a megabyte of
+digits came back as a megabyte of error text to whoever the message was
+shown to. `NumberRange` still carries the whole literal.
+
 ## 2.0.1 (2026-10-03)
 
 Doc comments on the remaining public declarations. No behaviour change.
