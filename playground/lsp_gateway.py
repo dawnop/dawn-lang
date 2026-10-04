@@ -80,6 +80,16 @@ HTTP_TOKEN_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~"
 )
 MAX_JSONRPC_INTEGER = 9_007_199_254_740_991
+# A semantic token legend is a short list of short names (the server's is 13
+# types and 4 modifiers). Modifiers are bits of one integer, and sixteen of
+# them keep that integer to five digits like every other one in a token.
+MAX_LEGEND_TYPES = 64
+MAX_LEGEND_MODIFIERS = 16
+MAX_LEGEND_NAME = 32
+# The widest one semantic-tokens integer can be once encoded: five digits
+# (lines, columns and lengths stay under the 65,536-byte source cap, the type
+# under 64, the modifier bits under 2**16), and a comma.
+SEMANTIC_INT_BYTES = 6
 
 
 def _site_origin() -> str:
@@ -636,6 +646,142 @@ def require_range(params: dict[str, Any]) -> dict[str, dict[str, int]]:
     return {"start": position_value(value.get("start")), "end": position_value(value.get("end"))}
 
 
+def semantic_legend_value(provider: Any) -> dict[str, list[str]] | None:
+    """The child's semantic tokens legend, or None when it offers none.
+
+    The legend crosses as the child sent it, in its order: the browser decodes
+    a token's type by looking its index up here, so a legend the gateway wrote
+    itself would mis-colour every token the day the server's order moved
+    (docs/lsp-references-design.md §T2). A child that offers no legend, or one
+    that is not a short list of short names, gets no semantic tokens surface
+    at all; the Playground then keeps its grammar colours.
+    """
+    if not isinstance(provider, dict):
+        return None
+    legend = provider.get("legend")
+    if not isinstance(legend, dict):
+        return None
+    if provider.get("range") is not True:
+        return None
+    types = legend.get("tokenTypes")
+    modifiers = legend.get("tokenModifiers")
+
+    def names(value: Any, limit: int) -> list[str] | None:
+        if not isinstance(value, list) or len(value) > limit:
+            return None
+        for name in value:
+            if (
+                not isinstance(name, str)
+                or not 0 < len(name) <= MAX_LEGEND_NAME
+                or not name.isascii()
+                or not name.isalpha()
+            ):
+                return None
+        return list(value)
+
+    safe_types = names(types, MAX_LEGEND_TYPES)
+    safe_modifiers = names(modifiers, MAX_LEGEND_MODIFIERS)
+    if not safe_types or safe_modifiers is None:
+        return None
+    return {"tokenTypes": safe_types, "tokenModifiers": safe_modifiers}
+
+
+def semantic_tokens_value(result: Any) -> Any:
+    """A semantic tokens reply as the browser may read it: the `data` array
+    of non-negative integers and nothing else (no `resultId`: there is no
+    delta to ask for with it)."""
+    if result is None:
+        return None
+    if not isinstance(result, dict):
+        raise ChildProtocolError("semantic tokens result is not an object")
+    data = result.get("data")
+    if not isinstance(data, list) or len(data) % 5 != 0:
+        raise ChildProtocolError("semantic tokens data is not a list of 5-tuples")
+    for value in data:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > 2_147_483_647
+        ):
+            raise ChildProtocolError("semantic tokens data holds a non-integer")
+    return {"data": data}
+
+
+def utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def utf16_index(line: str, character: int) -> int:
+    """The str index of a UTF-16 column within one line, clamped to its end."""
+    units = 0
+    for index, char in enumerate(line):
+        if units >= character:
+            return index
+        units += 2 if ord(char) > 0xFFFF else 1
+    return len(line)
+
+
+def semantic_range_budget(message_bytes: int) -> int:
+    """How many UTF-8 bytes of source one range request may cover.
+
+    Every token is a name that starts inside the range and is followed by at
+    least one other byte before the next name starts, so a span of n bytes
+    holds at most n // 2 + 1 tokens, each five integers. Kept a kilobyte short
+    of the message cap for the envelope (a request id may be 128 characters).
+    """
+    return max(0, (message_bytes - 1024) // (5 * SEMANTIC_INT_BYTES) * 2 - 2)
+
+
+def clamp_range(
+    text: str, wanted: dict[str, dict[str, int]], budget: int
+) -> dict[str, dict[str, int]]:
+    """The requested range, cut short where it would cover more than `budget`
+    UTF-8 bytes of `text`.
+
+    The reply to a range request only grows with the source it covers, and a
+    reply over the message cap is a child protocol error that ends the
+    session. Cutting the range keeps the reply under the cap, and the cut
+    lands at the end of a viewport-sized prefix, which is what the browser
+    asked for. Lines are split on LF, as the browser and the server do.
+    """
+    lines = text.split("\n")
+    start = wanted["start"]
+    end = wanted["end"]
+    if (end["line"], end["character"]) <= (start["line"], start["character"]):
+        return {"start": dict(start), "end": dict(start)}
+    if start["line"] >= len(lines):
+        return {"start": dict(start), "end": dict(end)}
+    first = lines[start["line"]]
+    begin = utf16_index(first, start["character"])
+    used = 0
+    line = start["line"]
+    column = begin
+    end_line = min(end["line"], len(lines) - 1)
+    while True:
+        current = lines[line]
+        stop = utf16_index(current, end["character"]) if line == end_line else len(current)
+        while column < stop:
+            size = len(current[column].encode("utf-8"))
+            if used + size > budget:
+                return {
+                    "start": dict(start),
+                    "end": {"line": line, "character": utf16_length(current[:column])},
+                }
+            used += size
+            column += 1
+        if line >= end_line:
+            return {"start": dict(start), "end": dict(end)}
+        used += 1
+        if used > budget:
+            return {
+                "start": dict(start),
+                "end": {"line": line, "character": utf16_length(current)},
+            }
+        line += 1
+        column = 0
+
+
 # What a completion item may carry back to `completionItem/resolve`: a label
 # and kind no longer than the server ever sends, and the `data` the server put
 # on it (docs/lsp-hover-design.md §D7), which names the Playground document and
@@ -734,8 +880,11 @@ def compact_json(message: dict[str, Any]) -> bytes:
 class ClientProtocol:
     """Validate and narrow one browser's LSP view to one scratch buffer."""
 
-    def __init__(self, source_bytes: int) -> None:
+    def __init__(self, source_bytes: int, message_bytes: int = HARD_MESSAGE_BYTES) -> None:
         self.source_bytes = source_bytes
+        self.range_budget = semantic_range_budget(message_bytes)
+        self.text = ""
+        self.semantic_legend: dict[str, list[str]] | None = None
         self.state = "new"
         self.initialize_id: int | str | None = None
         self.version = -1
@@ -808,6 +957,7 @@ class ClientProtocol:
                 raise GatewayError(1008, "didOpen version is too large")
             text = self._source(document.get("text"))
             self.version = version
+            self.text = text
             self.state = "open"
             return compact_json(
                 {
@@ -851,6 +1001,7 @@ class ClientProtocol:
                 raise GatewayError(1008, "incremental didChange is not allowed")
             text = self._source(changes[0].get("text"))
             self.version = version
+            self.text = text
             return compact_json(
                 {
                     "jsonrpc": "2.0",
@@ -905,6 +1056,32 @@ class ClientProtocol:
                     "params": {
                         "textDocument": {"uri": DOCUMENT_URI},
                         "range": hint_range,
+                    },
+                }
+            )
+
+        # Semantic tokens for what is on screen (docs/lsp-references-design.md
+        # §T2). Only `range`: `full` is not offered, because its reply grows
+        # with the whole buffer, and the range is cut to what keeps the reply
+        # under the message cap. Refused when the child offered no legend.
+        if method == "textDocument/semanticTokens/range":
+            if self.semantic_legend is None:
+                raise GatewayError(1008, "method is not allowed")
+            if len(self.pending) >= HARD_PENDING_REQUESTS:
+                raise GatewayError(1008, "too many pending LSP requests")
+            request_id = self._request_id(message)
+            params = require_params(message)
+            require_document(params)
+            token_range = clamp_range(self.text, require_range(params), self.range_budget)
+            self.pending[request_id] = method
+            return compact_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": {
+                        "textDocument": {"uri": DOCUMENT_URI},
+                        "range": token_range,
                     },
                 }
             )
@@ -997,23 +1174,31 @@ class ClientProtocol:
             self.state = "initialize-done"
             # Advertise the gateway's deliberately narrower surface, not every
             # feature the native server happens to implement.
+            capabilities: dict[str, Any] = {
+                "positionEncoding": "utf-16",
+                "textDocumentSync": 1,
+                "completionProvider": {
+                    "resolveProvider": True,
+                    "triggerCharacters": ["!"],
+                },
+                "hoverProvider": True,
+                "definitionProvider": True,
+                "inlayHintProvider": True,
+            }
+            self.semantic_legend = semantic_legend_value(
+                result["capabilities"].get("semanticTokensProvider")
+            )
+            if self.semantic_legend is not None:
+                capabilities["semanticTokensProvider"] = {
+                    "legend": self.semantic_legend,
+                    "range": True,
+                    "full": False,
+                }
             return compact_json(
                 {
                     "jsonrpc": "2.0",
                     "id": response_id,
-                    "result": {
-                        "capabilities": {
-                            "positionEncoding": "utf-16",
-                            "textDocumentSync": 1,
-                            "completionProvider": {
-                                "resolveProvider": True,
-                                "triggerCharacters": ["!"],
-                            },
-                            "hoverProvider": True,
-                            "definitionProvider": True,
-                            "inlayHintProvider": True,
-                        }
-                    },
+                    "result": {"capabilities": capabilities},
                 }
             )
         if response_id not in self.pending:
@@ -1030,6 +1215,8 @@ class ClientProtocol:
             message = {**message, "result": safe}
         if method == "completionItem/resolve" and "result" in message:
             message = {**message, "result": resolved_item_value(message["result"])}
+        if method == "textDocument/semanticTokens/range" and "result" in message:
+            message = {**message, "result": semantic_tokens_value(message["result"])}
         return compact_json(message)
 
 
@@ -1079,7 +1266,7 @@ class Session:
         self.id = session_id
         self.config = config
         self.ws = ws
-        self.protocol = ClientProtocol(config.source_bytes)
+        self.protocol = ClientProtocol(config.source_bytes, config.message_bytes)
         self.proc: asyncio.subprocess.Process | None = None
         self.started = time.monotonic()
         self.message_count = 0
