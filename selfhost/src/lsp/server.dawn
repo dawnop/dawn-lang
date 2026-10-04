@@ -44,15 +44,16 @@ use lsp/lspq.{
   find_target, typed_trees, inlay_hints, item_doc_site, sig_doc_site, decl_lo_named, resolutions
 }
 use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown, cut_doc}
-use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of}
+use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of, doc_link_spans}
 use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
-use lsp/lspref.{Occurrence, occurrences, ModRefs, Shift, mod_refs, refs_to, refresh}
-use front/lexer.{line_starts_of, view_of, SourceView}
+use lsp/lspref.{Occurrence, occurrences, ModRefs, Shift, mod_refs, refs_to, refresh, NotPun}
+use lsp/lsprename.{Key, Edit, name_class, check_new_name, name_edit, ordered, apply_edits, changed_name, link_tail, spells}
+use front/lexer.{line_starts_of, view_of, SourceView, slice_cps}
 use front/diag.{utf16_len}
-use check/types.{Sig, builtins, sig_render, sig_render_parts}
+use check/types.{Sig, builtins, sig_render, sig_render_parts, PkgRoot}
 use front/ast.{
   Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
 }
@@ -1329,6 +1330,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ("definitionProvider", JBool(true)),
       ("referencesProvider", JBool(true)),
       ("documentHighlightProvider", JBool(true)),
+      ("renameProvider", jobj([("prepareProvider", JBool(true))])),
       ("documentSymbolProvider", JBool(true)),
       ("documentFormattingProvider", JBool(true)),
       ("codeActionProvider", JBool(true)),
@@ -1376,6 +1378,14 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
   } else if method == "textDocument/references" {
     let (reply, st2) = handle_references(st, params)
     respond(id, reply)
+    st = st2
+  } else if method == "textDocument/prepareRename" || method == "textDocument/rename" {
+    let (reply, st2) = if method == "textDocument/rename" { handle_rename(st, params) } else { handle_prepare_rename(st, params) }
+    match reply {
+      Ok(r) -> respond(id, r)
+      # RequestFailed: the editor shows the message
+      Err(why) -> respond_error(id, -32803, why)
+    }
     st = st2
   } else if method == "textDocument/documentHighlight" {
     respond(id, handle_document_highlight(st, params))
@@ -2774,6 +2784,363 @@ fn handle_document_highlight(st: LspState, params: Json) -> Json =
     }
     None -> JArr([])
   }
+
+# ---- rename (docs/lsp-references-design.md §R3) ----
+
+## What a rename starts from: the name at the cursor, the declaration it
+## resolves to, and the workspace's references program both were read in.
+type RenameStart = {
+  ws: Workspace,
+  lookup: String,
+  # the identity of the workspace's source root: no file outside it is edited
+  root: String,
+  world: RefsWorld,
+  prog: Program,
+  entry: CheckedMod,
+  # every program file's identity, by the path the program loaded it from
+  ident: Map[String, String],
+  # every program file's analyzed text, by identity
+  texts: Map[String, String],
+  target: Key,
+  # the name as the cursor's occurrence spells it, and that occurrence
+  old: String,
+  lo: Int,
+  hi: Int,
+  # the name is one a `use m.{f as h}` binds, `h`: only this module's
+  # spelling of it changes, and `f` is left alone (Gleam's rule for a name
+  # from another package, here for any)
+  as_name: Bool
+}
+
+## Is `name` the local name of an `as` in one of `m`'s import lists?
+fn import_alias(m: Module, name: String) -> Bool = {
+  for d in m.decls {
+    match d {
+      DUseModule(_, selective, _, _, _, _, _) ->
+        match selective {
+          Some(names) -> {
+            for n in names {
+              match n.local {
+                Some(r) -> if r.name == name && n.name != name { return true }
+                None -> ()
+              }
+            }
+          }
+          None -> ()
+        }
+      _ -> ()
+    }
+  }
+  false
+}
+
+## Is the declaration at `def` of `m` its top-level `main`?
+fn is_main(m: Module, def: (Int, Int)) -> Bool = {
+  let (lo, _) = def
+  for d in m.decls {
+    match d {
+      DFn(f) -> if f.name == "main" && f.nlo == lo { return true }
+      _ -> ()
+    }
+  }
+  false
+}
+
+## The first diagnostic of `prog` in the file whose identity is `id`.
+fn first_diag_in(prog: Program, id: String) -> Option[LocDiag] !Fs !Env = {
+  for ld in prog.diags {
+    if canon_identity(ld.path) == id { return Some(ld) }
+  }
+  None
+}
+
+## The rename at `offset` of `d`, as far as the name and its declaration go,
+## or why there is none (§R3.2). The references program is brought up to
+## date on the way, and the state returned keeps it either way.
+fn rename_start(st: LspState, d: Doc, offset: Int) -> (Result[RenameStart, String], LspState) !Fs !Env !io = {
+  let analysis = match analysis_of(st, d) {
+    Some(a) -> a
+    None -> return (Err("this document has no analysis to rename in"), st)
+  }
+  let lookup = match analysis.workspace_key {
+    Some(k) -> k
+    None -> return (Err("rename works in the files of a project, not in a buffer with no file"), st)
+  }
+  let root = analysis.definition_root.expect("a workspace document's source root")
+  let ws = match map.get(st.workspaces, lookup) {
+    Some(Ready(w)) -> w
+    _ -> return (Err("this document has no analysis to rename in"), st)
+  }
+  let world = match refs_world(st, ws) {
+    Some(w) -> w
+    None -> return (Err("two open documents disagree about one file"), st)
+  }
+  # the program is kept whatever the answer: building it the first time
+  # checks the whole tree, and a refusal is no reason to pay that again
+  let kept = keep_world_of(st, lookup, ws, world)
+  let prog = world.prog.expect("a current references program")
+  let entry = match list.find(prog.modules, cm => cm.mod_path == analysis.entry) {
+    Some(e) -> e
+    None -> return (Err("this document has no analysis to rename in"), kept)
+  }
+  let qc = module_qcx(st, prog, program_exports(st, prog), entry, d.view.cps)
+  let t = match find_target(qc, offset) {
+    Some(t) -> t
+    None -> return (Err("there is no name here to rename"), kept)
+  }
+  let def = match t.def {
+    Some(sp) -> sp
+    None -> return (Err("this name is not declared in this project's sources"), kept)
+  }
+  let here = match list.find(occurrences(qc, offset, true), o => o.lo <= offset && offset <= o.hi) {
+    Some(o) -> o
+    None -> return (Err("there is no name here to rename"), kept)
+  }
+  let old = slice_cps(d.view.cps, here.lo, here.hi)
+  if name_class(old) == Err("`${old}` is not a name") { return (Err("there is no name here to rename"), kept) }
+  var ident: Map[String, String] = map.empty()
+  var texts: Map[String, String] = map.empty()
+  for cm in prog.modules {
+    let id = canon_identity(cm.path)
+    ident = map.insert(ident, cm.path, id)
+    match map.get(world.texts, cm.mod_path) {
+      Some(text) -> { texts = map.insert(texts, id, text) }
+      None -> ()
+    }
+  }
+  let own = map.get(ident, entry.path).expect("the requesting module's identity")
+  let tpath = match t.def_path {
+    None -> own
+    Some(p) -> map.get(ident, p).unwrap_or(p)
+  }
+  let (dlo, dhi) = def
+  if dlo == 0 && dhi == 0 && t.def_path != None {
+    return (Err("`${old}` names a module; a module is renamed by moving its file"), kept)
+  }
+  let as_name = import_alias(entry.m, old)
+  if not as_name {
+    let ids = ident
+    let decl = match list.find(prog.modules, cm => map.get(ids, cm.path) == Some(tpath)) {
+      Some(cm) -> cm
+      None -> return (Err("`${old}` is declared outside this project's sources (in std, a builtin or a dependency); rename only changes the project's own declarations"), kept)
+    }
+    if package_of(decl.cx) != PkgRoot || not path_in_root(tpath, root) {
+      return (Err("`${old}` is declared outside this project's sources (in std, a builtin or a dependency); rename only changes the project's own declarations"), kept)
+    }
+    if is_main(decl.m, def) { return (Err("`main` is the program's entry point and keeps its name"), kept) }
+    match first_diag_in(prog, tpath) {
+      Some(_) -> return (Err("`${decl.mod_path}` has errors; rename reads every name, so fix them first"), kept)
+      None -> ()
+    }
+  }
+  match first_diag_in(prog, own) {
+    Some(_) -> return (Err("`${entry.mod_path}` has errors; rename reads every name, so fix them first"), kept)
+    None -> ()
+  }
+  (Ok(RenameStart {
+    ws: ws, lookup: lookup, root: root, world: world, prog: prog, entry: entry, ident: ident, texts: texts,
+    target: Key { path: tpath, def: def }, old: old, lo: here.lo, hi: here.hi, as_name: as_name
+  }), kept)
+}
+
+## `st` keeping `world` as the references program of the workspace `ws`,
+## filed under `lookup`.
+fn keep_world_of(st: LspState, lookup: String, ws: Workspace, world: RefsWorld) -> LspState = {
+  let next = Workspace { ..ws, world: Some(world) }
+  LspState { ..st, workspaces: map.insert(st.workspaces, lookup, Ready(next)) }
+}
+
+## `st` keeping the references program (and index) a rename read.
+fn keep_world(st: LspState, rs: RenameStart, world: RefsWorld) -> LspState = keep_world_of(st, rs.lookup, rs.ws, world)
+
+## `textDocument/prepareRename`: the name's range and its spelling, or why
+## the name at the position cannot be renamed.
+fn handle_prepare_rename(st: LspState, params: Json) -> (Result[Json, String], LspState) !Fs !Env !io =
+  match doc_of(st, params) {
+    Some(d) ->
+      match rename_start(st, d, pos_offset(d, params)) {
+        (Ok(rs), st1) -> (Ok(jobj([("range", jrange(d.view, d.ls, rs.lo, rs.hi)), ("placeholder", JStr(rs.old))])), st1)
+        (Err(why), st1) -> (Err(why), st1)
+      }
+    None -> (Err("this document is not open"), st)
+  }
+
+## `textDocument/rename`: a `WorkspaceEdit` renaming the name at the position
+## everywhere it is spelled in the project's sources, its doc links included,
+## or why not (§R3.3). The edited program is analyzed before the edit is
+## handed out, and refused when it has an error the program did not have or
+## when any name in it resolves elsewhere than it did.
+fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState) !Fs !Env !io = {
+  let d = match doc_of(st, params) {
+    Some(d) -> d
+    None -> return (Err("this document is not open"), st)
+  }
+  let new = ostr(params, "newName")
+  let rs = match rename_start(st, d, pos_offset(d, params)) {
+    (Ok(r), _) -> r
+    (Err(why), st1) -> return (Err(why), st1)
+  }
+  match check_new_name(rs.old, new) {
+    Ok(_) -> ()
+    Err(why) -> return (Err(why), keep_world(st, rs, rs.world))
+  }
+  let none: Map[String, Json] = map.empty()
+  if new == rs.old { return (Ok(jobj([("changes", JObj(none))])), keep_world(st, rs, rs.world)) }
+  let prog = rs.prog
+  let env = program_exports(st, prog)
+  var mods: Map[String, Module] = map.empty()
+  for tr in st.std.srcs {
+    let (mp, _, m) = tr
+    mods = map.insert(mods, mp, m)
+  }
+  for cm in prog.modules { mods = map.insert(mods, cm.mod_path, cm.m) }
+  # every module's names, read as references reads them, and the edits
+  var index = rs.world.refs
+  var shifts: Map[String, (String, Shift)] = map.empty()
+  var edits: List[Edit] = []
+  for cm in prog.modules {
+    let text = match map.get(rs.world.texts, cm.mod_path) {
+      Some(t) -> t
+      None -> continue
+    }
+    let id = map.get(rs.ident, cm.path).expect("module identity")
+    let kept = match map.get(index, cm.mod_path) {
+      Some(old_refs) -> {
+        let (fresh, next) = refresh(old_refs, rs.texts, shifts)
+        shifts = next
+        fresh
+      }
+      None -> None
+    }
+    let mr = match kept {
+      Some(m) -> m
+      None -> mod_refs(module_qcx(st, prog, env, cm, code_points(text)), id, text, rs.ident, rs.texts)
+    }
+    index = map.insert(index, cm.mod_path, mr)
+    if rs.as_name && cm.mod_path != rs.entry.mod_path { continue }
+    let cs = code_points(text)
+    let (tlo, thi) = rs.target.def
+    for r in refs_to(mr, rs.target.path, (tlo, thi), true) {
+      # a name a `use .. as` bound keeps its own spelling
+      if slice_cps(cs, r.lo, r.hi) == rs.old { edits = edits ++ [name_edit(id, r.lo, r.hi, r.pun, rs.old, new)] }
+    }
+    # a link naming the old name ends with it
+    if str.contains(text, "[`") && str.contains(text, "${rs.old}`]") {
+      let sc = LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }
+      for sp in doc_link_spans(text) {
+        let (lo, _, ltext) = sp
+        let (alo, ahi) = link_tail(lo, ltext)
+        if slice_cps(cs, alo, ahi) != rs.old { continue }
+        match resolve_link(sc, mods, ltext) {
+          Ok(lt) ->
+            match list.find(prog.modules, m2 => m2.mod_path == lt.module) {
+              Some(m2) ->
+                if map.get(rs.ident, m2.path) == Some(rs.target.path) && lt.nlo == tlo {
+                  edits = edits ++ [name_edit(id, alo, ahi, NotPun, rs.old, new)]
+                }
+              None -> ()
+            }
+          Err(_) -> ()
+        }
+      }
+    }
+  }
+  let world = RefsWorld { ..rs.world, refs: index }
+  let st1 = keep_world(st, rs, world)
+  # the edits by file, and the files as they would read
+  var by_path: Map[String, List[Edit]] = map.empty()
+  for e in edits {
+    if not path_in_root(e.path, rs.root) {
+      return (Err("renaming `${rs.old}` would edit ${e.path}, which is outside this project's sources"), st1)
+    }
+    by_path = map.insert(by_path, e.path, map.get(by_path, e.path).unwrap_or([]) ++ [e])
+  }
+  var after_texts = rs.texts
+  for pr in map.entries(by_path) {
+    let (p, es) = pr
+    let one = ordered(es)
+    by_path = map.insert(by_path, p, one)
+    after_texts = map.insert(after_texts, p, apply_edits(map.get(rs.texts, p).expect("an edited file's text"), one))
+  }
+  # the edited program, analyzed from the references program's own session
+  # and parses; what it remembers is not kept, the edit is not applied yet
+  let after = match workspace_inputs(st, rs.ws.plan, rs.ws.path_by_uri) {
+    InputsConflict(_) -> return (Err("two open documents disagree about one file"), st1)
+    InputsReady(overlay, entries, _) -> {
+      var over = overlay
+      for cm in prog.modules {
+        let id = map.get(rs.ident, cm.path).expect("module identity")
+        if map.has(by_path, id) { over = map.insert(over, cm.path, map.get(after_texts, id).expect("edited text")) }
+      }
+      for pr in map.entries(rs.ws.path_by_uri) {
+        let (_, p) = pr
+        let id = canon_identity(p)
+        if map.has(by_path, id) { over = map.insert(over, p, map.get(after_texts, id).expect("edited text")) }
+      }
+      let read = load_entries_reusing(rs.ws.plan, entries ++ rs.world.seeds, over, rs.world.parses)
+      incremental.analyze(rs.world.cache, read.loaded).program
+    }
+  }
+  # no error the program did not have
+  var before_counts: Map[String, Int] = map.empty()
+  for ld in prog.diags {
+    let id = canon_identity(ld.path)
+    before_counts = map.insert(before_counts, id, map.get(before_counts, id).unwrap_or(0) + 1)
+  }
+  var after_counts: Map[String, Int] = map.empty()
+  for ld in rendered_diags(after) {
+    let id = canon_identity(ld.path)
+    let n = map.get(after_counts, id).unwrap_or(0) + 1
+    after_counts = map.insert(after_counts, id, n)
+    if n > map.get(before_counts, id).unwrap_or(0) {
+      let text = map.get(after_texts, id).unwrap_or("")
+      let (line, ch) = lsp_position(view_of(text), line_starts_of(text), ld.d.lo)
+      return (Err("renaming `${rs.old}` to `${new}` breaks the program: ${id}:${line + 1}:${ch + 1}: ${ld.d.msg}"), st1)
+    }
+  }
+  # no name that resolves elsewhere than it did: in every edited module and
+  # every module that spells the new name somewhere
+  let after_env = program_exports(st, after)
+  for cm in after.modules {
+    let id = match map.get(rs.ident, cm.path) {
+      Some(i) -> i
+      None -> continue
+    }
+    let text = match map.get(after_texts, id) {
+      Some(t) -> t
+      None -> continue
+    }
+    if not map.has(by_path, id) && not spells(text, new) { continue }
+    let before = match map.get(index, cm.mod_path) {
+      Some(mr) -> mr.refs
+      None -> continue
+    }
+    let mr2 = mod_refs(module_qcx(st, after, after_env, cm, code_points(text)), id, text, rs.ident, after_texts)
+    match changed_name(id, before, mr2.refs, by_path, rs.target) {
+      Some(at) -> {
+        let (line, ch) = lsp_position(view_of(text), line_starts_of(text), at)
+        return (Err("renaming `${rs.old}` to `${new}` would change what the name at ${id}:${line + 1}:${ch + 1} refers to"), st1)
+      }
+      None -> ()
+    }
+  }
+  # the edit, by document
+  var uri_of: Map[String, String] = map.empty()
+  for uri in sort(map.keys(rs.ws.path_by_uri)) {
+    let p = canon_identity(map.get(rs.ws.path_by_uri, uri).expect("workspace path"))
+    if not map.has(uri_of, p) { uri_of = map.insert(uri_of, p, uri) }
+  }
+  var changes: Map[String, Json] = map.empty()
+  for pr in map.entries(by_path) {
+    let (p, es) = pr
+    let text = map.get(rs.texts, p).expect("an edited file's text")
+    let view = view_of(text)
+    let ls = line_starts_of(text)
+    let uri = map.get(uri_of, p).unwrap_or(path_to_uri(p))
+    changes = map.insert(changes, uri, JArr(map(es, e => jobj([("range", jrange(view, ls, e.lo, e.hi)), ("newText", JStr(e.text))]))))
+  }
+  (Ok(jobj([("changes", JObj(changes))])), st1)
+}
 
 ## Resolve a definition site to a Location: a None def_path (or one naming the
 ## requesting document) maps through the live buffer; another file maps

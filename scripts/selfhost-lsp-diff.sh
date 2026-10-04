@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints (left-out defaults among them), semantic tokens (full and a range), references (in one file and across files) and document highlights, folded values of closed pure
+# on hover and on `use` lines, inlay hints (left-out defaults among them), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, folded values of closed pure
 # expressions on hover, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -556,6 +556,10 @@ req("textDocument/documentHighlight", at(inlays_uri, inlays_text, "(n, tag)", 1,
 # its import, the call and its declaration in util.dawn, a file not open
 req("textDocument/references", {**at(inlays_uri, inlays_text, "pad_to(tag", 1, 0),
     "context": {"includeDeclaration": True}})
+# rename (docs/lsp-references-design.md §R3): the same `pad_to`, prepared and
+# then renamed in both files
+req("textDocument/prepareRename", at(inlays_uri, inlays_text, "pad_to(tag", 1, 0))
+req("textDocument/rename", {**at(inlays_uri, inlays_text, "pad_to(tag", 1, 0), "newName": "pad_out"})
 note("textDocument/didClose", tdoc(inlays_uri))
 
 # left-out defaults: the whole file, with the session's default options

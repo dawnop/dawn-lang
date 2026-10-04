@@ -185,6 +185,54 @@ pub fn rewrite_links(doc: String, f: fn(String) -> Option[String]) -> String = {
   join(out, "\n")
 }
 
+## Every link in the `##` comments of the module text `text` (spec §1.2):
+## the span, in code points of `text`, of the link's text between its
+## backticks, and that text. `##` lines on consecutive lines are one doc, so a
+## fence opened on one line ends on a later one as `doc_links` reads it. A
+## rename rewrites the links that name what it renames
+## (docs/lsp-references-design.md §R3).
+pub fn doc_link_spans(text: String) -> List[(Int, Int, String)] = {
+  let ds = doc_src_of(text)
+  var out: List[(Int, Int, String)] = []
+  # the doc being read: where each of its lines starts in `text`, past the
+  # `##` and the one space after it, and the line
+  var block: List[(Int, String)] = []
+  var last = -2
+  for ln in sort(map.keys(ds.by_line)) {
+    let t = map.get(ds.by_line, ln).expect("a comment of the table")
+    if ln != last + 1 || not str.starts_with(t.text, "##") {
+      out = out ++ block_link_spans(block)
+      block = []
+    }
+    if str.starts_with(t.text, "##") {
+      let skip = if str.starts_with(t.text, "## ") { 3 } else { 2 }
+      block = block ++ [(t.lo + skip, str.drop(t.text, skip))]
+      last = ln
+    } else {
+      last = -2
+    }
+  }
+  out ++ block_link_spans(block)
+}
+
+fn block_link_spans(block: List[(Int, String)]) -> List[(Int, Int, String)] = {
+  let prose = prose_lines(map(block, b => {
+    let (_, line) = b
+    line
+  }))
+  var out: List[(Int, Int, String)] = []
+  for i in range(0, len(block)) {
+    if prose[i] {
+      let (base, line) = block[i]
+      for sp in line_links(code_points(line)) {
+        let (lo, hi, text) = sp
+        out = out ++ [(base + lo + 2, base + hi - 2, text)]
+      }
+    }
+  }
+  out
+}
+
 ## Which lines of a doc are prose rather than inside a fenced code block (a
 ## fence line itself is not prose).
 fn prose_lines(lines: List[String]) -> List[Bool] = {
@@ -591,6 +639,20 @@ test "rewriting touches the links and nothing else" {
   assert rewrite_links("a [`x`] b [`keep`] c [`y.z`]", f) == "a <x> b [`keep`] c <y.z>"
   # a fenced example and an ordinary link stay as written
   assert rewrite_links("[`x`](u)\n```\n[`x`]\n```\n[`x`]", f) == "[`x`](u)\n```\n[`x`]\n```\n<x>"
+}
+
+test "link spans are where each link's text sits in the module" {
+  let text = "## See [`scale`] and\n##[`geo.Shape`].\n## ```\n## [`no`]\n## ```\nfn f() = 1 # [`not_doc`]\n  ## [`late`]\n"
+  let cs = code_points(text)
+  let spans = doc_link_spans(text)
+  assert map(spans, sp => {
+    let (_, _, t) = sp
+    t
+  }) == ["scale", "geo.Shape", "late"]
+  for sp in spans {
+    let (lo, hi, t) = sp
+    assert from_code_points(map(range(lo, hi), k => cs[k])) == t
+  }
 }
 
 test "a doc's first line counts back from its declaration" {

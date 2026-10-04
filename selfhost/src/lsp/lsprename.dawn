@@ -1,0 +1,287 @@
+# Rename (docs/lsp-references-design.md §R3): what the new name may be, the
+# text edits a rename makes, and the check that the renamed program still
+# means what it meant. The server finds the names (the references index of
+# §R2) and analyzes the edited texts; everything here is pure.
+#
+# Why the check compares resolutions instead of trusting the compiler alone:
+# a top-level declaration may shadow std and the builtins (spec §10.3), so a
+# rename onto `len` can leave a module that compiles and calls a different
+# function at every old `len(..)`. No diagnostic says so. gopls answers this
+# with a conflict search per kind of scope; here the references walk already
+# says which declaration every name resolves to, before and after, so the
+# rename is accepted only when the two agree name for name, once every old
+# position and site is moved through the edits. A capture, a shadowing, a
+# lost import: each is a name whose declaration changed, and needs no rule of
+# its own. The compiler's verdict on the edited text is the other half of the
+# check (the server compares diagnostics), since a rename that breaks the
+# build changes no resolution it can still report.
+#
+# Why a record pun is spelled out rather than refused: `Point { x }` is one
+# span naming the field and the local. Renaming either half keeps the other
+# half's spelling, `Point { x: x2 }` or `Point { x2: x }`, which is what
+# rust-analyzer and Gleam write too. Folding a pair back into a pun when the
+# two names meet again is left to the writer, as formatting is.
+
+use std/map
+use std/str
+use front/lexer
+use front/token.{Token, IDENT, TYPEIDENT, NEWLINE, EOF, keyword}
+use lsp/lspref.{Ref, PunSide, NotPun, PunField, PunLocal}
+
+## A declaration as the references index keys it: the file it is in, by
+## identity, and its site in that file's text.
+pub(pkg) type Key = { path: String, def: (Int, Int) }
+
+## Is `name` an upper-case name (a type, constructor, trait, effect or
+## constant) or a lower-case one? Asked of the lexer, which is what decides it
+## for the parser (a `TYPEIDENT` is its own token): Ok(true) for upper,
+## Ok(false) for lower, Err when the text is not one name.
+pub(pkg) fn name_class(name: String) -> Result[Bool, String] = {
+  let (toks, diags) = lexer.lex(name)
+  var words: List[Token] = []
+  for t in toks {
+    if t.kind != NEWLINE && t.kind != EOF { words = words ++ [t] }
+  }
+  if len(diags) > 0 || len(words) != 1 || words[0].text != name {
+    return Err("`${name}` is not a name")
+  }
+  let k = words[0].kind
+  if k == TYPEIDENT {
+    Ok(true)
+  } else if k == IDENT {
+    Ok(false)
+  } else if keyword(name) != None {
+    Err("`${name}` is a keyword")
+  } else {
+    Err("`${name}` is not a name")
+  }
+}
+
+## Whether `new` may replace `old`: one name, not a keyword, and in the same
+## case class, since the case of a name's first letter is what the parser
+## reads it as (spec §1).
+pub(pkg) fn check_new_name(old: String, new: String) -> Result[Unit, String] = {
+  let upper = name_class(new)?
+  let was = name_class(old)?
+  if upper != was {
+    return Err(
+      if was {
+        "`${old}` names a type-level declaration, so its new name must start with an upper-case letter"
+      } else {
+        "`${old}` names a value, so its new name must start with a lower-case letter"
+      }
+    )
+  }
+  Ok(())
+}
+
+## One rewrite of a file's text: code points `lo..hi` become `text`. `name`
+## is where in `text` the renamed declaration is spelled; `rest`, for a record
+## pun spelled out, where the pun's other half is (which still names what it
+## named before), and None for a plain name.
+pub(pkg) type Edit = { path: String, lo: Int, hi: Int, text: String, name: (Int, Int), rest: Option[(Int, Int)] }
+
+fn cps_len(s: String) -> Int = len(code_points(s))
+
+## The edit renaming `old` to `new` at `lo..hi` of the file `path`, where the
+## name is the half `pun` of a record pun, or a plain name.
+pub(pkg) fn name_edit(path: String, lo: Int, hi: Int, pun: PunSide, old: String, new: String) -> Edit = {
+  let n = cps_len(new)
+  let o = cps_len(old)
+  match pun {
+    NotPun -> Edit { path: path, lo: lo, hi: hi, text: new, name: (0, n), rest: None }
+    # the field is renamed; the local keeps its name: `Point { x2: x }`
+    PunField -> Edit { path: path, lo: lo, hi: hi, text: "${new}: ${old}", name: (0, n), rest: Some((n + 2, n + 2 + o)) }
+    # the local is renamed; the field keeps its name: `Point { x: x2 }`
+    PunLocal -> Edit { path: path, lo: lo, hi: hi, text: "${old}: ${new}", name: (o + 2, o + 2 + n), rest: Some((0, o)) }
+  }
+}
+
+## `edits` sorted by offset, one per start: two names the index saw at one
+## start (a record type and its constructor share a site) are one edit.
+pub(pkg) fn ordered(edits: List[Edit]) -> List[Edit] = {
+  var out: List[Edit] = []
+  var last = -1
+  for e in sort_by(edits, (a, b) => a.lo - b.lo) {
+    if e.lo != last {
+      out = out ++ [e]
+      last = e.lo
+    }
+  }
+  out
+}
+
+## `text` with `edits` (one file's, `ordered`) applied.
+pub(pkg) fn apply_edits(text: String, edits: List[Edit]) -> String = {
+  let cs = code_points(text)
+  var parts: List[String] = []
+  var at = 0
+  for e in edits {
+    parts = parts ++ [from_code_points(map(range(at, e.lo), k => cs[k])), e.text]
+    at = e.hi
+  }
+  parts = parts ++ [from_code_points(map(range(at, len(cs)), k => cs[k]))]
+  join(parts, "")
+}
+
+## Where offset `p` of a file's old text is in its new text, `edits` being
+## that file's (`ordered`). An offset at an edit's start stays at its start;
+## one at an edit's end moves with it.
+pub(pkg) fn forward(edits: List[Edit], p: Int) -> Int = {
+  var out = p
+  for e in edits {
+    if e.hi <= p { out = out + cps_len(e.text) - (e.hi - e.lo) }
+  }
+  out
+}
+
+## The edit of `edits` starting at `lo`, if any.
+fn edit_at(edits: List[Edit], lo: Int) -> Option[Edit] = {
+  for e in edits {
+    if e.lo == lo { return Some(e) }
+  }
+  None
+}
+
+fn edits_of(by_path: Map[String, List[Edit]], path: String) -> List[Edit] =
+  map.get(by_path, path).unwrap_or([])
+
+## Where a name that started at `lo` in the old text starts in the new: in a
+## rewritten span, at the renamed name when it names the renamed declaration
+## (`renamed`), at the pun's other half when it names that.
+fn moved_start(edits: List[Edit], lo: Int, renamed: Bool) -> Int =
+  match edit_at(edits, lo) {
+    Some(e) -> {
+      let (a, _) = if renamed { e.name } else { e.rest.unwrap_or(e.name) }
+      forward(edits, e.lo) + a
+    }
+    None -> forward(edits, lo)
+  }
+
+## The key `k` of the old program as it reads in the new one. A site that is
+## a rewritten name is that name in its new spelling; any other site (a `let`
+## statement around a renamed call, a declaration further down) moves with
+## the edits before it.
+pub(pkg) fn forward_key(by_path: Map[String, List[Edit]], k: Key, renamed: Bool) -> Key = {
+  let edits = edits_of(by_path, k.path)
+  let (lo, hi) = k.def
+  match edit_at(edits, lo) {
+    Some(e) ->
+      if e.hi == hi {
+        let (a, b) = if renamed { e.name } else { e.rest.unwrap_or(e.name) }
+        let at = forward(edits, e.lo)
+        return Key { ..k, def: (at + a, at + b) }
+      }
+    None -> ()
+  }
+  Key { ..k, def: (forward(edits, lo), forward(edits, hi)) }
+}
+
+## One name as `changed_name` compares them, filed with where it starts.
+fn named(lo: Int, k: Key) -> (String, Int) = {
+  let (a, b) = k.def
+  ("${lo}|${a}|${b}|${k.path}", lo)
+}
+
+## Does the module `path` mean what it meant? `before`: its names in the old
+## text (the index entry); `after`: its names in the new text. Every old name
+## is moved through the edits, and so is the declaration it names, the
+## renamed one (`target`) to its new spelling; the two lists must then be the
+## same names at the same starts. None when they are; else the start, in the
+## new text, of the first name that differs.
+pub(pkg) fn changed_name(
+  path: String, before: List[Ref], after: List[Ref], by_path: Map[String, List[Edit]], target: Key
+) -> Option[Int] = {
+  let edits = edits_of(by_path, path)
+  var want: Map[String, Int] = map.empty()
+  for r in before {
+    let k = Key { path: r.path, def: r.def }
+    let renamed = k == target
+    let (s, lo) = named(moved_start(edits, r.lo, renamed), forward_key(by_path, k, renamed))
+    want = map.insert(want, s, lo)
+  }
+  var got: Map[String, Int] = map.empty()
+  for r in after {
+    let (s, lo) = named(r.lo, Key { path: r.path, def: r.def })
+    got = map.insert(got, s, lo)
+  }
+  var first = -1
+  for pr in map.entries(want) {
+    let (s, lo) = pr
+    if not map.has(got, s) && (first < 0 || lo < first) { first = lo }
+  }
+  for pr in map.entries(got) {
+    let (s, lo) = pr
+    if not map.has(want, s) && (first < 0 || lo < first) { first = lo }
+  }
+  if first < 0 { None } else { Some(first) }
+}
+
+## The span of the last segment of a doc link whose text starts at `lo`
+## (`a.b.c`: the `c`), the segment a rename rewrites.
+pub(pkg) fn link_tail(lo: Int, text: String) -> (Int, Int) = {
+  let segs = str.split(text, ".")
+  let n = cps_len(text)
+  (lo + n - cps_len(segs[len(segs) - 1]), lo + n)
+}
+
+fn is_word_char(c: Char) -> Bool = char_is_alnum(c) || c == '_'
+
+## Does `text` spell `name` as a whole word anywhere (code, comment or
+## string alike)? What decides which modules the resolution check walks: a
+## module that never spells the new name cannot have a name that now
+## resolves to it.
+pub(pkg) fn spells(text: String, name: String) -> Bool = {
+  if not str.contains(text, name) { return false }
+  let parts = str.split(text, name)
+  for i in range(0, len(parts) - 1) {
+    let before = code_points(parts[i])
+    let after = code_points(parts[i + 1])
+    let open = len(before) == 0 || not is_word_char(before[len(before) - 1])
+    let shut = len(after) == 0 || not is_word_char(after[0])
+    if open && shut { return true }
+  }
+  false
+}
+
+test "a new name keeps the old one's case class and is never a keyword" {
+  assert check_new_name("scale", "grow") == Ok(())
+  assert check_new_name("Shape", "Form") == Ok(())
+  assert check_new_name("LIMIT", "Cap") == Ok(())
+  assert check_new_name("scale", "Grow") != Ok(())
+  assert check_new_name("Shape", "form") != Ok(())
+  assert check_new_name("scale", "match") == Err("`match` is a keyword")
+  assert check_new_name("scale", "two words") == Err("`two words` is not a name")
+  assert check_new_name("scale", "_") == Err("`_` is not a name")
+  # a word whose meaning lives in one position is a name everywhere else
+  assert check_new_name("scale", "with") == Ok(())
+}
+
+test "a pun spelled out keeps the half that is not renamed" {
+  let text = "fn f() = Point {x}"
+  let e = name_edit("a", 16, 17, PunField, "x", "col")
+  assert apply_edits(text, [e]) == "fn f() = Point {col: x}"
+  let l = name_edit("a", 16, 17, PunLocal, "x", "v")
+  assert apply_edits(text, [l]) == "fn f() = Point {x: v}"
+  # the local's site was the pun; it is now the half the local kept
+  let by_path = map.insert(map.empty(), "a", [e])
+  assert forward_key(by_path, Key { path: "a", def: (16, 17) }, false) == Key { path: "a", def: (21, 22) }
+  assert forward_key(by_path, Key { path: "a", def: (16, 17) }, true) == Key { path: "a", def: (16, 19) }
+}
+
+test "positions move with the edits before them" {
+  let e1 = name_edit("a", 3, 6, NotPun, "abc", "a")
+  let e2 = name_edit("a", 9, 12, NotPun, "abc", "abcdef")
+  let es = [e1, e2]
+  assert forward(es, 0) == 0
+  assert forward(es, 3) == 3
+  assert forward(es, 6) == 4
+  assert forward(es, 9) == 7
+  assert forward(es, 12) == 13
+  assert apply_edits("fn abc = abc + 1", ordered([e2, e1, e1])) == "fn a = abcdef + 1"
+  assert link_tail(5, "geo.Shape.area") == (15, 19)
+  assert spells("let xs = 1", "xs")
+  assert not spells("let xss = maxs", "xs")
+  assert spells("xs", "xs")
+  assert spells("maxs + xs_ + (xs)", "xs")
+}
