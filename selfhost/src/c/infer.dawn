@@ -48,7 +48,8 @@ use ir/core.{
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CInt, CFloat, CBool, CStr, CUnit,
   CSlotFn, CSlotDefault,
-  CMode, COwned, CBorrowed, mode_owned
+  CMode, COwned, CBorrowed, mode_owned,
+  cex_ty
 }
 use check/types.{Ty, TyFn, TyOpaque, TyInt, TyList, EPure, is_ref_ty, intr_owned_args}
 use ir/reach
@@ -300,6 +301,42 @@ fn rebuilt_adts(ms: List[CModule]) -> Map[(String, String), Set[Int]] = {
   out
 }
 
+## Whether `rc.rw` consumes `e` when it stands in a borrow position.
+##
+## A borrow position only reads, but `rc.borrow` (and `rc.intr_args`, which
+## names a whole operand row once any operand needs a name) can only lend
+## what someone else already holds: a bare local or a projection/box chain
+## over one -- `rc.borrows`. Any other counted value is fresh, so the
+## rewrite produces it through the *consuming* path, names it and drops the
+## name after the read. For a call or a constructor that changes nothing
+## here, because their operands do not depend on `k`; for an `if` or a block
+## it means every arm's value is consumed, so a parameter in an arm is
+## handed over (dawn-lang #499: `xs ++ [if c { v } else { "z" }]` is
+## `list_push(xs, if ...)`, borrowed at the element, and the rewrite
+## panicked on `v`). Mirroring that here is the inference's half of the
+## contract: the alternative, letting the rewrite dup a borrowed parameter
+## in an arm, is the "silent compensating dup" `rc.RSt.borrowed_syms` rules
+## out.
+##
+## `held` is `rc.borrows` without the pass state: the one state-dependent
+## case, a dictionary local, is not counted, so the rewrite reads it in
+## place either way and `false` is the answer for both.
+fn read_k(e: CExpr) -> Bool = is_ref_ty(cex_ty(e)) && not held(e)
+
+fn held(e: CExpr) -> Bool =
+  match e {
+    CLocal(_, _) -> true
+    CField(t, _, _, _, _) -> held(t)
+    CTupleGet(t, _, _) -> held(t)
+    CBox(inner, from) -> is_ref_ty(from) && held(inner)
+    CUnbox(inner, to) -> is_ref_ty(to) && held(inner)
+    _ -> false
+  }
+
+## `e` in a borrow position of the rewrite: `rc.borrow`, `rc.borrow_all`, or a
+## borrowed position of `rc.intr_args`.
+fn dm_read(d: Dm, e: CExpr) -> Dm = dm_expr(d, e, read_k(e))
+
 fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
   match e {
     CLocal(sym, _) -> if k { dm_mark(d, sym) } else { d },
@@ -307,10 +344,10 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     # a projection reads its target; the projected value is fresh (dup'ed).
     # `proj_demands` is the one exception: taking a structure apart in order
     # to put a changed one back needs the structure, not a view of it.
-    CField(t, adt, _, _, _) -> dm_expr(d, t, proj_demands(d, k, adt))
-    CTupleGet(t, _, _) -> dm_expr(d, t, false)
-    CIsCtor(t, _, _) -> dm_expr(d, t, false)
-    CTagOf(t, _) -> dm_expr(d, t, false)
+    CField(t, adt, _, _, _) -> dm_expr(d, t, proj_demands(d, k, adt) || read_k(t))
+    CTupleGet(t, _, _) -> dm_read(d, t)
+    CIsCtor(t, _, _) -> dm_read(d, t)
+    CTagOf(t, _) -> dm_read(d, t)
 
     # transparent to counting when the wrapped side is a reference
     # (rc.rw's CBox/CUnbox rule)
@@ -320,7 +357,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     CCall(callee, args, _) -> {
       # calling a function value reads it (rc.rw_callee borrows the target)
       var d1 = match callee {
-        CDynamic(t) -> dm_expr(d, t, false)
+        CDynamic(t) -> dm_read(d, t)
         CMethod(dict, _, _, _, _) -> dm_expr(d, dict, false)
         _ -> d
       }
@@ -334,7 +371,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
           for a in args {
             # positions past the row (dictionaries, evidence) are owned
             let owned_pos = if i < len(row) { mode_owned(row[i]) } else { true }
-            d1 = dm_expr(d1, a, owned_pos)
+            d1 = if owned_pos { dm_expr(d1, a, true) } else { dm_read(d1, a) }
             i = i + 1
           }
           d1
@@ -353,7 +390,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
       var d1 = d
       var i = 0
       for a in args {
-        d1 = dm_expr(d1, a, list.contains(owned, i))
+        d1 = if list.contains(owned, i) { dm_expr(d1, a, true) } else { dm_read(d1, a) }
         i = i + 1
       }
       d1
@@ -372,8 +409,8 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     CClosure(_, _, caps, _) -> dm_list(d, caps, true)
 
     # both sides of any binary are reads, short-circuit or not
-    CBinary(_, l, r, _) -> dm_expr(dm_expr(d, l, false), r, false)
-    CUnary(_, x, _) -> dm_expr(d, x, false)
+    CBinary(_, l, r, _) -> dm_read(dm_read(d, l), r)
+    CUnary(_, x, _) -> dm_read(d, x)
 
     CIf(cond, thn, els, _) -> {
       let d1 = dm_expr(d, cond, false)
@@ -453,7 +490,7 @@ fn dm_stmt(d: Dm, s: CStmt) -> Dm =
     # loop-variable rule -- a binding that lives across iterations is
     # handed over once per trip)
     CSAssign(sym, v) -> dm_expr(dm_mark(d, sym), v, true)
-    CSDiscard(x) -> dm_expr(d, x, false)
+    CSDiscard(x) -> dm_read(d, x)
     CSLoop(_, body, step) -> {
       let d1 = dm_expr(d, body, false)
       match step {
@@ -699,6 +736,31 @@ test "an owned position propagates through the fixpoint" {
   let t2 = infer_modes([t_mod("m", [h, k2])])
   assert not mode_owned(t_row(t2, "m", "h")[0])
   assert not mode_owned(t_row(t2, "m", "k")[0])
+}
+
+test "a branching value in a borrow position consumes its arms (#499)" {
+  let lst = TyList(TyInt)
+  let ps = [CParam { sym: 1, ty: lst, mode: COwned }, CParam { sym: 2, ty: lst, mode: COwned }]
+  # `xs ++ [v]` lends v to list_push's borrowed element position...
+  let bare = t_fn("m", "bare", ps, lst,
+    CIntrinsic("list_push", [CLocal(1, lst), CLocal(2, lst)], lst))
+  # ...but the rewrite cannot lend an if: it builds the value owned, so the
+  # parameter in its arm is handed over, at a primitive's borrowed position,
+  # a plain function's borrowed position and a projection's target alike
+  let arm = CIf(CBool(true), CLocal(2, lst), Some(CListLit([], lst)), lst)
+  let pushed = t_fn("m", "pushed", ps, lst,
+    CIntrinsic("list_push", [CLocal(1, lst), arm], lst))
+  let called = t_fn("m", "called", ps, TyInt,
+    CCall(CDirect("m", "bare"), [CLocal(1, lst), arm], TyInt))
+  let projected = t_fn("m", "projected", ps, TyInt,
+    CField(CIf(CBool(true), CLocal(2, lst), Some(CLocal(1, lst)), lst), 7, 0, 0, TyInt))
+  let table = infer_modes([t_mod("m", [bare, pushed, called, projected])])
+  assert not mode_owned(t_row(table, "m", "bare")[1])
+  # xs is owned at list_push's position 0 already, so with v flipped too the
+  # row is pruned: absent means all owned
+  assert len(t_row(table, "m", "pushed")) == 0
+  assert len(t_row(table, "m", "called")) == 0
+  assert len(t_row(table, "m", "projected")) == 0
 }
 
 test "consuming shapes flip owned: stored, captured, aliased, reassigned" {
