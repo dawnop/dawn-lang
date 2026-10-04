@@ -27,8 +27,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TILE_PATHS = ["packages/tileir", "packages/tileref", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
-              "scripts/tile-gpu-diff"]
+# std/bytes.dawn is here because packages/tileir/src/bytecode.dawn builds every
+# .tilebc with it: a change to its Buf is a change to the bytes the device is
+# handed, whether or not any tile file moved (#493 measured the outputs the
+# same when it last changed, which is a fact about that change, not a rule).
+TILE_PATHS = ["packages/tileir", "packages/tileref", "std/bytes.dawn", "std/gpu.dawn", "std/narrow.dawn",
+              "scripts/tile-golden", "scripts/tile-gpu-diff"]
 LEDGER = re.compile(r"^scripts/tile-gpu-diff/ledger(-[^/]*)?\.txt$")
 # Documentation is not a tile input. No build, golden or layer-2 program reads
 # a `.md` file under TILE_PATHS (today packages/tileir/README.md and
