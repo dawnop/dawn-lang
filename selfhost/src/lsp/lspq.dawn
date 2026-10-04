@@ -18,7 +18,7 @@ use std/str
 use front/ast.{
   Module, Decl, Expr, Pattern, Stmt, TypeRef, FnDecl, TypeParamDecl,
   Arg, arg_exprs, PatArg, LambdaParam, Param, TypeDeclR, ImportName,
-  HandlerCell, HandlerArm, EffectDeclR,
+  HandlerCell, HandlerArm, EffectDeclR, ExampleOf,
   TNamed, TQual, TAssoc, TTuple, TFn,
   StrPart, SPText, SPInterp,
   EInt, EChar, EFloat, EStr, EVar, EApply, EMethod, ELambda,
@@ -335,8 +335,9 @@ fn hint_binding(qc: QCx, q: Q, want: Bool, sid: Int, at: Int) -> Q =
     }
   }
 
-fn is_ident_char(c: Char) -> Bool =
-  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+## A character of a name, by the lexer's rule: a letter or digit of any
+## script, or `_`.
+fn is_ident_char(c: Char) -> Bool = char_is_alnum(c) || c == '_'
 
 ## Where the name of `let name = ...` ends. Neither tree has the name's span:
 ## `SLet` keeps the statement's, and the checker declares the symbol over the
@@ -1043,8 +1044,10 @@ fn site_of_const(qc: QCx, name: String) -> Site = {
     }
     None -> ()
   }
+  # `use m.{LIMIT as CAP}`: the module declares the name the entry spelled
+  # before its `as`
   match map.get(qc.entry.cx.imported_names, name) {
-    Some(mp) -> site_of_const_in(qc, mp, name)
+    Some(mp) -> site_of_const_in(qc, mp, unwrap_or(map.get(qc.entry.cx.import_renames, name), name))
     None -> no_site()
   }
 }
@@ -1260,7 +1263,9 @@ fn visit_written_type(qc: QCx, q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -
       for arg in args { q = visit_written_type(qc, q, arg, WtStorage) }
       for ea in eargs { q = offer_row(qc, q, ea.lo, ea.hi) }
     }
-    TAssoc(_, _, _, _) -> ()
+    # `C.Item`: the subject is a type parameter in scope, and a rename of it
+    # rewrites the projection too
+    TAssoc(subject, _, lo, _) -> { q = offer_type_name(qc, q, subject, lo, lo + str.len(subject)) }
     TTuple(elems, _, _) -> {
       for elem in elems { q = visit_written_type(qc, q, elem, WtStorage) }
     }
@@ -1327,7 +1332,7 @@ fn offer_type_name(qc: QCx, q: Q, name: String, lo: Int, hi: Int) -> Q = {
 ## `m.T`: the alias at its own span, then the type the exporter names `T`.
 fn offer_qual_type(qc: QCx, q0: Q, qual: String, name: String, lo: Int) -> Q = {
   let q = offer_module_alias(qc, q0, qual, lo, lo + str.len(qual))
-  let nlo = lo + str.len(qual) + 1
+  let nlo = member_start(qc.cps, lo + str.len(qual))
   let nhi = nlo + str.len(name)
   if not spelled(qc, nlo, nhi, name) { return q }
   match map.get(qc.entry.cx.module_exports, qual) {
@@ -1448,7 +1453,10 @@ fn bracket_binders(qc: QCx, q0: Q, from: Int, names: List[String]) -> (Q, List[T
   var after_bang = false
   while i < n && cps[i] != ']' && k < len(names) {
     let c = cps[i]
-    if is_ident_char(c) {
+    if c == '#' {
+      # a comment inside the list: its words are not binders
+      while i < n && cps[i] != '\n' { i = i + 1 }
+    } else if is_ident_char(c) {
       let s0 = i
       while i < n && is_ident_char(cps[i]) { i = i + 1 }
       if not after_bang {
@@ -1823,7 +1831,11 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
     DFn(f) -> {
       q = visit_fn_decl(qc, q, f, [identity.Named(identity.FunctionDecl, f.name)])
     }
-    DTest(name, body, _, _, _, _, _) -> {
+    DTest(name, body, _, _, nlo, _, example_of) -> {
+      match example_of {
+        Some(of) -> { q = offer_example(qc, q, of, nlo) }
+        None -> ()
+      }
       let tf = tfun_at(qc, [identity.Named(identity.TestDecl, name)])
       q = walk_e(qc, q, body, tf_body(tf))
     }
@@ -1883,6 +1895,8 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         match m.body {
           Some(b) -> {
             let tf = tfun_at(qc, [identity.Named(identity.TraitDecl, name), identity.Named(identity.MethodDecl, m.name)])
+            # a default body's parameters are declared as a function's are
+            q = offer_params(qc, q, m.params, tf)
             q = walk_e(qc, q, b, tf_body(tf))
           }
           None -> ()
@@ -1900,12 +1914,15 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         }
       }
     }
-    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, _, _, _) -> {
+    DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, eff_binds, _, _) -> {
       q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
       let (qb, bs) = visit_tparams(qc, q, tparams)
       q = Q { ..qb, tps: bs }
       q = visit_written_type(qc, q, subject, WtStorage)
       for binding in assoc { q = visit_written_type(qc, q, binding.tref, WtStorage) }
+      # `effect E = !Ask`: the row's atoms name effects like any other row
+      # (the row scan stops at a `=`, so it starts past this one)
+      for eb in eff_binds { q = offer_row(qc, q, past_eq(qc.cps, eb.nhi, eb.hi), eb.hi) }
       let head = impl_head(tparams, trait_name, subject)
       for m in methods { q = visit_fn_decl(qc, q, m, method_path(head, m.name)) }
       q = collect_impl(qc, q, trait_name, tlo, thi, methods)
@@ -2110,25 +2127,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     None -> ()
   }
   let tf = tfun_at(qc, path)
-  match tf {
-    Some(t) -> {
-      var i = 0
-      for p in f.params {
-        match get(t.param_syms, i) {
-          Some(sid) ->
-            match sym_get(qc, sid) {
-              Some(sym) -> {
-                q = offer_local(q, ParamRole, p.lo, p.hi, p.name ++ ": " ++ show_ty(qc, sym.ty), (p.lo, p.hi))
-              }
-              None -> ()
-            }
-          None -> ()
-        }
-        i = i + 1
-      }
-    }
-    None -> ()
-  }
+  q = offer_params(qc, q, f.params, tf)
   # a parameter's default is an expression of the declaration and names what
   # any other expression does (`n: Int = len(xs)`): references, rename and
   # rename's own check read it as they read the body, or a rename onto a name
@@ -2143,6 +2142,100 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
   }
   Q { ..walk_e(qc, q, f.body, tf_body(tf)), tps: q0.tps }
 }
+
+## Each parameter of `params` at its declaration, typed by `tf`'s symbols.
+fn offer_params(qc: QCx, q0: Q, params: List[Param], tf: Option[TFun]) -> Q = {
+  let t = match tf {
+    Some(t) -> t
+    None -> return q0
+  }
+  var q = q0
+  var i = 0
+  for p in params {
+    match get(t.param_syms, i) {
+      Some(sid) ->
+        match sym_get(qc, sid) {
+          Some(sym) -> {
+            q = offer_local(q, ParamRole, p.lo, p.hi, p.name ++ ": " ++ show_ty(qc, sym.ty), (p.lo, p.hi))
+          }
+          None -> ()
+        }
+      None -> ()
+    }
+    i = i + 1
+  }
+  q
+}
+
+## The declaration a test is named by (`test f`, `test T.Ctor`, spec §3.4),
+## at the name after `test`, which starts at `nlo`: always one of this
+## module's own top-level declarations (`check/decltests`), and for `T.Ctor`
+## the constructor as well, at its segment.
+fn offer_example(qc: QCx, q0: Q, of: ExampleOf, nlo: Int) -> Q = {
+  let nhi = nlo + str.len(of.name)
+  if not spelled(qc, nlo, nhi, of.name) { return q0 }
+  var q = q0
+  for d in qc.entry.m.decls {
+    match d {
+      DFn(f) -> if f.name == of.name && of.ctor == None {
+        q = match sig_of(qc, f.name) {
+          Some(sg) -> offer_sig_at(qc, q, nlo, nhi, sg, here(f.nlo, f.nhi, f.lo))
+          None -> offer_at(q, nlo, nhi, "fn " ++ f.name, here(f.nlo, f.nhi, f.lo))
+        }
+      }
+      DConst(n, _, _, _, lo, _, dnlo, dnhi) -> if n == of.name && of.ctor == None {
+        q = offer_at(q, nlo, nhi, "const " ++ n, here(dnlo, dnhi, lo))
+      }
+      DTrait(n, tp, _, _, _, _, _, _, lo, _, dnlo, dnhi) -> if n == of.name && of.ctor == None {
+        q = offer_at(q, nlo, nhi, "trait " ++ n ++ "[" ++ tp ++ "]", here(dnlo, dnhi, lo))
+      }
+      DEffect(e) -> if e.name == of.name && of.ctor == None {
+        q = offer_at(q, nlo, nhi, "effect " ++ e.name, here(e.nlo, e.nhi, e.lo))
+      }
+      DType(t) -> if t.name == of.name {
+        q = offer_at(q, nlo, nhi, "type " ++ t.name, here(t.nlo, t.nhi, t.lo))
+        match of.ctor {
+          Some(cn) -> {
+            let clo = member_start(qc.cps, nhi)
+            let chi = clo + str.len(cn)
+            if spelled(qc, clo, chi, cn) {
+              for c in t.ctors {
+                if c.name == cn { q = offer_at(q, clo, chi, c.name, here(c.nlo, c.nhi, c.lo)) }
+              }
+            }
+          }
+          None -> ()
+        }
+      }
+      _ -> ()
+    }
+  }
+  q
+}
+
+## Where the member of a qualified name starts, `from` being the end of what
+## qualifies it: past the `.`, and any blanks either side of it, which the
+## grammar allows (`helper. Point`, `helper . Point`).
+fn member_start(cps: List[Char], from: Int) -> Int = {
+  let n = len(cps)
+  var i = from
+  while i < n && is_blank(cps[i]) { i = i + 1 }
+  if i < n && cps[i] == '.' { i = i + 1 }
+  while i < n && is_blank(cps[i]) { i = i + 1 }
+  i
+}
+
+## One past the first `=` in `from..to`, or `to` when there is none.
+fn past_eq(cps: List[Char], from: Int, to: Int) -> Int = {
+  var i = from
+  while i < to && i < len(cps) {
+    if cps[i] == '=' { return i + 1 }
+    i = i + 1
+  }
+  to
+}
+
+fn is_blank(c: Char) -> Bool = c == ' ' || c == '\t' || c == '\n' || c == '\r'
 
 ## The typed default of `tf`'s parameter `k`, when it has one.
 fn tdefault_body(tf: Option[TFun], k: Int) -> Option[TExpr] =

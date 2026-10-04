@@ -294,10 +294,12 @@ fn index_tparams(ix0: Map[Int, Kind], tparams: List[TypeParamDecl]) -> Map[Int, 
   ix
 }
 
-fn is_upper(c: Char) -> Bool = c >= 'A' && c <= 'Z'
+fn is_upper(c: Char) -> Bool = char_is_upper(c)
 
-fn is_name_char(c: Char) -> Bool =
-  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+## A character of a name, by the lexer's rule (`front/lexer.is_ident_part`):
+## a letter or digit of any script, or `_`. An ASCII-only test cut `café` to
+## `caf`, and rename then wrote `growé`.
+fn is_name_char(c: Char) -> Bool = char_is_alnum(c) || c == '_'
 
 ## The names inside a resolved span. A span is a name, or starts with one
 ## (a field's declaration runs on over its type, which has its own token);
@@ -350,6 +352,11 @@ test "a span reads as its leading name, a module path as each of its segments" {
   assert name_runs(cps, 0, 7, false) == [(0, 1)]
   assert name_runs(cps, 8, 15, true) == [(8, 11), (12, 15)]
   assert name_runs(cps, 1, 7, false) == []
+  # a name of another script is a name, as the lexer reads it
+  let wide = code_points("fn café(éx: Int) 中文")
+  assert name_runs(wide, 3, 7, false) == [(3, 7)]
+  assert name_runs(wide, 8, 10, false) == [(8, 10)]
+  assert name_runs(wide, 17, 19, false) == [(17, 19)]
 }
 
 test "the legend lists every index the classifier hands out" {

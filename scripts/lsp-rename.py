@@ -153,6 +153,139 @@ DEFAULT_CASES = [
         "main.dawn 1:4 len -> count", "main.dawn 3:15 len -> count"]),
 ]
 
+# names the references walk read wrongly or not at all (the 2026-10-04
+# audit's findings 4 to 12 and 15): one project, a case per finding
+COV_LIB = """pub fn first(n: Int) -> Int = n
+
+pub fn scale(n: Int) -> Int = n * 2
+
+pub const LIMIT: Int = 10
+
+pub type Point = { x: Int }
+
+pub fn at(x: Int) -> Point = Point { x }
+"""
+
+COV_MAIN = """use lib
+use lib.{first as scale, LIMIT as CAP}
+
+## See [`Pair.a`].
+type Pair = { a: Int }
+
+## ````dawn
+## ```
+## [`target`]
+## ````
+fn target() -> Int = 1
+
+test target {
+  assert target() == 1
+}
+
+fn café(éx: Int) -> Int = éx + 1
+
+pub type Box[ # T is the element
+  T] = { value: T }
+
+trait Head[C] {
+  type Item
+  fn first_of(c: C) -> Option[C.Item]
+}
+
+impl[T] Head[List[T]] {
+  type Item = T
+  fn first_of(c: List[T]) -> Option[T] = get(c, 0)
+}
+
+fn head_or[C: Head](c: C, d: C.Item) -> C.Item =
+  match first_of(c) {
+    Some(x) -> x
+    None -> d
+  }
+
+effect Ask {
+  fn ask() -> Int
+}
+
+trait Reader[T] {
+  effect E
+  fn read(t: T) -> Int !T.E
+}
+
+impl Reader[Int] {
+  effect E = !Ask
+  fn read(t: Int) -> Int !Ask = ask() + t
+}
+
+trait Ident[T] {
+  fn ident(x: T) -> T = x
+}
+
+impl Ident[Int] {}
+
+fn touch(p: lib. Point) -> Int = p.x
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 4 }
+  let pr = Pair { a: 1 }
+  let box = Box { value: 2 }
+  let pt = lib.at(1)
+  let total = lib.scale(1) + scale(1) + CAP + target() + café(1) + head_or([1], 0) + read(2) + ident(3) + touch(pt) + pr.a + box.value
+  println("${total}")
+}
+"""
+
+COV_CASES = [
+    # a name in another script is renamed whole, not cut at its first
+    # non-ASCII letter
+    ("coverage: a name with a non-ASCII letter", "main.dawn", "café(1)", 0, "grow", [
+        "main.dawn 17:4 café -> grow", "main.dawn 65:58 café -> grow"]),
+    # `lib.scale` is lib's `scale`, whatever `scale` names on its own
+    ("coverage: a qualified call beside an `as` import of its spelling", "main.dawn", "lib.scale(1)", 4,
+     "grow", ["lib.dawn 3:8 scale -> grow", "main.dawn 65:19 scale -> grow"]),
+    # the `as` name of a constant, from a use of it
+    ("coverage: a constant's `as` name from its use", "main.dawn", "+ CAP +", 2, "MAX", [
+        "main.dawn 2:35 CAP -> MAX", "main.dawn 65:41 CAP -> MAX"]),
+    # a projection's subject is the type parameter
+    ("coverage: a type parameter a projection names", "main.dawn", "[C: Head]", 1, "D", [
+        "main.dawn 32:12 C -> D",
+        "main.dawn 32:24 C -> D",
+        "main.dawn 32:30 C -> D",
+        "main.dawn 32:41 C -> D"]),
+    # an impl's associated effect binding names the effect
+    ("coverage: an effect an associated effect binds", "main.dawn", "effect Ask", 7, "Query", [
+        "main.dawn 38:8 Ask -> Query",
+        "main.dawn 48:15 Ask -> Query",
+        "main.dawn 49:27 Ask -> Query",
+        "main.dawn 61:15 Ask -> Query"]),
+    # a test named by the function, and a link inside a four-backtick
+    # fence that shows a three-backtick one, which is code and stays
+    ("coverage: a test's title and a link inside a fence", "main.dawn", "fn target", 3, "changed", [
+        "main.dawn 11:4 target -> changed",
+        "main.dawn 13:6 target -> changed",
+        "main.dawn 14:10 target -> changed",
+        "main.dawn 65:47 target -> changed"]),
+    # a trait default method's parameter, declared in its signature
+    ("coverage: a parameter of a trait's default method", "main.dawn", "= x", 2, "y", [
+        "main.dawn 53:12 x -> y", "main.dawn 53:25 x -> y"]),
+    # `lib. Point`: the grammar allows a blank after the dot
+    ("coverage: a qualified type with a blank after the dot", "lib.dawn", "type Point", 5, "Coord", [
+        "lib.dawn 7:10 Point -> Coord",
+        "lib.dawn 9:22 Point -> Coord",
+        "lib.dawn 9:30 Point -> Coord",
+        "main.dawn 58:18 Point -> Coord"]),
+    # a comment inside a type's parameter list spells the parameter's name
+    ("coverage: a comment in a parameter list is no binder", "main.dawn", "# T is", 2, None,
+     "error: there is no name here to rename"),
+    ("coverage: the binder after a comment in its list", "main.dawn", "  T] =", 2, "U", [
+        "main.dawn 20:17 T -> U", "main.dawn 20:3 T -> U"]),
+    # a doc link's owner: [`Pair.a`] when `Pair` is renamed
+    ("coverage: the owner of a doc link's member", "main.dawn", "type Pair", 5, "Couple", [
+        "main.dawn 4:10 Pair -> Couple",
+        "main.dawn 5:6 Pair -> Couple",
+        "main.dawn 62:12 Pair -> Couple"]),
+]
+
 DISK_BASE = "pub fn scale(n: Int) -> Int = n * 3\n"
 DISK_MAIN = 'use base\n\npub fn main() -> Unit !io = println("${base.scale(1)}")\n'
 DISK_LONE = "use base\n\npub fn lone() -> Int = base.scale(2)\n"
@@ -536,6 +669,23 @@ def defaults_project(server, env, dump, dawn, applied):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def coverage_project(server, env, dump, dawn, applied):
+    work = tempfile.mkdtemp(prefix="lsp-rename-coverage.")
+    try:
+        proj = Project(work, {"lib.dawn": COV_LIB, "main.dawn": COV_MAIN}, with_dep=False)
+        pending = []
+        before = run_copy(dawn, proj, proj.texts) if applied else None
+        s = Session(server, proj.root, env)
+        try:
+            open_all(s, proj)
+            run_cases(s, proj, COV_CASES, dump, dawn, before, pending)
+        finally:
+            s.close()
+            settle(pending)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def watched(proj, base, kind):
     """A didChangeWatchedFiles notification: 1 created, 2 changed, 3 deleted."""
     return {"changes": [{"uri": proj.uri(base), "type": kind}]}
@@ -594,6 +744,8 @@ def project_of(label):
         return "defaults"
     if label.startswith("files on disk"):
         return "disk"
+    if label.startswith("coverage"):
+        return "coverage"
     return "main"
 
 
@@ -606,6 +758,8 @@ def contract(server, env, dump=False, applied=True, only=None):
         main_project(server, env, dump, dawn, applied)
     if only in (None, "defaults"):
         defaults_project(server, env, dump, dawn, applied)
+    if only in (None, "coverage"):
+        coverage_project(server, env, dump, dawn, applied)
     if only in (None, "disk"):
         disk_project(server, env, dump, dawn, applied, True)
         disk_project(server, env, dump, dawn, applied, False)
@@ -631,6 +785,17 @@ MUTANTS = [
     ('disk-unread', 'files on disk (unreported): rename reads the edited module and the created one'),
     ('tree-not-rewalked', 'files on disk (unreported): rename reads the edited module and the created one'),
     ('watch-ignored', 'files on disk (notified): references follows a module edited on disk'),
+    ('names-ascii-only', 'coverage: a name with a non-ASCII letter'),
+    ('as-name-by-spelling', 'coverage: a qualified call beside an `as` import of its spelling'),
+    ('const-alias-unrenamed', 'coverage: a constant\'s `as` name from its use'),
+    ('projection-subject-skipped', 'coverage: a type parameter a projection names'),
+    ('effect-binding-skipped', 'coverage: an effect an associated effect binds'),
+    ('example-title-skipped', 'coverage: a test\'s title and a link inside a fence'),
+    ('trait-default-params-skipped', 'coverage: a parameter of a trait\'s default method'),
+    ('qualified-member-by-length', 'coverage: a qualified type with a blank after the dot'),
+    ('binders-read-comments', 'coverage: a comment in a parameter list is no binder'),
+    ('link-owner-skipped', 'coverage: the owner of a doc link\'s member'),
+    ('fences-by-prefix', 'coverage: a test\'s title and a link inside a fence'),
 ]
 
 
@@ -672,9 +837,13 @@ def main():
     if not mutants:
         return 0
     work = tempfile.mkdtemp(prefix="lsp-rename-mutants.")
+    # two compilers build at once, which is what a runner's four cores and
+    # sixteen gigabytes hold; the builds are most of this step's time
+    builds = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     try:
-        for name, owner in MUTANTS:
-            cmd = build_mutant(dawn, work, name)
+        built = [(name, owner, builds.submit(build_mutant, dawn, work, name)) for name, owner in MUTANTS]
+        for name, owner, fut in built:
+            cmd = fut.result()
             print("PASS  %s mutant compiles" % name)
             del failures[:]
             contract(cmd, env, applied=False, only=project_of(owner))
@@ -684,6 +853,7 @@ def main():
                 return 1
             print("PASS  %s mutant turns '%s' red" % (name, owner))
     finally:
+        builds.shutdown(wait=True, cancel_futures=True)
         shutil.rmtree(work, ignore_errors=True)
     print("\nlsp-rename: OK")
     return 0

@@ -312,6 +312,9 @@ name: gates
 # The same day it went up to 17,008s: the rename step gained a run of every
 # accepted rename, two more projects and four mutants (+88s planning value,
 # twice the 44s it added locally).
+# The same day it went up to 17,046s: the rename step gained a coverage
+# project and eleven more mutants, built two at a time (+38s planning
+# value, twice the 19s it added locally).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -335,7 +338,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 17008s (the most this file's `3x` claims may add up to)
+# push-total: 17046s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2503,10 +2506,12 @@ jobs:
     # fixed overhead: 2 * 198 + 50 = 446s; the rename step (R3) adds twice
     # its local 63s: 572s; its second version (applied renames, the default
     # argument and files-on-disk projects, eleven mutants) adds twice the
-    # 44s it added locally: 660s, timeout 3x that. Restate from the
-    # observation once the job has a week of main runs.
-    # budget: 3x 660s planning allowance (2 x 56s, 2 x 39s, 2 x 55s, 2 x 48s and 2 x 107s, plus 50s fixed overhead)
-    timeout-minutes: 33
+    # 44s it added locally: 660s; its third (a coverage project, 22
+    # mutants built two at a time) twice the 19s more: 698s, timeout 3x
+    # that. Restate from the observation once the job has a week of main
+    # runs.
+    # budget: 3x 698s planning allowance (2 x 56s, 2 x 39s, 2 x 55s, 2 x 48s and 2 x 126s, plus 50s fixed overhead)
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2526,7 +2531,8 @@ jobs:
       # What kind semanticTokens gives each name, token by token
       # (docs/lsp-references-design.md §T1): the two programs above, a range
       # inside one declaration, a line with characters past the BMP ahead of
-      # its names. selfhost-lsp-diff.sh only sees that the reply changed;
+      # its names, and names in other scripts; each token's absolute
+      # position is held too. selfhost-lsp-diff.sh only sees that the reply changed;
       # the previous release has none. Four mutants, each built from a
       # private selfhost copy, must turn their own case red. 39s locally
       # (2026-10-04).
@@ -2567,13 +2573,14 @@ jobs:
       # a trait method, an operation, doc links) and the refusals (std, a
       # builtin, a dependency, a module, `main`, a module with errors). Every
       # accepted rename is applied to a copy and must run and print what the
-      # original printed; a default argument's call and modules edited or
-      # created on disk mid-session have projects of their own. The
-      # previous release has no rename, so selfhost-lsp-diff.sh can only say
-      # that the reply changed. Eleven mutants, each built from a private
-      # selfhost copy, must turn their own case red. 107s locally
+      # original printed; a default argument's call, modules edited or
+      # created on disk mid-session, and a name of each kind the references
+      # walk once missed have projects of their own. The previous release
+      # has no rename, so selfhost-lsp-diff.sh can only say that the reply
+      # changed. Twenty-two mutants, each built from a private selfhost copy
+      # (two at a time), must turn their own case red. 126s locally
       # (2026-10-04, 63s before the second version on the same machine
-      # scaled by the measured 117s -> 198s).
+      # scaled by the measured 117s -> 198s -> 234s).
       - name: lsp rename and mutants
         run: ./scripts/lsp-rename.py --mutants
 

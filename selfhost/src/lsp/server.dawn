@@ -50,7 +50,7 @@ use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
 use lsp/lspref.{Occurrence, occurrences, ModRefs, Shift, mod_refs, refs_to, refresh, NotPun}
-use lsp/lsprename.{Key, Edit, name_class, check_new_name, name_edit, ordered, apply_edits, changed_name, link_tail, spells}
+use lsp/lsprename.{Key, Edit, name_class, check_new_name, name_edit, ordered, apply_edits, changed_name, edit_index, link_segments, spells}
 use front/lexer.{line_starts_of, view_of, SourceView, slice_cps}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts, PkgRoot}
@@ -3003,7 +3003,13 @@ fn rename_start(st: LspState, d: Doc, offset: Int) -> (Result[RenameStart, Strin
   if dlo == 0 && dhi == 0 && t.def_path != None {
     return (Err("`${old}` names a module; a module is renamed by moving its file"), kept)
   }
-  let as_name = import_alias(entry.m, old)
+  # an `as` name only where the cursor's name is not the declaration's own
+  # spelling: with `use lib.{first as scale}`, `lib.scale` is lib's `scale`
+  let declared = match map.get(texts, tpath) {
+    Some(dt) -> Some(slice_cps(code_points(dt), dlo, dhi))
+    None -> None
+  }
+  let as_name = import_alias(entry.m, old) && declared != Some(old)
   if not as_name {
     let ids = ident
     let decl = match list.find(prog.modules, cm => map.get(ids, cm.path) == Some(tpath)) {
@@ -3110,23 +3116,28 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
       # a name a `use .. as` bound keeps its own spelling
       if slice_cps(cs, r.lo, r.hi) == rs.old { edits = edits ++ [name_edit(id, r.lo, r.hi, r.pun, rs.old, new)] }
     }
-    # a link naming the old name ends with it
-    if str.contains(text, "[`") && str.contains(text, "${rs.old}`]") {
+    # a link spelling the old name as one of its segments: the segment is
+    # renamed when the link cut after it resolves to the declaration, which
+    # covers the member (`Point.x`, `geo.scale`) and the owner (`Point.x`
+    # when `Point` is renamed)
+    if str.contains(text, "[`") && str.contains(text, rs.old) {
       let sc = LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }
       for sp in doc_link_spans(text) {
         let (lo, _, ltext) = sp
-        let (alo, ahi) = link_tail(lo, ltext)
-        if slice_cps(cs, alo, ahi) != rs.old { continue }
-        match resolve_link(sc, mods, ltext) {
-          Ok(lt) ->
-            match list.find(prog.modules, m2 => m2.mod_path == lt.module) {
-              Some(m2) ->
-                if map.get(rs.ident, m2.path) == Some(rs.target.path) && lt.nlo == tlo {
-                  edits = edits ++ [name_edit(id, alo, ahi, NotPun, rs.old, new)]
-                }
-              None -> ()
-            }
-          Err(_) -> ()
+        for seg in link_segments(lo, ltext) {
+          let (alo, ahi, prefix) = seg
+          if slice_cps(cs, alo, ahi) != rs.old { continue }
+          match resolve_link(sc, mods, prefix) {
+            Ok(lt) ->
+              match list.find(prog.modules, m2 => m2.mod_path == lt.module) {
+                Some(m2) ->
+                  if map.get(rs.ident, m2.path) == Some(rs.target.path) && lt.nlo == tlo {
+                    edits = edits ++ [name_edit(id, alo, ahi, NotPun, rs.old, new)]
+                  }
+                None -> ()
+              }
+            Err(_) -> ()
+          }
         }
       }
     }
@@ -3187,6 +3198,7 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
   # no name that resolves elsewhere than it did: in every edited module and
   # every module that spells the new name somewhere
   let after_env = program_exports(st, after)
+  let ixs = edit_index(by_path)
   for cm in after.modules {
     let id = match map.get(rs.ident, cm.path) {
       Some(i) -> i
@@ -3202,7 +3214,7 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
       None -> continue
     }
     let mr2 = mod_refs(module_qcx(st, after, after_env, cm, code_points(text)), id, text, rs.ident, after_texts)
-    match changed_name(id, before, mr2.refs, by_path, rs.target) {
+    match changed_name(id, before, mr2.refs, ixs, rs.target) {
       Some(at) -> {
         let (line, ch) = lsp_position(view_of(text), line_starts_of(text), at)
         return (Err("renaming `${rs.old}` to `${new}` would change what the name at ${id}:${line + 1}:${ch + 1} refers to"), st1)

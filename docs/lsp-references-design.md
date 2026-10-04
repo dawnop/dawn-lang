@@ -203,6 +203,10 @@ Playground 尺寸的 full 回复 96 KB，在网关 256 KiB 的单条上限之内
 - 变异体 4 个，锚点在 `scripts/lsp-semantic-tokens/mutate.py`，登进 `mutation-anchor-preflight.py` 的登记表，构建前先证明每个锚点恰好命中一次：
   常量退回 `type`（种类映射错）、`var` 丢 `mutable`、range 不裁剪、列按 UTF-8 字节算。各自从私有 selfhost 副本编译，要求自己那条断言变红。
 - 本机墙钟：正例约 3 s，含四个变异体约 39 s。`lsp-workspace` 的规划额度 717 → 795 s，timeout 36 → 40 分钟，push-total 16,460 → 16,538 s。
+- 2026-10-04 审计第 16 条：第一版解码后只比（文本，类型，修饰），位置丢了，把 `acc = acc + p.x` 右边的 `acc` 挪到左边、重编后续 delta，
+  左边两个重叠、右边没有，断言照样绿。现在每个 token 解码出绝对行与 UTF-16 列，另有一条「positions」断言：覆盖一个完整的名字、不与前一个重叠、
+  是前一个 token 之后同名文本的第一次出现（于是挪到更早的同名处也红）、range 的 token 起点在 range 内。另加一份非 ASCII 名字的文档
+  （`中文`、`café`、`éx`，审计第 4 条：`name_runs` 原来只认 ASCII，`café` 只出 `caf`、`中文` 没有 token）。
 
 ### T1.8 不做的（理由）
 
@@ -618,7 +622,7 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
 | 10 | trait 方法 | R1 的 `ImplUse`：impl 的方法名是 trait 方法的引用 | `area` → `size`：trait、impl、导入列表、调用 |
 | 11 | 效果操作 | T0：调用与 handler 臂名都解析到操作声明 | `ask` → `query`：声明、调用、另一模块的 handler 臂 |
 | 12 | 管道与 UFCS | 名字跨度在 `EVar`/`EMethod` 上，与普通调用相同 | 并入第 6 条：`3 \|> scale`、`2.scale()` |
-| 13 | 文档链接 | 每个模块的 `##` 文档里的 `` [`…`] ``（`front/docs.doc_link_spans`），末段拼作旧名的，用 `driver/doclinks.resolve_link` 在该模块作用域解析，落在同一声明（声明模块相同、名字起点相同）就改末段 | `[`scale`]`、`[`geo.scale`]`、`[`Point.x`]` |
+| 13 | 文档链接 | 每个模块的 `##` 文档里的 `` [`…`] ``（`front/docs.doc_link_spans`），**每一段**拼作旧名的，把链接截到这一段为止（`lsprename.link_segments`）用 `driver/doclinks.resolve_link` 在该模块作用域解析，落在同一声明（声明模块相同、名字起点相同）就改这一段；第一版只看末段，改 `Point` 时 `[`Point.x`]` 不动（审计第 12 条） | `[`scale`]`、`[`geo.scale`]`、`[`Point.x`]`；另一个工程里 `[`Pair.a`]` 随 `Pair` 改 |
 | 14 | 格式 | 不重排；只出名字本身的编辑（简写展开除外）。触发率在 selfhost 上实测（R3.6） | 无（selfhost 抽样） |
 | 15 | 结果自检 | R3.3 | 第 3、4、5 条的负例 |
 
@@ -693,6 +697,19 @@ prepareRename、rename、references 交错各 9 轮，丢前 2 轮取中位数�
 所以下限在 0.8 s 左右。形参改成 `xs` 时，整词拼出 `xs` 的模块多（R3.3 的筛选），解析比较那一段比私有函数多一些。
 rename 是一次性的用户操作，3.6 s 对 130 处跨 21 个文件的改名可以接受；prepareRename 只走 `rename_start`，40 ms，不碍事。
 
+**2026-10-04 审计后。** 第 13 条（自检的二次复杂度）：`changed_name` 对每个改前名字都要把它与它指向的声明经编辑前移，
+`forward` 每次扫一遍这个文件的全部编辑、`edit_at` 再扫一遍，一个被调用 R 次的函数就是 O(R × E)。现在 `lsprename.edit_index`
+对每个文件的编辑建一次索引（按起点的表、按顺序的终点与累计增量），`forward` 二分，`changed_name` 里同一个声明键只前移一次。
+一个两声明工程，`main` 里 N 次 `let _ = helper()`，`helper` → `grow`，暖后 7 轮丢前 2 轮取中位数（本机，同一台机器同一时段）：
+
+| N | 修前 | 修后 |
+|---|---|---|
+| 1,000 | 133 ms | 53 ms |
+| 2,000 | 374 ms | 92 ms |
+| 4,000 | 1,108 ms | 183 ms |
+
+修前每翻一倍约 ×3，修后约 ×2，剩下的是改后重分析与遍历，本来就与名字数成正比。
+
 ### R3.8 行为变化与 Emit-Change
 
 `selfhost-lsp-diff.sh` 的会话在 R2 那条跨文件 references 之后加一次 prepareRename 与一次 rename（`pad_to` → `pad_out`，跨 inlays.dawn 与 util.dawn）。
@@ -703,7 +720,12 @@ rename 是一次性的用户操作，3.6 s 对 130 处跨 21 个文件的改名�
 
 ### R3.9 门禁
 
-`scripts/lsp-rename.py`：一个带 `[deps]` 路径包的工程（geo、main、一个有类型错误的 broken），一个会话，24 个断言：
+`scripts/lsp-rename.py`（第二版，2026-10-04 审计后）另有四个工程：默认参数（审计第 1 条）、磁盘上的改动（第 2、3 条，通知与不通知各一个会话）、
+覆盖面（第 4–12、15 条各一例：非 ASCII 名字、与 `as` 同拼写的限定调用、常量的 `as` 名字、投影的主体、关联效果绑定、以声明命名的测试标题与四反引号围栏里的链接、
+trait 默认方法的形参、点后带空白的限定类型、类型形参列表里的注释、文档链接的 owner）。每个被接受的改名都应用到工程副本上 `dawn run`，输出必须与改前相同；
+编辑区间从起点读到终点所在的行（第 14 条）。变异体从 7 个加到 22 个，两个编译器并行构建。
+
+第一版：`scripts/lsp-rename.py`：一个带 `[deps]` 路径包的工程（geo、main、一个有类型错误的 broken），一个会话，24 个断言：
 initialize 的能力；prepareRename 的区间与 placeholder；R3.2 表里每条条件的正例或负例；R3.1 的拒绝。编辑按 `文件 行:列 旧 -> 新` 逐条比，拒绝按消息全文比。
 变异体 7 个，锚点在 `scripts/lsp-rename/mutate.py`，登进 `mutation-anchor-preflight.py` 与 `anchor-readers.txt`：
 不查大小写类（`case-class-unchecked`，消息变成编译器的）、解析比对拿改后比改后（`resolutions-unchecked`，`len` 那例放行）、

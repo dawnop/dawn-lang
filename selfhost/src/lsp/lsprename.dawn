@@ -124,57 +124,80 @@ pub(pkg) fn apply_edits(text: String, edits: List[Edit]) -> String = {
   join(parts, "")
 }
 
-## Where offset `p` of a file's old text is in its new text, `edits` being
-## that file's (`ordered`). An offset at an edit's start stays at its start;
-## one at an edit's end moves with it.
-pub(pkg) fn forward(edits: List[Edit], p: Int) -> Int = {
-  var out = p
-  for e in edits {
-    if e.hi <= p { out = out + cps_len(e.text) - (e.hi - e.lo) }
+## One file's edits (`ordered`), indexed for moving offsets through them:
+## each edit by its start, and the edits' ends in order with the length the
+## text has gained once each has been applied. A rename that edits a name
+## R times asks this once per name of the module, so a scan of every edit per
+## question made the check O(R * E): 1.1 s for 4,000 calls of one function.
+pub(pkg) type EditIx = { by_lo: Map[Int, Edit], his: List[Int], gained: List[Int] }
+
+## `by_path`'s files, each indexed.
+pub(pkg) fn edit_index(by_path: Map[String, List[Edit]]) -> Map[String, EditIx] = {
+  var out: Map[String, EditIx] = map.empty()
+  for pr in map.entries(by_path) {
+    let (p, es) = pr
+    var by_lo: Map[Int, Edit] = map.empty()
+    var his: List[Int] = []
+    var gained: List[Int] = []
+    var g = 0
+    for e in es {
+      by_lo = map.insert(by_lo, e.lo, e)
+      g = g + cps_len(e.text) - (e.hi - e.lo)
+      his = his ++ [e.hi]
+      gained = gained ++ [g]
+    }
+    out = map.insert(out, p, EditIx { by_lo: by_lo, his: his, gained: gained })
   }
   out
 }
 
-## The edit of `edits` starting at `lo`, if any.
-fn edit_at(edits: List[Edit], lo: Int) -> Option[Edit] = {
-  for e in edits {
-    if e.lo == lo { return Some(e) }
+fn no_edits() -> EditIx = EditIx { by_lo: map.empty(), his: [], gained: [] }
+
+## Where offset `p` of a file's old text is in its new text. An offset at an
+## edit's start stays at its start; one at an edit's end moves with it. The
+## edits do not overlap, so their ends are in order: the ones at or before
+## `p` are a prefix, found by bisection.
+pub(pkg) fn forward(ix: EditIx, p: Int) -> Int = {
+  var lo = 0
+  var hi = len(ix.his)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if ix.his[mid] <= p { lo = mid + 1 } else { hi = mid }
   }
-  None
+  if lo == 0 { p } else { p + ix.gained[lo - 1] }
 }
 
-fn edits_of(by_path: Map[String, List[Edit]], path: String) -> List[Edit] =
-  map.get(by_path, path).unwrap_or([])
+fn ix_of(ixs: Map[String, EditIx], path: String) -> EditIx = map.get(ixs, path).unwrap_or(no_edits())
 
 ## Where a name that started at `lo` in the old text starts in the new: in a
 ## rewritten span, at the renamed name when it names the renamed declaration
 ## (`renamed`), at the pun's other half when it names that.
-fn moved_start(edits: List[Edit], lo: Int, renamed: Bool) -> Int =
-  match edit_at(edits, lo) {
+fn moved_start(ix: EditIx, lo: Int, renamed: Bool) -> Int =
+  match map.get(ix.by_lo, lo) {
     Some(e) -> {
       let (a, _) = if renamed { e.name } else { e.rest.unwrap_or(e.name) }
-      forward(edits, e.lo) + a
+      forward(ix, e.lo) + a
     }
-    None -> forward(edits, lo)
+    None -> forward(ix, lo)
   }
 
 ## The key `k` of the old program as it reads in the new one. A site that is
 ## a rewritten name is that name in its new spelling; any other site (a `let`
 ## statement around a renamed call, a declaration further down) moves with
 ## the edits before it.
-pub(pkg) fn forward_key(by_path: Map[String, List[Edit]], k: Key, renamed: Bool) -> Key = {
-  let edits = edits_of(by_path, k.path)
+pub(pkg) fn forward_key(ixs: Map[String, EditIx], k: Key, renamed: Bool) -> Key = {
+  let ix = ix_of(ixs, k.path)
   let (lo, hi) = k.def
-  match edit_at(edits, lo) {
+  match map.get(ix.by_lo, lo) {
     Some(e) ->
       if e.hi == hi {
         let (a, b) = if renamed { e.name } else { e.rest.unwrap_or(e.name) }
-        let at = forward(edits, e.lo)
+        let at = forward(ix, e.lo)
         return Key { ..k, def: (at + a, at + b) }
       }
     None -> ()
   }
-  Key { ..k, def: (forward(edits, lo), forward(edits, hi)) }
+  Key { ..k, def: (forward(ix, lo), forward(ix, hi)) }
 }
 
 ## One name as `changed_name` compares them, filed with where it starts.
@@ -188,16 +211,30 @@ fn named(lo: Int, k: Key) -> (String, Int) = {
 ## is moved through the edits, and so is the declaration it names, the
 ## renamed one (`target`) to its new spelling; the two lists must then be the
 ## same names at the same starts. None when they are; else the start, in the
-## new text, of the first name that differs.
+## new text, of the first name that differs. `ixs` is `edit_index` of the
+## rename's edits.
 pub(pkg) fn changed_name(
-  path: String, before: List[Ref], after: List[Ref], by_path: Map[String, List[Edit]], target: Key
+  path: String, before: List[Ref], after: List[Ref], ixs: Map[String, EditIx], target: Key
 ) -> Option[Int] = {
-  let edits = edits_of(by_path, path)
+  let ix = ix_of(ixs, path)
+  # the renamed declaration and the keys moved already, the same few
+  # declarations being named again and again
+  var moved: Map[String, Key] = map.empty()
   var want: Map[String, Int] = map.empty()
   for r in before {
     let k = Key { path: r.path, def: r.def }
     let renamed = k == target
-    let (s, lo) = named(moved_start(edits, r.lo, renamed), forward_key(by_path, k, renamed))
+    let (dlo, dhi) = k.def
+    let mk = "${renamed}|${dlo}|${dhi}|${k.path}"
+    let fk = match map.get(moved, mk) {
+      Some(f) -> f
+      None -> {
+        let f = forward_key(ixs, k, renamed)
+        moved = map.insert(moved, mk, f)
+        f
+      }
+    }
+    let (s, lo) = named(moved_start(ix, r.lo, renamed), fk)
     want = map.insert(want, s, lo)
   }
   var got: Map[String, Int] = map.empty()
@@ -217,12 +254,20 @@ pub(pkg) fn changed_name(
   if first < 0 { None } else { Some(first) }
 }
 
-## The span of the last segment of a doc link whose text starts at `lo`
-## (`a.b.c`: the `c`), the segment a rename rewrites.
-pub(pkg) fn link_tail(lo: Int, text: String) -> (Int, Int) = {
+## Each segment of a doc link whose text starts at `lo` (`a.b.c`: `a`, `b`
+## and `c`), with the link cut after it (`a`, `a.b`, `a.b.c`): a rename
+## rewrites a segment when its cut link resolves to the declaration renamed,
+## the owner of a member as well as the member.
+pub(pkg) fn link_segments(lo: Int, text: String) -> List[(Int, Int, String)] = {
   let segs = str.split(text, ".")
-  let n = cps_len(text)
-  (lo + n - cps_len(segs[len(segs) - 1]), lo + n)
+  var out: List[(Int, Int, String)] = []
+  var at = lo
+  for i in range(0, len(segs)) {
+    let n = cps_len(segs[i])
+    out = out ++ [(at, at + n, join(map(range(0, i + 1), k => segs[k]), "."))]
+    at = at + n + 1
+  }
+  out
 }
 
 fn is_word_char(c: Char) -> Bool = char_is_alnum(c) || c == '_'
@@ -264,22 +309,25 @@ test "a pun spelled out keeps the half that is not renamed" {
   let l = name_edit("a", 16, 17, PunLocal, "x", "v")
   assert apply_edits(text, [l]) == "fn f() = Point {x: v}"
   # the local's site was the pun; it is now the half the local kept
-  let by_path = map.insert(map.empty(), "a", [e])
-  assert forward_key(by_path, Key { path: "a", def: (16, 17) }, false) == Key { path: "a", def: (21, 22) }
-  assert forward_key(by_path, Key { path: "a", def: (16, 17) }, true) == Key { path: "a", def: (16, 19) }
+  let ixs = edit_index(map.insert(map.empty(), "a", [e]))
+  assert forward_key(ixs, Key { path: "a", def: (16, 17) }, false) == Key { path: "a", def: (21, 22) }
+  assert forward_key(ixs, Key { path: "a", def: (16, 17) }, true) == Key { path: "a", def: (16, 19) }
 }
 
 test "positions move with the edits before them" {
   let e1 = name_edit("a", 3, 6, NotPun, "abc", "a")
   let e2 = name_edit("a", 9, 12, NotPun, "abc", "abcdef")
-  let es = [e1, e2]
-  assert forward(es, 0) == 0
-  assert forward(es, 3) == 3
-  assert forward(es, 6) == 4
-  assert forward(es, 9) == 7
-  assert forward(es, 12) == 13
+  let ix = map.get(edit_index(map.insert(map.empty(), "a", [e1, e2])), "a").expect("indexed")
+  assert forward(ix, 0) == 0
+  assert forward(ix, 3) == 3
+  assert forward(ix, 6) == 4
+  assert forward(ix, 7) == 5
+  assert forward(ix, 9) == 7
+  assert forward(ix, 12) == 13
+  assert forward(ix, 20) == 21
+  assert forward(no_edits(), 20) == 20
   assert apply_edits("fn abc = abc + 1", ordered([e2, e1, e1])) == "fn a = abcdef + 1"
-  assert link_tail(5, "geo.Shape.area") == (15, 19)
+  assert link_segments(5, "geo.Shape.area") == [(5, 8, "geo"), (9, 14, "geo.Shape"), (15, 19, "geo.Shape.area")]
   assert spells("let xs = 1", "xs")
   assert not spells("let xss = maxs", "xs")
   assert spells("xs", "xs")
