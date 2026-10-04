@@ -24,7 +24,7 @@ use front/ast.{
   Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DEffect, Param, TypeParamDecl
 }
 use lsp/lspq.{
-  QCx, Resolution, LocalRole, NoRole, ParamRole, FnRole, MutableRole, walked_resolutions, decl_span
+  QCx, Resolution, LocalRole, NoRole, ParamRole, FnRole, MutableRole, references_only, walked_resolutions, decl_span
 }
 
 ## The legend's token types, in the order their indices mean. LSP's standard
@@ -92,7 +92,8 @@ pub(pkg) fn semantic_tokens(qc: QCx, lo: Int, hi: Int) -> List[Token] = {
   var last_index: Map[Int, Kind] = map.empty()
   var cands: List[(Token, Int)] = []
   for r in rs {
-    if in_range(r, lo, hi) {
+    # a second resolution of a span is for references; the first is the token
+    if in_range(r, lo, hi) && not references_only(r) {
       let (dlo, _) = r.def
       var index: Map[Int, Kind] = map.empty()
       match r.def_path {
@@ -301,7 +302,7 @@ fn is_name_char(c: Char) -> Bool =
 ## The names inside a resolved span. A span is a name, or starts with one
 ## (a field's declaration runs on over its type, which has its own token);
 ## only a module path (`use std/str`) is several, each a namespace.
-fn name_runs(cps: List[Char], lo: Int, hi: Int, all: Bool) -> List[(Int, Int)] = {
+pub(pkg) fn name_runs(cps: List[Char], lo: Int, hi: Int, all: Bool) -> List[(Int, Int)] = {
   let n = len(cps)
   let end = if hi > n { n } else { hi }
   var out: List[(Int, Int)] = []

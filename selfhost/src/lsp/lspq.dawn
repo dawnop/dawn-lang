@@ -184,8 +184,11 @@ pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_
 
 ## One name the walk resolved: its span, and the site of the declaration it
 ## names, `def_path` read as `Target.def_path` is. `role` is what the walk
-## knew, at a local's own declaration, that the site alone does not say.
-pub(pkg) type Resolution = { lo: Int, hi: Int, def: (Int, Int), def_path: Option[String], role: LocalRole }
+## knew, at a local's own declaration, that the site alone does not say;
+## `use_kind`, what it knew about the use itself.
+pub(pkg) type Resolution = {
+  lo: Int, hi: Int, def: (Int, Int), def_path: Option[String], role: LocalRole, use_kind: UseKind
+}
 
 ## A local declared at its own name: a parameter, a local `fn`, a mutable
 ## binding (`var`, a handler's state cell), a `let`. Only a declaration carries
@@ -197,12 +200,28 @@ pub(pkg) type Resolution = { lo: Int, hi: Int, def: (Int, Int), def_path: Option
 ## carries one because its site is the statement, not the name.
 pub(pkg) type LocalRole = NoRole | LetRole | ParamRole | FnRole | MutableRole
 
+## How a name is used, where the span alone does not say
+## (docs/lsp-references-design.md §R1). `AssignUse` is the target of an
+## assignment, which documentHighlight shows as a write. The other two are a
+## second resolution of a span the walk already answered for, read by
+## references alone (`references_only`): `PunUse` is the field of a record pun
+## (`Point { x }`, in a construction or a pattern), whose span hover,
+## definition and tokens answer as the local `x`; `ImplUse` is an impl's trait
+## name or method name, as a use of the trait or the trait method, where the
+## walk answers with the impl's own. Every other name is a `PlainUse`.
+pub(pkg) type UseKind = PlainUse | AssignUse | PunUse | ImplUse
+
+## Is `r` one of the second resolutions only references read?
+pub(pkg) fn references_only(r: Resolution) -> Bool = r.use_kind == PunUse || r.use_kind == ImplUse
+
 ## The resolved names starting in `lo..=hi`, by offset. A top-level
 ## declaration whose span misses the range is not walked, as for inlay hints.
+## The resolutions only references read are left out: definition does not
+## answer with them.
 pub(pkg) fn resolutions(qc: QCx, lo: Int, hi: Int) -> List[Resolution] = {
   var out: List[Resolution] = []
   for r in walked_resolutions(qc, lo, hi) {
-    if r.lo >= lo && r.lo <= hi { out = out ++ [r] }
+    if r.lo >= lo && r.lo <= hi && not references_only(r) { out = out ++ [r] }
   }
   sort_by(out, (a, b) => a.lo - b.lo)
 }
@@ -460,6 +479,34 @@ fn call_node(te: Option[TExpr]) -> Option[TExpr] =
     _ -> te
   }
 
+## A call whose written arguments the checker bound to locals before calling
+## (named arguments out of order, a default that reads an earlier parameter:
+## `checker.arrange_call_args`) is a block of those `let`s around the call.
+## The call, and the typed nodes of the written arguments, which are the
+## `let`s' values, in written order; a plain call has no block and no such
+## list. Walking the arguments against the call's own (the locals, and the
+## filled-in defaults) would pair nothing, and every name inside them would go
+## unresolved: a reference missed (docs/lsp-references-design.md §R1).
+fn arranged(te: Option[TExpr]) -> (Option[TExpr], List[TExpr]) = {
+  var bound: List[TExpr] = []
+  match te {
+    Some(XBlock(stmts, Some(tail), _, _, _)) ->
+      match tail {
+        XCallFn(_, _, _, _, _, _, _, _, _) -> {
+          for st in stmts {
+            match st {
+              TSLet(_, _, init, _, _) -> { bound = bound ++ [init] }
+              _ -> ()
+            }
+          }
+          (Some(tail), bound)
+        }
+        _ -> (te, bound)
+      }
+    _ -> (te, bound)
+  }
+}
+
 ## The signature a call by name resolved to, read off its typed node; `None`
 ## when the node is not a call the checker resolved. An operation call
 ## (`ask()`) is an `XApply` on the evidence record by the time it is typed,
@@ -688,7 +735,7 @@ fn offer_target(q: Q, t: Target) -> Q = {
   match q.found {
     Some(rs) ->
       return match t.def {
-        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: t.lo, hi: t.hi, def: d, def_path: t.def_path, role: NoRole }]) }
+        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: t.lo, hi: t.hi, def: d, def_path: t.def_path, role: NoRole, use_kind: PlainUse }]) }
         None -> q
       }
     None -> ()
@@ -704,19 +751,17 @@ fn offer_target(q: Q, t: Target) -> Q = {
 
 fn no_def() -> (Option[(Int, Int)], Option[String]) = (None, None)
 
-## A call of a local (a parameter, a local `fn`, a `let` holding a lambda),
-## collected as a use of that local. Only a collection takes it: hover and
-## definition at such a call answer as they did before T1, and a local that
-## shadows a top-level function of its name is R1's to resolve for them
-## (docs/lsp-references-design.md §T1). Collected ahead of the walk's own
-## offer at the same span, so a token reads the local.
-fn collect_local_call(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
-  match q.found {
-    Some(rs) ->
-      match sym_get(qc, sid) {
-        Some(sym) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: (sym.dlo, sym.dhi), def_path: None, role: NoRole }]) }
-        None -> q
-      }
+## A use of the local `sid` at `lo..hi`: a name read (`x`), or called
+## (`f(x)`, `local_eval()`). A call used to be answered by the top-level
+## function of the callee's name, which is nothing when there is none and the
+## wrong declaration when the local shadows one (docs/lsp-references-design.md
+## §T1.6, §R1); the checker already said which local it calls.
+fn offer_local_use(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
+  match sym_get(qc, sid) {
+    Some(sym) -> {
+      let kw = if sym.mutable { "var" } else { "let" }
+      offer(q, lo, hi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty), Some((sym.dlo, sym.dhi)), None)
+    }
     None -> q
   }
 
@@ -724,9 +769,60 @@ fn collect_local_call(qc: QCx, q: Q, sid: Int, lo: Int, hi: Int) -> Q =
 ## `offer` would, and collected with its role.
 fn offer_local(q: Q, role: LocalRole, lo: Int, hi: Int, hover: String, def: (Int, Int)) -> Q =
   match q.found {
-    Some(rs) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: def, def_path: None, role: role }]) }
+    Some(rs) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: def, def_path: None, role: role, use_kind: PlainUse }]) }
     None -> offer(q, lo, hi, hover, Some(def), None)
   }
+
+## The target of an assignment, `lo..hi`, naming the declaration at `def`:
+## offered as `offer` would, and collected as a write.
+fn offer_assigned(q: Q, lo: Int, hi: Int, hover: String, def: (Int, Int)) -> Q =
+  match q.found {
+    Some(rs) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: def, def_path: None, role: NoRole, use_kind: AssignUse }]) }
+    None -> offer(q, lo, hi, hover, Some(def), None)
+  }
+
+## A second resolution of `lo..hi`, to the declaration at `s`: collected
+## only, never offered (`references_only`).
+fn collect_also(q: Q, lo: Int, hi: Int, s: Site, k: UseKind) -> Q =
+  match q.found {
+    Some(rs) ->
+      match s.def {
+        Some(d) -> Q { ..q, found: Some(rs ++ [Resolution { lo: lo, hi: hi, def: d, def_path: s.dp, role: NoRole, use_kind: k }]) }
+        None -> q
+      }
+    None -> q
+  }
+
+## The field a record pun names at `lo..hi`, beside the local the walk answers
+## with there.
+fn collect_pun(qc: QCx, q: Q, aid: Int, ci: Int, fi: Int, lo: Int, hi: Int) -> Q =
+  match q.found {
+    Some(_) -> collect_also(q, lo, hi, site_of_ctor_field(qc, aid, ci, fi), PunUse)
+    None -> q
+  }
+
+## An impl's trait name (`tlo..thi`) and its methods' names, as uses of the
+## trait and of the trait methods they implement, beside the impl's own sites
+## the walk answers with there.
+fn collect_impl(qc: QCx, q0: Q, trait_name: String, tlo: Int, thi: Int, methods: List[FnDecl]) -> Q = {
+  match q0.found {
+    Some(_) -> ()
+    None -> return q0
+  }
+  let tid = match map.get(qc.entry.cx.traits_by_name, trait_name) {
+    Some(t) -> t
+    None -> return q0
+  }
+  var q = match trait_ref(qc, tid) {
+    Some(r) -> {
+      let (_, site) = r
+      collect_also(q0, tlo, thi, site, ImplUse)
+    }
+    None -> q0
+  }
+  for m in methods { q = collect_also(q, m.nlo, m.nhi, site_of_trait_method(qc, tid, m.name), ImplUse) }
+  q
+}
 
 # ---- name resolution helpers ----
 
@@ -1679,11 +1775,14 @@ fn offer_field_names(qc: QCx, q0: Q, aid: Int, ci: Int, args: List[Arg]) -> Q = 
   for arg in args {
     match arg.name {
       Some(n) ->
-        if e_lo(arg.e) != arg.lo {
-          match field_index(c, n) {
-            Some(fi) -> { q = offer_ctor_field(qc, q, aid, ci, fi, arg.lo, arg.lo + str.len(n)) }
-            None -> ()
-          }
+        match field_index(c, n) {
+          Some(fi) ->
+            if e_lo(arg.e) != arg.lo {
+              q = offer_ctor_field(qc, q, aid, ci, fi, arg.lo, arg.lo + str.len(n))
+            } else {
+              q = collect_pun(qc, q, aid, ci, fi, arg.lo, arg.lo + str.len(n))
+            }
+          None -> ()
         }
       None -> ()
     }
@@ -1809,6 +1908,7 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
       for binding in assoc { q = visit_written_type(qc, q, binding.tref, WtStorage) }
       let head = impl_head(tparams, trait_name, subject)
       for m in methods { q = visit_fn_decl(qc, q, m, method_path(head, m.name)) }
+      q = collect_impl(qc, q, trait_name, tlo, thi, methods)
     }
     DType(t) -> {
       let (qb, bs) = bracket_binders(qc, q, t.nhi, t.tparams)
@@ -2178,7 +2278,7 @@ fn cell_init_of(ts: Option[TStmt]) -> Option[TExpr] =
 
 ## The arms, out of the evidence record they are stored in. The record's last
 ## field is the environment the arms run in rather than an arm, and an
-## unanswered operation stands in it as an `XError`; `arm_node_at` is what
+## unanswered operation stands in it as an `XError`; `typed_at` is what
 ## tells the arms from both.
 fn handle_arm_nodes(ts: Option[TStmt]) -> List[TExpr] =
   match ts {
@@ -2186,12 +2286,13 @@ fn handle_arm_nodes(ts: Option[TStmt]) -> List[TExpr] =
     _ -> []
   }
 
-## The closure the checker made of one written arm, found by the arm's own
-## span: the record holds the arms in the effect's *declared* operation order,
-## which is not the order they were written in.
-fn arm_node_at(tarms: List[TExpr], lo: Int, hi: Int) -> Option[TExpr] = {
-  for a in tarms {
-    if x_lo(a) == lo && x_hi(a) == hi { return Some(a) }
+## The typed node among `ts` written at `lo..hi`. A handler's arms are found
+## this way because the record holds the closures the checker made of them in
+## the effect's *declared* operation order, which is not the order they were
+## written in; a call's arguments, when filled-in defaults sit among them.
+fn typed_at(ts: List[TExpr], lo: Int, hi: Int) -> Option[TExpr] = {
+  for t in ts {
+    if x_lo(t) == lo && x_hi(t) == hi { return Some(t) }
   }
   None
 }
@@ -2220,8 +2321,8 @@ fn cell_set_args(x: TExpr) -> Option[List[TExpr]] =
 ## erased cell the binding holds at run time (`check.types.Sym`) and no reader
 ## wants to see that. The keyword is `var` although the symbol is not
 ## `mutable`: what an arm writes is the slot, not the binding, and `var` is
-## what the author wrote.
-fn offer_cell(qc: QCx, q0: Q, sid: Int, lo: Int, hi: Int) -> Q =
+## what the author wrote. `assigned`: the name is the target of a write.
+fn offer_cell(qc: QCx, q0: Q, sid: Int, lo: Int, hi: Int, assigned: Bool) -> Q =
   match sym_get(qc, sid) {
     Some(sym) ->
       match sym.cell_of {
@@ -2231,6 +2332,8 @@ fn offer_cell(qc: QCx, q0: Q, sid: Int, lo: Int, hi: Int) -> Q =
           # the declaration is the one span that is its own site
           if (lo, hi) == (sym.dlo, sym.dhi) {
             offer_local(q0, MutableRole, lo, hi, hover, (sym.dlo, sym.dhi))
+          } else if assigned {
+            offer_assigned(q0, lo, hi, hover, (sym.dlo, sym.dhi))
           } else {
             offer(q0, lo, hi, hover, Some((sym.dlo, sym.dhi)), None)
           }
@@ -2244,7 +2347,7 @@ fn offer_cell(qc: QCx, q0: Q, sid: Int, lo: Int, hi: Int) -> Q =
 ## is its own definition.
 fn offer_cell_decl(qc: QCx, q0: Q, ts: Option[TStmt], c: HandlerCell) -> Q =
   match ts {
-    Some(TSLet(Some(sid), _, _, _, _)) -> offer_cell(qc, q0, sid, c.nlo, c.nhi)
+    Some(TSLet(Some(sid), _, _, _, _)) -> offer_cell(qc, q0, sid, c.nlo, c.nhi, false)
     _ -> q0
   }
 
@@ -2321,15 +2424,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   match pe {
     EVar(name, lo, hi) ->
       match te {
-        Some(XLocal(sid, _, _, _, _)) ->
-          match sym_get(qc, sid) {
-            Some(sym) -> {
-              let kw = if sym.mutable { "var" } else { "let" }
-              q = offer(q, lo, hi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty),
-                Some((sym.dlo, sym.dhi)), None)
-            }
-            None -> ()
-          }
+        Some(XLocal(sid, _, _, _, _)) -> { q = offer_local_use(qc, q, sid, lo, hi) }
         Some(XFnValue(owner, fname, _, _, _, _)) ->
           match sig_by_owner(qc, owner, fname, None) {
             Some(s) -> {
@@ -2360,7 +2455,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XCallBuiltin(prim, cargs, _, _, _, _, _)) -> {
           if is_cell_read(prim) {
             match cell_arg_sym(cargs) {
-              Some(sid) -> { q = offer_cell(qc, q, sid, lo, hi) }
+              Some(sid) -> { q = offer_cell(qc, q, sid, lo, hi, false) }
               None -> ()
             }
           }
@@ -2653,7 +2748,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       let tarms = handle_arm_nodes(opt_get3(tstmts, len(cells)))
       for arm in arms {
         q = visit_lambda_param_types(qc, q, arm.params)
-        q = walk_handler_arm(qc, q, arm, arm_node_at(tarms, arm.lo, arm.hi))
+        q = walk_handler_arm(qc, q, arm, typed_at(tarms, arm.lo, arm.hi))
       }
       q = walk_rest(qc, q, rest, trest)
     }
@@ -2698,8 +2793,9 @@ fn walk_method(
   var q = q0
   let args = arg_exprs(args0)
   q = hint_method_call(qc, q, target, name, args0, nhi, mhi, te)
+  let (call, bound) = arranged(te)
   # module-qualified (alias.fn) and UFCS calls carry the resolved sig
-  match te {
+  match call {
     # `x.g()` where `g` is a renamed import (`use m.{f as g}`) calls `f`
     Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
       if fname == name || map.get(qc.entry.cx.import_renames, name) == Some(fname) {
@@ -2711,7 +2807,7 @@ fn walk_method(
           None -> ()
         }
       }
-      q = walk_method_children(qc, q, target, args, targs)
+      q = walk_method_children(qc, q, target, args, if len(bound) > 0 { bound } else { targs })
     }
     Some(XCallBuiltin(bname, targs, _, _, _, _, _)) -> {
       if bname == name {
@@ -2768,8 +2864,9 @@ fn walk_method(
 ## module-qualified call (`m.f(a)`) has no receiver value at all -- `m` is an
 ## alias, not an expression -- so the lists are the same length. Only the first
 ## was handled, which sent every `m.f(a)` down the parse-only path and dropped
-## the type of every argument in it. Anything else is a shape the checker did
-## not produce for this node, and walking parse-only is the honest answer.
+## the type of every argument in it. Any other count has filled-in defaults
+## among the typed nodes (`arranged`), and each written child is the typed node
+## at its own span, or walked parse-only when none is.
 fn walk_method_children(qc: QCx, q0: Q, target: Expr, args: List[Expr], targs: List[TExpr]) -> Q = {
   var q = q0
   if len(targs) == len(args) + 1 {
@@ -2787,8 +2884,8 @@ fn walk_method_children(qc: QCx, q0: Q, target: Expr, args: List[Expr], targs: L
       j = j + 1
     }
   } else {
-    q = walk_e(qc, q, target, None)
-    q = walk_list(qc, q, args, no_texprs(args))
+    q = walk_e(qc, q, target, typed_at(targs, e_lo(target), e_hi(target)))
+    for a in args { q = walk_e(qc, q, a, typed_at(targs, e_lo(a), e_hi(a))) }
   }
   q
 }
@@ -2806,7 +2903,8 @@ fn walk_named_call(
   te: Option[TExpr]
 ) -> Q = {
   var q = q0
-  match te {
+  let (call, bound) = arranged(te)
+  match call {
     Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
       match sig_by_owner(qc, owner, fname, trait_id) {
         Some(s) -> {
@@ -2814,7 +2912,7 @@ fn walk_named_call(
         }
         None -> ()
       }
-      q = walk_call_args(qc, q, args, targs)
+      q = walk_call_args(qc, q, args, if len(bound) > 0 { bound } else { targs })
     }
     Some(XCallBuiltin(bname, targs, _, _, _, _, _)) -> {
       match map.get(qc.bins, bname) {
@@ -2825,13 +2923,7 @@ fn walk_named_call(
       q = walk_call_args(qc, q, args, written)
     }
     Some(XCallDyn(sid, _, targs, _, _, _, _)) -> {
-      q = collect_local_call(qc, q, sid, clo, chi)
-      match sig_of(qc, callee) {
-        Some(s) -> {
-          q = offer_sig_at(qc, q, clo, chi, s, site_of_sig(qc, s))
-        }
-        None -> ()
-      }
+      q = offer_local_use(qc, q, sid, clo, chi)
       q = walk_call_args(qc, q, args, targs)
     }
     _ -> {
@@ -2938,7 +3030,11 @@ fn walk_call_args(qc: QCx, q0: Q, args: List[Expr], targs: List[TExpr]) -> Q = {
       i = i + 1
     }
   } else {
-    q = walk_list(qc, q, args, no_texprs(args))
+    # a call that leaves a default out carries the filled-in default among
+    # its typed arguments: each written one is the typed one at its own span,
+    # so the names inside it still resolve (a reference missed there is one
+    # a rename would miss; docs/lsp-references-design.md §R1)
+    for a in args { q = walk_e(qc, q, a, typed_at(targs, e_lo(a), e_hi(a))) }
   }
   q
 }
@@ -3176,12 +3272,15 @@ fn visit_ctor_pat(
             # a field written by name (`Point { x: px }`) answers as the
             # field; `{ x }` is the binding too, which already answers there
             match pa.name {
-              Some(n) ->
-                if pa.nlo != pat_lo(pa.pat) {
-                  match fi {
-                    Some(ix) -> { q = offer_ctor_field(qc, q, aid, ci, ix, pa.nlo, pa.nhi) }
-                    None -> ()
-                  }
+              Some(_) ->
+                match fi {
+                  Some(ix) ->
+                    if pa.nlo != pat_lo(pa.pat) {
+                      q = offer_ctor_field(qc, q, aid, ci, ix, pa.nlo, pa.nhi)
+                    } else {
+                      q = collect_pun(qc, q, aid, ci, ix, pa.nlo, pa.nhi)
+                    }
+                  None -> ()
                 }
               None -> ()
             }
@@ -3302,8 +3401,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           match sym_get(qc, sid) {
             Some(sym) -> {
               let kw = if sym.mutable { "var" } else { "let" }
-              q = offer(q, nlo, nhi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty),
-                Some((sym.dlo, sym.dhi)), None)
+              q = offer_assigned(q, nlo, nhi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty), (sym.dlo, sym.dhi))
             }
             None -> ()
           }
@@ -3317,7 +3415,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           match cell_set_args(x) {
             Some(cargs) -> {
               match cell_arg_sym(cargs) {
-                Some(sid) -> { q = offer_cell(qc, q, sid, nlo, nhi) }
+                Some(sid) -> { q = offer_cell(qc, q, sid, nlo, nhi, true) }
                 None -> ()
               }
               q = walk_e(qc, q, value, get(cargs, 1))

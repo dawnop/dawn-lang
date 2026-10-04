@@ -1,0 +1,83 @@
+# References and document highlights inside one document
+# (docs/lsp-references-design.md §R1). Both are the same list: every name in
+# the document that resolves to the declaration the cursor's name resolves to.
+#
+# The key is that declaration's site (its file and its name's span), never the
+# name's spelling. A local that shadows another of its name, a parameter named
+# like a top-level function, a field named like a local: each has its own site,
+# so each has its own references, which a text search cannot tell apart.
+# rust-analyzer searches the text first and resolves each hit after; here the
+# document's walk has resolved every name already (`lspq.walked_resolutions`,
+# the collection semantic tokens read too), so filtering it by site is the
+# whole search.
+#
+# The key is taken from definition's own answer at the cursor
+# (`lspq.find_target`), so a name references answers for is a name definition
+# answers for, at the same declaration. The one name a span stands for twice
+# is a record pun (`Point { x }`): definition says the local, and the walk
+# also collects the field there for this file to read (`lspq.PunUse`), so the
+# pun is a reference of both.
+#
+# Only this document is searched. A declaration in another module still has
+# its uses here found, but the uses elsewhere are R2's (a workspace index).
+
+use lsp/lspq.{QCx, Resolution, NoRole, AssignUse, PlainUse, walked_resolutions, find_target}
+use lsp/lsptok.{name_runs}
+
+## One name in the document naming the asked declaration, in code points of
+## the analyzed text. `decl`: the declaration's own name. `write`: a
+## declaration (which binds the name) or the target of an assignment, what
+## documentHighlight calls a write; every other use reads.
+pub(pkg) type Occurrence = { lo: Int, hi: Int, decl: Bool, write: Bool }
+
+## Every occurrence of the declaration the name at `offset` resolves to, by
+## offset, one per name; the declaration's own name only when `with_decl`.
+## No name there, or one that resolves to nothing (a builtin, a literal):
+## nothing.
+pub(pkg) fn occurrences(qc: QCx, offset: Int, with_decl: Bool) -> List[Occurrence] = {
+  let t = match find_target(qc, offset) {
+    Some(t) -> t
+    None -> return []
+  }
+  let def = match t.def {
+    Some(d) -> d
+    None -> return []
+  }
+  var found: List[Occurrence] = []
+  for r in walked_resolutions(qc, 0, len(qc.cps)) {
+    if same_decl(r, t.def_path, def) {
+      let o = occurrence(qc, r)
+      if with_decl || not o.decl { found = found ++ [o] }
+    }
+  }
+  # a name the walk offered twice (a record type and its constructor share
+  # one) is one occurrence
+  var out: List[Occurrence] = []
+  var last = -1
+  for o in sort_by(found, (a, b) => a.lo - b.lo) {
+    if o.lo != last {
+      out = out ++ [o]
+      last = o.lo
+    }
+  }
+  out
+}
+
+## Does `r` name the declaration at `def` in `def_path`? By site, which is the
+## declaration's identity: two declarations never share one, and the spelling
+## of the name is not consulted.
+fn same_decl(r: Resolution, def_path: Option[String], def: (Int, Int)) -> Bool = r.def_path == def_path && r.def == def
+
+## `r` as an occurrence: cut to its name, which is how a span starts (a field's
+## declaration runs on over its type), or for a module, the last segment of a
+## path (`use std/str` is the module `str`).
+fn occurrence(qc: QCx, r: Resolution) -> Occurrence = {
+  let (dlo, dhi) = r.def
+  let is_module = dlo == 0 && dhi == 0 && r.def_path != None
+  let runs = name_runs(qc.cps, r.lo, r.hi, is_module)
+  let (lo, hi) = if len(runs) == 0 { (r.lo, r.hi) } else { runs[len(runs) - 1] }
+  # a declaration is its own site; a `let`'s site is its statement, and the
+  # walk tags its name with a role instead (`lspq.LocalRole`)
+  let decl = r.def_path == None && r.use_kind == PlainUse && (r.lo == dlo || r.role != NoRole)
+  Occurrence { lo: lo, hi: hi, decl: decl, write: decl || r.use_kind == AssignUse }
+}
