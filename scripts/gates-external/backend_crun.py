@@ -11,8 +11,13 @@ prefix mode. What runs a job is then the same code on both sides, and the
 bundle's toolchain fields must come out the same as a local prefix run's;
 that equality is the check that the backend changed where, not what.
 
-How a run goes (all remote paths under --backend-opt remote-prefix=P):
+How a run goes (all remote paths under --backend-opt remote-prefix=P, which
+is the same path on every machine, each on that machine's own disk):
 
+  machines  `crun status` names the cluster's machines and which of them
+            answer; each one that answers becomes a lettered machine (A, B,
+            ...; the letters and the addresses behind them are kept in
+            <out>/crun/machines.json and never leave this machine)
   prepare   1. a staging directory (not a worktree) holding this directory's
                tools, a git bundle of the commit and every tag, one JSON per
                planned job, and a .crun.yaml whose remote_root is
@@ -20,26 +25,63 @@ How a run goes (all remote paths under --backend-opt remote-prefix=P):
                of these tools (a digest of TOOL_FILES), so no two projects,
                and no two controllers with different tools, ever rsync
                --delete into each other
-            2. `inputs.py verify` on the cluster; if the pack is missing or
-               red, a second staging directory (hard links to the local
-               prefix's inputs/) goes to P/inputs and `inputs.py install`
-               extracts and re-verifies it there
-  run_job   `crun run -n 0 --no-build -d -- bash -c <wrapper>`: one detached
-            zero-card crun per job, at most --jobs at once. The wrapper claims
-            the job (mkdir P/out/<sha>/<run>.ctl/<job>.claim, so a second
-            launch of the same job in the same run is a no-op), runs
-            `env -i ... prefix.py run-job` with its stdout and stderr in that
-            directory, and writes <job>.exit last. crun pushes the staging
-            directory on every call (an unchanged tree is a few seconds; crun
-            serialises the pushes itself)
-  poll      one thread, one short `crun run -n 0 --no-sync --no-build` every
-            poll=SECONDS (default 30) for every job still out, which prints
-            each job's state: absent, running (claimed), or done with its
-            exit code, fragment, stdout and stderr
+            2. on every machine at once, `crun run -m <machine>`: the core
+               count and load average, then `inputs.py verify`; if the pack
+               is missing or red there, a second staging directory (hard
+               links to the local prefix's inputs/) goes to P/inputs and
+               `inputs.py install` extracts and re-verifies it on that
+               machine. Before the pack, the job uid (run-as) must be able
+               to start the prefix python there. A machine that does not
+               answer, that the job uid cannot use, or whose pack will not
+               verify, is dropped for this run; the run fails only when none
+               is left
+  run_job   `crun run -n 0 --no-build -m <machine> -d -- bash -c <wrapper>`:
+            one detached zero-card crun per job, at most --jobs at once, on
+            the machine chosen at launch (below). The wrapper claims the job
+            (mkdir P/out/<sha>/<run>.ctl/<job>.claim, holding the machine's
+            letter, so a second launch of the same job on the same machine is
+            a no-op), runs `env -i ... prefix.py run-job` with its stdout and
+            stderr in that directory, and writes <job>.exit last. crun pushes
+            the staging directory to its primary machine on every call (an
+            unchanged tree is a few seconds; crun serialises the pushes
+            itself) and from there rsyncs it to the chosen machine
+  poll      one thread; every poll=SECONDS (default 30) one short
+            `crun run -n 0 --no-sync --no-build -m <machine>` per machine
+            that has jobs out, run side by side, which prints that machine's
+            core count and load and each of its jobs' state: absent, running
+            (claimed), or done with its exit code, fragment, stdout and stderr
   results   run-job writes its result fragment to
-            P/out/<sha>/<run>/fragments; logs and artifacts stay in
-            P/out/<sha>/<run>/ on the cluster. Only the fragments come back,
-            and the runner builds bundle.json from them as for any backend
+            P/out/<sha>/<run>/fragments on its machine; logs and artifacts
+            stay there. Only the fragments come back, and the runner builds
+            bundle.json from them as for any backend; nothing in a fragment
+            names a machine
+
+Why several machines, and why chosen by load (2026-10-04). A zero-card crun
+without -m always lands on crun's primary machine. With six writers each
+running --jobs 8, that machine's load average sat at 175-205 on 256 cores
+while the two others idled at 2-5 on 224 each; a single job went from ~10 to
+20+ minutes and a full round from ~20 to ~65. Rotating jobs over the machines
+would still send a third of ours to the hottest one, because the other
+controllers do not rotate. So each launch goes to the machine with the least
+(load + recent) / cores, where load is the 1-minute load average from the
+latest poll or prepare, and recent is job-load (default 8) for each job this
+controller launched there in the last 90 s, which a 1-minute average does not
+show yet; a long run would otherwise pile its first dozen launches on
+whichever machine looked idle at prepare. This is no scheduler: it does not
+know the other controllers' plans, only what the load says now.
+
+Why each machine prepares its own prefix. The prefix sits on a disk local to
+each machine, so the input pack, the toolchain, the claims and the fragments of a
+job all live where it ran. Shipping goes through crun's own route (push to
+the primary, rsync from there, both incremental), so a pack already on the
+primary costs nothing from here and the copy to another machine is a
+cluster-internal rsync, not another 0.6 MB/s upload.
+
+When a machine goes away mid-run. A machine whose polls or launches fail
+dead-after times in a row (default 6, three minutes at the default poll) is
+marked down for the rest of the run, and every job out on it is launched
+again on another machine. A job that did start there and finishes later is
+harmless: its fragment stays on that machine's disk and nothing reads it.
 
 Why detached and polled (2026-09-25). A synchronous crun holds one SSH
 session for the length of the job, and crun kills the remote job when that
@@ -53,11 +95,15 @@ had returned). A dropped poll costs one poll interval; a dropped launch is
 settled by the claim: the next poll says whether the job started, and it is
 launched again only if it did not.
 
-Resuming. The run id is kept in <out>/crun/run-id, and with resume=1 (run.sh
---resume) the backend reads it back instead of making a new one, polls every
-job once in prepare, and hands the runner every job that already finished
-(finished()); a job still running is waited for, not launched again, and a
-job with no claim is launched. A job that finished without a fragment (a
+Resuming. The run id is kept in <out>/crun/run-id and the machine letters in
+<out>/crun/machines.json, and with resume=1 (run.sh --resume) the backend
+reads both back instead of making new ones, polls every job once on every
+machine in prepare, and hands the runner every job that already finished
+(finished()); a job still running is waited for on its machine, not launched
+again, and a job with no claim anywhere is launched. Where two machines
+answer for one job (it was launched again after its machine stopped
+answering), done beats running beats absent, and among equals the machine
+dispatch.txt names last wins. A job that finished without a fragment (a
 crash, or a fragment deleted since) is a failed job, never re-run silently
 and never skipped, so the bundle cannot come out complete.
 
@@ -71,6 +117,14 @@ Options (--backend-opt):
   remote-prefix=DIR   the prefix on the cluster (required; no location is
                       written into this code, and a path on a shared cluster
                       disk names the person who owns it)
+  machines=auto|N|primary
+                      auto (default): every machine `crun status` lists that
+                      answers; N: the N least loaded of those after prepare;
+                      primary: no -m at all, every job on crun's primary
+                      machine, which is what this backend did before
+  job-load=F          the load one fresh launch is assumed to add (default 8)
+  dead-after=N        failed polls or launches in a row before a machine is
+                      dropped (default 6)
   stage=DIR           local staging root (default <--prefix>/stage)
   crun=CMD            the crun executable (default crun)
   isolation=1         wrap every remote job in prefix.py check-isolation
@@ -95,12 +149,13 @@ Options (--backend-opt):
 """
 
 import base64
+import concurrent.futures
 import hashlib
 import json
-import os
 import re
 import shlex
 import shutil
+import string
 import subprocess
 import sys
 import threading
@@ -121,15 +176,55 @@ DEFAULT_RUN_AS = "20000:20000"
 # after this is a stalled connection, and waiting on it would stall every job.
 POLL_TIMEOUT = 300
 
+# How long a launch counts as load the load average has not caught up with.
+RECENT_SECONDS = 90
+
 # runner.py --resume asks for this: jobs run detached on the cluster and
 # outlive the controller that launched them.
 RESUMABLE = True
 
 TOOL_FILES = ("prefix.py", "inputs.py", "backend_local.py", "gatesplan.py", "inputs.lock.json")
 
+# What the remote side prints before anything else: core count and load.
+LOAD_PROBE = "echo \"GATES-LOAD $(nproc) $(cut -d' ' -f1 /proc/loadavg)\""
+
 
 def create(ctx):
     return CrunBackend(ctx)
+
+
+class Machine:
+    """One cluster machine, by letter; `host` is crun's -m value (None: no -m)."""
+
+    def __init__(self, label, host):
+        self.label = label
+        self.host = host
+        self.cores = None
+        self.load = None
+        self.up = True
+        self.failures = 0
+        self.recent = []  # monotonic times of this controller's recent launches here
+
+    def flag(self):
+        return ["-m", self.host] if self.host else []
+
+    def note_load(self, text):
+        """Take a `GATES-LOAD <cores> <load1>` line out of remote output."""
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[0] == "GATES-LOAD":
+                try:
+                    self.cores, self.load = int(fields[1]), float(fields[2])
+                except ValueError:
+                    continue
+                return True
+        return False
+
+    def score(self, job_load, now):
+        self.recent = [t for t in self.recent if now - t < RECENT_SECONDS]
+        if not self.cores:
+            return float("inf")
+        return ((self.load or 0.0) + job_load * len(self.recent)) / self.cores
 
 
 class CrunBackend:
@@ -157,6 +252,12 @@ class CrunBackend:
         self.poll_interval = float(opts.get("poll", "30"))
         self.wait_scale = float(opts.get("wait-scale",
                                          float(opts.get("timeout-scale", "2")) + 1))
+        self.machines_opt = opts.get("machines", "auto")
+        if not (self.machines_opt in ("auto", "primary") or self.machines_opt.isdigit()):
+            raise SystemExit(f"crun backend: machines={self.machines_opt}: want auto, primary "
+                             "or a number")
+        self.job_load = float(opts.get("job-load", "8"))
+        self.dead_after = int(opts.get("dead-after", "6"))
         run_id_file = self.out / "crun" / "run-id"
         self.resuming = opts.get("resume", "0") == "1"
         if self.resuming:
@@ -170,17 +271,21 @@ class CrunBackend:
         self.ctl = f"{self.remote}/out/{self.tree}/{self.run_id}.ctl"
         self.fragments = {}
         self.start_lock = threading.Lock()
+        self.ship_lock = threading.Lock()
         self.last_start = 0.0
-        # Polling: the jobs still out, the latest state of each, and a round
-        # counter the waiting threads block on.
+        # Polling: the jobs still out, the machine each was last launched on,
+        # the latest (machine, state) of each, and a round counter the
+        # waiting threads block on.
         self.cond = threading.Condition()
         self.watched = set()
+        self.assigned = {}
         self.states = {}
         self.round = 0
         self.stopping = False
         self.poller = None
         self.polls = {"ok": 0, "failed": 0}
         self.initial = {}
+        self.machines = []
         self.dispatch_log = self.out / "crun" / "dispatch.txt"
         # What a job runs is the commit and these tools, so both name the
         # staging directory and the remote tree. Keyed by the commit alone,
@@ -201,7 +306,7 @@ class CrunBackend:
         """The literal `env -i` every remote command starts from."""
         return ["env", "-i", "PATH=/usr/bin:/bin", f"HOME={self.remote}/home", "LANG=C.UTF-8"]
 
-    def _crun(self, stage, command, label, sync=True, detach=False, timeout=None):
+    def _crun(self, stage, machine, command, label, sync=True, detach=False, timeout=None):
         """One zero-card crun from a staging directory; (exit, stdout, stderr).
 
         With a timeout, a crun that hangs (an SSH session that stalls rather
@@ -212,7 +317,7 @@ class CrunBackend:
             if wait > 0:
                 time.sleep(wait)
             self.last_start = time.monotonic()
-        argv = list(self.crun) + ["run", "-n", "0", "--no-build"]
+        argv = list(self.crun) + ["run", "-n", "0", "--no-build"] + machine.flag()
         if not sync:
             argv.append("--no-sync")
         if detach:
@@ -225,7 +330,7 @@ class CrunBackend:
         except subprocess.TimeoutExpired as expired:
             done = subprocess.CompletedProcess(
                 argv, 124, _text(expired.stdout), _text(expired.stderr) + f"\ntimed out after {timeout}s\n")
-        record = self.out / "crun" / f"{label}.txt"
+        record = self.out / "crun" / f"{label}-{machine.label}.txt"
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(f"$ {shlex.join(argv)}\n# exit {done.returncode} after "
                           f"{time.monotonic() - t0:.0f}s\n--- stdout\n{done.stdout}"
@@ -238,6 +343,74 @@ class CrunBackend:
             "# written by scripts/gates-external/backend_crun.py; never committed\n"
             f"remote_root: {remote_root}\n"
             "build: 'true'\n")
+
+    # ------------------------------------------------------------ machines
+
+    def _discover(self):
+        """The machines this run may use, lettered; the letters survive --resume."""
+        map_file = self.out / "crun" / "machines.json"
+        saved = {}
+        if self.resuming and map_file.is_file():
+            saved = json.loads(map_file.read_text())
+        if self.machines_opt == "primary":
+            return [Machine("A", None)]
+        done = subprocess.run(list(self.crun) + ["status"], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=POLL_TIMEOUT)
+        # A machine is a `<host>  (<type>[, primary])` line; it answered when
+        # at least one `  GPU <n>: ...` line follows it (an unreachable one
+        # gets a one-line reason instead).
+        hosts = []
+        for line in done.stdout.splitlines():
+            head = re.match(r"^(\S+)\s+\(([^)]*)\)\s*$", line)
+            if head:
+                hosts.append([head.group(1), False])
+            elif hosts and re.match(r"^\s+GPU \d+:", line):
+                hosts[-1][1] = True
+        if not hosts:
+            self.log("crun backend: `crun status` named no machine; every job goes to crun's "
+                     "primary machine")
+            return [Machine("A", None)]
+        by_host = {host: label for label, host in saved.items()}
+        letters = iter(c for c in string.ascii_uppercase if c not in saved)
+        machines = []
+        for host, reachable in hosts:
+            label = by_host.get(host) or next(letters)
+            by_host[host] = label
+            machine = Machine(label, host)
+            machine.up = reachable
+            machines.append(machine)
+        map_file.parent.mkdir(parents=True, exist_ok=True)
+        map_file.write_text(json.dumps({m.label: m.host for m in machines}, indent=2,
+                                       sort_keys=True) + "\n")
+        down = [m.label for m in machines if not m.up]
+        self.log(f"crun backend: machines {', '.join(m.label for m in machines)}"
+                 + (f"; {', '.join(down)} not answering `crun status`" if down else ""))
+        return machines
+
+    def _drop(self, machine, why):
+        if machine.up:
+            machine.up = False
+            self.log(f"crun backend: machine {machine.label} dropped from this run: {why}")
+
+    def _failed(self, machine, what):
+        """One more failure in a row; dead-after of them drop the machine."""
+        machine.failures += 1
+        if machine.failures >= self.dead_after:
+            self._drop(machine, f"{machine.failures} {what} failures in a row")
+
+    def _up(self):
+        return [m for m in self.machines if m.up]
+
+    def _pick(self, avoid=()):
+        """The machine for one launch: the least (load + recent) per core."""
+        with self.cond:
+            now = time.monotonic()
+            candidates = [m for m in self._up() if m.label not in avoid] or self._up()
+            if not candidates:
+                return None
+            machine = min(candidates, key=lambda m: (m.score(self.job_load, now), m.label))
+            machine.recent.append(now)
+            return machine
 
     # ------------------------------------------------------------ prepare
 
@@ -269,34 +442,93 @@ class CrunBackend:
                  f"in {time.monotonic() - t0:.0f}s; remote prefix {self.remote}, run {self.run_id}, "
                  f"jobs run as {self.run_as or 'root'}")
 
+        self.machines = self._discover()
+        live = self._up()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(live))) as pool:
+            list(pool.map(self._prepare_machine, live))
+        live = self._up()
+        if not live:
+            raise SystemExit("crun backend: no machine is left to run on (see the log above "
+                             f"and {self.out / 'crun'})")
+        if self.machines_opt.isdigit():
+            keep = sorted(live, key=lambda m: (m.score(self.job_load, time.monotonic()),
+                                               m.label))[:max(1, int(self.machines_opt))]
+            for machine in live:
+                if machine not in keep:
+                    machine.up = False
+            live = keep
+        self.log("crun backend: running on " + ", ".join(
+            f"{m.label} ({m.cores} cores, load {m.load})" for m in live))
+        if self.resuming:
+            self._resume_states([job["id"] for job in plan["jobs"]])
+
+    def _prepare_machine(self, machine):
         t0 = time.monotonic()
-        code, out, err = self._verify_remote(stage, sync=True)
-        self.log(f"crun backend: first push and remote inputs verify: exit {code} in "
+        code, out, err = self._verify_remote(machine, sync=True)
+        if not machine.note_load(out):
+            self._drop(machine, f"no answer (crun exit {code})")
+            return
+        if "GATES-NOREACH" in out.splitlines():
+            self._drop(machine, f"uid {self.run_as} cannot run the prefix python there")
+            return
+        self.log(f"crun backend: machine {machine.label}: {machine.cores} cores, load "
+                 f"{machine.load}; first push and inputs verify: exit {code} in "
                  f"{time.monotonic() - t0:.0f}s")
         if code != 0:
-            self._ship_inputs()
-            code, out, err = self._verify_remote(stage, sync=False)
+            try:
+                self._ship_inputs(machine)
+            except MachineError as error:
+                self._drop(machine, str(error))
+                return
+            code, out, err = self._verify_remote(machine, sync=False)
+            if "GATES-NOREACH" in out.splitlines():
+                self._drop(machine, f"uid {self.run_as} cannot run the prefix python there")
+                return
             if code != 0:
-                raise SystemExit(f"crun backend: the input pack does not verify on the cluster "
-                                 f"after shipping:\n{out}{err}")
-        self.log("crun backend: the input pack verifies on the cluster")
-        if self.resuming:
-            ids = [job["id"] for job in plan["jobs"]]
+                self._drop(machine, f"the input pack does not verify after shipping: "
+                                    f"{(out + err)[-500:]}")
+                return
+        self.log(f"crun backend: machine {machine.label}: the input pack verifies")
+
+    def _resume_states(self, ids):
+        """Every job's state on every machine, merged; the machine each is on."""
+        last = {}
+        if self.dispatch_log.is_file():
+            for line in self.dispatch_log.read_text().splitlines():
+                fields = line.split("\t")
+                if len(fields) >= 4 and fields[3].startswith("machine "):
+                    last[fields[0]] = fields[3].split()[1]
+        merged = {}
+        rank = {"absent": 0, "running": 1, "done": 2}
+        for machine in self._up():
             states = None
             for _ in range(3):
-                states = self._poll_once(ids)
+                states = self._poll_once(machine, ids)
                 if states is not None:
                     break
                 time.sleep(self.poll_interval)
             if states is None:
-                raise SystemExit("crun backend: cannot read the earlier run's state on the "
-                                 "cluster (three polls failed)")
-            self.initial = states
-            counts = {}
-            for state in states.values():
-                counts[state["state"]] = counts.get(state["state"], 0) + 1
-            self.log(f"crun backend: resuming run {self.run_id}: "
-                     + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
+                self._drop(machine, "cannot read the earlier run's state there (three polls "
+                                    "failed)")
+                continue
+            for jid, state in states.items():
+                old = merged.get(jid)
+                better = (old is None or rank[state["state"]] > rank[old[1]["state"]]
+                          or (rank[state["state"]] == rank[old[1]["state"]]
+                              and last.get(jid) == machine.label))
+                if better:
+                    merged[jid] = (machine, state)
+        if not self._up():
+            raise SystemExit("crun backend: cannot read the earlier run's state on any machine")
+        self.initial = {jid: state for jid, (_, state) in merged.items()}
+        for jid, (machine, state) in merged.items():
+            if state["state"] == "running":
+                self.assigned[jid] = machine
+        counts = {}
+        for state in self.initial.values():
+            counts[state["state"]] = counts.get(state["state"], 0) + 1
+        self.log(f"crun backend: resuming run {self.run_id}: "
+                 + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
 
     def _make_bundle(self, bundle):
         """The commit and every tag, and nothing that names this machine."""
@@ -310,23 +542,47 @@ class CrunBackend:
                         "refs/heads/gates-tree", "--tags"], check=True)
         shutil.rmtree(tmp)
 
-    def _verify_remote(self, stage, sync):
-        py = self._python()
-        script = (f"if [ -x {py} ]; then exec {py} -B {self.tree_remote}/tools/inputs.py verify "
-                  f"--prefix {self.remote} --seed-tag {shlex.quote(self.seed_tag)}; "
-                  f"else echo 'no prefix python yet'; exit 1; fi")
-        return self._crun(stage, self._envi() + ["bash", "-c", script], "inputs-verify", sync=sync)
+    def _verify_remote(self, machine, sync):
+        """Load, then whether the job uid can reach the prefix, then the pack.
 
-    def _ship_inputs(self):
-        """Hard links to the local prefix's inputs/, pushed to P/inputs by crun."""
+        The uid check exists because a prefix can verify green as root and
+        still be out of a job's reach: on one machine a directory above the
+        prefix, which is not ours to change, is mode 700 to another uid, and
+        every job there died at once loading the prefix python's libpython.
+        The marker is matched as a whole line: crun echoes the command it
+        runs, marker included, on the same stdout.
+        """
+        py = self._python()
+        reach = ""
+        if self.run_as:
+            uid, gid = self.run_as.split(":")
+            reach = (f"setpriv --reuid={uid} --regid={gid} --clear-groups --no-new-privs "
+                     f"{py} -B -c pass || {{ echo GATES-NOREACH; exit 3; }}; ")
+        script = (f"{LOAD_PROBE}; "
+                  f"if [ ! -x {py} ]; then echo 'no prefix python yet'; exit 1; fi; {reach}"
+                  f"exec {py} -B {self.tree_remote}/tools/inputs.py verify "
+                  f"--prefix {self.remote} --seed-tag {shlex.quote(self.seed_tag)}")
+        return self._crun(self.stage, machine, self._envi() + ["bash", "-c", script],
+                          "inputs-verify", sync=sync)
+
+    def _ship_inputs(self, machine):
+        """Hard links to the local prefix's inputs/, pushed to P/inputs by crun.
+
+        One machine at a time: every ship pushes the same directory to the
+        primary first, and two pushes into one remote_root break each other.
+        """
+        with self.ship_lock:
+            self._ship_inputs_locked(machine)
+
+    def _ship_inputs_locked(self, machine):
         local_inputs = self.local_prefix / "inputs"
         if subprocess.run([sys.executable, "-B", str(HERE / "inputs.py"), "verify", "--prefix",
                            str(self.local_prefix), "--seed-tag", self.seed_tag],
                           capture_output=True).returncode != 0:
-            raise SystemExit(f"crun backend: the local input pack does not verify for seed "
-                             f"{self.seed_tag}; run inputs.py build --repo <a checkout at "
-                             f"{self.tree}> first")
-        stage = self.stage_root / f"inputs-{self.run_id}"
+            raise MachineError(f"the local input pack does not verify for seed "
+                               f"{self.seed_tag}; run inputs.py build --repo <a checkout at "
+                               f"{self.tree}> first")
+        stage = self.stage_root / f"inputs-{self.run_id}-{machine.label}"
         shutil.rmtree(stage, ignore_errors=True)
         subprocess.run(["cp", "-al", str(local_inputs), str(stage)], check=True)
         self._write_crun_yaml(stage, f"{self.remote}/inputs")
@@ -342,15 +598,16 @@ class CrunBackend:
                   f"exec {pydir}/bin/python3 -B {self.tree_remote}/tools/inputs.py install "
                   f"--prefix {self.remote}")
         t0 = time.monotonic()
-        self.log(f"crun backend: shipping the input pack ({size / 2**20:.0f} MiB) to "
-                 f"{self.remote}/inputs")
-        code, out, err = self._crun(stage, self._envi() + ["bash", "-c", script], "inputs-ship")
-        shutil.rmtree(stage, ignore_errors=True)  # hard links, one per run
-        self.log(f"crun backend: input pack shipped and installed: exit {code} in "
-                 f"{time.monotonic() - t0:.0f}s")
+        self.log(f"crun backend: machine {machine.label}: shipping the input pack "
+                 f"({size / 2**20:.0f} MiB) to {self.remote}/inputs")
+        code, out, err = self._crun(stage, machine, self._envi() + ["bash", "-c", script],
+                                    "inputs-ship")
+        shutil.rmtree(stage, ignore_errors=True)  # hard links, one per run and machine
+        self.log(f"crun backend: machine {machine.label}: input pack shipped and installed: "
+                 f"exit {code} in {time.monotonic() - t0:.0f}s")
         if code != 0:
-            raise SystemExit(f"crun backend: shipping the input pack failed:\n{out[-3000:]}"
-                             f"{err[-3000:]}")
+            raise MachineError(f"shipping the input pack failed (exit {code}); see "
+                               f"{self.out / 'crun'}")
 
     # ------------------------------------------------------------- jobs
 
@@ -376,19 +633,21 @@ class CrunBackend:
                      "--marker", f"{self.remote}/tmp/markers/{self.run_id}-{jid}", "--"] + inner
         return self._envi() + inner
 
-    def _wrapper(self, job):
+    def _wrapper(self, job, machine):
         """The detached job: claim it, run it, record exit code and times.
 
         The control directory sits beside the run's own out directory, not in
         it: run-job creates out/<sha>/<run> as the uid it drops to, and a
         directory root made there first would lock that uid out. <job>.exit
         is written last and by rename, so a poll that sees it sees the
-        fragment run-job wrote before it exited.
+        fragment run-job wrote before it exited. The claim holds the
+        machine's letter, so a claim read back says where it was made.
         """
         c, jid = self.ctl, job["id"]
         return ["bash", "-c",
                 f"mkdir -p {c} || exit 1; "
                 f"mkdir {c}/{jid}.claim 2>/dev/null || exit 0; "
+                f"echo {machine.label} > {c}/{jid}.claim/machine; "
                 f"s=$(date +%s); {shlex.join(self._inner(job))} "
                 f"> {c}/{jid}.stdout 2> {c}/{jid}.stderr; x=$?; "
                 f"echo \"$x $s $(date +%s)\" > {c}/{jid}.exit.tmp && "
@@ -396,7 +655,7 @@ class CrunBackend:
 
     def _poll_script(self, ids):
         c, f = self.ctl, f"{self.remote}/out/{self.tree}/{self.run_id}/fragments"
-        parts = []
+        parts = [LOAD_PROBE]
         for jid in ids:
             parts.append(
                 f"if [ -f {c}/{jid}.exit ]; then "
@@ -409,17 +668,25 @@ class CrunBackend:
                 f"else echo \"GATES-POLL absent {jid}\"; fi")
         return "; ".join(parts) + "; echo GATES-POLL-END"
 
-    def _poll_once(self, ids):
-        """{job: state} for these jobs, or None when the poll did not get through."""
-        code, out, _ = self._crun(self.stage, self._envi() + ["bash", "-c",
-                                                              self._poll_script(ids)],
+    def _poll_once(self, machine, ids):
+        """{job: state} for these jobs on one machine, or None when the poll did not get through."""
+        code, out, _ = self._crun(self.stage, machine,
+                                  self._envi() + ["bash", "-c", self._poll_script(ids)],
                                   "poll", sync=False, timeout=POLL_TIMEOUT)
         lines = [line.split(" ", 3) for line in out.splitlines()
                  if line.startswith("GATES-POLL")]
         if code != 0 or ["GATES-POLL-END"] not in lines:
-            self.polls["failed"] += 1
+            with self.cond:
+                self.polls["failed"] += 1
             return None
-        self.polls["ok"] += 1
+        with self.cond:
+            self.polls["ok"] += 1
+            if machine.note_load(out):
+                # local only, for the person who ran it: how loaded each
+                # machine was through the run
+                with open(self.out / "crun" / "loads.txt", "a") as handle:
+                    handle.write(f"{time.strftime('%H:%M:%S')}\t{machine.label}\t"
+                                 f"{machine.cores}\t{machine.load}\n")
         states = {}
         for fields in lines:
             if fields[0] != "GATES-POLL" or len(fields) < 3:
@@ -441,32 +708,65 @@ class CrunBackend:
             with self.cond:
                 if self.stopping:
                     return
-                ids = sorted(self.watched)
-            if ids:
-                states = self._poll_once(ids)
+                groups = {}
+                for jid in sorted(self.watched):
+                    machine = self.assigned.get(jid)
+                    if machine is not None:
+                        groups.setdefault(machine.label, (machine, []))[1].append(jid)
+            if groups:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
+                    answers = list(pool.map(lambda g: (g[0], g[1], self._poll_once(*g)),
+                                            groups.values()))
                 with self.cond:
-                    if states is not None:
-                        self.states.update(states)
+                    for machine, ids, states in answers:
+                        if states is None:
+                            self._failed(machine, "poll")
+                            if not machine.up:
+                                for jid in ids:
+                                    self.states[jid] = (machine.label, {"state": "lost"})
+                            continue
+                        machine.failures = 0
+                        for jid, state in states.items():
+                            self.states[jid] = (machine.label, state)
                     self.round += 1
                     self.cond.notify_all()
             with self.cond:
                 self.cond.wait_for(lambda: self.stopping, timeout=self.poll_interval)
 
     def _next_round(self, jid, seen):
-        """Block until a poll round after `seen`; (round, this job's state or None)."""
+        """Block until a poll round after `seen`; (round, this job's state or None).
+
+        A state from a machine the job has since left is stale and dropped.
+        """
         with self.cond:
             self.cond.wait_for(lambda: self.round > seen or self.stopping)
-            return self.round, self.states.pop(jid, None)
+            got = self.states.pop(jid, None)
+            machine = self.assigned.get(jid)
+            if got is None or machine is None or got[0] != machine.label:
+                return self.round, None
+            return self.round, got[1]
 
-    def _launch(self, job):
-        """(crun job id or None, whether crun said it started)."""
+    def _launch(self, job, avoid=()):
+        """(crun job id or None, whether crun said it started); records the machine."""
         jid = job["id"]
-        code, out, err = self._crun(self.stage, self._wrapper(job), f"launch-{jid}",
-                                    detach=True, timeout=POLL_TIMEOUT)
+        machine = self._pick(avoid)
+        if machine is None:
+            raise RuntimeError("no machine is left to launch on")
+        with self.cond:
+            self.assigned[jid] = machine
+            self.states.pop(jid, None)
+        code, out, err = self._crun(self.stage, machine, self._wrapper(job, machine),
+                                    f"launch-{jid}", detach=True, timeout=POLL_TIMEOUT)
         match = re.search(r"\bcrun-[a-z0-9]{8}\b", out + err)
         ok = code == 0 and match is not None
-        with open(self.dispatch_log, "a") as handle:
-            handle.write(f"{jid}\t{match.group(0) if match else '-'}\texit {code}\n")
+        with self.cond:
+            if ok:
+                machine.failures = 0
+            else:
+                self._failed(machine, "launch")
+            with open(self.dispatch_log, "a") as handle:
+                handle.write(f"{jid}\t{match.group(0) if match else '-'}\texit {code}\t"
+                             f"machine {machine.label}\n")
         return (match.group(0) if match else None), ok
 
     def run_job(self, job, artifacts):
@@ -481,7 +781,8 @@ class CrunBackend:
         state = self.initial.pop(jid, None)
         launches, crun_job, absent = 0, None, 0
         if state and state["state"] == "running":
-            self.log(f"{jid}: still running from the earlier controller; waiting for it")
+            self.log(f"{jid}: still running from the earlier controller on machine "
+                     f"{self.assigned[jid].label}; waiting for it")
             state = None
         elif state is None or state["state"] == "absent":
             crun_job, started = self._launch(job)
@@ -502,17 +803,28 @@ class CrunBackend:
                 seen, state = self._next_round(jid, seen)
                 if state is None:
                     continue
-                if state["state"] == "absent":
+                if state["state"] == "lost":
+                    # Its machine was dropped: start over elsewhere. Each
+                    # machine can be dropped once, so this is bounded.
+                    left = self.assigned[jid].label
+                    self.log(f"{jid}: machine {left} was dropped; launching again elsewhere")
+                    crun_job, _ = self._launch(job, avoid=(left,))
+                    launches += 1
+                    absent = 0
+                    state = None
+                elif state["state"] == "absent":
                     absent += 1
                     # Not claimed two polls after a launch: the launch never
-                    # reached the cluster. A late one would find the claim.
+                    # reached the cluster. A late one would find the claim
+                    # if it lands on the same machine, and on another one it
+                    # runs to no purpose and is never read.
                     if absent >= 2:
                         if launches >= 3:
                             raise RuntimeError(f"launched {launches} times and never started "
                                                f"(see {self.dispatch_log})")
                         self.log(f"{jid}: not started {absent} polls after launch "
                                  f"{launches}; launching again")
-                        crun_job, _ = self._launch(job)
+                        crun_job, _ = self._launch(job, avoid=(self.assigned[jid].label,))
                         launches += 1
                         absent = 0
                 elif state["state"] == "running":
@@ -521,8 +833,8 @@ class CrunBackend:
             with self.cond:
                 self.watched.discard(jid)
         extra = time.monotonic() - t0 - state["remote_seconds"]
-        self.log(f"{jid}: remote {state['remote_seconds']}s, controller {extra:+.0f}s "
-                 f"(launches {launches})")
+        self.log(f"{jid}: remote {state['remote_seconds']}s on machine "
+                 f"{self.assigned[jid].label}, controller {extra:+.0f}s (launches {launches})")
         return self._collect(jid, state)
 
     def _collect(self, jid, state):
@@ -582,8 +894,16 @@ class CrunBackend:
             self.cond.notify_all()
         if self.poller is not None:
             self.poller.join(timeout=5)
+        per_machine = {}
+        for machine in self.assigned.values():
+            per_machine[machine.label] = per_machine.get(machine.label, 0) + 1
         self.log(f"crun backend: {self.polls['ok']} poll(s) answered, "
-                 f"{self.polls['failed']} dropped")
+                 f"{self.polls['failed']} dropped; jobs last placed per machine: "
+                 + ", ".join(f"{k} {v}" for k, v in sorted(per_machine.items())))
+
+
+class MachineError(Exception):
+    """One machine cannot take part; the run goes on without it."""
 
 
 def tools_digest():
