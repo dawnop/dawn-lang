@@ -178,6 +178,18 @@ fi
 # heap the promise is about. The pass condition is the ceiling's own words,
 # and an OutOfMemoryError anywhere in the output is a failure even if the
 # words appear too.
+#
+# The words have to name pkgfetch's own ceiling, read from its source: a
+# refusal by some other limit (inflate's 16 MiB default, say, if pkgfetch ever
+# stopped passing `cap`) would also be the ceiling's words, and would leave
+# the ceiling pkgfetch actually sets unmeasured. Reading the constant here is
+# also what makes this leg one of the gates that see a change to that file.
+pkgfetch_src="$root/compiler-plan/src/pkgfetch.dawn"
+expanded_limit="$(sed -n 's/^const MAX_EXPANDED_BYTES: Int = \([0-9][0-9]*\)$/\1/p' "$pkgfetch_src")"
+if [ -z "$expanded_limit" ]; then
+  echo "FAIL: no MAX_EXPANDED_BYTES constant in $pkgfetch_src" >&2
+  exit 1
+fi
 pkg_case() { # kind
   local kind=$1 dir="$work/pkg-$1" out
   mkdir -p "$dir/proj/src" "$dir/cache"
@@ -191,7 +203,8 @@ pkg_case() { # kind
     echo "FAIL: dawn add accepted a 1 GiB $kind bomb" >&2
     exit 1
   fi
-  if grep -q 'OutOfMemoryError' "$out" || ! grep -Fq 'byte limit (stopped at' "$out"; then
+  if grep -q 'OutOfMemoryError' "$out" ||
+      ! grep -Fq "exceeds the $expanded_limit byte limit (stopped at" "$out"; then
     sed 's/^/  | /' "$out" | grep -v '^  | *at ' >&2
     echo "FAIL: a 1 GiB $kind bomb was not refused by pkgfetch's ceiling in the toolchain heap" >&2
     exit 1
