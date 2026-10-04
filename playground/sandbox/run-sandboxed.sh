@@ -8,6 +8,10 @@
 # Threat model: the command compiles/runs arbitrary user Dawn (hence arbitrary
 # JVM) code. Each invocation must not touch the network, the filesystem outside
 # its own temp dir, other processes, or more than its slice of CPU/RAM/time.
+#
+# The runner passes the request's `box/` as <workdir>, not the request
+# directory itself: the command's output files sit one level up, where the
+# unit cannot rename or replace them (playground/src/play/exec.dawn).
 set -eu
 
 WORKDIR="$1"
@@ -43,6 +47,16 @@ esac
 # shrinking it would fail deeply nested programs the parser handles today.
 SANDBOX_JVM_OPTS="-Xss512m -Xmx256m"
 
+# The largest file the unit may write, its stdout included: the runner opened
+# that file and the unit writes through the descriptor, but RLIMIT_FSIZE is
+# the writer's, so it applies all the same. MemoryMax bounds what the private
+# /tmp can hold; nothing bounded the disk under the work root, and a program
+# printing at full speed for the length of its run left gigabytes behind on
+# the host the blog shares. A playground jar is under 100 KB and the runner
+# shows 64 KB of output, so 32 MB is far from both. Past it, a write fails
+# with EFBIG (the JVM ignores SIGXFSZ) and the program goes on without it.
+SANDBOX_FSIZE=32M
+
 exec systemd-run \
   --quiet --wait --pipe --collect \
   --setenv="DAWN_JVM_OPTS=$SANDBOX_JVM_OPTS" \
@@ -66,6 +80,7 @@ exec systemd-run \
   --property=MemoryMax=512M \
   --property=MemorySwapMax=0 \
   --property=TasksMax=64 \
+  --property=LimitFSIZE=$SANDBOX_FSIZE \
   --property=CPUQuota=200% \
   --property=RuntimeMaxSec=15 \
   --property=WorkingDirectory="$WORKDIR" \

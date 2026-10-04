@@ -1,19 +1,59 @@
 # The execution pipeline: compile with `dawn build`, then run the jar with
 # `java`. Two phases keep the compile diagnostics clean and separate from the
-# program's own output. Each child's combined stdout+stderr is redirected to a
-# file (no pipe-buffer deadlock on large output), then read back.
+# program's own output.
+#
+# Each child's combined stdout+stderr goes to a file rather than a pipe, and
+# where that file lives is the security boundary of this module. A request's
+# directory is laid out as
+#
+#   dawn-play-<uuid>/          runner-owned, 0711: build.txt, run.txt
+#   dawn-play-<uuid>/box/      0777 under the sandbox: prog.dawn, prog.jar
+#
+# and the sandbox is handed `box/` only. The output files used to sit in the
+# directory the sandbox could write, and the runner read them back by name
+# after the child exited, so the child could swap one for a link to a file
+# only the runner could read, or for a file that never reaches end of file.
+# Now the child can only write *through* the descriptor the runner opened for
+# it; the names are in a directory it cannot change. The read still refuses
+# anything but a regular file and never follows a link, as a second line.
+#
+# The read is also bounded: at most OUTPUT_LIMIT + 1 bytes ever reach memory,
+# whatever the child wrote. It used to read the whole file and truncate after,
+# so output that outgrew the runner's heap ended the request with an
+# OutOfMemoryError and no response. The disk side is the sandbox's: the unit
+# runs with LimitFSIZE (sandbox/run-sandboxed.sh).
+#
+# Why a file and not a pipe: a pipe needs the runner to keep draining it, and
+# once the child is gone the JDK drains whatever is left into memory with no
+# bound of its own, which a writer that outlives the direct child (the sandbox
+# unit behind a killed `sudo`) keeps refilling. A file has no such reader.
 use std/str
+use std/bytes
 use std/io
 use std/io.{Fs, with_fs_real}
 use java "java.lang.ProcessBuilder"
 use java "java.io.File"
+use java "java.io.InputStream"
+use java "java.nio.file.Files"
+use java "java.nio.file.Path"
+use java "java.nio.file.LinkOption"
+use java "java.nio.file.attribute.PosixFilePermissions"
 use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
 use play/config.{dawn_bin, java_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root}
 
+## The most output, in bytes, a response carries. Bytes rather than
+## characters because bytes are what the read can bound before decoding.
 const OUTPUT_LIMIT: Int = 65536
+
+## The run phase's heap ceiling. The compile phase gets its own from
+## run-sandboxed.sh; the program's JVM otherwise aims at a quarter of host
+## RAM and meets the unit's MemoryMax as a SIGKILL instead of an
+## OutOfMemoryError it can print. Passed on the command line, not through
+## JAVA_TOOL_OPTIONS, whose "Picked up" banner would land in the output.
+const RUN_HEAP: String = "-Xmx256m"
 
 # Where per-request work dirs live: PLAY_WORK_ROOT if set (the sandbox needs a
 # non-/tmp path, see config.work_root), else java.io.tmpdir. Trailing slash is
@@ -31,18 +71,54 @@ fn temp_root() -> String !io = {
   str.strip_suffix(d, "/").unwrap_or(d)
 }
 
-fn truncate(s: String) -> (String, Bool) =
-  if str.len(s) > OUTPUT_LIMIT {
-    (str.take(s, OUTPUT_LIMIT) ++ "\n… (output truncated)", true)
-  } else {
-    (s, false)
-  }
+# How many bytes the UTF-8 sequence led by `b` occupies, 1 for anything that
+# does not lead a multi-byte sequence.
+fn utf8_width(b: Int) -> Int =
+  if b >= 0xF8 { 1 } else if b >= 0xF0 { 4 } else if b >= 0xE0 { 3 } else if b >= 0xC0 { 2 } else { 1 }
 
-fn slurp(path: String) -> String !Fs =
-  match io.read_file(path) {
-    Ok(s) -> s
-    Err(_) -> ""
+# `b` without a multi-byte sequence the cut at its end left incomplete, so a
+# truncation never shows up as a replacement character.
+fn whole_chars(b: Bytes) -> Bytes = {
+  let n = bytes.len(b)
+  var i = n - 1
+  # step back over at most three continuation bytes to the sequence's lead
+  while i >= 0 && i > n - 4 && (bytes.at(b, i) & 0xC0) == 0x80 {
+    i = i - 1
   }
+  if i >= 0 && i + utf8_width(bytes.at(b, i)) > n { bytes.slice(b, 0, i) } else { b }
+}
+
+fn close_in(s: InputStream) -> Unit !io = {
+  let _ = catch_fault(() => s.close())
+  ()
+}
+
+# The first OUTPUT_LIMIT bytes of the file at `path`, decoded, and whether
+# there was more. Anything but a regular file, links included, reads as empty:
+# the runner created this file itself, so anything else means something else
+# put it there. A read that fails reads as empty too; the outcome still says
+# whether the program finished.
+fn read_capped(path: String) -> (String, Bool) !io = {
+  let got = catch_fault(() => {
+    let p = Path.of(path)!
+    let nofollow = LinkOption.valueOf("NOFOLLOW_LINKS")!
+    if not Files.isRegularFile(p, nofollow) {
+      ("", false)
+    } else {
+      with s <- bracket(Files.newInputStream(p, nofollow)!, close_in)
+      let raw = s.readNBytes(OUTPUT_LIMIT + 1)!
+      if bytes.len(raw) > OUTPUT_LIMIT {
+        (bytes.decode_utf8_lossy(whole_chars(bytes.slice(raw, 0, OUTPUT_LIMIT))), true)
+      } else {
+        (bytes.decode_utf8_lossy(raw), false)
+      }
+    }
+  })
+  match got {
+    Ok(v) -> v
+    Err(_) -> ("", false)
+  }
+}
 
 # Strip the throwaway temp directory out of diagnostics so users see a clean
 # "prog.dawn:line:col" instead of /var/folders/.../dawn-play-<uuid>/prog.dawn.
@@ -55,37 +131,82 @@ fn slurp(path: String) -> String !Fs =
 fn strip_dir(text: String, dir: String) -> String =
   join(str.split(join(str.split(text, "${dir}/"), ""), dir), ".")
 
+# A child's output as the response shows it: capped, then the request's
+# directories stripped from what is left (the box first, since its path
+# starts with the request directory's), then the truncation marked.
+fn shown(path: String, dir: String, box: String) -> (String, Bool) !io = {
+  let (raw, cut) = read_capped(path)
+  let clean = strip_dir(strip_dir(raw, box), dir)
+  if cut { (clean ++ "\n… (output truncated)", true) } else { (clean, false) }
+}
+
 # Prepend the sudo-whitelisted sandbox wrapper. The wrapper takes the working
 # directory as its first argument, then the command to run inside a throwaway
 # systemd unit (stage 4d). Only PLAY_UNSAFE_LOCAL=1 leaves argv unchanged —
-# config.sandbox_enabled is fail-closed.
-fn sandboxed(dir: String, argv: List[String]) -> List[String] !io =
+# config.sandbox_enabled is fail-closed. `box` is the only directory the unit
+# can write.
+fn sandboxed(box: String, argv: List[String]) -> List[String] !io =
   if sandbox_enabled() {
-    ["sudo", "-n", sandbox_script(), dir] ++ argv
+    ["sudo", "-n", sandbox_script(), box] ++ argv
   } else {
     argv
   }
 
-# chmod 0777 the per-request dir so cross-uid DynamicUser phases can share it.
-fn make_world_writable(dir: String) -> Unit !io = {
-  let p = ProcessBuilder.new(["chmod", "0777", dir])
-  p.redirectErrorStream(true)
-  p.redirectOutput(File.new("${dir}/.chmod.log"))
-  p.start().expect("chmod").waitFor()
+# Set a directory's mode outright, umask aside, without a child process.
+fn set_mode(dir: String, mode: String) -> Unit !io = {
+  let _ = Files.setPosixFilePermissions(Path.of(dir)!, PosixFilePermissions.fromString(mode)!)
   ()
 }
 
-# Remove a per-request work dir. The runner owns the 0777 dir, so it can unlink
-# files inside it even though the sandbox's DynamicUser wrote them.
+# Under the sandbox each phase runs as a fresh DynamicUser (a different
+# transient uid), so the box must be world-writable for the compiler to write
+# the jar and the JVM to read it back, and the request directory must be
+# traversable but nothing more. The name is an unguessable uuid and the work
+# root is 0711, so neither can be listed or found.
+fn open_box(dir: String, box: String) -> Unit !io =
+  if sandbox_enabled() {
+    set_mode(dir, "rwx--x--x")
+    set_mode(box, "rwxrwxrwx")
+  } else {
+    ()
+  }
+
+# Remove a per-request work dir. The runner owns it, and the 0777 box inside,
+# so it can unlink files there even though the sandbox's DynamicUser wrote
+# them. `rm -rf` does not follow links.
 fn cleanup(dir: String) -> Unit !io = {
   let p = ProcessBuilder.new(["rm", "-rf", dir])
   p.start().expect("rm").waitFor()
   ()
 }
 
-# Stage the source into a fresh world-writable (when sandboxed) work dir and
-# run `dawn build` on it. Ok(ms) with cleaned diagnostics stripped, or
-# Err(diagnostics) on a compile failure. Shared by execute (/run) and check.
+# A fresh request directory under the work root, not yet created.
+fn fresh_dir() -> String !io = {
+  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
+  "${temp_root()}/dawn-play-${id}"
+}
+
+# Stage the source into a fresh box and run `body` with the request directory
+# and the box, removing the directory on every way out: a normal return, a
+# panic, and a JVM Error (bracket catches Throwable on the JVM). Without it, a
+# failure between staging and cleanup left the directory, and whatever the
+# child had written into it, on disk for good.
+fn with_request(code: String, body: fn(String, String) -> Outcome !io) -> Outcome !Fs !io = {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  let box = "${d}/box"
+  # write_file creates parent directories as needed
+  match io.write_file("${box}/prog.dawn", code) {
+    Err(e) -> CompileError("cannot stage source: ${e}")
+    Ok(_) -> {
+      open_box(d, box)
+      body(d, box)
+    }
+  }
+}
+
+# Run `dawn build` on the staged source. Ok(ms), or Err(diagnostics) with the
+# request's directories stripped. Shared by execute (/run) and check.
 #
 # The compiler gets its own wall-clock limit, and it needs one as much as the
 # run phase does: `comptime` executes user code *inside the compiler*, and a
@@ -96,10 +217,11 @@ fn cleanup(dir: String) -> Unit !io = {
 # permit in hand, keep the next request out too.
 #
 # The budget is `compile_timeout_secs()` — separate from the run budget, since
-# a cold compiler is legitimately slower than the program it produces.
-fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !Fs !io = {
+# a cold compiler is legitimately slower than the program it produces. The
+# diagnostics are capped like the run output: comptime can print too.
+fn compile_phase(dir: String, box: String) -> Result[Int, String] !io = {
   let build_out = "${dir}/build.txt"
-  let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
+  let bp = ProcessBuilder.new(sandboxed(box, [dawn_bin(), "build", "${box}/prog.dawn", "-o", "${box}/prog.jar"]))
   bp.redirectErrorStream(true)
   bp.redirectOutput(File.new(build_out))
   let started = System.nanoTime()
@@ -111,7 +233,8 @@ fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !
     build.waitFor()
     Err("compilation timed out after ${compile_timeout_secs()}s")
   } else if build.exitValue() != 0 {
-    Err(strip_dir(str.trim(slurp(build_out)), dir))
+    let (diags, _) = shown(build_out, dir, box)
+    Err(str.trim(diags))
   } else {
     Ok((System.nanoTime() - started) / 1000000)
   }
@@ -124,68 +247,42 @@ fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !
 ## them to `with_gate` as a `fn() -> T !io` body, a closed row the label
 ## cannot travel through (spec §6.5), and one snippet's staging directory is
 ## the whole unit of file work anyway.
-pub fn check(code: String) -> Outcome !io = with_fs_real(() => {
-  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  let dir = "${temp_root()}/dawn-play-${id}"
-  let src = "${dir}/prog.dawn"
-  let jar = "${dir}/prog.jar"
-  let outcome = match io.write_file(src, code) {
-    Err(e) -> CompileError("cannot stage source: ${e}")
-    Ok(_) -> {
-      if sandbox_enabled() { make_world_writable(dir) } else { () }
-      match compile_phase(dir, src, jar) {
-        Err(diags) -> CompileError(diags)
-        Ok(ms) -> Compiled("", 0, false, ms)
-      }
-    }
-  }
-  cleanup(dir)
-  outcome
-})
+pub fn check(code: String) -> Outcome !io = with_fs_real(() => with_request(code, check_staged))
 
-pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
-  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  let dir = "${temp_root()}/dawn-play-${id}"
-  let src = "${dir}/prog.dawn"
-  let jar = "${dir}/prog.jar"
-  # write_file creates parent directories as needed
-  let outcome = match io.write_file(src, code) {
-    Err(e) -> CompileError("cannot stage source: ${e}")
-    Ok(_) -> {
-      # Under the sandbox each phase runs as a fresh DynamicUser (a different
-      # transient uid), so the per-request temp dir must be world-accessible for
-      # the compiler to write the jar and the JVM to read it back. The dir name
-      # is an unguessable uuid, so 0777 here is safe. No-op effect locally.
-      if sandbox_enabled() { make_world_writable(dir) } else { () }
-      let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
-      match compile_phase(dir, src, jar) {
-        Err(diags) -> CompileError(diags)
-        Ok(_) -> {
-          # phase 2: run the compiled jar under a wall-clock limit
-          let run_out = "${dir}/run.txt"
-          let rp = ProcessBuilder.new(sandboxed(dir, [java_bin(), "-jar", jar]))
-          rp.redirectErrorStream(true)
-          rp.redirectOutput(File.new(run_out))
-          let started = System.nanoTime()
-          let proc = rp.start().expect("failed to start program")
-          let finished = proc.waitFor(timeout_secs(), secs)
-          if finished {
-            let ms = (System.nanoTime() - started) / 1000000
-            let (out, cut) = truncate(strip_dir(slurp(run_out), dir))
-            Compiled(out, proc.exitValue(), cut, ms)
-          } else {
-            proc.destroyForcibly()
-            proc.waitFor()
-            let (out, _) = truncate(strip_dir(slurp(run_out), dir))
-            Timeout(out)
-          }
-        }
-      }
-    }
+pub fn execute(code: String) -> Outcome !io = with_fs_real(() => with_request(code, execute_staged))
+
+fn check_staged(dir: String, box: String) -> Outcome !io =
+  match compile_phase(dir, box) {
+    Err(diags) -> CompileError(diags)
+    Ok(ms) -> Compiled("", 0, false, ms)
   }
-  cleanup(dir)
-  outcome
-})
+
+fn execute_staged(dir: String, box: String) -> Outcome !io =
+  match compile_phase(dir, box) {
+    Err(diags) -> CompileError(diags)
+    Ok(_) -> run_phase(dir, box)
+  }
+
+# Phase 2: run the compiled jar under a wall-clock limit.
+fn run_phase(dir: String, box: String) -> Outcome !io = {
+  let run_out = "${dir}/run.txt"
+  let rp = ProcessBuilder.new(sandboxed(box, [java_bin(), RUN_HEAP, "-jar", "${box}/prog.jar"]))
+  rp.redirectErrorStream(true)
+  rp.redirectOutput(File.new(run_out))
+  let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
+  let started = System.nanoTime()
+  let proc = rp.start().expect("failed to start program")
+  if proc.waitFor(timeout_secs(), secs) {
+    let ms = (System.nanoTime() - started) / 1000000
+    let (out, cut) = shown(run_out, dir, box)
+    Compiled(out, proc.exitValue(), cut, ms)
+  } else {
+    proc.destroyForcibly()
+    proc.waitFor()
+    let (out, _) = shown(run_out, dir, box)
+    Timeout(out)
+  }
+}
 
 # The compiler release this runner compiles with, for /health and so for the
 # version the editor shows: "0.81.0" out of `dawn --version`'s
@@ -203,19 +300,20 @@ pub fn execute(code: String) -> Outcome !io = with_fs_real(() => {
 # Unsandboxed: it runs the operator's own binary with a fixed argv.
 pub type CompilerId = { version: String, build: String }
 
-pub fn compiler_id() -> CompilerId !io = with_fs_real(() => {
+pub fn compiler_id() -> CompilerId !io = {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  let out = "${temp_root()}/dawn-play-version-${id}.txt"
+  with out <- bracket("${temp_root()}/dawn-play-version-${id}.txt", cleanup)
   let p = ProcessBuilder.new([dawn_bin(), "--version"])
   p.redirectErrorStream(true)
   p.redirectOutput(File.new(out))
   let unknown = CompilerId { version: "", build: "" }
-  let got = match p.start() {
+  match p.start() {
     None -> unknown
     Some(proc) -> {
       let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
       if proc.waitFor(5, secs) {
-        id_of(slurp(out))
+        let (text, _) = read_capped(out)
+        id_of(text)
       } else {
         proc.destroyForcibly()
         proc.waitFor()
@@ -223,9 +321,7 @@ pub fn compiler_id() -> CompilerId !io = with_fs_real(() => {
       }
     }
   }
-  cleanup(out)
-  got
-})
+}
 
 # The words after "dawn " on the first line that starts with it. bin/dawn may
 # print toolchain chatter ("resolving 2 java-deps ...") before it.
@@ -267,4 +363,77 @@ test "id_of takes the build digest when the compiler prints one" {
     CompilerId { version: "0.83.0", build: "b1:2bfef5fb3622" }
   assert id_of("dawn 0.81.0 (selfhost)\n") == CompilerId { version: "0.81.0", build: "" }
   assert id_of("no such file\n") == CompilerId { version: "", build: "" }
+}
+
+# Test-only: run a fixed argv to completion.
+fn sh_run(argv: List[String]) -> Unit !io = {
+  ProcessBuilder.new(argv).start().expect("start").waitFor()
+  ()
+}
+
+test "whole_chars drops only a sequence the cut left incomplete" {
+  let e = bytes.utf8("aé")
+  assert whole_chars(bytes.slice(e, 0, 2)) == bytes.utf8("a")
+  assert whole_chars(e) == e
+  let wide = bytes.utf8("a😀")
+  assert whole_chars(bytes.slice(wide, 0, 4)) == bytes.utf8("a")
+  assert whole_chars(wide) == wide
+  assert whole_chars(bytes.utf8("")) == bytes.utf8("")
+}
+
+test "read_capped holds at most the limit and says it cut" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  with_fs_real(() => {
+    let line = str.repeat("x", 1023) ++ "\n"
+    # twenty times the limit, which the old read held whole
+    assert match io.write_file("${d}/big.txt", str.repeat(line, 20 * 64)) { Ok(_) -> true, Err(_) -> false }
+    assert match io.write_file("${d}/small.txt", "hi\n") { Ok(_) -> true, Err(_) -> false }
+  })
+  let (big, cut) = read_capped("${d}/big.txt")
+  assert cut
+  assert str.len(big) == OUTPUT_LIMIT
+  assert read_capped("${d}/small.txt") == ("hi\n", false)
+  assert read_capped("${d}/absent.txt") == ("", false)
+}
+
+test "read_capped neither follows a link nor waits on a special file" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  with_fs_real(() => {
+    assert match io.write_file("${d}/secret.txt", "secret\n") { Ok(_) -> true, Err(_) -> false }
+  })
+  sh_run(["ln", "-s", "${d}/secret.txt", "${d}/link.txt"])
+  sh_run(["mkfifo", "${d}/fifo.txt"])
+  assert read_capped("${d}/link.txt") == ("", false)
+  # a FIFO with no writer would block an open for good; this returning at all
+  # is half the assertion
+  assert read_capped("${d}/fifo.txt") == ("", false)
+  # and the link's target is still readable when asked for by its own name
+  assert read_capped("${d}/secret.txt") == ("secret\n", false)
+}
+
+test "shown strips the box before the request directory, then marks a cut" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  let box = "${d}/box"
+  with_fs_real(() => {
+    assert match io.write_file("${d}/out.txt", "${box}/prog.dawn:1:1 in ${d}\n") { Ok(_) -> true, Err(_) -> false }
+  })
+  assert shown("${d}/out.txt", d, box) == ("prog.dawn:1:1 in .\n", false)
+}
+
+# Test-only: a request body that fails after the box exists, naming its
+# request directory so the test can look for it afterwards. The `|` ends the
+# name; the panic appends its call site after it.
+fn fails_in(dir: String, box: String) -> Outcome !io = panic(dir ++ "|")
+
+test "with_request removes the request directory when the body fails" {
+  let failed: Result[Outcome, ForeignError] = catch_panic(() => with_fs_real(() => with_request("x", fails_in)))
+  let named = match failed {
+    Ok(_) -> ""
+    Err(e) -> str.split(e.message, "|").get(0).unwrap_or("")
+  }
+  assert str.contains(named, "/dawn-play-")
+  assert not Files.exists(Path.of(named)!, LinkOption.valueOf("NOFOLLOW_LINKS")!)
 }
