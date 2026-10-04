@@ -597,6 +597,13 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
   } else if t == TyUnit {
     # evaluated before it is discarded, as every other relation's operand is
     (st, unit_relation([e], CStr("()"), TyString))
+  } else if t == TyNever {
+    # `"${todo()}"`: the operand diverges, so there is no value to render and
+    # no `Show` to ask. It is evaluated and the answer after it is unreachable,
+    # the same shape as the Unit line above. Without this the part fell through
+    # to `show_at`, whose last resort hands the value over erased: the JVM's
+    # runtime Show never ran it, but native has no runtime to hand it to.
+    (st, unit_relation([e], CStr(""), TyString))
   } else {
     match t {
       TyVar(_, _) ->

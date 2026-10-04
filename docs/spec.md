@@ -328,7 +328,10 @@ C 后端给它一个字节。
   generic/collection/tuple 等存储位、associated binding，以及直接别名
   `alias N = Never` 都非法。`type`、`alias`、`trait`、`effect`、constructor 名与
   type parameter 都不能遮蔽 `Never`。声明返回
-  `Never` 的函数体本身必须发散。LSP 只在函数返回上下文补全该名；
+  `Never` 的函数体本身必须发散。推断守同一条：元组、列表字面量里类型为 `Never` 的
+  分量与 constructor 实参一样只作底类型，取上下文给出的分量类型，上下文没给就报
+  无法推断，不会推出 `(Never, Int)` 或 `List[Never]`；字符串插值里的 `Never` 部分照常
+  求值，其后不可达，不需要 `Show`。LSP 只在函数返回上下文补全该名；
   `dawn doc --builtins` 以 `"use": "return"` 标明它不是全局可用的 public builtin。
   `io.exit` 仍返回 `Unit`，本规则不改变其既有 API。
 

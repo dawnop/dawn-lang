@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ d8e23c98d85858a9 -->
+<!-- doc-check: translation-of docs/spec.md @ 485f34e0550b8641 -->
 
 # Dawn Language Specification
 
@@ -408,7 +408,11 @@ The remaining composite types do not belong to that builtin-name inventory:
   annotations, generic, collection, tuple, and other storage positions, associated bindings, and
   the direct alias `alias N = Never` are invalid. `type`, `alias`, `trait`, `effect`, constructor
   names, and type parameters cannot shadow `Never`. A function declared to return `Never` must
-  itself diverge. LSP completion offers the
+  itself diverge. Inference keeps the same rule: a tuple or list literal component of type
+  `Never` is only the bottom type, as a constructor argument is. It takes the component type
+  the context supplies, and without one it is reported as not inferable, so `(Never, Int)` and
+  `List[Never]` are never inferred. A `Never` part of a string interpolation is evaluated as
+  usual, what follows it is unreachable, and it needs no `Show`. LSP completion offers the
   name only in function-return contexts. `dawn doc --builtins` marks it with `"use": "return"`
   rather than presenting it as a globally usable public builtin. `io.exit` still returns `Unit`;
   this rule does not change its existing API.
