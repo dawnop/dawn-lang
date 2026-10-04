@@ -1,0 +1,32 @@
+# Calling a function returned by a generic function in place, with a primitive
+# argument (#461). The call's target is typed by the generic signature, so its
+# parameter reads `T`; binding the result to a local first gave it the
+# instantiated type and hid the bug. The JVM boxed the argument by that `T`,
+# which boxes nothing, and failed verification. A function taken back out of
+# a generic tuple, list or option reaches its call already instantiated and
+# always worked; those lines are here so the neighbouring shapes stay covered.
+# `Unit` is a reference on the JVM and never needed a box either way.
+
+fn twice[T](f: fn(T) -> T) -> fn(T) -> T = x => f(f(x))
+
+fn both[T](f: fn(T) -> T) -> (fn(T) -> T, Int) = (f, 1)
+
+fn listed[T](f: fn(T) -> T) -> List[fn(T) -> T] = [f, f]
+
+fn some_fn[T](f: fn(T) -> T) -> Option[fn(T) -> T] = Some(f)
+
+pub fn main() -> Unit !io = {
+  println("${twice((x: Int) => x * 3)(2)}")
+  println("${twice((x: Float) => x * 2.0)(1.5)}")
+  println("${twice((b: Bool) => not b)(true)}")
+  println("${twice((ch: Char) => ch)('q')}")
+  println("${twice((_x: Unit) => ())(())}")
+  match both((x: Int) => x - 1) {
+    (f, _) -> println("${f(10)}")
+  }
+  println("${listed((x: Float) => x / 2.0)[0](9.0)}")
+  match some_fn((x: Int) => x * x) {
+    Some(f) -> println("${f(7)}")
+    None -> ()
+  }
+}

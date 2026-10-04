@@ -1,0 +1,29 @@
+# Calling a function stored in a generic record field with a primitive
+# argument (#461). Core keeps the field's declared `fn(T) -> T` type, so the
+# callee's parameter is still a type variable at the call site while the
+# argument is an unboxed long/double/boolean. The JVM used to box by that
+# declared parameter, which boxes nothing, and the verifier rejected `main`
+# because a raw primitive reached `FnN.apply(Object)`. The argument has to be
+# boxed by its own type, which is what the native backend always did.
+
+type Cell[T] = { f: fn(T) -> T }
+
+type Pair[A, B] = { g: fn(A, B) -> B }
+
+pub fn main() -> Unit !io = {
+  let c = Cell { f: (x: Float) => x * 1.5 }
+  println("${c.f(2.0)}")
+  let d = Cell { f: (b: Bool) => not b }
+  println("${d.f(true)}")
+  let e = Cell { f: (n: Int) => n + 1 }
+  println("${e.f(41)}")
+  let h = Cell { f: (ch: Char) => ch }
+  println("${h.f('z')}")
+  let u = Cell { f: (_x: Unit) => () }
+  println("${u.f(())}")
+  # two erased parameters of different widths in one call
+  let p = Pair { g: (n: Int, x: Float) => x * to_float(n) }
+  println("${p.g(3, 0.5)}")
+  # a pipe into the field lowers to the same dynamic call
+  println("${41 |> e.f}")
+}
