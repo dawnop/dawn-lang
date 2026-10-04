@@ -49,8 +49,8 @@
 use std/list
 use std/map
 use std/str
-use dev.{RedId, IdF, AssumePred, Hints, Padding, padding_present}
-use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView}
+use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, padding_present}
+use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -1126,6 +1126,49 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     let st = list.map(dyn_strides, h => ref_of(l0, h, "dynamic tensor view stride"))
     let (l3, v) = define(l2, dst, tv)
     emit(l3, MakeTensorView(v, Val(o), pt, tv, sh, st, idx))
+  }
+  CellViewOf(dst, param, dtype, align, shape, strides, dyn_shape, dyn_strides) -> {
+    # A parameter's cells start at its first element, so the view's base
+    # is the parameter itself and there is no `offset`. A non-zero `align`
+    # is the recording's claim that the parameter's address is a multiple
+    # of that many bytes (an In's, 6.25), and it is issued HERE, on the
+    # parameter, ahead of the view: `assume` on a value the base was
+    # computed from would be a claim about something else, and an `offset`
+    # by a run-time index in between would hide it from `tileiras`.
+    let e = PtrTo(dtype)
+    let pt = Tile([], e)
+    let (la, base) = if align > 0 {
+      let (l1, a) = fresh(l0)
+      let none: Option[Int] = None
+      (emit(l1, AssumeTile(a, Arg(param), DivBy(align, none, none), pt)), Val(a))
+    } else {
+      (l0, Arg(param))
+    }
+    let tv = TensorView(Num(dtype), shape, strides)
+    let idx = i32_scalar()
+    match list.find(dyn_shape ++ dyn_strides, h => not is_idx_ty(ty_of(la, h))) {
+      Some(h) -> panic("tileir: a dynamic cell view dimension is a rank-0 i32 tile, and handle ${h} is `${show(ty_of(la, h))}`")
+      None -> ()
+    }
+    let ext = list.map(dyn_shape, h => ref_of(la, h, "dynamic cell view extent"))
+    let steps = list.map(dyn_strides, h => ref_of(la, h, "dynamic cell view stride"))
+    let (lv, v) = define(la, dst, tv)
+    emit(lv, MakeTensorView(v, base, pt, tv, ext, steps, idx))
+  }
+  ReshapeOf(dst, dtype, from, to, src) -> {
+    let a = ref_of(l0, src, "reshape operand")
+    let (l1, d) = define(l0, dst, num_tile(to, dtype))
+    emit(l1, Reshape(d, a, num_tile(from, dtype), num_tile(to, dtype)))
+  }
+  BroadcastOf(dst, dtype, from, to, src) -> {
+    # the same shape is no instruction at all, as in `broadcast_to`
+    let a = ref_of(l0, src, "broadcast operand")
+    if from == to {
+      bind(l0, dst, a, num_tile(to, dtype))
+    } else {
+      let (l1, d) = define(l0, dst, num_tile(to, dtype))
+      emit(l1, Broadcast(d, a, num_tile(from, dtype), num_tile(to, dtype)))
+    }
   }
   TensorShapeOf(dst, view, dim) -> {
     # `get_tensor_shape` answers ONE result per tensor dimension, so the

@@ -557,6 +557,30 @@ pub opaque type Ptrs[D] = Int
 ## order at all. `t_print` is refused there for the same reason, and
 ## `t_assert` and `t_assume` are not: neither is ordered against memory.
 ##
+## `t_cell_view(param, dtype, free)` and `t_cell_fill(param, value)` read
+## the CELLS a parameter's marker gives it (`prog.trace1` to `trace5`; the
+## batch's PR-1, docs/tile-backend-design.md 6.25). `t_cell_view` answers a
+## partition view over the parameter's whole tensor, cut into its cells and
+## padded as the marker says, and the index of THIS block's cell in it: a
+## dimension that follows grid axis `k` takes the block id along `k`, and
+## the dimensions that follow no axis take the handles `free` names, in
+## order. The view is the handler's to build and to reuse: one per
+## parameter while it is in scope. For an In parameter it is the one view
+## here whose base carries an alignment claim (`assume div_by<16>` on the
+## parameter itself), because a buffer std/gpu allocates starts on a
+## 256-byte boundary and an In's cells start at its first element; for an
+## Out it carries none. `t_cell_fill` answers a tile of the parameter's
+## cell shape and format with every lane `value`, which for an integer
+## format must be a whole number. A parameter with no cells (a `Whole` or
+## `Shared` marker, or any parameter under `trace_kernel`) is refused by
+## both, under the kernel's name and the call that asked.
+##
+## `t_reshape(dtype, from, to, src)` regroups the lanes of `src` into `to`,
+## which holds as many: what a reduction that keeps its dimension issues
+## after the fold. `t_broadcast(dtype, from, to, src)` widens the
+## dimensions of length 1 in `from` to their length in `to`, every other
+## dimension unchanged and the rank the same; a rank-0 tile is `t_spread`'s.
+##
 ## `t_call_enter(name)` and `t_call_exit()` record nothing a kernel computes.
 ## Every public function below wraps its body in `called(name, ..)`, which
 ## brackets it with the two, so a handler can tell which public call issued
@@ -660,6 +684,10 @@ pub effect Dev {
   fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int) -> Unit
   fn t_tensor_shape(view: Int, dim: Int) -> Int
   fn t_index_space_shape(view: Int, dim: Int) -> Int
+  fn t_cell_view(param: Int, dtype: String, free: List[Int]) -> (Int, List[Int])
+  fn t_cell_fill(param: Int, value: Float) -> Int
+  fn t_reshape(dtype: String, from: List[Int], to: List[Int], src: Int) -> Int
+  fn t_broadcast(dtype: String, from: List[Int], to: List[Int], src: Int) -> Int
   fn t_call_enter(name: String) -> Unit
   fn t_call_exit() -> Unit
   fn t_body_enter() -> Unit
@@ -3326,6 +3354,165 @@ pub fn d_print[D: Dtype](d: D, fmt: String, args: List[Scalar[D]]) -> Unit !Dev 
   t_print(fmt, dtype_name(d), none, hs)
 })
 
+# ---- cells, the named reductions and broadcast (the batch's PR-1) ----
+#
+# docs/tile-backend-design.md 6.25. Everything here is ADDED beside the
+# surface above and nothing above changes: a kernel that calls none of it
+# records what it recorded before, byte for byte. The batch's PR-3 moves the
+# kernels over and retires what this makes redundant.
+#
+# What these functions have in common is that they take no format marker
+# and no shape. The format comes from the `Param[D]` or the `Tile[D]` (its
+# name travels with the parameter, and the handler holds every tile's row),
+# and the shape from where it already lives: a parameter's cells are on its
+# marker (`prog.trace1` to `trace5`), a tile's shape is in the handler's
+# table (`t_shape_of`). So none of them can be called with a shape that
+# disagrees with the operand, which is the mistake knife C1 refuses after
+# the fact for the functions above.
+
+## This block's cell of `p`, read through a view of `p`'s cells: the tile
+## of `p`'s marker, at the block ids of the grid axes its dimensions
+## follow. Lanes past the extent read the marker's padding value, so
+## `cells([1000], [1024], pad: PadNegInf)` reads a whole row with no mask.
+## Every dimension must follow a grid axis; [`load_at`] names the cells of
+## the ones that do not. `p` must be an `In` or an `Out` cut into cells.
+pub fn load_cell[D](p: Param[D]) -> Tile[D] !Dev = called("load_cell", () => read_cell(p, []))
+
+## [`load_cell`] for a parameter some of whose dimensions follow no grid
+## axis (`FREE_AXIS` in its `along`): `free` names the cell along each of
+## those, in dimension order, and the others are the block's own, as for
+## `load_cell`. The left operand of a matrix product cut
+## `cells([M, K], [TM, TK], along: [0, FREE_AXIS])` is read
+## `load_at(a, [k])` inside the loop over `k`.
+pub fn load_at[D](p: Param[D], free: List[Idx]) -> Tile[D] !Dev = called("load_at", () => read_cell(p, free))
+
+fn read_cell[D](p: Param[D], free: List[Idx]) -> Tile[D] !Dev = {
+  let (v, ix) = t_cell_view(position(p), param_dtype(p), list.map(free, i => {
+    let k: Int = i
+    k
+  }))
+  let h: Tile[D] = t_load_view(param_dtype(p), v, ix)
+  h
+}
+
+## `t` written into this block's cell of `p`, an `Out` cut into cells:
+## the same view `load_cell` reads, at the block's own index. Lanes past
+## the extent are not written. No format marker and no shape: `t` must be
+## the tile of `p`'s marker, which the lowering holds it to.
+pub fn store_cell[D](p: Param[D], t: Tile[D]) -> Unit !Dev = called("store_cell", () => {
+  let (v, ix) = t_cell_view(position(p), param_dtype(p), [])
+  let y: Int = t
+  t_store_view(param_dtype(p), v, ix, y)
+})
+
+## A tile shaped like one cell of `p`, in `p`'s format, every lane zero:
+## the accumulator a block starts from before it stores its cell.
+pub fn zeros[D](p: Param[D]) -> Tile[D] !Dev = called("zeros", () => {
+  let h: Tile[D] = t_cell_fill(position(p), 0.0)
+  h
+})
+
+## A tile shaped like one cell of `p`, in `p`'s format, every lane `v`.
+## For an integer format `v` must be a whole number.
+pub fn fill[D](p: Param[D], v: Float) -> Tile[D] !Dev = called("fill", () => {
+  let h: Tile[D] = t_cell_fill(position(p), v)
+  h
+})
+
+## The sum of `t` along dimension `dim` (the last by default, `-k` the
+## `k`-th from the end): the tile with that dimension dropped, or kept with
+## length 1 when `keepdims` is true, so a `[BQ, BK]` tile's row sums are
+## `[BQ]` or `[BQ, 1]`. The identity is the format's own (0), so a fold
+## seeded wrongly cannot be written. The order of the fold is not
+## specified, as `d_reduce`'s is not.
+##
+## A rank-1 tile reduces to a rank-0 one, which every element-wise
+## operation of a wider shape widens on its own (the recording's rank-0
+## rule, 6.25): `sub(F64, [1024], t, reduce_max(t))` needs no `spread`.
+pub fn reduce_sum[D](t: Tile[D], dim: Int = -1, keepdims: Bool = false) -> Tile[D] !Dev =
+  called("reduce_sum", () => fold_along(t, "sum", dim, keepdims))
+
+## [`reduce_sum`] for the largest element; the identity is -inf for a float
+## format and the least value for an integer one.
+pub fn reduce_max[D](t: Tile[D], dim: Int = -1, keepdims: Bool = false) -> Tile[D] !Dev =
+  called("reduce_max", () => fold_along(t, "max", dim, keepdims))
+
+## [`reduce_sum`] for the smallest element; the identity is +inf for a
+## float format and the greatest value for an integer one.
+pub fn reduce_min[D](t: Tile[D], dim: Int = -1, keepdims: Bool = false) -> Tile[D] !Dev =
+  called("reduce_min", () => fold_along(t, "min", dim, keepdims))
+
+## The running sum of `t` along `dim` (the last by default): the tile of
+## `t`'s shape whose element `i` along `dim` is the sum of elements `0` to
+## `i`, or `i` to the end when `reverse` is true.
+pub fn scan_sum[D](t: Tile[D], dim: Int = -1, reverse: Bool = false) -> Tile[D] !Dev = called("scan_sum", () => {
+  let h: Int = t
+  let (dtype, shape) = t_shape_of(h)
+  let at = if dim < 0 { len(shape) + dim } else { dim }
+  let args = t_scan_begin(at, reverse, shape, [identity_of(dtype, "sum")], [h])
+  let outs = t_scan_end([fold_step(dtype, "sum", args[0], args[1])])
+  let r: Tile[D] = outs[0]
+  r
+})
+
+## `t` widened to `shape`: every dimension of length 1 in `t` takes its
+## length in `shape`, and every other dimension must already have it. The
+## rank does not change; a rank-0 `t` widens to any shape. This is the
+## explicit half of the rank-0 rule: a `[BQ, 1]` row statistic is
+## `broadcast(m, [BQ, BK])` before it meets a `[BQ, BK]` tile.
+pub fn broadcast[D](t: Tile[D], shape: List[Int]) -> Tile[D] !Dev = called("broadcast", () => {
+  let h: Int = t
+  let (dtype, from) = t_shape_of(h)
+  let r: Tile[D] = if len(from) == 0 { t_spread(dtype, shape, h) } else { t_broadcast(dtype, from, shape, h) }
+  r
+})
+
+# A reduction of `t` along `dim` by one of the three named folds.
+fn fold_along[D](t: Tile[D], kind: String, dim: Int, keepdims: Bool) -> Tile[D] !Dev = {
+  let h: Int = t
+  let (dtype, shape) = t_shape_of(h)
+  let at = if dim < 0 { len(shape) + dim } else { dim }
+  let args = t_reduce_begin(at, shape, [identity_of(dtype, kind)], [h])
+  let outs = t_reduce_end([fold_step(dtype, kind, args[0], args[1])])
+  let kept = list.map(range(0, len(shape)), k => if k == at { 1 } else { shape[k] })
+  let dropped = list.map(list.filter(range(0, len(shape)), k => k != at), k => shape[k])
+  let r: Tile[D] = if keepdims { t_reshape(dtype, dropped, kept, outs[0]) } else { outs[0] }
+  r
+}
+
+# The rank-0 step of a named fold: the accumulator and the element, in the
+# order the region hands them over.
+fn fold_step(dtype: String, kind: String, acc: Int, e: Int) -> Int !Dev =
+  if is_float_dtype(dtype) {
+    t_binaryf(if kind == "sum" { "addf" } else if kind == "max" { "maxf" } else { "minf" }, dtype, [], acc, e)
+  } else {
+    t_binaryi(if kind == "sum" { "addi" } else if kind == "max" { "maxi" } else { "mini" }, dtype, [], acc, e)
+  }
+
+# What a named fold that has seen nothing starts from, in `dtype`.
+fn identity_of(dtype: String, kind: String) -> RedId =
+  if is_float_dtype(dtype) {
+    IdF(dtype, if kind == "sum" { 0.0 } else if kind == "max" { 0.0 - 1.0 / 0.0 } else { 1.0 / 0.0 })
+  } else {
+    IdI(dtype, if kind == "sum" { 0 } else if kind == "max" { int_least(dtype) } else { int_greatest(dtype) })
+  }
+
+# The least and the greatest SIGNED value of an integer format: the
+# comparisons a max or a min fold makes are signed.
+fn int_least(dtype: String) -> Int = match dtype {
+  "i8" -> -128
+  "i16" -> -32768
+  "i64" -> -9223372036854775807 - 1
+  _ -> -2147483648
+}
+
+fn int_greatest(dtype: String) -> Int = match dtype {
+  "i8" -> 127
+  "i16" -> 32767
+  "i64" -> 9223372036854775807
+  _ -> 2147483647
+}
+
 # ---- tests ----
 #
 # The recording handler lives in prog.dawn and is tested there. These blocks
@@ -3641,6 +3828,26 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_index_space_shape(_view, _dim) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_cell_view(_param, _dtype, free) => {
+      let h = next
+      next = next + 1
+      (h, free)
+    }
+    t_cell_fill(_param, _value) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_reshape(_dtype, _from, _to, _src) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_broadcast(_dtype, _from, _to, _src) => {
       let h = next
       next = next + 1
       h
@@ -3980,6 +4187,22 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_index_space_shape(view, dim) => {
       log = log ++ ["index_space_shape ${view} ${dim}"]
       84
+    }
+    t_cell_view(param, dtype, free) => {
+      log = log ++ ["cell_view ${param} ${dtype} ${show(free)}"]
+      (87, free)
+    }
+    t_cell_fill(param, value) => {
+      log = log ++ ["cell_fill ${param} ${value}"]
+      88
+    }
+    t_reshape(dtype, from, to, src) => {
+      log = log ++ ["reshape ${dtype} ${show(from)} ${show(to)} ${src}"]
+      89
+    }
+    t_broadcast(dtype, from, to, src) => {
+      log = log ++ ["broadcast ${dtype} ${show(from)} ${show(to)} ${src}"]
+      90
     }
   }
   body()
@@ -4459,6 +4682,10 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_store_view(_dtype, _view, _indices, _value) => ()
       t_tensor_shape(_view, _dim) => 83
       t_index_space_shape(_view, _dim) => 84
+      t_cell_view(_param, _dtype, free) => (87, free)
+      t_cell_fill(_param, _value) => 88
+      t_reshape(_dtype, _from, _to, _src) => 89
+      t_broadcast(_dtype, _from, _to, _src) => 90
     }
     let _r = loop_seen()
     log

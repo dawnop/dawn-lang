@@ -44,20 +44,22 @@ put.
 The table puts every `Dev` operation in a group and names some of the typed
 functions of each (a kernel body calls those, not the `t_*` operations). It
 was generated from `effects[0].ops` of `./bin/dawn doc packages/tileir`, and a
-script checked that the groups cover every operation exactly once (74
-operations on 2026-10-03, after knife C1' added `t_shape_of`). When an operation is added, its group has to
-follow; `dawn doc` is the authority on numbers and names.
+script checked that the groups cover every operation exactly once (78
+operations on 2026-10-04, after the batch's PR-1 added `t_cell_view`,
+`t_cell_fill`, `t_reshape` and `t_broadcast`). When an operation is added,
+its group has to follow; `dawn doc` is the authority on numbers and names.
 
 | Group | `Dev` operations | Typed functions (examples) |
 |----|-----------|--------------------|
 | Grid and index | `t_block_id` `t_num_blocks` `t_idx_const` `t_idx_add` `t_idx_mul` | `block_id` `num_blocks` `idx_const` `idx_add` `idx_mul` `idx_lt` |
 | Memory and pointers | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
 | Views | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
-| Constants and shapes | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` | `f_const` `i_const` `arange` `lanes` `spread` `extract` `insert` `cat` `permute_tile` |
+| Cells | `t_cell_view` `t_cell_fill` | `load_cell` `load_at` `store_cell` `zeros` `fill` |
+| Constants and shapes | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` `t_reshape` `t_broadcast` | `f_const` `i_const` `arange` `lanes` `spread` `broadcast` `extract` `insert` `cat` `permute_tile` |
 | Arithmetic, comparison and conversion | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int` `float_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
-| Regions | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `d_scan` `d_if` |
+| Regions | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `reduce_sum` `reduce_max` `reduce_min` `d_scan` `scan_sum` `d_if` |
 | Tokens | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
-| Shape query | `t_shape_of` | none yet: it is there for the knife that drops shapes a function can read off its operands |
+| Shape query | `t_shape_of` | none of its own; `reduce_sum`, `reduce_max`, `reduce_min`, `scan_sum` and `broadcast` read their operand's shape with it |
 | Module globals | `t_global` `t_get_global` | `d_global` `global_ptrs` |
 | Assertions and debugging | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
 | Call marks | `t_call_enter` `t_call_exit` `t_body_enter` `t_body_exit` | none: every public function wraps its own body in the first pair, every closure a public function takes runs inside the second, and only `trace_calls` reads them |
@@ -112,8 +114,22 @@ read through a view included), a tensor view's tensor extents (`DYN_DIM`
 where an operand carries one), or the tile a partition, strided or
 gather/scatter view moves. For a token it refuses, naming the kernel and the
 number of the operation about to be recorded. Nothing in this package calls
-it yet, so a handler that only replays or counts operations may answer any
-fixed pair.
+it before 0.6.0; since then the named reductions and `broadcast` ask it
+for their operand's format and shape, so a handler that only replays or
+counts operations has to answer a pair those functions can use (a
+plausible format and a shape of rank 1 or more).
+
+#### The four operations of 0.6.0, for a handler of `Dev` written outside this package
+
+0.6.0 adds `t_cell_view(param, dtype, free) -> (Int, List[Int])`,
+`t_cell_fill(param, value) -> Int`, `t_reshape(dtype, from, to, src) -> Int`
+and `t_broadcast(dtype, from, to, src) -> Int`, so a handler written against
+0.5.x does not compile until it answers them; that is why the version moved
+to 0.6.0. The first two read the cells of a parameter's marker (`trace1` to
+`trace5`); a handler that has no markers to read should refuse them, which
+is what the recording handler does under `trace_kernel`. The other two are
+shape operations like `t_spread`. No function that existed in 0.5.1 issues
+any of the four.
 
 Since knife K2, the attributes of an operation (rounding mode, flush to zero,
 NaN propagation, integer `overflow`, a loop's unsigned comparison, a global's
@@ -198,9 +214,10 @@ launch_entry3(entry, a, b, out)       # a Tensor[BF16] here is a compile error
   `cells([M, K], [TM, TK], along: [0, FREE_AXIS])`. A dimension that follows
   an axis must have as many cells as the grid has blocks there.
 
-Kernel bodies do not read the cells yet: a body takes `Param[D]` and
-addresses memory exactly as before. What the cells buy today is the checks,
-when the kernel is recorded and again when it is launched:
+A body may still take `Param[D]` and address memory exactly as before
+(0.6.0 lets it read and write the cells too, below). What the cells buy
+either way is the checks, when the kernel is recorded and again when it is
+launched:
 `launch_entryN` refuses, before any handler is asked, an `Out` or `Shared`
 argument that is the buffer of another argument (`gpu.aliased_argument`), a
 grid that disagrees with the cells (`gpu.grid_mismatch`) and a tensor shorter
@@ -211,6 +228,55 @@ Chinese).
 0.5.0 to 0.5.1 only adds names (`trace1` to `trace5`, `Arg`, `Cells`,
 `cells`, `FREE_AXIS`); nothing that compiled against 0.5.0 stops compiling,
 and `trace_kernel` records what it recorded.
+
+### Cells, named reductions and broadcast (since 0.6.0)
+
+A body traced through `trace1` to `trace5` can address a parameter by its
+cells instead of by a base and a shape, and fold or widen a tile without
+naming its format or its shape:
+
+```dawn
+use tileir/dev.{load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum, PadNegInf}
+use tileir/prog.{trace2, cells, In, Out}
+
+fn softmax(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)                              # this block's [1024]; lanes past 1000 read -inf
+  let e = exp(F64, [1024], sub(F64, [1024], t, reduce_max(t)))
+  store_cell(o, div(F64, [1024], e, reduce_sum(e)))  # lanes past 1000 are not written
+}
+
+let (prog, entry) = trace2("softmax", In(F64, cells([1000], [1024], pad: PadNegInf)),
+  Out(F64, cells([1000], [1024])), softmax)
+```
+
+- `load_cell(p)` reads this block's cell of `p` through a view of `p`'s
+  cells; `load_at(p, [k])` is the same for a parameter some of whose
+  dimensions follow no grid axis (`FREE_AXIS`), with one index per such
+  dimension. `store_cell(o, t)` writes this block's cell of an `Out`.
+  `zeros(p)` and `fill(p, v)` are a tile shaped like one cell of `p`.
+- The view an `In` is read through carries `assume div_by<16>` on the
+  parameter itself: `std/gpu` buffers are 256-byte aligned and an `In`'s
+  cells start at its first element, and the claim is what lets `tileiras`
+  choose 128-bit loads for an f16 tensor-core matmul. An `Out`'s view
+  carries no claim.
+- `reduce_sum`, `reduce_max`, `reduce_min` (and `scan_sum`) take the tile and
+  optionally `dim:` (the last by default) and `keepdims:`; the identity is
+  the format's own. A `[BQ, BK]` tile's `reduce_max(t, keepdims: true)` is
+  `[BQ, 1]`.
+- A RANK-0 tile widens on its own where an element-wise operation declares a
+  wider shape (`sub(F64, [1024], t, reduce_max(t))`); nothing else does.
+  `broadcast(m, [BQ, BK])` widens the dimensions of length 1 explicitly.
+- Places that want a rank-0 tile (an `if`'s or a loop's condition, a loop
+  bound, a reduction's yield, a cell index) refuse a wider one while the
+  kernel records.
+
+Everything above is added beside the 0.5.1 surface: every function that
+existed keeps its signature, and a kernel that calls none of the new ones
+records the same program. The version is 0.6.0 rather than 0.5.2 only
+because `Dev` gained four operations (above). Design, measurements and the
+plan for the kernels that move to this surface:
+[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §6.25 (in
+Chinese).
 
 Loops inside a kernel use `d_for` (design §5.2). The bounds and the step are
 `Idx` (`idx_const` for a host constant), one tile is carried, and the body
