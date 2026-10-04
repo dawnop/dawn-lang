@@ -1,0 +1,41 @@
+# A trait method whose result is an associated type, used as a function value
+# (#317). Over a concrete subject the projection reduces when the value is
+# instantiated, so the method passes where the concrete function type is
+# expected, and an unannotated lambda after it sees the reduced message type.
+# Over a rigid subject it survives, and the mismatch names it as written.
+
+trait App[M] {
+  type Msg
+  type View
+  fn update(m: M, msg: M.Msg) -> M
+  fn view(m: M) -> M.View
+}
+
+type C = { n: Int }
+
+type Ev =
+  | Inc
+  | Dec
+
+impl App[C] {
+  type Msg = Ev
+  type View = List[Ev]
+  fn update(m: C, msg: Ev) -> C = m
+  fn view(m: C) -> List[Ev] = [Inc]
+}
+
+fn run(m: C, vw: fn(C) -> List[Ev]) -> List[Ev] = vw(m)
+
+fn serve[Mo, E](m: Mo, up: fn(Mo, E) -> Mo, vw: fn(Mo) -> List[E]) -> List[E] = vw(m)
+
+fn direct(c: C) -> List[Ev] = run(c, view)
+
+fn generic(c: C) -> List[Ev] = serve(c, update, view)
+
+fn lambda(c: C) -> List[Ev] = serve(c, update, m => view(m))
+
+fn rigid[A: App](a: A, vw: fn(A) -> List[Ev]) -> List[Ev] = vw(a)
+
+fn rigid_use[A: App](a: A) -> List[Ev] = rigid(a, view)
+
+fn wrong(c: C) -> List[Int] = serve(c, update, view)

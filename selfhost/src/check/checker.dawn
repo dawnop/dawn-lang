@@ -814,6 +814,26 @@ fn reduce_ty_effs(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty =
 ## the rows the call's bindings name.
 fn reduce_instantiated(cx: Cx, t: Ty, m: Map[Int, Ty]) -> Ty = reduce_ty_effs(cx, reduce_assoc(cx, t), m)
 
+## A declared type as `unify_into` compared it against an actual: the
+## projections the declaration itself spells reduce under the bindings (its
+## TyAssoc arm), and a binding is substituted verbatim (its TyVar arm compares
+## `bound == actual` and reduces nothing). A mismatch diagnostic renders this
+## rather than `reduce_instantiated` of the substitution, which also reduces
+## projections *inside* the bindings: when a binding carried an unreduced
+## `Counter.Msg`, the message printed `Node[Msg]` on both sides while the
+## comparison had seen `Node[Counter.Msg]` against `Node[Msg]` (#317). The
+## rows reduce as before; only the type axis follows the comparison.
+fn as_unified(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
+  reduce_ty_effs(cx, as_unified_types(cx, d, m, em), m)
+
+fn as_unified_types(cx: Cx, d: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
+  match d {
+    TyVar(_, _) -> subst(d, m, em)
+    TyAssoc(_, _, _) -> reduce_assoc(cx, subst(d, m, em))
+    TyFn(ps, r, e) -> TyFn(map(ps, x => as_unified_types(cx, x, m, em)), as_unified_types(cx, r, m, em), subst_eff(e, em))
+    _ -> ty_map_children(d, x => as_unified_types(cx, x, m, em))
+  }
+
 pub(pkg) fn unify_into(
   cx: Cx,
   declared: Ty,
@@ -4341,9 +4361,13 @@ pub(pkg) fn check_fn_value(
     EffVar(_, eid) -> if not map.has(em, eid) { em = map.insert(em, eid, eeff) }
     _ -> ()
   }
-  # the function-value instantiation choke: rows inside the value's type
-  # reduce with the same bindings its types substituted under (SEM-13 path)
-  let inst = reduce_ty_effs(cx, subst(declared, m, em), m)
+  # the function-value instantiation choke, the twin of a call's
+  # (`check_call`'s `ret`): a projection whose subject the bindings just made
+  # concrete reduces here (D3), and rows inside the value's type reduce with
+  # the same bindings its types substituted under (SEM-13 path). Reducing only
+  # the rows left `view` as a value typed `fn(C) -> C.View` (#317), a ground
+  # type carrying a projection, which no concrete function type unifies with.
+  let inst = reduce_instantiated(cx, subst(declared, m, em), m)
   if nbounds > 0 {
     return eta_bounded_fn_value(cx, name, f, m, em, inst, lo, hi)
   }
@@ -8868,7 +8892,7 @@ fn infer_call_args(
               "signature: " ++ hint_text
             }
           }
-          let expected_type = reduce_instantiated(cx1, subst(pt, m, em), m)
+          let expected_type = as_unified(cx1, pt, m, em)
           let expected_text = ty_show(cx1.adts, expected_type)
           let actual_text = ty_show(cx1.adts, at)
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
@@ -13668,6 +13692,62 @@ fn msgs_of(src: String) -> List[String] !io = {
   let env: Map[String, ModExports] = map.empty()
   let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
   map(cx.diags, d => d.msg)
+}
+
+## #317's fixture: a trait whose methods answer associated types, one impl
+## binding them to concrete types, and three consumers of a method value.
+fn assoc_value_src(body: String) -> String =
+  "trait App[M] {\n  type Msg\n  type View\n  fn update(m: M, msg: M.Msg) -> M\n" ++
+  "  fn view(m: M) -> M.View\n}\n" ++
+  "type C = { n: Int }\n" ++
+  "type Ev =\n  | Inc\n  | Dec\n" ++
+  "impl App[C] {\n  type Msg = Ev\n  type View = List[Ev]\n" ++
+  "  fn update(m: C, msg: Ev) -> C = m\n  fn view(m: C) -> List[Ev] = [Inc]\n}\n" ++
+  "fn run(m: C, vw: fn(C) -> List[Ev]) -> List[Ev] = vw(m)\n" ++
+  "fn serve[Mo, E](m: Mo, up: fn(Mo, E) -> Mo, vw: fn(Mo) -> List[E]) -> List[E] = vw(m)\n" ++
+  body
+
+test "a trait method with an associated-type result is a value of the concrete type (#317)" {
+  # straight into a concrete function type, and into a generic one whose
+  # type parameter the projection's reduction has to bind
+  assert msgs_of(assoc_value_src("fn a(c: C) -> List[Ev] = run(c, view)\n" ++
+      "fn b(c: C) -> List[Ev] = serve(c, update, view)\n")) == []
+  # an unannotated lambda after the method value: `update` binds `E`, and
+  # binding it to the unreduced `C.Msg` is what used to make the lambda's
+  # `List[Ev]` miss
+  assert msgs_of(assoc_value_src("fn d(c: C) -> List[Ev] = serve(c, update, m => view(m))\n")) == []
+}
+
+test "a projection a mismatch is about is printed as written, never reduced on one side only (#317)" {
+  # over a rigid subject the projection survives, so it is what the message names
+  let rigid = msgs_of(assoc_value_src(
+    "fn g[A: App](a: A, vw: fn(A) -> List[Ev]) -> List[Ev] = vw(a)\n" ++
+      "fn h[A: App](a: A) -> List[Ev] = g(a, view)\n"))
+  assert rigid == ["argument type mismatch: expected fn(A) -> List[Ev], got fn(A) -> A.View"]
+  # The renderer against a binding that carries an unreduced ground projection,
+  # which is what #317's method value used to leave behind: the comparison
+  # does not reduce inside a binding, so neither may the message.
+  let (pm, _) = parser.parse_module(assoc_value_src(""))
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), pm, env)
+  assert len(cx.diags) == 0
+  let vs = lookup_fn_sig(cx, "view").expect("view")
+  let mv = vs.param_tys[0]
+  let mid = match mv {
+    TyVar(_, id) -> id
+    _ -> panic("view's parameter is its trait's variable")
+  }
+  let ct = TyAdt(map.get(cx.adts_by_name, "C").expect("C"), [])
+  let em: Map[Int, Eff] = map.empty()
+  let at_c = map.insert(map.empty(), mid, ct)
+  # the declared projection itself still reduces under the bindings
+  assert ty_show(cx.adts, as_unified(cx, vs.ret, at_c, em)) == "List[Ev]"
+  let stale = map.insert(map.empty(), mid, subst(vs.ret, at_c, em))
+  assert ty_show(cx.adts, as_unified(cx, TyList(mv), stale, em)) == "List[C.View]"
+  # the negative control: reducing the substitution prints what the
+  # comparison never saw, the identical rendering the issue reported
+  assert ty_show(cx.adts, reduce_instantiated(cx, subst(TyList(mv), stale, em), stale)) ==
+    "List[List[Ev]]"
 }
 
 fn hints_of(src: String) -> List[String] !io = {
