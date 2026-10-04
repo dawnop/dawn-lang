@@ -775,6 +775,386 @@ pub fn launch(kernel: String, grid: Int, args: List[Int], gy: Int = 1, gz: Int =
     gpu_launch(kernel, grid, gy, gz, args)
   }
 
+# ---- typed entries ----
+#
+# `launch` takes a kernel NAME and a list of handle integers, so nothing
+# relates the buffers a program passes to the kernel it names: a bf16
+# tensor handed to an f64 kernel, a missing buffer and an output passed
+# twice all reach the device. An entry is what the recorder of a kernel
+# knows about it that a launch can check (packages/tileir's `trace1` to
+# `trace5` answer one beside the program; docs/tile-backend-design.md
+# 6.24): its name, and per buffer argument what the kernel does to it and,
+# when the kernel cuts it into cells, how. The FORMAT and the COUNT of the
+# arguments are in the entry's type, so getting either wrong is a compile
+# error; what the type cannot say (two arguments that are one buffer, a
+# grid that disagrees with the cells, a tensor shorter than its cells) is
+# checked here, above the effect, so it reads the same under every handler.
+#
+# This module still does not know `TileProg` (docs 5.3): an entry is a name
+# and a few integers. The roles are codes behind an opaque type rather than
+# a sum type of their own, so that std/gpu adds no type a program carries
+# whether it launches anything or not.
+
+const ROLE_IN: Int = 0
+const ROLE_OUT: Int = 1
+const ROLE_SHARED: Int = 2
+
+# A dimension whose extent the launch decides, and a cut dimension that
+# follows no grid axis. Both are -1; packages/tileir's `DYN_DIM` and
+# `FREE_AXIS` are the same numbers.
+const DYNAMIC: Int = 0 - 1
+
+## One buffer argument of an entry: what the kernel does to the buffer and,
+## when it cuts the buffer into cells, how. Made by [`arg_in`],
+## [`arg_in_whole`], [`arg_out`] and [`arg_shared`].
+pub opaque type EntryArg = (Int, List[Int], List[Int], List[Int])
+
+## An argument the kernel only reads, cut into cells of `tile` over a tensor
+## of `extent` (row major). `along[j]` is the grid axis dimension `j` of the
+## cells follows, or -1 for a dimension the kernel indexes some other way;
+## a dimension that follows an axis has as many cells as the grid has
+## blocks there. An extent of -1 is dynamic: `grid[along[j]] * tile[j]`,
+## which is why a dynamic dimension must follow an axis.
+pub fn arg_in(extent: List[Int], tile: List[Int], along: List[Int]) -> EntryArg = {
+  let a: EntryArg = (ROLE_IN, extent, tile, along)
+  a
+}
+
+## An argument the kernel only reads, and reads as a whole: no cells, so
+## nothing about it is held to the grid.
+pub fn arg_in_whole() -> EntryArg = {
+  let a: EntryArg = (ROLE_IN, [], [], [])
+  a
+}
+
+## An argument each tile block writes one cell of: cells of `tile` over a
+## tensor of `extent`, dimension `k` along grid axis `k`. The cells of the
+## Out arguments ARE the grid; an extent of -1 makes that axis dynamic.
+pub fn arg_out(extent: List[Int], tile: List[Int]) -> EntryArg = {
+  let a: EntryArg = (ROLE_OUT, extent, tile, range(0, len(tile)))
+  a
+}
+
+## An argument the kernel reads and writes in ways no cell describes
+## (atomics, scatters, a stencil's neighbours): nothing about it is held to
+## the grid, and no other argument may be its buffer.
+pub fn arg_shared() -> EntryArg = {
+  let a: EntryArg = (ROLE_SHARED, [], [], [])
+  a
+}
+
+fn arg_parts(a: EntryArg) -> (Int, List[Int], List[Int], List[Int]) = {
+  let p: (Int, List[Int], List[Int], List[Int]) = a
+  p
+}
+
+fn role_word(role: Int) -> String =
+  if role == ROLE_IN { "In" } else if role == ROLE_OUT { "Out" } else { "Shared" }
+
+fn arg_word(args: List[EntryArg], i: Int) -> String = {
+  let (role, _e, _t, _a) = arg_parts(args[i])
+  "argument ${i} (${role_word(role)})"
+}
+
+fn dims_text(ns: List[Int]) -> String =
+  list.fold(ns, "", (acc, n) => {
+    let d = if n == DYNAMIC { "?" } else { "${n}" }
+    if acc == "" { d } else { acc ++ "x" ++ d }
+  })
+
+# How many cells a dimension of `extent` cut by `tile` has, or DYNAMIC.
+fn cell_count(extent: Int, tile: Int) -> Int =
+  if extent == DYNAMIC { DYNAMIC } else { (extent + tile - 1) / tile }
+
+fn pad_axes(ns: List[Int]) -> List[Int] = ns ++ list.map(range(len(ns), 3), _k => 1)
+
+# What is wrong with argument `i` taken alone, if anything.
+fn arg_problem(args: List[EntryArg], i: Int) -> Option[String] = {
+  let (role, extent, tile, along) = arg_parts(args[i])
+  let who = arg_word(args, i)
+  let r = len(tile)
+  let axes = list.filter(along, k => k != DYNAMIC)
+  if r == 0 {
+    if role == ROLE_OUT { Some("${who} has no cells; the cells of the Out arguments are the grid") } else { None }
+  } else if len(extent) != r || len(along) != r {
+    Some("${who} has ${len(extent)} extent(s), ${r} tile dimension(s) and ${len(along)} axis entries; they are one per dimension")
+  } else if role == ROLE_OUT && r > 3 {
+    Some("${who} is cut ${r} ways; its cells are the grid, and a grid has at most three axes")
+  } else if list.any(tile, t => t < 1) {
+    Some("${who} has a tile of ${dims_text(tile)}; every tile dimension is at least 1")
+  } else if list.any(extent, n => n < 1 && n != DYNAMIC) {
+    Some("${who} has an extent of ${dims_text(extent)}; every extent is at least 1, or -1 for a dynamic one")
+  } else if list.any(along, k => k != DYNAMIC && (k < 0 || k > 2)) {
+    Some("${who} follows grid axes ${show(along)}; a grid has axes 0, 1 and 2, and -1 follows none")
+  } else if list.any(range(0, len(axes)), x => list.any(range(0, x), y => axes[x] == axes[y])) {
+    Some("${who} follows grid axes ${show(along)}; two dimensions cannot follow one axis")
+  } else {
+    match list.find(range(0, r), j => extent[j] == DYNAMIC && along[j] == DYNAMIC) {
+      Some(j) -> Some("${who} has a dynamic extent in dimension ${j}, which follows no grid axis, so nothing says how long it is")
+      None -> None
+    }
+  }
+}
+
+# The grid the Out arguments' cells make, three axes with DYNAMIC where an
+# Out extent is dynamic, or [] when no argument is an Out. Two Out
+# arguments must make one grid.
+fn out_grid(args: List[EntryArg]) -> Result[List[Int], String] = {
+  var grid: List[Int] = []
+  var from = 0 - 1
+  for i in range(0, len(args)) {
+    let (role, extent, tile, _along) = arg_parts(args[i])
+    if role == ROLE_OUT {
+      let mine = pad_axes(list.map(range(0, len(tile)), j => cell_count(extent[j], tile[j])))
+      if from < 0 {
+        grid = mine
+        from = i
+      } else if mine != grid {
+        return Err("${arg_word(args, from)} is cut into a ${dims_text(grid)} grid and ${arg_word(args, i)} into ${dims_text(mine)}; one launch has one grid")
+      } else {
+        ()
+      }
+    } else {
+      ()
+    }
+  }
+  Ok(grid)
+}
+
+# Whether every In dimension that follows a grid axis has as many cells as
+# the grid has blocks there, where both numbers are known. `grid` is [] when
+# the caller decides it: nothing to hold the dimensions to yet.
+fn follow_problem(args: List[EntryArg], grid: List[Int]) -> Option[String] =
+  if len(grid) == 0 {
+    None
+  } else {
+    let none: Option[String] = None
+    list.fold(range(0, len(args)), none, (found, i) => match found {
+      Some(p) -> Some(p)
+      None -> {
+        let (role, extent, tile, along) = arg_parts(args[i])
+        if role != ROLE_IN {
+          None
+        } else {
+          match list.find(range(0, len(tile)), j => {
+            let k = along[j]
+            let n = cell_count(extent[j], tile[j])
+            k != DYNAMIC && n != DYNAMIC && grid[k] != DYNAMIC && n != grid[k]
+          }) {
+            Some(j) -> Some("${arg_word(args, i)} has ${cell_count(extent[j], tile[j])} cell(s) in dimension ${j}, which follows grid axis ${along[j]}, and the grid has ${grid[along[j]]} block(s) there")
+            None -> None
+          }
+        }
+      }
+    })
+  }
+
+## The grid an entry's arguments make, checked: each argument well formed,
+## the Out arguments agreeing on one grid, and every In dimension that
+## follows a grid axis cut into as many cells as the grid has blocks there,
+## wherever both are known before the launch. Three axes, -1 on an axis an
+## Out extent leaves to the launch; `[]` when no argument is an Out and the
+## grid is the caller's. `Err` says what is wrong, naming the argument.
+## packages/tileir calls this when it records a kernel, and every
+## `launch_entry` calls it again.
+pub fn entry_grid(args: List[EntryArg]) -> Result[List[Int], String] = {
+  let none: Option[String] = None
+  match list.fold(range(0, len(args)), none, (found, i) => match found {
+    Some(p) -> Some(p)
+    None -> arg_problem(args, i)
+  }) {
+    Some(p) -> Err(p)
+    None -> match out_grid(args) {
+      Err(p) -> Err(p)
+      Ok(grid) -> match follow_problem(args, grid) {
+        Some(p) -> Err(p)
+        None -> Ok(grid)
+      }
+    }
+  }
+}
+
+# The grid a launch runs on: the entry's, with each dynamic axis taken from
+# `given`, or `given` itself (axes past it 1) when the entry has no Out.
+fn resolve_grid(grid: List[Int], given: List[Int]) -> Result[List[Int], (String, String)] =
+  if len(given) > 3 {
+    Err(("gpu.bad_grid", "a grid has at most three axes, got ${show(given)}"))
+  } else if len(grid) == 0 {
+    if len(given) == 0 {
+      Err(("gpu.bad_grid", "no argument is an Out, so the grid is the caller's: pass `grid`"))
+    } else {
+      Ok(pad_axes(given))
+    }
+  } else {
+    match list.find(range(0, 3), k => k < len(given) && grid[k] != DYNAMIC && given[k] != grid[k]) {
+      Some(k) -> Err(("gpu.grid_mismatch", "the Out cells make ${grid[k]} block(s) along axis ${k} and the launch asks for ${given[k]}"))
+      None -> match list.find(range(0, 3), k => k >= len(given) && grid[k] == DYNAMIC) {
+        Some(k) -> Err(("gpu.bad_grid", "axis ${k} of the grid is dynamic (an Out extent is), so `grid` has to name it"))
+        None -> Ok(list.map(range(0, 3), k => if grid[k] == DYNAMIC { given[k] } else { grid[k] }))
+      }
+    }
+  }
+
+# How many elements argument `i`'s cells reach over the resolved grid: the
+# product of its extents, a dynamic one being the grid's blocks times the
+# tile. 0 for an argument with no cells.
+fn reach(a: EntryArg, grid: List[Int]) -> Int = {
+  let (_role, extent, tile, along) = arg_parts(a)
+  if len(tile) == 0 {
+    0
+  } else {
+    list.fold(range(0, len(tile)), 1, (n, j) =>
+        n * if extent[j] == DYNAMIC { grid[along[j]] * tile[j] } else { extent[j] })
+  }
+}
+
+# Everything a launch of an entry checks before the handler is asked, in
+# order: the entry, the buffers' identity, the grid, the cells against the
+# grid, and each buffer against its cells. Pure, so it is the same under
+# every handler and a test can call it alone.
+fn launch_plan(args: List[EntryArg], handles: List[Int], sizes: List[Int],
+  given: List[Int]) -> Result[List[Int], (String, String)] =
+  match entry_grid(args) {
+    Err(p) -> Err(("gpu.bad_entry", p))
+    Ok(grid) -> {
+      let n = len(args)
+      let clash = list.find(range(0, n * n), x => {
+        let i = x / n
+        let j = x % n
+        let (ri, _e1, _t1, _a1) = arg_parts(args[i])
+        let (rj, _e2, _t2, _a2) = arg_parts(args[j])
+        i < j && handles[i] == handles[j] && (ri != ROLE_IN || rj != ROLE_IN)
+      })
+      match clash {
+        Some(x) -> Err(("gpu.aliased_argument", "${arg_word(args, x / n)} and ${arg_word(args, x % n)} are one buffer (handle ${handles[x / n]}); an Out or Shared argument shares its buffer with no other"))
+        None -> match resolve_grid(grid, given) {
+          Err(e) -> Err(e)
+          Ok(g) -> if list.any(g, b => b < 1) {
+            Err(("gpu.bad_grid", "a grid has at least one block along each axis, got ${show(g)}"))
+          } else {
+            match follow_problem(args, g) {
+              Some(p) -> Err(("gpu.grid_mismatch", p))
+              None -> match list.find(range(0, n), i => sizes[i] < reach(args[i], g)) {
+                Some(i) -> Err(("gpu.short_tensor", "${arg_word(args, i)} holds ${sizes[i]} element(s) and its cells reach ${reach(args[i], g)}"))
+                None -> Ok(g)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+fn launch_args(kernel: String, args: List[EntryArg], handles: List[Int], sizes: List[Int],
+  given: List[Int]) -> Result[Unit, ForeignError] !Gpu =
+  match launch_plan(args, handles, sizes, given) {
+    Err(e) -> {
+      let (kind, message) = e
+      Err(refuse(kind, "gpu.launch_entry: kernel `${kernel}`: ${message}"))
+    }
+    Ok(g) -> launch(kernel, g[0], handles, gy: g[1], gz: g[2])
+  }
+
+## A kernel of one buffer argument of format `A`, as its recorder answers
+## it: the kernel's name and what it does to the buffer. [`launch_entry1`]
+## runs it. Opaque, so a program holds one only as a recorder made it.
+pub opaque type Entry1[A] = (String, List[EntryArg])
+
+## [`Entry1`] for two arguments, of formats `A` and `B` in order.
+pub opaque type Entry2[A, B] = (String, List[EntryArg])
+
+## [`Entry1`] for three arguments.
+pub opaque type Entry3[A, B, C] = (String, List[EntryArg])
+
+## [`Entry1`] for four arguments.
+pub opaque type Entry4[A, B, C, D] = (String, List[EntryArg])
+
+## [`Entry1`] for five arguments.
+pub opaque type Entry5[A, B, C, D, E] = (String, List[EntryArg])
+
+## The entry of `kernel`, whose one argument is `a`. The format is the
+## type's: a recorder fixes it from the kernel's own parameter.
+pub fn entry1[A](kernel: String, a: EntryArg) -> Entry1[A] = {
+  let e: Entry1[A] = (kernel, [a])
+  e
+}
+
+## [`entry1`] for two arguments.
+pub fn entry2[A, B](kernel: String, a: EntryArg, b: EntryArg) -> Entry2[A, B] = {
+  let e: Entry2[A, B] = (kernel, [a, b])
+  e
+}
+
+## [`entry1`] for three arguments.
+pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg) -> Entry3[A, B, C] = {
+  let e: Entry3[A, B, C] = (kernel, [a, b, c])
+  e
+}
+
+## [`entry1`] for four arguments.
+pub fn entry4[A, B, C, D](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
+  d: EntryArg) -> Entry4[A, B, C, D] = {
+  let e: Entry4[A, B, C, D] = (kernel, [a, b, c, d])
+  e
+}
+
+## [`entry1`] for five arguments.
+pub fn entry5[A, B, C, D, E](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg,
+  d: EntryArg, x: EntryArg) -> Entry5[A, B, C, D, E] = {
+  let e: Entry5[A, B, C, D, E] = (kernel, [a, b, c, d, x])
+  e
+}
+
+## Run `e` with `a` as its argument. The grid is the one the Out cells
+## make; `grid` names the axes the entry leaves to the launch (a dynamic Out
+## extent), or all of them when no argument is an Out, and an axis it names
+## that the entry knows must agree with it. Before any handler is asked:
+## `Err(kind: "gpu.bad_entry")` for an entry whose cells are malformed,
+## `gpu.aliased_argument` when an Out or Shared argument is the buffer of
+## another argument, `gpu.grid_mismatch` when `grid` or an In argument's
+## cells disagree with the Out cells, `gpu.short_tensor` when a tensor is
+## shorter than its cells reach, and `gpu.bad_grid` as [`launch`] has it.
+pub fn launch_entry1[A](e: Entry1[A], a: Tensor[A], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg]) = e
+  let (kernel, args) = p
+  launch_args(kernel, args, [handle_of(a)], [size(a)], grid)
+}
+
+## [`launch_entry1`] for two arguments.
+pub fn launch_entry2[A, B](e: Entry2[A, B], a: Tensor[A], b: Tensor[B],
+  grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg]) = e
+  let (kernel, args) = p
+  launch_args(kernel, args, [handle_of(a), handle_of(b)], [size(a), size(b)], grid)
+}
+
+## [`launch_entry1`] for three arguments.
+pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Tensor[A], b: Tensor[B], c: Tensor[C],
+  grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg]) = e
+  let (kernel, args) = p
+  launch_args(kernel, args, [handle_of(a), handle_of(b), handle_of(c)],
+    [size(a), size(b), size(c)], grid)
+}
+
+## [`launch_entry1`] for four arguments.
+pub fn launch_entry4[A, B, C, D](e: Entry4[A, B, C, D], a: Tensor[A], b: Tensor[B],
+  c: Tensor[C], d: Tensor[D], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg]) = e
+  let (kernel, args) = p
+  launch_args(kernel, args, [handle_of(a), handle_of(b), handle_of(c), handle_of(d)],
+    [size(a), size(b), size(c), size(d)], grid)
+}
+
+## [`launch_entry1`] for five arguments.
+pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Tensor[A], b: Tensor[B],
+  c: Tensor[C], d: Tensor[D], x: Tensor[E], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+  let p: (String, List[EntryArg]) = e
+  let (kernel, args) = p
+  launch_args(kernel, args, [handle_of(a), handle_of(b), handle_of(c), handle_of(d), handle_of(x)],
+    [size(a), size(b), size(c), size(d), size(x)], grid)
+}
+
 ## The module-level global named `name`, in the module that defines
 ## `kernel`, as a tensor of format `d` over the global's own storage.
 ##
@@ -2183,4 +2563,94 @@ test "the sub-byte layout is eight lanes to a word, low nibble first" {
   assert nibble_at(wrap_i32(0xFEDCBA98), 0) == 0x8
   assert nibble_word(k => k) == to_float(0x76543210)
   assert nibble_word(k => 0xF) == to_float(0 - 1)
+}
+
+# A handler that allocates, answers each launch with the grid and the
+# buffers it was handed as a refusal, and does nothing else: what an entry's
+# launch hands the device, or why it never got there.
+fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> List[String] = {
+  let rs = {
+    with handle Gpu {
+      var next: Int = 1
+      gpu_alloc(_dtype, _len) => {
+        let h = next
+        next = next + 1
+        Ok(h)
+      }
+      gpu_upload(_handle, _data) => Ok(())
+      gpu_download(_handle) => Ok([])
+      gpu_launch(kernel, gx, gy, gz, args) => Err(refuse("test.launch", "${kernel} ${gx} ${gy} ${gz} ${show(args)}"))
+      gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
+      gpu_free(_handle) => Ok(())
+      gpu_sync() => Ok(())
+    }
+    launches()
+  }
+  list.map(rs, r => match r {
+    Ok(_) -> "ok"
+    Err(e) -> "${e.kind}: ${e.message}"
+  })
+}
+
+fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
+  # vadd with no extent: the grid is the launch's, the cells cover it
+  let e: Entry3[F64, F64, F64] = entry3("vadd", arg_in([0 - 1], [128], [0]), arg_in([0 - 1], [128], [0]),
+    arg_out([0 - 1], [128]))
+  # a kernel with no Out: the grid is the caller's alone
+  let s: Entry2[F64, I32] = entry2("hist", arg_in_whole(), arg_shared())
+  # an In with a static extent along a dynamic axis is held at the launch
+  let f: Entry2[F64, F64] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
+  match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
+    (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
+      launch_entry3(e, a, b, a, grid: [4]),
+      launch_entry3(e, a, b, b, grid: [4]),
+      launch_entry3(e, a, a, b, grid: [4]),
+      launch_entry3(e, a, b, short, grid: [4]),
+      launch_entry3(e, a, b, short, grid: [3]),
+      launch_entry3(e, a, b, short),
+      launch_entry3(e, a, b, short, grid: [3, 2]),
+      launch_entry2(s, a, h, grid: [8, 2]),
+      launch_entry2(s, a, h),
+      launch_entry2(f, a, b, grid: [4]),
+      launch_entry2(f, a, b, grid: [2])
+    ]
+    _ -> []
+  }
+}
+
+test "an entry's launch takes its dynamic axes from the caller and holds the buffers to the cells" {
+  assert entry_launches(dynamic_launches) == [
+    "gpu.aliased_argument: gpu.launch_entry: kernel `vadd`: argument 0 (In) and argument 2 (Out) are one buffer (handle 1); an Out or Shared argument shares its buffer with no other",
+    "gpu.aliased_argument: gpu.launch_entry: kernel `vadd`: argument 1 (In) and argument 2 (Out) are one buffer (handle 2); an Out or Shared argument shares its buffer with no other",
+    "test.launch: vadd 4 1 1 [1, 1, 2]",
+    "gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 2 (Out) holds 500 element(s) and its cells reach 512",
+    "test.launch: vadd 3 1 1 [1, 2, 3]",
+    "gpu.bad_grid: gpu.launch_entry: kernel `vadd`: axis 0 of the grid is dynamic (an Out extent is), so `grid` has to name it",
+    "gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 1 block(s) along axis 1 and the launch asks for 2",
+    "test.launch: hist 8 2 1 [1, 4]",
+    "gpu.bad_grid: gpu.launch_entry: kernel `hist`: no argument is an Out, so the grid is the caller's: pass `grid`",
+    "test.launch: fixed 4 1 1 [1, 2]",
+    "gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(s) in dimension 0, which follows grid axis 0, and the grid has 2 block(s) there"
+  ]
+}
+
+test "entry_grid is the Out cells' grid, checked argument by argument and against one another" {
+  assert entry_grid([arg_in([1000], [128], [0]), arg_out([1000], [128])]) == Ok([8, 1, 1])
+  assert entry_grid([arg_in([64, 32], [16, 8], [0, 0 - 1]), arg_out([64, 48], [16, 16])]) == Ok([4, 3, 1])
+  assert entry_grid([arg_in_whole(), arg_shared()]) == Ok([])
+  assert entry_grid([arg_out([0 - 1, 64], [128, 16])]) == Ok([0 - 1, 4, 1])
+  assert entry_grid([arg_out([64], [8]), arg_out([64], [16])])
+    == Err("argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 4x1x1; one launch has one grid")
+  assert entry_grid([arg_in([64], [8], [0, 1]), arg_out([64], [8])])
+    == Err("argument 0 (In) has 1 extent(s), 1 tile dimension(s) and 2 axis entries; they are one per dimension")
+  assert entry_grid([arg_in([64], [0], [0])])
+    == Err("argument 0 (In) has a tile of 0; every tile dimension is at least 1")
+  assert entry_grid([arg_in([0], [8], [0])])
+    == Err("argument 0 (In) has an extent of 0; every extent is at least 1, or -1 for a dynamic one")
+  assert entry_grid([arg_in([64, 64], [8, 8], [0, 0])])
+    == Err("argument 0 (In) follows grid axes [0, 0]; two dimensions cannot follow one axis")
+  assert entry_grid([arg_in([64], [8], [3])])
+    == Err("argument 0 (In) follows grid axes [3]; a grid has axes 0, 1 and 2, and -1 follows none")
+  assert entry_grid([arg_out([], [])])
+    == Err("argument 0 (Out) has no cells; the cells of the Out arguments are the grid")
 }

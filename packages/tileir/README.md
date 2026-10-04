@@ -28,7 +28,7 @@ bf16 answers what `std/narrow.round_bf16` of the f64 sum answers;
 | Module | Contents |
 |------|------|
 | `dev` | `pub effect Dev` (handle-level, monomorphic device operations), the handle types (`Tile[D]`, `Param[D]`, `Idx`, `Scalar[D]`, `Ptrs[D]`, the view types and others, all opaque, with `D` a phantom format parameter) and the typed functions over them; the groups are below |
-| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body, hints = [])` is the recording handler, with a region stack; `trace_calls` is the same handler answering, beside the program, a side table `List[Call]`: the tree of calls the kernel made, each with the operations it issued; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
+| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body, hints = [])` is the recording handler, with a region stack; `trace_calls` is the same handler answering, beside the program, a side table `List[Call]`: the tree of calls the kernel made, each with the operations it issued; `trace1` to `trace5` record from one marker per parameter (`In`, `Out`, `Shared`, with `Cells`) and answer a typed `std/gpu` entry beside the program; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
 | `lower` | `lower(prog) -> Kernel`: the linear instruction table `Instr` (a region operation's body is a nested table), values numbered densely from 0, operands `Arg(pos)` / `Val(id)`, types `Ty`; the pointer ladders, deduplication, SSA renumbering and region scoping all live here; `lower_spans` also answers which operation each instruction came from (`Owner`, nested as the instructions are) |
 | `render` | `render(prog) -> String`: one `cuda_tile.module @m` holding the module's globals and one `entry @<name>`; one line per `Instr`, a region as a header line, a body indented two spaces, and a closing brace; `line_map(prog, calls)` cuts that text into the lines each call of the side table's tree is answerable for |
 | `bytecode` | `encode(prog) -> Bytes`: `cuda-tile` bytecode, regions included; `BYTECODE_MAJOR` / `BYTECODE_MINOR` pin the version in the header, and `bytecode_version()` answers `"13.4"` |
@@ -160,6 +160,57 @@ from several of them. A shape is a list of dimensions, each a power of two;
 same format), or `trace_kernel` panics: an entry signature that says one
 format and a load that says another would be wrong in the bytecode too, by
 the time it reached `tileiras`.
+
+### Markers and entries (since 0.5.1)
+
+`trace1` to `trace5` record the same program from one MARKER per parameter
+instead of a list of format names, and answer, beside it, an entry that
+`std/gpu` can launch with the format and the count of the arguments in its
+type:
+
+```dawn
+use std/gpu.{F64, alloc, launch_entry3}
+use tileir/prog.{trace3, cells, In, Out}
+
+let g = cells([1024], [128])          # a tensor of 1024, cut into cells of 128
+let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+# prog is what trace_kernel("vadd", ["f64", "f64", "f64"], ...) records
+# later, under a Gpu handler:
+launch_entry3(entry, a, b, out)       # a Tensor[BF16] here is a compile error
+```
+
+- `In(d, cells)` is a parameter the kernel only reads. The recording refuses
+  any write into it (`store`, `scatter`, an atomic, `store_ptrs` through
+  pointers spread from it, `store_view` through a view of it), and, while any
+  parameter is an `In`, a write through pointers it cannot follow back to a
+  parameter (`int_to_ptr`). `In(d, Whole)` is an input read anywhere.
+- `Out(d, cells)` is written one cell per tile block, and the cells of the
+  `Out` parameters are the launch grid: `cells([1000], [128])` is a grid of
+  8 along axis 0. Two `Out` cuts that make two grids are refused.
+- `Shared(d)` is read and written in ways no cell describes (atomics,
+  scatters, a stencil's neighbours). It is what every parameter of
+  `trace_kernel` is.
+- `cells(extent, tile, pad: PadZero, along: ..)` is how the tensor is cut.
+  An extent of `DYN_DIM` is the launch's to decide (the grid's blocks times
+  the tile). `pad` is what a read past the extent answers. `along[j]` is the
+  grid axis dimension `j` follows (`k` for dimension `k`, by default), or
+  `FREE_AXIS`: a matrix product's left input is
+  `cells([M, K], [TM, TK], along: [0, FREE_AXIS])`. A dimension that follows
+  an axis must have as many cells as the grid has blocks there.
+
+Kernel bodies do not read the cells yet: a body takes `Param[D]` and
+addresses memory exactly as before. What the cells buy today is the checks,
+when the kernel is recorded and again when it is launched:
+`launch_entryN` refuses, before any handler is asked, an `Out` or `Shared`
+argument that is the buffer of another argument (`gpu.aliased_argument`), a
+grid that disagrees with the cells (`gpu.grid_mismatch`) and a tensor shorter
+than its cells (`gpu.short_tensor`). Design and reasons:
+[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §6.24 (in
+Chinese).
+
+0.5.0 to 0.5.1 only adds names (`trace1` to `trace5`, `Arg`, `Cells`,
+`cells`, `FREE_AXIS`); nothing that compiled against 0.5.0 stops compiling,
+and `trace_kernel` records what it recorded.
 
 Loops inside a kernel use `d_for` (design §5.2). The bounds and the step are
 `Idx` (`idx_const` for a host constant), one tile is carried, and the body

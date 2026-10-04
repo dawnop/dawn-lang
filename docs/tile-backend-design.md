@@ -4327,6 +4327,221 @@ global 无主。用 `regions`、`nested`、`scanned` 等测试 kernel，加上�
 - 支持 kernel 内 `!Dev` helper、宿主循环和先绑定的闭包：flash_attn 用不到；到 M5 有调用点之后这些会自然放开。
 - 把位置信息写进 Tile IR 的 `loc` / Debug 节：只有行加起点列，给不出调用区间；而且默认开启会动 golden（M6，默认关）。
 
+### 6.24 参数标记：角色与几何，`trace1`…`trace5` 与类型化的入口（刀 C2 + D-3 + D-5）
+
+裁决出处：agent-handoff 的 `ruling-cutile-rs-borrow-20261003.md` 第 7 行（C2）、「修订」的 D-3 / D-5、「修订二」的 C2 扩大行
+与「落刀前补测」第 1 条；调研 `research-tile-shape-once-report-20261003.md` §3.3、§4.1、§4.3，
+`research-cutile-rs-api-report-20261003.md` 借-1 / 借-9 / 借-10，`research-tile-disjoint-writes-report-20261003.md` §3.3、§4.2。
+这一刀定**标记的形状**：角色与几何必须同刀定，晚了就是所有 `traceN` 调用点再迁一次。kernel 体一字不改，
+`kernels.dawn` 不迁（随 C3 那一批只迁一次），所以 golden 预测逐字节不动。
+
+**〇、落刀前补测：tile 大于 extent 的 partition view。** softmax 的 `RED_TILE = 1024 > RED_N = 1000`，单块，
+`PadNegInf` 读、越界写由方言屏蔽。这组合以前没有在设备上跑过（`view_padding` 的 tile 比 extent 小），
+本刀先跑了一次，结论**成立**。做法：scratch 里写一个 view 版 softmax（`tensor_view [1000]` + `partition_view
+tile=(1024) padding_value = neg_inf` 读，`reduce maxf`、`exp`、`reduce addf`、`divf`，再经 `tensor_view [1000]` +
+`partition_view tile=(1024)` 的 `store_view_tko` 写回），录成 13.4 字节码，钉住的 `tileiras` 13.4.92
+`--gpu-name sm_86` 汇编（退出 0，20 KB ELF cubin），本机 RTX 3080（驱动 616.56）上 `with_gpu_real` 跑一块：
+
+- 输入缓冲 1100 个元素：前 1000 个是语料，后 100 个是 `1.0e300`。若越界 lane 读的是内存而不是 padding，
+  最大值就是 `1e300`，全部结果变 0；输出缓冲 1100 个元素，预填哨兵。
+- 结果：1000 个 lane 与宿主左折叠参考的最大相对误差 `1.49e-15`（归约树序不同，10 个逐位相同），和为
+  `0.999999999999999`；输出第 1000 到 1099 个元素 100/100 保留哨兵。
+- 两个负控，同一个设备、同一套语料，各改一处再录再汇编再跑：输入 view 的 extent 改成 1100（`1e300` 进入
+  tile），结果全 0、`fail`；输出 view 的 extent 改成 1100，第 1000 到 1023 个元素（tile 内、原 extent 外的 24 个 lane）
+  被写成 0，只剩 76/100 个哨兵、`fail`。所以上面的「通过」确实是 padding 与写屏蔽在起作用，而不是语料碰巧。
+
+所以 `cells([RED_N], [RED_TILE], pad: PadNegInf)` 这类「tile 盖过 extent」的几何，D-4 降成 view 族之后可以直接用，
+softmax 不再需要 `tail_mask`、两个 pad 常量与 `select`。
+
+**一、标记与 `Cells`。** 在 `packages/tileir/src/prog.dawn`：
+
+```dawn
+pub type Cells =
+  | Whole
+  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[Int])
+
+pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
+  along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS })) -> Cells
+
+pub type Arg[D] =
+  | In(d: D, g: Cells)
+  | Out(d: D, g: Cells)
+  | Shared(d: D)
+```
+
+- `Cells` 是宿主侧的纯值：一个按行主序排的张量，`extent` 是它每一维的长度，按 `tile` 切成格子。
+  `pad` 是读越过 extent 时那些 lane 的值（partition view 的 `padding_value`），`along[j]` 是第 `j` 维跟随的网格轴，
+  或 `FREE_AXIS`（-1）表示这一维的格子由 kernel 自己挑（matmul 循环里的 `k`）。默认第 `k` 维跟第 `k` 轴。
+- `In(d, g)`：只读。`In(d, Whole)` 是整块读的输入（gather 的表、stencil 的邻居）。
+- `Out(d, g)`：每个 tile block 写自己的一格；所有 `Out` 的格子**就是**发射网格。可以读（原地 kernel 先读自己那一格）。
+- `Shared(d)`：读写方式不是「一块一格」的（原子、scatter、stencil），即今天 `trace_kernel` 下每个参数的身份。
+
+与裁决文本的三处拼写差异，都是语言事实逼出来的：
+
+| 裁决写的 | 这里 | 理由 |
+|---|---|---|
+| `In(F64)` 与 `In(F64, g, pad: ..)` 两种元数 | `In(F64, Whole)` 与 `In(F64, g)` | `In` 必须是构造器（大写开头是语义，spec §1），构造器字段不收默认值（spec §3.1「范围」一条），也没有重载，所以一个 `In` 只能有一种元数。按角色一个构造器、角色内元数固定，`Whole` 是「不切」这个几何值，读起来仍是「In、F64、整块」 |
+| `pad:` 挂在标记上 | `pad` 在 `Cells` 里：`cells(.., pad: PadNegInf)` | 同上，`In` 收不了具名默认参数；`cells` 是普通函数，收得了。`Out` 的格子也带 `pad`，D-4 的 `o.load_cell()`（原地 kernel）读越界时同样要它 |
+| `cells([Dyn], [128])` | `cells([DYN_DIM], [128])` | `dev.Dim` 的 `Dyn(v: Idx)` 带一个设备句柄，是体内的值；`Cells` 是记录之前的宿主值，没有句柄可带。`DYN_DIM`（-1）是本包已经用来表示「运行期才知道的维」的那个标记（§6.15） |
+
+另加了一样裁决没写的：`along`。原因见第四节，它是让「In 的几何与网格一致」有定义的最小东西。
+
+**二、`trace1`…`trace5` 由标记算出 params。**
+
+```dawn
+pub fn trace3[A: Dtype, B: Dtype, C: Dtype](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry3[A, B, C])
+```
+
+`params` 是 `dtype_name(marker)` 的列表，交给体的 `Param[D]` 由同一组标记造出，所以字符串表与 `param(F64, k)`
+的冗余（191/191）在用 `traceN` 的 kernel 上消失，`check_param` 那条拒绝在构造上不可能触发；签名里的
+`Param[F64]` 由检查器与标记对齐，写错是编译错误。只能按元数写到 5（Dawn 没有变长泛型，同 `d_for2`…`d_for4`），
+`trace_kernel` 原样保留，给第六个参数以上与想手写的人。`hints` 在 `body` 之后，沿用 K2 的位置。
+
+标记**不发任何操作**：几何只在记录之前检查、之后交给入口，不建视图，所以 §6.23 担心的「几何标记在体之前发出
+无主 op」没有发生，`line_map` 不受影响。包测试钉住：`trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)`
+与 `In(F64, Whole), Shared(F64), Shared(F64)` 两种标记记录出来的 `TileProg` 都与 `trace_kernel("vadd", ["f64", "f64",
+"f64"], ..)` 相等。
+
+**三、角色：handler 对 In 位拒写（D-3）。** 记录 handler 多一个参数：每个参数位的角色（`trace_kernel` /
+`trace_calls` 传空表，什么也不拒）。写操作共七类，各在臂里先问「写进哪个参数」：
+
+| 写操作 | 目标从哪来 |
+|---|---|
+| `t_store` / `t_scatter` / `t_atomic_rmw` / `t_atomic_cas` | 操作自带参数位 |
+| `t_store_ptrs` | 指针 tile 的来处：`t_ptrs` 记参数位，`t_ptr_offset` / `t_ptr_to_ptr` 沿用，`t_get_global` / `t_alloca` 记「不是参数」 |
+| `t_store_view`（含 `store_gather`）/ `t_atomic_red_view` | 视图的来处：`t_tensor_view` 记参数位，三种切分视图沿用 |
+
+handler 为此维护一张 `aims: Map[Int, Int]`（句柄 → 参数位，-1 为全局或 alloca）。写进 In 位即拒；目标**不明**
+（`int_to_ptr` 造出来的指针，或经区域携带的值，表里没有）时，只要有任何一个参数是 In 就拒：这次写与写进那个
+In 分不开。没有 In 时不明目标照常放行（今天的 `ptr_roundtrip` 一类）。`Out` 位这一刀不限制写法（D-4 再收紧为
+只收能力写），`Shared` 不限。照录：
+
+```
+tileir: kernel `w`: op #5 `store`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `w`: op #8 `store_view`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `w`: op #8 `store_ptrs`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `w`: op #4 `scatter`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `w`: op #4 `atomic_rmw`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `w`: op #6 `store_ptrs`: it writes through pointers the recording cannot follow to a parameter (an int_to_ptr, or a value carried through a region), and parameter 1 is an In
+```
+
+序号与 C1 同一套（`op_number`），操作名是发出这次写的那个 kernel 调用（`store_masked` 就写 `store_masked`），
+体直接调效果操作时写操作自己的名字。D-9（密封效果操作）裁为不做的理由正在这里：绕过公开函数直接调
+`t_store` 也过这一关。
+
+**四、几何与网格（D-5 的记录期一半）。** 规则分两层：std/gpu 的 `entry_grid` 做纯算术（发射时再做一次），
+tileir 的 `check_cells` 只做 Tile IR 才有的要求。
+
+- 格子本身：`extent`、`tile`、`along` 等长；tile 每维 ≥ 1 且（tileir）是 2 的幂；extent ≥ 1 或 `DYN_DIM`；
+  `along` 的值在 0..2 或 -1，两维不跟同一轴；动态 extent 必须跟某一轴（否则没有东西说它多长）；四个特殊 padding
+  值只给浮点格式（tileir，同 `verifyPartitionViewLike`）。
+- `Out`：必须切（`Out(F64, Whole)` 拒），第 `k` 维就是第 `k` 轴（`along` 非恒等拒），至多三维；**网格 = Out 的格子数**，
+  逐轴 `ceil(extent / tile)`，动态 extent 的那一轴是动态的；多个 `Out` 必须切出同一个网格。
+- `In`：跟随第 `k` 轴的那一维，格子数必须等于网格第 `k` 轴的块数；两边都静态时在记录期拒，有一边动态时留给发射期。
+
+**推翻调研的一处前提：**调研 §3.3 写「In 的几何与网格不一致（例如块数不同）在 `traceN` 处就能拒」，
+同一份报告 §4.1 的 matmul 范例本身就是反例：`A` 切成 `[M/TM, K/TK]`、网格是 `[M/TM, N/TN]`，K ≠ N 时第 1 轴块数
+不等，可那是正确的 kernel（`A` 的第 1 维由循环的 `k` 挑，不跟网格）。所以「一致」只能对**跟随某一轴**的维说，
+而「跟不跟」只有写 kernel 的人知道，于是有了 `along`：默认恒等（逐元素一类，占多数）；matmul 写
+`cells([M, K], [TM, TK], along: [0, FREE_AXIS])` 与 `cells([K, N], [TK, TN], along: [FREE_AXIS, 1])`。这与 Pallas 的
+`BlockSpec.index_map` 是同一件事，只收它最常见的那种（投影），D-4 的 `load_cell` 正好按 `along` 取块号、`load_at`
+只为自由维收下标。照录：
+
+```
+tileir: kernel `g`: argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 4x1x1; one launch has one grid
+tileir: kernel `g`: argument 0 (In) has 8 cell(s) in dimension 0, which follows grid axis 0, and the grid has 16 block(s) there
+tileir: kernel `mm`: argument 0 (In) has 4 cell(s) in dimension 1, which follows grid axis 1, and the grid has 3 block(s) there
+tileir: kernel `g`: argument 0 (In) has a dynamic extent in dimension 0, which follows no grid axis, so nothing says how long it is
+tileir: kernel `g`: argument 1 (Out) has no cells; the cells of the Out arguments are the grid
+tileir: kernel `g`: argument 1 (Out) follows grid axes [1, 0]; an Out's cells are the grid, so its dimension k is axis k
+tileir: kernel `g`: argument 1 (Out) is cut 4 ways; its cells are the grid, and a grid has at most three axes
+tileir: kernel `g`: argument 0 (In) has a tile of [100]; every tile dimension is a power of two
+tileir: kernel `g`: argument 0 (In) is i32 and pads with neg_inf, which only a float format can hold
+```
+
+这些拒绝都在体运行**之前**（测试用一个一跑就 panic 的体钉住）。
+
+**`cells([DYN_DIM], [128])` 的语义**（今天 vadd 一类不知道 N 的 kernel）：那一维的长度是「网格在它跟随的轴上的块数
+× tile」，即格子恰好盖满、没有尾块。网格那一轴由发射者给出；发射时核对张量至少有这么多元素。要尾块就写静态
+extent（softmax 的 1000）。这样 D-4 降低时视图的动态 extent 有体内来源（`num_blocks(k) * tile`，一条已有的操作），
+不必把长度当参数传进 kernel，也没有「由发射时的张量推几何」（裁决列为不做）：记录出来的程序不随张量变。
+
+**五、类型化的入口与 `launch_entryN`（借-9、D-5 的发射期一半）。** 在 `std/gpu`：
+
+```dawn
+pub opaque type EntryArg = (Int, List[Int], List[Int], List[Int])     # 角色码、extent、tile、along
+pub fn arg_in(extent, tile, along) / arg_in_whole() / arg_out(extent, tile) / arg_shared() -> EntryArg
+pub opaque type Entry3[A, B, C] = (String, List[EntryArg])           # Entry1..Entry5
+pub fn entry3[A, B, C](kernel: String, a: EntryArg, b: EntryArg, c: EntryArg) -> Entry3[A, B, C]
+pub fn entry_grid(args: List[EntryArg]) -> Result[List[Int], String]
+pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Tensor[A], b: Tensor[B], c: Tensor[C],
+  grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu
+```
+
+- 入口只是名字加几个整数，`std/gpu` 仍不认识 `TileProg`（§5.3 守住），依赖方向仍是 tileir → std/gpu。角色是
+  藏在 opaque 后面的整数码而不是一个和类型：JVM 后端给每个程序都带上 std 里每个类型的类（#356 的 `Base64`
+  加了五个类，每个 emit 语料都要声明），一个没人发射也要付的类型不值得。
+- 格式与元数在类型里：`launch_entry3` 给一个 `Tensor[BF16]`，或少给一个张量，是编译错误；`trace2` 配一个三参数的体、
+  标记的格式与体的 `Param` 不符，也是编译错误（诊断照录在报告里）。`handle_of` 从调用处消失。
+- 参数形状按 K5 写：张量按位置，`grid: List[Int] = []` 在最后（默认形参放在没有默认的形参之后，同 `launch`
+  的 `gy` / `gz`）。省掉 `grid` 就用 Out 格子推出的网格；`blocks_for` 因此不加，被「由 Out 分区推网格」吸收。
+- 发射前、问 handler 之前，依次查（每种失败一个 kind，消息前缀 `gpu.launch_entry: kernel `<name>`: `）：
+
+| kind | 什么时候 |
+|---|---|
+| `gpu.bad_entry` | 入口本身不成形（`entry_grid` 再跑一次，手写的入口也过这一关） |
+| `gpu.aliased_argument` | 一个 Out 或 Shared 参数的句柄与任何别的参数相等；In 与 In 相等可以 |
+| `gpu.bad_grid` | 动态轴没给、没有 Out 却没给 `grid`、超过三轴、某轴 < 1 |
+| `gpu.grid_mismatch` | `grid` 给的某一静态轴与 Out 格子不符，或某个 In 跟随的轴在解出的网格上块数不符 |
+| `gpu.short_tensor` | 某个切了格子的参数，张量元素数少于格子覆盖到的 extent 之积（动态维按网格 × tile 算） |
+
+  别名规则与调研 §3.3 相同：`std/gpu` 的张量只有 `alloc` 与 `module_global` 两个来源，没有切片，所以「别名」恰好
+  等于「句柄相等」；原地 kernel 只把那个缓冲作为**一个** `Out` 参数传，不需要同一句柄传两次。
+- `launch` 原样保留：`launch_entryN` 检查完调的就是它。
+
+照录（tileir 的包测试经假设备跑出，std/gpu 的测试经回显网格的 handler 跑出）：
+
+```
+gpu.aliased_argument: gpu.launch_entry: kernel `vadd`: argument 0 (In) and argument 2 (Out) are one buffer (handle 7); an Out or Shared argument shares its buffer with no other
+gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s) along axis 0 and the launch asks for 3
+gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 2 (Out) holds 200 element(s) and its cells reach 256
+gpu.bad_grid: gpu.launch_entry: kernel `vadd`: axis 0 of the grid is dynamic (an Out extent is), so `grid` has to name it
+gpu.bad_grid: gpu.launch_entry: kernel `hist`: no argument is an Out, so the grid is the caller's: pass `grid`
+gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(s) in dimension 0, which follows grid axis 0, and the grid has 2 block(s) there
+```
+
+**六、实测。**
+
+- 包测试：`dawn test packages/tileir` 166 → 172 项全过（新六项：`traceN` 与 `trace_kernel` 记录同一程序；七类写进
+  In 各拒一次；同样的写进 Out / Shared / 模块内存与 `trace_kernel` 下全放行；几何拒绝九种且体不运行；matmul 的
+  `along` 与动态 extent 放行；`trace3` 的入口在假设备上跑出 vadd 并按别名 / 网格 / 尺寸拒绝）。`dawn test
+  std/gpu.dawn` 29 → 31 项全过（新两项：动态轴、无 Out、发射期的 In 跟随检查与尺寸检查；`entry_grid` 的各条）。
+- JVM 与 native：一个 scratch 程序把上面的拒绝与假设备发射各跑一遍，两个后端输出逐字节相同（只差 panic 的
+  源位置后缀，C1′ 以来测试按前缀比）。
+- 负控（各先证红）：tileir 四个变异体在包的 scratch 副本上跑包测试（In 位放行写、不明目标放行、记录期不查网格、
+  切分视图丢掉来处），std/gpu 六个在原地改、跑测试、恢复（不查别名、In 与 In 也算别名、不查 In 跟随、忽略给定
+  网格、不比较两个 Out、不查尺寸），每个都有测试变红。类型层四个：格式不符、少一个张量、体的元数不符、标记格式
+  与体不符，各是一条编译错误，同一程序改对后编译通过。
+- golden：`kernels.dawn` 一行未动、`lower` / `render` / `bytecode` 未动，预测 191 个逐字节不动，以全量
+  `scripts/tile-golden/run.sh` 为准（结果见报告与下面的回填）。
+
+**七、版本。** `tileir` 0.5.0 → 0.5.1：只加名字（`trace1`…`trace5`、`Arg`、`Cells`、`cells`、`FREE_AXIS`），
+`trace_kernel` / `trace_calls` 的签名与记录结果不变，私有的 `Write.Whole` 改名 `AnyOf` 只为把 `Whole` 让给公开面；
+按 Cargo 的 0.x 规则（§6.3「0.x 与兼容类」）是同一兼容类内的补丁版本，依赖 0.5.0 的不必改任何东西。`std/gpu`
+只加名字，`launch` 不变，没有迁移。
+
+**不做的（理由）：**
+
+- `Out` 位只收能力写、`load_cell` / `load_at` / `store_cell`：D-4，体要用格子才有意义，随批迁移。
+- 迁 `kernels.dawn` 的 191 个注册行到 `traceN`：与 C3、C3′、D-4、D-7 同批，只迁一次（修订二）。
+- 单独的 `blocks_for`：Out 的格子已经给出网格，再加一个手算的函数就是第二个答案。
+- 由发射时的张量推几何：裁决不做；动态维的长度由网格定义，发射只**核对**张量够不够长。
+- `Accum` 角色（D-8）、发射期逐块枚举掩码依赖写（D-6）：视需求。
+- `trace6` 以上：191 个 kernel 里没有六参数以上的注册；`trace_kernel` 留着。
+- Out 的 `along` 非恒等（转置写）：Out 的格子就是网格，转置写今天是 `store_view` 的 `dim_map`，不经标记。
+- 没有格子的参数（`In(.., Whole)`、`Shared`）的尺寸检查：没有几何可比。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -4388,6 +4603,7 @@ global 无主。用 `regions`、`nested`、`scanned` 等测试 kernel，加上�
 | **T17 `loop` 内 `return`、`ftoi` 饱和、`ftof` 舍入表与 `rmw.xchg`**（已落地，13.4 覆盖刀的第二把，§6.20） | 「13.4 给旧操作码的三处新形状在本机 3080 上各有一个与独立宿主参考逐位相同的 kernel：block 在循环中途结束整个 kernel，第几轮、走哪个出口由设备自己的 store 说出来；`saturating` 改变的是哪几格，是量出来的（本机只有 NaN 格）；`ftof` 每一对格式收哪几种舍入，是 360 格逐格问过汇编器的；而 `xchg` 这个从 13.1 起就能拼、一直没有 kernel 要的模式有了第一个客户」（今天写不出：`return` 只能在 entry 与 `if` 里，`ftoi` 的 flags 字恒为 0，`ftof` 只写得出默认模式，`rmw.xchg` 是三本账里最后一行 `deferred`） | **零新 opcode**。`dev.dawn`：`t_return_if` 与 `d_return_if`、`float_to_int_sat`、`float_to_float_zero` / `_down` / `_up` / `_away`；`prog.dawn`：`Return` 与 `return_passes`（`for` / 归约 / 扫描里拒），`ftof_mode` / `ftof_modes` / `check_ftof`（13.4 的表）；`lower.dawn`：`Return` 降成 `Ret`，`yielded` 认 `Ret`；`bytecode.dawn`：`ROUND_NEAREST_AWAY`、`FTOI_FLAG_SATURATING`、`ftoi_flag_word`、`ftof_rounding_of`；`render.dawn` 两处拼法。`std/narrow`：`round_binary_away`、`round_tf32_away`（内联测试）；`packages/tileref`：`loop_return_ref`、`attr_sat_ref`、`attr_ftof_ref`、`attr_xchg_ref`。kernel 四个：`loop_return` 进 `loop_diff`（4 → 5），`attr_sat` / `attr_ftof` / `attr_xchg` 进 `attr_diff`（8 → 11）。三本账：`return` / `ftof` 升层 3，三个属性取值改 `implemented`，`rounding.zero` 升层 3，`no-client-kernel` 退休；`tile.yml` 分到第七片 | 层 0/1 四个新 golden、`FUNC GLOBAL` 四个，`tileiras` 一次通过（sm_86）；层 2 本机五个 loop kernel、十一个属性 kernel 全 `identical:exact`（`attr_approx` 照旧容差），`loop_return` 的出口 `74r,100b,1r,100r` 与语料自数逐字相同，十个新 probe 计数都钉在零以上；`ftof` 表 360 / 360 与 verifier 一致；`check.py --self-test` 绿；不分片全量 268 项 3356 s 绿，`tile.yml` 分到七片，规划值 945 → 826 s，path-total 6580 → 6692 s | 层 1 两条：`loop-return-as-break`（零操作数 `break` 与携带三个值的 loop 类型不符）、`ftof-zero-as-nearest-away`（f64 到 f32 不收 `nearest_away`）。层 2 四条：`loop-return-dropped`（只有 `loop_return` 红）、`ftoi-saturating-bit-dropped`（`attr_sat` 的 NaN 格红，`nan_zero=0`）、`ftof-away-as-nearest-even`（`attr_ftof` 红，`tf32_away=0`）、`rmw-xchg-as-add`（`attr_xchg` 红）。`loop-break-condition-inverted` 的红集加上 `loop_return` | 2（实报 1） |
 | **C1 + D-1 记录期形状检查与块内 fork 不相交**（已落地，cuTile 借鉴第一刀，§6.21） | 「一个逐元素操作的操作数形状与它声明的不符，在记录期就被拒，消息带 kernel 名、操作序号与操作名；`d_fork2` 的两支写同一元素也在记录期被拒」 | `packages/tileir/src/prog.dawn` 的记录 handler（句柄表、逐元素检查、`t_tok_join` 的 fork 检查） | 191 个 golden 逐字节不动；包测试五项新增 | 四条：去格式比较、去形状比较、去 fork 检查、消息去序号 | 1 |
 | **C1′ view 补行、`t_shape_of`、mma 的 K**（已落地，§6.22） | 「经 view 读出的值的形状不符在记录期被拒；任何有行的句柄都能问出它的格式与形状；mma 两个操作数的 K 不一致在记录期被拒」 | `packages/tileir/src/prog.dawn`（`Held.what`、view 与 `load_view` 的行、`t_shape_of` 臂、`check_k`）、`dev.dawn`（`Dev` 加一条、三个测试 handler 各一臂）、`tileir` 0.4.0 | 191 个 golden 逐字节不动；包测试三项新增 | 四条：`load_view` 不记行、`t_shape_of` 不拒、去 K 检查、view 当 tile | 0.5 |
+| **C2 + D-3 + D-5 参数标记：角色与几何、`trace1`…`trace5`、类型化入口**（已落地，§6.24） | 「一个 kernel 的参数格式只写一次，写错是编译错误；写进 In 参数在记录期被拒；Out 格子推出网格，两个 Out 切出两个网格、In 跟随的轴块数不符在记录期被拒；发射时 Out/Shared 与别的参数同一缓冲、网格与格子不符、张量短于格子都在问设备之前被拒」 | `packages/tileir/src/prog.dawn`（`Cells`、`Arg`、`trace1`…`trace5`、记录 handler 的角色与 `aims`）、`std/gpu.dawn`（`EntryArg`、`Entry1`…`Entry5`、`entry_grid`、`launch_entry1`…`launch_entry5`）、`tileir` 0.5.1 | 191 个 golden 逐字节不动；包测试六项、std 测试两项新增；补测 tile 1024 > extent 1000 在 sm_86 上成立 | 十四条：tileir 四个、std/gpu 六个变异体，类型层四条编译错误 | 1 |
 
 ## 8. 风险
 
