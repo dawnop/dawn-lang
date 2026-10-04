@@ -9,6 +9,9 @@ exhaustive pattern matching, and effects written into the type signature.
   included), signature help inside a call's argument list, go to definition,
   and the document outline, from the language server built into the Dawn
   compiler.
+- Semantic highlighting from the same server: names are coloured by what they
+  resolve to (function, constructor, constant, trait or effect, parameter),
+  not by their case, and `var` bindings are underlined.
 
 The front end does full error recovery, so a file that does not parse still
 reports all of its errors instead of stopping at the first one.
@@ -38,8 +41,9 @@ here, with the caveat that it is the C backend and refuses `use java`.
 The extension source is in
 [`editors/vscode`](https://github.com/dawnop/dawn-lang/tree/main/editors/vscode).
 `npm ci && npm test` runs the TextMate scope contract, which asserts the grammar
-against a corpus using VS Code's own TextMate engine; `npm run package` produces
-the `.vsix`.
+against a corpus using VS Code's own TextMate engine, and the semantic token
+contract, which checks the manifest's declarations against the server's legend;
+`npm run package` produces the `.vsix`.
 
 ## License
 
