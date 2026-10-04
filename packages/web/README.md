@@ -2,381 +2,169 @@
 
 A small HTTP/1.1 framework over `jdk.httpserver`: routes are data, handlers are `fn(Request) -> Result[Response, HttpError] !io`, middleware are handler transformers.
 
-nginx (or similar) terminates TLS in front.
-
-## Path handling (WEB-03)
-
-Routing runs on the **raw** request path (`Request.raw_path`): it is split on
-`/` first, then each segment is percent-decoded on its own. An encoded slash
-(`%2F`) therefore stays inside its segment and never creates a route
-boundary — `/files/a%2Fb` reaches `/files/{name}` with `name = "a/b"`. The
-decoded `Request.path` is kept for logs and display only.
-
-| Case | Policy |
-|---|---|
-| Dot segments (`/a/../b`, `/a/./b`, encoded spellings like `%2e%2e`) | Rejected with `400` in the server, before routing, on every path — 404 paths included. The framework never normalizes a path; normalizing in front of a router is a classic traversal-bypass source. |
-| Duplicate slash (`/a//b`) | The empty segment is kept: `/a//b` has three segments and does not match `/a/b`. A capture matches an empty segment; a literal never does. Merging slashes is path rewriting — the application's business. |
-| Trailing slash (`/a/`) | Tolerated, as the router always has: it matches the same route as `/a`. |
-
-Captures are held as the **segments** they matched (`Request.params` is
-`Map[String, List[String]]`): one for a `{name}` capture, however many remain
-for a trailing `{name*}`. Read them with `param` and `param_segs`.
-
-Until 3.0 a tail capture was handed over as `join(segments, "/")`, which put
-back exactly the ambiguity the raw-path split removes: a `/` that arrived
-percent-encoded inside one segment became a separator again, so a WebDAV
-handler could not tell `/dav/a%2Fb/c` from `/dav/a/b/c` and resolved both to the
-same file. `param` refuses to read a tail capture (500, naming `param_segs`)
-rather than silently picking one segment; a caller that does want a joined path
-joins them itself, and thereby says so.
-
-## Request headers (WEB-04)
-
-`Request.headers` is a lowercase-keyed multimap (`Map[String, List[String]]`):
-every value of a repeated name (`Cookie`, `Forwarded`, ...) survives in wire
-order. `header(req, name)` returns the first value — the one the old
-single-value map held — and `headers_all(req, name)` returns them all. Both
-lowercase the name they are given, and the server lowercases keys when it
-builds the map; that pair of lowercasings is the whole case-insensitivity
-contract.
-
-## Query strings and form bodies (3.0)
-
-`Request.query` is a multimap (`Map[String, List[String]]`), the same shape as
-`Request.headers`, and so is what `parse_form` returns. A query string is a list
-of pairs rather than a mapping, and `?tag=a&tag=b` is how a client spells a set;
-`<select multiple>` submits the same way. Both used to be
-`Map[String, String]`, where the last value silently won and nothing recorded
-that anything had been dropped.
-
-| read | one value | all of them |
-|---|---|---|
-| query | `query(req, name)` | `query_all(req, name)` |
-| form | `form_value(f, name)` | `form_all(f, name)` |
-| header | `header(req, name)` | `headers_all(req, name)` |
-
-The single-value readers return the **first** value, which is what the
-single-value map effectively held for a caller that never repeats a name.
-`query_int_bounded` reads through `query`, so it is unaffected.
-
-`Request.params` is a list for a different reason (see "Path handling" above):
-it holds the *segments* a capture matched, not repeated values. A duplicate
-capture name is a route-table error that `validate_routes` refuses at startup,
-so no path parameter ever has two values.
-
-## Request body (4.0)
-
-`Request.body` is the wire bytes (`Bytes`), exactly as they arrived. The UTF-8
-view is an accessor:
-
 ```dawn
-let source = body_text(req)?   # 400 on a malformed body, naming the byte offset
+use web/types.{Request, Response, HttpError, text, param}
+use web/router.{route_get}
+use web/server.{serve_app}
+use web/middleware.{with_logging}
+
+fn hello(req: Request) -> Result[Response, HttpError] !io = {
+  let name = param(req, "name")?
+  Ok(text(200, "hello, ${name}\n"))
+}
+
+pub fn main() -> Unit !io =
+  serve_app(8001, [route_get("/hello/{name}", hello)], [with_logging])
 ```
 
-Binary handlers (multipart upload) parse `req.body` directly; routes tagged
-`stream-body` still get a temp-file path in `body_file` and an empty `body`.
+TLS is terminated in front of it (nginx or similar).
 
-Until 4.0 a `body: String` field sat next to the bytes (then named `raw`),
-filled by an unconditional `decode_utf8_lossy` every request paid for, upload
-routes included. Lossy is the wrong default at a trust boundary: a malformed
-body reached the handler silently rewritten, and a `U+FFFD` in it was
-indistinguishable from one the client sent. Refusing with `400` is what axum
-and actix-web do on the same input; a caller that truly wants the lossy view
-still has `bytes.decode_utf8_lossy(req.body)`, one line, stated at the call
-site.
+## Paths
 
-## Responses (5.0)
+Routing runs on the raw request path: it is split on `/` first and each
+segment is then percent-decoded on its own, so `/files/a%2Fb` reaches
+`/files/{name}` with `name = "a/b"`. `Request.path` is the decoded path, for
+logs only.
 
-`Response` is opaque. It comes from the constructors (`text`, `json_response`,
-`json_ok`, `raw`, `binary`, `streaming`, `redirect`,
-`attachment`, `error_response`) and from `with_header`, and it is read with
-`response_status`, `response_content_type`, `response_headers` and
-`response_body`. There is no literal, so there is no response that skipped the
-checks the constructors make, and those checks are the only ones: the server
-writes what it is given. (Until 5.0 a record literal could build anything, and
-3.1 re-checked headers at the write boundary to catch it.)
-
-What a constructor refuses, it refuses with a panic, which the per-request
-isolation renders as a `500`, the same verdict `with_header` has always given a
-header the program built out of its own strings:
-
-| Check | Rule |
+| Path | What happens |
 |---|---|
-| status | `200..599`. jdk.httpserver sends any number as written (`99`, `600`, `-5`), and a final `100` leaves the client waiting for a response that never comes. There is no `1xx` here: nothing in this framework sends an interim response. |
-| content type | A legal header value, like any other: `raw`/`binary`/`streaming` pass it straight to `Content-Type`. |
-| header values | ASCII only: SP, HTAB and `!` to `~` (6.1). Encode anything else first: percent-encode a `Location`, and give a filename to `attachment`, which writes RFC 5987 `filename*` itself. Applies to `with_header`, `redirect`, `error_response`'s headers and every content type. |
-| `Transfer-Encoding` | Never accepted from a handler. The body kind decides the framing; a handler's copy used to go out next to the JDK's own `Content-length`, which RFC 9112 §6.1 forbids. |
-| `Content-Length` | A decimal byte count, once, equal to the body's length when the body has content. Any count is accepted on a body with no content, because that is how a `HEAD` answer states the length of what it does not carry. Never on a stream of unknown length. |
+| A dot segment (`/a/../b`, `/a/./b`, `%2e%2e`) | `400` before routing, on every path. Nothing is normalized. |
+| A doubled slash (`/a//b`) | Kept: three segments, which do not match `/a/b`. A capture matches an empty segment; a literal does not. |
+| A trailing slash (`/a/`) | Matches the same route as `/a`. |
 
-An `HttpError` stays a plain record. Its status is checked where it is rendered:
-out of range, it becomes the neutral `500` (`ErrorFormat.internal_message`),
-with its headers kept so a CORS stamp still reaches the browser.
+`param(req, name)` reads a `{name}` capture. A trailing `{name*}` capture is
+a list of segments and is read with `param_segs`; `param` refuses it with a
+`500`, so a caller that wants one string joins the segments itself.
 
-The status check is a range, not a closed enumeration. `docs/audit/web-api-v2-design.md`
-(section 4) turned down a `Method`/`Status` type because a closed set needs an
-`Other(String)` escape hatch, which is a `String` with extra steps. That argument
-does not apply here: the status is still an `Int`, any code in `200..599` is
-accepted, and what is refused was never valid HTTP. Route methods get the same
-treatment at startup: `validate_routes` refuses a method that is not an
-uppercase token (`route_method_of("get", ...)` used to be accepted and then never
-matched anything, since methods are compared exactly).
+## Requests
 
-Checked `HeaderName`/`HeaderValue` types are deliberately absent. With `Response`
-opaque, `with_header` is the one way a header gets in, and it already checks
-the name, the value and the framing rules; a second type would state the same
-invariant twice. WAI, Plug, http4s and Ktor draw the line the same way.
+`Request.headers`, `Request.query` and `parse_form`'s result are multimaps
+(`Map[String, List[String]]`) that keep every repeated value in wire order.
+Header names are lowercased on both sides.
 
-### Streams of a known length
+| read | the first value | all of them |
+|---|---|---|
+| header | `header(req, name)` | `headers_all(req, name)` |
+| query | `query(req, name)` | `query_all(req, name)` |
+| form | `form_value(f, name)` | `form_all(f, name)` |
 
-`streaming(status, content_type, stream)` is chunked: the length is unknown,
-and so an upstream that ends early with a clean EOF looks exactly like one that
-delivered everything. When the length is known (an object store's
-`Content-Length`), `streaming(status, content_type, stream, length: Some(n))`
-sends it as an exact `Content-Length` (`streaming_sized` until 6.0). The server counts what it pumps; a short
-upstream is logged as a truncation, and the connection ends before the promised
-length, so the client can tell as well.
+`Request.body` is the bytes as they arrived. `body_text(req)?` is the UTF-8
+view, and a malformed body is a `400` naming the byte offset. A route tagged
+`stream-body` gets its body spilled to a temp file in `body_file` and an
+empty `body`.
 
-## Server lifecycle and limits (5.0)
+## Body ceilings and guards
 
-`start` returns an opaque `ServerHandle`: `join` blocks on it, `stop` ends it,
-`handle_port` reads the port it bound (the point of `port: 0`). It used to be a
-public record, which let a caller hand `stop` an executor it never owned.
-
-A body ceiling is a positive byte count. `start` panics on a non-positive
-`ServerConfig.max_body` before binding, and `with_body_limit` panics when it is
-built with one. Until 5.0, `0` meant unbounded, which made the value most likely
-to be a slip the one that switched the guard off. Routes that legitimately take
-more say so with a tag: `raw-body` (bounded by nginx in front) or `stream-body`
-(spilled to disk, never held in memory). `serve_app_bounded` is gone; set
-`max_body` in the `ServerConfig` passed to `serve_app_with`.
-
-The router's dispatch machinery (`dispatch_segs`, `validate_routes`,
-`route_meta`, `Dispatch`) is package-private since 5.0: `start` is what runs
-it.
-
-## Per-route body ceiling and pre-body guard (5.1)
-
-Two typed fields on `Route`, set with builders in the style of `tagged`:
+`ServerConfig.max_body` is the server's ceiling, a positive byte count
+(`DEFAULT_MAX_BODY` unless set). A route can change it or check a request
+before any of the body is read:
 
 ```dawn
+let tags = ["raw-body", "no-cors", "stream-body"]
 let put = guarded(
-  body_limit(tagged(route_put("/dav/{rest*}", put_file), ["raw-body", "no-cors", "stream-body"]), 4294967296),
+  body_limit(tagged(route_put("/dav/{rest*}", put_file), tags), 4294967296),
   check_credentials,
 )
 ```
 
-`guarded(route, g)` runs `g: fn(Request) -> Result[Unit, HttpError] !io` (the
-`Guard` alias) before the body is read, on every route whatever its body mode.
-The guard sees the Request without its body: method, path, captures, query,
-headers and route metadata are all there. `Err(e)` is answered as `e`, through
-the middleware chain like the early `400` and `413`, and no byte of the body is
-read and no temp file is made. A guard that panics is the application's `500`.
+- `body_limit(route, n)` replaces `max_body` for that route, up or down. It
+  bounds a `raw-body` route, which is otherwise unbounded, and on a
+  `stream-body` route it refuses an over-long `Content-Length` before the temp
+  file exists and stops a spill that counts past it. Over the ceiling is a
+  `413`.
+- `guarded(route, g)` runs `g: fn(Request) -> Result[Unit, HttpError] !io`
+  before the body is read. The request it sees has everything but the body;
+  an `Err(e)` is answered as `e` and nothing is read or written to disk.
+- Tags: `raw-body` (no ceiling unless `body_limit` sets one), `stream-body`
+  (spilled to disk), `no-cors` (left alone by `with_cors`).
 
-`body_limit(route, n)` is the route's own ceiling, a positive byte count
-(anything else panics, as `max_body` does at `start`). On a route read into
-memory it replaces the server's `max_body`, upward or downward. On a `raw-body`
-route it bounds what is otherwise unbounded; without it a `raw-body` route is
-unbounded as before. On a `stream-body` route a `Content-Length` over it is
-refused before the temp file exists, and the spill counts as it writes, stops
-before the chunk that crosses the ceiling, deletes the partial file and answers
-`413`. `RouteMeta.body_limit` carries the value to middleware; the guard is a
-function and stays out of `RouteMeta`.
+## Responses
 
-Until 5.1 a `stream-body` route spilled the whole body to disk before any
-handler code ran, with no ceiling of its own. A handler that checked
-credentials did so after the upload was already written, so an anonymous
-client could fill the temp directory one `401` at a time, and only a reverse
-proxy in front bounded the size. Both shapes are fields rather than tags on
-purpose: a `max-body:<bytes>` tag is a number inside a string that every reader
-has to parse and every typo silently ignores, and a guard is a function, which
-no tag can carry.
+`Response` is opaque. Build one with `text`, `json_response`, `json_ok`,
+`raw`, `binary`, `streaming`, `redirect`, `attachment` or `error_response`,
+add headers with `with_header`, and read it back with `response_status`,
+`response_content_type`, `response_headers` and `response_body`. A
+constructor refuses what HTTP cannot carry with a panic, which the server
+answers as a `500`:
 
-## CORS and OPTIONS (2.1)
+| Check | Rule |
+|---|---|
+| status | `200..599` |
+| header names | an HTTP token |
+| header values and content types | ASCII only: SP, HTAB and `!` to `~` |
+| `Transfer-Encoding` | never set by a handler; the body kind decides the framing |
+| `Content-Length` | once, and equal to the body's length when the body has content (a `HEAD` answer may state any length); never on a stream of unknown length |
 
-`with_cors` answers a **preflight** itself and lets everything else through to
-the routes. A preflight is an `OPTIONS` carrying *both* `Origin` and
-`Access-Control-Request-Method` — the pair the Fetch standard says a browser
-sends before a non-simple cross-origin request. Either header alone names
-something else: a bare `OPTIONS` is a client asking what the server supports (a
-WebDAV client reading `DAV`/`Allow`, `curl -X OPTIONS`), and `Origin` without
-the request-method header is an ordinary cross-origin `OPTIONS`. Both reach the
-application's own `OPTIONS` route and are stamped like any other response.
-
-Until 2.1 every untagged `OPTIONS` was answered with a `204` and the handler was
-never called, so an application's `OPTIONS` route was unreachable unless it
-opted out of CORS entirely (the `no-cors` tag, which also drops the
-`Access-Control-*` stamping).
-
-The stamp covers the `Err` branch as well: an `HttpError` gets the same headers,
-and `error_response` renders them onto the response. Until 2.2 the error
-branch was written `next(req)?`, which handed the `Err` past the stamp — a
-cross-origin `4xx`/`5xx` arrived with no `Access-Control-*` at all and the
-browser refused to let the page read the error body.
-
-Since 3.0 it covers the server's own two early refusals too: the `400` for a
-dot segment and the `413` for an oversized body. Both are decided before the
-body is read, and used to be rendered before the middleware chain on the grounds
-that there was no `Request` yet. There is: everything a `Request` holds apart
-from the body comes off the request line and the headers. What the middleware
-sees on those paths is honest but partial. `body` is empty, because
-not reading the body is the whole point of refusing this early;
-`with_body_limit`, which reads `body`, passes. The dot-segment check runs after
-dispatch so that its `400` carries the matched route's tags: a WebDAV path is
-`no-cors` whether or not it contains a dot segment.
-
-## Response headers (3.0)
-
-A field value is one line by definition (RFC 9110 §5.5) and a field name is a
-token, so neither a `CR`/`LF` nor a `:` can travel inside one. `with_header`
-**refuses** what cannot travel: an illegal name or value panics, which the
-per-request isolation renders as a `500`.
-
-Until 3.0 it deleted the offending characters instead. That closed the
-response-splitting injection and opened a quieter hole in its place:
-`?next=/a%0d%0aX:%201` came back as `Location: /aX: 1`, a redirect to a URL the
-application never named, with no error anywhere and no way for the caller to
-learn that the value it handed over is not the value that went on the wire.
-`pub fn header_value(v) -> String` is gone; `valid_header_name` and
-`valid_header_value` are the predicates it should have been.
-
-For a name or value derived from request input there is `try_with_header` /
-`try_redirect`, which answer `400` instead of panicking:
+For a header value built from request input, `try_with_header` and
+`try_redirect` answer `400` instead of panicking. Non-ASCII text has to be
+encoded first:
 
 ```dawn
-let r = try_redirect(302, next_from_query)?
-```
-
-`attachment` needs neither: `filename=` is escaped into a quoted-string and
-`filename*=` is percent-encoded per RFC 5987, so both parameters are legal by
-construction whatever the filename is.
-
-The refusal names what it refused, through `escape_field` (3.2): a value held
-back for carrying a `CR` must not carry it into the log line the panic becomes,
-or into the `400` body. What that escapes is exactly what `valid_header_value`
-refuses, so `SP` and `HTAB` come through untouched.
-
-## Header values are ASCII (6.1)
-
-`valid_header_value`, and so every constructor that sets a header, accepts
-SP, HTAB and visible ASCII and nothing else. Until 6.1 it accepted any
-character from SP up, and jdk.httpserver writes a header by keeping the low
-byte of each Java `char`: a character above U+00FF reached the wire as some
-other byte, and U+010A, U+010D among them, as an LF or a CR. A value that
-passed every check could end its own header line and start another one.
-U+0080..U+00FF did arrive as the same byte, but as Latin-1, which is not
-what a Dawn `String` holding them means; RFC 9110 §5.5 keeps those bytes only
-as obs-text. Non-ASCII text is the caller's to encode:
-
-```dawn
-# a Location: percent-encode the path (RFC 3986)
+# a Location: percent-encode the path
 let r = try_redirect(302, "/files/caf%C3%A9")?
 # a download name: attachment writes filename= and filename*= itself
 let d = attachment("text/plain", "\u{4e2d}\u{6587}.txt", body)
 ```
 
-`escape_field` escapes exactly what `valid_header_value` refuses, so it now
-writes a non-ASCII character as `\u{...}` as well.
+`streaming(status, content_type, stream)` is chunked. With
+`length: Some(n)` it sends `Content-Length: n` instead, and a stream that ends
+short is logged and the connection is closed before `n`, so the client can
+tell.
 
-Why a minor and not a major: the signatures are the same, and every value
-still accepted reaches the wire as it was written. What is refused now never
-did, so a program that passed one was already sending something it did not
-mean. 3.1 and 3.2 narrowed what a response may carry the same way, as minors.
-A program that relied on Latin-1 header bytes has to encode them instead.
+An `HttpError` whose status is outside `200..599` is answered as the neutral
+`500`, keeping its headers.
 
-6.1 also closes the exchange on a JVM `Error` (an `OutOfMemoryError`, a
-`StackOverflowError`), which `catch_panic` does not catch: `handle` brackets
-the whole exchange, answers the neutral `500` when nothing was sent yet, and
-logs one `request failed: <error>` line instead of the thread's stack trace.
-Before, such a request got no response and its exchange stayed open.
+## Server
 
-## Error wording (2.1, 5.2)
+`start(cfg, routes, middleware)` binds and answers a `ServerHandle`: `join`
+waits on it, `stop` ends it, `handle_port` reads the bound port (for
+`port: 0`). `serve_app(port, routes, middleware)` and `serve_app_with(cfg,
+routes, middleware)` start and join in one call. `start` refuses a route
+table it cannot dispatch (a method that is not an uppercase token, a bad
+pattern, a route an earlier one shadows) and a `max_body` that is not
+positive, before it binds. A handler that panics, or fails with a JVM
+`Error`, gets a `500` if nothing was sent yet, and the exchange is always
+closed.
 
-Every error body the framework writes on its own is worded by one value,
-`ErrorFormat`, defaulting to neutral English:
+## CORS
+
+`with_cors` answers a preflight itself: an `OPTIONS` that carries both
+`Origin` and `Access-Control-Request-Method`. Any other `OPTIONS` reaches the
+application's own route. Every other response is stamped with the
+`Access-Control-*` headers, error responses and the server's own early `400`
+and `413` included, unless the route is tagged `no-cors`.
+
+## Error wording
+
+Every error body the framework writes itself is worded by an `ErrorFormat`
+(`default_errors()` is neutral English):
 
 | field | used for | default |
 |---|---|---|
 | `detail_key` | the JSON key of every error body | `{"error": "..."}` |
-| `internal_message` | the `500` for a failure of its own (a handler panic, a request body it could not spill to disk) | `"internal server error"` |
+| `internal_message` | its own `500` | `"internal server error"` |
 | `param_separator` | between a parameter's name and the complaint in `query_int_bounded`'s `422` | `"size: Input should be ..."` |
-| `body_too_large` | the `413` for a request body over its ceiling, given that ceiling in bytes | `"request body exceeds N bytes"` |
-| `not_found` | the `404` for a path no route matches | `"Not Found"` |
-| `method_not_allowed` | the `405` for a path matched under another method | `"Method Not Allowed"` |
-| `dot_segment` | the `400` for a path with a `.` or `..` segment | `"path contains a dot segment"` |
+| `body_too_large` | the `413`, given the ceiling in bytes | `"request body exceeds N bytes"` |
+| `not_found` | the `404` | `"Not Found"` |
+| `method_not_allowed` | the `405` | `"Method Not Allowed"` |
+| `dot_segment` | the `400` for a dot segment | `"path contains a dot segment"` |
 
-The `413` wording applies wherever the ceiling is enforced: an in-memory body
-refused on its `Content-Length` or found too long while reading, a
-`stream-body` route refused on its `Content-Length`, and a spill that counted
-past the ceiling.
-
-An application states the fields it changes and takes the rest from
-`default_errors()`:
+Set the fields to change and spread the rest:
 
 ```dawn
 let site = ErrorFormat {
   ..default_errors(),
   detail_key: "detail",
-  internal_message: "...",
-  param_separator: "：",
   body_too_large: n => "upload limit is ${n} bytes",
-  not_found: "...",
 }
-serve_app_with(ServerConfig { host: "127.0.0.1", port: 8001, max_body: DEFAULT_MAX_BODY, errors: site },
-  routes, middleware)
+let cfg = ServerConfig {
+  host: "127.0.0.1", port: 8001, max_body: DEFAULT_MAX_BODY, errors: site,
+}
+serve_app_with(cfg, routes, middleware)
 ```
 
-and passes the same value as `fmt:` to `error_response` / `query_int_bounded`
-where it renders errors itself. Since 5.2 `ErrorFormat` no longer derives
-`Show`, because a function field cannot be printed. Code that calls
-`default_errors()` or builds the value with `..default_errors()` is unaffected
-by 5.2; a record literal that names every field has to add the four new ones.
+and pass the same value as `fmt:` where the application renders errors
+itself: `error_response(e, fmt: site)`, `query_int_bounded(req, "page", 1, 1,
+-1, fmt: site)`.
 
-Before 2.1 the first three strings were hardcoded to what one consumer
-(dawnop-site, whose frontend was written against FastAPI) needed, including a
-Chinese `500` message and pydantic's fullwidth colon, and `ServerConfig` had no
-`errors` field. Before 5.2 the other four were fixed English strings in the
-server, so an application that worded its own errors in another language still
-answered in English for an oversized body, an unknown path, a wrong method or
-a dot segment, sometimes on the same route as its own `401`.
-
-## Defaulted parameters (6.0)
-
-Three pairs of functions that differed by one argument are one function each,
-with that argument defaulted and last:
-
-| 5.x | 6.0 |
-|---|---|
-| `error_response(e)` / `error_response_with(fmt, e)` | `error_response(e, fmt: ErrorFormat = default_errors())` |
-| `query_int_bounded(req, name, default, lo, hi)` / `query_int_bounded_with(fmt, req, name, default, lo, hi)` | `query_int_bounded(req, name, default, lo, hi, fmt: ErrorFormat = default_errors())` |
-| `streaming(status, ct, stream)` / `streaming_sized(status, ct, stream, n)` | `streaming(status, ct, stream, length: Option[Int] = None)` |
-
-`fmt` moved from first to last on purpose: a defaulted parameter goes after
-the ones every call passes, so that leaving it out drops a suffix rather than
-shifting the rest. A call that configured the wording now names it. A negative
-`length: Some(n)` still panics; `None` is the chunked stream it always was.
-`error_response_with`, `query_int_bounded_with` and `streaming_sized` are gone,
-with no aliases. The package is `web6 / 6.0.0`; a consumer keeps its
-`use web/...` lines through its `web = ...` alias.
-
-Migrating:
-
-```dawn
-# 5.x
-let page = query_int_bounded_with(site_errors(), req, "page", 1, 1, -1)?
-let r = error_response_with(site_errors(), e)
-let s = streaming_sized(200, ct, stream, n)
-# 6.0
-let page = query_int_bounded(req, "page", 1, 1, -1, fmt: site_errors())?
-let r = error_response(e, fmt: site_errors())
-let s = streaming(200, ct, stream, length: Some(n))
-```
-
-Calls without a format (`error_response(e)`, `query_int_bounded(req, ...)`,
-`streaming(status, ct, stream)`) are unchanged.
-
-Not in 6.0: `serve_app` / `serve_app_with` stay two functions, because a
-defaulted `cfg` would have to read `port`, an earlier parameter, which defaults
-cannot do yet; `json_ok(j)` stays, since the value it fixes (`200`) is the
-*first* argument of `json_response`; and the `hi < 0` "no upper bound" sentinel
-of `query_int_bounded` is still an `Int`, since replacing it with an
-`Option[Int]` is a separate decision.
+Changes between versions, with migration notes: [CHANGELOG.md](CHANGELOG.md).

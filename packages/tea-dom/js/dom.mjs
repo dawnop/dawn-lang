@@ -245,7 +245,7 @@ const OPS = {
   // Never a removal and a rebuild. `insertBefore` on a node that is already in
   // the document moves it, and moving is the whole reason this op exists.
   // `moveBefore` preserves more state still; it was evaluated and deferred, and
-  // the README lists what would reopen it.
+  // docs/package-design.md section 9 lists what would reopen it.
   //
   // The reference child is read off the list as it is *now*, with the moving
   // node still in it, while `to` counts positions in the list as it will be.

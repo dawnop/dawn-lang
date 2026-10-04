@@ -2,149 +2,10 @@
 
 A pure Dawn generator of CUDA Tile IR that records a kernel body written against the `Dev` effect and emits it as `cuda_tile` text or as bytecode `tileiras` can assemble.
 
-A kernel body is an ordinary Dawn function whose only effect is `Dev`. Running
-it once under a recording handler yields a `TileProg` (an ADT in SSA form),
-which is lowered to a linear instruction table and then rendered as
-`cuda_tile` dialect text or encoded as `tileiras` bytecode. The design and the
-order of the work are in
-[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §5 and §6
-(in Chinese); this package is knives 2 and 3 there. It is not in std: it
-needs no intrinsic, and the bytecode version has to be pinned in a package
-constant.
-
-The host side (buffers, launch) is `std/gpu`, which knows kernel names and
-bytecode and does not know `TileProg`. The format markers are `std/gpu`'s
-(`F64`, `BF16` and so on); this package does not declare a second set. A bf16
-kernel is written the same way as an f64 one (`Param[BF16]`,
-`addf(BF16, ...)`), and the dtype name `"bf16"` runs through recording,
-lowering, rendering (`tile<128xbf16>`) and bytecode (type tag 6). By the
-double-rounding theorem, the device's `addf ... rounding<nearest_even>` on
-bf16 answers what `std/narrow.round_bf16` of the f64 sum answers;
-`scripts/tile-golden`'s `vadd_bf16` pins the text and the bytes, and
-`scripts/tile-gpu-diff` checks the device against the fake device.
-
-## Modules
-
-| Module | Contents |
-|------|------|
-| `dev` | `pub effect Dev` (handle-level, monomorphic device operations), the handle types (`Tile[D]`, `Param[D]`, `Idx`, `Scalar[D]`, `Ptrs[D]`, the view types and others, all opaque, with `D` a phantom format parameter) and the typed functions over them; the groups are below |
-| `prog` | `TileOp` and `TileProg`, the recorded ADT; `trace_kernel(name, params, body, hints = [])` is the recording handler, with a region stack; `trace_calls` is the same handler answering, beside the program, a side table `List[Call]`: the tree of calls the kernel made, each with the operations it issued; `trace1` to `trace5` record from one marker per parameter (`In`, `Out`, `Shared`, with `Cells`) and answer a typed `std/gpu` entry beside the program; `MAX_LOOP_DEPTH`, `MAX_HANDLES` |
-| `lower` | `lower(prog) -> Kernel`: the linear instruction table `Instr` (a region operation's body is a nested table), values numbered densely from 0, operands `Arg(pos)` / `Val(id)`, types `Ty`; the pointer ladders, deduplication, SSA renumbering and region scoping all live here; `lower_spans` also answers which operation each instruction came from (`Owner`, nested as the instructions are) |
-| `render` | `render(prog) -> String`: one `cuda_tile.module @m` holding the module's globals and one `entry @<name>`; one line per `Instr`, a region as a header line, a body indented two spaces, and a closing brace; `line_map(prog, calls)` cuts that text into the lines each call of the side table's tree is answerable for |
-| `bytecode` | `encode(prog) -> Bytes`: `cuda-tile` bytecode, regions included; `BYTECODE_MAJOR` / `BYTECODE_MINOR` pin the version in the header, and `bytecode_version()` answers `"13.4"` |
-
-The full public surface (signatures and doc comments) is whatever
-`./bin/dawn doc packages/tileir` prints, one JSON document for the five
-modules. This README does not list every name: the last time a table here did,
-`Dev` had a dozen operations, and it grew past sixty while the table stayed
-put.
-
-### The groups of `dev`
-
-The table puts every `Dev` operation in a group and names some of the typed
-functions of each (a kernel body calls those, not the `t_*` operations). It
-was generated from `effects[0].ops` of `./bin/dawn doc packages/tileir`, and a
-script checked that the groups cover every operation exactly once (78
-operations on 2026-10-04, after the batch's PR-1 added `t_cell_view`,
-`t_cell_fill`, `t_reshape` and `t_broadcast`). When an operation is added,
-its group has to follow; `dawn doc` is the authority on numbers and names.
-
-| Group | `Dev` operations | Typed functions (examples) |
-|----|-----------|--------------------|
-| Grid and index | `t_block_id` `t_num_blocks` `t_idx_const` `t_idx_add` `t_idx_mul` | `block_id` `num_blocks` `idx_const` `idx_add` `idx_mul` `idx_lt` |
-| Memory and pointers | `t_load` `t_store` `t_gather` `t_scatter` `t_atomic_rmw` `t_atomic_cas` `t_ptrs` `t_ptr_offset` `t_ptr_to_int` `t_int_to_ptr` `t_ptr_to_ptr` `t_load_ptrs` `t_store_ptrs` `t_alloca` | `load` `store` `load_masked` `load_strided` `gather` `scatter` `atomic_rmw` `atomic_cas` `ptrs` `load_ptrs` `alloca_ptrs` |
-| Views | `t_tensor_view` `t_partition_view` `t_strided_view` `t_gather_view` `t_atomic_red_view` `t_load_view` `t_store_view` `t_tensor_shape` `t_index_space_shape` | `tensor_view` `tensor_view_dyn` `partition_view` `strided_view` `gather_scatter_view` `load_view` `store_view` `tensor_dim` |
-| Cells | `t_cell_view` `t_cell_fill` | `load_cell` `load_at` `store_cell` `zeros` `fill` |
-| Constants and shapes | `t_constf` `t_consti` `t_iota` `t_lanes` `t_spread` `t_extract` `t_insert` `t_cat` `t_permute` `t_reshape` `t_broadcast` | `f_const` `i_const` `arange` `lanes` `spread` `broadcast` `extract` `insert` `cat` `permute_tile` |
-| Arithmetic, comparison and conversion | `t_unaryf` `t_binaryf` `t_powi` `t_fma` `t_cmpf` `t_cmpi` `t_unaryi` `t_binaryi` `t_select` `t_convert` `t_repack` `t_mmaf` `t_mmaf_scaled` `t_mmai` | `addf` `mul` `exp` `powi` `fma` `lt` `add_i` `select` `int_to_float` `float_to_int` `float_to_float` `pack_bytes` `mmaf` `mmaf_scaled` `mmai` |
-| Regions | `t_loop_begin` `t_loop_end` `t_while_begin` `t_while_end` `t_return_if` `t_reduce_begin` `t_reduce_end` `t_scan_begin` `t_scan_end` `t_if_begin` `t_if_else` `t_if_end` | `d_for` `d_for2`…`d_for4` `d_loop` `d_return_if` `d_reduce` `reduce_sum` `reduce_max` `reduce_min` `d_scan` `scan_sum` `d_if` |
-| Tokens | `t_tok_get` `t_tok_set` `t_tok_join` | `d_fork2` |
-| Shape query | `t_shape_of` | none of its own; `reduce_sum`, `reduce_max`, `reduce_min`, `scan_sum` and `broadcast` read their operand's shape with it |
-| Module globals | `t_global` `t_get_global` | `d_global` `global_ptrs` |
-| Assertions and debugging | `t_assert` `t_assume` `t_print` | `d_assert` `d_assume` `assume_div_by` `d_print` |
-| Call marks | `t_call_enter` `t_call_exit` `t_body_enter` `t_body_exit` | none: every public function wraps its own body in the first pair, every closure a public function takes runs inside the second, and only `trace_calls` reads them |
-
-#### The call marks, for a handler of `Dev` written outside this package
-
-`Dev` has two pairs of operations that carry no device operation:
-`t_call_enter(name: String)` / `t_call_exit()` since 0.3.0, and
-`t_body_enter()` / `t_body_exit()` since 0.5.0. A handler has to answer
-every operation of the effect, so a handler written against 0.4.0 no longer
-compiles until it answers the second pair; that is why the version moved to
-0.5.0 (a 0.x minor is its own compatibility class,
-`docs/package-design.md` §6.3, as was 0.1.0 to 0.2.0). What a handler owes
-them:
-
-- Answer all four with `()` and record nothing. They carry no device
-  operation: a handler that emits an instruction, a token or a handle for
-  them changes the program every other handler sees. `prog.trace_kernel`
-  is held to that by every golden, which did not move a byte when either
-  pair was added.
-- The call pair comes balanced and properly nested around the body of each
-  public function, in call order, with the function's own name; a private
-  helper is never marked.
-- The body pair comes balanced around each closure a public function takes
-  (`d_for` to `d_for4`, `d_loop`, `d_loop2`, the reductions, the scans,
-  `d_if`, `d_fork2`), directly inside that function's call pair, and around
-  nothing else.
-- So the marks say which calls the KERNEL wrote: a call marked at the top
-  of the body, or directly inside a body pair whose enclosing call is one
-  the kernel wrote, is the kernel's; any other call is one the library made
-  on its own behalf (`idx_mul` inside `tile_at`), and its operations are
-  the enclosing kernel call's. That is the tree `prog.trace_calls` keeps,
-  each call under the region call whose closure it is in. A handler that
-  keeps only the outermost calls can ignore the body pair.
-- A kernel body that calls `t_*` operations directly issues operations
-  outside any pair. A side table has nothing to attribute them to, and
-  `render.line_map` refuses such a program rather than guessing.
-
-The side table numbers operations the way `TileProg.ops` reads depth first,
-a region before its body, which is the number a refusal's `op #k` already
-used. Before 0.5.0 a `Call`'s range counted top-level operations only and
-held no `parent`; a region's body was all one row.
-
-#### `t_shape_of`, for a handler of `Dev` written outside this package
-
-Since 0.4.0 `Dev` has `t_shape_of(h: Int) -> (String, List[Int])`, which is
-why the version moved from 0.3.2 to 0.4.0 for the reason the call marks
-gave above: a handler written against 0.3.x does not compile until it
-answers it. It is a query and issues nothing. The recording handler answers
-the element format and shape it holds for `h`: a tile's own type (a tile
-read through a view included), a tensor view's tensor extents (`DYN_DIM`
-where an operand carries one), or the tile a partition, strided or
-gather/scatter view moves. For a token it refuses, naming the kernel and the
-number of the operation about to be recorded. Nothing in this package calls
-it before 0.6.0; since then the named reductions and `broadcast` ask it
-for their operand's format and shape, so a handler that only replays or
-counts operations has to answer a pair those functions can use (a
-plausible format and a shape of rank 1 or more).
-
-#### The four operations of 0.6.0, for a handler of `Dev` written outside this package
-
-0.6.0 adds `t_cell_view(param, dtype, free) -> (Int, List[Int])`,
-`t_cell_fill(param, value) -> Int`, `t_reshape(dtype, from, to, src) -> Int`
-and `t_broadcast(dtype, from, to, src) -> Int`, so a handler written against
-0.5.x does not compile until it answers them; that is why the version moved
-to 0.6.0. The first two read the cells of a parameter's marker (`trace1` to
-`trace5`); a handler that has no markers to read should refuse them, which
-is what the recording handler does under `trace_kernel`. The other two are
-shape operations like `t_spread`. No function that existed in 0.5.1 issues
-any of the four.
-
-Since knife K2, the attributes of an operation (rounding mode, flush to zero,
-NaN propagation, integer `overflow`, a loop's unsigned comparison, a global's
-alignment, visibility and constness, and whether an `alloca` is shared) are
-named parameters with the dialect's default, placed after the positional
-parameters and after `body`: `addf(F32, s, a, b, rounding: Down)`,
-`d_global("t", F64, xs, visibility: Private)`,
-`trace_kernel("k", ps, () => body(), hints: hs)`. The rounding mode is
-`std/narrow`'s `Rounding`. The suffixed names of knives T4 and T17
-(`addf_down`, `float_to_int_sat`, `d_global_private`, ...) are gone; the
-reasons are in section 7.2 of
-[`docs/std-defaults-design.md`](../../docs/std-defaults-design.md) (in
-Chinese).
-
-## Usage
+A kernel body is an ordinary Dawn function whose only effect is `Dev`.
+Recording it once yields a `TileProg`, which `render` prints as `cuda_tile`
+text and `encode` writes as bytecode. Buffers and launches are `std/gpu`'s,
+and so are the format markers (`F64`, `BF16`, ...).
 
 ```dawn
 use std/gpu.{F64}
@@ -162,159 +23,48 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 let prog = trace_kernel("vadd", ["f64", "f64", "f64"],
   () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
-let text = render(prog)     # for people to read and for the goldens to pin
-let bytes = encode(prog)    # for tileiras to assemble into a cubin
+let text = render(prog)     # cuda_tile text
+let bytes = encode(prog)    # bytecode for tileiras
 ```
 
-A memory operation takes an element offset, not a block index: `tile_at(idx,
-n)` is `idx * n`, and a kernel over a multi-dimensional grid builds its base
-from several of them. A shape is a list of dimensions, each a power of two;
-`[]` is the rank-0 tile, which the typed surface spells `Scalar[D]`.
+| Module | Contents |
+|------|------|
+| `dev` | the `Dev` effect, the opaque handle types (`Tile[D]`, `Param[D]`, `Idx`, `Scalar[D]`, views, ...) and the typed functions a kernel calls |
+| `prog` | `TileProg`; `trace_kernel`, `trace_calls` and `trace1` to `trace5`, the recording handlers |
+| `lower` | `lower(prog)`, the linear instruction table |
+| `render` | `render(prog)`, the `cuda_tile` text; `line_map` |
+| `bytecode` | `encode(prog)`; `bytecode_version()` is `"13.4"` |
 
-`params` gives each entry parameter's dtype name, by position. Every
-`param(d, pos)` in the body has to agree with it (the position in range, the
-same format), or `trace_kernel` panics: an entry signature that says one
-format and a load that says another would be wrong in the bytecode too, by
-the time it reached `tileiras`.
+The full public surface is what `./bin/dawn doc packages/tileir` prints.
 
-### Markers and entries (since 0.5.1)
+## Writing a kernel
 
-`trace1` to `trace5` record the same program from one MARKER per parameter
-instead of a list of format names, and answer, beside it, an entry that
-`std/gpu` can launch with the format and the count of the arguments in its
-type:
+- A memory operation takes an element offset: `tile_at(idx, n)` is `idx * n`.
+- A shape is a list of powers of two; `[]` is a rank-0 tile (`Scalar[D]`).
+- `trace_kernel(name, params, body)` takes each entry parameter's format by
+  position; a `param(d, pos)` that disagrees with it panics.
+- An operation's attributes are named parameters with the dialect's default:
+  `addf(F32, s, a, b, rounding: Down)`, `d_global("t", F64, xs,
+  visibility: Private)`.
+- `load` and `store` take `strides:`, `mask:`, `pad:` and `hints:`, all
+  defaulted: `load(p, base, shape, strides: Some([N, 1]))`,
+  `load(p, base, shape, mask: Some(m), pad: Some(z))`. A `pad` without a
+  `mask` is refused; a `mask` without a `pad` reads masked lanes as
+  unspecified.
+- Memory operations are ordered by the token chain the recorder threads
+  through them, not by program order. `d_fork2` runs two chains, and writes
+  it cannot show to be disjoint are refused.
 
-```dawn
-use std/gpu.{F64, alloc, launch_entry3}
-use tileir/prog.{trace3, cells, In, Out}
+## Control flow
 
-let g = cells([1024], [128])          # a tensor of 1024, cut into cells of 128
-let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
-# prog is what trace_kernel("vadd", ["f64", "f64", "f64"], ...) records
-# later, under a Gpu handler:
-launch_entry3(entry, a, b, out)       # a Tensor[BF16] here is a compile error
-```
-
-- `In(d, cells)` is a parameter the kernel only reads. The recording refuses
-  any write into it (`store`, `scatter`, an atomic, `store_ptrs` through
-  pointers spread from it, `store_view` through a view of it), and, while any
-  parameter is an `In`, a write through pointers it cannot follow back to a
-  parameter (`int_to_ptr`). `In(d, Whole)` is an input read anywhere.
-- `Out(d, cells)` is written one cell per tile block, and the cells of the
-  `Out` parameters are the launch grid: `cells([1000], [128])` is a grid of
-  8 along axis 0. Two `Out` cuts that make two grids are refused.
-- `Shared(d)` is read and written in ways no cell describes (atomics,
-  scatters, a stencil's neighbours). It is what every parameter of
-  `trace_kernel` is.
-- `cells(extent, tile, pad: PadZero, along: ..)` is how the tensor is cut.
-  An extent of `DYN_DIM` is the launch's to decide (the grid's blocks times
-  the tile). `pad` is what a read past the extent answers. `along[j]` is the
-  grid axis dimension `j` follows (`k` for dimension `k`, by default), or
-  `FREE_AXIS`: a matrix product's left input is
-  `cells([M, K], [TM, TK], along: [0, FREE_AXIS])`. A dimension that follows
-  an axis must have as many cells as the grid has blocks there.
-
-A body may still take `Param[D]` and address memory exactly as before
-(0.6.0 lets it read and write the cells too, below). What the cells buy
-either way is the checks, when the kernel is recorded and again when it is
-launched:
-`launch_entryN` refuses, before any handler is asked, an `Out` or `Shared`
-argument that is the buffer of another argument (`gpu.aliased_argument`), a
-grid that disagrees with the cells (`gpu.grid_mismatch`) and a tensor shorter
-than its cells (`gpu.short_tensor`). Design and reasons:
-[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §6.24 (in
-Chinese).
-
-0.5.0 to 0.5.1 only adds names (`trace1` to `trace5`, `Arg`, `Cells`,
-`cells`, `FREE_AXIS`); nothing that compiled against 0.5.0 stops compiling,
-and `trace_kernel` records what it recorded.
-
-### Cells, named reductions and broadcast (since 0.6.0)
-
-A body traced through `trace1` to `trace5` can address a parameter by its
-cells instead of by a base and a shape, and fold or widen a tile without
-naming its format or its shape:
+`d_for(lower, upper, step, init, (k, acc) => ...)` is a loop over `Idx`
+bounds carrying one tile (`d_for2` to `d_for4` carry more); the body runs
+once on the host and what it emits lands in the loop's region. `d_if` takes
+two regions that each answer a tile of the same shape and format and neither
+may load or store.
 
 ```dawn
-use tileir/dev.{load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum, PadNegInf}
-use tileir/prog.{trace2, cells, In, Out}
-
-fn softmax(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
-  let t = load_cell(x)                              # this block's [1024]; lanes past 1000 read -inf
-  let e = exp(F64, [1024], sub(F64, [1024], t, reduce_max(t)))
-  store_cell(o, div(F64, [1024], e, reduce_sum(e)))  # lanes past 1000 are not written
-}
-
-let (prog, entry) = trace2("softmax", In(F64, cells([1000], [1024], pad: PadNegInf)),
-  Out(F64, cells([1000], [1024])), softmax)
-```
-
-- `load_cell(p)` reads this block's cell of `p` through a view of `p`'s
-  cells; `load_at(p, [k])` is the same for a parameter some of whose
-  dimensions follow no grid axis (`FREE_AXIS`), with one index per such
-  dimension. `store_cell(o, t)` writes this block's cell of an `Out`.
-  `zeros(p)` and `fill(p, v)` are a tile shaped like one cell of `p`.
-- The view an `In` is read through and the view an `Out` is written through
-  carry `assume div_by<16>` on the parameter itself: `std/gpu` buffers are
-  256-byte aligned and a parameter's cells start at its first element, and
-  the claim is what lets `tileiras` choose 128-bit loads and stores for an
-  f16 tensor-core matmul. (0.6.0 claimed it for an `In` only.)
-- `reduce_sum`, `reduce_max`, `reduce_min` (and `scan_sum`) take the tile and
-  optionally `dim:` (the last by default) and `keepdims:`; the identity is
-  the format's own. A `[BQ, BK]` tile's `reduce_max(t, keepdims: true)` is
-  `[BQ, 1]`.
-- A RANK-0 tile widens on its own where an element-wise operation declares a
-  wider shape (`sub(F64, [1024], t, reduce_max(t))`); nothing else does.
-  `broadcast(m, [BQ, BK])` widens the dimensions of length 1 explicitly.
-- Places that want a rank-0 tile (an `if`'s or a loop's condition, a loop
-  bound, a reduction's yield, a cell index) refuse a wider one while the
-  kernel records.
-
-Everything above is added beside the 0.5.1 surface: every function that
-existed keeps its signature, and a kernel that calls none of the new ones
-records the same program. The version is 0.6.0 rather than 0.5.2 only
-because `Dev` gained four operations (above). Design, measurements and the
-plan for the kernels that move to this surface:
-[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §6.25 (in
-Chinese).
-
-### One load and one store for the pointer path (since 0.7.0)
-
-`load` and `store` take the pointer path's options as named arguments with
-defaults, so the five spellings of each are one call:
-
-```dawn
-load(p, base, shape)                                       # contiguous, every lane
-load(p, base, shape, strides: Some([N, 1]))                # was load_strided
-load(p, base, shape, mask: Some(m), pad: Some(z))          # was load_masked
-load(p, base, shape, strides: Some(s), mask: Some(m), pad: Some(z))  # was load_strided_masked
-load(p, base, shape, hints: h)                             # was load_hinted
-store(o, base, shape, v, strides: Some(s), mask: Some(m), hints: h)  # any mix
-```
-
-- `strides: None` is the contiguous tile (`row_major(shape)`); `Some(s)` is
-  the escape hatch for any other layout, in elements.
-- A `mask` without a `pad` reads the masked-off lanes as unspecified values
-  (the dialect's load with no padding value); a `pad` without a `mask` is
-  refused while the kernel records.
-- Combinations the five names could not spell (a strided load with hints, a
-  masked load with no pad, a strided masked store with hints) are now
-  ordinary calls.
-- `load_strided`, `load_masked`, `load_strided_masked`, `load_hinted` and the
-  four matching stores remain, each one call of the merged function, and
-  record the same program they recorded in 0.6.0.
-
-0.7.0 also changes what `store_cell` lowers to: the view an `Out` is written
-through now carries the same `assume div_by<16>` an `In`'s view does (the
-write-side measurements are in design §6.25). No signature changed; a
-kernel that does not call `store_cell` records the same bytes.
-
-Loops inside a kernel use `d_for` (design §5.2). The bounds and the step are
-`Idx` (`idx_const` for a host constant), one tile is carried, and the body
-runs once on the host; what it emits lands in the loop's region:
-
-```dawn
-# block b folds `chunks` consecutive 128-wide tiles of x into one tile of out
+# block b folds `chunks` consecutive 128-wide tiles of x into one
 fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(chunks)
@@ -327,123 +77,94 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
 }
 ```
 
-`d_for2` carries two tiles. Loop nesting is capped at `MAX_LOOP_DEPTH` (16)
-and the handles of one recording at `MAX_HANDLES` (65536); past either the
-recording panics, so a helper that recurses through `d_for` and one that
-recurses without a loop each stop somewhere. A branch on a tile value uses
-`d_if` (in `src/dev.dawn`): both regions are required, each runs once on the
-host and answers a tile of the same shape and format, and neither may load or
-store. Lowering turns it into an `IfElse` the way it turns a loop into a
-`ForLoop` (`lower_if` next to `lower_for` in `src/lower.dawn`).
+Nesting is capped at `MAX_LOOP_DEPTH` (16) and one recording at
+`MAX_HANDLES` (65536) handles; past either the recording panics.
 
-## The shape of a recording
+## Parameters with cells
 
-- A handle is an SSA number assigned while recording, starting at 1 (0 is the
-  entry token). The same body emitting the same operations in the same order
-  records an equal `TileProg`; `scripts/tile-golden/run.sh` records every
-  kernel twice and compares.
-- The order of memory operations comes from the **token chain** and nothing
-  else: the handler keeps one `tok` cell, each load and store consumes the
-  previous token and produces the next, and `MakeToken(0)` heads the chain.
-  Tile IR gives program order between memory operations no meaning.
-- Lowering renumbers values in order of appearance (0, 1, ...), because a load
-  or store first has to spread the scalar pointer into a tile of pointers
-  (`reshape`, `broadcast`, `offset`, where the offset is `iota` plus the
-  base), and those intermediate values are not in the recording. The pointer
-  ladder for one (parameter, index, width) is emitted once. The renderer
-  spells `Val(k)` as `%k` and `Arg(i)` as `%argi`; the writer puts the entry
-  parameters first and the values right after them, in one flat index space.
-- `addf` defaults to `rounding<nearest_even>`: design §3.2's double-rounding
-  theorem holds for that mode only. The other modes are not public functions:
-  the recorder picks a separate internal operation name from the `rounding`
-  (and `ftz`) parameter, so the instruction table carries no rounding
-  field. `scripts/tile-golden`'s `addf-no-rounding` mutant deletes the
-  attribute from the renderer and `vadd_bf16.mlir` goes red;
-  `bf16-tag-as-i16` changes the writer's bf16 tag to i16 and `tileiras`
-  refuses the bytes.
-- **A loop** is recorded as `For(iv, lower, upper, step, unsigned, inits,
-  carried, results, body)`, with `body` ending in `Continue(values)`. The
-  handler keeps a region stack: `t_loop_begin` pushes and clears the current
-  operation list, and `t_loop_end` pops it and wraps the body in a `For`
-  attached to the enclosing list. **The token crosses the loop as its last
-  carried value**: the last of `inits` is the token before the loop, the body
-  chains from the carried token inside the region, the last of `Continue` is
-  the body's last token, and after the loop the handler continues from the
-  last of `results`; the kernel body never sees it. In lowering, a handle
-  defined in the body is closed when the region ends, and a later reference to
-  it is refused by name; a pointer ladder built inside is not reused after the
-  loop. The table numbers a `ForLoop` in reading order: results, induction
-  variable, carried values, body.
-- **What the recording refuses on sight** (knives C1, C1' and D-1). The
-  handler keeps one row per value handle, its element format and its shape,
-  and holds every element-wise operand to what the operation declares. Since
-  C1' views have rows too, so a tile read through `load_view` or
-  `load_gather` is held like any other, a view passed where a tile belongs is
-  refused as what it is, and an `mmaf`, `mmaf_scaled` or `mmai` whose left
-  operand's dimension 1 or right operand's dimension 0 is not the declared
-  `k` is refused. A
-  mismatch is refused when the kernel is recorded, naming the operation by
-  its depth-first position in `TileProg.ops` (`MakeToken(0)` is #0) and its
-  dialect name; before, only `tileiras` refused such a program:
-  ``tileir: kernel `vadd_half`: op #6 `addf`: lhs is tile<128xf64>, declared tile<64xf64>``.
-  A Dawn panic carries no source position, so the number is the way back
-  to the body. `d_fork2`'s two chains are held to their promise as well:
-  writes the recording cannot show to be disjoint within one block (bases a
-  non-constant distance apart, overlapping ranges, a scatter, an atomic, a
-  view or a pointer it cannot follow to a parameter) are refused at the
-  `join_tokens`. Design §6.21 has the rules and what is not checked.
+`trace1` to `trace5` take one marker per parameter instead of format names,
+and answer an entry `std/gpu` can launch with typed arguments:
 
-## Bytecode
+```dawn
+use std/gpu.{F64, alloc, launch_entry3}
+use tileir/prog.{trace3, cells, In, Out}
 
-`encode` writes the format that `NVIDIA/cuda-tile`'s `BytecodeWriter.cpp`
-writes and `BytecodeReader.cpp` reads (commit `be0889cd`): an 8-byte magic, a
-`13.4` version header (`BYTECODE_MAJOR` / `BYTECODE_MINOR` in
-`src/bytecode.dawn`; 13.2 before knife T8 and 13.3 before #344, see design
-§6.11 and §6.18), the Func, Constant, Type and String sections, and an end
-byte. Opcodes and type tags come from the three frozen `.td` tables in that
-repository, and each operation's layout from the tablegen backend that
-generates it (result types, then the optional-field flags bitfield, then
-attributes, then operands). cuTile.jl's `src/bytecode` is an independent
-implementation of the same format and was read alongside, item by item; the
-reader accepts both of the two places their output differs (it always writes
-a debug section and pre-registers i1 and i32), and this package follows the
-C++ writer.
+let g = cells([1024], [128])     # a tensor of 1024, cut into cells of 128
+let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+launch_entry3(entry, a, b, out)  # later, under a Gpu handler
+```
 
-Only what the instruction table can hold is encoded: memory operations are
-`weak` and carry their token operand, `addf` at its defaults is
-`nearest_even` without flush-to-zero, and integer operations carry `overflow` none. **Value numbering
-inside a region** follows the reader's rule: block arguments continue the
-enclosing count, the block's results follow, the count rolls back to before
-the arguments when the block ends, and the region-holding operation's own
-results are numbered from there; the writer maps the table's (textual)
-numbering onto it with an `index` table. A few shapes depend on the target
-version, such as `for`'s optional `unsigned` field (13.2 and later), `exp`'s
-inline rounding mode and `mmaf`'s flags (13.3) and the pointer type's flags
-word (13.4); the header comment of `src/bytecode.dawn` lists every one, as
-measured from the writer, and everything else is byte for byte the same from
-13.1 to 13.4. The version, the `tileiras` pin and the wheel's sha256 are in
-`scripts/tile-golden/toolchain.txt`, and `run.sh` checks `bytecode_version()`
-against it.
+- `In(d, cells)` is read only; a write into it is refused while recording.
+  `In(d, Whole)` is an input read anywhere.
+- `Out(d, cells)` is written one cell per block, and the `Out` cells are the
+  launch grid; two `Out` parameters that make two grids are refused.
+- `Shared(d)` is read and written freely, as every `trace_kernel` parameter is.
+- `cells(extent, tile, pad: PadZero, along: ..)` cuts the tensor. `pad` is what
+  a read past the extent answers; `along[j]` is the grid axis dimension `j`
+  follows, or `FREE_AXIS`.
 
-## Gates
+`launch_entryN` refuses an `Out` or `Shared` argument that aliases another
+argument, a grid that disagrees with the cells and a tensor shorter than its
+cells, before any handler runs.
 
-- `dawn test packages/tileir`: the inline test blocks
-  (`scripts/package-tests.sh` discovers them).
-- `scripts/tile-golden/run.sh`: for each of the 191 kernels in
-  `scripts/tile-golden/kernels.dawn`, a text golden (`*.mlir`) and a bytecode
-  golden (`*.tilebc`), on the JVM and natively; then each `.tilebc` goes to
-  the pinned `tileiras --gpu-name <toolchain.txt gpu-name>` (sm_86 in the
-  default `toolchain.txt`), which has to produce a cubin whose symbol table
-  has `GLOBAL FUNC <kernel>` (layer 1, the `.github/workflows/tile.yml`
-  workflow, sharded with `--shard I/N`). Locally,
-  `scripts/tile-golden/install-tileiras.sh <dir>` installs it, `--tileiras
-  <bin>` or `TILEIRAS=` points at it, and `--without-tileiras` skips it
-  explicitly. 77 mutants each remove one rule from a copy of the package and
-  name the kernel that must go red and how (for example: the renderer drops
-  the store's token operand, so the text golden differs; the writer encodes
-  `make_token` with `iota`'s opcode, so the text is untouched, the bytes
-  differ and `tileiras` refuses them by name). The list with each
-  prediction is the header of `run.sh`. `--record` re-records both kinds of
-  golden.
-- `scripts/opaque-twin/tileir.dawn`: the identity of the three handle types is
-  their target's (`# twin-infer-only`).
+A body recorded this way can address its parameters by cell:
+
+```dawn
+use tileir/dev.{
+  load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum, PadNegInf
+}
+use tileir/prog.{trace2, cells, In, Out}
+
+fn softmax(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  # this block's [1024]; the lanes past 1000 read -inf
+  let t = load_cell(x)
+  let e = exp(F64, [1024], sub(F64, [1024], t, reduce_max(t)))
+  # the lanes past 1000 are not written
+  store_cell(o, div(F64, [1024], e, reduce_sum(e)))
+}
+
+let x = In(F64, cells([1000], [1024], pad: PadNegInf))
+let o = Out(F64, cells([1000], [1024]))
+let (prog, entry) = trace2("softmax", x, o, softmax)
+```
+
+- `load_cell(p)` reads this block's cell; `load_at(p, [k])` is the same when
+  some dimensions follow no grid axis. `store_cell(o, t)` writes an `Out`'s
+  cell. `zeros(p)` and `fill(p, v)` make a tile shaped like a cell of `p`.
+- `reduce_sum`, `reduce_max`, `reduce_min` and `scan_sum` take `dim:` (the
+  last by default) and `keepdims:`.
+- A rank-0 tile widens on its own where an element-wise operation declares a
+  wider shape; `broadcast(m, shape)` widens dimensions of length 1. Places
+  that need a rank-0 tile (a condition, a loop bound, a cell index) refuse a
+  wider one.
+
+## What the recorder refuses
+
+Each value handle has a format and a shape, and every element-wise operand is
+held to what the operation declares, as is the `k` of `mmaf`, `mmaf_scaled`
+and `mmai`. A mismatch panics while the kernel records, naming the operation
+by its depth-first number in `TileProg.ops` (`MakeToken(0)` is #0), for
+example:
+``tileir: kernel `vadd_half`: op #6 `addf`: lhs is tile<128xf64>, declared tile<64xf64>``.
+
+## Writing your own `Dev` handler
+
+A handler has to answer every operation of `Dev`, so a new operation is a
+version bump (see the changelog). What a handler owes the ones that issue
+nothing:
+
+- `t_call_enter(name)` / `t_call_exit()` and `t_body_enter()` /
+  `t_body_exit()`: answer `()` and record nothing. The call pair wraps the
+  body of each public function; the body pair wraps each closure a public
+  function takes. `prog.trace_calls` uses them to attribute operations to
+  the calls the kernel wrote; `render.line_map` refuses a program whose
+  operations fall outside any pair.
+- `t_shape_of(h)`: answer the format and shape of handle `h` (rank 1 or more).
+  The named reductions and `broadcast` read it.
+- `t_cell_view` and `t_cell_fill` read a parameter's marker; a handler with no
+  markers should refuse them.
+
+Changes between versions: [CHANGELOG.md](CHANGELOG.md). Design, measurements
+and the bytecode format:
+[`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
+Chinese).
