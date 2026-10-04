@@ -26,26 +26,26 @@ cuda_tile.module @m {
     %27 = broadcast %26 : tile<1xptr<f64>> -> tile<128xptr<f64>>
     %28 = offset %27, %20 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
     %29, %30 = load_ptr_tko weak %28 token=%25 : tile<128xptr<f64>> -> tile<128xf64>, token
-    %31 = constant <f64: 128.0> : tile<128xf64>
-    %32 = reduce %13 dim=0 identities=[0.0 : f64] : tile<128xf64> -> tile<f64> (%33: tile<f64>, %34: tile<f64>) {
-      %35 = addf %33, %34 rounding<nearest_even> : tile<f64>
-      yield %35 : tile<f64>
+    %31 = reduce %13 dim=0 identities=[0.0 : f64] : tile<128xf64> -> tile<f64> (%32: tile<f64>, %33: tile<f64>) {
+      %34 = addf %32, %33 rounding<nearest_even> : tile<f64>
+      yield %34 : tile<f64>
     }
-    %36 = reshape %32 : tile<f64> -> tile<1xf64>
-    %37 = broadcast %36 : tile<1xf64> -> tile<128xf64>
-    %38 = divf %37, %31 rounding<nearest_even> : tile<128xf64>
+    %35 = constant <f64: 128.0> : tile<f64>
+    %36 = divf %31, %35 rounding<nearest_even> : tile<f64>
+    %37 = reshape %36 : tile<f64> -> tile<1xf64>
+    %38 = broadcast %37 : tile<1xf64> -> tile<128xf64>
     %39 = subf %13, %38 rounding<nearest_even> : tile<128xf64>
     %40 = mulf %39, %39 rounding<nearest_even> : tile<128xf64>
     %41 = reduce %40 dim=0 identities=[0.0 : f64] : tile<128xf64> -> tile<f64> (%42: tile<f64>, %43: tile<f64>) {
       %44 = addf %42, %43 rounding<nearest_even> : tile<f64>
       yield %44 : tile<f64>
     }
-    %45 = reshape %41 : tile<f64> -> tile<1xf64>
-    %46 = broadcast %45 : tile<1xf64> -> tile<128xf64>
-    %47 = divf %46, %31 rounding<nearest_even> : tile<128xf64>
-    %48 = constant <f64: 1.0E-5> : tile<128xf64>
-    %49 = addf %47, %48 rounding<nearest_even> : tile<128xf64>
-    %50 = sqrt %49 rounding<nearest_even> : tile<128xf64>
+    %45 = divf %41, %35 rounding<nearest_even> : tile<f64>
+    %46 = constant <f64: 1.0E-5> : tile<f64>
+    %47 = addf %45, %46 rounding<nearest_even> : tile<f64>
+    %48 = sqrt %47 rounding<nearest_even> : tile<f64>
+    %49 = reshape %48 : tile<f64> -> tile<1xf64>
+    %50 = broadcast %49 : tile<1xf64> -> tile<128xf64>
     %51 = divf %39, %50 rounding<nearest_even> : tile<128xf64>
     %52 = mulf %51, %24 rounding<nearest_even> : tile<128xf64>
     %53 = addf %52, %29 rounding<nearest_even> : tile<128xf64>

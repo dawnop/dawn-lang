@@ -2,17 +2,17 @@ cuda_tile.module @m {
   entry @gqa_context(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>, %arg2: tile<ptr<f64>>) {
     %0 = make_token : token
     %1, %2, %3 = get_tile_block_id : tile<i32>
-    %4, %5, %6 = get_tile_block_id : tile<i32>
-    %7 = constant <i32: 2> : tile<i32>
-    %8 = muli %6, %7 : tile<i32>
-    %9 = addi %8, %1 : tile<i32>
+    %4 = constant <i32: 2> : tile<i32>
+    %5 = muli %3, %4 : tile<i32>
+    %6, %7, %8 = get_tile_block_id : tile<i32>
+    %9 = addi %5, %6 : tile<i32>
     %10 = constant <i32: 4096> : tile<i32>
     %11 = muli %9, %10 : tile<i32>
-    %12 = constant <i32: 0> : tile<i32>
-    %13 = constant <i32: 2> : tile<i32>
-    %14 = constant <i32: 1> : tile<i32>
-    %15 = constant <f64: 0.0> : tile<64x32xf64>
-    %16, %17 = for %18 in (%12 to %13, step %14) : tile<i32> iter_values(%19 = %15, %20 = %0) -> (tile<64x32xf64>, token) {
+    %12 = constant <f64: 0.0> : tile<64x32xf64>
+    %13 = constant <i32: 0> : tile<i32>
+    %14 = constant <i32: 2> : tile<i32>
+    %15 = constant <i32: 1> : tile<i32>
+    %16, %17 = for %18 in (%13 to %14, step %15) : tile<i32> iter_values(%19 = %12, %20 = %0) -> (tile<64x32xf64>, token) {
       %21 = constant <i32: 32> : tile<i32>
       %22 = muli %18, %21 : tile<i32>
       %23 = addi %11, %22 : tile<i32>
@@ -33,7 +33,7 @@ cuda_tile.module @m {
       %38 = offset %37, %35 : tile<64x32xptr<f64>>, tile<64x32xi32> -> tile<64x32xptr<f64>>
       %39, %40 = load_ptr_tko weak %38 token=%20 : tile<64x32xptr<f64>> -> tile<64x32xf64>, token
       %41 = constant <i32: 2048> : tile<i32>
-      %42 = muli %6, %41 : tile<i32>
+      %42 = muli %3, %41 : tile<i32>
       %43 = constant <i32: 1024> : tile<i32>
       %44 = muli %18, %43 : tile<i32>
       %45 = addi %42, %44 : tile<i32>

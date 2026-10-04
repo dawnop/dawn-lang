@@ -37,15 +37,15 @@ cuda_tile.module @m {
     %38 = cmpi less_than %36, %37, signed : tile<4x32xi32> -> tile<4x32xi1>
     %39 = constant <i1: 0> : tile<4x32xi1>
     %40 = select %24, %38, %39 : tile<4x32xi1>, tile<4x32xi1>
-    %41 = constant <f64: 0.0> : tile<4x32xf64>
-    %42 = constant <i32: 400> : tile<i32>
-    %43 = muli %1, %42 : tile<i32>
-    %44 = addi %43, %10 : tile<i32>
-    %45 = constant <i32: 12> : tile<i32>
-    %46 = muli %1, %45 : tile<i32>
-    %47 = constant <i32: 0> : tile<i32>
-    %48 = addi %44, %47 : tile<i32>
-    %49 = reshape %48 : tile<i32> -> tile<1x1xi32>
+    %41 = constant <i32: 400> : tile<i32>
+    %42 = muli %1, %41 : tile<i32>
+    %43 = addi %42, %10 : tile<i32>
+    %44 = constant <i32: 12> : tile<i32>
+    %45 = muli %1, %44 : tile<i32>
+    %46 = constant <i32: 0> : tile<i32>
+    %47 = addi %43, %46 : tile<i32>
+    %48 = constant <f64: 0.0> : tile<4x32xf64>
+    %49 = reshape %47 : tile<i32> -> tile<1x1xi32>
     %50 = broadcast %49 : tile<1x1xi32> -> tile<4x32xi32>
     %51 = iota : tile<4xi32>
     %52 = reshape %51 : tile<4xi32> -> tile<4x1xi32>
@@ -60,9 +60,9 @@ cuda_tile.module @m {
     %61 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %62 = broadcast %61 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
     %63 = offset %62, %60 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %64, %65 = load_ptr_tko weak %63, %40, %41 token=%0 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
+    %64, %65 = load_ptr_tko weak %63, %40, %48 token=%0 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
     %66 = constant <i32: 0> : tile<i32>
-    %67 = addi %46, %66 : tile<i32>
+    %67 = addi %45, %66 : tile<i32>
     %68 = reshape %67 : tile<i32> -> tile<1x1xi32>
     %69 = broadcast %68 : tile<1x1xi32> -> tile<4x32xi32>
     %70 = iota : tile<4xi32>
@@ -80,11 +80,11 @@ cuda_tile.module @m {
     %82 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %83 = broadcast %82 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
     %84 = offset %83, %81 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %85, %86 = load_ptr_tko weak %84, %40, %41 token=%65 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
+    %85, %86 = load_ptr_tko weak %84, %40, %48 token=%65 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
     %87 = mulf %64, %85 rounding<nearest_even> : tile<4x32xf64>
-    %88 = addf %41, %87 rounding<nearest_even> : tile<4x32xf64>
+    %88 = addf %48, %87 rounding<nearest_even> : tile<4x32xf64>
     %89 = constant <i32: 1> : tile<i32>
-    %90 = addi %44, %89 : tile<i32>
+    %90 = addi %43, %89 : tile<i32>
     %91 = reshape %90 : tile<i32> -> tile<1x1xi32>
     %92 = broadcast %91 : tile<1x1xi32> -> tile<4x32xi32>
     %93 = iota : tile<4xi32>
@@ -100,9 +100,9 @@ cuda_tile.module @m {
     %103 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %104 = broadcast %103 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
     %105 = offset %104, %102 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %106, %107 = load_ptr_tko weak %105, %40, %41 token=%86 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
+    %106, %107 = load_ptr_tko weak %105, %40, %48 token=%86 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
     %108 = constant <i32: 1> : tile<i32>
-    %109 = addi %46, %108 : tile<i32>
+    %109 = addi %45, %108 : tile<i32>
     %110 = reshape %109 : tile<i32> -> tile<1x1xi32>
     %111 = broadcast %110 : tile<1x1xi32> -> tile<4x32xi32>
     %112 = iota : tile<4xi32>
@@ -120,11 +120,11 @@ cuda_tile.module @m {
     %124 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %125 = broadcast %124 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
     %126 = offset %125, %123 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %127, %128 = load_ptr_tko weak %126, %40, %41 token=%107 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
+    %127, %128 = load_ptr_tko weak %126, %40, %48 token=%107 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
     %129 = mulf %106, %127 rounding<nearest_even> : tile<4x32xf64>
     %130 = addf %88, %129 rounding<nearest_even> : tile<4x32xf64>
     %131 = constant <i32: 2> : tile<i32>
-    %132 = addi %44, %131 : tile<i32>
+    %132 = addi %43, %131 : tile<i32>
     %133 = reshape %132 : tile<i32> -> tile<1x1xi32>
     %134 = broadcast %133 : tile<1x1xi32> -> tile<4x32xi32>
     %135 = iota : tile<4xi32>
@@ -140,9 +140,9 @@ cuda_tile.module @m {
     %145 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %146 = broadcast %145 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
     %147 = offset %146, %144 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %148, %149 = load_ptr_tko weak %147, %40, %41 token=%128 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
+    %148, %149 = load_ptr_tko weak %147, %40, %48 token=%128 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
     %150 = constant <i32: 2> : tile<i32>
-    %151 = addi %46, %150 : tile<i32>
+    %151 = addi %45, %150 : tile<i32>
     %152 = reshape %151 : tile<i32> -> tile<1x1xi32>
     %153 = broadcast %152 : tile<1x1xi32> -> tile<4x32xi32>
     %154 = iota : tile<4xi32>
@@ -160,28 +160,15 @@ cuda_tile.module @m {
     %166 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %167 = broadcast %166 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
     %168 = offset %167, %165 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %169, %170 = load_ptr_tko weak %168, %40, %41 token=%149 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
+    %169, %170 = load_ptr_tko weak %168, %40, %48 token=%149 : tile<4x32xptr<f64>>, tile<4x32xi1>, tile<4x32xf64> -> tile<4x32xf64>, token
     %171 = mulf %148, %169 rounding<nearest_even> : tile<4x32xf64>
     %172 = addf %130, %171 rounding<nearest_even> : tile<4x32xf64>
-    %173 = constant <i32: 392> : tile<i32>
-    %174 = muli %1, %173 : tile<i32>
-    %175 = addi %174, %10 : tile<i32>
-    %176 = reshape %175 : tile<i32> -> tile<1x1xi32>
-    %177 = broadcast %176 : tile<1x1xi32> -> tile<4x32xi32>
-    %178 = iota : tile<4xi32>
-    %179 = reshape %178 : tile<4xi32> -> tile<4x1xi32>
-    %180 = broadcast %179 : tile<4x1xi32> -> tile<4x32xi32>
-    %181 = constant <i32: 98> : tile<4x32xi32>
-    %182 = muli %180, %181 : tile<4x32xi32>
-    %183 = addi %177, %182 : tile<4x32xi32>
-    %184 = iota : tile<32xi32>
-    %185 = reshape %184 : tile<32xi32> -> tile<1x32xi32>
-    %186 = broadcast %185 : tile<1x32xi32> -> tile<4x32xi32>
-    %187 = addi %183, %186 : tile<4x32xi32>
-    %188 = reshape %arg2 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
-    %189 = broadcast %188 : tile<1x1xptr<f64>> -> tile<4x32xptr<f64>>
-    %190 = offset %189, %187 : tile<4x32xptr<f64>>, tile<4x32xi32> -> tile<4x32xptr<f64>>
-    %191 = store_ptr_tko weak %190, %172, %40 token=%170 : tile<4x32xptr<f64>>, tile<4x32xf64>, tile<4x32xi1> -> token
+    %173 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %174 = make_tensor_view %173, shape = [6, 98], strides = [98, 1] : tensor_view<6x98xf64, strides=[98, 1]>
+    %175 = make_partition_view %174 : partition_view<tile=(4x32), padding_value = zero, tensor_view<6x98xf64, strides=[98, 1]>, dim_map=[0, 1]>
+    %176, %177, %178 = get_tile_block_id : tile<i32>
+    %179, %180, %181 = get_tile_block_id : tile<i32>
+    %182 = store_view_tko weak %172, %175[%176, %180] token=%170 : tile<4x32xf64>, partition_view<tile=(4x32), padding_value = zero, tensor_view<6x98xf64, strides=[98, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

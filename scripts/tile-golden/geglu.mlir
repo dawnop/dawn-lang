@@ -28,10 +28,10 @@ cuda_tile.module @m {
     %29 = constant <f64: 0.7071067811865475> : tile<128xf64>
     %30 = mulf %27, %29 rounding<nearest_even> : tile<128xf64>
     %31 = absf %30 : tile<128xf64>
-    %32 = constant <f64: 1.0> : tile<128xf64>
-    %33 = constant <f64: 0.3275911> : tile<128xf64>
-    %34 = fma %33, %31, %32 rounding<nearest_even> : tile<128xf64>
-    %35 = divf %32, %34 rounding<nearest_even> : tile<128xf64>
+    %32 = constant <f64: 0.3275911> : tile<128xf64>
+    %33 = constant <f64: 1.0> : tile<128xf64>
+    %34 = fma %32, %31, %33 rounding<nearest_even> : tile<128xf64>
+    %35 = divf %33, %34 rounding<nearest_even> : tile<128xf64>
     %36 = constant <f64: 1.061405429> : tile<128xf64>
     %37 = constant <f64: -1.453152027> : tile<128xf64>
     %38 = fma %35, %36, %37 rounding<nearest_even> : tile<128xf64>
@@ -46,7 +46,7 @@ cuda_tile.module @m {
     %47 = negf %46 : tile<128xf64>
     %48 = exp %47 : tile<128xf64>
     %49 = mulf %45, %48 rounding<nearest_even> : tile<128xf64>
-    %50 = subf %32, %49 rounding<nearest_even> : tile<128xf64>
+    %50 = subf %33, %49 rounding<nearest_even> : tile<128xf64>
     %51 = constant <f64: 0.0> : tile<128xf64>
     %52 = cmpf less_than ordered %30, %51 : tile<128xf64> -> tile<128xi1>
     %53 = negf %50 : tile<128xf64>
@@ -57,10 +57,11 @@ cuda_tile.module @m {
     %58 = addf %57, %54 rounding<nearest_even> : tile<128xf64>
     %59 = mulf %56, %58 rounding<nearest_even> : tile<128xf64>
     %60 = mulf %16, %59 rounding<nearest_even> : tile<128xf64>
-    %61 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %62 = broadcast %61 : tile<1xptr<f64>> -> tile<128xptr<f64>>
-    %63 = offset %62, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-    %64 = store_ptr_tko weak %63, %60, %11 token=%28 : tile<128xptr<f64>>, tile<128xf64>, tile<128xi1> -> token
+    %61 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+    %62 = make_tensor_view %61, shape = [300], strides = [1] : tensor_view<300xf64, strides=[1]>
+    %63 = make_partition_view %62 : partition_view<tile=(128), padding_value = zero, tensor_view<300xf64, strides=[1]>, dim_map=[0]>
+    %64, %65, %66 = get_tile_block_id : tile<i32>
+    %67 = store_view_tko weak %60, %63[%64] token=%28 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<300xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

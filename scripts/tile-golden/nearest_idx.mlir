@@ -99,18 +99,13 @@ cuda_tile.module @m {
       %109 = select %107, %105, %106 : tile<i1>, tile<i32>
       yield %108, %109 : tile<f64>, tile<i32>
     }
-    %110 = constant <i32: 1> : tile<i32>
-    %111 = muli %1, %110 : tile<i32>
-    %112 = reshape %102 : tile<i32> -> tile<1xi32>
-    %113 = broadcast %112 : tile<1xi32> -> tile<1xi32>
-    %114 = reshape %111 : tile<i32> -> tile<1xi32>
-    %115 = broadcast %114 : tile<1xi32> -> tile<1xi32>
-    %116 = iota : tile<1xi32>
-    %117 = addi %115, %116 : tile<1xi32>
-    %118 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
-    %119 = broadcast %118 : tile<1xptr<i32>> -> tile<1xptr<i32>>
-    %120 = offset %119, %117 : tile<1xptr<i32>>, tile<1xi32> -> tile<1xptr<i32>>
-    %121 = store_ptr_tko weak %120, %113 token=%78 : tile<1xptr<i32>>, tile<1xi32> -> token
+    %110 = assume div_by<16>, %arg1 : tile<ptr<i32>>
+    %111 = make_tensor_view %110, shape = [64], strides = [1] : tensor_view<64xi32, strides=[1]>
+    %112 = make_partition_view %111 : partition_view<tile=(1), padding_value = zero, tensor_view<64xi32, strides=[1]>, dim_map=[0]>
+    %113, %114, %115 = get_tile_block_id : tile<i32>
+    %116 = reshape %102 : tile<i32> -> tile<1xi32>
+    %117 = broadcast %116 : tile<1xi32> -> tile<1xi32>
+    %118 = store_view_tko weak %117, %112[%113] token=%78 : tile<1xi32>, partition_view<tile=(1), padding_value = zero, tensor_view<64xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

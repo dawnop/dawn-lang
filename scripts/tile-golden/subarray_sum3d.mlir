@@ -6,16 +6,16 @@ cuda_tile.module @m {
     %3 = broadcast %2 : tile<1xi32> -> tile<1024xi32>
     %4 = iota : tile<1024xi32>
     %5 = addi %3, %4 : tile<1024xi32>
-    %6 = constant <i32: 32> : tile<1024xi32>
-    %7 = constant <i32: 256> : tile<1024xi32>
-    %8 = divi %5, %7 signed : tile<1024xi32>
-    %9 = constant <i32: 1> : tile<1024xi32>
-    %10 = cmpi greater_than_or_equal %8, %9, signed : tile<1024xi32> -> tile<1024xi1>
-    %11 = constant <i32: 3> : tile<1024xi32>
-    %12 = cmpi less_than %8, %11, signed : tile<1024xi32> -> tile<1024xi1>
-    %13 = constant <i1: 0> : tile<1024xi1>
-    %14 = select %10, %12, %13 : tile<1024xi1>, tile<1024xi1>
-    %15 = divi %5, %6 signed : tile<1024xi32>
+    %6 = constant <i32: 256> : tile<1024xi32>
+    %7 = divi %5, %6 signed : tile<1024xi32>
+    %8 = constant <i32: 1> : tile<1024xi32>
+    %9 = cmpi greater_than_or_equal %7, %8, signed : tile<1024xi32> -> tile<1024xi1>
+    %10 = constant <i32: 3> : tile<1024xi32>
+    %11 = cmpi less_than %7, %10, signed : tile<1024xi32> -> tile<1024xi1>
+    %12 = constant <i1: 0> : tile<1024xi1>
+    %13 = select %9, %11, %12 : tile<1024xi1>, tile<1024xi1>
+    %14 = constant <i32: 32> : tile<1024xi32>
+    %15 = divi %5, %14 signed : tile<1024xi32>
     %16 = constant <i32: 8> : tile<1024xi32>
     %17 = remi %15, %16 signed : tile<1024xi32>
     %18 = constant <i32: 2> : tile<1024xi32>
@@ -25,8 +25,8 @@ cuda_tile.module @m {
     %22 = constant <i1: 0> : tile<1024xi1>
     %23 = select %19, %21, %22 : tile<1024xi1>, tile<1024xi1>
     %24 = constant <i1: 0> : tile<1024xi1>
-    %25 = select %14, %23, %24 : tile<1024xi1>, tile<1024xi1>
-    %26 = remi %5, %6 signed : tile<1024xi32>
+    %25 = select %13, %23, %24 : tile<1024xi1>, tile<1024xi1>
+    %26 = remi %5, %14 signed : tile<1024xi32>
     %27 = constant <i32: 3> : tile<1024xi32>
     %28 = cmpi greater_than_or_equal %26, %27, signed : tile<1024xi32> -> tile<1024xi1>
     %29 = constant <i32: 30> : tile<1024xi32>
@@ -44,16 +44,13 @@ cuda_tile.module @m {
       %44 = addi %42, %43 : tile<i32>
       yield %44 : tile<i32>
     }
-    %45 = reshape %41 : tile<i32> -> tile<1xi32>
-    %46 = broadcast %45 : tile<1xi32> -> tile<1xi32>
-    %47 = reshape %1 : tile<i32> -> tile<1xi32>
-    %48 = broadcast %47 : tile<1xi32> -> tile<1xi32>
-    %49 = iota : tile<1xi32>
-    %50 = addi %48, %49 : tile<1xi32>
-    %51 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
-    %52 = broadcast %51 : tile<1xptr<i32>> -> tile<1xptr<i32>>
-    %53 = offset %52, %50 : tile<1xptr<i32>>, tile<1xi32> -> tile<1xptr<i32>>
-    %54 = store_ptr_tko weak %53, %46 token=%40 : tile<1xptr<i32>>, tile<1xi32> -> token
+    %45 = assume div_by<16>, %arg1 : tile<ptr<i32>>
+    %46 = make_tensor_view %45, shape = [1], strides = [1] : tensor_view<1xi32, strides=[1]>
+    %47 = make_partition_view %46 : partition_view<tile=(1), padding_value = zero, tensor_view<1xi32, strides=[1]>, dim_map=[0]>
+    %48, %49, %50 = get_tile_block_id : tile<i32>
+    %51 = reshape %41 : tile<i32> -> tile<1xi32>
+    %52 = broadcast %51 : tile<1xi32> -> tile<1xi32>
+    %53 = store_view_tko weak %52, %47[%48] token=%40 : tile<1xi32>, partition_view<tile=(1), padding_value = zero, tensor_view<1xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

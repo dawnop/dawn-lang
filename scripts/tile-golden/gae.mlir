@@ -28,28 +28,29 @@ cuda_tile.module @m {
     %27 = broadcast %26 : tile<1xptr<f64>> -> tile<64xptr<f64>>
     %28 = offset %27, %13 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
     %29, %30 = load_ptr_tko weak %28, %24, %25 token=%0 : tile<64xptr<f64>>, tile<64xi1>, tile<64xf64> -> tile<64xf64>, token
-    %31 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %32 = broadcast %31 : tile<1xptr<f64>> -> tile<64xptr<f64>>
-    %33 = offset %32, %9 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
-    %34, %35 = load_ptr_tko weak %33 token=%30 : tile<64xptr<f64>> -> tile<64xf64>, token
-    %36 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %37 = broadcast %36 : tile<1xptr<f64>> -> tile<64xptr<f64>>
-    %38 = offset %37, %9 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
-    %39, %40 = load_ptr_tko weak %38 token=%35 : tile<64xptr<f64>> -> tile<64xf64>, token
-    %41 = constant <f64: 0.99> : tile<64xf64>
-    %42 = mulf %41, %29 rounding<nearest_even> : tile<64xf64>
-    %43 = addf %39, %42 rounding<nearest_even> : tile<64xf64>
-    %44 = subf %43, %34 rounding<nearest_even> : tile<64xf64>
-    %45 = constant <f64: 0.9405> : tile<64xf64>
-    %46, %47 = scan %45, %44 dim=0 reverse=true identities=[1.0 : f64, 0.0 : f64] : tile<64xf64>, tile<64xf64> -> tile<64xf64>, tile<64xf64> (%48: tile<f64>, %49: tile<f64>, %50: tile<f64>, %51: tile<f64>) {
-      %52 = mulf %49, %48 rounding<nearest_even> : tile<f64>
-      %53 = fma %49, %50, %51 rounding<nearest_even> : tile<f64>
-      yield %52, %53 : tile<f64>, tile<f64>
+    %31 = assume div_by<16>, %arg0 : tile<ptr<f64>>
+    %32 = make_tensor_view %31, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %33 = make_partition_view %32 : partition_view<tile=(64), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %34, %35, %36 = get_tile_block_id : tile<i32>
+    %37, %38 = load_view_tko weak %33[%34] token=%30 : partition_view<tile=(64), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<64xf64>, token
+    %39 = constant <f64: 0.99> : tile<64xf64>
+    %40 = mulf %39, %29 rounding<nearest_even> : tile<64xf64>
+    %41 = addf %37, %40 rounding<nearest_even> : tile<64xf64>
+    %42 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+    %43 = make_tensor_view %42, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %44 = make_partition_view %43 : partition_view<tile=(64), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %45, %46 = load_view_tko weak %44[%34] token=%38 : partition_view<tile=(64), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<64xf64>, token
+    %47 = subf %41, %45 rounding<nearest_even> : tile<64xf64>
+    %48 = constant <f64: 0.9405> : tile<64xf64>
+    %49, %50 = scan %48, %47 dim=0 reverse=true identities=[1.0 : f64, 0.0 : f64] : tile<64xf64>, tile<64xf64> -> tile<64xf64>, tile<64xf64> (%51: tile<f64>, %52: tile<f64>, %53: tile<f64>, %54: tile<f64>) {
+      %55 = mulf %52, %51 rounding<nearest_even> : tile<f64>
+      %56 = fma %52, %53, %54 rounding<nearest_even> : tile<f64>
+      yield %55, %56 : tile<f64>, tile<f64>
     }
-    %54 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %55 = broadcast %54 : tile<1xptr<f64>> -> tile<64xptr<f64>>
-    %56 = offset %55, %9 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
-    %57 = store_ptr_tko weak %56, %47 token=%40 : tile<64xptr<f64>>, tile<64xf64> -> token
+    %57 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %58 = make_tensor_view %57, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %59 = make_partition_view %58 : partition_view<tile=(64), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %60 = store_view_tko weak %50, %59[%34] token=%46 : tile<64xf64>, partition_view<tile=(64), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }
