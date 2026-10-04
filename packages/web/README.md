@@ -23,8 +23,9 @@ TLS is terminated in front of it (nginx or similar).
 
 Routing runs on the raw request path: it is split on `/` first and each
 segment is then percent-decoded on its own, so `/files/a%2Fb` reaches
-`/files/{name}` with `name = "a/b"`. `Request.path` is the decoded path, for
-logs only.
+`/files/{name}` with `name = "a/b"`. `Request.path` is the whole path
+decoded at once: a decoded `%0A` is a line break, so log `Request.raw_path`,
+as `with_logging` does.
 
 | Path | What happens |
 |---|---|

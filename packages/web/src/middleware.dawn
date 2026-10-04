@@ -7,9 +7,11 @@ use std/bytes
 use std/list
 use std/map
 use java "java.lang.System"
-use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error, response_status, response_headers, response_body}
+use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error, response_status, response_headers, response_body, log_request}
 
-## One access-log line per request: method, path, status, wall time.
+## One access-log line per request: method, path, status, wall time. The
+## path is the raw one, still percent-encoded, so a request cannot write a
+## line break into the log.
 pub fn with_logging(next: Handler) -> Handler =
   req => {
     let started = System.nanoTime()
@@ -19,9 +21,12 @@ pub fn with_logging(next: Handler) -> Handler =
       Ok(r) -> response_status(r)
       Err(e) -> e.status
     }
-    println("${req.method} ${req.path} -> ${status} (${ms}ms)")
+    println(access_line(req, status, ms))
     out
   }
+
+fn access_line(req: Request, status: Int, ms: Int) -> String =
+  "${log_request(req.method, req.raw_path)} -> ${status} (${ms}ms)"
 
 # True if the matched route carries `tag`. Middleware read the route's tags
 # (filled in by the server after dispatch) instead of hardcoding paths, so
@@ -341,4 +346,18 @@ test "a limit of zero or less is refused where the middleware is built" {
     Err(e) -> { assert e.status == 413 }
     Ok(_) -> { assert false }
   }
+}
+
+test "an encoded line break in the path stays one access-log line" {
+  # what the server builds for `GET /a%0D%0AGET%20/admin`: `path` is decoded
+  # by the JDK, `raw_path` is as sent
+  let req = Request { ..req_of("GET", map.empty()), path: "/a\r\nGET /admin", raw_path: "/a%0D%0AGET%20/admin" }
+  let line = access_line(req, 404, 3)
+  assert line == "GET /a%0D%0AGET%20/admin -> 404 (3ms)"
+  assert not str.contains(line, "\n")
+  assert not str.contains(line, "\r")
+  # and a control character that reached the raw path some other way is
+  # escaped rather than written
+  let odd = Request { ..req, raw_path: "/a\nb" }
+  assert access_line(odd, 200, 0) == "GET /a\\nb -> 200 (0ms)"
 }
