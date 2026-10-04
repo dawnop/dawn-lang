@@ -204,6 +204,12 @@ pub fn use_lines(p: Package) -> (String, String) = {
   (path, "dawn add <archive> \\\n  --subdir packages/${p.dir}${as_flag}")
 }
 
+## The path line as markup: the quoted path is one unbreakable piece, so a
+## narrow column wraps the line after `=` and never at the hyphen inside
+## `<dawn-lang>` or a directory name. Copying it still yields one line.
+pub fn path_html(path: String) -> String =
+  str.replace(escape_html(path), " = ", ` = <span class="pkg-nb">`) ++ "</span>"
+
 ## A package's dependencies, each linked to `href` of its directory when it
 ## is one of the packages in `known`; "std only" when there are none.
 pub fn deps_links(c: Copy, p: Package, known: List[String], href: fn(String) -> String) -> String =
@@ -227,7 +233,7 @@ fn row_html(c: Copy, root: String, lang: Lang, docs: List[String], p: Package, m
     ++ """<p class="pkg-mods">${mod_html}</p></td>"""
     ++ """<td class="pkg-deps">${deps_links(c, p, known, page)}</td>"""
     ++ """<td class="pkg-use"><span class="pkg-use-k">""" ++ escape_html(plain(c, "use-path")) ++ "</span>"
-    ++ "<code>" ++ escape_html(path) ++ "</code>"
+    ++ "<code>" ++ path_html(path) ++ "</code>"
     ++ """<span class="pkg-use-k">""" ++ escape_html(plain(c, "use-archive")) ++ "</span>"
     ++ "<code>" ++ escape_html(add) ++ "</code></td></tr>"
 }
@@ -322,6 +328,11 @@ test "the dependency lines alias a renamed package and leave the rest alone" {
     (`json = "<dawn-lang>/packages/json"`, "dawn add <archive> \\\n  --subdir packages/json --as json")
   assert use_lines(p("tea-core", "tea_core")) ==
     (`tea_core = "<dawn-lang>/packages/tea-core"`, "dawn add <archive> \\\n  --subdir packages/tea-core")
+}
+
+test "the path line wraps after `=` only" {
+  assert path_html(`web = "<dawn-lang>/packages/web"`) ==
+    `web = <span class="pkg-nb">"&lt;dawn-lang&gt;/packages/web"</span>`
 }
 
 test "the archive is the release's tag zip, and none without a release" {
