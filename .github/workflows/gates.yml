@@ -3572,8 +3572,14 @@ jobs:
   # a shard job deleted from this file surfaces here as a named absence,
   # which is the point.
   #
-  # `if: always()` so a red shard cannot swallow the completeness verdict —
-  # the two failures stay separately attributable. The self-test runs first
+  # `if: !cancelled()` so a red shard cannot swallow the completeness verdict;
+  # the two failures stay separately attributable. Not `always()`: that one is
+  # true in a cancelled run too, so when cancel-in-progress cut a run short
+  # this job still ran, found the cancelled shard's record missing and
+  # reported failure (run 37215696359), and a superseded run read as red.
+  # `cancelled()` is about the run, not the shards: a shard that fails or
+  # times out on its own does not cancel the run, so this job still runs
+  # and still refuses the missing record. The self-test runs first
   # because a guard whose red has never been observed is not a guard; it
   # feeds every refusal shape (missing shard, dropped mutant, double-run,
   # shard-count disagreement, absent harness) through the checker and
@@ -3590,7 +3596,7 @@ jobs:
       - builtin-type-3-1
       - builtin-type-3-2
       - builtin-type-3-3
-    if: ${{ always() && needs.plan.result == 'success' && (needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'mutant-shards-complete')) }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'mutant-shards-complete')) }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
     timeout-minutes: 5

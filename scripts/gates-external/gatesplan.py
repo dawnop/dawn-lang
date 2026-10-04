@@ -119,9 +119,16 @@ JOB_KEYS = {"runs-on", "timeout-minutes", "steps", "needs", "if"}
 STEP_KEYS = {"name", "id", "run", "uses", "with", "env", "if"}
 
 # Job conditions, whitespace-normalised, with {job} standing for the job's
-# own id. "legacy" is the pre-#168 mutant-shards-complete; the other two are
-# #168's wiring. All three mean "run" in an external run: the first because
-# the needed jobs always end, the others because the plan is `all` here.
+# own id. "legacy" is the pre-#168 mutant-shards-complete; the next two are
+# #168's wiring. "plan-selected-not-cancelled" is the same fan-in guarded by
+# `!cancelled()` instead of `always()`, so that a GitHub run cut short by
+# cancel-in-progress skips it instead of reporting the cancelled shard's
+# missing record as a failure. An external run is never cancelled part way
+# (a dead controller resumes, it does not cancel), so there the two fan-in
+# shapes mean the same thing. Older shapes stay admitted because a plan is
+# derived from gates.yml at whatever commit is being gated. All four mean
+# "run" in an external run: the first because the needed jobs always end,
+# the others because the plan is `all` here.
 _PLAN_SELECT = ("needs.plan.outputs.all == 'true' || "
                 "contains(fromJSON(needs.plan.outputs.jobs), '{job}')")
 JOB_CONDITIONS = {
@@ -129,6 +136,8 @@ JOB_CONDITIONS = {
     "plan-selected": _PLAN_SELECT,
     "plan-selected-always": ("always() && needs.plan.result == 'success' && ("
                              + _PLAN_SELECT + ")"),
+    "plan-selected-not-cancelled": ("!cancelled() && needs.plan.result == 'success' && ("
+                                    + _PLAN_SELECT + ")"),
 }
 STEP_CONDITION = re.compile(
     r"^steps\.([A-Za-z_][\w-]*)\.outputs\.([A-Za-z_][\w-]*) == '([^']*)'$")
@@ -244,7 +253,7 @@ def job_condition_kind(job_id, condition, needs):
         if uses_plan and PLAN_JOB not in needs:
             break
         if kind != "plan-selected" and not [n for n in needs if n != PLAN_JOB]:
-            break  # always() only means something with gate jobs to wait on
+            break  # a fan-in only means something with gate jobs to wait on
         if kind == "plan-selected" and needs != [PLAN_JOB]:
             break
         return kind
@@ -583,6 +592,9 @@ def self_test(repo):
                 "(needs.plan.outputs.all == 'true' || "
                 f"contains(fromJSON(needs.plan.outputs.jobs), '{job_id}')) }}}}")
 
+    def selected_not_cancelled(job_id):
+        return selected_always(job_id).replace("always()", "!cancelled()")
+
     tiered = doc({
         "plan": plan_job,
         "a": job([{"run": "echo a"}], needs=["plan"], **{"if": selected("a")}),
@@ -602,6 +614,14 @@ def self_test(repo):
             failures.append("no plan -> external-all row")
     except PlanError as error:
         failures.append(f"refused the #168 shape: {error}")
+
+    # The same fan-in guarded by !cancelled(), as mutant-shards-complete is.
+    try:
+        plan = parse(tiered.replace("always()", "!cancelled()"), ok_action)
+        if [j["needs"] for j in plan] != [[], ["a"]]:
+            failures.append(f"!cancelled() fan-in lost its needs: {[j['needs'] for j in plan]}")
+    except PlanError as error:
+        failures.append(f"refused the !cancelled() fan-in: {error}")
 
     # Conditional adjustment rows: present exactly when gates.yml gives them
     # something to act on.
@@ -639,6 +659,13 @@ def self_test(repo):
             c=job([{"run": "echo c"}], needs=["plan", "a"],
                   **{"if": selected_always("c").replace(
                       "needs.plan.result == 'success'", "needs.plan.result != 'x'")})),
+        "!cancelled() without plan.result success": tier_with(
+            c=job([{"run": "echo c"}], needs=["plan", "a"],
+                  **{"if": selected_not_cancelled("c").replace(
+                      "needs.plan.result == 'success'", "needs.plan.result != 'x'")})),
+        "!cancelled() fan-in with no gate job to wait on": tier_with(
+            c=job([{"run": "echo c"}], needs=["plan"],
+                  **{"if": selected_not_cancelled("c")})),
         "a plan job with a needs": tier_with(plan=dict(plan_job, needs=["a"])),
         "a plan job with other outputs": tier_with(
             plan=dict(plan_job, outputs={"all": "x"})),
@@ -654,7 +681,7 @@ def self_test(repo):
             c=job([{"run": "echo", "env": {"R": "${{ needs.zz.result }}"}}],
                   needs=["plan", "a"], **{"if": selected_always("c")})),
     })
-    for label in list(refused)[-12:]:
+    for label in list(refused)[-14:]:
         try:
             parse(refused[label], ok_action)
         except PlanError:
