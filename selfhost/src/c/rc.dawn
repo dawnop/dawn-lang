@@ -819,8 +819,13 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
       lets = lets ++ [CSLet(t, ty, e1)]
       outs = outs ++ [CLocal(t, ty)]
       # a hoisted literal's temporary is a binding like any other (its drop
-      # is free); only what was never counted at all stays out
-      if counted(s3, e) || lit_immortal(e) {
+      # is free); only what was never counted at all stays out. "Literal"
+      # here means a reference one: `lit_immortal` also says yes to a folded
+      # constant of scalar type (`get(names(), K)` with `K: Int`), and a
+      # scalar temporary is outside the ledger -- `rc_check` admits a let
+      # only at a reference type, so binding it here put a drop on something
+      # never held (dawn-lang #444).
+      if counted(s3, e) || (lit_immortal(e) && is_ref_ty(ty)) {
         st2 = bind(st2, t)
         held = held ++ [t]
         if not own { temps = temps ++ [t] }
