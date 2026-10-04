@@ -58,6 +58,8 @@
 | `eq_bytes.dawn` | 语料十:`Bytes` 相等——裸的按内容,嵌进 record/ctor/Option/元组就按身份 |
 | `<name>.expect` | 该语料的期望输出(**手写,不从后端抄**) |
 | `<name>.args` | 可选；逐行写程序参数，JVM 越过 `--`、native 直接收到同一数组 |
+| `<name>.stdin` | 可选；程序的 stdin 换成这个文件（默认 `/dev/null`），逐字节喂给两个后端与 asan 那次运行 |
+| `<name>.stdout-closed` | 可选；stdout 是读端已先关掉的管道，每次写都失败（EPIPE/SIGPIPE），捕获的 stdout 为空，只比 stderr 与退出码（#468） |
 | `known-red.txt` | 今天就红的检查清单,带 ratchet |
 | `stdext/raw.dawn` | std-only 原语的 std 侧壳(io fault / bytes 哨兵),由 `run.sh` 注进 std 拷贝,见下 |
 | `run.sh` | 差分 harness |

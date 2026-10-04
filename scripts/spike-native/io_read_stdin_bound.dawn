@@ -1,0 +1,32 @@
+# `read_stdin(n)` takes `n` as a bound, not a size (#468).
+#
+# The contract is "exactly n bytes, shorter only at end of input". Native used
+# to allocate `n` bytes before reading one, so a large `n` on a short input
+# ended the run with "dawn: out of memory"; the JVM narrowed `n` with L2I, so
+# 2^31 became a negative int and readNBytes threw, and 2^32 became 0 and read
+# nothing. Both now grow the buffer with what arrives, and both read a
+# negative `n` as 0.
+#
+# The reads are ordered so each one sees a known amount left in
+# io_read_stdin_bound.stdin (26 bytes): the empty reads first, then a short
+# exact read, then 2^32, which L2I turned into 0 and which has to take the
+# other 23 bytes, then three bounds at end of input. 2^31 is the one L2I made
+# negative; 2^62 and the largest Int are the ones an up-front allocation
+# cannot survive, and at end of input the right answer is plainly empty.
+use std/io
+use std/bytes
+
+fn take(label: String, n: Int) -> Unit !io = {
+  let b = io.read_stdin(n)
+  io.println(label ++ " -> ${bytes.len(b)} [" ++ bytes.decode_utf8_lossy(b) ++ "]")
+}
+
+pub fn main() -> Unit !io = {
+  take("-1", -1)
+  take("0", 0)
+  take("3", 3)
+  take("2^32", 4294967296)
+  take("2^31", 2147483648)
+  take("2^62", 4611686018427387904)
+  take("max", 9223372036854775807)
+}

@@ -165,6 +165,44 @@ verdict() {
 # never a ratchet trip: there is no evidence either way.
 blocked() { printf '  %-28s blocked\n' "$1"; }
 
+# feed <name> <stdout> <stderr> <command...>: run one backend's program the way
+# the entry asks to be run, with the exit code as the command's own.
+#
+# Two optional markers, both about the program's standard streams:
+#
+#   <name>.stdin          stdin is this file instead of /dev/null, byte for
+#                         byte, for a program whose subject is what it reads
+#                         (#468: where read_line ends a line, how read_stdin
+#                         bounds a read).
+#   <name>.stdout-closed  stdout is a pipe whose read end is closed before the
+#                         program starts, so every write to it fails with
+#                         EPIPE (or SIGPIPE, which is what #468 was about).
+#                         Closed beforehand rather than `| head -1`: with a
+#                         live reader the first failing write depends on when
+#                         the reader leaves, and a program that fits in the
+#                         pipe buffer never fails at all. <stdout> is left
+#                         empty. Python because bash cannot hand a child the
+#                         write end of a pipe whose read end is already gone;
+#                         subprocess restores SIGPIPE to the default for the
+#                         child, so the native runtime is tested from the
+#                         disposition a shell would give it, and a death by
+#                         signal comes back as 128+signal, as from a shell.
+feed() {
+  local name="$1" out="$2" err="$3" in=/dev/null
+  shift 3
+  if [ -f "$here/$name.stdin" ]; then in="$here/$name.stdin"; fi
+  if [ -f "$here/$name.stdout-closed" ]; then
+    : >"$out"
+    python3 -c 'import os, subprocess, sys
+r, w = os.pipe()
+os.close(r)
+rc = subprocess.call(sys.argv[1:], stdout=w)
+sys.exit(128 - rc if rc < 0 else rc)' "$@" 2>"$err" <"$in"
+  else
+    "$@" >"$out" 2>"$err" <"$in"
+  fi
+}
+
 # One corpus entry, start to finish.
 #
 # The driver runs these in parallel (see the worker branch below), so nothing
@@ -207,10 +245,10 @@ run_corpus() {
   # stdin is /dev/null, not the terminal: a corpus program that reads stdin
   # would otherwise hang the developer's shell and read something different in
   # CI. At /dev/null both backends see end of input, which is itself a case
-  # worth agreeing on.
-  "$root/bin/dawn" run --std "$stdcopy" "$prog" "${jvm_tail[@]}" \
-    >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
-    </dev/null || jvm_rc=$?
+  # worth agreeing on. An entry with a <name>.stdin reads that file instead
+  # (see feed).
+  feed "$name" "$work/$name.jvm" "$work/$name.jvm.err" \
+    "$root/bin/dawn" run --std "$stdcopy" "$prog" "${jvm_tail[@]}" || jvm_rc=$?
   if [ "$jvm_rc" -ne 0 ] && [ "$fatal_ok" -eq 0 ]; then
     verdict "$name:jvm-run" bad "$(cat "$work/$name.jvm.err")"
     jvm_ran=0
@@ -282,8 +320,8 @@ run_corpus() {
   fi
 
   nat_rc=0
-  "$work/$name.bin" "${prog_args[@]}" >"$work/$name.native" 2>"$work/$name.native.err" \
-    </dev/null || nat_rc=$?
+  feed "$name" "$work/$name.native" "$work/$name.native.err" \
+    "$work/$name.bin" "${prog_args[@]}" || nat_rc=$?
 
   # -O0 so the report names the Dawn function rather than whatever it was
   # inlined into; the answer is not being checked here, only the memory.
@@ -294,8 +332,8 @@ run_corpus() {
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
       >"$work/$name.asan.cc" 2>&1; then
       asan_rc=0
-      ASAN_OPTIONS=detect_leaks=1 "$work/$name.asan" "${prog_args[@]}" \
-        >/dev/null 2>"$work/$name.asan.err" </dev/null || asan_rc=$?
+      ASAN_OPTIONS=detect_leaks=1 feed "$name" /dev/null "$work/$name.asan.err" \
+        "$work/$name.asan" "${prog_args[@]}" || asan_rc=$?
       # LeakSanitizer prints its own banner, and a program that already
       # exits 1 (the panic corpus) would hide a leak behind a matching code
       if [ "$asan_rc" -eq "$nat_rc" ] &&

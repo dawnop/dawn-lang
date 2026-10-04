@@ -696,6 +696,11 @@ static void dawn_rc_stats_dump(void) {
           (unsigned long long)dawn_adt0_missed);
 }
 
+#ifndef __wasi__
+/* See the SIGPIPE note in dawn_rt_init. */
+static void dawn_on_sigpipe(int sig) { (void)sig; }
+#endif
+
 void dawn_rt_init(int argc, char **argv) {
   dawn_argc = argc;
   dawn_argv = argv;
@@ -703,6 +708,35 @@ void dawn_rt_init(int argc, char **argv) {
    * differential harness, so it must not be reordered by buffering
    * when stdout is a pipe and stderr is not. */
   setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+#ifndef __wasi__
+  /* A closed stdout is not the end of the program. On the JVM backend
+   * `print` and `println` go through System.out, a PrintStream, which catches
+   * the IOException a write to a closed pipe raises, records it for
+   * `checkError` (which nothing calls) and carries on; HotSpot handles SIGPIPE
+   * itself so the signal never ends the process. So `prog | head -1` runs the
+   * JVM program to its end and exits 0. Native used to die of SIGPIPE at the
+   * first flush after `head` left (exit 141), skipping whatever came next.
+   *
+   * With the signal handled, the write fails with EPIPE, stdio sets the
+   * stream's error flag, and that is all: the print functions below never
+   * look at the flag, the same way PrintStream never throws it. Every later
+   * flush fails the same way and costs one syscall.
+   *
+   * A do-nothing handler rather than SIG_IGN, because the two differ for a
+   * child: an ignored signal stays ignored across exec, a caught one goes
+   * back to the default. `io.run`'s children (posix_spawn below) must get the
+   * default, as children of the JVM do, or `yes | head` run from a Dawn
+   * program would never end. SA_RESTART keeps the handler from turning an
+   * unrelated blocking call into EINTR. */
+  {
+    struct sigaction pipe_sa;
+    memset(&pipe_sa, 0, sizeof pipe_sa);
+    pipe_sa.sa_handler = dawn_on_sigpipe;
+    sigemptyset(&pipe_sa.sa_mask);
+    pipe_sa.sa_flags = SA_RESTART;
+    sigaction(SIGPIPE, &pipe_sa, NULL);
+  }
+#endif
   /* Read at run time rather than compiled in, so one binary can be run both
    * ways. Rebuilding to switch would change the layout, which is the variable
    * the mode exists to hold still (plan 6 R3). */
@@ -3970,6 +4004,24 @@ dawn_unit dawn_reactor_state_set(void *state) {
  * things that must agree rather than a fact. `io_read_stdin` -- the one the
  * language server uses -- reads its whole frame in one call and pays nothing.
  * Neither reader may consume a byte the caller did not ask for. */
+
+/* Set when the last line `io_read_line` returned ended at a `\r`.
+ *
+ * BufferedReader.readLine ends a line at `\n`, at `\r`, or at `\r\n`, and
+ * the JVM backend's read_line is exactly that call. Telling a lone `\r` from
+ * the first half of `\r\n` needs the next byte, and reading it now would
+ * consume a byte the caller did not ask for (the rule above) and block on a
+ * terminal that has sent `\r` and is waiting for an answer. So this does what
+ * BufferedReader does with its own `skipLF`: end the line at the `\r`, and
+ * let the *next* call drop a leading `\n`. Process-level because stdin is.
+ *
+ * Only `io_read_line` reads or clears it. `io_read_stdin` reads the raw
+ * stream, as the JVM's does under its BufferedReader, and mixing the two is
+ * already outside the contract (std/io's note on read_stdin). For the same
+ * reason `io_stdin_ready` may answer `true` for a lone pending `\n` that the
+ * next read_line will swallow. */
+static bool dawn_stdin_skip_lf = false;
+
 dawn_adt *dawn_io_read_line(void) {
   size_t cap = 128;
   size_t n = 0;
@@ -3983,8 +4035,17 @@ dawn_adt *dawn_io_read_line(void) {
       k = 0; /* an error the caller sees as end of input, as ferror did */
     }
     if (k == 0) break;
+    if (dawn_stdin_skip_lf) {
+      dawn_stdin_skip_lf = false;
+      /* the second half of a `\r\n` the previous line already ended at */
+      if (c == '\n') continue;
+    }
     any = true;
     if (c == '\n') break;
+    if (c == '\r') {
+      dawn_stdin_skip_lf = true;
+      break;
+    }
     if (n == cap) {
       char *bigger = (char *)dawn_alloc(cap * 2);
       memcpy(bigger, buf, n);
@@ -3995,13 +4056,12 @@ dawn_adt *dawn_io_read_line(void) {
     buf[n++] = c;
   }
   /* end of input before a single byte is None; a last line without a
-   * terminator is still a line, as BufferedReader.readLine has it */
+   * terminator is still a line, as BufferedReader.readLine has it. Neither
+   * terminator is kept. */
   if (!any) {
     free(buf);
     return dawn_none();
   }
-  /* BufferedReader.readLine keeps neither terminator */
-  if (n > 0 && buf[n - 1] == '\r') n--;
   /* the JVM reads this stream through an InputStreamReader built on UTF_8,
    * whose decoder replaces rather than reports -- so a malformed line is a
    * line, here too */
@@ -4426,22 +4486,40 @@ dawn_str *dawn_io_real_path(dawn_str *path) {
 }
 
 /* Exactly `n` bytes, short only at end of input. See the note on
- * `dawn_io_read_line` for why this is `read(2)` and not `fread`. */
+ * `dawn_io_read_line` for why this is `read(2)` and not `fread`.
+ *
+ * `n` is how much the caller will take, not how much there is, so the buffer
+ * grows with what actually arrives: 64 KiB first (so a language server frame,
+ * the caller this exists for, is still one allocation of exactly `n`), then
+ * doubling, never past `n`. Allocating `n` up front made `read_stdin(1 << 40)`
+ * on a five-byte input die with "out of memory" instead of returning the five
+ * bytes, which is the short read the contract promises. A negative `n` is an
+ * empty read, the same as 0. Sizes stay in int64_t until a single step is
+ * handed to read(2), because size_t is 32 bits on wasm32. */
 dawn_bytes *dawn_io_read_stdin(int64_t n) {
   /* an owned empty buffer, not a static "": drop frees `p` now */
   if (n <= 0) return dawn_bytes_of((unsigned char *)dawn_alloc(1), 0);
-  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n);
-  size_t got = 0;
-  while (got < (size_t)n) {
-    ssize_t step = read(0, buf + got, (size_t)n - got);
+  int64_t cap = n < ((int64_t)1 << 16) ? n : ((int64_t)1 << 16);
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)cap);
+  int64_t got = 0;
+  while (got < n) {
+    if (got == cap) {
+      int64_t next = cap > n / 2 ? n : cap * 2;
+      unsigned char *bigger = (unsigned char *)dawn_alloc((size_t)next);
+      memcpy(bigger, buf, (size_t)got);
+      free(buf);
+      buf = bigger;
+      cap = next;
+    }
+    ssize_t step = read(0, buf + got, (size_t)(cap - got));
     if (step < 0) {
       if (errno == EINTR) continue;
       break; /* an error the caller sees as end of input, as ferror did */
     }
     if (step == 0) break; /* end of input */
-    got += (size_t)step;
+    got += (int64_t)step;
   }
-  return dawn_bytes_of(buf, (int64_t)got);
+  return dawn_bytes_of(buf, got);
 }
 
 /* True when at least one byte can be read from standard input right now.

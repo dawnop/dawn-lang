@@ -1,0 +1,33 @@
+# Where `read_line` ends a line (#468).
+#
+# The JVM backend's read_line is `BufferedReader.readLine`, and that call ends
+# a line at `\n`, at `\r`, or at `\r\n`. The C runtime used to end lines at
+# `\n` only and strip one trailing `\r`, so a lone `\r` stayed inside the line
+# and `\r\r` lost only the second: `a\rb\r\nc\r\rd\n\re` read as three lines on
+# native and seven on the JVM.
+#
+# io_read_line_cr.stdin holds that input with one change at the end -- a
+# last line `f` with no terminator -- because a lone `\r` right before end of
+# input is where a skip-the-next-`\n` flag can go wrong in both directions: it
+# must neither eat the `f` nor make up an empty line after it. Every line is
+# printed with its code points visible, so a `\r` that survives shows up as
+# `<CR>` rather than as a cursor movement in a terminal.
+use std/io
+use std/str
+
+fn shown(s: String) -> String = str.replace(str.replace(s, "\r", "<CR>"), "\n", "<LF>")
+
+pub fn main() -> Unit !io = {
+  var n = 0
+  var go = true
+  while go {
+    match io.read_line() {
+      Some(l) -> {
+        n = n + 1
+        io.println("${n}: [" ++ shown(l) ++ "]")
+      }
+      None -> { go = false }
+    }
+  }
+  io.println("lines: ${n}")
+}
