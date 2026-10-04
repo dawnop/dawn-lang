@@ -1,9 +1,10 @@
 # LSP 引用与改名：T0 解析覆盖
 
 > 状态：**current**：T0 于 2026-10-04 落地，分支 `feat/lsp-resolution-coverage`（提交以主题引用，合入后的哈希记在进度记录里）；
-> T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`；T2（VS Code 与 Playground 两个消费端，§T2）同日，分支 `feat/lsp-semantic-tokens-clients`。
+> T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`；T2（VS Code 与 Playground 两个消费端，§T2）同日，分支 `feat/lsp-semantic-tokens-clients`；
+> R1（单文件 references 与 documentHighlight，§R1）同日落地，分支 `feat/lsp-references-local`。
 > 依据：裁决 `agent-handoff/ruling-lsp-tokens-rename-20261003.md`，调研 `agent-handoff/research-lsp-tokens-rename-report-20261003.md`
-> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2；R1–R3（references、rename）各自动码前在此续写。
+> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2，§R1 写 R1；R2、R3（工作区 references、rename）各自动码前在此续写。
 
 ## 一、为什么 T0 在最前
 
@@ -298,4 +299,62 @@ CM6 里 mark 与语法高亮的 span 谁包谁取决于优先级，所以每条�
 - **自定义类型 `effect`、自定义修饰 `effect`**：同 T1.8；VS Code 侧现在多登记一个名字不难，但服务端不发，登记了也没有颜色。
 - **把 CM6 关键字表对齐 `front/token.dawn` 并纳入对账**（调研 §2.1 的旁支发现）：与 semantic tokens 无关，单独一刀。
 - **VS Code 扩展发布到 marketplace**：版本号升到 0.1.3、写了 `CHANGELOG.md`；发版由维护者做。
+
+## R1：单文件 references 与 documentHighlight
+
+调研 §5.1 的 R1 行：同一个收集器按键投影，只在当前文档内；documentHighlight 是同一份结果换个形状。跨文件的引用是 R2（工作区索引），改名是 R3。
+
+### R1.1 键：声明，不是名字
+
+键是名字**解析到的声明**的位置：`(def_path, 名字跨度)`，即 `Resolution.def_path` 与 `Resolution.def`。两个声明不会落在同一个位置，
+所以位置就是声明的身份；拼写一概不看。这正是 references 与文本搜索的分别：`let n = n + 1` 里左边的 `n` 是新的局部量，
+右边的 `n` 是被它遮蔽的形参；形参 `twice: fn(Int) -> Int` 与顶层函数 `twice` 同名；记录简写 `{ x }` 里的 `x` 既是字段又是局部量。
+同名而不同声明的，各自是各自的引用集合，夹具对这几种都有负例。
+
+不用 `Sym` 的整数 id：`Sym` 只有本模块的局部量才有，顶层声明、别的模块的声明、std 都没有；而遍历给每个名字的定义位置对局部量就是
+`Sym.dlo/dhi`，对其余的是声明的名字跨度，两者已经是同一套坐标（T0 的内联测试逐个核对过「收集到的位置 = definition 的回答」）。
+
+光标处的键取 definition 在那里的回答（`lspq.find_target`），而不是另走一遍收集再找最内层：这样「references 认哪个声明」与
+「definition 跳到哪里」由同一条规则决定，不会出现两者对同一个光标说法不一的情况。光标下的名字没有声明（内建类型、内建函数、字面量）时回空列表。
+
+然后把整个文档走一遍收集（`lspq.walked_resolutions`），留下键相同的，按起点排序。每个结果裁到名字本身：字段声明的跨度是 `x: Int`，
+引用只要 `x`；模块的路径 `use std/str` 取最后一段 `str`（模块的定义位置是文件开头 (0,0)，见 §T1.2）。同一起点被收集两次的只留一个：
+记录类型与它的构造器同名同位置，二者的引用合在一起，这与「一个名字一种颜色」（§T1.2）是同一个取舍。
+
+**只在当前文档内**：声明在别的模块时，本文档里的使用照样找得到，别的文件里的找不到。空结果不证明没人用，这是 R2 要补的。
+
+### R1.2 声明处与 `includeDeclaration`
+
+声明处是「名字就站在它自己的定义位置上」的那个：本文档内（`def_path` 为空），且起点等于定义位置；`let` 的定义位置是整条语句（`Sym.dlo`），
+它的名字靠 T1 在声明处打的 `LocalRole` 认出来。`context.includeDeclaration` 为真时它在结果里，为假时去掉；声明在别的模块时本来就不在本文档。
+请求没带 `context` 时按假处理（LSP 规定该字段必有，缺了就取保守的一边）。
+
+### R1.3 documentHighlight 的读与写
+
+结果与 `includeDeclaration: true` 的 references 相同，只是每项带种类：**声明处与赋值目标是 Write（3），其余都是 Read（2）**，不用 Text（1）。
+声明把值绑到名字上，赋值改写它，二者对读者是同一类事件；函数、类型的声明处也算 Write，是为了规则只有一条，客户端把声明处和使用处分开着色就够了。
+赋值目标是遍历在 `SAssign` 处知道、跨度上看不出的事，所以收集时带一个 `UseKind.AssignUse`；handler 状态格的写（检查器把它改写成 `cell_set`）同样算写。
+
+### R1.4 记录简写双向，以及 impl
+
+一个跨度有时要算作两个声明的引用，而 hover、definition、semantic tokens 都只能回答一个。这样的位置在收集时多记一条「只给 references 读」的解析
+（`UseKind.PunUse`/`ImplUse`，`lspq.references_only`）：`resolutions` 与 `lsptok` 都跳过它们，所以 T0 的契约与 T1 的 token 不变。
+
+- **记录简写**：`Point { x, y }`（构造）与 `Point { x, y: _ }`（模式）里的 `x`，遍历按局部量回答（T0 §3.3），收集时再记一条指向字段声明的。
+  于是字段 `x` 的引用里有这几处简写，局部量 `x` 的引用里也有，两个方向都不漏；R3 改名时这正是要展开成 `x: x` 的地方（裁决第 4 条）。
+  光标落在简写上时，definition 说的是局部量，references 也就给局部量的集合。
+- **impl**：`impl Area[Point]` 里的 trait 名、impl 里每个方法的名字，遍历按 impl 自己的位置回答（definition 跳到自己），收集时再各记一条
+  指向 trait 声明与 trait 方法声明的。于是从 trait 方法出发的引用含 impl 里的同名方法，从 trait 出发的含 impl 头。反方向不做：光标在 impl 方法上，
+  definition 说的是 impl 方法自己，references 就只给它自己的集合（见 R1.8）。
+
+### R1.8 不做的（理由）
+
+- **跨文件**：R2。工作区索引要挂在模块步骤上随记忆复用（调研 §5.1 R2 行），不是在 R1 里顺手能做对的事；R1 的结果对别的文件只字不提。
+- **先文本搜索再逐个解析**（rust-analyzer 的做法）：它解决的是没有现成解析结果的问题；本文档的每个名字已经解析过，按键过滤就是全部的搜索（裁决第 5 条）。
+- **从 impl 方法反查 trait 方法**：要让 definition 在 impl 方法上改答 trait 方法，或者让 references 不跟 definition 走；两者都改变一个已经有人依赖的回答。
+  R3 改名 trait 方法时必须连 impl 一起改，到时按改名的安全条件定。
+- **impl 头里 trait 名的 definition**：仍然跳到自己（T0 的现状），R1 只在收集里补了指向 trait 的那一条。改它会动 hover 文本，留给 R3 一并处理。
+- **按局部量裁剪遍历范围**：局部量的引用都在它所在的顶层声明里，理论上只走那一个声明就够；但判断「这是局部量」要再引一套规则，
+  而整篇遍历在 12k 行上也只是一百多毫秒（R1.6）。等 R2 的索引挂上记忆步骤后再看。
+- **Text（1）种类**：每个名字都已解析，没有「只是文字相同」的结果可标。
 
