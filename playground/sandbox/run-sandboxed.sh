@@ -1,7 +1,9 @@
 #!/bin/sh
 # Run one command inside a throwaway systemd sandbox. Invoked by the dawn-play
-# runner as `sudo -n run-sandboxed.sh <workdir> <cmd> [args...]`; whitelisted for
-# the dawn-play user in sudoers (see sudoers.dawn-play). Everything the runner
+# runner as `sudo -n run-sandboxed.sh run <id> <workdir> <cmd> [args...]`, and
+# as `sudo -n run-sandboxed.sh stop <id>` when that command outlives the
+# runner's time limit; whitelisted for the dawn-play user in sudoers (see
+# sudoers.dawn-play). Everything the runner
 # passes is untrusted, so this script hardcodes every limit and never interprets
 # the arguments as anything but a literal argv to exec.
 #
@@ -13,6 +15,42 @@
 # directory itself: the command's output files sit one level up, where the
 # unit cannot rename or replace them (playground/src/play/exec.dawn).
 set -eu
+
+# The unit is named after an id the runner picks, 32 lowercase hex digits, so
+# the runner can stop exactly the unit it started. It used to be anonymous,
+# and on a timeout the runner could only SIGKILL `sudo`, which does not reach
+# the unit `systemd-run --wait` started: the unit ran on to RuntimeMaxSec while
+# the runner's gate admitted the next request (the same run/stop shape as
+# run-lsp-sandboxed.sh). The id cannot name anything but a unit with this
+# prefix.
+PREFIX=dawn-play-run-
+
+valid_id() {
+  [ "${#1}" -eq 32 ] || return 1
+  case "$1" in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+}
+
+action=${1:-}
+case "$action" in
+  run)
+    [ "$#" -ge 4 ] || { echo "run-sandboxed: expected run <id> <workdir> <cmd...>" >&2; exit 2; }
+    ;;
+  stop)
+    [ "$#" -eq 2 ] || { echo "run-sandboxed: expected stop <id>" >&2; exit 2; }
+    ;;
+  *)
+    echo "run-sandboxed: expected run or stop" >&2
+    exit 2
+    ;;
+esac
+valid_id "$2" || { echo "run-sandboxed: invalid unit id" >&2; exit 2; }
+unit="${PREFIX}$2"
+if [ "$action" = stop ]; then
+  exec /usr/bin/systemctl stop "${unit}.service"
+fi
+shift 2
 
 WORKDIR="$1"
 shift
@@ -59,6 +97,7 @@ SANDBOX_FSIZE=32M
 
 exec systemd-run \
   --quiet --wait --pipe --collect \
+  --unit="$unit" \
   --setenv="DAWN_JVM_OPTS=$SANDBOX_JVM_OPTS" \
   --property=DynamicUser=yes \
   --property=PrivateNetwork=yes \
@@ -83,6 +122,7 @@ exec systemd-run \
   --property=LimitFSIZE=$SANDBOX_FSIZE \
   --property=CPUQuota=200% \
   --property=RuntimeMaxSec=15 \
+  --property=TimeoutStopSec=3s \
   --property=WorkingDirectory="$WORKDIR" \
   --property=ReadWritePaths="$WORKDIR" \
   --property=BindReadOnlyPaths=/opt/dawn \

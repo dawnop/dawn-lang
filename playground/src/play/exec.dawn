@@ -32,6 +32,7 @@ use std/bytes
 use std/io
 use std/io.{Fs, with_fs_real}
 use java "java.lang.ProcessBuilder"
+use java "java.lang.Process"
 use java "java.io.File"
 use java "java.io.InputStream"
 use java "java.nio.file.Files"
@@ -140,17 +141,67 @@ fn shown(path: String, dir: String, box: String) -> (String, Bool) !io = {
   if cut { (clean ++ "\n… (output truncated)", true) } else { (clean, false) }
 }
 
-# Prepend the sudo-whitelisted sandbox wrapper. The wrapper takes the working
-# directory as its first argument, then the command to run inside a throwaway
-# systemd unit (stage 4d). Only PLAY_UNSAFE_LOCAL=1 leaves argv unchanged —
-# config.sandbox_enabled is fail-closed. `box` is the only directory the unit
-# can write.
-fn sandboxed(box: String, argv: List[String]) -> List[String] !io =
+# Prepend the sudo-whitelisted sandbox wrapper: `run <unit id> <box> <argv>`
+# runs argv inside a throwaway systemd unit named after the id (stage 4d), and
+# `stop <unit id>` ends that unit. Only PLAY_UNSAFE_LOCAL=1 leaves argv
+# unchanged; config.sandbox_enabled is fail-closed. `box` is the only
+# directory the unit can write.
+fn sandboxed(unit: String, box: String, argv: List[String]) -> List[String] !io =
   if sandbox_enabled() {
-    ["sudo", "-n", sandbox_script(), box] ++ argv
+    ["sudo", "-n", sandbox_script(), "run", unit, box] ++ argv
   } else {
     argv
   }
+
+# How to end the unit a timed-out phase is still running, or nothing when
+# there is no unit.
+fn stop_argv(unit: String) -> List[String] !io =
+  if sandbox_enabled() { ["sudo", "-n", sandbox_script(), "stop", unit] } else { [] }
+
+# A fresh unit id: 32 lowercase hex digits, the only shape the wrapper takes.
+fn fresh_unit() -> String !io =
+  str.replace(UUID.randomUUID().expect("uuid").toString().expect("uuid string"), "-", "")
+
+## How long a `stop` may take before the runner gives up on it. The unit's
+## own TimeoutStopSec is 3 s; past this the unit's RuntimeMaxSec is the
+## backstop.
+const STOP_SECS: Int = 10
+
+# Wait up to `secs` for `proc`. On a timeout, stop it and wait until it has
+# ended, so the gate is released only when the work is gone; answer whether it
+# finished on its own.
+#
+# Under the sandbox `proc` is `sudo`, and the work is a systemd unit that
+# `systemd-run --wait` started on its behalf. A SIGKILL to `sudo` does not
+# reach the unit, and an unprivileged runner may not be allowed to signal a
+# root `sudo` at all. Killing only `proc` therefore either let the unit run
+# on to RuntimeMaxSec while the gate admitted the next request, or blocked
+# here until it did. `stop` ends the unit, after which `systemd-run`, and
+# `sudo` with it, exits by itself; `destroyForcibly` is left for the
+# unsandboxed case, where `proc` is the work.
+fn finish_or_stop(proc: Process, secs: Int, stop: List[String]) -> Bool !io = {
+  let unit = TimeUnit.valueOf("SECONDS").expect("seconds")
+  if proc.waitFor(secs, unit) {
+    true
+  } else {
+    if len(stop) > 0 {
+      let sp = ProcessBuilder.new(stop)
+      sp.redirectErrorStream(true)
+      sp.redirectOutput(File.new("/dev/null"))
+      match sp.start() {
+        Some(s) ->
+          if not s.waitFor(STOP_SECS, unit) {
+            let _ = s.destroyForcibly()
+            ()
+          }
+        None -> ()
+      }
+    }
+    proc.destroyForcibly()
+    proc.waitFor()
+    false
+  }
+}
 
 # Set a directory's mode outright, umask aside, without a child process.
 fn set_mode(dir: String, mode: String) -> Unit !io = {
@@ -221,16 +272,13 @@ fn with_request(code: String, body: fn(String, String) -> Outcome !io) -> Outcom
 # diagnostics are capped like the run output: comptime can print too.
 fn compile_phase(dir: String, box: String) -> Result[Int, String] !io = {
   let build_out = "${dir}/build.txt"
-  let bp = ProcessBuilder.new(sandboxed(box, [dawn_bin(), "build", "${box}/prog.dawn", "-o", "${box}/prog.jar"]))
+  let unit = fresh_unit()
+  let bp = ProcessBuilder.new(sandboxed(unit, box, [dawn_bin(), "build", "${box}/prog.dawn", "-o", "${box}/prog.jar"]))
   bp.redirectErrorStream(true)
   bp.redirectOutput(File.new(build_out))
   let started = System.nanoTime()
   let build = bp.start().expect("failed to start compiler")
-  let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
-  let finished = build.waitFor(compile_timeout_secs(), secs)
-  if not finished {
-    build.destroyForcibly()
-    build.waitFor()
+  if not finish_or_stop(build, compile_timeout_secs(), stop_argv(unit)) {
     Err("compilation timed out after ${compile_timeout_secs()}s")
   } else if build.exitValue() != 0 {
     let (diags, _) = shown(build_out, dir, box)
@@ -266,19 +314,17 @@ fn execute_staged(dir: String, box: String) -> Outcome !io =
 # Phase 2: run the compiled jar under a wall-clock limit.
 fn run_phase(dir: String, box: String) -> Outcome !io = {
   let run_out = "${dir}/run.txt"
-  let rp = ProcessBuilder.new(sandboxed(box, [java_bin(), RUN_HEAP, "-jar", "${box}/prog.jar"]))
+  let unit = fresh_unit()
+  let rp = ProcessBuilder.new(sandboxed(unit, box, [java_bin(), RUN_HEAP, "-jar", "${box}/prog.jar"]))
   rp.redirectErrorStream(true)
   rp.redirectOutput(File.new(run_out))
-  let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
   let started = System.nanoTime()
   let proc = rp.start().expect("failed to start program")
-  if proc.waitFor(timeout_secs(), secs) {
+  if finish_or_stop(proc, timeout_secs(), stop_argv(unit)) {
     let ms = (System.nanoTime() - started) / 1000000
     let (out, cut) = shown(run_out, dir, box)
     Compiled(out, proc.exitValue(), cut, ms)
   } else {
-    proc.destroyForcibly()
-    proc.waitFor()
     let (out, _) = shown(run_out, dir, box)
     Timeout(out)
   }
@@ -436,4 +482,56 @@ test "with_request removes the request directory when the body fails" {
   }
   assert str.contains(named, "/dawn-play-")
   assert not Files.exists(Path.of(named)!, LinkOption.valueOf("NOFOLLOW_LINKS")!)
+}
+
+# Test-only: a stand-in for the sandbox wrapper with the property that matters.
+# `run` starts the work in the background and waits for it, so killing the
+# wrapper leaves the work running, as killing `sudo` leaves the unit; `stop`
+# ends the work by the pid `run` recorded under the unit id.
+fn fake_wrapper(d: String) -> String !io = {
+  let path = "${d}/fake-sandbox.sh"
+  let body =
+    "#!/bin/sh\n" ++
+    "d=\$(dirname \"\$0\")\n" ++
+    "case \"\$1\" in\n" ++
+    "  run) id=\$2; shift 2; \"\$@\" & echo \$! > \"\$d/\$id.pid\"; wait \$! ;;\n" ++
+    "  stop) kill \"\$(cat \"\$d/\$2.pid\")\" ;;\n" ++
+    "esac\n"
+  let _ = with_fs_real(() => io.write_file(path, body))
+  path
+}
+
+# Test-only: whether the pid recorded for `unit` is still a live process.
+fn alive(d: String, unit: String) -> Bool !io = {
+  let pid = with_fs_real(() => match io.read_file("${d}/${unit}.pid") {
+    Ok(t) -> t
+    Err(_) -> ""
+  })
+  let p = ProcessBuilder.new(["kill", "-0", str.trim(pid)]).start().expect("start")
+  p.waitFor() == 0
+}
+
+test "a timed-out phase is stopped through the wrapper, not only killed" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  let fake = fake_wrapper(d)
+  let unit = fresh_unit()
+  assert str.len(unit) == 32
+  let p = ProcessBuilder.new(["sh", fake, "run", unit, "sleep", "30"]).start().expect("start")
+  assert not finish_or_stop(p, 1, ["sh", fake, "stop", unit])
+  # the work the wrapper started is gone by the time the phase returns
+  assert not alive(d, unit)
+}
+
+test "with no stop command a timed-out wrapper's work outlives it" {
+  # the shape of the bug, kept as the control: killing the wrapper alone
+  # leaves its work running
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  let fake = fake_wrapper(d)
+  let unit = fresh_unit()
+  let p = ProcessBuilder.new(["sh", fake, "run", unit, "sleep", "30"]).start().expect("start")
+  assert not finish_or_stop(p, 1, [])
+  assert alive(d, unit)
+  sh_run(["sh", fake, "stop", unit])
 }

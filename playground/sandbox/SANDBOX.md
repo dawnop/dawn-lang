@@ -10,12 +10,13 @@ except one temp dir, and hard CPU/RAM/PID/time caps.
 ```
 dawn-play (unprivileged service user)
   └─ per request: mkdir <root>/dawn-play-<uuid>/box, write box/prog.dawn
-  └─ phase 1  sudo -n run-sandboxed.sh <dir>/box  dawn build prog.dawn -o prog.jar
+  └─ phase 1  sudo -n run-sandboxed.sh run <id> <dir>/box  dawn build prog.dawn -o prog.jar
                  output -> <dir>/build.txt
-  └─ phase 2  sudo -n run-sandboxed.sh <dir>/box  java -Xmx256m -jar prog.jar
+  └─ phase 2  sudo -n run-sandboxed.sh run <id> <dir>/box  java -Xmx256m -jar prog.jar
                  output -> <dir>/run.txt
-                └─ systemd-run --wait --pipe  (DynamicUser, PrivateNetwork, …)
+                └─ systemd-run --wait --pipe --unit=dawn-play-run-<id>  (DynamicUser, PrivateNetwork, …)
                      └─ the untrusted command; stdout piped back to a file
+  └─ on a timeout: sudo -n run-sandboxed.sh stop <id>, then wait for the phase to end
   └─ rm -rf <dir>, on every way out
 ```
 
@@ -141,6 +142,13 @@ hang or a host-level effect:
 9. **Output swap**: from inside the unit, try to replace `../run.txt` with a
    link or a FIFO → denied (the request directory is not writable); the
    response arrives within the run budget.
+10. **Timeout reclaim**: send the infinite loop from item 1. Within a second of
+   the `phase:"timeout"` response, `systemctl list-units --all
+   'dawn-play-run-*'` shows no unit. Until 2026-10-05 a timeout only killed
+   `sudo`, which does not reach the unit; it ran on to `RuntimeMaxSec` while
+   the runner admitted the next request. Each phase's unit is now named
+   `dawn-play-run-<id>`, and the runner ends it with `run-sandboxed.sh stop
+   <id>` and waits for it before releasing the gate.
 
 Confirm too that after a storm of requests the concurrency gate hasn't leaked
 permits (the runner stays responsive). The permit leak this used to warn about
