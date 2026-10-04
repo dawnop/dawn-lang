@@ -22,6 +22,7 @@ import {
   lspDefinition,
   lspHover,
   lspInlayHints,
+  lspSemanticTokens,
 } from './lsp'
 import { playEndpoints } from './endpoints'
 import { SAMPLES } from './samples'
@@ -219,6 +220,7 @@ function mount(root: HTMLElement) {
         dawnDiagnostics(checkEndpoint, lsp, (busy) => (checking.hidden = !busy)),
         lspHover(lsp),
         lspInlayHints(lsp),
+        lspSemanticTokens(lsp),
         lspDefinition(lsp),
         errorLens,
         lintGutter(),

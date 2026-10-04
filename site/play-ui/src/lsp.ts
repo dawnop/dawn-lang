@@ -69,6 +69,24 @@ export interface LspInlayHint {
   paddingRight?: boolean
 }
 
+/**
+ * The names a semantic token's integers index into (LSP `SemanticTokensLegend`),
+ * as the server sent them in `initialize`. Tokens are decoded against these
+ * names, never against a list kept here: the server owns the order.
+ */
+export interface SemanticLegend {
+  types: string[]
+  modifiers: string[]
+}
+
+/** One decoded semantic token: a span of the text and its legend names. */
+export interface SemanticToken {
+  from: number
+  to: number
+  type: string
+  modifiers: string[]
+}
+
 interface LspLocation {
   uri: string
   range: LspRange
@@ -176,6 +194,69 @@ export function inlayHintOf(value: unknown): LspInlayHint | null {
     ...(hint.paddingLeft === true ? { paddingLeft: true } : {}),
     ...(hint.paddingRight === true ? { paddingRight: true } : {}),
   }
+}
+
+/**
+ * The legend of an `initialize` result's capabilities, or null when the
+ * server offers no semantic tokens for a range (docs/lsp-references-design.md
+ * §T2). A name becomes a CSS class, so only plain letters are taken.
+ */
+export function semanticLegendOf(capabilities: unknown): SemanticLegend | null {
+  const provider = asRecord(asRecord(capabilities)?.semanticTokensProvider)
+  const legend = asRecord(provider?.legend)
+  if (provider?.range !== true || legend == null) return null
+  const names = (value: unknown): string[] | null =>
+    Array.isArray(value) && value.every((name) => typeof name === 'string' && /^[A-Za-z]+$/.test(name))
+      ? value as string[]
+      : null
+  const types = names(legend.tokenTypes)
+  const modifiers = names(legend.tokenModifiers)
+  return types != null && types.length > 0 && modifiers != null ? { types, modifiers } : null
+}
+
+/**
+ * LSP's relative encoding (five integers per token: line delta, start delta,
+ * length, type index, modifier bits) decoded over `text`. Columns are UTF-16
+ * code units, which are JavaScript string offsets, so only lines need
+ * walking. A token whose type is not in the legend, that runs past its line,
+ * or that lies past the text is dropped rather than drawn somewhere else.
+ */
+export function decodeSemanticTokens(
+  data: readonly number[],
+  legend: SemanticLegend,
+  text: string,
+): SemanticToken[] {
+  const tokens: SemanticToken[] = []
+  let line = 0
+  let lineStart = 0
+  let character = 0
+  for (let i = 0; i + 4 < data.length; i += 5) {
+    const [deltaLine, deltaStart, length, type, bits] = data.slice(i, i + 5)
+    if (deltaLine > 0) {
+      for (let n = 0; n < deltaLine; n++) {
+        const newline = text.indexOf('\n', lineStart)
+        if (newline < 0) return tokens
+        lineStart = newline + 1
+      }
+      line += deltaLine
+      character = deltaStart
+    } else {
+      character += deltaStart
+    }
+    const lineEnd = text.indexOf('\n', lineStart)
+    const end = lineEnd < 0 ? text.length : lineEnd
+    const from = lineStart + character
+    const to = from + length
+    const name = legend.types[type]
+    if (name == null || length <= 0 || to > end) continue
+    tokens.push({
+      from,
+      to,
+      type: name,
+      modifiers: legend.modifiers.filter((_, bit) => (bits & (1 << bit)) !== 0),
+    })
+  }
+  return tokens
 }
 
 function completionItemOf(value: unknown): LspCompletionItem | null {
@@ -287,6 +368,7 @@ export class DawnLspClient {
   private generation = 0
   private diagnosedGeneration = -1
   private text = ''
+  private legend: SemanticLegend | null = null
   private inFlight: SyncFlight | null = null
   private statusValue: LspStatus = 'fallback'
   private readonly statusListeners = new Set<(status: LspStatus) => void>()
@@ -311,6 +393,11 @@ export class DawnLspClient {
 
   isReady(): boolean {
     return this.statusValue === 'ready'
+  }
+
+  /** The semantic tokens legend this connection's server offered, if any. */
+  get semanticLegend(): SemanticLegend | null {
+    return this.legend
   }
 
   onStatus(listener: (status: LspStatus) => void): () => void {
@@ -407,6 +494,27 @@ export class DawnLspClient {
       : []
   }
 
+  /**
+   * The semantic tokens whose names start between two offsets of the current
+   * text, or none when the server offers no legend. A name that starts in the
+   * range and ends past it is included whole.
+   */
+  async semanticTokens(from: number, to: number, timeoutMs = 1500): Promise<SemanticToken[]> {
+    const legend = this.legend
+    if (legend == null) return []
+    let text = ''
+    const value = await this.queryWith('textDocument/semanticTokens/range', (current) => {
+      text = current
+      return {
+        textDocument: { uri: DAWN_LSP_URI },
+        range: { start: offsetToLspPosition(current, from), end: offsetToLspPosition(current, to) },
+      }
+    }, timeoutMs)
+    const data = asRecord(value)?.data
+    if (!Array.isArray(data) || !data.every((n) => Number.isInteger(n) && n >= 0)) return []
+    return decodeSemanticTokens(data, legend, text)
+  }
+
   private setStatus(status: LspStatus): void {
     if (status === this.statusValue) return
     this.statusValue = status
@@ -447,6 +555,13 @@ export class DawnLspClient {
           textDocument: {
             hover: { contentFormat: ['markdown', 'plaintext'] },
             inlayHint: { dynamicRegistration: false },
+            semanticTokens: {
+              dynamicRegistration: false,
+              requests: { range: true, full: false },
+              tokenTypes: [],
+              tokenModifiers: [],
+              formats: ['relative'],
+            },
             completion: {
               completionItem: {
                 snippetSupport: false,
@@ -457,8 +572,9 @@ export class DawnLspClient {
             },
           },
         },
-      }, INITIALIZE_TIMEOUT_MS).then(() => {
+      }, INITIALIZE_TIMEOUT_MS).then((result) => {
         if (!this.isCurrent(connection, socket)) return
+        this.legend = semanticLegendOf(asRecord(result)?.capabilities)
         this.notify('initialized', {})
         this.opened = false
         this.version = 0
@@ -508,6 +624,7 @@ export class DawnLspClient {
     this.syncWaiters = []
     this.inFlight = null
     this.opened = false
+    this.legend = null
     // -1, not 0: a connection that never reached ready earns nothing back
     // even where the threshold itself is zero.
     const readyFor = this.readyAt === 0 ? -1 : Date.now() - this.readyAt
@@ -1083,6 +1200,80 @@ export function lspInlayHints(client: DawnLspClient): Extension {
         const hints = await client.inlayHints(from, to)
         if (view.state.doc.toString() !== snapshot) return
         this.decorations = inlayDecorations(hints, snapshot)
+        view.dispatch({})
+      } catch {
+        // stale or unavailable: the next edit or scroll asks again
+      }
+    }
+
+    destroy(): void {
+      if (this.timer != null) clearTimeout(this.timer)
+      this.unsubscribe()
+    }
+  }, { decorations: (plugin) => plugin.decorations })
+}
+
+/**
+ * Semantic tokens (docs/lsp-references-design.md §T2): the server's kind for
+ * each name on screen, drawn as a class over the grammar's colour. Only names
+ * come back; keywords, literals and comments keep the stream tokenizer's
+ * classes, and with no tokens (no legend, no analysis yet, the gateway
+ * unreachable) the grammar's colours are all there is. Asked for the visible
+ * part of the document once edits and scrolling are quiet; while a request
+ * is out, the marks already drawn move with the edits.
+ */
+const SEMANTIC_DEBOUNCE_MS = 300
+
+/** A token's classes: `dp-sem-<type>`, then `dp-sem-<modifier>` for each bit set. */
+export function semanticClass(token: SemanticToken): string {
+  return ['dp-sem', `dp-sem-${token.type}`, ...token.modifiers.map((m) => `dp-sem-${m}`)].join(' ')
+}
+
+export function semanticDecorations(tokens: readonly SemanticToken[]): DecorationSet {
+  return Decoration.set(
+    tokens.map((token) => Decoration.mark({ class: semanticClass(token) }).range(token.from, token.to)),
+    true,
+  )
+}
+
+export function lspSemanticTokens(client: DawnLspClient): Extension {
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet = Decoration.none
+    private timer: ReturnType<typeof setTimeout> | null = null
+    private unsubscribe: () => void
+
+    constructor(readonly view: EditorView) {
+      this.unsubscribe = client.onStatus((status) => {
+        if (status === 'ready') this.schedule()
+        else if (status === 'fallback' && this.decorations.size > 0) {
+          this.decorations = Decoration.none
+          this.view.dispatch({})
+        }
+      })
+    }
+
+    update(update: ViewUpdate): void {
+      if (update.docChanged) this.decorations = this.decorations.map(update.changes)
+      if (update.docChanged || update.viewportChanged) this.schedule()
+    }
+
+    schedule(): void {
+      if (this.timer != null) clearTimeout(this.timer)
+      this.timer = setTimeout(() => {
+        this.timer = null
+        void this.refresh()
+      }, SEMANTIC_DEBOUNCE_MS)
+    }
+
+    async refresh(): Promise<void> {
+      if (!client.isReady() || client.semanticLegend == null) return
+      const view = this.view
+      const snapshot = view.state.doc.toString()
+      const { from, to } = view.viewport
+      try {
+        const tokens = await client.semanticTokens(from, to)
+        if (view.state.doc.toString() !== snapshot) return
+        this.decorations = semanticDecorations(tokens)
         view.dispatch({})
       } catch {
         // stale or unavailable: the next edit or scroll asks again

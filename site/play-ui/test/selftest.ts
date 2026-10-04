@@ -12,6 +12,7 @@ import {
   completionInfo,
   completionInfoText,
   completionOf,
+  decodeSemanticTokens,
   hoverParts,
   hoverText,
   inlayClass,
@@ -23,6 +24,9 @@ import {
   lspWebSocketUrl,
   mergeCompletionResults,
   offsetToLspPosition,
+  semanticClass,
+  semanticDecorations,
+  semanticLegendOf,
   type LspSocket,
 } from '../src/lsp'
 import { playEndpoints } from '../src/endpoints'
@@ -299,6 +303,45 @@ expect('an inlay widget is classed by kind and padding', [
   set.between(0, text.length, (from) => { at.push(from) })
   expect('inlay hints become widgets at their offsets, in document order', at, [6, 12, 18])
 }
+// ---- semantic tokens (docs/lsp-references-design.md §T2) ----
+{
+  const legend = { tokenTypes: ['function', 'namespace', 'enumMember', 'variable'], tokenModifiers: ['mutable', 'declaration'] }
+  expect('a legend is read from a range provider, in the server\'s order',
+    semanticLegendOf({ semanticTokensProvider: { legend, range: true, full: false } }),
+    { types: legend.tokenTypes, modifiers: legend.tokenModifiers })
+  expect('no range, no legend, or a name that is not letters: no tokens', [
+    semanticLegendOf({ semanticTokensProvider: { legend, full: true } }),
+    semanticLegendOf({}),
+    semanticLegendOf({ semanticTokensProvider: { legend: { tokenTypes: ['a b'], tokenModifiers: [] }, range: true } }),
+    semanticLegendOf({ semanticTokensProvider: { legend: { tokenTypes: [], tokenModifiers: [] }, range: true } }),
+  ], [null, null, null, null])
+  // The legend here is not the real server's order: decoding has to go
+  // through it. A name after an astral character sits two code units on per
+  // character, which JavaScript offsets already are.
+  const text = 'var \u{1F600}x = Some(n)\nlet y = str.len(x)'
+  const tokens = decodeSemanticTokens([
+    0, 6, 1, 3, 3, // x: variable, mutable + declaration
+    0, 4, 4, 2, 0, // Some: enumMember
+    1, 8, 3, 1, 0, // str: namespace
+    0, 4, 3, 0, 0, // len: function
+    0, 4, 1, 9, 0, // type index past the legend: dropped
+    0, 2, 9, 3, 0, // runs past its line: dropped
+    5, 0, 1, 3, 0, // past the text: decoding stops
+  ], { types: legend.tokenTypes, modifiers: legend.tokenModifiers }, text)
+  expect('semantic tokens decode through the legend, over UTF-16 offsets', tokens.map((t) => [
+    text.slice(t.from, t.to), t.type, t.modifiers,
+  ]), [
+    ['x', 'variable', ['mutable', 'declaration']],
+    ['Some', 'enumMember', []],
+    ['str', 'namespace', []],
+    ['len', 'function', []],
+  ])
+  expect('a token is classed by its type and each modifier', semanticClass(tokens[0]),
+    'dp-sem dp-sem-variable dp-sem-mutable dp-sem-declaration')
+  const at: number[][] = []
+  semanticDecorations(tokens).between(0, text.length, (from, to) => { at.push([from, to]) })
+  expect('semantic tokens become marks over their spans', at, [[6, 7], [10, 14], [26, 29], [30, 33]])
+}
 const merged = mergeCompletionResults(
   [{ label: 'same', detail: 'server' }, { label: 'semantic' }],
   { from: 4, options: [{ label: 'same', detail: 'static' }, { label: 'builtin' }] },
@@ -431,6 +474,45 @@ socket.receive({ id: inlayRequest.id, result: [
 expect('inlay hint response keeps the well-formed hints', await inlay, [
   { position: { line: 0, character: 3 }, label: ': Int', kind: 1 },
 ])
+
+{
+  // a server that offered no legend is never asked for tokens
+  const before = socket.sent.length
+  expect('no legend: no tokens and no request', [await client.semanticTokens(0, 6), socket.sent.length], [[], before])
+  expect('no legend was taken from an empty capability set', client.semanticLegend, null)
+}
+{
+  let semanticSocket!: FakeSocket
+  const semanticClient = new DawnLspClient(
+    'ws://example.test/api/lsp',
+    (_url, protocol) => (semanticSocket = new FakeSocket(protocol)),
+    () => 0,
+  )
+  semanticClient.start('let ab = f(1)')
+  semanticSocket.open()
+  semanticSocket.receive({ id: semanticSocket.sent[0].id, result: { capabilities: {
+    semanticTokensProvider: { legend: { tokenTypes: ['variable', 'function'], tokenModifiers: ['declaration'] }, range: true },
+  } } })
+  await tick()
+  semanticSocket.receive({ method: 'textDocument/publishDiagnostics', params: { uri: DAWN_LSP_URI, diagnostics: [] } })
+  const pending = semanticClient.semanticTokens(4, 13)
+  await tick()
+  const request = semanticSocket.sent.at(-1)!
+  expect('semantic tokens ask for a range of the diagnosed snapshot', [request.method, request.params], [
+    'textDocument/semanticTokens/range',
+    { textDocument: { uri: DAWN_LSP_URI }, range: { start: { line: 0, character: 4 }, end: { line: 0, character: 13 } } },
+  ])
+  semanticSocket.receive({ id: request.id, result: { data: [0, 4, 2, 0, 1, 0, 5, 1, 1, 0] } })
+  expect('the reply decodes against the legend initialize gave', (await pending).map((t) => [t.from, t.to, t.type, t.modifiers]), [
+    [4, 6, 'variable', ['declaration']], [9, 10, 'function', []],
+  ])
+  const malformed = semanticClient.semanticTokens(0, 13)
+  await tick()
+  semanticSocket.receive({ id: semanticSocket.sent.at(-1)!.id, result: { data: [0, -1, 2, 0, 0] } })
+  expect('a malformed reply draws nothing', await malformed, [])
+  semanticClient.stop()
+  expect('a stopped connection forgets its legend', semanticClient.semanticLegend, null)
+}
 
 // ---- completion docs (docs/lsp-hover-design.md §D7) ----
 {
