@@ -27,6 +27,13 @@ If `dawn` is not on VS Code's PATH, set **Dawn: Lsp Path** (`dawn.lspPath`) in
 settings to the absolute path of the executable. The extension runs
 `<dawn.lspPath> lsp` and speaks LSP over stdio.
 
+To see which server is running, open the **Dawn Language Server** output
+channel. Each start prints the setting's value and the settings layer it came
+from, the file that runs (symlinks resolved), and the version the server
+reports. If that is not the `dawn` you meant, the setting is either in a place
+this window does not read (another profile, or another folder's workspace
+settings) or names a file that does not exist.
+
 The `dawnc` binary from the same release also answers `lsp` and can be used
 here, with the caveat that it is the C backend and refuses `use java`.
 
@@ -34,15 +41,17 @@ here, with the caveat that it is the C backend and refuses `use java`.
 
 | Setting | Default | What it is |
 |---|---|---|
-| `dawn.lspPath` | `dawn` | The Dawn CLI to run the language server from. |
+| `dawn.lspPath` | `dawn` | The Dawn CLI to run the language server from. `~`, `${userHome}` and `${workspaceFolder}` are expanded; a relative path is taken from the first workspace folder; a change restarts the server. |
 
 ## Building it yourself
 
 The extension source is in
 [`editors/vscode`](https://github.com/dawnop/dawn-lang/tree/main/editors/vscode).
 `npm ci && npm test` runs the TextMate scope contract, which asserts the grammar
-against a corpus using VS Code's own TextMate engine, and the semantic token
-contract, which checks the manifest's declarations against the server's legend;
+against a corpus using VS Code's own TextMate engine, the semantic token
+contract, which checks the manifest's declarations against the server's legend,
+and the server contract, which covers how the executable is found and the
+version check;
 `npm run package` produces the `.vsix`.
 
 ## License
