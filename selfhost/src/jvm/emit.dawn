@@ -2195,20 +2195,27 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
     CDynamic(target) -> {
       let (g1, falls) = gen_cexpr(gx, g, target, false)
       if not falls { return (g1, false) }
-      gen_cdynamic(gx, g1, args, cex_ty(target), ty)
+      gen_cdynamic(gx, g1, args, ty)
     }
   }
 
 ## Invoke a function value: erased apply, then unerase to the static type.
-fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -> (Gen, Bool) !io = {
-  let (fps, _) = tyfn_parts(ft)
+fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ret_static: Ty) -> (Gen, Bool) !io = {
   var g1 = g
-  var i = 0
   for a in args {
     let (g2, _) = gen_cexpr(gx, g1, a, false)
     g1 = g2
-    box_ty(g1.mv, if i < len(fps) { fps[i] } else { cex_ty(a) })
-    i = i + 1
+    # Boxed by what is on the stack, which is the argument's own type, not by
+    # the callee's declared parameter. The two differ exactly when the callee
+    # is still generic in Core (a generic record field, or the result of a
+    # generic function called in place), where the parameter reads `T` but the
+    # argument is an unboxed long/double/boolean. Lowering does not wrap these
+    # arguments in a CBox (XApply and XCallDyn lower them as they are), so this
+    # is the only place the erased `apply` slot gets its box, and the native
+    # backend makes the same choice (emitc's CDynamic arm). An argument that
+    # is already boxed or erased reads as TyError or a variable, and boxes as
+    # nothing.
+    box_ty(g1.mv, cex_ty(a))
   }
   # the evidence pack lowering appended is part of the arity, and `len(args)`
   # is the total by construction -- which is why `CDynamic` carries no `nev`
