@@ -1,0 +1,41 @@
+# The two checksums the package fetcher runs over every byte it unpacks,
+# CRC-32 per zip entry and SHA-256 for the d1 tree hash, over `n` MiB.
+#
+# A throughput probe, run natively by run.sh under a wall-clock limit. Both
+# used to read a `List` once or more per input byte (the CRC table; the SHA
+# block, message schedule and round constants), and on the native backend a
+# `List` read is a trie lookup plus reference counting: `dawn add` of a 234 MB
+# zip spent 94 s, almost all of it here. The digests are printed so run.sh can
+# also hold them against Python's zlib and hashlib, which makes the probe a
+# second-implementation check on bulk input as well as a speed limit.
+#
+# The input is one 1 MiB pattern fed `n` times: building `n` MiB with
+# `bytes.put` would cost more than hashing it and blur what is measured.
+
+use std/bytes
+use sha2/sha256
+use inflate/crc32
+
+pub fn main() -> Unit !io = {
+  let n = match args() {
+    [k] -> parse_int(k).unwrap_or(32)
+    _ -> 32
+  }
+  var src = bytes.buf()
+  var i = 0
+  while i < 1048576 {
+    src = bytes.put(src, (i * 7 + 3) & 0xFF)
+    i = i + 1
+  }
+  let mb = bytes.freeze(src)
+  var d = sha256.new()
+  var crc = 0
+  var k = 0
+  while k < n {
+    d = sha256.update(d, mb)
+    crc = crc32.sum(mb)
+    k = k + 1
+  }
+  println("crc32 " ++ to_string(crc))
+  println("sha256 " ++ sha256.finish(d))
+}

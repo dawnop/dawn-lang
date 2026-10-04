@@ -70,6 +70,45 @@ if ! diff -u "$pure_jvm" "$work/pure.native"; then
 fi
 echo "PASS  gzip member boundaries agree on JVM and native"
 
+# The fetcher's checksums at byte speed, natively (perf-native-zip).
+#
+# pkgfetch runs CRC-32 over every zip entry and SHA-256 over the whole
+# unpacked tree. Both read a `List` per input byte until sha2 2.0.1 and
+# inflate 3.1.1, and the native `dawn add` of a 234 MB zip took 94 s against
+# 12 s on the JVM. 64 MiB through both now takes about 2 s natively and took
+# 26 to 40 s before, so 10 s is far from the fixed code and still red on a
+# return of per-byte `List` reads. The digests must match Python's.
+mkdir -p "$work/sums/src"
+cp "$here/checksums.dawn" "$work/sums/src/main.dawn"
+cat > "$work/sums/dawn.toml" <<TOML
+schema = 1
+name = "inflate_checksum_speed"
+
+[deps]
+inflate = "$root/packages/inflate"
+sha2 = "$root/packages/sha2"
+TOML
+"$root/bin/dawn" __emitc "$work/sums" -o "$work/sums.c" > /dev/null
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  -I "$root/runtime/c" -o "$work/sums.bin" "$work/sums.c" "$root/runtime/c/dawn_rt.c" -lm
+sums_want="$(python3 -c '
+import hashlib, zlib
+mb = bytes((i * 7 + 3) & 0xFF for i in range(1 << 20))
+h = hashlib.sha256()
+for _ in range(64):
+    h.update(mb)
+print("crc32", zlib.crc32(mb))
+print("sha256", h.hexdigest())
+')"
+if sums_got="$( (ulimit -v 4000000 && timeout 10 "$work/sums.bin" 64) 2>&1)" &&
+    [ "$sums_got" = "$sums_want" ]; then
+  echo "PASS  CRC-32 and SHA-256 of 64 MiB match zlib and hashlib natively within 10 s"
+else
+  printf '%s\n' "$sums_got" | sed 's/^/  | /' >&2
+  echo "FAIL: native CRC-32 and SHA-256 of 64 MiB were wrong or took over 10 s" >&2
+  exit 1
+fi
+
 # Every rule below has a live behavioral mutant. A mutant must compile and run;
 # only the named contract failure counts as a red gate, so a stale replacement
 # or an unrelated compiler error cannot masquerade as discrimination.

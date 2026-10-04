@@ -8,9 +8,9 @@
 # A package rather than std: std stays the small set of things the language
 # itself leans on, and nothing in the language leans on SHA-256.
 #
-# It is slow: ~7.7 MB/s, and verifying a project's dawn.lock hashes the whole
-# resolved jar closure, which is 11.1 MB and ~1.5s for the compiler's own
-# project. Two ways of making that number smaller are closed, deliberately:
+# It is not fast: about 25 MB/s on the JVM and 30 MB/s native (2.0.1, 64 MiB
+# in 2.6 s and 2.0 s), and verifying a project's dawn.lock hashes the whole
+# resolved jar closure. Two ways of making it faster are closed, deliberately:
 #
 #   * `java.security.MessageDigest` in pkg/maven -- 150x faster, and it puts the
 #     package manager's trust root back on a host service. That is the thing
@@ -18,9 +18,13 @@
 #   * a `sha256` runtime intrinsic -- the same objection one layer down, plus a
 #     wider contract for every backend to implement.
 #
-# What is left is not doing the work twice, and not allocating while doing it.
-# Both are fair game and both have been taken: see `vendored_names` in
-# selfhost/src/main.dawn for the first and `K` below for the second.
+# What is left is not doing the work twice, and not allocating or indexing
+# a `List` while doing it. Both are fair game and both have been taken: see
+# `vendored_names` in selfhost/src/main.dawn for the first, and `compress`
+# and `k` below for the second. Until 2.0.1 the block, the message schedule
+# and the round constants were all `List`s, about ten trie lookups per input
+# byte: 1.9 MB/s native, and most of the 94 s the native `dawn add` spent
+# unpacking a 234 MB zip, which it tree-hashes afterwards.
 #
 # The API is incremental because its caller is: a tree hash feeds one file
 # after another, and a one-shot digest would make it concatenate the whole tree
@@ -33,7 +37,6 @@
 
 use std/bytes
 use std/char
-use std/list
 use std/str
 
 const MASK: Int = 0xFFFFFFFF
@@ -45,37 +48,94 @@ const MASK: Int = 0xFFFFFFFF
 # assemble the record could hand them a state that is type-correct and still
 # indexes out of bounds. Hence the record is private and `Digest` is opaque
 # over it: the only states that exist are the ones `new` and `update` build.
-type DigestState = { h: List[Int], buf: List[Int], total: Int }
+type DigestState = { h: List[Int], buf: Bytes, total: Int }
 
 ## A digest in progress: the eight chaining words, the bytes of the block that
 ## is not full yet, and how many bytes have been fed in (the padding needs the
 ## total, and it is a bit count that must survive past 2^32).
 pub opaque type Digest = DigestState
 
-## The round constants: the first 32 bits of the fractional parts of the cube
-## roots of the first 64 primes.
+## Round constant `t`: the first 32 bits of the fractional part of the cube
+## root of the `t`-th prime, for `t` in 0..63.
 ##
-## A `const`, not a function returning the literal. `compress` reads it once per
-## 64-byte block, and a function rebuilt the 64-element list on every call: 173k
-## rebuilds for an 11 MB input, 12.7% of everything `dawn check selfhost`
-## allocates. The digest is not measurably faster for it -- the cost of a
-## compression is the 64 rounds of arithmetic, not this list -- so this is a
-## reduction in garbage, not a speedup. Reach for it as such.
-const K: List[Int] = [
-  0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1,
-  0x923F82A4, 0xAB1C5ED5, 0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
-  0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174, 0xE49B69C1, 0xEFBE4786,
-  0x0FC19DC6, 0x240CA1CC, 0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
-  0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7, 0xC6E00BF3, 0xD5A79147,
-  0x06CA6351, 0x14292967, 0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
-  0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85, 0xA2BFE8A1, 0xA81A664B,
-  0xC24B8B70, 0xC76C51A3, 0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
-  0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5, 0x391C0CB3, 0x4ED8AA4A,
-  0x5B9CCA4F, 0x682E6FF3, 0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
-  0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2
-]
+## A match rather than a `List` constant. A `List` read is a trie lookup plus
+## reference counting, and `compress` makes 64 of them per block; on the
+## native backend that alone was half of what is left of the digest's time
+## once the rest stopped allocating, and cc turns this chain of integer
+## comparisons into a table. On the JVM the two are the same speed.
+fn k(t: Int) -> Int = match t {
+  0 -> 0x428A2F98
+  1 -> 0x71374491
+  2 -> 0xB5C0FBCF
+  3 -> 0xE9B5DBA5
+  4 -> 0x3956C25B
+  5 -> 0x59F111F1
+  6 -> 0x923F82A4
+  7 -> 0xAB1C5ED5
+  8 -> 0xD807AA98
+  9 -> 0x12835B01
+  10 -> 0x243185BE
+  11 -> 0x550C7DC3
+  12 -> 0x72BE5D74
+  13 -> 0x80DEB1FE
+  14 -> 0x9BDC06A7
+  15 -> 0xC19BF174
+  16 -> 0xE49B69C1
+  17 -> 0xEFBE4786
+  18 -> 0x0FC19DC6
+  19 -> 0x240CA1CC
+  20 -> 0x2DE92C6F
+  21 -> 0x4A7484AA
+  22 -> 0x5CB0A9DC
+  23 -> 0x76F988DA
+  24 -> 0x983E5152
+  25 -> 0xA831C66D
+  26 -> 0xB00327C8
+  27 -> 0xBF597FC7
+  28 -> 0xC6E00BF3
+  29 -> 0xD5A79147
+  30 -> 0x06CA6351
+  31 -> 0x14292967
+  32 -> 0x27B70A85
+  33 -> 0x2E1B2138
+  34 -> 0x4D2C6DFC
+  35 -> 0x53380D13
+  36 -> 0x650A7354
+  37 -> 0x766A0ABB
+  38 -> 0x81C2C92E
+  39 -> 0x92722C85
+  40 -> 0xA2BFE8A1
+  41 -> 0xA81A664B
+  42 -> 0xC24B8B70
+  43 -> 0xC76C51A3
+  44 -> 0xD192E819
+  45 -> 0xD6990624
+  46 -> 0xF40E3585
+  47 -> 0x106AA070
+  48 -> 0x19A4C116
+  49 -> 0x1E376C08
+  50 -> 0x2748774C
+  51 -> 0x34B0BCB5
+  52 -> 0x391C0CB3
+  53 -> 0x4ED8AA4A
+  54 -> 0x5B9CCA4F
+  55 -> 0x682E6FF3
+  56 -> 0x748F82EE
+  57 -> 0x78A5636F
+  58 -> 0x84C87814
+  59 -> 0x8CC70208
+  60 -> 0x90BEFFFA
+  61 -> 0xA4506CEB
+  62 -> 0xBEF9A3F7
+  _ -> 0xC67178F2
+}
 
 fn rotr(x: Int, n: Int) -> Int = ((x >>> n) | (x << (32 - n))) & MASK
+
+## The big-endian 32-bit word at `o`.
+fn word(src: Bytes, o: Int) -> Int =
+  (bytes.at(src, o) << 24) | (bytes.at(src, o + 1) << 16) |
+  (bytes.at(src, o + 2) << 8) | bytes.at(src, o + 3)
 
 ## A fresh digest, chained from the fractional parts of the square roots of the
 ## first eight primes.
@@ -83,26 +143,35 @@ pub fn new() -> Digest =
   DigestState {
     h: [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
       0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19],
-    buf: [],
+    buf: bytes.utf8(""),
     total: 0
   }
 
-## One 64-byte block folded into the chaining words.
-fn compress(hs: List[Int], block: List[Int]) -> List[Int] = {
-  var w: List[Int] = []
-  var t = 0
-  while t < 16 {
-    let o = t * 4
-    w = w ++
-      [(block[o] << 24) | (block[o + 1] << 16) | (block[o + 2] << 8) | block[o + 3]]
-    t = t + 1
-  }
-  while t < 64 {
-    let s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3)
-    let s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10)
-    w = w ++ [(w[t - 16] + s0 + w[t - 7] + s1) & MASK]
-    t = t + 1
-  }
+## The 64-byte block at `src[o..o+64]` folded into the chaining words.
+##
+## The message schedule is sixteen locals, not a list. Round `t` only ever
+## reads W[t] and the fifteen words after it, so a window that slides by one
+## word per round holds everything the schedule needs: `w0` is W[t] and
+## the next word is computed into `w15` from `w0`, `w1`, `w9` and `w14`. The
+## block is read straight out of the input for the same reason: a `List` read
+## is a trie lookup plus reference counting, which the file header prices.
+fn compress(hs: List[Int], src: Bytes, o: Int) -> List[Int] = {
+  var w0 = word(src, o)
+  var w1 = word(src, o + 4)
+  var w2 = word(src, o + 8)
+  var w3 = word(src, o + 12)
+  var w4 = word(src, o + 16)
+  var w5 = word(src, o + 20)
+  var w6 = word(src, o + 24)
+  var w7 = word(src, o + 28)
+  var w8 = word(src, o + 32)
+  var w9 = word(src, o + 36)
+  var w10 = word(src, o + 40)
+  var w11 = word(src, o + 44)
+  var w12 = word(src, o + 48)
+  var w13 = word(src, o + 52)
+  var w14 = word(src, o + 56)
+  var w15 = word(src, o + 60)
 
   var a = hs[0]
   var b = hs[1]
@@ -112,11 +181,11 @@ fn compress(hs: List[Int], block: List[Int]) -> List[Int] = {
   var f = hs[5]
   var g = hs[6]
   var h = hs[7]
-  t = 0
+  var t = 0
   while t < 64 {
     let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
     let ch = (e & f) ^ (~e & MASK & g)
-    let t1 = (h + s1 + ch + K[t] + w[t]) & MASK
+    let t1 = (h + s1 + ch + k(t) + w0) & MASK
     let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
     let maj = (a & b) ^ (a & c) ^ (b & c)
     let t2 = (s0 + maj) & MASK
@@ -128,6 +197,26 @@ fn compress(hs: List[Int], block: List[Int]) -> List[Int] = {
     c = b
     b = a
     a = (t1 + t2) & MASK
+    # W[t + 16]; the last sixteen of these are computed and never read
+    let m0 = rotr(w1, 7) ^ rotr(w1, 18) ^ (w1 >>> 3)
+    let m1 = rotr(w14, 17) ^ rotr(w14, 19) ^ (w14 >>> 10)
+    let next = (w0 + m0 + w9 + m1) & MASK
+    w0 = w1
+    w1 = w2
+    w2 = w3
+    w3 = w4
+    w4 = w5
+    w5 = w6
+    w6 = w7
+    w7 = w8
+    w8 = w9
+    w9 = w10
+    w10 = w11
+    w11 = w12
+    w12 = w13
+    w13 = w14
+    w14 = w15
+    w15 = next
     t = t + 1
   }
   [(hs[0] + a) & MASK, (hs[1] + b) & MASK, (hs[2] + c) & MASK, (hs[3] + d) & MASK,
@@ -135,23 +224,30 @@ fn compress(hs: List[Int], block: List[Int]) -> List[Int] = {
 }
 
 ## Feed bytes in. Any number, any number of times.
+##
+## Whole blocks are compressed where they lie in `b`; only a block that
+## straddles two calls is copied, once, to join its halves.
 pub fn update(d: Digest, b: Bytes) -> Digest = {
   # opacity is seen through by assignment, not by `.` (spec 2.7), so the state
   # is named once here and the fields are read off that
   let state: DigestState = d
   var hs = state.h
-  var buf = state.buf
   let n = bytes.len(b)
   var i = 0
-  while i < n {
-    buf = buf ++ [bytes.at(b, i)]
-    if len(buf) == 64 {
-      hs = compress(hs, buf)
-      buf = []
+  let held = bytes.len(state.buf)
+  if held > 0 {
+    let need = 64 - held
+    if n < need {
+      return DigestState { h: hs, buf: state.buf ++ b, total: state.total + n }
     }
-    i = i + 1
+    hs = compress(hs, state.buf ++ bytes.slice(b, 0, need), 0)
+    i = need
   }
-  DigestState { h: hs, buf: buf, total: state.total + n }
+  while n - i >= 64 {
+    hs = compress(hs, b, i)
+    i = i + 64
+  }
+  DigestState { h: hs, buf: bytes.slice(b, i, n), total: state.total + n }
 }
 
 ## The digest as 64 lower-case hex digits. The state is not consumed -- it is a
@@ -160,23 +256,24 @@ pub fn finish(d: Digest) -> String = {
   # see `update`: the fields come off an explicitly typed binding, not off `d`
   let state: DigestState = d
   # the 0x80 byte, zeros up to 56 bytes into a block, then the bit count
-  var block = state.buf ++ [0x80]
-  while len(block) % 64 != 56 { block = block ++ [0] }
+  var block = bytes.put(bytes.put_bytes(bytes.buf(), state.buf), 0x80)
+  while bytes.size(block) % 64 != 56 { block = bytes.put(block, 0) }
   let bits = state.total * 8
   var s = 56
   while s >= 0 {
-    block = block ++ [(bits >>> s) & 0xFF]
+    block = bytes.put(block, (bits >>> s) & 0xFF)
     s = s - 8
   }
+  let tail = bytes.freeze(block)
   var hs = state.h
   var off = 0
-  while off < len(block) {
-    hs = compress(hs, list.slice(block, off, off + 64))
+  while off < bytes.len(tail) {
+    hs = compress(hs, tail, off)
     off = off + 64
   }
   var out = ""
-  for word in hs {
-    out = out ++ word_hex(word)
+  for hw in hs {
+    out = out ++ word_hex(hw)
   }
   out
 }
@@ -226,4 +323,30 @@ test "feeding in pieces is feeding the same bytes" {
   d = update(d, bytes.slice(whole, 6, 40))
   d = update(d, bytes.slice(whole, 40, bytes.len(whole)))
   assert finish(d) == hex(whole)
+}
+
+test "a block may straddle any number of updates" {
+  # `update` compresses whole blocks where they lie and copies only a block
+  # split across calls; every split point of 130 bytes, fed as two or as three
+  # pieces, has to land on the one-shot digest
+  var raw = bytes.buf()
+  var i = 0
+  while i < 130 {
+    raw = bytes.put(raw, (i * 7 + 3) & 0xFF)
+    i = i + 1
+  }
+  let all = bytes.freeze(raw)
+  let want = hex(all)
+  # Python's hashlib (OpenSSL) on the same 130 bytes
+  assert want == "4d5e47a2e8510a314576c238f6ff19d389d3ef3aaaca8b2e530263a5d15741da"
+  var cut = 0
+  while cut <= 130 {
+    let two = update(update(new(), bytes.slice(all, 0, cut)), bytes.slice(all, cut, 130))
+    assert finish(two) == want
+    let mid = (cut + 130) / 2
+    let three = update(update(update(new(), bytes.slice(all, 0, cut)),
+      bytes.slice(all, cut, mid)), bytes.slice(all, mid, 130))
+    assert finish(three) == want
+    cut = cut + 1
+  }
 }

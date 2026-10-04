@@ -10,33 +10,28 @@ use std/bytes
 const POLY: Int = 0xEDB88320
 const MASK: Int = 0xFFFFFFFF
 
-## The 256-entry table, built rather than written out. A literal table is a
-## page of magic numbers nobody can check by eye; this is the definition those
-## numbers come from, and it costs 2048 shifts once per call.
-fn table() -> List[Int] = {
-  var t: List[Int] = []
-  var i = 0
-  while i < 256 {
-    var c = i
-    var k = 0
-    while k < 8 {
-      c = if c & 1 != 0 { POLY ^ (c >>> 1) } else { c >>> 1 }
-      k = k + 1
-    }
-    t = t ++ [c]
-    i = i + 1
-  }
-  t
-}
-
 ## The CRC-32 of `b`, as the unsigned 32-bit value the formats store.
+##
+## Bit at a time, eight steps per byte, with no table. The usual 256-entry
+## table would have to be a `List` here, and a `List` read is a trie lookup
+## plus reference counting: on the native backend that one read per byte cost
+## more than the eight shifts and masks it replaces. `0 - (c & 1)` is all ones
+## when the low bit is set and zero when it is not, so the conditional XOR
+## needs no branch.
 pub fn sum(b: Bytes) -> Int = {
-  let t = table()
   var c = MASK
   var i = 0
   let n = bytes.len(b)
   while i < n {
-    c = (c >>> 8) ^ t[(c ^ bytes.at(b, i)) & 0xFF]
+    c = c ^ bytes.at(b, i)
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
+    c = (c >>> 1) ^ (POLY & (0 - (c & 1)))
     i = i + 1
   }
   c ^ MASK
