@@ -348,11 +348,57 @@ pub fn fn_arity(t: Ty) -> Int =
     _ -> 0
   }
 
-## The portable closure ABI reserves one additional slot for evidence.
-## Direct named calls do not use this interface family. A control handler
-## also takes a continuation, leaving one fewer written operation parameter.
-pub fn fn_max_params() -> Int = 8
+## The erased function interfaces a backend provides for function values,
+## by runtime arity: `dawn/rt/Fn0` through `Fn9` on the JVM (main.dawn emits
+## exactly this list). The C backend applies a closure of any arity, so this
+## is the narrower of the two and the one the language's limit is read from.
+##
+## The table is the source and the limits below are derived from it, because
+## the limit used to be written down beside it: `main.dawn` emitted up to Fn9
+## while nothing bounded a written parameter list, and a nine-parameter value
+## -- ten slots with its evidence pack -- type checked and died on the JVM with
+## NoClassDefFoundError: dawn/rt/Fn10 (#87). Widening the table now widens the
+## language; narrowing it narrows the checker in the same commit.
+pub fn fn_interface_arities() -> List[Int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+## The widest written parameter list a function value may have: the widest
+## interface, less the evidence slots `fn_arity` adds to every function value.
+## Direct named calls do not use this interface family.
+pub fn fn_max_params() -> Int = {
+  var widest = 0
+  for n in fn_interface_arities() {
+    if n > widest { widest = n }
+  }
+  widest - fn_arity(TyFn([], TyUnit, EPure))
+}
+
+## A control handler also takes a continuation, leaving one fewer written
+## operation parameter.
 pub fn ctl_max_op_params() -> Int = fn_max_params() - 1
+
+test "every function value the checker admits has an interface to be called through" {
+  let table = fn_interface_arities()
+  # no hole: an arity below the widest with no interface is a value of that
+  # width with nothing to cast to
+  var i = 0
+  for n in table {
+    assert n == i
+    i = i + 1
+  }
+  # the widest admitted value, at every kind of row, has its interface: the
+  # evidence pack is a parameter of the value whatever the row says (#87 was
+  # this sum forgotten)
+  var widest: List[Ty] = []
+  for _k in 0..fn_max_params() { widest = widest ++ [TyInt] }
+  for row in [EPure, EIo, EffVar("e", 1), ELabeled(EPure, [(7, "Ask")])] {
+    assert list.contains(table, fn_arity(TyFn(widest, TyInt, row)))
+  }
+  # and one wider would not: the limit is the table's, not a number beside it
+  assert not list.contains(table, fn_arity(TyFn(widest ++ [TyInt], TyInt, EPure)))
+  # a control arm takes the operation's parameters, the continuation and the
+  # pack, so the widest operation's arm is exactly the widest interface
+  assert list.contains(table, ctl_max_op_params() + 1 + fn_arity(TyFn([], TyUnit, EPure)))
+}
 
 test "the named side counts atoms and a function value counts one" {
   let ask = ELabeled(EPure, [(7, "Ask")])

@@ -41,7 +41,17 @@ around the helper is a function pruning may have dropped, and it would only
 show up as a NoSuchMethodError in a user's program, so it is refused here by
 spelling: no `"std/pvec"` literal and no `LIST_MOD` outside those helpers.
 
-The third part does the same for the `dawn/rt/*` runtime classes (#205).
+The comptime interpreter is the third implementation of the same names, and
+it is read here too (#185). Its chain, `interp.call_builtin`, consults
+`interp_arms()` before it looks at a single arm, so an arm the list does not
+name is dead by construction -- and nothing saw one: `parse_int`'s arm outlived
+every producer of the name, and its comment contradicted its body. The Dawn
+test beside the list proves the list against the chain's behaviour by probing
+each name; what it cannot see is an arm the list never mentions, because a
+probe of that name is refused before the arm is reached. So the arms are read
+here and held to the list in both directions.
+
+The fourth part does the same for the `dawn/rt/*` runtime classes (#205).
 A test in emit.dawn reads every static method the JVM emitter can call there
 against the classes `rtclasses` generates; it can only see calls that go
 through `rtclasses.invoke_rt` with a method from `emitter_rt_methods()`, or
@@ -198,6 +208,41 @@ def c_arms():
     return arms
 
 
+def interp_arms():
+    """`interp.call_builtin`'s arms against `interp_arms()`, both ways."""
+    lines = read("ir/interp.dawn")
+    chain = body(lines, "fn call_builtin(", "interp.dawn")
+    if "has_name(interp_arms(), name)" not in "\n".join(chain):
+        fail(
+            "interp.dawn: call_builtin no longer consults interp_arms() before "
+            "its arms; this gate reads the list as the chain's gate on that premise."
+        )
+    # `.name == "Some"` compares a constructor's name, not the builtin's
+    arms = set(
+        names(chain, r'(?<![\w.\]])name == "([A-Za-z_0-9]+)"', "interp.dawn", "arms in call_builtin")
+    )
+    listed = set(
+        names(
+            body(lines, "fn interp_arms()", "interp.dawn"),
+            r'"([A-Za-z_0-9]+)"',
+            "interp.dawn",
+            "names in interp_arms()",
+        )
+    )
+    for n in sorted(arms - listed):
+        fail(
+            f"interp.dawn: call_builtin has an arm for `{n}`, which interp_arms() "
+            f"does not list. The chain consults the list first, so the arm can "
+            f"never run -- the dead `parse_int` arm #185 found."
+        )
+    for n in sorted(listed - arms):
+        fail(
+            f"interp.dawn: interp_arms() lists `{n}` and call_builtin has no arm "
+            f"for it, so a `const` reaching it is refused while the list says it folds."
+        )
+    return listed
+
+
 # Where a `std/pvec` call may be spelled: the helper that checks the name
 # against reach.list_root_names(), and nothing else. rc.dawn builds one Core
 # call to from_array (a list literal it rewrites), by constant.
@@ -340,12 +385,14 @@ def main():
     both = inline
     check("emit.dawn (JVM)", jvm_arms(), both | host)
     check("emitc.dawn (native)", c_arms(), both)
+    comptime = interp_arms()
     pvec_spellings()
     rt_spellings()
     report()
     print(
         f"PASS  both backends implement the {len(both)} inline primitives, "
-        f"and the JVM the {len(host)} it owes alone; every std/pvec call "
+        f"and the JVM the {len(host)} it owes alone; the comptime interpreter "
+        f"has exactly the {len(comptime)} arms its list names; every std/pvec call "
         f"goes through the helper that checks it against reach's list roots, "
         f"and every runtime-class call through the list emit.dawn's test reads"
     )
