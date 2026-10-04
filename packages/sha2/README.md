@@ -13,6 +13,7 @@ let both = sha256.finish(d)                       # the digest of a then b
 `Digest` is an opaque, immutable value: `update` answers a new one, and
 `finish` does not consume it, so feeding can go on after a `finish`.
 
-It is slow, about 7.7 MB/s; the header of `src/sha256.dawn` has the numbers.
+It is not fast, about 25 to 30 MB/s on either backend; the header of
+`src/sha256.dawn` has the numbers.
 
 Changes between versions: [CHANGELOG.md](CHANGELOG.md).
