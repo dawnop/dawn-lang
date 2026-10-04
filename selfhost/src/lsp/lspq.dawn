@@ -2129,8 +2129,31 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     }
     None -> ()
   }
+  # a parameter's default is an expression of the declaration and names what
+  # any other expression does (`n: Int = len(xs)`): references, rename and
+  # rename's own check read it as they read the body, or a rename onto a name
+  # the default calls would pass unseen
+  var k = 0
+  for p in f.params {
+    match p.default {
+      Some(dx) -> { q = walk_e(qc, q, dx, tdefault_body(tf, k)) }
+      None -> ()
+    }
+    k = k + 1
+  }
   Q { ..walk_e(qc, q, f.body, tf_body(tf)), tps: q0.tps }
 }
+
+## The typed default of `tf`'s parameter `k`, when it has one.
+fn tdefault_body(tf: Option[TFun], k: Int) -> Option[TExpr] =
+  match tf {
+    Some(f) ->
+      match get(f.defaults, k) {
+        Some(Some(d)) -> Some(d.body)
+        _ -> None
+      }
+    None -> None
+  }
 
 ## Hover and definition on one selective-import entry. A renamed entry
 ## (`Name as Local`) answers on both halves: the local name is the one the rest

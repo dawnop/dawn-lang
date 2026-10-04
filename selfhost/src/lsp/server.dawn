@@ -22,7 +22,7 @@ use driver/analyze.{
   Program, ProjectPlan, LocDiag, CheckedMod,
   rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
-  project_module_path,
+  project_module_path, project_files_now,
   ParseMemo, no_parses, load_entries_reusing, use_candidates
 }
 use compiler_plan/source
@@ -522,8 +522,8 @@ type Workspace = {
 ## It has its own session, so its modules' steps are remembered between
 ## requests the way `prog`'s are between edits, and its own parses.
 type RefsWorld = {
-  # the tree's modules, as the walk spelled them; walked on the first
-  # request, fixed with the plan
+  # the tree's modules, as the walk spelled them; walked again each time
+  # the program is analyzed, so a module created since is read
   seeds: List[String],
   cache: incremental.Session,
   parses: ParseMemo,
@@ -1359,6 +1359,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     }
   } else if method == "workspace/didChangeWatchedFiles" {
     st = refresh_manifests(st, watched_manifests(params))
+    st = sources_changed(st, params)
   } else if method == "textDocument/completion" {
     respond(id, handle_completion(st, params))
   } else if method == "completionItem/resolve" {
@@ -1528,11 +1529,12 @@ fn diagnostics_of_program(
 ## Every module under the project's source root, when the project has a
 ## manifest (docs/lsp-references-design.md §R2). A directory without one is
 ## where a loose file happens to sit, and its other files are not one program
-## with it.
+## with it. The tree is walked again rather than read from the plan: the plan
+## is as old as the workspace, and a module created since must be found.
 fn project_seeds(plan: ProjectPlan) -> List[String] !Fs !Env = {
   if not io.exists(canon(plan.source.project) ++ "/dawn.toml") { return [] }
   var out: List[String] = []
-  for f in plan.modules.project_files {
+  for f in project_files_now(plan) {
     match project_module_path(plan, f) {
       Some(_) -> { out = out ++ [f] }
       None -> ()
@@ -1545,11 +1547,17 @@ fn project_seeds(plan: ProjectPlan) -> List[String] !Fs !Env = {
 ## (§R2), or None while they conflict. The first call walks the tree and
 ## checks all of it; a later one after an edit reuses every step the edit
 ## left as it was, and keeps the index entries of exactly those modules.
-fn refs_world(st: LspState, ws: Workspace) -> Option[RefsWorld] !Fs !Env !io = {
+## Every call that analyzes walks the tree again, so a module created or
+## deleted since is in or out. A file no document holds can change on disk
+## with no edit to say so: a watched-file notification marks the program out
+## of date (`sources_changed`), and `verify` reads the files again whatever
+## the client sent, which rename asks for because an edit computed from a
+## stale text lands on the wrong characters.
+fn refs_world(st: LspState, ws: Workspace, verify: Bool) -> Option[RefsWorld] !Fs !Env !io = {
   let w0 = match ws.world {
     Some(w) -> {
-      if w.current { return Some(w) }
-      w
+      if w.current && not (verify && world_stale(ws, w)) { return Some(w) }
+      RefsWorld { ..w, seeds: project_seeds(ws.plan) }
     }
     None -> {
       let no_prog: Option[Program] = None
@@ -1585,6 +1593,75 @@ fn refs_world(st: LspState, ws: Workspace) -> Option[RefsWorld] !Fs !Env !io = {
       })
     }
   }
+}
+
+## Does the references program `w` read the project otherwise than the disk
+## does now: another set of modules, or a module no open document holds whose
+## file has another text than the one it was analyzed from?
+fn world_stale(ws: Workspace, w: RefsWorld) -> Bool !Fs !Env = {
+  let seeds = project_seeds(ws.plan)
+  if seeds != w.seeds { return true }
+  let prog = match w.prog {
+    Some(p) -> p
+    None -> return true
+  }
+  var held: Set[String] = set.empty()
+  for pr in map.entries(ws.path_by_uri) {
+    let (_, p) = pr
+    held = set.insert(held, canon_identity(p))
+  }
+  var tree: Set[String] = set.empty()
+  for f in seeds { tree = set.insert(tree, canon_identity(f)) }
+  for cm in prog.modules {
+    let id = canon_identity(cm.path)
+    if set.has(held, id) || not set.has(tree, id) { continue }
+    let disk = match io.read_file(cm.path) {
+      Ok(t) -> t
+      Err(_) -> return true
+    }
+    if map.get(w.texts, cm.mod_path) != Some(disk) { return true }
+  }
+  false
+}
+
+## Mark out of date the references program of every workspace whose source
+## root holds a `.dawn` file a watched-file notification names: a file no
+## document holds was edited, created or deleted on disk.
+fn sources_changed(st: LspState, params: Json) -> LspState !Fs !Env = {
+  var paths: List[String] = []
+  match oget(params, "changes") {
+    Some(JArr(changes)) -> {
+      for change in changes {
+        let uri = ostr(change, "uri")
+        if str.ends_with(uri, ".dawn") {
+          match uri_to_path(uri) {
+            Some(p) -> { paths = paths ++ [canon_identity(p)] }
+            None -> ()
+          }
+        }
+      }
+    }
+    _ -> ()
+  }
+  if len(paths) == 0 { return st }
+  var out = st
+  for key in sort(map.keys(st.workspaces)) {
+    match map.get(st.workspaces, key) {
+      Some(Ready(ws)) ->
+        match ws.world {
+          Some(w) -> {
+            let root = canon_identity(ws.plan.source.source_root)
+            if list.any(paths, p => path_in_root(p, root)) {
+              let next = Workspace { ..ws, world: Some(RefsWorld { ..w, current: false }) }
+              out = LspState { ..out, workspaces: map.insert(out.workspaces, key, Ready(next)) }
+            }
+          }
+          None -> ()
+        }
+      _ -> ()
+    }
+  }
+  out
 }
 
 fn diagnostics_of_problem(
@@ -2048,6 +2125,14 @@ fn manifest_watch_registration() -> Json =
       ("registerOptions", jobj([("watchers", JArr([
         jobj([("globPattern", JStr("**/dawn.toml"))]),
         jobj([("globPattern", JStr("**/dawn.lock"))])
+      ]))]))
+    ]), jobj([
+      # a module no document holds, edited, created or deleted on disk: the
+      # references program reads it (`sources_changed`)
+      ("id", JStr("dawn/sources")),
+      ("method", JStr("workspace/didChangeWatchedFiles")),
+      ("registerOptions", jobj([("watchers", JArr([
+        jobj([("globPattern", JStr("**/*.dawn"))])
       ]))]))
     ])]))]))
   ])
@@ -2689,7 +2774,7 @@ fn workspace_references(
     Some(Ready(w)) -> w
     _ -> return (JArr([]), st)
   }
-  let world = match refs_world(st, ws) {
+  let world = match refs_world(st, ws, false) {
     Some(w) -> w
     None -> return (JArr([]), st)
   }
@@ -2871,7 +2956,8 @@ fn rename_start(st: LspState, d: Doc, offset: Int) -> (Result[RenameStart, Strin
     Some(Ready(w)) -> w
     _ -> return (Err("this document has no analysis to rename in"), st)
   }
-  let world = match refs_world(st, ws) {
+  # verified against the disk: the edit is computed from these texts
+  let world = match refs_world(st, ws, true) {
     Some(w) -> w
     None -> return (Err("two open documents disagree about one file"), st)
   }

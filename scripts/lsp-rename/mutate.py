@@ -14,6 +14,7 @@ import sys
 
 SERVER = "selfhost/src/lsp/server.dawn"
 LSPRENAME = "selfhost/src/lsp/lsprename.dawn"
+LSPQ = "selfhost/src/lsp/lspq.dawn"
 
 # mutation -> [(file, anchor, replacement)]
 MUTATIONS = {
@@ -52,6 +53,29 @@ MUTATIONS = {
     'dependencies-renamed': [
         (SERVER, '    if package_of(decl.cx) != PkgRoot || not path_in_root(tpath, root) {\n',
          '    if package_of(decl.cx) != PkgRoot && false {\n'),
+    ],
+    # a parameter's default is not read: the call in it keeps the old name,
+    # and the builtin it now reaches answers it
+    'defaults-unread': [
+        (LSPQ, '      Some(dx) -> { q = walk_e(qc, q, dx, tdefault_body(tf, k)) }\n',
+         '      Some(dx) -> ()\n'),
+    ],
+    # rename trusts the references program it already holds, and a file
+    # edited on disk with no notification is read as it was
+    'disk-unread': [
+        (SERVER, '      if w.current && not (verify && world_stale(ws, w)) { return Some(w) }\n',
+         '      if w.current { return Some(w) }\n'),
+    ],
+    # the tree is the one walked when the workspace was planned, and a
+    # module created since is never read
+    'tree-not-rewalked': [
+        (SERVER, '  for f in project_files_now(plan) {\n',
+         '  for f in (if true { plan.modules.project_files } else { project_files_now(plan) }) {\n'),
+    ],
+    # a watched-file notification for a module leaves the references
+    # program as it was
+    'watch-ignored': [
+        (SERVER, '    st = sources_changed(st, params)\n', ''),
     ],
 }
 

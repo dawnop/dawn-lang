@@ -1126,8 +1126,10 @@ class Contract:
                 if registration.get("method") == "workspace/didChangeWatchedFiles"
                 for watcher in registration.get("registerOptions", {}).get("watchers", [])
             )
-            require(globs == ["**/dawn.lock", "**/dawn.toml"], "MANIFEST_WATCH_NOT_REGISTERED",
-                    f"registration does not watch both manifests: {registrations!r}")
+            # the manifests re-plan the workspace; the sources keep the
+            # references program reading the tree as it is on disk
+            require(globs == ["**/*.dawn", "**/dawn.lock", "**/dawn.toml"], "MANIFEST_WATCH_NOT_REGISTERED",
+                    f"registration does not watch both manifests and the sources: {registrations!r}")
             registration_id = requests[0].get("id")
             mark = client.mark()
             client.send({"jsonrpc": "2.0", "id": registration_id, "result": None})

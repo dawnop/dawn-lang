@@ -157,6 +157,8 @@ type UnavailableWorkspace = {
   server 按 workspace 去重，一条通知对每个 workspace 至多 refresh 一次。客户端若把
   `dawn.toml` 当文档打开并保存，那条 `didSave` 按同一规则处理。server 对自己那条请求的回应
   （只有 `result`/`error`、没有 `method` 的消息）一律忽略，不回 MethodNotFound。
+  同一条注册请求里还有第二项 `dawn/sources`，glob 为 `**/*.dawn`：它不 refresh plan，
+  只把引用程序标成过期（`sources_changed`，见 lsp-references-design.md §R2.1）。
 - **受影响的 workspace。** 变更文件所在目录属于该 slot 规划时读过的 manifest 目录：项目自身、
   每个已解析 package 的目录（即 `bootstrap_source_input_manifest` 记为输入的那一组），以及
   planner/setup 诊断指向的目录（这样修好一个坏 manifest 本身也会触发）。
