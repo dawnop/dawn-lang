@@ -25,15 +25,24 @@
 # move when those files are edited, which `refresh` follows without walking
 # the module again.
 
-use lsp/lspq.{QCx, Resolution, NoRole, AssignUse, PlainUse, walked_resolutions, find_target}
+use lsp/lspq.{QCx, Resolution, NoRole, AssignUse, PlainUse, PunUse, walked_resolutions, find_target}
 use lsp/lsptok.{name_runs}
 use std/map
+use std/set
 
 ## One name in the document naming the asked declaration, in code points of
 ## the analyzed text. `decl`: the declaration's own name. `write`: a
 ## declaration (which binds the name) or the target of an assignment, what
-## documentHighlight calls a write; every other use reads.
-pub(pkg) type Occurrence = { lo: Int, hi: Int, decl: Bool, write: Bool }
+## documentHighlight calls a write; every other use reads. `pun`: which half
+## of a record pun the name is, if it is one.
+pub(pkg) type Occurrence = { lo: Int, hi: Int, decl: Bool, write: Bool, pun: PunSide }
+
+## A record pun (`Point { x }`, in a construction or a pattern) is one span
+## naming two declarations: the field `x` and the local `x`. Each of its two
+## resolutions is the half it names, `PunField` or `PunLocal`; every other
+## name is `NotPun`. References need not tell them apart; rename does, since
+## renaming either half spells the pun out (docs/lsp-references-design.md §R3).
+pub(pkg) type PunSide = NotPun | PunField | PunLocal
 
 ## Every occurrence of the declaration the name at `offset` resolves to, by
 ## offset, one per name; the declaration's own name only when `with_decl`.
@@ -49,9 +58,11 @@ pub(pkg) fn occurrences(qc: QCx, offset: Int, with_decl: Bool) -> List[Occurrenc
     None -> return []
   }
   var found: List[Occurrence] = []
-  for r in walked_resolutions(qc, 0, len(qc.cps)) {
+  let walked = walked_resolutions(qc, 0, len(qc.cps))
+  let puns = pun_starts(walked)
+  for r in walked {
     if same_decl(r, t.def_path, def) {
-      let o = occurrence(qc, r)
+      let o = occurrence(qc, r, puns)
       if with_decl || not o.decl { found = found ++ [o] }
     }
   }
@@ -73,10 +84,22 @@ pub(pkg) fn occurrences(qc: QCx, offset: Int, with_decl: Bool) -> List[Occurrenc
 ## of the name is not consulted.
 fn same_decl(r: Resolution, def_path: Option[String], def: (Int, Int)) -> Bool = r.def_path == def_path && r.def == def
 
+## Where the walk saw a record pun: the start of every span it also resolved
+## to a field as a pun (`PunUse`). The local's resolution of that span starts
+## there too.
+fn pun_starts(walked: List[Resolution]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  for r in walked {
+    if r.use_kind == PunUse { out = set.insert(out, r.lo) }
+  }
+  out
+}
+
 ## `r` as an occurrence: cut to its name, which is how a span starts (a field's
 ## declaration runs on over its type), or for a module, the last segment of a
-## path (`use std/str` is the module `str`).
-fn occurrence(qc: QCx, r: Resolution) -> Occurrence = {
+## path (`use std/str` is the module `str`). `puns`: `pun_starts` of the walk
+## `r` is from.
+fn occurrence(qc: QCx, r: Resolution, puns: Set[Int]) -> Occurrence = {
   let (dlo, dhi) = r.def
   let is_module = dlo == 0 && dhi == 0 && r.def_path != None
   let runs = name_runs(qc.cps, r.lo, r.hi, is_module)
@@ -84,7 +107,8 @@ fn occurrence(qc: QCx, r: Resolution) -> Occurrence = {
   # a declaration is its own site; a `let`'s site is its statement, and the
   # walk tags its name with a role instead (`lspq.LocalRole`)
   let decl = r.def_path == None && r.use_kind == PlainUse && (r.lo == dlo || r.role != NoRole)
-  Occurrence { lo: lo, hi: hi, decl: decl, write: decl || r.use_kind == AssignUse }
+  let pun = if r.use_kind == PunUse { PunField } else if set.has(puns, r.lo) { PunLocal } else { NotPun }
+  Occurrence { lo: lo, hi: hi, decl: decl, write: decl || r.use_kind == AssignUse, pun: pun }
 }
 
 # ---- the workspace index (docs/lsp-references-design.md §R2) ----
@@ -93,7 +117,7 @@ fn occurrence(qc: QCx, r: Resolution) -> Occurrence = {
 ## the declaration it names by file identity (`path`) and the declaration's
 ## site in that file. The module's own declarations and locals are filed under
 ## the module's own identity, so a key reads the same from every module.
-pub(pkg) type Ref = { lo: Int, hi: Int, path: String, def: (Int, Int), decl: Bool, write: Bool }
+pub(pkg) type Ref = { lo: Int, hi: Int, path: String, def: (Int, Int), decl: Bool, write: Bool, pun: PunSide }
 
 ## A module's names, read from one analysis of it. `text` is the text the
 ## occurrences index (the module's own, unchanged while its step is reused).
@@ -109,8 +133,10 @@ pub(pkg) type ModRefs = { path: String, text: String, refs: List[Ref], read: Map
 pub(pkg) fn mod_refs(qc: QCx, path: String, text: String, ident: Map[String, String], texts: Map[String, String]) -> ModRefs = {
   var refs: List[Ref] = []
   var read: Map[String, String] = map.empty()
-  for r in walked_resolutions(qc, 0, len(qc.cps)) {
-    let o = occurrence(qc, r)
+  let walked = walked_resolutions(qc, 0, len(qc.cps))
+  let puns = pun_starts(walked)
+  for r in walked {
+    let o = occurrence(qc, r, puns)
     let at = match r.def_path {
       None -> path
       Some(p) -> map.get(ident, p).unwrap_or(p)
@@ -121,7 +147,7 @@ pub(pkg) fn mod_refs(qc: QCx, path: String, text: String, ident: Map[String, Str
         None -> ()
       }
     }
-    refs = refs ++ [Ref { lo: o.lo, hi: o.hi, path: at, def: r.def, decl: o.decl, write: o.write }]
+    refs = refs ++ [Ref { lo: o.lo, hi: o.hi, path: at, def: r.def, decl: o.decl, write: o.write, pun: o.pun }]
   }
   ModRefs { path: path, text: text, refs: refs, read: read }
 }

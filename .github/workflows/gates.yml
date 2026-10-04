@@ -307,6 +307,8 @@ name: gates
 # +96s planning value) would have taken lsp-workspace past the pole, so the
 # four steps of that design moved to a new lsp-references job (446s, its 50s
 # overhead included) and lsp-workspace went back to its observed 605s.
+# The same day it went up to 16,920s: lsp-references gained the rename step
+# (R3, +126s planning value, docs/lsp-references-design.md §R3).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -330,7 +332,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 16794s (the most this file's `3x` claims may add up to)
+# push-total: 16920s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2485,19 +2487,21 @@ jobs:
 
   # The per-name contracts of docs/lsp-references-design.md: what definition
   # resolves, what kind semantic tokens give, what references return in one
-  # document and across a project. Each builds four mutant compilers, so
-  # together they are most of their job; they ran in lsp-workspace until the
-  # fourth (R2) would have taken that job past the pole.
+  # document and across a project, what rename edits and refuses. Each builds
+  # four or more mutant compilers, so together they are most of their job;
+  # they ran in lsp-workspace until the fourth (R2) would have taken that job
+  # past the pole.
   lsp-references:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-references') }}
     runs-on: ubuntu-latest
     # Planning allowance, each step at twice its local time as its line in
     # lsp-workspace claimed (56s, 39s, 55s and 48s, 2026-10-04), plus 50s
-    # fixed overhead: 2 * 198 + 50 = 446s, timeout 3x that. Restate from the
-    # observation once the job has a week of main runs.
-    # budget: 3x 446s planning allowance (2 x 56s, 2 x 39s, 2 x 55s and 2 x 48s, plus 50s fixed overhead)
-    timeout-minutes: 23
+    # fixed overhead: 2 * 198 + 50 = 446s; the rename step (R3) adds twice
+    # its local 63s: 572s, timeout 3x that. Restate from the observation
+    # once the job has a week of main runs.
+    # budget: 3x 572s planning allowance (2 x 56s, 2 x 39s, 2 x 55s, 2 x 48s and 2 x 63s, plus 50s fixed overhead)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2549,6 +2553,19 @@ jobs:
       # locally (2026-10-04).
       - name: lsp workspace references and mutants
         run: ./scripts/lsp-references-workspace.py --mutants
+
+      # What prepareRename and rename answer (docs/lsp-references-design.md
+      # §R3): one project with a [deps] package, a case per safety condition
+      # the research report lists (case class, keyword, shadowing a builtin
+      # and a capture by a local, a module alias, an `as` import from both
+      # ends, every importer, record puns from both sides, named arguments,
+      # a trait method, an operation, doc links) and the refusals (std, a
+      # builtin, a dependency, a module, `main`, a module with errors). The
+      # previous release has no rename, so selfhost-lsp-diff.sh can only say
+      # that the reply changed. Seven mutants, each built from a private
+      # selfhost copy, must turn their own case red. 63s locally (2026-10-04).
+      - name: lsp rename and mutants
+        run: ./scripts/lsp-rename.py --mutants
 
   # The wasm target: the failure runtime, and the DOM bridge over it.
   #

@@ -3,9 +3,9 @@
 > 状态：**current**：T0 于 2026-10-04 落地，分支 `feat/lsp-resolution-coverage`（提交以主题引用，合入后的哈希记在进度记录里）；
 > T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`；T2（VS Code 与 Playground 两个消费端，§T2）同日，分支 `feat/lsp-semantic-tokens-clients`；
 > R1（单文件 references 与 documentHighlight，§R1）同日落地，分支 `feat/lsp-references-local`；
-> R2（工作区 references，§R2）同日落地，分支 `feat/lsp-references-workspace`。
+> R2（工作区 references，§R2）同日落地，分支 `feat/lsp-references-workspace`；R3（prepareRename 与 rename，§R3）同日落地，分支 `feat/lsp-rename`。
 > 依据：裁决 `agent-handoff/ruling-lsp-tokens-rename-20261003.md`，调研 `agent-handoff/research-lsp-tokens-rename-report-20261003.md`
-> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2，§R1 写 R1，§R2 写 R2；R3（rename）动码前在此续写。
+> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2，§R1 写 R1，§R2 写 R2，§R3 写 R3。
 
 ## 一、为什么 T0 在最前
 
@@ -561,3 +561,150 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
 - **超过 128 个模块的项目**：`max_modules` 只保留前 128 个步骤，之后的模块每次都重查，它们的条目也就每次重读。selfhost 79 个，离上限还远；
   真有更大的项目时该调的是这个上限，不是索引。
 - **跨会话持久化索引**：条目是步骤的派生物，步骤本身不跨会话，索引也不该先跨。
+
+## R3：prepareRename 与 rename
+
+调研 §5.1 的 R3 行与 §3.2、§3.3；裁决第 4、5 条：只改本工程包、source root 下的源码，安全条件以调研 §3.3 的 15 条为准，
+结束前对改后文本重分析，出新诊断即拒绝，不自动重排格式。服务端声明 `renameProvider: {prepareProvider: true}`，
+两个请求在 `lsp/server.dawn`（`rename_start`、`handle_prepare_rename`、`handle_rename`），纯计算在新模块 `lsp/lsprename.dawn`。
+
+### R3.1 可改的名字与拒绝理由
+
+`prepareRename` 与 `rename` 走同一个入口 `rename_start`：取光标处 `find_target` 的声明（R1 的键），在 R2 的引用程序里找到它，
+再逐条检查。可改的是光标所在的那一处 occurrence（R1 的裁剪，`use m.{f as h}` 里光标在 `f` 与在 `h` 是两个名字，限定访问只取成员段），
+回复 `{range, placeholder}`，`placeholder` 是它现在的拼写。拒绝时回 `RequestFailed`（-32803）带消息，编辑器直接显示：
+
+| 情形 | 消息要点 | 理由 |
+|---|---|---|
+| 没有分析、`untitled:` 缓冲区 | rename works in the files of a project | standalone 没有工作区、没有 source root，改名的边界无从谈起 |
+| 光标处没有名字，或没有声明（字面量、内建 `len`） | no name here / not declared in this project's sources | 同 definition：无处可跳就无处可改 |
+| 声明在 std、内建 prelude、`[deps]` 包 | declared outside this project's sources | 声明模块的 `package_of` 不是 `PkgRoot`，或文件不在 source root 下（`path_in_root`）；裁决第 4 条 |
+| 模块名（`use geo`、限定访问的 `geo.`） | a module is renamed by moving its file | 模块改名是移文件，裁决第 5 条不做 |
+| 顶层 `main` | the program's entry point | 入口按名字找 |
+| 请求模块或声明模块有诊断 | has errors; fix them first | 有错的模块解析不全，引用集合不可信（Roc 的「不能构建就不改」） |
+| 两个打开的文档对同一文件说法不同 | disagree about one file | 引用程序本身不成立 |
+
+引用程序一旦建起来，拒绝时也留在 workspace 里：第一次建它要检查全仓（R2.6 的 4 s 量级），不能因为光标落在 std 函数上就每次重付。
+`use java` 引入的类与成员没有项目内的声明位置，落在第二行；test 名是字符串，不是名字；语法糖合成的名字没有出现在 occurrence 里，
+光标拿不到它们。测试与 `[deps]` 包都是被动拒绝：只要声明不在本包，就没有可改的东西。
+
+**改名导入**：光标在 `use m.{f as h}` 的 `h` 上（或 `h` 的使用处），改的是本模块的局部名：只编辑本模块里拼作 `h` 的 occurrence，
+声明与别处都不动（`as_name`）。这时声明在哪个包无所谓，`use std/str.{len as slen}` 的 `slen` 也能改，因为只碰本模块的文本。
+
+### R3.2 15 条安全条件落到哪里
+
+| # | 条件 | 实现 | 夹具 |
+|---|---|---|---|
+| 1 | 大小写即语义 | `lsprename.check_new_name`：新旧名字各过一遍 `front/lexer`，必须都是单个 `IDENT` 或都是 `TYPEIDENT` | `scale` → `Grow` 拒绝（负例） |
+| 2 | 不是硬关键字 | 同上，分出关键字 token 就拒绝；上下文关键字（`with` `in` `as` …）分词是 `IDENT`，放行，靠第 15 条兜底 | `scale` → `match` 拒绝；单测里 `with` 放行 |
+| 3 | 遮蔽 std/builtin 改变他处解析 | 第 15 条的解析比对：改后每个名字解析到的声明必须与改前一致 | `count_of` → `len`（模块里调用了内建 `len`）拒绝；另有局部捕获：`scale` → `twice`，`helper` 里的 `twice` 是局部 lambda，改后 `twice(n)` 会被它接住，拒绝 |
+| 4 | 模块别名同一命名空间 | 第 15 条的诊断比对（编译器报 shadows the imported module） | `helper` → `str` 拒绝（负例） |
+| 5 | 选择性导入冲突、`as` | 冲突靠诊断比对；`as`：只改拼写与旧名相同的 occurrence，经 `as` 绑定的名字保留自己的拼写 | `first` → `lead` 只改导入列表的 `first` 不改 `head`；从 `head` 改只动 `head`；`helper` → `scale`（已导入）拒绝 |
+| 6 | 导出面与导入者 | 引用程序装全仓（R2），每个模块的条目按键过滤 | `scale` 的九处：声明、导入列表、调用、限定调用、管道、UFCS、两处文档链接，从调用处与声明处各改一次，结果相同 |
+| 7 | `[deps]` 与 std 不可改 | `rename_start` 查声明模块的包与 source root；生成编辑后再逐条查一次 `path_in_root` | `triple`（`[deps]`）、`str.len`（std）在 prepareRename 拒绝 |
+| 8 | 记录简写双向 | R1 的收集在简写处给两条解析（字段 `PunUse`、局部量 `PlainUse`），`lspref` 把它们标成 `PunField`/`PunLocal`；改字段写成 `col: x`，改局部量写成 `x: v` | 字段 `x` 在构造与模式里各一处简写；`let y` 被构造简写读；模式简写绑定的 `x` |
+| 9 | 具名实参与默认参数 | 形参的引用里本来就有调用处的 `name:`（T0）与默认值表达式里的使用 | `by` → `factor`：声明、函数体、调用处 `by: 3` |
+| 10 | trait 方法 | R1 的 `ImplUse`：impl 的方法名是 trait 方法的引用 | `area` → `size`：trait、impl、导入列表、调用 |
+| 11 | 效果操作 | T0：调用与 handler 臂名都解析到操作声明 | `ask` → `query`：声明、调用、另一模块的 handler 臂 |
+| 12 | 管道与 UFCS | 名字跨度在 `EVar`/`EMethod` 上，与普通调用相同 | 并入第 6 条：`3 \|> scale`、`2.scale()` |
+| 13 | 文档链接 | 每个模块的 `##` 文档里的 `` [`…`] ``（`front/docs.doc_link_spans`），末段拼作旧名的，用 `driver/doclinks.resolve_link` 在该模块作用域解析，落在同一声明（声明模块相同、名字起点相同）就改末段 | `[`scale`]`、`[`geo.scale`]`、`[`Point.x`]` |
+| 14 | 格式 | 不重排；只出名字本身的编辑（简写展开除外）。触发率在 selfhost 上实测（R3.6） | 无（selfhost 抽样） |
+| 15 | 结果自检 | R3.3 | 第 3、4、5 条的负例 |
+
+### R3.3 改后重分析自检
+
+`handle_rename` 算出编辑后，不直接交出去，先在内存里把编辑应用到各文件的文本，用引用程序自己的 `incremental.Session` 和解析记忆
+把改后的工作区分析一遍（编辑没碰的模块照常复用步骤；返回的新 session 丢掉，编辑还没生效，不能让引用程序记住它）。两道检查：
+
+1. **诊断**：按文件 identity 数诊断条数，改后哪个文件比改前多，就拒绝，消息带编译器的原文与位置。引用程序装着全仓，
+   一个本来就坏的模块（夹具的 broken.dawn）改前改后条数相同，不会挡住与它无关的改名。
+2. **解析**：这是第 3 条要的东西，诊断给不了：改名到 `len` 之后模块照样能编译，只是 `len(..)` 换了被调用者。
+   对每个**被编辑的模块**以及**改后文本里整词拼出新名字的模块**（`lsprename.spells`），拿改前的索引条目（R2 的 `ModRefs`）与改后整篇遍历的结果比：
+   改前每个名字的位置与它指向的声明位置都经编辑前移（`forward`/`forward_key`），被改名的声明移到新拼写，简写展开后两半各归各的；
+   两边必须是同一个集合。多出来的（内建调用现在解析到新函数）、少掉的、指向变了的（被局部量捕获），都拒绝，消息给出改后文本里第一处不一致的位置。
+   一个从来没拼出新名字的模块不会有名字改为指向它，所以不在比较范围内；改名前就指向旧声明的名字都在被编辑的模块里。
+
+这比 gopls 那样按作用域种类逐条写冲突规则少很多：遮蔽、捕获、导入丢失都是「某个名字指向的声明变了」，一条比较就覆盖，
+而且与 references 用的是同一份解析，不会出现「references 认为是同一个、rename 认为不是」。代价是一次改后分析与几次遍历（R3.7）。
+
+### R3.4 回复的形状
+
+`WorkspaceEdit` 只用 `changes`（URI → `TextEdit[]`），不用 `documentChanges`：编辑都是名字替换，没有建文件、改文件名，
+`changes` 每个客户端都支持。URI 照 R2：文件有打开的文档就用那个文档的 URI，否则 `path_to_uri(identity)`。区间按改前文本换算成 UTF-16。
+同一起点只出一条编辑（记录类型与它同名的构造器共用一个位置）。新名字与旧名字相同时回空的 `changes`。
+
+服务端不应用编辑、不改磁盘，客户端应用后会照常发 `didChange`，没打开的文件客户端会自己打开或改盘；之后的分析从那里接着走。
+
+### R3.5 Playground
+
+网关不转发 prepareRename 与 rename（`playground/lsp_gateway.py` 的白名单不变），与 R1、R2 一样：Playground 的文档是 `untitled:` 缓冲区，
+在服务端是 standalone，R3.1 第一行本来就拒绝。
+
+### R3.6 selfhost 抽样与格式触发率
+
+验收：对 selfhost 随机抽 20 个 `pub fn`（`random.Random(20261004)`，候选是 `selfhost/src` 下除 `embed/`（生成物，不许手改）外所有行首的 `pub fn`，共 513 个，排序后 `sample(…, 20)`），
+每个改名为原名加 `_rn`。一个 LSP 会话开在 selfhost 的副本上，逐个在声明处发 rename；每个回复应用到一份新副本，
+跑 `dawn check selfhost` 与 `dawn fmt selfhost --check`。
+
+结果：20 个全部被接受，20 个改后 `dawn check` 全部 ok；共 430 处编辑、84 个文件次；**`fmt --check` 触发 0 次**（改前副本 `fmt --check` 也是干净的）。
+最多的 `front/ast.e_hi` 一次 124 处、7 个文件，`check/types.prelude_adts` 49 处、11 个文件。名字变长 3 个字符没有碰到任何对齐：
+dawn fmt 只规范 token 之间的空白与按括号层次的缩进，保留作者的换行，不按列对齐（`front/fmt.dawn` 文件头），
+改一个名字的长度不改变它对任何一行的判断；简写展开写出的 `col: x` 本来就是 fmt 的间距。所以第 14 条在本仓的实际触发率是 0/20，
+调研担心的「对齐被改名打破」在今天的 fmt 下不存在，rename 不重排格式没有代价。
+
+### R3.7 性能（本机实测）
+
+selfhost 工作区，JVM（`./bin/dawn lsp`），打开 `check/types.dawn`，第一次 references 建引用程序（约 6 s，同 R2.6 的 4.1 s 量级，本机 load average 约 4）后，
+prepareRename、rename、references 交错各 9 轮，丢前 2 轮取中位数：
+
+| 目标 | 编辑 | prepareRename | rename（含自检） | references |
+|---|---|---|---|---|
+| `adt_of`（`pub fn`，21 个文件 130 处） | 130 处 | 40 ms | 3.6 s | 231 ms |
+| `union_has`（私有函数，8 处） | 8 处 | 42 ms | 1.1 s | 44 ms |
+| `union_has` 的形参 `vs`（2 处，改名为常见的 `xs`） | 2 处 | 40 ms | 1.3 s | 44 ms |
+
+在一份插了计时的副本上拆开（每轮）：
+
+| 阶段 | `adt_of` | `union_has` |
+|---|---|---|
+| 全部模块的条目（多数是 R2 的平移） | 120–160 ms | 120–170 ms |
+| 改后重分析 | 1.4–2.0 s | 0.8–1.2 s |
+| 诊断比较 | ≈ 0 | ≈ 0 |
+| 解析比较（改后遍历） | 1.4–1.9 s | 90–140 ms |
+
+大头是改后重分析与改后遍历。`adt_of` 的签名名字变了，导入 types.dawn 的模块的步骤都不能复用，重分析接近整仓重查；
+它被 21 个文件引用，这 21 个文件都要整篇遍历一次。私有函数只重查 types.dawn 自己，但重分析里还有一次重新装载全仓的文本与解析（解析记忆命中），
+所以下限在 0.8 s 左右。形参改成 `xs` 时，整词拼出 `xs` 的模块多（R3.3 的筛选），解析比较那一段比私有函数多一些。
+rename 是一次性的用户操作，3.6 s 对 130 处跨 21 个文件的改名可以接受；prepareRename 只走 `rename_start`，40 ms，不碍事。
+
+### R3.8 行为变化与 Emit-Change
+
+`selfhost-lsp-diff.sh` 的会话在 R2 那条跨文件 references 之后加一次 prepareRename 与一次 rename（`pad_to` → `pad_out`，跨 inlays.dawn 与 util.dawn）。
+用真父（`9b3f3e7f` 编出的服务端，`DAWN_STD` 指本仓 std）逐消息对照，137 条消息里三条不同：initialize 多了 `renameProvider`，
+两个新请求真父回 MethodNotFound。其余逐字相同。提交里写一行 `Emit-Change(lsp)`。
+
+`lspref` 的 `Occurrence` 与 `Ref` 多了 `pun` 字段，references 与 documentHighlight 的回复不读它，R1、R2 的夹具不变。
+
+### R3.9 门禁
+
+`scripts/lsp-rename.py`：一个带 `[deps]` 路径包的工程（geo、main、一个有类型错误的 broken），一个会话，24 个断言：
+initialize 的能力；prepareRename 的区间与 placeholder；R3.2 表里每条条件的正例或负例；R3.1 的拒绝。编辑按 `文件 行:列 旧 -> 新` 逐条比，拒绝按消息全文比。
+变异体 7 个，锚点在 `scripts/lsp-rename/mutate.py`，登进 `mutation-anchor-preflight.py` 与 `anchor-readers.txt`：
+不查大小写类（`case-class-unchecked`，消息变成编译器的）、解析比对拿改后比改后（`resolutions-unchecked`，`len` 那例放行）、
+不看诊断（`diagnostics-unchecked`）、简写不展开（`puns-not-spelled-out`）、`as` 名字跟着改（`as-names-renamed`）、
+不改文档链接（`doc-links-skipped`）、不查声明的包（`dependencies-renamed`，`triple` 的 prepareRename 放行）。各自从私有 selfhost 副本编译，要求自己那条断言变红。
+本机正例约 1.3 s，含七个变异体约 63 s（load average 约 4；本机另有写者时 load 12 到 15，同一命令 91 到 110 s）。
+
+**CI 的位置**：接进 R2 时新建的 `lsp-references` job（四个逐名夹具已在那里）。规划额度 446 + 2 × 63 = 572 s，timeout 29 分钟，仍在 950 s 的 pole 之下；
+push-total 16,794 → 16,920 s（+126 s）。`steps.lock.json` 已重录。
+
+### R3.10 不做的（理由）
+
+- **delta、模块改名、跨包 rename、rename 时重排格式、gopls 式默认关、rust-analyzer 式先文本搜索、codeLens**：裁决第 5 条，理由见调研 §5.2。
+- **简写收回**：改名后两半重新同名（`{ x: y }` 把 `y` 改成 `x`）时可以收回成 `{ x }`。收回是格式上的选择，与「不重排格式」同一个理由；`{ x: x }` 照样合法。
+- **standalone 缓冲区里改名**：没有 source root，「只改本工程源码」无从判断；Playground 不转发。
+- **有错的模块里改名**：R3.1。解析不全时引用集合会漏，漏改比拒绝更糟。
+- **改名导入的局部名在别的模块的连锁**：`as` 的局部名只在本模块可见，不存在连锁。
+- **上下文关键字的提示**：调研建议放行但在 prepareRename 的消息里提示。prepareRename 不知道新名字，提示只能是泛泛的一句；真出问题时第 15 条会拒绝，并带编译器的原文。
+- **改后文档链接再解析一次**：链接只在 `dawn doc` 里读；改的是末段且只在旧链接确实落在被改声明上时才改，改后 `dawn doc` 会照常解析它。
+- **自检的结果缓存**：改后分析的 session 不保留。保留它要在客户端真的应用了这份编辑之后才对，服务端不知道客户端何时、是否应用。
