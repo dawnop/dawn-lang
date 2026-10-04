@@ -8811,7 +8811,19 @@ fn call_arg_slots(
 
 ## The two inference rounds of a signature call: self-sufficient arguments
 ## first (they bind type variables), then the inference-needing ones (bare
-## `None`, `[]`) under what the first round learned.
+## `None`, `[]`, unannotated lambdas) under what the first round learned.
+##
+## The second round is not a source-order walk. Each step takes the first
+## remaining argument that is ready (`round_two_ready`) and falls back to the
+## first remaining one only when none is. A lambda whose parameter would be
+## typed by a callee variable that a later argument binds is therefore checked
+## after that argument: `apply2(1, (x, y) => inc(x, y), x => x * 2)` with
+## `f: fn(A, M) -> A, g: fn(A) -> M` checks `g` first, and `y` gets `Int`
+## rather than the callee's own unbound `M`. When every argument is ready the
+## order is the source order it always was, and so is the fallback, so only a
+## call that used to leak a callee variable into a lambda is reordered. This is
+## Kotlin's "analyze a lambda whose input types are proper" step, without the
+## type variables Dawn does not have.
 ##
 ## Cut out of `check_call` for HotSpot's 8000-byte HugeMethodLimit (#241). The
 ## rounds are the only place the substitution is grown from the arguments, so
@@ -8832,82 +8844,179 @@ fn infer_call_args(
   var cx1 = start
   var m = m0
   var em = em0
-  var at_slots = at0
-  var tx_slots = tx0
-  for round in 0..2 {
-    var at_next: List[Option[Ty]] = []
-    var tx_next: List[Option[TExpr]] = []
-    var i = 0
-    for a in args {
-      var at_i = at_slots[i]
-      var tx_i = tx_slots[i]
-      let done = match at_i {
-        Some(_) -> true
-        None -> false
-      }
-      let skip = if round == 0 {
-        let answer = needs_expected(cx1, a)
-        answer
-      } else { false }
-      if not done && not skip {
-        let pt = s.param_tys[pidx[i]]
-        let substd = reduce_instantiated(cx1, subst(pt, m, em), m)
-        # lambdas only need their parameter types, and function values unify
-        # piecewise — a partially concrete expected type still helps
-        let accepts = is_concrete(cx1, substd) || accepts_partial_expected(cx1, a)
-        let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
-        let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
-        cx1 = cxa
-        at_i = Some(at)
-        tx_i = Some(ax)
-        # A function value's row is answered here and nowhere else, so this is
-        # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
-        # binding is offered to `unify_into` rather than made after it: the
-        # union arm is a containment test over the *substituted* row, so a
-        # binding that arrives late is a binding the test never sees.
-        let (em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
-        var m3 = m
-        var em3 = em_sub
-        var ok = true
-        let (m4, em4, ok4) = unify_into(cx1, pt, at, m, em_sub)
-        m3 = m4
-        em3 = em4
-        ok = ok4
-        # A subtraction that did not rescue the argument must leave nothing
-        # behind: the argument is an error either way, and a stray binding for
-        # `e` would answer the next argument's row with a row nothing chose.
-        if not ok && subtracted {
-          let (m5, em5, ok5) = unify_into(cx1, pt, at, m, em)
-          m3 = m5
-          em3 = em5
-          ok = ok5
-        }
-        m = m3
-        em = em3
-        if not ok {
-          let h = match why {
-            Some(w) -> w
-            None -> {
-              let hint_text = sig_render(cx1.adts, cx1.traits, s)
-              "signature: " ++ hint_text
-            }
-          }
-          let expected_type = as_unified(cx1, pt, m, em)
-          let expected_text = ty_show(cx1.adts, expected_type)
-          let actual_text = ty_show(cx1.adts, at)
-          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
-              expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
-        }
-      }
-      at_next = at_next ++ [at_i]
-      tx_next = tx_next ++ [tx_i]
-      i = i + 1
+  var at_slots: List[Option[Ty]] = []
+  var tx_slots: List[Option[TExpr]] = []
+  var i = 0
+  for a in args {
+    var at_i = at0[i]
+    var tx_i = tx0[i]
+    let done = match at_i {
+      Some(_) -> true
+      None -> false
     }
-    at_slots = at_next
-    tx_slots = tx_next
+    if not done && not needs_expected(cx1, a) {
+      let (cxa, m1, em1, at, ax) = infer_call_arg(cx1, s, a, i, pidx, pre0, m, em)
+      cx1 = cxa
+      m = m1
+      em = em1
+      at_i = Some(at)
+      tx_i = Some(ax)
+    }
+    at_slots = at_slots ++ [at_i]
+    tx_slots = tx_slots ++ [tx_i]
+    i = i + 1
+  }
+  while true {
+    var first = 0 - 1
+    var pick = 0 - 1
+    var j = 0
+    for a in args {
+      let pending = match at_slots[j] {
+        Some(_) -> false
+        None -> true
+      }
+      if pending {
+        if first < 0 { first = j }
+        if pick < 0 {
+          let substd = reduce_instantiated(cx1, subst(s.param_tys[pidx[j]], m, em), m)
+          let partial_ok = is_concrete(cx1, substd) || accepts_partial_expected(cx1, a)
+          if round_two_ready(a, substd, unbound_tparams(s.tparams, m), partial_ok) { pick = j }
+        }
+      }
+      j = j + 1
+    }
+    if first < 0 { break }
+    let k = if pick >= 0 { pick } else { first }
+    let (cxa, m1, em1, at, ax) = infer_call_arg(cx1, s, args[k], k, pidx, pre0, m, em)
+    cx1 = cxa
+    m = m1
+    em = em1
+    at_slots = put_slot(at_slots, k, Some(at))
+    tx_slots = put_slot(tx_slots, k, Some(ax))
   }
   (cx1, m, em, at_slots, tx_slots)
 }
+
+## One argument of a signature call, checked under what `m` and `em` know so
+## far, its type unified into them. The body of both inference rounds.
+fn infer_call_arg(
+  cx: Cx,
+  s: Sig,
+  a: Expr,
+  i: Int,
+  pidx: List[Int],
+  pre0: Option[(Ty, TExpr)],
+  m0: Map[Int, Ty],
+  em0: Map[Int, Eff]
+) -> (Cx, Map[Int, Ty], Map[Int, Eff], Ty, TExpr) !io = {
+  var cx1 = cx
+  var m = m0
+  var em = em0
+  let pt = s.param_tys[pidx[i]]
+  let substd = reduce_instantiated(cx1, subst(pt, m, em), m)
+  # lambdas only need their parameter types, and function values unify
+  # piecewise — a partially concrete expected type still helps
+  let accepts = is_concrete(cx1, substd) || accepts_partial_expected(cx1, a)
+  let exp2: Option[Ty] = if accepts { Some(substd) } else { None }
+  let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, exp2)
+  cx1 = cxa
+  # A function value's row is answered here and nowhere else, so this is
+  # where the leftover `!(e|R)` leaves for `e` is computed (#350). The
+  # binding is offered to `unify_into` rather than made after it: the
+  # union arm is a containment test over the *substituted* row, so a
+  # binding that arrives late is a binding the test never sees.
+  let (em_sub, subtracted, why) = earg_row_subtract(cx1, s, pt, at, m, em)
+  var m3 = m
+  var em3 = em_sub
+  var ok = true
+  let (m4, em4, ok4) = unify_into(cx1, pt, at, m, em_sub)
+  m3 = m4
+  em3 = em4
+  ok = ok4
+  # A subtraction that did not rescue the argument must leave nothing
+  # behind: the argument is an error either way, and a stray binding for
+  # `e` would answer the next argument's row with a row nothing chose.
+  if not ok && subtracted {
+    let (m5, em5, ok5) = unify_into(cx1, pt, at, m, em)
+    m3 = m5
+    em3 = em5
+    ok = ok5
+  }
+  m = m3
+  em = em3
+  if not ok {
+    let h = match why {
+      Some(w) -> w
+      None -> {
+        let hint_text = sig_render(cx1.adts, cx1.traits, s)
+        "signature: " ++ hint_text
+      }
+    }
+    let expected_type = as_unified(cx1, pt, m, em)
+    let expected_text = ty_show(cx1.adts, expected_type)
+    let actual_text = ty_show(cx1.adts, at)
+    cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
+        expected_text ++ ", got " ++ actual_text, e_lo(a), e_hi(a), h)
+  }
+  (cx1, m, em, at, ax)
+}
+
+## The callee type parameters `m` has no answer for yet, by id.
+fn unbound_tparams(tparams: List[Ty], m: Map[Int, Ty]) -> List[Int] = {
+  var out: List[Int] = []
+  for tp in tparams {
+    match tp {
+      TyVar(_, vid) -> if not map.has(m, vid) { out = out ++ [vid] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+## May this second-round argument be checked now, under `expected`?
+##
+## An unannotated lambda parameter takes its type from the expected function
+## type, and `check_lambda` takes a bare type variable there as given -- it has
+## to, for the enclosing declaration's rigid parameters. So a lambda checked
+## while one of those parameter types still names a callee variable nothing
+## has bound yet gets that variable as its parameter's type, and then binds the
+## variable to itself on the way out. Such a lambda waits. Anything else keeps
+## the condition its expectation was always given under (`partial_ok`), since
+## for those that is exactly what makes checking it now worth anything.
+fn round_two_ready(a: Expr, expected: Ty, unbound: List[Int], partial_ok: Bool) -> Bool =
+  match a {
+    ELambda(params, _, _, _, _) -> {
+      let wanted: List[Ty] = match expected {
+        TyFn(ps, _, _) -> {
+          var out: List[Ty] = []
+          var i = 0
+          for p in params {
+            match p.ann {
+              None -> match get(ps, i) {
+                Some(pt) -> { out = out ++ [pt] }
+                None -> ()
+              }
+              Some(_) -> ()
+            }
+            i = i + 1
+          }
+          out
+        }
+        _ -> [expected]
+      }
+      for t in wanted {
+        for vid in unbound {
+          if ty_mentions_var(t, vid) { return false }
+        }
+      }
+      true
+    }
+    _ -> partial_ok
+  }
+
+## `xs` with slot `k` replaced. Argument lists are a handful long, and the
+## second round writes each slot once.
+fn put_slot[T](xs: List[T], k: Int, v: T) -> List[T] = list.take(xs, k) ++ [v] ++ list.drop(xs, k + 1)
 
 ## Instantiate a callee's declared effect at a call site: an unbound effect
 ## variable means pure, and labels ride through unchanged.
@@ -9984,7 +10093,9 @@ fn ctor_arg_slots(
 }
 
 ## The two inference rounds of a constructor call: self-sufficient arguments
-## first, then the inference-needing ones under what the first round learned.
+## first, then the inference-needing ones under what the first round learned,
+## the second in readiness order (see `infer_call_args`; a field of type
+## `fn(A, M) -> A` waits for the field that binds `M`).
 ##
 ## Cut out of `check_ctor_call` for C1's register limit (#252), the same cut
 ## as `infer_call_args`. Everything the rounds change comes back explicitly:
@@ -10001,50 +10112,84 @@ fn infer_ctor_args(
   var cx1 = start
   var m = m0
   var em = em0
-  var atx = atx0
-  # two rounds of checking (see check_call)
-  for round in 0..2 {
-    var atx_next: List[Option[TExpr]] = []
-    var j = 0
+  var atx: List[Option[TExpr]] = []
+  var j = 0
+  for a in cargs {
+    let idx = idx_of[j]
+    var atx_j = atx0[j]
+    let already = match atx_j {
+      Some(_) -> true
+      None -> false
+    }
+    if idx >= 0 && not already && not needs_expected(cx1, a.e) {
+      let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, a, idx, m, em)
+      cx1 = cxa
+      m = m1
+      em = em1
+      atx_j = Some(ax)
+    }
+    atx = atx ++ [atx_j]
+    j = j + 1
+  }
+  let tparams = adt_of(cx1.adts, ci.adt).tparams
+  while true {
+    var first = 0 - 1
+    var pick = 0 - 1
+    var k = 0
     for a in cargs {
-      let idx = idx_of[j]
-      var atx_j = atx[j]
-      let already = match atx_j {
-        Some(_) -> true
-        None -> false
+      let idx = idx_of[k]
+      let pending = match atx[k] {
+        Some(_) -> false
+        None -> true
       }
-      if idx >= 0 && not already {
-        let skip = if round == 0 {
-          let answer = needs_expected(cx1, a.e)
-          answer
-        } else { false }
-        if not skip {
-          let declared = ci.fields[idx].ty
-          let sub = subst(declared, m, em)
-          let concrete = is_concrete(cx1, sub)
-          let exp2: Option[Ty] = if concrete { Some(sub) } else { None }
-          let (cxa, at, ax) = check_expr(cx1, a.e, exp2)
-          cx1 = cxa
-          atx_j = Some(ax)
-          let (m3, em3, ok) = unify_into(cx1, declared, at, m, em)
-          m = m3
-          em = em3
-          if not ok {
-            let declared_text = ty_show(cx1.adts, subst(declared, m, em))
-            let actual_text = ty_show(cx1.adts, at)
-            let hint_text = ctor_render(cx1.adts, ci)
-            cx1 = cerr_h(cx1, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
-                "` is " ++ declared_text ++ ", got " ++ actual_text, e_lo(a.e), e_hi(a.e),
-              "constructor: " ++ hint_text)
-          }
+      if idx >= 0 && pending {
+        if first < 0 { first = k }
+        if pick < 0 {
+          let sub = subst(ci.fields[idx].ty, m, em)
+          let ok_now = is_concrete(cx1, sub)
+          if round_two_ready(a.e, sub, unbound_tparams(tparams, m), ok_now) { pick = k }
         }
       }
-      atx_next = atx_next ++ [atx_j]
-      j = j + 1
+      k = k + 1
     }
-    atx = atx_next
+    if first < 0 { break }
+    let at_k = if pick >= 0 { pick } else { first }
+    let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, cargs[at_k], idx_of[at_k], m, em)
+    cx1 = cxa
+    m = m1
+    em = em1
+    atx = put_slot(atx, at_k, Some(ax))
   }
   (cx1, m, em, atx)
+}
+
+## One constructor argument for field `idx`, checked under what `m` and `em`
+## know so far, its type unified into them. The body of both rounds.
+fn infer_ctor_arg(
+  cx: Cx,
+  ci: CtorI,
+  a: Arg,
+  idx: Int,
+  m0: Map[Int, Ty],
+  em0: Map[Int, Eff]
+) -> (Cx, Map[Int, Ty], Map[Int, Eff], TExpr) !io = {
+  var cx1 = cx
+  let declared = ci.fields[idx].ty
+  let sub = subst(declared, m0, em0)
+  let concrete = is_concrete(cx1, sub)
+  let exp2: Option[Ty] = if concrete { Some(sub) } else { None }
+  let (cxa, at, ax) = check_expr(cx1, a.e, exp2)
+  cx1 = cxa
+  let (m3, em3, ok) = unify_into(cx1, declared, at, m0, em0)
+  if not ok {
+    let declared_text = ty_show(cx1.adts, subst(declared, m3, em3))
+    let actual_text = ty_show(cx1.adts, at)
+    let hint_text = ctor_render(cx1.adts, ci)
+    cx1 = cerr_h(cx1, "field `" ++ ci.fields[idx].name ++ "` of `" ++ ci.name ++
+        "` is " ++ declared_text ++ ", got " ++ actual_text, e_lo(a.e), e_hi(a.e),
+      "constructor: " ++ hint_text)
+  }
+  (cx1, m3, em3, ax)
 }
 
 # ---- Java interop calls (spec §9) ----
@@ -13716,6 +13861,42 @@ test "a trait method with an associated-type result is a value of the concrete t
   # binding it to the unreduced `C.Msg` is what used to make the lambda's
   # `List[Ev]` miss
   assert msgs_of(assoc_value_src("fn d(c: C) -> List[Ev] = serve(c, update, m => view(m))\n")) == []
+}
+
+## A lambda whose parameter type is a callee variable that only a later
+## argument binds: `infer_call_args` and `infer_ctor_args` check it after that
+## argument instead of handing it the variable itself.
+fn later_binder_src(call: String) -> String =
+  "fn apply2[A, M](a: A, f: fn(A, M) -> A, g: fn(A) -> M) -> A = f(a, g(a))\n" ++
+  "fn apply2r[A, M](a: A, g: fn(A) -> M, f: fn(A, M) -> A) -> A = f(a, g(a))\n" ++
+  "fn chain[A, B, C](a: A, f: fn(B) -> C, g: fn(A) -> B, h: fn(C) -> A) -> A = h(f(g(a)))\n" ++
+  "fn app[A, M](a: A, f: fn(A, M) -> A) -> A = a\n" ++
+  "type Prog[A, M] = { init: A, step: fn(A, M) -> A, read: fn(A) -> M }\n" ++
+  "type Pair[A, M] = Pair(init: A, step: fn(A, M) -> A, read: fn(A) -> M)\n" ++
+  "fn inc(a: Int, b: Int) -> Int = a + b\n" ++
+  "pub fn main() -> Int = " ++ call ++ "\n"
+
+test "a lambda parameter a later argument binds waits for that argument" {
+  # `M` comes from `g`'s result alone; `f` is written first. Checked in source
+  # order `y` was the callee's own `M`, and `f` then bound `M` to itself, so a
+  # correct `g` was reported too.
+  assert len(msgs_of(later_binder_src("apply2(1, (x, y) => inc(x, y), x => x * 2)"))) == 0
+  assert len(msgs_of(later_binder_src("apply2(1, (x, y) => x + y, x => x * 2)"))) == 0
+  # the order that always worked still does
+  assert len(msgs_of(later_binder_src("apply2r(1, x => x * 2, (x, y) => inc(x, y))"))) == 0
+  # a chain: `f` waits for `g` (B), and `h` for `f` (C), two steps apart
+  assert len(msgs_of(later_binder_src("chain(1, b => b + 1, a => a * 2, c => c - 1)"))) == 0
+  # constructors take the same order, record and positional alike
+  assert len(msgs_of(later_binder_src(
+    "{\n  let p = Prog { init: 1, step: (a, m) => inc(a, m), read: a => a * 2 }\n  p.init\n}"))) == 0
+  assert len(msgs_of(later_binder_src(
+    "match Pair(1, (a, m) => inc(a, m), a => a * 2) {\n  Pair(i, _, _) -> i\n}"))) == 0
+  # what the lambda learns is what the later argument said, so a real
+  # mismatch is reported once, inside the lambda, against the learned type
+  assert msgs_of(later_binder_src("apply2(1, (x, y) => inc(x, y), x => \"s\")")) ==
+    ["argument type mismatch: expected Int, got String"]
+  # nothing binds `M` at all: the fallback is the source order, as before
+  assert len(msgs_of(later_binder_src("app(1, (x, y) => x)"))) == 0
 }
 
 test "a projection a mismatch is about is printed as written, never reduced on one side only (#317)" {

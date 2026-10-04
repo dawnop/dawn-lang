@@ -1,0 +1,37 @@
+# An unannotated lambda whose parameter type is a callee type variable that
+# only a later argument binds. The second inference round checks it after that
+# argument, so `y` is `Int` here rather than the callee's own unbound `M`. The
+# same order holds for constructor fields. When nothing binds the variable the
+# round falls back to source order, and the lambda sees the variable as before.
+
+fn apply2[A, M](a: A, f: fn(A, M) -> A, g: fn(A) -> M) -> A = f(a, g(a))
+
+fn chain[A, B, C](a: A, f: fn(B) -> C, g: fn(A) -> B, h: fn(C) -> A) -> A = h(f(g(a)))
+
+fn app[A, M](a: A, f: fn(A, M) -> A) -> A = a
+
+type Prog[A, M] = { init: A, step: fn(A, M) -> A, read: fn(A) -> M }
+
+type Pair[A, M] = Pair(init: A, step: fn(A, M) -> A, read: fn(A) -> M)
+
+fn inc(a: Int, b: Int) -> Int = a + b
+
+pub fn later_binder() -> Int = apply2(1, (x, y) => inc(x, y), x => x * 2)
+
+pub fn two_steps() -> Int = chain(1, b => b + 1, a => a * 2, c => c - 1)
+
+pub fn record_fields() -> Int = {
+  let p = Prog { init: 1, step: (a, m) => inc(a, m), read: a => a * 2 }
+  p.step(p.init, p.read(p.init))
+}
+
+pub fn ctor_fields() -> Int =
+  match Pair(1, (a, m) => inc(a, m), a => a * 2) {
+    Pair(i, f, g) -> f(i, g(i))
+  }
+
+# the learned type is what the later argument said: one finding, in the lambda
+pub fn learned_mismatch() -> Int = apply2(1, (x, y) => inc(x, y), x => "s")
+
+# nothing binds `M`: source order, and `y` is the variable
+pub fn unbound_fallback() -> Int = app(1, (x, y) => x + y)
