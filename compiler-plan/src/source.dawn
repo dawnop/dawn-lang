@@ -225,10 +225,10 @@ pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !Env = {
   let no_mfc: Map[String, Option[ManifestV]] = map.empty()
   let (url_resolved, url_names, sdiags, mfc) = select_url_deps(project, no_mfc)
   let no_cache: Map[String, Option[PkgR]] = map.empty()
-  let no_names: Map[String, String] = map.empty()
-  let (pkgs, mdiags, _, _, mfc1) =
-    resolve_src_deps(project, no_cache, set.empty(), url_resolved, url_names, no_names, mfc)
-  let (root_manifest, rdiags, _) = mf_get(mfc1, project)
+  let (root_manifest, rdiags, mfc0) = mf_get(mfc, project)
+  let (pkgs, mdiags, _, _, _) = resolve_src_deps(
+    project, no_cache, set.empty(), url_resolved, url_names, root_claim(project, root_manifest),
+    mfc0)
   let root_coords: List[MCoord] = match root_manifest {
     Some(m) -> m.java_deps
     None -> []
@@ -242,6 +242,19 @@ pub fn source_plan(target: SourceTarget) -> SourcePlan !Fs !Proc !Env = {
     java_coords: java.coords,
     java_coord_origin: java.origin,
     diags: sdiags ++ mdiags ++ rdiags
+  }
+}
+
+## The name claim table `resolve_src_deps` starts from: the project's own
+## manifest name, claimed by the project directory. The project is a package
+## like any other once something depends on it, and as one its own modules
+## and a dependency's under the same name would share one module path (#333).
+## A project without a manifest, or one that names nothing, claims nothing.
+fn root_claim(project: String, root: Option[ManifestV]) -> Map[String, String] !Fs !Env = {
+  let none: Map[String, String] = map.empty()
+  match root {
+    Some(m) -> if m.name == "" { none } else { map.insert(none, m.name, canon_identity(project)) }
+    None -> none
   }
 }
 
@@ -744,8 +757,9 @@ fn select_url_deps(
 ## own dawn.toml declares is its identity, the alias only this consumer's
 ## spelling (§4.3). `cache` (canonical dir → resolved package, None = known
 ## bad), `visiting` (cycle guard) and `names` (package name → owning dir, one
-## copy program-wide) are threaded through the recursion; url deps arrive
-## pre-selected, looked up through `url_names` (hash:subdir → real name).
+## copy program-wide, seeded with the project's own name by `root_claim`) are
+## threaded through the recursion; url deps arrive pre-selected, looked up
+## through `url_names` (hash:subdir → real name).
 fn resolve_src_deps(
   dir: String,
   cache0: Map[String, Option[PkgR]],
@@ -833,7 +847,8 @@ fn resolve_src_deps(
                 "package `" ++ dm.name ++ "` is linked from two different directories",
                 0,
                 0,
-                "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" ++
+                "one package name means one copy program-wide (coherence, package-design.md §4.5),\n" ++
+                  "  and a `[deps]` key is this manifest's spelling, not a new name;\n" ++
                   "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
               ) }]
             } else if not io.is_dir(ddir ++ "/src") {
@@ -846,6 +861,11 @@ fn resolve_src_deps(
               ) }]
               cache = map.insert(cache, dcanon, None)
             } else {
+              # The claim is made before the package's own dependencies are
+              # walked, not after: a dependency below it that carries the same
+              # name from another directory has to meet this claim, or the two
+              # collapse into one module path with no diagnostic (#333).
+              names = map.insert(names, dm.name, dcanon)
               let (tdeps, tdiags, cache1, names1, mfc1) =
                 resolve_src_deps(ddir, cache, set.insert(visiting, dcanon), url_resolved,
                   url_names, names, mfc)
@@ -868,7 +888,6 @@ fn resolve_src_deps(
                 }
               }
               cache = map.insert(cache, dcanon, Some(info))
-              names = map.insert(names, dm.name, dcanon)
               out = map.insert(out, aname, info)
             }
           None -> {
@@ -1278,6 +1297,109 @@ test "a package reached through a link and through its own path is one package" 
     map.get(map.get(plan.pkgs, "mid").expect("mid").deps, "lib").expect("mid's lib")
   assert direct.root == "/p/lib/src"
   assert through_mid.root == "/p/lib/src"
+}
+
+## A tree of path packages under `/q`: each `(dir, name, deps)` is a manifest
+## at `/q/<dir>/dawn.toml` naming `name`, with `deps` as its `[deps]` lines,
+## and one source file so that it has a src/.
+fn same_name_tree(pkgs: List[(String, String, List[String])]) -> memfs.MemFs = {
+  var st = memfs.empty(memfs.BASE)
+  for (dir, name, deps) in pkgs {
+    let dep_lines = if deps == [] { "" } else { "\n[deps]\n" ++ join(deps, "\n") ++ "\n" }
+    st = memfs.put(st, "/q/${dir}/dawn.toml", "schema = 1\nname = \"${name}\"\n" ++ dep_lines)
+    st = memfs.put(st, "/q/${dir}/src/ref.dawn", "pub fn f() -> Int = 1\n")
+  }
+  st
+}
+
+## The plan's diagnostics that are the one-name-one-copy refusal.
+fn name_clashes(plan: SourcePlan) -> List[LocDiag] = {
+  var out: List[LocDiag] = []
+  for ld in plan.diags {
+    if str.contains(ld.d.msg, "linked from two different directories") { out = out ++ [ld] }
+  }
+  out
+}
+
+test "one manifest name in two directories is refused wherever the two meet" {
+  # Two siblings under different `[deps]` keys: the key is the consumer's
+  # spelling, so both are `tileref` and only one could be loaded.
+  let siblings = plan_in_table(same_name_tree([
+    ("app", "app", ["tileref = \"../a\"", "tilereal = \"../b\""]),
+    ("a", "tileref", []),
+    ("b", "tileref", [])
+  ]), ProjectDirectory("/q/app"))
+  let sib = name_clashes(siblings)
+  assert len(sib) == 1
+  assert sib[0].path == "/q/app/dawn.toml"
+  assert sib[0].d.msg == "package `tileref` is linked from two different directories"
+  assert str.contains(sib[0].d.hint, "here:      /q/b")
+  assert str.contains(sib[0].d.hint, "elsewhere: /q/a")
+
+  # #333: a package and a dependency of its own under the same name. The
+  # claim used to be made after the dependency was walked, so the inner one
+  # claimed `tileref` first and the outer one overwrote it unseen; both then
+  # loaded as `tileref/ref`, and the shim's own module was the other copy.
+  let nested = plan_in_table(same_name_tree([
+    ("app", "app", ["tileref = \"../shim\""]),
+    ("shim", "tileref", ["tilereal = \"../real\""]),
+    ("real", "tileref", [])
+  ]), ProjectDirectory("/q/app"))
+  let inner = name_clashes(nested)
+  assert len(inner) == 1
+  assert inner[0].path == "/q/shim/dawn.toml"
+  assert inner[0].d.msg == "package `tileref` is linked from two different directories"
+  assert str.contains(inner[0].d.hint, "here:      /q/real")
+  assert str.contains(inner[0].d.hint, "elsewhere: /q/shim")
+  assert str.contains(inner[0].d.hint, "a `[deps]` key is this manifest's spelling")
+
+  # The project is that package when it is the target, and it claims its name.
+  let rooted = plan_in_table(same_name_tree([
+    ("shim", "tileref", ["tilereal = \"../real\""]),
+    ("real", "tileref", [])
+  ]), ProjectDirectory("/q/shim"))
+  let root = name_clashes(rooted)
+  assert len(root) == 1
+  assert root[0].path == "/q/shim/dawn.toml"
+  assert str.contains(root[0].d.hint, "here:      /q/real")
+  assert str.contains(root[0].d.hint, "elsewhere: /q/shim")
+}
+
+test "distinct names, and one directory reached twice, are not a name clash" {
+  # The same three graphs with the second package renamed plan cleanly.
+  let renamed = plan_in_table(same_name_tree([
+    ("app", "app", ["tileref = \"../shim\""]),
+    ("shim", "tileref", ["tilereal = \"../real\""]),
+    ("real", "tilereal", [])
+  ]), ProjectDirectory("/q/app"))
+  assert renamed.diags == []
+  let shim = map.get(renamed.pkgs, "tileref").expect("shim")
+  assert shim.root == "/q/shim/src"
+  assert map.get(shim.deps, "tilereal").expect("real").root == "/q/real/src"
+
+  let siblings = plan_in_table(same_name_tree([
+    ("app", "app", ["tileref = \"../a\"", "tilereal = \"../b\""]),
+    ("a", "tileref", []),
+    ("b", "tilereal", [])
+  ]), ProjectDirectory("/q/app"))
+  assert siblings.diags == []
+
+  let rooted = plan_in_table(same_name_tree([
+    ("shim", "tileref", ["tilereal = \"../real\""]),
+    ("real", "tilereal", [])
+  ]), ProjectDirectory("/q/shim"))
+  assert rooted.diags == []
+
+  # One directory under two keys, directly and through a diamond, is one
+  # package: path identity, not the key, decides.
+  let shared = plan_in_table(same_name_tree([
+    ("app", "app", ["lib = \"../lib\"", "other = \"../lib/.\"", "mid = \"../mid\""]),
+    ("mid", "mid", ["lib = \"../lib\""]),
+    ("lib", "lib", [])
+  ]), ProjectDirectory("/q/app"))
+  assert shared.diags == []
+  assert map.get(shared.pkgs, "lib").expect("lib").root == "/q/lib/src"
+  assert map.get(shared.pkgs, "other").expect("other").root == "/q/lib/src"
 }
 
 test "a dependency's `..` after a link leaves the link's target" {
