@@ -64,7 +64,7 @@ trap 'rm -rf "$work"' EXIT
 # produces.
 cflags=(-std=c11 -fwrapv -fexceptions -fno-strict-aliasing -pthread)
 warn=(-Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable
-  -Wno-unused-parameter -Wno-unused-label)
+  -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality)
 
 # Every run of the program is bounded. A broken reclaim is a wait for a baton
 # nobody will pass, and a gate that hangs is a gate somebody reruns rather than

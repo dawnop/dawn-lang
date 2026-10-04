@@ -410,6 +410,12 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 前四条改的是临时目录里的一份 prefix 副本，下载物先 `cp` 成独立的 inode 再改，共享 prefix 里的原件未动（事后 sha256 仍是 `c3e9f243…`）。
 
+### 2026-10-05 起 CI 的 C 编译器换成 clang 18，输入包仍是 gcc 13.3
+
+裁决 ffi-llvm 4.b 把 CI 与发布行的 C 编译器钉到 runner 镜像自带的 clang 18.1.3：每个编 C 的 gate job 与 release.yml 的发布 job 开头一步 `scripts/pinned-cc.sh`，按版本核对后把 `CC` 写进 `GITHUB_ENV`。上面「先看 CI 实际用什么」那段描述的是这之前的状态；`wasm-target` 的 C driver 一步与 `java-target-classpath-contract` 也改成了 `${CC:-cc}`。nightly 的 native-asan 暂不钉：clang 的 UBSan 带 `-fsanitize=function`，在每个 native 测试二进制上报同一处真实的未定义行为（`ctestrun` 生成的测试 thunk 签名与 `dawn_run_caught` 的调用类型不符），修它要动 `selfhost/src/c`，见 nightly.yml 该 job 的注释。
+
+这一步只在 `GITHUB_ACTIONS=true` 时生效，外部运行不设这个变量，所以 prefix 里的 job 照旧用输入包的 gcc 13.3，`toolchain.cc` 也照旧如实记 gcc。这是有意的：给输入包加 conda-forge 的 clang 要动锁与 MANIFEST（共享 prefix 也被别的分支的工具核验），且同「不进替换表」一节的理由，不能靠加替换行表达。代价是外部证据与 GitHub 上的 main push 用的编译器不同：一个只在 clang 下红的改动，PR 证据档看不见，要到 main push 才红。要收这个口子，做法是把 clang 18.1.x 作为第二个 conda 工具链进输入包、`pinned-cc.sh` 在 prefix 里认它，另起一刀。
+
 ## release 守卫的 ci 证据只认 main 的 push 运行（2026-09-25）
 
 `release_evidence.py` 的第 1 条证据原来是「`ci.yml` 在该 sha 上有任意一次成功运行，不限事件与分支」，理由是 `ci.yml` 在所有分支上调用同一个 `gates.yml`。#168 之后这个前提不成立：`pull_request` 运行只跑 `plan.py` 选的子集，其余 job 跳过、按 success 计；Actions API 把 PR 运行记在 PR 头提交的 sha 下。同一个 sha 先在 PR 上子集绿、再原样快进推到 main 时，`any(success)` 会把子集绿当全集证据，哪怕 main 上那次全集是红的。今天走 `gh pr merge --rebase` 总会产生新 sha，所以还没踩到；快进合入一旦常用就会踩到。

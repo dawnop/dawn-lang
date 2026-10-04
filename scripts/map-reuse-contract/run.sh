@@ -77,7 +77,7 @@ run_leg() { # label flips compiler [std-dir]
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
     -I "$root/runtime/c" \
     -o "$dir/insert" "$dir/insert.c" "$root/runtime/c/dawn_rt.c" -lm
 
@@ -145,7 +145,7 @@ run_record_leg() { # label flips compiler [std-dir]
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
     -I "$root/runtime/c" \
     -o "$dir/record" "$dir/record.c" "$root/runtime/c/dawn_rt.c" -lm
 

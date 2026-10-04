@@ -315,6 +315,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Not on the pinned clang (scripts/pinned-cc.sh) yet, unlike every
+      # gates.yml job that compiles C: clang's -fsanitize=undefined includes
+      # -fsanitize=function, and that reports every native test binary, std
+      # and nine packages alike, at dawn_rt.c's dawn_run_caught calling
+      # a test thunk through `void *(*)(dawn_clo *, void *)` while
+      # c/ctestrun.dawn defines it as `void *(dawn_clo *)`. That is real
+      # undefined behaviour, and the fix is in selfhost/src/c, a tile.yml
+      # path; until it lands this leg keeps the runner's gcc so that the
+      # one finding does not hide every other one behind a red night.
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

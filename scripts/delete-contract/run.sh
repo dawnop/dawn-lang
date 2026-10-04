@@ -118,7 +118,7 @@ if ! "$root/bin/dawn" __emitc --std "$root/std" "$here/probe.dawn" \
 fi
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$root/runtime/c" \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$root/runtime/c" \
     -o "$work/probe" "$work/probe.c" "$root/runtime/c/dawn_rt.c" -lm \
     > "$work/cc.out" 2>&1; then
   cat "$work/cc.out" >&2
@@ -140,7 +140,7 @@ cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/cpath-mutant/r
 python3 "$here/mutate.py" c-cpath-nul "$work/cpath-mutant"
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$work/cpath-mutant/runtime/c" \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$work/cpath-mutant/runtime/c" \
     -o "$work/cpath-mutant/probe" "$work/probe.c" "$work/cpath-mutant/runtime/c/dawn_rt.c" -lm \
     > "$work/cpath-mutant/cc.out" 2>&1; then
   cat "$work/cpath-mutant/cc.out" >&2
@@ -168,7 +168,7 @@ for query_case in \
   python3 "$here/mutate.py" "c-query-$query_name" "$query_dir"
   if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
       -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-      -Wno-unused-parameter -Wno-unused-label -I "$query_dir/runtime/c" \
+      -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$query_dir/runtime/c" \
       -o "$query_dir/probe" "$work/probe.c" "$query_dir/runtime/c/dawn_rt.c" -lm \
       > "$query_dir/cc.out" 2>&1; then
     cat "$query_dir/cc.out" >&2
@@ -191,7 +191,7 @@ cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-getenv-mutan
 python3 "$here/mutate.py" c-getenv-nul "$work/c-getenv-mutant"
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$work/c-getenv-mutant/runtime/c" \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$work/c-getenv-mutant/runtime/c" \
     -o "$work/c-getenv-mutant/probe" "$work/probe.c" \
     "$work/c-getenv-mutant/runtime/c/dawn_rt.c" -lm \
     > "$work/c-getenv-mutant/cc.out" 2>&1; then
@@ -214,7 +214,7 @@ cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/c-mutant/runti
 python3 "$here/mutate.py" c-delete-collapse "$work/c-mutant"
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$work/c-mutant/runtime/c" \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$work/c-mutant/runtime/c" \
     -o "$work/c-mutant/probe" "$work/probe.c" "$work/c-mutant/runtime/c/dawn_rt.c" -lm \
     > "$work/c-mutant/cc.out" 2>&1; then
   cat "$work/c-mutant/cc.out" >&2
@@ -302,7 +302,7 @@ if ! "$root/bin/dawn" __emitc --std "$work/preflight-mutant/std" "$here/probe.da
 fi
 if ! "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$root/runtime/c" \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$root/runtime/c" \
     -o "$work/preflight-mutant/probe" "$work/preflight-mutant/probe.c" \
     "$root/runtime/c/dawn_rt.c" -lm > "$work/preflight-mutant/cc.out" 2>&1; then
   cat "$work/preflight-mutant/cc.out" >&2

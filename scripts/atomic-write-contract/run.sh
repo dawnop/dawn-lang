@@ -126,7 +126,7 @@ build_native() { # stddir, rtdir, probe, outbin
     { cat "$outbin.emit" >&2; fail "native emit failed for $probe"; }
   "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label -I "$rtdir" \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality -I "$rtdir" \
     -o "$outbin" "$outbin.c" "$rtdir/dawn_rt.c" -lm > "$outbin.cc" 2>&1 ||
     { cat "$outbin.cc" >&2; fail "native compile failed for $probe"; }
 }

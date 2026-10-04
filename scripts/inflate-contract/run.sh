@@ -61,7 +61,7 @@ fi
 "$root/bin/dawn" __emitc "$work/pure" -o "$work/pure.c" > /dev/null
 "${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-but-set-variable \
-  -Wno-unused-parameter -Wno-unused-label \
+  -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
   -I "$root/runtime/c" -o "$work/pure.bin" "$work/pure.c" "$root/runtime/c/dawn_rt.c" -lm
 "$work/pure.bin" > "$work/pure.native"
 if ! diff -u "$pure_jvm" "$work/pure.native"; then
