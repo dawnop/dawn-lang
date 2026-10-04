@@ -13,7 +13,8 @@ the point of the design, so it is spelled out:
   this file      WHEN: jobs start in gates.yml order (which is descending
                  expected duration), up to --jobs at once; a job with `needs:`
                  waits for them and then runs whatever they returned, as
-                 `if: always()` asks
+                 `if: always()` and `if: !cancelled()` ask (nothing cancels
+                 an external run part way, so the two agree here)
 
 Resuming (--resume OUT). A controller can die mid-run (an SSH drop that
 takes the terminal with it, a killed shell) while a backend's jobs keep
@@ -203,8 +204,9 @@ def main():
     selected = [j for j in jobs if not only or j["id"] in only]
 
     def run(job):
-        # `needs:` with `if: always()`: wait for the needed jobs to end, not
-        # to succeed. gatesplan refuses any other job condition.
+        # `needs:` with `if: always()` or `!cancelled()`: wait for the needed
+        # jobs to end, not to succeed. gatesplan refuses any other job
+        # condition.
         for need in job["needs"]:
             done[need].wait()
         # The needed jobs' outcomes, for `${{ needs.<id>.result }}`. A job

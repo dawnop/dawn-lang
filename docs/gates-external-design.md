@@ -37,6 +37,7 @@
 | plan-selected | `needs.plan.outputs.all == 'true' \|\| contains(fromJSON(needs.plan.outputs.jobs), '{job}')` | `needs` 恰好是 `[plan]` |
 | plan-selected-always | `always() && needs.plan.result == 'success' && (…同上…)` | `needs` 含 plan 与至少一个 gate job |
 | legacy-always | `always()` | #168 之前的形状，`needs` 里要有 gate job |
+| plan-selected-not-cancelled | `!cancelled() && needs.plan.result == 'success' && (…同上…)` | 同 plan-selected-always；2026-10-05 起 mutant-shards-complete 用它，GitHub 上被 cancel-in-progress 取消的 run 里汇总 job 跳过而不是报红；外部运行不存在中途取消，与 plan-selected-always 同义 |
 
 名字写成别的 job、多一个子句、只看 `all`、不 `needs: plan`、plan job 自己有 `needs:` 或 `if:`、plan 的 outputs 不是 `all`/`jobs`，都拒绝，各有自测负控。
 
@@ -104,7 +105,7 @@
 
 后端是一个 `backend_<name>.py` 模块，暴露 `create(ctx)`，返回的对象实现 `prepare()`、`run_job(job, artifacts)`、`toolchain()`、`cleanup()`。`run_job` 拿到的是 `gatesplan` 给的一个 job（有序的 run 步骤与带替换 id 的 use 步骤）和本次运行的制品目录，还回每个 run 步骤的 `executed`、`exit_code`、两个输出哈希。
 
-分工：`gatesplan.py` 决定跑什么，后端决定在哪跑、每个替换 id 怎么实现，`bundle.py` 决定结果算不算完整，`runner.py` 只管调度（按 `gates.yml` 的定义顺序，即预期时长降序，最多 `--jobs` 个并行；有 `needs:` 的 job 等依赖结束后照跑，对应 `if: always()`）。crun 后端因此只需新增 `backend_crun.py`，通过 `--backend crun` 选中，不改现有文件。后端专属选项走 `--backend-opt KEY=VALUE`，也不需要改 `run.sh`。
+分工：`gatesplan.py` 决定跑什么，后端决定在哪跑、每个替换 id 怎么实现，`bundle.py` 决定结果算不算完整，`runner.py` 只管调度（按 `gates.yml` 的定义顺序，即预期时长降序，最多 `--jobs` 个并行；有 `needs:` 的 job 等依赖结束后照跑，对应 `if: always()` 与 `if: !cancelled()`）。crun 后端因此只需新增 `backend_crun.py`，通过 `--backend crun` 选中，不改现有文件。后端专属选项走 `--backend-opt KEY=VALUE`，也不需要改 `run.sh`。
 
 ## 签名、落盘与 GitHub 侧核验（第 2 刀）
 
