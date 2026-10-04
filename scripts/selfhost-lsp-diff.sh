@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints (left-out defaults among them), semantic tokens (full and a range), references and document highlights, folded values of closed pure
+# on hover and on `use` lines, inlay hints (left-out defaults among them), semantic tokens (full and a range), references (in one file and across files) and document highlights, folded values of closed pure
 # expressions on hover, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -552,6 +552,10 @@ req("textDocument/semanticTokens/range", {"textDocument": {"uri": inlays_uri}, "
 req("textDocument/references", {**at(inlays_uri, inlays_text, "let width", 1, 4),
     "context": {"includeDeclaration": True}})
 req("textDocument/documentHighlight", at(inlays_uri, inlays_text, "(n, tag)", 1, 1))
+# references across files: util's `pad_to` from its call here, which finds
+# its import, the call and its declaration in util.dawn, a file not open
+req("textDocument/references", {**at(inlays_uri, inlays_text, "pad_to(tag", 1, 0),
+    "context": {"includeDeclaration": True}})
 note("textDocument/didClose", tdoc(inlays_uri))
 
 # left-out defaults: the whole file, with the session's default options

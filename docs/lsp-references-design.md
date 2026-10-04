@@ -2,9 +2,10 @@
 
 > 状态：**current**：T0 于 2026-10-04 落地，分支 `feat/lsp-resolution-coverage`（提交以主题引用，合入后的哈希记在进度记录里）；
 > T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`；T2（VS Code 与 Playground 两个消费端，§T2）同日，分支 `feat/lsp-semantic-tokens-clients`；
-> R1（单文件 references 与 documentHighlight，§R1）同日落地，分支 `feat/lsp-references-local`。
+> R1（单文件 references 与 documentHighlight，§R1）同日落地，分支 `feat/lsp-references-local`；
+> R2（工作区 references，§R2）同日落地，分支 `feat/lsp-references-workspace`。
 > 依据：裁决 `agent-handoff/ruling-lsp-tokens-rename-20261003.md`，调研 `agent-handoff/research-lsp-tokens-rename-report-20261003.md`
-> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2，§R1 写 R1；R2、R3（工作区 references、rename）各自动码前在此续写。
+> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2，§R1 写 R1，§R2 写 R2；R3（rename）动码前在此续写。
 
 ## 一、为什么 T0 在最前
 
@@ -412,3 +413,151 @@ references 约等于一次 definition 加一次整篇收集，与结果多少几
   而整篇遍历在 12k 行上也只是一百多毫秒（R1.6）。等 R2 的索引挂上记忆步骤后再看。
 - **Text（1）种类**：每个名字都已解析，没有「只是文字相同」的结果可标。
 
+## R2：工作区 references
+
+调研 §5.1 的 R2 行：工作区装全仓（`project_files`），索引挂在模块步骤上随记忆复用，共享一份导出环境；`includeDeclaration` 照做。
+R1 的结果对别的文件只字不提，R2 补的就是这一半。documentHighlight 仍然只在当前文档内（它本来就是「这个文件里哪些地方」），standalone 缓冲区的 references 仍按 R1 答。
+
+### R2.1 两个程序：诊断的与引用的
+
+R1 时一个 workspace 的程序只有打开的文档和它们的导入闭包。没有任何打开文档导入的项目文件（一个还没接进 `main` 的模块、一个只被测试用的模块）
+不在程序里，它里面的引用无从谈起，所以 references 要一个装了全仓的程序。
+
+**这个程序不在诊断的路径上。** 第一版把全仓直接装进 workspace 的程序，selfhost 上打开 `check/types.dawn` 到首次诊断从 1.5 s 变成 4 到 4.8 s，
+每个编辑会话都替一个还没人问过的 references 付钱，协调者没有接受。现在 workspace 有两个程序：
+
+- `Workspace.prog`：诊断、hover、definition、补全读的那个，照旧只装打开文档的导入闭包，rebuild 一字未改。
+- `Workspace.world`（`RefsWorld`）：references 读的那个，装打开文档再加整棵源码树。它在**第一次 workspace references 请求时**才建：
+  走一遍 `project_files`（只留模块路径合法的文件，`project_seeds`），用它自己的 `incremental.Session` 检查全部模块，解析记忆从 workspace 的那份起步。
+  之后每次 rebuild 只把它标成过期（`current: false`），不碰它；下一次 references 请求先把它带到当前文本（`refs_world`）：同一个 session，
+  所以编辑没动到的模块的步骤原样复用，只重查被编辑的模块和导出面变了的导入者。冲突快照与 `prog` 一起丢掉它；manifest refresh 换 workspace 时它随旧 workspace 一起走。
+
+全仓只对**有 `dawn.toml` 的项目**这样装。没有 manifest 的目录只是散文件碰巧放在一起的地方（R1 的夹具、`~/Downloads` 里打开的一个文件），
+它的兄弟文件不是同一个程序；这种 workspace 的引用程序就是导入闭包。装全仓与 CLI 的目录模式一致：spec §10.5 规定「未被引用的模块也检查」，
+`load_directory_planned` 装的就是 `project_files`。
+
+诊断只来自 `prog`，所以引用程序里多出来的模块（包括有错的）永远不发诊断，不需要任何过滤。
+
+### R2.2 索引的形状与挂在哪一步
+
+每个模块一条 `lspref.ModRefs`：
+
+```dawn
+pub(pkg) type Ref = { lo: Int, hi: Int, path: String, def: (Int, Int), decl: Bool, write: Bool }
+pub(pkg) type ModRefs = { path: String, text: String, refs: List[Ref], read: Map[String, String] }
+```
+
+`refs` 是这个模块整篇遍历（`walked_resolutions`，R1 读的同一份收集）里每个名字的出现，裁剪与 `decl`/`write` 的判定照 R1（`occurrence`），
+外加它指向的声明：`path` 是声明所在文件的 identity（`canon_identity`；本模块的声明与局部量记成本模块自己的 identity，于是同一个键从哪个模块读都一样），
+`def` 是声明在那个文件里的位置。std 的文件不在程序里，路径照原样留着，std 在一个分析会话里是固定的。`read` 见 R2.3。
+
+条目放在 `RefsWorld.refs`，以模块路径为键。**它的寿命就是引用程序里那个模块步骤的寿命**：`driver/incremental.analyze` 的 `Update` 多了一个 `reused`
+集合（这次原样取用了上一步的那些模块），`refs_world` 把程序带到当前文本时只留下 `reused` 里的模块的条目，其余丢掉。条目是惰性的：
+一次请求遇到缺的条目才走那个模块一遍，并把读到或移动过的条目连同程序写回 workspace，下一次请求直接用。
+
+这不碰记忆的契约（incremental-memo-1..3 守的那些）：诊断那一侧的 `Session` 与 rebuild 都没有变，复用规则一字不改，
+`Update.reused` 只是把规则已经做出的判断报出来。`Cold` 配置下引用程序的 session 同样不复用，条目每次都重读，与参照配置的关系和分析本身一样。
+
+**共享一份导出环境。** 原来每次请求 `doc_qcx` 都把程序里每个模块的导出面现算一遍。走 N 个模块时这一步若跟着每个模块算就是 N 倍，
+所以拆成 `program_exports`（每个请求一次）与 `module_qcx`（每个模块套上自己包的可见性）。
+
+**请求文档自己不读索引**，照 R1 用活文本在引用程序里走一遍（`occurrences`）：光标处的键本来就要靠 `find_target` 在这份文本上取，
+而且这样 R1 的四个变异体在工作区文档上照样咬得住。其余模块从索引读，按键过滤（`refs_to`），同一起点只留一个（R1 的去重规则）。
+回复先按文件 identity、再按位置排序；文件若有打开的文档，用那个文档的 URI，否则用 `path_to_uri(identity)`。
+
+### R2.3 失效规则
+
+一个模块的步骤被复用，说明它的文本没变、它读到的导出面也没变，所以它的每个名字仍然指向同一个声明。**变的只有位置**：
+它指向别的文件的声明，那个文件改了一行，声明就挪了地方，而条目里记的还是旧位置。
+
+`read` 记的就是这个：条目指向的每个别的文件，读位置时那个文件的文本。请求时逐个对比当前文本（同一个字符串对象时比较是常数时间），
+不同就算一次 `Shift`：两份文本的最长公共前缀，再在剩下的部分里取最长公共后缀。落在公共前缀里的位置不动，落在公共后缀里的平移，
+**落在改动区里的放弃**，整条条目重读（`refresh` 回 None），因为那个位置上现在可能是另一个声明，或者什么都没有。
+连着几次编辑才问一次 references 时，前后缀合成一个更宽的改动区，只会让更多位置落进改动区、走重读，不会把位置移错。
+一个请求里同一个文件的 `Shift` 只算一次（导入它的模块记的是同一份旧文本），按文件记在请求里。
+
+被重查的模块条目直接丢，不走这条路：重查可能改变它的名字解析到哪里，那不是平移能修的。被编辑的文件自己当然也被重查。
+
+### R2.4 与 R1 相同的部分
+
+`includeDeclaration`：照 R1，声明处只在为真时给出，缺 `context` 按假；声明在别的模块时，「声明处」由那个模块自己的条目判定（它在那里 `def_path` 为空）。
+Playground：网关的白名单里没有 references 与 documentHighlight（`playground/lsp_gateway.py`），与 R1 同样不转发；Playground 的文档是 `untitled:` 缓冲区，
+在服务端本来就是 standalone，R2 也不会改变它的回答。
+
+### R2.5 行为变化与 Emit-Change
+
+`selfhost-lsp-diff.sh` 的会话在 inlays.dawn 上加了一次跨文件 references（`pad_to(tag, ...)` 处，含声明）。用真父（rebase 后的父提交 `3e904284` 编出的服务端；rebase 前对 `d091ae69` 结果相同）逐消息对照，
+135 条消息里只有这一条不同：真父只给出本文件的两处（导入列表与调用），R2 多出 util.dawn 里的声明。会话里的 hover、definition、诊断等逐字不变。
+会话的 proj 没有 `dawn.toml`，所以这一条看到的是「导入闭包内跨文件」；「未被导入的文件」由 R2.7 的夹具守。提交里写一行 `Emit-Change(lsp)`。
+
+**补全的一处 panic。** 第一版把全仓装进诊断程序时，`lsp-use-completion.py` 在集群全套里红了：`use a/b.{` 的补全在模块已在程序里时走 `exported_items`，
+用**文档自己的**类型表渲染那个模块的签名，而这条 `use` 还没写完，文档的表里没有那个模块的类型，`adt_of` 当场 panic。诊断程序回到导入闭包后
+那个夹具不再触发它，但同一个洞在真父上也够得着：另一个打开的文档导入了那个模块，它就在程序里，而正在写 `use` 的这个文档的表里没有。
+所以修法保留：`exported_items` 先取导出面自带的 `adt_infos`/`trait_infos`，再叠上文档自己的（同一个 id 在两边指同一个声明）。
+
+### R2.6 性能（本机实测）
+
+selfhost 工作区，JVM（`./bin/dawn lsp`），打开 `check/types.dawn`（4,727 行；全仓共 79 个模块）。每轮先在 `adt_of` 声明**上方**的一个函数体里改一个字面量
+（`+ 1` 与 `+ 10` 交替，声明因此平移一个字符，导入 types.dawn 的模块的条目都要走 R2.3 的平移），等到这个版本的诊断发布，
+先发一次 references（`adt_of` 的一次调用处，全仓 21 个文件 130 处：它要先把引用程序带到当前文本），再**交错**发 definition、
+同一处的 references、同一文件里局部量 `a` 的 references（4 处），奇数轮倒序；11 轮丢前 3 轮取中位数。真父与 R2 交错各跑两遍，本机 load average 约 2.4。
+
+诊断路径（验收：与真父相差 10% 以内）：
+
+| | 真父 `d091ae69` | R2 |
+|---|---|---|
+| didOpen 到首次诊断 | 1.61 s、1.44 s | 1.13 s、1.14 s |
+| 体内编辑到诊断（中位数） | 234.4 ms、233.0 ms | 228.0 ms、227.7 ms |
+
+两项都不比真父慢（首次诊断那格 R2 反而快，是同机两次 JVM 冷启动之间的抖动，不是 R2 做了什么）。
+
+references：
+
+| 请求 | 第一遍 | 第二遍 |
+|---|---|---|
+| 第一次 references（建引用程序，检查全仓，建全部条目） | 4.19 s | 4.14 s |
+| 编辑后的第一次 references（把程序带到当前文本） | 334.1 ms | 329.5 ms |
+| 之后的 references（`adt_of`，130 处） | 198.4 ms | 199.5 ms |
+| references（局部量，4 处） | 38.8 ms | 36.8 ms |
+| definition | 9.0 ms | 8.6 ms |
+
+目标「体内编辑后 references 中位数 ≤ 0.5 s」达到：编辑后第一次 330 ms，其中约 130 ms 是引用程序重查被编辑的 types.dawn，其余与之后的请求相同，
+大头是给 21 个有结果的文件各建一次 UTF-16 视图（`view_of`）好换算区间。保留的 8 轮里编辑后第一次有一轮到 650 到 670 ms，中位数不受它影响。
+第一次 references 的 4.1 s 是全仓第一次检查（与 CLI `dawn check selfhost` 同量级）加全部条目，每个 workspace 付一次。
+
+### R2.7 门禁
+
+`scripts/lsp-references-workspace.py`：
+
+- 两模块工程（main 导入 helper）与三模块工程（main 与 lone 各自导入 base，没有任何模块导入 lone；另有一个没人导入、带类型错误的 broken.dawn）。
+  每个工程一个会话，先只打开 main：从导入列表、限定调用、限定函数值、管道进限定函数、经导入的调用五处各问一次，结果集合逐项相同；
+  再打开声明所在的模块，从声明处问，集合仍相同。三模块工程的集合里有 lone 的三处。两模块工程另有 `includeDeclaration: false` 一例与「声明模块里的使用处」一例。
+- 编辑：把 base 里 `scale` 上方的 `pad` 的函数体拆成两行（导出面不变，lone 的步骤复用），从 main 与从声明处各问一次，`scale` 下移一行，lone 的三处仍在。
+- 诊断：会话结束前，服务端从未给 broken.dawn 发过非空诊断。引用程序检查了它，诊断程序没有装它。
+- 变异体 5 个，锚点在 `scripts/lsp-references-workspace/mutate.py`，登进 `mutation-anchor-preflight.py` 与 `anchor-readers.txt`：
+  只搜打开的文档（`open-documents-only`）、导入列表的名字不解析（`import-list-unresolved`）、重查过的模块留下旧条目（`index-outlives-its-step`）、
+  诊断程序装全仓（`diagnostics-load-whole-tree`，broken.dawn 收到诊断）、复用的条目不随编辑平移（`sites-not-moved`）。
+  各自从私有 selfhost 副本编译，要求自己那条断言变红。本机正例约 3 s，含五个变异体约 48 s。
+
+**CI 的位置。** 这一步若照 T0、T1、R1 接进 `lsp-workspace`，那个 job 的规划额度是 905 + 2 × 48 = 1001 s，越过 950 s 的 pole。所以这份设计的四个逐名夹具
+（T0 的 resolution-coverage、T1 的 semantic-tokens、R1 的 references、R2 的 references-workspace）一起挪进新 job `lsp-references`：
+规划额度 2 × (56 + 39 + 55 + 48) + 50 = 446 s，timeout 23 分钟；`lsp-workspace` 回到四步进来之前观测到的 605 s，timeout 31 分钟。
+push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开销 50 s）。挪动的三步命令一字不改，`steps.lock.json` 已重录。
+
+### R2.8 不做的（理由）
+
+- **rename**：R3。R2 的集合就是 R3 要改的地方，R3 还要加安全条件与结果自检。
+- **全仓诊断**：引用程序里有全仓每个模块的诊断，发出去只是多一步，但那是另一个特性，要回答「关掉的文件的诊断何时清」「几百个文件的诊断一次推多少」，
+  而且会把引用程序拉回诊断路径，正是 R2.1 拆开的东西。今天发布的范围与 R1 时逐字相同。
+- **两个程序共享步骤**：引用程序里导入闭包那部分与诊断程序检查的是同一批模块，编辑后各查一次被编辑的模块。共享要让一个 session
+  从另一个 session 的 carry 接着检查，是 `driver/incremental` 的接口改动；编辑后 330 ms 已在目标之内，等需要时再做。
+- **局部量不搜别的模块**：局部量的引用只在它自己的文件里，可以省掉整个工作区的条目检查与引用程序的更新。但判断「这是局部量」要再引一套规则，
+  与 R1.8「按局部量裁剪遍历范围」一起等需要时再做。
+- **视图缓存**：每个有结果的文件建一次 UTF-16 视图。可以随条目缓存，但它与文本同寿命、占内存，而 200 ms 已在目标之内。
+- **没有 manifest 的目录装全目录**：见 R2.1。
+- **跨 workspace、跨 source root**：每个 workspace 是一个 (project, source_root) 身份（docs/lsp-workspace-design.md §2.3），各自是一个程序；
+  另一个 source root 里的使用不在这个程序里，搜它要先让两个程序共享声明身份。
+- **std 内部的引用**：std 不在程序里，它的模块没有条目；std 的声明在用户模块里的使用照样找得到。
+- **超过 128 个模块的项目**：`max_modules` 只保留前 128 个步骤，之后的模块每次都重查，它们的条目也就每次重读。selfhost 79 个，离上限还远；
+  真有更大的项目时该调的是这个上限，不是索引。
+- **跨会话持久化索引**：条目是步骤的派生物，步骤本身不跨会话，索引也不该先跨。

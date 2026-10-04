@@ -18,11 +18,16 @@
 # also collects the field there for this file to read (`lspq.PunUse`), so the
 # pun is a reference of both.
 #
-# Only this document is searched. A declaration in another module still has
-# its uses here found, but the uses elsewhere are R2's (a workspace index).
+# `occurrences` searches one document. The workspace (§R2) reads the same
+# walk once per module into a `ModRefs`, which the server keeps beside the
+# module's analysis step and asks again for every request: a module's names
+# are a function of its step, and only the positions they name in other files
+# move when those files are edited, which `refresh` follows without walking
+# the module again.
 
 use lsp/lspq.{QCx, Resolution, NoRole, AssignUse, PlainUse, walked_resolutions, find_target}
 use lsp/lsptok.{name_runs}
+use std/map
 
 ## One name in the document naming the asked declaration, in code points of
 ## the analyzed text. `decl`: the declaration's own name. `write`: a
@@ -80,4 +85,152 @@ fn occurrence(qc: QCx, r: Resolution) -> Occurrence = {
   # walk tags its name with a role instead (`lspq.LocalRole`)
   let decl = r.def_path == None && r.use_kind == PlainUse && (r.lo == dlo || r.role != NoRole)
   Occurrence { lo: lo, hi: hi, decl: decl, write: decl || r.use_kind == AssignUse }
+}
+
+# ---- the workspace index (docs/lsp-references-design.md §R2) ----
+
+## One name of a module, as the workspace index keeps it: the occurrence, and
+## the declaration it names by file identity (`path`) and the declaration's
+## site in that file. The module's own declarations and locals are filed under
+## the module's own identity, so a key reads the same from every module.
+pub(pkg) type Ref = { lo: Int, hi: Int, path: String, def: (Int, Int), decl: Bool, write: Bool }
+
+## A module's names, read from one analysis of it. `text` is the text the
+## occurrences index (the module's own, unchanged while its step is reused).
+## `read` names every other file of the program a key points into, with the
+## text that key's site was read in: when that file is edited, the sites it
+## holds move, and `refresh` moves them along.
+pub(pkg) type ModRefs = { path: String, text: String, refs: List[Ref], read: Map[String, String] }
+
+## Every name of the module `qc` analyzes, with its key. `ident` turns the
+## file a resolution names into its identity (a std file it does not know
+## stays as it is: std is fixed for the life of the analysis). `texts` holds,
+## by identity, the program's files with their analyzed text.
+pub(pkg) fn mod_refs(qc: QCx, path: String, text: String, ident: Map[String, String], texts: Map[String, String]) -> ModRefs = {
+  var refs: List[Ref] = []
+  var read: Map[String, String] = map.empty()
+  for r in walked_resolutions(qc, 0, len(qc.cps)) {
+    let o = occurrence(qc, r)
+    let at = match r.def_path {
+      None -> path
+      Some(p) -> map.get(ident, p).unwrap_or(p)
+    }
+    if at != path {
+      match map.get(texts, at) {
+        Some(t) -> { read = map.insert(read, at, t) }
+        None -> ()
+      }
+    }
+    refs = refs ++ [Ref { lo: o.lo, hi: o.hi, path: at, def: r.def, decl: o.decl, write: o.write }]
+  }
+  ModRefs { path: path, text: text, refs: refs, read: read }
+}
+
+## The occurrences in `mr` of the declaration at `def` in the file `path`, by
+## offset, one per name (`occurrences`' rule); the declaration's own name only
+## when `with_decl`.
+pub(pkg) fn refs_to(mr: ModRefs, path: String, def: (Int, Int), with_decl: Bool) -> List[Ref] = {
+  var found: List[Ref] = []
+  for r in mr.refs {
+    if r.path == path && r.def == def && (with_decl || not r.decl) { found = found ++ [r] }
+  }
+  var out: List[Ref] = []
+  var last = -1
+  for r in sort_by(found, (a, b) => a.lo - b.lo) {
+    if r.lo != last {
+      out = out ++ [r]
+      last = r.lo
+    }
+  }
+  out
+}
+
+## How one revision of a file moved the positions of the one before it: the
+## two texts agree on their first `keep` code points and on everything from
+## `old_end` (in the old text) to its end, and that tail moved by `delta`.
+pub(pkg) type Shift = { keep: Int, old_end: Int, delta: Int }
+
+## The shift between two texts of one file: their longest common prefix and,
+## after it, their longest common suffix. Two edits far apart make one wide
+## changed region; that only makes more sites fall inside it, never a site
+## move wrongly.
+pub(pkg) fn shift_of(old: String, new: String) -> Shift = {
+  let a = code_points(old)
+  let b = code_points(new)
+  let la = len(a)
+  let lb = len(b)
+  let short = if la < lb { la } else { lb }
+  var i = 0
+  while i < short && a[i] == b[i] { i = i + 1 }
+  var j = 0
+  while j < short - i && a[la - 1 - j] == b[lb - 1 - j] { j = j + 1 }
+  Shift { keep: i, old_end: la - j, delta: lb - la }
+}
+
+## Where the site `d` of the old text is in the new one, or None when the edit
+## touched it. A site in the common prefix stays and one in the common suffix
+## moves; one the edit overlaps may name another declaration now, or none.
+pub(pkg) fn moved(sh: Shift, d: (Int, Int)) -> Option[(Int, Int)] = {
+  let (lo, hi) = d
+  if hi <= sh.keep { return Some(d) }
+  if lo >= sh.old_end { return Some((lo + sh.delta, hi + sh.delta)) }
+  None
+}
+
+## `mr` against the program as it is now, given the current text of every
+## program file by identity, or None when it has to be read again: a file it
+## points into left the program, or was edited at a site it names. `shifts`
+## memoizes `shift_of` for the request, by file, with the old text it was
+## computed from (every module importing an edited file holds the same one).
+pub(pkg) fn refresh(mr: ModRefs, texts: Map[String, String], shifts0: Map[String, (String, Shift)]) -> (Option[ModRefs], Map[String, (String, Shift)]) = {
+  var shifts = shifts0
+  var refs = mr.refs
+  var read = mr.read
+  for pr in map.entries(mr.read) {
+    let (f, old) = pr
+    let now = match map.get(texts, f) {
+      Some(t) -> t
+      None -> return (None, shifts)
+    }
+    if now == old { continue }
+    let sh = match map.get(shifts, f) {
+      Some(memo) -> {
+        let (from, s) = memo
+        if from == old { s } else { shift_of(old, now) }
+      }
+      None -> {
+        let s = shift_of(old, now)
+        shifts = map.insert(shifts, f, (old, s))
+        s
+      }
+    }
+    var next: List[Ref] = []
+    for r in refs {
+      if r.path == f {
+        match moved(sh, r.def) {
+          Some(d) -> { next = next ++ [Ref { ..r, def: d }] }
+          None -> return (None, shifts)
+        }
+      } else {
+        next = next ++ [r]
+      }
+    }
+    refs = next
+    read = map.insert(read, f, now)
+  }
+  (Some(ModRefs { ..mr, refs: refs, read: read }), shifts)
+}
+
+# An edit moves the sites after it and leaves the ones before it; a site it
+# overlaps cannot be followed, and the entry holding it is read again.
+test "a shift keeps the prefix, moves the suffix and gives up inside the edit" {
+  let old = "fn a() = 1\nfn b() = 2\n"
+  let new = "fn a() = 70\nfn b() = 2\n"
+  let sh = shift_of(old, new)
+  assert moved(sh, (3, 4)) == Some((3, 4))
+  assert moved(sh, (14, 15)) == Some((15, 16))
+  assert moved(sh, (9, 10)) == None
+  assert moved(shift_of(old, old), (14, 15)) == Some((14, 15))
+  # a deletion moves the tail back
+  assert moved(shift_of(new, old), (15, 16)) == Some((14, 15))
 }

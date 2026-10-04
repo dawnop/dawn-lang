@@ -96,7 +96,12 @@ pub type Stats = {
   retained_modules: Int
 }
 
-pub(pkg) type Update = { session: Session, program: Program, stats: Stats }
+## `reused`: the modules, by the loader's module path, whose previous step
+## this analysis took as it was. Whatever a caller derived from such a module's
+## step is still a function of the same step, which is how the language
+## server keeps its reference index beside the steps (docs/lsp-references-design.md
+## §R2): an entry survives exactly as long as the step it was read from.
+pub(pkg) type Update = { session: Session, program: Program, stats: Stats, reused: Set[String] }
 
 ## `max_modules` bounds how many steps one owner remembers. It is a safety
 ## limit rather than a memory budget: a remembered step is the same immutable
@@ -313,6 +318,7 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
   var memo: Map[String, Entry] = map.empty()
   var retained = 0
   var reused = 0
+  var reused_paths: Set[String] = set.empty()
   var checked = 0
   var ct_runs = 0
   for raw in loaded.modules {
@@ -334,6 +340,7 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
       Some(pair) -> {
         let (e, k) = pair
         reused = reused + 1
+        reused_paths = set.insert(reused_paths, raw.mod_path)
         let path = e.step.checked.mod_path
         let own = map.get(e.step.after.exports, path).expect("the step's own export surface")
         carry = AnalysisCarry { ..carry,
@@ -427,6 +434,7 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
     stats: Stats {
       reused_modules: reused, checked_modules: checked, comptime_modules: ct_runs,
       retained_modules: retained
-    }
+    },
+    reused: reused_paths
   }
 }

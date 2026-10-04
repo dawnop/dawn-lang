@@ -303,6 +303,10 @@ name: gates
 # semantic-tokens step (+78s planning value, docs/lsp-references-design.md §T1).
 # The same day it went up to 16,648s: lsp-workspace gained the references
 # step (+110s planning value, docs/lsp-references-design.md §R1).
+# The same day it went up to 16,794s: the workspace references step (R2,
+# +96s planning value) would have taken lsp-workspace past the pole, so the
+# four steps of that design moved to a new lsp-references job (446s, its 50s
+# overhead included) and lsp-workspace went back to its observed 605s.
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -326,7 +330,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 16648s (the most this file's `3x` claims may add up to)
+# push-total: 16794s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2396,8 +2400,13 @@ jobs:
     # 2026-10-04: the references step (R1 of the same design) took 55s
     # locally, its positive and four mutant builds: 795 + 2 * 55 = 905s,
     # timeout 3x that. Restated with the two above.
-    # budget: 3x 905s planning allowance (605s worst observed, run 36680145356, plus 2 x 56s, 2 x 39s and 2 x 55s)
-    timeout-minutes: 46
+    # 2026-10-04: the workspace references step (R2 of the same design) took
+    # 48s locally, which would have made 905 + 2 * 48 = 1001s, over the 950s
+    # pole. So the four steps of that design left for a job of their own,
+    # lsp-references below, and this job's claim goes back to the worst run
+    # it had before the first of them came in.
+    # budget: 3x 605s worst observed plus a tenth (run 36680145356)
+    timeout-minutes: 31
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2468,6 +2477,33 @@ jobs:
       - name: lsp typed-tree pairing by declaration key
         run: ./scripts/lsp-decl-pairing.py
 
+      # Analysis and completion must consume one captured source plan. Both
+      # fail-closed edges carry compiling mutants: loader replanning and LSP
+      # completion discarding the document's module index.
+      - name: project plan capture and completion consistency
+        run: ./scripts/project-plan-contract/run.sh
+
+  # The per-name contracts of docs/lsp-references-design.md: what definition
+  # resolves, what kind semantic tokens give, what references return in one
+  # document and across a project. Each builds four mutant compilers, so
+  # together they are most of their job; they ran in lsp-workspace until the
+  # fourth (R2) would have taken that job past the pole.
+  lsp-references:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'lsp-references') }}
+    runs-on: ubuntu-latest
+    # Planning allowance, each step at twice its local time as its line in
+    # lsp-workspace claimed (56s, 39s, 55s and 48s, 2026-10-04), plus 50s
+    # fixed overhead: 2 * 198 + 50 = 446s, timeout 3x that. Restate from the
+    # observation once the job has a week of main runs.
+    # budget: 3x 446s planning allowance (2 x 56s, 2 x 39s, 2 x 55s and 2 x 48s, plus 50s fixed overhead)
+    timeout-minutes: 23
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       # Which written names go-to-definition resolves, one assertion per name
       # (docs/lsp-references-design.md §五): written types, effect rows,
       # `with handle`, handler arms, operation calls, module alias segments,
@@ -2499,11 +2535,20 @@ jobs:
       - name: lsp references and mutants
         run: ./scripts/lsp-references.py --mutants
 
-      # Analysis and completion must consume one captured source plan. Both
-      # fail-closed edges carry compiling mutants: loader replanning and LSP
-      # completion discarding the document's module index.
-      - name: project plan capture and completion consistency
-        run: ./scripts/project-plan-contract/run.sh
+      # Which names references returns across a project
+      # (docs/lsp-references-design.md §R2): a two-module and a three-module
+      # project, the same set asked from the declaration, the import list, a
+      # qualified call, a qualified function value and a pipe; a module no
+      # open document imports; an edit above the declaration, which the
+      # index has to follow into a module whose step was reused; and no
+      # diagnostic for a broken module nothing open imports, since the
+      # diagnostics build must not load the rest of the tree.
+      # selfhost-lsp-diff.sh holds one cross-file reply against the previous
+      # release, which answers it from one file. Five mutants, each built
+      # from a private selfhost copy, must turn their own case red. 48s
+      # locally (2026-10-04).
+      - name: lsp workspace references and mutants
+        run: ./scripts/lsp-references-workspace.py --mutants
 
   # The wasm target: the failure runtime, and the DOM bridge over it.
   #

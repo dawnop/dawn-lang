@@ -19,7 +19,7 @@ use json/parser
 use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj, error_text}
 use json/render.{render}
 use driver/analyze.{
-  Program, ProjectPlan, LocDiag,
+  Program, ProjectPlan, LocDiag, CheckedMod,
   rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
   project_module_path,
@@ -49,7 +49,7 @@ use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
-use lsp/lspref.{Occurrence, occurrences}
+use lsp/lspref.{Occurrence, occurrences, ModRefs, Shift, mod_refs, refs_to, refresh}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts}
@@ -507,7 +507,35 @@ type Workspace = {
   # workspace in place (its plan and lease are the ones that last succeeded).
   # Kept beside the program rather than in `diag_by_uri` because every
   # rebuild recomputes that map; cleared by the next refresh that succeeds.
-  refresh_problem: Option[LocDiag]
+  refresh_problem: Option[LocDiag],
+  # what workspace references read (`refs_world`): None until the first
+  # request; marked out of date by every rebuild, dropped with a conflict
+  world: Option[RefsWorld]
+}
+
+## The program references search (docs/lsp-references-design.md §R2): the
+## open documents and every other module of the project's tree, so that a use
+## in a file no open document imports is found. It is not the program the
+## diagnostics come from, which stays the open documents' import closure: an
+## editor pays for the rest of the tree only once it asks for references.
+## It has its own session, so its modules' steps are remembered between
+## requests the way `prog`'s are between edits, and its own parses.
+type RefsWorld = {
+  # the tree's modules, as the walk spelled them; walked on the first
+  # request, fixed with the plan
+  seeds: List[String],
+  cache: incremental.Session,
+  parses: ParseMemo,
+  prog: Option[Program],
+  # the text each module of `prog` was analyzed from, by module path
+  texts: Map[String, String],
+  # the reference index, by module path: one entry per module whose step the
+  # session still holds as it was when the entry was read. Bringing the
+  # program up to date keeps exactly the entries of the steps it reused; a
+  # request fills in the rest (`workspace_references`).
+  refs: Map[String, ModRefs],
+  # whether `prog` was analyzed from the documents as they are now
+  current: Bool
 }
 
 ## Maven, lock or loader setup failed before a usable workspace existed. Open
@@ -578,32 +606,41 @@ fn analysis_of(st: LspState, d: Doc) -> Option[Analysis] =
 fn doc_qcx(st: LspState, d: Doc, analysis: Analysis) -> Option[QCx] = {
   let entry = list.find(analysis.prog.modules, cm => cm.mod_path == analysis.entry)
   match entry {
-    Some(e) -> {
-      var env = st.std.exports
-      for cm in analysis.prog.modules {
-        env = map.insert(env, cm.mod_path, exports_of(cm.cx, cm.m, cm.mod_path, cm.class_name))
-      }
-      # every surface the editor offers from here on is the one this document
-      # may name: the same `exports_seen_by` pass_imports applies, once, so a
-      # completion never offers another package's `pub(pkg)` name
-      let viewer = package_of(e.cx)
-      var seen: Map[String, ModExports] = map.empty()
-      for pr in map.entries(env) {
-        let (path, exp) = pr
-        seen = map.insert(seen, path, exports_seen_by(exp, viewer))
-      }
-      env = seen
-      Some(QCx {
-        entry: e,
-        prog: analysis.prog,
-        std: st.std,
-        exports_env: env,
-        bins: visible_bins(st.bins, e.cx),
-        typed: typed_trees(e.tm),
-        cps: d.view.cps
-      })
-    }
+    Some(e) -> Some(module_qcx(st, analysis.prog, program_exports(st, analysis.prog), e, d.view.cps))
     None -> None
+  }
+}
+
+## Every export surface in the program, std's and each module's own, before
+## anyone's visibility is applied. A request that reads many modules builds it
+## once (docs/lsp-references-design.md §R2).
+fn program_exports(st: LspState, prog: Program) -> Map[String, ModExports] = {
+  var env = st.std.exports
+  for cm in prog.modules {
+    env = map.insert(env, cm.mod_path, exports_of(cm.cx, cm.m, cm.mod_path, cm.class_name))
+  }
+  env
+}
+
+## The query context of the module `e`, whose text's code points are `cps`.
+fn module_qcx(st: LspState, prog: Program, env: Map[String, ModExports], e: CheckedMod, cps: List[Char]) -> QCx = {
+  # every surface the editor offers from here on is the one this document
+  # may name: the same `exports_seen_by` pass_imports applies, once, so a
+  # completion never offers another package's `pub(pkg)` name
+  let viewer = package_of(e.cx)
+  var seen: Map[String, ModExports] = map.empty()
+  for pr in map.entries(env) {
+    let (path, exp) = pr
+    seen = map.insert(seen, path, exports_seen_by(exp, viewer))
+  }
+  QCx {
+    entry: e,
+    prog: prog,
+    std: st.std,
+    exports_env: seen,
+    bins: visible_bins(st.bins, e.cx),
+    typed: typed_trees(e.tm),
+    cps: cps
   }
 }
 
@@ -1337,7 +1374,9 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
   } else if method == "textDocument/definition" {
     respond(id, handle_definition(st, params))
   } else if method == "textDocument/references" {
-    respond(id, handle_references(st, params))
+    let (reply, st2) = handle_references(st, params)
+    respond(id, reply)
+    st = st2
   } else if method == "textDocument/documentHighlight" {
     respond(id, handle_document_highlight(st, params))
   } else if method == "textDocument/documentSymbol" {
@@ -1476,6 +1515,68 @@ fn diagnostics_of_program(
   out
 }
 
+## Every module under the project's source root, when the project has a
+## manifest (docs/lsp-references-design.md §R2). A directory without one is
+## where a loose file happens to sit, and its other files are not one program
+## with it.
+fn project_seeds(plan: ProjectPlan) -> List[String] !Fs !Env = {
+  if not io.exists(canon(plan.source.project) ++ "/dawn.toml") { return [] }
+  var out: List[String] = []
+  for f in plan.modules.project_files {
+    match project_module_path(plan, f) {
+      Some(_) -> { out = out ++ [f] }
+      None -> ()
+    }
+  }
+  out
+}
+
+## The references program of `ws`, brought up to date with the documents
+## (§R2), or None while they conflict. The first call walks the tree and
+## checks all of it; a later one after an edit reuses every step the edit
+## left as it was, and keeps the index entries of exactly those modules.
+fn refs_world(st: LspState, ws: Workspace) -> Option[RefsWorld] !Fs !Env !io = {
+  let w0 = match ws.world {
+    Some(w) -> {
+      if w.current { return Some(w) }
+      w
+    }
+    None -> {
+      let no_prog: Option[Program] = None
+      RefsWorld {
+        seeds: project_seeds(ws.plan), cache: analysis_session(st, ws.lease.jsig),
+        parses: ws.parses, prog: no_prog, texts: map.empty(), refs: map.empty(), current: false
+      }
+    }
+  }
+  match workspace_inputs(st, ws.plan, ws.path_by_uri) {
+    InputsConflict(_) -> None
+    InputsReady(overlay, entries, _) -> {
+      # the open documents first, then the rest of the tree; the loader reads
+      # a file reached twice once
+      let read = load_entries_reusing(ws.plan, entries ++ w0.seeds, overlay, w0.parses)
+      let checked = incremental.analyze(w0.cache, read.loaded)
+      var texts: Map[String, String] = map.empty()
+      for lm in read.loaded.modules { texts = map.insert(texts, lm.mod_path, lm.text) }
+      # an index entry lives exactly as long as the step it was read from
+      var refs: Map[String, ModRefs] = map.empty()
+      for pr in map.entries(w0.refs) {
+        let (mod_path, mr) = pr
+        if set.has(checked.reused, mod_path) { refs = map.insert(refs, mod_path, mr) }
+      }
+      Some(RefsWorld {
+        ..w0,
+        cache: checked.session,
+        parses: retained_parses(st, read.parses),
+        prog: Some(checked.program),
+        texts: texts,
+        refs: refs,
+        current: true
+      })
+    }
+  }
+}
+
 fn diagnostics_of_problem(
   st: LspState,
   path_by_uri: Map[String, String],
@@ -1575,13 +1676,15 @@ fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
     InputsConflict(paths) -> {
       let no_entries: Map[String, String] = map.empty()
       let no_prog: Option[Program] = None
+      let no_world: Option[RefsWorld] = None
       Workspace {
         ..ws0,
         prog: no_prog,
         cache: incremental.evict(ws0.cache),
         analysis_stats: None,
         entry_by_uri: no_entries,
-        diag_by_uri: conflict_diagnostics(st, ws0.path_by_uri, paths)
+        diag_by_uri: conflict_diagnostics(st, ws0.path_by_uri, paths),
+        world: no_world
       }
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
@@ -1596,7 +1699,13 @@ fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
         analysis_stats: Some(update.stats),
         parses: retained_parses(st, reusing.parses),
         entry_by_uri: entry_by_uri,
-        diag_by_uri: diagnostics_of_program(st, ws0.path_by_uri, prog)
+        diag_by_uri: diagnostics_of_program(st, ws0.path_by_uri, prog),
+        # the references program is brought up to date by the next request
+        # that reads it, not here: this is the path every keystroke takes
+        world: match ws0.world {
+          Some(w) -> Some(RefsWorld { ..w, current: false })
+          None -> None
+        }
       }
     }
   }
@@ -1636,7 +1745,8 @@ fn activate_workspace(
         analysis_stats: None,
         parses: no_parses(),
         diag_by_uri: no_diags,
-        refresh_problem: None
+        refresh_problem: None,
+        world: None
       }
       match catch_panic(() => rebuild_workspace(st, candidate)) {
         Ok(workspace) -> Ready(workspace)
@@ -2521,13 +2631,29 @@ fn occurrences_at(st: LspState, params: Json, with_decl: Bool) -> Option[(Doc, L
     None -> None
   }
 
-## `textDocument/references`, inside the requested document only (R1); the
-## declaration's own name only when `context.includeDeclaration` is true.
-fn handle_references(st: LspState, params: Json) -> Json = {
+## `textDocument/references`: across the workspace for a project document
+## (§R2), inside the document for a standalone one (§R1); the declaration's
+## own name only when `context.includeDeclaration` is true.
+fn handle_references(st: LspState, params: Json) -> (Json, LspState) !Fs !Env !io = {
   let with_decl = match oget(get_or_null(params, "context"), "includeDeclaration") {
     Some(JBool(b)) -> b
     _ -> false
   }
+  match doc_of(st, params) {
+    Some(d) ->
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match analysis.workspace_key {
+            Some(key) -> workspace_references(st, d, analysis, key, pos_offset(d, params), with_decl)
+            None -> (local_references(st, params, with_decl), st)
+          }
+        None -> (JArr([]), st)
+      }
+    None -> (JArr([]), st)
+  }
+}
+
+fn local_references(st: LspState, params: Json, with_decl: Bool) -> Json =
   match occurrences_at(st, params, with_decl) {
     Some(pr) -> {
       let (d, os) = pr
@@ -2535,6 +2661,106 @@ fn handle_references(st: LspState, params: Json) -> Json = {
     }
     None -> JArr([])
   }
+
+## One reference found, for ordering the reply: the file's identity, the
+## offset, and the location.
+type Found = { path: String, lo: Int, loc: Json }
+
+## The references of a workspace document (docs/lsp-references-design.md §R2).
+## The requesting document answers from its own walk, as §R1 does; every
+## other module of the program, the ones no open document imports included,
+## answers from the workspace's index, read again only for a module whose
+## step the last rebuild did not reuse or whose entry names a site an edit
+## touched. What this request read or moved is kept for the next one.
+fn workspace_references(
+  st: LspState, d: Doc, analysis: Analysis, key: String, offset: Int, with_decl: Bool
+) -> (Json, LspState) !Fs !Env !io = {
+  let ws = match map.get(st.workspaces, key) {
+    Some(Ready(w)) -> w
+    _ -> return (JArr([]), st)
+  }
+  let world = match refs_world(st, ws) {
+    Some(w) -> w
+    None -> return (JArr([]), st)
+  }
+  let prog = world.prog.expect("a current references program")
+  let env = program_exports(st, prog)
+  let entry = match list.find(prog.modules, cm => cm.mod_path == analysis.entry) {
+    Some(e) -> e
+    None -> return (JArr([]), st)
+  }
+  let qc = module_qcx(st, prog, env, entry, d.view.cps)
+  let t = match find_target(qc, offset) {
+    Some(t) -> t
+    None -> return (JArr([]), st)
+  }
+  let def = match t.def {
+    Some(sp) -> sp
+    None -> return (JArr([]), st)
+  }
+  # every program file by identity, with the text it was analyzed from
+  var ident: Map[String, String] = map.empty()
+  var texts: Map[String, String] = map.empty()
+  for cm in prog.modules {
+    let id = canon_identity(cm.path)
+    ident = map.insert(ident, cm.path, id)
+    match map.get(world.texts, cm.mod_path) {
+      Some(text) -> { texts = map.insert(texts, id, text) }
+      None -> ()
+    }
+  }
+  let own = map.get(ident, entry.path).expect("the requesting module's identity")
+  let target = match t.def_path {
+    None -> own
+    Some(p) -> map.get(ident, p).unwrap_or(p)
+  }
+  var found: List[Found] = []
+  for o in occurrences(qc, offset, with_decl) {
+    let loc = jobj([("uri", JStr(d.uri)), ("range", jrange(d.view, d.ls, o.lo, o.hi))])
+    found = found ++ [Found { path: own, lo: o.lo, loc: loc }]
+  }
+  var uri_of: Map[String, String] = map.empty()
+  for uri in sort(map.keys(ws.path_by_uri)) {
+    let p = map.get(ws.path_by_uri, uri).expect("workspace path")
+    if not map.has(uri_of, p) { uri_of = map.insert(uri_of, p, uri) }
+  }
+  var index = world.refs
+  var shifts: Map[String, (String, Shift)] = map.empty()
+  for cm in prog.modules {
+    if cm.mod_path == analysis.entry { continue }
+    let text = match map.get(world.texts, cm.mod_path) {
+      Some(found_text) -> found_text
+      None -> continue
+    }
+    let id = map.get(ident, cm.path).expect("module identity")
+    let kept = match map.get(index, cm.mod_path) {
+      Some(old) -> {
+        let (fresh, next) = refresh(old, texts, shifts)
+        shifts = next
+        fresh
+      }
+      None -> None
+    }
+    let mr = match kept {
+      Some(m) -> m
+      None -> mod_refs(module_qcx(st, prog, env, cm, code_points(text)), id, text, ident, texts)
+    }
+    index = map.insert(index, cm.mod_path, mr)
+    let hits = refs_to(mr, target, def, with_decl)
+    if len(hits) > 0 {
+      let view = view_of(text)
+      let ls = line_starts_of(text)
+      let uri = map.get(uri_of, id).unwrap_or(path_to_uri(id))
+      for r in hits {
+        let loc = jobj([("uri", JStr(uri)), ("range", jrange(view, ls, r.lo, r.hi))])
+        found = found ++ [Found { path: id, lo: r.lo, loc: loc }]
+      }
+    }
+  }
+  let ordered = sort_by(found, (a, b) =>
+      if a.path == b.path { a.lo - b.lo } else if a.path < b.path { -1 } else { 1 })
+  let next = Workspace { ..ws, world: Some(RefsWorld { ..world, refs: index }) }
+  (JArr(map(ordered, f => f.loc)), LspState { ..st, workspaces: map.insert(st.workspaces, key, Ready(next)) })
 }
 
 ## `textDocument/documentHighlight`: the same occurrences, the declaration's
@@ -3211,7 +3437,7 @@ test "workspace commits its module memo with its Program and drops it on conflic
           prog: None, entry_by_uri: map.empty(), lease: lease,
           cache: incremental.new(std, ct_default(), lease.jsig, 128),
           analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
-          refresh_problem: None
+          refresh_problem: None, world: None
         }
         let first = rebuild_workspace(st, empty)
         assert len(first.prog.expect("first Program").diags) == 0
