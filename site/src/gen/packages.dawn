@@ -129,15 +129,10 @@ pub fn read_packages() -> List[Package] !Fs = map(package_dirs(), d => read_pack
 pub fn summary_text(p: Package) -> String = inline_text(p.summary)
 
 ## The module paths `dawn doc` documented for a package, as it spells them.
-## A package's document also carries the modules of its dependencies that it
-## reaches (tea-dom's lists `json2/value` and `tea_core/tree` beside its own
-## `node`), so [own_modules] keeps the ones with a source file here.
+## They are the package's own and nothing else: `dawn doc` leaves out the
+## `[deps]` modules a package reaches (docs/doc-comments-design.md), so
+## tea-dom's lists `node` and not the `json2/value` it uses.
 pub fn doc_module_paths(doc: Json) -> List[String] = map(jarr(jget(doc, "modules")), m => field(m, "path"))
-
-## The modules of `dir` among `paths`: those whose source is in the
-## package's own `src/`.
-fn own_modules(dir: String, paths: List[String]) -> List[String] !Fs =
-  filter(paths, m => io.exists("packages/${dir}/src/${m}.dawn"))
 
 ## Module paths as `use` spells them, sorted: the alias, a slash, the path.
 pub fn module_paths(use_as: String, paths: List[String]) -> List[String] =
@@ -277,7 +272,7 @@ pub fn packages_page(a: Assets, lang: Lang, rows: List[(Package, List[String])])
 ## entries are the same in both: they are the packages' own text.
 pub fn gen_packages(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let rows = map(read_packages(), p =>
-      (p, module_paths(p.use_as, own_modules(p.dir, doc_module_paths(read_doc(p.dir))))))
+      (p, module_paths(p.use_as, doc_module_paths(read_doc(p.dir)))))
   let dst =
     match lang {
       En -> "${out}/packages.html"
@@ -350,12 +345,4 @@ test "module paths are spelled as `use` spells them, sorted" {
       assert false
     }
   }
-}
-
-## The dependency modules a package's document carries are not its own:
-## tea-dom's lists json2's and tea_core's beside its own.
-test "only a package's own modules are its rows' modules" {
-  io.with_fs_real(() => {
-    assert own_modules("tea-dom", ["tea_core/tree", "node", "json2/value", "dsl"]) == ["node", "dsl"]
-  })
 }

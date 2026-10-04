@@ -257,6 +257,23 @@ pub(pkg) fn root_sources(loaded: LoadResult) -> List[(String, String)] = {
   out
 }
 
+## The module paths of the root package: every loaded module that belongs to
+## no `[deps]` package. `dawn doc` publishes these and only these; a
+## dependency's modules are whatever part of it the `use` closure reached,
+## which is neither that package's API nor this one's, and the loader's `pkg`
+## is the fact a consumer would otherwise have to guess from the file tree
+## (docs/doc-comments-design.md).
+pub(pkg) fn own_module_paths(loaded: LoadResult) -> Set[String] = {
+  var out: Set[String] = set.empty()
+  for lm in loaded.modules {
+    match lm.pkg {
+      None -> { out = set.insert(out, lm.mod_path) }
+      Some(_) -> ()
+    }
+  }
+  out
+}
+
 fn missing_source_root(dir: String) -> LoadResult = {
   let root = "${dir}/src"
   LoadResult {

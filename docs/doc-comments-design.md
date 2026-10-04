@@ -132,7 +132,28 @@ patch）。原示例用 `tea_dom/dsl` 的 `on_value`，而 dsl 是写在 node �
 见本文末「实测」一节。没有 decltest 的模块，新 pass 只是对 `module_tests` 的一次遍历；有的，每个 decltest 一次
 对本模块声明表的线性查找。
 
-## 7. 不做的（理由）
+## 7. 发布范围：只出本包的模块（2026-10-04）
+
+`dawn doc <工程>` 只写出加载器判给本工程的模块（`LoadedModule.pkg == None`），不写 `[deps]` 包里被
+`use` 闭包够到的那些。实现是 `driver/analyze.own_module_paths` 从 `loaded.modules` 取路径集合，
+`doc.project_json` 只对集合里的模块写 `module_json`；JVM 与 native 两个驱动同改，所以 native-cli-diff 不变。
+
+- **为什么**：依赖模块只是闭包残片（tea-dom 用到 tea_core 6 个模块里的 4 个），既不是依赖的完整 API，也不是本包的 API。
+  仓内三个消费者（站点 Packages 页、`pub-doc-check.py`、`api-snapshot.py`）没有一个要它们，各自按
+  「`src/` 下有没有同名文件」又筛了一遍；这个判据比加载器已知的 `pkg` 弱（本工程可以有 `src/json2/value.dawn`，
+  与依赖 `json2/value` 同路径）。三处过滤同刀删掉，判断只留在加载器一处。
+- **链接作用域不变**：`mods` 仍含 std 与全部依赖模块，指向依赖的 `` [`name`] `` 照样解析，`links[].target.module`
+  照样写依赖的模块路径（前缀即对方 manifest 的 `name`）。变的只是校验范围：依赖文档里的坏链接与缺文档只在依赖自己的
+  `dawn doc` 里报一次；仓内每个包都被 `pub-doc-check.py` 单独跑，覆盖不降。
+- **同类工具**：Gleam、Haddock、odoc（`@doc`）、Deno、ExDoc 都只出本包；默认含依赖的 `cargo doc` 与 DocC
+  是为了本地 HTML 站里链接有落点，Dawn 不出 HTML（见下节）。
+- **输出变化**：仓内只有 `doc site` 一个 run-diff 标签变（37 个模块减到 28，去掉 json2 4、sha2 1、
+  compiler_plan 3、fspath 1）；留下的模块逐字节不变。包的 JSON：tea-dom 14→6、web 6→4、tea-term 13→7，json 不变。
+  站点 Packages 页与 `api-snapshot.py` 的输出对父提交逐字节不变。
+- **守护**：`selfhost/src/doc.dawn` 的工程夹具测试（有 `[deps]`，断言依赖模块不在、指向依赖的链接仍带 `target`）；
+  变异体（不筛）跑过，该测试红。
+
+## 8. 不做的（理由）
 
 - **注释里的可运行代码块**（Rust 的 doctest 形状）：见 §6.1 的表。散文里的 ```` ```dawn ```` 围栏只是插图；
   「能被 parser 解析」的便宜检查是 D8，可选。
@@ -147,8 +168,15 @@ patch）。原示例用 `tea_dom/dsl` 的 `on_value`，而 dsl 是写在 node �
   与重开条件；放错位置的 `##` 只是注释，报错会让注释影响编译。
 - **裸 `Ctor` 命名测试**：§6.2。
 - **测试指向别的模块的声明**：§6.2。
+- **`dawn doc --deps` / `--no-deps` 开关**（§7）：零消费者要依赖模块；要看依赖的文档就对依赖目录跑 `dawn doc`，
+  那才是它的完整 API。重开条件：出现要一次拿整棵依赖树文档的消费者（例如离线文档包），届时也应输出每个依赖的完整模块集，
+  而不是闭包残片。`--no-deps` 把正确的形状放在开关后面，新消费者忘了加就拿到错的。
+- **在站点里筛依赖模块**（§7）：那是第四份过滤，还沿用文件存在法。
+- **JSON 顶层加 `package` 字段**（§7）：链接目标的模块前缀已是包真名，站点从 manifest 读得到名字。
+  重开条件：出现读 JSON 却读不到 manifest 的消费者。
+- **本包模块加包名前缀**（`tea_dom/node`）（§7）：改每个包的全部输出与站点模块列，与本问题无关，另议。
 
-## 8. 状态
+## 9. 状态
 
 | 刀 | 内容 | 提交 |
 |---|---|---|
@@ -157,6 +185,7 @@ patch）。原示例用 `tea_dom/dsl` 的 `on_value`，而 dsl 是写在 node �
 | D3 | std+packages pub 必有文档，`pub-doc-check.py` 门 | `bc64fde8`、`22dc48e1` |
 | D4 | `` [`name`] `` 链接：`dawn doc` 解析与失败、`links`、站点锚点、hover | `a0d94d5b` |
 | D5 | 以声明命名的测试；`examples`；站点渲染；tea-dom 迁移 | （合并后回填） |
+| §7 | `dawn doc` 只出本包模块；删三处消费者过滤 | （合并后回填） |
 
 ## 实测
 
