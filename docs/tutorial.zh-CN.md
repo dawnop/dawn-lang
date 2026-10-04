@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 075afa588adb57e0 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 30551d03f1f7b812 -->
 
 # Dawn 教程
 
@@ -1482,7 +1482,57 @@ refused: gpu.no_kernel
 
 kernel 本身也是 Dawn，对着 `packages/tileir` 写：它的 `Dev` 效果把 kernel 执行的操作记录
 下来，记录再编码成 NVIDIA 的 Tile IR 字节码，由 `tileiras` 汇编成 `with_gpu_real` 装载的
-模块。`examples/projects/gpu_fake` 是一个完整程序，九个这样的 kernel 加上它们的宿主一侧，
+模块。记录同样是纯的，所以这里就能看它发生。这个例子要用 `packages/tileir`，所以它是一个
+`[deps]` 里写着 `tileir` 的项目（第 18 章），不是单个文件；它也没有 Playground 链接，因为
+Playground 只跑单个文件：
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store_cell}
+use tileir/prog.{trace2, cells, In, Out}
+use tileir/render.{render}
+
+# 每个 tile 块读 `x` 里属于自己的那一格，写进 `out` 里属于自己的那一格。
+# 这里一个数也没拷：函数体只跑一次，跑在一个把它记录下来的 handler 底下。
+fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, load_cell(x))
+
+# 一行 Tile IR 执行的操作：`=` 后面的那个词，如果有的话。
+fn op_of(line: String) -> Option[String] = match str.split_once(line, " = ") {
+  Some((_results, rest)) -> Some(str.split(rest, " ")[0])
+  None -> None
+}
+
+pub fn main() -> Unit !io = {
+  let g = cells([256], [128])     # 256 个元素，每格 128：两个 tile 块
+  let (prog, _entry) = trace2("copy", In(F64, g), Out(F64, g), copy)
+  for line in str.split(render(prog), "\n") {
+    match op_of(line) {
+      Some(op) -> println(op)
+      None -> ()
+    }
+  }
+}
+```
+```output
+make_token
+assume
+make_tensor_view
+make_partition_view
+get_tile_block_id
+load_view_tko
+assume
+make_tensor_view
+make_partition_view
+store_view_tko
+```
+
+`copy` 从头到尾没见过一个数。`trace2` 在一个 handler 底下把它的函数体跑了一次，handler 把每个
+`Dev` 操作记下来；`render` 把这份记录打印成 Tile IR 文本，一行一个操作，上面的程序只留下每行的
+操作名。两个参数怎么切由 `In` 和 `Out` 标记说，所以 kernel 体里一个形状也不写：每个 tile 块
+找到自己的格子（`get_tile_block_id`），载入，再存回去。
+
+`examples/projects/gpu_fake` 是一个完整程序，九个这样的 kernel 加上它们的宿主一侧，
 在假设备上由 `packages/tileref` 里的参考实现应答。设计，以及设备一侧今天走到了哪一步，
 见 [tile-backend-design.md](tile-backend-design.md)。
 

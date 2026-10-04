@@ -1587,7 +1587,58 @@ an NVIDIA driver.
 
 The kernels are Dawn as well, written against `packages/tileir`: its `Dev` effect records
 the operations a kernel performs, and the record is encoded as NVIDIA's Tile IR bytecode,
-which `tileiras` assembles into the module `with_gpu_real` loads.
+which `tileiras` assembles into the module `with_gpu_real` loads. Recording is pure as
+well, so you can watch it here. This example needs `packages/tileir`, so it is a project
+with `tileir` under its `[deps]` (chapter 18) rather than one file, and it has no
+Playground link, because the Playground runs one file:
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store_cell}
+use tileir/prog.{trace2, cells, In, Out}
+use tileir/render.{render}
+
+# One tile block reads its cell of `x` and writes it to its cell of `out`.
+# Nothing is copied here: the body runs once, under a handler that records it.
+fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, load_cell(x))
+
+# The operation a line of Tile IR performs: the word after `=`, if it has one.
+fn op_of(line: String) -> Option[String] = match str.split_once(line, " = ") {
+  Some((_results, rest)) -> Some(str.split(rest, " ")[0])
+  None -> None
+}
+
+pub fn main() -> Unit !io = {
+  let g = cells([256], [128])     # 256 elements in cells of 128: two tile blocks
+  let (prog, _entry) = trace2("copy", In(F64, g), Out(F64, g), copy)
+  for line in str.split(render(prog), "\n") {
+    match op_of(line) {
+      Some(op) -> println(op)
+      None -> ()
+    }
+  }
+}
+```
+```output
+make_token
+assume
+make_tensor_view
+make_partition_view
+get_tile_block_id
+load_view_tko
+assume
+make_tensor_view
+make_partition_view
+store_view_tko
+```
+
+`copy` never saw a number. `trace2` ran its body once under a handler that wrote each
+`Dev` operation down, and `render` prints that record as Tile IR text, one operation per
+line; the program above keeps only each line's operation. The `In` and `Out` markers say
+how the two parameters are cut, so the kernel body says nothing about shape: each tile
+block finds its cell (`get_tile_block_id`), loads it and stores it.
+
 `examples/projects/gpu_fake` is a whole program of nine such kernels with their host
 side, answered on the fake device by the references in `packages/tileref`. The design,
 and how far the device side reaches today, is in

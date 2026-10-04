@@ -11,10 +11,10 @@
 # afterwards ("the first ul after id=s5"), breaks the day a section moves.
 
 use std/str
-use md/ast.{Inline, Text, Code, Bold, Em, Del, Link, Block, Heading, Para, CodeBlock, Fragment, UList, OList, Table, Quote, Rule}
+use md/ast.{Inline, Text, Code, Bold, Em, Del, Link, Block, Heading, Para, CodeBlock, Fragment, Program, UList, OList, Table, Quote, Rule}
 use md/text.{seg}
 use html/escape.{escape_html, escape_attr}
-use html/play.{Play, play_block}
+use html/play.{Play, play_block, code_window}
 use hl/dawn.{highlight_dawn}
 
 ## One rendered document: body HTML, its TOC, and the first h1's plain text.
@@ -79,6 +79,24 @@ fn code_html(lang: String, body: String, play: Option[Play], out: String) -> Str
     "<pre><code>" ++ escape_html(body) ++ "</code></pre>"
   }
 
+## A [Program] on a page that offers the Playground: the same window as an
+## offered block, with its output under it, but no link, since the Playground
+## runs one file and this program needs packages. The bar names them
+## (`dawn · tileir`), which is the one thing the reader must know to run it.
+## On a page that offers nothing it is an ordinary block.
+fn program_html(lang: String, deps: List[String], body: String, play: Option[Play], out: String) -> String =
+  match play {
+    Some(_) ->
+      if lang == "dawn" {
+        let pre = `<pre class="dawn"><code>` ++ highlight_dawn(body) ++ "</code></pre>"
+        let tail = if out == "" { "" } else { "\n" ++ out }
+        code_window("dawn · " ++ join(deps, ", "), pre ++ tail)
+      } else {
+        code_html(lang, body, None, "")
+      }
+    None -> code_html(lang, body, None, "")
+  }
+
 fn output_html(body: String) -> String =
   `<pre class="output"><code>` ++ escape_html(body) ++ "</code></pre>"
 
@@ -100,6 +118,12 @@ fn offered_pair(bs: List[Block], i: Int, play: Option[Play]) -> Option[String] =
             }
           } else {
             None
+          }
+        Some(Program(lang, deps, body)) ->
+          match get(bs, i + 1) {
+            Some(CodeBlock(next, out)) ->
+              if next == "output" { Some(program_html(lang, deps, body, play, output_html(out))) } else { None }
+            _ -> None
           }
         _ -> None
       }
@@ -301,6 +325,8 @@ fn block_html(b: Block, map_url: fn(String) -> String, play: Option[Play]) -> St
     CodeBlock(lang, body) -> code_html(lang, body, play, "")
     # highlighted like any other block, never offered: see md/ast.Fragment
     Fragment(lang, body) -> code_html(lang, body, None, "")
+    # in a window, never offered: see md/ast.Program
+    Program(lang, deps, body) -> program_html(lang, deps, body, play, "")
     UList(items) -> {
       let open = if is_timeline(items) { `<ul class="timeline">` } else { "<ul>" }
       open ++ "\n" ++ items_html(items, map_url, play) ++ "\n</ul>"
@@ -637,6 +663,29 @@ test "a fragment is highlighted and never offered to the playground" {
   assert str.contains(doc.html, `<span class="k">let</span>`)
   assert not str.contains(doc.html, "play-open")
   assert not str.contains(doc.html, "playable")
+}
+
+## A program that needs packages is still a program with its output: one
+## window, the packages named in its bar, and no link, because the Playground
+## could not resolve its imports.
+test "a program with deps keeps its output window and gets no playground link" {
+  let p = Some(Play { href: "../playground.html", label: "Open in playground" })
+  let doc = render_doc_play([Program("dawn", ["tileir"], "let x = 1"), CodeBlock("output", "1")], keep_url, p)
+  assert str.contains(doc.html, `<figure class="win">`)
+  assert str.contains(doc.html, `<span class="lbl">dawn · tileir</span>`)
+  assert str.contains(doc.html, `<span class="k">let</span>`)
+  assert str.contains(doc.html, "</code></pre>\n" ++ `<pre class="output"><code>1</code></pre>` ++ "\n</figure>")
+  assert len(str.split(doc.html, "<figure")) == 2
+  assert not str.contains(doc.html, "play-open")
+  assert not str.contains(doc.html, "playable")
+  # nested, alone, and with two packages
+  let nested = render_doc_play([UList([[Program("dawn", ["tileir", "tileref"], "let y = 2")]])], keep_url, p)
+  assert str.contains(nested.html, `<span class="lbl">dawn · tileir, tileref</span>`)
+  assert not str.contains(nested.html, "play-open")
+  # a page that offers nothing shows it like any other block
+  let plain = render_doc([Program("dawn", ["tileir"], "let x = 1"), CodeBlock("output", "1")], keep_url)
+  assert not str.contains(plain.html, "<figure")
+  assert str.contains(plain.html, `<pre class="output"><code>1</code></pre>`)
 }
 
 test "tables render thead and tbody, inside a scrolling frame" {

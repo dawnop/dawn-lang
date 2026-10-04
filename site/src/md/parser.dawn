@@ -3,7 +3,7 @@
 
 use std/str
 use std/list
-use md/ast.{Inline, Text, Code, Bold, Block, Heading, Para, CodeBlock, Fragment, UList, OList, Table, Quote, Rule}
+use md/ast.{Inline, Text, Code, Bold, Block, Heading, Para, CodeBlock, Fragment, Program, UList, OList, Table, Quote, Rule}
 use md/inline.{parse_inlines}
 use md/text.{cp_at, indent_of, strip_indent}
 
@@ -236,12 +236,25 @@ fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
 ## an editor on something that cannot run (2026-10-01). So it comes out as a
 ## [Fragment] instead of a [CodeBlock]; the language is still the first word
 ## and the highlighting is the same.
+##
+## `deps=<pkg>[,<pkg>]` is the other one (2026-10-05): a whole program that
+## doc-check runs as a project depending on those packages, so it comes out as
+## a [Program] carrying their names, paired with its output but never linked.
 fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let first = line_at(lines, start)
   let raw = str.trim(str.drop(first, 3))
   let words = str.split(raw, " ")
   let lang = match words { [w, ..] -> w, _ -> raw }
   let fragment = list.contains(words, "skip-check")
+  var deps: List[String] = []
+  for w in words {
+    match str.strip_prefix(w, "deps=") {
+      Some(names) -> {
+        deps = deps ++ str.split(names, ",")
+      }
+      None -> ()
+    }
+  }
   let n = len(lines)
   var body: List[String] = []
   var i = start + 1
@@ -257,7 +270,14 @@ fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] =
   }
   if closed {
     let code = join(body, "\n")
-    Ok((if fragment { Fragment(lang, code) } else { CodeBlock(lang, code) }, i))
+    let block = if fragment {
+      Fragment(lang, code)
+    } else if deps != [] {
+      Program(lang, deps, code)
+    } else {
+      CodeBlock(lang, code)
+    }
+    Ok((block, i))
   } else {
     Err("unclosed code fence: ${first}")
   }
@@ -425,6 +445,8 @@ test "fenced code keeps its body verbatim" {
   assert parse("```dawn\nfn main() -> Unit\n```\n") ==
     Ok([CodeBlock("dawn", "fn main() -> Unit")])
   assert parse("```dawn skip-check\nx\n```\n") == Ok([Fragment("dawn", "x")])
+  assert parse("```dawn run deps=tileir\nx\n```\n") == Ok([Program("dawn", ["tileir"], "x")])
+  assert parse("```dawn run deps=tileir,tileref\nx\n```\n") == Ok([Program("dawn", ["tileir", "tileref"], "x")])
   assert parse("```dawn run\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
   # the tutorial's 29 examples are all "dawn run"; a whole-string match sent
   # every one of them to the unhighlighted branch
