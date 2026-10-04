@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 
 cc_bin="${CC:-cc}"
-ccflags=(-std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c")
+ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c")
 
 if command -v sha256sum >/dev/null 2>&1; then
   digest_file() { sha256sum "$1" | cut -d' ' -f1; }

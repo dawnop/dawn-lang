@@ -42,7 +42,7 @@ fi
 "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \
-  -Wno-unused-parameter -Wno-unused-label \
+  -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
   -I "$root/runtime/c" \
   -o "$work/probe" "$work/probe.c" "$root/runtime/c/dawn_rt.c" -lm
 "$work/probe" >"$work/native.out"

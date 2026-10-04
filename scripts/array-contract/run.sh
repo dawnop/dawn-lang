@@ -87,7 +87,7 @@ cc_bin="${CC:-cc}"
 "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   -Wall -Wextra -Werror \
   -Wno-unused-variable -Wno-unused-but-set-variable \
-  -Wno-unused-parameter -Wno-unused-label \
+  -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
   -I "$root/runtime/c" \
   -o "$steal_bin" "$work/steal_native.c" "$root/runtime/c/dawn_rt.c" -lm
 

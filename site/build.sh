@@ -79,7 +79,7 @@ if [ "$tea_ok" = 1 ]; then
     if [ ! -x "$tea_out/dawnc" ] || [ "$(cat "$tea_out/dawnc.stamp" 2>/dev/null)" != "$tea_stamp" ]; then
       echo "  building the native driver from selfhost/src/nmain.dawn..."
       ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$tea_work/nmain.c"
-      "${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+      "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
         -I runtime/c -o "$tea_out/dawnc" "$tea_work/nmain.c" runtime/c/dawn_rt.c -lm
       printf '%s\n' "$tea_stamp" > "$tea_out/dawnc.stamp"
     fi

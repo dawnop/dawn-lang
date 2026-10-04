@@ -48,7 +48,7 @@ if ! "$dawn" __emitc "$root/selfhost/src/nmain.dawn" -o "$work/nmain.c" \
   cat "$work/native-build.err" >&2
   fail "native driver C emission failed"
 fi
-if ! cc -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+if ! "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -I "$root/runtime/c" -o "$work/dawnc" "$work/nmain.c" \
     "$root/runtime/c/dawn_rt.c" -lm > "$work/native-cc.out" 2>&1; then
   cat "$work/native-cc.out" >&2

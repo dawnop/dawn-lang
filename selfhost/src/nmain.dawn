@@ -689,8 +689,13 @@ fn cc_build_with(
   }
   # -Wno-parentheses-equality: a clang-only warning the emitted C trips a
   # few hundred times per program (`if ((x == 0))` is the emitter's honest
-  # parenthesization). The native row never sees it because gcc has no such
-  # warning; real errors still print.
+  # parenthesization); real errors still print. Both rows carry it. The native
+  # row once left it out because gcc has no such warning, but CC is clang on
+  # CI and in the release (scripts/pinned-cc.sh), and there the compiler
+  # itself trips it 9,306 times; `dawnc run` passes cc's stderr through, so
+  # every program's output would open with them. gcc says nothing about an
+  # unknown -Wno- option unless some other diagnostic is printed, so a gcc
+  # build is unchanged.
   # A reactor has no `_start`: wasi-libc's reactor crt exports `_initialize`
   # instead, the emitted `main` becomes an ordinary function nothing calls,
   # and the only way in is the export `reactor_shim` declares. That is the
@@ -709,7 +714,7 @@ fn cc_build_with(
   } else {
     [
       cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
-      "-I", work,
+      "-Wno-parentheses-equality", "-I", work,
       "-o", out, "${work}/main.c", "${work}/dawn_rt.c"
     ] ++ info_files ++ ["-lm"]
   }
@@ -1404,7 +1409,7 @@ test "the native build is one command line, and this is every flag in it" {
     # no probe: nothing here is cross-compiled, so nothing is asked
     assert len(log) == 1
     let argv = procmem.call_argv(log, 0)
-    assert len(argv) == 14
+    assert len(argv) == 15
     assert argv[0] == "fake-cc"
     assert argv[1] == "-std=c11"
     assert argv[2] == "-O2"
@@ -1412,13 +1417,16 @@ test "the native build is one command line, and this is every flag in it" {
     assert argv[4] == "-fexceptions"
     assert argv[5] == "-fno-strict-aliasing"
     assert argv[6] == "-pthread"
-    assert argv[7] == "-I"
-    let work = argv[8]
-    assert argv[9] == "-o"
-    assert argv[10] == out
-    assert argv[11] == "${work}/main.c"
-    assert argv[12] == "${work}/dawn_rt.c"
-    assert argv[13] == "-lm"
+    # clang's warning on the emitter's `if ((x == 0))`, the one flag the two
+    # rows share beyond the C ones (see cc_build_with)
+    assert argv[7] == "-Wno-parentheses-equality"
+    assert argv[8] == "-I"
+    let work = argv[9]
+    assert argv[10] == "-o"
+    assert argv[11] == out
+    assert argv[12] == "${work}/main.c"
+    assert argv[13] == "${work}/dawn_rt.c"
+    assert argv[14] == "-lm"
     # the include path is the staging directory itself: dawn_rt.h is beside
     # the C that includes it
     assert work != ""
@@ -1426,7 +1434,6 @@ test "the native build is one command line, and this is every flag in it" {
     let line = join(argv, " ")
     assert not str.contains(line, "--target")
     assert not str.contains(line, "-fwasm-exceptions")
-    assert not str.contains(line, "-Wno-parentheses-equality")
     assert not str.contains(line, "-mexec-model")
     assert not str.contains(line, "dawn_rt_wasi")
     # both streams stay where this process's point: cc's diagnostics are the
@@ -1455,12 +1462,12 @@ test "a build with a manifest links one more C file, after the runtime" {
       }
     )
     let argv = procmem.call_argv(log, 0)
-    let work = argv[8]
+    let work = argv[9]
     # the native row of the test above, with the unit between the runtime and -lm
-    assert len(argv) == 15
-    assert argv[12] == "${work}/dawn_rt.c"
-    assert argv[13] == "${work}/dawn_build_info.c"
-    assert argv[14] == "-lm"
+    assert len(argv) == 16
+    assert argv[13] == "${work}/dawn_rt.c"
+    assert argv[14] == "${work}/dawn_build_info.c"
+    assert argv[15] == "-lm"
   })
 }
 

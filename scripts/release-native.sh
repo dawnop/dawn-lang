@@ -115,9 +115,9 @@ fi
 # side of the release would ever see it. Measured cost on 2026-08-04: 2.9 MB ->
 # 3.7 MB, link time unchanged (15.3 s both ways), zero linker warnings -- the
 # runtime calls nothing that needs NSS or dlopen.
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
+"${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
   -I "$ROOT/runtime/c" -o "$CANDIDATE_A" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
+"${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
   -I "$ROOT/runtime/c" -o "$CANDIDATE_B" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
 
 for candidate in "$CANDIDATE_A" "$CANDIDATE_B"; do

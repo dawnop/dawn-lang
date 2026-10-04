@@ -303,12 +303,14 @@ run_corpus() {
   #
   # -Werror is a real gate: a Core type that reaches C wrong shows up first
   # as an int-from-pointer warning, long before it shows up as a wrong
-  # answer. That is how the pattern-binding types were caught. The three
-  # -Wno- flags cover noise a code generator legitimately produces.
+  # answer. That is how the pattern-binding types were caught. The -Wno-
+  # flags cover noise a code generator legitimately produces; the last,
+  # clang's warning on `if ((x == 0))`, matters since CI's CC is clang
+  # (scripts/pinned-cc.sh) and gcc ignores it.
   if "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Wno-unused-parameter -Wno-unused-label \
+    -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
     -I "$root/runtime/c" \
     -o "$work/$name.bin" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
     >"$work/$name.cc" 2>&1; then
