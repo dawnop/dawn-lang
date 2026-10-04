@@ -113,15 +113,16 @@ fn bomb_default_case(mb: Int) -> Unit !io = {
   let pair = bytes.freeze(b)
   io.println("bomb: " ++ to_string(bytes.len(raw)) ++ " compressed bytes, " ++
       to_string(mb) ++ "MB expanded, default cap " ++ to_string(deflate.DEFAULT_CAP))
+  # The limits are spelled from the constant, so moving the default (3.1.0
+  # took it from 16 to 64 MiB) leaves this leg about the default, not a number.
+  let whole = "deflate: the output exceeds the " ++ to_string(deflate.DEFAULT_CAP) ++ " byte limit"
+  let left = "deflate: the output exceeds the " ++ to_string(deflate.DEFAULT_CAP - 2) ++ " byte limit"
   var bad = 0
-  bad = bad + default_refused("deflate.inflate", deflate.inflate(raw), note,
-    "deflate: the output exceeds the 16777216 byte limit")
-  bad = bad + default_refused("gzip.gunzip", gzip.gunzip(gz), note,
-    "deflate: the output exceeds the 16777216 byte limit")
-  bad = bad + default_refused("gzip.gunzip after a member", gzip.gunzip(pair), note,
-    "deflate: the output exceeds the 16777214 byte limit")
+  bad = bad + default_refused("deflate.inflate", deflate.inflate(raw), note, whole)
+  bad = bad + default_refused("gzip.gunzip", gzip.gunzip(gz), note, whole)
+  bad = bad + default_refused("gzip.gunzip after a member", gzip.gunzip(pair), note, left)
   bad = bad + default_refused_entries("zip.entries", zip.entries(java_zip_bomb(mb)), note,
-    "zip: bomb: deflate: the output exceeds the 16777216 byte limit")
+    "zip: bomb: " ++ whole)
   io.println("mismatches " ++ to_string(bad))
 }
 

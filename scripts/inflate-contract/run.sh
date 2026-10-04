@@ -200,7 +200,7 @@ fi
 # words appear too.
 #
 # The words have to name pkgfetch's own ceiling, read from its source: a
-# refusal by some other limit (inflate's 16 MiB default, say, if pkgfetch ever
+# refusal by some other limit (inflate's 64 MiB default, say, if pkgfetch ever
 # stopped passing `cap`) would also be the ceiling's words, and would leave
 # the ceiling pkgfetch actually sets unmeasured. Reading the constant here is
 # also what makes this leg one of the gates that see a change to that file.
@@ -208,6 +208,15 @@ pkgfetch_src="$root/compiler-plan/src/pkgfetch.dawn"
 expanded_limit="$(sed -n 's/^const MAX_EXPANDED_BYTES: Int = \([0-9][0-9]*\)$/\1/p' "$pkgfetch_src")"
 if [ -z "$expanded_limit" ]; then
   echo "FAIL: no MAX_EXPANDED_BYTES constant in $pkgfetch_src" >&2
+  exit 1
+fi
+# That only works while the two numbers differ. Were pkgfetch's ceiling ever
+# set equal to inflate's default, a pkgfetch that dropped its `cap` would be
+# refused in the very same words, and this leg could no longer see it.
+deflate_src="$root/packages/inflate/src/deflate.dawn"
+default_cap="$(sed -n 's/^pub const DEFAULT_CAP: Int = \([0-9][0-9]*\)$/\1/p' "$deflate_src")"
+if [ -z "$default_cap" ] || [ "$default_cap" = "$expanded_limit" ]; then
+  echo "FAIL: pkgfetch's MAX_EXPANDED_BYTES ($expanded_limit) must differ from inflate's DEFAULT_CAP (${default_cap:-unreadable})" >&2
   exit 1
 fi
 pkg_case() { # kind

@@ -3,6 +3,18 @@
 Newest first. The manifest name carries the major from 2 on (`inflate2`,
 `inflate3`); consumers keep `use inflate/...` through their alias.
 
+## 3.1.0 (2026-10-05)
+
+`deflate.DEFAULT_CAP` is 64 MiB of output, up from 16 MiB. No signature
+changed, and every call that succeeded under 3.0.x still succeeds; a call
+that was refused by the old default and fits the new one now succeeds. The
+default was 16 MiB because `std/bytes.Buf` cost up to 32 B of memory per
+output byte; `Buf` is now built from 4 KiB chunks of bytes, and 64 MiB of
+honest output decompresses in a 256 MiB JVM heap. Calls that pass
+`cap: Some(n)` or `cap: None` behave as before. Rationale:
+[`docs/inflate-default-cap-design.md`](../../docs/inflate-default-cap-design.md)
+(in Chinese).
+
 ## 3.0.1 (2026-10-05)
 
 Decoding time is linear in the input again. The fixed Huffman tables are
