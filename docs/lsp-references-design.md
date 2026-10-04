@@ -432,6 +432,17 @@ R1 时一个 workspace 的程序只有打开的文档和它们的导入闭包。
   之后每次 rebuild 只把它标成过期（`current: false`），不碰它；下一次 references 请求先把它带到当前文本（`refs_world`）：同一个 session，
   所以编辑没动到的模块的步骤原样复用，只重查被编辑的模块和导出面变了的导入者。冲突快照与 `prog` 一起丢掉它；manifest refresh 换 workspace 时它随旧 workspace 一起走。
 
+**没打开的文件在磁盘上变了（2026-10-04 审计第 2、3 条）。** 第一版的模块列表取自规划时的 `project_files`，之后不再变，
+会话中新建的模块永远不进引用程序；`current` 又只由编辑翻转，一个没打开的文件在磁盘上被改了，引用程序照旧答旧文本的位置，
+rename 据此算出的区间落在别的字符上（实测把首行注释里的 `x pad` 换成了 `grow`），自检用的也是同一份旧文本，查不出来。现在三处：
+
+- 每次真正重分析都重走一遍源码树（`project_seeds` 调 `project_files_now`），新建、删除的模块随之进出；
+- 注册 `**/*.dawn` 的文件监视，`workspace/didChangeWatchedFiles` 里有落在某 workspace source root 下的 `.dawn` 就把它的引用程序标成过期（`sources_changed`）；
+- rename 与 prepareRename 不信通知：`refs_world(.., verify: true)` 先比一遍磁盘（`world_stale`：模块集合是否变了，没有打开文档的每个项目模块的文件文本是否还是分析时那份），
+  不一致就重分析。客户端不监视文件时 references 可能仍是旧的，rename 不会：编辑区间就是从这份文本算的。
+
+比一遍磁盘是读全部项目文件，对 references 每次请求都付不划算，所以只有 rename 付。
+
 全仓只对**有 `dawn.toml` 的项目**这样装。没有 manifest 的目录只是散文件碰巧放在一起的地方（R1 的夹具、`~/Downloads` 里打开的一个文件），
 它的兄弟文件不是同一个程序；这种 workspace 的引用程序就是导入闭包。装全仓与 CLI 的目录模式一致：spec §10.5 规定「未被引用的模块也检查」，
 `load_directory_planned` 装的就是 `project_files`。
@@ -603,7 +614,7 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
 | 6 | 导出面与导入者 | 引用程序装全仓（R2），每个模块的条目按键过滤 | `scale` 的九处：声明、导入列表、调用、限定调用、管道、UFCS、两处文档链接，从调用处与声明处各改一次，结果相同 |
 | 7 | `[deps]` 与 std 不可改 | `rename_start` 查声明模块的包与 source root；生成编辑后再逐条查一次 `path_in_root` | `triple`（`[deps]`）、`str.len`（std）在 prepareRename 拒绝 |
 | 8 | 记录简写双向 | R1 的收集在简写处给两条解析（字段 `PunUse`、局部量 `PlainUse`），`lspref` 把它们标成 `PunField`/`PunLocal`；改字段写成 `col: x`，改局部量写成 `x: v` | 字段 `x` 在构造与模式里各一处简写；`let y` 被构造简写读；模式简写绑定的 `x` |
-| 9 | 具名实参与默认参数 | 形参的引用里本来就有调用处的 `name:`（T0）与默认值表达式里的使用 | `by` → `factor`：声明、函数体、调用处 `by: 3` |
+| 9 | 具名实参与默认参数 | 形参的引用里本来就有调用处的 `name:`（T0）；默认值表达式按函数体同样遍历（`visit_fn_decl` 读 `Param.default` 与 `TFun.defaults`） | `by` → `factor`：声明、函数体、调用处 `by: 3`；另一个工程里 `fn f(n: Int = len([1]))` 配顶层 `len`，`len` → `count` 必须连默认值里的调用一起改 |
 | 10 | trait 方法 | R1 的 `ImplUse`：impl 的方法名是 trait 方法的引用 | `area` → `size`：trait、impl、导入列表、调用 |
 | 11 | 效果操作 | T0：调用与 handler 臂名都解析到操作声明 | `ask` → `query`：声明、调用、另一模块的 handler 臂 |
 | 12 | 管道与 UFCS | 名字跨度在 `EVar`/`EMethod` 上，与普通调用相同 | 并入第 6 条：`3 \|> scale`、`2.scale()` |
@@ -623,6 +634,11 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
    改前每个名字的位置与它指向的声明位置都经编辑前移（`forward`/`forward_key`），被改名的声明移到新拼写，简写展开后两半各归各的；
    两边必须是同一个集合。多出来的（内建调用现在解析到新函数）、少掉的、指向变了的（被局部量捕获），都拒绝，消息给出改后文本里第一处不一致的位置。
    一个从来没拼出新名字的模块不会有名字改为指向它，所以不在比较范围内；改名前就指向旧声明的名字都在被编辑的模块里。
+
+这两道检查都只看得见收集到的名字。第一版的收集不进默认值表达式（2026-10-04 审计第 1 条）：`fn f(n: Int = len([1]))` 里的 `len`
+既不在改前索引也不在改后遍历里，把顶层 `len` 改成 `count` 后那处调用落到内建 `len`，`RESULT` 从 99 变成 1，两道检查都放行。
+所以合约（`scripts/lsp-rename.py`）在两道检查之外再加一道它自己的：每个被接受的改名都应用到工程副本上（编辑区间从起点读到**终点所在的行**），
+`dawn run` 的输出必须与改前相同。
 
 这比 gopls 那样按作用域种类逐条写冲突规则少很多：遮蔽、捕获、导入丢失都是「某个名字指向的声明变了」，一条比较就覆盖，
 而且与 references 用的是同一份解析，不会出现「references 认为是同一个、rename 认为不是」。代价是一次改后分析与几次遍历（R3.7）。

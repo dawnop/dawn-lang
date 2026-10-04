@@ -36,6 +36,19 @@ safety condition of the research report's §3.3 that a fixture can hold
 
 plus the refusals of §3.2: a module name, `main`, and a module with errors.
 
+Every accepted rename is then applied to a copy of the project, edit ranges
+read whole, start line to end line, and the copy must run and print what the
+original printed: an edit that compiles and calls another function (a
+default argument's call left behind, now the builtin's) changes the output.
+Two more projects hold what one session's fixture cannot:
+
+  default argument  `fn f(n: Int = len([1]))` with a top-level `len`: the call
+                    in the default is renamed with the declaration
+  files on disk     a module no document holds is edited and another is
+                    created on disk mid-session: references follows a
+                    watched-file notification, and rename reads the files
+                    again even when the client sent none
+
 Usage:
   scripts/lsp-rename.py [--server CMD...]   positive run (default ./bin/dawn lsp)
   scripts/lsp-rename.py --dump              print every case's reply and exit
@@ -46,6 +59,7 @@ Usage:
 A mutant is accepted as red only when its owning assertion is among the
 failures; a build failure is not a negative control and fails the run.
 """
+import concurrent.futures
 import json
 import os
 import shutil
@@ -121,6 +135,28 @@ pub fn fine(n: Int) -> Int = n
 """
 
 FILES = {"geo.dawn": GEO, "main.dawn": MAIN, "broken.dawn": BROKEN}
+
+# a top-level `len` shadows the builtin, and a default argument calls it: a
+# rename that misses the default leaves a call the builtin then answers, and
+# the program prints 1 instead of 99 with no error anywhere
+DEFAULTS = """fn len(xs: List[Int]) -> Int = 99
+
+fn f(n: Int = len([1])) -> Int = n
+
+const RESULT: Int = f()
+
+pub fn main() -> Unit !io = println("${RESULT}")
+"""
+
+DEFAULT_CASES = [
+    ("default argument: a call in a default follows its declaration", "main.dawn", "fn len", 3, "count", [
+        "main.dawn 1:4 len -> count", "main.dawn 3:15 len -> count"]),
+]
+
+DISK_BASE = "pub fn scale(n: Int) -> Int = n * 3\n"
+DISK_MAIN = 'use base\n\npub fn main() -> Unit !io = println("${base.scale(1)}")\n'
+DISK_LONE = "use base\n\npub fn lone() -> Int = base.scale(2)\n"
+DISK_PAD = "# a comment added on disk\n"
 
 DEP_LIB = "pub fn triple(n: Int) -> Int = n * 3\n"
 
@@ -234,6 +270,33 @@ def read_msg(f):
     return json.loads(f.read(n))
 
 
+def offset(text, pos):
+    """The code point offset in `text` of an LSP position (UTF-16 column)."""
+    lines = text.split("\n")
+    if pos["line"] >= len(lines):
+        return len(text)
+    at = sum(len(l) + 1 for l in lines[:pos["line"]])
+    units = lines[pos["line"]].encode("utf-16-le")[:2 * pos["character"]]
+    return at + len(units.decode("utf-16-le", errors="replace"))
+
+
+def run_copy(dawn, proj, texts):
+    """Run a copy of `proj` whose sources are `texts`: (exit code, output)."""
+    work = tempfile.mkdtemp(prefix="lsp-rename-run.")
+    try:
+        root = os.path.join(work, os.path.basename(proj.root))
+        shutil.copytree(proj.root, root)
+        if os.path.isdir(os.path.join(proj.root, "..", "dep")):
+            shutil.copytree(os.path.join(proj.root, "..", "dep"), os.path.join(work, "dep"))
+        for base, text in texts.items():
+            with open(os.path.join(root, "src", base), "w") as f:
+                f.write(text)
+        r = subprocess.run([dawn, "run", root], capture_output=True, text=True)
+        return r.returncode, (r.stdout + r.stderr).replace(root + "/", "")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def position(text, needle, delta):
     i = text.index(needle) + delta
     line = text.count("\n", 0, i)
@@ -283,22 +346,30 @@ class Session:
 class Project:
     """The project, its [deps] package beside it, and the texts the server reads."""
 
-    def __init__(self, work):
-        dep = os.path.join(work, "dep")
-        os.makedirs(os.path.join(dep, "src"))
-        with open(os.path.join(dep, "dawn.toml"), "w") as f:
-            f.write('schema = 1\nname = "dep"\nversion = "1.0.0"\n')
-        with open(os.path.join(dep, "src", "lib.dawn"), "w") as f:
-            f.write(DEP_LIB)
+    def __init__(self, work, files=FILES, with_dep=True):
+        manifest = 'schema = 1\nname = "ren"\n'
+        if with_dep:
+            dep = os.path.join(work, "dep")
+            os.makedirs(os.path.join(dep, "src"))
+            with open(os.path.join(dep, "dawn.toml"), "w") as f:
+                f.write('schema = 1\nname = "dep"\nversion = "1.0.0"\n')
+            with open(os.path.join(dep, "src", "lib.dawn"), "w") as f:
+                f.write(DEP_LIB)
+            manifest += '\n[deps]\ndep = "../dep"\n'
         self.root = os.path.join(work, "ren")
         self.src = os.path.join(self.root, "src")
         os.makedirs(self.src)
         with open(os.path.join(self.root, "dawn.toml"), "w") as f:
-            f.write('schema = 1\nname = "ren"\n\n[deps]\ndep = "../dep"\n')
-        self.texts = dict(FILES)
-        for base, text in FILES.items():
-            with open(os.path.join(self.src, base), "w") as f:
-                f.write(text)
+            f.write(manifest)
+        self.texts = {}
+        for base, text in files.items():
+            self.put(base, text)
+
+    def put(self, base, text):
+        """Write a source file on disk, and remember it as the text edits read."""
+        self.texts[base] = text
+        with open(os.path.join(self.src, base), "w") as f:
+            f.write(text)
 
     def uri(self, base):
         return "file://" + os.path.join(self.src, base)
@@ -308,10 +379,25 @@ class Project:
         return uri[len(prefix):] if uri.startswith(prefix) else None
 
     def covered(self, base, rng):
+        """Where an edit starts and the text it replaces, read from its start
+        to its end on whichever line that is: an end on a later line covers
+        the line break and shows as text that is not the old name."""
         a, b = rng["start"], rng["end"]
-        units = self.texts[base].split("\n")[a["line"]].encode("utf-16-le")
-        text = units[2 * a["character"]:2 * b["character"]].decode("utf-16-le", errors="replace")
-        return "%d:%d" % (a["line"] + 1, a["character"] + 1), text
+        text = self.texts[base]
+        return "%d:%d" % (a["line"] + 1, a["character"] + 1), text[offset(text, a):offset(text, b)]
+
+    def applied(self, reply):
+        """The project's files with the edits of `reply` applied."""
+        out = dict(self.texts)
+        for uri, edits in reply["changes"].items():
+            base = self.base_of(uri)
+            text = out[base]
+            spans = sorted(((offset(text, e["range"]["start"]), offset(text, e["range"]["end"]), e["newText"])
+                            for e in edits), reverse=True)
+            for lo, hi, new in spans:
+                text = text[:lo] + new + text[hi:]
+            out[base] = text
+        return out
 
     def shown(self, reply):
         if isinstance(reply, dict) and "error" in reply:
@@ -335,10 +421,69 @@ class Project:
         return "unexpected reply: %r" % (reply,)
 
 
-def contract(server, env, dump=False):
+def want_of(want):
+    return sorted(want) if isinstance(want, list) else want
+
+
+# Each accepted rename's run is a compile of its own, so they run side by
+# side while the session goes on; `settle` reads them in case order.
+POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+
+def check_runs(dawn, label, proj, reply, before, pending):
+    """An accepted rename, applied to a copy of the project, must run and
+    print what the project printed; queued on `pending`."""
+    texts = proj.applied(reply)
+    pending.append((label, before, POOL.submit(run_copy, dawn, proj, texts)))
+
+
+def settle(pending):
+    for label, before, fut in pending:
+        after = fut.result()
+        if after == before:
+            ok("%s: the renamed project prints the same" % label)
+        else:
+            bad("%s: the renamed project prints the same" % label,
+                "before %r\n      after  %r" % (before, after))
+    del pending[:]
+
+
+def ask(s, proj, base, needle, delta, new):
+    params = {"textDocument": {"uri": proj.uri(base)},
+              "position": position(proj.texts[base], needle, delta)}
+    if new is None:
+        return s.request("textDocument/prepareRename", params)
+    params["newName"] = new
+    return s.request("textDocument/rename", params)
+
+
+def run_cases(s, proj, cases, dump, dawn, before, pending):
+    for label, base, needle, delta, new, want in cases:
+        reply = ask(s, proj, base, needle, delta, new)
+        got = proj.shown(reply)
+        if dump:
+            print("%s: %r" % (label, got))
+            continue
+        if got == want_of(want):
+            ok(label)
+        else:
+            bad(label, "want %r\n      got  %r" % (want, got))
+        if before is not None and isinstance(reply, dict) and "changes" in reply:
+            check_runs(dawn, label, proj, reply, before, pending)
+
+
+def open_all(s, proj):
+    for base in sorted(proj.texts):
+        s.notify("textDocument/didOpen", {"textDocument": {
+            "uri": proj.uri(base), "languageId": "dawn", "version": 1, "text": proj.texts[base]}})
+
+
+def main_project(server, env, dump, dawn, applied):
     work = tempfile.mkdtemp(prefix="lsp-rename.")
     try:
         proj = Project(work)
+        pending = []
+        before = run_copy(dawn, proj, proj.texts) if applied else None
         s = Session(server, proj.root, env)
         try:
             caps = (s.caps or {}).get("capabilities", {})
@@ -349,28 +494,121 @@ def contract(server, env, dump=False):
                 ok("initialize declares renameProvider with prepareProvider")
             else:
                 bad("initialize declares renameProvider with prepareProvider", "got %r" % got)
-            for base in ("main.dawn", "geo.dawn", "broken.dawn"):
-                s.notify("textDocument/didOpen", {"textDocument": {
-                    "uri": proj.uri(base), "languageId": "dawn", "version": 1, "text": proj.texts[base]}})
-            for label, base, needle, delta, new, want in CASES:
-                params = {"textDocument": {"uri": proj.uri(base)},
-                          "position": position(proj.texts[base], needle, delta)}
-                if new is None:
-                    reply = s.request("textDocument/prepareRename", params)
-                else:
-                    params["newName"] = new
-                    reply = s.request("textDocument/rename", params)
-                got = proj.shown(reply)
+            open_all(s, proj)
+            run_cases(s, proj, CASES, dump, dawn, before, pending)
+            if dump:
+                return
+            # an edit whose range ends on the next line deletes the line break
+            # and the next line's start; the comparison has to read the end line
+            reply = ask(s, proj, "main.dawn", "scale(1, by", 2, "grow")
+            if isinstance(reply, dict) and "changes" in reply:
+                for edits in reply["changes"].values():
+                    for e in edits:
+                        e["range"]["end"]["line"] = e["range"]["start"]["line"] + 1
+            label = "an edit range is read to its end line"
+            if proj.shown(reply) != want_of(SCALE_TO_GROW):
+                ok(label)
+            else:
+                bad(label, "an edit ending a line further down reads as the name it starts with")
+        finally:
+            s.close()
+            settle(pending)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def defaults_project(server, env, dump, dawn, applied):
+    work = tempfile.mkdtemp(prefix="lsp-rename-defaults.")
+    try:
+        proj = Project(work, {"main.dawn": DEFAULTS}, with_dep=False)
+        pending = []
+        before = run_copy(dawn, proj, proj.texts) if applied else None
+        if before is not None and before != (0, "99\n"):
+            bad("default argument: the project prints 99", "got %r" % (before,))
+        s = Session(server, proj.root, env)
+        try:
+            open_all(s, proj)
+            run_cases(s, proj, DEFAULT_CASES, dump, dawn, before, pending)
+        finally:
+            s.close()
+            settle(pending)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def watched(proj, base, kind):
+    """A didChangeWatchedFiles notification: 1 created, 2 changed, 3 deleted."""
+    return {"changes": [{"uri": proj.uri(base), "type": kind}]}
+
+
+def disk_project(server, env, dump, dawn, applied, notify):
+    """Only main.dawn is open. base.dawn gains a line on disk, lone.dawn is
+    created beside it, and then `scale` is renamed. With `notify` the client
+    reports both; without, it reports neither, and rename alone must notice."""
+    how = "notified" if notify else "unreported"
+    work = tempfile.mkdtemp(prefix="lsp-rename-disk.")
+    try:
+        proj = Project(work, {"base.dawn": DISK_BASE, "main.dawn": DISK_MAIN}, with_dep=False)
+        pending = []
+        s = Session(server, proj.root, env)
+        try:
+            s.notify("textDocument/didOpen", {"textDocument": {
+                "uri": proj.uri("main.dawn"), "languageId": "dawn", "version": 1, "text": DISK_MAIN}})
+            at = {"textDocument": {"uri": proj.uri("main.dawn")},
+                  "position": position(DISK_MAIN, "scale(1", 0), "context": {"includeDeclaration": True}}
+            s.request("textDocument/references", at)
+            proj.put("base.dawn", DISK_PAD + DISK_BASE)
+            if notify:
+                s.notify("workspace/didChangeWatchedFiles", watched(proj, "base.dawn", 2))
+                refs = s.request("textDocument/references", at)
+                got = sorted("%s %d:%d" % (proj.base_of(r["uri"]), r["range"]["start"]["line"] + 1,
+                                           r["range"]["start"]["character"] + 1) for r in refs or [])
+                label = "files on disk (notified): references follows a module edited on disk"
+                want = ["base.dawn 2:8", "main.dawn 3:45"]
                 if dump:
                     print("%s: %r" % (label, got))
-                elif got == (sorted(want) if isinstance(want, list) else want):
+                elif got == want:
                     ok(label)
                 else:
                     bad(label, "want %r\n      got  %r" % (want, got))
+            proj.put("lone.dawn", DISK_LONE)
+            if notify:
+                s.notify("workspace/didChangeWatchedFiles", watched(proj, "lone.dawn", 1))
+            before = run_copy(dawn, proj, proj.texts) if applied else None
+            run_cases(s, proj, [
+                ("files on disk (%s): rename reads the edited module and the created one" % how,
+                 "main.dawn", "scale(1", 0, "grow", [
+                     "base.dawn 2:8 scale -> grow", "lone.dawn 3:29 scale -> grow",
+                     "main.dawn 3:45 scale -> grow"]),
+            ], dump, dawn, before, pending)
         finally:
             s.close()
+            settle(pending)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def project_of(label):
+    """Which project's session holds the case `label`."""
+    if label.startswith("default argument"):
+        return "defaults"
+    if label.startswith("files on disk"):
+        return "disk"
+    return "main"
+
+
+def contract(server, env, dump=False, applied=True, only=None):
+    """Every case against `server`, or the cases of project `only`. `applied`
+    also runs each accepted rename's result; a mutant run skips that and
+    every other project, since its owner is one edit set or refusal."""
+    dawn = os.path.join(ROOT, "bin", "dawn")
+    if only in (None, "main"):
+        main_project(server, env, dump, dawn, applied)
+    if only in (None, "defaults"):
+        defaults_project(server, env, dump, dawn, applied)
+    if only in (None, "disk"):
+        disk_project(server, env, dump, dawn, applied, True)
+        disk_project(server, env, dump, dawn, applied, False)
 
 
 # ---- mutants ---------------------------------------------------------------
@@ -389,6 +627,10 @@ MUTANTS = [
     ('as-names-renamed', 'selective import: the declaration\'s name, not the `as` name'),
     ('doc-links-skipped', 'importers: a public function from a call'),
     ('dependencies-renamed', '[deps]: a dependency\'s function'),
+    ('defaults-unread', 'default argument: a call in a default follows its declaration'),
+    ('disk-unread', 'files on disk (unreported): rename reads the edited module and the created one'),
+    ('tree-not-rewalked', 'files on disk (unreported): rename reads the edited module and the created one'),
+    ('watch-ignored', 'files on disk (notified): references follows a module edited on disk'),
 ]
 
 
@@ -416,7 +658,7 @@ def main():
     server = [dawn, "lsp"]
     mutants = False
     if args[:1] == ["--dump"]:
-        contract(server, env, dump=True)
+        contract(server, env, dump=True, applied=False)
         return 0
     if args[:1] == ["--mutants"]:
         mutants = True
@@ -435,7 +677,7 @@ def main():
             cmd = build_mutant(dawn, work, name)
             print("PASS  %s mutant compiles" % name)
             del failures[:]
-            contract(cmd, env)
+            contract(cmd, env, applied=False, only=project_of(owner))
             if owner not in failures:
                 print("lsp-rename: %s mutant left '%s' green (red: %r)"
                       % (name, owner, failures), file=sys.stderr)
