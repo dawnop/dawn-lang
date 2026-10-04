@@ -30,7 +30,9 @@ there.
 
 Cases: a clean run is the reference bundle, and it spreads its jobs over
 more than one machine; machines=primary (every job on one machine) gives the
-same bytes; dropped polls and dropped launches (before and after the launch
+same bytes; the fan-in job reads artifacts its needed jobs uploaded on
+other machines (a missing one fails it in the stub, as check.py does on the
+cluster); dropped polls and dropped launches (before and after the launch
 reached the cluster) give the same bytes; a machine the job uid cannot use,
 one that never answers, and one that stops answering mid-run, give the same
 bytes; a controller killed
@@ -73,6 +75,11 @@ def _count(state, kind):
 
 
 STUB_MACHINES = ("stub-a", "stub-b", "stub-c")  # stub-a is the primary
+
+# The one job in gates.yml that reads other jobs' artifacts, and those jobs.
+FAN_IN = "mutant-shards-complete"
+FAN_IN_NEEDS = ("native-diff-1", "native-diff-2", "syntax-mutants-3-1", "syntax-mutants-3-2",
+                "syntax-mutants-3-3", "builtin-type-3-1", "builtin-type-3-2", "builtin-type-3-3")
 
 
 def _fault(kind, number):
@@ -184,6 +191,8 @@ def stub_crun(argv):
     # job-uid check answers what that machine's fault list says.
     reach = "false" if f"noreach={host}" in os.environ.get("STUB_FAULTS", "").split(",") else "true"
     command = [re.sub(r"setpriv .*? -c pass \|\|", f"{reach} ||", part) for part in command]
+    # nor give files away: the wrapper's chown segments become no-ops
+    command = [re.sub(r"chown (-R )?\d+:\d+ [^;]*;", "true;", part) for part in command]
     if detach:
         jid = "crun-" + "".join(random.choices("abcdefghjkmnpqrstuvwxyz23456789", k=8))
         subprocess.Popen(command, start_new_session=True, stdin=subprocess.DEVNULL,
@@ -223,17 +232,41 @@ def stub_python(argv):
     lengths = Path(opts["--prefix"]) / "stub-job-seconds"
     short, long = (lengths.read_text().split() if lengths.exists() else ("0.3", "0.3"))
     time.sleep(float(long if len(job["id"]) % 2 else short))
+    run_dir = Path(opts["--prefix"]) / "out" / opts["--sha"] / opts["--run-id"]
+    store = run_dir / "artifacts"
+    # Uploads and downloads as the local backend does them, in this machine's
+    # copy of the prefix: an upload writes artifacts/<name>/, and a download
+    # whose job needs others must find every artifact those jobs uploaded,
+    # which on CI it always does. A missing one fails every later run step.
+    peers = {}
+    for path in Path(opts["--job-file"]).parent.glob("*.json"):
+        peer = json.loads(path.read_text())
+        peers[peer["id"]] = [a["with"]["name"] for a in peer["actions"]
+                             if a["kind"] == "use"
+                             and a.get("replacement") == "artifact-store-local"]
+    missing = []
     steps = []
     for action in job["actions"]:
+        if action["kind"] == "use" and action.get("replacement") == "artifact-store-local":
+            (store / action["with"]["name"]).mkdir(parents=True, exist_ok=True)
+            (store / action["with"]["name"] / "record.txt").write_text(job["id"] + "\n")
+            continue
+        if action["kind"] == "use" and action.get("replacement") == "artifact-fetch-local":
+            missing = [n for need in job["needs"] for n in peers.get(need, [])
+                       if not (store / n / "record.txt").is_file()]
+            continue
         if action["kind"] != "run":
             continue
         digest = hashlib.sha256(action["command"].encode()).hexdigest()
-        steps.append({"executed": True, "exit_code": 0, "stdout_sha256": digest,
+        steps.append({"executed": True, "exit_code": 1 if missing else 0,
+                      "stdout_sha256": digest,
                       "stderr_sha256": hashlib.sha256(digest.encode()).hexdigest()})
-    fragment = {"job": job["id"], "result": {"steps": steps, "ok": True},
+    if missing:
+        print(f"[{job['id']}] no artifact {', '.join(missing)} on this machine", file=sys.stderr)
+    fragment = {"job": job["id"], "result": {"steps": steps, "ok": not missing},
                 "toolchain": {"seed_jar_sha256": "0" * 64, "java": "stub 21",
                               "cc": "stub cc", "python": "stub 3.12", "node": "stub 20"}}
-    out = Path(opts["--prefix"]) / "out" / opts["--sha"] / opts["--run-id"] / "fragments"
+    out = run_dir / "fragments"
     out.mkdir(parents=True, exist_ok=True)
     text = json.dumps(fragment, sort_keys=True)
     (out / f"{job['id']}.json").write_text(text + "\n")
@@ -327,6 +360,21 @@ def self_test(repo, sha):
         if len(used) < 2:
             failures.append(f"the clean run used one machine only: {sorted(used)}")
         print(f"  clean run: jobs placed on {len(used)} machines")
+        # The fan-in job and the jobs it needs: at least one pair must have
+        # run on different machines, or the reference proves nothing about
+        # artifacts crossing between them.
+        placed = {}
+        for line in (root / "out-clean" / "crun" / "dispatch.txt").read_text().splitlines():
+            fields = line.split("\t")
+            placed[fields[0]] = fields[3]
+        crossed = [n for n in FAN_IN_NEEDS if n in placed
+                   and placed[n] != placed.get(FAN_IN)]
+        if not crossed:
+            failures.append(f"the clean run put {FAN_IN} beside every job it needs; "
+                            "no artifact crossed machines")
+        else:
+            print(f"  dependency artifacts across machines: {len(crossed)} of "
+                  f"{FAN_IN}'s {len(FAN_IN_NEEDS)} needed jobs ran elsewhere; complete")
 
         done = world.run("primary-only", opts=("machines=primary",))
         if done.returncode != 0 or world.bundle("primary-only") != reference:
@@ -432,7 +480,8 @@ def self_test(repo, sha):
     if failures:
         return 1
     shutil.rmtree(root, ignore_errors=True)
-    print("OK: crun stub self-test, clean, one machine, 3 fault kinds, 3 machine faults, "
+    print("OK: crun stub self-test, clean with artifacts across machines, one machine, "
+          "3 fault kinds, 3 machine faults, "
           "killed and resumed, deleted fragment")
     return 0
 
