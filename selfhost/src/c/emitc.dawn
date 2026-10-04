@@ -999,7 +999,16 @@ fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt
     # the closure keeps its captures: a consuming position (chk_list k=true)
     let (st2, v) = emit_expr(st1, c, true)
     st1 = st2
-    parts = parts ++ [v]
+    # the captures are stored after `dawn_clo_new`, so one whose text can
+    # raise is named first, as `emit_alloc_row` does for a constructor (#482).
+    # The RC pass leaves only bound names here, so this does not fire today.
+    if inline_raises(c) && not no_value(c) {
+      let (st3, t) = fresh(st1)
+      st1 = line(st3, c_type(cex_ty(c)) ++ " " ++ t ++ " = " ++ v ++ ";")
+      parts = parts ++ [t]
+    } else {
+      parts = parts ++ [v]
+    }
   }
   var bits: List[Bool] = []
   for c in caps {
@@ -1049,7 +1058,7 @@ fn adapter_name(owner: String, name: String) -> String =
 ## field back at `K`, which is what `map_from` does with every key.
 fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, String) = {
   # a constructor keeps its fields: consuming positions (chk k=true)
-  let (st0, row) = emit_ordered(st, args, all_flags(len(args), true))
+  let (st0, row) = emit_alloc_row(st, args, all_flags(len(args), true))
   var st1 = st0
   var parts: List[String] = []
   var ri = 0
@@ -1243,6 +1252,31 @@ test "a left-nested arithmetic chain emits its leaves once each" {
   assert bin_test_count(text, "INT64_C(1)") == 1
 }
 
+test "a tuple names a raising operand before it allocates" {
+  # the shape of #482: one running operand, so nothing to reorder, and the
+  # call used to land in the field store after `dawn_adt_new`
+  let (st1, v) = emit_expr(bin_test_st(), CTuple([bin_test_call("f"), CInt(1)], TyError), true)
+  let text = join(st1.out, "")
+  assert v == "t1"
+  assert text == "int64_t t0 = dawn_t__f();\n" ++
+    "dawn_adt* t1 = dawn_adt_new(0, 2, UINT64_C(0x0000000000000003));\n" ++
+    "t1->fields[0].p = dawn_box_int(t0);\n" ++
+    "t1->fields[1].p = dawn_box_int(INT64_C(1));\n"
+}
+
+test "an operand that cannot raise stays in the field store" {
+  # arithmetic runs no call, so the row emits what it always did
+  let sum = CBinary(CAdd, CInt(1), CInt(2), TyInt)
+  let (st1, _v) = emit_expr(bin_test_st(), CTuple([sum, CInt(3)], TyError), true)
+  let text = join(st1.out, "")
+  assert str.starts_with(text, "dawn_adt* t0 = dawn_adt_new(")
+  assert str.contains(text, "t0->fields[0].p = dawn_box_int((INT64_C(1) + INT64_C(2)));")
+  # Int division can raise, so it is named first
+  let quot = CBinary(CDiv, CInt(1), CInt(2), TyInt)
+  let (st2, _w) = emit_expr(bin_test_st(), CTuple([quot, CInt(3)], TyError), true)
+  assert str.starts_with(join(st2.out, ""), "int64_t t0 = dawn_idiv(INT64_C(1), INT64_C(2));\n")
+}
+
 ## A branch with nothing to assign: it leaves (return/break/continue) or its
 ## type is Never, which is what `panic` and `todo` are.
 ##
@@ -1394,7 +1428,61 @@ fn tracked_local(st: CSt, e: CExpr) -> Bool =
     _ -> false
   }
 
-fn emit_ordered(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String]) = {
+fn emit_ordered(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String]) =
+  emit_row(st, es, ks, false)
+
+## The row of an allocation: `emit_ordered`, except that what is left of the
+## row must not run anything that can raise, because it is written into the
+## fields after the object exists. The object lives in a plain C temporary
+## until it is handed out, so a raise in between (a panic caught by
+## `catch_panic`, a fault caught by `catch_fault`) discards the frame and
+## leaks it (#482). A row with two running operands has already named every
+## one of them; what stays inline there and here is an atom, a `dawn_take`,
+## or the single running operand of a row that had nothing to reorder, and
+## only the last can raise. So that one is named before the allocation when
+## `inline_raises` says its text can, and an operand that does not return is
+## written as a statement there with a zero in its field, which nothing ever
+## reads. A running operand that cannot raise -- a dup, a box, a projection,
+## arithmetic -- stays inline, so a row that cannot fail emits what it did.
+##
+## The temporary is a plain one, for the reason `emit_ordered` gives its last
+## running operand one: nothing runs between it and the allocation that takes
+## it, so no raise can find an owned reference there.
+fn emit_alloc_row(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String]) =
+  emit_row(st, es, ks, true)
+
+## Can the C text `emit_expr` hands back for `e` raise when it is evaluated?
+## This is about the text alone: whatever `e` wrote as statements has run by
+## the time the text is placed. A call can always raise (or suspend), and so
+## can an intrinsic and Int division; the rest of the inline forms only
+## raise through an operand. A form that hands back a temporary -- an `if`,
+## an `&&`, an allocation -- ran its code as statements.
+fn inline_raises(e: CExpr) -> Bool =
+  match e {
+    CCall(_, _, _) -> true
+    CIntrinsic(_, _, _) -> true
+    CBinary(op, l, r, ty) ->
+      if op == CAnd || op == COr {
+        false
+      } else if (op == CDiv || op == CMod) && peel_opaque(ty) == TyInt {
+        true
+      } else {
+        inline_raises(l) || inline_raises(r)
+      },
+    CUnary(_, x, _) -> inline_raises(x)
+    CBox(x, _) -> inline_raises(x)
+    CUnbox(x, _) -> inline_raises(x)
+    CDup(x, _) -> inline_raises(x)
+    CField(x, _, _, _, _) -> inline_raises(x)
+    CTupleGet(x, _, _) -> inline_raises(x)
+    CIsCtor(x, _, _) -> inline_raises(x)
+    CTagOf(x, _) -> inline_raises(x)
+    CDictArg(x, _, _, _, _) -> inline_raises(x)
+    CBlock(_, Some(t), _) -> inline_raises(t)
+    _ -> false
+  }
+
+fn emit_row(st: CSt, es: List[CExpr], ks: List[Bool], alloc: Bool) -> (CSt, List[String]) = {
   var nontrivial = 0
   # the last operand that runs code; an owned operand before it needs a slot
   var last_run = -1
@@ -1412,7 +1500,13 @@ fn emit_ordered(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String])
   for e in es {
     let (st2, v) = emit_expr(st1, e, ks[i])
     st1 = st2
-    if nontrivial < 2 || atom_expr(st1, e, ks[i]) || no_value(e) {
+    if alloc && no_value(e) {
+      # it does not return: run it here, before the allocation
+      st1 = discard(st1, v)
+      out = out ++ [if v == "DAWN_UNIT" { v } else { c_zero(cex_ty(e)) }]
+    } else if atom_expr(st1, e, ks[i]) || no_value(e) {
+      out = out ++ [v]
+    } else if nontrivial < 2 && not (alloc && inline_raises(e)) {
       out = out ++ [v]
     } else if ks[i] && i < last_run && tracked_local(st1, e) {
       # already in a slot: the `dawn_take` it emitted is the transfer, and
@@ -1944,13 +2038,22 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # because a CHECKCAST can fail there. Should native ever grow host objects,
     # this arm grows the `Err` that its cast grows a check.
     let t = cast_target(ty)
-    let (sta, tmp) = fresh(st1)
+    # the operand is read after `dawn_adt_new`, so name it first when its
+    # text can raise (#482)
+    let (st1n, a0n) =
+      if inline_raises(args[0]) {
+        let (stx, tx) = fresh(st1)
+        (line(stx, c_type(cex_ty(args[0])) ++ " " ++ tx ++ " = " ++ a0 ++ ";"), tx)
+      } else {
+        (st1, a0)
+      }
+    let (sta, tmp) = fresh(st1n)
     var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = dawn_adt_new(" ++
         to_string(result_tag("Ok")) ++ ", 1, 1);")
     # a `Result`'s payload sits at a type variable, so it is boxed here as
     # emit_alloc boxes an erased constructor field
     st2 = line(st2, tmp ++ "->fields[0].p = " ++
-        box_call(dup_expr(unbox_expr(a0, t), t), t) ++ ";")
+        box_call(dup_expr(unbox_expr(a0n, t), t), t) ++ ";")
     (st2, tmp)
   } else if name == "to_string" {
     # Core normally lowers this into str_of_*; a residual one means a type
