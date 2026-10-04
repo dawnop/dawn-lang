@@ -1,0 +1,52 @@
+# A diverging expression inside a string, a tuple or a list (#462).
+#
+# Interpolating a `Never` part is the natural placeholder (`"${todo()}"`) and
+# has no value to render, so lowering evaluates it and stops there instead of
+# asking for a `Show`. Native used to reach its erased-`show` refusal and
+# panic at compile time; the JVM got away with it through its run-time Show.
+#
+# A tuple or list component that diverges is the bottom type when the context
+# names the component (`let t: (Int, Int) = (stop(), 1)`). Without that
+# context the checker refuses it (spec 2.2), which the selfhost tests pin; the
+# programs here are the ones that must keep compiling and running.
+#
+# Each shape runs on a branch that is not taken, where the backends must
+# still emit code for it, and all but the tuple run again through
+# `catch_panic`, where the part runs and the failure's message is what comes
+# back. The tuple is left out of the second run because native allocates a
+# tuple before it evaluates the components, so any component that panics
+# under `catch_panic` leaks the cell (a diverging one and a panicking `Int`
+# call alike); that is a separate defect and not what this file is about.
+
+fn stop(m: String) -> Never = panic(m)
+
+fn n(i: Int) -> Int !io = i
+
+fn label(k: Int) -> String !io =
+  if n(k) > 0 { "k=${k}" } else { "a${stop("neg")}b" }
+
+fn pair(k: Int) -> (Int, Int) !io =
+  if n(k) > 0 { (k, k + 1) } else { (stop("pair"), 1) }
+
+fn items(k: Int) -> List[Int] !io =
+  if n(k) > 0 { [k, k] } else { [stop("items")] }
+
+fn placeholder(k: Int) -> String !io =
+  if n(k) > 0 { "ready" } else { "${todo()}" }
+
+fn caught(f: fn() -> String !io) -> String !io =
+  match catch_panic(f) {
+    Ok(v) -> "ok " ++ v
+    Err(e) -> "failed: " ++ e.message
+  }
+
+pub fn main() -> Unit !io = {
+  println(label(1))
+  println(to_string(pair(1)))
+  println(to_string(items(2)))
+  println(placeholder(1))
+  println(caught(() => label(0)))
+  println(caught(() => to_string(items(0))))
+  println(caught(() => placeholder(0)))
+  println("done")
+}

@@ -1,0 +1,42 @@
+# checker.dawn: a literal component that only diverges cannot settle a tuple or
+# list type (#462, spec 2.2). Before the fix every refused shape below passed
+# check and then broke code generation: a JVM VerifyError in the derived Show,
+# a missing dictionary argument, or lowering's "no equality for Never" panic.
+fn stop(m: String) -> Never = panic(m)
+
+fn show_it[T: Show](f: fn() -> T) -> String = to_string(f())
+
+fn same[T: Eq](f: fn() -> T) -> Bool = f() == f()
+
+fn first_of[A](p: (A, Int)) -> Int = 0
+
+pub fn refused() -> Unit = {
+  let t = (stop("tuple"), 1)
+  let u = (1, "x", stop("third"))
+  let xs = [stop("list")]
+  let ys = [stop("a"), stop("b")]
+  let s = show_it(() => (stop("t"), 1))
+  let l = show_it(() => [stop("l")])
+  let e = same(() => (stop("t"), 1))
+  let g = first_of((stop("generic"), 1))
+  let nested = [(stop("inner"), 1)]
+  ()
+}
+
+# The context names the component, so the diverging part is the bottom type
+# there, as a constructor argument is once its parameter is known.
+pub fn settled() -> Unit = {
+  let t: (Int, Int) = (stop("tuple"), 1)
+  let xs: List[Int] = [stop("list")]
+  let ys = [stop("first"), 2]
+  let o: Option[Int] = Some(stop("ctor"))
+  let p: List[(Int, String)] = [(stop("pair"), "x")]
+  let msg = "a${stop("x")}b${todo()}"
+  ()
+}
+
+# The constructor case the literals now agree with.
+pub fn ctor_refused() -> Unit = {
+  let o = Some(stop("ctor"))
+  ()
+}

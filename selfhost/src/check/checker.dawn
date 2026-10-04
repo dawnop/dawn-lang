@@ -5484,6 +5484,17 @@ fn check_list_lit(
     elem_t = unified
     checked = checked ++ [tx]
   }
+  # Every element diverged and nothing outside settled the type: `Never` is
+  # absorbed by the unify above, as a constructor argument's is, so it is
+  # still the starting point. Storing it would make `List[Never]`, which
+  # spec §2.2 forbids, and no backend can pick a representation for it.
+  # The type stays a list, as a tuple keeps its other components, so a
+  # generic call around the literal does not report a second, derived error.
+  if elem_t == TyNever {
+    cx1 = cerr_h(cx1, "cannot infer the element type of a list whose elements never return",
+      lo, hi, never_component_hint("let xs: List[Int] = [...]"))
+    elem_t = TyError
+  }
   var txs: List[TListElem] = []
   var ri = 0
   var di = ready_n
@@ -5532,12 +5543,35 @@ fn check_tuple_lit(
     }
     let (cx2, t, tx) = check_expr(cx1, x, el_exp)
     cx1 = cx2
-    tys = tys ++ [t]
+    # A diverging element is the bottom type here exactly as it is in a list
+    # or a constructor argument: it takes the component the context asked for,
+    # and with no context it settles nothing (`(Never, Int)` is a storage
+    # position spec §2.2 forbids, and the Show/Eq it would need do not exist).
+    let settled = if t != TyNever {
+      t
+    } else {
+      match el_exp {
+        Some(et) -> et
+        None -> {
+          cx1 = cerr_h(cx1, "cannot infer the type of tuple element " ++ to_string(i + 1) ++
+              ": the expression never returns", e_lo(x), e_hi(x), never_component_hint("let t: (Int, String) = (...)"))
+          TyError
+        }
+      }
+    }
+    tys = tys ++ [settled]
     txs = txs ++ [tx]
     i = i + 1
   }
   (cx1, TyTuple(tys), XTupleLit(txs, owner_off(cx, lo), owner_off(cx, hi), TyTuple(tys)))
 }
+
+## The hint for a literal component whose only type is `Never`. One wording
+## for the list and the tuple so both read like the constructor case
+## (`Some(stop())` cannot infer `T`): the annotation that settles it, then the
+## rule that forbids the alternative.
+fn never_component_hint(example: String) -> String =
+  "add a type annotation, e.g. " ++ example ++ "; `Never` has no values to store (spec §2.2)"
 
 ## The `EIndex` arm of `check_expr_at`, `c[i]` through the `Index` witness (the
 ## comment at the arm says why it is one witness).
