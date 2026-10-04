@@ -4548,6 +4548,187 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
 - Out 的 `along` 非恒等（转置写）：Out 的格子就是网格，转置写今天是 `store_view` 的 `dim_map`，不经标记。
 - 没有格子的参数（`In(.., Whole)`、`Shared`）的尺寸检查：没有几何可比。
 
+### 6.25 批的 PR-1：格子读写、对齐假设、rank-0 规则与归约专名（纯加法）
+
+裁决出处：agent-handoff 的 `ruling-tile-read-view-assume-20261004.md`（读路与 PR 栈）、
+`ruling-cutile-rs-borrow-20261003.md`「修订二」与其补注；实测与切分是 `tile-batch-pregate-report-20261004.md`
+（§1 读路性能与对齐假设、§2 UFCS 与 `n9`、§4.2 PR 栈、§4.3 样本 kernel）。这一刀是批的第一个 PR：**只加名字**，
+现有公开函数一个签名也不改，`kernels.dawn` 一行不动，所以 golden 预测逐字节不动（实测见八）。
+
+**〇、本批裁决摘要（10-04）。**
+
+- 读一侧降成 view 族，`In(F64, g)` / `load_cell` / `load_at` 公开面按修订二；同一提交在读一侧 view 的基址上发
+  `assume div_by<16>`，**发在参数本身（`%arg`）上**，不发在 `offset` 之后。根因与数据在预检报告 §1.3、§1.4：
+  无对齐信息时 f16 张量核 matmul 的 view 路慢 3 到 4.5 倍（逐元素 `LDG.E.U16`、跨线程不合并），加上之后变成
+  `LDGSTS.E.128` + `LDSM`，比今天的指针路快 8% 到 45%；同等对齐知识下 view 与指针两路在四族八配置上持平。
+- 写一侧**不加**：预检 128×128×32 的反例里假设同时加在写指针上两路都慢 45%。写一侧（D-7 之后 `Out` 的 view）
+  的对齐假设另行实测，本批不顺手加。下文六节的样本又给了写一侧一条新数据。
+- 假设改变 f64 归约的器件折叠次序（softmax 最大相对差 4.8e-16），落在「归约次序不指定」的容差档内。
+- C3′ 不需要语言特性（UFCS 推断已够）；`n9`（`Scalar` 并入 `Tile` 之后 rank 不在类型里）的 rank-0 检查由
+  handler 在记录期做，本 PR 先落。
+- PR 栈：PR-1 纯加法（本节）→ PR-2 K7–K18 → PR-3 破坏性大迁移 → PR-4 sm_86 台账。sm_90 / sm_100 归所有者。
+
+**一、新面。** 全在 `packages/tileir`，dev.dawn 末尾一节、prog.dawn 的记录 handler 与 lower.dawn 各加一段：
+
+| 名字 | 做什么 |
+|---|---|
+| `load_cell(p)` | 读本块在 `p` 的格子里那一格：经 `p` 的格子视图（`cells` 的 extent、tile、pad），下标是各维跟随的网格轴的块号。越过 extent 的 lane 读 `pad`，所以 `cells([1000], [1024], pad: PadNegInf)` 读整行不要 mask |
+| `load_at(p, free)` | 同上，`along` 里是 `FREE_AXIS` 的维由 `free` 依次给出格子号（matmul 的 `k`）；个数不符在记录期拒 |
+| `store_cell(o, t)` | 写本块那一格；越过 extent 的 lane 不写。**不收 `d`**（D-4 扩大） |
+| `zeros(p)` / `fill(p, v)` | 形状是 `p` 的一格、格式是 `p` 的格式的常量 tile；整数格式的 `v` 必须是整数 |
+| `reduce_sum` / `reduce_max` / `reduce_min(t, dim: -1, keepdims: false)` | 不收 `d` 与 shape（从句柄表读），identity 内置（和 0，max 取 -inf 或整数最小值，min 取 +inf 或整数最大值），`keepdims` 把被归约的维留成长度 1：`[BQ, BK]` 的行最大值是 `[BQ, 1]` |
+| `scan_sum(t, dim: -1, reverse: false)` | 前缀和，形状不变 |
+| `broadcast(t, shape)` | 把长度为 1 的维展开到 `shape`，其余维必须相等，秩不变；rank 0 的 `t` 走 `spread` |
+
+效果操作加四个：`t_cell_view(param, dtype, free) -> (Int, List[Int])`（格子视图与本块的下标）、
+`t_cell_fill(param, value)`、`t_reshape(dtype, from, to, src)`、`t_broadcast(dtype, from, to, src)`。
+`TileOp` 加三个构造器：`CellViewOf`（`TensorViewOf` 去掉 `base`、多一个 `align`）、`ReshapeOf`、`BroadcastOf`；
+降低用的是已有的 `assume`、`make_tensor_view`、`reshape`、`broadcast` 指令，渲染器与写入器一行没改。
+
+视图由 handler 建、由 handler 记：每个参数一个，在可见范围内复用（同一个 kernel 读两次 `x` 只有一个视图；视图
+建在循环体里就只在循环体里可见，循环后再读会再建一个，降低会拒绝跨区域的名字，所以 handler 先问可见性）。
+块号同理按轴记一份。`block_id` 本身不记忆，所以已有的程序一个字节也不变。动态 extent（`DYN_DIM`）的长度是
+§6.24 定的「网格在它跟随的轴上的块数 × tile」，在体内就是 `num_blocks(k) * tile` 三条已有的操作；行主序
+stride 遇到动态 extent 时同样由这几个句柄乘出来。
+
+**二、对齐假设发在哪。** 降低 `CellViewOf` 时，`align > 0` 就在参数本身上发 `assume`，再从它建视图；没有
+`offset`（In 的格子从第 0 个元素起算）。记录 handler 只给 In 设 `align = 16`，Out 为 0。照录 `vadd` 的三个视图：
+
+```
+%1 = assume div_by<16>, %arg0 : tile<ptr<f64>>
+%2 = make_tensor_view %1, shape = [1024], strides = [1] : tensor_view<1024xf64, strides=[1]>
+...
+%9 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+%10 = make_tensor_view %9, shape = [1024], strides = [1] : tensor_view<1024xf64, strides=[1]>
+...
+%18 = make_tensor_view %arg2, shape = [1024], strides = [1] : tensor_view<1024xf64, strides=[1]>
+```
+
+为什么不在 `offset` 之后发：`assume` 说的是它的操作数，`offset` 之后的那个值是参数加一个运行期下标，对它的
+断言要么是另一个命题，要么让 `tileiras` 看不见原来的对齐。这条假设成立的依据（预检 §1.5）：`std/gpu` 的
+缓冲区都来自 `cuMemAlloc`（256 字节对齐），`Tensor` 没有子视图，`In` 的格子从 0 偏移起算。
+
+**三、rank-0 规则与 rank-0 检查。**
+
+- **只放 rank 0。** 逐元素操作（`binaryf`、`fma`、`cmpf`、`cmpi`、`binaryi`、`select`、`powi`）的某个操作数若是
+  该操作格式的 rank-0 tile 而操作声明了更宽的形状，handler 先替它记一个 `Spread`，再记操作本身。同一个
+  （句柄，形状）在可见范围内只 spread 一次。别的形状差一律照 C1 拒：`[BQ, 1]` 对 `[BQ, BK]` 不广播，要写
+  `broadcast`。理由是裁决不做全 numpy 广播：去掉一维的归约之后静默广播到错的轴，是一个看起来对的错答案。
+  这条规则改变的程序在它之前都被 C1 的检查拒绝，所以今天能记录的 kernel 记录出同一个程序。
+- **记录期 rank-0 检查（`n9`）。** `if` 的条件、`return` 的条件、`loop` 的退出条件、`for` 的三个界、归约与扫描的
+  yield、格子下标，要求是 rank 0（条件是 `i1`，界与下标是 `i32`，yield 是操作数的格式）。今天 `Scalar[D]` 与
+  `Idx` 在类型里挡住了大部分，`idx_of` 这类转换挡不住；PR-3 把 `Scalar` 并进 `Tile` 之后 rank 就只剩这里能查。
+
+**四、C4：归约专名、keepdims 与显式 broadcast。** 归约专名从 `t_shape_of` 读格式与形状，所以写不出「形状与
+操作数不符」的调用；identity 内置，所以「错的 identity」从可能变成不可能。`dim` 缺省是最后一维（负数从后数），
+`keepdims` 在归约之后补一条 `reshape`（`[32]` → `[32, 1]`），`broadcast` 记一条 `BroadcastOf`，形状相同时降低
+不发指令。整数格式用 `addi` / `maxi` / `mini`（有符号），identity 取该宽度的有符号极值。flash attention 的行统计
+因此可以写成教科书形状：
+
+```dawn
+let m = broadcast(reduce_max(s, keepdims: true), [BQ, BK])
+let p = exp(F64, [BQ, BK], sub(F64, [BQ, BK], s, m))
+let l = broadcast(reduce_sum(p, keepdims: true), [BQ, BK])
+```
+
+**五、拒绝消息（照录，位置后缀省略）。**
+
+```
+tileir: kernel `rows`: op #10 `subf`: rhs is tile<32x1xf64>, declared tile<32x64xf64>
+tileir: kernel `fmt`: op #3 `addf`: rhs is tile<f32>, declared tile<8xf64>
+tileir: kernel `bad`: op #10 `broadcast`: dimension 1 of tile<1x64xf64> is 64, and only a dimension of length 1 widens (to 32 in [64, 32])
+tileir: kernel `bad`: op #9 `broadcast`: tile<32xf64> cannot become tile<32x64xf64>: a broadcast keeps the rank, and a rank-0 tile is spread
+tileir: kernel `mm`: op #1 `load_cell`: parameter 0 has 1 dimension(s) that follow no grid axis, and the call names 0 cell(s) for them
+tileir: kernel `c`: op #1 `load_cell`: parameter 0 is an In of the whole tensor, which has no cells
+tileir: kernel `c`: op #1 `zeros`: parameter 0 is a Shared, which has no cells
+tileir: kernel `c`: op #1 `load_cell`: parameter 0 has no marker; cells are what an In or an Out marker of trace1 to trace5 says, and trace_kernel takes none
+tileir: kernel `c`: op #1 `fill`: parameter 0 is i32, and 2.5 is not a whole number
+tileir: kernel `r`: op #4 `if`: condition is tile<8xi1>, and it must be the rank-0 tile<i1>
+tileir: kernel `r`: op #4 `return`: condition is tile<8xi1>, and it must be the rank-0 tile<i1>
+tileir: kernel `r`: op #5 `loop`: exit condition is tile<8xi1>, and it must be the rank-0 tile<i1>
+tileir: kernel `r`: op #4 `reduce`: yield 0 is tile<8xf64>, and it must be the rank-0 tile<f64>
+tileir: kernel `r`: op #5 `d_for`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>
+tileir: kernel `r`: op #2 `load_at`: cell index is tile<4xi32>, and it must be the rank-0 tile<i32>
+```
+
+前两条是「只放 rank 0」的另一半：保维的结果与别的格式的 rank-0 照旧被拒。
+
+**六、性能样本（裁决第 4 条）。** f16 matmul 4096³，64×64×32（网格 64×64）与 128×128×32（网格 32×32），
+本机 RTX 3080（sm_86，驱动 616.56，`tileiras` 13.4.92）。方法照预检报告 §1.1：ctypes 直调 driver，cuEvent 计时，
+每样本是一批连续 launch 的平均（批长定到 ≥ 20 ms），三版交错测（奇偶轮正反序），每版 31 个样本；先各跑一次比输出
+字节。判据：中位数慢 > 5% 且 IQR 不重叠为「慢」。三版：
+
+- `ptr`：今天的指针路（`load_strided` 读、`store_strided` 写），`trace_kernel` 记录。
+- `cell`：新面写全：`load_at(a, [k])`、`load_at(b, [k])`、`zeros(c)`、`store_cell(c, acc)`，`trace3` 记录。
+- `cellr`：读一侧同 `cell`，写一侧换回今天的 `store_strided`。它与 `ptr` 只差读一侧，是裁决判据要的那一对。
+
+最终轮（`bench-final`，31 样本，单位 µs；前两轮 `r1`、`w16` 结论相同，各版差异在 ±3 个百分点内）。四版输出与 `ptr`
+逐字节相同。`cellw16` 是 scratch 里把 Out 视图也设 `align = 16` 的对照，只为量写一侧，不进仓库：
+
+| 形状 | 版本 | 中位数 | IQR | 相对 `ptr` | 判据 |
+|---|---|---|---|---|---|
+| 64×64×32 | `ptr` | 3467.6 | 3390.0–3585.3 | | |
+| | `cell` | 3155.8 | 3124.8–3278.4 | −9.0% | 不慢 |
+| | `cellr` | 2527.6 | 2474.7–2597.8 | −27.1% | 不慢 |
+| | `cellw16` | 2554.9 | 2517.0–2620.2 | −26.3% | （对照） |
+| 128×128×32 | `ptr` | 2200.0 | 2129.7–2249.7 | | |
+| | `cell` | 3658.0 | 3611.5–3750.0 | **+66.3%** | **慢** |
+| | `cellr` | 1813.0 | 1782.8–1910.8 | −17.6% | 不慢 |
+| | `cellw16` | 3194.1 | 3120.6–3341.9 | +45.2% | （对照） |
+
+**读一侧（裁决判据要的那一对 `cellr` 对 `ptr`）两个形状都快：−27% 与 −18%**，与预检的 −25% / −8%（只加读侧
+假设）同向；SASS 是 `LDGSTS.E.128` ×8 / ×16 加 `LDSM`，指针路是 `LDG.E.U16`。读侧视图建在循环体里，不妨碍这个结果。
+
+**新发现，在写一侧**：`store_cell` 的 view 写在 128×128×32 上比指针写慢 66%（64×64×32 上也吃掉约 18 个百分点：
+`cell` −9% 对 `cellr` −27%）。给 Out 视图也加对齐假设只部分缓解（+45%，SASS 从 `STG.E.U16` 变成 `STG.E.128`，仍慢），
+所以不是单纯的对齐问题。这条不违反本批裁决（写侧本来就另行实测），但它决定 PR-3 能不能把 Out 的写统一改走
+`store_cell`，见十。
+
+**七、负控（各先证红）。** 在包的 scratch 副本上各改一处，跑 `dawn test <副本>`（182 项）：
+
+| 变异 | 改了什么 | 红 |
+|---|---|---|
+| rank0-check-off | `check_rank0` 不拒 | 1 项（`n9` 那条） |
+| keepdims-dropped | `fold_along` 丢掉 keepdims 的 `reshape` | 2 项（保维形状、保维结果不广播即被拒） |
+| broadcast-wrong-axis | `t_broadcast` 拿目标第 `k` 维去比源的镜像维 | 1 项（错轴的 `[1, 64]` → `[64, 32]` 被放行） |
+| assume-on-out | Out 的视图也设 `align = 16`（写侧加假设） | 3 项（记录的 `align`、动态 extent 的视图、降低后的指令） |
+| assume-after-offset | 降低先发 `offset %arg, 0` 再对结果发 `assume` | 1 项（`AssumeTile` 的操作数必须是 `Arg(0)`） |
+| rank0-rule-off | rank-0 操作数不再自动 spread | 1 项（softmax 的两次 spread） |
+
+**八、golden 与台账。** 预测逐字节不动（`kernels.dawn` 未动，新构造器与新臂只在新函数被调用时出现，rank-0 规则与
+rank-0 检查放行的都是今天能记录的程序）。落刀前先在 JVM 上把 192 个 kernel 的文本与字节和 golden 逐个比过（0 处不同），
+再在代码提交 `97e6c43f` 上跑全量 `scripts/tile-golden/run.sh`（本机，`tileiras` 13.4.92，sm_86，61 min 51 s，与台账
+并行跑）：**`tile golden ok`**，192 个 kernel 的 trace、两后端文本 golden、两后端字节码 golden、assemble 各 192 PASS，
+**逐字节不动**；269 个变异体全部按名变红。`mutation-anchor-preflight.py` 532 处锚点各唯一。sm_86 台账在同一提交上一次
+通过（38 min 42 s），新行 `#` 之后除 `inputs` 外与上一行逐字相同（脚本比对）：设备看到的仍是原来那些程序。
+sm_90 / sm_100 台账归所有者。
+
+**九、版本。** `tileir` 0.5.1 → 0.6.0。公开函数只加不改，但 `Dev` 多了四个操作，包外写的 handler 要答它们才编得过，
+这是 0.x 的次版本号该动的理由（§6.24 七、`docs/package-design.md` §6.3），与 0.4.0（`t_shape_of`）、0.5.0（体标记）
+同一类。README 加「Cells, named reductions and broadcast (since 0.6.0)」一节与 handler 须知一节。
+
+**十、PR-2 到 PR-4 的计划（照预检报告 §4.2、§4.3）。**
+
+- **PR-2 K7–K18**：load/store 合并与逃生口指针路 `strides: Option[List[Int]] = None`，只动 dev.dawn 的指针路族；
+  旧名仍在的部分 golden 不动。
+- **PR-3 破坏性大迁移（栈末一次合入）**：C3 删形状实参、C3′ `Scalar` 并入 `Tile` 与 `spread` / `s_*` 退役、D-7 输出
+  默认 `Out`（约 10 个标 `Shared`），`kernels.dawn`、tile-gpu-diff、gpu_fake、README、本文、站点 GPU 页一次迁移，
+  golden 一次重录（每个 label 一行 `Emit-Change`）。dev.dawn 与 kernels.dawn 必须同一提交（Dawn 无重载）。
+  样本 kernel 先迁：vadd、softmax（tile > extent 的 `PadNegInf`）、matmul 与 matmul_f16（对齐的金丝雀）、flash_attn
+  （keepdims + broadcast 的验收样本）、layer_norm、loop_until、一个 gather 与一个 scan、一个 `Shared`。
+  **写一侧先补测**：六节的 128×128×32 数据说明 `store_cell` 的 view 写在这个形状上比指针写慢，PR-3 把 Out 改走
+  `store_cell` 之前，写一侧的降低（view 写、view 写加假设、或 Out 的写降成带尾 mask 的指针路）要单独实测定夺。
+- **PR-4 sm_86 台账重跑**：只录本机，sm_90 / sm_100 归所有者。
+
+**不做的（理由）：**
+
+- 写一侧的对齐假设：裁决第 2 条，另行实测（六节给了第一组数据）。
+- Out 位只收能力写：D-7 随 PR-3。本 PR 的 `load_cell` 对 Out 也能读（原地 kernel 先读自己那一格），不加假设。
+- 视图提到循环外：handler 可以把视图插进最外层区域，但那会打乱已记录调用的操作编号（M1 的逐行归属以先序编号为准），
+  不值得；六节的样本里视图建在循环体里，`cellr` 仍比 `ptr` 快，没有外提的必要。
+- `block_id` 记忆化：会改变已有程序的字节；只对格子下标做。
+- 全 numpy 广播、`load_like`、类型级形状：修订二不做。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -4610,6 +4791,7 @@ gpu.grid_mismatch: gpu.launch_entry: kernel `fixed`: argument 0 (In) has 4 cell(
 | **C1 + D-1 记录期形状检查与块内 fork 不相交**（已落地，cuTile 借鉴第一刀，§6.21） | 「一个逐元素操作的操作数形状与它声明的不符，在记录期就被拒，消息带 kernel 名、操作序号与操作名；`d_fork2` 的两支写同一元素也在记录期被拒」 | `packages/tileir/src/prog.dawn` 的记录 handler（句柄表、逐元素检查、`t_tok_join` 的 fork 检查） | 191 个 golden 逐字节不动；包测试五项新增 | 四条：去格式比较、去形状比较、去 fork 检查、消息去序号 | 1 |
 | **C1′ view 补行、`t_shape_of`、mma 的 K**（已落地，§6.22） | 「经 view 读出的值的形状不符在记录期被拒；任何有行的句柄都能问出它的格式与形状；mma 两个操作数的 K 不一致在记录期被拒」 | `packages/tileir/src/prog.dawn`（`Held.what`、view 与 `load_view` 的行、`t_shape_of` 臂、`check_k`）、`dev.dawn`（`Dev` 加一条、三个测试 handler 各一臂）、`tileir` 0.4.0 | 191 个 golden 逐字节不动；包测试三项新增 | 四条：`load_view` 不记行、`t_shape_of` 不拒、去 K 检查、view 当 tile | 0.5 |
 | **C2 + D-3 + D-5 参数标记：角色与几何、`trace1`…`trace5`、类型化入口**（已落地，§6.24） | 「一个 kernel 的参数格式只写一次，写错是编译错误；写进 In 参数在记录期被拒；Out 格子推出网格，两个 Out 切出两个网格、In 跟随的轴块数不符在记录期被拒；发射时 Out/Shared 与别的参数同一缓冲、网格与格子不符、张量短于格子都在问设备之前被拒」 | `packages/tileir/src/prog.dawn`（`Cells`、`Arg`、`trace1`…`trace5`、记录 handler 的角色与 `aims`）、`std/gpu.dawn`（`EntryArg`、`Entry1`…`Entry5`、`entry_grid`、`launch_entry1`…`launch_entry5`）、`tileir` 0.5.1 | 192 个 golden 逐字节不动；sm_86 台账各档计数不变；包测试六项、std 测试两项新增；补测 tile 1024 > extent 1000 在 sm_86 上成立 | 十四条：tileir 四个、std/gpu 六个变异体，类型层四条编译错误 | 1 |
+| **批 PR-1：格子读写、读侧对齐假设、rank-0 规则、归约专名与 broadcast**（已落地，§6.25） | 「kernel 按格子读写参数，不写基址与形状；In 的读视图在参数本身上带 `assume div_by<16>`；归约不写格式、形状与 identity，`keepdims` 留下长度 1 的维；rank-0 操作数自动展开而别的形状差照旧被拒；条件、循环界、yield 与格子下标不是 rank 0 在记录期被拒」 | `packages/tileir/src/dev.dawn`（`load_cell`、`load_at`、`store_cell`、`zeros`、`fill`、`reduce_sum`/`max`/`min`、`scan_sum`、`broadcast`，四个效果操作）、`prog.dawn`（`CellViewOf`、`ReshapeOf`、`BroadcastOf`，handler 的格子视图、rank-0 规则与检查）、`lower.dawn`、`tileir` 0.6.0 | 192 个 golden 逐字节不动；包测试十项新增；f16 matmul 样本读一侧不慢于指针路 | 六个 tileir 变异体 | 1 |
 
 ## 8. 风险
 
