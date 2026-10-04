@@ -36,6 +36,11 @@ PROTOCOL = "dawn-lsp-v1"
 URI = "untitled:dawn-playground/prog.dawn"
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 FAKE_DIAGNOSTIC_VERSION = 1_000_003
+# fake_lsp.py's legend, deliberately not the real server's order
+FAKE_SEMANTIC_LEGEND = {
+    "tokenTypes": ["function", "namespace", "enumMember", "variable"],
+    "tokenModifiers": ["mutable", "declaration"],
+}
 
 
 def free_port():
@@ -199,8 +204,12 @@ def initialize(ws, request_id=1):
         "hoverProvider",
         "definitionProvider",
         "inlayHintProvider",
+        "semanticTokensProvider",
     }, response
     assert capabilities["completionProvider"].get("resolveProvider") is True, response
+    assert capabilities["semanticTokensProvider"] == {
+        "legend": FAKE_SEMANTIC_LEGEND, "range": True, "full": False,
+    }, response
     ws.send_json(note("initialized", {"untrusted": True}))
 
 
@@ -305,6 +314,159 @@ def diagnostics_params_contract():
         "label": "x", "kind": 3,
     }
     ok("completion resolve items are rebuilt and their data confined to the document")
+
+    semantic_tokens_contract(load_gateway())
+    semantic_tokens_negative_controls()
+    ok("semantic tokens: the child's legend, range only, cut to the message cap")
+
+
+def load_gateway(source=None):
+    """The gateway as a module, from its file or from a mutated copy of it."""
+    module_name = "_dawn_playground_lsp_gateway_semantic"
+    module = type(sys)(module_name)
+    module.__file__ = GATEWAY
+    sys.modules[module_name] = module
+    try:
+        exec(compile(source if source is not None else read_text(GATEWAY), GATEWAY, "exec"),
+             module.__dict__)
+    finally:
+        sys.modules.pop(module_name, None)
+    return module
+
+
+def semantic_tokens_contract(gateway):
+    """The semantic tokens surface (docs/lsp-references-design.md §T2), driven
+    through ClientProtocol without a socket so each rule has its own case."""
+
+    def opened(child_capabilities, text, message_bytes=262_144):
+        protocol = gateway.ClientProtocol(source_bytes=65_536, message_bytes=message_bytes)
+        protocol.from_client(json.dumps(rpc(1, "initialize", {})).encode())
+        reply = json.loads(protocol.from_child(json.dumps({
+            "jsonrpc": "2.0", "id": 1, "result": {"capabilities": child_capabilities},
+        }).encode()))
+        protocol.from_client(json.dumps(note("initialized", {})).encode())
+        protocol.from_client(json.dumps(note("textDocument/didOpen", {
+            "textDocument": {"uri": URI, "version": 1, "text": text},
+        })).encode())
+        return protocol, reply["result"]["capabilities"]
+
+    def ranged(protocol, request_id, start, end):
+        body = protocol.from_client(json.dumps(rpc(request_id, "textDocument/semanticTokens/range", {
+            "textDocument": {"uri": URI},
+            "range": {"start": {"line": start[0], "character": start[1]},
+                      "end": {"line": end[0], "character": end[1]}},
+        })).encode())
+        return json.loads(body)["params"]["range"]
+
+    provider = {"legend": FAKE_SEMANTIC_LEGEND, "full": True, "range": True}
+    protocol, capabilities = opened({"semanticTokensProvider": provider}, "x")
+    assert capabilities.get("semanticTokensProvider") == {
+        "legend": FAKE_SEMANTIC_LEGEND, "range": True, "full": False,
+    }, ("SEMANTIC_LEGEND_NOT_THE_CHILDS", capabilities)
+
+    # a child with no legend, or a legend that is not short names, offers no
+    # tokens, and a request for them is refused like any unlisted method
+    for child in (
+        {},
+        {"semanticTokensProvider": {"legend": FAKE_SEMANTIC_LEGEND, "full": True}},
+        {"semanticTokensProvider": {**provider, "legend": {
+            "tokenTypes": ["function", "<script>"], "tokenModifiers": []}}},
+        {"semanticTokensProvider": {**provider, "legend": {
+            "tokenTypes": ["function"], "tokenModifiers": ["m"] * 17}}},
+    ):
+        protocol, capabilities = opened(child, "x")
+        assert "semanticTokensProvider" not in capabilities, (child, capabilities)
+        try:
+            ranged(protocol, 2, (0, 0), (1, 0))
+        except gateway.GatewayError as error:
+            assert error.code == 1008, error.code
+        else:
+            raise AssertionError(f"semantic tokens without a legend crossed: {child!r}")
+
+    # `full` is never forwarded, even when the child offers it
+    protocol, _ = opened({"semanticTokensProvider": provider}, "x")
+    try:
+        protocol.from_client(json.dumps(rpc(2, "textDocument/semanticTokens/full", {
+            "textDocument": {"uri": URI},
+        })).encode())
+    except gateway.GatewayError as error:
+        assert error.code == 1008, error.code
+    else:
+        raise AssertionError("semantic tokens full crossed the gateway")
+
+    # the range is cut where it would cover more source than the reply may
+    # answer for; the cut counts UTF-8 bytes and lands on a UTF-16 column
+    message_bytes = 1024 + 5 * gateway.SEMANTIC_INT_BYTES * 6
+    assert gateway.semantic_range_budget(message_bytes) == 10, gateway.semantic_range_budget(message_bytes)
+    text = "ab\ncd\U0001F600ef\nxyz"
+    protocol, _ = opened({"semanticTokensProvider": provider}, text, message_bytes)
+    # 2 + 1 + 2 + 4 + 1 bytes reach the `e` after the emoji, which is UTF-16
+    # column 5 of its line (the emoji is two code units)
+    assert ranged(protocol, 2, (0, 0), (2, 3)) == {
+        "start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 5},
+    }, "SEMANTIC_RANGE_CUT_NOT_UTF16"
+    assert ranged(protocol, 3, (1, 0), (2, 3)) == {
+        "start": {"line": 1, "character": 0}, "end": {"line": 2, "character": 1},
+    }, "SEMANTIC_RANGE_NOT_CUT_AT_BUDGET"
+    assert ranged(protocol, 4, (1, 4), (2, 3)) == {
+        "start": {"line": 1, "character": 4}, "end": {"line": 2, "character": 3},
+    }, "SEMANTIC_RANGE_START_NOT_UTF16"
+    assert ranged(protocol, 5, (1, 1), (1, 6)) == {
+        "start": {"line": 1, "character": 1}, "end": {"line": 1, "character": 6},
+    }, "SEMANTIC_RANGE_CUT_INSIDE_BUDGET"
+    # after an edit the cut measures the new text, not the opened one
+    protocol.from_client(json.dumps(note("textDocument/didChange", {
+        "textDocument": {"uri": URI, "version": 2},
+        "contentChanges": [{"text": "a" * 30}],
+    })).encode())
+    assert ranged(protocol, 6, (0, 0), (0, 30)) == {
+        "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10},
+    }, "SEMANTIC_RANGE_MEASURES_STALE_TEXT"
+
+    # the reply crosses as its data array only, and a malformed one is a
+    # child protocol error, not a page of garbage colours
+    assert gateway.semantic_tokens_value({"data": [0, 1, 2, 3, 4], "resultId": "x"}) == {
+        "data": [0, 1, 2, 3, 4],
+    }
+    assert gateway.semantic_tokens_value(None) is None
+    for bad in ({"data": [0, 1, 2, 3]}, {"data": [0, 1, 2, 3, -1]}, {"data": [0, 1, 2, 3, True]},
+                {"data": "0,1,2,3,4"}, []):
+        try:
+            gateway.semantic_tokens_value(bad)
+        except gateway.ChildProtocolError:
+            pass
+        else:
+            raise AssertionError(f"malformed semantic tokens crossed: {bad!r}")
+
+
+def semantic_tokens_negative_controls():
+    """Each mutant breaks one rule above, and the contract has to notice."""
+    source = read_text(GATEWAY)
+    mutants = {
+        # the legend written by the gateway in the real server's order: the
+        # browser would decode the child's indices against the wrong names
+        "hard-coded legend": mutate_once(
+            source,
+            '"legend": self.semantic_legend,',
+            '"legend": {"tokenTypes": ["namespace", "type", "struct", "enum"], '
+            '"tokenModifiers": ["declaration", "readonly", "defaultLibrary", "mutable"]},',
+        ),
+        # columns counted in code points: a cut after an astral character
+        # lands one column early
+        "code point columns": mutate_once(
+            source,
+            '    return len(text.encode("utf-16-le")) // 2\n',
+            '    return len(text)\n',
+        ),
+        # no cut at all
+        "unclamped range": mutate_once(
+            source,
+            "token_range = clamp_range(self.text, require_range(params), self.range_budget)",
+            "token_range = require_range(params)",
+        ),
+    }
+    for label, mutant in mutants.items():
+        expect_contract_red(label, lambda: semantic_tokens_contract(load_gateway(mutant)))
 
 
 def read_text(path):
@@ -972,6 +1134,15 @@ def main():
                 "label": "println", "kind": 3, "data": {"uri": URI, "module": "std/io"},
                 "documentation": {"kind": "markdown", "value": "Prints `s`."},
             }, resolved
+            # semantic tokens for a range: the range is rebuilt, and only the
+            # data array comes back
+            ws.send_json(rpc(7, "textDocument/semanticTokens/range", {
+                "textDocument": {"uri": URI},
+                "range": {"start": {"line": 0, "character": 4},
+                          "end": {"line": 0, "character": 9}, "extra": "/tmp/x"},
+            }))
+            tokens = ws.recv_json()["result"]
+            assert tokens == {"data": [0, 4, 3, 0, 1]}, tokens
 
             ws.send_frame(9, b"contract-ping")
             fin, opcode, payload = ws.recv_frame()
@@ -999,6 +1170,14 @@ def main():
                 "textDocument": {"uri": URI},
                 "range": {"start": {"line": 0, "character": 3}, "end": {"line": 9, "character": 0}},
             }, inlay
+            semantic = next(
+                item for item in audit
+                if item.get("method") == "textDocument/semanticTokens/range"
+            )
+            assert semantic["params"] == {
+                "textDocument": {"uri": URI},
+                "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 9}},
+            }, semantic
             resolve = next(item for item in audit if item.get("method") == "completionItem/resolve")
             assert resolve["params"] == {
                 "label": "println", "kind": 3, "data": {"uri": URI, "module": "std/io"},
@@ -1133,6 +1312,21 @@ def main():
             assert unlisted.recv_json()["method"] == "textDocument/publishDiagnostics"
             unlisted.send_json(rpc(13, "workspace/symbol", {}))
             unlisted.expect_close(1008)
+            stream.close()
+
+            # the child offers semantic tokens `full`; the gateway does not
+            stream, response = upgrade_when_available(port)
+            assert response.startswith(b"HTTP/1.1 101 "), response
+            full_tokens = WebSocket(stream)
+            initialize(full_tokens, 16)
+            full_tokens.send_json(note("textDocument/didOpen", {
+                "textDocument": {"uri": URI, "version": 1, "text": "()"}
+            }))
+            assert full_tokens.recv_json()["method"] == "textDocument/publishDiagnostics"
+            full_tokens.send_json(rpc(17, "textDocument/semanticTokens/full", {
+                "textDocument": {"uri": URI},
+            }))
+            full_tokens.expect_close(1008)
             stream.close()
 
             # JSON `true` decodes to a Python bool, and bool is a subclass of
@@ -1302,7 +1496,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("25 passed, 0 failed")
+    print("26 passed, 0 failed")
 
 
 if __name__ == "__main__":

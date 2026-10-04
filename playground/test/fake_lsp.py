@@ -12,6 +12,13 @@ DIAGNOSTIC_VERSION = 1_000_003
 OMIT_DIAGNOSTIC_VERSION = os.environ.get(
     "FAKE_LSP_OMIT_DIAGNOSTIC_VERSION"
 ) == "1"
+# Not the real server's order on purpose: the contract asserts the browser is
+# handed this order, so a gateway that wrote its own legend shows up as a
+# different list rather than as the same one by coincidence.
+SEMANTIC_LEGEND = {
+    "tokenTypes": ["function", "namespace", "enumMember", "variable"],
+    "tokenModifiers": ["mutable", "declaration"],
+}
 
 
 def audit(message):
@@ -112,6 +119,11 @@ def main():
                         "definitionProvider": True,
                         "documentSymbolProvider": True,
                         "documentFormattingProvider": True,
+                        "semanticTokensProvider": {
+                            "legend": SEMANTIC_LEGEND,
+                            "full": True,
+                            "range": True,
+                        },
                     }
                 },
             })
@@ -150,6 +162,17 @@ def main():
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": [{"position": start, "label": ": Int", "kind": 1}],
+            })
+        elif method == "textDocument/semanticTokens/range":
+            # one token at the range's start, and a field the gateway drops
+            start = message.get("params", {}).get("range", {}).get("start", {})
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "resultId": "/tmp/should-not-cross",
+                    "data": [start.get("line", 0), start.get("character", 0), 3, 0, 1],
+                },
             })
         elif method == "completionItem/resolve":
             # the item back with a doc, and a field the gateway must not pass on
