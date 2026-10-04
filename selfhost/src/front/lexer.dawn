@@ -667,7 +667,7 @@ fn lex_unicode(s: Src, u: Int) -> Result[(Int, Char), (Int, Diag)] = {
   let hex = text_of(s, hex_start, i)
   let hlen = off(s, i) - off(s, hex_start)
   let bad = ldiag("invalid unicode codepoint: ${hex}", off(s, i) - hlen, off(s, i))
-  match escape_value(hex) {
+  match parse_int(hex, radix: 16) {
     None -> Err((i, bad))
     Some(code) ->
       # `char.of` is the range check: not negative, not above U+10FFFF, and not
@@ -679,53 +679,6 @@ fn lex_unicode(s: Src, u: Int) -> Result[(Int, Char), (Int, Diag)] = {
         Some(c) -> Ok((i + 1, c))
       }
   }
-}
-
-## The number written between the braces of `\u{...}`, read as the builtin
-## `parse_int_radix(hex, 16)` read it: trimmed, an optional sign, then hex
-## digits of either case. A value outside 0..0x10FFFF comes back as `None`
-## early, which the caller cannot tell from the `Some` it used to get, since
-## `char.of` refuses that value next.
-##
-## A bridge, and a temporary one. K19 moved the radix into std/fmt's
-## `parse_int(s, radix: 16)`, but this file is compiled by the seed against the
-## seed's std (docs/bootstrap.md), where `parse_int` takes one argument and
-## `parse_int_radix` is the builtin this knife deleted. No spelling of a hex
-## parse is valid in both until a release whose std has the radix becomes the
-## seed; then this function goes and the call above becomes `parse_int(hex,
-## radix: 16)`.
-fn escape_value(hex: String) -> Option[Int] = {
-  let t = str.trim(hex)
-  var neg = false
-  var digits = 0
-  var acc = 0
-  var first = true
-  for c in code_points(t) {
-    if first && (c == '+' || c == '-') {
-      neg = c == '-'
-    } else {
-      let k = char.code(c)
-      let d = if k >= char.code('0') && k <= char.code('9') {
-        k - char.code('0')
-      } else if k >= char.code('a') && k <= char.code('f') {
-        k - char.code('a') + 10
-      } else if k >= char.code('A') && k <= char.code('F') {
-        k - char.code('A') + 10
-      } else {
-        -1
-      }
-      if d < 0 {
-        return None
-      }
-      acc = acc * 16 + d
-      if acc > 1114111 {
-        return None
-      }
-      digits = digits + 1
-    }
-    first = false
-  }
-  if digits == 0 { None } else { Some(if neg { 0 - acc } else { acc }) }
 }
 
 ## Character literal 'x' (spec §1.5): a single code point, lexed as a CHAR whose
@@ -1324,27 +1277,18 @@ test "a surrogate half is not a code point, in a string or in a char literal" {
 }
 
 test "the braces of a unicode escape read as a radix-16 parse_int" {
-  # what `parse_int_radix(hex, 16)` accepted, kept while the seed's std cannot
-  # spell the radix (`escape_value`)
-  assert escape_value("41") == Some(65)
-  assert escape_value("10FFFF") == Some(1114111)
-  assert escape_value("1f388") == Some(127880)
-  assert escape_value(" 41 ") == Some(65)
-  assert escape_value("+41") == Some(65)
-  assert escape_value("-0") == Some(0)
-  assert escape_value("-1") == Some(0 - 1)
-  assert escape_value("") == None
-  assert escape_value("+") == None
-  assert escape_value("4 1") == None
-  assert escape_value("g") == None
-  assert escape_value("0x41") == None
-  # past the last code point: refused here instead of by `char.of`
-  assert escape_value("110000") == None
-  assert escape_value("FFFFFFFFFFFFFFFFFFFFFFFF") == None
+  # trimmed, an optional sign, then hex digits: `parse_int`'s contract, which
+  # the lexer takes as is, so a sign and spaces inside the braces still lex
+  # and a negative value reaches `char.of` and is refused there
   let (t1, d1) = lex("\"\\u{ 41 }\\u{+42}\"")
   assert len(d1) == 0
   let (t2, d2) = lex("\"\\u{-1}\"")
   assert d2[0].msg == "invalid unicode codepoint: -1"
+  # past the last code point, and past what an Int holds: the same diagnostic
+  let (t3, d3) = lex("\"\\u{110000}\"")
+  assert d3[0].msg == "invalid unicode codepoint: 110000"
+  let (t4, d4) = lex("\"\\u{FFFFFFFFFFFFFFFFFFFFFFFF}\"")
+  assert d4[0].msg == "invalid unicode codepoint: FFFFFFFFFFFFFFFFFFFFFFFF"
 }
 
 test "a block comment is one error and its text is skipped (#196)" {

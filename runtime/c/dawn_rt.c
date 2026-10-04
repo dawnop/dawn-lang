@@ -3795,7 +3795,7 @@ dawn_str *dawn_str_upper(dawn_str *s) { return dawn_case(s, true); }
 
 /* ---- parsing ----
  *
- * The accepted language of `parse_int`/`parse_float`/`parse_int_radix` is an
+ * The accepted language of `parse_int` (any radix) and `parse_float` is an
  * EBNF in spec 11, and the scanner that enforces it is Dawn source
  * (std/fmt, audit RP-05) -- the integer parsers never reach this runtime at
  * all. What remains here is one conversion, `float_of_decimal`: fmt.atod
