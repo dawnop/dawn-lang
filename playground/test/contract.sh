@@ -73,11 +73,35 @@ trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}"; rm -f "${WORK:?}.canar
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-# the runner prints "listening" once the socket is open
-for _ in $(seq 1 30); do
-  curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
+# Wait for /health against a deadline, not a count of tries. `dawn run`
+# compiles the runner before the socket opens, and the old 30 tries of 0.3 s
+# (9 s) were gone before that finished on a loaded machine: every check after
+# then failed against a closed port, and /health reported an empty build that
+# read like another runner's. A runner that never answers is still red, at
+# the deadline, with its own log rather than fifteen downstream failures; one
+# that dies is red as soon as neither its pid nor its process group is
+# left (the pid alone right after the fork: setsid may not have run yet).
+# PLAY_TEST_HEALTH_WAIT moves the deadline (seconds).
+HEALTH_WAIT=${PLAY_TEST_HEALTH_WAIT:-60}
+wait_started=$(date +%s)
+deadline=$((wait_started + HEALTH_WAIT))
+waited=""
+until curl -s --noproxy '*' --max-time 5 -o /dev/null "http://127.0.0.1:$PORT/health"; do
+  if ! kill -0 "$SRV" 2>/dev/null && ! kill -0 "-$SRV" 2>/dev/null; then
+    waited="exited before /health answered"; break
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    waited="did not answer /health within ${HEALTH_WAIT}s"; break
+  fi
   sleep 0.3
 done
+if [ -n "$waited" ]; then
+  echo "FAIL: the runner $waited (PLAY_TEST_HEALTH_WAIT=$HEALTH_WAIT)"
+  echo "---- runner log, last 40 lines"
+  tail -n 40 "$LOG" || true
+  exit 1
+fi
+echo "runner answered /health after $(($(date +%s) - wait_started))s"
 
 pass=0
 fail=0
@@ -95,7 +119,7 @@ check() { # name, curl-data, python-assertion, [endpoint (default: run)]
   fi
 }
 
-health=$(curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" || true)
+health=$(curl -s --noproxy '*' --max-time 10 "http://127.0.0.1:$PORT/health" || true)
 echo "health: $health"
 # The editor's toolbar shows this version; a release always has three parts.
 # `build` is the short build-manifest digest the runner's compiler prints last
@@ -210,11 +234,11 @@ check "missing code -> error" \
 
 # large body -> 413 (checked via status, not JSON body)
 big=$(python3 -c 'print("{\"code\":\"" + "/"*70000 + "\"}")')
-code=$(printf '%s' "$big" | curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -X POST --data @- "http://127.0.0.1:$PORT/run")
+code=$(printf '%s' "$big" | curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' -X POST --data @- "http://127.0.0.1:$PORT/run" || true)
 [ "$code" = "413" ] && { pass=$((pass+1)); echo "  ok  oversized body -> 413"; } || { fail=$((fail+1)); echo "FAIL  oversized body -> $code"; }
 
 # GET -> 405
-code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/run")
+code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/run" || true)
 [ "$code" = "405" ] && { pass=$((pass+1)); echo "  ok  GET -> 405"; } || { fail=$((fail+1)); echo "FAIL  GET -> $code"; }
 
 # Every request above, including the ones that timed out, failed to compile
