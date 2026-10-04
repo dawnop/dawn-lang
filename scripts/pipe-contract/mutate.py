@@ -152,7 +152,9 @@ MUTATIONS = {
     # 11: the editor maps the typed children of a module-qualified call. Its
     # typed argument list carries no receiver, so it is the same length as the
     # written one; without that branch every argument inside `m.f(a)` walks
-    # parse-only and hover answers with the enclosing call's type.
+    # parse-only and hover answers with the enclosing call's type. The
+    # span-matched fallback below that branch (docs/lsp-references-design.md
+    # §R1.5) would find the same typed nodes, so the mutant drops it too.
     "drop-lsp-qualified-call-children": (
         LSPQ,
         "  } else if len(targs) == len(args) {\n"
@@ -162,8 +164,14 @@ MUTATIONS = {
         "      q = walk_e(qc, q, a, get(targs, j))\n"
         "      j = j + 1\n"
         "    }\n"
-        "  } else {\n",
-        "  } else {\n",
+        "  } else {\n"
+        "    q = walk_e(qc, q, target, typed_at(targs, e_lo(target), e_hi(target)))\n"
+        "    for a in args { q = walk_e(qc, q, a, typed_at(targs, e_lo(a), e_hi(a))) }\n"
+        "  }\n",
+        "  } else {\n"
+        "    q = walk_e(qc, q, target, None)\n"
+        "    q = walk_list(qc, q, args, no_texprs(args))\n"
+        "  }\n",
     ),
     # 12: and the typed children of a module-qualified *construction*, which
     # is an XCtor rather than an XApply. Split from #11 because one arm each is
