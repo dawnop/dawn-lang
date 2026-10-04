@@ -9,12 +9,17 @@ against the previous release, which answered neither request, so it can say
 that the reply changed and never whether it is right. This script says it.
 
 Two programs, one per session, the ones scripts/lsp-resolution-coverage.py
-probes (a single file, and a two-module project) plus a line whose string
+probes (a single file, and a two-module project), a third with names in
+other scripts (`中文`, `café`), plus a line whose string
 holds characters outside the BMP ahead of names, so a column counted in code
 points or bytes instead of UTF-16 units decodes to the wrong text. For each:
 the full reply decoded to (text, type, modifiers) must equal the expected
 sequence, and a range inside one declaration must answer exactly the tokens
-starting in it. The legend must be the one initialize declared, and a document
+starting in it. Where each token is, is held as well: decoded to an absolute
+line and UTF-16 column, every token must cover one whole name, no two may
+overlap, each must be the first occurrence of its text after the token
+before it (so a token moved onto an earlier name, leaving a later one bare,
+is red), and a range's tokens must start inside the range. The legend must be the one initialize declared, and a document
 the server has no analysis for must answer with no tokens.
 
 Usage:
@@ -347,6 +352,28 @@ PROJECT_TOKENS = [
 # A range inside one declaration: (label, start needle, end needle, expected
 # texts). The range runs from the start of the first needle to the start of
 # the second; only tokens starting inside it answer.
+# names in other scripts: a token covers the whole name, as the lexer reads
+# it, and a name starting with a non-ASCII letter has one at all
+WIDE = """fn 中文(x: Int) -> Int = x + 1
+
+fn café(éx: Int) -> Int = éx + 1
+
+pub fn main() -> Unit !io = println(show(中文(2) + café(3)))
+"""
+
+WIDE_TOKENS = [
+    ('中文', 'function', 'declaration'),
+    ('x', 'parameter', 'declaration'),
+    ('x', 'parameter', ''),
+    ('café', 'function', 'declaration'),
+    ('éx', 'parameter', 'declaration'),
+    ('éx', 'parameter', ''),
+    ('main', 'function', 'declaration'),
+    ('println', 'function', 'defaultLibrary'),
+    ('中文', 'function', ''),
+    ('café', 'function', ''),
+]
+
 SINGLE_RANGES = [
     ("range inside norm", "  acc = acc + p.x", "  if acc > LIMIT", [
         ('acc', 'variable', 'mutable'),
@@ -446,7 +473,8 @@ class Session:
 
 
 def decode(text, data, legend):
-    """The reply's integers as (text, type, modifiers), columns read as UTF-16."""
+    """The reply's integers as (text, type, modifiers), columns read as UTF-16,
+    each with where it is: (line, UTF-16 column, length in UTF-16 units)."""
     types, mods = legend["tokenTypes"], legend["tokenModifiers"]
     lines = text.split("\n")
     out = []
@@ -458,17 +486,79 @@ def decode(text, data, legend):
         units = lines[line].encode("utf-16-le") if line < len(lines) else b""
         name = units[2 * col:2 * (col + length)].decode("utf-16-le", errors="replace")
         names = [m for b, m in enumerate(mods) if bits & (1 << b)]
-        out.append((name, types[ty] if ty < len(types) else "?%d" % ty, "+".join(names)))
+        out.append(((name, types[ty] if ty < len(types) else "?%d" % ty, "+".join(names)), (line, col, length)))
     return out
 
 
+def code_point_at(text, line, col):
+    """The code-point offset of UTF-16 column `col` of `line`, or None past the text."""
+    lines = text.split("\n")
+    if line >= len(lines):
+        return None
+    units = lines[line].encode("utf-16-le")
+    if 2 * col > len(units):
+        return None
+    return sum(len(l) + 1 for l in lines[:line]) + len(units[:2 * col].decode("utf-16-le", errors="replace"))
+
+
+def is_name_char(c):
+    return c.isalnum() or c == "_"
+
+
+def whole_name_at(text, at, name):
+    """Is `name` spelled at `at` as a whole name, not part of a longer one?"""
+    end = at + len(name)
+    return (text[at:end] == name and (at == 0 or not is_name_char(text[at - 1]))
+            and (end >= len(text) or not is_name_char(text[end])))
+
+
+def next_name(text, name, start):
+    """The first whole-name occurrence of `name` at or after `start`, or -1."""
+    at = text.find(name, start)
+    while at >= 0 and not whole_name_at(text, at, name):
+        at = text.find(name, at + 1)
+    return at
+
+
+def placed(label, text, toks, lo=0, hi=None):
+    """Every token sits on a whole name, in order, none overlapping another,
+    each at the first occurrence of its text after the token before it, and
+    inside `lo..hi` (code points)."""
+    hi = len(text) if hi is None else hi
+    at = lo
+    for i, ((name, _, _), (line, col, length)) in enumerate(toks):
+        start = code_point_at(text, line, col)
+        where = "token %d %r at %d:%d" % (i, name, line + 1, col + 1)
+        if start is None or not whole_name_at(text, start, name) or len(name.encode("utf-16-le")) // 2 != length:
+            bad(label + ": positions", "%s does not cover one whole name" % where)
+            return
+        if start < at:
+            bad(label + ": positions", "%s starts before the end of the token before it" % where)
+            return
+        want = next_name(text, name, at)
+        if start != want:
+            bad(label + ": positions", "%s is not the first `%s` after the token before it (that is at offset %d)"
+                % (where, name, want))
+            return
+        if start >= hi:
+            bad(label + ": positions", "%s starts past the range" % where)
+            return
+        at = start + len(name)
+    ok("%s: positions (%d tokens)" % (label, len(toks)))
+
+
 def tokens(s, uri, text, rng=None):
+    """The reply decoded, each token with its position (`decode`)."""
     td = {"uri": uri}
     if rng is None:
         got = s.request("textDocument/semanticTokens/full", {"textDocument": td})
     else:
         got = s.request("textDocument/semanticTokens/range", {"textDocument": td, "range": rng})
     return decode(text, (got or {}).get("data", []), s.provider["legend"])
+
+
+def kinds(toks):
+    return [k for k, _ in toks]
 
 
 def compare(label, want, got):
@@ -487,15 +577,18 @@ def check_doc(s, uri, text, label, want, ranges, dump):
     got = tokens(s, uri, text)
     if dump:
         print("%s = [" % label)
-        for t in got:
+        for t, _ in got:
             print("    %r," % (t,))
         print("]")
         return
-    compare(label, want, got)
+    compare(label, want, kinds(got))
+    placed(label, text, got)
     for rlabel, start, end, rwant in ranges:
         lo, hi = text.index(start), text.index(end)
         rng = {"start": utf16_position(text, lo), "end": utf16_position(text, hi)}
-        compare(rlabel, rwant, tokens(s, uri, text, rng))
+        rgot = tokens(s, uri, text, rng)
+        compare(rlabel, rwant, kinds(rgot))
+        placed(rlabel, text, rgot, lo, hi)
 
 
 def contract(server, env, dump=False):
@@ -523,6 +616,7 @@ def contract(server, env, dump=False):
                     ok("no analysis: empty data")
             check_doc(s, "file://" + os.path.join(one, "one.dawn"), SINGLE, "SINGLE_TOKENS",
                       SINGLE_TOKENS, SINGLE_RANGES, dump)
+            check_doc(s, "file://" + os.path.join(one, "wide.dawn"), WIDE, "WIDE_TOKENS", WIDE_TOKENS, [], dump)
         finally:
             s.close()
         src = os.path.join(work, "proj", "src")

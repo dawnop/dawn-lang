@@ -235,25 +235,50 @@ fn block_link_spans(block: List[(Int, String)]) -> List[(Int, Int, String)] = {
 
 ## Which lines of a doc are prose rather than inside a fenced code block (a
 ## fence line itself is not prose).
+##
+## A fence is CommonMark's: a run of three or more of one character, `` ` ``
+## or `~`, and only a run of the same character at least as long, with
+## nothing after it, closes it. A four-backtick fence exists to show a
+## three-backtick one inside it; closing it at the inner one turned the rest
+## of the example into prose, and its links into names rename rewrote.
 fn prose_lines(lines: List[String]) -> List[Bool] = {
   var out: List[Bool] = []
-  var fence = ""
+  var fence: Option[(Char, Int)] = None
   for line in lines {
     let t = str.trim_start(line)
-    if fence != "" {
-      if str.starts_with(t, fence) { fence = "" }
-      out = out ++ [false]
-    } else if str.starts_with(t, "```") {
-      fence = "```"
-      out = out ++ [false]
-    } else if str.starts_with(t, "~~~") {
-      fence = "~~~"
-      out = out ++ [false]
-    } else {
-      out = out ++ [true]
+    let (c, n) = fence_run(t)
+    match fence {
+      Some(open) -> {
+        let (oc, on) = open
+        if n > 0 && c == oc && n >= on && str.trim(str.drop(t, n)) == "" { fence = None }
+        out = out ++ [false]
+      }
+      None ->
+        if n > 0 {
+          fence = Some((c, n))
+          out = out ++ [false]
+        } else {
+          out = out ++ [true]
+        }
     }
   }
   out
+}
+
+## The fence `t` starts with: its character and the length of the run, or a
+## length of 0 when it starts with none.
+fn fence_run(t: String) -> (Char, Int) = {
+  let cs = code_points(t)
+  if len(cs) == 0 || (cs[0] != '`' && cs[0] != '~') { return (' ', 0) }
+  var n = 0
+  while n < len(cs) && cs[n] == cs[0] { n = n + 1 }
+  if n < 3 { (' ', 0) } else { (cs[0], n) }
+}
+
+test "a fence closes only at a run of its own character at least as long" {
+  assert prose_lines(["a", "````dawn", "```", "[`x`]", "````", "b"]) == [true, false, false, false, false, true]
+  assert prose_lines(["```", "~~~", "x", "```"]) == [false, false, false, false]
+  assert prose_lines(["```", "```` trailing", "x", "``` ", "y"]) == [false, false, false, false, true]
 }
 
 ## The length of the run of backticks at `i`.
