@@ -388,6 +388,105 @@ def schema_contract(module: ModuleType) -> None:
                 raise AssertionError(f"stage timings accepted {name}")
 
 
+# The cadence the sampler is designed to keep. `bench.sampling_targets_two_ms`
+# reads it from the sleeps the sampler asks for, not from the module's own
+# constant: a sampler that sleeps a literal 0.2 s next to an untouched
+# PROC_INTERVAL_NS must still be red.
+TICK_TARGET_NS = 2_000_000
+
+
+class SamplerClock:
+    """The `time` module as profile_command sees it, with work taking no time.
+
+    `bench.sampling_targets_two_ms` used to compare the real wall clock with
+    the number of samples taken (one per 50 ms at least). That asks whether
+    this machine, at this moment, can walk /proc twenty times a second, and
+    with 39 gate jobs on one node it could not: a 10 s tree got 51 samples,
+    each walk costing about 200 ms, and the unmutated sampler went red beside
+    every mutant. A loaded node and a 200 ms sampler look the same from the
+    outside, so no wall-clock bound separates them.
+
+    What the check is for is the schedule: each sample is aimed 2 ms after
+    the one before. Here `perf_counter_ns` advances only by what `sleep` was
+    asked for, so the time a sample takes is invisible to the schedule and
+    every delay the sampler computes is exactly the interval it aims at, on
+    any machine and under any load. The real sleep behind a tick keeps the
+    real schedule the sampler would have kept (aim one requested delay past
+    the last real target, skip the sleep and re-aim when already late), so
+    the samples the other verdicts read are the ones an unwatched sampler
+    takes. `monotonic` stays real, so the sampler's timeout is a real 20 s.
+
+    Only sleeps that profile_command makes once it has a tick schedule
+    (`next_tick` bound) are ticks; the root-identity wait before that is not
+    a cadence. Cleanup paths that sleep are not profile_command's own.
+    """
+
+    def __init__(self) -> None:
+        self._now = time.perf_counter_ns()
+        self._lock = threading.Lock()
+        self.ticks: list[float] = []
+        self._real_target: int | None = None
+
+    def perf_counter_ns(self) -> int:
+        with self._lock:
+            return self._now
+
+    def sleep(self, seconds: float) -> None:
+        caller = sys._getframe(1)
+        requested = max(0, round(seconds * 1_000_000_000))
+        tick = (
+            caller.f_code.co_name == "profile_command"
+            and "next_tick" in caller.f_locals
+        )
+        with self._lock:
+            self._now += requested
+            if not tick:
+                real_delay = requested
+            else:
+                self.ticks.append(seconds)
+                real_now = time.perf_counter_ns()
+                if self._real_target is None:
+                    self._real_target = real_now
+                self._real_target += requested
+                real_delay = self._real_target - real_now
+                if real_delay <= 0:
+                    self._real_target = real_now
+        if real_delay > 0:
+            time.sleep(real_delay / 1_000_000_000)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+
+def ticks_target_two_ms(ticks: Sequence[float], attempts: int) -> bool:
+    """Every sample but the last was followed by one 2 ms tick, and no other.
+
+    With the sampler's own work taking no time on its clock, a sampler aimed
+    at 2 ms asks for exactly 2 ms after each sample except the one that sees
+    the tree gone. Fewer ticks than samples means it skipped its schedule;
+    any other length means it aims somewhere else.
+    """
+    return (
+        len(ticks) >= 2
+        and len(ticks) == attempts - 1
+        and all(abs(tick * 1_000_000_000 - TICK_TARGET_NS) < 1 for tick in ticks)
+    )
+
+
+def tick_selftest() -> None:
+    cases = {
+        "a 2 ms schedule": ([0.002] * 5, 6, True),
+        "a 200 ms schedule": ([0.2] * 5, 6, False),
+        "a schedule that skips samples": ([0.002] * 3, 6, False),
+        "no schedule at all": ([], 6, False),
+        "one 2 ms tick among 200 ms ones": ([0.002] + [0.2] * 4, 6, False),
+    }
+    for name, (ticks, attempts, want) in cases.items():
+        if ticks_target_two_ms(ticks, attempts) != want:
+            raise AssertionError(f"tick verdict on {name} is not {want}")
+    print("PASS  the tick verdict tells a 2 ms schedule from the others")
+
+
 def wait_for_ready(work: Path, names: Sequence[str]) -> dict[str, int]:
     paths = {name: work / f"ready.{name}" for name in names}
     deadline = time.monotonic() + 15
@@ -786,9 +885,17 @@ def process_assertions(
 ) -> tuple[dict[str, bool], dict[str, object]]:
     env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     env["JAVA_HOME"] = os.fspath(java.parent.parent)
-    result, sibling_stat, decoy_stat, oracle = main_tree_probe(
-        module, classes, java, jcmd, env
-    )
+    clock = SamplerClock()
+    real_time = module.time
+    real_started = time.perf_counter_ns()
+    module.time = clock
+    try:
+        result, sibling_stat, decoy_stat, oracle = main_tree_probe(
+            module, classes, java, jcmd, env
+        )
+    finally:
+        module.time = real_time
+    real_wall_ns = time.perf_counter_ns() - real_started
     recursive = (
         set(result.roles) == {"parent", "child", "grandchild"}
         and result.complete_overlap_samples > 0
@@ -807,10 +914,7 @@ def process_assertions(
     starttime_exact = identity_exact in result.observed_identities
     parent_hwm = result.roles.get("parent", {}).get("rss_hwm_bytes")
     hwm_exact = isinstance(parent_hwm, int) and parent_hwm >= oracle["parent_hwm"]
-    scheduled = (
-        result.sampling_attempts >= 20
-        and result.sampling_attempts * 50_000_000 >= result.wall_time_ns
-    )
+    scheduled = ticks_target_two_ms(clock.ticks, result.sampling_attempts)
     exception_cleanup = exception_cleanup_probe(module, classes, java, jcmd, env)
     nonzero_cleanup = nonzero_cleanup_probe(module, classes, java, jcmd, env)
     verdicts = {
@@ -843,7 +947,10 @@ def process_assertions(
         },
         "parent_hwm_floor": oracle["parent_hwm"],
         "sampling_attempts": result.sampling_attempts,
-        "wall_time_ns": result.wall_time_ns,
+        "sampling_ticks": len(clock.ticks),
+        "sampling_tick_values_s": sorted(set(clock.ticks)),
+        "tick_target_ns": TICK_TARGET_NS,
+        "tree_probe_real_wall_ns": real_wall_ns,
         "complete_overlap_samples": result.complete_overlap_samples,
         "parent_identity_expected": repr(identity_exact),
         "identities_observed": sorted(repr(item) for item in result.observed_identities),
@@ -1198,6 +1305,7 @@ def main() -> int:
     matrix_selftest(matrix_text, mutations)
     matrix = parse_matrix(matrix_text, mutations)
     failure_report_selftest()
+    tick_selftest()
     schema_contract(module)
     shell_contract()
     mutation_contract(module, matrix, mutations)
