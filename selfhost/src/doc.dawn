@@ -30,7 +30,12 @@ use front/docs.{
 use front/ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects, VisPub
 }
-use driver/analyze.{Program, CheckedMod, analyze_standalone}
+use driver/analyze.{
+  Program, CheckedMod, analyze_standalone, load_directory, analyze_program, own_module_paths
+}
+use driver/fsmem
+use std/memfs
+use compiler_plan/envmem
 use driver/doclinks.{LinkScope, LinkTarget, resolve_link}
 use check/cx.{Cx}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
@@ -528,22 +533,30 @@ fn std_modules(std: StdCtx) -> Map[String, Module] = {
 }
 
 ## A project's pub API. `std` is the library the project was checked against,
-## which a link in the project's docs may land in.
-pub(pkg) fn project_json(prog: Program, std: StdCtx) -> DocOut !Fs = {
+## which a link in the project's docs may land in. `own` is the project's own
+## module paths (`analyze.own_module_paths`): only those are written. A
+## `[deps]` module stays in the link scope, so a link into a dependency still
+## lands and still carries its `target`, but its docs are that package's to
+## publish and to check, once, under its own `dawn doc`.
+pub(pkg) fn project_json(prog: Program, std: StdCtx, own: Set[String]) -> DocOut !Fs = {
   var mods = std_modules(std)
   for cm in prog.modules { mods = map.insert(mods, cm.mod_path, cm.m) }
   var w = w_new()
   w = open_obj(w)
   w = w_key(w, "modules")
   w = open_arr(w)
+  var any = false
   for cm in prog.modules {
-    let text = match io.read_file(cm.path) {
-      Ok(t) -> t
-      Err(e) -> panic("cannot re-read " ++ cm.path ++ ": " ++ e.message)
+    if set.has(own, cm.mod_path) {
+      let text = match io.read_file(cm.path) {
+        Ok(t) -> t
+        Err(e) -> panic("cannot re-read " ++ cm.path ++ ": " ++ e.message)
+      }
+      w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)), module_examples(text, cm.m))
+      any = true
     }
-    w = module_json(w, cm, lk_of(cm, mods, doc_src_of(text)), module_examples(text, cm.m))
   }
-  w = close_arr(w, len(prog.modules) > 0)
+  w = close_arr(w, any)
   w = close_obj(w)
   w_out(w)
 }
@@ -1396,4 +1409,45 @@ test "a pub declaration's examples follow its doc, and nothing else gains a key"
     assert not str.contains(j, "dec(1)")
     assert len(str.split(j, "\"examples\"")) == 3
   }))
+}
+
+test "a project's doc carries its own modules, and a link into a dependency keeps its target" {
+  # A table, not the disk: the project and its [deps] package are written
+  # here and nowhere else (the analyze tests' `in_mem`, which is private to
+  # that module).
+  let (pair, _) = memfs.with_fs(fsmem.mem_std(memfs.BASE),
+    () => io.with_proc_real(
+      () => envmem.with_env_table(memfs.BASE, [("DAWN_PKG_CACHE", "${memfs.BASE}/pkg-cache")], () => {
+        let base = "/tmp/dawn-selfhost-doc/own"
+        let _ = io.mkdirs("${base}/lib/src")
+        let _ = io.mkdirs("${base}/app/src/deep")
+        let _ = io.write_file("${base}/lib/dawn.toml", "schema = 1\nname = \"lib\"\n")
+        let _ = io.write_file("${base}/lib/src/text.dawn", "## A tag.\npub fn tag() -> String = \"w\"\n")
+        let _ = io.write_file("${base}/app/dawn.toml", "schema = 1\nname = \"app\"\n\n[deps]\nl = \"../lib\"\n")
+        let _ = io.write_file("${base}/app/src/deep/util.dawn", "## One.\npub fn one() -> Int = 1\n")
+        let _ = io.write_file("${base}/app/src/main.dawn",
+          "use l/text\nuse deep/util\n\n## Calls [`text.tag`].\npub fn f() -> String = text.tag()\n" ++
+            "pub fn main() -> Unit !io = println(f() ++ to_string(util.one()))\n")
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
+          Ok(sc) -> sc
+          Err(e) -> panic("std: ${std_load_error_text(e)}")
+        }
+        let loaded = load_directory("${base}/app")
+        let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+        assert len(prog.diags) == 0
+        # the dependency was loaded and checked: what is left out below is left
+        # out by the doc, not by the load
+        assert len(filter(prog.modules, cm => cm.mod_path == "lib/text")) == 1
+        ok_json(project_json(prog, std, own_module_paths(loaded)))
+      })))
+  let (j, _) = pair
+  assert str.contains(j, "\"path\": \"deep/util\"")
+  assert str.contains(j, "\"path\": \"main\"")
+  # the dependency's module is not published here: its docs are its own package's
+  assert not str.contains(j, "\"path\": \"lib/text\"")
+  assert not str.contains(j, "A tag.")
+  # but a link into it still lands, and says where
+  assert str.contains(j, "\"text\": \"text.tag\"")
+  assert str.contains(j, "\"module\": \"lib/text\"")
+  assert str.contains(j, "\"name\": \"tag\"")
 }

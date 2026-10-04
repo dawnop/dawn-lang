@@ -14,13 +14,13 @@ What goes in, and why the shape is ours rather than `dawn doc`'s:
     the stdlib and the packages are compared by the same code. A package's
     entry carries the version its `dawn.toml` declares; the file as a whole
     carries the toolchain VERSION.
-  * dependency modules are dropped. `dawn doc packages/tea-dom` reports
-    `json2/value` and `tea_core/tree` alongside `dsl` and `wire`, because it
-    documents what the package compiles against. In a *published surface*
-    snapshot those modules belong to their own unit, and leaving them in would
-    report one change in json2 eight times over. The filter is the package's
-    own `src/**/*.dawn` relative paths, which is exactly the set `dawn doc`
-    prints unprefixed.
+  * a package's unit holds its own modules and nothing else, and `dawn doc`
+    is what keeps it that way: it publishes only the modules its loader read
+    from the target's own tree, never the `[deps]` ones the `use` closure
+    reached (docs/doc-comments-design.md). This script used to drop those
+    itself, by the package's `src/**/*.dawn` file names, which was a second
+    opinion about what the loader already knew; a dependency's module is in
+    its own unit, once, so one change in json2 is reported once.
   * builtins and prelude traits become synthetic modules (`<builtins>/io`,
     `<prelude>`). `dawn doc --stdlib` returns them outside `modules`, and they
     are surface too: `println` is as public as anything in `std/list`, and a
@@ -152,7 +152,7 @@ def clean_module(module: dict, path: str, where: str) -> dict:
     return out
 
 
-def normalize(doc: dict, own: "set[str] | None", where: str) -> list:
+def normalize(doc: dict, where: str) -> list:
     """`dawn doc` output as this snapshot's uniform module list."""
     check_keys(doc, DOC_KEYS, where)
     modules = []
@@ -161,8 +161,6 @@ def normalize(doc: dict, own: "set[str] | None", where: str) -> list:
         path = module.get("path")
         if not isinstance(path, str):
             raise SnapshotError(f"{where}: a module has no path")
-        if own is not None and path not in own:
-            continue  # a dependency's module; it belongs to the dependency's unit
         modules.append(clean_module(module, path, where))
     for group in doc.get("groups", []):
         check_keys(group, GROUP_KEYS, where)
@@ -226,26 +224,22 @@ def snapshot(root: str, dawn: list) -> dict:
     units = {
         "std": {
             "version": toolchain_version(root),
-            "modules": normalize(run_doc(dawn, ["--stdlib"], root), None, "std"),
+            "modules": normalize(run_doc(dawn, ["--stdlib"], root), "std"),
         }
     }
     for manifest_path in sorted(glob.glob(os.path.join(root, "packages", "*", "dawn.toml"))):
         pkg = os.path.dirname(manifest_path)
         rel = os.path.relpath(pkg, root)
         fields = manifest(manifest_path)
-        src = os.path.join(pkg, "src")
-        own = {
-            os.path.splitext(os.path.relpath(f, src))[0].replace(os.sep, "/")
-            for f in glob.glob(os.path.join(src, "**", "*.dawn"), recursive=True)
-        }
-        if not own:
-            raise SnapshotError(f"{rel}: no sources under src/")
         name = fields["name"]
         if name in units:
             raise SnapshotError(f"{rel}: unit name {name!r} is already taken")
+        modules = normalize(run_doc(dawn, [rel], root), name)
+        if not modules:
+            raise SnapshotError(f"{rel}: dawn doc published no modules")
         units[name] = {
             "version": fields["version"],
-            "modules": normalize(run_doc(dawn, [rel], root), own, name),
+            "modules": modules,
         }
     return {"schema": SCHEMA, "toolchain": units["std"]["version"], "units": units}
 
@@ -265,9 +259,6 @@ CLEAN_DOC = {
                     "methods": [{"name": "go", "sig": "fn go[W: Tr](w: W) -> W",
                                  "hasDefault": False, "doc": "prose"}]}],
         "impls": ["Show[T]"],
-    }, {
-        "path": "dep/mod",
-        "fns": [{"name": "g", "sig": "fn g() -> Int"}],
     }],
     "groups": [{"name": "io", "fns": [{"name": "println",
                                        "sig": "fn println(s: String) -> Unit !io"},
@@ -288,14 +279,13 @@ def self_test(verbose: bool = True) -> int:
     from a branch that cannot be taken.
     """
     failures = []
-    modules = normalize(CLEAN_DOC, {"m"}, "control")
+    modules = normalize(CLEAN_DOC, "control")
     paths = [m["path"] for m in modules]
     for want, why in (
         (paths == ["<builtins>/io", "<prelude>", "m"], f"unexpected modules {paths}"),
         ("doc" not in json.dumps(modules), "a doc comment survived into the snapshot"),
         ("links" not in json.dumps(modules), "a doc's links survived into the snapshot"),
         ("examples" not in json.dumps(modules), "a declaration's examples survived into the snapshot"),
-        ("dep/mod" not in paths, "a dependency's module was not filtered out"),
         (modules[2]["traits"][0]["assoc"] == ["It"], "the object assoc form was not flattened"),
         (modules[1]["traits"][0]["assoc"] == ["Item"], "the string assoc form was not kept"),
         (modules[0]["fns"][1].get("comptime") == "refused", "a builtin's comptime flag was not kept"),
@@ -330,7 +320,7 @@ def self_test(verbose: bool = True) -> int:
     )
     for label, doc in mutants:
         try:
-            normalize(doc, {"m"}, "mutant")
+            normalize(doc, "mutant")
         except SnapshotError:
             if verbose:
                 print(f"  refused: {label}")

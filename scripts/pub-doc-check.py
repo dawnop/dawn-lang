@@ -35,10 +35,11 @@ published surface is what `dawn doc` writes, so the check reads exactly that.
     required module doc would be a second header paragraph on 33 files
     written to satisfy a gate. std's module docs are held by the test in
     selfhost/src/doc.dawn, not here.
-  * A package's dump also carries the modules of its dependencies (tea-dom
-    documents `json2/lexer`). Only the modules whose source is under the
-    package's own src/ are checked, so a dependency's gap is reported once,
-    under the package that owns it.
+  * Every module in a dump is checked. `dawn doc` publishes only the
+    target's own modules, never the `[deps]` ones its `use` closure reached
+    (docs/doc-comments-design.md), so a dependency's gap is reported once,
+    under the package that owns it. This script used to drop those modules
+    itself, by the file names under each package's src/.
 
 Cost: eleven `dawn doc` runs, up to four at once, on a toolchain already
 built. The measured wall clock is in the comment above the step in gates.yml.
@@ -67,30 +68,14 @@ JVM_OPTS = "-Xss512m -Xmx2g -XX:+UseSerialGC -XX:TieredStopAtLevel=1"
 JOBS = min(4, os.cpu_count() or 1)
 
 
-def own_modules(pkg_dir):
-    """Module paths whose source lives under `pkg_dir/src`."""
-    src = os.path.join(pkg_dir, "src")
-    out = set()
-    for dirpath, _dirs, files in os.walk(src):
-        for f in files:
-            if f.endswith(".dawn"):
-                rel = os.path.relpath(os.path.join(dirpath, f), src)
-                out.add(rel[: -len(".dawn")].replace(os.sep, "/"))
-    return out
-
-
-def missing(label, dump, owned):
-    """`label/module.name` for every top-level pub declaration without a doc.
-
-    `owned` is None to check every module in the dump."""
+def missing(label, dump):
+    """`label/module.name` for every top-level pub declaration without a doc."""
     found = []
     modules = dump.get("modules")
     if not isinstance(modules, list):
         raise ValueError(f"{label}: no `modules` list in the dump")
     for m in modules:
         path = m["path"]
-        if owned is not None and path not in owned:
-            continue
         for kind in KINDS:
             if kind not in m:
                 raise ValueError(f"{label}/{path}: no `{kind}` list in the dump")
@@ -123,13 +108,13 @@ def run_doc(args):
 
 
 def check(jobs, workers=JOBS):
-    """jobs: (label, thunk producing the dump, owned modules or None)."""
+    """jobs: (label, thunk producing the dump)."""
     failures = []
     workers = max(1, min(len(jobs), workers))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [(label, owned, ex.submit(thunk)) for label, thunk, owned in jobs]
-        for label, owned, fut in futs:
-            failures += missing(label, fut.result(), owned)
+        futs = [(label, ex.submit(thunk)) for label, thunk in jobs]
+        for label, fut in futs:
+            failures += missing(label, fut.result())
     return failures
 
 
@@ -153,9 +138,6 @@ def self_test():
         {"path": "m", "fns": [{"name": "f", "doc": None}, {"name": "g", "doc": "G."}],
          "types": [{"name": "T", "doc": None}], "consts": [], "traits": [],
          "effects": [{"name": "E", "doc": None}]},
-        # a dependency's module: not this package's to document
-        {"path": "dep2/x", "fns": [{"name": "h", "doc": None}], "types": [],
-         "consts": [], "traits": [], "effects": []},
     ]}
     fails = 0
 
@@ -165,17 +147,15 @@ def self_test():
             print(f"self-test FAIL {name}: got {got!r}, want {want!r}")
             fails += 1
 
-    expect("documented passes", missing("p", documented, {"m"}), [])
+    expect("documented passes", missing("p", documented), [])
     expect("missing docs are named",
-           missing("p", bare, {"m"}), ["p/m.f", "p/m.T", "p/m.E"])
-    expect("unowned check sees dependency modules",
-           missing("p", bare, None), ["p/m.f", "p/m.T", "p/m.E", "p/dep2/x.h"])
+           missing("p", bare), ["p/m.f", "p/m.T", "p/m.E"])
     expect("a path that already names its package is not prefixed twice",
            missing("std", {"modules": [{"path": "std/gpu", "fns": [], "types": [
                {"name": "RefFn", "doc": None}], "consts": [], "traits": [],
-               "effects": []}]}, None), ["std/gpu.RefFn"])
+               "effects": []}]}), ["std/gpu.RefFn"])
     try:
-        missing("p", {"modules": [{"path": "m", "fns": []}]}, None)
+        missing("p", {"modules": [{"path": "m", "fns": []}]})
         expect("a dump without a kind is refused", "accepted", "refused")
     except ValueError:
         pass
@@ -197,12 +177,6 @@ def self_test():
         expect("cli: dump with a gap exits 1", b.returncode, 1)
         expect("cli: the gap is named", "p/m.T" in b.stdout, True)
 
-    # the owned-module set is read from the tree, so test it on the tree
-    expect("json owns its lexer",
-           "lexer" in own_modules(os.path.join(ROOT, "packages", "json")), True)
-    expect("tea-dom does not own json2/lexer",
-           "json2/lexer" in own_modules(os.path.join(ROOT, "packages", "tea-dom")),
-           False)
 
     if fails:
         return 1
@@ -226,18 +200,17 @@ def main():
             label, _, path = spec.partition("=")
             if not path:
                 ap.error(f"--json wants LABEL=FILE, got {spec!r}")
-            jobs.append((label, (lambda p=path: json.load(open(p))), None))
+            jobs.append((label, (lambda p=path: json.load(open(p)))))
         return report(check(jobs, a.jobs), len(jobs))
     # bin/dawn rebuilds a stale toolchain before it runs anything, and four
     # launchers finding it stale at once would rebuild it four times over
     # (measured: 63s instead of 8s after a std edit). One run first, alone.
     subprocess.run([os.path.join(ROOT, "bin", "dawn"), "--version"],
                    cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
-    jobs = [("std", lambda: run_doc(["--stdlib"]), None)]
+    jobs = [("std", lambda: run_doc(["--stdlib"]))]
     for pkg in packages():
         d = os.path.join(ROOT, "packages", pkg)
-        jobs.append((pkg, (lambda d=d: run_doc([os.path.relpath(d, ROOT)])),
-                     own_modules(d)))
+        jobs.append((pkg, (lambda d=d: run_doc([os.path.relpath(d, ROOT)]))))
     return report(check(jobs, a.jobs), len(jobs))
 
 
