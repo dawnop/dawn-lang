@@ -609,10 +609,13 @@ run_mutant() {
   case "$1" in
     recurse-opaque-representation)
       # the witness is in the tree: std/bytes declares `pub opaque type Buf =
-      # Array[Int]`, a public opaque over a standard-library-internal
-      # representation. Walking the representation makes the bundled std
-      # itself unloadable.
-      mutant_breaks_std "$1" 'public function `buf` exposes standard-library-internal type `Array`' ;;
+      # BufRep`, a public opaque over a private record (until 2026-10 it was
+      # `Array[Int]`, a standard-library-internal type, and this named
+      # `Array`). Walking the representation makes the bundled std itself
+      # unloadable.
+      grep -q '^pub opaque type Buf = BufRep$' "$root/std/bytes.dawn" \
+        || fail "$1: the witness moved; std/bytes no longer declares Buf over BufRep, retarget this mutant"
+      mutant_breaks_std "$1" 'public function `buf` exposes private type `BufRep`' ;;
     skip-opaque-args)
       mutant_drops "$1" reject_opaque_arg 'public function `leak`' ;;
     opaque-args-existential)

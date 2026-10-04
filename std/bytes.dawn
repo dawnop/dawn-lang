@@ -34,24 +34,70 @@ use std/char
 ## reading the frontier, so building a megabyte is linear and not quadratic.
 ## [`buf_at`] is here because the callers that need this are decompressors, and an
 ## LZ77 back-reference reads output that was written a moment ago.
-pub opaque type Buf = Array[Int]
+pub opaque type Buf = BufRep
+
+# What a Buf holds: every byte written so far, as full chunks of exactly
+# CHUNK bytes already frozen into `Bytes`, then the partial chunk still
+# being written as boxed Ints. Until 2026-10 it was one `Array[Int]`, and an
+# `Array` slot is a boxed Int on both backends: about 16 B a byte on the JVM
+# for bytes under 0x80 and 40 for the rest (`Long.valueOf` caches only
+# -128..127), 33 on native whatever the value. 32 MiB of 0xFF took 1.4 GB,
+# which is the multiplier pkgfetch's MAX_EXPANDED_BYTES was cut to fit
+# (#405, docs/inflate-default-cap-design.md 5). Chunked, a byte costs one
+# byte plus at most one chunk of boxed tail.
+#
+# This is Haskell's `Builder` shape, chosen over a new runtime byte-buffer
+# type because it is one std file: no backend, interpreter or seed change.
+# Every chunk is exactly CHUNK bytes, so `buf_at` finds a byte with a shift
+# and a mask. The value semantics are still `array_push`'s, applied to both arrays: an older
+# version that keeps writing copies its tail, never another version's.
+type BufRep = { chunks: Array[Bytes], tail: Array[Int] }
+
+# 4 KiB: as fast as 64 KiB or faster on every measured path, and a smaller
+# boxed tail (docs/inflate-default-cap-design.md 5.6 has the numbers).
+const CHUNK_BITS: Int = 12
+const CHUNK: Int = 4096
+const CHUNK_MASK: Int = 4095
 
 ## An empty buffer.
-pub fn buf() -> Buf = array_new()
+pub fn buf() -> Buf = BufRep { chunks: array_new(), tail: array_new() }
+
+# A full tail becomes the next chunk.
+fn settle(chunks: Array[Bytes], tail: Array[Int]) -> BufRep =
+  if array_len(tail) == CHUNK {
+    BufRep { chunks: array_push(chunks, bytes_from_array(tail)), tail: array_new() }
+  } else {
+    BufRep { chunks: chunks, tail: tail }
+  }
 
 ## Append one byte. A value outside 0..255 is truncated, as a byte store is.
-pub fn put(b: Buf, byte: Int) -> Buf = array_push(b, byte & 0xFF)
+pub fn put(b: Buf, byte: Int) -> Buf = {
+  let r: BufRep = b
+  settle(r.chunks, array_push(r.tail, byte & 0xFF))
+}
 
 ## Append all of `src`.
 pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
-  var out = b
+  let r: BufRep = b
+  var chunks = r.chunks
+  var tail = r.tail
   var i = 0
   let n = bytes_len(src)
   while i < n {
-    out = array_push(out, bytes_at(src, i))
-    i = i + 1
+    if array_len(tail) == 0 && n - i >= CHUNK {
+      # on a chunk boundary with a whole chunk to go: slice it, unboxed
+      chunks = array_push(chunks, bytes_slice(src, i, i + CHUNK))
+      i = i + CHUNK
+    } else {
+      tail = array_push(tail, bytes_at(src, i))
+      i = i + 1
+      if array_len(tail) == CHUNK {
+        chunks = array_push(chunks, bytes_from_array(tail))
+        tail = array_new()
+      }
+    }
   }
-  out
+  BufRep { chunks: chunks, tail: tail }
 }
 
 ## How many bytes have been written.
@@ -59,7 +105,10 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
 ## `size` and not [`len`]: a named exception to one-concept-one-name, because
 ## `len(b: Bytes)` above already holds that name and Dawn has no overloading
 ## (CONTRIBUTING §naming; history in `docs/stdlib-naming.md`).
-pub fn size(b: Buf) -> Int = array_len(b)
+pub fn size(b: Buf) -> Int = {
+  let r: BufRep = b
+  (array_len(r.chunks) << CHUNK_BITS) + array_len(r.tail)
+}
 
 ## The byte at `i`, as 0..255. Out of range panics, exactly as `at(b: Bytes, i)`
 ## does — it is the same question asked of the half-built buffer.
@@ -68,10 +117,36 @@ pub fn size(b: Buf) -> Int = array_len(b)
 ## because `get` is criterion 2's word and this asserts (spec §4.8). The second
 ## named exception to one-concept-one-name (CONTRIBUTING §naming; history and
 ## the rejected alternative in `docs/stdlib-naming.md`).
-pub fn buf_at(b: Buf, i: Int) -> Int = array_get(b, i)
+pub fn buf_at(b: Buf, i: Int) -> Int = {
+  let r: BufRep = b
+  let done = array_len(r.chunks) << CHUNK_BITS
+  if i >= done {
+    if i - done < array_len(r.tail) { array_get(r.tail, i - done) } else { panic("bytes.buf_at: index out of range") }
+  } else if i >= 0 {
+    bytes_at(array_get(r.chunks, i >> CHUNK_BITS), i & CHUNK_MASK)
+  } else {
+    panic("bytes.buf_at: index out of range")
+  }
+}
 
 ## The finished bytes.
-pub fn freeze(b: Buf) -> Bytes = bytes_from_array(b)
+pub fn freeze(b: Buf) -> Bytes = {
+  let r: BufRep = b
+  let k = array_len(r.chunks)
+  let last = bytes_from_array(r.tail)
+  if k == 0 { last } else { join_chunks(r.chunks, last, 0, k + 1) }
+}
+
+# Leaves [lo, hi) of the chunks followed by `last`, joined pairwise down a
+# balanced tree: each byte is copied once per level, log2 of the chunk count,
+# where joining left to right copies the growing prefix once per chunk.
+fn join_chunks(chunks: Array[Bytes], last: Bytes, lo: Int, hi: Int) -> Bytes =
+  if hi - lo == 1 {
+    if lo == array_len(chunks) { last } else { array_get(chunks, lo) }
+  } else {
+    let mid = (lo + hi) / 2
+    join_chunks(chunks, last, lo, mid) ++ join_chunks(chunks, last, mid, hi)
+  }
 
 ## The UTF-8 bytes of `s`.
 pub fn utf8(s: String) -> Bytes = bytes_utf8(s)
@@ -542,6 +617,84 @@ test "a Buf appends, reads back, and truncates what will not fit in a byte" {
   match catch_panic(() => buf_at(buf(), 0)) {
     Ok(_) -> { assert false }
     Err(_) -> ()
+  }
+}
+
+# The byte the chunked tests write at position `i`: every value 0..255 shows
+# up in each chunk, and no chunk is a shifted copy of its neighbour.
+fn nth_byte(i: Int) -> Int = (i * 7 + i / CHUNK) & 0xFF
+
+fn buf_of_nth(from: Int, to: Int) -> Buf = {
+  var b = buf()
+  var i = from
+  while i < to {
+    b = put(b, nth_byte(i))
+    i = i + 1
+  }
+  b
+}
+
+test "a Buf past one chunk reads back and freezes every byte where it was put" {
+  let n = 3 * CHUNK + 5
+  let b = buf_of_nth(0, n)
+  assert size(b) == n
+  let f = freeze(b)
+  assert len(f) == n
+  var i = 0
+  while i < n {
+    assert buf_at(b, i) == nth_byte(i)
+    assert at(f, i) == nth_byte(i)
+    i = i + 1
+  }
+  for k in [0 - 1, n, n + CHUNK] {
+    match catch_panic(() => buf_at(b, k)) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+  }
+  # exactly whole chunks: an empty tail after them
+  let w = buf_of_nth(0, 2 * CHUNK)
+  assert size(w) == 2 * CHUNK
+  assert freeze(w) == slice(f, 0, 2 * CHUNK)
+  assert buf_at(w, 2 * CHUNK - 1) == nth_byte(2 * CHUNK - 1)
+}
+
+test "an older Buf that keeps writing leaves the newer one alone, across a chunk edge" {
+  let a = buf_of_nth(0, CHUNK - 1)
+  # `x` fills the chunk and freezes it; `y` writes the same slot from `a`
+  let x = put(a, 1)
+  let y = put(a, 2)
+  let z = put(put(x, 3), 4)
+  assert size(a) == CHUNK - 1
+  assert buf_at(x, CHUNK - 1) == 1
+  assert buf_at(y, CHUNK - 1) == 2
+  assert at(freeze(y), CHUNK - 1) == 2
+  assert at(freeze(x), CHUNK - 1) == 1
+  assert size(z) == CHUNK + 2
+  assert at(freeze(z), CHUNK) == 3
+  # writing on from `x` again after `z` did: a copy, and `z` keeps its bytes
+  let x2 = put(x, 9)
+  assert buf_at(x2, CHUNK) == 9
+  assert buf_at(z, CHUNK) == 3
+  assert freeze(a) == slice(freeze(z), 0, CHUNK - 1)
+}
+
+test "put_bytes past a chunk is put byte by byte, wherever it starts" {
+  let src = freeze(buf_of_nth(0, 2 * CHUNK + 300))
+  for lead in [0, 1, CHUNK - 1, CHUNK] {
+    let head = buf_of_nth(0, lead)
+    var slow = head
+    var i = 0
+    while i < len(src) {
+      slow = put(slow, at(src, i))
+      i = i + 1
+    }
+    let fast = put_bytes(head, src)
+    assert size(fast) == lead + len(src)
+    assert freeze(fast) == freeze(slow)
+    assert buf_at(fast, lead + CHUNK + 7) == at(src, CHUNK + 7)
+    # the head is still what it was
+    assert size(head) == lead
   }
 }
 
