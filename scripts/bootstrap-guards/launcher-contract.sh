@@ -788,7 +788,7 @@ if prepare_mutant stamp-first; then
       invoke "$mutant_root" "$mutant_log" --version > /dev/null 2> "$work/mutant-stamp-first.err"; then
     bad "stamp-first mutant failed before its ordering assertion"
   else
-    first_promotion=$(grep -E '/build/dawn-selfhost\.(jar|inputs|stamp)$' "$mutant_mv_log" | head -n 1)
+    first_promotion=$(grep -E '/build/dawn-selfhost\.(jar|inputs|stamp)$' "$mutant_mv_log" | sed -n 1p)
     if [[ $first_promotion != "$mutant_root/build/dawn-selfhost.stamp" ]]; then
       bad "stamp-first mutant did not promote the marker first"
     else

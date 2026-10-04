@@ -147,7 +147,7 @@ if check_guest "$work/base"; then
   echo "OK   guest flags: the pinned session replays, byte for byte"
 else
   echo "FAIL: the pinned flags session is red before any mutant was applied:" >&2
-  diff -u "$work/expected.txt" "$work/guest-actual.txt" | head -20 >&2
+  diff -u "$work/expected.txt" "$work/guest-actual.txt" | sed -n '1,20p' >&2
   exit 1
 fi
 

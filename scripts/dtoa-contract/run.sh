@@ -30,7 +30,7 @@ cc_bin="${CC:-cc}"
 # check that can see a wrong dtoa rule reports success by not running. The
 # repository's own toolchain is JDK 21, so there is no supported configuration
 # in which this branch is reached by accident.
-feature=$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -1)
+feature=$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | sed -n 1p)
 if [ -z "$feature" ] || [ "$feature" -lt 19 ]; then
   echo "FAIL: JDK ${feature:-?} has the pre-2022 FloatingDecimal (or no java at" >&2
   echo "      all); the oracle needs 19+. Run this under the repository's JDK." >&2

@@ -150,8 +150,8 @@ pair_expect_error() { # expected label args...
     echo "FAIL: $label did not match stdout-empty + stderr-bytes + exit-2"
     [ ! -s "$OUT/j.out" ] || { echo "--- unexpected JVM stdout"; head -20 "$OUT/j.out"; }
     [ ! -s "$OUT/n.out" ] || { echo "--- unexpected native stdout"; head -20 "$OUT/n.out"; }
-    diff -u "$OUT/expected.txt" "$OUT/j.err" | head -20 || true
-    diff -u "$OUT/expected.txt" "$OUT/n.err" | head -20 || true
+    diff -u "$OUT/expected.txt" "$OUT/j.err" | sed -n '1,20p' || true
+    diff -u "$OUT/expected.txt" "$OUT/n.err" | sed -n '1,20p' || true
     fail=1
   else
     echo "OK   $label (stdout empty, stderr exact, exit 2)"
@@ -201,8 +201,8 @@ emitc_expect_error() { # expected label args...
     echo "FAIL: $label did not match stdout-empty + stderr-bytes + exit-2"
     [ ! -s "$OUT/j.out" ] || { echo "--- unexpected JVM stdout"; head -20 "$OUT/j.out"; }
     [ ! -s "$OUT/n.out" ] || { echo "--- unexpected native stdout"; head -20 "$OUT/n.out"; }
-    diff -u "$OUT/expected.txt" "$OUT/j.err" | head -20 || true
-    diff -u "$OUT/expected.txt" "$OUT/n.err" | head -20 || true
+    diff -u "$OUT/expected.txt" "$OUT/j.err" | sed -n '1,20p' || true
+    diff -u "$OUT/expected.txt" "$OUT/n.err" | sed -n '1,20p' || true
     fail=1
   else
     echo "OK   $label (stdout empty, stderr exact, exit 2)"
@@ -228,10 +228,10 @@ run_expect() { # exit stdout stderr label args...
     ! cmp -s "$OUT/n.err" "$OUT/expected.err"
   then
     echo "FAIL: $label did not match absolute stdout/stderr/exit $want"
-    echo "--- JVM stdout"; diff -u "$OUT/expected.out" "$OUT/j.out" | head -20 || true
-    echo "--- native stdout"; diff -u "$OUT/expected.out" "$OUT/n.out" | head -20 || true
-    echo "--- JVM stderr"; diff -u "$OUT/expected.err" "$OUT/j.err" | head -20 || true
-    echo "--- native stderr"; diff -u "$OUT/expected.err" "$OUT/n.err" | head -20 || true
+    echo "--- JVM stdout"; diff -u "$OUT/expected.out" "$OUT/j.out" | sed -n '1,20p' || true
+    echo "--- native stdout"; diff -u "$OUT/expected.out" "$OUT/n.out" | sed -n '1,20p' || true
+    echo "--- JVM stderr"; diff -u "$OUT/expected.err" "$OUT/j.err" | sed -n '1,20p' || true
+    echo "--- native stderr"; diff -u "$OUT/expected.err" "$OUT/n.err" | sed -n '1,20p' || true
     echo "exits: jvm=$PAIR_J native=$PAIR_N want=$want"
     fail=1
   else
@@ -402,8 +402,8 @@ std_expect() { # want label dir env-args -- dawn-args...
     [ -s "$OUT/j.err" ] || [ -s "$OUT/n.err" ]
   then
     echo "FAIL: $label did not print $want on both backends (exits jvm=$PAIR_J native=$PAIR_N)"
-    echo "--- JVM stdout"; diff -u "$OUT/expected.out" "$OUT/j.out" | head -10 || true
-    echo "--- native stdout"; diff -u "$OUT/expected.out" "$OUT/n.out" | head -10 || true
+    echo "--- JVM stdout"; diff -u "$OUT/expected.out" "$OUT/j.out" | sed -n '1,10p' || true
+    echo "--- native stdout"; diff -u "$OUT/expected.out" "$OUT/n.out" | sed -n '1,10p' || true
     echo "--- JVM stderr"; head -10 "$OUT/j.err"
     echo "--- native stderr"; head -10 "$OUT/n.err"
     fail=1
@@ -1031,7 +1031,7 @@ DAWN_PKG_CACHE="$CACHE_EMPTY" run_expect 0 $'0 entries checked, 0 bad\n' "" \
 # touched, plus a copy of its entry filed under a name it does not hash to.
 CACHE_FULL="$OUT/pkgcache-verify"
 cp -r "$OUT/pkgcache-j" "$CACHE_FULL"
-GOOD_ENTRY=$(cd "$CACHE_FULL" && ls -d d1-* 2>/dev/null | head -1)
+GOOD_ENTRY=$(cd "$CACHE_FULL" && ls -d d1-* 2>/dev/null | sed -n 1p)
 if [ -z "$GOOD_ENTRY" ]; then
   echo "FAIL: leg 3 left no d1 entry in $OUT/pkgcache-j to verify"
   fail=1
@@ -1096,7 +1096,7 @@ const D: Int = down(20000)
 pub fn main() -> Unit !io = println("${D}")
 EOF
 pair_expect_exit 1 "comptime depth (past the limit)" check "$DEPTH_DEEP"
-DEPTH_LIMIT=$(sed -n 's/^error: comptime: call depth limit (\([0-9]*\)) exceeded$/\1/p' "$OUT/n.txt" | head -1)
+DEPTH_LIMIT=$(sed -n 's/^error: comptime: call depth limit (\([0-9]*\)) exceeded$/\1/p' "$OUT/n.txt" | sed -n 1p)
 if [ -z "$DEPTH_LIMIT" ]; then
   echo "FAIL: comptime depth (past the limit): no depth diagnostic"
   head -5 "$OUT/n.txt"

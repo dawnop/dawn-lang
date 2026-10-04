@@ -326,7 +326,7 @@ expect_producer_failure optional-directory \
   --lock-directory "$optional_case" "$optional_case/app"
 echo "PASS  required files and present optional files fail closed on type changes"
 
-if "$dawn" --help | grep -q '__source-inputs'; then
+if "$dawn" --help | grep '__source-inputs' >/dev/null; then
   fail "bootstrap source input command leaked into public help"
 fi
 echo "PASS  source input manifest command remains hidden"

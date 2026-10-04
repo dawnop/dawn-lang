@@ -49,9 +49,9 @@ n_ok=0
 for f in "$here"/accept/*.dawn; do
   [ -e "$f" ] || continue
   out=$(./bin/dawn __parse "$f" 2>&1)
-  if printf '%s\n' "$out" | grep -q '^!'; then
+  if grep -q '^!' <<<"$out"; then
     echo "FAIL accept $(basename "$f") did not parse:" >&2
-    printf '%s\n' "$out" | grep '^!' | head -5 >&2
+    printf '%s\n' "$out" | grep '^!' | sed -n '1,5p' >&2
     fail=1
   else
     n_ok=$((n_ok + 1))

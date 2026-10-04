@@ -61,9 +61,9 @@ for f in "${targets[@]}"; do
   # check_module when the module has parse diagnostics), so its golden would
   # silently be a *parser* golden. This corpus is about the checker; a case
   # that stops parsing is a broken case, not a new expectation.
-  if ./bin/dawn __parse "$f" 2>&1 | grep -q '^!'; then
+  if ./bin/dawn __parse "$f" 2>&1 | grep '^!' >/dev/null; then
     echo "FAIL: $name does not parse -- this corpus only records checker diagnostics" >&2
-    ./bin/dawn __parse "$f" 2>&1 | grep '^!' | head -3 >&2
+    ./bin/dawn __parse "$f" 2>&1 | grep '^!' | sed -n '1,3p' >&2
     fail=1
     continue
   fi

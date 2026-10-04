@@ -195,7 +195,7 @@ expect_diags() {
   }
   local message
   for message in "$@"; do
-    printf '%s\n' "$got" | grep -Fq "$message" || {
+    grep -Fq "$message" <<<"$got" || {
       echo "$got" >&2
       fail "$name: missing expected diagnostic: $message"
     }
@@ -270,7 +270,7 @@ check_with_std() {
 expect_std_refuses() {
   local stddir=$1 message=$2 got
   got=$(check_with_std "$stddir")
-  printf '%s' "$got" | grep -Fq "$message" || {
+  grep -Fq "$message" <<<"$got" || {
     printf '%s\n' "$got" >&2
     fail "the bundled std was accepted, or refused for another reason: $message"
   }
@@ -357,7 +357,7 @@ expect_diags reject_two_occurrences 2 \
 expect_diags main_effect 1 'main cannot declare the effect `Ask`'
 
 # design §三: the surface diagnostic precedes an unrelated body diagnostic
-first=$(diags_of "$dawn" "$cases/order_before_body.dawn" | head -1)
+first=$(diags_of "$dawn" "$cases/order_before_body.dawn" | sed -n 1p)
 case "$first" in
   *'public function `leak` exposes private type `Secret`'*) ;;
   *) echo "$first" >&2; fail "the surface diagnostic no longer comes first" ;;
@@ -438,7 +438,7 @@ mutant_drops() {
   mutant=$(build_mutant "$mutation")
   got=$(diags_of "$mutant" "$cases/$name.dawn")
   refuse_std_break "$mutation" "$name" "$got"
-  if printf '%s' "$got" | grep -Fq "$message"; then
+  if grep -Fq "$message" <<<"$got"; then
     echo "$got" >&2
     fail "$mutation: $name still reports its owning diagnostic"
   fi
@@ -450,7 +450,7 @@ mutant_adds() {
   mutant=$(build_mutant "$mutation")
   got=$(diags_of "$mutant" "$cases/$name.dawn")
   refuse_std_break "$mutation" "$name" "$got"
-  printf '%s' "$got" | grep -Fq "$message" || {
+  grep -Fq "$message" <<<"$got" || {
     echo "$got" >&2
     fail "$mutation: $name was still accepted"
   }
@@ -472,7 +472,7 @@ mutant_std_refuses() {
   local mutation=$1 stddir=$2 message=$3 mutant got
   mutant=$(build_mutant "$mutation")
   got=$(check_with_std "$stddir" "$mutant")
-  printf '%s' "$got" | grep -Fq "$message" || {
+  grep -Fq "$message" <<<"$got" || {
     printf '%s\n' "$got" >&2
     fail "$mutation: the std case was still accepted"
   }
@@ -532,7 +532,7 @@ mutant_lsp_offers_internal_std() {
     cat "$out" >&2
     fail "$mutation: the completion list still answers to the audience"
   fi
-  grep -F 'an internal-std module is not offered outside std' "$out" | grep -q '^FAIL' || {
+  grep -F 'an internal-std module is not offered outside std' "$out" | grep '^FAIL' >/dev/null || {
     cat "$out" >&2
     fail "$mutation: the use-completion oracle broke for another reason"
   }
@@ -544,7 +544,7 @@ mutant_lsp_offers_internal_std() {
 mutant_reorders() {
   local mutation=$1 mutant first
   mutant=$(build_mutant "$mutation")
-  first=$(diags_of "$mutant" "$cases/order_before_body.dawn" | head -1)
+  first=$(diags_of "$mutant" "$cases/order_before_body.dawn" | sed -n 1p)
   case "$first" in
     *'public function `leak` exposes private type `Secret`'*)
       fail "$mutation: the surface diagnostic still comes first" ;;
@@ -712,7 +712,7 @@ Sketch[Card]' ;;
       local mutant got
       mutant=$(build_mutant "$1")
       got=$(doc_names "$mutant" "$cases/doc_pkg.dawn")
-      printf '%s\n' "$got" | grep -qx 'seam' || {
+      grep -qx 'seam' <<<"$got" || {
         printf '%s\n' "$got" >&2
         fail "$1: doc still leaves the pub(pkg) function out"
       }

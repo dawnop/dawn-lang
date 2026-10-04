@@ -234,7 +234,7 @@ fi
 listed=$("${DAWN_JVM[@]}" version -m "$ARTIFACT" 2>&1 | sed -n 's/^\tbuild\tb1:\([0-9a-f]\{12\}\).*$/\1/p' || true)
 if [ -z "$listed" ]; then
   echo "FAIL: the toolchain that built the artifact finds no build manifest in it"
-  "${DAWN_JVM[@]}" version -m "$ARTIFACT" 2>&1 | head -5 || true
+  "${DAWN_JVM[@]}" version -m "$ARTIFACT" 2>&1 | sed -n '1,5p' || true
   fail=1
 elif [ "$got" != "$want b1:$listed" ]; then
   echo "FAIL: the artifact says '$got', its manifest lists b1:$listed"
@@ -271,7 +271,7 @@ if [ "$rc" != 0 ]; then
   fail=1
 elif ! cmp -s "$WORK/smoke.expect" "$WORK/smoke.out"; then
   echo "FAIL: the artifact ran the smoke program wrong"
-  diff "$WORK/smoke.expect" "$WORK/smoke.out" | head -20 || true
+  diff "$WORK/smoke.expect" "$WORK/smoke.out" | sed -n '1,20p' || true
   fail=1
 else
   echo "OK   it built and ran a program from a bare directory (embedded std + runtime)"
@@ -288,7 +288,7 @@ if [ "$rc" != 0 ]; then
   fail=1
 elif ! cmp -s "$WORK/nmain.c" "$WORK/self.c"; then
   echo "FAIL: the artifact emits different C than the toolchain that built it"
-  diff "$WORK/nmain.c" "$WORK/self.c" | head -20 || true
+  diff "$WORK/nmain.c" "$WORK/self.c" | sed -n '1,20p' || true
   fail=1
 else
   echo "OK   it emits the same C as the toolchain that built it (A == B)"

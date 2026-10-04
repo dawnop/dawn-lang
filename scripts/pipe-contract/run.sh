@@ -98,7 +98,7 @@ assess() { # compiler
   # arguments in written order, with the left side as the first argument
   got=$("$c" run "$cases/eval_order.dawn" 2>&1 || true)
   same eval_trace "$got" "$EVAL_TRACE"
-  same eval_callee_first "$(printf '%s\n' "$got" | head -1)" "eval callee"
+  same eval_callee_first "$(printf '%s\n' "$got" | sed -n 1p)" "eval callee"
 
   # `f(a: 2)` names the parameter the pipe already filled. Asserted as
   # "refused" and pointedly not by message: see README, the message is what two

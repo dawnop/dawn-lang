@@ -115,7 +115,7 @@ STUB
     rc=$?
     if [ "$rc" -eq 0 ]; then
       printf 'FAIL self-check: a %s toolchain passed opaque-twin (exit 0)\n' "$stub"
-      sed 's/^/       /' "$OUT/sc.$stub" | head -10
+      sed 's/^/       /' "$OUT/sc.$stub" | sed -n '1,10p'
       sc_fail=1
     else
       printf 'ok   self-check: a %s toolchain is refused (exit %d)\n' "$stub" "$rc"
@@ -194,7 +194,7 @@ for c in "${cases[@]}"; do
   elif [ "$opaque_rc" -ne 0 ]; then
     printf 'FAIL %s -- does not compile and run (exit %d), so its twin proves nothing\n' "$c" "$opaque_rc"
     printf '       (a case that must stay rejected declares: # twin-rejected: <why>)\n'
-    sed 's/^/       /' "$OUT/$c.opaque" | head -10
+    sed 's/^/       /' "$OUT/$c.opaque" | sed -n '1,10p'
     fail=1
     continue
   fi
@@ -207,13 +207,13 @@ for c in "${cases[@]}"; do
       printf 'FAIL %s -- declares twin-infer-only, but its alias twin compiles and runs now:\n' "$c"
       printf '       the parameter is no longer a phantom, or the checker infers it from nothing\n'
       fail=1
-    elif grep '^error:' "$OUT/$c.alias" | grep -qv 'cannot infer type parameter'; then
+    elif grep '^error:' "$OUT/$c.alias" | grep -v 'cannot infer type parameter' >/dev/null; then
       printf 'FAIL %s -- its alias twin is refused for something other than inference\n' "$c"
-      grep '^error:' "$OUT/$c.alias" | grep -v 'cannot infer type parameter' | sed 's/^/       /' | head -10
+      grep '^error:' "$OUT/$c.alias" | grep -v 'cannot infer type parameter' | sed 's/^/       /' | sed -n '1,10p'
       fail=1
     elif ! grep -q '^error:' "$OUT/$c.alias"; then
       printf 'FAIL %s -- its alias twin failed (exit %d) without a diagnostic\n' "$c" "$alias_rc"
-      sed 's/^/       /' "$OUT/$c.alias" | head -10
+      sed 's/^/       /' "$OUT/$c.alias" | sed -n '1,10p'
       fail=1
     else
       printf 'ok   %s (alias twin refused, inference only)\n' "$c"
@@ -242,7 +242,7 @@ for c in "${cases[@]}"; do
     printf 'ok   %s\n' "$c"
   else
     printf 'FAIL %s -- the opaque and its alias twin disagree\n' "$c"
-    diff -u "$OUT/$c.alias.n" "$OUT/$c.opaque.n" | sed 's/^/       /' | head -20
+    diff -u "$OUT/$c.alias.n" "$OUT/$c.opaque.n" | sed 's/^/       /' | sed -n '1,20p'
     fail=1
   fi
 done

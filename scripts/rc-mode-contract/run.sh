@@ -96,7 +96,7 @@ verdict() {
     known_hit=$((known_hit + 1))
   else
     printf '  %-34s FAIL\n' "$id"
-    if [ "$#" -gt 0 ]; then printf '%s\n' "$@" | head -20; fi
+    if [ "$#" -gt 0 ]; then printf '%s\n' "$@" | sed -n '1,20p'; fi
     fail=1
   fi
 }
@@ -196,7 +196,7 @@ for p in "${progs[@]}"; do
   if [ "$rc" -ne 0 ] || san_red "$work/$p.clean.err2" ||
     ! diff -q "$here/$p.expect" "$work/$p.clean.out" >/dev/null; then
     verdict "$p:clean" bad "exit $rc" "$(head -15 "$work/$p.clean.err2")" \
-      "$(diff -u "$here/$p.expect" "$work/$p.clean.out" 2>/dev/null | head -10)"
+      "$(diff -u "$here/$p.expect" "$work/$p.clean.out" 2>/dev/null | sed -n '1,10p')"
   else
     verdict "$p:clean" ok
   fi
@@ -279,7 +279,7 @@ for spec in "${sites[@]}"; do
     verdict "$id" ok
   else
     verdict "$id" bad "exit $rc" "$(head -15 "$work/$tag.err2")" \
-      "$(diff -u "$here/$p.expect" "$work/$tag.out" 2>/dev/null | head -10)"
+      "$(diff -u "$here/$p.expect" "$work/$tag.out" 2>/dev/null | sed -n '1,10p')"
   fi
 done
 

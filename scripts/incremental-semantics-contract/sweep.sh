@@ -119,7 +119,7 @@ validate_java_home() {
       printf 'sweep.sh: JAVA_HOME/bin/%s cannot run: %s\n' "$tool" "$output" >&2
       return 2
     fi
-    major=$(printf '%s\n' "$output" | sed -nE 's/^(openjdk|java) version "([0-9]+).*/\2/p; s/^javac ([0-9]+).*/\1/p' | head -n 1)
+    major=$(printf '%s\n' "$output" | sed -nE 's/^(openjdk|java) version "([0-9]+).*/\2/p; s/^javac ([0-9]+).*/\1/p' | sed -n 1p)
     if [ -z "$major" ] || [ "$major" -lt 21 ]; then
       printf 'sweep.sh: JAVA_HOME/bin/%s must report version 21 or newer: %s\n' "$tool" "$output" >&2
       return 2
