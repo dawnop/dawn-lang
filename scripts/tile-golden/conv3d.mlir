@@ -33,12 +33,12 @@ cuda_tile.module @m {
     %32 = cmpi less_than %30, %31, signed : tile<16x16xi32> -> tile<16x16xi1>
     %33 = constant <i1: 0> : tile<16x16xi1>
     %34 = select %18, %32, %33 : tile<16x16xi1>, tile<16x16xi1>
-    %35 = constant <f64: 0.0> : tile<16x16xf64>
-    %36 = constant <i32: 192> : tile<i32>
-    %37 = muli %1, %36 : tile<i32>
-    %38 = constant <i32: 0> : tile<i32>
-    %39 = addi %37, %38 : tile<i32>
-    %40 = reshape %39 : tile<i32> -> tile<1x1xi32>
+    %35 = constant <i32: 192> : tile<i32>
+    %36 = muli %1, %35 : tile<i32>
+    %37 = constant <i32: 0> : tile<i32>
+    %38 = addi %36, %37 : tile<i32>
+    %39 = constant <f64: 0.0> : tile<16x16xf64>
+    %40 = reshape %38 : tile<i32> -> tile<1x1xi32>
     %41 = broadcast %40 : tile<1x1xi32> -> tile<16x16xi32>
     %42 = iota : tile<16xi32>
     %43 = reshape %42 : tile<16xi32> -> tile<16x1xi32>
@@ -53,7 +53,7 @@ cuda_tile.module @m {
     %52 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %53 = broadcast %52 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %54 = offset %53, %51 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %55, %56 = load_ptr_tko weak %54, %34, %35 token=%0 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %55, %56 = load_ptr_tko weak %54, %34, %39 token=%0 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %57 = constant <i32: 0> : tile<i32>
     %58 = reshape %57 : tile<i32> -> tile<1x1xi32>
     %59 = broadcast %58 : tile<1x1xi32> -> tile<16x16xi32>
@@ -74,9 +74,9 @@ cuda_tile.module @m {
     %74 = offset %73, %71 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
     %75, %76 = load_ptr_tko weak %74 token=%56 : tile<16x16xptr<f64>> -> tile<16x16xf64>, token
     %77 = mulf %55, %75 rounding<nearest_even> : tile<16x16xf64>
-    %78 = addf %35, %77 rounding<nearest_even> : tile<16x16xf64>
+    %78 = addf %39, %77 rounding<nearest_even> : tile<16x16xf64>
     %79 = constant <i32: 1> : tile<i32>
-    %80 = addi %37, %79 : tile<i32>
+    %80 = addi %36, %79 : tile<i32>
     %81 = reshape %80 : tile<i32> -> tile<1x1xi32>
     %82 = broadcast %81 : tile<1x1xi32> -> tile<16x16xi32>
     %83 = iota : tile<16xi32>
@@ -92,7 +92,7 @@ cuda_tile.module @m {
     %93 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %94 = broadcast %93 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %95 = offset %94, %92 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %96, %97 = load_ptr_tko weak %95, %34, %35 token=%76 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %96, %97 = load_ptr_tko weak %95, %34, %39 token=%76 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %98 = constant <i32: 1> : tile<i32>
     %99 = reshape %98 : tile<i32> -> tile<1x1xi32>
     %100 = broadcast %99 : tile<1x1xi32> -> tile<16x16xi32>
@@ -115,7 +115,7 @@ cuda_tile.module @m {
     %118 = mulf %96, %116 rounding<nearest_even> : tile<16x16xf64>
     %119 = addf %78, %118 rounding<nearest_even> : tile<16x16xf64>
     %120 = constant <i32: 2> : tile<i32>
-    %121 = addi %37, %120 : tile<i32>
+    %121 = addi %36, %120 : tile<i32>
     %122 = reshape %121 : tile<i32> -> tile<1x1xi32>
     %123 = broadcast %122 : tile<1x1xi32> -> tile<16x16xi32>
     %124 = iota : tile<16xi32>
@@ -131,7 +131,7 @@ cuda_tile.module @m {
     %134 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %135 = broadcast %134 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %136 = offset %135, %133 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %137, %138 = load_ptr_tko weak %136, %34, %35 token=%117 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %137, %138 = load_ptr_tko weak %136, %34, %39 token=%117 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %139 = constant <i32: 2> : tile<i32>
     %140 = reshape %139 : tile<i32> -> tile<1x1xi32>
     %141 = broadcast %140 : tile<1x1xi32> -> tile<16x16xi32>
@@ -154,7 +154,7 @@ cuda_tile.module @m {
     %159 = mulf %137, %157 rounding<nearest_even> : tile<16x16xf64>
     %160 = addf %119, %159 rounding<nearest_even> : tile<16x16xf64>
     %161 = constant <i32: 16> : tile<i32>
-    %162 = addi %37, %161 : tile<i32>
+    %162 = addi %36, %161 : tile<i32>
     %163 = reshape %162 : tile<i32> -> tile<1x1xi32>
     %164 = broadcast %163 : tile<1x1xi32> -> tile<16x16xi32>
     %165 = iota : tile<16xi32>
@@ -170,7 +170,7 @@ cuda_tile.module @m {
     %175 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %176 = broadcast %175 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %177 = offset %176, %174 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %178, %179 = load_ptr_tko weak %177, %34, %35 token=%158 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %178, %179 = load_ptr_tko weak %177, %34, %39 token=%158 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %180 = constant <i32: 3> : tile<i32>
     %181 = reshape %180 : tile<i32> -> tile<1x1xi32>
     %182 = broadcast %181 : tile<1x1xi32> -> tile<16x16xi32>
@@ -193,7 +193,7 @@ cuda_tile.module @m {
     %200 = mulf %178, %198 rounding<nearest_even> : tile<16x16xf64>
     %201 = addf %160, %200 rounding<nearest_even> : tile<16x16xf64>
     %202 = constant <i32: 17> : tile<i32>
-    %203 = addi %37, %202 : tile<i32>
+    %203 = addi %36, %202 : tile<i32>
     %204 = reshape %203 : tile<i32> -> tile<1x1xi32>
     %205 = broadcast %204 : tile<1x1xi32> -> tile<16x16xi32>
     %206 = iota : tile<16xi32>
@@ -209,7 +209,7 @@ cuda_tile.module @m {
     %216 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %217 = broadcast %216 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %218 = offset %217, %215 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %219, %220 = load_ptr_tko weak %218, %34, %35 token=%199 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %219, %220 = load_ptr_tko weak %218, %34, %39 token=%199 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %221 = constant <i32: 4> : tile<i32>
     %222 = reshape %221 : tile<i32> -> tile<1x1xi32>
     %223 = broadcast %222 : tile<1x1xi32> -> tile<16x16xi32>
@@ -232,7 +232,7 @@ cuda_tile.module @m {
     %241 = mulf %219, %239 rounding<nearest_even> : tile<16x16xf64>
     %242 = addf %201, %241 rounding<nearest_even> : tile<16x16xf64>
     %243 = constant <i32: 18> : tile<i32>
-    %244 = addi %37, %243 : tile<i32>
+    %244 = addi %36, %243 : tile<i32>
     %245 = reshape %244 : tile<i32> -> tile<1x1xi32>
     %246 = broadcast %245 : tile<1x1xi32> -> tile<16x16xi32>
     %247 = iota : tile<16xi32>
@@ -248,7 +248,7 @@ cuda_tile.module @m {
     %257 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %258 = broadcast %257 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %259 = offset %258, %256 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %260, %261 = load_ptr_tko weak %259, %34, %35 token=%240 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %260, %261 = load_ptr_tko weak %259, %34, %39 token=%240 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %262 = constant <i32: 5> : tile<i32>
     %263 = reshape %262 : tile<i32> -> tile<1x1xi32>
     %264 = broadcast %263 : tile<1x1xi32> -> tile<16x16xi32>
@@ -271,7 +271,7 @@ cuda_tile.module @m {
     %282 = mulf %260, %280 rounding<nearest_even> : tile<16x16xf64>
     %283 = addf %242, %282 rounding<nearest_even> : tile<16x16xf64>
     %284 = constant <i32: 32> : tile<i32>
-    %285 = addi %37, %284 : tile<i32>
+    %285 = addi %36, %284 : tile<i32>
     %286 = reshape %285 : tile<i32> -> tile<1x1xi32>
     %287 = broadcast %286 : tile<1x1xi32> -> tile<16x16xi32>
     %288 = iota : tile<16xi32>
@@ -287,7 +287,7 @@ cuda_tile.module @m {
     %298 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %299 = broadcast %298 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %300 = offset %299, %297 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %301, %302 = load_ptr_tko weak %300, %34, %35 token=%281 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %301, %302 = load_ptr_tko weak %300, %34, %39 token=%281 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %303 = constant <i32: 6> : tile<i32>
     %304 = reshape %303 : tile<i32> -> tile<1x1xi32>
     %305 = broadcast %304 : tile<1x1xi32> -> tile<16x16xi32>
@@ -310,7 +310,7 @@ cuda_tile.module @m {
     %323 = mulf %301, %321 rounding<nearest_even> : tile<16x16xf64>
     %324 = addf %283, %323 rounding<nearest_even> : tile<16x16xf64>
     %325 = constant <i32: 33> : tile<i32>
-    %326 = addi %37, %325 : tile<i32>
+    %326 = addi %36, %325 : tile<i32>
     %327 = reshape %326 : tile<i32> -> tile<1x1xi32>
     %328 = broadcast %327 : tile<1x1xi32> -> tile<16x16xi32>
     %329 = iota : tile<16xi32>
@@ -326,7 +326,7 @@ cuda_tile.module @m {
     %339 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %340 = broadcast %339 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %341 = offset %340, %338 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %342, %343 = load_ptr_tko weak %341, %34, %35 token=%322 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %342, %343 = load_ptr_tko weak %341, %34, %39 token=%322 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %344 = constant <i32: 7> : tile<i32>
     %345 = reshape %344 : tile<i32> -> tile<1x1xi32>
     %346 = broadcast %345 : tile<1x1xi32> -> tile<16x16xi32>
@@ -349,7 +349,7 @@ cuda_tile.module @m {
     %364 = mulf %342, %362 rounding<nearest_even> : tile<16x16xf64>
     %365 = addf %324, %364 rounding<nearest_even> : tile<16x16xf64>
     %366 = constant <i32: 34> : tile<i32>
-    %367 = addi %37, %366 : tile<i32>
+    %367 = addi %36, %366 : tile<i32>
     %368 = reshape %367 : tile<i32> -> tile<1x1xi32>
     %369 = broadcast %368 : tile<1x1xi32> -> tile<16x16xi32>
     %370 = iota : tile<16xi32>
@@ -365,7 +365,7 @@ cuda_tile.module @m {
     %380 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %381 = broadcast %380 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %382 = offset %381, %379 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %383, %384 = load_ptr_tko weak %382, %34, %35 token=%363 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %383, %384 = load_ptr_tko weak %382, %34, %39 token=%363 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %385 = constant <i32: 8> : tile<i32>
     %386 = reshape %385 : tile<i32> -> tile<1x1xi32>
     %387 = broadcast %386 : tile<1x1xi32> -> tile<16x16xi32>
@@ -388,7 +388,7 @@ cuda_tile.module @m {
     %405 = mulf %383, %403 rounding<nearest_even> : tile<16x16xf64>
     %406 = addf %365, %405 rounding<nearest_even> : tile<16x16xf64>
     %407 = constant <i32: 192> : tile<i32>
-    %408 = addi %37, %407 : tile<i32>
+    %408 = addi %36, %407 : tile<i32>
     %409 = reshape %408 : tile<i32> -> tile<1x1xi32>
     %410 = broadcast %409 : tile<1x1xi32> -> tile<16x16xi32>
     %411 = iota : tile<16xi32>
@@ -404,7 +404,7 @@ cuda_tile.module @m {
     %421 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %422 = broadcast %421 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %423 = offset %422, %420 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %424, %425 = load_ptr_tko weak %423, %34, %35 token=%404 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %424, %425 = load_ptr_tko weak %423, %34, %39 token=%404 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %426 = constant <i32: 9> : tile<i32>
     %427 = reshape %426 : tile<i32> -> tile<1x1xi32>
     %428 = broadcast %427 : tile<1x1xi32> -> tile<16x16xi32>
@@ -427,7 +427,7 @@ cuda_tile.module @m {
     %446 = mulf %424, %444 rounding<nearest_even> : tile<16x16xf64>
     %447 = addf %406, %446 rounding<nearest_even> : tile<16x16xf64>
     %448 = constant <i32: 193> : tile<i32>
-    %449 = addi %37, %448 : tile<i32>
+    %449 = addi %36, %448 : tile<i32>
     %450 = reshape %449 : tile<i32> -> tile<1x1xi32>
     %451 = broadcast %450 : tile<1x1xi32> -> tile<16x16xi32>
     %452 = iota : tile<16xi32>
@@ -443,7 +443,7 @@ cuda_tile.module @m {
     %462 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %463 = broadcast %462 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %464 = offset %463, %461 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %465, %466 = load_ptr_tko weak %464, %34, %35 token=%445 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %465, %466 = load_ptr_tko weak %464, %34, %39 token=%445 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %467 = constant <i32: 10> : tile<i32>
     %468 = reshape %467 : tile<i32> -> tile<1x1xi32>
     %469 = broadcast %468 : tile<1x1xi32> -> tile<16x16xi32>
@@ -466,7 +466,7 @@ cuda_tile.module @m {
     %487 = mulf %465, %485 rounding<nearest_even> : tile<16x16xf64>
     %488 = addf %447, %487 rounding<nearest_even> : tile<16x16xf64>
     %489 = constant <i32: 194> : tile<i32>
-    %490 = addi %37, %489 : tile<i32>
+    %490 = addi %36, %489 : tile<i32>
     %491 = reshape %490 : tile<i32> -> tile<1x1xi32>
     %492 = broadcast %491 : tile<1x1xi32> -> tile<16x16xi32>
     %493 = iota : tile<16xi32>
@@ -482,7 +482,7 @@ cuda_tile.module @m {
     %503 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %504 = broadcast %503 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %505 = offset %504, %502 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %506, %507 = load_ptr_tko weak %505, %34, %35 token=%486 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %506, %507 = load_ptr_tko weak %505, %34, %39 token=%486 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %508 = constant <i32: 11> : tile<i32>
     %509 = reshape %508 : tile<i32> -> tile<1x1xi32>
     %510 = broadcast %509 : tile<1x1xi32> -> tile<16x16xi32>
@@ -505,7 +505,7 @@ cuda_tile.module @m {
     %528 = mulf %506, %526 rounding<nearest_even> : tile<16x16xf64>
     %529 = addf %488, %528 rounding<nearest_even> : tile<16x16xf64>
     %530 = constant <i32: 208> : tile<i32>
-    %531 = addi %37, %530 : tile<i32>
+    %531 = addi %36, %530 : tile<i32>
     %532 = reshape %531 : tile<i32> -> tile<1x1xi32>
     %533 = broadcast %532 : tile<1x1xi32> -> tile<16x16xi32>
     %534 = iota : tile<16xi32>
@@ -521,7 +521,7 @@ cuda_tile.module @m {
     %544 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %545 = broadcast %544 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %546 = offset %545, %543 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %547, %548 = load_ptr_tko weak %546, %34, %35 token=%527 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %547, %548 = load_ptr_tko weak %546, %34, %39 token=%527 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %549 = constant <i32: 12> : tile<i32>
     %550 = reshape %549 : tile<i32> -> tile<1x1xi32>
     %551 = broadcast %550 : tile<1x1xi32> -> tile<16x16xi32>
@@ -544,7 +544,7 @@ cuda_tile.module @m {
     %569 = mulf %547, %567 rounding<nearest_even> : tile<16x16xf64>
     %570 = addf %529, %569 rounding<nearest_even> : tile<16x16xf64>
     %571 = constant <i32: 209> : tile<i32>
-    %572 = addi %37, %571 : tile<i32>
+    %572 = addi %36, %571 : tile<i32>
     %573 = reshape %572 : tile<i32> -> tile<1x1xi32>
     %574 = broadcast %573 : tile<1x1xi32> -> tile<16x16xi32>
     %575 = iota : tile<16xi32>
@@ -560,7 +560,7 @@ cuda_tile.module @m {
     %585 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %586 = broadcast %585 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %587 = offset %586, %584 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %588, %589 = load_ptr_tko weak %587, %34, %35 token=%568 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %588, %589 = load_ptr_tko weak %587, %34, %39 token=%568 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %590 = constant <i32: 13> : tile<i32>
     %591 = reshape %590 : tile<i32> -> tile<1x1xi32>
     %592 = broadcast %591 : tile<1x1xi32> -> tile<16x16xi32>
@@ -583,7 +583,7 @@ cuda_tile.module @m {
     %610 = mulf %588, %608 rounding<nearest_even> : tile<16x16xf64>
     %611 = addf %570, %610 rounding<nearest_even> : tile<16x16xf64>
     %612 = constant <i32: 210> : tile<i32>
-    %613 = addi %37, %612 : tile<i32>
+    %613 = addi %36, %612 : tile<i32>
     %614 = reshape %613 : tile<i32> -> tile<1x1xi32>
     %615 = broadcast %614 : tile<1x1xi32> -> tile<16x16xi32>
     %616 = iota : tile<16xi32>
@@ -599,7 +599,7 @@ cuda_tile.module @m {
     %626 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %627 = broadcast %626 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %628 = offset %627, %625 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %629, %630 = load_ptr_tko weak %628, %34, %35 token=%609 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %629, %630 = load_ptr_tko weak %628, %34, %39 token=%609 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %631 = constant <i32: 14> : tile<i32>
     %632 = reshape %631 : tile<i32> -> tile<1x1xi32>
     %633 = broadcast %632 : tile<1x1xi32> -> tile<16x16xi32>
@@ -622,7 +622,7 @@ cuda_tile.module @m {
     %651 = mulf %629, %649 rounding<nearest_even> : tile<16x16xf64>
     %652 = addf %611, %651 rounding<nearest_even> : tile<16x16xf64>
     %653 = constant <i32: 224> : tile<i32>
-    %654 = addi %37, %653 : tile<i32>
+    %654 = addi %36, %653 : tile<i32>
     %655 = reshape %654 : tile<i32> -> tile<1x1xi32>
     %656 = broadcast %655 : tile<1x1xi32> -> tile<16x16xi32>
     %657 = iota : tile<16xi32>
@@ -638,7 +638,7 @@ cuda_tile.module @m {
     %667 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %668 = broadcast %667 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %669 = offset %668, %666 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %670, %671 = load_ptr_tko weak %669, %34, %35 token=%650 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %670, %671 = load_ptr_tko weak %669, %34, %39 token=%650 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %672 = constant <i32: 15> : tile<i32>
     %673 = reshape %672 : tile<i32> -> tile<1x1xi32>
     %674 = broadcast %673 : tile<1x1xi32> -> tile<16x16xi32>
@@ -661,7 +661,7 @@ cuda_tile.module @m {
     %692 = mulf %670, %690 rounding<nearest_even> : tile<16x16xf64>
     %693 = addf %652, %692 rounding<nearest_even> : tile<16x16xf64>
     %694 = constant <i32: 225> : tile<i32>
-    %695 = addi %37, %694 : tile<i32>
+    %695 = addi %36, %694 : tile<i32>
     %696 = reshape %695 : tile<i32> -> tile<1x1xi32>
     %697 = broadcast %696 : tile<1x1xi32> -> tile<16x16xi32>
     %698 = iota : tile<16xi32>
@@ -677,7 +677,7 @@ cuda_tile.module @m {
     %708 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %709 = broadcast %708 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %710 = offset %709, %707 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %711, %712 = load_ptr_tko weak %710, %34, %35 token=%691 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %711, %712 = load_ptr_tko weak %710, %34, %39 token=%691 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %713 = constant <i32: 16> : tile<i32>
     %714 = reshape %713 : tile<i32> -> tile<1x1xi32>
     %715 = broadcast %714 : tile<1x1xi32> -> tile<16x16xi32>
@@ -700,7 +700,7 @@ cuda_tile.module @m {
     %733 = mulf %711, %731 rounding<nearest_even> : tile<16x16xf64>
     %734 = addf %693, %733 rounding<nearest_even> : tile<16x16xf64>
     %735 = constant <i32: 226> : tile<i32>
-    %736 = addi %37, %735 : tile<i32>
+    %736 = addi %36, %735 : tile<i32>
     %737 = reshape %736 : tile<i32> -> tile<1x1xi32>
     %738 = broadcast %737 : tile<1x1xi32> -> tile<16x16xi32>
     %739 = iota : tile<16xi32>
@@ -716,7 +716,7 @@ cuda_tile.module @m {
     %749 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %750 = broadcast %749 : tile<1x1xptr<f64>> -> tile<16x16xptr<f64>>
     %751 = offset %750, %748 : tile<16x16xptr<f64>>, tile<16x16xi32> -> tile<16x16xptr<f64>>
-    %752, %753 = load_ptr_tko weak %751, %34, %35 token=%732 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
+    %752, %753 = load_ptr_tko weak %751, %34, %39 token=%732 : tile<16x16xptr<f64>>, tile<16x16xi1>, tile<16x16xf64> -> tile<16x16xf64>, token
     %754 = constant <i32: 17> : tile<i32>
     %755 = reshape %754 : tile<i32> -> tile<1x1xi32>
     %756 = broadcast %755 : tile<1x1xi32> -> tile<16x16xi32>

@@ -3,11 +3,11 @@ cuda_tile.module @m {
     %0 = make_token : token
     %1, %2, %3 = get_tile_block_id : tile<i32>
     %4, %5, %6 = get_num_tile_blocks : tile<i32>
-    %7 = constant <f64: 0.0> : tile<128xf64>
-    %8 = constant <i32: 0> : tile<i32>
-    %9 = constant <i32: 4> : tile<i32>
-    %10 = constant <i32: 1> : tile<i32>
-    %11, %12 = for %13 in (%8 to %9, step %10) : tile<i32> iter_values(%14 = %7, %15 = %0) -> (tile<128xf64>, token) {
+    %7 = constant <i32: 0> : tile<i32>
+    %8 = constant <i32: 4> : tile<i32>
+    %9 = constant <i32: 1> : tile<i32>
+    %10 = constant <f64: 0.0> : tile<f64>
+    %11, %12 = for %13 in (%7 to %8, step %9) : tile<i32> iter_values(%14 = %10, %15 = %0) -> (tile<f64>, token) {
       %16 = muli %13, %4 : tile<i32>
       %17 = addi %1, %16 : tile<i32>
       %18 = constant <i32: 128> : tile<i32>
@@ -26,7 +26,7 @@ cuda_tile.module @m {
       %32 = broadcast %31 : tile<1xptr<f64>> -> tile<128xptr<f64>>
       %33 = offset %32, %23 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
       %34 = store_ptr_tko weak %33, %30 token=%28 : tile<128xptr<f64>>, tile<128xf64> -> token
-      continue %14, %34 : tile<128xf64>, token
+      continue %14, %34 : tile<f64>, token
     }
     return
   }

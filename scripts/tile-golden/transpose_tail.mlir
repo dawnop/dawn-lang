@@ -37,11 +37,11 @@ cuda_tile.module @m {
     %38 = cmpi less_than %36, %37, signed : tile<32x32xi32> -> tile<32x32xi1>
     %39 = constant <i1: 0> : tile<32x32xi1>
     %40 = select %24, %38, %39 : tile<32x32xi1>, tile<32x32xi1>
-    %41 = constant <f64: 0.0> : tile<32x32xf64>
-    %42 = constant <i32: 1920> : tile<i32>
-    %43 = muli %1, %42 : tile<i32>
-    %44 = addi %43, %10 : tile<i32>
-    %45 = reshape %44 : tile<i32> -> tile<1x1xi32>
+    %41 = constant <i32: 1920> : tile<i32>
+    %42 = muli %1, %41 : tile<i32>
+    %43 = addi %42, %10 : tile<i32>
+    %44 = constant <f64: 0.0> : tile<32x32xf64>
+    %45 = reshape %43 : tile<i32> -> tile<1x1xi32>
     %46 = broadcast %45 : tile<1x1xi32> -> tile<32x32xi32>
     %47 = iota : tile<32xi32>
     %48 = reshape %47 : tile<32xi32> -> tile<32x1xi32>
@@ -56,7 +56,7 @@ cuda_tile.module @m {
     %57 = reshape %arg0 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %58 = broadcast %57 : tile<1x1xptr<f64>> -> tile<32x32xptr<f64>>
     %59 = offset %58, %56 : tile<32x32xptr<f64>>, tile<32x32xi32> -> tile<32x32xptr<f64>>
-    %60, %61 = load_ptr_tko weak %59, %40, %41 token=%0 : tile<32x32xptr<f64>>, tile<32x32xi1>, tile<32x32xf64> -> tile<32x32xf64>, token
+    %60, %61 = load_ptr_tko weak %59, %40, %44 token=%0 : tile<32x32xptr<f64>>, tile<32x32xi1>, tile<32x32xf64> -> tile<32x32xf64>, token
     %62 = constant <i32: 3200> : tile<i32>
     %63 = muli %5, %62 : tile<i32>
     %64 = addi %63, %8 : tile<i32>

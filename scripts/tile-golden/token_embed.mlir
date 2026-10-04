@@ -44,29 +44,20 @@ cuda_tile.module @m {
     %44 = broadcast %43 : tile<1x16xi32> -> tile<8x16xi32>
     %45 = addi %41, %44 : tile<8x16xi32>
     %46 = addi %32, %45 : tile<8x16xi32>
-    %47 = constant <i32: 128> : tile<i32>
-    %48 = muli %1, %47 : tile<i32>
-    %49 = constant <f64: -777.0> : tile<8x16xf64>
-    %50 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
-    %51 = broadcast %50 : tile<1x1xptr<f64>> -> tile<8x16xptr<f64>>
-    %52 = offset %51, %46 : tile<8x16xptr<f64>>, tile<8x16xi32> -> tile<8x16xptr<f64>>
-    %53, %54 = load_ptr_tko weak %52, %28, %49 token=%22 : tile<8x16xptr<f64>>, tile<8x16xi1>, tile<8x16xf64> -> tile<8x16xf64>, token
-    %55 = reshape %48 : tile<i32> -> tile<1x1xi32>
-    %56 = broadcast %55 : tile<1x1xi32> -> tile<8x16xi32>
-    %57 = iota : tile<8xi32>
-    %58 = reshape %57 : tile<8xi32> -> tile<8x1xi32>
-    %59 = broadcast %58 : tile<8x1xi32> -> tile<8x16xi32>
-    %60 = constant <i32: 16> : tile<8x16xi32>
-    %61 = muli %59, %60 : tile<8x16xi32>
-    %62 = addi %56, %61 : tile<8x16xi32>
-    %63 = iota : tile<16xi32>
-    %64 = reshape %63 : tile<16xi32> -> tile<1x16xi32>
-    %65 = broadcast %64 : tile<1x16xi32> -> tile<8x16xi32>
-    %66 = addi %62, %65 : tile<8x16xi32>
-    %67 = reshape %arg2 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
-    %68 = broadcast %67 : tile<1x1xptr<f64>> -> tile<8x16xptr<f64>>
-    %69 = offset %68, %66 : tile<8x16xptr<f64>>, tile<8x16xi32> -> tile<8x16xptr<f64>>
-    %70 = store_ptr_tko weak %69, %53 token=%54 : tile<8x16xptr<f64>>, tile<8x16xf64> -> token
+    %47 = constant <f64: -777.0> : tile<8x16xf64>
+    %48 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
+    %49 = broadcast %48 : tile<1x1xptr<f64>> -> tile<8x16xptr<f64>>
+    %50 = offset %49, %46 : tile<8x16xptr<f64>>, tile<8x16xi32> -> tile<8x16xptr<f64>>
+    %51, %52 = load_ptr_tko weak %50, %28, %47 token=%22 : tile<8x16xptr<f64>>, tile<8x16xi1>, tile<8x16xf64> -> tile<8x16xf64>, token
+    %53, %54, %55 = get_num_tile_blocks : tile<i32>
+    %56 = constant <i32: 8> : tile<i32>
+    %57 = muli %53, %56 : tile<i32>
+    %58 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %59 = make_tensor_view %58, shape = [%57, 16], strides = [16, 1] : tile<i32> -> tensor_view<?x16xf64, strides=[16, 1]>
+    %60 = make_partition_view %59 : partition_view<tile=(8x16), padding_value = zero, tensor_view<?x16xf64, strides=[16, 1]>, dim_map=[0, 1]>
+    %61, %62, %63 = get_tile_block_id : tile<i32>
+    %64, %65, %66 = get_tile_block_id : tile<i32>
+    %67 = store_view_tko weak %51, %60[%61, %65] token=%52 : tile<8x16xf64>, partition_view<tile=(8x16), padding_value = zero, tensor_view<?x16xf64, strides=[16, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

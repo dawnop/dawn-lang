@@ -30,34 +30,27 @@ cuda_tile.module @m {
     %30 = broadcast %29 : tile<1xi32> -> tile<1xi32>
     %31 = iota : tile<1xi32>
     %32 = addi %30, %31 : tile<1xi32>
-    %33 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
-    %34 = broadcast %33 : tile<1xptr<i32>> -> tile<1xptr<i32>>
-    %35 = offset %34, %32 : tile<1xptr<i32>>, tile<1xi32> -> tile<1xptr<i32>>
-    %36, %37 = load_ptr_tko weak %35 token=%14 : tile<1xptr<i32>> -> tile<1xi32>, token
-    %38 = constant <i32: 32> : tile<1xi32>
-    %39 = muli %32, %38 : tile<1xi32>
-    %40 = addi %39, %36 : tile<1xi32>
+    %33 = constant <i32: 32> : tile<1xi32>
+    %34 = muli %32, %33 : tile<1xi32>
+    %35 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
+    %36 = broadcast %35 : tile<1xptr<i32>> -> tile<1xptr<i32>>
+    %37 = offset %36, %32 : tile<1xptr<i32>>, tile<1xi32> -> tile<1xptr<i32>>
+    %38, %39 = load_ptr_tko weak %37 token=%14 : tile<1xptr<i32>> -> tile<1xi32>, token
+    %40 = addi %34, %38 : tile<1xi32>
     %41 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %42 = broadcast %41 : tile<1xptr<f64>> -> tile<1xptr<f64>>
     %43 = offset %42, %40 : tile<1xptr<f64>>, tile<1xi32> -> tile<1xptr<f64>>
-    %44, %45 = load_ptr_tko weak %43 token=%37 : tile<1xptr<f64>> -> tile<1xf64>, token
-    %46 = reshape %15 : tile<f64> -> tile<1xf64>
-    %47 = broadcast %46 : tile<1xf64> -> tile<1xf64>
-    %48 = reshape %23 : tile<f64> -> tile<1xf64>
+    %44, %45 = load_ptr_tko weak %43 token=%39 : tile<1xptr<f64>> -> tile<1xf64>, token
+    %46 = log %23 : tile<f64>
+    %47 = addf %15, %46 rounding<nearest_even> : tile<f64>
+    %48 = reshape %47 : tile<f64> -> tile<1xf64>
     %49 = broadcast %48 : tile<1xf64> -> tile<1xf64>
-    %50 = log %49 : tile<1xf64>
-    %51 = addf %47, %50 rounding<nearest_even> : tile<1xf64>
-    %52 = subf %51, %44 rounding<nearest_even> : tile<1xf64>
-    %53 = constant <i32: 1> : tile<i32>
-    %54 = muli %1, %53 : tile<i32>
-    %55 = reshape %54 : tile<i32> -> tile<1xi32>
-    %56 = broadcast %55 : tile<1xi32> -> tile<1xi32>
-    %57 = iota : tile<1xi32>
-    %58 = addi %56, %57 : tile<1xi32>
-    %59 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %60 = broadcast %59 : tile<1xptr<f64>> -> tile<1xptr<f64>>
-    %61 = offset %60, %58 : tile<1xptr<f64>>, tile<1xi32> -> tile<1xptr<f64>>
-    %62 = store_ptr_tko weak %61, %52 token=%45 : tile<1xptr<f64>>, tile<1xf64> -> token
+    %50 = subf %49, %44 rounding<nearest_even> : tile<1xf64>
+    %51 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %52 = make_tensor_view %51, shape = [64], strides = [1] : tensor_view<64xf64, strides=[1]>
+    %53 = make_partition_view %52 : partition_view<tile=(1), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>
+    %54, %55, %56 = get_tile_block_id : tile<i32>
+    %57 = store_view_tko weak %50, %53[%54] token=%45 : tile<1xf64>, partition_view<tile=(1), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

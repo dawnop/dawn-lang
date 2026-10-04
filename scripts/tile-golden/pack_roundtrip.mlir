@@ -4,41 +4,38 @@ cuda_tile.module @m {
     %1, %2, %3 = get_tile_block_id : tile<i32>
     %4 = constant <i32: 32> : tile<i32>
     %5 = muli %1, %4 : tile<i32>
-    %6 = reshape %5 : tile<i32> -> tile<1xi32>
-    %7 = broadcast %6 : tile<1xi32> -> tile<32xi32>
-    %8 = iota : tile<32xi32>
-    %9 = addi %7, %8 : tile<32xi32>
-    %10 = reshape %arg0 : tile<ptr<i32>> -> tile<1xptr<i32>>
-    %11 = broadcast %10 : tile<1xptr<i32>> -> tile<32xptr<i32>>
-    %12 = offset %11, %9 : tile<32xptr<i32>>, tile<32xi32> -> tile<32xptr<i32>>
-    %13, %14 = load_ptr_tko weak %12 token=%0 : tile<32xptr<i32>> -> tile<32xi32>, token
-    %15 = pack %13 : tile<32xi32> -> tile<128xi8>
-    %16 = constant <i32: 0> : tile<i32>
-    %17 = addi %5, %16 : tile<i32>
-    %18 = unpack %15 : tile<128xi8> -> tile<256xi4>
-    %19 = pack %18 : tile<256xi4> -> tile<128xi8>
-    %20 = unpack %19 : tile<128xi8> -> tile<32xi32>
-    %21 = reshape %17 : tile<i32> -> tile<1xi32>
-    %22 = broadcast %21 : tile<1xi32> -> tile<32xi32>
-    %23 = iota : tile<32xi32>
-    %24 = addi %22, %23 : tile<32xi32>
-    %25 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
-    %26 = broadcast %25 : tile<1xptr<i32>> -> tile<32xptr<i32>>
-    %27 = offset %26, %24 : tile<32xptr<i32>>, tile<32xi32> -> tile<32xptr<i32>>
-    %28 = store_ptr_tko weak %27, %20 token=%14 : tile<32xptr<i32>>, tile<32xi32> -> token
-    %29 = constant <i32: 512> : tile<i32>
-    %30 = addi %5, %29 : tile<i32>
-    %31 = unpack %15 : tile<128xi8> -> tile<64xi16>
-    %32 = pack %31 : tile<64xi16> -> tile<128xi8>
-    %33 = unpack %32 : tile<128xi8> -> tile<32xi32>
-    %34 = reshape %30 : tile<i32> -> tile<1xi32>
-    %35 = broadcast %34 : tile<1xi32> -> tile<32xi32>
-    %36 = iota : tile<32xi32>
-    %37 = addi %35, %36 : tile<32xi32>
-    %38 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
-    %39 = broadcast %38 : tile<1xptr<i32>> -> tile<32xptr<i32>>
-    %40 = offset %39, %37 : tile<32xptr<i32>>, tile<32xi32> -> tile<32xptr<i32>>
-    %41 = store_ptr_tko weak %40, %33 token=%28 : tile<32xptr<i32>>, tile<32xi32> -> token
+    %6 = assume div_by<16>, %arg0 : tile<ptr<i32>>
+    %7 = make_tensor_view %6, shape = [512], strides = [1] : tensor_view<512xi32, strides=[1]>
+    %8 = make_partition_view %7 : partition_view<tile=(32), padding_value = zero, tensor_view<512xi32, strides=[1]>, dim_map=[0]>
+    %9, %10, %11 = get_tile_block_id : tile<i32>
+    %12, %13 = load_view_tko weak %8[%9] token=%0 : partition_view<tile=(32), padding_value = zero, tensor_view<512xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<32xi32>, token
+    %14 = pack %12 : tile<32xi32> -> tile<128xi8>
+    %15 = constant <i32: 0> : tile<i32>
+    %16 = addi %5, %15 : tile<i32>
+    %17 = unpack %14 : tile<128xi8> -> tile<256xi4>
+    %18 = pack %17 : tile<256xi4> -> tile<128xi8>
+    %19 = unpack %18 : tile<128xi8> -> tile<32xi32>
+    %20 = reshape %16 : tile<i32> -> tile<1xi32>
+    %21 = broadcast %20 : tile<1xi32> -> tile<32xi32>
+    %22 = iota : tile<32xi32>
+    %23 = addi %21, %22 : tile<32xi32>
+    %24 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
+    %25 = broadcast %24 : tile<1xptr<i32>> -> tile<32xptr<i32>>
+    %26 = offset %25, %23 : tile<32xptr<i32>>, tile<32xi32> -> tile<32xptr<i32>>
+    %27 = store_ptr_tko weak %26, %19 token=%13 : tile<32xptr<i32>>, tile<32xi32> -> token
+    %28 = constant <i32: 512> : tile<i32>
+    %29 = addi %5, %28 : tile<i32>
+    %30 = unpack %14 : tile<128xi8> -> tile<64xi16>
+    %31 = pack %30 : tile<64xi16> -> tile<128xi8>
+    %32 = unpack %31 : tile<128xi8> -> tile<32xi32>
+    %33 = reshape %29 : tile<i32> -> tile<1xi32>
+    %34 = broadcast %33 : tile<1xi32> -> tile<32xi32>
+    %35 = iota : tile<32xi32>
+    %36 = addi %34, %35 : tile<32xi32>
+    %37 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
+    %38 = broadcast %37 : tile<1xptr<i32>> -> tile<32xptr<i32>>
+    %39 = offset %38, %36 : tile<32xptr<i32>>, tile<32xi32> -> tile<32xptr<i32>>
+    %40 = store_ptr_tko weak %39, %32 token=%27 : tile<32xptr<i32>>, tile<32xi32> -> token
     return
   }
 }

@@ -1,31 +1,25 @@
 cuda_tile.module @m {
   entry @swiglu_act(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>, %arg2: tile<ptr<f64>>) {
     %0 = make_token : token
-    %1, %2, %3 = get_tile_block_id : tile<i32>
-    %4 = constant <i32: 128> : tile<i32>
-    %5 = muli %1, %4 : tile<i32>
-    %6 = reshape %5 : tile<i32> -> tile<1xi32>
-    %7 = broadcast %6 : tile<1xi32> -> tile<128xi32>
-    %8 = iota : tile<128xi32>
-    %9 = addi %7, %8 : tile<128xi32>
-    %10 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %11 = broadcast %10 : tile<1xptr<f64>> -> tile<128xptr<f64>>
-    %12 = offset %11, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-    %13, %14 = load_ptr_tko weak %12 token=%0 : tile<128xptr<f64>> -> tile<128xf64>, token
-    %15 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %16 = broadcast %15 : tile<1xptr<f64>> -> tile<128xptr<f64>>
-    %17 = offset %16, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-    %18, %19 = load_ptr_tko weak %17 token=%14 : tile<128xptr<f64>> -> tile<128xf64>, token
-    %20 = constant <f64: 1.0> : tile<128xf64>
-    %21 = negf %13 : tile<128xf64>
-    %22 = exp %21 : tile<128xf64>
-    %23 = addf %20, %22 rounding<nearest_even> : tile<128xf64>
-    %24 = divf %13, %23 rounding<nearest_even> : tile<128xf64>
-    %25 = mulf %24, %18 rounding<nearest_even> : tile<128xf64>
-    %26 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
-    %27 = broadcast %26 : tile<1xptr<f64>> -> tile<128xptr<f64>>
-    %28 = offset %27, %9 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-    %29 = store_ptr_tko weak %28, %25 token=%19 : tile<128xptr<f64>>, tile<128xf64> -> token
+    %1 = assume div_by<16>, %arg0 : tile<ptr<f64>>
+    %2 = make_tensor_view %1, shape = [4096], strides = [1] : tensor_view<4096xf64, strides=[1]>
+    %3 = make_partition_view %2 : partition_view<tile=(128), padding_value = zero, tensor_view<4096xf64, strides=[1]>, dim_map=[0]>
+    %4, %5, %6 = get_tile_block_id : tile<i32>
+    %7, %8 = load_view_tko weak %3[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<4096xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %9 = negf %7 : tile<128xf64>
+    %10 = exp %9 : tile<128xf64>
+    %11 = constant <f64: 1.0> : tile<128xf64>
+    %12 = addf %11, %10 rounding<nearest_even> : tile<128xf64>
+    %13 = divf %7, %12 rounding<nearest_even> : tile<128xf64>
+    %14 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+    %15 = make_tensor_view %14, shape = [4096], strides = [1] : tensor_view<4096xf64, strides=[1]>
+    %16 = make_partition_view %15 : partition_view<tile=(128), padding_value = zero, tensor_view<4096xf64, strides=[1]>, dim_map=[0]>
+    %17, %18 = load_view_tko weak %16[%4] token=%8 : partition_view<tile=(128), padding_value = zero, tensor_view<4096xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %19 = mulf %13, %17 rounding<nearest_even> : tile<128xf64>
+    %20 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %21 = make_tensor_view %20, shape = [4096], strides = [1] : tensor_view<4096xf64, strides=[1]>
+    %22 = make_partition_view %21 : partition_view<tile=(128), padding_value = zero, tensor_view<4096xf64, strides=[1]>, dim_map=[0]>
+    %23 = store_view_tko weak %19, %22[%4] token=%18 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<4096xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }
