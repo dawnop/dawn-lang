@@ -243,20 +243,21 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   3. **Move 3 — 显式 box/unbox 节点**:推迟到后端 #2 逼你面对表示问题时;Perceus RC 正好是
      **只有 native 后端跑**的 core-IR→core-IR pass、需要所有权/装箱显式化,那时 Move 3 自然到位。
 
-  `TJavaCall` 保持 JVM-only(后端 #2 直接报错,与 `use c` 对称);闭包(indy/LMF,`emit.dawn:1955`)
+  `TJavaCall` 保持 JVM-only(后端 #2 直接报错);闭包(indy/LMF,`emit.dawn:1955`)
   只 ~8 个函数、localized,重写便宜,不进这轮。
 - **native 运行时**(JVM 白送、native 要自造):
   - 持久集合:Map/Set=HAMT,**List=严格 RB(relaxed 以后)**(已定,§7);字符串(UTF-8 还是 UTF-16 的 native 表示?决策项)。
   - **内存管理**:JVM 有 GC,native 没有。**Dawn 的纯性是利好**——数据不可变、无可变别名,持久结构是
     无环 DAG → **引用计数就够**(不必防环),或 region/arena 更省。不一定要上完整 tracing GC。
   - `panic`/效果 IO 的 native 实现(unwind 或返回码)。
-- **native FFI**(`use c`/extern)替 `use java`。
+- **native FFI**:C FFI 未立项,见 [native-driver-plan.md](native-driver-plan.md) D7(原写「`use c`/extern 替 `use java`」,拼写已否)。
 - **staging**:可先让 JVM-hosted 编译器**交叉发射** LLVM 给用户程序;native 自举(编译器把自己编成
   native)是更远的里程碑。
 
 ## 9. FFI 的分裂(诚实接受)
 
-`use java` 是 JVM 限定,`use c` 将是 LLVM 限定——**FFI 本质不可移植**。用了 `use java` 的程序
+`use java` 是 JVM 限定;native 侧的 C FFI 未立项(见 [native-driver-plan.md](native-driver-plan.md) D7),
+真做也只属于 C 后端——**FFI 本质不可移植**。用了 `use java` 的程序
 (backend-dawn 全家:sqlite-jdbc/jBCrypt……)就是 JVM-only,这没问题、也很诚实。可移植的是**语言核心
 + std + 只用 intrinsic 的纯 Dawn 程序**;碰了平台 FFI 的部分天然绑定该平台。
 

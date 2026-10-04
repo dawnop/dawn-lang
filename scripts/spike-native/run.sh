@@ -225,12 +225,13 @@ run_corpus() {
   fi
 
   # A program whose subject is the `use java` boundary has no native half to
-  # differ from: `emitc` refuses `use java` by design ("cannot be compiled to
-  # native; use `use c`"), which is a decision rather than a defect. Such a
-  # program declares itself with a `<name>.jvm-only` marker and its C-side
-  # checks report `blocked`, the same word every other "no evidence either way"
-  # gets here. Without the marker the refusal would have to live in
-  # known-red.txt, which is the list of things that are *meant* to be fixed.
+  # differ from: `emitc` refuses `use java` by design ("`use java` is JVM-only
+  # and the C backend ... cannot compile it"), which is a decision rather than
+  # a defect. Such a program declares itself with a `<name>.jvm-only` marker
+  # and its C-side checks report `blocked`, the same word every other "no
+  # evidence either way" gets here. Without the marker the refusal would have
+  # to live in known-red.txt, which is the list of things that are *meant* to
+  # be fixed.
   #
   # The marker is a ratchet the way known-red.txt is, and for the same reason:
   # an exemption nobody checks is a hiding place. So the refusal is *verified*
