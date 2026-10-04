@@ -475,3 +475,74 @@ jobs:
             echo '```'
           } > issue.md
           scripts/nightly-issue.sh "nightly: ecosystem corpus pin is behind dawnop-site" issue.md
+
+  # Generated programs, run three ways (research-bug-rate-report 7.3, cut 1):
+  # the JVM backend, the native backend at -O2 and again under ASan and UBSan,
+  # and the comptime interpreter folding the same pure functions into consts.
+  # scripts/fuzz3/run.py's header says why three and why generated: every
+  # other corpus here is written by hand, and in the 2026-10 survey the gates
+  # had found 1 of 90 product bugs. Nightly rather than push because the push
+  # total has no room (ruling on bug-rate, 2026-10-04) and the job finds old
+  # defects rather than guarding a change. The run is bounded by its own
+  # clock: --minutes 18 of batches from a seed derived from the date, so a
+  # slow runner explores fewer programs instead of timing out, and the 30
+  # minutes below leave the toolchain step and the last in-flight batches
+  # room. Measured 2026-10-05 on four pinned cores (gcc 11): 97 batches of
+  # 20 programs in 1,123 s, the in-flight batches finishing 43 s past the
+  # clock; each batch is one JVM build, one emitc, two cc builds, the runs
+  # and a comptime build.
+  # Red opens one issue per title; its verdict line is the set of finding
+  # signatures, so a night that finds the same defects again is not a new
+  # comment. The single-case programs go up as an artifact.
+  fuzz3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read    # the checkout
+      issues: write     # the report when the run is red
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: generated programs, JVM against native against comptime
+        id: fuzz
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fuzz3/run.py --minutes 18 --jobs 4 --out fuzz3-out \
+            > fuzz3.txt 2>&1 || status=$?
+          cat fuzz3.txt
+          exit "${status:-0}"
+
+      - name: keep the failing programs
+        if: failure() && steps.fuzz.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz3-findings
+          path: fuzz3-out/
+          retention-days: 14
+
+      - name: report a red differential as an issue
+        if: failure() && steps.fuzz.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly three-way differential over generated programs"
+            echo "(scripts/fuzz3/run.py) is red."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Each line is one signature of finding, with up to three seeds that hit it;"
+            echo "the artifact fuzz3-findings holds every single-case program. A \`rejected\`"
+            echo "line is the generator writing a program the checker refuses, which is the"
+            echo "generator's bug, and still red: a generator that is refused tests nothing."
+            echo
+            cat fuzz3-out/report.md 2>/dev/null || tail -40 fuzz3.txt 2>/dev/null ||
+              echo "(no output was captured)"
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: fuzz3 three-way differential is red" issue.md
