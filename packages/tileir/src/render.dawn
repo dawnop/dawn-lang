@@ -20,7 +20,7 @@ use std/gpu.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
   Dev, Param, param, block_id, tile_at, load, store, addf, idx_const, d_for, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, s_maxf, f_const, lt, d_assert, spread, mul, s_gt,
-  load_cell, store_cell }
+  load_cell, store_cell, tail_mask, for_arch, hint_latency }
 use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
@@ -1669,7 +1669,7 @@ test "a global's line belongs to the call that declared it" {
 fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
   store_cell(o, addf(F64, [128], load_cell(a), load_cell(b)))
 
-test "PR-1: an In's cell view claims 16-byte alignment on the parameter itself, ahead of the view, and an Out's claims nothing" {
+test "PR-2: every cell view, an In's and an Out's, claims 16-byte alignment on the parameter itself, ahead of the view" {
   let g = cells([1024], [128])
   let (p, _e) = trace3("vadd_cells", In(F64, g), In(F64, g), Out(F64, g), vadd_cells)
   let k = lower(p)
@@ -1678,12 +1678,16 @@ test "PR-1: an In's cell view claims 16-byte alignment on the parameter itself, 
     AssumeTile(_d, _src, _pred, _t) -> true
     _ -> false
   })
-  assert claims == [
-    AssumeTile(1, Arg(0), DivBy(16, none, none), Tile([], PtrTo("f64"))),
-    AssumeTile(9, Arg(1), DivBy(16, none, none), Tile([], PtrTo("f64")))
+  assert list.map(claims, i => match i {
+    AssumeTile(_d, src, pred, t) -> (src, pred, t)
+    _ -> (Arg(9), DivBy(0, none, none), Tile([], PtrTo("f64")))
+  }) == [
+    (Arg(0), DivBy(16, none, none), Tile([], PtrTo("f64"))),
+    (Arg(1), DivBy(16, none, none), Tile([], PtrTo("f64"))),
+    (Arg(2), DivBy(16, none, none), Tile([], PtrTo("f64")))
   ]
-  # each view starts from the claim or, for the Out, from the bare
-  # parameter; no `offset` sits between a parameter and a view
+  # each view starts from its parameter's claim; no `offset` sits between a
+  # parameter and a view
   let bases = list.map(list.filter(k.body, i => match i {
     MakeTensorView(_d, _base, _bt, _t, _ds, _dst, _it) -> true
     _ -> false
@@ -1691,12 +1695,32 @@ test "PR-1: an In's cell view claims 16-byte alignment on the parameter itself, 
     MakeTensorView(_d, base, _bt, _t, _ds, _dst, _it) -> base
     _ -> Arg(9)
   })
-  assert bases == [Val(1), Val(9), Arg(2)]
+  assert bases == list.map(claims, i => match i {
+    AssumeTile(d, _src, _pred, _t) -> Val(d)
+    _ -> Arg(9)
+  })
   assert not list.any(k.body, i => match i {
     Offset(_d, _p, _o, _pt, _ot) -> true
     _ -> false
   })
   let text = render(p)
   assert str.contains(text, "%1 = assume div_by<16>, %arg0 : tile<ptr<f64>>")
-  assert str.contains(text, "make_tensor_view %arg2, shape = [1024], strides = [1]")
+  assert str.contains(text, "assume div_by<16>, %arg2 : tile<ptr<f64>>")
+  assert not str.contains(text, "make_tensor_view %arg")
+}
+
+fn merged_combos(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let b = tile_at(block_id(0), 128)
+  let m = tail_mask(b, [128], 1000)
+  let h = [for_arch("sm_86", [hint_latency(2)])]
+  let t = load(a, b, [128], strides: Some([1]), hints: h)
+  let u = load(a, b, [128], mask: Some(m))
+  store(o, b, [128], addf(F64, [128], t, u), strides: Some([1]), mask: Some(m), hints: h)
+}
+
+test "PR-2: a hinted load, a masked load with no padding value and a masked hinted store render as the dialect spells them" {
+  let text = render(trace_kernel("combos", ["f64", "f64"], () => merged_combos(param(F64, 0), param(F64, 1))))
+  assert str.contains(text, "%15, %16 = load_ptr_tko weak %14 token=%0 optimization_hints=<sm_86 = {latency = 2}> : tile<128xptr<f64>> -> tile<128xf64>, token")
+  assert str.contains(text, "%17, %18 = load_ptr_tko weak %14, %11 token=%16 : tile<128xptr<f64>>, tile<128xi1> -> tile<128xf64>, token")
+  assert str.contains(text, "%23 = store_ptr_tko weak %22, %19, %11 token=%18 optimization_hints=<sm_86 = {latency = 2}> : tile<128xptr<f64>>, tile<128xf64>, tile<128xi1> -> token")
 }

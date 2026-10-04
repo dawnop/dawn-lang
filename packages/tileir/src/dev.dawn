@@ -965,96 +965,120 @@ pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1]
 })
 
 ## The tile of `p`'s format and `shape` whose element `[i, j, ..]` is at
-## element `base + i * strides[0] + j * strides[1] + ..` of `p`. Every lane
-## is read, so every one of those elements must be inside `p`;
-## `load_strided_masked` is the one to use when they are not.
+## element `base + i * strides[0] + j * strides[1] + ..` of `p`: THE load of
+## the pointer path. The five names 0.6.0 spelled it with (`load_strided`,
+## `load_masked`, `load_strided_masked`, `load_hinted` and this one without
+## its options) are each one call of it, and are kept below as such until
+## the kernels have moved to this spelling.
 ##
-## `strides` is in ELEMENTS and is a host constant, so a tile of a larger
-## array is a stride of that array's row length rather than a new operation:
-## the ladder is one `iota` per dimension, reshaped and broadcast to
-## `shape`, scaled by that dimension's stride and summed.
-pub fn load_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int]) -> Tile[D] !Dev = called("load_strided", () => {
-  let i: Int = base
-  let none: Option[Int] = None
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, none, none, [])
-  h
-})
-
-## `load_strided`, reading only the lanes `mask` selects: a lane whose mask
-## bit is 0 is not read at all and answers the matching lane of `pad`. The
-## mask and the padding tile have `shape`, like the result.
-pub fn load_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int],
-  mask: Tile[I1], pad: Tile[D]) -> Tile[D] !Dev = called("load_strided_masked", () => {
+## - `strides`: `None` is `row_major(shape)`, a contiguous tile. `Some(s)`
+##   is the escape hatch for every other layout: `s` is in ELEMENTS and is a
+##   host constant, so a tile of a larger array is a stride of that array's
+##   row length rather than a new operation (the ladder is one `iota` per
+##   dimension, reshaped and broadcast to `shape`, scaled by that
+##   dimension's stride and summed). A tile a parameter's cells describe is
+##   read with `load_cell`, which needs no strides at all.
+## - `mask`: `None` reads every lane, so every element named must be inside
+##   `p`. `Some(m)`, an `i1` tile of `shape`, reads only the lanes whose bit
+##   is 1; a lane whose bit is 0 is not read at all.
+## - `pad`: what a lane the mask blocks answers, a tile of `p`'s format and
+##   `shape`. With a mask and no pad such a lane answers an UNSPECIFIED
+##   value (the dialect's load with no `paddingValue`), which is right for
+##   a lane that is only ever stored back under the same mask. A pad with
+##   no mask is refused when the kernel is recorded: every lane is read, so
+##   it would name a value nothing can answer.
+## - `hints`: `optimization_hints` on `load_ptr_tko` (knife T15); the one
+##   key a load takes is `latency`. A hint does not change the answer, only
+##   the bytes.
+##
+## Why options on one name rather than five names: Dawn has no overloading,
+## so every combination the five did not spell (a strided load with hints, a
+## masked one with no pad) was a sixth name waiting to be written, and the
+## dialect's own `load_ptr_tko` carries the same three as optional operands
+## and attributes. Why `strides` is an Option rather than defaulting to
+## `row_major(shape)`: the shape-once ruling makes strides the exception a
+## kernel states, not a value every call recomputes and shows.
+pub fn load[D](p: Param[D], base: Idx, shape: List[Int], strides: Option[List[Int]] = None,
+  mask: Option[Tile[I1]] = None, pad: Option[Tile[D]] = None, hints: Hints = []) -> Tile[D] !Dev = called("load", () => {
     let i: Int = base
-    let hm: Int = mask
-    let hp: Int = pad
-    let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides, Some(hm), Some(hp), [])
+    let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides),
+      handle_of(mask), handle_of(pad), hints)
     h
   })
 
-## `load_strided` over a contiguous tile: the strides are `shape`'s own
-## (`row_major`).
-pub fn load[D](p: Param[D], base: Idx, shape: List[Int]) -> Tile[D] !Dev = called("load", () => {
-  load_strided(p, base, shape, row_major(shape))
-})
-
-## `load_masked` over a contiguous tile.
-pub fn load_masked[D](p: Param[D], base: Idx, shape: List[Int], mask: Tile[I1], pad: Tile[D]) -> Tile[D] !Dev = called("load_masked", () => {
-  load_strided_masked(p, base, shape, row_major(shape), mask, pad)
-})
-
-## Write the tile `v` of `shape` at `base`, laid out by `strides`. Every
-## lane is written; `store_strided_masked` is the one to use when some of
-## them fall outside `p`.
-pub fn store_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int], v: Tile[D]) -> Unit !Dev = called("store_strided", () => {
-  let i: Int = base
-  let hv: Int = v
-  let none: Option[Int] = None
-  t_store(position(p), param_dtype(p), i, shape, strides, hv, none, [])
-})
-
-## `store_strided`, writing only the lanes `mask` selects: a lane whose mask
-## bit is 0 leaves memory as it was.
-pub fn store_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int],
-  mask: Tile[I1], v: Tile[D]) -> Unit !Dev = called("store_strided_masked", () => {
+## Write the tile `v` of `shape` at `base`: THE store of the pointer path,
+## `load`'s other direction, with the options `load` has and no `pad`.
+## `strides` lays the tile out as `load`'s does; `mask` writes only the
+## lanes whose bit is 1 and leaves memory as it was under the rest;
+## `hints` is `optimization_hints` on `store_ptr_tko`, whose one key is
+## `latency`. Without a mask every lane is written, so every element named
+## must be inside `p`. The options follow `v` so that a call without them
+## reads as the 0.6.0 one did.
+pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D], strides: Option[List[Int]] = None,
+  mask: Option[Tile[I1]] = None, hints: Hints = []) -> Unit !Dev = called("store", () => {
     let i: Int = base
-    let hm: Int = mask
     let hv: Int = v
-    t_store(position(p), param_dtype(p), i, shape, strides, hv, Some(hm), [])
+    t_store(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides), hv, handle_of(mask), hints)
   })
 
-## `store_strided` over a contiguous tile.
-pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D]) -> Unit !Dev = called("store", () => {
-  store_strided(p, base, shape, row_major(shape), v)
+# The strides a `load` or a `store` walks: the ones given, or a contiguous
+# tile's.
+fn strides_or_row_major(shape: List[Int], strides: Option[List[Int]]) -> List[Int] = match strides {
+  Some(s) -> s
+  None -> row_major(shape)
+}
+
+# The handle an optional tile names, for the `t_` operations that take one.
+fn handle_of[D](t: Option[Tile[D]]) -> Option[Int] = match t {
+  Some(x) -> {
+    let h: Int = x
+    Some(h)
+  }
+  None -> None
+}
+
+## `load(p, base, shape, strides: Some(strides))`, as 0.6.0 spelled it.
+pub fn load_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int]) -> Tile[D] !Dev = called("load_strided", () => {
+  load(p, base, shape, strides: Some(strides))
 })
 
-## `store_masked` over a contiguous tile.
+## `load(p, base, shape, strides: Some(strides), mask: Some(mask), pad: Some(pad))`,
+## as 0.6.0 spelled it.
+pub fn load_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int],
+  mask: Tile[I1], pad: Tile[D]) -> Tile[D] !Dev = called("load_strided_masked", () => {
+    load(p, base, shape, strides: Some(strides), mask: Some(mask), pad: Some(pad))
+  })
+
+## `load(p, base, shape, mask: Some(mask), pad: Some(pad))`, as 0.6.0 spelled it.
+pub fn load_masked[D](p: Param[D], base: Idx, shape: List[Int], mask: Tile[I1], pad: Tile[D]) -> Tile[D] !Dev = called("load_masked", () => {
+  load(p, base, shape, mask: Some(mask), pad: Some(pad))
+})
+
+## `store(p, base, shape, v, strides: Some(strides))`, as 0.6.0 spelled it.
+pub fn store_strided[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int], v: Tile[D]) -> Unit !Dev = called("store_strided", () => {
+  store(p, base, shape, v, strides: Some(strides))
+})
+
+## `store(p, base, shape, v, strides: Some(strides), mask: Some(mask))`, as
+## 0.6.0 spelled it.
+pub fn store_strided_masked[D](p: Param[D], base: Idx, shape: List[Int], strides: List[Int],
+  mask: Tile[I1], v: Tile[D]) -> Unit !Dev = called("store_strided_masked", () => {
+    store(p, base, shape, v, strides: Some(strides), mask: Some(mask))
+  })
+
+## `store(p, base, shape, v, mask: Some(mask))`, as 0.6.0 spelled it.
 pub fn store_masked[D](p: Param[D], base: Idx, shape: List[Int], mask: Tile[I1], v: Tile[D]) -> Unit !Dev = called("store_masked", () => {
-  store_strided_masked(p, base, shape, row_major(shape), mask, v)
+  store(p, base, shape, v, mask: Some(mask))
 })
 
-## `load` carrying `optimization_hints`, the dialect's optional attribute
-## on `load_ptr_tko` (knife T15). The only key a load takes is `latency`.
-##
-## The tile it answers is the one `load` answers: a hint does not change
-## an answer, so this reads as "the same load, said differently". What it
-## does change is the bytes -- the flag bit for the attribute and the
-## nested dictionary after it -- which is where every judgement about it
-## lives.
+## `load(p, base, shape, hints: hints)`, as 0.6.0 spelled it.
 pub fn load_hinted[D](p: Param[D], base: Idx, shape: List[Int], hints: Hints) -> Tile[D] !Dev = called("load_hinted", () => {
-  let i: Int = base
-  let none: Option[Int] = None
-  let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, row_major(shape), none, none, hints)
-  h
+  load(p, base, shape, hints: hints)
 })
 
-## `store` carrying `optimization_hints`, on `store_ptr_tko`. Its one key
-## is `latency`, as a load's is.
+## `store(p, base, shape, v, hints: hints)`, as 0.6.0 spelled it.
 pub fn store_hinted[D](p: Param[D], base: Idx, shape: List[Int], hints: Hints, v: Tile[D]) -> Unit !Dev = called("store_hinted", () => {
-  let i: Int = base
-  let hv: Int = v
-  let none: Option[Int] = None
-  t_store(position(p), param_dtype(p), i, shape, row_major(shape), hv, none, hints)
+  store(p, base, shape, v, hints: hints)
 })
 
 ## The tile of `p`'s format and `shape` whose lane `[i, j, ..]` is element

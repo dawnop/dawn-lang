@@ -254,11 +254,11 @@ let (prog, entry) = trace2("softmax", In(F64, cells([1000], [1024], pad: PadNegI
   dimensions follow no grid axis (`FREE_AXIS`), with one index per such
   dimension. `store_cell(o, t)` writes this block's cell of an `Out`.
   `zeros(p)` and `fill(p, v)` are a tile shaped like one cell of `p`.
-- The view an `In` is read through carries `assume div_by<16>` on the
-  parameter itself: `std/gpu` buffers are 256-byte aligned and an `In`'s
-  cells start at its first element, and the claim is what lets `tileiras`
-  choose 128-bit loads for an f16 tensor-core matmul. An `Out`'s view
-  carries no claim.
+- The view an `In` is read through and the view an `Out` is written through
+  carry `assume div_by<16>` on the parameter itself: `std/gpu` buffers are
+  256-byte aligned and a parameter's cells start at its first element, and
+  the claim is what lets `tileiras` choose 128-bit loads and stores for an
+  f16 tensor-core matmul. (0.6.0 claimed it for an `In` only.)
 - `reduce_sum`, `reduce_max`, `reduce_min` (and `scan_sum`) take the tile and
   optionally `dim:` (the last by default) and `keepdims:`; the identity is
   the format's own. A `[BQ, BK]` tile's `reduce_max(t, keepdims: true)` is
@@ -277,6 +277,37 @@ because `Dev` gained four operations (above). Design, measurements and the
 plan for the kernels that move to this surface:
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) §6.25 (in
 Chinese).
+
+### One load and one store for the pointer path (since 0.7.0)
+
+`load` and `store` take the pointer path's options as named arguments with
+defaults, so the five spellings of each are one call:
+
+```dawn
+load(p, base, shape)                                       # contiguous, every lane
+load(p, base, shape, strides: Some([N, 1]))                # was load_strided
+load(p, base, shape, mask: Some(m), pad: Some(z))          # was load_masked
+load(p, base, shape, strides: Some(s), mask: Some(m), pad: Some(z))  # was load_strided_masked
+load(p, base, shape, hints: h)                             # was load_hinted
+store(o, base, shape, v, strides: Some(s), mask: Some(m), hints: h)  # any mix
+```
+
+- `strides: None` is the contiguous tile (`row_major(shape)`); `Some(s)` is
+  the escape hatch for any other layout, in elements.
+- A `mask` without a `pad` reads the masked-off lanes as unspecified values
+  (the dialect's load with no padding value); a `pad` without a `mask` is
+  refused while the kernel records.
+- Combinations the five names could not spell (a strided load with hints, a
+  masked load with no pad, a strided masked store with hints) are now
+  ordinary calls.
+- `load_strided`, `load_masked`, `load_strided_masked`, `load_hinted` and the
+  four matching stores remain, each one call of the merged function, and
+  record the same program they recorded in 0.6.0.
+
+0.7.0 also changes what `store_cell` lowers to: the view an `Out` is written
+through now carries the same `assume div_by<16>` an `In`'s view does (the
+write-side measurements are in design §6.25). No signature changed; a
+kernel that does not call `store_cell` records the same bytes.
 
 Loops inside a kernel use `d_for` (design §5.2). The bounds and the step are
 `Idx` (`idx_const` for a host constant), one tile is carried, and the body

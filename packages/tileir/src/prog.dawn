@@ -20,7 +20,9 @@ use std/str
 use std/gpu.{Gpu, F64, F32, F16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
   entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
 use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int, tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if, float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, PadZero, padding_name, padding_is_special, is_float_dtype, DYN_DIM,
-  idx_of, exp, div, maxf, load_cell, load_at, store_cell, zeros, fill, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast }
+  idx_of, exp, div, maxf, load_cell, load_at, store_cell, zeros, fill, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast,
+  load_strided, load_masked, load_strided_masked, load_hinted, store_strided, store_masked, store_strided_masked, store_hinted,
+  tail_mask, axis_mask, for_arch, hint_latency }
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -120,7 +122,8 @@ use std/narrow.{Rounding}
 ## more, `align`. A non-zero `align` is a claim that the parameter's
 ## address is a multiple of that many bytes, which the lowering issues as
 ## `assume div_by<align>` on the parameter itself, ahead of the view; the
-## recording sets it for an In parameter and for nothing else. `ReshapeOf`
+## recording sets it for every parameter it cuts into cells, In and Out
+## (since PR-2; PR-1 set it for an In only). `ReshapeOf`
 ## regroups a tile's lanes into another shape of as many, and `BroadcastOf`
 ## widens the dimensions of length 1; `Spread` stays the rank-0 case.
 pub type TileOp =
@@ -1567,15 +1570,25 @@ fn check_write(name: String, frames: List[Frame], ops: List[TileOp], roles: List
 #
 # docs/tile-backend-design.md 6.25 is the long form of what follows.
 
-# The bytes an In parameter's address is claimed to be a multiple of, on
-# the view its cells are read through (ruling of 10-04 on the read path).
-# std/gpu's buffers come from `cuMemAlloc`, which aligns to 256, a Tensor
-# has no sub-views, and an In's cells start at its first element; 16 is
-# what lets `tileiras` pick 128-bit loads (`LDGSTS.E.128`). The claim is
-# issued on the parameter itself, never after an `offset`, and never for
-# an Out or a Shared: the write side of the same claim measured 45% slower
-# at 128x128x32 and is a separate question.
-const IN_ALIGN: Int = 16
+# The bytes a parameter's address is claimed to be a multiple of, on the
+# view its cells are read or written through. std/gpu's buffers come from
+# `cuMemAlloc`, which aligns to 256, a Tensor has no sub-views, and a
+# parameter's cells start at its first element; 16 is what lets `tileiras`
+# pick 128-bit accesses. The claim is issued on the parameter itself, never
+# after an `offset`.
+#
+# PR-1 claimed it for an In only (the read path ruling of 10-04), because
+# the pre-gate measured the write side of the same claim 45% slower at
+# 128x128x32. PR-2 measured what that was (docs/tile-backend-design.md
+# 6.25, the write side): not the claim, but `tileiras` budgeting 64 KB of
+# shared memory instead of 48 KB for that kernel, one block per SM instead
+# of two, which a pointer store with the same claim does as well and which
+# the entry hint `occupancy` = 2 undoes. Without the claim an Out's view
+# writes 16-bit lanes and is 15% to 27% slower than with it (22% to 27%
+# wherever the occupancy is the same); with it, it writes `STG.E.128` and
+# matches the pointer store at the same occupancy. So an Out claims it
+# too. A Shared has no cells.
+const CELL_ALIGN: Int = 16
 
 # The part of the recording the rank-0 rule adds to: the handle counter, the
 # region being recorded, the handle table and the spreads made so far, by
@@ -1981,6 +1994,10 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         check_param(name, params, param, dtype, "load")
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        match (mask, pad) {
+          (None, Some(_)) -> refuse_at(name, frames, ops, writer(marks, calls, "load"), "a pad with no mask is never read: every lane of the load is")
+          _ -> ()
+        }
         held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
@@ -3053,7 +3070,7 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
           None -> 0 - 1
         }
         if known < 0 {
-          let align = if roles[param] == Reading { IN_ALIGN } else { 0 }
+          let align = CELL_ALIGN
           let built = cell_view_ops(name, next, param, dtype, align, extent, tile, pad, along)
           next = built.next
           ops = ops ++ built.ops
@@ -4606,7 +4623,7 @@ fn is_spread(o: TileOp) -> Bool = match o {
 fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
   store_cell(o, addf(F64, [128], load_cell(a), load_cell(b)))
 
-test "PR-1: load_cell and store_cell read and write through one cell view per parameter, aligned on the In side only" {
+test "PR-1: load_cell and store_cell read and write through one cell view per parameter, aligned on both sides since PR-2" {
   let g = cells([1024], [128])
   let (p, _e) = trace3("vadd_cells", In(F64, g), In(F64, g), Out(F64, g), vadd_cells)
   let views = ops_where(p.ops, is_cell_view)
@@ -4614,7 +4631,7 @@ test "PR-1: load_cell and store_cell read and write through one cell view per pa
   assert list.all(views, v => match v {
     CellViewOf(_d, param, dtype, align, shape, strides, ds, dst) ->
       dtype == "f64" && shape == [1024] && strides == [1] && ds == [] && dst == []
-      && align == if param == 2 { 0 } else { 16 }
+      && align == 16
     _ -> false
   })
   # each view is cut into the marker's cells, padded as the marker says
@@ -4774,7 +4791,7 @@ test "PR-1: a view made inside a loop is not reused after it, and a dynamic exte
   let vs = ops_where(q.ops, is_cell_view)
   assert list.all(vs, v => match v {
     CellViewOf(_d, 0, _dt, 16, [-1, 64], [64, 1], ds, []) -> len(ds) == 1
-    CellViewOf(_d, 1, _dt, 0, [64, -1], [-1, 1], ds, dst) -> len(ds) == 1 && dst == ds
+    CellViewOf(_d, 1, _dt, 16, [64, -1], [-1, 1], ds, dst) -> len(ds) == 1 && dst == ds
     _ -> false
   })
   assert len(ops_where(q.ops, o => match o {
@@ -4880,4 +4897,111 @@ test "knife C2: the entry trace3 answers runs on the fake device, and a launch i
     "gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s) along axis 0 and the launch asks for 3",
     "gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 2 (Out) holds 200 element(s) and its cells reach 256"
   ]
+}
+
+# ---- PR-2: one load and one store for the pointer path ----
+
+# The 0.6.0 spellings, one kernel each, and the same kernel through the
+# merged `load` / `store`: the recording must be the same program, op for
+# op, which is what keeps every golden that still uses the old names.
+fn old_five(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let m = tail_mask(b, [128], 1000)
+  let z = f_const(F64, [128], 0.0)
+  let h = [for_arch("sm_86", [hint_latency(4)])]
+  let t1 = load_strided(a, b, [8, 16], [32, 1])
+  let t2 = load_masked(a, b, [128], m, z)
+  let t3 = load_strided_masked(a, b, [8, 16], [32, 2], axis_mask(b, [8, 16], 0, 5), f_const(F64, [8, 16], 1.0))
+  let t4 = load_hinted(a, b, [128], h)
+  store_strided(o, b, [8, 16], [32, 1], addf(F64, [8, 16], t1, t3))
+  store_masked(o, b, [128], m, t2)
+  store_strided_masked(o, b, [8, 16], [16, 1], axis_mask(b, [8, 16], 1, 9), t1)
+  store_hinted(o, b, [128], h, t4)
+  store(o, b, [128], load(a, b, [128]))
+}
+
+fn new_five(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let m = tail_mask(b, [128], 1000)
+  let z = f_const(F64, [128], 0.0)
+  let h = [for_arch("sm_86", [hint_latency(4)])]
+  let t1 = load(a, b, [8, 16], strides: Some([32, 1]))
+  let t2 = load(a, b, [128], mask: Some(m), pad: Some(z))
+  let t3 = load(a, b, [8, 16], strides: Some([32, 2]), mask: Some(axis_mask(b, [8, 16], 0, 5)), pad: Some(f_const(F64, [8, 16], 1.0)))
+  let t4 = load(a, b, [128], hints: h)
+  store(o, b, [8, 16], addf(F64, [8, 16], t1, t3), strides: Some([32, 1]))
+  store(o, b, [128], t2, mask: Some(m))
+  store(o, b, [8, 16], t1, strides: Some([16, 1]), mask: Some(axis_mask(b, [8, 16], 1, 9)))
+  store(o, b, [128], t4, hints: h)
+  store(o, b, [128], load(a, b, [128], strides: None))
+}
+
+test "PR-2: the merged load and store record what the five 0.6.0 names recorded, op for op" {
+  let old = trace_kernel("five", ["f64", "f64"], () => old_five(param(F64, 0), param(F64, 1)))
+  let new = trace_kernel("five", ["f64", "f64"], () => new_five(param(F64, 0), param(F64, 1)))
+  assert len(old.ops) > 10
+  assert old == new
+}
+
+# What the five names could not say: a strided load with hints, a masked
+# load with no pad, a strided masked store with hints.
+fn combos(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let m = tail_mask(b, [128], 1000)
+  let h = [for_arch("sm_86", [hint_latency(2)])]
+  let t = load(a, b, [128], strides: Some([2]), hints: h)
+  let u = load(a, b, [128], mask: Some(m))
+  store(o, b, [128], addf(F64, [128], t, u), strides: Some([3]), mask: Some(m), hints: h)
+}
+
+test "PR-2: a strided load with hints, a masked load with no pad and a strided masked store with hints record as such" {
+  let p = trace_kernel("combos", ["f64", "f64"], () => combos(param(F64, 0), param(F64, 1)))
+  let loads = list.filter(p.ops, o => match o {
+    Load(_d, _t, _p, _dt, _b, _s, _st, _m, _pd, _ti, _h) -> true
+    _ -> false
+  })
+  let stores = list.filter(p.ops, o => match o {
+    Store(_t, _p, _dt, _b, _s, _st, _v, _m, _ti, _h) -> true
+    _ -> false
+  })
+  assert len(loads) == 2
+  assert len(stores) == 1
+  match loads[0] {
+    Load(_d, _t, _p, _dt, _b, shape, strides, mask, pad, _ti, hints) -> {
+      assert shape == [128]
+      assert strides == [2]
+      assert mask == None
+      assert pad == None
+      assert hints == [("sm_86", [("latency", 2)])]
+    }
+    _ -> { assert false }
+  }
+  match loads[1] {
+    Load(_d, _t, _p, _dt, _b, _s, strides, mask, pad, _ti, hints) -> {
+      assert strides == [1]
+      assert mask != None
+      assert pad == None
+      assert hints == []
+    }
+    _ -> { assert false }
+  }
+  match stores[0] {
+    Store(_t, _p, _dt, _b, _s, strides, _v, mask, _ti, hints) -> {
+      assert strides == [3]
+      assert mask != None
+      assert hints == [("sm_86", [("latency", 2)])]
+    }
+    _ -> { assert false }
+  }
+}
+
+fn pad_no_mask() -> Unit !Dev = {
+  let b = block_id(0)
+  let _t = load(param(F64, 0), b, [128], pad: Some(f_const(F64, [128], 0.0)))
+  ()
+}
+
+test "PR-2: a pad with no mask is refused when the kernel is recorded, naming the load" {
+  let r = refusal(pad_no_mask)
+  assert str.contains(r, "`load`: a pad with no mask is never read: every lane of the load is")
 }
