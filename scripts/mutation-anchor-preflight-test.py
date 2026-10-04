@@ -180,8 +180,8 @@ class PreflightTests(unittest.TestCase):
                                           "const OP_MAKE_TOKEN: Int = 68")
         self.assert_registry_drift_is_red("tile-golden", "load-dtype-f64",
                                           "packages/tileir/src/dev.dawn",
-                                          "param_dtype(p), i, shape, strides, none, none, [])",
-                                          "param_dtype(p), i, shape, strides, none, none, [ ])")
+                                          "t_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides),",
+                                          "t_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape,  strides),")
         self.assert_stale_registry_is_red("tile-golden", "region-stack-pop", 0)
 
     def test_lsp_lifecycle_anchor_drift_is_caught(self):
