@@ -1,3 +1,5 @@
+// Exercise editor decisions without a browser or gateway, so regressions in
+// syntax and LSP routing can run offline against the same CodeMirror objects.
 import { dawn, dawnCompletions, dawnHighlight, importEdit, staticCompletionLabels } from '../src/dawn-lang'
 import { BUILTINS } from '../src/builtins.generated'
 import { parseDawnDiagnostics } from '../src/lint'
@@ -5,6 +7,7 @@ import { EditorState, Text } from '@codemirror/state'
 import { ensureSyntaxTree, matchBrackets } from '@codemirror/language'
 import { highlightTree } from '@lezer/highlight'
 import { CompletionContext } from '@codemirror/autocomplete'
+import type { EditorView, Tooltip, WidgetType } from '@codemirror/view'
 import {
   DAWN_LSP_PROTOCOL,
   DAWN_LSP_URI,
@@ -18,8 +21,10 @@ import {
   inlayClass,
   inlayDecorations,
   inlayHintOf,
+  inlayHoverTarget,
   lspCompletionSource,
   lspDiagnostics,
+  lspHoverSource,
   lspPositionToOffset,
   lspWebSocketUrl,
   mergeCompletionResults,
@@ -28,6 +33,7 @@ import {
   semanticDecorations,
   semanticLegendOf,
   type LspSocket,
+  type LspInlayHint,
 } from '../src/lsp'
 import { playEndpoints } from '../src/endpoints'
 
@@ -280,13 +286,21 @@ expect('an unresolved doc link keeps its code and drops its brackets',
 // ---- inlay hints (docs/lsp-hover-design.md §A4) ----
 expect('an inlay hint keeps its label, kind and the padding that is on', inlayHintOf({
   position: { line: 1, character: 8 }, label: '!Fs', kind: 1, paddingLeft: true, paddingRight: false,
-  tooltip: 'not read',
-}), { position: { line: 1, character: 8 }, label: '!Fs', kind: 1, paddingLeft: true })
+  tooltip: 'Filesystem effects',
+}), { position: { line: 1, character: 8 }, label: '!Fs', kind: 1, paddingLeft: true, tooltip: 'Filesystem effects' })
 expect('an inlay hint without a position or a string label is dropped', [
   inlayHintOf({ label: ': Int' }),
   inlayHintOf({ position: { line: 0, character: 0 }, label: [{ value: ': Int' }] }),
   inlayHintOf({ position: { line: 0, character: 0 }, label: '' }),
 ], [null, null, null])
+const markupHint = { position: { line: 0, character: 6 }, label: ': List[Int]',
+  tooltip: { kind: 'markdown', value: '```dawn\nList[Int]\n```' } }
+expect('an inlay keeps its MarkupContent tooltip', inlayHintOf(markupHint), markupHint)
+expect('an invalid inlay tooltip is ignored', [
+  inlayHintOf({ ...markupHint, tooltip: { kind: 'html', value: '<b>List[Int]</b>' } })?.tooltip,
+  inlayHintOf({ ...markupHint, tooltip: { kind: 'markdown', value: 42 } })?.tooltip,
+  inlayHintOf({ ...markupHint, tooltip: { value: 'List[Int]' } })?.tooltip,
+], [undefined, undefined, undefined])
 expect('an inlay widget is classed by kind and padding', [
   inlayClass({ position: { line: 0, character: 0 }, label: ': Int', kind: 1 }),
   inlayClass({ position: { line: 0, character: 0 }, label: '!Fs', kind: 1, paddingLeft: true }),
@@ -302,6 +316,91 @@ expect('an inlay widget is classed by kind and padding', [
   const at: number[] = []
   set.between(0, text.length, (from) => { at.push(from) })
   expect('inlay hints become widgets at their offsets, in document order', at, [6, 12, 18])
+}
+{
+  // CodeMirror's widget branch supplies (hint offset, 1). Real code can supply
+  // that same pair, so the hover route must also know which DOM was hit.
+  const text = 'let xs = f()'
+  const offset = 6
+  const view = { state: EditorState.create({ doc: text }) } as EditorView
+  // Only the DOM operations used by the widgets/tooltip renderer are needed;
+  // this does not simulate browser layout or CodeMirror's pointer coordinates.
+  class HoverDOM {
+    parentNode: HoverDOM | null = null
+    children: HoverDOM[] = []
+    className = ''
+    textContent = ''
+    rect = { left: 60, right: 140, top: 20, bottom: 36 }
+    appendChild(child: HoverDOM): void { child.parentNode = this; this.children.push(child) }
+    contains(node: HoverDOM | null): boolean {
+      for (let at = node; at != null; at = at.parentNode) if (at === this) return true
+      return false
+    }
+    getBoundingClientRect() { return this.rect }
+  }
+  const originalDocument = globalThis.document
+  Object.assign(globalThis, { document: { createElement: () => new HoverDOM() } })
+  try {
+    const content = new HoverDOM()
+    const codeDOM = new HoverDOM()
+    content.appendChild(codeDOM)
+    const hint: LspInlayHint = { position: { line: 0, character: offset }, label: ': List[Int]' }
+    const widgetFor = (hint: LspInlayHint) => inlayDecorations([hint], text).iter().value!.spec.widget as WidgetType
+    const widget = widgetFor(hint)
+    const hintDOM = widget.toDOM(view)
+    content.appendChild(hintDOM as unknown as HoverDOM)
+    const hit = (target: HoverDOM | HTMLElement | null) => inlayHoverTarget(content as unknown as HTMLElement, target as Node | null)
+    const requests: number[] = []
+    const neighbour = { contents: 'fn f() -> List[Int]', range: {
+      start: { line: 0, character: 9 }, end: { line: 0, character: 10 },
+    } }
+    const client = {
+      isReady: () => true,
+      hover: async (at: number) => { requests.push(at); return neighbour },
+    }
+    let hovered = hit(hintDOM)
+    expect('the inlay hover target is the widget under the pointer', [hovered?.hint, hovered?.dom === hintDOM], [hint, true])
+    const labelChild = new HoverDOM()
+    ;(hintDOM as unknown as HoverDOM).appendChild(labelChild)
+    expect('a target inside the inlay still finds its hint', hit(labelChild)?.hint, hint)
+    expect('real code and targets outside the editor are not inlays', [hit(codeDOM), hit(null), hit(new HoverDOM())], [null, null, null])
+    const source = lspHoverSource(client, () => hovered)
+    expect('a tooltip-less inlay never shows its neighbour hover', await source(view, offset, 1), null)
+    expect('an inlay never requests ordinary code hover', requests, [])
+    hovered = hit(codeDOM)
+    const code = await source(view, offset, 1) as Tooltip
+    expect('real code at the same offset and side keeps its hover range', [code.pos, code.end, requests], [9, 10, [offset]])
+    expect('real code keeps its ordinary document anchor', code.create(view).getCoords, undefined)
+    for (const tooltip of ['The inferred list type', { kind: 'plaintext', value: 'List of integers' }, markupHint.tooltip]) {
+      const withTooltip = inlayHintOf({ ...hint, tooltip })!
+      const dom = widgetFor(withTooltip).toDOM(view)
+      content.appendChild(dom as unknown as HoverDOM)
+      hovered = hit(dom)
+      const own = await source(view, offset, 1) as Tooltip
+      const rendered = own.create(view)
+      expect('an inlay tooltip uses its own text', (rendered.dom as unknown as HoverDOM).children[0].textContent, hoverText(tooltip))
+      expect('an inlay tooltip anchors at the hint offset', [own.pos, own.end], [offset, offset])
+      expect('an inlay tooltip anchors at the widget rectangle', rendered.getCoords?.(offset), (dom as unknown as HoverDOM).rect)
+      expect('a tooltip change invalidates widget reuse', widget.eq(widgetFor(withTooltip)), false)
+    }
+    expect('hint tooltips never request the neighbour', requests, [offset])
+    const empty = widgetFor({ ...hint, tooltip: '  ' }).toDOM(view)
+    content.appendChild(empty as unknown as HoverDOM)
+    hovered = hit(empty)
+    expect('an empty inlay tooltip shows nothing', await source(view, offset, 1), null)
+    hovered = null
+    let finish!: (value: typeof neighbour) => void
+    const delayed = lspHoverSource({
+      isReady: () => true,
+      hover: () => new Promise<typeof neighbour>((resolve) => { finish = resolve }),
+    }, () => hovered)
+    const pending = delayed(view, offset, 1)
+    hovered = hit(hintDOM)
+    finish(neighbour)
+    expect('a delayed code hover cannot appear after entering a hint', await pending, null)
+  } finally {
+    Object.assign(globalThis, { document: originalDocument })
+  }
 }
 // ---- semantic tokens (docs/lsp-references-design.md §T2) ----
 {
