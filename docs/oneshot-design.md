@@ -1188,8 +1188,9 @@ oracle 恰好在这个机制引入的那一类 bug 上变绿**，`dawn_ctl_live`
 激活回答，而那时它站在一条从未装过任何东西的线程上；`stateful` 对 handler 的状态格子问同一
 件事（臂第二次跑在另一条线程上，必须看见第一次写进去的东西）。三条都成立。
 
-**native 侧的裁决是「没有拼写」，而这是结论不是省略**：Dawn 今天起不了线程。`use c` 还不
-存在（`emitc` 的拒绝语里那句 "use `use c`" 指的是将来），std 没有并发，而 native 自己的
+**native 侧的裁决是「没有拼写」，而这是结论不是省略**：Dawn 今天起不了线程。C FFI 未立项
+（见 [native-driver-plan.md](native-driver-plan.md) D7；`emitc` 的拒绝语曾写 "use `use c`"，
+2026-10-04 已改为不指向任何替代 FFI），std 没有并发，而 native 自己的
 carrier 线程属于运行时而不属于程序。native 确实跨**栈**恢复续延，那就是它的全部机制
 （§11.10），但一个 native 程序里只有一条 Dawn 栈，所以「另一条线程」没有可以去拒绝的写法。
 那边可写的是 `ctl_nested.drive`，它已经钉住了「装 handler 的帧已经返回之后再恢复」。

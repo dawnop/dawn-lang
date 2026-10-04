@@ -41,7 +41,7 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 | **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行），并让 lsp 差分真的覆盖 native | 加能力 + 加门禁 | **已做**（§11–§15） |
 | **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 + 加门禁 | **已做**（§18–§21） |
 | **K-B5** | 结构化 comptime 常量落到 native（`emitc.const_literal` 原来直接 panic） | 加能力 + 加门禁 | **已做**（§17） |
-| **K-B6** | `use c` FFI（native 侧的 java FFI 对位物） | 加语法 | **推迟**（裁决 D7=(b)，理由见下） |
+| **K-B6** | C FFI（native 侧的 java FFI 对位物；立项时的暂定拼写 `use c` 已否，见 D7） | 加语法 | **推迟**（裁决 D7=(b)，理由见下） |
 | **K-B7** | native 二进制进 release artifact | 加产物 + 加门禁 | **已做**（§22） |
 
 > 刀表的**内容**来自任务 #128 的描述。原始 issue body 在写这份文档时取不到
@@ -60,6 +60,13 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 但整个编译器闭包与 `packages/` 都不需要 C 侧的外部函数，`pkgfetch` 要下载就 spawn
 `curl`（§4）。为一个假想需求预付三期两发布的成本，是把契约面积扩大到没人用的地方。
 等到出现第一个真的够不着的 native 程序，再按那时的形状定语法。
+
+> **2026-10-04 补记：C FFI 未立项，拼写也不会是 `use c`。** 维持本条推迟；
+> 拼写之所以否掉，是因为 `use c` 与模块路径 `use c/emitc` 撞名，且照 `java` 的做法会再吃掉一个
+> 单字母标识符（[re-audit-2026-07-30.md](audit/re-audit-2026-07-30.md) RX-11）。
+> 此前 `emitc` 拒绝 `use java` 时的报错写着 "use `use c`"，建议了一个不存在的特性；
+> 现在改成说明 C 后端（native 与 wasm）不编译 `use java`，并指向 spec §12.3。
+> 凡是文档里把 `use c` 写成将来特性的地方，以本条为准。
 
 裁决 **D4（K-B2 的形态）= (a)**：与 JVM 驱动**等价**——同样的 flag、同样的参数处理、
 同样的输出、同样的退出码。不做缩水版。

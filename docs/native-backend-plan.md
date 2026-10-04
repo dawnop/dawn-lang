@@ -5,8 +5,9 @@
 > ——§14.23，提交 `83def2d`，门禁 `scripts/native-fixpoint.sh`（A==B、B==C，外加一次裸目录
 > smoke）。重排后的 S0–S4 也已全部结清（§11.4）。
 >
-> 仍开着的只有两件：Phase 5 的 `use c` FFI（**明确推迟**，判词见
-> [native-driver-plan.md](native-driver-plan.md) §2 的 K-B6）与 S5「std 收口」
+> 仍开着的只有两件：Phase 5 的 C FFI（**未立项**，判词见
+> [native-driver-plan.md](native-driver-plan.md) §2 的 K-B6 / D7；下文 Phase 5 一节里的
+> `use c` 是 07-25 定稿时的计划拼写，已被否掉，见 D7）与 S5「std 收口」
 > （见 [std-audit.md](std-audit.md)）。
 >
 > 上游决策见 [llvm-backend-research.md](llvm-backend-research.md) §10、
