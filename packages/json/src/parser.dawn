@@ -61,11 +61,21 @@ fn is_finite(f: Float) -> Bool = f - f == 0.0
 # are accepted; only overflow to NaN or Infinity is rejected. RFC 8259 §6 lets
 # implementations set these range and precision limits. A caller that needs
 # exact decimal arithmetic needs a decimal model in `Json`.
+# The literal as a message quotes it: the first SHOWN_MAX characters and `...`.
+# A message is often handed back to whoever sent the document (the playground
+# returns `error_text` to its client), and a megabyte of digits would come back
+# as a megabyte of error. The whole literal stays in `NumberRange`, for the
+# caller who wants the digits.
+const SHOWN_MAX: Int = 64
+
+fn shown(lit: String) -> String =
+  if str.len(lit) <= SHOWN_MAX { lit } else { str.slice(lit, 0, SHOWN_MAX) ++ "..." }
+
 fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, JsonError] =
   if is_int_literal(lit) {
     match parse_int(lit) {
       Some(n) -> Ok(JInt(n))
-      None -> Err(err_kind(src, i, NumberRange(lit), "integer out of Int range: " ++ lit))
+      None -> Err(err_kind(src, i, NumberRange(lit), "integer out of Int range: " ++ shown(lit)))
     }
   } else {
     match parse_float(lit) {
@@ -75,9 +85,9 @@ fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, JsonError] =
         if is_finite(f) {
           Ok(JNum(f))
         } else {
-          Err(err_kind(src, i, NumberRange(lit), "number out of Float range: " ++ lit))
+          Err(err_kind(src, i, NumberRange(lit), "number out of Float range: " ++ shown(lit)))
         }
-      None -> Err(err_kind(src, i, NumberRange(lit), "invalid number: " ++ lit))
+      None -> Err(err_kind(src, i, NumberRange(lit), "invalid number: " ++ shown(lit)))
     }
   }
 
@@ -250,6 +260,23 @@ test "integer and non-finite overflow are refused, finite underflow is accepted"
   # a caller that needs exact decimals keeps the digits instead of the sentence
   assert kind_of(parse("1e400")) == NumberRange("1e400")
   assert kind_of(parse("99999999999999999999")) == NumberRange("99999999999999999999")
+}
+
+test "an error message quotes at most 64 characters of a number" {
+  let long = str.repeat("9", 1000000)
+  match parse(long) {
+    Err(e) -> {
+      assert e.message == "integer out of Int range: " ++ str.repeat("9", 64) ++ "..."
+      # the kind still carries every digit
+      assert e.kind == NumberRange(long)
+    }
+    Ok(_) -> { assert false }
+  }
+  let big = "1" ++ str.repeat("0", 100) ++ "e400"
+  assert text_of(parse(big)) == "number out of Float range: " ++ str.slice(big, 0, 64) ++ "... at offset 0"
+  # sixty-four characters exactly are quoted whole
+  let edge = str.repeat("9", 64)
+  assert text_of(parse(edge)) == "integer out of Int range: " ++ edge ++ " at offset 0"
 }
 
 test "errors carry a code-point offset" {
