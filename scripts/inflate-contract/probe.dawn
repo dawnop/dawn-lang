@@ -8,6 +8,7 @@
 # redundancy -- 0 forces stored blocks, 1 tends to fixed Huffman and 6/9 to
 # dynamic, which is all three of RFC 1951's kinds.
 use std/bytes
+use std/bytes.{Buf}
 use std/io
 use std/io.{Fs}
 use std/str
@@ -401,10 +402,99 @@ fn check_bounded(src: Bytes) -> Int !io = {
   bad
 }
 
+## The empty-block leg (security audit item 6). A stream of empty blocks
+## writes no output, so no ceiling stops it, and it costs whatever the decoder
+## spends per block: 40 000 empty fixed blocks are 50 KB, which the decoder
+## that rebuilt both fixed tables per block took about 100 s of CPU to read.
+## The harness runs this under a wall-clock limit far above the linear cost.
+## The dynamic kind is here for completeness: dynamic blocks rebuild their
+## tables by definition, and the fix made that about five times cheaper, a
+## ratio too small for a wall-clock gate.
+fn empty_blocks_case(dynamic: Bool, n: Int) -> Unit !io = {
+  let src = empty_stream(n, dynamic)
+  io.println("empty blocks: " ++ to_string(n) ++ (if dynamic { " dynamic" } else { " fixed" }) ++
+      ", " ++ to_string(bytes.len(src)) ++ " compressed bytes")
+  match deflate.inflate(src) {
+    Ok(o) ->
+      if bytes.len(o) == 0 {
+        io.println("mismatches 0")
+      } else {
+        io.println("empty blocks decoded to " ++ to_string(bytes.len(o)) ++ " bytes")
+        io.println("mismatches 1")
+      }
+    Err(e) -> {
+      io.println("empty blocks were refused: " ++ e)
+      io.println("mismatches 1")
+    }
+  }
+}
+
+## The same builder as the package's own test (deflate.dawn `empty_blocks`),
+## repeated because that one is private.
+fn empty_stream(n: Int, dynamic: Bool) -> Bytes = {
+  var w = EW { out: bytes.buf(), acc: 0, n: 0 }
+  var i = 0
+  while i < n {
+    w = ew_lsb(w, if i == n - 1 { 1 } else { 0 }, 1)
+    if dynamic {
+      w = ew_lsb(w, 2, 2)
+      w = ew_lsb(w, 0, 5)
+      w = ew_lsb(w, 0, 5)
+      w = ew_lsb(w, 14, 4)
+      for l in [0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2] { w = ew_lsb(w, l, 3) }
+      w = ew_msb(w, 3, 2)
+      w = ew_lsb(w, 127, 7)
+      w = ew_msb(w, 3, 2)
+      w = ew_lsb(w, 107, 7)
+      w = ew_msb(w, 2, 2)
+      w = ew_msb(w, 0, 1)
+      w = ew_msb(w, 0, 1)
+    } else {
+      w = ew_lsb(w, 1, 2)
+      w = ew_msb(w, 0, 7)
+    }
+    i = i + 1
+  }
+  if w.n > 0 { w = ew_lsb(w, 0, 8 - w.n) }
+  bytes.freeze(w.out)
+}
+
+type EW = { out: Buf, acc: Int, n: Int }
+
+fn ew_lsb(w0: EW, v: Int, count: Int) -> EW = {
+  var w = w0
+  var i = 0
+  while i < count {
+    w = ew_bit(w, (v >>> i) & 1)
+    i = i + 1
+  }
+  w
+}
+
+fn ew_msb(w0: EW, v: Int, count: Int) -> EW = {
+  var w = w0
+  var i = count - 1
+  while i >= 0 {
+    w = ew_bit(w, (v >>> i) & 1)
+    i = i - 1
+  }
+  w
+}
+
+fn ew_bit(w: EW, b: Int) -> EW = {
+  let acc = w.acc | (b << w.n)
+  if w.n == 7 {
+    EW { out: bytes.put(w.out, acc), acc: 0, n: 0 }
+  } else {
+    EW { ..w, acc: acc, n: w.n + 1 }
+  }
+}
+
 pub fn main() -> Unit !io = io.with_fs_real(() =>
     match args() {
       ["--bomb", n] -> bomb_case(parse_int(n).unwrap_or(512))
       ["--bomb-default", n] -> bomb_default_case(parse_int(n).unwrap_or(512))
+      ["--empty-blocks", kind, n] -> empty_blocks_case(kind == "dynamic", parse_int(n).unwrap_or(40000))
       _ -> differential()
     })
 
