@@ -40,8 +40,8 @@ MUTATIONS = {
     ),),
     "load-dtype-f64": ((
         DEV,
-        't_load(position(p), param_dtype(p), i, shape, strides, none, none, [])',
-        't_load(position(p), "f64", i, shape, strides, none, none, [])',
+        't_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides),',
+        't_load(position(p), "f64", i, shape, strides_or_row_major(shape, strides),',
     ),),
     "make-token-as-iota": ((
         BYTECODE,
