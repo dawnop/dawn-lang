@@ -237,6 +237,61 @@ jobs:
           } > totals-issue.md
           scripts/nightly-issue.sh "nightly: gate totals over their limits" totals-issue.md
 
+  # The test blocks of std and of every package the native backend can build,
+  # run natively with ASan, LeakSanitizer and UBSan (scripts/native-asan-tests.sh
+  # says why, and holds the exclusion and known-leak tables). The package
+  # suites otherwise ran on the JVM alone, which is how #9 shipped, and std's
+  # native run had no sanitizer, which is how #237 shipped. Nightly rather than
+  # push: push-total had no room on 2026-10-04, and the leg finds old bugs
+  # rather than guarding a change, so a day's delay costs little. Measured
+  # 2026-10-04: 354s for the whole script on a gcc 11 box, toolchain already
+  # built; locally the native driver build is about 1 minute, packages/tileir
+  # 80s, std 37s and the rest 3s to 20s each. The toolchain action adds what
+  # it adds to every job. The timeout is a runaway stop, as the header says.
+  native-asan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read    # the checkout
+      issues: write     # the report when the run is red
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: std and package tests, native, under ASan and UBSan
+        id: asan
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/native-asan-tests.sh > asan.txt 2>&1 || status=$?
+          cat asan.txt
+          exit "${status:-0}"
+
+      - name: report a red native sanitizer run as an issue
+        if: failure() && steps.asan.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly native ASan/UBSan run of std's and the packages' test"
+            echo "blocks (scripts/native-asan-tests.sh) is red."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "A sanitizer report is a bug in the compiler or the runtime, not in the"
+            echo "run. Failing lines:"
+            echo
+            echo '```'
+            grep -E '^(FAIL|==|SUMMARY)|ERROR: |runtime error:' asan.txt 2>/dev/null | head -60 ||
+              echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: native sanitizer run is red" issue.md
+
   # Ruling 9(c). The corpus above is dawnop-site at a pinned commit, and a pin
   # nothing advances answers an older question every week: it sat at a72bfc9
   # (v0.59.0) through three `.dawn-version` bumps over there. The rule is
