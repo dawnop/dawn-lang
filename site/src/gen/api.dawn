@@ -14,7 +14,10 @@
 #
 # The anchors are page-relative: `link_anchor` assumes the entries of the
 # page it renders on, and `linked` stops the build on a link whose target the
-# page does not carry (`Pg.anchors`). The page decides which entries it has.
+# page should carry and does not (`Pg.anchors`). The page decides which
+# entries it has, and where the rest live (`Pg.std_page`, `Pg.dep_pages`):
+# a package's page sends std names to the stdlib page and a sibling
+# package's names to that package's page.
 
 use std/str
 use std/map
@@ -70,7 +73,7 @@ fn prose(pg: Pg, text: String, links: List[Json]) -> String =
     ""
   } else {
     match parser.parse(text) {
-      Ok(bs) -> linked(pg, render_doc(bs, u => map_doc_url(".", pg.docs, u)).html, links)
+      Ok(bs) -> linked(pg, render_doc(bs, u => map_doc_url(pg.root, pg.docs, u)).html, links)
       Err(e) -> panic("a doc comment is not Markdown: ${e}\n---\n${text}")
     }
   }
@@ -79,10 +82,22 @@ fn prose(pg: Pg, text: String, links: List[Json]) -> String =
 pub fn doc_prose(pg: Pg, j: Json) -> String = prose(pg, field(j, "doc"), jarr(jget(j, "links")))
 
 ## What rendering any doc on the page needs: the `docs/` files a doc may link
-## to, every anchor the page carries, which a `[`name`]` link lands on, and
-## the heading an entry's examples go under (one, many), in the page's
-## language.
-pub type Pg = { docs: List[String], anchors: Set[String], examples: (String, String) }
+## to and the page's distance from the site root, every anchor the page
+## carries, which a `[`name`]` link lands on, and the heading an entry's
+## examples go under (one, many), in the page's language.
+##
+## `std_page` is where std and prelude names are documented when it is not
+## this page ("" on the stdlib page itself). `dep_pages` pairs a package's
+## manifest name with its page: a doc link into a dependency names a module
+## whose path starts with that name ([link_href]).
+pub type Pg = {
+  docs: List[String],
+  root: String,
+  anchors: Set[String],
+  examples: (String, String),
+  std_page: String,
+  dep_pages: List[(String, String)],
+}
 
 ## An entry's examples (spec §3.4: the bodies of the tests named by its
 ## declaration, as `dawn doc` wrote them) as Dawn code blocks under one
@@ -114,10 +129,12 @@ fn examples_html(pg: Pg, j: Json) -> String = {
 ## [api_rows] uses: a member (constructor, field, method, operation, associated
 ## member) lands on its owner's entry. None for a prelude name the page has no
 ## entry for: a builtin type, or `Option` and its constructors.
-pub fn link_anchor(t: Json) -> Option[String] = {
-  let module = field(t, "module")
-  let name = field(t, "name")
-  let kind = field(t, "kind")
+pub fn link_anchor(t: Json) -> Option[String] =
+  anchor_of(field(t, "module"), field(t, "name"), field(t, "kind"))
+
+## [link_anchor] over the target's three fields, for a caller that has taken
+## a package's name off the module path first.
+pub fn anchor_of(module: String, name: String, kind: String) -> Option[String] = {
   let owner = str.split(name, ".")[0]
   if module == "" {
     return match kind {
@@ -143,24 +160,66 @@ pub fn link_anchor(t: Json) -> Option[String] = {
   }
 }
 
-## `html` with each of `links` turned into a link to its entry. A target whose
-## anchor this page does not carry is a std doc pointing at something the
-## reference leaves out (a private helper, an internal module), which is a
-## broken link on the page as surely as a misspelled one, so the build stops.
-## A prelude name with no entry at all keeps its code span and loses the
-## brackets.
+## Where a link's target is, seen from this page, or None when nowhere on
+## the site documents it.
+##
+## On this page: a std or prelude name on the stdlib page, and a name in one
+## of the modules a package's page carries. A target this page should carry
+## and does not is a doc pointing at something the reference leaves out (a
+## private helper, an internal module), which is a broken link on the page as
+## surely as a misspelled one, so the build stops.
+##
+## Elsewhere: std and the prelude on `std_page`, a sibling package's module on
+## its page, under the module path with the manifest name taken off (its own
+## page anchors its modules by their own paths). A module of a dependency that
+## has no page, and a prelude name with no entry at all, keep their code span.
+pub fn link_href(pg: Pg, text: String, t: Json) -> Option[String] = {
+  let module = field(t, "module")
+  let is_std = module == "" || str.starts_with(module, "std/")
+  if (is_std && pg.std_page == "") || (not is_std && set.has(pg.anchors, "m-" ++ slug(module))) {
+    return match link_anchor(t) {
+      Some(a) ->
+        if set.has(pg.anchors, a) {
+          Some("#${a}")
+        } else {
+          panic("a doc links [`${text}`] to #${a}, which this page does not carry")
+        }
+      None -> None
+    }
+  }
+  if is_std {
+    return match link_anchor(t) {
+      Some(a) -> Some("${pg.std_page}#${a}")
+      None -> None
+    }
+  }
+  var to: Option[String] = None
+  for dp in pg.dep_pages {
+    let (name, page) = dp
+    match str.strip_prefix(module, name ++ "/") {
+      Some(rest) -> {
+        if to == None {
+          to = match anchor_of(rest, field(t, "name"), field(t, "kind")) {
+            Some(a) -> Some("${page}#${a}")
+            None -> None
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  to
+}
+
+## `html` with each of `links` turned into a link to its entry ([link_href]).
+## A target with no entry anywhere keeps its code span and loses the brackets.
 fn linked(pg: Pg, html: String, links: List[Json]) -> String = {
   var out = html
   for l in links {
     let text = field(l, "text")
     let code = "<code>" ++ escape_html(text) ++ "</code>"
-    let to = match link_anchor(jget(l, "target")) {
-      Some(a) ->
-        if set.has(pg.anchors, a) {
-          """<a href="#${a}">""" ++ code ++ "</a>"
-        } else {
-          panic("a doc links [`${text}`] to #${a}, which this page does not carry")
-        }
+    let to = match link_href(pg, text, jget(l, "target")) {
+      Some(h) -> """<a href="${h}">""" ++ code ++ "</a>"
       None -> code
     }
     out = str.replace(out, "[" ++ code ++ "]", to)
@@ -314,6 +373,80 @@ pub fn effect_entry(pg: Pg, id_base: String, e: Json) -> String = {
   entry(pg, name, "${id_base}-effect-${name}", "effect ${name} {${body}\n}", e, member_docs(ops))
 }
 
+# ---- a module's entries ----
+
+## The impls a module registers. Coherence is program-wide — it does not ask
+## who wrote the `use` — so a reader needs to see that `==` on a `Map` is
+## answered here even though no function in the list says so. `lead` and
+## `sep` are the page's words for it.
+pub fn impls_html(lead: String, sep: String, m: Json) -> String = {
+  let names = map(jarr(jget(m, "impls")), i => "<code>" ++ escape_html(jstr(i)) ++ "</code>")
+  if len(names) == 0 {
+    ""
+  } else {
+    """<p class="api-impls">""" ++ lead ++ join(names, sep) ++ "</p>\n"
+  }
+}
+
+## A module's declarations other than its functions, in the order every
+## reference page shows them: types, traits, constants, effects. `qual` is the
+## name its functions are called through, `base` its path as an id fragment.
+pub fn decls_html(pg: Pg, qual: String, base: String, m: Json) -> String = {
+  var html: List[String] = []
+  for t in jarr(jget(m, "types")) {
+    html = html ++ [type_entry(pg, base, t) ++ "\n"]
+  }
+  for t in jarr(jget(m, "traits")) {
+    html = html ++ [trait_entry(pg, base, t) ++ "\n"]
+  }
+  for c in jarr(jget(m, "consts")) {
+    html = html ++ [const_entry(pg, qual, base, c) ++ "\n"]
+  }
+  for e in jarr(jget(m, "effects")) {
+    html = html ++ [effect_entry(pg, base, e) ++ "\n"]
+  }
+  join(html, "")
+}
+
+# ---- the same entries, as an index ----
+
+## One entry of a reference page, as the search index needs it: the name, the
+## declaration, the doc (links unbracketed) and the id the page anchors it at.
+pub type ApiRow = { title: String, decl: String, doc: String, anchor: String }
+
+pub fn api_row(title: String, decl: String, doc: String, anchor: String) -> ApiRow =
+  ApiRow { title: title, decl: decl, doc: doc, anchor: anchor }
+
+pub fn trait_row(base: String, t: Json) -> ApiRow = {
+  let name = field(t, "name")
+  api_row(name, "trait ${name}[" ++ field(t, "typeParam") ++ "]", unlinked(t),
+    "${base}-trait-${name}")
+}
+
+## The rows of [decls_html]'s entries, in its order and with its anchors.
+pub fn decl_rows(qual: String, base: String, m: Json) -> List[ApiRow] = {
+  var rows: List[ApiRow] = []
+  for t in jarr(jget(m, "types")) {
+    rows = rows
+      ++ [api_row(field(t, "name"), type_decl(t), unlinked(t), "${base}-type-" ++ field(t, "name"))]
+  }
+  for t in jarr(jget(m, "traits")) {
+    rows = rows ++ [trait_row(base, t)]
+  }
+  for c in jarr(jget(m, "consts")) {
+    let name = field(c, "name")
+    rows = rows
+      ++ [api_row(qualify(qual, name), "const ${name}: " ++ field(c, "type"), unlinked(c),
+        "${base}-${name}")]
+  }
+  for e in jarr(jget(m, "effects")) {
+    rows = rows
+      ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), unlinked(e),
+        "${base}-effect-" ++ field(e, "name"))]
+  }
+  rows
+}
+
 # ---- tests ----
 
 ## A JSON object from its entries, in order: what the tests here and in the
@@ -322,7 +455,9 @@ pub fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))
 
 ## A page with no docs to link to, no anchors and the English example
 ## headings: enough to render an entry whose doc links nothing.
-pub fn no_pg() -> Pg = Pg { docs: [], anchors: set.empty(), examples: ("Example", "Examples") }
+pub fn no_pg() -> Pg =
+  Pg { docs: [], root: ".", anchors: set.empty(), examples: ("Example", "Examples"), std_page: "",
+    dep_pages: [] }
 
 fn plain_prose(text: String) -> String = prose(no_pg(), text, [])
 

@@ -1,8 +1,9 @@
 # Packages page copy, English, the original
 
-Everything `packages.html` says in words. The generator reads these sections
-by name (`site/src/gen/packages.dawn`), the way the cuTile page reads
-`gpu.md`, so a missing section fails the build. The Chinese translation is
+Everything `packages.html` and each package's page under `packages/` say in
+words. The generators read these sections by name (`site/src/gen/packages.dawn`,
+`site/src/gen/pkgpage.dawn`), the way the cuTile page reads `gpu.md`, so a
+missing section fails the build. The Chinese translation is
 `packages.zh.md`, with the same keys and a digest of this file.
 
 What is not here: anything about a particular package. Names, versions,
@@ -70,3 +71,31 @@ archive
 ## name-note
 
 A package at major version 2 or later carries the major at the end of its manifest name (`json2`, `web6`). The alias in the first column is the name `use` lines spell, so a major bump does not move them.
+
+## api-title
+
+API
+
+## chip-modules
+
+modules
+
+## chip-deps
+
+depends on
+
+## chip-repo
+
+source on GitHub
+
+## impls-lead
+
+impls registered by this module (visible program-wide, no `use` needed):
+
+## example-one
+
+Example
+
+## example-many
+
+Examples

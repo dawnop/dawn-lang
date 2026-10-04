@@ -58,7 +58,8 @@ use gen/tutorial.{chapter_titles, chapter_sections}
 use gen/examples.{gallery_examples, must_describe}
 use gen/copy.{load_copy, plain, body_text}
 use gen/gpu.{prose_sections, copy_file}
-use gen/packages.{read_packages, summary_text, row_id}
+use gen/packages.{read_packages, summary_text, page_of}
+use gen/pkgpage.{package_rows}
 
 ## One row of the index.
 pub type Row = { group: String, title: String, detail: String, note: String, href: String }
@@ -241,23 +242,35 @@ fn gpu_index(lang: Lang, detail: String) -> List[Row] !Fs = {
     })
 }
 
-## The packages page, one row per package: the name `use` lines spell, with
-## its README's first sentence as the note, landing on its row of the table.
+## The packages, one row per package and one per entry of its API, all
+## landing on the package's own page (gen/pkgpage).
 ##
-## In the "examples" group, as the cuTile page's rows are, for the reason
-## given there. Read from the manifests and READMEs only, not from the `dawn
-## doc` documents the page also reads: those are written by site/build.sh,
-## and `dawn test site` runs without them.
-fn packages_index(lang: Lang, detail: String) -> List[Row] !Fs = {
-  let page = lang_path(lang, "packages.html")
-  list.map(read_packages(), p =>
-      Row {
-        group: "examples",
-        title: p.use_as,
-        detail: detail,
-        note: note_of(summary_text(p)),
-        href: "${page}#${row_id(p.dir)}",
-      })
+## The package's row is the name `use` lines spell, with its README's first
+## sentence as the note. Its API rows are the stdlib page's kind of row (a
+## name, its declaration and the first sentence of its doc), from the same
+## kind of document. All of them are in the "examples" group, as the cuTile
+## page's rows are, for the reason given there and one more: the panel's
+## "stdlib" group is drawn as the standard library, which these are not.
+##
+## `docs` pairs a package's directory with its `dawn doc` document, which
+## site/build.sh writes and `dawn test site` runs without; a package with no
+## document in it contributes its own row only.
+fn packages_index(lang: Lang, detail: String, docs: List[(String, Json)]) -> List[Row] !Fs = {
+  var rows: List[Row] = []
+  for p in read_packages() {
+    let page = lang_path(lang, page_of(p.use_as))
+    rows = rows
+      ++ [Row { group: "examples", title: p.use_as, detail: detail, note: note_of(summary_text(p)), href: page }]
+    for d in docs {
+      let (dir, doc) = d
+      if dir == p.dir {
+        rows = rows
+          ++ list.map(package_rows(p.use_as, doc), r =>
+              Row { group: "examples", title: r.title, detail: r.decl, note: note_of(r.doc), href: "${page}#${r.anchor}" })
+      }
+    }
+  }
+  rows
 }
 
 # ---- the words the rows carry ----------------------------------------------
@@ -439,8 +452,8 @@ fn row_json(r: Row) -> String =
 
 ## Every row of one language's index, in the order the file will carry them.
 ## `c` is the same language's documents, as gen/corpus parsed them for the
-## pages.
-pub fn index_rows(api: Json, lang: Lang, c: Corpus) -> List[Row] !Fs = {
+## pages; `docs` the packages' `dawn doc` documents ([packages_index]).
+pub fn index_rows(api: Json, docs: List[(String, Json)], lang: Lang, c: Corpus) -> List[Row] !Fs = {
   let w = words(lang)
   api_index(api, lang)
     ++ doc_index(c.spec, "spec", lang_path(lang, "spec.html"), w.spec)
@@ -449,7 +462,7 @@ pub fn index_rows(api: Json, lang: Lang, c: Corpus) -> List[Row] !Fs = {
     ++ tutorial_index(c.tutorial, lang, w.tutorial)
     ++ examples_index(lang, w.gallery, w.home)
     ++ gpu_index(lang, w.gpu)
-    ++ packages_index(lang, w.packages)
+    ++ packages_index(lang, w.packages, docs)
 }
 
 ## The index for one language, as the bytes that go into /assets/.
@@ -463,8 +476,8 @@ pub fn index_rows(api: Json, lang: Lang, c: Corpus) -> List[Row] !Fs = {
 ## in `items`. Positions and not a second copy of the rows, so a suggestion's
 ## title and href are the row's own -- in this language, and checked by
 ## gen/links with every other href in the file.
-pub fn search_index(api: Json, lang: Lang, c: Corpus) -> String !Fs = {
-  let rows = index_rows(api, lang, c)
+pub fn search_index(api: Json, docs: List[(String, Json)], lang: Lang, c: Corpus) -> String !Fs = {
+  let rows = index_rows(api, docs, lang, c)
   "{\"v\":1,\"lang\":" ++ quoted(lang_code_of(lang))
     ++ ",\"start\":[" ++ join(list.map(start_ids(rows, lang), i => to_string(i)), ",") ++ "]"
     ++ ",\"items\":[" ++ join(list.map(rows, r => row_json(r)), ",") ++ "]}"
@@ -569,7 +582,7 @@ test "every row lands in one of the five groups the panel draws" {
   io.with_fs_real(() => {
     let drawn = ["stdlib", "spec", "tutorial", "examples", "history"]
     for lang in [En, Zh] {
-      for r in index_rows(probe_api(), lang, read_corpus(lang)) {
+      for r in index_rows(probe_api(), [], lang, read_corpus(lang)) {
         assert list.contains(drawn, r.group)
         assert r.title != ""
         assert r.href != ""
@@ -653,7 +666,7 @@ test "a note is the first sentence of a doc comment, cut to a bound" {
 ## The sections a chapter page anchors are searchable, under their chapter.
 test "the tutorial's sections are indexed with their chapter as the note" {
   io.with_fs_real(() => {
-    let rows = list.filter(index_rows(probe_api(), En, read_corpus(En)), r => r.group == "tutorial")
+    let rows = list.filter(index_rows(probe_api(), [], En, read_corpus(En)), r => r.group == "tutorial")
     let sections = list.filter(rows, r => str.contains(r.href, "#"))
     assert len(sections) > 0
     for r in sections {
@@ -669,8 +682,8 @@ test "the tutorial's sections are indexed with their chapter as the note" {
 test "the index carries every group and addresses them from the site root" {
   io.with_fs_real(() => {
     let api = probe_api()
-    let en = index_rows(api, En, read_corpus(En))
-    let zh = index_rows(api, Zh, read_corpus(Zh))
+    let en = index_rows(api, [], En, read_corpus(En))
+    let zh = index_rows(api, [], Zh, read_corpus(Zh))
     for group in ["stdlib", "spec", "tutorial", "examples", "history"] {
       assert len(list.filter(en, r => r.group == group)) > 0
       assert len(list.filter(zh, r => r.group == group)) > 0
@@ -711,7 +724,7 @@ test "the cuTile page and its sections are rows of the index" {
   io.with_fs_real(() => {
     for lang in [En, Zh] {
       let page = lang_path(lang, "gpu.html")
-      let rows = list.filter(index_rows(probe_api(), lang, read_corpus(lang)),
+      let rows = list.filter(index_rows(probe_api(), [], lang, read_corpus(lang)),
         r => r.href == page || str.starts_with(r.href, page ++ "#"))
       # the page row, one per section, and the nav's own row for it
       assert len(rows) == len(prose_sections()) + 2
@@ -725,31 +738,50 @@ test "the cuTile page and its sections are rows of the index" {
         assert hit[0].note != ""
       }
     }
-    let en = list.filter(index_rows(probe_api(), En, read_corpus(En)), r => r.href == "gpu.html")
+    let en = list.filter(index_rows(probe_api(), [], En, read_corpus(En)), r => r.href == "gpu.html")
     assert list.map(en, r => r.title) == ["GPU", "Dawn's cuTile backend"]
-    let zh = list.filter(index_rows(probe_api(), Zh, read_corpus(Zh)), r => r.href == "zh/gpu.html")
+    let zh = list.filter(index_rows(probe_api(), [], Zh, read_corpus(Zh)), r => r.href == "zh/gpu.html")
     assert list.map(zh, r => r.title) == ["GPU", "Dawn 的 cuTile 后端"]
     assert str.starts_with(zh[1].note, "Dawn 里的 GPU kernel")
   })
 }
 
-## Every package is a row in each language, landing on its row of the
-## packages page with its README's first sentence as the note.
-test "each package is a row of the index, on its row of the packages page" {
+## Every package is a row in each language, landing on its own page with its
+## README's first sentence as the note; with its `dawn doc` document, every
+## entry of its API is a row on the same page, at the entry's anchor.
+test "each package is a row of the index, on its own page, and so is its API" {
   io.with_fs_real(() => {
     let n = len(read_packages())
     for lang in [En, Zh] {
-      let page = lang_path(lang, "packages.html")
-      let rows = list.filter(index_rows(probe_api(), lang, read_corpus(lang)),
-        r => str.starts_with(r.href, page ++ "#pkg-"))
+      let rows = list.filter(index_rows(probe_api(), [], lang, read_corpus(lang)),
+        r => str.starts_with(r.href, lang_path(lang, "packages/")))
       assert len(rows) == n
       for r in rows {
         assert r.group == "examples"
         assert r.note != ""
+        assert not str.contains(r.href, "#")
       }
     }
-    let en = list.filter(index_rows(probe_api(), En, read_corpus(En)), r => r.href == "packages.html#pkg-tea-dom")
+    let en = list.filter(index_rows(probe_api(), [], En, read_corpus(En)), r => r.href == "packages/tea_dom.html")
     assert list.map(en, r => r.title) == ["tea_dom"]
+    let doc = parse("{\"modules\":[{\"path\":\"value\",\"doc\":\"\",\"impls\":[],\"types\":[],"
+        ++ "\"traits\":[],\"consts\":[],\"effects\":[],\"fns\":[{\"name\":\"show\","
+        ++ "\"sig\":\"fn show() -> String\",\"doc\":\"Shows it. More.\"}]}]}")
+    match doc {
+      Ok(d) -> {
+        let zh = list.filter(index_rows(probe_api(), [("json", d)], Zh, read_corpus(Zh)),
+          r => str.starts_with(r.href, "zh/packages/json.html"))
+        assert list.map(zh, r => (r.title, r.detail, r.href)) == [
+          ("json", "包", "zh/packages/json.html"),
+          ("json/value", "module", "zh/packages/json.html#m-value"),
+          ("value.show", "fn show() -> String", "zh/packages/json.html#value-show"),
+        ]
+        assert zh[2].note == "Shows it."
+      }
+      Err(_) -> {
+        assert false
+      }
+    }
   })
 }
 
@@ -759,14 +791,14 @@ test "the suggested starting points are rows of the index, in each language" {
   io.with_fs_real(() => {
     let api = probe_api()
     for lang in [En, Zh] {
-      let rows = index_rows(api, lang, read_corpus(lang))
+      let rows = index_rows(api, [], lang, read_corpus(lang))
       let picked = list.map(start_ids(rows, lang), i => rows[i])
       assert list.map(picked, r => r.group) == ["tutorial", "spec", "stdlib"]
       assert picked[0].href == lang_path(lang, "tutorial/01.html")
       assert str.starts_with(picked[1].title, "6. ")
       assert picked[2].title == "std/str"
     }
-    let en_rows = index_rows(api, En, read_corpus(En))
+    let en_rows = index_rows(api, [], En, read_corpus(En))
     let en = list.map(start_ids(en_rows, En), i => en_rows[i].href)
     assert en == ["tutorial/01.html", "spec.html#s6", "stdlib.html#m-std-str"]
   })

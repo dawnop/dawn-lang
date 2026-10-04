@@ -1,0 +1,320 @@
+# One page per package: packages/<alias>.html, and zh/packages/<alias>.html.
+#
+# The package's README in full, then its API as `dawn doc packages/<dir>`
+# describes it, entry for entry in the stdlib page's shape (gen/api). The
+# packages table (gen/packages) links each row here; the search index points
+# each package's row, and every entry of its API, here as well.
+#
+# Why a module of its own and not more of gen/packages. That module reads the
+# packages and draws the table; this one draws a page from what it read, and
+# the search index needs this page's anchors without the table. gen/packages
+# cannot import this module back, so the one fact both sides need, where a
+# package's page is, lives there ([page_of]).
+#
+# The README's heading ids are not the ones `render_doc` hands out. Those are
+# positional (`s2-1`) and gen/links holds them to the section number a heading
+# prints: that is right for the spec, whose headings are numbered by hand, and
+# wrong for a README, where `### 2.0.0` is a version and not section 2.0.0.
+# So the README's ids are `readme-s2-1`: still positional, still unique on the
+# page, and no claim about a number.
+#
+# Doc links (spec §1.2) land where their target is documented: on this page
+# for the package's own modules, on another package's page for a module of a
+# sibling (its path starts with that package's manifest name, which is what
+# `dawn doc` writes for a dependency), on the stdlib page for std and the
+# prelude. A target that is none of these, a dependency outside packages/,
+# keeps its code span (gen/api.link_href).
+#
+# The chrome is in site/pages/packages.md with the table's; the README and the
+# entries are English on both pages, as stdlib.html's entries are.
+
+use std/str
+use std/set
+use std/io
+use std/io.{Fs}
+use json/value.{Json, JStr, JArr, JBool}
+use md/parser
+use html/escape.{escape_html}
+use html/page.{
+  Assets, Lang, En, Zh, PageHead, page_with_toc, toc_rail, section_crumb, here, chip, link_chip,
+  lang_path, repo_url, plain_assets
+}
+use html/render.{render_doc, split_head, inline_run, TocEntry}
+use gen/common.{must_read, write_page, doc_files}
+use gen/copy.{Copy, load_copy, line, plain}
+use gen/api.{
+  Pg, ApiRow, jget, jarr, field, slug, doc_prose, impls_html, decls_html, decl_rows, fn_entry,
+  api_row, qualify, unlinked, jobj, no_pg
+}
+use gen/packages.{
+  Package, read_packages, read_doc, copy_file, page_of, readme_url, deps_links, alias_of
+}
+
+# ---- the API half ----
+
+## A package's modules in the order the page shows them: by path, as the
+## stdlib page and the packages table order theirs. `dawn doc` writes them in
+## the order they are compiled in, which tells a reader nothing.
+pub fn modules_in_order(doc: Json) -> List[Json] =
+  sort_by(jarr(jget(doc, "modules")), (a, b) => cmp(field(a, "path"), field(b, "path")))
+
+## The name a module's functions are called through: `use json/value` binds
+## `value`, `use tileir/dev` binds `dev`.
+pub fn call_name(path: String) -> String = {
+  let parts = str.split(path, "/")
+  parts[len(parts) - 1]
+}
+
+## Every entry of a package's page, as an index needs it, in the order the
+## page shows them: each module's heading, then its types, traits, constants,
+## effects and functions. `use_as` is the package's alias, which a module's
+## heading is spelled with (`json/value`). The anchors are the module's own
+## path, `m-value` and `value-parse`, because those are what `dawn doc`'s
+## doc links name ([gen/api.link_anchor]).
+pub fn package_rows(use_as: String, doc: Json) -> List[ApiRow] = {
+  var rows: List[ApiRow] = []
+  for m in modules_in_order(doc) {
+    let path = field(m, "path")
+    let base = slug(path)
+    let qual = call_name(path)
+    rows = rows ++ [api_row("${use_as}/${path}", "module", unlinked(m), "m-${base}")]
+    rows = rows ++ decl_rows(qual, base, m)
+    for f in jarr(jget(m, "fns")) {
+      let name = field(f, "name")
+      rows = rows ++ [api_row(qualify(qual, name), field(f, "sig"), unlinked(f), "${base}-${name}")]
+    }
+  }
+  rows
+}
+
+fn sub(id: String, title: String) -> String =
+  """<h3 class="api-group" id="${id}">""" ++ escape_html(title) ++ "</h3>\n"
+
+## The API section: one `###` per module, the module's doc and impls under it,
+## then its entries. Returns the markup and the rail's entries for it.
+pub fn api_html(c: Copy, lang: Lang, pg: Pg, use_as: String, doc: Json) -> (String, List[TocEntry]) = {
+  let mu = (u: String) => u
+  let lead = line(c, "impls-lead", mu) ++ after_colon(lang)
+  let sep = list_sep(lang)
+  var html: List[String] = []
+  var toc: List[TocEntry] = []
+  for m in modules_in_order(doc) {
+    let path = field(m, "path")
+    let id = "m-" ++ slug(path)
+    let title = "${use_as}/${path}"
+    toc = toc ++ [TocEntry { level: 3, id: id, text: title }]
+    html = html ++ [sub(id, title) ++ doc_prose(pg, m) ++ impls_html(lead, sep, m)
+        ++ decls_html(pg, call_name(path), slug(path), m)]
+    for f in jarr(jget(m, "fns")) {
+      html = html ++ [fn_entry(pg, call_name(path), slug(path), f) ++ "\n"]
+    }
+  }
+  (join(html, ""), toc)
+}
+
+## What comes after the impls line's colon: a space in English, nothing after
+## the full-width colon in Chinese.
+fn after_colon(lang: Lang) -> String =
+  match lang {
+    En -> " "
+    Zh -> ""
+  }
+
+fn list_sep(lang: Lang) -> String =
+  match lang {
+    En -> ", "
+    Zh -> "、"
+  }
+
+# ---- the README half ----
+
+## The README's heading ids, moved out of the section-number namespace (see
+## the head of this file). `render_doc` writes an id as ` id="s...` and the
+## heading's own anchor as `href="#s...`; nothing else in rendered Markdown
+## spells either, because text and code are escaped.
+pub fn readme_ids(html: String) -> String =
+  str.replace(str.replace(html, ` id="s`, ` id="readme-s`), `href="#s`, `href="#readme-s`)
+
+fn readme_toc(toc: List[TocEntry]) -> List[TocEntry] =
+  map(toc, e => TocEntry { level: e.level, id: "readme-" ++ e.id, text: e.text })
+
+# ---- the page ----
+
+## How far a package's page is from the site root.
+fn root_of(lang: Lang) -> String =
+  match lang {
+    En -> ".."
+    Zh -> "../.."
+  }
+
+## What rendering an entry needs on `p`'s page: its own anchors, the stdlib
+## page for std and the prelude, and every other package's page under the
+## manifest name a doc link's module path starts with.
+pub fn pg_for(lang: Lang, root: String, docs: List[String], c: Copy, p: Package, all: List[Package], doc: Json) -> Pg =
+  Pg {
+    docs: docs,
+    root: root,
+    anchors: set.from(map(package_rows(p.use_as, doc), r => r.anchor)),
+    examples: (plain(c, "example-one"), plain(c, "example-many")),
+    std_page: "${root}/" ++ lang_path(lang, "stdlib.html"),
+    dep_pages: map(filter(all, q => q.dir != p.dir), q =>
+        (q.name, "${root}/" ++ lang_path(lang, page_of(q.use_as)))),
+  }
+
+## One package's page, as markup, in one language.
+pub fn package_page(a: Assets, lang: Lang, p: Package, doc: Json, all: List[Package], docs: List[String]) -> String !Fs = {
+  let root = root_of(lang)
+  let c = load_copy(copy_file(lang))
+  let mu = (u: String) => readme_url(root, docs, p.dir, u)
+  let readme = "packages/${p.dir}/README.md"
+  # The title is the page's, and the first paragraph its lede (p.summary,
+  # which gen/packages already insists is there); the rest is the article.
+  let blocks =
+    match parser.parse(must_read(readme)) {
+      Ok(bs) -> split_head(bs).body
+      Err(e) -> panic("${readme}: ${e}")
+    }
+  let rest = map(range(1, len(blocks)), i => blocks[i])
+  let intro = render_doc(rest, mu)
+  let pg = pg_for(lang, root, docs, c, p, all, doc)
+  let (api, api_toc) = api_html(c, lang, pg, p.use_as, doc)
+  let api_title = plain(c, "api-title")
+  let body = readme_ids(intro.html)
+    ++ """<h2 id="api">""" ++ escape_html(api_title)
+    ++ """<a class="anchor" href="#api" aria-hidden="true" tabindex="-1">#</a></h2>""" ++ "\n" ++ api
+  let toc = readme_toc(intro.toc) ++ [TocEntry { level: 2, id: "api", text: api_title }] ++ api_toc
+  let n = len(jarr(jget(doc, "modules")))
+  let ver = "<code>" ++ escape_html(p.name) ++ "</code> " ++ escape_html(p.version)
+  # "std only" says it alone; "depends on" is the lead of a list
+  let links = deps_links(c, p, map(all, q => q.dir), d => "${root}/" ++ lang_path(lang, page_of(alias_of(d))))
+  let deps = if len(p.deps) == 0 { links } else { escape_html(plain(c, "chip-deps")) ++ " " ++ links }
+  let head = PageHead {
+    crumbs: [section_crumb(lang, root, "packages", true), here(escape_html(p.use_as))],
+    title: escape_html(p.use_as),
+    lede: inline_run(p.summary, mu),
+    meta: [chip(ver), chip("${n} " ++ line(c, "chip-modules", u => u)), chip(deps),
+      link_chip("${repo_url()}/tree/main/packages/${p.dir}", escape_html(plain(c, "chip-repo")))],
+    extra: "",
+    cls: "toc-aligned",
+  }
+  page_with_toc(a, lang, page_of(p.use_as), p.use_as ++ " — Dawn", root, "packages", head,
+    toc_rail(lang, toc), body)
+}
+
+## Write every package's page in one language: English under /packages/,
+## Chinese under /zh/packages/.
+pub fn gen_package_pages(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
+  let all = read_packages()
+  let docs = doc_files()
+  for p in all {
+    let dst =
+      match lang {
+        En -> "${out}/" ++ page_of(p.use_as)
+        Zh -> "${out}/zh/" ++ page_of(p.use_as)
+      }
+    let dir = str.strip_suffix(dst, "/${p.use_as}.html").unwrap_or(dst)
+    let _ = io.mkdirs(dir)
+    write_page(dst, package_page(a, lang, p, read_doc(p.dir), all, docs))
+  }
+}
+
+# ---- tests ----
+
+fn fn_json(name: String, doc: String, links: List[Json]) -> Json =
+  jobj([("name", JStr(name)), ("sig", JStr("fn ${name}() -> Unit")), ("doc", JStr(doc)),
+    ("links", JArr(links))])
+
+fn link_json(text: String, module: String, name: String, kind: String) -> Json =
+  jobj([("text", JStr(text)),
+    ("target", jobj([("module", JStr(module)), ("name", JStr(name)), ("kind", JStr(kind))]))])
+
+fn module_json(path: String, fns: List[Json]) -> Json =
+  jobj([("path", JStr(path)), ("doc", JStr("")), ("impls", JArr([JStr("Show[T]")])),
+    ("types", JArr([jobj([("name", JStr("T")), ("record", JBool(false)), ("typeParams", JArr([])),
+      ("ctors", JArr([])), ("doc", JStr("A t."))])])),
+    ("traits", JArr([])), ("consts", JArr([])), ("effects", JArr([])), ("fns", JArr(fns))])
+
+fn probe_doc() -> Json =
+  jobj([("modules", JArr([
+    module_json("value", [fn_json("show", "Shows it.", [])]),
+    module_json("lexer", [fn_json("lex", "Like [`value.show`].", [link_json("value.show", "value", "show", "fn")])]),
+  ]))])
+
+fn probe_pkg(dir: String, name: String) -> Package =
+  Package { dir: dir, use_as: alias_of(dir), name: name, version: "1.0.0", summary: [], deps: [] }
+
+fn probe_copy() -> Copy !Fs = load_copy(copy_file(En))
+
+## The anchors [package_rows] hands the search index are ids the API section
+## really carries, as many as it has, in the page's order. The stdlib page's
+## test of the same name says why both halves matter.
+test "every index anchor of a package page is an id the page carries" {
+  io.with_fs_real(() => {
+    let doc = probe_doc()
+    let rows = package_rows("json", doc)
+    let (html, toc) = api_html(probe_copy(), En, no_pg(), "json", doc)
+    for r in rows {
+      assert str.contains(html, "id=\"" ++ r.anchor ++ "\"")
+    }
+    assert len(str.split(html, ` id="`)) - 1 == len(rows)
+    assert map(rows, r => r.anchor) == ["m-lexer", "lexer-type-T", "lexer-lex", "m-value", "value-type-T", "value-show"]
+    assert map(rows, r => r.title) == ["json/lexer", "T", "lexer.lex", "json/value", "T", "value.show"]
+    assert map(toc, e => e.id) == ["m-lexer", "m-value"]
+  })
+}
+
+## A link into the package's own module stays on the page; one into a sibling
+## package lands on that package's page, under the module path with the
+## manifest name taken off; std and the prelude land on the stdlib page; a
+## module of a package that has no page keeps its code span.
+test "a doc link lands on the page that documents its target" {
+  io.with_fs_real(() => {
+    let all = [probe_pkg("json", "json2"), probe_pkg("web", "web6"), probe_pkg("tea-core", "tea_core")]
+    let doc = probe_doc()
+    let pg = pg_for(En, "..", [], probe_copy(), all[1], all, doc)
+    let to = (module: String, name: String, kind: String) => {
+      let d = jobj([("doc", JStr("See [`x`].")), ("links", JArr([link_json("x", module, name, kind)]))])
+      doc_prose(pg, d)
+    }
+    assert str.contains(to("value", "show", "fn"), `<a href="#value-show"><code>x</code></a>`)
+    assert str.contains(to("json2/value", "show", "fn"), `<a href="../packages/json.html#value-show"><code>x</code></a>`)
+    assert str.contains(to("tea_core/cmd", "", "module"), `<a href="../packages/tea_core.html#m-cmd"><code>x</code></a>`)
+    assert str.contains(to("std/str", "trim", "fn"), `<a href="../stdlib.html#std-str-trim"><code>x</code></a>`)
+    assert str.contains(to("", "println", "fn"), `<a href="../stdlib.html#p-println"><code>x</code></a>`)
+    assert str.contains(to("", "Int", "type"), "See <code>x</code>.")
+    assert str.contains(to("compiler_plan/manifestv", "validate", "fn"), "See <code>x</code>.")
+    # the Chinese page links into the Chinese tree
+    let zh = pg_for(Zh, "../..", [], load_copy(copy_file(Zh)), all[1], all, doc)
+    let d = jobj([("doc", JStr("See [`x`].")), ("links", JArr([link_json("x", "std/str", "trim", "fn")]))])
+    assert str.contains(doc_prose(zh, d), `<a href="../../zh/stdlib.html#std-str-trim">`)
+  })
+}
+
+test "a README's heading ids make no claim about a section number" {
+  let html = `<h3 id="s0-1"><span class="hn">2.0.0</span><a class="anchor" href="#s0-1" aria-hidden="true" tabindex="-1">#</a></h3>`
+  assert readme_ids(html) == `<h3 id="readme-s0-1"><span class="hn">2.0.0</span><a class="anchor" href="#readme-s0-1" aria-hidden="true" tabindex="-1">#</a></h3>`
+  assert readme_toc([TocEntry { level: 3, id: "s0-1", text: "2.0.0" }]) == [TocEntry { level: 3, id: "readme-s0-1", text: "2.0.0" }]
+}
+
+test "a function is called through the last segment of its module's path" {
+  assert call_name("value") == "value"
+  assert call_name("a/b") == "b"
+}
+
+## Every package in the tree renders in both languages, from a doc of its
+## own modules: its README parses, its first paragraph is the lede, and no
+## doc link of the page's entries points at nothing.
+test "every package's page renders" {
+  io.with_fs_real(() => {
+    let all = read_packages()
+    for p in all {
+      let doc = jobj([("modules", JArr([module_json("m", [])]))])
+      for lang in [En, Zh] {
+        let html = package_page(plain_assets(), lang, p, doc, all, doc_files())
+        assert str.contains(html, `<h2 id="api">`)
+        assert str.contains(html, `id="m-m"`)
+        assert not str.contains(html, ` id="s`)
+      }
+    }
+  })
+}

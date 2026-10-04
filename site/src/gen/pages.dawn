@@ -21,6 +21,7 @@ use html/escape.{escape_html, escape_attr}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
+use gen/packages.{read_packages, read_doc}
 use gen/search_body.{search_body}
 use gen/corpus.{Corpus}
 
@@ -93,6 +94,9 @@ pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) 
   # and an index built from a second read would be an index of a document
   # nobody had checked was the same one.
   let api = read_api()
+  # And the packages' documents, for the same reason: gen/pkgpage renders
+  # the entries these index.
+  let pkg_docs = map(read_packages(), p => (p.dir, read_doc(p.dir)))
   # The site's monospace face, self-hosted so the site makes no request to
   # anybody else (docs/site-home-design.md). Written before the stylesheet
   # that names them, because that stylesheet names them by the hashed name
@@ -163,8 +167,8 @@ pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) 
     search_app: search_app,
     search_worker: search_worker,
     search_wasm: emit_wasm(out, "tea-search.wasm", "site/build/tea/search.wasm"),
-    search_en: emit_text(out, "search-en.json", search_index(api, En, en)),
-    search_zh: emit_text(out, "search-zh.json", search_index(api, Zh, zh)),
+    search_en: emit_text(out, "search-en.json", search_index(api, pkg_docs, En, en)),
+    search_zh: emit_text(out, "search-zh.json", search_index(api, pkg_docs, Zh, zh)),
     # The second half of the search: the documents' paragraphs, inverted
     # (gen/search_body.dawn, contract in docs/site-search-design.md). Fetched
     # by the panel only once a reader has typed something, so a reader who
