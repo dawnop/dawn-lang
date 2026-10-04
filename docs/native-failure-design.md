@@ -602,7 +602,9 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
   残留（诚实记账）：**未具名的中间值**——`f(g(x), h(y))` 里 g 的结果不落名字、
   直接嵌进实参表达式——若同一实参表里更晚的表达式 raise，该中间值仍会漏。全语料
   LSan 全绿说明现有语料没有这个形状；系统性收口要么 rc A-normalize 所有 owned
-  中间值（顺带修掉 C 实参求值顺序未定的老账），要么等语料先红。负控两枚都红在
+  中间值（顺带修掉 C 实参求值顺序未定的老账），要么等语料先红。（2026-10-04 回填：语料先红了，#467、#458；
+  修在 emitter 侧，为顺序提前求值的 owned 操作数分 `dawn_own` 槽，见
+  [rc-operand-unwind-design.md](rc-operand-unwind-design.md) §二。）负控两枚都红在
   该红处：去掉 `-fexceptions` → unwinder 走不过无表帧，END_OF_STACK 响亮
   abort（比静默泄漏更硬）；删一处清槽 → asan heap-use-after-free 在
   `dawn_drop`。`DAWN_RC_LEAK=1` 二分档照常成立（drop 含 cleanup 全成 no-op）。

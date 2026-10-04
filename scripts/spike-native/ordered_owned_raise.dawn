@@ -1,0 +1,89 @@
+# An owned operand evaluated early for order's sake must not leak when a later
+# operand of the same row raises (#467).
+#
+# The C emitter binds every operand of a row that has two or more operands
+# running code, so that C's unspecified argument order cannot reorder them.
+# The first `boom` result is owned by the time the second `boom` panics, and
+# until the constructor or callee takes it over, only the frame holds it. It
+# used to be a plain C temporary, which the forced unwind cannot see; the
+# asan check here is the oracle for the slot that replaced it.
+#
+# Five shapes leaked before the fix: record, tuple and ADT construction, a
+# record field taken from a tracked local, and a call whose parameters are
+# owned. The other four rows were clean all along and are here to stay that
+# way: a call whose parameters are borrowed (rc.dawn binds those operands
+# itself), `++`, a list literal and interpolation. `nested` holds a row inside
+# a row; `no raise` checks that the ordinary path still hands every value over
+# exactly once.
+type R = { a: String, c: String }
+
+type P = Pair(a: String, c: String) | Nope
+
+fn boom(s: String) -> String = if s == "x" { panic("boom " ++ s) } else { s ++ "!" }
+
+fn keep(a: String, c: String) -> R = R { a: a, c: c }
+
+fn two(a: String, c: String) -> Bool = a == c
+
+fn rec_row() -> String = {
+  let r = R { a: boom("a"), c: boom("x") }
+  r.a
+}
+
+fn tuple_row() -> String = {
+  let (a, _c) = (boom("a"), boom("x"))
+  a
+}
+
+fn adt_row() -> String =
+  match Pair(boom("a"), boom("x")) {
+    Pair(a, _) -> a
+    Nope -> "nope"
+  }
+
+fn local_row() -> String = {
+  let a = boom("a")
+  let r = R { a: a, c: boom("x") }
+  r.c
+}
+
+fn owned_call_row() -> String = keep(boom("a"), boom("x")).a
+
+fn borrowed_call_row() -> String = to_string(two(boom("a"), boom("x")))
+
+fn concat_row() -> String = boom("a") ++ boom("x")
+
+fn list_row() -> String = {
+  let xs = [boom("a"), boom("x")]
+  xs[0]
+}
+
+fn interp_row() -> String = "${boom("a")}${boom("x")}"
+
+fn nested_row() -> String = keep(keep(boom("a"), boom("b")).a, boom("x")).c
+
+fn ok_row() -> String = {
+  let r = keep(boom("a"), boom("b"))
+  let p = R { a: boom("c"), c: r.a ++ r.c }
+  p.a ++ p.c
+}
+
+fn try(name: String, f: fn() -> String) -> Unit !io =
+  match catch_panic(f) {
+    Ok(v) -> println(name ++ ": " ++ v)
+    Err(e) -> println(name ++ ": " ++ e.message)
+  }
+
+pub fn main() -> Unit !io = {
+  try("record", () => rec_row())
+  try("tuple", () => tuple_row())
+  try("adt", () => adt_row())
+  try("local", () => local_row())
+  try("owned call", () => owned_call_row())
+  try("borrowed call", () => borrowed_call_row())
+  try("concat", () => concat_row())
+  try("list", () => list_row())
+  try("interpolation", () => interp_row())
+  try("nested", () => nested_row())
+  try("no raise", () => ok_row())
+}

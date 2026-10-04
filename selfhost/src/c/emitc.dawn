@@ -1373,11 +1373,37 @@ fn arg_flags(st: CSt, callee: CCallee, n: Int) -> List[Bool] =
 ## a temporary, in order, and the row becomes those names. A diverging
 ## operand stays inline: nothing after it runs, and its C type may not be
 ## assignable (`dawn_str t = DAWN_UNIT;` does not compile -- see `no_value`).
+##
+## An operand bound here at a consuming position holds a reference nobody else
+## does: the constructor or callee takes it over only when the whole row has
+## run. If an operand after it runs code, that code may raise, or suspend and
+## have its continuation dropped, and either one discards this frame by forced
+## unwind, which releases what the `dawn_own` slots hold and nothing else. So
+## such an operand is parked in a slot of its own instead of a C temporary and
+## handed over with `dawn_take` at the use, which is the transfer an owned
+## local already gets (#467). A plain temporary is still right for the rest:
+## a borrowed operand is somebody else's reference, a scalar is outside the
+## ledger, and an owned one that nothing runs after is handed over before
+## anything can discard the frame. The slot has no symbol, so it is minted
+## past the frame's count and never shared; rc.dawn is not involved, because
+## on every path that returns the take clears the slot before the cleanup
+## looks, and its oracle only speaks about those paths.
+fn tracked_local(st: CSt, e: CExpr) -> Bool =
+  match e {
+    CLocal(sym, _) -> map.has(st.slots, sym)
+    _ -> false
+  }
+
 fn emit_ordered(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String]) = {
   var nontrivial = 0
+  # the last operand that runs code; an owned operand before it needs a slot
+  var last_run = -1
   var i0 = 0
   for e in es {
-    if not atom_expr(st, e, ks[i0]) { nontrivial = nontrivial + 1 }
+    if not atom_expr(st, e, ks[i0]) {
+      nontrivial = nontrivial + 1
+      last_run = i0
+    }
     i0 = i0 + 1
   }
   var st1 = st
@@ -1388,6 +1414,16 @@ fn emit_ordered(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String])
     st1 = st2
     if nontrivial < 2 || atom_expr(st1, e, ks[i]) || no_value(e) {
       out = out ++ [v]
+    } else if ks[i] && i < last_run && tracked_local(st1, e) {
+      # already in a slot: the `dawn_take` it emitted is the transfer, and
+      # it waits for the use. Nothing later in the row can touch the slot --
+      # rc.dawn transfers a binding only where no other operand mentions it,
+      # and names the row first when a later operand assigns one
+      out = out ++ [v]
+    } else if ks[i] && i < last_run && is_ref_ty(cex_ty(e)) && not emit_dictish(e) {
+      let n = st1.nslots + 1
+      st1 = line(CSt { ..st1, nslots: n }, slot_lv(n) ++ " = " ++ v ++ ";")
+      out = out ++ [take_expr(n, cex_ty(e))]
     } else {
       let (st3, t) = fresh(st1)
       st1 = line(st3, c_type(cex_ty(e)) ++ " " ++ t ++ " = " ++ v ++ ";")

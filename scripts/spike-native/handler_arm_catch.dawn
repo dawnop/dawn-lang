@@ -1,0 +1,36 @@
+# A panic raised in an effect handler arm and caught by `catch_panic` must not
+# leak what the handled computation already held (#458).
+#
+# The leaking value is the `[64]` argument of `store`: it is owned and bound
+# for order's sake when `rec([a, 64])` runs the arm that panics. This is an
+# instance of #467 rather than anything particular to handler arms, and the
+# same fix closes it; the entry stays because the issue asked for this exact
+# shape to run under ASan.
+effect Rec {
+  fn rec(xs: List[Int]) -> Int
+}
+
+fn store(xs: List[Int], k: Int) -> Unit !Rec = {
+  let _ = rec(xs ++ [k])
+  ()
+}
+
+fn body() -> Unit !Rec = {
+  let a = rec([128])
+  store([64], rec([a, 64]))
+}
+
+fn run() -> Int = {
+  with handle Rec {
+    rec(xs) => if len(xs) == 2 { panic("refused at op") } else { 0 }
+  }
+  body()
+  0
+}
+
+pub fn main() -> Unit !io = {
+  match catch_panic(() => run()) {
+    Ok(_) -> println("no panic")
+    Err(e) -> println(e.message)
+  }
+}
