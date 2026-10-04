@@ -64,11 +64,17 @@ while the two others idled at 2-5 on 224 each; a single job went from ~10 to
 would still send a third of ours to the hottest one, because the other
 controllers do not rotate. So each launch goes to the machine with the least
 (load + recent) / cores, where load is the 1-minute load average from the
-latest poll or prepare, and recent is job-load (default 8) for each job this
+latest poll or prepare, and recent is job-load (default 4) for each job this
 controller launched there in the last 90 s, which a 1-minute average does not
 show yet; a long run would otherwise pile its first dozen launches on
 whichever machine looked idle at prepare. This is no scheduler: it does not
 know the other controllers' plans, only what the load says now.
+
+Why job-load is 4. The first full run used 8 and put 13 of 34 jobs on the
+primary (load 81 at prepare, 185 at peak) while the idle machine, given 21,
+peaked at 75: about 3.6 per job. At 8 the idle machine looked full after
+nine quick launches; jobs placed on the primary averaged 585 s, those on the
+idle one 386 s, and the five longest all ran on the primary.
 
 Why each machine prepares its own prefix. The prefix sits on a disk local to
 each machine, so the input pack, the toolchain, the claims and the fragments of a
@@ -122,7 +128,7 @@ Options (--backend-opt):
                       answers; N: the N least loaded of those after prepare;
                       primary: no -m at all, every job on crun's primary
                       machine, which is what this backend did before
-  job-load=F          the load one fresh launch is assumed to add (default 8)
+  job-load=F          the load one fresh launch is assumed to add (default 4)
   dead-after=N        failed polls or launches in a row before a machine is
                       dropped (default 6)
   stage=DIR           local staging root (default <--prefix>/stage)
@@ -256,7 +262,7 @@ class CrunBackend:
         if not (self.machines_opt in ("auto", "primary") or self.machines_opt.isdigit()):
             raise SystemExit(f"crun backend: machines={self.machines_opt}: want auto, primary "
                              "or a number")
-        self.job_load = float(opts.get("job-load", "8"))
+        self.job_load = float(opts.get("job-load", "4"))
         self.dead_after = int(opts.get("dead-after", "6"))
         run_id_file = self.out / "crun" / "run-id"
         self.resuming = opts.get("resume", "0") == "1"
