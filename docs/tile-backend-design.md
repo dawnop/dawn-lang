@@ -4718,6 +4718,7 @@ sm_90 / sm_100 台账归所有者。
   （keepdims + broadcast 的验收样本）、layer_norm、loop_until、一个 gather 与一个 scan、一个 `Shared`。
   **写一侧先补测**：六节的 128×128×32 数据说明 `store_cell` 的 view 写在这个形状上比指针写慢，PR-3 把 Out 改走
   `store_cell` 之前，写一侧的降低（view 写、view 写加假设、或 Out 的写降成带尾 mask 的指针路）要单独实测定夺。
+  （已由 PR-2 实测回答，见下文「6.25 续」十三、十四：view 写加假设，`store_cell` 的降低随 PR-2 改了。）
 - **PR-4 sm_86 台账重跑**：只录本机，sm_90 / sm_100 归所有者。
 
 **不做的（理由）：**
@@ -4728,6 +4729,197 @@ sm_90 / sm_100 台账归所有者。
   不值得；六节的样本里视图建在循环体里，`cellr` 仍比 `ptr` 快，没有外提的必要。
 - `block_id` 记忆化：会改变已有程序的字节；只对格子下标做。
 - 全 numpy 广播、`load_like`、类型级形状：修订二不做。
+
+### 6.25 续：批的 PR-2（指针路 load/store 合并）与写一侧的降低
+
+任务单 `tile-batch-pr2-20261004.md`（agent-handoff）。两件事：A 是 K7–K18 的指针路合并，B 是 PR-1 六节留下的写一侧
+问题，为 PR-3 定方案。B 的结论让本 PR 顺带改了 `store_cell` 的降低（十四）。
+
+**十一、K7–K18 在本批里是什么。** `std-defaults-design.md` §5 原把 K7–K18 定为「B1 之后 Dev load/store 五连合并，
+按 `kernels.dawn` 的段落与其它文件切」十二刀；10-03 的形状裁决把它改成逃生口 `strides: Option[List[Int]] = None`，
+不再等 B1；预检报告 §4.2 再把它定为批的 PR-2：「load/store 合并与逃生口，只动 dev.dawn 的指针路族，旧名仍在的
+部分 golden 不动」。这几处没有逐条列出十二刀的内容。本 PR 的取舍：**合并本身是一刀**，十二刀里「按段落迁移
+`kernels.dawn`」那部分归 PR-3 的大迁移（`kernels.dawn` 只大迁一次，这是批的前提）；所以本 PR `kernels.dawn` 一行
+不动，旧名全部保留，golden 全部不动，而不只是「旧名仍在的部分」。
+
+**十二、新面。** `tileir` 0.6.0 → 0.7.0：
+
+```dawn
+pub fn load[D](p: Param[D], base: Idx, shape: List[Int], strides: Option[List[Int]] = None,
+  mask: Option[Tile[I1]] = None, pad: Option[Tile[D]] = None, hints: Hints = []) -> Tile[D] !Dev
+pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D], strides: Option[List[Int]] = None,
+  mask: Option[Tile[I1]] = None, hints: Hints = []) -> Unit !Dev
+```
+
+- `strides: None` 是 `row_major(shape)`，`Some(s)` 是任意布局的逃生口（元素为单位、宿主常数）。选 `Option` 而不是
+  默认 `row_major(shape)`（K6 的 B1 已经让后者写得出来）：形状裁决要 strides 是 kernel 明说的例外，不是每次调用
+  重算一遍并显示在签名里的值。
+- `mask` 与 `pad` 各自可选。有 mask 无 pad 是新能写的：被屏蔽的 lane 读到**不指定**的值（方言的 `load_ptr_tko`
+  不带 `paddingValue`），适合只在同一 mask 下写回的值；`tileiras` 13.4.92 sm_86 接受（探针 `combos`，渲染照录在
+  `render.dawn` 的测试里）。有 pad 无 mask 在记录期拒：`` op #N `load`: a pad with no mask is never read: every lane of the load is ``。
+- `hints` 与 0.6.0 的 `load_hinted` / `store_hinted` 同义。合并之后「带 hints 的 strided load」「带 mask 与 hints 的
+  strided store」都是普通调用，不再各等一个新名字。
+- 选具名默认参数而不是更多名字：Dawn 无重载，五个名字没覆盖的组合每个都是一个待写的第六名；方言的 `load_ptr_tko`
+  本身就把这三样作为可选操作数与属性。`store` 的选项放在 `v` 之后，所以 0.6.0 的位置调用原样成立。
+- 旧名（`load_strided`、`load_masked`、`load_strided_masked`、`load_hinted` 与四个 store）保留，各是合并函数的一次
+  调用，留到 PR-3 迁完 `kernels.dawn` 再删（删名是破坏性变更，归 PR-3）。
+
+版本为什么是次版本号：没有新的 `Dev` 操作，包外 handler 不受影响；但公开函数多了可选参数（新能力）、`store_cell`
+的降低变了字节（十四），按 0.x 的规矩动次版本号。
+
+**十三、写一侧实测。** 方法同六节与预检报告 §1.1（ctypes 直调 driver、cuEvent、每样本一批 launch 平均到 ≥ 20 ms、
+各版交错、每版 31 个样本、先比输出字节；判据：中位数慢 > 5% 且 IQR 不重叠为「慢」）。读一侧固定为 PR-1 的
+`load_at` / `load_cell`（In 视图带假设），只换写一侧。候选：
+
+| 记号 | 写一侧 | 怎么得到 |
+|---|---|---|
+| `ptr` | 指针写，无 mask（`store(.., strides: Some([N, 1]))`） | 本包 |
+| `ptrm` | 指针写带尾 mask（matmul 两轴 `axis_mask` 相与，vadd `tail_mask`） | 本包 |
+| `view` | `store_cell`，Out 视图无假设（PR-1 的降低） | 本包（改动前） |
+| `view+a` | `store_cell`，Out 视图在 `%arg` 上 `assume div_by<16>` | scratch 包副本 |
+| `view+ib` | `store_cell`，`store_view_tko` 的 `inbounds` 全写 true | scratch 包副本 |
+| `view+a+ib` | 两者都加 | scratch 包副本 |
+| `ptr+a` | 指针写，参数指针先 `assume div_by<16>` | scratch 包副本（同预检 §1.4） |
+| `…+o2` | 再加入口 hint `occupancy = 2`（sm_86） | 本包的 `trace3(.., hints:)` |
+
+`store_view_tko` 在 13.4 只有 `memory_ordering_semantics`、`inbounds` 两样可调，`optimization_hints` 里写一侧能用的
+`allow_tma` 在 sm_86 无意义，所以「属性组合」实测的就是 `inbounds`。
+
+结果（两轮 `r1`、`r2` 结论一致，表为 `r2`，单位 µs；每组内各版输出与第一版逐字节相同）：
+
+| 形状 | 版本 | 中位数 | IQR | 相对 `ptr` | 共享内存 | 每 SM 块数 | 写指令 |
+|---|---|---|---|---|---|---|---|
+| f16 matmul 4096³，128×128×32 | `ptr` | 1799.0 | 1774.8–1865.1 | | 48 KB | 2 | `STG.E.U16` ×128 |
+| | `ptrm` | 1825.7 | 1776.3–1878.9 | +1.5% | 48 KB | 2 | `STG.E.U16` ×128 |
+| | `view` | 3674.7 | 3567.4–3753.7 | **+104.3%** | 64 KB | 1 | `STG.E.U16` ×128 |
+| | `view+a` | 3186.1 | 3094.1–3345.4 | **+77.1%** | 64 KB | 1 | `STG.E.128` ×16 |
+| | `view+ib` | 3696.6 | 3609.0–3802.5 | **+105.5%** | 64 KB | 1 | `STG.E.U16` ×128 |
+| | `view+a+ib` | 3143.4 | 3090.0–3174.9 | **+74.7%** | 64 KB | 1 | `STG.E.128` ×16 |
+| | `ptr+a` | 3107.4 | 3066.9–3184.3 | **+72.7%** | 64 KB | 1 | `STG.E.128` ×16 |
+| 同上，入口 hint `occupancy = 2`（另一组，基线 `ptr` 1836.4） | `ptr+o2` | 1910.4 | 1849.3–1976.2 | +4.0% | 48 KB | 2 | `STG.E.U16` ×128 |
+| | `view+o2` | 2336.6 | 2292.7–2448.2 | **+27.2%** | 48 KB | 2 | `STG.E.U16` ×128 |
+| | `view+a+o2` | 1853.8 | 1818.8–1990.1 | +0.9% | 48 KB | 2 | `STG.E.128` ×16 |
+| | `view+a+ib+o2` | 1877.8 | 1843.0–1937.4 | +2.3% | 48 KB | 2 | `STG.E.128` ×16 |
+| | `ptr+a+o2` | 1854.9 | 1835.2–1936.5 | +1.0% | 48 KB | 2 | `STG.E.128` ×16 |
+| f16 matmul 4096³，64×64×32 | `ptr` | 2519.0 | 2458.3–2707.4 | | 16 KB | 5 | `STG.E.U16` ×32 |
+| | `ptrm` | 2535.9 | 2457.1–2741.2 | +0.7% | 16 KB | 5 | `STG.E.U16` ×32 |
+| | `view` | 3126.8 | 3090.7–3503.1 | **+24.1%** | 16 KB | 5 | `STG.E.U16` ×32 |
+| | `view+a` | 2466.3 | 2455.8–2608.4 | −2.1% | 16 KB | 5 | `STG.E.128` ×4 |
+| | `view+ib` | 3114.0 | 3088.9–3286.5 | **+23.6%** | 16 KB | 5 | `STG.E.U16` ×32 |
+| | `view+a+ib` | 2689.0 | 2488.7–2925.1 | +6.8%（IQR 重叠） | 16 KB | 5 | `STG.E.128` ×4 |
+| | `ptr+a` | 2465.2 | 2456.8–2565.6 | −2.1% | 16 KB | 5 | `STG.E.128` ×4 |
+| vadd f32，N = 2^24，tile 1024 | `ptr` | 248.0 | 247.4–260.2 | | 4 KB | 12 | `STG.E` ×8 |
+| | `ptrm` / `view` / `view+ib` | 248.1–248.2 | | +0.1% | 4 KB | 12 | `STG.E` ×8 |
+| | `view+a` / `view+a+ib` / `ptr+a` | 249.0–256.2 | | +0.4% 到 +3.3% | 0 | 12 | `STG.E.128` ×2 |
+| softmax f64，16384 行 × 1000，tile [1, 1024] > extent | `ptrm` | 2123.3 | 2023.6–2237.7 | | 4 KB | 10 | `STG.E.64` ×8 |
+| | `view` | 1963.7 | 1955.4–2220.6 | −7.5% | 4 KB | 9 | `STG.E.64` ×8 |
+| | `view+a` | 2072.5 | 1953.9–2217.0 | −2.4% | 0 | 10 | `STG.E.128` ×4 |
+| | `ptrm+a` | 2074.6 | 1952.9–2100.7 | −2.3% | 0 | 10 | `STG.E.128` ×4 |
+
+第三轮 `r3`（机器重启之后用本分支的包重建，只测两个 matmul 形状）复现同一结论，相对 `ptr`：128×128×32 上
+`view` +103.0%、`view+a`（本分支的 `store_cell`）+79.3%、`ptr+a` +75.8%、`ptr+o2` +1.8%、`view+o2` +25.8%、
+`view+a+o2` +1.3%；64×64×32 上 `view` +26.0%、`view+a` −1.0%；各版输出逐字节相同，共享内存与写指令同上表。
+
+共享内存与每 SM 块数取自 `cuFuncGetAttribute` 与 `cuOccupancyMaxActiveBlocksPerMultiprocessor`（每个 cubin 的
+`EIATTR_REQNTID` 都是 128 线程）；写指令数取自 `cuobjdump -sass`。softmax 的 `view+ib` 也被 `tileiras` 接受，
+尽管 1000 不是 1024 的倍数、那个 `true` 是假话（会越界写到下一行）：`inbounds` 是不受检的承诺，没有计时。
+
+**66% 从哪来（PR-1 六节的 `cell` 对 `ptr`）。** 两个独立的原因，计数器之外的证据如下：
+
+1. **占用率，不是写法。** 128×128×32 上，除了不带假设的指针写，**每一种**写法（view 有无假设、指针写带假设）都让
+   `tileiras` 给这个 kernel 定 64 KB 共享内存而不是 48 KB；RTX 3080 每 SM 100 KB，于是常驻块从 2 掉到 1。
+   48 KB 与 64 KB 恰是 3 级与 4 级 16 KB（A、B 各一个 128×32 的 f16 块）的 cp.async 流水，所以多出来的大概率是一级
+   流水（推断，没有计数器佐证）。证据：入口 hint `occupancy = 2` 让所有版本都回到 48 KB、2 块/SM，`view+a` 立刻与
+   `ptr` 持平（+0.9%），`ptr+a` 同样（+1.0%）；`ptr` 自己加这个 hint 不变（+4.0%，IQR 重叠）。预检报告 §1.5 的
+   「写指针加假设两路都慢 45%」是同一件事。64×64×32 上 16 KB、每 SM 5 块，各版占用率相同，这一项不存在。
+2. **不带假设的 view 写不合并。** `view` 与 `ptr` 写指令条数相同（都是 `STG.E.U16`），地址模式相反：指针写每线程的
+   偏移以行（0x2000 / 0x4000 字节）为步长，相邻 lane 写相邻列，一条 warp 指令是一段连续的 64 字节；view 写每线程的
+   偏移在一行之内（+0x0 到 +0x7c），lane 号经 `(tid & 63) * 4096` 选**行**，一条 warp 指令打到 32 个相隔 8 KB 的行上，
+   外加每个元素一条越界谓词。这与预检 §1.3 读一侧的根因同形。在占用率相同的地方它单独值 22% 到 27%：64×64×32 的
+   `view` 对 `view+a` +24%（`r1` +24%，`r2` +27%），128×128×32 加 `occupancy = 2` 后 `view+o2` 对 `view+a+o2` +26%（`r1` +22%）。
+   加上假设后变成 `STG.E.128`：`(tid >> 4)` 选行、`(tid & 15) * 8` 选列，一条 warp 指令写两整行各 256 字节，完全合并。
+
+所以 `cell` 的 +66%（本轮 +104%）= 占用率减半 + 写不合并；`cellw16`（即 `view+a`）的 +45%（本轮 +77%）= 只剩占用率。
+
+`inbounds` 全 true 在两个 matmul 形状上都与不加持平（`view+ib` 对 `view`、`view+a+ib` 对 `view+a`），只省掉几条
+谓词计算；它不改变写宽，也不改变共享内存预算，而且是一个 `tileiras` 不检查的承诺，不值得在本批引入（仍是 T18 的事）。
+带尾 mask 的指针写（`ptrm`）在四个形状上都不慢（≤ +1.5%）：mask 的代价在这里可以忽略。
+
+**形状依赖。** 结论随形状变的只有占用率那一项：它取决于 `tileiras` 对具体 kernel 的共享内存预算，128×128 的
+f16 matmul 撞上 2→1 块的台阶，64×64 与逐元素 / softmax 撞不上。写不合并那一项只在「每线程持有一行」的布局上出现
+（张量核累加器）；vadd 与 softmax 的 `view` 本来就合并（`STG.E` / `STG.E.64`，与指针写相同），带不带假设都持平。
+
+**Nsight Compute。** 任务单补充要求用 ncu 看写侧（memory workload、warp stall、store 附近的 source/SASS）。
+ncu 2026.2.1（build 38283040）从 CUDA wsl-ubuntu 源的 `nsight-compute-2026.2.1_2026.2.1.5-1_amd64.deb` 用
+`dpkg-deb -x` 解到 scratch 运行，无 sudo、无 apt。本机四次运行（Windows 侧打开「允许所有用户访问 GPU 性能
+计数器」之前、之后未重启 WSL、以及 WSL 重启之后各一次）都报 `ERR_NVGPUCTRPERM`，没有拿到任何计数器；上面的解释来自墙钟、SASS、
+函数属性与占用率计算，第 1 条里「多出的是一级流水」是推断。要补：Windows 侧 NVIDIA 控制面板 → 桌面菜单勾选
+「启用开发者设置」→ 开发者 → 管理 GPU 性能计数器 → 「允许所有用户访问 GPU 性能计数器」→ 应用，然后让驱动重读
+设置（实测重启 WSL 不够，要重启 Windows）。采集命令（scratch 的 `ncu-run.sh` 逐版本跑一遍）：
+
+```
+ncu --launch-skip 1 --launch-count 1 \
+  --section SpeedOfLight --section MemoryWorkloadAnalysis --section MemoryWorkloadAnalysis_Tables \
+  --section WarpStateStats --section LaunchStats --section Occupancy --section SourceCounters \
+  --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum,l1tex__t_requests_pipe_lsu_mem_global_op_st.sum,lts__t_sectors_srcunit_tex_op_write.sum,dram__bytes_write.sum,sm__warps_active.avg.pct_of_peak_sustained_active \
+  python3 prof.py bin 32,32 2 16777216 2 <kernel>
+```
+
+预期能证实的两件事：`view` 的写 sectors/request 接近 32、`view+a` 接近 16（两行 × 256 字节 / 32 字节）；
+`ptr` 对 `view+a` 的 achieved occupancy 约 2 比 1。
+
+**十四、推荐与本 PR 的改动。** 写一侧降成 **view 写 + Out 视图在 `%arg` 上 `assume div_by<16>`**（与 In 同一条
+假设、同一个位置）。理由：
+
+- 它在被测的四个形状上不慢于 PR-1 的 `store_cell`（matmul 128 −13%、matmul 64 −21%；vadd 与 softmax 持平，IQR 重叠，
+  softmax 两轮是 −0.6% 与 +5.5%），在占用率相同的地方与指针写持平；
+- 128×128 的剩余差距不属于写法：带同一假设的指针写一样慢，入口 hint `occupancy = 2` 一样治好；它是逐 kernel 的
+  调优旋钮（`trace3(.., hints: [for_arch("sm_86", [hint_occupancy(2)])])` 今天就能写），不该由降低替所有 kernel 定；
+- 假设成立的依据与 In 相同：`std/gpu` 缓冲区来自 `cuMemAlloc`（256 字节对齐），`Tensor` 无子视图，Out 的格子从
+  第 0 个元素起算。Shared 没有格子，不涉及。
+- 不选「Out 降成带尾 mask 的指针写」：它不带假设时在 128×128 上恰好躲开了 64 KB 台阶，但那是 `tileiras` 启发式的
+  偶然（`ptr+a` 一加假设就撞上），而且拿不到 `STG.E.128`；指针写还要 kernel 自己写基址与 strides，正是批要删掉的东西。
+
+因为推荐与 PR-1 的降低不同，本 PR 一并改掉：记录 handler 给 In 与 Out 的格子视图都设 `align = 16`（常量改名
+`CELL_ALIGN`）。golden 影响：`scripts/tile-golden` 没有 kernel 调 `store_cell`（也没有 kernel 用格子视图），所以
+**零个 golden 变**（JVM 上 192 个文本与字节逐个比过，0 处不同；全量 run.sh 见十五）。PR-3 迁移后用到 Out 的 kernel
+的字节会带上这条 `assume`，随 PR-3 的一次重录。Out 的格子视图同时服务 `load_cell` 对 Out 的读（原地 kernel），
+那一读也随之带上假设，与 In 一致。PR-3 的样本里给 128×128 的 `matmul_f16` 是否加 `occupancy` hint 留给 PR-3 按台账
+与性能样本定。
+
+**十五、负控、golden 与台账。**
+
+负控（scratch 副本各改一处、跑 `dawn test <副本>`，186 项；各先证红）：
+
+| 变异 | 改了什么 | 红 |
+|---|---|---|
+| strides-ignored | `Some(s)` 也当 `row_major(shape)` | 1 项（组合记录） |
+| load-mask-dropped | 合并 `load` 不把 mask 交给 `t_load` | 3 项 |
+| store-hints-dropped | 合并 `store` 丢掉 hints | 1 项 |
+| pad-check-off | 有 pad 无 mask 不拒 | 1 项 |
+| out-claim-off | Out 的格子视图回到 `align = 0` | 3 项 |
+| old-masked-pad-dropped | 旧名 `load_strided_masked` 漏传 pad | 1 项（新旧逐操作相等） |
+
+golden 比对器自身也先证红：把 JVM 比对的依赖指向 `strides-ignored` 副本，192 个 kernel 里 140 处文本 / 字节不同；
+指向 `old-masked-pad-dropped`，24 处；指回本包，0 处。
+
+全量 `scripts/tile-golden/run.sh`（本机，`tileiras` 13.4.92，sm_86）：第一次在合并提交上跑（rebase 前的 `b08c4a1a`，rebase 到 c96a1af8 后是 `1186df0e`），192 个 kernel 的
+trace、文本 golden、字节码 golden、assemble 全部 PASS（**逐字节不动**），但停在变异体 `load-dtype-f64`：它的锚点引的
+是 `load_strided` 里那句 `t_load` 调用，合并把这句挪进了 `load`。下一个提交（rebase 前 `507d516e`，rebase 后 `9a86866c`）让变异体改合并后 `load` 的格式实参（0.6.0
+的每个 load 拼写都经过它，所以 `vadd_f32` 仍在 trace 期被拒、`vadd` 不动），`mutation-anchor-preflight-test.py` 引同一行。
+在 `507d516e` 上重跑（59 min 56 s）：**`tile golden ok`**，trace / golden / bytecode / assemble 各 192 PASS、逐字节不动，
+269 个变异体全部按名变红；`mutation-anchor-preflight.py` 532 处 OK。
+
+sm_86 台账在 `507d516e` 上一次通过（44 min 38 s），单独提交（rebase 后 `ae31f7b2`）；rebase 到 main 之后 tile 输入摘要不变（`10ac1bfa7398`），`--check` 照过，未重录；新行 `#` 之后除 `inputs` 外与上一行逐字相同
+（脚本比对），设备看到的仍是原来那些程序；`run.sh --check` PASS。sm_90 / sm_100 未录，归所有者。
+
+**不做的（理由）：**
+
+- 删旧名、迁 `kernels.dawn`：破坏性，归 PR-3 的一次迁移（十一）。
+- 给 pad 收宿主常数（`pad: Float`）或 rank-0 tile：C3′ 让常量不收形状之后才自然；rank-0 规则目前只作用于逐元素操作，
+  扩到 load 的 pad 随 PR-3 定。
+- `inbounds` 写 true：实测无收益，且是不受检的承诺（十三）。
+- 降低替 kernel 定 `occupancy`：它是逐 kernel 的调优，不是写法的属性（十四）。
 
 ## 7. 刀序
 
@@ -4792,6 +4984,7 @@ sm_90 / sm_100 台账归所有者。
 | **C1′ view 补行、`t_shape_of`、mma 的 K**（已落地，§6.22） | 「经 view 读出的值的形状不符在记录期被拒；任何有行的句柄都能问出它的格式与形状；mma 两个操作数的 K 不一致在记录期被拒」 | `packages/tileir/src/prog.dawn`（`Held.what`、view 与 `load_view` 的行、`t_shape_of` 臂、`check_k`）、`dev.dawn`（`Dev` 加一条、三个测试 handler 各一臂）、`tileir` 0.4.0 | 191 个 golden 逐字节不动；包测试三项新增 | 四条：`load_view` 不记行、`t_shape_of` 不拒、去 K 检查、view 当 tile | 0.5 |
 | **C2 + D-3 + D-5 参数标记：角色与几何、`trace1`…`trace5`、类型化入口**（已落地，§6.24） | 「一个 kernel 的参数格式只写一次，写错是编译错误；写进 In 参数在记录期被拒；Out 格子推出网格，两个 Out 切出两个网格、In 跟随的轴块数不符在记录期被拒；发射时 Out/Shared 与别的参数同一缓冲、网格与格子不符、张量短于格子都在问设备之前被拒」 | `packages/tileir/src/prog.dawn`（`Cells`、`Arg`、`trace1`…`trace5`、记录 handler 的角色与 `aims`）、`std/gpu.dawn`（`EntryArg`、`Entry1`…`Entry5`、`entry_grid`、`launch_entry1`…`launch_entry5`）、`tileir` 0.5.1 | 192 个 golden 逐字节不动；sm_86 台账各档计数不变；包测试六项、std 测试两项新增；补测 tile 1024 > extent 1000 在 sm_86 上成立 | 十四条：tileir 四个、std/gpu 六个变异体，类型层四条编译错误 | 1 |
 | **批 PR-1：格子读写、读侧对齐假设、rank-0 规则、归约专名与 broadcast**（已落地，§6.25） | 「kernel 按格子读写参数，不写基址与形状；In 的读视图在参数本身上带 `assume div_by<16>`；归约不写格式、形状与 identity，`keepdims` 留下长度 1 的维；rank-0 操作数自动展开而别的形状差照旧被拒；条件、循环界、yield 与格子下标不是 rank 0 在记录期被拒」 | `packages/tileir/src/dev.dawn`（`load_cell`、`load_at`、`store_cell`、`zeros`、`fill`、`reduce_sum`/`max`/`min`、`scan_sum`、`broadcast`，四个效果操作）、`prog.dawn`（`CellViewOf`、`ReshapeOf`、`BroadcastOf`，handler 的格子视图、rank-0 规则与检查）、`lower.dawn`、`tileir` 0.6.0 | 192 个 golden 逐字节不动；包测试十项新增；f16 matmul 样本读一侧不慢于指针路 | 六个 tileir 变异体 | 1 |
+| **批 PR-2：指针路 load/store 合并，Out 视图对齐假设**（已落地，§6.25 续） | 「一个 `load` / `store` 用具名默认参数说出五个旧名的全部组合（strided、mask、pad、hints 任意搭配），有 pad 无 mask 在记录期被拒；Out 的格子视图与 In 一样在参数本身上带 `assume div_by<16>`，写成合并的 `STG.E.128`」 | `packages/tileir/src/dev.dawn`（`load`、`store` 合并，旧名改成一次调用）、`prog.dawn`（pad 检查、`CELL_ALIGN`）、`tileir` 0.7.0 | 192 个 golden 逐字节不动；包测试四项新增；写一侧四个形状的实测与推荐 | 六个 tileir 变异体 | 1 |
 
 ## 8. 风险
 
