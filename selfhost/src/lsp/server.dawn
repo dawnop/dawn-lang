@@ -49,6 +49,7 @@ use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
+use lsp/lspref.{Occurrence, occurrences}
 use front/lexer.{line_starts_of, view_of, SourceView}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts}
@@ -1289,6 +1290,8 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
         ("triggerCharacters", JArr([JStr("("), JStr(",")]))
       ])),
       ("definitionProvider", JBool(true)),
+      ("referencesProvider", JBool(true)),
+      ("documentHighlightProvider", JBool(true)),
       ("documentSymbolProvider", JBool(true)),
       ("documentFormattingProvider", JBool(true)),
       ("codeActionProvider", JBool(true)),
@@ -1333,6 +1336,10 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     st = st2
   } else if method == "textDocument/definition" {
     respond(id, handle_definition(st, params))
+  } else if method == "textDocument/references" {
+    respond(id, handle_references(st, params))
+  } else if method == "textDocument/documentHighlight" {
+    respond(id, handle_document_highlight(st, params))
   } else if method == "textDocument/documentSymbol" {
     respond(id, handle_symbols(st, params))
   } else if method == "textDocument/formatting" {
@@ -2496,6 +2503,51 @@ fn handle_definition(st: LspState, params: Json) -> Json !Fs !Env = {
     None -> JArr([])
   }
 }
+
+## The occurrences in the requested document of the declaration the name at
+## the position resolves to (docs/lsp-references-design.md §R1), or None when
+## there is no analysis to ask.
+fn occurrences_at(st: LspState, params: Json, with_decl: Bool) -> Option[(Doc, List[Occurrence])] =
+  match doc_of(st, params) {
+    Some(d) ->
+      match analysis_of(st, d) {
+        Some(analysis) ->
+          match doc_qcx(st, d, analysis) {
+            Some(qc) -> Some((d, occurrences(qc, pos_offset(d, params), with_decl)))
+            None -> None
+          }
+        None -> None
+      }
+    None -> None
+  }
+
+## `textDocument/references`, inside the requested document only (R1); the
+## declaration's own name only when `context.includeDeclaration` is true.
+fn handle_references(st: LspState, params: Json) -> Json = {
+  let with_decl = match oget(get_or_null(params, "context"), "includeDeclaration") {
+    Some(JBool(b)) -> b
+    _ -> false
+  }
+  match occurrences_at(st, params, with_decl) {
+    Some(pr) -> {
+      let (d, os) = pr
+      JArr(map(os, o => jobj([("uri", JStr(d.uri)), ("range", jrange(d.view, d.ls, o.lo, o.hi))])))
+    }
+    None -> JArr([])
+  }
+}
+
+## `textDocument/documentHighlight`: the same occurrences, the declaration's
+## own name included, each a Write (3) where it binds or assigns the name and
+## a Read (2) everywhere else.
+fn handle_document_highlight(st: LspState, params: Json) -> Json =
+  match occurrences_at(st, params, true) {
+    Some(pr) -> {
+      let (d, os) = pr
+      JArr(map(os, o => jobj([("range", jrange(d.view, d.ls, o.lo, o.hi)), ("kind", JInt(if o.write { 3 } else { 2 }))])))
+    }
+    None -> JArr([])
+  }
 
 ## Resolve a definition site to a Location: a None def_path (or one naming the
 ## requesting document) maps through the live buffer; another file maps
@@ -3837,6 +3889,44 @@ test "a collection reports the names definition resolves, at the same sites" {
     let one = resolutions(qc, row, row)
     assert len(one) == 1
     assert one[0].lo == row
+  }))
+}
+
+# References read the same collection by declaration (docs/lsp-references-design.md
+# §R1): a `let` that shadows a parameter, and a parameter named like a
+# function, each have their own occurrences, and the declaration's own name
+# comes only when asked for.
+test "references follow the declaration a name resolves to, not its spelling" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = join([
+      "fn n() -> Int = 1",
+      "",
+      "fn f(n: Int) -> Int = {",
+      "  let m = n + 1",
+      "  let n = m",
+      "  n + n()",
+      "}",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "refs.dawn", text)
+    let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
+    let param = probe_offset(text, "n: Int", 0)
+    let read = probe_offset(text, "n + 1", 0)
+    let inner = probe_offset(text, "n = m", 0)
+    let last = probe_offset(text, "n + n()", 0)
+    let call = probe_offset(text, "n()\n}", 0)
+    assert map(occurrences(qc, read, true), o => o.lo) == [param, read]
+    assert map(occurrences(qc, read, false), o => o.lo) == [read]
+    assert map(occurrences(qc, last, true), o => o.lo) == [inner, last]
+    assert map(occurrences(qc, call, true), o => o.lo) == [probe_offset(text, "n()", 0), call]
+    # the declarations write, a read reads
+    assert map(occurrences(qc, last, true), o => o.write) == [true, false]
   }))
 }
 

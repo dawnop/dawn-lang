@@ -190,6 +190,7 @@ Playground 尺寸的 full 回复 96 KB，在网关 256 KiB 的单条上限之内
 调用局部量（形参 `f(x)`、局部 `fn` 的 `local_eval()`）在遍历里是 `XCallDyn`，原来只按名字查全局签名：没有同名全局函数时什么也不 offer，
 有的话还会指错（局部量遮蔽全局函数）。T1 只在收集模式里补一条指向该局部量的解析（`collect_local_call`），排在遍历自己的 offer 之前，
 所以 token 读的是局部量。hover 与 definition 在这些位置照旧，留给 R1：references 要的是同一件事，届时连同 hover 一并改，并写自己的 Emit-Change。
+（R1 已改，见 §R1.5：遍历在这里直接 offer 局部量，`collect_local_call` 随之删去。）
 
 ### T1.7 门禁
 
@@ -346,6 +347,30 @@ CM6 里 mark 与语法高亮的 span 谁包谁取决于优先级，所以每条�
 - **impl**：`impl Area[Point]` 里的 trait 名、impl 里每个方法的名字，遍历按 impl 自己的位置回答（definition 跳到自己），收集时再各记一条
   指向 trait 声明与 trait 方法声明的。于是从 trait 方法出发的引用含 impl 里的同名方法，从 trait 出发的含 impl 头。反方向不做：光标在 impl 方法上，
   definition 说的是 impl 方法自己，references 就只给它自己的集合（见 R1.8）。
+
+### R1.5 遍历上的两处改动与行为变化
+
+**调用局部量**（§T1.6 记下的错指）：`XCallDyn` 的臂原来按名字查全局签名，现在与读局部量的 `EVar` 臂共用 `offer_local_use`，
+hover 是 `let f: fn(Int) -> Int`，definition 跳到局部量。T1 为 token 单独补的 `collect_local_call` 不再需要，删去；token 不变（夹具逐项核过）。
+
+**检查器重排过实参的调用**：调用写了具名实参而顺序与形参不同，或省略的默认值要读前面的形参时，检查器把写出的实参先绑到局部量，
+类型化节点是「一串 `let` 加末尾的调用」（`checker.arrange_call_args`）；只省略末尾默认值时，类型化实参里又混着补上的默认调用，
+个数与写出的不等。遍历原来按下标配对，两种情况都配不上，于是整串实参退回无类型遍历，里面的名字一个都不解析：
+`pad_to(tag, width, "-")` 里的 `width` 不是 `width` 的引用，改名时会漏。现在 `arranged` 剥掉那层块，写出的实参取 `let` 的值；
+个数仍不等时按跨度找（`typed_at`，原来 handler 臂已经这样找），方法调用的子节点同样处理。
+
+`selfhost-lsp-diff.sh` 的会话在 inlays.dawn 上加了一次 references（`let width`，含声明）与一次 documentHighlight（模式里的 `n`）。
+用真父（`f11a2249` 编出的服务端）逐消息对照，134 条消息里 6 条不同，都是有意的：
+
+| 消息 | 变化 |
+|---|---|
+| initialize | 多了 `referencesProvider`、`documentHighlightProvider` |
+| app.dawn 上 hover `double(n)`（局部 `fn` 的调用） | `Int`（外层调用的类型）变为 `let double: fn(Int) -> Int`，跨度缩到名字 |
+| inlays.dawn 的 semanticTokens/full | 多两个 token：`pad_to(tag, width, "-")` 里的 `tag`、`width`（省略了默认值的调用） |
+| references、documentHighlight | 新请求；真父回 `-32601` |
+| defaults.dawn 的 inlayHint | `each([1]) { n => ... }` 的 `n` 多了 `: Int`（`each` 省略了 `step`，尾随块的形参原来没有类型） |
+
+所以提交里写一行 `Emit-Change(lsp)`。
 
 ### R1.8 不做的（理由）
 
