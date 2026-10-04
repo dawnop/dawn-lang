@@ -103,7 +103,7 @@ fn seg_ok(s: String) -> Bool = {
   }
   true
 }
-use ir/core.{CValue, VInt}
+use ir/core.{CValue, VInt, VBool}
 
 ## The segments of a module path that are not legal path segments, in order.
 ##
@@ -1616,6 +1616,52 @@ test "comptime still refuses another module's effectful function" {
     let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
     assert len(prog.diags) == 1
     assert str.contains(prog.diags[0].d.msg, "must be pure")
+  })
+}
+
+test "comptime refuses a cursor used on another string and still walks one string" {
+  in_mem(() => {
+    # spec 11 leaves a cursor from one string used on another undefined, and
+    # the backends do differ there: `probe("é", "ab")` is true on the JVM and
+    # false natively. A fold that answered would bake a third answer into
+    # both, so each of these is refused, while a walk over one string, and a
+    # position in a string equal to the one it came from, still fold.
+    let root = "/tmp/dawn-selfhost-analyze/comptime-cursor-cross"
+    mkdirs("${root}/src")
+    put("${root}/src/main.dawn", "use std/cursor\nuse std/cursor.{Cursor}\nuse std/str\n" ++
+        "fn second(s: String) -> Cursor = cursor.next(s, cursor.start(s))\n" ++
+        "fn probe(a: String, b: String) -> Bool = second(a) == second(b)\n" ++
+        "fn probe_lt(a: String, b: String) -> Bool = second(a) < cursor.next(b, second(b))\n" ++
+        "fn probe_opt(a: String, b: String) -> Bool = Some(second(a)) == Some(second(b))\n" ++
+        "fn cross_char(a: String, b: String) -> Int = cursor.char(b, second(a))\n" ++
+        "const EQ: Bool = probe(\"é\", \"ab\")\n" ++
+        "const LT: Bool = probe_lt(\"😀\", \"ab\")\n" ++
+        "const OPT: Bool = probe_opt(\"é\", \"ab\")\n" ++
+        "const CH: Int = cross_char(\"é\", \"ab\")\n" ++
+        "const SAME: Bool = probe(\"a😀\", \"a\" ++ \"😀\")\n" ++
+        "const DIFF: Bool = Some(1) == None && probe(\"é\", \"ab\")\n" ++
+        "const WALK: Int = str.index_of(\"a😀b\", \"b\").unwrap_or(-1)\n" ++
+        "const LEN: Int = str.len(\"a😀b\")\n" ++
+        "pub fn main() -> Unit !io = println(to_string(LEN))\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+    var refused = 0
+    for ld in prog.diags {
+      if ld.d.msg == "comptime: a cursor from one string was used with another" {
+        refused = refused + 1
+      }
+    }
+    assert refused == 4
+    assert len(prog.diags) == 4
+    assert folded(prog, "main", "SAME") == Some(VBool(true))
+    # `&&` stops at the first false, as it does at run time, so the probe is
+    # never reached and there is nothing to refuse
+    assert folded(prog, "main", "DIFF") == Some(VBool(false))
+    assert folded(prog, "main", "WALK") == Some(VInt(2))
+    assert folded(prog, "main", "LEN") == Some(VInt(3))
   })
 }
 
