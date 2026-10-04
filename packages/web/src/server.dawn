@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw, log_request, escape_field}
+use types.{safe_rel, Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw, log_request, escape_field}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -2142,5 +2142,31 @@ test "no header line reaches the wire that the handler did not write" {
     assert not str.contains(resp, "\r\nX-Injected")
     assert str.starts_with(resp, "HTTP/1.1 " ++ status)
   }
+  srv.stop(0)
+}
+
+fn status_of(url: String) -> Int !io = {
+  let (st, _) = test_fetch_bytes(url)
+  st
+}
+
+test "an encoded slash cannot smuggle `..` into a file path through safe_rel" {
+  # the whole-segment check passes `..%2F..%2Fetc`, which decodes to one
+  # segment, and the handler sees it whole; safe_rel is what refuses it
+  let routes = [route_get("/files/{rest*}", (req: Request) => {
+    let p = safe_rel(param_segs(req, "rest"))?
+    Ok(text(200, "file " ++ p))
+  })]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}/files/"
+  let (st, body) = test_fetch_bytes(base ++ "a/b.txt")
+  assert st == 200
+  assert body == bytes.utf8("file a/b.txt")
+  assert status_of(base ++ "..%2F..%2Fetc") == 400
+  assert status_of(base ++ "a/..%2Fb") == 400
+  assert status_of(base ++ "a%5Cb") == 400
+  assert status_of(base ++ "a%00") == 400
   srv.stop(0)
 }

@@ -750,6 +750,26 @@ pub fn param_segs(req: Request, name: String) -> List[String] =
     None -> []
   }
 
+## Captured path segments as one relative file path, or a `400`. Each segment
+## must be non-empty and must not be `.` or `..` or contain `/`, `\` or NUL;
+## the segments are then joined with `/`. `[]` is `""`, the base directory
+## itself.
+##
+## The server refuses a request whose segment *is* `.` or `..`, but a segment
+## is decoded on its own, so `..%2F..` arrives as the one segment `../..`,
+## which no whole-segment check sees. Joining captures into a file path is
+## where that segment becomes a traversal, so this is the way to do it.
+pub fn safe_rel(segs: List[String]) -> Result[String, HttpError] = {
+  for s in segs {
+    if not plain_segment(s) { return Err(http_error(400, "path segment cannot name a file")) }
+  }
+  Ok(join(segs, "/"))
+}
+
+fn plain_segment(s: String) -> Bool =
+  s != "" && s != "." && s != ".." && not str.contains(s, "/") && not str.contains(s, "\\") &&
+  not str.contains(s, "\u{0}")
+
 ## `param` parsed as an integer; a non-numeric capture is a 400.
 pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
   let raw = param(req, name)?
@@ -1356,4 +1376,17 @@ test "an HttpError out of range renders as the neutral 500, headers kept" {
     Text("{\"detail\":\"oops\"}")
   # in range is untouched
   assert response_status(error_response(http_error(418, "teapot"))) == 418
+}
+
+test "safe_rel joins plain segments and refuses any that could leave the base" {
+  assert safe_rel([]) == Ok("")
+  assert safe_rel(["a", "b.txt"]) == Ok("a/b.txt")
+  assert safe_rel(["..a", "b..", ".hidden"]) == Ok("..a/b../.hidden")
+  # `..%2F..` decodes to one segment; so do `%5C` and `%00`
+  for bad in [["../.."], ["a", ".."], ["."], ["a/b"], ["a\\b"], ["a\u{0}"], [""], ["a", ""]] {
+    match safe_rel(bad) {
+      Err(e) -> { assert e.status == 400 }
+      Ok(p) -> { assert p == "refused" }
+    }
+  }
 }
