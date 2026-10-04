@@ -2688,12 +2688,21 @@ fi
 # 4. mask-all-true: the package's lowering answers an all-true `i1` constant
 #    where it should answer the comparison, so every kernel still carries a
 #    mask operand and every lane of it is 1. The text and the bytes move (a
-#    `--record` would take them), `tileiras` accepts them (an all-true mask
-#    is a mask), and on the device the last block reads and writes the lanes
-#    past the end of the vector: the sentinel in the output buffer's tail is
-#    overwritten and every one of the six kernels differs from the fake
-#    device. This is the claim only layer 2 can make, and the reason knife 7a
-#    is a boundary knife and not an arithmetic one.
+#    `--record` would take them) and `tileiras` accepts them (an all-true mask
+#    is a mask).
+#
+#    Until tileir 0.8.0 this ran on the six boundary kernels, whose tail was a
+#    mask: every one wrote past the end of its vector. Since the batch's PR-3
+#    their tail is a cell's extent and they build no mask at all, so the
+#    mutant cannot touch them; 4b below is their boundary mutant now. Here it
+#    runs on the strided family, which still masks its pointer reads and some
+#    of its writes. All ten kernels' bytes move; on the device FIVE differ,
+#    and the split is the new boundary's, measured: transpose_tail,
+#    interleave and conv3d write through the pointer path and the mask was
+#    their only bound, and jacobi and gaussian_blur choose interior lanes with
+#    the mask itself. conv1d, conv2d, max_pool, rgb_gray and depthwise_conv1d
+#    read past their tails too, but only into lanes their Out cell does not
+#    write: the extent bounds the write whatever the mask says.
 mutant_pkg="$work/pkg-mask-all-true"
 rm -rf "$mutant_pkg"
 cp -r "$root/packages/tileir" "$mutant_pkg"
@@ -2704,46 +2713,95 @@ python3 "$here/mutate.py" "$mutant_pkg/src/lower.dawn" mask-all-true \
 after=$(digest "$mutant_pkg/src/lower.dawn")
 echo "      mask-all-true: packages/tileir/src/lower.dawn md5 $before -> $after"
 
-mkdir -p "$work/mk/src"
-cp "$golden/kernels.dawn" "$work/mk/src/main.dawn"
-cat > "$work/mk/dawn.toml" <<TOML
+# The kernels of a mutated package, encoded and assembled into $work/<tag>-<k>.cubin.
+mutant_kernels() { # tag, pkgdir, kernels...
+  local tag="$1" pkg="$2"
+  shift 2
+  mkdir -p "$work/proj-$tag/src"
+  cp "$golden/kernels.dawn" "$work/proj-$tag/src/main.dawn"
+  cat > "$work/proj-$tag/dawn.toml" <<TOML
 schema = 1
 name = "tile_golden"
 
 [deps]
-tileir = "$mutant_pkg"
+tileir = "$pkg"
 tileref = "$root/packages/tileref"
 TOML
-mutant_cubins=()
-for k in "${masked[@]}"; do
-  "$root/bin/dawn" run "$work/mk" -- "$k" --bytecode "$work/m-$k.tilebc" > "$work/mk.$k.log" 2>&1 ||
-    { cat "$work/mk.$k.log" >&2; fail "mask-all-true: $k did not encode"; }
-  cmp -s "$golden/$k.tilebc" "$work/m-$k.tilebc" &&
-    fail "mask-all-true mutant stayed green: $k.tilebc is unchanged"
-  assemble_golden "$k" "$work/m-$k.tilebc" "$work/m-$k.cubin"
-  mutant_cubins+=("$work/m-$k.cubin")
-done
-echo "      mask-all-true: the six .tilebc files differ from the goldens and tileiras still accepts them"
-rc=0
-device "$work/masked.bin" "${mutant_cubins[@]}" > "$work/m-mask-all-true.out" 2>&1 || rc=$?
-mverdict="$(verdict_of "$work/m-mask-all-true.out")"
-if [ "$masked_verdict" = pass ]; then
-  differ=$(grep -c '^  verdict differ:result$' "$work/m-mask-all-true.out" || true)
-  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#masked[@]}" ]; then
-    cat "$work/m-mask-all-true.out" >&2
-    fail "mask-all-true mutant stayed green: expected verdict fail (exit 1) with all ${#masked[@]} kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
-  fi
-  echo "PASS  mutant: mask-all-true (all ${#masked[@]} kernels write past the end of the vector; verdict fail, exit 1)"
-else
-  [ "$mverdict" = "$masked_verdict" ] ||
-    { cat "$work/m-mask-all-true.out" >&2; fail "mask-all-true: the clean run is $masked_verdict but the mutant is $mverdict; a mutant the driver never runs should be indistinguishable"; }
-  echo "SKIP  mutant: mask-all-true not verifiable on this driver: the clean run is $masked_verdict, before any launch reaches the device"
-fi
+  local k
+  for k in "$@"; do
+    "$root/bin/dawn" run "$work/proj-$tag" -- "$k" --bytecode "$work/$tag-$k.tilebc" > "$work/proj-$tag.$k.log" 2>&1 ||
+      { cat "$work/proj-$tag.$k.log" >&2; fail "$tag: $k did not encode"; }
+    assemble_golden "$k" "$work/$tag-$k.tilebc" "$work/$tag-$k.cubin"
+  done
+}
 
-# 5. reduce-identity-wrong: `d_reduce` hands the reduction an identity one
-#    greater than the one it was given. A sum's identity becomes 1.0 instead
-#    of 0.0; a maximum's stays -inf, since -inf + 1 is -inf, so the mutant
-#    lands on the sums alone. Layer 0 MOVES (the text prints
+# A package mutant held to one family: every kernel's bytes move, and on the
+# device exactly the named red set differs and the rest do not.
+family_pkg_verdict() { # name, bin, clean-verdict, red-kernels-separated-by-spaces, kernels...
+  local name="$1" bin="$2" clean="$3" red="$4" k cubs=() rc mverdict differ
+  shift 4
+  for k in "$@"; do
+    cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
+      fail "$name mutant stayed green: $k.tilebc is unchanged"
+    cubs+=("$work/$name-$k.cubin")
+  done
+  echo "      $name: the $# .tilebc files differ from the goldens and tileiras still accepts them"
+  rc=0
+  device "$bin" "${cubs[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "$clean" = pass ]; then
+    local want
+    want=$(echo $red | wc -w)
+    differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+    if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "$want" ]; then
+      cat "$work/m-$name.out" >&2
+      fail "$name mutant stayed green: expected verdict fail (exit 1) with exactly $want kernels saying differ:result, got $mverdict (exit $rc, $differ differing)"
+    fi
+    for k in $red; do
+      awk -v want="$k" '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+        "$work/m-$name.out" ||
+        { cat "$work/m-$name.out" >&2; fail "$name: $k should differ"; }
+    done
+    echo "PASS  mutant: $name (on the device exactly $red differ; verdict fail, exit 1)"
+  else
+    [ "$mverdict" = "$clean" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the clean run is $clean but the mutant is $mverdict; a mutant the driver never runs should be indistinguishable"; }
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $clean, before any launch reaches the device"
+  fi
+}
+
+mutant_kernels mask-all-true "$mutant_pkg" "${strided[@]}"
+family_pkg_verdict mask-all-true "$work/strided.bin" "$strided_verdict" \
+  "transpose_tail interleave jacobi gaussian_blur conv3d" "${strided[@]}"
+
+# 4b. cell-extent-rounded-up: the recording rounds a cell view's static extent
+#    up to a whole number of tiles, so the view a boundary kernel reads and
+#    writes through ends at the last tile's end rather than at the tensor's.
+#    The text and the bytes move (`tensor_view<1024xf64>` where the extent is
+#    1000), `tileiras` accepts them, and on the device the last block writes
+#    the lanes past the end: the sentinel in each output buffer's tail is
+#    overwritten and every one of the six kernels differs. This is the claim
+#    mask-all-true made of the same six kernels before the batch's PR-3: the
+#    boundary is the extent now, and this is the mutant that takes it away.
+mutant_pkg_ce="$work/pkg-cell-extent-rounded-up"
+rm -rf "$mutant_pkg_ce"
+cp -r "$root/packages/tileir" "$mutant_pkg_ce"
+before=$(digest "$mutant_pkg_ce/src/prog.dawn")
+python3 "$here/mutate.py" "$mutant_pkg_ce/src/prog.dawn" cell-extent-rounded-up \
+  '    ops = ops ++ [CellViewOf(tv, param, dtype, align, extent, strides, dyn_shape, dyn_strides)]' \
+  '    let rounded = list.map(range(0, len(extent)), j => if extent[j] == DYN_DIM { DYN_DIM } else { (extent[j] + tile[j] - 1) / tile[j] * tile[j] })
+    ops = ops ++ [CellViewOf(tv, param, dtype, align, rounded, strides, dyn_shape, dyn_strides)]'
+after=$(digest "$mutant_pkg_ce/src/prog.dawn")
+echo "      cell-extent-rounded-up: packages/tileir/src/prog.dawn md5 $before -> $after"
+mutant_kernels cell-extent-rounded-up "$mutant_pkg_ce" "${masked[@]}"
+family_pkg_verdict cell-extent-rounded-up "$work/masked.bin" "$masked_verdict" "${masked[*]}" "${masked[@]}"
+
+# 5. reduce-identity-wrong: the named float sum (`reduce_sum`, and since
+#    tileir 0.8.0 every sum here is one) takes 1.0 as its identity instead
+#    of 0.0. Until 0.8.0 the anchor was `d_reduce` handing on its identity
+#    plus one, which left a maximum's -inf alone; the named maximum's
+#    identity is a separate branch now, so the mutant still lands on the
+#    sums alone. Layer 0 MOVES (the text prints
 #    `identities=[1.0 : f64]`, and a `--record` would take it), layer 1
 #    ACCEPTS it -- tileiras checks the identity's format against the
 #    operand's and never its value, measured -- and only the device says the
@@ -2788,32 +2846,10 @@ rm -rf "$mutant_pkg_id"
 cp -r "$root/packages/tileir" "$mutant_pkg_id"
 before=$(digest "$mutant_pkg_id/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_id/src/dev.dawn" reduce-identity-wrong \
-  'let args = t_reduce_begin(0, shape, [IdF(dtype_name(d), identity)], [h])' \
-  'let args = t_reduce_begin(0, shape, [IdF(dtype_name(d), identity + 1.0)], [h])'
+  '    IdF(dtype, if kind == "sum" { 0.0 } else if kind == "max" {' \
+  '    IdF(dtype, if kind == "sum" { 1.0 } else if kind == "max" {'
 after=$(digest "$mutant_pkg_id/src/dev.dawn")
 echo "      reduce-identity-wrong: packages/tileir/src/dev.dawn md5 $before -> $after"
-
-# The kernels of a mutated package, encoded and assembled into $work/<tag>-<k>.cubin.
-mutant_kernels() { # tag, pkgdir, kernels...
-  local tag="$1" pkg="$2"
-  shift 2
-  mkdir -p "$work/proj-$tag/src"
-  cp "$golden/kernels.dawn" "$work/proj-$tag/src/main.dawn"
-  cat > "$work/proj-$tag/dawn.toml" <<TOML
-schema = 1
-name = "tile_golden"
-
-[deps]
-tileir = "$pkg"
-tileref = "$root/packages/tileref"
-TOML
-  local k
-  for k in "$@"; do
-    "$root/bin/dawn" run "$work/proj-$tag" -- "$k" --bytecode "$work/$tag-$k.tilebc" > "$work/proj-$tag.$k.log" 2>&1 ||
-      { cat "$work/proj-$tag.$k.log" >&2; fail "$tag: $k did not encode"; }
-    assemble_golden "$k" "$work/$tag-$k.tilebc" "$work/$tag-$k.cubin"
-  done
-}
 
 mutant_kernels reduce-identity-wrong "$mutant_pkg_id" "${reduced[@]}"
 # the eight kernels with a sum reduction move at layer 0; the five without
@@ -2867,8 +2903,12 @@ mutant_kernels_src="$work/kernels-softmax.dawn"
 cp "$golden/kernels.dawn" "$mutant_kernels_src"
 before=$(digest "$mutant_kernels_src")
 python3 "$here/mutate.py" "$mutant_kernels_src" softmax-no-max-subtract \
-  '  let mx = spread(F64, [RED_TILE], d_reduce(F64, [RED_TILE], t, neg_inf(), (acc, e) => s_maxf(F64, acc, e)))' \
-  '  let mx = f_const(F64, [RED_TILE], 0.0)'
+  'fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)
+  let ex = exp(sub(t, reduce_max(t)))' \
+  'fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)
+  let ex = exp(t)'
 after=$(digest "$mutant_kernels_src")
 echo "      softmax-no-max-subtract: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-softmax/src"
@@ -2976,8 +3016,8 @@ mutant_mma_src="$work/kernels-mma.dawn"
 cp "$golden/kernels.dawn" "$mutant_mma_src"
 before=$(digest "$mutant_mma_src")
 python3 "$here/mutate.py" "$mutant_mma_src" mma-acc-not-carried \
-  '    mmaf(F64, MM_TM, MM_TK, MM_TN, ta, tb, sofar)' \
-  '    mmaf(F64, MM_TM, MM_TK, MM_TN, ta, tb, f_const(F64, [MM_TM, MM_TN], 0.0))'
+  '  let acc = d_range(0, MM_K / MM_TK, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))' \
+  '  let acc = d_range(0, MM_K / MM_TK, zeros(c), (k, _sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), zeros(c)))'
 after=$(digest "$mutant_mma_src")
 echo "      mma-acc-not-carried: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-mma/src"
@@ -3035,8 +3075,8 @@ mutant_ts_src="$work/kernels-transpose.dawn"
 cp "$golden/kernels.dawn" "$mutant_ts_src"
 before=$(digest "$mutant_ts_src")
 python3 "$here/mutate.py" "$mutant_ts_src" stride-row-major-swapped \
-  '  store_strided_masked(out, base_out, shape, permute(row_major([TT_COLS, TT_ROWS]), [1, 0]), m, t)' \
-  '  store_strided_masked(out, base_out, shape, permute(row_major([TT_ROWS, TT_COLS]), [1, 0]), m, t)'
+  '  store(out, base_out, t, strides: Some(permute(row_major([TT_COLS, TT_ROWS]), [1, 0])), mask: Some(m))' \
+  '  store(out, base_out, t, strides: Some(permute(row_major([TT_ROWS, TT_COLS]), [1, 0])), mask: Some(m))'
 after=$(digest "$mutant_ts_src")
 echo "      stride-row-major-swapped: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-transpose/src"
@@ -3083,6 +3123,19 @@ fi
 #     from the opposite dimension, so every rank-2 layout in a kernel is
 #     swapped at once. Six of the nine kernels' bytecode moves and tileiras
 #     accepts every one of them.
+#
+#     Since tileir 0.8.0 five of the seven go red, and the reason is the
+#     line that used to say one: reversing EVERY layout in a kernel is a
+#     relabelling of the tile's own two axes, and a relabelling cancels when
+#     the TILE is square -- but only when the read and the write are both
+#     ladders. conv2d, max_pool, jacobi and gaussian_blur now write their
+#     Out cell through a view, which the mutant does not touch, so the
+#     swapped read is no longer undone and all four answer the transpose;
+#     depthwise_conv1d's 4 by 32 tile was red before and still is.
+#     transpose_tail and conv3d still write through the pointer path (both
+#     are Shared), and they are the two the square tile still hides. What
+#     the paragraphs below say of the ladder itself stands; this is the
+#     measurement before 0.8.0:
 #
 #     On the device only ONE of the seven goes red, and the reason is worth
 #     the line: reversing EVERY layout in a kernel is a relabelling of the
@@ -3137,7 +3190,7 @@ for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubi
 rc=0
 device "$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
-ladder_red=(depthwise_conv1d)
+ladder_red=(conv2d max_pool jacobi depthwise_conv1d gaussian_blur)
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-ladder-reversed.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#ladder_red[@]}" ]; then
@@ -3149,11 +3202,11 @@ if [ "$strided_verdict" = pass ]; then
       "$work/m-ladder-reversed.out" ||
       { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: $k should differ"; }
   done
-  awk 'BEGIN{split("depthwise_conv1d", r, " "); for (i in r) red[r[i]]=1}
+  awk -v reds="${ladder_red[*]}" 'BEGIN{split(reds, r, " "); for (i in r) red[r[i]]=1}
        /^kernel /{cur=$2} /^  verdict differ:result$/ && !(cur in red) {bad=1} END {exit bad}' \
     "$work/m-ladder-reversed.out" ||
-    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel outside the red set moved; a square tile should have hidden it, masks and all"; }
-  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move, and only ${ladder_red[*]}'s 4 by 32 tile can see it on the device)"
+    { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel outside the red set moved; a square tile read and written through ladders should have hidden it, masks and all"; }
+  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move; on the device ${ladder_red[*]} differ, and the two square tiles written through the pointer path hide it)"
 else
   [ "$mverdict" = "$strided_verdict" ] ||
     { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: the clean run is $strided_verdict but the mutant is $mverdict"; }
@@ -3499,8 +3552,8 @@ rm -rf "$mutant_pkg_gm"
 cp -r "$root/packages/tileir" "$mutant_pkg_gm"
 before=$(digest "$mutant_pkg_gm/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_gm/src/dev.dawn" gather-mask-dropped \
-  '  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape, Some(hm), Some(hp))' \
-  '  let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape, None, None)'
+  '    let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), handle_of(mask), handle_of(pad))' \
+  '    let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), None, None)'
 after=$(digest "$mutant_pkg_gm/src/dev.dawn")
 echo "      gather-mask-dropped: packages/tileir/src/dev.dawn md5 $before -> $after"
 
@@ -3604,8 +3657,8 @@ gath_kernel_check() { # name, kernel
 #     layer 1 accepts it (one index tile is as legal as another), and the
 #     device says 255 of 264 lanes hold the wrong value.
 gath_kernel_mutant scatter-unpermuted scatter_perm \
-  '  scatter_masked(out, dst, s, ok, load(x, blk, s))' \
-  '  scatter_masked(out, lanes(blk, s), s, ok, load(x, blk, s))'
+  '  scatter(out, dst, load_cell(x), mask: Some(in_range(p, 0, SC_N)))' \
+  '  scatter(out, lanes(tile_at(block_id(0), SC_TILE), [SC_TILE]), load_cell(x), mask: Some(in_range(p, 0, SC_N)))'
 gath_kernel_check scatter-unpermuted scatter_perm
 
 # 18. rank-scatter-in-lane-order: `sort_rank` still computes every rank and
@@ -3615,8 +3668,8 @@ gath_kernel_check scatter-unpermuted scatter_perm
 #     that turns a rank into a sort. The scatter here carries NO mask, which
 #     is the half of the surface scatter-unpermuted does not reach.
 gath_kernel_mutant rank-scatter-in-lane-order sort_rank \
-  '  scatter(out, float_to_int(F64, I32, s1, rank), s1, load(x, zero, s1))' \
-  '  store(out, zero, s1, load(x, zero, s1))'
+  '  scatter(out, float_to_int(rank, I32), load(x, zero, s1))' \
+  '  store(out, zero, load(x, zero, s1))'
 gath_kernel_check rank-scatter-in-lane-order sort_rank
 
 # A kernel-source mutant for the scan family: the gath_ pair above with
@@ -3748,8 +3801,8 @@ fi
 #     different expression, which is why the red set is one kernel and not
 #     two.
 scan_kernel_mutant exclusive-scan-as-inclusive compact \
-  '  scatter_masked(out, sub_i(s, incl, ones), s, keep, t)' \
-  '  scatter_masked(out, incl, s, keep, t)'
+  '  scatter(out, sub_i(incl, ones), t, mask: Some(keep))' \
+  '  scatter(out, incl, t, mask: Some(keep))'
 scan_kernel_check exclusive-scan-as-inclusive compact
 
 # 21. atomic-as-plain-store: the PACKAGE's `atomic_add_masked` issues a
@@ -3767,10 +3820,10 @@ rm -rf "$mutant_pkg_atom"
 cp -r "$root/packages/tileir" "$mutant_pkg_atom"
 before=$(digest "$mutant_pkg_atom/src/dev.dawn")
 python3 "$here/mutate.py" "$mutant_pkg_atom/src/dev.dawn" atomic-as-plain-store \
-  '    let _old = atomic_rmw_masked(p, "add", index, shape, mask, v)
-    ()' \
-  '    let old = gather_masked(p, index, shape, mask, i_const(shape, 0))
-    scatter_masked(p, index, shape, mask, add_i(shape, old, v))'
+  '  let _old = atomic_rmw(p, "add", index, v, mask: mask)
+  ()' \
+  '  let old = gather(p, index, mask: mask, pad: Some(i_const(0)))
+  scatter(p, index, add_i(old, v), mask: mask)'
 after=$(digest "$mutant_pkg_atom/src/dev.dawn")
 echo "      atomic-as-plain-store: packages/tileir/src/dev.dawn md5 $before -> $after"
 
@@ -3884,8 +3937,8 @@ atom_kernel_check() { # name, kernel
 #     operands is which: `AllTypesMatch<["cmp", "val", "result"]>` is
 #     satisfied either way, which is why tileiras accepts it.
 atom_kernel_mutant cas-compare-ignored cas_swap \
-  '  let prev = atomic_cas_masked(state, lanes(blk, s), s, active, c, v)' \
-  '  let prev = atomic_cas_masked(state, lanes(blk, s), s, active, v, v)'
+  '[CAS_TILE]), c, load_cell(val), mask: Some(active))' \
+  '[CAS_TILE]), load_cell(val), load_cell(val), mask: Some(active))'
 atom_kernel_check cas-compare-ignored cas_swap
 
 # The two mutants of the error function family (knife 15). Both live in the
@@ -3991,20 +4044,11 @@ erf_mutant_corpus() { # name, corpus, want, cubins...
 #     would have no way to show that its own greenness on the control
 #     corpus means something.
 erf_pkg_mutant erf-tanh-approx \
-  '  let one = f_const(d, shape, 1.0)
-  let t = div(d, shape, one, fma(d, shape, f_const(d, shape, AS_P), ax, one))
-  let inner = fma(d, shape, t,
-    fma(d, shape, t,
-      fma(d, shape, t,
-        fma(d, shape, t, f_const(d, shape, AS_A5), f_const(d, shape, AS_A4)),
-        f_const(d, shape, AS_A3)),
-      f_const(d, shape, AS_A2)),
-    f_const(d, shape, AS_A1))
-  let m = sub(d, shape, one,
-    mul(d, shape, mul(d, shape, t, inner), exp(d, shape, neg(d, shape, mul(d, shape, ax, ax)))))' \
-  '  let m = tanh(d, shape,
-    fma(d, shape, mul(d, shape, ax, mul(d, shape, ax, ax)), f_const(d, shape, 0.10091094891335171),
-      mul(d, shape, f_const(d, shape, 1.1283791670955128), ax)))' \
+  '  let one = k(1.0)
+  let t = div(one, fma(k(AS_P), ax, one))
+  let inner = fma(t, fma(t, fma(t, fma(t, k(AS_A5), k(AS_A4)), k(AS_A3)), k(AS_A2)), k(AS_A1))
+  let m = sub(one, mul(mul(t, inner), exp(neg(mul(ax, ax)))))' \
+  '  let m = tanh(fma(mul(ax, mul(ax, ax)), k(0.10091094891335171), mul(k(1.1283791670955128), ax)))' \
   fail fail
 
 # 24. erf-sign-not-flipped: the package's `erf` drops the odd symmetry and
@@ -4019,7 +4063,7 @@ erf_pkg_mutant erf-tanh-approx \
 #     catching -- the same argument atomic-as-plain-store's collision-free
 #     corpus makes for knife 14, run the other way round.
 erf_pkg_mutant erf-sign-not-flipped \
-  '  select(d, shape, lt(d, shape, a, f_const(d, shape, 0.0)), neg(d, shape, m), m)' \
+  '  select(lt(a, k(0.0)), neg(m), m)' \
   '  m' \
   fail pass
 
@@ -4216,10 +4260,18 @@ shape_pkg_mutant extract-indices-reversed bytecode.dawn \
 #     the device reads a legal program. `grid_stride` then strides by its
 #     own block index instead of the grid's extent, so three blocks cover
 #     seven of the twelve tiles and five keep the sentinel.
+#
+#     Since tileir 0.8.0 five more kernels of the family read the opcode:
+#     a cell of `DYN_DIM` extent (`run_of`) is the grid's blocks times the
+#     tile, so token_join, ptr_roundtrip, ptr_recast, insert_tile and
+#     powi_sweep size their Out view with it. Under the mutant block b's
+#     view is b tiles long and ends exactly where its own cell begins, so no
+#     block writes anything; shape_ops, a Shared output, is the one that
+#     does not read it.
 shape_pkg_mutant num-tile-blocks-as-block-id bytecode.dawn \
   'emit(emit(emit(emit(w1, OP_GET_NUM_TILE_BLOCKS), ti), ti), ti)' \
   'emit(emit(emit(emit(w1, OP_GET_TILE_BLOCK_ID), ti), ti), ti)' \
-  grid_stride
+  grid_stride token_join ptr_roundtrip ptr_recast insert_tile powi_sweep
 
 # The element format family's one mutant (knife T3). It lives in the WRITER
 # (packages/tileir/src/bytecode.dawn), because what this knife added is a
@@ -4730,8 +4782,8 @@ dbg_kernel_control() { # name, kernels...
 
 if [ "$dbg_verdict" = pass ] && [ "$dbg_fail_verdict" = pass ] && [ "$dbg_print_verdict" = pass ]; then
   dbg_kernel_mutant assert-condition-inverted \
-    '  d_assert(shape, lt_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")' \
-    '  d_assert(shape, ge_i(shape, v, i_const(shape, limit)), "tile-golden: a lane reached the limit")'
+    '  d_assert(lt_i(v, i_const(limit)), "tile-golden: a lane reached the limit")' \
+    '  d_assert(ge_i(v, i_const(limit)), "tile-golden: a lane reached the limit")'
   dbg_kernel_moved assert-condition-inverted assert_pass
   dbg_kernel_moved assert-condition-inverted assert_fail
   dbg_kernel_control assert-condition-inverted "${dbg_green[@]}" print_tile
@@ -4783,8 +4835,8 @@ if [ "$dbg_verdict" = pass ] && [ "$dbg_fail_verdict" = pass ] && [ "$dbg_print_
   cp -r "$root/packages/tileir" "$pkg"
   before=$(digest "$pkg/src/dev.dawn")
   python3 "$here/mutate.py" "$pkg/src/dev.dawn" print-format-wrong \
-    '  t_print(fmt, dtype_name(d), none, hs)' \
-    '  t_print(fmt, dtype_name(d), none, list.reverse(hs))'
+    '  t_print(fmt, dt, none, hs)' \
+    '  t_print(fmt, dt, none, list.reverse(hs))'
   after=$(digest "$pkg/src/dev.dawn")
   echo "      print-format-wrong: packages/tileir/src/dev.dawn md5 $before -> $after"
   mutant_kernels print-format-wrong "$pkg" print_tile "${dbg[@]}"

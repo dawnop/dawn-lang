@@ -3664,7 +3664,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 `fn(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev`。
 
 - 它不在设备上执行，也不在宿主上计算任何数值。`Dev` 的每个操作产生或消费**句柄**：
-  `Tile[D]`、`Idx`、`Scalar[D]`、`Param[D]` 等不透明类型，幻影参数 `D` 是格式标记（§2.7）。
+  `Tile[D]`（任意秩，0 秩即标量）、`Idx`、`Param[D]` 等不透明类型，幻影参数 `D` 是格式标记（§2.7）。
   句柄由 handler 签发；把一种句柄当另一种用，或把宿主的 `Int` 当句柄用，是类型错误。
 - **记录**：`tileir/prog` 的 `trace_kernel(name, params, body)` 在**宿主运行期**、在记录
   handler 下把 `body` 跑恰好一次，答一个 `TileProg`（SSA 形式的 ADT）。`params` 是入口各参数

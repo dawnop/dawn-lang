@@ -57,7 +57,7 @@ Every line of one kernel, a fused attention, sits beside the Tile IR its calls w
 
 ## kernel-kind
 
-one loop, two scans inside it
+one loop, two reductions inside it
 
 ## kernel-left
 
@@ -73,7 +73,7 @@ the Tile IR it recorded
 
 ## kernel-note
 
-Click a call's name to mark its whole span and the Tile IR it wrote. A loop or a scan marks its own header, terminator and brace, and more faintly the lines its body's calls wrote. Click a line of Tile IR to find its call.
+Click a call's name to mark its whole span and the Tile IR it wrote. A loop marks its own header, terminator and brace, and more faintly the lines its body's calls wrote. Click a line of Tile IR to find its call.
 
 ## fact-calls
 

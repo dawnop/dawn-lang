@@ -41,14 +41,13 @@ use std/list
 use std/map
 use std/narrow
 use std/str
-use tileir/dev.{Dev, Param, Tile, param, block_id, tile_at, load, store, addf,
-  load_hinted, store_hinted, for_arch, hint_latency,
-  d_loop2, d_reduce_i, s_addi, s_maxi, s_consti, s_le_i, spread,
-  i_const, add_i, mul_i, div_i, rem_i, lt_i, eq_i, select, idx_const, idx_add,
+use tileir/dev.{Dev, Param, Tile, param, block_id, tile_at, load, store, addf, load_cell, store_cell,
+  for_arch, hint_latency, d_loop2, d_reduce, broadcast, DYN_DIM,
+  i_const, add_i, mul_i, div_i, rem_i, lt_i, le_i, max_i, eq_i, select, idx_const, idx_add,
   d_assert, d_print, d_global, global_ptrs, lanes,
   ptr_offset, load_ptrs, store_ptrs, alloca_ptrs,
   float_to_float, extract, cat, permute_tile }
-use tileir/prog.{trace_kernel}
+use tileir/prog.{TileProg, trace_kernel, trace3, cells, In, Out}
 use tileir/render.{render}
 
 ## The tile the two wide kernels cover, and the tile the others do. Eight
@@ -61,12 +60,12 @@ const N: Int = 8
 
 ## Knife 1, the first milestone: one 128-wide tile per block, two loads, one
 ## add, one store. `!Dev` and nothing else, so there is no host memory here
-## and no way to look at a number.
+## and no way to look at a number. The parameters' cells (`vadd_text` below)
+## are the addressing, so the body names no shape and no offset.
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let blk = tile_at(block_id(0), WIDTH)
-  let ta = load(a, blk, [WIDTH])
-  let tb = load(b, blk, [WIDTH])
-  store(out, blk, [WIDTH], addf(F64, [WIDTH], ta, tb))
+  let ta = load_cell(a)
+  let tb = load_cell(b)
+  store_cell(out, addf(ta, tb))
 }
 
 ## Knife T15: `vadd` with `optimization_hints` on the first load and on the
@@ -75,25 +74,21 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
 ## states of the flag bit in one kernel.
 fn vadd_hinted(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), WIDTH)
-  let ta = load_hinted(a, blk, [WIDTH], [for_arch("sm_86", [hint_latency(4)])])
+  let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", [hint_latency(4)])])
   let tb = load(b, blk, [WIDTH])
-  store_hinted(out, blk, [WIDTH], [for_arch("sm_86", [hint_latency(7)])],
-    addf(F64, [WIDTH], ta, tb))
+  store(out, blk, addf(ta, tb), hints: [for_arch("sm_86", [hint_latency(7)])])
 }
 
 # One Collatz step per lane, saturating at 1: a lane that has reached 1 stays
 # there, which is what makes "every lane is 1" a condition that stays true.
 fn collatz_step(v: Tile[I32], s: Tile[I32]) -> (Tile[I32], Tile[I32]) !Dev = {
-  let shape = [N]
-  let one = i_const(shape, 1)
-  let zero = i_const(shape, 0)
-  let two = i_const(shape, 2)
-  let running = lt_i(shape, one, v)
-  let even = eq_i(shape, rem_i(shape, v, two), zero)
-  let moved = select(I32, shape, even, div_i(shape, v, two),
-    add_i(shape, mul_i(shape, v, i_const(shape, 3)), one))
-  (select(I32, shape, running, moved, v),
-    add_i(shape, s, select(I32, shape, running, one, zero)))
+  let one = i_const(1)
+  let zero = i_const(0)
+  let two = i_const(2)
+  let running = lt_i(one, v)
+  let even = eq_i(rem_i(v, two), zero)
+  let moved = select(even, div_i(v, two), add_i(mul_i(v, i_const(3)), one))
+  (select(running, moved, v), add_i(s, select(running, one, zero)))
 }
 
 ## Knife T5: `loop` and `break`, the one region shape whose exit the region
@@ -104,14 +99,13 @@ fn collatz_step(v: Tile[I32], s: Tile[I32]) -> (Tile[I32], Tile[I32]) !Dev = {
 fn collatz(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let shape = [N]
   let blk = tile_at(idx_const(0), N)
-  let (_left, steps) = d_loop2(load(x, blk, shape), i_const(shape, 0), (v, s) => {
-    let biggest = d_reduce_i(shape, v, 1, (acc, e) => s_maxi(acc, e))
+  let (_left, steps) = d_loop2(load(x, blk, shape), broadcast(i_const(0), shape), (v, s) => {
+    let biggest = d_reduce(v, 1.0, (acc, e) => max_i(acc, e))
     let (nv, ns) = collatz_step(v, s)
-    (s_le_i(biggest, s_consti(1)), nv, ns)
+    (le_i(biggest, i_const(1)), nv, ns)
   })
-  store(out, blk, shape, steps)
-  store(out, tile_at(idx_const(1), N), shape,
-    spread(I32, shape, d_reduce_i(shape, steps, 0, (acc, e) => s_maxi(acc, e))))
+  store(out, blk, steps)
+  store(out, tile_at(idx_const(1), N), broadcast(d_reduce(steps, 0.0, (acc, e) => max_i(acc, e)), shape))
 }
 
 ## Knife T6: an assertion and a print. A launch that fires an `assert` is
@@ -121,13 +115,11 @@ fn collatz(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 ## the fake device never running this body, and both are in the rendered
 ## text, which is the layer an example can hold.
 fn guarded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
-  let shape = [N]
   let blk = tile_at(block_id(0), N)
-  let v = load(x, blk, shape)
-  d_assert(shape, lt_i(shape, v, i_const(shape, 1000)),
-    "gpu_fake: a lane reached the limit")
-  d_print(I32, "guarded sum=%d\n", [d_reduce_i(shape, v, 0, (acc, e) => s_addi(acc, e))])
-  store(out, blk, shape, add_i(shape, v, i_const(shape, 1)))
+  let v = load(x, blk, [N])
+  d_assert(lt_i(v, i_const(1000)), "gpu_fake: a lane reached the limit")
+  d_print("guarded sum=%d\n", [d_reduce(v, 0.0, (acc, e) => add_i(acc, e))])
+  store(out, blk, add_i(v, i_const(1)))
 }
 
 ## The two tables `table` declares, written out here rather than taken from
@@ -150,10 +142,10 @@ fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), N)
   let off = lanes(blk, s)
   let tx = load(x, blk, s)
-  let pa = ptr_offset(F64, s, global_ptrs("tbl_a", F64, s), off)
-  let pb = ptr_offset(F64, s, global_ptrs("tbl_b", F64, s), off)
-  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, pa), tx))
-  store(out, idx_add(blk, idx_const(N)), s, addf(F64, s, load_ptrs(F64, s, pb), tx))
+  let pa = ptr_offset(global_ptrs("tbl_a", F64, s), off)
+  let pb = ptr_offset(global_ptrs("tbl_b", F64, s), off)
+  store(out, blk, addf(load_ptrs(pa), tx))
+  store(out, idx_add(blk, idx_const(N)), addf(load_ptrs(pb), tx))
 }
 
 ## Knives T3 and T9: the narrow element formats. Segment 0 reads a buffer OF
@@ -164,9 +156,8 @@ fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn narrowed(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [N]
   let blk = tile_at(block_id(0), N)
-  store(out, blk, s, float_to_float(F8E4M3FN, F64, s, load(x, blk, s)))
-  store(out, idx_add(blk, idx_const(N)), s,
-    float_to_float(F8E4M3FN, F64, s, float_to_float(F64, F8E4M3FN, s, load(y, blk, s))))
+  store(out, blk, float_to_float(load(x, blk, s), F64))
+  store(out, idx_add(blk, idx_const(N)), float_to_float(float_to_float(load(y, blk, s), F8E4M3FN), F64))
 }
 
 ## Knife T4: the attribute domains, of which a directed rounding is the one
@@ -177,11 +168,10 @@ fn narrowed(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [N]
   let blk = tile_at(block_id(0), N)
-  let a = float_to_float(F64, F32, s, load(x, blk, s))
-  let b = float_to_float(F64, F32, s, load(y, blk, s))
-  store(out, blk, s, float_to_float(F32, F64, s, addf(F32, s, a, b, rounding: narrow.Down)))
-  store(out, idx_add(blk, idx_const(N)), s,
-    float_to_float(F32, F64, s, addf(F32, s, a, b, rounding: narrow.Up)))
+  let a = float_to_float(load(x, blk, s), F32)
+  let b = float_to_float(load(y, blk, s), F32)
+  store(out, blk, float_to_float(addf(a, b, rounding: narrow.Down), F64))
+  store(out, idx_add(blk, idx_const(N)), float_to_float(addf(a, b, rounding: narrow.Up), F64))
 }
 
 ## Knife T10: `alloca`, memory that belongs to the block and to nothing else.
@@ -195,10 +185,10 @@ fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = [N]
   let blk = tile_at(block_id(0), N)
-  let p = ptr_offset(F64, s, alloca_ptrs(F64, 12, 8, s), lanes(idx_const(0), s))
+  let p = ptr_offset(alloca_ptrs(F64, 12, 8, s), lanes(idx_const(0), s))
   let tx = load(x, blk, s)
-  store_ptrs(F64, s, p, addf(F64, s, tx, tx))
-  store(out, blk, s, addf(F64, s, load_ptrs(F64, s, p), tx))
+  store_ptrs(p, addf(tx, tx))
+  store(out, blk, addf(load_ptrs(p), tx))
 }
 
 ## Knife T2: the three shape operations, on one block of 128 f64 read twice.
@@ -212,24 +202,31 @@ fn shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let base = tile_at(b, 128)
   let obase = tile_at(b, 192)
   let t2 = load(x, base, [16, 8])
-  let lower = extract(F64, [16, 8], [8, 4], t2, [idx_const(1), idx_const(0)])
-  let upper = extract(F64, [16, 8], [8, 4], t2, [idx_const(0), idx_const(0)])
-  store(out, obase, [16, 4], cat(F64, 0, [8, 4], [8, 4], lower, upper))
+  let lower = extract(t2, [8, 4], [idx_const(1), idx_const(0)])
+  let upper = extract(t2, [8, 4], [idx_const(0), idx_const(0)])
+  store(out, obase, cat(lower, upper, 0))
   let t3 = load(x, base, [4, 4, 8])
-  store(out, idx_add(obase, idx_const(64)), [4, 4, 8],
-    permute_tile(F64, [4, 4, 8], [1, 0, 2], t3))
+  store(out, idx_add(obase, idx_const(64)), permute_tile(t3, [1, 0, 2]))
 }
 
 # ---- the records ----
 #
-# `trace_kernel` installs the recording handler, calls the body once and
-# answers the record; `render` turns it into the text a reader (and a golden)
-# can hold. The list is the entry signature, and a `param` in the body that
-# disagrees with it is refused here rather than by the assembler.
+# `trace3` installs the recording handler, calls the body once with one
+# marker a parameter and answers the record; `render` turns it into the text
+# a reader (and a golden) can hold. `vadd`'s parameters are cut into cells of
+# WIDTH, as many as the grid has; the others are `trace_kernel`'s, whose
+# list is the entry signature and whose every parameter is a `Shared`, the
+# pointer path's: each writes two regions a block, a pointer of its own or
+# through a hint, which no cell describes. A `param` in such a body that
+# disagrees with the list is refused here rather than by the assembler.
 
-fn vadd_text() -> String =
-  render(trace_kernel("vadd", ["f64", "f64", "f64"],
-    () => vadd(param(F64, 0), param(F64, 1), param(F64, 2))))
+fn vadd_prog() -> TileProg = {
+  let g = cells([DYN_DIM], [WIDTH])
+  let (p, _e) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  p
+}
+
+fn vadd_text() -> String = render(vadd_prog())
 
 fn vadd_hinted_text() -> String =
   render(trace_kernel("vadd_hinted", ["f64", "f64", "f64"],
@@ -487,11 +484,7 @@ pub fn main() -> Unit !io = {
 # ---- the records are a function of the bodies ----
 
 test "the record is a function of the body, not of the run" {
-  let once = trace_kernel("vadd", ["f64", "f64", "f64"],
-    () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
-  let twice = trace_kernel("vadd", ["f64", "f64", "f64"],
-    () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
-  assert once == twice
+  assert vadd_prog() == vadd_prog()
 }
 
 test "the kernel renders as one Tile IR entry" {

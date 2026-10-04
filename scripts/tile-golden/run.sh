@@ -1004,8 +1004,10 @@ mutant_run_bytecode() { # name, kernel
 }
 
 # 1. The renderer drops the store's token operand. The kernel still traces
-#    and renders (exit 0), and vadd's text differs from its golden on both
-#    backends, in the store line and nowhere else.
+#    and renders (exit 0), and batch_norm's text differs from its golden on
+#    both backends, in the store line and nowhere else. (Until tileir 0.8.0
+#    this was vadd, whose output is a cell since then and is written by
+#    `store_view_tko`; batch_norm's strided column is still a pointer store.)
 #
 #    The anchor moved once, at knife T15: `optimization_hints` is printed
 #    between the token and the colon, so the store line now carries a
@@ -1014,41 +1016,43 @@ mutant_run_bytecode() { # name, kernel
 #    only a store has.
 if run_item drop-store-token; then
   mutant_project drop-store-token render.dawn
-  mutant_run drop-store-token vadd
+  mutant_run drop-store-token batch_norm
   for backend in jvm native; do
-    out="$work/m-drop-store-token.vadd.$backend"
-    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "drop-store-token: vadd did not run to completion on $backend"; }
-    cmp -s "$here/vadd.mlir" "$out" && fail "drop-store-token mutant stayed green on $backend: vadd.mlir still matches"
-    changed=$(diff "$here/vadd.mlir" "$out" | grep -c '^[<>]' || true)
-    [ "$changed" = 2 ] || { diff "$here/vadd.mlir" "$out" >&2 || true; fail "drop-store-token: expected exactly the store line to move on $backend, got $changed changed line(s)"; }
-    grep -q '^> .*store_ptr_tko weak' <(diff "$here/vadd.mlir" "$out") ||
-      { diff "$here/vadd.mlir" "$out" >&2 || true; fail "drop-store-token: the moved line is not the store on $backend"; }
+    out="$work/m-drop-store-token.batch_norm.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "drop-store-token: batch_norm did not run to completion on $backend"; }
+    cmp -s "$here/batch_norm.mlir" "$out" && fail "drop-store-token mutant stayed green on $backend: batch_norm.mlir still matches"
+    changed=$(diff "$here/batch_norm.mlir" "$out" | grep -c '^[<>]' || true)
+    [ "$changed" = 2 ] || { diff "$here/batch_norm.mlir" "$out" >&2 || true; fail "drop-store-token: expected exactly the store line to move on $backend, got $changed changed line(s)"; }
+    grep -q '^> .*store_ptr_tko weak' <(diff "$here/batch_norm.mlir" "$out") ||
+      { diff "$here/batch_norm.mlir" "$out" >&2 || true; fail "drop-store-token: the moved line is not the store on $backend"; }
   done
-  echo "PASS  mutant: drop-store-token (vadd.mlir red on both backends; exactly the store line moved)"
+  echo "PASS  mutant: drop-store-token (batch_norm.mlir red on both backends; exactly the store line moved)"
 fi
 
 # 2. `load` hands the handler a fixed "f64" instead of its parameter's format.
-#    The f32 kernel's entry declares f32 and its first load now claims f64, so
-#    trace_kernel refuses it: non-zero exit, the refusal on stderr, nothing
-#    rendered. vadd, whose parameters are f64, is untouched on both backends.
+#    The f16 kernel's entry declares f16 and its first load now claims f64, so
+#    the recording refuses it: non-zero exit, the refusal on stderr, nothing
+#    rendered. batched_matmul, whose parameters are f64, is untouched on both
+#    backends. (Until tileir 0.8.0 the pair was vadd_f32 and vadd; both read
+#    their cells since then, which this anchor does not reach.)
 if run_item load-dtype-f64; then
   mutant_project load-dtype-f64 dev.dawn
-  mutant_run load-dtype-f64 vadd_f32
-  mutant_run load-dtype-f64 vadd
-  refusal='tileir: kernel `vadd_f32`: parameter 0 is declared f32, but a load reads it as f64'
+  mutant_run load-dtype-f64 batched_matmul_f16
+  mutant_run load-dtype-f64 batched_matmul
+  refusal='tileir: kernel `batched_matmul_f16`: parameter 0 is declared f16, but a load reads it as f64'
   for backend in jvm native; do
-    out="$work/m-load-dtype-f64.vadd_f32.$backend"
-    [ "$(cat "$out.rc")" != 0 ] || { cat "$out" >&2; fail "load-dtype-f64 mutant stayed green on $backend: vadd_f32 still renders (exit 0)"; }
+    out="$work/m-load-dtype-f64.batched_matmul_f16.$backend"
+    [ "$(cat "$out.rc")" != 0 ] || { cat "$out" >&2; fail "load-dtype-f64 mutant stayed green on $backend: batched_matmul_f16 still renders (exit 0)"; }
     grep -Fq "$refusal" "$out.err" ||
-      { cat "$out.err" >&2; fail "load-dtype-f64: vadd_f32 failed on $backend for something other than the dtype refusal"; }
-    [ ! -s "$out" ] || fail "load-dtype-f64: vadd_f32 printed text before being refused on $backend"
-    ctrl="$work/m-load-dtype-f64.vadd.$backend"
-    if [ "$(cat "$ctrl.rc")" != 0 ] || ! cmp -s "$here/vadd.mlir" "$ctrl"; then
+      { cat "$out.err" >&2; fail "load-dtype-f64: batched_matmul_f16 failed on $backend for something other than the dtype refusal"; }
+    [ ! -s "$out" ] || fail "load-dtype-f64: batched_matmul_f16 printed text before being refused on $backend"
+    ctrl="$work/m-load-dtype-f64.batched_matmul.$backend"
+    if [ "$(cat "$ctrl.rc")" != 0 ] || ! cmp -s "$here/batched_matmul.mlir" "$ctrl"; then
       cat "$ctrl.err" >&2
-      fail "load-dtype-f64: vadd (all f64) should be untouched on $backend"
+      fail "load-dtype-f64: batched_matmul (all f64) should be untouched on $backend"
     fi
   done
-  echo "PASS  mutant: load-dtype-f64 (vadd_f32 refused at trace time on both backends; vadd untouched)"
+  echo "PASS  mutant: load-dtype-f64 (batched_matmul_f16 refused at trace time on both backends; batched_matmul untouched)"
 fi
 
 # The length varint of the Func section: it starts at byte 13, after the
@@ -1177,15 +1181,17 @@ if run_item make-token-as-iota; then
 fi
 
 # 4. The writer's store still sets the token-present flag but no longer
-#    writes the operand. vadd has one store and its token index is one
-#    varint byte, so the function section is one byte short (the file is
-#    not: the constant section's alignment padding grows by one); the reader
-#    takes the next byte, `return`'s opcode 0x5C, for the token's value index
-#    and refuses it: 92 is past the 27 values (3 parameters, 24 results).
+#    writes the operand. batch_norm has one pointer store and its token
+#    index is one varint byte, so the function section is one byte short
+#    (the file is not: the constant section's alignment padding grows by
+#    one); the reader takes the next byte, `return`'s opcode 0x5C, for the
+#    token's value index and refuses it: 92 is past the 55 values (4
+#    parameters, 51 results). Until tileir 0.8.0 this was vadd, whose
+#    output is a cell written by `store_view_tko` since then.
 if run_item store-token-unwritten; then
   mutant_project store-token-unwritten bytecode.dawn
-  writer_mutant_checks store-token-unwritten vadd func-one-short \
-    "operand index 92 out of bounds (size=27) for token segment"
+  writer_mutant_checks store-token-unwritten batch_norm func-one-short \
+    "operand index 92 out of bounds (size=55) for token segment"
 fi
 
 # 5. The writer's type table gives f64 the i64 tag. Same length, the type
@@ -1205,18 +1211,18 @@ fi
 if run_item loop-token-not-carried; then
   mutant_project loop-token-not-carried prog.dawn
   refused_mutant_checks loop-token-not-carried sum \
-    'tileir: `store token` refers to handle 17, which a loop body defined and which is not visible after the loop'
+    'tileir: `store token` refers to handle 15, which a loop body defined and which is not visible after the loop'
 fi
 
 # 7. The handler pops the region stack the wrong way round: the operations
 #    the loop body issued stay in the enclosing region and the ones issued
 #    before the loop become the body. sum's first operation is then the
-#    body's own index arithmetic, over the induction variable, which
-#    nothing outside the loop has defined.
+#    body's own read through x's cell view, which the loop made before it
+#    and which therefore no earlier operation outside it has defined.
 if run_item region-stack-pop; then
   mutant_project region-stack-pop prog.dawn
   refused_mutant_checks region-stack-pop sum \
-    'tileir: `index mul lhs` refers to handle 11, which no earlier operation defined'
+    'tileir: `load_view view` refers to handle 5, which no earlier operation defined'
 fi
 
 # 8. The writer forgets the reader's rule that a block's value indices roll
@@ -1224,13 +1230,13 @@ fi
 #    indices after its body instead of the body's first two, and everything
 #    after the loop shifts with them; the file is the same length (every
 #    index is one varint byte either way), the text is untouched, and the
-#    reader stops at the first operand past the values it has: 39 where it
-#    knows 25 (2 parameters, 20 values before the loop, its 2 results and
-#    the constant after it).
+#    reader stops at the first operand past the values it has: 24 where it
+#    knows 22 (tileir 0.8.0's sum, which reads its chunks through a cell
+#    view and stores through one; 13.4.92 measured).
 if run_item for-results-not-rolled-back; then
   mutant_project for-results-not-rolled-back bytecode.dawn
   writer_mutant_checks for-results-not-rolled-back sum same-size \
-    "operand index 39 out of bounds (size=25) for operand 1"
+    "operand index 24 out of bounds (size=22) for operand 0"
 fi
 
 # 9. The renderer forgets addf's rounding attribute. Every kernel with an
@@ -1269,10 +1275,12 @@ fi
 #     token and then reads the rest of the function one operand out of step.
 #     The text is untouched (the renderer prints the operand it was given,
 #     not the flag) and the file is the same length: a flag bit is a flag
-#     bit either way. Only layer 1 sees it.
+#     bit either way. Only layer 1 sees it. The kernel is geglu, whose two
+#     halves are masked pointer loads with a padding value; until tileir
+#     0.8.0 it was vadd_tail, whose tail is a cell's extent since then.
 if run_item load-pad-flag-as-token; then
   mutant_project load-pad-flag-as-token bytecode.dawn
-  writer_mutant_checks load-pad-flag-as-token vadd_tail same-size \
+  writer_mutant_checks load-pad-flag-as-token geglu same-size \
     "failed to get result type 0 for"
 fi
 
@@ -1347,20 +1355,22 @@ fi
 #     tileiras loses the stream one operation later and says so in four
 #     lines, of which the first is the informative one:
 #
-#       error: error at offset 112: failed to get result type 0 for DivIOp
-#       error: error at offset 751: failed to parse function body for
+#       error: error at offset 112: failed to get result type 0 for DivFOp
+#       error: error at offset 755: failed to parse function body for
 #         function 'trig_sweep'
-#       error: error at offset 751: failed to create function from bytecode
+#       error: error at offset 755: failed to create function from bytecode
 #       error: input does not correspond to Tile IR bytecode
 #
-#     There is no `divi` in this kernel: `DivIOp` is what the byte after the
-#     extra one decodes to once the reader is one place out of step, which
+#     There is no `divf` in this kernel: `DivFOp` is what the byte after the
+#     extra one decodes to once the reader is one place out of step (it was
+#     `DivIOp` until tileir 0.8.0 moved the constants to where they are
+#     used, which moved the byte after `sin`), which
 #     is the same shape as the measurement `exp`'s doc comment records
 #     (`failed to get result type 0 for CmpIOp`).
 if run_item trig-extra-flags; then
   mutant_project trig-extra-flags bytecode.dawn
   writer_mutant_checks trig-extra-flags trig_sweep func-one-long \
-    "error at offset 112: failed to get result type 0 for DivIOp"
+    "error at offset 112: failed to get result type 0 for DivFOp"
 fi
 
 # 17. The writer says a `join_tokens` has one operand more than it wrote.
@@ -1505,17 +1515,19 @@ fi
 if run_item loop-carried-not-rolled-back; then
   mutant_project loop-carried-not-rolled-back bytecode.dawn
   writer_mutant_checks loop-carried-not-rolled-back loop_count same-size \
-    "operand index 37 out of bounds (size=19) for operand 0"
+    "operand index 33 out of bounds (size=15) for operand 0"
 fi
 
 # 28. `break` with no operands. The loop's results are the values the break
 #     hands back, so dropping them is not a stream error but a TYPE error,
-#     and the verifier prints both sides. The file does not shrink: the two
-#     operand indices come out of the Func section and the alignment
-#     padding after it takes the same two bytes back.
+#     and the verifier prints both sides. The three operand indices (two
+#     tiles and the token) come out of the Func section. Until tileir 0.8.0
+#     the alignment padding after it took them back and the file kept its
+#     length; since the batch's PR-3 loop_count's sections fall so that the
+#     file loses eight bytes, so the claim is held on the Func section.
 if run_item break-values-missing; then
   mutant_project break-values-missing bytecode.dawn
-  writer_mutant_checks break-values-missing loop_count same-size \
+  writer_mutant_checks break-values-missing loop_count func-three-short \
     "'cuda_tile.break' op operand types must correspond to the parent loop result types"
 fi
 
@@ -1535,7 +1547,7 @@ fi
 if run_item overflow-attr-not-written; then
   mutant_project overflow-attr-not-written bytecode.dawn
   writer_mutant_checks overflow-attr-not-written attr_overflow func-three-short \
-    "error at offset 72: invalid integer value for enum type: 18"
+    "error at offset 97: invalid integer value for enum type: 22"
 fi
 
 # 30. The writer swaps the memory ordering and the memory scope of the
@@ -1553,7 +1565,7 @@ fi
 if run_item atomic-memory-attrs-swapped; then
   mutant_project atomic-memory-attrs-swapped bytecode.dawn
   writer_mutant_checks atomic-memory-attrs-swapped attr_memsem same-size \
-    "error at offset 109: invalid integer value for enum type: 3"
+    "error at offset 123: invalid integer value for enum type: 3"
 fi
 
 # 31. The writer gives the float atomic mode the integer one's enum value.
@@ -1588,11 +1600,13 @@ fi
 #     store-token-unwritten's twin one operand group over: the flags word
 #     says the token is carried, the args are written with their own count,
 #     and then nothing follows. The reader takes the next byte of the
-#     stream for the token's value index.
+#     stream for the token's value index. Since tileir 0.8.0 13.4.92
+#     reports the first index it cannot place as the next instruction's
+#     operand 1 rather than as the token segment.
 if run_item print-tko-token-unwritten; then
   mutant_project print-tko-token-unwritten bytecode.dawn
   writer_mutant_checks print-tko-token-unwritten print_tile func-one-short \
-    "operand index 91 out of bounds (size=19) for token segment, element 0"
+    "operand index 67 out of bounds (size=14) for operand 1"
 fi
 
 # 34. `div_by`'s tag given to `same_elements`. One byte for one, so the file
@@ -1606,21 +1620,22 @@ fi
 if run_item assume-divby-tag-as-same-elements; then
   mutant_project assume-divby-tag-as-same-elements bytecode.dawn
   writer_mutant_checks assume-divby-tag-as-same-elements assume_divby same-size \
-    "error at offset 72: failed to read values data"
+    "error at offset 90: failed to read values data"
 fi
 
 # 35. `same_elements`'s values laid down four bytes wide instead of eight.
 #     A `DenseI64ArrayAttr` is the same `writeLEVarSize` shape as
 #     `permute`'s `DenseI32ArrayAttr` one element WIDER, and nothing but
 #     the width says so: the count is written the same way and the reader
-#     takes it on trust. The Func section loses four bytes and the
-#     alignment padding after it takes them back, so the FILE is the same
-#     length; what the reader then reads for the operand is four bytes of
-#     the next instruction.
+#     takes it on trust. The Func section loses four bytes; until tileir
+#     0.8.0 the alignment padding after it took them back and the file kept
+#     its length, and since the batch's PR-3 assume_same's sections fall so
+#     that the file is eight bytes shorter. What the reader then reads for
+#     the operand is four bytes of the next instruction.
 if run_item assume-same-elements-payload-four-bytes; then
   mutant_project assume-same-elements-payload-four-bytes bytecode.dawn
-  writer_mutant_checks assume-same-elements-payload-four-bytes assume_same same-size \
-    "operand index 78 out of bounds (size=17) for operand 0"
+  writer_mutant_checks assume-same-elements-payload-four-bytes assume_same file-shorter \
+    "operand index 78 out of bounds (size=16) for operand 0"
 fi
 
 # 36. `bounded`'s two bounds written the other way round. The presence byte
@@ -1851,7 +1866,7 @@ fi
 if run_item hint-entry-flag-dropped; then
   mutant_project hint-entry-flag-dropped bytecode.dawn
   writer_mutant_checks hint-entry-flag-dropped hint_entry same-size \
-    "operand index 10 out of bounds (size=4) for operand 0"
+    "error at offset 11: failed to get result type 3 for BreakOp"
 fi
 
 # 44. `exp` stops writing the `rounding_mode` it must carry from 13.3 on.
@@ -1934,15 +1949,16 @@ fi
 # 49. `mmaf_scaled` stops writing its last operand. It takes five where
 #     `mmaf` takes three, and the two extra ones are the scales; without
 #     the last the reader takes the NEXT instruction's first varint for it
-#     and hands the operation a tile of the wrong element type, which the
-#     verifier names. Nothing is variadic here, so no count would have
-#     caught it: the arity is the operation's identity and nothing in the
-#     stream repeats it. The scale types are the verifier's list, which
-#     13.4.92 extended with `fnv8E5M3FNU`, so the pin is the 13.4.92 text.
+#     and the operation is handed whatever that varint names. Until tileir
+#     0.8.0 it named a tile of the wrong element type and the verifier said
+#     so; since the batch's PR-3 it is past every value the reader has, so
+#     the reader stops first and names the operand. Nothing is variadic
+#     here, so no count would have caught it: the arity is the operation's
+#     identity and nothing in the stream repeats it.
 if run_item mmaf-scaled-scale-operand-missing; then
   mutant_project mmaf-scaled-scale-operand-missing bytecode.dawn
   writer_mutant_checks mmaf-scaled-scale-operand-missing mmaf_scaled_e4m3 func-one-short \
-    "'cuda_tile.mmaf_scaled' op operand #4 must be mmaf_scaled scale tile type of f8E4M3FN or f8E8M0FNU or fnv8E5M3FNU values, but got '!cuda_tile.tile<32x2xi32>'"
+    "operand index 42 out of bounds (size=33) for operand 4"
 fi
 
 # 50. `mmaf_scaled` writes a flags varint. This is the sibling comparison
@@ -1955,11 +1971,12 @@ fi
 #     would put one there, and the reader would take it for the first
 #     operand and run one place out of step for the rest of the body.
 #     Same file length, Func one byte longer, and the same kind of
-#     evidence as trig-extra-flags.
+#     evidence as trig-extra-flags (since tileir 0.8.0 the step lands on a
+#     byte that is no opcode at all, and the reader says so).
 if run_item mmaf-scaled-writes-a-flags-word; then
   mutant_project mmaf-scaled-writes-a-flags-word bytecode.dawn
   writer_mutant_checks mmaf-scaled-writes-a-flags-word mmaf_scaled_e4m3 func-one-long \
-    "operand index 91 out of bounds (size=77) for operand 2"
+    "error at offset 137: unknown or unimplemented opcode: 30"
 fi
 
 # 51. The writer's type table gives `i4` the `i8` tag, which is the only
@@ -2011,14 +2028,16 @@ fi
 #     reads the unpacked nibbles at the shape the body declared is refused
 #     before anything is rendered (docs/tile-backend-design.md 6.21). The
 #     layer moved from 1 to 0; the claim, that the result shape carries the
-#     ratio, is the same one.
+#     ratio, is the same one. Since tileir 0.8.0 the conversions take their
+#     shape from their operand, so the first refusal is the `select` that
+#     meets the 256-lane `odd` mask with tiles of the unhalved count.
 #
 #     The anchor is in prog.dawn because that is where a recorded `Repack`
 #     gets its second shape; lower.dawn and the writer only carry it.
 if run_item pack-result-shape-unhalved; then
   mutant_project pack-result-shape-unhalved prog.dawn
   refused_mutant_checks pack-result-shape-unhalved dtype_i4 \
-    'tileir: kernel `dtype_i4`: op #10 `extis`: operand is tile<128xi4>, declared tile<256xi4>'
+    'tileir: kernel `dtype_i4`: op #52 `select`: condition is tile<256xi1>, declared tile<32xi1>'
 fi
 
 # 55. The writer gives a `tensor_view` the POINTER tag. Both are type-table
@@ -2196,7 +2215,7 @@ fi
 if run_item ftoi-flags-unwritten; then
   mutant_project ftoi-flags-unwritten bytecode.dawn
   writer_mutant_checks ftoi-flags-unwritten int_ops func-one-short \
-    "error at offset 160: invalid integer value for enum type: 6"
+    "error at offset 146: invalid integer value for enum type: 6"
 fi
 
 # 68. The view load and store stop writing `inbounds`, the DenseBoolArrayAttr

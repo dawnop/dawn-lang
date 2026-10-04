@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 39bd3fb898e9dd89 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ a4e4570af1b29c44 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -52,7 +52,7 @@ Dawn 里的 GPU kernel 是一个带 `!Dev` 效果的普通函数。运行一次�
 
 ## kernel-kind
 
-一个循环，里面两次扫描
+一个循环，里面两次归约
 
 ## kernel-left
 
@@ -68,7 +68,7 @@ Dawn 源码
 
 ## kernel-note
 
-点一个调用名，会标出它的整段源码和它写出的 Tile IR。循环或扫描只标出自己的头、终结和括号，体内调用写出的行用更淡的边线标出。点一行 Tile IR，可以找到写出它的调用。
+点一个调用名，会标出它的整段源码和它写出的 Tile IR。循环只标出自己的头、终结和括号，体内调用写出的行用更淡的边线标出。点一行 Tile IR，可以找到写出它的调用。
 
 ## fact-calls
 

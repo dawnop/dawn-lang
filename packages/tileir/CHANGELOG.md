@@ -7,6 +7,59 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.8.0 (2026-10-05)
+
+Breaking: the one-time migration of the batch's PR-3 (§6.26). A kernel no
+longer states a shape or a format it can read off its operands, `Scalar[D]`
+is `Tile[D]` at rank 0, and an `Out` is written only through its cells.
+
+- Element-wise operations, comparisons, conversions, selects, `mmaf` /
+  `mmai` / `mmaf_scaled`, `extract`, `insert`, `cat`, `permute_tile`, the
+  pointer ladder, the views and the debugging operations drop their leading
+  format and shape arguments (C3). A conversion takes the tile first and the
+  target format second.
+- `Scalar[D]` is gone: a rank-0 `Tile[D]` is what a constant, a reduction of
+  a rank-1 tile and an index read as a tile are. A rank-0 operand widens on
+  its own where it meets a wider one; no other widening is implicit
+  (`broadcast`). A place that needs rank 0 (a condition, a loop bound, a
+  cell index, `d_return_if`) refuses a wider tile (C3′).
+- Constants take no shape: `f_const(d, v)`, `i_const(v)` and the rest record
+  nothing until they are used, and are materialised at the shape of the use.
+- `store_cell(o, t)` and `store_sub(o, at, t)` are the only writes an `Out`
+  takes; a `store`, `scatter`, atomic, `store_ptrs` or `store_view` into one
+  is refused while recording, and so is a write through untraceable
+  pointers in a kernel that has an `In` or an `Out` (D-7). `zeros(p)` and
+  `fill(p, v)` make a cell-shaped tile.
+- `d_range(lower, upper, init, body)` is `d_for` over host bounds; a loop's
+  carried value and an `if`'s two answers must keep their format and shape.
+  `retile(p, extent, tile)` is a second, read-only view of a parameter (C4).
+- `Dev` gains `t_sub_view` and `t_retile`.
+
+| 0.7.0 | 0.8.0 |
+|---|---|
+| `addf(F64, s, a, b)`, `sub`, `mul`, `exp(F64, s, a)`, ... | `addf(a, b)`, `sub(a, b)`, `exp(a)`, ... |
+| `eq(F64, s, a, b)`, `eq_i(s, a, b)`, `add_i(s, a, b)` | `eq(a, b)`, `eq_i(a, b)`, `add_i(a, b)` |
+| `addi(I16, s, a, b)`, `select(F64, s, c, a, b)` | `addi(a, b)`, `select(c, a, b)` |
+| `int_to_float(I32, F64, s, t)`, `float_to_int(..)`, `float_to_float(..)` | `int_to_float(t, F64)`, `float_to_int(t, I32)`, `float_to_float(t, F32)` |
+| `mmaf(F64, m, k, n, a, b, c)`, `mmai(m, k, n, a, b, c)`, `mmaf_scaled(..)` | `mmaf(a, b, c)`, `mmai(a, b, c)`, `mmaf_scaled(a, b, c, sa, sb)` |
+| `f_const(F64, s, v)`, `consti(I16, s, v)`, `i_const(s, v)` | `f_const(F64, v)`, `consti(I16, v)`, `i_const(v)` |
+| `spread(F64, s, x)` | `broadcast(x, s)` |
+| `s_addf`, `s_mulf`, `s_maxf`, `s_minf`, `s_fma`, `s_eq`, `s_gt`, `s_select`, `s_const` | `addf`, `mul`, `maxf`, `minf`, `fma`, `eq`, `gt`, `select`, `f_const` |
+| `s_addi`, `s_maxi`, `s_le_i`, `s_consti` | `add_i`, `max_i`, `le_i`, `i_const` |
+| `idx_as_scalar(i)` | `idx_as_tile(i)` |
+| `d_reduce(F64, s, t, id, f)`, `d_reduce_dim(F64, s, k, t, id, f)` | `d_reduce(t, id, f)`, `d_reduce(t, id, f, dim: k)` |
+| `d_reduce_i`, `d_reduce_dim_i`, `d_scan_i` | `d_reduce(t, to_float(id), f)`, `d_scan(..)` |
+| `d_scan(F64, s, dim, rev, t, id, f)`, `d_scan2(..)` | `d_scan(t, id, f, dim: k, reverse: r)`, `d_scan2(..)` |
+| `extract(F64, s, to, t, i)`, `insert(F64, sub, whole, s, t, i)`, `cat(F64, dim, l, r, a, b)`, `permute_tile(F64, s, perm, t)` | `extract(t, to, i)`, `insert(s, t, i)`, `cat(a, b, dim)`, `permute_tile(t, perm)` |
+| `load_strided(p, b, s, st)`, `load_masked(p, b, s, m, z)`, `load_strided_masked`, `load_hinted` | `load(p, b, s, strides: Some(st), mask: Some(m), pad: Some(z), hints: h)` |
+| `store(p, b, s, t)`, `store_strided`, `store_masked`, `store_strided_masked`, `store_hinted` | `store(p, b, t, strides:, mask:, hints:)` |
+| `gather_masked(p, i, s, m, z)`, `scatter_masked`, `atomic_rmw_masked`, `atomic_add_masked`, `atomic_cas_masked` | `gather(p, i, mask: Some(m), pad: Some(z))`, `scatter(.., mask:)`, `atomic_rmw(.., mask:)`, `atomic_add(.., mask:)`, `atomic_cas(.., mask:)` |
+| `ptr_offset(F64, s, ps, o)`, `load_ptrs(F64, s, ps)`, ... | `ptr_offset(ps, o)`, `load_ptrs(ps)`, ... |
+| `tensor_view(F64, p, ..)`, `load_view(F64, v, ix)`, ... | `tensor_view(p, ..)`, `load_view(v, ix)`, ... |
+| `d_assert(s, c, msg)`, `d_print(F64, f, xs)`, `assume_div_by(F64, s, n, t)`, ... | `d_assert(c, msg)`, `d_print(f, xs)`, `assume_div_by(t, n)`, ... |
+| `store(o, b, s, t)` into an `Out` | `store_cell(o, t)` or `store_sub(o, at, t)` |
+| `d_for(idx_const(0), idx_const(n), idx_const(1), init, f)` | `d_range(0, n, init, f)` (the old spelling still records the same) |
+
 ## 0.7.0 (2026-10-04)
 
 - `load` and `store` take the pointer path's options as defaulted named
