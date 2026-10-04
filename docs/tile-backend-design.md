@@ -4921,6 +4921,153 @@ sm_86 台账在 `507d516e` 上一次通过（44 min 38 s），单独提交（reb
 - `inbounds` 写 true：实测无收益，且是不受检的承诺（十三）。
 - 降低替 kernel 定 `occupancy`：它是逐 kernel 的调优，不是写法的属性（十四）。
 
+### 6.26 批的 PR-3：一次迁移（C3、C3′、D-4 扩大、C4、K7–K18、D-7）
+
+任务单 `tile-batch-pr3-20261005.md`（agent-handoff），裁决见 `ruling-cutile-rs-borrow-20261003.md` 修订二与补注。
+这是批里唯一的破坏性 PR：`tileir` 0.7.0 → 0.8.0，`kernels.dawn`、`scripts/tile-gpu-diff`、`gpu_fake` 示例、
+站点 GPU 页与它的调用图、本节，全部只迁一次。迁移表在包的 `CHANGELOG.md`，README 只写今天的面。
+
+**一、新面。**
+
+- **C3：能从操作数读出的形状一律删。** 逐元素、比较、转换、`select`、`mmaf` / `mmai` / `mmaf_scaled`、`extract` /
+  `insert` / `cat` / `permute_tile`、指针梯子、视图、调试操作都不再收格式与形状；格式与形状由记录 handler 从句柄表
+  （6.22 的 `Held`）读。转换改成「tile 在前、目标格式在后」：`int_to_float(t, F64)`。`mmaf` 的 m、k、n 从两个因子读，
+  K 不一致照旧按 6.22 拒。
+- **C3′：`Scalar[D]` 并入 `Tile[D]` 的 0 秩。** 只有 0 秩隐式加宽（逐元素操作遇到更宽的操作数时），其它一切加宽都写
+  `broadcast`。需要 0 秩的地方（条件、循环界、格子下标、`d_return_if`、`d_if` 的条件）拒更宽的（n9）。`spread` 与
+  `s_*` 十四个函数退场：`s_addf` 就是 `addf`，`spread(d, s, x)` 就是 `broadcast(x, s)`。
+- **常量不收形状。** `f_const(d, v)`、`i_const(v)` 等在调用处**什么也不记**，只在句柄表里挂一条待定（`Pend`）；
+  第一次被用到时按那次使用要的形状物化成一条 `constant`，同一常量同一形状在可见范围内只物化一次（备忘键
+  `c<h>:<shape>`）。所以 `mul(t, f_const(F64, 0.5))` 记的是一条 `constant <f64: 0.5> : tile<128xf64>`，不是 0 秩常量再
+  `reshape` + `broadcast`；它出现在用它的操作前面，而不是写下它的那一行（golden 的一类字节变化就是这个，见四）。
+  没被用到的常量不出现在程序里。区域内用到的常量物化在区域内（规约体里是 0 秩），循环之后再用会重新物化。
+- **D-4 扩大。** `zeros(o)` / `fill(o, v)` 是格子形状的 tile；`store_cell(o, t)` 去掉 `d`；`store_sub(o, at, t)` 写本块
+  格子的一片（`at` 是宿主数，片号 < 格子 / 片形），格子永远出不去。0 秩的 `t` 写满格子。
+- **C4。** `reduce_sum` / `reduce_max` / `reduce_min` / `scan_sum` 不收 `d` 与形状，`dim:` 默认最后一维，`keepdims:`
+  保留长 1 的那一维（flash_attn 的行统计就是 `[BQ, BK]` → `[BQ, 1]` → `broadcast` 回 `[BQ, BK]`）。`d_range(lower,
+  upper, init, body)` 是宿主界的 `d_for`，记录与 `d_for(idx_const(..), ..)` 相同；循环携带值与 `d_if` 的两支必须保持
+  格式与形状（从 `zeros` 或 `broadcast` 起步，不能从 0 秩常量起步，那是 `` `d_range`: carried value 0 is tile<f64>
+  and comes back tile<8xf64> ``）。逃生口 `retile(p, extent, tile)` 给一个参数第二种切法，只读。
+- **K7–K18。** `load_strided` / `load_masked` / `load_strided_masked` / `load_hinted` 与四个 store、`*_masked` 的
+  gather / scatter / 原子、`d_reduce_dim`、`d_reduce_i`、`d_scan_i`、`idx_as_scalar` 删除；`store(p, base, t, ..)`
+  的形状从 `t` 读。
+- **D-7。** `Out` 只收 `store_cell` / `store_sub`：`store`、`scatter`、原子、`store_ptrs`、`store_view` 写进 `Out` 在
+  记录期拒；经不可追踪指针（`int_to_ptr`、全局、`alloca`）的写，只要 kernel 有 `In` 或 `Out` 参数就拒。
+- **为站点加的一处。** `trace_calls(.., markers: [erase(In(..)), ..])`：带角色与格子的调用树记录，`erase` 把不同
+  格式的标记放进一个列表。站点的 flash_attn 调用图（`site/gpu-map`）要它，因为 flash_attn 迁移后读的是格子。
+- `Dev` 新增 `t_sub_view`、`t_retile`。
+
+**二、样本先行（预检报告 §4.3）。** 先迁 10 个样本 kernel（vadd、softmax、matmul、layer_norm、matmul_f16、
+flash_attn、loop_until、token_embed、ssm_scan、histogram）到 scratch，三层门禁都过了才批量迁：
+
+- 第 1 层：10 个全部被 `tileiras` 13.4.92（sm_86）接受。
+- 第 2 层：九个族（reduced、twod、wide、gathered、scanned、atomic、loops、seq_order、hint_order）与 vadd_diff 全 PASS；
+  flash_attn 与三步注意力的差 5.9e-12，在容差档内。
+- 第 3 层：7 个具名变异体按名变红（softmax-no-max-subtract、mma-acc-not-carried、reduce-identity-wrong、
+  gather-mask-dropped、atomic-as-plain-store，加样本自带的 sub-piece-ignored、flash-rescale-dropped）。
+
+**性能样本。** 方法同 6.25 十三（ctypes 直调 driver、cuEvent、每样本一批平均到 ≥ 20 ms、交错、31 样本、先比输出字节；
+判据：中位数慢 > 5% 且 IQR 不重叠为「慢」）。f16 matmul 4096³，「今天」是 main 上 0.7.0 的指针路写法（冻结副本），
+「迁移后」是格子读写（`load_at` + `zeros` + `store_cell`）。两轮 `r1` / `r2`，各版输出与第一版逐字节相同：
+
+| 形状 | 版本 | 中位数 r1 / r2（µs） | 相对今天 | 共享内存 | 每 SM 块数 | 判定 |
+|---|---|---|---|---|---|---|
+| 64×64×32 | 今天 | 3383.0 / 3387.2 | | | | |
+| | 迁移后 | 2487.1 / 2462.4 | −26.5% / −27.3% | | | 不慢 |
+| 128×128×32 | 今天 | 2180.5 / 2184.4 | | 49184 B | 2 | |
+| | 迁移后 | 3172.6 / 3172.4 | **+45.5% / +45.2%** | 65568 B | 1 | **慢** |
+| | 迁移后 + `occupancy = 2` | 1795.1 / 1806.7 | −17.7% / −17.3% | 49184 B | 2 | 不慢 |
+| | 今天 + `occupancy = 2`（参照） | 2152.0 / 2159.5 | −1.3% / −1.1% | | | |
+| 32×32×32 | 今天 / 迁移后 | 8467.5 / 8797.1 | +3.9% | | | 不慢（< 5%） |
+
+（32 级只跑了一轮，作对照。）128 级的慢就是 6.25 十三第 1 条：带对齐假设的写让 `tileiras` 给这个 kernel 多一级
+cp.async 流水，65568 字节共享内存、每 SM 1 块；入口 hint `occupancy = 2` 让它回到 49184 字节、2 块，而且比今天的
+指针写还快 17%（读也走了格子视图）。
+
+**占用率裁决：** sm_86 上 128 级的 f16 张量核 kernel 一律带 `hints: [for_arch("sm_86", [hint_occupancy(2)])]`；
+写进 README「Occupancy」一节。`kernels.dawn` 里没有 128 级的 f16 kernel（`matmul_f16` 是 32 级），所以没有 golden
+kernel 因此加 hint；降低不替 kernel 定这件事（6.25 十四），理由不变。
+
+**三、迁移计数与 `Shared` 的数目。** `kernels.dawn` 的 192 个 kernel 全部改用 `trace1`…`trace5` 加标记，只有
+三个参数多于五个的留在 `trace_kernel`（`ssm_scan`、`view_padding`、`view_atomic`）。结果：
+
+| 类 | kernel 数 |
+|---|---|
+| 只写 `Out` 格子（`store_cell` / `store_sub`） | 136 |
+| 有 `Shared` 输出（其中 `cas_swap`、`token_join` 同时有 `Out`） | 55 |
+| `trace_kernel`（全部参数 `Shared`） | 3 |
+
+（136 + 53 + 3 = 192。）调用计数：`load_cell` 135、`load_at` 52、`store_cell` 121、`store_sub` 54、`zeros` 20、
+`d_range` 24、`broadcast` 31、`reduce_sum` 33、`reduce_max` 6。
+
+调研报告（`research-tile-disjoint-writes-report-20261003.md` §3.1）估的是 181 个落进 A0–A3、10 个要逃生口；实迁是
+55 个。差额不是调研算错了写集合，而是写集合之外的几堵墙，调研没有数：
+
+| 墙 | 例 | 数 |
+|---|---|---|
+| 真逃生口（原子、数据决定的 scatter、两区域、网格步进、经全局 / `alloca` 指针写、读别的格子的原地） | histogram、cas_swap、scatter_perm、compact、sort_rank、merge_rank、reverse、grid_stride、attr_memsem、attr_addf、attr_xchg、view_atomic_bf16、global_scratch、alloca_scratch、alloca_two、apsp_step、ols_elim | 17 |
+| 秩墙：表面没有 `reshape`，二维的积写不进 `[1, T, T]` 的格子，一维的段写不进 `[K, T]` 的格子 | batched_matmul ×2、mha_scores、xattn_scores、dtype_* 八个、pack_roundtrip、trig_sweep、conv3d | 15 |
+| `Out` 的维 k 必须跟网格轴 k（C2），或格子下标是两个网格轴的组合（GQA 的 `qh = bkv × 组数 + bg`） | mha / xattn / gpt / gqa 的 context、gpt_scores、gqa_scores、llama_scores、llama_qkv、llama_rope、transpose | 10 |
+| 每块的段数不是 2 的幂（tile 的维必须是 2 的幂） | attr_round（6）、attr_overflow（3）、attr_ftof（11）、shape_ops（192 个元素） | 4 |
+| 带 mask 的部分写、步长写 | attr_sat、view_tensor_shape、interleave、transpose_tail、batch_norm | 5 |
+| 写上带 hint（`store_cell` 不收 hints） | hint_memory | 1 |
+| 写侧的视图本身就是测试对象（置换步长） | view_transpose、view_dyn_transpose | 2 |
+| `d_fork2` 两支写同一个 `Out` 的两片，记录期证明不了不相交 | token_join | 1 |
+
+（`cas_swap` 的 `Shared` 是原子那一个参数，第四个缓冲是 `Out`，算在第一行。）秩墙一堵就是 15 个：一个公开的
+`reshape` 能把它们大多拆掉，但那是新的语言面，不在本批裁决里（见「不做的」）。
+
+迁移里实测出的几处语义：
+
+- **格子的 extent 就是边界。** 边界 kernel（`vadd_tail` 等）不再构造 mask，尾部 lane 由视图的 extent 挡住：读到
+  `pad`、写不出去。`token_embed` 的输出格子必须是 `DYN_DIM`：网格是 13 块 × 8，最后一块有 4 行在 `TOK_N` 之外，
+  旧核不带 mask 照写，`TOK_N` 作 extent 会让这 4 行停在哨兵上（第 2 层实测 64 个 lane 不同，改 `DYN_DIM` 后通过）。
+- **要整块读的向量**（layer_norm 的 gamma、kmeans 的中心）标 `along: [FREE_AXIS]` 再 `load_at(p, [0])`；标成一格
+  而跟网格轴 0 走，网格大于 1 时第二块的下标越界，读到的是 padding。
+- **不同网格复用的 kernel** 用 `DYN_DIM`：`attn_softmax` 在七个序列里以七种行数启动，`vadd` 在 GPT / Llama 序列里
+  按向量长度启动。
+
+**四、golden 的一次重录、字节变化分类与变异体。** `scripts/tile-golden/run.sh --record` 一次重录 192 个（175 个变、17 个
+不变），每个 trace 两次同一程序、JVM 与 native 一致、`tileiras` 13.4.92 sm_86 全部收下。按新旧 `.mlir` 的操作计数分：
+
+| 类 | 数 | 变了什么 |
+|---|---|---|
+| 格子视图 | 166 | 指针梯子（`iota`、`reshape`、`broadcast`、`offset`、`load_ptr_tko` / `store_ptr_tko`）换成 `make_tensor_view`、`make_partition_view`、`load_view_tko` / `store_view_tko`，每个参数前一条 `assume div_by<16>`；其中 view_conv2d、view_max_pool、view_pad_i32、view_stride_pad 读侧仍是显式视图，只有写换成 `Out` 格子 |
+| 操作不变、只换了位置 | 7 | 常量在第一次用到处物化（batch_norm、conv3d、gqa_context、grid_stride、merge_rank、transpose_tail、trig_sweep） |
+| 0 秩下标加宽 | 2 | gather 出的 0 秩下标遇到坐标 tile 时隐式加宽，多一条 `reshape` 一条 `broadcast`（apsp_step、ols_elim） |
+| 不变 | 17 | 只是换了拼写的 `Shared` / `trace_kernel` kernel |
+
+变异体（第 3 层）：`tile-golden` 的 269 个与 `tile-gpu-diff` 的全部，按名变红。没有一个是删掉的；改的是三种：
+
+- **换靶子**：它测的操作不在原 kernel 里了。drop-store-token、store-token-unwritten 从 vadd 换到 batch_norm（指针
+  写的列），load-dtype-f64 从 vadd_f32 / vadd 换到 batched_matmul_f16 / batched_matmul，load-pad-flag-as-token 从
+  vadd_tail 换到 geglu。
+- **换族与新增**：mask-all-true 的六个边界 kernel 已经没有 mask，它改在 strided 族上跑，十个 kernel 的字节全动，
+  设备上五个不同（transpose_tail、interleave、conv3d 经指针写、mask 是唯一的界；jacobi、gaussian_blur 用 mask 本身
+  选内点；其余五个越界读只落在 `Out` 格子不写的 lane 上，写由 extent 管住）。边界 kernel 的变异体改成新的
+  `cell-extent-rounded-up`：格子视图的静态 extent 向上取整到 tile 的倍数，六个全部写穿哨兵。
+  ladder-strides-reversed 从 1 个红变成 5 个红：conv2d、max_pool、jacobi、gaussian_blur 的写换成了格子视图，交换
+  只作用于读，「方 tile 上两次交换抵消」不再成立，只剩两个仍经指针写的 transpose_tail、conv3d 被方 tile 藏住。
+  num-tile-blocks-as-block-id 从 1 个红变成 6 个：`DYN_DIM` 的格子用 `get_num_tile_blocks` 定 extent。
+- **重测的消息**：写入器 / handler 的 16 个变异体，红的方式不变，`tileiras` 报的偏移、下标与操作名随字节变了，逐个
+  按新字节重测后写进 run.sh（例：for-results-not-rolled-back 由「39 越过 25」变成「24 越过 22」；break-values-missing
+  与 assume-same-elements-payload-four-bytes 的文件不再被对齐填充补回原长）。reduce-identity-wrong 的锚点从
+  `d_reduce` 移到具名求和的单位元（每个求和都是 `reduce_sum` 了），红集不变。
+
+**五、门禁。** 本机（sm_86、`tileiras` 13.4.92）：`dawn test packages/tileir`（198）、`packages/tileref`（29）、`site`
+（254）、`examples/projects/gpu_fake`（197）、`selfhost`（932）全过；`scripts/tile-golden/run.sh` 与
+`scripts/tile-gpu-diff/run.sh` 全量见本 PR 的报告与 PR-4 的台账行（台账在 PR-4 的提交里重录，因为 PR-4 改了 tile
+输入摘要的范围）。
+
+**不做的（理由）：**
+
+- 公开的 `reshape`：本批的秩墙（四）多数靠它能拆，但它是新的语言面，裁决的范围里没有；记下数目，留给下一次裁决。
+- 让 `store_sub` / `store_cell` 隐式补前导的长 1 维：那是 0 秩以外的隐式改秩，正是 C3′ 不许的。
+- 放宽「`Out` 的维 k 跟网格轴 k」：它是 C2 由 `Out` 推网格的前提，放宽要连 `Entry` 一起重想。
+- 给 `store_cell` 加 `hints:`：只有 `hint_memory` 要，它留在 `Shared`。
+- `a.sub(a)` 的错提示：#450（10-04 关）修好了「经模块别名可达」的情形（实测提示 `dev.sub(...)`）；只用选择性
+  引入（`use tileir/dev.{..}` 不含 `sub`）时仍提示 `use std/narrow`，那是 #450 验收没覆盖的另一情形，本批不碰编译器。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
