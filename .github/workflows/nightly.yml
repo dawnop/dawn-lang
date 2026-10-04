@@ -60,6 +60,64 @@ jobs:
       - name: N vs N-1 differential, with the backend-dawn corpus
         run: ./scripts/selfhost-prev-diff.sh --corpus site
 
+  # Core lint (docs/core-lint-design.md). `DAWN_CORE_LINT=1` holds lowered
+  # Core to the invariants lowering owes both backends; it is a debugging
+  # switch, off in every build, and the push path does not turn it on: the
+  # push total has no room (ruling on bug-rate, 2026-10-04), and the lint
+  # moves no output, so a day's delay hides nothing a push would have shown.
+  # Three steps: every restored historical defect is red in the check that
+  # owns it (run.py, one compiler build per lint mutant), no compile anywhere
+  # the tree compiles trips a rule (corpus.sh: the spike-native corpus on both
+  # backends, the compiler on both), and the compiler's own tests build and
+  # pass with the lint on. Measured locally 2026-10-04 on 16 cores: 127s,
+  # 260s at --jobs 4, 37s. A hosted runner has four, so the 45 minutes below
+  # are a runaway stop at about three times that.
+  core-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write     # the report when it goes red
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: every restored ABI defect is red in its owning check
+        id: contract
+        run: python3 scripts/core-lint-contract/run.py
+
+      - name: no lint violation anywhere the tree compiles
+        id: corpus
+        if: success() || failure()
+        run: ./scripts/core-lint-contract/corpus.sh --jobs 4
+
+      - name: the compiler's tests with the lint on
+        id: tests
+        if: success() || failure()
+        env:
+          DAWN_CORE_LINT: '1'
+        run: ./bin/dawn test selfhost
+
+      - name: report a red core lint as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly core-lint job is red: contract ${{ steps.contract.outcome }},"
+            echo "corpus ${{ steps.corpus.outcome }}, selfhost tests ${{ steps.tests.outcome }}."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "A violation is a lowering bug or a rule that is wrong; either way the"
+            echo "message names the rule (docs/core-lint-design.md lists them)."
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: core lint is red" issue.md
+
   # Ruling 9(b). check-gate-budgets.py in tree-policy holds every timeout to
   # its `# budget:` line, but whether the line is still the worst observation
   # needs the Actions API, and a push gate that reads the network goes red for

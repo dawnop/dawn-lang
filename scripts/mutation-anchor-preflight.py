@@ -26,6 +26,7 @@ ADAPTERS = {
     "bootstrap-input-manifest-contract": ("compiler-plan/src/source.dawn",),
     "builtin-type-contract": (".",),
     "classfile-verify": (".",),
+    "core-lint-contract": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
     "dict-owner-contract": (".",),
@@ -70,6 +71,7 @@ EXCLUSIONS = {
 # registry, so an entry cannot outlive the reading it vouches for.
 # anchor-guard.py counts these as preflighted.
 REGISTRY_READERS = {
+    "core-lint-contract/run.py": "core-lint-contract",
     "dict-owner-contract/shapes.py": "dict-owner-contract",
     "export-surface-contract/run.sh": "export-surface-contract",
     "incremental-semantics-contract/body-executor.py": "incremental-semantics-contract",

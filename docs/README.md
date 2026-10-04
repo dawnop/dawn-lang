@@ -89,6 +89,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。 |
 | [native-operand-snapshot-design.md](native-operand-snapshot-design.md) | current | #84 的操作数值快照：后续赋值不能改变前置值，借用引用沿用 RC 临时绑定清理。 |
 | [function-value-arity-design.md](function-value-arity-design.md) | current | #87 的函数值与效果操作参数上限；在检查期报告，保留宽参数直接调用。 |
+| [core-lint-design.md](core-lint-design.md) | current | Core/ABI 校验器两刀：刀 1 静态对账（intrinsic 三处分区含 comptime、JVM 运行时符号、FnN 上限从 `types.fn_interface_arities` 派生）；刀 2 `DAWN_CORE_LINT=1` 时 lowering 之后的 well-formedness（`ir/lint.dawn`，字典形状、证据行与槽、调用个数、配对、Never 规则下的绑定）。十二个历史缺陷的变异补丁各自变红，全语料与 selfhost 零误报；只在本机与 nightly 开。 |
 | [builtin-privileges-design.md](builtin-privileges-design.md) | current | 裁决 6：`Ord[Bool]`/`Ord[Bytes]`、`Unit` 进标量表、derive 表驱动、opaque 不继承 `Show`、`f[T](x)` 诊断。 |
 | [range-bound-order-design.md](range-bound-order-design.md) | current | SEM-18 的 range `for` 边界求值顺序、共享 Core 修复与 compiling mutant 契约。 |
 | [for-pattern-design.md](for-pattern-design.md) | current | SYN-13 的定稿：`for` 复用完整不可反驳 pattern、隐藏 loop locals、空 alternative 的 token recovery、限定 constructor completion、Core placement 与 28 条独立负控。 |

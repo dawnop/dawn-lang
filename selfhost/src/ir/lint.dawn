@@ -1,0 +1,733 @@
+# Core lint: the invariants lowering owes both backends, checked on the Core
+# itself instead of discovered as a crash in one of them.
+#
+# Why this exists. The largest family in the 2026-10 bug corpus is "the checker
+# accepted it, lowering or a backend could not honour it": a dictionary applied
+# against a singleton's private constructor (#13, #144), a lifted local fn
+# asking its pack for evidence nobody put there (#43, #54), a projection's slot
+# handed a bare record where its readers walk a pack (5f91c188). Each was a
+# well-formedness fact about lowered Core, and each surfaced as a
+# NoSuchMethodError, an IllegalAccessError or "effect evidence missing" at run
+# time, on one backend, in the user's program. The only IR-level checker in the
+# tree was the C side's RC consumption check (c/rc.dawn), and the bugs it
+# governs are the ones that surfaced as a compile-time panic naming a line.
+# This is the same move one stage earlier, for both backends at once
+# (docs/core-lint-design.md has the corpus mapping and the measurements).
+#
+# Why it is off by default. It is GHC's `-dcore-lint` and rustc's
+# `-Zvalidate-mir`: a debugging and testing switch, read from
+# `DAWN_CORE_LINT=1` by the drivers, never a user-facing diagnostic. A violation
+# is a compiler bug, so it panics with every violation found and the rule each
+# one broke, rather than reporting a source position the user cannot act on.
+#
+# Why each rule is shaped the way it is:
+#
+#   * every rule is a fact about Core alone plus the tables lowering already
+#     publishes (`lower.lowered_intrinsics`, the dictionary defs). Nothing here
+#     consults the checker's TAST, so a rule cannot be satisfied by the same
+#     mistake that produced the Core it reads;
+#   * a rule that would need a guess to decide (a callee that is not in the
+#     program, an evidence row with an effect variable in it) does not decide:
+#     it skips. False positives are what retire a lint, so every skip is a
+#     place a defect could hide, written down beside the rule rather than
+#     hidden in a heuristic;
+#   * `unbound-read` stops at the first statement that cannot fall through.
+#     Core keeps code after a call to a `Never` function (#93's
+#     `let y: Int = stop(); println(y)`), the backends do not emit it, and a
+#     read there is not a read anything performs.
+
+use std/io
+use std/io.{Env}
+use std/map
+use std/set
+use std/str
+use check/types.{
+  Adts, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_vars,
+  eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID
+}
+use ir/core.{
+  CModule, CFun, CExpr, CStmt, CCallee, CDictDef,
+  CInt, CLocal, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
+  CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit,
+  CReturn, CBreak, CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_values,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDirect, CDynamic, CMethod, CAnd, COr,
+  cex_ty
+}
+use check/tast.{TModule}
+use ir/lower.{LMod, internal_intrinsics, lowered_intrinsics, staged_intrinsics}
+
+## The switch. Any value but empty and `0` turns the lint on.
+pub const LINT_ENV: String = "DAWN_CORE_LINT"
+
+pub fn enabled() -> Bool !Env =
+  match io.getenv(LINT_ENV) {
+    Some(v) -> v != "" && v != "0"
+    None -> false
+  }
+
+## One broken invariant: which rule, where, and what was seen.
+pub type Violation = { rule: String, owner: String, fn_name: String, detail: String }
+
+pub fn render(v: Violation) -> String =
+  "[" ++ v.rule ++ "] " ++ v.owner ++ "." ++ v.fn_name ++ ": " ++ v.detail
+
+## The panic a driver raises when the lint found something. Every violation is
+## listed (up to a cap), because a lowering defect usually breaks a rule at
+## several sites and the first one alone can point at the wrong caller.
+pub fn enforce(vs: List[Violation]) -> Unit = {
+  if len(vs) == 0 { return () }
+  var lines = "core lint: " ++ to_string(len(vs)) ++
+    " violation(s) of the lowered-Core invariants (" ++ LINT_ENV ++ "=1)"
+  var i = 0
+  for v in vs {
+    if i == 40 {
+      lines = lines ++ "\n  ... and " ++ to_string(len(vs) - 40) ++ " more"
+      break
+    }
+    lines = lines ++ "\n  " ++ render(v)
+    i = i + 1
+  }
+  panic(lines)
+}
+
+# ---- fn-pairing ----
+
+## The checker's functions and lowering's, position by position (#182). Both
+## backends pair the two lists by index -- the JVM in `emit_module`, which
+## refuses a mismatch only when it is about to read past one -- so a list one
+## short, one long or out of order is a lowering bug whichever backend runs.
+pub fn check_pairing(owner: String, declared: List[String], lowered: List[String]) -> List[Violation] = {
+  var out: List[Violation] = []
+  if len(declared) != len(lowered) {
+    out = out ++ [Violation {
+      rule: "fn-pairing",
+      owner: owner,
+      fn_name: "<module>",
+      detail: "the checker declared " ++ to_string(len(declared)) ++
+        " function(s) and lowering produced " ++ to_string(len(lowered))
+    }]
+  }
+  var i = 0
+  while i < len(declared) && i < len(lowered) {
+    if declared[i] != lowered[i] {
+      out = out ++ [Violation {
+        rule: "fn-pairing",
+        owner: owner,
+        fn_name: lowered[i],
+        detail: "position " ++ to_string(i) ++ " was declared as `" ++ declared[i] ++ "`"
+      }]
+      return out
+    }
+    i = i + 1
+  }
+  out
+}
+
+## `check_pairing` for one module the way the drivers hold it: the checker's
+## module and lowering's, before the lifted functions are flattened in.
+pub fn check_module(owner: String, tm: TModule, lm: LMod) -> List[Violation] = {
+  var declared: List[String] = []
+  for f in tm.fns { declared = declared ++ [f.name] }
+  var lowered: List[String] = []
+  for pr in lm.fns {
+    let (cf, _) = pr
+    lowered = lowered ++ [cf.name]
+  }
+  check_pairing(owner, declared, lowered)
+}
+
+# ---- the program-wide index ----
+
+## What the rules need to know about the whole program before reading any one
+## body: every dictionary def by key, every plain function by (owner, name),
+## and every row a lifted closure is created at.
+type Index = {
+  adts: Adts,
+  dicts: Map[String, CDictDef],
+  fns: Map[(String, String), CFun],
+  closure_rows: Map[(String, String), List[Eff]],
+  # every intrinsic name, and the ones lowering promises no backend sees
+  known: Set[String],
+  removed: Set[String]
+}
+
+type Acc = { ix: Index, owner: String, fn_name: String, out: List[Violation] }
+
+fn flag(a: Acc, rule: String, detail: String) -> Acc =
+  Acc {
+    ..a,
+    out: a.out ++ [Violation { rule: rule, owner: a.owner, fn_name: a.fn_name, detail: detail }]
+  }
+
+fn same_def(x: CDictDef, y: CDictDef) -> Bool =
+  x.trait_id == y.trait_id && x.nargs == y.nargs && len(x.slots) == len(y.slots)
+
+## Lint every module of one program. `mods` is everything the backend will
+## emit, std included: a dictionary key or a callee can live in any of them.
+pub fn lint_program(adts: Adts, mods: List[CModule]) -> List[Violation] = {
+  var dicts: Map[String, CDictDef] = map.empty()
+  var fns: Map[(String, String), CFun] = map.empty()
+  var out: List[Violation] = []
+  for m in mods {
+    for d in m.dicts {
+      match map.get(dicts, d.key) {
+        None -> { dicts = map.insert(dicts, d.key, d) }
+        Some(prev) ->
+          if not same_def(prev, d) {
+            out = out ++ [Violation {
+              rule: "dict-shape",
+              owner: m.owner,
+              fn_name: "<dicts>",
+              detail: "dictionary `" ++ d.key ++ "` is defined with " ++ to_string(d.nargs) ++
+                " argument(s) and " ++ to_string(len(d.slots)) ++ " slot(s) here and with " ++
+                to_string(prev.nargs) ++ " and " ++ to_string(len(prev.slots)) ++
+                " elsewhere; one key names one constructor (#144)"
+            }]
+          }
+      }
+    }
+    for f in m.fns {
+      match f.impl_of {
+        Some(_) -> ()
+        None ->
+          match f.default_of {
+            Some(_) -> ()
+            None -> { fns = map.insert(fns, (f.owner, f.name), f) }
+          }
+      }
+    }
+  }
+  var known: Set[String] = set.empty()
+  for n in map.keys(intrinsics()) ++ internal_intrinsics() { known = set.insert(known, n) }
+  var removed: Set[String] = set.empty()
+  for n in lowered_intrinsics() ++ staged_intrinsics() { removed = set.insert(removed, n) }
+  var rows: Map[(String, String), List[Eff]] = map.empty()
+  for m in mods {
+    for f in m.fns { rows = closure_rows_expr(rows, f.body) }
+  }
+  let ix = Index {
+    adts: adts,
+    dicts: dicts,
+    fns: fns,
+    closure_rows: rows,
+    known: known,
+    removed: removed
+  }
+  var a = Acc { ix: ix, owner: "", fn_name: "", out: out }
+  for m in mods {
+    for f in m.fns {
+      a = Acc { ..a, owner: m.owner, fn_name: f.name }
+      a = check_expr(a, f.body)
+      a = check_pack_reads(a, f)
+      a = check_scopes(a, f)
+    }
+  }
+  a.out
+}
+
+# ---- closure rows ----
+
+fn rows_all(rows: Map[(String, String), List[Eff]], es: List[CExpr]) -> Map[(String, String), List[Eff]] = {
+  var r = rows
+  for e in es { r = closure_rows_expr(r, e) }
+  r
+}
+
+## Every row each lifted closure is created at, read off the CClosure node's
+## own type. One function can be created at more than one site (a wrapper
+## lowering hoists once), and each site's row has to cover its body's reads.
+fn closure_rows_expr(rows: Map[(String, String), List[Eff]], e: CExpr) -> Map[(String, String), List[Eff]] =
+  match e {
+    CClosure(name, owner, caps, ty) -> {
+      let r = rows_all(rows, caps)
+      match peel_opaque(ty) {
+        TyFn(_, _, eff) -> {
+          let prev = match map.get(r, (owner, name)) {
+            Some(xs) -> xs
+            None -> []
+          }
+          map.insert(r, (owner, name), prev ++ [eff])
+        }
+        _ -> r
+      }
+    }
+    _ -> rows_all(rows, children(e))
+  }
+
+## The direct subexpressions of a node, statements' expressions included.
+fn children(e: CExpr) -> List[CExpr] =
+  match e {
+    CCall(callee, args, _) -> callee_exprs(callee) ++ args
+    CIntrinsic(_, args, _) -> args
+    CCtor(_, _, args, _) -> args
+    CUpdate(base, _, _, fields, _) -> [base] ++ update_values(fields)
+    CField(t, _, _, _, _) -> [t]
+    CIsCtor(t, _, _) -> [t]
+    CTagOf(t, _) -> [t]
+    CClosure(_, _, caps, _) -> caps
+    CTuple(elems, _) -> elems
+    CTupleGet(t, _, _) -> [t]
+    CBox(inner, _) -> [inner]
+    CUnbox(inner, _) -> [inner]
+    CDup(inner, _) -> [inner]
+    CBinary(_, l, r, _) -> [l, r]
+    CUnary(_, o, _) -> [o]
+    CIf(c, t, e2, _) -> [c, t] ++ opt_list(e2)
+    CBlock(stmts, tail, _) -> {
+      var out: List[CExpr] = []
+      for s in stmts { out = out ++ stmt_exprs(s) }
+      out ++ opt_list(tail)
+    }
+    CListLit(elems, _) -> elems
+    CReturn(v) -> opt_list(v)
+    CForeign(j, _) -> opt_list(j.target) ++ j.args ++ sam_ev_exprs(j)
+    CDictApply(_, args, _) -> args
+    CDictArg(d, _, _, _, _) -> [d]
+    _ -> []
+  }
+
+fn stmt_exprs(s: CStmt) -> List[CExpr] =
+  match s {
+    CSLet(_, _, init) -> [init]
+    CSAssign(_, v) -> [v]
+    CSDiscard(e) -> [e]
+    CSLoop(_, body, step) -> [body] ++ opt_list(step)
+    CSIf(c, t, e) -> [c, t] ++ opt_list(e)
+    CSDrop(_) -> []
+  }
+
+fn callee_exprs(c: CCallee) -> List[CExpr] =
+  match c {
+    CDynamic(t) -> [t]
+    CMethod(d, _, _, _, _) -> [d]
+    _ -> []
+  }
+
+fn opt_list(e: Option[CExpr]) -> List[CExpr] =
+  match e {
+    Some(x) -> [x]
+    None -> []
+  }
+
+# ---- per-node rules ----
+
+fn check_all(a: Acc, es: List[CExpr]) -> Acc = {
+  var acc = a
+  for e in es { acc = check_expr(acc, e) }
+  acc
+}
+
+fn check_expr(a: Acc, e: CExpr) -> Acc = {
+  let a1 = check_node(a, e)
+  check_all(a1, children(e))
+}
+
+fn check_node(a: Acc, e: CExpr) -> Acc =
+  match e {
+    CIntrinsic(name, _, _) ->
+      if set.has(a.ix.removed, name) {
+        flag(a, "lowered-intrinsic", "`" ++ name ++
+            "` reached Core, and lowering removes every call to it (lower.lowered_intrinsics); " ++
+            "no backend has an arm for it (#283)")
+      } else if not set.has(a.ix.known, name) {
+        flag(a, "lowered-intrinsic", "`" ++ name ++ "` is no intrinsic any table declares")
+      } else {
+        a
+      }
+    CDictRef(key, _, _, _) ->
+      match map.get(a.ix.dicts, key) {
+        None -> flag(a, "dict-undefined", "a reference to dictionary `" ++ key ++
+            "`, which no module defines")
+        Some(d) ->
+          if d.nargs != 0 {
+            flag(a, "dict-arity", "a constant reference to dictionary `" ++ key ++
+                "`, whose def takes " ++ to_string(d.nargs) ++ " argument(s)")
+          } else {
+            a
+          }
+      }
+    CDictApply(key, args, _) ->
+      match map.get(a.ix.dicts, key) {
+        None -> flag(a, "dict-undefined", "an application of dictionary `" ++ key ++
+            "`, which no module defines")
+        Some(d) ->
+          if d.nargs == 0 {
+            flag(a, "dict-arity", "dictionary `" ++ key ++ "` applied to " ++
+                to_string(len(args)) ++ " argument(s), but its def is a constant singleton " ++
+                "(nargs 0); a backend would construct it through the singleton's private " ++
+                "constructor (#13, #144)")
+          } else if d.nargs != len(args) {
+            flag(a, "dict-arity", "dictionary `" ++ key ++ "` applied to " ++
+                to_string(len(args)) ++ " argument(s), but its def takes " ++ to_string(d.nargs))
+          } else {
+            a
+          }
+      }
+    CDictArg(_, _, key, idx, _) ->
+      match map.get(a.ix.dicts, key) {
+        None -> flag(a, "dict-undefined", "an argument read from dictionary `" ++ key ++
+            "`, which no module defines")
+        Some(d) ->
+          if idx < 0 || idx >= d.nargs {
+            flag(a, "dict-arity", "argument " ++ to_string(idx) ++ " read from dictionary `" ++
+                key ++ "`, whose def takes " ++ to_string(d.nargs))
+          } else {
+            a
+          }
+      }
+    CCall(CDirect(owner, name), args, _) ->
+      match map.get(a.ix.fns, (owner, name)) {
+        None -> a
+        Some(f) -> check_named_call(a, owner ++ "." ++ name, f, args)
+      }
+    CCall(CDynamic(_), args, _) ->
+      if len(args) == 0 {
+        flag(a, "evidence-slot", "a call through a function value with no evidence pack")
+      } else {
+        let last = args[len(args) - 1]
+        match exact_record(a.ix.adts, cex_ty(last)) {
+          Some(nm) -> flag(a, "evidence-slot", "a call through a function value hands it `" ++
+              nm ++ "`'s bare record where its one slot carries a pack")
+          None -> a
+        }
+      }
+    _ -> a
+  }
+
+## The evidence record of one label, if `t` is one: `ev$<id>$<name>`.
+fn exact_record(adts: Adts, t: Ty) -> Option[String] =
+  match peel_opaque(t) {
+    TyAdt(id, _) ->
+      if id == EV_PACK_ID {
+        None
+      } else {
+        match map.get(adts, id) {
+          Some(ad) -> if str.starts_with(ad.name, "ev\$") { Some(ad.name) } else { None }
+          None -> None
+        }
+      }
+    _ -> None
+  }
+
+fn is_erased(t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> true
+    _ -> false
+  }
+
+## A call to a named function in the program: the argument count is the
+## callee's whole ABI, and each evidence argument has the shape its slot
+## declares -- an exact label slot gets that label's record, an erased slot
+## (an effect variable's or a projection's) never gets a bare record, because
+## the callee walks it as a pack (5f91c188).
+fn check_named_call(a: Acc, callee: String, f: CFun, args: List[CExpr]) -> Acc = {
+  let want = len(f.captures) + len(f.params) + len(f.dicts) + len(f.evs)
+  if len(args) != want {
+    return flag(a, "call-arity", "`" ++ callee ++ "` called with " ++ to_string(len(args)) ++
+        " argument(s); its ABI is " ++ to_string(len(f.captures)) ++ " capture(s) + " ++
+        to_string(len(f.params)) ++ " parameter(s) + " ++ to_string(len(f.dicts)) ++
+        " dictionary(ies) + " ++ to_string(len(f.evs)) ++ " evidence slot(s)")
+  }
+  var acc = a
+  let base = want - len(f.evs)
+  var i = 0
+  for p in f.evs {
+    let arg = args[base + i]
+    let got = exact_record(a.ix.adts, cex_ty(arg))
+    match exact_record(a.ix.adts, p.ty) {
+      Some(slot) ->
+        match got {
+          Some(g) ->
+            if g != slot {
+              acc = flag(acc, "evidence-slot", "`" ++ callee ++ "` evidence slot " ++
+                  to_string(i) ++ " is `" ++ slot ++ "` and receives `" ++ g ++ "`")
+            }
+          None -> {
+            acc = flag(acc, "evidence-slot", "`" ++ callee ++ "` evidence slot " ++
+                to_string(i) ++ " is the exact record `" ++ slot ++
+                "` and receives no record (a placeholder or a pack)")
+          }
+        }
+      None ->
+        if is_erased(p.ty) {
+          match got {
+            Some(g) -> {
+              acc = flag(acc, "evidence-slot", "`" ++ callee ++ "` evidence slot " ++
+                  to_string(i) ++ " is erased and carries a pack, and receives the bare record `" ++
+                  g ++ "` (5f91c188)")
+            }
+            None -> ()
+          }
+        }
+    }
+    i = i + 1
+  }
+  acc
+}
+
+# ---- evidence-row ----
+
+## A lifted closure reads a label's evidence out of its own pack only if every
+## row it is created at names that label (#43, #54). The pack is built by the
+## caller from the closure's *type*, so a label the body reads and the row does
+## not name is a key nobody put there: "effect evidence missing" at run time.
+##
+## A row with an effect variable or a projection in it is skipped: the pack
+## then carries whatever the caller's instantiation brought, which Core alone
+## cannot enumerate.
+fn check_pack_reads(a: Acc, f: CFun) -> Acc = {
+  let rows = match map.get(a.ix.closure_rows, (f.owner, f.name)) {
+    Some(rs) -> rs
+    None -> []
+  }
+  if len(rows) == 0 || len(f.evs) != 1 { return a }
+  let own = f.evs[0].sym
+  var acc = a
+  # A row with no evidence atom at all -- pure, or io alone -- means every
+  # caller hands this closure the empty pack. Reading that pack for anything
+  # is reading nothing: forwarding it into a callee's slot is #54's shape (an
+  # effect variable the enclosing function carried, answered out of a pack
+  # that cannot hold it), and `ev_get` on it is #43's.
+  var empty = true
+  for row in rows {
+    if len(eff_labels(row)) > 0 || len(eff_vars(row)) > 0 || len(eff_assocs(row)) > 0 {
+      empty = false
+    }
+  }
+  if empty && forwards(a.ix, own, f.body) {
+    return flag(acc, "evidence-row", "every site creates this closure at a row with no " ++
+        "evidence atom, so its pack is empty, and its body hands that pack to a callee as " ++
+        "evidence (#54)")
+  }
+  for key in pack_reads(own, [], f.body) {
+    if key_is_label(key) {
+      let eid = key_effect_id(key)
+      for row in rows {
+        if not row_answers(row, eid) {
+          acc = flag(acc, "evidence-row", "the closure reads `" ++ label_name(a.ix.adts, eid) ++
+              "` out of its own pack, and a site creates it at a row that does not name that " ++
+              "label, so no caller puts it there (#43, #54)")
+        }
+      }
+    }
+  }
+  acc
+}
+
+fn label_name(adts: Adts, eid: Int) -> String =
+  match map.get(adts, eid) {
+    Some(ad) -> ad.name
+    None -> "?"
+  }
+
+fn row_answers(row: Eff, eid: Int) -> Bool = {
+  if len(eff_vars(row)) > 0 || len(eff_assocs(row)) > 0 { return true }
+  for l in eff_labels(row) {
+    let (id, _) = l
+    if id == eid { return true }
+  }
+  false
+}
+
+## Whether `e` hands the pack in symbol `own` to a callee as evidence: as one
+## of a named callee's evidence arguments, or as the pack of a call through a
+## function value. Only those two: a control wrapper also passes its slot on,
+## to `ctl_yield`, and that slot is the handler's pack, not one its own row
+## describes (`lower.lower_ctl`).
+fn forwards(ix: Index, own: Int, e: CExpr) -> Bool = {
+  let here =
+    match e {
+      CCall(CDirect(owner, name), args, _) ->
+        match map.get(ix.fns, (owner, name)) {
+          Some(f) -> {
+            var hit = false
+            let base = len(args) - len(f.evs)
+            var i = 0
+            for x in args {
+              if i >= base && is_local(x, own) { hit = true }
+              i = i + 1
+            }
+            hit
+          }
+          None -> false
+        }
+      CCall(CDynamic(_), args, _) -> len(args) > 0 && is_local(args[len(args) - 1], own)
+      _ -> false
+    }
+  if here { return true }
+  for c in children(e) {
+    if forwards(ix, own, c) { return true }
+  }
+  false
+}
+
+fn is_local(e: CExpr, s: Int) -> Bool =
+  match e {
+    CLocal(x, _) -> x == s
+    _ -> false
+  }
+
+## The keys `ev_get` asks of the pack in symbol `own`.
+fn pack_reads(own: Int, acc: List[Int], e: CExpr) -> List[Int] = {
+  var out = acc
+  match e {
+    CIntrinsic(name, args, _) ->
+      if name == "ev_get" && len(args) == 2 {
+        match args[0] {
+          CLocal(s, _) ->
+            if s == own {
+              match args[1] {
+                CInt(k) -> { out = out ++ [k] }
+                _ -> ()
+              }
+            }
+          _ -> ()
+        }
+      }
+    _ -> ()
+  }
+  for c in children(e) { out = pack_reads(own, out, c) }
+  out
+}
+
+# ---- unbound-read ----
+
+## Every symbol a function reads or assigns is bound where it is read: by the
+## function's own parameters (captures, params, dictionaries, evidence) or by a
+## `let` earlier in an enclosing block. A block's `let` scopes over the rest of
+## that block and nothing outside it.
+##
+## Reachability is the Never rule (#93): after a statement that cannot fall
+## through, the rest of its block is not read, because no backend emits it.
+fn check_scopes(a: Acc, f: CFun) -> Acc = {
+  var scope: Set[Int] = set.empty()
+  for p in f.captures ++ f.params ++ f.dicts ++ f.evs { scope = set.insert(scope, p.sym) }
+  let (a1, _) = scope_expr(a, scope, f.body)
+  a1
+}
+
+fn unbound(a: Acc, sym: Int, what: String) -> Acc =
+  flag(a, "unbound-read", what ++ " symbol " ++ to_string(sym) ++
+      ", which no parameter or enclosing `let` binds on this path")
+
+## (acc, whether control can leave this expression normally)
+fn scope_expr(a: Acc, scope: Set[Int], e: CExpr) -> (Acc, Bool) =
+  match e {
+    CLocal(s, _) -> {
+      let a1 = if set.has(scope, s) { a } else { unbound(a, s, "a read of") }
+      (a1, true)
+    }
+    CReturn(v) -> {
+      let (a1, _) = scope_seq(a, scope, opt_list(v))
+      (a1, false)
+    }
+    CBreak(_) -> (a, false)
+    CContinue(_) -> (a, false)
+    CIf(c, t, e2, ty) -> {
+      let (a1, cf) = scope_expr(a, scope, c)
+      if not cf { return (a1, false) }
+      let (a2, tf) = scope_expr(a1, scope, t)
+      match e2 {
+        Some(x) -> {
+          let (a3, ef) = scope_expr(a2, scope, x)
+          (a3, (tf || ef) && not_never(ty))
+        }
+        None -> (a2, true)
+      }
+    }
+    CBlock(stmts, tail, ty) -> {
+      var acc = a
+      var sc = scope
+      for s in stmts {
+        let (acc2, sc2, falls) = scope_stmt(acc, sc, s)
+        acc = acc2
+        sc = sc2
+        if not falls { return (acc, false) }
+      }
+      match tail {
+        Some(t) -> {
+          let (acc3, tf) = scope_expr(acc, sc, t)
+          (acc3, tf && not_never(ty))
+        }
+        None -> (acc, not_never(ty))
+      }
+    }
+    CBinary(op, l, r, ty) -> {
+      let (a1, lf) = scope_expr(a, scope, l)
+      if not lf { return (a1, false) }
+      let (a2, rf) = scope_expr(a1, scope, r)
+      match op {
+        CAnd -> (a2, true)
+        COr -> (a2, true)
+        _ -> (a2, rf && not_never(ty))
+      }
+    }
+    CIntrinsic(name, args, ty) -> {
+      let (a1, af) = scope_seq(a, scope, args)
+      (a1, af && name != "panic" && name != "todo" && not_never(ty))
+    }
+    _ -> {
+      let (a1, af) = scope_seq(a, scope, children(e))
+      (a1, af && not_never(cex_ty(e)))
+    }
+  }
+
+fn not_never(t: Ty) -> Bool =
+  match t {
+    TyNever -> false
+    _ -> true
+  }
+
+## Left to right, stopping at the first operand that cannot fall through: the
+## operands after it are never evaluated.
+fn scope_seq(a: Acc, scope: Set[Int], es: List[CExpr]) -> (Acc, Bool) = {
+  var acc = a
+  for e in es {
+    let (acc2, f) = scope_expr(acc, scope, e)
+    acc = acc2
+    if not f { return (acc, false) }
+  }
+  (acc, true)
+}
+
+## (acc, the scope after the statement, whether it falls through)
+fn scope_stmt(a: Acc, scope: Set[Int], s: CStmt) -> (Acc, Set[Int], Bool) =
+  match s {
+    CSLet(sym, _, init) -> {
+      let (a1, f) = scope_expr(a, scope, init)
+      (a1, set.insert(scope, sym), f)
+    }
+    CSAssign(sym, v) -> {
+      let (a1, f) = scope_expr(a, scope, v)
+      let a2 = if not f || set.has(scope, sym) { a1 } else { unbound(a1, sym, "an assignment to") }
+      (a2, scope, f)
+    }
+    CSDiscard(e) -> {
+      let (a1, f) = scope_expr(a, scope, e)
+      (a1, scope, f)
+    }
+    CSLoop(_, body, step) -> {
+      let (a1, _) = scope_expr(a, scope, body)
+      let (a2, _) = scope_seq(a1, scope, opt_list(step))
+      (a2, scope, true)
+    }
+    CSIf(c, t, e) -> {
+      let (a1, cf) = scope_expr(a, scope, c)
+      if not cf { return (a1, scope, false) }
+      let (a2, tf) = scope_expr(a1, scope, t)
+      match e {
+        Some(x) -> {
+          let (a3, ef) = scope_expr(a2, scope, x)
+          (a3, scope, tf || ef)
+        }
+        None -> (a2, scope, true)
+      }
+    }
+    CSDrop(sym) -> {
+      let a1 = if set.has(scope, sym) { a } else { unbound(a, sym, "a drop of") }
+      (a1, scope, true)
+    }
+  }

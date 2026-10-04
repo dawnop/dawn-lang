@@ -1,0 +1,19 @@
+# #54: the same hole as local_label.dawn, one axis over -- a local fn that
+# calls through the enclosing function's effect variable.
+use std/io
+
+effect Ask {
+  fn ask() -> Int
+}
+
+fn twice(f: fn() -> Int !e) -> Int !e = f() + f()
+
+fn outer(f: fn() -> Int !e) -> Int !e !io = {
+  fn probe() -> Int !io = twice(f)
+  probe()
+}
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 21 }
+  io.println("${outer(() => ask())}")
+}
