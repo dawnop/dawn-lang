@@ -819,6 +819,92 @@ run-pole 还很远，整轮墙钟不动。spike-native 全量本地 230.75s 变 
 一条 6s 的语料被调度空隙吃掉了），557s 那条 runner 观测值没被推动，budget 不重述。
 effect-evidence 在 `test` job 里从 23.8s 到 25.3s，同一个 job 的预算里毫发无损。
 
+### 7.9 第四条：右侧不能失败（#466，2026-10-04）
+
+§7.8 的三条回答的是「本次安装的臂能不能在窗口里跑起来」，漏了另一条读到空槽的路：
+**窗口里的 panic 或 fault**。它不需要任何臂：失败从臂里展开出去，被受管计算内部的
+`catch_panic`/`catch_fault` 接住，handler 仍在作用域，槽仍是空的，下一次读就是空指针
+（native SIGSEGV，JVM `NullPointerException` 于 `std/pvec`）。复现是
+`log(s) => { seen = seen ++ [check(s)] }`，`check` 对 `"bad"` panic，`work` 里
+`catch_panic(() => log("bad"))` 接住后继续 `log("caught")`、`dump()`。期望
+`["a", "caught"]`，即处处 `cell_get` 给出的答案：失败的那次写没发生过。两条语料
+`scripts/spike-native/cell_take_panic.dawn` / `cell_take_fault.dawn` 修前两后端都崩，
+修后都打印 `["a", "caught"]`。
+
+**修法 (a)：右侧任何部分可能失败，就退回 `cell_get`。** `cell_take_ok` 加第四条
+`cell_cannot_fail(value)`：读之前对 AST 做一次白名单判定，只放行名字（局部量、常量、
+函数值）、不带插值的字面量、构造器、记录、列表/元组字面量（含 `..` 展开与 `if` 元素）、
+字段读与 `++`（列表、字符串、字节串的拼接，不调用程序写的任何代码）。其余一律否：
+调用会 panic；插值调 `Show`；下标、`!`、`/`、`%` 会 panic；`==` 可能走 `Eq` 覆写；
+`?` 与 `return` 带着空槽离开臂。与 `cell_occurrences` 相反，这里**有**通配臂：那边漏答一种
+形态是少数、是空槽，这边漏答是「否」，只赔优化。判定在检查之前、对所有可能的类型都得成立，
+所以它不看类型；看类型能多放行 `"${n}"`（`n: Int`）这类，换来的是一张要维护的「哪些
+内建 Show 不会失败」的表，不值。
+
+**为什么不是 (b)「先求右侧其余部分、最后 take」。** 它只修一半。窗口不只包括读之后才求值
+的兄弟子表达式，还包括**消费这个值的那次调用本身**：`m = map.insert(m, k, v)` 里 take
+出来的 map 交给 `insert`，`insert` 跑到一半失败（比如用户的 `Hash` panic），值已经交出去、
+可能已被就地改写，提前求值什么也救不回来。(b) 只对 `acc ++ [f(x)]` 这一种「消费者是不会
+失败的 `++`」的形状有效，而这种形状用户自己写一行 `let y = f(x)` 就能回到 take（见下），
+不需要编译器偷偷改求值顺序。
+
+**为什么不是 (c)「失败时把值放回去」或「读到空槽时 panic」。** 放回去做不到：take 的全部
+意义就是让消费者拿到唯一引用并就地改写，失败时旧值已经不存在了；保留旧值等于 rc 为 2，
+等于 `cell_get`。读空槽时报一个清楚的 panic 只是把 UB 换成一个**语义错误的**可恢复失败：
+程序仍然丢了状态，只是丢得体面些。§7.7 已经为同类兜底裁过 (c)「不兜底」，理由在这里同样
+成立：格子可拼写、语料够得着，这条有两条语料加一条内联测试（`cell_take` is not chosen
+when the right-hand side can fail，去掉第四条它当场转红，实测过）看着。所以这次只修静态
+判定，运行时不加检查。
+
+**收益账：量过再裁。** 全树（selfhost、compiler-plan、site、playground、packages/*、
+examples、spike-native 语料）用临时插桩数 `cell_take_ok` 放行的赋值点（按源文本去重）：
+
+| 范围 | 修前 | 修后 | 丢掉的是什么 |
+|---|---|---|---|
+| selfhost 自身 | 0 | 0 | 编译器自己没有一处 take |
+| std | 10 | 4 | `std/gpu` 的 `next = next + 1`（标量，take 本无收益）与五处 `map.insert` 累积 |
+| compiler-plan | 8 | 7 | `procmem` 的 `next = next + 1`（标量） |
+| packages/tileir | 197 | 70 | `dev.dawn` 79 处日志插值与标量计数；`prog.dawn` 48 处 `hold(...)`/`map.insert`/`mint(...)` |
+| examples | 5 | 2 | `cells.dawn` 两处日志插值、一处标量 |
+| spike-native | 9 | 4 | `effect_fs_seam` 三处 `without(files, ...)`，外加两条新语料本身 |
+
+`effect_handler_state.dawn` 的 `long_tail`（§7.8 那条量得出复用的语料）形状是
+`acc = acc ++ [n]`，修后仍是 take。
+
+运行时代价用三个合成基准量（一个臂里累积 30 万次，`-O2`，本机 hyperfine 30 轮，
+机器同时有别的负载，所以只看同一轮里修前修后的相对值）：
+
+| 形状 | native 修前 | native 修后 | `DAWN_RC_STATS` 修前 → 修后 | JVM 修前 / 修后 |
+|---|---|---|---|---|
+| `acc = acc ++ [x]` | 30.8 ms | 29.8 ms | in-place 17391 → 17391（不变） | 148.9 / 140.4 ms |
+| `acc = acc ++ [twice(x)]` | 27.4 ms | 32.0 ms | in-place 17391 → 0，copied 0 → 17391 | 142.3 / 140.0 ms |
+| `m = map.insert(m, x, x)` | 337.1 ms | 622.1 ms | in-place 866176 → 0，copied 0 → 866176 | 413.9 / 396.9 ms |
+
+JVM 没有 RC，take 在那边本来就只是把字段置空，两侧差别在噪声里。native 上
+`acc ++ [f(x)]` 丢掉 trie 节点的就地复用，但 pvec 的尾巴每 32 次才写一次 trie，墙钟只多一点；
+`map.insert` 累积器是实打实的 1.8 倍。前者用户可以自己挪回来：
+
+```dawn
+log(s) => {
+  let y = check(s)       # 失败发生在槽打开之前
+  seen = seen ++ [y]     # 右侧只剩名字、列表字面量与 ++，仍是 take
+}
+```
+
+后者挪不回来，消费者本身就是一次可能失败的调用。这正是 (a) 的代价，也是它和
+「看类型、给 std 函数登记『不会失败』」那条路的分界。
+
+**不做的（理由）。**
+
+- 不给 `map.insert` 之类的 std 调用登记「不会失败」：它对 `K` 的 `Hash`/`Eq` 见证是
+  泛型的，用户实现能 panic；要判就得在检查之后看见证、再维护一张函数表，换回来的是
+  native 上 `map.insert` 累积器的 1.8 倍。仓内没有一个 native 热路径用到这个形状
+  （selfhost 零处；`std/gpu` 与 tileir 的 map 只有几十项，跑在 JVM 上）。重开条件：
+  出现一个 native 上真实的 map 累积 handler，且量得出这一项在它的墙钟里。
+- 不做 (b)：理由见上，它对消费者失败无效，而它唯一能救的形状用户一行 `let` 就能救。
+- 不加运行时空槽检查：理由见上，与 §7.7 同裁。
+
+
 ## 8. 裁决
 
 每条先给本文当初的倾向与最强的反对意见，末行是用户 2026-08-29 的裁决。
