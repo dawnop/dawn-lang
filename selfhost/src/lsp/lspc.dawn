@@ -642,10 +642,24 @@ fn import_items(
 fn exported_items(qc: QCx, it0: Items, ex: ModExports) -> List[CItem] = {
   var it = it0
   let from = Some(ex.mod_path)
-  let adts = qc.entry.cx.adts
+  # The signatures name the exporting module's types, which the document has
+  # in its tables only once its `use` of the module parses. The line being
+  # completed is that `use`, mid-edit, so the surface's own tables (which
+  # carry every type its signatures name) come first, and the document's are
+  # laid over them: an id means the same declaration in both.
+  var adts = ex.adt_infos
+  for pr in map.entries(qc.entry.cx.adts) {
+    let (id, a) = pr
+    adts = map.insert(adts, id, a)
+  }
+  var traits = ex.trait_infos
+  for pr in map.entries(qc.entry.cx.traits) {
+    let (id, t) = pr
+    traits = map.insert(traits, id, t)
+  }
   for pr in map.entries(ex.fns) {
     let (name, sig) = pr
-    it = add_from(it, name, 3, Some(sig_render(adts, qc.entry.cx.traits, sig)), "0", from)
+    it = add_from(it, name, 3, Some(sig_render(adts, traits, sig)), "0", from)
   }
   for name in map.keys(ex.types_by_name) { it = add_from(it, name, 7, Some("type ${name}"), "0", from) }
   for name in map.keys(ex.aliases) { it = add_from(it, name, 7, Some("alias ${name}"), "0", from) }
