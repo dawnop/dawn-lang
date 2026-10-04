@@ -1610,7 +1610,17 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     panic(NO_ARM_LISTED ++ name)
   }
 
-## Stable merge sort with the interpreted comparator (Kotlin sortedWith).
+## Stable merge sort with the interpreted comparator, deciding each step the
+## way std/pvec's `merge` does: the right element goes first only when
+## `cmp(right, left) < 0`, and a tie takes from the left.
+##
+## Both orders agree for a total order, and `sort_by` does not ask for one:
+## its comparator is any `fn(T, T) -> Int`. With `(a, b) => 1`, or the common
+## "-1 if less, else 0", the two conventions answer differently, and this one
+## used to ask `cmp(left, right) <= 0` instead, so a folded sort and the same
+## sort at run time printed two different lists. pvec is what both backends
+## run, so it is the definition; scripts/spike-native/const_fold.dawn holds a
+## folded and a live sort with such comparators side by side.
 fn merge_sort(
   icx: ICx,
   st: ESt,
@@ -1627,14 +1637,14 @@ fn merge_sort(
   var j = 0
   var st3 = st2
   while i < len(left) && j < len(right) {
-    let (st4, _, cv) = apply_fn(icx, st3, env, f, [left[i], right[j]])?
+    let (st4, _, cv) = apply_fn(icx, st3, env, f, [right[j], left[i]])?
     st3 = st4
-    if as_int(cv) <= 0 {
-      out = out ++ [left[i]]
-      i = i + 1
-    } else {
+    if as_int(cv) < 0 {
       out = out ++ [right[j]]
       j = j + 1
+    } else {
+      out = out ++ [left[i]]
+      i = i + 1
     }
   }
   while i < len(left) {
