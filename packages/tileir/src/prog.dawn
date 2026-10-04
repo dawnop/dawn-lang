@@ -17,8 +17,9 @@
 use std/list
 use std/map
 use std/str
-use std/gpu.{F64, F32, F16, I32, I64}
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, extract, insert, powi, d_return_if, float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
+use std/gpu.{Gpu, F64, F32, F16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
+  entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
+use dev.{Dev, Tile, Param, Hints, RedId, IdF, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_reduce_i, s_addi, param, block_id, tile_at, load, store, gather, gather_masked, scatter, atomic_rmw, atomic_add_masked, atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_loop, d_reduce, d_if, spread, s_addf, s_maxf, s_gt, s_const, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int, tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if, float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, PadZero, padding_name, padding_is_special, is_float_dtype, DYN_DIM}
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -1050,13 +1051,13 @@ fn lin_of(defs: Map[Int, TileOp], h: Int) -> Lin = match map.get(defs, h) {
 
 # What one write may touch, as simply as the check needs it: `Span` is the
 # elements `base + lo` to `base + hi` of a parameter (the hull of a strided
-# tile's lanes, which is exact for a contiguous one); `Whole` is somewhere in
+# tile's lanes, which is exact for a contiguous one); `AnyOf` is somewhere in
 # a parameter, at addresses the recording does not follow (a scatter, an
 # atomic, a view); `Unnamed` is a write whose target is not a parameter the
 # recording can name (an alloca, a global, a pointer made from an integer).
 type Write =
   | Span(param: Int, base: Lin, lo: Int, hi: Int)
-  | Whole(param: Int)
+  | AnyOf(param: Int)
   | Unnamed
 
 # The parameter a pointer tile points into, when it was spread from one and
@@ -1077,7 +1078,7 @@ fn view_param(defs: Map[Int, TileOp], h: Int) -> Option[Int] = match map.get(def
 }
 
 fn named(p: Option[Int]) -> Write = match p {
-  Some(param) -> Whole(param)
+  Some(param) -> AnyOf(param)
   None -> Unnamed
 }
 
@@ -1098,14 +1099,14 @@ fn writes_of(defs: Map[Int, TileOp], op: TileOp) -> List[Write] = match op {
     # `base` written the long way, and is read as one
     Some(PtrAdd(_d, _dt, _s, root, offs)) -> match (map.get(defs, root), map.get(defs, offs)) {
       (Some(MakePtrs(_d2, param, _dt2, _s2)), Some(Lanes(_d3, base, lshape, lstrides))) ->
-        if lshape == shape { [span_of(param, lin_of(defs, base), lshape, lstrides)] } else { [Whole(param)] }
+        if lshape == shape { [span_of(param, lin_of(defs, base), lshape, lstrides)] } else { [AnyOf(param)] }
       _ -> [named(ptr_param(defs, ptrs))]
     }
     _ -> [named(ptr_param(defs, ptrs))]
   }
-  Scatter(_t, param, _dtype, _i, _s, _v, _m, _ti) -> [Whole(param)]
-  AtomicRMW(_d, _t, param, _dtype, _mode, _i, _s, _v, _m, _ti) -> [Whole(param)]
-  AtomicCAS(_d, _t, param, _dtype, _i, _s, _c, _v, _m, _ti) -> [Whole(param)]
+  Scatter(_t, param, _dtype, _i, _s, _v, _m, _ti) -> [AnyOf(param)]
+  AtomicRMW(_d, _t, param, _dtype, _mode, _i, _s, _v, _m, _ti) -> [AnyOf(param)]
+  AtomicCAS(_d, _t, param, _dtype, _i, _s, _c, _v, _m, _ti) -> [AnyOf(param)]
   StoreView(_t, _dtype, view, _ix, _v, _ti) -> [named(view_param(defs, view))]
   AtomicRedViewOf(_t, _dtype, view, _ix, _mode, _scope, _v, _ti) -> [named(view_param(defs, view))]
   For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> writes_in(defs, body)
@@ -1184,9 +1185,9 @@ fn tok_ancestry(chain: Map[Int, (TileOp, List[Int])], tok: Int, seen: List[Int])
 fn overlap(a: Write, b: Write) -> Option[String] = match (a, b) {
   (Unnamed, _) -> Some("a write whose target is not a parameter (an alloca, a global, or a pointer made from an integer) cannot be told apart from the other chain's")
   (_, Unnamed) -> Some("a write whose target is not a parameter (an alloca, a global, or a pointer made from an integer) cannot be told apart from the other chain's")
-  (Whole(p), Whole(q)) -> if p != q { None } else { Some("both write parameter ${p} at addresses the recording does not follow") }
-  (Whole(p), Span(q, _b, _lo, _hi)) -> if p != q { None } else { Some("both write parameter ${p}, one at addresses the recording does not follow") }
-  (Span(p, _b, _lo, _hi), Whole(q)) -> if p != q { None } else { Some("both write parameter ${p}, one at addresses the recording does not follow") }
+  (AnyOf(p), AnyOf(q)) -> if p != q { None } else { Some("both write parameter ${p} at addresses the recording does not follow") }
+  (AnyOf(p), Span(q, _b, _lo, _hi)) -> if p != q { None } else { Some("both write parameter ${p}, one at addresses the recording does not follow") }
+  (Span(p, _b, _lo, _hi), AnyOf(q)) -> if p != q { None } else { Some("both write parameter ${p}, one at addresses the recording does not follow") }
   (Span(p, ba, alo, ahi), Span(q, bb, blo, bhi)) ->
     if p != q {
       None
@@ -1284,6 +1285,267 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev,
   prog
 }
 
+# ---- knife C2: parameter markers with roles and cells, and typed entries
+#
+# `trace_kernel` takes the parameters' formats as a list of strings because
+# Dawn has no variadic generics: the list is the only way to say "this many
+# parameters, of these formats" in one signature, and it repeats what the
+# body's own `Param[F64]` already says (191 of 191 kernels in
+# scripts/tile-golden). `trace1` to `trace5` take one MARKER per parameter
+# instead, the way `d_for2` to `d_for4` take one carried value each, and
+# compute the list: `In(F64, cells(..))` says the format once, and says the
+# two things a string could not (docs/tile-backend-design.md 6.24):
+#
+# - the ROLE. An In parameter is never written: the recording refuses a
+#   store, a scatter, an atomic or a view store into it, and a write
+#   through pointers it cannot follow back to a parameter while any
+#   parameter is an In. An Out is written one cell per tile block (D-4 will
+#   hold the body to that; this knife does not), and a Shared one is the
+#   escape hatch, today's `Param`.
+# - the CELLS. How the tensor behind the parameter is cut, which for the Out
+#   parameters IS the launch grid. Bodies do not read the cells yet (D-4's
+#   `load_cell` / `store_cell` will); what this knife does with them is hold
+#   them to each other and hand them to std/gpu's entry, so a launch can be
+#   held to them.
+#
+# The markers issue no operation: a kernel recorded through `trace3` is the
+# program `trace_kernel` records for the same body, byte for byte.
+
+## The axis entry of a cut dimension that follows no grid axis: the kernel
+## picks that cell some other way (the `k` of a matrix product's loop). The
+## same number as std/gpu's.
+pub const FREE_AXIS: Int = 0 - 1
+
+## How a kernel parameter's tensor is cut. `Whole` is not cut at all.
+## `Grid` cuts a row-major tensor of `extent` into cells of `tile`:
+##
+## - an extent of `DYN_DIM` is the launch's to decide, and is the grid's
+##   blocks along the axis that dimension follows times the tile, so the
+##   cells then cover the tensor with no tail;
+## - `pad` is what a read past the extent answers (the partition view's
+##   `padding_value`, a float format's only for the four special ones);
+## - `along[j]` is the grid axis dimension `j` follows, or `FREE_AXIS`. A
+##   dimension that follows axis `k` has as many cells as the grid has
+##   blocks along `k`.
+##
+## [`cells`] builds one with the defaults; `Whole` and `Grid` are its
+## values, for a match.
+pub type Cells =
+  | Whole
+  | Grid(extent: List[Int], tile: List[Int], pad: Padding, along: List[Int])
+derive Show
+
+## `extent` cut into cells of `tile`, a read past the extent answering
+## `pad`, dimension `k` following grid axis `k` (the first three; a fourth
+## and later follow none). Pass `along` for a cut whose dimensions follow
+## other axes, or none: the left operand of a matrix product follows axis 0
+## along its rows and `FREE_AXIS` along K.
+pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
+  along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS })) -> Cells =
+  Grid(extent, tile, pad, along)
+
+## One parameter of a kernel, for `trace1` to `trace5`: its format marker
+## (std/gpu's `F64` and so on), what the kernel does to it, and for `In` and
+## `Out` how its tensor is cut.
+##
+## - `In` is read and never written: the recording refuses any write into
+##   it. `In(F64, Whole)` is an input read anywhere (a gather's table).
+## - `Out` is written, one cell per tile block, and its cells are the
+##   launch grid; it may be read (an in-place kernel reads its cell first).
+## - `Shared` is read and written in ways no cell describes: atomics,
+##   scatters, a stencil's neighbours.
+pub type Arg[D] =
+  | In(d: D, g: Cells)
+  | Out(d: D, g: Cells)
+  | Shared(d: D)
+
+# What the recording holds a parameter to: its role without its format.
+type Access =
+  | Reading
+  | Owning
+  | Sharing
+
+# The aim of a pointer tile or view that addresses no parameter: a global's
+# or an alloca's memory.
+const NO_PARAM: Int = 0 - 1
+
+# One parameter's marker with its format as a name, so that five markers of
+# five formats fit in one list.
+type Sig = {
+  dtype: String,
+  access: Access,
+  g: Cells,
+}
+
+fn marker[D](a: Arg[D]) -> D = match a {
+  In(d, _g) -> d
+  Out(d, _g) -> d
+  Shared(d) -> d
+}
+
+fn sig_of[D: Dtype](a: Arg[D]) -> Sig = match a {
+  In(d, g) -> Sig { dtype: dtype_name(d), access: Reading, g: g }
+  Out(d, g) -> Sig { dtype: dtype_name(d), access: Owning, g: g }
+  Shared(d) -> Sig { dtype: dtype_name(d), access: Sharing, g: Whole }
+}
+
+fn access_word(a: Access) -> String = match a {
+  Reading -> "In"
+  Owning -> "Out"
+  Sharing -> "Shared"
+}
+
+# The checks only Tile IR makes of one parameter's cells: each tile
+# dimension is a power of two (every tile is), a special padding value is a
+# float format's, and an Out's dimension `k` is grid axis `k`. The rest is
+# arithmetic std/gpu does for the launch too (`entry_grid`).
+fn check_cells(name: String, k: Int, s: Sig) -> Unit = match s.g {
+  Whole -> ()
+  Grid(_extent, tile, pad, along) -> {
+    let who = "argument ${k} (${access_word(s.access)})"
+    match list.find(tile, t => not is_pow2(t)) {
+      Some(_t) -> refuse(name, "${who} has a tile of ${show(tile)}; every tile dimension is a power of two")
+      None -> ()
+    }
+    if padding_is_special(pad) && not is_float_dtype(s.dtype) {
+      refuse(name, "${who} is ${s.dtype} and pads with ${padding_name(pad)}, which only a float format can hold")
+    } else {
+      ()
+    }
+    # a rank past three is std/gpu's to refuse, in the launch's words
+    if s.access == Owning && len(along) <= 3 && along != range(0, len(along)) {
+      refuse(name, "${who} follows grid axes ${show(along)}; an Out's cells are the grid, so its dimension k is axis k")
+    } else {
+      ()
+    }
+  }
+}
+
+fn entry_arg(s: Sig) -> EntryArg = match (s.access, s.g) {
+  (Reading, Whole) -> arg_in_whole()
+  (Reading, Grid(extent, tile, _pad, along)) -> arg_in(extent, tile, along)
+  (Owning, Whole) -> arg_out([], [])
+  (Owning, Grid(extent, tile, _pad, _along)) -> arg_out(extent, tile)
+  (Sharing, _g) -> arg_shared()
+}
+
+# The entry's arguments, every marker checked first: alone (`check_cells`),
+# and against one another and the grid (`entry_grid`). Refused before the
+# body runs, so a kernel with bad markers records nothing.
+fn entry_args(name: String, sigs: List[Sig]) -> List[EntryArg] = {
+  for k in range(0, len(sigs)) {
+    check_cells(name, k, sigs[k])
+  }
+  let args = list.map(sigs, entry_arg)
+  match entry_grid(args) {
+    Err(p) -> refuse(name, p)
+    Ok(_grid) -> args
+  }
+}
+
+fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: Hints) -> TileProg = {
+  let (prog, _calls) = record_calls(name, list.map(sigs, s => s.dtype), list.map(sigs, s => s.access),
+    body, hints)
+  prog
+}
+
+## `trace_kernel` for a kernel of one parameter, described by its marker
+## rather than by a format name; beside the program, the entry std/gpu's
+## `launch_entry1` runs. The body receives the `Param` the marker makes, so
+## its format is the marker's. A marker whose cells are malformed, or that
+## disagree with another's or with the grid, is refused before the body
+## runs; a write into an `In` parameter is refused while it records. The
+## program is the one `trace_kernel` records for the same body.
+pub fn trace1[A: Dtype](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
+  hints: Hints = []) -> (TileProg, Entry1[A]) = {
+  let args = entry_args(name, [sig_of(a)])
+  let prog = record_sigs(name, [sig_of(a)], () => body(param(marker(a), 0)), hints)
+  (prog, entry1(name, args[0]))
+}
+
+## [`trace1`] for two parameters.
+pub fn trace2[A: Dtype, B: Dtype](name: String, a: Arg[A], b: Arg[B],
+  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry2[A, B]) = {
+  let sigs = [sig_of(a), sig_of(b)]
+  let args = entry_args(name, sigs)
+  let prog = record_sigs(name, sigs, () => body(param(marker(a), 0), param(marker(b), 1)), hints)
+  (prog, entry2(name, args[0], args[1]))
+}
+
+## [`trace1`] for three parameters.
+pub fn trace3[A: Dtype, B: Dtype, C: Dtype](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry3[A, B, C]) = {
+  let sigs = [sig_of(a), sig_of(b), sig_of(c)]
+  let args = entry_args(name, sigs)
+  let prog = record_sigs(name, sigs,
+    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2)), hints)
+  (prog, entry3(name, args[0], args[1], args[2]))
+}
+
+## [`trace1`] for four parameters.
+pub fn trace4[A: Dtype, B: Dtype, C: Dtype, E: Dtype](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+  d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev,
+  hints: Hints = []) -> (TileProg, Entry4[A, B, C, E]) = {
+  let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d)]
+  let args = entry_args(name, sigs)
+  let prog = record_sigs(name, sigs,
+    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3)), hints)
+  (prog, entry4(name, args[0], args[1], args[2], args[3]))
+}
+
+## [`trace1`] for five parameters.
+pub fn trace5[A: Dtype, B: Dtype, C: Dtype, E: Dtype, F: Dtype](name: String, a: Arg[A], b: Arg[B],
+  c: Arg[C], d: Arg[E], e: Arg[F],
+  body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev,
+  hints: Hints = []) -> (TileProg, Entry5[A, B, C, E, F]) = {
+  let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e)]
+  let args = entry_args(name, sigs)
+  let prog = record_sigs(name, sigs,
+    () => body(param(marker(a), 0), param(marker(b), 1), param(marker(c), 2), param(marker(d), 3),
+      param(marker(e), 4)), hints)
+  (prog, entry5(name, args[0], args[1], args[2], args[3], args[4]))
+}
+
+# `aims` after handle `to` was made from `from` (an offset, a recast, a view
+# of a view): it aims where `from` does, or nowhere the recording followed.
+fn follow(aims: Map[Int, Int], from: Int, to: Int) -> Map[Int, Int] = match map.get(aims, from) {
+  Some(p) -> map.insert(aims, to, p)
+  None -> aims
+}
+
+# The name a write is refused under: the call the kernel made that issued
+# it (`store_masked`, `store_view`), or the operation's own name when the
+# body called the effect directly.
+fn writer(marks: List[Mark], calls: List[Call], op: String) -> String = {
+  let row = open_row(marks)
+  if row >= 0 { calls[row].name } else { op }
+}
+
+# A write into the parameter `aim` names: `Some(p)` for parameter `p`,
+# `Some(NO_PARAM)` for memory no parameter addresses, `None` when the
+# pointers or the view came from nothing the recording followed (an
+# `int_to_ptr`, a value carried through a region). Refused into an In, and,
+# when the target is unknown, while any parameter is an In: the recording
+# cannot tell that write from one into it.
+fn check_write(name: String, frames: List[Frame], ops: List[TileOp], roles: List[Access],
+  aim: Option[Int], op: String) -> Unit =
+  if len(roles) == 0 {
+    ()
+  } else {
+    match aim {
+      Some(p) ->
+        if p >= 0 && p < len(roles) && roles[p] == Reading {
+          refuse_at(name, frames, ops, op, "parameter ${p} is an In, and nothing writes an In")
+        } else {
+          ()
+        }
+      None -> match list.find(range(0, len(roles)), k => roles[k] == Reading) {
+        Some(p) -> refuse_at(name, frames, ops, op, "it writes through pointers the recording cannot follow to a parameter (an int_to_ptr, or a value carried through a region), and parameter ${p} is an In")
+        None -> ()
+      }
+    }
+  }
+
 ## One call the KERNEL made, as the recording saw it, from the side table
 ## `trace_calls` keeps: the name of the public function (dev.dawn's `called`
 ## marks), the call it was made inside, and the half-open ranges of
@@ -1357,7 +1619,14 @@ fn kernel_side(marks: List[Mark]) -> Bool =
 ## kernel made, in the order they started. The program is the one
 ## `trace_kernel` answers: it is the same handler, and the marks put nothing
 ## into `ops`.
-pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> (TileProg, List[Call]) = {
+pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> (TileProg, List[Call]) =
+  record_calls(name, params, [], body, hints)
+
+# `trace_calls` with a role for each parameter (knife C2): empty for the two
+# public recorders above, which know no roles and refuse nothing on their
+# account, and one per parameter for `trace1` to `trace5`.
+fn record_calls(name: String, params: List[String], roles: List[Access], body: fn() -> Unit !Dev,
+  hints: Hints) -> (TileProg, List[Call]) = {
   let (globals, ops, calls) = {
     with handle Dev {
       var next: Int = 1
@@ -1368,6 +1637,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       var marks: List[Mark] = []
       var calls: List[Call] = []
       var held: Map[Int, Held] = map.empty()
+      var aims: Map[Int, Int] = map.empty()
       t_call_enter(called_name) => {
         if kernel_side(marks) {
           let at = op_number(frames, ops)
@@ -1432,6 +1702,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_param(name, params, param, dtype, "store")
         check_shape(name, shape)
         check_strides(name, shape, strides)
+        check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "store"))
         let t = next
         next = mint(name, next, 1)
         ops = ops ++ [Store(t, param, dtype, base, shape, strides, v, mask, tok, hints)]
@@ -1456,6 +1727,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         if list.any(open, is_pure_region) { refuse(name, "a scatter inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "scatter")
         check_shape(name, shape)
+        check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "scatter"))
         let t = next
         next = mint(name, next, 1)
         ops = ops ++ [Scatter(t, param, dtype, index, shape, v, mask, tok)]
@@ -1468,6 +1740,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_param(name, params, param, dtype, "atomic")
         check_shape(name, shape)
         check_rmw_mode(name, mode)
+        check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "atomic_rmw"))
         held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
@@ -1481,6 +1754,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         if list.any(open, is_pure_region) { refuse(name, "an atomic inside a reduce, scan or if region has no memory order") } else { () }
         check_param(name, params, param, dtype, "atomic")
         check_shape(name, shape)
+        check_write(name, frames, ops, roles, Some(param), writer(marks, calls, "atomic_cas"))
         held = hold(held, next, dtype, shape)
         let d = next
         let t = next + 1
@@ -2023,6 +2297,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         check_param(name, params, param, dtype, "pointer tile")
         check_shape(name, shape)
         held = hold(held, next, ptr_of(dtype), shape)
+        aims = map.insert(aims, next, param)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [MakePtrs(d, param, dtype, shape)]
@@ -2031,6 +2306,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_ptr_offset(dtype, shape, ptrs, offs) => {
         check_shape(name, shape)
         held = hold(held, next, ptr_of(dtype), shape)
+        aims = follow(aims, ptrs, next)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PtrAdd(d, dtype, shape, ptrs, offs)]
@@ -2055,6 +2331,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       t_ptr_to_ptr(from, to, shape, ptrs) => {
         check_shape(name, shape)
         held = hold(held, next, ptr_of(to), shape)
+        aims = follow(aims, ptrs, next)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PtrCast(d, from, to, shape, ptrs)]
@@ -2119,6 +2396,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         check_shape(name, shape)
+        check_write(name, frames, ops, roles, map.get(aims, ptrs), writer(marks, calls, "store_ptrs"))
         let t = next
         next = mint(name, next, 1)
         ops = ops ++ [StoreAt(t, dtype, shape, ptrs, value, mask, tok)]
@@ -2168,6 +2446,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
             }
         }
         held = hold(held, next, ptr_of(dtype), shape)
+        aims = map.insert(aims, next, NO_PARAM)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [GetGlobal(d, sym, dtype, shape)]
@@ -2193,6 +2472,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         held = hold(held, next, ptr_of(dtype), shape)
+        aims = map.insert(aims, next, NO_PARAM)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [Alloca(d, dtype, num_elem, align, shared, shape)]
@@ -2240,6 +2520,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         held = hold_view(held, next, TensorViewRow, dtype, shape)
+        aims = map.insert(aims, next, param)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [TensorViewOf(d, param, dtype, base, shape, strides, dyn_shape, dyn_strides)]
@@ -2252,6 +2533,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         # where a handle's type is known.
         check_view_record(name, dtype, tile_shape, dim_map, padding, "partition view")
         held = hold_view(held, next, GridViewRow("partition view"), dtype, tile_shape)
+        aims = follow(aims, view, next)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [PartitionViewOf(d, dtype, view, tile_shape, dim_map, padding)]
@@ -2274,6 +2556,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           None -> ()
         }
         held = hold_view(held, next, GridViewRow("strided view"), dtype, tile_shape)
+        aims = follow(aims, view, next)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [StridedViewOf(d, dtype, view, tile_shape, traversal, dim_map, padding)]
@@ -2292,6 +2575,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
           ()
         }
         held = hold_view(held, next, GridViewRow("gather/scatter view"), dtype, tile_shape)
+        aims = follow(aims, view, next)
         let d = next
         next = mint(name, next, 1)
         ops = ops ++ [GatherViewOf(d, dtype, view, tile_shape, sparse_dim, padding)]
@@ -2320,6 +2604,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        check_write(name, frames, ops, roles, map.get(aims, view), writer(marks, calls, "atomic_red_view"))
         let tv = next
         next = mint(name, next, 1)
         ops = ops ++ [AtomicRedViewOf(tv, dtype, view, indices, mode, scope, value, tok)]
@@ -2359,6 +2644,7 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
         } else {
           ()
         }
+        check_write(name, frames, ops, roles, map.get(aims, view), writer(marks, calls, "store_view"))
         let tv = next
         next = mint(name, next, 1)
         ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok)]
@@ -3711,4 +3997,186 @@ test "knife D-1: a write the recording cannot place is refused in a fork, and wr
     }, () => store(x, idx_const(0), [8], t))
   })
   assert str.contains(looped, "the first writes elements 4 to 11 and the second 0 to 7")
+}
+
+# ---- knife C2: markers, roles, cells and entries
+
+# What a recording through markers answers: "accepted", or the refusal.
+fn marked[T](f: fn() -> T) -> String = match catch_panic(f) {
+  Ok(_) -> "accepted"
+  Err(e) -> e.message
+}
+
+test "knife C2: trace3 records the program trace_kernel records for the same body, the formats from the markers" {
+  let g = cells([1024], [128])
+  let (p, _e) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  assert p == trace_vadd()
+  let (q, _e2) = trace3("vadd", In(F64, Whole), Shared(F64), Shared(F64), vadd)
+  assert q == trace_vadd()
+  let (s, _e3) = trace2("scale_f32", In(F32, Whole), Out(F32, cells([64], [64])), scale_f32)
+  assert s.params == ["f32", "f32"]
+}
+
+# Each body writes parameter 0 one way; parameter 1 is the one it reads.
+fn into_first_store(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 8)
+  store(x, base, [8], load(y, base, [8]))
+}
+
+fn into_first_view(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let zero = idx_const(0)
+  let at = [block_id(0)]
+  let t = load_view(F64, partition_view(F64, tensor_view(F64, y, zero, [64], [1]), [8], [0], PadZero), at)
+  store_view(F64, partition_view(F64, tensor_view(F64, x, zero, [64], [1]), [8], [0], NoPadding), at, t)
+}
+
+fn into_first_ptrs(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 8)
+  let t = load(y, base, [8])
+  store_ptrs(F64, [8], ptr_offset(F64, [8], ptrs(x, [8]), lanes(base, [8])), t)
+}
+
+fn into_first_scatter(x: Param[F64], y: Param[F64]) -> Unit !Dev =
+  scatter(x, arange(8), [8], load(y, idx_const(0), [8]))
+
+fn into_first_atomic(x: Param[I32], y: Param[I32]) -> Unit !Dev = {
+  let _old = atomic_rmw(x, "add", arange(8), [8], load(y, idx_const(0), [8]))
+  ()
+}
+
+# A store through a pointer tile made from integers: the recording cannot
+# say which parameter it lands in.
+fn into_forged(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+  let t = load(y, idx_const(0), [8])
+  store_ptrs(F64, [8], int_to_ptr(F64, [8], ptr_to_int(F64, [8], ptrs(x, [8]))), t)
+}
+
+# A store into module memory, which is no parameter.
+fn into_global(x: Param[F64], _y: Param[F64]) -> Unit !Dev = {
+  d_global("scratch", F64, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+  store_ptrs(F64, [8], global_ptrs("scratch", F64, [8]), load(x, idx_const(0), [8]))
+}
+
+test "knife C2: every way of writing an In parameter is refused while the kernel records, by number and by the call that wrote" {
+  let g = cells([64], [8])
+  assert str.starts_with(marked(() => trace2("w", In(F64, g), Out(F64, g), into_first_store)),
+    "tileir: kernel `w`: op #5 `store`: parameter 0 is an In, and nothing writes an In")
+  assert str.starts_with(marked(() => trace2("w", In(F64, g), Out(F64, g), into_first_view)),
+    "tileir: kernel `w`: op #8 `store_view`: parameter 0 is an In, and nothing writes an In")
+  assert str.starts_with(marked(() => trace2("w", In(F64, g), Out(F64, g), into_first_ptrs)),
+    "tileir: kernel `w`: op #8 `store_ptrs`: parameter 0 is an In, and nothing writes an In")
+  assert str.starts_with(marked(() => trace2("w", In(F64, Whole), Shared(F64), into_first_scatter)),
+    "tileir: kernel `w`: op #4 `scatter`: parameter 0 is an In, and nothing writes an In")
+  assert str.starts_with(marked(() => trace2("w", In(I32, Whole), Shared(I32), into_first_atomic)),
+    "tileir: kernel `w`: op #4 `atomic_rmw`: parameter 0 is an In, and nothing writes an In")
+  # pointers made from integers aim nowhere the recording followed; with an
+  # In among the parameters that write cannot be told from one into it
+  assert str.starts_with(marked(() => trace2("w", Shared(F64), In(F64, g), into_forged)),
+    "tileir: kernel `w`: op #6 `store_ptrs`: it writes through pointers the recording cannot follow to a parameter")
+}
+
+test "knife C2: the same writes into an Out or a Shared parameter, and a store into module memory, are recorded" {
+  let g = cells([64], [8])
+  assert marked(() => trace2("w", Out(F64, g), In(F64, g), into_first_store)) == "accepted"
+  assert marked(() => trace2("w", Out(F64, g), In(F64, g), into_first_view)) == "accepted"
+  assert marked(() => trace2("w", Shared(F64), In(F64, g), into_first_ptrs)) == "accepted"
+  assert marked(() => trace2("w", Shared(F64), In(F64, Whole), into_first_scatter)) == "accepted"
+  assert marked(() => trace2("w", Shared(I32), In(I32, Whole), into_first_atomic)) == "accepted"
+  assert marked(() => trace2("w", In(F64, Whole), Shared(F64), into_global)) == "accepted"
+  # with no In at all, a write through forged pointers threatens nothing
+  assert marked(() => trace2("w", Shared(F64), Shared(F64), into_forged)) == "accepted"
+  # and trace_kernel knows no roles: it refuses none of these
+  assert marked(() => trace_kernel("w", ["f64", "f64"], () => into_first_store(param(F64, 0), param(F64, 1)))) == "accepted"
+}
+
+fn two(_x: Param[F64], _y: Param[F64]) -> Unit !Dev = ()
+
+fn three(_x: Param[F64], _y: Param[F64], _z: Param[F64]) -> Unit !Dev = ()
+
+fn never_runs(_x: Param[F64], _y: Param[F64]) -> Unit !Dev = panic("the body ran")
+
+test "knife C2: cells that disagree with one another or with the grid are refused before the body runs" {
+  # two Out cuts make two grids
+  assert str.starts_with(marked(() => trace2("g", Out(F64, cells([64], [8])), Out(F64, cells([64], [16])), never_runs)),
+    "tileir: kernel `g`: argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 4x1x1; one launch has one grid")
+  # an In dimension following axis 0 with 8 cells, on a grid of 16 blocks
+  assert str.starts_with(marked(() => trace2("g", In(F64, cells([1000], [128])), Out(F64, cells([2048], [128])), never_runs)),
+    "tileir: kernel `g`: argument 0 (In) has 8 cell(s) in dimension 0, which follows grid axis 0, and the grid has 16 block(s) there")
+  # a dynamic extent has to follow an axis: that is where its length comes from
+  assert str.starts_with(marked(() => trace2("g", In(F64, cells([DYN_DIM], [128], along: [FREE_AXIS])), Out(F64, cells([DYN_DIM], [128])), never_runs)),
+    "tileir: kernel `g`: argument 0 (In) has a dynamic extent in dimension 0, which follows no grid axis, so nothing says how long it is")
+  # an Out is cut, and cut along the grid's own axes
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, Whole), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) has no cells; the cells of the Out arguments are the grid")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along: [1, 0])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [1, 0]; an Out's cells are the grid, so its dimension k is axis k")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([2, 2, 2, 2], [1, 1, 1, 1])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) is cut 4 ways; its cells are the grid, and a grid has at most three axes")
+  # what only Tile IR asks of a cut
+  assert str.starts_with(marked(() => trace2("g", In(F64, cells([100], [100])), Out(F64, cells([100], [128])), never_runs)),
+    "tileir: kernel `g`: argument 0 (In) has a tile of [100]; every tile dimension is a power of two")
+  assert str.starts_with(marked(() => trace2("g", In(I32, cells([64], [8], pad: PadNegInf)), Out(I32, cells([64], [8])), (_x, _y) => ())),
+    "tileir: kernel `g`: argument 0 (In) is i32 and pads with neg_inf, which only a float format can hold")
+}
+
+test "knife C2: a matrix product's inputs follow one grid axis each, and a dynamic extent follows the grid" {
+  # A is [M, K] and follows axis 0 along M; B is [K, N] and follows axis 1
+  # along N; K is the loop's, so it follows neither. K != N on purpose.
+  assert marked(() => trace3("mm",
+    In(F64, cells([64, 32], [16, 8], along: [0, FREE_AXIS])),
+    In(F64, cells([32, 48], [8, 16], along: [FREE_AXIS, 1])),
+    Out(F64, cells([64, 48], [16, 16])), three)) == "accepted"
+  # the same A read as if its K followed axis 1 has 4 cells where the grid has 3
+  assert str.starts_with(marked(() => trace3("mm",
+    In(F64, cells([64, 32], [16, 8])),
+    In(F64, cells([32, 48], [8, 16], along: [FREE_AXIS, 1])),
+    Out(F64, cells([64, 48], [16, 16])), three)),
+    "tileir: kernel `mm`: argument 0 (In) has 4 cell(s) in dimension 1, which follows grid axis 1, and the grid has 3 block(s) there")
+  # extents the launch decides
+  assert marked(() => trace2("d", In(F64, cells([DYN_DIM], [128])), Out(F64, cells([DYN_DIM], [128])), two)) == "accepted"
+}
+
+# Three tensors of the lengths `n` on the fake device, `a` and `b` filled,
+# and `e` launched over them: as given (`swap` 0), with `a` as both inputs
+# (1), or with `a` as the output too (2).
+fn run_entry(e: Entry3[F64, F64, F64], n: List[Int], swap: Int,
+  grid: List[Int]) -> Result[List[Float], ForeignError] !Gpu = {
+  let a = alloc(F64, n[0])?
+  let b = alloc(F64, n[1])?
+  let o = alloc(F64, n[2])?
+  upload(a, list.map(range(0, n[0]), i => to_float(i)))?
+  upload(b, list.map(range(0, n[1]), i => to_float(2 * i)))?
+  if swap == 1 {
+    launch_entry3(e, a, a, o, grid: grid)?
+  } else if swap == 2 {
+    launch_entry3(e, a, b, a, grid: grid)?
+  } else {
+    launch_entry3(e, a, b, o, grid: grid)?
+  }
+  download(o)
+}
+
+fn launched(e: Entry3[F64, F64, F64], n: List[Int], swap: Int, grid: List[Int]) -> String !Gpu =
+  match run_entry(e, n, swap, grid) {
+    Ok(v) -> "${v[0]} ${v[3]} ${v[len(v) - 1]}"
+    Err(err) -> "${err.kind}: ${err.message}"
+  }
+
+test "knife C2: the entry trace3 answers runs on the fake device, and a launch it cannot vouch for is refused above the effect" {
+  let g = cells([256], [128])
+  let (_p, e) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  let rs = with_gpu_fake(reference_kernels(), () => [
+    launched(e, [256, 256, 256], 0, []),
+    launched(e, [256, 256, 256], 1, []),
+    launched(e, [256, 256, 256], 2, []),
+    launched(e, [256, 256, 256], 0, [3]),
+    launched(e, [256, 256, 200], 0, [])
+  ])
+  assert rs == [
+    "0.0 9.0 765.0",
+    "0.0 6.0 510.0",
+    "gpu.aliased_argument: gpu.launch_entry: kernel `vadd`: argument 0 (In) and argument 2 (Out) are one buffer (handle 7); an Out or Shared argument shares its buffer with no other",
+    "gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s) along axis 0 and the launch asks for 3",
+    "gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 2 (Out) holds 200 element(s) and its cells reach 256"
+  ]
 }

@@ -1,0 +1,63 @@
+# The two wrappers std/gpu's typed entries add (knife C2): `EntryArg`, a
+# plain wrapper over the role code and the cells of one argument, and
+# `Entry2[A, B]`, whose two parameters are the formats of the kernel's
+# arguments and appear nowhere in the target (one of `Entry1` to `Entry5`;
+# the five differ only in arity). Declared here rather than imported for the
+# reason phantom.dawn gives: the gate's substitution runs over this file,
+# and what it must flip is the declaration itself.
+#
+# On the opaque side the run pins, against each target, that identity is the
+# target's: `==` and hashing of an `EntryArg` and of an `Entry2[F64, F32]`
+# are those of the tuple under it. The parameters are bound from the
+# argument (`kernel_of(e)` needs no annotation), which the alias twin cannot
+# do: with `alias Entry2[A, B]` the argument is a bare tuple and `A` and `B`
+# have nothing to bind from, so the call is refused with "cannot infer type
+# parameter(s)" and nothing else. `EntryArg` alone would compare clean both
+# ways; it rides in this case so the two declarations stay one corpus entry.
+# twin-infer-only: `Entry2[A, B]` is a phantom over both parameters; once it
+#   is an alias they have nothing to bind from, so the alias side is refused
+#   by inference alone
+use std/map
+
+type F64 = F64
+type F32 = F32
+
+opaque type EntryArg = (Int, List[Int], List[Int], List[Int])
+opaque type Entry2[A, B] = (String, List[EntryArg])
+
+fn kernel_of[A, B](e: Entry2[A, B]) -> String = {
+  let p: (String, List[EntryArg]) = e
+  let (k, _args) = p
+  k
+}
+
+fn same(what: String, a: String, b: String) -> Unit =
+  if a != b { panic("an entry disagrees with its tuple about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
+
+pub fn main() -> Unit !io = {
+  let x: EntryArg = (0, [1000], [128], [0])
+  let y: EntryArg = (0, [1000], [128], [0])
+  let z: EntryArg = (1, [1000], [128], [0])
+  let rx: (Int, List[Int], List[Int], List[Int]) = (0, [1000], [128], [0])
+  let rz: (Int, List[Int], List[Int], List[Int]) = (1, [1000], [128], [0])
+  same("== of an argument", to_string(x == y), to_string(rx == rx))
+  same("== across roles", to_string(x == z), to_string(rx == rz))
+
+  let a: Entry2[F64, F32] = ("vadd", [x, z])
+  let b: Entry2[F64, F32] = ("vadd", [y, z])
+  let c: Entry2[F64, F32] = ("vsub", [x, z])
+  let ra: (String, List[(Int, List[Int], List[Int], List[Int])]) = ("vadd", [rx, rz])
+  let rc: (String, List[(Int, List[Int], List[Int], List[Int])]) = ("vsub", [rx, rz])
+  same("== of an entry", to_string(a == b), to_string(ra == ra))
+  same("== across kernels", to_string(a == c), to_string(ra == rc))
+
+  let m: Map[Entry2[F64, F32], Int] = map.from([(a, 1), (c, 2)])
+  let n: Map[(String, List[(Int, List[Int], List[Int], List[Int])]), Int] = map.from([(ra, 1), (rc, 2)])
+  same("hash lookup", to_string(map.get(m, b)), to_string(map.get(n, ra)))
+  same("distinct keys", to_string(map.len(m)), to_string(map.len(n)))
+
+  # both phantoms are bound from the argument, no annotation needed
+  println(kernel_of(a))
+  println(kernel_of(c))
+  println("entry-twin ok")
+}
