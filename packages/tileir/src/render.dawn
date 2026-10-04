@@ -19,8 +19,9 @@ use std/str
 use std/gpu.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
   Dev, Param, param, block_id, tile_at, load, store, addf, idx_const, d_for, d_global, global_ptrs, load_ptrs, t_block_id,
-  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, s_maxf, f_const, lt, d_assert, spread, mul, s_gt }
-use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, s_maxf, f_const, lt, d_assert, spread, mul, s_gt,
+  load_cell, store_cell }
+use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
@@ -1661,4 +1662,41 @@ test "a global's line belongs to the call that declared it" {
   assert m.head == [(1, 2), (3, 5)]
   let n = len(str.split(m.text, "\n")) - 1
   assert list.all(range(1, n + 1), k => owners(all_ranges(m), k) == 1)
+}
+
+# ---- the batch's PR-1: where an In's alignment claim goes ----
+
+fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
+  store_cell(o, addf(F64, [128], load_cell(a), load_cell(b)))
+
+test "PR-1: an In's cell view claims 16-byte alignment on the parameter itself, ahead of the view, and an Out's claims nothing" {
+  let g = cells([1024], [128])
+  let (p, _e) = trace3("vadd_cells", In(F64, g), In(F64, g), Out(F64, g), vadd_cells)
+  let k = lower(p)
+  let none: Option[Int] = None
+  let claims = list.filter(k.body, i => match i {
+    AssumeTile(_d, _src, _pred, _t) -> true
+    _ -> false
+  })
+  assert claims == [
+    AssumeTile(1, Arg(0), DivBy(16, none, none), Tile([], PtrTo("f64"))),
+    AssumeTile(9, Arg(1), DivBy(16, none, none), Tile([], PtrTo("f64")))
+  ]
+  # each view starts from the claim or, for the Out, from the bare
+  # parameter; no `offset` sits between a parameter and a view
+  let bases = list.map(list.filter(k.body, i => match i {
+    MakeTensorView(_d, _base, _bt, _t, _ds, _dst, _it) -> true
+    _ -> false
+  }), i => match i {
+    MakeTensorView(_d, base, _bt, _t, _ds, _dst, _it) -> base
+    _ -> Arg(9)
+  })
+  assert bases == [Val(1), Val(9), Arg(2)]
+  assert not list.any(k.body, i => match i {
+    Offset(_d, _p, _o, _pt, _ot) -> true
+    _ -> false
+  })
+  let text = render(p)
+  assert str.contains(text, "%1 = assume div_by<16>, %arg0 : tile<ptr<f64>>")
+  assert str.contains(text, "make_tensor_view %arg2, shape = [1024], strides = [1]")
 }
