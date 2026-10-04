@@ -178,7 +178,9 @@ fetch 失败或版本不认识时面板照旧只搜标题，底栏照旧写「�
     （单元格里的 `|` 在反引号内不作分隔）。
 - **围栏语言**：`dawn` → 构建期高亮，教程里另挂 Playground 链接；`dawn skip-check` →
   解析成 `Fragment`，同样高亮但**不挂** Playground 链接（它不是能单独跑的程序，链过去
-  必然失败）；`output` → 输出块（CSS 加角标，英文页 Output、中文页「输出」）；其余
+  必然失败）；`dawn run deps=tileir` → 解析成 `Program`（带包名），与其后的 `output` 仍合成
+  一个窗口、窗口条标 `dawn · tileir`，但**不挂** Playground 链接（Playground 只跑单文件、
+  没有包）；`output` → 输出块（CSS 加角标，英文页 Output、中文页「输出」）；其余
   （`bash`、裸块）→ 只转义不高亮。
 - **转义**：文本位置用 `escape_html`（`&<>`），属性值一律用 `escape_attr`（再加 `"`，#316）。
 - **锚点**：标题用编号 id（`#s2-3` = 第 2 节第 3 小节），不做中文 slug。

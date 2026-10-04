@@ -20,8 +20,10 @@ gets disabled, and then it protects nothing):
   version   every documented claim about the *current* toolchain version
             equals `selfhost/src/version.dawn`
   blocks    every fenced block marked ```dawn run / ```dawn compile is
-            compiled (and run) by the toolchain, and wherever an ```output
-            fence follows a ```dawn run block, stdout equals it byte for byte
+            compiled (and run) by the toolchain (a `deps=<package>` block as
+            a project depending on packages/<package>), and wherever an
+            ```output fence follows a ```dawn run block, stdout equals it
+            byte for byte
   fences    every ```dawn fence in the tutorial declares which of the three
             kinds it is, and every exemption states its reason
   pages     every whole program the website ships runs and prints exactly the
@@ -68,7 +70,22 @@ exemption is unbounded is a gate with no lower bound on its coverage.
                      records what it printed. The criterion is mechanical and
                      the obligation runs one way -- a block that CAN be a
                      whole program MUST be one, and MUST record its output.
-                     39 of the tutorial's 44 dawn fences are this.
+                     40 of the tutorial's 45 dawn fences are this.
+  ```dawn run deps=tileir
+                     The same kind, for a whole program that needs one of
+                     this repository's packages: it is run as a project whose
+                     dawn.toml lists each named package under [deps]. Only
+                     directory names under packages/ are accepted, never a
+                     path, so the fence can only point at what a reader has
+                     in the same checkout. It is a qualifier on `run` and
+                     not a fourth kind on purpose: a block that can run must
+                     run, and needing a package is not a reason to stop
+                     comparing its output. Before it existed the GPU part of
+                     the tutorial could show only std/gpu's host half,
+                     because a kernel needs packages/tileir. The site
+                     renders such a block with its output but without a
+                     Playground link (the Playground runs one file).
+                     One of the 40 is this.
   ```dawn skip-check A block that cannot be a whole program for a reason in
                      the language rather than in the author's effort. Each of
                      today's five is one file of a multi-file example: two
@@ -4469,6 +4486,67 @@ def fences(text: str) -> list[tuple[str, str, int]]:
             for m in FENCE.finditer(text)]
 
 
+# `deps=tileir,tileref`: the packages a block needs, by directory name under
+# packages/. A name rather than a path, so the fence says *which* of this
+# repository's packages the example uses and nothing else: a path would let a
+# tutorial example depend on a scratch directory, a sibling checkout or an
+# examples/ project, none of which the reader who copies the block has.
+DEPS_PREFIX = "deps="
+PACKAGE_NAME = re.compile(r"[a-z][a-z0-9_-]*")
+
+
+def block_deps(words: list[str]) -> tuple[list[str], str | None]:
+    """The packages a fence's info words ask for, and why they are refused if
+    they are. `([], None)` for a fence with no `deps=` word.
+
+    One word, after the mode, and only on `run`: `compile` is `dawn check` on
+    one file and has no project to put a [deps] table in, and a skip-check
+    fragment is not compiled at all, so a dependency on either would be a
+    statement nothing reads."""
+    found = [w for w in words[2:] if w.startswith(DEPS_PREFIX)]
+    if not found:
+        return [], None
+    if len(found) > 1:
+        return [], "names `deps=` twice; list every package in one word, comma-separated"
+    if words[1:2] != ["run"]:
+        return [], "has `deps=` on a block that is not ```dawn run"
+    names = found[0][len(DEPS_PREFIX):].split(",")
+    for name in names:
+        if not PACKAGE_NAME.fullmatch(name):
+            return [], (f"names {name!r} in `deps=`, which is not a package name "
+                        f"(a directory under packages/, never a path)")
+        if not (ROOT / "packages" / name / "dawn.toml").is_file():
+            return [], (f"names {name!r} in `deps=`, but packages/{name}/dawn.toml "
+                        f"does not exist")
+    if len(set(names)) != len(names):
+        return [], "names a package twice in `deps=`"
+    return names, None
+
+
+def deps_project(block_dir: pathlib.Path, deps: list[str], body: str) -> pathlib.Path:
+    """A throwaway project around one block: the block as src/main.dawn, and a
+    dawn.toml whose [deps] points at each package by a path relative to the
+    project, the way examples/projects/gpu_fake/dawn.toml does. Relative
+    because that is the form the repository's own consumers use and so the one
+    known to resolve; whether an absolute path dependency is accepted was not
+    the question this needs answered."""
+    (block_dir / "src").mkdir(parents=True, exist_ok=True)
+    (block_dir / "src" / "main.dawn").write_text(body, encoding="utf-8")
+    lines = ["schema = 1", f'name = "{block_dir.name}"', 'version = "0.0.0"', "", "[deps]"]
+    for name in deps:
+        rel = os.path.relpath(ROOT / "packages" / name, block_dir)
+        lines.append(f'{name} = "{pathlib.Path(rel).as_posix()}"')
+    (block_dir / "dawn.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return block_dir
+
+
+# One `dawn run` per distinct (dependencies, program). check_deps_selftest
+# re-checks a tutorial block with its recorded output altered, and the program
+# it would run is byte for byte the one check_blocks already ran: a cache keeps
+# the negative control from costing a second compile of the package.
+_RUN_CACHE: dict[tuple[str, tuple[str, ...], str], subprocess.CompletedProcess | None] = {}
+
+
 def check_blocks(path: pathlib.Path, text: str,
                  work: pathlib.Path) -> tuple[list[str], int, int]:
     """Compile (and run) the marked blocks, and hold the run ones to the output
@@ -4480,7 +4558,12 @@ def check_blocks(path: pathlib.Path, text: str,
     falsehood and passes the gate. All 29 of the tutorial's recorded outputs
     were correct when the comparison was added -- which is the expected result
     and not evidence the comparison is unnecessary, since nothing had been
-    reading them and nothing would have said so if they had drifted."""
+    reading them and nothing would have said so if they had drifted.
+
+    A ```dawn run deps=<pkg> block is run as a project rather than as a file
+    (see deps_project). It is still a whole program held to its output; the
+    only thing it has that a one-file block lacks is a [deps] table, which one
+    file cannot carry."""
     bad: list[str] = []
     checked = recorded = 0
     blocks = fences(text)
@@ -4496,14 +4579,24 @@ def check_blocks(path: pathlib.Path, text: str,
         words = info.split()
         if not words or words[0] != "dawn":
             continue
+        deps, why = block_deps(words)
+        if why is not None:
+            bad.append(f"{rel}:{line}: ```{info} {why}")
+            continue
         mode = words[1] if len(words) > 1 else None
         if mode not in ("run", "compile"):
             continue
         checked += 1
-        src = doc_dir / f"block_{i}.dawn"
-        src.write_text(body, encoding="utf-8")
-        cmd = [str(DAWN), "run" if mode == "run" else "check", str(src)]
-        r = run_example(cmd)
+        if deps:
+            src = deps_project(doc_dir / f"block_{i}", deps, body)
+        else:
+            src = doc_dir / f"block_{i}.dawn"
+            src.write_text(body, encoding="utf-8")
+        key = (mode, tuple(deps), body)
+        if key not in _RUN_CACHE:
+            cmd = [str(DAWN), "run" if mode == "run" else "check", str(src)]
+            _RUN_CACHE[key] = run_example(cmd)
+        r = _RUN_CACHE[key]
         if r is None:
             bad.append(f"{rel}:{line}: ```{info} block did not finish within "
                        f"{EXAMPLE_TIMEOUT}s (an example that loops or waits on "
@@ -4533,6 +4626,67 @@ def check_blocks(path: pathlib.Path, text: str,
     return bad, checked, recorded
 
 
+def check_deps_selftest(texts: dict[pathlib.Path, str],
+                        work: pathlib.Path) -> tuple[list[str], int]:
+    """`deps=` is a way for a block to be run differently, which makes it a way
+    for a block to stop being run at all: a project whose dawn.toml is wrong, or
+    an output comparison skipped on the project path, would leave every such
+    block green. So each refusal is shown to fire, on the tutorial's own first
+    `deps=` block rather than on a fixture, so that the controls exercise the
+    path the real blocks take.
+
+    The tutorial must have one. A rule with no call site is green for the same
+    reason a working rule is, which is the thing the module docstring says this
+    file must not grow."""
+    tutorial = ROOT / "docs" / "tutorial.md"
+    blocks = fences(texts.get(tutorial, ""))
+    at = next((i for i, (info, _body, _line) in enumerate(blocks)
+               if info.split()[:2] == ["dawn", "run"]
+               and block_deps(info.split())[0]
+               and i + 1 < len(blocks) and blocks[i + 1][0] == "output"), None)
+    if at is None:
+        return [f"deps self-test: docs/tutorial.md has no ```dawn run deps= block "
+                f"with its output, so nothing shows the rule runs"], 0
+    info, body, _line = blocks[at]
+    real_out = blocks[at + 1][1]
+    deps_word = next(w for w in info.split() if w.startswith(DEPS_PREFIX))
+
+    def doc(fence_info: str, out: str) -> str:
+        return f"```{fence_info}\n{body}```\n```output\n{out}```\n"
+
+    # Every mutant but the first is refused before anything runs, and the first
+    # is the real block's program, already run: these cost no compile.
+    mutants = [
+        ("an altered recorded output", info, real_out + "x\n"),
+        ("a package that does not exist", f"dawn run {DEPS_PREFIX}tilier", real_out),
+        ("a path instead of a package name", f"dawn run {DEPS_PREFIX}../packages/tileir", real_out),
+        ("an absolute path", f"dawn run {DEPS_PREFIX}/tmp", real_out),
+        ("`deps=` on a compile block", f"dawn compile {deps_word}", real_out),
+        ("`deps=` on a skip-check fragment", f"dawn skip-check {deps_word}", real_out),
+        ("`deps=` named twice", f"{info} {deps_word}", real_out),
+    ]
+    bad: list[str] = []
+    seen = 0
+    sandbox = work / "deps-selftest"
+    for what, fence_info, out in mutants:
+        problems, _n, _m = check_blocks(tutorial, doc(fence_info, out), sandbox)
+        if not problems:
+            bad.append(f"deps self-test: a block with {what} (```{fence_info}) passed")
+        seen += 1
+    problems, _n, _m = check_blocks(tutorial, doc(info, real_out), sandbox)
+    if problems:
+        bad.append(f"deps self-test: the unaltered block failed: {problems[0]}")
+    seen += 1
+    # a misspelt marker would otherwise run the block as one file and fail on a
+    # missing module, which is red but names the wrong cause
+    policy, _n = check_fence_policy(tutorial, doc("dawn run dep=" + deps_word[len(DEPS_PREFIX):],
+                                                  real_out))
+    if not policy:
+        bad.append("deps self-test: an unknown word on a ```dawn run fence passed the fence policy")
+    seen += 1
+    return bad, seen
+
+
 def check_fence_policy(path: pathlib.Path, text: str) -> tuple[list[str], int]:
     """In the tutorial, every dawn fence declares its kind and every exemption
     states its reason. See the module docstring for the three kinds."""
@@ -4556,6 +4710,11 @@ def check_fence_policy(path: pathlib.Path, text: str) -> tuple[list[str], int]:
         seen += 1
         mode = words[1] if len(words) > 1 else None
         if mode == "run":
+            unknown = [w for w in words[2:] if not w.startswith(DEPS_PREFIX)]
+            if unknown:
+                bad.append(f"{rel}:{line}: ```{info} -- {unknown[0]!r} is not a "
+                           f"marker; a ```dawn run fence takes `{DEPS_PREFIX}<package>"
+                           f"[,<package>]` and nothing else")
             nxt = blocks[i + 1][0] if i + 1 < len(blocks) else None
             if nxt != "output":
                 bad.append(f"{rel}:{line}: ```dawn run block has no ```output "
@@ -4827,6 +4986,10 @@ def main() -> None:
             problems += bad
             blocks += n
             recorded += m
+        # after every document, so the real block it reuses has already run
+        bad, n = check_deps_selftest(texts, work)
+        problems += bad
+        selftests_seen += n
 
     if problems:
         for p in problems:
