@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ da907160ca4cc7f1 -->
+<!-- doc-check: translation-of docs/spec.md @ a67706fb82bba84e -->
 
 # Dawn Language Specification
 
@@ -2990,7 +2990,9 @@ right-hand side of a top-level `const` is implicitly in a comptime context.
    and `range`, list slicing, `join`, `code_points`/`from_code_points`, case mapping,
    string slicing and quoting by the elements or code points they produce. The budget
    so bounds memory and the time of one step as well: doubling `s = s ++ s` pays the
-   length of its result each time, not a few steps.
+   length of its result each time, not a few steps. A count too large for an `Int` (a
+   `range` whose ends are further apart than an `Int` can say, for instance) is over any
+   budget, not zero.
 4. There is no Java interop and no io inside comptime (constraint 1 guarantees this
    automatically).
 5. Pure does not mean foldable: some pure builtins are refused at comptime too, because the

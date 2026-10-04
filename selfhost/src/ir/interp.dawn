@@ -453,9 +453,14 @@ fn burn(st: ESt, env: Env) -> ER =
 ## The unit is the one the language defines and both hosts agree on, elements
 ## for a List and code points for a String, so a fold runs out of fuel at the
 ## same place on the JVM and native compilers.
+##
+## A negative `n` is over budget, not free. Every caller computes `n` as a
+## size, and the only way a size comes out negative is a subtraction that
+## wrapped: `range(-2, MAX)` asked for 2^63 elements and was charged nothing,
+## and the loop that built them is not one this counter sees. A caller whose
+## count can legitimately be empty clamps to zero itself, before calling.
 fn burn_n(st: ESt, env: Env, n: Int) -> ER = {
-  let cost = if n > 0 { n } else { 0 }
-  let left = st.fuel - cost
+  let left = if n < 0 { -1 } else { st.fuel - n }
   if left < 0 {
     cerrh(st, env, "fuel exhausted — evaluation did not finish within the step budget",
       "raise it with --comptime-fuel, or simplify the computation")
@@ -1461,8 +1466,12 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     let xs = as_list(args[0])
     let from = as_int(args[1])
     let to = as_int(args[2])
-    let (st1, _, _) = burn_n(st, env, (if to < len(xs) { to } else { len(xs) }) - from)?
-    Ok((st1, env, VList(list.take(list.drop(xs, from), to - from))))
+    # clamped into the list before subtracting, so the count is the number of
+    # elements produced and cannot wrap
+    let lo = if from < 0 { 0 } else if from > len(xs) { len(xs) } else { from }
+    let hi = if to < lo { lo } else if to > len(xs) { len(xs) } else { to }
+    let (st1, _, _) = burn_n(st, env, hi - lo)?
+    Ok((st1, env, VList(list.take(list.drop(xs, lo), hi - lo))))
     # the placeholder a match or if result slot is declared with; every path
     # assigns before reading, so its value is never observed
   } else if name == "null_ref" {
@@ -1470,7 +1479,10 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "range" {
     let from = as_int(args[0])
     let to = as_int(args[1])
-    let (st1, _, _) = burn_n(st, env, to - from)?
+    # An empty range costs nothing. Otherwise `to - from` is the count, and it
+    # is negative exactly when the length does not fit in an Int, which
+    # `burn_n` treats as over any budget.
+    let (st1, _, _) = burn_n(st, env, if to <= from { 0 } else { to - from })?
     var out: List[CValue] = []
     var i = from
     while i < to {
