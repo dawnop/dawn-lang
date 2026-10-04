@@ -80,6 +80,7 @@ use ir/core.{CModule, CValue, CMode}
 use ir/reach
 use ir/reach.{Live}
 use ir/lower
+use ir/lint
 use c/rc
 use c/infer
 use c/cdriver
@@ -482,6 +483,26 @@ fn collect_program_roots(
   for cm in mods {
     user_lm = user_lm ++
       [lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true)]
+  }
+  # `DAWN_CORE_LINT=1`: hold the Core both lists hold to the invariants
+  # lowering owes a backend (ir/lint.dawn), before anything reads it.
+  if lint.enabled() {
+    var found: List[lint.Violation] = []
+    var linted: List[CModule] = []
+    var si = 0
+    for sm in std_mods {
+      let (cls, _cx3, tm3, _ct3) = sm
+      found = found ++ lint.check_module(cls, tm3, std_lm[si])
+      linted = linted ++ [lower.emitted_core(std_lm[si])]
+      si = si + 1
+    }
+    var ui = 0
+    for cm in mods {
+      found = found ++ lint.check_module(cm.class_name, cm.tm, user_lm[ui])
+      linted = linted ++ [lower.emitted_core(user_lm[ui])]
+      ui = ui + 1
+    }
+    lint.enforce(found ++ lint.lint_program(adts, linted))
   }
 
   # What the user's modules can reach (reach.dawn), which answers two

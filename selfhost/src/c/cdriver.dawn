@@ -19,6 +19,7 @@ use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/analyze.{CheckedMod, Program, analyze_program, load_target}
 use check/jsig.{jsig_refused}
 use ir/lower
+use ir/lint
 use c/rc
 use c/infer
 use c/infer.{ForcedMode}
@@ -379,27 +380,25 @@ fn build_units(
   # `pre` carries the un-counted Core in EmitMod's own shape.
   var pre: List[EmitMod] = []
   var entry = ""
+  # `DAWN_CORE_LINT=1` (ir/lint.dawn): the pairing half is read per module
+  # here, where the checker's module is still at hand; the rest once every
+  # module is lowered, below.
+  let linting = lint.enabled()
+  var found: List[lint.Violation] = []
   for sm in std.mods {
     let (cls, cx, tm, ct) = sm
-    let core =
-      if std_tests {
-        named_tests(lower.emitted_core(lower.lower_module_full(cls, tm, traits,
-          impl_table, adts, prog_fns, true)))
-      } else {
-        lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
-      }
+    let lm = lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests)
+    if linting { found = found ++ lint.check_module(cls, tm, lm) }
+    let core = if std_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
       EmitMod { m: core, consts: merged_consts(cx, ct, const_vals), blocks: ct.blocks }
     ]
   }
   for cm in prog.modules {
-    let core =
-      if with_tests {
-        named_tests(lower.emitted_core(lower.lower_module_full(cm.class_name, cm.tm, traits,
-          impl_table, adts, prog_fns, true)))
-      } else {
-        lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)
-      }
+    let lm = lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns,
+      with_tests)
+    if linting { found = found ++ lint.check_module(cm.class_name, cm.tm, lm) }
+    let core = if with_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
       EmitMod { m: core, consts: merged_consts(cm.cx, cm.ct, const_vals), blocks: cm.ct.blocks }
     ]
@@ -421,6 +420,7 @@ fn build_units(
   # table the rewrite used.
   var cores: List[CModule] = []
   for u2 in pre { cores = cores ++ [u2.m] }
+  if linting { lint.enforce(found ++ lint.lint_program(adts, cores)) }
   let inferred0 = infer.infer_modes(cores)
   var forced: List[ForcedMode] = []
   for fl in flips {
