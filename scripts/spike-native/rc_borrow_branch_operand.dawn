@@ -1,0 +1,74 @@
+# A parameter in an arm of an if, a match or a block, where that branching
+# value is itself read in a borrow position. The rewrite cannot lend a value
+# it has to choose, so it builds the value owned, names it and drops the name
+# after the read; the parameter in the arm is therefore handed over, and the
+# mode inference has to count it as consumed (dawn-lang #499).
+
+type P = { name: String, n: Int }
+
+# `xs ++ [x]` lowers to list_push(xs, x), which borrows the element
+fn push_if(xs: List[String], c: Bool, v: String) -> List[String] = xs ++ [if c { v } else { "z" }]
+
+fn push_match(xs: List[String], o: Option[Int], v: String) -> List[String] =
+  xs ++ [match o {
+    Some(n) -> if n > 0 { v } else { "neg" }
+    None -> "none"
+  }]
+
+fn push_block(xs: List[String], v: String) -> List[String] =
+  xs ++ [{
+    let n = len(xs)
+    if n > 1 { v } else { "short" }
+  }]
+
+fn push_nested(xs: List[List[String]], c: Bool, v: String) -> List[List[String]] =
+  xs ++ [[if c { v } else { "z" }, "w"]]
+
+# the other borrow positions: a primitive, an operator, a projection, a
+# borrowed parameter of a plain function, and a discarded value
+fn len_if(c: Bool, v: List[Int], w: List[Int]) -> Int = len(if c { v } else { w })
+
+fn concat_if(c: Bool, v: String, w: String) -> String = (if c { v } else { w }) ++ "!"
+
+fn field_if(c: Bool, p: P, q: P) -> String = (if c { p } else { q }).name
+
+fn field_match(o: Option[Int], p: P, q: P) -> Int =
+  (match o {
+    Some(_) -> p
+    None -> q
+  }).n
+
+fn count(s: List[Int]) -> Int = len(s)
+
+fn call_if(c: Bool, v: List[Int], w: List[Int]) -> Int = count(if c { v } else { w })
+
+fn discard_if(c: Bool, v: String, w: String) -> Int = {
+  let _ = if c { v } else { w }
+  1
+}
+
+pub fn main() -> Unit !io = {
+  let a = "kept"
+  println(to_string(push_if(["a"], true, a)))
+  println(to_string(push_if(["a"], false, a)))
+  println(to_string(push_match(["b"], Some(1), a)))
+  println(to_string(push_match(["b"], Some(-1), a)))
+  println(to_string(push_match(["b"], None, a)))
+  println(to_string(push_block(["c", "d"], a)))
+  println(to_string(push_block(["c"], a)))
+  println(to_string(push_nested([["e"]], true, a)))
+  println(to_string(len_if(true, [1, 2], [3])))
+  println(to_string(len_if(false, [1, 2], [3])))
+  println(concat_if(true, a, "other"))
+  println(concat_if(false, a, "other"))
+  let p = P { name: "p", n: 1 }
+  let q = P { name: "q", n: 2 }
+  println(field_if(true, p, q))
+  println(field_if(false, p, q))
+  println(to_string(field_match(Some(0), p, q)))
+  println(to_string(field_match(None, p, q)))
+  println(to_string(call_if(true, [1, 2, 3], [4])))
+  println(to_string(discard_if(true, a, "x")))
+  # the arguments are still alive after every call above
+  println(a ++ " " ++ p.name ++ " " ++ q.name)
+}
