@@ -363,6 +363,69 @@ api-diff 驱动的强制 bump（独立议题）。
 3. **项目 B（Dawn 源码包）** — 第一个用户就是把 `web/` 从 backend-dawn 拆出来变成真包。
    它已经证明自己够格了（523 行漂移 + 自带测试）。
 
+## 九、各包为什么是包（2026-10-05 从包 README 移入）
+
+2026-10-05 起，`packages/*/README.md` 只写调用者要知道的东西：一句话简介、最小用法、
+契约。版本迁移挪进各包 `CHANGELOG.md`（英文），设计理由挪到 docs/。理由已经写在别的
+设计文档里的，这里只给链接；下面是当时只写在 README 里、别处没有的部分。
+
+**共同的一条。** 不进 std 的判据是「语言里没有东西以它为定义，它也不需要 intrinsic」；
+std 模块随每个程序编译，所以够不上这条的就是包（审计 RD-09，
+[`audit/re-audit-2026-07-30.md`](audit/re-audit-2026-07-30.md)）。下面三个包还在自举闭包里：
+`selfhost/dawn.toml`（`fspath`、`sha2` 也在 `compiler-plan/dawn.toml`）把它们列在 `[deps]`，
+所以每次修改都要能被钉住的种子编译，返回值一变就是编译器自己的行为在变；改动会碰到
+哪些门禁，问 `scripts/gate-map/gatemap.py`，其中必有 `selfhost-run-diff.sh` 与
+`selfhost-prev-diff.sh`。
+
+- **fspath。** 名字不叫 `path`：导入模块的别名与局部名共用一个命名空间，而 `path` 是最常见
+  的局部名之一。分隔符钉 `/`：C 运行时自己的文件系统原语就写 `/`，语言的文件系统契约本来
+  就是 POSIX 形状。`scripts/path-contract/run.sh` 拿 `java.nio.file.Path.normalize`
+  （本包出现前编译器用的就是它）对拍。
+- **json。** 编译器的语言服务器用它读写 JSON-RPC（`selfhost/src/lsp/server.dawn`），所以
+  `selfhost-lsp-diff.sh` 的会话随它而动；站点、playground、`packages/web`、`packages/tea-dom`
+  也依赖它。成为包是为了结束拷贝：`[deps]` 出现前它被 vendor 了四份、三个版本（本文 §一）。
+  `scripts/json-suite.sh` 跑 JSONTestSuite（接受的用例还要经得起 parse、render、再 parse 不变）。
+- **sha2。** 包管理器的内容寻址（`d1:` 树哈希）用它算，算错会让每个锁定的包失效。写它是为了
+  让包管理器不再走 `java.security`：哈希是字节上的算术，信任根没有理由是宿主服务。两条更快的
+  路都有意关着：`MessageDigest`（约快 150 倍，但把信任根放回宿主）和 `sha256` 运行时
+  intrinsic（同一条反对理由下沉一层，还给每个后端多一份契约）。API 做成增量的，因为调用者
+  就是增量的：树哈希一个文件接一个文件地喂，一次性摘要得先把整棵树拼起来。慢（约 7.7 MB/s），
+  数字与已做的事在 `src/sha256.dawn` 文件头。
+- **tea_core 与 tea_term 分两个包。** `runtime.run` 有效果行、`use std/io`，不是终端的宿主
+  不该为了拿到 reconciler 把它拉进来；能把这件事说给机器听而不只是说给读者听的，语言里只有
+  包边界。另有一处形状是被迫的：orphan rule 按模块算，`impl[M] Tree[Widget[M]]` 只能住在声明
+  `Widget` 的文件里。reconciler 契约的几处取舍：`relate` 只被问到 `==` 已判不等的对，
+  所以词汇不必重比 `==` 已定的字段；`key` 是 `String`，因为类型声明约束不了自己的参数、无界
+  投影又解不出来，身份只能用 core 已经认识的类型拼；同一堵墙也让原地更新 `SetSelf` 携带整个
+  节点而不是属性，何况单子包装器没有「没有孩子」的写法。DOM 一侧的契约见
+  [dom-bridge-design.md](dom-bridge-design.md) §5、§6。终端上
+  `diff` 至今没有生产调用者（呈现器的增量是行而不是节点），由
+  `scripts/tea-reconciler-contract` 的预言机与变异体代为守着。
+- **tileref。** 迁出 `std/gpu` 的理由与实测在 [tile-backend-design.md](tile-backend-design.md)
+  §5.3；不依赖 `tileir` 由 `scripts/leetgpu-diff/check.py` 读 manifest 强制。
+- **inflate。** 默认上界与它的数值依据在 [inflate-default-cap-design.md](inflate-default-cap-design.md)；
+  `_bounded` 合并在 [std-defaults-design.md](std-defaults-design.md)。游标 `inflate_from` 留在
+  `deflate` 一个模块里是有意的：Dawn 有模块私有、没有包私有，另立一个「internal」模块照样是
+  用户够得着的 API，只是不承认。`scripts/inflate-contract/run.sh` 拿 `java.util.zip` 对拍，
+  末两腿在 256 MB 堆里跑 512 MB 炸弹，把默认改回 `None` 就是 OutOfMemoryError 而不是通过。
+- **web。** 封闭的 status/method 类型、受检 `HeaderName`/`HeaderValue`、`max-body:<bytes>` tag
+  为什么不做，见 [web5-design.md](web5-design.md) §三、§六；后缀函数并成默认参数与「6.0 不并
+  `serve_app_with`、`json_ok`、`hi < 0` 哨兵」见 [std-defaults-design.md](std-defaults-design.md)。
+  README 里另有两条只在那里写过：4.0 把 `Request.body` 换成线上字节，是因为有损解码在信任边界
+  上是错的默认（畸形 body 被静默改写，其中的 U+FFFD 与客户端真发的分不开），拒成 `400` 与
+  axum、actix-web 对同一输入的做法一致；6.1 收紧头值到 ASCII 只升 minor，是因为签名不变、
+  仍被接受的值照原样上线，新拒的那些本来就没有按原样上线过（JDK 只取每个 char 的低字节），
+  3.1、3.2 收紧响应时也是 minor。
+- **tea_dom。** `moveBefore`（DOM 保状态的移动，会省掉那对回调）暂不采用：Safari 没有实现、
+  无法 polyfill，它买的是保住的状态（动画进度、`iframe`、`popover`/`dialog`）而不是速度。下列
+  任一条成立就重开：WebKit bug 281223 进 RESOLVED；React 的 `enableMoveBefore` 默认打开；
+  有消费者给装着 `iframe`、长动画或 `popover`/`dialog` 的列表加了 key；有消费者发了实现
+  `connectedMoveCallback` 的 widget。监听器还声明不了 `preventDefault`、passive、防抖、
+  宿主本地求值的谓词，对每轮都整模型过线的边界，能拦住一轮的谓词比一轮能带的任何东西都值钱；
+  `On` 是 record，所以加一条是加字段。`to_html` 不做原始 HTML 节点（每个 `match` 都要多学一个
+  构造器）、不做美化输出（标签间的空白是文本节点，子下标就是线上地址）、不做水合（桥靠追加
+  挂载，接管打印出的 DOM 是改桥的事）。
+
 ---
 
 ## 附录：项目 A 实施细节
