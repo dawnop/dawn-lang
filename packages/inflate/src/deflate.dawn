@@ -87,43 +87,34 @@ type Huff = { counts: List[Int], symbols: List[Int] }
 const MAX_BITS: Int = 15
 
 ## Build the table from a code length per symbol (0 = symbol unused).
+##
+## Linear in the number of symbols: one pass per code length, each appending.
+## The first version placed every symbol with a list update that copied the
+## whole list, which made a table cost the square of its size; a stream of
+## empty blocks spends almost no input per table, so that square was the
+## decoder's running time per input byte.
 fn huff_of(lengths: List[Int]) -> Huff = {
   var counts: List[Int] = []
-  var i = 0
-  while i <= MAX_BITS {
-    counts = counts ++ [0]
-    i = i + 1
-  }
-  for l in lengths {
-    counts = list_set(counts, l, counts[l] + 1)
-  }
-  # where each length's symbols start in the canonical order
-  var offs: List[Int] = [0, 0]
-  var bl = 1
-  var acc = 0
-  while bl < MAX_BITS {
-    acc = acc + counts[bl]
-    offs = offs ++ [acc]
-    bl = bl + 1
-  }
   var symbols: List[Int] = []
-  var k = 0
-  while k < len(lengths) {
-    symbols = symbols ++ [0]
-    k = k + 1
-  }
-  var sym = 0
-  while sym < len(lengths) {
-    let l = lengths[sym]
-    if l != 0 {
-      symbols = list_set(symbols, offs[l], sym)
-      offs = list_set(offs, l, offs[l] + 1)
+  var bl = 0
+  while bl <= MAX_BITS {
+    var n = 0
+    var sym = 0
+    while sym < len(lengths) {
+      if lengths[sym] == bl {
+        n = n + 1
+        # canonical order: by length, then by symbol; length 0 is unused
+        if bl != 0 { symbols = symbols ++ [sym] }
+      }
+      sym = sym + 1
     }
-    sym = sym + 1
+    counts = counts ++ [n]
+    bl = bl + 1
   }
   Huff { counts: counts, symbols: symbols }
 }
 
+## Only for the 19 code-length code lengths, where a copy is bounded.
 fn list_set(xs: List[Int], i: Int, v: Int) -> List[Int] =
   list.take(xs, i) ++ [v] ++ list.drop(xs, i + 1)
 
@@ -174,6 +165,14 @@ fn fixed_dist() -> Huff = {
   }
   huff_of(ls)
 }
+
+## The base and extra-bit tables of RFC 1951 3.2.5, built once per stream
+## rather than once per block: an empty block costs ten bits of input, so any
+## work done per block is work per ten bits.
+type Codes = { lbase: List[Int], lextra: List[Int], dbase: List[Int], dextra: List[Int] }
+
+fn codes() -> Codes =
+  Codes { lbase: length_base(), lextra: length_extra(), dbase: dist_base(), dextra: dist_extra() }
 
 fn length_base() -> List[Int] = [
   3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
@@ -287,6 +286,12 @@ pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = Some(DEFAULT_C
   var out = bytes.buf()
   var st = bits_from(src, from)
   var last = false
+  let cs = codes()
+  # The fixed tables are the same for every fixed block, so they are built at
+  # the first one and reused. Rebuilding them per block made a stream of empty
+  # fixed blocks, which writes no output and so never meets the ceiling, cost
+  # thousands of operations per ten bits of input (security audit item 6).
+  var fixed: Option[(Huff, Huff)] = None
   while not last {
     if past_end(st) { return Err("deflate: truncated before the final block") }
     let (fin, s1) = take(st, 1)
@@ -303,7 +308,15 @@ pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = Some(DEFAULT_C
         Err(e) -> return Err(e)
       }
     } else if btype == 1 {
-      match block(out, st, fixed_lit(), fixed_dist(), lim) {
+      let (flit, fdist) = match fixed {
+        Some(t) -> t
+        None -> {
+          let t = (fixed_lit(), fixed_dist())
+          fixed = Some(t)
+          t
+        }
+      }
+      match block(out, st, flit, fdist, cs, lim) {
         Ok(p) -> {
           let (o2, s3) = p
           out = o2
@@ -315,7 +328,7 @@ pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = Some(DEFAULT_C
       match dynamic_tables(st) {
         Ok(t) -> {
           let (lit, dist, s3) = t
-          match block(out, s3, lit, dist, lim) {
+          match block(out, s3, lit, dist, cs, lim) {
             Ok(p) -> {
               let (o2, s4) = p
               out = o2
@@ -432,13 +445,13 @@ fn dynamic_tables(b: Bits) -> Result[(Huff, Huff, Bits), String] = {
 }
 
 ## The literal/length/distance loop shared by fixed and dynamic blocks.
-fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff, lim: Int) -> Result[(Buf, Bits), String] = {
+fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff, cs: Codes, lim: Int) -> Result[(Buf, Bits), String] = {
   var out = out0
   var st = b
-  let lbase = length_base()
-  let lextra = length_extra()
-  let dbase = dist_base()
-  let dextra = dist_extra()
+  let lbase = cs.lbase
+  let lextra = cs.lextra
+  let dbase = cs.dbase
+  let dextra = cs.dextra
   while true {
     let sym = match decode(lit, st) {
       Ok(p) -> {
@@ -642,6 +655,70 @@ test "the default ceiling refuses a bomb and names the default and the ways out"
   # An explicit ceiling that is not the default says only what it is.
   match inflate(bomb(65100), cap: Some(1000)) {
     Err(e) -> { assert e == "deflate: the output exceeds the 1000 byte limit (stopped at 775 bytes)" }
+    Ok(_) -> { assert false }
+  }
+}
+
+## `n` empty blocks, the last one final: fixed-Huffman ones (ten bits each) or
+## dynamic ones (ninety-three bits each, a literal table whose only code is
+## end-of-block). Neither writes a byte, so no output ceiling ever sees them;
+## what they cost is whatever the decoder does per block.
+fn empty_blocks(n: Int, dynamic: Bool) -> Bytes = {
+  var w = BitW { out: bytes.buf(), acc: 0, n: 0 }
+  var i = 0
+  while i < n {
+    w = bits_lsb(w, if i == n - 1 { 1 } else { 0 }, 1)
+    if dynamic {
+      w = bits_lsb(w, 2, 2)
+      # HLIT 257, HDIST 1, HCLEN 18: code-length codes up to symbol 1
+      w = bits_lsb(w, 0, 5)
+      w = bits_lsb(w, 0, 5)
+      w = bits_lsb(w, 14, 4)
+      # in clen_order: 18 gets 2 bits, 0 gets 1, 1 gets 2, the rest none, so
+      # the canonical codes are 0 -> `0`, 1 -> `10`, 18 -> `11`
+      for l in [0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2] { w = bits_lsb(w, l, 3) }
+      # 256 zero lengths as 138 + 118, then length 1 for end-of-block, then
+      # length 0 for the one distance code
+      w = code_msb(w, 3, 2)
+      w = bits_lsb(w, 127, 7)
+      w = code_msb(w, 3, 2)
+      w = bits_lsb(w, 107, 7)
+      w = code_msb(w, 2, 2)
+      w = code_msb(w, 0, 1)
+      # end-of-block, the literal table's only code
+      w = code_msb(w, 0, 1)
+    } else {
+      w = bits_lsb(w, 1, 2)
+      w = code_msb(w, 0, 7)
+    }
+    i = i + 1
+  }
+  if w.n > 0 { w = bits_lsb(w, 0, 8 - w.n) }
+  bytes.freeze(w.out)
+}
+
+test "the fixed tables are the canonical ones of RFC 1951 3.2.6" {
+  let lit = fixed_lit()
+  assert lit.counts == [0, 0, 0, 0, 0, 0, 0, 24, 152, 112, 0, 0, 0, 0, 0, 0]
+  # length 7 first (256..279), then length 8 (0..143, 280..287), then 9
+  assert list.take(lit.symbols, 3) == [256, 257, 258]
+  assert lit.symbols[24] == 0
+  assert lit.symbols[24 + 144] == 280
+  assert lit.symbols[24 + 152] == 144
+  assert len(lit.symbols) == 288
+  assert fixed_dist().counts[5] == 30
+}
+
+test "empty blocks decode to nothing, fixed and dynamic, one or many" {
+  assert inflate(empty_blocks(1, false)) == Ok(bytes.utf8(""))
+  assert inflate(empty_blocks(1, true)) == Ok(bytes.utf8(""))
+  assert inflate_from(empty_blocks(2000, false)) == Ok((bytes.utf8(""), 2500))
+  assert inflate(empty_blocks(500, true)) == Ok(bytes.utf8(""))
+  # a final block is still required: drop the last byte and the stream ends
+  # inside a non-final block
+  let fx = empty_blocks(2000, false)
+  match inflate(bytes.slice(fx, 0, bytes.len(fx) - 2)) {
+    Err(e) -> { assert str.contains(e, "truncated") }
     Ok(_) -> { assert false }
   }
 }

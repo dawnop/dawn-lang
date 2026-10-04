@@ -164,6 +164,26 @@ else
   exit 1
 fi
 
+# Empty blocks, against a wall clock (security audit item 6).
+#
+# An empty block writes nothing, so the output ceiling never sees it; the only
+# bound on such a stream is how much work the decoder does per block. The
+# decoder used to rebuild both fixed tables for every fixed block, with a table
+# build quadratic in the table size, and 40 000 empty fixed blocks (50 KB) took
+# 90 to 110 s in the toolchain's JVM flags, which is where pkgfetch meets such
+# a stream. Hoisted and linear, they take well under a second, so a 30 s limit
+# is far from both and does not care how loaded the machine is.
+empty_out="$work/empty-fixed.txt"
+if timeout 30 "$java" -Xss512m -Xmx2g -XX:+UseSerialGC -jar "$work/probe.jar" \
+    --empty-blocks fixed 40000 > "$empty_out" 2>&1 &&
+    [ "$(tail -n 1 "$empty_out")" = "mismatches 0" ]; then
+  echo "PASS  40000 empty fixed blocks decode in linear time"
+else
+  sed 's/^/  | /' "$empty_out" >&2
+  echo "FAIL: 40000 empty fixed blocks did not decode within 30 s" >&2
+  exit 1
+fi
+
 # The package fetcher, end to end, in the toolchain's own heap (#405).
 #
 # Everything above calls the package; this calls `dawn add`, which is where a

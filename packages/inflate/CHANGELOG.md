@@ -3,6 +3,14 @@
 Newest first. The manifest name carries the major from 2 on (`inflate2`,
 `inflate3`); consumers keep `use inflate/...` through their alias.
 
+## 3.0.1 (2026-10-05)
+
+Decoding time is linear in the input again. The fixed Huffman tables are
+built once per stream instead of once per fixed block, and a table build is
+linear in the number of symbols instead of quadratic. A stream of empty fixed
+blocks writes no output, so the ceiling never stopped it: 50 KB of them took
+about 100 s and now take well under a second. No API or output change.
+
 ## 3.0.0 (2026-10-03)
 
 Every entry point has a finite default ceiling, `deflate.DEFAULT_CAP`
