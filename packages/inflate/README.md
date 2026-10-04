@@ -6,7 +6,7 @@ Pure Dawn readers for raw DEFLATE, gzip and ZIP, plus CRC-32.
 use inflate/gzip
 use inflate/zip
 
-let data = gzip.gunzip(src)?                       # at most 16 MiB out
+let data = gzip.gunzip(src)?                       # at most 64 MiB out
 let big = gzip.gunzip(src, cap: Some(268435456))?  # a larger ceiling
 let files = zip.entries(archive)?                  # name, is_dir, data
 ```
@@ -14,7 +14,7 @@ let files = zip.entries(archive)?                  # name, is_dir, data
 ## Output ceiling
 
 Every entry point takes `cap: Option[Int]`, a ceiling on the bytes it may
-write. It defaults to `deflate.DEFAULT_CAP`, 16 MiB. Pass `cap: Some(n)` for
+write. It defaults to `deflate.DEFAULT_CAP`, 64 MiB. Pass `cap: Some(n)` for
 another ceiling and `cap: None` for none. A refusal by the default says it
 was the default and ends with `pass cap: Some(n) for a larger limit, or cap:
 None for no limit`. `gzip.gunzip` applies its `cap` to all members

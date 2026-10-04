@@ -187,26 +187,30 @@ pub fn tree_hash(root: String) -> Result[String, String] !Fs = {
 ## `MAX_EXPANDED_BYTES` is the one of these that is a memory ceiling, and it is
 ## not a byte count of the archive: it bounds what is decompressed into memory
 ## at once -- one zip entry, or the whole tar stream, which is gunzipped before
-## the ustar walk starts. Decompression builds into `bytes.Buf`, which is
-## `Array[Int]` today, so every output byte costs about 32 B of JVM heap at
-## worst (0x80..0xFF are each a boxed Long). Measured under the toolchain's own
-## `-Xmx2g`, a 1 MB gzip of 0xFF bytes is refused at a 64 MiB ceiling only
-## after 13 s of collecting in a full heap, and is an OutOfMemoryError at
-## 80 MiB. The tar.gz ceiling used to be 256 MiB, which is how one hostile url
-## took `dawn add` down instead of being refused (#405). 32 MiB needs about
-## 1 GiB at the worst byte, half the heap, and is still above this
-## repository's own tag tarball (25 MB) and far above any single file in it.
+## the ustar walk starts. Decompression builds into `bytes.Buf`. When that was
+## a boxed `Array[Int]` every output byte cost up to 32 B of JVM heap, a 256 MiB
+## tar.gz ceiling let one hostile url take `dawn add` down with an
+## OutOfMemoryError (#405), and the ceiling had to come down to 32 MiB, under
+## this repository's own tag tarball by only a fifth. `Buf` is now 4 KiB chunks
+## of real bytes, and the ceiling is 128 MiB with more room than 32 MiB had.
+## The worst cases are honest: a tar.gz of 128 MiB of random bytes, or a zip
+## of 128 MiB stored plus a 128 MiB entry of 0xFF. Each needs -Xmx608m (576m is
+## an OutOfMemoryError), so the toolchain's 2g heap keeps 1.4 GiB to spare. A
+## refusal is cheaper than an honest unpack, since the chunks are dropped
+## without being joined: a 1 GiB 0xFF bomb is refused at this ceiling under
+## -Xmx160m, and after a 255 MiB download under -Xmx416m. At 256 MiB the honest
+## case needs -Xmx1152m; 128 MiB is five times this repository's tag tarball
+## (26.7 MB) and stays apart from inflate's 64 MiB default, so the inflate
+## contract can still tell this ceiling's refusal from that one's.
 ## `MAX_ARCHIVE_BYTES` stays a byte count: the download and the zip's total on
 ## disk are held at one byte per byte, or not held at all. The two ceilings do
-## add up, since the download is still live while an entry expands: a 235 MB
-## zip whose last entry is a lying 0xFF bomb is refused under -Xmx1280m and is
-## an OutOfMemoryError under -Xmx1024m, which leaves the toolchain's 2g heap
-## about 0.7 GiB to spare at the worst byte and the largest download.
+## add up, since the download is still live while an entry expands; the
+## numbers above already include it.
 const FETCH_CONNECT_TIMEOUT_SECS: Int = 30
 const FETCH_REQUEST_TIMEOUT_SECS: Int = 300
 const MAX_ARCHIVE_BYTES: Int = 268435456
 const MAX_ENTRIES: Int = 65536
-const MAX_EXPANDED_BYTES: Int = 33554432
+const MAX_EXPANDED_BYTES: Int = 134217728
 
 fn too_big(what: String, n: Int, limit: Int) -> String =
   "archive rejected: " ++ what ++ " (" ++ to_string(n) ++ " exceeds the " ++

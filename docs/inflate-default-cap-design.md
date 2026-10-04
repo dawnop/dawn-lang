@@ -3,7 +3,9 @@
 > 状态：**current**。2026-10-03 裁决刀 1：`packages/inflate` 升 3.0.0（包名 `inflate3`），
 > 四个解压入口与 `zip.entries` 的 `cap` 默认从「不设上界」改为 `Some(DEFAULT_CAP)`，
 > 16 MiB。字节上界不等于内存上界那一半是公开 issue #405，见 §5：先做验收 (ii)，
-> pkgfetch 的内存上界降到 32 MiB 并进 inflate-contract；(i) 的完整方案留在 §5.4。
+> pkgfetch 的内存上界降到 32 MiB 并进 inflate-contract；(i) 分块 `Buf` 已落地（§5.7）。
+> 2026-10-05 刀 3（§5.8）按新倍数放宽：`DEFAULT_CAP` 16 → 64 MiB（inflate 3.1.0），
+> pkgfetch 的 `MAX_EXPANDED_BYTES` 32 → 128 MiB。§3 与 §5.1 到 §5.6 的数是旧表示下的实测，保留作历史。
 
 ## 1. 问题
 
@@ -65,7 +67,7 @@ dawnop-site 后端都不经 inflate。所以改默认的仓内与下游破坏面
 - **`Limit` 枚举、哨兵 `Int`。** 前者为「一个可选的数」新造类型，`Option[Int]` 已经说清楚；
   后者复刻 Node `kMaxLength` 式的伪默认。
 - **默认 64 MiB 或 256 MiB。** 见 §3，今天在 `-Xmx2g` 下不稳。`bytes.Buf` 换成真字节缓冲后
-  再评（放宽上界不让任何原先成功的调用失败，minor 即可）。
+  再评（放宽上界不让任何原先成功的调用失败，minor 即可）。（10-05 已按新倍数放宽到 64 MiB，见 §5.8。）
 - **web 请求体解压。** web 今天不解码 `Content-Encoding`，`max_body` 管的是线上字节；要开这个口子
   必须另设解压后上限，且要等内存倍数修好。
 
@@ -205,7 +207,7 @@ tar.gz 腿 `OutOfMemoryError`，合约红（84 s）。读源码这一步也让 g
 - **在 inflate 里分块冻结输出来压倍数。** 能把峰值降到每字节几 B，但它是绕开 `Buf` 表示的局部补丁，
   (i) 落地后就是死代码；该修的是表示本身。
 
-### 5.6 (i) 落地：分块 `Buf`（2026-10-05，#405）
+### 5.7 (i) 落地：分块 `Buf`（2026-10-05，#405）
 
 调研 `research-bytes-buf-repr-20261004.md` 比了 §5.4 的新运行时类型（方案 A）与只改 std 的分块缓冲
 （方案 B，Haskell `ByteString.Builder` 的形状），裁先做 B，A 作 B 吞吐不达标时的后手。落地的是 B：
@@ -252,3 +254,83 @@ inflate-contract pkgfetch 腿原样保留作新表示的回归门。`bytes_conca
 - **逐块 `++` 冻结。** 32 MiB / 4 KiB 是 8192 块，前缀被复制 8192 次，约 128 GiB 的复制量。
 - **块大小不定长（按写入量倍增）。** `buf_at` 就要二分找块，LZ77 回指是 inflate 的热路径；定长块
   一次移位一次掩码。
+
+### 5.8 刀 3：按新倍数重评两个上界（2026-10-05，#405）
+
+§5.7 把 `Buf` 的每字节代价从 JVM 约 32 B、native 约 34 B 降到 JVM 约 3.9 B（活对象口径）、native 3 B。
+这一刀在含 #493 的 main（`3ce69dcc`）上按 §5.6 的方法重测，据实测放宽两个常数：
+
+- pkgfetch 的 `MAX_EXPANDED_BYTES`：32 MiB → **128 MiB**；`MAX_ARCHIVE_BYTES` 仍是 256 MiB。
+- inflate 的 `DEFAULT_CAP`：16 MiB → **64 MiB**，包升 3.1.0（放宽上界不让任何原先成功的调用失败，minor）。
+
+方法同 §5.6：入口是 `dawn add file://<archive>`；JVM 是 `bin/dawn` 的 `-Xss512m -Xmx2g -XX:+UseSerialGC`
+（同一个 GraalVM 21），最小堆只换 `-Xmx`，以 32m 为步长二分；native 是 `nmain` 经 `__emitc` 加 `cc -O2`
+出的驱动。全部在 `ulimit -v` 与 `timeout` 下单个顺序跑。最小堆的判据是干净结束（拒绝或解开后报
+「不是 Dawn 包」），没有 `OutOfMemoryError`。
+
+**pkgfetch，`-Xmx2g` 下的峰值 RSS / 墙钟与最小可用堆**（「改前」是含 #493 的 main，32 MiB）：
+
+| 归档 | 改前 JVM | 改前 native | 128 MiB JVM | 128 MiB native | 最小堆 改前 → 128 MiB |
+|---|---|---|---|---|---|
+| tar.gz，1 MB，1 GiB `0xFF` | 271 MB / 0.9 s | 40 MB / 1.5 s | 327 MB / 1.6 s | 139 MB / 6.2 s | 96m → 160m |
+| zip，1 MB，目录谎报 | 279 MB / 0.7 s | 41 MB / 1.6 s | 326 MB / 1.6 s | 140 MB / 6.4 s | |
+| tar.gz，255 MiB：1 GiB `0xFF` 后接 254 MiB 随机 | 798 MB / 1.0 s | 300 MB / 2.5 s | 847 MB / 1.8 s | 399 MB / 6.5 s | 416m → 416m |
+| zip：stored 填满 256 MiB 减上界，末条谎报的 `0xFF` 炸弹 | 757 MB / 2.6 s（7 × 31.9 MiB） | 269 MB / 8.7 s | 657 MB / 2.6 s（4 × 31.9 MiB） | 271 MB / 9.8 s | 352m → 288m |
+| zip：同上 stored，加一个诚实的满上界 `0xFF` 条目 | 952 MB / 12.4 s | 365 MB / 90 s | 1222 MB / 13.5 s | 608 MB / 94 s | 352m → 608m |
+| tar.gz：满上界的随机字节（下载体约等于展开量） | 485 MB / 2.4 s | 172 MB / 12.8 s | 1258 MB / 8.3 s | 590 MB / 51 s | 160m → 608m |
+
+**最坏是诚实解包，不是炸弹。** 拒绝时 `Buf` 的块直接丢掉，不做冻结拼接，所以 1 GiB 炸弹在 128 MiB
+处被拒只要 160m；诚实地解开一个满上界的流要冻结（块一份、结果一份）再走 ustar 切片写盘，下载体还活着。
+用最后一行拟合：所需堆 ≈ 62 MiB + 4.3 × `E`（`E` 是一次解进内存的量；tar.gz 的下载体不会比展开量大，
+4.3 里含下载体的 1 B）。三个点：`E` = 31.5 MiB 实测 160m（式子给 197m，偏保守）、127.5 MiB 实测 608m
+（式子 610m）、254.5 MiB 实测 1152m（式子 1156m，见下）。所以 128 MiB 在 `-Xmx2g` 下的余量是
+2048 − 608 = 1440 MiB，约 70%，比 §5.6 里 32 MiB 在旧表示下的 0.7 GiB（35%）宽一倍。native 没有堆
+上限，最坏 RSS 608 MB（§5.6 的旧表示下 32 MiB 是 1.33 GB）。
+
+为什么是 128 MiB：
+
+- **余量。** 256 MiB（等于 `MAX_ARCHIVE_BYTES`）实测要 1152m（1120m OOM），`-Xmx2g` 剩 0.9 GiB（44%），
+  也站得住，但 2g 堆下诚实解包的峰值 RSS 已到 2.23 GB；128 MiB 是留足余量的那一档。
+- **负载。** 本仓 tag 的 tar 展开 26.7 MB（§5.6），128 MiB 是它的 5 倍；§5.6 里 tar.gz 一路离上界只剩
+  20% 的风险解除，GitHub 依赖用 `.tar.gz` 也不再贴边。
+- **与 inflate 默认值错开。** pkgfetch 腿要求拒绝原话点名 pkgfetch 自己的上界，靠的是两个数不同：
+  `untar` 若不再传 `cap`，会被 inflate 的默认值拒绝，原话里的数不对，腿才会红。所以 pkgfetch 不能取
+  64 MiB；合约现在显式检查两个常数不相等。
+
+**inflate 的 `DEFAULT_CAP`**（scratch 探针：读文件、`gzip.gunzip` 不传 `cap`；JVM 同上参数）：
+
+| 输入 | `-Xmx2g` 峰值 RSS / 墙钟 | native 峰值 RSS / 墙钟 | 最小可用堆 |
+|---|---|---|---|
+| 诚实的 64 MiB `0xFF`（正好等于上界，解开） | 479 MB / 1.4 s | 200 MB / 5.1 s | 256m（240m OOM） |
+| 1 GiB `0xFF` 炸弹（在 64 MiB 处拒绝） | 282 MB / 0.8 s | 70 MB / 2.9 s | 80m（64m OOM） |
+
+默认值的意义是「忘了设也不崩」，调用者的堆不一定是 2g：没有 `-Xmx` 的 JVM 默认取物理内存的 1/4，
+1 GiB 的机器上是 256 MiB，64 MiB 的诚实输出正好放得下，所以取 64 MiB。§3 那张旧表里 64 MiB 是
+「`0xFF` 输入贴边」，现在在 2g 下只用到八分之一。同一探针传 `cap: Some(128 MiB)` 解 128 MiB 的
+`0xFF` 要 512m（480m OOM），放在上面那台机器上就是 OOM，也会和 pkgfetch 的新上界撞在一起。
+
+门与负控：`scripts/inflate-contract/run.sh` 的 pkgfetch 腿照旧读源码里的 `MAX_EXPANDED_BYTES`，新值下
+两条腿的原话是 `exceeds the 134217728 byte limit (stopped at`；新增一步从 `deflate.dawn` 读 `DEFAULT_CAP`，
+两数相等即红。probe 的默认上界腿改成由 `deflate.DEFAULT_CAP` 拼出期望原话，不再写死 16777216。负控都是
+改 pkgfetch 或 deflate 后重建工具链、跑整份合约：
+
+| 变异 | 结果 |
+|---|---|
+| `untar` 的 `gunzip` 改传旧值 `Some(33554432)` | 红：原话是 33554432 |
+| `untar` 的 `gunzip` 不传 `cap` | 红：被 inflate 的 64 MiB 默认拒绝，原话是 67108864 |
+| `untar` 的 `gunzip` 传 `cap: None` | 红：tar.gz 腿 `OutOfMemoryError` |
+| zip 的 `zip.read` 不传 `cap` | 红：tar.gz 腿绿，zip 腿原话是 67108864 |
+| `MAX_EXPANDED_BYTES` 改成 64 MiB（等于默认） | 红：两数相等检查 |
+| `DEFAULT_CAP` 改成 1 GiB | 红：默认上界腿在 256m 堆里 `OutOfMemoryError` |
+
+成本：inflate 包测试为钉住 64 MiB 的文案要真解一个 64 MiB 的炸弹、构造 33 MiB 的重叠条目，
+`dawn test packages/inflate` 本机从 5.5 s 到 11.1 s（CI 的 package tests 步骤多约 6 s）；
+inflate-contract 两条 pkgfetch 腿与默认上界腿要解到更大的上界，整份合约本机 27.9 s → 32.0 s
+（同机背靠背各一次）。不新增 job 与步骤。
+
+不做的（理由）：
+
+- **`MAX_EXPANDED_BYTES` 取 256 MiB。** 见上，余量从 70% 降到 44%，换来的负载空间今天没有需求方。
+- **动 `MAX_ARCHIVE_BYTES`。** 理由同 §5.5 第一条：它每字节 1 B，内存问题只在 `E` 乘倍数上；实测里
+  255 MiB 下载体加炸弹在新旧上界下都是 416m。
+- **默认值取 128 MiB 或更大。** 见上：128 MiB 的诚实输入要 512m 堆，没有 `-Xmx` 的 1 GiB 机器上会 OOM，且与 pkgfetch 撞数。
