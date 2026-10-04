@@ -1,0 +1,59 @@
+# A bounded function with a written effect label, taken as a value (issue
+# #460).
+#
+# `g` needs a `Show` dictionary and `Log` evidence. The eta wrapper the checker
+# writes for a bounded function value passed the dictionary and nothing in the
+# evidence slot: the JVM saw the dictionary where the evidence belonged and
+# failed verification, and cc refused the call with too few arguments. The
+# wrapper is a closure whose row carries `Log`, so the evidence arrives in the
+# closure's pack from the call that runs it, the handler at that call answers
+# it, and the value also runs under a second handler to show it is the call
+# site, not the place the value was made, that supplies it.
+# Two bounds and two labels check dictionary/evidence ordering, and the mixed
+# row exercises a written label beside an effect variable bound by a callback.
+
+pub effect Log {
+  fn log(s: String) -> Unit
+}
+
+effect Ask {
+  fn ask() -> Int
+}
+
+fn g[T: Show](x: T) -> Int !Log = {
+  log("g ${to_string(x)}")
+  1
+}
+
+fn g2[T: Ord + Show](x: T) -> Int !Ask !Log = {
+  log("g2 ${to_string(x)}")
+  cmp(x, x) + ask()
+}
+
+fn as_ordered[T: Ord + Show]() -> fn(T) -> Int !Ask !Log = g2
+
+fn mixed[T: Show](x: T, body: fn() -> Int !e) -> Int !Log !e = {
+  log("mixed ${to_string(x)}")
+  body()
+}
+
+fn run(f: fn(Int) -> Int !Log, x: Int) -> Int !io = {
+  with handle Log { log(s) => println("inner: " ++ s) }
+  f(x)
+}
+
+pub fn main() -> Unit !io = {
+  let f: fn(Int) -> Int !Log = g
+  let h: fn(String) -> Int !Log = g
+  let ordered: fn(Int) -> Int !Log !Ask = g2
+  let forwarded: fn(Int) -> Int !Log !Ask = as_ordered()
+  let mix: fn(Int, fn() -> Int !Ask) -> Int !Log !Ask = mixed
+  with handle Log { log(s) => println(s) }
+  with handle Ask { ask() => 5 }
+  println("${f(7)}")
+  println("${h("x")}")
+  println("${run(f, 8)}")
+  println("${ordered(9)}")
+  println("${forwarded(10)}")
+  println("${mix(11, () => ask())}")
+}
