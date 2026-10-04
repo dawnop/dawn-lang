@@ -1,0 +1,36 @@
+# The `catch_fault` half of cell_take_panic.dawn (issue #466): the failure in
+# the arm's right-hand side is a fault from the outside world rather than a
+# panic, and the barrier that stops it is the io one. The window it opens is
+# the same one, from the read of `seen` to the write that ends the
+# assignment, so the expectation is the same too.
+#
+# The fault comes from `raw.read_file` on a path that does not exist, the one
+# way a corpus program can raise a fault on native (stdext/raw.dawn).
+use std/raw
+
+effect Log {
+  fn log(s: String) -> Unit
+  fn dump() -> String
+}
+
+fn load(s: String) -> String !io =
+  if s == "bad" { raw.read_file("/no/such/dawn/path") } else { s }
+
+fn work() -> String !Log !io = {
+  log("a")
+  let r: Result[Unit, ForeignError] = catch_fault(() => log("bad"))
+  match r {
+    Ok(_) -> ()
+    Err(e) -> log("caught")
+  }
+  dump()
+}
+
+pub fn main() -> Unit !io = {
+  with handle Log {
+    var seen: List[String] = []
+    log(s) => { seen = seen ++ [load(s)] }
+    dump() => to_string(seen)
+  }
+  println(work())
+}

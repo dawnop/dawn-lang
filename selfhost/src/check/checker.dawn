@@ -6435,14 +6435,74 @@ fn check_rest(cx: Cx, rest: Expr, hid: Int, expected: Option[Ty]) -> (Cx, Ty, TE
 ## the *same* arm is entered on the emptied slot. Refusing the take is free --
 ## `cell_get` is correct everywhere and this is only ever an optimisation
 ## (`cell_read`) -- so there is nothing to weigh.
+##
+## **Nothing in the right-hand side can fail** (issue #466,
+## docs/handler-state-design.md §7.9). The conditions above keep this
+## installation's arms out of the window, but a panic or a fault does not need
+## an arm to reach the cell: it unwinds out of the arm, a `catch_panic` or
+## `catch_fault` inside the handled computation stops it, and the handler is
+## still installed with its slot empty. The next read is a null dereference.
+## Putting the value back on the way out is not available either, because
+## whatever consumed it may already have rebuilt it in place; that is the
+## whole point of the take. So the take is kept only where no failure can
+## happen between it and the `cell_set`: `cell_cannot_fail`.
 fn cell_take_ok(cx: Cx, hid: Int, name: String, value: Expr) -> Bool = {
   if len(cx.frame.lambda_stack) == 0 { return false }
   let lc = cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1]
   if not lc.arm { return false }
   if lc.ctl { return false }
   if lc.handler_of != Some(hid) { return false }
+  if not cell_cannot_fail(value) { return false }
   cell_occurrences(value, name) == 1
 }
+
+## Can evaluating this expression neither panic nor fault, whatever the types
+## turn out to be?
+##
+## A syntactic allow-list, read before the expression is checked, so it has to
+## hold for every type the expression could have: names (a local, a constant
+## or a function value), literals without interpolation, constructors, records,
+## list and tuple literals, field reads, and `++`, which is concatenation of
+## lists, strings or bytes and calls nothing the program wrote. Everything else
+## answers no: a call can panic, and so can interpolation (it calls `Show`),
+## indexing, `!`, `/` and `%`, `==` (an `Eq` override), and `?` and `return`
+## leave the arm with the slot still empty.
+##
+## The wildcard arm is deliberate, the opposite of `cell_occurrences`: there an
+## unanswered form would be an under-count and an empty slot, here it is a
+## "no", and a "no" only costs the optimisation. The program that wants the
+## take back hoists the call into a `let` above the assignment, where a failure
+## happens before the slot is opened.
+fn cell_cannot_fail(e: Expr) -> Bool =
+  match e {
+    EInt(_, _, _) | EChar(_, _, _) | EFloat(_, _, _) | EBool(_, _, _) | EUnit(_, _) |
+      EVar(_, _, _) | ECtor(_, _, _) -> true
+    EStr(parts, _, _) -> list.all(parts, pt => match pt {
+      SPText(_) -> true
+      SPInterp(_) -> false
+    })
+    EApply(target, args, _, _) ->
+      match target {
+        ECtor(_, _, _) -> list.all(args, a => cell_cannot_fail(a.e))
+        _ -> false
+      }
+    ERecord(_, args, spread, _, _, _, _) -> {
+      let base = match spread {
+        Some(sp) -> cell_cannot_fail(sp)
+        None -> true
+      }
+      base && list.all(args, a => cell_cannot_fail(a.e))
+    }
+    EFieldAcc(target, _, _, _, _, _) -> cell_cannot_fail(target)
+    EListLit(elems, _, _) -> list.all(elems, x => match x {
+      LeExpr(x2) -> cell_cannot_fail(x2)
+      LeSpread(x2, _, _) -> cell_cannot_fail(x2)
+      LeIf(arms, _, _) -> list.all(arms, a => cell_cannot_fail(a.cond) && cell_cannot_fail(a.body))
+    })
+    ETupleLit(elems, _, _) -> list.all(elems, x => cell_cannot_fail(x))
+    EBinary(OpConcat, l, r, _, _, _, _) -> cell_cannot_fail(l) && cell_cannot_fail(r)
+    _ -> false
+  }
 
 ## An occurrence in a context that runs more than once, scored so that it can
 ## never be the single occurrence `cell_take_ok` accepts.
@@ -14869,6 +14929,39 @@ test "`cell_take` is not chosen inside a control arm" {
   let prims2 = tast_prims(tm2.fns[0].body)
   assert not list.contains(prims2, "cell_take")
   assert list.contains(prims2, "cell_get")
+}
+
+## The cell primitives an arm `ask(n) => { acc = <rhs> ... }` is checked into,
+## for the test below; empty when the program does not check clean, so a
+## typo in a case fails the take assertion instead of passing the other one.
+fn take_case_prims(rhs: String) -> List[String] !io = {
+  let (m, p) = parser.parse_module(
+    "type R = { v: Int }\nfn f(n: Int) -> Int = n\n" ++
+      "effect Ask {\n  fn ask(n: Int) -> Int\n}\n" ++
+      "fn g() -> Int = {\n  with handle Ask {\n    var acc: List[Int] = []\n" ++
+      "    ask(n) => { acc = " ++ rhs ++ "\n      n }\n  }\n  ask(1)\n}\n")
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(test_cx(), m, env)
+  if len(p) > 0 || len(cx1.diags) > 0 { return [] }
+  tast_prims(tm.fns[len(tm.fns) - 1].body)
+}
+
+test "`cell_take` is not chosen when the right-hand side can fail" {
+  # issue #466: a panic or fault between the take and the write unwinds out of
+  # the arm, a barrier inside the handled computation can stop it, and the
+  # handler is still installed with its slot empty. Each of these right-hand
+  # sides can fail after the read, so each one reads with `cell_get`.
+  for rhs in ["acc ++ [f(n)]", "acc ++ [n / 2]", "acc ++ [[1][n]]", "acc ++ [Some(n)!]",
+    "if n == 1 { acc } else { acc ++ [n] }"] {
+    let prims = take_case_prims(rhs)
+    assert not list.contains(prims, "cell_take")
+    assert list.contains(prims, "cell_get")
+  }
+  # and the shapes that cannot fail keep the take: names, literals,
+  # constructors, records, list literals with a spread, field reads and `++`
+  for rhs in ["acc ++ [n]", "[0, ..acc] ++ [R { v: n }.v]"] {
+    assert list.contains(take_case_prims(rhs), "cell_take")
+  }
 }
 
 test "`?` in a control arm reports against the block, not the operation" {

@@ -1,0 +1,40 @@
+# A panic raised while an arm is rebuilding its handler's state cell, and
+# caught inside the handled computation (issue #466).
+#
+# The arm `seen = seen ++ [check(s)]` is the accumulating shape `cell_take`
+# exists for (docs/handler-state-design.md §7.8): the read hands the slot's
+# reference over so the vector can be grown in place. But `check` panics on
+# "bad", the panic unwinds out of the arm to the `catch_panic` in `work`, and
+# the handler is still installed when `work` goes on to log and dump. With
+# the read taken before `check` ran, the slot was empty by then: the JVM threw
+# a NullPointerException in std/pvec and native dereferenced NULL.
+#
+# The expectation is the one `cell_get` gives everywhere: the failed write
+# never happened, so "a" is still there and "caught" lands after it. The
+# checker now keeps the take only where nothing in the right-hand side can
+# fail (§7.9), so this arm reads with `cell_get`.
+effect Log {
+  fn log(s: String) -> Unit
+  fn dump() -> String
+}
+
+fn check(s: String) -> String = if s == "bad" { panic("refused ${s}") } else { s }
+
+fn work() -> String !Log = {
+  log("a")
+  let r: Result[Unit, ForeignError] = catch_panic(() => log("bad"))
+  match r {
+    Ok(_) -> ()
+    Err(e) -> log("caught")
+  }
+  dump()
+}
+
+pub fn main() -> Unit !io = {
+  with handle Log {
+    var seen: List[String] = []
+    log(s) => { seen = seen ++ [check(s)] }
+    dump() => to_string(seen)
+  }
+  println(work())
+}
