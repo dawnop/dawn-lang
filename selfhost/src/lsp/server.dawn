@@ -48,6 +48,7 @@ use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of, doc
 use driver/doclinks.{LinkScope, resolve_link}
 use lsp/lspc.{completions_at, signature_at}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
+use version.{VERSION}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
 use lsp/lspref.{Occurrence, occurrences, ModRefs, Shift, mod_refs, refs_to, refresh, NotPun}
 use lsp/lsprename.{Key, Edit, name_class, check_new_name, name_edit, ordered, apply_edits, changed_name, edit_index, link_segments, spells}
@@ -1298,6 +1299,17 @@ fn handle(st0: LspState, msg: Json) -> LspState !io =
       io.with_proc_real(() => io.with_env_real(() =>
           io.with_console_real(() => handle_fs(st0, msg)))))
 
+## The `serverInfo` of the `initialize` result (LSP 3.15): which build is
+## answering. A client that starts `dawn` off PATH can run a stale toolchain
+## for weeks without anything saying so; the editor prints this line instead.
+fn server_info() -> Json =
+  jobj([("name", JStr("dawn")), ("version", JStr(VERSION))])
+
+test "serverInfo names the build that answers" {
+  assert ostr(server_info(), "name") == "dawn"
+  assert ostr(server_info(), "version") == VERSION
+}
+
 fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io = {
   var st = st0
   let method = ostr(msg, "method")
@@ -1336,7 +1348,7 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
       ("codeActionProvider", JBool(true)),
       ("inlayHintProvider", JBool(true)),
       ("semanticTokensProvider", semantic_tokens_provider())
-    ]))]))
+    ])), ("serverInfo", server_info())]))
   } else if method == "initialized" {
     if st.watch_manifests { send(manifest_watch_registration()) }
   } else if method == "textDocument/didOpen" || method == "textDocument/didChange" {

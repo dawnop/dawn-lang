@@ -611,8 +611,14 @@ while True:
 # sortText). Normalize by (sortText, label); everything else keeps its order.
 # An inlay hint has a label too, but its order is the server's (by position)
 # and is compared as is.
+# serverInfo.version is the build's own VERSION, which the oracle (N-1) never
+# shares with the subject; whether the field is there and what it is called
+# is still compared.
 for f in frames:
     r = f.get("result")
+    if isinstance(r, dict) and isinstance(r.get("serverInfo"), dict) \
+            and isinstance(r["serverInfo"].get("version"), str):
+        r["serverInfo"]["version"] = "<version>"
     if isinstance(r, list) and r and all(isinstance(x, dict) and "label" in x and "position" not in x
                                          for x in r):
         f["result"] = sorted(r, key=lambda x: (x.get("sortText", ""), x["label"]))
