@@ -2,11 +2,11 @@
 # the text form of the model the wire carries between turns. No io and no
 # host; `main.dawn` is the one call that connects it to one.
 #
-# `update` and `view` are top-level functions rather than an `impl App`, so
-# that `main` can hand them to `serve` by name (issue #317 is why a trait
-# method cannot be passed that way yet). The gates' fixtures live in
+# `update` and `view` are an `impl App`, and `main` hands the trait's two
+# methods to `serve` by name. The gates' fixtures live in
 # examples/projects/tea_dom_counter_contract, not here.
 
+use tea_core/app.{App, view}
 use tea_core/cmd.{Cmd, NoCmd}
 use tea_dom/node.{Node}
 use tea_dom/dsl.{button, div, el, text}
@@ -23,19 +23,24 @@ pub type Msg =
 ## The model a fresh page starts from.
 pub fn init() -> Counter = Counter { n: 0 }
 
-pub fn update(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
-  match msg {
-    Inc -> (Counter { n: m.n + 1 }, NoCmd)
-    Dec -> (Counter { n: m.n - 1 }, NoCmd)
-    Reset -> (init(), NoCmd)
-  }
+impl App[Counter] {
+  type Msg = Msg
+  type View = Node[Msg]
 
-pub fn view(m: Counter) -> Node[Msg] =
-  div(class: "counter", kids: [
-    el("h1", kids: [text("dawn counter")]),
-    el("p", class: "count", kids: [text(to_string(m.n))]),
-    div(class: "row", kids: [button("-", Dec), button("+", Inc), button("reset", Reset)]),
-  ])
+  fn update(m: Counter, msg: Msg) -> (Counter, Cmd[Msg]) =
+    match msg {
+      Inc -> (Counter { n: m.n + 1 }, NoCmd)
+      Dec -> (Counter { n: m.n - 1 }, NoCmd)
+      Reset -> (init(), NoCmd)
+    }
+
+  fn view(m: Counter) -> Node[Msg] =
+    div(class: "counter", kids: [
+      el("h1", kids: [text("dawn counter")]),
+      el("p", class: "count", kids: [text(to_string(m.n))]),
+      div(class: "row", kids: [button("-", Dec), button("+", Inc), button("reset", Reset)]),
+    ])
+}
 
 ## A model as text, and back. The host carries it untouched between turns.
 pub fn encode(m: Counter) -> String = to_string(m.n)

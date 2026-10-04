@@ -36,7 +36,7 @@ pub fn step[A: App](m: A, msg: A.Msg, vw: fn(A) -> Widget[A.Msg]) -> (A, String)
 ## The same turn for a host that wants the change rather than the frame: the
 ## new model and the patches from the old view to the new one. `W` is the
 ## driver's own type parameter, which is what lets `Tree + Eq` apply to it at
-## all; the caller's `m => view(m)` settles it to a concrete widget tree.
+## all; the caller's `view` settles it to a concrete widget tree.
 pub fn diff_step[A: App, W: Tree + Eq](
   m: A,
   msg: A.Msg,
@@ -68,7 +68,7 @@ impl App[Counter] {
 }
 
 test "step returns the new model and the rendered frame" {
-  let (m, frame) = step(Counter { n: 41 }, Inc, c => view(c))
+  let (m, frame) = step(Counter { n: 41 }, Inc, view)
   assert m == Counter { n: 42 }
   assert frame == "n=42"
 }
@@ -76,10 +76,10 @@ test "step returns the new model and the rendered frame" {
 test "a step discharges the message's command before it paints" {
   # `Undo` moves nothing itself and commands a `Dec`; the frame is rendered
   # from the model the whole turn ends with, not from the update's own answer.
-  let (m, frame) = step(Counter { n: 42 }, Undo, c => view(c))
+  let (m, frame) = step(Counter { n: 42 }, Undo, view)
   assert m == Counter { n: 41 }
   assert frame == "n=41"
-  let (next, ps) = diff_step(Counter { n: 42 }, Undo, c => view(c))
+  let (next, ps) = diff_step(Counter { n: 42 }, Undo, view)
   assert next == Counter { n: 41 }
   let want: List[Patch[Widget[CounterMsg]]] =
     [Patch { path: [], op: Replace(w: Text(s: "n=41")) }]
@@ -95,7 +95,7 @@ test "the impl of App is two lines more than before the split" {
 }
 
 test "a driver reaches the reconciler by pinning the tree as its own parameter" {
-  let (next, ps) = diff_step(Counter { n: 0 }, Inc, c => view(c))
+  let (next, ps) = diff_step(Counter { n: 0 }, Inc, view)
   assert next == Counter { n: 1 }
   let want: List[Patch[Widget[CounterMsg]]] =
     [Patch { path: [], op: Replace(w: Text(s: "n=1")) }]
