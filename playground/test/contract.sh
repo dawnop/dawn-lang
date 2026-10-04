@@ -10,6 +10,28 @@ ROOT=$(cd .. && pwd)
 # framing, lifecycle and admission contract does not depend on a Dawn build.
 ./test/lsp-contract.sh
 
+# The run wrapper's argument contract, which is all of it that runs without
+# sudo and systemd: an action, a 32-hex unit id, and for `run` a work dir and
+# a command. Everything else is refused (exit 2) before anything is executed,
+# and a work dir outside the work roots is refused with 3.
+WRAP=sandbox/run-sandboxed.sh
+sh -n "$WRAP"
+ID=0123456789abcdef0123456789abcdef
+wrap_refuses() { # expected-status, args...
+  want=$1; shift
+  st=0; sh "$WRAP" "$@" >/dev/null 2>&1 || st=$?
+  [ "$st" = "$want" ] || { echo "FAIL: run-sandboxed.sh $* exited $st, expected $want"; exit 1; }
+}
+wrap_refuses 2
+wrap_refuses 2 /tmp/dawn-play-x true
+wrap_refuses 2 run abc /tmp/dawn-play-x true
+wrap_refuses 2 run "$ID" /tmp/dawn-play-x
+wrap_refuses 2 stop ../../x
+wrap_refuses 2 stop 0123456789ABCDEF0123456789abcdef
+wrap_refuses 2 stop "$ID" extra
+wrap_refuses 3 run "$ID" /etc true
+echo "  ok  the run wrapper takes only run/stop with a unit id"
+
 # Both layouts: macOS bundles the JDK under Contents/Home, Linux tarballs put
 # bin/ at the top level. Same probe as bin/dawn.
 if [ -z "$JAVA_HOME" ]; then
