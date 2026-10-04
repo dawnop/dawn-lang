@@ -59,6 +59,14 @@ const A_SPLIT: String = join(str.split(ASTRAL, "𝄞"), "|")
 const A_TRIM: String = str.trim("  a𝄞中b𝄞  ")
 const A_ENDS: Bool = str.ends_with(ASTRAL, "𝄞")
 
+## `sort_by` with comparators that are not a total order, which its signature
+## allows. The interpreter sorts with its own merge, and it once broke ties the
+## other way round from std/pvec's, so these folded to `[4, 3, 2, 1]` and
+## `[3, 1, 2]` while the same calls at run time answer the lists below. Both
+## backends print the folded value, so only the expectation sees it.
+const SORT_ALWAYS1: List[Int] = sort_by([1, 2, 3, 4], (a, b) => 1)
+const SORT_LT_ONLY: List[Int] = sort_by([3, 1, 2], (a, b) => if a < b { -1 } else { 0 })
+
 ## The constants above all fold to a *scalar*, which both backends inline as a
 ## literal. These fold to a value with storage -- spec 7.2's serializable set
 ## past the scalars: List, tuple, record, sum constructor, an opaque type over
@@ -162,6 +170,12 @@ pub fn main() -> Unit !io = {
   println("const   ends  = ${A_ENDS}")
   println("runtime ends  = ${str.ends_with(ASTRAL, "𝄞")}")
 
+  println("-- sort_by with a comparator that is not a total order --")
+  println("const   always1 = ${to_string(SORT_ALWAYS1)}")
+  println("runtime always1 = ${to_string(sort_by(four(), (a, b) => 1))}")
+  println("const   lt_only = ${to_string(SORT_LT_ONLY)}")
+  println("runtime lt_only = ${to_string(sort_by(three(), (a, b) => if a < b { -1 } else { 0 }))}")
+
   println("-- structured constants, folded vs the same literal at run time --")
   println("const   list  = ${to_string(C_LIST)}")
   println("runtime list  = ${to_string([1, 2, 3])}")
@@ -221,3 +235,8 @@ fn ok_int() -> Result[Int, String] = Ok(3)
 fn tag(xs: List[String]) -> Tags = xs
 
 fn untag(t: Tags) -> List[String] = t
+
+## The lists the run-time sorts take, out of a function so they are not folded.
+fn four() -> List[Int] = [1, 2, 3, 4]
+
+fn three() -> List[Int] = [3, 1, 2]
