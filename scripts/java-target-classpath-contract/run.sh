@@ -459,7 +459,7 @@ release_block = '''  let lease = jsig_for(jars)
   Ok(bracket(
     lease,
     held => held.close(),
-    held => analyze_program(loaded, std, ct_default(), held.jsig)
+    held => analyze_program(loaded, std, opts, held.jsig)
   ))'''
 
 if name == "always-system":
@@ -467,7 +467,7 @@ if name == "always-system":
         main,
         release_block,
         '''  let _ = jars
-  Ok(analyze_program(loaded, std, ct_default(), jsig_real()))''',
+  Ok(analyze_program(loaded, std, opts, jsig_real()))''',
     )
 elif name == "merge-classpaths":
     main = replace_once(

@@ -88,7 +88,7 @@ use c/binfo
 use jvm/jreflect.{jsig_real, jsig_for}
 use check/jsig.{JsigLease}
 use check/tast.{TModule}
-use ir/interp.{CtOut, CtOpts, ct_default, ct_fuel, ct_lsp, DEFAULT_FUEL}
+use ir/interp.{CtOut, CtOpts, ct_default, ct_fuel, ct_lsp, DEFAULT_FUEL, ct_fuel_value, take_ct_fuel}
 use check/cx.{Cx}
 use java "java.io.File"
 use java "java.util.Map"
@@ -786,6 +786,11 @@ fn usage() -> String = join([
   "                                       them in the jar manifest's Class-Path. Merged with",
   "                                       anything dawn.toml's [java-deps] resolves to.",
   "",
+  "comptime (check/run/test/build):",
+  "  --comptime-fuel <n>                  the steps each constant may take to fold, 0 or more",
+  "                                       (default 100000000); past it the build stops with",
+  "                                       a diagnostic instead of running on",
+  "",
   "the standard library (check/run/test/build/doc):",
   "  --std <dir>                          compile against the std in <dir>. Without it,",
   "                                       DAWN_STD names one if set and not empty, and",
@@ -813,32 +818,18 @@ fn usage() -> String = join([
 ], "\n") ++ "\n"
 
 ## `--comptime-fuel N` / `--comptime-fuel=N`; (options, args without the
-## flags).
-fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !Console !io = {
-  var fuel = DEFAULT_FUEL
-  var out: List[String] = []
-  var i = 0
-  while i < len(rest) {
-    let a = rest[i]
-    if a == "--comptime-fuel" && i + 1 < len(rest) {
-      match parse_int(rest[i + 1]) {
-        Some(n) -> { fuel = n }
-        None -> { cli_error("--comptime-fuel needs a number") }
-      }
-      i = i + 2
-    } else if str.starts_with(a, "--comptime-fuel=") {
-      match parse_int(str.strip_prefix(a, "--comptime-fuel=").unwrap_or(a)) {
-        Some(n) -> { fuel = n }
-        None -> { cli_error("--comptime-fuel needs a number") }
-      }
-      i = i + 1
-    } else {
-      out = out ++ [a]
-      i = i + 1
+## flags). The parsing is `interp.take_ct_fuel`, which dawnc shares.
+fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !Exit !Console !io =
+  match take_ct_fuel(rest) {
+    Ok(found) -> {
+      let (fuel, out) = found
+      (ct_fuel(fuel.unwrap_or(DEFAULT_FUEL)), out)
+    }
+    Err(e) -> {
+      cli_error(e)
+      (ct_default(), rest)
     }
   }
-  (ct_fuel(fuel), out)
-}
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
 ## exist; (jars, args without the flag).
@@ -909,15 +900,15 @@ fn parse_run_args(rest: List[String]) -> RunArgs !Fs !Exit !Console !io = {
       i = i + 1
     } else if a == "--comptime-fuel" {
       if i + 1 >= len(rest) { cli_error("--comptime-fuel needs a number") }
-      match parse_int(rest[i + 1]) {
-        Some(n) -> { fuel = n }
-        None -> { cli_error("--comptime-fuel needs a number") }
+      match ct_fuel_value(rest[i + 1]) {
+        Ok(n) -> { fuel = n }
+        Err(e) -> { cli_error(e) }
       }
       i = i + 2
     } else if str.starts_with(a, "--comptime-fuel=") {
-      match parse_int(str.strip_prefix(a, "--comptime-fuel=").unwrap_or(a)) {
-        Some(n) -> { fuel = n }
-        None -> { cli_error("--comptime-fuel needs a number") }
+      match ct_fuel_value(str.strip_prefix(a, "--comptime-fuel=").unwrap_or(a)) {
+        Ok(n) -> { fuel = n }
+        Err(e) -> { cli_error(e) }
       }
       i = i + 1
     } else if a == "--closure" {
@@ -1112,7 +1103,8 @@ fn source_target(target: String) -> source.SourceTarget !Fs =
 fn analyze_target_scoped(
   plan: ProjectPlan,
   loaded: LoadResult,
-  std: StdCtx
+  std: StdCtx,
+  opts: CtOpts
 ) -> Result[Program, String] !Fs !Env !io = {
   let no_jars: List[String] = []
   let jars = if len(plan.source.diags) > 0 {
@@ -1131,7 +1123,7 @@ fn analyze_target_scoped(
   Ok(bracket(
     lease,
     held => held.close(),
-    held => analyze_program(loaded, std, ct_default(), held.jsig)
+    held => analyze_program(loaded, std, opts, held.jsig)
   ))
 }
 
@@ -1946,7 +1938,7 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     }
   }
   let loaded = load_planned(plan)
-  let prog = match analyze_target_scoped(plan, loaded, std) {
+  let prog = match analyze_target_scoped(plan, loaded, std, ct_default()) {
     Ok(found) -> found
     Err(e) -> {
       fail_target_setup(e)
@@ -2125,7 +2117,8 @@ fn lower_size(m: CModule) -> Int = {
 ## build manifest (c/binfo), for a script that links the emitted C itself, as
 ## `release-native.sh` and `native-fixpoint.sh` do. It is a second file and
 ## not part of the emitted C, which stays what the differentials compare.
-fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  let (opts, rest) = extract_ct_opts(rest0)
   var std_flag: Option[String] = None
   var out = ""
   var info_out = ""
@@ -2156,7 +2149,7 @@ fn run_emitc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   }
   let t = target
   let loaded = load_target(std, t)
-  let prog = analyze_program(loaded, std, ct_default(), jsig_real())
+  let prog = analyze_program(loaded, std, opts, jsig_real())
   if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
   let text = match cdriver.c_text(std, prog) {
     Ok(s) -> s
@@ -2216,7 +2209,8 @@ fn check_std(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
 ##
 ## Diagnostics from every target are rendered together, so a multi-target run
 ## reports all of them rather than the first target's.
-fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+fn run_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
+  let (opts, rest) = extract_ct_opts(rest0)
   let (std_flag, targets) = check_args(rest)
   if len(targets) == 0 {
     return cli_error("usage: dawn check [--std <dir>] <target>...")
@@ -2242,7 +2236,7 @@ fn run_check(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
           Err(rejected) -> { all = all ++ rejected.diags }
           Ok(plan) -> {
             let loaded = load_planned(plan)
-            match analyze_target_scoped(plan, loaded, std) {
+            match analyze_target_scoped(plan, loaded, std, opts) {
               Ok(prog) -> { all = all ++ rendered_diags(prog) }
               Err(e) -> return fail_target_setup(e)
             }
@@ -2514,6 +2508,28 @@ test "`dawn check` refuses an argv with no target and one that names nothing" {
     == (Some(2), "error: usage: dawn check [--std <dir>] <target>...\n", "")
   assert cli_read(() => run_check([NO_SUCH]))
     == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+}
+
+test "every compiling command takes --comptime-fuel, and none takes a bad one" {
+  # The fuel-exhausted hint names this flag, and `check` used to read it as a
+  # file name. A negative budget used to be accepted and turned every constant
+  # into a fuel error.
+  assert cli_read(() => run_check(["--comptime-fuel", "5"]))
+    == (Some(2), "error: usage: dawn check [--std <dir>] <target>...\n", "")
+  assert cli_read(() => run_check(["--comptime-fuel=5", NO_SUCH]))
+    == (Some(2), "error: no such file or directory: " ++ NO_SUCH ++ "\n", "")
+  assert cli_read(() => run_check(["--comptime-fuel", "-1", NO_SUCH]))
+    == (Some(2), "error: --comptime-fuel needs a number, 0 or more\n", "")
+  assert cli_read(() => run_check([NO_SUCH, "--comptime-fuel"]))
+    == (Some(2), "error: --comptime-fuel needs a number\n", "")
+  assert cli_read(() => run_emitc(["--comptime-fuel=many", NO_SUCH]))
+    == (Some(2), "error: --comptime-fuel needs a number\n", "")
+  assert cli_read(() => run_test(["--comptime-fuel=-3", NO_SUCH]))
+    == (Some(2), "error: --comptime-fuel needs a number, 0 or more\n", "")
+  assert cli_read(() => {
+    let _ = parse_run_args(["--comptime-fuel", "-1", NO_SUCH])
+    ()
+  }) == (Some(2), "error: --comptime-fuel needs a number, 0 or more\n", "")
 }
 
 test "`dawn fmt` refuses an argv with no path and one that names nothing" {

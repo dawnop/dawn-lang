@@ -743,7 +743,10 @@ stderr 和退出码。第 7 条腿的两次调用在 :427 与 :429，第 8 条�
    下两边打出同样的字节。真正把「编译对不对」钉住的是 `spike-native/run.sh` 和
    `native-fixpoint.sh`，不是这里。
 2. **它不覆盖 `--comptime-fuel` / `--comptime-ffi` / `--closure`。** 这个驱动的**任何**
-   子命令都不收这几个 flag，所以那是驱动的缺口，不是这个子命令的。
+   子命令都不收这几个 flag，所以那是驱动的缺口，不是这个子命令的。（2026-10-04 起
+   `--comptime-fuel` 已补上：check/build/emitc/run/test 都收，和 JVM 驱动共用
+   `interp.take_ct_fuel` 解析，负数拒绝；进程内断言在 `nmain.dawn` 的测试里，这条门禁
+   仍然没有它的 argv。）
 3. ~~它不覆盖超过 512 字节的失败消息~~——已经覆盖。native 运行时曾在 `DAWN_FAILURE_MAX`
    处截断一条被捕获的失败消息（#193 ARC-03，2026-08-08 修复：载荷改为失败自有的堆
    字符串，上限连同宏一起删除），语料里那条 650 字节的消息现在两边逐字节一致。
