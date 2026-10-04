@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw}
+use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw, log_request, escape_field}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -804,7 +804,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
       # every route, including paths nothing would match. Dispatch has already
       # run, but no handler has: the decision is only read for its tags.
       if has_dot_segment(raw_path) {
-        println("${ex.getRequestMethod()!} ${raw_path} -> 400 (dot segment)")
+        println("${log_request(ex.getRequestMethod()!, raw_path)} -> 400 (dot segment)")
         Err(http_error(400, errors.dot_segment))
       } else {
         # a guard's refusal and an oversized body are both answered before the
@@ -813,7 +813,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
         # same way
         match build_request(ex, meta, guard_of(d), max_body, errors) {
           Err(e) -> {
-            println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
+            println("${log_request(ex.getRequestMethod()!, raw_path)} -> ${e.status} (${escape_field(e.message)})")
             Err(e)
           }
           Ok(req) -> Ok(req)

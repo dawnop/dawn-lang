@@ -423,6 +423,16 @@ pub fn escape_field(s: String) -> String = {
   out
 }
 
+# The request half of every log line the package writes: the method and the
+# path *as the client sent it*, still percent-encoded, as nginx logs it. The
+# decoded path is the wrong thing to log: `%0D%0A` decodes to a line break,
+# and a log line that carries one is two log lines, the second written by the
+# client (CWE-117). The raw path cannot hold a control character (the JDK's
+# URI refuses one), and `escape_field` makes that a property of this function
+# rather than of the JDK.
+pub(pkg) fn log_request(method: String, raw_path: String) -> String =
+  escape_field(method) ++ " " ++ escape_field(raw_path)
+
 # A code point in hex for `escape_field`: two digits up to U+00FF, as it has
 # always been written, and as many as it takes above that.
 fn code_hex(n: Int) -> String =

@@ -6,6 +6,14 @@ Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
 `docs/std-defaults-design.md` and `docs/audit/web-api-v2-design.md` (in
 Chinese).
 
+## 6.1.1 (2026-10-05)
+
+- The access log writes the path as the client sent it, percent-encoded, in
+  `with_logging` and in the server's own refusal lines. Before, it wrote the
+  decoded path, so `%0D%0A` in a request path broke the line and the rest of
+  the path became a log line of the client's choosing. A path with non-ASCII
+  text now logs as its `%XX` escapes.
+
 ## 6.1.0 (2026-10-04)
 
 - Header values are ASCII only (SP, HTAB, `!` to `~`), for `with_header`,
