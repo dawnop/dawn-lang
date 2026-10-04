@@ -170,3 +170,51 @@ issue 的验收二选一：(i) `Buf` 换真字节缓冲；(ii) 先降 pkgfetch �
   `bin/dawn` 把堆钉成 2g 正是为了不让构建结果依赖机器。
 - **在 inflate 里分块冻结输出来压倍数。** 能把峰值降到每字节几 B，但它是绕开 `Buf` 表示的局部补丁，
   (i) 落地后就是死代码；该修的是表示本身。
+
+### 5.6 (i) 落地：分块 `Buf`（2026-10-05，#405）
+
+调研 `research-bytes-buf-repr-20261004.md` 比了 §5.4 的新运行时类型（方案 A）与只改 std 的分块缓冲
+（方案 B，Haskell `ByteString.Builder` 的形状），裁先做 B，A 作 B 吞吐不达标时的后手。落地的是 B：
+
+- `std/bytes.dawn` 的 `Buf` 改成 `opaque type Buf = BufRep`，`BufRep = { chunks: Array[Bytes], tail: Array[Int] }`：
+  已写满的块各恰好 4 KiB，冻成 `Bytes`；没写满的那一块仍是装箱的 `Array[Int]`。`put` 推尾部，满了
+  `bytes_from_array` 冻成一块；`buf_at` 用移位与掩码找块；`put_bytes` 在块边界上整块 `bytes_slice`，
+  不再逐字节装箱；`freeze` 平衡二分拼接（每字节每层复制一次，层数是块数的 log2），不是逐块 `++`
+  （那是 O(n²/块)）。
+- 公开面六个函数与类型 `Buf` 的签名、文档注释一字未改，329 处调用点不改源码；值语义仍是 `array_push`
+  的子句，作用在两个数组上：旧版本继续写只复制它自己的尾部（std 新增三条测试钉块边界上的读回、
+  旧版本续写与 `put_bytes` 和逐字节 `put` 等价）。越界的 `buf_at` 仍然 panic，文案从数组的越界
+  文案改成 `bytes.buf_at: index out of range`，与文档所说「同 `at`」对齐。
+- 不加原语、不动后端、不动解释器与镜像，所以不需要两次发版。
+
+实测（本机 16 核 WSL2，同一时段交错跑 5 轮，load 1.3 到 2.7；JVM 探针 `-Xmx6g -XX:+UseSerialGC`，
+tileir 与 inflate 用 `bin/dawn` 的 `-Xmx2g -XX:+UseSerialGC`；native `cc -O2`；表中是中位数）：
+
+| 测量 | 改前 | 4 KiB 块 | 64 KiB 块 |
+|---|---|---|---|
+| 探针 32 MiB `0x00`，JVM 峰值 RSS（每字节） | 539 MB（15.6 B） | 210 MB（5.3 B） | 225 MB（5.8 B） |
+| 探针 32 MiB `0xFF`，JVM 峰值 RSS（每字节） | 1350 MB（40.9 B） | 214 MB（5.4 B） | 227 MB（5.8 B） |
+| 探针 32 MiB，native 峰值 RSS（每字节，与字节值无关） | 1090 MB（34.0 B） | 99 MB（3.0 B） | 98 MB（3.0 B） |
+| 探针 32 MiB `0xFF`，JVM 最小可用堆 | 1024m 不够、1280m 够 | 120m 不够、124m 够 | 112m 不够、128m 够 |
+| 探针墙钟 JVM `0xFF` / native | 1.26 / 1.43 s | 0.45 / 1.06 s | 0.47 / 1.47 s |
+| tileir 大模块（5000 条 addf 各带常量，20 万元素的 global，编码 20 次），JVM | 8.63 s | 7.56 s | 7.63 s |
+| 同上，native | 36.26 s | 31.38 s | 31.67 s |
+| inflate 解 26.7 MB（本仓 `git archive` 的 tar.gz，`cap: None`），JVM | 2.03 s，1193 MB | 1.22 s，326 MB | 1.25 s，355 MB |
+| 同上，native | 6.85 s，935 MB | 5.69 s，87 MB | 5.82 s，108 MB |
+
+探针把 `Buf` 与冻好的 `Bytes` 都留到退出，所以每字节的下限本来就是 2 B（块一份、结果一份），
+冻结时平衡拼接的最上一层再加约 1 B 的瞬时量；JVM 的 RSS 口径还含未回收的中间层，最小可用堆
+124m（约 3.9 B/字节）是活对象口径。三组都不退化，反而全快：装箱对象少了，GC 与数组扩容复制
+都跟着少。块大小取 4 KiB：每一组都不慢于 64 KiB（native 探针快 28%），尾部的装箱量也小。
+
+之后：`MAX_EXPANDED_BYTES` 与 `DEFAULT_CAP` 按新倍数重评是刀 3（另派），本刀不动；§5.3 的
+inflate-contract pkgfetch 腿原样保留作新表示的回归门。`bytes_concat` 原语（刀 2）看拼接是否成为
+瓶颈再说，上表里没有它是瓶颈的迹象。
+
+不做的（理由）：
+
+- **方案 A（`ByteBuf` 运行时类型）。** 内存数量级与 B 相同（每字节 1 B 对约 1 到 3 B），吞吐上 B 已经
+  快于改前，A 剩下的好处不抵一条线的改动面与两次发版。
+- **逐块 `++` 冻结。** 32 MiB / 4 KiB 是 8192 块，前缀被复制 8192 次，约 128 GiB 的复制量。
+- **块大小不定长（按写入量倍增）。** `buf_at` 就要二分找块，LZ77 回指是 inflate 的热路径；定长块
+  一次移位一次掩码。
