@@ -1,0 +1,39 @@
+# A folded scalar constant beside an operand that has to be named.
+#
+# When one operand of a borrowing operation is a fresh reference (a call),
+# the RC pass names every operand of the row so evaluation order survives the
+# hoist. A folded constant is "immortal" as an operand, and the hoisted
+# temporary of an immortal *reference* literal is a ledger binding with a free
+# drop. The temporary of an Int constant is not a ledger binding at all, but
+# the pass still recorded it and dropped it, and its own checker stopped the
+# build with "released a binding that was not held" (dawn-lang #444).
+#
+# The rows that broke were the list `get` intrinsic and index syntax, with
+# the index a `const` or an inline `comptime` block: both stay a constant
+# reference node after lowering. The other lines are controls that were
+# always balanced: a plain literal index, a user function whose scalar
+# parameter stays owned, `str.slice` over a call, and a String constant,
+# whose temporary is a real (free) ledger entry.
+
+use std/str
+
+const K: Int = 1
+const Z: Int = 0
+const SEP: String = "-"
+
+fn names() -> List[String] = ["a", "b", "c"]
+
+fn word() -> String = "dawn"
+
+## A user function taking a call result and a scalar constant.
+fn pick(xs: List[String], i: Int) -> String = xs[i]
+
+pub fn main() -> Unit !io = {
+  println("${get(names(), K)}")
+  println(names()[K])
+  println(names()[comptime { Z + 2 }])
+  println(names()[1])
+  println(str.slice(word(), Z, K))
+  println(pick(names(), K))
+  println(join(names(), SEP))
+}
