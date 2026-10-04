@@ -19,7 +19,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header}
+use types.{Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -39,6 +39,8 @@ use java "java.io.FileInputStream"
 use java "java.util.ArrayList"
 use java "java.lang.System"
 use java "java.lang.Long"
+use java "java.lang.Thread"
+use java "java.lang.Throwable"
 
 ## Close an upstream stream, swallowing a close failure (non-fatal — the
 ## response is already committed, or was never sent). Called after pumping a
@@ -56,6 +58,37 @@ fn close_writer(w: OutputStreamWriter) -> Unit !io = w.close()
 fn close_body(o: OutputStream) -> Unit !io = o.close()
 
 fn close_exchange(ex: HttpExchange) -> Unit !io = ex.close()
+
+fn close_exchange_quietly(ex: HttpExchange) -> Unit !io = {
+  let _ = catch_fault(() => ex.close())
+  ()
+}
+
+# What `handle` brackets the whole exchange with, so that it runs on every way
+# out, including the one no barrier stops: a JVM Error such as an
+# OutOfMemoryError, which `catch_panic` and `catch_fault` let through by design
+# (spec §9.8.2: only `bracket` sees it, and only to release). That path used to
+# skip `write_response` entirely, so the exchange was never closed and the
+# client waited until its own timeout.
+#
+# On the ordinary path `write_response` has answered and closed the exchange,
+# and closing it again does nothing. On the other, nothing has been sent if the
+# status is still -1 (the JDK sets it in sendResponseHeaders), and then this
+# tries the neutral 500. Trying may itself fail, the heap being what it is when
+# this runs, so the close is bracketed around the attempt rather than after it.
+fn finish_exchange(ex: HttpExchange, errors: ErrorFormat) -> Unit !io = {
+  with x <- bracket(ex, close_exchange_quietly)
+  if x.getResponseCode() == -1 {
+    let _ = catch_fault(() => write_response(x, error_response(http_error(500, errors.internal_message), fmt: errors)))
+    ()
+  }
+}
+
+# One line for a request that ended in a JVM Error, in place of the stack trace
+# the thread would otherwise print. The request's own virtual thread is the one
+# this is installed on, so it covers that request and nothing else; the line
+# is shaped like the "request panicked" one a panic leaves.
+fn log_fatal(_t: Thread, e: Throwable) -> Unit !io = println("request failed: ${e.toString()!}")
 
 # The Content-Length the client claims, or 0 when it does not say. A claim, not
 # a fact — it only ever produces a fast rejection, never permission to read.
@@ -727,6 +760,11 @@ fn serve_through(
 }
 
 fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, errors: ErrorFormat, ex: HttpExchange) -> Unit !io = {
+  # The outermost layer, so it holds on every way out: `finish_exchange`
+  # closes the exchange, and answers 500 first if a JVM Error got past the
+  # barrier below before anything was sent.
+  Thread.currentThread()!.setUncaughtExceptionHandler(log_fatal)
+  with ex <- bracket(ex, x => finish_exchange(x, errors))
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
   let outcome = catch_panic(() => {
@@ -2037,5 +2075,72 @@ test "a custom ErrorFormat words the 404, the 405 and the dot-segment 400" {
   let r400 = raw_http(port, get_line("/a/../b"))
   assert str.starts_with(r400, "HTTP/1.1 400")
   assert str.contains(r400, "{\"error\":\"no dots\"}")
+  srv.stop(0)
+}
+
+# Test-only: `raw_http` that gives up after `ms` milliseconds of silence, so a
+# server that never answers is a red assertion and not a hung suite.
+fn raw_http_within(port: Int, request: String, ms: Int) -> String !io = {
+  let s = Socket.new("127.0.0.1", port)
+  s.setSoTimeout(ms)
+  let out = s.getOutputStream()!
+  out.write(bytes.utf8(request))
+  out.flush()
+  let got = catch_fault(() => bytes.decode_utf8_lossy(s.getInputStream()!.readAllBytes()!))
+  s.close()
+  match got {
+    Ok(r) -> r
+    Err(_) -> "<no response>"
+  }
+}
+
+# Test-only: a handler that ends in a JVM Error rather than a panic. An array
+# of Int.MAX elements is past the VM's limit whatever the heap, so this throws
+# OutOfMemoryError at once without using any memory.
+fn fatal_handler(_req: Request) -> Result[Response, HttpError] !io = {
+  let xs = ArrayList.new(2147483647)
+  Ok(text(200, "unreachable ${xs.size()}"))
+}
+
+test "a JVM Error in a handler still answers 500 and closes the exchange" {
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+  let h = start(cfg, [route_get("/fatal", fatal_handler), route_get("/hello", hello_handler)], [])
+  let port = handle_port(h)
+  # catch_panic does not see an Error, so this request used to get nothing:
+  # no response, and an exchange nobody closed
+  let fatal = raw_http_within(port, get_line("/fatal"), 10000)
+  assert str.starts_with(fatal, "HTTP/1.1 500")
+  assert str.contains(fatal, "{\"error\":\"internal server error\"}")
+  # and the server goes on answering
+  assert str.starts_with(raw_http_within(port, get_line("/hello"), 10000), "HTTP/1.1 200")
+  stop(h, 0)
+}
+
+# Test-only: a handler that puts characters above U+00FF into a header. The
+# JDK writes the low byte of each, and those two lows are CR and LF.
+fn split_header_handler(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(with_header(text(200, "ok"), "X-Name", "a\u{010d}\u{010a}X-Injected: 1"))
+
+fn split_redirect_handler(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(try_redirect(302, "/a\u{010d}\u{010a}X-Injected: 1")?)
+
+fn split_type_handler(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(raw(200, "text/plain\u{010d}\u{010a}X-Injected: 1", "ok"))
+
+test "no header line reaches the wire that the handler did not write" {
+  let routes = [
+    route_get("/h", split_header_handler),
+    route_get("/r", split_redirect_handler),
+    route_get("/t", split_type_handler),
+  ]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  for (path, status) in [("/h", "500"), ("/r", "400"), ("/t", "500")] {
+    let resp = raw_http_within(port, get_line(path), 10000)
+    assert not str.contains(resp, "\r\nX-Injected")
+    assert str.starts_with(resp, "HTTP/1.1 " ++ status)
+  }
   srv.stop(0)
 }

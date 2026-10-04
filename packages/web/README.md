@@ -104,6 +104,7 @@ header the program built out of its own strings:
 |---|---|
 | status | `200..599`. jdk.httpserver sends any number as written (`99`, `600`, `-5`), and a final `100` leaves the client waiting for a response that never comes. There is no `1xx` here: nothing in this framework sends an interim response. |
 | content type | A legal header value, like any other: `raw`/`binary`/`streaming` pass it straight to `Content-Type`. |
+| header values | ASCII only: SP, HTAB and `!` to `~` (6.1). Encode anything else first: percent-encode a `Location`, and give a filename to `attachment`, which writes RFC 5987 `filename*` itself. Applies to `with_header`, `redirect`, `error_response`'s headers and every content type. |
 | `Transfer-Encoding` | Never accepted from a handler. The body kind decides the framing; a handler's copy used to go out next to the JDK's own `Content-length`, which RFC 9112 §6.1 forbids. |
 | `Content-Length` | A decimal byte count, once, equal to the body's length when the body has content. Any count is accepted on a body with no content, because that is how a `HEAD` answer states the length of what it does not carry. Never on a stream of unknown length. |
 
@@ -253,6 +254,40 @@ The refusal names what it refused, through `escape_field` (3.2): a value held
 back for carrying a `CR` must not carry it into the log line the panic becomes,
 or into the `400` body. What that escapes is exactly what `valid_header_value`
 refuses, so `SP` and `HTAB` come through untouched.
+
+## Header values are ASCII (6.1)
+
+`valid_header_value`, and so every constructor that sets a header, accepts
+SP, HTAB and visible ASCII and nothing else. Until 6.1 it accepted any
+character from SP up, and jdk.httpserver writes a header by keeping the low
+byte of each Java `char`: a character above U+00FF reached the wire as some
+other byte, and U+010A, U+010D among them, as an LF or a CR. A value that
+passed every check could end its own header line and start another one.
+U+0080..U+00FF did arrive as the same byte, but as Latin-1, which is not
+what a Dawn `String` holding them means; RFC 9110 §5.5 keeps those bytes only
+as obs-text. Non-ASCII text is the caller's to encode:
+
+```dawn
+# a Location: percent-encode the path (RFC 3986)
+let r = try_redirect(302, "/files/caf%C3%A9")?
+# a download name: attachment writes filename= and filename*= itself
+let d = attachment("text/plain", "\u{4e2d}\u{6587}.txt", body)
+```
+
+`escape_field` escapes exactly what `valid_header_value` refuses, so it now
+writes a non-ASCII character as `\u{...}` as well.
+
+Why a minor and not a major: the signatures are the same, and every value
+still accepted reaches the wire as it was written. What is refused now never
+did, so a program that passed one was already sending something it did not
+mean. 3.1 and 3.2 narrowed what a response may carry the same way, as minors.
+A program that relied on Latin-1 header bytes has to encode them instead.
+
+6.1 also closes the exchange on a JVM `Error` (an `OutOfMemoryError`, a
+`StackOverflowError`), which `catch_panic` does not catch: `handle` brackets
+the whole exchange, answers the neutral `500` when nothing was sent yet, and
+logs one `request failed: <error>` line instead of the thread's stack trace.
+Before, such a request got no response and its exchange stayed open.
 
 ## Error wording (2.1, 5.2)
 
