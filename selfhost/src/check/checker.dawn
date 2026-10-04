@@ -5916,6 +5916,32 @@ pub(pkg) fn moved_or_suggest(cx: Cx, name: String, pool: List[String]) -> Option
     None -> suggest.hint(name, pool)
   }
 
+## The hint for a call to a name nothing in scope binds but a whole-module
+## import exports (#450): `use lib as m` puts `sub` behind `m.`, and neither
+## `sub(x, 1)` nor `x.sub(1)` looks there, since both find only unqualified
+## names. Asked before `moved_or_suggest`, whose std answer for a name like
+## `sub` pointed at a module the author never imported while the one they did
+## import had it. Every exporting alias is listed, in import order (the
+## insertion order of `module_exports`); `dot` picks the wording for `x.f(...)`.
+fn alias_export_hint(cx: Cx, name: String, dot: Bool) -> Option[String] = {
+  var quals: List[String] = []
+  var uses: List[String] = []
+  for al in map.keys(cx.module_exports) {
+    match map.get(cx.module_exports, al) {
+      Some(exp) -> if map.has(exp.fns, name) {
+        quals = quals ++ ["`" ++ al ++ "." ++ name ++ "(...)`"]
+        uses = uses ++ ["`use " ++ exp.mod_path ++ ".{" ++ name ++ "}`"]
+      }
+      None -> ()
+    }
+  }
+  if len(quals) == 0 { return None }
+  let how = if dot { "to keep the dot call" } else { "to call it unqualified" }
+  let what = if len(quals) == 1 { "an import exports it" } else { "imports export it" }
+  Some("`" ++ name ++ "` is not in scope unqualified, but " ++ what ++ ": write " ++
+      join(quals, " or ") ++ ", or add " ++ join(uses, " or ") ++ " " ++ how)
+}
+
 ## A variable read: a local (with capture bookkeeping), else a top-level fn or
 ## builtin used as a value, else undefined.
 ## `f[T]` where `f` is a generic function or builtin (not a local) and `T` is a
@@ -8149,7 +8175,10 @@ fn check_call(
           XError(owner_off(cx, lo), owner_off(cx, hi)))
       }
       let pool = fn_pool(cxa)
-      let hint = moved_or_suggest(cxa, callee, pool)
+      let hint = match alias_export_hint(cxa, callee, pre0 != None) {
+        Some(h) -> Some(h)
+        None -> moved_or_suggest(cxa, callee, pool)
+      }
       return (cerr_o(cxa, "undefined function: ${callee}", clo, chi, hint),
         TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     }
