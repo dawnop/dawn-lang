@@ -26,7 +26,8 @@
 #
 # The modules come from `dawn doc`, as stdlib.html's entries do: site/build.sh
 # writes one document per package. Only their paths are read here; the
-# entries render through gen/api when each package gets a page of its own.
+# entries render through gen/api on each package's own page (gen/pkgpage),
+# which the package's name in the first column, and each dependency, links to.
 
 use std/str
 use std/list
@@ -37,9 +38,9 @@ use json/value.{Json, error_text}
 use md/parser
 use md/ast.{Inline, Para}
 use html/escape.{escape_html}
-use html/page.{Assets, Lang, En, Zh, PageHead, shell, section_crumb, chip, repo_url}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell, section_crumb, chip, repo_url, lang_path}
 use html/render.{split_head, inline_run, inline_text}
-use gen/common.{must_read, must_list, write_page}
+use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files}
 use gen/copy.{Copy, load_copy, line, plain}
 use gen/api.{jget, jarr, field}
 use compiler_plan/manifestv.{validate, semv_show, VPath, VUrl}
@@ -138,7 +139,8 @@ pub fn doc_module_paths(doc: Json) -> List[String] = map(jarr(jget(doc, "modules
 pub fn module_paths(use_as: String, paths: List[String]) -> List[String] =
   list.sort(map(paths, m => "${use_as}/${m}"))
 
-fn read_doc(dir: String) -> Json !Fs = {
+## The `dawn doc` document site/build.sh wrote for the package in `dir`.
+pub fn read_doc(dir: String) -> Json !Fs = {
   let path = "site/build/packages/${dir}.json"
   let text =
     match io.read_file(path) {
@@ -156,15 +158,25 @@ fn read_doc(dir: String) -> Json !Fs = {
 ## The page's anchor for a package's row.
 pub fn row_id(dir: String) -> String = "pkg-${dir}"
 
-fn gh_tree(dir: String) -> String = "${repo_url()}/tree/main/packages/${dir}"
+## Where a package's own page is, from the site root of either language:
+## its alias, the name `use` lines spell.
+pub fn page_of(use_as: String) -> String = "packages/${use_as}.html"
 
-## A link the README's first paragraph makes: relative ones are relative to
-## the package's directory, which on this site is GitHub's copy of it.
-fn readme_url(dir: String, u: String) -> String =
+## A link a README makes, from a page `root` away from the site root. A
+## relative one is relative to the package's directory: into docs/ it is
+## mapped as every other doc link on the site is (a rendered page, or the file
+## on GitHub, or a stopped build when the file is not there), and anywhere
+## else it is GitHub's copy of the file.
+pub fn readme_url(root: String, docs: List[String], dir: String, u: String) -> String =
   if str.contains(u, "://") || str.starts_with(u, "#") || str.starts_with(u, "mailto:") {
     u
   } else {
-    "${repo_url()}/blob/main/packages/${dir}/${u}"
+    let full = fspath.normalize("packages/${dir}/${u}")
+    if str.starts_with(full, "docs/") {
+      map_doc_url(root, docs, full)
+    } else {
+      "${repo_url()}/blob/main/${full}"
+    }
   }
 
 ## The release's source archive, the url a consumer's `dawn add` fetches.
@@ -192,32 +204,35 @@ pub fn use_lines(p: Package) -> (String, String) = {
   (path, "dawn add <archive> \\\n  --subdir packages/${p.dir}${as_flag}")
 }
 
-fn deps_html(c: Copy, p: Package, known: List[String]) -> String =
+## A package's dependencies, each linked to `href` of its directory when it
+## is one of the packages in `known`; "std only" when there are none.
+pub fn deps_links(c: Copy, p: Package, known: List[String], href: fn(String) -> String) -> String =
   if len(p.deps) == 0 {
     """<span class="pkg-none">""" ++ escape_html(plain(c, "deps-none")) ++ "</span>"
   } else {
     join(map(p.deps, d => {
       let (a, dir) = d
       let code = "<code>" ++ escape_html(a) ++ "</code>"
-      if dir != "" && list.contains(known, dir) { """<a href="#${row_id(dir)}">${code}</a>""" } else { code }
+      if dir != "" && list.contains(known, dir) { """<a href="${href(dir)}">${code}</a>""" } else { code }
     }), " ")
   }
 
-fn row_html(c: Copy, p: Package, mods: List[String], known: List[String]) -> String = {
+fn row_html(c: Copy, root: String, lang: Lang, docs: List[String], p: Package, mods: List[String], known: List[String]) -> String = {
   let (path, add) = use_lines(p)
+  let page = (dir: String) => "${root}/" ++ lang_path(lang, page_of(alias_of(dir)))
   let mod_html = join(map(mods, m => "<code>" ++ escape_html(m) ++ "</code>"), " ")
-  """<tr id="${row_id(p.dir)}"><td class="key"><a href="${gh_tree(p.dir)}"><code>${escape_html(p.use_as)}</code></a></td>"""
+  """<tr id="${row_id(p.dir)}"><td class="key"><a href="${page(p.dir)}"><code>${escape_html(p.use_as)}</code></a></td>"""
     ++ """<td class="pkg-name"><code>${escape_html(p.name)}</code></td><td class="pkg-ver">${escape_html(p.version)}</td>"""
-    ++ """<td class="pkg-sum"><p>""" ++ inline_run(p.summary, u => readme_url(p.dir, u)) ++ "</p>"
+    ++ """<td class="pkg-sum"><p>""" ++ inline_run(p.summary, u => readme_url(root, docs, p.dir, u)) ++ "</p>"
     ++ """<p class="pkg-mods">${mod_html}</p></td>"""
-    ++ """<td class="pkg-deps">${deps_html(c, p, known)}</td>"""
+    ++ """<td class="pkg-deps">${deps_links(c, p, known, page)}</td>"""
     ++ """<td class="pkg-use"><span class="pkg-use-k">""" ++ escape_html(plain(c, "use-path")) ++ "</span>"
     ++ "<code>" ++ escape_html(path) ++ "</code>"
     ++ """<span class="pkg-use-k">""" ++ escape_html(plain(c, "use-archive")) ++ "</span>"
     ++ "<code>" ++ escape_html(add) ++ "</code></td></tr>"
 }
 
-fn table_html(c: Copy, rows: List[(Package, List[String])]) -> String = {
+fn table_html(c: Copy, root: String, lang: Lang, docs: List[String], rows: List[(Package, List[String])]) -> String = {
   let p = (k: String) => escape_html(plain(c, k))
   let known = map(rows, r => {
     let (pk, _) = r
@@ -225,7 +240,7 @@ fn table_html(c: Copy, rows: List[(Package, List[String])]) -> String = {
   })
   let body = join(map(rows, r => {
     let (pk, mods) = r
-    row_html(c, pk, mods, known)
+    row_html(c, root, lang, docs, pk, mods, known)
   }), "\n")
   """<div class="table-wrap pkg-table"><table>
 <thead><tr><th>${p("th-package")}</th><th>${p("th-name")}</th><th>${p("th-version")}</th><th>${p("th-summary")}</th><th>${p("th-deps")}</th><th>${p("th-use")}</th></tr></thead>
@@ -263,7 +278,7 @@ pub fn packages_page(a: Assets, lang: Lang, rows: List[(Package, List[String])])
     extra: "",
     cls: "",
   }
-  let main = `<main class="wrap page pkg-page">` ++ "\n" ++ table_html(c, rows) ++ "\n"
+  let main = `<main class="wrap page pkg-page">` ++ "\n" ++ table_html(c, root, lang, doc_files(), rows) ++ "\n"
     ++ """<div class="pkg-notes"><p>${note}</p>""" ++ "\n<p>" ++ line(c, "name-note", mu) ++ "</p></div>\n</main>"
   shell(a, lang, "packages.html", plain(c, "title") ++ " — Dawn", root, "packages", head, main)
 }
@@ -345,4 +360,20 @@ test "module paths are spelled as `use` spells them, sorted" {
       assert false
     }
   }
+}
+
+test "a package's page is named by its alias" {
+  assert page_of(alias_of("tea-dom")) == "packages/tea_dom.html"
+}
+
+## A README link into docs/ is a doc link like any other on the site; one
+## anywhere else in the tree is the file on GitHub.
+test "a README's relative links resolve from the package's directory" {
+  let docs = ["spec.en.md", "tile-backend-design.md"]
+  assert readme_url("..", docs, "tileir", "../../docs/spec.en.md") == "../spec.html"
+  assert readme_url("..", docs, "tileir", "../../docs/tile-backend-design.md")
+    == repo_url() ++ "/blob/main/docs/tile-backend-design.md"
+  assert readme_url(".", docs, "tea-dom", "js/README.md") == repo_url() ++ "/blob/main/packages/tea-dom/js/README.md"
+  assert readme_url(".", docs, "x", "https://a.b/c") == "https://a.b/c"
+  assert readme_url(".", docs, "x", "#s1") == "#s1"
 }

@@ -29,8 +29,8 @@ use html/render.{render_doc, split_head, inline_run, inline_text, TocEntry}
 use md/ast.{Para}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/api.{
-  Pg, jget, jstr, jarr, field, slug, doc_prose, link_anchor, unlinked, qualify, fn_entry,
-  type_decl, type_entry, const_entry, trait_entry, effect_entry, jobj, no_pg
+  Pg, ApiRow, jget, jarr, field, slug, doc_prose, link_anchor, unlinked, qualify, fn_entry,
+  trait_entry, impls_html, decls_html, api_row, trait_row, decl_rows, jobj, no_pg
 }
 
 # ---- the page's own words ----
@@ -113,21 +113,11 @@ fn chrome(lang: Lang, root: String) -> Chrome =
 
 ## What rendering an entry on this page needs (gen/api.Pg): the anchors are
 ## every entry [api_rows] lists, and the example headings are the chrome's.
-fn pg_of(docs: List[String], api: Json, c: Chrome) -> Pg =
-  Pg { docs: docs, anchors: set.from(map(api_rows(api), r => r.anchor)),
-    examples: (c.example_one, c.example_many) }
-
-## The impls a module registers. Coherence is program-wide — it does not ask
-## who wrote the `use` — so a reader needs to see that `==` on a `Map` is
-## answered here even though no function in the list says so.
-fn impls_html(c: Chrome, m: Json) -> String = {
-  let names = map(jarr(jget(m, "impls")), i => "<code>" ++ escape_html(jstr(i)) ++ "</code>")
-  if len(names) == 0 {
-    ""
-  } else {
-    """<p class="api-impls">""" ++ c.impls_lead ++ join(names, c.impls_sep) ++ "</p>\n"
-  }
-}
+## Every name a std doc links to is documented here, so there is no other
+## page to send one to.
+fn pg_of(docs: List[String], root: String, api: Json, c: Chrome) -> Pg =
+  Pg { docs: docs, root: root, anchors: set.from(map(api_rows(api), r => r.anchor)),
+    examples: (c.example_one, c.example_many), std_page: "", dep_pages: [] }
 
 fn section(id: String, title: String, intro: String, body: String) -> String =
   """<h2 id="${id}">""" ++ escape_html(title)
@@ -208,19 +198,8 @@ fn modules_html(c: Chrome, pg: Pg, root: Json) -> (String, List[TocEntry]) = {
     # the call-site alias is the file's own name: `use std/str` binds `str`
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
     toc = toc ++ [TocEntry { level: 3, id: id, text: path }]
-    html = html ++ [sub(id, path) ++ doc_prose(pg, m) ++ impls_html(c, m)]
-    for t in jarr(jget(m, "types")) {
-      html = html ++ [type_entry(pg, slug(path), t) ++ "\n"]
-    }
-    for t in jarr(jget(m, "traits")) {
-      html = html ++ [trait_entry(pg, slug(path), t) ++ "\n"]
-    }
-    for c in jarr(jget(m, "consts")) {
-      html = html ++ [const_entry(pg, qual, slug(path), c) ++ "\n"]
-    }
-    for e in jarr(jget(m, "effects")) {
-      html = html ++ [effect_entry(pg, slug(path), e) ++ "\n"]
-    }
+    html = html ++ [sub(id, path) ++ doc_prose(pg, m) ++ impls_html(c.impls_lead, c.impls_sep, m)
+        ++ decls_html(pg, qual, slug(path), m)]
     let (used, refs) = fns_in_order(path, m)
     for f in used {
       html = html ++ [fn_entry(pg, qual, slug(path), f) ++ "\n"]
@@ -255,12 +234,6 @@ fn modules_html(c: Chrome, pg: Pg, root: Json) -> (String, List[TocEntry]) = {
 # to agree so that an entry kind added to the page and not to this is a
 # failure rather than a silent omission.
 
-## One entry of the standard library page, as an index needs it.
-pub type ApiRow = { title: String, decl: String, doc: String, anchor: String }
-
-fn api_row(title: String, decl: String, doc: String, anchor: String) -> ApiRow =
-  ApiRow { title: title, decl: decl, doc: doc, anchor: anchor }
-
 ## Every entry on the standard library page, in the order the page shows them.
 ##
 ## The module and group HEADINGS are here too, as rows whose declaration is
@@ -284,25 +257,7 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     let base = slug(path)
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
     rows = rows ++ [api_row(path, "module", unlinked(m), "m-${base}")]
-    for t in jarr(jget(m, "types")) {
-      rows = rows
-        ++ [api_row(field(t, "name"), type_decl(t), unlinked(t),
-          "${base}-type-" ++ field(t, "name"))]
-    }
-    for t in jarr(jget(m, "traits")) {
-      rows = rows ++ [trait_row(base, t)]
-    }
-    for c in jarr(jget(m, "consts")) {
-      let name = field(c, "name")
-      rows = rows
-        ++ [api_row(qualify(qual, name), "const ${name}: " ++ field(c, "type"), unlinked(c),
-          "${base}-${name}")]
-    }
-    for e in jarr(jget(m, "effects")) {
-      rows = rows
-        ++ [api_row(field(e, "name"), "effect " ++ field(e, "name"), unlinked(e),
-          "${base}-effect-" ++ field(e, "name"))]
-    }
+    rows = rows ++ decl_rows(qual, base, m)
     let (used, refs) = fns_in_order(path, m)
     for f in used ++ refs {
       let name = field(f, "name")
@@ -311,12 +266,6 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
     }
   }
   rows
-}
-
-fn trait_row(base: String, t: Json) -> ApiRow = {
-  let name = field(t, "name")
-  api_row(name, "trait ${name}[" ++ field(t, "typeParam") ++ "]", unlinked(t),
-    "${base}-trait-${name}")
 }
 
 # ---- the page ----
@@ -350,7 +299,7 @@ pub fn gen_stdlib(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
       Err(e) -> panic("stdlib.json: " ++ error_text(e))
     }
   let docs = doc_files()
-  let pg = pg_of(docs, api, c)
+  let pg = pg_of(docs, root, api, c)
   let mu = (u: String) => map_doc_url(root, docs, u)
   # The title and the opening paragraph go into the band above the page; the
   # rest of the intro opens the article.
@@ -540,7 +489,7 @@ fn link_json(text: String, module: String, name: String, kind: String) -> Json =
 ## here and in [api_rows] are one set of rules, and a member lands on its
 ## owner. Built from the same synthetic document as the anchor test above.
 test "a doc link lands on the entry that holds its target" {
-  let pg = pg_of([], probe_api(), chrome(En, "."))
+  let pg = pg_of([], ".", probe_api(), chrome(En, "."))
   let lands = (module: String, name: String, kind: String) =>
     match link_anchor(jget(link_json(name, module, name, kind), "target")) {
       Some(a) -> if set.has(pg.anchors, a) { a } else { "missing #" ++ a }
@@ -565,7 +514,7 @@ test "a doc link lands on the entry that holds its target" {
 }
 
 test "a doc's links render as links to their entries, and nothing else moves" {
-  let pg = pg_of([], probe_api(), chrome(En, "."))
+  let pg = pg_of([], ".", probe_api(), chrome(En, "."))
   let doc = jobj([("doc", JStr("Like [`str.trim`], not [`Int`]; `[x]` and\n\n```\n[`str.trim`]\n```")),
     ("links", JArr([link_json("str.trim", "std/str", "trim", "fn"), link_json("Int", "", "Int", "type")]))])
   let html = doc_prose(pg, doc)

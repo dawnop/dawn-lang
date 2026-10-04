@@ -1,8 +1,9 @@
-<!-- doc-check: translation-of site/pages/packages.md @ 65a474a822db7b87 -->
+<!-- doc-check: translation-of site/pages/packages.md @ aaf21432c91f74c3 -->
 # 包页文案，中文，译本
 
-`packages.html` 的全部文字。生成器按名字读这些小节（`site/src/gen/packages.dawn`），
-做法与 cuTile 页读 `gpu.md` 相同，缺一节就构建失败。正本是 `packages.md`，
+`packages.html` 与 `packages/` 下各包页面的全部文字。生成器按名字读这些小节
+（`site/src/gen/packages.dawn`、`site/src/gen/pkgpage.dawn`），做法与 cuTile 页读
+`gpu.md` 相同，缺一节就构建失败。正本是 `packages.md`，
 两边的键相同，本文件记着正本的摘要。
 
 这里没有任何具体某个包的内容：名字、版本、依赖与模块在建站时从各包的 `dawn.toml`
@@ -68,3 +69,31 @@ manifest 名
 ## name-note
 
 主版本 2 及以上的包，manifest 名以主版本号结尾（`json2`、`web6`）。第一列的别名是 `use` 行里写的名字，所以升主版本不用改它们。
+
+## api-title
+
+API
+
+## chip-modules
+
+个模块
+
+## chip-deps
+
+依赖
+
+## chip-repo
+
+GitHub 上的源码
+
+## impls-lead
+
+本模块登记的 impl（全程序可见，不必 `use`）：
+
+## example-one
+
+示例
+
+## example-many
+
+示例
