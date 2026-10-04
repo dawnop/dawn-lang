@@ -631,8 +631,15 @@ jobs:
   # a name the tree does not carry a matrix for, so neither can quietly cover a
   # harness that was deleted or renamed.
   #
-  # `if: always()` so a red shard cannot swallow the completeness verdict; the
-  # two failures stay separately attributable. The self-test runs first because
+  # `if: !cancelled()` so a red shard cannot swallow the completeness verdict;
+  # the two failures stay separately attributable. Not `always()`: that one is
+  # true in a cancelled run too, so when cancel-in-progress cut a run short
+  # this job still ran, found the cancelled shards' records missing and
+  # reported failure (runs 37127166843 and 37207175626), and a superseded run
+  # read as red. `cancelled()` is about the run, not the shards: a shard that
+  # fails or times out on its own does not cancel the run, so this job still
+  # runs and still refuses the missing record. gates.yml's
+  # mutant-shards-complete made the same move. The self-test runs first because
   # a guard whose red has never been observed is not a guard. The job is
   # skipped with the shards when the dedupe job found this tree verified.
   #
@@ -649,7 +656,7 @@ jobs:
       - tile-golden-5
       - tile-golden-6
       - tile-golden-7
-    if: ${{ always() && needs.dedupe.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
     timeout-minutes: 5
