@@ -48,9 +48,7 @@ declare -A EXCLUDED=(
 # leak detection on, and passes only if the run is red for a LeakSanitizer
 # report and nothing else: every test passed, no other sanitizer spoke. A run
 # that comes back clean fails too, so the entry is removed with the fix.
-declare -A KNOWN_LEAKS=(
-  [packages/tileir]="a panic raised in an effect handler arm and caught by catch_panic leaves lists the handled computation allocated unreleased (the knife C1 vadd_half test, prog.dawn)"
-)
+declare -A KNOWN_LEAKS=()
 
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/native-asan-tests.XXXXXX")
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi

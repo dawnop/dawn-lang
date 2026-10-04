@@ -1,0 +1,22 @@
+# The dropped-continuation half of #467: no panic anywhere, and still a leak.
+#
+# `label(1)` is evaluated and owned before `ask(2)` suspends. The handler
+# answers without resuming, so the suspended frame is discarded by the
+# carrier's forced unwind (dawn_rt.c, "THE SECOND EXIT, AND PERCEUS"), and the
+# unwind releases only what the frame's `dawn_own` slots hold. The label used
+# to sit in a plain C temporary and leaked 31 bytes on every run.
+ctl effect Ask {
+  fn ask(n: Int) -> String
+}
+
+type R = { a: String, c: String }
+
+fn label(n: Int) -> String = "item-" ++ to_string(n)
+
+fn stopped() -> String = {
+  with handle Ask { ask(n) resume k => "stopped at ${to_string(n)}" }
+  let r = R { a: label(1), c: ask(2) }
+  r.a ++ r.c
+}
+
+pub fn main() -> Unit !io = println(stopped())

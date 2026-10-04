@@ -86,7 +86,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [control-freight-design.md](control-freight-design.md) | current | #71：控制运行时与效果证据跟随已有的函数可达性遍历，未使用的声明不增加类文件。 |
 | [slab-residency-design.md](slab-residency-design.md) | **current** | #10 的 measurement-first 调研与落地：把 lexer 小活集的 RSS 拆成 eager 64 KiB layout、空 current、每类 empty cache、rounding 与 `madvise` 五份；以 lexer/compiler/持久红黑树矩阵裁定 fresh slab 按 32 KiB 增量 materialize，保留 hot path、empty cache 与退役策略。 |
 | [native-loop-control-design.md](native-loop-control-design.md) | current | native RC 的 `unloop` 只拆 match 一次性循环，保留仍被源码 `break`/`continue` 指向的循环与 C 标签。 |
-| [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。 |
+| [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。#467：为顺序提前求值的 owned 操作数在 C 里放进 `dawn_own` 槽，raise 或丢弃 continuation 时由 unwind 释放。 |
 | [native-operand-snapshot-design.md](native-operand-snapshot-design.md) | current | #84 的操作数值快照：后续赋值不能改变前置值，借用引用沿用 RC 临时绑定清理。 |
 | [function-value-arity-design.md](function-value-arity-design.md) | current | #87 的函数值与效果操作参数上限；在检查期报告，保留宽参数直接调用。 |
 | [core-lint-design.md](core-lint-design.md) | current | Core/ABI 校验器两刀：刀 1 静态对账（intrinsic 三处分区含 comptime、JVM 运行时符号、FnN 上限从 `types.fn_interface_arities` 派生）；刀 2 `DAWN_CORE_LINT=1` 时 lowering 之后的 well-formedness（`ir/lint.dawn`，字典形状、证据行与槽、调用个数、配对、Never 规则下的绑定）。十二个历史缺陷的变异补丁各自变红，全语料与 selfhost 零误报；只在本机与 nightly 开。 |
