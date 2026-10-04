@@ -1,9 +1,9 @@
 # LSP 引用与改名：T0 解析覆盖
 
 > 状态：**current**：T0 于 2026-10-04 落地，分支 `feat/lsp-resolution-coverage`（提交以主题引用，合入后的哈希记在进度记录里）；
-> T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`。
+> T1（semantic tokens 服务端，§T1）同日落地，分支 `feat/lsp-semantic-tokens`；T2（VS Code 与 Playground 两个消费端，§T2）同日，分支 `feat/lsp-semantic-tokens-clients`。
 > 依据：裁决 `agent-handoff/ruling-lsp-tokens-rename-20261003.md`，调研 `agent-handoff/research-lsp-tokens-rename-report-20261003.md`
-> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1；R1–R3（references、rename）各自动码前在此续写。
+> （§1.4 空洞实测表、§2、§3.4、§5.1 刀序）。前六节写 T0，§T1 写 T1，§T2 写 T2；R1–R3（references、rename）各自动码前在此续写。
 
 ## 一、为什么 T0 在最前
 
@@ -210,3 +210,92 @@ Playground 尺寸的 full 回复 96 KB，在网关 256 KiB 的单条上限之内
 - **`modification` 修饰（赋值目标）**：`acc = acc + 1` 左边的 `acc` 现在只是 `mutable`。标准名有，但要遍历区分读写，留到 R1（documentHighlight 的读/写种类要的正是它）。
 - **内建类型、内建函数的 token**：没有声明可落，分类无从读；TextMate 按大小写已经涂对。
 - **开关**：token 来自已经算好的分析，请求时只是一次遍历；分析未就绪回空，语法高亮不受影响。裁决第 3 条。
+
+## T2：semantic tokens 消费端（VS Code 与 Playground）
+
+裁决第 1、3 条；调研 §5.1 的 T2 行。服务端一字节不动：两端都只读 T1 的 legend 与 `data`，按 legend 里的**名字**解码，不在客户端另抄一份下标表。
+legend 的顺序归服务端，客户端抄一份就等于把 T1.2 那张表复制到第二、第三处，服务端哪天插一个类型，客户端的颜色就整体错位一格。
+
+### T2.1 Playground 走哪条路
+
+任务单的前提是「Playground 后端今天走 `/check`，不是 LSP 会话」。实查不成立：`/check` 只剩 LSP 不可用时的诊断兜底（`site/play-ui/src/lint.ts`），
+hover、completion、definition、inlayHint 早已走 #11 的 WebSocket 网关（`playground/lsp_gateway.py`，见 `docs/playground-lsp-design.md`），
+网关后面就是一个 native `dawnc lsp` 会话，T1 落地后它本来就答 `semanticTokens/range`。所以两条候选（后端加端点、`/check` 回包带 tokens）都不选：
+前者要在 `playground/src/main.dawn` 里再起一个 LSP 会话或另写一遍分类，后者要改 `/check` 的合约，而且 `/check` 是一次性编译，没有 hover 等用的那份分析。
+走网关只需三处窄改动，`/check` 与 `contract.sh` 里的 `/run`、`/check` 用例一个字不变：
+
+- **白名单只加 `textDocument/semanticTokens/range`**，`full` 照旧 `method is not allowed`（1008 关连接）。`full` 的回复随整个缓冲区长，
+  T1.5 实测 64 KiB 缓冲区 96 KB，离单条 256 KiB 上限不远，而调研 §2.4 的最坏写法到 243 KB；Playground 只看视口，用不着它。
+- **initialize 改写**：子进程宣告了 `semanticTokensProvider` 且 legend 是短的纯字母名表（类型不超过 64 个，修饰不超过 16 个）时，网关原样转发子进程的 legend，
+  宣告 `{"range": true, "full": false}`；否则不宣告，请求也按未放行处理。生产上网关与 `dawnc` 分开部署，旧 `dawnc` 配新网关时 Playground 就是没有 token，不是报错。
+- **范围按字节裁**：网关记着当前文本（didOpen、didChange 本来就过它的手），把请求范围从起点往后数，超过预算的 UTF-8 字节数就把终点截到那里（换成 UTF-16 列）。
+  预算从单条上限倒推：range 只回起点落在范围内的名字，每个名字后面至少还有一个字节才轮到下一个名字，所以 n 字节最多 n/2+1 个 token；
+  每个 token 五个整数，每个整数编码后不超过 6 字节（行、列、长度都受 64 KiB 源码上限约束在五位数内，类型下标小于 64，修饰位小于 2^16），
+  再给信封留 1 KiB。256 KiB 上限下预算是 17,406 字节，大约是 200 行 80 列，比一屏多得多，正常视口碰不到；碰到时浏览器拿到的是截断处之前的 token，后半截保留语法色。
+  调研说的「超限回空」改成了「先裁再发」：子进程的回复超过上限在网关里是协议错误，会直接结束会话，等它超了再回空已经来不及，只能在请求这一侧保证它不超。
+- 回复只放行 `data`（丢掉 `resultId` 之类），并核对它是长度为 5 的倍数的非负整数数组；不合格按子进程协议错误处理，与 completion resolve 一致。
+
+### T2.2 两端怎么取、何时取
+
+| | VS Code | Playground |
+|---|---|---|
+| 协商 | `vscode-languageclient` 9 的默认特性集里就有 `SemanticTokensFeature`，服务端宣告 `full` 与 `range`，它就注册两个 provider；扩展代码不用动 | 自己的 `DawnLspClient` 在 initialize 回复里读 legend（`semanticLegendOf`），断线即丢 |
+| 请求 | VS Code 自己决定：先对可见区域发 `range` 尽快上色，再发 `full`；没有 delta，编辑后重发 `full` | 只发 `range`，范围是 CM6 的 `view.viewport`（可见区域加一点余量） |
+| 时机 | 由编辑器调度 | 编辑与滚动停 300 ms 后（与 inlayHint 同一节奏），且在服务端分析完这一版文本之后（`queryWith` 等诊断回来）；文本又变了就丢掉回复 |
+| 等待中 | 编辑器保留旧 token | 已画的 mark 随编辑映射位置，不先清掉，免得每敲一个键闪一次 |
+| 空 `data`、无 legend、连接断开 | 只剩 TextMate 着色 | 只剩 stream tokenizer 着色；断开时清掉全部 mark |
+
+Playground 的解码在 `site/play-ui/src/lsp.ts` 的 `decodeSemanticTokens`：JavaScript 字符串下标本来就是 UTF-16 码元，所以只需要逐行走换行；
+类型下标不在 legend 里、跨行、落在文本之外的 token 丢弃，不画到别处。
+
+### T2.3 样式映射
+
+VS Code 侧标准名不需要任何配置：主题有 semantic 规则就用主题的；没有的（包括默认的 Dark+/Light+ 对大部分类型），VS Code 按内置表回落到 TextMate scope
+（`enumMember` → `variable.other.enummember`，`variable.readonly` → `variable.other.constant`，`function.defaultLibrary` → `support.function` 等）。
+唯一的非标准名 `mutable` 在 `package.json` 里登记为 `semanticTokenModifiers`，并在 `semanticTokenScopes` 里把 `*.mutable` 映到 `markup.underline`：
+默认主题给它下划线，颜色仍由类型那一层决定，与 rust-analyzer 的做法一致。不登记的话 VS Code 不认识这一位，静默丢掉。效果仍与 trait 同为 `interface`
+（T1.8），不另加修饰。
+
+Playground 侧每个 token 一个 `Decoration.mark`，类名 `dp-sem-<类型>` 加每个修饰的 `dp-sem-<修饰>`。只给语法高亮分不出来的几类改色，其余保持语法色：
+
+| token | 颜色 | 理由 |
+|---|---|---|
+| `function`、`method` | `--f`（原来只给 `fn` 后的定义名） | 调用处与定义处同色，CM6 原来只认得定义处 |
+| `enumMember`、带 `readonly` 的（常量） | `--n`（数字色） | 它们是值；按大小写原来都涂成类型色 |
+| 带 `mutable` 的 | 下划线 | 同 VS Code |
+| 其余（类型、trait、效果、形参、局部量、字段、模块别名） | 不改 | 语法色已经对，或者原来就不上色 |
+
+CM6 里 mark 与语法高亮的 span 谁包谁取决于优先级，所以每条规则同时写 `.dp-sem-x` 与 `.dp-sem-x *`，并放在 `tok-*` 规则之后，特异性相同时它赢。
+
+### T2.4 TextMate / stream tokenizer 与 semantic tokens 的分工
+
+语法着色负责关键字、字面量、字符串插值、注释、运算符，以及打开文件后第一帧的全部颜色；semantic tokens 只覆盖**名字**，而且只在服务端分析完之后叠上去。
+二者互不替代：服务端没起来、文件还没分析完、或者是旧 `dawnc`，看到的就是今天的着色。所以 `editors/vscode/syntaxes/dawn.tmLanguage.json` 与
+`site/play-ui/src/dawn-lang.ts` 都不删任何规则，它们按大小写把构造器、常量涂成类型的那几条也保留：那是没有 token 时最好的猜测。
+
+### T2.5 门禁
+
+- `editors/vscode/test/semantic-contract.js`（接进 `npm test`，`editor-grammar` workflow 已在跑）：从 `lsptok.dawn` 读出 legend，核对非标准类型与修饰都在
+  `package.json` 里登记、登记的都还在 legend 里、每个非标准名都有回落 scope、selector 只用 legend 里的名字、`CHANGELOG.md` 首条与版本号一致。
+  七个变异体（服务端加修饰、加类型、删 `mutable` 登记、服务端删修饰、selector 拼错、删回落 scope、版本号挪动）各自要红在自己的错误码上；
+  对 HEAD 的旧 `package.json` 跑也是红的。本机约 0.1 s。
+- `playground/test/lsp_contract.py`（`contract.sh` 先跑的 `lsp-contract.sh`）：假子进程故意用**不是**真服务端顺序的 legend，断言浏览器拿到的就是这份；
+  直连会话里发一次 range（多余键被剥掉、回复只剩 `data`）、审计日志里转发的是重建过的范围；`full` 关连接 1008。
+  另有不走 socket 的 `semantic_tokens_contract`：无 legend、legend 名不合法、修饰超过 16 个都不宣告且请求被拒；按字节裁范围（含 BMP 以外字符后的 UTF-16 列）、
+  didChange 之后按新文本裁；畸形回复是子进程协议错误。三个变异体（网关自写 legend、列按码点算、不裁）跑在网关源码的变异副本上，各自要红在自己的断言上。
+  本机整个 `lsp-contract.sh` 约 7 s，新增部分不到 0.5 s。
+- `site/play-ui/test/selftest.ts`（`npm test`）：legend 读取、按打乱顺序的 legend 解码、BMP 以外字符后的偏移、类名、mark 位置、客户端请求参数与畸形回复。
+  两个变异（解码改用写死的 T1 顺序；列按码点算）手工证红，这个测试不在 CI 里跑，所以没做成常驻变异体。
+- 端到端：本机用网关接 JVM 的 `dawn lsp`、再接 `scripts/release-native.sh` 编出的 `dawnc lsp` 各跑一次（initialize、didOpen、range、full 被拒），
+  同一段 10 行程序两边都是 legend 原样到达、`full` 被关；token 逐项相同，只差一个：JVM 那边 `println` 有一个 `function`+`defaultLibrary`，
+  native 没有。native 的 std 是编进二进制的副本，没有文件可落（T1.3 已写明这类名字不发），所以 Playground 里 std 函数保留语法色，这是预期，不是缺口。
+
+### T2.6 不做的（理由）
+
+- **Playground 请求 `full`、网关放行 `full`**：见 T2.1；视口之外的颜色用户看不见，滚动后再要一次 range 只要 2 ms 量级（T1.5）。
+- **超限时回空**：网关读到超限的回复时会话已经要断了；改成请求前裁范围，见 T2.1。
+- **Playground 的 `/check` 带 tokens**：`/check` 是没有会话的一次性编译，tokens 要的分析在 LSP 会话里；见 T2.1。
+- **自定义类型 `effect`、自定义修饰 `effect`**：同 T1.8；VS Code 侧现在多登记一个名字不难，但服务端不发，登记了也没有颜色。
+- **把 CM6 关键字表对齐 `front/token.dawn` 并纳入对账**（调研 §2.1 的旁支发现）：与 semantic tokens 无关，单独一刀。
+- **VS Code 扩展发布到 marketplace**：版本号升到 0.1.3、写了 `CHANGELOG.md`；发版由维护者做。
+
