@@ -1133,9 +1133,9 @@ fn call_named(
 ## intrinsic the partition check goes red, and if it is not, the arm was
 ## already unreachable from lowering.
 fn interp_arms() -> List[String] = [
-  # lowering's own intrinsics (lower.internal_intrinsics()); `cmp`, `hash` and
-  # `java_hash` are the three it emits that are refused instead, below
-  "java_eq", "show", "quote", "str_of_int", "str_of_bool",
+  # lowering's own intrinsics (lower.internal_intrinsics()); `hash` and
+  # `java_hash` are the two it emits that are refused instead, below
+  "cmp", "java_eq", "show", "quote", "str_of_int", "str_of_bool",
   "str_of_bytes", "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
   "dbg_line",
   # user builtins
@@ -1159,10 +1159,13 @@ fn interp_arms() -> List[String] = [
 ## `dawn doc --builtins` for the names (`comptime_refuses`), instead of a prose
 ## copy that was short of them by an order of magnitude (audit RP-11, #213).
 fn comptime_rejects() -> List[String] = {
-  # `cmp`/`hash` are the prelude relation collapsed at a scalar and `java_hash`
-  # is the host's; a const that needs an ordering says so as a trait call,
-  # which comptime refuses one level up
-  var out = ["cmp", "hash", "java_hash"]
+  # `hash` is the prelude Hash collapsed at a scalar and `java_hash` the
+  # host's. A hash feeds a Map or a Set, which comptime cannot hold, so there
+  # is nothing for one to fold into. `cmp`, the same collapse for `Ord`, used
+  # to be here too, and that left `list.sort`, a derived `Ord` and `<` on a
+  # tuple unfoldable while `<` on the scalars inside them folded: an order is
+  # the language's (spec 3.5), so it has an arm now.
+  var out = ["hash", "java_hash"]
   # `CValue` has no `VBytes`: comptime cannot hold a Bytes at all, so the
   # seven byte primitives have nothing to operate on
   for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
@@ -1463,6 +1466,9 @@ test "appending an empty pack changes nothing on either side" {
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -> ER !io =
   if not has_name(interp_arms(), name) {
     cerr(st, env, no_arm_msg(name))
+  } else if name == "cmp" {
+    let c = order(st, env, args[0], args[1])?
+    Ok((st, env, VInt(c)))
   } else if name == "java_eq" {
     # equality of a host value (semantics-closure-design.md 3). Comptime never
     # reaches a real Java object -- `use java` is not foldable -- so this is
@@ -2188,40 +2194,11 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
     let same = eq_or_refuse(st2, env2, lv, rv)?
     return Ok((st2, env2, VBool(if op == CEq { same } else { not same })))
   }
-  # ordered comparisons. `<` through an Ord impl never reaches here: lowering
-  # made it an explicit cmp call, which comptime rejects as a trait call.
-  var c = 0
+  # Ordered comparisons. A Float is the one operand handled here rather than
+  # in `order`: it is not Ord (types.ord_scalars), so only these operators
+  # compare it, and NaN makes all four of them false rather than giving it a
+  # place in an order.
   match lv {
-    VInt(a) -> {
-      let b = as_int(rv)
-      c = if a < b { -1 } else if a > b { 1 } else { 0 }
-    }
-    VStr(a) -> {
-      # Spelled as an explicit code point walk, not `a < b`: the host `<` here
-      # is whatever the *seed* compiler emitted, so a fold through it would
-      # answer with the previous generation's order for one bootstrap step.
-      # Written out, the fold answers spec 4.3's code point order on the first
-      # build (RP-12: interp and intrinsics must give one answer).
-      c = str_cmp_cp(a, as_str(rv))
-    }
-    # false < true, the order Ord[Bool] gives (types.ord_scalars)
-    VBool(a) -> {
-      let b = match rv {
-        VBool(x) -> x
-        _ -> panic("comptime interpreter bug: mixed comparison")
-      }
-      c = if a == b { 0 } else if a { 1 } else { -1 }
-    }
-    # Cursor's own Ord impl compares the positions it sees as Ints, and that
-    # is where the interpreter's positions arrive
-    VCursor(x, a) ->
-      match rv {
-        VCursor(y, b) -> {
-          if x != y { return cross_text(st2, env2) }
-          c = if a < b { -1 } else if a > b { 1 } else { 0 }
-        }
-        _ -> panic("comptime interpreter bug: mixed comparison")
-      }
     VFloat(a) -> {
       let b = match rv {
         VFloat(x) -> x
@@ -2232,11 +2209,17 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
       if a != a || b != b { return Ok((st2, env2, VBool(false))) }
       # IEEE ordering, not Double.compare: the latter puts -0.0 below 0.0,
       # which folded `-0.0 < 0.0` to true while both backends answer false
-      c = if a < b { -1 } else if a > b { 1 } else { 0 }
+      let c = if a < b { -1 } else if a > b { 1 } else { 0 }
+      return Ok((st2, env2, VBool(holds(op, c))))
     }
-    _ -> return cerr(st2, env2, "cannot order these values")
+    _ -> ()
   }
-  let res = if op == CLt {
+  let c = order(st2, env2, lv, rv)?
+  Ok((st2, env2, VBool(holds(op, c))))
+}
+
+fn holds(op: CBinOp, c: Int) -> Bool =
+  if op == CLt {
     c < 0
   } else if op == CLe {
     c <= 0
@@ -2245,8 +2228,49 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
   } else {
     c >= 0
   }
-  Ok((st2, env2, VBool(res)))
-}
+
+## The sign of comparing two values of one orderable scalar type. It answers
+## both the ordered operators on those scalars and the `cmp` intrinsic, which
+## is what lowering makes of the prelude `Ord` at a scalar: inside `list.sort`
+## and `list.max`, at each field of a derived `Ord`, and for `<` on a tuple or
+## a list. One function for both, so a fold cannot order a pair one way
+## through `<` and the other way through `list.sort`, and the answer is a sign,
+## as `dawn_cmp_*` and the JVM's scalar comparison return.
+fn order(st: ESt, env: Env, lv: CValue, rv: CValue) -> Result[Int, (ESt, Env, Ctl)] =
+  match lv {
+    VInt(a) -> {
+      let b = as_int(rv)
+      Ok(if a < b { -1 } else if a > b { 1 } else { 0 })
+    }
+    # Spelled as an explicit code point walk, not `a < b`: the host `<` here
+    # is whatever the *seed* compiler emitted, so a fold through it would
+    # answer with the previous generation's order for one bootstrap step.
+    # Written out, the fold answers spec 4.3's code point order on the first
+    # build (RP-12: interp and intrinsics must give one answer).
+    VStr(a) -> Ok(str_cmp_cp(a, as_str(rv)))
+    # false < true, the order Ord[Bool] gives (types.ord_scalars)
+    VBool(a) -> {
+      let b = as_bool(rv)
+      Ok(if a == b { 0 } else if a { 1 } else { -1 })
+    }
+    VUnit -> Ok(0)
+    # Cursor's own Ord impl compares the positions it sees as Ints, and that
+    # is where the interpreter's positions arrive
+    VCursor(x, a) ->
+      match rv {
+        VCursor(y, b) ->
+          if x != y {
+            cross_text(st, env)
+          } else {
+            Ok(if a < b { -1 } else if a > b { 1 } else { 0 })
+          }
+        _ -> panic("comptime interpreter bug: mixed comparison")
+      }
+    _ -> match cerr(st, env, "cannot order these values") {
+      Err(e) -> Err(e)
+      Ok(_) -> panic("unreachable")
+    }
+  }
 
 fn arith(st: ESt, env: Env, op: CBinOp, lv: CValue, rv: CValue) -> ER =
   match lv {
@@ -3099,8 +3123,8 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 43
-  assert len(rejects) == 69
+  assert len(arms) == 44
+  assert len(rejects) == 68
   assert len(after) == 18
 }
 

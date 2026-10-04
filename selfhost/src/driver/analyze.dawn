@@ -103,7 +103,7 @@ fn seg_ok(s: String) -> Bool = {
   }
   true
 }
-use ir/core.{CValue, VInt, VBool}
+use ir/core.{CValue, VInt, VBool, VStr, VList}
 
 ## The segments of a module path that are not legal path segments, in order.
 ##
@@ -1662,6 +1662,48 @@ test "comptime refuses a cursor used on another string and still walks one strin
     assert folded(prog, "main", "DIFF") == Some(VBool(false))
     assert folded(prog, "main", "WALK") == Some(VInt(2))
     assert folded(prog, "main", "LEN") == Some(VInt(3))
+  })
+}
+
+test "comptime orders values through the prelude Ord, not only through `<` on scalars" {
+  in_mem(() => {
+    # Lowering turns the prelude Ord at a scalar into the `cmp` intrinsic, and
+    # the interpreter used to refuse that by name, so none of these folded
+    # while `3 < 4` did. The tagged pair is the one that gave it away: `TA(5)
+    # < TB("a")` decides on the constructor and folded, `TB("x") < TB("y")`
+    # reaches the String inside and did not.
+    let root = "/tmp/dawn-selfhost-analyze/comptime-cmp"
+    mkdirs("${root}/src")
+    put("${root}/src/main.dawn", "use std/list\n" ++
+        "pub type Q = { s: String, y: Int } derive Show, Ord\n" ++
+        "pub type T = TA(n: Int) | TB(s: String) derive Ord\n" ++
+        "const SORTED: List[Int] = list.sort([3, 1, 2])\n" ++
+        "const WORDS: List[String] = list.sort([\"b\", \"\u{10000}\", \"\u{FF5E}\", \"a\"])\n" ++
+        "const MAX: Int = list.max([3, 1, 2]).unwrap_or(0)\n" ++
+        "const REC: Bool = Q { s: \"a\", y: 2 } < Q { s: \"b\", y: 1 }\n" ++
+        "const TUP: Bool = (1, \"b\") < (1, \"a\")\n" ++
+        "const LST: Bool = [\"a\"] < [\"b\"]\n" ++
+        "const BOOLS: List[Bool] = list.sort([true, false])\n" ++
+        "const TAGS: Bool = TA(5) < TB(\"a\")\n" ++
+        "const INNER: Bool = TB(\"x\") < TB(\"y\")\n" ++
+        "pub fn main() -> Unit !io = println(to_string(MAX))\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 0
+    assert folded(prog, "main", "SORTED") == Some(VList([VInt(1), VInt(2), VInt(3)]))
+    # code point order: U+FF5E sorts below U+10000, where UTF-16 would not
+    assert folded(prog, "main", "WORDS") ==
+      Some(VList([VStr("a"), VStr("b"), VStr("\u{FF5E}"), VStr("\u{10000}")]))
+    assert folded(prog, "main", "MAX") == Some(VInt(3))
+    assert folded(prog, "main", "REC") == Some(VBool(true))
+    assert folded(prog, "main", "TUP") == Some(VBool(false))
+    assert folded(prog, "main", "LST") == Some(VBool(true))
+    assert folded(prog, "main", "BOOLS") == Some(VList([VBool(false), VBool(true)]))
+    assert folded(prog, "main", "TAGS") == Some(VBool(true))
+    assert folded(prog, "main", "INNER") == Some(VBool(true))
   })
 }
 

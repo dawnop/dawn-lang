@@ -12,6 +12,7 @@
 # codebase-audit.md TEST-01 named this blind spot; this is the first corpus
 # that actually exercises it.
 use std/str
+use std/list
 
 pub type Point = Point(x: Int, y: Int) derive Show
 
@@ -67,6 +68,15 @@ const A_ENDS: Bool = str.ends_with(ASTRAL, "𝄞")
 const SORT_ALWAYS1: List[Int] = sort_by([1, 2, 3, 4], (a, b) => 1)
 const SORT_LT_ONLY: List[Int] = sort_by([3, 1, 2], (a, b) => if a < b { -1 } else { 0 })
 
+## The prelude Ord, which lowering spells as the `cmp` intrinsic at a scalar.
+## These were refused at comptime while `<` on the same scalars folded.
+## U+FF5E and U+10000 are a pair that code point order and UTF-16 order put
+## the other way round.
+const ORD_SORT: List[String] = list.sort(["b", "\u{10000}", "\u{FF5E}", "a"])
+const ORD_MAX: Int = list.max([3, 1, 2]).unwrap_or(0)
+const ORD_TUP: Bool = (1, "b") < (1, "a")
+const ORD_REC: Bool = Item { sku: "a", qty: 2 } < Item { sku: "b", qty: 1 }
+
 ## The constants above all fold to a *scalar*, which both backends inline as a
 ## literal. These fold to a value with storage -- spec 7.2's serializable set
 ## past the scalars: List, tuple, record, sum constructor, an opaque type over
@@ -81,7 +91,7 @@ const SORT_LT_ONLY: List[Int] = sort_by([3, 1, 2], (a, b) => if a < b { -1 } els
 ## same expression evaluated at run time, which is the other half -- that pair
 ## is what catches a constant that is *built* differently from the way the
 ## same literal is built.
-pub type Item = { sku: String, qty: Int } derive Show
+pub type Item = { sku: String, qty: Int } derive Show, Ord
 
 pub type Shape =
   | Dot
@@ -176,6 +186,16 @@ pub fn main() -> Unit !io = {
   println("const   lt_only = ${to_string(SORT_LT_ONLY)}")
   println("runtime lt_only = ${to_string(sort_by(three(), (a, b) => if a < b { -1 } else { 0 }))}")
 
+  println("-- the prelude Ord, folded vs live --")
+  println("const   sort  = ${to_string(ORD_SORT)}")
+  println("runtime sort  = ${to_string(list.sort(words()))}")
+  println("const   max   = ${ORD_MAX}")
+  println("runtime max   = ${list.max(three()).unwrap_or(0)}")
+  println("const   tup   = ${ORD_TUP}")
+  println("runtime tup   = ${(one(), "b") < (one(), "a")}")
+  println("const   rec   = ${ORD_REC}")
+  println("runtime rec   = ${Item { sku: "a", qty: one() + 1 } < Item { sku: "b", qty: one() }}")
+
   println("-- structured constants, folded vs the same literal at run time --")
   println("const   list  = ${to_string(C_LIST)}")
   println("runtime list  = ${to_string([1, 2, 3])}")
@@ -240,3 +260,7 @@ fn untag(t: Tags) -> List[String] = t
 fn four() -> List[Int] = [1, 2, 3, 4]
 
 fn three() -> List[Int] = [3, 1, 2]
+
+fn words() -> List[String] = ["b", "\u{10000}", "\u{FF5E}", "a"]
+
+fn one() -> Int = 1
