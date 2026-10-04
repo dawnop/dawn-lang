@@ -33,7 +33,7 @@ use check/types.{
   TyTuple, TyOpaque, TyError, CHAR_OPAQUE_ID, adt_of, peel_opaque, subst, cut_balanced,
   AdtI, CtorI, FieldI, OPTION_ID, ty_char
 }
-use ir/core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict}
+use ir/core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor}
 
 ## The widest a value renders, in code points, before its suffix. A default
 ## (`DEFAULT_SHOWN`, 40) shares its line with every other parameter of the
@@ -54,6 +54,8 @@ pub(pkg) fn value_text(adts: Adts, t: Ty, v: CValue) -> Option[String] =
   match v {
     VClosure(_, _, _) -> None
     VDict(_, _) -> None
+    # a position's number is the interpreter's own measure, not the program's
+    VCursor(_, _) -> None
     _ -> {
       let full = render(adts, t, v, VALUE_SHOWN + 1)
       let shown = cut_balanced(full, VALUE_SHOWN)
@@ -72,6 +74,7 @@ pub(pkg) fn value_echoes(adts: Adts, t: Ty, v: CValue, src: String) -> Bool =
   match v {
     VClosure(_, _, _) -> false
     VDict(_, _) -> false
+    VCursor(_, _) -> false
     _ -> squeezed(render(adts, t, v, str.len(src) + 1)) == squeezed(src)
   }
 
@@ -138,6 +141,7 @@ fn render(adts: Adts, t: Ty, v: CValue, room: Int) -> String =
     VAdt(aid, ci, fs) -> adt_text(adts, t, aid, ci, fs, room)
     VClosure(_, _, _) -> "<fn>"
     VDict(_, _) -> "<fn>"
+    VCursor(_, _) -> "<cursor>"
   }
 
 ## Elements joined by `, `, each read through its own type in `tys` or, past

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ a67706fb82bba84e -->
+<!-- doc-check: translation-of docs/spec.md @ d8e23c98d85858a9 -->
 
 # Dawn Language Specification
 
@@ -4221,7 +4221,12 @@ cursor to its string needs a tag that is itself backend-independent (otherwise t
 diverges exactly where the cursor did), which costs a walk to compute and a second word per
 position. That was weighed and declined on 2026-08-16 in favour of writing the boundary
 down; every other channel is held shut by `scripts/spike-native/cursor_currency.dawn`,
-which compares this module's public answers across both backends.
+which compares this module's public answers across both backends. Comptime evaluation is
+outside that trade-off: the interpreter's positions already know which string they were
+taken on (inside the interpreter only; nothing of it reaches an artifact or costs a word at
+run time), so a constant fold that uses a cursor on another string, or compares or tests
+for equality two cursors from different strings, is refused with an error rather than
+given a third answer.
 
 **Container representations.** `Map`/`Set` are represented by the pure-Dawn `std/hamt` (a
 persistent HAMT) and `List` by `std/pvec` (a persistent vector); these are **internal

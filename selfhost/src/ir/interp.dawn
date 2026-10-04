@@ -50,7 +50,7 @@ use check/types.{
 }
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
-  VClosure, VDict,
+  VClosure, VDict, VCursor,
   CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
@@ -126,7 +126,32 @@ pub(pkg) type LowerCache = {
 type ESt = {
   fuel: Int,
   depth: Int,
-  cache: LowerCache
+  cache: LowerCache,
+  texts: Texts
+}
+
+## The strings a fold has taken a cursor on, each decoded to code points once.
+##
+## A cursor names its string by number (`VCursor.text`) and indexes that
+## string's code points, so a step is a list read rather than a decode of the
+## whole string: the cursor arms used to call `code_points(s)` or `str.len(s)`
+## on every step, which made a walk over a string quadratic while the fuel
+## counted it as linear (20,000 characters took 20 s to `str.index_of`).
+##
+## `last` is the string the latest cursor was taken on, so a walk that keeps
+## starting over on one string finds it without hashing it again. A string is
+## added once per fold and pays its length in fuel when it is, which is the
+## decode it costs.
+type Texts = {
+  ids: Map[String, Int],
+  strs: List[String],
+  cps: List[List[Char]],
+  last: Int
+}
+
+fn no_texts() -> Texts = {
+  let ids: Map[String, Int] = map.empty()
+  Texts { ids: ids, strs: [], cps: [], last: -1 }
 }
 
 alias Env = Map[Int, CValue]
@@ -469,6 +494,49 @@ fn burn_n(st: ESt, env: Env, n: Int) -> ER = {
   }
 }
 
+## The number this fold gives `s`, decoding it the first time it is seen.
+fn text_id(st: ESt, env: Env, s: String) -> Result[(ESt, Int), (ESt, Env, Ctl)] = {
+  let t = st.texts
+  if t.last >= 0 && t.strs[t.last] == s { return Ok((st, t.last)) }
+  match map.get(t.ids, s) {
+    Some(id) -> Ok((ESt { ..st, texts: Texts { ..t, last: id } }, id))
+    None -> {
+      let (st1, _, _) = burn_n(st, env, str.len(s))?
+      let id = len(t.strs)
+      let texts = Texts {
+        ids: map.insert(t.ids, s, id),
+        strs: t.strs ++ [s],
+        cps: t.cps ++ [code_points(s)],
+        last: id
+      }
+      Ok((ESt { ..st1, texts: texts }, id))
+    }
+  }
+}
+
+## A cursor argument handed to a cursor arm together with `s`: its string's
+## number and its code-point index, or a refusal when it was taken on another
+## string. The comparison is of contents, so a position in one string is a
+## position in any equal one, exactly as it is on both backends.
+fn cursor_in(st: ESt, env: Env, s: String, v: CValue) -> Result[(Int, Int), (ESt, Env, Ctl)] =
+  match v {
+    VCursor(id, c) ->
+      if st.texts.strs[id] == s {
+        Ok((id, c))
+      } else {
+        cross_text(st, env)
+      }
+    _ -> panic("comptime interpreter bug: expected a Cursor")
+  }
+
+fn cross_text[T](st: ESt, env: Env) -> Result[T, (ESt, Env, Ctl)] =
+  match cerrh(st, env, "a cursor from one string was used with another",
+    "a position belongs to the string it was taken on; across strings the backends " ++
+      "answer differently, so there is no value to fold (spec 11)") {
+    Err(e) -> Err(e)
+    Ok(_) -> panic("unreachable")
+  }
+
 fn some_v(v: CValue) -> CValue = VAdt(OPTION_ID, 0, [v])
 
 fn none_v() -> CValue = VAdt(OPTION_ID, 1, [])
@@ -524,6 +592,7 @@ pub fn cvalue_kind(v: CValue) -> String =
     VAdt(_, _, _) -> "ADT value"
     VClosure(_, _, _) -> "function"
     VDict(_, _) -> "trait dictionary"
+    VCursor(_, _) -> "Cursor"
   }
 
 fn stringify(v: CValue) -> String =
@@ -576,7 +645,62 @@ fn quote_str(s: String) -> String = {
 ## so Dawn's own `==` on Float *is* the answer — no host query needed.
 fn float_ieee_eq(a: Float, b: Float) -> Bool = a == b
 
-fn value_eq(a: CValue, b: CValue) -> Bool =
+fn value_eq(a: CValue, b: CValue) -> Bool = value_eq_or_clash(a, b) == EQ_TRUE
+
+const EQ_FALSE: Int = 0
+const EQ_TRUE: Int = 1
+## Two cursors on different strings met: the equality has no answer to fold.
+const EQ_CLASH: Int = 2
+
+## `==` and `!=` at comptime: the equality, or the refusal for two cursors
+## taken on different strings, wherever in the two values they sit.
+fn eq_or_refuse(st: ESt, env: Env, a: CValue, b: CValue) -> Result[Bool, (ESt, Env, Ctl)] = {
+  let r = value_eq_or_clash(a, b)
+  if r == EQ_CLASH { cross_text(st, env) } else { Ok(r == EQ_TRUE) }
+}
+
+fn eq_code(b: Bool) -> Int = if b { EQ_TRUE } else { EQ_FALSE }
+
+fn value_eq_or_clash(a: CValue, b: CValue) -> Int =
+  match a {
+    VCursor(x, i) ->
+      match b {
+        VCursor(y, j) -> if x != y { EQ_CLASH } else { eq_code(i == j) }
+        _ -> EQ_FALSE
+      }
+    VList(xs) ->
+      match b {
+        VList(ys) -> list_eq_or_clash(xs, ys)
+        _ -> EQ_FALSE
+      }
+    VTuple(xs) ->
+      match b {
+        VTuple(ys) -> list_eq_or_clash(xs, ys)
+        _ -> EQ_FALSE
+      }
+    VAdt(aid, ci, fs) ->
+      match b {
+        VAdt(bid, bci, gs) -> if aid == bid && ci == bci { list_eq_or_clash(fs, gs) } else { EQ_FALSE }
+        _ -> EQ_FALSE
+      }
+    _ -> eq_code(scalar_eq(a, b))
+  }
+
+## In order, stopping at the first pair that is not equal, as the backends'
+## equality does: a difference before any clash is an answer both of them
+## give, and a clash before any difference is one they do not.
+fn list_eq_or_clash(xs: List[CValue], ys: List[CValue]) -> Int = {
+  if len(xs) != len(ys) { return EQ_FALSE }
+  var i = 0
+  while i < len(xs) {
+    let e = value_eq_or_clash(xs[i], ys[i])
+    if e != EQ_TRUE { return e }
+    i = i + 1
+  }
+  EQ_TRUE
+}
+
+fn scalar_eq(a: CValue, b: CValue) -> Bool =
   match a {
     VInt(x) ->
       match b {
@@ -603,33 +727,8 @@ fn value_eq(a: CValue, b: CValue) -> Bool =
         VUnit -> true
         _ -> false
       }
-    VList(xs) ->
-      match b {
-        VList(ys) -> list_eq(xs, ys)
-        _ -> false
-      }
-    VTuple(xs) ->
-      match b {
-        VTuple(ys) -> list_eq(xs, ys)
-        _ -> false
-      }
-    VAdt(aid, ci, fs) ->
-      match b {
-        VAdt(bid, bci, gs) -> aid == bid && ci == bci && list_eq(fs, gs)
-        _ -> false
-      }
     _ -> false
   }
-
-fn list_eq(xs: List[CValue], ys: List[CValue]) -> Bool = {
-  if len(xs) != len(ys) { return false }
-  var i = 0
-  while i < len(xs) {
-    if not value_eq(xs[i], ys[i]) { return false }
-    i = i + 1
-  }
-  true
-}
 
 # ---- lowering on demand ----
 
@@ -1368,7 +1467,8 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # equality of a host value (semantics-closure-design.md 3). Comptime never
     # reaches a real Java object -- `use java` is not foldable -- so this is
     # the interpreter's own value equality, kept so the arm is not a hole.
-    Ok((st, env, VBool(value_eq(args[0], args[1]))))
+    let same = eq_or_refuse(st, env, args[0], args[1])?
+    Ok((st, env, VBool(same)))
   } else if name == "ev_get" {
     # An arm rather than a refusal, so that a `const` whose body reaches a
     # function value keeps folding once lowering starts emitting reads.
@@ -1514,45 +1614,58 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # offset and the C runtime a byte offset. The seven only have to agree with
     # each other.
     #
+    # A position also names the string it was taken on (`VCursor.text`, see
+    # `Texts`), and every arm below checks it against the string it is handed.
+    # Across two strings the backends disagree with each other (spec 11 leaves
+    # it undefined), so no folded answer could match the program at run time;
+    # the interpreter refuses instead of inventing a third one.
+    #
     # They reached the emitted `dawn.rt.Strings` by reflection until 2026-07-28,
     # which is a route a native compiler does not have and which answered with
     # whatever the *seed* release emitted rather than what this compiler does
     # (docs/native-backend-plan.md 14.11, 14.13).
     #
-    # `code_points` per character makes a walk quadratic. Comptime strings are
-    # constants and the fuel counter bounds the loop, so this buys correctness
-    # at a cost nothing here can feel.
   } else if name == "cursor_start" {
-    Ok((st, env, VInt(0)))
+    let (st1, id) = text_id(st, env, as_str(args[0]))?
+    Ok((st1, env, VCursor(id, 0)))
   } else if name == "cursor_end" {
-    Ok((st, env, VInt(str.len(as_str(args[0])))))
+    let (st1, id) = text_id(st, env, as_str(args[0]))?
+    Ok((st1, env, VCursor(id, len(st1.texts.cps[id]))))
   } else if name == "cursor_done" {
-    Ok((st, env, VBool(as_int(args[1]) >= str.len(as_str(args[0])))))
+    let (id, c) = cursor_in(st, env, as_str(args[0]), args[1])?
+    Ok((st, env, VBool(c >= len(st.texts.cps[id]))))
   } else if name == "cursor_char" {
-    let s = as_str(args[0])
-    let c = as_int(args[1])
-    if c < 0 || c >= str.len(s) {
+    let (id, c) = cursor_in(st, env, as_str(args[0]), args[1])?
+    let cps = st.texts.cps[id]
+    if c < 0 || c >= len(cps) {
       Ok((st, env, VInt(-1)))
     } else {
-      Ok((st, env, VInt(char.code(get(code_points(s), c).expect("in range")))))
+      Ok((st, env, VInt(char.code(cps[c]))))
     }
   } else if name == "cursor_next" {
-    let n = str.len(as_str(args[0]))
-    let c = as_int(args[1])
-    Ok((st, env, VInt(if c < 0 { 0 } else if c >= n { n } else { c + 1 })))
+    let (id, c) = cursor_in(st, env, as_str(args[0]), args[1])?
+    let n = len(st.texts.cps[id])
+    Ok((st, env, VCursor(id, if c < 0 { 0 } else if c >= n { n } else { c + 1 })))
   } else if name == "cursor_prev" {
-    let n = str.len(as_str(args[0]))
-    let c = as_int(args[1])
-    Ok((st, env, VInt(if c <= 0 { 0 } else if c > n { n - 1 } else { c - 1 })))
+    let (id, c) = cursor_in(st, env, as_str(args[0]), args[1])?
+    let n = len(st.texts.cps[id])
+    Ok((st, env, VCursor(id, if c <= 0 { 0 } else if c > n { n - 1 } else { c - 1 })))
   } else if name == "cursor_slice" {
     let s = as_str(args[0])
-    let from = as_int(args[1])
-    let to = as_int(args[2])
-    if from < 0 || to > str.len(s) || from > to {
+    let (id, from) = cursor_in(st, env, s, args[1])?
+    let (_, to) = cursor_in(st, env, s, args[2])?
+    let cps = st.texts.cps[id]
+    if from < 0 || to > len(cps) || from > to {
       cerr(st, env, "panicked: cursor_slice: invalid cursor range")
     } else {
       let (st1, _, _) = burn_n(st, env, to - from)?
-      Ok((st1, env, VStr(str.slice(s, from, to))))
+      var out: List[Char] = []
+      var i = from
+      while i < to {
+        out = out ++ [cps[i]]
+        i = i + 1
+      }
+      Ok((st1, env, VStr(from_code_points(out))))
     }
     # case folding is a Unicode table rather than a walk, so it stays a backend
     # primitive -- but calling it is not reflecting into one: this is the same
@@ -2071,8 +2184,10 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
     }
     return cerr(st2, env2, "`++` needs two Strings or two Lists")
   }
-  if op == CEq { return Ok((st2, env2, VBool(value_eq(lv, rv)))) }
-  if op == CNe { return Ok((st2, env2, VBool(not value_eq(lv, rv)))) }
+  if op == CEq || op == CNe {
+    let same = eq_or_refuse(st2, env2, lv, rv)?
+    return Ok((st2, env2, VBool(if op == CEq { same } else { not same })))
+  }
   # ordered comparisons. `<` through an Ord impl never reaches here: lowering
   # made it an explicit cmp call, which comptime rejects as a trait call.
   var c = 0
@@ -2097,6 +2212,16 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
       }
       c = if a == b { 0 } else if a { 1 } else { -1 }
     }
+    # Cursor's own Ord impl compares the positions it sees as Ints, and that
+    # is where the interpreter's positions arrive
+    VCursor(x, a) ->
+      match rv {
+        VCursor(y, b) -> {
+          if x != y { return cross_text(st2, env2) }
+          c = if a < b { -1 } else if a > b { 1 } else { 0 }
+        }
+        _ -> panic("comptime interpreter bug: mixed comparison")
+      }
     VFloat(a) -> {
       let b = match rv {
         VFloat(x) -> x
@@ -2326,7 +2451,7 @@ fn empty_cache() -> LowerCache = {
 ## depth start over here and nowhere else, which is what keeps one const's
 ## budget from being spent by the one before it.
 fn st_from(fuel: Int, cache: LowerCache) -> ESt =
-  ESt { fuel: fuel, depth: 0, cache: cache }
+  ESt { fuel: fuel, depth: 0, cache: cache, texts: no_texts() }
 
 fn fresh_st(fuel: Int) -> ESt = st_from(fuel, empty_cache())
 
