@@ -301,6 +301,8 @@ name: gates
 # resolution-coverage step (+112s planning value, docs/lsp-references-design.md).
 # The same day it went up to 16,538s: lsp-workspace gained the
 # semantic-tokens step (+78s planning value, docs/lsp-references-design.md §T1).
+# The same day it went up to 16,648s: lsp-workspace gained the references
+# step (+110s planning value, docs/lsp-references-design.md §R1).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -324,7 +326,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 16538s (the most this file's `3x` claims may add up to)
+# push-total: 16648s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2391,8 +2393,11 @@ jobs:
     # 2026-10-04: the semantic-tokens step (T1 of the same design) took 39s
     # locally, its positive and four mutant builds: 717 + 2 * 39 = 795s,
     # timeout 3x that. Restated with the one above.
-    # budget: 3x 795s planning allowance (605s worst observed, run 36680145356, plus 2 x 56s and 2 x 39s)
-    timeout-minutes: 40
+    # 2026-10-04: the references step (R1 of the same design) took 55s
+    # locally, its positive and four mutant builds: 795 + 2 * 55 = 905s,
+    # timeout 3x that. Restated with the two above.
+    # budget: 3x 905s planning allowance (605s worst observed, run 36680145356, plus 2 x 56s, 2 x 39s and 2 x 55s)
+    timeout-minutes: 46
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2482,6 +2487,17 @@ jobs:
       # (2026-10-04).
       - name: lsp semantic tokens and mutants
         run: ./scripts/lsp-semantic-tokens.py --mutants
+
+      # Which names references and documentHighlight return for a cursor
+      # (docs/lsp-references-design.md §R1): a local, a parameter, a named
+      # argument, a record pun from both sides, a trait method, an operation,
+      # a constructor, a field, and the negatives a text search gets wrong
+      # (a shadowing let, a parameter named like a function). The previous
+      # release answers neither, so selfhost-lsp-diff.sh cannot say whether a
+      # reply is right. Four mutants, each built from a private selfhost copy,
+      # must turn their own case red. 55s locally (2026-10-04).
+      - name: lsp references and mutants
+        run: ./scripts/lsp-references.py --mutants
 
       # Analysis and completion must consume one captured source plan. Both
       # fail-closed edges carry compiling mutants: loader replanning and LSP

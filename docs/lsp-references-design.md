@@ -372,6 +372,35 @@ hover 是 `let f: fn(Int) -> Int`，definition 跳到局部量。T1 为 token �
 
 所以提交里写一行 `Emit-Change(lsp)`。
 
+### R1.6 性能（本机实测）
+
+测法照 §T1.5：调研的合成缓冲区 `untitled:big`（11,993 行），每轮先体内改一行再改回，然后**交错**发 inlayHint 全文（一次整篇遍历的参照）、
+definition、references 与 documentHighlight（光标在 `norm74` 里的局部量 `acc`，5 处）、references（光标在 `use std/str` 的 `str`，全篇 149 处），
+奇数轮倒序；每格 11 轮丢前 3 轮取中位数，两遍。本机当时另有负载（load average 约 3.6）。
+
+| 请求 | 第一遍 | 第二遍 |
+|---|---|---|
+| inlayHint 全文 | 83.9 ms | 102.6 ms |
+| definition | 64.1 ms | 68.0 ms |
+| references（局部量，5 处） | 132.7 ms | 144.3 ms |
+| documentHighlight（同上） | 133.2 ms | 148.7 ms |
+| references（模块别名，149 处） | 136.6 ms | 150.4 ms |
+
+references 约等于一次 definition 加一次整篇收集，与结果多少几乎无关（5 处与 149 处差 4–6 ms）。
+单文件的一百多毫秒对按键触发的 documentHighlight 也够用；R1.8 记了能把局部量的请求再砍一半的裁剪，等有需要再做。
+
+### R1.7 门禁
+
+`scripts/lsp-references.py`，接在 `lsp-workspace` job（semantic tokens 那一步之后）：
+
+- 正例：一份程序一个会话。20 个 references 用例逐项断言 `行:列 文本` 的完整列表：局部量（`var` 及其赋值）、`let`、形参、具名实参（含方法调用里次序打乱的）、
+  省略默认值的调用里的实参、记录简写的字段一侧（构造与模式各一）与局部量一侧、trait 方法（含 impl 方法与调用）、操作（含调用与 handler 臂）、构造器、字段；
+  负例：遮蔽的 `let` 与被遮蔽的形参各自的集合、与顶层函数同名的形参与那个函数各自的集合；`includeDeclaration: false`；内建类型回空。
+  两个 documentHighlight 用例断言读写种类；调用局部量处的 definition 与 hover；未打开的文档两种请求都回空列表。
+- 变异体 4 个，锚点在 `scripts/lsp-references/mutate.py`，登进 `mutation-anchor-preflight.py` 的登记表：按名字而非声明匹配（文本搜索）、
+  丢掉声明处（无视 `includeDeclaration`）、记录简写只算局部量一侧、调用局部量退回按名字查全局函数。各自从私有 selfhost 副本编译，要求自己那条断言变红。
+- 本机墙钟：正例约 1.5 s，含四个变异体约 55 s。`lsp-workspace` 的规划额度 795 → 905 s，timeout 40 → 46 分钟，push-total 16,538 → 16,648 s。
+
 ### R1.8 不做的（理由）
 
 - **跨文件**：R2。工作区索引要挂在模块步骤上随记忆复用（调研 §5.1 R2 行），不是在 R1 里顺手能做对的事；R1 的结果对别的文件只字不提。
