@@ -354,13 +354,26 @@ pub fn streaming(status: Int, content_type: String, stream: InputStream, length:
 # a framework that silently rewrites it has taken a decision that belongs to
 # the application. So they are predicates now, and the emitters refuse.
 #
-# SP and HTAB are legal in a value (both are field-content); the other C0
-# controls and DEL are not.
-## Whether `v` can travel as an HTTP header field value: SP, HTAB and any
-## character from `!` up, but no CR, LF, other C0 control or DEL.
+# SP and HTAB are legal in a value (both are field-content), and so is visible
+# ASCII; the other C0 controls, DEL and everything above U+007E are not.
+#
+# The upper bound is what the server can actually send. jdk.httpserver writes
+# a header by casting each Java `char` to a byte, so a character above U+00FF
+# loses its high byte on the way out, and a value that passed every check here
+# could still put a CR or an LF on the wire: the low byte of U+010A is 0x0A.
+# Until 6.1 this accepted any character from SP up, and that was the hole.
+# U+0080..U+00FF would at least arrive as the same byte, but as Latin-1, which
+# is not what a Dawn String holding them means, and RFC 9110 §5.5 keeps those
+# bytes only as obs-text for compatibility. So the rule is ASCII, and a value
+# that needs more is encoded by the caller: a Location percent-encoded
+# (RFC 3986), a filename through `attachment`, which writes RFC 5987
+# `filename*` itself.
+## Whether `v` can travel as an HTTP header field value: SP, HTAB and visible
+## ASCII (`!` to `~`). CR, LF, the other C0 controls, DEL and every non-ASCII
+## character are refused; encode non-ASCII text before it becomes a header.
 pub fn valid_header_value(v: String) -> Bool = {
   for c in code_points(v) {
-    if not (c == '\t' || (c >= ' ' && c != '\u{007F}')) { return false }
+    if not (c == '\t' || (c >= ' ' && c <= '~')) { return false }
   }
   true
 }
@@ -392,7 +405,8 @@ pub fn valid_header_name(n: String) -> Bool = {
 ## same injection one layer down, against whoever reads the report rather than
 ## against the client. The other C0 controls are no better, an `ESC` reaching
 ## the terminal that is tailing the log being the same trick in the terminal's
-## language.
+## language. Since 6.1 a non-ASCII character is refused too, and is written
+## here as `\u{...}` like the controls.
 pub fn escape_field(s: String) -> String = {
   var out = ""
   for c in code_points(s) {
@@ -400,14 +414,19 @@ pub fn escape_field(s: String) -> String = {
       out = out ++ "\\r"
     } else if c == '\n' {
       out = out ++ "\\n"
-    } else if c == '\t' || (c >= ' ' && c != '\u{007F}') {
+    } else if c == '\t' || (c >= ' ' && c <= '~') {
       out = out ++ str.from_char(c)
     } else {
-      out = out ++ "\\u{" ++ to_hex(char.code(c)) ++ "}"
+      out = out ++ "\\u{" ++ code_hex(char.code(c)) ++ "}"
     }
   }
   out
 }
+
+# A code point in hex for `escape_field`: two digits up to U+00FF, as it has
+# always been written, and as many as it takes above that.
+fn code_hex(n: Int) -> String =
+  if n < 256 { to_hex(n) } else { code_hex(n / 16) ++ str.slice("0123456789abcdef", n % 16, n % 16 + 1) }
 
 # The refusal, worded once, used by both `with_header` (as a panic) and
 # `try_with_header` (as a 400). It takes the response because two of the rules
@@ -987,6 +1006,14 @@ test "the header predicates say exactly what may travel" {
   assert valid_header_value("a\rb") == false
   assert valid_header_value("a\u{0}b") == false
   assert valid_header_value("a\u{7f}b") == false
+  assert valid_header_value("!~") == true
+  # nothing above ASCII: jdk.httpserver keeps only a char's low byte, so these
+  # would reach the wire as some other byte, U+010A as an LF
+  assert valid_header_value("caf\u{e9}") == false
+  assert valid_header_value("a\u{010a}b") == false
+  assert valid_header_value("a\u{010d}b") == false
+  assert valid_header_value("\u{4e2d}") == false
+  assert valid_header_value("\u{1f600}") == false
   # a token: alphanumerics and the fifteen listed marks, and never empty
   assert valid_header_name("X-Request-Id") == true
   assert valid_header_name("!#$%&'*+-.^_`|~09aZ") == true
@@ -1028,6 +1055,34 @@ test "escape_field rewrites what cannot travel and nothing else" {
   assert escape_field("<b>\"&'\\") == "<b>\"&'\\"
   assert escape_field("a\r\nb") == "a\\r\\nb"
   assert escape_field("\u{0}\u{1b}\u{7f}") == "\\u{00}\\u{1b}\\u{7f}"
+  # non-ASCII is refused, so it is escaped too, at whatever width it needs
+  assert escape_field("caf\u{e9}\u{010a}\u{4e2d}\u{1f600}") == "caf\\u{e9}\\u{10a}\\u{4e2d}\\u{1f600}"
+}
+
+test "no constructor lets a non-ASCII character into a header" {
+  # each of these characters is one the JDK would send as some other byte
+  for v in ["/a\u{010d}\u{010a}X-Injected: 1", "caf\u{e9}", "\u{4e2d}"] {
+    let via_with: Result[Response, ForeignError] = catch_panic(() => with_header(text(200, ""), "X-A", v))
+    assert match via_with { Ok(_) -> false, Err(m) -> str.contains(m.message, "illegal value for header X-A") }
+    let via_redirect: Result[Response, ForeignError] = catch_panic(() => redirect(302, v))
+    assert match via_redirect { Ok(_) -> false, Err(m) -> str.contains(m.message, "illegal value for header Location") }
+    let via_raw: Result[Response, ForeignError] = catch_panic(() => raw(200, "text/plain; x=" ++ v, ""))
+    assert match via_raw { Ok(_) -> false, Err(m) -> str.contains(m.message, "illegal Content-Type") }
+    assert match try_with_header(text(200, ""), "X-A", v) { Ok(_) -> false, Err(e) -> e.status == 400 }
+    assert match try_redirect(302, v) { Ok(_) -> false, Err(e) -> e.status == 400 }
+  }
+  # the encoded forms are what travels, and attachment encodes by itself
+  assert response_headers(redirect(302, "/caf%C3%A9")) == [("Location", "/caf%C3%A9")]
+  assert valid_header_value(unwrap_or(header_of(attachment("text/plain", "\u{4e2d}.txt", "x"), "Content-Disposition"), "\u{4e2d}"))
+}
+
+# Test-only: the first value of a response header, by exact name.
+fn header_of(r: Response, name: String) -> Option[String] = {
+  for h in response_headers(r) {
+    let (k, v) = h
+    if k == name { return Some(v) }
+  }
+  None
 }
 
 test "a refused header names what it refused without repeating it verbatim" {
