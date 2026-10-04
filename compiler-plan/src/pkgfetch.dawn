@@ -197,7 +197,11 @@ pub fn tree_hash(root: String) -> Result[String, String] !Fs = {
 ## 1 GiB at the worst byte, half the heap, and is still above this
 ## repository's own tag tarball (25 MB) and far above any single file in it.
 ## `MAX_ARCHIVE_BYTES` stays a byte count: the download and the zip's total on
-## disk are held at one byte per byte, or not held at all.
+## disk are held at one byte per byte, or not held at all. The two ceilings do
+## add up, since the download is still live while an entry expands: a 235 MB
+## zip whose last entry is a lying 0xFF bomb is refused under -Xmx1280m and is
+## an OutOfMemoryError under -Xmx1024m, which leaves the toolchain's 2g heap
+## about 0.7 GiB to spare at the worst byte and the largest download.
 const FETCH_CONNECT_TIMEOUT_SECS: Int = 30
 const FETCH_REQUEST_TIMEOUT_SECS: Int = 300
 const MAX_ARCHIVE_BYTES: Int = 268435456

@@ -135,8 +135,9 @@ issue 的验收二选一：(i) `Buf` 换真字节缓冲；(ii) 先降 pkgfetch �
 
 门：`scripts/inflate-contract/run.sh` 末尾加一条腿（不新增 job），`pkgbomb.py` 流式造 1 GiB `0xFF`
 的 tar.gz 与目录谎报的 zip，清掉 `DAWN_JVM_OPTS` 让堆就是 `bin/dawn` 钉的那个，跑
-`dawn add file://...`：必须失败、输出里必须有上界的原话 `byte limit (stopped at`、不得出现
-`OutOfMemoryError`。负控两份，都用改过的 pkgfetch 重建工具链再跑整份合约：
+`dawn add file://...`：必须失败、输出里必须有上界的原话、不得出现
+`OutOfMemoryError`。原话自 10-04 起要点名 pkgfetch 自己的上界（`exceeds the <MAX_EXPANDED_BYTES> byte limit (stopped at`，
+数值从 `pkgfetch.dawn` 源码读），理由与负控见 §5.6。负控两份，都用改过的 pkgfetch 重建工具链再跑整份合约：
 
 - pkgfetch 换回父提交的版本（tar.gz 256 MiB、zip 64 MiB）：tar.gz 腿 OOM，合约红；
 - 只把 zip 的单条上界改成 128 MiB：tar.gz 腿绿，zip 腿 OOM，合约红。
@@ -161,6 +162,39 @@ issue 的验收二选一：(i) `Buf` 换真字节缓冲；(ii) 先降 pkgfetch �
   （因为 tileir 走 `Buf`），prev-diff 的 `emit` label 照实声明。
 - **之后**：每字节约 1 B，本节的 `MAX_EXPANDED_BYTES` 与 §3 的 `DEFAULT_CAP` 都按新倍数重评
   （刀 3，放宽是 minor），本节的 inflate-contract 腿原样保留，作为新表示的回归门。
+
+### 5.6 复测与门的收紧（2026-10-04）
+
+在 `e89f6a46` 上经 `dawn add file://...` 复测，JVM 是 `bin/dawn` 默认的 `-Xss512m -Xmx2g -XX:+UseSerialGC`，
+native 是 `nmain` 经 `__emitc` 加 `cc -O2` 出的驱动（native 的 `add` 与 JVM 是同一个 `pkg/add` 与
+`compiler_plan/pkgfetch`）。都在 `ulimit -v` 与 `timeout` 下跑：
+
+| 归档 | JVM 结果 | JVM 峰值 RSS / 墙钟 | native 结果 | native 峰值 RSS / 墙钟 |
+|---|---|---|---|---|
+| tar.gz，1 MB，1 GiB `0xFF` | `Err`（32 MiB 上界） | 1.57 GB / 2.9 s | `Err` | 1.09 GB / 1.6 s |
+| zip，1 MB，目录谎报 | `Err`（32 MiB 上界） | 1.60 GB / 2.7 s | `Err` | 1.09 GB / 1.5 s |
+| zip，235 MB：7 个 31.9 MiB 随机 stored 条目，末条是谎报的 `0xFF` 炸弹 | `Err` | 2.05 GB / 5.6 s | `Err` | 1.33 GB / 10.8 s |
+| tar.gz，232 MB：1 GiB `0xFF` 后接 220 MiB 随机 | `Err` | 2.00 GB / 2.9 s | `Err` | 1.33 GB / 2.4 s |
+| zip，234 MB：同上 7 个 stored 条目加一个诚实的 32 MiB `0xFF` 条目 | 解开（之后报不是 Dawn 包） | 2.21 GB / 13.4 s | 同 | 1.33 GB / 87 s |
+
+后三行是两个上界同时顶满的最坏组合：下载体 `A`（每字节 1 B）与一次解进内存的 `E`（`0xFF` 下每字节约
+24 到 32 B）。所需堆约为 `A + 32·E`，`A = 256 MiB`、`E = 32 MiB` 时约 1.25 GiB。实测最小堆：
+235 MB 那份谎报 zip 在 `-Xmx1024m` 下 OOM（31 s），`-Xmx1280m` 拒绝；单独的 1 MB 炸弹在 `-Xmx1024m`
+下就拒绝。所以 `-Xmx2g` 下最坏组合还有约 0.7 GiB 余量，`MAX_ARCHIVE_BYTES` 不必降（§5.5 第一条的
+推理有了实测）；native 没有堆上限，最坏 RSS 1.33 GB。
+
+生态里的真实负载：唯一的 url 依赖消费者是 dawnop-site 后端，拉本仓 tag 的 `.zip`；本仓 `HEAD` 的
+`git archive` 为 zip 8.8 MB、tar.gz 7.7 MB、展开 26.7 MB，单文件最大 0.66 MB（`checker.dawn`）；
+`packages/` 里最大的是 tileir，tar 0.83 MB。zip 一路离两个上界都很远；tar.gz 一路展开量已是
+`E` 的 80%，这一条仍要等 (i)，在那之前 GitHub 依赖用 `.zip`。
+
+门的收紧：原先只要求输出里有 `byte limit (stopped at`，任何上界的拒绝都满足它。变异体「`untar` 的
+`gunzip` 不传 `cap`」会被 inflate 的 16 MiB 默认上界拒绝，旧门照绿，可 pkgfetch 自己的上界已经
+没人量了。现在合约从 `compiler-plan/src/pkgfetch.dawn` 读出 `MAX_EXPANDED_BYTES` 的值，要求拒绝
+原话点名这个数。负控：上面这个变异体，新门红、旧门绿；把 `MAX_EXPANDED_BYTES` 改回 256 MiB，
+tar.gz 腿 `OutOfMemoryError`，合约红（84 s）。读源码这一步也让 gate-map 把这条腿记成
+`pkgfetch.dawn` 的门（之前 `gatemap.py compiler-plan/src/pkgfetch.dawn` 列不出 inflate-contract）。
+墙钟：整份合约本机 38.5 s，新增的是一次 `sed`，可忽略。
 
 ### 5.5 不做的（理由）
 
