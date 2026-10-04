@@ -1,6 +1,6 @@
 # 在 GitHub 之外跑完整门禁集
 
-> 状态：**current**。第 1 刀（本地后端 + 证据包）、第 2 刀（签名、`refs/notes/gates`、`verify-external.yml` 回写 commit status）、第 3 刀（prefix、离线输入包、隔离证明、crun 后端）、第 3b′ 刀（集群上 `complete = true`：启动器 shim、非 root 与私有 `/tmp`、wasi-sdk 与 npm 离线）、第 4 刀（2026-09-24：release 守卫接受外部证据；`steps.lock.json` 进 tree-policy，关 #167）与第 5 刀（2026-09-24：C 编译器进输入包，本机与集群证据包的 `toolchain` 逐字段相等）已落地；自动触发仍记在「不做的」。首次正向发布已做（14535104）：集群全套 `complete = true`，签名 note 推上 `refs/notes/gates`，`verify-external.yml`（run 35932235187）给该提交写出 `gates/maintainer` = `success`，见「签名、落盘与 GitHub 侧核验」一节的实测。
+> 状态：**current**。第 1 刀（本地后端 + 证据包）、第 2 刀（签名、`refs/notes/gates`、`verify-external.yml` 回写 commit status）、第 3 刀（prefix、离线输入包、隔离证明、crun 后端）、第 3b′ 刀（集群上 `complete = true`：启动器 shim、非 root 与私有 `/tmp`、wasi-sdk 与 npm 离线）、第 4 刀（2026-09-24：release 守卫接受外部证据；`steps.lock.json` 进 tree-policy，关 #167）与第 5 刀（2026-09-24：C 编译器进输入包，本机与集群证据包的 `toolchain` 逐字段相等）已落地；自动触发仍记在「不做的」。首次正向发布已做（14535104）：集群全套 `complete = true`，签名 note 推上 `refs/notes/gates`，`verify-external.yml`（run 35932235187）给该提交写出 `gates/maintainer` = `success`，见「签名、落盘与 GitHub 侧核验」一节的实测。2026-10-04 起 crun 后端按负载把 job 分到集群的多台机器上，见「多机分派」一节。
 
 ## 要解决的问题
 
@@ -474,6 +474,62 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 - **续跑时重跑没有片段的 job。** 任务单允许「重跑或判红」。重跑要先清掉认领与上次的制品目录，而没有片段通常意味着 job 本身坏了（或有人动了集群上的文件），悄悄重跑会把这件事藏起来；判红后整次再跑一遍即可。
 - **每个 job 一个轮询。** 推送由 crun 串行化，16 个 job 各自轮询会把推送排满；一个线程一次问完，轮询开销与 job 数无关。
 - **`anchor-readers.txt` 登记。** 新代码不按字面量读源码文本（只读 gates.yml 的计划与集群上的 JSON），不涉及。`steps_lock.py` 也不涉及：没有碰 gates.yml 的 run 行。
+
+## 多机分派（2026-10-04）
+
+### 为什么
+
+不带 `-m` 的零卡 `crun run` 一律落在 crun 的主力机上。10-04 晚六个写者各跑 `--jobs 8`，主力机（256 核）load 在 175–205 之间，另两台 H200（各 224 核）load 2–5。单个 job 从约 10 分钟拉到 20 分钟以上，一轮全套从约 20 分钟拉到约 65 分钟（当时六个控制端的全套墙钟 3358–3727s）；`--jobs 39` 时负载敏感的门禁（compiler-weight-contract 的 `sampling_targets_two_ms` 等）必红。
+
+### 先探清的三件事
+
+| 问题 | 做法 | 结果 |
+|---|---|---|
+| `-m` 时树推到哪 | 读 crun 源码，再从临时 staging 目录 `crun run -n 0 -m <机器>` | 控制端照旧先推到主力机的 `remote_root`，主力机上的内层 crun 再把同一路径 rsync 到目标机（`--no-sync` 只跳过这一步）；三台机器上路径相同 |
+| prefix 是否共享 | 三台各 `df` 一次 prefix 所在目录 | 不共享：各是本机磁盘。输入包、工具链、认领目录与片段都只在 job 所在的机器上 |
+| load 从哪读 | 同上 | 每次远端命令前加一行 `nproc` 与 `/proc/loadavg`，不另起探测 |
+
+### 做法
+
+- **机器集合。** `crun status` 列出的、有 GPU 行回来的机器，按出现顺序记为 A、B、C；字母与地址的对应只写在 `<out>/crun/machines.json`（本机），日志、`dispatch.txt`、认领目录里只出现字母。`--backend-opt machines=auto`（默认）用全部；`machines=N` 在 prepare 后留负载最低的 N 台；`machines=primary` 不带 `-m`，即旧行为。
+- **每台各自 prepare。** 并行地对每台跑一次「load 探测 → job uid 能否启动 prefix 的 python → `inputs.py verify`」。红了就把输入包送到那台：走 crun 自己的路线（推到主力机，主力机已有同一份所以几乎零字节；再由主力机集群内 rsync 过去），然后 `inputs.py install`。两台空机器各 63–64s（775 MiB），远小于从本机直推的 0.6 MB/s。送包串行，因为每次都推进主力机上同一个 `remote_root`。
+- **选机。** 每次启动挑 `(load + job-load × 近 90s 内本控制端在该机启动的 job 数) / 核数` 最小的一台。load 是最近一次轮询或 prepare 读到的 1 分钟均值；第二项补的是 1 分钟均值还没反映出来的新 job。不用轮转：其他控制端不轮转，轮转仍会把三分之一的 job 送到最热的那台。`job-load` 默认 4，来自实测（见下）。
+- **记录与轮询。** `dispatch.txt` 每行多一列 `machine <字母>`，认领目录里写一个 `machine` 文件。轮询按机器分组，每轮每台一次短 crun，并行发出，顺带带回该机 load（逐条记在本机 `<out>/crun/loads.txt`）。job 换了机器后，旧机器那一轮的状态按过期丢弃。
+- **续跑。** 读回 `machines.json`，在每台机器上把全部 job 轮询一次再合并：done 胜 running 胜 absent，同级取 `dispatch.txt` 最后记的那台；还在跑的就在它那台上等。
+- **掉机。** prepare 时不应答、job uid 用不了、或送包后仍验不过的机器，本次运行不用；运行中某台的轮询或启动连续 `dead-after`（默认 6，默认轮询下约 3 分钟）次失败就判掉线，它上面的 job 到别的机器重新启动。原机器上晚跑完的那份留在它自己的盘上，没人读。只有一台都不剩时整轮才失败。
+- **证据包不变。** 片段里没有机器信息；`toolchain` 由各 job 自报，跨机器不一致时照旧置 `null` 并记日志，这正是「换了在哪跑、没换跑什么」的核对。
+
+### 途中查出
+
+- **一台机器上 job uid 进不去 prefix。** 第一次多机全套，B 上 13 个 job 全部 `exit 127`：降权到 uid 20000 后加载 prefix python 的 `libpython` 报 Permission denied。原因是 prefix 上面一层目录在那台机器上是 700、属主是别的 uid；那不是我们的目录，不能改。所以 prepare 加了上面那步 uid 检查，B 因此在 prepare 就被摘掉，本节其余实测都是 A 加主力机两台。
+- **标记被 crun 的回显命中。** 第一版 uid 检查用 `"GATES-NOREACH" in stdout` 判，而 crun 会把要执行的命令原样回显在同一个 stdout 里，三台机器全被摘掉。改成整行匹配；桩 crun 也照样回显命令，这类错今后在桩自测里就红。
+
+### 实测（同一提交 6c85e112，origin/main，34 个 job、125 个 run 步骤）
+
+| 运行 | 墙钟 | complete | job 分布 | 各机 load 峰值 | 同时在跑的其他控制端 |
+|---|---|---|---|---|---|
+| 单机基线 `machines=primary --jobs 8` | **2096s** | true | 全在主力机 | 主力机 87 | 起跑 1 个，结束时 0 个 |
+| 多机 `--jobs 39`（`job-load=8`） | **949s** | true | A 21、主力机 13 | A 75，主力机 185 | 起跑 2 个，结束时 3 个 |
+| 多机 `--jobs 8`（`job-load=4`） | **2076s** | true | A 34、主力机 0 | A 47 | 起跑 3 个，结束时 1 个 |
+
+参照：当晚六个控制端各自单机 `--jobs 8` 的全套是 3358–3727s（不同提交）。
+
+- `--jobs 39` 全绿，包括 compiler-weight-contract（387s）与 docs（848s）。负载敏感门禁的修复不在本刀，这一轮绿是因为 A 只到 75/224；主力机那边同时有别人的 job，到 185/256。
+- `job-load` 原来是 8：A 在九次快速启动后就「显得满了」，13 个 job 去了起跑时 load 已 81 的主力机。主力机上的 job 平均 585s，A 上 386s，最长的五个都在主力机上。A 放了 21 个 job、峰值 75，约每 job 3.6，所以改为 4。
+- 单机基线与多机 `--jobs 8` 几乎一样（2096s 对 2076s，job 远端平均 378s 对 369s）：这两轮跑时别的控制端已基本收工，主力机只到 87/256，没有可躲的负载；`--jobs 8` 的墙钟由 8 路宽度与最长链决定。多机在 `--jobs 8` 上的收益只在主力机被别人压满时才出现，本节没有在那种条件下测到同一提交的对照，只有开头那组六控制端的 3358–3727s。
+- `--jobs 8` 多机时 8 个 job 全落 A：A 起跑 load 2.3，按 4 算要十几个并发 job 才追上主力机的 77/256，`--jobs 8` 到不了。这说明选机在按负载走，而不是在轮转。
+
+### 墙钟影响
+
+push-total 不变：这是外部后端，`gates.yml` 与任何工作流都没动。桩自测本机 24s → 31s（多了四种情形），它不在 CI 里。
+
+### 不做的（理由）
+
+- **改那台机器上 prefix 上层目录的权限。** 不是我们的目录，门禁运行只准写 prefix；摘掉那台机器即可。
+- **跨控制端的全局调度。** 其他控制端（旧工具）不带 `-m`，也不报计划；要全局调度就得在集群上放一个常驻协调者，与「集群侧是可丢弃镜像」相悖。按当前 load 选机已经把负载从最热的那台挪开。
+- **job 中途迁移。** 掉线机器上的 job 重新启动，不搬运半截结果；半截结果在那台盘上，读不到，也不可信。
+- **按 job 历史时长加权选机。** 需要入库或本机的时长台账，台账会过期；`job-load` 一个常数加 1 分钟均值已经够分流。
+- **探测机器时用 `crun status` 之外的路径。** 机器清单与可达性以 crun 自己的视图为准，后端不读它的配置文件，代码与日志里也就不会出现地址。
 
 ## PR 与 main 上的证据档（2026-09-25）
 

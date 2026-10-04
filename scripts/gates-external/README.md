@@ -34,6 +34,7 @@ scripts/gates-external/prefix.py selftest --prefix ~/dawn-gates [--break-env-i]
 scripts/gates-external/run.sh --sha <sha> --backend crun --prefix ~/dawn-gates --jobs 16 \
     --backend-opt remote-prefix=<cluster dir> [--backend-opt isolation=1] [--only ...] \
     [--backend-opt run-as=UID:GID|root] [--backend-opt private-tmp=0] [--backend-opt poll=30]
+    [--backend-opt machines=auto|N|primary] [--backend-opt job-load=4] [--backend-opt dead-after=6]
 scripts/gates-external/run.sh --resume <out> [--jobs N]   # after the controller died
 scripts/gates-external/crun_stub_selftest.py   # disconnects and --resume against a stub crun
 ```
@@ -47,8 +48,8 @@ plan, 3 the bundle was refused (leak or schema), nothing written.
 |---|---|
 | `gatesplan.py` | what runs: every job and `run:` step of gates.yml at the commit, read from git; each `uses:` resolved through the substitution table, anything unmodelled refused |
 | `backend_local.py` | where and how: one job at a time on this machine, in a fresh worktree (a fresh clone inside a prefix) |
-| `backend_crun.py` | where and how, on the cluster: ships the input pack and the tools once, then one detached zero-card `crun run -d` per job, each running `prefix.py run-job` (the local backend in prefix mode) inside the cluster's prefix, and one poll for all jobs still out every 30 s; resumable |
-| `crun_stub_selftest.py` | the crun backend against a stub crun: dropped polls and launches give the same bundle bytes, a killed controller resumed gives the same bytes, a fragment deleted before `--resume` gives `complete=false` |
+| `backend_crun.py` | where and how, on the cluster: on every machine `crun status` lists, checks that the job uid can use the prefix and ships the input pack where it does not verify, then one detached zero-card `crun run -m <machine> -d` per job on the machine with the least load per core, each running `prefix.py run-job` (the local backend in prefix mode) inside that machine's prefix, and one poll per machine for its jobs still out every 30 s; a machine that stops answering is dropped and its jobs move; resumable (`machines=primary` keeps every job on crun's primary) |
+| `crun_stub_selftest.py` | the crun backend against a stub crun with three stub machines: dropped polls and launches, a machine the job uid cannot use, one that never answers and one lost mid-run all give the same bundle bytes, a killed controller resumed gives the same bytes, a fragment deleted before `--resume` gives `complete=false` |
 | `bundle.py` | what it means: schema whitelist, leak filter, and `complete` |
 | `runner.py` | when: schedules jobs up to `--jobs`, honours `needs:`, writes `summary.json`, `bundle.json` and `invocation.json` (what `--resume` reads back) |
 | `run.sh` | the entry point |
