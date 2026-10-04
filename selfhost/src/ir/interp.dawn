@@ -183,6 +183,43 @@ pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL, depth: MAX_CALL_DEP
 ## a comptime run bounded well below a real compile's).
 pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { ..ct_default(), fuel: n }
 
+## The value of `--comptime-fuel`: a step count, so a number and not a
+## negative one. A negative budget used to be taken as given, and every
+## constant then reported running out of fuel, which is no way to say that
+## the flag was wrong.
+pub fn ct_fuel_value(text: String) -> Result[Int, String] =
+  match parse_int(text) {
+    Some(n) -> if n < 0 { Err("--comptime-fuel needs a number, 0 or more") } else { Ok(n) }
+    None -> Err("--comptime-fuel needs a number")
+  }
+
+## `--comptime-fuel N` and `--comptime-fuel=N`, wherever they sit in `rest`:
+## the budget asked for, if any, and the arguments without the flag. Both
+## drivers take the flag through here for every command that folds constants,
+## because the fuel-exhausted hint names the flag and has to be right whichever
+## command printed it; `dawn check` and every dawnc command used to leave the
+## flag in place and then read it as a file name.
+pub fn take_ct_fuel(rest: List[String]) -> Result[(Option[Int], List[String]), String] = {
+  var fuel: Option[Int] = None
+  var out: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    let a = rest[i]
+    if a == "--comptime-fuel" {
+      if i + 1 >= len(rest) { return Err("--comptime-fuel needs a number") }
+      fuel = Some(ct_fuel_value(rest[i + 1])?)
+      i = i + 2
+    } else if str.starts_with(a, "--comptime-fuel=") {
+      fuel = Some(ct_fuel_value(str.strip_prefix(a, "--comptime-fuel=").unwrap_or(a))?)
+      i = i + 1
+    } else {
+      out = out ++ [a]
+      i = i + 1
+    }
+  }
+  Ok((fuel, out))
+}
+
 ## What an editor may spend folding one expression it was pointed at
 ## (docs/lsp-hover-design.md, C5): far below a build's budget, because the
 ## answer is wanted while the user waits and a refusal costs nothing. Both
@@ -269,7 +306,13 @@ type ICx = {
   # another module, whose constants its body then names
   body: String,
   # how many calls may nest (CtOpts.depth)
-  max_depth: Int
+  max_depth: Int,
+  # The folding module's constants not reached yet, and the one being folded
+  # ("" outside a module's constant run). A body that reads one of them
+  # finds nothing, and these are what let the refusal say why rather than
+  # call a constant that has not run yet one that failed.
+  pending: Set[String],
+  folding: String
 }
 
 ## How a body names constants: the module it belongs to (`path`, the key
@@ -2088,8 +2131,27 @@ fn ceval_const_ref(icx: ICx, st: ESt, env: Env, owner: String, name: String) -> 
       let (path, v) = pr
       Ok((note_read(icx, st, path), env, v))
     }
-    None -> cerr(note_miss(st), env, "const `" ++ owner ++ "." ++ name ++ "` failed to evaluate")
+    None -> cerr(note_miss(st), env, const_miss(icx, owner, name))
   }
+
+## Why a constant a body named has no value. It used to be "failed to
+## evaluate" every time, with the owner spliced in even when there was none
+## (`.B`), which sent a reader looking for an error at `B` when `B` had simply
+## not been folded yet: constants fold top to bottom, and a function that
+## reads one declared below the constant being folded runs before it exists.
+## The checker says that much for a direct reference; this is the same answer
+## for one reached through a call.
+fn const_miss(icx: ICx, owner: String, name: String) -> String = {
+  let own = if owner == "" { icx.body == icx.owner } else { owner == icx.scope.path }
+  if own && name == icx.folding {
+    "const `" ++ name ++ "` needs its own value to fold"
+  } else if own && set.has(icx.pending, name) {
+    "const `" ++ name ++ "` is declared later in the file; constants are evaluated top to bottom"
+  } else {
+    let shown = if owner == "" { name } else { owner ++ "." ++ name }
+    "const `" ++ shown ++ "` failed to evaluate"
+  }
+}
 
 ## a comptime block nested in what is being folded: the driver folded it
 ## first, exactly as codegen would have
@@ -2841,7 +2903,9 @@ fn module_icx(
     world: world,
     scope: scope,
     body: owner,
-    max_depth: depth
+    max_depth: depth,
+    pending: set.empty(),
+    folding: ""
   }
 }
 
@@ -2868,11 +2932,15 @@ fn eval_module_in(
   }
   let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
     traits, impls, owner, opts.depth)
+  var pending: Set[String] = set.empty()
+  for c in tm.consts { pending = set.insert(pending, c.name) }
   for c in tm.consts {
+    pending = set.remove(pending, c.name)
+    let base_c = ICx { ..base, pending: pending, folding: c.name }
     # a comptime block inside the initializer folds first
-    run = walk_expr(ICx { ..base, consts: run.out.consts, blocks: run.out.blocks },
+    run = walk_expr(ICx { ..base_c, consts: run.out.consts, blocks: run.out.blocks },
       fuel, c.init, run)
-    let icx = ICx { ..base, consts: run.out.consts, blocks: run.out.blocks }
+    let icx = ICx { ..base_c, consts: run.out.consts, blocks: run.out.blocks }
     let (cache, r) = fold_expr(icx, fuel, run.cache, c.init, c.lo, c.hi)
     match r {
       Ok(v) -> {
@@ -3000,7 +3068,9 @@ fn probe_icx() -> ICx = {
     world: ct_world_empty(),
     scope: alone("probe"),
     body: "probe",
-    max_depth: MAX_CALL_DEPTH
+    max_depth: MAX_CALL_DEPTH,
+    pending: set.empty(),
+    folding: ""
   }
 }
 
@@ -3049,6 +3119,17 @@ fn probe_hamt(icx: ICx, name: String) -> String !io = {
       }
     }
   }
+}
+
+test "--comptime-fuel is a count of steps, wherever it sits in an argv" {
+  assert take_ct_fuel(["a.dawn"]) == Ok((None, ["a.dawn"]))
+  assert take_ct_fuel(["--comptime-fuel", "7", "a.dawn"]) == Ok((Some(7), ["a.dawn"]))
+  assert take_ct_fuel(["a.dawn", "--comptime-fuel=0"]) == Ok((Some(0), ["a.dawn"]))
+  # the last one wins, as it does for the JVM's own options
+  assert take_ct_fuel(["--comptime-fuel=1", "--comptime-fuel", "2"]) == Ok((Some(2), []))
+  assert take_ct_fuel(["--comptime-fuel"]) == Err("--comptime-fuel needs a number")
+  assert take_ct_fuel(["--comptime-fuel=x"]) == Err("--comptime-fuel needs a number")
+  assert take_ct_fuel(["--comptime-fuel", "-1"]) == Err("--comptime-fuel needs a number, 0 or more")
 }
 
 test "the comptime interpreter covers every intrinsic, removes it in lowering, or refuses it" {

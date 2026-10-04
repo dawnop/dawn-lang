@@ -1065,6 +1065,29 @@ test "list slices, joins and code point conversions pay for what they produce" {
   assert charged("m", "let cs = code_points(s)", "some(from_code_points(cs))", 40)
 }
 
+## A constant read through a function before it has been folded is not a
+## constant that failed: constants fold top to bottom, and the refusal says so
+## the way the checker does for a direct reference. It used to call every miss
+## "failed to evaluate", with an empty owner spliced in as `.B`.
+test "a constant read before it is folded is named as declared later, not as failed" {
+  let src = "fn get_b() -> Int = B\n" ++
+    "const A: Int = get_b() + 1\n" ++
+    "const B: Int = 2\n" ++
+    "fn get_c() -> Int = C\n" ++
+    "const C: Int = get_c()\n" ++
+    "const D: Int = [1][3]\n" ++
+    "fn get_d() -> Int = D\n" ++
+    "const E: Int = get_d()\n"
+  let (msgs, consts) = fold_src("m", src, 100000)
+  assert msgs == [
+    "comptime: const `B` is declared later in the file; constants are evaluated top to bottom",
+    "comptime: const `C` needs its own value to fold",
+    "comptime: index 3 out of bounds for length 1",
+    "comptime: const `D` failed to evaluate"
+  ]
+  assert map.get(consts, "B") == Some(VInt(2))
+}
+
 ## A range's length is `to - from`, and that subtraction wraps when the
 ## length does not fit in an Int. The charge used to read the wrapped value as
 ## a count of nothing, so the fold went on to build 2^63 elements uncharged
