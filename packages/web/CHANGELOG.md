@@ -6,6 +6,16 @@ Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
 `docs/std-defaults-design.md` and `docs/audit/web-api-v2-design.md` (in
 Chinese).
 
+## 6.2.0 (2026-10-05)
+
+- `safe_rel(segs)` turns captured segments into a relative file path, or a
+  `400` if any segment is empty, `.` or `..`, or contains `/`, `\` or NUL.
+  The server's dot-segment `400` only sees a segment that *is* `.` or `..`,
+  and a segment is decoded on its own, so `..%2F..` reached a handler as the
+  single segment `../..`. Routing is unchanged: an encoded slash still stays
+  inside its segment, and handlers that join captures into a path should
+  call `safe_rel`. A minor: one new function, no behaviour changed.
+
 ## 6.1.1 (2026-10-05)
 
 - The access log writes the path as the client sent it, percent-encoded, in

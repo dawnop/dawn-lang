@@ -37,6 +37,14 @@ as `with_logging` does.
 a list of segments and is read with `param_segs`; `param` refuses it with a
 `500`, so a caller that wants one string joins the segments itself.
 
+A capture is not a file path. The `400` above covers a segment that *is*
+`.` or `..`, but each segment is decoded on its own, so `..%2F..` reaches the
+handler as the one segment `../..`. To turn captures into a path under some
+base directory, use `safe_rel(segs)?`: it refuses (`400`) any segment that is
+empty, `.` or `..`, or contains `/`, `\` or NUL, and joins the rest with `/`.
+For a single capture, `safe_rel([param(req, name)?])?`. Never locate a file
+with `Request.path` or `Request.raw_path`.
+
 ## Requests
 
 `Request.headers`, `Request.query` and `parse_form`'s result are multimaps
