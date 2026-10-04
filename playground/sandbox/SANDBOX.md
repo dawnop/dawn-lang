@@ -9,12 +9,24 @@ except one temp dir, and hard CPU/RAM/PID/time caps.
 
 ```
 dawn-play (unprivileged service user)
-  └─ per request: mkdir /tmp/dawn-play-<uuid>, write prog.dawn
-  └─ phase 1  sudo -n run-sandboxed.sh <dir>  dawn build prog.dawn -o prog.jar
-  └─ phase 2  sudo -n run-sandboxed.sh <dir>  java -jar prog.jar
+  └─ per request: mkdir <root>/dawn-play-<uuid>/box, write box/prog.dawn
+  └─ phase 1  sudo -n run-sandboxed.sh <dir>/box  dawn build prog.dawn -o prog.jar
+                 output -> <dir>/build.txt
+  └─ phase 2  sudo -n run-sandboxed.sh <dir>/box  java -Xmx256m -jar prog.jar
+                 output -> <dir>/run.txt
                 └─ systemd-run --wait --pipe  (DynamicUser, PrivateNetwork, …)
                      └─ the untrusted command; stdout piped back to a file
+  └─ rm -rf <dir>, on every way out
 ```
+
+The unit can write `box/` and nothing else. Its output files are one level
+up, opened by the runner before the child starts; the child writes through
+that descriptor and cannot rename, replace or link the files themselves.
+The runner reads back at most 64 KiB + 1 byte of each, refuses anything but a
+regular file and never follows a link. (Until 2026-10-04 the output files sat
+inside the writable directory and were read whole by name after the child
+exited, so the child could swap one for a link or a FIFO, and a large enough
+output exhausted the runner's heap.)
 
 - `run-sandboxed.sh` pins every limit; sudoers lets `dawn-play` call *only* that
   script (see `sudoers.dawn-play`). The runner can pass any argv but cannot relax
@@ -40,6 +52,8 @@ dawn-play (unprivileged service user)
 | Syscalls           | `SystemCallFilter=@system-service` minus privileged |
 | Memory             | `MemoryMax=512M`, `MemorySwapMax=0`                 |
 | Compiler heap      | `DAWN_JVM_OPTS=-Xss512m -Xmx256m` via `--setenv`    |
+| Run-phase heap     | `java -Xmx256m` on the runner's argv (`play/exec.dawn`) |
+| Disk, per file     | `LimitFSIZE=32M` (stdout included; writes past it fail) |
 | Fork bomb          | `TasksMax=64` (the JVM itself needs a few dozen)    |
 | CPU                | `CPUQuota=200%` (two cores)                          |
 | Wall clock         | `RuntimeMaxSec=15` (a hard backstop over the runner's own `PLAY_TIMEOUT`) |
@@ -69,13 +83,12 @@ exports reaches either phase. Two consequences that are easy to get wrong:
   diagnostic. At `-Xmx256m` it stays inside and reports an `OutOfMemoryError`
   the runner can render.
 
-The **run** phase (`java -jar prog.jar`) still gets no explicit `-Xmx`, so the
-user program's JVM aims at ~25% of host RAM and is contained by the cgroup
-rather than by its own ceiling. That is the pre-existing behaviour validated in
-the checklist below (item 3), and it is contained — but ungraceful. Giving it
-its own ceiling means changing the argv the runner builds in `play/exec.dawn`;
-`JAVA_TOOL_OPTIONS` is not an option because `redirectErrorStream(true)` merges
-its "Picked up …" banner into the program's own output.
+The **run** phase gets its ceiling on the argv the runner builds,
+`java -Xmx256m -jar prog.jar` (`RUN_HEAP` in `play/exec.dawn`), since
+2026-10-04. Before that it had none, aimed at ~25% of host RAM and was
+contained by the cgroup as an opaque kill (checklist item 3 below).
+`JAVA_TOOL_OPTIONS` was not an option because `redirectErrorStream(true)`
+merges its "Picked up …" banner into the program's own output.
 
 ## Cross-uid work dir — resolved on first deploy (2026-07-12)
 
@@ -92,15 +105,18 @@ Three things make this work, learned the hard way on the server:
 2. **Parent dirs need `o+x`.** `/var/lib/dawn-play` and `…/work` are `0711`
    (owner dawn-play rwx, others traverse-only) so the DynamicUser can `chdir`
    into its work dir. `0700` → exit 200/CHDIR "permission denied".
-3. **Work dir is `chmod 0777`** by the runner before the phases
-   (`make_world_writable`, gated on the sandbox switch). The name is an unguessable
+3. **The box is `0777`, its parent `0711`**, set by the runner before the
+   phases (`open_box`, gated on the sandbox switch). The name is an unguessable
    uuid and the parents are `0711` (unlistable), so world-writable is fine.
    Default `DynamicUser` umask (0022) leaves `prog.jar` world-readable, which is
-   what the next phase's different uid needs.
+   what the next phase's different uid needs. Until 2026-10-04 the whole request
+   directory was `0777` and the output files lived in it.
 
-The runner `rm -rf`s each work dir after the run (it owns the `0777` dir, so it
-can unlink the DynamicUser-owned files inside). Verified: no accumulation across
-runs, including timeouts.
+The runner `rm -rf`s each request directory on every way out, a JVM `Error`
+included (`bracket`, in `play/exec.dawn`). It owns the directory and the box,
+so it can unlink the DynamicUser-owned files inside. Before 2026-10-04 the
+removal ran only after a normal return, and an `OutOfMemoryError` on the read
+left the directory behind.
 
 ## Malicious-sample checklist (run on the server after wiring)
 
@@ -120,8 +136,11 @@ hang or a host-level effect:
    → denied (`ProtectSystem=strict`).
 7. **Privilege escalation** — attempt `sudo`, setuid → blocked (`NoNewPrivileges`,
    empty capability set).
-8. **Huge output** — print megabytes → truncated at 64 KB, no memory blowup on the
-   runner (output goes to a file, not a pipe buffer).
+8. **Huge output**: print for the whole run → truncated at 64 KB, the runner's
+   memory does not move, and the output file stops at `LimitFSIZE`.
+9. **Output swap**: from inside the unit, try to replace `../run.txt` with a
+   link or a FIFO → denied (the request directory is not writable); the
+   response arrives within the run budget.
 
 Confirm too that after a storm of requests the concurrency gate hasn't leaked
 permits (the runner stays responsive). The permit leak this used to warn about

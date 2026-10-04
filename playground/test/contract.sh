@@ -69,7 +69,7 @@ SRV=$!
 # runner is outside the terminal's process group now, so ^C no longer reaches
 # it; the signal traps route through exit so the EXIT trap still kills it.
 # `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}"; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}"; rm -f "${WORK:?}.canary"; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -81,10 +81,13 @@ done
 
 pass=0
 fail=0
+# Every request is bounded, so a runner that never answers is a red case and
+# not a hung test: the compile budget, the run budget and a margin.
+REQ_MAX=$((PLAY_COMPILE_TIMEOUT + PLAY_TIMEOUT + 10))
 # The assertion sees the parsed body as `d` and the bytes as `raw`: a JSON
 # parser reads 0 and 0.0 as equal, so the integer fields are checked on `raw`.
 check() { # name, curl-data, python-assertion, [endpoint (default: run)]
-  body=$(curl -s --noproxy '*' -X POST --data "$2" "http://127.0.0.1:$PORT/${4:-run}")
+  body=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$2" "http://127.0.0.1:$PORT/${4:-run}" || true)
   if printf '%s' "$body" | python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); assert ($3), d" 2>/dev/null; then
     pass=$((pass + 1)); echo "  ok  $1"
   else
@@ -136,6 +139,57 @@ check "infinite loop times out" \
   '{"code":"fn s(n: Int) -> Unit !io = s(n+1)\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}' \
   'not d["ok"] and d["phase"]=="timeout" and d["output"]=="x\n"'
 
+# The child's output files live beside its box, not in it, and the runner
+# reads them back without following a link or opening anything but a regular
+# file. Unsandboxed, the program runs as the runner's own user and can reach
+# them, which is what lets these cases swap them; under the sandbox it cannot
+# write that directory at all. `code_json` builds the request from a program
+# with the canary path or the swap command spliced in. The output is empty
+# rather than "before the swap": the runner refuses what it finds at the name,
+# and an empty answer is also the proof that the swap happened.
+CANARY="$WORK.canary"
+printf 'canary-%s\n' "$$" >"$CANARY"
+code_json() { # program text with @CMD@ replaced by a shell command
+  python3 -c 'import json,sys; print(json.dumps({"code": sys.stdin.read().replace("@CMD@", sys.argv[1].replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34)).replace("$", chr(92) + "$"))}))' "$1" <<'DAWN'
+use std/str
+use java "java.lang.ProcessBuilder"
+use java "java.lang.System"
+
+pub fn main() -> Unit !io = {
+  println("before the swap")
+  let jar = System.getProperty("java.class.path").expect("cp")
+  let here = str.take(jar, str.len(jar) - str.len("/prog.jar"))
+  let cmd = "for f; do [ -e \"\$f\" ] && { @CMD@; }; done; true"
+  ProcessBuilder.new(["sh", "-c", cmd, "sh", here ++ "/run.txt", here ++ "/../run.txt"]).start().expect("sh").waitFor()
+  println("after the swap")
+}
+DAWN
+}
+
+check "an output file swapped for a link does not leak its target" \
+  "$(code_json "ln -sf '$CANARY' \"\$f\"")" \
+  'd["phase"]=="run" and d["output"]==""'
+
+# A FIFO never reaches end of file. Twice, because MAX_CONCURRENT is 2: a
+# runner that blocked on each would hold both permits and the hello after
+# them would wait out the queue and answer 429.
+check "an output file swapped for a FIFO does not hang the request" \
+  "$(code_json 'rm -f "$f" && mkfifo "$f"')" \
+  'd["phase"]=="run" and d["output"]==""'
+check "a second FIFO swap does not hang it either" \
+  "$(code_json 'rm -f "$f" && mkfifo "$f"')" \
+  'd["phase"]=="run" and d["output"]==""'
+check "the gate is free after both" \
+  '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
+  'd["ok"] and d["output"]=="hi\n"'
+
+# A thousand times the output limit. The runner reads one byte past the limit
+# and no more, so this answers truncated with the response capped, where the
+# old read held the whole file before truncating it.
+check "huge output answers truncated, capped at the limit" \
+  '{"code":"use std/str\npub fn main() -> Unit !io = {\n  let s = str.repeat(\"x\", 65536)\n  for i in range(0, 1000) { print(s) }\n}"}' \
+  'd["phase"]=="run" and d["exit"]==0 and d["truncated"] is True and len(d["output"].encode()) <= 65536 + 64 and d["output"].endswith("(output truncated)")'
+
 check "/check on good code -> all-clear, no run" \
   '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
   'd["ok"] and d["phase"]=="check" and "output" not in d and re.search(r"\"ms\":[0-9]+[,}]", raw)' \
@@ -162,6 +216,15 @@ code=$(printf '%s' "$big" | curl -s --noproxy '*' -o /dev/null -w '%{http_code}'
 # GET -> 405
 code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/run")
 [ "$code" = "405" ] && { pass=$((pass+1)); echo "  ok  GET -> 405"; } || { fail=$((fail+1)); echo "FAIL  GET -> $code"; }
+
+# Every request above, including the ones that timed out, failed to compile
+# or had their output swapped, removed its own directory.
+left=$(find "$WORK" -mindepth 1 -maxdepth 1 -name 'dawn-play-*' | head -n 5)
+if [ -z "$left" ]; then
+  pass=$((pass + 1)); echo "  ok  no request directory left in the work root"
+else
+  fail=$((fail + 1)); echo "FAIL  request directories left in the work root:"; echo "$left"
+fi
 
 echo "----"
 echo "$pass passed, $fail failed"
