@@ -55,6 +55,12 @@ is the same path on every machine, each on that machine's own disk):
             stay there. Only the fragments come back, and the runner builds
             bundle.json from them as for any backend; nothing in a fragment
             names a machine
+  artifacts a job that uploads (upload-artifact) has those artifacts tarred
+            into the poll that reports it done, and the controller keeps
+            them; a job with needs: that is launched on another machine than
+            a needed job ran on gets them in the staging directory
+            (xfer/<run>/<job>.tar.gz), and its wrapper unpacks them into its
+            machine's P/out/<sha>/<run>/artifacts before run-job starts
 
 Why several machines, and why chosen by load (2026-10-04). A zero-card crun
 without -m always lands on crun's primary machine. With six writers each
@@ -88,6 +94,23 @@ dead-after times in a row (default 6, three minutes at the default poll) is
 marked down for the rest of the run, and every job out on it is launched
 again on another machine. A job that did start there and finishes later is
 harmless: its fragment stays on that machine's disk and nothing reads it.
+
+Why artifacts travel instead of pinning jobs together (2026-10-05). Each
+machine's prefix is its own disk, so an artifact lives where its job ran. A
+full run of a branch came out complete=false for that alone: the fan-in job
+mutant-shards-complete ran on one machine, builtin-type-3-3 on another, and
+the fan-in found no coverage record from that shard though the shard had
+passed. The one dependency gates.yml has (its header lets no job need
+another except this fan-in) is eight mutation shards into one seconds-long
+job. Pinning the dependency closure to one machine would put those eight,
+among the longest jobs of the set, on one machine, which is the
+concentration this backend exists to avoid, and would have to choose the
+machine when the first shard starts, long before the fan-in. Moving the
+artifacts instead costs a few KiB per shard (coverage records) through the
+poll that already reports the job and the push every launch already makes,
+and leaves every job free to go where the load is. The artifact names come
+from the plan (each upload step's literal `name:`); a name that is an
+expression is refused in prepare rather than guessed at.
 
 Why detached and polled (2026-09-25). A synchronous crun holds one SSH
 session for the length of the job, and crun kills the remote job when that
@@ -293,6 +316,10 @@ class CrunBackend:
         self.initial = {}
         self.machines = []
         self.dispatch_log = self.out / "crun" / "dispatch.txt"
+        # job id -> the artifact names it uploads (from the plan), and
+        # job id -> (machine letter, tar.gz bytes) once it is done
+        self.uploads = {}
+        self.artifact_tars = {}
         # What a job runs is the commit and these tools, so both name the
         # staging directory and the remote tree. Keyed by the commit alone,
         # two controllers on one commit with different tools (a branch's run
@@ -440,6 +467,7 @@ class CrunBackend:
         jobs.mkdir()
         for job in plan["jobs"]:
             (jobs / f"{job['id']}.json").write_text(json.dumps(job, sort_keys=True) + "\n")
+            self.uploads[job["id"]] = upload_names(job)
         bundle = stage / "repo.bundle"
         if not bundle.exists():
             self._make_bundle(bundle)
@@ -639,7 +667,51 @@ class CrunBackend:
                      "--marker", f"{self.remote}/tmp/markers/{self.run_id}-{jid}", "--"] + inner
         return self._envi() + inner
 
-    def _wrapper(self, job, machine):
+    def _stage_artifacts(self, job, machine):
+        """[(needed job, artifact names)] whose artifacts this launch carries.
+
+        Only what a needed job uploaded on another machine travels; on the
+        same machine the files are already where run-job's download reads.
+        """
+        carried = []
+        xfer = self.stage / "xfer" / self.run_id
+        for need in job.get("needs") or []:
+            with self.cond:
+                got = self.artifact_tars.get(need)
+            if got is None or got[0] == machine.label:
+                continue
+            xfer.mkdir(parents=True, exist_ok=True)
+            (xfer / f"{need}.tar.gz").write_bytes(got[1])
+            carried.append((need, self.uploads.get(need) or []))
+        if carried:
+            self.log(f"{job['id']}: carrying the artifacts of "
+                     f"{', '.join(n for n, _ in carried)} to machine {machine.label}")
+        return carried
+
+    def _unpack(self, carried):
+        """Wrapper text that puts carried artifacts into this run's store.
+
+        Runs as root before run-job. The run directory does not exist yet on a
+        machine where this is the run's first job, and one root made would
+        lock the job's uid out of writing its fragment, so whatever is made
+        here is handed to that uid (its own segment, which the stub test
+        replaces, as it cannot change owners).
+        """
+        if not carried:
+            return ""
+        run = f"{self.remote}/out/{self.tree}/{self.run_id}"
+        xfer = f"{self.tree_remote}/xfer/{self.run_id}"
+        text = f"mkdir -p {run}/artifacts || exit 1; "
+        for need, _ in carried:
+            text += f"tar -xzf {xfer}/{need}.tar.gz -C {run}/artifacts || exit 1; "
+        if self.run_as:
+            names = " ".join(f"{run}/artifacts/{shlex.quote(n)}"
+                             for _, ns in carried for n in ns)
+            text += (f"chown {self.run_as} {self.remote}/out/{self.tree} {run} "
+                     f"{run}/artifacts; chown -R {self.run_as} {names}; ")
+        return text
+
+    def _wrapper(self, job, machine, carried=()):
         """The detached job: claim it, run it, record exit code and times.
 
         The control directory sits beside the run's own out directory, not in
@@ -654,6 +726,7 @@ class CrunBackend:
                 f"mkdir -p {c} || exit 1; "
                 f"mkdir {c}/{jid}.claim 2>/dev/null || exit 0; "
                 f"echo {machine.label} > {c}/{jid}.claim/machine; "
+                f"{self._unpack(carried)}"
                 f"s=$(date +%s); {shlex.join(self._inner(job))} "
                 f"> {c}/{jid}.stdout 2> {c}/{jid}.stderr; x=$?; "
                 f"echo \"$x $s $(date +%s)\" > {c}/{jid}.exit.tmp && "
@@ -670,9 +743,21 @@ class CrunBackend:
                 f"echo \"GATES-POLL $k {jid} $(base64 -w0 < {c}/{jid}.$k)\"; done; "
                 f"[ -f {f}/{jid}.json ] && "
                 f"echo \"GATES-POLL fragment {jid} $(base64 -w0 < {f}/{jid}.json)\"; "
+                + self._artifact_probe(jid) +
                 f"elif [ -d {c}/{jid}.claim ]; then echo \"GATES-POLL running {jid}\"; "
                 f"else echo \"GATES-POLL absent {jid}\"; fi")
         return "; ".join(parts) + "; echo GATES-POLL-END"
+
+    def _artifact_probe(self, jid):
+        """The poll's line carrying a done job's uploaded artifacts, if it has any."""
+        names = self.uploads.get(jid) or []
+        if not names:
+            return ""
+        a = f"{self.remote}/out/{self.tree}/{self.run_id}/artifacts"
+        quoted = " ".join(shlex.quote(n) for n in names)
+        return (f"h=''; for n in {quoted}; do [ -d {a}/$n ] && h=\"$h $n\"; done; "
+                f"[ -n \"$h\" ] && echo \"GATES-POLL artifacts {jid} "
+                f"$(tar -czf - -C {a} $h | base64 -w0)\"; ")
 
     def _poll_once(self, machine, ids):
         """{job: state} for these jobs on one machine, or None when the poll did not get through."""
@@ -707,6 +792,10 @@ class CrunBackend:
                                "remote_seconds": int(t1) - int(t0)}
             elif kind in ("stdout", "stderr", "fragment") and jid in states:
                 states[jid][kind] = base64.b64decode(rest).decode("utf-8", "replace")
+            elif kind == "artifacts" and jid in states:
+                states[jid]["artifacts"] = base64.b64decode(rest)
+        for state in states.values():
+            state["machine"] = machine.label
         return states
 
     def _poll_loop(self):
@@ -761,7 +850,8 @@ class CrunBackend:
         with self.cond:
             self.assigned[jid] = machine
             self.states.pop(jid, None)
-        code, out, err = self._crun(self.stage, machine, self._wrapper(job, machine),
+        carried = self._stage_artifacts(job, machine)
+        code, out, err = self._crun(self.stage, machine, self._wrapper(job, machine, carried),
                                     f"launch-{jid}", detach=True, timeout=POLL_TIMEOUT)
         match = re.search(r"\bcrun-[a-z0-9]{8}\b", out + err)
         ok = code == 0 and match is not None
@@ -844,6 +934,12 @@ class CrunBackend:
         return self._collect(jid, state)
 
     def _collect(self, jid, state):
+        if "artifacts" in state:
+            with self.cond:
+                self.artifact_tars[jid] = (state["machine"], state["artifacts"])
+            self.log(f"{jid}: {len(state['artifacts'])} bytes of artifacts "
+                     f"({', '.join(self.uploads.get(jid) or [])}) kept from machine "
+                     f"{state['machine']}")
         out, err = state.get("stdout", ""), state.get("stderr", "")
         record = self.out / "crun" / f"job-{jid}.txt"
         record.write_text(f"# remote exit {state['exit']} after {state['remote_seconds']}s\n"
@@ -906,6 +1002,20 @@ class CrunBackend:
         self.log(f"crun backend: {self.polls['ok']} poll(s) answered, "
                  f"{self.polls['failed']} dropped; jobs last placed per machine: "
                  + ", ".join(f"{k} {v}" for k, v in sorted(per_machine.items())))
+
+
+def upload_names(job):
+    """The artifact names a planned job uploads, as written in gates.yml."""
+    names = []
+    for action in job["actions"]:
+        if action["kind"] == "use" and action.get("replacement") == "artifact-store-local":
+            name = (action.get("with") or {}).get("name", "")
+            if "${{" in name or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+                raise SystemExit(f"crun backend: {job['id']} uploads an artifact named "
+                                 f"{name!r}; only a literal name can be carried between "
+                                 "machines")
+            names.append(name)
+    return names
 
 
 class MachineError(Exception):
