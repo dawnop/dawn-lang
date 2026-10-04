@@ -1,0 +1,62 @@
+# A bounded function whose row is an effect variable, taken as a value
+# (issue #460).
+#
+# `list.max_by` has both a bound (`K: Ord`) and an effect variable (`!e`).
+# The checker writes an eta wrapper for any bounded function used as a value,
+# and that wrapper used to pass the dictionary but no evidence, so the callee's
+# trailing evidence slot was missing: the JVM rejected the class with an
+# operand stack underflow and cc refused the call with too few arguments.
+# Pure keys exercise the empty pack, and an effectful key reads two labels
+# through the same slot. The generic helper also makes the wrapper capture
+# a forwarded dictionary and forward its caller's effect-variable pack.
+# A callback variable absent from the declared row still needs an ABI slot;
+# its isolated handler checks that the function value's row charges it too.
+
+use std/list
+
+effect Ask {
+  fn ask() -> Int
+}
+
+effect Tell {
+  fn tell(s: String) -> Unit
+}
+
+fn key(s: String) -> Int !Ask !Tell = {
+  tell(s)
+  len(code_points(s)) + ask()
+}
+
+fn pick_all[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e = {
+  let pick: fn(List[T], fn(T) -> K !e) -> Option[T] !e = list.max_by
+  pick(xs, key)
+}
+
+fn only_io[T: Eq](x: T, body: fn() -> Int !e) -> Int !io = {
+  let _ = x == x
+  body()
+}
+
+fn run_only_io() -> Int !io = {
+  let f: fn(Int, fn() -> Int !Ask !Tell) -> Int !io !Ask !Tell = only_io
+  with handle Ask { ask() => 20 }
+  with handle Tell { tell(s) => println("only_io " ++ s) }
+  f(1, () => {
+    tell("callback")
+    ask()
+  })
+}
+
+pub fn main() -> Unit !io = {
+  let pick: fn(List[String], fn(String) -> Int) -> Option[String] = list.max_by
+  println("${pick(["a", "ccc", "bb"], s => len(code_points(s)))}")
+  let least: fn(List[Int], fn(Int) -> Int) -> Option[Int] = list.min_by
+  println("${least([3, -7, 5], x => x * x)}")
+  println("${least([], x => x)}")
+  let loud: fn(List[String], fn(String) -> Int !Ask !Tell) -> Option[String] !Ask !Tell = list.max_by
+  with handle Ask { ask() => 10 }
+  with handle Tell { tell(s) => println("key " ++ s) }
+  println("${loud(["a", "ccc", "bb"], key)}")
+  println("${pick_all(["bb", "dddd"], key)}")
+  println("${run_only_io()}")
+}

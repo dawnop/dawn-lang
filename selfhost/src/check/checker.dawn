@@ -4353,14 +4353,20 @@ pub(pkg) fn check_fn_value(
 ## A bounded function or a trait method used as a value: write the eta
 ## expansion that used to be demanded of the programmer (audit SEM-13).
 ##
-## The dictionaries are the whole of the difficulty, and the reason this
-## happens in the checker rather than in `lift_fn_value`: a bound is discharged
-## against the checker's scopes, and a bound on the *enclosing* function's type
-## parameter is discharged to that function's hidden dictionary parameter,
-## which the wrapper then has to capture. So the wrapper is opened as a lambda
-## first and the witnesses are resolved inside it. `resolve_witness` puts a
-## forwarded dictionary into every open lambda's capture list by itself, and
-## the synthesised wrapper is only one more of those.
+## The dictionaries are the reason this happens in the checker rather than in
+## `lift_fn_value`: a bound is discharged against the checker's scopes, and a
+## bound on the *enclosing* function's type parameter is discharged to that
+## function's hidden dictionary parameter, which the wrapper then has to
+## capture. So the wrapper is opened as a lambda first and the witnesses are
+## resolved inside it. `resolve_witness` puts a forwarded dictionary into every
+## open lambda's capture list by itself, and the synthesised wrapper is only
+## one more of those.
+##
+## The evidence is resolved inside the same open lambda, slot for slot as a
+## direct call lays it out (`named_evidence_args`), and for the opposite
+## reason: it is never captured. Every atom is read off the pack the wrapper's
+## own caller supplies, so the value runs under the handlers of the call that
+## runs it, not of the place it was made (#460).
 ##
 ## What comes out is an ordinary call node, so nothing downstream learns a new
 ## shape: `lower_trait_call` devirtualises a concrete subject, collapses a
@@ -4405,7 +4411,7 @@ fn eta_bounded_fn_value(
     }
     i = i + 1
   }
-  let (ips, iret, _) = fn_ty_parts(inst)
+  let (ips, iret, ieff) = fn_ty_parts(inst)
   # The parameters are the compiler's, not the source's: naming them after the
   # callee's parameters would let a wrapper shadow a module alias, and nothing
   # reads these names but a hover.
@@ -4423,30 +4429,27 @@ fn eta_bounded_fn_value(
     args = args ++ [XLocal(sid, pn, owner_off(cx, lo), owner_off(cx, hi), pt)]
     j = j + 1
   }
+  # This body is a named call, so its evidence slots follow the same layout
+  # as a direct call. Keep the lambda open while resolving them: `ev_expr`
+  # must read its caller's pack, including when no handler is in scope here.
+  let (cxe, evid, _, vinsts, _) = named_evidence_args(cx1, f, m, em, lo, hi)
+  cx1 = cxe
+  # A variable bound only in a parameter still owns an ABI slot. Charge its
+  # instance on the callable row, as a direct call does, so the eventual
+  # caller supplies that pack even when the declared row says only `!io`.
+  let wrapper_ty = TyFn(ips, iret, reduce_eff(cx1, eff_union([ieff] ++ vinsts), m))
   cx1 = pop_scope(cx1)
   let popped = cx1.frame.lambda_stack[len(cx1.frame.lambda_stack) - 1]
   let outer = list.take(cx1.frame.lambda_stack, len(cx1.frame.lambda_stack) - 1)
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: outer } }
   if not ok { return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
-  # The eta wrapper's own body is a *named* call, so the evidence it owes is
-  # per atom of the callee's ABI row, not one pack. A bounded function value
-  # with a labelled row would need that list built here; none exists (a bound
-  # and a label have never met in one signature in this tree), and building it
-  # blind would be a second, untested copy of `check_call`'s evidence block.
-  # The builtin side is uninhabited rather than merely empty, and the two
-  # halves of the reason are in different files: only `sort_by` and `bracket`
-  # have a row worth a slot (`types.nev`), and neither carries a bound, so
-  # neither reaches this wrapper -- `check_fn_value` only opens one when
-  # `nbounds > 0`, and an unbounded primitive taken as a value is an
-  # `XFnValue` that `lower.lift_fn_value` unpacks a pack for.
-  let evid: List[TExpr] = []
   let body =
     if f.is_builtin {
       XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), iret)
     } else {
       XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), iret)
     }
-  (cx1, inst, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), inst))
+  (cx1, wrapper_ty, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), wrapper_ty))
 }
 
 ## `f` used as a value with nothing to instantiate it from (#428). What is
@@ -4573,6 +4576,59 @@ test "fn values instantiate from the expected type" {
   let join_sig = map.get(bs, "join").expect("join")
   let (cx4, t4, _) = check_fn_value(cx, "join", "join", join_sig, None, 0, 4)
   assert t4 == TyFn([TyList(TyString), TyString], TyString, EPure)
+}
+
+test "bounded fn values read ordered evidence from the caller and expose ABI-only rows" {
+  var cx = push_scope(test_cx())
+  let labels = [(73, "Alpha"), (71, "Zed")]
+  for label in labels {
+    let (eid, ename) = label
+    cx = Cx { ..cx, effect_infos: map.insert(cx.effect_infos, eid,
+      EffectI { id: eid, name: ename, owner: None, audience: AWorld, ops: [], ctl: false }) }
+    let (cx1, _) = declare_evidence(cx, ev_local_name(cx, eid), TyAdt(eid, []), label_key(eid), 0, 1)
+    cx = cx1
+  }
+  let outer = EffVar("outer", 74)
+  let (cx1, _) = declare_evidence(cx, ev_var_local_name(74), erased_ev_ty(), var_key(74), 0, 1)
+  let tv = TyVar("T", 0)
+  let ev = EffVar("e", 72)
+  let row = eff_union([EIo, ELabeled(EPure, labels)])
+  # The callback's variable owns an ABI slot even though the declared row
+  # omits it. Its instance must reach the value's row and eventual caller.
+  let bounded = Sig {
+    name: "with_callback", param_tys: [tv, TyFn([], TyInt, ev)],
+    param_names: ["x", "callback"], param_defaults: [], ret: TyInt, eff: row,
+    is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [ev],
+    owner: None, trait_id: None, op_of: None, inferring: false
+  }
+  let want = TyFn([TyInt, TyFn([], TyInt, outer)], TyInt, eff_union([row, outer]))
+  let (cx2, actual, value) = check_fn_value(cx1, "with_callback", "with_callback", bounded, Some(want), 0, 1)
+  assert len(cx2.diags) == 0
+  assert actual == want
+  assert cx2.frame.used_effects == cx1.frame.used_effects
+  match value {
+    XLambda(_, _, XCallFn(_, _, _, wits, evid, _, _, _, _), captures, _, _, value_ty) -> {
+      # Existing evidence is outside the wrapper, so it must be read from the
+      # caller's pack rather than captured at the value's creation point.
+      assert captures == []
+      assert value_ty == want
+      assert wits == [WConcrete(EQ_ID, TyInt)]
+      assert len(evid) == 3
+      let origins = [LabelSlot(71), LabelSlot(73), VariableSlot(74)]
+      var i = 0
+      for argument in evid {
+        match argument {
+          XEvRead(key, origin, _, _, _) -> {
+            assert origin == origins[i]
+            assert key == evidence_role_key(origin)
+          }
+          _ -> { assert false }
+        }
+        i = i + 1
+      }
+    }
+    _ -> { assert false }
+  }
 }
 
 ## A constructor used bare as a function value: `map(xs, Some)`. Generics come
@@ -8383,25 +8439,9 @@ fn check_call(
   let (arranged_cx, arg_lets, txs2) =
     arrange_call_args(cx, cx1, s, callee, args0, slot_of, tx_slots, m, em, wits, not args_broken, lo, hi)
   cx1 = arranged_cx
-  # the evidence the callee's *written* labels need, in effect-id order. A
-  # label that arrived by instantiating an effect variable is not here: it
-  # belongs to the variable's own slot, which `evidence_var_args` fills with a
-  # pack of that instance. (It used to be left out on the different grounds
-  # that the closure the caller handed over carried its own evidence in its
-  # captures -- rule 乙, which is what this knife severed. Same list, and now
-  # for the reason the layout already said.)
-  # the callee's ABI row, which is its declared row plus the effect variables
-  # it binds -- the same list `bind_evidence` walked on the other side
-  let callee_abi = sig_abi_eff(s)
-  let (cxv, evs0, unanswered) = evidence_args(cx1, callee_abi, clo, chi)
+  let (cxv, evs, unanswered, vinsts, adropped) =
+    named_evidence_args(cx1, s, m, em, clo, chi)
   cx1 = cxv
-  # ... one per effect variable, behind them (rule 丁) ...
-  let (cxv2, vevs, vunanswered, vinsts) = evidence_var_args(cx1, callee_abi, em, clo, chi)
-  cx1 = cxv2
-  # ... and one per projection written in the row, behind those (rule 丙)
-  let (cxa2, aevs, aunanswered, adropped) = evidence_assoc_args(cx1, callee_abi, m, clo, chi)
-  cx1 = cxa2
-  let evs = evs0 ++ vevs ++ aevs
   # **Charged is what was supplied.** The declared row is not enough on its
   # own, because a declared `!io` absorbs the effect variables beside it
   # (`base_union`) and the absorbed one is exactly the slot the line above just
@@ -8418,7 +8458,7 @@ fn check_call(
   # raise site's words; leaving the label in the body's row would have
   # `verify_effects` say the same thing over again at the signature.
   cx1 = record_effect(cx1,
-    eff_drop_assocs(eff_drop(charged, unanswered ++ vunanswered ++ aunanswered), adropped),
+    eff_drop_assocs(eff_drop(charged, unanswered), adropped),
     clo, chi, callee)
   # Nothing further to record about where the labels came from. That question
   # -- written here, or brought in by instantiating an effect variable -- was
@@ -8843,6 +8883,30 @@ fn refuse_decl_eff_inst(
         "`fn f(g: fn() -> Int !" ++ vname ++ ") -> Int !" ++ vname ++ "`")
   }
   cx1
+}
+
+## Direct calls and eta wrappers share the callee's named-call ABI. Its
+## written labels come first, in effect-id order, then one pack per effect
+## variable and one per associated effect. A label introduced by substitution
+## belongs inside that variable's pack, not in another labelled slot. This
+## walks the same ABI row as `bind_evidence`, behind the trait dictionaries.
+## The remaining results let a direct call charge the supplied rows and
+## withdraw unanswered atoms. The eta wrapper keeps only the instantiated
+## variable rows: inside its open lambda `ev_expr` answers every atom with a
+## pack read, so nothing comes back unanswered or dropped there.
+fn named_evidence_args(
+  cx: Cx,
+  s: Sig,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff],
+  lo: Int,
+  hi: Int
+) -> (Cx, List[TExpr], List[Int], List[Eff], List[(String, Int, Int, String)]) = {
+  let abi = sig_abi_eff(s)
+  let (cx1, labels, unanswered) = evidence_args(cx, abi, lo, hi)
+  let (cx2, vars, vunanswered, vinsts) = evidence_var_args(cx1, abi, em, lo, hi)
+  let (cx3, assocs, aunanswered, adropped) = evidence_assoc_args(cx2, abi, m, lo, hi)
+  (cx3, labels ++ vars ++ assocs, unanswered ++ vunanswered ++ aunanswered, vinsts, adropped)
 }
 
 ## Resolve one evidence value per label written in `declared`, in effect-id

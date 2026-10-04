@@ -1,0 +1,45 @@
+# A trait method whose signature carries an effect label, taken as a value
+# (issue #460).
+#
+# A trait method is bounded on the trait's own parameter, so taking one as a
+# value goes through the same eta wrapper as any bounded function. With a
+# label in the row the wrapper owed evidence it did not pass: taken directly
+# the compiler itself panicked with an index out of bounds, and returned from
+# a generic function (where the dictionary is the caller's, forwarded) the JVM
+# failed verification and the native program crashed.
+# Values are created before the handler to keep evidence tied to invocation,
+# including the closures that capture a generic caller's dictionary.
+
+pub effect Log {
+  fn log(s: String) -> Unit
+}
+
+trait Visit[T] {
+  fn visit(x: T) -> Int !Log
+}
+
+impl Visit[Int] {
+  fn visit(x: Int) -> Int !Log = {
+    log("visit ${x}")
+    x + 1
+  }
+}
+
+impl Visit[String] {
+  fn visit(x: String) -> Int !Log = {
+    log("visit " ++ x)
+    len(code_points(x))
+  }
+}
+
+fn as_value[T: Visit]() -> fn(T) -> Int !Log = visit
+
+pub fn main() -> Unit !io = {
+  let f: fn(Int) -> Int !Log = visit
+  let h: fn(Int) -> Int !Log = as_value()
+  let k: fn(String) -> Int !Log = as_value()
+  with handle Log { log(s) => println(s) }
+  println("${f(1)}")
+  println("${h(10)}")
+  println("${k("abc")}")
+}
