@@ -30,10 +30,10 @@
 # something else, and the release, whose dawnc bytes are a function of the
 # compiler, would otherwise change without anyone choosing it.
 #
-# Where it runs: first in every gates.yml job that compiles C, and before
-# release.yml's native binary. Not yet in nightly's native-asan: clang's UBSan
-# reports one real defect in every test binary there (nightly.yml says which),
-# and that leg stays on gcc until the fix lands.
+# Where it runs: first in every gates.yml job that compiles C, before
+# release.yml's native binary, and in nightly's native-asan, where clang is
+# also the stronger sanitizer (its UBSan checks indirect call types, gcc's does
+# not; nightly.yml says what that missed).
 #
 # Why only on a GitHub runner, or where DAWN_PINNED_CC names the compiler.
 # Off a runner (a laptop), CC stays whatever the caller set and the scripts

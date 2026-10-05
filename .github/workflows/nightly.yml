@@ -304,8 +304,11 @@ jobs:
   # rather than guarding a change, so a day's delay costs little. Measured
   # 2026-10-04: 354s for the whole script on a gcc 11 box, toolchain already
   # built; locally the native driver build is about 1 minute, packages/tileir
-  # 80s, std 37s and the rest 3s to 20s each. The toolchain action adds what
-  # it adds to every job. The timeout is a runaway stop, as the header says.
+  # 80s, std 37s and the rest 3s to 20s each. On the pinned clang 18.1.3,
+  # 2026-10-05, one 16-core machine, driver build included, back to back:
+  # 317s wall (323s user) against gcc 13.3's 359s (361s user). The toolchain
+  # action adds what it adds to every job. The timeout is a runaway stop, as
+  # the header says.
   native-asan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -315,15 +318,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Not on the pinned clang (scripts/pinned-cc.sh) yet, unlike every
-      # gates.yml job that compiles C: clang's -fsanitize=undefined includes
-      # -fsanitize=function, and that reports every native test binary, std
-      # and nine packages alike, at dawn_rt.c's dawn_run_caught calling
-      # a test thunk through `void *(*)(dawn_clo *, void *)` while
-      # c/ctestrun.dawn defines it as `void *(dawn_clo *)`. That is real
-      # undefined behaviour, and the fix is in selfhost/src/c, a tile.yml
-      # path; until it lands this leg keeps the runner's gcc so that the
-      # one finding does not hide every other one behind a red night.
+      # CC = the pinned clang 18.1.3, as in every gates.yml job that compiles
+      # C (scripts/pinned-cc.sh). Here it is also the sanitizer: clang's
+      # -fsanitize=undefined includes -fsanitize=function, which checks an
+      # indirect call against the callee's type, and gcc's UBSan has no such
+      # check. That is how #502 went through this leg while it ran on gcc:
+      # dawn_rt.c called every test thunk through a pointer type the thunks
+      # were not defined with, and only clang reported it. The script's own
+      # probe fails a cc that cannot sanitize, so a runner image that loses
+      # clang-18's compiler-rt reds here rather than going quiet.
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
