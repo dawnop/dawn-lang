@@ -41,7 +41,7 @@ use check/identity
 use check/tast_positions
 use check/tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
-  tex_ty, x_lo, x_hi,
+  tex_ty, x_lo, x_hi, NO_NAME,
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
@@ -186,10 +186,13 @@ pub type SelfCtx = {
 
 ## The site of a call written at `lo..hi` whose callee's name starts at
 ## `nlo`, all three positions in the file (`tast_positions` resolved them), as
-## offsets from the declaration being lowered (core.CSite). Nothing when no
-## scheduler filed the tree: the offsets would be measured from nothing.
+## offsets from the declaration being lowered (core.CSite). Nothing for a call
+## the checker wrote for some other construct (`tast.NO_NAME`: a `with
+## handle`'s remainder, a default argument's `f$default$k`, a cell), and
+## nothing when no scheduler filed the tree: the offsets would be measured
+## from nothing.
 fn site_at(st: LSt, lo: Int, hi: Int, nlo: Int) -> CSite =
-  if st.base < 0 { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }
+  if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
   (LSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
@@ -3390,7 +3393,7 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
     self_tail: false,
     ev_env: [],
     ev_own: own
-  }, XCallBuiltin(name, args, no_wits, evid, 0, 0, ret))
+  }, XCallBuiltin(name, args, no_wits, evid, 0, 0, NO_NAME, ret))
   let f = CFun {
     name: lam,
     owner: st5.owner,
@@ -3605,7 +3608,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         Some(t) -> {
           let (st2, tv) = lower_expr(LSt { ..st1, tail: tl }, t)
           match t {
-            XJava(_, _, _, tail_ty) ->
+            XJava(_, _, _, _, tail_ty) ->
               if ty == TyUnit && tail_ty != TyUnit {
                 (st2, CBlock(ss ++ [CSDiscard(tv)], None, ty))
               } else {
@@ -3648,11 +3651,8 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st1, CTuple(vs, ty))
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
-    XCallBuiltin(name, args, wits, evid, lo, hi, ty) -> {
-      # an internal primitive is one the checker writes and refuses to
-      # anyone else (`ev_append` joining packs, a handler's cells), so the
-      # span it carries is the construct it serves and not a call
-      let site = if list.contains(internal_intrinsics(), name) { CNoSite } else { site_at(st, lo, hi, lo) }
+    XCallBuiltin(name, args, wits, evid, lo, hi, nlo, ty) -> {
+      let site = site_at(st, lo, hi, nlo)
       # first, because its trailing argument is a line's head and not the
       # failure suffix `unsite` below would fold into a message
       if name == "dbg" {
@@ -3667,7 +3667,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # a failure that carries its call site (check/tast_positions) has the
       # site folded into its message here, and is lowered as the call it
       # then is; nothing below this arm sees a site
-      match unsite(name, args, wits, evid, lo, hi, ty) {
+      match unsite(name, args, wits, evid, lo, hi, nlo, ty) {
         Some(plain) -> return lower_expr(st, plain)
         None -> ()
       }
@@ -3760,13 +3760,8 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         }
       }
     }
-    XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, ty) -> {
-      # an omitted default argument's `f$default$k(..)` carries the span of
-      # the call it was omitted from, but nothing was written for it: the
-      # written call is the `f(..)` that follows (core.CSite, one written call
-      # one site). `$` is not in the identifier lexicon, so no source call
-      # spells the name.
-      let site = if str.contains(name, "\$default\$") { CNoSite } else { site_at(st, lo, hi, lo) }
+    XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, nlo, ty) -> {
+      let site = site_at(st, lo, hi, nlo)
       match trait_id {
         Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
         None -> {
@@ -3805,7 +3800,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     XIndex(target, index, wit, _, _, ty) ->
       lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty, CNoSite)
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
-    XCallDyn(sym, _, args, evid, lo, hi, ty) ->
+    XCallDyn(sym, _, args, evid, lo, hi, nlo, ty) ->
       if is_self_sym(st, sym) {
         if tl {
           self_tail_jump(st, args)
@@ -3814,24 +3809,16 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           let (st1, vs) = lower_all(st, args)
           let clo = self_value(st1, sym).expect("self closure")
           let (st2, es) = dyn_evidence(st1, evid)
-          (st2, CCall(CDynamic(clo), vs ++ es, ty, site_at(st2, lo, hi, lo)))
+          (st2, CCall(CDynamic(clo), vs ++ es, ty, site_at(st2, lo, hi, nlo)))
         }
       } else {
         let (st1, vs) = lower_all(st, args)
         let fty = sym_ty(st1, sym, TyError)
         let (st2, es) = dyn_evidence(st1, evid)
-        (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty, site_at(st2, lo, hi, lo)))
+        (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty, site_at(st2, lo, hi, nlo)))
       }
-    XApply(target, args, evid, lo, hi, ty) -> {
-      # A `with handle` runs the rest of its block as a closure applied to
-      # nothing (`checker.check_handle`), spanning the whole construct. Until
-      # the typed tree says which calls were written (the callee-name field,
-      # docs/source-span-map-design.md section 3), that shape is how lowering
-      # tells it apart; a written `(() => e)()` loses its site to it.
-      let site = match target {
-        XLambda(_, _, _, _, _, _, _) -> if len(args) == 0 { CNoSite } else { site_at(st, lo, hi, lo) }
-        _ -> site_at(st, lo, hi, lo)
-      }
+    XApply(target, args, evid, lo, hi, nlo, ty) -> {
+      let site = site_at(st, lo, hi, nlo)
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
       let (st3, es) = dyn_evidence(st2, evid)
@@ -3846,7 +3833,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let o = match owner { Some(x) -> x, None -> st.owner }
       lift_fn_value(st, o, name, is_builtin, ty)
     }
-    XJava(call, lo, hi, ty) -> lower_java(st, call, ty, site_at(st, lo, hi, lo))
+    XJava(call, lo, hi, nlo, ty) -> lower_java(st, call, ty, site_at(st, lo, hi, nlo))
   }
 }
 
@@ -4402,6 +4389,7 @@ fn unsite(
   evid: List[TExpr],
   lo: Int,
   hi: Int,
+  nlo: Int,
   ty: Ty
 ) -> Option[TExpr] = {
   let n = if name == "panic" { 1 } else if name == "todo" { 0 } else if name == "expect" { 2 } else { -1 }
@@ -4409,23 +4397,23 @@ fn unsite(
   let written = list.take(args, n)
   let at = args[n]
   let suffix: Option[TExpr] = match at {
-    XCallBuiltin("caller", cargs, _, _, _, _, _) ->
+    XCallBuiltin("caller", cargs, _, _, _, _, _, _) ->
       match tast_positions.split_site("caller", cargs) {
         (_, Some(l)) -> Some(XStr([TSPText(" at " ++ l)], lo, lo))
         (_, None) -> None
       }
-    _ -> Some(XCallBuiltin("loc_suffix", [at], wits, [], lo, lo, TyString))
+    _ -> Some(XCallBuiltin("loc_suffix", [at], wits, [], lo, lo, NO_NAME, TyString))
   }
   match suffix {
-    None -> Some(XCallBuiltin(name, written, wits, evid, lo, hi, ty))
+    None -> Some(XCallBuiltin(name, written, wits, evid, lo, hi, nlo, ty))
     Some(sx) ->
       if name == "todo" {
         Some(XCallBuiltin("panic", [with_suffix(XStr([TSPText("not yet implemented")], lo, lo), sx)],
-          wits, evid, lo, hi, ty))
+          wits, evid, lo, hi, nlo, ty))
       } else {
         let last = n - 1
         Some(XCallBuiltin(name, list.take(written, last) ++ [with_suffix(written[last], sx)],
-          wits, evid, lo, hi, ty))
+          wits, evid, lo, hi, nlo, ty))
       }
   }
 }
@@ -5727,12 +5715,13 @@ pub fn lower_module(
 ) -> CModule =
   lower_module_full(owner, tm, traits, impls, adts, prog_fns, false).m
 
-test "a written call's site is measured from its declaration, and a default's call has none" {
+test "a written call's site is measured from its declaration, and a call nobody wrote has none" {
   let sig0 = (nm: String) => Sig {
     name: nm,
     param_tys: [],
     param_names: [],
     param_defaults: [],
+    caller_params: [],
     ret: TyInt,
     eff: EPure,
     is_builtin: false,
@@ -5745,8 +5734,8 @@ test "a written call's site is measured from its declaration, and a default's ca
     inferring: false
   }
   let none_tid: Option[Int] = None
-  let call = (nm: String, lo: Int, hi: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, TyInt)
-  let body = XBinary(BAdd, call("g", 120, 125), call("g\$default\$0", 130, 135), None, 0, 0, 0, 0, TyInt)
+  let call = (nm: String, lo: Int, hi: Int, nlo: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, nlo, TyInt)
+  let body = XBinary(BAdd, call("g", 118, 125, 120), call("g\$default\$0", 130, 135, NO_NAME), None, 0, 0, 0, 0, TyInt)
   let f = TFun {
     name: "f",
     sig: sig0("f"),
@@ -5774,7 +5763,7 @@ test "a written call's site is measured from its declaration, and a default's ca
   }
   let (origin, written, omitted) = sites_of(f)
   assert origin == "Nf:f"
-  assert written == CAt(20, 25, 20)
+  assert written == CAt(18, 25, 20)
   assert omitted == CNoSite
   # a tree no scheduler filed records nothing
   let (_, unfiled, _) = sites_of(TFun { ..f, decl: "", base: -1 })

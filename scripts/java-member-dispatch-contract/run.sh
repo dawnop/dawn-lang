@@ -289,7 +289,7 @@ elif name == "drop-lsp-children":
         # is a mutant neither of them owns. Without this arm an XJava call
         # falls through to walk_apply_value, whose shapes do not match, and
         # every type inside the call is dropped.
-        """            Some(XJava(call, _, _, _)) -> {
+        """            Some(XJava(call, _, _, _, _)) -> {
               match call.target {
                 Some(tt) -> { q = walk_e(qc, q, recv, Some(tt)) }
                 None -> { q = walk_e(qc, q, recv, None) }

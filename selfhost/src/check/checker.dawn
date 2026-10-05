@@ -33,7 +33,7 @@ use front/ast.{
   VisPkg, vis_exported
 }
 use check/tast.{
-  TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
+  NO_NAME, TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
@@ -4477,9 +4477,9 @@ fn eta_bounded_fn_value(
   if not ok { return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi))) }
   let body =
     if f.is_builtin {
-      XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), iret)
+      XCallBuiltin(name, args, wits, evid, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret)
     } else {
-      XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), iret)
+      XCallFn(f.owner, emitted_fn_name(f, name), args, wits, evid, f.trait_id, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, iret)
     }
   (cx1, wrapper_ty, XLambda(psyms, pnames, body, popped.captures, owner_off(cx, lo), owner_off(cx, hi), wrapper_ty))
 }
@@ -4590,7 +4590,7 @@ test "fn values instantiate from the expected type" {
       # nothing to capture: the witness is settled at `Int`, not forwarded
       assert len(caps) == 0
       match body {
-        XCallBuiltin(bn, bargs, bwits, _, _, _, _) -> {
+        XCallBuiltin(bn, bargs, bwits, _, _, _, _, _) -> {
           assert bn == "sortish"
           assert len(bargs) == 1
           assert bwits == [WConcrete(EQ_ID, TyInt)]
@@ -4640,7 +4640,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   assert actual == want
   assert cx2.frame.used_effects == cx1.frame.used_effects
   match value {
-    XLambda(_, _, XCallFn(_, _, _, wits, evid, _, _, _, _), captures, _, _, value_ty) -> {
+    XLambda(_, _, XCallFn(_, _, _, wits, evid, _, _, _, _, _), captures, _, _, value_ty) -> {
       # Existing evidence is outside the wrapper, so it must be read from the
       # caller's pack rather than captured at the value's creation point.
       assert captures == []
@@ -5876,7 +5876,7 @@ fn is_list_ty(t: Ty) -> Bool =
 
 fn is_java_node(x: TExpr) -> Bool =
   match x {
-    XJava(_, _, _, _) -> true
+    XJava(_, _, _, _, _) -> true
     _ -> false
   }
 
@@ -6378,7 +6378,7 @@ fn cell_evs() -> List[TExpr] = []
 ## rebuilt in place or copied. `cell_take_ok` is where the conditions are.
 fn cell_read(cx: Cx, id: Int, name: String, ct: Ty, take: Bool, lo: Int, hi: Int) -> TExpr = {
   let prim = if take { "cell_take" } else { "cell_get" }
-  XCallBuiltin(prim, [cell_local(cx, id, name, lo, hi)], cell_wits(), cell_evs(), owner_off(cx, lo), owner_off(cx, hi), ct)
+  XCallBuiltin(prim, [cell_local(cx, id, name, lo, hi)], cell_wits(), cell_evs(), owner_off(cx, lo), owner_off(cx, hi), NO_NAME, ct)
 }
 
 ## One write of a cell. The superseded value is the primitive's problem, not
@@ -6386,11 +6386,11 @@ fn cell_read(cx: Cx, id: Int, name: String, ct: Ty, take: Bool, lo: Int, hi: Int
 ## on the JVM.
 fn cell_write(cx: Cx, id: Int, name: String, v: TExpr, lo: Int, hi: Int) -> TExpr =
   XCallBuiltin("cell_set", [cell_local(cx, id, name, lo, hi), v], cell_wits(), cell_evs(),
-    owner_off(cx, lo), owner_off(cx, hi), TyUnit)
+    owner_off(cx, lo), owner_off(cx, hi), NO_NAME, TyUnit)
 
 ## Making the slot: evaluated once, where the handler is installed.
 fn cell_new(cx: Cx, init: TExpr, lo: Int, hi: Int) -> TExpr =
-  XCallBuiltin("cell_new", [init], cell_wits(), cell_evs(), owner_off(cx, lo), owner_off(cx, hi), erased_cell_ty())
+  XCallBuiltin("cell_new", [init], cell_wits(), cell_evs(), owner_off(cx, lo), owner_off(cx, hi), NO_NAME, erased_cell_ty())
 
 ## The cells of one installation, bound into the scope the caller has already
 ## pushed, with the `TSLet` that makes each slot.
@@ -6760,7 +6760,7 @@ fn check_handle(
       cxr0 = cxr
       let (_, rret, reff0) = fn_ty_parts(rt)
       let (cxr1, revs0, _) = evidence_pack(cxr0, reff0, false, lo, hi)
-      let rcall = XApply(rx, [], [revs0], owner_off(cx, lo), owner_off(cx, hi), rret)
+      let rcall = XApply(rx, [], [revs0], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret)
       return (pop_scope(cxr1), rret, XBlock(cstmts, Some(rcall), owner_off(cx, lo), owner_off(cx, hi), rret))
     }
   }
@@ -6915,9 +6915,9 @@ fn check_handle(
   let call =
     if has_ctl {
       XCallBuiltin("ctl_run", [XInt(hid, owner_off(cx, lo), owner_off(cx, hi)), rx, revs], ctl_wits(), ctl_evs(),
-        owner_off(cx, lo), owner_off(cx, hi), rret)
+        owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret)
     } else {
-      XApply(rx, [], [revs], owner_off(cx, lo), owner_off(cx, hi), rret)
+      XApply(rx, [], [revs], owner_off(cx, lo), owner_off(cx, hi), NO_NAME, rret)
     }
   # the slots are made before the record that holds the arms: an arm closes
   # over the cells, so they have to exist before the closure does. A control
@@ -7216,7 +7216,7 @@ fn ctl_wrapper(
   cx1 = pop_scope(cx1)
   let body = XCallBuiltin("ctl_yield",
     [XInt(hid, owner_off(cx, lo), owner_off(cx, hi)), XLocal(arm_sym, arm_name, owner_off(cx, lo), owner_off(cx, hi), arm_ty)] ++ pargs,
-    ctl_wits(), ctl_evs(), owner_off(cx, lo), owner_off(cx, hi), fret)
+    ctl_wits(), ctl_evs(), owner_off(cx, lo), owner_off(cx, hi), NO_NAME, fret)
   (cx1, XLambda(psyms, pnames, body, [arm_sym], owner_off(cx, lo), owner_off(cx, hi), TyFn(fptys, fret, EPure)))
 }
 
@@ -7533,7 +7533,7 @@ fn check_apply(
   cx1 = cxe
   cx1 = record_effect(cx1, eff_drop(feff, unanswered), e_lo(target), e_hi(target),
     "the applied function")
-  (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), fret))
+  (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, e_lo(target)), fret))
 }
 
 # ---- blocks and statements ----
@@ -8143,12 +8143,12 @@ fn default_call(
     # the constant (`tast_positions`), spanning the call it is the site of
     let no_wits: List[WitRef] = []
     let no_evs: List[TExpr] = []
-    return XCallBuiltin("caller", [], no_wits, no_evs, owner_off(cx, lo), owner_off(cx, hi), ty_loc())
+    return XCallBuiltin("caller", [], no_wits, no_evs, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, ty_loc())
   }
   let none_tid: Option[Int] = None
   let pty = reduce_instantiated(cx, subst(s.param_tys[idx], m, em), m)
   XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), prefix, wits, [], none_tid,
-    owner_off(cx, lo), owner_off(cx, hi), pty)
+    owner_off(cx, lo), owner_off(cx, hi), NO_NAME, pty)
 }
 
 ## The arguments of a signature call in parameter order, and the `let`s that
@@ -8650,7 +8650,7 @@ fn check_call(
   # and both handed a closure a pack with nothing in it, so a labelled closure
   # through either was `ev_get`'s panic on a program that checks clean.
   let node = if s.is_builtin {
-    XCallBuiltin(callee, txs2, wits, evs, owner_off(cx, lo), owner_off(cx, hi), ret)
+    XCallBuiltin(callee, txs2, wits, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret)
   } else {
     match s.op_of {
       # an operation call is a field read off the evidence plus a closure
@@ -8669,9 +8669,9 @@ fn check_call(
         let env_idx = ev_arity - 1
         let env = XField(recv, env_idx, owner_off(cx, clo), owner_off(cx, chi), erased_ev_ty())
         XApply(XField(recv, idx, owner_off(cx, clo), owner_off(cx, chi), TyFn(s.param_tys, s.ret, EPure)), txs2,
-          [env], owner_off(cx, lo), owner_off(cx, hi), ret)
+          [env], owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret)
       }
-      None -> XCallFn(s.owner, emitted_fn_name(s, callee), txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), ret)
+      None -> XCallFn(s.owner, emitted_fn_name(s, callee), txs2, wits, evs, s.trait_id, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), ret)
     }
   }
   let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), owner_off(cx, lo), owner_off(cx, hi), ret) } else { node }
@@ -8766,7 +8766,7 @@ fn check_local_value_call(
   let (cxe, evs, unanswered) = dyn_evidence_args(cx1, leff, clo, chi)
   cx1 = cxe
   cx1 = record_effect(cx1, eff_drop(leff, unanswered), clo, chi, callee)
-  (cx1, lret, XCallDyn(sid, callee, txs, evs, owner_off(cx, lo), owner_off(cx, hi), lret))
+  (cx1, lret, XCallDyn(sid, callee, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, clo), lret))
 }
 
 ## Which parameter each argument of a signature call fills, and the two per-
@@ -9407,7 +9407,7 @@ fn evidence_pack(cx: Cx, inst: Eff, report: Bool, lo: Int, hi: Int) -> (Cx, TExp
     var i = len(envs) - 1
     while i > 0 {
       i = i - 1
-      tail = XCallBuiltin("ev_append", [envs[i], tail], no_wits, no_ev, owner_off(cx, lo), owner_off(cx, hi), erased_ev_ty())
+      tail = XCallBuiltin("ev_append", [envs[i], tail], no_wits, no_ev, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, erased_ev_ty())
     }
   }
   var acc = tail
@@ -10894,7 +10894,7 @@ fn check_java_call(
     # .new returns T — a constructor never returns null; a constructed
     # java.lang.String is an ordinary Dawn String
     let rt = if cls.fqcn == "java.lang.String" { TyString } else { TyJava(cls.fqcn, cls.display) }
-    return (cx1, rt, XJava(call, owner_off(cx, lo), owner_off(cx, hi), rt))
+    return (cx1, rt, XJava(call, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, nlo), rt))
   }
   var matching: List[JMethod] = []
   let methods = cx1.jsig.methods_of(cls.fqcn)
@@ -10991,7 +10991,7 @@ fn check_java_call(
     nlo: owner_off(cx, nlo),
     nhi: owner_off(cx, nhi)
   }
-  (cx1, rt, XJava(call, owner_off(cx, lo), owner_off(cx, hi), rt))
+  (cx1, rt, XJava(call, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, nlo), rt))
 }
 
 ## Is `target` a bare java class name (a nullary ctor spelling that resolves to a
@@ -11053,7 +11053,7 @@ fn check_java_static_field(
         nlo: owner_off(cx, flo),
         nhi: owner_off(cx, fhi)
       }
-      (cx2, ty, XJava(call, owner_off(cx, lo), owner_off(cx, hi), ty))
+      (cx2, ty, XJava(call, owner_off(cx, lo), owner_off(cx, hi), NO_NAME, ty))
     }
   }
 }
@@ -11306,7 +11306,7 @@ fn check_method_call(
               let (cxe, evs, unanswered) = dyn_evidence_args(cx1, feff, nlo, nhi)
               cx1 = cxe
               cx1 = record_effect(cx1, eff_drop(feff, unanswered), nlo, nhi, name)
-              return (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), fret))
+              return (cx1, fret, XApply(fx, txs, evs, owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, nlo), fret))
             }
             _ -> ()
           }
@@ -11837,7 +11837,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     XCallFn(_, _, gargs, gwits, ..) -> {
       assert gwits == [WConcrete(EQ_ID, TyInt)]
       match gargs[0] {
-        XCallFn(_, dn2, dargs2, dwits2, _, _, _, _, dty2) -> {
+        XCallFn(_, dn2, dargs2, dwits2, _, _, _, _, _, dty2) -> {
           assert dn2 == "hold\$default\$0"
           assert len(dargs2) == 0
           assert dwits2 == [WConcrete(EQ_ID, TyInt)]
@@ -14696,7 +14696,7 @@ test "in main the same diagnostic offers the handler alone" {
 ## The evidence arguments of the single named call a test function's body is.
 fn ev_args_of(f: TFun) -> List[TExpr] =
   match f.body {
-    XCallFn(_, _, _, _, evs, _, _, _, _) -> evs
+    XCallFn(_, _, _, _, evs, _, _, _, _, _) -> evs
     _ -> []
   }
 
@@ -14732,7 +14732,7 @@ fn local_sym(t: TExpr) -> Int =
 ## makes "no join here" assertable -- `local_sym` of a join is not a local.
 fn append_args(t: TExpr) -> (TExpr, TExpr) =
   match t {
-    XCallBuiltin(name, args, _, _, _, _, ty) -> {
+    XCallBuiltin(name, args, _, _, _, _, _, ty) -> {
       if name != "ev_append" || len(args) != 2 {
         panic("not an ev_append call")
       }
@@ -15014,17 +15014,17 @@ fn tast_prims(e: TExpr) -> List[String] =
       for a in written { out = out ++ tast_prims(a) }
       out
     }
-    XCallBuiltin(n, args, _, _, _, _, _) -> {
+    XCallBuiltin(n, args, _, _, _, _, _, _) -> {
       var out = [n]
       for a in args { out = out ++ tast_prims(a) }
       out
     }
-    XApply(t, args, _, _, _, _) -> {
+    XApply(t, args, _, _, _, _, _) -> {
       var out = tast_prims(t)
       for a in args { out = out ++ tast_prims(a) }
       out
     }
-    XCallFn(_, _, args, _, _, _, _, _, _) -> {
+    XCallFn(_, _, args, _, _, _, _, _, _, _) -> {
       var out: List[String] = []
       for a in args { out = out ++ tast_prims(a) }
       out
@@ -15083,12 +15083,12 @@ fn tast_lets(e: TExpr) -> List[String] =
       }
     }
     XLambda(_, _, body, _, _, _, _) -> tast_lets(body)
-    XApply(t, args, _, _, _, _) -> {
+    XApply(t, args, _, _, _, _, _) -> {
       var out = tast_lets(t)
       for a in args { out = out ++ tast_lets(a) }
       out
     }
-    XCallBuiltin(_, args, _, _, _, _, _) -> {
+    XCallBuiltin(_, args, _, _, _, _, _, _) -> {
       var out: List[String] = []
       for a in args { out = out ++ tast_lets(a) }
       out
@@ -15120,10 +15120,10 @@ fn ctl_wrapper_captures(e: TExpr) -> List[Int] =
     }
     XLambda(_, _, body, caps, _, _, _) ->
       match body {
-        XCallBuiltin(n, _, _, _, _, _, _) -> if n == "ctl_yield" { caps } else { [] }
+        XCallBuiltin(n, _, _, _, _, _, _, _) -> if n == "ctl_yield" { caps } else { [] }
         _ -> ctl_wrapper_captures(body)
       }
-    XApply(t, args, _, _, _, _) -> {
+    XApply(t, args, _, _, _, _, _) -> {
       var out = ctl_wrapper_captures(t)
       for a in args { out = out ++ ctl_wrapper_captures(a) }
       out
@@ -16083,7 +16083,7 @@ test "a local declaration shadows a prelude trait method rather than colliding" 
     for tf in tm.fns {
       if tf.name == "f" {
         match tf.body {
-          XCallFn(_, cn, _, _, _, tid, _, _, _) -> {
+          XCallFn(_, cn, _, _, _, tid, _, _, _, _) -> {
             assert cn == n
             assert tid == None
           }

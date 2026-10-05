@@ -11,9 +11,9 @@ makes, and nothing else:
   absolute       lowering stores file positions instead of declaration
                  offsets, so a site is placed one declaration base too far
                  (check.py's sound rule);
-  nlo            the callee-name start points somewhere other than where the
-                 rule in force says (check.py's NLO rule; while NLO is "stub"
-                 that is the call's own start);
+  nlo            a module-qualified call `m.f(x)` takes the call's start for
+                 its callee-name start instead of where `f` is written
+                 (check.py's sound rule, the name half);
   rc-drops-site  the Perceus pass rebuilds a call without the site it had,
                  which only a listing taken after rc can see (check.py's
                  complete rule);
@@ -31,19 +31,20 @@ from pathlib import Path
 import sys
 
 LOWER = "selfhost/src/ir/lower.dawn"
+CHECKER = "selfhost/src/check/checker.dawn"
 RC = "selfhost/src/c/rc.dawn"
 DUMP = "selfhost/src/ir/coredump.dawn"
 
 MUTATIONS = {
     "absolute": ((
         LOWER,
-        "if st.base < 0 { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }",
-        "if st.base < 0 { CNoSite } else { CAt(lo, hi, nlo) }",
+        "if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }",
+        "if st.base < 0 || nlo == NO_NAME { CNoSite } else { CAt(lo, hi, nlo) }",
     ),),
     "nlo": ((
-        LOWER,
-        """      let site = if str.contains(name, "\\$default\\$") { CNoSite } else { site_at(st, lo, hi, lo) }""",
-        """      let site = if str.contains(name, "\\$default\\$") { CNoSite } else { site_at(st, lo, hi, hi - 1) }""",
+        CHECKER,
+        """    Some(s) -> check_call(cx1, name, args0, expected, None, Some(s), nlo, nhi, lo, hi)""",
+        """    Some(s) -> check_call(cx1, name, args0, expected, None, Some(s), lo, nhi, lo, hi)""",
     ),),
     "rc-drops-site": ((
         RC,

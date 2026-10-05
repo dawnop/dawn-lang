@@ -14,7 +14,9 @@ whole Core pipeline (rc included) has run, runs `dawn parse` on the same
 file, and holds the two to three rules:
 
   sound      every site's [lo, hi) is exactly one parser call node's span, and
-             its nlo is that node's callee name start (NLO below);
+             its nlo is that node's callee name start: the `name@` of a
+             method call, the `field@` of an applied field, otherwise the
+             start of an application's callee expression;
   injective  no two sites name the same call node;
   complete   every parser call node in the checked functions has a site,
              except the kinds listed in EXCUSED, each for a stated reason.
@@ -50,12 +52,6 @@ DAWN_BIN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
 DAWN = ["java", "-Xss512m", "-Xmx2g", "-jar", DAWN_BIN] if DAWN_BIN.endswith(".jar") else [DAWN_BIN]
 KERNELS = ROOT / "scripts" / "tile-golden" / "kernels.dawn"
 
-# Where a site's nlo must point. The typed tree does not carry the callee
-# name's position yet (the five call nodes get an `nlo` field once the L4
-# caller() work has landed; design doc section 3), so lowering stands the call's
-# own start in for it, and this says so instead of letting the rule pass by
-# accident. "parser" is the rule proper: nlo is the parser's name start.
-NLO = "stub"
 
 # (source, module listing, functions to check or None for all)
 CASES = {
@@ -135,6 +131,10 @@ def callee(n: Node):
         return n.text.split(" ")[1], int(m.group(1))
     head = n.kids[0]
     name = head.text.split(" ")[1] if head.kind in ("Var", "Ctor") else None
+    if head.kind == "FieldAccess":
+        # `(r.f)(x)`: the callee is the field, named where the field is
+        m = re.search(r"field@(\d+)\.\.(\d+)", head.text)
+        return head.text.split(" ")[1], int(m.group(1))
     return name, head.lo
 
 
@@ -208,10 +208,9 @@ def check(name: str, source: Path, fns, rows: list, tops: list) -> list:
         # itself) cannot happen for calls; take the innermost if it ever does
         t, c = hits[-1]
         _, nlo = callee(c)
-        want = c.lo if NLO == "stub" else nlo
-        if r["nlo"] != want:
+        if r["nlo"] != nlo:
             problems.append(f"{name}: site {r['lo']}..{r['hi']} ({r['what']}) has its name at {r['nlo']}, "
-                            f"expected {want} ({NLO})")
+                            f"expected {nlo}")
         key = (c.lo, c.hi)
         if key in claimed:
             problems.append(f"{name}: call {c.text} has two sites: {claimed[key]['what']} and {r['what']}")
