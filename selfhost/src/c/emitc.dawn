@@ -703,7 +703,7 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
     Some(sym) -> return (st, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
     None -> ()
   }
-  let sym = "dawn_const_${to_string(len(st.cdefs))}"
+  let sym = const_symbol(len(st.cdefs))
   var b = line(CSt { ..st, out: [], ind: 1 }, "static void* c = NULL;")
   b = push(line(b, "if (c == NULL) {"))
   let (b1, expr) = emit_const_value(b, v)
@@ -711,7 +711,10 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
   b2 = line(b2, "dawn_immortal(c);")
   b2 = line(pop(b2), "}")
   b2 = line(b2, "return c;")
-  let body = "static void* " ++ sym ++ "(void) {\n" ++ join(b2.out, "") ++ "}\n\n"
+  # external linkage, not `static`: the builder is defined once, in the first
+  # translation unit, and called from whichever unit holds the body that
+  # reads the constant (see `emit_units`)
+  let body = "void* " ++ sym ++ "(void) {\n" ++ join(b2.out, "") ++ "}\n\n"
   (CSt {
     ..st,
     tmp: b2.tmp,
@@ -719,6 +722,11 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
     cmap: map.insert(st.cmap, full, sym)
   }, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
 }
+
+## The symbol of the `i`th constant builder, in creation order. One spelling for
+## the definition `const_builder` writes and the declaration `emit_units` puts
+## in the shared head.
+fn const_symbol(i: Int) -> String = "dawn_const_${to_string(i)}"
 
 ## A Float as a C expression.
 ##
@@ -1650,7 +1658,9 @@ fn dict_line(d: CDictDef) -> String = {
   }
   # the argument half is written out rather than left to default
   # initialisation: the C backend builds with -Werror=missing-field-initializers
-  "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
+  # external linkage, like the constant builders: one unit defines it, every
+  # unit sees the `extern` declaration in the shared head
+  "dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
     to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };"
 }
 
@@ -2453,11 +2463,7 @@ pub fn test_name(idx: Int) -> String = "dawn\$test\$${to_string(idx)}"
 
 pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(idx))
 
-## Everything the translation unit needs except an entry point: the tables,
-## the declarations, the dictionaries and every function body. Two callers
-## finish it differently -- `emit_program` writes the program's own `main`,
-## and `dawn test` on this backend appends a generated runner instead.
-## What this translation unit may leave out: the functions and dictionaries a
+## What the program's C may leave out: the functions and dictionaries a
 ## chain of calls from the program's own modules cannot reach (ir/reach).
 ## `None` prunes nothing, which is what `dawn test --stdlib` hands over --
 ## there is no user module to root a walk at, and std's own tests are the
@@ -2474,6 +2480,62 @@ fn dict_kept(live: Option[Live], key: String) -> Bool =
     Some(l) -> reach.dict_live(l, key)
   }
 
+## The line that separates two translation units of one program
+## (docs/c-tu-split-design.md §5.1). `cdriver.split` cuts the text only at a
+## line that is exactly this, and nothing else the emitter writes can be: a
+## body carries no comments, and a string literal stays on one line because
+## `c_escape` turns a newline into `\n` and opens the line with indentation.
+pub fn tu_marker(k: Int, n: Int) -> String = "/* dawn:tu ${to_string(k)} of ${to_string(n)} */"
+
+## The bytes of function body one translation unit is sized for, and the most
+## units a program is cut into (docs/c-tu-split-design.md §5.2). Measured, not
+## chosen: on a 4-core runner sixteen units of the compiler beat eight, and
+## past sixteen the shared head every unit re-parses starts to show.
+const TU_BYTES: Int = 1500000
+
+const TU_MAX: Int = 16
+
+## How many translation units a program with `body_bytes` of function bodies is
+## cut into. A function of the program alone, never of the machine: the count
+## is written into the text, so the same source has to give the same C on
+## every host or the fixpoint's byte comparisons stop meaning anything. How
+## many of the units compile at once is the builder's business.
+pub fn tu_count(body_bytes: Int) -> Int = {
+  let k = (body_bytes + TU_BYTES - 1) / TU_BYTES
+  if k < 1 { 1 } else if k > TU_MAX { TU_MAX } else { k }
+}
+
+## The C is ASCII apart from what `c_escape` has already spelled in octal, so
+## bytes are what `cc` reads; asked of the UTF-8 encoding rather than counted
+## in code points because that is the cheap question on both backends.
+fn out_bytes(lines: List[String]) -> Int = {
+  var n = 0
+  for l in lines { n = n + bytes.len(bytes.utf8(l)) }
+  n
+}
+
+## Everything the program needs except an entry point, as one text that is
+## also K translation units (docs/c-tu-split-design.md §5.1):
+##
+##   the shared head   includes, every prototype, an `extern` line per
+##                     dictionary and constant builder
+##   unit 0            the Unicode tables, the dictionaries, the constant
+##                     builders, then the first run of function bodies
+##   unit 1 .. K-1     the following runs of bodies, in emission order
+##
+## with `tu_marker` lines between them. Read whole it is still one legal
+## translation unit -- an `extern` declaration followed by its definition is
+## plain C -- so everything that compiles the text as one file is unaffected;
+## `cdriver.split` is what turns it into K files. The cut is contiguous and
+## by function: each body goes to the unit its starting byte falls in when
+## the bodies are laid end to end and divided K ways. A module is not the
+## atom: check/checker alone is 15% of the compiler's bodies and would set
+## the floor (design §4.1).
+##
+## Two callers finish the text differently -- `emit_program` writes the
+## program's own `main`, and `dawn test` on this backend appends a generated
+## runner instead. Either lands in the last unit, and needs nothing from the
+## others that the head does not declare.
 fn emit_units(
   units: List[EmitMod],
   u: TableUse,
@@ -2503,11 +2565,14 @@ fn emit_units(
   # int and truncate the answer -- a wrong result, and only a warning.
   st = line(st, "#include <math.h>")
   st = line(st, "")
+  let preamble = st.out
+  st = CSt { ..st, out: [] }
   # Which tables carry rows is `u`'s answer (reach.dawn). Unlike the JVM,
   # `parse` funds the space set here: the C parsers strip leading and
   # trailing whitespace with it (dawn_str_trim_span), where the JVM answers
   # with `String.strip`. And `char_is_alnum` is letter-or-digit, so it funds
-  # both of those.
+  # both of those. They are definitions, so they go in unit 0 and not the
+  # head; dawn_rt.h already declares them for every other reader.
   st = emit_case_table(st, "dawn_upper_ranges", unicode_case.upper(), u.str_upper)
   st = line(st, "")
   st = emit_case_table(st, "dawn_lower_ranges", unicode_case.lower(), u.str_lower)
@@ -2521,6 +2586,8 @@ fn emit_units(
     st = emit_cp_table(st, name, rs, want)
     st = line(st, "")
   }
+  let tables = st.out
+  st = CSt { ..st, out: [] }
 
   # C needs declarations before use; Dawn does not order top-level functions
   for u in units {
@@ -2534,11 +2601,13 @@ fn emit_units(
     }
   }
   st = line(st, "")
+  let protos = st.out
+  st = CSt { ..st, out: [] }
 
-  # One translation unit for the whole program, so a dictionary two modules
-  # both need would be defined twice under the same symbol. The JVM dedupes by
-  # the same key (emit.dawn skips one its Gen already carries), but there the
-  # scope is a class, and a class is a module -- which is why only C sees it.
+  # One program, so a dictionary two modules both need would be defined twice
+  # under the same symbol. The JVM dedupes by the same key (emit.dawn skips one
+  # its Gen already carries), but there the scope is a class, and a class is a
+  # module -- which is why only C sees it.
   #
   # Every module that needs `Eq[String]` lowers its own copy of the slot
   # function, so the two definitions are not textually equal: they differ in
@@ -2576,26 +2645,31 @@ fn emit_units(
   # the copy `reach.dict_owners` picked rather than from the first one met:
   # which module's slot bodies the program links against must not depend on
   # the order std happens to load in (issue #69).
+  var dict_decls: List[String] = []
   for k in dict_order {
     if dict_kept(live, k) {
       match map.get(chosen, k) {
-        Some(d) -> { st = line(st, dict_line(d)) }
+        Some(d) -> {
+          st = line(st, dict_line(d))
+          dict_decls = dict_decls ++ ["extern dawn_dict " ++ dict_symbol(d.key) ++ ";\n"]
+        }
         None -> ()
       }
     }
   }
   st = line(st, "")
+  let dicts = st.out
 
-  # The function bodies go into their own buffer, because a body may ask for
-  # a constant builder and C wants the builder defined first. Emitting them
-  # apart and splicing is the whole of the ordering story: `const_builder`
-  # collects into `st.cdefs` while the bodies are written, and the two are
-  # joined below in the order C needs. The alternative -- a pre-pass over
-  # every Core body to find the constants first -- would walk the program
-  # twice to learn what emitting it already says.
-  let head = st.out
-  st = CSt { ..st, out: [] }
-
+  # The function bodies are emitted one at a time into an empty transcript, so
+  # each one's size is known for the cut. That is also the ordering story for
+  # the constant builders: a body may ask for one, `const_builder` collects it
+  # into `st.cdefs` while the bodies are written, and they are spliced in ahead
+  # of every body below. The alternative -- a pre-pass over every Core body to
+  # find the constants first -- would walk the program twice to learn what
+  # emitting it already says.
+  var bodies: List[List[String]] = []
+  var sizes: List[Int] = []
+  var total = 0
   for u in units {
     # a const is resolved in its declaring module, so the maps travel with it;
     # the dictionary symbols are unioned unit-wide because a lifted lambda's
@@ -2613,18 +2687,51 @@ fn emit_units(
     }
     for f in u.m.fns {
       if not f.is_test && fn_kept(live, f) {
+        st = CSt { ..st, out: [] }
         st = emit_fn(st, f)
         st = line(st, "")
         if is_lifted(f) {
           st = emit_adapter(st, f)
           st = line(st, "")
         }
+        let n = out_bytes(st.out)
+        bodies = bodies ++ [st.out]
+        sizes = sizes ++ [n]
+        total = total + n
       }
     }
   }
-  st = CSt { ..st, out: head ++ st.cdefs ++ st.out }
 
-  st
+  let nunits = tu_count(total)
+  var head: List[String] = preamble ++ protos ++ dict_decls
+  var i = 0
+  while i < len(st.cdefs) {
+    head = head ++ ["void* " ++ const_symbol(i) ++ "(void);\n"]
+    i = i + 1
+  }
+  # the prototypes already end in a blank line; the declarations get their own
+  if len(dict_decls) > 0 || len(st.cdefs) > 0 { head = head ++ ["\n"] }
+  var out = head ++ [tu_marker(0, nunits) ++ "\n"] ++ tables ++ dicts ++ st.cdefs
+  var seg = 0
+  var acc = 0
+  var j = 0
+  while j < len(bodies) {
+    # the unit this body's first byte falls in; `total` is positive whenever
+    # there is a body to place
+    let k = acc * nunits / total
+    while seg < k {
+      seg = seg + 1
+      out = out ++ [tu_marker(seg, nunits) ++ "\n"]
+    }
+    out = out ++ bodies[j]
+    acc = acc + sizes[j]
+    j = j + 1
+  }
+  while seg < nunits - 1 {
+    seg = seg + 1
+    out = out ++ [tu_marker(seg, nunits) ++ "\n"]
+  }
+  CSt { ..st, out: out }
 }
 
 pub fn emit_program(

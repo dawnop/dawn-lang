@@ -51,7 +51,7 @@ fi
 
 for order in late early; do
   "$root/bin/dawn" __emitc --std "$work/std-$order" "$prog" -o "$work/$order.c" > /dev/null
-  grep '^static dawn_dict ' "$work/$order.c" > "$work/$order.dicts" || true
+  grep '^dawn_dict ' "$work/$order.c" > "$work/$order.dicts" || true
 done
 
 if ! diff -u "$work/late.dicts" "$work/early.dicts" > "$work/d.txt"; then
