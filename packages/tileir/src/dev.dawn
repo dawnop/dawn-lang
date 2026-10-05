@@ -3331,6 +3331,22 @@ pub fn broadcast[D](t: Tile[D], shape: List[Int]) -> Tile[D] !Dev = called("broa
   r
 })
 
+## `t` with its lanes regrouped into `shape`, in row-major order: the lanes
+## are read off `t` row by row and laid into `shape` row by row, which is
+## Tile IR's `reshape`. `shape` holds as many lanes as `t` and every
+## dimension is a power of two; the recording refuses anything else. This
+## is how a tile meets a cell of another rank: a `[T, T]` product is stored
+## into a `[1, T, T]` cell as `store_cell(o, reshape(acc, [1, T, T]))`.
+## Adding or dropping a dimension of length 1 moves no lane; regrouping the
+## others may cost data movement the compiler chooses.
+pub fn reshape[D](t: Tile[D], shape: List[Int]) -> Tile[D] !Dev = called("reshape", () => {
+  let h: Int = t
+  let (dtype, from) = t_shape_of(h)
+  let one = list.fold(shape, 1, (acc, n) => acc * n) == 1
+  let r: Tile[D] = if len(from) == 0 && one { t_spread(dtype, shape, h) } else { t_reshape(dtype, from, shape, h) }
+  r
+})
+
 # A reduction of `t` along `dim` by one of the three named folds.
 fn fold_along[D](t: Tile[D], kind: String, dim: Int, keepdims: Bool) -> Tile[D] !Dev = {
   let h: Int = t
