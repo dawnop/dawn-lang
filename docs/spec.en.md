@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 49c1a70fc3bc748d -->
+<!-- doc-check: translation-of docs/spec.md @ fa92ddfecc0d5ac6 -->
 
 # Dawn Language Specification
 
@@ -348,8 +348,8 @@ broke are kept).
 ### 2.1 Basic types
 
 The non-generic, compiler-owned basic types users may name directly are `Int` (64-bit), `Char`
-(a Unicode scalar value), `Float` (double), `Bool`, `String`, `Bytes` (an immutable byte sequence),
-and `Unit`. These seven names, together with the three public generic names in the next section,
+(a Unicode scalar value), `Loc` (a call site, §8.4), `Float` (double), `Bool`, `String`, `Bytes` (an immutable byte sequence),
+and `Unit`. These eight names, together with the three public generic names in the next section,
 are the complete public builtin type surface.
 
 `Unit` is a first-class value (its only value is `()`) and **may appear anywhere a value can
@@ -787,6 +787,11 @@ column(kids, align: 1, gap: 12)
   parameter order; when only the first parameter is omitted, `f$default$0` takes nothing and
   the call binds nothing. Both backends and the comptime interpreter treat `f$default$k` as an
   ordinary top-level function and the bindings as ordinary `let`s, with no special handling.
+- **`caller()` is the one default not evaluated at the declaration** (2026-10-05, L4): when a
+  parameter's default is exactly `caller()`, a call that omits the argument gets **its own
+  location** (a `Loc`, §8.4), and no `f$default$k` is synthesized. `caller()` anywhere else
+  (wrapped inside a default, in a body, in a `const`) is a compile error. It is a constant, so
+  it satisfies "a default must be pure".
 - **Using the function as a value loses the defaults**: after `let g = f`, `g`'s type is the
   full `fn(A, B, C) -> R` — the same discipline as "a bare constructor used as a function
   value loses its field names" (§2.3).
@@ -3078,9 +3083,10 @@ same way.
 
 ### 8.2 Unrecoverable: panic
 
-`panic(msg)`: prints `panic: <msg> at <path>:<line>:<col>` to stderr; the process exits
-non-zero. No stack is printed.
-`todo()` is equivalent to writing `panic("not yet implemented")` in the same place, and
+`panic(msg, at: Loc = caller())`: prints `panic: <msg> at <at>` to stderr; the process exits
+non-zero. No stack is printed. An omitted `at` is the location of this call; a function that
+reports a failure on its caller's behalf passes its own `at` on (§8.4).
+`todo(at: Loc = caller())` is equivalent to writing `panic("not yet implemented")` in the same place, and
 passes any type check (its return type is the bottom type `Never`).
 
 **Location suffix**: when `panic`, `todo`, `expect`, postfix `!` or `assert` (§3.4) fails, the
@@ -3096,8 +3102,9 @@ compiler at compile time from the call site:
   name `panic`/`todo`, the `o` of `o.expect(..)` and of `o!`, the `assert` keyword.
 - The location is part of the message; the `message` that `catch_panic` hands back carries it
   too (§9.8).
-- A failure inside std carries no location, and neither does `panic` passed as a function
-  value and called through it.
+- std has no position path: a failure in std that omits `at` carries no location. Used as a
+  function value, `panic`'s `at` is an ordinary parameter (`fn(String, Loc) -> Never`), and
+  the caller must supply a `Loc`.
 - There is no run-time stack trace: Core carries no spans, and a location exists only for a
   call site known at compile time (reasons in `docs/source-location-design.md`).
 
@@ -3165,6 +3172,40 @@ let m = xs |> len |> dbg  # stderr: [src/main.dawn:5:11] xs |> len = 3
   function value has no call site and no argument text. To pass it, wrap it in a lambda:
   `(x) => dbg(x)`.
 - It takes one argument. To see several values, pass a tuple: `dbg((a, b))`.
+
+### 8.4 Caller location: `caller()` and `Loc`
+
+A function that reports a failure on its caller's behalf takes **the line that called it**
+through a parameter whose default is `caller()`:
+
+```dawn
+fn assert_eq[T: Eq + Show](a: T, b: T, at: Loc = caller()) -> Unit =
+  if a != b { panic("${show(a)} != ${show(b)}", at: at) }
+
+fn sums() -> Unit = assert_eq(1 + 1, 3)   # panic: 2 != 3 at src/t.dawn:4:21
+```
+
+- **`Loc`** is an opaque type the compiler provides (owned by `std/loc`); its value is
+  `<path>:<line>:<col>`, with the path, line and column of §8.2's location suffix. `"${l}"` and
+  `show(l)` are that text; `loc.path`, `loc.line` and `loc.col` read the three parts (split from
+  the right, so a path holding a `:` still splits). Only `caller()` makes a `Loc`.
+- **`caller()` may only be the whole default value of a top-level function's parameter.** When
+  the argument is omitted, its value is the location of **this call**: the start of the call
+  expression (the name `f`; for a method call or a pipe, the start of the left side), with the
+  position path of **the module the call is in**. A written argument is used as written.
+  `caller()` anywhere else, or used as a function value, is a compile error; a `fn caller` the
+  module declares shadows it, and `= caller()` is then an ordinary default.
+- **Passing on is explicit.** Each hop writes `at: at`; a function with no `at` parameter
+  reports the line in its own body. There is no implicit caller location (reasons in
+  `docs/caller-location-design.md`).
+- For a value of the current location (to compare in a test, or to supply when calling through
+  a function value): `loc.here()`, which is itself `fn here(at: Loc = caller()) -> Loc = at`.
+- The last parameter of `panic`, `todo` and `expect` is `at: Loc = caller()`. With it omitted
+  the message is exactly §8.2's.
+- std has no position path, so a `caller()` omitted in std is a `Loc` that names no place
+  (rendered as the empty string; `panic` adds no suffix for it). std only takes a `Loc` from its
+  callers and never hands one of its own back to a program.
+- At comptime nothing changes: the location is a constant before anything is evaluated.
 
 ---
 
@@ -3987,6 +4028,7 @@ two together; one module too many or too few fails it):
 - `std/str`: strings
 - `std/char`: the character type `Char`
 - `std/fmt`: rendering and parsing numbers (see below)
+- `std/loc`: reading a call site `Loc`, and `here()` (§8.4)
 - `std/narrow`: the narrow binary floats bf16, binary16 and binary32, correctly rounded
   per operation (§11 "Math builtins")
 - `std/list`: `List` functions and the `Iter` instance
@@ -4024,7 +4066,7 @@ import.
 The **prelude** is the high-traffic core of that, implicitly available without a `use`: the
 constructors of `List`/`Option`/`Result`, `println`/`print`, `map`/`filter`/`fold`, the
 `sort` family (std/list), `parse_int` (std/fmt), and the builtin
-<!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
+<!-- doc-check: builtin-inventory --> `panic`/`todo`/`caller`/`bracket`/`catch_fault`/`catch_panic`/
 `discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
 `sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/

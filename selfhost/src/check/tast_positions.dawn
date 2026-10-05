@@ -17,6 +17,12 @@
 # plain string to everything below: lowering folds the suffix in and no
 # backend or interpreter learns what a position is.
 #
+# Since L4 the site of `panic`, `todo` and `expect` arrives as their `at`
+# argument, and an omitted one is the checker's `caller` placeholder: what
+# this exit appends to it is the `Loc` itself, `<path>:<line>:<col>`, the site
+# of the call the placeholder stands in for (docs/caller-location-design.md
+# 4.3). Any function's `at: Loc = caller()` is filled the same way.
+#
 # `dbg` rides the same seam with a different shape: its trailing argument is
 # the `[<path>:<line>:<col>] <argument text> = ` its line starts with (section
 # 6 of the same document). The argument text is the source between the
@@ -32,7 +38,7 @@
 use std/list
 use std/map
 use std/str
-use check/types.{Sym, TyInt, TyNever}
+use check/types.{Sym, TyInt, TyNever, ty_loc}
 use check/tast.{
   TExpr, TStmt, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TConst,
   TSPText, TSPInterp, TLEExpr, TLESpread, TLEIf,
@@ -106,12 +112,21 @@ fn line_col(line_starts: List[Int], pos: Int) -> (Int, Int) = {
 ## message baked at check time could not do. A module with no position path
 ## (std) names no site.
 fn site(r: Resolver, pos: Int) -> String =
+  match loc_text(r, pos) {
+    Some(l) -> " at " ++ l
+    None -> ""
+  }
+
+## `<path>:<line>:<col>` of a position, the value of a `Loc` and the text
+## after ` at ` in a failure (docs/caller-location-design.md 3.1); None in a
+## module with no position path (std).
+fn loc_text(r: Resolver, pos: Int) -> Option[String] =
   match r.path {
     Some(p) -> {
       let (line, col) = line_col(r.line_starts, pos)
-      " at " ++ p ++ ":" ++ to_string(line) ++ ":" ++ to_string(col)
+      Some(p ++ ":" ++ to_string(line) ++ ":" ++ to_string(col))
     }
-    None -> ""
+    None -> None
   }
 
 ## The `[<path>:<line>:<col>] <argument text> = ` a `dbg` line starts with,
@@ -159,18 +174,19 @@ fn arg_text(source: String, lo: Int, hi: Int) -> String = {
   from_code_points(out)
 }
 
-## The builtins that fail with a message written at their call, and how many
-## arguments the author writes for each. The arity is what tells a call that
-## carries its site from one that does not (a call in std carries none).
-## `dbg` is here too: what it carries is its line's head rather than a
-## failure's suffix, by the same trailing argument.
+## The builtins whose call carries a fact about where it was written, and how
+## many arguments it has without it. The arity is what tells a call that
+## carries one from one that does not (a call in std carries none).
+##
+## `caller` is the site an omitted `at: Loc = caller()` stands for: the checker
+## puts a placeholder call in the argument's place, and its trailing string is
+## the `Loc` (docs/caller-location-design.md 4.3). `dbg` carries its line's
+## head. `panic`, `todo` and `expect` were here until L4, with a site appended
+## to the message; their site is now their `at` argument, which is a
+## `caller` like any other.
 fn sited_arity(name: String) -> Option[Int] =
-  if name == "panic" {
-    Some(1)
-  } else if name == "todo" {
+  if name == "caller" {
     Some(0)
-  } else if name == "expect" {
-    Some(2)
   } else if name == "dbg" {
     Some(1)
   } else {
@@ -193,7 +209,7 @@ fn sited_call(r: Resolver, name: String, args: List[TExpr], start: Int) -> List[
         let tag = if name == "dbg" {
           dbg_head(r, start, args[0]).expect("a module with a position path")
         } else {
-          site(r, start)
+          loc_text(r, start).expect("a module with a position path")
         }
         args ++ [XStr([TSPText(tag)], start, start)]
       } else {
@@ -403,25 +419,26 @@ test "a column counts from its own line, and the first line starts at one" {
   assert line_col(starts, 104) == (3, 15)
 }
 
-test "panic, todo and expect carry their site as one trailing argument" {
+test "an omitted caller() becomes its call's site, carried as one trailing argument" {
   let starts = [0, 40, 90]
   let r = owned(100, 130, Some("src/m.dawn"), starts, "")
-  let msg = XStr([TSPText("boom")], 6, 12)
-  let call = XCallBuiltin("panic", [msg], [], [], 0, 13, TyNever)
-  let site = XStr([TSPText(" at src/m.dawn:3:11")], 100, 100)
+  # the checker's placeholder spans the call it is the site of
+  let call = XCallBuiltin("caller", [], [], [], 0, 13, ty_loc())
+  let loc = XStr([TSPText("src/m.dawn:3:11")], 100, 100)
   let resolved = expr(r, call)
-  assert resolved == XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112), site], [], [], 100, 113, TyNever)
-  assert split_site("panic", [XStr([TSPText("boom")], 106, 112), site]) ==
-    ([XStr([TSPText("boom")], 106, 112)], Some(" at src/m.dawn:3:11"))
+  assert resolved == XCallBuiltin("caller", [loc], [], [], 100, 113, ty_loc())
+  assert split_site("caller", [loc]) == ([], Some("src/m.dawn:3:11"))
   # resolving twice does not site a call twice
   assert expr(unowned(Some("src/m.dawn"), starts, ""), resolved) == resolved
-  assert expr(r, XCallBuiltin("todo", [], [], [], 4, 10, TyNever)) ==
-    XCallBuiltin("todo", [XStr([TSPText(" at src/m.dawn:3:15")], 104, 104)], [], [], 104, 110, TyNever)
-  # std has no position path, so its calls stay as written
+  # std has no position path: the placeholder stays bare, the no-site Loc
   let in_std = owned(100, 130, None, starts, "")
-  assert expr(in_std, call) == XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyNever)
-  assert split_site("panic", [msg]) == ([msg], None)
-  # a builtin that does not fail with a written message is never sited
+  assert expr(in_std, call) == XCallBuiltin("caller", [], [], [], 100, 113, ty_loc())
+  assert split_site("caller", []) == ([], None)
+  # a failing builtin's site is its `at` argument now, never a string of its own
+  let msg = XStr([TSPText("boom")], 6, 12)
+  let panic_call = XCallBuiltin("panic", [msg, call], [], [], 0, 13, TyNever)
+  assert expr(r, panic_call) ==
+    XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112), resolved], [], [], 100, 113, TyNever)
   let other = XCallBuiltin("len", [msg], [], [], 0, 13, TyInt)
   assert expr(r, other) == XCallBuiltin("len", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyInt)
 }

@@ -798,6 +798,16 @@ pub const CHAR_OPAQUE_ID: Int = -2
 ## The type of a character literal: `Char`, an opaque `Int`.
 pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", [], TyInt)
 
+## `Loc`, a call site as `<path>:<line>:<col>` (docs/caller-location-design.md
+## 3.1). Minted here for the reason `Char` is: a builtin signature (`panic`'s
+## `at`) names it, so the checker needs it before any module is in scope.
+## Opaque over String, so a site is one string constant that costs nothing to
+## pass and that lowering can fold into a failure message, and `std/loc`, its
+## owner, is the one module that sees the text.
+pub const LOC_OPAQUE_ID: Int = -4
+
+pub fn ty_loc() -> Ty = TyOpaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString)
+
 ## Who may write a compiler-owned type name. This is surface policy, including
 ## the distinct return-only access used by Never.
 pub type BuiltinTypeAccess =
@@ -828,6 +838,7 @@ pub type BuiltinTypeI = {
 pub fn builtin_type_inventory() -> List[BuiltinTypeI] = [
   BuiltinTypeI { name: "Int", params: [], access: BtPublic, build: BtLeaf(TyInt) },
   BuiltinTypeI { name: "Char", params: [], access: BtPublic, build: BtLeaf(ty_char()) },
+  BuiltinTypeI { name: "Loc", params: [], access: BtPublic, build: BtLeaf(ty_loc()) },
   BuiltinTypeI { name: "Float", params: [], access: BtPublic, build: BtLeaf(TyFloat) },
   BuiltinTypeI { name: "Bool", params: [], access: BtPublic, build: BtLeaf(TyBool) },
   BuiltinTypeI { name: "String", params: [], access: BtPublic, build: BtLeaf(TyString) },
@@ -1626,6 +1637,13 @@ pub type Sig = {
   # only: a call that omits the argument calls the synthesized `f$default$k`,
   # never anything parsed back out of this string.
   param_defaults: List[Option[String]],
+  # The parameters whose default is `caller()` (docs/caller-location-design.md
+  # 4.1), by index. Such a default is not a value computed in the declaring
+  # module but the location of each call, so no `f$default$k` is synthesized
+  # for it and a call that omits the argument gets the call's own position.
+  # Kept apart from `param_defaults`, whose text is for readers: the text
+  # `caller()` says nothing once a module declares a `caller` of its own.
+  caller_params: List[Int],
   ret: Ty,
   eff: Eff,
   is_builtin: Bool,
@@ -1832,7 +1850,7 @@ test "a signature's ABI row lays its labels out by effect id" {
   # can be mistaken for the id sort asserted here. Same construction as
   # `scripts/checker-corpus/cases/ctl_two_labels.dawn`, which holds down the
   # one place that does sort by name.
-  let s = Sig { name: "f", param_tys: [], param_names: [], param_defaults: [], ret: TyUnit,
+  let s = Sig { name: "f", param_tys: [], param_names: [], param_defaults: [], caller_params: [], ret: TyUnit,
     eff: ELabeled(EPure, [(59, "Alpha"), (23, "Zulus"), (41, "Mimas")]),
     is_builtin: false, tparams: [], constraints: [], eparams: [],
     owner: None, trait_id: None, op_of: None, inferring: false }
@@ -2354,6 +2372,7 @@ fn closers_of(cps: List[Char]) -> List[Char] = {
 test "a default renders as its source text, cut at the shown width" {
   let s = Sig { name: "pad", param_tys: [TyString, TyInt, TyString],
     param_names: ["s", "width", "fill"], param_defaults: [None, None, Some("\" \"")],
+    caller_params: [],
     ret: TyString, eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
     owner: None, trait_id: None, op_of: None, inferring: false }
   let adts = prelude_adts()
@@ -2704,6 +2723,7 @@ fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[S
     param_tys: ptys,
     param_names: pnames,
     param_defaults: [],
+    caller_params: [],
     ret: ret,
     eff: EPure,
     is_builtin: false,
@@ -2740,6 +2760,7 @@ pub fn prelude_traits() -> Traits = {
     param_tys: [tv, tv],
     param_names: ["a", "b"],
     param_defaults: [],
+    caller_params: [],
     ret: TyInt,
     eff: EPure,
     is_builtin: false,
@@ -3113,6 +3134,7 @@ fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
     param_tys: ptys,
     param_names: pnames,
     param_defaults: [],
+    caller_params: [],
     ret: ret,
     eff: EPure,
     is_builtin: true,
@@ -3126,6 +3148,22 @@ fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
   }
 
 fn tp1(s: Sig, v: Ty) -> Sig = Sig { ..s, tparams: [v] }
+
+## A failing builtin whose last parameter is `at: Loc = caller()`: the call's
+## own site unless the caller passes one on (docs/caller-location-design.md
+## 3.6). The one default a builtin may carry, because it is the one that is
+## not a function to synthesize in a declaring module a builtin does not have.
+fn sited(s: Sig) -> Sig = {
+  let last = len(s.param_tys) - 1
+  let none: Option[String] = None
+  var defaults: List[Option[String]] = []
+  var i = 0
+  while i < last {
+    defaults = defaults ++ [none]
+    i = i + 1
+  }
+  Sig { ..s, param_defaults: defaults ++ [Some("caller()")], caller_params: [last] }
+}
 
 ## One type parameter carrying one bound: the shape `to_string` has now that
 ## rendering is a trait rather than a predicate the checker applies itself.
@@ -3178,15 +3216,16 @@ pub fn builtins() -> Map[String, Sig] = {
   let e = EffVar("e", -1)
   var out: Map[String, Sig] = map.empty()
   var sigs = [
-    bsig("panic", [TyString], ["msg"], TyNever),
-    bsig("todo", [], [], TyNever),
+    sited(bsig("panic", [TyString, ty_loc()], ["msg", "at"], TyNever)),
+    sited(bsig("todo", [ty_loc()], ["at"], TyNever)),
+    bsig("caller", [], [], ty_loc()),
     bsig("to_float", [TyInt], ["n"], TyFloat),
     bsig("to_int", [TyFloat], ["x"], TyInt),
     tp1(bsig("len", [TyList(t)], ["xs"], TyInt), t),
     tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
     bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
     effp1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
-    tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
+    sited(tp1(bsig("expect", [opt_ty(t), TyString, ty_loc()], ["o", "msg", "at"], t), t)),
     tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
     tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
     # The debug print (docs/source-location-design.md section 6): `x` back,
@@ -4483,7 +4522,7 @@ test "prelude shapes" {
 
 test "builtin type inventory keeps its surface boundaries" {
   assert public_builtin_type_names() ==
-    ["Int", "Char", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
+    ["Int", "Char", "Loc", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
   var std_only: List[String] = []
   var return_only: List[String] = []
   var compiler_only: List[String] = []
@@ -4624,7 +4663,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 113
+  assert map_size2(bs) == 114
 }
 
 test "the reclaim's failure is a value, under the one name left" {

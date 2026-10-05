@@ -14,6 +14,7 @@ TIMEOUT = 180
 PUBLIC_TYPES = [
     {"name": "Int", "params": []},
     {"name": "Char", "params": []},
+    {"name": "Loc", "params": []},
     {"name": "Float", "params": []},
     {"name": "Bool", "params": []},
     {"name": "String", "params": []},
@@ -50,7 +51,7 @@ def checker_is_complete(jar):
         "fn rejects(x: Zzzzz) -> Unit = ()\n"
     )
     expected_hint = (
-        "builtin types: Int, Char, Float, Bool, String, Bytes, Unit, "
+        "builtin types: Int, Char, Loc, Float, Bool, String, Bytes, Unit, "
         "List, Map, Set — or declare `type Zzzzz = ...`"
     )
     with tempfile.TemporaryDirectory(prefix="dawn-builtin-types-") as tmp:

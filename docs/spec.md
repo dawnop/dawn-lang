@@ -280,8 +280,8 @@ v0.80.0 起只报错，见 [`syntax-window-design.md`](syntax-window-design.md) 
 ### 2.1 基础类型
 
 用户可直接命名、由编译器拥有的非泛型基础类型是：`Int`（64 位）、`Char`（Unicode
-scalar value）、`Float`（double）、`Bool`、`String`、`Bytes`（不可变字节序列）与 `Unit`。
-这七个名字与下节三个公开泛型名字构成完整的 public builtin type surface。
+scalar value）、`Loc`（调用点位置，§8.4）、`Float`（double）、`Bool`、`String`、`Bytes`（不可变字节序列）与 `Unit`。
+这八个名字与下节三个公开泛型名字构成完整的 public builtin type surface。
 
 `Unit` 是一等值（唯一值 `()`），**可出现在任何值能出现的位置**：形参、局部变量、
 闭包捕获、元组元素、返回值，以及实例化类型参数（`Result[Unit, E]`、`List[Unit]`、
@@ -629,6 +629,10 @@ column(kids, align: 1, gap: 12)
   绑到局部量（`f$default$k` 吃前 k 个局部量），最后按形参序调 `f`；只省掉第一个形参时
   `f$default$0` 零元，调用不加绑定。两个后端与 comptime 解释器都把 `f$default$k` 当普通
   顶层函数、把绑定当普通 `let`，没有专门的处理。
+- **`caller()` 是唯一一个不在声明处求值的默认值**（2026-10-05，L4）：形参的默认值**整个**就是
+  `caller()` 时，省掉实参的那次调用得到的是**这次调用自己的位置**（`Loc`，§8.4），不合成
+  `f$default$k`。`caller()` 写在别处（默认值里套一层、函数体、`const`）都是编译错误。
+  它是常量，满足「默认值必须纯」。
 - **把函数当值用则默认值丢失**：`let g = f` 之后 `g` 的类型是全参的 `fn(A, B, C) -> R`
   ——与「构造器裸名当函数值时字段名丢失」（§2.3）是同一条纪律。
 - **范围**：只有顶层函数（含私有、模块函数）。局部 fn（其调用走函数值路）、lambda、
@@ -2468,9 +2472,9 @@ fn as_http[T](r: Result[T, String], status: Int) -> Result[T, HttpError] =
 
 ### 8.2 不可恢复：panic
 
-`panic(msg)`：向 stderr 打印 `panic: <msg> at <path>:<line>:<col>`，进程以非零退出。
-不打印栈。
-`todo()` 等价于在同一处写 `panic("not yet implemented")`，且能通过任意类型检查
+`panic(msg, at: Loc = caller())`：向 stderr 打印 `panic: <msg> at <at>`，进程以非零退出。
+不打印栈。`at` 省掉就是这次调用的位置；替调用者报错的函数把自己的 `at` 传下去（§8.4）。
+`todo(at: Loc = caller())` 等价于在同一处写 `panic("not yet implemented")`，且能通过任意类型检查
 （返回类型为底类型 `Never`）。
 
 **位置后缀**：`panic`、`todo`、`expect`、后缀 `!` 与 `assert`（§3.4）失败时，消息末尾是
@@ -2481,7 +2485,8 @@ fn as_http[T](r: Result[T, String], status: Int) -> Result[T, HttpError] =
 - `<line>`、`<col>` 从 1 起，列按码点计，与诊断的 `--> path:line:col` 同一把尺子。
   指向失败表达式的起点：`panic`/`todo` 的名字、`o.expect(..)` 与 `o!` 的 `o`、`assert` 关键字。
 - 位置是消息的一部分，`catch_panic` 拿到的 `message` 同样带它（§9.8）。
-- std 里的失败不带位置；把 `panic` 当函数值传递、经值调用时也不带。
+- std 没有位置路径：std 里省掉 `at` 的失败不带位置。把 `panic` 当函数值用时 `at` 是普通形参
+  （`fn(String, Loc) -> Never`），调用方必须给出一个 `Loc`。
 - 没有运行期栈迹：Core 不带 span，位置只在编译期知道的调用点上
   （理由见 `docs/source-location-design.md`）。
 
@@ -2533,6 +2538,33 @@ let m = xs |> len |> dbg  # stderr: [src/main.dawn:5:11] xs |> len = 3
 - 只能调用，不能当函数值（`let f = dbg` 是编译错误）：函数值没有调用点，也没有实参文本。
   要传就包一层 lambda：`(x) => dbg(x)`。
 - 只有一个实参。要看几个值，传一个元组：`dbg((a, b))`。
+
+### 8.4 调用者位置：`caller()` 与 `Loc`
+
+替调用者报错的函数用一个默认值为 `caller()` 的形参拿到**调用它的那一行**：
+
+```dawn
+fn assert_eq[T: Eq + Show](a: T, b: T, at: Loc = caller()) -> Unit =
+  if a != b { panic("${show(a)} != ${show(b)}", at: at) }
+
+fn sums() -> Unit = assert_eq(1 + 1, 3)   # panic: 2 != 3 at src/t.dawn:4:21
+```
+
+- **`Loc`** 是编译器提供的不透明类型（拥有者 `std/loc`），值就是 `<path>:<line>:<col>`，
+  路径、行、列的规则同 §8.2 的位置后缀。`"${l}"` 与 `show(l)` 都是这串本身；`loc.path`、
+  `loc.line`、`loc.col` 取三段（从右切，路径里有 `:` 也对）。只有 `caller()` 能造出 `Loc`。
+- **`caller()` 只能是一个顶层函数形参的完整默认值。** 省掉这个实参时，它的值是**这次调用**
+  的位置：调用表达式的起点（`f` 这个名字；方法式与管道是左边的起点），路径是**调用点所在
+  模块**的位置路径。写了实参就用写的。`caller()` 出现在别处、当函数值用，都是编译错误；
+  本模块自己声明的 `fn caller` 遮蔽它，那时 `= caller()` 是普通默认值。
+- **转发是显式的。** 每一跳写 `at: at`；没有 `at` 形参的函数报它自己体内的那一行。
+  不做隐式调用者位置（理由见 `docs/caller-location-design.md`）。
+- 要一个当前位置的值（测试里比对、经函数值调用时补实参）：`loc.here()`，它本身就是
+  `fn here(at: Loc = caller()) -> Loc = at`。
+- `panic`、`todo`、`expect` 的最后一个形参就是 `at: Loc = caller()`。省掉它时消息与 §8.2 逐字相同。
+- std 没有位置路径，std 里省掉的 `caller()` 是不指向任何地方的 `Loc`（渲染为空串，`panic` 对它不加后缀）；
+  std 只从调用方接收 `Loc`，不把自己的交还给程序。
+- comptime 中照常：位置在求值之前已是常量。
 
 ---
 
@@ -3169,6 +3201,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/str`：字符串
 - `std/char`：字符 `Char`
 - `std/fmt`：数字的渲染与解析（见下）
+- `std/loc`：调用点位置 `Loc` 的读法与 `here()`（§8.4）
 - `std/narrow`：窄二进制浮点 bf16、binary16、binary32，逐运算正确舍入（§11「数学内建」）
 - `std/list`：`List` 的函数与 `Iter` 实例
 - `std/bytes`：字节串，及 UTF-8、hex、base64 编解码
@@ -3196,7 +3229,7 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、`parse_int`（std/fmt）、内建的
-<!-- doc-check: builtin-inventory --> `panic`/`todo`/`bracket`/`catch_fault`/`catch_panic`/
+<!-- doc-check: builtin-inventory --> `panic`/`todo`/`caller`/`bracket`/`catch_fault`/`catch_panic`/
 `discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
 `sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/

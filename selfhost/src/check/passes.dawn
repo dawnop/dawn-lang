@@ -19,7 +19,7 @@ use front/ast.{
   Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
-  Param, Expr, Decl, DImpl, ImplView, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
+  Param, Expr, Decl, DImpl, ImplView, FnDecl, EBool, DFn, EVar, EApply, DConst, EInt, module_effects,
   DEffect, EffectDeclR, AssocBind, ImportName, import_local,
   Vis, VisPrivate, VisPkg, VisPub, vis_exported,
   e_lo, e_hi
@@ -1299,6 +1299,7 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         param_tys: ptys,
         param_names: map(op.params, p => p.name),
         param_defaults: [],
+        caller_params: [],
         ret: ret,
         eff: ELabeled(EPure, [(eid, d.name)]),
         is_builtin: false,
@@ -1554,6 +1555,7 @@ pub(pkg) fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         param_tys: ptys,
         param_names: map(me.params, p => p.name),
         param_defaults: [],
+        caller_params: [],
         ret: ret,
         eff: eff,
         is_builtin: false,
@@ -2185,6 +2187,7 @@ fn impl_method_sigs(
       param_tys: ptys,
       param_names: map(me.params, p => p.name),
       param_defaults: [],
+      caller_params: [],
       ret: ret,
       eff: eff,
       is_builtin: false,
@@ -2538,6 +2541,7 @@ pub(pkg) fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[Li
 pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = {
   var cx1 = cx
   var sigs: PathTable[Sig] = path_table()
+  let caller_is_builtin = caller_names_the_builtin(cx, m)
   for d in module_fns(m) {
     cx1 = enter_decl_owner(cx1, [Named(FunctionDecl, d.name)], d.nlo, d.nhi)
     var tpnames: List[String] = []
@@ -2620,6 +2624,7 @@ pub(pkg) fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, PathTable[Sig]) !io = 
       param_tys: ptys,
       param_names: map(d.params, p => p.name),
       param_defaults: map(d.params, p => default_text(p)),
+      caller_params: if caller_is_builtin { caller_param_indices(d) } else { [] },
       ret: ret,
       eff: final_eff,
       is_builtin: false,
@@ -2660,6 +2665,38 @@ test "Eq and Hash resolve as bounds like any other trait" {
 ## `None` when it has none, else the author's spelling. A default the parser
 ## had no source for still has to read as omittable, so it falls back to the
 ## `...` every default rendered as before the text was carried.
+## Does a bare `caller` in this module name the builtin? Not when the module
+## declares a function of that name or brings one in: a shadowing `caller`
+## (spec §10.6) is an ordinary function, and `= caller()` is then an ordinary
+## default that calls it.
+fn caller_names_the_builtin(cx: Cx, m: Module) -> Bool = {
+  for d in module_fns(m) {
+    if d.name == "caller" { return false }
+  }
+  not map.has(cx.fns, "caller") && not map.has(cx.std_fns, "caller")
+}
+
+## The parameters whose default is the call's own site: a default that is
+## exactly `caller()` and nothing around it (docs/caller-location-design.md
+## 3.2; Swift's magic literals follow the same rule). Decided here, from the
+## declaration alone, because a call in another module reads the signature
+## before this function's body, or its defaults, are checked.
+fn caller_param_indices(d: FnDecl) -> List[Int] = {
+  var out: List[Int] = []
+  var k = 0
+  for p in d.params {
+    if is_caller_call(p.default) { out = out ++ [k] }
+    k = k + 1
+  }
+  out
+}
+
+pub(pkg) fn is_caller_call(e: Option[Expr]) -> Bool =
+  match e {
+    Some(EApply(EVar(n, _, _), args, _, _)) -> n == "caller" && len(args) == 0
+    _ -> false
+  }
+
 fn default_text(p: Param) -> Option[String] =
   match p.default {
     Some(_) ->

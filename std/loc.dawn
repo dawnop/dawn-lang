@@ -1,0 +1,113 @@
+## Call sites: the `Loc` a `caller()` default hands a function, and what
+## there is to ask of one (spec §8.4).
+#
+# `Loc` is minted by the compiler (`types.ty_loc`), for the reason `Char` is:
+# `panic`'s signature names it, so the checker needs the type before any
+# module is in scope. This module is its owner, the one place that sees the
+# text it is made of, `<path>:<line>:<col>`. A string rather than a record
+# because a call's site is then one string constant: passing it allocates
+# nothing, and a `panic` that omits its `at` folds the constant into its
+# message at compile time, the same bytes as before `at` existed
+# (docs/caller-location-design.md 3.1).
+#
+# Nothing outside this module can turn a String into a `Loc`, so every `Loc`
+# a program holds was measured by the compiler at some call.
+#
+# std has no position path (docs/source-location-design.md 4.1), so a call in
+# std that omits its `at` gets the empty `Loc`, which names no site: `panic`
+# adds nothing for it, it renders as nothing, and its line and column are 0.
+# It never reaches a program: std takes a `Loc` from its callers and never
+# hands one of its own back.
+
+use std/str
+use std/fmt
+
+## The location of the call of `here()`: the one place `caller()` is wanted
+## somewhere other than a parameter's default, given by a function whose
+## default it is.
+pub fn here(at: Loc = caller()) -> Loc = at
+
+## The path of the file the call is in, as the program names it: relative to
+## the project root (`src/main.dawn`), to the entry file's directory for a
+## single file, `<package>/<path>` in a `[deps]` package.
+pub fn path(l: Loc) -> String =
+  match parts(l) {
+    Some((p, _, _)) -> p
+    None -> ""
+  }
+
+## The 1-based line of the call.
+pub fn line(l: Loc) -> Int =
+  match parts(l) {
+    Some((_, n, _)) -> n
+    None -> 0
+  }
+
+## The 1-based column of the call, counted in code points, the column the
+## compiler's diagnostics print.
+pub fn col(l: Loc) -> Int =
+  match parts(l) {
+    Some((_, _, c)) -> c
+    None -> 0
+  }
+
+## Split from the right: the line and column are the last two fields, and a
+## path may itself contain a `:`.
+fn parts(l: Loc) -> Option[(String, Int, Int)] = {
+  let text: String = l
+  match str.rsplit_once(text, ":") {
+    Some((rest, c)) ->
+      match str.rsplit_once(rest, ":") {
+        Some((p, n)) ->
+          match (fmt.parse_int(n), fmt.parse_int(c)) {
+            (Some(ln), Some(cn)) -> Some((p, ln, cn))
+            _ -> None
+          }
+        None -> None
+      }
+    None -> None
+  }
+}
+
+## The site as the text a failure message carries after ` at `.
+impl Display[Loc] {
+  fn display(l: Loc) -> String = l
+}
+
+## The same text nested: a `Loc` in a list reads `[src/a.dawn:1:2]`, not a
+## quoted string, because it is not a string a program wrote.
+impl Show[Loc] {
+  fn show(l: Loc) -> String = l
+}
+
+# ---- tests ----
+
+test "a site splits from the right, so a path may hold a colon" {
+  let l: Loc = "c:/work/src/main.dawn:12:7"
+  assert path(l) == "c:/work/src/main.dawn"
+  assert line(l) == 12
+  assert col(l) == 7
+  let plain: Loc = "src/m.dawn:3:11"
+  assert path(plain) == "src/m.dawn"
+  assert line(plain) == 3
+  assert col(plain) == 11
+}
+
+test "the no-site Loc names nothing" {
+  let none: Loc = ""
+  assert path(none) == ""
+  assert line(none) == 0
+  assert col(none) == 0
+  assert to_string(none) == ""
+}
+
+test "a site renders as its text at both layers" {
+  let l: Loc = "src/m.dawn:3:11"
+  assert to_string(l) == "src/m.dawn:3:11"
+  assert "${l}" == "src/m.dawn:3:11"
+  assert show(l) == "src/m.dawn:3:11"
+}
+
+test "here() in std is the no-site Loc" {
+  assert to_string(here()) == ""
+}

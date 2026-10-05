@@ -5252,6 +5252,23 @@ test "after alias dot, the module's members, with the use when it is missing" {
   })))
 }
 
+test "a failing builtin shows its `at`, and its written argument still hovers" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st0 = def_probe_state(std)
+    let text = "fn f(n: Int) -> Int = if n > 0 { n } else { panic(\"bad \${to_string(n + 40)}\") }\n"
+    let d = def_probe_doc_named(st0, "atprobe.dawn", text)
+    let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+    assert def_probe_at(st, d, text, "panic(", 0).hover == "fn panic(msg: String, at: Loc = caller()) -> Never"
+    # the `at` the checker filled in spans the whole call, and is not taken
+    # for the written message when the two are paired by span
+    assert def_probe_at(st, d, text, "40", 0).hover == "Int\n40  (0x28)"
+  })))
+}
+
 test "completion resolve on a use line: the module's doc, and its members'" {
   io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
     let st0 = def_probe_state(d7_probe_std())
@@ -5561,6 +5578,8 @@ fn defaults_probe_text() -> String =
     "fn mid(s: String, gap: Int = 1, last: Int = 0) -> Int = gap + last",
     "fn each(xs: List[Int], step: Int = 1, f: fn(Int) -> Unit) -> Unit = { for x in xs { f(x + step) } }",
     "fn wordy(n: Int, why: String = \"a default far wider than any hint shows\") -> Int = n",
+    "fn site(n: Int, at: Loc = caller()) -> Int = n",
+    "fn both(n: Int, k: Int = 2, at: Loc = caller()) -> Int = n + k",
     "",
     "fn run(s: String) -> Int = {",
     "  let a = pad(s, 4)",
@@ -5578,7 +5597,9 @@ fn defaults_probe_text() -> String =
     "  let j = wordy(1)",
     "  let k = pad(s, 4, \"-\")",
     "  let l = zero(1, m: 2)",
-    "  str.len(a ++ c ++ e ++ f ++ h) + b + d + i + j + str.len(k) + l + (if g == None { 0 } else { 1 })",
+    "  let m = site(1) + Some(2).expect(\"two\")",
+    "  let n = both(1)",
+    "  str.len(a ++ c ++ e ++ f ++ h) + b + d + i + j + str.len(k) + l + m + n + (if g == None { 0 } else { 1 })",
     "}",
     ""
   ], "\n")
@@ -5590,7 +5611,7 @@ fn defaults_probe(st: LspState, d: Doc) -> List[String] !io = {
     ..st,
     inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false }
   }
-  inlay_probe(st1, d, 0, 0, 30, 0)
+  inlay_probe(st1, d, 0, 0, 40, 0)
 }
 
 test "inlay hints: a left-out default shows its written text, after the last argument" {
@@ -5619,7 +5640,11 @@ test "inlay hints: a left-out default shows its written text, after the last arg
     assert list.contains(got, "let j = wordy(1«, why: …»)")
     # nothing left out, nothing shown
     assert not list.any(got, l => str.contains(l, "let k ") || str.contains(l, "let l "))
-    assert len(got) == 11
+    # a `caller()` default is the site of the call being read, so it is never
+    # shown, for a user's function or a builtin's `at`
+    assert not list.any(got, l => str.contains(l, "let m "))
+    assert list.contains(got, "let n = both(1«, k: 2»)")
+    assert len(got) == 12
   }))
 }
 
@@ -5629,7 +5654,7 @@ test "inlay hints: a left-out default is a parameter hint with no padding, and c
     let d = def_probe_doc_named(st0, "defaults.dawn", defaults_probe_text())
     let params = jobj([
       ("textDocument", jobj([("uri", JStr(d.uri))])),
-      ("range", jobj([("start", jpos(11, 0)), ("end", jpos(11, 99))]))
+      ("range", jobj([("start", jpos(13, 0)), ("end", jpos(13, 99))]))
     ])
     let st1 = LspState {
       ..st0,

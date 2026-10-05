@@ -1,6 +1,6 @@
 # 调用者位置：`caller()` 默认参数与 `Loc`
 
-> 状态：**proposed**（L4，2026-10-05 起草，待评审，未实现）。源码位置一线的第四刀；前三刀与刀序见
+> 状态：**current**（L4，2026-10-05 设计并落地，分支 `feat/loc-caller`）。源码位置一线的第四刀；前三刀与刀序见
 > [source-location-design.md](source-location-design.md)。依据：裁决 `agent-handoff/ruling-source-location-20261003.md`
 > 的 L4 行（`caller()` 默认参数 + `Loc`；`panic`/`todo` 签名加 `at`；不做隐式调用者位置），
 > 调研 `agent-handoff/research-debug-print-report-20261003.md` §3.2(b) 与 §四刀 4。仓库行号指 `bc745727`。
@@ -164,7 +164,11 @@ fn expect[T](o: Option[T], msg: String, at: Loc = caller()) -> T
 - `default_call`（`checker.dawn:8120`）：省掉的形参在 `caller_params` 里时，不生成 `f$default$k` 调用，而是一个占位节点
   `XCallBuiltin("caller", [], …, lo, hi, Loc)`，`lo`/`hi` 是**这次调用**的跨度。`arrange_call_args` 的三种形状都不用改：
   占位节点是纯的、零元的，后面的默认值读它时照常绑成局部量。
-- `check_call`：解析到内建 `caller` 的调用，若不是由注册期认定的那个默认值位置发起，报 3.2 的错。`check_fn_value` 拒绝 `caller` 当值。
+- `check_call`：解析到内建 `caller` 的调用一律报 3.2 的错。注册期认定的那种默认值根本不作为表达式检查（`check_param_defaults`
+  只核类型），所以凡是走到 `check_call` 的 `caller()` 都在别处。`check_fn_value` 拒绝 `caller` 当值。
+- `arrange_call_args` 判断「省掉的默认值要不要先把实参绑成局部量」（`reads_params`）时不算 `caller()` 默认：它不读任何形参。
+  落地时第一版漏了这一条，后果是**每个** `panic(msg)` 都走了绑定路径，消息变成局部量，降低时折不成字面量，
+  LSP 也按跨度配不上实参。第六节的逐字节对照就是在这里抓到的。
 
 ### 4.3 声明出口（L2 的缝）
 
@@ -176,16 +180,19 @@ L2 那条「按实参个数判别是否带位置」的特判随之消失，`spli
 
 ### 4.4 降低
 
-- `caller` 占位降成 `CStr(位置串)`（std 里是 `CStr("")`）；`Loc` 是不透明类型，降低后就是 `String`。
+- `caller` 占位降成一个类型为 `Loc` 的绑定：`{ let v: Loc = "src/m.dawn:4:3"; v }`（std 里是空串）。`Loc` 不透明，
+  运行期就是 `String`，所以后端得到的仍是一个字符串常量；绑定是给读 Core 的人看的：Core 的字面量没有类型，
+  一个带类型的绑定是 dump 里分辨「位置」与「程序自己写的长得像位置的字符串」的唯一办法，Core 差分的归一按它认（第六节）。
 - `panic`/`todo`/`expect` 的 `unsite` 改为读最后一个实参：
   - 是字面量（省掉 `at` 的常态）：空串不加后缀，否则把 ` at <loc>` 并进消息字面量，**与 L2 的产物同一个 `CStr`**；`todo` 照旧降成
     `panic("not yet implemented at …")`，std 里的 `todo()` 照旧是 `todo` intrinsic。
-  - 不是字面量（转发）：`msg ++ loc_suffix(at)`，`loc_suffix` 在 Core 里展开为「空串答空串，否则 `" at " ++ at`」。只在失败路径上执行。
+  - 不是字面量（转发）：`msg ++ loc_suffix(at)`。`loc_suffix` 是降低内部的名字（与 `dbg` 的展开同类，不进 Core），
+    展开为「空串答空串，否则 `" at " ++ at`」，只在失败路径上执行。
 - 两个后端、解释器、运行时零改动：它们看到的仍是一个 `panic` intrinsic 加一个字符串。
 
 ### 4.5 std/loc
 
-新模块 `std/loc.dawn`：`impl Show[Loc]`、`impl Display[Loc]`、`path`/`line`/`col`、`here`。`Loc` 由编译器铸造
+新模块 `std/loc.dawn`（`modules.txt` 里排在 `fmt` 之后，读行列用 `fmt.parse_int`）：`impl Show[Loc]`、`impl Display[Loc]`、`path`/`line`/`col`、`here`。`Loc` 由编译器铸造
 （`TyOpaque(LOC_OPAQUE_ID, "Loc", "std/loc", [], TyString)`，id 取负数，与 `ev$Pack` 一样不挪 `first_minted_id`），
 std/loc 是它的拥有者，所以在 std/loc 里 `Loc` 与 `String` 互相可赋值、别处不行。`stdsrc` 重新生成。
 
@@ -203,29 +210,45 @@ std/loc 是它的拥有者，所以在 std/loc 里 `Loc` 与 `String` 互相可�
 
 ## 六、差分与 golden
 
-- **现有调用点不动**：省掉 `at` 的 `panic`/`todo`/`expect` 降低后与 L2 是同一个 `CStr`，所以凡是只含这类调用的产物，
-  emit 语料与 Core golden **应当逐字节不变**。这是本刀的核心负控：若 prev-diff 的 emit 语料因为既有 `panic` 而变，就是降低没做对。
+- **现有调用点不动**：省掉 `at` 的 `panic`/`todo`/`expect` 降低后与 L2 是同一个 `CStr`。实测：用本刀的工具链与基线
+  （`origin/main` 自举出的工具链）各编**同一份基线源码**，十个 emit 语料（selfhost、site、playground、web、json 与五个示例）
+  逐个 `__emit`，除了 std 多出的 `std/loc.class` 之外**逐字节相同**；selfhost 里数以千计的 `panic`/`todo`/`expect` 一个字节没动。
 - **会变的**（预期，照实声明 `Emit-Change`）：
   - `doc --builtins`：`panic`/`todo`/`expect` 的签名多 `at`，多一个 `caller`，内建类型多 `Loc`，std 多 `std/loc`。
   - `lsp`：补全与签名里的这几个签名文本。
   - `emit selfhost` 等：std 多一个模块，`stdsrc` 重生成；std 的 jar 是否进 emit 语料以实测为准。
-- **Core golden 归一**：`selfhost-core-diff.sh` 现在只归一 ` at <file>.dawn:N:N`。转发调用把位置作为**独立的字符串常量实参**传出，
-  形如 `str "src/t.dawn:20:3"`，需要第二条规则：整个字面量恰好是 `<file>.dawn:N:N` 的，行列归一。selfhost 自己暂不调用带 `caller()` 的函数，
-  所以本刀的 Core golden 预计只多一个 `std.loc` 的 dump（若 dump 覆盖它）；规则先加上，负控用一个转发调用的纯移动。
+- **Core 差分归一**：`selfhost-core-diff.sh` 原先只归一 ` at <file>.dawn:N:N`。`Loc` 作为值传给函数时，Core dump 里是
+
+  ```text
+  let v1 : Loc
+    str "src/t.dawn:20:3"
+  ```
+
+  第二条规则只认这个形状：**紧跟在 `let <名> : Loc` 之后**的 `str "<file>.dawn:N:N"`，行列归一。不按字符串的样子认：
+  程序自己写的 `"x.dawn:1:2"` 是程序计算用的值，照原样比。两条规则搬进 `scripts/core-site-normalise.py`，它的 `--selftest`
+  钉住「像位置的用户字符串不归一、`Loc` 绑定归一」，挂在 tree-policy（本机 0.01 s）；负控：去掉「前一行是 `Loc` 绑定」的条件，
+  自测红在 `str "x.dawn:1:2"` 那一条。selfhost 自己不调用带 `caller()` 默认的函数，所以 selfhost 的 Core 里没有这种绑定。
 
 ## 七、测试与负控
 
-- **两后端**：`scripts/spike-native/caller_loc.dawn`（`matrix.txt` 登记）：用户函数省掉 / 显式 `at`；两跳转发与「不转发」的对照；
-  `panic(msg, at: at)`、`todo(at: at)`、方法式 `o.expect(m, at: at)`；`loc.here()` 经函数值补实参；`ä🎈` 之后的码点列；
-  `Show`/`Display`/`line`/`col`；最后一个不捕获。`.expect` 手写行列，两后端各自比。
-- **单元**：checker 的三条拒绝（默认值里套一层、函数体里、当值用）含消息、hint、位置；遮蔽 `caller` 不拒；
-  `tast_positions` 的占位换常量与 std 无位置；`interp_test` 的 comptime 一条；LSP：悬停、签名帮助、内联提示跳过 `caller()`。
-- **`[deps]`**：checker 语料里一个两包项目，包函数带 `at`，入口调用它，钉住位置是入口的 `src/main.dawn:L:C`。
-- **负控**（各自先红再还原）：
-  1. `default_call` 不认 `caller_params`（退回普通默认值路径）：编译或测试红；
-  2. `.expect` 里一个列号加一：两后端的检查都红；
-  3. 降低把字面量 `at` 也走转发分支：prev-diff 的 emit 语料变（现有 `panic` 的 Core 不再是单个 `CStr`），证明第六节那条负控有牙；
-  4. Core 归一：一个转发调用所在函数整体下移一行，`--raw` 红、归一后不变。
+- **两后端**：`scripts/spike-native/caller_loc.dawn`（`matrix.txt` 登记，带 `.exits-nonzero`）：用户函数省掉 `at`；两跳转发与
+  「不转发」的对照；`panic` 经函数值、用 `loc.here()` 补实参；`expect` 与 `todo` 的转发；`loc.here()` 的 `Display`/`line`/`col`/`path`；
+  `"ä🎈"` 之后的码点列；`const` 里的 `loc.here()`；`show(Loc)`；最后一个不捕获。`.expect` 按手算的行列写，JVM 与 native 各自对它比，
+  `stderr`/`exit` 两后端互比。
+- **单元**：checker「a caller() default is the call's site, and is legal nowhere else」（注册期的 `caller_params`、遮蔽、四条拒绝、
+  `panic` 省掉与写出 `at`）；`tast_positions` 的占位换常量、std 无位置；`interp_test` 的 comptime（`const A: Loc` 折成位置串，
+  转发的 `panic` 在 comptime 报调用点）；std/loc 自己的四条测（含路径带 `:` 的 `c:/work/src/main.dawn:12:7` 从右切）；
+  LSP：悬停 `panic` 显示 `fn panic(msg: String, at: Loc = caller()) -> Never`、悬停插值消息里的 `40` 仍得 `Int`，
+  内联提示对用户函数与内建的 `caller()` 默认都不显示、同一调用里的普通默认照常显示。
+- **checker 语料**：`scripts/checker-corpus/cases/caller_rules.d`，带 `[deps]` 的两包项目：五条拒绝按序钉住；入口省掉或转发包函数的 `at`
+  无诊断。另外三个既有 golden 只因「内建类型清单多 `Loc`」「std 模块清单多 `std/loc`」两处提示文本而重录。
+- **`[deps]` 端到端**（本机 scratch，不进仓）：入口 `src/main.dawn` 调包函数 `check.positive(-1)`，消息是 `not positive at src/main.dawn:10:22`。
+- **负控**（各自先红再还原，数字见 L4 报告）：
+  1. `default_call` 不认 `caller_params`：工具链自举即红（`codegen: unknown fn std/str.expect$default$2`）；
+  2. `caller_loc.expect` 第 8 行列号 40 改 41：`caller_loc:jvm`、`caller_loc:native` 都红，还原后 `differential ok`；
+  3. 降低把字面量 `at` 也走 `loc_suffix`：用新工具链编基线的 `examples/errors/barriers.dawn`，`barriers.class` 不再与基线相同；
+     编基线 selfhost 有 57 个 class 不同。还原后两者都只多一个 `std/loc.class`（第六节）；
+  4. Core 归一：`core-site-normalise.py` 去掉「前一行是 `Loc` 绑定」的条件，`--selftest` 红在用户字符串 `"x.dawn:1:2"`。
 
 ## 八、本刀范围与后续
 
