@@ -68,7 +68,7 @@
 # declarations, not from a global counter (the note beside `ty_key` in
 # `selfhost/src/ir/core.dawn`), so they need no normalisation.
 #
-# ## The one normalisation: failure sites
+# ## The one normalisation: sites
 #
 # Line numbers left Core's nodes with #142, but they are back in its string
 # constants: every `e!`, `panic`, `todo`, `expect` and `assert` outside std
@@ -80,6 +80,14 @@
 # (and the column-less form older revisions baked to ` at <file>.dawn:<line>`).
 # The path is kept: a module that moved to another file is news. `--raw`
 # compares the dumps as written; `--out` always keeps them as written.
+#
+# Since L4 a site also reaches Core as a value: an omitted `at: Loc =
+# caller()` is the call's `<file>.dawn:<line>:<col>`, bound to a local of type
+# `Loc` (docs/caller-location-design.md section 6). Its line and column are
+# normalised the same way, recognised by that typed binding and never by the
+# string's shape, so a program's own string that reads like a site is still
+# compared as written. Both rules live in scripts/core-site-normalise.py, whose
+# `--selftest` holds that line.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -198,10 +206,7 @@ if [ "$raw" = 0 ]; then
   for side in base head; do
     ( cd "$WORK/$side" && find . -name '*.core' ) | while read -r rel; do
       mkdir -p "$(dirname "$CMP/$side/$rel")"
-      sed -E \
-        -e 's/( at [^ "]+\.dawn):[0-9]+:[0-9]+/\1:<line>:<col>/g' \
-        -e 's/( at [^ "]+\.dawn):[0-9]+/\1:<line>/g' \
-        "$WORK/$side/$rel" > "$CMP/$side/$rel"
+      python3 "$ROOT/scripts/core-site-normalise.py" "$WORK/$side/$rel" "$CMP/$side/$rel"
     done
   done
 fi

@@ -559,7 +559,10 @@ fn hint_default_args(qc: QCx, q: Q, s: Sig, args: List[Arg], first: Int, name_hi
   var omitted: List[DefaultArg] = []
   var pi = 0
   for pn in s.param_names {
-    if not map.has(filled, pi) {
+    # a `caller()` default is the site of the very call being read, which
+    # the reader is looking at; a hint for it would sit on every `panic` and
+    # `.expect` (docs/caller-location-design.md 5)
+    if not map.has(filled, pi) && not list.contains(s.caller_params, pi) {
       match get(s.param_defaults, pi) {
         Some(Some(text)) -> { omitted = omitted ++ [DefaultArg { name: pn, text: text, fill: default_fill(s, te, pi) }] }
         _ -> return q

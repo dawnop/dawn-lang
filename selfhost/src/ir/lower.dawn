@@ -22,6 +22,7 @@ use check/types.{
   subst,
   reduce_via_bindings,
   peel_opaque,
+  ty_loc,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TyJava,
   DICT_ADT_ID,
@@ -1258,7 +1259,7 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## representation is `Int`, so the bridge is the identity and lowering drops
 ## it. A backend never learns the name.
 pub fn lowered_intrinsics() -> List[String] = {
-  var out = ["parse_float", "char_unchecked", "dbg"]
+  var out = ["parse_float", "char_unchecked", "dbg", "caller"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries", "fold"] {
     out = out ++ ["map_${op}"]
@@ -1338,10 +1339,10 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   #    answers for the same list in the same paragraph.
   assert len(inline) == 39
   assert len(host) == 2
-  assert len(gone) == 21
+  assert len(gone) == 22
   assert len(staged) == 0
-  # and the five groups account for all 133 names, with none left over
-  assert len(map.keys(it)) == 113
+  # and the five groups account for all 134 names, with none left over
+  assert len(map.keys(it)) == 114
   assert len(internal) == 22
 }
 
@@ -3629,6 +3630,12 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       if name == "dbg" {
         return lower_dbg(st, args, wits, ty)
       }
+      if name == "caller" {
+        return lower_caller(st, args)
+      }
+      if name == "loc_suffix" {
+        return lower_loc_suffix(st, args[0])
+      }
       # a failure that carries its call site (check/tast_positions) has the
       # site folded into its message here, and is lowered as the call it
       # then is; nothing below this arm sees a site
@@ -4329,14 +4336,19 @@ fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
   }
 }
 
-## A sited `panic`/`todo`/`expect` call as the plain call it means, its
-## site appended to the message; `None` for every other call.
+## A `panic`/`todo`/`expect` call as the plain call it means, its `at`
+## argument folded into the message; `None` for every other call, and for a
+## call already folded (no `at` left).
 ##
-## A literal message stays one literal, so a sited `panic("boom")` is the
-## same single `CStr` in Core that it was before it had a site, and an
-## `expect` on a hot path pays no concatenation for it. `todo` becomes the
-## `panic` it always was, with the text both backends give a bare `todo`
-## (still the intrinsic std's calls reach, since std carries no site).
+## An omitted `at` is the checker's `caller` placeholder, by now carrying the
+## call's own site (check/tast_positions), and that is folded at compile time:
+## a literal message stays one literal, so `panic("boom")` is the same single
+## `CStr` in Core that it was before `at` existed (docs/caller-location-design.md
+## section 6), and an `expect` on a hot path pays no concatenation for it. A
+## placeholder with no site (std) folds to nothing: `todo` stays the intrinsic
+## both backends give its own text. An `at` passed on from somewhere else is
+## only known when the failure runs, so the message is followed by
+## `loc_suffix(at)`, which only the failing path evaluates.
 fn unsite(
   name: String,
   args: List[TExpr],
@@ -4345,20 +4357,55 @@ fn unsite(
   lo: Int,
   hi: Int,
   ty: Ty
-) -> Option[TExpr] =
-  match tast_positions.split_site(name, args) {
-    (_, None) -> None
-    (written, Some(site)) ->
+) -> Option[TExpr] = {
+  let n = if name == "panic" { 1 } else if name == "todo" { 0 } else if name == "expect" { 2 } else { -1 }
+  if n < 0 || len(args) != n + 1 { return None }
+  let written = list.take(args, n)
+  let at = args[n]
+  let suffix: Option[TExpr] = match at {
+    XCallBuiltin("caller", cargs, _, _, _, _, _) ->
+      match tast_positions.split_site("caller", cargs) {
+        (_, Some(l)) -> Some(XStr([TSPText(" at " ++ l)], lo, lo))
+        (_, None) -> None
+      }
+    _ -> Some(XCallBuiltin("loc_suffix", [at], wits, [], lo, lo, TyString))
+  }
+  match suffix {
+    None -> Some(XCallBuiltin(name, written, wits, evid, lo, hi, ty))
+    Some(sx) ->
       if name == "todo" {
-        Some(XCallBuiltin("panic", [XStr([TSPText("not yet implemented" ++ site)], lo, lo)],
+        Some(XCallBuiltin("panic", [with_suffix(XStr([TSPText("not yet implemented")], lo, lo), sx)],
           wits, evid, lo, hi, ty))
       } else {
-        let last = len(written) - 1
-        let msg = written[last]
-        Some(XCallBuiltin(name, list.take(written, last) ++ [with_site(msg, site)],
+        let last = n - 1
+        Some(XCallBuiltin(name, list.take(written, last) ++ [with_suffix(written[last], sx)],
           wits, evid, lo, hi, ty))
       }
   }
+}
+
+## ` at <loc>` for a `Loc` known only at run time, empty for the no-site
+## `Loc` a std call omitting `at` gets (docs/caller-location-design.md 3.1).
+fn lower_loc_suffix(st: LSt, at: TExpr) -> (LSt, CExpr) = {
+  let (st1, v) = lower_expr(st, at)
+  let (st2, sym) = fresh_sym(st1)
+  let held = CLocal(sym, TyString)
+  (st2, CBlock([CSLet(sym, TyString, v)],
+    Some(CIf(CBinary(CEq, CStr(""), held, TyBool), CStr(""), Some(cat(CStr(" at "), held)), TyString)),
+    TyString))
+}
+
+## A call's own site as the `Loc` it is: the string, bound to a local of type
+## `Loc`. The binding costs a backend nothing and is there for the reader of
+## Core: a literal has no type in Core, and this is how a dump tells a site
+## from a user's string that happens to look like one, which is what
+## `selfhost-core-diff.sh` normalises by (docs/caller-location-design.md 6).
+fn lower_caller(st: LSt, args: List[TExpr]) -> (LSt, CExpr) = {
+  let (_, l) = tast_positions.split_site("caller", args)
+  let (st1, sym) = fresh_sym(st)
+  let lt = ty_loc()
+  (st1, CBlock([CSLet(sym, lt, CStr(l.unwrap_or("")))], Some(CLocal(sym, lt)), lt))
+}
 
 ## `dbg(x)` as the block it means (docs/source-location-design.md section
 ## 6.3): bind the argument, write its line, answer it.
@@ -4394,9 +4441,11 @@ fn lower_dbg(st: LSt, args: List[TExpr], wits: List[WitRef], ty: Ty) -> (LSt, CE
     Some(held), ty))
 }
 
-fn with_site(msg: TExpr, site: String) -> TExpr =
-  match msg {
-    XStr(parts, lo, hi) -> {
+## `msg ++ suffix`, folded into the message's last literal part when both are
+## literal text, so a literal message stays one literal.
+fn with_suffix(msg: TExpr, suffix: TExpr) -> TExpr =
+  match (msg, suffix) {
+    (XStr(parts, lo, hi), XStr([TSPText(site)], _, _)) -> {
       let n = len(parts)
       if n > 0 {
         match parts[n - 1] {
@@ -4409,8 +4458,7 @@ fn with_site(msg: TExpr, site: String) -> TExpr =
     }
     _ -> {
       let lo = x_lo(msg)
-      XBinary(BConcat, msg, XStr([TSPText(site)], lo, lo), None, lo, lo, lo, x_hi(msg),
-        TyString)
+      XBinary(BConcat, msg, suffix, None, lo, lo, lo, x_hi(msg), TyString)
     }
   }
 
@@ -5422,6 +5470,7 @@ test "the flat module and the grouped functions are one lowering" {
       param_tys: [tt, tt],
       param_names: ["a", "b"],
       param_defaults: [],
+      caller_params: [],
       ret: TyBool,
       eff: EPure,
       is_builtin: false,
@@ -5535,6 +5584,7 @@ test "emitted_core carries the test bodies and what they hoisted" {
       param_tys: [ti, ti],
       param_names: ["a", "b"],
       param_defaults: [],
+      caller_params: [],
       ret: TyBool,
       eff: EPure,
       is_builtin: false,

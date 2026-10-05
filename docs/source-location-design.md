@@ -1,6 +1,6 @@
 # 源码位置：路径规范、panic 位置与 `dbg`
 
-> 状态：**current**（L1、L2、L3 已落地，L4 为已裁决、未实现的刀序）。2026-10-03：L1 分支 `fix/source-position-paths`，关 #401；
+> 状态：**current**（L1、L2、L3、L4 已落地；L4 的设计与落地记录在 [caller-location-design.md](caller-location-design.md)）。2026-10-03：L1 分支 `fix/source-position-paths`，关 #401；
 > L2 分支 `feat/panic-call-site`，关 #396（第五节）；L3 分支 `feat/dbg-builtin`（第六节）。
 > 依据：裁决 `agent-handoff/ruling-source-location-20261003.md`，调研 `agent-handoff/research-debug-print-report-20261003.md`
 > （仓库行号指 `9fb834d0`，外部出处抓取于 2026-10-03）。本文是那份调研 §一至§三的压缩，加上 L1 的落地说明。
@@ -83,7 +83,7 @@ comptime 中恒等、不打印。`[deps]` 加载的模块与 std 里出现 `dbg`
 | **L1**（已落地） | 位置路径规范；Playground 运行输出 `strip_dir`；两个 cwd 构建字节相同的负控 | 否 | 关 #401 |
 | **L2**（已落地，第五节） | `panic`/`todo`/`assert` 带调用点位置（`site` 加列）；Core golden 对位置后缀归一；两后端各一测 | §8.2 删「Dawn 层栈迹」，改为 `panic: <msg> at <path>:<line>:<col>` | 关 #396 |
 | **L3**（已落地，第六节） | `dbg` 内建 + `dbg_line` intrinsic；`[deps]`/std 拒绝；仓内门禁；comptime 恒等 | 新增 §8.3 | |
-| L4 | `caller()` 默认参数 + std `Loc`；`panic`/`todo` 签名加 `at` | 独立设计文档 | |
+| **L4**（已落地，[caller-location-design.md](caller-location-design.md)） | `caller()` 默认参数 + `Loc`（std/loc）；`panic`/`todo`/`expect` 签名加 `at` | 新增 §8.4 | |
 
 ## 四、L1：位置路径规范
 
@@ -162,7 +162,7 @@ comptime 中恒等、不打印。`[deps]` 加载的模块与 std 里出现 `dbg`
 - **std 里的失败不带位置**（std 的 `site_path` 是 None，与 L1 同一条规则），形状与修前逐字节相同：`todo` 仍是 `todo` intrinsic，
   后端给它的固定文案不变。L4 之后 std 的失败报调用者的行。
 - 把 `panic`/`todo`/`expect` 当函数值用（`let f = panic`）时，经值调用**不带位置**：位置属于调用点，函数值没有调用点。
-  这与「函数当值用丢默认值」是同一个丢失规则，L4 的 `caller()` 也会这样丢。
+  这与「函数当值用丢默认值」是同一个丢失规则。（L4 之后 `at` 是普通形参，经值调用必须给一个 `Loc`，见 caller-location-design 3.5。）
 - 编译器自己（selfhost 是普通项目）的 panic 从此也带 `src/<模块>.dawn:L:C`，内部错误报告因此能直接定位。
 
 **`x!` 同刀加列**：一致性是唯一理由，也足够。spec §8.2 给出一个格式 `at <path>:<line>:<col>`，若 `!` 独留
@@ -322,7 +322,7 @@ run-diff 只有 `test playground (with [deps])`（`web` 的测试改为断言带
 - **L1 用 `-ffile-prefix-map` 式的命令行重映射**：把可复现交给调用者记得传参，默认值仍然是错的。
 - **L2 把位置作为 `ForeignError` 的独立字段**：调研 §3.5 已否，按错误模型决定看 `kind`，没有人应当按位置做决定。
 - **L2 给运行期索引越界、除零、`unreachable match` 加位置**：这些失败由 std 或降低生成，没有作者写下的调用点；
-  下标 `c[i]` 的失败在 std 的 `Index` impl 里，L4 的 `caller()` 才是它的路。
+  下标 `c[i]` 的失败在 std 的 `Index` impl 里；`Index` 是 trait 方法，不收默认值，所以 L4 的 `caller()` 也够不着它（caller-location-design 第八节）。
 - **L2 在 Core golden 里归一路径**：同一个模块换了文件不是纯移动。
 - **L3 用 parser 边表传实参文本**：见 6.2，声明出口切片取自同一修订，不要第二条通道，也不要为遮蔽与管道特判。
 - **L3 按 token 重排实参文本**（Rust `stringify!` 式）：那是反打印；原文加跨行折叠已经让一行是一行。

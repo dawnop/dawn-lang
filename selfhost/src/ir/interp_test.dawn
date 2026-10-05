@@ -41,6 +41,7 @@ fn test_sig(name: String, params: List[Ty], ret: Ty) -> Sig =
     param_tys: params,
     param_names: [],
     param_defaults: [],
+    caller_params: [],
     ret: ret,
     eff: EPure,
     is_builtin: false,
@@ -845,6 +846,31 @@ test "a comptime failure names its call site, in the words the program would pri
     "comptime: panicked: not yet implemented at src/m.dawn:4:17",
     "comptime: a nested comptime block did not fold"
   ]
+}
+
+test "a caller() default folds at compile time to the site of the call" {
+  # the site is a constant before the interpreter runs, so a const holds the
+  # site of the call written in it, and a failure passed an `at` reports that
+  # site in the words a backend prints
+  let src = "fn here(at: Loc = caller()) -> Loc = at\n" ++
+    "fn check(n: Int, at: Loc = caller()) -> Int = if n > 2 { panic(\"too big\", at: at) } else { n }\n" ++
+    "const A: Loc = comptime { here() }\n" ++
+    "const B: Int = comptime { check(3) }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let cx0 = Cx { ..cx_new(Some("m"), Some("src/m.dawn")), line_starts: lexer.line_starts_of(src) }
+  let (cx1, tm) = check_module(cx0, m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert map(out.diags, d => d.msg) == [
+    "comptime: panicked: too big at src/m.dawn:4:27",
+    "comptime: a nested comptime block did not fold"
+  ]
+  assert map.get(out.consts, "A") == Some(VStr("src/m.dawn:3:27"))
 }
 
 test "dbg is the identity in a const, and writes nothing" {

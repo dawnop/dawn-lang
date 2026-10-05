@@ -57,7 +57,7 @@ use check/types.{
   sig_abi_eff, ty_eff_vars_all, label_key, var_key, assoc_key,
   EvidenceRole, LabelSlot, VariableSlot, AssociatedSlot, evidence_role_key,
   ev_label_name, ev_assoc_name, ev_var_name,
-  EV_PACK_ID, ev_pack_ty,
+  EV_PACK_ID, ev_pack_ty, ty_loc,
   AdtI, CtorI, FieldI, EffectI, TraitI, ImplI, Sym, Sig,
   ty_show, ctor_render, fn_return_show, eff_ctl_labels, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
@@ -2531,6 +2531,7 @@ test "propagate demands matching option and result shapes" {
     param_tys: [],
     param_names: [],
     param_defaults: [],
+    caller_params: [],
     ret: opt_ty(TyInt),
     eff: EPure,
     is_builtin: false,
@@ -3996,7 +3997,7 @@ test "an isolated context reports its own effects, then restores all ten fields"
       # the outer witness, not restoring leaves the body's
       eff_witness: outer_wit,
       current_sig: Some(Sig {
-        name: "outer", param_tys: [], param_names: [], param_defaults: [], ret: TyInt,
+        name: "outer", param_tys: [], param_names: [], param_defaults: [], caller_params: [], ret: TyInt,
         eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
         owner: None, trait_id: None, op_of: None, inferring: false
       }),
@@ -4291,6 +4292,13 @@ pub(pkg) fn check_fn_value(
       "call it where the value is, `dbg(e)` or `e |> dbg`, or wrap it in a lambda: (x) => dbg(x)"),
       TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
   }
+  # `caller()` is the site of a call, and a value has no call to be the site
+  # of (docs/caller-location-design.md 3.2)
+  if f.is_builtin && f.name == "caller" {
+    return (cerr_h(cx, "`caller` cannot be used as a value", lo, hi,
+      "write `at: Loc = caller()` as a parameter's default, or call `loc.here()` for the site of a call"),
+      TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
+  }
   if len(f.param_tys) > fn_max_params() {
     return (check_value_arity(cx, len(f.param_tys), lo, hi), TyError, XError(owner_off(initial, lo), owner_off(initial, hi)))
   }
@@ -4567,6 +4575,7 @@ test "fn values instantiate from the expected type" {
   let tv = TyVar("T", 0)
   let bounded = Sig {
     name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], param_defaults: [],
+    caller_params: [],
     ret: TyList(tv),
     eff: EPure, is_builtin: true, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
     owner: None, trait_id: None, op_of: None, inferring: false
@@ -4621,7 +4630,7 @@ test "bounded fn values read ordered evidence from the caller and expose ABI-onl
   # omits it. Its instance must reach the value's row and eventual caller.
   let bounded = Sig {
     name: "with_callback", param_tys: [tv, TyFn([], TyInt, ev)],
-    param_names: ["x", "callback"], param_defaults: [], ret: TyInt, eff: row,
+    param_names: ["x", "callback"], param_defaults: [], caller_params: [], ret: TyInt, eff: row,
     is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [ev],
     owner: None, trait_id: None, op_of: None, inferring: false
   }
@@ -8129,6 +8138,13 @@ fn default_call(
   lo: Int,
   hi: Int
 ) -> TExpr = {
+  if list.contains(s.caller_params, idx) {
+    # the call's own site: a placeholder the declaration's exit turns into
+    # the constant (`tast_positions`), spanning the call it is the site of
+    let no_wits: List[WitRef] = []
+    let no_evs: List[TExpr] = []
+    return XCallBuiltin("caller", [], no_wits, no_evs, owner_off(cx, lo), owner_off(cx, hi), ty_loc())
+  }
   let none_tid: Option[Int] = None
   let pty = reduce_instantiated(cx, subst(s.param_tys[idx], m, em), m)
   XCallFn(s.owner, emitted_fn_name(s, callee) ++ "\$default\$" ++ to_string(idx), prefix, wits, [], none_tid,
@@ -8179,7 +8195,10 @@ fn arrange_call_args(
         if wi < prev { mono = false }
         prev = wi
       }
-      None -> if pi > 0 && param_has_default(s, pi) { reads_params = true }
+      # a `caller()` default reads no parameter: it is the call's site
+      None -> if pi > 0 && param_has_default(s, pi) && not list.contains(s.caller_params, pi) {
+        reads_params = true
+      }
     }
     pi = pi + 1
   }
@@ -8291,6 +8310,39 @@ test "dbg is the program's own: refused in a [deps] package, in std, and as a va
   let (shadow, _) = parser.parse_module("fn dbg(n: Int) -> Int = n\nfn f(n: Int) -> Int = dbg(n)\n")
   let (dep2, _) = check_module(Cx { ..base, dep_package: Some("json") }, shadow, env)
   assert len(dep2.diags) == 0
+}
+
+test "a caller() default is the call's site, and is legal nowhere else" {
+  let src = "fn f(n: Int, at: Loc = caller()) -> Loc = at\nfn g() -> Loc = f(1)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
+  assert len(cx.diags) == 0
+  # registration records it, so a call in another module knows without the body
+  match map.get(cx.fns, "f") {
+    Some(s) -> {
+      assert s.caller_params == [1]
+      assert s.param_defaults == [None, Some("caller()")]
+    }
+    None -> panic("f is not registered")
+  }
+  # a module's own `caller` shadows the builtin, and its default is ordinary
+  let (m2, _) = parser.parse_module("fn caller() -> Int = 3\nfn f(n: Int = caller()) -> Int = n\n")
+  let (cx2, _) = check_module(seed_prelude(test_cx()), m2, env)
+  assert len(cx2.diags) == 0
+  match map.get(cx2.fns, "f") {
+    Some(s) -> { assert s.caller_params == [] }
+    None -> panic("f is not registered")
+  }
+  let elsewhere = "`caller()` can only be the whole default value of a parameter"
+  assert msgs_of("fn f() -> Loc = caller()\n") == [elsewhere]
+  assert msgs_of("fn id(l: Loc) -> Loc = l\nfn f(at: Loc = id(caller())) -> Loc = at\n") == [elsewhere]
+  assert msgs_of("fn f() -> fn() -> Loc = caller\n") == ["`caller` cannot be used as a value"]
+  assert msgs_of("fn f(s: String = caller()) -> String = s\n") ==
+    ["parameter `s` is String but its default value is Loc"]
+  # a builtin's `at` is filled the same way
+  assert msgs_of("fn f() -> Int = panic(\"x\")\nfn g(at: Loc) -> Int = panic(\"x\", at: at)\n") == []
 }
 
 test "dbg renders through Show, and says so when there is none" {
@@ -8523,6 +8575,13 @@ fn check_call(
   }
   if s.is_builtin && s.name == "dbg" {
     cx1 = refuse_dbg_outside_the_program(cx1, clo, chi)
+  }
+  # A default that is exactly `caller()` never reaches here: registration
+  # took it as the call's own site and nothing checks it as an expression. So
+  # every `caller()` that is checked is one somewhere else.
+  if s.is_builtin && s.name == "caller" {
+    cx1 = cerr_h(cx1, "`caller()` can only be the whole default value of a parameter", clo, chi,
+      "declare `at: Loc = caller()` on the function, and pass `at` on to what reports the failure")
   }
   if s.is_builtin && s.name == "cast" {
     # T is bound here (an unbound type param already errored above). It must be
@@ -11641,6 +11700,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     param_tys: [TyInt, TyBool],
     param_names: ["dx", "wrap"],
     param_defaults: [],
+    caller_params: [],
     ret: TyUnit,
     eff: EPure,
     is_builtin: false,
@@ -11763,6 +11823,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   let gsig = Sig {
     name: "hold", param_tys: [TyList(tv), tv], param_names: ["xs", "probe"],
     param_defaults: [Some("[]"), None],
+    caller_params: [],
     ret: TyInt,
     eff: EPure, is_builtin: false, tparams: [tv], constraints: [[EQ_ID]], eparams: [],
     owner: Some("m"), trait_id: None, op_of: None, inferring: false
@@ -11817,6 +11878,7 @@ test "omitted defaults run after the written arguments, in declaration order" {
     param_tys: [TyInt, TyInt, TyBool, TyInt],
     param_names: ["a", "b", "c", "d"],
     param_defaults: [None, Some("a"), None, Some("b")],
+    caller_params: [],
     ret: TyInt,
     eff: EPure,
     is_builtin: false,
@@ -12649,6 +12711,7 @@ pub fn default_sig(parent: Sig, fname: String, k: Int, pty: Ty) -> Sig =
     param_tys: list.take(parent.param_tys, k),
     param_names: list.take(parent.param_names, k),
     param_defaults: [],
+    caller_params: [],
     ret: pty,
     eff: EPure,
     is_builtin: false,
@@ -12795,7 +12858,15 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]
   for p in d.params {
     match p.default {
       None -> { out = out ++ [no_tdefault()] }
-      Some(_) -> {
+      Some(de) -> if list.contains(s.caller_params, k) {
+        # no function to synthesize: the value is each call's own site
+        let pty = s.param_tys[k]
+        if not assignable(cx1, ty_loc(), pty) {
+          cx1 = cerr(cx1, "parameter `" ++ p.name ++ "` is " ++ ty_show(cx1.adts, pty) ++
+              " but its default value is Loc", e_lo(de), e_hi(de))
+        }
+        out = out ++ [no_tdefault()]
+      } else {
         let (next, value) = check_param_default(cx1, d, s, k)
         cx1 = next
         out = out ++ [Some(value)]
@@ -12977,6 +13048,7 @@ fn test_sig(name: String) -> Sig =
     param_tys: [],
     param_names: [],
     param_defaults: [],
+    caller_params: [],
     ret: TyUnit,
     eff: EIo,
     is_builtin: false,

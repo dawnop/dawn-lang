@@ -1,0 +1,52 @@
+# A function names its caller's line by taking `at: Loc = caller()` (L4).
+#
+# An omitted `caller()` default is the site of the call that omitted it,
+# filled in by the checker and resolved where the call's declaration ends
+# (docs/caller-location-design.md). Passing `at` on is what makes a helper
+# report its own caller; a helper that does not pass it on reports itself.
+# `panic`, `todo` and `expect` take the same `at`, so a site passed on folds
+# into their message at run time, while an omitted one is the constant L2
+# already baked. The messages come back as values, so `.expect` pins them,
+# and the last failure is left uncaught for `stderr` and `exit`.
+#
+# Columns count code points: the line with `ä🎈` before the call is where a
+# backend counting bytes or UTF-16 units would disagree.
+
+use std/loc
+
+fn check_eq(a: Int, b: Int, at: Loc = caller()) -> Unit =
+  if a != b { panic("${to_string(a)} != ${to_string(b)}", at: at) }
+
+fn check_doubles(a: Int, at: Loc = caller()) -> Unit = check_eq(a, a * 2, at: at)
+
+fn check_zero(a: Int) -> Unit = check_eq(a, 0)
+
+fn said(f: fn() -> Unit) -> String =
+  match catch_panic(f) {
+    Ok(_) -> "no panic"
+    Err(e) -> e.message
+  }
+
+fn through_value(f: fn(String, Loc) -> Never) -> String = said(() => f("as a value", loc.here()))
+
+fn first(xs: List[Int], at: Loc = caller()) -> Int = get(xs, 0).expect("empty list", at: at)
+
+fn later(at: Loc = caller()) -> Int = todo(at: at)
+
+const BUILT: Loc = loc.here()
+
+pub fn main() -> Unit !io = {
+  println(said(() => check_eq(1, 2)))
+  println(said(() => check_doubles(3)))
+  println(said(() => check_zero(5)))
+  println(through_value(panic))
+  println(said(() => if first([]) > 0 { () } else { () }))
+  println(said(() => if later() > 0 { () } else { () }))
+  let s = "ä🎈"
+  let h = loc.here()
+  println("${h} ${to_string(loc.line(h))} ${to_string(loc.col(h))} ${loc.path(h)} ${s}")
+  println(said(() => { if "ä🎈" != "" { check_eq(0, 1) } }))
+  println("${BUILT} ${show(h)}")
+  println(said(() => check_eq(4, 4)))
+  check_doubles(7)
+}
