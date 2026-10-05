@@ -27,7 +27,7 @@ use front/lexer
 use front/token.{
   Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, FOR, TRUE, FALSE, IMPL, EFFECT, TYPE, PUB,
+  USE, ELSE, FN, FOR, IF, MATCH, WHILE, NOT, TRUE, FALSE, IMPL, EFFECT, TYPE, PUB,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -51,7 +51,8 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   let marks = Marks {
     unary: unary_minus(raw),
     postfix: postfix_bang(raw),
-    keywords: contextual_keywords(raw)
+    keywords: contextual_keywords(raw),
+    signature: signature_arrows(raw)
   }
   Ok(reflow(cps, stream, marks, block_arrow(cps, raw)))
 }
@@ -377,9 +378,25 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
   false
 }
 
-## The token-level facts `space` needs, each a set of span starts: unary `-`,
-## postfix `!`, and the contextual keywords standing in their position.
-type Marks = { unary: Set[Int], postfix: Set[Int], keywords: Set[Int] }
+## The token-level facts `space` and `reflow` need, each a set of span starts:
+## unary `-`, postfix `!`, the contextual keywords standing in their position,
+## and the `->` arrows that end a parameter list.
+type Marks = { unary: Set[Int], postfix: Set[Int], keywords: Set[Int], signature: Set[Int] }
+
+## Span starts of the `->` arrows that end a signature's or a function type's
+## parameter list (`is_signature_arrow`). A line wrapped after one of these
+## continues the signature with its result type; it does not begin the body, so
+## a `{` further along the wrapped line still belongs to the declaration. A
+## match arm's `->` is not one: what follows it is a new expression.
+fn signature_arrows(raw: List[Token]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  var i = 0
+  while i < len(raw) {
+    if raw[i].kind == ARROW && is_signature_arrow(raw, i) { out = set.insert(out, raw[i].lo) }
+    i = i + 1
+  }
+  out
+}
 
 ## Span starts of the contextual keywords (spec §1.4) that sit where they are
 ## keywords rather than names, for the two that can be followed by a bracket:
@@ -418,6 +435,10 @@ fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
 ## bracket when `reflow` picks an anchor.
 type Opener = { at: Int, brace: Bool }
 
+## An `if` reflow has seen: the bracket depth it stands at and the indent of
+## its line.
+type IfAt = { depth: Int, at: Int }
+
 fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) -> String = {
   let unary = marks.unary
   var out: List[String] = []
@@ -434,8 +455,30 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # whole body one level too deep. The wrong answer was a stable fixpoint, so
   # `fmt --check` and the idempotence oracle both agreed with it -- it only
   # surfaced as "9 files are unformatted" in a repo whose files were right.
+  #
+  # The anchor moves where a statement or a new expression begins, never on a
+  # line that only continues an operand (`if a &&` / `b {`, a signature wrapped
+  # after `->`, a pattern after `|`): the brace there still opens the body of
+  # what began a line further up (#532). And it moves at the line's first token
+  # that is not a closer, once the closers have been popped: before, a line
+  # opening with `}` was weighed with that brace still on the stack, and a
+  # record brace inside a later call (`g(` / `S {`) happened to match the
+  # stale depth and was taken for a statement body (#533).
   var logical_indent = 0
   var logical_depth = 0
+  var anchor_pending = false
+  var anchor_moves = false
+  # The innermost `if`/`match`/`while`/`for` whose body brace has not opened
+  # yet: the indent of the line its keyword is on, and the bracket depth there.
+  # A header wrapped across lines continues that construct, so its lines step
+  # in from the keyword's line, however that line was itself reached (`=` then
+  # `if a &&` then `b {`), and its brace anchors there (#532). -1 is none.
+  var header_indent = -1
+  var header_depth = 0
+  # The `if` each still-open bracket depth last saw, innermost last. An `else` brace belongs to the `if` it follows, so
+  # it anchors where that `if` did, even when the `else` sits on a line the
+  # header was wrapped to; an `else if` is a new `if` on its own line.
+  var ifs: List[IfAt] = []
   var line_first = toks[0]
   var prev = toks[0]
   # Last *code* token seen, which is what decides whether a new line continues
@@ -490,18 +533,43 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         let arm_bar = t.kind == PIPE && len(openers) > 0 && openers[len(openers) - 1].brace &&
           not is_cont_ender(pl.kind)
         let cont = not arm_bar && is_continuation(pl, t, unary, barrow)
+        if not cont && len(openers) <= header_depth { header_indent = -1 }
+        let in_header = header_indent >= 0 && header_depth == len(openers)
         line_indent = indent_of(t, openers, line_indent, cont)
+        if cont && in_header && line_indent <= header_indent { line_indent = header_indent + 1 }
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
         out = out ++ [ttext]
-        # A line with no `(`/`[` open above it begins a construct, even when it
-        # continues the previous line: `fn f() =` then `match x {` is a wrapped
-        # statement, and the arms follow the `match`, not the `fn`. A line inside
-        # an unclosed `(` is mid-expression instead, and inherits the anchor.
-        if in_block(openers) {
-          logical_indent = line_indent
-          logical_depth = len(openers)
-        }
+        anchor_pending = true
+        anchor_moves = not (cont && continues_operand(pl, t, marks))
+      }
+    }
+    # A line with no `(`/`[` open above it begins a construct, even when it
+    # continues the previous line: `fn f() =` then `match x {` is a wrapped
+    # statement, and the arms follow the `match`, not the `fn`. A line inside
+    # an unclosed `(` is mid-expression instead, and inherits the anchor.
+    if anchor_pending && not is_closer(t.kind) {
+      anchor_pending = false
+      if anchor_moves && in_block(openers) {
+        logical_indent = line_indent
+        logical_depth = len(openers)
+      }
+    }
+    let headed = t.kind == IF || t.kind == MATCH || t.kind == WHILE || t.kind == FOR
+    if headed && (header_indent < 0 || (have_prev_code && prev_code.kind == ELSE)) {
+      header_indent = line_indent
+      header_depth = len(openers)
+    }
+    if t.kind == IF || t.kind == ELSE {
+      let d = len(openers)
+      while len(ifs) > 0 && ifs[len(ifs) - 1].depth > d { ifs = list.take(ifs, len(ifs) - 1) }
+      let seen = len(ifs) > 0 && ifs[len(ifs) - 1].depth == d
+      if t.kind == IF {
+        if seen { ifs = list.take(ifs, len(ifs) - 1) }
+        ifs = ifs ++ [IfAt { depth: d, at: line_indent }]
+      } else if seen && header_indent < 0 {
+        header_indent = ifs[len(ifs) - 1].at
+        header_depth = d
       }
     }
     if t.kind != COMMENT {
@@ -513,13 +581,16 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       # this statement's body, and follows the statement. Anything else -- a
       # `(`/`[`, or a brace nested inside one (a closure argument, say) -- belongs
       # to the line it is written on.
+      let header = t.kind == LBRACE && header_indent >= 0 && len(openers) == header_depth
       let body = t.kind == LBRACE && len(openers) == logical_depth
       openers = openers ++ [Opener {
-        at: if body { logical_indent } else { line_indent },
+        at: if header { header_indent } else if body { logical_indent } else { line_indent },
         brace: t.kind == LBRACE,
       }]
+      if header { header_indent = -1 }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
       if len(openers) > 0 { openers = list.take(openers, len(openers) - 1) }
+      if len(openers) < header_depth { header_indent = -1 }
     }
     prev = t
     i = i + 1
@@ -549,6 +620,16 @@ fn indent_of(
     content
   }
 }
+
+## Whether a continuation line carries on an operand rather than beginning a new
+## expression: the line above ended in a binary operator, `not` or a
+## signature's `->`, or this line opens with a binary operator. After `=`, `<-`,
+## `=>`, `:` or an arm's `->` a new expression begins, and a body brace on that
+## line is its own construct's.
+fn continues_operand(prev_line_last: Token, line_start: Token, marks: Marks) -> Bool =
+  is_cont_starter(prev_line_last.kind) || prev_line_last.kind == NOT ||
+  set.has(marks.signature, prev_line_last.lo) ||
+  (is_cont_starter(line_start.kind) && not set.has(marks.unary, line_start.lo))
 
 ## Whether the innermost still-open bracket is a brace -- i.e. whether the next
 ## line sits in a statement list rather than inside a `(`/`[`.
@@ -1221,4 +1302,64 @@ test "a body under a wrapped header keeps the header's level" {
   let c = "fn k(xs: List[Int]) -> List[Int] =\n  map(xs,\n    (x: Int) => {\n      x + 1\n    })\n"
   assert fmt_of(c) == c
   assert fmt_of("fn k(xs: List[Int]) -> List[Int] =\nmap(xs,\n(x: Int) => {\nx + 1\n})\n") == c
+}
+
+## #532: a header wrapped after an operator. The wrapped line continues the
+## header; it does not begin the body, so the body sits one level inside the
+## statement and the closing brace at the statement's column. The property
+## checks (scripts/fmt-properties, rule (c)) found both shapes as stable fixed
+## points, so each is pinned from both directions.
+test "a body under a header wrapped after an operator follows the statement" {
+  let i = "fn f(a: Bool, b: Bool) -> Int = {\n  if a &&\n    b {\n    1\n  } else {\n    2\n  }\n}\n"
+  assert fmt_of(i) == i
+  assert fmt_of("fn f(a: Bool, b: Bool) -> Int = {\nif a &&\nb {\n1\n} else {\n2\n}\n}\n") == i
+  # the old answer, which was a fixed point, is now moved
+  assert fmt_of("fn f(a: Bool, b: Bool) -> Int = {\n  if a &&\n    b {\n      1\n    } else {\n" ++
+      "      2\n    }\n}\n") == i
+  # a signature wrapped after its `->`: the result type continues the signature
+  let s = "fn k(a: Int) ->\n  Int = {\n  a\n}\n"
+  assert fmt_of(s) == s
+  assert fmt_of("fn k(a: Int) ->\nInt = {\na\n}\n") == s
+  # an or-pattern wrapped after `|`: the arm's body follows the arm
+  let p = "fn m(x: T) -> Int =\n  match x {\n    A |\n      B -> {\n      1\n    }\n    _ -> 2\n  }\n"
+  assert fmt_of(p) == p
+  assert fmt_of("fn m(x: T) -> Int =\nmatch x {\nA |\nB -> {\n1\n}\n_ -> 2\n}\n") == p
+  # an arm's `->` begins a new expression, so an `if` on the next line still
+  # anchors its own body
+  let a = "fn n(x: Int) -> Int =\n  match x {\n    _ ->\n      if x > 0 {\n        1\n      } else {\n" ++
+    "        2\n      }\n  }\n"
+  assert fmt_of(a) == a
+  # a `match` on a signature's wrapped line owns the arms from its own line
+  let w = "fn o(a: Int,\n  h: Option[Int]) -> Int = match h {\n    Some(x) -> x\n    None -> a\n  }\n"
+  assert fmt_of(w) == w
+}
+
+## #532: a header that is itself on a continuation line. Continuations used to
+## be one level past the bracket content whatever they continued, so `b {`
+## landed at the `if`'s own column and read as its body.
+test "a header wrapped twice steps in from the keyword's line" {
+  let g = "fn g(a: Bool, b: Bool) -> Int =\n  if a &&\n    b {\n    1\n  } else {\n    2\n  }\n"
+  assert fmt_of(g) == g
+  assert fmt_of("fn g(a: Bool, b: Bool) -> Int =\n  if a &&\n  b {\n    1\n  } else {\n    2\n  }\n") == g
+  # an operator chain that is no header keeps sharing one column
+  let c = "fn h(a: Int, b: Int) -> Int =\n  a +\n  b\n"
+  assert fmt_of(c) == c
+}
+
+## #533: a line that opens with a closing brace is weighed after that brace
+## is popped. It used to refresh the body anchor with the brace still on the
+## stack, and a record brace inside a later call matched the stale depth.
+test "a closing brace line leaves no stale anchor behind" {
+  let r = "fn f() -> Unit = [\n  S {\n  },\n  g(\n    S {\n      a: 1,\n    },\n  ),\n]\n"
+  assert fmt_of(r) == r
+  assert fmt_of("fn f() -> Unit = [\nS {\n},\ng(\nS {\na: 1,\n},\n),\n]\n") == r
+  # `} else {` and `) {` still anchor where they did
+  let e = "fn f(c: Bool) -> Int = {\n  if c {\n    1\n  } else {\n    2\n  }\n}\n"
+  assert fmt_of(e) == e
+  # an `else` left on a wrapped header line belongs to its `if`, and an
+  # `else if` there is a new `if` on that line
+  let w = "fn s(n: Int) -> Int =\n  if n <\n    0 { 1 } else {\n    2 }\n"
+  assert fmt_of(w) == w
+  let v = "fn s(n: Int) -> Int =\n  if n <\n    0 { 1 } else if n > 0 { 2 } else {\n      3 }\n"
+  assert fmt_of(v) == v
 }
