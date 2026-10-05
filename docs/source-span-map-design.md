@@ -80,6 +80,9 @@ pub type CSite =
 `nlo, nhi`，`front/ast.dawn:319`），检查器在 `check_method_call` 等处拿得到。五个调用节点
 `XCallFn`/`XCallDyn`/`XCallBuiltin`/`XApply`/`XJava` 各加一个 `nlo: Int` 字段，紧跟 `hi`；
 `tast_positions` 对它做与 `lo`/`hi` 相同的平移（每个 arm 多一个参数，换算函数不变）。
+检查器替别的构造写出的调用节点填 `tast.NO_NAME`（-1），平移时原样保留（`tast_positions.name_at`），
+降低见到它给 `CNoSite`。被调名起点的取法：具名调用取被调名（`check_call` 的 `clo`），方法式取 `name@`，
+应用一个字段 `(r.f)(x)` 取字段名，其余 `XApply` 取被应用表达式的起点，`use java` 调用取成员名。
 
 否决的替代：检查器在 `Cx` 里另记一张「调用 span → 名字起点」的旁表，挂在 `TFun` 上，绕开 tast 节点。
 改动少（不碰 tast_positions、lsp），但它是一张靠 `(lo, hi)` 当键的表：`f(x)` 的默认参数展开合成的
@@ -107,10 +110,11 @@ pub type CSite =
   构造器，不改本刀已有的东西。
 
 - 检查器替别的构造写出的调用也不是书写调用：`with handle` 把块的余下部分包成闭包再空参应用
-  （`checker.check_handle`），`ev_append` 拼证据包，处理器的 cell 与 one-shot 原语。后三者是
-  `internal_intrinsics`，用户写不出来，降低按名字给 `CNoSite`，这条是长久规则。`with handle` 那一个
-  在第一步用形状认：目标是 lambda 且零实参的 `XApply` 给 `CNoSite`，代价是用户手写的 `(() => e)()`
-  也没有 site。第二步 tast 有了 `nlo` 字段后，检查器给合成节点写 `nlo = -1`，降低改看它，形状规则删掉。
+  （`checker.check_handle`），省掉默认实参的 `f$default$k`，`caller()` 占位，eta 包装体，`ev_append`
+  拼证据包，处理器的 cell 与 one-shot 原语，`use java` 静态字段读。它们的 `nlo` 都是 `tast.NO_NAME`，
+  降低据此给 `CNoSite`，不认名字也不认形状。用户手写的 `(() => e)()` 与 `with handle` 的余下块形状相同，
+  前者有 site、后者没有，语料里两者都有。（实现分两步落地：第一步 tast 还没有 `nlo`，降低按内建名与
+  「lambda 零实参应用」的形状认，第二步换成 `NO_NAME`，两条临时规则删掉。）
 
 单射是可检的性质：第七节的 oracle 对每个 `CAt` 找唯一的 parser 调用节点，重复即红。唯一允许的重复
 是降低**复制**了同一段代码（如果有），此时两份拷贝带同一个 site，与 LLVM 复制指令时保留 `DILocation`
@@ -175,19 +179,18 @@ GHC 的 tick 浮动都是在解决同一件事），本刀不预留。
     comptime 折叠掉的），例外按类别逐条列出，不是一个计数阈值。
   例外按解析树判定，三类：构造器（`ctor`）、以所在函数为名的调用（`self`，尾位置的已变成循环；非尾位置
   的照样有 site，由「可靠」一条检查）、降低改写成非调用的内建（`rewritten`：`to_string`、`char_unchecked`）。
-  第一步 tast 还没有 `nlo`，降低以调用起点代替，脚本的 `NLO = "stub"` 明说这一点并按它检查；第二步改成
-  `"parser"`。实测（第一步）：语料 31 个调用 28 个有 site、3 个按类豁免；flash_attn 38/38、softmax 19/19、
-  vadd 6/6。
+  `nlo` 按 parser 判：方法式调用的 `name@`、被应用字段的 `field@`、其余为被应用表达式的起点。
+  实测（`611dd421` 之上）：语料 33 个调用 30 个有 site、3 个按类豁免；flash_attn 34/34、softmax 7/7、
+  vadd 4/4（三个 kernel 在 tileir 0.8.0 迁移后调用变少）。
 - **单元**：`ir/lower` 的 test 块钉住相对偏移、`origin`、默认实参调用与未登记树的 `CNoSite`；
   `ir/coresites` 的 test 块钉住换算；`ir/lint` 新规则 `site`（`DAWN_CORE_LINT=1` 时检查）。
 - **负控**（`scripts/core-sites/mutate.py` 登记、`run.py` 逐个建编译器验红，锚点由
   `mutation-anchor-preflight.py` 每次推送证明恰好一处；`check.py` 与 `run.py` 挂在 nightly 的 core-lint job）：
   1. `absolute`：降低时不减 `base`：check.py 报「is no call the parser sees」；
-  2. `nlo`：被调名起点偏离当前规则：check.py 报「has its name at」。第一步规则是 stub，变异体写 `hi - 1`；
-     第二步换成「方法式调用的 `nlo` 写成 `lo`」；
+  2. `nlo`：模块限定调用 `m.f(x)` 的被调名起点写成调用起点：check.py 报「has its name at」；
   3. `rc-drops-site`：`c/rc` 重建调用时丢 site：check.py（列表取自 rc 之后）报「has no site」；
   4. `dump-prints`：`coredump` 打印 site：语料的 Core dump 变了，即 `selfhost-core-diff.sh` 在每次纯移动上都会报的东西。
-  第一步实测四个全红，`run.py` 墙钟 125 s。
+  实测四个全红，`run.py` 墙钟见报告。
 
 ## 八、改动面与在途冲突
 

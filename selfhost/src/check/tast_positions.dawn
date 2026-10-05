@@ -40,7 +40,7 @@ use std/map
 use std/str
 use check/types.{Sym, TyInt, TyNever, ty_loc}
 use check/tast.{
-  TExpr, TStmt, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TConst,
+  NO_NAME, TExpr, TStmt, TFun, TDefault, TJavaCall, TStrPart, TArm, TListElem, TListIfArm, TConst,
   TSPText, TSPInterp, TLEExpr, TLESpread, TLEIf,
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue,
   XCallDyn, XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef,
@@ -88,6 +88,11 @@ fn at(r: Resolver, off: Int) -> Int =
         r.base + off
       }
   }
+
+## A call's callee-name start, resolved like any offset, except the checker's
+## `tast.NO_NAME` for a call nobody wrote, which stays what it is: it is not a
+## position, and adding a base to it would make it one.
+fn name_at(r: Resolver, nlo: Int) -> Int = if nlo == NO_NAME { NO_NAME } else { at(r, nlo) }
 
 ## 1-based line and column of a position, on the checker's line table. The
 ## column counts code points from the line's start, the currency positions
@@ -282,18 +287,18 @@ pub fn expr(r: Resolver, e: TExpr) -> TExpr =
     XEvRead(key, origin, lo, hi, ty) -> XEvRead(key, origin, at(r, lo), at(r, hi), ty)
     XFnValue(owner, name, builtin, ty, lo, hi) ->
       XFnValue(owner, name, builtin, ty, at(r, lo), at(r, hi))
-    XCallDyn(sym, name, args, evs, lo, hi, ty) ->
-      XCallDyn(sym, name, exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), ty)
-    XCallBuiltin(name, args, wits, evs, lo, hi, ty) -> {
+    XCallDyn(sym, name, args, evs, lo, hi, nlo, ty) ->
+      XCallDyn(sym, name, exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), name_at(r, nlo), ty)
+    XCallBuiltin(name, args, wits, evs, lo, hi, nlo, ty) -> {
       let start = at(r, lo)
       XCallBuiltin(name, sited_call(r, name, exprs(r, args), start), wits, exprs(r, evs),
-        start, at(r, hi), ty)
+        start, at(r, hi), name_at(r, nlo), ty)
     }
-    XCallFn(owner, name, args, wits, evs, trait_id, lo, hi, ty) ->
-      XCallFn(owner, name, exprs(r, args), wits, exprs(r, evs), trait_id, at(r, lo), at(r, hi), ty)
-    XApply(target, args, evs, lo, hi, ty) ->
-      XApply(expr(r, target), exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), ty)
-    XJava(c, lo, hi, ty) -> XJava(java_call(r, c), at(r, lo), at(r, hi), ty)
+    XCallFn(owner, name, args, wits, evs, trait_id, lo, hi, nlo, ty) ->
+      XCallFn(owner, name, exprs(r, args), wits, exprs(r, evs), trait_id, at(r, lo), at(r, hi), name_at(r, nlo), ty)
+    XApply(target, args, evs, lo, hi, nlo, ty) ->
+      XApply(expr(r, target), exprs(r, args), exprs(r, evs), at(r, lo), at(r, hi), name_at(r, nlo), ty)
+    XJava(c, lo, hi, nlo, ty) -> XJava(java_call(r, c), at(r, lo), at(r, hi), name_at(r, nlo), ty)
     XLambda(params, pnames, body, captures, lo, hi, ty) ->
       XLambda(params, pnames, expr(r, body), captures, at(r, lo), at(r, hi), ty)
     XCtor(adt, ci, written, slots, spread, lo, hi, ty) ->
@@ -423,24 +428,24 @@ test "an omitted caller() becomes its call's site, carried as one trailing argum
   let starts = [0, 40, 90]
   let r = owned(100, 130, Some("src/m.dawn"), starts, "")
   # the checker's placeholder spans the call it is the site of
-  let call = XCallBuiltin("caller", [], [], [], 0, 13, ty_loc())
+  let call = XCallBuiltin("caller", [], [], [], 0, 13, NO_NAME, ty_loc())
   let loc = XStr([TSPText("src/m.dawn:3:11")], 100, 100)
   let resolved = expr(r, call)
-  assert resolved == XCallBuiltin("caller", [loc], [], [], 100, 113, ty_loc())
+  assert resolved == XCallBuiltin("caller", [loc], [], [], 100, 113, NO_NAME, ty_loc())
   assert split_site("caller", [loc]) == ([], Some("src/m.dawn:3:11"))
   # resolving twice does not site a call twice
   assert expr(unowned(Some("src/m.dawn"), starts, ""), resolved) == resolved
   # std has no position path: the placeholder stays bare, the no-site Loc
   let in_std = owned(100, 130, None, starts, "")
-  assert expr(in_std, call) == XCallBuiltin("caller", [], [], [], 100, 113, ty_loc())
+  assert expr(in_std, call) == XCallBuiltin("caller", [], [], [], 100, 113, NO_NAME, ty_loc())
   assert split_site("caller", []) == ([], None)
   # a failing builtin's site is its `at` argument now, never a string of its own
   let msg = XStr([TSPText("boom")], 6, 12)
-  let panic_call = XCallBuiltin("panic", [msg, call], [], [], 0, 13, TyNever)
+  let panic_call = XCallBuiltin("panic", [msg, call], [], [], 0, 13, 0, TyNever)
   assert expr(r, panic_call) ==
-    XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112), resolved], [], [], 100, 113, TyNever)
-  let other = XCallBuiltin("len", [msg], [], [], 0, 13, TyInt)
-  assert expr(r, other) == XCallBuiltin("len", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, TyInt)
+    XCallBuiltin("panic", [XStr([TSPText("boom")], 106, 112), resolved], [], [], 100, 113, 100, TyNever)
+  let other = XCallBuiltin("len", [msg], [], [], 0, 13, 0, TyInt)
+  assert expr(r, other) == XCallBuiltin("len", [XStr([TSPText("boom")], 106, 112)], [], [], 100, 113, 100, TyInt)
 }
 
 test "a dbg call carries its line's head: site, then the argument as written" {
@@ -449,10 +454,10 @@ test "a dbg call carries its line's head: site, then the argument as written" {
   let starts = [0, 26, 38]
   let r = owned(30, 52, Some("src/m.dawn"), starts, src)
   let arg = XBinary(BAdd, XLocal(1, "n", 14, 15, TyInt), XInt(2, 18, 19), None, 16, 17, 14, 19, TyInt)
-  let call = XCallBuiltin("dbg", [arg], [], [], 10, 20, TyInt)
+  let call = XCallBuiltin("dbg", [arg], [], [], 10, 20, 10, TyInt)
   let head = "[src/m.dawn:3:3] n * 2 = "
   match expr(r, call) {
-    XCallBuiltin(_, args, _, _, lo, _, _) -> {
+    XCallBuiltin(_, args, _, _, lo, _, _, _) -> {
       assert lo == 40
       assert len(args) == 2
       assert split_site("dbg", args) == ([args[0]], Some(head))
@@ -462,7 +467,7 @@ test "a dbg call carries its line's head: site, then the argument as written" {
   # a module with no position path (std, which refuses `dbg` anyway) adds none
   let in_std = owned(30, 52, None, starts, src)
   match expr(in_std, call) {
-    XCallBuiltin(_, args, _, _, _, _, _) -> { assert len(args) == 1 }
+    XCallBuiltin(_, args, _, _, _, _, _, _) -> { assert len(args) == 1 }
     _ -> panic("not a builtin call")
   }
 }
