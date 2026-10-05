@@ -1,0 +1,16 @@
+# A list element that returns early, on an arm that is not taken, must not
+# release a binding the code after the if still reads (#505). The returned
+# value builds its own list, and that inner block drops what the return path
+# no longer needs; the untaken arm used to copy that drop.
+fn f(c: Bool, n: Int) -> String = {
+  let kept: List[String] = ["kept"]
+  if c {
+    let _: List[Int] = [return to_string([n + 1])]
+  }
+  join(kept, "|")
+}
+
+pub fn main() -> Unit !io = {
+  println(f(false, 1))
+  println(f(true, 1))
+}
