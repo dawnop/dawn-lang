@@ -5147,7 +5147,7 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 写法与 dtype_tf32 相同，网格不变。
 
 **五、golden 与变异体。** `scripts/tile-golden/run.sh --record` 一次重录：**只有这 27 对** `.mlir` / `.tilebc` 变，其余
-166 个逐字节不变（`git diff --stat` 为证）。每一处变化都是写：指针梯子或步长指针写换成 `make_tensor_view` +
+165 个逐字节不变（`git diff --stat` 为证）。每一处变化都是写：指针梯子或步长指针写换成 `make_tensor_view` +
 `make_partition_view` + `store_view_tko`，格子秩更高的前面多一条 `reshape`；`tileiras` 13.4.92 全部收下（四个 arch 族按各自
 下限汇编，同前）。宿主网格零改动，各族第 2 层（mm、stride、wide、trig、dtype、attr、seq）对宿主参考 PASS。
 
