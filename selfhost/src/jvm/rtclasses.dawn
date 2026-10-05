@@ -1861,13 +1861,22 @@ fn gen_io_stdin(cw: ClassWriter) -> Unit !io = {
 
 ## io_stdin_ready(timeout_ms): `true` iff a byte can be read right now.
 ##
-##     long deadline = System.currentTimeMillis() + timeoutMs;
+##     long window = Math.min(Math.max(timeoutMs, 0L), 9_223_372_036_854L) * 1_000_000L;
+##     long start = System.nanoTime();
 ##     for (;;) {
 ##       try { if (System.in.available() > 0) return true; }
 ##       catch (IOException e) { return false; }
-##       if (deadline - System.currentTimeMillis() <= 0) return false;
+##       if (window - (System.nanoTime() - start) < 1_000_000L) return false;
 ##       try { Thread.sleep(1L); } catch (InterruptedException e) { return false; }
 ##     }
+##
+## The window is measured on `nanoTime`, the monotonic clock, and not on
+## `currentTimeMillis`: the wall clock can be stepped backwards while a call
+## waits, and a deadline on it then stretches the wait by the step, which
+## the contract does not allow (#512). Elapsed time is a subtraction of two
+## readings, so it stays right across a wrap of the counter. The clamp keeps
+## the window's nanoseconds inside a `long`: 9_223_372_036_854 ms is about
+## 292 years, past anything a caller can mean.
 ##
 ## `available()` and not a read with a timeout: `System.in` is a
 ## `BufferedInputStream`, and `available()` counts what that buffer already
@@ -1900,10 +1909,17 @@ fn gen_io_stdin_ready(cw: ClassWriter) -> Unit !io = {
   m.visitTryCatchBlock(avail_try, avail_end, avail_catch, "java/io/IOException")
   m.visitTryCatchBlock(sleep_try, sleep_end, sleep_catch, "java/lang/InterruptedException")
 
-  # deadline = currentTimeMillis() + timeout_ms, in slot 2
+  # window = clamp(timeout_ms, 0, 9_223_372_036_854) * 1_000_000, in slot 4
   m.visitVarInsn(OP_LLOAD, 0)
-  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
-  m.visitInsn(OP_LADD)
+  m.visitInsn(OP_LCONST_0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "max", "(JJ)J", false)
+  m.visitLdcInsn(Long.valueOf(9223372036854).expect("boxed"))
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "min", "(JJ)J", false)
+  m.visitLdcInsn(Long.valueOf(1000000).expect("boxed"))
+  m.visitInsn(OP_LMUL)
+  m.visitVarInsn(OP_LSTORE, 4)
+  # start = nanoTime(), in slot 2
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "nanoTime", "()J", false)
   m.visitVarInsn(OP_LSTORE, 2)
 
   m.visitLabel(loop)
@@ -1922,13 +1938,16 @@ fn gen_io_stdin_ready(cw: ClassWriter) -> Unit !io = {
   m.visitInsn(OP_ICONST_0)
   m.visitInsn(OP_IRETURN)
 
+  # remaining = window - (nanoTime() - start); under 1 ms left is no time
   m.visitLabel(not_yet)
+  m.visitVarInsn(OP_LLOAD, 4)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "nanoTime", "()J", false)
   m.visitVarInsn(OP_LLOAD, 2)
-  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
   m.visitInsn(OP_LSUB)
-  m.visitInsn(OP_LCONST_0)
+  m.visitInsn(OP_LSUB)
+  m.visitLdcInsn(Long.valueOf(1000000).expect("boxed"))
   m.visitInsn(OP_LCMP)
-  m.visitJumpInsn(OP_IFLE, no_time)
+  m.visitJumpInsn(OP_IFLT, no_time)
 
   # the remaining window is at least 1 ms, so a 1 ms sleep cannot overshoot it
   m.visitLabel(sleep_try)
