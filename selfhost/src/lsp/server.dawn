@@ -4729,6 +4729,40 @@ test "references follow the declaration a name resolves to, not its spelling" {
   }))
 }
 
+test "an operator over a type of its own keeps its operands' references and hover" {
+  # `v + w` on a record with an `Add` impl is checked as the trait's call
+  # (docs/arith-operator-traits-design.md D6), and the walkers pair the
+  # operands with that call's arguments. Without the pairing every name in
+  # either operand drops out of references, rename and hover.
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = join([
+      "type V = { x: Int }",
+      "impl Add[V] {",
+      "  fn add(a: V, b: V) -> V = V { x: a.x + b.x }",
+      "}",
+      "impl Neg[V] {",
+      "  fn neg(a: V) -> V = V { x: -a.x }",
+      "}",
+      "fn f(v: V, w: V) -> V = v + -w",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "ops.dawn", text)
+    let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
+    let v_use = probe_offset(text, "v + -w", 0)
+    let w_use = probe_offset(text, "w\n", 0)
+    assert map(occurrences(qc, v_use, true), o => o.lo) == [probe_offset(text, "v: V, w", 0), v_use]
+    assert map(occurrences(qc, w_use, true), o => o.lo) == [probe_offset(text, "w: V)", 0), w_use]
+    assert def_probe_at(st, d, text, "v + -w", 0).hover == "let v: V"
+    assert def_probe_at(st, d, text, "w\n", 0).hover == "let w: V"
+  }))
+}
+
 test "on a constant's name the constant answers, on its literal the literal does" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = match load_std("std") {

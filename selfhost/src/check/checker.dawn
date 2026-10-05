@@ -68,7 +68,8 @@ use check/types.{
   prelude_traits, bounds_of,
   prelude_trait_ids,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
-  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
+  NEG_ID, is_arith_trait, arith_trait_name, CHAR_OPAQUE_ID,
   head_of, impl_at, has_impl_at,
   is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld, PkgDep
@@ -4768,6 +4769,11 @@ pub(pkg) fn resolve_witness(
   match t {
     TyOpaque(_, _, _, _, tgt) -> {
       if not has_impl_at(cx.impl_table, trait_id, t) {
+        # Nor arithmetic (docs/arith-operator-traits-design.md D4): it makes a
+        # new value of the type, and only the declaring module knows how that
+        # value keeps the type's invariant. A handle number summed or a
+        # narrow float left unrounded would be wrong silently.
+        if is_arith_trait(trait_id) { return (arith_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
         if trait_id == SHOW_ID {
           let ts = ty_show(cx.adts, t)
           return (cerr_h(cx, "no impl of `Show` for `" ++ ts ++ "`", lo, hi,
@@ -4855,6 +4861,9 @@ pub(pkg) fn resolve_witness(
               _ -> ()
             }
           }
+          # the generic hints below name the module declaring the trait, and
+          # an operator's trait is the prelude's
+          if is_arith_trait(trait_id) { return (arith_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
           let ts = ty_show(cx.adts, t)
           let scalar_order = trait_id == ORD_ID && not is_adt(t)
           let nongeneric = not scalar_order && is_nongeneric_adt(cx, t)
@@ -5319,19 +5328,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EUnit(lo, hi) -> (cx, TyUnit, XUnit(owner_off(cx, lo), owner_off(cx, hi)))
     EStr(parts, lo, hi) -> check_str_lit(cx, parts, lo, hi)
     EVar(name, lo, hi) -> check_var(cx, name, expected, lo, hi)
-    EUnary(op, operand, lo, hi) -> {
-      let (cx1, t, tx) = check_expr(cx, operand, no_expected())
-      check_unary(cx1, op, t, tx, e_lo(operand), e_hi(operand), lo, hi)
-    }
-    EBinary(op, left, right, olo, ohi, lo, hi) -> {
-      let (left_cx, lt, lx) = check_expr(cx, left, no_expected())
-      # == seeds the right side with the left side's type
-      let eq_like = op == OpEq || op == OpNeq
-      let rexp: Option[Ty] = if eq_like && is_concrete(left_cx, lt) { Some(lt) } else { None }
-      let (cx2, rt, rx) = check_expr(left_cx, right, rexp)
-      check_binary_typed(cx2, op, lt, rt, lx, rx,
-        e_lo(left), e_hi(left), e_lo(right), e_hi(right), olo, ohi, lo, hi)
-    }
+    EUnary(op, operand, lo, hi) -> check_unary_expr(cx, op, operand, lo, hi)
+    EBinary(op, left, right, olo, ohi, lo, hi) -> check_binary_expr(cx, op, left, right, olo, ohi, lo, hi)
     EIf(cond, thn, els, lo, hi) -> check_if(cx, cond, thn, els, expected, lo, hi)
     EListLit(elems, lo, hi) -> check_list_lit(cx, elems, expected, lo, hi)
     ETupleLit(elems, lo, hi) -> check_tuple_lit(cx, elems, expected, lo, hi)
@@ -5597,6 +5595,265 @@ fn check_tuple_lit(
     i = i + 1
   }
   (cx1, TyTuple(tys), XTupleLit(txs, owner_off(cx, lo), owner_off(cx, hi), TyTuple(tys)))
+}
+
+## The binary arm, cut out of `check_expr_at` so that function stays under
+## HotSpot's HugeMethodLimit (#241). The left operand is checked with no
+## expectation, as it always was. Arithmetic on a left operand today's path
+## refuses -- anything but an Int, a Float, an error or a type still being
+## inferred -- goes to the operator's trait instead; every other operand takes
+## the path it took before the traits existed, so a program that compiled
+## before checks to the same tree (docs/arith-operator-traits-design.md D6).
+fn check_binary_expr(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: Int, lo: Int,
+  hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let before = len(cx.diags)
+  let (left_cx, lt, lx) = check_expr(cx, left, no_expected())
+  let arith = is_arith_op(op)
+  if arith && arith_routed(left_cx, lt) {
+    return check_arith_trait(left_cx, arith_tid(op), lt, lx, Some(right), olo, ohi, lo, hi)
+  }
+  # == seeds the right side with the left side's type
+  let eq_like = op == OpEq || op == OpNeq
+  let rexp: Option[Ty] = if eq_like && is_concrete(left_cx, lt) { Some(lt) } else { None }
+  let (cx2, rt, rx) = check_expr(left_cx, right, rexp)
+  let cx3 = if arith { left_infer_hint(cx2, before, len(left_cx.diags), rt) } else { cx2 }
+  check_binary_typed(cx3, op, lt, rt, lx, rx,
+    e_lo(left), e_hi(left), e_lo(right), e_hi(right), olo, ohi, lo, hi)
+}
+
+## The unary arm, cut out for the same reason. A negated operand today's path
+## refuses goes to `Neg`, located at the `-` itself.
+fn check_unary_expr(cx: Cx, op: UnOp, operand: Expr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let (cx1, t, tx) = check_expr(cx, operand, no_expected())
+  if op == OpNeg && arith_routed(cx1, t) {
+    check_arith_trait(cx1, NEG_ID, t, tx, None, lo, lo + 1, lo, hi)
+  } else {
+    check_unary(cx1, op, t, tx, e_lo(operand), e_hi(operand), lo, hi)
+  }
+}
+
+fn is_arith_op(op: BinOp) -> Bool = op == OpAdd || op == OpSub || op == OpMul || op == OpDiv || op == OpMod
+
+fn arith_tid(op: BinOp) -> Int =
+  match op {
+    OpAdd -> ADD_ID
+    OpSub -> SUB_ID
+    OpMul -> MUL_ID
+    OpDiv -> DIV_ID
+    _ -> REM_ID
+  }
+
+## How the operator behind a trait is spelled in a diagnostic.
+fn arith_spelling(tid: Int) -> String = ["+", "-", "*", "/", "%", "-"][tid - ADD_ID]
+
+## The operand types today's path refuses (D6): not a number, not an error,
+## and either a rigid type parameter or a type with a head. A type variable
+## still being inferred stays on the old path and keeps its old error.
+fn arith_routed(cx: Cx, t: Ty) -> Bool =
+  if is_numeric(t) || is_errorish(t) {
+    false
+  } else {
+    match t {
+      TyVar(_, _) -> is_concrete(cx, t)
+      _ -> head_of(t) != None
+    }
+  }
+
+## `a + b` beyond Int and Float, as `Add`'s `add(a, b)`. The right operand is
+## checked with the left's type as its expectation, and never the other way
+## round: one direction, one pass (D6, D7).
+fn check_arith_trait(cx: Cx, tid: Int, lt: Ty, lx: TExpr, right: Option[Expr], olo: Int,
+  ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io =
+  match right {
+    Some(r) -> {
+      let (cxr, rt, rx) = check_expr(cx, r, Some(lt))
+      arith_call(cxr, tid, lt, lx, Some((rt, rx)), olo, ohi, lo, hi)
+    }
+    None -> arith_call(cx, tid, lt, lx, None, olo, ohi, lo, hi)
+  }
+
+## The trait call behind an operator whose operands are already checked. A
+## missing impl is reported before the two sides are compared: `true + 1` says
+## that Bool has no `+`, not that Bool and Int differ. The message is the
+## operator's own, because `resolve_witness`'s hint points at the module
+## declaring the trait, and a prelude trait has none.
+fn arith_call(cx: Cx, tid: Int, lt: Ty, lx: TExpr, rhs: Option[(Ty, TExpr)], olo: Int,
+  ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  let err = XError(owner_off(cx, lo), owner_off(cx, hi))
+  var args = [lx]
+  match rhs {
+    Some(pair) -> {
+      let (rt, rx) = pair
+      if is_errorish(rt) { return (cx, TyError, err) }
+      args = args ++ [rx]
+    }
+    None -> ()
+  }
+  let trait_name = arith_trait_name(tid)
+  let headed = match lt {
+    TyVar(_, _) -> false
+    _ -> true
+  }
+  if headed && not has_impl_at(cx.impl_table, tid, lt) {
+    return (cerr_h(cx, "`" ++ arith_spelling(tid) ++ "` needs " ++ article(trait_name) ++ " `" ++
+        trait_name ++ "` impl for `" ++ ty_show(cx.adts, lt) ++ "`", olo, ohi,
+      arith_missing_hint(cx, tid, lt)), TyError, err)
+  }
+  match rhs {
+    Some(pair) -> {
+      let (rt, _) = pair
+      if rt != lt {
+        return (cerr_h(cx, "both sides must have the same type: " ++ ty_show(cx.adts, lt) ++
+            " vs " ++ ty_show(cx.adts, rt), olo, ohi, "there are no implicit conversions"),
+          TyError, err)
+      }
+    }
+    None -> ()
+  }
+  let (cx2, w) = resolve_witness(cx, tid, lt, olo, ohi, "`" ++ arith_spelling(tid) ++ "`")
+  match w {
+    None -> (cx2, TyError, err)
+    Some(wr) -> {
+      let tr = trait_of(cx2.traits, tid)
+      let (mname, ms) = tr.methods[0]
+      let s = ms.sig
+      let tvid = match tr.tvar {
+        TyVar(_, id) -> id
+        _ -> -1
+      }
+      let m: Map[Int, Ty] = map.from([(tvid, lt)])
+      let em: Map[Int, Eff] = map.empty()
+      # the effect the impl binds is charged where the operator is, and its
+      # evidence travels with the call, the way it does for any call (D5)
+      let callee_eff = reduce_eff(cx2, s.eff, m)
+      let (cx3, evs, unanswered, vinsts, adropped) = named_evidence_args(cx2, s, m, em, olo, ohi)
+      let charged = eff_union([callee_eff] ++ vinsts)
+      let cx4 = record_effect(cx3, eff_drop_assocs(eff_drop(charged, unanswered), adropped),
+        olo, ohi, mname)
+      (cx4, lt, XCallFn(s.owner, emitted_fn_name(s, mname), args, [wr], evs, Some(tid),
+        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt))
+    }
+  }
+}
+
+## A bound an operator's trait cannot satisfy at `t`, met at a call rather than
+## at the operator itself.
+fn arith_no_impl(cx: Cx, tid: Int, t: Ty, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "no impl of `" ++ arith_trait_name(tid) ++ "` for `" ++ ty_show(cx.adts, t) ++ "`", lo,
+    hi, arith_missing_hint(cx, tid, t))
+
+## The body of the function `name` in a checked test module.
+fn arith_body(tm: TModule, name: String) -> TExpr = {
+  for f in tm.fns {
+    if f.name == name { return f.body }
+  }
+  panic("no function `" ++ name ++ "`")
+}
+
+test "an operator on Int or Float stays native, and on a type of its own calls the trait" {
+  # D3 is a checker property, not a byte property: a prelude Int witness
+  # would lower back to the same CBinary, so only the tree shows that a
+  # scalar operator never resolved one (mutant M2 of the design is red here)
+  let src = "type V = { x: Int }\n" ++
+    "impl Add[V] {\n  fn add(a: V, b: V) -> V = a\n}\n" ++
+    "impl Neg[V] {\n  fn neg(a: V) -> V = a\n}\n" ++
+    "fn i(a: Int) -> Int = a + 1\n" ++
+    "fn f(a: Float) -> Float = -a * 2.0\n" ++
+    "fn v(a: V) -> V = a + -a\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), m, env)
+  assert len(cx.diags) == 0
+  let native = match arith_body(tm, "i") {
+    XBinary(BAdd, XLocal(..), XInt(1, ..), None, ..) -> true
+    _ -> false
+  }
+  assert native
+  let negated = match arith_body(tm, "f") {
+    XBinary(BMul, XUnary(UNeg, ..), XFloat(..), None, ..) -> true
+    _ -> false
+  }
+  assert negated
+  let routed = match arith_body(tm, "v") {
+    XCallFn(_, _, [XLocal(..), XCallFn(_, _, [_], [_], _, Some(nid), ..)], [_], _, Some(aid), ..) ->
+      aid == ADD_ID && nid == NEG_ID
+    _ -> false
+  }
+  assert routed
+}
+
+fn article(name: String) -> String = if str.starts_with(name, "A") { "an" } else { "a" }
+
+## What to write instead, by the kind of type that has no impl.
+fn arith_missing_hint(cx: Cx, tid: Int, t: Ty) -> String = {
+  let trait_name = arith_trait_name(tid)
+  let op = arith_spelling(tid)
+  match t {
+    TyString -> if tid == ADD_ID { "`++` concatenates strings" } else { arith_own_type_hint(tid) }
+    TyList(_) -> if tid == ADD_ID { "`++` concatenates lists" } else { arith_own_type_hint(tid) }
+    TyOpaque(id, _, _, _, _) ->
+      if id == CHAR_OPAQUE_ID {
+        "an opaque type does not inherit its target's arithmetic; convert with char.code first"
+      } else {
+        "an opaque type does not inherit its target's arithmetic; write `" ++
+          impl_shape(cx, trait_name, t) ++ "` in the module declaring it, or convert to the " ++
+          "target there first"
+      }
+    TyAdt(_, _) -> "a type gets `" ++ op ++ "` from `" ++ impl_shape(cx, trait_name, t) ++
+      "`, written in the module declaring it"
+    _ -> arith_own_type_hint(tid)
+  }
+}
+
+fn arith_own_type_hint(tid: Int) -> String =
+  "Int and Float have one; a type of your own gets `" ++ arith_spelling(tid) ++ "` from `impl " ++
+  arith_trait_name(tid) ++ "[T]` in its module"
+
+## The impl a reader would write for `t`: `impl Add[Money]`, or with the
+## type's own parameters, `impl[D] Add[Tile[D]]`.
+fn impl_shape(cx: Cx, trait_name: String, t: Ty) -> String = {
+  let (name, params) = match t {
+    TyAdt(aid, _) -> {
+      let a = adt_of(cx.adts, aid)
+      (a.name, map(a.tparams, tp => ty_show(cx.adts, tp)))
+    }
+    TyOpaque(id, name, _, args, _) -> (name, opaque_param_names(cx, id, len(args)))
+    _ -> (ty_show(cx.adts, t), [])
+  }
+  if len(params) == 0 {
+    "impl " ++ trait_name ++ "[" ++ name ++ "]"
+  } else {
+    let ps = join(params, ", ")
+    "impl[" ++ ps ++ "] " ++ trait_name ++ "[" ++ name ++ "[" ++ ps ++ "]]"
+  }
+}
+
+## An opaque type's declared parameter names, when its declaration is in scope;
+## positional names otherwise.
+fn opaque_param_names(cx: Cx, id: Int, n: Int) -> List[String] = {
+  for al in map.values(cx.aliases) {
+    if al.is_opaque && al.id == id && len(al.tparams) == n {
+      return map(al.tparams, tp => ty_show(cx.adts, tp))
+    }
+  }
+  var out: List[String] = []
+  for i in 0..n { out = out ++ ["T" ++ to_string(i + 1)] }
+  out
+}
+
+## `lit(2.0) * t`: the left operand is a call whose type parameter nothing
+## settles, while the right one has a type. The operator gives the left
+## operand's type to the right one and not the other way, which the generic
+## "cannot infer" hint does not say.
+fn left_infer_hint(cx: Cx, before: Int, after_left: Int, rt: Ty) -> Cx = {
+  if after_left != before + 1 || is_errorish(rt) { return cx }
+  let d = cx.diags[before]
+  if not str.starts_with(d.msg, "cannot infer type parameter(s) ") { return cx }
+  let hint = "an operator gives its left operand's type to the right one, not the other way " ++
+    "round: swap the operands, or bind the left one with an annotated `let`"
+  Cx { ..cx, diags: list.take(cx.diags, before) ++ [Diag { ..d, hint: hint }] ++
+      list.drop(cx.diags, before + 1) }
 }
 
 ## The hint for a literal component whose only type is `Never`. One wording

@@ -110,7 +110,7 @@ fn largest[T: Ord + Show](xs: List[T]) -> String = ...
 - **`==` 不动**：结构相等已覆盖全类型、与 Map 键的生成 hashCode 深度耦合、
   语义可预测。自定义相等（如忽略大小写）用显式函数——直到真实需求出现前不引入
   Eq trait 与「== 语义可被用户改写」的心智负担。
-- `+`/`Num` 抽象不做（等真实需求）。
+- `+`/`Num` 抽象不做（等真实需求）。（2026-10-06：`+ - * / %` 与一元 `-` 已经各自有 trait，`Num` 仍不做，见 [arith-operator-traits-design.md](arith-operator-traits-design.md)。）
 
 ### 3.5 与既有机制的关系
 
