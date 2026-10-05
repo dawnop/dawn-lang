@@ -14,7 +14,7 @@ use front/ast.{
   PLit, POr, PCtor, PQual, PTuple, PList,
   SLetPat, SWhile,
   DFn, DType, DConst, DUseModule, DImpl, DTest, example_spelling,
-  TQual, TNamed, TFn, Vis, VisPrivate, VisPkg, VisPub
+  TQual, TNamed, TFn, Vis, VisPrivate, VisPkg, VisPub, e_lo, e_hi
 }
 
 fn rendered(src: String) -> String = {
@@ -1853,4 +1853,51 @@ test "a test is named by a string or by one declaration name, never by a path" {
   assert ds[0].msg == "a test is named by a declaration of this module, not by a path"
   let (_, ds2) = parse_module("test { }")
   assert ds2[0].msg == "expected a test name: a string, or a declaration of this module, found `{`"
+}
+
+## The calls and closures under `e`, which is all a `with` desugar builds.
+fn with_kids(e: Expr) -> List[Expr] = {
+  var out: List[Expr] = []
+  match e {
+    EApply(t, args, _, _) -> {
+      out = [t]
+      for a in args { out = out ++ [a.e] }
+    }
+    EMethod(t, _, args, _, _, _, _) -> {
+      out = [t]
+      for a in args { out = out ++ [a.e] }
+    }
+    ELambda(_, body, _, _, _) -> { out = [body] }
+    EBlock(_, Some(tail), _, _) -> { out = [tail] }
+    _ -> ()
+  }
+  out
+}
+
+## Whether every node under `e` lies inside its parent's span.
+fn spans_nest(e: Expr) -> Bool = {
+  for k in with_kids(e) {
+    if e_lo(k) < e_lo(e) || e_hi(k) > e_hi(e) || not spans_nest(k) { return false }
+  }
+  true
+}
+
+## #538: the call a `with` statement desugars to used to start at the callee,
+## right of its own closure child, which starts at `with`.
+test "a with statement's call spans the statement and contains its children" {
+  for src in [
+    "fn f(p: String) -> Unit !io = {\n  with h <- bracket(open(p), close)\n  write(h)\n}",
+    "fn f(r: R) -> Unit !io = {\n  with h <- r.each()\n  write(h)\n}",
+    "fn f(p: String) -> Unit !io = {\n  with h <-\n    bracket(open(p), close)\n" ++
+      "  with g <- h.each()\n  write(g)\n}",
+  ] {
+    let body = piped_body(src)
+    assert spans_nest(body)
+    let call = match body {
+      EBlock(_, Some(e), _, _) -> e
+      _ -> panic("expected the with statement as the block's tail")
+    }
+    assert str.index_of(src, "with") == Some(e_lo(call))
+    assert e_hi(call) == e_hi(body) - 1
+  }
 }
