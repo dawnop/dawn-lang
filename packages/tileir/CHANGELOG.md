@@ -14,7 +14,13 @@ in row-major order, as Tile IR's `reshape` does; the recording refuses a
 shape that holds another number of lanes or has a dimension that is not a
 power of two. It wraps the `t_reshape` that `keepdims` already issued, so
 `Dev` is unchanged and a handler written outside the package compiles as
-before. Adds a name only. §6.27.
+before. Adds a name only.
+
+An `Out` takes the `along` an `In` already did: dimension `j` follows grid
+axis `along[j]`, any injection into the three axes, no `FREE_AXIS`, and an
+axis no dimension follows has one block. Before, any `along` but the
+identity was refused. Every program that recorded before records the same
+bytes. §6.27.
 
 ## 0.8.0 (2026-10-05)
 

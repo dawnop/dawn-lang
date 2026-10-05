@@ -1363,7 +1363,9 @@ derive Show
 ## `pad`, dimension `k` following grid axis `k` (the first three; a fourth
 ## and later follow none). Pass `along` for a cut whose dimensions follow
 ## other axes, or none: the left operand of a matrix product follows axis 0
-## along its rows and `FREE_AXIS` along K.
+## along its rows and `FREE_AXIS` along K. An `Out`'s dimensions each follow
+## an axis, no two the same one: a batched product's output cut
+## `along: [2, 0, 1]` keeps its batch on axis 2.
 pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
   along: List[Int] = list.map(range(0, len(tile)), k => if k < 3 { k } else { FREE_AXIS })) -> Cells =
   Grid(extent, tile, pad, along)
@@ -1431,8 +1433,17 @@ fn access_word(a: Access) -> String = match a {
 
 # The checks only Tile IR makes of one parameter's cells: each tile
 # dimension is a power of two (every tile is), a special padding value is a
-# float format's, and an Out's dimension `k` is grid axis `k`. The rest is
-# arithmetic std/gpu does for the launch too (`entry_grid`).
+# float format's, and an Out's dimensions follow grid axes one to one. The
+# rest is arithmetic std/gpu does for the launch too (`entry_grid`).
+#
+# An Out's `along` is any injection into the grid's three axes (0.8.1):
+# dimension j follows axis `along[j]`, and an axis no dimension follows has
+# one block, because the grid is the Out's cells (`out_axes` gives std/gpu
+# the cut axis by axis, a `1` where nothing follows). So block `b` writes
+# cell `(b[along[0]], ..)`, and two blocks that write one cell agree on
+# every followed axis and, having one block there, on every other: the
+# disjointness the identity gave, kept by an injection. `FREE_AXIS` is not
+# one: a dimension no axis decides is not the grid's.
 fn check_cells(name: String, k: Int, s: Sig) -> Unit = match s.g {
   Whole -> ()
   Grid(_extent, tile, pad, along) -> {
@@ -1447,8 +1458,16 @@ fn check_cells(name: String, k: Int, s: Sig) -> Unit = match s.g {
       ()
     }
     # a rank past three is std/gpu's to refuse, in the launch's words
-    if s.access == Owning && len(along) <= 3 && along != range(0, len(along)) {
-      refuse(name, "${who} follows grid axes ${show(along)}; an Out's cells are the grid, so its dimension k is axis k")
+    if s.access == Owning && len(along) <= 3 {
+      if list.any(along, a => a == FREE_AXIS) {
+        refuse(name, "${who} follows grid axes ${show(along)}; every dimension of an Out follows a grid axis, because its cells are the grid")
+      } else if list.any(along, a => a < 0 || a > 2) {
+        refuse(name, "${who} follows grid axes ${show(along)}; a grid has axes 0, 1 and 2")
+      } else if list.any(range(0, len(along)), j => list.any(range(0, j), i => along[i] == along[j])) {
+        refuse(name, "${who} follows grid axes ${show(along)}; two of its dimensions follow one axis, so two blocks would write one cell")
+      } else {
+        ()
+      }
     } else {
       ()
     }
@@ -1459,9 +1478,34 @@ fn entry_arg(s: Sig) -> EntryArg = match (s.access, s.g) {
   (Reading, Whole) -> arg_in_whole()
   (Reading, Grid(extent, tile, _pad, along)) -> arg_in(extent, tile, along)
   (Owning, Whole) -> arg_out([], [])
-  (Owning, Grid(extent, tile, _pad, _along)) -> arg_out(extent, tile)
+  (Owning, Grid(extent, tile, _pad, along)) -> {
+    let (e, t) = out_axes(extent, tile, along)
+    arg_out(e, t)
+  }
   (Sharing, _g) -> arg_shared()
 }
+
+# An Out's cut as std/gpu's `arg_out` takes it, whose dimension k is grid
+# axis k: axis by axis, the extent and tile of the dimension that follows
+# it, or 1 and 1 where none does, the trailing ones dropped. The grid it
+# derives is the Out's, and the elements it reaches are as many. A cut of
+# rank past three passes as it is, for std/gpu to refuse.
+fn out_axes(extent: List[Int], tile: List[Int], along: List[Int]) -> (List[Int], List[Int]) =
+  if len(along) > 3 || along == range(0, len(along)) {
+    (extent, tile)
+  } else {
+    let top = list.fold(along, 0, (m, a) => if a + 1 > m { a + 1 } else { m })
+    let at = (k: Int) => list.find(range(0, len(along)), j => along[j] == k)
+    let e = list.map(range(0, top), k => match at(k) {
+      Some(j) -> extent[j]
+      None -> 1
+    })
+    let t = list.map(range(0, top), k => match at(k) {
+      Some(j) -> tile[j]
+      None -> 1
+    })
+    (e, t)
+  }
 
 # The entry's arguments, every marker checked first: alone (`check_cells`),
 # and against one another and the grid (`entry_grid`). Refused before the
@@ -5230,8 +5274,6 @@ test "knife C2: cells that disagree with one another or with the grid are refuse
   # an Out is cut, and cut along the grid's own axes
   assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, Whole), never_runs)),
     "tileir: kernel `g`: argument 1 (Out) has no cells; the cells of the Out arguments are the grid")
-  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along: [1, 0])), never_runs)),
-    "tileir: kernel `g`: argument 1 (Out) follows grid axes [1, 0]; an Out's cells are the grid, so its dimension k is axis k")
   assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([2, 2, 2, 2], [1, 1, 1, 1])), never_runs)),
     "tileir: kernel `g`: argument 1 (Out) is cut 4 ways; its cells are the grid, and a grid has at most three axes")
   # what only Tile IR asks of a cut
@@ -5239,6 +5281,45 @@ test "knife C2: cells that disagree with one another or with the grid are refuse
     "tileir: kernel `g`: argument 0 (In) has a tile of [100]; every tile dimension is a power of two")
   assert str.starts_with(marked(() => trace2("g", In(I32, cells([64], [8], pad: PadNegInf)), Out(I32, cells([64], [8])), (_x, _y) => ())),
     "tileir: kernel `g`: argument 0 (In) is i32 and pads with neg_inf, which only a float format can hold")
+}
+
+# The grid the markers of `sigs` make, as std/gpu derives it.
+fn grid_of(sigs: List[Sig]) -> Result[List[Int], String] = entry_grid(list.map(sigs, entry_arg))
+
+test "0.8.1: an Out's dimensions follow grid axes one to one, any injection, and the grid is the Out's cells axis by axis" {
+  # the batch on axis 2: [4, 64, 32] in [1, 32, 32] cells makes a 2x1x4 grid
+  let batched = Out(F64, cells([4, 64, 32], [1, 32, 32], along: [2, 0, 1]))
+  assert grid_of([sig_of(batched)]) == Ok([2, 1, 4])
+  # a head on axis 2 of a two-dimensional output: axis 1 is followed by none and has one block
+  assert grid_of([sig_of(Out(F64, cells([64, 128], [32, 32], along: [0, 2])))]) == Ok([2, 1, 4])
+  # the identity is what it was
+  assert grid_of([sig_of(Out(F64, cells([64, 128], [32, 32])))]) == Ok([2, 4, 1])
+  # the cell index is the block ids of the axes `along` names, in dimension order
+  let (p, _e) = trace1("b", batched, o => store_cell(o, zeros(o)))
+  assert list.map(ops_where(p.ops, o => match o {
+    BlockId(_d, _axis) -> true
+    _ -> false
+  }), o => match o {
+    BlockId(_d, axis) -> axis
+    _ -> 0 - 1
+  }) == [2, 0, 1]
+  assert marked(() => trace2("t", In(F64, cells([64, 64], [8, 8], along: [1, 0])), Out(F64, cells([64, 64], [8, 8], along: [1, 0])),
+    (x, o) => store_cell(o, load_cell(x)))) == "accepted"
+}
+
+test "0.8.1: an Out that follows no axis in a dimension, one axis twice, an axis past the third, or an axis another Out leaves at one block, is refused" {
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along: [0, FREE_AXIS])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [0, -1]; every dimension of an Out follows a grid axis, because its cells are the grid")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along: [1, 1])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [1, 1]; two of its dimensions follow one axis, so two blocks would write one cell")
+  assert str.starts_with(marked(() => trace2("g", In(F64, Whole), Out(F64, cells([64, 64], [8, 8], along: [0, 3])), never_runs)),
+    "tileir: kernel `g`: argument 1 (Out) follows grid axes [0, 3]; a grid has axes 0, 1 and 2")
+  # the first Out follows axis 0 alone, so axis 1 has one block; the second has eight there
+  assert str.starts_with(marked(() => trace2("g", Out(F64, cells([64], [8])), Out(F64, cells([8, 64], [8, 8], along: [0, 1])), never_runs)),
+    "tileir: kernel `g`: argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 1x8x1; one launch has one grid")
+  # an In that follows an axis the Out leaves at one block
+  assert str.starts_with(marked(() => trace2("g", In(F64, cells([64], [8], along: [1])), Out(F64, cells([64], [8])), never_runs)),
+    "tileir: kernel `g`: argument 0 (In) has 8 cell(s) in dimension 0, which follows grid axis 1, and the grid has 1 block(s) there")
 }
 
 test "knife C2: a matrix product's inputs follow one grid axis each, and a dynamic extent follows the grid" {
