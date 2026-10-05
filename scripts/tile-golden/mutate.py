@@ -436,6 +436,11 @@ MUTATIONS = {
         '  "ftof_zero" -> ROUND_ZERO',
         '  "ftof_zero" -> ROUND_NEAREST_AWAY',
     ),),
+    "out-along-twice-accepted": ((
+        PROG,
+        '} else if list.any(range(0, len(along)), j => list.any(range(0, j), i => along[i] == along[j])) {',
+        '} else if false {',
+    ),),
 }
 
 
