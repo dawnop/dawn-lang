@@ -5068,6 +5068,113 @@ kernel 因此加 hint；降低不替 kernel 定这件事（6.25 十四），理�
 - `a.sub(a)` 的错提示：#450（10-04 关）修好了「经模块别名可达」的情形（实测提示 `dev.sub(...)`）；只用选择性
   引入（`use tileir/dev.{..}` 不含 `sub`）时仍提示 `use std/narrow`，那是 #450 验收没覆盖的另一情形，本批不碰编译器。
 
+### 6.27 tileir 0.8.1：公开 `reshape`，`Out` 收 `along`，27 个 kernel 迁回格子（R1）
+
+任务单 `tile-r1-reshape-20261005.md`（agent-handoff），裁决见 `ruling-tile-reshape-20261005.md` 与它的两次补充；调研见
+`research-tile-reshape-report-20261005.md`、`research-tile-out-order-report-20261005.md`。两件新面都是补丁版本：
+不加 `Dev` 操作，今天能记录的程序记录结果逐字节不变。
+
+**一、`reshape(t, shape)`。** 包一层 0.6.0 起就在 `Dev` 里的 `t_reshape`：`from` 由 `t_shape_of` 读，0 秩、单 lane
+的源走 `t_spread`（和 `broadcast` 一样，常量在使用处按形状物化）。语义照 Tile IR：行主序，只改下标，lane 数守恒
+（`Ops.td` 的 reshape 一节）。记录期本来就查 lane 数与每维 2 的幂，照录：
+
+```
+tileir: kernel `bad`: op #6 `reshape`: tile<32x32xf64> has 1024 lane(s) and tile<1x32x16xf64> has 512; a reshape keeps every lane
+tileir: kernel `bad`: every tile dimension is a power of two, got 3 in [3, 32]
+```
+
+**二、批的发现：C2 逼着批维上网格轴 0，丢 L2 复用。** 样本先行时，batched_matmul_f16 按「`Out` 的维 k 跟网格轴 k」
+迁成 `cells([B, M, N], [1, T, T])`，批就得从轴 2 挪到轴 0。sm_86、f16、B=8、M=N=K=1024、TK=32，31 样本交错，
+各版输出逐字节相同（单位 µs）：
+
+| tile | 今天（指针写，批在轴 2） | 指针写，批挪到轴 0 | 格子写，批在轴 0 | 格子写 + `along: [2, 0, 1]`（批留在轴 2） |
+|---|---|---|---|---|
+| 32 | 1283 / 1299 | 2037 | 2059 / 2084（+60%） | 1288 / 1296（+0.4% / −0.3%） |
+| 64 | 525 / 533 | 768 | 778 / 779（+46%～+48%） | 524 / 533（−0.3% / 0.0%） |
+| 128 + occupancy 2 | 221 / 224 | 247 | 249 / 251（+12%） | 213 / 215（−3.5% / −3.8%） |
+
+（斜线前后是两轮。）另两组 tile 64：B=2、N=4096 时格子写在轴 0 慢 +53%/+55%，带 `along` 是 +1.1%/+2.2%；B=64、N=512 时
++78%/+77%，带 `along` 是 +0.8%/+0.7%；带 `along` 的 IQR 全与今天重叠。第二列与第三列逐组在噪声内相等，所以
+**写法本身零代价，慢全在轴序**：轴 0 是发射顺序里变得最快的轴，批在那里，同时在跑的块分属不同的批，读进 L2 的 A、B
+块没人复用。CUTLASS 的批量 GEMM 也把批放在变得最慢的位置（`GemmBatchedIdentityThreadblockSwizzle` 用 `blockIdx.z`）。
+T128 不带 hint 时格子写仍是 PR-3 量过的占用率问题（约 531 µs），归 README「Occupancy」的 hint 规则。
+
+**三、修法：`Out` 收已有的 `along`。** `cells(extent, tile, pad, along)` 的 `along` 本来就有，`In` 用它说「维 j 跟网格轴
+along[j]」；`Out` 过去只许恒等，`check_cells` 主动拒。现在的规则：
+
+- `Out` 的 `along` 单射到 {0, 1, 2}，不含 `FREE_AXIS`；
+- 没被任何维跟随的轴只有 1 块：网格由 `Out` 推出，这一轴本来就是 1；若另一个 `Out` 或跟随它的 `In` 在这一轴上要更多块，
+  照旧由 `entry_grid` 拒。
+
+C2 改写成「`Out` 的格子就是网格，维 j 跟网格轴 `along[j]`」。**不相交的证明从恒等推广到单射**：块 b 写格子
+`(b[along[0]], …)`，两块写同一格，则在被跟随的轴上相同，在没被跟随的轴上只有 1 块也相同，所以是同一块；`store_sub`
+的片在本块格子之内，片也不相交。实现只在 tileir：`check_cells` 放宽；`entry_arg` 把 `Out` 的 extent/tile 按轴重排、
+空轴补 `(1, 1)` 再交给 `std/gpu` 的 `arg_out`，推出的网格、`reach`、越界检查都不变，所以 `std/gpu`、降低、Tile IR、
+tileref 一行不改（格子下标 `cell_index` 本来就按 `along` 取块号）。拒绝照录：
+
+```
+tileir: kernel `g`: argument 1 (Out) follows grid axes [0, -1]; every dimension of an Out follows a grid axis, because its cells are the grid
+tileir: kernel `g`: argument 1 (Out) follows grid axes [1, 1]; two of its dimensions follow one axis, so two blocks would write one cell
+tileir: kernel `g`: argument 1 (Out) follows grid axes [0, 3]; a grid has axes 0, 1 and 2
+tileir: kernel `g`: argument 0 (Out) is cut into a 8x1x1 grid and argument 1 (Out) into 1x8x1; one launch has one grid
+```
+
+6.24 照录的那句「`follows grid axes [1, 0]; an Out's cells are the grid, so its dimension k is axis k`」从此不再出现：
+`[1, 0]` 现在被接受。
+
+**为什么不是 `order` / `dim_map`。** 上一份调研和样本报告都写过「照 cuTile 的 `order` 给 `Out` 加置换视图」。那是两件事
+混在了一起：cuTile 的 `order` 与 Tile IR 的 `dim_map` 是 tile 维到 tensor 维的置换，**转置的是 tile**（`Types.td`：带非默认
+`dim_map` 的 load 等于默认 load 后接一个 `permute`）；批量 GEMM 写回的 `[1, T, T]` 本来就是内存顺序，要的只是「拿哪个
+block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kernel 传给 `store_view_tko` 的下标里，tileir 的 `along` 正是它
+（Pallas `BlockSpec.index_map` 的投影子集）。
+
+**四、迁移：27 个，网格一个不改。** 宿主侧（`seq_diff`、`dtype_diff`、`wide_diff`、`trig_diff`、`arch_diff`、`mm_diff`）的
+网格零改动，这本身就是判据：网格要改，说明 `along` 写错了。只迁写，读留在原处（`load-dtype-f64` 的靶子是 batched 两个的
+指针读）。
+
+| 做法 | kernel |
+|---|---|
+| `reshape` 进高一秩的格子，批 / 头留在轴 2（`along: [2, 0, 1]`） | batched_matmul、batched_matmul_f16、mha_scores、xattn_scores |
+| 混合进制拆维 `[HKV, G·S, …]`，kv 跟轴 2、g 跟轴 0 | gqa_scores、gqa_context、llama_scores |
+| 一个平面一格，extent 代替写侧 mask | conv3d |
+| 段是同一格的片，段数补到 2 的幂、extent 截掉多余的行；列跟轴 0、行跟只有 1 块的轴 1（`along: [1, 0]`） | trig_sweep、dtype_i16/i64/tf32/e4m3/e5m2/e8m0/i4/e2m1、pack_roundtrip |
+| 同上，块优先 `[DYN_DIM, segs, 128]` | attr_round（6 → 8）、attr_overflow（3 → 4）、attr_ftof（11 → 16） |
+| 头留在原来的轴，`along` 把输出那一维指过去 | mha_context、xattn_context、gpt_scores、gpt_context（`[0, 2]` / `[2, 0]`）、llama_qkv、llama_rope（`[1, 0]`） |
+
+`Shared` 从 55 降到 28：真逃生口 17 个、`attr_sat`、`view_tensor_shape`、`transpose_tail`、`hint_memory`、`view_transpose`、
+`view_dyn_transpose`、`token_join`，以及能迁但建议留的 4 个（transpose、shape_ops、interleave、batch_norm：都是测试对象或
+变异体靶子）。dtype_e4m3/e5m2/e8m0/e2m1 在 sm_86 上汇编不出 cubin，第 2 层由集群台账（sm_90 / sm_100）重录时验证；
+写法与 dtype_tf32 相同，网格不变。
+
+**五、golden 与变异体。** `scripts/tile-golden/run.sh --record` 一次重录：**只有这 27 对** `.mlir` / `.tilebc` 变，其余
+166 个逐字节不变（`git diff --stat` 为证）。每一处变化都是写：指针梯子或步长指针写换成 `make_tensor_view` +
+`make_partition_view` + `store_view_tko`，格子秩更高的前面多一条 `reshape`；`tileiras` 13.4.92 全部收下（四个 arch 族按各自
+下限汇编，同前）。宿主网格零改动，各族第 2 层（mm、stride、wide、trig、dtype、attr、seq）对宿主参考 PASS。
+
+变异体（全部按名红）：
+
+- 新增 `out-along-twice-accepted`（tile-golden）：去掉单射检查。golden 里没有一个 kernel 两维跟同一轴，所以由 golden 之外的
+  探针 `out_along_twice`（`along: [0, 0]`）把守：干净时按名拒，变异后记录并渲染。`dawn test packages/tileir` 里对应的拒绝测试
+  在变异下也红（负控）。
+- 重钉 `mask-all-true`：5 → 4 红，conv3d 的写由 extent 管住，转绿。
+- 重钉 `ladder-strides-reversed`：5 → 6 红，conv3d 的读侧交换不再被指针写抵消；只剩 transpose_tail 被方 tile 藏住。
+- 重测消息：`trig-extra-flags`（`offset 104 … DivFOp`）、`overflow-attr-not-written`（`offset 77 … enum type: 15`）、
+  `pack-result-shape-unhalved`（`op #60 select`），红的方式不变。
+- `load-dtype-f64` 的靶子不变（batched 两个的读没迁）；`grid-y-ignored` 红集不变（batched_matmul 网格照旧有 y 轴）；
+  序列族四个变异体红集仍是 81。
+- 样本期另跑过两个临时变异体（不入库）：格子下标轴序反转让 5 个样本全红；`store_sub` 片号一律为 0 让 dtype_i16、attr_round 红。
+
+**不做的（理由）：**
+
+- `-1` 推断、`expand_dims` / `squeeze` / `flatten`：目标形状是 `reshape` 唯一带进来的信息；今天要的形变一个 `reshape` 全写得出。
+- Triton 式 `can_reorder`：乱序会悄悄弄错成对使用的值与下标（triton#12099），第 2 层判词假定同一程序同一答案。
+- `store_cell` / `store_sub` 隐式补前导 1：0 秩以外的隐式改秩，C3′ 不许；显式写一行 `reshape`。
+- `cells(.., order:)` 或 `Out.permute`：见三，它们转置 tile，不改格子下标；另起名字只会让人去找它和 `along` 的区别。
+- `Out` 的 `FREE_AXIS`：那一维就不由网格决定，块到格子不再是单射，不相交证明失效。
+- 改 `std/gpu` 的 `arg_out` 让它收 `along`：在 tileir 里按轴重排得到同样的网格与 `reach`，免了 std 的 Emit-Change。
+- 分组光栅 / swizzle：要对 block id 做整除，`Idx` 没有整除；单 GEMM 的 L2 成为瓶颈时再作为入口级发射策略考虑。
+- 网格 y / z 轴超过 65535 的发射前检查：与本节无关、今天就存在，另开 issue。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
