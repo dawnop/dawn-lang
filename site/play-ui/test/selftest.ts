@@ -1,6 +1,15 @@
 // Exercise editor decisions without a browser or gateway, so regressions in
 // syntax and LSP routing can run offline against the same CodeMirror objects.
-import { dawn, dawnCompletions, dawnHighlight, importEdit, staticCompletionLabels } from '../src/dawn-lang'
+import {
+  builtinsLoaded,
+  dawn,
+  dawnCompletions,
+  dawnHighlight,
+  importEdit,
+  loadBuiltins,
+  staticCompletionLabels,
+  staticCompletions,
+} from '../src/dawn-lang'
 import { BUILTINS } from '../src/builtins.generated'
 import { parseDawnDiagnostics } from '../src/lint'
 import { EditorState, Text } from '@codemirror/state'
@@ -28,6 +37,7 @@ import {
   lspPositionToOffset,
   lspWebSocketUrl,
   mergeCompletionResults,
+  prefetchWhenOffline,
   offsetToLspPosition,
   semanticClass,
   semanticDecorations,
@@ -137,6 +147,51 @@ expect('d1 hint folded in', diags[0].message.includes('hint: write pub'), true)
 expect('d2 span = "oops"', [diags[1].from, diags[1].to], [docText.line(2).from + 15, docText.line(2).from + 21])
 expect('d3 severity', diags[2].severity, 'error')
 
+// ---- the builtin table is a lazy chunk (docs/play-lsp-client-design.md) ----
+// These run first, while nothing has loaded the table yet. A live LSP answers
+// without it; a client that is not ready, or a request that fails, gets it.
+{
+  const doc = 'pub fn main() -> Unit !io = pri'
+  const state = EditorState.create({ doc })
+  const ctx = () => new CompletionContext(state, doc.length, false)
+  const live = lspCompletionSource({
+    isReady: () => true,
+    completion: async () => [{ label: 'println', kind: 3 }],
+  } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
+  const liveResult = await live(ctx())
+  expect('a live LSP answer does not fetch the builtin table', [
+    builtinsLoaded() === null, liveResult?.options.some((o) => o.label === 'println'),
+    liveResult?.options.some((o) => o.label === 'str.trim'),
+  ], [true, true, false])
+  let statusListener: ((s: string) => void) | null = null
+  let prefetches = 0
+  prefetchWhenOffline({
+    onStatus: (l: (s: string) => void) => { statusListener = l; l('connecting'); return () => {} },
+  } as unknown as DawnLspClient, () => prefetches++)
+  expect('no prefetch while the LSP is connecting', prefetches, 0)
+  statusListener!('ready')
+  expect('no prefetch while the LSP is ready', prefetches, 0)
+  statusListener!('fallback')
+  expect('a dropped LSP prefetches the table', prefetches, 1)
+  const down = lspCompletionSource({
+    isReady: () => false,
+    completion: async () => { throw new Error('must not be asked') },
+  } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
+  const downResult = await down(ctx())
+  expect('LSP down: builtins still complete, prelude bare and modules qualified', [
+    downResult?.options.some((o) => o.label === 'println'),
+    downResult?.options.some((o) => o.label === 'str.trim'),
+    builtinsLoaded() !== null,
+  ], [true, true, true])
+  const failing = lspCompletionSource({
+    isReady: () => true,
+    completion: async () => { throw new Error('timed out') },
+  } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
+  const failedResult = await failing(ctx())
+  expect('LSP request failure: builtins complete', failedResult?.options.some((o) => o.label === 'println'), true)
+}
+const builtinTable = (await loadBuiltins())!
+
 // ---- completion context awareness ----
 function completeAt(doc: string, marker = '‸') {
   const pos = doc.indexOf(marker)
@@ -192,7 +247,7 @@ const bareModuleLabels = anywhere.options.map((o) => o.label).filter((l) => modu
 expect('no static label is a bare module function', bareModuleLabels, [])
 expect('module functions complete qualified', anywhere.options.some((o) => o.label === 'str.trim'), true)
 expect('prelude completes bare', anywhere.options.some((o) => o.label === 'println'), true)
-const labels = staticCompletionLabels()
+const labels = staticCompletionLabels(builtinTable)
 expect('every module label is qualified', labels.module.every((l) => /^[a-z_]\w*\.\w+$/.test(l)), true)
 expect('prelude and module halves are both present', [labels.prelude.length > 0, labels.module.length > 0], [true, true])
 const member = completeAt('use std/str\npub fn main() -> Unit !io = println(str.tr‸)')!
@@ -455,7 +510,7 @@ const semanticSource = lspCompletionSource({
     semanticCalls++
     return [{ label: 'playground', kind: 9, sortText: '0playground' }]
   },
-} as unknown as DawnLspClient, dawnCompletions)
+} as unknown as DawnLspClient, staticCompletions, dawnCompletions)
 const useState = EditorState.create({ doc: 'use pl' })
 const useResult = await semanticSource(new CompletionContext(useState, useState.doc.length, false))
 expect('LSP handles and orders use completion absent from static source', [
@@ -464,7 +519,7 @@ expect('LSP handles and orders use completion absent from static source', [
 const rejectedSemanticSource = lspCompletionSource({
   isReady: () => true,
   completion: async () => { throw new Error('timed out') },
-} as unknown as DawnLspClient, dawnCompletions)
+} as unknown as DawnLspClient, staticCompletions, dawnCompletions)
 const staticFallbackState = EditorState.create({ doc: 'fn solo() -> Int = so' })
 const staticFallback = await rejectedSemanticSource(new CompletionContext(
   staticFallbackState,

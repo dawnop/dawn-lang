@@ -3,7 +3,10 @@ import { defineConfig } from 'vite'
 // Build the editor as one self-contained ES module + one CSS file with stable
 // names, so the Dawn site generator can vendor them into dist/assets and drop a
 // <script type="module"> onto the Playground page. No hashing (the generator
-// controls cache headers), no code-splitting (one page, one bundle).
+// controls cache headers), and one split: the builtin completion table is its
+// own chunk, `playground-builtins.js`, fetched only while the LSP cannot answer
+// (docs/play-lsp-client-design.md). The site generator fingerprints it and
+// repoints the import in playground.js (site/src/gen/pages.dawn).
 //
 // This is an app build with a script input, not library mode. Library mode with
 // the `es` format leaves whitespace in place even with `build.minify` on (Vite
@@ -37,7 +40,7 @@ export default defineConfig({
         format: 'es',
         entryFileNames: 'playground.js',
         assetFileNames: 'playground.[ext]',
-        inlineDynamicImports: true,
+        chunkFileNames: 'playground-builtins.js',
       },
     },
   },
