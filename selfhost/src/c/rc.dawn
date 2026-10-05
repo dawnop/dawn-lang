@@ -340,7 +340,8 @@ fn fv_stmts(stmts: List[CStmt], acc: Set[Int]) -> Set[Int] = {
 ## block whose *statement* binds or discards a Never value is over at that
 ## statement, whatever its tail says. The depth is not optional -- the
 ## checker's `gone` walks statements, and `reconcile` decides by this
-## judgement which arms still run; disagree and reconcile seals compensating
+## judgement (deepened into the operands by `falls_through`) which arms
+## still run; disagree and reconcile seals compensating
 ## drops onto a path that is very much alive (found the hard way: `unloop`
 ## flattens an arm's `break` tail away, leaving exactly the
 ## statements-diverge-tail-None shape).
@@ -367,6 +368,108 @@ fn completes(e: CExpr) -> Bool =
         Some(x) -> completes(thn) || completes(x)
       },
     _ -> not diverges(e) && cex_ty(e) != TyNever
+  }
+
+## Whether control can reach the end of `e`, with the operands read too. A
+## jump in a strictly evaluated operand ends the whole expression, though its
+## type and its tail say nothing: `array_push(buf, box(return x))` is an
+## Array-typed statement that never finishes. The reconciliation of an if's
+## arms must ask this question rather than `completes`. The rewrite of such an
+## arm released what the jump's path no longer reads (a block in the returned
+## value drops an outer binding the code after the if still needs), and a
+## shallow "completes" then took that path's account as the arm's and made
+## the untaken arm drop the same binding (#505). The checker's `gone` already
+## threads through operands, so this agrees with it where `completes` did not.
+##
+## Not a replacement for `completes`/`yields`: those decide whether a value
+## gets a name, and an operand-diverging call is still a typed C expression.
+## Only the right side of `&&`/`||` is conditional and is not read.
+fn falls_through(e: CExpr) -> Bool = {
+  if diverges(e) || cex_ty(e) == TyNever { return false }
+  match e {
+    CBlock(stmts, tail, _) -> {
+      for s in stmts {
+        if not stmt_falls_through(s) { return false }
+      }
+      match tail {
+        None -> true
+        Some(t) -> falls_through(t)
+      }
+    }
+    CIf(c, thn, els, _) ->
+      falls_through(c) && match els {
+        None -> true
+        Some(x) -> falls_through(thn) || falls_through(x)
+      },
+    CCall(callee, args, _) -> {
+      let head = match callee {
+        CDynamic(t) -> falls_through(t)
+        _ -> true
+      }
+      head && all_fall_through(args)
+    }
+    CIntrinsic(_, args, _) -> all_fall_through(args)
+    CCtor(_, _, args, _) -> all_fall_through(args)
+    CUpdate(base, adt, ci, fields, ty) -> falls_through(update_as_ctor(base, adt, ci, fields, ty))
+    CTuple(es, _) -> all_fall_through(es)
+    CListLit(es, _) -> all_fall_through(es)
+    CClosure(_, _, caps, _) -> all_fall_through(caps)
+    CDictApply(_, args, _) -> all_fall_through(args)
+    CDictArg(d, _, _, _, _) -> falls_through(d)
+    CField(t, _, _, _, _) -> falls_through(t)
+    CTupleGet(t, _, _) -> falls_through(t)
+    CIsCtor(t, _, _) -> falls_through(t)
+    CTagOf(t, _) -> falls_through(t)
+    CBox(x, _) -> falls_through(x)
+    CUnbox(x, _) -> falls_through(x)
+    CDup(x, _) -> falls_through(x)
+    CUnary(_, x, _) -> falls_through(x)
+    CBinary(op, l, r, _) ->
+      match op {
+        CAnd -> falls_through(l)
+        COr -> falls_through(l)
+        _ -> falls_through(l) && falls_through(r)
+      },
+    # diverges() above already answered for these
+    CReturn(_) -> false
+    CBreak(_) -> false
+    CContinue(_) -> false
+    CInt(_) -> true
+    CFloat(_) -> true
+    CBool(_) -> true
+    CStr(_) -> true
+    CUnit -> true
+    CLocal(_, _) -> true
+    CFnRef(_, _, _) -> true
+    CDictRef(_, _, _, _) -> true
+    CConstRef(_, _, _) -> true
+    CComptime(_, _, _) -> true
+    # not walked, for the reason `jumps` gives
+    CForeign(_, _) -> true
+  }
+}
+
+fn all_fall_through(es: List[CExpr]) -> Bool = {
+  for e in es {
+    if not falls_through(e) { return false }
+  }
+  true
+}
+
+## A loop statement is left alone: whether one is ever left is `open`'s
+## question, answered with the jumps, and the old account stays as it was.
+fn stmt_falls_through(s: CStmt) -> Bool =
+  match s {
+    CSLet(_, _, v) -> falls_through(v)
+    CSAssign(_, v) -> falls_through(v)
+    CSDiscard(x) -> falls_through(x)
+    CSIf(c, t, e2) ->
+      falls_through(c) && match e2 {
+        None -> true
+        Some(x) -> falls_through(t) || falls_through(x)
+      },
+    CSLoop(_, _, _) -> true
+    CSDrop(_) -> true
   }
 
 ## Whether a jump to `lid` occurs anywhere inside -- `brk` and `cont` select
@@ -901,11 +1004,11 @@ fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], 
 ## `entry` is the state the arms started from; `st_els` carries the threading
 ## (next_sym) forward.
 fn reconcile(entry: RSt, st_thn: RSt, st_els: RSt, t1: CExpr, e1: CExpr, ty: Ty) -> (RSt, CExpr, CExpr) = {
-  if not yields(t1) && not yields(e1) {
+  if not falls_through(t1) && not falls_through(e1) {
     return (RSt { ..st_els, scopes: entry.scopes }, t1, e1)
   }
-  if not yields(t1) { return (st_els, t1, e1) }
-  if not yields(e1) { return (RSt { ..st_els, scopes: st_thn.scopes }, t1, e1) }
+  if not falls_through(t1) { return (st_els, t1, e1) }
+  if not falls_through(e1) { return (RSt { ..st_els, scopes: st_thn.scopes }, t1, e1) }
   let thn_gone = diff(scope_syms(entry), scope_syms(st_thn))
   let els_gone = diff(scope_syms(entry), scope_syms(st_els))
   let need_t = diff(els_gone, thn_gone)
@@ -1556,7 +1659,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
           # one-armed ifs are Unit; a transfer on the taken path would leave
           # the untaken path holding more, so the arm's removals materialise
           # an else that releases the same bindings
-          if not yields(t1) {
+          if not falls_through(t1) {
             let (st4, cond2) = wrap(RSt { ..st2, scopes: st1.scopes }, lets, c1, cex_ty(cond), temps)
             return (st4, CIf(cond2, t1, None, ity))
           }
@@ -1858,7 +1961,7 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
       let (st2, t1) = rw_effect(st1, thn, after)
       match els {
         None -> {
-          if not yields(t1) {
+          if not falls_through(t1) {
             let (st4, cond2) = wrap(RSt { ..st2, scopes: st1.scopes }, lets, c1, cex_ty(cond), temps)
             return (st4, [CSIf(cond2, t1, None)])
           }
@@ -3003,6 +3106,25 @@ test "a later operand return releases a hoisted assignment value" {
     let m = rc_module(one_fn([p], TyInt, body), modes)
     assert len(rc_check(m, modes)) == 0
   }
+}
+
+test "an arm whose list element returns leaves the other arm alone" {
+  let lst = TyList(TyInt)
+  let ps = [CParam { sym: 1, ty: lst, mode: COwned }, CParam { sym: 2, ty: TyBool, mode: COwned }]
+  # #505: the returned value builds a list, whose block drops binding 1 on
+  # the return path. The arm is Unit-typed and its tail says nothing, so only
+  # the operand shows it never ends; the untaken arm must not copy the drop
+  # that the reassignment below then repeats.
+  let fresh_list = CListLit([CCall(CDirect("m", "h"), [], TyInt)], lst)
+  let ret = CBox(CReturn(Some(fresh_list)), TyNever)
+  let arm = CBlock([CSLet(3, lst, CListLit([ret], lst))], None, TyUnit)
+  let body = CBlock(
+    [CSDiscard(CIf(CLocal(2, TyBool), arm, None, TyUnit)), CSAssign(1, fresh_list)],
+    Some(CLocal(1, lst)),
+    lst
+  )
+  let m = rc_module(one_fn(ps, lst, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
 }
 
 test "reassignment from the old value is a hand-over, not copy and drop" {
