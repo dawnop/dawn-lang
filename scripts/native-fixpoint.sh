@@ -20,8 +20,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 root=$(pwd)
 
-cc_bin="${CC:-cc}"
-ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c")
+# Each generation's C is also written as translation units (`--split`), and
+# the units compile in parallel (scripts/cc-units.sh; docs/c-tu-split-design.md).
+# The whole text is still what A == B == C compares; the units are compared
+# too, because generation B cuts them with the native build of the same
+# `cdriver.split` the JVM ran for A.
 
 if command -v sha256sum >/dev/null 2>&1; then
   digest_file() { sha256sum "$1" | cut -d' ' -f1; }
@@ -129,15 +132,15 @@ assert_inputs_unchanged() {
 }
 
 java -Xss512m -jar "$root/build/dawn-selfhost.jar" __emitc \
-  "$root/selfhost/src/nmain.dawn" -o "$work/A.c" --build-info "$work/A.info.c"
+  "$root/selfhost/src/nmain.dawn" -o "$work/A.c" --build-info "$work/A.info.c" \
+  --split "$work/A.units"
 assert_inputs_unchanged "after generation A"
-"$cc_bin" "${ccflags[@]}" -o "$work/dawnc-A" "$work/A.c" "$root/runtime/c/dawn_rt.c" \
-  "$work/A.info.c" -lm
+"$root/scripts/cc-units.sh" -o "$work/dawnc-A" "$work/A.units" "$work/A.info.c"
 
 # generation B: A compiles the driver itself; the C must match A's exactly
 assert_inputs_unchanged "before generation B"
 "$work/dawnc-A" emitc "$root/selfhost/src/nmain.dawn" -o "$work/B.c" \
-  --build-info "$work/B.info.c"
+  --build-info "$work/B.info.c" --split "$work/B.units"
 assert_inputs_unchanged "after generation B"
 if ! cmp -s "$work/A.c" "$work/B.c"; then
   echo "FAIL: the native compiler emits different C than the JVM toolchain (A != B)" >&2
@@ -149,8 +152,12 @@ if ! cmp -s "$work/A.info.c" "$work/B.info.c"; then
   diff "$work/A.info.c" "$work/B.info.c" | sed -n '1,40p' >&2
   exit 1
 fi
-"$cc_bin" "${ccflags[@]}" -o "$work/dawnc-B" "$work/B.c" "$root/runtime/c/dawn_rt.c" \
-  "$work/B.info.c" -lm
+if ! diff -r "$work/A.units" "$work/B.units" > "$work/units.diff"; then
+  echo "FAIL: the native compiler cuts its C into different units than the JVM toolchain (A != B)" >&2
+  sed -n '1,40p' "$work/units.diff" >&2
+  exit 1
+fi
+"$root/scripts/cc-units.sh" -o "$work/dawnc-B" "$work/B.units" "$work/B.info.c"
 
 # generation C: B compiles the driver; B == C is the fixed point
 "$work/dawnc-B" emitc "$root/selfhost/src/nmain.dawn" -o "$work/C.c" \

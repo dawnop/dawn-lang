@@ -42,15 +42,15 @@ if ! "$dawn" --version > "$work/version.out" 2> "$work/version.err"; then
   fail "current compiler did not initialize"
 fi
 
-if ! "$dawn" __emitc "$root/selfhost/src/nmain.dawn" -o "$work/nmain.c" \
+# the units compile in parallel (scripts/cc-units.sh, docs/c-tu-split-design.md)
+if ! "$dawn" __emitc "$root/selfhost/src/nmain.dawn" --split "$work/nmain" \
     > "$work/native-build.out" 2> "$work/native-build.err"; then
   cat "$work/native-build.out" >&2
   cat "$work/native-build.err" >&2
   fail "native driver C emission failed"
 fi
-if ! "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-    -I "$root/runtime/c" -o "$work/dawnc" "$work/nmain.c" \
-    "$root/runtime/c/dawn_rt.c" -lm > "$work/native-cc.out" 2>&1; then
+if ! "$root/scripts/cc-units.sh" -o "$work/dawnc" "$work/nmain" \
+    > "$work/native-cc.out" 2>&1; then
   cat "$work/native-cc.out" >&2
   fail "native driver C compilation failed"
 fi

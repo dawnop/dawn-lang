@@ -142,10 +142,9 @@ fi
 DAWNC="${DAWNC_BIN:-}"
 if [ -z "$DAWNC" ]; then
   echo "building the native driver from selfhost/src/nmain.dawn..."
-  "$root/bin/dawn" __emitc "$root/selfhost/src/nmain.dawn" -o "$work/nmain.c"
-  "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-    -I "$root/runtime/c" \
-    -o "$work/dawnc" "$work/nmain.c" "$root/runtime/c/dawn_rt.c" -lm
+  # the units compile in parallel (scripts/cc-units.sh, docs/c-tu-split-design.md)
+  "$root/bin/dawn" __emitc "$root/selfhost/src/nmain.dawn" --split "$work/nmain"
+  "$root/scripts/cc-units.sh" -o "$work/dawnc" "$work/nmain"
   DAWNC="$work/dawnc"
 fi
 case "$DAWNC" in /*) ;; *) DAWNC="$root/$DAWNC" ;; esac

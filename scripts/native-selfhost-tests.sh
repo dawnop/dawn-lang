@@ -19,7 +19,7 @@
 # covered by `./bin/dawn test selfhost`, which is the only place main.dawn's
 # parsers can run.
 #
-# The binary is built the plain way (emitc + cc), which is what
+# The binary is built the plain way (emitc --split + scripts/cc-units.sh), which is what
 # native-cli-diff.sh does when DAWNC_BIN is unset: this leg's subject is the
 # tests, not the release artifact.
 #
@@ -38,10 +38,9 @@ if [ -z "$DAWNC" ]; then
   # keep the toolchain's rebuild chatter out of the build below
   ./bin/dawn --version > /dev/null
   echo "building the native driver from selfhost/src/nmain.dawn..."
-  ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$OUT/nmain.c"
-  "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-    -I "$ROOT/runtime/c" \
-    -o "$OUT/dawnc" "$OUT/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
+  # the units compile in parallel (scripts/cc-units.sh, docs/c-tu-split-design.md)
+  ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$OUT/nmain"
+  scripts/cc-units.sh -o "$OUT/dawnc" "$OUT/nmain"
   DAWNC="$OUT/dawnc"
 fi
 case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac

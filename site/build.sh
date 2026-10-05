@@ -78,9 +78,9 @@ if [ "$tea_ok" = 1 ]; then
       find runtime/c -type f | sort | xargs cat | sha256sum | cut -d' ' -f1)"
     if [ ! -x "$tea_out/dawnc" ] || [ "$(cat "$tea_out/dawnc.stamp" 2>/dev/null)" != "$tea_stamp" ]; then
       echo "  building the native driver from selfhost/src/nmain.dawn..."
-      ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$tea_work/nmain.c"
-      "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-        -I runtime/c -o "$tea_out/dawnc" "$tea_work/nmain.c" runtime/c/dawn_rt.c -lm
+      # the units compile in parallel (scripts/cc-units.sh, docs/c-tu-split-design.md)
+      ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$tea_work/nmain"
+      scripts/cc-units.sh -o "$tea_out/dawnc" "$tea_work/nmain"
       printf '%s\n' "$tea_stamp" > "$tea_out/dawnc.stamp"
     fi
     tea_dawnc="$tea_out/dawnc"

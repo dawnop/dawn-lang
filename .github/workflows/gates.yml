@@ -2744,13 +2744,13 @@ jobs:
           echo "DAWN_WASM_CC=$RUNNER_TEMP/wasi-sdk/bin/clang" >>"$GITHUB_ENV"
 
       # Both harnesses build this from nmain.dawn when it is not handed one,
-      # and it is 35s of the job. Built once here, passed to both.
+      # and it is 35s of the job. Built once here, passed to both. The
+      # translation units compile in parallel (scripts/cc-units.sh,
+      # docs/c-tu-split-design.md knife 2).
       - name: the C driver, once
         run: |
-          ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$RUNNER_TEMP/nmain.c"
-          "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-            -I runtime/c -o "$RUNNER_TEMP/dawnc" "$RUNNER_TEMP/nmain.c" \
-            runtime/c/dawn_rt.c -lm
+          ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$RUNNER_TEMP/nmain"
+          scripts/cc-units.sh -o "$RUNNER_TEMP/dawnc" "$RUNNER_TEMP/nmain"
           echo "DAWNC_BIN=$RUNNER_TEMP/dawnc" >>"$GITHUB_ENV"
 
       # catch/bracket/raise on wasm, held to the native run byte for byte,
