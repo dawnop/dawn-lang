@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 554705a26ac7072a -->
+<!-- doc-check: translation-of docs/spec.md @ 3f0f507bc1c2d23a -->
 
 # Dawn Language Specification
 
@@ -198,8 +198,8 @@ spaced `a < -b` is unaffected, and `dawn fmt` puts a space on both sides of ever
 
 | Form | Type | Notes |
 |------|------|------|
-| `42`, `1_000_000`, `0xFF`, `0b1010` | `Int` | 64-bit signed; underscores may be used as separators |
-| `3.14`, `1.0e-9` | `Float` | IEEE 754 double |
+| `42`, `1_000_000`, `0xFF`, `0b1010` | `Int` when nothing is expected | 64-bit signed; underscores may be used as separators; typed by its expectation (below) |
+| `3.14`, `1.0e-9` | `Float` when nothing is expected | IEEE 754 double; typed by its expectation (below) |
 | `true` / `false` | `Bool` | |
 | `"hello"` | `String` | see §1.6 |
 | `()` | `Unit` | the only value |
@@ -215,6 +215,40 @@ patterns use the same rule. Parentheses around the whole negative value remain v
 (`(-9223372036854775808)`), but parentheses separating the magnitude from the minus do not
 (`-(9223372036854775808)`), nor does bare `2^63`. A magnitude greater than `2^63` is a range error;
 a digit forbidden by its radix (such as `0b2`) is an invalid literal rather than a range error.
+
+**A numeric literal has no type of its own; its expected type types it** (since 2026-10-06,
+[literal-system-design.md](literal-system-design.md)). A **literal atom** is an integer literal, a
+float literal, or either one directly after a unary `-`. When it is checked with an expected type
+`T`:
+
+- `T` is `Float`: an integer literal is the `Float` of the same value, and one that has no exact
+  `Float` (`|n| > 2^53` with no double exactly equal to it) is a compile error. `-0` is negated as
+  an integer first and is `+0.0`; a negative zero is written `-0.0`.
+- `T` is a type this module **cannot see through** and there is an impl of `FromInt[T]` (for an
+  integer literal) or `FromFloat[T]` (for a float literal): the literal is that impl's
+  `from_int`/`from_float` applied to the literal's value (§3.5). A float literal is rounded to
+  `Float` first and then handed to `from_float`, so it is bit for bit what an explicit conversion
+  such as `bf16(x)` gives; a literal of more than seventeen significant digits that lands exactly
+  on a midpoint of the narrow format can therefore differ by one ulp from rounding the decimal
+  directly. An integer literal never goes through `FromFloat`, and a float literal never becomes an
+  integer type.
+- An opaque type the declaring module sees through is typed at its target (§2.7); a literal there
+  is exactly what it always was.
+- Otherwise, including when nothing is expected, an integer literal is an `Int` and a float literal
+  a `Float`, and a disagreement with the expectation is reported as before.
+
+When the impl is pure, the compiler computes the literal's value at compile time (the same
+interpreter as `comptime`, §7), and a panic in the impl is a compile error pointing at the literal:
+the range of `U8` is written in its `FromInt` impl, which is why `let b: U8 = 300` does not compile
+although the compiler does not know 255. When the impl has an effect, the literal is a call at run
+time and the effect is charged to the enclosing signature (§6); such a literal cannot appear in a
+`const` or a `comptime` block. Typing a literal never feeds back into the type of anything else:
+there are no inference variables and no defaulting rules. How the expectation reaches a literal: for
+a binary operator see §4.3 (the literal yields to the typed side); among the arguments of a generic
+call, a literal whose parameter still names an unsettled type parameter is checked after the other
+arguments have typed themselves and before those that need an expectation, a float literal before
+an integer literal on the same type parameter (`g(1, 2.5)` has `T = Float`, and in `g(s, 1)` the `1`
+takes the type of `s`). Literals in patterns are not part of this and follow §5.1 as before.
 
 **A character is its own type, `Char`**: one Unicode scalar value (`0..0x10FFFF`, excluding the
 surrogate range `D800..DFFF`). It is an **opaque type** (§2.7) over `Int` whose owner is
@@ -375,6 +409,8 @@ accounting was wrong.)
 **There is no null.** A value of any type is necessarily valid; possible absence is expressed with
 `Option[T]`.
 **There are no implicit conversions.** `Int` → `Float` must be written explicitly as `to_float(n)`.
+A numeric literal is not a value of `Int` or `Float`; it is typed by §1.5, so `let f: Float = 1` is
+legal and `let f: Float = n` is not.
 
 ### 2.2 Composite types and naming layers
 
@@ -955,16 +991,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the five
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the eight whose method name the
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the ten whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
   bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
-  (consumed by `to_string` and `${...}`, §4.3) and the six arithmetic traits
-  `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3).
-- **Thirteen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  (consumed by `to_string` and `${...}`, §4.3), the six arithmetic traits
+  `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3) and `FromInt`/`FromFloat`
+  (consumed by numeric literals, §1.5).
+- **Fifteen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
   `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Index` (behind `[]`, §4.8),
   `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
-  and the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below).
+  the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below), and
+  `FromInt`/`FromFloat` behind numeric literals (the entry after that).
   The impls for the scalars ship with the language;
   `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
   `Display` cannot be derived (the reason is under `Display` below).
@@ -1028,6 +1066,15 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   unaffected. The six names are taken in trait and effect position from now on: a user can no
   longer declare a `trait` or an `effect` by one of them (a `type` still can). There is no
   `Num`/`Zero`/`One`.
+- **`FromInt`/`FromFloat`** (behind numeric literals, §1.5):
+  `trait FromInt[T] { effect FromInt = !()  fn from_int(n: Int) -> T !T.FromInt }`, and
+  `FromFloat` alike (`fn from_float(x: Float) -> T`). The subject is only in the return position,
+  and that a method of that shape cannot be called by name does not matter: the method names are
+  not injected, and the compiler inserts the call at a `T` it already knows and resolves the
+  witness directly. The language provides `FromInt[Int]`, `FromInt[Float]` (a panic when not exact,
+  the compile-time rule of §1.5) and `FromFloat[Float]`, and no `FromFloat[Int]`. In generic code
+  a `0` under `[T: FromInt]` is `from_int(0)`. Both names are taken in trait and effect position
+  from now on as well.
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
   rule**: an impl can only be written in the module that declares the trait or the subject type.
   Impls take effect globally, no `use` needed.
@@ -1480,8 +1527,20 @@ implementations are cross-checked against this, "happens to agree" is not allowe
   effect is the row that impl binds. `[T: Add]` is an ordinary bound, and `Int`/`Float` satisfy it.
   The left operand is checked with no expectation and the right one with the left one's type as
   its expectation, never the other way (`lit(2.0) * t` cannot infer `lit`'s type parameter; write
-  `t * lit(2.0)`). A missing impl is reported before the two sides are compared: `true + 1` says
-  that `Bool` has no `+`. Evaluation is still left to right.
+  `t * lit(2.0)`). **The exception: when exactly one side is a numeric literal, the other side is
+  checked first and the literal is typed at its type** (§1.5; `0.5 * s` means `s * 0.5`, and with
+  `r: Float` both `r * 2` and `2 * r` hold). This holds for arithmetic, comparison and `==`/`!=`;
+  bitwise operators and shifts take `Int` alone and are not covered. When both sides are literals,
+  the whole operation's expected type reaches them only when it is a type that takes literals
+  through `FromInt`/`FromFloat` (`let b: U8 = 200 + 100`). **A `Float` expectation does not pass
+  through an operator**: in `let f: Float = 1 / 2` the `1 / 2` is still the `Int` `0` and a type
+  error; write `1.0 / 2.0` (the same text does not mean 0 or 0.5 by its annotation; a library type's
+  literals have no other kind to fall back to, so the expectation reaches them). Otherwise an integer
+  literal next to a float literal takes `Float` (`3.14159 * 2 * r` and `1 + 2.0` both hold), never the reverse, and
+  two of one kind keep their defaults (`1 / 2` is still the `Int` `0`). The literal is recognised
+  by its syntax before anything is checked, in one pass; this is not back-filling. A missing impl is
+  reported before the two sides are compared: `true + 1` says that `Bool` has no `+`. The order of
+  checking does not change the order of evaluation, which is still left to right.
 - Printing user types: add `derive Show` after a `type` declaration to get `to_string` and
   string interpolation support (`Ord` is also derivable, see §3.5; use commas for several:
   `derive Show, Ord`).

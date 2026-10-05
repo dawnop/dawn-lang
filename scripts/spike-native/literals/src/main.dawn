@@ -1,0 +1,61 @@
+# Numeric literals typed by their expectation, differentially
+# (docs/literal-system-design.md): folded literals at an opaque byte, in a
+# const and through a function a const calls; an Int literal at Float and next
+# to a Float operand or literal; the waiting round of call arguments; a
+# literal zero in generic code at Int, Float and the byte, whose Float slot
+# converts at run time; and an impl that binds an effect, called where the
+# literal is.
+use u8.{U8, to_int, inside}
+
+effect Log {
+  fn note(s: String) -> Unit
+}
+
+type Traced = { v: Int }
+
+impl FromInt[Traced] {
+  effect FromInt = !Log
+  fn from_int(n: Int) -> Traced !Log = {
+    note("lit ${n}")
+    Traced { v: n }
+  }
+}
+
+fn seven() -> U8 = 7
+
+const S: U8 = seven()
+
+const C: U8 = 77
+
+fn zero[T: FromInt]() -> T !T.FromInt = 0
+
+fn sum[T: Add + FromInt](xs: List[T]) -> T !(T.Add | T.FromInt) = fold(xs, 0, (a, x) => a + x)
+
+fn g[T](a: T, b: T) -> T = b
+
+fn half(x: Float) -> Float = x / 2
+
+fn traced() -> Int !Log = {
+  let t: Traced = 41
+  t.v + 1
+}
+
+pub fn main() -> Unit !io = {
+  let b: U8 = 200
+  let c = b + 100
+  println("${to_int(b)} ${to_int(c)} ${to_int(S)} ${to_int(C)} ${to_int(inside())}")
+  let f: Float = 1
+  let r = 2.0
+  println("${f} ${3.14159 * 2 * r} ${1 + 2.0} ${r * 3} ${3 * r} ${half(3)} ${1 / 2}")
+  let z: Float = zero()
+  let zi: Int = zero()
+  println("${zi} ${z} ${to_int(zero())}")
+  println("${sum([1, 2, 3])} ${sum([1.5, 2.5])} ${to_int(sum([b, b]))}")
+  println("${g(1, 2.5)} ${g(2.5, 1)}")
+  let xs: List[Float] = [1.5, 2]
+  println("${xs} ${-0} ${r == 2} ${b == 200}")
+  let ff: Float = -0
+  println("${1.0 / ff}")
+  with handle Log { note(s) => println("log " ++ s) }
+  println(to_string(traced()))
+}

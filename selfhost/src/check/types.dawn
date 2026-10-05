@@ -2586,6 +2586,18 @@ pub fn is_arith_trait(tid: Int) -> Bool = tid >= ADD_ID && tid <= NEG_ID
 pub fn arith_trait_name(tid: Int) -> String =
   ["Add", "Sub", "Mul", "Div", "Rem", "Neg"][tid - ADD_ID]
 
+## The literal traits, behind a numeric literal met at a type the compiler
+## does not own (docs/literal-system-design.md). Ids 13 and 14. The subject
+## is only in the return position, `fn from_int(n: Int) -> T`, which is fine
+## because nothing ever calls one by name: the checker inserts the call at a
+## type it already knows and resolves the witness directly. Shaped like the
+## arithmetic traits otherwise: not injected, one effect member named like
+## the trait and pure by default.
+pub const FROM_INT_ID: Int = 13
+pub const FROM_FLOAT_ID: Int = 14
+
+pub fn is_lit_trait(tid: Int) -> Bool = tid == FROM_INT_ID || tid == FROM_FLOAT_ID
+
 ## One prelude trait `derive` can mint an impl of.
 pub type Derivable = { name: String, trait_id: Int, adjective: String }
 
@@ -2915,7 +2927,30 @@ pub fn prelude_traits() -> Traits = {
     (MUL_ID, arith_trait(MUL_ID, "Mul", "mul", -25, 2)),
     (DIV_ID, arith_trait(DIV_ID, "Div", "div", -26, 2)),
     (REM_ID, arith_trait(REM_ID, "Rem", "rem", -27, 2)),
-    (NEG_ID, arith_trait(NEG_ID, "Neg", "neg", -28, 1))])
+    (NEG_ID, arith_trait(NEG_ID, "Neg", "neg", -28, 1)),
+    (FROM_INT_ID, lit_trait(FROM_INT_ID, "FromInt", "from_int", TyInt, -29)),
+    (FROM_FLOAT_ID, lit_trait(FROM_FLOAT_ID, "FromFloat", "from_float", TyFloat, -30))])
+}
+
+## `trait FromInt[T] { effect FromInt = !()  fn from_int(n: Int) -> T !T.FromInt }`
+## and `FromFloat` alike over `x: Float`: one parameter of a fixed host type.
+fn lit_trait(tid: Int, name: String, m: String, pty: Ty, tvid: Int) -> TraitI = {
+  let tv = TyVar("T", tvid)
+  let pn = if tid == FROM_INT_ID { "n" } else { "x" }
+  let sig = Sig { ..prelude_method(tid, tv, m, [pty], [pn], tv), eff: EffAssoc("T", tvid, tid, name) }
+  TraitI {
+    id: tid,
+    name: name,
+    tvar: tv,
+    audience: AWorld,
+    owner: None,
+    src_path: None,
+    methods: [(m, MethodSig { sig: sig, has_default: false })],
+    assoc: [],
+    eff_assoc: [name],
+    eff_defaults: [(name, EPure)],
+    injects: false
+  }
 }
 
 ## `trait Add[T] { effect Add = !()  fn add(a: T, b: T) -> T !T.Add }`, and
@@ -2949,7 +2984,7 @@ fn arith_trait(tid: Int, name: String, m: String, tvid: Int, arity: Int) -> Trai
 ## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
 pub fn prelude_trait_ids() -> List[Int] =
   [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID,
-    REM_ID, NEG_ID]
+    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -3164,6 +3199,13 @@ pub fn prelude_impls() -> List[ImplI] = {
       out = out ++ [ImplI { ..prelude_impl(tid, t), eff_bindings: [(nm, EPure)] }]
     }
   }
+  # FromInt at Int and Float, FromFloat at Float, and no FromFloat[Int]: a
+  # float literal never becomes an integer. Like the arithmetic ones, only a
+  # dictionary slot reaches these; a concrete Int or Float expectation is the
+  # checker's own business (literal-system-design D2)
+  out = out ++ [ImplI { ..prelude_impl(FROM_INT_ID, TyInt), eff_bindings: [("FromInt", EPure)] },
+    ImplI { ..prelude_impl(FROM_INT_ID, TyFloat), eff_bindings: [("FromInt", EPure)] },
+    ImplI { ..prelude_impl(FROM_FLOAT_ID, TyFloat), eff_bindings: [("FromFloat", EPure)] }]
   let ot = TyVar("T", -11)
   let rt = TyVar("T", -12)
   let re = TyVar("E", -13)
@@ -4575,7 +4617,18 @@ test "prelude shapes" {
   # each trait over its own list -- one table per question, which is the point
   # (the arithmetic traits: Int and Float for each of the six)
   assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
-    len(hash_scalars()) + len(show_scalars()) + 5 + 2 * len(arith_trait_ids())
+    len(hash_scalars()) + len(show_scalars()) + 5 + 2 * len(arith_trait_ids()) + 3
+  # the literal traits: not injected, one pure-by-default effect member each
+  for tid in [FROM_INT_ID, FROM_FLOAT_ID] {
+    let tr = trait_of(traits, tid)
+    assert not tr.injects
+    assert tr.eff_assoc == [tr.name]
+    assert tr.eff_defaults == [(tr.name, EPure)]
+  }
+  var tbl: Impls = map.empty()
+  for i in prelude_impls() { tbl = insert_impl(tbl, i) }
+  assert has_impl_at(tbl, FROM_INT_ID, TyFloat)
+  assert not has_impl_at(tbl, FROM_FLOAT_ID, TyInt)
   # an operator's trait injects nothing, and carries one effect named like it,
   # pure unless an impl binds it
   for tid in arith_trait_ids() {
