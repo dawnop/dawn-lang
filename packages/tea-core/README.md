@@ -70,7 +70,9 @@ command whose answer arrives after the turn yet.
 `Sub[M]` is data too: `Tick(every_ms, msg)` names the message a timer means.
 The model declares its subscriptions (`subs(m)`), the driver owns all timing
 and re-reads the declaration after every update, and a due timer's message is
-taken from the declaration current when it fires.
+taken from the declaration current when it fires. `elapse` is handed the
+milliseconds the driver measured; a timer that missed whole periods fires once
+and keeps its phase.
 
 Changes between versions: [CHANGELOG.md](CHANGELOG.md). Design background:
 [`docs/dom-bridge-design.md`](../../docs/dom-bridge-design.md) (in Chinese).
