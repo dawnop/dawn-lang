@@ -7,6 +7,17 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## Unreleased: tileiras 13.4.92 on sm_90 and sm_100 (#558)
+
+New module `asm`: `tileiras_args(version, gpu_name)` answers the arguments to
+assemble with, and `assembler_defect(version, gpu_name)` explains them.
+tileiras 13.4.92 miscompiles a loop exit value on sm_90, sm_100, sm_103,
+sm_107 and sm_110 at `--opt-level` 1 and above
+([NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)), so for
+those targets the answer includes `--opt-level 0`. The table is keyed on the
+exact tileiras version, so a fixed release gets the plain arguments.
+`Dev` is unchanged and so are the bytes `encode` writes. Adds names only. §6.28.
+
 ## 0.8.1 (2026-10-05)
 
 `reshape(t, shape)` regroups a tile's lanes into another shape of as many,
