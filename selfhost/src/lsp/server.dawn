@@ -4273,6 +4273,75 @@ test "a handler state cell answers at every spelling of it" {
   }))
 }
 
+fn arm_probe_text() -> String =
+  join([
+    "use std/io.{Console as Out}",
+    "",
+    "effect Ask {",
+    "  fn ask(n: Int) -> Int",
+    "}",
+    "",
+    "fn twice(n: Int) -> Int !Ask = ask(n) + ask(n)",
+    "",
+    "fn quiet() -> Int = {",
+    "  with handle Ask { ask(n) => n + 1 }",
+    "  with handle Out {",
+    "    console_print(s) => ()",
+    "    console_println(s) => ()",
+    "    console_eprint(s) => ()",
+    "    console_eprintln(s) => ()",
+    "  }",
+    "  twice(2)",
+    "}",
+    ""
+  ], "\n")
+
+test "a handler arm's operation name answers as the operation it implements" {
+  # the real handler stays: `load_std("std")` names a relative directory, so
+  # the working directory this runs in is one of the inputs.
+  io.with_fs_real(() => io.with_env_real(() => {
+    # The arm head is written like a call and resolved like none: the checker
+    # matches it to the effect's operation by name, and the closure it makes of
+    # the arm keeps the parameters and the body but no span for the name. So
+    # the walk answers it from the handled effect (`offer_arm_names`), and the
+    # answer has to be the call site's: same signature, same declaration.
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = arm_probe_text()
+    let d = def_probe_doc_named(st, "arms.dawn", text)
+    let absent: Option[String] = None
+
+    # an effect of this module: the call site and the arm agree
+    let call = def_probe_at(st, d, text, "ask(n) + ask", 0)
+    let arm = def_probe_at(st, d, text, "ask(n) =>", 1)
+    assert arm.hover == "fn ask(n: Int) -> Int !Ask"
+    assert arm.hover == call.hover
+    let (alo, ahi) = def_probe_span(arm, "the arm of a local effect")
+    assert (alo, ahi) == def_probe_span(call, "the operation call")
+    assert str.slice(text, alo, ahi) == "ask"
+    assert arm.def_path == absent
+
+    # a std effect under a renamed import: the signature names the effect by
+    # its own name, and the jump lands in std's file, on the operation
+    let out = def_probe_at(st, d, text, "console_println(s) =>", 3)
+    assert out.hover == "fn console_println(s: String) -> Unit !Console"
+    let dp = match out.def_path {
+      Some(p) -> p
+      None -> panic("an arm of a std effect must name std's file")
+    }
+    assert dp == canon_identity("std/io.dawn")
+    let (olo, ohi) = def_probe_span(out, "the arm of a std effect")
+    let src = match io.read_file(dp) {
+      Ok(s) -> s
+      Err(e) -> panic("std/io.dawn: ${e.message}")
+    }
+    assert str.slice(src, olo, ohi) == "console_println"
+  }))
+}
+
 # ---- comptime values on hover (docs/lsp-hover-design.md §3) ----
 
 fn value_probe_text() -> String =

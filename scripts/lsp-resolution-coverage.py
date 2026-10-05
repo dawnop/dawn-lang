@@ -218,6 +218,7 @@ SINGLE_NEW_HOVERS = [
     ("written type hover", "e: Expr", 3, "type Expr = Num | Var | Add"),
     ("type parameter hover", "x: T,", 3, "type parameter T"),
     ("effect row hover", "!Env =", 1, "effect Env"),
+    ("handler arm op hover", "{ lookup(n) =>", 2, "fn lookup(name: String) -> Int !Env"),
     ("named argument hover", "dy: 5", 0, "dy: Int"),
     ("var declaration hover", "var acc", 4, "var acc: Int"),
 ]

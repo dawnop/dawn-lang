@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints (left-out defaults among them, with their folded values), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, folded values of closed pure
+# on hover and on `use` lines, inlay hints (left-out defaults among them, with their folded values), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, handler arms' operation names, folded values of closed pure
 # expressions on hover, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -347,6 +347,31 @@ test "adds" {
 }
 EOF
 
+# Handler arms (docs/lsp-hover-design.md §H1): the operation name an arm
+# answers hovers as the operation and goes to its declaration, for an effect
+# of the project and for a std effect under a renamed import, whose
+# declaration is in std's own file.
+cat > "$OUT/proj/src/arms.dawn" <<'EOF'
+use std/io.{Console as Out}
+
+pub effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+fn twice(n: Int) -> Int !Ask = ask(n) + ask(n)
+
+pub fn quiet() -> Int = {
+  with handle Ask { ask(n) => n + 1 }
+  with handle Out {
+    console_print(s) => ()
+    console_println(s) => ()
+    console_eprint(s) => ()
+    console_eprintln(s) => ()
+  }
+  twice(2)
+}
+EOF
+
 cat > "$OUT/proj/src/messy.dawn" <<'EOF'
 fn   messy( a : Int )  ->  Int =  a  +  1
 EOF
@@ -596,6 +621,24 @@ req("textDocument/references", {**at(inlays_uri, inlays_text, "pad_to(tag", 1, 0
 req("textDocument/prepareRename", at(inlays_uri, inlays_text, "pad_to(tag", 1, 0))
 req("textDocument/rename", {**at(inlays_uri, inlays_text, "pad_to(tag", 1, 0), "newName": "pad_out"})
 note("textDocument/didClose", tdoc(inlays_uri))
+
+# handler arms: hover and definition on each arm's operation name, the call
+# site's hover beside them, and the references of the arm's operation
+arms_path = f"{out_dir}/proj/src/arms.dawn"
+arms_uri = "file://" + arms_path
+arms_text = open(arms_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": arms_uri, "languageId": "dawn", "version": 1, "text": arms_text}})
+for needle, occ, delta in [
+    ("ask(n) =>", 1, 1),             # an arm of the project's effect
+    ("ask(n) + ask", 1, 1),          # the call site of the same operation
+    ("console_println(s) =>", 1, 3), # an arm of a std effect, renamed
+]:
+    req("textDocument/hover", at(arms_uri, arms_text, needle, occ, delta))
+    req("textDocument/definition", at(arms_uri, arms_text, needle, occ, delta))
+req("textDocument/references", {**at(arms_uri, arms_text, "ask(n) =>", 1, 1),
+    "context": {"includeDeclaration": True}})
+note("textDocument/didClose", tdoc(arms_uri))
 
 # left-out defaults: the whole file, with the session's default options
 defaults_path = f"{out_dir}/proj/src/defaults.dawn"

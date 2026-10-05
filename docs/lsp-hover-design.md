@@ -1,4 +1,4 @@
-# LSP 悬停与内联提示：设计（A1–A4、B1、C4、C5）
+# LSP 悬停与内联提示：设计（A1–A4、B1、C4、C5、H1）
 
 > 状态：current。本线的总纲：除类型之外，hover 与 inlay 还能告诉读者什么、按什么刀序做。
 > A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）；
@@ -6,6 +6,7 @@
 > `use` 行的模块文档，文档注释 D7）见 §D7。B1（省略的默认实参作 inlay hint）已落地（§B1）。
 > C5（纯且闭合表达式的 hover 求值）已落地：解释器入口 C5-1 与 LSP 接线 C5-2（§C5）。
 > C4（省略的默认实参显示求得的值，复用 C5 的求值）已落地（§C4）。
+> H1（handler 臂的操作名 hover 与跳转定义）：v0.83.0 起已在，本节记实测、测试与负控（§H1）。
 > B 组立项时在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
@@ -1077,6 +1078,60 @@ thunk 接受前面**所有**形参的值，不管默认值读没读。直接求�
 - **把求不出的原因写进提示**：同 C5.8。
 - **对占位实参做类型正确的构造**：占位从不被读（C4.2），构造同类型的值要为每种类型找一个值，没有收益。
 
+## H1. handler 臂的操作名：hover 与跳转定义
+
+`with handle Ask { ask() => 21 }` 里臂头的 `ask`。立项时的前提是「臂头 hover 无结果、definition 无结果，同一个名字
+在调用点上两样都正常」。实测推翻了这个前提：
+
+- **v0.82.0**（2026-10-05 用 `.dawn/seeds/v0.82.0` 的种子 jar 复现）：臂头 hover 回的是外层语句的类型
+  （`Unit`，range 盖住整个 `with handle` 及其块剩余），definition 回 `[]`；调用点 `ask()` 的 hover 正常，
+  definition 同样是 `[]`。所以缺的是两处，不止臂头。
+- **v0.83.0 起**：两处都已补上，来自 `0e6ef2c2`（Resolve every written name the definition walk used to leave
+  empty），即 [lsp-references-design.md](lsp-references-design.md) §3 的 T0。立项时看到的是 v0.82.0 的行为。
+
+### H1.1 臂头怎么解析
+
+臂头的名字在 AST 里有跨度（`ast.HandlerArm.nlo`/`nhi`），在 typed 树里没有：checker 把臂做成一个闭包
+（`XLambda`），按名字去效果声明里配操作，配上的结果不回写到臂上。所以 `lsp/lspq.offer_arm_names` 不读 typed 树，
+从 `EHandle` 的效果名出发：`effect_id_of` 在 checker 留下的名字表（`cx.effects`、别名的导出面
+`module_exports`）里查出效果 id，裸名、选择性导入及其改名、`m.E` 限定名都在这两张表里，
+按效果的 owner 用 `sig_by_owner` 取操作签名，在臂头跨度上 offer。hover 文本与落点都走调用点用的
+`offer_sig_at`/`site_of_op`，两处回包一样：
+
+- hover：`fn ask() -> Int !Ask`，与调用点同一格式，末尾是所属效果；操作带 `##` 文档时文档照常跟在围栏后（§A3）。
+  改名导入的 std 效果仍按效果自己的名字打印（`!Console`，不是 `!Out`），与 spec §6.5「改名不改诊断里打印的名字」一致。
+- definition：效果声明里那个操作的名字。std 效果（`Fs`、`Console` 等）的臂跳进 std 自己的文件，走的是跨模块跳转
+  的同一条路（`site_of_op` 给出声明所在的模块，`def_path` 指 std 文件，`location_of` 按那个文件的行表换算）。
+- 不依赖 typed 树，所以模块有类型错误时（例如臂体类型不对、块剩余里有未定义的名字）臂头仍然有答案；带状态格子的 handler、
+  `resume k` 控制臂、impl 方法 / lambda / 局部 `fn` / `if` 分支 / `test` 块里的 handler 都实测过。
+
+### H1.2 references 与 rename
+
+references、documentHighlight 与 rename 读的是同一份 walk（lsp-references-design.md），臂头自然在内：在操作声明
+或臂头上请求 references，回包是声明、调用点、每个臂头；rename 在项目文件里会把这些位置一起改。实测见报告，本节不扩范围。
+
+### H1.3 测试与负控
+
+- `lsp/server` 一条（`a handler arm's operation name answers as the operation it implements`）：本模块效果的臂与调用点
+  hover 逐字相同、落点相同且切出来是 `ask`；改名导入的 std `Console` 臂 hover 为 `fn console_println(s: String) -> Unit !Console`、
+  `def_path` 是 `std/io.dawn`、在 std 原文里切出来是 `console_println`。
+- `scripts/lsp-resolution-coverage.py` 原有「handler arm op」「imported effect's arm op」两条 definition，加一条臂头 hover
+  （`fn lookup(name: String) -> Int !Env`）。
+- `scripts/selfhost-lsp-diff.sh` 会话新增 `arms.dawn`：三处 hover + definition（本项目效果的臂、同一操作的调用点、改名导入的
+  std 效果的臂）与一次 references。与上一 release（v0.83.0）的回包只差一行：std 臂的 definition 行号，因为 HEAD 的
+  `std/io.dawn` 比种子的多了几行，是 std 文本的差别，不是 LSP 行为的差别。native 腿（`scripts/native-cli-diff.sh` 第 4 腿）
+  拿同一份会话跑 `dawnc lsp`，两端一致由它守。
+- 负控：`scripts/lsp-resolution-coverage/mutate.py` 已有的 `drop-arm-names`（`offer_arm_names` 开头直接 `return q0`）打到树上，
+  上面的 `lsp/server` 一条红在第一条断言，resolution-coverage 的三条（两条 definition 加新的 hover）红。lsp-diff 会话在这个变异下
+  也多出 10 行差异，但 `lsp` 标签自 v0.83.0 起已有 `Emit-Change(lsp)` 声明，标签级的门不红；下一次发版推进种子后才会红，
+  所以它不算这条的负控。
+
+### H1.4 不做的（H1 内，理由）
+
+- **让 checker 把配上的操作写回臂上**（例如 `XLambda` 外面包一层带 `Sig` 的节点）：臂头的解析只依赖效果名与操作名，
+  两者 AST 上都有，查的是 checker 自己填的名字表，回写多一个 typed 节点却不多一条信息，还要动 Core 降级与两个后端。
+- **inlay 给臂加效果行**：A4 报告把「handler 臂不给效果行」定为设计，这条不改。
+
 ## 5. 门禁与契约
 
 - `./bin/dawn test selfhost`：`lsp/lspv` 五条（每种值、记录与和类、十六进制阈值、截断、函数值）；
@@ -1179,4 +1234,5 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | C5-1（解释器入口 `eval_closed`） | 已落地 | `98f000f5`（main 上的哈希，PR #432） |
 | C5-2（hover 接线） | 已落地 | `ff7a77b2`（main 上的哈希，PR #442） |
 | C4（默认实参值 inlay） | 合入后由协调者回填 | |
+| H1（handler 臂的操作名） | 实现随 `0e6ef2c2`（v0.83.0）落地；测试与本节合入后由协调者回填 | |
 | B 组其余 | 未立项 | |
