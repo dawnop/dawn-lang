@@ -187,3 +187,26 @@ ground: contains a98e85fb^:std/modules.txt path
 ground: lacks cb2984c4:std/modules.txt path
 query: std/path.dawn
 expect: exact std/modules.txt lists this path in the relevant tree's bundled-module set
+
+# The Playground contract is a script outside scripts/, and the map stopped at
+# it. contract.sh moves to playground/ by its own location and runs
+# `./test/lsp-contract.sh`, which runs `python3 -B playground/test/lsp_contract.py`,
+# which names the gateway with `os.path.join(ROOT, ...)` and boots the runner
+# with `"$DAWN_BIN" run "$ROOT/playground"`. Read from the root, with the scripts/
+# closure, `/` joins only and the toolchain's word only when bare, every one of
+# those links named nothing. So a change to playground/lsp_gateway.py or to the
+# runner's source selected no job that runs the contract, though gates.yml runs
+# it on every push. This is the tree that gap was found on.
+name: 427a813e, the Playground contract reaches the gateway and the runner
+tree: 427a813e
+ground: contains 427a813e:.github/workflows/gates.yml run: ./playground/test/contract.sh
+ground: contains 427a813e:playground/test/contract.sh ./test/lsp-contract.sh
+ground: contains 427a813e:playground/test/contract.sh "$DAWN_BIN" run "$ROOT/playground"
+ground: contains 427a813e:playground/test/lsp-contract.sh python3 -B playground/test/lsp_contract.py
+ground: contains 427a813e:playground/test/lsp_contract.py os.path.join(ROOT, "playground", "lsp_gateway.py")
+query: playground/lsp_gateway.py
+expect: coarse docs / playground contract :: playground/test/lsp_contract.py names playground/lsp_gateway.py
+query: playground/src/play/exec.dawn
+expect: coarse docs / playground contract :: playground/test/contract.sh names playground
+query: playground/test/lsp_contract.py
+expect: exact docs / playground contract :: gates.yml:3067 runs playground/test/lsp_contract.py

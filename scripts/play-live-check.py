@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Check a *deployed* Playground against the samples in the tree.
 
-`scripts/doc-check.py` already runs `site/play-ui/samples/*.dawn` with the local
-compiler and compares stdout with the `.out` beside each one. Nothing checked
-the same thing against the *server*, and that gap is not hypothetical: the
-sidebar shipped a `fn`-prefixed lambda the compiler had rejected for eight
-releases, and the deployed runner sat thirteen days behind the tree, each half
-consistent with the other and both wrong. Two things have to agree here that
+The documentation check, scripts/doc-check.py, already runs
+`site/play-ui/samples/*.dawn` with the local compiler and compares stdout with
+the `.out` beside each one. Nothing checked the same thing against the
+*server*, and that gap is not hypothetical: the sidebar shipped a
+`fn`-prefixed lambda the compiler had rejected for eight releases, and the
+deployed runner sat thirteen days behind the tree, each half consistent with
+the other and both wrong. Two things have to agree here that
 `doc-check` cannot compare: the compiler the server runs, and the bundle nginx
 serves.
 
