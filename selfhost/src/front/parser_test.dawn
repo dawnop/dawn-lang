@@ -1168,6 +1168,59 @@ test "recovery stops at every top-level declaration head" {
   }
 }
 
+test "a declaration that fails on the next one's head does not take it along (#548)" {
+  # the trailing `=` joins the next line, so the const fails on the `fn` of
+  # the declaration after it; the resync used to step over that `fn` first
+  let src = "const A: Int =\nfn f() -> Int = 1\nfn g() -> Int = f()"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 1
+  var names: List[String] = []
+  for d in m.decls {
+    match d {
+      DFn(f) -> { names = names ++ [f.name] }
+      _ -> { assert false }
+    }
+  }
+  assert names == ["f", "g"]
+  # the `pub` in front of the head is part of it
+  let (pm, pds) = parse_module("use std/\npub fn main() -> Int = 1")
+  assert len(pds) == 1
+  assert len(pm.decls) == 1
+  match pm.decls[0] {
+    DFn(f) -> {
+      assert f.name == "main"
+      assert f.vis == VisPub
+    }
+    _ -> { assert false }
+  }
+  # a head in the middle of the broken line is part of the broken text, not a
+  # declaration of its own: one error, and nothing parsed from the `fn`
+  let (mm, mds) = parse_module("const A: Int = fn(x) x\nfn k() -> Int = 1")
+  assert len(mds) == 1
+  assert len(mm.decls) == 1
+  # the joined line can be read past its head before it fails: `fn` starts a
+  # function type, and the failure is on the name after it
+  let (tm, tds) = parse_module("type T =\nfn s() -> Int = 1\npub fn t() -> Int = 2")
+  assert len(tds) == 1
+  assert len(tm.decls) == 2
+  match tm.decls[0] {
+    DFn(f) -> { assert f.name == "s" }
+    _ -> { assert false }
+  }
+  # or not fail at all: after `.` a keyword is a member name, but not a head
+  # at column 0 that the trailing `.` pulled up
+  let (dm, dds) = parse_module("fn o() -> Int = p.\nfn q() -> Int = 1")
+  assert len(dds) == 1
+  assert dds[0].msg == "expected a field or function name after `.`, found `fn`"
+  assert len(dm.decls) == 1
+  match dm.decls[0] {
+    DFn(f) -> { assert f.name == "q" }
+    _ -> { assert false }
+  }
+  let (_, kept) = parse_module("fn o() -> Int = p.\n  type")
+  assert len(kept) == 0
+}
+
 test "a conditional impl carries its own type parameters" {
   let (m, ds) = parse_module("impl[T: Eq] Eq[List[T]] {\n  fn eq(a: List[T], b: List[T]) -> Bool = true\n}")
   assert len(ds) == 0
