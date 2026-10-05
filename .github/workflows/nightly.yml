@@ -364,6 +364,68 @@ jobs:
           } > issue.md
           scripts/nightly-issue.sh "nightly: native sanitizer run is red" issue.md
 
+  # Structural properties of `dawn fmt` (research-bug-rate-report 7.2, cut 1;
+  # scripts/fmt-properties/run.py's header has the properties and why each).
+  # `fmt --check` and the fmt differential only ask whether the output is a
+  # fixed point, and #187 and #188 were both fixed points: the formatter
+  # decided from tokens what the parser decides from the grammar, and the two
+  # disagreed. This compares them on every tracked file, re-indented and
+  # re-broken, and on the fuzz3 generator's programs once that script is in
+  # the tree. Nightly rather than push: push-total had no room on 2026-10-04,
+  # and the run finds layout defects in old code rather than guarding a
+  # change. Measured 2026-10-05 on four pinned cores: 128s for 966 inputs
+  # (2,774 formatted variants), 2.4 GB peak; the toolchain action adds what it
+  # adds to every job, and 20 minutes is a runaway stop. Red opens one issue;
+  # its verdict line is the set of property:rule:variant keys, so the same
+  # kinds of finding on another night are not a new comment.
+  fmt-properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read    # the checkout
+      issues: write     # the report when the run is red
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the checks hold on their own inputs
+        run: python3 scripts/fmt-properties/run.py --self-test
+
+      - name: fmt against the parser, every tracked file
+        id: props
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fmt-properties/run.py --jobs 4 > props.txt 2>&1 || status=$?
+          cat props.txt
+          exit "${status:-0}"
+
+      - name: report a red property run as an issue
+        if: failure() && steps.props.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly structural properties of dawn fmt"
+            echo "(scripts/fmt-properties/run.py) are red."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Each finding is a place where fmt's layout or spacing disagrees with the"
+            echo "parser. The run is deterministic: \`run.py --out <dir>\` keeps the variants."
+            echo
+            echo "<!-- verdict: $(sed -n 's/^verdict: //p' props.txt | tail -1) -->"
+            echo
+            echo '```'
+            grep -v '^verdict: ' props.txt 2>/dev/null | tail -60 || echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: fmt properties are red" issue.md
+
   # Ruling 9(c). The corpus above is dawnop-site at a pinned commit, and a pin
   # nothing advances answers an older question every week: it sat at a72bfc9
   # (v0.59.0) through three `.dawn-version` bumps over there. The rule is
