@@ -435,6 +435,73 @@ jobs:
           } > issue.md
           scripts/nightly-issue.sh "nightly: fmt properties are red" issue.md
 
+  # Recovery properties of the diagnostics (research-bug-rate-report 7.2,
+  # cut 2; scripts/diag-properties/run.py's header has the properties and
+  # why each). Every diagnostic corpus in the tree was written by someone who
+  # knew the mistake, and #190 (a missing comma made the rest of a body
+  # false top-level errors), #191 (a missing interpolation `}` reported as an
+  # unterminated string) and 24ab1b6e (the declaration resync skipped `use`
+  # and `test`) were each one token away from a file in the tree. This makes
+  # those one-token typos in every tracked file, a fixed number per file,
+  # and holds the result to no crash, a first diagnostic near the typo, no
+  # top-level cascade from inside a body, and no later declaration lost.
+  # Nightly rather than push: push-total had no room on 2026-10-04, and the
+  # run finds recovery defects in old code rather than guarding a change.
+  # Measured 2026-10-05 on four pinned cores: 282s and 2.4 GB peak for 946
+  # inputs, about 10,000 mutants and 800 of them through `__check` (139s when
+  # only examples and checker-corpus go through it); the toolchain action
+  # adds what it adds to every job, and 30 minutes is a runaway stop. Red opens one
+  # issue; its verdict line is the set of property:rule:mutation keys, so
+  # the same kinds of finding on another night are not a new comment.
+  diag-properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read    # the checkout
+      issues: write     # the report when the run is red
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the judges hold on their own inputs
+        run: python3 scripts/diag-properties/run.py --self-test
+
+      - name: one-token mutations of every tracked file
+        id: props
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/diag-properties/run.py --jobs 4 > props.txt 2>&1 || status=$?
+          cat props.txt
+          exit "${status:-0}"
+
+      - name: report a red property run as an issue
+        if: failure() && steps.props.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly recovery properties of the diagnostics"
+            echo "(scripts/diag-properties/run.py) are red."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Each finding is a one-token mutation of a tracked file whose diagnostics"
+            echo "crash, land far from the change, cascade to module level or lose a later"
+            echo "declaration. The run is deterministic: \`run.py --out <dir>\` keeps the mutants."
+            echo
+            echo "<!-- verdict: $(sed -n 's/^verdict: //p' props.txt | tail -1) -->"
+            echo
+            echo '```'
+            grep -v '^verdict: ' props.txt 2>/dev/null | tail -60 || echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: diagnostic recovery properties are red" issue.md
+
   # Ruling 9(c). The corpus above is dawnop-site at a pinned commit, and a pin
   # nothing advances answers an older question every week: it sat at a72bfc9
   # (v0.59.0) through three `.dawn-version` bumps over there. The rule is
