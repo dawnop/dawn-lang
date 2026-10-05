@@ -315,8 +315,9 @@ class Layout:
         self.first_lo = {t.lo for t in self.first.values()}
         self.brace_lo = {t.lo for t in self.code if t.kind == "LBRACE"}
         self.node_lo = {n.lo for n in walk(root) if n.lo is not None}
-        # a node's leftmost offset over its subtree: a `with` statement's call
-        # spans from the callee, but its lambda child starts at `with`
+        # a node's leftmost offset over its subtree: before #538 a `with`
+        # statement's call spanned from the callee while its lambda child
+        # started at `with`, and --dawn may name a toolchain from then
         self.lo_min = {}
         for n in reversed(list(walk(root))):
             los = [self.lo_min[id(k)] for k in n.kids if self.lo_min.get(id(k)) is not None]

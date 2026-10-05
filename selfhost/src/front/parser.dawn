@@ -3137,8 +3137,21 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   let param = LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }
   let body = EBlock(stmts, tail, rest_lo, rest_hi)
   let lam = ELambda([param], body, true, kw.lo, rest_hi)
-  Ok((st7, attach_trailing(callee, lam)))
+  Ok((st7, from_with(attach_trailing(callee, lam), kw.lo)))
 }
+
+## The call a `with` statement becomes spans the statement, from `with` on.
+## `attach_trailing` keeps the callee's start, which is right for a tail block
+## written after the call; here the closure it attaches starts at `with`, left
+## of the callee, and a span that does not contain its children misleads every
+## reader that assumes nesting: selection ranges, folding, the innermost node
+## at an offset (#538).
+fn from_with(call: Expr, lo: Int) -> Expr =
+  match call {
+    EApply(t, args, _, hi) -> EApply(t, args, lo, hi)
+    EMethod(t, n, args, nlo, nhi, _, hi) -> EMethod(t, n, args, nlo, nhi, lo, hi)
+    other -> other
+  }
 
 ## `with handle E { var s: T = e ... op(a) => body ... }` plus the rest of the
 ## enclosing block, which becomes a parameterless closure exactly as the binder
