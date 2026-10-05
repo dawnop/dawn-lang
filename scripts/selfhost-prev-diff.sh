@@ -86,7 +86,7 @@ TAG=$(tr -d ' \n' < scripts/seed-release.txt)
 # revision whose bytes define this gate.
 ECO_URL=${DAWNOP_SITE_URL:-https://github.com/dawnop/dawnop-site.git}
 ECO_REPO=dawnop/dawnop-site
-ECO_REV=7031dc3f6a13c003fa6e33863a47f54741a6071d
+ECO_REV=4c37105874bce81f5ebdcad27bd08bd906aa9262
 
 if [ "$CHECK_PIN" = 1 ]; then
   bump=$(gh api "repos/$ECO_REPO/commits?path=.dawn-version&per_page=1" --jq '.[0].sha')
