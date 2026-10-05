@@ -8,10 +8,11 @@
 # a command that means "again in n ms" needs the driver to wait, which is the
 # io arm `Cmd` does not have. The declarative form needs neither.
 #
-# There is no clock in std, only `io.stdin_ready(timeout_ms)`. So "every n
-# ms" honestly means: n ms of *waiting* (full poll timeouts with no input),
-# not n ms of wall time. Time spent blocked on input does not count, because
-# nothing can measure it. That approximation is the documented v1 semantics.
+# What a millisecond is, is the driver's business: `elapse` is handed a count
+# and trusts it. tea_term hands it monotonic time read through std/io's
+# `Clock`, so "every n ms" is n ms of elapsed time, whatever the loop was
+# doing. Until that clock existed the count was n ms of *waiting* (full poll
+# timeouts with no input), and this file documented that approximation.
 #
 # The pending state is deliberately not generic: it keeps intervals and
 # waiting only, and due timers come back as *indices* into the declaration.
@@ -22,8 +23,9 @@
 
 use std/list
 
-## What a model can ask the driver for: a message every `every_ms` of
-## waiting. Intervals below 1ms behave as 1ms (see `intervals`).
+## What a model can ask the driver for: a message every `every_ms`
+## milliseconds, as the driver counts them (tea_term counts monotonic
+## time). Intervals below 1ms behave as 1ms (see `intervals`).
 pub type Sub[M] =
   | Tick(every_ms: Int, msg: M)
 derive Show
@@ -61,10 +63,11 @@ pub fn poll_ms(ps: List[Pending]) -> Option[Int] = {
 fn remaining(p: Pending) -> Int =
   if p.every_ms - p.waited_ms < 1 { 1 } else { p.every_ms - p.waited_ms }
 
-## Account `ms` of waiting to every timer. Returns the advanced timers and
-## the indices (declaration order) of those that came due. A timer fires
-## once per call and carries its remainder, so a late poll drifts rather
-## than bursts.
+## Account `ms` of elapsed time to every timer. Returns the advanced timers
+## and the indices (declaration order) of those that came due. A timer fires
+## once per call and keeps what it waited past its last boundary, so a late
+## poll drifts rather than bursts: periods missed whole are skipped, not
+## owed.
 pub fn elapse(ps: List[Pending], ms: Int) -> (List[Pending], List[Int]) = {
   let kept: List[Pending] = []
   let due: List[Int] = []
@@ -84,8 +87,14 @@ fn elapse_go(
     let p = ps[i]
     let w = p.waited_ms + ms
     if w >= p.every_ms {
+      # `w % every_ms` and not `w - every_ms`: a caller that measures time
+      # can hand over several periods at once (a slow update, a long paint),
+      # and a timer still owed the rest would fire again on every call until
+      # it caught up -- the burst this function exists to prevent. An
+      # interval below 1 (`arm` takes any Int) keeps nothing.
+      let left = if p.every_ms < 1 { 0 } else { w % p.every_ms }
       elapse_go(ps, ms, i + 1,
-        kept ++ [Pending { every_ms: p.every_ms, waited_ms: w - p.every_ms }],
+        kept ++ [Pending { every_ms: p.every_ms, waited_ms: left }],
         due ++ [i])
     } else {
       elapse_go(ps, ms, i + 1,
@@ -149,6 +158,17 @@ test "a late poll carries the remainder instead of losing it" {
   assert late == [Pending { every_ms: 10, waited_ms: 5 }]
   let (again, due1) = elapse(late, 5)
   assert due1 == [0]
+}
+
+test "periods missed whole are skipped, not owed" {
+  # 35 ms over a 10 ms timer: it fires once and is 5 ms into its next
+  # period, not 25 ms in debt that the next three calls would pay out
+  let (late, due0) = elapse(arm([10]), 35)
+  assert due0 == [0]
+  assert late == [Pending { every_ms: 10, waited_ms: 5 }]
+  let (calm, due1) = elapse(late, 1)
+  assert list.is_empty(due1)
+  assert poll_ms(calm) == Some(4)
 }
 
 test "timers with different intervals fire independently" {

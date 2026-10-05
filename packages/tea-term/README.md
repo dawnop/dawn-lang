@@ -30,8 +30,22 @@ structural `==` and a view test is one assertion: `view(m) == expected`.
 pure. The one `!io` is `runtime.run`, the driver loop, which an app hands its
 pure hooks: the view, a parser from an input line to a message, its ticks and
 when to stop. A `SendMsg` command is one more `update` before the next paint.
-"Every n ms" counts time spent waiting for input, not wall time
-(`runtime.dawn`'s header).
+
+## Subscriptions
+
+`run` reads the monotonic clock (std/io's `Clock`), so `Tick(every_ms, msg)`
+fires every `every_ms` of elapsed time, typing, updating and painting
+included. A tick that a slow turn made late fires once; periods missed whole
+are skipped, not delivered in a burst. Before 0.4.0 the loop had no clock and
+counted only full poll timeouts, so steady input could hold a timer off
+indefinitely.
+
+At end of input the session ends, timers or not: the native backend's poll
+answers at once for a closed stream, the loop sees from the clock that the
+answer came early, and reads. The JVM backend cannot tell a closed pipe from
+a silent one, so there a subscribed app on piped input keeps ticking until
+`done`. `run` installs the real clock itself, so its signature has no
+`!Clock`. The timing rules are in `runtime.dawn`'s header.
 
 ## The DSL
 

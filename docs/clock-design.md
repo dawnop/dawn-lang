@@ -1,8 +1,8 @@
 # 时钟：两个读数原语与 std 的 `Clock` 效果
 
 > 状态：**current**。2026-10-05，K1（原语两后端 + 浏览器 WASI 垫片）与 K2（`std/io` 的 `Clock`
-> 效果声明）同一分支 `feat/clock-intrinsic` 两个提交；K3（tea-term、web 中间件改用）与
-> backend-dawn 的迁移不在本文。调研与裁决见 `research-clock-intrinsic-report-20261005` 与
+> 效果声明）同一分支 `feat/clock-intrinsic` 两个提交；K3（tea-term 改用；web 中间件等种子）见
+> 文末「消费者」节；backend-dawn 的迁移不在本文。调研与裁决见 `research-clock-intrinsic-report-20261005` 与
 > `ruling-clock-intrinsic-20261005`（agent-handoff，未入库）。
 
 ## 问题
@@ -130,8 +130,9 @@ pub fn instant_at_ns(ns: Int) -> Instant
   变更；backend-dawn 今天就有 11 个安装点在答它自己的 `Clock`。所以 `Clock` 只放两个读数。
 - **公开函数的行写 `!Clock`，生产 handler 体行写 `!e`。** 与 `Env` 的 `cwd() -> String !Env`、
   `with_env_real` 同形。新效果没有旧调用者，没有五族那种「先 `!io` 一个 release」的过渡；selfhost
-  内的消费者要等种子推进到含本声明的 release（docs/bootstrap.md 特性纪律 4），packages 与 tea-term
-  不受种子纪律约束，可以在同一 release 改用。
+  内的消费者要等种子推进到含本声明的 release（docs/bootstrap.md 特性纪律 4）。`selfhost-prev-diff.sh`
+  用上一 release 的编译器和它自带的 std 发射 site、playground、packages/web、packages/json 与
+  几个 examples，这些也等种子；不在那份语料里的包（tea-term、tea-core）可以在同一 release 改用。
 - **名字 `Clock`** 与 backend-dawn 的用户效果同名。两者身份不同，只有同一模块同时引入两者才冲突，
   且可以改名引入（spec §6.5 的 `use std/io.{Fs as Files}`），不构成改名理由。
 
@@ -146,6 +147,30 @@ pub fn instant_at_ns(ns: Int) -> Instant
   2023 年；假 handler 冻结时间并逐次前进，`elapsed_ns` 的倒退读数饱和到 0；六个生产 wrapper 嵌套。
   测试**不打印读数**，因为 `dawn test --stdlib` 的转写要在两后端之间按字节一致。
 - `scripts/wasm-contract/run.sh`：wasi 的 `clock_gettime` 能编、能链。
+
+## 消费者（K3）
+
+- **tea-term 0.4.0**：`runtime.run` 体内自己装 `with_clock_real`，签名仍是 `!io !A.E`。每次等待前
+  读一次单调钟，把整毫秒交给 `tea_core/sub.elapse`，不足一毫秒的部分带到下一轮（`Mark.carry_ns`）。
+  `stdin_ready(t)` 答 `false` 时用两次读数判断：比窗口短 1 ms 以上算「提前的 false」，照 std/io
+  契约停下等待、去阻塞读；读空即输入结束，会话结束。1 ms 的余量来自 JVM 的轮询（剩余不足 1 ms
+  就答 `false`，#512）。判断是纯函数 `judge`，计时的 `poll_timed` 带 `!Clock`，用假 handler 测。
+  实测（同一演示程序，100 ms 的 Tick）：管道每 20 ms 一行、共 2.5 s，旧版 2 次、新版 24 次（旧版
+  只数完整的轮询超时，输入比间隔快就永远攒不满）；native 上管道读完后不发 `q`，旧版 3 s 内连发
+  577,741 次且不会自己结束，新版读到输入结束即退出。JVM 上 `System.in.available()` 分不清关闭的
+  管道与安静的管道，轮询总是等满窗口，所以那里订阅了计时器的应用在管道输入下会一直按声明的节奏
+  走到 `done`，这一点写进了 README。
+- **tea-core 0.1.1**：`elapse` 越过边界后保留 `waited % every_ms` 而不是 `waited - every_ms`。
+  旧驱动交给它的毫秒数从不超过最近计时器的剩余，两种写法结果相同；量真实时间后一次可能交进好几个
+  周期，旧写法会在之后每一轮都再触发一次直到补齐，即它注释里说不会发生的连发。
+- **web 的访问日志（未合入，等种子）**：`with_logging` 改用 `now`/`elapsed_ns` 的提交已写好
+  （本地分支 `feat/clock-web-log`），但 packages/web 在 prev-diff 的语料里，v0.83.0 的编译器加它
+  自带的 std 没有 `Clock`，编不动（集群 prev-diff 实测红：`module std/io has no exported name
+  Clock`）。种子推进到含 `Clock` 的 release 之后再合。形状已定：`Handler` 的行是 `!io`，若把
+  `!Clock` 放进行里，`Handler` 类型要变，每个应用都得在 handler 栈外装 `with_clock_real`，而读钟的
+  只有这一个中间件；所以在返回的闭包里就地装，每个请求多一个 handler 帧（JVM 微基准与直接调
+  `nanoTime` 同量级，负载约 20 下测得不稳）。计时拆成 `timed`（`!io !Clock`），假 handler 步进
+  7.5 ms 记 7 ms、倒退的钟记 0；公开面不变（`scripts/api-diff.py` 报 0 处变化），版本 6.2.1。
 
 ## 不做的（理由）
 

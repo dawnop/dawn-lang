@@ -21,20 +21,37 @@
 # lines itself. Bytes accumulate until a newline and decode as one string,
 # so multi-byte characters survive the byte-wise reads.
 #
-# Honesty notes, in the module contract because they are load-bearing:
-# - "Every n ms" counts waiting, not wall time: there is no clock in std,
-#   only `stdin_ready(timeout_ms)`, so time spent reading ready bytes is
-#   invisible. Interactive pacing is approximate by design.
-# - End of input ends the session, timers or not: a line-mode app is a
-#   conversation, and `stdin_ready` may answer `false` immediately once the
-#   input is gone, which would otherwise burst every timer at CPU speed.
-#   The loop cannot tell that early `false` from a real timeout, so a
-#   subscribed app on piped input may see ticks arrive faster than declared
-#   until the pipe's end is read. Subscriptions are for interactive use.
+# Timing, in the module contract because it is load-bearing:
+# - "Every n ms" is n ms of monotonic time (std/io's `Clock`), read before
+#   every wait. Reading bytes, updating and painting all count, and the
+#   part of a millisecond not yet handed to the timers is carried, so the
+#   pace does not drift by a truncation per turn. Until std had a clock this
+#   counted full poll timeouts only, and said it was approximate.
+# - A timer that a slow turn made miss whole periods fires once, then keeps
+#   its phase (tea_core/sub.elapse): ticks are skipped, not owed.
+# - `stdin_ready` may answer `false` before its window is up, and that is
+#   how a closed stream answers on a backend that polls the descriptor. The
+#   clock tells that early `false` from a real timeout, and the loop does
+#   what the std/io contract says to do with it: stop waiting and read. At
+#   end of input the read is empty and the session ends, timers or not.
+#   Before, the loop took that `false` for a timeout and never read again:
+#   every timer fired at CPU speed, and the session did not end.
+#   "Early" is a window short by more than 1 ms, the slack the JVM's poll
+#   is allowed (it gives up once less than 1 ms is left).
+# - The JVM backend cannot answer early at end of piped input:
+#   `System.in.available()` says 0 for a silent stream and a finished one
+#   alike, so the poll waits out its window. There a subscribed app on
+#   piped input keeps ticking at the declared pace until `done`; it is never
+#   told the input ended while a timer is armed.
+# - `run` installs the real clock itself, so its row is still `!io !A.E`. A
+#   loop driven by a fake clock would need `!Clock` in that row, a breaking
+#   signature; the timing decisions are the functions below (`account`,
+#   `judge`, `poll_timed`), tested against a fake clock instead.
 # - A tick repaint reprints the prompt but cannot re-echo what was typed;
 #   typed-but-unsubmitted bytes stay in the partial line and are not lost.
 
 use std/io
+use std/io.{Clock, Instant}
 use std/list
 use std/bytes
 use tea_core/app.{App, update}
@@ -59,7 +76,51 @@ pub fn run[A: App](
   let rows = frame_lines(render(view_of(init)))
   io.print(present([], rows) ++ park(len(rows)))
   let iv = intervals(subs(init))
-  turn(init, iv, arm(iv), rows, view_of, parse, subs, done)
+  io.with_clock_real(() =>
+      turn(init, iv, arm(iv), mark_at(io.now()), rows, view_of, parse, subs, done))
+}
+
+# How far the timers have been brought: the reading they were last accounted
+# up to, and the nanoseconds past it that were less than a whole millisecond
+# and are still to be handed on.
+type Mark = { at: Instant, carry_ns: Int }
+
+fn mark_at(t: Instant) -> Mark = Mark { at: t, carry_ns: 0 }
+
+# Bring the timers up to `now`: whole milliseconds go to `elapse`, the rest
+# is carried. Answers the advanced timers, the due indices and the new mark.
+fn account(ps: List[Pending], mk: Mark, now: Instant) -> (List[Pending], List[Int], Mark) = {
+  let ns = io.elapsed_ns(mk.at, now) + mk.carry_ns
+  let ms = ns / 1_000_000
+  let (p2, due) = elapse(ps, ms)
+  (p2, due, Mark { at: now, carry_ns: ns - ms * 1_000_000 })
+}
+
+# What one bounded poll of stdin came to.
+type Polled =
+  | Ready
+  | TimedOut
+  | Early
+derive Show
+
+# `false` from a window of `t` ms is early when it came back more than 1 ms
+# short; the JVM's poll gives up with less than 1 ms left, and that is a
+# timeout, not a closed stream.
+fn judge(t: Int, ready: Bool, waited_ns: Int) -> Polled =
+  if ready {
+    Ready
+  } else if waited_ns + 1_000_000 < t * 1_000_000 {
+    Early
+  } else {
+    TimedOut
+  }
+
+# One poll of at most `t` ms, timed on the clock. `ready` is the poll itself,
+# a parameter so a test can answer it.
+fn poll_timed[!e](t: Int, ready: fn(Int) -> Bool !e) -> Polled !Clock !e = {
+  let before = io.now()
+  let r = ready(t)
+  judge(t, r, io.elapsed_ns(before, io.now()))
 }
 
 # One turn: the done check and the prompt, then wait for a line or a tick.
@@ -67,56 +128,65 @@ fn turn[A: App](
   m: A,
   iv: List[Int],
   pending: List[Pending],
+  mk: Mark,
   shown: List[String],
   view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io !A.E =
+) -> Unit !io !Clock !A.E =
   if done(m) {
     ()
   } else {
     io.print("> ")
     let fresh: List[Int] = []
-    wait(m, iv, pending, fresh, shown, view_of, parse, subs, done)
+    wait(m, iv, pending, mk, fresh, shown, view_of, parse, subs, done)
   }
 
-# Block until a byte is due or a timer is; `partial` is the line so far.
+# Account the time since the last look, fire what came due, else block until
+# a byte is ready or the nearest timer is due; `partial` is the line so far.
 fn wait[A: App](
   m: A,
   iv: List[Int],
   pending: List[Pending],
+  mk: Mark,
   partial: List[Int],
   shown: List[String],
   view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io !A.E =
-  match poll_ms(pending) {
-    None -> take_byte(m, iv, pending, partial, shown, view_of, parse, subs, done)
-    Some(t) ->
-      if io.stdin_ready(t) {
-        take_byte(m, iv, pending, partial, shown, view_of, parse, subs, done)
-      } else {
-        # A full timeout of waiting is accounted; fire what came due. The
-        # partial line survives the repaint.
-        let (p2, due) = elapse(pending, t)
-        let next = fold_msgs(m, due_msgs(subs(m), due), (acc, msg) => update(acc, msg))
-        let rows = frame_lines(render(view_of(next)))
-        io.print(present(shown, rows) ++ park(len(rows)) ++ "> ")
-        if done(next) {
-          ()
-        } else {
-          let want = intervals(subs(next))
-          if want == iv {
-            wait(next, iv, p2, partial, rows, view_of, parse, subs, done)
-          } else {
-            wait(next, want, arm(want), partial, rows, view_of, parse, subs, done)
-          }
+) -> Unit !io !Clock !A.E = {
+  let (p2, due, mk2) = account(pending, mk, io.now())
+  if list.is_empty(due) {
+    match poll_ms(p2) {
+      None -> take_byte(m, iv, p2, mk2, partial, shown, view_of, parse, subs, done)
+      Some(t) ->
+        match poll_timed(t, ms => io.stdin_ready(ms)) {
+          # a timeout is accounted at the top of the next wait, from the clock
+          TimedOut -> wait(m, iv, p2, mk2, partial, shown, view_of, parse, subs, done)
+          # Ready, or an early false: read. An early false is a stream with
+          # nothing more to say, and the empty read ends the session.
+          _ -> take_byte(m, iv, p2, mk2, partial, shown, view_of, parse, subs, done)
         }
+    }
+  } else {
+    # Fire what came due. The partial line survives the repaint.
+    let next = fold_msgs(m, due_msgs(subs(m), due), (acc, msg) => update(acc, msg))
+    let rows = frame_lines(render(view_of(next)))
+    io.print(present(shown, rows) ++ park(len(rows)) ++ "> ")
+    if done(next) {
+      ()
+    } else {
+      let want = intervals(subs(next))
+      if want == iv {
+        wait(next, iv, p2, mk2, partial, rows, view_of, parse, subs, done)
+      } else {
+        wait(next, want, arm(want), mark_at(io.now()), partial, rows, view_of, parse, subs, done)
       }
+    }
   }
+}
 
 # One raw byte: end of input ends the session, a newline completes the line
 # and steps the app, anything else extends the partial line.
@@ -124,13 +194,14 @@ fn take_byte[A: App](
   m: A,
   iv: List[Int],
   pending: List[Pending],
+  mk: Mark,
   partial: List[Int],
   shown: List[String],
   view_of: fn(A) -> Widget[A.Msg],
   parse: fn(A, String) -> A.Msg,
   subs: fn(A) -> List[Sub[A.Msg]],
   done: fn(A) -> Bool,
-) -> Unit !io !A.E = {
+) -> Unit !io !Clock !A.E = {
   let b = io.read_stdin(1)
   if bytes.is_empty(b) {
     ()
@@ -140,12 +211,12 @@ fn take_byte[A: App](
     io.print(present(shown, rows) ++ park(len(rows)))
     let want = intervals(subs(next))
     if want == iv {
-      turn(next, iv, pending, rows, view_of, parse, subs, done)
+      turn(next, iv, pending, mk, rows, view_of, parse, subs, done)
     } else {
-      turn(next, want, arm(want), rows, view_of, parse, subs, done)
+      turn(next, want, arm(want), mark_at(io.now()), rows, view_of, parse, subs, done)
     }
   } else {
-    wait(m, iv, pending, partial ++ [bytes.at(b, 0)], shown, view_of, parse, subs, done)
+    wait(m, iv, pending, mk, partial ++ [bytes.at(b, 0)], shown, view_of, parse, subs, done)
   }
 }
 
@@ -163,4 +234,62 @@ test "to_line decodes multi-byte characters assembled byte-wise" {
   let empty: List[Int] = []
   assert to_line(empty) == ""
   assert to_line([0x68, 0x69, 0x0D]) == "hi\r"
+}
+
+test "account hands whole milliseconds to the timers and carries the rest" {
+  let start = mark_at(io.instant_at_ns(0))
+  # 2.5 ms in: 2 ms accounted, 0.5 ms carried, nothing due
+  let (p1, due1, mk1) = account(arm([3]), start, io.instant_at_ns(2_500_000))
+  assert list.is_empty(due1)
+  assert p1 == [Pending { every_ms: 3, waited_ms: 2 }]
+  assert mk1.carry_ns == 500_000
+  # 0.6 ms later the carried half makes the third millisecond: due
+  let (p2, due2, mk2) = account(p1, mk1, io.instant_at_ns(3_100_000))
+  assert due2 == [0]
+  assert p2 == [Pending { every_ms: 3, waited_ms: 0 }]
+  assert mk2.carry_ns == 100_000
+  # a reading from before the mark is no time at all, not negative time
+  let (p3, due3, _) = account(p2, mk2, io.instant_at_ns(1_000_000))
+  assert list.is_empty(due3)
+  assert p3 == p2
+}
+
+test "judge tells an early false from a timeout by the clock" {
+  assert judge(50, true, 0) == Ready
+  # a closed stream answers at once
+  assert judge(50, false, 20_000) == Early
+  assert judge(50, false, 48_999_999) == Early
+  # the JVM gives up with less than 1 ms left: still a timeout
+  assert judge(50, false, 49_000_000) == TimedOut
+  assert judge(50, false, 50_000_000) == TimedOut
+  assert judge(50, false, 75_000_000) == TimedOut
+  # a 1 ms window cannot come back early by more than its slack
+  assert judge(1, false, 0) == TimedOut
+}
+
+test "poll_timed reads the window off a fake clock" {
+  # Frozen: a `false` that took no time is the closed stream that used to
+  # fire every timer at CPU speed.
+  with handle Clock {
+    clock_wall_ns() => 0
+    clock_mono() => io.instant_at_ns(7)
+  }
+  # the poll is asked for the window it was given (any other answers true)
+  assert poll_timed(40, t => t != 40) == Early
+  assert poll_timed(40, _t => true) == Ready
+}
+
+test "poll_timed counts a full window as a timeout" {
+  # Each reading 40 ms after the last: the poll waited its whole window.
+  with handle Clock {
+    var reads: Int = 0
+    clock_wall_ns() => 0
+    clock_mono() => {
+      reads = reads + 1
+      io.instant_at_ns(reads * 40_000_000)
+    }
+  }
+  assert poll_timed(40, _t => false) == TimedOut
+  assert poll_timed(41, _t => false) == TimedOut
+  assert poll_timed(42, _t => false) == Early
 }
