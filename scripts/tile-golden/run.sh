@@ -598,6 +598,7 @@ mutants=(
   insert-index-dropped
   loop-return-as-break
   ftof-zero-as-nearest-away
+  out-along-twice-accepted
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2325,6 +2326,35 @@ if run_item ftof-zero-as-nearest-away; then
   mutant_project ftof-zero-as-nearest-away bytecode.dawn
   writer_mutant_checks ftof-zero-as-nearest-away attr_ftof same-size \
     "'cuda_tile.ftof' op invalid rounding mode specified for conversion from f64 to f32. Only 'nearest_even', 'zero', 'negative_inf', and 'positive_inf' are supported"
+fi
+
+# The recording accepts an Out whose `along` names one grid axis twice
+# (tileir 0.8.1, docs/tile-backend-design.md 6.27). Two dimensions that
+# follow one axis would make two blocks write one cell, which is the
+# disjointness the injectivity check keeps; no kernel here is written that
+# way, so the claim is held by a probe kernels.dawn keeps out of the
+# goldens, `out_along_twice`, cut `along: [0, 0]`. The clean recording
+# refuses it, by name, on both backends; under the mutant it records and
+# renders (exit 0), so the refusal is the check and nothing else is.
+if run_item out-along-twice-accepted; then
+  mutant_project out-along-twice-accepted prog.dawn
+  mutant_run out-along-twice-accepted out_along_twice
+  refusal='tileir: kernel `out_along_twice`: argument 0 (Out) follows grid axes [0, 0]; two of its dimensions follow one axis, so two blocks would write one cell'
+  for backend in jvm native; do
+    clean="$work/out_along_twice.clean.$backend"
+    rc=0
+    if [ "$backend" = jvm ]; then
+      run_jvm "$work/clean" "$clean" out_along_twice || rc=$?
+    else
+      run_native "$work/clean.bin" "$clean" out_along_twice || rc=$?
+    fi
+    [ "$rc" != 0 ] && grep -Fq "$refusal" "$clean.err" ||
+      { cat "$clean.err" >&2; fail "out-along-twice-accepted: the clean recording should refuse out_along_twice on $backend (exit $rc)"; }
+    out="$work/m-out-along-twice-accepted.out_along_twice.$backend"
+    [ "$(cat "$out.rc")" = 0 ] && [ -s "$out" ] ||
+      { cat "$out.err" >&2; fail "out-along-twice-accepted mutant stayed green on $backend: out_along_twice is still refused"; }
+  done
+  echo "PASS  mutant: out-along-twice-accepted (out_along_twice refused by name when clean, recorded and rendered under the mutant, both backends)"
 fi
 
 _item_tick ""
