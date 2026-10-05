@@ -4850,6 +4850,14 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   })
 }
 
+## The highest symbol id in `syms`, where lowering starts minting its own.
+## A fold over the trie, not over `map.keys`: the keys come back sorted into
+## insertion order, and this runs once per function the interpreter lowers,
+## over every symbol of that function's module. In a language server folding
+## a default argument (docs/lsp-hover-design.md §C4) that sort was most of the
+## request.
+fn top_sym(syms: Map[Int, Sym]) -> Int = map.fold(syms, 0, (top, k, sym) => if k > top { k } else { top })
+
 ## Lower one expression on its own: the comptime interpreter's entry, which
 ## folds a const initializer or a comptime block rather than a function body.
 ## The lifted lambdas come back with it, and so do the dictionaries, because
@@ -4864,11 +4872,23 @@ pub fn lower_expr_only(
   prog_fns: Map[(String, String), Sig],
   syms: Map[Int, Sym],
   lam_start: Int
+) -> (CExpr, List[CFun], List[CDictDef], Int) =
+  lower_expr_in(owner, e, traits, impls, adts, prog_fns, syms, intrinsics(), lam_start)
+
+## `lower_expr_only` with the intrinsic table supplied, for a caller that lowers many
+## times over and builds it once (the comptime interpreter).
+pub fn lower_expr_in(
+  owner: String,
+  e: TExpr,
+  traits: Traits,
+  impls: Impls,
+  adts: Adts,
+  prog_fns: Map[(String, String), Sig],
+  syms: Map[Int, Sym],
+  intrs: Map[String, Intr],
+  lam_start: Int
 ) -> (CExpr, List[CFun], List[CDictDef], Int) = {
-  var top = 0
-  for k in map.keys(syms) {
-    if k > top { top = k }
-  }
+  let top = top_sym(syms)
   let st = LSt {
     next_sym: top + 1,
     next_loop: 0,
@@ -4882,7 +4902,7 @@ pub fn lower_expr_only(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
-    intrs: intrinsics(),
+    intrs: intrs,
     dicts: [],
     dict_env: map.empty(),
     self_ctx: None,
@@ -4912,12 +4932,12 @@ pub fn lower_fn_only(
   syms: Map[Int, Sym],
   # lifted names must be unique across the whole class, not just this
   # function, so the caller seeds and carries the counter
-  lam_start: Int
+  lam_start: Int,
+  # the intrinsic table, built once by the caller (the interpreter lowers one
+  # function at a time, many times over)
+  intrs: Map[String, Intr]
 ) -> (CFun, List[CFun], List[CDictDef], Int) = {
-  var top = 0
-  for k in map.keys(syms) {
-    if k > top { top = k }
-  }
+  let top = top_sym(syms)
   let st = LSt {
     next_sym: top + 1,
     next_loop: 0,
@@ -4931,7 +4951,7 @@ pub fn lower_fn_only(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
-    intrs: intrinsics(),
+    intrs: intrs,
     dicts: [],
     dict_env: map.empty(),
     self_ctx: None,

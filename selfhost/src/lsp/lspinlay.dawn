@@ -7,12 +7,17 @@
 # carries an error is not shown, an effect row is shown only when it names an
 # effect and is not polymorphic, a parameter name only where it tells the
 # reader something the call does not already spell, and a left-out default
-# argument as the text its author wrote (§B1), never as a value.
+# argument as the text its author wrote (§B1). Its value (§C4) is folded
+# elsewhere (`lspeval.with_default_values`, which may run the interpreter);
+# what is decided here is which of value and text a hint shows, and which
+# earlier parameters a default's text may read.
 #
 # Types and rows render the way hover renders them (`ty_show`, `eff_suffix`),
 # so one type never reads two ways between a hint and the hover beside it.
 
 use std/str
+use check/tast.{TExpr}
+use front/lexer.{slice_cps}
 use check/types.{Eff, eff_labels, eff_is_ground, eff_suffix, EPure, EIo, ELabeled, EffVar, EUnion}
 
 ## Which kinds of hint a session wants, read once from the client's
@@ -22,7 +27,8 @@ pub type InlayOpts = {
   lambda_param_types: Bool,
   call_effects: Bool,
   param_names: Bool,
-  default_args: Bool
+  default_args: Bool,
+  default_values: Bool
 }
 
 ## Types and effects on, parameter names off: Dawn has named arguments, so an
@@ -36,7 +42,8 @@ pub fn default_inlay_opts() -> InlayOpts =
     lambda_param_types: true,
     call_effects: true,
     param_names: false,
-    default_args: true
+    default_args: true,
+    default_values: true
   }
 
 ## LSP 3.17's `InlayHintKind`: Type = 1, Parameter = 2. An effect row is a
@@ -44,8 +51,26 @@ pub fn default_inlay_opts() -> InlayOpts =
 pub type HintKind = HintType | HintParam
 
 ## One hint, at a code-point offset of the analysed document; the server turns
-## the offset into a UTF-16 position.
-pub type Hint = { at: Int, label: String, kind: HintKind, pad_left: Bool, pad_right: Bool }
+## the offset into a UTF-16 position. `left_out` is what a left-out-defaults
+## hint was made of, kept so its label can be made again with values in it.
+pub type Hint = {
+  at: Int,
+  label: String,
+  kind: HintKind,
+  pad_left: Bool,
+  pad_right: Bool,
+  left_out: Option[LeftOut]
+}
+
+## One argument a call leaves to its default: the parameter's name, the
+## default as written, and the expression the call computes it with
+## (`lspq.default_fill`), when there is one to fold.
+pub type DefaultArg = { name: String, text: String, fill: Option[TExpr] }
+
+## The arguments of one left-out-defaults hint, where the hint sits
+## (`after_arg`, `bare`: see `default_args_hint`), and the call's span,
+## inside which a local is the call's own.
+pub type LeftOut = { args: List[DefaultArg], after_arg: Bool, bare: Bool, lo: Int, hi: Int }
 
 ## The longest type a hint shows, in code points. rust-analyzer's
 ## `inlayHints.maxLength` defaults to 25 and clangd's `TypeNameLimit` to 24.
@@ -61,7 +86,7 @@ pub fn type_hint(at: Int, shown: String) -> Option[Hint] =
   if str.len(shown) > TYPE_HINT_SHOWN || str.contains(shown, "?") {
     None
   } else {
-    Some(Hint { at: at, label: ": " ++ shown, kind: HintType, pad_left: false, pad_right: false })
+    Some(Hint { at: at, label: ": " ++ shown, kind: HintType, pad_left: false, pad_right: false, left_out: None })
   }
 
 ## `!Fs` after a call, or nothing. Only a row that names an effect: a pure call
@@ -79,7 +104,8 @@ pub fn effect_hint(at: Int, eff: Eff) -> Option[Hint] =
       label: str.trim_start(eff_suffix(eff)),
       kind: HintType,
       pad_left: true,
-      pad_right: false
+      pad_right: false,
+      left_out: None
     })
   }
 
@@ -92,7 +118,7 @@ pub fn param_hint(at: Int, pname: String, arg_var: Option[String], shown: Int) -
   if shown <= 1 || pname == "" || pname == "_" || arg_var == Some(pname) {
     None
   } else {
-    Some(Hint { at: at, label: pname ++ ":", kind: HintParam, pad_left: false, pad_right: true })
+    Some(Hint { at: at, label: pname ++ ":", kind: HintParam, pad_left: false, pad_right: true, left_out: None })
   }
 
 ## The arguments a call leaves to their defaults, as one hint: `name: text`
@@ -100,28 +126,104 @@ pub fn param_hint(at: Int, pname: String, arg_var: Option[String], shown: Int) -
 ## its author spelled it (`Sig.param_defaults`), not a value: a default may
 ## read the parameters before it (`from: start(s)` names the callee's `s`), so
 ## it is the callee's expression, shown the way signature help shows it.
+## `lspeval.with_default_values` may later put values in its place (§C4).
 ## A text past `TYPE_HINT_SHOWN` code points is `…`: the hint's news is that
 ## an argument goes in at all, which a dropped hint would hide, and the whole
 ## text is one signature help away. `after_arg` says written arguments come
 ## before the hint inside the parentheses, so it opens with `, `; `bare` says
 ## the call has no parentheses to sit in (`x |> f`), so it brings its own.
-pub fn default_args_hint(at: Int, omitted: List[(String, String)], after_arg: Bool, bare: Bool) -> Option[Hint] = {
+## `lo..hi` is the call's span.
+pub fn default_args_hint(at: Int, omitted: List[DefaultArg], after_arg: Bool, bare: Bool, lo: Int, hi: Int) -> Option[Hint] = {
   if len(omitted) == 0 { return None }
-  var parts: List[String] = []
-  for o in omitted {
-    let (pname, text) = o
-    let shown = if str.len(text) > TYPE_HINT_SHOWN { "…" } else { text }
-    parts = parts ++ [pname ++ ": " ++ shown]
-  }
-  let body = join(parts, ", ")
-  let label = if bare {
+  let lo_rec = LeftOut { args: omitted, after_arg: after_arg, bare: bare, lo: lo, hi: hi }
+  let texts = map(omitted, a => (a.name, default_shown(a.text, None)))
+  Some(Hint {
+    at: at,
+    label: default_args_label(texts, after_arg, bare),
+    kind: HintParam,
+    pad_left: false,
+    pad_right: false,
+    left_out: Some(lo_rec)
+  })
+}
+
+## The label of a left-out-defaults hint from what each argument shows.
+pub fn default_args_label(shown: List[(String, String)], after_arg: Bool, bare: Bool) -> String = {
+  let body = join(map(shown, p => {
+    let (pname, text) = p
+    pname ++ ": " ++ text
+  }), ", ")
+  if bare {
     "(" ++ body ++ ")"
   } else if after_arg {
     ", " ++ body
   } else {
     body
   }
-  Some(Hint { at: at, label: label, kind: HintParam, pad_left: false, pad_right: false })
+}
+
+## What one left-out argument shows: its value when there is one and it fits
+## in `TYPE_HINT_SHOWN` code points, else its text when that fits, else `…`.
+## A value too long to show falls back to the text rather than to `…`
+## (`range(0, 100)` says more than an elided list), and the text is never
+## cut for the same reason a type is not (A4.1).
+pub fn default_shown(text: String, value: Option[String]) -> String =
+  match value {
+    Some(v) ->
+      if str.len(v) <= TYPE_HINT_SHOWN { v } else { default_shown(text, None) }
+    None -> if str.len(text) > TYPE_HINT_SHOWN { "…" } else { text }
+  }
+
+## Does a default's text read the parameter `pname`? By its identifiers, so
+## a field, a named argument's label or a lambda's own parameter of the same
+## name counts as a read too: a wrong yes only costs the value (the text is
+## shown instead), and a read cannot be spelled without the name.
+pub fn reads_name(text: String, pname: String) -> Bool = {
+  let cps = code_points(text)
+  let n = len(cps)
+  var i = 0
+  while i < n {
+    if ident_start(cps[i]) {
+      var j = i
+      while j < n && ident_part(cps[j]) { j = j + 1 }
+      if slice_cps(cps, i, j) == pname { return true }
+      i = j
+    } else {
+      i = i + 1
+    }
+  }
+  false
+}
+
+fn ident_start(c: Char) -> Bool = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+
+fn ident_part(c: Char) -> Bool = ident_start(c) || (c >= '0' && c <= '9')
+
+## A default written as a literal whose text is already its value: folding it
+## would only find the text again. Digits (and a sign), `true`, `false`, and
+## a string with no interpolation or escape.
+pub fn literal_default(text: String) -> Bool = {
+  if text == "true" || text == "false" { return true }
+  let cps = code_points(text)
+  let n = len(cps)
+  if n == 0 { return false }
+  if cps[0] == '"' {
+    if n < 2 || cps[n - 1] != '"' { return false }
+    var k = 1
+    while k < n - 1 {
+      if cps[k] == '"' || cps[k] == '\\' || cps[k] == '$' { return false }
+      k = k + 1
+    }
+    return true
+  }
+  let start = if cps[0] == '-' { 1 } else { 0 }
+  if start >= n { return false }
+  var m = start
+  while m < n {
+    if cps[m] < '0' || cps[m] > '9' { return false }
+    m = m + 1
+  }
+  true
 }
 
 test "a type hint is the type after a colon, unless long or erroneous" {
@@ -180,31 +282,77 @@ test "a parameter name is hidden for one argument and for a same-named variable"
   assert param_hint(5, "_", None, 2) == None
 }
 
+fn da(name: String, text: String) -> DefaultArg = DefaultArg { name: name, text: text, fill: None }
+
 test "left-out defaults are one hint, comma-led after a written argument" {
-  match default_args_hint(9, [("from", "start(s)")], true, false) {
+  match default_args_hint(9, [da("from", "start(s)")], true, false, 0, 12) {
     Some(h) -> {
       assert h.label == ", from: start(s)"
       assert h.at == 9
       assert h.kind == HintParam
       assert not h.pad_left
       assert not h.pad_right
+      match h.left_out {
+        Some(lo) -> {
+          assert lo.after_arg
+          assert (lo.lo, lo.hi) == (0, 12)
+          assert map(lo.args, a => a.name) == ["from"]
+        }
+        None -> { assert false }
+      }
     }
     None -> { assert false }
   }
-  match default_args_hint(4, [("a", "1"), ("b", "\" \"")], false, false) {
+  match default_args_hint(4, [da("a", "1"), da("b", "\" \"")], false, false, 0, 5) {
     Some(h) -> { assert h.label == "a: 1, b: \" \"" }
     None -> { assert false }
   }
-  match default_args_hint(4, [("a", "1")], false, true) {
+  match default_args_hint(4, [da("a", "1")], false, true, 0, 5) {
     Some(h) -> { assert h.label == "(a: 1)" }
     None -> { assert false }
   }
-  assert default_args_hint(4, [], true, false) == None
+  assert default_args_hint(4, [], true, false, 0, 5) == None
 }
 
 test "a default's text past the bound is elided, not dropped" {
-  match default_args_hint(0, [("why", str.repeat("x", 26)), ("n", str.repeat("y", 25))], false, false) {
+  match default_args_hint(0, [da("why", str.repeat("x", 26)), da("n", str.repeat("y", 25))], false, false, 0, 1) {
     Some(h) -> { assert h.label == "why: …, n: " ++ str.repeat("y", 25) }
     None -> { assert false }
   }
+}
+
+test "a default shows its value when it fits, else its text, else an ellipsis" {
+  assert default_shown("2 * GAP", Some("8")) == "8"
+  assert default_shown("2 * GAP", None) == "2 * GAP"
+  # a value too long falls back to the text, not to `…`
+  assert default_shown("range(0, 100)", Some(str.repeat("x", 26))) == "range(0, 100)"
+  assert default_shown(str.repeat("t", 26), Some(str.repeat("x", 26))) == "…"
+  assert default_shown(str.repeat("t", 26), Some("1")) == "1"
+  assert default_args_label([("a", "1"), ("b", "2")], true, false) == ", a: 1, b: 2"
+}
+
+test "a default reads a parameter by any identifier of its name" {
+  assert reads_name("start(s)", "s")
+  assert reads_name("lo + 9", "lo")
+  assert not reads_name("lo + 9", "l")
+  assert not reads_name("slo + 9", "lo")
+  assert reads_name("\"\${s}\"", "s")
+  # a field of the same name is a read too: a wrong yes only costs the value
+  assert reads_name("cfg.s", "s")
+  assert not reads_name("WIDTH * 2", "w")
+  assert not reads_name("", "s")
+}
+
+test "a literal default is its own value" {
+  assert literal_default("10")
+  assert literal_default("-3")
+  assert literal_default("true")
+  assert literal_default("\" \"")
+  assert literal_default("\"\"")
+  assert not literal_default("\"\${n}\"")
+  assert not literal_default("\"a\\n\"")
+  assert not literal_default("-")
+  assert not literal_default("1.5")
+  assert not literal_default("WIDTH")
+  assert not literal_default("2 * 3")
 }

@@ -3,7 +3,7 @@
 # oracle since kotlin-final): a scripted LSP session (initialize,
 # open/change/close, hover, definition, completion and its resolve, symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
-# on hover and on `use` lines, inlay hints (left-out defaults among them), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, folded values of closed pure
+# on hover and on `use` lines, inlay hints (left-out defaults among them, with their folded values), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, folded values of closed pure
 # expressions on hover, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
@@ -259,6 +259,41 @@ pub fn run(s: String) -> Int = {
   let f = df.span(hi: 3)
   let g = cursor.find(s, "a")
   str.len(a ++ b ++ c ++ d) + e + f + (if g == None { 0 } else { 1 })
+}
+EOF
+
+# Left-out defaults with values (docs/lsp-hover-design.md §C4): a constant,
+# an expression over a call, an interpolation, a default that reads an earlier
+# parameter (folded with the call's value of it, or its text when that value
+# is an outer local's), a fold past the depth budget, a value that repeats its
+# text, and a default of another module that reads that module's constant.
+cat > "$OUT/proj/src/dvdep.dawn" <<'EOF'
+const BASE: Int = 3
+pub fn gap(n: Int, w: Int = 2 * BASE) -> Int = n + w
+EOF
+
+cat > "$OUT/proj/src/dvalues.dawn" <<'EOF'
+use std/str
+use dvdep as dv
+
+const GAP: Int = 4
+fn twice(n: Int) -> Int = n * 2
+fn spin(n: Int) -> Int = if n == 0 { 0 } else { spin(n - 1) + 1 }
+fn sep(s: String, gap: Int = GAP, wide: Int = twice(GAP) + 1, tag: String = "<${GAP}>") -> String = s
+fn span(lo: Int = 1, hi: Int = lo + 9) -> Int = hi - lo
+fn slow(n: Int, k: Int = spin(5000)) -> Int = n + k
+fn listed(n: Int, xs: List[Int] = [1, 2, 3]) -> Int = n
+
+pub fn run(s: String) -> Int = {
+  let a = sep(s)
+  let b = sep(s, wide: 2)
+  let c = span()
+  let d = span(lo: 5)
+  let e = span(lo: str.len(s))
+  let f = slow(1)
+  let g = listed(1)
+  let h = dv.gap(s |> str.len)
+  str.len(a ++ b) + c + d + e + f + g + h
 }
 EOF
 
@@ -572,6 +607,17 @@ req("textDocument/inlayHint", {"textDocument": {"uri": defaults_uri}, "range": {
     "start": {"line": 0, "character": 0},
     "end": {"line": defaults_text.count("\n") + 1, "character": 0}}})
 note("textDocument/didClose", tdoc(defaults_uri))
+
+# left-out defaults with values, folded under hover's budget
+dvalues_path = f"{out_dir}/proj/src/dvalues.dawn"
+dvalues_uri = "file://" + dvalues_path
+dvalues_text = open(dvalues_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": dvalues_uri, "languageId": "dawn", "version": 1, "text": dvalues_text}})
+req("textDocument/inlayHint", {"textDocument": {"uri": dvalues_uri}, "range": {
+    "start": {"line": 0, "character": 0},
+    "end": {"line": dvalues_text.count("\n") + 1, "character": 0}}})
+note("textDocument/didClose", tdoc(dvalues_uri))
 
 # formatting: a lexable but unformatted file
 note("textDocument/didOpen", {"textDocument": {

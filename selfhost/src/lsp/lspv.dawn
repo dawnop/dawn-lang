@@ -64,6 +64,22 @@ pub(pkg) fn value_text(adts: Adts, t: Ty, v: CValue) -> Option[String] =
     }
   }
 
+## The value as source spells it, with no suffix, for an inlay hint that
+## stands where an argument could be written (docs/lsp-hover-design.md §C4):
+## `10`, not hover's `10  (0xA)`. `None` past `width` code points rather than
+## a cut, since a cut value is not one a reader could write there, and for the
+## values `value_text` has no text for.
+pub(pkg) fn value_source(adts: Adts, t: Ty, v: CValue, width: Int) -> Option[String] =
+  match v {
+    VClosure(_, _, _) -> None
+    VDict(_, _) -> None
+    VCursor(_, _) -> None
+    _ -> {
+      let full = render(adts, t, v, width + 1)
+      if str.len(full) > width { None } else { Some(full) }
+    }
+  }
+
 ## Whether `v` is written exactly as `src` already says it, spaces aside: the
 ## value of `Some(Plus)` or `[1, 2, 3]` repeats its own source, and a hover that
 ## folds an expression shows nothing it would only echo (docs/lsp-hover-design.md
@@ -540,6 +556,13 @@ test "a long value is cut, closed, and says how long it was" {
   assert str.starts_with(st, "\"abab")
   # one that fits is left alone, with no length
   assert show(TyList(TyInt), VList([VInt(1), VInt(2)])) == "[1, 2]"
+}
+
+test "a value in place of an argument has no suffix, and none past its width" {
+  assert value_source(prelude_adts(), TyInt, VInt(42), 25) == Some("42")
+  assert value_source(prelude_adts(), TyString, VStr("ab"), 4) == Some("\"ab\"")
+  assert value_source(prelude_adts(), TyString, VStr("abc"), 4) == None
+  assert value_source(prelude_adts(), TyList(TyInt), VList([VInt(1), VInt(2)]), 25) == Some("[1, 2]")
 }
 
 test "a function value has no text" {

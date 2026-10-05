@@ -45,7 +45,7 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyUnit, Sym, Sig, Traits, Impls, Adts, adt_of,
-  intrinsics, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple,
+  intrinsics, Intr, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple,
   EV_PACK_ID, EV_MISS_MSG
 }
 use ir/core.{
@@ -270,7 +270,7 @@ pub(pkg) fn ct_lsp() -> CtOpts = CtOpts { ..ct_default(), depth: LSP_DEPTH }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
-type ICx = {
+pub(pkg) type ICx = {
   # flat name → direct typed fn (module fns over std fns; local shadows std)
   fns: Map[String, TFun],
   # owner → (name → direct typed fn): qualified calls resolve by owner
@@ -312,7 +312,10 @@ type ICx = {
   # finds nothing, and these are what let the refusal say why rather than
   # call a constant that has not run yet one that failed.
   pending: Set[String],
-  folding: String
+  folding: String,
+  # the intrinsic table every lowering reads (`types.intrinsics()`), built
+  # once per context rather than once per function lowered
+  intrs: Map[String, Intr]
 }
 
 ## How a body names constants: the module it belongs to (`path`, the key
@@ -792,7 +795,7 @@ fn lower_into(
   }
   let (cf, lifted, dicts, next) =
     lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, icx.prog_fns,
-      syms, st.cache.next_lam)
+      syms, st.cache.next_lam, icx.intrs)
   var tbl = map.insert(st.cache.fns, cache_key(owner, f), cf)
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = st.cache.dicts
@@ -2556,8 +2559,8 @@ fn fold_expr(
 ) -> (LowerCache, Result[CValue, Diag]) !io = {
   let env: Env = map.empty()
   let (ce, lifted, dicts, next) =
-    lower.lower_expr_only(icx.owner, e, icx.traits, icx.impls, icx.adts,
-      icx.prog_fns, icx.syms, cache.next_lam)
+    lower.lower_expr_in(icx.owner, e, icx.traits, icx.impls, icx.adts,
+      icx.prog_fns, icx.syms, icx.intrs, cache.next_lam)
   var tbl = cache.fns
   for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
   var dts = cache.dicts
@@ -2905,7 +2908,8 @@ fn module_icx(
     body: owner,
     max_depth: depth,
     pending: set.empty(),
-    folding: ""
+    folding: "",
+    intrs: intrinsics()
   }
 }
 
@@ -3002,10 +3006,39 @@ pub(pkg) fn eval_closed(
   owner: String,
   e: TExpr,
   opts: CtOpts
-) -> Result[CValue, String] !io = {
+) -> Result[CValue, String] !io =
+  eval_closed_in(closed_icx(tm, world, scope, ct, std_fns, std_owners, std_impl_fns, std_names, adts,
+    traits, impls, owner, opts), e, opts)
+
+## The context `eval_closed` folds in, for a caller with several expressions
+## of one module to fold (the left-out defaults of an inlay request, §C4).
+## Building it walks every std function's owner table, which is most of what
+## a small fold costs, so such a caller builds it once. It is a value, and no
+## fold changes it: what is shared is only what every fold would have built
+## the same.
+pub(pkg) fn closed_icx(
+  tm: TModule,
+  world: CtWorld,
+  scope: ConstScope,
+  ct: CtOut,
+  std_fns: Map[String, TFun],
+  std_owners: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
+  std_names: Set[String],
+  adts: Adts,
+  traits: Traits,
+  impls: Impls,
+  owner: String,
+  opts: CtOpts
+) -> ICx = {
   let base = module_icx(tm, world, scope, std_fns, std_owners, std_impl_fns, std_names, adts,
     traits, impls, owner, opts.depth)
-  let icx = ICx { ..base, consts: ct.consts, blocks: ct.blocks }
+  ICx { ..base, consts: ct.consts, blocks: ct.blocks }
+}
+
+## `eval_closed` in a context `closed_icx` built: the fold and its barrier.
+## The lowering cache still starts empty for each fold.
+pub(pkg) fn eval_closed_in(icx: ICx, e: TExpr, opts: CtOpts) -> Result[CValue, String] !io = {
   match catch_panic(() => fold_expr(icx, opts.fuel, empty_cache(), e, 0, 0)) {
     Ok(pr) -> {
       let (_, r) = pr
@@ -3070,7 +3103,8 @@ fn probe_icx() -> ICx = {
     body: "probe",
     max_depth: MAX_CALL_DEPTH,
     pending: set.empty(),
-    folding: ""
+    folding: "",
+    intrs: intrinsics()
   }
 }
 
