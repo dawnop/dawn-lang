@@ -33,12 +33,13 @@ use check/types.{
   ev_pack_adt, EV_MISS_MSG
 }
 use ir/reach
+use ir/coresites
 use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
 use ir/core.{
-  CNoSite, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
+  CSite, CNoSite, CAt, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -132,8 +133,44 @@ pub type CSt = {
   # positions are borrowed, and so read (k=false) rather than consumed. The
   # callee side is read off `CParam.mode` in `emit_fn`. Filled by
   # `infer.infer_modes` in the driver.
-  modes: Map[(String, String), List[CMode]]
+  modes: Map[(String, String), List[CMode]],
+  # `--map` (docs/source-span-map-design.md section 12). With `mapping` false
+  # both lists stay empty: `note_call` returns at once and `line` never looks
+  # at `pend`, so the C text is the same expression either way.
+  #
+  # `pend` is the calls whose C expression has been handed back but not yet
+  # written down, in the order they were emitted; the first line containing
+  # one claims it. `rows` is where each sited call landed, as chunk indices
+  # into the current transcript, relocated as transcripts are spliced.
+  mapping: Bool,
+  pend: List[Pend],
+  rows: List[MapRow]
 }
+
+## Where one sited call's C landed, for `--map`. `first..last` are chunk
+## indices (one chunk is one line) of the lines its C occupies, `last` the one
+## holding the call expression; `clo..chi` the expression's columns in that
+## line, or -1 when the call was written as whole statements. All four are -1
+## for a call whose C was never found, which the map's checker refuses.
+pub type MapRow = {
+  owner: String,
+  origin: String,
+  what: String,
+  site: CSite,
+  first: Int,
+  last: Int,
+  clo: Int,
+  chi: Int
+}
+
+## A call expression waiting for its line. An unsited call waits too, without
+## a row: it owns its occurrence of the text, so that an identical sited call
+## on the same line claims the occurrence after it, not this one.
+pub type Pend = { text: String, row: MapRow, sited: Bool }
+
+## One emitted C function body, for `--map`: chunk indices of its first and
+## last line, and the declaration it came from.
+pub type FnRow = { owner: String, origin: String, symbol: String, first: Int, last: Int }
 
 fn pad(n: Int) -> String = {
   var s = ""
@@ -145,8 +182,74 @@ fn pad(n: Int) -> String = {
   s
 }
 
-fn line(st: CSt, text: String) -> CSt =
-  CSt { ..st, out: st.out ++ [pad(st.ind) ++ text ++ "\n"] }
+fn line(st: CSt, text: String) -> CSt = {
+  let l = pad(st.ind) ++ text ++ "\n"
+  let st1 = CSt { ..st, out: st.out ++ [l] }
+  if len(st.pend) == 0 { st1 } else { claim(st1, l, len(st.out)) }
+}
+
+## Hand each waiting call expression found in `l` (chunk `at`) its place.
+## Waiting calls are taken in emission order, and each occurrence of a text
+## goes to one of them, left to right: the second of two identical calls on
+## one line gets the second occurrence. The cursor is per text, so a call
+## whose text sits inside an enclosing call's text is found where it is,
+## whatever was claimed before it.
+fn claim(st: CSt, l: String, at: Int) -> CSt = {
+  var cursor: Map[String, Int] = map.empty()
+  var left: List[Pend] = []
+  var rows = st.rows
+  for p in st.pend {
+    let from = match map.get(cursor, p.text) {
+      Some(c) -> c
+      None -> 0
+    }
+    match str.index_of(str.drop(l, from), p.text) {
+      Some(i) -> {
+        let lo = from + i
+        let hi = lo + str.len(p.text)
+        cursor = map.insert(cursor, p.text, hi)
+        if p.sited {
+          let first = if p.row.first < 0 { at } else { p.row.first }
+          rows = rows ++ [MapRow { ..p.row, first: first, last: at, clo: lo, chi: hi }]
+        }
+      }
+      None -> { left = left ++ [p] }
+    }
+  }
+  CSt { ..st, pend: left, rows: rows }
+}
+
+## A call has just been emitted: `a` is the transcript length before it, `v`
+## the C it handed back. Only `--map` pays for any of this.
+fn note_call(st: CSt, a: Int, callee: CCallee, s: CSite, v: String) -> CSt =
+  if not st.mapping { st } else { noted(st, a, coresites.callee_text(callee), s, v) }
+
+fn note_intrinsic(st: CSt, a: Int, name: String, s: CSite, v: String) -> CSt =
+  if not st.mapping { st } else { noted(st, a, "intrinsic " ++ name, s, v) }
+
+## Three ways a call's C can land (design section 12.3): an expression, which
+## waits for the line that writes it down; statements, which are the lines
+## written while it was emitted; or nothing at all, a row with no place.
+fn noted(st: CSt, a: Int, what: String, s: CSite, v: String) -> CSt = {
+  let sited = match s {
+    CNoSite -> false
+    CAt(_, _, _) -> true
+  }
+  let n = len(st.out)
+  let row = MapRow {
+    owner: "", origin: "", what: what, site: s,
+    first: if n > a { a } else { -1 }, last: -1, clo: -1, chi: -1
+  }
+  if str.contains(v, "(") {
+    CSt { ..st, pend: st.pend ++ [Pend { text: v, row: row, sited: sited }] }
+  } else if not sited {
+    st
+  } else if n > a {
+    CSt { ..st, rows: st.rows ++ [MapRow { ..row, last: n - 1 }] }
+  } else {
+    CSt { ..st, rows: st.rows ++ [row] }
+  }
+}
 
 fn fresh(st: CSt) -> (CSt, String) =
   (CSt { ..st, tmp: st.tmp + 1 }, "t${to_string(st.tmp)}")
@@ -704,7 +807,7 @@ fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String)
     None -> ()
   }
   let sym = const_symbol(len(st.cdefs))
-  var b = line(CSt { ..st, out: [], ind: 1 }, "static void* c = NULL;")
+  var b = line(CSt { ..st, out: [], ind: 1, pend: [], rows: [] }, "static void* c = NULL;")
   b = push(line(b, "if (c == NULL) {"))
   let (b1, expr) = emit_const_value(b, v)
   var b2 = line(b1, "c = (void*)(" ++ expr ++ ");")
@@ -838,8 +941,14 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
         None -> (st1, "DAWN_UNIT")
       }
     }
-    CCall(callee, args, ty, _) -> emit_call(st, callee, args, ty)
-    CIntrinsic(name, args, ty, _) -> emit_intrinsic(st, name, args, ty)
+    CCall(callee, args, ty, s) -> {
+      let (st1, v) = emit_call(st, callee, args, ty)
+      (note_call(st1, len(st.out), callee, s, v), v)
+    }
+    CIntrinsic(name, args, ty, s) -> {
+      let (st1, v) = emit_intrinsic(st, name, args, ty)
+      (note_intrinsic(st1, len(st.out), name, s, v), v)
+    }
     CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false)
     CUpdate(_, _, _, _, _) -> panic("emitc: a record update reached the emitter; rc.rw builds it whole")
     CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
@@ -1214,7 +1323,10 @@ fn bin_test_st() -> CSt =
     cmap: map.empty(),
     slots: map.empty(),
     nslots: 0,
-    modes: map.empty()
+    modes: map.empty(),
+    mapping: false,
+    pend: [],
+    rows: []
   }
 
 ## A non-atomic Int operand: a call runs code, so the ordered row has to name
@@ -2339,7 +2451,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # needs is only known afterwards, and the array that holds them has to
   # precede every statement and every label -- Core's loops land on `goto`
   # labels, and jumping past a cleanup variable's initializer is undefined.
-  let st1 = CSt { ..st, tmp: 0, slots: slots, nslots: n, out: [], ind: 1 }
+  let st1 = CSt { ..st, tmp: 0, slots: slots, nslots: n, out: [], ind: 1, pend: [], rows: [] }
   let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
     if peel_opaque(f.ret) == TyUnit {
@@ -2377,9 +2489,29 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     out: st.out ++ head ++ st3.out ++ ["}\n"],
     ind: st.ind,
     slots: map.empty(),
-    nslots: 0
+    nslots: 0,
+    pend: [],
+    rows: if st3.mapping { st.rows ++ placed_rows(st3, f, len(st.out) + len(head)) } else { st.rows }
   }
 }
+
+## The body's rows, moved from the body's own transcript to where it now
+## starts, `shift` chunks in, and told which declaration they belong to. A
+## sited call still waiting when the body is done was never written down: it
+## becomes a row with no place.
+fn placed_rows(st: CSt, f: CFun, shift: Int) -> List[MapRow] = {
+  var out: List[MapRow] = []
+  for r in st.rows {
+    out = out ++ [MapRow { ..shifted(r, shift), owner: f.owner, origin: f.origin }]
+  }
+  for p in st.pend {
+    if p.sited { out = out ++ [MapRow { ..p.row, owner: f.owner, origin: f.origin, first: -1 }] }
+  }
+  out
+}
+
+fn shifted(r: MapRow, by: Int) -> MapRow =
+  if r.last < 0 { r } else { MapRow { ..r, first: r.first + by, last: r.last + by } }
 
 const C_HEX: String = "0123456789ABCDEF"
 
@@ -2541,8 +2673,9 @@ fn emit_units(
   u: TableUse,
   live: Option[Live],
   adts: Adts,
-  modes: Map[(String, String), List[CMode]]
-) -> CSt = {
+  modes: Map[(String, String), List[CMode]],
+  mapping: Bool
+) -> (CSt, List[FnRow]) = {
   var st = CSt {
     out: [],
     tmp: 0,
@@ -2557,7 +2690,10 @@ fn emit_units(
     cmap: map.empty(),
     slots: map.empty(),
     nslots: 0,
-    modes: modes
+    modes: modes,
+    mapping: mapping,
+    pend: [],
+    rows: []
   }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
@@ -2670,6 +2806,9 @@ fn emit_units(
   var bodies: List[List[String]] = []
   var sizes: List[Int] = []
   var total = 0
+  # `--map` only: each body's rows, and its function's line count and row
+  var body_rows: List[List[MapRow]] = []
+  var body_fns: List[FnRow] = []
   for u in units {
     # a const is resolved in its declaring module, so the maps travel with it;
     # the dictionary symbols are unioned unit-wide because a lifted lambda's
@@ -2687,8 +2826,15 @@ fn emit_units(
     }
     for f in u.m.fns {
       if not f.is_test && fn_kept(live, f) {
-        st = CSt { ..st, out: [] }
+        st = CSt { ..st, out: [], rows: [] }
         st = emit_fn(st, f)
+        if mapping {
+          body_fns = body_fns ++ [FnRow {
+            owner: f.owner, origin: f.origin, symbol: mangle(f.owner, f.name),
+            first: 0, last: len(st.out) - 1
+          }]
+          body_rows = body_rows ++ [st.rows]
+        }
         st = line(st, "")
         if is_lifted(f) {
           st = emit_adapter(st, f)
@@ -2715,6 +2861,8 @@ fn emit_units(
   var seg = 0
   var acc = 0
   var j = 0
+  var rows: List[MapRow] = []
+  var fns: List[FnRow] = []
   while j < len(bodies) {
     # the unit this body's first byte falls in; `total` is positive whenever
     # there is a body to place
@@ -2722,6 +2870,12 @@ fn emit_units(
     while seg < k {
       seg = seg + 1
       out = out ++ [tu_marker(seg, nunits) ++ "\n"]
+    }
+    if mapping {
+      let at = len(out)
+      for r in body_rows[j] { rows = rows ++ [shifted(r, at)] }
+      let fr = body_fns[j]
+      fns = fns ++ [FnRow { ..fr, first: fr.first + at, last: fr.last + at }]
     }
     out = out ++ bodies[j]
     acc = acc + sizes[j]
@@ -2731,7 +2885,7 @@ fn emit_units(
     seg = seg + 1
     out = out ++ [tu_marker(seg, nunits) ++ "\n"]
   }
-  CSt { ..st, out: out }
+  (CSt { ..st, out: out, rows: rows }, fns)
 }
 
 pub fn emit_program(
@@ -2742,7 +2896,62 @@ pub fn emit_program(
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> String = {
-  var st = emit_units(units, u, live, adts, modes)
+  let (st, _fns) = program_st(units, entry, u, live, adts, modes, false)
+  join(st.out, "")
+}
+
+## `emit_program` with `--map`: the same text, and where each sited call and
+## each function body landed in it, by line (design section 12). The text is
+## built by the same `program_st`; `mapping` only adds the bookkeeping.
+pub fn emit_program_mapped(
+  units: List[EmitMod],
+  entry: String,
+  u: TableUse,
+  live: Option[Live],
+  adts: Adts,
+  modes: Map[(String, String), List[CMode]]
+) -> (String, List[MapRow], List[FnRow]) = {
+  let (st, fns) = program_st(units, entry, u, live, adts, modes, true)
+  let starts = chunk_lines(st.out)
+  var rows: List[MapRow] = []
+  for r in st.rows { rows = rows ++ [row_lines(st.out, starts, r)] }
+  var fls: List[FnRow] = []
+  for fr in fns { fls = fls ++ [FnRow { ..fr, first: starts[fr.first], last: starts[fr.last] }] }
+  (join(st.out, ""), rows, fls)
+}
+
+## The line (from 1) each chunk starts on.
+fn chunk_lines(out: List[String]) -> List[Int] = {
+  var starts: List[Int] = []
+  var n = 1
+  for c in out {
+    starts = starts ++ [n]
+    n = n + len(str.split(c, "\n")) - 1
+  }
+  starts
+}
+
+## A row's chunk indices as lines. A claimed chunk has to be exactly one line,
+## or its columns would be counted from the wrong place.
+fn row_lines(out: List[String], starts: List[Int], r: MapRow) -> MapRow = {
+  if r.last < 0 { return r }
+  if r.clo >= 0 && len(str.split(out[r.last], "\n")) != 2 {
+    panic("emitc --map: a call was claimed in a chunk that is not one line")
+  }
+  MapRow { ..r, first: starts[r.first], last: starts[r.last] }
+}
+
+fn program_st(
+  units: List[EmitMod],
+  entry: String,
+  u: TableUse,
+  live: Option[Live],
+  adts: Adts,
+  modes: Map[(String, String), List[CMode]],
+  mapping: Bool
+) -> (CSt, List[FnRow]) = {
+  let (st0, fns) = emit_units(units, u, live, adts, modes, mapping)
+  var st = st0
   # The program body runs on the runtime's own stack, not the OS default one
   # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
   # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
@@ -2759,7 +2968,7 @@ pub fn emit_program(
   st = line(st, "return dawn_rt_main(argc, argv, dawn_program_entry);")
   st = pop(st)
   st = line(st, "}")
-  join(st.out, "")
+  (st, fns)
 }
 
 ## The same translation unit with no `int main` in it: whoever calls this owes
@@ -2772,8 +2981,10 @@ pub fn emit_headless(
   live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
-) -> String =
-  join(emit_units(units, u, live, adts, modes).out, "")
+) -> String = {
+  let (st, _fns) = emit_units(units, u, live, adts, modes, false)
+  join(st.out, "")
+}
 
 # ---- tests ----
 
@@ -3058,4 +3269,85 @@ test "Int minimum uses the C standard boundary macro" {
   assert int_lit(min) == "INT64_MIN"
   assert int_lit(-1) == "INT64_C(-1)"
   assert const_literal(VInt(min), TyInt, "test") == "INT64_MIN"
+}
+
+# ---- --map: where a call's C landed (docs/source-span-map-design.md section 12) ----
+
+fn map_test_row(lo: Int, hi: Int) -> MapRow =
+  MapRow { owner: "", origin: "", what: "direct t.h", site: CAt(lo, hi, lo), first: -1, last: -1, clo: -1, chi: -1 }
+
+fn map_test_lo(s: CSite) -> Int =
+  match s {
+    CAt(lo, _, _) -> lo
+    CNoSite -> -1
+  }
+
+## (source lo, clo, chi) of each row, in the order they were claimed.
+fn map_test_claims(st: CSt) -> List[(Int, Int, Int)] = {
+  var out: List[(Int, Int, Int)] = []
+  for r in st.rows { out = out ++ [(map_test_lo(r.site), r.clo, r.chi)] }
+  out
+}
+
+test "two identical call texts on one line are claimed left to right" {
+  let st = CSt {
+    ..bin_test_st(),
+    mapping: true,
+    pend: [
+      Pend { text: "h(v)", row: map_test_row(5, 9), sited: true },
+      Pend { text: "h(v)", row: map_test_row(11, 15), sited: true }
+    ]
+  }
+  let st1 = line(st, "return pair(h(v), h(v));")
+  assert len(st1.pend) == 0
+  assert map_test_claims(st1) == [(5, 12, 16), (11, 18, 22)]
+  # an unsited call with the same text owns its occurrence, so the sited one
+  # after it takes the next
+  let ghost = CSt {
+    ..st,
+    pend: [
+      Pend { text: "h(v)", row: map_test_row(0, 0), sited: false },
+      Pend { text: "h(v)", row: map_test_row(11, 15), sited: true }
+    ]
+  }
+  assert map_test_claims(line(ghost, "return pair(h(v), h(v));")) == [(11, 18, 22)]
+}
+
+test "a call whose text starts its enclosing call's text is found where it is" {
+  # `f(v)(w)`: the inner call is claimed first, and the enclosing call is
+  # looked for from the start of the line, not after the inner one
+  let st = CSt {
+    ..bin_test_st(),
+    mapping: true,
+    ind: 1,
+    pend: [
+      Pend { text: "f(v)", row: map_test_row(0, 4), sited: true },
+      Pend { text: "f(v)(w)", row: map_test_row(0, 7), sited: true }
+    ]
+  }
+  let st1 = line(st, "return f(v)(w);")
+  assert len(st1.pend) == 0
+  # columns count the line's indentation
+  assert map_test_claims(st1) == [(0, 9, 13), (0, 9, 16)]
+  # a text the line does not hold keeps waiting
+  let st2 = line(st, "return g(v);")
+  assert len(st2.pend) == 2
+  assert len(st2.rows) == 0
+}
+
+test "emitting with --map writes the same C, and without it records nothing" {
+  let inner = CCall(CDirect("t", "h"), [CInt(1)], TyInt, CAt(2, 6, 2))
+  let outer = CCall(CDirect("t", "h"), [inner], TyInt, CAt(0, 7, 0))
+  let (sp, vp) = emit_expr(bin_test_st(), outer, true)
+  let plain = line(sp, "return " ++ vp ++ ";")
+  let (sm, vm) = emit_expr(CSt { ..bin_test_st(), mapping: true }, outer, true)
+  let mapped = line(sm, "return " ++ vm ++ ";")
+  assert join(plain.out, "") == join(mapped.out, "")
+  assert join(plain.out, "") == "return dawn_t__h(dawn_t__h(INT64_C(1)));\n"
+  assert len(plain.pend) == 0
+  assert len(plain.rows) == 0
+  assert len(mapped.pend) == 0
+  assert map_test_claims(mapped) == [(2, 17, 38), (0, 7, 39)]
+  assert mapped.rows[0].first == 0
+  assert mapped.rows[0].last == 0
 }

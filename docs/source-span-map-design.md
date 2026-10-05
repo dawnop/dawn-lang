@@ -1,6 +1,6 @@
 # 源码位置进 Core：调用节点的 site 与按需侧表
 
-> 状态：**proposed**（M2，2026-10-05 起草，待评审，未实现；M3 C 侧表见第十二节，2026-10-05 起草）。源码位置模型一线（M 刀序）的第二刀；
+> 状态：**proposed**（M2，2026-10-05 起草，待评审，未实现；M2 已合入 `b1b25062`；M3 C 侧表见第十二节）。源码位置模型一线（M 刀序）的第二刀；
 > 依据：裁决 `agent-handoff/ruling-source-span-map-20261003.md`（「位置货币」一条与 M 刀序），
 > 调研 `agent-handoff/research-gpumap-call-spans-report-20261003.md` §六、§八。M1（flash 页）已落地：
 > `65547d27`（tileir 调用树与体标记）、`3547325f`（GPU 页只放 flash_attn）。仓库行号指 `ecfa0eda`，
@@ -270,8 +270,9 @@ GHC 的 tick 浮动都是在解决同一件事），本刀不预留。
 
 ## 十二、M3：C 侧表 `__emitc --map`
 
-> 状态：**proposed**（2026-10-05 起草，待评审，未实现）。基于本文 M2（`65c8e56c`，`feat/core-site`）与
-> TU 拆分（#530，`docs/c-tu-split-design.md`）。行号指 `65c8e56c` 的 `selfhost/src/c/emitc.dawn`。
+> 状态：**proposed**（2026-10-05 起草，同日实现于分支 `feat/emitc-map`，待合入）。基于本文 M2（合入为
+> `b1b25062`）与 TU 拆分（#530，`docs/c-tu-split-design.md`）。行号指 `65c8e56c` 的
+> `selfhost/src/c/emitc.dawn`；12.5、12.7 的实测在 `995e2396` 之上。
 
 ### 12.1 要什么
 
@@ -302,10 +303,11 @@ call <first> <line> <clo> <chi> <module> <lo> <hi> <nlo> <what>
 - **一份，不分 TU。** 整份文本是正本：差分比的是它，`cdriver.split` 是它的纯函数，`--split` 的每个
   文件都由它切出。侧表跟着正本走，只多一张 `unit` 表告诉读取方怎么换到切开的文件：
   `tuNN.c` 第一行是 `#include "dawn_prog.h"`，所以整份文本第 `L` 行（`first <= L <= last`）在
-  `tuNN.c` 里是第 `L - first + 2` 行；函数体只在 TU 里，头文件那段不会有 `fn`/`call` 行。
+  `tuNN.c` 里是第 `L - first + 2` 行（没有 TU 标记的文本整份就是 `main.c`，行号不变）；函数体只在 TU 里，
+  头文件那段不会有 `fn`/`call` 行。
   每 TU 一份的话，K 由 `tu_count` 按字节数决定，同一程序改一行就可能多一个文件，读取方得先猜有几份；
-  一份加一张表没有这个问题。`unit` 表由写出器按 `tu_marker` 行重算，不另记第二份真相，
-  测试里拿它和 `cdriver.split` 的实际输出对账（12.5）。
+  一份加一张表没有这个问题。`unit` 表由 `cdriver.unit_lines` 按 `split` 切的同一种标记行重算，
+  不另记第二份真相，测试里拿它和 `cdriver.split` 的实际输出对账（12.5）。
 - **路径**：项目模块用 `LoadedModule.site_path`（相对项目根，不随工作目录与命令行写法变，
   `docs/source-location-design.md` §四），std 模块用 `std/<模块>.dawn`（嵌入 stdsrc 的名字）。
 - **`what`** 与 `.sites` 同词表（`coresites.callee_text`：`direct m.f`、`method f`、`impl f`、
@@ -328,10 +330,16 @@ emitc 把表达式拼成字符串往上交，写行的只有 `line`（`emitc.daw
 求值两次）。所以不需要在串里嵌标记，只要记住这个串，等它出现：
 
 - `emit_expr` 的 `CCall`/`CIntrinsic` 两个 arm（`emitc.dawn:841-842`）在调用 `emit_call`/`emit_intrinsic`
-  前记下 `a = len(st.out)`，返回后交给 `note_site(st, site, what, a, v)`：
+  前记下 `a = len(st.out)`，返回后交给 `note_call`/`note_intrinsic(st, a, …, site, v)`：
   1. **表达式形**（`v` 含 `(`）：挂进 `st.pend` 待定。之后每次 `line` 先照常拼出这一行，再在行里找每个
      待定串，找到的出列，记 `(first = a 处的块或本行, line = 本行, clo, chi)`。同一行里几个待定串文本相同
-     （`g(f(), f())` 这种没被命名的情形）按入列顺序认领从左到右的不重叠出现。
+     （`g(f(), f())` 这种没被命名的情形）按入列顺序认领从左到右的不重叠出现：游标**按文本**各记一个，
+     认领一次就移到该次出现之后，所以同文本的后一个只能落在前一个之后；不同文本之间不共用游标，
+     因为内层调用的串就在外层调用的串里面（`f(x)(y)` 的 `f(x)` 恰好打头），外层得从行首找。
+     没有 site 的调用（`CNoSite`）也入列，只是不出行：它占住自己那次出现，同文本的有 site 调用才不会
+     认领错。实测今天的 emitc 从不把两个同文本调用写在同一行（一行里有两个要跑代码的操作数时，
+     `emit_row` 把每个都先命名成临时变量），nmain、kernels 上同行同文本的行对都是 0（12.5）。所以这条
+     规则由单元测试与 oracle 的自检钉住，不靠真实程序。
   2. **语句形**（`v` 是 `DAWN_UNIT` 或不含括号的临时名，且期间写过行）：调用本身就在那几行里，
      记 `[a, len(st.out) - 1]`，列为 `-`。临时名不进待定：`t3` 是 `t30` 的子串。
   3. **无痕**（`v` 是原子、期间没写行，例如被折成常量的内建）：记一行未落地。
@@ -343,11 +351,13 @@ emitc 把表达式拼成字符串往上交，写行的只有 `line`（`emitc.daw
   （数之前各块里的换行；`line` 写的块恰好一行，若认领的块里有不在末尾的换行，写出器 panic，
   这只在 `--map` 时才会走到）。
 - 待定串、行记录都在 `CSt` 新加的三个字段里（`mapping: Bool`、`pend`、`rows`）。`mapping` 为假时
-  `note_site` 立即返回原 `st`，`line` 只多一次 `len(st.pend) == 0` 判断。`line` 写出的文本在两种模式下
+  `note_call`/`note_intrinsic` 立即返回原 `st`，`line` 只多一次 `len(st.pend) == 0` 判断。`line` 写出的文本在两种模式下
   是同一个表达式算出来的，侧表只读它、不改它。
 - 驱动：`cdriver.c_text` 不变；新加 `c_text_mapped(std, prog) -> Result[(String, String), String]`，
-  返回 C 文本与侧表文本。`base` 表（M2 的 `main.decl_bases`）挪进 `ir/coresites`，`__lower --sites`
-  与侧表写出器共用。写出器单独一个模块 `c/cmap.dawn`，emitc 只交出原始行记录。
+  返回 C 文本与侧表文本，两者都出自 `emitc.program_st`，`emit_program` 与 `emit_program_mapped` 只差
+  `mapping` 这一个参数。`base` 表（M2 的 `main.decl_bases`）挪进 `ir/coresites`，`__lower --sites`
+  与侧表写出器共用。写出器单独一个模块 `c/cmap.dawn`，emitc 只交出原始行记录。`__emitc` 与
+  `dawnc emitc` 都认 `--map`；用法文本没有加这一项（与 `--split` 一样不列），所以 CLI 输出不变。
 
 为什么按「串出现在哪一行」而不是在 `line` 处给每个表达式标号：emitc 的表达式是字符串，没有地方挂
 标号；给串加不可见标记再在输出前剥掉，等于在默认路径上多一遍扫描，也就不再是「对 C 文本零影响」
@@ -357,16 +367,21 @@ emitc 把表达式拼成字符串往上交，写行的只有 `line`（`emitc.daw
 ### 12.4 对 C 文本零影响：怎么证明
 
 1. **结构**：上一节的改动里，C 文本只经过 `line` 的同一个拼接表达式与 `emit_units` 的同一段排布；
-   新字段只被 `note_site`、`line` 的认领分支和写出器读写。
+   新字段只被 `note_call`/`note_intrinsic`、`line` 的认领分支和写出器读写。
 2. **同输入有无 `--map`**：同一个编译器对同一输入跑 `__emitc -o a.c` 与 `__emitc -o b.c --map m`，
    `a.c` 与 `b.c` 逐字节相同；加 `--split` 时两个目录逐文件相同。输入：`nmain.dawn`（整个原生编译器，
-   17 个 TU）、`scripts/tile-golden/kernels.dawn`、`examples/` 里能走 C 后端的程序、`scripts/core-sites/corpus.dawn`。
-   脚本 `scripts/c-map/same.sh`。
+   16 个 TU 加头文件）、`scripts/tile-golden/kernels.dawn`、`examples/` 里能走 C 后端的程序、
+   `scripts/c-map/corpus.dawn`（M2 的语料用了 `use java`，C 后端不收，另写了一份）。脚本
+   `scripts/c-map/same.sh`；实测 40 个输入相同，16 个是 C 后端不收或不是独立程序的文件，跳过。
+   `check.py` 每晚在它的三个样本上再比一次。
 3. **对真父**：不带 `--map` 时本分支与真父对同一输入的 `__emitc` 输出逐字节相同（同 M2 硬判据），
    `native-fixpoint.sh` B==C。
 4. **两条入口一致**：`__emitc --map`（JVM 上）与 `dawnc emitc --map`（固定点里编出的原生编译器）对
    `nmain.dawn` 写出的侧表逐字节相同，与两边 C 文本 A==B 是同一条要求。
-5. **负控**：变异体 `text-leak` 在认领时往行尾加一段注释，第 2 条红。
+5. **负控**：变异体 `text-leak` 在 `--map` 时给每行多写一个空格，第 2 条红。
+6. **`--map` 关时队列一直是空的**：`note_call`/`note_intrinsic` 第一句就是 `if not st.mapping { st }`，
+   队列只有它们会加；单元测试「emitting with --map writes the same C, and without it records nothing」
+   对同一棵 Core 关、开各发一次，断言两边 C 相同、关时 `pend` 与 `rows` 都空。开销实测见 12.7。
 
 ### 12.5 测试与负控
 
@@ -378,21 +393,46 @@ emitc 把表达式拼成字符串往上交，写行的只有 `line`（`emitc.daw
   - **C 侧位置**：取整份文本第 `line` 行的 `[clo, chi)`，按 `what` 判：`direct m.f` 要包含
     `mangle(m, f)`（oracle 用 Python 独立实现 `escape_part` 那张五行的表，不读编译器）；`impl`/`default`
     要包含被调方法名的转义；`method` 要包含 `->slots[`，`dynamic` 要包含 `->fn)`；`intrinsic` 只要求
-    区间非空。语句形的行区间要落在所属 `fn` 的区间里。另查 `first <= line`、同一调用树的嵌套：源码 span
-    包含的两个调用，C 区间也包含（同行比列，跨行比行）。
+    区间非空。语句形的行区间要落在所属 `fn` 的区间里，且其中一行有该符号。另查 `first <= line`。
+  - **一处一认**：没有两行认领同一行的同一段列。
+  - **同行有序**：同一个 C 函数、同一行上的两行，源码 span 互不包含时，C 里的先后与源码先后一致。
+    同文本的两个调用若被认反（后一个拿了前一个的出现），这条红；都认到同一次出现，上一条红。
+  - **同行嵌套**：同一 C 函数、同一行上，源码 span 包含的两个调用，C 列区间也包含。跨行不比：实参被
+    命名成临时变量后，内层在前几行，外层的列区间里只剩临时名，`[first, line]` 的包含才是对的那一层。
+    lambda 体里的调用在另一个 C 函数里，也不比。
+  - **自检**（`check.py --self-test`）：在手写的单行侧表上验这几条规则会红：同一行两个同文本调用认反、
+    认到同一次出现，以及内层调用的串打头外层调用的串时认到外层之后。真实程序里这两种形状不出现（上面
+    12.3 的实测），这是证明规则有牙的唯一办法。
   - **TU**：对每个 `call`，按 `unit` 表换到 `--split` 写出的 `tuNN.c` 里那一行，文本与整份文本那一行相同。
-  - 样本：`kernels.dawn` 的 `flash_attn`（及 `vadd`、`softmax`）每个 sited 调用都落地、名字核对通过；
-    `corpus.dawn` 全部；`nmain.dawn` 整个编译器只跑统计（未落地数必须为 0，列出例外类别）。
-- **单元**：`c/emitc` 的 test 块用手搭的 `CFun` 钉住三种落地形与平移；`c/cmap` 的 test 块钉住排序、
-  `unit` 表与 `cdriver.split` 一致。
+  - 样本：`kernels.dawn`（整个程序，`flash_attn`、`vadd`、`softmax` 在内）、`scripts/c-map/corpus.dawn`
+    全部、`nmain.dawn` 整个编译器，全部规则都跑，未落地数必须为 0。实测（`995e2396` 之上）：
+
+    | 样本 | 行 | 语句形 | 函数 | TU | 同函数同行的行对 | 其中同文本 |
+    |---|---|---|---|---|---|---|
+    | corpus | 23 | 0 | 12 | 1 | 1 | 0 |
+    | kernels | 10224 | 86 | 3005 | 8 | 490 | 0 |
+    | nmain | 18411 | 201 | 4413 | 16 | 358 | 0 |
+
+    每个样本里被保留函数的 site 全部在表里（kernels 10224 个、nmain 18411 个），没有一个未落地。
+- **单元**：`c/emitc` 的三个 test 块：同一行两个同文本调用按从左到右认领（含一个无 site 的同文本调用
+  占位在前）、内层调用的串打头外层的串时两者都认在原位（列含缩进）、同一棵 Core 开关 `--map` 输出
+  相同且关时什么都不记；`c/cmap` 的 test 块钉住排序与 `?`；`c/cdriver` 的 test 块钉住 `unit_lines`
+  与 `split` 切出的文件逐行一致。
 - **负控**（`scripts/c-map/mutate.py` 登记、`run.py` 逐个建编译器验红，锚点归
   `mutation-anchor-preflight.py`）：
   1. `text-leak`：认领时改了行文本：12.4 第 2 条红；
   2. `no-claim`：`line` 不认领待定串：全部未落地，完整性红；
   3. `head-shift`：`emit_fn` 平移时少算函数头：行号错一到几行，名字核对红；
   4. `col-pad`：列不算缩进：名字核对红；
-  5. `unit-off`：`unit` 表的 `first` 差一：TU 对账红。
-- **接入**：push 预算余量为 0，先挂 nightly 的 core-lint job（与 `scripts/core-sites` 并列一步）。
+  5. `unit-off`：`unit` 表的 `first` 差一：TU 对账红；
+  6. `same-line-twin`：认领后游标不前移，同一行第二个同文本调用拿到第一个的出现。今天的 emitc 不写这种行，
+     所以它对 check.py 是等价变异体；由 `dawn test selfhost` 里的单元测试判红（run.py 对它跑测试而不跑
+     check.py），check.py 自己那条规则由 `--self-test` 判红；
+  7. `prefix-enclosing`：所有文本共用一个游标：内层认领后，外层只在它之后找，找不到：语料里的 `h(h(x))`
+     在 check.py 上「has no place in the C」。
+  实测七个全红，`run.py` 本机 488 s（`check.py --self-test` 与正控在前）。
+- **接入**：push 预算余量为 0，挂 nightly 的 core-lint job（与 `scripts/core-sites` 并列一步）。本机
+  check.py 78 s（负载 4 时）到 194 s（与其他写者并跑），run.py 488 s。
 
 ### 12.6 给 M7 的读取方
 
@@ -417,9 +457,25 @@ M7 页面的读取方是 Python（M1 的 `site/gpu-map/record.py` 那一层）�
 ### 12.7 开销
 
 `--map` 关时：`CSt` 多三个字段（每次 `{..st}` 拷贝多三个指针），`line` 多一次判空。按 M2 的测法
-（同输入、交错、`-Xmx6g -XX:+UseSerialGC`）报 `__emitc nmain --split` 的墙钟、峰值 RSS 与分配量，
-真父对本分支；分配量预期在 +0.5% 以内，超过 2% 写原因。`--map` 开时另报一组，只作记录，不设门限
-（它是按需工具）。估算不作数，以实测为准。
+（同输入、交错、`-Xmx6g -XX:+UseSerialGC`）测 `__emitc nmain.dawn --split`：A = 真父 `995e2396`，
+B = 本分支不带 `--map`，C = 本分支带 `--map`，ABC 交错。本机负载约 4。
+
+| 量 | A 真父 | B 不带 `--map` | C 带 `--map` |
+|---|---|---|---|
+| 墙钟（中位数，7 次） | 6.24 s [5.39–6.38] | 6.19 s [5.09–6.30] | 6.62 s [5.69–6.70] |
+| CPU user | 18.75 s | 18.93 s | 19.20 s |
+| 峰值 RSS | 924 MB [878–970] | 925 MB [873–1008] | 993 MB [979–1007] |
+| 分配量（JFR，5 次） | 10702 / 10707 / 11073 / 11079 / 11085 MB | 10699 / 10708 / 10724 / 11090 / 11096 MB | 11940–11957 MB |
+
+- 分配量用 JFR 的 `jdk.ObjectAllocationInNewTLAB` 的 `tlabSize` 加 `jdk.ObjectAllocationOutsideTLAB` 的
+  `allocationSize` 求和（TLAB 粒度，精确到每次 TLAB），不是 M2 用的 GC 日志回收量之和：回收量之和漏掉最后
+  一段没回收的 eden，在这里抖动 ±4%，分不出 0.5% 的差别。
+- A、B 的分配量都是双峰（约 10.70 GB 与 11.08 GB 两档，同一个 jar 反复跑也会跳档），所以按档比：低档
+  A 10702/10707、B 10699/10708/10724，高档 A 11073/11079/11085、B 11090/11096，同档差在 ±0.2% 以内。
+  也就是说不带 `--map` 时测不出代价，与 12.4 第 6 条的结构性论证一致：队列一直是空的，`line` 只做一次判空。
+- 带 `--map`：分配多约 0.9–1.2 GB（+8%～+12%），墙钟 +7%，RSS +7%。多出来的是每个调用一个待定记录与
+  一行记录（nmain 有 18411 行），以及认领时每写一行就对队列里每个串做一次 `str.drop` 加 `index_of`。
+  这是按需工具，不设门限；要再省，第一步是 `from == 0` 时不切串。
 
 ### 12.8 不做的（理由）
 

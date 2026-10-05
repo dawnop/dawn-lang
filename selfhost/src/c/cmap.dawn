@@ -1,0 +1,159 @@
+# The `.dawnmap` side table `__emitc --map` writes: where each written call
+# landed in the emitted C (docs/source-span-map-design.md section 12).
+#
+# It is a separate file and never a part of the C. The C is the evidence the
+# differentials and the native fixpoint compare byte for byte, and a `#line`
+# or a comment per call would move with every pure edit of the source; the
+# map is asked for, written beside the C, and the C does not change whether it
+# is asked for or not (the design's section 12.4 is how that is checked).
+#
+# One map per emission, in the coordinates of the whole text, not one per
+# translation unit: the unit count follows the program's size, so a reader of
+# per-unit maps would first have to guess how many there are. The `unit` rows
+# say how to move a line into the file `--split` writes; `cdriver.unit_lines`
+# computes them from the same marker lines `cdriver.split` cuts at.
+#
+# The source side is file code point offsets, the currency `.sites` and
+# `dawn parse` speak, recovered with `coresites.site_abs` from the
+# declaration-relative offsets Core holds. No source line or column is written:
+# those are the offsets projected through the file's line starts, and the
+# reader has the file.
+#
+# Every row kind is sorted by a total key, so the same C and the same sites
+# give the same bytes; the emitter itself is deterministic (the fixpoint
+# depends on it), and this is one more function of what it emitted.
+
+use std/list
+use std/map
+use std/str
+use ir/core.{CAt, CNoSite}
+use ir/coresites
+use c/emitc.{MapRow, FnRow}
+
+## The format's first line: name, version, backend. A reader refuses a version
+## it does not know and skips a row kind it does not know; a new row kind does
+## not bump the version, a changed meaning of an existing field does.
+pub const HEADER: String = "dawnmap\t1\tc"
+
+## The map as text. `units` is (k, file, first line, last line) per translation
+## unit; `srcs` names each module's source file; `bases` is each module's
+## declaration bases (`coresites.decl_bases`).
+pub fn render(
+  lines: Int,
+  units: List[(Int, String, Int, Int)],
+  rows: List[MapRow],
+  fns: List[FnRow],
+  srcs: Map[String, String],
+  bases: Map[String, Map[String, Int]]
+) -> String = {
+  var out: List[String] = [HEADER ++ "\n", "text\t" ++ to_string(lines) ++ "\n"]
+  for u in units {
+    let (k, file, first, last) = u
+    out = out ++ ["unit\t${to_string(k)}\t${file}\t${to_string(first)}\t${to_string(last)}\n"]
+  }
+  var mods: Map[String, Bool] = map.empty()
+  for r in rows { mods = map.insert(mods, r.owner, true) }
+  for f in fns { mods = map.insert(mods, f.owner, true) }
+  for m in list.sort(map.keys(mods)) {
+    let path = match map.get(srcs, m) {
+      Some(p) -> p
+      None -> "?"
+    }
+    out = out ++ ["src\t" ++ m ++ "\t" ++ path ++ "\n"]
+  }
+  for f in sort_by(fns, (a, b) => fn_order(a, b)) {
+    out = out ++ ["fn\t${to_string(f.first)}\t${to_string(f.last)}\t${f.owner}\t${f.origin}\t${f.symbol}\n"]
+  }
+  var placed: List[(MapRow, (Int, Int, Int))] = []
+  for r in rows { placed = placed ++ [(r, abs_of(r, bases))] }
+  for pr in sort_by(placed, (a, b) => call_order(a, b)) {
+    let (r, at) = pr
+    out = out ++ [call_line(r, at)]
+  }
+  join(out, "")
+}
+
+## A row's site in file coordinates, or (-1, -1, -1) when its declaration has
+## no base on record (the checker refuses the `?` this prints).
+fn abs_of(r: MapRow, bases: Map[String, Map[String, Int]]) -> (Int, Int, Int) = {
+  let base = match map.get(bases, r.owner) {
+    Some(bs) -> map.get(bs, r.origin)
+    None -> None
+  }
+  match base {
+    Some(b) -> match coresites.site_abs(b, r.site) {
+      Some(t) -> t
+      None -> (-1, -1, -1)
+    }
+    None -> (-1, -1, -1)
+  }
+}
+
+fn num(n: Int) -> String = if n < 0 { "-" } else { to_string(n) }
+
+fn src_num(n: Int) -> String = if n < 0 { "?" } else { to_string(n) }
+
+fn call_line(r: MapRow, at: (Int, Int, Int)) -> String = {
+  let (lo, hi, nlo) = at
+  "call\t" ++ num(r.first) ++ "\t" ++ num(r.last) ++ "\t" ++ num(r.clo) ++ "\t" ++ num(r.chi) ++ "\t" ++
+    r.owner ++ "\t" ++ src_num(lo) ++ "\t" ++ src_num(hi) ++ "\t" ++ src_num(nlo) ++ "\t" ++ r.what ++ "\n"
+}
+
+fn int_cmp(a: Int, b: Int) -> Int = if a < b { -1 } else if a > b { 1 } else { 0 }
+
+fn str_cmp(a: String, b: String) -> Int = cmp(a, b)
+
+## Ties broken until the order is total.
+fn chain(cs: List[Int]) -> Int = {
+  for c in cs {
+    if c != 0 { return c }
+  }
+  0
+}
+
+fn fn_order(a: FnRow, b: FnRow) -> Int =
+  chain([int_cmp(a.first, b.first), str_cmp(a.owner, b.owner), str_cmp(a.symbol, b.symbol)])
+
+## Placed rows by line, then column, the enclosing call first on a tie
+## (wider `chi`); rows with no place last. Then by source position, which
+## no two rows share.
+fn call_order(x: (MapRow, (Int, Int, Int)), y: (MapRow, (Int, Int, Int))) -> Int = {
+  let (a, aat) = x
+  let (b, bat) = y
+  let (alo, ahi, anlo) = aat
+  let (blo, bhi, bnlo) = bat
+  let ap = if a.last < 0 { 1 } else { 0 }
+  let bp = if b.last < 0 { 1 } else { 0 }
+  chain([
+    int_cmp(ap, bp), int_cmp(a.last, b.last), int_cmp(a.clo, b.clo), int_cmp(b.chi, a.chi),
+    int_cmp(a.first, b.first), str_cmp(a.owner, b.owner), int_cmp(alo, blo), int_cmp(ahi, bhi),
+    int_cmp(anlo, bnlo), str_cmp(a.origin, b.origin), str_cmp(a.what, b.what)
+  ])
+}
+
+test "rows sort by place, the enclosing call first, the placeless last" {
+  let r = MapRow { owner: "m", origin: "f", what: "direct m.g", site: CAt(0, 3, 0), first: 5, last: 5, clo: 4, chi: 9 }
+  let outer = MapRow { ..r, site: CAt(0, 10, 0), clo: 2, chi: 12, what: "direct m.h" }
+  let lost = MapRow { ..r, site: CAt(20, 23, 20), first: -1, last: -1, clo: -1, chi: -1 }
+  let early = MapRow { ..r, site: CAt(30, 33, 30), first: 2, last: 3, clo: -1, chi: -1, what: "intrinsic x" }
+  let bases = map.insert(map.empty(), "m", map.insert(map.empty(), "f", 100))
+  let fns = [FnRow { owner: "m", origin: "f", symbol: "dawn_m__f", first: 2, last: 7 }]
+  let text = render(9, [(0, "tu00.c", 2, 9)], [lost, r, outer, early], fns,
+    map.insert(map.empty(), "m", "m.dawn"), bases)
+  assert text == join([
+    "dawnmap\t1\tc\n",
+    "text\t9\n",
+    "unit\t0\ttu00.c\t2\t9\n",
+    "src\tm\tm.dawn\n",
+    "fn\t2\t7\tm\tf\tdawn_m__f\n",
+    "call\t2\t3\t-\t-\tm\t130\t133\t130\tintrinsic x\n",
+    "call\t5\t5\t2\t12\tm\t100\t110\t100\tdirect m.h\n",
+    "call\t5\t5\t4\t9\tm\t100\t103\t100\tdirect m.g\n",
+    "call\t-\t-\t-\t-\tm\t120\t123\t120\tdirect m.g\n"
+  ], "")
+  # a declaration with no base is printed so that a checker refuses it
+  let unknown = render(9, [], [MapRow { ..r, origin: "nope" }], [], map.empty(), bases)
+  assert str.contains(unknown, "call\t5\t5\t4\t9\tm\t?\t?\t?\tdirect m.g\n")
+  assert str.contains(unknown, "src\tm\t?\n")
+  assert abs_of(MapRow { ..r, site: CNoSite }, bases) == (-1, -1, -1)
+}

@@ -27,6 +27,7 @@ ADAPTERS = {
     "builtin-type-contract": (".",),
     "classfile-verify": (".",),
     "core-lint-contract": (".",),
+    "c-map": (".",),
     "core-sites": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
@@ -72,6 +73,7 @@ EXCLUSIONS = {
 # registry, so an entry cannot outlive the reading it vouches for.
 # anchor-guard.py counts these as preflighted.
 REGISTRY_READERS = {
+    "c-map/run.py": "c-map",
     "core-lint-contract/run.py": "core-lint-contract",
     "core-sites/run.py": "core-sites",
     "dict-owner-contract/shapes.py": "dict-owner-contract",

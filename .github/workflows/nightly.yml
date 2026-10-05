@@ -70,11 +70,13 @@ jobs:
   # the tree compiles trips a rule (corpus.sh: the spike-native corpus on both
   # backends, the compiler on both), and the compiler's own tests build and
   # pass with the lint on. Measured locally 2026-10-04 on 16 cores: 127s,
-  # 260s at --jobs 4, 37s. A hosted runner has four, so the 45 minutes below
-  # are a runaway stop at about three times that.
+  # 260s at --jobs 4, 37s. A hosted runner has four, so the 45 minutes this
+  # job had were a runaway stop at about three times that. 2026-10-05 the C
+  # side table step (scripts/c-map) added about 570 s locally, and the stop
+  # went to 75 minutes to keep the same margin.
   core-lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
       issues: write     # the report when it goes red
@@ -98,6 +100,17 @@ jobs:
         if: success() || failure()
         run: python3 scripts/core-sites/check.py && python3 scripts/core-sites/run.py
 
+      # The C side table `__emitc --map` writes, against the C it describes
+      # and the sites above, then each of its seven restored defects red
+      # (scripts/c-map, docs/source-span-map-design.md section 12). It moves
+      # no output the push path compares, and the push total has no room.
+      # Measured locally 2026-10-05 on 16 cores: 78 s to 194 s (the latter
+      # beside other writers' builds) and 488 s.
+      - name: every C side table row points at its call, and each map defect is red
+        id: cmap
+        if: success() || failure()
+        run: python3 scripts/c-map/check.py && python3 scripts/c-map/run.py
+
       - name: no lint violation anywhere the tree compiles
         id: corpus
         if: success() || failure()
@@ -118,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "The nightly core-lint job is red: contract ${{ steps.contract.outcome }}, sites ${{ steps.sites.outcome }},"
+            echo "The nightly core-lint job is red: contract ${{ steps.contract.outcome }}, sites ${{ steps.sites.outcome }}, C map ${{ steps.cmap.outcome }},"
             echo "corpus ${{ steps.corpus.outcome }}, selfhost tests ${{ steps.tests.outcome }}."
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo

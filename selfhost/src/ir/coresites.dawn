@@ -21,6 +21,7 @@
 use std/list
 use std/map
 use check/types.{TyInt}
+use check/tast.{TModule}
 use ir/core.{
   CModule, CFun, CExpr, CStmt, CCallee, CSite, CNoSite, CAt,
   CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure, CDictApply, CDictArg,
@@ -37,6 +38,18 @@ pub fn site_abs(base: Int, s: CSite) -> Option[(Int, Int, Int)] =
     CNoSite -> None
     CAt(lo, hi, nlo) -> Some((base + lo, base + hi, base + nlo))
   }
+
+## A typed module's declaration bases by declaration path: what a site's
+## offsets are measured from (`TFun.base`), for `__lower --sites` and the C
+## side table (`__emitc --map`). A tree no scheduler filed (`base` below zero)
+## has no sites to place and no entry.
+pub fn decl_bases(tm: TModule) -> Map[String, Int] = {
+  var out: Map[String, Int] = map.empty()
+  for tf in tm.fns ++ tm.tests {
+    if tf.base >= 0 && tf.decl != "" { out = map.insert(out, tf.decl, tf.base) }
+  }
+  out
+}
 
 ## One line per call that has a site, for every function of `m`. `bases`
 ## maps a declaration path (`CFun.origin`) to the base its offsets are
@@ -63,7 +76,7 @@ pub fn render(m: CModule, bases: Map[String, Int]) -> String = {
 
 alias Row = (String, CSite)
 
-fn callee_text(c: CCallee) -> String =
+pub fn callee_text(c: CCallee) -> String =
   match c {
     CDirect(owner, name) -> "direct " ++ owner ++ "." ++ name
     CDynamic(_) -> "dynamic"

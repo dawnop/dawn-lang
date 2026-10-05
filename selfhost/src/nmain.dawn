@@ -287,17 +287,18 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
   RunArgs { std_flag: std_flag, opts: ct_fuel(fuel), target: target, program_args: program_args }
 }
 
-## `--std <dir>`, `-o <out>`, `--build-info <file.c>` and `--split <dir>` plus
-## exactly one target, kept out of run.
+## `--std <dir>`, `-o <out>`, `--build-info <file.c>`, `--split <dir>` and
+## `--map <file>` plus exactly one target, kept out of run.
 fn parse_compile_tail(
   cmd: String,
   usage_text: String,
   rest: List[String]
-) -> (Option[String], String, String, String, String) !Exit !Console !io = {
+) -> (Option[String], String, String, String, String, String) !Exit !Console !io = {
   var std_flag: Option[String] = None
   var out = ""
   var info_out = ""
   var split_out = ""
+  var map_out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -313,6 +314,9 @@ fn parse_compile_tail(
     } else if rest[i] == "--split" && i + 1 < len(rest) {
       split_out = rest[i + 1]
       i = i + 2
+    } else if rest[i] == "--map" && i + 1 < len(rest) {
+      map_out = rest[i + 1]
+      i = i + 2
     } else {
       refuse_second_target(cmd, target, rest[i])
       target = rest[i]
@@ -320,7 +324,7 @@ fn parse_compile_tail(
     }
   }
   if target == "" { cli_error(usage_text) }
-  (std_flag, out, target, info_out, split_out)
+  (std_flag, out, target, info_out, split_out, map_out)
 }
 
 ## `build`'s tail: `parse_compile_tail` plus `--target <t>` and `--reactor`. A
@@ -440,7 +444,7 @@ fn emitted(
   target: String,
   opts: CtOpts
 ) -> String !Fs !Proc !Env !Exit !Console !io = {
-  let (text, _) = emitted_with(std_flag, target, opts, false)
+  let (text, _, _) = emitted_with(std_flag, target, opts, false, false)
   text
 }
 
@@ -452,23 +456,33 @@ fn emitted_with(
   std_flag: Option[String],
   target: String,
   opts: CtOpts,
-  with_info: Bool
-) -> (String, String) !Fs !Proc !Env !Exit !Console !io = {
+  with_info: Bool,
+  with_map: Bool
+) -> (String, String, String) !Fs !Proc !Env !Exit !Console !io = {
   let std = load_or_die(std_flag)
   let (loaded, prog) = analyzed_load(std, target, opts)
-  let text = match cdriver.c_text(std, prog) {
-    Ok(s) -> s
+  # `--map` takes the mapped entry, which builds the text the same way and
+  # also says where each call landed (docs/source-span-map-design.md section 12)
+  let emitted = if with_map { cdriver.c_text_mapped(std, prog) } else {
+    let r: Result[(String, String), String] = match cdriver.c_text(std, prog) {
+      Ok(s) -> Ok((s, ""))
+      Err(e) -> Err(e)
+    }
+    r
+  }
+  let (text, dmap) = match emitted {
+    Ok(pr) -> pr
     Err(e) -> {
       cli_error(e ++ " in " ++ target)
-      ""
+      ("", "")
     }
   }
-  if not with_info { return (text, "") }
+  if not with_info { return (text, "", dmap) }
   match binfo.unit_for(VERSION, target, loaded) {
-    Ok(u) -> (text, u)
+    Ok(u) -> (text, u, dmap)
     Err(e) -> {
       cli_error(e)
-      (text, "")
+      (text, "", dmap)
     }
   }
 }
@@ -792,16 +806,22 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 
 fn cmd_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (opts, rest) = ct_opts_of(rest0)
-  let (std_flag, out, target, info_out, split_out) = parse_compile_tail(
+  let (std_flag, out, target, info_out, split_out, map_out) = parse_compile_tail(
     "dawn emitc",
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
     rest
   )
-  let (text, unit) = emitted_with(std_flag, target, opts, info_out != "")
+  let (text, unit, dmap) = emitted_with(std_flag, target, opts, info_out != "", map_out != "")
   if info_out != "" {
     match io.write_file(info_out, unit) {
       Ok(_) -> ()
       Err(e) -> return cli_error("cannot write " ++ info_out ++ ": " ++ e.message)
+    }
+  }
+  if map_out != "" {
+    match io.write_file(map_out, dmap) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error("cannot write " ++ map_out ++ ": " ++ e.message)
     }
   }
   # `--split <dir>`: the same text as the files a build compiles
@@ -842,7 +862,7 @@ fn cmd_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     out0
   }
-  let (text, unit) = emitted_with(std_flag, target, opts, true)
+  let (text, unit, _) = emitted_with(std_flag, target, opts, true, false)
   cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor)
 }
 
