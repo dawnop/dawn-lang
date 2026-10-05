@@ -62,26 +62,14 @@ cuda_tile.module @m {
     %69 = broadcast %68 : tile<1x64xi32> -> tile<64x64xi32>
     %70 = addi %66, %69 : tile<64x64xi32>
     %71 = cmpi greater_than_or_equal %57, %70, signed : tile<64x64xi32> -> tile<64x64xi1>
-    %72 = constant <i32: 4096> : tile<i32>
-    %73 = muli %9, %72 : tile<i32>
-    %74 = constant <f64: -Infinity> : tile<64x64xf64>
-    %75 = select %71, %44, %74 : tile<64x64xi1>, tile<64x64xf64>
-    %76 = reshape %73 : tile<i32> -> tile<1x1xi32>
-    %77 = broadcast %76 : tile<1x1xi32> -> tile<64x64xi32>
-    %78 = iota : tile<64xi32>
-    %79 = reshape %78 : tile<64xi32> -> tile<64x1xi32>
-    %80 = broadcast %79 : tile<64x1xi32> -> tile<64x64xi32>
-    %81 = constant <i32: 64> : tile<64x64xi32>
-    %82 = muli %80, %81 : tile<64x64xi32>
-    %83 = addi %77, %82 : tile<64x64xi32>
-    %84 = iota : tile<64xi32>
-    %85 = reshape %84 : tile<64xi32> -> tile<1x64xi32>
-    %86 = broadcast %85 : tile<1x64xi32> -> tile<64x64xi32>
-    %87 = addi %83, %86 : tile<64x64xi32>
-    %88 = reshape %arg2 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
-    %89 = broadcast %88 : tile<1x1xptr<f64>> -> tile<64x64xptr<f64>>
-    %90 = offset %89, %87 : tile<64x64xptr<f64>>, tile<64x64xi32> -> tile<64x64xptr<f64>>
-    %91 = store_ptr_tko weak %90, %75 token=%39 : tile<64x64xptr<f64>>, tile<64x64xf64> -> token
+    %72 = constant <f64: -Infinity> : tile<64x64xf64>
+    %73 = select %71, %44, %72 : tile<64x64xi1>, tile<64x64xf64>
+    %74 = reshape %73 : tile<64x64xf64> -> tile<1x64x64xf64>
+    %75 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %76 = make_tensor_view %75, shape = [2, 128, 64], strides = [8192, 64, 1] : tensor_view<2x128x64xf64, strides=[8192, 64, 1]>
+    %77 = make_partition_view %76 : partition_view<tile=(1x64x64), padding_value = zero, tensor_view<2x128x64xf64, strides=[8192, 64, 1]>, dim_map=[0, 1, 2]>
+    %78, %79, %80 = get_tile_block_id : tile<i32>
+    %81 = store_view_tko weak %74, %77[%34, %78, %36] token=%39 : tile<1x64x64xf64>, partition_view<tile=(1x64x64), padding_value = zero, tensor_view<2x128x64xf64, strides=[8192, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> token
     return
   }
 }

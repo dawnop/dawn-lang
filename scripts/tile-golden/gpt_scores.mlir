@@ -13,26 +13,13 @@ cuda_tile.module @m {
     %16 = permute %14 [1, 0] : tile<64x32xf64> -> tile<32x64xf64>
     %17 = constant <f64: 0.0> : tile<64x64xf64>
     %18 = mmaf %10, %16, %17 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
-    %19 = constant <i32: 4096> : tile<i32>
-    %20 = muli %3, %19 : tile<i32>
-    %21 = constant <f64: 0.17677669529663687> : tile<64x64xf64>
-    %22 = mulf %18, %21 rounding<nearest_even> : tile<64x64xf64>
-    %23 = reshape %20 : tile<i32> -> tile<1x1xi32>
-    %24 = broadcast %23 : tile<1x1xi32> -> tile<64x64xi32>
-    %25 = iota : tile<64xi32>
-    %26 = reshape %25 : tile<64xi32> -> tile<64x1xi32>
-    %27 = broadcast %26 : tile<64x1xi32> -> tile<64x64xi32>
-    %28 = constant <i32: 64> : tile<64x64xi32>
-    %29 = muli %27, %28 : tile<64x64xi32>
-    %30 = addi %24, %29 : tile<64x64xi32>
-    %31 = iota : tile<64xi32>
-    %32 = reshape %31 : tile<64xi32> -> tile<1x64xi32>
-    %33 = broadcast %32 : tile<1x64xi32> -> tile<64x64xi32>
-    %34 = addi %30, %33 : tile<64x64xi32>
-    %35 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
-    %36 = broadcast %35 : tile<1x1xptr<f64>> -> tile<64x64xptr<f64>>
-    %37 = offset %36, %34 : tile<64x64xptr<f64>>, tile<64x64xi32> -> tile<64x64xptr<f64>>
-    %38 = store_ptr_tko weak %37, %22 token=%15 : tile<64x64xptr<f64>>, tile<64x64xf64> -> token
+    %19 = constant <f64: 0.17677669529663687> : tile<64x64xf64>
+    %20 = mulf %18, %19 rounding<nearest_even> : tile<64x64xf64>
+    %21 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+    %22 = make_tensor_view %21, shape = [128, 64], strides = [64, 1] : tensor_view<128x64xf64, strides=[64, 1]>
+    %23 = make_partition_view %22 : partition_view<tile=(64x64), padding_value = zero, tensor_view<128x64xf64, strides=[64, 1]>, dim_map=[0, 1]>
+    %24, %25, %26 = get_tile_block_id : tile<i32>
+    %27 = store_view_tko weak %20, %23[%26, %7] token=%15 : tile<64x64xf64>, partition_view<tile=(64x64), padding_value = zero, tensor_view<128x64xf64, strides=[64, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }
