@@ -71,10 +71,11 @@ pub type CSite =
 
 **相对偏移从哪来。** tast 在检查期是相对偏移，但在声明出口被 `tast_positions` 换回了文件坐标
 （`check/tast_positions.dawn` 头注释），降低拿到的是绝对位置。所以 `TFun` 加 `base: Int`：
-`tast_positions` 加上去的那个数（`Resolver.base`，无主声明为 0），由调度器在填 `decl` 的同一处填
-（`check/checker.dawn:13551`/`13667`/`13699`/`13727`/`13745`）；参数默认值合成的 `f$default$k`
-（`checker.dawn:13820`）继承父函数的 `base`，因为它的树是用父函数的 resolver 换算的。降低时
-`rel = abs - tf.base`。这样不碰 `tast_positions.dawn` 的换算逻辑（L4 要动那个文件）。
+`tast_positions` 加上去的那个数（`Resolver.base`，无主声明为 0），由 `tast_positions.function` 在换算
+同一棵树时写上；参数默认值合成的 `f$default$k` 继承父函数的 `base`，因为它的树是用父函数的 resolver
+换算的。降低时 `rel = abs - tf.base`。最初写在调度器填 `decl` 的那几处，但
+`scripts/incremental-semantics-contract/body-scheduler.py` 把生产调度器与冻结的参考调度器逐产物对照，
+参考那份不会跟着填，于是红了；放进 `function` 后两边共用，冻结副本不用改。
 
 **`nlo` 从哪来。** tast 今天的调用节点只有整个调用的 `lo, hi`。parser 有名字区间（`EMethod` 的
 `nlo, nhi`，`front/ast.dawn:319`），检查器在 `check_method_call` 等处拿得到。五个调用节点
