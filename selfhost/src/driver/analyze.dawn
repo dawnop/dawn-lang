@@ -1619,6 +1619,30 @@ test "comptime still refuses another module's effectful function" {
   })
 }
 
+test "comptime refuses to read either clock, and says which effect it met" {
+  in_mem(() => {
+    # A reading would make the bytes a build produces depend on when it ran
+    # (docs/clock-design.md). The checker is the wall a user meets: both
+    # public readers are `!Clock`, and a `const` must be pure. The
+    # interpreter's refusal of the two primitives is the second wall, held by
+    # the comptime coverage test in ir/interp.
+    let root = "/tmp/dawn-selfhost-analyze/comptime-clock"
+    mkdirs("${root}/src")
+    put("${root}/src/main.dawn", "use std/io\n" ++
+        "const BUILT: Int = io.now_wall_ns()\n" ++
+        "const SPAN: Int = io.elapsed_ns(io.now(), io.now())\n" ++
+        "pub fn main() -> Unit !io = println(to_string(BUILT + SPAN))\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 2
+    assert prog.diags[0].d.msg == "const initializers must be pure, but `now_wall_ns` is !Clock"
+    assert prog.diags[1].d.msg == "const initializers must be pure, but `now` is !Clock"
+  })
+}
+
 test "comptime refuses a cursor used on another string and still walks one string" {
   in_mem(() => {
     # spec 11 leaves a cursor from one string used on another undefined, and
