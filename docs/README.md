@@ -200,6 +200,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | 文档 | 生命周期 | 说明 |
 |---|---|---|
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
+| [clock-design.md](clock-design.md) | current | 时钟：两个读数原语 `io_clock_wall_ns`（纪元纳秒，可倒退）与 `io_clock_mono_ns`（单调，两后端同为 `CLOCK_MONOTONIC`/`nanoTime`），std-only、comptime 拒绝；std/io 第六个效果 `Clock`，单调读数是 opaque 的 `Instant`、`elapsed_ns` 饱和到 0、`instant_at_ns` 供假 handler；tea-dom 浏览器垫片补 `clock_time_get`。不做 sleep、BOOTTIME、毫秒、元组返回。 |
 | [fs-real-path-design.md](fs-real-path-design.md) | current | #207 刀 2：身份路径要解析 symlink（`Fs` 加 `fs_real_path`，`canon_identity` 退回 `canon`）。handler 臂集必须等于声明的 op 集，而 selfhost 的 `driver/fsmem` 自带一个 `Fs` handler、被种子 std 与 HEAD std 各编一次，所以分三个 release：R1 把表 handler 搬进 `std/memfs`；R2 让 selfhost 换用它（`check_memfs_twin` 随副本退役），给 `Fs` 加 op、两后端加 `io_real_path`（wasi 上一律 `Err`），`std/memfs` 加链接模型；R3 改身份点。附 #297：`walk_dawn` 不下钻指向目录的链接。 |
 | [tea-block-children-design.md](tea-block-children-design.md) | **current** | 视图 DSL 的子节点该不该由尾块发出（类 Compose 形状）。三条路线各自的墙：效果发出法卡在收集型 handler 在尾恢复档不可表达、效果不带类型参数、效果变量上装不了 handler（十二个探针的实测答复逐条在册）；块产生列表法过不了语法歧义那道线；停在列表的得失。用户 2026-08-29 逐条终裁（§8）：路线二关档、handler 局部状态立项归效果系统、参数化效果缓裁比价、验收认转写不变为必要条件加直驱腿。 |
 | [package-visibility-design.md](package-visibility-design.md) | current | 裁决 1 的包内可见档 `pub(pkg)`：包 = 一个 `dawn.toml` 单元、判定只在 import 边界一处、SEM-07 audience 表扩 `Package` 一档、doc/LSP 只发 `pub`；末尾是下个种子后收 ARCH-N05/N12/LIB-13 的前置报告与回填（N12 以「白盒探针住在包内」收掉）。 |

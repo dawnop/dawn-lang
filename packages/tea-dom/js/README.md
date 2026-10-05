@@ -12,7 +12,7 @@ same files in a browser and in node.
 
 | file | what it is |
 |---|---|
-| `wasi.mjs` | the eight WASI preview1 functions the guest imports, over a byte queue |
+| `wasi.mjs` | the WASI preview1 functions the guest imports (stdio, environment, clock), over a byte queue |
 | `reactor.mjs` | instantiate once, `dawn_turn` per message, one JSON line each way |
 | `dom.mjs` | the seven patch ops as DOM mutations, and the address walk both ways |
 | `app.mjs` | the loop: init, render, wait, dispatch, patch, wait |
@@ -215,7 +215,9 @@ element.
 
 There is no `node:wasi` in a browser, and a harness running on a different
 host than the page tests something the page does not do. The module imports
-eight functions, all stdio or environment; `wasi.mjs` is all eight.
+a handful of functions, stdio and environment plus `clock_time_get` when the
+program reads the clock; `wasi.mjs` implements all of them, and answers
+anything newer with a stub that says so on stderr.
 
 ## Addresses
 

@@ -4,10 +4,10 @@
 // Why not node:wasi. The browser has no such module, and the whole point of
 // this bridge is that the same JavaScript runs in both places -- if the
 // harness ran on a different host than the page, the harness would be
-// testing something the page does not do. The module imports eight
-// functions (`node -e` over the built .wasm will list them), all of them
-// stdio or environment, so the shim is small enough to read in one sitting
-// and has no dependency of any kind.
+// testing something the page does not do. The module imports a handful of
+// functions (`node -e` over the built .wasm will list them), stdio and
+// environment plus the clock when the program reads one, so the shim is
+// small enough to read in one sitting and has no dependency of any kind.
 //
 // Stdin is a byte queue the caller refills before each turn, and end of the
 // queue is end of input: the guest's `read_line` reads until a newline and
@@ -25,12 +25,19 @@
 // load.
 //
 // The errno values used below are from the preview1 table:
-// 0 success, 8 badf, 52 nosys, 70 spipe.
+// 0 success, 8 badf, 28 inval, 52 nosys, 70 spipe.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
+const ERRNO_INVAL = 28;
 const ERRNO_NOSYS = 52;
 const ERRNO_SPIPE = 70;
+
+// preview1 clock ids: 0 realtime, 1 monotonic. The two process and thread
+// CPU-time clocks have no browser counterpart and the runtime never asks
+// for them.
+const CLOCK_REALTIME = 0;
+const CLOCK_MONOTONIC = 1;
 
 // preview1 filetype 2 is a character device, which is what a pipe-less
 // stdio stream should look like to a libc deciding how to buffer.
@@ -177,6 +184,26 @@ export class Wasi {
           written += iov.len;
         }
         this.#view().setUint32(nwrittenPtr, written, true);
+        return ERRNO_SUCCESS;
+      },
+
+      // The two clocks behind std/io's `Clock` (docs/clock-design.md): a u64
+      // of nanoseconds written at `outPtr`. Realtime is `Date.now()`, whole
+      // milliseconds since the epoch. Monotonic is `performance.now()`, which
+      // never goes backwards within a page; browsers coarsen it to 100 us
+      // (5 us when cross-origin isolated) against timing attacks. The
+      // contract promises nanosecond units, not nanosecond resolution, so
+      // neither coarsening breaks it. `precision` is a hint and is ignored.
+      clock_time_get: (id, precision, outPtr) => {
+        let ns;
+        if (id === CLOCK_REALTIME) {
+          ns = BigInt(Date.now()) * 1000000n;
+        } else if (id === CLOCK_MONOTONIC) {
+          ns = BigInt(Math.round(performance.now() * 1e6));
+        } else {
+          return ERRNO_INVAL;
+        }
+        this.#view().setBigUint64(outPtr, ns, true);
         return ERRNO_SUCCESS;
       },
 

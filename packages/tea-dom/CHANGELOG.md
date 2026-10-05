@@ -6,6 +6,11 @@ Newest first.
 
 Doc comments and published examples. No behaviour change.
 
+Changed since, without a version change:
+
+- 2026-10-05: the browser WASI shim (`js/wasi.mjs`) answers `clock_time_get`,
+  so a reactor that reads std/io's `Clock` gets a reading instead of a stub.
+
 ## 0.2.0 (2026-10-01)
 
 `render.to_html` and `render.to_document`: a tree printed as HTML.

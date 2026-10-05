@@ -3568,6 +3568,26 @@ pub fn builtins() -> Map[String, Sig] = {
     # spins at end of input; the loop is expected to block when it has nothing
     # else to do, which is what selfhost/src/lsp/server.dawn does.
     eff1(bsig("io_stdin_ready", [TyInt], ["timeout_ms"], TyBool), EIo),
+    # The two clocks, as nanoseconds in one Int each (docs/clock-design.md).
+    #
+    # Wall time is nanoseconds since 1970-01-01T00:00:00Z: `Instant.now()` on
+    # the JVM, `CLOCK_REALTIME` on native and wasi. The host may set it, so it
+    # can go backwards and can be negative; an Int holds it from about 1678 to
+    # 2262, the range Go's `UnixNano` documents.
+    #
+    # Monotonic time has an arbitrary origin and only the difference of two
+    # readings means anything. Both backends read the same clock on purpose,
+    # `System.nanoTime` and `CLOCK_MONOTONIC` (which is what HotSpot reads on
+    # Linux), so that a program behaves alike under both; the clock that also
+    # counts suspend (`CLOCK_BOOTTIME`) would be the better answer on native
+    # alone. Compare readings by subtracting: the difference stays right
+    # across a wrap, and the readings themselves may be negative.
+    #
+    # Two primitives rather than one because they answer two questions, and a
+    # program that measures a duration with the wall clock is wrong exactly
+    # when the host's time is adjusted. std/io keeps them apart by type as well.
+    eff1(bsig("io_clock_wall_ns", [], [], TyInt), EIo),
+    eff1(bsig("io_clock_mono_ns", [], [], TyInt), EIo),
     # Spawn `argv[0]` (found on PATH), wait, and answer its exit status.
     #
     # Both streams go to files rather than back through a pipe, and that is
@@ -3805,7 +3825,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
     "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "real_path",
-    "read_stdin", "stdin_ready"]
+    "read_stdin", "stdin_ready", "clock_wall_ns", "clock_mono_ns"]
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_${op}", RtIo)
   }
@@ -4038,6 +4058,22 @@ test "every owned argument position is a parameter of the intrinsic it names" {
   assert intr_owned_args("array_push") == []
   assert intr_owned_args("cell_get") == []
   assert intr_owned_args("no_such_intrinsic") == []
+}
+
+test "the two clocks are std-only io primitives answering a bare Int" {
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  for n in ["io_clock_wall_ns", "io_clock_mono_ns"] {
+    let i = intr_at(n).expect(n)
+    # std/io's `with_clock_real` is the one caller; a program reads the clock
+    # through `Clock`, so a test can answer it instead
+    assert i.internal
+    assert not i.erased
+    assert i.rt == Some(RtIo)
+    # no argument and no box: a reading is one 64-bit Int on every backend
+    assert sig_render(adts, traits, map.get(bs, n).expect(n)) == "fn " ++ n ++ "() -> Int !io"
+  }
 }
 
 test "the reactor root primitive is std-only, erased, and io" {
@@ -4588,7 +4624,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 111
+  assert map_size2(bs) == 113
 }
 
 test "the reclaim's failure is a value, under the one name left" {

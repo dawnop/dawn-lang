@@ -1220,10 +1220,14 @@ fn comptime_rejects() -> List[String] = {
   }
   # io is the point: a compile must not read files or spawn processes because
   # a source file said so. `args` is the same rule at the process boundary.
+  # The two clocks act on nothing, but a reading would make the bytes a build
+  # produces depend on when it ran, which is the input reproducible builds
+  # exist to remove; a fixed answer instead (0, say) would compile a `const`
+  # stamped 1970 without a word. docs/clock-design.md has both halves.
   for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
     "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "real_path",
-    "read_stdin", "stdin_ready", "list_names", "run"] {
+    "read_stdin", "stdin_ready", "clock_wall_ns", "clock_mono_ns", "list_names", "run"] {
     out = out ++ ["io_" ++ op]
   }
   # The two barriers are refused for a reason of their own, and it is not the
@@ -3239,7 +3243,7 @@ test "the comptime interpreter covers every intrinsic, removes it in lowering, o
   #    "thirteen more" and "all twelve" in the same paragraph -- so the
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 44
-  assert len(rejects) == 68
+  assert len(rejects) == 70
   assert len(after) == 18
 }
 

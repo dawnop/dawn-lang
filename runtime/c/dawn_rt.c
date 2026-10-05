@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #ifndef __wasi__
 #include <pthread.h>
@@ -4564,6 +4565,32 @@ bool dawn_io_stdin_ready(int64_t timeout_ms) {
    * `false` there is right rather than merely safe: there is nothing to read. */
   if (ioctl(0, FIONREAD, &queued) != 0) return false;
   return queued > 0;
+}
+
+/* The two clocks, as nanoseconds in an int64_t (docs/clock-design.md).
+ *
+ * CLOCK_MONOTONIC and not CLOCK_BOOTTIME, although the second also counts
+ * time spent suspended: HotSpot's System.nanoTime is CLOCK_MONOTONIC on
+ * Linux, and a duration has to mean the same on both backends. Neither clock
+ * id can fail on Linux; if one ever does, that is a fault like any other io
+ * primitive's, not a made-up reading. wasi-libc implements clock_gettime over
+ * the preview1 `clock_time_get`, so the same code serves wasm32-wasi. The
+ * product cannot overflow before 2262, the bound the Int representation has
+ * anyway. */
+int64_t dawn_io_clock_wall_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+    dawn_fault(DAWN_LIT("io_clock_wall_ns: the host has no wall clock"));
+  }
+  return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+}
+
+int64_t dawn_io_clock_mono_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    dawn_fault(DAWN_LIT("io_clock_mono_ns: the host has no monotonic clock"));
+  }
+  return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
 }
 
 #ifdef __wasi__
