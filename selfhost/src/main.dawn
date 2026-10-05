@@ -2117,11 +2117,16 @@ fn lower_size(m: CModule) -> Int = {
 ## build manifest (c/binfo), for a script that links the emitted C itself, as
 ## `release-native.sh` and `native-fixpoint.sh` do. It is a second file and
 ## not part of the emitted C, which stays what the differentials compare.
+##
+## `--split <dir>` writes the same C as the files a build compiles -- the
+## shared head and one file per translation unit (docs/c-tu-split-design.md)
+## -- for the scripts that compile the units in parallel.
 fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (opts, rest) = extract_ct_opts(rest0)
   var std_flag: Option[String] = None
   var out = ""
   var info_out = ""
+  var split_out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -2133,6 +2138,9 @@ fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       i = i + 2
     } else if rest[i] == "--build-info" && i + 1 < len(rest) {
       info_out = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--split" && i + 1 < len(rest) {
+      split_out = rest[i + 1]
       i = i + 2
     } else {
       refuse_second_target("dawn emitc", target, rest[i])
@@ -2164,6 +2172,15 @@ fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       Ok(_) -> ()
       Err(e) -> return cli_error("cannot write " ++ info_out ++ ": " ++ e.message)
     }
+  }
+  # `--split <dir>` writes the text as the files a build compiles, one per
+  # translation unit (cdriver.split); `dawnc emitc` takes it in the same words.
+  if split_out != "" {
+    match cdriver.write_split(split_out, text) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error(e)
+    }
+    if out == "" { return () }
   }
   if out == "" {
     console_print(text)

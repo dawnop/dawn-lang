@@ -47,6 +47,7 @@ use driver/clifail.{fail_compile, fail_planner}
 use check/identity
 use check/tast.{TModule}
 use c/cdriver
+use c/emitc
 use c/binfo
 use version.{VERSION}
 use front/fmt
@@ -286,16 +287,17 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
   RunArgs { std_flag: std_flag, opts: ct_fuel(fuel), target: target, program_args: program_args }
 }
 
-## `--std <dir>`, `-o <out>` and `--build-info <file.c>` plus exactly one
-## target, kept out of run.
+## `--std <dir>`, `-o <out>`, `--build-info <file.c>` and `--split <dir>` plus
+## exactly one target, kept out of run.
 fn parse_compile_tail(
   cmd: String,
   usage_text: String,
   rest: List[String]
-) -> (Option[String], String, String, String) !Exit !Console !io = {
+) -> (Option[String], String, String, String, String) !Exit !Console !io = {
   var std_flag: Option[String] = None
   var out = ""
   var info_out = ""
+  var split_out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -308,6 +310,9 @@ fn parse_compile_tail(
     } else if rest[i] == "--build-info" && i + 1 < len(rest) {
       info_out = rest[i + 1]
       i = i + 2
+    } else if rest[i] == "--split" && i + 1 < len(rest) {
+      split_out = rest[i + 1]
+      i = i + 2
     } else {
       refuse_second_target(cmd, target, rest[i])
       target = rest[i]
@@ -315,7 +320,7 @@ fn parse_compile_tail(
     }
   }
   if target == "" { cli_error(usage_text) }
-  (std_flag, out, target, info_out)
+  (std_flag, out, target, info_out, split_out)
 }
 
 ## `build`'s tail: `parse_compile_tail` plus `--target <t>` and `--reactor`. A
@@ -612,7 +617,30 @@ fn cc_build_with(
       return ()
     }
   }
-  var wrote = io.write_file("${work}/main.c", ctext)
+  # The text as the files cc compiles: the shared head and one file per
+  # translation unit (cdriver.split), or `main.c` alone for a text with no
+  # unit markers. They go in one cc command, in the order `split` gives:
+  # nothing here runs two processes at once (Proc has no spawn), but the units
+  # still compile apart, which is cheaper in CPU than one unit of the whole
+  # (docs/c-tu-split-design.md §4.1), and the gate scripts that do run them
+  # in parallel compile the same files.
+  let staged = match cdriver.split(ctext) {
+    Ok(fs) -> fs
+    Err(e) -> {
+      cli_error("cannot split the emitted C: " ++ e)
+      return ()
+    }
+  }
+  var sources: List[String] = []
+  var wrote: Result[Unit, ForeignError] = Ok(())
+  for f in staged {
+    let (name, body) = f
+    match wrote {
+      Ok(_) -> { wrote = io.write_file(work ++ "/" ++ name, body) }
+      Err(_) -> ()
+    }
+    if str.ends_with(name, ".c") { sources = sources ++ ["${work}/${name}"] }
+  }
   for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
     match cdriver.runtime_source(f) {
       Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
@@ -707,16 +735,16 @@ fn cc_build_with(
       "-fno-strict-aliasing", "-Wno-parentheses-equality"
     ] ++ model ++ [
       "-I", work,
-      "-o", out, "${work}/main.c", "${work}/dawn_rt.c"
-    ] ++ info_files ++ [
+      "-o", out
+    ] ++ sources ++ ["${work}/dawn_rt.c"] ++ info_files ++ [
       "${work}/dawn_rt_wasi_eh.o", "${work}/dawn_rt_wasi_tag.o", "-lm"
     ]
   } else {
     [
       cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
       "-Wno-parentheses-equality", "-I", work,
-      "-o", out, "${work}/main.c", "${work}/dawn_rt.c"
-    ] ++ info_files ++ ["-lm"]
+      "-o", out
+    ] ++ sources ++ ["${work}/dawn_rt.c"] ++ info_files ++ ["-lm"]
   }
   # cc is done with the staging directory the moment it succeeds, and nothing
   # else ever removed it: 125 of them, a megabyte each (the emitted C plus the
@@ -764,7 +792,7 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 
 fn cmd_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (opts, rest) = ct_opts_of(rest0)
-  let (std_flag, out, target, info_out) = parse_compile_tail(
+  let (std_flag, out, target, info_out, split_out) = parse_compile_tail(
     "dawn emitc",
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
     rest
@@ -775,6 +803,16 @@ fn cmd_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       Ok(_) -> ()
       Err(e) -> return cli_error("cannot write " ++ info_out ++ ": " ++ e.message)
     }
+  }
+  # `--split <dir>`: the same text as the files a build compiles
+  # (cdriver.split), for a script that compiles the units in parallel. With no
+  # `-o` beside it nothing is printed: the units are the output asked for.
+  if split_out != "" {
+    match cdriver.write_split(split_out, text) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error(e)
+    }
+    if out == "" { return () }
   }
   if out == "" {
     console_print(text)
@@ -1468,6 +1506,40 @@ test "a build with a manifest links one more C file, after the runtime" {
     assert argv[13] == "${work}/dawn_rt.c"
     assert argv[14] == "${work}/dawn_build_info.c"
     assert argv[15] == "-lm"
+  })
+}
+
+test "a text cut into units compiles every unit in the one command, in order" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-units-")
+    with d <- bracket(dir, scrub)
+    let out = "${d}/prog"
+    let text = "#include <stdint.h>\nint64_t f(void);\n\n" ++
+      emitc.tu_marker(0, 2) ++ "\nint main(void) { return (int)f(); }\n" ++
+      emitc.tu_marker(1, 2) ++ "\nint64_t f(void) { return 0; }\n"
+    let (_, log) = procmem.with_proc_table(
+      [procmem.exited(0)],
+      () => {
+        with handle Exit {
+          exit_now(c) resume k => panic("cc_build_with exited with ${c}")
+        }
+        io.with_console_real(() => cc_build_with("fake-cc", text, "", out, false, false))
+      }
+    )
+    # one process still: the units are separate inputs to one cc, not a
+    # second invocation
+    assert len(log) == 1
+    let argv = procmem.call_argv(log, 0)
+    let work = argv[9]
+    # the native row of the test above, with the units where main.c was and
+    # the shared head beside them, reached through -I
+    assert len(argv) == 16
+    assert argv[11] == out
+    assert argv[12] == "${work}/tu00.c"
+    assert argv[13] == "${work}/tu01.c"
+    assert argv[14] == "${work}/dawn_rt.c"
+    assert argv[15] == "-lm"
+    assert not str.contains(join(argv, " "), "dawn_prog.h")
   })
 }
 
