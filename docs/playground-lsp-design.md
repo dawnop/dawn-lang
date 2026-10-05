@@ -115,6 +115,14 @@ didOpen 顺序，socket 关闭时由 gateway 发 shutdown / exit。会话中其�
 - 单个 wire message 另设小而固定的 gateway 上限，不把 LSP 内层 64 MiB ceiling 暴露到公网；
 - completion / hover / definition 在写入前先 flush 最新 Full sync。server 对任何 query 都会先
   flush 自己的 pending update，因此查询与所见文本同一顺序。
+- 不在 allowlist 的 method 不关连接（2026-10-05 起）：通知（没有 `id`，含 `$/cancelRequest`、
+  `$/setTrace` 这类 `$/` 开头的）静默丢弃；请求回 JSON-RPC 错误 `-32601 MethodNotFound`，`id`
+  原样带回；两者都不进子进程、不改 lifecycle 状态。依据是 LSP 3.17「$ Notifications and
+  Requests」一节（服务端不认识的 `$/` 通知可以忽略，`$/` 请求必须回 MethodNotFound）与
+  JSON-RPC 2.0 §5.1 的错误码表。此前一律 1008 关连接，而通用 LSP 客户端（如
+  `@codemirror/lsp-client`）请求一过时就发 `$/cancelRequest`，等于几秒内必断。`id` 照旧要是
+  有界字符串或整数且不与在途请求重复，否则仍 1008；错误文案固定为规范原文，不回显 method。
+  子进程没给 legend 时 `semanticTokens/range` 也按未放行处理，`full` 同样回 `-32601`。
 
 ### 5.1 已裁决：标准库 Python 的窄 gateway
 
@@ -262,7 +270,8 @@ LSP 恢复后，completion 合并时以 server 结果为先、按 label 去重�
 
 - initialize → didOpen → diagnostics → completion → hover → local definition → shutdown；
 - 两个并发 session 各有 child，同值 request id 不串线；
-- source/message cap、第二 document、`file:` URI、binary frame 和不在 allowlist 的 method 被拒绝；
+- source/message cap、第二 document、`file:` URI、binary frame 被拒绝；不在 allowlist 的通知被丢弃、
+  请求回 `-32601` 且会话继续可用（2026-10-05 起，此前也是关连接）；
 - Origin / subprotocol 不符时在 spawn 前拒绝，满 admission 回 503 + `Retry-After`；
 - setup timeout、malformed child frame 与 active SIGTERM 都关闭 socket、回收 child/permit；
 - deploy smoke 贯通 handshake→child→diagnostics，只对显式 503 有限重试，且每次有 30 秒不可续期

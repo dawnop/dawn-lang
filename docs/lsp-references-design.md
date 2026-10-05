@@ -231,7 +231,7 @@ hover、completion、definition、inlayHint 早已走 #11 的 WebSocket 网关�
 前者要在 `playground/src/main.dawn` 里再起一个 LSP 会话或另写一遍分类，后者要改 `/check` 的合约，而且 `/check` 是一次性编译，没有 hover 等用的那份分析。
 走网关只需三处窄改动，`/check` 与 `contract.sh` 里的 `/run`、`/check` 用例一个字不变：
 
-- **白名单只加 `textDocument/semanticTokens/range`**，`full` 照旧 `method is not allowed`（1008 关连接）。`full` 的回复随整个缓冲区长，
+- **白名单只加 `textDocument/semanticTokens/range`**，`full` 照旧 `method is not allowed`（1008 关连接；2026-10-05 起未放行的请求一律回 `-32601`、不再关连接，见 [playground-lsp-design.md](playground-lsp-design.md) §5）。`full` 的回复随整个缓冲区长，
   T1.5 实测 64 KiB 缓冲区 96 KB，离单条 256 KiB 上限不远，而调研 §2.4 的最坏写法到 243 KB；Playground 只看视口，用不着它。
 - **initialize 改写**：子进程宣告了 `semanticTokensProvider` 且 legend 是短的纯字母名表（类型不超过 64 个，修饰不超过 16 个）时，网关原样转发子进程的 legend，
   宣告 `{"range": true, "full": false}`；否则不宣告，请求也按未放行处理。生产上网关与 `dawnc` 分开部署，旧 `dawnc` 配新网关时 Playground 就是没有 token，不是报错。
@@ -287,7 +287,7 @@ CM6 里 mark 与语法高亮的 span 谁包谁取决于优先级，所以每条�
   七个变异体（服务端加修饰、加类型、删 `mutable` 登记、服务端删修饰、selector 拼错、删回落 scope、版本号挪动）各自要红在自己的错误码上；
   对 HEAD 的旧 `package.json` 跑也是红的。本机约 0.1 s。
 - `playground/test/lsp_contract.py`（`contract.sh` 先跑的 `lsp-contract.sh`）：假子进程故意用**不是**真服务端顺序的 legend，断言浏览器拿到的就是这份；
-  直连会话里发一次 range（多余键被剥掉、回复只剩 `data`）、审计日志里转发的是重建过的范围；`full` 关连接 1008。
+  直连会话里发一次 range（多余键被剥掉、回复只剩 `data`）、审计日志里转发的是重建过的范围；`full` 关连接 1008（2026-10-05 起改为回 `-32601`）。
   另有不走 socket 的 `semantic_tokens_contract`：无 legend、legend 名不合法、修饰超过 16 个都不宣告且请求被拒；按字节裁范围（含 BMP 以外字符后的 UTF-16 列）、
   didChange 之后按新文本裁；畸形回复是子进程协议错误。三个变异体（网关自写 legend、列按码点算、不裁）跑在网关源码的变异副本上，各自要红在自己的断言上。
   本机整个 `lsp-contract.sh` 约 7 s，新增部分不到 0.5 s。
