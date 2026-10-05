@@ -7,6 +7,15 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.8.1 (2026-10-05)
+
+`reshape(t, shape)` regroups a tile's lanes into another shape of as many,
+in row-major order, as Tile IR's `reshape` does; the recording refuses a
+shape that holds another number of lanes or has a dimension that is not a
+power of two. It wraps the `t_reshape` that `keepdims` already issued, so
+`Dev` is unchanged and a handler written outside the package compiles as
+before. Adds a name only. §6.27.
+
 ## 0.8.0 (2026-10-05)
 
 Breaking: the one-time migration of the batch's PR-3 (§6.26). A kernel no

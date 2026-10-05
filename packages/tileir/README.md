@@ -90,6 +90,9 @@ let (prog, entry) = trace3("matmul",
   else: `broadcast(t, shape)` widens dimensions of length 1 explicitly, and
   places that need a rank-0 tile (a condition, a loop bound, a cell index)
   refuse a wider one.
+- `reshape(t, shape)` regroups `t`'s lanes into `shape`, row-major, as
+  many lanes as before: a `[T, T]` product goes into a `[1, T, T]` cell as
+  `store_cell(o, reshape(acc, [1, T, T]))`. No write reshapes on its own.
 - `reduce_sum`, `reduce_max`, `reduce_min` and `scan_sum` take `dim:` (the
   last by default) and `keepdims:`; `d_reduce` and `d_scan` take a body for
   any other fold. A rank-1 tile reduces to rank 0.

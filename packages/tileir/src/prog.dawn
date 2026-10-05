@@ -26,7 +26,7 @@ use dev.{Dev, Tile, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElemen
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
   float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
-  retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, tail_mask, for_arch, hint_latency }
+  retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency }
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -5399,6 +5399,42 @@ test "PR-1: keepdims keeps the folded dimension at length 1, and broadcast widen
     let t = load_cell(x)
     store_cell(o, broadcast(reduce_max(t), [32, 64]))
   })), "tileir: kernel `bad`: op #9 `broadcast`: tile<32xf64> cannot become tile<32x64xf64>: a broadcast keeps the rank")
+}
+
+# a [32, 32] product written into the [1, 32, 32] cell of a batch.
+fn batch_cell(x: Param[F64], o: Param[F64]) -> Unit !Dev =
+  store_cell(o, reshape(load_cell(x), [1, 32, 32]))
+
+test "0.8.1: reshape regroups a tile's lanes in row-major order, keeps every lane and spreads a rank-0 tile" {
+  let (p, _e) = trace2("batch", In(F64, cells([64, 32], [32, 32])), Out(F64, cells([2, 32, 32], [1, 32, 32])), batch_cell)
+  assert len(ops_where(p.ops, o => match o {
+    ReshapeOf(_d, "f64", [32, 32], [1, 32, 32], _src) -> true
+    _ -> false
+  })) == 1
+  let (_q, calls) = trace_calls("batch", [], () => batch_cell(param(F64, 0), param(F64, 1)),
+    markers: [erase(In(F64, cells([64, 32], [32, 32]))), erase(Out(F64, cells([2, 32, 32], [1, 32, 32])))])
+  assert list.map(calls, c => c.name) == ["load_cell", "reshape", "store_cell"]
+  # a rank-0 tile becomes a one-lane tile of any rank by a spread, as broadcast makes it
+  let (r, _e2) = trace2("one", In(F64, cells([64], [64])), Out(F64, cells([1, 1], [1, 1])),
+    (x, o) => store_cell(o, reshape(reduce_sum(load_cell(x)), [1, 1])))
+  assert len(ops_where(r.ops, o => match o {
+    Spread(_d, "f64", [1, 1], _src) -> true
+    _ -> false
+  })) == 1
+  assert len(ops_where(r.ops, o => match o {
+    ReshapeOf(_d, _dt, _f, _t, _src) -> true
+    _ -> false
+  })) == 0
+  # another number of lanes, and a dimension that is not a power of two, are refused
+  let g = cells([32, 32], [32, 32])
+  assert str.starts_with(marked(() => trace2("bad", In(F64, g), Out(F64, g), (x, o) => {
+    let _t = reshape(load_cell(x), [1, 32, 16])
+    store_cell(o, zeros(o))
+  })), "tileir: kernel `bad`: op #6 `reshape`: tile<32x32xf64> has 1024 lane(s) and tile<1x32x16xf64> has 512; a reshape keeps every lane")
+  assert str.starts_with(marked(() => trace2("bad", In(F64, g), Out(F64, g), (x, o) => {
+    let _t = reshape(load_cell(x), [3, 32])
+    store_cell(o, zeros(o))
+  })), "tileir: kernel `bad`: every tile dimension is a power of two, got 3 in [3, 32]")
 }
 
 test "PR-1: the named folds over an integer tile fold with integer operations and the format's own extremes" {
