@@ -1,6 +1,6 @@
 # 源码位置进 Core：调用节点的 site 与按需侧表
 
-> 状态：**proposed**（M2，2026-10-05 起草，待评审，未实现；M2 已合入 `b1b25062`；M3 C 侧表见第十二节）。源码位置模型一线（M 刀序）的第二刀；
+> 状态：**proposed**（M2，2026-10-05 起草，待评审，未实现；M2 已合入 `b1b25062`；M3 C 侧表见第十二节；M4 JVM 侧表见第十三节）。源码位置模型一线（M 刀序）的第二刀；
 > 依据：裁决 `agent-handoff/ruling-source-span-map-20261003.md`（「位置货币」一条与 M 刀序），
 > 调研 `agent-handoff/research-gpumap-call-spans-report-20261003.md` §六、§八。M1（flash 页）已落地：
 > `65547d27`（tileir 调用树与体标记）、`3547325f`（GPU 页只放 flash_attn）。仓库行号指 `ecfa0eda`，
@@ -490,3 +490,190 @@ B = 本分支不带 `--map`，C = 本分支带 `--map`，ABC 交错。本机负�
 - **适配器（`emit_adapter`）、字典表、常量构建器进 `fn` 表**：没有书写调用，也没有所属声明。
 - **映射到 cc 之后的汇编或机器码**：那是 cc 的 DWARF 的事；要看汇编，用 M6 的 `#line` 加 `-g` 走 CE 的路。
 - **带 `--map` 时自动建目录、与 `-o` 推导文件名**：侧表路径显式给，与 `--build-info` 同一种约定。
+
+## 十三、M4：JVM 侧表 `__emit --map`
+
+> 状态：**proposed**（2026-10-06 起草，待评审，未实现）。基于本文 M2（`b1b25062`）与第十二节 M3
+> （分支 `feat/emitc-map`，本刀叠在它之上）；格式、读取方、`coresites.decl_bases` 与 `src` 路径规则沿用 M3。行号指 `ee21f5a5` 的
+> `selfhost/src/jvm/emit.dawn` 与 `selfhost/src/main.dawn`。
+
+### 13.1 要什么
+
+`__emit <target> -o <dir> --map <file>` 在写 class 的同时写一份侧表：每个带 `CAt` 的调用，在哪个类的
+哪个方法里、占字节码的哪段 pc、实现它的那条 invoke 指令在哪个 pc。不带 `--map` 时什么都不变；带
+`--map` 时写出的 class 也逐字节不变（13.4），这一条在本节的方案里是**构造上**成立的，不是靠测出来的。
+M7 页面的 JVM 一栏是「类 javap 的反汇编列表 + 本表」，列表不由编译器写（13.6）。
+
+### 13.2 格式：`dawnmap 1 jvm`
+
+与 12.2 同一个格式，第一行的后端字段写 `jvm`。`src` 行逐字相同；`fn`、`call` 两种行的**源码半边
+位置与含义与 C 后端相同**，只有输出半边换成 JVM 的坐标：
+
+```
+dawnmap 1 jvm
+src  <module> <path>                                      同 12.2
+fn   <k> <len> <module> <origin> <symbol>                 第 k 个方法：code_length、所属声明、owner.name:desc
+call <k> <pclo> <pchi> <ipc> <module> <lo> <hi> <nlo> <what>
+```
+
+- `fn` 的输出半边：C 是 `<first> <last>`（函数体的行区间），JVM 是 `<k> <len>`：方法序号与 Code 属性的
+  `code_length`（方法的 pc 全域是 `[0, len)`）。`symbol` 是 `类.方法:描述符`，与 javap 注释
+  `// Method a.sq:(J)J` 同一种写法，读取方据此在 javap 列表里找到这个方法。`k` 按 `(类, 方法名, 描述符)`
+  排序编号，从 0 起。
+- `call` 的输出半边：`<k>` 指所在方法；`[pclo, pchi)` 是这次调用的全部字节码（被调表达式、实参、调用
+  指令、调用后的拆箱/`Option` 包装），半开、单位字节；`ipc` 是实现这次调用的那条 invoke 指令的 pc。
+  内建（`intrinsic`）没有「那一条」指令（可能是一条 `invokestatic`，可能是几条，可能是 `lmul`），
+  `ipc` 写 `-`；后面四个源码字段与 12.2 逐位相同。没能落地的调用（13.4 的比对失败、13.3 末的长方法）
+  三个 pc 字段写 `-`。
+- JVM 的字节码区间天然连续：ASM 只在尾部追加，`gen_cexpr` 递归地把一次调用的全部代码写在一起，没有
+  C 那样「实参先命名成临时变量写在前几行」的形状；`operands.prepare` 把带跳转的实参提升成前面的
+  `CSLet` 时，被提升的那次调用有它自己的一行，外层调用的区间从它之后开始。所以不需要 12.2 的
+  `first`/语句形。
+- 只有 `gen_cbody` 写出的方法进 `fn`（顶层函数、impl/default 方法、提升的 lambda、test 块）：只有它们
+  有 `CFun`，有 `origin`。JVM 入口包装 `main([String)`、SAM 桥、闭包类的 `apply`、字典类、常量初始化
+  没有书写调用，与 12.8 对适配器的处理一致。
+- 稳定排序：`src` 按模块名，`fn` 按 `k`，`call` 按 `(k, pclo, -pchi, module, lo, hi)`（同起点时外层在前），
+  未落地的排最后。同输入同字节。
+- **读取方**：`scripts/c-map/dawnmap.py` 的 `load` 改成按第一行的后端字段分派 `fn`/`call` 输出半边的
+  字段名（`c`：`first last` / `first line clo chi`；`jvm`：`k len` / `k pclo pchi ipc`），源码半边的键不变，
+  不认识的后端拒绝。版本仍是 `1`：没有任何已有字段改含义，`jvm` 是新的后端值；M3 未合入、读取方还没有
+  别的使用者，这是唯一不付代价就能统一的时刻。文件留在原处，`scripts/jvm-map/check.py` 从
+  `scripts/c-map/` 导入，一种格式只有一个解析器。
+
+### 13.3 在 ASM 里怎么记 pc
+
+**用 `Label`，不包装 `MethodVisitor`。** 包装（ASM 的 `MethodVisitor(api, mv)` 委托子类，数 `visit*` 调用）
+在 Dawn 里写不出来：Dawn 不能继承 Java 类（`jvm/classread.dawn` 头注释记过同一堵墙）；改成由编译器发射一个
+`dawn/rt/` 计数类，又会把它写进每个程序的运行时，默认产物就变了。`Label` 是已经在用的 API（循环、`if` 的
+跳转都靠它），`Label.getOffset()` 在 `visitLabel` 之后立即可读，值是方法 code 数组里的字节偏移。
+
+记的位置：
+
+- `gen_cexpr` 的 `CCall`/`CIntrinsic`/`CForeign` 三个 arm（`emit.dawn:2492`、`:2557`、`:2558`）：site 为
+  `CAt` 时，生成前 `visitLabel(lo)`，生成后 `visitLabel(hi)`；
+- invoke 之前一个 `Label`：`gen_ccall` 的四条 `visitMethodInsn`（`emit.dawn:2129` 起）、`gen_cdynamic` 的
+  `apply`、`gen_java_call`/`gen_java_new` 的那一条。这几个函数加一个 `at: Option[Label]` 参数，`Some` 时
+  在 invoke 前 `visitLabel`。
+- 记下的 `(site, what, lo, inv, hi)` 进 `Gen` 的新字段 `marks`，`gen_cbody` 关闭方法后把 Label 换成
+  偏移，连同方法名与描述符交给模块级的列表。`marks` 只在 `GenCtx` 的新字段 `mapping` 为真时写，
+  `mapping` 是模块级只读事实，放 `GenCtx`（它的头注释说的就是这一类）。
+
+**pc 稳不稳。** 偏移在 `visitLabel` 时定下，之后 code 数组只在一种情形下挪动：ASM 写前向跳转先留 16 位
+偏移，`Label.resolve` 发现放不下时把指令记成内部伪指令，`ClassWriter.toByteArray` 用
+`EXPAND_ASM_INSNS` 重读整个类并改写成 `goto_w`，此后 pc 平移。16 位有符号偏移放不下，意味着方法
+`code_length` 至少 32768 字节，所以规则是：`len >= 32768` 的方法，它的调用一律记成未落地。其余两件
+看着可疑的事都不挪 pc：
+
+- **COMPUTE_FRAMES**：帧写在 `StackMapTable` 属性里，不在 code 数组里；不可达代码被换成等长的
+  `nop … athrow`，长度不变。
+- **方法拆分（8000 字节门）**：编译器不自动拆方法。`docs/method-size-gate-design.md` 的门禁是**源码级**
+  拆分加 jar 扫描，拆完的方法就是普通方法，pc 与别的方法一样定。它与本表的唯一交点是 `code_length`：
+  `fn` 行的 `len` 与 `scripts/method-size-gate.py` 读的是同一个字段，oracle 用同一种读法核对。
+
+**但 Label 本身可能改字节。** COMPUTE_FRAMES 下 `visitLabel` 会开一个新的基本块。可达代码里多切一刀
+不改输出：只给跳转目标写帧，最大栈按块求最大值，切开前后相同。不可达代码里多切一刀会改：ASM 对每个
+不可达块各写一段 `nop … athrow` 加一帧，一块变两块就多一帧。今天的发射器会写不可达代码：`gen_cargs`
+不看实参是否落空（`f(panic("x"), g(y))` 里 `g(y)` 与 `f` 的 invoke 都在死代码里）。所以「带 Label 的那份
+class 与不带的逐字节同」不能当作公理，只能当作每次都核对的事实，见下一节。
+
+### 13.4 对 class 字节零影响：构造上成立
+
+**发射两遍。** 带 `--map` 时，`emit_module` 对每个模块跑两遍：第一遍 `mapping = false`，产出的 class 就是
+写进 `-o` 的那些；第二遍 `mapping = true`，只取模块类的字节与 `marks`，其余（ADT、字典、闭包类）丢弃。
+然后逐类比：第二遍的模块类字节与第一遍**相同**，这个类的 pc 才写进表；不同，这个类的全部调用记成
+未落地。于是：
+
+1. **同输入有无 `--map`**：写进 `-o` 的字节来自 `mapping = false` 的那一遍，与不带 `--map` 时是同一个
+   函数、同一组实参。新加的代码在这一遍里只做两件事：`if gx.mapping` 判假，`at` 传 `None`。没有一个
+   `visit*` 调用的先后或参数因 `--map` 而不同。这是结构论证；`scripts/jvm-map/same.sh` 再对语料逐文件
+   比一次，作为它的回归。
+2. **对真父**：不带 `--map` 时本分支的 `__emit` 输出与真父逐字节相同（prev-diff 的 `emit *` 十个 label
+   无差异，提交不带 Emit-Change），`selfhost-fixpoint` B==C。
+3. **侧表可信**：pc 来自第二遍，只有当第二遍的类字节与第一遍完全相同时才采用。字节相同意味着 code 数组
+   相同，pc 的含义也就相同；常量池、帧也相同，所以不用担心多出一帧把后面方法的常量池下标挪了
+   （那正是不能逐方法比、只能逐类比的原因）。加上 13.3 的长方法规则，写出的每个 pc 都指向
+   `-o` 里那份 class 的那条指令。
+4. **两遍为什么不并成一遍**：一遍（直接在输出那份上打 Label）的话，`--map` 会改不可达代码所在类的字节，
+   要证明「不改」只能靠测试覆盖，而 13.3 已经给出了改的例子；两遍让输出不依赖 `--map`，Label 的副作用
+   只会让侧表少几行，不会让产物错。代价是带 `--map` 时多一遍发射（13.7 实测）。
+5. **为什么不用一个「临时」ClassWriter 只为单个方法打 Label**：常量池按访问顺序建，临时类的池与真类不同，
+   `ldc` 与 `ldc_w` 的选择取决于下标是否小于 256，pc 就可能不同。只有同一个模块、同一顺序重放，池才相同。
+
+**为什么不用 LineNumberTable / SourceDebugExtension**（裁决已否，复述一句）：默认产物字节不变是硬要求，
+而 LNT 只到行、SMAP（JSR-45）只是行到行的重映射，都给不出调用区间，写进 class 还会让每个 class 随纯移动
+漂移；真调试信息归 M6，默认关。
+
+### 13.5 测试与负控
+
+- **oracle**（`scripts/jvm-map/check.py`，读取用 `dawnmap.py`）：对同一目标跑 `__emit --map` 与
+  `__lower --sites`，再对 `-o` 目录跑一次 `javap -c -p -s`，检查：
+  - **配对**（同 12.5）：每个 `call` 行的 `(module, lo, hi, nlo)` 恰是 `.sites` 的一行；`fn` 表里出现的每个
+    `(module, origin)`，它在 `.sites` 里的每一行在侧表里恰好出现一次。
+  - **方法**：`fn` 行的 `symbol` 在 javap 里恰有一个方法（类、名、`descriptor:` 三者都对上）；`len` 等于
+    用 struct 直接读 class 文件得到的 `code_length`（与 `method-size-gate.py` 同一种读法，不经 ASM）。
+  - **边界**：`pclo`、`ipc` 是 javap 列出的指令起点，`pchi` 是指令起点或等于 `len`；`pclo <= ipc < pchi`。
+  - **指令**：`ipc` 处是 `invoke*`，且按 `what` 判 owner/name：`direct m.f` 要 `invokestatic` 且 owner 为 `m`
+    （javap 对本类省略 owner，按本类补全）、名为 `f`；`impl f`/`default f` 要 `invokestatic` 且名字是
+    `impl_method_name`/`default_method_name` 的拼法（oracle 用 Python 独立实现那两行拼接，不读编译器）；
+    `method f` 要 `invokeinterface` 且名为 `f`；`dynamic` 要 `invokeinterface dawn/rt/FnN.apply`；
+    `java m` 要名为 `m`（构造器为 `<init>`）。`intrinsic` 要求 `ipc` 为 `-` 且区间非空。
+  - **一处一认**：没有两行的 `ipc` 相同（invoke 指令上单射）。
+  - **嵌套**：同一方法里源码 span 包含的两个调用，pc 区间也包含，或内层整个在外层之前（被 `prepare` 提升）。
+  - **未落地**：数为 0；语料里专门放一份带死代码调用的文件（`dead.dawn`，`f(panic(..))` 一类），它的类
+    **必须**整类未落地，证明 13.4 第 3 条的比对有牙；若哪天发射器不再写死代码、这一条变绿了，就把它改成
+    断言「两遍字节相同」，不静默删掉。
+  - **自检**（`check.py --self-test`）：手写几份小表与 javap 文本，验上面每条规则会红。
+  - 样本：`scripts/tile-golden/kernels.dawn`、`scripts/core-sites/corpus.dawn`（含 `use java`，C 侧不收，
+    JVM 侧正好用上）、`dead.dawn`、整个 `selfhost`（`__emit selfhost`）。
+- **同输入有无 `--map`**：`scripts/jvm-map/same.sh`，同一编译器对每个输入跑 `-o a` 与 `-o b --map m`，
+  两个目录逐文件比；输入同 `scripts/c-map/same.sh` 的思路，加 `examples/` 里能编的全部程序。
+- **单元**：`jvm/emit` 的 test 块钉住同一棵 Core 关、开 `mapping` 各发一次，关时 `marks` 为空且两份
+  字节相同；`jvm/classread` 的 test 块钉住新的 `code_length` 读取；写出器（`jvm/jmap.dawn`）的 test 块钉住
+  排序与 `-`。
+- **负控**（`scripts/jvm-map/mutate.py` 登记、`run.py` 逐个建编译器验红，锚点归 `mutation-anchor-preflight.py`）：
+  1. `leak`：第一遍也传 `mapping = true`：`dead.dawn` 的类字节在有无 `--map` 时不同，`same.sh` 红；
+  2. `no-compare`：跳过逐类比对：`dead.dawn` 的行被写成已落地，「必须未落地」红；
+  3. `inv-early`：invoke 前的 Label 挪到实参之前：`ipc` 处是别的指令，「指令」红；
+  4. `hi-early`：`hi` 打在 invoke 之前：`ipc >= pchi`，「边界」红；
+  5. `absolute`：写源码位置时不加 base：「配对」红；
+  6. `len-off`：`code_length` 差一：「方法」红；
+  7. `long-method`：去掉 `len >= 32768` 规则：只能由单元测试判红（语料里没有这么长的方法，selfhost
+     方法都在 8000 以下），与 M3 的 `same-line-twin` 同一种处理，`run.py` 对它跑 `dawn test selfhost`。
+- **接入**：push 预算余量为 0，挂 nightly 的 core-lint job，与 `scripts/core-sites`、`scripts/c-map`
+  并列一步；墙钟实测写进报告。
+
+### 13.6 给 M7：类 javap 列表从哪来
+
+- **来源：JDK 的 `javap -c -p -s`，由读取方（M7 的建站脚本）对 `__emit -o` 目录跑，编译器不写列表。**
+  列表是 class 字节的纯函数，编译器再写一份就是第二份真相；`javap` 每条指令前就是 pc，这正是本表的坐标，
+  对齐不需要任何换算。`-p` 列出 `ACC_SYNTHETIC` 的提升 lambda，`-s` 给出 `descriptor:` 行，与 `symbol`
+  里的描述符逐字比。M7 页面与 oracle 读的是同一份 javap 输出，所以 oracle 绿就是页面对得上。
+- **为什么不是 ASM 的 Textifier**：它在 `asm-util` 里，selfhost 只 vendor `org.ow2.asm:asm`
+  （`selfhost/dawn.toml:10`）；而且 Textifier 打的是 `L0`、`L1` 这样的标签而不是 pc，对齐还得再造一遍
+  偏移。**为什么不在 Dawn 里写反汇编器**（扩展 `jvm/classread.dawn`）：要 200 来个操作码的长度表、
+  `tableswitch`/`lookupswitch` 的对齐与 `wide`，换来的只是 javap 已经给的东西；本刀只给 `classread` 加读
+  `code_length`（oracle 与单元测试要）。javap 的输出格式不是跨 JDK 版本的契约，但 pc 与
+  `// Method owner.name:desc` 注释是稳定的，建站与 oracle 都在 `bin/dawn` 钉的 JDK 21 上跑。
+- **对齐**：javap 的方法头 + `descriptor:` → `fn` 的 `symbol`；javap 每条指令的 pc → 落在哪些 `call` 的
+  `[pclo, pchi)` 里，取最内层着色（CE 式按指令着色）；`ipc` 那一行加粗，即「这次调用本身」。
+  源码一栏与 C 一栏的用法同 12.6。
+
+### 13.7 开销
+
+带 `--map` 时多一遍全模块发射，加每个调用两到三个 `Label` 与一行记录，估算 `__emit` 阶段约两倍；不带
+`--map` 时 `Gen` 多一个空列表字段、`GenCtx` 多一个布尔，每个调用多一次判假。按 12.7 的测法（同输入、交错、
+JFR 分配量按档比）测 `__emit selfhost`：A 真父、B 本分支不带 `--map`、C 本分支带 `--map`，数字以实测为准，
+写进实现提交与报告；B 对 A 超出测量抖动即视为回归，不靠调测法过关。
+
+### 13.8 不做的（理由）
+
+- **LineNumberTable、SourceFile、SourceDebugExtension（SMAP）**：裁决已否；只到行，进 class 改默认字节（13.4）。
+- **一遍发射直接在输出上打 Label**：会改不可达代码所在类的字节，`--map` 不再是旁观者（13.4 第 4 条）。
+- **包装 `MethodVisitor` 数字节**：Dawn 不能继承 Java 类；由编译器发射一个计数类会改所有程序的运行时。
+- **编译器自己写反汇编列表**：列表是 class 字节的纯函数，第二份真相；javap 已经按 pc 列好（13.6）。
+- **长方法（`len >= 32768`）也给 pc**：要先读回 `goto_w` 展开后的类再重新定位每个 Label，等于自己实现一遍
+  ASM 的重写；这类方法在 8000 字节门之下的编译器里不存在，用户程序里出现时如实记成未落地。
+- **逐方法比对两遍字节**：一帧之差会挪后面方法的常量池下标，逐方法比会误伤；逐类比是能成立的最小单位。
+- **闭包类、SAM 桥、字典类、入口包装进 `fn` 表**：没有书写调用，与 12.8 对适配器的处理相同。
+- **`dawn build` 的 jar 也带侧表**：jar 里的类与 `__emit` 同一函数产出，M7 用 `__emit`；要了再加，读取方不变。
+- **构造器、隐含调用进表**：Core 没有它们的 site（第四节），同 12.8。
