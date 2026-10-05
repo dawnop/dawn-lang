@@ -70,7 +70,7 @@ exemption is unbounded is a gate with no lower bound on its coverage.
                      records what it printed. The criterion is mechanical and
                      the obligation runs one way -- a block that CAN be a
                      whole program MUST be one, and MUST record its output.
-                     40 of the tutorial's 45 dawn fences are this.
+                     47 of the tutorial's 53 dawn fences are this.
   ```dawn run deps=tileir
                      The same kind, for a whole program that needs one of
                      this repository's packages: it is run as a project whose
@@ -85,14 +85,20 @@ exemption is unbounded is a gate with no lower bound on its coverage.
                      because a kernel needs packages/tileir. The site
                      renders such a block with its output but without a
                      Playground link (the Playground runs one file).
-                     One of the 40 is this.
-  ```dawn skip-check A block that cannot be a whole program for a reason in
-                     the language rather than in the author's effort. Each of
-                     today's five is one file of a multi-file example: two
-                     from §13, which explains `use`, and three from §18, whose
-                     package only means something beside the project that
-                     depends on it. A module example needs more than one file
-                     to be an example at all. The reason is written in a
+                     Eight of the 47 are this: one in §19 and seven in §20.
+  ```dawn skip-check A block that cannot be run here for a reason in the
+                     language or in the machine, never in the author's
+                     effort. Five of today's six are the language's: each is
+                     one file of a multi-file example, two from §13, which
+                     explains `use`, and three from §18, whose package only
+                     means something beside the project that depends on it.
+                     A module example needs more than one file to be an
+                     example at all. The sixth is the machine's: §20's last
+                     program launches a kernel on a real card, which needs an
+                     NVIDIA GPU, its driver and `tileiras`, and CI has none
+                     of the three. Its kernel and its host function are run
+                     on the fake device by a `deps=` block above it. The
+                     reason is written in a
                      `<!-- doc-check: skip-check ... -->` marker above the
                      fence: the exemption costs a sentence, and the whole set
                      of exemptions can be audited by reading the markers.
