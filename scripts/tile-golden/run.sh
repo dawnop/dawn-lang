@@ -609,7 +609,7 @@ cmp -s "$work/matrix.executable" "$work/matrix.recorded" || {
 }
 
 if [ -n "$only" ]; then
-  printf '%s\n' "${items[@]}" | grep -qxF "$only" || fail "no kernel or mutant named $only"
+  printf '%s\n' "${items[@]}" | grep -xF "$only" >/dev/null || fail "no kernel or mutant named $only"
   # One item is not a shard's worth of coverage, so it must not be filed as one.
   MUTANT_COVERAGE_DIR=
 fi

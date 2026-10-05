@@ -49,7 +49,7 @@ stamp="$dest/.pin"
 want="$(sha256sum "$toolchain" | cut -d ' ' -f 1)"
 want_tileiras="$(awk '$1 == "tileiras" { print $2 }' "$toolchain")"
 [ -n "$want_tileiras" ] || fail "no tileiras version in $toolchain"
-tileiras_of() { find "$1" -type f -path '*/nvidia/cu13/bin/tileiras' | head -n 1; }
+tileiras_of() { find "$1" -type f -path '*/nvidia/cu13/bin/tileiras' | sed -n 1p; }
 
 # Only the pinned packages need replacing when the pin changes. Do not erase
 # the wheels, or recreate an existing environment's read-only activation files.
