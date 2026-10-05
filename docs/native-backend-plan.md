@@ -337,6 +337,8 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 - **唯一的退步是 span**。Core 没有源位置,所以 comptime 失败现在报在**被折叠的 const / comptime 块**上,
   而不是子表达式上;消息、hint、条数不变。保持 Core 无 span 是有意的——等真正需要行号表(调试信息)
   时再一次性加,那时 comptime 的 span 顺带变好。
+  (2026-10-05 补记:M2 让 Core 的调用节点带上不打印的 site,Core dump 逐字节不变,
+  这句话的字面因此不再成立、理由仍成立,见 [source-span-map-design.md](source-span-map-design.md) 第二节。)
 
 **Phase 0 的真正教训**:出口条件写成「零 Emit-Change」是错的(§6 的自纠已记);更值得记的是
 **「两条路都在」这件事本身是最强的 oracle**。三个 bug 全靠拿同一个程序两边跑出来的差异定位,

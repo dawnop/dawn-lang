@@ -40,7 +40,7 @@ use std/list
 use std/map
 use std/set
 use ir/core.{
-  CModule, CFun, CParam, CExpr, CStmt, CDictDef,
+  CNoSite, CModule, CFun, CParam, CExpr, CStmt, CDictDef,
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
@@ -115,7 +115,7 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
   match e {
     CClosure(fn_name, owner, caps, _) ->
       clo_list(caps, set.insert(acc, (owner, fn_name))),
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       let a1 = match callee {
         CDynamic(t) -> clo_expr(t, acc)
         CMethod(d, _, _, _, _) -> clo_expr(d, acc)
@@ -123,7 +123,7 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
       }
       clo_list(args, a1)
     }
-    CIntrinsic(_, args, _) -> clo_list(args, acc)
+    CIntrinsic(_, args, _, _) -> clo_list(args, acc)
     CCtor(_, _, args, _) -> clo_list(args, acc)
     CUpdate(base, adt, ci, fields, ty) -> clo_expr(update_as_ctor(base, adt, ci, fields, ty), acc)
     CField(t, _, _, _, _) -> clo_expr(t, acc)
@@ -158,7 +158,7 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
         Some(x) -> clo_expr(x, acc)
       },
     CDup(inner, _) -> clo_expr(inner, acc)
-    CForeign(j, _) -> {
+    CForeign(j, _, _) -> {
       let a1 = match j.target {
         None -> acc
         Some(t) -> clo_expr(t, acc)
@@ -354,7 +354,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     CBox(inner, from) -> dm_expr(d, inner, k && is_ref_ty(from))
     CUnbox(inner, to) -> dm_expr(d, inner, k && is_ref_ty(to))
 
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       # calling a function value reads it (rc.rw_callee borrows the target)
       var d1 = match callee {
         CDynamic(t) -> dm_read(d, t)
@@ -384,7 +384,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
       }
     }
 
-    CIntrinsic(name, args, _) -> {
+    CIntrinsic(name, args, _, _) -> {
       # runtime primitives borrow, except the reuse-analysis positions
       let owned = intr_owned_args(name)
       var d1 = d
@@ -438,7 +438,7 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
 
     # the JVM escape hatch; unreachable on the native path, walked
     # conservatively so a symbol read only in here still demands owned
-    CForeign(j, _) -> {
+    CForeign(j, _, _) -> {
       let d1 = match j.target {
         None -> d
         Some(t) -> dm_expr(d, t, true)
@@ -690,7 +690,8 @@ pub fn stamp_modes(m: CModule, modes: Map[(String, String), List[CMode]]) -> CMo
 fn t_fn(owner: String, name: String, params: List[CParam], ret: Ty, body: CExpr) -> CFun =
   CFun {
     name: name, owner: owner, captures: [], params: params, dicts: [], evs: [],
-    ret: ret, body: body, is_test: false, impl_of: None, default_of: None
+    ret: ret, body: body, is_test: false, impl_of: None, default_of: None,
+    origin: ""
   }
 
 fn t_mod(owner: String, fns: List[CFun]) -> CModule =
@@ -709,7 +710,7 @@ fn t_row(
 test "a parameter only read stays borrowed; a returned one flips owned" {
   let lst = TyList(TyInt)
   let read = t_fn("m", "r", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt,
-    CIntrinsic("len", [CLocal(1, lst)], TyInt))
+    CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite))
   let ret = t_fn("m", "g", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
     CLocal(2, lst))
   let table = infer_modes([t_mod("m", [read, ret])])
@@ -725,14 +726,14 @@ test "an owned position propagates through the fixpoint" {
   let g = t_fn("m", "g", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
     CLocal(2, lst))
   let f = t_fn("m", "f", [CParam { sym: 1, ty: lst, mode: COwned }], lst,
-    CCall(CDirect("m", "g"), [CLocal(1, lst)], lst))
+    CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite))
   let table = infer_modes([t_mod("m", [f, g])])
   assert len(t_row(table, "m", "f")) == 0
   # ...and a borrowed position does not: h only reads, k rides through it
   let h = t_fn("m", "h", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
-    CIntrinsic("len", [CLocal(3, lst)], TyInt))
+    CIntrinsic("len", [CLocal(3, lst)], TyInt, CNoSite))
   let k2 = t_fn("m", "k", [CParam { sym: 4, ty: lst, mode: COwned }], TyInt,
-    CCall(CDirect("m", "h"), [CLocal(4, lst)], TyInt))
+    CCall(CDirect("m", "h"), [CLocal(4, lst)], TyInt, CNoSite))
   let t2 = infer_modes([t_mod("m", [h, k2])])
   assert not mode_owned(t_row(t2, "m", "h")[0])
   assert not mode_owned(t_row(t2, "m", "k")[0])
@@ -743,15 +744,15 @@ test "a branching value in a borrow position consumes its arms (#499)" {
   let ps = [CParam { sym: 1, ty: lst, mode: COwned }, CParam { sym: 2, ty: lst, mode: COwned }]
   # `xs ++ [v]` lends v to list_push's borrowed element position...
   let bare = t_fn("m", "bare", ps, lst,
-    CIntrinsic("list_push", [CLocal(1, lst), CLocal(2, lst)], lst))
+    CIntrinsic("list_push", [CLocal(1, lst), CLocal(2, lst)], lst, CNoSite))
   # ...but the rewrite cannot lend an if: it builds the value owned, so the
   # parameter in its arm is handed over, at a primitive's borrowed position,
   # a plain function's borrowed position and a projection's target alike
   let arm = CIf(CBool(true), CLocal(2, lst), Some(CListLit([], lst)), lst)
   let pushed = t_fn("m", "pushed", ps, lst,
-    CIntrinsic("list_push", [CLocal(1, lst), arm], lst))
+    CIntrinsic("list_push", [CLocal(1, lst), arm], lst, CNoSite))
   let called = t_fn("m", "called", ps, TyInt,
-    CCall(CDirect("m", "bare"), [CLocal(1, lst), arm], TyInt))
+    CCall(CDirect("m", "bare"), [CLocal(1, lst), arm], TyInt, CNoSite))
   let projected = t_fn("m", "projected", ps, TyInt,
     CField(CIf(CBool(true), CLocal(2, lst), Some(CLocal(1, lst)), lst), 7, 0, 0, TyInt))
   let table = infer_modes([t_mod("m", [bare, pushed, called, projected])])
@@ -808,7 +809,7 @@ test "the rebuild shape demands its container; a plain getter does not" {
 
 test "jurisdiction pins: closures, dictionary slots, pvec, fn-typed" {
   let lst = TyList(TyInt)
-  let read_body = CIntrinsic("len", [CLocal(1, lst)], TyInt)
+  let read_body = CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite)
   # named by a CClosure somewhere: called through CDynamic, all owned
   let cl = t_fn("m", "cl", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read_body)
   let user = t_fn("m", "u", [], TyFn([], TyInt, EPure),
@@ -831,14 +832,14 @@ test "jurisdiction pins: closures, dictionary slots, pvec, fn-typed" {
   # a fn-typed parameter: higher-order is owned by consensus
   let fty = TyFn([], TyInt, EPure)
   let ho = t_fn("m", "ho", [CParam { sym: 1, ty: fty, mode: COwned }], TyInt,
-    CCall(CDynamic(CLocal(1, fty)), [], TyInt))
+    CCall(CDynamic(CLocal(1, fty)), [], TyInt, CNoSite))
   assert len(t_row(infer_modes([t_mod("m", [ho])]), "m", "ho")) == 0
 }
 
 test "stamping writes the fixpoint onto the callee half" {
   let lst = TyList(TyInt)
   let r = t_fn("m", "r", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt,
-    CIntrinsic("len", [CLocal(1, lst)], TyInt))
+    CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite))
   let m = t_mod("m", [r])
   let table = infer_modes([m])
   let m2 = stamp_modes(m, table)
@@ -855,7 +856,7 @@ test "a forced position survives the fixpoint in both directions" {
   assert not mode_owned(t_row(t1, "m", "g")[0])
   # read-only body, forced owned: the row prunes to absent, which is owned
   let r = t_fn("m", "r", [CParam { sym: 2, ty: lst, mode: COwned }], TyInt,
-    CIntrinsic("len", [CLocal(2, lst)], TyInt))
+    CIntrinsic("len", [CLocal(2, lst)], TyInt, CNoSite))
   let t2 = infer_modes_forced([t_mod("m", [r])],
     [ForcedMode { owner: "m", name: "r", arity: 1, idx: 0, mode: COwned }])
   assert len(t_row(t2, "m", "r")) == 0

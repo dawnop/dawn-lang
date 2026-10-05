@@ -32,7 +32,7 @@
 # the corpus for it is the spike-native asan check.
 
 use ir/core.{
-  CModule, CFun, CParam, CExpr, CStmt, CCallee, CBorrowed,
+  CNoSite, CModule, CFun, CParam, CExpr, CStmt, CCallee, CBorrowed,
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
@@ -224,14 +224,14 @@ fn pins_only(after: Set[Int]) -> Set[Int] = {
 fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
   match e {
     CLocal(sym, _) -> set.insert(acc, sym)
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       let a1 = match callee {
         CDynamic(t) -> fv_expr(t, acc)
         _ -> acc
       }
       fv_list(args, a1)
     }
-    CIntrinsic(_, args, _) -> fv_list(args, acc)
+    CIntrinsic(_, args, _, _) -> fv_list(args, acc)
     CCtor(_, _, args, _) -> fv_list(args, acc)
     CUpdate(base, adt, ci, fields, ty) -> fv_expr(update_as_ctor(base, adt, ci, fields, ty), acc)
     CField(t, _, _, _, _) -> fv_expr(t, acc)
@@ -272,7 +272,7 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
     CContinue(lid) -> set.insert(acc, pin_of(lid))
     # inert on the path this pass runs for, but a symbol read only in here
     # must still count as read -- see the header of this section
-    CForeign(j, _) -> {
+    CForeign(j, _, _) -> {
       let a1 = match j.target {
         None -> acc
         Some(t) -> fv_expr(t, acc)
@@ -401,14 +401,14 @@ fn falls_through(e: CExpr) -> Bool = {
         None -> true
         Some(x) -> falls_through(thn) || falls_through(x)
       },
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       let head = match callee {
         CDynamic(t) -> falls_through(t)
         _ -> true
       }
       head && all_fall_through(args)
     }
-    CIntrinsic(_, args, _) -> all_fall_through(args)
+    CIntrinsic(_, args, _, _) -> all_fall_through(args)
     CCtor(_, _, args, _) -> all_fall_through(args)
     CUpdate(base, adt, ci, fields, ty) -> falls_through(update_as_ctor(base, adt, ci, fields, ty))
     CTuple(es, _) -> all_fall_through(es)
@@ -445,7 +445,7 @@ fn falls_through(e: CExpr) -> Bool = {
     CConstRef(_, _, _) -> true
     CComptime(_, _, _) -> true
     # not walked, for the reason `jumps` gives
-    CForeign(_, _) -> true
+    CForeign(_, _, _) -> true
   }
 }
 
@@ -479,14 +479,14 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
   match e {
     CBreak(l) -> brk && l == lid
     CContinue(l) -> cont && l == lid
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       let hit = match callee {
         CDynamic(t) -> jumps(t, lid, brk, cont)
         _ -> false
       }
       hit || jumps_list(args, lid, brk, cont)
     }
-    CIntrinsic(_, args, _) -> jumps_list(args, lid, brk, cont)
+    CIntrinsic(_, args, _, _) -> jumps_list(args, lid, brk, cont)
     CCtor(_, _, args, _) -> jumps_list(args, lid, brk, cont)
     CUpdate(base, adt, ci, fields, ty) ->
       jumps(update_as_ctor(base, adt, ci, fields, ty), lid, brk, cont)
@@ -540,7 +540,7 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
     # from the wildcard: a `use java` argument can hold a jump, but this pass
     # runs for the native backend, which refuses CForeign outright (emitc's
     # CForeign arm). Walking it would be dead code with no way to test it.
-    CForeign(_, _) -> false
+    CForeign(_, _, _) -> false
   }
 
 fn jumps_list(es: List[CExpr], lid: Int, brk: Bool, cont: Bool) -> Bool = {
@@ -591,14 +591,14 @@ fn leaves(e: CExpr, inner: List[Int]) -> Bool =
     CReturn(_) -> true
     CBreak(l) -> not list.contains(inner, l)
     CContinue(l) -> not list.contains(inner, l)
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       let hit = match callee {
         CDynamic(t) -> leaves(t, inner)
         _ -> false
       }
       hit || leaves_list(args, inner)
     }
-    CIntrinsic(_, args, _) -> leaves_list(args, inner)
+    CIntrinsic(_, args, _, _) -> leaves_list(args, inner)
     CCtor(_, _, args, _) -> leaves_list(args, inner)
     CUpdate(base, adt, ci, fields, ty) -> leaves(update_as_ctor(base, adt, ci, fields, ty), inner)
     CField(t, _, _, _, _) -> leaves(t, inner)
@@ -644,7 +644,7 @@ fn leaves(e: CExpr, inner: List[Int]) -> Bool =
     CConstRef(_, _, _) -> false
     CComptime(_, _, _) -> false
     # not walked, for the reason `jumps` gives
-    CForeign(_, _) -> false
+    CForeign(_, _, _) -> false
   }
 
 fn leaves_list(es: List[CExpr], inner: List[Int]) -> Bool = {
@@ -1273,14 +1273,14 @@ fn lift_spread_stmts(st: SpreadLift, ss: List[CStmt]) -> (SpreadLift, List[CStmt
 
 fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
   match e {
-    CCall(callee, args, ty) -> {
+    CCall(callee, args, ty, site) -> {
       let (st1, c1) = lift_spread_callee(st, callee)
       let (st2, as1) = lift_spread_list(st1, args)
-      (st2, CCall(c1, as1, ty))
+      (st2, CCall(c1, as1, ty, site))
     }
-    CIntrinsic(name, args, ty) -> {
+    CIntrinsic(name, args, ty, site) -> {
       let (st1, as1) = lift_spread_list(st, args)
-      (st1, CIntrinsic(name, as1, ty))
+      (st1, CIntrinsic(name, as1, ty, site))
     }
     CCtor(adt, ci, args, ty) -> {
       let (st1, as1) = lift_spread_list(st, args)
@@ -1413,7 +1413,7 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
     # Foreign calls cannot reach the native emitter. Leaving one opaque is
     # conservative: if it is the base's only remaining use, liveness keeps
     # the record instead of moving a JVM-only access across the call.
-    CForeign(_, _) -> (st, e)
+    CForeign(_, _, _) -> (st, e)
     CInt(_) -> (st, e)
     CFloat(_) -> (st, e)
     CBool(_) -> (st, e)
@@ -1447,7 +1447,7 @@ fn assigns_spread_opt(e: Option[CExpr], sym: Int) -> Bool =
 # Core expression rather than looking only for a top-level CSAssign.
 fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
   match e {
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       let in_callee = match callee {
         CDynamic(target) -> assigns_spread_expr(target, sym)
         CMethod(dict, _, _, _, _) -> assigns_spread_expr(dict, sym)
@@ -1455,7 +1455,7 @@ fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
       }
       in_callee || assigns_spread_list(args, sym)
     }
-    CIntrinsic(_, args, _) -> assigns_spread_list(args, sym)
+    CIntrinsic(_, args, _, _) -> assigns_spread_list(args, sym)
     CCtor(_, _, args, _) -> assigns_spread_list(args, sym)
     CUpdate(base, adt, ci, fields, ty) ->
       assigns_spread_expr(update_as_ctor(base, adt, ci, fields, ty), sym)
@@ -1480,7 +1480,7 @@ fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
     CListLit(elems, _) -> assigns_spread_list(elems, sym)
     CReturn(value) -> assigns_spread_opt(value, sym)
     CDup(inner, _) -> assigns_spread_expr(inner, sym)
-    CForeign(j, _) -> {
+    CForeign(j, _, _) -> {
       let in_target = match j.target {
         None -> false
         Some(target) -> assigns_spread_expr(target, sym)
@@ -1668,7 +1668,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     # call forwards are not counted and pass through. A callee that is a
     # value must stay alive until the call: each side's after-set covers the
     # other, and a later rebinding forces an owned snapshot before arguments.
-    CCall(callee, args, cty) -> {
+    CCall(callee, args, cty, site) -> {
       # The function value is the first borrowed operand, not a name that
       # may be reread after an argument replaces it. Put its snapshot in
       # the same held set as argument snapshots so a later jump drops it --
@@ -1681,7 +1681,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
           if snapshot_row(row) || held_before_exit(st, row, owned) {
             let (st1, lets, row1, temps) = intr_args(st, row, owned, after)
             return wrap(st1, lets,
-              CCall(CDynamic(row1[0]), list.drop(row1, 1), cty), cty, temps)
+              CCall(CDynamic(row1[0]), list.drop(row1, 1), cty, site), cty, temps)
           }
         }
         _ -> ()
@@ -1694,7 +1694,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
       match owned_positions(st1.modes, callee, len(args)) {
         None -> {
           let (st2, lets2, args1, temps2) = consume_all(st1, args, cbase)
-          wrap(st2, lets ++ lets2, CCall(c1, args1, cty), cty, temps ++ temps2)
+          wrap(st2, lets ++ lets2, CCall(c1, args1, cty, site), cty, temps ++ temps2)
         }
         # A callee with borrowed positions is an intrinsic-shaped operand
         # list: the owned positions transfer or dup as ever, a borrowed
@@ -1703,16 +1703,16 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
         # its own after the call.
         Some(owned) -> {
           let (st2, lets2, args1, temps2) = intr_args(st1, args, owned, cbase)
-          wrap(st2, lets ++ lets2, CCall(c1, args1, cty), cty, temps ++ temps2)
+          wrap(st2, lets ++ lets2, CCall(c1, args1, cty, site), cty, temps ++ temps2)
         }
       }
     }
 
     # Runtime primitives borrow, and dup whatever they decide to keep --
     # except the argument positions the reuse analysis flipped to owned.
-    CIntrinsic(name, args, ity) -> {
+    CIntrinsic(name, args, ity, site) -> {
       let (st1, lets, args1, temps) = intr_args(st, args, intr_owned_args(name), after)
-      wrap(st1, lets, CIntrinsic(name, args1, ity), ity, temps)
+      wrap(st1, lets, CIntrinsic(name, args1, ity, site), ity, temps)
     }
 
     CCtor(adt, ci, args, cty) -> {
@@ -1741,12 +1741,12 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
       # An emitter-only Array cannot be released by RC on a jump or panic.
       let (st1, buf) = fresh(st)
       let aty = TyArray(TyVar("E", 0))
-      var steps: List[CStmt] = [CSLet(buf, aty, CIntrinsic("array_new", [], aty))]
+      var steps: List[CStmt] = [CSLet(buf, aty, CIntrinsic("array_new", [], aty, CNoSite))]
       for el in elems {
         steps = steps ++ [CSAssign(buf,
-          CIntrinsic("array_push", [CLocal(buf, aty), el], aty))]
+          CIntrinsic("array_push", [CLocal(buf, aty), el], aty, CNoSite))]
       }
-      let done = CCall(CDirect(LIST_MOD, LIST_FROM_ARRAY), [CLocal(buf, aty)], lty)
+      let done = CCall(CDirect(LIST_MOD, LIST_FROM_ARRAY), [CLocal(buf, aty)], lty, CNoSite)
       rw(st1, CBlock(steps, Some(done), lty), consume, after)
     }
 
@@ -1881,7 +1881,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     # The JVM escape hatch, which the native backend refuses outright
     # (emitc's CForeign arm). Rewriting it would mean counting values that
     # only ever exist on the path this pass does not run on.
-    CForeign(_, _) -> (st, e)
+    CForeign(_, _, _) -> (st, e)
 
     # Everything left produces its own reference or is not counted at all, so
     # the rewrite is the identity. Enumerated rather than swept up: the
@@ -2384,7 +2384,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
     CUnbox(inner, to) -> chk_expr(c, inner, k && is_ref_ty(to))
     CUnary(_, x, _) -> chk_expr(c, x, false)
     CBinary(_, l, r, _) -> chk_expr(chk_expr(c, l, false), r, false)
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       var c1 = match callee {
         CDynamic(t) -> chk_expr(c, t, false)
         _ -> c
@@ -2407,7 +2407,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
         }
       }
     }
-    CIntrinsic(name, args, _) -> {
+    CIntrinsic(name, args, _, _) -> {
       let owned = intr_owned_args(name)
       var c1 = c
       var i = 0
@@ -2437,7 +2437,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
     CDictApply(_, _, _) -> c
     CDictArg(_, _, _, _, _) -> c
     # inert here for the same reason `rw` leaves it alone
-    CForeign(_, _) -> c
+    CForeign(_, _, _) -> c
   }
 
 fn chk_list(c: Chk, es: List[CExpr], k: Bool) -> Chk = {
@@ -2553,7 +2553,8 @@ fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
     owner: "m",
     fns: [CFun {
       name: "f", owner: "m", captures: [], params: params, dicts: [], evs: [],
-      ret: ret, body: body, is_test: false, impl_of: None, default_of: None
+      ret: ret, body: body, is_test: false, impl_of: None, default_of: None,
+      origin: ""
     }],
     dicts: [],
     next_sym: 100
@@ -2566,12 +2567,12 @@ test "a scalar body needs no counting at all" {
 
 test "a list builder is an owned Core binding before its elements run" {
   let ty = TyList(TyInt)
-  let call = CCall(CDirect("m", "element"), [], TyInt)
+  let call = CCall(CDirect("m", "element"), [], TyInt, CNoSite)
   let m = rc_module(one_fn([], ty, CListLit([call], ty)), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
     CBlock(ss, _, _) -> match ss[0] {
-      CSLet(_, TyArray(_), CIntrinsic("array_new", [], _)) -> ()
+      CSLet(_, TyArray(_), CIntrinsic("array_new", [], _, _)) -> ()
       _ -> panic("list builder is not an owned Core binding")
     },
     _ -> panic("list builder is hidden from RC")
@@ -2595,7 +2596,7 @@ test "operand snapshots follow later nested assignments, not reads" {
 test "a scalar argument is named before a later argument rewrites it" {
   let p = CParam { sym: 1, ty: TyInt, mode: COwned }
   let later = CBlock([CSAssign(1, CInt(9))], Some(CInt(1)), TyInt)
-  let body = CCall(CDirect("m", "g"), [CLocal(1, TyInt), later], TyInt)
+  let body = CCall(CDirect("m", "g"), [CLocal(1, TyInt), later], TyInt, CNoSite)
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
@@ -2605,7 +2606,7 @@ test "a scalar argument is named before a later argument rewrites it" {
     },
     _ -> panic("expected a snapshot block")
   }
-  let plain = CCall(CDirect("m", "g"), [CLocal(1, TyInt), CInt(1)], TyInt)
+  let plain = CCall(CDirect("m", "g"), [CLocal(1, TyInt), CInt(1)], TyInt, CNoSite)
   let unchanged = rc_module(one_fn([p], TyInt, plain), owned_modes())
   assert unchanged.fns[0].body == plain
 }
@@ -2614,7 +2615,7 @@ test "borrowed and owned argument snapshots retain a reassigned reference" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let later = CBlock([CSAssign(1, CListLit([CInt(9)], lst))], Some(CInt(0)), TyInt)
-  let body = CCall(CDirect("m", "g"), [CLocal(1, lst), later], TyInt)
+  let body = CCall(CDirect("m", "g"), [CLocal(1, lst), later], TyInt, CNoSite)
   for mode in [COwned, CBorrowed] {
     let modes = map.insert(owned_modes(), ("m", "g"), [mode, COwned])
     let m = rc_module(one_fn([p], TyInt, body), modes)
@@ -2637,7 +2638,7 @@ test "a dynamic target snapshot remains owned across argument return" {
     Some(CIf(CBool(true), CReturn(Some(CInt(7))), Some(CInt(1)), TyInt)),
     TyInt
   )
-  let body = CCall(CDynamic(CLocal(1, fn_ty)), [later], TyInt)
+  let body = CCall(CDynamic(CLocal(1, fn_ty)), [later], TyInt, CNoSite)
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
@@ -2675,8 +2676,8 @@ test "an earlier use copies, the last one takes" {
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let g = CDirect("m", "g")
   let body = CBlock(
-    [CSDiscard(CCall(g, [CLocal(1, lst)], TyInt))],
-    Some(CCall(g, [CLocal(1, lst)], TyInt)),
+    [CSDiscard(CCall(g, [CLocal(1, lst)], TyInt, CNoSite))],
+    Some(CCall(g, [CLocal(1, lst)], TyInt, CNoSite)),
     TyInt
   )
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
@@ -2684,7 +2685,7 @@ test "an earlier use copies, the last one takes" {
   match m.fns[0].body {
     CBlock(ss, tail, _) -> {
       match ss[0] {
-        CSDiscard(CCall(_, a1, _)) ->
+        CSDiscard(CCall(_, a1, _, _)) ->
           match a1[0] {
             CDup(_, _) -> ()
             _ -> panic("expected the earlier use to copy")
@@ -2692,7 +2693,7 @@ test "an earlier use copies, the last one takes" {
         _ -> panic("expected the discarded call")
       }
       match tail {
-        Some(CCall(_, a2, _)) ->
+        Some(CCall(_, a2, _, _)) ->
           match a2[0] {
             CLocal(s, _) -> { assert s == 1 }
             _ -> panic("expected the last use to take the value")
@@ -2740,7 +2741,7 @@ test "two uses in one operand list both copy" {
 test "a use inside a loop copies every trip round" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
-  let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt)
+  let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite)
   let body = CBlock(
     [CSLoop(7, CBlock([CSDiscard(call)], None, TyUnit), None)],
     Some(CInt(0)),
@@ -2757,7 +2758,7 @@ test "a use inside a loop copies every trip round" {
           match lb {
             CBlock(ls, _, _) ->
               match ls[0] {
-                CSDiscard(CCall(_, args2, _)) ->
+                CSDiscard(CCall(_, args2, _, _)) ->
                   match args2[0] {
                     CDup(_, _) -> ()
                     _ -> panic("expected the loop use to copy")
@@ -2777,7 +2778,7 @@ test "the arm that keeps a binding drops what the other arm took" {
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let body = CIf(
     CBool(true),
-    CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt),
+    CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite),
     Some(CInt(0)),
     TyInt
   )
@@ -2786,7 +2787,7 @@ test "the arm that keeps a binding drops what the other arm took" {
   match m.fns[0].body {
     CIf(_, thn, els, _) -> {
       match thn {
-        CCall(_, args2, _) ->
+        CCall(_, args2, _, _) ->
           match args2[0] {
             CLocal(s, _) -> { assert s == 1 }
             _ -> panic("expected the then arm to take the value")
@@ -2817,7 +2818,7 @@ test "the right side of a short circuit refuses to take" {
   let body = CBinary(
     CAnd,
     CBool(true),
-    CCall(CDirect("m", "p"), [CLocal(1, lst)], TyBool),
+    CCall(CDirect("m", "p"), [CLocal(1, lst)], TyBool, CNoSite),
     TyBool
   )
   let m = rc_module(one_fn([p], TyBool, body), owned_modes())
@@ -2829,7 +2830,7 @@ test "the right side of a short circuit refuses to take" {
       match ss[0] {
         CSLet(_, _, CBinary(_, _, r, _)) ->
           match r {
-            CCall(_, args2, _) ->
+            CCall(_, args2, _, _) ->
               match args2[0] {
                 CDup(_, _) -> ()
                 _ -> panic("expected the conditional use to copy")
@@ -2852,12 +2853,12 @@ test "array_with takes its owned operands bare at their last use" {
   let lst = TyList(TyInt)
   let p1 = CParam { sym: 1, ty: arr, mode: COwned }
   let p2 = CParam { sym: 2, ty: lst, mode: COwned }
-  let body = CIntrinsic("array_with", [CLocal(1, arr), CInt(0), CLocal(2, lst)], arr)
+  let body = CIntrinsic("array_with", [CLocal(1, arr), CInt(0), CLocal(2, lst)], arr, CNoSite)
   let m = rc_module(one_fn([p1, p2], arr, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   # both owned positions hand their reference over: no dup, no scope drop
   match m.fns[0].body {
-    CIntrinsic(_, args, _) -> {
+    CIntrinsic(_, args, _, _) -> {
       match args[0] {
         CLocal(s, _) -> { assert s == 1 }
         _ -> panic("expected the array handed over bare")
@@ -2878,8 +2879,8 @@ test "a binding is released at the statement that stops touching it" {
   # sweep must, and right after its last touch rather than at scope end
   let body = CBlock(
     [
-      CSDiscard(CIntrinsic("len", [CLocal(1, lst)], TyInt)),
-      CSDiscard(CCall(CDirect("m", "g"), [], TyInt))
+      CSDiscard(CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite)),
+      CSDiscard(CCall(CDirect("m", "g"), [], TyInt, CNoSite))
     ],
     Some(CInt(0)),
     TyInt
@@ -2909,7 +2910,7 @@ test "a record update releases its spread owner before an updated field runs" {
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
     CUpdField { ty: ref, value: None },
     CUpdField { ty: ref,
-      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref)) }
+      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(1, rec), 7, 0, 1, ref)], ref, CNoSite)) }
   ], rec)
   let body = CBlock([CSLet(2, rec, CLocal(1, rec))], Some(rebuilt), rec)
   let m = rc_module(one_fn([p], rec, body), owned_modes())
@@ -2935,7 +2936,7 @@ test "a record update releases its spread owner before an updated field runs" {
             _ -> panic("expected the unchanged field transferred from its temporary")
           }
           match args[1] {
-            CCall(_, [CLocal(_, _)], _) -> ()
+            CCall(_, [CLocal(_, _)], _, _) -> ()
             _ -> panic("expected the updated field to consume its lifted temporary")
           }
         }
@@ -2952,12 +2953,12 @@ test "a record bound after an earlier statement is released before its update" {
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [
     CUpdField { ty: ref, value: None },
     CUpdField { ty: ref,
-      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)) }
+      value: Some(CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref, CNoSite)) }
   ], rec)
   let body = CBlock(
     [
       CSDiscard(CInt(0)),
-      CSLet(2, rec, CCall(CDirect("m", "load"), [], rec)),
+      CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite)),
       CSDiscard(CInt(1))
     ],
     Some(rebuilt),
@@ -2986,7 +2987,7 @@ test "a record bound after an earlier statement is released before its update" {
         _ -> panic("expected the following statement to remain after the release")
       }
       match tail {
-        Some(CCtor(_, _, [CLocal(_, _), CCall(_, [CLocal(_, _)], _)], _)) -> ()
+        Some(CCtor(_, _, [CLocal(_, _), CCall(_, [CLocal(_, _)], _, _)], _)) -> ()
         _ -> panic("expected the rebuilt record to consume the lifted fields")
       }
     }
@@ -2998,14 +2999,14 @@ test "a reassigned record is not lifted ahead of the assignment" {
   let rec = TyAdt(7, [])
   let ref = TyList(TyInt)
   let rebuilt = CUpdate(CLocal(2, rec), 7, 0, [CUpdField { ty: ref, value: None }], rec)
-  let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))]
+  let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
   # spread_rebuild follows tail blocks, so an assignment in one is just as
   # much "between" the binding and constructor as an outer statement is.
   let tail = CBlock(
     [CSIf(
       CBool(true),
       CBlock(
-        [CSAssign(2, CCall(CDirect("m", "replace"), [], rec))],
+        [CSAssign(2, CCall(CDirect("m", "replace"), [], rec, CNoSite))],
         None,
         TyUnit
       ),
@@ -3036,14 +3037,14 @@ test "a constructor written out whole is not taken for an update" {
   let ref = TyList(TyInt)
   let rebuilt = CCtor(7, 0, [
     CField(CLocal(2, rec), 7, 0, 0, ref),
-    CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref)
+    CCall(CDirect("m", "g"), [CField(CLocal(2, rec), 7, 0, 1, ref)], ref, CNoSite)
   ], rec)
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
     borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
     next_sym: 100, pinned: false
   }
-  let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec))]
+  let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
   let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(rebuilt))
   assert st1.next_sym == 100 && ss1 == stmts && tail1 == Some(rebuilt)
 }
@@ -3059,7 +3060,7 @@ test "an update nested in a written field keeps its node until its own block" {
     CUpdField { ty: ref, value: Some(CListLit([], ref)) }
   ], rec)), rec)
   let outer = CUpdate(CLocal(2, rec), 7, 0, [
-    CUpdField { ty: ref, value: Some(CField(CCall(CDirect("m", "g"), [inner], rec), 7, 0, 0, ref)) },
+    CUpdField { ty: ref, value: Some(CField(CCall(CDirect("m", "g"), [inner], rec, CNoSite), 7, 0, 0, ref)) },
     CUpdField { ty: ref, value: None }
   ], rec)
   let st = RSt {
@@ -3071,7 +3072,7 @@ test "an update nested in a written field keeps its node until its own block" {
   # the outer kept field was lifted, and the outer update became a constructor
   assert len(ss1) == 2
   match tail1 {
-    Some(CCtor(_, _, [CField(CCall(_, [CBlock(_, Some(CUpdate(CLocal(3, _), _, _, _, _)), _)], _),
+    Some(CCtor(_, _, [CField(CCall(_, [CBlock(_, Some(CUpdate(CLocal(3, _), _, _, _, _)), _)], _, CNoSite),
       _, _, 0, _), CLocal(_, _)], _)) -> ()
     _ -> panic("expected the inner update left as a node inside the outer constructor")
   }
@@ -3083,13 +3084,13 @@ test "the match once-loop is unlooped and its arm takes the binding" {
   # lower_match's shape: `if (test) { arm; break }` rows over an unreachable
   # tail; inside the loop the transfer would be refused, unlooped it happens
   let arm = CBlock(
-    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt))],
+    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite))],
     Some(CBreak(7)),
     TyNever
   )
   let body = CBlock(
     [CSLoop(7, CBlock(
-      [CSIf(CBool(true), arm, None), CSDiscard(CIntrinsic("todo", [], TyNever))],
+      [CSIf(CBool(true), arm, None), CSDiscard(CIntrinsic("todo", [], TyNever, CNoSite))],
       None, TyUnit), None)],
     Some(CInt(0)),
     TyInt
@@ -3104,7 +3105,7 @@ test "the match once-loop is unlooped and its arm takes the binding" {
           match thn {
             CBlock(as2, _, _) ->
               match as2[0] {
-                CSDiscard(CCall(_, args2, _)) ->
+                CSDiscard(CCall(_, args2, _, _)) ->
                   match args2[0] {
                     CLocal(s, _) -> { assert s == 1 }
                     _ -> panic("expected the arm to take the value")
@@ -3155,7 +3156,7 @@ test "a borrowed table row passes the argument bare and keeps the release" {
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let modes = map.insert(owned_modes(), ("m", "g"), [CBorrowed])
   let body = CBlock(
-    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt))],
+    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite))],
     Some(CInt(0)),
     TyInt
   )
@@ -3166,7 +3167,7 @@ test "a borrowed table row passes the argument bare and keeps the release" {
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
       match ss[0] {
-        CSDiscard(CCall(_, args2, _)) ->
+        CSDiscard(CCall(_, args2, _, _)) ->
           match args2[0] {
             CLocal(s, _) -> { assert s == 1 }
             _ -> panic("expected the borrowed position to pass the binding bare")
@@ -3192,7 +3193,7 @@ test "the checker under the same table judges the borrowed rewrite balanced" {
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let modes = map.insert(owned_modes(), ("m", "g"), [CBorrowed])
   let body = CBlock(
-    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt))],
+    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt, CNoSite))],
     Some(CInt(0)),
     TyInt
   )
@@ -3225,7 +3226,7 @@ test "a later operand return releases a hoisted assignment value" {
     Some(CIf(CBool(true), CReturn(Some(CInt(7))), Some(CInt(2)), TyInt)),
     TyInt
   )
-  let value = CCall(CDirect("m", "g"), [CLocal(1, lst), CListLit([later], lst)], lst)
+  let value = CCall(CDirect("m", "g"), [CLocal(1, lst), CListLit([later], lst)], lst, CNoSite)
   let body = CBlock([CSAssign(1, value)], Some(CInt(0)), TyInt)
   for mode in [COwned, CBorrowed] {
     let modes = map.insert(owned_modes(), ("m", "g"), [mode, CBorrowed])
@@ -3241,7 +3242,7 @@ test "an arm whose list element returns leaves the other arm alone" {
   # the return path. The arm is Unit-typed and its tail says nothing, so only
   # the operand shows it never ends; the untaken arm must not copy the drop
   # that the reassignment below then repeats.
-  let fresh_list = CListLit([CCall(CDirect("m", "h"), [], TyInt)], lst)
+  let fresh_list = CListLit([CCall(CDirect("m", "h"), [], TyInt, CNoSite)], lst)
   let ret = CBox(CReturn(Some(fresh_list)), TyNever)
   let arm = CBlock([CSLet(3, lst, CListLit([ret], lst))], None, TyUnit)
   let body = CBlock(
@@ -3259,7 +3260,7 @@ test "a directly applied closure is held in scope across a returning argument" {
   # #506: `borrow` used to name the fresh closure outside the scope the
   # argument's return unwinds, and rc_module refused the result
   let arg = CIf(CLocal(1, TyBool), CReturn(Some(CInt(7))), Some(CInt(1)), TyInt)
-  let body = CCall(CDynamic(CClosure("lam", "m", [], fn_ty)), [arg], TyInt)
+  let body = CCall(CDynamic(CClosure("lam", "m", [], fn_ty)), [arg], TyInt, CNoSite)
   let m = rc_module(one_fn([p], TyInt, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
   match m.fns[0].body {
@@ -3274,7 +3275,7 @@ test "a directly applied closure is held in scope across a returning argument" {
 test "an owned operand ahead of a leaving one is named, and only then" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: TyBool, mode: COwned }
-  let fresh_list = CCall(CDirect("m", "h"), [], lst)
+  let fresh_list = CCall(CDirect("m", "h"), [], lst, CNoSite)
   let cont = CIf(CLocal(1, TyBool), CContinue(0), Some(CInt(1)), TyInt)
   # #507: inline, the fresh list is a C argument the continue never sees
   let pair = TyTuple([lst, TyInt])
@@ -3306,7 +3307,7 @@ test "reassignment from the old value is a hand-over, not copy and drop" {
   # `m = g(m)`: the call consumes the old value, so the expansion has no
   # drop of its own -- this is what lets the callee see rc == 1
   let body = CBlock(
-    [CSAssign(1, CCall(CDirect("m", "g"), [CLocal(1, lst)], lst))],
+    [CSAssign(1, CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite))],
     Some(CInt(0)),
     TyInt
   )
@@ -3315,7 +3316,7 @@ test "reassignment from the old value is a hand-over, not copy and drop" {
   match m.fns[0].body {
     CBlock(ss, _, _) -> {
       match ss[0] {
-        CSLet(_, _, CCall(_, args2, _)) ->
+        CSLet(_, _, CCall(_, args2, _, _)) ->
           match args2[0] {
             CLocal(s, _) -> { assert s == 1 }
             _ -> panic("expected the old value handed into the call")

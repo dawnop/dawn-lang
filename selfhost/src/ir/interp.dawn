@@ -1879,8 +1879,8 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CDup(inner, _) -> ceval(icx, st, env, inner)
     CClosure(name, owner, caps, _) -> ceval_closure(icx, st, env, name, owner, caps)
     CFnRef(_, name, _) -> unlifted_fn(st, env, name)
-    CCall(callee, args, _) -> ceval_call(icx, st, env, callee, args)
-    CIntrinsic(name, args, _) -> ceval_intrinsic(icx, st, env, name, args)
+    CCall(callee, args, _, _) -> ceval_call(icx, st, env, callee, args)
+    CIntrinsic(name, args, _, _) -> ceval_intrinsic(icx, st, env, name, args)
     CCtor(adt, ci, args, _) -> ceval_ctor(icx, st, env, adt, ci, args)
     CUpdate(base, _, _, fields, _) -> ceval_update(icx, st, env, base, fields)
     CField(target, _, _, idx, _) -> ceval_field(icx, st, env, target, idx)
@@ -1898,7 +1898,7 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CReturn(v) -> ceval_return(icx, st, env, v)
     CBreak(id) -> Err((st, env, KBreak(id)))
     CContinue(id) -> Err((st, env, KContinue(id)))
-    CForeign(j, _) -> eval_java(st, env, j)
+    CForeign(j, _, _) -> eval_java(st, env, j)
     # A dictionary is a value here, the same three ways Core builds one: a
     # statically registered singleton, a construction from its parts', and a
     # part read back out of the one a slot body was handed.
@@ -3278,7 +3278,8 @@ fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
     is_test: false,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   }
 
 test "lowering invariant panics cross both comptime lowering boundaries" {

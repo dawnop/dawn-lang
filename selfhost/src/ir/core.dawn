@@ -98,6 +98,25 @@ pub type CJava = {
   sam_evs: List[(Int, CExpr)]
 }
 
+## Where a call was written, for the side tables a backend writes on request
+## (docs/source-span-map-design.md). Nothing prints it and no backend's output
+## reads it: the Core dump staying byte for byte what it was is the whole
+## reason the earlier "Core has no spans" rulings existed, and they protected
+## the dump, not this type.
+##
+## The offsets are code points from the start of the declaration the
+## enclosing `CFun.origin` names, the same currency the checker measures in:
+## moving a declaration moves its base and leaves every site in it alone.
+## `nlo` is where the callee's name starts (`f` in `m.f(x)`, `g` in
+## `a.f().g()`), so a reader can underline one link of a method chain.
+##
+## A call lowering synthesised -- a default argument's `f$default$k`, the
+## `Eq` behind `==`, a dictionary bridge -- has no written text and says so
+## with `CNoSite`. One written call gets at most one `CAt`.
+pub type CSite =
+  | CNoSite
+  | CAt(lo: Int, hi: Int, nlo: Int)
+
 pub type CExpr =
   | CInt(v: Int)
   | CFloat(v: Float)
@@ -107,10 +126,12 @@ pub type CExpr =
   | CLocal(sym: Int, ty: Ty)
 # a top-level function used as a value (already instantiated)
   | CFnRef(owner: String, name: String, ty: Ty)
-  | CCall(callee: CCallee, args: List[CExpr], ty: Ty)
+# `site` is where the call was written (see CSite); every node below that
+# carries one ends with it, so a pattern that does not care spells one `_`
+  | CCall(callee: CCallee, args: List[CExpr], ty: Ty, site: CSite)
 # a runtime primitive: str_*, io_*, array_*, panic, ... Backends own the
 # name -> implementation table; Core owns only the name and the types.
-  | CIntrinsic(name: String, args: List[CExpr], ty: Ty)
+  | CIntrinsic(name: String, args: List[CExpr], ty: Ty, site: CSite)
 # build a constructor: args are in field order, already reordered from the
 # source's written order and spread base by lowering
   | CCtor(adt: Int, ci: Int, args: List[CExpr], ty: Ty)
@@ -199,7 +220,7 @@ pub type CExpr =
 # native backend refuses this node. There is no C counterpart; C FFI is not
 # scheduled (docs/native-driver-plan.md D7), and if it ever is, it gets its
 # own node for the JVM backend to refuse in turn.
-  | CForeign(j: CJava, ty: Ty)
+  | CForeign(j: CJava, ty: Ty, site: CSite)
 # Take a reference to `inner` and hand it back -- `dawn_dup` in the C runtime,
 # ignored by every other consumer. An expression rather than a statement
 # because what needs counting is often not a binding: `let y = p.x` hands over
@@ -355,7 +376,12 @@ pub type CFun = {
   is_test: Bool,
   # set for impl method bodies and trait defaults, which the backends mangle
   impl_of: Option[(Int, Ty)],
-  default_of: Option[Int]
+  default_of: Option[Int],
+  # The declaration this function's text came from (`TFun.decl`), the one its
+  # call sites' offsets are measured from (CSite). A lifted lambda inherits
+  # its enclosing function's; a function lowering wrote itself -- a bridge, a
+  # wrapper, a derived relation -- has "" and no CAt in its body.
+  origin: String
 }
 
 ## One statically built dictionary. `slots` is in the trait's declaration
@@ -614,8 +640,8 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CUnit -> TyUnit
     CLocal(_, ty) -> ty
     CFnRef(_, _, ty) -> ty
-    CCall(_, _, ty) -> ty
-    CIntrinsic(_, _, ty) -> ty
+    CCall(_, _, ty, _) -> ty
+    CIntrinsic(_, _, ty, _) -> ty
     CCtor(_, _, _, ty) -> ty
     CUpdate(_, _, _, _, ty) -> ty
     CField(_, _, _, _, ty) -> ty
@@ -639,7 +665,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CReturn(_) -> TyNever
     CBreak(_) -> TyNever
     CContinue(_) -> TyNever
-    CForeign(_, ty) -> ty
+    CForeign(_, ty, _) -> ty
     CDup(_, ty) -> ty
   }
 
@@ -725,7 +751,8 @@ test "the three kinds of body with one name are three keys" {
     body: CUnit,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
   let plain = fn_key(base)
   let as_impl = fn_key(CFun { ..base, impl_of: Some((3, TyString)) })

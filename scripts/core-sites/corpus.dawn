@@ -1,0 +1,49 @@
+# One of every way a call can be written, for scripts/core-sites/check.py.
+#
+# The checker pairs each call site lowering puts in Core with the parser's
+# call node at the same position, so this file is shaped by the forms the
+# typed tree tells apart rather than by what a program would do: a call
+# resolved to a function, a function value, an application of something that
+# is not a name, a builtin, a trait method, an effect operation, a `use java`
+# member, a call whose default argument was left out, and the calls lowering
+# turns into something else (a self tail call becomes a loop, a constructor is
+# no call at all). Every form is on a line of its own, and a few lines carry
+# two calls, so a site that lands on the wrong call of a line is told apart.
+
+use std/list
+use std/str
+use java "java.lang.Math"
+
+effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+type Box = { step: fn(Int) -> Int }
+
+fn add(a: Int, b: Int = 1) -> Int = a + b
+
+fn twice(f: fn(Int) -> Int, x: Int) -> Int = f(f(x))
+
+fn count(n: Int, acc: Int) -> Int = if n == 0 { acc } else { count(n - 1, acc + 1) }
+
+fn depth(n: Int) -> Int = if n == 0 { 0 } else { 1 + depth(n - 1) }
+
+fn make(k: Int) -> fn(Int) -> Int = v => v + k
+
+fn asked(x: Int) -> Int !Ask = ask(x) + ask(x + 1)
+
+pub fn main() -> Unit !io = {
+  let xs = list.map([1, 2, 3], v => add(v))
+  let s = str.split("a,b", ",").len()
+  let k = 3 |> add
+  let g = (v: Int) => v * 2
+  let b = Box { step: v => v - 1 }
+  let o = Some(add(1, 2))
+  let m = make(2)(5) + (b.step)(7)
+  let j = Math.abs(-4) + Math.max(add(1), 2)
+  let t = str.len("${add(4)}")
+  with handle Ask { ask(n) => n * 10 }
+  let a = asked(1)
+  println(to_string(twice(g, add(1, b: 2)) + k + s + len(xs) + count(3, 0) + depth(2)))
+  println("${m} ${j} ${t} ${a} ${o.unwrap_or(0)} ${xs[0] == 2}")
+}

@@ -118,6 +118,8 @@
 > `native-backend-plan.md` 已有裁决：**保持 Core 无 span
 > 是有意的**，等真正做调试信息行号表时再一次性加。所以那件事属于「JVM LineNumberTable」的
 > 独立项，不该塞进本条。
+> （2026-10-05 补记：M2 给 Core 调用节点加了 site，但 dump 不打印它，本条的判据原样成立；
+> 关系见 [source-span-map-design.md](../source-span-map-design.md) 第二节。）
 >
 > 顺带订正勘察一处：`codegen.dawn` 里那处「漏网的裸 `cw.toByteArray().expect("bytes")`」
 > 不在生产路径上，它在一个 ASM interop 的 `test` 块里，把 spike 测试的 writer 接进错误报告器
