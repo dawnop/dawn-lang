@@ -35,11 +35,15 @@
 # reports one real defect in every test binary there (nightly.yml says which),
 # and that leg stays on gcc until the fix lands.
 #
-# Why only on a GitHub runner. Off one (a laptop, or scripts/gates-external
-# on a prefix whose toolchain pins gcc 13.3 as the stand-in for the runner's
-# `cc`), CC stays whatever the caller set and the scripts keep their own
-# default, `cc`; this prints which and changes nothing. GITHUB_ACTIONS is the
-# runner's own variable and the external runner does not set it.
+# Why only on a GitHub runner, or where DAWN_PINNED_CC names the compiler.
+# Off a runner (a laptop), CC stays whatever the caller set and the scripts
+# keep their own default, `cc`; this prints which and changes nothing.
+# GITHUB_ACTIONS is the runner's own variable, and the external runner
+# (scripts/gates-external) does not fake it. It names the clang 18.1.3 of its
+# input pack in DAWN_PINNED_CC instead (conda-forge's build of the same
+# release, since a prefix cannot apt install), and this script holds that
+# compiler to the same version and writes CC the same way, so an external
+# run's C jobs build with the compiler CI's do.
 #
 #   ./scripts/pinned-cc.sh        # in a workflow step; appends CC to $GITHUB_ENV
 set -euo pipefail
@@ -47,12 +51,16 @@ set -euo pipefail
 want_bin=clang-18
 want_version=18.1.3
 
-if [ "${GITHUB_ACTIONS:-}" != true ]; then
+if [ -n "${DAWN_PINNED_CC:-}" ]; then
+  path=$DAWN_PINNED_CC
+  if [ ! -x "$path" ]; then
+    echo "FAIL: DAWN_PINNED_CC=$path is not an executable" >&2
+    exit 1
+  fi
+elif [ "${GITHUB_ACTIONS:-}" != true ]; then
   echo "pinned-cc: not a GitHub runner, CC left as ${CC:-unset (cc)}"
   exit 0
-fi
-
-if ! path=$(command -v "$want_bin"); then
+elif ! path=$(command -v "$want_bin"); then
   echo "FAIL: $want_bin is not on this runner; the image no longer carries it" >&2
   exit 1
 fi
@@ -62,7 +70,7 @@ if [ "$got" != "$want_version" ]; then
   exit 1
 fi
 if [ -z "${GITHUB_ENV:-}" ]; then
-  echo "FAIL: GITHUB_ACTIONS is set but GITHUB_ENV is not" >&2
+  echo "FAIL: a pinned compiler was found but GITHUB_ENV is not set" >&2
   exit 1
 fi
 echo "CC=$path" >>"$GITHUB_ENV"

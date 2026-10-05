@@ -16,7 +16,8 @@ persistent disk.
 Layout (created by `layout`):
 
     toolchain/<dir>/     one per download in inputs.lock.json, and one per
-                         conda toolchain (the C compiler, gcc-13.3.0/)
+                         conda toolchain (the C compiler, gcc-13.3.0/, and the
+                         pinned clang CI's C jobs take as CC, clang-18.1.3/)
     inputs/downloads/    the archives, as downloaded
     inputs/seeds/<tag>/  inputs/std-seeds/<tag>/  inputs/coursier/
     inputs/MANIFEST.json what inputs.py put there, with a sha256 per item
@@ -101,6 +102,15 @@ def job_env(prefix, *, tmpdir=None, runner_temp=None, inherit_host=False):
     make seedjar.sh skip its checksum and print a warning CI never prints; the
     seed reaches a job as the cache restore does, copied into .dawn/seeds.
 
+    DAWN_PINNED_CC names the pack's clang 18.1.3 (a conda toolchain with a
+    `pinned_cc` path and no bin on PATH). On CI, scripts/pinned-cc.sh finds
+    the runner image's clang-18 because GITHUB_ACTIONS is true and appends
+    CC to GITHUB_ENV; this runner does not pretend to be GitHub, so it names
+    the compiler instead, and the same script then checks its version and
+    writes CC the same way. Bare `cc` stays gcc, as on the runner. clang is
+    kept off PATH because its directory's bin/ also holds icu, xz and zstd
+    tools that would shadow /usr/bin for every step.
+
     inherit_host=True is the broken shell the leak self-test must catch: the
     host environment underneath, as if `env -i` had been dropped.
     """
@@ -135,6 +145,9 @@ def job_env(prefix, *, tmpdir=None, runner_temp=None, inherit_host=False):
         "npm_config_cache": str(prefix / "cache" / "npm"),
         "npm_config_offline": "true",
     }
+    for item in lock.get("conda_toolchains", []):
+        if item.get("pinned_cc"):
+            base["DAWN_PINNED_CC"] = str(prefix / "toolchain" / item["dir"] / item["pinned_cc"])
     if inherit_host:
         # The broken variant keeps whatever the host had for these, which is
         # exactly what dropping `env -i` would do for a variable the host sets.
@@ -283,8 +296,9 @@ def cmd_selftest(args):
     ensure_layout(prefix)
     want = str(java_home(prefix))
     leak = "/leaked/host/jdk"
-    probe = ('printf "%s\\n%s\\n%s\\n%s\\n" "$JAVA_HOME" "$PATH" '
-             '"${HOST_ONLY_VARIABLE:-unset}" "$(command -v cc || echo none)"')
+    probe = ('printf "%s\\n%s\\n%s\\n%s\\n%s\\n" "$JAVA_HOME" "$PATH" '
+             '"${HOST_ONLY_VARIABLE:-unset}" "$(command -v cc || echo none)" '
+             '"${DAWN_PINNED_CC:-unset}"')
     saved = {k: os.environ.get(k) for k in ("JAVA_HOME", "HOST_ONLY_VARIABLE", "PATH")}
     os.environ["JAVA_HOME"] = leak
     os.environ["HOST_ONLY_VARIABLE"] = "leaked"
@@ -305,9 +319,13 @@ def cmd_selftest(args):
         ("no host-only variable", out[2] == "unset", out[2]),
     ]
     compilers = [str(prefix / "toolchain" / entry["dir"] / entry["bin"] / "cc")
-                 for entry in load_lock().get("conda_toolchains", [])]
+                 for entry in load_lock().get("conda_toolchains", []) if entry["bin"]]
     if compilers:
         checks.append(("cc is the input pack's", out[3] in compilers, out[3]))
+    pinned = [str(prefix / "toolchain" / entry["dir"] / entry["pinned_cc"])
+              for entry in load_lock().get("conda_toolchains", []) if entry.get("pinned_cc")]
+    if pinned:
+        checks.append(("DAWN_PINNED_CC is the input pack's clang", out[4] in pinned, out[4]))
     ok = True
     for name, good, seen in checks:
         print(f"{'ok  ' if good else 'FAIL'} {name}: {seen}")

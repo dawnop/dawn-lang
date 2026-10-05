@@ -201,11 +201,19 @@ class LocalBackend:
         _, java_out = java_major(f"{self.jdk}/bin/java")
         build = re.search(r"Runtime Environment.*\(build ([^)]+)\)", java_out)
         python = first_line(["python3", "--version"])
+        # The C compiler the C jobs build with: CC as scripts/pinned-cc.sh sets
+        # it from DAWN_PINNED_CC (the input pack's clang), else bare `cc`.
+        # conda-forge's clang names its feedstock by URL on that line, and a
+        # slash is refused as a path by the bundle's leak filter, so the
+        # scheme and directories go and the feedstock name and commit stay.
+        cc = first_line([env.get("DAWN_PINNED_CC") or "cc", "--version"])
+        if cc:
+            cc = re.sub(r"[a-z]+://\S*/", "", cc)
         seeds = sorted(self.seed_hashes)
         return {
             "seed_jar_sha256": seeds[0] if len(seeds) == 1 else None,
             "java": build.group(1) if build else None,
-            "cc": first_line(["cc", "--version"]),
+            "cc": cc,
             "python": python.split()[-1] if python else None,
             "node": first_line(["node", "--version"]),
         }

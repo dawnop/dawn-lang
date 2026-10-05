@@ -416,6 +416,19 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 这一步只在 `GITHUB_ACTIONS=true` 时生效，外部运行不设这个变量，所以 prefix 里的 job 照旧用输入包的 gcc 13.3，`toolchain.cc` 也照旧如实记 gcc。这是有意的：给输入包加 conda-forge 的 clang 要动锁与 MANIFEST（共享 prefix 也被别的分支的工具核验），且同「不进替换表」一节的理由，不能靠加替换行表达。代价是外部证据与 GitHub 上的 main push 用的编译器不同：一个只在 clang 下红的改动，PR 证据档看不见，要到 main push 才红。要收这个口子，做法是把 clang 18.1.x 作为第二个 conda 工具链进输入包、`pinned-cc.sh` 在 prefix 里认它，另起一刀。
 
+### 输入包加 clang 18.1.3，外部运行与 CI 同编译器（2026-10-05）
+
+上一节的口子按那里写的做法收了。
+
+- **版本恰好相同。** conda-forge 有 18.1.3 的构建（`clang-18-18.1.3-default_h127d8a8_0` 等，2024-04-08 上传），锁里作为第二个 conda 工具链 `clang`（目录 `clang-18.1.3/`）钉了十九个包：`clang`、`clang-18`、`libclang-cpp18.1`、`libllvm18`、`compiler-rt`（含 `compiler-rt_linux-64` 的 ASan 等运行时）及 libLLVM 的动态库依赖 `libxml2`、`icu`、`libiconv`、`xz`、`libzlib`、`zstd`，再加 gcc 工具链已有的 sysroot、binutils、`libgcc-devel` 与 14.2.0 运行时七个包（同一归档，不必重新下载）。新下载 110 MiB，解开 994.7 MiB。没用 LLVM 官方 tarball：预编译包在 1 到 2 GB（`inputs.py` 文件头已记），送集群按 0.6 MB/s 算要半小时以上。
+- **怎么找到 sysroot 与链接器。** conda-forge 的 clang 默认目标是 `x86_64-conda-linux-gnu`，clang 18 按默认目标在自己的 `bin/` 找 `x86_64-conda-linux-gnu-clang.cfg`（以 `clang-18` 调用也读），里面是 `--sysroot <工具链>/x86_64-conda-linux-gnu/sysroot`（文本占位符，照常重定位）；gcc 安装（`crtbegin.o`、`libgcc.a`）与 `x86_64-conda-linux-gnu-ld` 在同一目录里找到。所以这些包必须与 clang 解在同一个目录，不能借 gcc 工具链的目录。实测本机 `env -i` 下编译、链接、`-fsanitize=address` 都通，产物只依赖 `libc`/`libm`。
+- **不进 PATH，用 `DAWN_PINNED_CC` 点名。** CI 上裸 `cc` 仍是 gcc，只有 `CC` 是 clang；这个工具链的 `bin/` 还带着 icu、xz、zstd 的命令行工具，进 PATH 会挡住 `/usr/bin`。所以锁里 `bin` 为 null，另记 `pinned_cc: bin/clang-18`，`prefix.job_env` 据此设 `DAWN_PINNED_CC`。`pinned-cc.sh` 见到它就把它当作 runner 上 `command -v clang-18` 的结果，照样核版本（`-dumpversion` 必须是 18.1.3）、照样写 `CC` 进 `GITHUB_ENV`；外部 runner 本来就按步骤给 `GITHUB_ENV` 文件，并带到后续步骤。没有伪造 `GITHUB_ACTIONS`：那是 runner 自己的变量，伪造它等于让所有按它分支的脚本都以为在 GitHub 上。
+- **`toolchain.cc`。** 改记 `$DAWN_PINNED_CC --version` 的首行（没有该变量时仍是 `cc --version`）。conda-forge 的首行带 feedstock 的 URL，证据包的泄露过滤见斜杠就拒，所以去掉 URL 的协议与目录，留下 `clang version 18.1.3 (clangdev-feedstock 9d0fad6b23c7f8bf40587b7924996e1cfbdcaffd)`。`bundle.py` 与 `verify_note.py` 对 `toolchain.cc` 只做字符串与泄露检查，不认具体值，所以 main 上的核验器不需要改，已发布的证据包也不受影响；替换表照旧不加行（理由同「不进替换表」）。
+- **二进制占位符。** `libxml2.so` 里的默认 catalog 路径与 `xz` 两个命令里的 locale 目录是二进制模式占位符，解包器向来拒绝。锁条目的 `unrelocated` 列出这五个文件，它们按原样解出、保留构建机路径；gate 用不到 libxml2 的 catalog，也不跑这里的 xz。不在列表里的二进制占位符照旧拒绝。
+- **与并行使用者兼容。** 同 `conda_items` 当初的理由，clang 的 MANIFEST 行放在新键 `pinned_cc_items`（锁条目的 `manifest_key`）下。main 的 `inputs.py verify` 在新 MANIFEST 上实测仍绿。反过来，别的分支用 main 的工具重新 `build` 会写出没有这个键的 MANIFEST，本分支的 `verify` 随之红（「clang in inputs.lock.json but not in MANIFEST」），要再 `build` 一次；合进 main 之后就没有这个来回。
+
+剩下的差别：CI 的 clang 是 Ubuntu 打包的 `18.1.3-1ubuntu1`，这里是 conda-forge 的构建，上游源码版本相同，下游补丁与构建选项不同；CI 链接的是 runner 的 glibc 2.39 头文件与 gcc 的 crt、libgcc，这里是 glibc 2.34 sysroot 与 gcc 13.3 的 `libgcc-devel`。一个只在 Ubuntu 补丁或新 glibc 头文件下才红的改动，外部证据仍看不见；只在 clang 18 下红的改动现在看得见。
+
 ## release 守卫的 ci 证据只认 main 的 push 运行（2026-09-25）
 
 `release_evidence.py` 的第 1 条证据原来是「`ci.yml` 在该 sha 上有任意一次成功运行，不限事件与分支」，理由是 `ci.yml` 在所有分支上调用同一个 `gates.yml`。#168 之后这个前提不成立：`pull_request` 运行只跑 `plan.py` 选的子集，其余 job 跳过、按 success 计；Actions API 把 PR 运行记在 PR 头提交的 sha 下。同一个 sha 先在 PR 上子集绿、再原样快进推到 main 时，`any(success)` 会把子集绿当全集证据，哪怕 main 上那次全集是红的。今天走 `gh pr merge --rebase` 总会产生新 sha，所以还没踩到；快进合入一旦常用就会踩到。
