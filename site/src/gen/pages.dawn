@@ -134,8 +134,7 @@ pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) 
   # Vendor the Playground editor bundle (built from site/play-ui). Copy it if
   # present; otherwise write placeholders so the link checker still passes and
   # the rest of the site builds — the Playground page just won't have an editor.
-  let play_js = emit_or_stub(out, "playground.js", "site/play-ui/dist/playground.js",
-    "console.warn('dawn-play: editor bundle missing; run site/play-ui build')")
+  let play_js = emit_play_js(out)
   let play_css = emit_or_stub(out, "playground.css", "site/play-ui/dist/playground.css",
     "/* dawn-play: editor bundle missing */")
   let (search_app, search_worker) = emit_search_bridge(out)
@@ -308,6 +307,37 @@ fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String 
       emit_text(out, name, stub)
     }
   }
+
+## The Playground editor bundle and the one chunk it imports on demand, the
+## builtin completion table (docs/play-lsp-client-design.md). Answers the
+## name of the bundle the page loads.
+##
+## The chunk is written first, so its fingerprinted name can be written into
+## the bundle's `import("./playground-builtins.js")`, the way [emit_bridge]
+## orders the demo's modules. A bundle without that import stops the build:
+## either the split was undone, and the table is back in the first download,
+## or Vite spells the import differently, and the bundle would ask for a file
+## by a name whose bytes the cache cannot see change. A missing bundle gets
+## the placeholder pair, as before the split.
+fn emit_play_js(out: String) -> String !Fs !io = {
+  let stub = "console.warn('dawn-play: editor bundle missing; run site/play-ui build')"
+  match (io.read_file("site/play-ui/dist/playground.js"),
+    io.read_file("site/play-ui/dist/playground-builtins.js")) {
+    (Ok(main), Ok(chunk)) -> {
+      let spec = `import("./playground-builtins.js")`
+      if not str.contains(main, spec) {
+        panic("site/play-ui/dist/playground.js has no `${spec}`; the builtin table "
+            ++ "is either inlined again or imported under a name this generator does not write")
+      }
+      let hashed = emit_text(out, "playground-builtins.js", chunk)
+      emit_text(out, "playground.js", str.replace(main, spec, `import("./` ++ hashed ++ `")`))
+    }
+    _ -> {
+      println("  warning: the Playground bundle or its builtins chunk is missing; writing placeholder playground.js")
+      emit_text(out, "playground.js", stub)
+    }
+  }
+}
 
 ## The spec, the early design notes and the history, each one document
 ## rendered whole and each one a pair. The spec and the design notes have

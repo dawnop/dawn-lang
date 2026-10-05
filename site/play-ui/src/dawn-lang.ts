@@ -3,6 +3,12 @@
 // build-time highlighter (site/src/hl/dawn.dawn): keyword, type/ctor, the
 // definition name after `fn`, strings with `$` interpolation, numbers, chars,
 // and `#` comments.
+//
+// The builtin table is not in the first bundle. It is the largest input after
+// @codemirror/view and is only needed while the LSP cannot answer, so it is a
+// separate chunk fetched by `loadBuiltins()` (docs/play-lsp-client-design.md
+// gives the measured sizes). Until it arrives, completion still offers the
+// buffer's own names, keywords, types and constructors.
 import {
   StreamLanguage,
   LanguageSupport,
@@ -16,7 +22,7 @@ import {
   type CompletionResult,
   type CompletionSource,
 } from '@codemirror/autocomplete'
-import { BUILTINS, type Builtin } from './builtins.generated'
+import type { Builtin } from './builtins.generated'
 import type { EditorView } from '@codemirror/view'
 
 const KEYWORDS = new Set([
@@ -297,12 +303,45 @@ function docDecls(doc: string, skipFrom: number) {
 // where the alias is the module path's last segment. Prelude
 // functions are in scope everywhere and complete bare.
 const moduleAlias = (module: string) => module.slice(module.lastIndexOf('/') + 1)
-const PRELUDE = BUILTINS.filter((b) => !b.module)
-const MODULE_FNS = BUILTINS.filter((b) => b.module)
-const MODULES_BY_ALIAS = new Map<string, Builtin[]>()
-for (const b of MODULE_FNS) {
-  const alias = moduleAlias(b.module!)
-  MODULES_BY_ALIAS.set(alias, [...(MODULES_BY_ALIAS.get(alias) ?? []), b])
+export interface BuiltinIndex {
+  prelude: Builtin[]
+  moduleFns: Builtin[]
+  byAlias: Map<string, Builtin[]>
+}
+
+export function indexBuiltins(table: readonly Builtin[]): BuiltinIndex {
+  const prelude = table.filter((b) => !b.module)
+  const moduleFns = table.filter((b) => b.module)
+  const byAlias = new Map<string, Builtin[]>()
+  for (const b of moduleFns) {
+    const alias = moduleAlias(b.module!)
+    byAlias.set(alias, [...(byAlias.get(alias) ?? []), b])
+  }
+  return { prelude, moduleFns, byAlias }
+}
+
+// The loaded table, or null before `loadBuiltins()` has finished. One
+// promise is shared, so concurrent completions fetch the chunk once; a failed
+// fetch is forgotten, so the next completion tries again.
+let loadedIndex: BuiltinIndex | null = null
+let loading: Promise<BuiltinIndex | null> | null = null
+
+export function builtinsLoaded(): BuiltinIndex | null {
+  return loadedIndex
+}
+
+export function loadBuiltins(
+  load: () => Promise<readonly Builtin[]> = () => import('./builtins.generated').then((m) => m.BUILTINS),
+): Promise<BuiltinIndex | null> {
+  if (loadedIndex != null) return Promise.resolve(loadedIndex)
+  loading ??= load().then(
+    (table) => (loadedIndex = indexBuiltins(table)),
+    () => {
+      loading = null
+      return null
+    },
+  )
+  return loading
 }
 
 // Where `use <module>` goes when a completion needs it: after the last
@@ -344,10 +383,10 @@ function builtinOption(b: Builtin, label: string): Completion {
 // The static half of completion, used before the LSP connects and whenever it
 // is down. Prelude functions are offered bare; module functions as
 // `str.trim`, never bare (a bare `trim` does not compile).
-export function staticCompletionLabels(): { prelude: string[]; module: string[] } {
+export function staticCompletionLabels(table: BuiltinIndex): { prelude: string[]; module: string[] } {
   return {
-    prelude: PRELUDE.map((b) => b.name),
-    module: MODULE_FNS.map((b) => `${moduleAlias(b.module!)}.${b.name}`),
+    prelude: table.prelude.map((b) => b.name),
+    module: table.moduleFns.map((b) => `${moduleAlias(b.module!)}.${b.name}`),
   }
 }
 
@@ -357,7 +396,15 @@ export function staticCompletionLabels(): { prelude: string[]; module: string[] 
 // (after fn/let/var/const/type/for/derive), on `use` lines (module paths), and
 // right after `.` (Java members, record fields) or `!` (effect rows) -- except
 // after `alias.` for a std module alias, where the module's functions follow.
-export function dawnCompletions(context: CompletionContext): CompletionResult | null {
+//
+// Synchronous, over whatever builtin table is loaded (`table` defaults to it):
+// with none, the builtins are simply absent. It never starts the fetch, so it
+// is also the half merged under a live LSP answer. `staticCompletions` is the
+// offline source that waits for the table.
+export function dawnCompletions(
+  context: CompletionContext,
+  table: BuiltinIndex | null = loadedIndex,
+): CompletionResult | null {
   const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
   const inside = lexContext(context.state.sliceDoc(0, context.pos), context.pos)
   if (inside === 'string' || inside === 'comment') return null
@@ -385,7 +432,7 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
     // `str.` (not `x.str.`): the members of that std module, named bare after
     // the dot, as the LSP names them, so the two sources merge by label.
     const qualifier = /(?:^|[^\w.])([a-z_]\w*)\.$/.exec(before)
-    const members = qualifier ? MODULES_BY_ALIAS.get(qualifier[1]) : undefined
+    const members = qualifier ? table?.byAlias.get(qualifier[1]) : undefined
     if (!members) return null
     return {
       from,
@@ -398,8 +445,8 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
   const locals = docDecls(context.state.doc.toString(), from)
   const options = [
     ...locals,
-    ...PRELUDE.map((b) => builtinOption(b, b.name)),
-    ...MODULE_FNS.map((b) => builtinOption(b, `${moduleAlias(b.module!)}.${b.name}`)),
+    ...(table?.prelude ?? []).map((b) => builtinOption(b, b.name)),
+    ...(table?.moduleFns ?? []).map((b) => builtinOption(b, `${moduleAlias(b.module!)}.${b.name}`)),
     ...TYPES.map((t) => ({ label: t, type: 'type' })),
     ...CTORS.map((c) => ({ label: c, type: 'type' })),
     ...[...KEYWORDS].map((k) => ({ label: k, type: 'keyword' })),
@@ -412,6 +459,12 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
     : options
   return { from, options: filtered, validFor: /^[A-Za-z0-9_]*$/ }
 }
+
+// The completion source for when the LSP cannot answer: the static half with
+// the builtin table, fetched first if it has not been. A table that fails to
+// load leaves the rest of the static half.
+export const staticCompletions: CompletionSource = async (context) =>
+  dawnCompletions(context, await loadBuiltins())
 
 export function dawn(completionSource: CompletionSource = dawnCompletions): LanguageSupport {
   return new LanguageSupport(dawnMode, [

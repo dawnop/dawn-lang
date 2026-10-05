@@ -937,32 +937,57 @@ export function mergeCompletionResults(
   return { ...fallback, options }
 }
 
+/**
+ * Completion with the LSP first. `online` is the static half merged under a
+ * server answer; `offline` stands in when there is no answer to merge under:
+ * the client is not ready (never connected, or dropped) or the request
+ * failed. The two differ only in the builtin table: `offline` fetches it,
+ * `online` uses it only if some earlier offline moment already did, because a
+ * live server offers the builtins itself (docs/play-lsp-client-design.md).
+ */
 export function lspCompletionSource(
   client: DawnLspClient,
-  fallback: CompletionSource,
+  offline: CompletionSource,
+  online: CompletionSource = offline,
 ): CompletionSource {
   return async (context: CompletionContext): Promise<CompletionResult | null> => {
-    const staticResult = await fallback(context)
+    if (!client.isReady()) return offline(context)
+    const staticResult = await online(context)
     const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
     const line = context.state.doc.lineAt(context.pos)
     const before = context.state.sliceDoc(line.from, context.pos)
     const shouldAsk = staticResult != null || context.explicit || word != null || /\S$/.test(before)
-    if (!shouldAsk || !client.isReady()) return staticResult
+    if (!shouldAsk) return staticResult
+    let items: LspCompletionItem[]
     try {
-      const items = await client.completion(context.pos, 750)
-      const server = items.map((item) => completionOf(item, client))
-        .filter((item): item is Completion => item != null)
-      if (server.length === 0) return staticResult
-      const base = staticResult ?? {
-        from: word?.from ?? context.pos,
-        options: [],
-        validFor: /^[A-Za-z0-9_]*$/,
-      }
-      return mergeCompletionResults(server, base)
+      items = await client.completion(context.pos, 750)
     } catch {
-      return staticResult
+      return offline(context)
     }
+    const server = items.map((item) => completionOf(item, client))
+      .filter((item): item is Completion => item != null)
+    if (server.length === 0) return staticResult
+    const base = staticResult ?? {
+      from: word?.from ?? context.pos,
+      options: [],
+      validFor: /^[A-Za-z0-9_]*$/,
+    }
+    return mergeCompletionResults(server, base)
   }
+}
+
+/**
+ * Fetch the builtin table as soon as the LSP is down, so the first offline
+ * completion does not wait for it. Subscribe after `start()`: before it the
+ * client reports `fallback` only because it has not tried yet.
+ */
+export function prefetchWhenOffline(
+  client: Pick<DawnLspClient, 'onStatus'>,
+  load: () => unknown,
+): () => void {
+  return client.onStatus((status) => {
+    if (status === 'fallback') load()
+  })
 }
 
 /**

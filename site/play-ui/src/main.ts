@@ -13,7 +13,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { closeBrackets, completionKeymap, acceptCompletion } from '@codemirror/autocomplete'
 import { bracketMatching, indentOnInput } from '@codemirror/language'
 import { lintGutter } from '@codemirror/lint'
-import { dawn, dawnCompletions } from './dawn-lang'
+import { dawn, dawnCompletions, loadBuiltins, staticCompletions } from './dawn-lang'
 import { dawnDiagnostics, errorLens } from './lint'
 import {
   DawnLspClient,
@@ -23,6 +23,7 @@ import {
   lspHover,
   lspInlayHints,
   lspSemanticTokens,
+  prefetchWhenOffline,
 } from './lsp'
 import { playEndpoints } from './endpoints'
 import { SAMPLES } from './samples'
@@ -216,7 +217,7 @@ function mount(root: HTMLElement) {
         lineNumbers(),
         highlightActiveLineGutter(),
         highlightActiveLine(),
-        dawn(lspCompletionSource(lsp, dawnCompletions)),
+        dawn(lspCompletionSource(lsp, staticCompletions, dawnCompletions)),
         dawnDiagnostics(checkEndpoint, lsp, (busy) => (checking.hidden = !busy)),
         lspHover(lsp),
         lspInlayHints(lsp),
@@ -250,6 +251,7 @@ function mount(root: HTMLElement) {
     parent: editorHost,
   })
   lsp.start(initialCode)
+  prefetchWhenOffline(lsp, loadBuiltins)
   refreshChrome()
 
   // ---- draft: debounced, so typing does not write storage per keystroke ----
