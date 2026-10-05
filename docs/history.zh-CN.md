@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ f75f39bf52df9f26 -->
+<!-- doc-check: translation-of docs/history.md @ e10a380ad750e737 -->
 
 # 历史
 
@@ -159,6 +159,10 @@
   站点与 Playground 按 release tag 部署。
 - **2026-10-01。** GPU 参考实现从 `std/gpu` 迁到 `packages/tileref`
   （已在 main，尚未发版）。（[tile-backend-design.md](tile-backend-design.md)）
+- **2026-10-06。** `+ - * / %` 与一元 `-` 经六个 prelude trait（`Add` 到 `Neg`）用到程序自己的类型上，
+  每个都带一个设备类型可以绑定的效果成员；Int 与 Float 保留原生运算，不透明类型不继承目标的算术。
+  这六个名字从此不能再用作 `trait` 或 `effect` 的名字（已在 main，尚未发版）。
+  （[arith-operator-traits-design.md](arith-operator-traits-design.md)）
 
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
 

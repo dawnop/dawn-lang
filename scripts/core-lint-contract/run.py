@@ -71,6 +71,7 @@ LINT = {
     "lint-54": (HERE / "local_variable.dawn", "evidence-row"),
     "lint-144": (HERE / "nested_list_eq.dawn", "dict-arity"),
     "lint-5f91c188": (SPIKE / "effect_assoc_row.dawn", "evidence-slot"),
+    "lint-arith-slot": (SPIKE / "arith_traits.dawn", "slot-evidence"),
 }
 
 # repros that are refused by the unmutated checker: the defect they show is

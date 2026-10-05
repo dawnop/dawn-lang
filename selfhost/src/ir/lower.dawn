@@ -33,7 +33,7 @@ use check/types.{
   LabelSlot, VariableSlot, AssociatedSlot,
   Adts, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
-  DISPLAY_ID,
+  DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID, NEG_ID, is_arith_trait,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, sub_goals
 }
@@ -1815,6 +1815,15 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
   if tid == ORD_ID { return cmp_at(st, args[0], args[1], subject) }
   if tid == SHOW_ID { return show_at(st, args[0], subject) }
   if tid == INDEX_ID { return index_at(st, args[0], args[1], subject) }
+  # Int and Float arithmetic reached through a dictionary: the very node a
+  # written `a + b` lowers to, so a backend only ever sees CBinary over the
+  # two scalars (docs/arith-operator-traits-design.md D8)
+  if tid == ADD_ID { return (st, CBinary(CAdd, args[0], args[1], subject)) }
+  if tid == SUB_ID { return (st, CBinary(CSub, args[0], args[1], subject)) }
+  if tid == MUL_ID { return (st, CBinary(CMul, args[0], args[1], subject)) }
+  if tid == DIV_ID { return (st, CBinary(CDiv, args[0], args[1], subject)) }
+  if tid == REM_ID { return (st, CBinary(CMod, args[0], args[1], subject)) }
+  if tid == NEG_ID { return (st, CUnary(CNeg, args[0], subject)) }
   panic("lower: no primitive relation for trait ${to_string(tid)}")
 }
 
@@ -1841,6 +1850,8 @@ fn prim_ret_ty(tid: Int, subject: Ty) -> Ty =
     TyString
   } else if tid == INDEX_ID {
     index_item_ty(subject)
+  } else if is_arith_trait(tid) {
+    subject
   } else {
     panic("lower: no primitive relation for trait ${to_string(tid)}")
   }
@@ -1894,17 +1905,30 @@ fn make_prim_slot(
     }
     ai = ai + 1
   }
-  let (st4, body0) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
+  let (st4a, body0) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
   # ...and the result crosses back out the same way. A scalar answer needs no
   # box, which is every relation but `Index`.
   let body = adapt_in(body0, prim_ret_ty(tid, subject), sg.ret)
+  # The slot has the trait method's erased ABI, so each projection in the
+  # method's row is one evidence parameter, which a primitive relation never
+  # reads. The arithmetic traits are the first prelude traits with an effect
+  # member. Without these parameters the JVM fails to link the slot, and C
+  # calls it through a cast pointer with one argument too many, which runs
+  # (core lint's slot rule is what catches that side, ir/lint).
+  var st4 = st4a
+  var evps: List[CParam] = []
+  for _a in eff_assocs(sig_abi_eff(sg)) {
+    let (stv, esym) = fresh_sym(st4)
+    st4 = stv
+    evps = evps ++ [CParam { sym: esym, ty: erased_ev_ty(), mode: COwned }]
+  }
   let f = CFun {
     name: name,
     owner: st4.owner,
     captures: [],
     params: ps,
     dicts: [CParam { sym: dsym, ty: dict_ty(), mode: COwned }],
-    evs: [],
+    evs: evps,
     ret: sg.ret,
     body: body,
     is_test: false,

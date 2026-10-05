@@ -178,6 +178,11 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   Playground deploy from release tags.
 - **2026-10-01.** The GPU reference implementations leave `std/gpu` for `packages/tileref`
   (on main, not yet released). ([tile-backend-design.md](tile-backend-design.md))
+- **2026-10-06.** `+ - * / %` and unary `-` reach types of the program's own through six
+  prelude traits, `Add` to `Neg`, each with an effect member a device type can bind; Int and
+  Float keep their native operators, and an opaque type does not inherit its target's
+  arithmetic. The six names are now taken for a `trait` or an `effect` (on main, not
+  yet released). ([arith-operator-traits-design.md](arith-operator-traits-design.md))
 
 From v0.1.0 on 2026-07-17 to v0.81.0 on 2026-10-01 there have been 83 release tags.
 

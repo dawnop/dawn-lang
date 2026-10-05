@@ -42,11 +42,11 @@ use std/map
 use std/set
 use std/str
 use check/types.{
-  Adts, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_vars,
-  eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID
+  Adts, Traits, Ty, TyFn, TyAdt, TyNever, TyVar, Eff, peel_opaque, eff_labels, eff_vars,
+  eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID, sig_abi_eff
 }
 use ir/core.{
-  CSite, CNoSite, CAt, CModule, CFun, CExpr, CStmt, CCallee, CDictDef,
+  CSite, CNoSite, CAt, CModule, CFun, CExpr, CStmt, CCallee, CDictDef, CSlotFn,
   CInt, CLocal, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
@@ -226,6 +226,67 @@ pub fn lint_program(adts: Adts, mods: List[CModule]) -> List[Violation] = {
     }
   }
   a.out
+}
+
+# ---- slot-evidence ----
+
+## A dictionary slot function takes the evidence its trait method's erased ABI
+## names: one parameter per label, per effect variable and per projection of
+## the method's row. A call through the slot passes exactly that many, so a
+## slot with fewer fails to link on the JVM (NoSuchMethodError) and on C is
+## called through a cast pointer with arguments it never declared, which on
+## x86-64 happens to run. The arithmetic traits were the first prelude traits
+## with an effect member, and the primitive slots built for Int and Float
+## missed the projection's parameter on C silently
+## (docs/arith-operator-traits-design.md D8). A trait not in the table, or a
+## slot that defers to a default body, is not judged here.
+pub fn check_slots(traits: Traits, mods: List[CModule]) -> List[Violation] = {
+  var fns: Map[(String, String), CFun] = map.empty()
+  for m in mods {
+    for f in m.fns { fns = map.insert(fns, (f.owner, f.name), f) }
+  }
+  var out: List[Violation] = []
+  var seen: Set[String] = set.empty()
+  for m in mods {
+    for d in m.dicts {
+      if set.has(seen, d.key) { continue }
+      seen = set.insert(seen, d.key)
+      match map.get(traits, d.trait_id) {
+        None -> ()
+        Some(tr) -> {
+          var i = 0
+          for slot in d.slots {
+            if i < len(tr.methods) {
+              let (mn, ms) = tr.methods[i]
+              let abi = sig_abi_eff(ms.sig)
+              let want = len(eff_labels(abi)) + len(eff_vars(abi)) + len(eff_assocs(abi))
+              match slot {
+                CSlotFn(owner, name) ->
+                  match map.get(fns, (owner, name)) {
+                    Some(f) ->
+                      if len(f.evs) != want {
+                        out = out ++ [Violation {
+                          rule: "slot-evidence",
+                          owner: owner,
+                          fn_name: name,
+                          detail: "slot " ++ to_string(i) ++ " of dictionary `" ++ d.key ++
+                            "` takes " ++ to_string(len(f.evs)) ++
+                            " evidence parameter(s), but `" ++ tr.name ++ "." ++ mn ++
+                            "` passes " ++ to_string(want)
+                        }]
+                      }
+                    None -> ()
+                  }
+                _ -> ()
+              }
+            }
+            i = i + 1
+          }
+        }
+      }
+    }
+  }
+  out
 }
 
 # ---- closure rows ----

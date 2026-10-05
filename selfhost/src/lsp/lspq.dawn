@@ -2908,6 +2908,14 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           q = walk_e(qc, q, left, Some(tl))
           q = walk_e(qc, q, right, Some(tr2))
         }
+        # an operator over a type of its own is checked as its trait's call
+        # (docs/arith-operator-traits-design.md D6); its operands are still
+        # this node's, or a name inside `v + w` would go missing from hover,
+        # references and rename
+        Some(XCallFn(_, _, [tl, tr2], _, _, Some(_), _, _, _, _)) -> {
+          q = walk_e(qc, q, left, Some(tl))
+          q = walk_e(qc, q, right, Some(tr2))
+        }
         _ -> {
           q = walk_e(qc, q, left, None)
           q = walk_e(qc, q, right, None)
@@ -2916,6 +2924,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
     EUnary(_, operand, _, _) ->
       match te {
         Some(XUnary(_, t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+        Some(XCallFn(_, _, [t], _, _, Some(_), _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
         _ -> { q = walk_e(qc, q, operand, None) }
       }
     EIf(cond, thn, els, _, _) ->
@@ -4032,6 +4041,7 @@ fn collect_e(
     EBinary(_, left, right, _, _, _, _) -> {
       let (tl, tr2) = match te {
         Some(XBinary(_, l, r, _, _, _, _, _, _)) -> (Some(l), Some(r))
+        Some(XCallFn(_, _, [l, r], _, _, Some(_), _, _, _, _)) -> (Some(l), Some(r))
         _ -> {
           let n1: Option[TExpr] = None
           let n2: Option[TExpr] = None
@@ -4044,6 +4054,7 @@ fn collect_e(
     EUnary(_, operand, _, _) -> {
       let t: Option[TExpr] = match te {
         Some(XUnary(_, o, _, _, _)) -> Some(o)
+        Some(XCallFn(_, _, [o], _, _, Some(_), _, _, _, _)) -> Some(o)
         _ -> None
       }
       acc = collect_e(qc, acc, operand, t, before)

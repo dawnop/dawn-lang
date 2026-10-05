@@ -502,7 +502,7 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 同样的相等、哈希与序（`Eq`/`Hash`/`Ord`，以及 `Index`/`Iter`，自己没写就用目标的），
 两个后端都如此，零开销。`opaque` 是软关键字，只有 `opaque type` 有意义。
 
-**唯一的例外是渲染**：不透明类型**不**继承目标的 `Show`（也就不继承 `Display`）。
+**两个例外：渲染与算术**。不透明类型**不**继承目标的 `Show`（也就不继承 `Display`）。
 关系只回答真假或符号，不暴露表示；渲染把表示原样印出来，而那正是这个类型要藏的东西。
 要打印就在声明模块写 `impl Show[N]`（需要时再写 `impl Display[N]`）；没写，`to_string`、
 `${…}`、`derive Show` 的字段、`[T: Show]` 约束对它都是编译错误。
@@ -510,6 +510,14 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 印出来。GHC 的 `GeneralizedNewtypeDeriving` 是同一条切分：复用表示的字典，唯独
 `Show`/`Read` 不看穿。审计与逐个类型的处置见
 [builtin-privileges-design.md](builtin-privileges-design.md) §4。）
+
+不透明类型也**不**继承目标的算术（`Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`，§3.5、§4.3）：
+算术产出该类型的**新值**，而新值怎样满足类型的不变量只有声明模块知道（句柄号相加、
+窄格式浮点跳过重新舍入都会静默算错）。要 `+` 就在声明模块写 `impl Add[N]`；没写，
+`u + u` 与 `[T: Add]` 约束对它都是编译错误，`Char` 也一样（`char.code` 先转成 `Int`）。
+（2026-10-06 起；此前 opaque 上的算术同样是错误，只是因为算术只认 `Int`/`Float`。
+GHC 同一条切分：`Num` 不随 newtype 白给，要显式 `deriving newtype`。见
+[arith-operator-traits-design.md](arith-operator-traits-design.md) D4。）
 
 泛型不透明类型的**实例身份**由声明 identity 与实例化实参共同组成，target 只回答运行期表示。
 即使某个类型参数根本不出现在 target 里，`Phantom[Int]` 与 `Phantom[String]` 仍是两个类型；
@@ -519,15 +527,15 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 > 若某个函数的答案变了，它要么是下面六件事之一，要么就是 bug。**只有六件事**允许看见
 > `TyOpaque`：可赋值性与统一判定（谁能转换）、impl 选择（`head_of`/`impl_at`）、
 > 符号命名（`ty_key`/`dict_key`/impl 方法名）、诊断里的类型名、公开面可见性校验
-> （§3.3：查 identity 与显式实参，**不查** representation），以及 `Show` 见证解析
-> （上一段的例外：不落回目标）。
+> （§3.3：查 identity 与显式实参，**不查** representation），以及 `Show` 与算术见证解析
+> （上两段的例外：不落回目标）。
 > 其余每一个吃 `Ty` 的函数——宽度、描述符、槽位、装箱、哪条指令、能不能当常量、
 > 某个 trait 有没有答案——都取目标的答案。
 > 次序也是定的：**先问身份再问表示**，`impl Eq[UserId]` 必须先于「按 Int 比较」，
 > 否则声明它就没意义了。
 > 机器化在 `scripts/opaque-twin/`：每个语料跑两遍，一遍原样一遍换成 `alias`，
 > 输出必须一致（编译错误也算输出）。2026-07-27 用手工做这件事一次抓出 12 处。
-> 渲染因上面的例外不在这个性质里，语料经目标显式渲染。
+> 渲染与算术因上面的例外不在这个性质里，语料经目标显式渲染、显式运算。
 
 可以给不透明类型写自己的 impl（`impl Show[UserId]`、`impl Display[UserId]`），它优先于
 目标类型的；孤儿规则把不透明类型算作声明模块的本地类型。`Char` 两层都写了
@@ -576,7 +584,9 @@ fn greet(name: String) -> Unit !io = {
   写出任一具名效果，整条效果行就是固定承诺，不会再自动补 io。例如一个 `!Ask` 函数同时
   做 IO，必须写 `!(io | Ask)`；只写 `!Ask` 会报错。
 - 函数体是 `=` 后的单个表达式；块 `{ }` 也是表达式（§4.2）。
-- 有默认参数（见下）；没有变长参数、没有重载。
+- 有默认参数（见下）；没有变长参数、没有**按名字的**重载：一个名字在一个作用域里恰有一个签名。
+  运算符背后的 trait（§3.5、§4.3）不是重载：每个「trait × 类型」全程序至多一个 impl，
+  选择是一次查表。
 
 **默认参数**（2026-08-08，#207）：形参可写 `name: Type = expr`，调用省掉该实参时
 在**每次调用**求值一次（不做 Python 那种「定义时求一次共享」）：
@@ -753,12 +763,14 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
   今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter` 五个预置 trait 也注入；
-  **方法名由语言代用户消费掉的两个不注入**，它们的方法名只在 impl 体、文档与错误消息里
-  出现：`Index`（`[]` 消费它，§4.8）与 `Display`（`to_string` 与 `${...}` 消费它，§4.3）。
-- **预置 trait 七个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+  **方法名由语言代用户消费掉的八个不注入**，它们的方法名只在 impl 体、文档与错误消息里
+  出现：`Index`（`[]` 消费它，§4.8）、`Display`（`to_string` 与 `${...}` 消费它，§4.3）
+  与六个算术 trait `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`（运算符消费它们，§4.3）。
+- **预置 trait 十三个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，**嵌套**渲染，也是 `to_string`
   要的 bound）、`Iter`（背后是 `for..in`，§4.7）、`Index`（背后是 `[]`，§4.8）、
-  `Display`（`display`，**顶层**渲染，背后是 `to_string` 与 `${...}`，§4.3）。
+  `Display`（`display`，**顶层**渲染，背后是 `to_string` 与 `${...}`，§4.3），
+  以及背后是 `+ - * / %` 与一元 `-` 的六个算术 trait（见下面那条）。
   标量的 impl 随语言提供；
   `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl；
   `Display` 不可 derive（理由见下面 `Display` 那条）。
@@ -797,6 +809,16 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     `Show`，不借 `B` 的 `Display`（不透明类型不继承任何渲染，§2.7）。
   语言自带的唯一一份是 `impl Display[Char]`（在 `std/char`，§1.5；同一个模块也写了
   那一层对应的 `impl Show[Char]`）。
+- **`Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`**（背后是 `+`、二元 `-`、`*`、`/`、`%`、一元 `-`，
+  §4.3）：同质、单参数，
+  `trait Add[T] { effect Add = !()  fn add(a: T, b: T) -> T !T.Add }`，其余同形
+  （`Neg` 一元：`fn neg(a: T) -> T !T.Neg`）。语言为 `Int`/`Float` 提供 impl；方法名
+  **不**进入函数命名空间。每个 trait 带一个与 trait 同名的关联效果，默认纯；impl 可绑定一个
+  具名效果（`effect Add = !Dev`），运算符的效果就是该绑定，记在外层签名里（§6），泛型代码以
+  `!T.Add` 投影它。impl 的效果绑定只能是 ground 行，所以「把算术转发给类型参数」的条件 impl
+  （`impl[T: Add] Add[Pair[T]]` 体内写 `p.a + q.a`）写不出；不转发的条件 impl 不受影响。
+  六个名字从此在 trait 与效果位置被占用：用户不能再声明同名的 `trait` 或 `effect`
+  （同名 `type` 仍可）。不提供 `Num`/`Zero`/`One`。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -1023,9 +1045,9 @@ let area = {
 | 7 | `&` | 左 | 按位与；仅 `Int` |
 | 8 | `<< >> >>>` | 左 | 移位；仅 `Int`。`>>` 算术（补符号）、`>>>` 逻辑（补零） |
 | 9 | `++` | 右 | `String`/`List` 连接 |
-| 10 | `+ -` | 左 | 仅数值，两侧同类型 |
-| 11 | `* / %` | 左 | 仅数值；`Int` 除零 panic |
-| 12 | `not`、一元 `-`、`~` | 前缀 | `~` 仅 `Int` 按位取反 |
+| 10 | `+ -` | 左 | 两侧同类型；`Int`/`Float` 原生，其余类型经 `Add`/`Sub`（§3.5） |
+| 11 | `* / %` | 左 | 两侧同类型；`Int`/`Float` 原生，其余经 `Mul`/`Div`/`Rem`；`Int` 除零 panic |
+| 12 | `not`、一元 `-`、`~` | 前缀 | 一元 `-` 在 `Int`/`Float` 外经 `Neg`；`~` 仅 `Int` 按位取反 |
 | 13 | `? . () []调用` | 后缀 | `?` 见 §8.1；`()` 自 2026-07-30 起是**一般后缀**（见下） |
 
 - **调用是一般后缀（SYN-02）**：任何后缀表达式后同一行紧跟 `(` 即为应用——
@@ -1148,6 +1170,12 @@ let area = {
   - 两套机制在 `Ord` 的每个标量上**答案相同**（`String` 上 `<` 与 `cmp` 是同一条
     比较、同一个序——**码点序**，见 §3.5），在 `Float` 上**有意不同**：原生 `<`
     是 IEEE 偏序，`Ord` 要的是全序，Float 只有前者。
+- 算术同样是**两套机制**：具体的 `Int`/`Float` 上 `+ - * / %` 与一元 `-` 是**不解见证的
+  原生运算**，不查 impl、不建字典；其余类型解对应 trait 的见证，`a + b` 就是 `Add` 的
+  `add(a, b)`，效果是该 impl 绑定的行。`[T: Add]` 是普通 bound，`Int`/`Float` 满足它。
+  左操作数无期望地检查，右操作数以左操作数的类型为期望类型检查，从不反向（`lit(2.0) * t`
+  推不出 `lit` 的类型参数，写 `t * lit(2.0)`）。缺 impl 先于两侧类型比较报出：`true + 1`
+  说的是 `Bool` 没有 `+`。求值仍是左到右。
 - 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string` 与字符串插值支持
   （可 derive 的还有 `Ord`，见 §3.5；多个用逗号：`derive Show, Ord`）。
   `Show` 是**预置 trait**，`derive Show` 铸的就是一条 impl，所以也可以手写
@@ -1319,6 +1347,7 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 - **只读**——没有 `xs[i] = v`，`Index` 也没有对应的写方法。列表与映射不可变；
   用户类型即使可变也不经 `[]` 写入。
 - 比较运算符 `<`/`==` 不经 trait 路由到标量的 native 实现（见 §4.3）——`Index` 只管 `[]`。
+  算术同，见 §4.3。
 
 用户类型的 impl：
 

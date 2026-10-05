@@ -159,6 +159,17 @@ MUTATIONS = {
         "let key = dict_key(tid, subject) ++ dict_shape_suffix(nargs)",
         "let key = dict_key(tid, subject)",
     ),),
+    # arith D8: the primitive Int/Float slot of an operator trait without the
+    # evidence parameter its method's projection asks for. The JVM fails to
+    # link it; C calls it through a cast pointer and runs.
+    "lint-arith-slot": ((
+        LOWER,
+        """  for _a in eff_assocs(sig_abi_eff(sg)) {
+    let (stv, esym) = fresh_sym(st4)""",
+        """  for _a in eff_assocs(sig_abi_eff(sg)) {
+    if len(evps) >= 0 { break }
+    let (stv, esym) = fresh_sym(st4)""",
+    ),),
     # 5f91c188: a projection that reduced to a label hands over that label's
     # bare record, where the slot's readers walk a pack.
     "lint-5f91c188": ((

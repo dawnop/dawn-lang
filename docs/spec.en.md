@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ fa92ddfecc0d5ac6 -->
+<!-- doc-check: translation-of docs/spec.md @ 554705a26ac7072a -->
 
 # Dawn Language Specification
 
@@ -627,7 +627,7 @@ target type — the same representation, the same equality, hashing and ordering
 and `Index`/`Iter`, the target's unless the type writes its own), on both backends, at zero cost.
 `opaque` is a soft keyword; only `opaque type` means anything.
 
-**Rendering is the one exception**: an opaque type does **not** inherit its target's `Show` (and so
+**Two exceptions, rendering and arithmetic.** An opaque type does **not** inherit its target's `Show` (and so
 not its `Display` either). A relation only answers true/false or a sign and exposes nothing; a
 rendering prints the representation as it is, which is exactly what the type hides. To print one,
 write `impl Show[N]` in the declaring module (and `impl Display[N]` when needed); without it,
@@ -637,6 +637,16 @@ it. (Since 2026-09-24; before that it was inherited, and fourteen handle types i
 the same line: it reuses the representation's dictionary, except for `Show`/`Read`, which do not
 look through. The audit and the verdict per type are in
 [builtin-privileges-design.md](builtin-privileges-design.md) §4.)
+
+Nor does an opaque type inherit its target's arithmetic (`Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`,
+§3.5, §4.3): arithmetic makes a **new value** of the type, and only the declaring module knows how
+that value keeps the type's invariant (summing handle numbers, or skipping the re-rounding of a
+narrow float, would be silently wrong). To have `+`, write `impl Add[N]` in the declaring module;
+without it, `u + u` and a `[T: Add]` bound are compile errors for it, `Char` included (convert with
+`char.code` first). (Since 2026-10-06; before that, arithmetic on an opaque type was an error too,
+only because arithmetic accepted nothing but `Int`/`Float`. GHC draws the same line: `Num` does not
+come with a newtype for free, it takes an explicit `deriving newtype`. See
+[arith-operator-traits-design.md](arith-operator-traits-design.md) D4.)
 
 A generic opaque type's **instance identity** is its declaration identity together with its
 instantiated arguments; the target answers only questions about runtime representation. Even when a
@@ -650,7 +660,8 @@ arguments along. "The representation is not public" does not imply "the type par
 > unification decision (who can convert), impl selection (`head_of`/`impl_at`), symbol naming
 > (`ty_key`/`dict_key`/impl method names), the type name in diagnostics, export-surface
 > visibility (§3.3: it checks the identity and the explicit arguments, **not** the representation),
-> and `Show` witness resolution (the exception above: it does not fall back to the target).
+> and `Show` and arithmetic witness resolution (the exceptions above: they do not fall back to the
+> target).
 > Every other function that eats a `Ty` — width, descriptor, slot, boxing, which instruction,
 > whether it can be a constant, whether some trait has an answer — takes the target's answer.
 > The order is fixed too: **ask about identity before representation**. `impl Eq[UserId]` must come
@@ -658,8 +669,8 @@ arguments along. "The representation is not public" does not imply "the type par
 > The mechanised form is in `scripts/opaque-twin/`: every corpus program is run twice, once as
 > written and once with `alias` substituted, and the outputs must agree (a compile error counts as
 > output). Doing this by hand once on 2026-07-27 caught 12 places.
-> Rendering is outside that property because of the exception above; the corpus renders through
-> the target explicitly.
+> Rendering and arithmetic are outside that property because of the exceptions above; the corpus
+> renders and computes through the target explicitly.
 
 An opaque type can be given its own impls (`impl Show[UserId]`, `impl Display[UserId]`), which take
 precedence over the target type's; the orphan rule counts an opaque type as a local type of the
@@ -720,7 +731,9 @@ fn greet(name: String) -> Unit !io = {
   example, a function declared `!Ask` that also performs IO must write `!(io | Ask)`; `!Ask` alone
   is an error.
 - The function body is the single expression after `=`; a block `{ }` is an expression too (§4.2).
-- Default parameter values exist (below); no varargs, no overloading.
+- Default parameter values exist (below); no varargs, no overloading **by name**: a name has exactly
+  one signature in a scope. The traits behind the operators (§3.5, §4.3) are not overloading:
+  each "trait × type" has at most one impl in the whole program, and choosing it is one lookup.
 
 **Default parameter values** (2026-08-08, #207): a parameter may be written
 `name: Type = expr`; a call that omits the argument evaluates the expression **once per
@@ -942,14 +955,16 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the five
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the two whose method name the
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the eight whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
-  bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8) and `Display`
-  (consumed by `to_string` and `${...}`, §4.3).
-- **Seven built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
+  (consumed by `to_string` and `${...}`, §4.3) and the six arithmetic traits
+  `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3).
+- **Thirteen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
   `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Index` (behind `[]`, §4.8),
-  `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3).
+  `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
+  and the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below).
   The impls for the scalars ship with the language;
   `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
   `Display` cannot be derived (the reason is under `Display` below).
@@ -1000,6 +1015,19 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     §2.7).
   The one impl that ships with the language is `impl Display[Char]` (in `std/char`, §1.5; the
   same module writes the other layer's `impl Show[Char]`).
+- **`Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`** (behind `+`, binary `-`, `*`, `/`, `%` and unary `-`,
+  §4.3): homogeneous, one type parameter,
+  `trait Add[T] { effect Add = !()  fn add(a: T, b: T) -> T !T.Add }`, the others alike (`Neg`
+  is unary: `fn neg(a: T) -> T !T.Neg`). The language provides impls for `Int`/`Float`; the method
+  names do **not** enter the function namespace. Each trait carries one associated effect named
+  like the trait, pure by default; an impl may bind it to a named effect (`effect Add = !Dev`),
+  and that binding is the operator's effect, recorded in the enclosing signature (§6), while
+  generic code projects it as `!T.Add`. An impl's effect binding can only be a ground row, so a
+  conditional impl that forwards arithmetic to its type parameter (`impl[T: Add] Add[Pair[T]]`
+  with `p.a + q.a` in its body) cannot be written; a conditional impl that does not forward is
+  unaffected. The six names are taken in trait and effect position from now on: a user can no
+  longer declare a `trait` or an `effect` by one of them (a `type` still can). There is no
+  `Num`/`Zero`/`One`.
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
   rule**: an impl can only be written in the module that declares the trait or the subject type.
   Impls take effect globally, no `use` needed.
@@ -1279,9 +1307,9 @@ From lowest to highest:
 | 7 | `&` | left | bitwise and; `Int` only |
 | 8 | `<< >> >>>` | left | shifts; `Int` only. `>>` is arithmetic (sign-filling), `>>>` logical (zero-filling) |
 | 9 | `++` | right | `String`/`List` concatenation |
-| 10 | `+ -` | left | numeric only, both sides the same type |
-| 11 | `* / %` | left | numeric only; `Int` division by zero panics |
-| 12 | `not`, unary `-`, `~` | prefix | `~` is bitwise complement, `Int` only |
+| 10 | `+ -` | left | both sides the same type; native on `Int`/`Float`, through `Add`/`Sub` on other types (§3.5) |
+| 11 | `* / %` | left | both sides the same type; native on `Int`/`Float`, through `Mul`/`Div`/`Rem` otherwise; `Int` division by zero panics |
+| 12 | `not`, unary `-`, `~` | prefix | unary `-` goes through `Neg` past `Int`/`Float`; `~` is bitwise complement, `Int` only |
 | 13 | `? . () []` call | postfix | `?` see §8.1; `()` has been a **general postfix** since 2026-07-30 (see below) |
 
 - **A call is a general postfix (SYN-02)**: any postfix expression followed on the same line
@@ -1446,6 +1474,14 @@ implementations are cross-checked against this, "happens to agree" is not allowe
     `cmp` are the same comparison and the same order — **code point order**, see §3.5), and
     **differ on purpose** on `Float`: native `<` is the IEEE partial order, `Ord` wants a
     total order, and Float only has the former.
+- Arithmetic has **two mechanisms** too: on concrete `Int`/`Float`, `+ - * / %` and unary `-` are
+  **native operations that resolve no witness**, with no impl lookup and no dictionary; on any
+  other type they resolve the matching trait's witness, so `a + b` is `Add`'s `add(a, b)` and its
+  effect is the row that impl binds. `[T: Add]` is an ordinary bound, and `Int`/`Float` satisfy it.
+  The left operand is checked with no expectation and the right one with the left one's type as
+  its expectation, never the other way (`lit(2.0) * t` cannot infer `lit`'s type parameter; write
+  `t * lit(2.0)`). A missing impl is reported before the two sides are compared: `true + 1` says
+  that `Bool` has no `+`. Evaluation is still left to right.
 - Printing user types: add `derive Show` after a `type` declaration to get `to_string` and
   string interpolation support (`Ord` is also derivable, see §3.5; use commas for several:
   `derive Show, Ord`).
@@ -1667,7 +1703,7 @@ let c = rows[1][0]   # chainable, composes with ?/./()
 - **Read-only** — there is no `xs[i] = v`, and `Index` has no corresponding write method.
   Lists and maps are immutable; a user type, even a mutable one, is not written through `[]`.
 - The comparison operators `<`/`==` route to the native implementation for scalars without
-  going through a trait (see §4.3) — `Index` only governs `[]`.
+  going through a trait (see §4.3) — `Index` only governs `[]`. So does arithmetic, see §4.3.
 
 An impl for a user type:
 

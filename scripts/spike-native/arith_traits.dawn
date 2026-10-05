@@ -1,0 +1,80 @@
+# The arithmetic operator traits, differentially (docs/arith-operator-traits-design.md).
+# `+ - * / %` and unary `-` on a record of the program's own, through the
+# generic paths: a dictionary forwarded through `for`, a lambda capturing one
+# in `fold`, two bounds and a two-projection row, `Neg` beside `Sub`, and each
+# instantiated at Int and Float, whose dictionary slots are the primitive ones
+# with an evidence parameter they ignore (D8). `Traced` binds the effect member
+# to a label, so the operator charges `!Log`, generically and directly.
+effect Log { fn note(s: String) -> Unit }
+
+type V2 = { x: Float, y: Float }
+
+impl Add[V2] {
+  fn add(a: V2, b: V2) -> V2 = V2 { x: a.x + b.x, y: a.y + b.y }
+}
+impl Sub[V2] {
+  fn sub(a: V2, b: V2) -> V2 = V2 { x: a.x - b.x, y: a.y - b.y }
+}
+impl Neg[V2] {
+  fn neg(a: V2) -> V2 = V2 { x: -a.x, y: -a.y }
+}
+impl Mul[V2] {
+  fn mul(a: V2, b: V2) -> V2 = V2 { x: a.x * b.x, y: a.y * b.y }
+}
+
+type Traced = { v: Int }
+
+impl Add[Traced] {
+  effect Add = !Log
+  fn add(a: Traced, b: Traced) -> Traced !Log = {
+    note("add ${a.v} ${b.v}")
+    Traced { v: a.v + b.v }
+  }
+}
+
+fn sum[T: Add](xs: List[T], z: T) -> T !T.Add = {
+  var acc = z
+  for x in xs { acc = acc + x }
+  acc
+}
+
+fn sum_fold[T: Add](xs: List[T], z: T) -> T !T.Add = fold(xs, z, (a, x) => a + x)
+
+fn dot[T: Add + Mul](xs: List[T], ys: List[T], z: T) -> T !(T.Add | T.Mul) = {
+  var acc = z
+  var i = 0
+  while i < len(xs) {
+    acc = acc + xs[i] * ys[i]
+    i = i + 1
+  }
+  acc
+}
+
+fn negsub[T: Sub + Neg](a: T, b: T) -> T !(T.Sub | T.Neg) = -(a - b)
+
+fn rem_div[T: Rem + Div](a: T, b: T) -> (T, T) !(T.Rem | T.Div) = (a / b, a % b)
+
+pub fn main() -> Unit !io = {
+  println(to_string(sum([1, 2, 3], 0)))
+  println(to_string(sum([1.5, 2.25], 0.0)))
+  println(to_string(sum_fold([10, 20], 5)))
+  println(to_string(dot([1, 2, 3], [4, 5, 6], 0)))
+  println(to_string(dot([0.5, 2.0], [4.0, 0.25], 1.0)))
+  println(to_string(negsub(3, 10)))
+  println(to_string(negsub(3.5, 1.0)))
+  println(to_string(rem_div(17, 5)))
+  println(to_string(rem_div(7.5, 2.0)))
+  let v = sum([V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }], V2 { x: 0.5, y: 0.5 })
+  println("${v.x} ${v.y}")
+  let w = negsub(V2 { x: 1.0, y: 1.0 }, V2 { x: 4.0, y: -2.0 })
+  println("${w.x} ${w.y}")
+  let a = V2 { x: 1.0, y: 2.0 }
+  let b = V2 { x: 10.0, y: 20.0 }
+  let c = a + b - -a * b
+  println("${c.x} ${c.y}")
+  with handle Log { note(s) => println("log " ++ s) }
+  let t = sum([Traced { v: 1 }, Traced { v: 2 }], Traced { v: 100 })
+  println(to_string(t.v))
+  let u = Traced { v: 7 } + Traced { v: 8 }
+  println(to_string(u.v))
+}
