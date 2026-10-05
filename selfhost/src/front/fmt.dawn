@@ -48,10 +48,11 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   }
   let stream = merge_by_lo(code, comments)
   if len(stream) == 0 { return Ok("") }
+  let keywords = contextual_keywords(raw)
   let marks = Marks {
-    unary: unary_minus(raw),
+    unary: unary_minus(raw, keywords),
     postfix: postfix_bang(raw),
-    keywords: contextual_keywords(raw),
+    keywords: keywords,
     signature: signature_arrows(raw)
   }
   Ok(reflow(cps, stream, marks, block_arrow(cps, raw)))
@@ -160,6 +161,17 @@ fn merge_by_lo(code: List[Token], comments: List[Token]) -> List[Token] = {
 ## wrapped lambda body `map(xs, x =>` does not either (innermost opener is a
 ## paren).
 ##
+## A head written on the line after its brace (`map(xs) {` then `(x: Int) =>`)
+## is still the head, and its body still follows the block (#535): before, the
+## first body line took the arrow's continuation level and the next one stepped
+## back to the block's. So an arrow also qualifies when the tokens between the
+## innermost brace and it are the head `parser.tail_block_lambda` reads there,
+## a name or one parenthesised group, and the brace stands where the parser
+## takes a tail block: right after a call's `)` or a name, and not as the body
+## of an `if`/`match`/`while`/`for` header. That brace opens a plain block, and
+## in `if c {` then `req =>` the block's value is a lambda whose body continues
+## the arrow. A handler arm (`op(a) =>`) is a name *and* a group, so no head.
+##
 ## Lines are counted from the *source*, not from NEWLINE tokens: the lexer
 ## swallows the NEWLINE after every line-continuing token (`{`, `,`, `=>`
 ## themselves -- lexer.continues_line), so the token stream cannot say which
@@ -172,6 +184,11 @@ fn block_arrow(cps: List[Char], raw: List[Token]) -> Set[Int] = {
   var out: Set[Int] = set.empty()
   var opener_kinds: List[TokKind] = []
   var opener_lines: List[Int] = []
+  # the index of each open brace that stands in tail position, else -1
+  var opener_at: List[Int] = []
+  # the bracket depth of an `if`/`match`/`while`/`for` whose body brace has not
+  # opened yet, else -1
+  var header_depth = -1
   var line = 0
   var cur = 0
   var i = 0
@@ -182,23 +199,54 @@ fn block_arrow(cps: List[Char], raw: List[Token]) -> Set[Int] = {
       cur = cur + 1
     }
     let k = t.kind
+    if k == IF || k == MATCH || k == WHILE || k == FOR {
+      header_depth = len(opener_kinds)
+    }
     if k == LPAREN || k == LBRACKET || k == LBRACE {
+      let header = k == LBRACE && header_depth == len(opener_kinds)
+      if header { header_depth = -1 }
+      let tail = k == LBRACE && not header && i > 0 &&
+        (raw[i - 1].kind == RPAREN || raw[i - 1].kind == IDENT)
       opener_kinds = opener_kinds ++ [k]
       opener_lines = opener_lines ++ [line]
+      opener_at = opener_at ++ [if tail { i } else { -1 }]
     } else if k == RPAREN || k == RBRACKET || k == RBRACE {
       if len(opener_kinds) > 0 {
         opener_kinds = list.take(opener_kinds, len(opener_kinds) - 1)
         opener_lines = list.take(opener_lines, len(opener_lines) - 1)
+        opener_at = list.take(opener_at, len(opener_at) - 1)
       }
     } else if k == FATARROW && len(opener_kinds) > 0 {
       let top = len(opener_kinds) - 1
-      if opener_kinds[top] == LBRACE && opener_lines[top] == line {
+      if opener_kinds[top] == LBRACE &&
+        (opener_lines[top] == line ||
+            (opener_at[top] >= 0 && is_block_head(raw, opener_at[top], i))) {
         out = set.insert(out, t.lo)
       }
     }
     i = i + 1
   }
   out
+}
+
+## Whether `raw[brace + 1 .. arrow - 1]` is a tail block's parameter head: one
+## name, or one parenthesised group closed right before the arrow.
+fn is_block_head(raw: List[Token], brace: Int, arrow: Int) -> Bool = {
+  let first = brace + 1
+  if arrow == first + 1 && raw[first].kind == IDENT { return true }
+  if raw[first].kind != LPAREN || raw[arrow - 1].kind != RPAREN { return false }
+  var depth = 0
+  var j = first
+  while j < arrow {
+    let k = raw[j].kind
+    if k == LPAREN || k == LBRACKET || k == LBRACE { depth = depth + 1 }
+    if k == RPAREN || k == RBRACKET || k == RBRACE {
+      depth = depth - 1
+      if depth == 0 { return j == arrow - 1 }
+    }
+    j = j + 1
+  }
+  false
 }
 
 ## Span starts of MINUS tokens that are unary (prefix), so they hug the
@@ -215,12 +263,21 @@ fn block_arrow(cps: List[Char], raw: List[Token]) -> Set[Int] = {
 ## was read as the subtraction it would have been on one line. That cost two
 ## things at once: the spacing (`- 1`) and, through `is_continuation`, an
 ## indent, so the statement was printed as a continuation of the line above it.
-fn unary_minus(raw: List[Token]) -> Set[Int] = {
+##
+## A contextual keyword in its position (`keywords`, from
+## `contextual_keywords`) is a keyword, not the name the lexer handed over, so
+## it ends no value: `for x in -1..1` negates, it does not subtract (#534).
+## And a `}` on the same line does end one: a block, an `if` or a `match` is an
+## operand like any other, so `{ ... } -x` subtracts. `}` stays out of
+## `is_value_end`, whose other callers space a bracket or a `..` after it.
+fn unary_minus(raw: List[Token], keywords: Set[Int]) -> Set[Int] = {
   var out: Set[Int] = set.empty()
   var i = 0
   while i < len(raw) {
     if raw[i].kind == MINUS {
-      let after_value = i > 0 && is_value_end(raw[i - 1].kind)
+      let left = if i > 0 { raw[i - 1] } else { raw[i] }
+      let after_value = i > 0 && (left.kind == RBRACE ||
+          (is_value_end(left.kind) && not set.has(keywords, left.lo)))
       if not after_value { out = set.insert(out, raw[i].lo) }
     }
     i = i + 1
@@ -530,9 +587,10 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         # pattern (the parser gives a line-leading bar to patterns alone), and
         # the alternatives line up with the arm instead of stepping in under
         # it; a bar in a bracket or at a declaration's `=` still continues
-        let arm_bar = t.kind == PIPE && len(openers) > 0 && openers[len(openers) - 1].brace &&
-          not is_cont_ender(pl.kind)
-        let cont = not arm_bar && is_continuation(pl, t, unary, barrow)
+        let bracketed = len(openers) > 0
+        let arm_bar = t.kind == PIPE && bracketed && openers[len(openers) - 1].brace &&
+          not is_cont_ender(pl.kind, bracketed)
+        let cont = not arm_bar && is_continuation(pl, t, unary, barrow, bracketed)
         if not cont && len(openers) <= header_depth { header_indent = -1 }
         let in_header = header_indent >= 0 && header_depth == len(openers)
         line_indent = indent_of(t, openers, line_indent, cont)
@@ -622,12 +680,13 @@ fn indent_of(
 }
 
 ## Whether a continuation line carries on an operand rather than beginning a new
-## expression: the line above ended in a binary operator, `not` or a
+## expression: the line above ended in a binary operator, `not`, `..` or a
 ## signature's `->`, or this line opens with a binary operator. After `=`, `<-`,
 ## `=>`, `:` or an arm's `->` a new expression begins, and a body brace on that
 ## line is its own construct's.
 fn continues_operand(prev_line_last: Token, line_start: Token, marks: Marks) -> Bool =
   is_cont_starter(prev_line_last.kind) || prev_line_last.kind == NOT ||
+  prev_line_last.kind == DOTDOT ||
   set.has(marks.signature, prev_line_last.lo) ||
   (is_cont_starter(line_start.kind) && not set.has(marks.unary, line_start.lo))
 
@@ -639,13 +698,22 @@ fn in_block(openers: List[Opener]) -> Bool =
 ## A leading `-` means two different things: `a\n  - b` wraps a subtraction, so
 ## the second line is a continuation, while `{\n  -1\n}` opens an expression
 ## and is not. `unary` already tells them apart for spacing.
+##
+## A line ending in `..` is continued too, though the lexer does not continue
+## it: outside brackets the lexer ends the line there and the parser refuses
+## the `..`, so the case only arises inside a bracket, where the lexer drops
+## every newline and leaves the joining to the parser. There a trailing `..`
+## is a spread or range still waiting for its operand, or a rest pattern, whose
+## next line opens with the closer and is placed by the closer rule (#537).
 fn is_continuation(
   prev_line_last: Token,
   line_start: Token,
   unary: Set[Int],
-  barrow: Set[Int]
+  barrow: Set[Int],
+  bracketed: Bool
 ) -> Bool =
-  (is_cont_ender(prev_line_last.kind) && not set.has(barrow, prev_line_last.lo)) ||
+  (is_cont_ender(prev_line_last.kind, bracketed) && not set.has(barrow, prev_line_last.lo)) ||
+  prev_line_last.kind == DOTDOT ||
   (is_cont_starter(line_start.kind) && not set.has(unary, line_start.lo))
 
 # ---- spacing between two tokens already known to be on the same line ----
@@ -747,19 +815,25 @@ fn is_callable_before_paren(k: TokKind) -> Bool =
 ## hand-written copy, and the two drifted -- a trailing `|` (SYN-N10), then a
 ## trailing `:` (`let a:` then `Int = 6` parsed as one statement and printed as
 ## two, #188). Derived, a token the lexer starts continuing is indented here
-## without anyone remembering to add it.
-fn is_cont_ender(k: TokKind) -> Bool = lexer.continues_line(k) && not fmt_exempt(k)
+## without anyone remembering to add it. `bracketed` says whether a bracket is
+## open at the line's end.
+fn is_cont_ender(k: TokKind, bracketed: Bool) -> Bool =
+  lexer.continues_line(k) && not fmt_exempt(k, bracketed)
 
 ## The tokens the lexer continues a line after but the formatter does not add a
 ## continuation level for, each for its own reason.
-fn fmt_exempt(k: TokKind) -> Bool =
+fn fmt_exempt(k: TokKind, bracketed: Bool) -> Bool =
   match k {
     # the bracket stack (`openers` in reflow) already indents the lines inside
     # an opener one level in; a continuation level on top would double it
     LPAREN | LBRACKET | LBRACE -> true
     # a comma separates the items of the bracket it sits in, and those items
-    # line up at that bracket's content indent rather than stepping in
-    COMMA -> true
+    # line up at that bracket's content indent rather than stepping in. With
+    # no bracket open there are no such items and nothing indents the next
+    # line, so there the comma continues like any other token the lexer joins:
+    # `derive Show,` then `Ord` is one clause, and `Ord` at column 0 read as a
+    # new declaration (#536)
+    COMMA -> bracketed
     # never the last code token of a line: reflow's stream drops NEWLINE
     NEWLINE -> true
     _ -> false
@@ -937,9 +1011,11 @@ test "the formatter's continuation set is the lexer's minus its exemptions" {
     let k = t.kind
     # derived, not a second list: disagreeing with the lexer needs an entry
     # in fmt_exempt
-    assert is_cont_ender(k) == (lexer.continues_line(k) && not fmt_exempt(k))
-    # and no exemption is stale: each names a token the lexer continues
-    assert not fmt_exempt(k) || lexer.continues_line(k)
+    for b in [true, false] {
+      assert is_cont_ender(k, b) == (lexer.continues_line(k) && not fmt_exempt(k, b))
+      # and no exemption is stale: each names a token the lexer continues
+      assert not fmt_exempt(k, b) || lexer.continues_line(k)
+    }
   }
 }
 
@@ -1362,4 +1438,65 @@ test "a closing brace line leaves no stale anchor behind" {
   assert fmt_of(w) == w
   let v = "fn s(n: Int) -> Int =\n  if n <\n    0 { 1 } else if n > 0 { 2 } else {\n      3 }\n"
   assert fmt_of(v) == v
+}
+
+## #534: `in` reaches the formatter as an IDENT, which ends a value, so the `-`
+## after it was spaced as a subtraction. In a `for` header it is the keyword.
+test "a minus after a for header's in is a negation" {
+  let f = "fn f() -> Unit = {\n  for x in -1..1 { () }\n}\n"
+  assert fmt_of(f) == f
+  assert fmt_of("fn f() -> Unit = {\n  for x in - 1..1 { () }\n}\n") == f
+  # a variable named `in` elsewhere is still a value
+  let v = "fn g(in: Int) -> Int = in - 1\n"
+  assert fmt_of(v) == v
+  # and a closing brace ends one: the parser subtracts here
+  let b = "fn h(c: Bool) -> Int = if c { 1 } else { 2 } - 3\n"
+  assert fmt_of(b) == b
+  assert fmt_of("fn h(c: Bool) -> Int = if c { 1 } else { 2 } -3\n") == b
+}
+
+## #535: a tail block's parameter head on the line after its brace is still the
+## head, and the body follows the block as it does when the head shares the
+## brace's line. The body's statements share one column.
+test "a tail block's parameter head on its own line does not stagger the body" {
+  let t = "fn f(xs: List[Int]) -> List[Int] = map(xs) {\n  (x: Int) =>\n  let y = x +\n" ++
+    "    10\n  y\n}\n"
+  assert fmt_of(t) == t
+  assert fmt_of("fn f(xs: List[Int]) -> List[Int] = map(xs) {\n(x: Int) =>\nlet y = x +\n" ++
+      "10\ny\n}\n") == t
+  # the old answer, a fixed point, is moved
+  assert fmt_of("fn f(xs: List[Int]) -> List[Int] = map(xs) {\n  (x: Int) =>\n    let y = x +\n" ++
+      "    10\n  y\n}\n") == t
+  # a one-name head the same
+  let n = "fn f(xs: List[Int]) -> List[Int] = map(xs) {\n  x =>\n  x + 1\n}\n"
+  assert fmt_of(n) == n
+  # a handler arm is a name and a group, no head: its body still continues
+  let h = "fn g() -> Int = {\n  with handle Ask {\n    ask() =>\n      42\n  }\n  ask()\n}\n"
+  assert fmt_of(h) == h
+  # an `if` body is a plain block, not a tail block: a lambda that is its
+  # value keeps its body a continuation of the arrow
+  let l = "fn k(c: Bool) -> fn(Int) -> Int =\n  if c {\n    x =>\n      x + 1\n  } else {\n" ++
+    "    x => x\n  }\n"
+  assert fmt_of(l) == l
+}
+
+## #536: with no bracket open, a trailing comma continues the line like any
+## other token the lexer joins; inside a bracket the items still line up.
+test "a comma outside brackets continues its line" {
+  let d = "type T = A | B\nderive Show,\n  Ord\n"
+  assert fmt_of(d) == d
+  assert fmt_of("type T = A | B\nderive Show,\nOrd\n") == d
+  let c = "fn f() -> List[Int] = [\n  1,\n  2,\n]\n"
+  assert fmt_of(c) == c
+}
+
+## #537: a `..` that ends a line inside a bracket is still waiting for its
+## operand, which is a continuation and not the next element.
+test "the operand of a spread on the next line is a continuation" {
+  let s = "fn f(xs: List[Int]) -> List[Int] = [\n  1,\n  ..\n    xs,\n]\n"
+  assert fmt_of(s) == s
+  assert fmt_of("fn f(xs: List[Int]) -> List[Int] = [\n1,\n..\nxs,\n]\n") == s
+  # a rest pattern's closer still lines up with its opener
+  let r = "fn k(xs: List[Int]) -> Int =\n  match xs {\n    [x, ..\n    ] -> x\n    _ -> 0\n  }\n"
+  assert fmt_of(r) == r
 }
