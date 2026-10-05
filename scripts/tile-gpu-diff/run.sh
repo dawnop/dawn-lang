@@ -715,7 +715,7 @@ fi
 # its place: compute_cap 10.3 is sm_103, a real target tileiras knows and a
 # different one from sm_100. A check that compared only the major number
 # would take a Blackwell variant for the card the goldens were built for.
-device_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 |
+device_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | sed -n 1p |
   tr -d ' ' || true)"
 if [ -n "$device_cap" ]; then
   device_gpu_name="sm_$(printf '%s' "$device_cap" | tr -d '.')"
@@ -1166,7 +1166,7 @@ for k in "${gsview_order[@]}"; do gsview_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
-driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1 | tr -d ' ' || true)"
+driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | sed -n 1p | tr -d ' ' || true)"
 [ -n "$driver" ] || driver=none
 echo "      driver: $driver (nvidia-smi); toolchain.txt says $pinned_driver"
 
@@ -1260,7 +1260,7 @@ case "$verdict" in
   fail) cat "$work/clean.err" >&2; fail "the device answered and disagreed with the fake device (see the transcript above)" ;;
   *) cat "$work/clean.err" >&2; fail "vadd_diff printed no verdict (exit $rc)" ;;
 esac
-note="$(sed -n 's/^  note  //p' "$work/clean.out" | head -n 1)"
+note="$(sed -n 's/^  note  //p' "$work/clean.out" | sed -n 1p)"
 
 # ---- native, the boundary kernels (knife 7a)
 build_native "$root/std" "$work/masked.bin" "$here/mask_diff.dawn"
@@ -1276,7 +1276,7 @@ case "$masked_verdict" in
   fail) cat "$work/masked.err" >&2; fail "the device answered and disagreed with the fake device on a boundary kernel (see the transcript above)" ;;
   *) cat "$work/masked.err" >&2; fail "mask_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/masked.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/masked.out" | sed -n 1p)"
 
 # ---- native, the reduction and transcendental kernels (knife 7b)
 build_native "$root/std" "$work/reduced.bin" "$here/red_diff.dawn"
@@ -1292,7 +1292,7 @@ case "$reduced_verdict" in
   fail) cat "$work/reduced.err" >&2; fail "the device answered and disagreed with the fake device on a reduction kernel (see the transcript above)" ;;
   *) cat "$work/reduced.err" >&2; fail "red_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/reduced.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/reduced.out" | sed -n 1p)"
 
 # ---- native, the two-dimensional kernels (knife 8)
 build_native "$root/std" "$work/twod.bin" "$here/mm_diff.dawn"
@@ -1308,7 +1308,7 @@ case "$twod_verdict" in
   fail) cat "$work/twod.err" >&2; fail "the device answered and disagreed with the fake device on a two-dimensional kernel (see the transcript above)" ;;
   *) cat "$work/twod.err" >&2; fail "mm_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/twod.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/twod.out" | sed -n 1p)"
 
 # ---- native, the strided kernels (knife 9)
 build_native "$root/std" "$work/strided.bin" "$here/stride_diff.dawn"
@@ -1324,7 +1324,7 @@ case "$strided_verdict" in
   fail) cat "$work/strided.err" >&2; fail "the device answered and disagreed with the fake device on a strided kernel (see the transcript above)" ;;
   *) cat "$work/strided.err" >&2; fail "stride_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/strided.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/strided.out" | sed -n 1p)"
 
 # ---- native, the integer kernels (knife 10)
 build_native "$root/std" "$work/ints.bin" "$here/int_diff.dawn"
@@ -1340,7 +1340,7 @@ case "$int_verdict" in
   fail) cat "$work/ints.err" >&2; fail "the device answered and disagreed with the fake device on an integer kernel (see the transcript above)" ;;
   *) cat "$work/ints.err" >&2; fail "int_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/ints.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/ints.out" | sed -n 1p)"
 
 # ---- native, the wide kernels (knife 11)
 build_native "$root/std" "$work/wide.bin" "$here/wide_diff.dawn"
@@ -1356,7 +1356,7 @@ case "$wide_verdict" in
   fail) cat "$work/wide.err" >&2; fail "the device answered and disagreed with the fake device on a wide kernel (see the transcript above)" ;;
   *) cat "$work/wide.err" >&2; fail "wide_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/wide.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/wide.out" | sed -n 1p)"
 
 # ---- native, the gather and scatter kernels (knife 12)
 build_native "$root/std" "$work/gath.bin" "$here/gath_diff.dawn"
@@ -1372,7 +1372,7 @@ case "$gath_verdict" in
   fail) cat "$work/gath.err" >&2; fail "the device answered and disagreed with the fake device on a gather or scatter kernel (see the transcript above)" ;;
   *) cat "$work/gath.err" >&2; fail "gath_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gath.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gath.out" | sed -n 1p)"
 
 # ---- native, the scan kernels (knife 13)
 build_native "$root/std" "$work/scan.bin" "$here/scan_diff.dawn"
@@ -1388,7 +1388,7 @@ case "$scan_verdict" in
   fail) cat "$work/scan.err" >&2; fail "the device answered and disagreed with the fake device on a scan kernel (see the transcript above)" ;;
   *) cat "$work/scan.err" >&2; fail "scan_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/scan.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/scan.out" | sed -n 1p)"
 
 # ---- native, the atomic kernels (knife 14)
 build_native "$root/std" "$work/atom.bin" "$here/atom_diff.dawn"
@@ -1404,7 +1404,7 @@ case "$atom_verdict" in
   fail) cat "$work/atom.err" >&2; fail "the device answered and disagreed with the fake device on an atomic kernel (see the transcript above)" ;;
   *) cat "$work/atom.err" >&2; fail "atom_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/atom.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/atom.out" | sed -n 1p)"
 
 # ---- native, the error function kernels (knife 15)
 build_native "$root/std" "$work/erf.bin" "$here/erf_diff.dawn"
@@ -1420,7 +1420,7 @@ case "$erf_verdict" in
   fail) cat "$work/erf.err" >&2; fail "the device answered and disagreed with the fake device on an error function kernel (see the transcript above)" ;;
   *) cat "$work/erf.err" >&2; fail "erf_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/erf.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/erf.out" | sed -n 1p)"
 
 # ---- native, the trigonometric kernels (knife T1)
 build_native "$root/std" "$work/trig.bin" "$here/trig_diff.dawn"
@@ -1436,7 +1436,7 @@ case "$trig_verdict" in
   fail) cat "$work/trig.err" >&2; fail "the device answered and disagreed with the fake device on a trigonometric kernel (see the transcript above)" ;;
   *) cat "$work/trig.err" >&2; fail "trig_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/trig.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/trig.out" | sed -n 1p)"
 
 # ---- native, the element format kernels (knife T3)
 build_native "$root/std" "$work/dtype.bin" "$here/dtype_diff.dawn"
@@ -1452,7 +1452,7 @@ case "$dtype_verdict" in
   fail) cat "$work/dtype.err" >&2; fail "the device answered and disagreed with the fake device on an element format kernel (see the transcript above)" ;;
   *) cat "$work/dtype.err" >&2; fail "dtype_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dtype.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dtype.out" | sed -n 1p)"
 
 # ---- native, the architecture-gated kernels (knife TA)
 #
@@ -1481,7 +1481,7 @@ else
     fail) cat "$work/arch.err" >&2; fail "the device answered and disagreed with the fake device on an architecture-gated kernel (see the transcript above)" ;;
     *) cat "$work/arch.err" >&2; fail "arch_diff printed no verdict (exit $rc)" ;;
   esac
-  [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/arch.out" | head -n 1)"
+  [ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/arch.out" | sed -n 1p)"
 
   # The kernels arch_diff itself says it compared and agreed on. It is read
   # back from the transcript rather than assumed from arch_ran, because the
@@ -1531,7 +1531,7 @@ case "$loop_verdict" in
   fail) cat "$work/loop.err" >&2; fail "the device answered and disagreed with the fake device on a loop kernel (see the transcript above)" ;;
   *) cat "$work/loop.err" >&2; fail "loop_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/loop.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/loop.out" | sed -n 1p)"
 
 # ---- native, the debugging kernels (knife T6)
 #
@@ -1564,7 +1564,7 @@ case "$dbg_verdict" in
   fail) fail "the device answered and disagreed with the fake device on a knife T6 kernel (see the transcript above)" ;;
   *) fail "assert_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/assert.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/assert.out" | sed -n 1p)"
 
 # The FAIL case: one kernel in a process of its own, whose judgement is that
 # the host is told. Two halves, and neither is a comparison: the driver's
@@ -1648,7 +1648,7 @@ case "$shape_verdict" in
   fail) cat "$work/shape.err" >&2; fail "the device answered and disagreed with the fake device on a knife T2 kernel (see the transcript above)" ;;
   *) cat "$work/shape.err" >&2; fail "shape_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/shape.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/shape.out" | sed -n 1p)"
 
 # `powi_sweep`'s exponents, held field by field: negative ones are where
 # the final reciprocal of the device's sequence is visible, and ones above
@@ -1678,7 +1678,7 @@ case "$attr_verdict" in
   fail) cat "$work/attr.err" >&2; fail "the device answered and disagreed with the fake device on a knife T4 kernel (see the transcript above)" ;;
   *) cat "$work/attr.err" >&2; fail "attr_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/attr.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/attr.out" | sed -n 1p)"
 
 # ---- native, the static-global kernels (knife T7)
 build_native "$root/std" "$work/global.bin" "$here/global_diff.dawn"
@@ -1694,7 +1694,7 @@ case "$global_verdict" in
   fail) cat "$work/global.err" >&2; fail "the device answered and disagreed with the fake device on a knife T7 kernel (see the transcript above)" ;;
   *) cat "$work/global.err" >&2; fail "global_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/global.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/global.out" | sed -n 1p)"
 
 # The static-global corpus, held field by field. Each of these is what
 # makes one of the three mutants below a measurement rather than a
@@ -1737,7 +1737,7 @@ case "$sym_verdict" in
   fail) cat "$work/sym.err" >&2; fail "the device answered and disagreed with the fake device on the knife TG kernel or its symbols (see the transcript above)" ;;
   *) cat "$work/sym.err" >&2; fail "sym_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/sym.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/sym.out" | sed -n 1p)"
 
 # The symbol corpus, held field by field, for the same reason the T7 one is:
 # three tables that agreed anywhere would forgive a lookup that answered the
@@ -1794,7 +1794,7 @@ case "$alloca_verdict" in
   fail) cat "$work/alloca.err" >&2; fail "the device answered and disagreed with the fake device on a knife T10 kernel (see the transcript above)" ;;
   *) cat "$work/alloca.err" >&2; fail "alloca_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/alloca.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/alloca.out" | sed -n 1p)"
 
 # The allocation corpus, held field by field. `live` is the lanes where
 # `3 * x` differs from `x`, so a scratch that read back zeros has somewhere
@@ -1834,7 +1834,7 @@ case "$view_verdict" in
   fail) cat "$work/view.err" >&2; fail "the device answered and disagreed with the fake device on a knife T11 kernel (see the transcript above)" ;;
   *) cat "$work/view.err" >&2; fail "view_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/view.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/view.out" | sed -n 1p)"
 
 # The view corpus, held field by field. Each of these is what makes one of
 # the four mutants below a measurement rather than a sentence.
@@ -1887,7 +1887,7 @@ case "$dyn_verdict" in
   fail) cat "$work/dyn.err" >&2; fail "the device answered and disagreed with the fake device on a knife T12 kernel (see the transcript above)" ;;
   *) cat "$work/dyn.err" >&2; fail "dyn_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dyn.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/dyn.out" | sed -n 1p)"
 
 # The dynamic corpus, held field by field, and then the family's own claim.
 # Each field is what makes one of the mutants below a measurement rather
@@ -1922,7 +1922,7 @@ if [ "$dyn_verdict" = pass ]; then
   [ "$shapes" -ge 2 ] 2> /dev/null ||
     fail "the dynamic kernels run over $shapes tensor shape(s): with one, every question mark is a constant spelled the long way: $dyn_shape_line"
   dyn_probe="$(sed -n 's/^probe dyn //p' "$work/dyn.out" | tail -n 1)"
-  twin="$(printf '%s\n' "$dyn_probe" | tr ' ' '\n' | sed -n 's/^twin=//p' | head -n 1)"
+  twin="$(printf '%s\n' "$dyn_probe" | tr ' ' '\n' | sed -n 's/^twin=//p' | sed -n 1p)"
   [ "$twin" = same ] ||
     { printf '%s\n' "$dyn_probe" >&2; fail "the dynamic transpose and the static one did not write the same bytes: twin=$twin"; }
   echo "PASS  corpus: every transpose lane is distinct, both bounds decide something, $shapes shapes from three cubins, and the dynamic transpose wrote the static one's bytes ($dyn_shape_line $dyn_probe)"
@@ -1951,7 +1951,7 @@ case "$gsview_verdict" in
   fail) cat "$work/gsview.err" >&2; fail "the device answered and disagreed with the fake device on a knife T13 kernel (see the transcript above)" ;;
   *) cat "$work/gsview.err" >&2; fail "gsview_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gsview.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/gsview.out" | sed -n 1p)"
 
 # The corpora, held field by field. Each field is what makes one of the
 # mutants below a measurement rather than a sentence.
@@ -1988,7 +1988,7 @@ if [ "$gsview_verdict" = pass ]; then
   [ "$modes" = 9 ] ||
     fail "view_atomic runs $modes atomic modes and the operation takes nine: $gsview_shape_line"
   gsview_probe="$(sed -n 's/^probe gsview //p' "$work/gsview.out" | tail -n 1)"
-  hist="$(printf '%s\n' "$gsview_probe" | tr ' ' '\n' | sed -n 's/^histogram=//p' | head -n 1)"
+  hist="$(printf '%s\n' "$gsview_probe" | tr ' ' '\n' | sed -n 's/^histogram=//p' | sed -n 1p)"
   [ "$hist" = same ] ||
     { printf '%s\n' "$gsview_probe" >&2; fail "view_atomic's add output is not the histogram reference's answer: histogram=$hist"; }
   echo "PASS  corpus: the windows overlap, the grid skips, both padded kernels leave the tensor, the gathers repeat a row, the bins collide across blocks, the contributions go negative, and the nine modes are nine ($gsview_shape_line $gsview_probe)"
@@ -2017,7 +2017,7 @@ case "$hint_verdict" in
   fail) cat "$work/hint.err" >&2; fail "the device answered and disagreed with the fake device on a knife T15 kernel (see the transcript above)" ;;
   *) cat "$work/hint.err" >&2; fail "hint_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/hint.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/hint.out" | sed -n 1p)"
 
 # The claim, held here and not only inside the program: all three kernels
 # answered the control's bytes, and the corpus really did carry hints. A
@@ -2027,11 +2027,11 @@ esac
 # so.
 if [ "$hint_verdict" = pass ]; then
   hint_probe="$(sed -n 's/^probe hints //p' "$work/hint.out" | tail -n 1)"
-  hint_agree="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n 's/^agree=//p' | head -n 1)"
+  hint_agree="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n 's/^agree=//p' | sed -n 1p)"
   [ "$hint_agree" = "3/3" ] ||
     { printf '%s\n' "$hint_probe" >&2; fail "the hinted kernels and the control did not answer the same bytes: agree=$hint_agree"; }
   for claim in entry_archs entry_keys memory_hinted memory_plain; do
-    value="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n "s/^${claim}=//p" | head -n 1)"
+    value="$(printf '%s\n' "$hint_probe" | tr ' ' '\n' | sed -n "s/^${claim}=//p" | sed -n 1p)"
     [ -n "$value" ] ||
       { printf '%s\n' "$hint_probe" >&2; fail "the hint probe line has no $claim count"; }
     [ "$value" -gt 0 ] 2> /dev/null ||
@@ -2057,7 +2057,7 @@ if [ "$attr_verdict" = pass ]; then
     attr_ftof:tf32_zero attr_ftof:tf32_away attr_ftof:f16_zero attr_ftof:bf16_zero; do
     field="${claim#*:}"
     kernel="${claim%%:*}"
-    value="$(printf '%s\n' "$attr_probe_line" | tr ' ' '\n' | sed -n "s/^${kernel}:${field}=//p" | head -n 1)"
+    value="$(printf '%s\n' "$attr_probe_line" | tr ' ' '\n' | sed -n "s/^${kernel}:${field}=//p" | sed -n 1p)"
     [ -n "$value" ] ||
       { printf '%s\n' "$attr_probe_line" >&2; fail "the attribute probe line has no $claim count"; }
     [ "$value" -gt 0 ] 2> /dev/null ||
@@ -2104,7 +2104,7 @@ case "$seq_verdict" in
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
   *) cat "$work/seq.err" >&2; fail "seq_diff printed no verdict (exit $rc)" ;;
 esac
-[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/seq.out" | head -n 1)"
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/seq.out" | sed -n 1p)"
 
 # An atomic add is only an atomic where two lanes meet. gath_diff holds its
 # scatter's repeats DOWN to zero for the opposite reason; here the repeats
@@ -3436,9 +3436,9 @@ if [ "$wide_verdict" = pass ]; then
   # invert's at its first octet (0.0)
   grep -q '^kernel reverse ' "$work/m-inplace.out" ||
     { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: the transcript has no reverse case"; }
-  awk '/^kernel /{cur=$2} /^  fake /&&cur=="reverse"{print}' "$work/m-inplace.out" | grep -q 'head=\[3\.0' ||
+  awk '/^kernel /{cur=$2} /^  fake /&&cur=="reverse"{print}' "$work/m-inplace.out" | grep 'head=\[3\.0' >/dev/null ||
     { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: reverse should read back its own input under the mutant"; }
-  awk '/^kernel /{cur=$2} /^  fake /&&cur=="invert"{print}' "$work/m-inplace.out" | grep -q 'head=\[0\.0' ||
+  awk '/^kernel /{cur=$2} /^  fake /&&cur=="invert"{print}' "$work/m-inplace.out" | grep 'head=\[0\.0' >/dev/null ||
     { cat "$work/m-inplace.out" >&2; fail "inplace-writes-copy: invert should read back its own input under the mutant"; }
   echo "PASS  mutant: inplace-writes-copy (all ${#wide[@]} wide kernels differ; the two in-place buffers come back holding the corpus)"
 else
@@ -4413,7 +4413,7 @@ if [ "$dtype_verdict" = pass ]; then
     "$work/m-pack-halves.out" ||
     { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: a kernel other than dtype_i4 moved, and only dtype_i4 names a lane"; }
   awk '/^kernel dtype_i4 /{f=1} f && /^  first /{sub(/^  first /, ""); print; exit}' \
-    "$work/m-pack-halves.out" | grep -q '^seg 4 ' ||
+    "$work/m-pack-halves.out" | grep '^seg 4 ' >/dev/null ||
     { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: expected the first difference in segment 4, the one that names a lane index; the relabelling is consistent, so no uniform segment may move"; }
   echo "PASS  mutant: pack-halves-swapped (dtype_i4's segment 4 alone reds; the four uniform segments and pack_roundtrip are blind to a consistent relabelling)"
 else
@@ -4466,7 +4466,7 @@ attr_pkg_mutant() { # name, module, old, new, red-kernel-or-probe...
     case "$k" in
       probe:*)
         # the claim is a probe count that must have fallen to zero
-        printf '%s\n' "$probe_line" | tr ' ' '\n' | grep -qxF "${k#probe:}" ||
+        printf '%s\n' "$probe_line" | tr ' ' '\n' | grep -xF "${k#probe:}" >/dev/null ||
           { printf '%s\n' "$probe_line" >&2; fail "$name: expected the probe to say ${k#probe:}"; }
         ;;
       *)
@@ -5106,7 +5106,7 @@ view_pkg_mutant() { # name, module, old, new, moved..., --red, red...
 
   mutant_kernels "$name" "$pkg" "${views[@]}"
   for k in "${views[@]}"; do
-    if printf '%s\n' "${moved[@]}" | grep -qxF "$k"; then
+    if printf '%s\n' "${moved[@]}" | grep -xF "$k" >/dev/null; then
       cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
         fail "$name: $k carries what this mutant changes and its bytecode is unchanged"
       [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
@@ -5119,7 +5119,7 @@ view_pkg_mutant() { # name, module, old, new, moved..., --red, red...
   echo "      $name: ${#moved[@]} of ${#views[@]} .tilebc differ from their goldens at the same length, and tileiras still accepts every one"
 
   for k in "${view_order[@]}"; do
-    if printf '%s\n' "${views[@]}" | grep -qxF "$k"; then
+    if printf '%s\n' "${views[@]}" | grep -xF "$k" >/dev/null; then
       cubs+=("$work/$name-$k.cubin")
     else
       cubs+=("$work/$k.cubin")
@@ -5246,7 +5246,7 @@ dyn_pkg_mutant() { # name, module, old, new, moved..., --red, red...
 
   mutant_kernels "$name" "$pkg" "${dyns[@]}"
   for k in "${dyns[@]}"; do
-    if printf '%s\n' "${moved[@]}" | grep -qxF "$k"; then
+    if printf '%s\n' "${moved[@]}" | grep -xF "$k" >/dev/null; then
       cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
         fail "$name: $k carries what this mutant changes and its bytecode is unchanged"
       [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
@@ -5259,7 +5259,7 @@ dyn_pkg_mutant() { # name, module, old, new, moved..., --red, red...
   echo "      $name: ${#moved[@]} of ${#dyns[@]} .tilebc differ from their goldens at the same length, and tileiras still accepts every one"
 
   for k in "${dyn_order[@]}"; do
-    if printf '%s\n' "${dyns[@]}" | grep -qxF "$k"; then
+    if printf '%s\n' "${dyns[@]}" | grep -xF "$k" >/dev/null; then
       cubs+=("$work/$name-$k.cubin")
     else
       cubs+=("$work/$k.cubin")
@@ -5354,7 +5354,7 @@ gsview_pkg_mutant() { # name, module, old, new, moved..., --red, red...
 
   mutant_kernels "$name" "$pkg" "${gsviews[@]}"
   for k in "${gsviews[@]}"; do
-    if printf '%s\n' "${moved[@]}" | grep -qxF "$k"; then
+    if printf '%s\n' "${moved[@]}" | grep -xF "$k" >/dev/null; then
       cmp -s "$golden/$k.tilebc" "$work/$name-$k.tilebc" &&
         fail "$name: $k carries what this mutant changes and its bytecode is unchanged"
       [ "$(wc -c < "$golden/$k.tilebc")" = "$(wc -c < "$work/$name-$k.tilebc")" ] ||
@@ -5367,7 +5367,7 @@ gsview_pkg_mutant() { # name, module, old, new, moved..., --red, red...
   echo "      $name: ${#moved[@]} of ${#gsviews[@]} .tilebc differ from their goldens at the same length, and tileiras still accepts every one"
 
   for k in "${gsview_order[@]}"; do
-    if printf '%s\n' "${gsviews[@]}" | grep -qxF "$k"; then
+    if printf '%s\n' "${gsviews[@]}" | grep -xF "$k" >/dev/null; then
       cubs+=("$work/$name-$k.cubin")
     else
       cubs+=("$work/$k.cubin")
