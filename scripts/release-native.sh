@@ -106,8 +106,11 @@ if [ -n "$JAR" ]; then
 else
   DAWN_JVM=(./bin/dawn)
 fi
+# --split writes the same C again as the files the compile below takes: the
+# shared head and one file per translation unit (docs/c-tu-split-design.md).
+# nmain.c stays the whole text, which is what check 4 compares.
 "${DAWN_JVM[@]}" __emitc selfhost/src/nmain.dawn -o "$WORK/nmain.c" \
-  --build-info "$WORK/build_info.c"
+  --build-info "$WORK/build_info.c" --split "$WORK/units"
 
 # -static because the failure it removes is invisible here: a dynamically
 # linked binary built on the runner's glibc refuses to start on an older one,
@@ -115,10 +118,12 @@ fi
 # side of the release would ever see it. Measured cost on 2026-08-04: 2.9 MB ->
 # 3.7 MB, link time unchanged (15.3 s both ways), zero linker warnings -- the
 # runtime calls nothing that needs NSS or dlopen.
-"${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
-  -I "$ROOT/runtime/c" -o "$CANDIDATE_A" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
-"${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static "$WORK/build_info.c" \
-  -I "$ROOT/runtime/c" -o "$CANDIDATE_B" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
+#
+# Each candidate compiles the units afresh, in parallel (scripts/cc-units.sh),
+# and links them in a fixed order; the two builds share nothing, objects
+# included, so the comparison below still says what it said for one cc line.
+scripts/cc-units.sh --static -o "$CANDIDATE_A" "$WORK/units" "$WORK/build_info.c"
+scripts/cc-units.sh --static -o "$CANDIDATE_B" "$WORK/units" "$WORK/build_info.c"
 
 for candidate in "$CANDIDATE_A" "$CANDIDATE_B"; do
   if [ ! -s "$candidate" ] || [ ! -x "$candidate" ]; then

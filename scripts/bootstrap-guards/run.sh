@@ -674,7 +674,8 @@ tool18_expect_reject "promoting the std record before the JAR record" \
 # ---------------------------------------------------------------------------
 tool19_validate() {
   local script_file="$1"
-  local cc_ref_count
+  local units_file="${2:-$root/scripts/cc-units.sh}"
+  local build_count
   local static_line_count
   local compare_line
   local promote_line
@@ -682,25 +683,38 @@ tool19_validate() {
   local verify_b_line
   local errors=0
 
+  # Each candidate is its own compile and link of the translation units
+  # (scripts/cc-units.sh, docs/c-tu-split-design.md knife 2): two builds,
+  # both static.
   # shellcheck disable=SC2016 # literal source in the guarded script
-  cc_ref_count="$(grep -F -c '"${CC:-cc}"' "$script_file")"
-  static_line_count="$(grep -F -c -- '-pthread -static' "$script_file")"
-  if [ "$cc_ref_count" -ne 2 ] || [ "$static_line_count" -ne 2 ]; then
-    echo "release-native.sh must contain exactly two identical static cc invocations" >&2
+  build_count="$(grep -F -c 'scripts/cc-units.sh ' "$script_file")"
+  static_line_count="$(grep -F -c -- 'scripts/cc-units.sh --static -o' "$script_file")"
+  if [ "$build_count" -ne 2 ] || [ "$static_line_count" -ne 2 ]; then
+    echo "release-native.sh must contain exactly two identical static builds" >&2
     errors=1
   fi
   # both links carry the build manifest unit (docs/build-info-design.md §八):
   # the artifact's `dawnc --version` digest and check 2b read it
   # shellcheck disable=SC2016 # literal source in the guarded script
-  if [ "$(grep -F -c -- '-pthread -static "$WORK/build_info.c"' "$script_file")" -ne 2 ]; then
+  if [ "$(grep -F -c -- '"$WORK/units" "$WORK/build_info.c"' "$script_file")" -ne 2 ]; then
     echo "release-native.sh must link the build manifest unit into both candidates" >&2
     errors=1
   fi
+  # and the build script hands --static to the one link it runs
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  for line in \
+    '--static) static=(-static); shift ;;' \
+    '"$cc_bin" "${ccflags[@]}" "${static[@]}" -o "$out" "${objs[@]}" -lm'; do
+    if ! tool17_require_line "$units_file" "$line" \
+        "cc-units.sh is missing one exact native release contract: $line"; then
+      errors=1
+    fi
+  done
 
   # shellcheck disable=SC2016 # literal source in the guarded script
   for line in \
-    '-I "$ROOT/runtime/c" -o "$CANDIDATE_A" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm' \
-    '-I "$ROOT/runtime/c" -o "$CANDIDATE_B" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm' \
+    'scripts/cc-units.sh --static -o "$CANDIDATE_A" "$WORK/units" "$WORK/build_info.c"' \
+    'scripts/cc-units.sh --static -o "$CANDIDATE_B" "$WORK/units" "$WORK/build_info.c"' \
     'if ! command -v readelf >/dev/null 2>&1; then' \
     'if ! elf_header=$(LC_ALL=C readelf -h "$candidate" 2>&1); then' \
     'if ! program_headers=$(LC_ALL=C readelf -l "$candidate" 2>&1); then' \
@@ -757,7 +771,8 @@ cp "$native_file" "$tool19_dir/native.base.sh"
 tool19_expect_reject() {
   local name="$1"
   local mutated_script="$2"
-  if tool19_validate "$mutated_script" > "$tool19_dir/control.out" 2>&1; then
+  local units_script="${3:-$root/scripts/cc-units.sh}"
+  if tool19_validate "$mutated_script" "$units_script" > "$tool19_dir/control.out" 2>&1; then
     bad "$name did not trip the native-release guard"
   else
     ok "$name trips the native-release guard"
@@ -765,12 +780,19 @@ tool19_expect_reject() {
 }
 
 # shellcheck disable=SC2016 # mutate literal source in the guarded script
-sed 's/ -static "\$WORK\/build_info.c" \\/ "$WORK\/build_info.c" \\/' \
+sed 's/cc-units.sh --static -o/cc-units.sh -o/' \
   "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-static.sh"
 tool19_expect_reject "removing -static" "$tool19_dir/native.no-static.sh"
 
+# the release still asks for --static, and the build script drops it at the link
 # shellcheck disable=SC2016 # mutate literal source in the guarded script
-sed 's/ "\$WORK\/build_info.c" \\/ \\/' \
+sed 's/ "\${static\[@\]}" -o / -o /' \
+  "$root/scripts/cc-units.sh" > "$tool19_dir/units.no-static.sh"
+tool19_expect_reject "a build script that drops -static at the link" \
+  "$tool19_dir/native.base.sh" "$tool19_dir/units.no-static.sh"
+
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed 's/ "\$WORK\/units" "\$WORK\/build_info.c"$/ "$WORK\/units"/' \
   "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-build-info.sh"
 tool19_expect_reject "removing the build manifest unit" "$tool19_dir/native.no-build-info.sh"
 

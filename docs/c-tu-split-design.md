@@ -1,6 +1,6 @@
 # C 翻译单元切分：一个程序切成 K 段并行 cc
 
-> 状态：**proposed**。2026-10-05，分支 `docs/c-tu-split`。只有设计与原型实测，未动生产代码。
+> 状态：**current**。刀 1、刀 2 于 2026-10-05 落地（§十），刀 3 等 Proc spawn/wait（裁决 4.f）。设计与原型实测写于同日，分支 `docs/c-tu-split`。
 > 依据：裁决 ffi-llvm 4.c（「按模块拆 TU 并行 cc，打 #239 与 prev-diff-native pole；需设计文档」）；
 > 同日 LLVM 调研报告 §3（自举约八成墙钟在 cc）；#239 与 #275（native-selfhost-tests 的 cc 占比、
 > 「切 TU 等 Proc 有 spawn/wait」）；`scripts/pinned-cc.sh`（CI 与发布已钉 clang 18.1.3）。
@@ -317,3 +317,68 @@ native-diff-2（383 s）或 test-compiler 一档，push-total 约省 125 + 60 + 
 - **不换编译器档位换墙钟**（-O1/-O0）：#239/#275 已裁测试档保持 -O2；切分在 -O2 下就拿到了 79%。
 - **不改 emitc 发出多个字符串**：一份文本加分界行就够，所有逐字节比较与单 TU 消费者不受影响；
   改成多文件输出要改三十来个脚本与 fixpoint 的比较方式，换不来任何东西。
+
+## 十、落地记录
+
+### 10.1 刀 1：emitc 发共享头 + K 段（`e645c965`）
+
+按 §5.1、§5.2 落地，与设计的出入：
+
+- **nmain 的 K 实测是 15，不是 16**。公式没变（`emitc.tu_count`），§5.2 的 16 是按整份文本 22.7 MB 估的，
+  公式量的是函数体字节，nmain 的函数体在 21.0 到 22.5 MB 之间。其它程序：site 3、`tea_dom_search` 2，
+  native-diff 与 Playground 一类的小程序 1。
+- **entry、`main` 与测试 runner 落在最后一段**，不是段 0。它们由 `emit_program` 与 `c_test_text` 接在
+  文本末尾，只用到头部已声明的符号，放哪段都合法；接在末尾就不用在段 0 中间插入。wasm reactor 的 shim
+  （`reactor_wrapped`）也接在末尾，因而总与 `main` 同段，调用 `main` 不需要另加声明。
+- 没有分界行的文本，`cdriver.split` 原样返回为一个 `main.c`：手写的 C、驱动单测里的一行程序都走这条。
+  分界行格式不对或序号不连续是错误，不猜。
+- `--split <dir>` 要求目录不存在或为空：编译方取目录里全部 `tu*.c`，上一个更大的程序留下的段会被一起链进去。
+- `dawnc build/run/test` 把 K 段写进暂存目录、一条 cc 命令编完（段与段之间不并行，等 4.f）。
+- `dict-owner-contract` 原来 grep `^static dawn_dict `，字典去 `static` 后会匹配零行、按「检查是空的」报红，改成 `^dawn_dict `。
+- **Emit-Change：无。** C 文本不在任何差分 label 的语料里；`emit ...` 十个 label 在 v0.83.0 窗口里已有声明、
+  被遮住，所以另做了真父对照：本提交与父提交各建一个 jar，编同一份源码，十个语料逐字节相同。
+- 刀 1 状态下 `native-fixpoint.sh` 仍用旧的单文件配方编新文本，A == B == C 成立；也就是说同一份文本当单 TU 编和
+  （刀 2 之后）按 15 段编，链出的编译器发出相同的 C。
+
+### 10.2 刀 2：脚本并行编段（本提交）
+
+- 新增 `scripts/cc-units.sh`：取 `--split` 写出的目录，`xargs -P`（默认全部核，`CC_JOBS` 可改）按文件从大到小
+  并行 `-c`，再按固定顺序（段名、运行时、额外的 C 文件）链接。编 nmain 的五处都改用它：`native-fixpoint.sh`、
+  `release-native.sh`、`native-selfhost-tests.sh`、`gates.yml` wasm-target 的「the C driver, once」，以及
+  `native-cli-diff.sh`、两个 wasm 契约脚本、`site/build.sh` 在没拿到现成 dawnc 时的自建分支，和
+  `java-target-classpath-contract` 自建 dawnc 的那一步。
+- `bootstrap-guards` 的 TOOL-19 原来逐字钉着 `release-native.sh` 的两条 cc 行；改成钉两条
+  `cc-units.sh --static` 构建行，并钉住 `cc-units.sh` 把 `--static` 交给唯一那次链接，另加一个变异体：
+  发布脚本仍要 `--static`、构建脚本在链接处丢掉它，守卫必须红。
+- `native-fixpoint.sh` 多比一项：A（JVM 上的 `cdriver.split`）与 B（native 上的同一函数）切出的段逐文件相同。
+- `gates.yml` 只改 wasm-target 那一步的 `run:`，`steps.lock.json` 随之 `record`。各 job 的 claim 与 push-total
+  都没动：还没有 CI 观测，按纪律等 main 上的观测出来再按现有注释格式重述，所以本提交不需要 Gate-Budget 声明。
+
+### 10.3 实测（本机 16 核，clang 18.1.3，-O2；负载来自同机其它任务，括号里是 loadavg）
+
+同一份 nmain C（15 段），只比编译与链接：
+
+| 配置 | 墙钟 | user | 负载 |
+|---|---:|---:|---|
+| 单 TU，taskset 4 核 | 82.4 s | 81.0 s | 34 → 16 |
+| 15 段，taskset 4 核，J=4 | **16.6 s**（−80%） | 60.3 s | 同上，紧接着测 |
+| 单 TU，taskset 4 核（高负载那一轮） | 222.0 s | 115.4 s | 62 |
+| 15 段，taskset 4 核，J=4（同一轮） | 25.5 s | 81.8 s | 62 |
+| 单 TU，不限核 | 136.8 s | 108.0 s | 26 → 31 |
+| 15 段，不限核，J=16 | 12.2 s | 83.5 s | 31 |
+
+4 核比例与 §4.2 的集群原型一致（69.5 → 14.8 s）。J=16 与 J=4 链出的 dawnc 逐字节相同。
+
+整脚本，同一棵树、前后紧接着跑（负载 14 → 7）：`native-fixpoint.sh` 旧配方 **167.4 s**，新配方 **52.7 s**。
+`release-native.sh` 两次独立的 `--static` 链接逐字节相同（`cmp` 那一项绿）。
+`--static` 链接时 `dawn_gpu_open` 的 `dlopen` 警告在改动前的单 TU 链接里同样出现，不是本刀引入的。
+
+CI 墙钟仍按 §七估计（prev-diff-native 约 −125 s、native-selfhost-tests driver 构建约 −60 s、wasm-target 约 −45 s）；
+真实数字要合入 main 后从 Actions 观测。
+
+### 10.4 wasm
+
+K 段在 wasm 路径上成立，不需要给 wasm 特判 K=1：`tea_dom_search` 恰好是 K=2，用本刀的 dawnc 以
+`DAWN_WASM_CC=clang-20 dawnc build --target wasm --reactor` 构建通过；`dawnc build --target wasm` 与原生行一样
+把各段放在同一条 clang 命令里，wasm-ld 链接多个目标文件没有额外条件。wasm-target 里编宿主 dawnc 的那一步按原生
+走 `cc-units.sh`。

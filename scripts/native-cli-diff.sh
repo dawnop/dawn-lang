@@ -81,9 +81,9 @@ if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
 DAWNC=${DAWNC_BIN:-}
 if [ -z "$DAWNC" ]; then
   echo "building the native driver from selfhost/src/nmain.dawn..."
-  ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$OUT/nmain.c"
-  "${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$ROOT/runtime/c" \
-    -o "$OUT/dawnc" "$OUT/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
+  # the units compile in parallel (scripts/cc-units.sh, docs/c-tu-split-design.md)
+  ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$OUT/nmain"
+  scripts/cc-units.sh -o "$OUT/dawnc" "$OUT/nmain"
   DAWNC="$OUT/dawnc"
 fi
 # an absolute path: the add leg runs both drivers with a --dir elsewhere, and
