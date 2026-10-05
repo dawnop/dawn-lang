@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Differential for the language server against the previous release (the N-1
 # oracle since kotlin-final): a scripted LSP session (initialize,
-# open/change/close, hover, definition, completion and its resolve, symbols, signature help,
+# open/change/close, hover, definition, completion and its resolve (std names not yet imported among them), symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
 # on hover and on `use` lines, inlay hints (left-out defaults among them, with their folded values), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, folded values of closed pure
 # expressions on hover, formatting over a two-module project + a standalone buffer) runs
@@ -456,6 +456,20 @@ req("textDocument/completion", at(app_uri, app_text, "a + b + mid", 1, 0))
 # (docs/lsp-hover-design.md §D7); util's `helper` has a two-line `##`
 req("completionItem/resolve", {"label": "helper", "kind": 3, "data": {"uri": app_uri}})
 
+# auto-import (docs/lsp-auto-import-design.md): std names a buffer has not
+# imported, bare and after `alias.`, each with the `use` line it needs; an
+# empty word gets a list marked incomplete; a qualified item resolves to std's doc
+auto_text = "# Head.\n\npub fn main() -> Unit !io = {\n  let a = tri\n  let b = list.\n  let c = 1\n}\n"
+auto_uri = "untitled:Untitled-auto"
+note("textDocument/didOpen", {"textDocument": {
+    "uri": auto_uri, "languageId": "dawn", "version": 1, "text": auto_text}})
+req("textDocument/completion", at(auto_uri, auto_text, "tri\n", 1, 3))
+req("textDocument/completion", at(auto_uri, auto_text, "list.\n", 1, 5))
+req("textDocument/completion", at(auto_uri, auto_text, "1\n}", 1, 0))
+req("completionItem/resolve", {"label": "str.trim", "kind": 3,
+    "data": {"uri": auto_uri, "module": "std/str"}})
+note("textDocument/didClose", tdoc(auto_uri))
+
 req("textDocument/documentSymbol", tdoc(app_uri))
 
 # didChange: introduce a type error, diagnostics update
@@ -652,7 +666,7 @@ while True:
     frames.append(json.loads(body.decode()))
     i = j + 4 + clen
 
-# Completion arrays: the Kotlin tables are HashMaps, so item order inside one
+# Completion arrays (and a CompletionList's items): the Kotlin tables are HashMaps, so item order inside one
 # rank is JVM hash-bucket order — semantically void (clients sort by
 # sortText). Normalize by (sortText, label); everything else keeps its order.
 # An inlay hint has a label too, but its order is the server's (by position)
@@ -668,6 +682,10 @@ for f in frames:
     if isinstance(r, list) and r and all(isinstance(x, dict) and "label" in x and "position" not in x
                                          for x in r):
         f["result"] = sorted(r, key=lambda x: (x.get("sortText", ""), x["label"]))
+    # the same list in the CompletionList shape (`isIncomplete` needs it)
+    if isinstance(r, dict) and isinstance(r.get("items"), list) and \
+            all(isinstance(x, dict) and "label" in x for x in r["items"]):
+        r["items"] = sorted(r["items"], key=lambda x: (x.get("sortText", ""), x["label"]))
     print(json.dumps(f, sort_keys=True, ensure_ascii=False))
 PYEOF
 }

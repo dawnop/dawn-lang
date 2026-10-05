@@ -61,6 +61,22 @@ interface LspCompletionItem {
   insertText?: string
   /** What the server put on the item for `completionItem/resolve`, sent back as is. */
   data?: Record<string, unknown>
+  /**
+   * The `use` line a std name needs when the buffer lacks it
+   * (docs/lsp-auto-import-design.md), applied with the item.
+   */
+  additionalTextEdits?: LspTextEdit[]
+}
+
+interface LspTextEdit {
+  range: LspRange
+  newText: string
+}
+
+/** A completion answer: its items, and whether typing on must ask again. */
+export interface LspCompletionList {
+  items: LspCompletionItem[]
+  isIncomplete: boolean
 }
 
 interface LspHover {
@@ -282,6 +298,7 @@ export function decodeSemanticTokens(
 function completionItemOf(value: unknown): LspCompletionItem | null {
   const item = asRecord(value)
   if (typeof item?.label !== 'string') return null
+  const edits = textEditsOf(item.additionalTextEdits)
   return {
     label: item.label,
     ...(typeof item.kind === 'number' ? { kind: item.kind } : {}),
@@ -289,7 +306,19 @@ function completionItemOf(value: unknown): LspCompletionItem | null {
     ...(typeof item.sortText === 'string' ? { sortText: item.sortText } : {}),
     ...(typeof item.insertText === 'string' ? { insertText: item.insertText } : {}),
     ...(asRecord(item.data) != null ? { data: item.data } : {}),
+    ...(edits.length > 0 ? { additionalTextEdits: edits } : {}),
   }
+}
+
+function textEditsOf(value: unknown): LspTextEdit[] {
+  if (!Array.isArray(value)) return []
+  const edits: LspTextEdit[] = []
+  for (const entry of value) {
+    const edit = asRecord(entry)
+    const range = rangeOf(edit?.range)
+    if (range != null && typeof edit?.newText === 'string') edits.push({ range, newText: edit.newText })
+  }
+  return edits
 }
 
 /** A `MarkupContent` or bare string's text; '' for anything else. */
@@ -454,19 +483,32 @@ export class DawnLspClient {
   }
 
   async completion(offset: number, timeoutMs = 750): Promise<LspCompletionItem[]> {
+    return (await this.completionList(offset, timeoutMs)).items
+  }
+
+  /**
+   * The completion answer with its `isIncomplete`: the server says the list
+   * is not whole while the word is still empty, and leaves the module names
+   * for when it has a first character (docs/lsp-auto-import-design.md).
+   */
+  async completionList(offset: number, timeoutMs = 750): Promise<LspCompletionList> {
     const value = await this.query('textDocument/completion', offset, timeoutMs)
     if (Array.isArray(value)) {
-      return value.map(completionItemOf).filter((item): item is LspCompletionItem => item != null)
+      return {
+        items: value.map(completionItemOf).filter((item): item is LspCompletionItem => item != null),
+        isIncomplete: false,
+      }
     }
     const record = asRecord(value)
-    if (!Array.isArray(record?.items)) return []
+    if (!Array.isArray(record?.items)) return { items: [], isIncomplete: false }
     // LSP 3.17 list defaults: the server names the document once
     // (docs/lsp-hover-design.md §D7.2), and an item without data of its own
     // takes it
     const data = asRecord(asRecord(record.itemDefaults)?.data)
-    return record.items.map(completionItemOf)
+    const items = record.items.map(completionItemOf)
       .filter((item: LspCompletionItem | null): item is LspCompletionItem => item != null)
       .map((item: LspCompletionItem) => item.data == null && data != null ? { ...item, data } : item)
+    return { items, isIncomplete: record.isIncomplete === true }
   }
 
   /**
@@ -895,9 +937,33 @@ export function completionOf(item: LspCompletionItem, client?: DawnLspClient): C
     type: completionType(item.kind),
     boost: 3,
     ...(typeof item.sortText === 'string' ? { sortText: item.sortText } : {}),
-    ...(typeof item.insertText === 'string' ? { apply: item.insertText } : {}),
+    ...(item.additionalTextEdits != null
+      ? { apply: applyWithEdits(item.insertText ?? item.label, item.additionalTextEdits) }
+      : typeof item.insertText === 'string' ? { apply: item.insertText } : {}),
     ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
     ...(client != null && item.data != null ? { info: () => completionInfo(client, item) } : {}),
+  }
+}
+
+/**
+ * Insert `text` over the word and apply the item's other edits (the `use`
+ * line), in one transaction. The edits' positions are the buffer's as the
+ * server saw it; only the word at the cursor has changed since, and the
+ * `use` line goes above it, so they still name the same place. The cursor
+ * lands after the inserted text, wherever the `use` line moved it.
+ */
+function applyWithEdits(text: string, edits: readonly LspTextEdit[]) {
+  return (view: EditorView, _completion: Completion, from: number, to: number) => {
+    const doc = view.state.doc.toString()
+    const changes = view.state.changes([
+      { from, to, insert: text },
+      ...edits.map((edit) => ({
+        from: lspPositionToOffset(doc, edit.range.start),
+        to: lspPositionToOffset(doc, edit.range.end),
+        insert: edit.newText,
+      })),
+    ])
+    view.dispatch({ changes, selection: { anchor: changes.mapPos(to, 1) }, userEvent: 'input.complete' })
   }
 }
 
@@ -958,12 +1024,13 @@ export function lspCompletionSource(
     const before = context.state.sliceDoc(line.from, context.pos)
     const shouldAsk = staticResult != null || context.explicit || word != null || /\S$/.test(before)
     if (!shouldAsk) return staticResult
-    let items: LspCompletionItem[]
+    let list: LspCompletionList
     try {
-      items = await client.completion(context.pos, 750)
+      list = await client.completionList(context.pos, 750)
     } catch {
       return offline(context)
     }
+    const items = list.items
     const server = items.map((item) => completionOf(item, client))
       .filter((item): item is Completion => item != null)
     if (server.length === 0) return staticResult
@@ -972,7 +1039,10 @@ export function lspCompletionSource(
       options: [],
       validFor: /^[A-Za-z0-9_]*$/,
     }
-    return mergeCompletionResults(server, base)
+    const result = mergeCompletionResults(server, base)
+    // a list the server says is not whole is asked for again as the word grows
+    if (list.isIncomplete) delete result.validFor
+    return result
   }
 }
 

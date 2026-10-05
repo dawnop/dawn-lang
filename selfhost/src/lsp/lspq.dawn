@@ -1258,8 +1258,17 @@ fn member_doc_site(qc: QCx, mod_path: String, name: String) -> Option[DocSite] =
 ## the server then reads from the file a `use` line would load.
 pub(pkg) fn item_doc_site(qc: QCx, label: String, kind: Int, from: Option[String]) -> Option[DocSite] =
   match from {
-    Some(mp) -> if kind == 9 { module_doc_site(qc, mp) } else { member_doc_site(qc, mp, label) }
+    # an item offered as `alias.name` (docs/lsp-auto-import-design.md) is
+    # the module's `name`; a declared name never has a dot of its own
+    Some(mp) -> if kind == 9 { module_doc_site(qc, mp) } else { member_doc_site(qc, mp, member_name(label)) }
     None -> scope_doc_site(qc, label, kind)
+  }
+
+## `name` of an `alias.name` label; any other label as it is.
+pub(pkg) fn member_name(label: String) -> String =
+  match str.split_once(label, ".") {
+    Some((_, name)) -> name
+    None -> label
   }
 
 ## An item offered in code, as the entry module's scope resolves its label.

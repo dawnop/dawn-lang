@@ -156,7 +156,7 @@ expect('d3 severity', diags[2].severity, 'error')
   const ctx = () => new CompletionContext(state, doc.length, false)
   const live = lspCompletionSource({
     isReady: () => true,
-    completion: async () => [{ label: 'println', kind: 3 }],
+    completionList: async () => ({ items: [{ label: 'println', kind: 3 }], isIncomplete: false }),
   } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
   const liveResult = await live(ctx())
   expect('a live LSP answer does not fetch the builtin table', [
@@ -175,7 +175,7 @@ expect('d3 severity', diags[2].severity, 'error')
   expect('a dropped LSP prefetches the table', prefetches, 1)
   const down = lspCompletionSource({
     isReady: () => false,
-    completion: async () => { throw new Error('must not be asked') },
+    completionList: async () => { throw new Error('must not be asked') },
   } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
   const downResult = await down(ctx())
   expect('LSP down: builtins still complete, prelude bare and modules qualified', [
@@ -185,7 +185,7 @@ expect('d3 severity', diags[2].severity, 'error')
   ], [true, true, true])
   const failing = lspCompletionSource({
     isReady: () => true,
-    completion: async () => { throw new Error('timed out') },
+    completionList: async () => { throw new Error('timed out') },
   } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
   const failedResult = await failing(ctx())
   expect('LSP request failure: builtins complete', failedResult?.options.some((o) => o.label === 'println'), true)
@@ -506,9 +506,9 @@ expect('completion is server-first and deduplicated', merged.options.map((o) => 
 let semanticCalls = 0
 const semanticSource = lspCompletionSource({
   isReady: () => true,
-  completion: async () => {
+  completionList: async () => {
     semanticCalls++
-    return [{ label: 'playground', kind: 9, sortText: '0playground' }]
+    return { items: [{ label: 'playground', kind: 9, sortText: '0playground' }], isIncomplete: false }
   },
 } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
 const useState = EditorState.create({ doc: 'use pl' })
@@ -518,7 +518,7 @@ expect('LSP handles and orders use completion absent from static source', [
 ], [1, 'playground', '0playground'])
 const rejectedSemanticSource = lspCompletionSource({
   isReady: () => true,
-  completion: async () => { throw new Error('timed out') },
+  completionList: async () => { throw new Error('timed out') },
 } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
 const staticFallbackState = EditorState.create({ doc: 'fn solo() -> Int = so' })
 const staticFallback = await rejectedSemanticSource(new CompletionContext(
@@ -528,6 +528,38 @@ const staticFallback = await rejectedSemanticSource(new CompletionContext(
 ))
 expect('semantic completion failure returns static completion',
   staticFallback?.options.some((item) => item.label === 'solo'), true)
+
+// ---- std names the buffer has not imported (docs/lsp-auto-import-design.md) ----
+{
+  const doc = '# Head.\n\npub fn main() -> Unit !io = tri'
+  const state = EditorState.create({ doc })
+  const edit = { range: { start: { line: 2, character: 0 }, end: { line: 2, character: 0 } }, newText: 'use std/str\n\n' }
+  const option = completionOf({ label: 'str.trim', kind: 3, additionalTextEdits: [edit] })!
+  let dispatched: any = null
+  const view = { state, dispatch: (spec: any) => { dispatched = spec } } as unknown as EditorView
+  ;(option.apply as (v: EditorView, c: typeof option, from: number, to: number) => void)(
+    view, option, doc.length - 3, doc.length)
+  const after = state.update(dispatched).state
+  expect('an auto-import item inserts its name and its use line in one transaction', after.doc.toString(),
+    '# Head.\n\nuse std/str\n\npub fn main() -> Unit !io = str.trim')
+  expect('the cursor lands after the inserted name', after.selection.main.head, after.doc.length)
+  const plain = completionOf({ label: 'trim', kind: 3, insertText: 'trim' })!
+  expect('an item without edits keeps its plain apply', plain.apply, 'trim')
+
+  // an incomplete list is asked for again as the word grows: no validFor
+  const ctx = new CompletionContext(EditorState.create({ doc: 'pub fn main() -> Unit = (' }), 25, false)
+  const incomplete = lspCompletionSource({
+    isReady: () => true,
+    completionList: async () => ({ items: [{ label: 'let', kind: 14 }], isIncomplete: true }),
+  } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
+  const whole = lspCompletionSource({
+    isReady: () => true,
+    completionList: async () => ({ items: [{ label: 'let', kind: 14 }], isIncomplete: false }),
+  } as unknown as DawnLspClient, staticCompletions, dawnCompletions)
+  expect('an incomplete server list is not reused, a whole one is', [
+    (await incomplete(ctx))?.validFor === undefined, (await whole(ctx))?.validFor !== undefined,
+  ], [true, true])
+}
 
 // ---- fake gateway: handshake, serialized Full sync and stale suppression ----
 class FakeSocket implements LspSocket {
@@ -704,6 +736,19 @@ expect('inlay hint response keeps the well-formed hints', await inlay, [
   expect('list defaults fill in data an item lacks, and leave its own', (await listed).map((item) => item.data), [
     { uri: DAWN_LSP_URI }, data,
   ])
+  // the list says whether it is whole, and an item keeps the use line it needs
+  const edited = client.completionList(3)
+  await tick()
+  const editedRequest = socket.sent.at(-1)!
+  const useEdit = { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: 'use std/str\n' }
+  socket.receive({ id: editedRequest.id, result: {
+    isIncomplete: true,
+    items: [{ label: 'str.trim', kind: 3, additionalTextEdits: [useEdit, { range: 'bad', newText: 'x' }] }],
+  } })
+  const editedList = await edited
+  expect('isIncomplete and additionalTextEdits are read off the list', [
+    editedList.isIncomplete, editedList.items[0].additionalTextEdits,
+  ], [true, [useEdit]])
   const none = completionInfo(client, { label: 'plain', kind: 3, data })
   await tick()
   const noneRequest = socket.sent.at(-1)!

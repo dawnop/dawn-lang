@@ -5,6 +5,14 @@
 # after ordinary member dots. Effect positions include declarations and aliases.
 # The server translates LSP UTF-16 positions to code-point offsets at the boundary.
 #
+# Module members complete too, as `str.trim` in bare code and as `trim` after
+# `str.`, and that includes the std modules the buffer has not imported yet:
+# each such item carries the `use` line that makes it compile. Only std, not
+# packages or dependencies: std is the one surface every buffer can reach and
+# the server already holds checked, while a package's names would mean
+# guessing which of several modules a bare `parse` should import, and loading
+# surfaces the buffer never asked for (docs/lsp-auto-import-design.md).
+#
 # A `use` line completes too, and to something else entirely: module paths one
 # segment at a time, then the module's exported names inside `.{ }`. That is
 # the toolchain half of "the directory tree IS the namespace" (#179) -- the
@@ -45,13 +53,27 @@ use driver/analyze.{use_candidates}
 ## `.{ }`. It travels in the item's `data` so `completionItem/resolve` finds the
 ## declaration whose doc the item shows (docs/lsp-hover-design.md §D7); an item
 ## offered in code is resolved in the document's own scope and carries none.
+##
+## `edit` is the `use` line an item needs and the buffer lacks: offered for a
+## std module the document has not imported, it is what makes the picked name
+## compile (docs/lsp-auto-import-design.md).
 pub type CItem = {
   label: String,
   kind: Int,
   detail: Option[String],
   sort_text: Option[String],
-  from: Option[String]
+  from: Option[String],
+  edit: Option[UseEdit]
 }
+
+## A completion answer. `incomplete` tells the client that typing on must ask
+## again rather than filter this list: true where the word being typed is
+## still empty, because the qualified std names are offered only once its
+## first character is known (docs/lsp-auto-import-design.md §3).
+pub(pkg) type Completions = { items: List[CItem], incomplete: Bool }
+
+## Insert `text` at code-point offset `at`: the `use` line `path` needs.
+pub type UseEdit = { at: Int, text: String, path: String }
 
 # ---- the lexical spot the cursor sits in (mirrors the tokenizer's rules) ----
 
@@ -482,7 +504,19 @@ fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String)
   add_from(it, name, kind, detail, rank, None)
 
 ## `add` for an item a `use` line offers out of module `from`.
-fn add_from(it: Items, name: String, kind: Int, detail: Option[String], rank: String, from: Option[String]) -> Items = {
+fn add_from(it: Items, name: String, kind: Int, detail: Option[String], rank: String, from: Option[String]) -> Items =
+  add_edit(it, name, kind, detail, rank, from, None)
+
+## `add_from` for an item that needs the `use` line `edit` inserts.
+fn add_edit(
+  it: Items,
+  name: String,
+  kind: Int,
+  detail: Option[String],
+  rank: String,
+  from: Option[String],
+  edit: Option[UseEdit]
+) -> Items = {
   if name == "_" || set.has(it.seen, name) { return it }
   Items {
     out: it.out ++ [CItem {
@@ -490,7 +524,8 @@ fn add_from(it: Items, name: String, kind: Int, detail: Option[String], rank: St
       kind: kind,
       detail: detail,
       sort_text: Some(rank ++ name),
-      from: from
+      from: from,
+      edit: edit
     }],
     seen: set.insert(it.seen, name)
   }
@@ -544,7 +579,7 @@ fn use_completions(
   if str.trim(from_code_points(rest)) == "" && path != "" {
     let d: Option[String] =
       Some("`use " ++ path ++ " as <name>` — rename the module in this file")
-    return [CItem { label: "as", kind: 14, detail: d, sort_text: Some("0as"), from: None }]
+    return [CItem { label: "as", kind: 14, detail: d, sort_text: Some("0as"), from: None, edit: None }]
   }
   let none2: List[CItem] = []
   none2
@@ -849,6 +884,264 @@ fn qualified_pattern_constructors(qc: QCx, module_alias: String) -> List[CItem] 
   }
 }
 
+# ---- module members, imported or not (docs/lsp-auto-import-design.md) ----
+#
+# Read off the buffer as it is now, not off the last analysis: the analysis is
+# of the last text that parsed, and a `use` line it never saw would be offered
+# again. Top-level `use` lines start a line (`dawn fmt` puts them at column 0);
+# a selective list may run on over lines to its `}`.
+
+## One `use` of a module the buffer spells. `alias` is the name the module is
+## reachable by, None for a selective import, which binds no alias. `lo` is
+## the start of its first line, `hi` just past its last line break.
+pub(pkg) type UseLine = { path: String, binds: Option[String], lo: Int, hi: Int }
+
+## Every top-level `use` of a module, in the order the buffer has them.
+pub(pkg) fn scan_uses(v: SourceView) -> List[UseLine] = {
+  let cps = v.cps
+  let n = len(cps)
+  var out: List[UseLine] = []
+  var i = 0
+  while i < n {
+    var e = i
+    while e < n && cps[e] != '\n' { e = e + 1 }
+    match use_line_at(v, i, e) {
+      Some(u) -> {
+        out = out ++ [u]
+        i = u.hi
+      }
+      None -> { i = e + 1 }
+    }
+  }
+  out
+}
+
+## Is `word` spelled at `at`, followed by a space?
+fn word_then_space(cps: List[Char], at: Int, word: String, end: Int) -> Bool = {
+  let w = code_points(word)
+  let k = len(w)
+  if at + k >= end { return false }
+  if slice_cps(cps, at, at + k) != w { return false }
+  cps[at + k] == ' ' || cps[at + k] == '\t'
+}
+
+## The `use` declaration starting on the line [lo, e), if that line opens one.
+fn use_line_at(v: SourceView, lo: Int, e: Int) -> Option[UseLine] = {
+  let cps = v.cps
+  let n = len(cps)
+  var i = lo
+  if word_then_space(cps, i, "pub", e) {
+    i = i + 3
+    while i < e && is_space(cps[i]) { i = i + 1 }
+  }
+  if not word_then_space(cps, i, "use", e) { return None }
+  i = i + 3
+  while i < e && is_space(cps[i]) { i = i + 1 }
+  let p0 = i
+  while i < e && path_char(cps[i]) { i = i + 1 }
+  let path = from_code_points(slice_cps(cps, p0, i))
+  if path == "" || path == "java" { return None }
+  # a line inside a multi-line string or after a comment opener is not code
+  if lex_ctx(v, lo) != 0 { return None }
+  var hi = if e < n { e + 1 } else { n }
+  if i + 1 < e && cps[i] == '.' && cps[i + 1] == '{' {
+    # a selective list ends at its `}`, on this line or a later one
+    var j = i + 2
+    while j < n && cps[j] != '}' { j = j + 1 }
+    while j < n && cps[j] != '\n' { j = j + 1 }
+    hi = if j < n { j + 1 } else { n }
+    return Some(UseLine { path: path, binds: None, lo: lo, hi: hi })
+  }
+  while i < e && (cps[i] == ' ' || cps[i] == '\t') { i = i + 1 }
+  if word_then_space(cps, i, "as", e) {
+    var a = i + 3
+    while a < e && is_space(cps[a]) { a = a + 1 }
+    var b = a
+    while b < e && is_word(cps[b]) { b = b + 1 }
+    return Some(UseLine { path: path, binds: Some(from_code_points(slice_cps(cps, a, b))), lo: lo, hi: hi })
+  }
+  let segs = str.split(path, "/")
+  Some(UseLine { path: path, binds: Some(segs[len(segs) - 1]), lo: lo, hi: hi })
+}
+
+## Where `use <path>` goes, and the text to insert there. `dawn fmt` keeps
+## `use` lines in the order written, so the order is ours to pick and the
+## buffer's to keep:
+##
+## - beside the std imports the buffer has: in sorted place when they are
+##   sorted, after the last of them when they are not;
+## - before the first `use` when none of them is std's (std comes first);
+## - with no `use` at all, above the first declaration and the comment lines
+##   attached to it (its `##` doc), so a file-head comment kept apart from
+##   the code by a blank line stays first; one blank line follows.
+pub(pkg) fn use_edit(cps: List[Char], uses: List[UseLine], path: String) -> UseEdit = {
+  let n = len(cps)
+  let line = "use ${path}\n"
+  let stds = list.filter(uses, u => str.starts_with(u.path, "std/"))
+  if len(stds) > 0 {
+    var sorted = true
+    for k in range(1, len(stds)) {
+      if stds[k - 1].path > stds[k].path { sorted = false }
+    }
+    if sorted {
+      for u in stds {
+        if u.path > path { return UseEdit { at: u.lo, text: line, path: path } }
+      }
+    }
+    let at = stds[len(stds) - 1].hi
+    let lead = if at == n && n > 0 && cps[n - 1] != '\n' { "\n" } else { "" }
+    return UseEdit { at: at, text: lead ++ line, path: path }
+  }
+  if len(uses) > 0 { return UseEdit { at: uses[0].lo, text: line, path: path } }
+  # the first line of code, and the comment lines directly above it
+  var starts: List[Int] = []
+  var i = 0
+  var code: Option[Int] = None
+  while i < n && code == None {
+    var j = i
+    while j < n && (cps[j] == ' ' || cps[j] == '\t') { j = j + 1 }
+    if j < n && cps[j] != '\n' && cps[j] != '\r' && cps[j] != '#' {
+      code = Some(i)
+    } else {
+      starts = starts ++ [i]
+      while j < n && cps[j] != '\n' { j = j + 1 }
+      i = j + 1
+    }
+  }
+  match code {
+    Some(c) -> {
+      var at = c
+      var k = len(starts) - 1
+      while k >= 0 && is_comment_line(cps, starts[k]) {
+        at = starts[k]
+        k = k - 1
+      }
+      UseEdit { at: at, text: line ++ "\n", path: path }
+    }
+    None -> {
+      let lead = if n > 0 && cps[n - 1] != '\n' { "\n" } else { "" }
+      UseEdit { at: n, text: lead ++ line, path: path }
+    }
+  }
+}
+
+fn is_comment_line(cps: List[Char], lo: Int) -> Bool = {
+  var j = lo
+  while j < len(cps) && (cps[j] == ' ' || cps[j] == '\t') { j = j + 1 }
+  j < len(cps) && cps[j] == '#'
+}
+
+## The module a non-selective `use` binds `alias_name` to in the buffer.
+fn use_bound(uses: List[UseLine], alias_name: String) -> Option[String] =
+  match list.find(uses, u => u.binds == Some(alias_name)) {
+    Some(u) -> Some(u.path)
+    None -> None
+  }
+
+## A std module this document may `use` and has not: the ones auto-import
+## offers. Not one whose alias the buffer already gives another module, or a
+## local of the same name: adding the `use` there would not compile, or `x.`
+## would be the local's.
+fn importable_std(qc: QCx, uses: List[UseLine], mp: String, alias_name: String, locals: Set[String]) -> Bool =
+  str.starts_with(mp, "std/") && may_name_module(qc, mp) &&
+  not list.any(uses, u => u.path == mp && u.binds != None) &&
+  use_bound(uses, alias_name) == None && not set.has(locals, alias_name)
+
+fn alias_of(mp: String) -> String = {
+  let segs = str.split(mp, "/")
+  segs[len(segs) - 1]
+}
+
+fn with_edit(items: List[CItem], edit: UseEdit) -> List[CItem] =
+  list.map(items, it => CItem { ..it, edit: Some(edit) })
+
+## After `alias.`: the members of the module `alias` names. One the buffer
+## imports lists as a `use` line's `.{ }` would; a std module it does not
+## import lists the same, each item carrying the `use` that makes it compile.
+## Anything else (a local's fields, an unknown name) lists nothing.
+fn member_items(qc: QCx, v: SourceView, alias_name: String, locals: Set[String]) -> List[CItem] = {
+  let none: List[CItem] = []
+  if set.has(locals, alias_name) { return none }
+  let uses = scan_uses(v)
+  let fresh = Items { out: [], seen: set.empty() }
+  match use_bound(uses, alias_name) {
+    Some(mp) ->
+      match map.get(qc.exports_env, mp) {
+        Some(ex) -> exported_items(qc, fresh, ex)
+        None -> none
+      }
+    None -> {
+      let mp = "std/${alias_name}"
+      if not map.has(qc.std.exports, mp) || not importable_std(qc, uses, mp, alias_name, locals) { return none }
+      match map.get(qc.exports_env, mp) {
+        Some(ex) -> with_edit(exported_items(qc, fresh, ex), use_edit(v.cps, uses, mp))
+        None -> none
+      }
+    }
+  }
+}
+
+## Bare code, word `word` begun: every module function and constant as
+## `alias.name`, for the modules the buffer imports (rank 2, beside the
+## prelude) and for the std modules it does not (rank 4, after the keywords,
+## with the `use` edit). Only names whose member or alias starts with the
+## word's first character: a client keeps filtering the list as the word
+## grows, and the first character never changes while it does, so the list
+## stays whole for that word (§3).
+fn qualified_items(qc: QCx, v: SourceView, it0: Items, word: String, locals: Set[String]) -> Items = {
+  let first = str.take(word, 1)
+  let uses = scan_uses(v)
+  var it = it0
+  # the imported modules, by the alias the buffer gives each
+  for u in uses {
+    match u.binds {
+      Some(alias_name) ->
+        match map.get(qc.exports_env, u.path) {
+          Some(ex) -> if not set.has(locals, alias_name) { it = add_members(it, ex, alias_name, first, "2", None) }
+          None -> ()
+        }
+      None -> ()
+    }
+  }
+  for mp in sort(map.keys(qc.std.exports)) {
+    let alias_name = alias_of(mp)
+    if importable_std(qc, uses, mp, alias_name, locals) {
+      match map.get(qc.exports_env, mp) {
+        Some(ex) -> {
+          # the edit is the same for every name of the module, and only a
+          # module with a matching name needs one
+          if str.starts_with(alias_name, first) || list.any(map.keys(ex.fns) ++ map.keys(ex.consts),
+            nm => str.starts_with(nm, first)) {
+            it = add_members(it, ex, alias_name, first, "4", Some(use_edit(v.cps, uses, mp)))
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  it
+}
+
+## `alias.name` for each function and constant of `ex` that `first` begins.
+fn add_members(it0: Items, ex: ModExports, alias_name: String, first: String, rank: String, edit: Option[UseEdit]) -> Items = {
+  var it = it0
+  let whole = str.starts_with(alias_name, first)
+  let from = Some(ex.mod_path)
+  for pr in map.entries(ex.fns) {
+    let (name, sig) = pr
+    if (whole || str.starts_with(name, first)) && not str.contains(name, "\$") {
+      it = add_edit(it, "${alias_name}.${name}", 3, Some(sig_render(ex.adt_infos, ex.trait_infos, sig)), rank, from, edit)
+    }
+  }
+  for pr in map.entries(ex.consts) {
+    let (name, ty) = pr
+    if whole || str.starts_with(name, first) {
+      it = add_edit(it, "${alias_name}.${name}", 21, Some("const " ++ name ++ ": " ++ ty_show(ex.adt_infos, ty)), rank, from, edit)
+    }
+  }
+  it
+}
+
 ## A partial row/handler is often not parseable yet. Restrict the lexical
 ## suffix rather than offering every module member after an effect qualifier.
 fn effect_reference_tail(text: String) -> Bool = {
@@ -871,7 +1164,7 @@ pub(pkg) fn completions_at(
   project_modules: Option[Map[String, String]],
   text: String,
   offset: Int
-) -> List[CItem] !Fs !Proc !Env !io = {
+) -> Completions !Fs !Proc !Env !io = {
   let v = view_of(text)
   let cps = v.cps
   let n = len(cps)
@@ -885,10 +1178,7 @@ pub(pkg) fn completions_at(
     offset
   }
   let ctx = lex_ctx(v, pos)
-  if ctx == 1 || ctx == 2 {
-    let none: List[CItem] = []
-    return none
-  }
+  if ctx == 1 || ctx == 2 { return whole([]) }
   # back over word chars from the cursor to the word start
   var k = pos
   var ws = k
@@ -934,12 +1224,9 @@ pub(pkg) fn completions_at(
         }
       }
     }
-    return effects.out
+    return whole(effects.out)
   }
-  if fresh_name_tail(before) {
-    let none: List[CItem] = []
-    return none
-  }
+  if fresh_name_tail(before) { return whole([]) }
   match use_tail(before) {
     Some(tail) -> {
       # Project-aware documents reuse the module index captured during their
@@ -948,7 +1235,7 @@ pub(pkg) fn completions_at(
         Some(modules) -> modules
         None -> use_candidates(qc.entry.path)
       }
-      return use_completions(qc, candidates, tail)
+      return whole(use_completions(qc, candidates, tail))
     }
     None -> ()
   }
@@ -957,25 +1244,26 @@ pub(pkg) fn completions_at(
       Some(pair) -> {
         let (module_alias, alias_lo) = pair
         if in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos) {
-          return qualified_pattern_constructors(qc, module_alias)
+          return whole(qualified_pattern_constructors(qc, module_alias))
         }
+        return whole(member_items(qc, v, module_alias, local_names(qc, pos)))
       }
       None -> ()
     }
-    let none: List[CItem] = []
-    return none
+    return whole([])
   }
 
   var it = Items { out: [], seen: set.empty() }
   if in_for_pattern(qc, pos) {
-    return add_adt_completions(qc, it, false).out
+    return whole(add_adt_completions(qc, it, false).out)
   }
   if in_incomplete_for_pattern(text, pos) {
     it = add_adt_completions(qc, it, false)
-    return add_source_constructor_completions(qc, text, it).out
+    return whole(add_source_constructor_completions(qc, text, it).out)
   }
   # locals of the enclosing function: parameters + binders before the cursor
-  for pr in locals_at(qc, pos) {
+  let locals = locals_at(qc, pos)
+  for pr in locals {
     let (name, detail) = pr
     it = add(it, name, 6, detail, "0")
   }
@@ -1022,7 +1310,25 @@ pub(pkg) fn completions_at(
   }
   let nd2: Option[String] = None
   it = add(it, "derive", 14, nd2, "3")
-  it.out
+  # module members as `alias.name`, once the word has a first character;
+  # before that the list is incomplete, and the client asks again as it grows
+  if ws == pos { return Completions { items: it.out, incomplete: true } }
+  whole(qualified_items(qc, v, it, from_code_points(slice_cps(cps, ws, pos)), names_of(locals)).out)
+}
+
+fn whole(items: List[CItem]) -> Completions = Completions { items: items, incomplete: false }
+
+## The names of the locals in scope at `pos`: `x.` after one of them is not
+## a module's members.
+fn local_names(qc: QCx, pos: Int) -> Set[String] = names_of(locals_at(qc, pos))
+
+fn names_of(locals: List[(String, Option[String])]) -> Set[String] = {
+  var out: Set[String] = set.empty()
+  for pr in locals {
+    let (name, _) = pr
+    out = set.insert(out, name)
+  }
+  out
 }
 
 # ---- signature help: the call whose argument list the cursor is in ----
@@ -1302,4 +1608,46 @@ test "signature help finds the open call and the argument under the cursor" {
   assert show("let x = f(\"a, ") == "-"
   assert show("let x = f(() => { g(1) ") == "-"
   assert show("let x = f(1)") == "-"
+}
+
+## The buffer `text` after the `use` edit for `path`.
+fn with_use(text: String, path: String) -> String = {
+  let v = view_of(text)
+  let e = use_edit(v.cps, scan_uses(v), path)
+  from_code_points(slice_cps(v.cps, 0, e.at)) ++ e.text ++ from_code_points(slice_cps(v.cps, e.at, len(v.cps)))
+}
+
+test "the use lines a buffer has are read off its text, selective lists and all" {
+  let text = "# head\n\nuse std/str\npub use front/lexer as lx\nuse std/map.{\n  get,\n  insert\n}\nuse java \"java.util.List\"\nlet s = \"\"\"\n" ++
+    "use std/fake\n\"\"\"\n"
+  let uses = scan_uses(view_of(text))
+  assert list.map(uses, u => u.path) == ["std/str", "front/lexer", "std/map"]
+  assert list.map(uses, u => u.binds) == [Some("str"), Some("lx"), None]
+  # a selective list runs to the line of its `}`
+  assert uses[2].hi == unwrap_or(str.index_of(text, "use java"), 0)
+}
+
+test "a use edit goes beside the std imports, in sorted place when they are sorted" {
+  assert with_use("use std/list\nuse std/str\n\nfn f() = 1\n", "std/map") ==
+    "use std/list\nuse std/map\nuse std/str\n\nfn f() = 1\n"
+  assert with_use("use std/list\nuse std/map\n", "std/str") == "use std/list\nuse std/map\nuse std/str\n"
+  # unsorted: after the last, where nothing the writer chose moves
+  assert with_use("use std/str\nuse std/list\nuse util\n", "std/map") ==
+    "use std/str\nuse std/list\nuse std/map\nuse util\n"
+  # a selective import of the same module keeps its place before the new line
+  assert with_use("use std/set\nuse std/str.{trim}\nuse std/tile\n", "std/str") ==
+    "use std/set\nuse std/str.{trim}\nuse std/str\nuse std/tile\n"
+  # no line break at the end of the buffer: one is supplied
+  assert with_use("use std/set", "std/str") == "use std/set\nuse std/str\n"
+  # only other modules: std first
+  assert with_use("use util\n\nfn f() = 1\n", "std/str") == "use std/str\nuse util\n\nfn f() = 1\n"
+}
+
+test "with no use line, the edit goes above the first declaration and its doc" {
+  assert with_use("fn f() = 1\n", "std/str") == "use std/str\n\nfn f() = 1\n"
+  # a file-head comment set apart by a blank line stays first
+  assert with_use("# Why this file.\n\n## Doc of f.\nfn f() = 1\n", "std/str") ==
+    "# Why this file.\n\nuse std/str\n\n## Doc of f.\nfn f() = 1\n"
+  assert with_use("", "std/str") == "use std/str\n"
+  assert with_use("# only a comment", "std/str") == "# only a comment\nuse std/str\n"
 }
