@@ -1,0 +1,223 @@
+# The `.dawnmap` side table `__emit --map` writes: where each written call
+# landed in the emitted bytecode (docs/source-span-map-design.md section 13).
+#
+# It is a separate file and never a part of a class. A LineNumberTable would
+# give lines, not call ranges, and would move every class with every pure edit
+# of the source; the class bytes are what the emit differentials compare, so
+# they must not change whether a map is asked for or not. They do not, by
+# construction: `emit.emit_module_mapped` writes the classes of a plain
+# emission and reads pcs off a second, labelled one, and a module whose
+# labelled class came out different keeps its rows but loses their pcs.
+#
+# The format is the C side table's (c/cmap.dawn) with `jvm` in the header:
+# `src` rows are the same, and `fn`/`call` rows keep the source half in the
+# same positions, so one reader (scripts/c-map/dawnmap.py) serves both. Only
+# the output half differs: a method number and code length instead of a line
+# range, a pc range and the pc of the call instruction instead of lines and
+# columns.
+#
+# Every row kind is sorted by a total key, so the same classes and the same
+# sites give the same bytes.
+
+use std/list
+use std/map
+use std/str
+use ir/coresites
+use jvm/classread
+use jvm/emit.{JRow, JFn, JModMap}
+use ir/core.{CAt, CNoSite}
+use jvm/rtclasses.{obj, close_mv}
+use jvm/ops.{ACC_PUBLIC, ACC_STATIC, COMPUTE_FRAMES, OP_LLOAD, OP_LRETURN, V52}
+use java "dawn.rt.Asm"
+
+## The format's first line: name, version, backend.
+pub const HEADER: String = "dawnmap\t1\tjvm"
+
+## A row ready to print: its method's number, its pcs (-1 for none) and its
+## site in file coordinates.
+type Placed = { k: Int, pclo: Int, pchi: Int, ipc: Int, row: JRow, at: (Int, Int, Int) }
+
+## The map as text. `srcs` names each module's source file; `bases` is each
+## module's declaration bases (`coresites.decl_bases`).
+pub fn render(
+  mods: List[JModMap],
+  srcs: Map[String, String],
+  bases: Map[String, Map[String, Int]]
+) -> String = {
+  var out: List[String] = [HEADER ++ "\n"]
+  var names: Map[String, Bool] = map.empty()
+  for mm in mods {
+    for r in mm.rows { names = map.insert(names, r.owner, true) }
+    for f in mm.fns { names = map.insert(names, f.owner, true) }
+  }
+  for m in list.sort(map.keys(names)) {
+    let path = match map.get(srcs, m) {
+      Some(p) -> p
+      None -> "?"
+    }
+    out = out ++ ["src\t" ++ m ++ "\t" ++ path ++ "\n"]
+  }
+  # every method of every module, numbered in (class, name, descriptor) order
+  var fns: List[(JFn, Int)] = []
+  # whether a method's pcs mean anything in the class written, by symbol
+  var sound: Map[String, Bool] = map.empty()
+  for mm in mods {
+    var lens: Map[(String, String), Int] = map.empty()
+    for cm in classread.class_methods(mm.class_bytes) {
+      lens = map.insert(lens, (cm.name, cm.desc), cm.code_length)
+    }
+    for f in mm.fns {
+      let n = match map.get(lens, (f.method, f.desc)) {
+        Some(x) -> x
+        None -> panic("jmap: " ++ symbol(f) ++ " is not in the class written")
+      }
+      fns = fns ++ [(f, n)]
+      sound = map.insert(sound, symbol(f), mm.same && f.end == n)
+    }
+  }
+  let sorted = sort_by(fns, (a, b) => {
+    let (fa, _) = a
+    let (fb, _) = b
+    str_cmp(symbol(fa), symbol(fb))
+  })
+  var index: Map[String, (Int, Int)] = map.empty()
+  var k = 0
+  for pr in sorted {
+    let (f, n) = pr
+    index = map.insert(index, symbol(f), (k, n))
+    out = out ++ ["fn\t${to_string(k)}\t${to_string(n)}\t${f.owner}\t${f.origin}\t${symbol(f)}\n"]
+    k = k + 1
+  }
+  var placed: List[Placed] = []
+  for mm in mods {
+    for r in mm.rows {
+      let (rk, _) = match map.get(index, row_symbol(r)) {
+        Some(x) -> x
+        None -> panic("jmap: a row of " ++ row_symbol(r) ++ " has no method")
+      }
+      let p = Placed { k: rk, pclo: -1, pchi: -1, ipc: -1, row: r, at: abs_of(r, bases) }
+      placed = placed ++ [if lands(r, map.get(sound, row_symbol(r)) == Some(true)) {
+        Placed { ..p, pclo: r.pclo, pchi: r.pchi, ipc: r.ipc }
+      } else {
+        p
+      }]
+    }
+  }
+  for p in sort_by(placed, (a, b) => call_order(a, b)) {
+    out = out ++ [call_line(p)]
+  }
+  join(out, "")
+}
+
+## Whether a row's pcs can be printed: its method is sound (its class came out
+## of the labelled emission unchanged and no jump in it was widened after the
+## labels were read, docs/source-span-map-design.md 13.3), and the call
+## instruction was written (an intrinsic has none to write).
+fn lands(r: JRow, sound: Bool) -> Bool =
+  sound && r.pclo >= 0 && r.pchi >= 0 &&
+  (r.ipc >= 0 || str.starts_with(r.what, "intrinsic "))
+
+fn symbol(f: JFn) -> String = f.owner ++ "." ++ f.method ++ ":" ++ f.desc
+
+fn row_symbol(r: JRow) -> String = r.owner ++ "." ++ r.method ++ ":" ++ r.desc
+
+## A row's site in file coordinates, or (-1, -1, -1) when its declaration has
+## no base on record (the checker refuses the `?` this prints).
+fn abs_of(r: JRow, bases: Map[String, Map[String, Int]]) -> (Int, Int, Int) = {
+  let base = match map.get(bases, r.owner) {
+    Some(bs) -> map.get(bs, r.origin)
+    None -> None
+  }
+  match base {
+    Some(b) -> match coresites.site_abs(b, r.site) {
+      Some(t) -> t
+      None -> (-1, -1, -1)
+    }
+    None -> (-1, -1, -1)
+  }
+}
+
+fn num(n: Int) -> String = if n < 0 { "-" } else { to_string(n) }
+
+fn src_num(n: Int) -> String = if n < 0 { "?" } else { to_string(n) }
+
+fn call_line(p: Placed) -> String = {
+  let (lo, hi, nlo) = p.at
+  "call\t" ++ to_string(p.k) ++ "\t" ++ num(p.pclo) ++ "\t" ++ num(p.pchi) ++ "\t" ++ num(p.ipc) ++ "\t" ++
+    p.row.owner ++ "\t" ++ src_num(lo) ++ "\t" ++ src_num(hi) ++ "\t" ++ src_num(nlo) ++ "\t" ++ p.row.what ++ "\n"
+}
+
+fn int_cmp(a: Int, b: Int) -> Int = if a < b { -1 } else if a > b { 1 } else { 0 }
+
+fn str_cmp(a: String, b: String) -> Int = cmp(a, b)
+
+## Ties broken until the order is total.
+fn chain(cs: List[Int]) -> Int = {
+  for c in cs {
+    if c != 0 { return c }
+  }
+  0
+}
+
+## Placed rows by method, then pc, the enclosing call first on a tie (wider
+## `pchi`); rows with no place last. Then by source position, which no two
+## rows share.
+fn call_order(a: Placed, b: Placed) -> Int = {
+  let (alo, ahi, anlo) = a.at
+  let (blo, bhi, bnlo) = b.at
+  let ap = if a.pclo < 0 { 1 } else { 0 }
+  let bp = if b.pclo < 0 { 1 } else { 0 }
+  chain([
+    int_cmp(ap, bp), int_cmp(a.k, b.k), int_cmp(a.pclo, b.pclo), int_cmp(b.pchi, a.pchi),
+    str_cmp(a.row.owner, b.row.owner), int_cmp(alo, blo), int_cmp(ahi, bhi), int_cmp(anlo, bnlo),
+    str_cmp(a.row.origin, b.row.origin), str_cmp(a.row.what, b.row.what)
+  ])
+}
+
+## A class `m` with one method `f(J)J` of two bytes, `lload_0; lreturn`.
+fn tiny_class() -> Bytes !io = {
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC, "m", obj())
+  let mv = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "f", "(J)J").expect("mv")
+  mv.visitCode()
+  mv.visitVarInsn(OP_LLOAD, 0)
+  mv.visitInsn(OP_LRETURN)
+  close_mv(mv)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+test "rows sort by method and pc, and an unsound method keeps its rows without pcs" {
+  let bs = tiny_class()
+  let r = JRow {
+    owner: "m", origin: "f", method: "f", desc: "(J)J", site: CAt(0, 3, 0), what: "direct m.g",
+    pclo: 0, pchi: 2, ipc: 1
+  }
+  let outer = JRow { ..r, site: CAt(0, 9, 0), pchi: 3, ipc: 2, what: "direct m.h" }
+  let cast = JRow { ..r, site: CAt(5, 8, 5), pclo: 2, pchi: 3, ipc: -1, what: "intrinsic x" }
+  let lost = JRow { ..r, site: CAt(20, 23, 20), ipc: -1 }
+  let f = JFn { owner: "m", origin: "f", method: "f", desc: "(J)J", end: 2 }
+  let bases = map.insert(map.empty(), "m", map.insert(map.empty(), "f", 100))
+  let srcs = map.insert(map.empty(), "m", "m.dawn")
+  let mm = JModMap { owner: "m", rows: [cast, lost, r, outer], fns: [f], same: true, class_bytes: bs }
+  assert render([mm], srcs, bases) == join([
+    "dawnmap\t1\tjvm\n",
+    "src\tm\tm.dawn\n",
+    "fn\t0\t2\tm\tf\tm.f:(J)J\n",
+    "call\t0\t0\t3\t2\tm\t100\t109\t100\tdirect m.h\n",
+    "call\t0\t0\t2\t1\tm\t100\t103\t100\tdirect m.g\n",
+    "call\t0\t2\t3\t-\tm\t105\t108\t105\tintrinsic x\n",
+    "call\t0\t-\t-\t-\tm\t120\t123\t120\tdirect m.g\n"
+  ], "")
+  # a class the labelled emission changed, or a method a widened jump moved,
+  # keeps every row and loses every pc
+  for bad in [JModMap { ..mm, same: false }, JModMap { ..mm, fns: [JFn { ..f, end: 1 }] }] {
+    let text = render([bad], srcs, bases)
+    assert str.contains(text, "call\t0\t-\t-\t-\tm\t100\t109\t100\tdirect m.h\n")
+    assert not str.contains(text, "call\t0\t0\t")
+  }
+  # a declaration with no base is printed so that a checker refuses it
+  let unknown = render([JModMap { ..mm, rows: [JRow { ..r, origin: "nope" }] }], srcs, bases)
+  assert str.contains(unknown, "\tm\t?\t?\t?\tdirect m.g\n")
+  assert abs_of(JRow { ..r, site: CNoSite }, bases) == (-1, -1, -1)
+}

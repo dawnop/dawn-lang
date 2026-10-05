@@ -1,0 +1,23 @@
+# A call the JVM backend writes into unreachable code, for scripts/jvm-map.
+#
+# `f(panic("no"), g(x))`: the first argument never returns, and the emitter
+# writes the rest of the call after it anyway, so `g(x)` and `f`'s invoke sit
+# in code nothing reaches. ASM replaces such a block with `nop .. athrow` and
+# gives it a stack map frame; a label inside it, which is what `__emit --map`
+# puts around every sited call, splits it in two, and the labelled class has
+# one frame more than the plain one. The side table must then keep this
+# module's rows without pcs (docs/source-span-map-design.md 13.4), and
+# check.py requires exactly that. If the emitter ever stops writing the dead
+# half of such a call, check.py goes red here, and the case should then hold
+# the two emissions equal rather than be removed.
+
+fn g(x: Int) -> Int = x + 1
+
+fn f(a: Int, b: Int) -> Int = a + b
+
+fn boom(x: Int) -> Int = f(panic("no"), g(x))
+
+pub fn main() -> Unit !io = {
+  println(to_string(g(1)))
+  if g(0) > 5 { println(to_string(boom(2))) }
+}

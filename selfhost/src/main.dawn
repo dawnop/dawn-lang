@@ -76,7 +76,8 @@ use check/types.{
   prelude_trait_ids, bounds_of, fn_interface_arities,
   Ty, TyFn, TyUnit, Sig, Traits, Adts, Impls, sig_abi_eff
 }
-use jvm/emit.{emit_module, gen_trait_interface}
+use jvm/emit.{emit_module, emit_module_mapped, gen_trait_interface, JModMap}
+use jvm/jmap
 use ir/core.{CModule, CValue, CMode}
 use ir/reach
 use ir/reach.{Live}
@@ -290,6 +291,24 @@ fn collect_program_roots(
   closure: Bool,
   std_tests: Bool
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])], List[(String, String)]) !Fs !Proc !Env !Exit !Console !io = {
+  let (classes, entry, tests_info, root_files, _) =
+    collect_program_full(target, std_flag, opts, closure, std_tests, false)
+  (classes, entry, tests_info, root_files)
+}
+
+## `collect_program_roots`, plus the `.dawnmap` side table when `mapping`
+## (`__emit --map`, docs/source-span-map-design.md section 13); "" otherwise.
+## The classes are the same either way: `emit_module_mapped` writes the plain
+## emission's and reads the map off a second one.
+fn collect_program_full(
+  target: String,
+  std_flag: Option[String],
+  opts: CtOpts,
+  closure: Bool,
+  std_tests: Bool,
+  mapping: Bool
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])], List[(String, String)], String) !Fs !Proc !Env !Exit !Console !io = {
+  var jmods: List[JModMap] = []
   var root_files: List[(String, String)] = []
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
@@ -595,9 +614,11 @@ fn collect_program_roots(
     # std carries no source path or AST here (StdCtx keeps neither), so a std
     # class that outgrows the class file format reports what it always did
     let no_decls: List[Decl] = []
-    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, entry, cls,
+    let (cs, mm) = emit_module_for(mapping, sup, adts, traits, impl_table, prog_fns, entry, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
       tm, std_lm[si], live, ct, cdriver.merged_consts(cx, ct, const_vals), "", no_decls)
+    classes = classes ++ cs
+    jmods = jmods ++ mm
     si = si + 1
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
@@ -616,10 +637,12 @@ fn collect_program_roots(
   }
   var ui = 0
   for cm in mods {
-    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, entry,
+    let (cs, mm) = emit_module_for(mapping, sup, adts, traits, impl_table, prog_fns, entry,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], live, cm.ct,
       cdriver.merged_consts(cm.cx, cm.ct, const_vals), cm.path, cm.m.decls)
+    classes = classes ++ cs
+    jmods = jmods ++ mm
     ui = ui + 1
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
@@ -633,7 +656,66 @@ fn collect_program_roots(
   for outer in vendor.vendored_outers() {
     classes = classes ++ vendor.rt_class_family(outer)
   }
-  (classes, entry, tests_info, root_files)
+  let dmap = if mapping { side_table(std_mods, mods, jmods) } else { "" }
+  (classes, entry, tests_info, root_files, dmap)
+}
+
+## One module's classes, and with `mapping` what its labelled emission found
+## (`emit_module_mapped`). Split out of `collect_program_full`, which the
+## two branches took past HotSpot's 8000-byte HugeMethodLimit
+## (docs/method-size-gate-design.md).
+fn emit_module_for(
+  mapping: Bool,
+  supers: List[String],
+  adts: Adts,
+  traits: Traits,
+  impl_table: Impls,
+  prog_fns: Map[(String, String), Sig],
+  args_owner: String,
+  class_name: String,
+  own_trait_ids: List[Int],
+  own_adt_ids: List[Int],
+  tm: TModule,
+  lm: lower.LMod,
+  live: Option[Live],
+  ct: CtOut,
+  all_consts: Map[String, CValue],
+  src: String,
+  decls: List[Decl]
+) -> (List[(String, Bytes)], List[JModMap]) !Fs !Exit !Console !io =
+  if mapping {
+    let (cs, mm) = emit_module_mapped(supers, adts, traits, impl_table, prog_fns, args_owner, class_name,
+      own_trait_ids, own_adt_ids, tm, lm, live, ct, all_consts, src, decls)
+    (cs, [mm])
+  } else {
+    (emit_module(supers, adts, traits, impl_table, prog_fns, args_owner, class_name, own_trait_ids,
+      own_adt_ids, tm, lm, live, ct, all_consts, src, decls), [])
+  }
+
+## The `.dawnmap` of a program's labelled emissions. Each module's source
+## path and declaration bases come by the C side table's rule
+## (cdriver.c_text_mapped): the bundled std's modules are named by where they
+## sit in it, a project module by its site path.
+fn side_table(
+  std_mods: List[(String, Cx, TModule, CtOut)],
+  mods: List[CheckedMod],
+  jmods: List[JModMap]
+) -> String = {
+  var srcs: Map[String, String] = map.empty()
+  var bases: Map[String, Map[String, Int]] = map.empty()
+  for sm in std_mods {
+    let (cls, _cx, tm, _ct) = sm
+    srcs = map.insert(srcs, cls, cls ++ ".dawn")
+    bases = map.insert(bases, cls, coresites.decl_bases(tm))
+  }
+  for cm in mods {
+    srcs = map.insert(srcs, cm.class_name, match cm.cx.site_path {
+      Some(p) -> p
+      None -> cm.path
+    })
+    bases = map.insert(bases, cm.class_name, coresites.decl_bases(cm.tm))
+  }
+  jmap.render(jmods, srcs, bases)
 }
 
 ## The JVM this process is running on, not whatever `java` PATH resolves to.
@@ -1348,8 +1430,13 @@ fn run_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
 ## compiled program under <dir> (`emitrt` is the historical alias).
+##
+## `--map <file>` also writes the `.dawnmap` side table: where each written
+## call landed in the bytecode (docs/source-span-map-design.md section 13).
+## The classes are the same with it or without it.
 fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var out = ""
+  var map_out = ""
   var target = ""
   var std_flag: Option[String] = None
   var i = 0
@@ -1360,6 +1447,9 @@ fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     } else if rest[i] == "--std" && i + 1 < len(rest) {
       std_flag = Some(rest[i + 1])
       i = i + 2
+    } else if rest[i] == "--map" && i + 1 < len(rest) {
+      map_out = rest[i + 1]
+      i = i + 2
     } else {
       refuse_second_target("dawn __emit", target, rest[i])
       target = rest[i]
@@ -1369,7 +1459,14 @@ fn run_emitrt(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if out == "" {
     return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
   }
-  let (classes, _, _) = collect_program(target, std_flag, ct_default(), false, false)
+  let (classes, _, _, _, dmap) =
+    collect_program_full(target, std_flag, ct_default(), false, false, map_out != "")
+  if map_out != "" {
+    match io.write_file(map_out, dmap) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error("cannot write " ++ map_out ++ ": " ++ e.message)
+    }
+  }
   var seen: Set[String] = set.empty()
   var n = 0
   for pair in classes {
