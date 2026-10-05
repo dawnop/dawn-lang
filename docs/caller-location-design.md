@@ -260,6 +260,8 @@ std/loc 是它的拥有者，所以在 std/loc 里 `Loc` 与 `String` 互相可�
 |---|---|
 | std 的 `str.at`、`bytes.at`、`bytes.buf_at` 加 `at` 并转发 | 在 inflate、sha2 的热循环里；多一个常量实参的代价要实测再落（CONTRIBUTING：性能断言要有出处） |
 | `web` 的 header 拒绝、`tea-dom` 的 render 拒绝、tileir 的 kernel 拒绝 | 各包的公开签名与版本；tileir 在 tile 路径上，要等 tile.yml |
+
+状态（2026-10-05）：`tea-dom` 那一条已落地，tea_dom 0.3.0 的 `to_html`/`to_document` 收 `at: Loc = caller()`，api-diff 记为新增（函数值处类型变），0.x 按兼容类升 minor。`web` 那一条要等下一次发版：`selfhost-prev-diff.sh` 用种子（v0.84.0）和它自带的 std 编 packages/web，而那份 std 里没有 `Loc`、`caller`，`panic` 也没有 `at`，探针三处报错。和 K3 的 web 日志中间件是同一个原因（`docs/clock-design.md`）。
 | `c[i]` 越界报调用者位置 | `Index` 是 trait 方法，不收默认值；若要做，是 L2 式的 `XIndex` 带位置，另行设计 |
 
 ## 九、不做的（理由）

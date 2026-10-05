@@ -128,6 +128,9 @@ The output parses to the DOM the bridge would build for the same tree:
 - A repeated prop prints once, at its first position with its last value.
 - The 13 void elements print as `<br>`, children dropped. A tag or prop name
   with whitespace, a control character or one of `" ' > / =` panics.
+- Either panic names the line that called `to_html` or `to_document`. Both
+  take `at: Loc = caller()`; a helper that renders for its own caller passes
+  `at: at` on.
 
 ## Flags
 
