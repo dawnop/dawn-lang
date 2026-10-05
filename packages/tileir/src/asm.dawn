@@ -1,0 +1,108 @@
+## How to call `tileiras` on the bytes `bytecode.encode` writes, for one
+## assembler version and one `--gpu-name`: [`tileiras_args`] answers the
+## arguments, and [`assembler_defect`] says why they are not the plain ones.
+##
+## This package never runs `tileiras` and neither does `std/gpu`: a program
+## hands `with_gpu_real` cubins somebody else assembled. So this module is
+## where the knowledge of a broken assembler lives, for that somebody (a build
+## script, scripts/tile-gpu-diff) to ask.
+#
+# Why a table keyed on the EXACT assembler version and the exact target, and
+# not a flag of the package. tileiras 13.4.92 writes wrong PTX for a loop that
+# exits by `break` with two carried values when the target is in the
+# sm_90/sm_100 family and the optimization level is 1 or above (issue #558,
+# upstream NVIDIA/cuda-tile#25; tile-backend-design 6.28). The defect is a
+# property of one binary on some targets, so the workaround is keyed on both:
+# a fixed tileiras is another version string and gets the plain arguments
+# without anybody remembering to take the workaround out, and sm_86 under the
+# same 13.4.92 keeps its optimizer, since its PTX is correct.
+#
+# Why `--opt-level 0` and not the previous assembler. 13.3.36 assembles the
+# same kernels correctly, but it refuses bytecode 13.4, which is the only
+# version bytecode.dawn writes, and four goldens (attr_ftof, insert_tile,
+# powi_sweep, loop_return) use operations 13.3 does not have. 13.4.92 at
+# `--opt-level 0` is correct on the minimised program and on every golden of
+# the sm_90 and sm_100 ledgers. It costs device time (on sm_86, where it can
+# be measured as a pure cost, up to 4.5x for kernels that compute and 8x for
+# loop_until; 6.28), and only on the affected targets.
+use std/list
+
+# One known assembler defect: the `tileiras` version it was measured on, the
+# `--gpu-name` values whose code is wrong, the extra arguments that avoid it,
+# and where it is written down.
+type Defect = {
+  tileiras: String,
+  targets: List[String],
+  args: List[String],
+  issue: String,
+}
+
+# The measured defects. sm_80 to sm_89 and sm_120/sm_121 assemble the
+# minimised program correctly under 13.4.92 at every level; the five below do
+# not (6.28 lists the PTX check behind each).
+fn defects() -> List[Defect] = [
+  Defect {
+    tileiras: "13.4.92",
+    targets: ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"],
+    args: ["--opt-level", "0"],
+    issue: "dawnop/dawn-lang#558, NVIDIA/cuda-tile#25",
+  }
+]
+
+fn defect_for(tileiras: String, gpu_name: String) -> Option[Defect] =
+  list.find(defects(), d => d.tileiras == tileiras && list.contains(d.targets, gpu_name))
+
+## The arguments to put before `-o <cubin> <bytecode>` when `tileiras`
+## version `tileiras` (as `tileiras --version` prints it after `V`, e.g.
+## `"13.4.92"`) assembles for `gpu_name` (e.g. `"sm_90"`): `--gpu-name` and,
+## for a combination [`assembler_defect`] knows to be broken, the arguments
+## that avoid the defect. For tileiras 13.4.92 on sm_90, sm_100, sm_103,
+## sm_107 and sm_110 that is `--opt-level 0`.
+pub fn tileiras_args(tileiras: String, gpu_name: String) -> List[String] = {
+  let extra = match defect_for(tileiras, gpu_name) {
+    Some(d) -> d.args
+    None -> []
+  }
+  ["--gpu-name", gpu_name] ++ extra
+}
+
+## Why [`tileiras_args`] adds arguments for this combination, or `None` when
+## it does not: one English sentence naming the assembler, the target, the
+## defect and the issues that track it.
+pub fn assembler_defect(tileiras: String, gpu_name: String) -> Option[String] =
+  match defect_for(tileiras, gpu_name) {
+    Some(d) -> Some(
+      "tileiras ${d.tileiras} miscompiles a loop exit value for ${gpu_name} at --opt-level 1 and above"
+        ++ " (${d.issue}); assemble with --opt-level 0 or with a tileiras that fixes it")
+    None -> None
+  }
+
+test "13.4.92 on the sm_90 and sm_100 family assembles at --opt-level 0" {
+  for g in ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"] {
+    assert tileiras_args("13.4.92", g) == ["--gpu-name", g, "--opt-level", "0"]
+    assert assembler_defect("13.4.92", g) != None
+  }
+}
+
+test "13.4.92 on the targets it compiles correctly keeps the default level" {
+  # sm_86 is this repository's ledger: the same 13.4.92 bytes give the right
+  # answer there at the default level, so its cubins keep the optimizer.
+  for g in ["sm_80", "sm_86", "sm_87", "sm_88", "sm_89", "sm_120", "sm_121"] {
+    assert tileiras_args("13.4.92", g) == ["--gpu-name", g]
+    assert assembler_defect("13.4.92", g) == None
+  }
+}
+
+test "the workaround is keyed on the assembler version, so another tileiras gets the plain arguments" {
+  # 13.3.36 is correct at every level on sm_90 and sm_100; a later fixed
+  # release is a different string and lifts the workaround with no edit here.
+  assert tileiras_args("13.3.36", "sm_90") == ["--gpu-name", "sm_90"]
+  assert tileiras_args("13.4.93", "sm_100") == ["--gpu-name", "sm_100"]
+  assert assembler_defect("13.3.36", "sm_90") == None
+}
+
+test "the diagnostic names the assembler, the target and both issues" {
+  assert assembler_defect("13.4.92", "sm_90") == Some(
+    "tileiras 13.4.92 miscompiles a loop exit value for sm_90 at --opt-level 1 and above"
+      ++ " (dawnop/dawn-lang#558, NVIDIA/cuda-tile#25); assemble with --opt-level 0 or with a tileiras that fixes it")
+}

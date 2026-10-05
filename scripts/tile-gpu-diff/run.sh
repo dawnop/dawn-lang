@@ -27,6 +27,9 @@
 #             tileiras into cubins for toolchain.txt's gpu-name. install-tileiras.sh
 #             installs the pin under $TILEIRAS_DIR (default
 #             ~/.cache/dawn-tileiras) unless $TILEIRAS names a binary.
+#             The arguments are packages/tileir's asm.tileiras_args for the
+#             pinned version and gpu-name: `--opt-level 0` on sm_90 and
+#             sm_100 under 13.4.92 (#558), the default level elsewhere.
 #   jvm       vadd_diff.dawn on the JVM stops at the first operation with
 #             `gpu.unsupported_backend`: the JVM has no device runtime and
 #             says so by construction rather than by a LinkageError.
@@ -735,6 +738,50 @@ fi
 grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
   { cat "$work/tileiras.version" >&2; fail "tileiras is not the pinned ${want_tileiras} (toolchain.txt)"; }
 
+# The arguments every cubin is assembled with, asked of packages/tileir's
+# `asm.tileiras_args` and not spelled here, so that this ledger and a user's
+# build take one answer from one table (docs 6.28). For the pinned 13.4.92 on
+# sm_90 and sm_100 that answer carries `--opt-level 0`: at the default level
+# that assembler stores a wrong loop exit value on those targets (#558) and
+# loop_until is the golden that caught it. The table is keyed on the
+# assembler version and the gpu-name, so pinning a fixed tileiras drops the
+# extra flag without an edit here, and sm_86 keeps the default level. The
+# answer is written into the ledger line as `asm=`, so a reader sees which
+# level a cluster line was assembled at.
+asm_proj="$work/proj-asm"
+mkdir -p "$asm_proj/src"
+cat > "$asm_proj/src/main.dawn" <<'DAWN'
+use tileir/asm.{tileiras_args, assembler_defect}
+
+pub fn main() -> Unit !io = match args() {
+  [version, gpu] -> {
+    for a in tileiras_args(version, gpu) { print("${a} ") }
+    println("")
+    match assembler_defect(version, gpu) {
+      Some(why) -> println(why)
+      None -> ()
+    }
+  }
+  _ -> panic("usage: asm <tileiras version> <gpu-name>")
+}
+DAWN
+cat > "$asm_proj/dawn.toml" <<TOML
+schema = 1
+name = "tile_asm_args"
+
+[deps]
+tileir = "$root/packages/tileir"
+TOML
+"$root/bin/dawn" run "$asm_proj" -- "$want_tileiras" "$gpu_name" > "$work/asm-args.out" 2> "$work/asm-args.err" ||
+  { cat "$work/asm-args.err" >&2; fail "packages/tileir's asm.tileiras_args did not answer"; }
+read -r -a asm_args < <(sed -n 1p "$work/asm-args.out")
+asm_why="$(sed -n 2p "$work/asm-args.out")"
+[ "${asm_args[0]-}" = --gpu-name ] && [ "${asm_args[1]-}" = "$gpu_name" ] ||
+  fail "asm.tileiras_args answered '${asm_args[*]-}', which does not start with --gpu-name $gpu_name"
+asm_probe="$(IFS=,; printf '%s' "${asm_args[*]}")"
+echo "      assemble with: tileiras ${asm_args[*]} (asm.tileiras_args, tileiras $want_tileiras, $gpu_name)"
+[ -z "$asm_why" ] || echo "      because: $asm_why"
+
 # The boundary kernels of knife 7a, in the order mask_diff takes them.
 masked=(vadd_tail copy relu leaky_relu clip elemops)
 
@@ -1069,7 +1116,7 @@ seq_order=("${sequenced[@]}" vadd)
 # `assemble` says which one), so the empty error stream is part of the
 # verdict here too.
 assemble_golden() { # kernel, tilebc, cubin
-  "$tileiras" --gpu-name "$gpu_name" -o "$3" "$2" > "$work/assemble.log" 2>&1 ||
+  "$tileiras" "${asm_args[@]}" -o "$3" "$2" > "$work/assemble.log" 2>&1 ||
     { cat "$work/assemble.log" >&2; fail "tileiras refused $2"; }
   ! grep -q '^error:' "$work/assemble.log" ||
     { cat "$work/assemble.log" >&2; fail "tileiras exited 0 but refused $2"; }
@@ -5505,6 +5552,7 @@ summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
 summary="$summary arch=$arch_probe"
+summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi
 printf '%s\n' "$line" >> "$ledger"
 echo "      ledger: appended: $line"
