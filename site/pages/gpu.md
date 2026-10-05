@@ -97,7 +97,7 @@ Reductions that keep their dimension
 
 ## api-keepdims
 
-`keepdims: true` reduces each row to a column of length one, and `broadcast` widens it back, explicitly. These two lines are the row statistics of the attention below; follow one to the Tile IR it wrote.
+`keepdims: true` reduces each row to a column of length one, and the column widens back where it meets the whole rows, because it kept their rank. These two lines are the row statistics of the attention below; follow one to the Tile IR it wrote.
 
 ## api-keepdims-go
 
@@ -113,7 +113,7 @@ The package's whole surface
 
 ## api-changes
 
-What changed in 0.8.0
+What changed in 0.9.0
 
 ## api-measured
 

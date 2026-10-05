@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 221c24de63747f9f -->
+<!-- doc-check: translation-of docs/tutorial.md @ 34a57d72bf424ec7 -->
 
 # Dawn 教程
 
@@ -1557,13 +1557,13 @@ GPU 程序分两层，每层一个效果。kernel 体唯一的效果是 `!Dev`�
 
 ```dawn run deps=tileir
 use std/gpu.{F64}
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 
 # 每个 tile 块读 `a` 和 `b` 里属于自己的那一格，写进 `out` 里属于自己的那一格。
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 pub fn main() -> Unit !io = {
   let g = cells([256], [128])     # 256 个元素，每格 128：两个块
@@ -1596,7 +1596,7 @@ cuda_tile.module @m {
 
 `vadd` 什么也没算。`trace3` 拿三个参数句柄调用了它一次，调用发生在一个 handler 底下，handler
 把函数体执行的每个 `Dev` 操作记下来；`render` 把这份记录打印成 `cuda_tile` 文本。函数体执行了
-四个操作（两个 `load_cell`、一个 `addf`、一个 `store_cell`），文本其余部分是它们降低出来的样子。
+四个操作（两个 `load_cell`、一个 `add`、一个 `store_cell`），文本其余部分是它们降低出来的样子。
 每个参数先成为它整个张量的视图（`make_tensor_view`），再按标记描述的格子切开
 （`make_partition_view`）。`get_tile_block_id` 是正在跑的那个块，`load_view_tko` 读这个块的格子。
 `assume div_by<16>` 是关于指针对齐的一个承诺，汇编器可以利用它。
@@ -1615,11 +1615,11 @@ extent 的 lane 读到的是标记的填充值（标记不另说就是零），�
 ```dawn run deps=tileir
 use std/gpu.{Gpu, F64, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
 use std/list
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 # 宿主一半：三个 `n` 元素的缓冲区，按 1000 个元素的格子启动。
 fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
@@ -1668,17 +1668,17 @@ extent 的末尾。它还拒绝和格子不一致的网格，以及和别的参�
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_cell, store_cell, store, addf, f_const, broadcast, block_id,
+use tileir/dev.{Dev, Param, load_cell, store_cell, store, add, f_const, broadcast, block_id,
   tile_at}
 use tileir/prog.{trace2, cells, In, Out}
 
 fn adds_one(x: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(x), f_const(F64, 1.0)))
+  store_cell(out, add(load_cell(x), f_const(F64, 1.0)))
 
 fn writes_its_input(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(x))
 
 fn adds_two_shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
+  store_cell(out, add(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
 
 fn stores_by_pointer(x: Param[F64], out: Param[F64]) -> Unit !Dev =
   store(out, tile_at(block_id(0), 128), load_cell(x))
@@ -1796,13 +1796,14 @@ Ok([0.09003057317038043, 0.24472847105479767, 0.6652409557748218, 9.0])
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range, carry, get, set}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
-  let acc = d_range(0, 256 / 32, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))
-  store_cell(c, acc)
+  let acc = carry(zeros(c))
+  d_range(0, 256 / 32) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  store_cell(c, acc.get())
 }
 
 pub fn main() -> Unit !io = {
@@ -1827,12 +1828,14 @@ continue %26, %25 : tile<64x64xf64>, token
 
 `along` 说格子的每一维跟网格的哪个轴走。`a` 的第 0 维（行）跟网格轴 0，第 1 维（沿 K）不跟任何
 轴：`FREE_AXIS` 的意思是这一维由 kernel 自己挑格子，挑法就是 `load_at(a, [k])`。`b` 正好反过来，
-`c` 是 `Out`，它的格子就是网格。`d_range(0, 8, init, body)` 是走八趟的循环，带着一个 tile，也就是
-累加器。`zeros(c)` 是一个形状和 `c` 的一格相同的 tile，所以累加器的形状从头到尾不用写；`mmaf` 从
+`c` 是 `Out`，它的格子就是网格。`d_range(0, 8) { k => .. }` 是走八趟的循环。累加器是一个
+`Carry`，即设备变量：`carry(zeros(c))` 造出它，`acc.get()` 读它，`acc.set(..)` 换成同形状的另一个
+tile。`zeros(c)` 是一个形状和 `c` 的一格相同的 tile，所以累加器的形状从头到尾不用写；`mmaf` 从
 操作数读出 m、k、n（`a` 和 `b` 的 k 对不上，记录时就拒）。
 
-循环体和 kernel 体一样只跑了一次：记录里是一个 `for` 区域，八趟由设备去跑。这个区域在累加器
-旁边还带着第二个值，token。内存操作的先后由记录器串起来的 token 链决定，不由程序文本的先后决定。
+循环体和 kernel 体一样在宿主上跑，记录里是一个 `for` 区域，八趟由设备去跑。循环带着体里 `set`
+过的东西；记录器先把体当试跑记一遍、再整遍扔掉，由此得知：`acc` 被 `set` 过，所以 `for` 带着它
+（体里的 `%8`，循环后的 `%5`）。这个区域在累加器旁边还带着第二个值，token。内存操作的先后由记录器串起来的 token 链决定，不由程序文本的先后决定。
 
 ### 按行归约：keepdims
 
@@ -1892,7 +1895,7 @@ NumPy 连 `[32]` 也会替你加宽。不这么做，是因为它的规则会在
 减去的是第 j 行的最大值。这里那种写法被拒，`keepdims` 就是归约说明自己指哪个轴的方式。
 
 把这一步放进一个沿 key/value 块走的循环，带上一路的最大值和一路的和，就是 FlashAttention：
-`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环，用的是同一批操作。
+`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环：三个 carry，同一批操作。
 [GPU 页](https://dawn-lang.dawnop.com/zh/gpu.html)展示了后端为这种规模的 kernel 记录下来的东西，
 以及它们在设备上的答案是怎么被核对的。
 
@@ -1960,12 +1963,12 @@ use std/io
 use std/io.{with_fs_real}
 use std/list
 use std/map
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/bytecode.{encode}
 
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 fn add_1000(entry: Entry3[F64, F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
   let xs = list.map(range(0, 1000), i => to_float(i))

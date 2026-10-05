@@ -18,8 +18,8 @@ use std/list
 use std/str
 use std/gpu.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
-  Dev, Param, param, block_id, tile_at, load, store, addf, idx_const, d_for, d_global, global_ptrs, load_ptrs, t_block_id,
-  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, maxf, f_const, lt, gt, d_assert, broadcast, mul,
+  Dev, Param, param, block_id, tile_at, load, store, add, idx_const, d_for, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
+  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
   load_cell, store_cell, tail_mask, for_arch, hint_latency }
 use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
@@ -1365,7 +1365,7 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), 128)
   let ta = load(a, blk, [128])
   let tb = load(b, blk, [128])
-  store(out, blk, addf(ta, tb))
+  store(out, blk, add(ta, tb))
 }
 
 fn vadd_body() -> Unit !Dev = vadd(param(F64, 0), param(F64, 1), param(F64, 2))
@@ -1393,7 +1393,7 @@ fn must_map(prog: TileProg, calls: List[Call]) -> LineMap = match line_map(prog,
 test "the side table holds vadd's six calls in source order, the kernel's own only" {
   let (p, calls) = vadd_calls()
   # tile_at's idx_const and idx_mul are its own, not rows of their own
-  assert names_of(calls) == ["block_id", "tile_at", "load", "load", "addf", "store"]
+  assert names_of(calls) == ["block_id", "tile_at", "load", "load", "add", "store"]
   assert list.map(calls, c => (c.ops_from, c.ops_to)) == [(1, 2), (2, 4), (4, 5), (5, 6), (6, 7), (7, 8)]
   assert list.all(calls, c => c.parent == 0 - 1)
   assert len(p.ops) == 8
@@ -1453,8 +1453,9 @@ fn summed(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let b = block_id(0)
   let first = load(x, tile_at(b, 128), [128])
   let one = idx_const(1)
-  let acc = d_for(one, idx_const(4), one, first, (k, t) => addf(t, load(x, tile_at(k, 128), [128])))
-  store(out, tile_at(b, 128), acc)
+  let acc = carry(first)
+  d_for(one, idx_const(4), one) { k => acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
+  store(out, tile_at(b, 128), acc.get())
 }
 
 # The rows of `calls` as (name, parent) pairs.
@@ -1477,29 +1478,32 @@ fn every_line_once(m: LineMap) -> Bool = {
 
 test "what a loop's body calls are the d_for's children, and the d_for keeps its header, its continue and its brace" {
   let (p, calls) = trace_calls("summed", ["f64", "f64"], () => summed(param(F64, 0), param(F64, 1)))
+  # `carry`, `get` and `set` are calls that record nothing, and the trial
+  # that found the loop's carry left no row behind
   assert tree_of(calls) == [("block_id", 0 - 1), ("tile_at", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1),
-    ("idx_const", 0 - 1), ("d_for", 0 - 1), ("tile_at", 5), ("load", 5), ("addf", 5), ("tile_at", 0 - 1), ("store", 0 - 1)]
+    ("carry", 0 - 1), ("idx_const", 0 - 1), ("d_for", 0 - 1), ("get", 6), ("tile_at", 6), ("load", 6), ("add", 6),
+    ("set", 6), ("tile_at", 0 - 1), ("get", 0 - 1), ("store", 0 - 1)]
   # a call's range holds its children's
-  assert calls[5].ops_from < calls[6].ops_from && calls[8].ops_to < calls[5].ops_to
+  assert calls[6].ops_from < calls[8].ops_from && calls[10].ops_to < calls[6].ops_to
   let m = must_map(p, calls)
   assert every_line_once(m)
-  let own = texts(m, m.calls[5].lines)
+  let own = texts(m, m.calls[6].lines)
   assert len(own) == 3
   assert str.contains(own[0], " = for ")
   assert str.starts_with(own[1], "continue ")
   assert own[2] == "}"
   # the body's lines are the children's, in the order the body issued them
-  assert list.all([6, 7, 8], k => len(m.calls[k].lines) > 0)
+  assert list.all([8, 9, 10], k => len(m.calls[k].lines) > 0)
 }
 
 fn scanned(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let t = load(x, idx_const(0), [8])
-  store(out, idx_const(0), d_scan(t, 0.0, (best, e) => maxf(best, e)))
+  store(out, idx_const(0), d_scan(t, 0.0, (best, e) => max(best, e)))
 }
 
 test "a call inside a scan's closure is the d_scan's child, and the d_scan keeps its header, its yield and its brace" {
   let (p, calls) = trace_calls("scanned", ["f64", "f64"], () => scanned(param(F64, 0), param(F64, 1)))
-  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1), ("d_scan", 0 - 1), ("maxf", 3),
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1), ("d_scan", 0 - 1), ("max", 3),
     ("store", 0 - 1)]
   let m = must_map(p, calls)
   assert every_line_once(m)
@@ -1516,15 +1520,21 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let z = idx_const(0)
   let one = idx_const(1)
   let first = load(x, z, [8])
-  let acc = d_for(z, one, one, first, (i, t) =>
-      d_for(z, one, one, t, (_j, u) => addf(u, broadcast(d_reduce(u, 0.0, (a, e) => maxf(a, e)), [8]))))
-  store(out, z, acc)
+  let acc = carry(first)
+  d_for(z, one, one) { _i =>
+    d_for(z, one, one) { _j =>
+      let u = acc.get()
+      acc.set(add(u, broadcast(d_reduce(u, 0.0, (a, e) => max(a, e)), [8])))
+    }
+  }
+  store(out, z, acc.get())
 }
 
 test "regions inside regions nest the rows: each call's parent is the region whose closure it is in" {
   let (p, calls) = trace_calls("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
-  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("d_for", 0 - 1), ("d_for", 3),
-    ("d_reduce", 4), ("maxf", 5), ("broadcast", 4), ("addf", 4), ("store", 0 - 1)]
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("carry", 0 - 1), ("d_for", 0 - 1),
+    ("d_for", 4), ("get", 5), ("d_reduce", 5), ("max", 7), ("broadcast", 5), ("add", 5), ("set", 5), ("get", 0 - 1),
+    ("store", 0 - 1)]
   let m = must_map(p, calls)
   assert every_line_once(m)
 }
@@ -1535,13 +1545,19 @@ fn regions(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let z = idx_const(0)
   let t = load(x, z, [8])
   let c = lt(t, t)
-  let r = d_reduce(t, 0.0, (a, e) => maxf(a, e))
-  let s = d_scan(t, 0.0, (a, e) => maxf(a, e), reverse: true)
+  let r = d_reduce(t, 0.0, (a, e) => max(a, e))
+  let s = d_scan(t, 0.0, (a, e) => max(a, e), reverse: true)
   let stop = gt(r, r)
-  let w = d_loop(s, u => (stop, mul(u, u)))
-  let v = d_if(stop, () => addf(w, w), () => mul(w, w))
+  let w = carry(s)
+  d_loop {
+    let u = w.get()
+    w.set(mul(u, u))
+    stop
+  }
+  let v = carry(w.get())
+  d_if(stop, () => v.set(add(w.get(), w.get())), () => v.set(mul(w.get(), w.get())))
   d_assert(c, "never")
-  d_fork2(() => store(out, z, v), () => store(out, idx_const(8), v))
+  d_fork2(() => store(out, z, v.get()), () => store(out, idx_const(8), v.get()))
 }
 
 test "the marks put nothing into the program: trace_calls records what trace_kernel records" {
@@ -1566,9 +1582,11 @@ test "the marks put nothing into the program: trace_calls records what trace_ker
 
 test "every region function's closure is a body: what it calls is the region call's child" {
   let (_q, calls) = trace_calls("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
-  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("lt", 0 - 1), ("d_reduce", 0 - 1), ("maxf", 3),
-    ("d_scan", 0 - 1), ("maxf", 5), ("gt", 0 - 1), ("d_loop", 0 - 1), ("mul", 8), ("d_if", 0 - 1), ("addf", 10),
-    ("mul", 10), ("d_assert", 0 - 1), ("d_fork2", 0 - 1), ("store", 14), ("idx_const", 14), ("store", 14)]
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("lt", 0 - 1), ("d_reduce", 0 - 1), ("max", 3),
+    ("d_scan", 0 - 1), ("max", 5), ("gt", 0 - 1), ("carry", 0 - 1), ("d_loop", 0 - 1), ("get", 9), ("mul", 9), ("set", 9),
+    ("get", 0 - 1), ("carry", 0 - 1), ("d_if", 0 - 1), ("get", 15), ("get", 15), ("add", 15), ("set", 15), ("get", 15),
+    ("get", 15), ("mul", 15), ("set", 15), ("d_assert", 0 - 1), ("d_fork2", 0 - 1), ("get", 25), ("store", 25),
+    ("idx_const", 25), ("get", 25), ("store", 25)]
 }
 
 # The sentinel oracle: a kernel with a `d_assert` between every two calls it
@@ -1588,23 +1606,24 @@ fn sentinels(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   s("3")
   let n = idx_const(2)
   s("4")
-  let acc = d_for(i0, n, n, t, (k, u) => {
+  let acc = carry(t)
+  d_for(i0, n, n) { k =>
     s("5")
     let v = load(x, k, [8])
     s("6")
     let w = d_scan(v, 0.0, (a, e) => {
       s("7")
-      let r = maxf(a, e)
+      let r = max(a, e)
       s("8")
       r
     })
     s("9")
-    let y = addf(u, w)
+    let y = add(acc.get(), w)
     s("10")
-    y
-  })
+    acc.set(y)
+  }
   s("11")
-  store(out, i0, acc)
+  store(out, i0, acc.get())
   s("12")
 }
 
@@ -1644,20 +1663,20 @@ test "the map agrees with sentinels: every line is the call that ran between the
   # the constant is made where it is first used, by the broadcast, so the
   # `f_const` call has no line of its own
   assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_for"], ["load"], ["d_scan"],
-    ["maxf"], ["d_scan"], ["addf"], ["d_for"], ["store"], ["tail"]]
+    ["max"], ["d_scan"], ["add"], ["d_for"], ["store"], ["tail"]]
 }
 
 fn tabled(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   d_global("t", F64, [1.0, 2.0])
   let v = load_ptrs(global_ptrs("t", F64, [2]))
-  store(out, idx_const(0), addf(v, load(x, idx_const(0), [2])))
+  store(out, idx_const(0), add(v, load(x, idx_const(0), [2])))
 }
 
 test "a global's line belongs to the call that declared it" {
   let (p, calls) = trace_calls("tabled", ["f64", "f64"], () => tabled(param(F64, 0), param(F64, 1)))
   # arguments left to right, each call after its own arguments: store's
-  # `idx_const(0)` runs before anything inside its `addf`
-  assert names_of(calls) == ["d_global", "global_ptrs", "load_ptrs", "idx_const", "idx_const", "load", "addf", "store"]
+  # `idx_const(0)` runs before anything inside its `add`
+  assert names_of(calls) == ["d_global", "global_ptrs", "load_ptrs", "idx_const", "idx_const", "load", "add", "store"]
   let m = must_map(p, calls)
   # the module line, then the global, then the entry
   assert m.calls[0].lines == [(2, 3)]
@@ -1669,7 +1688,7 @@ test "a global's line belongs to the call that declared it" {
 # ---- the batch's PR-1: where an In's alignment claim goes ----
 
 fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
-  store_cell(o, addf(load_cell(a), load_cell(b)))
+  store_cell(o, add(load_cell(a), load_cell(b)))
 
 test "PR-2: every cell view, an In's and an Out's, claims 16-byte alignment on the parameter itself, ahead of the view" {
   let g = cells([1024], [128])
@@ -1717,7 +1736,7 @@ fn merged_combos(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let h = [for_arch("sm_86", [hint_latency(2)])]
   let t = load(a, b, [128], strides: Some([1]), hints: h)
   let u = load(a, b, [128], mask: Some(m))
-  store(o, b, addf(t, u), strides: Some([1]), mask: Some(m), hints: h)
+  store(o, b, add(t, u), strides: Some([1]), mask: Some(m), hints: h)
 }
 
 test "PR-2: a hinted load, a masked load with no padding value and a masked hinted store render as the dialect spells them" {

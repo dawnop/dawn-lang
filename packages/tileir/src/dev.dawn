@@ -37,7 +37,7 @@ use std/narrow.{Rounding}
 ## A tile value inside a kernel: the SSA handle the handler issued for it,
 ## of any rank, rank 0 (`tile<f64>`) included. `D` is a phantom (spec 2.7):
 ## `Tile[F64]` and `Tile[F32]` are two types over one representation, so
-## `addf` of an f64 tile and an f32 one is a type error.
+## `add` of an f64 tile and an f32 one is a type error.
 ##
 ## The SHAPE is not in the type. It belongs to the value: the recording
 ## handler holds every handle's format and shape, a public function reads
@@ -613,13 +613,14 @@ pub opaque type Ptrs[D] = Int
 ## which operations: `prog.trace_calls` keeps the kernel's own calls as a
 ## side table beside the program, and every other handler answers `()`. They
 ## are the only way that is known exactly, because the mapping is not one to
-## one (`tile_at` issues `t_idx_const` and `t_idx_mul`, `addf` issues
+## one (`tile_at` issues `t_idx_const` and `t_idx_mul`, `add` issues
 ## `t_binaryf`, `d_for` a whole region).
 ##
 ## `t_body_enter()` and `t_body_exit()` record nothing either. Every public
-## function that takes a closure (`d_for` to `d_for4`, `d_loop`, `d_loop2`,
-## the reductions, the scans, `d_if`, `d_fork2`) runs that closure between
-## the two, and runs nothing else between them. A call marked inside a body
+## function that takes a closure (`d_for`, `d_range`, `d_loop`, the
+## reductions, the scans, `d_if`, `d_fork2`) runs that closure between the
+## two, and runs nothing else between them; a region's trial (`Carry`) runs
+## it between them too, and the trial's calls are thrown away with the rest. A call marked inside a body
 ## is one the KERNEL wrote, in the region the closure fills; a call marked
 ## anywhere else inside another call is one the library made on its own
 ## behalf (`idx_mul` inside `tile_at`). That difference is what lets
@@ -679,6 +680,12 @@ pub effect Dev {
   fn t_insert(dtype: String, sub: List[Int], whole: List[Int], src: Int, dst: Int, indices: List[Int]) -> Int
   fn t_powi(dtype: String, exp_dtype: String, shape: List[Int], a: Int, n: Int) -> Int
   fn t_num_blocks(axis: Int) -> Int
+  fn t_extent_of(param: Int, dim: Int, blocks: Bool) -> Int
+  fn t_carry_new(init: Int) -> Int
+  fn t_carry_get(c: Int) -> Int
+  fn t_carry_set(c: Int, h: Int) -> Unit
+  fn t_trial_begin() -> Unit
+  fn t_trial_end() -> List[Int]
   fn t_tok_get() -> Int
   fn t_tok_set(tok: Int) -> Unit
   fn t_tok_join(toks: List[Int]) -> Int
@@ -1225,8 +1232,17 @@ pub fn atomic_cas[D](p: Param[D], index: Tile[I32], cmp: Tile[D], v: Tile[D],
 # batch's PR-3 (C3) there is nothing left to get wrong. A rank-0 operand
 # beside a wider one is widened by the recording (the rank-0 rule, 6.25),
 # so `sub(t, reduce_max(t))` and `mul(t, f_const(F64, 0.5))` need no
-# shape either; every other shape difference is refused, by number and
-# name, and `broadcast` is the explicit spelling.
+# shape either, and so is an operand of the operation's rank along its
+# dimensions of length 1 (the same-rank rule, 0.8.2, 6.29); every other
+# shape difference is refused, by number and name, and `broadcast` is the
+# explicit spelling.
+#
+# The float names are `add`, `sub`, `mul`, `div`, `max`, `min`, `neg` and
+# `abs` (0.9.0; `add`, `max` and `min` were `addf`, `maxf` and `minf`,
+# the last of the suffixes 0.8.0 left). Integer arithmetic keeps its own
+# names (`add_i`, `addi`): docs/std-defaults-design.md 3. A module that
+# imports `max` or `min` from here shadows the prelude's for host numbers
+# too (spec 10.3); `list.max` and a qualified `dev.max` are unaffected.
 
 # The handle of a binary float operation over `a` and `b`.
 fn binary[D](op: String, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
@@ -1265,21 +1281,21 @@ fn compare_int(pred: String, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = {
 ## tile-backend-design 3.2's theorem covers and what every kernel here
 ## writes unless it says otherwise. The other values this package writes
 ## are listed at "the attributes of float arithmetic" below.
-pub fn addf[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev = called("addf", () => {
+pub fn add[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev = called("add", () => {
   binary(float_op("addf", rounding, ftz), a, b)
 })
 
-## The element-wise difference `a - b`. `rounding` and `ftz` as for `addf`.
+## The element-wise difference `a - b`. `rounding` and `ftz` as for `add`.
 pub fn sub[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev = called("sub", () => {
   binary(float_op("subf", rounding, ftz), a, b)
 })
 
-## The element-wise product `a * b`. `rounding` and `ftz` as for `addf`.
+## The element-wise product `a * b`. `rounding` and `ftz` as for `add`.
 pub fn mul[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev = called("mul", () => {
   binary(float_op("mulf", rounding, ftz), a, b)
 })
 
-## The element-wise quotient `a / b`. `rounding` and `ftz` as for `addf`.
+## The element-wise quotient `a / b`. `rounding` and `ftz` as for `add`.
 pub fn div[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false) -> Tile[D] !Dev = called("div", () => {
   binary(float_op("divf", rounding, ftz), a, b)
 })
@@ -1287,12 +1303,12 @@ pub fn div[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Boo
 ## The element-wise larger of `a` and `b`. Without `propagate_nan` (the
 ## dialect's default), a NaN operand answers the other operand; with it, a
 ## NaN operand answers a canonical NaN.
-pub fn maxf[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false) -> Tile[D] !Dev = called("maxf", () => {
+pub fn max[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false) -> Tile[D] !Dev = called("max", () => {
   binary(if propagate_nan { "maxf_nan" } else { "maxf" }, a, b)
 })
 
-## The element-wise smaller of `a` and `b`. `propagate_nan` as for `maxf`.
-pub fn minf[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false) -> Tile[D] !Dev = called("minf", () => {
+## The element-wise smaller of `a` and `b`. `propagate_nan` as for `max`.
+pub fn min[D](a: Tile[D], b: Tile[D], propagate_nan: Bool = false) -> Tile[D] !Dev = called("min", () => {
   binary(if propagate_nan { "minf_nan" } else { "minf" }, a, b)
 })
 
@@ -2241,28 +2257,113 @@ pub fn idx_rem(a: Idx, b: Idx) -> Idx !Dev = called("idx_rem", () => idx_of(bina
 ## The difference `a - b` of two index tiles.
 pub fn idx_sub(a: Idx, b: Idx) -> Idx !Dev = called("idx_sub", () => idx_of(binary_int("subi", idx_as_tile(a), idx_as_tile(b))))
 
-# A `for` over the index range `[lower, upper)` by `step` with `carried` as
-# the loop-carried handles: `body` runs ONCE, on the host, with the induction
-# variable and the carried handles as the loop sees them, and answers the
-# handles the next iteration receives (as many as `carried`, in order); what
-# it issues in between falls inside the loop's region. The answer is the
-# carried handles after the loop. Private: handles are opaque outside this
-# module, so a body can only reach this through the typed `d_for` / `d_for2`.
-fn loop_handles(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, carried: List[Int],
-  body: fn(Idx, List[Int]) -> List[Int] !Dev) -> List[Int] !Dev = {
+# ---- device variables and the regions that carry them (tileir 0.9.0) ----
+#
+# A loop or an `if` in a kernel is a REGION whose values flow out through
+# block arguments and results, which in SSA is a tuple of handles. Until
+# 0.9.0 the kernel spelt that tuple: `d_for3(.., m0, l0, acc0, (j, m, l, acc)
+# => { ..; (m_new, l_new, acc_new) })` named every carried value three times
+# and needed one function per arity, because Dawn has no variadic generics
+# to take a tuple apart (docs/tile-backend-design.md 6.30).
+#
+# A `Carry[D]` is a device variable instead: `carry(init)` makes one,
+# `c.get()` reads its current tile and `c.set(t)` replaces it. The regions
+# take bodies that answer Unit (`d_loop`'s answers its stop mask), and find
+# what they carry themselves, the way Triton's code generator does
+# (`_find_carries`): the body runs once as a TRIAL, the recording notes
+# which carries made before the region the trial `set`, and everything the
+# trial recorded is then thrown away (`t_trial_begin` / `t_trial_end`
+# restore the whole recording). The body then runs again for real, with
+# those carries as the region's carried values in the order they were made;
+# inside, `get` answers the block argument, and after the region the
+# carries hold its results. A carry the body only reads is not carried; the
+# body sees the tile it held outside, as a closure would.
+#
+# A body is recorded twice per region, so a region nested `n` deep runs its
+# innermost body 2^n times while recording; MAX_LOOP_DEPTH (16) bounds `n`.
+# The kernels in scripts/tile-golden nest two deep at most. Recording is
+# deterministic (every kernel is already traced twice and the two records
+# compared), so the trial and the real run issue the same operations.
+#
+# Which carries are carried is "was set", not "holds another handle": a
+# body that sets a carry to what it already holds still carries it, which
+# is what a loop that answers its argument unchanged always meant.
+
+## A device variable of format `D`: a tile a kernel body replaces as it goes,
+## which a region carries when its body replaces it. Made by `carry`, read
+## by `get`, replaced by `set`; its format and shape are its first tile's
+## for good.
+pub opaque type Carry[D] = Int
+
+## A device variable starting at `init`. `init` must have a format of its
+## own (`f_const`, not `lit`) and a shape: a loop's accumulator starts from
+## `zeros(p)` or a `broadcast`, as before.
+pub fn carry[D](init: Tile[D]) -> Carry[D] !Dev = called("carry", () => {
+  let h: Int = init
+  let c: Carry[D] = t_carry_new(h)
+  c
+})
+
+## The tile `c` holds where the body stands: inside a region that carries
+## it, the region's block argument; after the region, its result.
+pub fn get[D](c: Carry[D]) -> Tile[D] !Dev = called("get", () => {
+  let k: Int = c
+  let h: Tile[D] = t_carry_get(k)
+  h
+})
+
+## Replace the tile `c` holds with `t`, of the same format and shape (the
+## recording refuses any other). Not inside a reduction's or a scan's body,
+## whose regions carry nothing.
+pub fn set[D](c: Carry[D], t: Tile[D]) -> Unit !Dev = called("set", () => {
+  let k: Int = c
+  let h: Int = t
+  t_carry_set(k, h)
+})
+
+# The carries `body` sets, in the order they were made, found by a trial:
+# `region` opens and closes the region around the body with nothing
+# carried, and the recording is restored afterwards.
+fn trial(region: fn() -> Unit !Dev) -> List[Int] !Dev = {
+  t_trial_begin()
+  region()
+  t_trial_end()
+}
+
+fn carry_gets(cs: List[Int]) -> List[Int] !Dev = list.map(cs, c => t_carry_get(c))
+
+fn carry_sets(cs: List[Int], hs: List[Int]) -> Unit !Dev = {
+  for k in range(0, len(cs)) {
+    t_carry_set(cs[k], hs[k])
+  }
+}
+
+# A `for` over the index range `[lower, upper)` by `step` carrying what
+# `body` sets (`trial`). Private: `d_for` and `d_range` are the spellings.
+fn loop_carrying(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, body: fn(Idx) -> Unit !Dev) -> Unit !Dev = {
   let lo: Int = lower
   let up: Int = upper
   let st: Int = step
-  let (iv, inside) = t_loop_begin(lo, up, st, unsigned, carried)
+  let none: List[Int] = []
+  let cs = trial(() => {
+    let (iv, _inside) = t_loop_begin(lo, up, st, unsigned, none)
+    let i: Idx = iv
+    user_body(() => body(i))
+    let _r = t_loop_end(none)
+    ()
+  })
+  let (iv, inside) = t_loop_begin(lo, up, st, unsigned, carry_gets(cs))
+  carry_sets(cs, inside)
   let i: Idx = iv
-  t_loop_end(body(i, inside))
+  user_body(() => body(i))
+  carry_sets(cs, t_loop_end(carry_gets(cs)))
 }
 
-## A `for` over the index range `[lower, upper)` by `step` inside the kernel,
-## carrying one tile: `init` enters, `body` runs ONCE, on the host, with the
-## induction variable and the carried tile as the loop sees them, and
-## answers the tile the next iteration receives; what it issues in between
-## falls inside the loop's region. The answer is the tile after the loop.
+## A `for` over the index range `[lower, upper)` by `step` inside the
+## kernel: `body` runs on the host with the induction variable, and what it
+## issues falls inside the loop's region. The carries it sets are carried
+## through the loop (`Carry`); after the loop they hold what the last
+## iteration set.
 ##
 ## This is an ordinary function rather than an operation because the
 ## operation's own declaration could not name a `!Dev` body
@@ -2276,133 +2377,35 @@ fn loop_handles(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, carried: List
 ## forward instead of not running at all. Its own kernel is
 ## scripts/tile-golden's attr_ucmp, and the difference is a lane count and
 ## not a rounding, which is why this is the one unit attribute of knife T4
-## with an unmistakable device answer. `d_for2` to `d_for4` take it too.
-pub fn d_for[D](lower: Idx, upper: Idx, step: Idx, init: Tile[D],
-  body: fn(Idx, Tile[D]) -> Tile[D] !Dev, unsigned_cmp: Bool = false) -> Tile[D] !Dev = called("d_for", () => {
-    let h: Int = init
-    let outs = loop_handles(lower, upper, step, unsigned_cmp, [h], (i, inside) => {
-      let t: Tile[D] = inside[0]
-      let rt: Tile[D] = user_body(() => body(i, t))
-      let r: Int = rt
-      [r]
-    })
-    let out: Tile[D] = outs[0]
-    out
+## with an unmistakable device answer.
+##
+## `body` is the last parameter, so it is written as a tail block:
+## `d_for(lo, hi, one) { j => .. }`.
+pub fn d_for(lower: Idx, upper: Idx, step: Idx, unsigned_cmp: Bool = false,
+  body: fn(Idx) -> Unit !Dev) -> Unit !Dev = called("d_for", () => {
+    loop_carrying(lower, upper, step, unsigned_cmp, body)
   })
 
 ## `d_for` over HOST bounds: the index range `[lower, upper)` by `step`,
 ## each a number fixed when the kernel is recorded, which is what nearly
 ## every loop here has (the `k` of a matrix product walks `0 .. K / TK`).
 ## It records exactly what `d_for(idx_const(lower), idx_const(upper),
-## idx_const(step), ..)` records, in that order; it is a spelling, not an
+## idx_const(step)) { .. }` records, in that order; it is a spelling, not an
 ## operation (the batch's C4, cutile-rs's `d_range`).
-pub fn d_range[D](lower: Int, upper: Int, init: Tile[D], body: fn(Idx, Tile[D]) -> Tile[D] !Dev,
-  step: Int = 1) -> Tile[D] !Dev = called("d_range", () => {
-    let lo = idx_const(lower)
-    let up = idx_const(upper)
-    let st = idx_const(step)
-    let h: Int = init
-    let outs = loop_handles(lo, up, st, false, [h], (i, inside) => {
-      let t: Tile[D] = inside[0]
-      let rt: Tile[D] = user_body(() => body(i, t))
-      let r: Int = rt
-      [r]
-    })
-    let out: Tile[D] = outs[0]
-    out
-  })
+pub fn d_range(lower: Int, upper: Int, step: Int = 1, body: fn(Idx) -> Unit !Dev) -> Unit !Dev = called("d_range", () => {
+  let lo = idx_const(lower)
+  let up = idx_const(upper)
+  let st = idx_const(step)
+  loop_carrying(lo, up, st, false, body)
+})
 
-## `d_for` carrying two tiles, of formats `A` and `B`, in order.
-pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
-  body: fn(Idx, Tile[A], Tile[B]) -> (Tile[A], Tile[B]) !Dev, unsigned_cmp: Bool = false) -> (Tile[A], Tile[B]) !Dev = called("d_for2", () => {
-    let ha: Int = a
-    let hb: Int = b
-    let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb], (i, inside) => {
-      let ta: Tile[A] = inside[0]
-      let tb: Tile[B] = inside[1]
-      let (ra, rb) = user_body(() => body(i, ta, tb))
-      let xa: Int = ra
-      let xb: Int = rb
-      [xa, xb]
-    })
-    let oa: Tile[A] = outs[0]
-    let ob: Tile[B] = outs[1]
-    (oa, ob)
-  })
-
-## `d_for` carrying three tiles, of formats `A`, `B` and `C`, in order:
-## what an online softmax needs (a running maximum, a running sum and an
-## accumulator move through one loop together).
-pub fn d_for3[A, B, C](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B], c: Tile[C],
-  body: fn(Idx, Tile[A], Tile[B], Tile[C]) -> (Tile[A], Tile[B], Tile[C]) !Dev,
-  unsigned_cmp: Bool = false) -> (Tile[A], Tile[B], Tile[C]) !Dev = called("d_for3", () => {
-    let ha: Int = a
-    let hb: Int = b
-    let hc: Int = c
-    let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb, hc], (i, inside) => {
-      let ta: Tile[A] = inside[0]
-      let tb: Tile[B] = inside[1]
-      let tc: Tile[C] = inside[2]
-      let (ra, rb, rc) = user_body(() => body(i, ta, tb, tc))
-      let xa: Int = ra
-      let xb: Int = rb
-      let xc: Int = rc
-      [xa, xb, xc]
-    })
-    let oa: Tile[A] = outs[0]
-    let ob: Tile[B] = outs[1]
-    let oc: Tile[C] = outs[2]
-    (oa, ob, oc)
-  })
-
-## `d_for` carrying four tiles, in order.
-pub fn d_for4[A, B, C, E](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B], c: Tile[C], e: Tile[E],
-  body: fn(Idx, Tile[A], Tile[B], Tile[C], Tile[E]) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev,
-  unsigned_cmp: Bool = false) -> (Tile[A], Tile[B], Tile[C], Tile[E]) !Dev = called("d_for4", () => {
-    let ha: Int = a
-    let hb: Int = b
-    let hc: Int = c
-    let he: Int = e
-    let outs = loop_handles(lower, upper, step, unsigned_cmp, [ha, hb, hc, he], (i, inside) => {
-      let ta: Tile[A] = inside[0]
-      let tb: Tile[B] = inside[1]
-      let tc: Tile[C] = inside[2]
-      let te: Tile[E] = inside[3]
-      let (ra, rb, rc, re) = user_body(() => body(i, ta, tb, tc, te))
-      let xa: Int = ra
-      let xb: Int = rb
-      let xc: Int = rc
-      let xe: Int = re
-      [xa, xb, xc, xe]
-    })
-    let oa: Tile[A] = outs[0]
-    let ob: Tile[B] = outs[1]
-    let oc: Tile[C] = outs[2]
-    let oe: Tile[E] = outs[3]
-    (oa, ob, oc, oe)
-  })
-
-# A `loop` carrying `carried`: `body` runs ONCE, on the host, with the
-# carried handles as the loop sees them, and answers the exit condition (a
-# rank-0 `i1` handle) and the handles the next iteration receives; what it
-# issues in between falls inside the loop's region. The answer is the
-# carried handles after the loop, which are the ones that ENTERED the
-# iteration whose condition was true. Private for `loop_handles`'s reason:
-# handles are opaque outside this module.
-fn while_handles(carried: List[Int],
-  body: fn(List[Int]) -> (Int, List[Int]) !Dev) -> List[Int] !Dev = {
-  let inside = t_while_begin(carried)
-  let (cond, outs) = body(inside)
-  t_while_end(cond, outs)
-}
-
-## The loop whose trip count the DATA decides, carrying one tile: `init`
-## enters, `body` runs ONCE, on the host, with the carried tile as the loop
-## sees it, and answers a rank-0 mask -- true when the loop is to stop here
-## -- and the tile the next iteration receives. The answer is the tile that
-## entered the iteration where the mask was true, so the loop reads "while
-## the mask is false, replace the tile"; what `body` computed on the
-## iteration that stopped it is discarded.
+## The loop whose trip count the DATA decides: `body` runs on the host and
+## answers a rank-0 mask, true when the loop is to stop here; the carries it
+## sets are carried (`Carry`). When the mask is true the loop stops with the
+## carries as they ENTERED that iteration, so the loop reads "while the
+## mask is false, keep what the body set"; what `body` set on the iteration
+## that stopped it is discarded. Compute the mask from what the iteration
+## started with, before the `set`s, unless that is not what you mean.
 ##
 ## This is `d_for`'s sibling and the only other region that iterates. The
 ## difference is where the trip count comes from: `d_for`'s bounds are
@@ -2414,40 +2417,21 @@ fn while_handles(carried: List[Int],
 ## Do not store inside one unless the store is meant to happen on the
 ## discarded iteration too: `body` runs to the end every time, including
 ## the last.
-pub fn d_loop[D](init: Tile[D],
-  body: fn(Tile[D]) -> (Tile[I1], Tile[D]) !Dev) -> Tile[D] !Dev = called("d_loop", () => {
-    let h: Int = init
-    let outs = while_handles([h], inside => {
-      let t: Tile[D] = inside[0]
-      let (done, nxt) = user_body(() => body(t))
-      let c: Int = done
-      let r: Int = nxt
-      (c, [r])
-    })
-    let out: Tile[D] = outs[0]
-    out
+pub fn d_loop(body: fn() -> Tile[I1] !Dev) -> Unit !Dev = called("d_loop", () => {
+  let none: List[Int] = []
+  let cs = trial(() => {
+    let _inside = t_while_begin(none)
+    let done: Tile[I1] = user_body(body)
+    let c: Int = done
+    let _r = t_while_end(c, none)
+    ()
   })
-
-## `d_loop` carrying two tiles, of formats `A` and `B`, in order: what a
-## loop that counts its own iterations needs (the value being refined and
-## the counter travel through one loop together).
-pub fn d_loop2[A, B](a: Tile[A], b: Tile[B],
-  body: fn(Tile[A], Tile[B]) -> (Tile[I1], Tile[A], Tile[B]) !Dev) -> (Tile[A], Tile[B]) !Dev = called("d_loop2", () => {
-    let ha: Int = a
-    let hb: Int = b
-    let outs = while_handles([ha, hb], inside => {
-      let ta: Tile[A] = inside[0]
-      let tb: Tile[B] = inside[1]
-      let (done, ra, rb) = user_body(() => body(ta, tb))
-      let c: Int = done
-      let xa: Int = ra
-      let xb: Int = rb
-      (c, [xa, xb])
-    })
-    let oa: Tile[A] = outs[0]
-    let ob: Tile[B] = outs[1]
-    (oa, ob)
-  })
+  let inside = t_while_begin(carry_gets(cs))
+  carry_sets(cs, inside)
+  let done: Tile[I1] = user_body(body)
+  let c: Int = done
+  carry_sets(cs, t_while_end(c, carry_gets(cs)))
+})
 
 ## End the kernel for this tile block where `cond` is true, from wherever the
 ## call is: the top of the kernel, an `if`, or -- what bytecode 13.4 added
@@ -2649,24 +2633,43 @@ pub fn d_scan2[D](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
   })
 
 ## The `if` over the rank-0 mask `cond`: `on_true` and `on_false` each run
-## ONCE, on the host, and what each issues is one of the operation's two
-## regions; each answers the tile its region yields and the two must have
-## the same shape and format. The answer is the tile the operation defines.
-## A wider `cond` is refused when the kernel records.
+## on the host, and what each issues is one of the operation's two regions.
+## A carry either branch sets is a result of the `if` (`Carry`): each branch
+## starts from the tile the carry held before the `if`, a branch that does
+## not set it answers that tile, and after the `if` the carry holds the
+## branch's answer the mask chose. Both must keep the carry's format and
+## shape. A wider `cond` is refused when the kernel records.
 ##
 ## Both regions are always written, as the dialect's reader requires (an
 ## `if` with one region is refused, measured). Neither may load or store.
-pub fn d_if[D](cond: Tile[I1], on_true: fn() -> Tile[D] !Dev, on_false: fn() -> Tile[D] !Dev) -> Tile[D] !Dev = called("d_if", () => {
+pub fn d_if(cond: Tile[I1], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev = called("d_if", () => {
   let c: Int = cond
+  let none: List[Int] = []
+  # one trial per branch: each starts from what the carries held outside
+  let on_t = trial(() => {
+    t_if_begin(c)
+    user_body(on_true)
+    t_if_else(none)
+    let _r = t_if_end(none)
+    ()
+  })
+  let on_f = trial(() => {
+    t_if_begin(c)
+    t_if_else(none)
+    user_body(on_false)
+    let _r = t_if_end(none)
+    ()
+  })
+  let cs = list.filter(range(0, 1 + list.fold(on_t ++ on_f, 0 - 1, (m, k) => if k > m { k } else { m })),
+    k => list.contains(on_t, k) || list.contains(on_f, k))
+  let before = carry_gets(cs)
   t_if_begin(c)
-  let tt: Tile[D] = user_body(on_true)
-  let th: Int = tt
-  t_if_else([th])
-  let te: Tile[D] = user_body(on_false)
-  let el: Int = te
-  let outs = t_if_end([el])
-  let out: Tile[D] = outs[0]
-  out
+  user_body(on_true)
+  let yields = carry_gets(cs)
+  carry_sets(cs, before)
+  t_if_else(yields)
+  user_body(on_false)
+  carry_sets(cs, t_if_end(carry_gets(cs)))
 })
 
 # ---- shapes, the grid's extent, token joins and pointers (knife T2) ----
@@ -2743,6 +2746,27 @@ pub fn permute_tile[D](t: Tile[D], perm: List[Int]) -> Tile[D] !Dev = called("pe
 ## step.
 pub fn num_blocks(axis: Int) -> Idx !Dev = called("num_blocks", () => {
   let h: Idx = t_num_blocks(axis)
+  h
+})
+
+## How many elements `p`'s tensor has along dimension `dim`, as an index:
+## the number its cells declare, or for a `DYN_DIM` dimension the grid's
+## blocks along the axis it follows times its tile, which is what such an
+## extent is (`prog.cells`). `p` must have cells (an `In` or an `Out` of
+## `trace1` to `trace5`; a dynamic dimension that follows no grid axis is
+## refused by the markers already) (tileir 0.9.0).
+pub fn extent_of[D](p: Param[D], dim: Int) -> Idx !Dev = called("extent_of", () => {
+  let h: Idx = t_extent_of(position(p), dim, false)
+  h
+})
+
+## How many cells `p` is cut into along dimension `dim`: the extent over
+## the tile, rounded up, or for a `DYN_DIM` dimension the grid's blocks
+## along the axis it follows. The upper bound of a loop over a dimension of
+## an `In` that follows no grid axis: `d_for(idx_const(0), blocks_of(k, 0),
+## idx_const(1)) { j => .. load_at(k, [j]) .. }` (tileir 0.9.0).
+pub fn blocks_of[D](p: Param[D], dim: Int) -> Idx !Dev = called("blocks_of", () => {
+  let h: Idx = t_extent_of(position(p), dim, true)
   h
 })
 
@@ -3462,6 +3486,9 @@ fn int_greatest(dtype: String) -> Int = match dtype {
 fn under_counter[T](body: fn() -> T !Dev) -> T = {
   with handle Dev {
     var next: Int = 100
+    var carries: List[Int] = []
+    var sets: List[Int] = []
+    var snaps: List[(Int, List[Int], List[Int])] = []
     t_call_enter(_name) => ()
     t_call_exit() => ()
     t_body_enter() => ()
@@ -3672,6 +3699,36 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_extent_of(_param, _dim, _blocks) => {
+      let h = next
+      next = next + 1
+      h
+    }
+    t_carry_new(init) => {
+      carries = carries ++ [init]
+      sets = sets ++ [0]
+      len(carries) - 1
+    }
+    t_carry_get(c) => carries[c]
+    t_carry_set(c, h) => {
+      let was = carries
+      let n = sets
+      carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
+      sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
+    }
+    t_trial_begin() => {
+      snaps = snaps ++ [(next, carries, sets)]
+    }
+    t_trial_end() => {
+      let (n0, c0, s0) = snaps[len(snaps) - 1]
+      let n = sets
+      let changed = list.filter(range(0, len(c0)), k => n[k] != s0[k])
+      snaps = list.take(snaps, len(snaps) - 1)
+      next = n0
+      carries = c0
+      sets = s0
+      changed
+    }
     t_tok_get() => 0
     t_shape_of(_h) => ("f64", [])
     t_tok_set(_tok) => ()
@@ -3811,7 +3868,7 @@ fn handles_seen() -> (Int, Int, Int, Int) !Dev = {
   let base = tile_at(i, 128)
   let ta = load(a, base, [128])
   let tb = load(a, base, [128])
-  let s = addf(ta, tb)
+  let s = add(ta, tb)
   store(a, base, s)
   let hi: Int = i
   let ha: Int = ta
@@ -3892,6 +3949,9 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
   with handle Dev {
     var log: List[String] = []
     var rows: List[(Int, String, List[Int])] = []
+    var carries: List[Int] = []
+    var sets: List[Int] = []
+    var snaps: List[((List[String], List[(Int, String, List[Int])]), List[Int], List[Int])] = []
     t_call_enter(_name) => ()
     t_call_exit() => ()
     t_body_enter() => ()
@@ -4066,6 +4126,36 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_num_blocks(axis) => {
       log = log ++ ["num_blocks ${axis}"]
       53
+    }
+    t_extent_of(param, dim, blocks) => {
+      log = log ++ ["extent_of ${param} ${dim} ${blocks}"]
+      53
+    }
+    t_carry_new(init) => {
+      carries = carries ++ [init]
+      sets = sets ++ [0]
+      len(carries) - 1
+    }
+    t_carry_get(c) => carries[c]
+    t_carry_set(c, h) => {
+      let was = carries
+      let n = sets
+      carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
+      sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
+    }
+    t_trial_begin() => {
+      snaps = snaps ++ [((log, rows), carries, sets)]
+    }
+    t_trial_end() => {
+      let ((l0, r0), c0, s0) = snaps[len(snaps) - 1]
+      let n = sets
+      let changed = list.filter(range(0, len(c0)), k => n[k] != s0[k])
+      snaps = list.take(snaps, len(snaps) - 1)
+      log = l0
+      rows = r0
+      carries = c0
+      sets = s0
+      changed
     }
     t_tok_get() => {
       log = log ++ ["tok_get"]
@@ -4262,13 +4352,13 @@ fn k2_surface() -> Unit !Dev = {
   let x = param(F32, 0)
   let t = load(x, idx_const(0), [8])
   let _r = [
-    addf(t, t, rounding: Down), addf(t, t, rounding: Up),
+    add(t, t, rounding: Down), add(t, t, rounding: Up),
     mul(t, t, rounding: Down), mul(t, t, rounding: Up),
     div(t, t, rounding: Down), div(t, t, rounding: Up),
-    addf(t, t, ftz: true), mul(t, t, ftz: true),
-    maxf(t, t, propagate_nan: true), minf(t, t, propagate_nan: true),
-    addf(t, t, rounding: NearestEven, ftz: false), sub(t, t, rounding: TowardZero),
-    addf(t, t, rounding: Down, ftz: true)
+    add(t, t, ftz: true), mul(t, t, ftz: true),
+    max(t, t, propagate_nan: true), min(t, t, propagate_nan: true),
+    add(t, t, rounding: NearestEven, ftz: false), sub(t, t, rounding: TowardZero),
+    add(t, t, rounding: Down, ftz: true)
   ]
   let i = broadcast(i_const(1), [8])
   let _n = [
@@ -4384,12 +4474,12 @@ fn every_arithmetic_name() -> Unit !Dev = {
   let m = tail_mask(base, [8], 5)
   let x = load(a, base, [8], mask: Some(m), pad: Some(f_const(F64, 0.0)))
   let y = load(a, base, [8])
-  let s = addf(x, y)
+  let s = add(x, y)
   let d = sub(s, y)
   let p = mul(d, y)
   let q = div(p, y)
-  let hi = maxf(q, y)
-  let lo = minf(hi, y)
+  let hi = max(q, y)
+  let lo = min(hi, y)
   let n1 = neg(lo)
   let a1 = abs(n1)
   let f1 = fma(a1, y, x)
@@ -4452,7 +4542,7 @@ fn one_reduction() -> Unit !Dev = {
   let a = param(F64, 0)
   let i = block_id(0)
   let x = load(a, tile_at(i, 8), [8])
-  let s = d_reduce(x, 0.0, (acc, e) => addf(acc, e))
+  let s = d_reduce(x, 0.0, (acc, e) => add(acc, e))
   let _w = broadcast(s, [8])
   ()
 }
@@ -4486,8 +4576,8 @@ fn one_branch() -> Unit !Dev = {
   let a = param(F64, 0)
   let i = block_id(0)
   let x = load(a, tile_at(i, 8), [8])
-  let _r = d_if(idx_eq(i, idx_const(0)), () => addf(x, x), () => mul(x, x))
-  ()
+  let r = carry(x)
+  d_if(idx_eq(i, idx_const(0)), () => r.set(add(x, x)), () => r.set(mul(x, x)))
 }
 
 test "an if hands the handler its condition, then each branch's yield in turn" {
@@ -4503,54 +4593,47 @@ test "an if hands the handler its condition, then each branch's yield in turn" {
   ]
 }
 
-test "d_for3 carries three tiles into the loop and answers three after it" {
+test "a loop carries the carries its body sets, in the order they were made, and leaves the trial no trace" {
   let seen = under_counter(() => {
     let a = param(F64, 0)
     let i = block_id(0)
     let x = load(a, tile_at(i, 8), [8])
     let z = idx_const(0)
-    let (p, q, r) = d_for3(z, z, z, x, x, x, (_k, u, v, w) => (u, v, w))
-    let hp: Int = p
-    let hq: Int = q
-    let hr: Int = r
-    (hp, hq, hr)
+    let p = carry(x)
+    let q = carry(x)
+    let r = carry(x)
+    let w = carry(x)
+    d_for(z, z, z) { _k =>
+      r.set(r.get())
+      p.set(p.get())
+      q.set(q.get())
+    }
+    let hp: Int = p.get()
+    let hq: Int = q.get()
+    let hr: Int = r.get()
+    let hw: Int = w.get()
+    (hp, hq, hr, hw)
   })
   # block_id 100, tile_at's idx_const 101 and idx_mul 102, load 103,
-  # idx_const 104; loop_begin takes 105 for the induction variable and 106,
-  # 107, 108 for the three carried tiles, and loop_end answers 109, 110, 111
-  # for the three after the loop.
-  assert seen == (109, 110, 111)
-}
-
-test "d_for4 carries four tiles into the loop and answers four after it" {
-  let seen = under_counter(() => {
-    let a = param(F64, 0)
-    let i = block_id(0)
-    let x = load(a, tile_at(i, 8), [8])
-    let z = idx_const(0)
-    let (p, q, r, s) = d_for4(z, z, z, x, x, x, x, (_k, u, v, w, y) => (u, v, w, y))
-    let hp: Int = p
-    let hq: Int = q
-    let hr: Int = r
-    let hs: Int = s
-    (hp, hq, hr, hs)
-  })
-  # one carried value more than d_for3: the induction variable takes 105,
-  # the four carried tiles 106 to 109, and loop_end answers 110 to 113.
-  assert seen == (110, 111, 112, 113)
+  # idx_const 104; the trial's handles are given back, so loop_begin takes
+  # 105 for the induction variable and 106, 107, 108 for p, q and r (made in
+  # that order, whatever order the body sets them in), and loop_end answers
+  # 109, 110, 111 for them after the loop. `w` is never set: not carried,
+  # still the load.
+  assert seen == (109, 110, 111, 103)
 }
 
 test "d_range issues its three bounds as index constants, then the loop, as d_for over them does" {
   let ranged = under_counter(() => {
-    let x = broadcast(f_const(F64, 0.0), [8])
-    let r = d_range(2, 9, x, (_k, t) => t, step: 3)
-    let h: Int = r
+    let c = carry(broadcast(f_const(F64, 0.0), [8]))
+    d_range(2, 9, step: 3) { _k => c.set(c.get()) }
+    let h: Int = c.get()
     h
   })
   let spelled = under_counter(() => {
-    let x = broadcast(f_const(F64, 0.0), [8])
-    let r = d_for(idx_const(2), idx_const(9), idx_const(3), x, (_k, t) => t)
-    let h: Int = r
+    let c = carry(broadcast(f_const(F64, 0.0), [8]))
+    d_for(idx_const(2), idx_const(9), idx_const(3)) { _k => c.set(c.get()) }
+    let h: Int = c.get()
     h
   })
   assert ranged == spelled
@@ -4649,11 +4732,12 @@ fn loop_seen() -> (Int, Int, Int, Int, Int) !Dev = {
   let lo = idx_const(0)
   let up = idx_add(b, idx_mul(b, lo))
   let first = load(a, b, [8])
-  let acc = d_for(lo, up, lo, first, (i, t) => addf(t, load(a, i, [8])))
+  let acc = carry(first)
+  d_for(lo, up, lo) { i => acc.set(add(acc.get(), load(a, i, [8]))) }
   let hb: Int = b
   let hup: Int = up
   let hfirst: Int = first
-  let hacc: Int = acc
+  let hacc: Int = acc.get()
   let hlo: Int = lo
   (hb, hlo, hup, hfirst, hacc)
 }
@@ -4669,6 +4753,9 @@ test "d_for hands the body the carried handle and passes its answer back as the 
   let seen = {
     with handle Dev {
       var log: List[String] = []
+      var carries: List[Int] = []
+      var sets: List[Int] = []
+      var snaps: List[(List[String], List[Int], List[Int])] = []
       t_call_enter(_name) => ()
       t_call_exit() => ()
       t_body_enter() => ()
@@ -4735,6 +4822,32 @@ test "d_for hands the body the carried handle and passes its answer back as the 
       t_cat(_dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) => 51
       t_permute(_dtype, _shape, _perm, _src) => 52
       t_num_blocks(_axis) => 53
+      t_extent_of(_param, _dim, _blocks) => 53
+      t_carry_new(init) => {
+        carries = carries ++ [init]
+        sets = sets ++ [0]
+        len(carries) - 1
+      }
+      t_carry_get(c) => carries[c]
+      t_carry_set(c, h) => {
+        let was = carries
+        let n = sets
+        carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
+        sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
+      }
+      t_trial_begin() => {
+        snaps = snaps ++ [(log, carries, sets)]
+      }
+      t_trial_end() => {
+        let (l0, c0, s0) = snaps[len(snaps) - 1]
+        let n = sets
+        let changed = list.filter(range(0, len(c0)), k => n[k] != s0[k])
+        snaps = list.take(snaps, len(snaps) - 1)
+        log = l0
+        carries = c0
+        sets = s0
+        changed
+      }
       t_tok_get() => 60
       t_shape_of(_h) => ("f64", [])
       t_tok_set(_tok) => ()

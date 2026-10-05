@@ -7,16 +7,55 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
-## Unreleased: tileiras 13.4.92 on sm_90 and sm_100 (#558)
+## 0.9.0 (2026-10-06)
 
-New module `asm`: `tileiras_args(version, gpu_name)` answers the arguments to
-assemble with, and `assembler_defect(version, gpu_name)` explains them.
-tileiras 13.4.92 miscompiles a loop exit value on sm_90, sm_100, sm_103,
-sm_107 and sm_110 at `--opt-level` 1 and above
-([NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)), so for
-those targets the answer includes `--opt-level 0`. The table is keyed on the
-exact tileiras version, so a fixed release gets the plain arguments.
-`Dev` is unchanged and so are the bytes `encode` writes. Adds names only. §6.28.
+Breaking: loops and `if`s carry device variables instead of tuples, and the
+float arithmetic has one naming scheme. `Dev` gains `t_carry_new`,
+`t_carry_get`, `t_carry_set`, `t_trial_begin`, `t_trial_end` and
+`t_extent_of`; a handler written outside the package must answer them.
+Every kernel in `scripts/tile-golden` records the bytes it did, except
+three: in `flash_attn` and `loop_bound` one carried value's starting tile is
+now recorded before the loop's bounds rather than after them, and
+`grid_stride`'s loop no longer carries the constant it handed back unchanged
+(0.8's `d_range` had to carry one tile). §6.30.
+
+- `carry(init)` makes a `Carry[D]`, a device variable; `c.get()` reads it
+  and `c.set(t)` replaces it, at the same format and shape. `d_range`,
+  `d_for`, `d_loop` and `d_if` take bodies that answer `Unit` (`d_loop`'s
+  answers its stop mask) and carry the carries their bodies set, in the
+  order they were made. The recording finds them by running the body once
+  as a trial and discarding what the trial recorded, so a region nested `n`
+  deep records its innermost body 2^n times.
+- `d_range(lower, upper, step: 1) { j => .. }` and
+  `d_for(lower, upper, step, unsigned_cmp: false) { j => .. }`: the body is
+  the last parameter, so it is written as a tail block.
+- `d_for2`, `d_for3`, `d_for4`, `d_loop2` and the value-answering `d_if` are
+  gone.
+- Float `addf`, `maxf` and `minf` are `add`, `max` and `min`, beside `sub`,
+  `mul`, `div`, `neg` and `abs`. The integer families (`add_i`, `addi`, ...)
+  are unchanged. A module that imports `max` or `min` from `tileir/dev`
+  shadows the prelude's for host `Int`s too; `list.max` is unaffected.
+- `extent_of(p, dim)` and `blocks_of(p, dim)`: the extent of a parameter's
+  tensor along `dim` and its number of cells there, as an `Idx`: a constant
+  for a static dimension, the grid's blocks along the axis it follows for a
+  `DYN_DIM` one.
+- New module `asm` (#558): `tileiras_args(version, gpu_name)` answers the
+  arguments to assemble with, and `assembler_defect(version, gpu_name)`
+  explains them. tileiras 13.4.92 miscompiles a loop exit value on sm_90,
+  sm_100, sm_103, sm_107 and sm_110 at `--opt-level` 1 and above
+  ([NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)), so
+  for those targets the answer includes `--opt-level 0`. The table is keyed
+  on the exact tileiras version, so a fixed release gets the plain
+  arguments. It changes neither `Dev` nor the bytes `encode` writes. §6.28.
+
+| 0.8 | 0.9 |
+|---|---|
+| `let acc = d_range(0, n, zeros(c), (k, s) => mmaf(a, b, s))` | `let acc = carry(zeros(c))` then `d_range(0, n) { k => acc.set(mmaf(a, b, acc.get())) }` |
+| `let (x, y) = d_for2(lo, hi, st, x0, y0, (k, x, y) => (f(x), g(y)))` | `let x = carry(x0)`, `let y = carry(y0)`, then `d_for(lo, hi, st) { k => .. }` whose body sets `x` to `f(x.get())` and `y` to `g(y.get())` |
+| `d_loop(v0, v => (done(v), next(v)))` | `let v = carry(v0)` then `d_loop { .. }` whose body computes `done(v.get())`, sets `v` to `next(v.get())` and answers the mask |
+| `let r = d_if(c, () => a, () => b)` | `let r = carry(a)` then `d_if(c, () => (), () => r.set(b))` |
+| `d_for(.., init, body, unsigned_cmp: true)` | `d_for(.., unsigned_cmp: true) { k => .. }` |
+| `addf(a, b)`, `maxf(a, b)`, `minf(a, b)` | `add(a, b)`, `max(a, b)`, `min(a, b)` |
 
 ## 0.8.2 (2026-10-06)
 

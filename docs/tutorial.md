@@ -1666,13 +1666,13 @@ at `packages/tileir` in your checkout, as `examples/projects/gpu_fake/dawn.toml`
 
 ```dawn run deps=tileir
 use std/gpu.{F64}
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 
 # Each tile block reads its cell of `a` and of `b` and writes its cell of `out`.
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 pub fn main() -> Unit !io = {
   let g = cells([256], [128])     # 256 elements in cells of 128: two blocks
@@ -1706,7 +1706,7 @@ cuda_tile.module @m {
 `vadd` computed nothing. `trace3` called it once with three parameter handles, under a
 handler that wrote down each `Dev` operation the body performed, and `render` prints that
 record as `cuda_tile` text. The body performed four operations (two `load_cell`, one
-`addf`, one `store_cell`), and the rest of the text is what they lower to. Each parameter
+`add`, one `store_cell`), and the rest of the text is what they lower to. Each parameter
 becomes a view of its whole tensor (`make_tensor_view`) cut into the cells its marker
 describes (`make_partition_view`). `get_tile_block_id` is the block that is running, and
 `load_view_tko` reads that block's cell. `assume div_by<16>` is a promise about the
@@ -1729,11 +1729,11 @@ unless the marker says otherwise) and is not written back, so the tail needs no 
 ```dawn run deps=tileir
 use std/gpu.{Gpu, F64, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
 use std/list
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 # The host half: three buffers of `n` elements, launched over cells of 1000.
 fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
@@ -1787,17 +1787,17 @@ before any bytecode exists:
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_cell, store_cell, store, addf, f_const, broadcast, block_id,
+use tileir/dev.{Dev, Param, load_cell, store_cell, store, add, f_const, broadcast, block_id,
   tile_at}
 use tileir/prog.{trace2, cells, In, Out}
 
 fn adds_one(x: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(x), f_const(F64, 1.0)))
+  store_cell(out, add(load_cell(x), f_const(F64, 1.0)))
 
 fn writes_its_input(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(x))
 
 fn adds_two_shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
+  store_cell(out, add(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
 
 fn stores_by_pointer(x: Param[F64], out: Param[F64]) -> Unit !Dev =
   store(out, tile_at(block_id(0), 128), load_cell(x))
@@ -1924,13 +1924,14 @@ A matrix product, one 64 by 64 tile of `c` per block, walking along K:
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range, carry, get, set}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
-  let acc = d_range(0, 256 / 32, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))
-  store_cell(c, acc)
+  let acc = carry(zeros(c))
+  d_range(0, 256 / 32) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  store_cell(c, acc.get())
 }
 
 pub fn main() -> Unit !io = {
@@ -1956,14 +1957,18 @@ continue %26, %25 : tile<64x64xf64>, token
 `along` says which grid axis each dimension of a cell follows. Dimension 0 of `a` (its
 rows) follows grid axis 0, and dimension 1 (along K) follows none: `FREE_AXIS` means the
 kernel picks that cell itself, and `load_at(a, [k])` is how. `b` is the other way round,
-and the cells of `c`, the `Out`, are the grid. `d_range(0, 8, init, body)` is a loop of
-eight trips that carries one tile, the accumulator. `zeros(c)` is a tile shaped like one
-cell of `c`, so the accumulator's shape is never written out, and `mmaf` reads m, k and n
-off its operands (a k on which `a` and `b` disagree is refused while recording).
+and the cells of `c`, the `Out`, are the grid. `d_range(0, 8) { k => .. }` is a loop of
+eight trips. The accumulator is a `Carry`, a device variable: `carry(zeros(c))` makes it,
+`acc.get()` reads it and `acc.set(..)` replaces it with a tile of the same shape.
+`zeros(c)` is a tile shaped like one cell of `c`, so the accumulator's shape is never
+written out, and `mmaf` reads m, k and n off its operands (a k on which `a` and `b`
+disagree is refused while recording).
 
-The loop's body ran once, like the kernel's: the record holds one `for` region, and the
-device runs its eight trips. The region carries a second value beside the accumulator,
-the token. Memory operations are ordered by a token chain the recorder threads through
+The loop's body ran on the host, like the kernel's, and the record holds one `for`
+region; the device runs its eight trips. The loop carries what its body sets, and the
+recorder finds that out by recording the body once as a trial and throwing the trial
+away: `acc` is set, so the `for` carries it (`%8` in the body, `%5` after the loop). The
+region carries a second value beside the accumulator, the token. Memory operations are ordered by a token chain the recorder threads through
 them, not by the order of the program text.
 
 ### Reductions over rows: keepdims
@@ -2030,7 +2035,7 @@ of row j. Here that is refused, and `keepdims` is how a reduction says which axi
 
 Put this step in a loop over blocks of keys and values, carry a running maximum and a
 running sum, and it is FlashAttention: `flash_attn` in `scripts/tile-golden/kernels.dawn`
-is that loop, written with these same operations. The
+is that loop, three carries and these same operations. The
 [GPU page](https://dawn-lang.dawnop.com/gpu.html) shows what the backend records for
 kernels of that size, and how their answers on a device are checked.
 
@@ -2102,12 +2107,12 @@ use std/io
 use std/io.{with_fs_real}
 use std/list
 use std/map
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/bytecode.{encode}
 
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 fn add_1000(entry: Entry3[F64, F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
   let xs = list.map(range(0, 1000), i => to_float(i))

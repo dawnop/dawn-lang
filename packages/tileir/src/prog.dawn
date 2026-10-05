@@ -19,15 +19,15 @@ use std/map
 use std/str
 use std/gpu.{Gpu, F64, F32, F16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
   entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
-use dev.{Dev, Tile, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
+use dev.{Dev, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
-  atomic_cas, addf, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_for2, d_range, d_loop,
-  d_reduce, d_if, maxf, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
+  atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_range, d_loop, Carry, carry, get, set,
+  d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
   float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
-  idx_rem, idx_sub }
+  idx_rem, idx_sub, extent_of, blocks_of }
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -1317,7 +1317,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev,
 # parameters, of these formats" in one signature, and it repeats what the
 # body's own `Param[F64]` already says (191 of 191 kernels in
 # scripts/tile-golden). `trace1` to `trace5` take one MARKER per parameter
-# instead, the way `d_for2` to `d_for4` take one carried value each, and
+# instead, the way `d_for2` to `d_for4` took one carried value each, and
 # compute the list: `In(F64, cells(..))` says the format once, and says the
 # two things a string could not (docs/tile-backend-design.md 6.24):
 #
@@ -2123,6 +2123,33 @@ fn hold_indices(held: Map[Int, Held], more: List[TileOp]) -> Map[Int, Held] =
     _ -> m
   })
 
+# Everything the recording handler holds, as it stood when a trial began
+# (`dev.Carry`): a trial records a region's body once to see which carries
+# it sets, and then all of this is put back, so the trial leaves nothing
+# behind: not an operation, not a handle number, not a call row.
+type Snap = {
+  next: Int,
+  tok: Int,
+  ops: List[TileOp],
+  globals: List[Global],
+  frames: List[Frame],
+  marks: List[Mark],
+  calls: List[Call],
+  held: Map[Int, Held],
+  aims: Map[Int, Int],
+  cell_views: Map[Int, Int],
+  spreads: Map[String, Int],
+  cell_blocks: Map[Int, Int],
+  pending: Map[Int, Pend],
+  cell_tvs: Map[Int, Int],
+  cell_marks: Map[Int, Int],
+  sub_views: Map[String, Int],
+  dyn_exts: Map[String, Int],
+  carries: List[Int],
+  carry_rows: List[(String, List[Int])],
+  carry_sets: List[Int],
+}
+
 ## One call the KERNEL made, as the recording saw it, from the side table
 ## `trace_calls` keeps: the name of the public function (dev.dawn's `called`
 ## marks), the call it was made inside, and the half-open ranges of
@@ -2243,6 +2270,10 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
       var cell_marks: Map[Int, Int] = map.empty()
       var sub_views: Map[String, Int] = map.empty()
       var dyn_exts: Map[String, Int] = map.empty()
+      var carries: List[Int] = []
+      var carry_rows: List[(String, List[Int])] = []
+      var carry_sets: List[Int] = []
+      var trials: List[Snap] = []
       t_call_enter(called_name) => {
         if kernel_side(marks) {
           let at = op_number(frames, ops)
@@ -3145,6 +3176,131 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         ops = ops ++ [NumBlocks(d, axis)]
         d
       }
+      t_extent_of(param, dim, blocks) => {
+        # `extent_of` / `blocks_of` (tileir 0.9.0): a static dimension is the
+        # host number as an index constant; a dynamic one is the grid's
+        # blocks along the axis it follows, times the tile for the extent,
+        # which is what `cells` says such an extent is
+        let asking = writer(marks, calls, if blocks { "blocks_of" } else { "extent_of" })
+        let (extent, tile, _pad, along) = cells_of(name, frames, ops, geoms, roles, param, asking)
+        if dim < 0 || dim >= len(extent) {
+          refuse_at(name, frames, ops, asking, "parameter ${param} has ${len(extent)} dimension(s), and the call names dimension ${dim}")
+        } else {
+          ()
+        }
+        if extent[dim] != DYN_DIM {
+          let n = if blocks { (extent[dim] + tile[dim] - 1) / tile[dim] } else { extent[dim] }
+          held = hold(held, next, "i32", [])
+          let d = next
+          next = mint(name, next, 1)
+          ops = ops ++ [IdxConst(d, n)]
+          d
+        } else if along[dim] == FREE_AXIS {
+          # the markers refuse such a cut before a body runs (`check_cells`)
+          refuse_at(name, frames, ops, asking, "dimension ${dim} of parameter ${param} is DYN_DIM and follows no grid axis, so nothing here knows its extent")
+        } else {
+          let nb = next
+          held = hold(held, nb, "i32", [])
+          next = mint(name, next, 1)
+          ops = ops ++ [NumBlocks(nb, along[dim])]
+          if blocks {
+            nb
+          } else {
+            let c = next
+            let m = next + 1
+            next = mint(name, next, 2)
+            held = hold(hold(held, c, "i32", []), m, "i32", [])
+            ops = ops ++ [IdxConst(c, tile[dim]), IdxMul(m, nb, c)]
+            m
+          }
+        }
+      }
+      t_carry_new(init) => {
+        # A device variable: its current handle, its row for good, and how
+        # many times it has been set (what a trial compares)
+        let asking = writer(marks, calls, "carry")
+        let row = match map.get(held, init) {
+          Some(x) -> (x.dtype, x.shape)
+          None -> refuse_at(name, frames, ops, asking, "handle ${init} has no recorded shape: it is a token, or no operation answered it")
+        }
+        let (dt, _sh) = row
+        if dt == "" {
+          refuse_at(name, frames, ops, asking, "a carry starts from a tile with a format of its own, and lit(..) has none; write f_const(<format>, v)")
+        } else {
+          ()
+        }
+        carries = carries ++ [init]
+        carry_rows = carry_rows ++ [row]
+        carry_sets = carry_sets ++ [0]
+        len(carries) - 1
+      }
+      t_carry_get(c) => {
+        if c < 0 || c >= len(carries) { refuse(name, "carry ${c} was never made") } else { () }
+        carries[c]
+      }
+      t_carry_set(c, h) => {
+        if c < 0 || c >= len(carries) { refuse(name, "carry ${c} was never made") } else { () }
+        let asking = writer(marks, calls, "set")
+        let open = frames
+        if list.any(open, f => match f {
+          ReduceFrame(_o, _d, _s, _i, _ops, _a) -> true
+          ScanFrame(_o, _d, _r, _s, _i, _ops, _a) -> true
+          _ -> false
+        }) {
+          refuse_at(name, frames, ops, asking, "a carry is set inside a reduce or scan body, whose region carries nothing out")
+        } else {
+          ()
+        }
+        let (dt, sh) = carry_rows[c]
+        match map.get(held, h) {
+          Some(x) -> if x.dtype == dt && x.shape == sh {
+            ()
+          } else {
+            refuse_at(name, frames, ops, asking, "carry ${c} holds ${tile_text(dt, sh)}, and is set to ${tile_text(x.dtype, x.shape)}")
+          }
+          None -> refuse_at(name, frames, ops, asking, "handle ${h} has no recorded shape: it is a token, or no operation answered it")
+        }
+        let was = carries
+        let n = carry_sets
+        carries = list.map(range(0, len(was)), k => if k == c { h } else { was[k] })
+        carry_sets = list.map(range(0, len(n)), k => if k == c { n[k] + 1 } else { n[k] })
+        ()
+      }
+      t_trial_begin() => {
+        trials = trials ++ [Snap { next: next, tok: tok, ops: ops, globals: globals, frames: frames, marks: marks,
+          calls: calls, held: held, aims: aims, cell_views: cell_views, spreads: spreads, cell_blocks: cell_blocks,
+          pending: pending, cell_tvs: cell_tvs, cell_marks: cell_marks, sub_views: sub_views, dyn_exts: dyn_exts,
+          carries: carries, carry_rows: carry_rows, carry_sets: carry_sets }]
+        ()
+      }
+      t_trial_end() => {
+        if len(trials) == 0 { refuse(name, "a trial ends that never began") } else { () }
+        let sn = trials[len(trials) - 1]
+        let n = carry_sets
+        let set = list.filter(range(0, len(sn.carries)), k => n[k] != sn.carry_sets[k])
+        trials = list.take(trials, len(trials) - 1)
+        next = sn.next
+        tok = sn.tok
+        ops = sn.ops
+        globals = sn.globals
+        frames = sn.frames
+        marks = sn.marks
+        calls = sn.calls
+        held = sn.held
+        aims = sn.aims
+        cell_views = sn.cell_views
+        spreads = sn.spreads
+        cell_blocks = sn.cell_blocks
+        pending = sn.pending
+        cell_tvs = sn.cell_tvs
+        cell_marks = sn.cell_marks
+        sub_views = sn.sub_views
+        dyn_exts = sn.dyn_exts
+        carries = sn.carries
+        carry_rows = sn.carry_rows
+        carry_sets = sn.carry_sets
+        set
+      }
       t_tok_get() => tok
       t_shape_of(h) => {
         # The row, as `Held` describes it (a view's included). A handle
@@ -3929,6 +4085,7 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
       }
     }
     body()
+    if len(trials) != 0 { refuse(name, "the body ended inside a trial") } else { () }
     if len(frames) != 0 { refuse(name, "the body ended with ${len(frames)} region(s) still open") } else { () }
     if len(marks) != 0 { refuse(name, "the body ended with ${len(marks)} call or body mark(s) still open") } else { () }
     (globals, ops, calls)
@@ -4041,7 +4198,7 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let base = tile_at(i, 128)
   let ta = load(a, base, [128])
   let tb = load(b, base, [128])
-  store(out, base, addf(ta, tb))
+  store(out, base, add(ta, tb))
 }
 
 fn trace_vadd() -> TileProg =
@@ -4071,7 +4228,7 @@ fn scale_f32(x: Param[F32], out: Param[F32]) -> Unit !Dev = {
   let i = block_id(0)
   let base = tile_at(i, 64)
   let t = load(x, base, [64])
-  store(out, base, addf(t, t))
+  store(out, base, add(t, t))
 }
 
 test "an f32 kernel records f32 loads, stores and sums" {
@@ -4104,8 +4261,9 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let one = idx_const(1)
   let lo = idx_add(base, one)
   let up = idx_add(base, n)
-  let acc = d_for(lo, up, one, first, (k, t) => addf(t, load(x, tile_at(k, 128), [128])))
-  store(out, tile_at(b, 128), acc)
+  let acc = carry(first)
+  d_for(lo, up, one) { k => acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
+  store(out, tile_at(b, 128), acc.get())
 }
 
 fn trace_sum() -> TileProg =
@@ -4152,9 +4310,13 @@ fn two_carried(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let two = idx_const(2)
   let a0 = load(x, b, [8])
   let b0 = load(y, b, [8])
-  let (ra, rb) = d_for2(zero, two, idx_const(1), a0, b0, (k, ta, tb) =>
-      (addf(ta, load(x, k, [8])), addf(tb, load(y, k, [8]))))
-  store(out, b, addf(ra, rb))
+  let ra = carry(a0)
+  let rb = carry(b0)
+  d_for(zero, two, idx_const(1)) { k =>
+    ra.set(add(ra.get(), load(x, k, [8])))
+    rb.set(add(rb.get(), load(y, k, [8])))
+  }
+  store(out, b, add(ra.get(), rb.get()))
 }
 
 test "a loop carrying two tiles answers two results in order, the token behind them" {
@@ -4181,9 +4343,11 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let two = idx_const(2)
   let one = idx_const(1)
   let first = load(x, b, [8])
-  let acc = d_for(zero, two, one, first, (i, t) =>
-      d_for(zero, two, one, t, (j, u) => addf(u, load(x, idx_add(i, j), [8]))))
-  store(out, b, acc)
+  let acc = carry(first)
+  d_for(zero, two, one) { i =>
+    d_for(zero, two, one) { j => acc.set(add(acc.get(), load(x, idx_add(i, j), [8]))) }
+  }
+  store(out, b, acc.get())
 }
 
 test "loops nest: the inner For sits in the outer body and the outer continue passes the inner result" {
@@ -4210,8 +4374,14 @@ test "loops nest: the inner For sits in the outer body and the outer continue pa
 fn spin(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let b = block_id(0)
   let v0 = load(x, b, [8])
-  let v = d_loop(v0, t => (gt(f_const(F64, 1.0), reduce_max(t)), addf(t, t)))
-  store(out, b, v)
+  let v = carry(v0)
+  d_loop {
+    let t = v.get()
+    let done = gt(f_const(F64, 1.0), reduce_max(t))
+    v.set(add(t, t))
+    done
+  }
+  store(out, b, v.get())
 }
 
 test "a loop records a Loop whose body ends in the exit if and a continue, and the break carries what entered" {
@@ -4248,12 +4418,16 @@ test "a loop records a Loop whose body ends in the exit if and a continue, and t
 fn spin_or_leave(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let b = block_id(0)
   let v0 = load(x, b, [8])
-  let v = d_loop(v0, t => {
+  let v = carry(v0)
+  d_loop {
+    let t = v.get()
     let m = reduce_max(t)
     d_return_if(gt(m, f_const(F64, 4.0)))
-    (gt(f_const(F64, 1.0), m), addf(t, t))
-  })
-  store(out, b, v)
+    let done = gt(f_const(F64, 1.0), m)
+    v.set(add(t, t))
+    done
+  }
+  store(out, b, v.get())
 }
 
 test "a return inside a loop records the early exit's if where it was called, before the loop's own exit" {
@@ -4290,11 +4464,9 @@ test "a return under a for, a reduction or a scan is refused when the kernel is 
   let in_for = catch_panic(() => trace_kernel("bad_return", ["f64"], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
-    let _r = d_for(idx_const(0), idx_const(2), idx_const(1), t, (_i, v) => {
-      d_return_if(gt(f_const(F64, 1.0), reduce_max(v)))
-      v
-    })
-    ()
+    d_for(idx_const(0), idx_const(2), idx_const(1)) { _i =>
+      d_return_if(gt(f_const(F64, 1.0), reduce_max(t)))
+    }
   }))
   match in_for {
     Ok(_) -> { assert false }
@@ -4382,7 +4554,7 @@ test "knife K2: every rounding records the mode its dialect name says, and a com
   let both = refused_as("down_ftz", () => {
     let x = param(F32, 0)
     let t = load(x, idx_const(0), [8])
-    let _h = addf(t, t, rounding: Down, ftz: true)
+    let _h = add(t, t, rounding: Down, ftz: true)
     ()
   })
   assert str.contains(both, "kernel `down_ftz`: `addf_neg_inf_ftz` is not a binary float operation")
@@ -4400,13 +4572,12 @@ test "knife K2: every rounding records the mode its dialect name says, and a com
   assert str.contains(add_nw, "`addi_nw` is not a binary integer operation")
 }
 
-test "knife K2: d_for2 takes the unsigned comparison d_for_unsigned alone used to spell" {
+test "knife K2: d_for takes the unsigned comparison d_for_unsigned alone used to spell, before its body" {
   let p = trace_kernel("ucmp2", ["f64"], () => {
     let x = param(F64, 0)
-    let t = load(x, idx_const(0), [8])
+    let a = carry(load(x, idx_const(0), [8]))
     let z = idx_const(0)
-    let _r = d_for2(z, idx_const(2), idx_const(1), t, t, (_k, a, b) => (a, b), unsigned_cmp: true)
-    ()
+    d_for(z, idx_const(2), idx_const(1), unsigned_cmp: true) { _k => a.set(a.get()) }
   })
   assert list.any(p.ops, op => match op {
     For(_iv, _lo, _up, _st, unsigned, _i, _c, _r, _b) -> unsigned
@@ -4648,7 +4819,7 @@ test "a gather inside a reduction region is refused: a pure region carries no me
     let i = load(idx, idx_const(0), [8])
     let _r = d_reduce(gather(src, i), 0.0, (acc, e) => {
       let _inner = gather(src, i)
-      addf(acc, e)
+      add(acc, e)
     })
     ()
   }))
@@ -4658,18 +4829,19 @@ test "a gather inside a reduction region is refused: a pure region carries no me
   }
 }
 
-fn deeper(x: Param[F64], depth: Int, t: Tile[F64]) -> Tile[F64] !Dev = {
+fn deeper(x: Param[F64], depth: Int, t: Carry[F64]) -> Unit !Dev = {
   let zero = idx_const(0)
   let one = idx_const(1)
-  d_for(zero, one, one, t, (i, u) => deeper(x, depth + 1, addf(u, load(x, i, [8]))))
+  d_for(zero, one, one) { i =>
+    t.set(add(t.get(), load(x, i, [8])))
+    deeper(x, depth + 1, t)
+  }
 }
 
 test "a body that recurses through d_for is refused at the depth limit rather than unrolled forever" {
   let outcome = catch_panic(() => trace_kernel("deep", ["f64"], () => {
     let x = param(F64, 0)
-    let first = load(x, block_id(0), [8])
-    let _r = deeper(x, 0, first)
-    ()
+    deeper(x, 0, carry(load(x, block_id(0), [8])))
   }))
   match outcome {
     Ok(_) -> { assert false }
@@ -4682,7 +4854,7 @@ test "a body that recurses through d_for is refused at the depth limit rather th
 fn total(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
   let t = load(x, i, [8])
-  store(out, i, broadcast(d_reduce(t, 0.0, (acc, e) => addf(acc, e)), [1]))
+  store(out, i, broadcast(d_reduce(t, 0.0, (acc, e) => add(acc, e)), [1]))
 }
 
 fn trace_total() -> TileProg =
@@ -4712,7 +4884,9 @@ test "a reduction records as one Reduce holding its region, with the accumulator
 fn branch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let i = block_id(0)
   let t = load(x, i, [8])
-  store(out, i, d_if(idx_eq(i, idx_const(0)), () => addf(t, t), () => mul(t, t)))
+  let r = carry(t)
+  d_if(idx_eq(i, idx_const(0)), () => r.set(add(t, t)), () => r.set(mul(t, t)))
+  store(out, i, r.get())
 }
 
 test "an if records two regions, each ending in its own yield, and one result after both" {
@@ -4737,7 +4911,7 @@ fn load_in_reduce() -> Unit !Dev = {
   let t = load(x, i, [8])
   let _s = d_reduce(t, 0.0, (acc, e) => {
     let _extra = load(x, i, [8])
-    addf(acc, e)
+    add(acc, e)
   })
   ()
 }
@@ -4746,11 +4920,7 @@ fn store_in_if() -> Unit !Dev = {
   let x = param(F64, 0)
   let i = block_id(0)
   let t = load(x, i, [8])
-  let _r = d_if(idx_eq(i, i), () => {
-    store(x, i, t)
-    t
-  }, () => t)
-  ()
+  d_if(idx_eq(i, i), () => store(x, i, t), () => ())
 }
 
 fn loop_in_reduce() -> Unit !Dev = {
@@ -4759,8 +4929,8 @@ fn loop_in_reduce() -> Unit !Dev = {
   let t = load(x, i, [8])
   let z = idx_const(0)
   let _s = d_reduce(t, 0.0, (acc, e) => {
-    let _u = d_for(z, z, z, t, (_k, v) => v)
-    addf(acc, e)
+    d_for(z, z, z) { _k => () }
+    add(acc, e)
   })
   ()
 }
@@ -4917,11 +5087,8 @@ test "a global declared twice, one declared inside a region, an empty one, and a
     let x = param(F64, 0)
     let zero = idx_const(0)
     let one = idx_const(1)
-    let _t = d_for(zero, one, one, load(x, zero, [8]), (_i, acc) => {
-      d_global("a", F64, [1.0])
-      acc
-    })
-    ()
+    let _t = load(x, zero, [8])
+    d_for(zero, one, one) { _i => d_global("a", F64, [1.0]) }
   }))
   match inside {
     Ok(_) -> { assert false }
@@ -4965,7 +5132,7 @@ fn vadd_half(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let base = tile_at(block_id(0), 128)
   let ta = load(a, base, [64])
   let tb = load(b, base, [128])
-  store(out, base, addf(ta, tb))
+  store(out, base, add(ta, tb))
 }
 
 test "knife C1: an element-wise operation whose operands disagree in shape is refused when recorded, by number and name" {
@@ -4989,8 +5156,8 @@ test "knife C1: op #k is the operation's position in the recorded program read d
     let x = param(F64, 0)
     let zero = idx_const(0)
     let one = idx_const(1)
-    let _t = d_for(zero, one, one, load(x, zero, [8]), (_i, acc) => mul(load(x, zero, [4]), acc))
-    ()
+    let acc = carry(load(x, zero, [8]))
+    d_for(zero, one, one) { _i => acc.set(mul(load(x, zero, [4]), acc.get())) }
   }))
   match r {
     Ok(_) -> { assert false }
@@ -5207,11 +5374,7 @@ test "knife D-1: a write the recording cannot place is refused in a fork, and wr
     d_fork2(() => {
       let zero = idx_const(0)
       let one = idx_const(1)
-      let _r = d_for(zero, one, one, t, (_i, acc) => {
-        store(x, idx_const(4), acc)
-        acc
-      })
-      ()
+      d_for(zero, one, one) { _i => store(x, idx_const(4), t) }
     }, () => store(x, idx_const(0), t))
   })
   assert str.contains(looped, "the first writes elements 4 to 11 and the second 0 to 7")
@@ -5428,7 +5591,7 @@ fn is_const(o: TileOp) -> Bool = match o {
 
 # vadd over cells: no base, no shape at the memory operations.
 fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
-  store_cell(o, addf(load_cell(a), load_cell(b)))
+  store_cell(o, add(load_cell(a), load_cell(b)))
 
 test "PR-1: load_cell and store_cell read and write through one cell view per parameter, aligned on both sides since PR-2" {
   let g = cells([1024], [128])
@@ -5448,7 +5611,7 @@ test "PR-1: load_cell and store_cell read and write through one cell view per pa
   })) == 3
   # a second read of one parameter reuses its view
   let (q, _e2) = trace2("twice", In(F64, g), Out(F64, g),
-    (x, o) => store_cell(o, addf(load_cell(x), load_cell(x))))
+    (x, o) => store_cell(o, add(load_cell(x), load_cell(x))))
   assert len(ops_where(q.ops, is_cell_view)) == 2
 }
 
@@ -5458,7 +5621,7 @@ test "PR-3: trace_calls with erased markers records what trace3 records, and ref
   let (q, calls) = trace_calls("vadd_cells", [], () => vadd_cells(param(F64, 0), param(F64, 1), param(F64, 2)),
     markers: [erase(In(F64, g)), erase(In(F64, g)), erase(Out(F64, g))])
   assert p == q
-  assert list.map(calls, c => c.name) == ["load_cell", "load_cell", "addf", "store_cell"]
+  assert list.map(calls, c => c.name) == ["load_cell", "load_cell", "add", "store_cell"]
   match catch_panic(() => trace_calls("both", ["f64"], () => (), markers: [erase(In(F64, g))])) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "formats or markers, not both") }
@@ -5490,7 +5653,7 @@ test "PR-1: a reduction's rank-0 answer widens on its own where an element-wise 
   let (q, _e2) = trace2("twice", In(F64, cells([1024], [1024])), Out(F64, cells([1024], [1024])), (x, o) => {
     let t = load_cell(x)
     let m = reduce_max(t)
-    store_cell(o, maxf(sub(t, m), sub(m, t)))
+    store_cell(o, max(sub(t, m), sub(m, t)))
   })
   assert len(ops_where(q.ops, is_spread)) == 1
 }
@@ -5622,8 +5785,9 @@ test "PR-1: the named folds over an integer tile fold with integer operations an
 
 # matmul over cells: A's K and B's K are the loop's.
 fn mm_cells(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
-  let acc = d_range(0, 2, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))
-  store_cell(c, acc)
+  let acc = carry(zeros(c))
+  d_range(0, 2) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  store_cell(c, acc.get())
 }
 
 test "PR-1: load_at names the cells of the dimensions that follow no axis, zeros is shaped like the cell, and a miscount is refused" {
@@ -5652,8 +5816,9 @@ test "PR-1: load_at names the cells of the dimensions that follow no axis, zeros
 test "PR-1: a view made inside a loop is not reused after it, and a dynamic extent is the grid's blocks times the tile" {
   let g = cells([256], [128])
   let (p, _e) = trace2("inside", In(F64, g), Out(F64, g), (x, o) => {
-    let t = d_range(0, 2, zeros(o), (_k, acc) => addf(acc, load_cell(x)))
-    store_cell(o, addf(t, load_cell(x)))
+    let t = carry(zeros(o))
+    d_range(0, 2) { _k => t.set(add(t.get(), load_cell(x))) }
+    store_cell(o, add(t.get(), load_cell(x)))
   })
   assert len(ops_where(p.ops, is_cell_view)) == 3
   let d = cells([DYN_DIM, 64], [32, 64])
@@ -5715,8 +5880,8 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
     ()
   })), "tileir: kernel `r`: op #4 `reduce`: yield 0 is tile<8xf64>, and it must be the rank-0 tile<f64>")
   assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
-    let _t = d_for(idx_of(arange(8)), idx_const(2), idx_const(1), broadcast(f_const(F64, 0.0), [8]), (_k, acc) => acc)
-    ()
+    let acc = carry(broadcast(f_const(F64, 0.0), [8]))
+    d_for(idx_of(arange(8)), idx_const(2), idx_const(1)) { _k => acc.set(acc.get()) }
   })), "tileir: kernel `r`: op #5 `d_for`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
   let ga = cells([128, 64], [64, 32], along: [0, FREE_AXIS])
   assert str.starts_with(marked(() => trace2("r", In(F16, ga), Out(F16, cells([128, 32], [64, 32])), (a, c) => {
@@ -5727,8 +5892,7 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
   assert str.contains(marked(() => trace_kernel("r", ["f64"], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
-    let _r = d_if(lt(t, t), () => t, () => t)
-    ()
+    d_if(lt(t, t), () => (), () => ())
   })), "`d_if`: condition is tile<8xi1>, and it must be the rank-0 tile<i1>")
 }
 
@@ -5740,10 +5904,10 @@ test "C3': a constant takes no shape: it is made where it is used, at the shape 
     let _never = f_const(F64, 9.0)
     let t = load(x, idx_const(0), [128])
     let u = mul(t, half)
-    let v = addf(u, half)
+    let v = add(u, half)
     let w = load(x, idx_const(0), [4, 8])
     store(out, idx_const(0), mul(w, half))
-    store(out, idx_const(0), addf(u, v))
+    store(out, idx_const(0), add(u, v))
   })
   let consts = ops_where(p.ops, is_const)
   # 0.5 at [128] once (two uses at one shape) and at [4, 8] once; 9.0 never
@@ -5763,9 +5927,11 @@ test "C3': a constant used inside a region is made there, at rank 0 in a reducti
   let (p, _e) = trace2("regional", In(F64, cells([128], [128])), Out(F64, cells([128], [128])), (x, o) => {
     let floor = f_const(F64, 0.25)
     let t = load_cell(x)
-    let r = d_range(0, 2, t, (_k, acc) => maxf(acc, floor))
-    let s = d_reduce(r, 0.0, (acc, e) => addf(acc, maxf(e, floor)))
-    store_cell(o, addf(maxf(r, floor), s))
+    let c = carry(t)
+    d_range(0, 2) { _k => c.set(max(c.get(), floor)) }
+    let r = c.get()
+    let s = d_reduce(r, 0.0, (acc, e) => add(acc, max(e, floor)))
+    store_cell(o, add(max(r, floor), s))
   })
   # once in the loop's body at [128], once in the reduction's at rank 0, and
   # once after the loop at [128] again: the loop's is not visible there
@@ -5781,23 +5947,26 @@ test "C3': a constant used inside a region is made there, at rank 0 in a reducti
   assert len(loops) == 1
 }
 
-test "C3': a loop whose starting value is a bare constant and whose body answers a tile is refused, by the value that changed shape" {
+test "C3': a carry that starts as a bare constant and is set to a tile is refused, by the value that changed shape" {
   assert str.contains(marked(() => trace_kernel("bare", ["f64"], () => {
     let x = param(F64, 0)
-    let _r = d_range(0, 2, f_const(F64, 0.0), (_k, acc) => addf(acc, load(x, idx_const(0), [8])))
-    ()
-  })), "`d_range`: carried value 0 is tile<f64> and comes back tile<8xf64>")
+    let acc = carry(f_const(F64, 0.0))
+    d_range(0, 2) { _k => acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
+  })), "`set`: carry 0 holds tile<f64>, and is set to tile<8xf64>")
   assert marked(() => trace_kernel("shaped", ["f64"], () => {
     let x = param(F64, 0)
-    let _r = d_range(0, 2, broadcast(f_const(F64, 0.0), [8]), (_k, acc) => addf(acc, load(x, idx_const(0), [8])))
-    ()
+    let acc = carry(broadcast(f_const(F64, 0.0), [8]))
+    d_range(0, 2) { _k => acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
   })) == "accepted"
   assert str.contains(marked(() => trace_kernel("branches", ["f64"], () => {
     let x = param(F64, 0)
-    let t = load(x, idx_const(0), [8])
-    let _r = d_if(idx_eq(idx_const(0), idx_const(0)), () => t, () => f_const(F64, 1.0))
+    let r = carry(load(x, idx_const(0), [8]))
+    d_if(idx_eq(idx_const(0), idx_const(0)), () => (), () => r.set(f_const(F64, 1.0)))
+  })), "`set`: carry 0 holds tile<8xf64>, and is set to tile<f64>")
+  assert str.contains(marked(() => trace_kernel("weak", ["f64"], () => {
+    let _c: Carry[F64] = carry(lit(0.5))
     ()
-  })), "`d_if`: yield 0 is tile<8xf64> and comes back tile<f64>")
+  })), "`carry`: a carry starts from a tile with a format of its own")
 }
 
 test "C3': a broadcast constant and a zero accumulator are one constant of the shape, and an mma widens a rank-0 accumulator" {
@@ -5807,7 +5976,7 @@ test "C3': a broadcast constant and a zero accumulator are one constant of the s
     let a = load(x, idx_const(0), [16, 16])
     let z = broadcast(f_const(F16, 0.0), [16, 16])
     let c = mmaf(a, a, f_const(F16, 0.0))
-    store(out, idx_const(0), addf(c, z))
+    store(out, idx_const(0), add(c, z))
   })
   assert list.filter(ops_where(p.ops, is_const), o => match o {
     ConstF(_d, "f16", [16, 16], 0.0) -> true
@@ -5930,7 +6099,7 @@ fn combos(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let h = [for_arch("sm_86", [hint_latency(2)])]
   let t = load(a, b, [128], strides: Some([2]), hints: h)
   let u = load(a, b, [128], mask: Some(m))
-  store(o, b, addf(t, u), strides: Some([3]), mask: Some(m), hints: h)
+  store(o, b, add(t, u), strides: Some([3]), mask: Some(m), hints: h)
 }
 
 test "PR-2: a strided load with hints, a masked load with no pad and a strided masked store with hints record as such" {
@@ -6047,4 +6216,98 @@ test "0.8.2: idx_div, idx_rem and idx_sub are the signed i32 operations on the i
     _ -> ""
   })
   assert names == ["divi", "remi", "subi"]
+}
+
+# ---- tileir 0.9.0: carries
+
+test "0.9.0: a carry only one branch sets is an if result, and the other branch yields what it held before" {
+  let p = trace_kernel("half", ["f64", "f64"], () => {
+    let x = param(F64, 0)
+    let out = param(F64, 1)
+    let i = block_id(0)
+    let t = load(x, i, [8])
+    let r = carry(t)
+    let unread = carry(t)
+    d_if(idx_eq(i, idx_const(0)), () => (), () => r.set(mul(t, t)))
+    store(out, i, add(r.get(), unread.get()))
+  })
+  match list.find(p.ops, o => match o {
+    If(_r, _c, _t, _f) -> true
+    _ -> false
+  }) {
+    Some(If(results, _cond, on_true, on_false)) -> {
+      # one result: `unread` is set by neither branch and is not one
+      assert len(results) == 1
+      # the then-branch yields the load itself, the else-branch its product
+      assert on_true == [Yield([2])]
+      match on_false {
+        [BinaryF(d, "mulf", "f64", [8], 2, 2), Yield(ys)] -> { assert ys == [d] }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # the trials left nothing: the program is the one recorded twice
+  assert p == trace_kernel("half", ["f64", "f64"], () => {
+    let x = param(F64, 0)
+    let out = param(F64, 1)
+    let i = block_id(0)
+    let t = load(x, i, [8])
+    let r = carry(t)
+    let unread = carry(t)
+    d_if(idx_eq(i, idx_const(0)), () => (), () => r.set(mul(t, t)))
+    store(out, i, add(r.get(), unread.get()))
+  })
+}
+
+test "0.9.0: a carry set inside a reduction's body is refused, and so is a region left open by a trial" {
+  assert str.contains(marked(() => trace_kernel("red", ["f64"], () => {
+    let x = param(F64, 0)
+    let t = load(x, idx_const(0), [8])
+    let c = carry(t)
+    let _s = d_reduce(t, 0.0, (acc, e) => {
+      c.set(t)
+      add(acc, e)
+    })
+    ()
+  })), "a carry is set inside a reduce or scan body")
+  assert str.contains(marked(() => trace_kernel("open", ["f64"], () => t_trial_begin())), "the body ended inside a trial")
+}
+
+test "0.9.0: extent_of and blocks_of are host constants for a static dimension and the grid's for a dynamic one" {
+  let consts = (p: TileProg) => list.map(ops_where(p.ops, o => match o {
+    IdxConst(_d, _v) -> true
+    _ -> false
+  }), o => match o {
+    IdxConst(_d, v) -> v
+    _ -> 0
+  })
+  let kv = cells([200, 32], [64, 32], along: [FREE_AXIS, 1])
+  let (p, _e) = trace2("st", In(F64, kv), Out(F64, cells([64, 32], [64, 32])), (k, o) => {
+    let _n = extent_of(k, 0)
+    let _b = blocks_of(k, 0)
+    store_cell(o, zeros(o))
+  })
+  assert consts(p) == [200, 4]
+  let (q, _e2) = trace2("dy", In(F64, cells([DYN_DIM], [128])), Out(F64, cells([DYN_DIM], [128])), (x, o) => {
+    let _n = extent_of(x, 0)
+    let _b = blocks_of(x, 0)
+    store_cell(o, load_cell(x))
+  })
+  assert len(ops_where(q.ops, o => match o {
+    NumBlocks(_d, 0) -> true
+    _ -> false
+  })) >= 2
+  assert list.contains(consts(q), 128)
+  let fr = marked(() => trace2("fr", In(F64, cells([DYN_DIM, 32], [64, 32], along: [FREE_AXIS, 0])),
+    Out(F64, cells([64, 32], [64, 32])), (k, o) => {
+      let _b = blocks_of(k, 0)
+      store_cell(o, zeros(o))
+    }))
+  # the marker refuses it before the body runs; `extent_of` never sees one
+  assert str.contains(fr, "has a dynamic extent in dimension 0, which follows no grid axis")
+  assert str.contains(marked(() => trace2("dim", In(F64, kv), Out(F64, cells([64, 32], [64, 32])), (k, o) => {
+    let _b = blocks_of(k, 2)
+    store_cell(o, zeros(o))
+  })), "has 2 dimension(s), and the call names dimension 2")
 }

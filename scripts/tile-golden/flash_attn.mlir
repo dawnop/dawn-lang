@@ -9,11 +9,11 @@ cuda_tile.module @m {
     %10, %11 = load_view_tko weak %3[%4, %8] token=%0 : partition_view<tile=(32x32), padding_value = zero, tensor_view<64x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<32x32xf64>, token
     %12 = constant <f64: -Infinity> : tile<32x1xf64>
     %13 = constant <f64: 0.0> : tile<32x1xf64>
-    %14 = constant <i32: 0> : tile<i32>
-    %15 = constant <i32: 2> : tile<i32>
-    %16 = constant <i32: 1> : tile<i32>
-    %17 = constant <f64: 0.0> : tile<32x32xf64>
-    %18, %19, %20, %21 = for %22 in (%14 to %15, step %16) : tile<i32> iter_values(%23 = %12, %24 = %13, %25 = %17, %26 = %11) -> (tile<32x1xf64>, tile<32x1xf64>, tile<32x32xf64>, token) {
+    %14 = constant <f64: 0.0> : tile<32x32xf64>
+    %15 = constant <i32: 0> : tile<i32>
+    %16 = constant <i32: 2> : tile<i32>
+    %17 = constant <i32: 1> : tile<i32>
+    %18, %19, %20, %21 = for %22 in (%15 to %16, step %17) : tile<i32> iter_values(%23 = %12, %24 = %13, %25 = %14, %26 = %11) -> (tile<32x1xf64>, tile<32x1xf64>, tile<32x32xf64>, token) {
       %27 = assume div_by<16>, %arg1 : tile<ptr<f64>>
       %28 = make_tensor_view %27, shape = [64, 32], strides = [32, 1] : tensor_view<64x32xf64, strides=[32, 1]>
       %29 = make_partition_view %28 : partition_view<tile=(32x32), padding_value = zero, tensor_view<64x32xf64, strides=[32, 1]>, dim_map=[0, 1]>

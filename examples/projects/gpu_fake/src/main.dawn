@@ -41,8 +41,8 @@ use std/list
 use std/map
 use std/narrow
 use std/str
-use tileir/dev.{Dev, Param, Tile, param, block_id, tile_at, load, store, addf, load_cell, store_cell,
-  for_arch, hint_latency, d_loop2, d_reduce, broadcast, DYN_DIM,
+use tileir/dev.{Dev, Param, Tile, param, block_id, tile_at, load, store, add, load_cell, store_cell,
+  for_arch, hint_latency, d_loop, carry, get, set, d_reduce, broadcast, DYN_DIM,
   i_const, add_i, mul_i, div_i, rem_i, lt_i, le_i, max_i, eq_i, select, idx_const, idx_add,
   d_assert, d_print, d_global, global_ptrs, lanes,
   ptr_offset, load_ptrs, store_ptrs, alloca_ptrs,
@@ -65,7 +65,7 @@ const N: Int = 8
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let ta = load_cell(a)
   let tb = load_cell(b)
-  store_cell(out, addf(ta, tb))
+  store_cell(out, add(ta, tb))
 }
 
 ## Knife T15: `vadd` with `optimization_hints` on the first load and on the
@@ -76,7 +76,7 @@ fn vadd_hinted(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), WIDTH)
   let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", [hint_latency(4)])])
   let tb = load(b, blk, [WIDTH])
-  store(out, blk, addf(ta, tb), hints: [for_arch("sm_86", [hint_latency(7)])])
+  store(out, blk, add(ta, tb), hints: [for_arch("sm_86", [hint_latency(7)])])
 }
 
 # One Collatz step per lane, saturating at 1: a lane that has reached 1 stays
@@ -99,13 +99,17 @@ fn collatz_step(v: Tile[I32], s: Tile[I32]) -> (Tile[I32], Tile[I32]) !Dev = {
 fn collatz(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let shape = [N]
   let blk = tile_at(idx_const(0), N)
-  let (_left, steps) = d_loop2(load(x, blk, shape), broadcast(i_const(0), shape), (v, s) => {
-    let biggest = d_reduce(v, 1.0, (acc, e) => max_i(acc, e))
-    let (nv, ns) = collatz_step(v, s)
-    (le_i(biggest, i_const(1)), nv, ns)
-  })
-  store(out, blk, steps)
-  store(out, tile_at(idx_const(1), N), broadcast(d_reduce(steps, 0.0, (acc, e) => max_i(acc, e)), shape))
+  let v = carry(load(x, blk, shape))
+  let steps = carry(broadcast(i_const(0), shape))
+  d_loop {
+    let biggest = d_reduce(v.get(), 1.0, (acc, e) => max_i(acc, e))
+    let (nv, ns) = collatz_step(v.get(), steps.get())
+    v.set(nv)
+    steps.set(ns)
+    le_i(biggest, i_const(1))
+  }
+  store(out, blk, steps.get())
+  store(out, tile_at(idx_const(1), N), broadcast(d_reduce(steps.get(), 0.0, (acc, e) => max_i(acc, e)), shape))
 }
 
 ## Knife T6: an assertion and a print. A launch that fires an `assert` is
@@ -144,8 +148,8 @@ fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let tx = load(x, blk, s)
   let pa = ptr_offset(global_ptrs("tbl_a", F64, s), off)
   let pb = ptr_offset(global_ptrs("tbl_b", F64, s), off)
-  store(out, blk, addf(load_ptrs(pa), tx))
-  store(out, idx_add(blk, idx_const(N)), addf(load_ptrs(pb), tx))
+  store(out, blk, add(load_ptrs(pa), tx))
+  store(out, idx_add(blk, idx_const(N)), add(load_ptrs(pb), tx))
 }
 
 ## Knives T3 and T9: the narrow element formats. Segment 0 reads a buffer OF
@@ -170,8 +174,8 @@ fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), N)
   let a = float_to_float(load(x, blk, s), F32)
   let b = float_to_float(load(y, blk, s), F32)
-  store(out, blk, float_to_float(addf(a, b, rounding: narrow.Down), F64))
-  store(out, idx_add(blk, idx_const(N)), float_to_float(addf(a, b, rounding: narrow.Up), F64))
+  store(out, blk, float_to_float(add(a, b, rounding: narrow.Down), F64))
+  store(out, idx_add(blk, idx_const(N)), float_to_float(add(a, b, rounding: narrow.Up), F64))
 }
 
 ## Knife T10: `alloca`, memory that belongs to the block and to nothing else.
@@ -187,8 +191,8 @@ fn scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), N)
   let p = ptr_offset(alloca_ptrs(F64, 12, 8, s), lanes(idx_const(0), s))
   let tx = load(x, blk, s)
-  store_ptrs(p, addf(tx, tx))
-  store(out, blk, addf(load_ptrs(p), tx))
+  store_ptrs(p, add(tx, tx))
+  store(out, blk, add(load_ptrs(p), tx))
 }
 
 ## Knife T2: the three shape operations, on one block of 128 f64 read twice.
@@ -314,7 +318,7 @@ fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], F
   Ok(got)
 }
 
-## The `addf(.., rounding: Down)` / `rounding: Up` pair on the host. The sum of two binary32
+## The `add(.., rounding: Down)` / `rounding: Up` pair on the host. The sum of two binary32
 ## values is EXACT in binary64, so this rounds the exact sum in the named
 ## direction and `std/narrow`'s rounder is the whole of the arithmetic. It
 ## is the one reference `std/gpu` does not already carry.
