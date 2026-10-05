@@ -27,6 +27,8 @@ use ir/reach
 use ir/reach.{TableUse, Live}
 use c/emitc
 use c/emitc.{EmitMod}
+use c/cmap
+use ir/coresites
 use c/ctestrun
 use embed/rtsrc
 use compiler_plan/envmem
@@ -504,6 +506,59 @@ pub(pkg) fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = 
   Ok(emitc.emit_program(units, entry, tables(lv), lv, adts, modes))
 }
 
+## `c_text` plus its side table, for `--map` (docs/source-span-map-design.md
+## section 12): the same text, from the same `emitc.program_st`, and the
+## `.dawnmap` that says where each written call landed in it.
+pub(pkg) fn c_text_mapped(std: StdCtx, prog: Program) -> Result[(String, String), String] !Env = {
+  let (units, entry, adts, modes) = build_units(std, prog, false, false)
+  if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
+  let lv = live(units, prog, false)
+  let (text, rows, fns) = emitc.emit_program_mapped(units, entry, tables(lv), lv, adts, modes)
+  var srcs: Map[String, String] = map.empty()
+  var bases: Map[String, Map[String, Int]] = map.empty()
+  for sm in std.mods {
+    let (cls, _cx, tm, _ct) = sm
+    # the bundled std's modules are named by where they sit in it
+    srcs = map.insert(srcs, cls, cls ++ ".dawn")
+    bases = map.insert(bases, cls, coresites.decl_bases(tm))
+  }
+  for cm in prog.modules {
+    srcs = map.insert(srcs, cm.class_name, match cm.cx.site_path {
+      Some(p) -> p
+      None -> cm.path
+    })
+    bases = map.insert(bases, cm.class_name, coresites.decl_bases(cm.tm))
+  }
+  let lines = len(str.split(text, "\n")) - 1
+  Ok((text, cmap.render(lines, unit_lines(text), rows, fns, srcs, bases)))
+}
+
+## Each translation unit's line range in the whole text, and the file `split`
+## writes it to: (k, file, first, last). A unit's body is the lines after its
+## marker up to the next marker, so line `L` of the whole text is line
+## `L - first + 2` of its file, whose first line is the `#include`. Computed
+## from the marker lines `split` cuts at, so the two cannot disagree about
+## where a unit starts; a text with no marker is one `main.c`, line for line.
+pub fn unit_lines(text: String) -> List[(Int, String, Int, Int)] = {
+  let ls = str.split(text, "\n")
+  let total = len(ls) - 1
+  var marks: List[Int] = []
+  var i = 0
+  while i < total {
+    if str.starts_with(ls[i], TU_LEAD) { marks = marks ++ [i + 1] }
+    i = i + 1
+  }
+  if len(marks) == 0 { return [(0, "main.c", 1, total)] }
+  var out: List[(Int, String, Int, Int)] = []
+  var k = 0
+  while k < len(marks) {
+    let last = if k + 1 < len(marks) { marks[k + 1] - 1 } else { total }
+    out = out ++ [(k, unit_file(k), marks[k] + 1, last)]
+    k = k + 1
+  }
+  out
+}
+
 ## A source target, whole, as the C translation unit `emitc` prints, for tools
 ## outside this package. `c_text` and the pipeline in front of it take and
 ## return checker state (`StdCtx`, `Program`), which is `pub(pkg)`; this entry
@@ -738,4 +793,26 @@ test "the unit count follows the program's size, and only that" {
   assert emitc.tu_count(22000000) == 15
   assert emitc.tu_count(24000001) == 16
   assert emitc.tu_count(500000000) == 16
+}
+
+test "unit_lines puts every unit line where split puts it" {
+  # the `--map` contract (docs/source-span-map-design.md section 12.2): line
+  # L of the whole text is line L - first + 2 of its unit's file
+  let text = three_units()
+  let whole = str.split(text, "\n")
+  let files = units_of(text)
+  let units = unit_lines(text)
+  assert len(units) == 3
+  for u in units {
+    let (k, file, first, last) = u
+    let (name, body) = files[k + 1]
+    assert name == file
+    let ls = str.split(body, "\n")
+    var l = first
+    while l <= last {
+      assert ls[l - first + 1] == whole[l - 1]
+      l = l + 1
+    }
+  }
+  assert unit_lines("int main(void) {}\n") == [(0, "main.c", 1, 1)]
 }

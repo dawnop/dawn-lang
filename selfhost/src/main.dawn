@@ -1957,17 +1957,6 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ##
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
-## A typed module's declaration bases by declaration path, for `__lower
-## --sites`. A tree no scheduler filed (`base` below zero) has no sites to
-## place and no entry.
-fn decl_bases(tm: TModule) -> Map[String, Int] = {
-  var out: Map[String, Int] = map.empty()
-  for tf in tm.fns ++ tm.tests {
-    if tf.base >= 0 && tf.decl != "" { out = map.insert(out, tf.decl, tf.base) }
-  }
-  out
-}
-
 fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_flag: Option[String] = None
   var dump_dir = ""
@@ -2017,9 +2006,9 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   if sites_dir != "" {
     for sm in std.mods {
       let (cls, _cx, tm, _ct) = sm
-      site_bases = map.insert(site_bases, cls, decl_bases(tm))
+      site_bases = map.insert(site_bases, cls, coresites.decl_bases(tm))
     }
-    for cm in prog.modules { site_bases = map.insert(site_bases, cm.class_name, decl_bases(cm.tm)) }
+    for cm in prog.modules { site_bases = map.insert(site_bases, cm.class_name, coresites.decl_bases(cm.tm)) }
   }
   let bases_all = site_bases
   let listing = sites_dir != ""
@@ -2166,12 +2155,17 @@ fn lower_size(m: CModule) -> Int = {
 ## `--split <dir>` writes the same C as the files a build compiles -- the
 ## shared head and one file per translation unit (docs/c-tu-split-design.md)
 ## -- for the scripts that compile the units in parallel.
+##
+## `--map <file>` also writes the `.dawnmap` side table: where each written
+## call landed in the C (docs/source-span-map-design.md section 12). The C is
+## the same with it or without it.
 fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let (opts, rest) = extract_ct_opts(rest0)
   var std_flag: Option[String] = None
   var out = ""
   var info_out = ""
   var split_out = ""
+  var map_out = ""
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -2186,6 +2180,9 @@ fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       i = i + 2
     } else if rest[i] == "--split" && i + 1 < len(rest) {
       split_out = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--map" && i + 1 < len(rest) {
+      map_out = rest[i + 1]
       i = i + 2
     } else {
       refuse_second_target("dawn emitc", target, rest[i])
@@ -2204,9 +2201,22 @@ fn run_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let loaded = load_target(std, t)
   let prog = analyze_program(loaded, std, opts, jsig_real())
   if len(prog.diags) > 0 { fail_compile(rendered_diags(prog)) }
-  let text = match cdriver.c_text(std, prog) {
-    Ok(s) -> s
+  let emitted = if map_out != "" { cdriver.c_text_mapped(std, prog) } else {
+    let r: Result[(String, String), String] = match cdriver.c_text(std, prog) {
+      Ok(s) -> Ok((s, ""))
+      Err(e) -> Err(e)
+    }
+    r
+  }
+  let (text, dmap) = match emitted {
+    Ok(pr) -> pr
     Err(e) -> return cli_error(e ++ " in " ++ t)
+  }
+  if map_out != "" {
+    match io.write_file(map_out, dmap) {
+      Ok(_) -> ()
+      Err(e) -> return cli_error("cannot write " ++ map_out ++ ": " ++ e.message)
+    }
   }
   if info_out != "" {
     let unit = match binfo.unit_for(VERSION, t, loaded) {
