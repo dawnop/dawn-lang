@@ -5267,7 +5267,7 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
    逐个对过调用点：单携带的 `d_range` / `d_for`、foldif 的三携带（初值都是更早绑定的）、全部 `d_loop2`、唯一的 `d_if`
    都保持操作序。**两处不保持**：flash_attn 的 `zeros(o)` 与 loop_bound 的 `load_cell(x)` 今天是 `d_for3` / `d_for2` 的
    第 4 个以后的实参，在三个 `idx_const` 界之后求值；写成 `carry(init)` 再 `d_range(..)` 就挪到了界之前。协调者裁决取
-   干净写法、接受这两个 golden 里一个常量（一个 load）前移，其余 kernel 一律逐字节不变（见下「golden」）。
+   干净写法、接受这两个 golden 里一个常量（一个 load）前移，其余 kernel 一律逐字节不变（6.30 三）。
 2. `lit[D](v) -> Tile[D]` 的 `D` 只在返回类型里：`mul(s, lit(0.5))`、嵌在实参位的 `mul(a, mul(lit(2.0), lit(3.0)))`、
    `let g: Tile[F32] = lit(1.0)` 都推得出；`mul(lit(0.5), s)` 推不出（「cannot infer type parameter(s) D for `lit`」），
    checker 自左向右定类型参数。所以 `lit` 写在有类型的操作数之后，README 照写。
@@ -5306,6 +5306,72 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 - `Tile * Float` 异构运算、数值字面量多态：单参数 trait 写不出，字面量多态是语言级大改；`lit(v)` 足够。
 - 给 `Idx` 单开 `IdxDiv` 之类的 `TileOp`：`Idx` 本来就是 0 秩 i32 tile 的句柄，`divi` / `remi` / `subi` 已有降低、渲染、
   字节码与层 2 证据，再开一套只多出要维护的穷举分支。
+
+### 6.30 tileir 0.9.0：设备变量 `Carry`、Unit 体的区域、命名归一（K2）
+
+同一任务单的第二个提交，破坏性：`Dev` 加 6 个操作。落刀前补测见 6.29。
+
+**一、`Carry` 与 Unit 体的区域。**
+
+`d_for2..4`、`d_loop2` 把元数写进名字，携带值在实参、lambda 形参、返回元组里各写一次（flash_attn 的 `m/l/acc` 写了三遍），
+根因是没有变长泛型拆不开元组（`prog.dawn` 的 `trace1..5` 注释）。现在：
+
+```dawn
+pub opaque type Carry[D] = Int
+pub fn carry[D](init: Tile[D]) -> Carry[D] !Dev
+pub fn get[D](c: Carry[D]) -> Tile[D] !Dev
+pub fn set[D](c: Carry[D], t: Tile[D]) -> Unit !Dev
+pub fn d_range(lower: Int, upper: Int, step: Int = 1, body: fn(Idx) -> Unit !Dev) -> Unit !Dev
+pub fn d_for(lower: Idx, upper: Idx, step: Idx, unsigned_cmp: Bool = false, body: fn(Idx) -> Unit !Dev) -> Unit !Dev
+pub fn d_loop(body: fn() -> Tile[I1] !Dev) -> Unit !Dev
+pub fn d_if(cond: Tile[I1], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev
+```
+
+- **试跑**（Triton `_find_carries` 同法）：区域函数先 `t_trial_begin`，以不带携带值的方式把区域开、体跑、区域关一遍，
+  `t_trial_end` 答出「试跑期间被 `set` 过的、试跑前就存在的 Carry」（按创建序），并把记录 handler 的**全部**状态还原
+  （句柄计数、操作表、token、区域栈、调用标记与调用行、句柄表、各 memo、待物化常量、各 Carry）。然后正式开区域，这些
+  Carry 依创建序成为携带值，体内 `get` 答块参数，区域后它们持有结果。只读不写的不携带，体看到的是外层的 tile。
+- **判据是「被 set 过」而不是「句柄变了」**：`c.set(c.get())` 仍然携带，与 Triton 比句柄的做法不同；这样「是否携带」
+  只看体里写了什么，不看值碰巧相等。反过来，体里不 `set` 的值就不是循环携带值：grid_stride 在 0.8 里为了满足
+  `d_range` 必须带一个 tile 而带着一个原样答回的 0 秩常量，0.9.0 里它什么都不带（除 token），golden 随之变（见三）。
+- `d_loop` 的体答停止掩码：`while` 的出口是体算出来的值，Unit 体表达不了；携带值仍走 Carry。停下的那一轮答的是进入
+  那一轮的值（`Break` 带块参数），所以掩码应在 `set` 之前、按进入时的值算，README 写明。
+- `d_if`：每个分支各试跑一次，任一分支 `set` 过的 Carry 是 `if` 的结果；正式记录时 then 分支跑完把这些 Carry 复位到
+  `if` 之前的值再跑 else，没 `set` 的分支 yield 外层的 tile。
+- `set` 要求格式与形状与 `carry` 时相同（按名拒，例「carry 0 holds tile<f64>, and is set to tile<8xf64>」，取代旧的
+  「carried value 0 … comes back」）；归约 / scan 体里 `set` 拒（那两种区域什么都不带出）；`carry(lit(..))` 拒。
+- 代价：嵌套 n 层的最内层体在记录时跑 2^n 次；`MAX_LOOP_DEPTH` 16 封顶，本仓 kernel 最深 2 层。记录确定（每个 kernel
+  本来就记两次比对），试跑与正式跑发同样的操作。
+- `Dev` 加 `t_carry_new` / `t_carry_get` / `t_carry_set` / `t_trial_begin` / `t_trial_end`，外部 handler 要补臂，所以是 minor。
+- `extent_of(p, dim)` / `blocks_of(p, dim)` 随 K2 落地（任务单把它们列在 K1，但它们要读参数标记，只能是新的 `Dev` 操作
+  `t_extent_of`，按 CHANGELOG 头的规则不能进补丁版本）：静态维发 `idx_const`，`DYN_DIM` 维是网格沿它所跟的轴的块数
+  （乘 tile 即 extent），与 `cells` 对动态 extent 的定义同一；跟 `FREE_AXIS` 的动态维在标记期就被拒。调研写的
+  `get_tensor_shape` 不需要：动态 extent 本来就定义成「块数 × tile」，`num_blocks` 是同一个数。
+
+**二、命名归一。** 浮点 `addf → add`、`maxf → max`、`minf → min`，与 `sub/mul/div/neg/abs` 成一套；整数族（`add_i`
+与泛型 `addi`）不动（`std-defaults-design.md` §3 的理由）。调用标记的名字随之改（`site/gpu-map` 的调用图里看得到），
+Tile IR 的操作名不变。
+
+**三、迁移与 golden。** kernels.dawn 一次迁完：全部单携带循环、多携带 3 处（foldif、loop_bound、flash_attn）、`d_loop` /
+`d_loop2` 4 处（loop_count、loop_until、loop_none、loop_return）、`d_if` 1 处，以及全部 `addf` / `maxf` / `minf`。flash_attn 写成调研 §2.3 的形状（Carry + 同秩广播 + `lit`，
+不再有显式 `broadcast`）。迁移后的渲染逐个对 golden：已有的 193 个里变了三对。flash_attn 与 loop_bound 是 6.29 第 1 条预言的两处，
+变化只是一个常量（loop_bound 是一个 load 及其视图）挪到三个界常量之前，`.tilebc` 长度不变（683、423 字节）。
+grid_stride 是协调者裁的第三处：不再写一个原样答回的 `set` 去保字节，循环不再带那个 0 秩 f64 常量。flash_attn
+去掉了 4 个显式 `broadcast`（同秩规则补上的 `broadcast` 落在原位，6.29 第 4 条的实测）。attr_ucmp、view 的两层嵌套
+循环、foldif 的 `d_if` 都逐字节不变。新增覆盖 golden `carry_extent`：
+`for` 带两个 Carry，其中一个是循环体里一个只有一支 `set` 的 `if` 的结果，上界来自 `blocks_of`（静态 `FREE_AXIS` 维，
+常量），除数来自 `extent_of`（`Out` 的 `DYN_DIM` 维，网格块数乘 tile）。
+
+**不做的（理由）：**
+
+- 语言级 `for` 线程化 `var`（调研 L-C）：要拆状态元组，得加变长泛型或在 prelude 放元组结构 trait；`for` 多出第二种含义。
+  重开条件：语言为别的理由引入变长泛型。
+- 两遍执行的零改动 `for`（调研 §2.5）：宿主 `var` 被静默算错，同一拼写两种语义。
+- 「全部活变量都携带再剪枝」（不试跑）：句柄编号出空洞且操作序变，字节必变。
+- 算术运算符 trait：走语言线（`ruling-arith-operator-traits-20261006.md`），不在 tileir 0.9 里顺手做。
+- const generics / 类型级形状：宿主 `Int` 闭包即尺寸参数（调研 §5）。
+- 写一侧计算下标（调研 I-C）：`Out` 仍只写本格，`along` 的单射证明保留；第一个真需要的 kernel 出现时另裁（K6）。
+- `get` / `set` 不发操作、不做「读后写」检查：Carry 只是记录期的名字，SSA 本身没有可变量，检查无对象。
 
 ## 7. 刀序
 

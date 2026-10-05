@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ fc911af1edb7b4ab -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 5f04d78ce96c1f38 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -92,7 +92,7 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 
 ## api-keepdims
 
-`keepdims: true` 把每一行归约成长度为 1 的一列，再由 `broadcast` 显式展回去。这两行就是下面那个注意力 kernel 的行统计；点进去，看它写出的 Tile IR。
+`keepdims: true` 把每一行归约成长度为 1 的一列；这一列和整行同阶，遇到整行时自己展回去。这两行就是下面那个注意力 kernel 的行统计；点进去，看它写出的 Tile IR。
 
 ## api-keepdims-go
 
@@ -108,7 +108,7 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 
 ## api-changes
 
-0.8.0 改了什么
+0.9.0 改了什么
 
 ## api-measured
 

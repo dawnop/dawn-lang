@@ -9,13 +9,13 @@ and so are the format markers (`F64`, `BF16`, ...).
 
 ```dawn
 use std/gpu.{F64}
-use tileir/dev.{Dev, Param, load_cell, store_cell, addf, DYN_DIM}
+use tileir/dev.{Dev, Param, load_cell, store_cell, add, DYN_DIM}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 use tileir/bytecode.{encode}
 
 fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
-  store_cell(out, addf(load_cell(a), load_cell(b)))
+  store_cell(out, add(load_cell(a), load_cell(b)))
 
 let g = cells([DYN_DIM], [128])     # 128-wide cells, as many as the grid has
 let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
@@ -66,12 +66,13 @@ block reads and writes, element-wise operations take their shape and format
 from their operands, and a matrix product's from its two factors:
 
 ```dawn
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range, carry, get, set}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
-  let acc = d_range(0, 256 / 32, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))
-  store_cell(c, acc)
+  let acc = carry(zeros(c))
+  d_range(0, 256 / 32) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  store_cell(c, acc.get())
 }
 
 let (prog, entry) = trace3("matmul",
@@ -119,21 +120,53 @@ let (prog, entry) = trace3("matmul",
   atomics, `tensor_view` and the views cut from it. A memory operation takes
   an element offset: `tile_at(idx, n)` is `idx * n`.
 - An operation's attributes are named parameters with the dialect's default:
-  `addf(a, b, rounding: Down)`, `d_global("t", F64, xs, visibility: Private)`.
+  `add(a, b, rounding: Down)`, `d_global("t", F64, xs, visibility: Private)`.
+  Float arithmetic is `add`, `sub`, `mul`, `div`, `max`, `min`, `neg`, `abs`;
+  importing `max` and `min` shadows the prelude's in that module.
 - Memory operations are ordered by the token chain the recorder threads
   through them, not by program order. `d_fork2` runs two chains, and writes
   it cannot show to be disjoint are refused.
 
 ## Control flow
 
-`d_range(lower, upper, init, (k, acc) => ...)` is a loop over host bounds
-carrying one tile; `d_for(lower, upper, step, init, ..)` takes `Idx` bounds
-the device computes, and `d_for2` to `d_for4` carry more. A carried value
-keeps its format and shape: start it from `zeros(p)` or a `broadcast`, not
-from a rank-0 constant. `d_loop` runs until its body answers true; `d_if`
-takes two regions that answer the same format and shape, and neither may
-load or store. The body runs once on the host and what it emits lands in the
-region.
+A value that changes as a loop goes is a `Carry`, a device variable:
+`let acc = carry(init)`, `acc.get()` to read it, `acc.set(t)` to replace it
+with a tile of the same format and shape. A carry starts from a tile with a
+shape (`zeros(p)`, a `broadcast`), not from a rank-0 constant or a `lit`.
+
+```dawn
+let m = carry(broadcast(f_const(F64, neg_inf()), [BQ, 1]))
+let l = carry(broadcast(f_const(F64, 0.0), [BQ, 1]))
+let acc = carry(zeros(o))
+d_range(0, N / BK) { j =>
+  let s = mul(mmaf(tq, permute_tile(load_at(k, [j]), [1, 0]), lit(0.0)), lit(scale))
+  let m_new = max(m.get(), reduce_max(s, keepdims: true))
+  let p = exp(sub(s, m_new))
+  let alpha = exp(sub(m.get(), m_new))
+  l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims: true)))
+  acc.set(mmaf(p, load_at(v, [j]), mul(acc.get(), alpha)))
+  m.set(m_new)
+}
+store_cell(o, div(acc.get(), l.get()))
+```
+
+- `d_range(lower, upper, step: 1) { j => .. }` is a loop over host bounds;
+  `d_for(lower, upper, step, unsigned_cmp: false) { j => .. }` takes `Idx`
+  bounds the device computes (`extent_of(p, dim)` and `blocks_of(p, dim)`
+  are a parameter's extent and its number of cells along a dimension).
+- `d_loop { .. }` runs until its body answers a true rank-0 mask. On the
+  iteration that answers true the loop stops with the carries as they
+  entered it, so compute the mask before the `set`s.
+- `d_if(cond, () => .., () => ..)` runs one of two regions, neither of which
+  may load or store; a carry either sets is the `if`'s answer, and a branch
+  that does not set it keeps what it held.
+
+A region carries a carry only if its body sets it, and carries those in the
+order they were made; one the body only reads is the tile it held outside,
+and a loop that sets nothing carries nothing but the memory token. The recorder finds
+them by recording the body once as a trial and discarding it, so a body runs
+twice on the host (2^n times n regions deep). A body is otherwise ordinary
+Dawn: host `if` and `for` in it unroll while recording.
 
 Nesting is capped at `MAX_LOOP_DEPTH` (16) and one recording at
 `MAX_HANDLES` (65536) handles; past either the recording panics.
@@ -193,8 +226,13 @@ nothing:
   operations fall outside any pair.
 - `t_shape_of(h)`: answer the format and shape of handle `h` (rank 1 or more).
   The named reductions and `broadcast` read it.
-- `t_cell_view`, `t_sub_view`, `t_cell_fill` and `t_retile` read a
-  parameter's marker; a handler with no markers should refuse them.
+- `t_cell_view`, `t_sub_view`, `t_cell_fill`, `t_retile` and `t_extent_of`
+  read a parameter's marker; a handler with no markers should refuse them.
+- `t_carry_new`, `t_carry_get`, `t_carry_set` keep the carries, and
+  `t_trial_begin` / `t_trial_end` bracket a trial: `t_trial_end` answers
+  the carries made before the trial that were set during it, in the order
+  they were made, and puts every piece of the handler's state back as it
+  was at `t_trial_begin`.
 
 Changes between versions: [CHANGELOG.md](CHANGELOG.md). Design, measurements
 and the bytecode format:

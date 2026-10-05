@@ -1,5 +1,5 @@
 # The cuTile backend's page, gpu.html: the two layers, how a kernel is
-# written against tileir 0.8.0, a kernel lined up line by line with the Tile
+# written against tileir 0.9.0, a kernel lined up line by line with the Tile
 # IR it records, the three coverage tables, the three
 # gates and the mutants they catch, and the last line of every device ledger.
 #
@@ -36,8 +36,8 @@
 # or the build stops.
 #
 # Why the section on writing a kernel is cut, not written. It shows what
-# tileir 0.8.0 asks of a kernel (markers that are the addressing, shapes read
-# off operands, rank-0 widening, writes only through `Out`, `Shared` as the
+# tileir 0.9.0 asks of a kernel (markers that are the addressing, shapes read
+# off operands, rank-0 and same-rank widening, writes only through `Out`, `Shared` as the
 # escape hatch, reductions that keep their dimension) with code the gates
 # hold: golden kernels of kernels.dawn, the dispatch arms that trace them
 # under their markers, and a helper of that file, each cut by
@@ -1510,8 +1510,8 @@ test "the nav marks GPU as the page you are on" {
 ## flash_attn against the files it comes from: its rows' source is
 ## kernels.dawn's function as the page's other cut reads it, its Tile IR is
 ## the golden's, every golden line is in exactly one run, and the calls of
-## the loop's body are the d_for3's children (the named reductions inside it
-## take no closure, so they have none of their own).
+## the loop's body are the d_range's children (the named reductions inside
+## it take no closure, so they have none of their own).
 test "flash_attn lines up with its golden, call by call" {
   with_fs_real(() => {
     let f = load_facts()
@@ -1528,12 +1528,12 @@ test "flash_attn lines up with its golden, call by call" {
     }
     assert sort(owned) == range(1, len(m.ir) + 1)
     assert map(m.rows, r => r.line) == range(cut.first, cut.last + 1)
-    # the loop's body is the d_for3's, and nothing else has children
-    let loops = filter(m.calls, c => c.name == "d_for3")
+    # the loop's body is the d_range's, and nothing else has children
+    let loops = filter(m.calls, c => c.name == "d_range")
     assert len(loops) == 1
     let body = filter(m.calls, c => c.parent == loops[0].id)
-    assert len(body) == 20
-    assert len(filter(m.calls, c => c.parent >= 0)) == 20
+    assert len(body) == 25
+    assert len(filter(m.calls, c => c.parent >= 0)) == 25
     # a region call keeps its header on its own line and its terminator and
     # brace on the line its span ends on
     assert len(loops[0].lines) == 2
@@ -1546,11 +1546,13 @@ test "flash_attn lines up with its golden, call by call" {
 # writes for it: an oracle the recording does not produce, so a map whose
 # runs are moved one call along is red here even though every line is still
 # owned once. A constant writes nothing where it is called and is made where
-# it is used (tileir 0.8.0), so `f_const` is for no line at all, and a call
-# that takes one may end in it: `broadcast` of a constant is that constant
-# at the wider shape, and `mmaf` and `mul` write theirs just ahead of the
-# operation. A reduction with `keepdims` ends in the reshape that keeps the
-# dimension.
+# it is used (tileir 0.8.0), so `f_const` and `lit` are for no line at all,
+# and a call that takes one may end in it: `broadcast` of a constant is that
+# constant at the wider shape, and `mmaf` and `mul` write theirs just ahead
+# of the operation. A reduction with `keepdims` ends in the reshape that
+# keeps the dimension. `carry`, `get` and `set` record nothing (tileir
+# 0.9.0): what a carry is, is the loop's block arguments and its `continue`,
+# which are `d_range`'s lines.
 fn ops_for(name: String) -> List[String] =
   match name {
     "load_cell" -> ["load_view_tko"]
@@ -1559,18 +1561,22 @@ fn ops_for(name: String) -> List[String] =
     "idx_const" -> ["constant"]
     "zeros" -> ["constant"]
     "f_const" -> []
+    "lit" -> []
+    "carry" -> []
+    "get" -> []
+    "set" -> []
     "broadcast" -> ["broadcast", "constant"]
     "permute_tile" -> ["permute"]
     "mmaf" -> ["mmaf"]
     "mul" -> ["mulf"]
     "sub" -> ["subf"]
-    "addf" -> ["addf"]
+    "add" -> ["addf"]
     "div" -> ["divf"]
     "exp" -> ["exp"]
-    "maxf" -> ["maxf"]
+    "max" -> ["maxf"]
     "reduce_max" -> ["reshape"]
     "reduce_sum" -> ["reshape"]
-    "d_for3" -> ["for"]
+    "d_range" -> ["for"]
     _ -> ["?"]
   }
 
@@ -1644,7 +1650,7 @@ test "the facts beside the map are the map's and the files' numbers" {
       }
     assert kf.bytes == size
     assert kf.lines == len(m.ir)
-    assert kf.calls == 33
+    assert kf.calls == 39
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }

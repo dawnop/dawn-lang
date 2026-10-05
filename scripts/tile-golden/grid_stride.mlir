@@ -6,27 +6,26 @@ cuda_tile.module @m {
     %7 = constant <i32: 0> : tile<i32>
     %8 = constant <i32: 4> : tile<i32>
     %9 = constant <i32: 1> : tile<i32>
-    %10 = constant <f64: 0.0> : tile<f64>
-    %11, %12 = for %13 in (%7 to %8, step %9) : tile<i32> iter_values(%14 = %10, %15 = %0) -> (tile<f64>, token) {
-      %16 = muli %13, %4 : tile<i32>
-      %17 = addi %1, %16 : tile<i32>
-      %18 = constant <i32: 128> : tile<i32>
-      %19 = muli %17, %18 : tile<i32>
-      %20 = reshape %19 : tile<i32> -> tile<1xi32>
-      %21 = broadcast %20 : tile<1xi32> -> tile<128xi32>
-      %22 = iota : tile<128xi32>
-      %23 = addi %21, %22 : tile<128xi32>
-      %24 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
-      %25 = broadcast %24 : tile<1xptr<f64>> -> tile<128xptr<f64>>
-      %26 = offset %25, %23 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-      %27, %28 = load_ptr_tko weak %26 token=%15 : tile<128xptr<f64>> -> tile<128xf64>, token
-      %29 = constant <f64: 2.0> : tile<128xf64>
-      %30 = mulf %27, %29 rounding<nearest_even> : tile<128xf64>
-      %31 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
-      %32 = broadcast %31 : tile<1xptr<f64>> -> tile<128xptr<f64>>
-      %33 = offset %32, %23 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-      %34 = store_ptr_tko weak %33, %30 token=%28 : tile<128xptr<f64>>, tile<128xf64> -> token
-      continue %14, %34 : tile<f64>, token
+    %10 = for %11 in (%7 to %8, step %9) : tile<i32> iter_values(%12 = %0) -> (token) {
+      %13 = muli %11, %4 : tile<i32>
+      %14 = addi %1, %13 : tile<i32>
+      %15 = constant <i32: 128> : tile<i32>
+      %16 = muli %14, %15 : tile<i32>
+      %17 = reshape %16 : tile<i32> -> tile<1xi32>
+      %18 = broadcast %17 : tile<1xi32> -> tile<128xi32>
+      %19 = iota : tile<128xi32>
+      %20 = addi %18, %19 : tile<128xi32>
+      %21 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
+      %22 = broadcast %21 : tile<1xptr<f64>> -> tile<128xptr<f64>>
+      %23 = offset %22, %20 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
+      %24, %25 = load_ptr_tko weak %23 token=%12 : tile<128xptr<f64>> -> tile<128xf64>, token
+      %26 = constant <f64: 2.0> : tile<128xf64>
+      %27 = mulf %24, %26 rounding<nearest_even> : tile<128xf64>
+      %28 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
+      %29 = broadcast %28 : tile<1xptr<f64>> -> tile<128xptr<f64>>
+      %30 = offset %29, %20 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
+      %31 = store_ptr_tko weak %30, %27 token=%25 : tile<128xptr<f64>>, tile<128xf64> -> token
+      continue %31 : token
     }
     return
   }

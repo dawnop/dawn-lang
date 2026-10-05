@@ -10,7 +10,7 @@ wrote. Two programs know half each, and neither half is guessed:
 
   - packages/tileir knows which call issued which operation, because it ran
     them: `prog.trace_calls` keeps the tree of the kernel's calls (a call
-    inside a `d_for3` or a `d_scan` closure is that region call's child) and
+    inside a `d_range` or a `d_scan` closure is that region call's child) and
     `render.line_map` carries it to lines of the text. That needs the kernel
     to RUN, so it is a Dawn harness over a copy of kernels.dawn.
   - Dawn's own parser knows where each call is: `dawn parse` gives every call
