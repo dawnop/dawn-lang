@@ -6,6 +6,17 @@ Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
 `docs/std-defaults-design.md` and `docs/audit/web-api-v2-design.md` (in
 Chinese).
 
+## 6.2.1 (2026-10-05)
+
+- `with_logging` times a request with std/io's `Clock` (`now` and
+  `elapsed_ns`) instead of calling `System.nanoTime` through `use java`. The
+  reading is the same monotonic clock, so the logged milliseconds do not
+  change; the middleware module no longer binds a Java class. The clock
+  handler is installed inside the handler `with_logging` returns, so
+  `Handler` keeps its `!io` row and no application installs anything. A
+  patch: no signature or log line changed. Needs a toolchain whose std/io
+  has `Clock`.
+
 ## 6.2.0 (2026-10-05)
 
 - `safe_rel(segs)` turns captured segments into a relative file path, or a
