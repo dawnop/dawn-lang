@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 0.3.0 (2026-10-05)
+
+`render.to_html` and `render.to_document` take `at: Loc = caller()`, and a
+refused tree (a bad tag or prop name, a `script` or `style` holding its own
+end tag) panics with the caller's location instead of a line inside
+`render.dawn`.
+
+Breaking only where either function is used as a value: a function value
+drops defaults, so its type gains a `Loc` parameter. Every direct call
+compiles unchanged. In 0.x the minor is the compatibility class, hence 0.3.0.
+
 ## 0.2.1 (2026-10-03)
 
 Doc comments and published examples. No behaviour change.

@@ -42,6 +42,13 @@
 # production: whitespace, `" ' > / =` and control characters, plus the empty
 # name. A bad name is a bug in the view, not data, so it panics.
 #
+# Both refusals report the line that called `to_html` or `to_document`, not a
+# line in this file: the bad tree is the caller's input, and the line that
+# wrote the `panic` here would be the same for every view. So both take
+# `at: Loc = caller()` and every private function below hands it on. Nothing
+# else here panics, so there is no internal invariant left reporting its own
+# line.
+#
 # Void elements are the 13 in HTML 13.1.2, written `<br>` and not `<br/>`
 # (the slash is "unnecessary and has no effect"). A void element given kids
 # prints none of them: the tree is a legal value and the tag is what is wrong,
@@ -54,34 +61,37 @@
 use std/list
 use std/str
 use std/char
+use std/loc
 use node.{Node, Text, Elem, with_key}
 use dsl.{text, el, div, button, input, foreign, on_click, on_value}
 
 ## `w` as HTML: no whitespace added, no doctype, the same bytes every time.
 ## Listeners and keys do not appear; see the file head for the other rules.
-pub fn to_html[M](w: Node[M]) -> String = node_html(w, "")
+## A tree it refuses (a bad name, a raw-text element holding its own end tag)
+## panics with the caller's location, or `at` when one is handed on.
+pub fn to_html[M](w: Node[M], at: Loc = caller()) -> String = node_html(w, "", at)
 
 ## `w` as a whole document: `<!DOCTYPE html>` and then `to_html(w)`. Nothing is
 ## wrapped around the tree. A root that is not `html` is still a document, the
 ## parser supplies `html`, `head` and `body` itself, and a page that wants them
 ## spelled says `el("html", kids: [..])`.
-pub fn to_document[M](w: Node[M]) -> String = "<!DOCTYPE html>" ++ to_html(w)
+pub fn to_document[M](w: Node[M], at: Loc = caller()) -> String = "<!DOCTYPE html>" ++ to_html(w, at: at)
 
 # `parent` is the enclosing element's lower-cased tag, which is all a text node
 # needs to know: whether it sits in raw text.
-fn node_html[M](w: Node[M], parent: String) -> String =
+fn node_html[M](w: Node[M], parent: String, at: Loc) -> String =
   match w {
-    Text(s) -> if parent == "script" || parent == "style" { raw_text(s, parent) } else { esc_text(s) }
-    Elem(tag, props, _, kids, _) -> elem_html(tag, props, kids)
+    Text(s) -> if parent == "script" || parent == "style" { raw_text(s, parent, at) } else { esc_text(s) }
+    Elem(tag, props, _, kids, _) -> elem_html(tag, props, kids, at)
   }
 
-fn elem_html[M](tag: String, props: List[(String, String)], kids: List[Node[M]]) -> String = {
-  check_name("tag", tag)
+fn elem_html[M](tag: String, props: List[(String, String)], kids: List[Node[M]], at: Loc) -> String = {
+  check_name("tag", tag, at)
   let low = str.to_lower(tag)
   let settled = settle(props)
   var attrs = ""
   for kv in settled {
-    attrs = attrs ++ attr_html(low, kv)
+    attrs = attrs ++ attr_html(low, kv, at)
   }
   let open = "<" ++ tag ++ attrs ++ ">"
   if is_void(low) {
@@ -92,7 +102,7 @@ fn elem_html[M](tag: String, props: List[(String, String)], kids: List[Node[M]])
       Some(v) -> { body = esc_text(v) }
       None -> {
         for k in kids {
-          body = body ++ node_html(k, low)
+          body = body ++ node_html(k, low, at)
         }
       }
     }
@@ -102,9 +112,9 @@ fn elem_html[M](tag: String, props: List[(String, String)], kids: List[Node[M]])
 
 # One prop as the bytes it contributes to the start tag, the leading space
 # included, or nothing for the props the file head says print nothing.
-fn attr_html(tag: String, kv: (String, String)) -> String = {
+fn attr_html(tag: String, kv: (String, String), at: Loc) -> String = {
   let (name, value) = kv
-  check_name("prop", name)
+  check_name("prop", name, at)
   if name == "checked" && is_control(tag) {
     if value == "" || value == "false" { "" } else { " checked" }
   } else if name == "value" && tag == "textarea" {
@@ -170,16 +180,16 @@ fn esc_attr(s: String) -> String = {
   str.replace(t, "\"", "&quot;")
 }
 
-fn raw_text(s: String, tag: String) -> String =
+fn raw_text(s: String, tag: String, at: Loc) -> String =
   if str.contains(str.to_lower(s), "</" ++ tag) {
-    panic("tea_dom/render: a <" ++ tag ++ "> holds text containing its own end tag")
+    panic("tea_dom/render: a <" ++ tag ++ "> holds text containing its own end tag", at: at)
   } else {
     s
   }
 
-fn check_name(what: String, name: String) -> Unit =
+fn check_name(what: String, name: String, at: Loc) -> Unit =
   if name == "" || list.any(code_points(name), bad_name_char) {
-    panic("tea_dom/render: not a valid " ++ what ++ " name: \"" ++ name ++ "\"")
+    panic("tea_dom/render: not a valid " ++ what ++ " name: \"" ++ name ++ "\"", at: at)
   } else {
     ()
   }
@@ -307,7 +317,7 @@ test "script and style hold raw text, and refuse their own end tag" {
   match catch_panic(() => to_html(bad)) {
     Ok(_) -> { assert false }
     Err(e) -> {
-      # the message ends with where the panic is written (spec 8.2)
+      # the message ends with the caller's site, checked in the test below
       assert str.starts_with(e.message,
         "tea_dom/render: a <script> holds text containing its own end tag at ")
     }
@@ -338,6 +348,40 @@ test "a name that would break the markup is refused" {
   let custom: Node[ProbeMsg] = el("x-y", [("data-a_b", "1"), ("aria-label", "z")])
   assert to_html(custom) == "<x-y data-a_b=\"1\" aria-label=\"z\"></x-y>"
 }
+
+test "a refused tree reports the line that called to_html" {
+  let bad: Node[ProbeMsg] = el("p", [("on click", "x")])
+  let site = loc.here()
+  let got = catch_panic(() => to_html(bad))
+  match got {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      let want = " at ${loc.path(site)}:${loc.line(site) + 1}:${CALL_COL}"
+      assert str.ends_with(e.message, want)
+    }
+  }
+}
+
+test "to_document reports its caller too, and a forwarded at wins" {
+  let bad: Node[ProbeMsg] = el("style", kids: [text("</style>")])
+  let site = loc.here()
+  let got = catch_panic(() => to_document(bad))
+  match got {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      let want = " at ${loc.path(site)}:${loc.line(site) + 1}:${CALL_COL}"
+      assert str.ends_with(e.message, want)
+    }
+  }
+  match catch_panic(() => to_html(bad, at: site)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.ends_with(e.message, " at ${site}") }
+  }
+}
+
+# The column of `to_html` / `to_document` in `catch_panic(() => to_html(bad))`
+# written after `  let got = `, as the tests above lay it out.
+const CALL_COL: Int = 31
 
 # The counter example's view, restated so this package does not depend on an
 # example: the frame `view(init())` prints is the bytes below.
