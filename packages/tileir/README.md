@@ -41,7 +41,10 @@ The full public surface is what `./bin/dawn doc packages/tileir` prints.
 - `In(d, cells)` is read only; a write into it is refused while recording.
   `In(d, Whole)` is an input read anywhere (a gather's table, a pointer read).
 - `Out(d, cells)` is written one cell per block, and the `Out` cells are the
-  launch grid: dimension `k` of an `Out` follows grid axis `k`.
+  launch grid: dimension `j` of an `Out` follows grid axis `along[j]`, each
+  axis at most once (the identity unless `along` says otherwise), and an
+  axis no dimension follows has one block. A batched product keeps its
+  batch on axis 2 with `cells([B, M, N], [1, T, T], along: [2, 0, 1])`.
 - `Shared(d)` is the escape hatch: atomics, scatters, a block that writes two
   regions, a write through pointers. `grep Shared(` finds every one.
 - `cells(extent, tile, pad: PadZero, along: ..)` cuts the tensor. An extent
