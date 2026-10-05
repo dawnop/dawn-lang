@@ -1,5 +1,7 @@
 # GPU 页按 tileir 0.8.0 重做：页面讲新 API（设计）
 
+> 状态：**current**。2026-10-05 落地于 `site/src/gen/gpu.dawn` 的「写一个 kernel」一节（id `api`）；卡 D 按协调者 10-05 的意见由 `batched_matmul` 换成 `histogram`。
+
 任务单 `gpu-page-newapi-20261005.md`（agent-handoff）。基点是 cuTile 批 PR-3 的分支（`feat/tile-batch-migrate-r1`，
 `74ea0cf3`）：`tileir` 0.8.0，`kernels.dawn` 全迁，flash_attn 调用图已重录。PR-3 只改了页面两句文案，页面仍然只讲
 「flash_attn 的逐调用对照 + 覆盖率 + 三道门 + 台账」，**没有一处告诉读者 0.8.0 的 kernel 怎么写**。本文定这一刀
@@ -23,7 +25,7 @@ golden、过 `tileiras`、大多在 sm_86 台账上，比 `gpu_fake`（只断言
 | 3 | rank-0 tile 与隐式广播：常量与对 rank-1 的归约是 0 秩，遇到更宽的操作数自己加宽，别处不加宽 | C3′ | 同一段 `softmax`：`sub(t, reduce_max(t))`、`div(ex, reduce_sum(ex))` | 第 2、3 点共用一段，不另找 |
 | 4 | 写只经 `Out`：`store_cell` / `store_sub`；累加器从 `zeros(o)` / `fill(o, v)` 起步；`FREE_AXIS` 让 kernel 自己挑格子（`load_at`） | D-7、D-4 | `matmul`（`d_range` + `zeros(c)` + `load_at` + `store_cell`）+ 它的派发臂（`along: [0, FREE_AXIS]`） | 教科书形状的 GEMM，标记即几何 |
 | 5 | 保维归约：`reduce_max(s, keepdims: true)` 得 `[BQ, 1]`，再显式 `broadcast` 回 `[BQ, BK]` | C4、修订二补注 | **不另切**：就是下面调用图里 `flash_attn` 的 `m_new` 与 `l_new` 两行；本节给两个「在图里看」的链接，点击即选中图里那次调用 | 补注明说 flash_attn 是这项能力的验收样本；重复贴一遍等于两份同一代码 |
-| 6 | `Shared` 何时需要：原子、数据决定的 scatter、一块写两区域、维序对不上网格等；它是显式的、可 grep 的逃生口 | D-7 | `batched_matmul` 的派发臂（`In(F64, Whole), In(F64, Whole), Shared(F64)`）与它函数头上那段说明「批在网格第三轴、是矩阵第一维」的注释 | 55 个 `Shared` 里最常见的一类（秩墙 / 维序墙）的代表，注释本身就是理由；不选 histogram（原子那类读者不用解释） |
+| 6 | `Shared` 何时需要：原子、数据决定的 scatter、一块写两区域；它是显式的、可 grep 的逃生口 | D-7 | `histogram`（`atomic_add` 带 mask）+ 它的派发臂（`In(I32, cells(..)), Shared(I32)`） | 原子是「无论形状操作怎么扩都留在 `Shared`」的一类。原稿选的 `batched_matmul` 是秩墙，协调者 10-05 已采纳 0.8.1 公开 `reshape`，R1 会把它迁回 `Out`，卡片会随下一次合并过期（`research-tile-reshape-report-20261005.md` §4 的「留」行） |
 | 7 | `hint_occupancy`：sm_86 上 128 级 f16 张量核 kernel 一律 `hints: [for_arch("sm_86", [hint_occupancy(2)])]` | §6.26 占用率裁决 | **无 kernel 可切**：`kernels.dawn` 没有 128 级 f16 kernel（`matmul_f16` 是 32 级，注释里写明不要这个 hint）。页上只写一句规则，链到 README「Occupancy」一节（站点的 `packages/tileir.html` 已整篇渲染 README） | 见下 |
 
 第 7 点不新增示例 kernel 的理由：新增一个 128×128×32 f16 matmul 带 hint，代价是 `kernels.dawn` 进 TILE_PATHS（全量
@@ -33,7 +35,7 @@ sm_90 / sm_100 台账还要所有者重录；而门禁能证明的只是「`tile
 
 点 1 的「`run_of` 一并切出」：`cut_fn` 只切 `fn name(` 开头的函数，`run_of` 正是这种形状，直接复用。派发臂需要一个
 新切法（`  "vadd" -> {` 到同缩进的 `  }`），写成 `gpu.cut_arm`，测试持有「臂里 trace 的函数名就是卡片的 kernel 名」。
-`batched_matmul` 的注释切法：函数前紧邻的 `#` 块，到上一个空行为止，同样写成纯函数加测试。
+`vadd`、`run_of`、`histogram` 这类不带花括号的定义由 `gpu.cut_def` 切（到最后一行缩进体为止），带花括号的到独占一行的 `}`。
 
 ## 二、页面结构
 
@@ -48,7 +50,7 @@ kernel 写成什么。顺序：
    - 卡 A「标记即地址」：`vadd` + 派发臂 + `run_of`（点 1）；
    - 卡 B「形状从操作数来」：`softmax`（点 2、3）；
    - 卡 C「只经 Out 写」：`matmul` + 派发臂（点 4）；
-   - 卡 D「逃生口 Shared」：`batched_matmul` 的注释 + 派发臂（点 6）。
+   - 卡 D「逃生口 Shared」：`histogram` + 派发臂（点 6）。
    卡片下一行小字两条：点 5 的「在图里看 `reduce_max(…, keepdims: true)` / `broadcast`」（锚点 `#kernel`，gpu.js 在
    时同时选中该调用；无脚本时只是跳到图），点 7 的占用率规则一句 + README 链接；再一条「完整公开面与迁移表」链到
    `packages/tileir.html` 与 `CHANGELOG.md`。
