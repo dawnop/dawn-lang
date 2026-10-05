@@ -31,6 +31,10 @@ What the lock pins and what it does not:
     so the unpacking runs in that interpreter with a pinned zstandard wheel
     (lock key wheels) on its path: the same code on every machine, and no
     host tool deciding what gets unpacked.
+    A second conda toolchain is the clang 18.1.3 CI pins as CC (see
+    prefix.job_env, DAWN_PINNED_CC); its MANIFEST rows go under the key its
+    lock entry names (manifest_key), for the reason the gcc rows go under
+    conda_items.
 
 Why the compiler is in the pack at all: it was the one tool the steps took
 from /usr/bin, so an external run's bundle said `cc` = gcc 11.4 on the
@@ -339,8 +343,11 @@ def conda_unpack(args):
     keeps them in its package cache), and refuses a package with any other
     file or missing one, a file whose bytes are not the ones it records,
     a file two packages both ship, and a binary-mode placeholder (conda pads
-    those with NULs inside compiled code; none of the pinned packages has one,
-    and this module does not pretend to do it).
+    those with NULs inside compiled code, and this module does not pretend to
+    do it) unless the lock entry lists that file under `unrelocated`: such a
+    file is unpacked as shipped and keeps the build machine's path, which is
+    harmless only where nothing the gates run reads that path (the lock
+    entry says why for each).
     """
     import io
     import tarfile
@@ -390,6 +397,8 @@ def conda_unpack(args):
                 raise SystemExit(f"inputs: {label}: {rel} is not the file its paths.json records")
             if "prefix_placeholder" in p:
                 if p.get("file_mode") != "text":
+                    if rel in args.leave:
+                        continue
                     raise SystemExit(f"inputs: {label}: {rel} has a {p.get('file_mode')} "
                                      f"placeholder, which this unpacker does not relocate")
                 relocate[rel] = p["prefix_placeholder"]
@@ -418,9 +427,10 @@ def extract_conda(entry, prefix, log):
     archives = [str(prefix / "inputs" / "downloads" / archive_name(package_item(**p)))
                 for p in entry["packages"]]
     t0 = time.monotonic()
+    leave = [arg for rel in entry.get("unrelocated", []) for arg in ("--leave", rel)]
     done = subprocess.run([str(prefix_python(prefix)), "-B", str(Path(__file__).resolve()),
                            "conda-unpack", "--wheel-dir", str(wheel_dir), "--into", str(tmp)]
-                          + archives, capture_output=True, text=True,
+                          + leave + archives, capture_output=True, text=True,
                           env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
     shutil.rmtree(wheel_dir, ignore_errors=True)
     if done.returncode != 0:
@@ -466,22 +476,28 @@ def build(args):
     # there by the lock they carry, and hash every toolchain without
     # relocation, so a row of these in `items` would turn them red. The local
     # and cluster prefixes are verified by several branches' tools at once.
+    # The pinned clang's rows go under a key of their own (the entry's
+    # manifest_key) for the same reason: a verifier from before it indexes
+    # every download row of conda_items by its own lock and would fail on a
+    # package it has never heard of.
     lock = prefix_mod.load_lock()
-    conda_items = []
+    extra = {"conda_items": []}
+    conda_items = extra["conda_items"]
     for item in lock.get("wheels", []):
         archive, seconds = fetch(item, prefix, log)
         conda_items.append(download_row(item, archive, seconds, prefix))
     for entry in lock.get("conda_toolchains", []):
+        rows = extra.setdefault(entry.get("manifest_key", "conda_items"), [])
         packages = [package_item(**p) for p in entry["packages"]]
         for item in packages:
             archive, seconds = fetch(item, prefix, log)
-            conda_items.append(download_row(item, archive, seconds, prefix))
+            rows.append(download_row(item, archive, seconds, prefix))
         # always unpacked afresh: the relocated files are only known from the
         # packages, and unpacking takes seconds
         relocated = extract_conda(entry, prefix, log)
         target = prefix / "toolchain" / entry["dir"]
         tree, size, files = tree_digest(target, relocated)
-        conda_items.append({"name": entry["name"], "version": entry["version"], "kind": "toolchain",
+        rows.append({"name": entry["name"], "version": entry["version"], "kind": "toolchain",
                       "path": target.relative_to(prefix).as_posix(), "bytes": size,
                       "files": files, "tree_sha256": tree,
                       "source": f"{len(packages)} conda packages",
@@ -529,15 +545,25 @@ def build(args):
         items.append(reuse_npm_cache(prefix, entry, previous, log)
                      or build_npm_cache(prefix, repo, entry, log))
 
-    manifest = {"schema": 1, "items": items, "conda_items": conda_items}
+    manifest = {"schema": 1, "items": items, **extra}
     # written whole and renamed: other runs may be reading it
     tmp_manifest = manifest_path.with_name(manifest_path.name + ".tmp")
     tmp_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
     tmp_manifest.rename(manifest_path)
     shutil.copy2(prefix_mod.LOCK_FILE, prefix / "inputs" / "inputs.lock.json")
-    for row in items + conda_items:
+    for row in items + [row for rows in extra.values() for row in rows]:
         print(f"  {row['kind']:10} {row['name']:9} {row['version']:20} {mib(row['bytes']):>11}  {row['path']}")
     return verify(argparse.Namespace(prefix=str(prefix), repo=str(repo)))
+
+
+def conda_rows(manifest):
+    """MANIFEST's rows outside `items`: conda_items and each manifest_key the
+    lock's conda toolchains name (a key the MANIFEST lacks gives no rows, and
+    verify then reports that toolchain missing)."""
+    keys = ["conda_items"] + [entry["manifest_key"] for entry in
+                              prefix_mod.load_lock().get("conda_toolchains", [])
+                              if entry.get("manifest_key", "conda_items") != "conda_items"]
+    return [row for key in dict.fromkeys(keys) for row in manifest.get(key, [])]
 
 
 def download_row(item, archive, seconds, prefix):
@@ -668,8 +694,7 @@ def install(args):
     for item in lock.get("wheels", []):
         if sha256_file(prefix / "inputs" / "downloads" / archive_name(item)) != item["sha256"]:
             raise SystemExit(f"inputs: {archive_name(item)} does not match the lock")
-    rows = {row["name"]: row for row in manifest.get("conda_items", [])
-            if row["kind"] == "toolchain"}
+    rows = {row["name"]: row for row in conda_rows(manifest) if row["kind"] == "toolchain"}
     for entry in lock.get("conda_toolchains", []):
         for item in (package_item(**p) for p in entry["packages"]):
             if sha256_file(prefix / "inputs" / "downloads" / archive_name(item)) != item["sha256"]:
@@ -694,7 +719,7 @@ def verify(args):
     npm_lock = {item["name"]: item for item in prefix_mod.load_lock().get("npm_caches", [])}
     bad = 0
     t0 = time.monotonic()
-    for row in manifest["items"] + manifest.get("conda_items", []):
+    for row in manifest["items"] + conda_rows(manifest):
         path = prefix / row["path"]
         problems = []
         if not path.exists():
@@ -738,10 +763,10 @@ def verify(args):
         print(f"{status} {row['kind']:10} {row['name']:9} {row['version']:20} "
               f"{mib(row['bytes']):>11}  {row['path']}{'  ' + '; '.join(problems) if problems else ''}")
         bad += bool(problems)
-    missing = set(lock) - {r["name"] for r in manifest["items"] + manifest.get("conda_items", [])
+    missing = set(lock) - {r["name"] for r in manifest["items"] + conda_rows(manifest)
                            if r["kind"] == "download"}
     conda_lock = {entry["name"] for entry in prefix_mod.load_lock().get("conda_toolchains", [])}
-    for name in sorted(conda_lock - {r["name"] for r in manifest.get("conda_items", [])
+    for name in sorted(conda_lock - {r["name"] for r in conda_rows(manifest)
                                      if r["kind"] == "toolchain"}):
         print(f"FAIL toolchain  {name} in inputs.lock.json but not in MANIFEST")
         bad += 1
@@ -788,6 +813,8 @@ def main():
     p = sub.add_parser("conda-unpack")
     p.add_argument("--wheel-dir", required=True)
     p.add_argument("--into", required=True)
+    p.add_argument("--leave", action="append", default=[],
+                   help="a file whose binary placeholder stays as shipped")
     p.add_argument("archives", nargs="+")
     args = parser.parse_args()
     return {"build": build, "install": install, "verify": verify,

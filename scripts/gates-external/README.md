@@ -113,7 +113,7 @@ It does not decide what runs (`gatesplan.py`) or what counts as complete
 
 `--prefix DIR` runs every job inside one directory. Its layout is in
 `prefix.py`'s docstring: `toolchain/` (GraalVM CE 21.0.2, node 20, wasi-sdk 34,
-python 3.12.3, and the C compiler, gcc 13.3.0), `inputs/` (the archives, the seed jar and std, a coursier
+python 3.12.3, the C compiler, gcc 13.3.0, and CI's pinned clang 18.1.3), `inputs/` (the archives, the seed jar and std, a coursier
 cache, `MANIFEST.json`), `jobs/<sha>/`, `home/`, `tmp/`, `cache/`,
 `out/<sha>/`. No location is written into the code.
 
@@ -165,6 +165,28 @@ It is recorded in `toolchain.cc` (`cc (conda-forge gcc 13.3.0-2) 13.3.0`),
 like python, node and java, and has no substitution row: that table is
 derived from the commit, and a new unconditional row would invalidate
 bundles already published.
+
+Since CI pins `CC` to the runner image's clang 18.1.3 (`scripts/pinned-cc.sh`,
+the first step of every gate job that compiles C), the pack also holds clang
+18.1.3: conda-forge's build of that release, as a second conda toolchain
+(`clang-18.1.3/`, nineteen packages, seven of them the gcc toolchain's
+sysroot, binutils and runtime archives, so 110 MiB of new downloads). It is
+not put on `PATH`, whose bare `cc` stays gcc as on the runner, and because its
+`bin/` also holds icu, xz and zstd tools. The job environment names it in
+`DAWN_PINNED_CC`; `pinned-cc.sh` takes that as the compiler where a runner
+would take `clang-18` from `PATH`, holds it to the same version, and writes
+`CC` to `GITHUB_ENV`, which the per-step files carry to the job's later steps.
+`GITHUB_ACTIONS` is still not set. `toolchain.cc` is then the first line of
+`$DAWN_PINNED_CC --version` with the feedstock URL's scheme and directories
+removed (`clang version 18.1.3 (clangdev-feedstock 9d0fad6b...)`), since the
+bundle's leak filter refuses a slash. Five files of libxml2 and xz carry a
+binary-mode placeholder, which the unpacker does not relocate; the lock lists
+them under `unrelocated` and they keep the build machine's path, which only
+libxml2's default catalog lookup reads and nothing a gate runs uses. The
+clang rows of MANIFEST sit under their own key, `pinned_cc_items` (the lock
+entry's `manifest_key`), for the same reason the gcc rows sit under
+`conda_items`: a verifier from before them indexes every download row of the
+keys it reads by its own lock.
 
 `inputs.py` trusts only the digests in `inputs.lock.json`. The seed jar and std
 are checked against `scripts/seed-checksums.txt` and `seed-std-checksums.txt`,
