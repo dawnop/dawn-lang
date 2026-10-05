@@ -172,6 +172,21 @@ class WebSocket:
         self.stream.close()
 
 
+def recv_reply(ws, label):
+    """The next JSON message, or an assertion named `label` if the gateway
+    closed the session instead of answering."""
+    while True:
+        fin, opcode, payload = ws.recv_frame()
+        if opcode == 9:
+            ws.send_frame(10, payload)
+            continue
+        if opcode == 8:
+            code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else None
+            raise AssertionError((label, "gateway closed the session", code, payload[2:]))
+        assert fin and opcode == 1, (fin, opcode, payload)
+        return json.loads(payload)
+
+
 def rpc(request_id, method, params):
     return {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
 
@@ -319,6 +334,10 @@ def diagnostics_params_contract():
     semantic_tokens_negative_controls()
     ok("semantic tokens: the child's legend, range only, cut to the message cap")
 
+    unknown_method_contract(load_gateway())
+    unknown_method_negative_controls()
+    ok("methods the gateway does not offer: notifications dropped, requests -32601")
+
 
 def load_gateway(source=None):
     """The gateway as a module, from its file or from a mutated copy of it."""
@@ -334,21 +353,127 @@ def load_gateway(source=None):
     return module
 
 
+def open_protocol(gateway, child_capabilities, text, message_bytes=262_144):
+    """A ClientProtocol walked through initialize and didOpen, without a
+    socket; returns it with the capabilities the browser was handed."""
+    protocol = gateway.ClientProtocol(source_bytes=65_536, message_bytes=message_bytes)
+    protocol.from_client(json.dumps(rpc(1, "initialize", {})).encode())
+    reply = json.loads(protocol.from_child(json.dumps({
+        "jsonrpc": "2.0", "id": 1, "result": {"capabilities": child_capabilities},
+    }).encode()))
+    protocol.from_client(json.dumps(note("initialized", {})).encode())
+    protocol.from_client(json.dumps(note("textDocument/didOpen", {
+        "textDocument": {"uri": URI, "version": 1, "text": text},
+    })).encode())
+    return protocol, reply["result"]["capabilities"]
+
+
+def route_unknown(gateway, protocol, message, label):
+    """from_client for a method the gateway does not offer; a close is the
+    failure this contract exists to catch, so it becomes `label`."""
+    try:
+        return protocol.from_client(json.dumps(message).encode())
+    except gateway.GatewayError as error:
+        raise AssertionError((label, message.get("method"), error.code, error.reason)) from error
+
+
+def assert_method_not_found(gateway, protocol, message):
+    pending = dict(protocol.pending)
+    reply = route_unknown(gateway, protocol, message, "GATEWAY_CLOSED_ON_UNKNOWN_REQUEST")
+    assert isinstance(reply, gateway.ClientReply), (
+        "GATEWAY_FORWARDED_UNKNOWN_REQUEST", message.get("method"), reply,
+    )
+    assert json.loads(reply.body) == {
+        "jsonrpc": "2.0",
+        "id": message["id"],
+        "error": {"code": -32601, "message": "Method not found"},
+    }, ("GATEWAY_UNKNOWN_REQUEST_NOT_METHOD_NOT_FOUND", message.get("method"), reply.body)
+    # nothing is owed by the child, so nothing waits for it
+    assert protocol.pending == pending, ("GATEWAY_UNKNOWN_REQUEST_LEFT_PENDING", protocol.pending)
+
+
+def unknown_method_contract(gateway):
+    """Methods the gateway does not offer (LSP 3.17 "$ Notifications and
+    Requests", JSON-RPC 2.0 §5.1), in every lifecycle state: notifications
+    are dropped, requests are answered -32601 under their id, and neither
+    reaches the child nor ends the session."""
+    notifications = (
+        ("$/cancelRequest", {"id": 3}),
+        ("$/setTrace", {"value": "off"}),
+        ("$/progress", {"token": "t", "value": {}}),
+        ("workspace/didChangeConfiguration", {"settings": {}}),
+        ("textDocument/didSave", {"textDocument": {"uri": URI}}),
+    )
+    requests = (
+        (7, "workspace/symbol", {"query": ""}),
+        ("unknown-8", "$/unknownRequest", {}),
+        (9, "textDocument/references", {}),
+    )
+    fresh = gateway.ClientProtocol(source_bytes=65_536)
+    opened, _ = open_protocol(gateway, {}, "x")
+    for protocol in (fresh, opened):
+        state = protocol.state
+        for method, params in notifications:
+            dropped = route_unknown(
+                gateway, protocol, note(method, params), "GATEWAY_CLOSED_ON_UNKNOWN_NOTIFICATION",
+            )
+            assert dropped is None, ("GATEWAY_FORWARDED_UNKNOWN_NOTIFICATION", method, dropped)
+        for request_id, method, params in requests:
+            assert_method_not_found(gateway, protocol, rpc(request_id, method, params))
+        assert protocol.state == state, ("GATEWAY_UNKNOWN_METHOD_MOVED_LIFECYCLE", protocol.state)
+
+    # the session still answers what it offers, under ids an unknown request
+    # used, since nothing was left pending for them
+    body = opened.from_client(json.dumps(rpc(7, "textDocument/hover", {
+        "textDocument": {"uri": URI}, "position": {"line": 0, "character": 0},
+    })).encode())
+    assert json.loads(body)["method"] == "textDocument/hover", body
+
+    # an unknown request still needs an id it may answer under: an id that is
+    # not a bounded string or integer, or one already pending, is refused
+    for request_id in (None, 1.5, True, "gateway:x", 7):
+        try:
+            opened.from_client(json.dumps(rpc(request_id, "workspace/symbol", {})).encode())
+        except gateway.GatewayError as error:
+            assert error.code == 1008, error.code
+        else:
+            raise AssertionError(("GATEWAY_ANSWERED_UNUSABLE_ID", request_id))
+
+
+def unknown_method_negative_controls():
+    """Each mutant breaks one rule above, and the contract has to notice."""
+    source = read_text(GATEWAY)
+    mutants = {
+        # the old policy: anything unlisted closes the session
+        "close on unknown notification": mutate_once(
+            source,
+            '        if "id" not in message:\n            return None\n',
+            '        if "id" not in message:\n'
+            '            raise GatewayError(1008, "method is not allowed")\n',
+        ),
+        # an error the client cannot match to its request
+        "error without its id": mutate_once(
+            source,
+            '{"jsonrpc": "2.0", "id": request_id, "error": METHOD_NOT_FOUND}',
+            '{"jsonrpc": "2.0", "id": None, "error": METHOD_NOT_FOUND}',
+        ),
+        # forwarded to the child instead of answered by the gateway
+        "unknown request forwarded": mutate_once(
+            source,
+            '        return ClientReply(\n',
+            '        return compact_json(message)\n        return ClientReply(\n',
+        ),
+    }
+    for label, mutant in mutants.items():
+        expect_contract_red(label, lambda: unknown_method_contract(load_gateway(mutant)))
+
+
 def semantic_tokens_contract(gateway):
     """The semantic tokens surface (docs/lsp-references-design.md §T2), driven
     through ClientProtocol without a socket so each rule has its own case."""
 
     def opened(child_capabilities, text, message_bytes=262_144):
-        protocol = gateway.ClientProtocol(source_bytes=65_536, message_bytes=message_bytes)
-        protocol.from_client(json.dumps(rpc(1, "initialize", {})).encode())
-        reply = json.loads(protocol.from_child(json.dumps({
-            "jsonrpc": "2.0", "id": 1, "result": {"capabilities": child_capabilities},
-        }).encode()))
-        protocol.from_client(json.dumps(note("initialized", {})).encode())
-        protocol.from_client(json.dumps(note("textDocument/didOpen", {
-            "textDocument": {"uri": URI, "version": 1, "text": text},
-        })).encode())
-        return protocol, reply["result"]["capabilities"]
+        return open_protocol(gateway, child_capabilities, text, message_bytes)
 
     def ranged(protocol, request_id, start, end):
         body = protocol.from_client(json.dumps(rpc(request_id, "textDocument/semanticTokens/range", {
@@ -365,7 +490,8 @@ def semantic_tokens_contract(gateway):
     }, ("SEMANTIC_LEGEND_NOT_THE_CHILDS", capabilities)
 
     # a child with no legend, or a legend that is not short names, offers no
-    # tokens, and a request for them is refused like any unlisted method
+    # tokens, and a request for them is answered like any method the gateway
+    # does not offer: -32601 under its id, nothing for the child
     for child in (
         {},
         {"semanticTokensProvider": {"legend": FAKE_SEMANTIC_LEGEND, "full": True}},
@@ -376,23 +502,16 @@ def semantic_tokens_contract(gateway):
     ):
         protocol, capabilities = opened(child, "x")
         assert "semanticTokensProvider" not in capabilities, (child, capabilities)
-        try:
-            ranged(protocol, 2, (0, 0), (1, 0))
-        except gateway.GatewayError as error:
-            assert error.code == 1008, error.code
-        else:
-            raise AssertionError(f"semantic tokens without a legend crossed: {child!r}")
+        assert_method_not_found(gateway, protocol, rpc(2, "textDocument/semanticTokens/range", {
+            "textDocument": {"uri": URI},
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+        }))
 
     # `full` is never forwarded, even when the child offers it
     protocol, _ = opened({"semanticTokensProvider": provider}, "x")
-    try:
-        protocol.from_client(json.dumps(rpc(2, "textDocument/semanticTokens/full", {
-            "textDocument": {"uri": URI},
-        })).encode())
-    except gateway.GatewayError as error:
-        assert error.code == 1008, error.code
-    else:
-        raise AssertionError("semantic tokens full crossed the gateway")
+    assert_method_not_found(gateway, protocol, rpc(2, "textDocument/semanticTokens/full", {
+        "textDocument": {"uri": URI},
+    }))
 
     # the range is cut where it would cover more source than the reply may
     # answer for; the cut counts UTF-8 bytes and lands on a UTF-16 column
@@ -1310,24 +1429,50 @@ def main():
                 "textDocument": {"uri": URI, "version": 1, "text": "()"}
             }))
             assert unlisted.recv_json()["method"] == "textDocument/publishDiagnostics"
-            unlisted.send_json(rpc(13, "workspace/symbol", {}))
-            unlisted.expect_close(1008)
-            stream.close()
-
-            # the child offers semantic tokens `full`; the gateway does not
-            stream, response = upgrade_when_available(port)
-            assert response.startswith(b"HTTP/1.1 101 "), response
-            full_tokens = WebSocket(stream)
-            initialize(full_tokens, 16)
-            full_tokens.send_json(note("textDocument/didOpen", {
-                "textDocument": {"uri": URI, "version": 1, "text": "()"}
-            }))
-            assert full_tokens.recv_json()["method"] == "textDocument/publishDiagnostics"
-            full_tokens.send_json(rpc(17, "textDocument/semanticTokens/full", {
-                "textDocument": {"uri": URI},
-            }))
-            full_tokens.expect_close(1008)
-            stream.close()
+            # LSP 3.17 "$ Notifications and Requests": a notification the
+            # gateway does not offer is dropped, `$/` ones included, and the
+            # session carries on. Every generic LSP client sends
+            # `$/cancelRequest` when a request goes stale.
+            for method, params in (
+                ("$/cancelRequest", {"id": 13}),
+                ("$/setTrace", {"value": "off"}),
+                ("workspace/didChangeConfiguration", {"settings": {}}),
+            ):
+                unlisted.send_json(note(method, params))
+            unlisted.send_json(rpc(13, "textDocument/completion", position_params()))
+            answered = recv_reply(unlisted, "GATEWAY_CLOSED_ON_UNKNOWN_NOTIFICATION")
+            assert answered.get("id") == 13 and answered["result"][0]["label"] == "println", (
+                "GATEWAY_CLOSED_ON_UNKNOWN_NOTIFICATION", answered,
+            )
+            # JSON-RPC 2.0 §5.1: a request the gateway does not offer is
+            # answered with -32601 under its own id, and the session carries
+            # on. The child offers semantic tokens `full`; the gateway does
+            # not, so it is one of these.
+            for request_id, method, params in (
+                (14, "workspace/symbol", {"query": ""}),
+                ("unknown-15", "$/unknownRequest", {}),
+                (16, "textDocument/semanticTokens/full", {"textDocument": {"uri": URI}}),
+            ):
+                unlisted.send_json(rpc(request_id, method, params))
+                refused = recv_reply(unlisted, "GATEWAY_UNKNOWN_REQUEST_NOT_METHOD_NOT_FOUND")
+                assert refused == {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }, ("GATEWAY_UNKNOWN_REQUEST_NOT_METHOD_NOT_FOUND", method, refused)
+            unlisted.send_json(rpc(17, "textDocument/hover", position_params()))
+            answered = recv_reply(unlisted, "GATEWAY_UNKNOWN_REQUEST_ENDED_SESSION")
+            assert answered.get("id") == 17 and answered["result"]["contents"]["value"] == "Int", (
+                "GATEWAY_UNKNOWN_REQUEST_ENDED_SESSION", answered,
+            )
+            unlisted.close()
+            reached = {item.get("method") for item in read_audit(audit_path)}
+            for method in (
+                "$/cancelRequest", "$/setTrace", "workspace/didChangeConfiguration",
+                "workspace/symbol", "$/unknownRequest", "textDocument/semanticTokens/full",
+            ):
+                assert method not in reached, ("GATEWAY_FORWARDED_UNKNOWN_METHOD", method)
+            ok("unknown notifications are dropped and unknown requests answered -32601")
 
             # JSON `true` decodes to a Python bool, and bool is a subclass of
             # int, so only the explicit bool exclusion refuses it. Each of these
@@ -1361,7 +1506,7 @@ def main():
             }))
             bool_change.expect_close(1008)
             stream.close()
-            ok("file/bool-version/second documents and unlisted methods are rejected")
+            ok("file/bool-version/second documents are rejected")
 
             stream, response = upgrade_when_available(port)
             assert response.startswith(b"HTTP/1.1 101 "), response
@@ -1496,7 +1641,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("26 passed, 0 failed")
+    print("28 passed, 0 failed")
 
 
 if __name__ == "__main__":

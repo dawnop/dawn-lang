@@ -877,6 +877,32 @@ def compact_json(message: dict[str, Any]) -> bytes:
     return json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+# What the browser may call; anything else is a method the gateway does not
+# offer. `textDocument/semanticTokens/range` is offered only once the child
+# has handed over a legend, so it is added per session (offered_methods).
+CLIENT_METHODS = frozenset({
+    "initialize",
+    "initialized",
+    "textDocument/didOpen",
+    "textDocument/didChange",
+    "textDocument/completion",
+    "textDocument/hover",
+    "textDocument/definition",
+    "textDocument/inlayHint",
+    "completionItem/resolve",
+})
+# JSON-RPC 2.0 §5.1. The message is the specification's own wording and
+# never names the method: what the client sent is not echoed back.
+METHOD_NOT_FOUND = {"code": -32601, "message": "Method not found"}
+
+
+@dataclass(frozen=True)
+class ClientReply:
+    """A message the gateway answers itself; it never reaches the child."""
+
+    body: bytes
+
+
 class ClientProtocol:
     """Validate and narrow one browser's LSP view to one scratch buffer."""
 
@@ -898,6 +924,30 @@ class ClientProtocol:
             raise GatewayError(1008, "request id is already pending")
         return value
 
+    def offered_methods(self) -> frozenset[str]:
+        if self.semantic_legend is None:
+            return CLIENT_METHODS
+        return CLIENT_METHODS | {"textDocument/semanticTokens/range"}
+
+    def _not_offered(self, message: dict[str, Any]) -> ClientReply | None:
+        """A method outside the allowlist, answered the way the LSP
+        specification asks (3.17, "$ Notifications and Requests"): a
+        notification is dropped, `$/` ones included, and a request gets
+        MethodNotFound under its own id (JSON-RPC 2.0 §5.1). Neither reaches
+        the child, moves the lifecycle or ends the session. Generic LSP
+        clients send `$/cancelRequest` whenever a request goes stale, so a
+        close here would end every such session within seconds. The id is
+        still checked: an answer must go to an id the client can match, and
+        not to one a forwarded request is waiting on."""
+        if "id" not in message:
+            return None
+        request_id = self._request_id(message)
+        return ClientReply(
+            compact_json(
+                {"jsonrpc": "2.0", "id": request_id, "error": METHOD_NOT_FOUND}
+            )
+        )
+
     def _source(self, value: Any) -> str:
         if not isinstance(value, str):
             raise GatewayError(1008, "document text must be a string")
@@ -905,11 +955,15 @@ class ClientProtocol:
             raise GatewayError(1009, "Dawn source is too large")
         return value
 
-    def from_client(self, body: bytes) -> bytes:
+    def from_client(self, body: bytes) -> bytes | ClientReply | None:
+        """The narrowed body for the child; or a ClientReply the gateway
+        answers itself; or None for a notification it drops."""
         message = parse_json(body, client=True)
         method = message.get("method")
         if not isinstance(method, str):
             raise GatewayError(1008, "client messages must name a method")
+        if method not in self.offered_methods():
+            return self._not_offered(message)
 
         if method == "initialize":
             if self.state != "new":
@@ -1063,10 +1117,9 @@ class ClientProtocol:
         # Semantic tokens for what is on screen (docs/lsp-references-design.md
         # §T2). Only `range`: `full` is not offered, because its reply grows
         # with the whole buffer, and the range is cut to what keeps the reply
-        # under the message cap. Refused when the child offered no legend.
+        # under the message cap. Offered only when the child handed over a
+        # legend (offered_methods); otherwise it is answered -32601 above.
         if method == "textDocument/semanticTokens/range":
-            if self.semantic_legend is None:
-                raise GatewayError(1008, "method is not allowed")
             if len(self.pending) >= HARD_PENDING_REQUESTS:
                 raise GatewayError(1008, "too many pending LSP requests")
             request_id = self._request_id(message)
@@ -1099,6 +1152,8 @@ class ClientProtocol:
                 {"jsonrpc": "2.0", "id": request_id, "method": method, "params": item}
             )
 
+        # Every offered method returned above; reaching here means
+        # CLIENT_METHODS grew without a branch, which must not forward.
         raise GatewayError(1008, "method is not allowed")
 
     def from_child(self, body: bytes) -> bytes:
@@ -1316,6 +1371,11 @@ class Session:
                 return
             self.consume_message_budget()
             narrowed = self.protocol.from_client(body)
+            if narrowed is None:
+                continue
+            if isinstance(narrowed, ClientReply):
+                await self.ws.send_text(narrowed.body)
+                continue
             self.proc.stdin.write(lsp_frame(narrowed))
             try:
                 await asyncio.wait_for(
