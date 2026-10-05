@@ -1,0 +1,74 @@
+# An argument evaluated earlier holds a heap value when a later argument
+# leaves early; the leaving path has to release it (#507). #94 fixed this for
+# list literals only. Every other operand row is here: a constructor, an
+# ordinary call with owned parameters, a record literal, a tuple, and a
+# transferred binding rather than a fresh temporary. Without the fix the output
+# is right and LeakSanitizer reports one string per skipped iteration: the
+# skips are `continue`s because a `return` or `break` out of the function
+# happens to be covered by the frame's own-slot cleanup, and a skipped
+# iteration overwrites the slot instead. `with_return` is that covered shape,
+# kept so the row the fix now names on a return path stays exercised.
+use std/io
+
+type S = C(s: String, m: Int) derive Show
+
+type R = { name: String, n: Int } derive Show
+
+fn make(s: String, m: Int) -> S = C(s, m)
+
+fn both(a: String, b: String) -> (String, String) = (a, b)
+
+fn ctor() -> Unit !io = {
+  var i = 0
+  while i < 3 {
+    i = i + 1
+    let v: S = C("a" ++ to_string(i), if i < 3 { continue } else { i })
+    io.println(to_string(v))
+  }
+}
+
+fn call() -> Unit !io = {
+  var i = 0
+  while i < 3 {
+    i = i + 1
+    let v = make("b" ++ to_string(i), if i == 2 { continue } else { i })
+    io.println(to_string(v))
+  }
+}
+
+fn record() -> Unit !io = {
+  for i in 0..3 {
+    let v = R { name: "c" ++ to_string(i), n: if i > 0 { continue } else { i } }
+    io.println(to_string(v))
+  }
+}
+
+fn tuple() -> Unit !io = {
+  for i in 0..3 {
+    let v = ("d" ++ to_string(i), if i != 1 { continue } else { i })
+    io.println(to_string(v))
+  }
+}
+
+fn moved() -> Unit !io = {
+  var i = 0
+  while i < 3 {
+    i = i + 1
+    let s = "e" ++ to_string(i)
+    let v = both(s, if i != 3 { continue } else { "!" })
+    io.println(to_string(v))
+  }
+}
+
+fn with_return(xs: List[Int]) -> Option[(String, Int)] = Some(("f" ++ to_string(len(xs)), get(xs, 0)?))
+
+pub fn main() -> Unit !io = {
+  ctor()
+  call()
+  record()
+  tuple()
+  moved()
+  io.println(to_string(with_return([4])))
+  io.println(to_string(with_return([])))
+  io.println("done")
+}
