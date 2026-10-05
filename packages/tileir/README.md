@@ -30,6 +30,7 @@ let bytes = encode(prog)    # bytecode for tileiras
 | `lower` | `lower(prog)`, the linear instruction table |
 | `render` | `render(prog)`, the `cuda_tile` text; `line_map` |
 | `bytecode` | `encode(prog)`; `bytecode_version()` is `"13.4"` |
+| `asm` | `tileiras_args(version, gpu_name)`, `assembler_defect(version, gpu_name)`: how to call `tileiras` (see below) |
 
 The full public surface is what `./bin/dawn doc packages/tileir` prints.
 
@@ -142,6 +143,30 @@ rule), as is the `k` of `mmaf`, `mmaf_scaled` and `mmai`. A mismatch panics
 while the kernel records, naming the operation by its depth-first number in
 `TileProg.ops` (`MakeToken(0)` is #0), for example:
 ``tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>``.
+
+## Assembling with tileiras (#558)
+
+Neither this package nor `std/gpu` runs `tileiras`: you assemble the bytes
+and hand `with_gpu_real` the cubins. **With tileiras 13.4.92, pass
+`--opt-level 0` when assembling for sm_90, sm_100, sm_103, sm_107 or
+sm_110.** At the default level that assembler stores a wrong loop exit value
+for a loop that leaves through `break` with two carried values
+([#558](https://github.com/dawnop/dawn-lang/issues/558),
+[NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)). Other
+targets, and other tileiras versions, keep the default level. Ask `asm`
+rather than hard-coding this, so the workaround lifts when you move to a fixed
+tileiras:
+
+```dawn
+use tileir/asm.{tileiras_args, assembler_defect}
+
+let args = tileiras_args("13.4.92", "sm_90")   # ["--gpu-name", "sm_90", "--opt-level", "0"]
+let why = assembler_defect("13.4.92", "sm_90") # Some("tileiras 13.4.92 miscompiles ...")
+# then: tileiras <args> -o kernel.cubin kernel.tilebc
+```
+
+`-O0` costs device time: measured on sm_86, up to 4.5x for kernels that
+compute and 8x for a small loop (§6.28).
 
 ## Writing your own `Dev` handler
 
