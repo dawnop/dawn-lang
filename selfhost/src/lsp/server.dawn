@@ -293,33 +293,33 @@ fn utf8_decode(bs: List[Int]) -> String = {
       i = i + 2
     } else if b0 >= 224 && b0 <= 239 && i + 2 < n && is_cont(bs[i + 1]) &&
       is_cont(bs[i + 2]) {
-        let cp = (b0 - 224) * 4096 + (bs[i + 1] - 128) * 64 + (bs[i + 2] - 128)
-        # below 0x800 is overlong; D800..DFFF is a surrogate
-        if cp < 2048 || (cp >= 55296 && cp <= 57343) {
-          cps = cps ++ [65533]
-          i = i + 1
-        } else {
-          cps = cps ++ [cp]
-          i = i + 3
-        }
-      } else if b0 >= 240 && b0 <= 244 && i + 3 < n && is_cont(bs[i + 1]) &&
-      is_cont(bs[i + 2]) && is_cont(bs[i + 3]) {
-        let cp = (b0 - 240) * 262144 + (bs[i + 1] - 128) * 4096 +
-          (bs[i + 2] - 128) * 64 + (bs[i + 3] - 128)
-        # below 0x10000 is overlong; above 0x10FFFF is out of range
-        if cp < 65536 || cp > 1114111 {
-          cps = cps ++ [65533]
-          i = i + 1
-        } else {
-          cps = cps ++ [cp]
-          i = i + 4
-        }
-      } else {
-        # lone continuation, overlong lead (C0/C1), out-of-range lead (F5..FF),
-        # or a truncated sequence
+      let cp = (b0 - 224) * 4096 + (bs[i + 1] - 128) * 64 + (bs[i + 2] - 128)
+      # below 0x800 is overlong; D800..DFFF is a surrogate
+      if cp < 2048 || (cp >= 55296 && cp <= 57343) {
         cps = cps ++ [65533]
         i = i + 1
+      } else {
+        cps = cps ++ [cp]
+        i = i + 3
       }
+    } else if b0 >= 240 && b0 <= 244 && i + 3 < n && is_cont(bs[i + 1]) &&
+      is_cont(bs[i + 2]) && is_cont(bs[i + 3]) {
+      let cp = (b0 - 240) * 262144 + (bs[i + 1] - 128) * 4096 +
+        (bs[i + 2] - 128) * 64 + (bs[i + 3] - 128)
+      # below 0x10000 is overlong; above 0x10FFFF is out of range
+      if cp < 65536 || cp > 1114111 {
+        cps = cps ++ [65533]
+        i = i + 1
+      } else {
+        cps = cps ++ [cp]
+        i = i + 4
+      }
+    } else {
+      # lone continuation, overlong lead (C0/C1), out-of-range lead (F5..FF),
+      # or a truncated sequence
+      cps = cps ++ [65533]
+      i = i + 1
+    }
   }
   # every branch above has already established its value is a scalar -- the
   # overlong, surrogate and out-of-range cases are the ones that become U+FFFD

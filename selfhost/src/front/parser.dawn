@@ -1836,16 +1836,16 @@ fn let_stmt(p: P, st: St, mutable: Bool) -> PR[Stmt] = {
   if k == LPAREN || k == TYPEIDENT || k == LBRACKET || k == INT || k == CHAR ||
     k == FLOAT || k == MINUS || k == TRUE || k == FALSE || k == STRING || k == PIPE ||
     qualified_ctor || or_after_name {
-      let (st2, pat) = pattern_p(p, st1)?
-      if at_kind(p, st2, COLON) {
-        return Err((st2, perr_h(p, st2, "destructuring lets cannot take a type annotation",
-          "annotate inside the pattern's source instead")))
-      }
-      let (st3, _) = want(p, st2, EQ, "`=`")?
-      let st4 = skip_nl(p, st3)
-      let (st5, init) = expression(p, st4, false)?
-      return Ok((st5, SLetPat(pat, mutable, init, kw.lo, e_hi(init))))
+    let (st2, pat) = pattern_p(p, st1)?
+    if at_kind(p, st2, COLON) {
+      return Err((st2, perr_h(p, st2, "destructuring lets cannot take a type annotation",
+        "annotate inside the pattern's source instead")))
     }
+    let (st3, _) = want(p, st2, EQ, "`=`")?
+    let st4 = skip_nl(p, st3)
+    let (st5, init) = expression(p, st4, false)?
+    return Ok((st5, SLetPat(pat, mutable, init, kw.lo, e_hi(init))))
+  }
   var st6 = st1
   var name = ""
   if at_kind(p, st6, IDENT) {
@@ -3414,12 +3414,12 @@ fn match_expr(p: P, st: St) -> PR[Expr] = {
           st4 = skip_nl(p, adv1(p, st5))
         } else if at_kind(p, st5, NEWLINE) || at_kind(p, st5, RBRACE) ||
           at_kind(p, st5, EOF) {
-            st4 = skip_nl(p, st5)
-          } else {
-            let d = perr_h(p, st5, "expected a newline, `,` or `}` after this match arm",
-              "put the next arm on a new line or after `,`; wrap statement bodies in braces: `-> { ... }`")
-            st4 = sync_arm(p, st5, St { ..st5, diags: st5.diags ++ [d] })
-          }
+          st4 = skip_nl(p, st5)
+        } else {
+          let d = perr_h(p, st5, "expected a newline, `,` or `}` after this match arm",
+            "put the next arm on a new line or after `,`; wrap statement bodies in braces: `-> { ... }`")
+          st4 = sync_arm(p, st5, St { ..st5, diags: st5.diags ++ [d] })
+        }
       }
     }
   }

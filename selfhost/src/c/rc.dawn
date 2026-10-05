@@ -1533,51 +1533,51 @@ fn assigned_after(stmts: List[CStmt], at: Int, sym: Int) -> Bool = {
 
 fn schedule_record_update(st: RSt, stmts: List[CStmt], tail: Option[CExpr]) ->
   (RSt, List[CStmt], Option[CExpr]) = {
-    match tail {
-      None -> (st, stmts, tail)
-      Some(t) -> {
-        # Prefer the nearest eligible binding. Besides moving projections the
-        # shortest distance, this preserves the old single-statement choice
-        # if a hand-written constructor happens to project several records.
-        var at = len(stmts) - 1
-        while at >= 0 {
-          match stmts[at] {
-            CSLet(base, _, init) ->
-              match spread_rebuild(t, base) {
-                Some((adt, ci)) -> {
-                  let source = match init {
-                    CLocal(sym, _) -> sym
-                    _ -> -1
+  match tail {
+    None -> (st, stmts, tail)
+    Some(t) -> {
+      # Prefer the nearest eligible binding. Besides moving projections the
+      # shortest distance, this preserves the old single-statement choice
+      # if a hand-written constructor happens to project several records.
+      var at = len(stmts) - 1
+      while at >= 0 {
+        match stmts[at] {
+          CSLet(base, _, init) ->
+            match spread_rebuild(t, base) {
+              Some((adt, ci)) -> {
+                let source = match init {
+                  CLocal(sym, _) -> sym
+                  _ -> -1
+                }
+                let changed = assigned_after(stmts, at, base) || assigns_spread_expr(t, base) ||
+                  (source >= 0 &&
+                      (assigned_after(stmts, at, source) || assigns_spread_expr(t, source)))
+                if not changed {
+                  let seed = SpreadLift {
+                    base: base, source: source, adt: adt, ci: ci, next_sym: st.next_sym,
+                    fields: map.empty(), lets: []
                   }
-                  let changed = assigned_after(stmts, at, base) || assigns_spread_expr(t, base) ||
-                    (source >= 0 &&
-                        (assigned_after(stmts, at, source) || assigns_spread_expr(t, source)))
-                  if not changed {
-                    let seed = SpreadLift {
-                      base: base, source: source, adt: adt, ci: ci, next_sym: st.next_sym,
-                      fields: map.empty(), lets: []
-                    }
-                    let (lifted, t1) = lift_spread_expr(seed, t)
-                    if len(lifted.lets) > 0 {
-                      let after = at + 1
-                      return (
-                        RSt { ..st, next_sym: lifted.next_sym },
-                        list.take(stmts, after) ++ lifted.lets ++ list.drop(stmts, after),
-                        Some(t1)
-                      )
-                    }
+                  let (lifted, t1) = lift_spread_expr(seed, t)
+                  if len(lifted.lets) > 0 {
+                    let after = at + 1
+                    return (
+                      RSt { ..st, next_sym: lifted.next_sym },
+                      list.take(stmts, after) ++ lifted.lets ++ list.drop(stmts, after),
+                      Some(t1)
+                    )
                   }
                 }
-                None -> ()
-              },
-            _ -> ()
-          }
-          at = at - 1
+              }
+              None -> ()
+            },
+          _ -> ()
         }
-        (st, stmts, tail)
+        at = at - 1
       }
+      (st, stmts, tail)
     }
   }
+}
 
 ## `consume` says whether the value is handed over; `after` is the bindings
 ## anything later still touches. Both only ever decide something at a

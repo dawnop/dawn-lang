@@ -2760,11 +2760,11 @@ pub fn binds_anything(p: Pattern) -> Bool =
     }
     PCtor(_, pargs, _, _, _, _, _) | PRecord(_, pargs, _, _, _, _, _) |
       PQual(_, _, pargs, _, _, _, _, _) | PQualRecord(_, _, pargs, _, _, _, _, _) -> {
-        for a in pargs {
-          if binds_anything(a.pat) { return true }
-        }
-        false
+      for a in pargs {
+        if binds_anything(a.pat) { return true }
       }
+      false
+    }
     PTuple(elems, _, _) -> {
       for e in elems {
         if binds_anything(e) { return true }
@@ -7967,13 +7967,13 @@ fn check_local_fn(
     # variable, and that is the one thing a local row may not do.
     if not effect_name.ambient(a) && not effect_name.dotted(a) && not effect_name.upper(a) &&
       map.get(enclosing_vars, a) == None {
-        cx1 = cerr_h(cx1, "`" ++ name ++ "` cannot introduce the effect variable `!" ++ a ++ "`",
-          nlo, nhi, "a local function's row can name the enclosing function's effect " ++
-            "variables, but not bind new ones; lift `" ++ name ++ "` to the top level for that")
-        refused = true
-      } else {
-        atoms = atoms ++ [a]
-      }
+      cx1 = cerr_h(cx1, "`" ++ name ++ "` cannot introduce the effect variable `!" ++ a ++ "`",
+        nlo, nhi, "a local function's row can name the enclosing function's effect " ++
+          "variables, but not bind new ones; lift `" ++ name ++ "` to the top level for that")
+      refused = true
+    } else {
+      atoms = atoms ++ [a]
+    }
   }
   let (row_cx, eff) = resolve_eff_at(cx1, atoms, nlo, nhi)
   cx1 = row_cx
@@ -8465,12 +8465,12 @@ fn check_call(
   # first (the all-positional path answered arity above and returned)
   if named_present && not args_broken &&
     (len(args) > len(s.param_tys) || len(args) < min_arity) {
-      let hint_text = sig_render(cx1.adts, cx1.traits, s)
-      let cxb = cerr_h(cx1, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
-        "signature: " ++ hint_text)
-      let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
-      return (cxb, rt, XError(owner_off(cx, lo), owner_off(cx, hi)))
-    }
+    let hint_text = sig_render(cx1.adts, cx1.traits, s)
+    let cxb = cerr_h(cx1, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
+      "signature: " ++ hint_text)
+    let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
+    return (cxb, rt, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
   # a required parameter a named call skipped while the count stayed in
   # range, or a default-before-required signature called positionally short
   if not args_broken {
