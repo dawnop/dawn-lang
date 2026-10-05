@@ -16,9 +16,9 @@ and may lag behind the language; mark your own if it matters that they are right
 -->
 
 A deliberately small statically typed language, with two peer backends: it compiles to
-JVM bytecode or, through C, to a native executable. This tutorial has nineteen chapters:
-it takes you from the first program to effects of your own and their handlers, and then
-to packages and to the targets a program compiles for.
+JVM bytecode or, through C, to a native executable. This tutorial has twenty chapters:
+it takes you from the first program to effects of your own and their handlers, then to
+packages and to the targets a program compiles for, and last to kernels for a GPU.
 
 ---
 
@@ -1639,12 +1639,529 @@ line; the program above keeps only each line's operation. The `In` and `Out` mar
 how the two parameters are cut, so the kernel body says nothing about shape: each tile
 block finds its cell (`get_tile_block_id`), loads it and stores it.
 
-`examples/projects/gpu_fake` is a whole program of nine such kernels with their host
-side, answered on the fake device by the references in `packages/tileref`. The design,
-and how far the device side reaches today, is in
-[tile-backend-design.md](tile-backend-design.md), in Chinese.
+Chapter 20 is about writing kernels: what the markers say, what the recording refuses,
+loops, reductions, and how a host program runs one on the fake device and on a real card.
 
 See also: [spec.en.md](spec.en.md) §12.1, §12.3
+
+---
+
+## 20. GPU kernels
+
+Chapter 19 recorded one kernel and stopped there. This chapter writes six, each for
+one idea: a vector add, a vector whose length is not a multiple of the tile, a softmax, a
+matrix product, a softmax over rows, and a transpose. Everything before the last section
+runs on any machine, on the JVM backend, because recording a kernel is pure and so is the
+fake device. Only the last section needs a GPU, its driver and `tileiras`.
+
+A GPU program has two layers with one effect each. The kernel body's only effect is `!Dev`,
+from `packages/tileir`: the body runs once, on the host, under a handler that records each
+operation, and the record is Tile IR. The host side's effect is `!Gpu`, from `std/gpu`
+(chapter 19): it allocates buffers and launches the recorded kernel by name. Every example
+here is a project with `tileir` under its `[deps]`, so none of them has a Playground link.
+To run one yourself, put it in the `src/main.dawn` of a project whose `dawn.toml` points
+at `packages/tileir` in your checkout, as `examples/projects/gpu_fake/dawn.toml` does.
+
+### A kernel is a function that records
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/prog.{trace3, cells, In, Out}
+use tileir/render.{render}
+
+# Each tile block reads its cell of `a` and of `b` and writes its cell of `out`.
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(a), load_cell(b)))
+
+pub fn main() -> Unit !io = {
+  let g = cells([256], [128])     # 256 elements in cells of 128: two blocks
+  let (prog, _entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  print(render(prog))
+}
+```
+```output
+cuda_tile.module @m {
+  entry @vadd(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>, %arg2: tile<ptr<f64>>) {
+    %0 = make_token : token
+    %1 = assume div_by<16>, %arg0 : tile<ptr<f64>>
+    %2 = make_tensor_view %1, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %3 = make_partition_view %2 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %4, %5, %6 = get_tile_block_id : tile<i32>
+    %7, %8 = load_view_tko weak %3[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %9 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+    %10 = make_tensor_view %9, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %11 = make_partition_view %10 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %12, %13 = load_view_tko weak %11[%4] token=%8 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %14 = addf %7, %12 rounding<nearest_even> : tile<128xf64>
+    %15 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %16 = make_tensor_view %15, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %17 = make_partition_view %16 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %18 = store_view_tko weak %14, %17[%4] token=%13 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    return
+  }
+}
+```
+
+`vadd` computed nothing. `trace3` called it once with three parameter handles, under a
+handler that wrote down each `Dev` operation the body performed, and `render` prints that
+record as `cuda_tile` text. The body performed four operations (two `load_cell`, one
+`addf`, one `store_cell`), and the rest of the text is what they lower to. Each parameter
+becomes a view of its whole tensor (`make_tensor_view`) cut into the cells its marker
+describes (`make_partition_view`). `get_tile_block_id` is the block that is running, and
+`load_view_tko` reads that block's cell. `assume div_by<16>` is a promise about the
+pointer's alignment that the assembler may use.
+
+`!Dev` is the body's only effect, so no host memory is in reach and there is no number to
+look at: a kernel can do exactly what `Dev` offers. `Param[F64]` is a parameter whose
+elements are in `std/gpu`'s `F64` format, the same marker a host buffer carries, so a
+`Tensor[F32]` passed where this kernel takes `F64` is a type error.
+
+### Cells: where the shape lives
+
+The body of `vadd` names no length, no tile width and no offset. Those belong to the
+markers. `cells([1000], [128])` cuts a 1000-element tensor into cells of 128: eight cells,
+and the last one has 24 lanes past the end. `In` and `Out` say what the kernel does with
+each argument, and the cells of the `Out` are the launch grid: eight blocks, block `i`
+reading and writing cell `i`. A lane past the extent reads the marker's padding (zero
+unless the marker says otherwise) and is not written back, so the tail needs no mask.
+
+```dawn run deps=tileir
+use std/gpu.{Gpu, F64, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/list
+use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/prog.{trace3, cells, In, Out}
+
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(a), load_cell(b)))
+
+# The host half: three buffers of `n` elements, launched over cells of 1000.
+fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
+  let g = cells([1000], [128])     # eight cells; the last has 24 lanes past the end
+  let (_prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  let xs = list.map(range(0, n), i => to_float(i))
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  upload(a, xs)?
+  upload(b, xs)?
+  launch_entry3(entry, a, b, out)?
+  download(out)
+}
+
+pub fn main() -> Unit !io = {
+  for n in [1000, 999] {
+    match with_gpu_fake(reference_kernels(), () => add_1000(n)) {
+      Ok(ys) -> println("${len(ys)} values, the last is ${ys[len(ys) - 1]}")
+      Err(e) -> println("refused: ${e.kind}: ${e.message}")
+    }
+  }
+}
+```
+```output
+1000 values, the last is 1998.0
+refused: gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 0 (In) holds 999 element(s) and its cells reach 1000
+```
+
+`trace3` answers the record and an entry, and `launch_entry3` takes that entry and three
+tensors whose formats the entry's type fixes. Before any handler is asked, it holds the
+buffers against the cells: a 999-element buffer does not reach the end of a 1000-element
+extent. It also refuses a grid that disagrees with the cells, and an `Out` that shares its
+buffer with another argument. An extent of `DYN_DIM` leaves the number of cells to the
+launch, as in `launch_entry3(entry, a, b, out, grid: [8])`, and then the buffers have to
+cover the whole of every cell: 1024 elements for eight cells of 128.
+
+The `1998.0` is a reference's answer, not the kernel's. The fake device never runs a
+kernel body: it looks the launch's name up in its table and calls the host function
+registered there, which for `vadd` is `std/gpu`'s `vadd_ref`. What this program checks is
+the host side, the launch checks and the reference. Whether the kernel agrees with the
+reference is a question for a real card (the last section).
+
+### What the recording refuses
+
+The type checker sees formats: a `Tile[F32]` where a `Tile[F64]` belongs is a type error.
+Shapes, roles and grids are not in the types, and the recording checks them as it goes.
+A refusal is a panic that names the kernel and the operation, numbered in recording order,
+before any bytecode exists:
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store_cell, store, addf, f_const, broadcast, block_id,
+  tile_at}
+use tileir/prog.{trace2, cells, In, Out}
+
+fn adds_one(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(x), f_const(F64, 1.0)))
+
+fn writes_its_input(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(x))
+
+fn adds_two_shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
+
+fn stores_by_pointer(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store(out, tile_at(block_id(0), 128), load_cell(x))
+
+# A panic's message ends with where it was raised; keep what it says.
+fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
+  Some((what, _where)) -> what
+  None -> message
+}
+
+fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+  let g = cells([256], [128])
+  match catch_panic(() => trace2("k", In(F64, g), Out(F64, g), body)) {
+    Ok(_) -> "recorded"
+    Err(e) -> reason(e.message)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println(try_record(adds_one))
+  println(try_record(writes_its_input))
+  println(try_record(adds_two_shapes))
+  println(try_record(stores_by_pointer))
+}
+```
+```output
+recorded
+tileir: kernel `k`: op #5 `store_cell`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `k`: op #6 `addf`: rhs is tile<64xf64>, declared tile<128xf64>
+tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared
+```
+
+`adds_one` adds a constant to a 128-lane tile. A constant is rank 0 (`f_const(F64, 1.0)`
+has no shape), and a rank-0 tile widens on its own wherever it meets a wider one. That is
+the only widening that happens without being asked for: `adds_two_shapes` widens the
+constant to 64 lanes, then meets 128, and is refused. `writes_its_input` stores into an
+`In`. `stores_by_pointer` writes its `Out` through the pointer path, a `store` at an
+element offset, and the offset is even the right one. It is refused anyway: an `Out` is
+written through its cells (`store_cell`, or `store_sub` for one piece of a cell) and in no
+other way, so that "block `i` writes cell `i`" stays something the recorder checks rather
+than something a reader has to. A kernel that writes anywhere else declares the parameter
+`Shared`, as the transpose below does.
+
+### Reductions and padding
+
+A softmax over four lanes that hold three values. This time the fake device runs a
+reference written here rather than one from `std/gpu`:
+
+```dawn run deps=tileir,tileref
+use std/gpu.{Gpu, F64, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels,
+  launch_entry2, last_out}
+use std/list
+use std/map
+use std/str
+use tileir/dev.{Dev, Param, PadNegInf, load_cell, store_cell, exp, sub, div, reduce_max,
+  reduce_sum}
+use tileir/prog.{trace2, cells, In, Out}
+use tileir/render.{render}
+use tileref/ref.{ref_exp}
+
+fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)                        # the lane past the extent reads -inf
+  let e = exp(sub(t, reduce_max(t)))          # reduce_max(t) is rank 0, and widens
+  store_cell(out, div(e, reduce_sum(e)))      # nothing past the extent is written
+}
+
+# The kernel's contract, written on the host: the softmax of the first `n`
+# values of `x`, and every element of `out` past them exactly as it was.
+fn softmax_ref(n: Int, _formats: List[String], bufs: List[List[Float]]) -> List[Float] = {
+  let xs = list.take(bufs[0], n)
+  let m = list.fold(xs, xs[0], (a, v) => if v > a { v } else { a })
+  let es = list.map(xs, v => ref_exp(v - m))
+  let total = list.fold(es, 0.0, (a, v) => a + v)
+  list.map(es, v => v / total) ++ list.drop(bufs[1], n)
+}
+
+fn run(entry: Entry2[F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+  let x = alloc(F64, 4)?
+  let out = alloc(F64, 4)?
+  upload(x, [1.0, 2.0, 3.0, 0.0])?
+  upload(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] is past the extent: the kernel leaves it
+  launch_entry2(entry, x, out)?
+  download(out)
+}
+
+pub fn main() -> Unit !io = {
+  let (prog, entry) = trace2("softmax", In(F64, cells([3], [4], pad: PadNegInf)),
+    Out(F64, cells([3], [4])), softmax)
+  # the padding is part of the record
+  for line in str.split(render(prog), "\n") {
+    if str.contains(line, "= make_partition_view") && str.contains(line, "neg_inf") {
+      println(str.trim(line))
+    }
+  }
+  let kernels = map.insert(reference_kernels(), "softmax",
+    (2, last_out((formats, bufs) => softmax_ref(3, formats, bufs))))
+  println("${with_gpu_fake(kernels, () => run(entry))}")
+}
+```
+```output
+%3 = make_partition_view %2 : partition_view<tile=(4), padding_value = neg_inf, tensor_view<3xf64, strides=[1]>, dim_map=[0]>
+Ok([0.09003057317038043, 0.24472847105479767, 0.6652409557748218, 9.0])
+```
+
+`PadNegInf` makes the lane past the extent read `-inf`. The maximum ignores it, `exp` of it
+is exactly 0, and so the sum is the sum of the three real lanes. With the default zero
+padding the sum would also count `exp(0 - 3)`, and every answer would be a little too
+small. The padding is in the recorded program (`padding_value = neg_inf`), so the device is
+held to it. `reduce_max(t)` of a rank-1 tile is rank 0, and widens when `sub` meets the
+four-lane `t`.
+
+`softmax_ref` is the kernel's contract, on the host. It answers the softmax of the first
+`n` values and leaves every element past them as it was, which is why the sentinel `9.0`
+survives. `last_out` turns a function that answers the last buffer into the entry
+`with_gpu_fake` wants, and the `2` beside it is how many buffers the kernel takes. In this
+file `exp` is the device's, so the host side uses `ref_exp` from `packages/tileref`, where
+the references for the repository's own kernels live.
+
+### Loops and matrices
+
+A matrix product, one 64 by 64 tile of `c` per block, walking along K:
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range}
+use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
+use tileir/render.{render}
+
+fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+  let acc = d_range(0, 256 / 32, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))
+  store_cell(c, acc)
+}
+
+pub fn main() -> Unit !io = {
+  let a = In(F64, cells([256, 256], [64, 32], along: [0, FREE_AXIS]))
+  let b = In(F64, cells([256, 256], [32, 64], along: [FREE_AXIS, 1]))
+  let c = Out(F64, cells([256, 256], [64, 64]))     # the grid: 4 by 4 blocks
+  let (prog, _entry) = trace3("matmul", a, b, c, matmul)
+  # eight trips along K, and one loop with one mmaf in the record
+  for line in str.split(render(prog), "\n") {
+    let l = str.trim(line)
+    if str.contains(l, "= for ") || str.contains(l, "= mmaf ") || str.starts_with(l, "continue ") {
+      println(l)
+    }
+  }
+}
+```
+```output
+%5, %6 = for %7 in (%2 to %3, step %4) : tile<i32> iter_values(%8 = %1, %9 = %0) -> (tile<64x64xf64>, token) {
+%26 = mmaf %16, %24, %8 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
+continue %26, %25 : tile<64x64xf64>, token
+```
+
+`along` says which grid axis each dimension of a cell follows. Dimension 0 of `a` (its
+rows) follows grid axis 0, and dimension 1 (along K) follows none: `FREE_AXIS` means the
+kernel picks that cell itself, and `load_at(a, [k])` is how. `b` is the other way round,
+and the cells of `c`, the `Out`, are the grid. `d_range(0, 8, init, body)` is a loop of
+eight trips that carries one tile, the accumulator. `zeros(c)` is a tile shaped like one
+cell of `c`, so the accumulator's shape is never written out, and `mmaf` reads m, k and n
+off its operands (a k on which `a` and `b` disagree is refused while recording).
+
+The loop's body ran once, like the kernel's: the record holds one `for` region, and the
+device runs its eight trips. The region carries a second value beside the accumulator,
+the token. Memory operations are ordered by a token chain the recorder threads through
+them, not by the order of the program text.
+
+### Reductions over rows: keepdims and broadcast
+
+In two dimensions a reduction has a dimension to work along. Here each block takes 32 rows
+of 64 scores and turns each row into a softmax:
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum,
+  broadcast}
+use tileir/prog.{trace2, cells, In, Out}
+
+fn row_softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = load_cell(x)                                          # [32, 64]
+  let m = broadcast(reduce_max(s, keepdims: true), [32, 64])    # [32, 1], then [32, 64]
+  let p = exp(sub(s, m))
+  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+}
+
+# The same, with the first `broadcast` left out.
+fn row_softmax_unbroadcast(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = load_cell(x)
+  let p = exp(sub(s, reduce_max(s, keepdims: true)))
+  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+}
+
+fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
+  Some((what, _where)) -> what
+  None -> message
+}
+
+fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+  let g = cells([256, 64], [32, 64])     # eight blocks of 32 rows
+  match catch_panic(() => trace2("row_softmax", In(F64, g), Out(F64, g), body)) {
+    Ok(_) -> "recorded"
+    Err(e) -> reason(e.message)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println(try_record(row_softmax))
+  println(try_record(row_softmax_unbroadcast))
+}
+```
+```output
+recorded
+tileir: kernel `row_softmax`: op #10 `subf`: rhs is tile<32x1xf64>, declared tile<32x64xf64>
+```
+
+`reduce_max(s, keepdims: true)` reduces the last dimension (`dim: -1` is the default) and
+keeps it with length 1: a `[32, 1]` tile, one maximum per row. Widening it back to
+`[32, 64]` is written out with `broadcast`, because only a rank-0 tile widens by itself.
+The second kernel leaves the `broadcast` out and is refused at the subtraction; the
+refusal names `subf`, the Tile IR operation `sub` records.
+
+NumPy would have widened it. The reason not to is the case its rule gets wrong while
+looking right: reduce a square `[64, 64]` tile without `keepdims` and NumPy lines the
+`[64]` result up with the last axis, so element (i, j) is shifted by the maximum of row j.
+Here that is refused too, and every widening is written where it happens.
+
+Put this step in a loop over blocks of keys and values, carry a running maximum and a
+running sum, and it is FlashAttention: `flash_attn` in `scripts/tile-golden/kernels.dawn`
+is that loop, written with these same operations. The
+[GPU page](https://dawn-lang.dawnop.com/gpu.html) shows what the backend records for
+kernels of that size, and how their answers on a device are checked.
+
+### When cells cannot say it: `Shared`
+
+An `Out`'s cells are the grid in the grid's own order: block (i, j) writes cell (i, j). A
+transpose breaks that, because block (i, j) reads cell (i, j) of `x` and writes the tile at
+(j, i) of `out`:
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store, block_id, idx_add, idx_mul, idx_const}
+use tileir/prog.{Arg, trace2, cells, In, Out, Shared}
+
+# A 128 by 64 matrix in 32 by 32 tiles. Block (i, j) reads its cell of `x`
+# and writes it, transposed, at tile (j, i) of a 64 by 128 `out`.
+fn transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)
+  let at = idx_add(idx_mul(block_id(1), idx_const(32 * 128)), idx_mul(block_id(0), idx_const(32)))
+  store(out, at, t, strides: Some([1, 128]))     # out's strides, swapped: the layout transposes
+}
+
+fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
+  Some((what, _where)) -> what
+  None -> message
+}
+
+fn try_record(out: Arg[F64]) -> String = {
+  let x = In(F64, cells([128, 64], [32, 32]))     # 4 by 2 cells
+  match catch_panic(() => trace2("transpose", x, out, transpose)) {
+    Ok(_) -> "recorded"
+    Err(e) -> reason(e.message)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println(try_record(Out(F64, cells([64, 128], [32, 32]))))     # 2 by 4 cells
+  println(try_record(Shared(F64)))
+}
+```
+```output
+tileir: kernel `transpose`: argument 0 (In) has 4 cell(s) in dimension 0, which follows grid axis 0, and the grid has 2 block(s) there
+recorded
+```
+
+Declared as an `Out` with its own cells, `out` makes a 2 by 4 grid, `x`'s 4 by 2 cells
+disagree with it, and the recording refuses before the body runs. `Shared(d)` is the
+escape hatch: a parameter the kernel addresses itself, through the pointer path. Here
+`store` writes the tile at an element offset with `out`'s strides swapped, so the tile
+lands transposed and no element moves inside it. Atomics, scatters and a block that
+writes two regions are `Shared` for the same reason, and `grep Shared(` finds every one.
+With no `Out` the grid is the caller's: `launch_entry2(entry, x, out, grid: [4, 2])`.
+
+Two more ways out, each a sentence. A kernel that reads one `In` in two shapes takes a
+second view of it with `retile(p, extent, tile)`. `trace1` to `trace5` record kernels of
+up to five parameters, and `trace_kernel` records one with more, every parameter `Shared`.
+
+### On a real card
+
+Running on a GPU changes the handler and nothing else. The host function is the one from
+the cells section, `with_gpu_fake` becomes `with_gpu_real`, and the table maps the
+kernel's name to an assembled module instead of a reference:
+
+<!-- doc-check: skip-check needs an NVIDIA GPU, its driver and tileiras, which CI does not have -->
+```dawn skip-check
+use std/gpu.{Gpu, F64, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/io
+use std/io.{with_fs_real}
+use std/list
+use std/map
+use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/prog.{trace3, cells, In, Out}
+use tileir/bytecode.{encode}
+
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(a), load_cell(b)))
+
+fn add_1000(entry: Entry3[F64, F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+  let xs = list.map(range(0, 1000), i => to_float(i))
+  let a = alloc(F64, 1000)?
+  let b = alloc(F64, 1000)?
+  let out = alloc(F64, 1000)?
+  upload(a, xs)?
+  upload(b, xs)?
+  launch_entry3(entry, a, b, out)?
+  download(out)
+}
+
+pub fn main() -> Unit !io = {
+  let g = cells([1000], [128])
+  let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  let argv = args()
+  if len(argv) == 1 && argv[0] == "encode" {
+    # the record, as the bytecode tileiras reads
+    println("${with_fs_real(() => io.write_bytes("vadd.tilebc", encode(prog)))}")
+  } else {
+    # the module tileiras wrote, under the name the entry launches
+    match with_fs_real(() => io.read_bytes("vadd.cubin")) {
+      Ok(cubin) -> match with_gpu_real(map.from([("vadd", cubin)]), () => add_1000(entry)) {
+        Ok(ys) -> println("${len(ys)} values, the last is ${ys[999]}")
+        Err(e) -> println("refused: ${e.kind}")
+      }
+      Err(e) -> println("no vadd.cubin: ${e.message}")
+    }
+  }
+}
+```
+
+With that program as the project `vadd_card`:
+
+```text
+dawn run vadd_card -- encode                         # writes vadd.tilebc
+tileiras --gpu-name sm_86 -o vadd.cubin vadd.tilebc
+dawnc run vadd_card                                  # launches vadd on the card
+```
+
+`encode` writes the same record `render` prints, as the bytecode `tileiras` assembles.
+`--gpu-name` is the card's architecture (`sm_86` for an RTX 30 series card). The last step
+needs the C backend: on the JVM every `with_gpu_real` operation answers
+`gpu.unsupported_backend`. It also needs an NVIDIA driver recent enough for Tile IR and
+the `tileiras` the repository is tested with; `scripts/tile-golden/toolchain.txt` pins
+both, and `scripts/tile-golden/install-tileiras.sh <dir>` installs that `tileiras` from
+its wheels. On a card the program should print what the fake device printed in the cells
+section. If it prints something else, the kernel and the reference disagree, and finding
+that out is what the repository's device gates are for; the
+[GPU page](https://dawn-lang.dawnop.com/gpu.html) describes them.
+
+Where to go from here: `examples/projects/gpu_fake` is a whole program of kernels with
+their host side. `packages/tileir/README.md` lists the parameter markers and what the
+recorder refuses, and `dawn doc packages/tileir` prints the whole API. The design and
+its measurements are in [tile-backend-design.md](tile-backend-design.md), in Chinese.
+
+See also: [spec.en.md](spec.en.md) §12.6
 
 ---
 

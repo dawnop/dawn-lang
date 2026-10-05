@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 30551d03f1f7b812 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 2dcc2f0d343852b8 -->
 
 # Dawn 教程
 
@@ -16,8 +16,8 @@
 -->
 
 一门刻意小的静态类型语言，有两个平级后端：编译到 JVM 字节码，或经 C 编成 native
-可执行文件。本教程共十九章，从第一个程序一直讲到自己声明的效果与它们的 handler，
-再讲到包，以及程序可以编译到的目标。
+可执行文件。本教程共二十章，从第一个程序一直讲到自己声明的效果与它们的 handler，
+再讲到包、程序可以编译到的目标，最后讲 GPU 上的 kernel。
 
 ---
 
@@ -1532,11 +1532,493 @@ store_view_tko
 操作名。两个参数怎么切由 `In` 和 `Out` 标记说，所以 kernel 体里一个形状也不写：每个 tile 块
 找到自己的格子（`get_tile_block_id`），载入，再存回去。
 
-`examples/projects/gpu_fake` 是一个完整程序，九个这样的 kernel 加上它们的宿主一侧，
-在假设备上由 `packages/tileref` 里的参考实现应答。设计，以及设备一侧今天走到了哪一步，
-见 [tile-backend-design.md](tile-backend-design.md)。
+第 20 章讲怎么写 kernel：标记说了什么、记录拒绝什么、循环、归约，以及宿主程序怎样在假设备
+和真卡上跑它。
 
 另见：[spec.md](spec.md) §12.1、§12.3
+
+---
+
+## 20. GPU kernel
+
+第 19 章记录了一个 kernel，就停在了那里。本章写六个，每个讲一件事：向量加法、长度不是 tile
+整数倍的向量、softmax、矩阵乘、按行的 softmax，以及转置。最后一节之前的内容在任何机器上都能
+跑，用 JVM 后端即可，因为记录 kernel 是纯的，假设备也是纯的。只有最后一节需要 GPU、它的驱动
+和 `tileiras`。
+
+GPU 程序分两层，每层一个效果。kernel 体唯一的效果是 `!Dev`，来自 `packages/tileir`：函数体
+在宿主上只跑一次，跑在一个把每个操作记下来的 handler 底下，记下来的就是 Tile IR。宿主一侧的
+效果是 `!Gpu`，来自 `std/gpu`（第 19 章）：它分配缓冲区，按名字启动记录好的 kernel。本章每个
+例子都是 `[deps]` 里写着 `tileir` 的项目，所以都没有 Playground 链接。想自己跑，就把它放进一个
+项目的 `src/main.dawn`，项目的 `dawn.toml` 指向你检出里的 `packages/tileir`，写法照
+`examples/projects/gpu_fake/dawn.toml`。
+
+### kernel 是一个会被记录的函数
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/prog.{trace3, cells, In, Out}
+use tileir/render.{render}
+
+# 每个 tile 块读 `a` 和 `b` 里属于自己的那一格，写进 `out` 里属于自己的那一格。
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(a), load_cell(b)))
+
+pub fn main() -> Unit !io = {
+  let g = cells([256], [128])     # 256 个元素，每格 128：两个块
+  let (prog, _entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  print(render(prog))
+}
+```
+```output
+cuda_tile.module @m {
+  entry @vadd(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>, %arg2: tile<ptr<f64>>) {
+    %0 = make_token : token
+    %1 = assume div_by<16>, %arg0 : tile<ptr<f64>>
+    %2 = make_tensor_view %1, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %3 = make_partition_view %2 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %4, %5, %6 = get_tile_block_id : tile<i32>
+    %7, %8 = load_view_tko weak %3[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %9 = assume div_by<16>, %arg1 : tile<ptr<f64>>
+    %10 = make_tensor_view %9, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %11 = make_partition_view %10 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %12, %13 = load_view_tko weak %11[%4] token=%8 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %14 = addf %7, %12 rounding<nearest_even> : tile<128xf64>
+    %15 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %16 = make_tensor_view %15, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
+    %17 = make_partition_view %16 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
+    %18 = store_view_tko weak %14, %17[%4] token=%13 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    return
+  }
+}
+```
+
+`vadd` 什么也没算。`trace3` 拿三个参数句柄调用了它一次，调用发生在一个 handler 底下，handler
+把函数体执行的每个 `Dev` 操作记下来；`render` 把这份记录打印成 `cuda_tile` 文本。函数体执行了
+四个操作（两个 `load_cell`、一个 `addf`、一个 `store_cell`），文本其余部分是它们降低出来的样子。
+每个参数先成为它整个张量的视图（`make_tensor_view`），再按标记描述的格子切开
+（`make_partition_view`）。`get_tile_block_id` 是正在跑的那个块，`load_view_tko` 读这个块的格子。
+`assume div_by<16>` 是关于指针对齐的一个承诺，汇编器可以利用它。
+
+`!Dev` 是函数体唯一的效果，所以够不到宿主内存，也没有数可看：kernel 能做的恰好就是 `Dev`
+提供的那些。`Param[F64]` 是元素格式为 `std/gpu` 的 `F64` 的参数，和宿主缓冲区带的是同一个
+标记，所以在这个 kernel 要 `F64` 的位置传 `Tensor[F32]` 是类型错误。
+
+### 格子：形状写在哪里
+
+`vadd` 的函数体里没有长度，没有 tile 宽度，也没有偏移。这些属于标记。`cells([1000], [128])`
+把 1000 个元素的张量切成每格 128：八格，最后一格有 24 个 lane 越过了末尾。`In` 和 `Out` 说明
+kernel 对每个参数做什么，而 `Out` 的格子就是启动网格：八个块，块 `i` 读写第 `i` 格。越过
+extent 的 lane 读到的是标记的填充值（标记不另说就是零），而且不写回，所以尾巴不需要 mask。
+
+```dawn run deps=tileir
+use std/gpu.{Gpu, F64, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/list
+use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/prog.{trace3, cells, In, Out}
+
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(a), load_cell(b)))
+
+# 宿主一半：三个 `n` 元素的缓冲区，按 1000 个元素的格子启动。
+fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
+  let g = cells([1000], [128])     # 八格；最后一格有 24 个 lane 越过末尾
+  let (_prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  let xs = list.map(range(0, n), i => to_float(i))
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  upload(a, xs)?
+  upload(b, xs)?
+  launch_entry3(entry, a, b, out)?
+  download(out)
+}
+
+pub fn main() -> Unit !io = {
+  for n in [1000, 999] {
+    match with_gpu_fake(reference_kernels(), () => add_1000(n)) {
+      Ok(ys) -> println("${len(ys)} values, the last is ${ys[len(ys) - 1]}")
+      Err(e) -> println("refused: ${e.kind}: ${e.message}")
+    }
+  }
+}
+```
+```output
+1000 values, the last is 1998.0
+refused: gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 0 (In) holds 999 element(s) and its cells reach 1000
+```
+
+`trace3` 答回记录和一个入口，`launch_entry3` 接这个入口和三个张量，张量的格式由入口的类型
+定死。在问任何 handler 之前，它先拿缓冲区对照格子：999 个元素的缓冲区够不到 1000 个元素的
+extent 的末尾。它还拒绝和格子不一致的网格，以及和别的参数共用缓冲区的 `Out`。extent 写成
+`DYN_DIM` 时，格子数交给启动来定，比如 `launch_entry3(entry, a, b, out, grid: [8])`，这时缓冲区
+要盖住每一格的全部：八格、每格 128，就是 1024 个元素。
+
+`1998.0` 是参考实现的答案，不是 kernel 的。假设备从不运行 kernel 体：它拿启动的名字查表，调用
+登记在那个名字下的宿主函数，对 `vadd` 来说就是 `std/gpu` 的 `vadd_ref`。这个程序检查的是宿主
+一侧、启动检查和参考实现。kernel 与参考实现是否一致，要到真卡上才知道（最后一节）。
+
+### 记录拒绝什么
+
+类型检查看得见格式：在该放 `Tile[F64]` 的地方放 `Tile[F32]` 是类型错误。形状、角色和网格不在
+类型里，由记录边走边查。拒绝是一个 panic，报出 kernel 名和操作（按记录顺序编号），这时还没有
+任何字节码：
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store_cell, store, addf, f_const, broadcast, block_id,
+  tile_at}
+use tileir/prog.{trace2, cells, In, Out}
+
+fn adds_one(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(x), f_const(F64, 1.0)))
+
+fn writes_its_input(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(x))
+
+fn adds_two_shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
+
+fn stores_by_pointer(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store(out, tile_at(block_id(0), 128), load_cell(x))
+
+# panic 的消息末尾是它在哪里被抛出；只留它说了什么。
+fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
+  Some((what, _where)) -> what
+  None -> message
+}
+
+fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+  let g = cells([256], [128])
+  match catch_panic(() => trace2("k", In(F64, g), Out(F64, g), body)) {
+    Ok(_) -> "recorded"
+    Err(e) -> reason(e.message)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println(try_record(adds_one))
+  println(try_record(writes_its_input))
+  println(try_record(adds_two_shapes))
+  println(try_record(stores_by_pointer))
+}
+```
+```output
+recorded
+tileir: kernel `k`: op #5 `store_cell`: parameter 0 is an In, and nothing writes an In
+tileir: kernel `k`: op #6 `addf`: rhs is tile<64xf64>, declared tile<128xf64>
+tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared
+```
+
+`adds_one` 给 128 个 lane 的 tile 加一个常量。常量是 0 阶的（`f_const(F64, 1.0)` 没有形状），
+0 阶 tile 遇到更宽的就自己加宽。不用开口要就会发生的加宽只有这一种：`adds_two_shapes` 先把常量
+加宽到 64 个 lane，再碰上 128，于是被拒。`writes_its_input` 往 `In` 里写。`stores_by_pointer`
+走指针路写自己的 `Out`，在一个元素偏移处 `store`，偏移甚至是对的。它照样被拒：`Out` 只经它的
+格子写（`store_cell`，或者写一格中一块的 `store_sub`），别的写法一概不行，这样「块 `i` 写第
+`i` 格」就一直是记录器查的事，而不是读代码的人查的事。要写到别处的 kernel 把参数声明成
+`Shared`，下面的转置就是这样。
+
+### 归约与填充
+
+四个 lane 装三个值的 softmax。这次假设备跑的参考实现是这里写的，不是 `std/gpu` 自带的：
+
+```dawn run deps=tileir,tileref
+use std/gpu.{Gpu, F64, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels,
+  launch_entry2, last_out}
+use std/list
+use std/map
+use std/str
+use tileir/dev.{Dev, Param, PadNegInf, load_cell, store_cell, exp, sub, div, reduce_max,
+  reduce_sum}
+use tileir/prog.{trace2, cells, In, Out}
+use tileir/render.{render}
+use tileref/ref.{ref_exp}
+
+fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)                        # 越过 extent 的那个 lane 读到 -inf
+  let e = exp(sub(t, reduce_max(t)))          # reduce_max(t) 是 0 阶的，会自己加宽
+  store_cell(out, div(e, reduce_sum(e)))      # extent 之外一个也不写
+}
+
+# kernel 的合同，写在宿主上：`x` 前 `n` 个值的 softmax，
+# `out` 在它们之后的每个元素原样不动。
+fn softmax_ref(n: Int, _formats: List[String], bufs: List[List[Float]]) -> List[Float] = {
+  let xs = list.take(bufs[0], n)
+  let m = list.fold(xs, xs[0], (a, v) => if v > a { v } else { a })
+  let es = list.map(xs, v => ref_exp(v - m))
+  let total = list.fold(es, 0.0, (a, v) => a + v)
+  list.map(es, v => v / total) ++ list.drop(bufs[1], n)
+}
+
+fn run(entry: Entry2[F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+  let x = alloc(F64, 4)?
+  let out = alloc(F64, 4)?
+  upload(x, [1.0, 2.0, 3.0, 0.0])?
+  upload(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] 在 extent 之外：kernel 不碰它
+  launch_entry2(entry, x, out)?
+  download(out)
+}
+
+pub fn main() -> Unit !io = {
+  let (prog, entry) = trace2("softmax", In(F64, cells([3], [4], pad: PadNegInf)),
+    Out(F64, cells([3], [4])), softmax)
+  # 填充值是记录的一部分
+  for line in str.split(render(prog), "\n") {
+    if str.contains(line, "= make_partition_view") && str.contains(line, "neg_inf") {
+      println(str.trim(line))
+    }
+  }
+  let kernels = map.insert(reference_kernels(), "softmax",
+    (2, last_out((formats, bufs) => softmax_ref(3, formats, bufs))))
+  println("${with_gpu_fake(kernels, () => run(entry))}")
+}
+```
+```output
+%3 = make_partition_view %2 : partition_view<tile=(4), padding_value = neg_inf, tensor_view<3xf64, strides=[1]>, dim_map=[0]>
+Ok([0.09003057317038043, 0.24472847105479767, 0.6652409557748218, 9.0])
+```
+
+`PadNegInf` 让越过 extent 的那个 lane 读到 `-inf`。求最大值时它不起作用，`exp` 它恰好是 0，
+所以总和就是三个真 lane 的和。换成默认的零填充，总和会多算一个 `exp(0 - 3)`，每个答案都偏小
+一点。填充值写在记录下来的程序里（`padding_value = neg_inf`），所以设备也受它约束。
+1 阶 tile 的 `reduce_max(t)` 是 0 阶的，`sub` 碰上四个 lane 的 `t` 时它自己加宽。
+
+`softmax_ref` 是 kernel 的合同，写在宿主上。它答回前 `n` 个值的 softmax，之后的元素原样不动，
+所以哨兵 `9.0` 留了下来。`last_out` 把一个只答最后一个缓冲区的函数变成 `with_gpu_fake` 要的
+表项，旁边的 `2` 是 kernel 接几个缓冲区。这个文件里的 `exp` 是设备的，所以宿主一侧用
+`packages/tileref` 的 `ref_exp`；仓库自己那些 kernel 的参考实现都在那个包里。
+
+### 循环与矩阵
+
+矩阵乘，每个块算 `c` 的一个 64×64 tile，沿 K 走：
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range}
+use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
+use tileir/render.{render}
+
+fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+  let acc = d_range(0, 256 / 32, zeros(c), (k, sofar) => mmaf(load_at(a, [k]), load_at(b, [k]), sofar))
+  store_cell(c, acc)
+}
+
+pub fn main() -> Unit !io = {
+  let a = In(F64, cells([256, 256], [64, 32], along: [0, FREE_AXIS]))
+  let b = In(F64, cells([256, 256], [32, 64], along: [FREE_AXIS, 1]))
+  let c = Out(F64, cells([256, 256], [64, 64]))     # 网格：4×4 个块
+  let (prog, _entry) = trace3("matmul", a, b, c, matmul)
+  # 沿 K 走八趟，记录里却只有一个循环、一个 mmaf
+  for line in str.split(render(prog), "\n") {
+    let l = str.trim(line)
+    if str.contains(l, "= for ") || str.contains(l, "= mmaf ") || str.starts_with(l, "continue ") {
+      println(l)
+    }
+  }
+}
+```
+```output
+%5, %6 = for %7 in (%2 to %3, step %4) : tile<i32> iter_values(%8 = %1, %9 = %0) -> (tile<64x64xf64>, token) {
+%26 = mmaf %16, %24, %8 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
+continue %26, %25 : tile<64x64xf64>, token
+```
+
+`along` 说格子的每一维跟网格的哪个轴走。`a` 的第 0 维（行）跟网格轴 0，第 1 维（沿 K）不跟任何
+轴：`FREE_AXIS` 的意思是这一维由 kernel 自己挑格子，挑法就是 `load_at(a, [k])`。`b` 正好反过来，
+`c` 是 `Out`，它的格子就是网格。`d_range(0, 8, init, body)` 是走八趟的循环，带着一个 tile，也就是
+累加器。`zeros(c)` 是一个形状和 `c` 的一格相同的 tile，所以累加器的形状从头到尾不用写；`mmaf` 从
+操作数读出 m、k、n（`a` 和 `b` 的 k 对不上，记录时就拒）。
+
+循环体和 kernel 体一样只跑了一次：记录里是一个 `for` 区域，八趟由设备去跑。这个区域在累加器
+旁边还带着第二个值，token。内存操作的先后由记录器串起来的 token 链决定，不由程序文本的先后决定。
+
+### 按行归约：keepdims 与 broadcast
+
+二维时，归约要选一维来做。这里每个块拿 32 行、每行 64 个分数，把每一行变成 softmax：
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum,
+  broadcast}
+use tileir/prog.{trace2, cells, In, Out}
+
+fn row_softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = load_cell(x)                                          # [32, 64]
+  let m = broadcast(reduce_max(s, keepdims: true), [32, 64])    # [32, 1]，再到 [32, 64]
+  let p = exp(sub(s, m))
+  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+}
+
+# 同一个 kernel，去掉了第一个 `broadcast`。
+fn row_softmax_unbroadcast(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let s = load_cell(x)
+  let p = exp(sub(s, reduce_max(s, keepdims: true)))
+  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+}
+
+fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
+  Some((what, _where)) -> what
+  None -> message
+}
+
+fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+  let g = cells([256, 64], [32, 64])     # 八个块，每块 32 行
+  match catch_panic(() => trace2("row_softmax", In(F64, g), Out(F64, g), body)) {
+    Ok(_) -> "recorded"
+    Err(e) -> reason(e.message)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println(try_record(row_softmax))
+  println(try_record(row_softmax_unbroadcast))
+}
+```
+```output
+recorded
+tileir: kernel `row_softmax`: op #10 `subf`: rhs is tile<32x1xf64>, declared tile<32x64xf64>
+```
+
+`reduce_max(s, keepdims: true)` 归约最后一维（默认 `dim: -1`），并把这一维留成长度 1：得到
+`[32, 1]` 的 tile，每行一个最大值。把它加宽回 `[32, 64]` 要用 `broadcast` 写出来，因为只有 0 阶
+tile 会自己加宽。第二个 kernel 去掉了 `broadcast`，在减法处被拒；拒绝里写的是 `subf`，即 `sub`
+记录下的 Tile IR 操作。
+
+NumPy 会替你加宽。不这么做，是因为它的规则会在一种情况下错得像对的：对一个方的 `[64, 64]`
+tile 不带 `keepdims` 做归约，NumPy 把 `[64]` 的结果对齐到最后一个轴，于是元素 (i, j) 减去的是
+第 j 行的最大值。这里那种写法同样被拒，每一次加宽都写在发生的地方。
+
+把这一步放进一个沿 key/value 块走的循环，带上一路的最大值和一路的和，就是 FlashAttention：
+`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环，用的是同一批操作。
+[GPU 页](https://dawn-lang.dawnop.com/zh/gpu.html)展示了后端为这种规模的 kernel 记录下来的东西，
+以及它们在设备上的答案是怎么被核对的。
+
+### 格子说不清的时候：`Shared`
+
+`Out` 的格子就是网格，顺序也是网格自己的：块 (i, j) 写第 (i, j) 格。转置打破了这一点，块
+(i, j) 读 `x` 的第 (i, j) 格，写的却是 `out` 的第 (j, i) 个 tile：
+
+```dawn run deps=tileir
+use std/gpu.{F64}
+use std/str
+use tileir/dev.{Dev, Param, load_cell, store, block_id, idx_add, idx_mul, idx_const}
+use tileir/prog.{Arg, trace2, cells, In, Out, Shared}
+
+# 128×64 的矩阵，切成 32×32 的 tile。块 (i, j) 读 `x` 里属于自己的那一格，
+# 转置后写到 64×128 的 `out` 的第 (j, i) 个 tile。
+fn transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let t = load_cell(x)
+  let at = idx_add(idx_mul(block_id(1), idx_const(32 * 128)), idx_mul(block_id(0), idx_const(32)))
+  store(out, at, t, strides: Some([1, 128]))     # out 的步长，对调：布局本身完成转置
+}
+
+fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
+  Some((what, _where)) -> what
+  None -> message
+}
+
+fn try_record(out: Arg[F64]) -> String = {
+  let x = In(F64, cells([128, 64], [32, 32]))     # 4×2 格
+  match catch_panic(() => trace2("transpose", x, out, transpose)) {
+    Ok(_) -> "recorded"
+    Err(e) -> reason(e.message)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  println(try_record(Out(F64, cells([64, 128], [32, 32]))))     # 2×4 格
+  println(try_record(Shared(F64)))
+}
+```
+```output
+tileir: kernel `transpose`: argument 0 (In) has 4 cell(s) in dimension 0, which follows grid axis 0, and the grid has 2 block(s) there
+recorded
+```
+
+按自己的格子声明成 `Out`，`out` 构成 2×4 的网格，`x` 的 4×2 格和它对不上，记录在函数体运行
+之前就拒。`Shared(d)` 是逃生口：kernel 自己寻址的参数，走指针路。这里 `store` 在一个元素偏移处
+写 tile，用的是对调过的 `out` 步长，于是 tile 落下时就转置好了，tile 内部一个元素也没挪。原子
+操作、scatter、一个块写两块区域，都因为同样的理由是 `Shared`，`grep Shared(` 能把它们全找出来。
+没有 `Out` 时网格归调用方：`launch_entry2(entry, x, out, grid: [4, 2])`。
+
+另有两条出路，各一句话。一个 kernel 要用两种形状读同一个 `In`，就用 `retile(p, extent, tile)`
+给它第二个视图。`trace1` 到 `trace5` 记录最多五个参数的 kernel，参数更多时用 `trace_kernel`，
+每个参数都是 `Shared`。
+
+### 上真卡
+
+在 GPU 上跑，换的只是 handler。宿主函数还是格子那一节的那个，`with_gpu_fake` 换成
+`with_gpu_real`，表里每个 kernel 名映到汇编好的模块，而不是参考实现：
+
+<!-- doc-check: skip-check 需要 NVIDIA GPU、它的驱动和 tileiras，CI 上都没有 -->
+```dawn skip-check
+use std/gpu.{Gpu, F64, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/io
+use std/io.{with_fs_real}
+use std/list
+use std/map
+use tileir/dev.{Dev, Param, load_cell, store_cell, addf}
+use tileir/prog.{trace3, cells, In, Out}
+use tileir/bytecode.{encode}
+
+fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+  store_cell(out, addf(load_cell(a), load_cell(b)))
+
+fn add_1000(entry: Entry3[F64, F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+  let xs = list.map(range(0, 1000), i => to_float(i))
+  let a = alloc(F64, 1000)?
+  let b = alloc(F64, 1000)?
+  let out = alloc(F64, 1000)?
+  upload(a, xs)?
+  upload(b, xs)?
+  launch_entry3(entry, a, b, out)?
+  download(out)
+}
+
+pub fn main() -> Unit !io = {
+  let g = cells([1000], [128])
+  let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  let argv = args()
+  if len(argv) == 1 && argv[0] == "encode" {
+    # 这份记录，写成 tileiras 读的字节码
+    println("${with_fs_real(() => io.write_bytes("vadd.tilebc", encode(prog)))}")
+  } else {
+    # tileiras 写出的模块，挂在入口启动时用的名字下
+    match with_fs_real(() => io.read_bytes("vadd.cubin")) {
+      Ok(cubin) -> match with_gpu_real(map.from([("vadd", cubin)]), () => add_1000(entry)) {
+        Ok(ys) -> println("${len(ys)} values, the last is ${ys[999]}")
+        Err(e) -> println("refused: ${e.kind}")
+      }
+      Err(e) -> println("no vadd.cubin: ${e.message}")
+    }
+  }
+}
+```
+
+把这个程序做成项目 `vadd_card`：
+
+```text
+dawn run vadd_card -- encode                         # 写出 vadd.tilebc
+tileiras --gpu-name sm_86 -o vadd.cubin vadd.tilebc
+dawnc run vadd_card                                  # 在卡上启动 vadd
+```
+
+`encode` 写出的就是 `render` 打印的那份记录，格式是 `tileiras` 汇编用的字节码。`--gpu-name` 是
+卡的架构（RTX 30 系列是 `sm_86`）。最后一步需要 C 后端：在 JVM 上 `with_gpu_real` 的每个操作都答
+`gpu.unsupported_backend`。它还需要一个足够新、支持 Tile IR 的 NVIDIA 驱动，以及仓库测试时用的
+那个 `tileiras`；两者都钉在 `scripts/tile-golden/toolchain.txt` 里，
+`scripts/tile-golden/install-tileiras.sh <dir>` 从 wheel 装那个 `tileiras`。在卡上，这个程序应当
+打印假设备在格子那一节打印的东西。如果打印的不一样，就是 kernel 和参考实现不一致，仓库的设备
+门禁就是为了发现这种事；[GPU 页](https://dawn-lang.dawnop.com/zh/gpu.html)讲了这些门禁。
+
+接下来去哪儿：`examples/projects/gpu_fake` 是一个完整程序，多个 kernel 加上它们的宿主一侧。
+`packages/tileir/README.md` 列了参数标记和记录器拒绝的东西，`dawn doc packages/tileir` 打印整个
+API。设计和实测见 [tile-backend-design.md](tile-backend-design.md)。
+
+另见：[spec.md](spec.md) §12.6
 
 ---
 
