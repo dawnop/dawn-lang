@@ -390,11 +390,11 @@ MUTATIONS = {
         "src/lsp/lspc.dawn",
         ((
             '''        if in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos) {
-          return qualified_pattern_constructors(qc, module_alias)
+          return whole(qualified_pattern_constructors(qc, module_alias))
         }
 ''',
             '''        if false {
-          return qualified_pattern_constructors(qc, module_alias)
+          return whole(qualified_pattern_constructors(qc, module_alias))
         }
 ''',
         ),),

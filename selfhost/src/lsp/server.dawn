@@ -41,7 +41,7 @@ use check/checker.{exports_of, visible_bins}
 use check/cx.{ModExports, package_of, exports_seen_by}
 use lsp/lspq.{
   QCx, Target, DocHome, DocHere, DocFile, DocStd, DocSite, DeclAt, ModuleDoc,
-  find_target, typed_trees, inlay_hints, item_doc_site, sig_doc_site, decl_lo_named, resolutions
+  find_target, typed_trees, inlay_hints, item_doc_site, member_name, sig_doc_site, decl_lo_named, resolutions
 }
 use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown, cut_doc}
 use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of, doc_link_spans}
@@ -2450,7 +2450,8 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
           match doc_qcx(st, d, analysis) {
             Some(qc) -> {
               var items: List[Json] = []
-              for it in completions_at(qc, analysis.modules, d.text, pos_offset(d, params)) {
+              let found = completions_at(qc, analysis.modules, d.text, pos_offset(d, params))
+              for it in found.items {
                 var fields: List[(String, Json)] = [("label", JStr(it.label))]
                 fields = fields ++ [("kind", JInt(it.kind))]
                 match it.detail {
@@ -2471,16 +2472,35 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
                     }
                   }
                 }
+                # the `use` line a std name the buffer has not imported needs,
+                # sent with the list: it costs one position per module, and a
+                # client that never resolves still gets a name that compiles
+                # (docs/lsp-auto-import-design.md §5)
+                match it.edit {
+                  Some(e) -> {
+                    fields = fields ++ [
+                      ("labelDetails", jobj([("description", JStr("use ${e.path}"))])),
+                      ("additionalTextEdits", JArr([jobj([
+                        ("range", jrange(d.view, d.ls, e.at, e.at)),
+                        ("newText", JStr(e.text))
+                      ])]))
+                    ]
+                  }
+                  None -> ()
+                }
                 items = items ++ [jobj(fields)]
               }
               # A client that applies `itemDefaults.data` is told the document
-              # once; every item then costs no bytes for its resolve.
+              # once; every item then costs no bytes for its resolve. A list
+              # that is not whole has to say so, which only the object form can.
               if st.default_item_data {
                 jobj([
-                  ("isIncomplete", JBool(false)),
+                  ("isIncomplete", JBool(found.incomplete)),
                   ("itemDefaults", jobj([("data", jobj([("uri", JStr(d.uri))]))])),
                   ("items", JArr(items))
                 ])
+              } else if found.incomplete {
+                jobj([("isIncomplete", JBool(true)), ("items", JArr(items))])
               } else {
                 JArr(items)
               }
@@ -2577,7 +2597,7 @@ fn unloaded_doc(
   let (m, _) = source_parser.parse_module(text)
   let (src, st2) = doc_src_memo(st, key, text)
   if kind == 9 { return (blank_none(module_doc_of(src, m)), st2) }
-  match decl_lo_named(m, label) {
+  match decl_lo_named(m, member_name(label)) {
     Some(lo) -> (doc_in(src, lo), st2)
     None -> (None, st2)
   }
@@ -5099,8 +5119,11 @@ test "a client that applies itemDefaults.data is told the document once" {
       other -> panic("completion replied ${render(other)}")
     }
     let local = list.find(items, it => ostr(it, "label") == "local_fn").expect("local_fn offered")
-    # no item names the document itself; the client fills it in from the default
-    assert list.all(items, it => oget(it, "data") == None)
+    # no item names the document itself; the client fills it in from the
+    # default. Only an item offered out of a module (`docprobe.bare`) carries
+    # data of its own, the module it came from.
+    assert list.all(items, it => oget(it, "data") == None || ostr(get_or_null(it, "data"), "module") != "")
+    assert list.any(items, it => oget(it, "data") == None)
     let filled = with_field(local, "data", jobj([("uri", JStr(d.uri))]))
     assert d7_resolved(st, filled) == "Local and documented."
     # a keyword comes back with the default data as well, and resolves to itself
@@ -5129,6 +5152,103 @@ test "dbg is a builtin the editor offers and explains, and its argument hovers a
     assert def_probe_at(st, d, text, "40", 0).hover == "Int\n40  (0x28)"
     let item = d7_item(st, d, "dbg(", 2, "dbg")
     assert ostr(item, "detail") == "fn dbg[T: Show](x: T) -> T"
+  })))
+}
+
+# ---- std names the buffer has not imported (docs/lsp-auto-import-design.md) ----
+
+## The items of a completion reply of either shape.
+fn ai_items(reply: Json) -> List[Json] =
+  match reply {
+    JArr(xs) -> xs
+    other -> match get_or_null(other, "items") {
+      JArr(xs) -> xs
+      _ -> panic("completion replied ${render(other)}")
+    }
+  }
+
+## The `use` text an item inserts and the position it inserts it at, or "-".
+fn ai_edit(item: Json) -> String =
+  match oget(item, "additionalTextEdits") {
+    Some(JArr([e])) -> {
+      let start = get_or_null(get_or_null(e, "range"), "start")
+      "${oint(start, "line")}:${oint(start, "character")} ${ostr(e, "newText")}"
+    }
+    _ -> "-"
+  }
+
+fn ai_labels(reply: Json) -> List[String] = list.map(ai_items(reply), it => ostr(it, "label"))
+
+test "a std name the buffer has not imported is offered with the use it needs" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st0 = def_probe_state(std)
+    let doc = (name: String, text: String) => {
+      let d = def_probe_doc_named(st0, name, text)
+      (LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }, d)
+    }
+    # bare word: `tri` offers `str.trim`, with `use std/str` above the code
+    let (st, d) = doc("aibare.dawn", "# Head.\n\npub fn main() -> Unit !io = {\n  let a = tri\n}\n")
+    let bare = handle_completion(st, d7_params(d, "tri\n", 3))
+    let trim = d7_item_in(bare, "str.trim")
+    assert ai_edit(trim) == "2:0 use std/str\n\n"
+    assert ostr(trim, "sortText") == "4str.trim"
+    assert ostr(get_or_null(trim, "labelDetails"), "description") == "use std/str"
+    assert ostr(trim, "detail") == "fn trim(s: String) -> String"
+    # only names whose member or alias starts with the word's first letter
+    assert not list.contains(ai_labels(bare), "str.split")
+    assert list.contains(ai_labels(bare), "list.take")
+    # the item resolves to std's doc, under its qualified label
+    assert d7_resolved(st, trim) == "`s` without leading or trailing whitespace."
+    # imported: the same name, no edit, ranked with the prelude
+    let (st2, d2) = doc("aiused.dawn", "use std/list\nuse std/str\n\npub fn main() -> Unit !io = {\n  let a = tri\n}\n")
+    let used = d7_item_in(handle_completion(st2, d7_params(d2, "tri\n", 3)), "str.trim")
+    assert ai_edit(used) == "-" && ostr(used, "sortText") == "2str.trim"
+    # an unimported module goes in sorted place among sorted std imports
+    let (st3, d3) = doc("aisorted.dawn", "use std/list\nuse std/str\n\npub fn main() -> Unit !io = {\n  let a = ma\n}\n")
+    assert ai_edit(d7_item_in(handle_completion(st3, d7_params(d3, "ma\n", 2)), "map.get")) == "1:0 use std/map\n"
+    # no word yet: no module names, and the list says it is not whole
+    let empty = handle_completion(st, d7_params(d, "tri\n", 0))
+    assert get_or_null(empty, "isIncomplete") == JBool(true)
+    assert not list.any(ai_labels(empty), l => str.contains(l, "."))
+    assert get_or_null(bare, "isIncomplete") == JNull
+  })))
+}
+
+test "after alias dot, the module's members, with the use when it is missing" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st0 = def_probe_state(std)
+    let doc = (name: String, text: String) => {
+      let d = def_probe_doc_named(st0, name, text)
+      (LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }, d)
+    }
+    let (st, d) = doc("aidot.dawn", "pub fn main() -> Unit !io = {\n  let a = str.\n}\n")
+    let trim = d7_item_in(handle_completion(st, d7_params(d, "str.", 4)), "trim")
+    assert ai_edit(trim) == "0:0 use std/str\n\n"
+    assert ostr(get_or_null(trim, "data"), "module") == "std/str"
+    assert d7_resolved(st, trim) == "`s` without leading or trailing whitespace."
+    # imported, renamed: the alias it is imported as, and no edit
+    let (st2, d2) = doc("aidotas.dawn", "use std/str as s\n\npub fn main() -> Unit !io = {\n  let a = s.\n}\n")
+    assert ai_edit(d7_item_in(handle_completion(st2, d7_params(d2, "s.\n", 2)), "trim")) == "-"
+    # renamed, `str.` is no longer the module: adding a second use would not compile
+    let (st3, d3) = doc("aidotas2.dawn", "use std/str as s\n\npub fn main() -> Unit !io = {\n  let a = str.\n}\n")
+    assert ai_items(handle_completion(st3, d7_params(d3, "str.\n", 4))) == []
+    # a local of that name: its fields, not the module's members
+    let (st4, d4) = doc("aidotlocal.dawn", "pub fn f(str: String) -> Int = {\n  str.\n  0\n}\n")
+    assert ai_items(handle_completion(st4, d7_params(d4, "str.\n", 4))) == []
+    # even when the module is imported under that alias: the local shadows it
+    let (st6, d6) = doc("aidotshadow.dawn", "use std/str\n\npub fn f(str: String) -> Int = {\n  str.\n  0\n}\n")
+    assert ai_items(handle_completion(st6, d7_params(d6, "str.\n", 4))) == []
+    # not a module std has
+    let (st5, d5) = doc("aidotnone.dawn", "pub fn main() -> Unit !io = {\n  let a = nosuch.\n}\n")
+    assert ai_items(handle_completion(st5, d7_params(d5, "nosuch.", 7))) == []
   })))
 }
 

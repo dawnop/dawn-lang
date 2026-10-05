@@ -333,6 +333,10 @@ def lsp_results(jar):
     out = {}
     for frame_id, name in ids.items():
         result = frames[frame_id]
+        # a list not yet whole comes as a CompletionList (`isIncomplete`):
+        # an empty word, as in `root` (docs/lsp-auto-import-design.md)
+        if isinstance(result, dict):
+            result = result.get("items")
         if not isinstance(result, list):
             return None
         out[name] = {item.get("label") for item in result}

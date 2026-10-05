@@ -77,6 +77,10 @@ LSP 在线且本页从未离线过时，静态半边里没有 builtin 表，于�
 写了 `use` 之后两者都由服务端给出。本页离线过一次（表已加载）之后，在线补全照旧与表合并，与刀 1 之前一致。
 这是裁决 3c 的直接后果（表只在 LSP 不可用时加载），换来的是下表的首屏体积。
 
+> 2026-10-05 补记：上面两项已由服务端补回，见 [lsp-auto-import-design.md](lsp-auto-import-design.md)：
+> 裸词给 `str.trim`、`str.` 给成员，各带插入 `use` 的 `additionalTextEdits`，play-ui 在同一个事务里应用。
+> 那篇 §1 也记了：改前「写了 `use` 之后由服务端给出」并不成立，服务端在 `.` 之后一律返回空、裸词也不给限定名。
+
 ### 3.5 体积实测
 
 方法：基点 main `4734d08c` 与本刀，各自在 `site/play-ui` 里 `npm ci && npm run build`（Vite 6.4.3），
@@ -124,7 +128,7 @@ LSP 在线且本页从未离线过时，静态半边里没有 builtin 表，于�
   二者都是已上线行为。补全源留手写，刀 2 只把它改挂到 `LSPPlugin` 的 client 上。
 - **不引 DOMPurify**：+11.4 KiB gzip；文档 markdown 只来自服务端，标签集合小，自写白名单够用（刀 2）。
 - **LSP 在线时不为补回未导入的模块限定名而拉表**：那会让表在每次页面加载后都被下载，裁决 3c 就不成立了。
-  需要它的读者写一行 `use` 即可得到服务端的成员补全（§3.4）。
+  需要它的读者写一行 `use` 即可得到服务端的成员补全（§3.4）。（2026-10-05 起不用写：服务端自己给，附 `use` 编辑，见 [lsp-auto-import-design.md](lsp-auto-import-design.md)。）
 - **不在空闲时预取表**：理由同上；只在 `fallback` 时预取。
 - **不放行 documentHighlight、declaration、typeDefinition、implementation**：lsp-client 不默认发前者，
   服务端未实现后三者（调研 §8）。
