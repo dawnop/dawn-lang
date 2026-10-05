@@ -412,7 +412,7 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 ### 2026-10-05 起 CI 的 C 编译器换成 clang 18，输入包仍是 gcc 13.3
 
-裁决 ffi-llvm 4.b 把 CI 与发布行的 C 编译器钉到 runner 镜像自带的 clang 18.1.3：每个编 C 的 gate job 与 release.yml 的发布 job 开头一步 `scripts/pinned-cc.sh`，按版本核对后把 `CC` 写进 `GITHUB_ENV`。上面「先看 CI 实际用什么」那段描述的是这之前的状态；`wasm-target` 的 C driver 一步与 `java-target-classpath-contract` 也改成了 `${CC:-cc}`。nightly 的 native-asan 暂不钉：clang 的 UBSan 带 `-fsanitize=function`，在每个 native 测试二进制上报同一处真实的未定义行为（`ctestrun` 生成的测试 thunk 签名与 `dawn_run_caught` 的调用类型不符），修它要动 `selfhost/src/c`，见 nightly.yml 该 job 的注释。
+裁决 ffi-llvm 4.b 把 CI 与发布行的 C 编译器钉到 runner 镜像自带的 clang 18.1.3：每个编 C 的 gate job 与 release.yml 的发布 job 开头一步 `scripts/pinned-cc.sh`，按版本核对后把 `CC` 写进 `GITHUB_ENV`。上面「先看 CI 实际用什么」那段描述的是这之前的状态；`wasm-target` 的 C driver 一步与 `java-target-classpath-contract` 也改成了 `${CC:-cc}`。nightly 的 native-asan 暂不钉：clang 的 UBSan 带 `-fsanitize=function`，在每个 native 测试二进制上报同一处真实的未定义行为（`ctestrun` 生成的测试 thunk 签名与 `dawn_run_caught` 的调用类型不符），修它要动 `selfhost/src/c`，见 nightly.yml 该 job 的注释。#502（660fda19）修好后，native-asan 也加了同一步 `pinned-cc.sh`：clang 在那里还是更强的检查器，gcc 的 UBSan 不查间接调用的函数类型，#502 正是这样在 gcc 下漏过去的。
 
 这一步只在 `GITHUB_ACTIONS=true` 时生效，外部运行不设这个变量，所以 prefix 里的 job 照旧用输入包的 gcc 13.3，`toolchain.cc` 也照旧如实记 gcc。这是有意的：给输入包加 conda-forge 的 clang 要动锁与 MANIFEST（共享 prefix 也被别的分支的工具核验），且同「不进替换表」一节的理由，不能靠加替换行表达。代价是外部证据与 GitHub 上的 main push 用的编译器不同：一个只在 clang 下红的改动，PR 证据档看不见，要到 main push 才红。要收这个口子，做法是把 clang 18.1.x 作为第二个 conda 工具链进输入包、`pinned-cc.sh` 在 prefix 里认它，另起一刀。
 
