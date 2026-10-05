@@ -2,11 +2,20 @@
 #   fn(handler) -> handler
 # composed by serve_app with the first element outermost. No registry, no
 # annotations — wrapping a function is the whole mechanism.
+#
+# The access log times a request on std/io's monotonic clock, installed inside
+# the handler `with_logging` returns. `Handler` is a function type whose row
+# is `!io`, so a handler can only read `!Clock` under a handler of its own.
+# Putting `!Clock` on that row instead would change `Handler` and make every
+# application install `with_clock_real` around its handler stack, for a
+# reading only this middleware takes. Installed here, it is one handler frame
+# per logged request.
+use std/io
+use std/io.{Clock}
 use std/str
 use std/bytes
 use std/list
 use std/map
-use java "java.lang.System"
 use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error, response_status, response_headers, response_body, log_request}
 
 ## One access-log line per request: method, path, status, wall time. The
@@ -14,9 +23,7 @@ use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, 
 ## line break into the log.
 pub fn with_logging(next: Handler) -> Handler =
   req => {
-    let started = System.nanoTime()
-    let out = next(req)
-    let ms = (System.nanoTime() - started) / 1000000
+    let (out, ms) = io.with_clock_real(() => timed(next, req))
     let status = match out {
       Ok(r) -> response_status(r)
       Err(e) -> e.status
@@ -24,6 +31,15 @@ pub fn with_logging(next: Handler) -> Handler =
     println(access_line(req, status, ms))
     out
   }
+
+# The answer and how many whole milliseconds it took, on the monotonic clock:
+# the wall clock can be set while a request runs, and a duration read off it
+# is then negative or a spike. Its own function so a test can answer `Clock`.
+fn timed(next: Handler, req: Request) -> (Result[Response, HttpError], Int) !io !Clock = {
+  let started = io.now()
+  let out = next(req)
+  (out, io.elapsed_ns(started, io.now()) / 1_000_000)
+}
 
 fn access_line(req: Request, status: Int, ms: Int) -> String =
   "${log_request(req.method, req.raw_path)} -> ${status} (${ms}ms)"
@@ -346,6 +362,45 @@ test "a limit of zero or less is refused where the middleware is built" {
     Err(e) -> { assert e.status == 413 }
     Ok(_) -> { assert false }
   }
+}
+
+test "the access log times a request on the clock it is given" {
+  let req = req_of("GET", map.empty())
+  # each reading 7.5 ms after the last: the handler took 7.5 ms, logged as 7
+  with handle Clock {
+    var reads: Int = 0
+    clock_wall_ns() => 0
+    clock_mono() => {
+      reads = reads + 1
+      io.instant_at_ns(reads * 7_500_000)
+    }
+  }
+  let (out, ms) = timed(ok_handler, req)
+  assert ms == 7
+  match out {
+    Ok(r) -> { assert response_status(r) == 200 }
+    Err(_) -> { assert false }
+  }
+  # the error branch is timed the same way
+  let (failed, ms2) = timed(failing_handler, req)
+  assert ms2 == 7
+  match failed {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.status == 404 }
+  }
+}
+
+test "a clock that steps back logs no time, not negative time" {
+  with handle Clock {
+    var reads: Int = 0
+    clock_wall_ns() => 0
+    clock_mono() => {
+      reads = reads + 1
+      io.instant_at_ns(-reads * 3_000_000)
+    }
+  }
+  let (_, ms) = timed(ok_handler, req_of("GET", map.empty()))
+  assert ms == 0
 }
 
 test "an encoded line break in the path stays one access-log line" {
