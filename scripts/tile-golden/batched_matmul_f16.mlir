@@ -60,30 +60,14 @@ cuda_tile.module @m {
       %69 = mmaf %47, %67, %27 : tile<16x16xf16>, tile<16x16xf16>, tile<16x16xf16>
       continue %69, %68 : tile<16x16xf16>, token
     }
-    %70 = constant <i32: 1024> : tile<i32>
-    %71 = muli %9, %70 : tile<i32>
-    %72 = constant <i32: 512> : tile<i32>
-    %73 = muli %1, %72 : tile<i32>
-    %74 = addi %71, %73 : tile<i32>
-    %75 = constant <i32: 16> : tile<i32>
-    %76 = muli %5, %75 : tile<i32>
-    %77 = addi %74, %76 : tile<i32>
-    %78 = reshape %77 : tile<i32> -> tile<1x1xi32>
-    %79 = broadcast %78 : tile<1x1xi32> -> tile<16x16xi32>
-    %80 = iota : tile<16xi32>
-    %81 = reshape %80 : tile<16xi32> -> tile<16x1xi32>
-    %82 = broadcast %81 : tile<16x1xi32> -> tile<16x16xi32>
-    %83 = constant <i32: 32> : tile<16x16xi32>
-    %84 = muli %82, %83 : tile<16x16xi32>
-    %85 = addi %79, %84 : tile<16x16xi32>
-    %86 = iota : tile<16xi32>
-    %87 = reshape %86 : tile<16xi32> -> tile<1x16xi32>
-    %88 = broadcast %87 : tile<1x16xi32> -> tile<16x16xi32>
-    %89 = addi %85, %88 : tile<16x16xi32>
-    %90 = reshape %arg2 : tile<ptr<f16>> -> tile<1x1xptr<f16>>
-    %91 = broadcast %90 : tile<1x1xptr<f16>> -> tile<16x16xptr<f16>>
-    %92 = offset %91, %89 : tile<16x16xptr<f16>>, tile<16x16xi32> -> tile<16x16xptr<f16>>
-    %93 = store_ptr_tko weak %92, %24 token=%25 : tile<16x16xptr<f16>>, tile<16x16xf16> -> token
+    %70 = reshape %24 : tile<16x16xf16> -> tile<1x16x16xf16>
+    %71 = assume div_by<16>, %arg2 : tile<ptr<f16>>
+    %72 = make_tensor_view %71, shape = [2, 32, 32], strides = [1024, 32, 1] : tensor_view<2x32x32xf16, strides=[1024, 32, 1]>
+    %73 = make_partition_view %72 : partition_view<tile=(1x16x16), padding_value = zero, tensor_view<2x32x32xf16, strides=[1024, 32, 1]>, dim_map=[0, 1, 2]>
+    %74, %75, %76 = get_tile_block_id : tile<i32>
+    %77, %78, %79 = get_tile_block_id : tile<i32>
+    %80, %81, %82 = get_tile_block_id : tile<i32>
+    %83 = store_view_tko weak %70, %73[%76, %77, %81] token=%25 : tile<1x16x16xf16>, partition_view<tile=(1x16x16), padding_value = zero, tensor_view<2x32x32xf16, strides=[1024, 32, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> token
     return
   }
 }

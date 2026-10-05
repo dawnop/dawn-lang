@@ -1,75 +1,54 @@
 cuda_tile.module @m {
   entry @dtype_i64(%arg0: tile<ptr<i64>>, %arg1: tile<ptr<i64>>, %arg2: tile<ptr<i64>>) {
     %0 = make_token : token
-    %1, %2, %3 = get_tile_block_id : tile<i32>
-    %4 = constant <i32: 128> : tile<i32>
-    %5 = muli %1, %4 : tile<i32>
-    %6 = assume div_by<16>, %arg0 : tile<ptr<i64>>
-    %7 = make_tensor_view %6, shape = [512], strides = [1] : tensor_view<512xi64, strides=[1]>
-    %8 = make_partition_view %7 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>
-    %9, %10, %11 = get_tile_block_id : tile<i32>
-    %12, %13 = load_view_tko weak %8[%9] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xi64>, token
-    %14 = assume div_by<16>, %arg1 : tile<ptr<i64>>
-    %15 = make_tensor_view %14, shape = [512], strides = [1] : tensor_view<512xi64, strides=[1]>
-    %16 = make_partition_view %15 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>
-    %17, %18 = load_view_tko weak %16[%9] token=%13 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xi64>, token
-    %19 = constant <i32: 0> : tile<i32>
-    %20 = addi %5, %19 : tile<i32>
-    %21 = addi %12, %17 : tile<128xi64>
-    %22 = reshape %20 : tile<i32> -> tile<1xi32>
-    %23 = broadcast %22 : tile<1xi32> -> tile<128xi32>
-    %24 = iota : tile<128xi32>
-    %25 = addi %23, %24 : tile<128xi32>
-    %26 = reshape %arg2 : tile<ptr<i64>> -> tile<1xptr<i64>>
-    %27 = broadcast %26 : tile<1xptr<i64>> -> tile<128xptr<i64>>
-    %28 = offset %27, %25 : tile<128xptr<i64>>, tile<128xi32> -> tile<128xptr<i64>>
-    %29 = store_ptr_tko weak %28, %21 token=%18 : tile<128xptr<i64>>, tile<128xi64> -> token
-    %30 = constant <i32: 512> : tile<i32>
-    %31 = addi %5, %30 : tile<i32>
-    %32 = subi %12, %17 : tile<128xi64>
-    %33 = reshape %31 : tile<i32> -> tile<1xi32>
-    %34 = broadcast %33 : tile<1xi32> -> tile<128xi32>
-    %35 = iota : tile<128xi32>
-    %36 = addi %34, %35 : tile<128xi32>
-    %37 = reshape %arg2 : tile<ptr<i64>> -> tile<1xptr<i64>>
-    %38 = broadcast %37 : tile<1xptr<i64>> -> tile<128xptr<i64>>
-    %39 = offset %38, %36 : tile<128xptr<i64>>, tile<128xi32> -> tile<128xptr<i64>>
-    %40 = store_ptr_tko weak %39, %32 token=%29 : tile<128xptr<i64>>, tile<128xi64> -> token
-    %41 = constant <i32: 1024> : tile<i32>
-    %42 = addi %5, %41 : tile<i32>
-    %43 = muli %12, %17 : tile<128xi64>
-    %44 = reshape %42 : tile<i32> -> tile<1xi32>
-    %45 = broadcast %44 : tile<1xi32> -> tile<128xi32>
-    %46 = iota : tile<128xi32>
-    %47 = addi %45, %46 : tile<128xi32>
-    %48 = reshape %arg2 : tile<ptr<i64>> -> tile<1xptr<i64>>
-    %49 = broadcast %48 : tile<1xptr<i64>> -> tile<128xptr<i64>>
-    %50 = offset %49, %47 : tile<128xptr<i64>>, tile<128xi32> -> tile<128xptr<i64>>
-    %51 = store_ptr_tko weak %50, %43 token=%40 : tile<128xptr<i64>>, tile<128xi64> -> token
-    %52 = constant <i32: 1536> : tile<i32>
-    %53 = addi %5, %52 : tile<i32>
-    %54 = constant <i64: 4294967296> : tile<128xi64>
-    %55 = addi %12, %54 : tile<128xi64>
-    %56 = reshape %53 : tile<i32> -> tile<1xi32>
-    %57 = broadcast %56 : tile<1xi32> -> tile<128xi32>
-    %58 = iota : tile<128xi32>
-    %59 = addi %57, %58 : tile<128xi32>
-    %60 = reshape %arg2 : tile<ptr<i64>> -> tile<1xptr<i64>>
-    %61 = broadcast %60 : tile<1xptr<i64>> -> tile<128xptr<i64>>
-    %62 = offset %61, %59 : tile<128xptr<i64>>, tile<128xi32> -> tile<128xptr<i64>>
-    %63 = store_ptr_tko weak %62, %55 token=%51 : tile<128xptr<i64>>, tile<128xi64> -> token
-    %64 = constant <i32: 2048> : tile<i32>
-    %65 = addi %5, %64 : tile<i32>
-    %66 = itof %12 signed rounding<nearest_even> : tile<128xi64> -> tile<128xf64>
-    %67 = ftoi %66 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi64>
-    %68 = reshape %65 : tile<i32> -> tile<1xi32>
-    %69 = broadcast %68 : tile<1xi32> -> tile<128xi32>
-    %70 = iota : tile<128xi32>
-    %71 = addi %69, %70 : tile<128xi32>
-    %72 = reshape %arg2 : tile<ptr<i64>> -> tile<1xptr<i64>>
-    %73 = broadcast %72 : tile<1xptr<i64>> -> tile<128xptr<i64>>
-    %74 = offset %73, %71 : tile<128xptr<i64>>, tile<128xi32> -> tile<128xptr<i64>>
-    %75 = store_ptr_tko weak %74, %67 token=%63 : tile<128xptr<i64>>, tile<128xi64> -> token
+    %1 = assume div_by<16>, %arg0 : tile<ptr<i64>>
+    %2 = make_tensor_view %1, shape = [512], strides = [1] : tensor_view<512xi64, strides=[1]>
+    %3 = make_partition_view %2 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>
+    %4, %5, %6 = get_tile_block_id : tile<i32>
+    %7, %8 = load_view_tko weak %3[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xi64>, token
+    %9 = assume div_by<16>, %arg1 : tile<ptr<i64>>
+    %10 = make_tensor_view %9, shape = [512], strides = [1] : tensor_view<512xi64, strides=[1]>
+    %11 = make_partition_view %10 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>
+    %12, %13 = load_view_tko weak %11[%4] token=%8 : partition_view<tile=(128), padding_value = zero, tensor_view<512xi64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xi64>, token
+    %14 = addi %7, %12 : tile<128xi64>
+    %15 = reshape %14 : tile<128xi64> -> tile<1x128xi64>
+    %16 = assume div_by<16>, %arg2 : tile<ptr<i64>>
+    %17 = make_tensor_view %16, shape = [5, 512], strides = [512, 1] : tensor_view<5x512xi64, strides=[512, 1]>
+    %18 = make_partition_view %17 : partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi64, strides=[512, 1]>, dim_map=[0, 1]>
+    %19, %20, %21 = get_tile_block_id : tile<i32>
+    %22 = constant <i32: 8> : tile<i32>
+    %23 = muli %20, %22 : tile<i32>
+    %24 = store_view_tko weak %15, %18[%23, %4] token=%13 : tile<1x128xi64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %25 = subi %7, %12 : tile<128xi64>
+    %26 = reshape %25 : tile<128xi64> -> tile<1x128xi64>
+    %27 = constant <i32: 8> : tile<i32>
+    %28 = muli %20, %27 : tile<i32>
+    %29 = constant <i32: 1> : tile<i32>
+    %30 = addi %28, %29 : tile<i32>
+    %31 = store_view_tko weak %26, %18[%30, %4] token=%24 : tile<1x128xi64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %32 = muli %7, %12 : tile<128xi64>
+    %33 = reshape %32 : tile<128xi64> -> tile<1x128xi64>
+    %34 = constant <i32: 8> : tile<i32>
+    %35 = muli %20, %34 : tile<i32>
+    %36 = constant <i32: 2> : tile<i32>
+    %37 = addi %35, %36 : tile<i32>
+    %38 = store_view_tko weak %33, %18[%37, %4] token=%31 : tile<1x128xi64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %39 = constant <i64: 4294967296> : tile<128xi64>
+    %40 = addi %7, %39 : tile<128xi64>
+    %41 = reshape %40 : tile<128xi64> -> tile<1x128xi64>
+    %42 = constant <i32: 8> : tile<i32>
+    %43 = muli %20, %42 : tile<i32>
+    %44 = constant <i32: 3> : tile<i32>
+    %45 = addi %43, %44 : tile<i32>
+    %46 = store_view_tko weak %41, %18[%45, %4] token=%38 : tile<1x128xi64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %47 = itof %7 signed rounding<nearest_even> : tile<128xi64> -> tile<128xf64>
+    %48 = ftoi %47 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi64>
+    %49 = reshape %48 : tile<128xi64> -> tile<1x128xi64>
+    %50 = constant <i32: 8> : tile<i32>
+    %51 = muli %20, %50 : tile<i32>
+    %52 = constant <i32: 4> : tile<i32>
+    %53 = addi %51, %52 : tile<i32>
+    %54 = store_view_tko weak %49, %18[%53, %4] token=%46 : tile<1x128xi64>, partition_view<tile=(1x128), padding_value = zero, tensor_view<5x512xi64, strides=[512, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }
