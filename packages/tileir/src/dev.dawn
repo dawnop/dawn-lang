@@ -1086,14 +1086,37 @@ fn shape_of(h: Int) -> List[Int] !Dev = {
 }
 
 # The shape an element-wise operation over the handles `hs` declares: the
-# first operand of rank one or more, or rank 0 when every one is. A rank-0
-# operand beside a wider one is widened by the recording (the rank-0 rule),
-# and any other disagreement is refused there, by number and name.
+# first operand of rank one or more, or rank 0 when every one is, with each
+# of its dimensions of length 1 taken from a later operand of the same rank
+# (tileir 0.8.2). A rank-0 operand beside a wider one is widened by the
+# recording (the rank-0 rule), so is a same-rank one whose other dimensions
+# agree (the same-rank rule), and any other disagreement is refused there,
+# by number and name.
 fn wider(hs: List[Int]) -> List[Int] !Dev = {
   var out: List[Int] = []
   for h in hs {
+    let s = shape_of(h)
     if len(out) == 0 {
-      out = shape_of(h)
+      out = s
+    } else if len(s) == len(out) {
+      let was = out
+      out = list.map(range(0, len(was)), k => if was[k] == 1 { s[k] } else { was[k] })
+    } else {
+      ()
+    }
+  }
+  out
+}
+
+# The format an element-wise operation over the handles `hs` is of: the
+# first operand's that has one. Only a `lit` has none (`""`); it takes the
+# operation's, and an operation of nothing but `lit`s is refused by the
+# recording, which cannot give it one.
+fn format_of(hs: List[Int]) -> String !Dev = {
+  var out = ""
+  for h in hs {
+    if out == "" {
+      out = dtype_of(h)
     } else {
       ()
     }
@@ -1209,7 +1232,7 @@ pub fn atomic_cas[D](p: Param[D], index: Tile[I32], cmp: Tile[D], v: Tile[D],
 fn binary[D](op: String, a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = {
   let x: Int = a
   let y: Int = b
-  let h: Tile[D] = t_binaryf(op, dtype_of(x), wider([x, y]), x, y)
+  let h: Tile[D] = t_binaryf(op, format_of([x, y]), wider([x, y]), x, y)
   h
 }
 
@@ -1223,7 +1246,7 @@ fn unary[D](op: String, a: Tile[D]) -> Tile[D] !Dev = {
 fn compare[D](pred: String, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = {
   let x: Int = a
   let y: Int = b
-  let h: Tile[I1] = t_cmpf(pred, dtype_of(x), wider([x, y]), x, y)
+  let h: Tile[I1] = t_cmpf(pred, format_of([x, y]), wider([x, y]), x, y)
   h
 }
 
@@ -1511,7 +1534,7 @@ pub fn fma[D](a: Tile[D], b: Tile[D], c: Tile[D]) -> Tile[D] !Dev = called("fma"
   let x: Int = a
   let y: Int = b
   let z: Int = c
-  let h: Tile[D] = t_fma(dtype_of(x), wider([x, y, z]), x, y, z)
+  let h: Tile[D] = t_fma(format_of([x, y, z]), wider([x, y, z]), x, y, z)
   h
 })
 
@@ -1669,6 +1692,22 @@ pub fn mmai(a: Tile[I8], b: Tile[I8], c: Tile[I32]) -> Tile[I32] !Dev = called("
 ## recorded, which is what a host `Float` in a kernel body means.
 pub fn f_const[D: Dtype](d: D, value: Float) -> Tile[D] !Dev = called("f_const", () => {
   let h: Tile[D] = t_constf(dtype_name(d), [], value)
+  h
+})
+
+## A float constant with no format of its own: `mul(s, lit(0.5))` is
+## `mul(s, f_const(F64, 0.5))` when `s` is a `Tile[F64]` and
+## `mul(s, f_const(F32, 0.5))` when it is a `Tile[F32]` (tileir 0.8.2). As
+## a constant's shape is the use's, so is its format: the recording makes
+## it where it meets an element-wise operation, of that operation's format
+## (JAX calls this a weakly typed constant). `D` is found from what the
+## call is checked against, so `lit` is written after a typed operand
+## (`mul(s, lit(0.5))`, not `mul(lit(0.5), s)`) or under an annotation.
+## A place that needs a format of its own -- a `broadcast`, a reduction, a
+## loop's starting value, a store, an integer operation -- refuses a `lit`
+## by name and says to write `f_const` there.
+pub fn lit[D](value: Float) -> Tile[D] !Dev = called("lit", () => {
+  let h: Tile[D] = t_constf("", [], value)
   h
 })
 
@@ -2154,7 +2193,7 @@ pub fn select[D](cond: Tile[I1], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = calle
   let c: Int = cond
   let x: Int = a
   let y: Int = b
-  let h: Tile[D] = t_select(dtype_of(x), wider([x, y, c]), c, x, y)
+  let h: Tile[D] = t_select(format_of([x, y]), wider([x, y, c]), c, x, y)
   h
 })
 
@@ -2181,6 +2220,26 @@ pub fn idx_mul(a: Idx, b: Idx) -> Idx !Dev = called("idx_mul", () => {
   let h: Idx = t_idx_mul(x, y)
   h
 })
+
+# ---- index arithmetic beyond the sum and the product (tileir 0.8.2) ----
+#
+# A grid has three axes, and a kernel over batches x heads x row blocks x
+# groups folds two of them into one; reading them back out is a division
+# and a remainder, which until 0.8.2 an `Idx` did not have. These are the
+# i32 operations `div_i`, `rem_i` and `sub_i` already issue, on the rank-0
+# i32 tile an `Idx` is (`idx_as_tile`): nothing new reaches the device. The
+# division and the remainder are SIGNED and round toward zero, as Tile IR's
+# `divi`/`remi` signed are; every index a grid or a cell count produces is
+# non-negative, where that is the floor.
+
+## The quotient `a / b` of two index tiles, rounded toward zero.
+pub fn idx_div(a: Idx, b: Idx) -> Idx !Dev = called("idx_div", () => idx_of(binary_int("divi", idx_as_tile(a), idx_as_tile(b))))
+
+## The remainder of `a / b`, of `a`'s sign.
+pub fn idx_rem(a: Idx, b: Idx) -> Idx !Dev = called("idx_rem", () => idx_of(binary_int("remi", idx_as_tile(a), idx_as_tile(b))))
+
+## The difference `a - b` of two index tiles.
+pub fn idx_sub(a: Idx, b: Idx) -> Idx !Dev = called("idx_sub", () => idx_of(binary_int("subi", idx_as_tile(a), idx_as_tile(b))))
 
 # A `for` over the index range `[lower, upper)` by `step` with `carried` as
 # the loop-carried handles: `body` runs ONCE, on the host, with the induction

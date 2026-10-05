@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 2dcc2f0d343852b8 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 221c24de63747f9f -->
 
 # Dawn 教程
 
@@ -1712,8 +1712,8 @@ tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written throu
 ```
 
 `adds_one` 给 128 个 lane 的 tile 加一个常量。常量是 0 阶的（`f_const(F64, 1.0)` 没有形状），
-0 阶 tile 遇到更宽的就自己加宽。不用开口要就会发生的加宽只有这一种：`adds_two_shapes` 先把常量
-加宽到 64 个 lane，再碰上 128，于是被拒。`writes_its_input` 往 `In` 里写。`stores_by_pointer`
+0 阶 tile 遇到更宽的就自己加宽。除它之外，不用开口要就会加宽的只有长度为 1 的维（下面的按行
+归约会用到）：`adds_two_shapes` 先把常量加宽到 64 个 lane，再碰上 128，于是被拒。`writes_its_input` 往 `In` 里写。`stores_by_pointer`
 走指针路写自己的 `Out`，在一个元素偏移处 `store`，偏移甚至是对的。它照样被拒：`Out` 只经它的
 格子写（`store_cell`，或者写一格中一块的 `store_sub`），别的写法一概不行，这样「块 `i` 写第
 `i` 格」就一直是记录器查的事，而不是读代码的人查的事。要写到别处的 kernel 把参数声明成
@@ -1834,29 +1834,27 @@ continue %26, %25 : tile<64x64xf64>, token
 循环体和 kernel 体一样只跑了一次：记录里是一个 `for` 区域，八趟由设备去跑。这个区域在累加器
 旁边还带着第二个值，token。内存操作的先后由记录器串起来的 token 链决定，不由程序文本的先后决定。
 
-### 按行归约：keepdims 与 broadcast
+### 按行归约：keepdims
 
 二维时，归约要选一维来做。这里每个块拿 32 行、每行 64 个分数，把每一行变成 softmax：
 
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum,
-  broadcast}
+use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum}
 use tileir/prog.{trace2, cells, In, Out}
 
 fn row_softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let s = load_cell(x)                                          # [32, 64]
-  let m = broadcast(reduce_max(s, keepdims: true), [32, 64])    # [32, 1]，再到 [32, 64]
-  let p = exp(sub(s, m))
-  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+  let s = load_cell(x)                                   # [32, 64]
+  let p = exp(sub(s, reduce_max(s, keepdims: true)))     # [32, 1]，加宽到 [32, 64]
+  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
 }
 
-# 同一个 kernel，去掉了第一个 `broadcast`。
-fn row_softmax_unbroadcast(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+# 同一个 kernel，去掉了第一个 `keepdims`。
+fn row_softmax_dropped(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = load_cell(x)
-  let p = exp(sub(s, reduce_max(s, keepdims: true)))
-  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+  let p = exp(sub(s, reduce_max(s)))                     # [32]
+  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
 }
 
 fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
@@ -1874,22 +1872,24 @@ fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
 
 pub fn main() -> Unit !io = {
   println(try_record(row_softmax))
-  println(try_record(row_softmax_unbroadcast))
+  println(try_record(row_softmax_dropped))
 }
 ```
 ```output
 recorded
-tileir: kernel `row_softmax`: op #10 `subf`: rhs is tile<32x1xf64>, declared tile<32x64xf64>
+tileir: kernel `row_softmax`: op #9 `subf`: rhs is tile<32xf64>, declared tile<32x64xf64>
 ```
 
 `reduce_max(s, keepdims: true)` 归约最后一维（默认 `dim: -1`），并把这一维留成长度 1：得到
-`[32, 1]` 的 tile，每行一个最大值。把它加宽回 `[32, 64]` 要用 `broadcast` 写出来，因为只有 0 阶
-tile 会自己加宽。第二个 kernel 去掉了 `broadcast`，在减法处被拒；拒绝里写的是 `subf`，即 `sub`
-记录下的 Tile IR 操作。
+`[32, 1]` 的 tile，每行一个最大值。它在 `sub` 里遇到 `[32, 64]` 的 tile，长度为 1 的那一维加宽到 64。
+规则就这一条：逐元素操作的操作数与操作同阶时，沿长度为 1 的维加宽；0 阶 tile 加宽到任何形状。
+第二个 kernel 去掉了 `keepdims`，最大值成了 `[32]`，阶不同，在减法处被拒；拒绝里写的是 `subf`，
+即 `sub` 记录下的 Tile IR 操作。`broadcast(t, shape)` 是显式写法，用在不是逐元素操作的地方，比如
+循环的初值。
 
-NumPy 会替你加宽。不这么做，是因为它的规则会在一种情况下错得像对的：对一个方的 `[64, 64]`
-tile 不带 `keepdims` 做归约，NumPy 把 `[64]` 的结果对齐到最后一个轴，于是元素 (i, j) 减去的是
-第 j 行的最大值。这里那种写法同样被拒，每一次加宽都写在发生的地方。
+NumPy 连 `[32]` 也会替你加宽。不这么做，是因为它的规则会在一种情况下错得像对的：对一个方的
+`[64, 64]` tile 不带 `keepdims` 做归约，NumPy 把 `[64]` 的结果对齐到最后一个轴，于是元素 (i, j)
+减去的是第 j 行的最大值。这里那种写法被拒，`keepdims` 就是归约说明自己指哪个轴的方式。
 
 把这一步放进一个沿 key/value 块走的循环，带上一路的最大值和一路的和，就是 FlashAttention：
 `scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环，用的是同一批操作。

@@ -5255,6 +5255,57 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 - 改写 golden 绕开触发形状（去掉第二携带值、不用 `reduce` 判出口）：同上，依赖优化器内部，而且用户的 kernel 不会跟着改。
 - 在 `std/gpu` 里替用户调用 `tileiras`：Dawn 至今不运行汇编器，加进去是另一件事；这里只在 `with_gpu_real` 文档加一句指向 `asm`。
 - 拿 13.4.92 的 `-O0` 当所有目标的默认：sm_86 等目标没有缺陷，白付 1.3 到 8 倍。
+### 6.29 tileir 0.8.2：下标除法、同秩广播、`lit`（K1）
+
+任务单 `tile-surface-k1k2-20261006.md`（agent-handoff），裁决 `ruling-tile-surface-09-20261006.md`，调研
+`research-tile-surface-09-report-20261006.md`（对照 cutile-rs、cuTile Python、Triton、Pallas、TileLang、ThunderKittens）。
+一个 PR 栈两个提交，本节是第一个：0.8.2，纯加法，`Dev` 不变，今天能记录的程序字节不变。
+
+**落刀前补测（调研 §9 的 1–4 条，动码前实跑）。**
+
+1. L-B 的「golden 零变化」：渲染与字节码都按定义序重新编号（`lower.dawn` 头注），句柄号的空洞不进字节，只有操作序算数。
+   逐个对过调用点：单携带的 `d_range` / `d_for`、foldif 的三携带（初值都是更早绑定的）、全部 `d_loop2`、唯一的 `d_if`
+   都保持操作序。**两处不保持**：flash_attn 的 `zeros(o)` 与 loop_bound 的 `load_cell(x)` 今天是 `d_for3` / `d_for2` 的
+   第 4 个以后的实参，在三个 `idx_const` 界之后求值；写成 `carry(init)` 再 `d_range(..)` 就挪到了界之前。协调者裁决取
+   干净写法、接受这两个 golden 里一个常量（一个 load）前移，其余 kernel 一律逐字节不变（见下「golden」）。
+2. `lit[D](v) -> Tile[D]` 的 `D` 只在返回类型里：`mul(s, lit(0.5))`、嵌在实参位的 `mul(a, mul(lit(2.0), lit(3.0)))`、
+   `let g: Tile[F32] = lit(1.0)` 都推得出；`mul(lit(0.5), s)` 推不出（「cannot infer type parameter(s) D for `lit`」），
+   checker 自左向右定类型参数。所以 `lit` 写在有类型的操作数之后，README 照写。
+3. 选择性引入 `use tileir/dev.{max, min, get, set}` 遮蔽 prelude 的同名函数，`a.max(b)`、`c.get()`、`c.set(t)` 走 UFCS
+   解析到 tileir；`list.max(xs)` 带模块名照常；同一模块里裸写宿主 `max(1, 2)` 变成类型错误（遮蔽是整体的）。
+   kernels.dawn、gpu_fake、tile-gpu-diff 里没有裸写宿主 `max` / `min` 的地方。
+4. 同秩广播的记录位置：显式 `broadcast` 在实参求值时记录，隐式的在二元操作的 handler 臂里、操作本身之前。两者同序的
+   条件是「被广播的是最后一个会记录东西的实参」；flash_attn 的四处都满足。memo 与 0 秩规则相同（每个 (操作数, 形状)
+   在可见范围内一次），flash_attn 没有同一句柄广播到同一形状两次的地方。K2 的 flash_attn 迁移是实测：去掉 4 个显式 `broadcast`
+   后，除第 1 条的常量前移外字节不变。
+
+另一条签名上的事实：尾块填**最后一个**声明的形参（spec §4.3），而带默认值的形参可以排在 `body` 之前（`column(gap: 12) { .. }`
+同理），所以 `d_range(lower, upper, step: Int = 1, body)` 与 `d_for(lower, upper, step, unsigned_cmp: Bool = false, body)`
+都能写 `d_range(0, n) { j => .. }`。
+
+**一、K1（0.8.2）：`idx_div` / `idx_rem` / `idx_sub`、同秩广播、`lit`。**
+
+- 下标算术不加操作：`Idx` 就是 0 秩 i32 tile 的句柄（`idx_as_tile` / `idx_of` 不发任何东西），三个函数发的是 `div_i`、
+  `rem_i`、`sub_i` 早就在发的 `divi signed` / `remi signed` / `subi`。有符号、向零取整；网格和格子数给出的下标都非负，
+  向零就是向下。GQA 把「头 × 组」折进一根轴，读回来正是一除一余（调研 §4）。
+- 同秩广播在 `prog.widen_all`（只有多操作数的逐元素操作走它）：操作数与操作同秩、同格式、只在操作数为 1 的维上不同，
+  就在操作前补一条 `BroadcastOf`，与显式 `broadcast` 记录的是同一个操作。`dev.wider` 相应地把声明形状里为 1 的维取自
+  后面同秩的操作数。秩不同仍拒（0 秩除外），10-03 修订二否决全 numpy 广播的理由原样成立：`[BQ]` 对 `[BQ, BK]` 按尾维
+  对齐会对错轴；`keepdims` 留下的 `[BQ, 1]` 就是为同秩准备的。之前被 C1 拒的程序才会变，所以今天能记录的程序字节不变。
+- `lit(v)` 是格式为空串的待物化常量：`widen` 碰到它时把操作的格式交给它（JAX 的弱类型常量同义），按操作的形状物化；
+  `settle`、`broadcast`、归约、存储、循环初值这些要「它自己的格式」的地方由 `materialize` 按名拒，提示写 `f_const`；
+  遇到整数操作也拒（`lit` 存的是 `Float`）。memo 键加上格式，同一个 `lit` 在两种格式下各物化一次。
+
+**golden。** 192 个旧 kernel 逐字节不变（`tile-golden/run.sh` 全套，两后端文本 + 字节码 + `tileiras` 13.4.92 汇编 + 全部变异体，
+58.5 分钟）。新增覆盖 golden `idx_softmax`：块号经 `idx_div` / `idx_rem` / `idx_sub` 选两个行块，两个 `[16, 1]` 行统计
+不写 `broadcast` 遇上 `[16, 64]`，再乘一个 `lit(2.0)`。
+
+**不做的（理由）：**
+
+- 全 numpy 广播（秩提升）：reduce 不带 `keepdims` 后按尾维对齐会静默错轴（10-03 修订二的理由原样成立）。
+- `Tile * Float` 异构运算、数值字面量多态：单参数 trait 写不出，字面量多态是语言级大改；`lit(v)` 足够。
+- 给 `Idx` 单开 `IdxDiv` 之类的 `TileOp`：`Idx` 本来就是 0 秩 i32 tile 的句柄，`divi` / `remi` / `subi` 已有降低、渲染、
+  字节码与层 2 证据，再开一套只多出要维护的穷举分支。
 
 ## 7. 刀序
 

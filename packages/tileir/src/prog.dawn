@@ -26,7 +26,8 @@ use dev.{Dev, Tile, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElemen
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
   float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
-  retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency }
+  retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
+  idx_rem, idx_sub }
 use std/narrow.{Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -1694,8 +1695,18 @@ fn grown(next: Int, ops: List[TileOp], held: Map[Int, Held], spreads: Map[String
 # The constant `c` (pending as handle `h`) materialised at `shape`: one
 # `ConstF` or `ConstI` of that shape, recorded where the recording stands,
 # or the one already made for (`h`, `shape`) while it is visible.
+#
+# A `lit(v)` is pending with no format (`""`): `widen` hands it the format of
+# the element-wise operation it meets, and every other place that would
+# materialise it at its own format refuses it here, by name, since it has
+# none.
 fn materialize(name: String, frames: List[Frame], g: Grown, h: Int, c: Pend, shape: List[Int]) -> (Grown, Int) = {
-  let key = "c${h}:${show(shape)}"
+  if c.dtype == "" {
+    refuse_at(name, frames, g.ops, "lit", "lit(${c.f}) takes its format from the element-wise operation it meets, and it is used where none is given (a broadcast, a reduction, a loop's starting value, a store); write f_const(<format>, ${c.f}) there")
+  } else {
+    ()
+  }
+  let key = "c${h}:${c.dtype}:${show(shape)}"
   let known = match map.get(g.spreads, key) {
     Some(k) -> if visible(frames, g.ops, k) { k } else { 0 - 1 }
     None -> 0 - 1
@@ -1784,8 +1795,24 @@ fn widen(name: String, frames: List[Frame], g: Grown, h: Int, dtype: String, sha
   match map.get(g.pending, h) {
     # a constant of the operation's format is made at the operation's
     # shape; one of another format is made at rank 0 and refused as such
-    Some(c) -> materialize(name, frames, g, h, c, if c.dtype == dtype { shape } else { [] })
+    Some(c) -> {
+      let c1 = lit_at(name, frames, g, c, dtype)
+      materialize(name, frames, g, h, c1, if c1.dtype == dtype { shape } else { [] })
+    }
     None -> widen_held(name, frames, g, h, dtype, shape)
+  }
+
+# A pending constant as the operation of format `dtype` takes it: a `lit`
+# (format `""`) takes `dtype` when that is a float format, and is refused by
+# name when it is an integer one (a `lit` holds a `Float`); any other
+# constant is as it was made.
+fn lit_at(name: String, frames: List[Frame], g: Grown, c: Pend, dtype: String) -> Pend =
+  if c.dtype != "" || dtype == "" {
+    c
+  } else if is_float_dtype(dtype) {
+    Pend { ..c, dtype: dtype }
+  } else {
+    refuse_at(name, frames, g.ops, "lit", "lit(${c.f}) is a float constant and meets a ${dtype} operation; an integer constant is i_const or consti")
   }
 
 fn widen_held(name: String, frames: List[Frame], g: Grown, h: Int, dtype: String, shape: List[Int]) -> (Grown, Int) = {
@@ -1814,16 +1841,55 @@ fn widen_held(name: String, frames: List[Frame], g: Grown, h: Int, dtype: String
   }
 }
 
-# `widen` over every operand of one operation, `dtypes[k]` being what the
-# operation declares operand `k` to be.
+# `widen` over every operand of one ELEMENT-WISE operation, `dtypes[k]`
+# being what the operation declares operand `k` to be, and then the
+# same-rank rule (tileir 0.8.2): an operand of the operation's rank and
+# format whose shape differs from the operation's only where the operand's
+# dimension is 1 is broadcast to it before the operation, as
+# `broadcast(t, shape)` would have written it. `[BQ, 1]` against
+# `[BQ, BK]` is the case: a row statistic `reduce_max(.., keepdims: true)`
+# kept the rank for. A difference in RANK is still refused (rank 0 aside):
+# `[BQ]` against `[BQ, BK]` is the after-a-reduction case the 10-03 ruling
+# declined, where aligning trailing dimensions would pick the wrong axis.
+# One broadcast per (operand, shape) while it is visible, as for a spread.
+# Every program this changes was refused before (`check_operand`).
 fn widen_all(name: String, frames: List[Frame], g: Grown, hs: List[Int], dtypes: List[String],
   shape: List[Int]) -> (Grown, List[Int]) = {
   let none: List[Int] = []
   list.fold(range(0, len(hs)), (g, none), (acc, k) => {
     let (g1, out) = acc
     let (g2, h) = widen(name, frames, g1, hs[k], dtypes[k], shape)
-    (g2, out ++ [h])
+    let (g3, b) = widen_same_rank(name, frames, g2, h, dtypes[k], shape)
+    (g3, out ++ [b])
   })
+}
+
+fn widen_same_rank(name: String, frames: List[Frame], g: Grown, h: Int, dtype: String, shape: List[Int]) -> (Grown, Int) = {
+  let from = match map.get(g.held, h) {
+    Some(x) -> match x.what {
+      TileRow -> if x.dtype == dtype { x.shape } else { shape }
+      _ -> shape
+    }
+    None -> shape
+  }
+  let same_rank = len(from) == len(shape) && len(shape) > 0 && from != shape
+  let ones = same_rank && list.all(range(0, len(shape)), k => from[k] == shape[k] || from[k] == 1)
+  if not ones {
+    (g, h)
+  } else {
+    let key = "${h}:${show(shape)}"
+    let known = match map.get(g.spreads, key) {
+      Some(sp) -> if visible(frames, g.ops, sp) { sp } else { 0 - 1 }
+      None -> 0 - 1
+    }
+    if known >= 0 {
+      (g, known)
+    } else {
+      let d = g.next
+      (Grown { ..g, next: mint(name, g.next, 1), ops: g.ops ++ [BroadcastOf(d, dtype, from, shape, h)],
+        held: hold(g.held, d, dtype, shape), spreads: map.insert(g.spreads, key, d) }, d)
+    }
+  }
 }
 
 # A place that wants a RANK-0 tile of `dtype`: an `if`'s or a loop's
@@ -5429,12 +5495,22 @@ test "PR-1: a reduction's rank-0 answer widens on its own where an element-wise 
   assert len(ops_where(q.ops, is_spread)) == 1
 }
 
-test "PR-1: only rank 0 widens: a kept dimension and a rank-0 tile of another format are refused as before" {
+test "0.8.2: a kept dimension widens as broadcast would; a dropped one and a rank-0 tile of another format are refused" {
   let g = cells([64, 64], [32, 64])
+  # the same-rank rule: the program `rows_cells` writes with two explicit
+  # broadcasts, byte for byte
+  let (implicit, _e1) = trace2("rows", In(F64, g), Out(F64, g), (x, o) => {
+    let t = load_cell(x)
+    let e = exp(sub(t, reduce_max(t, keepdims: true)))
+    store_cell(o, div(e, reduce_sum(e, dim: 1, keepdims: true)))
+  })
+  let (explicit, _e2) = trace2("rows", In(F64, g), Out(F64, g), rows_cells)
+  assert show(implicit) == show(explicit)
+  # a reduction that dropped the dimension is a rank difference: refused
   assert str.starts_with(marked(() => trace2("rows", In(F64, g), Out(F64, g), (x, o) => {
     let t = load_cell(x)
-    store_cell(o, sub(t, reduce_max(t, keepdims: true)))
-  })), "tileir: kernel `rows`: op #10 `subf`: rhs is tile<32x1xf64>, declared tile<32x64xf64>")
+    store_cell(o, sub(t, reshape(reduce_max(t, keepdims: true), [32])))
+  })), "tileir: kernel `rows`: op #11 `subf`: rhs is tile<32xf64>, declared tile<32x64xf64>")
   assert str.starts_with(marked(() => trace_kernel("fmt", ["f64"], () => {
     let x = t_constf("f64", [8], 1.0)
     let y = t_constf("f32", [], 2.0)
@@ -5925,4 +6001,50 @@ test "PR-3: a rank-0 pad is widened to the load's shape, as one constant made wh
     })
     _ -> false
   })
+}
+
+# ---- tileir 0.8.2: lit and index division
+
+test "0.8.2: lit takes the format and the shape of the operation it meets, and records what f_const records" {
+  let g = cells([64, 64], [32, 64])
+  let (a, _e1) = trace2("s", In(F64, g), Out(F64, g), (x, o) => store_cell(o, mul(load_cell(x), lit(0.5))))
+  let (b, _e2) = trace2("s", In(F64, g), Out(F64, g), (x, o) => store_cell(o, mul(load_cell(x), f_const(F64, 0.5))))
+  assert a == b
+  let (c, _e3) = trace2("s", In(F32, g), Out(F32, g), (x, o) => store_cell(o, mul(load_cell(x), lit(0.5))))
+  let (d, _e4) = trace2("s", In(F32, g), Out(F32, g), (x, o) => store_cell(o, mul(load_cell(x), f_const(F32, 0.5))))
+  assert c == d
+}
+
+test "0.8.2: lit is refused by name where no operation gives it a format" {
+  let g = cells([64, 64], [32, 64])
+  assert str.contains(marked(() => trace2("b", In(F64, g), Out(F64, g), (x, o) => {
+    let t = load_cell(x)
+    store_cell(o, mul(t, broadcast(lit(0.5), [32, 64])))
+  })), "`lit`: lit(0.5) takes its format from the element-wise operation it meets")
+  assert str.contains(marked(() => trace2("two", In(F64, g), Out(F64, g), (x, o) => {
+    let t = load_cell(x)
+    store_cell(o, mul(t, mul(lit(2.0), lit(3.0))))
+  })), "write f_const(<format>, 2.0) there")
+  assert str.contains(marked(() => trace2("int", In(I32, cells([64], [64])), Out(I32, cells([64], [64])), (x, o) => {
+    store_cell(o, add_i(load_cell(x), lit(1.0)))
+  })), "lit(1.0) is a float constant and meets a i32 operation")
+}
+
+test "0.8.2: idx_div, idx_rem and idx_sub are the signed i32 operations on the index tile" {
+  let p = trace_kernel("ix", ["f64"], () => {
+    let b = block_id(0)
+    let g = idx_const(4)
+    let _q = idx_div(b, g)
+    let _r = idx_rem(b, g)
+    let _s = idx_sub(b, g)
+    ()
+  })
+  let names = list.map(ops_where(p.ops, o => match o {
+    BinaryI(_d, _op, "i32", [], _a, _b) -> true
+    _ -> false
+  }), o => match o {
+    BinaryI(_d, op, _dt, _s, _a, _b) -> op
+    _ -> ""
+  })
+  assert names == ["divi", "remi", "subi"]
 }

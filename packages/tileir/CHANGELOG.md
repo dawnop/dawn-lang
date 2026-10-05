@@ -18,6 +18,30 @@ those targets the answer includes `--opt-level 0`. The table is keyed on the
 exact tileiras version, so a fixed release gets the plain arguments.
 `Dev` is unchanged and so are the bytes `encode` writes. Adds names only. §6.28.
 
+## 0.8.2 (2026-10-06)
+
+Additions only: `Dev` is unchanged, and every program that recorded before
+records the same bytes. §6.29.
+
+- `idx_div`, `idx_rem` and `idx_sub`: the quotient (signed, toward zero),
+  the remainder and the difference of two `Idx`. They issue the `divi`,
+  `remi` and `subi` that `div_i`, `rem_i` and `sub_i` already did, on the
+  rank-0 i32 tile an `Idx` is. A grid axis that holds two indices folded
+  together (`head * G + group`) is read back out with them.
+- Same-rank broadcasting: an operand of an element-wise operation whose
+  shape differs from the operation's only in dimensions of length 1 is
+  broadcast to it, so `sub(s, reduce_max(s, keepdims: true))` needs no
+  `broadcast`. A difference in rank is still refused (rank 0 aside): a
+  reduction that dropped the dimension does not line up by trailing
+  dimensions. The broadcast is recorded where an explicit `broadcast` in the
+  last argument would have been.
+- `lit(v)`: a float constant with no format, which takes the format and the
+  shape of the element-wise operation it meets: `mul(s, lit(0.5))`. Write it
+  after a typed operand (the checker finds `D` from left to right) or under
+  an annotation. A place that needs a format of its own (a `broadcast`, a
+  reduction, a store, an integer operation) refuses it by name and says to
+  write `f_const`.
+
 ## 0.8.1 (2026-10-05)
 
 `reshape(t, shape)` regroups a tile's lanes into another shape of as many,
