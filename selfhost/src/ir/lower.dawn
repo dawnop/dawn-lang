@@ -155,7 +155,15 @@ pub type LSt = {
   # means no site is recorded at all -- the comptime interpreter's lowering,
   # and every tree no scheduler filed.
   base: Int,
-  origin: String
+  origin: String,
+  # Lowering for the comptime interpreter (`lower_fn_only`): a `comptime`
+  # block is lowered as its body instead of a `CComptime` reference. The
+  # driver folds each module's blocks into a table keyed by span, and the
+  # interpreter reads the table of the module whose const it is folding; a
+  # function reached from another module, or before the walk reached its
+  # own blocks, would look its block up in the wrong table (#563). The body
+  # is pure, so running it again gives the value the table holds.
+  ct_inline: Bool
 }
 
 ## The function currently being lowered, as its own body sees it. Two things
@@ -3463,7 +3471,8 @@ test "a builtin taken as a value lowers as the call it wraps" {
     prog_fns: fns, intrs: it, dicts: [], dict_env: map.empty(),
     self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
     base: -1,
-    origin: ""
+    origin: "",
+    ct_inline: false
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
@@ -3520,7 +3529,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let raw = ev_slot(st, key)
       (st, adapt_out(raw, cex_ty(raw), ty))
     }
-    XComptime(_, lo, hi, ty) -> (st, CComptime(lo, hi, ty))
+    XComptime(body, lo, hi, ty) -> if st.ct_inline { lower_expr(st, body) } else { (st, CComptime(lo, hi, ty)) }
     XError(_, _) -> panic("lower: XError reached lowering")
     XStr(parts, _, _) -> lower_str(st, parts)
     XUnary(op, operand, _, _, ty) -> {
@@ -4195,7 +4204,8 @@ test "dictionary constructors and slots keep their argument shape in either requ
     prog_fns: map.empty(), intrs: intrinsics(), dicts: [], dict_env: map.empty(),
     self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
     base: -1,
-    origin: ""
+    origin: "",
+    ct_inline: false
   }
   for bridge in [false, true] {
     # Exercise both slot producers directly. The explicit implementation is
@@ -4998,7 +5008,8 @@ pub fn lower_expr_in(
     ev_env: [],
     ev_own: None,
     base: -1,
-    origin: ""
+    origin: "",
+    ct_inline: false
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -5049,7 +5060,8 @@ pub fn lower_fn_only(
     ev_env: [],
     ev_own: None,
     base: -1,
-    origin: ""
+    origin: "",
+    ct_inline: true
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -5126,7 +5138,8 @@ pub fn lower_module_full(
     ev_env: [],
     ev_own: None,
     base: -1,
-    origin: ""
+    origin: "",
+    ct_inline: false
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
