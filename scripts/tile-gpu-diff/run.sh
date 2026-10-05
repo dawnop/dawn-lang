@@ -2696,13 +2696,15 @@ fi
 #    their tail is a cell's extent and they build no mask at all, so the
 #    mutant cannot touch them; 4b below is their boundary mutant now. Here it
 #    runs on the strided family, which still masks its pointer reads and some
-#    of its writes. All ten kernels' bytes move; on the device FIVE differ,
-#    and the split is the new boundary's, measured: transpose_tail,
-#    interleave and conv3d write through the pointer path and the mask was
-#    their only bound, and jacobi and gaussian_blur choose interior lanes with
-#    the mask itself. conv1d, conv2d, max_pool, rgb_gray and depthwise_conv1d
-#    read past their tails too, but only into lanes their Out cell does not
-#    write: the extent bounds the write whatever the mask says.
+#    of its writes. All ten kernels' bytes move; on the device FOUR differ,
+#    and the split is the new boundary's, measured: transpose_tail and
+#    interleave write through the pointer path and the mask was their only
+#    bound, and jacobi and gaussian_blur choose interior lanes with the mask
+#    itself. conv1d, conv2d, max_pool, rgb_gray, depthwise_conv1d and, since
+#    tileir 0.8.1 writes its plane as a cell, conv3d read past their tails
+#    too, but only into lanes their Out cell does not write: the extent
+#    bounds the write whatever the mask says. (conv3d was the fifth red
+#    until then.)
 mutant_pkg="$work/pkg-mask-all-true"
 rm -rf "$mutant_pkg"
 cp -r "$root/packages/tileir" "$mutant_pkg"
@@ -2772,7 +2774,7 @@ family_pkg_verdict() { # name, bin, clean-verdict, red-kernels-separated-by-spac
 
 mutant_kernels mask-all-true "$mutant_pkg" "${strided[@]}"
 family_pkg_verdict mask-all-true "$work/strided.bin" "$strided_verdict" \
-  "transpose_tail interleave jacobi gaussian_blur conv3d" "${strided[@]}"
+  "transpose_tail interleave jacobi gaussian_blur" "${strided[@]}"
 
 # 4b. cell-extent-rounded-up: the recording rounds a cell view's static extent
 #    up to a whole number of tiles, so the view a boundary kernel reads and
@@ -3131,9 +3133,11 @@ fi
 #     ladders. conv2d, max_pool, jacobi and gaussian_blur now write their
 #     Out cell through a view, which the mutant does not touch, so the
 #     swapped read is no longer undone and all four answer the transpose;
-#     depthwise_conv1d's 4 by 32 tile was red before and still is.
-#     transpose_tail and conv3d still write through the pointer path (both
-#     are Shared), and they are the two the square tile still hides. What
+#     depthwise_conv1d's 4 by 32 tile was red before and still is. Since
+#     tileir 0.8.1 conv3d writes its plane as an Out cell too and is the
+#     sixth red, for the same reason; transpose_tail alone still writes
+#     through the pointer path (it is Shared), and it is the one the square
+#     tile still hides. What
 #     the paragraphs below say of the ladder itself stands; this is the
 #     measurement before 0.8.0:
 #
@@ -3190,7 +3194,7 @@ for k in "${strided[@]}"; do rev_cubins+=("$work/ladder-strides-reversed-$k.cubi
 rc=0
 device "$work/strided.bin" "${rev_cubins[@]}" > "$work/m-ladder-reversed.out" 2>&1 || rc=$?
 mverdict="$(verdict_of "$work/m-ladder-reversed.out")"
-ladder_red=(conv2d max_pool jacobi depthwise_conv1d gaussian_blur)
+ladder_red=(conv2d max_pool jacobi depthwise_conv1d gaussian_blur conv3d)
 if [ "$strided_verdict" = pass ]; then
   differ=$(grep -c '^  verdict differ:result$' "$work/m-ladder-reversed.out" || true)
   if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#ladder_red[@]}" ]; then
@@ -3206,7 +3210,7 @@ if [ "$strided_verdict" = pass ]; then
        /^kernel /{cur=$2} /^  verdict differ:result$/ && !(cur in red) {bad=1} END {exit bad}' \
     "$work/m-ladder-reversed.out" ||
     { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: a kernel outside the red set moved; a square tile read and written through ladders should have hidden it, masks and all"; }
-  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move; on the device ${ladder_red[*]} differ, and the two square tiles written through the pointer path hide it)"
+  echo "PASS  mutant: ladder-strides-reversed (seven kernels' bytes move; on the device ${ladder_red[*]} differ, and the square tile written through the pointer path hides it)"
 else
   [ "$mverdict" = "$strided_verdict" ] ||
     { cat "$work/m-ladder-reversed.out" >&2; fail "ladder-strides-reversed: the clean run is $strided_verdict but the mutant is $mverdict"; }

@@ -218,7 +218,7 @@
 #                            index for the enum -> attr_overflow's text is
 #                            untouched, its Func section is three bytes
 #                            short, and tileiras answers `invalid integer
-#                            value for enum type: 18`. The three values
+#                            value for enum type: 15`. The three values
 #                            are assumptions the COMPILER may make and no
 #                            corpus can see them, so this is where they
 #                            are covered and the ledger says so
@@ -1356,10 +1356,10 @@ fi
 #     tileiras loses the stream one operation later and says so in four
 #     lines, of which the first is the informative one:
 #
-#       error: error at offset 112: failed to get result type 0 for DivFOp
-#       error: error at offset 755: failed to parse function body for
+#       error: error at offset 104: failed to get result type 0 for DivFOp
+#       error: error at offset 823: failed to parse function body for
 #         function 'trig_sweep'
-#       error: error at offset 755: failed to create function from bytecode
+#       error: error at offset 823: failed to create function from bytecode
 #       error: input does not correspond to Tile IR bytecode
 #
 #     There is no `divf` in this kernel: `DivFOp` is what the byte after the
@@ -1371,7 +1371,7 @@ fi
 if run_item trig-extra-flags; then
   mutant_project trig-extra-flags bytecode.dawn
   writer_mutant_checks trig-extra-flags trig_sweep func-one-long \
-    "error at offset 112: failed to get result type 0 for DivFOp"
+    "error at offset 104: failed to get result type 0 for DivFOp"
 fi
 
 # 17. The writer says a `join_tokens` has one operand more than it wrote.
@@ -1548,7 +1548,7 @@ fi
 if run_item overflow-attr-not-written; then
   mutant_project overflow-attr-not-written bytecode.dawn
   writer_mutant_checks overflow-attr-not-written attr_overflow func-three-short \
-    "error at offset 97: invalid integer value for enum type: 22"
+    "error at offset 77: invalid integer value for enum type: 15"
 fi
 
 # 30. The writer swaps the memory ordering and the memory scope of the
@@ -2038,7 +2038,7 @@ fi
 if run_item pack-result-shape-unhalved; then
   mutant_project pack-result-shape-unhalved prog.dawn
   refused_mutant_checks pack-result-shape-unhalved dtype_i4 \
-    'tileir: kernel `dtype_i4`: op #52 `select`: condition is tile<256xi1>, declared tile<32xi1>'
+    'tileir: kernel `dtype_i4`: op #60 `select`: condition is tile<256xi1>, declared tile<32xi1>'
 fi
 
 # 55. The writer gives a `tensor_view` the POINTER tag. Both are type-table
