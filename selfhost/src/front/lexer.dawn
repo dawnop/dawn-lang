@@ -471,7 +471,7 @@ fn lex_string(s: Src, start: Int) -> Result[(Int, Token, List[Diag]), (Int, Diag
         buf = buf ++ [cp]
         i = j
       } else if c == '$' {
-        let (j, sg, bf, d) = lex_dollar(s, i, segs, buf)?
+        let (j, sg, bf, d) = lex_dollar(s, i, segs, buf, false)?
         i = j
         segs = sg
         buf = bf
@@ -505,15 +505,17 @@ fn lex_dollar(
   s: Src,
   at: Int,
   segs: List[Seg],
-  buf: List[Char]
+  buf: List[Char],
+  multiline: Bool
 ) -> Result[(Int, List[Seg], List[Char], List[Diag]), (Int, Diag)] = {
   let next = cp_at(s, at + 1)
   if next == '{' {
-    let (j, sg, d) = lex_brace_interp(s, at)?
+    let (j, sg, d) = lex_brace_interp(s, at, multiline)?
     match sg {
       Some(g) -> Ok((j, flush(segs, buf) ++ [g], no_cps(), d))
       # the interpolation never closed and its text is dropped; `j` is the
-      # quote that ends the literal, so the caller closes the string there
+      # quote that ends the literal, so the caller closes the string there, or
+      # the backtick that was misread, which the caller reads on as text
       None -> Ok((j, segs, buf, d))
     }
   } else if char_is_letter(next) || next == '_' {
@@ -558,13 +560,27 @@ fn flush(segs: List[Seg], buf: List[Char]) -> List[Seg] =
 ## string's own close, as the writer meant: the result is `Ok` with no segment
 ## and one diagnostic, the position is that quote, and the caller ends the
 ## literal there. The string stays one token, so the `)` after it survives and
-## the file keeps lexing without a cascade.
+## the file keeps lexing without a cascade. A backtick misreads the same way, and
+## so does the `"""` closing a multiline string, but a raw string and a `"""`
+## string may span lines, so they usually do not fail: they end at the next
+## backtick or `"""` in the file and swallow every declaration in between
+## (#549). A nested literal that crosses a line, or never ends, is therefore the
+## same unclosed `${`; the position returned is its opening character, and the
+## string reads on from there as text to its own closing quote.
+##
+## `multiline` says the string around the interpolation is a `"""` one. Such a
+## string goes on past the newline that ends an unclosed interpolation, so that
+## newline is reported and returned like the quote above, and the string reads
+## on; a one-line string ends there anyway, and the error stops the literal.
+## When the interpolation's text on that line holds a `"""`, it was the
+## string's close, misread as nested literals that each ended on the line, and
+## it is returned instead.
 ##
 ## Line comments are deliberately *not* skipped: interpolation is single-line
 ## (below), so a `#` that swallowed the rest of the line could only ever turn
 ## into "interpolation cannot span lines". Leaving `#` an ordinary character
 ## keeps `"${ x # }"` meaning what it means today.
-fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Option[Seg], List[Diag]), (Int, Diag)] = {
+fn lex_brace_interp(s: Src, dollar: Int, multiline: Bool) -> Result[(Int, Option[Seg], List[Diag]), (Int, Diag)] = {
   let code_start = dollar + 2
   var i = code_start
   var depth = 1
@@ -588,25 +604,45 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Option[Seg], List[Diag]
         with_no_diags(lex_char(s, i))
       }
       match r {
-        Ok((j, _, _)) -> { i = j }
+        Ok((j, _, _)) -> {
+          # a raw string, or a `"""` string, may span lines, so a quote
+          # misread the same way need not run off the line and fail: it
+          # succeeds at the next backtick or `"""` in the file, however many
+          # declarations away. Nothing inside `${...}` may cross a line, so a
+          # nested literal that did is that misreading, and it is the unclosed
+          # `${` again (#549)
+          if crosses_line(s, i, j) {
+            return Ok((i, None, [unmatched_interp(s, dollar, misread_hint(c))]))
+          }
+          i = j
+        }
         Err((fi, d)) -> {
           # the nested literal's own "unterminated" error is the one anchored
           # at its opening quote and raised at the end of the line; an error
           # from inside it (a bad escape, a nested interpolation) is anchored
           # elsewhere and still propagates as it is
           let ran_off = fi >= s.n || s.cps[fi] == '\n'
-          if c == '"' && ran_off && d.lo == off(s, i) {
-            return Ok((i, None, [unmatched_interp(
-              s,
-              dollar,
-              "the `\"` after it was read as the start of a string inside the interpolation; close the interpolation with `}` before that quote"
-            )]))
+          if (c == '"' || c == '`') && ran_off && d.lo == off(s, i) {
+            return Ok((i, None, [unmatched_interp(s, dollar, misread_hint(c))]))
           }
           return Err((fi, d))
         }
       }
     } else if c == '\n' {
-      return Err((i, ldiag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
+      let d = ldiag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)
+      if multiline {
+        # a `"""` on this line was the string's own close, read as nested
+        # string literals (`"..."` then `""`) that each ended on the line; it
+        # still closes the string, as a lone quote does above
+        match triple_quote_in(s, code_start, i) {
+          Some(q) -> { return Ok((q, None, [unmatched_interp(s, dollar, misread_hint('"'))])) }
+          None -> { }
+        }
+        # otherwise the `"""` string goes on past this newline, so it reads on
+        # from here as text instead of the rest of it being lexed as code
+        return Ok((i, None, [d]))
+      }
+      return Err((i, d))
     } else {
       i = i + 1
     }
@@ -620,6 +656,39 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Option[Seg], List[Diag]
     return Err((i, ldiag("empty interpolation", off(s, dollar), off(s, i) + 1)))
   }
   Ok((i + 1, Some(SCode(code, off(s, code_start))), no_diags()))
+}
+
+## The hint for a quote or backtick taken as the start of a nested literal. The
+## caller resumes the string at that character, so the rest of it stays text
+## and the string closes at its own quote.
+fn misread_hint(c: Char) -> String =
+  if c == '`' {
+    "the backtick after it was read as the start of a raw string inside the " ++
+      "interpolation, which ran past the end of the line; close the interpolation " ++
+      "with `}` before that backtick"
+  } else {
+    "the `\"` after it was read as the start of a string inside the interpolation; " ++
+      "close the interpolation with `}` before that quote"
+  }
+
+## The first `"""` that starts in `[from, to)`.
+fn triple_quote_in(s: Src, from: Int, to: Int) -> Option[Int] = {
+  var k = from
+  while k < to && k + 2 < s.n {
+    if s.cps[k] == '"' && s.cps[k + 1] == '"' && s.cps[k + 2] == '"' { return Some(k) }
+    k = k + 1
+  }
+  None
+}
+
+## Whether a newline lies in `[from, to)`.
+fn crosses_line(s: Src, from: Int, to: Int) -> Bool = {
+  var k = from
+  while k < to && k < s.n {
+    if s.cps[k] == '\n' { return true }
+    k = k + 1
+  }
+  false
 }
 
 ## Anchored at the `${` itself: that is the token the writer has to finish.
@@ -750,7 +819,7 @@ fn lex_triple(s: Src, start: Int) -> Result[(Int, Token, List[Diag]), (Int, Diag
       buf = buf ++ [cp]
       i = j
     } else if c == '$' {
-      let (j, sg, bf, d) = lex_dollar(s, i, segs, buf)?
+      let (j, sg, bf, d) = lex_dollar(s, i, segs, buf, true)?
       i = j
       segs = sg
       buf = bf
@@ -1232,6 +1301,60 @@ test "an interpolation missing its brace is the error, not the string (#191)" {
   let (_, eof) = lex("\"\${ x ")
   assert len(eof) == 1
   assert eof[0].msg == "unmatched \${ in interpolation"
+}
+
+test "a backtick in a string with an unclosed interpolation stays text (#549)" {
+  # the backtick after `${a` used to open a raw string that ran to the next
+  # backtick in the file, taking the declarations in between with it
+  let src = "f(\"`\${a` b\")\ng()\nh(\"`\")"
+  let (toks, ds) = lex(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "unmatched \${ in interpolation"
+  assert ds[0].lo == 4 && ds[0].hi == 6
+  assert str.starts_with(ds[0].hint, "the backtick after it was read as the start of a raw string")
+  assert kinds(src) == [
+    "IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "IDENT", "LPAREN", "RPAREN", "NEWLINE",
+    "IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "EOF"
+  ]
+  assert toks[2].segs == [SText("``" ++ " b")]
+  # with no later backtick the raw string never ends: the same error, not
+  # "unterminated raw string"
+  let (_, eof) = lex("f(\"`\${a` b\")\ng()")
+  assert len(eof) == 1
+  assert eof[0].msg == "unmatched \${ in interpolation"
+  # a raw string inside an interpolation that closes on its line is still one
+  let (ok, none) = lex("\"\${f(`}`)}\"")
+  assert len(none) == 0
+  assert ok[0].segs == [SCode("f(`}`)", 3)]
+  # the `"""` that closes a multiline string misreads the same way, and that
+  # string may span lines too
+  let tri = "f(\"\"\"\n<a>\${x </a>\"\"\")\ng()\nh(\"\"\"\nb\"\"\")"
+  let (_, tds) = lex(tri)
+  assert len(tds) == 1
+  assert tds[0].msg == "unmatched \${ in interpolation"
+  assert str.starts_with(tds[0].hint, "the `\"` after it was read as the start of a string")
+  assert kinds(tri) == [
+    "IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "IDENT", "LPAREN", "RPAREN", "NEWLINE",
+    "IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "EOF"
+  ]
+  # a multiline string goes on past the newline that ends an unclosed
+  # interpolation, so it reads on as text; a one-line string ends there
+  let nl = "f(\"\"\"\n\${x \nb\n\"\"\")\ng()"
+  let (ntoks, nds) = lex(nl)
+  assert len(nds) == 1
+  assert nds[0].msg == "interpolation cannot span lines"
+  assert kinds(nl) == ["IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "IDENT", "LPAREN", "RPAREN", "NEWLINE", "EOF"]
+  assert ntoks[2].segs == [SText("\nb")]
+  # unless the line holds the string's own `"""`, read as `"..."` then `""`
+  let cl = "f(\"\"\"<a \${u \"><b>\"\"\" ++ g)\nh()\nk(\"\"\"\nc\"\"\")"
+  let (ctoks, cds) = lex(cl)
+  assert len(cds) == 1
+  assert cds[0].msg == "unmatched \${ in interpolation"
+  assert kinds(cl) == [
+    "IDENT", "LPAREN", "STRING", "PLUSPLUS", "IDENT", "RPAREN", "NEWLINE", "IDENT", "LPAREN", "RPAREN",
+    "NEWLINE", "IDENT", "LPAREN", "STRING", "RPAREN", "NEWLINE", "EOF"
+  ]
+  assert ctoks[2].segs == [SText("<a ")]
 }
 
 test "unknown escape" {

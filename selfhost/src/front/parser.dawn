@@ -220,7 +220,7 @@ pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List
       }
       Err(fe) -> {
         let (st2, d) = fe
-        st = sync_decl(p, St { ..st2, diags: st2.diags ++ [d] })
+        st = sync_decl(p, st, St { ..st2, diags: st2.diags ++ [d] })
       }
     }
     st = skip_nl(p, st)
@@ -466,13 +466,80 @@ fn starts_top_decl(p: P, st: St) -> Bool =
     None -> false
   }
 
-## After a broken declaration: skip forward to the next plausible declaration start.
-fn sync_decl(p: P, st: St) -> St = {
-  var s = st
+## After a broken declaration: skip forward to the next plausible declaration
+## start. `start` is where the broken declaration began and `st` is where it
+## failed.
+##
+## A declaration can fail on the first token of the next one. A trailing `=`,
+## `->` or `|` joins the next line to it (spec §1.7), so `const A: Int =`
+## followed by `fn f() ...` fails on that `fn`. Stepping over the failing token
+## unconditionally would skip `fn` (or the `pub` in front of it) and lose `f`
+## with no diagnostic that names it (#548). So a failure on a declaration head
+## that begins its source line resumes right there. The line test keeps a
+## keyword in the middle of the broken text, such as a `fn` written where a
+## lambda goes, from being parsed as a declaration of its own and raising a
+## second error.
+##
+## The joined line can also be read further before the failure: `type T =`
+## takes the `fn` of the next line as the start of a function type and fails on
+## the name after it. So before that, a declaration head the broken text has
+## already passed resumes the parse when it is `joined_decl_head`: at column
+## 0, on a line that only a trailing operator tied to the one before it. The
+## first such head wins, since every declaration from there on was lost.
+##
+## Progress: resuming without a step happens only at a position strictly past
+## `start`, so the next `top_decl` begins later than this one did. Every other
+## path steps at least one token from `start` or later before it searches, as
+## before, so the loop in `parse_module_lexed` cannot revisit a position.
+fn sync_decl(p: P, start: St, st: St) -> St = {
+  var s = if st.pos < start.pos { St { ..st, pos: start.pos } } else { st }
+  var k = start.pos + 1
+  while k < s.pos {
+    let at = St { ..s, pos: k }
+    if joined_decl_head(p, at) { return at }
+    k = k + 1
+  }
+  if s.pos > start.pos && starts_top_decl(p, s) && starts_source_line(p, s) {
+    return s
+  }
   if not at_kind(p, s, EOF) { s = adv1(p, s) }
   while not at_kind(p, s, EOF) && not starts_top_decl(p, s) { s = adv1(p, s) }
   s
 }
+
+## Whether the current token is the first one on its line in the source. The
+## token stream cannot say: a line joined to the one before it by a trailing
+## operator has no NEWLINE token in front of it, so this reads the source.
+fn starts_source_line(p: P, st: St) -> Bool =
+  if st.pos == 0 || p.toks[st.pos - 1].kind == NEWLINE {
+    true
+  } else {
+    match p.cps {
+      Some(cps) -> {
+        var i = p.toks[st.pos].lo
+        while i > 0 && i <= len(cps) && (cps[i - 1] == ' ' || cps[i - 1] == '\t') { i = i - 1 }
+        i == 0 || (i <= len(cps) && cps[i - 1] == '\n')
+      }
+      None -> false
+    }
+  }
+
+## A declaration head at column 0 whose line a trailing operator joined to the
+## one before it, so no NEWLINE token separates it from that line. Formatted
+## code indents everything inside a declaration, so this is a declaration the
+## line above left unfinished and ran into (#548), not part of it.
+fn joined_decl_head(p: P, st: St) -> Bool =
+  st.pos > 0 && p.toks[st.pos - 1].kind != NEWLINE && at_column_zero(p, st) &&
+  starts_top_decl(p, st)
+
+fn at_column_zero(p: P, st: St) -> Bool =
+  match p.cps {
+    Some(cps) -> {
+      let lo = p.toks[st.pos].lo
+      lo == 0 || (lo <= len(cps) && cps[lo - 1] == '\n')
+    }
+    None -> false
+  }
 
 fn top_decl_error(p: P, st: St) -> PR[Decl] =
   Err((st, perr(p, st,
@@ -2289,8 +2356,13 @@ fn postfix_tail(p: P, st: St, initial: Expr, nb: Bool) -> PR[Expr] = {
         # A member name after `.` may be any word — an identifier or a keyword
         # like `in`/`type` (Java members can be named that, e.g. `System.in`;
         # after `.` a keyword is unambiguously a member name, so accept it).
+        # The exception is a declaration head at column 0 that a trailing `.`
+        # pulled up: that is the next declaration, and taking it as a member
+        # would lose it without a word (#548).
         let nt2 = cur(p, st2)
-        let (st3, f) = if nt2.kind == IDENT || keyword(nt2.text) != None {
+        let member = (nt2.kind == IDENT || keyword(nt2.text) != None) &&
+          not joined_decl_head(p, st2)
+        let (st3, f) = if member {
           adv(p, st2)
         } else {
           return Err((st2, perr(p, st2,
