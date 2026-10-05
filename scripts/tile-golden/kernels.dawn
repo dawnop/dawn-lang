@@ -5501,12 +5501,6 @@ fn trace(name: String) -> TileProg = match name {
       In(I32, run_of(LOOP_TILE)), Out(I32, run_of(2 * LOOP_TILE)), loop_return)
     p
   }
-  # Not a golden: the probe run.sh's out-along-twice-accepted mutant records,
-  # an Out cut along one grid axis twice, which the clean recording refuses.
-  "out_along_twice" -> {
-    let (p, _e) = trace1("out_along_twice", Out(F64, cells([64, 64], [8, 8], along: [0, 0])), o => store_cell(o, zeros(o)))
-    p
-  }
   "attr_round" -> {
     let (p, _e) = trace3("attr_round",
       In(F64, run_of(ATTR_TILE)), In(F64, run_of(ATTR_TILE)), Out(F64, attr_segs(ATTR_ROUND_SEGS, 8)), attr_round)
@@ -5720,8 +5714,17 @@ fn trace_twice(name: String) -> TileProg = {
   first
 }
 
+# Not a golden, and not one of `trace`'s arms for that reason: the probe
+# run.sh's out-along-twice-accepted mutant records, an Out cut along one
+# grid axis twice, which the clean recording refuses by name.
+fn out_along_twice() -> TileProg = {
+  let (p, _e) = trace1("out_along_twice", Out(F64, cells([64, 64], [8, 8], along: [0, 0])), o => store_cell(o, zeros(o)))
+  p
+}
+
 pub fn main() -> Unit !io = match args() {
   ["--bytecode-version"] -> println(bytecode_version())
+  ["out_along_twice"] -> print(render(out_along_twice()))
   [name] -> print(render(trace_twice(name)))
   [name, "--bytecode", path] -> {
     let bytes = encode(trace_twice(name))
