@@ -62,11 +62,15 @@ use std/list
 use std/io
 use std/bytes
 use std/io.{Fs, with_fs_real, with_proc_real}
-use html/page.{Assets, Lang, En, Zh, PageHead, shell_ext, section_crumb, chip, plain_assets, repo_url}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell_ext, section_crumb, chip, plain_assets, repo_url, lang_path}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
-use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source}
+use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source, pad2}
 use gen/fingerprint.{fingerprint}
+use gen/corpus.{corpus_path}
+use gen/tutorial.{chapter_titles}
+use md/ast.{Block}
+use md/parser.{parse}
 use gen/copy.{Copy, load_copy, line, plain, body}
 use gen/gpumap.{KernelMap, MCall, Seg, parse_map, check, cuts, covering, named_at, seg_lines}
 
@@ -815,14 +819,43 @@ fn keepdims_card(c: Copy, mu: fn(String) -> String, m: KernelMap) -> String = {
     ++ """<pre class="gpu-card-src gpu-picks"><code>${join(rows, "")}</code></pre></article>"""
 }
 
-## The section on writing a kernel: the four cards, the keepdims card that
+## The tutorial chapter that teaches writing a kernel, as its page from the
+## site root in the default layout (`tutorial/20.html`), or None while the
+## tutorial has no such chapter: the first `##` chapter whose title names
+## GPU. Found by title and not by number, so the link appears the day the
+## chapter lands, in each language as its own tutorial has it, and follows
+## the chapter if the chapters are renumbered. The page name is
+## gen/tutorial's, `pad2` of the chapter's place.
+pub fn gpu_chapter(blocks: List[Block]) -> Option[String] = {
+  let titles = chapter_titles(blocks)
+  var found = 0
+  for i in range(0, len(titles)) {
+    if found == 0 && str.contains(titles[i], "GPU") {
+      found = i + 1
+    }
+  }
+  if found == 0 { None } else { Some("tutorial/${pad2(found)}.html") }
+}
+
+## The section on writing a kernel: a link to the tutorial's chapter on it
+## when there is one, the four cards, the keepdims card that
 ## leads into the call map, and the two notes under them (the occupancy rule,
 ## which no golden kernel carries, and where the rest of the surface is).
-fn api_section(c: Copy, mu: fn(String) -> String, root: String, f: Facts) -> String = {
+fn api_section(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, f: Facts) -> String !Fs = {
   let p = (k: String) => escape_html(plain(c, k))
+  let tutorial =
+    match parse(must_read(corpus_path("tutorial", lang))) {
+      Ok(bs) -> bs
+      Err(e) -> panic("${corpus_path("tutorial", lang)}: ${e}")
+    }
+  let learn =
+    match gpu_chapter(tutorial) {
+      Some(page) -> """<p class="gpu-learn"><a href="${root}/${lang_path(lang, page)}">${p("api-learn")} <span aria-hidden="true">→</span></a></p>""" ++ "\n"
+      None -> ""
+    }
   let readme = gh("packages/tileir/README.md")
   let changes = gh("packages/tileir/CHANGELOG.md")
-  """<div class="gpu-cards">
+  learn ++ """<div class="gpu-cards">
 ${join(map(f.cards, k => api_card(c, mu, k)), "\n")}
 ${keepdims_card(c, mu, f.flash)}
 </div>
@@ -1183,7 +1216,7 @@ fn gpu_page(a: Assets, js: String, lang: Lang, f: Facts, docs: List[String]) -> 
   }
   let main = `<main class="wrap page gpu-page">` ++ "\n"
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
-    ++ prose(c, mu, "api") ++ "\n" ++ api_section(c, mu, root, f) ++ "\n"
+    ++ prose(c, mu, "api") ++ "\n" ++ api_section(c, mu, root, lang, f) ++ "\n"
     ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, f) ++ "\n"
     ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
     ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu, f) ++ "\n"
@@ -1774,6 +1807,41 @@ test "the keepdims card points at flash_attn's reductions, on rows the map has" 
         assert str.contains(p, """<span class="km-c" data-c="${k.id}" """)
       }
       assert len(str.split(p, `<article class="gpu-card`)) == len(f.cards) + 2
+    }
+  })
+}
+
+## The tutorial link is found by a chapter's title, numbered as gen/tutorial
+## names its pages, and absent while no chapter names GPU; on the real
+## tutorial the page carries it exactly when the chapter is there.
+test "the page links the tutorial's GPU chapter when there is one" {
+  let with = match parse("Intro.\n\n## 1. Values\n\nText.\n\n## 2. GPU kernels\n\nMore.\n") {
+    Ok(bs) -> bs
+    Err(e) -> panic(e)
+  }
+  let without = match parse("## 1. Values\n\nText.\n") {
+    Ok(bs) -> bs
+    Err(e) -> panic(e)
+  }
+  assert gpu_chapter(with) == Some("tutorial/02.html")
+  assert gpu_chapter(without) == None
+  with_fs_real(() => {
+    let f = load_facts()
+    for lang in [En, Zh] {
+      let p = gpu_page(plain_assets(), "gpu.js", lang, f, [])
+      let blocks = match parse(must_read(corpus_path("tutorial", lang))) {
+        Ok(bs) -> bs
+        Err(e) -> panic(e)
+      }
+      match gpu_chapter(blocks) {
+        Some(page) -> {
+          assert str.contains(p, """<p class="gpu-learn"><a href=""")
+          assert str.contains(p, page)
+        }
+        None -> {
+          assert not str.contains(p, "gpu-learn")
+        }
+      }
     }
   })
 }
