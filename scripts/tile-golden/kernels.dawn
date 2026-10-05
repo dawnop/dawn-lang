@@ -26,7 +26,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, store
   hint_latency, tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
   idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
-  store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, DYN_DIM }
+  store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, DYN_DIM, idx_div, idx_rem, idx_sub, lit }
 use tileir/prog.{TileProg, Cells, trace_kernel, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
   Whole, FREE_AXIS }
 use tileir/render.{render}
@@ -2159,6 +2159,30 @@ fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Uni
     (m_new, l_new, acc_new)
   })
   store_cell(o, div(acc, broadcast(l, [FA_BQ, ATT_D])))
+}
+
+# ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
+
+## The rows of `idx_softmax`'s input, its row blocks and its width.
+const IS_N: Int = 128
+const IS_T: Int = 16
+const IS_D: Int = 64
+
+# A row softmax over the sum of two of `x`'s eight row blocks, picked by
+# index arithmetic on the block id: block `b` of four reads blocks
+# `(b + 8 / 2) % 8` and `8 - b - 1`. It is the coverage kernel of tileir
+# 0.8.2 and no problem's: `idx_div`, `idx_rem` and `idx_sub` (the `divi`,
+# `remi` and `subi` on the index tile), two `[16, 1]` row statistics that
+# meet the `[16, 64]` tile with no `broadcast` (the same-rank rule), and a
+# `lit` that takes the operation's f64.
+fn idx_softmax(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+  let b = block_id(0)
+  let n = idx_const(IS_N / IS_T)
+  let j = idx_rem(idx_add(b, idx_div(n, idx_const(2))), n)
+  let i = idx_sub(idx_sub(n, b), idx_const(1))
+  let t = addf(load_at(x, [j]), load_at(x, [i]))
+  let e = exp(sub(t, reduce_max(t, keepdims: true)))
+  store_cell(o, mul(div(e, reduce_sum(e, keepdims: true)), lit(2.0)))
 }
 
 # leetgpu 37 (Matrix Power): one square product, launched P-1 times with the
@@ -5124,6 +5148,12 @@ fn trace(name: String) -> TileProg = match name {
     let (p, _e) = trace4("flash_attn",
       In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, fa_kv()), In(F64, fa_kv()),
       Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), flash_attn)
+    p
+  }
+  "idx_softmax" -> {
+    let (p, _e) = trace2("idx_softmax",
+      In(F64, cells([IS_N, IS_D], [IS_T, IS_D], along: [FREE_AXIS, 1])),
+      Out(F64, cells([IS_N / 2, IS_D], [IS_T, IS_D])), idx_softmax)
     p
   }
   "matpow_step" -> {

@@ -89,11 +89,22 @@ let (prog, entry) = trace3("matmul",
   `store_view` into one is refused while recording.
 - `zeros(p)` and `fill(p, v)` are a tile shaped like a cell of `p`, the
   accumulator a block starts from.
-- A constant is rank 0: `f_const(F64, 0.5)`, `i_const(3)`. A rank-0 tile
-  widens on its own wherever an operation meets a wider one, and nowhere
-  else: `broadcast(t, shape)` widens dimensions of length 1 explicitly, and
-  places that need a rank-0 tile (a condition, a loop bound, a cell index)
-  refuse a wider one.
+- A constant is rank 0: `f_const(F64, 0.5)`, `i_const(3)`. `lit(0.5)` is
+  a float constant with no format, which takes the format of the
+  element-wise operation it meets (`mul(s, lit(0.5))`; write it after a
+  typed operand, since the checker finds the format left to right); a
+  place that needs a format of its own refuses it and asks for `f_const`.
+- An operand of an element-wise operation widens on its own in two cases: a
+  rank-0 tile widens to any shape, and a tile of the operation's rank widens
+  along its dimensions of length 1, so `sub(s, reduce_max(s, keepdims:
+  true))` needs nothing more. A tile of another rank is refused (a
+  reduction without `keepdims` dropped the dimension it would line up by).
+  `broadcast(t, shape)` widens explicitly, for places that are not
+  element-wise (a loop's starting value); places that need a rank-0 tile (a
+  condition, a loop bound, a cell index) refuse a wider one.
+- `Idx` arithmetic is `idx_add`, `idx_sub`, `idx_mul`, `idx_div` and
+  `idx_rem` (signed, toward zero): a grid axis that holds a head and a
+  group folded together is read back as `idx_div(b, g)` and `idx_rem(b, g)`.
 - `reshape(t, shape)` regroups `t`'s lanes into `shape`, row-major, as
   many lanes as before: a `[T, T]` product goes into a `[1, T, T]` cell as
   `store_cell(o, reshape(acc, [1, T, T]))`. No write reshapes on its own.
@@ -139,7 +150,7 @@ measurement is in §6.26 of the design document.
 
 Each value handle has a format and a shape, and every element-wise operand is
 held to the shape the operation takes from its operands (after the rank-0
-rule), as is the `k` of `mmaf`, `mmaf_scaled` and `mmai`. A mismatch panics
+and same-rank rules), as is the `k` of `mmaf`, `mmaf_scaled` and `mmai`. A mismatch panics
 while the kernel records, naming the operation by its depth-first number in
 `TileProg.ops` (`MakeToken(0)` is #0), for example:
 ``tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>``.

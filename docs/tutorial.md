@@ -1831,9 +1831,10 @@ tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written throu
 ```
 
 `adds_one` adds a constant to a 128-lane tile. A constant is rank 0 (`f_const(F64, 1.0)`
-has no shape), and a rank-0 tile widens on its own wherever it meets a wider one. That is
-the only widening that happens without being asked for: `adds_two_shapes` widens the
-constant to 64 lanes, then meets 128, and is refused. `writes_its_input` stores into an
+has no shape), and a rank-0 tile widens on its own wherever it meets a wider one. Beside
+it, only a dimension of length 1 widens without being asked (the row reductions below
+show it): `adds_two_shapes` widens the constant to 64 lanes, then meets 128, and is
+refused. `writes_its_input` stores into an
 `In`. `stores_by_pointer` writes its `Out` through the pointer path, a `store` at an
 element offset, and the offset is even the right one. It is refused anyway: an `Out` is
 written through its cells (`store_cell`, or `store_sub` for one piece of a cell) and in no
@@ -1965,7 +1966,7 @@ device runs its eight trips. The region carries a second value beside the accumu
 the token. Memory operations are ordered by a token chain the recorder threads through
 them, not by the order of the program text.
 
-### Reductions over rows: keepdims and broadcast
+### Reductions over rows: keepdims
 
 In two dimensions a reduction has a dimension to work along. Here each block takes 32 rows
 of 64 scores and turns each row into a softmax:
@@ -1973,22 +1974,20 @@ of 64 scores and turns each row into a softmax:
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum,
-  broadcast}
+use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum}
 use tileir/prog.{trace2, cells, In, Out}
 
 fn row_softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let s = load_cell(x)                                          # [32, 64]
-  let m = broadcast(reduce_max(s, keepdims: true), [32, 64])    # [32, 1], then [32, 64]
-  let p = exp(sub(s, m))
-  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+  let s = load_cell(x)                                   # [32, 64]
+  let p = exp(sub(s, reduce_max(s, keepdims: true)))     # [32, 1], widened to [32, 64]
+  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
 }
 
-# The same, with the first `broadcast` left out.
-fn row_softmax_unbroadcast(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+# The same, with the first `keepdims` left out.
+fn row_softmax_dropped(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let s = load_cell(x)
-  let p = exp(sub(s, reduce_max(s, keepdims: true)))
-  store_cell(out, div(p, broadcast(reduce_sum(p, keepdims: true), [32, 64])))
+  let p = exp(sub(s, reduce_max(s)))                     # [32]
+  store_cell(out, div(p, reduce_sum(p, keepdims: true)))
 }
 
 fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
@@ -2006,24 +2005,28 @@ fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
 
 pub fn main() -> Unit !io = {
   println(try_record(row_softmax))
-  println(try_record(row_softmax_unbroadcast))
+  println(try_record(row_softmax_dropped))
 }
 ```
 ```output
 recorded
-tileir: kernel `row_softmax`: op #10 `subf`: rhs is tile<32x1xf64>, declared tile<32x64xf64>
+tileir: kernel `row_softmax`: op #9 `subf`: rhs is tile<32xf64>, declared tile<32x64xf64>
 ```
 
 `reduce_max(s, keepdims: true)` reduces the last dimension (`dim: -1` is the default) and
-keeps it with length 1: a `[32, 1]` tile, one maximum per row. Widening it back to
-`[32, 64]` is written out with `broadcast`, because only a rank-0 tile widens by itself.
-The second kernel leaves the `broadcast` out and is refused at the subtraction; the
-refusal names `subf`, the Tile IR operation `sub` records.
+keeps it with length 1: a `[32, 1]` tile, one maximum per row. Where it meets the
+`[32, 64]` tile in `sub`, its dimension of length 1 widens to 64. That is the whole rule:
+an operand of an element-wise operation widens along its dimensions of length 1 when it
+has the operation's rank, and a rank-0 tile widens to any shape. The second kernel drops
+`keepdims`, so the maximum is a `[32]` tile, of another rank, and it is refused at the
+subtraction; the refusal names `subf`, the Tile IR operation `sub` records.
+`broadcast(t, shape)` is the explicit spelling, for a place that is not an element-wise
+operation, such as a loop's starting value.
 
-NumPy would have widened it. The reason not to is the case its rule gets wrong while
-looking right: reduce a square `[64, 64]` tile without `keepdims` and NumPy lines the
-`[64]` result up with the last axis, so element (i, j) is shifted by the maximum of row j.
-Here that is refused too, and every widening is written where it happens.
+NumPy would have widened the `[32]` too. The reason not to is the case its rule gets
+wrong while looking right: reduce a square `[64, 64]` tile without `keepdims` and NumPy
+lines the `[64]` result up with the last axis, so element (i, j) is shifted by the maximum
+of row j. Here that is refused, and `keepdims` is how a reduction says which axis it means.
 
 Put this step in a loop over blocks of keys and values, carry a running maximum and a
 running sum, and it is FlashAttention: `flash_attn` in `scripts/tile-golden/kernels.dawn`
