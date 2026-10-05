@@ -1,6 +1,6 @@
 # 源码位置进 Core：调用节点的 site 与按需侧表
 
-> 状态：**proposed**（M2，2026-10-05 起草，待评审，未实现）。源码位置模型一线（M 刀序）的第二刀；
+> 状态：**proposed**（M2，2026-10-05 起草，待评审，未实现；M3 C 侧表见第十二节，2026-10-05 起草）。源码位置模型一线（M 刀序）的第二刀；
 > 依据：裁决 `agent-handoff/ruling-source-span-map-20261003.md`（「位置货币」一条与 M 刀序），
 > 调研 `agent-handoff/research-gpumap-call-spans-report-20261003.md` §六、§八。M1（flash 页）已落地：
 > `65547d27`（tileir 调用树与体标记）、`3547325f`（GPU 页只放 flash_attn）。仓库行号指 `ecfa0eda`，
@@ -267,3 +267,170 @@ GHC 的 tick 浮动都是在解决同一件事），本刀不预留。
 - **Core 层「行号表」**：行号只是 span 的投影，写侧表时由 `line_starts` 算；Core 里存行号会让
   纯移动改 Core 的值。
 - **为 site 预留内联来源字段**：没有内联 pass，预留的字段没有测试能证明它对。
+
+## 十二、M3：C 侧表 `__emitc --map`
+
+> 状态：**proposed**（2026-10-05 起草，待评审，未实现）。基于本文 M2（`65c8e56c`，`feat/core-site`）与
+> TU 拆分（#530，`docs/c-tu-split-design.md`）。行号指 `65c8e56c` 的 `selfhost/src/c/emitc.dawn`。
+
+### 12.1 要什么
+
+`__emitc <target> -o out.c --map out.dawnmap`（`dawnc emitc` 同一组参数）在写 C 的同时写一份侧表：
+每个带 `CAt` 的调用，在 C 文本里落在哪几行、末行的哪一段列。不带 `--map` 时什么都不变；带 `--map` 时
+C 文本也不变（12.4 的硬判据）。与 `--split`、`--build-info` 可任意组合。
+
+### 12.2 格式：`.dawnmap` 第 1 版
+
+纯文本，按行，字段以制表符分隔，UTF-8。第一行自描述，其余每行第一个字段是行种类：
+
+```
+dawnmap 1 c                                  格式名、版本、后端
+text <lines>                                 映射的那份 C 文本（`-o` 所写）的总行数
+unit <k> <file> <first> <last>               第 k 个 TU：split 后的文件名、在整份文本里的行区间
+src <module> <path>                          模块与它的源文件路径
+fn <first> <last> <module> <origin> <symbol> 一个 C 函数体占的行区间、所属声明、C 符号
+call <first> <line> <clo> <chi> <module> <lo> <hi> <nlo> <what>
+```
+
+- **C 一侧坐标**一律指 `-o` 写出的**整份文本**：行从 1 起，列是该行内从 0 起的半开字节区间
+  （C 文本除 `c_escape` 写成八进制的部分全是 ASCII，字节即字符）。`call` 的 `line` 是调用表达式所在行，
+  `[clo, chi)` 是表达式在该行里的那一段；`first` 是这次调用开始写 C 的那一行（实参被命名成临时变量时，
+  那几行在 `line` 之前），所以 `[first, line]` 是这次调用的全部 C。调用以语句形落地（12.3 第二种）时
+  `clo`/`chi` 写 `-`，区间是整行。没能落地的调用（12.3 第三种）三个行列字段都写 `-`。
+- **源码一侧坐标**是文件坐标的码点偏移 `lo, hi, nlo`（M2 的 `site_abs`：`base + 相对偏移`），与 `.sites`、
+  `dawn parse` 同一种货币。不写行列：行列是偏移对源文件 `line_starts` 的投影，读取方手里有源文件。
+- **一份，不分 TU。** 整份文本是正本：差分比的是它，`cdriver.split` 是它的纯函数，`--split` 的每个
+  文件都由它切出。侧表跟着正本走，只多一张 `unit` 表告诉读取方怎么换到切开的文件：
+  `tuNN.c` 第一行是 `#include "dawn_prog.h"`，所以整份文本第 `L` 行（`first <= L <= last`）在
+  `tuNN.c` 里是第 `L - first + 2` 行；函数体只在 TU 里，头文件那段不会有 `fn`/`call` 行。
+  每 TU 一份的话，K 由 `tu_count` 按字节数决定，同一程序改一行就可能多一个文件，读取方得先猜有几份；
+  一份加一张表没有这个问题。`unit` 表由写出器按 `tu_marker` 行重算，不另记第二份真相，
+  测试里拿它和 `cdriver.split` 的实际输出对账（12.5）。
+- **路径**：项目模块用 `LoadedModule.site_path`（相对项目根，不随工作目录与命令行写法变，
+  `docs/source-location-design.md` §四），std 模块用 `std/<模块>.dawn`（嵌入 stdsrc 的名字）。
+- **`what`** 与 `.sites` 同词表（`coresites.callee_text`：`direct m.f`、`method f`、`impl f`、
+  `intrinsic name`……），供 oracle 与人读，页面不依赖它。
+- **稳定排序**：`unit` 按 k，`src` 按模块名，`fn` 按 `first`，`call` 按 `(line, clo, -chi, module, lo, hi)`
+  （同行嵌套时外层在前），未落地的排最后按 `(module, lo, hi)`。排序键是全序，所以同输入同字节；
+  emitc 本身是确定的（固定点 B==C 依赖于此），侧表只是它的又一个确定函数。
+- **版本**：第一行的 `1`。读取方见到不认识的版本拒绝，见到不认识的行种类跳过（加行种类不升版本，
+  改已有字段的含义才升）。
+
+`fn` 行是给页面的「整函数」粒度（CE 式按行着色的底色），也是 oracle 判「这个 site 所在函数是否被
+`reach` 裁掉」的依据。
+
+### 12.3 emitc 里在哪里记
+
+emitc 把表达式拼成字符串往上交，写行的只有 `line`（`emitc.dawn:148`）一处（`emit_fn` 的函数头与
+收尾 `}` 在体外，不含调用）。一个调用交出的 C 表达式串 `v`，会被**原样**嵌进之后某一次 `line`
+写的那一行：`T t = v;`、`(void)(v);`、`return v;`、外层调用的实参……emitc 的正确性本来就要求它恰好
+写下一次（`emit_fn` 头注释：「a C expression that is never written down is never evaluated」，写两次就是
+求值两次）。所以不需要在串里嵌标记，只要记住这个串，等它出现：
+
+- `emit_expr` 的 `CCall`/`CIntrinsic` 两个 arm（`emitc.dawn:841-842`）在调用 `emit_call`/`emit_intrinsic`
+  前记下 `a = len(st.out)`，返回后交给 `note_site(st, site, what, a, v)`：
+  1. **表达式形**（`v` 含 `(`）：挂进 `st.pend` 待定。之后每次 `line` 先照常拼出这一行，再在行里找每个
+     待定串，找到的出列，记 `(first = a 处的块或本行, line = 本行, clo, chi)`。同一行里几个待定串文本相同
+     （`g(f(), f())` 这种没被命名的情形）按入列顺序认领从左到右的不重叠出现。
+  2. **语句形**（`v` 是 `DAWN_UNIT` 或不含括号的临时名，且期间写过行）：调用本身就在那几行里，
+     记 `[a, len(st.out) - 1]`，列为 `-`。临时名不进待定：`t3` 是 `t30` 的子串。
+  3. **无痕**（`v` 是原子、期间没写行，例如被折成常量的内建）：记一行未落地。
+- `st.pend` 不为空的时间只在一个函数体里：`emit_fn` 结束时剩下的全部记成未落地（oracle 会让它红），
+  另起一份转写的地方（常量构建器 `emitc.dawn:707`、`:1204`）以空 `pend` 开始，免得它们的行认领了
+  外面的待定串。
+- 记下的行号先是块下标，相对当前转写：`emit_fn` 把体拼到函数头之后时整体平移 `len(st.out) + len(head)`，
+  `emit_units` 把每个函数体排进最终文本时再平移到它的落点。块下标换成行号由写出器在最后一步做
+  （数之前各块里的换行；`line` 写的块恰好一行，若认领的块里有不在末尾的换行，写出器 panic，
+  这只在 `--map` 时才会走到）。
+- 待定串、行记录都在 `CSt` 新加的三个字段里（`mapping: Bool`、`pend`、`rows`）。`mapping` 为假时
+  `note_site` 立即返回原 `st`，`line` 只多一次 `len(st.pend) == 0` 判断。`line` 写出的文本在两种模式下
+  是同一个表达式算出来的，侧表只读它、不改它。
+- 驱动：`cdriver.c_text` 不变；新加 `c_text_mapped(std, prog) -> Result[(String, String), String]`，
+  返回 C 文本与侧表文本。`base` 表（M2 的 `main.decl_bases`）挪进 `ir/coresites`，`__lower --sites`
+  与侧表写出器共用。写出器单独一个模块 `c/cmap.dawn`，emitc 只交出原始行记录。
+
+为什么按「串出现在哪一行」而不是在 `line` 处给每个表达式标号：emitc 的表达式是字符串，没有地方挂
+标号；给串加不可见标记再在输出前剥掉，等于在默认路径上多一遍扫描，也就不再是「对 C 文本零影响」
+的结构性论证。按出现认领只在 `--map` 时花钱，代价是要靠上面那条「恰好写下一次」的不变式，
+而这条不变式 oracle 会逐个调用检查（12.5）。
+
+### 12.4 对 C 文本零影响：怎么证明
+
+1. **结构**：上一节的改动里，C 文本只经过 `line` 的同一个拼接表达式与 `emit_units` 的同一段排布；
+   新字段只被 `note_site`、`line` 的认领分支和写出器读写。
+2. **同输入有无 `--map`**：同一个编译器对同一输入跑 `__emitc -o a.c` 与 `__emitc -o b.c --map m`，
+   `a.c` 与 `b.c` 逐字节相同；加 `--split` 时两个目录逐文件相同。输入：`nmain.dawn`（整个原生编译器，
+   17 个 TU）、`scripts/tile-golden/kernels.dawn`、`examples/` 里能走 C 后端的程序、`scripts/core-sites/corpus.dawn`。
+   脚本 `scripts/c-map/same.sh`。
+3. **对真父**：不带 `--map` 时本分支与真父对同一输入的 `__emitc` 输出逐字节相同（同 M2 硬判据），
+   `native-fixpoint.sh` B==C。
+4. **两条入口一致**：`__emitc --map`（JVM 上）与 `dawnc emitc --map`（固定点里编出的原生编译器）对
+   `nmain.dawn` 写出的侧表逐字节相同，与两边 C 文本 A==B 是同一条要求。
+5. **负控**：变异体 `text-leak` 在认领时往行尾加一段注释，第 2 条红。
+
+### 12.5 测试与负控
+
+- **oracle**（`scripts/c-map/check.py`，读取部分放 `scripts/c-map/dawnmap.py`，M7 复用）：同一目标再跑一次
+  `__lower --sites`，然后检查：
+  - **配对**：每个 `call` 行的 `(module, lo, hi, nlo)` 恰是 `.sites` 里的一行（M2 已证明 `.sites` 与
+    parser 调用节点一一对应，所以这里传递到源码）；`fn` 表里的每个函数，它在 `.sites` 里的每一行
+    在侧表里恰好出现一次（完整、单射）；被 `reach` 裁掉的函数（不在 `fn` 表里）的行不要求出现。
+  - **C 侧位置**：取整份文本第 `line` 行的 `[clo, chi)`，按 `what` 判：`direct m.f` 要包含
+    `mangle(m, f)`（oracle 用 Python 独立实现 `escape_part` 那张五行的表，不读编译器）；`impl`/`default`
+    要包含被调方法名的转义；`method` 要包含 `->slots[`，`dynamic` 要包含 `->fn)`；`intrinsic` 只要求
+    区间非空。语句形的行区间要落在所属 `fn` 的区间里。另查 `first <= line`、同一调用树的嵌套：源码 span
+    包含的两个调用，C 区间也包含（同行比列，跨行比行）。
+  - **TU**：对每个 `call`，按 `unit` 表换到 `--split` 写出的 `tuNN.c` 里那一行，文本与整份文本那一行相同。
+  - 样本：`kernels.dawn` 的 `flash_attn`（及 `vadd`、`softmax`）每个 sited 调用都落地、名字核对通过；
+    `corpus.dawn` 全部；`nmain.dawn` 整个编译器只跑统计（未落地数必须为 0，列出例外类别）。
+- **单元**：`c/emitc` 的 test 块用手搭的 `CFun` 钉住三种落地形与平移；`c/cmap` 的 test 块钉住排序、
+  `unit` 表与 `cdriver.split` 一致。
+- **负控**（`scripts/c-map/mutate.py` 登记、`run.py` 逐个建编译器验红，锚点归
+  `mutation-anchor-preflight.py`）：
+  1. `text-leak`：认领时改了行文本：12.4 第 2 条红；
+  2. `no-claim`：`line` 不认领待定串：全部未落地，完整性红；
+  3. `head-shift`：`emit_fn` 平移时少算函数头：行号错一到几行，名字核对红；
+  4. `col-pad`：列不算缩进：名字核对红；
+  5. `unit-off`：`unit` 表的 `first` 差一：TU 对账红。
+- **接入**：push 预算余量为 0，先挂 nightly 的 core-lint job（与 `scripts/core-sites` 并列一步）。
+
+### 12.6 给 M7 的读取方
+
+M7 页面的读取方是 Python（M1 的 `site/gpu-map/record.py` 那一层），用 `scripts/c-map/dawnmap.py` 的
+`load(path) -> {units, srcs, fns, calls}`，它需要的全在表里：
+
+- 源码栏：`src` 给路径，`call` 给 `[nlo, hi)` 高亮被调名、`[lo, hi)` 是整个调用；嵌套由 span 包含还原。
+- C 栏：`[first, line]` 与末行列区间；要逐行着色（CE 的形态）时，每行取覆盖它的最内层调用。
+- 切开的文件：用 `unit` 表换算，不必重新切。
+
+与 Compiler Explorer 的对照：CE 的汇编视图靠编译器发出的 `.loc file line` 指令（`lib/parsers/asm-parser.ts`
+的 `sourceTag = /^\s*\.loc\s+(\d+)\s+(\d+)\s+(.*)/`），每条汇编行带一个 `{file, line}`，即**输出行到源码行**
+的多对一表，颜色按源码行分组。本表反过来是**源码调用到输出区间**，每个调用一行、带列区间与嵌套；CE 那张
+表是它的投影（每个输出行取最内层调用的源码行），反之推不出来。
+
+**为什么侧表不用 `#line`**：裁决已否；一句话：`#line` 只到行、给不出调用区间，而默认写进 C 会让每份 C
+随纯移动漂移，prev-diff 与固定点拿 C 字节当证据的那层判据就没了（第十节同理，真调试信息归 M6，默认关）。
+
+出处：Compiler Explorer `asm-parser.ts`：https://github.com/compiler-explorer/compiler-explorer/blob/main/lib/parsers/asm-parser.ts
+（抓取于 2026-10-05）。
+
+### 12.7 开销
+
+`--map` 关时：`CSt` 多三个字段（每次 `{..st}` 拷贝多三个指针），`line` 多一次判空。按 M2 的测法
+（同输入、交错、`-Xmx6g -XX:+UseSerialGC`）报 `__emitc nmain --split` 的墙钟、峰值 RSS 与分配量，
+真父对本分支；分配量预期在 +0.5% 以内，超过 2% 写原因。`--map` 开时另报一组，只作记录，不设门限
+（它是按需工具）。估算不作数，以实测为准。
+
+### 12.8 不做的（理由）
+
+- **每 TU 一份侧表**：K 随字节数变，读取方得先猜份数；一份加 `unit` 表等价且稳定。
+- **侧表里写源码行列**：行列是偏移对 `line_starts` 的投影，第二份真相；读取方有源文件。
+- **在 C 串里嵌标记再剥掉**：默认路径多一遍扫描，零影响就只能靠测试而不是靠结构。
+- **`#line` / 默认 `-g`**：见 12.6，归 M6，默认关。
+- **构造器、隐含调用（`==`、插值、`for`、`?`、`c[i]`）进表**：Core 里它们没有 site（第四节）。要加是
+  `CSite` 加构造器，与本刀独立；本刀的落地机制对它们照样适用。
+- **自尾调用改成的循环回边、内建折成的运算符进表**：调用在 Core 里已经消失（第五节「丢弃」），C 里没有
+  对应的调用可指。
+- **适配器（`emit_adapter`）、字典表、常量构建器进 `fn` 表**：没有书写调用，也没有所属声明。
+- **映射到 cc 之后的汇编或机器码**：那是 cc 的 DWARF 的事；要看汇编，用 M6 的 `#line` 加 `-g` 走 CE 的路。
+- **带 `--map` 时自动建目录、与 `-o` 推导文件名**：侧表路径显式给，与 `--build-info` 同一种约定。
