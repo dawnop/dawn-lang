@@ -125,7 +125,14 @@ one it did not), and plan.py reads it as "selects no job".
 
 Outside `scripts/`, a script still owns only itself, and rule B still reads
 path tokens from the scripts a step reaches, now excluding the harness's own
-directory, which rule A has already read file by file.
+directory, which rule A has already read file by file. A shell script's
+commands are followed wherever they point, including outside `scripts/` and
+relative to the directory it `cd`s to by its own location; before 2026-10-05
+the closure stopped at `scripts/`, and `playground/test/contract.sh` ran
+`lsp-contract.sh` and `lsp_contract.py` without either, or the gateway they
+drive, being any gate's input (fixture `427a813e`). Python and JavaScript
+bodies are still followed only into `scripts/`, because the shell command
+reader takes a docstring that names a script for a command.
 
 ## Changing it
 

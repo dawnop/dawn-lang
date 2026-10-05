@@ -71,15 +71,19 @@ paths no gate watches) is a ratchet checked in both directions.
      comment above HarnessReader gives the edges and the reasons (#169).
      A script outside scripts/ owns only itself.
      From: the `run:` commands in .github/workflows/*.yml, followed through
-     the scripts those scripts run.
+     the scripts those scripts run: from a shell script, any script in the
+     tree, resolved also against the directory it moves to by its own
+     location (`cd "$(dirname "$0")/.."`); from Python or JavaScript, which
+     the shell reader also reads prose in, only scripts under scripts/.
   B  A gate's script names a path, so that path is coarse for it. Read from
      the scripts rule A says the gate runs or imports, not from every file
      beside them, and never for the harness's own directory, which rule A
      already read file by file. A harness directory handed to the toolchain
      as a project (`./bin/dawn test scripts/x`) is its SourcePlan inputs,
      the manifest and src, not every harness beside them. Slash-bearing
-     tokens, shell globs, and for Python gates the `ROOT / "a" / "b"` joins and
-     `.glob()` patterns that a regular expression cannot tell from division.
+     tokens, shell globs, and for Python gates the `ROOT / "a" / "b"` and
+     `os.path.join(ROOT, "a", "b")` joins and `.glob()` patterns that a
+     regular expression cannot tell from division.
      For JavaScript gates the `join(ROOT, "a", "b")` and
      `resolve(__dirname, "..")` calls, which are the same statement in the
      only other language a gate here is written in, under whichever name the
@@ -91,7 +95,7 @@ paths no gate watches) is a ratchet checked in both directions.
      directory, because the lifecycle name is not a path and the table that
      binds it to one is in the tree.
      Bare directory names count only where a word cannot be prose: handed to
-     the toolchain, or appended to a list of units.
+     the toolchain (also as `$ROOT/name`), or appended to a list of units.
   C  A step that runs scripts/selfhost-core-diff.sh dumps the Core of every
      compiler module, so every module is exact for it. This is what 98b9896
      needed. From: the workflow, and the tree's own selfhost/src/**.dawn.
@@ -798,6 +802,9 @@ def path_tokens(text, tree, bare=False):
     return found
 
 
+SH_ROOT_PREFIX = re.compile(r"\$\{?\w*(?:ROOT|root|Root)\}?/")
+
+
 def shell_targets(text, tree):
     """Slash-free targets a shell gate names in the two places it can mean one.
 
@@ -817,6 +824,14 @@ def shell_targets(text, tree):
             contexts.append(line)
         contexts += re.findall(r"\+?=\(([^)]*)\)", line)
         for context in contexts:
+            # `"$DAWN_BIN" run "$ROOT/playground"` hands the toolchain the
+            # top-level `playground`, spelled through the variable the script
+            # names the repository with. playground/test/contract.sh boots the
+            # runner exactly so, and read with the slash in front the word was
+            # nobody's, so a change to the runner's source selected no job
+            # that runs it. Only a ROOT-like name, as python_inputs takes:
+            # `$tmp/std` is a scratch copy, not the tree's std.
+            context = SH_ROOT_PREFIX.sub("", context)
             for word in BARE_TOKEN.findall(context):
                 if word in tree.dirs and "/" not in word:
                     found.add(word)
@@ -829,8 +844,9 @@ def shell_targets(text, tree):
 
 
 def python_inputs(text, tree):
-    """Paths a Python gate script builds out of `ROOT / "a" / "b"` and reads
-    with `.glob(...)` / `.rglob(...)`.
+    """Paths a Python gate script builds out of `ROOT / "a" / "b"` (or
+    `os.path.join(ROOT, "a", "b")`) and reads with `.glob(...)` /
+    `.rglob(...)`.
 
     doc-check.py states its whole subject that way (`(ROOT / "docs").rglob(
     "*.md")` and `ROOT.glob("*.md")`), so without this the documentation gate
@@ -901,8 +917,42 @@ def python_input_patterns(text):
             if node.func.attr in ("glob", "rglob"):
                 inner.discard(id(node.func.value))
 
+    def os_joined(node):
+        """`os.path.join(ROOT, "a", "b")` -> "a/b": the os.path spelling of
+        the join above. playground/test/lsp_contract.py names the gateway it
+        drives that way and no other, so without it the Playground contract
+        read as never touching playground/lsp_gateway.py. Only a ROOT-like
+        first argument and constant segments count, as for `/`."""
+        func = node.func
+        is_join = (
+            isinstance(func, ast.Attribute) and func.attr == "join"
+            and (
+                (isinstance(func.value, ast.Attribute) and func.value.attr == "path"
+                 and isinstance(func.value.value, ast.Name)
+                 and func.value.value.id == "os")
+                or (isinstance(func.value, ast.Name) and func.value.id == "posixpath")
+            )
+        )
+        if not is_join or len(node.args) < 2 or node.keywords:
+            return None
+        head = node.args[0]
+        if not (isinstance(head, ast.Name) and head.id.lower().endswith("root")):
+            return None
+        segs = []
+        for arg in node.args[1:]:
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                return None
+            seg = arg.value.strip("/")
+            if seg:
+                segs.append(seg)
+        return "/".join(segs) or None
+
     patterns = set()
     for node in ast.walk(tree_ast):
+        if isinstance(node, ast.Call):
+            path = os_joined(node)
+            if path:
+                patterns.add(("path", path, ""))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             if id(node) in inner:
                 continue
@@ -1082,7 +1132,7 @@ def js_inputs(text, tree, script):
 SEGMENT_SPLIT = re.compile(r"[\n;|&]+|\$\(|`|\(\s")
 COMMAND_PREFIX = re.compile(
     r"^\s*(?:(?:if|then|else|elif|while|until|do|!|time|exec|command|bash|sh|"
-    r"python3?|node|env|sudo|source|\.|\w+=\S*)\s+)*"
+    r"python3?(?:\s+-[A-Za-z]+)*|node|env|sudo|source|\.|\w+=\S*)\s+)*"
 )
 
 # The lifecycle names `npm <name>` accepts without `run`, which is the whole of
@@ -1153,7 +1203,9 @@ def executed_scripts(text, tree, workdir=None, seen=None):
             continue
         cands = {words[0]}
         if workdir:
-            cands.add(posixpath.join(workdir, words[0]))
+            joined = _join(workdir, words[0].strip("\"'"))
+            if joined:
+                cands.add(joined)
         for cand in cands:
             for path in resolve(cand, tree):
                 if is_script(path, tree):
@@ -1190,6 +1242,31 @@ def unresolved_commands(text, tree):
     return bad
 
 
+SH_CD_SELF = re.compile(
+    r"^\s*cd\s+[\"']?\$\(\s*dirname\s+[\"']?\$\{?(?:BASH_SOURCE(?:\[0\])?|0)\}?[\"']?\s*\)"
+    r"((?:/\.\.)*)/?[\"']?\s*(?:$|&&|;|\|\|)",
+    re.M,
+)
+
+
+def shell_cwd(script, body):
+    """The directory a shell script moves to before it runs anything, when it
+    moves there by its own location (`cd "$(dirname "$0")/.."`), or None.
+
+    playground/test/contract.sh starts that way and then runs
+    `./test/lsp-contract.sh`, which resolves against playground/, not against
+    the repository root a step runs from. Read from the root alone, the
+    command named nothing, and the gateway that lsp-contract.sh drives was
+    recorded as no part of the playground contract.
+    """
+    if Path(script).suffix != ".sh":
+        return None
+    m = SH_CD_SELF.search(body)
+    if not m:
+        return None
+    return _up(posixpath.dirname(script), m.group(1).count("/.."))
+
+
 def gate_scripts(gate, tree, transitive=True):
     """The repository files a gate's commands execute, transitively.
 
@@ -1197,6 +1274,14 @@ def gate_scripts(gate, tree, transitive=True):
     delete-contract/run.sh, lsp-lifecycle-contract runs lsp-lifecycle.py. A
     gate that stops at its own command line records those as watched by nobody,
     so the set is closed over the scripts each script runs.
+
+    The closure used to stop at scripts/, and the Playground contract is the
+    gate that lived past that edge: playground/test/contract.sh runs
+    lsp-contract.sh, which runs lsp_contract.py, which drives the gateway, and
+    none of the three was any gate's code. A shell script is now followed
+    wherever it points; Python and JavaScript, read here with the shell
+    reader, keep the scripts/ bound, because that reader takes a docstring
+    naming a script for a command.
     """
     direct = set()
     for command in gate.commands:
@@ -1213,9 +1298,15 @@ def gate_scripts(gate, tree, transitive=True):
         if script in UNSCRAPED:
             continue
         body = strip_comments(tree.read(script))
-        frontier |= {
-            s for s in executed_scripts(body, tree) if s.startswith("scripts/")
-        }
+        cwd = shell_cwd(script, body)
+        found = executed_scripts(body, tree, cwd)
+        if Path(script).suffix != ".sh":
+            # Only a shell script is read in its own language here. Over
+            # Python and JavaScript the shell reader also takes prose for
+            # commands, so what it finds there is followed under scripts/
+            # alone, as it always was.
+            found = {s for s in found if s.startswith("scripts/")}
+        frontier |= found
     return scripts
 
 
