@@ -579,6 +579,104 @@ fn jumps_stmts(stmts: List[CStmt], lid: Int, brk: Bool, cont: Bool) -> Bool = {
   false
 }
 
+## Whether control can leave `e` sideways: a `return` anywhere, or a `break`
+## or `continue` of a loop that `e` does not itself contain (`inner` is the
+## loops entered on the way down). This is the "may" that `falls_through`'s
+## "must" is not: an operand like `if c { continue } else { x }` falls through
+## on one path and leaves on the other, and an operand list has to be ready for
+## the leaving path whenever there is one (`held_before_exit`). A panic is not
+## counted, since it ends the process and nothing it skips is worth releasing.
+fn leaves(e: CExpr, inner: List[Int]) -> Bool =
+  match e {
+    CReturn(_) -> true
+    CBreak(l) -> not list.contains(inner, l)
+    CContinue(l) -> not list.contains(inner, l)
+    CCall(callee, args, _) -> {
+      let hit = match callee {
+        CDynamic(t) -> leaves(t, inner)
+        _ -> false
+      }
+      hit || leaves_list(args, inner)
+    }
+    CIntrinsic(_, args, _) -> leaves_list(args, inner)
+    CCtor(_, _, args, _) -> leaves_list(args, inner)
+    CUpdate(base, adt, ci, fields, ty) -> leaves(update_as_ctor(base, adt, ci, fields, ty), inner)
+    CField(t, _, _, _, _) -> leaves(t, inner)
+    CIsCtor(t, _, _) -> leaves(t, inner)
+    CTagOf(t, _) -> leaves(t, inner)
+    CClosure(_, _, caps, _) -> leaves_list(caps, inner)
+    CDictApply(_, args, _) -> leaves_list(args, inner)
+    CDictArg(d, _, _, _, _) -> leaves(d, inner)
+    CTuple(es, _) -> leaves_list(es, inner)
+    CTupleGet(t, _, _) -> leaves(t, inner)
+    CBox(x, _) -> leaves(x, inner)
+    CUnbox(x, _) -> leaves(x, inner)
+    CBinary(_, l, r, _) -> leaves(l, inner) || leaves(r, inner)
+    CUnary(_, x, _) -> leaves(x, inner)
+    CIf(c, t, e2, _) -> {
+      let hit = leaves(c, inner) || leaves(t, inner)
+      match e2 {
+        None -> hit
+        Some(x) -> hit || leaves(x, inner)
+      }
+    }
+    CBlock(stmts, tail, _) -> {
+      for s in stmts {
+        if stmt_leaves(s, inner) { return true }
+      }
+      match tail {
+        None -> false
+        Some(t) -> leaves(t, inner)
+      }
+    }
+    CListLit(es, _) -> leaves_list(es, inner)
+    CDup(x, _) -> leaves(x, inner)
+    # The rest, enumerated for fv_expr's reason: a jump wrongly reported
+    # absent is an earlier operand left out of the unwind (#506, #507).
+    CInt(_) -> false
+    CFloat(_) -> false
+    CBool(_) -> false
+    CStr(_) -> false
+    CUnit -> false
+    CLocal(_, _) -> false
+    CFnRef(_, _, _) -> false
+    CDictRef(_, _, _, _) -> false
+    CConstRef(_, _, _) -> false
+    CComptime(_, _, _) -> false
+    # not walked, for the reason `jumps` gives
+    CForeign(_, _) -> false
+  }
+
+fn leaves_list(es: List[CExpr], inner: List[Int]) -> Bool = {
+  for e in es {
+    if leaves(e, inner) { return true }
+  }
+  false
+}
+
+fn stmt_leaves(s: CStmt, inner: List[Int]) -> Bool =
+  match s {
+    CSLet(_, _, v) -> leaves(v, inner)
+    CSAssign(_, v) -> leaves(v, inner)
+    CSDiscard(x) -> leaves(x, inner)
+    CSLoop(lid, body, step) -> {
+      let inner2 = inner ++ [lid]
+      let hit = leaves(body, inner2)
+      match step {
+        None -> hit
+        Some(x) -> hit || leaves(x, inner2)
+      }
+    }
+    CSIf(c, t, e2) -> {
+      let hit = leaves(c, inner) || leaves(t, inner)
+      match e2 {
+        None -> hit
+        Some(x) -> hit || leaves(x, inner)
+      }
+    }
+    CSDrop(_) -> false
+  }
+
 ## The arm's statements with its final `break lid` peeled off: lower_match
 ## ends every taken arm with one, sometimes behind a nest of blocks. Merging
 ## the nest into one statement list is fine -- symbols are globally unique,
@@ -870,7 +968,7 @@ fn owned_positions(
 ## operand hoisted for order's sake is passed on bare and not released here;
 ## the callee does that.
 fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
-  var any = snapshot_row(es)
+  var any = snapshot_row(es) || held_before_exit(st, es, owned)
   var h = 0
   for e in es {
     if not list.contains(owned, h) && counted(st, e) && not borrows(st, e) { any = true }
@@ -958,6 +1056,34 @@ fn snapshot_row(es: List[CExpr]) -> Bool = {
   false
 }
 
+## Whether some operand may leave the row sideways (`leaves`) after an earlier
+## operand already produced a reference the operation was going to own: an
+## owned position's counted value, or an owned temporary in a borrowed one.
+## Inline, that earlier value is a C argument nobody named, so the jump's
+## unwind cannot see it: a transferred binding or a fresh string leaks on
+## every skipped iteration (#507), and a directly applied lambda's closure is
+## a let the return walks past (#506, where rc_check refuses the program).
+## The answer is the row snapshot's: name every operand in written order and
+## hold the names in scope until the operation (`intr_args`), so the leaving
+## operand unwinds them like any other binding. A row with no such pair keeps
+## its inline spelling byte for byte.
+fn held_before_exit(st: RSt, es: List[CExpr], owned: List[Int]) -> Bool = {
+  var held = false
+  var i = 0
+  for e in es {
+    if held && leaves(e, []) { return true }
+    if counted(st, e) && (list.contains(owned, i) || not borrows(st, e)) { held = true }
+    i = i + 1
+  }
+  false
+}
+
+fn all_positions(n: Int) -> List[Int] = {
+  var out: List[Int] = []
+  for i in 0..n { out = out ++ [i] }
+  out
+}
+
 ## Rewrite each operand in a consuming position: the value is handed over and
 ## the receiver keeps it.
 ##
@@ -973,10 +1099,9 @@ fn snapshot_row(es: List[CExpr]) -> Bool = {
 ## twice. A later assignment is not made safe by a dup at call time: that
 ## row first uses `intr_args` to bind value snapshots in written order.
 fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
-  if snapshot_row(es) {
-    var owned: List[Int] = []
-    for i in 0..len(es) { owned = owned ++ [i] }
-    return intr_args(st, es, owned, after)
+  let all = all_positions(len(es))
+  if snapshot_row(es) || held_before_exit(st, es, all) {
+    return intr_args(st, es, all, after)
   }
   let n = len(es)
   var st1 = st
@@ -1546,13 +1671,14 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     CCall(callee, args, cty) -> {
       # The function value is the first borrowed operand, not a name that
       # may be reread after an argument replaces it. Put its snapshot in
-      # the same held set as argument snapshots so a later jump drops it.
+      # the same held set as argument snapshots so a later jump drops it --
+      # also when the function value is a fresh closure and an argument may
+      # jump (#506): `borrow` would name it outside the scope a jump unwinds.
       match callee {
         CDynamic(target) -> {
           let row = [target] ++ args
-          if snapshot_row(row) {
-            var owned: List[Int] = []
-            for i in 1..len(row) { owned = owned ++ [i] }
+          let owned = list.drop(all_positions(len(row)), 1)
+          if snapshot_row(row) || held_before_exit(st, row, owned) {
             let (st1, lets, row1, temps) = intr_args(st, row, owned, after)
             return wrap(st1, lets,
               CCall(CDynamic(row1[0]), list.drop(row1, 1), cty), cty, temps)
@@ -3125,6 +3251,53 @@ test "an arm whose list element returns leaves the other arm alone" {
   )
   let m = rc_module(one_fn(ps, lst, body), owned_modes())
   assert len(rc_check(m, owned_modes())) == 0
+}
+
+test "a directly applied closure is held in scope across a returning argument" {
+  let fn_ty = TyFn([TyInt], TyInt, EPure)
+  let p = CParam { sym: 1, ty: TyBool, mode: COwned }
+  # #506: `borrow` used to name the fresh closure outside the scope the
+  # argument's return unwinds, and rc_module refused the result
+  let arg = CIf(CLocal(1, TyBool), CReturn(Some(CInt(7))), Some(CInt(1)), TyInt)
+  let body = CCall(CDynamic(CClosure("lam", "m", [], fn_ty)), [arg], TyInt)
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> match ss[0] {
+      CSLet(_, _, CClosure(_, _, _, _)) -> ()
+      _ -> panic("expected the closure named ahead of its argument")
+    },
+    _ -> panic("expected a block naming the call's operands")
+  }
+}
+
+test "an owned operand ahead of a leaving one is named, and only then" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: TyBool, mode: COwned }
+  let fresh_list = CCall(CDirect("m", "h"), [], lst)
+  let cont = CIf(CLocal(1, TyBool), CContinue(0), Some(CInt(1)), TyInt)
+  # #507: inline, the fresh list is a C argument the continue never sees
+  let pair = TyTuple([lst, TyInt])
+  let row = CTuple([fresh_list, cont], pair)
+  let body = CBlock(
+    [CSLoop(0, CBlock([CSDiscard(row)], None, TyUnit), None)],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  let st0 = RSt {
+    scopes: [], dict_syms: set.empty(), modes: owned_modes(), borrowed_syms: set.empty(),
+    hoisting: false, fname: "m.f", next_sym: 100, pinned: false
+  }
+  assert held_before_exit(st0, [fresh_list, cont], [0, 1])
+  # the same row with the jump inside a loop of its own leaves nothing, and
+  # a leaving operand with nothing held ahead of it needs no names either
+  let own_loop = CBlock([CSLoop(5, CBlock([CSDiscard(CIf(CLocal(1, TyBool), CBreak(5),
+    Some(CContinue(5)), TyNever))], None, TyUnit), None)], Some(CInt(1)), TyInt)
+  assert not held_before_exit(st0, [fresh_list, own_loop], [0, 1])
+  assert not held_before_exit(st0, [cont, fresh_list], [0, 1])
+  assert not held_before_exit(st0, [CLocal(1, TyBool), cont], [0, 1])
 }
 
 test "reassignment from the old value is a hand-over, not copy and drop" {

@@ -1,0 +1,42 @@
+# A directly applied lambda is a call through a fresh closure, and an argument
+# that leaves early has to release that closure on its way out (#506). The
+# `?` shape used to stop the C backend outright ("a return left a binding
+# behind"); the `continue` and `break` shapes compiled and leaked the closure
+# on every skipped iteration, which only the leak check can see.
+use std/io
+
+fn first_plus(xs: List[Int]) -> Option[Int] = Some(((y: Int) => y + 1)(get(xs, 0)?))
+
+fn label(xs: List[Int]) -> Option[String] =
+  Some(((p: String, y: Int) => p ++ to_string(y))("n" ++ to_string(len(xs)), get(xs, 1)?))
+
+fn skipped() -> Int = {
+  var i = 0
+  var total = 0
+  while i < 4 {
+    i = i + 1
+    let v: Int = ((y: Int) => y * 10)(if i % 2 == 0 { continue } else { i })
+    total = total + v
+  }
+  total
+}
+
+fn stopped() -> Int = {
+  var i = 0
+  var total = 0
+  while true {
+    i = i + 1
+    let v: Int = ((y: Int) => y + 100)(if i > 2 { break } else { i })
+    total = total + v
+  }
+  total
+}
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(first_plus([1])))
+  io.println(to_string(first_plus([])))
+  io.println(to_string(label([5, 6])))
+  io.println(to_string(label([5])))
+  io.println(to_string(skipped()))
+  io.println(to_string(stopped()))
+}
