@@ -6,7 +6,7 @@
 > 前置阅读：[operator-traits-design.md](operator-traits-design.md)（`Index`，本文同构的先例）、
 > [assoc-types-design.md](assoc-types-design.md)、[effect-params-design.md](effect-params-design.md) 刀 5 与 §9（关联效果及默认值）、
 > [builtin-privileges-design.md](builtin-privileges-design.md) §4（opaque 不继承 Show）。
-> 字面量随期望定型（`t * 0.5`）是另一篇：字面量设计（L1，与本刀同一个 release）。
+> 字面量随期望定型（`t * 0.5`）是另一篇：[literal-system-design.md](literal-system-design.md)（L1，与本刀同一个 release）。
 
 ## 1. 为什么
 
@@ -135,8 +135,8 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 
 ### D7 字面量
 
-本刀的字面量仍是单态的：`2.0` 是 `Float`，`t * 2.0` 报两侧类型不同。字面量随期望定型、向有类型的一侧让步是字面量设计的 L1，
-与本刀同一个 release 落地。**左锚定的不对称对非字面量写死**：`lit(2.0) * t` 推不出 `D`，现成的「cannot infer type parameter(s) D for `lit`」
+本刀单独看时字面量仍是单态的：`2.0` 是 `Float`，`t * 2.0` 报两侧类型不同。字面量随期望定型、向有类型的一侧让步是
+[literal-system-design.md](literal-system-design.md) 的 L1，与本刀同一个 release 落地，取代这一条。**左锚定的不对称对非字面量写死**：`lit(2.0) * t` 推不出 `D`，现成的「cannot infer type parameter(s) D for `lit`」
 加专属 hint「an operator gives its left operand's type to the right one, not the other way round: swap the operands, or bind the left one with an annotated `let`」
 （只在左操作数恰报了这一条、右操作数类型已知时替换 hint）。不做「左推不出时以右回填」：那就是双向求解的第一步。
 

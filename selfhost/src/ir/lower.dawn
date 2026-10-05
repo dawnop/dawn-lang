@@ -34,6 +34,7 @@ use check/types.{
   Adts, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID, NEG_ID, is_arith_trait,
+  FROM_INT_ID, FROM_FLOAT_ID, is_lit_trait,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, sub_goals
 }
@@ -1824,7 +1825,30 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
   if tid == DIV_ID { return (st, CBinary(CDiv, args[0], args[1], subject)) }
   if tid == REM_ID { return (st, CBinary(CMod, args[0], args[1], subject)) }
   if tid == NEG_ID { return (st, CUnary(CNeg, args[0], subject)) }
+  # A literal reached through a dictionary (`[T: FromInt]` at Int or Float).
+  # FromInt[Int] and FromFloat[Float] are the identity; FromInt[Float] is the
+  # conversion, held to the exactness the checker asks of a literal it types
+  # itself (literal-system-design D6), so a generic `0` does not round where a
+  # written one would have been refused
+  if tid == FROM_INT_ID && subject == TyFloat { return exact_to_float(st, args[0]) }
+  if tid == FROM_INT_ID || tid == FROM_FLOAT_ID { return (st, args[0]) }
   panic("lower: no primitive relation for trait ${to_string(tid)}")
+}
+
+## `to_float(n)`, or a panic when no Float is exactly `n`. The float is below
+## 2^63 whenever `to_int` can answer for it; at 2^63 it rounded up from an Int
+## that is not exactly a Float, and saying so needs no `to_int`.
+fn exact_to_float(st0: LSt, n: CExpr) -> (LSt, CExpr) = {
+  let (st1, ns) = fresh_sym(st0)
+  let (st2, fs) = fresh_sym(st1)
+  let nl = CLocal(ns, TyInt)
+  let fl = CLocal(fs, TyFloat)
+  let refuse = CIntrinsic("panic", [CStr("an integer literal is not exactly a Float")], TyNever, CNoSite)
+  let below = CBinary(CLt, fl, CFloat(9223372036854775807.0), TyBool)
+  let same = CBinary(CEq, CIntrinsic("to_int", [fl], TyInt, CNoSite), nl, TyBool)
+  let body = CIf(below, CIf(same, fl, Some(refuse), TyFloat), Some(refuse), TyFloat)
+  (st2, CBlock([CSLet(ns, TyInt, n), CSLet(fs, TyFloat, CIntrinsic("to_float", [nl], TyFloat, CNoSite))],
+    Some(body), TyFloat))
 }
 
 ## What `prim_relation` actually takes and returns at one subject, as opposed
@@ -1839,7 +1863,16 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
 ## RHS is verbatim (`Item = T`, the impl's own parameter) -- right for a real
 ## callee's ABI, wrong for a relation spelled out at the instantiated subject.
 fn prim_param_ty(tid: Int, subject: Ty, i: Int) -> Ty =
-  if tid == INDEX_ID && i == 1 { index_idx_ty(subject) } else { subject }
+  if tid == INDEX_ID && i == 1 {
+    index_idx_ty(subject)
+  } else if tid == FROM_INT_ID {
+    # the subject is only the result; the parameter is the host type
+    TyInt
+  } else if tid == FROM_FLOAT_ID {
+    TyFloat
+  } else {
+    subject
+  }
 
 fn prim_ret_ty(tid: Int, subject: Ty) -> Ty =
   if tid == EQ_ID {
@@ -1850,7 +1883,7 @@ fn prim_ret_ty(tid: Int, subject: Ty) -> Ty =
     TyString
   } else if tid == INDEX_ID {
     index_item_ty(subject)
-  } else if is_arith_trait(tid) {
+  } else if is_arith_trait(tid) || is_lit_trait(tid) {
     subject
   } else {
     panic("lower: no primitive relation for trait ${to_string(tid)}")

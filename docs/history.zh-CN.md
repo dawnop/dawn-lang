@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ e10a380ad750e737 -->
+<!-- doc-check: translation-of docs/history.md @ eaad6c511a5d89b8 -->
 
 # 历史
 
@@ -163,6 +163,9 @@
   每个都带一个设备类型可以绑定的效果成员；Int 与 Float 保留原生运算，不透明类型不继承目标的算术。
   这六个名字从此不能再用作 `trait` 或 `effect` 的名字（已在 main，尚未发版）。
   （[arith-operator-traits-design.md](arith-operator-traits-design.md)）
+- **2026-10-06。** 数字字面量按期望定型：`let f: Float = 1` 与 `3.14159 * 2 * r` 都能编译，
+  程序自己的类型经 `FromInt`、`FromFloat` 接收字面量，纯 impl 在编译期执行，所以 `let b: U8 = 300`
+  是编译错误，而范围写在库里（已在 main，尚未发版）。（[literal-system-design.md](literal-system-design.md)）
 
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
 

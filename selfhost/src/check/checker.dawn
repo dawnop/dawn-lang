@@ -69,7 +69,7 @@ use check/types.{
   prelude_trait_ids,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
-  NEG_ID, is_arith_trait, arith_trait_name, CHAR_OPAQUE_ID,
+  NEG_ID, is_arith_trait, arith_trait_name, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
   head_of, impl_at, has_impl_at,
   is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld, PkgDep
@@ -5321,15 +5321,17 @@ fn check_list_elem(cx: Cx, x: ListElem, elem_t: Ty) -> (Cx, Ty, TListElem) !io =
 
 fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match e {
-    EInt(v, lo, hi) -> (cx, TyInt, XInt(v, owner_off(cx, lo), owner_off(cx, hi)))
+    EInt(_, _, _) -> check_num_lit(cx, e, expected)
     EChar(v, lo, hi) -> (cx, ty_char(), XChar(v, owner_off(cx, lo), owner_off(cx, hi)))
-    EFloat(v, lo, hi) -> (cx, TyFloat, XFloat(v, owner_off(cx, lo), owner_off(cx, hi)))
+    EFloat(_, _, _) -> check_num_lit(cx, e, expected)
     EBool(v, lo, hi) -> (cx, TyBool, XBool(v, owner_off(cx, lo), owner_off(cx, hi)))
     EUnit(lo, hi) -> (cx, TyUnit, XUnit(owner_off(cx, lo), owner_off(cx, hi)))
     EStr(parts, lo, hi) -> check_str_lit(cx, parts, lo, hi)
     EVar(name, lo, hi) -> check_var(cx, name, expected, lo, hi)
-    EUnary(op, operand, lo, hi) -> check_unary_expr(cx, op, operand, lo, hi)
-    EBinary(op, left, right, olo, ohi, lo, hi) -> check_binary_expr(cx, op, left, right, olo, ohi, lo, hi)
+    EUnary(op, operand, lo, hi) ->
+      if is_lit_atom(e) { check_num_lit(cx, e, expected) } else { check_unary_expr(cx, op, operand, lo, hi) }
+    EBinary(op, left, right, olo, ohi, lo, hi) ->
+      check_binary_expr(cx, op, left, right, olo, ohi, lo, hi, expected)
     EIf(cond, thn, els, lo, hi) -> check_if(cx, cond, thn, els, expected, lo, hi)
     EListLit(elems, lo, hi) -> check_list_lit(cx, elems, expected, lo, hi)
     ETupleLit(elems, lo, hi) -> check_tuple_lit(cx, elems, expected, lo, hi)
@@ -5605,20 +5607,419 @@ fn check_tuple_lit(
 ## the path it took before the traits existed, so a program that compiled
 ## before checks to the same tree (docs/arith-operator-traits-design.md D6).
 fn check_binary_expr(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: Int, lo: Int,
-  hi: Int) -> (Cx, Ty, TExpr) !io = {
+  hi: Int, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
+  # A numeric literal on either side yields to the other one
+  # (docs/literal-system-design.md D5.2): the operand that has a type of its
+  # own is checked first and the literal is typed at it. Only the order of
+  # checking moves; the node keeps its written order, so evaluation is still
+  # left to right.
+  let yields = op_takes_lit_yield(op)
+  let ll = yields && is_lit_atom(left)
+  let rl = yields && is_lit_atom(right)
+  if ll && rl {
+    match both_lit_expectation(cx, op, left, right, expected) {
+      Some(t) -> {
+        let (cxa, lt, lx) = check_expr(cx, left, Some(t))
+        return check_binary_after_left(cxa, op, left, right, lt, lx, Some(t), olo, ohi, lo, hi)
+      }
+      None -> ()
+    }
+  } else if ll {
+    return check_binary_lit_left(cx, op, left, right, olo, ohi, lo, hi)
+  }
   let before = len(cx.diags)
   let (left_cx, lt, lx) = check_expr(cx, left, no_expected())
   let arith = is_arith_op(op)
   if arith && arith_routed(left_cx, lt) {
     return check_arith_trait(left_cx, arith_tid(op), lt, lx, Some(right), olo, ohi, lo, hi)
   }
-  # == seeds the right side with the left side's type
+  # == seeds the right side with the left side's type, and so does a literal
+  # on the right (it yields), unless the left one is a literal too
   let eq_like = op == OpEq || op == OpNeq
-  let rexp: Option[Ty] = if eq_like && is_concrete(left_cx, lt) { Some(lt) } else { None }
+  let seeded = (eq_like || (rl && not ll)) && not is_errorish(lt)
+  let rexp: Option[Ty] = if seeded && is_concrete(left_cx, lt) { Some(lt) } else { None }
   let (cx2, rt, rx) = check_expr(left_cx, right, rexp)
   let cx3 = if arith { left_infer_hint(cx2, before, len(left_cx.diags), rt) } else { cx2 }
+  if arith && rl && not ll && lit_mismatch(cx3, lt, rt) {
+    return lit_mismatch_err(cx3, lt, rt, right, lt, rt, lo, hi)
+  }
   check_binary_typed(cx3, op, lt, rt, lx, rx,
     e_lo(left), e_hi(left), e_lo(right), e_hi(right), olo, ohi, lo, hi)
+}
+
+## The operators a literal operand yields to the other side for: arithmetic,
+## comparison and equality. Bitwise operators and shifts take Int alone, so
+## there is nothing to yield to.
+fn op_takes_lit_yield(op: BinOp) -> Bool =
+  is_arith_op(op) || op == OpEq || op == OpNeq || op == OpLt || op == OpLe || op == OpGt ||
+  op == OpGe
+
+## Two literals, and nothing on either side to yield to. The node's own
+## expectation types both only when it is a type that takes literals through
+## its own impl (`let b: U8 = 200 + 100`): those literals have no other type
+## to fall back to. A Float expectation does not reach them (ruling
+## 2026-10-06): `let f: Float = 1 / 2` would otherwise be 0.5 where the same
+## text unannotated is 0, arithmetic whose meaning depends on an annotation,
+## which Go (0) and Rust (refused) both avoid. It stays the Int 0 and the
+## binding reports it. Otherwise, of an Int and a Float literal the Int one
+## takes Float, never the reverse (`3.14159 * 2 * r`, `1 + 2.0`); two of one
+## kind keep their defaults. None means today's path: each its default.
+fn both_lit_expectation(cx: Cx, op: BinOp, left: Expr, right: Expr, expected: Option[Ty]) -> Option[Ty] = {
+  match expected {
+    Some(t) ->
+      if is_arith_op(op) &&
+        (lit_target(cx, t, is_float_atom(left)) == LitViaTrait ||
+            lit_target(cx, t, is_float_atom(right)) == LitViaTrait) {
+        return Some(t)
+      }
+    None -> ()
+  }
+  if is_float_atom(left) != is_float_atom(right) { Some(TyFloat) } else { None }
+}
+
+## `1 / 2` where a Float was expected: the expectation stops at the operator,
+## so the literals are Ints and so is the result. Says so, and spells the
+## Float version when the whole expression is literal arithmetic.
+fn int_arith_at_float_hint(e: Expr, want: Ty, got: Ty) -> Option[String] = {
+  if want != TyFloat || got != TyInt { return None }
+  match e {
+    EBinary(op, _, _, _, _, _, _) ->
+      if not is_arith_op(op) {
+        None
+      } else {
+        let lead = "a Float expectation does not reach the integer literals inside an operator"
+        match float_spelling(e) {
+          Some(s) -> Some(lead ++ "; write `" ++ s ++ "`")
+          None -> Some(lead ++ "; write them as Float literals")
+        }
+      }
+    _ -> None
+  }
+}
+
+## Literal arithmetic with every integer literal written as a Float one.
+fn float_spelling(e: Expr) -> Option[String] =
+  match e {
+    EInt(v, _, _) -> Some(to_string(to_float(v)))
+    EFloat(v, _, _) -> Some(to_string(v))
+    EUnary(op, inner, _, _) ->
+      if op != OpNeg {
+        None
+      } else {
+        match float_spelling(inner) {
+          Some(s) -> Some("-" ++ s)
+          None -> None
+        }
+      }
+    EBinary(op, l, r, _, _, _, _) ->
+      if not is_arith_op(op) {
+        None
+      } else {
+        match float_spelling(l) {
+          Some(a) ->
+            match float_spelling(r) {
+              Some(b) -> Some(a ++ " " ++ arith_spelling(arith_tid(op)) ++ " " ++ b)
+              None -> None
+            }
+          None -> None
+        }
+      }
+    _ -> None
+  }
+
+## `lit OP x`: `x` first with no expectation, then the literal at its type
+## (Go's rule).
+fn check_binary_lit_left(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: Int,
+  lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let (cx1, rt, rx) = check_expr(cx, right, no_expected())
+  let lexp: Option[Ty] = if is_errorish(rt) || not is_concrete(cx1, rt) { None } else { Some(rt) }
+  let (cx2, lt, lx) = check_expr(cx1, left, lexp)
+  if is_arith_op(op) && lit_mismatch(cx2, lt, rt) && arith_has_impl(cx2, arith_tid(op), rt) {
+    return lit_mismatch_err(cx2, lt, rt, left, lt, rt, lo, hi)
+  }
+  if is_arith_op(op) && arith_routed(cx2, lt) {
+    return arith_call(cx2, arith_tid(op), lt, lx, Some((rt, rx)), olo, ohi, lo, hi)
+  }
+  check_binary_typed(cx2, op, lt, rt, lx, rx,
+    e_lo(left), e_hi(left), e_lo(right), e_hi(right), olo, ohi, lo, hi)
+}
+
+## The rest of a binary node once its left side is checked: the right side at
+## `rexp`, then the operator. The two-literal case, whose left side was given
+## the expectation too.
+fn check_binary_after_left(cx: Cx, op: BinOp, left: Expr, right: Expr, lt: Ty, lx: TExpr,
+  rexp: Option[Ty], olo: Int, ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let (cx2, rt, rx) = check_expr(cx, right, rexp)
+  if is_arith_op(op) && arith_routed(cx2, lt) {
+    return arith_call(cx2, arith_tid(op), lt, lx, Some((rt, rx)), olo, ohi, lo, hi)
+  }
+  check_binary_typed(cx2, op, lt, rt, lx, rx,
+    e_lo(left), e_hi(left), e_lo(right), e_hi(right), olo, ohi, lo, hi)
+}
+
+## A literal that kept its default type next to an operand of a type it could
+## not become. Reported at the literal, which is the side to rewrite.
+fn lit_mismatch(cx: Cx, lt: Ty, rt: Ty) -> Bool =
+  not is_errorish(lt) && not is_errorish(rt) && lt != rt && is_numeric(lt) != is_numeric(rt)
+
+fn lit_mismatch_err(cx: Cx, lt0: Ty, rt0: Ty, lit: Expr, lt: Ty, rt: Ty, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  let other = if is_numeric(lt) { rt } else { lt }
+  let hint = lit_kind_hint(cx, lit, other)
+  (cerr_h(cx, "both sides must have the same type: " ++ ty_show(cx.adts, lt) ++ " vs " ++
+      ty_show(cx.adts, rt), e_lo(lit), e_hi(lit), hint), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## What a literal that could not become `t` should be written as instead.
+fn lit_kind_hint(cx: Cx, lit: Expr, t: Ty) -> String = {
+  let ts = ty_show(cx.adts, t)
+  let fl = is_float_atom(lit)
+  if not fl && lit_target(cx, t, true) != LitDefault {
+    "`" ++ ts ++ "` takes Float literals: write `" ++ to_string(to_float(lit_int_value(lit))) ++ "`"
+  } else if fl && lit_target(cx, t, false) != LitDefault {
+    "`" ++ ts ++ "` takes integer literals"
+  } else {
+    match t {
+      TyAdt(_, _) | TyOpaque(_, _, _, _, _) ->
+        "there are no implicit conversions; a literal becomes `" ++ ts ++ "` only through `" ++
+        impl_shape(cx, if fl { "FromFloat" } else { "FromInt" }, t) ++ "`, written in the module declaring it"
+      _ -> "there are no implicit conversions"
+    }
+  }
+}
+
+## Whether `t` answers an operator's trait at all: an impl at its head, or a
+## type parameter (whose bound `resolve_witness` will judge).
+fn arith_has_impl(cx: Cx, tid: Int, t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> true
+    _ -> is_numeric(t) || has_impl_at(cx.impl_table, tid, t)
+  }
+
+# ---- numeric literals (docs/literal-system-design.md) ----
+
+## What a literal does at an expected type (D2). `LitDefault` is today's
+## literal: Int or Float, whatever is expected, with any disagreement left to
+## the site that asked. `LitToFloat` is an integer literal at Float, the same
+## number as a Float when that is exact. `LitViaTrait` is the type's own
+## `FromInt`/`FromFloat` impl.
+type LitTarget = LitDefault | LitToFloat | LitViaTrait
+
+## A numeric literal atom: an Int or Float literal, or `-` directly before
+## one. What the parser reads as a literal is all a literal is here, so the
+## yield of D5.2 is decided by syntax before anything is checked.
+pub(pkg) fn is_lit_atom(e: Expr) -> Bool =
+  match e {
+    EInt(_, _, _) -> true
+    EFloat(_, _, _) -> true
+    EUnary(op, inner, _, _) ->
+      if op != OpNeg {
+        false
+      } else {
+        match inner {
+          EInt(_, _, _) -> true
+          EFloat(_, _, _) -> true
+          _ -> false
+        }
+      }
+    _ -> false
+  }
+
+fn is_float_atom(e: Expr) -> Bool =
+  match e {
+    EFloat(_, _, _) -> true
+    EUnary(_, inner, _, _) -> is_float_atom(inner)
+    _ -> false
+  }
+
+## The atom's value, its sign included. The negation is the Int's, so `-0`
+## is the Int 0 and becomes `+0.0` at Float (Go does the same); `-0.0` is the
+## way to write a negative zero.
+fn lit_int_value(e: Expr) -> Int =
+  match e {
+    EInt(v, _, _) -> v
+    EUnary(_, inner, _, _) -> 0 - lit_int_value(inner)
+    _ -> 0
+  }
+
+fn lit_float_value(e: Expr) -> Float =
+  match e {
+    EFloat(v, _, _) -> v
+    EUnary(_, inner, _, _) -> 0.0 - lit_float_value(inner)
+    _ -> 0.0
+  }
+
+## The expectation a literal reacts to. An opaque type the current module
+## sees through is read at its target (D7: the declaring module keeps
+## today's literals, and an impl's own body cannot fold into itself); one it
+## cannot see through answers only with an impl of its own, never by falling
+## back to its target the way `resolve_witness` does for the relations.
+fn lit_target(cx: Cx, t: Ty, is_float: Bool) -> LitTarget = {
+  let tid = if is_float { FROM_FLOAT_ID } else { FROM_INT_ID }
+  match t {
+    TyInt -> LitDefault
+    TyFloat -> if is_float { LitDefault } else { LitToFloat }
+    TyOpaque(_, _, ow, _, tgt) ->
+      if sees_through(cx, ow) {
+        lit_target(cx, tgt, is_float)
+      } else if has_impl_at(cx.impl_table, tid, t) {
+        LitViaTrait
+      } else {
+        LitDefault
+      }
+    TyVar(_, vid) -> if map.get(cx.frame.dict_syms, (vid, tid)) != None { LitViaTrait } else { LitDefault }
+    _ -> if head_of(t) != None && has_impl_at(cx.impl_table, tid, t) { LitViaTrait } else { LitDefault }
+  }
+}
+
+fn lit_peel(cx: Cx, t: Ty) -> Ty =
+  match t {
+    TyOpaque(_, _, ow, _, tgt) -> if sees_through(cx, ow) { lit_peel(cx, tgt) } else { t }
+    _ -> t
+  }
+
+## The literal as it always was: Int or Float, whatever is expected.
+fn check_lit_default(cx: Cx, e: Expr) -> (Cx, Ty, TExpr) =
+  match e {
+    EInt(v, lo, hi) -> (cx, TyInt, XInt(v, owner_off(cx, lo), owner_off(cx, hi)))
+    EFloat(v, lo, hi) -> (cx, TyFloat, XFloat(v, owner_off(cx, lo), owner_off(cx, hi)))
+    EUnary(op, operand, lo, hi) -> {
+      let (cx1, t, tx) = check_lit_default(cx, operand)
+      check_unary(cx1, op, t, tx, e_lo(operand), e_hi(operand), lo, hi)
+    }
+    _ -> panic("check_lit_default: not a literal atom")
+  }
+
+## Whether no Float is exactly `n`: |n| <= 2^53 always is, and above that
+## the Float has to come back as the same Int. 2^63 itself is the Float an Int
+## near the top rounds up to, and it is no Int.
+fn int_exact_as_float(n: Int) -> Bool = {
+  if n <= 9007199254740992 && n >= -9007199254740992 { return true }
+  let f = to_float(n)
+  f < 9223372036854775807.0 && to_int(f) == n
+}
+
+## A numeric literal atom at its expectation (D2, D6).
+fn check_num_lit(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io = {
+  let t = match expected {
+    Some(x) -> x
+    None -> return check_lit_default(cx, e)
+  }
+  let fl = is_float_atom(e)
+  let lo = e_lo(e)
+  let hi = e_hi(e)
+  match lit_target(cx, t, fl) {
+    LitDefault -> check_lit_default(cx, e)
+    LitToFloat -> {
+      let v = lit_int_value(e)
+      if not int_exact_as_float(v) {
+        return (cerr_h(cx, "the integer literal `" ++ to_string(v) ++ "` is not exactly a Float", lo, hi,
+          "write it as a Float literal (" ++ to_string(to_float(v)) ++ ") if the nearest Float is meant"),
+          TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+      }
+      (cx, lit_peel(cx, t), XFloat(to_float(v), owner_off(cx, lo), owner_off(cx, hi)))
+    }
+    LitViaTrait -> {
+      let arg = if fl {
+        XFloat(lit_float_value(e), owner_off(cx, lo), owner_off(cx, hi))
+      } else {
+        XInt(lit_int_value(e), owner_off(cx, lo), owner_off(cx, hi))
+      }
+      lit_via_trait(cx, if fl { FROM_FLOAT_ID } else { FROM_INT_ID }, lit_peel(cx, t), arg, lo, hi)
+    }
+  }
+}
+
+test "a literal at Int or Float is the literal it always was, and elsewhere its impl's call" {
+  # The red gate for mutant NL1 of the literal design: routing a concrete
+  # Int or Float expectation through the prelude impls moves no byte when the
+  # call is not folded (the witness lowers back to the constant), so only the
+  # tree can show it. An integer literal at Float is a Float literal; one at
+  # a type with a pure FromInt is that impl's call, folded.
+  let src = "type M = { n: Int }\n" ++
+    "impl FromInt[M] {\n  fn from_int(n: Int) -> M = M { n: n }\n}\n" ++
+    "fn i() -> Int = 1\n" ++
+    "fn f() -> Float = 1.5\n" ++
+    "fn n() -> Int = -1\n" ++
+    "fn x() -> Float = -2\n" ++
+    "fn m() -> M = 3\n"
+  let (md, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 0
+  let int_lit = match arith_body(tm, "i") {
+    XInt(1, ..) -> true
+    _ -> false
+  }
+  assert int_lit
+  let float_lit = match arith_body(tm, "f") {
+    XFloat(_, ..) -> true
+    _ -> false
+  }
+  assert float_lit
+  let negated = match arith_body(tm, "n") {
+    XUnary(UNeg, XInt(1, ..), ..) -> true
+    _ -> false
+  }
+  assert negated
+  let converted = match arith_body(tm, "x") {
+    XFloat(v, ..) -> v == -2.0
+    _ -> false
+  }
+  assert converted
+  let folded = match arith_body(tm, "m") {
+    XComptime(XCallFn(_, _, [XInt(3, ..)], [_], _, Some(tid), ..), ..) -> tid == FROM_INT_ID
+    _ -> false
+  }
+  assert folded
+}
+
+## `from_int(n)` at a type already known: the witness is resolved directly,
+## since the subject is only in the return position and no argument could
+## say it. A concrete impl whose effect reduces to pure folds through the one
+## comptime pipeline (D9), so the literal is a constant in the program and a
+## panic in the impl is a compile error at the literal (`let b: U8 = 300`).
+## Any other impl is an ordinary call whose effect is charged where the
+## literal is, as an operator's is.
+fn lit_via_trait(cx: Cx, tid: Int, t: Ty, arg: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  let err = XError(owner_off(cx, lo), owner_off(cx, hi))
+  let (cx2, w) = resolve_witness(cx, tid, t, lo, hi, "this literal")
+  match w {
+    None -> (cx2, TyError, err)
+    Some(wr) -> {
+      let tr = trait_of(cx2.traits, tid)
+      let (mname, ms) = tr.methods[0]
+      let s = ms.sig
+      let tvid = match tr.tvar {
+        TyVar(_, id) -> id
+        _ -> -1
+      }
+      let m: Map[Int, Ty] = map.from([(tvid, t)])
+      let em: Map[Int, Eff] = map.empty()
+      let callee_eff = reduce_eff(cx2, s.eff, m)
+      let concrete = match wr {
+        WForward(_) -> false
+        _ -> true
+      }
+      let pure = concrete && callee_eff == EPure
+      # a constant or a comptime block is evaluated at compile time, where an
+      # effect has nowhere to go; say so about the literal, not about
+      # `from_int`, which nobody wrote
+      if cx2.frame.isolated && not pure {
+        return (cerr_h(cx2, "a literal at `" ++ ty_show(cx2.adts, t) ++ "` needs a pure `" ++ tr.name ++
+            "` impl here", lo, hi,
+          "this is evaluated at compile time, and the impl's `" ++ tr.name ++ "` is " ++
+            (if concrete { "!" ++ eff_show(callee_eff) } else { "not known yet" })), TyError, err)
+      }
+      let (cx3, evs, unanswered, vinsts, adropped) = named_evidence_args(cx2, s, m, em, lo, hi)
+      let charged = eff_union([callee_eff] ++ vinsts)
+      let cx4 = record_effect(cx3, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo,
+        hi, mname)
+      let call = XCallFn(s.owner, emitted_fn_name(s, mname), [arg], [wr], evs, Some(tid),
+        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, lo), t)
+      if pure { (cx4, t, XComptime(call, owner_off(cx, lo), owner_off(cx, hi), t)) } else { (cx4, t, call) }
+    }
+  }
 }
 
 ## The unary arm, cut out for the same reason. A negated operand today's path
@@ -5667,6 +6068,9 @@ fn check_arith_trait(cx: Cx, tid: Int, lt: Ty, lx: TExpr, right: Option[Expr], o
   match right {
     Some(r) -> {
       let (cxr, rt, rx) = check_expr(cx, r, Some(lt))
+      if is_lit_atom(r) && lit_mismatch(cxr, lt, rt) && arith_has_impl(cxr, tid, lt) {
+        return lit_mismatch_err(cxr, lt, rt, r, lt, rt, lo, hi)
+      }
       arith_call(cxr, tid, lt, lx, Some((rt, rx)), olo, ohi, lo, hi)
     }
     None -> arith_call(cx, tid, lt, lx, None, olo, ohi, lo, hi)
@@ -7903,8 +8307,9 @@ fn check_let(
       if not assignable(cx1, it, a) {
         let declared_text = ty_show(cx1.adts, a)
         let actual_text = ty_show(cx1.adts, it)
-        cx1 = cerr(cx1, "annotated type is " ++ declared_text ++
-            " but the initializer is " ++ actual_text, e_lo(init), e_hi(init))
+        cx1 = cerr_o(cx1, "annotated type is " ++ declared_text ++
+            " but the initializer is " ++ actual_text, e_lo(init), e_hi(init),
+          int_arith_at_float_hint(init, a, it))
         t = a
       }
     }
@@ -9170,7 +9575,7 @@ fn infer_call_args(
       Some(_) -> true
       None -> false
     }
-    if not done && not needs_expected(cx1, a) {
+    if not done && not needs_expected(cx1, a) && not lit_waits(cx1, s, a, i, pidx, m, em) {
       let (cxa, m1, em1, at, ax) = infer_call_arg(cx1, s, a, i, pidx, pre0, m, em)
       cx1 = cxa
       m = m1
@@ -9181,6 +9586,23 @@ fn infer_call_args(
     at_slots = at_slots ++ [at_i]
     tx_slots = tx_slots ++ [tx_i]
     i = i + 1
+  }
+  # Between the rounds, the literals that waited (docs/literal-system-design.md
+  # D5.3): after every argument that types itself, so `g(s, 1)` types the
+  # literal at what `s` settled, and before any argument that needs an
+  # expectation. Those (`map.empty()`, a generic function value) have always
+  # been settled by what the first round decided, literals included, and
+  # moving the literals into the second round left four calls in the
+  # compiler itself and `apply(1, ident)` with nothing to infer from.
+  while true {
+    let k = first_pending_lit(args, at_slots)
+    if k < 0 { break }
+    let (cxa, m1, em1, at, ax) = infer_call_arg(cx1, s, args[k], k, pidx, pre0, m, em)
+    cx1 = cxa
+    m = m1
+    em = em1
+    at_slots = put_slot(at_slots, k, Some(at))
+    tx_slots = put_slot(tx_slots, k, Some(ax))
   }
   while true {
     var first = 0 - 1
@@ -9211,6 +9633,55 @@ fn infer_call_args(
     tx_slots = put_slot(tx_slots, k, Some(ax))
   }
   (cx1, m, em, at_slots, tx_slots)
+}
+
+## A literal argument whose parameter still names a type parameter nothing
+## has settled waits for the round between the two (Go 1.21: untyped
+## constants are considered last), so that the other arguments settle it.
+fn lit_waits(cx: Cx, s: Sig, a: Expr, i: Int, pidx: List[Int], m: Map[Int, Ty],
+  em: Map[Int, Eff]) -> Bool =
+  if not is_lit_atom(a) {
+    false
+  } else {
+    let substd = reduce_instantiated(cx, subst(s.param_tys[pidx[i]], m, em), m)
+    not is_concrete(cx, substd)
+  }
+
+## The next waiting literal: a Float one before any Int one, so that of two
+## literals left for one type parameter the larger kind decides it
+## (`g(1, 2.5)` is `g` at Float, Go 1.21's rule); otherwise in written order.
+fn first_pending_lit(args: List[Expr], slots: List[Option[Ty]]) -> Int = {
+  var int_k = 0 - 1
+  var j = 0
+  for a in args {
+    match slots[j] {
+      None ->
+        if is_lit_atom(a) {
+          if is_float_atom(a) { return j }
+          if int_k < 0 { int_k = j }
+        }
+      Some(_) -> ()
+    }
+    j = j + 1
+  }
+  int_k
+}
+
+fn first_pending_ctor_lit(cargs: List[Arg], atx: List[Option[TExpr]], idx_of: List[Int]) -> Int = {
+  var int_k = 0 - 1
+  var j = 0
+  for a in cargs {
+    match atx[j] {
+      None ->
+        if idx_of[j] >= 0 && is_lit_atom(a.e) {
+          if is_float_atom(a.e) { return j }
+          if int_k < 0 { int_k = j }
+        }
+      Some(_) -> ()
+    }
+    j = j + 1
+  }
+  int_k
 }
 
 ## One argument of a signature call, checked under what `m` and `em` know so
@@ -10437,7 +10908,9 @@ fn infer_ctor_args(
       Some(_) -> true
       None -> false
     }
-    if idx >= 0 && not already && not needs_expected(cx1, a.e) {
+    let lit_wait = idx >= 0 && is_lit_atom(a.e) &&
+      not is_concrete(cx1, subst(ci.fields[idx].ty, m, em))
+    if idx >= 0 && not already && not needs_expected(cx1, a.e) && not lit_wait {
       let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, a, idx, m, em)
       cx1 = cxa
       m = m1
@@ -10446,6 +10919,16 @@ fn infer_ctor_args(
     }
     atx = atx ++ [atx_j]
     j = j + 1
+  }
+  # the literals that waited, as for a call (`infer_call_args`)
+  while true {
+    let k = first_pending_ctor_lit(cargs, atx, idx_of)
+    if k < 0 { break }
+    let (cxa, m1, em1, ax) = infer_ctor_arg(cx1, ci, cargs[k], idx_of[k], m, em)
+    cx1 = cxa
+    m = m1
+    em = em1
+    atx = put_slot(atx, k, Some(ax))
   }
   let tparams = adt_of(cx1.adts, ci.adt).tparams
   while true {
@@ -13172,9 +13655,9 @@ pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]
   if not assignable(cx1, bt, s.ret) {
     let return_text = ty_show(cx1.adts, s.ret)
     let body_text = ty_show(cx1.adts, bt)
-    cx1 = cerr(cx1, "function `" ++ d.name ++ "` declares return type " ++
+    cx1 = cerr_o(cx1, "function `" ++ d.name ++ "` declares return type " ++
         return_text ++ " but its body is " ++ body_text,
-      e_lo(d.body), e_hi(d.body))
+      e_lo(d.body), e_hi(d.body), int_arith_at_float_hint(d.body, s.ret, bt))
   }
   cx1 = verify_effects(cx1, "function", d.name, s.eff, s.eparams, "the end of the signature",
     d.nlo, d.nhi)

@@ -39,19 +39,19 @@ use check/tast.{
   XCallDyn, XCallBuiltin, XCallFn, XCtor, XField, XListLit, XTupleLit,
   TLEExpr, TLESpread, TLEIf,
   XBinary, XUnary, XIf, XMatch, XBlock, XComptime,
-  XError,
+  XError, XInt, XFloat,
   TSPText, TSPInterp,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
 }
 use check/types.{
   Ty, TyUnit, Sym, Sig, Traits, Impls, Adts, adt_of,
   intrinsics, Intr, OPTION_ID, EPure, TyList, TyMap, TySet, TyArray, TyTuple,
-  EV_PACK_ID, EV_MISS_MSG
+  EV_PACK_ID, EV_MISS_MSG, FROM_INT_ID, FROM_FLOAT_ID, ty_show
 }
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
   VClosure, VDict, VCursor,
-  CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key,
+  CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key, ty_key_inst,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CUpdate, update_values,
@@ -117,7 +117,13 @@ pub(pkg) type LowerCache = {
   # whether a lookup into another module found nothing. Kept beside the
   # bodies because it accumulates exactly as they do: once per module run.
   reads: Set[String],
-  missed: Bool
+  missed: Bool,
+  # Folded literals by trait, instantiated type and value
+  # (docs/literal-system-design.md D9). A module of byte-sized constants
+  # repeats a few hundred values, and each fold is a lowering and an
+  # interpretation (about 70 us measured at L0); a failed fold is not kept,
+  # so every literal out of range is reported where it is.
+  lits: Map[String, CValue]
 }
 
 ## One expression's evaluation. Fuel and depth are the per-evaluation half and
@@ -2537,7 +2543,9 @@ pub(pkg) type CtRun = {
 fn empty_cache() -> LowerCache = {
   let no_fns: Map[String, CFun] = map.empty()
   let no_dicts: Map[String, CDictDef] = map.empty()
-  LowerCache { fns: no_fns, dicts: no_dicts, next_lam: 0, reads: set.empty(), missed: false }
+  let no_lits: Map[String, CValue] = map.empty()
+  LowerCache { fns: no_fns, dicts: no_dicts, next_lam: 0, reads: set.empty(), missed: false,
+    lits: no_lits }
 }
 
 ## An evaluation seeded from what the module has lowered so far. Fuel and
@@ -2589,7 +2597,47 @@ fn fold_expr(
   }
 }
 
+## The cache key of a block the checker inserted for a literal, or None. The
+## Float is keyed by its rendering, which tells `-0.0` from `0.0`; a literal
+## is never a NaN.
+fn lit_fold_key(body: TExpr) -> Option[String] =
+  match body {
+    XCallFn(_, _, args, _, _, Some(tid), _, _, _, ty) ->
+      if tid != FROM_INT_ID && tid != FROM_FLOAT_ID {
+        None
+      } else {
+        let k = to_string(tid) ++ ":" ++ ty_key_inst(ty) ++ ":"
+        match args[0] {
+          XInt(v, _, _) -> Some(k ++ to_string(v))
+          XFloat(v, _, _) -> Some(k ++ to_string(v))
+          _ -> None
+        }
+      }
+    _ -> None
+  }
+
 fn eval_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) -> CtRun !io = {
+  let key = lit_fold_key(body)
+  match key {
+    Some(k) ->
+      match map.get(run.cache.lits, k) {
+        Some(v) -> return CtRun { ..run, out: CtOut { ..run.out, blocks: map.insert(run.out.blocks, (lo, hi), v) } }
+        None -> ()
+      }
+    None -> ()
+  }
+  let r0 = fold_block(icx, fuel, body, run, lo, hi)
+  match key {
+    Some(k) ->
+      match map.get(r0.out.blocks, (lo, hi)) {
+        Some(v) -> CtRun { ..r0, cache: LowerCache { ..r0.cache, lits: map.insert(r0.cache.lits, k, v) } }
+        None -> r0
+      }
+    None -> r0
+  }
+}
+
+fn fold_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) -> CtRun !io = {
   # a block nested inside this one folds first, so lowering's reference to it
   # resolves
   let run1 = walk_expr(icx, fuel, body, run)
@@ -2602,9 +2650,33 @@ fn eval_block(icx: ICx, fuel: Int, body: TExpr, run: CtRun, lo: Int, hi: Int) ->
         cache: cache
       }
     Err(d) ->
-      CtRun { out: CtOut { ..run1.out, diags: run1.out.diags ++ [d] }, cache: cache }
+      CtRun { out: CtOut { ..run1.out, diags: run1.out.diags ++ [lit_fold_diag(icx, body, d)] },
+        cache: cache }
   }
 }
+
+## A fold the checker inserted for a literal fails in the literal's words
+## (literal-system-design D6): `the literal `300` cannot be a `U8`: <why>`.
+## No marker on the node is needed to know it is one: `from_int` and
+## `from_float` are not injected, so no source can spell a call to either, and
+## a comptime body that is exactly such a call came from a literal.
+fn lit_fold_diag(icx: ICx, body: TExpr, d: Diag) -> Diag =
+  match body {
+    XCallFn(_, _, args, _, _, Some(tid), _, _, _, ty) ->
+      if tid != FROM_INT_ID && tid != FROM_FLOAT_ID {
+        d
+      } else {
+        let text = match args[0] {
+          XInt(v, _, _) -> to_string(v)
+          XFloat(v, _, _) -> to_string(v)
+          _ -> "?"
+        }
+        let why = if str.starts_with(d.msg, "comptime: panicked: ") { str.drop(d.msg, 20) } else { d.msg }
+        Diag { ..d, msg: "the literal `" ++ text ++ "` cannot be a `" ++ ty_show(icx.adts, ty) ++ "`: " ++ why,
+          hint: "" }
+      }
+    _ -> d
+  }
 
 ## Find comptime blocks in a checked body and evaluate each with a fresh fuel
 ## budget. This walk stays on TAST: it is a search for a syntactic form, not
