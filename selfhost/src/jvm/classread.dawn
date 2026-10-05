@@ -1,5 +1,5 @@
 # The smallest class file reader that answers one question: which methods a
-# class declares, by name, descriptor and access flags. It exists so a test
+# class declares, by name, descriptor, access flags and code length. It exists so a test
 # can hold the JVM emitter's runtime calls to the `dawn/rt/*` classes
 # `rtclasses` writes, the way emitc's tests hold its calls to `dawn_rt.h`
 # (#205), without building a corpus.
@@ -8,7 +8,8 @@
 # `org.ow2.asm:asm` only, and reading with it means subclassing
 # `ClassVisitor`, which Dawn cannot do. Nor with `javap` over a built jar:
 # that needs a JDK tool and a program to build, and the point is a check that
-# runs as an inline test. The format part needed is small and frozen (JVMS
+# runs as an inline test. The code length is for `__emit --map`, whose side
+# table states each method's pc range (docs/source-span-map-design.md 13.2). The format part needed is small and frozen (JVMS
 # §4.1, §4.4, §4.6): walk the constant pool for the UTF-8 entries, skip the
 # fields, read the methods, skip every attribute by its length.
 
@@ -19,7 +20,10 @@ use std/map
 pub type ClassMethod = {
   access: Int,
   name: String,
-  desc: String
+  desc: String,
+  # the Code attribute's `code_length` (JVMS §4.7.3), -1 for a method with
+  # none (abstract or native)
+  code_length: Int
 }
 
 fn u1(b: Bytes, at: Int) -> Int = bytes.at(b, at)
@@ -43,6 +47,16 @@ fn cp_width(tag: Int) -> Int =
     15 -> 3
     _ -> panic("classread: unknown constant pool tag " ++ to_string(tag))
   }
+
+## The `code_length` of the Code attribute in the list starting at `at`, or -1.
+fn code_length_in(b: Bytes, pool: Map[Int, String], at0: Int) -> Int = {
+  var at = at0 + 2
+  for _i in 0..u2(b, at0) {
+    if map.get(pool, u2(b, at)) == Some("Code") { return u4(b, at + 10) }
+    at = at + 6 + u4(b, at + 2)
+  }
+  -1
+}
 
 ## Past one `attribute_info` list starting at `at`.
 fn skip_attributes(b: Bytes, at0: Int) -> Int = {
@@ -86,7 +100,8 @@ pub fn class_methods(b: Bytes) -> List[ClassMethod] = {
     out = out ++ [ClassMethod {
       access: u2(b, at),
       name: utf8_at(pool, u2(b, at + 2)),
-      desc: utf8_at(pool, u2(b, at + 4))
+      desc: utf8_at(pool, u2(b, at + 4)),
+      code_length: code_length_in(b, pool, at + 6)
     }]
     at = skip_attributes(b, at + 6)
   }

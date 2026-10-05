@@ -28,6 +28,7 @@ ADAPTERS = {
     "classfile-verify": (".",),
     "core-lint-contract": (".",),
     "c-map": (".",),
+    "jvm-map": (".",),
     "core-sites": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
@@ -74,6 +75,7 @@ EXCLUSIONS = {
 # anchor-guard.py counts these as preflighted.
 REGISTRY_READERS = {
     "c-map/run.py": "c-map",
+    "jvm-map/run.py": "jvm-map",
     "core-lint-contract/run.py": "core-lint-contract",
     "core-sites/run.py": "core-sites",
     "dict-owner-contract/shapes.py": "dict-owner-contract",

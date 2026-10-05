@@ -72,8 +72,9 @@ use ir/core.{
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault
+  CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault, CSite, CNoSite, CAt, CParam, COwned
 }
+use ir/coresites.{callee_text}
 use ir/lower.{LMod, subst_subject, trait_method_sig}
 use ir/reach
 use ir/reach.{Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
@@ -174,6 +175,40 @@ pub type SamC = {
 
 pub type ConstF = { fname: String, v: CValue, ty: Ty }
 
+# ---- the side table `__emit --map` reads (docs/source-span-map-design.md 13) ----
+
+## A sited call being written: the labels around its code and in front of the
+## instruction that makes it. `inv` is None for an intrinsic, which has no one
+## instruction that is the call.
+pub type JMark = { site: CSite, what: String, lo: Label, inv: Option[Label], hi: Label }
+
+## One sited call of a written method, its labels read as pcs. `ipc` is -1
+## when the call has no instruction of its own, or never reached it (an
+## argument that does not return).
+pub type JRow = {
+  owner: String,
+  origin: String,
+  method: String,
+  desc: String,
+  site: CSite,
+  what: String,
+  pclo: Int,
+  pchi: Int,
+  ipc: Int
+}
+
+## One method `gen_cbody` wrote, with the declaration it came from. `end` is
+## where its code ended when the labels were read; ASM widens a forward jump
+## that does not fit 16 bits only later, when the class is finished, and that
+## moves every pc behind it, so a method whose finished code is longer than
+## `end` has pcs that point at the wrong instructions.
+pub type JFn = { owner: String, origin: String, method: String, desc: String, end: Int }
+
+## What the labelled emission of one module found: its rows, its methods, and
+## whether its class came out byte for byte the class the plain emission wrote.
+## Only then do the pcs mean anything in the class that was written.
+pub type JModMap = { owner: String, rows: List[JRow], fns: List[JFn], same: Bool, class_bytes: Bytes }
+
 ## What is true of the whole module before the first method opens: `emit_module`
 ## is handed all of it and nothing writes it again.
 ##
@@ -219,7 +254,12 @@ pub type GenCtx = {
   # anything here.
   live: Option[Live],
   consts: Map[String, CValue],
-  blocks: Map[(Int, Int), CValue]
+  blocks: Map[(Int, Int), CValue],
+  # Whether this is the labelled emission `--map` runs beside the plain one
+  # (docs/source-span-map-design.md 13.4). The classes a build writes always
+  # come from an emission with this false: a label can change ASM's output, so
+  # the labelled class is only ever compared, never written.
+  mapping: Bool
 }
 
 ## The half that moves: a cursor into the method being written, plus the two
@@ -256,7 +296,12 @@ pub type Gen = {
   closures: List[ClosB],
   sam_classes: List[SamC],
   const_fields: List[ConstF],
-  const_by_key: Map[String, String]
+  const_by_key: Map[String, String],
+  # the labelled emission's marks for the method being written, and its rows
+  # and methods so far; all three stay empty unless `GenCtx.mapping`
+  marks: List[JMark],
+  jrows: List[JRow],
+  jfns: List[JFn]
 }
 
 fn sym_of(g: Gen, id: Int) -> Sym =
@@ -326,6 +371,65 @@ fn finish_call(g: Gen, ty: Ty, result: CallResult) -> (Gen, Bool) !io = {
   } else {
     (g, true)
   }
+}
+
+## Put the label `--map` asked for in front of the next instruction. None,
+## which is every call outside the labelled emission, visits nothing.
+fn visit_at(m: MethodVisitor, at: Option[Label]) -> Unit !io =
+  match at {
+    Some(l) -> m.visitLabel(l)
+    None -> ()
+  }
+
+## Does this call get labels? Only a call with a site, and only in the
+## labelled emission: the plain emission's visits are exactly the parent's.
+fn marking(gx: GenCtx, site: CSite) -> Bool =
+  gx.mapping && match site {
+    CAt(_, _, _) -> true
+    CNoSite -> false
+  }
+
+fn open_mark(g: Gen) -> Label !io = {
+  let l = Label.new()
+  g.mv.visitLabel(l)
+  l
+}
+
+fn close_mark(g: Gen, site: CSite, what: String, lo: Label, inv: Option[Label]) -> Gen !io = {
+  let hi = Label.new()
+  g.mv.visitLabel(hi)
+  Gen { ..g, marks: g.marks ++ [JMark { site: site, what: what, lo: lo, inv: inv, hi: hi }] }
+}
+
+## A label's pc, or -1 for one never placed: the call instruction of a call
+## whose argument does not return is never written.
+fn label_pc(l: Label) -> Int !io =
+  match catch_fault(() => l.getOffset()) {
+    Ok(n) -> n
+    Err(_) -> -1
+  }
+
+## The marks of the method just closed, as rows.
+fn mark_rows(cf: CFun, owner: String, name: String, desc: String, marks: List[JMark]) -> List[JRow] !io = {
+  var out: List[JRow] = []
+  for mk in marks {
+    let ipc = match mk.inv {
+      Some(l) -> label_pc(l)
+      None -> -1
+    }
+    out = out ++ [JRow {
+      owner: owner,
+      origin: cf.origin,
+      method: name,
+      desc: desc,
+      site: mk.site,
+      what: mk.what,
+      pclo: label_pc(mk.lo),
+      pchi: label_pc(mk.hi),
+      ipc: ipc
+    }]
+  }
+  out
 }
 
 ## Box a primitive about to sit in an erased Object position.
@@ -1064,7 +1168,7 @@ fn gen_java_spilled_args(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, List[(Int, Int)
 }
 
 ## Type.new(args): direct construction — never null, no Option wrap.
-fn gen_java_new(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
+fn gen_java_new(gx: GenCtx, g: Gen, jc: CJava, at: Option[Label]) -> (Gen, Bool) !io = {
   let call = jc.call
   let owner = internal_of(call.fqcn)
   if operands.foreign_jumps(jc) {
@@ -1078,6 +1182,7 @@ fn gen_java_new(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
     reload_java_values(g1, [receiver])
     g1.mv.visitInsn(OP_DUP)
     reload_java_values(g1, slots)
+    visit_at(g1.mv, at)
     g1.mv.visitMethodInsn(OP_INVOKESPECIAL, owner, "<init>",
       jmethod_desc(call.param_cls, "void"), false)
     return (g1, true)
@@ -1086,6 +1191,7 @@ fn gen_java_new(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
   g.mv.visitInsn(OP_DUP)
   let (g1, falls) = gen_java_args(gx, g, jc)
   if not falls { return (g1, false) }
+  visit_at(g1.mv, at)
   g1.mv.visitMethodInsn(OP_INVOKESPECIAL, owner, "<init>",
     jmethod_desc(call.param_cls, "void"), false)
   (g1, true)
@@ -1132,7 +1238,7 @@ fn gen_java_field(g: Gen, call: TJavaCall) -> (Gen, Bool) !io = {
   (g1, true)
 }
 
-fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
+fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty, at: Option[Label]) -> (Gen, Bool) !io = {
   let call = jc.call
   let owner = internal_of(call.decl_cls)
   let itf = match jreflect.find_class(call.decl_cls) {
@@ -1169,6 +1275,7 @@ fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
   }
   let opcode = if call.is_static { OP_INVOKESTATIC }
   else if itf { OP_INVOKEINTERFACE } else { OP_INVOKEVIRTUAL }
+  visit_at(g1.mv, at)
   g1.mv.visitMethodInsn(opcode, owner, call.method,
     jmethod_desc(call.param_cls, call.ret_cls), itf)
   # returns (§9.2): small ints widen, floats widen, references wrap in Option
@@ -1448,7 +1555,8 @@ fn gen_cbody(
     # type still has to hand back a reference. A dictionary slot body does
     # not: it is called against the trait's own descriptor.
     rets_null: lifted && not slot_body,
-    cloops: []
+    cloops: [],
+    marks: []
   }
   for p in cf.captures {
     let (g2, slot) = alloc(g1, slots_of(p.ty))
@@ -1470,8 +1578,18 @@ fn gen_cbody(
   }
   let (g3, falls) = gen_cexpr(gx, g1, operands.prepare(cf.body, gx.next_sym), false)
   if falls { emit_method_return(g3) }
+  if not gx.mapping {
+    close_mv(m)
+    return g3
+  }
+  let end = open_mark(g3)
   close_mv(m)
-  g3
+  Gen {
+    ..g3,
+    marks: [],
+    jrows: g3.jrows ++ mark_rows(cf, gx.class_name, name, desc, g3.marks),
+    jfns: g3.jfns ++ [JFn { owner: gx.class_name, origin: cf.origin, method: name, desc: desc, end: label_pc(end) }]
+  }
 }
 
 ## Emit the bridges a `use java` argument queued. Lambdas no longer queue:
@@ -1848,6 +1966,71 @@ pub fn emit_module(
   own_trait_ids: List[Int],
   own_adt_ids: List[Int],
   tm: TModule,
+  lm: LMod,
+  live: Option[Live],
+  ct: CtOut,
+  all_consts: Map[String, CValue],
+  src: String,
+  decls: List[Decl]
+) -> List[(String, Bytes)] !Fs !Exit !Console !io = {
+  let (out, _, _) = emit_module_with(supers, adts, traits, impl_table, prog_fns, args_owner, class_name, own_trait_ids,
+    own_adt_ids, tm, lm, live, ct, all_consts, src, decls, false)
+  out
+}
+
+## `emit_module` for `__emit --map` (docs/source-span-map-design.md 13.4): the
+## classes, exactly as `emit_module` writes them, and what a second, labelled
+## emission of the same module found. The classes come from the plain
+## emission alone, so what is written never depends on `--map`; the labels'
+## pcs are kept only when the labelled module class is the same bytes.
+pub fn emit_module_mapped(
+  supers: List[String],
+  adts: Adts,
+  traits: Traits,
+  impl_table: Impls,
+  prog_fns: Map[(String, String), Sig],
+  args_owner: String,
+  class_name: String,
+  own_trait_ids: List[Int],
+  own_adt_ids: List[Int],
+  tm: TModule,
+  lm: LMod,
+  live: Option[Live],
+  ct: CtOut,
+  all_consts: Map[String, CValue],
+  src: String,
+  decls: List[Decl]
+) -> (List[(String, Bytes)], JModMap) !Fs !Exit !Console !io = {
+  let (written, _, _) = emit_module_with(supers, adts, traits, impl_table, prog_fns, args_owner, class_name,
+    own_trait_ids, own_adt_ids, tm, lm, live, ct, all_consts, src, decls, false)
+  let (labelled, rows, fns) = emit_module_with(supers, adts, traits, impl_table, prog_fns, args_owner, class_name,
+    own_trait_ids, own_adt_ids, tm, lm, live, ct, all_consts, src, decls, true)
+  let plain = class_of(written, class_name)
+  let same = plain == class_of(labelled, class_name)
+  (written, JModMap { owner: class_name, rows: rows, fns: fns, same: same, class_bytes: plain })
+}
+
+## The bytes `emit_module` wrote for one class; the module class is always
+## last and always there.
+fn class_of(out: List[(String, Bytes)], name: String) -> Bytes = {
+  for pr in out {
+    let (n, bs) = pr
+    if n == name { return bs }
+  }
+  panic("emit: no class " ++ name ++ " in the module's output")
+}
+
+fn emit_module_with(
+  supers: List[String],
+  adts: Adts,
+  traits: Traits,
+  impl_table: Impls,
+  prog_fns: Map[(String, String), Sig],
+  args_owner: String,
+  class_name: String,
+  own_trait_ids: List[Int],
+  own_adt_ids: List[Int],
+  tm: TModule,
   # this module's Core, lowered once by the caller -- the same value `reach`
   # reads to decide what freight the program carries. The JVM path used to
   # lower here, per function, and the two lowerings could disagree about
@@ -1865,8 +2048,9 @@ pub fn emit_module(
   # cannot hold what was compiled to point at the declaration it came from.
   # Empty for a module the driver kept no AST for, which is every std module
   src: String,
-  decls: List[Decl]
-) -> List[(String, Bytes)] !Fs !Exit !Console !io = {
+  decls: List[Decl],
+  mapping: Bool
+) -> (List[(String, Bytes)], List[JRow], List[JFn]) !Fs !Exit !Console !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
     let a = adt_of(adts, aid)
@@ -1907,7 +2091,8 @@ pub fn emit_module(
     dicts: lm.dicts,
     live: live,
     consts: all_consts,
-    blocks: ct.blocks
+    blocks: ct.blocks,
+    mapping: mapping
   }
   var g = Gen {
     mv: scratch_mv(),
@@ -1926,7 +2111,10 @@ pub fn emit_module(
     closures: [],
     sam_classes: [],
     const_fields: [],
-    const_by_key: no_ckey
+    const_by_key: no_ckey,
+    marks: [],
+    jrows: [],
+    jfns: []
   }
   for pr in lm.fns {
     let (_cf, lifts) = pr
@@ -2009,7 +2197,7 @@ pub fn emit_module(
   for s in g.sam_classes {
     out = out ++ [gen_sam_class(supers, s)]
   }
-  out ++ [(class_name, class_bytes_from(() => cw.toByteArray(), class_name, src, sites))]
+  (out ++ [(class_name, class_bytes_from(() => cw.toByteArray(), class_name, src, sites))], g.jrows, g.jfns)
 }
 
 ## One Core dictionary as a JVM singleton.
@@ -2126,7 +2314,17 @@ fn gen_cargs(gx: GenCtx, g: Gen, args: List[CExpr]) -> Gen !io = {
 
 ## Core has already boxed and unboxed everything, so an argument is emitted
 ## exactly as it stands -- no adapt_to at the call site.
-fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) !io =
+##
+## `at` is the label `--map` wants in front of the call instruction; None
+## outside the labelled emission.
+fn gen_ccall(
+  gx: GenCtx,
+  g: Gen,
+  callee: CCallee,
+  args: List[CExpr],
+  ty: Ty,
+  at: Option[Label]
+) -> (Gen, Bool) !io =
   match callee {
     CDirect(owner, name) -> {
       let g1 = gen_cargs(gx, g, args)
@@ -2136,6 +2334,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
         Some(x) -> x
         None -> fn_desc_with_dicts(gx, sig_of_call(gx, owner, name))
       }
+      visit_at(g1.mv, at)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
       finish_call(g1, ty, call_result_of_desc(d))
     }
@@ -2168,6 +2367,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
       }
       ptys = ptys ++ evtys
       let d = method_desc(gx.adts, ptys, psig.ret)
+      visit_at(g1.mv, at)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
         impl_method_name(gx, tr.name, subject, method), d, false)
       finish_call(g1, ty, call_result_of_desc(d))
@@ -2176,6 +2376,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
       let g1 = gen_cargs(gx, g, args)
       let tr = trait_of(gx.traits, tid)
       let d = fn_desc_with_dicts(gx, trait_method_sig(tr, method))
+      visit_at(g1.mv, at)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
         default_method_name(tr.name, method), d, false)
       finish_call(g1, ty, call_result_of_desc(d))
@@ -2188,6 +2389,7 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
       g0.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, tr.name))
       let g1 = gen_cargs(gx, g0, args)
       let d = trait_method_desc(gx, trait_method_sig(tr, method))
+      visit_at(g1.mv, at)
       g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
         d, true)
       finish_call(g1, ty, call_result_of_desc(d))
@@ -2195,12 +2397,18 @@ fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> 
     CDynamic(target) -> {
       let (g1, falls) = gen_cexpr(gx, g, target, false)
       if not falls { return (g1, false) }
-      gen_cdynamic(gx, g1, args, ty)
+      gen_cdynamic(gx, g1, args, ty, at)
     }
   }
 
 ## Invoke a function value: erased apply, then unerase to the static type.
-fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ret_static: Ty) -> (Gen, Bool) !io = {
+fn gen_cdynamic(
+  gx: GenCtx,
+  g: Gen,
+  args: List[CExpr],
+  ret_static: Ty,
+  at: Option[Label]
+) -> (Gen, Bool) !io = {
   var g1 = g
   for a in args {
     let (g2, _) = gen_cexpr(gx, g1, a, false)
@@ -2219,6 +2427,7 @@ fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ret_static: Ty) -> (Gen, 
   }
   # the evidence pack lowering appended is part of the arity, and `len(args)`
   # is the total by construction -- which is why `CDynamic` carries no `nev`
+  visit_at(g1.mv, at)
   g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(args)), "apply",
     erased_apply_desc(len(args)), true)
   if is_bottom(ret_static) {
@@ -2489,7 +2698,15 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       g.mv.visitJumpInsn(OP_GOTO, cont)
       (g, false)
     }
-    CCall(callee, args, ty, _) -> gen_ccall(gx, g, callee, args, ty)
+    CCall(callee, args, ty, site) ->
+      if not marking(gx, site) {
+        gen_ccall(gx, g, callee, args, ty, None)
+      } else {
+        let lo = open_mark(g)
+        let inv = Label.new()
+        let (g1, falls) = gen_ccall(gx, g, callee, args, ty, Some(inv))
+        (close_mark(g1, site, callee_text(callee), lo, Some(inv)), falls)
+      }
     CClosure(name, owner, caps, ty) -> (gen_cclosure(gx, g, name, owner, caps, ty), true)
     CDictRef(key, tid, _subject, _) -> {
       # The JVM's dictionary is a singleton implementing the trait interface
@@ -2554,8 +2771,23 @@ pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     CTuple(elems, _) -> gen_ctuple(gx, g, elems)
     CTupleGet(target, idx, ty) -> gen_ctupleget(gx, g, target, idx, ty)
     CListLit(elems, _) -> gen_clistlit(gx, g, elems)
-    CIntrinsic(name, args, ty, _) -> gen_cintrinsic(gx, g, name, args, ty)
-    CForeign(call, ty, _) -> gen_cforeign(gx, g, call, ty)
+    CIntrinsic(name, args, ty, site) ->
+      if not marking(gx, site) {
+        gen_cintrinsic(gx, g, name, args, ty)
+      } else {
+        let lo = open_mark(g)
+        let (g1, falls) = gen_cintrinsic(gx, g, name, args, ty)
+        (close_mark(g1, site, "intrinsic " ++ name, lo, None), falls)
+      }
+    CForeign(call, ty, site) ->
+      if not marking(gx, site) {
+        gen_cforeign(gx, g, call, ty, None)
+      } else {
+        let lo = open_mark(g)
+        let inv = Label.new()
+        let (g1, falls) = gen_cforeign(gx, g, call, ty, Some(inv))
+        (close_mark(g1, site, "java " ++ call.call.method, lo, Some(inv)), falls)
+      }
     # the JVM has a collector; a count is a fact about the C runtime only
     CDup(inner, _) -> gen_cexpr(gx, g, inner, false)
   }
@@ -3607,13 +3839,13 @@ test "every runtime method the JVM emitter can call is one rtclasses generates" 
 ## The JVM-only node (core.CJava). A `use java` site dispatches three ways --
 ## a static field read, a constructor, or a method invoke. The native backend
 ## refuses this node instead.
-fn gen_cforeign(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io =
+fn gen_cforeign(gx: GenCtx, g: Gen, jc: CJava, ty: Ty, at: Option[Label]) -> (Gen, Bool) !io =
   if jc.call.is_field {
     gen_java_field(g, jc.call)
   } else if jc.call.is_ctor {
-    gen_java_new(gx, g, jc)
+    gen_java_new(gx, g, jc, at)
   } else {
-    gen_java_call(gx, g, jc, ty)
+    gen_java_call(gx, g, jc, ty, at)
   }
 
 test "a signature's descriptor carries one evidence slot per row atom" {
@@ -3670,4 +3902,57 @@ test "call result width reads the return descriptor, not its last character" {
   assert call_result_of_desc("()[J") == CallOne
   assert call_result_of_desc("[D") == CallOne
   assert call_result_of_desc("()Ljava/lang/Object;") == CallOne
+}
+
+## One class holding `f(x) = m.g(m.g(x))`, a nested pair of sited calls,
+## written by `gen_cbody` with `mapping` as given: its bytes and the Gen.
+fn mapped_fixture(mapping: Bool) -> (Bytes, Gen) !io = {
+  let base = Sig {
+    name: "g", param_tys: [TyInt], param_names: ["x"], param_defaults: [None], caller_params: [],
+    ret: TyInt, eff: EPure, is_builtin: false, tparams: [], constraints: [], eparams: [],
+    owner: None, trait_id: None, op_of: None, inferring: false
+  }
+  let gx = GenCtx {
+    next_sym: 10, class_name: "m", args_owner: "", adts: prelude_adts(), traits: map.empty(),
+    impl_table: map.empty(), prog_fns: map.insert(map.empty(), ("m", "g"), base), intrs: intrinsics(),
+    dicts: [], live: None, consts: map.empty(), blocks: map.empty(), mapping: mapping
+  }
+  let g = Gen {
+    mv: scratch_mv(), lift_descs: map.empty(), syms: map.empty(), slots: map.empty(), next_slot: 0,
+    method_ret: TyUnit, rets_null: false, cloops: [], sam_ctr: 0, pending_sam: [], clos_ctr: 0,
+    closures: [], sam_classes: [], const_fields: [], const_by_key: map.empty(), marks: [], jrows: [],
+    jfns: []
+  }
+  let inner = CCall(CDirect("m", "g"), [CLocal(1, TyInt)], TyInt, CAt(9, 13, 9))
+  let body = CCall(CDirect("m", "g"), [inner], TyInt, CAt(4, 14, 4))
+  let cf = CFun {
+    name: "f", owner: "m", captures: [], params: [CParam { sym: 1, ty: TyInt, mode: COwned }], dicts: [],
+    evs: [], ret: TyInt, body: body, is_test: false, impl_of: None, default_of: None, origin: "f"
+  }
+  let no_supers: List[String] = []
+  let cw = AsmWriter.of(COMPUTE_FRAMES, no_supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, "m", obj())
+  let g1 = gen_cbody(gx, g, cw, cf, "f", "(J)J", false)
+  cw.visitEnd()
+  (cw.toByteArray().expect("bytes"), g1)
+}
+
+test "the labelled emission writes the same class, and the plain one records nothing" {
+  # docs/source-span-map-design.md 13.4: `--map` writes the plain emission's
+  # classes and keeps the labelled one's pcs only when its class is the same.
+  # The plain emission must visit nothing extra and record nothing at all.
+  let (plain, gp) = mapped_fixture(false)
+  let (labelled, gl) = mapped_fixture(true)
+  assert plain == labelled
+  assert len(gp.jrows) == 0 && len(gp.jfns) == 0 && len(gp.marks) == 0
+  # lload_0 (0), invokestatic g (1), invokestatic g (4), lreturn (7)
+  let rows = gl.jrows
+  assert len(rows) == 2
+  assert (rows[0].what, rows[0].pclo, rows[0].pchi, rows[0].ipc) == ("direct m.g", 0, 4, 1)
+  assert (rows[1].what, rows[1].pclo, rows[1].pchi, rows[1].ipc) == ("direct m.g", 0, 7, 4)
+  assert rows[1].site == CAt(4, 14, 4)
+  assert len(gl.jfns) == 1 && gl.jfns[0].end == 8 && gl.jfns[0].origin == "f"
+  # the reader the side table measures `end` against
+  let ms = classread.class_methods(plain)
+  assert len(ms) == 1 && ms[0].name == "f" && ms[0].code_length == 8
 }
