@@ -1,9 +1,10 @@
-## The outside world: console, files, environment and subprocesses.
+## The outside world: console, files, environment, clocks and subprocesses.
 ## The file system is the named effect [`Fs`], running another program is
-## [`Proc`] and the process environment is [`Env`], each with a production handler
-## `with_*_real`. The console and ending the process are `!io` today; the
-## effects that will carry them, [`Console`] and [`Exit`], are declared below and
-## their consumers are a release away. Everything that can fail answers
+## [`Proc`], the process environment is [`Env`] and the host's two clocks are
+## [`Clock`], each with a production handler `with_*_real`. The console and
+## ending the process are `!io` today; the effects that will carry them,
+## [`Console`] and [`Exit`], are declared below and their consumers are a
+## release away. Everything that can fail answers
 ## `Result[T, ForeignError]` (spec §9.8.1).
 #
 # These write over the io_* intrinsics, which every backend implements; the
@@ -808,6 +809,105 @@ pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {
   body()
 }
 
+# ---- the clocks as a named effect ----
+#
+# The host's two clocks, wall and monotonic, as two operations
+# (docs/clock-design.md). There was no clock in std before this block, so
+# unlike the five above it relabels nothing: no `!io` public function moves,
+# and the public face below names `!Clock` from the start, as `cwd` names
+# `!Env`.
+#
+# A monotonic reading is an `Instant` and a wall reading is a bare `Int`, and
+# that difference is the point. The two clocks agree almost all the time,
+# which is exactly what makes a duration measured on the wall clock a bug that
+# shows up only on the day the host's time is stepped. Here the mix-up is a
+# type error: `elapsed_ns` takes two `Instant`s, and outside this module an
+# `Int` is not one. The wall reading stays an `Int` because nanoseconds since
+# the epoch are a meaningful number on their own (a token's expiry, a signed
+# request's timestamp), and wrapping them would buy one unwrap per use.
+#
+# Two operations, and the set is meant to be final. Every declared operation
+# has exactly one arm in a handler (spec §6.5), so an operation added later
+# breaks every handler written against this one. That is why sleep is not
+# here: nothing in either tree asks for it, a browser host cannot block, and a
+# fake that only wants to freeze time would have to answer it anyway. If it
+# comes, it comes as an effect of its own.
+#
+# `instant_at_ns` is for the fakes. `Instant` is opaque, so outside this module
+# an arm answering `clock_mono` has no other way to make one; the hole that
+# opens in the opacity is spelled out at every use, which is what keeps it
+# from being an accident.
+#
+# The wrapper's body row is `!e`, as every wrapper's here is but
+# `with_fs_real`'s, and the nesting test below holds it to that.
+#
+# What no test in this module can assert is a reading itself. `dawn test
+# --stdlib` runs under both backends with the transcripts compared byte for
+# byte (scripts/native-cli-diff.sh), so a test may say a reading moved
+# forward and how far past the epoch it is, never print it.
+
+## The host's two clocks, as the two operations a handler answers. The names
+## carry a `clock_` prefix for the reason the `fs_` and `env_` ones do: `use
+## std/io.{Clock}` brings every operation into the importing module's own
+## namespace (spec §6.5).
+##
+## `clock_wall_ns` is nanoseconds since 1970-01-01T00:00:00Z. The host may set
+## that clock, so a later reading can be smaller and a reading can be
+## negative. `clock_mono` is a point on a line that only moves forward, from
+## an origin nobody knows; how far apart two of them are is [`elapsed_ns`].
+pub effect Clock {
+  fn clock_wall_ns() -> Int
+  fn clock_mono() -> Instant
+}
+
+## A reading of the monotonic clock. The distance to another reading is the
+## one thing it means, and [`elapsed_ns`] is how to get it. Being opaque, it
+## cannot be mistaken for a wall reading or passed where a count of
+## nanoseconds is wanted.
+pub opaque type Instant = Int
+
+## Run `body` against the host's clocks. Each arm is one host reading.
+##
+## This is the production handler: a program installs it at the boundary that
+## owns a whole unit of work, and everything beneath sees [`Clock`]. A test
+## installs arms of its own instead, and time is then whatever the test says.
+pub fn with_clock_real[T, !e](body: fn() -> T !Clock !e) -> T !io = {
+  with handle Clock {
+    clock_wall_ns() => io_clock_wall_ns()
+    clock_mono() => io_clock_mono_ns()
+  }
+  body()
+}
+
+## Nanoseconds since 1970-01-01T00:00:00Z, as the [`Clock`] handler answers.
+## The host may set this clock, so a duration is [`now`] and [`elapsed_ns`],
+## never two of these subtracted.
+pub fn now_wall_ns() -> Int !Clock = clock_wall_ns()
+
+## The current point on the monotonic clock, as the [`Clock`] handler answers.
+pub fn now() -> Instant !Clock = clock_mono()
+
+## Nanoseconds from `start` to `stop`, and 0 when `stop` is the earlier one.
+##
+## The subtraction stays right across a wrap of the Int, which is why two
+## readings are compared this way and not with `<`. The floor at 0 is Rust's
+## `Instant::duration_since` rule: a monotonic clock that went backwards is a
+## hardware, virtualisation or OS fault, and a negative duration handed on
+## would make it the caller's bug.
+pub fn elapsed_ns(start: Instant, stop: Instant) -> Int = {
+  # this module sees through `Instant`, but only where a value is assigned
+  # (spec 2.7), so the readings become Ints before the subtraction
+  let a: Int = start
+  let b: Int = stop
+  let d = b - a
+  if d < 0 { 0 } else { d }
+}
+
+## An [`Instant`] `ns` nanoseconds from the clock's origin, for an arm that
+## answers [`clock_mono`] outside this module: a test's fake clock. A program
+## that wants the time calls [`now`].
+pub fn instant_at_ns(ns: Int) -> Instant = ns
+
 # What these blocks may and may not assert is decided by one fact: `kind` is
 # whatever the backend called the failure. On the JVM a missing file is
 # `java.nio.file.NoSuchFileException`; a second backend has no reason to spell
@@ -1531,21 +1631,91 @@ test "a handler over a table answers Console without a host" {
   ]
 }
 
-test "the five real wrappers nest, and the order is the body rows' doing" {
+test "with_clock_real answers both clocks from the host" {
+  with_clock_real(() => {
+    # far past the epoch on any machine that runs this: 1.7e18 ns is
+    # 2023-11-14, the floor backend-dawn's own clock test uses. Nothing is
+    # printed, so the report stays the same bytes on both backends.
+    assert now_wall_ns() > 1_700_000_000 * 1_000_000_000
+    # never backwards over a run of readings...
+    var prev = now()
+    for _i in range(0, 1000) {
+      let next = now()
+      # raw readings, not `elapsed_ns`, which floors at 0 and would hide a
+      # step backwards
+      let p: Int = prev
+      let n: Int = next
+      assert n - p >= 0
+      prev = next
+    }
+    # ...and it moves. A clock answering a constant passes the loop above and
+    # fails here: the spin is bounded, and on a clock that ticks every few
+    # tens of nanoseconds it ends on the first few reads.
+    let start = now()
+    var reads = 0
+    while elapsed_ns(start, now()) == 0 && reads < 100_000_000 {
+      reads = reads + 1
+    }
+    assert reads < 100_000_000
+  })
+}
+
+test "a handler over a table answers Clock without a host" {
+  # What the fake is for: time is whatever the test says. The wall clock is
+  # frozen at 2025-10-05T00:00:00Z and the monotonic one moves 1 ms a read.
+  with handle Clock {
+    var reads: Int = 0
+    clock_wall_ns() => 1_759_622_400_000_000_000
+    clock_mono() => {
+      reads = reads + 1
+      instant_at_ns(reads * 1_000_000)
+    }
+  }
+  assert now_wall_ns() == 1_759_622_400_000_000_000
+  let a = now()
+  let b = now()
+  let c = now()
+  assert elapsed_ns(a, b) == 1_000_000
+  assert elapsed_ns(a, c) == 2_000_000
+  # read the wrong way round, a duration is 0 and never negative
+  assert elapsed_ns(c, a) == 0
+  # reading one clock does not move the other
+  assert now_wall_ns() == 1_759_622_400_000_000_000
+  assert elapsed_ns(c, now()) == 1_000_000
+}
+
+test "elapsed_ns is a subtraction that floors at zero" {
+  assert elapsed_ns(instant_at_ns(5), instant_at_ns(12)) == 7
+  assert elapsed_ns(instant_at_ns(12), instant_at_ns(5)) == 0
+  assert elapsed_ns(instant_at_ns(9), instant_at_ns(9)) == 0
+  # a monotonic reading may be negative; only the difference means anything
+  assert elapsed_ns(instant_at_ns(-3), instant_at_ns(4)) == 7
+  # and the difference is right across a wrap of the Int: the reading after
+  # the largest Int is the smallest one, one nanosecond later
+  let top = 9223372036854775807
+  assert elapsed_ns(instant_at_ns(top), instant_at_ns(top + 1)) == 1
+}
+
+test "the six real wrappers nest, and the order is the body rows' doing" {
   # The nesting is an assertion, not a setting. `with_fs_real`'s body row is
-  # closed, so it can only be the outer one; the other four take `!e`, so each
-  # can sit anywhere inside. Spell `with_exit_real`'s or `with_console_real`'s
-  # row as a closed `!(Exit | io)` or `!(Console | io)` and this block stops
-  # compiling, the way the three-wrapper test above says it does for `Env`.
+  # closed, so it can only be the outer one; the other five take `!e`, so each
+  # can sit anywhere inside. Spell `with_exit_real`'s, `with_console_real`'s or
+  # `with_clock_real`'s row as a closed `!(Exit | io)`, `!(Console | io)` or
+  # `!(Clock | io)` and this block stops compiling, the way the three-wrapper
+  # test above says it does for `Env`. `with_clock_real` is innermost here and
+  # could be anywhere inside the first.
   with_fs_real(() => with_proc_real(() => with_env_real(() => with_exit_real(() =>
-      with_console_real(() => {
-        # four of the five effects are exercised here; the fifth is `Exit`, and
+      with_console_real(() => with_clock_real(() => {
+        # five of the six effects are exercised here; the sixth is `Exit`, and
         # calling `exit_now` under its real handler would end the test run,
         # which is the whole reason the test above installs an arm of its own.
+        let start = now()
         let here = env_cwd()
         assert here != ""
         assert is_dir(here)
         assert proc_run(["sh", "-c", "exit 0"], "", "") == Ok(0)
-        console_println("std/io: all five real handlers are installed")
-      })))))
+        # a child process ran in between, so the monotonic clock has moved
+        assert elapsed_ns(start, now()) > 0
+        console_println("std/io: all six real handlers are installed")
+      }))))))
 }

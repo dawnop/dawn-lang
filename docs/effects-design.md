@@ -444,11 +444,12 @@ type ev$State = { get: fn() -> Int, put: fn(Int) -> Unit }
    唯一的减法点是 `with handle`。这是健全性要求，但方向上是放大签名噪音而不是缩小。
 
 第一个真实样本已经在了：`std/io` 声明了 `Fs`（文件系统的十五个操作，生产 handler
-`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共六条 `effect` 声明，落在两个文件里：
+`with_fs_real`）。今天 `std/` 与 `selfhost/src/` 下共七条 `effect` 声明，落在两个文件里：
 `std/io` 的 `Fs`、`Proc`（跑另一个程序，一个操作 `proc_run`，生产 handler
 `with_proc_real`）、`Env`（进程环境的两个操作 `env_cwd` / `env_get`，生产 handler
 `with_env_real`）、`Exit`（结束进程，一个 `ctl` 操作 `exit_now`，生产 handler
-`with_exit_real`）与 `Console`（控制台的四个操作，生产 handler `with_console_real`），
+`with_exit_real`）、`Console`（控制台的四个操作，生产 handler `with_console_real`）与 `Clock`
+（墙钟与单调钟两个读数，生产 handler `with_clock_real`，见 [clock-design.md](clock-design.md)），
 以及 `std/gpu` 的 `Gpu`（设备宿主侧的六个操作，测试里由一个纯的假设备
 应答）。这份清单由
 `scripts/doc-check.py` 的 `NAMED_EFFECT_EXPECTED` 枚举、`check_named_effect_status` 三向钉住
@@ -658,7 +659,7 @@ runs」写成类型的样子。操作的返回类型是 `Never`，这在这里�
 
 `with_exit_real` 与 `with_console_real` 的 body 行都是 `!e`，于是五个 wrapper 可以一层套一层，
 `with_fs_real` 在最外层（它的行是五个里唯一闭合的那一个）。看护是 `std/io` 里那条
-「the five real wrappers nest」的 test。
+「the five real wrappers nest」的 test（2026-10-05 加入 `with_clock_real` 后改名「the six real wrappers nest」）。
 
 **刀 1（消费者迁移，下一轮种子之后）**：`io.exit` 的体改调 `exit_now`，四个打印函数的体改调
 四个 `console_*`；可达的签名各加一个原子；handler 装在**既有的 `Fs` 边界**上，也就是当时
@@ -1049,8 +1050,8 @@ Core golden 是另一回事：**测试块不进这份 dump**（实测 `main.core
   （spec §6.5）；吸收禁令（spec §6.2 规则 7）另外挡住了「静默吞掉外层效果」的静态形态，因为
   `with handle` 只减自己应答的那个标签，别的原子必须留在行里。这两条都不是对顺序的检查。
 
-规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有六条 `effect` 声明（§8.1 末段），
-其中 `Fs`、`Proc`、`Env`、`Exit` 与 `Console` 同住 `std/io`，五个生产 handler 要考虑谁装在谁外面；仓外的
+规模上这笔账今天已经不是零了。`std/` 与 `selfhost/src/` 下有七条 `effect` 声明（§8.1 末段），
+其中 `Fs`、`Proc`、`Env`、`Exit`、`Console` 与 `Clock` 同住 `std/io`，六个生产 handler 要考虑谁装在谁外面；仓外的
 backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 （`backend-dawn/src/util/http.dawn`）两个，且它们在生产路径上真的嵌套：
 `svc/monitor.lighthouse_start` 的行是 `!Upstream !io`，体内就地装 `Clock`，而调用它的
@@ -1064,9 +1065,9 @@ backend-dawn 有 `Clock`（`backend-dawn/src/util/clock.dawn`）与 `Upstream`
 （`expected fn() -> T !(Fs|io), got fn() -> T !(Fs|Proc|io)`，`T` 处是具体的返回类型）。`std/io` 里那条
 「one wrapper inside the other」的 test 就是这条判词的看护：把 `!e` 换回闭合行，它编译不过。
 `with_env_real` 也写 `!e`，于是三个 wrapper 的次序由同一条判词管着，看护是同一个文件里那条
-「the three real wrappers nest」。`with_exit_real` 与 `with_console_real` 也写 `!e`，
-看护是同一个文件里那条「the five real wrappers nest」：五个 wrapper 一层套一层，
-`with_fs_real` 在最外层，因为它的行是五个里唯一闭合的那一个。
+「the three real wrappers nest」。`with_exit_real`、`with_console_real` 与 `with_clock_real` 也写 `!e`，
+看护是同一个文件里那条「the six real wrappers nest」：六个 wrapper 一层套一层，
+`with_fs_real` 在最外层，因为它的行是六个里唯一闭合的那一个。
 这不是对「两个 handler 装错顺序」的检查（octachron 那条结论一个字都没被削弱），它只是把
 「哪一个能当外层」从口头约定变成了签名上的事实。
 

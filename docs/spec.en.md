@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 21c0c4e6f44f76ec -->
+<!-- doc-check: translation-of docs/spec.md @ 9fcaac164abd697e -->
 
 # Dawn Language Specification
 
@@ -2054,6 +2054,19 @@ axis as well, beside io rather than as special cases of it: **effect variables**
 The **label axis** is the finite set of named effects the user declares with `effect` (§6.5).
 It is independent of the base axis: `!io` does **not** cover named effects. So an `!io` function
 that performs `!Ask` still has to write `!Ask` in its signature.
+
+**Clocks.** Reading a clock is `!io`, and there are two primitives: the wall clock
+`io_clock_wall_ns` (nanoseconds since 1970-01-01T00:00:00Z; the host may set it, so a later
+reading can be smaller and a reading can be negative) and the monotonic clock
+`io_clock_mono_ns` (an arbitrary origin, and only the difference of two readings means
+anything; both backends read the same clock, `System.nanoTime` on the JVM and
+`CLOCK_MONOTONIC` on native and wasi). Both are nanoseconds in one `Int`, representable to
+about 2262; the resolution is the host's and is not promised. Both are for std only (§10.6)
+and refused by compile-time evaluation (§7.2): a reading would make one source compile to
+different bytes at different times. A program reads the clocks through `std/io`'s named
+effect `Clock` (§6.5), whose production handler is `io.with_clock_real`: `io.now_wall_ns()`
+answers the wall clock as an `Int`, `io.now()` a monotonic reading as an `io.Instant`
+(opaque, §2.7), and `io.elapsed_ns(a, b)` is `b - a`, or 0 when that is negative.
 
 **`io` wears two faces and they are read separately**, which is this section's main clause: under
 **containment** `io` is an upper bound, so a signature that promises `!io` stands over a purer
