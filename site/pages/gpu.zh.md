@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 1552c6963aa56232 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ fc911af1edb7b4ab -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -49,6 +49,10 @@ Dawn 里的 GPU kernel 是一个带 `!Dev` 效果的普通函数。运行一次�
 ## api-body
 
 kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操作数读出的形状一概不写。下面每段代码都在建站时从 golden kernel 里切出来。
+
+## api-learn
+
+学着写一个
 
 ## api-cells-title
 

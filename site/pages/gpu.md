@@ -55,6 +55,10 @@ Writing a kernel
 
 A kernel says where it reads and writes once, on its parameters' markers, and states no shape it could read off its operands. Each piece of code below is cut from the golden kernels when the site is built.
 
+## api-learn
+
+Learn to write one
+
 ## api-cells-title
 
 The markers are the addressing
