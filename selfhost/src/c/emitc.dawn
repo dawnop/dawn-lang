@@ -38,7 +38,7 @@ use embed/unicode_case
 use embed/rtsrc
 use embed/unicode_class
 use ir/core.{
-  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
+  CNoSite, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
@@ -838,8 +838,8 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
         None -> (st1, "DAWN_UNIT")
       }
     }
-    CCall(callee, args, ty) -> emit_call(st, callee, args, ty)
-    CIntrinsic(name, args, ty) -> emit_intrinsic(st, name, args, ty)
+    CCall(callee, args, ty, _) -> emit_call(st, callee, args, ty)
+    CIntrinsic(name, args, ty, _) -> emit_intrinsic(st, name, args, ty)
     CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false)
     CUpdate(_, _, _, _, _) -> panic("emitc: a record update reached the emitter; rc.rw builds it whole")
     CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
@@ -954,7 +954,7 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       }
       (st1, pvec_call(LIST_FROM_ARRAY) ++ "(" ++ tmp ++ ")")
     }
-    CForeign(_, _) ->
+    CForeign(_, _, _) ->
       # Not a gap: `use java` is the half of FFI that does not port, and
       # refusing it here is the design (llvm-backend-research.md 9). The
       # native `dawnc` never gets here, since it checks with the refusing
@@ -985,7 +985,7 @@ fn boxed_unit_literal(inner: CExpr, from: Ty) -> Bool =
 test "a boxed unit literal is the shared object, a boxed call is not" {
   assert boxed_unit_literal(CUnit, TyUnit)
   # a Unit that came out of a call still has the call to evaluate
-  assert not boxed_unit_literal(CCall(CDirect("m", "f"), [], TyUnit), TyUnit)
+  assert not boxed_unit_literal(CCall(CDirect("m", "f"), [], TyUnit, CNoSite), TyUnit)
   # and a box around anything else is an ordinary box
   assert not boxed_unit_literal(CInt(1), TyInt)
 }
@@ -1219,7 +1219,7 @@ fn bin_test_st() -> CSt =
 
 ## A non-atomic Int operand: a call runs code, so the ordered row has to name
 ## it before the other side runs.
-fn bin_test_call(name: String) -> CExpr = CCall(CDirect("t", name), [], TyInt)
+fn bin_test_call(name: String) -> CExpr = CCall(CDirect("t", name), [], TyInt, CNoSite)
 
 fn bin_test_count(hay: String, needle: String) -> Int = len(str.split(hay, needle)) - 1
 
@@ -1467,8 +1467,8 @@ fn emit_alloc_row(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String
 ## an `&&`, an allocation -- ran its code as statements.
 fn inline_raises(e: CExpr) -> Bool =
   match e {
-    CCall(_, _, _) -> true
-    CIntrinsic(_, _, _) -> true
+    CCall(_, _, _, _) -> true
+    CIntrinsic(_, _, _, _) -> true
     CBinary(op, l, r, ty) ->
       if op == CAnd || op == COr {
         false

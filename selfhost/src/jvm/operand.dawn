@@ -9,7 +9,7 @@ use std/set
 use check/types.{Ty, TyInt, TyBool, TyUnit, TyNever, TyError, TyVar}
 use jvm/codegen.{wide_fields}
 use ir/core.{
-  CExpr, CStmt, CJava, cex_ty, diverges,
+  CNoSite, CExpr, CStmt, CJava, cex_ty, diverges,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
@@ -177,18 +177,18 @@ fn visit(e: CExpr, next: Int) -> Prepared =
       } else {
         eager([l, r], next, ty, xs => CBinary(op, xs[0], xs[1], ty))
       }
-    CCall(callee, args, ty) ->
+    CCall(callee, args, ty, site) ->
       match callee {
         CDynamic(t) -> eager([t] ++ args, next, ty, xs => {
-          CCall(CDynamic(xs[0]), list_tail(xs), ty)
+          CCall(CDynamic(xs[0]), list_tail(xs), ty, site)
         })
         CMethod(d, tid, name, idx, nev) -> eager([d] ++ args, next, ty, xs => {
-          CCall(CMethod(xs[0], tid, name, idx, nev), list_tail(xs), ty)
+          CCall(CMethod(xs[0], tid, name, idx, nev), list_tail(xs), ty, site)
         })
         CDirect(_, _) | CImpl(_, _, _, _) | CDefault(_, _, _) ->
-          eager(args, next, ty, xs => CCall(callee, xs, ty))
+          eager(args, next, ty, xs => CCall(callee, xs, ty, site))
       }
-    CIntrinsic(name, args, ty) -> eager(args, next, ty, xs => CIntrinsic(name, xs, ty))
+    CIntrinsic(name, args, ty, site) -> eager(args, next, ty, xs => CIntrinsic(name, xs, ty, site))
     CCtor(adt, ci, args, ty) -> eager(args, next, ty, xs => CCtor(adt, ci, xs, ty))
     # A narrow update is the whole constructor it denotes, spilled exactly as
     # that constructor always was. A wide one keeps its node: its operands are
@@ -241,9 +241,9 @@ fn visit(e: CExpr, next: Int) -> Prepared =
       let p = visit(v, next)
       Prepared { ..p, expr: CDup(p.expr, ty) }
     }
-    CForeign(j, ty) -> {
+    CForeign(j, ty, site) -> {
       let (j2, jumps, n) = foreign(j, next)
-      Prepared { expr: CForeign(j2, ty), jumps: jumps, next: n }
+      Prepared { expr: CForeign(j2, ty, site), jumps: jumps, next: n }
     }
   }
 
@@ -295,8 +295,8 @@ test "eager operands snapshot locals and respect JVM value widths" {
     CBlock([CSLet(10, TyUnit, CUnit)], Some(CBreak(7)), TyUnit) -> ()
     _ -> panic("a bottom operand must not acquire a local")
   }
-  match prepare(CIntrinsic("list_push", [CUnit, CBox(rhs, TyInt)], TyUnit), 10) {
-    CBlock([_, CSLet(_, TyVar(_, _), CBox(_, TyInt))], Some(CIntrinsic(_, _, _)), _) -> ()
+  match prepare(CIntrinsic("list_push", [CUnit, CBox(rhs, TyInt)], TyUnit, CNoSite), 10) {
+    CBlock([_, CSLet(_, TyVar(_, _), CBox(_, TyInt))], Some(CIntrinsic(_, _, _, _)), _) -> ()
     _ -> panic("boxed values have an erased JVM slot, not Core's sentinel type")
   }
 }

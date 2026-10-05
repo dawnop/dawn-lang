@@ -56,7 +56,7 @@ use check/tast.{
 }
 use check/exhaustive.{LitV, LInt, LFloat, LBool, LStr}
 use ir/core.{
-  CExpr, CStmt, CCallee, CFun, CModule, CParam, CBinOp, CUnOp,
+  CSite, CNoSite, CAt, CExpr, CStmt, CCallee, CFun, CModule, CParam, CBinOp, CUnOp,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
@@ -148,7 +148,14 @@ pub type LSt = {
   # (`fn_value_evs`). It answers for any single atom, because it is the whole
   # chain rather than one node of it. None inside a named function, which has
   # per-atom slots instead.
-  ev_own: Option[CExpr]
+  ev_own: Option[CExpr],
+  # What a written call's site is measured from (core.CSite): the offset
+  # `tast_positions` added back to the function being lowered (`TFun.base`),
+  # and that function's declaration path (`TFun.decl`). A base below zero
+  # means no site is recorded at all -- the comptime interpreter's lowering,
+  # and every tree no scheduler filed.
+  base: Int,
+  origin: String
 }
 
 ## The function currently being lowered, as its own body sees it. Two things
@@ -176,6 +183,13 @@ pub type SelfCtx = {
   fty: Ty,
   loop_id: Int
 }
+
+## The site of a call written at `lo..hi` whose callee's name starts at
+## `nlo`, all three positions in the file (`tast_positions` resolved them), as
+## offsets from the declaration being lowered (core.CSite). Nothing when no
+## scheduler filed the tree: the offsets would be measured from nothing.
+fn site_at(st: LSt, lo: Int, hi: Int, nlo: Int) -> CSite =
+  if st.base < 0 { CNoSite } else { CAt(lo - st.base, hi - st.base, nlo - st.base) }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
   (LSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
@@ -348,7 +362,7 @@ fn ev_slot(st: LSt, key: Int) -> CExpr = {
 ## walk to.
 fn ev_from_pack(pack: CExpr, key: Int) -> CExpr =
   if key_is_label(key) {
-    let raw = CIntrinsic("ev_get", [pack, CInt(key)], erased_ev_ty())
+    let raw = CIntrinsic("ev_get", [pack, CInt(key)], erased_ev_ty(), CNoSite)
     adapt_out(raw, erased_ev_ty(), TyAdt(key_effect_id(key), []))
   } else {
     pack
@@ -461,15 +475,15 @@ fn lower_cell(st: LSt, name: String, args: List[TExpr], ty: Ty) -> (LSt, CExpr) 
   let er = erased_cell_ty()
   if name == "cell_new" {
     let (st1, v) = lower_expr(st, args[0])
-    return (st1, CIntrinsic(name, [adapt_in(v, tex_ty(args[0]), er)], er))
+    return (st1, CIntrinsic(name, [adapt_in(v, tex_ty(args[0]), er)], er, CNoSite))
   }
   if name == "cell_set" {
     let (st1, c) = lower_expr(st, args[0])
     let (st2, v) = lower_expr(st1, args[1])
-    return (st2, CIntrinsic(name, [c, adapt_in(v, tex_ty(args[1]), er)], TyUnit))
+    return (st2, CIntrinsic(name, [c, adapt_in(v, tex_ty(args[1]), er)], TyUnit, CNoSite))
   }
   let (st1, c) = lower_expr(st, args[0])
-  (st1, adapt_out(CIntrinsic(name, [c], er), er, ty))
+  (st1, adapt_out(CIntrinsic(name, [c], er, CNoSite), er, ty))
 }
 
 # ---- one-shot resumption ----
@@ -503,7 +517,7 @@ fn lower_ctl(st: LSt, name: String, args: List[TExpr], ty: Ty) -> (LSt, CExpr) =
     let (st1, p) = lower_expr(st, args[0])
     let (st2, r) = lower_expr(st1, args[1])
     let (st3, evs) = dyn_evidence(st2, [args[2]])
-    return (st3, adapt_out(CIntrinsic(name, [p, r] ++ evs, er), er, ty))
+    return (st3, adapt_out(CIntrinsic(name, [p, r] ++ evs, er, CNoSite), er, ty))
   }
   let (st1, p) = lower_expr(st, args[0])
   let (st2, arm) = lower_expr(st1, args[1])
@@ -519,7 +533,7 @@ fn lower_ctl(st: LSt, name: String, args: List[TExpr], ty: Ty) -> (LSt, CExpr) =
     st3 = stn
     cargs = cargs ++ [adapt_in(v, tex_ty(a), er)]
   }
-  (st3, adapt_out(CIntrinsic(name, cargs, er), er, ty))
+  (st3, adapt_out(CIntrinsic(name, cargs, er, CNoSite), er, ty))
 }
 
 fn refuse_evidence_captures(st: LSt, where2: String, captures: List[Int]) -> Unit = {
@@ -634,7 +648,7 @@ fn display_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   let imp = impl_for(st, DISPLAY_ID, t)
   let (st1, ds) = goal_dicts(st, sub_goals(st.impls, DISPLAY_ID, t))
   (st1, CCall(
-    CImpl(owner_or(imp.owner, st1.owner), DISPLAY_ID, t, "display"), [x] ++ ds, TyString))
+    CImpl(owner_or(imp.owner, st1.owner), DISPLAY_ID, t, "display"), [x] ++ ds, TyString, CNoSite))
 }
 
 # ---- constructor fields ----
@@ -870,7 +884,7 @@ fn lower_list_pattern(
       _ -> TyError
     }
   let n = len(pre) + len(post)
-  let count = CIntrinsic("len", [subj], TyInt)
+  let count = CIntrinsic("len", [subj], TyInt, CNoSite)
   var cond: CExpr =
     if has_rest {
       CBinary(CGe, count, CInt(n), TyBool)
@@ -882,7 +896,7 @@ fn lower_list_pattern(
   var i = 0
   for p in pre {
     let elem = adapt_out(
-      CIntrinsic("list_index", [subj, CInt(i)], TyVar("E", 0)), TyVar("E", 0), et)
+      CIntrinsic("list_index", [subj, CInt(i)], TyVar("E", 0), CNoSite), TyVar("E", 0), et)
     let (st2, c, bs) = pat_test_slots(st1, elem, p, et, slots)
     st1 = st2
     cond = and_of(cond, c)
@@ -894,7 +908,7 @@ fn lower_list_pattern(
     # counted from the end, so a `..rest` of unknown width does not shift it
     let idx = CBinary(CSub, count, CInt(j), TyInt)
     let elem = adapt_out(
-      CIntrinsic("list_index", [subj, idx], TyVar("E", 0)), TyVar("E", 0), et)
+      CIntrinsic("list_index", [subj, idx], TyVar("E", 0), CNoSite), TyVar("E", 0), et)
     let (st2, c, bs) = pat_test_slots(st1, elem, p, et, slots)
     st1 = st2
     cond = and_of(cond, c)
@@ -904,7 +918,7 @@ fn lower_list_pattern(
   match rest_sym {
     Some(rs) -> {
       let value = CIntrinsic("list_slice",
-        [subj, CInt(len(pre)), CBinary(CSub, count, CInt(len(post)), TyInt)], t)
+        [subj, CInt(len(pre)), CBinary(CSub, count, CInt(len(post)), TyInt)], t, CNoSite)
       if sym_in(slots, rs) {
         binds = binds ++ [CSAssign(rs, value)]
       } else {
@@ -1758,7 +1772,7 @@ fn make_bridge(
       let (i, from, to, via) = pr
       ies = ies ++ [ev_select(evlocals[i], from, to, via)]
     }
-    let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret)
+    let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds ++ ies, psig.ret, CNoSite)
     let f = CFun {
       name: name,
       owner: st1.owner,
@@ -1770,7 +1784,8 @@ fn make_bridge(
       body: adapt_in(call, psig.ret, sg.ret),
       is_test: false,
       impl_of: None,
-      default_of: None
+      default_of: None,
+      origin: ""
     }
     (LSt { ..st1, lifted: st1.lifted ++ [f] }, name)
   }
@@ -1883,7 +1898,8 @@ fn make_prim_slot(
     body: body,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
   (LSt { ..st4, lifted: st4.lifted ++ [f], dict_env: st.dict_env }, name)
 }
@@ -2057,7 +2073,7 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
     if provides(imp, rel.method) {
       let (st1, ds) = goal_dicts(st, sub_goals(st.impls, rel.tid, t))
       return (st1, CCall(
-        CImpl(owner_or(imp.owner, st1.owner), rel.tid, t, rel.method), xs ++ ds, rel.ret))
+        CImpl(owner_or(imp.owner, st1.owner), rel.tid, t, rel.method), xs ++ ds, rel.ret, CNoSite))
     }
   }
   # An opaque type with no impl of its own relates as its target: the value
@@ -2073,7 +2089,7 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
   if is_ground(t) {
     if expandable(t) {
       let (st1, name) = struct_rel_fn(st, rel, t)
-      return (st1, CCall(CDirect(st1.owner, name), xs, rel.ret))
+      return (st1, CCall(CDirect(st1.owner, name), xs, rel.ret, CNoSite))
     }
     if rel.ground_is_final { return (st, rel.fallback(xs, t)) }
   }
@@ -2090,7 +2106,7 @@ fn rel_at(st: LSt, rel: Rel, xs: List[CExpr], t: Ty) -> (LSt, CExpr) = {
   if expandable(t) && goals_available(st, sub_goals(st.impls, rel.tid, t)) {
     let (st1, ds) = goal_dicts(st, sub_goals(st.impls, rel.tid, t))
     let (st2, name) = struct_rel_fn(st1, rel, t)
-    return (st2, CCall(CDirect(st2.owner, name), xs ++ ds, rel.ret))
+    return (st2, CCall(CDirect(st2.owner, name), xs ++ ds, rel.ret, CNoSite))
   }
   (st, rel.fallback(xs, t))
 }
@@ -2109,7 +2125,7 @@ fn rel_through_dict(st: LSt, rel: Rel, d: CExpr, xs: List[CExpr], t: Ty) -> (LSt
     args = args ++ [adapt_in(x, t, sg.param_tys[i])]
     i = i + 1
   }
-  (st, adapt_out(CCall(CMethod(d, rel.tid, rel.method, idx, 0), args, sg.ret), sg.ret, rel.ret))
+  (st, adapt_out(CCall(CMethod(d, rel.tid, rel.method, idx, 0), args, sg.ret, CNoSite), sg.ret, rel.ret))
 }
 
 ## The relation the compiler writes for one composite type, as an ordinary
@@ -2167,7 +2183,8 @@ fn struct_rel_fn(st: LSt, rel: Rel, t: Ty) -> (LSt, String) = {
     body: rel.unit_answer,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
   let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
   let (st3, body) = rel_body(st2, rel, xs, t)
@@ -2322,7 +2339,7 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, eq_rel
 ## stopped owing an implementation of the walk.
 fn foreign_eq(xs: List[CExpr], t: Ty) -> CExpr =
   match t {
-    TyJava(_, _) -> CIntrinsic("java_eq", xs, TyBool)
+    TyJava(_, _) -> CIntrinsic("java_eq", xs, TyBool, CNoSite)
     _ -> panic("lower: no equality for `" ++ ty_key_inst(t) ++
         "`; the checker should have refused it")
   }
@@ -2387,7 +2404,7 @@ fn cmp_rel() -> Rel =
     union: cmp_union
   }
 
-fn cmp_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("cmp", xs, TyInt)
+fn cmp_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("cmp", xs, TyInt, CNoSite)
 
 ## There is no fallback. Unlike equality, ordering is not defined for every
 ## type -- the checker refuses `Ord` where no impl and no derive supply it --
@@ -2499,7 +2516,7 @@ fn hash_rel() -> Rel =
     union: hash_union
   }
 
-fn hash_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("hash", xs, TyInt)
+fn hash_scalar(xs: List[CExpr], t: Ty) -> CExpr = CIntrinsic("hash", xs, TyInt, CNoSite)
 
 ## `hash(x)` at one type, as Core: the `hash` method, a `[K: Eq + Hash]` bound
 ## at a concrete key type, and each field inside a synthesised hash.
@@ -2510,7 +2527,7 @@ fn hash_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = rel_at(st, hash_rel(), [x
 ## agreeing inside the same Map. A backend with no Java owes nothing here.
 fn foreign_hash(xs: List[CExpr], t: Ty) -> CExpr =
   match t {
-    TyJava(_, _) -> CIntrinsic("java_hash", xs, TyInt)
+    TyJava(_, _) -> CIntrinsic("java_hash", xs, TyInt, CNoSite)
     _ -> panic("lower: no hash for `" ++ ty_key_inst(t) ++
         "`; the checker should have refused it")
   }
@@ -2606,24 +2623,24 @@ fn show_rel() -> Rel =
 ## named, unerased leaf.
 fn show_scalar(xs: List[CExpr], t: Ty) -> CExpr =
   if t == TyInt {
-    CIntrinsic("str_of_int", xs, TyString)
+    CIntrinsic("str_of_int", xs, TyString, CNoSite)
   } else if t == TyFloat {
     # Float is the one scalar whose rendering is not a backend intrinsic: the
     # shortest-round-trip algorithm is Dawn source (std/fmt.dtoa, audit
     # RP-01), and both backends compile that one definition. std/fmt itself
     # must never render a Float through `to_string`/interpolation -- this
     # rewrite would make it a self-call.
-    CCall(CDirect("std/fmt", "dtoa"), xs, TyString)
+    CCall(CDirect("std/fmt", "dtoa"), xs, TyString, CNoSite)
   } else if t == TyBool {
-    CIntrinsic("str_of_bool", xs, TyString)
+    CIntrinsic("str_of_bool", xs, TyString, CNoSite)
   } else if t == TyString {
-    CIntrinsic("quote", xs, TyString)
+    CIntrinsic("quote", xs, TyString, CNoSite)
   } else if t == TyBytes {
     # It has no structure to walk -- the language renders it as a summary of
     # its length, not as its contents -- so it belongs with the others: named,
     # unerased, one arm per backend. Erased, it was unimplementable on native,
     # where a `void*` and a kind tag are all there is to identify a value by.
-    CIntrinsic("str_of_bytes", xs, TyString)
+    CIntrinsic("str_of_bytes", xs, TyString, CNoSite)
   } else {
     panic("lower: `" ++ ty_key_inst(t) ++ "` is a show scalar with no rendering")
   }
@@ -2644,7 +2661,7 @@ fn show_scalar(xs: List[CExpr], t: Ty) -> CExpr =
 ## backends, which is worse than the JVM keeping an answer native declines.
 fn show_erased(xs: List[CExpr], t: Ty) -> CExpr = {
   if not expandable(t) {
-    return CIntrinsic("show", [adapt_in(xs[0], t, TyVar("T", 0))], TyString)
+    return CIntrinsic("show", [adapt_in(xs[0], t, TyVar("T", 0))], TyString, CNoSite)
   }
   panic("lower: no rendering for ${ty_key_inst(t)}")
 }
@@ -2895,7 +2912,8 @@ fn lower_trait_call(
   args: List[TExpr],
   ws: List[WitRef],
   evid: List[TExpr],
-  ty: Ty
+  ty: Ty,
+  site: CSite
 ) -> (LSt, CExpr) = {
   let tr = trait_of(st.traits, tid)
   let idx = method_index(tr, name)
@@ -2931,7 +2949,7 @@ fn lower_trait_call(
       let (st1, vs) = lower_args_to(st, args, sg.param_tys)
       let (st2, es) = lower_all(st1, evid)
       (st2, adapt_out(
-        CCall(CMethod(CLocal(sym, dict_ty()), tid, name, idx, len(es)), vs ++ es, sg.ret),
+        CCall(CMethod(CLocal(sym, dict_ty()), tid, name, idx, len(es)), vs ++ es, sg.ret, site),
         sg.ret, ty))
     }
     # An impl with a body, reached at a subject that is not ground: there is
@@ -2951,14 +2969,14 @@ fn lower_trait_call(
         let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
         return (st3, adapt_out(
           CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ ds ++ ies,
-            psig.ret),
+            psig.ret, site),
           psig.ret, ty))
       }
       let (st1, d) = witness_value(st, ws[0])
       let (st2, vs) = lower_args_to(st1, args, sg.param_tys)
       let (st3, es) = lower_evidence(st2, evid)
       (st3, adapt_out(
-        CCall(CMethod(d, tid, name, idx, len(es)), vs ++ es, sg.ret), sg.ret, ty))
+        CCall(CMethod(d, tid, name, idx, len(es)), vs ++ es, sg.ret, site), sg.ret, ty))
     }
     WConcrete(_, subject) -> {
       let imp = impl_for(st, tid, subject)
@@ -2972,7 +2990,7 @@ fn lower_trait_call(
         let (st3, ies) = impl_evidence(st2, sg, imp, psig, evid)
         (st3, adapt_out(
           CCall(CImpl(owner_or(imp.owner, st3.owner), tid, subject, name), vs ++ ds ++ ies,
-            psig.ret),
+            psig.ret, site),
           psig.ret, ty))
       } else {
         # the default body is generic and takes the dictionary like any
@@ -2982,7 +3000,7 @@ fn lower_trait_call(
         let (st2, d) = dict_ref(st1, tid, subject)
         let (st3, es) = lower_evidence(st2, evid)
         (st3, adapt_out(
-          CCall(CDefault(owner_or(tr.owner, st3.owner), tid, name), vs ++ [d] ++ es, sg.ret),
+          CCall(CDefault(owner_or(tr.owner, st3.owner), tid, name), vs ++ [d] ++ es, sg.ret, site),
           sg.ret, ty))
       }
     }
@@ -3173,7 +3191,8 @@ fn lift_lambda(
     body: cbody,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: st2.origin
   }
   (LSt {
     ..st2,
@@ -3220,7 +3239,8 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
     body: CCtor(adt, ci, args, ret),
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
   (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
 }
@@ -3303,10 +3323,11 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     dicts: [],
     evs: evps,
     ret: ret,
-    body: adapt_out(CCall(CDirect(owner, name), args ++ inner_evs, decl_ret), decl_ret, ret),
+    body: adapt_out(CCall(CDirect(owner, name), args ++ inner_evs, decl_ret, CNoSite), decl_ret, ret),
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
   (LSt { ..st5, lifted: st5.lifted ++ [f] }, CClosure(lam, st5.owner, [], ty))
 }
@@ -3381,7 +3402,8 @@ fn lift_builtin_value(st: LSt, name: String, ty: Ty) -> (LSt, CExpr) = {
     body: body,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
   (LSt {
     ..st5,
@@ -3436,7 +3458,9 @@ test "a builtin taken as a value lowers as the call it wraps" {
     ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
     traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
     prog_fns: fns, intrs: it, dicts: [], dict_env: map.empty(),
-    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None
+    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
+    base: -1,
+    origin: ""
   }
   for n in lowered_intrinsics() {
     let sg = map.get(it, n).expect("a lowered name is an intrinsic").sig
@@ -3447,10 +3471,10 @@ test "a builtin taken as a value lowers as the call it wraps" {
     }
     let body = st1.lifted[len(st1.lifted) - 1].body
     match body {
-      CIntrinsic(got, _, _) ->
+      CIntrinsic(got, _, _, _) ->
         panic("`" ++ n ++ "` taken as a value lowered to the intrinsic `" ++ got ++
             "`, which lowering removes from every direct call (lowered_intrinsics)")
-      CUnbox(CIntrinsic(got, _, _), _) ->
+      CUnbox(CIntrinsic(got, _, _, _), _) ->
         panic("`" ++ n ++ "` taken as a value lowered to the intrinsic `" ++ got ++
             "`, which lowering removes from every direct call (lowered_intrinsics)")
       _ -> ()
@@ -3458,7 +3482,7 @@ test "a builtin taken as a value lowers as the call it wraps" {
     match parser_impl(n) {
       Some(f) ->
         match body {
-          CCall(CDirect(o, g), _, _) -> { assert o == "std/fmt" && g == f }
+          CCall(CDirect(o, g), _, _, _) -> { assert o == "std/fmt" && g == f }
           _ -> panic("`" ++ n ++ "` taken as a value is not a call on std/fmt." ++ f)
         }
       None -> ()
@@ -3507,13 +3531,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         # `<` becomes `cmp(l, r) <op> 0`, `==` becomes `eq(l, r)`.
         Some(w) ->
           if is_eq_op(op) {
-            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], no_texprs(), TyBool)
+            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], no_texprs(), TyBool, CNoSite)
             match op {
               BEq -> (st1, c)
               _ -> (st1, negated(c))
             }
           } else {
-            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], no_texprs(), TyInt)
+            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], no_texprs(), TyInt, CNoSite)
             (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
           }
         # No witness. For `==`/`!=` that is not "nothing to dispatch": the
@@ -3625,6 +3649,10 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XListLit(elems, _, _, ty) -> lower_list_lit(st, elems, ty)
     XCallBuiltin(name, args, wits, evid, lo, hi, ty) -> {
+      # an internal primitive is one the checker writes and refuses to
+      # anyone else (`ev_append` joining packs, a handler's cells), so the
+      # span it carries is the construct it serves and not a call
+      let site = if list.contains(internal_intrinsics(), name) { CNoSite } else { site_at(st, lo, hi, lo) }
       # first, because its trailing argument is a line's head and not the
       # failure suffix `unsite` below would fold into a message
       if name == "dbg" {
@@ -3709,12 +3737,12 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
                 "is its own intrinsic (`float_of_decimal`), never the builtin it implements")
           }
           let (st1, vs) = lower_all(st, args)
-          return (st1, CCall(CDirect("std/fmt", fname), vs, ty))
+          return (st1, CCall(CDirect("std/fmt", fname), vs, ty, site))
         }
         None -> ()
       }
       match hamt_fn(name) {
-        Some(fname) -> return hamt_call(st, name, fname, args, wits, evid, ty)
+        Some(fname) -> return hamt_call(st, name, fname, args, wits, evid, ty, site)
         None -> ()
       }
       match erased_builtin_sig(st, name) {
@@ -3722,19 +3750,25 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           let (st1, vs) = lower_args_to(st, args, sg.param_tys)
           let (st2, ds) = witness_values(st1, wits)
           let (st3, es) = builtin_evidence(st2, name, evid)
-          (st3, adapt_out(CIntrinsic(name, vs ++ ds ++ es, sg.ret), sg.ret, ty))
+          (st3, adapt_out(CIntrinsic(name, vs ++ ds ++ es, sg.ret, site), sg.ret, ty))
         }
         None -> {
           let (st1, vs) = lower_all(st, args)
           let (st2, ds) = witness_values(st1, wits)
           let (st3, es) = builtin_evidence(st2, name, evid)
-          (st3, CIntrinsic(name, vs ++ ds ++ es, ty))
+          (st3, CIntrinsic(name, vs ++ ds ++ es, ty, site))
         }
       }
     }
-    XCallFn(owner, name, args, wits, evid, trait_id, _, _, ty) ->
+    XCallFn(owner, name, args, wits, evid, trait_id, lo, hi, ty) -> {
+      # an omitted default argument's `f$default$k(..)` carries the span of
+      # the call it was omitted from, but nothing was written for it: the
+      # written call is the `f(..)` that follows (core.CSite, one written call
+      # one site). `$` is not in the identifier lexicon, so no source call
+      # spells the name.
+      let site = if str.contains(name, "\$default\$") { CNoSite } else { site_at(st, lo, hi, lo) }
       match trait_id {
-        Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty)
+        Some(tid) -> lower_trait_call(st, tid, name, args, wits, evid, ty, site)
         None -> {
           let o = match owner { Some(x) -> x, None -> st.owner }
           if tl && is_self_fn(st, o, name) {
@@ -3751,26 +3785,27 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
               # and an effectful one its evidence, right behind them
               let (st2, ds) = witness_values(st1, wits)
               let (st3, es) = lower_evidence(st2, evid)
-              (st3, adapt_out(CCall(CDirect(o, name), vs ++ ds ++ es, sg.ret), sg.ret, ty))
+              (st3, adapt_out(CCall(CDirect(o, name), vs ++ ds ++ es, sg.ret, site), sg.ret, ty))
             }
             None -> {
               let (st1, vs) = lower_all(st, args)
               let (st2, ds) = witness_values(st1, wits)
               let (st3, es) = lower_evidence(st2, evid)
-              (st3, CCall(CDirect(o, name), vs ++ ds ++ es, ty))
+              (st3, CCall(CDirect(o, name), vs ++ ds ++ es, ty, site))
             }
           }
         }
       }
+    }
     XConstRef(owner, name, _, _, ty) -> (st, CConstRef(owner, name, ty))
     # `c[i]` is a trait method call like any other: devirtualised where the
     # subject is known (which for List and Map means `index_at` inline, since
     # the prelude impls have no body), dispatched through the dictionary where
     # it is a rigid `[C: Index]`.
     XIndex(target, index, wit, _, _, ty) ->
-      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty)
+      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], no_texprs(), ty, CNoSite)
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
-    XCallDyn(sym, _, args, evid, _, _, ty) ->
+    XCallDyn(sym, _, args, evid, lo, hi, ty) ->
       if is_self_sym(st, sym) {
         if tl {
           self_tail_jump(st, args)
@@ -3779,19 +3814,28 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           let (st1, vs) = lower_all(st, args)
           let clo = self_value(st1, sym).expect("self closure")
           let (st2, es) = dyn_evidence(st1, evid)
-          (st2, CCall(CDynamic(clo), vs ++ es, ty))
+          (st2, CCall(CDynamic(clo), vs ++ es, ty, site_at(st2, lo, hi, lo)))
         }
       } else {
         let (st1, vs) = lower_all(st, args)
         let fty = sym_ty(st1, sym, TyError)
         let (st2, es) = dyn_evidence(st1, evid)
-        (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty))
+        (st2, CCall(CDynamic(CLocal(sym, fty)), vs ++ es, ty, site_at(st2, lo, hi, lo)))
       }
-    XApply(target, args, evid, _, _, ty) -> {
+    XApply(target, args, evid, lo, hi, ty) -> {
+      # A `with handle` runs the rest of its block as a closure applied to
+      # nothing (`checker.check_handle`), spanning the whole construct. Until
+      # the typed tree says which calls were written (the callee-name field,
+      # docs/source-span-map-design.md section 3), that shape is how lowering
+      # tells it apart; a written `(() => e)()` loses its site to it.
+      let site = match target {
+        XLambda(_, _, _, _, _, _, _) -> if len(args) == 0 { CNoSite } else { site_at(st, lo, hi, lo) }
+        _ -> site_at(st, lo, hi, lo)
+      }
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
       let (st3, es) = dyn_evidence(st2, evid)
-      (st3, CCall(CDynamic(tv), vs ++ es, ty))
+      (st3, CCall(CDynamic(tv), vs ++ es, ty, site))
     }
     XLambda(params, _, body, captures, _, _, ty) ->
       lift_lambda(st, params, body, captures, ty, None)
@@ -3802,14 +3846,14 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let o = match owner { Some(x) -> x, None -> st.owner }
       lift_fn_value(st, o, name, is_builtin, ty)
     }
-    XJava(call, _, _, ty) -> lower_java(st, call, ty)
+    XJava(call, lo, hi, ty) -> lower_java(st, call, ty, site_at(st, lo, hi, lo))
   }
 }
 
 ## `use java`: the receiver and the arguments lower like any other
 ## expression, so no backend has to walk TAST to emit them. Everything else
 ## about the call is JVM-shaped metadata and rides along unchanged.
-fn lower_java(st: LSt, call: TJavaCall, ty: Ty) -> (LSt, CExpr) = {
+fn lower_java(st: LSt, call: TJavaCall, ty: Ty, site: CSite) -> (LSt, CExpr) = {
   var st1 = st
   let tgt: Option[CExpr] =
     match call.target {
@@ -3841,7 +3885,7 @@ fn lower_java(st: LSt, call: TJavaCall, ty: Ty) -> (LSt, CExpr) = {
   }
   (st1, CForeign(CJava {
     call: call, target: tgt, args: args, arg_tys: tys, sam_evs: sevs
-  }, ty))
+  }, ty, site))
 }
 
 fn lower_all(st: LSt, es: List[TExpr]) -> (LSt, List[CExpr]) = {
@@ -3927,7 +3971,7 @@ fn cat_list(a: CExpr, b: CExpr, ty: Ty) -> CExpr =
   match b {
     CListLit(vs, _) ->
       if len(vs) == 1 {
-        CIntrinsic("list_push", [a, vs[0]], ty)
+        CIntrinsic("list_push", [a, vs[0]], ty, CNoSite)
       } else {
         CBinary(CConcat, a, b, ty)
       }
@@ -4162,7 +4206,9 @@ test "dictionary constructors and slots keep their argument shape in either requ
     ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
     traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
     prog_fns: map.empty(), intrs: intrinsics(), dicts: [], dict_env: map.empty(),
-    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None
+    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
+    base: -1,
+    origin: ""
   }
   for bridge in [false, true] {
     # Exercise both slot producers directly. The explicit implementation is
@@ -4267,7 +4313,7 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
       }
     body = body ++ setup ++ [CSIf(cond, inner, None)]
   }
-  body = body ++ [CSDiscard(CIntrinsic("panic", [CStr("unreachable match")], TyNever))]
+  body = body ++ [CSDiscard(CIntrinsic("panic", [CStr("unreachable match")], TyNever, CNoSite))]
 
   var stmts: List[CStmt] = [CSLet(ssym, sty, sv)]
   if produces {
@@ -4300,7 +4346,7 @@ fn zero_of(t: Ty) -> CExpr = {
   } else if p == TyString {
     CStr("")
   } else {
-    CIntrinsic("null_ref", [], t)
+    CIntrinsic("null_ref", [], t, CNoSite)
   }
 }
 
@@ -4437,7 +4483,7 @@ fn lower_dbg(st: LSt, args: List[TExpr], wits: List[WitRef], ty: Ty) -> (LSt, CE
     Some(h) -> cat(CStr(h), shown)
     None -> shown
   }
-  (st3, CBlock([CSLet(sym, t, v), CSDiscard(CIntrinsic("dbg_line", [line], TyUnit))],
+  (st3, CBlock([CSLet(sym, t, v), CSDiscard(CIntrinsic("dbg_line", [line], TyUnit, CNoSite))],
     Some(held), ty))
 }
 
@@ -4474,13 +4520,13 @@ fn lower_unwrap(st: LSt, operand: TExpr, msg: String, ty: Ty) -> (LSt, CExpr) = 
         (st2, CBlock(
           [CSLet(sym, ot, ov),
             CSIf(CIsCtor(subj, OPTION_ID, NONE_CI),
-              CIntrinsic("panic", [CStr(msg)], TyNever), None)],
+              CIntrinsic("panic", [CStr(msg)], TyNever, CNoSite), None)],
           Some(read_field(st2, subj, ot, OPTION_ID, SOME_CI, 0)), ty))
       } else if adt == RESULT_ID {
         (st2, CBlock(
           [CSLet(sym, ot, ov),
             CSIf(CIsCtor(subj, RESULT_ID, ERR_CI),
-              CIntrinsic("panic", [CStr(msg)], TyNever), None)],
+              CIntrinsic("panic", [CStr(msg)], TyNever, CNoSite), None)],
           Some(read_field(st2, subj, ot, RESULT_ID, OK_CI, 0)), ty))
       } else {
         panic("lower: `!` on a non-Option/Result type")
@@ -4527,7 +4573,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       let (st1, c) = lower_expr(st, cond)
       let text = match src { Some(t) -> t, None -> "assertion failed" }
       (st1, [CSIf(CUnary(CNot, c, TyBool),
-        CIntrinsic("panic", [CStr("assertion failed: ${text}")], TyNever), None)])
+        CIntrinsic("panic", [CStr("assertion failed: ${text}")], TyNever, CNoSite), None)])
     }
     TSWhile(cond, body, _, _, _) -> {
       let (st1, lid) = fresh_loop(st)
@@ -4625,10 +4671,10 @@ fn lower_for_iter(
   let (st4, isym) = fresh_sym(st3)
   let cv: TExpr = XLocal(csym, "for$" ++ "xs", 0, 0, ct)
   let iv: TExpr = XLocal(isym, "for$" ++ "cur", 0, 0, cur_t)
-  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], no_texprs(), cur_t)
-  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], no_texprs(), TyBool)
-  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], no_texprs(), item_ty)
-  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], no_texprs(), cur_t)
+  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], no_texprs(), cur_t, CNoSite)
+  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], no_texprs(), TyBool, CNoSite)
+  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], no_texprs(), item_ty, CNoSite)
+  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], no_texprs(), cur_t, CNoSite)
   let (st9, item_sym) = fresh_sym(st8)
   let item = CLocal(item_sym, item_ty)
   let (st10, pattern_stmts) = lower_irrefutable_pattern(st9, item, pat, item_ty)
@@ -4736,7 +4782,7 @@ fn hamt_sig(st: LSt, name: String) -> Sig =
 ## but on the container itself, which is a concrete type on both sides.
 fn hamt_call(
   st: LSt, prim: String, fname: String, args: List[TExpr], wits: List[WitRef],
-  evid: List[TExpr], ty: Ty
+  evid: List[TExpr], ty: Ty, site: CSite
 ) -> (LSt, CExpr) = {
   let sg = hamt_sig(st, fname)
   let (st1, vs) = lower_args_to(st, args, sg.param_tys)
@@ -4746,7 +4792,7 @@ fn hamt_call(
   # count is read off the primitive's own signature; for the rest of the
   # family it is zero and this appends nothing.
   let (st3, es) = builtin_evidence(st2, prim, evid)
-  (st3, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds ++ es, sg.ret), sg.ret, ty))
+  (st3, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds ++ es, sg.ret, site), sg.ret, ty))
 }
 
 # ---- indexing (docs/operator-traits-design.md §4.4) ----
@@ -4783,7 +4829,7 @@ fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
     TyList(el) -> {
       # indexing yields an erased element, so the unbox is explicit
       let erased = TyVar("E", 0)
-      (st, adapt_out(CIntrinsic("list_index", [c, i], erased), erased, el))
+      (st, adapt_out(CIntrinsic("list_index", [c, i], erased, CNoSite), erased, el))
     }
     TyMap(k, v) -> {
       # `m[k]` is `hamt.index`, which needs the key's Eq, Hash and Show -- the
@@ -4794,7 +4840,7 @@ fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
       let sg = hamt_sig(st, "index")
       let (st1, ds) = goal_dicts(st, sub_goals(st.impls, INDEX_ID, subject))
       let call = CCall(CDirect("std/hamt", "index"),
-        [c, adapt_in(i, k, sg.param_tys[1])] ++ ds, sg.ret)
+        [c, adapt_in(i, k, sg.param_tys[1])] ++ ds, sg.ret, CNoSite)
       (st1, adapt_out(call, sg.ret, v))
     }
     _ -> panic("lower: no indexing for ${ty_key_inst(subject)}")
@@ -4869,7 +4915,9 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     tail: true,
     self_tail: false,
     ev_env: ev_env,
-    ev_own: None
+    ev_own: None,
+    base: f.base,
+    origin: f.decl
   }
   let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
@@ -4882,7 +4930,9 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     tail: st.tail,
     self_tail: st.self_tail,
     ev_env: st.ev_env,
-    ev_own: st.ev_own
+    ev_own: st.ev_own,
+    base: st.base,
+    origin: st.origin
   }, CFun {
     name: f.name,
     owner: owner,
@@ -4894,7 +4944,8 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     body: body,
     is_test: f.is_test,
     impl_of: f.impl_of,
-    default_of: f.default_of
+    default_of: f.default_of,
+    origin: f.decl
   })
 }
 
@@ -4957,7 +5008,9 @@ pub fn lower_expr_in(
     tail: false,
     self_tail: false,
     ev_env: [],
-    ev_own: None
+    ev_own: None,
+    base: -1,
+    origin: ""
   }
   let (st1, ce) = lower_expr(st, e)
   (ce, st1.lifted, st1.dicts, st1.next_lam)
@@ -5006,7 +5059,9 @@ pub fn lower_fn_only(
     tail: false,
     self_tail: false,
     ev_env: [],
-    ev_own: None
+    ev_own: None,
+    base: -1,
+    origin: ""
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.dicts, st1.next_lam)
@@ -5081,7 +5136,9 @@ pub fn lower_module_full(
     tail: false,
     self_tail: false,
     ev_env: [],
-    ev_own: None
+    ev_own: None,
+    base: -1,
+    origin: ""
   }
   var fns: List[(CFun, List[CFun])] = []
   var flat: List[CFun] = []
@@ -5183,8 +5240,8 @@ fn dense_java(d: Dense, j: CJava) -> Dense = {
 fn dense_expr(d: Dense, e: CExpr) -> Dense =
   match e {
     CLocal(s, _) -> dense_sym(d, s)
-    CCall(callee, args, _) -> dense_all(dense_callee(d, callee), args)
-    CIntrinsic(_, args, _) -> dense_all(d, args)
+    CCall(callee, args, _, _) -> dense_all(dense_callee(d, callee), args)
+    CIntrinsic(_, args, _, _) -> dense_all(d, args)
     CCtor(_, _, args, _) -> dense_all(d, args)
     CUpdate(base, _, _, fields, _) -> dense_all(dense_expr(d, base), update_values(fields))
     CField(t, _, _, _, _) -> dense_expr(d, t)
@@ -5208,7 +5265,7 @@ fn dense_expr(d: Dense, e: CExpr) -> Dense =
     CReturn(v) -> dense_opt(d, v)
     CBreak(_) -> d
     CContinue(_) -> d
-    CForeign(j, _) -> dense_java(d, j)
+    CForeign(j, _, _) -> dense_java(d, j)
     CInt(_) -> d
     CFloat(_) -> d
     CBool(_) -> d
@@ -5281,8 +5338,8 @@ fn moved_java(d: Dense, j: CJava) -> CJava = {
 fn moved_expr(d: Dense, e: CExpr) -> CExpr =
   match e {
     CLocal(s, ty) -> CLocal(moved_sym(d, s), ty)
-    CCall(callee, args, ty) -> CCall(moved_callee(d, callee), moved_all(d, args), ty)
-    CIntrinsic(name, args, ty) -> CIntrinsic(name, moved_all(d, args), ty)
+    CCall(callee, args, ty, site) -> CCall(moved_callee(d, callee), moved_all(d, args), ty, site)
+    CIntrinsic(name, args, ty, site) -> CIntrinsic(name, moved_all(d, args), ty, site)
     CCtor(adt, ci, args, ty) -> CCtor(adt, ci, moved_all(d, args), ty)
     CUpdate(base, adt, ci, fields, ty) -> {
       var out: List[CUpdField] = []
@@ -5310,7 +5367,7 @@ fn moved_expr(d: Dense, e: CExpr) -> CExpr =
     CReturn(v) -> CReturn(moved_opt(d, v))
     CBreak(l) -> CBreak(l)
     CContinue(l) -> CContinue(l)
-    CForeign(j, ty) -> CForeign(moved_java(d, j), ty)
+    CForeign(j, ty, site) -> CForeign(moved_java(d, j), ty, site)
     CInt(v) -> CInt(v)
     CFloat(v) -> CFloat(v)
     CBool(v) -> CBool(v)
@@ -5413,7 +5470,7 @@ test "lowering numbers a module's names in the order the Core dump reads them" {
     ret: TyInt,
     body: CBlock([CSLet(4005, TyInt, sum(local(4002), local(4004)))],
       Some(sum(sum(local(4001), local(4003)), local(4005))), TyInt),
-    is_test: false, impl_of: None, default_of: None
+    is_test: false, impl_of: None, default_of: None, origin: ""
   }
   var syms: Map[Int, Sym] = map.empty()
   syms = map.insert(syms, 4002, sym_named("x"))
@@ -5490,7 +5547,8 @@ test "the flat module and the grouped functions are one lowering" {
     is_test: false,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   }
   let no_traits: Traits = map.empty()
   let no_impls: Impls = map.empty()
@@ -5604,7 +5662,8 @@ test "emitted_core carries the test bodies and what they hoisted" {
     is_test: false,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   }
   # a test takes no parameters and answers Unit; the string tuple keeps its
   # comparison distinct from the one `f` asked for, so it really is hoisted
@@ -5667,3 +5726,57 @@ pub fn lower_module(
   prog_fns: Map[(String, String), Sig]
 ) -> CModule =
   lower_module_full(owner, tm, traits, impls, adts, prog_fns, false).m
+
+test "a written call's site is measured from its declaration, and a default's call has none" {
+  let sig0 = (nm: String) => Sig {
+    name: nm,
+    param_tys: [],
+    param_names: [],
+    param_defaults: [],
+    ret: TyInt,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    eparams: [],
+    owner: None,
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+  let none_tid: Option[Int] = None
+  let call = (nm: String, lo: Int, hi: Int) => XCallFn(Some("m"), nm, [], [], [], none_tid, lo, hi, TyInt)
+  let body = XBinary(BAdd, call("g", 120, 125), call("g\$default\$0", 130, 135), None, 0, 0, 0, 0, TyInt)
+  let f = TFun {
+    name: "f",
+    sig: sig0("f"),
+    param_syms: [],
+    dict_syms: [],
+    ev_syms: [],
+    defaults: [],
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None,
+    decl: "Nf:f",
+    base: 100
+  }
+  let no_traits: Traits = map.empty()
+  let no_impls: Impls = map.empty()
+  let no_sigs: Map[(String, String), Sig] = map.empty()
+  let sites_of = (tf: TFun) => {
+    let tm = TModule { fns: [tf], consts: [], tests: [], syms: map.empty() }
+    let cf = lower_module_full("m", tm, no_traits, no_impls, prelude_adts(), no_sigs, false).m.fns[0]
+    match cf.body {
+      CBinary(_, CCall(_, _, _, s1), CCall(_, _, _, s2), _) -> (cf.origin, s1, s2)
+      _ -> panic("expected the two calls")
+    }
+  }
+  let (origin, written, omitted) = sites_of(f)
+  assert origin == "Nf:f"
+  assert written == CAt(20, 25, 20)
+  assert omitted == CNoSite
+  # a tree no scheduler filed records nothing
+  let (_, unfiled, _) = sites_of(TFun { ..f, decl: "", base: -1 })
+  assert unfiled == CNoSite
+}

@@ -1,0 +1,149 @@
+# The call sites a lowered module carries, as text: `__lower --sites <dir>`.
+#
+# A CSite is never printed by the Core dump (coredump.dawn), and that is the
+# point of it: the dump is the evidence a pure move changed nothing, and a
+# printed offset would be one more thing a move could disturb
+# (docs/source-span-map-design.md section 2). So the sites get their own
+# listing, written by a walker of their own, in a file of their own. Keeping
+# this out of coredump.dawn is deliberate: a reviewer can see from the import
+# lists alone that the golden's renderer never reaches a site.
+#
+# The listing is in file coordinates, not the offsets Core holds. Its one
+# reader is scripts/core-sites/check.py, which pairs every site with the
+# parser's call node at the same position; the parser speaks positions, and
+# adding the declaration's base back here is the same sum a side table writer
+# (M3, M4) will do, through the same `site_abs`.
+#
+# Order is the walk's pre-order: a call before its callee expression and its
+# arguments, statements before a block's tail. The checker reads the listing
+# as a set keyed by position, so the order only has to be stable.
+
+use std/list
+use std/map
+use check/types.{TyInt}
+use ir/core.{
+  CModule, CFun, CExpr, CStmt, CCallee, CSite, CNoSite, CAt,
+  CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure, CDictApply, CDictArg,
+  CTuple, CTupleGet, CBox, CUnbox, CBinary, CUnary, CIf, CBlock, CListLit,
+  CReturn, CForeign, CDup, sam_ev_exprs, CUpdate, update_values,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf,
+  CDirect, CDynamic, CMethod, CImpl, CDefault
+}
+
+## A site in file coordinates: the declaration's base added back to each
+## offset. None for a call lowering wrote itself.
+pub fn site_abs(base: Int, s: CSite) -> Option[(Int, Int, Int)] =
+  match s {
+    CNoSite -> None
+    CAt(lo, hi, nlo) -> Some((base + lo, base + hi, base + nlo))
+  }
+
+## One line per call that has a site, for every function of `m`. `bases`
+## maps a declaration path (`CFun.origin`) to the base its offsets are
+## measured from (`TFun.base`); a function whose origin it does not know
+## prints `?` positions, which the checker refuses.
+pub fn render(m: CModule, bases: Map[String, Int]) -> String = {
+  var out = ""
+  for f in m.fns {
+    let base = map.get(bases, f.origin)
+    for row in expr_rows([], f.body) {
+      let (what, s) = row
+      let at = match base {
+        Some(b) -> {
+          let (lo, hi, nlo) = site_abs(b, s).expect("a listed row has a site")
+          "${lo} ${hi} ${nlo}"
+        }
+        None -> "? ? ?"
+      }
+      out = out ++ m.owner ++ "\t" ++ f.name ++ "\t" ++ f.origin ++ "\t" ++ what ++ "\t" ++ at ++ "\n"
+    }
+  }
+  out
+}
+
+alias Row = (String, CSite)
+
+fn callee_text(c: CCallee) -> String =
+  match c {
+    CDirect(owner, name) -> "direct " ++ owner ++ "." ++ name
+    CDynamic(_) -> "dynamic"
+    CMethod(_, _, method, _, _) -> "method " ++ method
+    CImpl(_, _, _, method) -> "impl " ++ method
+    CDefault(_, _, method) -> "default " ++ method
+  }
+
+fn callee_rows(acc: List[Row], c: CCallee) -> List[Row] =
+  match c {
+    CDynamic(t) -> expr_rows(acc, t)
+    CMethod(d, _, _, _, _) -> expr_rows(acc, d)
+    CDirect(_, _) -> acc
+    CImpl(_, _, _, _) -> acc
+    CDefault(_, _, _) -> acc
+  }
+
+fn sited(acc: List[Row], what: String, s: CSite) -> List[Row] =
+  match s {
+    CNoSite -> acc
+    CAt(_, _, _) -> acc ++ [(what, s)]
+  }
+
+fn all_rows(acc: List[Row], es: List[CExpr]) -> List[Row] =
+  list.fold(es, acc, (a, e) => expr_rows(a, e))
+
+fn opt_rows(acc: List[Row], e: Option[CExpr]) -> List[Row] =
+  match e {
+    Some(x) -> expr_rows(acc, x)
+    None -> acc
+  }
+
+fn expr_rows(acc: List[Row], e: CExpr) -> List[Row] =
+  match e {
+    CCall(callee, args, _, s) -> all_rows(callee_rows(sited(acc, callee_text(callee), s), callee), args)
+    CIntrinsic(name, args, _, s) -> all_rows(sited(acc, "intrinsic " ++ name, s), args)
+    CForeign(j, _, s) ->
+      all_rows(all_rows(opt_rows(sited(acc, "java " ++ j.call.method, s), j.target), j.args), sam_ev_exprs(j))
+    CCtor(_, _, args, _) -> all_rows(acc, args)
+    CUpdate(base, _, _, fields, _) -> all_rows(expr_rows(acc, base), update_values(fields))
+    CField(t, _, _, _, _) -> expr_rows(acc, t)
+    CIsCtor(t, _, _) -> expr_rows(acc, t)
+    CTagOf(t, _) -> expr_rows(acc, t)
+    CClosure(_, _, caps, _) -> all_rows(acc, caps)
+    CTuple(elems, _) -> all_rows(acc, elems)
+    CTupleGet(t, _, _) -> expr_rows(acc, t)
+    CBox(inner, _) -> expr_rows(acc, inner)
+    CUnbox(inner, _) -> expr_rows(acc, inner)
+    CDup(inner, _) -> expr_rows(acc, inner)
+    CBinary(_, l, r, _) -> expr_rows(expr_rows(acc, l), r)
+    CUnary(_, o, _) -> expr_rows(acc, o)
+    CIf(c, t, f, _) -> opt_rows(expr_rows(expr_rows(acc, c), t), f)
+    CBlock(stmts, tail, _) -> opt_rows(list.fold(stmts, acc, (a, s) => stmt_rows(a, s)), tail)
+    CListLit(elems, _) -> all_rows(acc, elems)
+    CReturn(v) -> opt_rows(acc, v)
+    CDictApply(_, args, _) -> all_rows(acc, args)
+    CDictArg(d, _, _, _, _) -> expr_rows(acc, d)
+    _ -> acc
+  }
+
+fn stmt_rows(acc: List[Row], s: CStmt) -> List[Row] =
+  match s {
+    CSLet(_, _, init) -> expr_rows(acc, init)
+    CSAssign(_, v) -> expr_rows(acc, v)
+    CSDiscard(e) -> expr_rows(acc, e)
+    CSLoop(_, body, step) -> opt_rows(expr_rows(acc, body), step)
+    CSIf(c, t, f) -> opt_rows(expr_rows(expr_rows(acc, c), t), f)
+    _ -> acc
+  }
+
+test "a site is listed in file coordinates, and a call with none is not" {
+  let ty = TyInt
+  let inner = CCall(CDirect("m", "g"), [], ty, CAt(4, 7, 4))
+  let outer = CIntrinsic("println", [inner], ty, CNoSite)
+  let f = CFun {
+    name: "main", owner: "m", captures: [], params: [], dicts: [], evs: [], ret: ty,
+    body: outer, is_test: false, impl_of: None, default_of: None, origin: "main"
+  }
+  let m = CModule { owner: "m", fns: [f], dicts: [], next_sym: 0 }
+  assert render(m, map.insert(map.empty(), "main", 100)) == "m\tmain\tmain\tdirect m.g\t104 107 104\n"
+  assert render(m, map.empty()) == "m\tmain\tmain\tdirect m.g\t? ? ?\n"
+  assert site_abs(10, CNoSite) == None
+}

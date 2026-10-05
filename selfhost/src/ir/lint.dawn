@@ -46,7 +46,7 @@ use check/types.{
   eff_assocs, key_is_label, key_effect_id, intrinsics, EV_PACK_ID
 }
 use ir/core.{
-  CModule, CFun, CExpr, CStmt, CCallee, CDictDef,
+  CSite, CNoSite, CAt, CModule, CFun, CExpr, CStmt, CCallee, CDictDef,
   CInt, CLocal, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
@@ -154,7 +154,7 @@ type Index = {
   removed: Set[String]
 }
 
-type Acc = { ix: Index, owner: String, fn_name: String, out: List[Violation] }
+type Acc = { ix: Index, owner: String, fn_name: String, origin: String, out: List[Violation] }
 
 fn flag(a: Acc, rule: String, detail: String) -> Acc =
   Acc {
@@ -216,10 +216,10 @@ pub fn lint_program(adts: Adts, mods: List[CModule]) -> List[Violation] = {
     known: known,
     removed: removed
   }
-  var a = Acc { ix: ix, owner: "", fn_name: "", out: out }
+  var a = Acc { ix: ix, owner: "", fn_name: "", origin: "", out: out }
   for m in mods {
     for f in m.fns {
-      a = Acc { ..a, owner: m.owner, fn_name: f.name }
+      a = Acc { ..a, owner: m.owner, fn_name: f.name, origin: f.origin }
       a = check_expr(a, f.body)
       a = check_pack_reads(a, f)
       a = check_scopes(a, f)
@@ -260,8 +260,8 @@ fn closure_rows_expr(rows: Map[(String, String), List[Eff]], e: CExpr) -> Map[(S
 ## The direct subexpressions of a node, statements' expressions included.
 fn children(e: CExpr) -> List[CExpr] =
   match e {
-    CCall(callee, args, _) -> callee_exprs(callee) ++ args
-    CIntrinsic(_, args, _) -> args
+    CCall(callee, args, _, _) -> callee_exprs(callee) ++ args
+    CIntrinsic(_, args, _, _) -> args
     CCtor(_, _, args, _) -> args
     CUpdate(base, _, _, fields, _) -> [base] ++ update_values(fields)
     CField(t, _, _, _, _) -> [t]
@@ -283,7 +283,7 @@ fn children(e: CExpr) -> List[CExpr] =
     }
     CListLit(elems, _) -> elems
     CReturn(v) -> opt_list(v)
-    CForeign(j, _) -> opt_list(j.target) ++ j.args ++ sam_ev_exprs(j)
+    CForeign(j, _, _) -> opt_list(j.target) ++ j.args ++ sam_ev_exprs(j)
     CDictApply(_, args, _) -> args
     CDictArg(d, _, _, _, _) -> [d]
     _ -> []
@@ -321,13 +321,41 @@ fn check_all(a: Acc, es: List[CExpr]) -> Acc = {
 }
 
 fn check_expr(a: Acc, e: CExpr) -> Acc = {
-  let a1 = check_node(a, e)
+  let a1 = check_node(check_site(a, e), e)
   check_all(a1, children(e))
 }
 
+## The site of a call (core.CSite) is offsets into the declaration its
+## function's `origin` names: ordered, inside the call, and only in a function
+## that has an origin to measure from. Whether the offsets fall inside the
+## declaration is not decided here; Core does not know its width, and the
+## oracle (scripts/core-sites) pairs every site with the parser's call node.
+fn check_site(a: Acc, e: CExpr) -> Acc =
+  match node_site(e) {
+    CNoSite -> a
+    CAt(lo, hi, nlo) ->
+      if a.origin == "" {
+        flag(a, "site", "a call site at " ++ to_string(lo) ++ ".." ++ to_string(hi) ++
+            " in a function with no origin declaration to measure it from")
+      } else if lo < 0 || lo > nlo || nlo >= hi {
+        flag(a, "site", "a call site " ++ to_string(lo) ++ ".." ++ to_string(hi) ++
+            " whose name starts at " ++ to_string(nlo) ++ "; it needs 0 <= lo <= nlo < hi")
+      } else {
+        a
+      }
+  }
+
+fn node_site(e: CExpr) -> CSite =
+  match e {
+    CCall(_, _, _, s) -> s
+    CIntrinsic(_, _, _, s) -> s
+    CForeign(_, _, s) -> s
+    _ -> CNoSite
+  }
+
 fn check_node(a: Acc, e: CExpr) -> Acc =
   match e {
-    CIntrinsic(name, _, _) ->
+    CIntrinsic(name, _, _, _) ->
       if set.has(a.ix.removed, name) {
         flag(a, "lowered-intrinsic", "`" ++ name ++
             "` reached Core, and lowering removes every call to it (lower.lowered_intrinsics); " ++
@@ -378,12 +406,12 @@ fn check_node(a: Acc, e: CExpr) -> Acc =
             a
           }
       }
-    CCall(CDirect(owner, name), args, _) ->
+    CCall(CDirect(owner, name), args, _, _) ->
       match map.get(a.ix.fns, (owner, name)) {
         None -> a
         Some(f) -> check_named_call(a, owner ++ "." ++ name, f, args)
       }
-    CCall(CDynamic(_), args, _) ->
+    CCall(CDynamic(_), args, _, _) ->
       if len(args) == 0 {
         flag(a, "evidence-slot", "a call through a function value with no evidence pack")
       } else {
@@ -540,7 +568,7 @@ fn row_answers(row: Eff, eid: Int) -> Bool = {
 fn forwards(ix: Index, own: Int, e: CExpr) -> Bool = {
   let here =
     match e {
-      CCall(CDirect(owner, name), args, _) ->
+      CCall(CDirect(owner, name), args, _, _) ->
         match map.get(ix.fns, (owner, name)) {
           Some(f) -> {
             var hit = false
@@ -554,7 +582,7 @@ fn forwards(ix: Index, own: Int, e: CExpr) -> Bool = {
           }
           None -> false
         }
-      CCall(CDynamic(_), args, _) -> len(args) > 0 && is_local(args[len(args) - 1], own)
+      CCall(CDynamic(_), args, _, _) -> len(args) > 0 && is_local(args[len(args) - 1], own)
       _ -> false
     }
   if here { return true }
@@ -574,7 +602,7 @@ fn is_local(e: CExpr, s: Int) -> Bool =
 fn pack_reads(own: Int, acc: List[Int], e: CExpr) -> List[Int] = {
   var out = acc
   match e {
-    CIntrinsic(name, args, _) ->
+    CIntrinsic(name, args, _, _) ->
       if name == "ev_get" && len(args) == 2 {
         match args[0] {
           CLocal(s, _) ->
@@ -665,7 +693,7 @@ fn scope_expr(a: Acc, scope: Set[Int], e: CExpr) -> (Acc, Bool) =
         _ -> (a2, rf && not_never(ty))
       }
     }
-    CIntrinsic(name, args, ty) -> {
+    CIntrinsic(name, args, ty, _) -> {
       let (a1, af) = scope_seq(a, scope, args)
       (a1, af && name != "panic" && name != "todo" && not_never(ty))
     }

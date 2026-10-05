@@ -44,7 +44,7 @@
 # there.
 
 use ir/core.{
-  CModule, CFun, CExpr, CStmt, CDictSlot, CDictDef, subject_key, fn_key,
+  CNoSite, CModule, CFun, CExpr, CStmt, CDictSlot, CDictDef, subject_key, fn_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic, CCtor,
   CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg, CTuple,
   CTupleGet, CBox, CUnbox, CBinary, CUnary, CIf, CBlock, CListLit, CConstRef,
@@ -549,7 +549,7 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
     CUnit -> st0
     CLocal(_, _) -> st0
     CFnRef(owner, name, _) -> direct(st0, owner, name)
-    CCall(callee, args, _) -> {
+    CCall(callee, args, _, _) -> {
       var st =
         match callee {
           CDirect(owner, name) -> direct(st0, owner, name)
@@ -562,7 +562,7 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
         }
       walk_list(st, args)
     }
-    CIntrinsic(name, args, _) -> {
+    CIntrinsic(name, args, _, _) -> {
       let st = Rch { ..st0, u: mark(st0.u, name),
         ctl: st0.ctl || name == "ctl_run" || name == "ctl_yield" }
       walk_list(st, args)
@@ -624,7 +624,7 @@ fn walk_node(st0: Rch, e: CExpr) -> Rch =
       }
     CBreak(_) -> st0
     CContinue(_) -> st0
-    CForeign(j, _) -> {
+    CForeign(j, _, _) -> {
       var st = types_use(st0, j.arg_tys)
       for name in [j.call.fqcn, j.call.decl_cls, j.call.ret_cls] ++ j.call.param_cls {
         st = java_class_use(st, name)
@@ -831,13 +831,14 @@ fn tfn(owner: String, name: String, body: CExpr) -> CFun =
     body: body,
     is_test: false,
     impl_of: None,
-    default_of: None
+    default_of: None,
+    origin: ""
   }
 
 fn tmod(owner: String, fns: List[CFun]) -> CModule =
   CModule { owner: owner, fns: fns, dicts: [], next_sym: 0 }
 
-fn intr(name: String) -> CExpr = CIntrinsic(name, [CStr("x")], TyString)
+fn intr(name: String) -> CExpr = CIntrinsic(name, [CStr("x")], TyString, CNoSite)
 
 test "control runtime follows reachable operations rather than declarations" {
   let app = tmod("app", [tfn("app", "main", CUnit)])
@@ -895,7 +896,7 @@ test "a root's own intrinsic marks its table" {
 test "a call chain into std marks; an uncalled std body does not" {
   let app = tmod("app", [
     tfn("app", "main",
-      CCall(CDirect("std/str", "to_lower"), [], TyString))
+      CCall(CDirect("std/str", "to_lower"), [], TyString, CNoSite))
   ])
   let std_str = tmod("std/str", [
     tfn("std/str", "to_lower", intr("str_lower")),
@@ -944,7 +945,7 @@ test "a test block is a root like any other function" {
   let body = CFun { ..tfn("app", "only in a test", CUnit), is_test: true }
   let app = tmod("app", [
     tfn("app", "shout", CStr("!")),
-    CFun { ..body, body: CCall(CDirect("std/str", "to_upper"), [], TyString) }
+    CFun { ..body, body: CCall(CDirect("std/str", "to_upper"), [], TyString, CNoSite) }
   ])
   let std_str = tmod("std/str", [tfn("std/str", "to_upper", intr("str_upper"))])
   let u = table_use([app, std_str], ["app"])
@@ -953,7 +954,7 @@ test "a test block is a root like any other function" {
 
 test "the walk hands back the functions it reached, not only the tables" {
   let app = tmod("app", [
-    tfn("app", "main", CCall(CDirect("std/str", "to_lower"), [], TyString))
+    tfn("app", "main", CCall(CDirect("std/str", "to_lower"), [], TyString, CNoSite))
   ])
   let std_str = tmod("std/str", [
     tfn("std/str", "to_lower", intr("str_lower")),
@@ -1002,7 +1003,7 @@ test "the emitter's pvec roots ride only when the program has a List" {
   # have to ride -- that return value is a vector the emitter will build.
   let helper = CFun { ..tfn("std/thing", "of", CUnit), ret: TyList(TyInt) }
   let caller = tmod("app", [
-    tfn("app", "main", CCall(CDirect("std/thing", "of"), [], TyUnit))
+    tfn("app", "main", CCall(CDirect("std/thing", "of"), [], TyUnit, CNoSite))
   ])
   let typed = live_set([caller, tmod("std/thing", [helper]), pvec], ["app"], roots)
   assert typed.lists
@@ -1152,14 +1153,14 @@ test "a test's description never shadows a function of the same name" {
   # emitted_core appends the tests, so the test is the later insert and would
   # win the key
   let app = tmod("app", [
-    tfn("app", "shout", CCall(CDirect("std/str", "to_lower"), [], TyString)),
+    tfn("app", "shout", CCall(CDirect("std/str", "to_lower"), [], TyString, CNoSite)),
     CFun { ..tfn("app", "shout", CUnit), is_test: true }
   ])
   let std_str = tmod("std/str", [tfn("std/str", "to_lower", intr("str_lower"))])
   # the real `shout` is a root either way; the caller here is a third module
   # that only knows the name
   let other = tmod("app2", [
-    tfn("app2", "main", CCall(CDirect("app", "shout"), [], TyString))
+    tfn("app2", "main", CCall(CDirect("app", "shout"), [], TyString, CNoSite))
   ])
   let u = table_use([app, std_str, other], ["app2"])
   assert u.str_lower

@@ -12935,7 +12935,8 @@ pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]
     is_test: false,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   })
 }
 
@@ -12998,7 +12999,8 @@ pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[
       is_test: false,
       impl_of: None,
       default_of: None,
-      decl: ""
+      decl: "",
+      base: -1
     })
 }
 
@@ -13038,7 +13040,8 @@ pub(pkg) fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> 
     is_test: false,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   })
 }
 
@@ -13105,7 +13108,8 @@ pub(pkg) fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
     is_test: true,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   })
 }
 
@@ -13620,7 +13624,7 @@ fn attempt_inferred_group[S](entry: S, cx: Cx, done: Map[Int, TFun], settled: Se
       if ordered || not used_unsealed {
         state = next_state
         cx1 = left(owner, Cx { ..cxe, unsealed_uses: set.empty() })
-        inferred = map.insert(inferred, idx, TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })
+        inferred = map.insert(inferred, idx, TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, base: owner.resolver.base })
         sealed_some = true
       } else {
         blocked = blocked ++ [idx]
@@ -13736,7 +13740,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
       let (next_state, cxe, tf) = executor.function(state, owner.cx, d, sigs[i])
       state = next_state
       cx1 = left(owner, cxe)
-      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl })]
+      tfuns = tfuns ++ [Some(TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, base: owner.resolver.base })]
     } else {
       match map.get(inferred, i) {
         Some(tf) -> { tfuns = tfuns ++ [Some(tf)] }
@@ -13768,7 +13772,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
           state = next_state
           cx1 = left(owner, cxe)
           impl_tfuns = impl_tfuns ++
-            [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, impl_of: imp_key }]
+            [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, base: owner.resolver.base, impl_of: imp_key }]
         }
         _ -> ()
       }
@@ -13796,7 +13800,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
                   state = next_state
                   cx1 = left(owner, cxe)
                   default_tfuns = default_tfuns ++
-                    [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, default_of: Some(t) }]
+                    [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, base: owner.resolver.base, default_of: Some(t) }]
                 }
                 None -> ()
               }
@@ -13814,7 +13818,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     let (next_state, cxe, tf) = executor.test_body(state, owner.cx, t.name, t.body)
     state = next_state
     cx1 = left(owner, cxe)
-    ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl }]
+    ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, base: owner.resolver.base }]
   }
   var fns_out: List[TFun] = []
   for sl in tfuns {
@@ -13889,7 +13893,10 @@ pub(pkg) fn assemble_module_bodies(products: ModuleBodies) -> (Cx, TModule) = {
             default_of: None,
             # the parameter default's own path under its parent's, the key
             # `identity.located` gives the default expression
-            decl: tf.decl ++ identity.path_text([identity.Named(identity.ParameterDefault, tf.sig.param_names[k])])
+            decl: tf.decl ++ identity.path_text([identity.Named(identity.ParameterDefault, tf.sig.param_names[k])]),
+            # its body was resolved with the parent's resolver
+            # (`tast_positions.function`), so it is measured from the parent too
+            base: tf.base
           }]
           cx1 = write_signature(cx1, ds.name, ds)
         }

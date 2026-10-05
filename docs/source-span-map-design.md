@@ -106,6 +106,12 @@ pub type CSite =
   回指到哪段源码（整个运算符表达式？），是 M3/M4 的设计问题，`CSite` 届时可以加一个 `CImplied(lo, hi)`
   构造器，不改本刀已有的东西。
 
+- 检查器替别的构造写出的调用也不是书写调用：`with handle` 把块的余下部分包成闭包再空参应用
+  （`checker.check_handle`），`ev_append` 拼证据包，处理器的 cell 与 one-shot 原语。后三者是
+  `internal_intrinsics`，用户写不出来，降低按名字给 `CNoSite`，这条是长久规则。`with handle` 那一个
+  在第一步用形状认：目标是 lambda 且零实参的 `XApply` 给 `CNoSite`，代价是用户手写的 `(() => e)()`
+  也没有 site。第二步 tast 有了 `nlo` 字段后，检查器给合成节点写 `nlo = -1`，降低改看它，形状规则删掉。
+
 单射是可检的性质：第七节的 oracle 对每个 `CAt` 找唯一的 parser 调用节点，重复即红。唯一允许的重复
 是降低**复制**了同一段代码（如果有），此时两份拷贝带同一个 site，与 LLVM 复制指令时保留 `DILocation`
 同理；oracle 对这种情形报告复制点，不静默放过。
@@ -156,8 +162,9 @@ GHC 的 tick 浮动都是在解决同一件事），本刀不预留。
 
 ## 七、正确性测试与负控
 
-- **配对 oracle**：`__lower --sites <file>` 打印每个 `CAt` 的绝对位置（`base + rel`）与被调节点的
-  名字；脚本复用 M1 `site/gpu-map/record.py` 读 `dawn parse` 输出的那一半（`parse_tree`），对
+- **配对 oracle**（`scripts/core-sites/check.py`）：`__lower --sites <dir> <target>` 在 rc 之后为每个模块
+  写一个 `.sites` 文件（`ir/coresites.dawn`，单独的走查器，coredump 不引用它），列出每个 `CAt` 的绝对位置
+  （`base + rel`，base 由驱动从 `TFun.base` 建表）与被调节点；脚本复用 M1 `site/gpu-map/record.py` 读 `dawn parse` 输出的那一半（`parse_tree`），对
   `scripts/tile-golden/kernels.dawn` 里的 `flash_attn`、`softmax`、`vadd` 以及一份覆盖全部调用形状的
   小语料（普通、限定 `m.f`、方法式、方法链、管道、闭包调用、`XApply`、内建、`use java`、省掉默认实参、
   自尾调用）检查：
@@ -166,12 +173,21 @@ GHC 的 tick 浮动都是在解决同一件事），本刀不预留。
   - **单射**：没有两个 `CAt` 对到同一个 parser 节点（复制除外，见第四节）；
   - **完整**：parser 里每个调用节点都有 `CAt`，除了列出的几类（构造器、自尾调用、折成运算符的内建、
     comptime 折叠掉的），例外按类别逐条列出，不是一个计数阈值。
-- **单元**：`ir/lower` 的 test 块对上面语料的几种形状钉住 `CAt` 的值；`ir/lint` 的新检查一条。
-- **负控**（各自先红再还原）：
-  1. 降低时不减 `base`（存绝对位置）：oracle 在不在文件开头的声明上红；
-  2. 方法式调用的 `nlo` 写成 `lo`：oracle 红；
-  3. `c/rc` 重建调用时丢 site：对原生路径的 `--sites`（rc 之后再打一遍）红；
-  4. `coredump` 打印 site：`selfhost-core-diff.sh` 红（证明判据 1 有牙）。
+  例外按解析树判定，三类：构造器（`ctor`）、以所在函数为名的调用（`self`，尾位置的已变成循环；非尾位置
+  的照样有 site，由「可靠」一条检查）、降低改写成非调用的内建（`rewritten`：`to_string`、`char_unchecked`）。
+  第一步 tast 还没有 `nlo`，降低以调用起点代替，脚本的 `NLO = "stub"` 明说这一点并按它检查；第二步改成
+  `"parser"`。实测（第一步）：语料 31 个调用 28 个有 site、3 个按类豁免；flash_attn 38/38、softmax 19/19、
+  vadd 6/6。
+- **单元**：`ir/lower` 的 test 块钉住相对偏移、`origin`、默认实参调用与未登记树的 `CNoSite`；
+  `ir/coresites` 的 test 块钉住换算；`ir/lint` 新规则 `site`（`DAWN_CORE_LINT=1` 时检查）。
+- **负控**（`scripts/core-sites/mutate.py` 登记、`run.py` 逐个建编译器验红，锚点由
+  `mutation-anchor-preflight.py` 每次推送证明恰好一处；`check.py` 与 `run.py` 挂在 nightly 的 core-lint job）：
+  1. `absolute`：降低时不减 `base`：check.py 报「is no call the parser sees」；
+  2. `nlo`：被调名起点偏离当前规则：check.py 报「has its name at」。第一步规则是 stub，变异体写 `hi - 1`；
+     第二步换成「方法式调用的 `nlo` 写成 `lo`」；
+  3. `rc-drops-site`：`c/rc` 重建调用时丢 site：check.py（列表取自 rc 之后）报「has no site」；
+  4. `dump-prints`：`coredump` 打印 site：语料的 Core dump 变了，即 `selfhost-core-diff.sh` 在每次纯移动上都会报的东西。
+  第一步实测四个全红，`run.py` 墙钟 125 s。
 
 ## 八、改动面与在途冲突
 

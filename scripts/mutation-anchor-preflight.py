@@ -27,6 +27,7 @@ ADAPTERS = {
     "builtin-type-contract": (".",),
     "classfile-verify": (".",),
     "core-lint-contract": (".",),
+    "core-sites": (".",),
     "ctl-live-contract": ("runtime/c",),
     "delete-contract": (".",),
     "dict-owner-contract": (".",),
@@ -72,6 +73,7 @@ EXCLUSIONS = {
 # anchor-guard.py counts these as preflighted.
 REGISTRY_READERS = {
     "core-lint-contract/run.py": "core-lint-contract",
+    "core-sites/run.py": "core-sites",
     "dict-owner-contract/shapes.py": "dict-owner-contract",
     "export-surface-contract/run.sh": "export-surface-contract",
     "incremental-semantics-contract/body-executor.py": "incremental-semantics-contract",

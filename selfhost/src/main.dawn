@@ -26,6 +26,7 @@ use front/lexdump
 use front/astdump
 use driver/checkdump
 use ir/coredump
+use ir/coresites
 use driver/stdlib.{
   StdCtx, StdLoadError, load_chosen_std, cli_std_choice, std_choice_text, std_load_error_text,
   std_load_is_bug
@@ -1956,9 +1957,24 @@ fn run_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ##
 ## Each module is lowered inside catch_panic so one gap does not hide the
 ## rest: a single run lists everything still missing.
+## A typed module's declaration bases by declaration path, for `__lower
+## --sites`. A tree no scheduler filed (`base` below zero) has no sites to
+## place and no entry.
+fn decl_bases(tm: TModule) -> Map[String, Int] = {
+  var out: Map[String, Int] = map.empty()
+  for tf in tm.fns ++ tm.tests {
+    if tf.base >= 0 && tf.decl != "" { out = map.insert(out, tf.decl, tf.base) }
+  }
+  out
+}
+
 fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   var std_flag: Option[String] = None
   var dump_dir = ""
+  # `--sites` lists every call site Core carries, in file coordinates, one
+  # `.sites` file per module (ir/coresites.dawn). Its reader is the pairing
+  # check in scripts/core-sites; the Core dump itself never prints a site.
+  var sites_dir = ""
   var targets: List[String] = []
   var i = 0
   while i < len(rest) {
@@ -1967,6 +1983,9 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       i = i + 2
     } else if rest[i] == "--dump" && i + 1 < len(rest) {
       dump_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--sites" && i + 1 < len(rest) {
+      sites_dir = rest[i + 1]
       i = i + 2
     } else {
       targets = targets ++ [rest[i]]
@@ -1992,6 +2011,23 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let dump_to = dump_dir
   let dumping = dump_to != ""
 
+  # Each module's declaration bases, by declaration path: what `--sites`
+  # adds back to a CAt's offsets (`TFun.base`, docs/source-span-map-design.md).
+  var site_bases: Map[String, Map[String, Int]] = map.empty()
+  if sites_dir != "" {
+    for sm in std.mods {
+      let (cls, _cx, tm, _ct) = sm
+      site_bases = map.insert(site_bases, cls, decl_bases(tm))
+    }
+    for cm in prog.modules { site_bases = map.insert(site_bases, cm.class_name, decl_bases(cm.tm)) }
+  }
+  let bases_all = site_bases
+  let listing = sites_dir != ""
+  let bases_of = (cls: String) => match map.get(bases_all, cls) {
+    Some(b) -> b
+    None -> map.empty()
+  }
+
   ## Lower one module; the counting and the dump happen in the second phase,
   ## once every module's Core exists and the mode inference has seen it all.
   fn one(cls: String, tm: TModule) -> CModule =
@@ -2008,10 +2044,12 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   ## `--dump` failed at run time with "effect evidence missing" when the io.*
   ## file functions moved onto Fs (dawn-lang #43). Keeping the local fn pure
   ## keeps its row honest either way.
-  fn two(cls: String, core: CModule, modes: Map[(String, String), List[CMode]]) -> (Int, String) = {
+  fn two(cls: String, core: CModule, modes: Map[(String, String), List[CMode]]) -> (Int, String, String) = {
     let m = rc.rc_module(infer.stamp_modes(core, modes), modes)
     let text = if dumping { coredump.render(adts, m) } else { "" }
-    (lower_size(m), text)
+    # after rc, so a pass that rebuilds a call and drops its site shows here
+    let listed = if listing { coresites.render(m, bases_of(cls)) } else { "" }
+    (lower_size(m), text, listed)
   }
 
   var ok = 0
@@ -2059,10 +2097,17 @@ fn run_lower(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     let (cls, m) = pr
     match catch_panic(() => two(cls, m, modes)) {
       Ok(counted) -> {
-        let (_n, text) = counted
+        let (_n, text, listed) = counted
         if dumping {
           let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
           match io.write_file(path, text) {
+            Ok(_u) -> ()
+            Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
+          }
+        }
+        if sites_dir != "" {
+          let path = sites_dir ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".sites"
+          match io.write_file(path, listed) {
             Ok(_u) -> ()
             Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
           }

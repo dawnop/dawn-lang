@@ -66,7 +66,8 @@ fn test_tfun(name: String, params: List[Ty], ret: Ty, body: TExpr) -> TFun =
     is_test: false,
     impl_of: None,
     default_of: None,
-    decl: ""
+    decl: "",
+    base: -1
   }
 
 test "an empty user impl calls its default; explicit methods still call their bodies" {
@@ -114,15 +115,15 @@ test "an empty user impl calls its default; explicit methods still call their bo
     ce
   }
   match lowered(0) {
-    CCall(CDefault(_, _, "defaulted"), _, _) -> ()
+    CCall(CDefault(_, _, "defaulted"), _, _, _) -> ()
     _ -> { assert false }
   }
   match lowered(1) {
-    CCall(CImpl(_, _, _, "required"), _, _) -> ()
+    CCall(CImpl(_, _, _, "required"), _, _, _) -> ()
     _ -> { assert false }
   }
   match lowered(2) {
-    CCall(CImpl(_, _, _, "overridden"), _, _) -> ()
+    CCall(CImpl(_, _, _, "overridden"), _, _, _) -> ()
     _ -> { assert false }
   }
 }
@@ -229,7 +230,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
     lower.lower_expr_only("same_impl", tm.consts[0].init, cx1.traits, cx1.impl_table,
       cx1.adts, direct_sigs, tm.syms, 0)
   match direct_core {
-    CCall(CDirect(o, "same"), _, _) -> { assert o == "same_impl" }
+    CCall(CDirect(o, "same"), _, _, _) -> { assert o == "same_impl" }
     _ -> { assert false }
   }
 
@@ -243,7 +244,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
     ce
   }
   match lowered(0) {
-    CCall(CImpl(o, got_tid, subject, "same"), _, _) -> {
+    CCall(CImpl(o, got_tid, subject, "same"), _, _, _) -> {
       assert o == "same_impl"
       assert got_tid == tid
       assert subject == TyAdt(explicit_id, [])
@@ -251,7 +252,7 @@ test "interpreter identity tables keep direct, impl, and default spellings separ
     _ -> { assert false }
   }
   match lowered(1) {
-    CCall(CDefault(o, got_tid, "same"), _, _) -> {
+    CCall(CDefault(o, got_tid, "same"), _, _, _) -> {
       assert o == "defs"
       assert got_tid == tid
     }
@@ -750,8 +751,8 @@ fn lowered_fns(owner: String, src: String) -> Map[String, CFun] !io = {
 ## The call a function's body ends in, by the name it calls.
 fn called(fns: Map[String, CFun], name: String) -> String =
   match tail_of(map.get(fns, name).expect("lowered").body) {
-    CIntrinsic(n, _, _) -> "intrinsic " ++ n
-    CCall(CDirect(o, n), _, _) -> o ++ "." ++ n
+    CIntrinsic(n, _, _, _) -> "intrinsic " ++ n
+    CCall(CDirect(o, n), _, _, _) -> o ++ "." ++ n
     _ -> "another shape"
   }
 

@@ -89,6 +89,15 @@ jobs:
         id: contract
         run: python3 scripts/core-lint-contract/run.py
 
+      # Core's call sites against the parser's call nodes, then each of the
+      # four restored site defects red in its check (scripts/core-sites,
+      # docs/source-span-map-design.md section 7). Measured locally
+      # 2026-10-05 on 16 cores: 11 s and 125 s.
+      - name: every call site pairs with the parser's call, and each site defect is red
+        id: sites
+        if: success() || failure()
+        run: python3 scripts/core-sites/check.py && python3 scripts/core-sites/run.py
+
       - name: no lint violation anywhere the tree compiles
         id: corpus
         if: success() || failure()
@@ -109,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "The nightly core-lint job is red: contract ${{ steps.contract.outcome }},"
+            echo "The nightly core-lint job is red: contract ${{ steps.contract.outcome }}, sites ${{ steps.sites.outcome }},"
             echo "corpus ${{ steps.corpus.outcome }}, selfhost tests ${{ steps.tests.outcome }}."
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
