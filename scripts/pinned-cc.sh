@@ -33,7 +33,7 @@
 # Where it runs: first in every gates.yml job that compiles C, before
 # release.yml's native binary, and in nightly's native-asan, where clang is
 # also the stronger sanitizer (its UBSan checks indirect call types, gcc's does
-# not; nightly.yml says what that missed).
+# not; nightly.yml says what that missed), and in nightly's fuzz3.
 #
 # Why only on a GitHub runner, or where DAWN_PINNED_CC names the compiler.
 # Off a runner (a laptop), CC stays whatever the caller set and the scripts

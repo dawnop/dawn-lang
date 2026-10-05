@@ -72,14 +72,54 @@ CC = os.environ.get("CC", "cc")
 # wraps, -fexceptions because a raise unwinds, -Werror because a Core type
 # that reaches C wrong shows up first as a warning.
 CFLAGS = ["-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"]
+# spike-native's own -Wno- set: noise any code generator produces
 WFLAGS = ["-Wall", "-Wextra", "-Werror", "-Wno-unused-variable", "-Wno-unused-but-set-variable",
           "-Wno-unused-parameter", "-Wno-unused-label",
-          # a Dawn program may compare a value with itself or a Bool with a
-          # literal; cc's opinion of that is about the source, not the backend
-          "-Wno-tautological-compare", "-Wno-bool-compare",
-          # `9223372036854775807 + 5` folded by cc: defined under -fwrapv,
-          # and what the backend owes is the wrapped value, which is compared
-          "-Wno-overflow"]
+          # a generated case compares a value with itself (`x <= x`, `x == x`);
+          # cc's opinion of that is about the source, not the backend. The
+          # same name in both compilers (gcc's -Wall, clang's default set).
+          "-Wno-tautological-compare"]
+# The rest is per compiler, because the two name the same complaints
+# differently and clang refuses a warning name it does not know
+# (-Wunknown-warning-option, an error under -Werror), while gcc ignores an
+# unknown -Wno- unless something else is reported. That is how gcc's
+# -Wno-bool-compare here once failed every batch under clang. Each entry was
+# seen in the C of fixed seeds 1-200 (2026-10-05, gcc 13.3, clang 18.1.3;
+# batches out of the 175 that emitted C):
+WFLAGS_BY_CC = {
+    "gcc": [
+        # `9223372036854775807 + 5` written by the generator, emitted as a C
+        # constant expression and folded by cc: defined under -fwrapv, and
+        # what the backend owes is the wrapped value, which is compared.
+        # 81 of 175 batches.
+        "-Wno-overflow",
+    ],
+    "clang": [
+        # the same folded overflow; clang's name for it is -Winteger-overflow,
+        # and its -Wno-overflow is accepted but does not cover it. 61 of 175.
+        "-Wno-integer-overflow",
+        # the generator's `x = x` on a var, emitted as written; gcc has no C
+        # warning for it. 131 of 175.
+        "-Wno-self-assign",
+        # the emitter's `if ((x == 0))`, every batch; spike-native turns it
+        # off for the same reason (gcc has no such warning). 175 of 175.
+        "-Wno-parentheses-equality",
+    ],
+}
+# Not here: -Wno-bool-compare (gcc), which `b < false` needed while Bool was
+# in gen.py's ORDERED; it no longer is, and seeds 1-200 raise it 0 times. If
+# Bool comes back to ORDERED, gcc needs it again and clang does not (its
+# warning for that is under -Wtautological-compare).
+
+
+def cc_family(cc):
+    """'clang' when cc defines __clang__ (clang also defines __GNUC__), else 'gcc'."""
+    rc, out, err = sh([cc, "-dM", "-E", "-x", "c", "/dev/null"])
+    if rc != 0:
+        raise SystemExit(f"FAIL: cannot ask {cc} what it is:\n{err}")
+    return "clang" if re.search(r"^#define __clang__ ", out, re.M) else "gcc"
+
+
 SANFLAGS = ["-std=c11", "-g", "-O0", "-fno-omit-frame-pointer", "-fwrapv", "-fexceptions",
             "-fno-strict-aliasing", "-pthread", "-fsanitize=address,undefined",
             "-fno-sanitize-recover=undefined"]
@@ -105,6 +145,8 @@ class Toolchain:
         self.jar, self.std, self.rt = jar, std, rt
         self.rt_o = work / "dawn_rt.o"
         self.rt_san = work / "dawn_rt.san.o"
+        self.cc_family = cc_family(CC)
+        self.wflags = WFLAGS + WFLAGS_BY_CC[self.cc_family]
         # one runtime object per flavour for the whole run: the runtime is the
         # same for every batch, and the batch's own C is what cc has to see
         for out, flags in ((self.rt_o, CFLAGS), (self.rt_san, SANFLAGS)):
@@ -292,7 +334,7 @@ class Batch:
     def three_way(self, labels, jar, c):
         tc = self.tc
         nbin, sbin = self.work / "b.bin", self.work / "b.san"
-        rc, o, e = sh([CC, *CFLAGS, *WFLAGS, "-I", str(tc.rt), str(c), str(tc.rt_o), "-lm", "-o", str(nbin)])
+        rc, o, e = sh([CC, *CFLAGS, *tc.wflags, "-I", str(tc.rt), str(c), str(tc.rt_o), "-lm", "-o", str(nbin)])
         native_ok = rc == 0
         if not native_ok:
             self.find("cc", -1, e)
@@ -449,7 +491,7 @@ def main():
         kinds[f["kind"]] = kinds.get(f["kind"], 0) + 1
     summary = {"seeds": sorted(seeds_run), "elapsed_s": round(elapsed), **totals,
                "findings": len(findings), "by_kind": kinds,
-               "jar": a.jar, "cases_per_batch": a.cases}
+               "jar": a.jar, "cc": CC, "cc_family": tc.cc_family, "cases_per_batch": a.cases}
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     with open(out / "findings.jsonl", "w") as fh:
         for f in findings:
