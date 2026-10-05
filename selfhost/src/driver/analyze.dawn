@@ -1601,6 +1601,55 @@ test "comptime calls the functions of the modules before it" {
   })
 }
 
+## Fold a project of these `(file, text)` modules under `src/`.
+fn fold_project(root: String, files: List[(String, String)]) -> Program !io = in_mem(() => {
+  mkdirs("${root}/src")
+  for f in files {
+    let (name, text) = f
+    put("${root}/src/${name}", text)
+  }
+  let std = match load_std(std_dir()) {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: ${std_load_error_text(e)}")
+  }
+  analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+})
+
+# The driver folds each module's comptime blocks into a table keyed by span.
+# The interpreter used to look a block in a called function up in the table of
+# the module whose const it was folding (#563), which went wrong two ways; one
+# test each.
+
+test "a comptime block in another module's function keeps its own value when the spans collide" {
+  # `b`'s block sits at the offsets of main's `A`, and `S` silently folded
+  # to 5
+  let b_src = "#xxx\npub fn qqqqqq() -> Int = comptime { 7 }\n"
+  let main_src = "use b.{qqqqqq}\nconst A: Int = comptime { 5 }\nconst S: Int = qqqqqq()\n" ++
+    "pub fn main() -> Unit !io = println(to_string(A + S))\n"
+  # the collision is the point; a test that lost it would pass without the fix
+  assert str.index_of(b_src, "comptime") == str.index_of(main_src, "comptime")
+  let prog = fold_project("/tmp/dawn-selfhost-analyze/comptime-block-collide",
+    [("b.dawn", b_src), ("main.dawn", main_src)])
+  assert folded(prog, "main", "S") == Some(VInt(7))
+  assert folded(prog, "main", "A") == Some(VInt(5))
+  assert len(prog.diags) == 0
+}
+
+test "a comptime block folds in a function a const reaches before the walk does" {
+  # with no span to collide with, the lookup found nothing: "a nested comptime
+  # block did not fold", for another module's function and for one of the
+  # same module declared after the const
+  let c_src = "pub fn far() -> Int = {\n  let base = 10\n  base + comptime { 2 * 3 }\n}\n"
+  let main_src = "use c\nconst C: Int = c.far()\n" ++
+    "const L: Int = later()\nfn later() -> Int = comptime { 6 * 7 } + 1\n" ++
+    "pub fn main() -> Unit !io = println(to_string(C + L))\n"
+  let prog = fold_project("/tmp/dawn-selfhost-analyze/comptime-block-reach",
+    [("c.dawn", c_src), ("main.dawn", main_src)])
+  assert map(prog.diags, ld => ld.d.msg) == []
+  assert folded(prog, "main", "C") == Some(VInt(16))
+  assert folded(prog, "main", "L") == Some(VInt(43))
+}
+
 test "comptime still refuses another module's effectful function" {
   in_mem(() => {
     let root = "/tmp/dawn-selfhost-analyze/comptime-xmod-io"
