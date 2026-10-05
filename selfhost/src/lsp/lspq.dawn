@@ -36,7 +36,7 @@ use check/tast.{
   TSPText, TSPInterp,
   XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
-  XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn,
+  XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XUnit,
   TListElem, TLEExpr, TLESpread, TLEIf, TModule, TConst,
   XComptime, XBinary, XUnary, XIf, XMatch, XBlock,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
@@ -58,7 +58,7 @@ use front/lexer.{slice_cps}
 use lsp/lspv.{
   value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
 }
-use lsp/lspinlay.{InlayOpts, Hint, type_hint, effect_hint, param_hint, default_args_hint}
+use lsp/lspinlay.{InlayOpts, Hint, DefaultArg, type_hint, effect_hint, param_hint, default_args_hint, reads_name}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -531,8 +531,10 @@ fn call_sig(qc: QCx, callee: String, te: Option[TExpr]) -> Option[Sig] =
 ## argument out of order, a pipe's argument and a trailing block (which fills
 ## the last parameter) land where the call lands them. A call where an
 ## argument lands nowhere, or a parameter with no default is left out, is an
-## error the diagnostics already report, and gets no hint.
-fn hint_default_args(qc: QCx, q: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int) -> Q = {
+## error the diagnostics already report, and gets no hint. Each argument
+## carries the expression that computes it at this call (`default_fill`), for
+## `lspeval.with_default_values` to fold (§C4).
+fn hint_default_args(qc: QCx, q: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int, call_hi: Int, te: Option[TExpr]) -> Q = {
   let want = match inlay_opts(q) {
     Some(o) -> o.default_args
     None -> false
@@ -554,42 +556,154 @@ fn hint_default_args(qc: QCx, q: Q, s: Sig, args: List[Arg], first: Int, name_hi
       _ -> return q
     }
   }
-  var omitted: List[(String, String)] = []
+  var omitted: List[DefaultArg] = []
   var pi = 0
   for pn in s.param_names {
     if not map.has(filled, pi) {
       match get(s.param_defaults, pi) {
-        Some(Some(text)) -> { omitted = omitted ++ [(pn, text)] }
+        Some(Some(text)) -> { omitted = omitted ++ [DefaultArg { name: pn, text: text, fill: default_fill(s, te, pi) }] }
         _ -> return q
       }
     }
     pi = pi + 1
   }
   if len(omitted) == 0 { return q }
+  # the span inside which a local is the call's own: from its first written
+  # argument (a pipe's sits left of the name) or its name, to its end
+  var clo = name_hi
+  for a in args {
+    if a.lo < clo { clo = a.lo }
+  }
   # a pipe's argument sits left of the name, outside the parentheses
   var last = -1
   for a in args {
     if not a.trailing && a.lo >= name_hi && a.hi > last { last = a.hi }
   }
-  if last >= 0 { return add_hint(q, default_args_hint(last, omitted, true, false)) }
+  if last >= 0 { return add_hint(q, default_args_hint(last, omitted, true, false, clo, call_hi)) }
   let cps = qc.cps
   let n = len(cps)
   var j = name_hi
   while j < n && (cps[j] == ' ' || cps[j] == '\t') { j = j + 1 }
   if j < n && cps[j] == '(' {
-    add_hint(q, default_args_hint(j + 1, omitted, false, false))
+    add_hint(q, default_args_hint(j + 1, omitted, false, false, clo, call_hi))
   } else {
     # `x |> f` and `f { ... }`: no parentheses, so the hint brings its own
-    add_hint(q, default_args_hint(name_hi, omitted, false, true))
+    add_hint(q, default_args_hint(name_hi, omitted, false, true, clo, call_hi))
   }
 }
+
+## The expression a call computes its left-out parameter `pi` with, ready to
+## fold on its own, or None when the call's typed node has no such shape (a
+## builtin's defaults, a call in error). The checker fills a left-out default
+## with a call of its thunk, `f$default$k(p0, .., pk-1)`, given the values of
+## the parameters before it (`checker.arrange_call_args`); when the call binds
+## its arguments first, the thunk call is a `let` of the block and the
+## parameters are its locals. So the locals are put back as the expressions
+## they hold, and a parameter the default does not read (`reads_name` on its
+## text) as a unit placeholder: its value is never looked at, and the written
+## argument it stands in for is most often an outer local, which would make the
+## whole default unfoldable for a parameter it does not use.
+fn default_fill(s: Sig, te: Option[TExpr], pi: Int) -> Option[TExpr] = {
+  var lets: Map[Int, TExpr] = map.empty()
+  let call = match te {
+    Some(XBlock(stmts, Some(tail), _, _, _)) -> {
+      for st in stmts {
+        match st {
+          TSLet(Some(sid), _, init, _, _) -> { lets = map.insert(lets, sid, init) }
+          _ -> ()
+        }
+      }
+      tail
+    }
+    Some(x) -> x
+    None -> return None
+  }
+  match call {
+    XCallFn(_, _, targs, _, _, _, _, _, _) ->
+      match get(targs, pi) {
+        Some(a) -> fill_of(s, lets, a)
+        None -> None
+      }
+    _ -> None
+  }
+}
+
+## A thunk call, or the local a call bound one to, as a closed-up thunk call.
+fn fill_of(s: Sig, lets: Map[Int, TExpr], a: TExpr) -> Option[TExpr] =
+  match a {
+    XCallFn(owner, fname, prefix, wits, evid, tid, lo, hi, ty) ->
+      match default_index(fname, len(s.param_names)) {
+        Some(k) -> {
+          let text = match get(s.param_defaults, k) {
+            Some(Some(t)) -> t
+            _ -> return None
+          }
+          var out: List[TExpr] = []
+          var i = 0
+          for p in prefix {
+            let pname = match get(s.param_names, i) {
+              Some(n) -> n
+              None -> return None
+            }
+            if reads_name(text, pname) {
+              match arg_value(s, lets, p) {
+                Some(v) -> { out = out ++ [v] }
+                None -> return None
+              }
+            } else {
+              out = out ++ [XUnit(x_lo(p), x_hi(p))]
+            }
+            i = i + 1
+          }
+          Some(XCallFn(owner, fname, out, wits, evid, tid, lo, hi, ty))
+        }
+        None -> None
+      }
+    XLocal(sid, name, _, _, _) ->
+      if str.starts_with(name, "default\$") {
+        match map.get(lets, sid) {
+          Some(init) -> fill_of(s, lets, init)
+          None -> None
+        }
+      } else { None }
+    _ -> None
+  }
+
+## The value a thunk's argument stands for: a written argument's expression
+## behind the local the call bound it to, an earlier default's own fill, or
+## the argument itself when the call bound nothing.
+fn arg_value(s: Sig, lets: Map[Int, TExpr], p: TExpr) -> Option[TExpr] =
+  match p {
+    XLocal(sid, name, _, _, _) ->
+      if str.starts_with(name, "default\$") {
+        fill_of(s, lets, p)
+      } else if str.starts_with(name, "arg\$") {
+        map.get(lets, sid)
+      } else { Some(p) }
+    _ -> if is_default_fill(p) { fill_of(s, lets, p) } else { Some(p) }
+  }
+
+## `k` of a thunk named `f$default$k`, one of the `n` parameters.
+fn default_index(fname: String, n: Int) -> Option[Int] =
+  match str.rsplit_once(fname, "\$default\$") {
+    Some(pr) -> {
+      let (_, k) = pr
+      var i = 0
+      while i < n {
+        if to_string(i) == k { return Some(i) }
+        i = i + 1
+      }
+      None
+    }
+    None -> None
+  }
 
 ## The left-out defaults, the effect hint and the parameter names of one
 ## call. `first` as in `hint_param_names`; `name_hi` is the end of the
 ## callee's name. The defaults go in first: with no parentheses they share the
 ## effect hint's offset, and they read before it.
-fn hint_call(qc: QCx, q0: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int, call_hi: Int) -> Q = {
-  var q = hint_default_args(qc, q0, s, args, first, name_hi)
+fn hint_call(qc: QCx, q0: Q, s: Sig, args: List[Arg], first: Int, name_hi: Int, call_hi: Int, te: Option[TExpr]) -> Q = {
+  var q = hint_default_args(qc, q0, s, args, first, name_hi, call_hi, te)
   match inlay_opts(q) {
     Some(o) -> {
       if o.call_effects {
@@ -650,7 +764,7 @@ fn hint_named_call(qc: QCx, q: Q, callee: String, args: List[Arg], name_hi: Int,
         Some(XCallDyn(sid, _, _, _, _, _, _)) -> hint_dyn_call(qc, q, sid, args, name_hi, call_hi)
         _ ->
           match call_sig(qc, callee, te) {
-            Some(s) -> hint_call(qc, q, s, args, 0, name_hi, call_hi)
+            Some(s) -> hint_call(qc, q, s, args, 0, name_hi, call_hi, te)
             None -> q
           }
       }
@@ -677,7 +791,7 @@ fn hint_method_call(
             q
           } else {
             match sig_by_owner(qc, owner, fname, trait_id) {
-              Some(s) -> hint_call(qc, q, s, args, receiver_slots(recv, targs), name_hi, call_hi)
+              Some(s) -> hint_call(qc, q, s, args, receiver_slots(recv, targs), name_hi, call_hi, te)
               None -> q
             }
           }
@@ -686,7 +800,7 @@ fn hint_method_call(
             q
           } else {
             match map.get(qc.bins, bname) {
-              Some(s) -> hint_call(qc, q, s, args, receiver_slots(recv, targs), name_hi, call_hi)
+              Some(s) -> hint_call(qc, q, s, args, receiver_slots(recv, targs), name_hi, call_hi, te)
               None -> q
             }
           }

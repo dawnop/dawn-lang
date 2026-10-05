@@ -27,6 +27,12 @@
 # still right. A value that only repeats its source (`[1, 2, 3]`), and `Unit`,
 # are left out for the same reason. The cursor's innermost node is the one
 # folded, never an ancestor, so the highlighted range is what the value is of.
+#
+# The one inlay that folds (§C4) is a left-out default argument's: there the
+# expression is the call's own thunk call (`lspq.default_fill`), one per call
+# and not one per node, so a screen of hints costs a handful of folds. The
+# same judgement and budget apply; what a refusal shows is the default's text,
+# which is what the hint showed before it had values.
 
 use std/map
 use std/set
@@ -47,9 +53,10 @@ use check/types.{
 }
 use check/cx.{is_const_serializable}
 use front/lexer.{slice_cps}
-use ir/interp.{CtOpts, ConstScope, eval_closed}
+use ir/interp.{CtOpts, ConstScope, ICx, eval_closed, closed_icx, eval_closed_in}
 use lsp/lspq.{QCx, Target, sym_get, sig_by_owner}
-use lsp/lspv.{value_text, value_echoes}
+use lsp/lspv.{value_text, value_source, value_echoes}
+use lsp/lspinlay.{Hint, TYPE_HINT_SHOWN, default_args_label, default_shown, literal_default}
 
 ## The hover text for `t` with the value of its expression appended
 ## (`Int = 611  (0x263)`, A1's shape), or `t.hover` unchanged whenever there
@@ -83,6 +90,97 @@ fn folded_text(qc: QCx, lo: Int, hi: Int, e: TExpr, opts: CtOpts) -> Option[Stri
       let t = tex_ty(e)
       let src = if lo >= 0 && hi <= len(qc.cps) && lo < hi { slice_cps(qc.cps, lo, hi) } else { "" }
       if value_echoes(cm.cx.adts, t, v, src) { None } else { value_text(cm.cx.adts, t, v) }
+    }
+  }
+}
+
+## `hints` with each left-out-defaults hint's label made again, every
+## argument showing its value where one folds (`default_shown` decides between
+## value and text). A literal default is not folded: its text is its value.
+## The interpreter's context is built once for the request, and only when
+## something is left to fold; a default that reads no parameter is the same
+## value at every call, so it is folded once per callee (`memo_key`).
+pub(pkg) fn with_default_values(qc: QCx, hints: List[Hint], opts: CtOpts) -> List[Hint] !io = {
+  let cm = qc.entry
+  if len(cm.cx.diags) > 0 { return hints }
+  var icx: Option[ICx] = None
+  var memo: Map[String, Option[String]] = map.empty()
+  var out: List[Hint] = []
+  for h in hints {
+    match h.left_out {
+      None -> { out = out ++ [h] }
+      Some(lo) -> {
+        var shown: List[(String, String)] = []
+        for a in lo.args {
+          var value: Option[String] = None
+          match a.fill {
+            Some(e) ->
+              if not literal_default(a.text) {
+                let key = memo_key(e)
+                match key {
+                  Some(k) if map.has(memo, k) -> { value = map.get(memo, k).unwrap_or(None) }
+                  _ -> {
+                    let c = match icx {
+                      Some(built) -> built
+                      None -> {
+                        let scope = ConstScope { path: cm.mod_path, imported: cm.cx.imported_names,
+                          renames: cm.cx.import_renames }
+                        closed_icx(cm.tm, qc.prog.ct_world, scope, cm.ct, qc.std.fn_decls,
+                          qc.std.by_owner, qc.std.impl_fns, qc.std.std_names, cm.cx.adts, cm.cx.traits,
+                          cm.cx.impl_table, cm.class_name, opts)
+                      }
+                    }
+                    icx = Some(c)
+                    value = default_value(qc, c, lo.lo, lo.hi, e, a.text, opts)
+                    match key {
+                      Some(k) -> { memo = map.insert(memo, k, value) }
+                      None -> ()
+                    }
+                  }
+                }
+              }
+            None -> ()
+          }
+          shown = shown ++ [(a.name, default_shown(a.text, value))]
+        }
+        out = out ++ [Hint { ..h, label: default_args_label(shown, lo.after_arg, lo.bare) }]
+      }
+    }
+  }
+  out
+}
+
+## A thunk call that passes no value (every argument a placeholder, no
+## dictionary) computes the same at every call: its callee is its key.
+fn memo_key(e: TExpr) -> Option[String] =
+  match e {
+    XCallFn(owner, fname, args, wits, _, _, _, _, _) -> {
+      if len(wits) > 0 { return None }
+      for a in args {
+        match a {
+          XUnit(..) -> ()
+          _ -> return None
+        }
+      }
+      let o = match owner {
+        Some(x) -> x
+        None -> ""
+      }
+      Some(o ++ "." ++ fname)
+    }
+    _ -> None
+  }
+
+## The value of one left-out argument as it would be written in its place,
+## or None: refused, failed, too long, or a value its text already spells.
+fn default_value(qc: QCx, icx: ICx, lo: Int, hi: Int, e: TExpr, text: String, opts: CtOpts) -> Option[String] !io = {
+  if fold_refusal(qc, lo, hi, e) != None { return None }
+  match eval_closed_in(icx, e, opts) {
+    Err(_) -> None
+    Ok(v) -> {
+      let adts = qc.entry.cx.adts
+      let t = tex_ty(e)
+      if value_echoes(adts, t, v, text) { None } else { value_source(adts, t, v, TYPE_HINT_SHOWN) }
     }
   }
 }

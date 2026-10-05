@@ -32,7 +32,7 @@ use driver/fsmem
 use std/memfs
 use compiler_plan/envmem
 use ir/interp.{CtOpts, ct_default, ct_hover}
-use lsp/lspeval.{with_value}
+use lsp/lspeval.{with_value, with_default_values}
 use check/jsig.{Jsig, JsigLease, jsig_refused_lease}
 use driver/stdlib.{
   StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text, std_file_of
@@ -2216,7 +2216,7 @@ fn client_defaults_item_data(params: Json) -> Bool = {
 }
 
 ## The inlay hints the client asked for: `initializationOptions.inlayHints`,
-## five optional booleans over `default_inlay_opts`. A key that is missing or
+## six optional booleans over `default_inlay_opts`. A key that is missing or
 ## not a boolean keeps its default; read once, at `initialize`
 ## (docs/lsp-hover-design.md §A4.3 says why not `workspace/configuration`).
 fn inlay_opts_of(params: Json) -> InlayOpts = {
@@ -2227,7 +2227,8 @@ fn inlay_opts_of(params: Json) -> InlayOpts = {
     lambda_param_types: json_flag(j, "lambdaParamTypes", d.lambda_param_types),
     call_effects: json_flag(j, "callEffects", d.call_effects),
     param_names: json_flag(j, "parameterNames", d.param_names),
-    default_args: json_flag(j, "defaultArguments", d.default_args)
+    default_args: json_flag(j, "defaultArguments", d.default_args),
+    default_values: json_flag(j, "defaultArgumentValues", d.default_values)
   }
 }
 
@@ -3502,8 +3503,10 @@ fn hover_value(st: LspState, d: Doc, analysis: Analysis, qc: QCx, t: Target) -> 
 
 ## `textDocument/inlayHint`: the hints `lspq.inlay_hints` finds inside the
 ## requested range, in LSP 3.17's shape. Padding is written only where it is
-## on, which is what the protocol defaults the absent field to.
-fn handle_inlay_hint(st: LspState, params: Json) -> Json = {
+## on, which is what the protocol defaults the absent field to. Left-out
+## defaults get their values folded under hover's budget (§C4), so the JVM and
+## native servers show the same ones.
+fn handle_inlay_hint(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) ->
       match analysis_of(st, d) {
@@ -3516,7 +3519,11 @@ fn handle_inlay_hint(st: LspState, params: Json) -> Json = {
               let lo = lsp_offset(d.view, d.ls, oint(rs, "line"), oint(rs, "character"))
               let hi = lsp_offset(d.view, d.ls, oint(re, "line"), oint(re, "character"))
               var out: List[Json] = []
-              for h in inlay_hints(qc, lo, hi, st.inlay) {
+              let found = inlay_hints(qc, lo, hi, st.inlay)
+              let hints = if st.inlay.default_args && st.inlay.default_values {
+                with_default_values(qc, found, ct_hover(st.host.ct))
+              } else { found }
+              for h in hints {
                 let (line, ch) = lsp_position(d.view, d.ls, h.at)
                 var fields: List[(String, Json)] = [
                   ("position", jpos(line, ch)),
@@ -5184,7 +5191,7 @@ fn inlay_probe_text() -> String =
 ## where an editor would draw them (`«…»`, padding as a blank inside), from
 ## the reply of a `textDocument/inlayHint` over `l0:c0..l1:c1`. Positions are
 ## UTF-16 columns, which the ASCII probe texts make code points.
-fn inlay_probe(st: LspState, d: Doc, l0: Int, c0: Int, l1: Int, c1: Int) -> List[String] = {
+fn inlay_probe(st: LspState, d: Doc, l0: Int, c0: Int, l1: Int, c1: Int) -> List[String] !io = {
   let params = jobj([
     ("textDocument", jobj([("uri", JStr(d.uri))])),
     ("range", jobj([("start", jpos(l0, c0)), ("end", jpos(l1, c1))]))
@@ -5389,7 +5396,7 @@ fn defaults_probe_text() -> String =
 
 ## The probe's hinted lines with only the left-out-default hints kept, so the
 ## let types around them do not crowd the assertions.
-fn defaults_probe(st: LspState, d: Doc) -> List[String] = {
+fn defaults_probe(st: LspState, d: Doc) -> List[String] !io = {
   let st1 = LspState {
     ..st,
     inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false }
@@ -5457,6 +5464,75 @@ test "inlay hints: a left-out default is a parameter hint with no padding, and c
       ]))]))]))
     }
     assert defaults_probe(off, d) == []
+  }))
+}
+
+# ---- left-out default arguments' values (docs/lsp-hover-design.md §C4) ----
+
+fn values_probe_text() -> String =
+  join([
+    "const GAP: Int = 4",
+    "fn twice(n: Int) -> Int = n * 2",
+    "fn spin(n: Int) -> Int = if n == 0 { 0 } else { spin(n - 1) + 1 }",
+    "fn sep(s: String, gap: Int = GAP, wide: Int = twice(GAP) + 1, tag: String = \"<\${GAP}>\") -> String = s",
+    "fn span(lo: Int = 1, hi: Int = lo + 9) -> Int = hi - lo",
+    "fn slow(n: Int, k: Int = spin(5000)) -> Int = n + k",
+    "fn listed(n: Int, xs: List[Int] = [1, 2, 3], ys: String = str.repeat(\"ab\", 20)) -> Int = n",
+    "",
+    "fn run(s: String) -> Int = {",
+    "  let a = sep(s)",
+    "  let b = sep(s, wide: 2)",
+    "  let c = span()",
+    "  let d = span(lo: 5)",
+    "  let e = span(lo: str.len(s))",
+    "  let f = slow(1)",
+    "  let g = listed(1)",
+    "  let h = s.sep(gap: 1)",
+    "  str.len(a ++ b ++ h) + c + d + e + f + g",
+    "}",
+    ""
+  ], "\n")
+
+test "inlay hints: a left-out default shows its value where it folds, else its text" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st, "values.dawn", "use std/str\n" ++ values_probe_text())
+    let got = defaults_probe(st, d)
+    # a constant, an expression over a call and an interpolation, all left
+    # out; the written argument is an outer local none of them reads
+    assert list.contains(got, "let a = sep(s«, gap: 4, wide: 9, tag: \"<4>\"»)")
+    # a named argument given, the defaults around it still folded
+    assert list.contains(got, "let b = sep(s, wide: 2«, gap: 4, tag: \"<4>\"»)")
+    # a default that reads an earlier parameter folds with the call's value
+    # of it, the left-out one's or the written one's
+    assert list.contains(got, "let c = span(«lo: 1, hi: 10»)")
+    assert list.contains(got, "let d = span(lo: 5«, hi: 14»)")
+    # ... and is refused when that value is an outer local's: the text
+    assert list.contains(got, "let e = span(lo: str.len(s)«, hi: lo + 9»)")
+    # past the depth budget the fold is refused: the text
+    assert list.contains(got, "let f = slow(1«, k: spin(5000)»)")
+    # a value that repeats its text, and one too long to show: the text
+    assert list.contains(got, "let g = listed(1«, xs: [1, 2, 3], ys: str.repeat(\"ab\", 20)»)")
+    # UFCS: the receiver fills `s`, which no default reads
+    assert list.contains(got, "let h = s.sep(gap: 1«, wide: 9, tag: \"<4>\"»)")
+    assert len(got) == 8
+  }))
+}
+
+test "inlay hints: left-out default values can be turned off, leaving the text" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st0, "values.dawn", "use std/str\n" ++ values_probe_text())
+    let off = LspState {
+      ..st0,
+      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+        ("defaultArgumentValues", JBool(false))
+      ]))]))]))
+    }
+    let got = defaults_probe(off, d)
+    assert list.contains(got, "let a = sep(s«, gap: GAP, wide: twice(GAP) + 1, tag: \"<\${GAP}>\"»)")
+    assert list.contains(got, "let c = span(«lo: 1, hi: lo + 9»)")
+    assert len(got) == 8
   }))
 }
 

@@ -1277,5 +1277,85 @@ sys.exit(bad)
 PYEOF
 then :; else fail=1; fi
 
+# ---- leg 13: left-out default arguments fold to the same values on both servers ----
+#
+# An inlay hint for left-out default arguments shows their values where they
+# fold (docs/lsp-hover-design.md §C4), under the same editor budget as hover.
+# Same reasoning as leg 12, for the other caller of that budget: both servers
+# must give the same labels, some label must carry a value (`gap: 4`, not the
+# text `gap: GAP`), and the default just past the editor's depth must stay
+# its text on both.
+echo "== default argument values, JVM vs native =="
+cat > "$OUT/dvalues.dawn" <<'EOF'
+const GAP: Int = 4
+
+fn down(n: Int) -> Int = if n == 0 { 0 } else { 1 + down(n - 1) }
+
+fn sep(s: String, gap: Int = GAP, wide: Int = GAP * 2 + 1, tag: String = "<${GAP}>") -> String = s
+
+fn span(lo: Int = 1, hi: Int = lo + 9) -> Int = hi - lo
+
+fn near(n: Int, k: Int = down(1400)) -> Int = n + k
+
+fn far(n: Int, k: Int = down(1600)) -> Int = n + k
+
+pub fn probe(s: String) -> Int = {
+  let a = sep(s)
+  let b = span(lo: 5)
+  let c = near(1)
+  let d = far(1)
+  len([a]) + b + c + d
+}
+EOF
+if python3 - "$DAWNC" "$OUT/dvalues.dawn" <<'PYEOF'
+import json, subprocess, sys
+
+dawnc, path = sys.argv[1:]
+text = open(path).read()
+uri = "file://" + path
+msgs = [{"jsonrpc": "2.0", "id": 0, "method": "initialize",
+         "params": {"processId": None, "rootUri": None, "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+            "uri": uri, "languageId": "dawn", "version": 1, "text": text}}},
+        {"jsonrpc": "2.0", "id": 1, "method": "textDocument/inlayHint", "params": {
+            "textDocument": {"uri": uri}, "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": text.count("\n") + 1, "character": 0}}}},
+        {"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": None},
+        {"jsonrpc": "2.0", "method": "exit", "params": {}}]
+payload = b"".join(b"Content-Length: %d\r\n\r\n%s" % (len(b), b)
+                   for b in (json.dumps(m).encode() for m in msgs))
+
+def labels(cmd):
+    data = subprocess.run(cmd, input=payload, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, timeout=300).stdout
+    i = 0
+    while True:
+        j = data.find(b"\r\n\r\n", i)
+        if j < 0:
+            return None
+        n = int(data[i:j].decode().split(":", 1)[1])
+        f = json.loads(data[j + 4:j + 4 + n].decode())
+        i = j + 4 + n
+        if f.get("id") == 1 and isinstance(f.get("result"), list):
+            return [h.get("label") for h in f["result"] if h.get("kind") == 2]
+
+jvm = labels(["./bin/dawn", "lsp"])
+native = labels([dawnc, "lsp"])
+bad = 0
+if jvm != native:
+    print("FAIL: default argument hints: jvm %r, native %r" % (jvm, native))
+    bad = 1
+want = [', gap: 4, wide: 9, tag: "<4>"', ", hi: 14", ", k: 1400", ", k: down(1600)"]
+if jvm != want:
+    print("FAIL: default argument hints on jvm: %r, expected %r" % (jvm, want))
+    bad = 1
+if not bad:
+    print("OK   default argument values agree: %s" % "; ".join(jvm))
+sys.exit(bad)
+PYEOF
+then :; else fail=1; fi
+
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, comptime stops at one depth limit on both, and hover folds to the same values on both"
+echo "OK: fmt/doc/add/lsp/test/cache/__pkghash agree across both backends, native fmt/lsp match the previous release, raw LSP framing holds on native, both lsp servers answer mid-session, the test reports account for themselves, comptime stops at one depth limit on both, hover folds to the same values on both, and so do left-out default arguments"
