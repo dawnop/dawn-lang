@@ -1527,6 +1527,71 @@ test "`fn` marks declarations only in primary position" {
   assert d2[0].hint == hint
 }
 
+test "a header whose operand is missing before `{` is reported at the `{` (#550)" {
+  # the body was taken as the iterable, and the error used to land past its
+  # `}`, saying "expected `{`, found `\n`"
+  let body = "{\n    n = n + x\n    n = n + 1\n  }\n  n\n}"
+  for head in ["for x in ", "if x == ", "while i < ", "match "] {
+    let src = "fn f(xs: List[Int]) -> Int = {\n  var n = 0\n  ${head}${body}"
+    let (m, ds) = parse_module(src)
+    assert len(ds) == 1
+    assert ds[0].msg == "expected an expression before `{`"
+    assert Some(ds[0].lo) == str.index_of(src, "{\n    n")
+    assert len(m.decls) == 1
+  }
+  # `else` after the block ends the header too
+  let (_, eds) = parse_module("fn f() -> Int = {\n  if x == { 1 } else { 2 }\n}")
+  assert len(eds) == 1
+  assert eds[0].msg == "expected an expression before `{`"
+  # a block that is an operand stays one: something follows it
+  let (_, ok1) = parse_module("fn f() -> Int = {\n  if { a } == b { 1 } else { 2 }\n}")
+  assert len(ok1) == 0
+  let (_, ok2) = parse_module("fn f() -> Unit = {\n  for x in { xs } { g(x) }\n}")
+  assert len(ok2) == 0
+  # a line end is named in words
+  let (_, nds) = parse_module("fn f() -> Unit = {\n  if x\n  { g() }\n}")
+  assert len(nds) > 0
+  assert nds[0].msg == "expected `{`, found a newline"
+}
+
+test "an unclosed `(` that a later line cuts off is noted at the opener (#551)" {
+  let src = "fn f(x: Int) -> Int = {\n  let y = g((x +\n  let z = 2\n  z\n}"
+  let (_, ds) = parse_module(src)
+  assert len(ds) == 1
+  assert Some(ds[0].lo) == str.index_of(src, "let z")
+  assert len(ds[0].notes) == 1
+  assert ds[0].notes[0].msg == "unclosed `(`"
+  assert Some(ds[0].notes[0].lo) == str.index_of(src, "(x +")
+  # a deleted `)`: the innermost opener left is the call's own
+  let src2 = "fn f(x: Int) -> Int = {\n  let y = g((x)\n  let z = 2\n  z\n}"
+  let (_, ds2) = parse_module(src2)
+  assert len(ds2) == 1
+  assert ds2[0].msg == "expected `)`, found `let`"
+  assert len(ds2[0].notes) == 1
+  assert Some(ds2[0].notes[0].lo) == str.index_of(src2, "((x)")
+  # `[` and a block's `}` cut it off the same way
+  let src3 = "fn f() -> List[Int] = {\n  let y = [1,\n    2\n}"
+  let (_, ds3) = parse_module(src3)
+  assert len(ds3) > 0
+  assert len(ds3[0].notes) == 1
+  assert ds3[0].notes[0].msg == "unclosed `[`"
+  # an opener on the reporting line is in view already
+  let (_, ds4) = parse_module("fn f() -> Int = {\n  g(x }\n")
+  assert len(ds4) > 0
+  assert len(ds4[0].notes) == 0
+  # any line can cut it off, a call statement included
+  let src5 = "fn f() -> Unit = {\n  g(h(1)\n  println(\"a\")\n}"
+  let (_, ds5) = parse_module(src5)
+  assert len(ds5) == 1
+  assert ds5[0].msg == "expected `)`, found `println`"
+  assert len(ds5[0].notes) == 1
+  assert Some(ds5[0].notes[0].lo) == str.index_of(src5, "(h(")
+  # a bracket closed further on is not the trouble: here a comma is missing
+  let (_, ds6) = parse_module("fn f() -> Int = g(\n  a\n  b\n)")
+  assert len(ds6) > 0
+  assert len(ds6[0].notes) == 0
+}
+
 test "a lambda in a condition is reported as one" {
   # the block after `=>` would otherwise swallow the `{` that starts the body
   let (_, d1) = parse_module("fn f() -> Unit = {\n  if x => { g() } { h() }\n}")
