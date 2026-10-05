@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ a4e4570af1b29c44 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 1552c6963aa56232 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -42,13 +42,81 @@ Dawn 里的 GPU kernel 是一个带 `!Dev` 效果的普通函数。运行一次�
 
 `packages/tileir` 的 `Dev` 效果。kernel 被记录的一次运行，变成 Tile IR 文本，或交给 `tileiras` 的字节码。
 
+## api-title
+
+写一个 kernel
+
+## api-body
+
+kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操作数读出的形状一概不写。下面每段代码都在建站时从 golden kernel 里切出来。
+
+## api-cells-title
+
+标记就是寻址
+
+## api-cells
+
+`In` 与 `Out` 把每个张量切成格子，`Out` 的格子就是 launch 的网格。函数体读本块的格子、写本块的格子，不写任何偏移。
+
+## api-shapes-title
+
+形状从操作数来
+
+## api-shapes
+
+没有一个操作收形状或格式。常量、以及对一维 tile 的归约，都是 0 秩 tile：遇到更宽的操作数时自己加宽，别处一律不加宽。
+
+## api-out-title
+
+写只经 `Out`
+
+## api-out
+
+`Out` 只接受 `store_cell` 与 `store_sub` 两种写，累加器从它的 `zeros` 起步。`FREE_AXIS` 把一维留给 kernel 自己挑，这里是循环的 `k`。
+
+## api-shared-title
+
+`Shared` 是逃生口
+
+## api-shared
+
+原子操作不是格子写，地址由数据决定的 scatter、一块写两个区域也不是。它们经 `Shared` 写，标记把这件事写在读者找得到的地方。
+
+## api-keepdims-title
+
+保维归约
+
+## api-keepdims
+
+`keepdims: true` 把每一行归约成长度为 1 的一列，再由 `broadcast` 显式展回去。这两行就是下面那个注意力 kernel 的行统计；点进去，看它写出的 Tile IR。
+
+## api-keepdims-go
+
+在图里看 ↓
+
+## api-occupancy
+
+在 `sm_86` 上，128×128 的 f16 矩阵乘要带 `hint_occupancy(2)`：每个 SM 放得下两块，而不是一块。
+
+## api-surface
+
+这个包的完整公开面
+
+## api-changes
+
+0.8.0 改了什么
+
+## api-measured
+
+怎么测的。
+
 ## kernel-title
 
 一个 kernel，逐行对照
 
 ## kernel-body
 
-一个融合注意力 kernel 的每一行，都摆在它的调用写出的 Tile IR 旁边，每一段挂在写出它的那个调用名下。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表。每段里加粗的那一行是这个调用真正要做的操作，它上面的几行是 lowering 补上的寻址。
+一个融合注意力 kernel（也就是上面那两行行统计的出处）的每一行，都摆在它的调用写出的 Tile IR 旁边，每一段挂在写出它的那个调用名下。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表。每段里加粗的那一行是这个调用真正要做的操作，它上面的几行是 lowering 补上的寻址。
 
 ## kernel-kind
 

@@ -10,6 +10,11 @@
    pressing Escape, lets go; clicking a line of Tile IR picks the call that
    wrote it. Nothing moves and nothing is filled: an underline and an edge.
 
+   The keepdims card above the map links two of its rows (`#kl-<line>`,
+   `data-pick` the call). Without this the link is a jump to the row; with
+   it the row is brought to the middle and its call picked, as a click on
+   the call's name would.
+
    It carries no words: the one sentence about clicking is in the markup,
    `hidden` until this shows it. With reduced motion the cards are their end
    state, as home.js does it. */
@@ -42,7 +47,7 @@
       each(map, '.km-c[aria-pressed="true"]', function (e) { e.setAttribute("aria-pressed", "false"); });
       picked = null;
     }
-    function pick(id) {
+    function pick(id, quiet) {
       var again = picked === id;
       clear();
       if (again || id === null) return;
@@ -61,7 +66,7 @@
           e.classList.add("km-in");
         }
       });
-      if (first && first.scrollIntoView) first.scrollIntoView({ block: "nearest", behavior: still ? "auto" : "smooth" });
+      if (!quiet && first && first.scrollIntoView) first.scrollIntoView({ block: "nearest", behavior: still ? "auto" : "smooth" });
     }
     each(map, ".km-c", function (c) {
       c.setAttribute("role", "button");
@@ -78,6 +83,18 @@
       var c = ev.target.closest && ev.target.closest(".km-c");
       if (c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); pick(c.getAttribute("data-c")); }
       else if (ev.key === "Escape") clear();
+    });
+    each(document, "a[data-pick]", function (a) {
+      a.addEventListener("click", function (ev) {
+        var id = a.getAttribute("data-pick");
+        var name = map.querySelector(".km-c[data-c=\"" + id + "\"]");
+        var row = name && name.closest(".km-row");
+        if (!row) return;
+        ev.preventDefault();
+        if (row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+        if (picked !== id) pick(id, true);
+        if (window.history && history.replaceState) history.replaceState(null, "", a.getAttribute("href"));
+      });
     });
     map.classList.add("km-live");
     each(map, ".km-note", function (n) { n.hidden = false; });

@@ -1,5 +1,6 @@
-# The cuTile backend's page, gpu.html: the two layers, a kernel lined up line
-# by line with the Tile IR it records, the three coverage tables, the three
+# The cuTile backend's page, gpu.html: the two layers, how a kernel is
+# written against tileir 0.8.0, a kernel lined up line by line with the Tile
+# IR it records, the three coverage tables, the three
 # gates and the mutants they catch, and the last line of every device ledger.
 #
 # Why every number on it is read and none is written. The backend's evidence
@@ -34,6 +35,19 @@
 # vector add cannot (what each call inside a region wrote). It has to line up
 # or the build stops.
 #
+# Why the section on writing a kernel is cut, not written. It shows what
+# tileir 0.8.0 asks of a kernel (markers that are the addressing, shapes read
+# off operands, rank-0 widening, writes only through `Out`, `Shared` as the
+# escape hatch, reductions that keep their dimension) with code the gates
+# hold: golden kernels of kernels.dawn, the dispatch arms that trace them
+# under their markers, and a helper of that file, each cut by
+# name when the site is built (docs/gpu-page-newapi-design.md). A demo
+# written for the page would be one more kernel no golden pins. The
+# keepdims card cuts nothing new: its two lines are flash_attn's, links into
+# the call map below. The occupancy rule is one sentence and a link, because
+# no golden kernel is a 128-wide f16 product and a measurement is not
+# something these gates hold.
+#
 # Why the rest of the page barely moves. The coverage cards count up and list
 # the rows that are not implemented, and real Tile IR drifts behind the head.
 # Each is the markup's final state without gpu.js or under reduced motion; the
@@ -54,7 +68,7 @@ use html/escape.{escape_html}
 use gen/common.{must_read, must_list, write_page, map_doc_url, doc_files, fn_source}
 use gen/fingerprint.{fingerprint}
 use gen/copy.{Copy, load_copy, line, plain, body}
-use gen/gpumap.{KernelMap, Seg, parse_map, check, cuts, covering, named_at, seg_lines}
+use gen/gpumap.{KernelMap, MCall, Seg, parse_map, check, cuts, covering, named_at, seg_lines}
 
 # ---- the coverage tables ----
 
@@ -251,6 +265,103 @@ pub fn cut_fn(src: String, name: String) -> Cut = {
   }
   Cut { first: first, last: last, text: text }
 }
+
+# ---- the API cards ----
+
+## A definition cut out of `src`, braced or not: from `fn name(` to its lone
+## `}` when the head opens a brace, otherwise to the last indented line of
+## its body. [cut_fn] needs the brace, and `vadd` and `run_of` have none.
+pub fn cut_def(src: String, name: String) -> Cut = {
+  let lines = str.split(src, "\n")
+  let head = "fn ${name}("
+  var first = 0
+  var last = 0
+  var braced = false
+  var done = false
+  var i = 0
+  for l in lines {
+    i = i + 1
+    if first == 0 {
+      if str.starts_with(l, head) {
+        first = i
+        last = i
+        braced = str.ends_with(str.trim_end(l), "{")
+      }
+    } else if not done {
+      if braced {
+        last = i
+        if l == "}" {
+          done = true
+        }
+      } else if str.starts_with(l, "  ") {
+        last = i
+      } else {
+        done = true
+      }
+    }
+  }
+  if first == 0 || (braced && not done) {
+    panic("no `${head}...` to cut")
+  }
+  Cut { first: first, last: last, text: join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
+}
+
+## A kernel's arm of the dispatch in kernels.dawn: from `  "name" -> {` to
+## the `  }` that closes it, where the markers it is traced under are.
+pub fn cut_arm(src: String, name: String) -> Cut = {
+  let lines = str.split(src, "\n")
+  let head = "  \"${name}\" -> {"
+  var first = 0
+  var last = 0
+  var i = 0
+  for l in lines {
+    i = i + 1
+    if first == 0 {
+      if l == head {
+        first = i
+      }
+    } else if last == 0 && l == "  }" {
+      last = i
+    }
+  }
+  if first == 0 || last == 0 {
+    panic("no dispatch arm `${head}` closed by `  }` to cut")
+  }
+  Cut { first: first, last: last, text: join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
+}
+
+## `text` with the indent all its lines share taken off: an arm of the
+## dispatch reads at the margin, as the functions do.
+pub fn dedent(text: String) -> String = {
+  let ls = str.split(text, "\n")
+  let lead = (l: String) => str.len(l) - str.len(str.trim_start(l))
+  let full = filter(ls, l => str.trim(l) != "")
+  let n = list.fold(full, 1000, (m, l) => if lead(l) < m { lead(l) } else { m })
+  join(map(ls, l => str.drop(l, if str.len(l) < n { str.len(l) } else { n })), "\n")
+}
+
+## One card of the section on writing a kernel: the copy key its title and
+## sentence are under (`api-<key>-title`, `api-<key>`), the kernel it shows,
+## and the pieces of kernels.dawn it shows, in order.
+pub type ApiCard = { key: String, kernel: String, cuts: List[Cut] }
+
+## The four cards, cut from kernels.dawn: every piece of code on them is a
+## golden kernel's, or the dispatch arm that traces it, or a helper of that
+## file, so none of it can drift from what the gates hold. The escape hatch's
+## card is `histogram`, an atomic: a kernel that stays `Shared` whatever the
+## shape operations become, where a kernel `Shared` only for want of a
+## `reshape` would leave the card the day one lands.
+pub fn api_cards(src: String) -> List[ApiCard] =
+  [ApiCard { key: "cells", kernel: "vadd", cuts: [cut_def(src, "vadd"), cut_arm(src, "vadd"), cut_def(src, "run_of")] },
+    ApiCard { key: "shapes", kernel: "softmax", cuts: [cut_def(src, "softmax")] },
+    ApiCard { key: "out", kernel: "matmul", cuts: [cut_def(src, "matmul"), cut_arm(src, "matmul")] },
+    ApiCard { key: "shared", kernel: "histogram", cuts: [cut_def(src, "histogram"), cut_arm(src, "histogram")] }]
+
+## The calls of flash_attn the keepdims card points at: each named reduction
+## whose line keeps its dimension.
+pub fn keepdims_calls(m: KernelMap) -> List[MCall] =
+  filter(m.calls, c => (c.name == "reduce_max" || c.name == "reduce_sum")
+      && str.contains(m.src[c.from.line - m.first], "keepdims: true"))
 
 # ---- the device ledgers ----
 
@@ -547,6 +658,7 @@ pub type Facts = {
   flash: KernelMap,
   bytes: Int,
   mutants: List[Mutant],
+  cards: List[ApiCard],
 }
 
 ## The kernel the page draws, and where both halves live.
@@ -564,7 +676,8 @@ pub fn load_facts() -> Facts !Fs = {
   if golden == 0 {
     panic("scripts/tile-golden holds no .mlir golden")
   }
-  let cut = cut_fn(must_read(kernels_file()), kernel_name())
+  let src = must_read(kernels_file())
+  let cut = cut_fn(src, kernel_name())
   let path = "scripts/tile-golden/${kernel_name()}.tilebc"
   let size =
     match io.read_bytes(path) {
@@ -582,6 +695,7 @@ pub fn load_facts() -> Facts !Fs = {
     flash: load_map(cut),
     bytes: size,
     mutants: muts,
+    cards: api_cards(src),
   }
 }
 
@@ -648,11 +762,72 @@ fn layers(c: Copy, mu: fn(String) -> String) -> String = {
 <p>${text}</p>
 </section>"""
   let fork = `<li class="gpu-fork"><code>with_gpu_real</code><code>with_gpu_fake</code></li>`
-  let host = row("host", t("layer-host"), "std/gpu.dawn", "!Gpu", [step("main"), step("launch(\"vadd\")"), fork],
+  let host = row("host", t("layer-host"), "std/gpu.dawn", "!Gpu", [step("main"), step("launch_entry3"), fork],
     t("layer-host-body"))
   let device = row("device", t("layer-device"), "packages/tileir", "!Dev",
     [step("vadd"), step("record"), step("Tile IR"), step("tileiras"), step("cubin")], t("layer-device-body"))
   `<div class="gpu-layers">` ++ "\n" ++ host ++ "\n" ++ device ++ "\n</div>"
+}
+
+# ---- writing a kernel ----
+
+## `a–b`, or `a` alone when the cut is one line.
+fn span_text(k: Cut) -> String = if k.first == k.last { "${k.first}" } else { "${k.first}–${k.last}" }
+
+## Code as one block per line, each highlighted on its own, so that a line
+## too long for its card wraps under itself (style.css hangs the indent)
+## instead of hiding its tail. No piece the cards show spans two lines.
+fn code_lines(text: String) -> String =
+  join(map(str.split(text, "\n"), l => {
+    let h = if l == "" { " " } else { highlight_dawn(l) }
+    """<span class="gpu-l">${h}</span>"""
+  }), "")
+
+## One card: its title and the kernel's name, its sentence, its pieces of
+## kernels.dawn one after another, and where each piece is, with the
+## kernel's golden.
+fn api_card(c: Copy, mu: fn(String) -> String, card: ApiCard) -> String = {
+  let code = join(map(card.cuts, k => code_lines(dedent(k.text))), `<span class="gpu-l"> </span>`)
+  let links = map(card.cuts, k =>
+      """<a href="${gh(kernels_file())}#L${k.first}-L${k.last}"><code>kernels.dawn:${span_text(k)}</code></a>""")
+    ++ ["""<a href="${gh("scripts/tile-golden/${card.kernel}.mlir")}"><code>${escape_html(card.kernel)}.mlir</code></a>"""]
+  """<article class="gpu-card"><header><h3>${line(c, "api-${card.key}-title", mu)}</h3>"""
+    ++ """<code class="gpu-card-k">${escape_html(card.kernel)}</code></header>"""
+    ++ """<p>${line(c, "api-${card.key}", mu)}</p>"""
+    ++ """<pre class="gpu-card-src"><code>${code}</code></pre>"""
+    ++ """<p class="gpu-card-from">${join(links, " · ")}</p></article>"""
+}
+
+## The keepdims card, across the grid: flash_attn's two lines that keep a
+## row's dimension, each a link to its row of the call map below (`#kl-<line>`),
+## which gpu.js also picks as that call (`data-pick`). With no script the link
+## is a jump to the row, whose Tile IR is beside it.
+fn keepdims_card(c: Copy, mu: fn(String) -> String, m: KernelMap) -> String = {
+  let go = escape_html(plain(c, "api-keepdims-go"))
+  let rows = map(keepdims_calls(m), k => {
+    let l = k.from.line
+    """<a class="gpu-pick" href="#kl-${l}" data-pick="${k.id}"><i>${l}</i>${highlight_dawn(str.trim(m.src[l - m.first]))}"""
+      ++ """<span class="gpu-pick-go">${go}</span></a>"""
+  })
+  """<article class="gpu-card gpu-card-wide" id="keepdims"><header><h3>${line(c, "api-keepdims-title", mu)}</h3>"""
+    ++ """<code class="gpu-card-k">${escape_html(m.name)}</code></header>"""
+    ++ """<p>${line(c, "api-keepdims", mu)}</p>"""
+    ++ """<pre class="gpu-card-src gpu-picks"><code>${join(rows, "")}</code></pre></article>"""
+}
+
+## The section on writing a kernel: the four cards, the keepdims card that
+## leads into the call map, and the two notes under them (the occupancy rule,
+## which no golden kernel carries, and where the rest of the surface is).
+fn api_section(c: Copy, mu: fn(String) -> String, root: String, f: Facts) -> String = {
+  let p = (k: String) => escape_html(plain(c, k))
+  let readme = gh("packages/tileir/README.md")
+  let changes = gh("packages/tileir/CHANGELOG.md")
+  """<div class="gpu-cards">
+${join(map(f.cards, k => api_card(c, mu, k)), "\n")}
+${keepdims_card(c, mu, f.flash)}
+</div>
+<p class="gpu-note">${line(c, "api-occupancy", mu)} <a href="${readme}#occupancy">${p("api-measured")}</a></p>
+<p class="gpu-note gpu-api-more"><a href="${root}/packages/tileir.html">${p("api-surface")}</a> · <a href="${changes}">${p("api-changes")}</a></p>"""
 }
 
 # ---- the call map ----
@@ -758,7 +933,7 @@ pub fn map_rows(m: KernelMap) -> String = {
     if cls != "ge" {
       hue = hue + 1
     }
-    out = out ++ ["""<li class="km-row ${cls}"><pre class="km-d"><code><span class="km-l"><i>${r.line}</i>${dawn_line(m, r.line)}</span></code></pre>"""
+    out = out ++ ["""<li class="km-row ${cls}" id="kl-${r.line}"><pre class="km-d"><code><span class="km-l"><i>${r.line}</i>${dawn_line(m, r.line)}</span></code></pre>"""
         ++ """<div class="km-t">${join(map(r.segs, s => seg_html(m, s)), "")}</div></li>"""]
   }
   join(out, "\n")
@@ -954,7 +1129,7 @@ ${join(map(f.ledgers, row), "\n")}
 ## moved here moves in both, and a fragment the search names is one the page
 ## carries.
 pub fn prose_sections() -> List[(String, String)] =
-  [("layers", "layers"), ("kernel", "kernel"), ("coverage", "coverage"), ("gates", "gates"),
+  [("layers", "layers"), ("api", "api"), ("kernel", "kernel"), ("coverage", "coverage"), ("gates", "gates"),
     ("ledgers", "ledger")]
 
 ## The copy file of one language.
@@ -1008,6 +1183,7 @@ fn gpu_page(a: Assets, js: String, lang: Lang, f: Facts, docs: List[String]) -> 
   }
   let main = `<main class="wrap page gpu-page">` ++ "\n"
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
+    ++ prose(c, mu, "api") ++ "\n" ++ api_section(c, mu, root, f) ++ "\n"
     ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, f) ++ "\n"
     ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
     ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu, f) ++ "\n"
@@ -1516,6 +1692,88 @@ test "the head's background is real Tile IR from the goldens" {
     assert len(ls) > 20
     for l in ls {
       assert list.any(hero_kernels(), k => str.contains(must_read("scripts/tile-golden/${k}.mlir"), l))
+    }
+  })
+}
+
+## The cutters on a file made up for them: a braced definition runs to its
+## lone `}`, an unbraced one to its last indented line, and an arm to the
+## `  }` that closes it.
+test "the cutters take a definition and an arm whole" {
+  let src = "fn a(x: Int) -> Int =\n  x + 1\n\n#\n# Why b.\n# More.\nfn b() -> Int = {\n  1\n}\nfn c() -> Int = 2\n"
+    ++ "fn trace(n: String) = match n {\n  \"b\" -> {\n    let p = b()\n    p\n  }\n}\n"
+  assert cut_def(src, "a") == Cut { first: 1, last: 2, text: "fn a(x: Int) -> Int =\n  x + 1" }
+  assert cut_def(src, "b") == Cut { first: 7, last: 9, text: "fn b() -> Int = {\n  1\n}" }
+  assert cut_def(src, "c") == Cut { first: 10, last: 10, text: "fn c() -> Int = 2" }
+  let arm = cut_arm(src, "b")
+  assert arm.first == 12 && arm.last == 15
+  assert dedent(arm.text) == "\"b\" -> {\n  let p = b()\n  p\n}"
+}
+
+## Every card shows kernels.dawn's own code: a golden kernel, the arm that
+## traces that kernel under its markers, a helper, a comment; its copy is in
+## both languages; and the page carries the code and the links to where it is.
+test "the cards are golden kernels and the arms that trace them" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let src = must_read(kernels_file())
+    let names = golden_names()
+    let en = load_copy(copy_file(En))
+    let zh = load_copy(copy_file(Zh))
+    let keys = (c: Copy) => map(c.sections, e => {
+      let (k, _) = e
+      k
+    })
+    assert map(f.cards, k => k.key) == ["cells", "shapes", "out", "shared"]
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    for card in f.cards {
+      assert list.contains(names, card.kernel)
+      for c in [en, zh] {
+        assert list.contains(keys(c), "api-${card.key}-title")
+        assert list.contains(keys(c), "api-${card.key}")
+      }
+      for k in card.cuts {
+        let ls = list.take(list.drop(str.split(src, "\n"), k.first - 1), k.last - k.first + 1)
+        assert join(ls, "\n") == k.text
+        assert str.contains(p, "kernels.dawn:${span_text(k)}</code>")
+      }
+      let arms = filter(card.cuts, k => str.starts_with(k.text, "  \""))
+      for a in arms {
+        assert str.contains(a.text, "trace")
+        assert str.contains(a.text, ", ${card.kernel})")
+      }
+      assert str.contains(p, "${card.kernel}.mlir</code>")
+    }
+    # the first piece of every card is the kernel itself
+    for card in f.cards {
+      assert str.starts_with(card.cuts[0].text, "fn ${card.kernel}(")
+    }
+    # the escape hatch's kernel is traced with a Shared and writes atomically
+    assert str.contains(f.cards[3].cuts[1].text, "Shared(")
+    assert str.contains(f.cards[3].cuts[0].text, "atomic_")
+    assert str.contains(p, `<span class="f">softmax</span>`)
+  })
+}
+
+## The keepdims card is flash_attn's two reductions that keep their
+## dimension, every one of them, each a link to its own row of the map and
+## naming the call that row's picker picks.
+test "the keepdims card points at flash_attn's reductions, on rows the map has" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let m = f.flash
+    let ks = keepdims_calls(m)
+    assert map(ks, k => k.name) == ["reduce_max", "reduce_sum"]
+    assert len(filter(m.src, l => str.contains(l, "keepdims: true"))) == len(ks)
+    for lang in [En, Zh] {
+      let p = gpu_page(plain_assets(), "gpu.js", lang, f, [])
+      for k in ks {
+        assert str.contains(p, """<li class="km-row """)
+        assert str.contains(p, """id="kl-${k.from.line}">""")
+        assert str.contains(p, """href="#kl-${k.from.line}" data-pick="${k.id}">""")
+        assert str.contains(p, """<span class="km-c" data-c="${k.id}" """)
+      }
+      assert len(str.split(p, `<article class="gpu-card`)) == len(f.cards) + 2
     }
   })
 }

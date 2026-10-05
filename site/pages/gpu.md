@@ -47,13 +47,81 @@ the device
 
 `packages/tileir`'s `Dev` effect. One recorded run of a kernel becomes Tile IR text, or bytecode for `tileiras`.
 
+## api-title
+
+Writing a kernel
+
+## api-body
+
+A kernel says where it reads and writes once, on its parameters' markers, and states no shape it could read off its operands. Each piece of code below is cut from the golden kernels when the site is built.
+
+## api-cells-title
+
+The markers are the addressing
+
+## api-cells
+
+`In` and `Out` cut each tensor into cells, and the `Out` cells are the launch grid. The body reads its block's cell and writes its block's cell; it names no offset.
+
+## api-shapes-title
+
+Shapes come from the operands
+
+## api-shapes
+
+No operation takes a shape or a format. A constant, and a reduction of a rank-1 tile, are rank-0 tiles: they widen on their own where they meet a wider operand, and nowhere else.
+
+## api-out-title
+
+Writes go through `Out`
+
+## api-out
+
+`store_cell` and `store_sub` are the only writes an `Out` takes, and an accumulator starts from `zeros` of it. `FREE_AXIS` leaves a dimension for the kernel to pick, here the loop's `k`.
+
+## api-shared-title
+
+`Shared` is the escape hatch
+
+## api-shared
+
+An atomic is not a cell write, and neither is a scatter whose addresses are data or a block that writes two regions. Those write through `Shared`, and the marker says so where a reader can find it.
+
+## api-keepdims-title
+
+Reductions that keep their dimension
+
+## api-keepdims
+
+`keepdims: true` reduces each row to a column of length one, and `broadcast` widens it back, explicitly. These two lines are the row statistics of the attention below; follow one to the Tile IR it wrote.
+
+## api-keepdims-go
+
+see it in the map ↓
+
+## api-occupancy
+
+On `sm_86`, a 128 by 128 f16 matrix product wants `hint_occupancy(2)`, which fits two blocks on each SM instead of one.
+
+## api-surface
+
+The package's whole surface
+
+## api-changes
+
+What changed in 0.8.0
+
+## api-measured
+
+How it was measured.
+
 ## kernel-title
 
 One kernel, line by line
 
 ## kernel-body
 
-Every line of one kernel, a fused attention, sits beside the Tile IR its calls wrote, each run under the call that wrote it. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table. In each run the bold line is the operation the call is for; the lines above it are addressing the lowering added.
+Every line of one kernel, a fused attention and the source of the row statistics above, sits beside the Tile IR its calls wrote, each run under the call that wrote it. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table. In each run the bold line is the operation the call is for; the lines above it are addressing the lowering added.
 
 ## kernel-kind
 
