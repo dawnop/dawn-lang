@@ -534,8 +534,12 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # A header wrapped across lines continues that construct, so its lines step
   # in from the keyword's line, however that line was itself reached (`=` then
   # `if a &&` then `b {`), and its brace anchors there (#532). -1 is none.
-  var header_indent = -1
-  var header_depth = 0
+  #
+  # A header's own brackets can hold another header (`if (match (x) {` ... `}) {`,
+  # a lambda body that is an `if`), whose brace opens first. So the pending headers
+  # are a stack, innermost last: a brace at a header's depth closes that header
+  # and the outer one is waiting again (#545).
+  var hdrs: List[IfAt] = []
   # The `if` each still-open bracket depth last saw, innermost last. An `else` brace belongs to the `if` it follows, so
   # it anchors where that `if` did, even when the `else` sits on a line the
   # header was wrapped to; an `else if` is a new `if` on its own line.
@@ -601,8 +605,11 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         let arm_bar = t.kind == PIPE && bracketed && openers[len(openers) - 1].brace &&
           not is_cont_ender(pl.kind, bracketed)
         let cont = not arm_bar && is_continuation(pl, t, unary, barrow, bracketed)
-        if not cont && len(openers) <= header_depth { header_indent = -1 }
-        let in_header = header_indent >= 0 && header_depth == len(openers)
+        while len(hdrs) > 0 && not cont && len(openers) <= hdrs[len(hdrs) - 1].depth {
+          hdrs = list.take(hdrs, len(hdrs) - 1)
+        }
+        let in_header = len(hdrs) > 0 && hdrs[len(hdrs) - 1].depth == len(openers)
+        let header_indent = if len(hdrs) > 0 { hdrs[len(hdrs) - 1].at } else { -1 }
         line_indent = indent_of(t, openers, line_indent, cont)
         if cont && in_header && line_indent <= header_indent { line_indent = header_indent + 1 }
         let lvl = if line_indent < 0 { 0 } else { line_indent }
@@ -624,9 +631,12 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       }
     }
     let headed = t.kind == IF || t.kind == MATCH || t.kind == WHILE || t.kind == FOR
-    if headed && (header_indent < 0 || (have_prev_code && prev_code.kind == ELSE)) {
-      header_indent = line_indent
-      header_depth = len(openers)
+    if headed {
+      let d = len(openers)
+      let top = if len(hdrs) > 0 { hdrs[len(hdrs) - 1].depth } else { -1 }
+      let else_if = have_prev_code && prev_code.kind == ELSE
+      if top == d && else_if { hdrs = list.take(hdrs, len(hdrs) - 1) }
+      if top < d || else_if { hdrs = hdrs ++ [IfAt { depth: d, at: line_indent }] }
     }
     if t.kind == IF || t.kind == ELSE {
       let d = len(openers)
@@ -635,9 +645,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       if t.kind == IF {
         if seen { ifs = list.take(ifs, len(ifs) - 1) }
         ifs = ifs ++ [IfAt { depth: d, at: line_indent }]
-      } else if seen && header_indent < 0 {
-        header_indent = ifs[len(ifs) - 1].at
-        header_depth = d
+      } else if seen && (len(hdrs) == 0 || hdrs[len(hdrs) - 1].depth < d) {
+        hdrs = hdrs ++ [IfAt { depth: d, at: ifs[len(ifs) - 1].at }]
       }
     }
     let tail_brace = t.kind == LBRACE && have_prev_code &&
@@ -658,7 +667,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       # this statement's body, and follows the statement. Anything else -- a
       # `(`/`[`, or a brace nested inside one (a closure argument, say) -- belongs
       # to the line it is written on.
-      let header = t.kind == LBRACE && header_indent >= 0 && len(openers) == header_depth
+      let header = t.kind == LBRACE && len(hdrs) > 0 && hdrs[len(hdrs) - 1].depth == len(openers)
+      let header_indent = if header { hdrs[len(hdrs) - 1].at } else { -1 }
       let body = t.kind == LBRACE && len(openers) == logical_depth
       openers = openers ++ [Opener {
         at: if header {
@@ -676,7 +686,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         lat: logical_indent,
         ld: logical_depth,
       }]
-      if header { header_indent = -1 }
+      if header { hdrs = list.take(hdrs, len(hdrs) - 1) }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
       if len(openers) > 0 {
         let inner = openers[len(openers) - 1]
@@ -685,7 +695,9 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         logical_depth = inner.ld
         openers = list.take(openers, len(openers) - 1)
       }
-      if len(openers) < header_depth { header_indent = -1 }
+      while len(hdrs) > 0 && len(openers) < hdrs[len(hdrs) - 1].depth {
+        hdrs = list.take(hdrs, len(hdrs) - 1)
+      }
     }
     prev = t
     i = i + 1
@@ -1582,4 +1594,17 @@ test "a tail block's body follows the line its brace is on" {
   assert fmt_of("fn f() -> Int = {\n  let e = map(\n    xs) { x =>\n    let y = x\n    y\n  }\n  g(a,\n    b) {\n    s()\n  }\n  e\n}\n") == w
   let o = "fn f() -> Int = {\n  xs.each { x =>\n    g(x)\n  }\n}\n"
   assert fmt_of(o) == o
+}
+
+## #545: a header can hold another header in its own brackets, and the inner
+## brace opens first. With one pending slot the inner header was ignored and
+## its body anchored to whatever line the brace sat on, so a condition written
+## `if ((if (` / `c) { a } else {` / `b }))` printed the inner bodies at the
+## wrong level, and a `match` in an `if` condition put its arms there too.
+test "a header inside another header's brackets anchors its own body" {
+  let n = "fn f() -> Int = {\n  let v =\n    (if ((if (\n      true) { false } else {\n      false })) { 1 } else { 2 })\n  v\n}\n"
+  assert fmt_of(n) == n
+  let m = "fn f() -> Int = {\n  if (match (\n    29) {\n    1 -> true\n    _ ->\n      false\n  }) { 3 } else { 4 }\n}\n"
+  assert fmt_of(m) == m
+  assert fmt_of("fn f() -> Int = {\nif (match (\n29) {\n1 -> true\n_ ->\nfalse\n}) { 3 } else { 4 }\n}\n") == m
 }
