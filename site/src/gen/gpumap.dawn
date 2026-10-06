@@ -20,8 +20,22 @@
 # Rows are source lines, which is what a reader scans. A call's own Tile IR
 # goes on the line its name is on; a region call's terminator and closing
 # brace go on the line its span ends on, after its body, where the text puts
-# them. That is the whole layout rule, so the default page reads with no
-# script at all; a click only highlights what this already put on the page.
+# them. That is the whole layout rule.
+#
+# A row starts folded to one line of its Tile IR, its key line, and the rule
+# that picks it is computed here, never marked in the recording: of the calls
+# named on the row that wrote lines, the outermost (the one no other's span
+# holds) is what the source line is for, and the key is the line it wrote
+# its result with (the run's last line that is not a closing brace). Why the
+# outermost and not an op priority table: in `mul(mmaf(..), lit(..))` the
+# line's value is the `mul`, whatever the ops are, and nesting is the
+# parser's fact while a priority table would be one more thing to keep in
+# step with the backend's opcodes. Why a named call over a region's
+# terminator: a line like `addf(u, u))` that also closes a loop is about the
+# `addf`; a row that only closes the region (`}`) shows its `continue`. The
+# signature's row shows the line opening the entry, its counterpart, and the
+# closing brace's the `return`. Folding is the browser's (`<details>`), so
+# the page still folds and opens with no script; a click only highlights.
 
 use std/str
 use std/list
@@ -320,6 +334,56 @@ pub fn seg_lines(s: Seg) -> List[Int] = {
   range(a, b)
 }
 
+## The line a run is for: its last line that is not a closing brace (a
+## region's body is written before the `}` that ends it, and a reduction's
+## result is the reshape after its body), or None for a run of braces only.
+pub fn result_line(ir: List[String], s: Seg) -> Option[Int] = {
+  let real = filter(seg_lines(s), n => not str.starts_with(str.trim(ir[n - 1]), "}"))
+  if len(real) == 0 { None } else { Some(real[len(real) - 1]) }
+}
+
+# Whether run `s` is call `c`'s first, the one put on its name's line.
+fn first_of(calls: List[MCall], s: Seg) -> Bool =
+  s.owner >= 0 && len(calls[s.owner].lines) > 0 && calls[s.owner].lines[0] == s.ir
+
+# Of the runs `ss` (all calls'), the one whose call no other's span holds;
+# of several such (two statements on one line), the one written last.
+fn outermost(calls: List[MCall], ss: List[Seg]) -> Option[Seg] = {
+  let inside = (c: MCall, p: MCall) => c.id != p.id && before_or_at(p.from, c.from) && before_or_at(c.to, p.to)
+  let outer = filter(ss, s => not list.any(ss, o => inside(calls[s.owner], calls[o.owner])))
+  if len(outer) == 0 { None } else { Some(outer[len(outer) - 1]) }
+}
+
+## The row's key line: the one Tile IR line a folded row shows. The rule:
+## of the calls named on the row that wrote lines, the outermost (the one no
+## other's span holds) is what the line is for, and its key is the line it
+## wrote its result with (`result_line`). A row that names none but ends a
+## region shows the region's terminator by the same rule. The signature's
+## row shows the line that opens the entry, and the closing brace's the
+## `return`. None when the row has no Tile IR.
+pub fn key_line(m: KernelMap, r: Row) -> Option[Int] = {
+  let calls = filter(r.segs, s => s.owner >= 0)
+  let named = filter(calls, s => first_of(m.calls, s))
+  let pick = if len(named) > 0 { outermost(m.calls, named) } else { outermost(m.calls, calls) }
+  match pick {
+    Some(s) -> result_line(m.ir, s)
+    None -> {
+      let none: List[Int] = []
+      let opens = filter(list.fold(r.segs, none, (acc, s) => acc ++ seg_lines(s)), n => str.ends_with(str.trim_end(m.ir[n - 1]), "{"))
+      if len(r.segs) > 0 && r.segs[0].owner == head_owner() && len(opens) > 0 {
+        Some(opens[len(opens) - 1])
+      } else if len(r.segs) > 0 {
+        result_line(m.ir, r.segs[0])
+      } else {
+        None
+      }
+    }
+  }
+}
+
+## How many Tile IR lines the row holds.
+pub fn row_lines(r: Row) -> Int = list.fold(r.segs, 0, (n, s) => n + len(seg_lines(s)))
+
 ## The rows of `calls` whose span covers `[a, b)` of line `l`, in row order:
 ## the call the text is in, and every call around it.
 pub fn covering(calls: List[MCall], l: Int, a: Int, b: Int) -> List[Int] =
@@ -445,5 +509,73 @@ test "a line is cut where the calls on it start, end and name themselves" {
   match named_at(r.calls, 13, 5, 9) {
     Some(c) -> { assert c.name == "addf" }
     None -> { assert false }
+  }
+}
+
+# A second kernel for the key line: a call inside another on one line, a
+# region whose head, body and terminator are all on one line, a line whose
+# only call wrote nothing, and Tile IR with the braces the rule skips.
+fn nested_map() -> String =
+  "kernel k\nfn 30-34\nops 5\nhead 1-3\n"
+  ++ "call 0 -1 mmaf 31:15-31:25 31:15-31:19 3-5\n"
+  ++ "call 1 -1 lit 31:27-31:35 31:27-31:30\n"
+  ++ "call 2 -1 mul 31:11-31:36 31:11-31:14 5-7\n"
+  ++ "call 3 -1 d_for 32:3-32:36 32:3-32:8 7-9 10-12\n"
+  ++ "call 4 3 addf 32:25-32:35 32:25-32:29 9-10\n"
+  ++ "call 5 -1 set 33:3-33:11 33:5-33:8\n"
+  ++ "tail 12-15\n"
+
+fn nested_src() -> List[String] =
+  [
+    "fn k(x: Param[F64]) -> Unit !Dev = {",
+    "  let a = mul(mmaf(t, u), lit(2.0))",
+    "  d_for(z, o, (i, u) => addf(u, u))",
+    "  m.set(a)",
+    "}",
+  ]
+
+fn nested_ir() -> List[String] =
+  [
+    "module {",
+    "  entry @k() {",
+    "    %0 = constant",
+    "    %1 = mmaf %0",
+    "    %2 = constant",
+    "    %3 = mulf %1, %2",
+    "    %4 = constant",
+    "    %5 = for %i in (%4) {",
+    "      %6 = addf %i, %i",
+    "      continue %6",
+    "    }",
+    "    return",
+    "  }",
+    "}",
+  ]
+
+fn keys_of(m: KernelMap) -> List[Option[Int]] = map(m.rows, r => key_line(m, r))
+
+## The key line is computed, and each wrong rule it could be mistaken for
+## picks a different line somewhere here: the innermost call (`mmaf`, `addf`),
+## the run written last (`continue`), a region's terminator over the call
+## named on its row, or the head's `make_token`-like last line.
+test "a folded row shows the line its outermost named call wrote its result with" {
+  match check(must_parse(nested_map()), 30, nested_src(), nested_ir()) {
+    Ok(m) -> {
+      assert keys_of(m) == [Some(2), Some(6), Some(8), None, Some(12)]
+      assert map(m.rows, r => row_lines(r)) == [2, 4, 5, 0, 3]
+    }
+    Err(e) -> panic(e)
+  }
+  let ir = map(range(0, 22), k => if k == 1 { "  entry {" } else if k == 15 { "}" } else { "line ${k + 1}" })
+  match check(must_parse(sample_map()), 10, sample_src(), ir) {
+    Ok(m) -> {
+      # line 13 names `addf` and ends `d_for`: the call named wins over the
+      # terminator; a run of braces only has no result line
+      assert keys_of(m) == [Some(2), Some(11), Some(12), Some(14), Some(19), Some(22)]
+      assert map(m.rows, r => row_lines(r)) == [3, 8, 1, 4, 3, 3]
+      assert result_line(ir, m.rows[3].segs[1]) == Some(15)
+      assert result_line(ir, Seg { owner: 1, ir: (16, 17) }) == None
+    }
+    Err(e) -> panic(e)
   }
 }

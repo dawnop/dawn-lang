@@ -754,11 +754,19 @@ ul.timeline ul { padding-left: 1.2rem; }
 .km-facts span { color: var(--faint); }
 .km-heads { display: none; }
 .km-rows { list-style: none; margin: 0; padding: 0; }
-.km-row { margin: 0; padding: 0.5rem 0; --g: var(--gm-0); }
+.km-row { margin: 0; padding: 0; --g: var(--gm-0); }
 .km-row + .km-row { border-top: 1px solid var(--line-soft); }
 .km-row.g1 { --g: var(--gm-1); } .km-row.g2 { --g: var(--gm-2); } .km-row.g3 { --g: var(--gm-3); }
 .km-row.g4 { --g: var(--gm-4); } .km-row.g5 { --g: var(--gm-5); }
 .km-row.ge { --g: var(--line); }
+/* A row is one block, `.km-s`: a plain div, or the summary of the row's
+   details when it has Tile IR to fold. The right edge keeps room for the
+   marker on every row, so folding rows and plain ones line up. */
+.km-s { display: block; position: relative; padding: 0.4rem 1.7rem 0.4rem 0; font-size: 0.76rem; }
+summary.km-s { list-style: none; cursor: pointer; }
+summary.km-s::-webkit-details-marker { display: none; }
+summary.km-s:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+summary.km-s:hover { background: color-mix(in srgb, var(--g) 5%, transparent); }
 .km pre { margin: 0; padding: 0; border: 0; border-radius: 0; background: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.76rem/1.6 var(--mono); font-variant-ligatures: none; }
 .km pre code { font: inherit; background: none; border: 0; padding: 0; }
 /* every line wraps under itself, past its number: a hanging indent */
@@ -766,10 +774,14 @@ ul.timeline ul { padding-left: 1.2rem; }
 .km-l i { display: inline-block; width: 2.4em; margin-right: 0.6em; text-indent: 0; text-align: right; font-style: normal; color: var(--faint); opacity: 0.75; user-select: none; -webkit-user-select: none; }
 .km pre.km-d { border-left: 3px solid var(--g); padding-left: 0.45rem; color: var(--text); }
 .km-row.ge .km-d { color: var(--muted); }
+/* the source's indentation, a faint dot a space on an open row: drawn by
+   the stylesheet over a real space, so a copy is the source byte for byte */
+.km-sp { position: relative; }
+.km-f[open] .km-sp::before { content: "·"; position: absolute; left: 0; right: 0; text-indent: 0; text-align: center; color: var(--faint); opacity: 0.6; pointer-events: none; user-select: none; -webkit-user-select: none; }
 .km-t { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0.35rem 0 0 1.1rem; }
 .km-t:empty { display: none; }
-.km-tag { display: block; min-height: 0; }
-.km-tag code { font: 600 0.7rem/1.6 var(--mono); color: var(--g); }
+.km-tag { display: block; min-height: 0; line-height: calc(0.76rem * 1.6); }
+.km-tag code { font: 600 0.7rem/calc(0.76rem * 1.6) var(--mono); color: var(--g); vertical-align: top; }
 .km-tag:empty { display: none; }
 .km pre.km-ir { border-left: 2px solid color-mix(in srgb, var(--g) 60%, transparent); padding-left: 0.45rem; color: var(--muted); }
 .km-ir + .km-tag { margin-top: 0.25rem; }
@@ -780,15 +792,33 @@ ul.timeline ul { padding-left: 1.2rem; }
 .km-ir .km-res b { font-weight: 650; color: var(--g); }
 .km-row.ge .km-ir .km-res { color: inherit; }
 .km-row.ge .km-ir .km-res b { font-weight: inherit; color: inherit; }
+/* folded: the key line under its call's name and nothing else, one line
+   high, its type tail cut off at the edge */
+.km-f:not([open]) .km-t > :not(.km-kt):not(.km-kp) { display: none; }
+.km-f:not([open]) .km-ir .km-l:not(.km-k) { display: none; }
+.km-f:not([open]) .km-ir .km-k { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+/* the marker: how many lines are folded away, and a chevron that turns */
+.km-x { position: absolute; top: 0.4rem; right: 0.15rem; font: 600 0.62rem/1.95 var(--mono); color: var(--faint); white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.km-x::after { content: ""; display: inline-block; width: 0.3rem; height: 0.3rem; margin: 0 0.1rem 0.15rem 0.25rem; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); }
+summary.km-s:hover .km-x { color: var(--g); }
+.km-f[open] .km-x { color: var(--g); font-size: 0; }
+.km-f[open] .km-x::after { margin-bottom: -0.1rem; transform: rotate(-135deg); }
+.km-row.ge summary.km-s:hover .km-x, .km-row.ge .km-f[open] .km-x { color: var(--muted); }
 @container (min-width: 44rem) {
-  .km-grid { display: grid; grid-template-columns: fit-content(40%) minmax(0, 1fr); }
-  .km-heads, .km-rows, .km-row { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
-  .km-heads { padding: 0.5rem 0 0.15rem; font: 500 0.66rem/1.4 var(--mono); letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
+  /* The source column is as wide as the longest line (`--kmn`, in code
+     points, from the generator) up to a bound. A folded row is one line on
+     both sides: a source line too long for the column is cut at its edge
+     until its row is opened. An open row wraps and its source column runs
+     the full height of its Tile IR. */
+  .km-s, .km-heads { display: grid; grid-template-columns: min(calc(var(--kmn, 60) * 1ch + 3em + 2ch + 0.8rem), 52%) minmax(0, 1fr); font-family: var(--mono); }
+  .km-heads { padding: 0.5rem 1.7rem 0.15rem 0; font-size: 0.76rem; }
+  .km-heads span { font: 500 0.66rem/1.4 var(--mono); letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
   .km-heads code { text-transform: none; letter-spacing: 0; }
   .km-heads span:nth-child(2) { display: none; }
   .km-heads span:last-child { padding-left: calc(1.2rem + 6.6rem); }
-  .km-row { align-items: start; padding: 0.4rem 0; }
-  .km-t { grid-template-columns: 6.6rem minmax(0, 1fr); margin: 0 0 0 1.2rem; row-gap: 0.25rem; }
+  .km-f:not([open]) pre.km-d { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .km-f:not([open]) pre.km-d .km-l { padding-left: 0; text-indent: 0; }
+  .km-t { grid-template-columns: 6.6rem minmax(0, 1fr); margin: 0 0 0 1.2rem; row-gap: 0.25rem; align-content: start; }
   .km-t:empty { display: grid; }
   .km-tag code { white-space: nowrap; }
   .km-ir + .km-tag { margin-top: 0; }
@@ -802,6 +832,7 @@ ul.timeline ul { padding-left: 1.2rem; }
 @container (max-width: 43.99rem) {
   .km pre.km-ir { white-space: pre; overflow-x: auto; overflow-wrap: normal; scrollbar-width: thin; }
   .km-ir .km-l { padding-left: 0; text-indent: 0; }
+  .km-f:not([open]) pre.km-ir { overflow: hidden; }
 }
 .km-note { margin: 0.6rem 0 0; max-width: var(--measure); font-size: 0.84rem; color: var(--faint); }
 /* a call picked (gpu.js): its span underlined, its own Tile IR lines given an

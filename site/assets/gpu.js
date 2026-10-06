@@ -2,13 +2,20 @@
    on the call map, and the coverage cards' count-up.
 
    The page is complete without it. Every row of flash_attn already has the
-   Tile IR its calls wrote beside it, and every card is at its final number;
-   this only lets a reader point at one call. Clicking a call's name marks
+   Tile IR its calls wrote beside it, folded to its key line in a native
+   <details> that opens and closes with no script, and every card is at its
+   final number; this only lets a reader point at one call. Clicking a call's name marks
    its whole span in the source and the Tile IR lines it wrote itself; a
    region call (a loop, a scan) marks its header, terminator and brace, and
    the lines its body's calls wrote more faintly. Clicking it again, or
    pressing Escape, lets go; clicking a line of Tile IR picks the call that
    wrote it. Nothing moves and nothing is filled: an underline and an edge.
+
+   Folding is the browser's: a click on a row toggles its <details>. This
+   keeps a click that picks from also toggling (a call's name, a line of an
+   open row's Tile IR, a drag that selected text), opens the rows a picked
+   call wrote into so its lines can be seen, opens a row the page jumps to,
+   and mirrors each summary's state into aria-expanded.
 
    The keepdims card above the map links two of its rows (`#kl-<line>`,
    `data-pick` the call). Without this the link is a jump to the row; with
@@ -41,6 +48,18 @@
       return false;
     }
     var picked = null;
+    function open(row) {
+      var d = row && row.querySelector("details.km-f");
+      if (d && !d.open) d.open = true;
+    }
+    function sync(d) {
+      var s = d.querySelector("summary");
+      if (s) s.setAttribute("aria-expanded", d.open ? "true" : "false");
+    }
+    each(map, "details.km-f", function (d) {
+      sync(d);
+      d.addEventListener("toggle", function () { sync(d); });
+    });
     function clear() {
       each(map, ".km-on", function (e) { e.classList.remove("km-on"); });
       each(map, ".km-hit, .km-in", function (e) { e.classList.remove("km-hit", "km-in"); });
@@ -61,6 +80,7 @@
         var o = e.getAttribute("data-o");
         if (o === id) {
           e.classList.add("km-hit");
+          open(e.closest(".km-row"));
           if (!first) first = e;
         } else if (+o >= 0 && under(o, id)) {
           e.classList.add("km-in");
@@ -74,14 +94,24 @@
       c.setAttribute("aria-pressed", "false");
     });
     map.addEventListener("click", function (ev) {
+      var sel = window.getSelection && window.getSelection();
+      var inSummary = ev.target.closest("summary");
+      if (inSummary && sel && !sel.isCollapsed && map.contains(sel.anchorNode)) { ev.preventDefault(); return; }
       var c = ev.target.closest(".km-c");
-      if (c) { pick(c.getAttribute("data-c")); return; }
+      if (c) {
+        ev.preventDefault();
+        open(c.closest(".km-row"));
+        pick(c.getAttribute("data-c"));
+        return;
+      }
       var l = ev.target.closest(".km-ir .km-l[data-o]");
-      if (l && +l.getAttribute("data-o") >= 0) pick(l.getAttribute("data-o"));
+      var d = l && l.closest("details.km-f");
+      if (d && !d.open) return;
+      if (l && +l.getAttribute("data-o") >= 0) { ev.preventDefault(); pick(l.getAttribute("data-o")); }
     });
     map.addEventListener("keydown", function (ev) {
       var c = ev.target.closest && ev.target.closest(".km-c");
-      if (c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); pick(c.getAttribute("data-c")); }
+      if (c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(c.closest(".km-row")); pick(c.getAttribute("data-c")); }
       else if (ev.key === "Escape") clear();
     });
     each(document, "a[data-pick]", function (a) {
@@ -91,11 +121,19 @@
         var row = name && name.closest(".km-row");
         if (!row) return;
         ev.preventDefault();
+        open(row);
         if (row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
         if (picked !== id) pick(id, true);
         if (window.history && history.replaceState) history.replaceState(null, "", a.getAttribute("href"));
       });
     });
+    /* a row reached by its address (`#kl-<line>`), on load or later */
+    function toHash() {
+      var h = location.hash;
+      if (h && /^#kl-\d+$/.test(h)) open(document.getElementById(h.slice(1)));
+    }
+    toHash();
+    window.addEventListener("hashchange", toHash);
     map.classList.add("km-live");
     each(map, ".km-note", function (n) { n.hidden = false; });
   }
