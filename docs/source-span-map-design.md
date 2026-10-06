@@ -187,7 +187,7 @@ GHC 的 tick 浮动都是在解决同一件事），本刀不预留。
   `ir/coresites` 的 test 块钉住换算；`ir/lint` 新规则 `site`（`DAWN_CORE_LINT=1` 时检查）。
 - **负控**（`scripts/core-sites/mutate.py` 登记、`run.py` 逐个建编译器验红，锚点由
   `mutation-anchor-preflight.py` 每次推送证明恰好一处；`check.py` 与 `run.py` 挂在 nightly 的 core-lint job）：
-  1. `absolute`：降低时不减 `base`：check.py 报「is no call the parser sees」；
+  1. `absolute`：降低时不减 `base`：check.py 报「is no call the parser sees」或「fall in no function of the file」（翻倍的偏移落在被查 kernel 内报前者，落到所有函数之外报后者，取决于 kernel 的大小，所以两者都算检出）；
   2. `nlo`：模块限定调用 `m.f(x)` 的被调名起点写成调用起点：check.py 报「has its name at」；
   3. `rc-drops-site`：`c/rc` 重建调用时丢 site：check.py（列表取自 rc 之后）报「has no site」；
   4. `dump-prints`：`coredump` 打印 site：语料的 Core dump 变了，即 `selfhost-core-diff.sh` 在每次纯移动上都会报的东西。
