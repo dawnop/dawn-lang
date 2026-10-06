@@ -676,6 +676,9 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     # header's body: a body brace follows the condition's last operand
     let operand = t.kind == LBRACE && have_prev_code &&
       (is_cont_starter(prev_code.kind) || prev_code.kind == NOT)
+    # the block of `return {` or `comptime {` starts where that keyword does
+    let kw_brace = t.kind == LBRACE && have_prev_code &&
+      (prev_code.kind == RETURN || prev_code.kind == COMPTIME || prev_code.kind == BREAK)
     let tail_brace = t.kind == LBRACE && have_prev_code &&
       (prev_code.kind == RPAREN || prev_code.kind == IDENT)
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
@@ -699,14 +702,14 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       let header_indent = if header { hdrs[len(hdrs) - 1].at } else { -1 }
       let body = t.kind == LBRACE && len(openers) == logical_depth
       openers = openers ++ [Opener {
-        at: if header {
+        at: if header && nl == 0 {
           header_indent
-        } else if tail_brace || (operand && nl > 0) {
+        } else if nl > 0 || tail_brace || kw_brace {
           line_indent
-        } else if body {
-          logical_indent
         } else if lambda_brace {
           rparen_at
+        } else if body {
+          logical_indent
         } else if operand && len(openers) > 0 && not openers[len(openers) - 1].brace {
           openers[len(openers) - 1].at
         } else {
@@ -1687,4 +1690,14 @@ test "a minus after assert is a negation" {
   # a variable named `assert` elsewhere is still a value
   let v = "fn f(assert: Int) -> Int = assert - 1\n"
   assert fmt_of(v) == v
+}
+
+## #545: a block's body follows the construct the block belongs to. A brace
+## that opens its own line, the block of `return` or `comptime`, and a lambda
+## whose wrapped parameters began on an earlier line each start where their own
+## line or keyword is, even when the statement is a `let` whose annotation
+## wrapped.
+test "a block follows the line its own construct starts on" {
+  let a = "fn f(c: Bool) -> Int = {\n  let v:\n    Int = return {\n      1\n    }\n  let w:\n    Bool = comptime {\n      true\n    }\n  let g:\n    Fn = (a,\n      b) => {\n      a\n    }\n  match c {\n    true ->\n      {\n        1\n      }\n    _ -> 2\n  }\n}\n"
+  assert fmt_of(a) == a
 }
