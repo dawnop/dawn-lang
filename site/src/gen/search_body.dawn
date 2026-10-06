@@ -41,7 +41,7 @@ use html/page.{Lang, En, Zh, lang_path}
 use gen/common.{pad2}
 use gen/corpus.{Corpus, read_corpus}
 use gen/tutorial.{split_chapters}
-use gen/search.{body_terms}
+use gen/search.{body_terms, is_han}
 use md/parser
 use std/io
 
@@ -49,14 +49,34 @@ use std/io
 ## whose version it does not know, so a change to the format is a change here.
 pub fn body_version() -> Int = 1
 
-## How many code points of a paragraph its excerpt keeps, before the `…`.
+## How many display columns of a paragraph its excerpt keeps, before the `…`.
 ##
 ## 120 and not the 240 first drafted: at 240 the excerpts alone were 68 KB of
 ## the English asset gzipped and 99 KB of the Chinese one, against budgets of
 ## 100 and 130 for the whole file (docs/site-search-design.md 6 has the table).
 ## 120 is about two lines of the panel; 80, which would have kept English under
 ## the 90 first set, was ruled too short to read.
+##
+## Columns, not code points (docs/site-search-design.md 6.5): the bound was
+## always a width on the panel, and a Han character is two columns wide. Counted
+## in code points, a Chinese excerpt carried twice the text of an English one
+## and the Chinese asset alone went over its budget.
 fn excerpt_len() -> Int = 120
+
+## The columns `c` takes on the panel: 2 for the East Asian Wide and Fullwidth
+## characters the documents use (Unicode UAX #11) -- Han, CJK punctuation,
+## kana, Hangul syllables and the fullwidth forms -- and 1 for everything else.
+## A subset of the table rather than all of it: the corpus is English and
+## Chinese, and a wide character missing here only lets its excerpt run long.
+pub fn columns(c: Char) -> Int = {
+  let n = char.code(c)
+  if is_han(c) || (n >= 0x3000 && n <= 0x30FF) || (n >= 0xAC00 && n <= 0xD7A3)
+    || (n >= 0xFF01 && n <= 0xFF60) || (n >= 0xFFE0 && n <= 0xFFE6) {
+    2
+  } else {
+    1
+  }
+}
 
 ## One section: which document it is in, where it is (site-root relative,
 ## with its fragment), its title, and the plain text of its paragraphs in
@@ -226,20 +246,34 @@ pub fn body_sections(c: Corpus, lang: Lang) -> List[Section] =
 # ---- the index -------------------------------------------------------------
 
 ## A paragraph as the panel shows it: whole when it is at most [excerpt_len]
-## code points, otherwise cut and marked with `…`. The cut is at the last blank
-## in the second half of the bound, so that a word is not split; text with no
-## blank there (Chinese, mostly) is cut where the bound falls.
+## columns wide, otherwise cut and marked with `…`. The cut is at the last blank
+## that starts at or after half the bound, so that a word is not split; text
+## with no blank there (Chinese, mostly) is cut where the bound falls. For text
+## with no wide character a column is a code point, and this is the rule
+## docs/site-search-design.md 2.1 first wrote.
 pub fn excerpt(s: String) -> String = {
   let cs = code_points(s)
   let n = excerpt_len()
-  if len(cs) <= n {
+  # at[i]: the columns the first i code points take
+  var at: List[Int] = [0]
+  var w = 0
+  for c in cs {
+    w = w + columns(c)
+    at = at ++ [w]
+  }
+  if w <= n {
     s
   } else {
-    var at = n
-    while at >= n / 2 && not char.is_space(cs[at]) {
-      at = at - 1
+    # fit: how many code points fit in the bound
+    var fit = 0
+    while at[fit + 1] <= n {
+      fit = fit + 1
     }
-    let keep = if at < n / 2 { n } else { at }
+    var i = fit
+    while i >= 0 && at[i] >= n / 2 && not char.is_space(cs[i]) {
+      i = i - 1
+    }
+    let keep = if i < 0 || at[i] < n / 2 { fit } else { i }
     from_code_points(list.take(cs, keep)) ++ "…"
   }
 }
@@ -417,12 +451,35 @@ test "an excerpt is cut at a blank and marked" {
   assert str.starts_with(long, body)
   assert char.is_space(code_points(long)[len(kept) - 1])
   assert not str.ends_with(body, " ")
-  # no blank to cut at: the bound
+  # no blank to cut at: the bound, which a Han character fills two columns
+  # at a time
   let han = str.repeat("效", 300)
-  assert len(code_points(excerpt(han))) == excerpt_len() + 1
+  assert len(code_points(excerpt(han))) == excerpt_len() / 2 + 1
   # exactly at the bound is not cut
   let exact = str.repeat("x", excerpt_len())
   assert excerpt(exact) == exact
+  let exact_han = str.repeat("效", excerpt_len() / 2)
+  assert excerpt(exact_han) == exact_han
+}
+
+## The bound is columns (docs/site-search-design.md 6.5): Han, CJK and
+## fullwidth punctuation are two, ASCII one, so a Chinese and an English
+## excerpt take the same room on the panel.
+test "an excerpt is bounded in display columns" {
+  assert columns('a') == 1
+  assert columns(' ') == 1
+  assert columns('é') == 1
+  assert columns('效') == 2
+  assert columns('，') == 2
+  assert columns('。') == 2
+  assert columns('「') == 2
+  # mixed: an ASCII word between Han runs, cut at the blank after it
+  let mixed = str.repeat("效", 40) ++ " Fs " ++ str.repeat("果", 100)
+  let cut = excerpt(mixed)
+  assert cut == str.repeat("效", 40) ++ " Fs" ++ "…"
+  # a wide character that would straddle the bound is left out
+  let odd = "x" ++ str.repeat("效", 100)
+  assert len(code_points(excerpt(odd))) == 1 + (excerpt_len() - 1) / 2 + 1
 }
 
 ## A tiny deterministic generator, so that "twenty terms at random" is the
