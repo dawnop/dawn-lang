@@ -3,8 +3,8 @@
 > 状态：**current** —— 刀 L1（2026-10-06）落地：两个 prelude trait、字面量按期望定型、二元运算的字面量让步与混合种类规则、
 > 调用实参在两轮推断之间检查等待中的字面量、纯 impl 的编译期折叠与它的报错措辞、折叠缓存。权威条文在 [spec.md](spec.md) §1.5、§2.1、§3.5、§4.3。
 > 与 [arith-operator-traits-design.md](arith-operator-traits-design.md)（运算符刀 1）同一个 release。
-> N1（`std/narrow` 的 `FromFloat` impl）已落地。未做：L2（LSP 悬停显示字面量的定型与折叠值）、L3（tileir 的 `FromFloat[Tile[D]]`/`FromInt[Idx]`）、
-> N2（std 定宽整数），见 §8。std 里的 impl 都要等种子推进到本 release 之后（std 在自举 closure 里，种子不认识这两个 trait）。
+> N1（`std/narrow` 的 `FromFloat` impl）与 N2（std 定宽整数，D13）已落地。未做：L2（LSP 悬停显示字面量的定型与折叠值）、
+> L3（tileir 的 `FromFloat[Tile[D]]`/`FromInt[Idx]`），见 §8。std 里的 impl 都要等种子推进到本 release 之后（std 在自举 closure 里，种子不认识这两个 trait）。
 > 前置阅读：[int-min-literal-design.md](int-min-literal-design.md)、[effect-params-design.md](effect-params-design.md) §9（关联效果默认值）。
 
 ## 1. 为什么
@@ -185,6 +185,23 @@ trait FromFloat[T] { effect FromFloat = !()  fn from_float(x: Float) -> T !T.Fro
 无符号的 `<` 必须给自己的 `Ord` impl（否则 `U64` 按有符号比，静默错）；转换 `of`/`wrap`/`to_int`；按位先给具名函数，运算符形式等按位 trait 立项。刀前必测
 sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 
+**刀 N2 落地（2026-10-06）**，在上面之外定下的几件事：
+
+- **实测**（刀前，`packages/sha2` 的压缩循环改用 `U32` 的草稿副本，未合入）：64 MiB 一轮，单进程 7 轮、3 个进程，
+  JVM 去掉首轮后中位数 `Int + MASK` 1129.5 ms、`U32` 1141 ms（+1.0%）；native（cc 13.3 `-O2`，nmain 的旗标，无 LTO）
+  1004 ms 对 1006 ms（+0.2%）。两者摘要相同且与 Python `hashlib` 一致。远低于 D1 的 2 倍重开线。
+- **模块：每个宽度一个，放在 `std/int/` 下**（`std/int/i8` … `std/int/u64`），不是一个 `std/fixed`。子目录是 10-06 的改裁：七个平铺在 std 顶层的条目太长。
+  `use std/int/u32` 绑定的限定名照旧是路径末段 `u32`，所以 `u32.wrap` 不变；这是 std 第一次有子目录，加载器、内嵌 std 与两后端本来就接受，
+  要改的只是八个把 std 平铺复制成 `*.dawn` 的契约脚本和站点 stdlib 页的限定名（原先取 `std/` 之后的全部）。模块就是 Dawn 的命名空间，`u32.wrap(n)` 与
+  `u8.wrap(n)` 是同一个名字的不同限定，与 `char.code` 之于 `Char` 同形。合成一个模块，要么每个名字带宽度（`wrap_u32`），
+  要么用一个 trait，而 trait 的 `to_int` 成员会在每个导入者里遮住内建 `to_int`；构造函数的主体只在返回位，本来也做不成 trait 成员。
+  程序只导入用到的宽度。代价：七个模块形状相同，靠同一个对拍语料（`spike-native/fixed_ints`，Python 无界整数算出的期望）钉住。
+- **`Ord` 只有 `U64` 写**：其余六个的值就是范围内的 `Int`，继承目标的序是对的；自己写一份说的是同一件事，却把每个 `<`
+  从原生比较变成一次调用。草稿「为一致仍各写一份」不采。
+- **`complement` 而不是 `not`**：`not` 是关键字。移位与旋转的计数取模宽度，同 `Int` 移位取低 6 位。
+- **`U64` 不收负字面量**，大值写 `u64.wrap(-1)` 或 `u64.MAX`：字面量先是 64 位有符号词法值（`int-min-literal-design.md`）。
+- 检查版只给 `checked_add`/`checked_sub`/`checked_mul`；`/` 的唯一越界（有符号 `MIN / -1`）照 `Int` 回绕。
+
 ## 3. 改动位置
 
 | 文件 | 改动 |
@@ -236,7 +253,7 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 | L2 | LSP：字面量悬停显示定型结果与折叠值（`lspeval` 读折叠表）；`EUnary(-, 字面量)` 与 `XComptime` 配对 | 待做 |
 | L3 | tileir：`FromFloat[Tile[D]]`、`FromInt[Idx]`（与运算符刀 3 同批） | 待种子 |
 | N1 | `std/narrow`：`FromFloat[BF16/FP16/F32]`（不给 `FromInt`：bf16 只有 256 个连续整数）；`narrow-contract` 把每个有限的舍入输入写成该格式的字面量，编译期折叠的值对 oracle。顺带修了 `-0.0` 字面量经 trait 时丢符号（`0.0 - 0.0` 是 +0.0） | 完成 |
-| N2 | std 定宽整数（D13） | 待 N1 与实测 |
+| N2 | std 定宽整数（D13）：七个模块、`FromInt` 与六个算术 trait、`Show`、`U64` 的 `Ord`、`of`/`wrap`/`to_int`、具名按位、`checked_*` | 完成 |
 | N3 | 按位 trait（独立设计） | — |
 | — | 模式里的字面量（D10） | 有消费者时 |
 

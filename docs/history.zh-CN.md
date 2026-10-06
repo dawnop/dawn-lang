@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ 9f1e5d5c0c891178 -->
+<!-- doc-check: translation-of docs/history.md @ ffd18ebb32328c0b -->
 
 # 历史
 
@@ -173,6 +173,9 @@
 - **2026-10-06。** `std/narrow` 的 bfloat16、binary16、binary32 接上运算符与浮点字面量：`BF16` 上的
   `a + b` 是正确舍入的和，`a % b` 是精确的余数，`let w: BF16 = 0.1` 就是 `bf16(0.1)`，在编译期折叠。
   具名函数保留（已在 main，尚未发版）。（[arith-operator-traits-design.md](arith-operator-traits-design.md)）
+- **2026-10-06。** std 有了定宽整数 `I8` 到 `I32`、`U8` 到 `U64`，每种一个模块：`Int` 上的不透明类型，算术与 `Int`
+  同样回绕，字面量在编译期检查范围，按位运算是具名函数。编译器仍然只拥有 `Int` 与 `Float`；实测 `U32` 版 sha256
+  与掩码 `Int` 写法相差不到 1%（已在 main，尚未发版）。（[literal-system-design.md](literal-system-design.md)）
 
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
 

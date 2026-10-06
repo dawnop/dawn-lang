@@ -75,7 +75,7 @@ Core golden 与跨 release Emit 差分只按实测更新或报告，不根据方
 
 ## 7. 不做的（记录理由）
 
-- **不引入无符号整数或 BigInt。** marker 不是一种值，只是把一元负号所需的唯一 magnitude
+- **不引入无符号整数或 BigInt。**[^unsigned] marker 不是一种值，只是把一元负号所需的唯一 magnitude
   跨过 lexer/parser 边界。
 - **不接受裸 `2^63` 后再靠上下文变负。** 类型推断、常量折叠或运算符重载都不应把词法越界
   追溯性改成合法；只有直接一元负号局部可判定。
@@ -83,3 +83,7 @@ Core golden 与跨 release Emit 差分只按实测更新或报告，不根据方
   内部状态会泄漏进一般 AST。
 - **不改下划线与换行规则。** 三种进制沿用既有分隔习惯，lexer/formatter 的 continuation
   规则不属于 SYN-08。
+
+[^unsigned]: 指编译器原语。std 的定宽整数（`U8`…`U64`、`I8`…`I32`，`Int` 上的不透明类型）是另一回事，
+    见 [literal-system-design.md](literal-system-design.md) D13 与 spec §11「定宽整数」（2026-10-06）。
+    `U64` 的大值仍没有字面量（字面量先是 64 位有符号词法值，本文的纪律），写 `u64.wrap(-1)`。

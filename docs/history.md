@@ -199,6 +199,12 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   remainder, and `let w: BF16 = 0.1` is `bf16(0.1)`, folded at compile time. The named
   functions stay (on main, not yet released).
   ([arith-operator-traits-design.md](arith-operator-traits-design.md))
+- **2026-10-06.** std gains fixed-width integers, `I8` to `I32` and `U8` to `U64`, one module
+  each: opaque types over `Int` whose arithmetic wraps as `Int`'s does, whose literals are
+  range-checked at compile time, and whose bitwise operations are named functions. The
+  compiler still owns only `Int` and `Float`; sha256 over `U32` measured within 1% of the
+  masked-`Int` form (on main, not yet released).
+  ([literal-system-design.md](literal-system-design.md))
 
 From v0.1.0 on 2026-07-17 to v0.81.0 on 2026-10-01 there have been 83 release tags.
 

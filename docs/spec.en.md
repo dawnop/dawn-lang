@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 054d554e1f171c9a -->
+<!-- doc-check: translation-of docs/spec.md @ d48fb425642fe41a -->
 
 # Dawn Language Specification
 
@@ -4162,6 +4162,20 @@ two together; one module too many or too few fails it):
 - `std/loc`: reading a call site `Loc`, and `here()` (§8.4)
 - `std/narrow`: the narrow binary floats bf16, binary16 and binary32, correctly rounded
   per operation (§11 "Math builtins")
+- `std/int/i8`: the signed 8-bit integer `I8`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
+- `std/int/i16`: the signed 16-bit integer `I16`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
+- `std/int/i32`: the signed 32-bit integer `I32`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
+- `std/int/u8`: the unsigned 8-bit integer `U8`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
+- `std/int/u16`: the unsigned 16-bit integer `U16`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
+- `std/int/u32`: the unsigned 32-bit integer `U32`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
+- `std/int/u64`: the unsigned 64-bit integer `U64`, an opaque type over `Int` with wrapping
+  arithmetic (§11 "Fixed-width integers")
 - `std/list`: `List` functions and the `Iter` instance
 - `std/bytes`: byte strings, with UTF-8, hex and base64 encoding
 - `std/io`: console, files, environment and subprocesses (the `Fs`/`Proc`/`Env` effects
@@ -4518,6 +4532,40 @@ conversion functions are
 <!-- doc-check: builtin-list --> `to_float` and `to_int`. Additional
 operations live in pure Dawn source libraries; for example, `std/narrow` computes square
 roots with integer arithmetic and does not depend on a host math library.
+`std/narrow`'s three formats have `+ - * / %` and unary `-` (§3.5's `Add` to `Neg`, with the
+default rounding, nearest even; `%` is the exact truncating remainder) and `FromFloat`:
+`let w: BF16 = 0.1` is `bf16(0.1)`, folded at compile time. They take no integer literals.
+
+**Fixed-width integers.** The compiler owns two numbers, `Int` and `Float`
+([literal-system-design.md](literal-system-design.md) D1); `I8`, `I16`, `I32`, `U8`, `U16`,
+`U32` and `U64` are opaque types over `Int` (§2.7), one std module each (`std/int/i8` ...
+`std/int/u64`; `use std/int/u32` binds the last segment, `u32`), made first-class numbers by §3.5's arithmetic and literal traits. The criteria:
+
+- **Invariant and representation**: the value is the `Int` in range (`I8` is -128..127, `U32`
+  is 0..2^32-1, and so on). `U64` has no invariant: every `Int` is the bit pattern of some
+  `U64`, and a value of 2^63 or more has a negative `Int`.
+- **Arithmetic wraps, by `Int`'s own rule** (§4.3): `+ - *` and unary `-` keep the low w bits
+  of the result (read as two's complement for the signed types); `/` and `%` truncate and
+  panic on a zero divisor with `Int`'s message; a signed `MIN / -1` wraps to `MIN`; `U64`'s
+  `/ % <` and rendering are unsigned. Overflow is not checked: two overflow rules in one
+  family of types would have every reader looking up which applies. The checked forms are
+  `checked_add`/`checked_sub`/`checked_mul`, answering an `Option`.
+- **Literals** go through `FromInt`, whose pure impl folds at compile time, so
+  `let b: U8 = 300` is a compile error with the range stated by the library (§1.5). A float
+  literal never becomes an integer type; `U64` takes no negative literal, and its large
+  values are written `u64.wrap(-1)` or `u64.MAX`. In the declaring module a literal is typed
+  at the target as always.
+- **No mixed widths**: `U8 + U16` is a compile error (the two sides differ); there is no
+  implicit widening or narrowing. Conversions go through `Int`: `x.of(n)` answers an `Option`
+  (`None` out of range), `x.wrap(n)` keeps the low bits, `x.to_int(v)` gives the `Int` back
+  (the bit pattern, for `U64`).
+- **Equality, hashing and order** are inherited from the target `Int` (§2.7), which is right
+  for in-range values; only `U64` writes an `Ord` of its own, without which a value above
+  2^63 would compare below zero. Rendering is decimal (`impl Show`, unsigned for `U64`).
+- **Bitwise** operations are named functions: `and`, `or`, `xor`, `complement` (`not` is a
+  keyword), `shl`, `shr`, `rotl`, `rotr`. A signed `shr` copies the sign bit in, an unsigned
+  one zeros; a shift or rotation count is taken modulo w (as `Int`'s shifts take the low six
+  bits). Operator forms wait for bitwise traits of their own.
 
 Implementation strategy: wrap Java thinly wherever a thin wrapper will do (`String` simply
 is `java.lang.String`), while the persistent `List`/`Map`/`Set` are **pure Dawn source**
