@@ -340,7 +340,8 @@ class Layout:
                 continue
             i = index[lo]
             while i > 0 and self.code[i - 1].kind == "LPAREN" and \
-                    i - 1 in match and self.code[match[i - 1]].lo <= n.hi:
+                    i - 1 in match and self.code[match[i - 1]].lo <= n.hi and \
+                    not self.call_paren(i - 1, text):
                 i -= 1
             self.lo_min[id(n)] = self.code[i].lo
         self.modifier_of = {}  # a modifier token's lo -> its declaration's start
@@ -372,6 +373,23 @@ class Layout:
         self.by_line = {}
         for t in self.code:
             self.by_line.setdefault(self.line_of(t.lo), []).append(t)
+
+    def call_paren(self, i, text):
+        """Whether the `(` at code index `i` opens a call's arguments, not a
+        grouping. A call's parenthesis closes right after its last argument, so
+        a sole argument that ends where the `)` begins looks exactly like a
+        parenthesised node (`w(` / `() => {` ... `})`), and the node's start
+        would be read as the call's line. A `(` straight after a value (a name,
+        a type name, a closer) on its own line is a call; `in` and `assert` are the contextual
+        words that read as names and precede a grouping."""
+        if i == 0:
+            return False
+        p = self.code[i - 1]
+        if self.line_of(p.hi - 1) != self.line_of(self.code[i].lo):
+            return False  # a newline before `(` ends the statement: it groups
+        if p.kind in ("RPAREN", "RBRACKET", "TYPEIDENT"):
+            return True
+        return p.kind == "IDENT" and text[p.lo:p.hi] not in ("in", "assert")
 
     def code_on(self, ln):
         return self.by_line.get(ln, [])
@@ -850,6 +868,12 @@ def self_test(dawn):
         ("an over-indented statement", "fn f() -> Int = {\n    1\n}\n", "item-indent"),
         ("a spaced subtraction", "fn f(a: Int) -> Int = a - 1\n", None),
         ("a glued subtraction", "fn f(a: Int) -> Int = a -1\n", "minus-role"),
+        ("a sole lambda argument on a line of its own",
+         "fn f() -> Int = {\n  let a = g(\n    () => {\n      1\n    })\n  a\n}\n", None),
+        ("the same body at the call's own level",
+         "fn f() -> Int = {\n  let a = g(\n    () => {\n    1\n    })\n  a\n}\n", "item-indent"),
+        ("a grouping parenthesis on a line of its own",
+         "fn f() -> Int = {\n  let r = b\n  (\n    h(r) << 2) + h(\n      r)\n}\n", None),
     ]
     tmp = tempfile.mkdtemp(prefix="fmt-properties-self-")
     files = []
