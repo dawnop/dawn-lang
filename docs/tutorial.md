@@ -1924,14 +1924,14 @@ A matrix product, one 64 by 64 tile of `c` per block, walking along K:
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, carry, get, set}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
-  let acc = carry(zeros(c))
-  for k in d_range(0, 256 / 32) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
-  store_cell(c, acc.get())
+  var acc = zeros(c)
+  for k in d_range(0, 256 / 32) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
 }
 
 pub fn main() -> Unit !io = {
@@ -1958,8 +1958,8 @@ continue %26, %25 : tile<64x64xf64>, token
 rows) follows grid axis 0, and dimension 1 (along K) follows none: `FREE_AXIS` means the
 kernel picks that cell itself, and `load_at(a, [k])` is how. `b` is the other way round,
 and the cells of `c`, the `Out`, are the grid. `for k in d_range(0, 8) { .. }` is a loop of
-eight trips. The accumulator is a `Carry`, a device variable: `carry(zeros(c))` makes it,
-`acc.get()` reads it and `acc.set(..)` replaces it with a tile of the same shape.
+eight trips. The accumulator is a `var`, carried through the loop: `var acc = zeros(c)` makes it,
+and `acc = ..` in the body replaces it with a tile of the same shape.
 `zeros(c)` is a tile shaped like one cell of `c`, so the accumulator's shape is never
 written out, and `mma` reads m, k and n off its operands (a k on which `a` and `b`
 disagree is refused while recording). It records Tile IR's `mmaf`, the float one.
@@ -2035,7 +2035,7 @@ has the operation's rank, and a rank-0 tile widens to any shape. The second kern
 subtraction; the refusal names `subf`, the Tile IR operation `sub` records.
 `broadcast(t, shape)` is the explicit spelling, for a place that is not an element-wise
 operation. A loop's starting value is usually `full(shape, value)`, a tile of that shape
-in the format it is checked against: `let m: Carry[F32] = carry(full([32, 1], 0.0))`.
+in the format it is checked against: `var m: Tile[F32] = full([32, 1], 0.0)`.
 
 NumPy would have widened the `[32]` too. The reason not to is the case its rule gets
 wrong while looking right: reduce a square `[64, 64]` tile without `keepdims` and NumPy
@@ -2044,7 +2044,7 @@ of row j. Here that is refused, and `keepdims` is how a reduction says which axi
 
 Put this step in a loop over blocks of keys and values, carry a running maximum and a
 running sum, and it is FlashAttention: `flash_attn` in `scripts/tile-golden/kernels.dawn`
-is that loop, three carries and these same operations, and `flash_attn_bf16` beside it
+is that loop, three `var`s and these same operations, and `flash_attn_bf16` beside it
 is the same loop with bf16 inputs, f32 accumulators and `p.to(BF16)` before the second
 product. The
 [GPU page](https://dawn-lang.dawnop.com/gpu.html) shows what the backend records for

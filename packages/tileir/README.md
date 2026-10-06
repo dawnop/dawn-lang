@@ -66,13 +66,13 @@ block reads and writes, element-wise operations take their shape and format
 from their operands, and a matrix product's from its two factors:
 
 ```dawn
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, By, carry, get, set}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
-  let acc = carry(zeros(c))
-  for k in d_range(0, 256 / 32) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
-  store_cell(c, acc.get())
+  var acc = zeros(c)
+  for k in d_range(0, 256 / 32) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
 }
 
 let (prog, entry) = trace3("matmul",
@@ -133,35 +133,43 @@ let (prog, entry) = trace3("matmul",
   an element offset: `tile_at(idx, n)` is `idx * n`.
 - An operation's attributes are named parameters with the dialect's default:
   `add(a, b, rounding: Down)`, `d_global("t", F64, xs, visibility: Private)`.
-  Float arithmetic is `add`, `sub`, `mul`, `div`, `max`, `min`, `neg`, `abs`;
-  importing `max` and `min` shadows the prelude's in that module.
+  Float arithmetic is `add`, `sub`, `mul`, `div`, `max`, `min`, `neg`, `abs`,
+  and `+ - * /` and unary `-` on tiles (and on `Idx`) are the same calls: over
+  an integer tile they record the integer operations. Importing `max` and
+  `min` shadows the prelude's in that module.
 - Memory operations are ordered by the token chain the recorder threads
   through them, not by program order. `d_fork2` runs two chains, and writes
   it cannot show to be disjoint are refused.
 
 ## Control flow
 
-A value that changes as a loop goes is a `Carry`, a device variable:
-`let acc = carry(init)`, `acc.get()` to read it, `acc.set(t)` to replace it
-with a tile of the same format and shape. A carry starts from a tile with a
-shape (`zeros(p)`, `full`, a `broadcast`), not from a rank-0 constant or
-a `lit`. This is FlashAttention with bf16 inputs and f32 accumulation:
+A value that changes as a loop goes is a `var`, which a `for` over a
+`d_range` carries: `var acc = zeros(p)`, then `acc = t` in the body replaces it
+with a tile of the same format and shape, and after the loop it holds what the
+last iteration assigned. A `var` starts from a tile with a shape (`zeros(p)`,
+`full`, a `broadcast`), not from a rank-0 constant or a `lit`. This is
+FlashAttention with bf16 inputs and f32 accumulation:
 
 ```dawn
-let m: Carry[F32] = carry(full([BQ, 1], neg_inf()))
-let l: Carry[F32] = carry(full([BQ, 1], 0.0))
-let acc: Carry[F32] = carry(full([BQ, D], 0.0))
+use std/float.{INFINITY}
+
+var m: Tile[F32] = full([BQ, 1], -INFINITY)
+var l: Tile[F32] = full([BQ, 1], 0.0)
+var acc: Tile[F32] = full([BQ, D], 0.0)
 for j in d_range(0, N / BK) {
-  let s: Tile[F32] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(scale))
-  let m_new = max(m.get(), reduce_max(s, keepdims: true))
-  let p = exp(sub(s, m_new))
-  let alpha = exp(sub(m.get(), m_new))
-  l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims: true)))
-  acc.set(mma(p.to(BF16), load_at(v, [j]), mul(acc.get(), alpha)))
-  m.set(m_new)
+  let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * lit(scale)
+  let m_new = max(m, reduce_max(s, keepdims: true))
+  let p = exp(s - m_new)
+  let alpha = exp(m - m_new)
+  l = l * alpha + reduce_sum(p, keepdims: true)
+  acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
+  m = m_new
 }
-store_cell(o, div(acc.get(), l.get()).to(F64))   # o: Param[F64]
+store_cell(o, (acc / l).to(F64))   # o: Param[F64]
 ```
+
+`carry`, `get` and `set` remain for the loops a `for` cannot write: `d_loop`'s
+body is a closure with a data-dependent exit.
 
 - `for j in d_range(lower, upper, step: By(n), unsigned_cmp: false) { .. }` is
   a loop. The bounds are host numbers (`Int`, fixed when the kernel is
