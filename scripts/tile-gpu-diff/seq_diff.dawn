@@ -1353,7 +1353,7 @@ fn flash_bf16_seq() -> Seq = Seq {
 }
 
 ## The tolerance a sequence is held to, `(atol, rtol)`: leetgpu's for every
-## sequence but `flash_bf16`, whose absolute part is `2^-8 * max|v|`.
+## sequence but `flash_bf16`, whose absolute part is `2^-16 * max|v|`.
 ##
 ## Why that one cannot be leetgpu's. `flash_attn_bf16` narrows each
 ## probability `p` to bf16 before the second product, and the reference
@@ -1361,17 +1361,26 @@ fn flash_bf16_seq() -> Seq = Seq {
 ## `p` before narrowing are not the same number: the device's comes from an
 ## f32 score and an f32 `exp`, the reference's from f64 ones, so they agree
 ## to about 1e-7 relative. Wherever a bf16 rounding boundary falls between
-## the two, they narrow to NEIGHBOURING bf16 values, one bf16 step apart:
-## 2^-8 to 2^-7 of `p` (bf16 keeps eight significant bits). One such
-## disagreement moves an output lane by at most `step * p * |v| / l`, and
-## `p / l` is that key's share of the row's weight, so the lane moves by at
-## most `2^-7 * share * max|v|`. `2^-8 * max|v|` therefore covers any set
-## of disagreements whose shares add up to one half of a row, which is far
-## more than a corpus whose `p` agree to 1e-7 can produce (the miss line
-## prints how far the device actually is, in units of this bound). The
-## f32 arithmetic everywhere else is ~1e-7 relative and is what `RTOL`
-## keeps covering. 1e-5 absolute is 1/350 of one bf16 step of `v` here and
-## would call every such disagreement a wrong answer.
+## the two, they narrow to NEIGHBOURING bf16 values, one bf16 step apart.
+## That is a real, if rare, disagreement and the tolerance has to be able to
+## say whether it happened; 1e-5 absolute is 1/350 of one bf16 step of `v`
+## here and would call any such disagreement a wrong answer.
+##
+## Why it is `2^-16` and not the `2^-8` this first was. A bound has to sit
+## between two measured numbers, and both are here. BELOW it, the device
+## against the reference on this corpus: `miss` prints ~1.8e-8 absolute,
+## about 1e-3 of the bound, and no `p` narrowing disagreed at all. ABOVE it,
+## the reference that forgot to narrow `p` at all (`flash_bf16_unrounded`,
+## the control below): 4.09e-4 absolute, thirty times the bound. At `2^-8 *
+## max|v|` (0.0035) that forgetful reference moved the answer by 0.116 of the
+## bound and was judged GREEN, which is a tolerance that cannot tell the
+## kernel it guards from the mistake it exists to catch. `2^-16` leaves two
+## orders of magnitude to the device side and more than one to the other,
+## and one lone neighbouring-bf16 disagreement (at most `2^-7 * share *
+## max|v|` of an output lane, `share` being that key's weight in its row)
+## would be named by `miss` as a number above 1.0 rather than hidden. The
+## f32 arithmetic everywhere else is ~1e-7 relative and is what `RTOL` keeps
+## covering.
 fn tolerance_of(name: String) -> (Float, Float) =
   if name == "flash_bf16" {
     let v = flash_bf16_bufs()[2].data
@@ -1379,7 +1388,7 @@ fn tolerance_of(name: String) -> (Float, Float) =
       let m = if x > 0.0 { x } else { 0.0 - x }
       if m > a { m } else { a }
     })
-    (biggest / 256.0, RTOL)
+    (biggest / 65536.0, RTOL)
   } else {
     (ATOL, RTOL)
   }
@@ -1598,6 +1607,11 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
   } else if name == "flash_bf16" {
     map.from([("flash_attn_bf16", (4, last_out((dts, ins) =>
         flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins, p_round: "bf16"))))])
+  } else if name == "flash_bf16_unrounded" {
+    # NOT a sequence of `sequences()`: the control's reference, the honest
+    # one with `p_round` left out (see `tolerance_of`).
+    map.from([("flash_attn_bf16", (4, last_out((dts, ins) =>
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins))))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
@@ -1807,6 +1821,21 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     if blocked == "" && not any_differ && v != "identical:exact" && v != "close:tolerance"
       && v != "identical:tolerance" {
       blocked = v
+    } else {
+      ()
+    }
+
+    # THE PERMANENT NEGATIVE CONTROL of `flash_bf16`'s tolerance: the same
+    # launch judged against the reference that never narrows `p`. A
+    # tolerance that cannot red it is not guarding the narrowing, whatever
+    # the device says. The first line is host-only (the honest fake against
+    # the unrounded one) and is held on every driver; the second puts the
+    # device's own answer in the same chair and is held when it ran.
+    if s.name == "flash_bf16" {
+      let forgetful = run_fake(Seq { ..s, name: "flash_bf16_unrounded" }, 0 - 1, "", "")
+      io.println("control unrounded-reference host sequence=${s.name} verdict ${verdict(s.tier, tol, fake, forgetful)}"
+          ++ " miss ${miss_line(forgetful, fake, tol)}")
+      io.println("control unrounded-reference device sequence=${s.name} verdict ${verdict(s.tier, tol, forgetful, real)}")
     } else {
       ()
     }
