@@ -1936,11 +1936,80 @@ fn sweep(st: RSt, after: Set[Int]) -> (RSt, List[CStmt]) = {
   if len(dead) == 0 { (st, []) } else { (strip_syms(st, dead), drops(dead)) }
 }
 
+## A self tail call lowers to `let t = f(p); ...; p = t; continue`: the
+## arguments go through temporaries because the assignment is simultaneous.
+## For the counted parameter that shape is a copy in disguise -- the `let`
+## reads `p` while the later `p = t` still counts `p` as live, so the read is
+## not the last one and `loop(step(s), ...)` dups `s` on every step. Where the
+## simultaneity buys nothing for one parameter, the pair collapses into the
+## plain assignment `p = f(p)`, which the assignment arm of `rw_stmt` already
+## hands over. Fused only when `t` has no other use and nothing between the
+## two statements reads `p` (those would now see the new value); `[f(b, a)]`
+## swaps and `[step(s), s.len]` therefore keep their temporaries.
+fn reads_sym(s: CStmt, sym: Int) -> Bool = set.has(fv_stmt(s, set.empty()), sym)
+
+fn rebind_partner(stmts: List[CStmt], a: Int, t: Int) -> Int = {
+  var b = a + 1
+  while b < len(stmts) {
+    match stmts[b] {
+      CSAssign(_, CLocal(t2, _)) -> if t2 == t { return b }
+      _ -> ()
+    }
+    b = b + 1
+  }
+  -1
+}
+
+fn can_fuse_rebind(stmts: List[CStmt], base: Set[Int], a: Int, b: Int, t: Int, p: Int) -> Bool = {
+  # `base` is what the block's tail expression and everything after it read
+  if p == t || set.has(base, t) { return false }
+  var i = 0
+  while i < len(stmts) {
+    if i != a && i != b && reads_sym(stmts[i], t) { return false }
+    if i > a && i < b && reads_sym(stmts[i], p) { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn fuse_rebinds(stmts: List[CStmt], base: Set[Int]) -> List[CStmt] = {
+  var cur = stmts
+  var a = 0
+  while a < len(cur) {
+    match cur[a] {
+      CSLet(t, ty, v) ->
+        if is_ref_ty(ty) {
+          let b = rebind_partner(cur, a, t)
+          if b >= 0 {
+            match cur[b] {
+              CSAssign(p, _) ->
+                if can_fuse_rebind(cur, base, a, b, t, p) {
+                  var next: List[CStmt] = []
+                  var i = 0
+                  while i < len(cur) {
+                    if i == a { next = next ++ [CSAssign(p, v)] }
+                    else if i != b { next = next ++ [cur[i]] }
+                    i = i + 1
+                  }
+                  cur = next
+                }
+              _ -> ()
+            }
+          }
+        }
+      _ -> ()
+    }
+    a = a + 1
+  }
+  cur
+}
+
 ## Statements, each rewritten with the union of everything after it still
 ## alive. The after-sets are built back to front so the whole list costs one
 ## walk, then spent front to back with the rewrite; a sweep between each pair
 ## of statements releases whatever the suffix no longer touches.
-fn rw_stmts(st: RSt, stmts: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) = {
+fn rw_stmts(st: RSt, stmts0: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) = {
+  let stmts = fuse_rebinds(stmts0, base)
   let n = len(stmts)
   var afters: List[Set[Int]] = []
   var acc = base
@@ -3358,6 +3427,62 @@ test "a read after the assignment sees the new value, so the old one is handed o
         _ -> panic("expected the value named first")
       }
     }
+    _ -> panic("expected a block")
+  }
+}
+
+test "a self tail call's argument temporary fuses into the assignment unless it would be read stale" {
+  let lst = TyList(TyInt)
+  let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite)
+  # `loop(g(s))`: the temporary has no other use, so `s = g(s)` is left
+  let single = fuse_rebinds([CSLet(3, lst, call), CSAssign(1, CLocal(3, lst))], set.empty())
+  assert len(single) == 1
+  match single[0] {
+    CSAssign(p, CCall(_, _, _, _)) -> { assert p == 1 }
+    _ -> panic("expected the plain assignment")
+  }
+  # `loop(b, a)`: the second temporary reads `a`, which the first assignment
+  # would already have overwritten, so that pair keeps its temporary
+  let swap = fuse_rebinds([
+    CSLet(3, lst, CLocal(2, lst)),
+    CSLet(4, lst, CLocal(1, lst)),
+    CSAssign(1, CLocal(3, lst)),
+    CSAssign(2, CLocal(4, lst))
+  ], set.empty())
+  assert len(swap) == 3
+  # the temporary also read elsewhere stays a temporary
+  let shared = fuse_rebinds([
+    CSLet(3, lst, call),
+    CSAssign(1, CLocal(3, lst)),
+    CSDiscard(CLocal(3, lst))
+  ], set.empty())
+  assert len(shared) == 3
+  # ... and so does one the block's tail expression reads
+  let tail_read = fuse_rebinds([CSLet(3, lst, call), CSAssign(1, CLocal(3, lst))], set.insert(set.empty(), 3))
+  assert len(tail_read) == 2
+}
+
+test "a fused self tail call hands its parameter over with no dup" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite)
+  let body = CBlock(
+    [CSLet(3, lst, call), CSAssign(1, CLocal(3, lst))],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) ->
+      match ss[0] {
+        CSLet(_, _, CCall(_, args2, _, _)) ->
+          match args2[0] {
+            CLocal(s, _) -> { assert s == 1 }
+            _ -> panic("expected the parameter handed into the call, not a dup")
+          }
+        _ -> panic("expected the value named first")
+      }
     _ -> panic("expected a block")
   }
 }
