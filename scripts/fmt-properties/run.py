@@ -334,6 +334,7 @@ class Layout:
                 stack.append(i)
             elif t.kind in CLOSERS and stack:
                 match[stack.pop()] = i
+        self.lo_bare = dict(self.lo_min)  # before the walk out through parentheses
         for n in walk(root):
             lo = self.lo_min.get(id(n))
             if lo is None or lo not in index or n.hi is None:
@@ -497,7 +498,9 @@ def body_anchor(lay, c, bases):
     hold = None
     p = c
     while p is not None:
-        lo = lay.lo_min.get(id(p))
+        # a header's body follows the header's keyword, not the parenthesis
+        # that groups the whole `if` from the line above
+        lo = (lay.lo_bare if p.kind in HEADED or p.kind == "Lambda" else lay.lo_min).get(id(p))
         if p is not c and anc is None and lo is not None and lo < c.lo:
             anc = lo
         if hold is None and id(p) in bases:
@@ -872,6 +875,10 @@ def self_test(dawn):
          "fn f() -> Int = {\n  let a = g(\n    () => {\n      1\n    })\n  a\n}\n", None),
         ("the same body at the call's own level",
          "fn f() -> Int = {\n  let a = g(\n    () => {\n    1\n    })\n  a\n}\n", "item-indent"),
+        ("an `if` on the line after the parenthesis that groups it",
+         "fn f() -> Int = {\n  let a = (\n    if c {\n      1\n    } else {\n      2\n    })\n  a\n}\n", None),
+        ("the same body one level shallower",
+         "fn f() -> Int = {\n  let a = (\n    if c {\n    1\n    } else {\n      2\n    })\n  a\n}\n", "item-indent"),
         ("a grouping parenthesis on a line of its own",
          "fn f() -> Int = {\n  let r = b\n  (\n    h(r) << 2) + h(\n      r)\n}\n", None),
     ]
