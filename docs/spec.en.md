@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7f2bf5f30b87be1c -->
+<!-- doc-check: translation-of docs/spec.md @ bb7be8c1922d3bb5 -->
 
 # Dawn Language Specification
 
@@ -4893,7 +4893,7 @@ The reasons, the roadmap and the measurements are in
 - Ordinary Dawn control flow in the body (`if`, `for`, recursion) is evaluated by the host
   while recording: a branch that depends only on what the host knows is unrolled, and a host
   `Int` / `Float` becomes a constant when it enters the record. Control flow that depends on
-  a tile value **must** go through `tileir/dev`'s structured functions (`d_for`, `d_loop`,
+  a tile value **must** go through `tileir/dev`'s structured functions (`d_range`, `d_loop`,
   `d_if`, `d_reduce` and so on), which become regions in the record.
 - Memory operations are ordered only by the token chain the recording handler keeps; program
   order gives them no order at all.

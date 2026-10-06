@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ d54e91a19c5e4cad -->
+<!-- doc-check: translation-of docs/tutorial.md @ 30a2632e38dd598a -->
 
 # Dawn 教程
 
@@ -1802,7 +1802,7 @@ use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 256 / 32) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, 256 / 32) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -1828,7 +1828,7 @@ continue %26, %25 : tile<64x64xf64>, token
 
 `along` 说格子的每一维跟网格的哪个轴走。`a` 的第 0 维（行）跟网格轴 0，第 1 维（沿 K）不跟任何
 轴：`FREE_AXIS` 的意思是这一维由 kernel 自己挑格子，挑法就是 `load_at(a, [k])`。`b` 正好反过来，
-`c` 是 `Out`，它的格子就是网格。`d_range(0, 8) { k => .. }` 是走八趟的循环。累加器是一个
+`c` 是 `Out`，它的格子就是网格。`for k in d_range(0, 8) { .. }` 是走八趟的循环。累加器是一个
 `Carry`，即设备变量：`carry(zeros(c))` 造出它，`acc.get()` 读它，`acc.set(..)` 换成同形状的另一个
 tile。`zeros(c)` 是一个形状和 `c` 的一格相同的 tile，所以累加器的形状从头到尾不用写；`mma` 从
 操作数读出 m、k、n（`a` 和 `b` 的 k 对不上，记录时就拒）。它记录的是 Tile IR 的浮点乘加 `mmaf`。

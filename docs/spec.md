@@ -3846,7 +3846,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
   的格式名，按位置。同一个体按同一顺序发同样的操作，得到的记录相等。
 - 体里普通的 Dawn 控制流（`if`、`for`、递归）在记录时由宿主求值：只依赖宿主已知量的分支被
   展开，宿主的 `Int` / `Float` 进入记录时成为常量。依赖 tile 值的控制流**必须**走 `tileir/dev`
-  的结构化函数（`d_for`、`d_loop`、`d_if`、`d_reduce` 等），它们在记录里成为区域。
+  的结构化函数（`d_range`、`d_loop`、`d_if`、`d_reduce` 等），它们在记录里成为区域。
 - 内存操作之间的顺序只由记录 handler 维护的 token 链给出，程序序不给出任何顺序。
 - 下列情形在记录时 panic（不是 `Err`）：`param(d, pos)` 与 `params` 不符（位置越界或格式不同）；
   tile 的某一维不是 2 的幂；循环嵌套深于 `MAX_LOOP_DEPTH`（16）；一次记录签发的句柄超过

@@ -21,7 +21,7 @@ use std/gpu.{Gpu, F64, F32, F16, BF16, I32, I64, Dtype, alloc, upload, download,
   entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
 use dev.{Dev, Param, Tile, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
-  atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_range, d_loop, Carry, carry, get, set,
+  atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
   float_to_float, sub, add_i, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
@@ -210,7 +210,7 @@ pub type TileOp =
   | BroadcastOf(dst: Int, dtype: String, from: List[Int], to: List[Int], src: Int)
 derive Show
 
-## How deep loops may nest. A kernel body that recurses through `d_for`
+## How deep loops may nest. A kernel body that recurses through `d_range`
 ## unrolls at recording time, one region per call, and this is where the
 ## handler stops it (tile-backend-design 5.2).
 pub const MAX_LOOP_DEPTH: Int = 16
@@ -2199,7 +2199,7 @@ type Snap = {
 ## marks say which those are). What a public function calls on its own
 ## behalf is not a row: `tile_at`'s `idx_const` and `idx_mul` are
 ## `tile_at`'s operations. `parent` is the row of the region call whose
-## closure this call is in (`d_for`, `d_scan`, ...), or -1 at the top of the
+## closure this call is in (`d_range`, `d_scan`, ...), or -1 at the top of the
 ## body, and it is always an EARLIER row: the rows are in the order the
 ## calls started.
 ##
@@ -2842,7 +2842,7 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         check_rank0(name, frames, ops, held, bounded, "upper bound", upper, "i32")
         check_rank0(name, frames, ops, held, bounded, "step", step, "i32")
         if len(frames) >= MAX_LOOP_DEPTH {
-          refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_for unrolls forever")
+          refuse(name, "loops nest deeper than ${MAX_LOOP_DEPTH}; a body that recurses through d_range unrolls forever")
         } else {
           ()
         }
@@ -4304,7 +4304,7 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let lo = idx_add(base, one)
   let up = idx_add(base, n)
   let acc = carry(first)
-  d_for(lo, up, one) { k => acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
+  for k in d_range(lo, up, step: By(one)) { acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
   store(out, tile_at(b, 128), acc.get())
 }
 
@@ -4354,7 +4354,7 @@ fn two_carried(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let b0 = load(y, b, [8])
   let ra = carry(a0)
   let rb = carry(b0)
-  d_for(zero, two, idx_const(1)) { k =>
+  for k in d_range(zero, two, step: By(idx_const(1))) {
     ra.set(add(ra.get(), load(x, k, [8])))
     rb.set(add(rb.get(), load(y, k, [8])))
   }
@@ -4386,8 +4386,8 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let one = idx_const(1)
   let first = load(x, b, [8])
   let acc = carry(first)
-  d_for(zero, two, one) { i =>
-    d_for(zero, two, one) { j => acc.set(add(acc.get(), load(x, idx_add(i, j), [8]))) }
+  for i in d_range(zero, two, step: By(one)) {
+    for j in d_range(zero, two, step: By(one)) { acc.set(add(acc.get(), load(x, idx_add(i, j), [8]))) }
   }
   store(out, b, acc.get())
 }
@@ -4506,7 +4506,7 @@ test "a return under a for, a reduction or a scan is refused when the kernel is 
   let in_for = catch_panic(() => trace_kernel("bad_return", ["f64"], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
-    d_for(idx_const(0), idx_const(2), idx_const(1)) { _i =>
+    for _i in d_range(idx_const(0), idx_const(2), step: By(idx_const(1))) {
       d_return_if(gt(f_const(F64, 1.0), reduce_max(t)))
     }
   }))
@@ -4614,12 +4614,12 @@ test "knife K2: every rounding records the mode its dialect name says, and a com
   assert str.contains(add_nw, "`addi_nw` is not a binary integer operation")
 }
 
-test "knife K2: d_for takes the unsigned comparison d_for_unsigned alone used to spell, before its body" {
+test "knife K2: d_range takes the unsigned comparison d_for_unsigned alone used to spell, before its body" {
   let p = trace_kernel("ucmp2", ["f64"], () => {
     let x = param(F64, 0)
     let a = carry(load(x, idx_const(0), [8]))
     let z = idx_const(0)
-    d_for(z, idx_const(2), idx_const(1), unsigned_cmp: true) { _k => a.set(a.get()) }
+    for _k in d_range(z, idx_const(2), step: By(idx_const(1)), unsigned_cmp: true) { a.set(a.get()) }
   })
   assert list.any(p.ops, op => match op {
     For(_iv, _lo, _up, _st, unsigned, _i, _c, _r, _b) -> unsigned
@@ -4874,13 +4874,13 @@ test "a gather inside a reduction region is refused: a pure region carries no me
 fn deeper(x: Param[F64], depth: Int, t: Carry[F64]) -> Unit !Dev = {
   let zero = idx_const(0)
   let one = idx_const(1)
-  d_for(zero, one, one) { i =>
+  for i in d_range(zero, one, step: By(one)) {
     t.set(add(t.get(), load(x, i, [8])))
     deeper(x, depth + 1, t)
   }
 }
 
-test "a body that recurses through d_for is refused at the depth limit rather than unrolled forever" {
+test "a body that recurses through d_range is refused at the depth limit rather than unrolled forever" {
   let outcome = catch_panic(() => trace_kernel("deep", ["f64"], () => {
     let x = param(F64, 0)
     deeper(x, 0, carry(load(x, block_id(0), [8])))
@@ -4971,7 +4971,7 @@ fn loop_in_reduce() -> Unit !Dev = {
   let t = load(x, i, [8])
   let z = idx_const(0)
   let _s = d_reduce(t, 0.0, (acc, e) => {
-    d_for(z, z, z) { _k => () }
+    for _k in d_range(z, z, step: By(z)) { () }
     add(acc, e)
   })
   ()
@@ -5130,7 +5130,7 @@ test "a global declared twice, one declared inside a region, an empty one, and a
     let zero = idx_const(0)
     let one = idx_const(1)
     let _t = load(x, zero, [8])
-    d_for(zero, one, one) { _i => d_global("a", F64, [1.0]) }
+    for _i in d_range(zero, one, step: By(one)) { d_global("a", F64, [1.0]) }
   }))
   match inside {
     Ok(_) -> { assert false }
@@ -5199,7 +5199,7 @@ test "knife C1: op #k is the operation's position in the recorded program read d
     let zero = idx_const(0)
     let one = idx_const(1)
     let acc = carry(load(x, zero, [8]))
-    d_for(zero, one, one) { _i => acc.set(mul(load(x, zero, [4]), acc.get())) }
+    for _i in d_range(zero, one, step: By(one)) { acc.set(mul(load(x, zero, [4]), acc.get())) }
   }))
   match r {
     Ok(_) -> { assert false }
@@ -5416,7 +5416,7 @@ test "knife D-1: a write the recording cannot place is refused in a fork, and wr
     d_fork2(() => {
       let zero = idx_const(0)
       let one = idx_const(1)
-      d_for(zero, one, one) { _i => store(x, idx_const(4), t) }
+      for _i in d_range(zero, one, step: By(one)) { store(x, idx_const(4), t) }
     }, () => store(x, idx_const(0), t))
   })
   assert str.contains(looped, "the first writes elements 4 to 11 and the second 0 to 7")
@@ -5828,7 +5828,7 @@ test "PR-1: the named folds over an integer tile fold with integer operations an
 # matmul over cells: A's K and B's K are the loop's.
 fn mm_cells(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 2) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, 2) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -5859,7 +5859,7 @@ test "PR-1: a view made inside a loop is not reused after it, and a dynamic exte
   let g = cells([256], [128])
   let (p, _e) = trace2("inside", In(F64, g), Out(F64, g), (x, o) => {
     let t = carry(zeros(o))
-    d_range(0, 2) { _k => t.set(add(t.get(), load_cell(x))) }
+    for _k in d_range(0, 2) { t.set(add(t.get(), load_cell(x))) }
     store_cell(o, add(t.get(), load_cell(x)))
   })
   assert len(ops_where(p.ops, is_cell_view)) == 3
@@ -5923,8 +5923,8 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
   })), "tileir: kernel `r`: op #4 `reduce`: yield 0 is tile<8xf64>, and it must be the rank-0 tile<f64>")
   assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
     let acc = carry(broadcast(f_const(F64, 0.0), [8]))
-    d_for(idx_of(arange(8)), idx_const(2), idx_const(1)) { _k => acc.set(acc.get()) }
-  })), "tileir: kernel `r`: op #5 `d_for`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
+    for _k in d_range(idx_of(arange(8)), idx_const(2), step: By(idx_const(1))) { acc.set(acc.get()) }
+  })), "tileir: kernel `r`: op #5 `d_range`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
   let ga = cells([128, 64], [64, 32], along: [0, FREE_AXIS])
   assert str.starts_with(marked(() => trace2("r", In(F16, ga), Out(F16, cells([128, 32], [64, 32])), (a, c) => {
     store_cell(c, load_at(a, [idx_of(arange(4))]))
@@ -5970,7 +5970,7 @@ test "C3': a constant used inside a region is made there, at rank 0 in a reducti
     let floor = f_const(F64, 0.25)
     let t = load_cell(x)
     let c = carry(t)
-    d_range(0, 2) { _k => c.set(max(c.get(), floor)) }
+    for _k in d_range(0, 2) { c.set(max(c.get(), floor)) }
     let r = c.get()
     let s = d_reduce(r, 0.0, (acc, e) => add(acc, max(e, floor)))
     store_cell(o, add(max(r, floor), s))
@@ -5993,12 +5993,12 @@ test "C3': a carry that starts as a bare constant and is set to a tile is refuse
   assert str.contains(marked(() => trace_kernel("bare", ["f64"], () => {
     let x = param(F64, 0)
     let acc = carry(f_const(F64, 0.0))
-    d_range(0, 2) { _k => acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
+    for _k in d_range(0, 2) { acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
   })), "`set`: carry 0 holds tile<f64>, and is set to tile<8xf64>")
   assert marked(() => trace_kernel("shaped", ["f64"], () => {
     let x = param(F64, 0)
     let acc = carry(broadcast(f_const(F64, 0.0), [8]))
-    d_range(0, 2) { _k => acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
+    for _k in d_range(0, 2) { acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
   })) == "accepted"
   assert str.contains(marked(() => trace_kernel("branches", ["f64"], () => {
     let x = param(F64, 0)

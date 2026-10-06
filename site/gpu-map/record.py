@@ -214,6 +214,17 @@ def static_calls(n: Node, dev: set) -> list:
     kind = n.kind
     if kind == "Lambda":
         fail(f"a closure at {n.lo}..{n.hi} is not an argument of a call that runs it")
+    if kind == "For" and len(n.kids) == 3 and n.kids[1].kind == "Apply" and n.kids[1].kids \
+            and n.kids[1].kids[0].kind == "Var" and n.kids[1].kids[0].text.split(" ")[1] in dev:
+        # A staged `for` over a region call (`for j in d_range(..) { .. }`): the
+        # region is the call, its span is the whole statement, and the body's
+        # calls are its children, as the closure's were before `for` was staged.
+        head = n.kids[1].kids[0]
+        before = []
+        for a in n.kids[1].kids[1:]:
+            before += static_calls(a, dev)
+        return before + [{"name": head.text.split(" ")[1], "span": (n.lo, n.hi), "name_span": (head.lo, head.hi),
+                          "kids": static_calls(n.kids[2], dev)}]
     if kind in ("If", "Match", "For", "While") and any_call(n, dev):
         fail(f"a call under host control flow at {n.lo}..{n.hi}")
     if kind in ("Apply", "MethodCall"):
