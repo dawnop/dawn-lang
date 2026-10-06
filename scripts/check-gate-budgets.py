@@ -89,6 +89,14 @@ not happened) is reported and not refused; its budget line says "planning
 value" for exactly that reason. The default invocation is unchanged: it is
 what CI runs, and it does not read this file.
 
+HOW TO RESTATE A CLAIM (2026-10-06). New figure = the worst run whose steps
+digest is the job's own, plus the larger of a tenth of it and one standard
+deviation of that job's runs in the same window, rounded up to 5s; timeout 3x
+the figure. A flat tenth loses to runner jitter: 95e7c21c restated
+native-diff-2 to 470s (426s plus a tenth) and a run took 488s a day later,
+while one deviation (66s) over 426s would have covered it. The check itself
+only requires claim >= worst; this is how to pick the number.
+
 WHICH RUNS A CLAIM IS HELD TO (issue #244). By steps, not by name. A
 gates.yml job's runs are the ones whose steps digest (gate-observations.py
 records it per run, from gates.yml at the run's own commit, through
