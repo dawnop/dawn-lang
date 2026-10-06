@@ -125,7 +125,7 @@ One kernel, line by line
 
 ## kernel-body
 
-Every line of one kernel, a fused attention and the source of the row statistics above, sits beside the Tile IR its calls wrote, each run under the call that wrote it. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table. In each run the bold line is the operation the call is for; the lines above it are addressing the lowering added.
+Every line of one kernel, a fused attention and the source of the row statistics above, sits beside the Tile IR its calls wrote, each run under the call that wrote it. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table. In each run the bold line is the operation the call is for; the lines above it are addressing the lowering added. Each row starts folded to one of those bold lines, the one its outermost call wrote; click a row to open the rest.
 
 ## kernel-kind
 

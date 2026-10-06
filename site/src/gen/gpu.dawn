@@ -52,7 +52,9 @@
 # the rows that are not implemented, and real Tile IR drifts behind the head.
 # Each is the markup's final state without gpu.js or under reduced motion; the
 # script only starts it from nothing. The call map and the gates do not move
-# at all: the map is read with no script, and a click only highlights a call.
+# at all. The map's rows start folded to one key line each and open on a
+# click, but the folding is native `<details>` and works with no script;
+# gpu.js highlights a call and opens the rows it needs to show it.
 #
 # The words are site/pages/gpu.md and its translation gpu.zh.md, in
 # home.md's shape: the same keys in both, which a test below holds.
@@ -72,7 +74,7 @@ use gen/tutorial.{chapter_titles}
 use md/ast.{Block}
 use md/parser.{parse}
 use gen/copy.{Copy, load_copy, line, plain, body}
-use gen/gpumap.{KernelMap, MCall, Seg, parse_map, check, cuts, covering, named_at, seg_lines}
+use gen/gpumap.{KernelMap, MCall, Seg, parse_map, check, cuts, covering, named_at, seg_lines, result_line, key_line, row_lines}
 
 # ---- the coverage tables ----
 
@@ -873,10 +875,15 @@ fn hue_of(k: Int) -> String = "g${k % 6}"
 ## themselves, each piece highlighted on its own. A call's name is wrapped as
 ## the thing gpu.js lets a reader pick (`data-c` its row, `data-p` its
 ## parent's); every piece inside a call's span says which rows it is inside
-## (`data-k`), so a picked call's whole span can be underlined.
+## (`data-k`), so a picked call's whole span can be underlined. Each space of
+## the line's indentation is its own `km-sp`, which the stylesheet marks with
+## a faint dot drawn by a pseudo-element: the dot is never text, so what a
+## reader copies is the line as kernels.dawn has it.
 pub fn dawn_line(m: KernelMap, l: Int) -> String = {
   let text = m.src[l - m.first]
-  let cs = cuts(m.calls, l, str.len(text))
+  let lead = str.len(text) - str.len(str.trim_start(text))
+  let indent: List[Int] = if lead > 0 { [lead + 1] } else { [] }
+  let cs = list.unique(sort(cuts(m.calls, l, str.len(text)) ++ indent))
   var out = ""
   for k in range(0, len(cs) - 1) {
     let a = cs[k]
@@ -885,7 +892,7 @@ pub fn dawn_line(m: KernelMap, l: Int) -> String = {
     let html =
       match named_at(m.calls, l, a, b) {
         Some(c) -> """<span class="km-c" data-c="${c.id}" data-p="${c.parent}">${highlight_dawn(piece)}</span>"""
-        None -> highlight_dawn(piece)
+        None -> if b <= lead + 1 { str.repeat(`<span class="km-sp"> </span>`, b - a) } else { highlight_dawn(piece) }
       }
     let around = covering(m.calls, l, a, b)
     out = out ++ if len(around) == 0 {
@@ -897,12 +904,9 @@ pub fn dawn_line(m: KernelMap, l: Int) -> String = {
   out
 }
 
-## Whether a Tile IR line is the operation its run is for: the last line of
-## the run that is not a closing brace.
-fn is_result(m: KernelMap, s: Seg, n: Int) -> Bool = {
-  let real = filter(seg_lines(s), x => not str.starts_with(str.trim(m.ir[x - 1]), "}"))
-  len(real) > 0 && real[len(real) - 1] == n
-}
+## Whether a Tile IR line is the operation its run is for (gen/gpumap's
+## `result_line`).
+fn is_result(m: KernelMap, s: Seg, n: Int) -> Bool = result_line(m.ir, s) == Some(n)
 
 ## One Tile IR line as markup: its type tail (from the first ` : `) faint and,
 ## on the run's result line, the operation's name bold.
@@ -933,24 +937,35 @@ pub fn ir_html(text: String, res: Bool) -> String = {
 
 ## One run of Tile IR under its call's name: every line says which row wrote
 ## it (`data-o`, -1 the head, -2 the tail), which is what a click on it picks.
-fn seg_html(m: KernelMap, s: Seg) -> String = {
+## The run holding the row's key line `key` has its tag and block marked
+## `km-kt` and `km-kp` and the line itself `km-k`: what a folded row keeps.
+fn seg_html(m: KernelMap, s: Seg, key: Option[Int]) -> String = {
   let tag =
     if s.owner >= 0 {
       "<code>${escape_html(m.calls[s.owner].name)}</code>"
     } else {
       ""
     }
+  let mine = list.any(seg_lines(s), n => key == Some(n))
   let ls = map(seg_lines(s), n => {
     let res = is_result(m, s, n)
-    let cls = if res { "km-l km-res" } else { "km-l" }
+    let cls = (if res { "km-l km-res" } else { "km-l" }) ++ if key == Some(n) { " km-k" } else { "" }
     """<span class="${cls}" data-o="${s.owner}"><i>${n}</i>${ir_html(m.ir[n - 1], res)}</span>"""
   })
-  """<span class="km-tag">${tag}</span><pre class="km-ir"><code>${join(ls, "")}</code></pre>"""
+  let (kt, kp) = if mine { (" km-kt", " km-kp") } else { ("", "") }
+  """<span class="km-tag${kt}">${tag}</span><pre class="km-ir${kp}"><code>${join(ls, "")}</code></pre>"""
 }
 
 ## The rows of the map: every line of the function, the signature and the
 ## closing brace in no colour (they hold what no call wrote), every other line
 ## that has Tile IR in the next colour, a line with none in no colour.
+##
+## A row with Tile IR is a `<details>` whose `<summary>` is the whole row,
+## folded: the stylesheet shows its key line (gen/gpumap's `key_line`) one
+## line high and hides the rest until it is open. With two or more lines the
+## count of what is folded away is its marker; with one there is nothing
+## hidden, so no marker, and opening it only lets a line cut at the column's
+## edge wrap. A row with none is a plain block of the same shape.
 pub fn map_rows(m: KernelMap) -> String = {
   let last = m.first + len(m.src) - 1
   var out: List[String] = []
@@ -966,8 +981,18 @@ pub fn map_rows(m: KernelMap) -> String = {
     if cls != "ge" {
       hue = hue + 1
     }
-    out = out ++ ["""<li class="km-row ${cls}" id="kl-${r.line}"><pre class="km-d"><code><span class="km-l"><i>${r.line}</i>${dawn_line(m, r.line)}</span></code></pre>"""
-        ++ """<div class="km-t">${join(map(r.segs, s => seg_html(m, s)), "")}</div></li>"""]
+    let key = key_line(m, r)
+    let n = row_lines(r)
+    let inner = """<pre class="km-d"><code><span class="km-l"><i>${r.line}</i>${dawn_line(m, r.line)}</span></code></pre>"""
+      ++ """<div class="km-t">${join(map(r.segs, s => seg_html(m, s, key)), "")}</div>"""
+    let body =
+      if n >= 1 {
+        let mark = if n >= 2 { """<span class="km-x" aria-hidden="true">+${n - 1}</span>""" } else { "" }
+        """<details class="km-f"><summary class="km-s">${inner}${mark}</summary></details>"""
+      } else {
+        """<div class="km-s">${inner}</div>"""
+      }
+    out = out ++ ["""<li class="km-row ${cls}" id="kl-${r.line}">${body}</li>"""]
   }
   join(out, "\n")
 }
@@ -1018,7 +1043,8 @@ fn map_figure(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
   let last = m.first + len(m.src) - 1
   let src_link = """<a href="${gh(kernels_file())}#L${m.first}-L${last}"><code>kernels.dawn:${m.first}–${last}</code></a>"""
   let ir_link = """<a href="${gh("scripts/tile-golden/${m.name}.mlir")}"><code>${escape_html(m.name)}.mlir</code></a>"""
-  """<figure class="km">
+  let widest = list.fold(m.src, 0, (w, l) => if str.len(l) > w { str.len(l) } else { w })
+  """<figure class="km" style="--kmn: ${widest}">
 <figcaption class="km-cap"><span class="km-name"><code>${escape_html(m.name)}</code></span><span class="km-kind">${line(c, "kernel-kind", mu)}</span>${map_facts(c, mu, kernel_facts(f, m))}</figcaption>
 <div class="km-grid">
 <div class="km-heads" aria-hidden="true"><span>${p("kernel-left")} · ${src_link}</span><span>${p("kernel-call")}</span><span>${p("kernel-right")} · ${ir_link}</span></div>
@@ -1619,6 +1645,44 @@ test "every call's Tile IR is the operation it is for, and the page marks it as 
   })
 }
 
+## Every row with Tile IR folds to exactly one key line, the one gen/gpumap's
+## rule computes; a row with two or more lines carries the count it hides,
+## a row with one carries no marker, and a row with none folds nothing.
+test "the map's rows fold to their key line and mark what they hide" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let m = f.flash
+    let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    for r in m.rows {
+      let row =
+        match str.split_once(p, """id="kl-${r.line}">""") {
+          Some((_a, b)) -> match str.split_once(b, "</li>") {
+            Some((x, _y)) -> x
+            None -> b
+          }
+          None -> panic("no row ${r.line}")
+        }
+      let n = row_lines(r)
+      let marked = str.split(row, ` km-k"`)
+      assert len(marked) - 1 == if n == 0 { 0 } else { 1 }
+      assert str.contains(row, `<details class="km-f">`) == (n >= 1)
+      assert str.contains(row, `class="km-x"`) == (n >= 2)
+      if n >= 2 {
+        assert str.contains(row, ">+${n - 1}</span></summary>")
+      }
+      match key_line(m, r) {
+        Some(k) -> {
+          # the marked line is the key: its number follows `data-o` at once
+          assert str.contains(str.take(marked[1], 24), "\"><i>${k}</i>")
+        }
+        None -> { assert n == 0 }
+      }
+    }
+    assert len(filter(m.rows, r => row_lines(r) == 0)) > 0
+    assert len(filter(m.rows, r => row_lines(r) == 1)) > 0
+  })
+}
+
 ## One kernel, drawn with no script: no picker, no replay, no file fetched
 ## per kernel, and the sentence about picking a call hidden until the
 ## script shows it.
@@ -1631,7 +1695,7 @@ test "the page draws one kernel and nothing a script has to finish" {
       assert not str.contains(p, "gpu/k/")
       assert not str.contains(p, "gm-")
       assert str.contains(p, `<p class="km-note" hidden>`)
-      assert len(str.split(p, `<figure class="km">`)) == 2
+      assert len(str.split(p, `<figure class="km" `)) == 2
     }
   })
 }
