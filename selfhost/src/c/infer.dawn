@@ -49,6 +49,7 @@ use ir/core.{
   CDynamic, CDirect, CMethod, CInt, CFloat, CBool, CStr, CUnit,
   CSlotFn, CSlotDefault,
   CMode, COwned, CBorrowed, mode_owned,
+  mode_key, callee_mode_key, impl_mode_name, CImpl,
   cex_ty
 }
 use check/types.{Ty, TyFn, TyOpaque, TyInt, TyList, EPure, is_ref_ty, intr_owned_args}
@@ -360,9 +361,9 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
         CMethod(dict, _, _, _, _) -> dm_expr(d, dict, false)
         _ -> d
       }
-      match callee {
-        CDirect(owner, name) -> {
-          let row = match map.get(d1.modes, (owner, name)) {
+      match callee_mode_key(callee) {
+        Some(key) -> {
+          let row = match map.get(d1.modes, key) {
             Some(r) -> r
             None -> []
           }
@@ -375,8 +376,8 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
           }
           d1
         }
-        # impl/default/method/dynamic targets keep the all-owned convention
-        _ -> {
+        # default/method/dynamic targets keep the all-owned convention
+        None -> {
           for a in args { d1 = dm_expr(d1, a, true) }
           d1
         }
@@ -520,15 +521,13 @@ fn dm_stmt(d: Dm, s: CStmt) -> Dm =
 ## borrowed because the row used to say borrowed).
 pub type ForcedMode = { owner: String, name: String, arity: Int, idx: Int, mode: CMode }
 
-fn plain(f: CFun) -> Bool =
-  match f.impl_of {
-    Some(_) -> false
-    None ->
-      match f.default_of {
-        Some(_) -> false
-        None -> len(f.captures) == 0
-      }
-  }
+## The key of a function the table describes, or None. An impl method is one
+## of them: its call sites are `CImpl`, which read the row under the same key
+## (`core.mode_key` / `core.callee_mode_key`). The dictionary slots do not
+## name it -- they name a bridge (`lower.make_bridge`), a plain function that
+## calls it all-owned -- so no dictionary or closure call can reach an impl
+## body behind the table's back.
+fn keyed(f: CFun) -> Option[(String, String)] = mode_key(f)
 
 ## The positions of the list primitives' `std/pvec` targets that stay owned.
 ##
@@ -561,12 +560,18 @@ fn seed(ms: List[CModule], pin: Set[(String, String)]) -> Map[(String, String), 
   let held = list_owned_positions()
   for m in ms {
     for f in m.fns {
-      if plain(f) && not set.has(pin, (f.owner, f.name)) {
+      let has_key = keyed(f) != None
+      let key = match keyed(f) {
+        Some(k) -> k
+        None -> ("", "")
+      }
+      let (k_owner, k_name) = key
+      if has_key && not set.has(pin, key) {
         var row: List[CMode] = []
         var any = false
         var pi = 0
         for p in f.params {
-          if eligible(p) && not set.has(held, (f.owner, f.name, pi)) {
+          if eligible(p) && not set.has(held, (k_owner, k_name, pi)) {
             row = row ++ [CBorrowed]
             any = true
           } else {
@@ -574,7 +579,7 @@ fn seed(ms: List[CModule], pin: Set[(String, String)]) -> Map[(String, String), 
           }
           pi = pi + 1
         }
-        if any { table = map.insert(table, (f.owner, f.name), row) }
+        if any { table = map.insert(table, key, row) }
       }
     }
   }
@@ -625,7 +630,12 @@ pub fn infer_modes_forced(
     changed = false
     for m in ms {
       for f in m.fns {
-        match map.get(table, (f.owner, f.name)) {
+        let key = match keyed(f) {
+          Some(k) -> k
+          None -> ("", "")
+        }
+        let (k_owner, k_name) = key
+        match map.get(table, key) {
           None -> ()
           Some(row) -> {
             let mine = match map.get(built, (f.owner, f.name)) {
@@ -647,7 +657,7 @@ pub fn infer_modes_forced(
             for p in f.params {
               let keep = row[i]
               if not mode_owned(keep) && set.has(dm.owned, p.sym) &&
-                not set.has(fixed, (f.owner, f.name, i)) {
+                not set.has(fixed, (k_owner, k_name, i)) {
                 row2 = row2 ++ [COwned]
                 diff = true
               } else {
@@ -656,7 +666,7 @@ pub fn infer_modes_forced(
               i = i + 1
             }
             if diff {
-              table = map.insert(table, (f.owner, f.name), row2)
+              table = map.insert(table, key, row2)
               changed = true
             }
           }
@@ -687,24 +697,22 @@ pub fn infer_modes_forced(
 pub fn stamp_modes(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModule = {
   var fns: List[CFun] = []
   for f in m.fns {
-    match map.get(modes, (f.owner, f.name)) {
+    match keyed(f) {
       None -> { fns = fns ++ [f] }
-      Some(row) -> {
-        if plain(f) {
-          var params: List[CParam] = []
-          var i = 0
-          for p in f.params {
-            let mo = if i < len(row) { row[i] } else { COwned }
-            params = params ++ [CParam { ..p, mode: mo }]
-            i = i + 1
+      Some(key) ->
+        match map.get(modes, key) {
+          None -> { fns = fns ++ [f] }
+          Some(row) -> {
+            var params: List[CParam] = []
+            var i = 0
+            for p in f.params {
+              let mo = if i < len(row) { row[i] } else { COwned }
+              params = params ++ [CParam { ..p, mode: mo }]
+              i = i + 1
+            }
+            fns = fns ++ [CFun { ..f, params: params }]
           }
-          fns = fns ++ [CFun { ..f, params: params }]
-        } else {
-          # an impl shares its method's name; the row that matched it
-          # belongs to a plain function and must not stamp this one
-          fns = fns ++ [f]
         }
-      }
     }
   }
   CModule { ..m, fns: fns }
@@ -869,6 +877,33 @@ test "jurisdiction pins: closures, dictionary slots, pvec boundary, fn-typed" {
   let ho = t_fn("m", "ho", [CParam { sym: 1, ty: fty, mode: COwned }], TyInt,
     CCall(CDynamic(CLocal(1, fty)), [], TyInt, CNoSite))
   assert len(t_row(infer_modes([t_mod("m", [ho])]), "m", "ho")) == 0
+}
+
+test "an impl method has its own row, and a CImpl call reads it" {
+  let lst = TyList(TyInt)
+  let read = CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite)
+  # an impl method and a plain function share the name `size`; only the impl
+  # only reads its parameter, the plain one returns it
+  let im = CFun {
+    ..t_fn("m", "size", [CParam { sym: 1, ty: lst, mode: COwned }], TyInt, read),
+    impl_of: Some((7, TyInt))
+  }
+  let pl = t_fn("m", "size", [CParam { sym: 2, ty: lst, mode: COwned }], lst,
+    CLocal(2, lst))
+  # a caller that only hands its parameter to the impl: borrowed through the
+  # impl's row
+  let caller = t_fn("m", "c", [CParam { sym: 3, ty: lst, mode: COwned }], TyInt,
+    CCall(CImpl("m", 7, TyInt, "size"), [CLocal(3, lst)], TyInt, CNoSite))
+  let table = infer_modes([t_mod("m", [im, pl, caller])])
+  let irow = t_row(table, "m", impl_mode_name(7, TyInt, "size"))
+  assert len(irow) == 1 && not mode_owned(irow[0])
+  assert len(t_row(table, "m", "size")) == 0
+  let crow = t_row(table, "m", "c")
+  assert len(crow) == 1 && not mode_owned(crow[0])
+  # stamping lands on the impl and not on the plain function of its name
+  let st = stamp_modes(t_mod("m", [im, pl, caller]), table)
+  assert not mode_owned(st.fns[0].params[0].mode)
+  assert mode_owned(st.fns[1].params[0].mode)
 }
 
 test "stamping writes the fixpoint onto the callee half" {

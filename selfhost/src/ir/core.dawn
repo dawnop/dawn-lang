@@ -586,6 +586,44 @@ pub fn fn_key(f: CFun) -> String = {
   f.owner ++ "\n" ++ tag ++ "\n" ++ f.name
 }
 
+## The name an impl method goes by wherever a program-wide table is keyed
+## `(owner, name)`: the spelling the C backend mangles the method with
+## (`emitc.impl_symbol`), so a `CImpl` call site and the `CFun` it names agree
+## without either re-deriving the other. A plain function's name never holds a
+## `$` of this shape, so the two kinds of key share one table.
+pub fn impl_mode_name(tid: Int, subject: Ty, method: String) -> String =
+  "impl\$" ++ to_string(tid) ++ "\$" ++ subject_key(subject) ++ "\$" ++ method
+
+## The parameter-mode table's key for a function, or None for the functions
+## the table does not describe: trait defaults and anything with captures
+## (a lifted lambda is reached through `CDynamic`, all-owned).
+pub fn mode_key(f: CFun) -> Option[(String, String)] =
+  match f.default_of {
+    Some(_) -> None
+    None ->
+      if len(f.captures) > 0 {
+        None
+      } else {
+        match f.impl_of {
+          Some(pair) -> {
+            let (tid, subject) = pair
+            Some((f.owner, impl_mode_name(tid, subject, f.name)))
+          }
+          None -> Some((f.owner, f.name))
+        }
+      }
+  }
+
+## The key a call site reads the same table with: a direct call, or a
+## devirtualised impl call. Dictionary, default, dynamic and method callees
+## stay all-owned and have none.
+pub fn callee_mode_key(c: CCallee) -> Option[(String, String)] =
+  match c {
+    CDirect(owner, name) -> Some((owner, name))
+    CImpl(owner, tid, subject, method) -> Some((owner, impl_mode_name(tid, subject, method)))
+    _ -> None
+  }
+
 ## The same spelling, but injective over *instantiated* types.
 ##
 ## `ty_key` may drop type arguments because everything it names is a v1 impl
