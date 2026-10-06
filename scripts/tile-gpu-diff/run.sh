@@ -2629,47 +2629,22 @@ sym_probe="$(sed -n 's/^probe symbols //p' "$work/sym.out" | tail -n 1)"
 echo "      tiers: $tiers; fold-order probe: $probe; scan order: $scan_probe; erf error: $erf_probe;"\
   " per-op miss: $trig_probe; sequence launches: $seq_launch_probe; loop rounds: $loop_probe"
 
-# The ledger records one verdict for the tree: both programs pass, or the
-# first thing that stopped one of them.
-if [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ] && [ "$scan_verdict" = pass ] \
-  && [ "$atom_verdict" = pass ]; then
-  verdict=pass
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ] && [ "$scan_verdict" = pass ]; then
-  verdict="$atom_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ] && [ "$gath_verdict" = pass ]; then
-  verdict="$scan_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ] \
-  && [ "$wide_verdict" = pass ]; then
-  verdict="$gath_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ] && [ "$int_verdict" = pass ]; then
-  verdict="$wide_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ] && [ "$strided_verdict" = pass ]; then
-  verdict="$int_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ] \
-  && [ "$twod_verdict" = pass ]; then
-  verdict="$strided_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ] && [ "$reduced_verdict" = pass ]; then
-  verdict="$twod_verdict"
-elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
-  verdict="$reduced_verdict"
-elif [ "$verdict" = pass ]; then
-  verdict="$masked_verdict"
-fi
-
-# The sequence family's verdict was never read by the cascade above, so a
-# driver that refused seq_diff still ended on `pass` (fold_verdict.sh says
-# why the fold is a function and carries its negative control).
+# The ledger records one verdict for the tree: every family passes (or was
+# skipped on purpose), or it is the first thing that stopped one of them. The
+# list is in run order and is the only place the fold reads; fold_verdict.sh
+# checks that each `<name>_verdict=` this script assigns is named here and
+# carries the negative control (#575: the ladder this replaced never read the
+# fourteen families after atom_diff).
+verdict_families=(
+  verdict masked_verdict reduced_verdict twod_verdict strided_verdict int_verdict
+  wide_verdict gath_verdict scan_verdict atom_verdict erf_verdict trig_verdict
+  dtype_verdict arch_verdict loop_verdict dbg_verdict dbg_fail_verdict
+  dbg_print_verdict shape_verdict attr_verdict global_verdict sym_verdict
+  alloca_verdict view_verdict dyn_verdict gsview_verdict hint_verdict seq_verdict
+)
 fold_verdict_selftest || fail "the verdict fold's negative control failed"
-verdict="$(fold_family_verdict "$verdict" "$seq_verdict")"
+fold_script_selftest "$here/run.sh" || fail "a family verdict is assigned in run.sh but not read by the fold"
+verdict="$(fold_named_verdicts "${verdict_families[@]}")" || fail "the verdict fold could not read every family"
 
 # ---- mutants: a copy of std with one anchor rewritten in std/gpu.dawn
 if command -v md5sum > /dev/null 2>&1; then
