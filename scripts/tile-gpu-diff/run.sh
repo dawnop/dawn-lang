@@ -2956,10 +2956,10 @@ mutant_kernels_src="$work/kernels-softmax.dawn"
 cp "$golden/kernels.dawn" "$mutant_kernels_src"
 before=$(digest "$mutant_kernels_src")
 python3 "$here/mutate.py" "$mutant_kernels_src" softmax-no-max-subtract \
-  'fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  'fn softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
-  let ex = exp(sub(t, reduce_max(t)))' \
-  'fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+  let ex = exp(t - reduce_max(t))' \
+  'fn softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let ex = exp(t)'
 after=$(digest "$mutant_kernels_src")
@@ -3069,8 +3069,8 @@ mutant_mma_src="$work/kernels-mma.dawn"
 cp "$golden/kernels.dawn" "$mutant_mma_src"
 before=$(digest "$mutant_mma_src")
 python3 "$here/mutate.py" "$mutant_mma_src" mma-acc-not-carried \
-  '  for k in d_range(0, MM_K / MM_TK) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }' \
-  '  for k in d_range(0, MM_K / MM_TK) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), zeros(c))) }'
+  '  for k in d_range(0, MM_K / MM_TK) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }' \
+  '  for k in d_range(0, MM_K / MM_TK) { acc = mma(load_at(a, [k]), load_at(b, [k]), zeros(c)) }'
 after=$(digest "$mutant_mma_src")
 echo "      mma-acc-not-carried: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-mma/src"
