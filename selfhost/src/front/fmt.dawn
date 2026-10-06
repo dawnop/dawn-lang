@@ -456,7 +456,8 @@ fn signature_arrows(raw: List[Token]) -> Set[Int] = {
 }
 
 ## Span starts of the contextual keywords (spec §1.4) that sit where they are
-## keywords rather than names, for the two that can be followed by a bracket:
+## keywords rather than names, for the two that can be followed by a bracket
+## or a prefix minus (`assert -x < 0`, #588):
 ## the `in` of a `for` header -- the first `in` at the `for`'s own bracket depth
 ## -- and an `assert` opening a line. The lexer hands both over as IDENT, and an
 ## identifier before `[` or `(` hugs it (`xs[0]`, `f(x)`), which would print
@@ -476,8 +477,7 @@ fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
       out = set.insert(out, t.lo)
       for_depth = -1
     } else if k == IDENT && t.text == "assert" &&
-      (i == 0 || raw[i - 1].kind == NEWLINE || raw[i - 1].kind == LBRACE) &&
-      i + 1 < len(raw) && (raw[i + 1].kind == LPAREN || raw[i + 1].kind == LBRACKET) {
+      (i == 0 || raw[i - 1].kind == NEWLINE || raw[i - 1].kind == LBRACE) {
       out = set.insert(out, t.lo)
     }
     if k == LPAREN || k == LBRACKET || k == LBRACE { depth = depth + 1 }
@@ -1674,4 +1674,17 @@ test "a block after a wrapped let annotation follows the statement" {
 test "a block operand inside brackets follows the bracket's line" {
   let o = "fn f(p: List[Int]) -> Int = {\n  let v: List[Int] = ((p ++ [\n    1]) ++ {\n    let b = 2\n    [b]\n  })\n  1\n}\n"
   assert fmt_of(o) == o
+}
+
+## #588: `assert` reaches the formatter as an IDENT, which ends a value, so a
+## minus after it was spaced as a subtraction (`assert - x < 0`). `assert`
+## opens an expression, so the minus is a negation. `return` is a real keyword
+## token and already behaved.
+test "a minus after assert is a negation" {
+  let a = "fn f(x: Int, y: Float) -> Unit = {\n  assert -x < 0\n  assert -1e308 < y\n  assert x > -1\n  assert (x) > 0\n}\n"
+  assert fmt_of(a) == a
+  assert fmt_of("fn f(x: Int, y: Float) -> Unit = {\n  assert - x < 0\n  assert - 1e308 < y\n  assert x > -1\n  assert (x) > 0\n}\n") == a
+  # a variable named `assert` elsewhere is still a value
+  let v = "fn f(assert: Int) -> Int = assert - 1\n"
+  assert fmt_of(v) == v
 }
