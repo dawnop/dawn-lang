@@ -66,6 +66,22 @@ reported at the importer), not about recovery; such mutants get (a) from
 Why nightly. The push total has no room (ruling on bug-rate, 2026-10-04),
 and the run finds recovery defects in old code rather than guarding a change.
 
+The ratchet. The run is deterministic, so the findings it had when it was
+first run on this tree are pinned in KNOWN_KEYS below, one
+`<property> <rule> <file>` key per line, and only the keys not in that file
+fail the run. The file can only shrink: a pinned key the run no longer
+produces is stale and fails the run too, so the fix that clears a finding has
+to delete its line, and a later regression of the same file is a new red
+rather than a quiet return. A key is a (property, rule, file) triple, not a
+mutant, so another mutant of an already pinned file and rule is not new;
+that is the price of keys that survive unrelated edits to the file. The stale
+half is judged only on the default scope (no --only, --seed, --mutants,
+--check-paths), because a narrower run cannot produce every key. --known FILE
+reads the keys from a file instead, and --known '' reports every finding.
+The list lives in this file, not beside it: a separate data file would be a
+path no gate watches (scripts/gate-map/unseen.txt), and run.py already is one
+recorded reason (nightly only), so the pins add no new unwatched path.
+
 Output: one line per finding, `<property> <rule> <file> [<kind>]: <detail>`,
 a summary, and the verdict line `verdict: <keys>`, the sorted set of
 `<property>:<rule>:<kind>`, so a nightly issue is commented on when a kind of
@@ -74,6 +90,7 @@ when anything is found.
 """
 
 import argparse
+import io
 import os
 import random
 import re
@@ -84,6 +101,26 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Pinned on 2026-10-06 (the job's first run: 15 findings, 13 keys after the
+# opener rule in judge_parse excused the one `unclosed` report that is right).
+# This list only shrinks: a key the run no longer finds fails the run until its
+# line is deleted here, and a key not listed fails it as new. The first
+# diagnostic of each is more than 2 lines from the one-token edit.
+KNOWN_KEYS = """\
+b near packages/inflate/src/gzip.dawn
+b near scripts/checker-corpus/cases/effect_type_args.dawn
+b near scripts/checker-corpus/cases/unused_imports.d/entry.dawn
+b near scripts/display-layering-contract/probe.dawn
+b near scripts/for-pattern-contract/complexity.dawn
+b near scripts/map-reuse-contract/record_update_native.dawn
+b near scripts/slab-bench/workloads/lexer/src/main.dawn
+b near scripts/table-freight/only_in_test.dawn
+b near selfhost/src/embed/stdsrc.dawn
+b near selfhost/src/ir/lint.dawn
+b near selfhost/src/jvm/testrun.dawn
+b near site/play-ui/samples/effects.dawn
+b near site/src/gen/search_body.dawn
+"""
 ANY_SPAN = re.compile(r"@\d+\.\.\d+")
 SPAN = re.compile(r"@(\d+)\.\.(\d+)$")
 BRACKETS = {"LPAREN", "RPAREN", "LBRACKET", "RBRACKET", "LBRACE", "RBRACE"}
@@ -309,14 +346,16 @@ def interp_closers(text, toks):
 
 
 class Mutant:
-    __slots__ = ("path", "kind", "at", "shift", "neutral", "what", "partner")
+    __slots__ = ("path", "kind", "at", "shift", "neutral", "what", "partner", "enclosing")
 
-    def __init__(self, path, kind, at, shift, neutral, what, partner=None):
+    def __init__(self, path, kind, at, shift, neutral, what, partner=None, enclosing=()):
         # at: offset of the mutated token in the mutant (and in the original:
         # nothing before it moves); shift: characters added at `at`; partner:
         # for a deleted bracket, the offset of the one it paired with
         self.path, self.kind, self.at, self.shift, self.neutral, self.what, self.partner = \
             path, kind, at, shift, neutral, what, partner
+        # the offsets of the original's openers whose brackets surround `at`
+        self.enclosing = frozenset(enclosing)
 
 
 def partners(code):
@@ -329,6 +368,13 @@ def partners(code):
             o = stack.pop()
             pair[o.lo], pair[t.lo] = t.lo, o.lo
     return pair
+
+
+def enclosing_openers(code, at):
+    """Offsets of the openers in the original whose brackets surround `at`
+    (an opener at `at` itself does not; a closer at `at` is inside its pair)."""
+    pair = partners(code)
+    return [o for o, c in pair.items() if o < c and o < at <= c]
 
 
 def mutate(text, toks, rng, n):
@@ -391,7 +437,14 @@ def judge_parse(mut, text, starts, root0, bodies, diags, root):
             a, b = line_of(starts, back(lo)), line_of(starts, back(max(lo, hi - 1)))
             for m in anchors:
                 dist.append(0 if a <= m <= b else min(abs(a - m), abs(b - m)))
-        if min(dist) > NEAR:
+        # "unclosed `{`" reported at an opener that surrounds the mutated token
+        # is the right place: with a bracket added or removed inside it, that
+        # opener is the construct left open, and how far its line is from the
+        # edit is the construct's size, not a recovery defect. An opener that
+        # does not surround the token (a later one swallowed the difference)
+        # is not excused.
+        at_opener = d.msg.startswith("unclosed ") and back(d.lo) in mut.enclosing
+        if min(dist) > NEAR and not at_opener:
             yield ("b", "near", f"line {mline + 1}: {mut.what}; the first diagnostic is at line "
                    f"{line_of(starts, back(d.lo)) + 1}: {d.msg[:100]}")
     if not mut.neutral:
@@ -417,6 +470,27 @@ def judge_parse(mut, text, starts, root0, bodies, diags, root):
 
 
 # ---------------------------------------------------------------- driver
+
+
+def read_known(path):
+    """The pinned keys: (property, rule, file) per non-comment line, from
+    `path` or, when it is None, from KNOWN_KEYS."""
+    keys = set()
+    with (open(path, encoding="utf-8") if path else io.StringIO(KNOWN_KEYS)) as fh:
+        for n, line in enumerate(fh, 1):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parts = line.split(" ", 2)
+                if len(parts) != 3:
+                    raise SystemExit(f"{path}:{n}: want `<property> <rule> <file>`, got `{line}`")
+                keys.add(tuple(parts))
+    return keys
+
+
+def ratchet(found, known, full):
+    """(new keys, stale keys): what the run found that is not pinned, and,
+    when it covered everything, what is pinned that it no longer found."""
+    return sorted(found - known), (sorted(known - found) if full else [])
 
 
 def tracked(pattern):
@@ -447,6 +521,9 @@ def main():
     ap.add_argument("--only", help="a regex the input paths must match")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--out", help="keep the work tree here (default: a temporary one)")
+    ap.add_argument("--known", default=None,
+                    help="a file of pinned finding keys instead of KNOWN_KEYS; "
+                         "'' reports every finding")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
@@ -490,13 +567,16 @@ def main():
     muts = []
     for f in clean:
         text, _, _, _, toks = info[f]
+        code = [t for t in toks if t.kind not in ("NEWLINE", "EOF", "COMMENT")
+                and "\n" not in text[t.lo:t.hi]]
         rng = random.Random(f"{a.seed}:{f}")
         stem = f[:-len(".dawn")]
         for k, (mt, kind, off, shift, neutral, what, partner) in enumerate(
                 mutate(text, toks, rng, a.mutants)):
             mp = f"{stem}__m{k}.dawn"
             write(at(mp), mt)
-            muts.append((f, Mutant(mp, kind, off, shift, neutral, what, partner)))
+            muts.append((f, Mutant(mp, kind, off, shift, neutral, what, partner,
+                                   enclosing_openers(code, off) if kind.endswith("bracket") else ())))
 
     astm, mcrash = run_all(a.dawn, "__parse", [at(m.path) for _, m in muts], a.jobs)
     to_check, verdicts = [], {"parse": 0, "check": 0}
@@ -552,6 +632,26 @@ def main():
         shutil.rmtree(work, ignore_errors=True)
     else:
         print(f"work tree kept in {work}")
+    if a.known != "":
+        known = read_known(a.known)
+        full = (a.only is None and a.seed == ap.get_default("seed")
+                and a.mutants == ap.get_default("mutants")
+                and a.check_paths == ap.get_default("check_paths"))
+        new, stale = ratchet(set(seen), known, full)
+        print(f"{len(findings)} findings in {len(seen)} (property, rule, file) keys; "
+              f"{len(known)} pinned, {len(new)} new, {len(stale)} stale")
+        for k in new:
+            print("NEW   " + " ".join(k))
+        for k in stale:
+            print("STALE " + " ".join(k) + "  (no longer found: delete its line from "
+                  + (os.path.relpath(a.known, ROOT) if a.known else "KNOWN_KEYS in " + os.path.relpath(__file__, ROOT)) + ")")
+        if new or stale:
+            fresh = set(new)
+            sigs = sorted({f"{p}:{r}:{kd}" for p, r, f, kd, _ in findings if (p, r, f) in fresh})
+            print("verdict: " + ",".join(sigs + (["stale-pins"] if stale else [])))
+            return 1
+        print("verdict: green")
+        return 0
     if findings:
         sigs = sorted({f"{p}:{r}:{k}" for p, r, _, k, _ in findings})
         print(f"{len(findings)} findings in {len(seen)} (property, rule, file) keys")
@@ -640,6 +740,29 @@ def self_test(dawn):
     whole = Diag(text.index("fn f"), len(text) - 1, "from line 2 to the end",
                  [(text.index("fn f"), len(text) - 1)])
     expect("(b) passes a span that runs through the mutated line", "near" not in rules(at_assert, [whole]))
+    # an "unclosed" report at an opener that surrounds the edit is excused, at
+    # an opener that does not (a later one) is not
+    o_at = text.index("{")
+    o_later = text.index("{", o_at + 1)
+    unclosed_here = Diag(o_at, o_at + 1, "unclosed `{`", [(o_at, o_at + 1)])
+    unclosed_later = Diag(o_later, o_later + 1, "unclosed `{`", [(o_later, o_later + 1)])
+    deep = Mutant("x", "insert-bracket", text.index("assert"), 1, False, "inserted `{`", None, [o_at])
+    early = Mutant("x", "insert-bracket", a_at, 1, False, "inserted `{`", None, [o_at])
+    expect("(b) excuses an unclosed report at an opener around the edit",
+           "near" not in rules(deep, [unclosed_here]))
+    expect("(b) does not excuse an unclosed report at a later opener",
+           "near" in rules(early, [unclosed_later]))
+    expect("(b) does not excuse another message at that opener",
+           "near" in rules(deep, [Diag(o_at, o_at + 1, "expected `)`", [(o_at, o_at + 1)])]))
+    expect("enclosing openers are those whose brackets surround the edit",
+           enclosing_openers([t for t in toks if t.kind not in ("NEWLINE", "EOF", "COMMENT")],
+                             a_at) == [o_at])
+    # the ratchet: new keys fail, stale pins fail on a full run only
+    k1, k2 = ("b", "near", "a.dawn"), ("b", "near", "b.dawn")
+    expect("(ratchet) a pinned key passes", ratchet({k1}, {k1}, True) == ([], []))
+    expect("(ratchet) an unpinned key is new", ratchet({k1, k2}, {k1}, True) == ([k2], []))
+    expect("(ratchet) a pin nobody found is stale", ratchet({k1}, {k1, k2}, True) == ([], [k2]))
+    expect("(ratchet) a narrow run leaves stale pins alone", ratchet({k1}, {k1, k2}, False) == ([], []))
     closers = interp_closers('f("a${x}b${g("}")}")', [Tok("STRING", 2, 19, ["T:a", "C:6:x", "T:b", "C:11:g(\"}\")"])])
     expect("an interpolation's closer is found past a nested string", closers == [7, 17])
     # a launcher that dies on one file: the batch is halved down to it
