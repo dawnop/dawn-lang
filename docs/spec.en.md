@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ bb7be8c1922d3bb5 -->
+<!-- doc-check: translation-of docs/spec.md @ 918ca429fa49d36f -->
 
 # Dawn Language Specification
 
@@ -1781,7 +1781,7 @@ while queue.non_empty() { ... }
   implements both `Iter` and `StagedIter` cannot be iterated by `for`.
 
   ```dawn
-  var acc = zeros(o)                    # Tile[F64]; tileir provides StagedVar[Tile[D]]
+  var acc = zeros(o)                    # Tile[Float]; tileir provides StagedVar[Tile[D]]
   for k in d_range(0, K / T) {          # tileir provides StagedIter[DRange]
     acc = mmaf(load_at(a, [k]), load_at(b, [k]), acc)
   }
@@ -4868,8 +4868,8 @@ The device backend is **not** a third backend of the compiler. Neither driver kn
 kernel, Tile IR or a GPU is, and neither calls any device toolchain. It is two layers of
 library:
 
-- The host layer, `std/gpu` (bundled with std): the `Gpu` effect, `Tensor[D]`, the format
-  markers and `Dtype`, and the two handlers.
+- The host layer, `std/gpu` (bundled with std): the `Gpu` effect, `Tensor[D]` and the two
+  handlers; the element formats are in `std/dtype` (`Dtype[T]`) and in each value type's module.
 - The device layer, `packages/tileir` (a source package brought in through `[deps]`, not part
   of std): the `Dev` effect, the recording handler, `TileProg`, the Tile IR text renderer and
   the bytecode writer. The host reference implementations of kernels are in
@@ -4879,11 +4879,11 @@ The reasons, the roadmap and the measurements are in
 [`tile-backend-design.md`](tile-backend-design.md) §4–§6 (in Chinese).
 
 **A kernel body** is an ordinary Dawn function whose effect row is `Dev` alone, of the shape
-`fn(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev`.
+`fn(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev`.
 
 - It does not execute on the device, and it computes no number on the host. Every `Dev`
   operation produces or consumes **handles**: opaque types such as `Tile[D]` (of any rank; a
-  scalar is rank 0), `Idx` and `Param[D]`, whose phantom parameter `D` is a format marker (§2.7). Handles
+  scalar is rank 0), `Idx` and `Param[D]`, whose phantom parameter `D` is a format's value type (§2.7). Handles
   are issued by the handler; using one kind of handle as another, or a host `Int` as a
   handle, is a type error.
 - **Recording**: `tileir/prog`'s `trace_kernel(name, params, body)` runs `body` exactly once,
@@ -4991,12 +4991,17 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 **Types that cross the boundary**: only buffers cross between host and device.
 
 - `Tensor[D]` is an opaque type whose representation is (handle, element count); `D` is a
-  format marker, so `Tensor[F64]` and `Tensor[BF16]` are two types and passing the wrong format
+  format's value type, so `Tensor[Float]` and `Tensor[BF16]` are two types and passing the wrong format
   is a type error rather than a launch failure. A handle is an opaque integer issued by the
   handler, and a program never invents one.
-- There are 15 format markers, each implementing `Dtype` (`dtype_name`, `dtype_bytes`), and no
-  other type implements it: `F64`, `F32`, `BF16`, `I32`, `F16`, `I8`, `U8`, `I16`, `I64`,
-  `TF32`, `F8E4M3FN`, `F8E5M2`, `F8E8M0FNU`, `I4`, `F4E2M1FN`.
+- There are 15 formats, each a value type plus a witness constant of the same name, a
+  `Dtype[T]` (`use std/narrow.{BF16}` brings in the type and the witness; `alloc(BF16, n)`,
+  `Tensor[BF16]`), and only they implement `HasDtype`: `Float` (witness `F64`), `Int` (`I64`)
+  and `Bool` (`I1`, a tile format only) in `std/dtype`; `BF16`, `F16`, `F32`, `TF32`, `F8E4M3FN`,
+  `F8E5M2`, `F8E8M0FNU` and `F4E2M1FN` in `std/narrow` (the last five are storage-only, with no
+  arithmetic); `I8`, `I16`, `I32` and `U8` in `std/int/*`; `I4` in `std/gpu`. `U16`, `U32` and
+  `U64` have none (the dialect has no unsigned integer tile types), so a `Tensor[U32]` is a type
+  error at `alloc`.
 - The formats a buffer can be allocated in are exactly the 12 `element_bytes` knows: `f64`,
   `i64`, `i32`, `tf32`, `bf16`, `f16`, `i16`, `i8`, `u8`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`.
   Both handlers answer `gpu.unsupported_dtype` for the rest, `F32` included: it can be written

@@ -92,7 +92,7 @@ NAN = float("nan")
 # (name, p, emin, emax) -- p counts the hidden bit
 FORMATS = [
     ("bf16", 8, -126, 127),
-    ("fp16", 11, -14, 15),
+    ("f16", 11, -14, 15),
     ("f32", 24, -126, 127),
 ]
 

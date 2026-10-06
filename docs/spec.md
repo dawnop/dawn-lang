@@ -1399,7 +1399,7 @@ while queue.non_empty() { ... }
   `Iter` 与 `StagedIter` 的类型不能被 `for` 迭代。
 
   ```dawn
-  var acc = zeros(o)                    # Tile[F64]，tileir 提供 StagedVar[Tile[D]]
+  var acc = zeros(o)                    # Tile[Float]，tileir 提供 StagedVar[Tile[D]]
   for k in d_range(0, K / T) {          # tileir 提供 StagedIter[DRange]
     acc = mmaf(load_at(a, [k]), load_at(b, [k]), acc)
   }
@@ -3828,7 +3828,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 设备后端**不是**编译器的第三个后端。两个驱动都不认识 kernel、Tile IR 或 GPU，也不调用任何
 设备工具链。它是两层库：
 
-- 宿主层 `std/gpu`（随 std 捆绑）：`Gpu` 效果、`Tensor[D]`、格式标记与 `Dtype`、两个 handler。
+- 宿主层 `std/gpu`（随 std 捆绑）：`Gpu` 效果、`Tensor[D]`、两个 handler；元素格式在 `std/dtype`（`Dtype[T]`）与各值类型的模块里。
 - 设备层 `packages/tileir`（源码包，经 `[deps]` 引入，不在 std 里）：`Dev` 效果、记录
   handler、`TileProg`、Tile IR 文本渲染器与字节码写入器。kernel 的宿主参考实现在
   `packages/tileref`。
@@ -3836,10 +3836,10 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 理由、路线与实测见 [`tile-backend-design.md`](tile-backend-design.md) §4–§6。
 
 **kernel 体**是效果行只有 `Dev` 的普通 Dawn 函数，形如
-`fn(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev`。
+`fn(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev`。
 
 - 它不在设备上执行，也不在宿主上计算任何数值。`Dev` 的每个操作产生或消费**句柄**：
-  `Tile[D]`（任意秩，0 秩即标量）、`Idx`、`Param[D]` 等不透明类型，幻影参数 `D` 是格式标记（§2.7）。
+  `Tile[D]`（任意秩，0 秩即标量）、`Idx`、`Param[D]` 等不透明类型，幻影参数 `D` 是格式的值类型（§2.7）。
   句柄由 handler 签发；把一种句柄当另一种用，或把宿主的 `Int` 当句柄用，是类型错误。
 - **记录**：`tileir/prog` 的 `trace_kernel(name, params, body)` 在**宿主运行期**、在记录
   handler 下把 `body` 跑恰好一次，答一个 `TileProg`（SSA 形式的 ADT）。`params` 是入口各参数
@@ -3916,12 +3916,14 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 
 **跨界的类型**：宿主与设备之间只过缓冲。
 
-- `Tensor[D]` 是不透明类型，表示是（句柄，元素数）；`D` 是格式标记，`Tensor[F64]` 与
+- `Tensor[D]` 是不透明类型，表示是（句柄，元素数）；`D` 是格式的值类型，`Tensor[Float]` 与
   `Tensor[BF16]` 是两个类型，传错格式是类型错误而不是 launch 失败。句柄是 handler 签发的
   不透明整数，程序从不编造它。
-- 格式标记有 15 个，各实现 `Dtype`（`dtype_name`、`dtype_bytes`），别的类型不实现它：
-  `F64`、`F32`、`BF16`、`I32`、`F16`、`I8`、`U8`、`I16`、`I64`、`TF32`、`F8E4M3FN`、`F8E5M2`、
-  `F8E8M0FNU`、`I4`、`F4E2M1FN`。
+- 格式有 15 个，每个是一个值类型加一个同名的见证常量 `Dtype[T]`（`use std/narrow.{BF16}` 同时带来类型与见证；
+  `alloc(BF16, n)`、`Tensor[BF16]`），只有它们有 `HasDtype`：`Float`（见证 `F64`）、`Int`（`I64`）、`Bool`（`I1`，只是 tile 格式）
+  在 `std/dtype`；`BF16`、`F16`、`F32`、`TF32`、`F8E4M3FN`、`F8E5M2`、`F8E8M0FNU`、`F4E2M1FN` 在 `std/narrow`（后五个只作存储，没有算术）；
+  `I8`、`I16`、`I32`、`U8` 在 `std/int/*`；`I4` 在 `std/gpu`。`U16`、`U32`、`U64` 没有（方言没有无符号整数 tile 类型），
+  所以 `Tensor[U32]` 在 `alloc` 处是类型错误。
 - 能分配成缓冲的格式恰好是 `element_bytes` 认识的 12 个：`f64`、`i64`、`i32`、`tf32`、`bf16`、
   `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
   `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN` 只是 tile

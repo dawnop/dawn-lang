@@ -64,6 +64,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out}
+use std/dtype.{F64}
 use tileref/ref.{global_syms_tables, global_syms_ref}
 use std/list
 use std/map
@@ -231,7 +232,7 @@ fn blank_probe() -> Probe =
 ## the global held if it answered a handle. The handle is FREED, which for a
 ## module's global drops the handle and leaves the storage alone.
 fn look_up(name: String) -> (String, Int, Option[List[Float]]) !Gpu =
-  match gpu.module_global(gpu.F64, KERNEL, name) {
+  match gpu.module_global(F64, KERNEL, name) {
     Err(e) -> (e.kind, 0, None)
     Ok(t) -> {
       let n = gpu.size(t)
@@ -257,7 +258,7 @@ fn look_up_all(names: List[String], i: Int, p: Probe) -> Probe !Gpu =
 ## answers the handle it answered before, so this is the storage the read
 ## above read and the storage the launch below reads.
 fn write_one(name: String, values: List[Float]) -> String !Gpu =
-  match gpu.module_global(gpu.F64, KERNEL, name) {
+  match gpu.module_global(F64, KERNEL, name) {
     Err(e) -> e.kind
     Ok(t) -> {
       let w = gpu.upload(t, values)

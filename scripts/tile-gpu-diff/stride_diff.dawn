@@ -38,8 +38,9 @@
 #     stride-row-major-swapped).
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, sync, handle_of }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
+  launch, sync, handle_of}
+use std/dtype.{F64}
 use tileref/ref.{transpose_ref, conv1d_ref, conv2d_ref, conv3d_ref, max_pool_ref, interleave_ref, rgb_gray_ref,
   jacobi_ref, depthwise_conv1d_ref, gaussian_blur_ref }
 use std/list
@@ -126,13 +127,13 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 fn blank() -> Trace =
   Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
 
-fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+fn release(ts: List[Tensor[Float]]) -> Unit !Gpu = {
   for t in ts {
     let _ = free(t)
   }
 }
 
-fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[F64]]) -> Result[List[Tensor[F64]], ForeignError] !Gpu =
+fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[Float]]) -> Result[List[Tensor[Float]], ForeignError] !Gpu =
   if i >= len(sizes) {
     Ok(acc)
   } else {
@@ -142,7 +143,7 @@ fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[F64]]) -> Result[List[Te
     }
   }
 
-fn upload_all(ts: List[Tensor[F64]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
   if i >= len(ts) {
     Ok(())
   } else {

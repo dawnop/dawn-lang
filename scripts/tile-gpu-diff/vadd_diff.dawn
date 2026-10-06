@@ -36,8 +36,10 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, Dtype, F64, BF16, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc,
-  upload, download, free, launch, sync, handle_of, dtype_name }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, upload, download, free,
+  launch, sync, handle_of}
+use std/dtype.{Dtype, F64, dtype_name}
+use std/narrow.{BF16}
 use std/list
 use std/map
 use std/narrow
@@ -84,14 +86,14 @@ fn release[D](ts: List[Tensor[D]]) -> Unit !Gpu = {
 }
 
 # `xs` as a buffer of format `d` holds it.
-fn held[D: Dtype](d: D, xs: List[Float]) -> List[Float] = {
+fn held[D](d: Dtype[D], xs: List[Float]) -> List[Float] = {
   let dt = dtype_name(d)
   list.map(xs, x => gpu.round_to(dt, x))
 }
 
 ## The whole vadd of format `d` through `kernel`, one stage at a time,
 ## stopping at the first refusal and saying which stage it was.
-fn stages[D: Dtype](d: D, kernel: String, xs: List[Float], ys: List[Float]) -> Trace !Gpu = {
+fn stages[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> Trace !Gpu = {
   let n = len(xs)
   let ra = alloc(d, n)
   let rb = alloc(d, n)

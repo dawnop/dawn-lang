@@ -96,7 +96,7 @@ spec §2.7 的别名替换法判据：允许看见 `TyOpaque` 的事从五件变
 | `std/cursor.Cursor` | `Int` | 已有 `impl Show`（SEM-04） | 不变 |
 | `std/bytes.Buf` | `Array[Int]` | 可变构建器句柄，打印它等于打印内部数组 | 不可打印；要看内容先 `to_bytes` |
 | `std/gpu.Tensor[D]` | `(Int, Int)` | 设备句柄，句柄号对用户无意义 | 不可打印 |
-| `std/narrow.BF16`/`FP16`/`F32` | `Float` | 数值，打印是正常需求（今天的语料就在打） | 补 `impl Show`，渲染为所含 `Float`（与今天逐字节相同） |
+| `std/narrow.BF16`/`F16`/`F32` | `Float` | 数值，打印是正常需求（今天的语料就在打） | 补 `impl Show`，渲染为所含 `Float`（与今天逐字节相同） |
 | `packages/sha2.Digest` | `DigestState` | 进行中的哈希状态，打印会泄漏中间状态 | 不可打印；结果用 `finish`/`hex` |
 | `packages/tileir` 的 `Tile`/`Idx`/`Param`/`Scalar`/`Ptrs`/`TensorView`/`GridView`/`GatherScatterView` | `Int` 或 `(Int, String)` | SSA 句柄，句柄号对用户无意义 | 不可打印 |
 

@@ -32,8 +32,11 @@
 # Run: dawn run examples/projects/gpu_fake
 
 use std/gpu
-use std/gpu.{Gpu, F64, F32, I32, F8E4M3FN, WideRefFn, last_out, with_gpu_fake,
-  reference_kernels, alloc, upload, download, launch, free, sync, handle_of, vadd_ref }
+use std/gpu.{Gpu, WideRefFn, last_out, with_gpu_fake, reference_kernels, alloc, upload, download, launch, free,
+  sync, handle_of, vadd_ref}
+use std/dtype.{F64}
+use std/narrow.{F32, F8E4M3FN}
+use std/int/i32.{I32}
 use tileref/ref.{loop_count_ref, assert_pass_ref, global_table_ref, alloca_scratch_ref, shape_ops_ref,
   dtype_convert_ref }
 use std/io
@@ -62,7 +65,7 @@ const N: Int = 8
 ## add, one store. `!Dev` and nothing else, so there is no host memory here
 ## and no way to look at a number. The parameters' cells (`vadd_text` below)
 ## are the addressing, so the body names no shape and no offset.
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let ta = load_cell(a)
   let tb = load_cell(b)
   store_cell(out, add(ta, tb))
@@ -72,7 +75,7 @@ fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
 ## store. A hint is advice about latency, so by definition it cannot change
 ## what the kernel computes; the second load carries none, which puts both
 ## states of the flag bit in one kernel.
-fn vadd_hinted(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn vadd_hinted(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), WIDTH)
   let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", [hint_latency(4)])])
   let tb = load(b, blk, [WIDTH])
@@ -139,7 +142,7 @@ fn table_b() -> List[Float] = [-0.25, -1.25, -4.25, -9.25, -16.25, -25.25, -36.2
 ## `get_global` answers a pointer to each; `@tbl_b` asks for a 256-byte
 ## alignment and `@tbl_a` takes the dialect's default, so one module carries
 ## two different values in that field.
-fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn table(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [N]
   d_global("tbl_a", F64, table_a())
   d_global("tbl_b", F64, table_b(), align: 256)
@@ -157,7 +160,7 @@ fn table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 ## the storage form and the conversion answer the same numbers, both landing
 ## on the same eight-bit grid. The subword formats T9 added (`i4`,
 ## `f4E2M1FN`) have no buffer format at all, so they are not here.
-fn narrowed(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn narrowed(x: Param[F8E4M3FN], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [N]
   let blk = tile_at(block_id(0), N)
   store(out, blk, float_to_float(load(x, blk, s), F64))
@@ -169,7 +172,7 @@ fn narrowed(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 ## twice, towards each infinity, so the two segments BRACKET the exact sum:
 ## a lane on the f32 grid gets one number twice, and a lane off it gets the
 ## two neighbours it falls between.
-fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn interval(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [N]
   let blk = tile_at(block_id(0), N)
   let a = float_to_float(load(x, blk, s), F32)
@@ -186,7 +189,7 @@ fn interval(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 ## same launch and adds the input, so the answer is `3 * x` and a scratch
 ## that read back zeros would answer `x`. The count is not a power of two
 ## and the alignment is: the dialect's rule, and why they cannot be swapped.
-fn scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn scratch(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [N]
   let blk = tile_at(block_id(0), N)
   let p = ptr_offset(alloca_ptrs(F64, 12, 8, s), lanes(idx_const(0), s))
@@ -201,7 +204,7 @@ fn scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 ## two axes. Both source dimensions have two slices and the rank-3 tile's
 ## first two dimensions are equal, so every wrong spelling here is still
 ## well typed: a wrong ANSWER rather than a refusal.
-fn shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn shapes(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let base = tile_at(b, 128)
   let obase = tile_at(b, 192)
@@ -266,7 +269,7 @@ fn shapes_text() -> String =
 ## so every list below ends with the output buffer's initial contents.
 alias Buf = (String, List[Float])
 
-## Three buffers, one launch, one answer back, with `Tensor[F64]` carrying
+## Three buffers, one launch, one answer back, with `Tensor[Float]` carrying
 ## the format in its type. Which device this is, is the handler's business;
 ## `run` names only `!Gpu`.
 fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {

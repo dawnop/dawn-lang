@@ -52,8 +52,9 @@
 # seen rather than discovered.
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, sync, handle_of }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
+  launch, sync, handle_of}
+use std/dtype.{F64}
 use tileref/ref.{ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref,
   monte_carlo_ref, rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref, agent_step_ref }
 use std/list
@@ -122,13 +123,13 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 fn blank() -> Trace =
   Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
 
-fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+fn release(ts: List[Tensor[Float]]) -> Unit !Gpu = {
   for t in ts {
     let _ = free(t)
   }
 }
 
-fn alloc_many(count: Int, size: Int, acc: List[Tensor[F64]]) -> Result[List[Tensor[F64]], ForeignError] !Gpu =
+fn alloc_many(count: Int, size: Int, acc: List[Tensor[Float]]) -> Result[List[Tensor[Float]], ForeignError] !Gpu =
   if count == 0 {
     Ok(acc)
   } else {
@@ -138,7 +139,7 @@ fn alloc_many(count: Int, size: Int, acc: List[Tensor[F64]]) -> Result[List[Tens
     }
   }
 
-fn upload_all(ts: List[Tensor[F64]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
   if i >= len(ts) {
     Ok(())
   } else {

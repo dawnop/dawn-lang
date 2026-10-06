@@ -5,16 +5,18 @@ A pure Dawn generator of CUDA Tile IR that records a kernel body written against
 A kernel body is an ordinary Dawn function whose only effect is `Dev`.
 Recording it once yields a `TileProg`, which `render` prints as `cuda_tile`
 text and `encode` writes as bytecode. Buffers and launches are `std/gpu`'s,
-and so are the format markers (`F64`, `BF16`, ...).
+and a format is a value type with a witness of the same name: `Float` and
+`F64`, `Int` and `I64`, `Bool` and `I1` (`std/dtype`), `BF16`, `F16` and `F32`
+(`std/narrow`), `I32` (`std/int/i32`).
 
 ```dawn
-use std/gpu.{F64}
+use std/dtype.{F64}
 use tileir/dev.{Dev, Param, load_cell, store_cell, add, DYN_DIM}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 use tileir/bytecode.{encode}
 
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
 let g = cells([DYN_DIM], [128])     # 128-wide cells, as many as the grid has
@@ -69,7 +71,7 @@ from their operands, and a matrix product's from its two factors:
 use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 
-fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   var acc = zeros(c)
   for k in d_range(0, 256 / 32) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
@@ -165,7 +167,7 @@ for j in d_range(0, N / BK) {
   acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
   m = m_new
 }
-store_cell(o, (acc / l).to(F64))   # o: Param[F64]
+store_cell(o, (acc / l).to(F64))   # o: Param[Float]
 ```
 
 `carry`, `get` and `set` remain for the loops a `for` cannot write: `d_loop`'s

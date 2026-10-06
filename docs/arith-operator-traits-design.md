@@ -48,7 +48,7 @@ trait Neg[T] { effect Neg = !()  fn neg(a: T) -> T !T.Neg }         # 一元 -
 | 运算符 | 进 trait？ | 理由 |
 |---|---|---|
 | `+ - * / %`、一元 `-` | **进** | 本设计 |
-| `< <= > >=` | 不动 | 仍桥 `Ord`、答 `Bool`。tile 的逐元素比较答 `Tile[I1]`，让 `<` 答 tile 会破 `if a < b`、`sort`、`[T: Ord]` |
+| `< <= > >=` | 不动 | 仍桥 `Ord`、答 `Bool`。tile 的逐元素比较答 `Tile[Bool]`，让 `<` 答 tile 会破 `if a < b`、`sort`、`[T: Ord]` |
 | `==` `!=` | 不动 | 答 `Bool`，与 `Map` 键、`match` 字面量深度耦合 |
 | `++` | 不动 | 封闭在 `String/Bytes/List`，有 `cat_list` 的单元素改写；没有消费者在等 |
 | `& \| ^ << >> >>> ~` | 不动 | 仅 `Int`；按位 trait 另立设计 |
@@ -139,7 +139,7 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 [literal-system-design.md](literal-system-design.md) 的 L1，与本刀同一个 release 落地，取代这一条。**左锚定的不对称对非字面量收窄**（C0 刀，2026-10-06 裁决，推翻原判）：原判是「`lit(2.0) * t` 推不出 `D`，不做左推不出时以右回填」，
 理由是右回填就是双向求解的第一步。这一条仍然成立，**不做右回填**；改变的是另一个方向：二元算术运算符节点**自己的期望类型**，
 当它是走 trait 的库类型（`arith_routed` 为真，即不是 `Int`/`Float`、不是错误类型、有类型头或是刚性类型参数）时，**下传给左操作数**。
-于是 `fn f(t: Tile[F64]) -> Tile[F64] = lit(2.0) * t` 的 `D` 由返回类型定下，`let s: Tile[A] = mma(q, k, 0.0) * lit(scale)` 的累加器格式 `C` 由 let 注解定下。
+于是 `fn f(t: Tile[Float]) -> Tile[Float] = lit(2.0) * t` 的 `D` 由返回类型定下，`let s: Tile[A] = mma(q, k, 0.0) * lit(scale)` 的累加器格式 `C` 由 let 注解定下。
 期望只是期望，不是约束：左操作数类型与期望不符时，二元节点上原有的类型不符诊断照旧。
 
 理由：左右不对称在字面量裁决之后成了缺陷而不是设计。右操作数早就以左类型为期望，字面量裁决又规定库类型的期望照常流动；
@@ -241,7 +241,7 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 | 1′ | 发 release N（与字面量 L1 同一个 release），`advance-seed.sh` | 待做 |
 | 2 | LSP：运算符悬停显示 impl 签名、goto 跳 impl 方法、`lspeval` 折用户 impl 的闭合算术 | 完成（折叠本来就读 `XCallFn`，运算符悬停的第一行带值） |
 | 3 | tileir：`impl[D] Add/Sub/Mul/Div/Rem/Neg[Tile[D]]`（`effect X = !Dev`）、`Idx` 的 impl；判词 tile-golden 逐字节零变化 | 待种子 |
-| 4 | `std/narrow`：`BF16/FP16/F32` 的 impl（含 `Rem`：截断余数在任何二进制格式里都精确，不需重新舍入），改写其头注与 `tile-backend-design.md` 的「人体工学降一档」；`narrow-contract` 让运算符与具名成员跑同一批 oracle 用例 | 完成 |
+| 4 | `std/narrow`：`BF16/F16/F32` 的 impl（含 `Rem`：截断余数在任何二进制格式里都精确，不需重新舍入），改写其头注与 `tile-backend-design.md` 的「人体工学降一档」；`narrow-contract` 让运算符与具名成员跑同一批 oracle 用例 | 完成 |
 | 5 | 教程 §16（英文先、中文后）、站点 GPU 页示例 | 待 3、4 |
 
 ## 6. 测试

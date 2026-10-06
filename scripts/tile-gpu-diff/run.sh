@@ -3541,8 +3541,8 @@ fi
 #     corpus is tenths rounded to the f16 grid, is off the bf16 grid, and
 #     that is why its corpus is written the way it is.
 std_f16="$(mutant_std f16-rounds-like-bf16 \
-  '    let bits = narrow.fp16_bits(narrow.round_fp16(x))' \
-  '    let bits = narrow.fp16_bits(narrow.round_bf16(x))')"
+  '    let bits = narrow.f16_bits(narrow.round_f16(x))' \
+  '    let bits = narrow.f16_bits(narrow.round_bf16(x))')"
 build_native "$std_f16" "$work/m-f16-bf16.bin" "$here/wide_diff.dawn"
 rc=0
 "$work/m-f16-bf16.bin" "${wide_cubins[@]}" > "$work/m-f16-bf16.out" 2>&1 || rc=$?

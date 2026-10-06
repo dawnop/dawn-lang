@@ -10,12 +10,14 @@
 # the operations traffic in SSA handles (`Int`), dtype names (`String`) and
 # operation names (`String`), and the functions below add the phantom-typed
 # `Tile[D]` / `Param[D]` and are the only surface a kernel body uses. The
-# dtype markers for buffer formats are std/gpu's `F64` / `F32` / `BF16` /
-# `I32`, so a `Param[F64]` and a `Tensor[F64]` agree on what "f64" means
-# without a second declaration. `I32` moved there with knife 10, when i32
-# became a buffer format as well as a tile one; `I1` is still declared here,
-# because it is a tile element format alone: std/gpu's `element_bytes` does
-# not know it and a `Tensor[I1]` cannot be allocated.
+# formats are std's value types: a `Param[Float]` and a `Tensor[Float]` agree
+# on what "f64" means because both are indexed by the host type, and the
+# format is named at a call by the witness spelled like the type
+# (`param(F64, 0)`, `f_const(BF16, 0.5)`): `F64`, `I64` and `I1` come from
+# std/dtype, `BF16`, `F16`, `F32` and the other float formats from std/narrow,
+# `I8`, `I16`, `I32` and `U8` from std/int. `Tile[Bool]` is a mask, a tile
+# element format that is not a buffer format: `element_bytes` does not know
+# it and a `Tensor[Bool]` cannot be allocated.
 #
 # One effect operation per shape rather than per operation: `t_binaryf` takes
 # the operation's name, so adding `subf` is a name in a list rather than a
@@ -27,16 +29,19 @@
 # Handles are minted by the handler; a body never invents one. The three
 # opaque types below are three kinds of handle a body can hold, and mixing
 # them is a type error rather than a malformed program: a `Tile[F32]` in a
-# `Tile[F64]` slot, or a host `Int` where an index tile is wanted, are both
+# `Tile[Float]` slot, or a host `Int` where an index tile is wanted, are both
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, I32, I8, I64, I4}
-use std/narrow.{Rounding}
+use std/dtype.{Dtype, dtype_name, F64, I64, I1}
+use std/int/i32.{I32}
+use std/int/i8.{I8}
+use std/gpu.{I4}
+use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it,
 ## of any rank, rank 0 (`tile<f64>`) included. `D` is a phantom (spec 2.7):
-## `Tile[F64]` and `Tile[F32]` are two types over one representation, so
+## `Tile[Float]` and `Tile[F32]` are two types over one representation, so
 ## `add` of an f64 tile and an f32 one is a type error.
 ##
 ## The SHAPE is not in the type. It belongs to the value: the recording
@@ -166,83 +171,56 @@ pub fn hint_occupancy(n: Int) -> Hint = ("occupancy", n)
 ## view operations'). The dialect wants 1 to 10.
 pub fn hint_latency(n: Int) -> Hint = ("latency", n)
 
-## The one-bit tile format: what a comparison answers and what a mask is. A
-## tile element format, not a buffer format. Its i32 neighbour is std/gpu's
-## `I32`, which is both (knife 10).
-pub type I1 = I1
-
-impl Dtype[I1] {
-  fn dtype_name(d: I1) -> String = "i1"
-  fn dtype_bytes(d: I1) -> Int = 1
-}
-
 ## The float formats a constant can be made in when nothing but the TYPE
 ## names the format (tileir 0.10.0): `full` and `mma`'s accumulator read
-## theirs off this rather than off a marker argument, so
+## theirs off this rather than off a witness argument, so
 ## `let m: Tile[F32] = full([32, 1], 0.0)` is an f32 tile and
 ## `full([32, 1], 0.0)` with no expected type does not check.
 ##
-## `float_dtype` answers the marker of `D` from the type alone. std/gpu's
-## `Dtype` cannot: its methods take the marker as their first argument
-## (a type parameter that appears in no argument position cannot be
-## inferred there), and a `Tile[D]` is erased at run time, so a function
-## generic in `D` and given no `D` value has no other way to learn which
-## format it is making. The dictionary this bound passes is that way.
-## `float_name` is the format's name, so one bound is enough; it agrees
-## with `Dtype`'s `dtype_name` for every format here. The seven formats
-## are the dialect's arithmetic floats: the operands `mmaf` takes. The
-## exponent-only `f8E8M0FNU` and the sub-byte `f4E2M1FN` are left out,
-## as no arithmetic operation takes either.
+## `float_dtype` answers the witness of `D` from the type alone. A
+## function generic in `D` and given no `D` value has no other way to learn
+## which format it is making (a type parameter that appears in no argument
+## position cannot be inferred, and a `Tile[D]` is erased at run time), so
+## `D` is in the return position and the dictionary this bound passes is
+## that way. std/dtype's `HasDtype` is the same shape for every format;
+## this one is kept apart because the seven formats here are the dialect's
+## arithmetic floats, the operands `mma` takes, and `HasDtype` would let
+## the exponent-only `f8E8M0FNU`, the sub-byte `f4E2M1FN` and the integers
+## into `full`'s bound, turning a type error into a recording refusal.
 pub trait FloatDtype[D] {
-  fn float_dtype() -> D
-  fn float_name(d: D) -> String
+  fn float_dtype() -> Dtype[D]
 }
 
-impl FloatDtype[F64] {
-  fn float_dtype() -> F64 = F64
-  fn float_name(d: F64) -> String = "f64"
+impl FloatDtype[Float] {
+  fn float_dtype() -> Dtype[Float] = F64
 }
 
 impl FloatDtype[F32] {
-  fn float_dtype() -> F32 = F32
-  fn float_name(d: F32) -> String = "f32"
+  fn float_dtype() -> Dtype[F32] = F32
 }
 
 impl FloatDtype[TF32] {
-  fn float_dtype() -> TF32 = TF32
-  fn float_name(d: TF32) -> String = "tf32"
+  fn float_dtype() -> Dtype[TF32] = TF32
 }
 
 impl FloatDtype[F16] {
-  fn float_dtype() -> F16 = F16
-  fn float_name(d: F16) -> String = "f16"
+  fn float_dtype() -> Dtype[F16] = F16
 }
 
 impl FloatDtype[BF16] {
-  fn float_dtype() -> BF16 = BF16
-  fn float_name(d: BF16) -> String = "bf16"
+  fn float_dtype() -> Dtype[BF16] = BF16
 }
 
 impl FloatDtype[F8E4M3FN] {
-  fn float_dtype() -> F8E4M3FN = F8E4M3FN
-  fn float_name(d: F8E4M3FN) -> String = "f8E4M3FN"
+  fn float_dtype() -> Dtype[F8E4M3FN] = F8E4M3FN
 }
 
 impl FloatDtype[F8E5M2] {
-  fn float_dtype() -> F8E5M2 = F8E5M2
-  fn float_name(d: F8E5M2) -> String = "f8E5M2"
+  fn float_dtype() -> Dtype[F8E5M2] = F8E5M2
 }
 
-# The 64-bit integer format is std/gpu's `I64` and not one of this
-# module's own. Knife T2 declared it here, beside `I1`, on the grounds that
-# it was a tile element format and not a buffer format: `ptr_to_int` answers
-# one and nothing allocated a buffer of it. Knife T3 allocates buffers of
-# it, so the grounds are gone and there is one `I64` again. `I1` stays here,
-# because the dialect has no i1 buffer at all and std/gpu has no marker for
-# one.
-
 ## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:
-## the element format the pointers point AT, so a `Ptrs[F64]` where a
+## the element format the pointers point AT, so a `Ptrs[Float]` where a
 ## `Ptrs[I32]` is wanted is a type error.
 ##
 ## Every `load` and `store` of the strided surface builds one of these
@@ -938,7 +916,7 @@ pub fn padding_present(p: Padding) -> Bool = match p {
 ## Parameter `pos` of the entry, of format `d`. Positions count from zero and
 ## must agree with the `params` list given to `trace_kernel`; the handler
 ## refuses a load or store that disagrees.
-pub fn param[D: Dtype](d: D, pos: Int) -> Param[D] = {
+pub fn param[D](d: Dtype[D], pos: Int) -> Param[D] = {
   let p: Param[D] = (pos, dtype_name(d))
   p
 }
@@ -1029,21 +1007,21 @@ pub fn coord(base: Idx, shape: List[Int], axis: Int, step: Int) -> Tile[I32] !De
 ## re-record six kernels that were measured against a device under the
 ## spelling they have, and buy no claim the `andi` clients below do not
 ## already make. The shape is the masks' own.
-pub fn and_mask(a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev = called("and_mask", () => {
+pub fn and_mask(a: Tile[Bool], b: Tile[Bool]) -> Tile[Bool] !Dev = called("and_mask", () => {
   select(a, b, bool_const(false))
 })
 
 ## The lanes either mask selects: a `select`, `a` where it is 1 choosing
 ## the all-true tile and `b` elsewhere. The `or` to `and_mask`'s `and`,
 ## written the same way and for the same reason.
-pub fn or_mask(a: Tile[I1], b: Tile[I1]) -> Tile[I1] !Dev = called("or_mask", () => {
+pub fn or_mask(a: Tile[Bool], b: Tile[Bool]) -> Tile[Bool] !Dev = called("or_mask", () => {
   select(a, bool_const(true), b)
 })
 
 ## The lanes whose coordinate `c` satisfies `lo <= c < hi`, as a mask of
 ## `c`'s shape. Both bounds are host constants; `lo` is not always zero,
 ## because a stencil reads a coordinate one before the tile's own.
-pub fn in_range(c: Tile[I32], lo: Int, hi: Int) -> Tile[I1] !Dev = called("in_range", () => {
+pub fn in_range(c: Tile[I32], lo: Int, hi: Int) -> Tile[Bool] !Dev = called("in_range", () => {
   and_mask(ge_i(c, i_const(lo)), lt_i(c, i_const(hi)))
 })
 
@@ -1056,7 +1034,7 @@ pub fn in_range(c: Tile[I32], lo: Int, hi: Int) -> Tile[I1] !Dev = called("in_ra
 ## given starts at a block's own base and counts up; a stencil, whose taps
 ## reach BELOW that base, wants `in_range`. `shape` is the tile's: a mask
 ## has no operand to read it from.
-pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1] !Dev = called("axis_mask", () => {
+pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[Bool] !Dev = called("axis_mask", () => {
   lt_i(coord(base, shape, axis, 1), i_const(limit))
 })
 
@@ -1093,7 +1071,7 @@ pub fn axis_mask(base: Idx, shape: List[Int], axis: Int, limit: Int) -> Tile[I1]
 ## the shape-once ruling makes strides the exception a kernel states, not a
 ## value every call recomputes and shows.
 pub fn load[D](p: Param[D], base: Idx, shape: List[Int], strides: Option[List[Int]] = None,
-  mask: Option[Tile[I1]] = None, pad: Option[Tile[D]] = None, hints: Hints = []) -> Tile[D] !Dev = called("load", () => {
+  mask: Option[Tile[Bool]] = None, pad: Option[Tile[D]] = None, hints: Hints = []) -> Tile[D] !Dev = called("load", () => {
     let i: Int = base
     let h: Tile[D] = t_load(position(p), param_dtype(p), i, shape, strides_or_row_major(shape, strides),
       handle_of(mask), handle_of(pad), hints)
@@ -1115,7 +1093,7 @@ pub fn load[D](p: Param[D], base: Idx, shape: List[Int], strides: Option[List[In
 ## kernel records, and so is one into an In. A `Shared` parameter, or any
 ## parameter of `trace_kernel`, takes this.
 pub fn store[D](p: Param[D], base: Idx, v: Tile[D], strides: Option[List[Int]] = None,
-  mask: Option[Tile[I1]] = None, hints: Hints = []) -> Unit !Dev = called("store", () => {
+  mask: Option[Tile[Bool]] = None, hints: Hints = []) -> Unit !Dev = called("store", () => {
     let i: Int = base
     let hv: Int = v
     let shape = shape_of(hv)
@@ -1216,7 +1194,7 @@ fn pointee(h: Int) -> String !Dev = {
 ## tile LOADED from a buffer is the whole of data-dependent addressing:
 ## `load` it, then gather with it. 0.8.0 folded `gather_masked` into the
 ## two options, as 0.7.0 did the pointer path's loads.
-pub fn gather[D](p: Param[D], index: Tile[I32], mask: Option[Tile[I1]] = None,
+pub fn gather[D](p: Param[D], index: Tile[I32], mask: Option[Tile[Bool]] = None,
   pad: Option[Tile[D]] = None) -> Tile[D] !Dev = called("gather", () => {
     let hi: Int = index
     let h: Tile[D] = t_gather(position(p), param_dtype(p), hi, shape_of(hi), handle_of(mask), handle_of(pad))
@@ -1232,7 +1210,7 @@ pub fn gather[D](p: Param[D], index: Tile[I32], mask: Option[Tile[I1]] = None,
 ## duplicated index has no answer at all rather than one of two. A
 ## permutation is the shape every caller here writes. A scatter is not a
 ## cell write, so its parameter is a `Shared` one.
-pub fn scatter[D](p: Param[D], index: Tile[I32], v: Tile[D], mask: Option[Tile[I1]] = None) -> Unit !Dev = called("scatter", () => {
+pub fn scatter[D](p: Param[D], index: Tile[I32], v: Tile[D], mask: Option[Tile[Bool]] = None) -> Unit !Dev = called("scatter", () => {
   let hi: Int = index
   let hv: Int = v
   t_scatter(position(p), param_dtype(p), hi, shape_of(hi), hv, handle_of(mask))
@@ -1251,7 +1229,7 @@ pub fn scatter[D](p: Param[D], index: Tile[I32], v: Tile[D], mask: Option[Tile[I
 ## one `histogram` uses; `xchg` is not, and a kernel that used it on
 ## colliding lanes would have no answer to compare against.
 pub fn atomic_rmw[D](p: Param[D], mode: String, index: Tile[I32], v: Tile[D],
-  mask: Option[Tile[I1]] = None) -> Tile[D] !Dev = called("atomic_rmw", () => {
+  mask: Option[Tile[Bool]] = None) -> Tile[D] !Dev = called("atomic_rmw", () => {
     let hi: Int = index
     let hv: Int = v
     let h: Tile[D] = t_atomic_rmw(position(p), param_dtype(p), mode, hi, shape_of(hi), hv, handle_of(mask))
@@ -1263,7 +1241,7 @@ pub fn atomic_rmw[D](p: Param[D], mode: String, index: Tile[I32], v: Tile[D],
 ## scatter-with-collisions a histogram is. Named because the returned tile
 ## is what a caller forgets to use, and a function that never answers it
 ## cannot be misread as a plain store.
-pub fn atomic_add(p: Param[I32], index: Tile[I32], v: Tile[I32], mask: Option[Tile[I1]] = None) -> Unit !Dev = called("atomic_add", () => {
+pub fn atomic_add(p: Param[I32], index: Tile[I32], v: Tile[I32], mask: Option[Tile[Bool]] = None) -> Unit !Dev = called("atomic_add", () => {
   let _old = atomic_rmw(p, "add", index, v, mask: mask)
   ()
 })
@@ -1276,7 +1254,7 @@ pub fn atomic_add(p: Param[I32], index: Tile[I32], v: Tile[I32], mask: Option[Ti
 ## on the format's own equality, so two NaNs with different payloads are
 ## two values.
 pub fn atomic_cas[D](p: Param[D], index: Tile[I32], cmp: Tile[D], v: Tile[D],
-  mask: Option[Tile[I1]] = None) -> Tile[D] !Dev = called("atomic_cas", () => {
+  mask: Option[Tile[Bool]] = None) -> Tile[D] !Dev = called("atomic_cas", () => {
     let hi: Int = index
     let hc: Int = cmp
     let hv: Int = v
@@ -1319,17 +1297,17 @@ fn unary[D](op: String, a: Tile[D]) -> Tile[D] !Dev = {
   h
 }
 
-fn compare[D](pred: String, a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = {
+fn compare[D](pred: String, a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = {
   let x: Int = a
   let y: Int = b
-  let h: Tile[I1] = t_cmpf(pred, format_of([x, y]), wider([x, y]), x, y)
+  let h: Tile[Bool] = t_cmpf(pred, format_of([x, y]), wider([x, y]), x, y)
   h
 }
 
-fn compare_int(pred: String, a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = {
+fn compare_int(pred: String, a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = {
   let x: Int = a
   let y: Int = b
-  let h: Tile[I1] = t_cmpi(pred, wider([x, y]), x, y)
+  let h: Tile[Bool] = t_cmpi(pred, wider([x, y]), x, y)
   h
 }
 
@@ -1714,8 +1692,8 @@ pub fn mma[A, C: FloatDtype](a: Tile[A], b: Tile[A], acc: Tile[C]) -> Tile[C] !D
   let sb = shape_of(y)
   let (m, k) = matrix_dims(sa)
   let (_k2, n) = matrix_dims(sb)
-  let c: C = float_dtype()
-  let h: Tile[C] = t_mmaf(dt, float_name(c), m, k, n, x, y, z)
+  let c: Dtype[C] = float_dtype()
+  let h: Tile[C] = t_mmaf(dt, dtype_name(c), m, k, n, x, y, z)
   h
 })
 
@@ -1794,13 +1772,13 @@ pub fn mmai(a: Tile[I8], b: Tile[I8], c: Tile[I32]) -> Tile[I32] !Dev = called("
 
 ## The rank-0 tile of format `d` holding `value`, fixed when the kernel is
 ## recorded, which is what a host `Float` in a kernel body means.
-pub fn f_const[D: Dtype](d: D, value: Float) -> Tile[D] !Dev = called("f_const", () => {
+pub fn f_const[D](d: Dtype[D], value: Float) -> Tile[D] !Dev = called("f_const", () => {
   let h: Tile[D] = t_constf(dtype_name(d), [], value)
   h
 })
 
 ## A float constant with no format of its own: `mul(s, lit(0.5))` is
-## `mul(s, f_const(F64, 0.5))` when `s` is a `Tile[F64]` and
+## `mul(s, f_const(F64, 0.5))` when `s` is a `Tile[Float]` and
 ## `mul(s, f_const(F32, 0.5))` when it is a `Tile[F32]` (tileir 0.8.2). As
 ## a constant's shape is the use's, so is its format: the recording makes
 ## it where it meets an element-wise operation, of that operation's format
@@ -1828,8 +1806,8 @@ pub fn lit[D](value: Float) -> Tile[D] !Dev = called("lit", () => {
 ## in `p`'s format; they stay, because there the parameter already says
 ## both, and they also make integer tiles, which this does not.
 pub fn full[D: FloatDtype](shape: List[Int], value: Float) -> Tile[D] !Dev = called("full", () => {
-  let d: D = float_dtype()
-  let c: Tile[D] = t_constf(float_name(d), [], value)
+  let d: Dtype[D] = float_dtype()
+  let c: Tile[D] = t_constf(dtype_name(d), [], value)
   broadcast(c, shape)
 })
 
@@ -1851,8 +1829,8 @@ pub fn i8_const(value: Int) -> Tile[I8] !Dev = called("i8_const", () => {
 })
 
 ## The rank-0 `i1` tile holding `value`.
-pub fn bool_const(value: Bool) -> Tile[I1] !Dev = called("bool_const", () => {
-  let h: Tile[I1] = t_consti("i1", [], if value { 1 } else { 0 })
+pub fn bool_const(value: Bool) -> Tile[Bool] !Dev = called("bool_const", () => {
+  let h: Tile[Bool] = t_consti("i1", [], if value { 1 } else { 0 })
   h
 })
 
@@ -1883,23 +1861,23 @@ pub fn lanes(base: Idx, shape: List[Int]) -> Tile[I32] !Dev = called("lanes", ()
 ## `a == b` over two tiles of one float format, as a mask of their shape.
 ## Ordered: a NaN operand answers 0 for every one of the six comparisons
 ## this heads, `ne` included.
-pub fn eq[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("eq", () => compare("eq", a, b))
+pub fn eq[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("eq", () => compare("eq", a, b))
 
 ## `a != b`: one of the six ordered predicates `eq` heads, so a NaN operand
 ## answers 0 here too.
-pub fn ne[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("ne", () => compare("ne", a, b))
+pub fn ne[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("ne", () => compare("ne", a, b))
 
 ## `a < b`: one of the six ordered predicates `eq` heads.
-pub fn lt[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("lt", () => compare("lt", a, b))
+pub fn lt[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("lt", () => compare("lt", a, b))
 
 ## `a <= b`: one of the six ordered predicates `eq` heads.
-pub fn le[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("le", () => compare("le", a, b))
+pub fn le[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("le", () => compare("le", a, b))
 
 ## `a > b`: one of the six ordered predicates `eq` heads.
-pub fn gt[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("gt", () => compare("gt", a, b))
+pub fn gt[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("gt", () => compare("gt", a, b))
 
 ## `a >= b`: one of the six ordered predicates `eq` heads.
-pub fn ge[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("ge", () => compare("ge", a, b))
+pub fn ge[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("ge", () => compare("ge", a, b))
 
 # The same six predicates UNORDERED (knife T4). `cmpf` carries a
 # `comparison_ordering` beside its predicate: `ordered` answers false
@@ -1908,41 +1886,41 @@ pub fn ge[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("ge", () => compa
 # corpus without a NaN in it, and something else entirely on one with.
 
 ## `a == b` or either operand a NaN.
-pub fn eq_u[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("eq_u", () => compare("ueq", a, b))
+pub fn eq_u[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("eq_u", () => compare("ueq", a, b))
 
 ## `a != b` or either operand a NaN.
-pub fn ne_u[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("ne_u", () => compare("une", a, b))
+pub fn ne_u[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("ne_u", () => compare("une", a, b))
 
 ## `a < b` or either operand a NaN.
-pub fn lt_u[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("lt_u", () => compare("ult", a, b))
+pub fn lt_u[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("lt_u", () => compare("ult", a, b))
 
 ## `a <= b` or either operand a NaN.
-pub fn le_u[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("le_u", () => compare("ule", a, b))
+pub fn le_u[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("le_u", () => compare("ule", a, b))
 
 ## `a > b` or either operand a NaN.
-pub fn gt_u[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("gt_u", () => compare("ugt", a, b))
+pub fn gt_u[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("gt_u", () => compare("ugt", a, b))
 
 ## `a >= b` or either operand a NaN.
-pub fn ge_u[D](a: Tile[D], b: Tile[D]) -> Tile[I1] !Dev = called("ge_u", () => compare("uge", a, b))
+pub fn ge_u[D](a: Tile[D], b: Tile[D]) -> Tile[Bool] !Dev = called("ge_u", () => compare("uge", a, b))
 
 ## The same six over two i32 tiles, signed: `a == b` as a mask of their
 ## shape.
-pub fn eq_i(a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = called("eq_i", () => compare_int("eq", a, b))
+pub fn eq_i(a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = called("eq_i", () => compare_int("eq", a, b))
 
 ## `a != b` over two i32 tiles, signed: one of the six `eq_i` heads.
-pub fn ne_i(a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = called("ne_i", () => compare_int("ne", a, b))
+pub fn ne_i(a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = called("ne_i", () => compare_int("ne", a, b))
 
 ## `a < b` over two i32 tiles, signed: one of the six `eq_i` heads.
-pub fn lt_i(a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = called("lt_i", () => compare_int("lt", a, b))
+pub fn lt_i(a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = called("lt_i", () => compare_int("lt", a, b))
 
 ## `a <= b` over two i32 tiles, signed: one of the six `eq_i` heads.
-pub fn le_i(a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = called("le_i", () => compare_int("le", a, b))
+pub fn le_i(a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = called("le_i", () => compare_int("le", a, b))
 
 ## `a > b` over two i32 tiles, signed: one of the six `eq_i` heads.
-pub fn gt_i(a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = called("gt_i", () => compare_int("gt", a, b))
+pub fn gt_i(a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = called("gt_i", () => compare_int("gt", a, b))
 
 ## `a >= b` over two i32 tiles, signed: one of the six `eq_i` heads.
-pub fn ge_i(a: Tile[I32], b: Tile[I32]) -> Tile[I1] !Dev = called("ge_i", () => compare_int("ge", a, b))
+pub fn ge_i(a: Tile[I32], b: Tile[I32]) -> Tile[Bool] !Dev = called("ge_i", () => compare_int("ge", a, b))
 
 # ---- integer arithmetic (knife 10) ----
 #
@@ -2133,7 +2111,7 @@ pub fn shri[D](a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = called("shri", () => bi
 
 ## The rank-0 tile of the integer format `d` holding `value`, truncated to
 ## the format's width. `i_const` is the i32 spelling.
-pub fn consti[D: Dtype](d: D, value: Int) -> Tile[D] !Dev = called("consti", () => {
+pub fn consti[D](d: Dtype[D], value: Int) -> Tile[D] !Dev = called("consti", () => {
   let h: Tile[D] = t_consti(dtype_name(d), [], value)
   h
 })
@@ -2149,7 +2127,7 @@ pub fn consti[D: Dtype](d: D, value: Int) -> Tile[D] !Dev = called("consti", () 
 ## tile `a`, rounded to nearest even. Exact for every i32 into an f64 tile
 ## (a binary64 significand covers the whole range) and not always exact
 ## into an f32 one, nor from an i64 tile.
-pub fn int_to_float[A, B: Dtype](a: Tile[A], to_d: B) -> Tile[B] !Dev = called("int_to_float", () => {
+pub fn int_to_float[A, B](a: Tile[A], to_d: Dtype[B]) -> Tile[B] !Dev = called("int_to_float", () => {
   let x: Int = a
   let (from, s) = row_of(x)
   let h: Tile[B] = t_convert("itof", from, dtype_name(to_d), s, x)
@@ -2170,7 +2148,7 @@ pub fn int_to_float[A, B: Dtype](a: Tile[A], to_d: B) -> Tile[B] !Dev = called("
 ## the dialect allows (FToIOp has no per-format rule for it), so the
 ## recording handler checks it by the same rule as the plain conversion:
 ## the operation name `ftoi_sat` is on its list.
-pub fn float_to_int[A, B: Dtype](a: Tile[A], to_d: B, saturating: Bool = false) -> Tile[B] !Dev = called("float_to_int", () => {
+pub fn float_to_int[A, B](a: Tile[A], to_d: Dtype[B], saturating: Bool = false) -> Tile[B] !Dev = called("float_to_int", () => {
   let x: Int = a
   let (from, s) = row_of(x)
   let op = if saturating { "ftoi_sat" } else { "ftoi" }
@@ -2182,12 +2160,12 @@ pub fn float_to_int[A, B: Dtype](a: Tile[A], to_d: B, saturating: Bool = false) 
 ## `exti` from `i1`, ZERO-extending. Signedness is the whole of the claim
 ## here -- a signed widening of a one-bit 1 is -1, not 1 -- and it is why a
 ## count of the lanes a comparison selects is this and not a `select`.
-pub fn mask_to_int(a: Tile[I1]) -> Tile[I32] !Dev = called("mask_to_int", () => convert_to("exti", "i32", a))
+pub fn mask_to_int(a: Tile[Bool]) -> Tile[I32] !Dev = called("mask_to_int", () => convert_to("exti", "i32", a))
 
 ## The mask holding the LOW BIT of each lane of `a`: a `trunci` from `i32`
 ## to `i1`. The parity test, and the one direction back from an integer to
 ## a mask that costs no comparison.
-pub fn int_to_mask(a: Tile[I32]) -> Tile[I1] !Dev = called("int_to_mask", () => convert_to("trunci", "i1", a))
+pub fn int_to_mask(a: Tile[I32]) -> Tile[Bool] !Dev = called("int_to_mask", () => convert_to("trunci", "i1", a))
 
 ## The f32 tile whose lanes hold the BITS of `a` unchanged: a `bitcast`,
 ## which moves no bits and reads them as another format of the same width.
@@ -2232,7 +2210,7 @@ fn convert_to[A, B](op: String, to: String, a: Tile[A]) -> Tile[B] !Dev = {
 ## The two formats must DIFFER (Ops.td's FToFOp says so and its verifier
 ## enforces it); `ftof` from a format to itself is refused by `tileiras`,
 ## not here.
-pub fn float_to_float[A, B: Dtype](a: Tile[A], to_d: B, rounding: Rounding = NearestEven) -> Tile[B] !Dev = called("float_to_float", () => {
+pub fn float_to_float[A, B](a: Tile[A], to_d: Dtype[B], rounding: Rounding = NearestEven) -> Tile[B] !Dev = called("float_to_float", () => {
   convert_to("ftof" ++ rounding_suffix(rounding), dtype_name(to_d), a)
 })
 
@@ -2243,7 +2221,7 @@ pub fn float_to_float[A, B: Dtype](a: Tile[A], to_d: B, rounding: Rounding = Nea
 ## formats, which it refuses. A kernel generic in its format can then write
 ## `p.to(D)` and get no instruction where `D` is the format `p` has.
 ## Another rounding is `float_to_float`'s third argument.
-pub fn to[A, B: Dtype](a: Tile[A], fmt: B) -> Tile[B] !Dev = called("to", () => {
+pub fn to[A, B](a: Tile[A], fmt: Dtype[B]) -> Tile[B] !Dev = called("to", () => {
   let x: Int = a
   let (from, _shape) = row_of(x)
   if from == dtype_name(fmt) {
@@ -2311,7 +2289,7 @@ pub fn pack_bytes[A](a: Tile[A]) -> Tile[I8] !Dev = called("pack_bytes", () => {
 ## dialect's `unpack`, and `pack_bytes`'s inverse. The answer has
 ## `lanes * 8 / bits(to_d)` lanes, so unpacking a byte tile into a sub-byte
 ## format DOUBLES the lane count.
-pub fn unpack_bytes[B: Dtype](a: Tile[I8], to_d: B) -> Tile[B] !Dev = called("unpack_bytes", () => {
+pub fn unpack_bytes[B](a: Tile[I8], to_d: Dtype[B]) -> Tile[B] !Dev = called("unpack_bytes", () => {
   let x: Int = a
   let h: Tile[B] = t_repack("unpack", "i8", dtype_name(to_d), shape_of(x), x)
   h
@@ -2322,14 +2300,14 @@ pub fn unpack_bytes[B: Dtype](a: Tile[I8], to_d: B) -> Tile[B] !Dev = called("un
 ## kernel over a vector whose length is not a multiple of the tile width; a
 ## parameter's cells (`load_cell`, `store_cell`) carry their own and need
 ## none. `shape` is the block's geometry.
-pub fn tail_mask(base: Idx, shape: List[Int], limit: Int) -> Tile[I1] !Dev = called("tail_mask", () => {
+pub fn tail_mask(base: Idx, shape: List[Int], limit: Int) -> Tile[Bool] !Dev = called("tail_mask", () => {
   lt_i(lanes(base, shape), i_const(limit))
 })
 
 ## The element-wise choice: lane `i` of `a` where lane `i` of `cond` is 1,
 ## lane `i` of `b` where it is 0. A rank-0 condition or value is widened to
 ## the shape of the others.
-pub fn select[D](cond: Tile[I1], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = called("select", () => {
+pub fn select[D](cond: Tile[Bool], a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = called("select", () => {
   let c: Int = cond
   let x: Int = a
   let y: Int = b
@@ -2669,18 +2647,18 @@ impl FromInt[Idx] {
 ## Do not store inside one unless the store is meant to happen on the
 ## discarded iteration too: `body` runs to the end every time, including
 ## the last.
-pub fn d_loop(body: fn() -> Tile[I1] !Dev) -> Unit !Dev = called("d_loop", () => {
+pub fn d_loop(body: fn() -> Tile[Bool] !Dev) -> Unit !Dev = called("d_loop", () => {
   let none: List[Int] = []
   let cs = trial(() => {
     let _inside = t_while_begin(none)
-    let done: Tile[I1] = user_body(body)
+    let done: Tile[Bool] = user_body(body)
     let c: Int = done
     let _r = t_while_end(c, none)
     ()
   })
   let inside = t_while_begin(carry_gets(cs))
   carry_sets(cs, inside)
-  let done: Tile[I1] = user_body(body)
+  let done: Tile[Bool] = user_body(body)
   let c: Int = done
   carry_sets(cs, t_while_end(c, carry_gets(cs)))
 })
@@ -2695,42 +2673,42 @@ pub fn d_loop(body: fn() -> Tile[I1] !Dev) -> Unit !Dev = called("d_loop", () =>
 ## Not inside `d_range`, a reduction or a scan: the dialect forbids a `return`
 ## under a `for` (use the `loop` for an early exit, Ops.td says) and the
 ## other two are pure regions. The recording refuses all three.
-pub fn d_return_if(cond: Tile[I1]) -> Unit !Dev = called("d_return_if", () => {
+pub fn d_return_if(cond: Tile[Bool]) -> Unit !Dev = called("d_return_if", () => {
   let c: Int = cond
   t_return_if(c)
 })
 
 # The comparison of two index tiles, as a rank-0 mask.
-fn idx_compare(pred: String, a: Idx, b: Idx) -> Tile[I1] !Dev = {
+fn idx_compare(pred: String, a: Idx, b: Idx) -> Tile[Bool] !Dev = {
   let x: Int = a
   let y: Int = b
-  let h: Tile[I1] = t_cmpi(pred, [], x, y)
+  let h: Tile[Bool] = t_cmpi(pred, [], x, y)
   h
 }
 
 ## `a == b` over two index tiles, as the rank-0 mask `d_if` branches on.
 ## Signed, as every integer comparison here is.
-pub fn idx_eq(a: Idx, b: Idx) -> Tile[I1] !Dev = called("idx_eq", () => idx_compare("eq", a, b))
+pub fn idx_eq(a: Idx, b: Idx) -> Tile[Bool] !Dev = called("idx_eq", () => idx_compare("eq", a, b))
 
 ## `a != b` over two index tiles, signed, as a rank-0 mask: one of the six
 ## index predicates `idx_eq` heads.
-pub fn idx_ne(a: Idx, b: Idx) -> Tile[I1] !Dev = called("idx_ne", () => idx_compare("ne", a, b))
+pub fn idx_ne(a: Idx, b: Idx) -> Tile[Bool] !Dev = called("idx_ne", () => idx_compare("ne", a, b))
 
 ## `a < b` over two index tiles, signed, as a rank-0 mask: one of the six
 ## index predicates `idx_eq` heads.
-pub fn idx_lt(a: Idx, b: Idx) -> Tile[I1] !Dev = called("idx_lt", () => idx_compare("lt", a, b))
+pub fn idx_lt(a: Idx, b: Idx) -> Tile[Bool] !Dev = called("idx_lt", () => idx_compare("lt", a, b))
 
 ## `a <= b` over two index tiles, signed, as a rank-0 mask: one of the six
 ## index predicates `idx_eq` heads.
-pub fn idx_le(a: Idx, b: Idx) -> Tile[I1] !Dev = called("idx_le", () => idx_compare("le", a, b))
+pub fn idx_le(a: Idx, b: Idx) -> Tile[Bool] !Dev = called("idx_le", () => idx_compare("le", a, b))
 
 ## `a > b` over two index tiles, signed, as a rank-0 mask: one of the six
 ## index predicates `idx_eq` heads.
-pub fn idx_gt(a: Idx, b: Idx) -> Tile[I1] !Dev = called("idx_gt", () => idx_compare("gt", a, b))
+pub fn idx_gt(a: Idx, b: Idx) -> Tile[Bool] !Dev = called("idx_gt", () => idx_compare("gt", a, b))
 
 ## `a >= b` over two index tiles, signed, as a rank-0 mask: one of the six
 ## index predicates `idx_eq` heads.
-pub fn idx_ge(a: Idx, b: Idx) -> Tile[I1] !Dev = called("idx_ge", () => idx_compare("ge", a, b))
+pub fn idx_ge(a: Idx, b: Idx) -> Tile[Bool] !Dev = called("idx_ge", () => idx_compare("ge", a, b))
 
 # ---- reductions and scans with a body ----
 #
@@ -2894,7 +2872,7 @@ pub fn d_scan2[D](a: Tile[D], b: Tile[D], a_identity: Float, b_identity: Float,
 ##
 ## Both regions are always written, as the dialect's reader requires (an
 ## `if` with one region is refused, measured). Neither may load or store.
-pub fn d_if(cond: Tile[I1], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev = called("d_if", () => {
+pub fn d_if(cond: Tile[Bool], on_true: fn() -> Unit !Dev, on_false: fn() -> Unit !Dev) -> Unit !Dev = called("d_if", () => {
   let c: Int = cond
   let none: List[Int] = []
   # one trial per branch: each starts from what the carries held outside
@@ -3076,9 +3054,9 @@ pub fn ptr_offset[D](ps: Ptrs[D], offs: Tile[I32]) -> Ptrs[D] !Dev = called("ptr
 
 ## `ps` as a tile of i64 addresses. The values are to be read UNSIGNED; the
 ## inverse is `int_to_ptr`.
-pub fn ptr_to_int[D](ps: Ptrs[D]) -> Tile[I64] !Dev = called("ptr_to_int", () => {
+pub fn ptr_to_int[D](ps: Ptrs[D]) -> Tile[Int] !Dev = called("ptr_to_int", () => {
   let x: Int = ps
-  let r: Tile[I64] = t_ptr_to_int(pointee(x), shape_of(x), x)
+  let r: Tile[Int] = t_ptr_to_int(pointee(x), shape_of(x), x)
   r
 })
 
@@ -3088,7 +3066,7 @@ pub fn ptr_to_int[D](ps: Ptrs[D]) -> Tile[I64] !Dev = called("ptr_to_int", () =>
 ## here and puts it back. A write through what this answers cannot be
 ## followed back to a parameter, so it is refused in a kernel with an In or
 ## an Out parameter (`Shared` and `trace_kernel` ones take it).
-pub fn int_to_ptr[D: Dtype](v: Tile[I64], d: D) -> Ptrs[D] !Dev = called("int_to_ptr", () => {
+pub fn int_to_ptr[D](v: Tile[Int], d: Dtype[D]) -> Ptrs[D] !Dev = called("int_to_ptr", () => {
   let x: Int = v
   let r: Ptrs[D] = t_int_to_ptr(dtype_name(d), shape_of(x), x)
   r
@@ -3099,7 +3077,7 @@ pub fn int_to_ptr[D: Dtype](v: Tile[I64], d: D) -> Ptrs[D] !Dev = called("int_to
 ## what a later `ptr_offset` counts in and what a later `load_ptrs` reads.
 ## The dialect keeps this apart from `int_to_ptr` and `ptr_to_int` so that a
 ## compiler can still follow pointer provenance across it.
-pub fn ptr_to_ptr[A, B: Dtype](ps: Ptrs[A], to_d: B) -> Ptrs[B] !Dev = called("ptr_to_ptr", () => {
+pub fn ptr_to_ptr[A, B](ps: Ptrs[A], to_d: Dtype[B]) -> Ptrs[B] !Dev = called("ptr_to_ptr", () => {
   let x: Int = ps
   let r: Ptrs[B] = t_ptr_to_ptr(pointee(x), dtype_name(to_d), shape_of(x), x)
   r
@@ -3144,7 +3122,7 @@ pub fn ptr_to_ptr[A, B: Dtype](ps: Ptrs[A], to_d: B) -> Ptrs[B] !Dev = called("p
 ##   writes is byte for byte the same one (measured, knife TG;
 ##   scripts/tile-golden's `constant-flag-as-mutable` is the gate). The
 ##   exemption on the row is `constant-not-in-the-cubin`.
-pub fn d_global[D: Dtype](sym: String, d: D, values: List[Float],
+pub fn d_global[D](sym: String, d: Dtype[D], values: List[Float],
   align: Int = 0, visibility: Visibility = Public, constant: Bool = false) -> Unit !Dev = called("d_global", () => {
     t_global(sym, dtype_name(d), values, align, visibility_is_private(visibility), constant)
   })
@@ -3173,7 +3151,7 @@ fn visibility_is_private(v: Visibility) -> Bool = match v {
 ## element at position `x` of the global is `ptr_offset`'s `x` from here,
 ## which is what the dialect means by "the initial values are stored in
 ## memory in linear order".
-pub fn global_ptrs[D: Dtype](sym: String, d: D, shape: List[Int]) -> Ptrs[D] !Dev = called("global_ptrs", () => {
+pub fn global_ptrs[D](sym: String, d: Dtype[D], shape: List[Int]) -> Ptrs[D] !Dev = called("global_ptrs", () => {
   let r: Ptrs[D] = t_get_global(sym, dtype_name(d), shape)
   r
 })
@@ -3196,7 +3174,7 @@ pub fn global_ptrs[D: Dtype](sym: String, d: D, shape: List[Int]) -> Ptrs[D] !De
 ## `align` must be a non-zero power of two and at least the natural size of
 ## `d`, which the dialect's verifier requires and the recording handler
 ## refuses ahead of it.
-pub fn alloca_ptrs[D: Dtype](d: D, num_elem: Int, align: Int, shape: List[Int],
+pub fn alloca_ptrs[D](d: Dtype[D], num_elem: Int, align: Int, shape: List[Int],
   shared: Bool = false) -> Ptrs[D] !Dev = called("alloca_ptrs", () => {
     let r: Ptrs[D] = t_alloca(dtype_name(d), num_elem, align, shared, shape)
     r
@@ -3458,11 +3436,11 @@ pub fn store_ptrs[D](ps: Ptrs[D], v: Tile[D]) -> Unit !Dev = called("store_ptrs"
 
 ## The rank-0 i64 tile holding `value`. What an address is offset by, in
 ## bytes; the i64 spelling of `consti`.
-pub fn i64_const(value: Int) -> Tile[I64] !Dev = called("i64_const", () => consti(I64, value))
+pub fn i64_const(value: Int) -> Tile[Int] !Dev = called("i64_const", () => consti(I64, value))
 
 ## The element-wise i64 sum `a + b`, the spelling address arithmetic uses.
 ## `addi` over i64 tiles is the same instruction and the same bytes.
-pub fn add_i64(a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev = called("add_i64", () => addi(a, b))
+pub fn add_i64(a: Tile[Int], b: Tile[Int]) -> Tile[Int] !Dev = called("add_i64", () => addi(a, b))
 
 ## Stop the kernel with `message` when any lane of `cond` is false (knife
 ## T6). Every zero lane prints the message and its index, and the host is
@@ -3476,7 +3454,7 @@ pub fn add_i64(a: Tile[I64], b: Tile[I64]) -> Tile[I64] !Dev = called("add_i64",
 ## scripts/tile-gpu-diff runs the failing corpus in a process of its own,
 ## and it is the reason "this launch should fail" is a judgement shape and
 ## not just another comparison.
-pub fn d_assert(cond: Tile[I1], message: String) -> Unit !Dev = called("d_assert", () => {
+pub fn d_assert(cond: Tile[Bool], message: String) -> Unit !Dev = called("d_assert", () => {
   let c: Int = cond
   t_assert(shape_of(c), c, message)
 })
@@ -4169,8 +4147,8 @@ test "a layout is a permutation of strides, and a transpose is one" {
 }
 
 test "the tile element formats name themselves as Tile IR spells them" {
-  assert (dtype_name(I32), dtype_bytes(I32)) == ("i32", 4)
-  assert (dtype_name(I1), dtype_bytes(I1)) == ("i1", 1)
+  assert dtype_name(I32) == "i32"
+  assert dtype_name(I1) == "i1"
 }
 
 fn dtype_passed_to_load() -> List[String] !Dev = {

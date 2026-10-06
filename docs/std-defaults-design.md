@@ -263,8 +263,8 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 - **实现。** 私有的 `round_nearest`（两种就近模式）与 `round_binary_toward`（三种定向模式）合成
   `round_binary` 里的两个 `match`：一个回答「量级要不要进一个 quantum」，一个回答「越过最大有限值时
   是无穷还是最大有限值」。非法模式的 `panic` 随字符串一起消失。
-- **`round_bf16` / `round_fp16` 不加 `mode`。** 任务单允许加（只转调 `round_binary`）；没加的理由：格式是
-  函数身份（§3 C 组），今天没有调用要 bf16/fp16 的定向舍入（tileref 的两处用 `round_binary(f, .., mode: TowardZero)`
+- **`round_bf16` / `round_f16` 不加 `mode`。** 任务单允许加（只转调 `round_binary`）；没加的理由：格式是
+  函数身份（§3 C 组），今天没有调用要 bf16/f16 的定向舍入（tileref 的两处用 `round_binary(f, .., mode: TowardZero)`
   直接写），而 `round_bf16` 的签名是 narrow 契约 `emax-off-by-one` 变异体的锚点，没有需求就不动它。
 - **调用方。** `packages/tileref` 8 处、`scripts/tile-gpu-diff/attr_diff.dawn` 1 处、
   `examples/projects/gpu_fake` 1 处，外加 narrow 自己的内联测试（五个模式各有断言，另加「显式写

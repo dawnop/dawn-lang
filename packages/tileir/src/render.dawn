@@ -16,7 +16,7 @@
 # tile<i32> iter_values(%a = %init) -> (ty) { ... continue %v : ty }`).
 use std/list
 use std/str
-use std/gpu.{F64}
+use std/dtype.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
   Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
@@ -1361,7 +1361,7 @@ test "an atomic reduction prints its ordering, its scope, its mode and its value
 # ---- the side table: which public call wrote which line ----
 
 # scripts/tile-golden/kernels.dawn's vadd, the kernel the cuTile page maps.
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), 128)
   let ta = load(a, blk, [128])
   let tb = load(b, blk, [128])
@@ -1449,7 +1449,7 @@ test "an operation issued outside any public call has no owner, and the map says
   assert is_err(line_map(p, calls))
 }
 
-fn summed(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn summed(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let first = load(x, tile_at(b, 128), [128])
   let one = idx_const(1)
@@ -1496,7 +1496,7 @@ test "what a loop's body calls are the d_range's children, and the d_range keeps
   assert list.all([8, 9, 10], k => len(m.calls[k].lines) > 0)
 }
 
-fn scanned(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn scanned(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load(x, idx_const(0), [8])
   store(out, idx_const(0), d_scan(t, 0.0, (best, e) => max(best, e)))
 }
@@ -1516,7 +1516,7 @@ test "a call inside a scan's closure is the d_scan's child, and the d_scan keeps
   assert str.contains(texts(m, m.calls[4].lines)[0], " = maxf ")
 }
 
-fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn nested(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let z = idx_const(0)
   let one = idx_const(1)
   let first = load(x, z, [8])
@@ -1541,7 +1541,7 @@ test "regions inside regions nest the rows: each call's parent is the region who
 
 # A kernel that calls every region function that takes a closure, each
 # closure doing something, so that every body mark is on the way.
-fn regions(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn regions(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let z = idx_const(0)
   let t = load(x, z, [8])
   let c = lt(t, t)
@@ -1595,7 +1595,7 @@ test "every region function's closure is a body: what it calls is the region cal
 # head's or the tail's) by how the body is written, which is the
 # expectation below. That is a second reading of who wrote which line,
 # from text order alone, against the map's, from operation numbers.
-fn sentinels(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn sentinels(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let z = broadcast(f_const(F64, 0.0), [8])
   let c = lt(z, z)
   let s = (m: String) => d_assert(c, "@@" ++ m)
@@ -1666,7 +1666,7 @@ test "the map agrees with sentinels: every line is the call that ran between the
     ["max"], ["d_scan"], ["add"], ["d_range"], ["store"], ["tail"]]
 }
 
-fn tabled(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn tabled(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   d_global("t", F64, [1.0, 2.0])
   let v = load_ptrs(global_ptrs("t", F64, [2]))
   store(out, idx_const(0), add(v, load(x, idx_const(0), [2])))
@@ -1687,7 +1687,7 @@ test "a global's line belongs to the call that declared it" {
 
 # ---- the batch's PR-1: where an In's alignment claim goes ----
 
-fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
+fn vadd_cells(a: Param[Float], b: Param[Float], o: Param[Float]) -> Unit !Dev =
   store_cell(o, add(load_cell(a), load_cell(b)))
 
 test "PR-2: every cell view, an In's and an Out's, claims 16-byte alignment on the parameter itself, ahead of the view" {
@@ -1730,7 +1730,7 @@ test "PR-2: every cell view, an In's and an Out's, claims 16-byte alignment on t
   assert not str.contains(text, "make_tensor_view %arg")
 }
 
-fn merged_combos(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn merged_combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let b = tile_at(block_id(0), 128)
   let m = tail_mask(b, [128], 1000)
   let h = [for_arch("sm_86", [hint_latency(2)])]

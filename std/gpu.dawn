@@ -30,249 +30,71 @@ use std/bytes
 use std/list
 use std/map
 use std/narrow
+use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, F64}
+use std/narrow.{BF16, F16, F32}
+use std/int/i32.{I32}
 
 # ---- element formats ----
-
-## Marker types for element formats: values with no content, passed where a
-## function needs to know the format of a tensor it is about to create.
-## [`Dtype`] is implemented for each; nothing else is. A marker names a format
-## a buffer holds; the values a program moves in and out are `Float` under
-## every format ([`upload`] / [`download`]), so a marker is not std/narrow's
-## value type of the same name ([`narrow.BF16`] is a number, [`gpu.BF16`] is a
-## label), the way [`gpu.F32`] was never [`narrow.F32`].
-pub type F64 = F64
-
-## The 32-bit float format. Neither handler moves it in this release, so a
-## tensor of this format can be typed but not allocated.
-pub type F32 = F32
-
-## The bfloat16 format: two bytes an element. A buffer of it holds bf16
-## values; [`upload`] rounds each Float to the nearest one (ties to even, the
-## conversion a device's own load would perform) and [`download`] answers each
-## exactly, as a Float. The device's `addf` over bf16 tiles is then
-## [`narrow.round_bf16`] of the exact sum, bit for bit (tile-backend-design
-## 3.2's theorem), which is what the fake device computes.
-pub type BF16 = BF16
-
-## The 32-bit signed integer format: four bytes an element. A buffer of it
-## holds two's-complement i32 values; [`upload`] truncates each Float toward
-## zero and wraps it into the range ([`round_to`]), and [`download`] answers each
-## exactly, as a Float.
-##
-## The `List[Float]` channel is LOSSLESS for this format. A binary64
-## significand holds 53 bits, and every i32 (and every u32) value fits in
-## fewer, so a value crosses [`upload`] / [`download`] unrounded and the fake
-## device's buffer holds exactly what the real device's does. That is not
-## true of `bf16`, and it is why an integer kernel can be held to the bit
-## without a word about tolerance.
-pub type I32 = I32
-
-## The IEEE binary16 format: two bytes an element. A buffer of it holds
-## binary16 values; [`upload`] rounds each Float to the nearest one (ties to
-## even) and [`download`] answers each exactly. The bf16 story with binary16's
-## widths, including the double-rounding theorem: the device's `addf` over
-## an f16 tile with `rounding<nearest_even>` is bit for bit
-## [`narrow.round_fp16`] of the exact sum, which is what the fake device
-## computes. `mmaf` is NOT covered by it -- the theorem is about one
-## operation, and a matrix multiply sums over K in an order the dialect
-## does not specify -- so an f16 GEMM is a tolerance claim and an f16 `addf`
-## is not.
-pub type F16 = F16
-
-## The 8-bit signed integer format: one byte an element, holding a
-## two's-complement value in [-128, 127]. [`upload`] truncates each Float
-## toward zero and wraps it into that range, [`download`] answers each
-## exactly. This is the format `mmai`'s operands are.
-pub type I8 = I8
-
-## The 8-bit UNSIGNED integer format: one byte an element, holding a value
-## in [0, 255]. The BYTES are [`I8`]'s bytes -- a buffer of either format is a
-## run of octets and the runtime copies them without knowing which -- and
-## the difference is entirely in what a Float means on the way in and out:
-## [`upload`] wraps into [0, 255] and [`download`] reads the octet unsigned, so
-## 200 crosses as 200 here and as -56 under [`I8`].
-##
-## There is no `u8` TILE: the dialect's 8-bit integer type is `i8` and its
-## signedness is an attribute of an operation, not of a type. A kernel over
-## a `Tensor[U8]` therefore declares its parameter `Param[I8]` and widens
-## with `exti` (unsigned), which reads the octet as [0, 255]; the pairing is
-## the host's, and [`launch`] takes handles rather than typed tensors, so
-## nothing has to be told twice.
-pub type U8 = U8
-
-# ---- the formats knife T3 added ----
 #
-# Six more of the frozen table's fifteen scalar types
-# (scripts/tileir-features/types.txt is the ledger). Three of them a device
-# this tree can reach will run and three it will not: `tileiras` refuses
-# every fp8 type at sm_86 AND at sm_89 and takes it only from sm_100, so
-# the host side below is complete for all six and the second opinion stops
-# at three.
-
-## The 16-bit signed integer format: two bytes an element, holding a
-## two's-complement value in [-32768, 32767]. [`upload`] truncates each Float
-## toward zero and wraps it into that range, [`download`] answers each
-## exactly. The `List[Float]` channel is lossless for it, as it is for
-## [`I32`], so an i16 kernel is a bit-exact claim and the wrap at 2^15 is part
-## of what is being claimed.
-pub type I16 = I16
-
-## The 64-bit signed integer format: eight bytes an element.
-##
-## The `List[Float]` channel is NOT lossless for it. A binary64 significand
-## holds 53 bits and an i64 holds 64, so a corpus for this format has to
-## stay inside +/-2^52 for the host to say anything bit-exact about it, and
-## the wrap at 2^63 has no evidence here at all. That is a corpus's debt and
-## it is named where the corpus is (scripts/tile-gpu-diff/dtype_diff.dawn),
-## not paid by widening the channel: [`upload`] and [`download`] traffic in
-## Float under every format and changing that is a different knife.
-pub type I64 = I64
-
-## TensorFloat-32: binary32's eight exponent bits with ten significand bits
-## instead of twenty-three, in a 32-bit slot whose bottom thirteen bits are
-## zero ([`narrow.tf32_bits`]). Four bytes an element, and [`upload`] rounds
-## each Float to the nearest one.
-##
-## It is the input format of the tensor cores rather than a format
-## arithmetic is done in: the dialect gives `tf32` to `ftof` and to memory
-## and keeps it out of `addf` (Ops.td's BaseFloatTileType is f16, bf16, f32
-## and f64), so a kernel over this format loads it, widens it, computes, and
-## narrows again.
-pub type TF32 = TF32
-
-## The OCP fp8 format with four exponent bits and three significand bits,
-## and no infinity: one byte an element, values up to 448, and the two
-## all-ones encodings are its only NaNs ([`narrow.round_f8e4m3fn`] says what
-## an overflow answers and why that answer is a choice).
-pub type F8E4M3FN = F8E4M3FN
-
-## The OCP fp8 format with five exponent bits and two significand bits: one
-## byte an element, an ordinary IEEE binary format at eight bits, infinities
-## and all, values up to 57344.
-pub type F8E5M2 = F8E5M2
-
-## The fp8 exponent format: one byte an element holding `2^(b - 127)`, with
-## `0xFF` for NaN. No sign, no significand, no zero and no infinity, so a
-## buffer of it holds 255 distinct positive powers of two and nothing else.
-## `ftof` into it takes only the `zero` and `positive_inf` rounding modes,
-## never `nearest_even`; this tree writes `zero`.
-pub type F8E8M0FNU = F8E8M0FNU
-
-# ---- the sub-byte formats knife T9 added ----
+# A format is a value type with a witness (std/dtype), not a marker declared
+# here: `F64`, `I64` and `I1` are the builtin three's witnesses in std/dtype
+# (the types are `Float`, `Int` and `Bool`), `BF16`, `F16`, `F32`, `TF32`,
+# `F8E4M3FN`, `F8E5M2`, `F8E8M0FNU` and `F4E2M1FN` are std/narrow's, `I8`,
+# `I16`, `I32` and `U8` are std/int's, and `I4` is declared below. A program
+# says `alloc(BF16, n)` and `Tensor[BF16]`; one `use std/narrow.{BF16}` brings
+# in the type and the witness. What a tensor holds under each format, and how
+# `upload` and `download` move it (the values a program moves are `Float`
+# under every format):
 #
-# The last two of the frozen table's fifteen scalar types, and the only two
-# narrower than a byte. Neither is a BUFFER format: `element_bytes` refuses
-# both names, so `gpu_alloc` refuses them and no `Tensor` of one exists.
-# That is the dialect's own shape rather than a limitation of this release.
-# Types.td leaves `i4` out of `CudaTile_AnyInt`, so `ptr<i4>` does not
-# parse, and it leaves both out of every arithmetic operation: an `i4` tile
-# can only be `pack`ed, `unpack`ed, `exti`ed and `trunci`ed, and an
-# `f4E2M1FN` tile can only be those plus `ftof`. A kernel over either one
-# therefore reads BYTES, unpacks them, widens, computes, narrows and packs
-# back, which is what scripts/tile-golden's dtype_i4 and dtype_e2m1 do.
+#   f64, i64    eight bytes an element. The channel is lossless for f64, not
+#               for i64: a binary64 significand holds 53 bits, so a corpus
+#               for i64 stays inside +/-2^52 (scripts/tile-gpu-diff/
+#               dtype_diff.dawn names that debt).
+#   f32         four bytes; neither handler moves it, so a `Tensor[F32]` can
+#               be typed but not allocated.
+#   bf16, f16   two bytes; `upload` rounds each Float to the nearest value
+#               (ties to even) and `download` answers each exactly. The
+#               device's `addf` over such a tile is `narrow.round_bf16` /
+#               `round_f16` of the exact sum, bit for bit (tile-backend-design
+#               3.2's theorem, which is what the fake device computes);
+#               `mma` is a tolerance claim, not covered by it.
+#   i32, i16    four and two bytes; `upload` truncates toward zero and wraps
+#               into the range (`round_to`), `download` is exact, and the
+#               channel is lossless.
+#   i8, u8      one byte each, the same octets read two ways: `upload` wraps
+#               into [-128, 127] or [0, 255]. There is no u8 TILE (the
+#               dialect's 8-bit integer is `i8` and signedness belongs to an
+#               operation), so a kernel over a `Tensor[U8]` declares its
+#               parameter `Param[I8]` and widens with `exti`.
+#   tf32        four bytes: binary32's exponent with ten significand bits.
+#               The input format of the tensor cores, kept out of `addf`.
+#   f8E4M3FN    one byte, no infinity, values up to 448.
+#   f8E5M2      one byte, an IEEE binary format at eight bits, up to 57344.
+#   f8E8M0FNU   one byte holding 2^(b - 127), 0xFF for NaN: positive powers
+#               of two only; `ftof` into it takes `zero` or `positive_inf`
+#               rounding, never `nearest_even`, and this tree writes `zero`.
+#   i4, f4E2M1FN  the sub-byte tile formats, two elements to the byte, low
+#               nibble first. Neither is a BUFFER format (`element_bytes`
+#               refuses both names, so no `Tensor` of one exists): Types.td
+#               leaves `i4` out of `CudaTile_AnyInt` and both out of every
+#               arithmetic operation, so a kernel reads BYTES, unpacks them,
+#               widens, computes, narrows and packs back
+#               (scripts/tile-golden's dtype_i4 and dtype_e2m1).
+#               `element_bits` is the width `pack` and `unpack` scale by.
 
 ## The 4-bit signed integer format: two elements to the byte, the low
 ## nibble first (Types.td spells the order out for a tensor view of it, and
 ## `pack` / `unpack` lay a tile down the same way). A two's-complement
-## value in [-8, 7].
-##
-## [`dtype_bytes`] answers 1 for it, which is the ONE place in this trait
-## where the number is not the element's own width: it is the byte two of
-## them share. [`element_bits`] is the width, and it is what `pack` and
-## `unpack` compute their shapes from.
-pub type I4 = I4
+## value in [-8, 7]. It is a tile format and never a buffer format
+## ([`element_bytes`] refuses it), so there is no host value of this type:
+## the type and its witness exist to name the format.
+pub opaque type I4 = Int
 
-## The OCP MX fp4 format: one sign bit, two exponent bits, one significand
-## bit, two elements to the byte. No infinity and no NaN at all, which is
-## what FN means here and is stronger than `f8E4M3FN`'s FN (that one keeps
-## two NaN encodings). Sixteen encodings and sixteen values: +/-0, +/-0.5,
-## +/-1, +/-1.5, +/-2, +/-3, +/-4, +/-6.
-##
-## [`narrow.round_f4e2m1`] is the host reading of a conversion into it and
-## records which of its answers are choices rather than measurements.
-pub type F4E2M1FN = F4E2M1FN
+## The 4-bit signed integer device format, the witness of [`I4`].
+pub const I4: Dtype[I4] = dtype_named("i4")
 
-## What a device needs to know about an element format. The marker value is
-## the first argument so the methods can be called by name (spec §3.5: a type
-## parameter that appears in no argument position cannot be inferred).
-pub trait Dtype[D] {
-  fn dtype_name(d: D) -> String
-  fn dtype_bytes(d: D) -> Int
-}
-
-impl Dtype[F64] {
-  fn dtype_name(d: F64) -> String = "f64"
-  fn dtype_bytes(d: F64) -> Int = 8
-}
-
-impl Dtype[F32] {
-  fn dtype_name(d: F32) -> String = "f32"
-  fn dtype_bytes(d: F32) -> Int = 4
-}
-
-impl Dtype[BF16] {
-  fn dtype_name(d: BF16) -> String = "bf16"
-  fn dtype_bytes(d: BF16) -> Int = 2
-}
-
-impl Dtype[I32] {
-  fn dtype_name(d: I32) -> String = "i32"
-  fn dtype_bytes(d: I32) -> Int = 4
-}
-
-impl Dtype[F16] {
-  fn dtype_name(d: F16) -> String = "f16"
-  fn dtype_bytes(d: F16) -> Int = 2
-}
-
-impl Dtype[I8] {
-  fn dtype_name(d: I8) -> String = "i8"
-  fn dtype_bytes(d: I8) -> Int = 1
-}
-
-impl Dtype[U8] {
-  fn dtype_name(d: U8) -> String = "u8"
-  fn dtype_bytes(d: U8) -> Int = 1
-}
-
-impl Dtype[I16] {
-  fn dtype_name(d: I16) -> String = "i16"
-  fn dtype_bytes(d: I16) -> Int = 2
-}
-
-impl Dtype[I64] {
-  fn dtype_name(d: I64) -> String = "i64"
-  fn dtype_bytes(d: I64) -> Int = 8
-}
-
-impl Dtype[TF32] {
-  fn dtype_name(d: TF32) -> String = "tf32"
-  fn dtype_bytes(d: TF32) -> Int = 4
-}
-
-impl Dtype[F8E4M3FN] {
-  fn dtype_name(d: F8E4M3FN) -> String = "f8E4M3FN"
-  fn dtype_bytes(d: F8E4M3FN) -> Int = 1
-}
-
-impl Dtype[F8E5M2] {
-  fn dtype_name(d: F8E5M2) -> String = "f8E5M2"
-  fn dtype_bytes(d: F8E5M2) -> Int = 1
-}
-
-impl Dtype[F8E8M0FNU] {
-  fn dtype_name(d: F8E8M0FNU) -> String = "f8E8M0FNU"
-  fn dtype_bytes(d: F8E8M0FNU) -> Int = 1
-}
-
-impl Dtype[I4] {
-  fn dtype_name(d: I4) -> String = "i4"
-  fn dtype_bytes(d: I4) -> Int = 1
-}
-
-impl Dtype[F4E2M1FN] {
-  fn dtype_name(d: F4E2M1FN) -> String = "f4E2M1FN"
-  fn dtype_bytes(d: F4E2M1FN) -> Int = 1
+impl HasDtype[I4] {
+  fn dtype_of() -> Dtype[I4] = I4
 }
 
 ## The bytes one element of the named format occupies in a device buffer, or
@@ -337,7 +159,7 @@ pub fn element_bits(dtype: String) -> Option[Int] = match dtype {
 ## that leaves the range, which is the case a corpus above 2^31 exists for.
 pub fn round_to(dtype: String, x: Float) -> Float = match dtype {
   "bf16" -> narrow.round_bf16(x)
-  "f16" -> narrow.round_fp16(x)
+  "f16" -> narrow.round_f16(x)
   "f32" -> narrow.round_f32(x)
   "tf32" -> narrow.round_tf32(x)
   "f8E4M3FN" -> narrow.round_f8e4m3fn(x)
@@ -484,18 +306,18 @@ pub fn unpack_i32(b: Bytes) -> List[Float] =
 
 ## `xs` as the bytes an f16 buffer holds: each value rounded to the nearest
 ## IEEE binary16, then its 16-bit pattern, low byte first. The rounding is
-## this function's, for [`pack_bf16`]'s reason: [`narrow.fp16_bits`] truncates a
+## this function's, for [`pack_bf16`]'s reason: [`narrow.f16_bits`] truncates a
 ## value off the grid, and a truncating upload would put a different number
 ## on the device than the fake device holds.
 ##
 ## The one line that separates this from [`pack_bf16`] is the codec it calls.
 ## Getting that line wrong is invisible to [`round_to`] (which rounds through
-## [`narrow.round_fp16`] either way) and shows only on the device, which is
+## [`narrow.round_f16`] either way) and shows only on the device, which is
 ## what scripts/tile-gpu-diff's f16-rounds-like-bf16 is for.
 pub fn pack_f16(xs: List[Float]) -> Bytes = {
   var b = bytes.buf()
   for x in xs {
-    let bits = narrow.fp16_bits(narrow.round_fp16(x))
+    let bits = narrow.f16_bits(narrow.round_f16(x))
     b = bytes.put(bytes.put(b, bits & 0xFF), bits >>> 8)
   }
   bytes.freeze(b)
@@ -504,7 +326,7 @@ pub fn pack_f16(xs: List[Float]) -> Bytes = {
 ## The values an f16 buffer holds, from its bytes: one per two bytes, each
 ## the exact Float of its pattern.
 pub fn unpack_f16(b: Bytes) -> List[Float] =
-  list.map(range(0, bytes.len(b) / 2), i => narrow.fp16_of_bits(bytes.at(b, 2 * i) | (bytes.at(b, 2 * i + 1) << 8)))
+  list.map(range(0, bytes.len(b) / 2), i => narrow.f16_of_bits(bytes.at(b, 2 * i) | (bytes.at(b, 2 * i + 1) << 8)))
 
 # ---- the i8 and u8 wire formats ----
 #
@@ -576,9 +398,8 @@ pub fn unpack_i16(b: Bytes) -> List[Float] =
 ## `List[Float]` and a binary64 significand does not reach the top of an
 ## i64. `to_int` of a Float above 2^53 is some value, and nothing here can
 ## tell which of the neighbouring integers was meant. A caller that wants
-## bit-exactness owes a corpus inside +/-2^52; [`TF32`]'s and [`I64`]'s doc
-## comments say so and scripts/tile-gpu-diff/dtype_diff.dawn is where the
-## debt is paid.
+## bit-exactness owes a corpus inside +/-2^52; the format notes above say
+## so and scripts/tile-gpu-diff/dtype_diff.dawn is where the debt is paid.
 pub fn pack_i64(xs: List[Float]) -> Bytes = {
   var b = bytes.buf()
   for x in xs {
@@ -670,7 +491,7 @@ pub fn unpack_f8e8m0(b: Bytes) -> List[Float] =
 # ---- tensors ----
 
 ## A tensor on the device: the handle the handler issued and its element
-## count. `D` is a phantom (spec §2.7): `Tensor[F64]` and `Tensor[F32]` are two
+## count. `D` is a phantom (spec §2.7): `Tensor[Float]` and `Tensor[F32]` are two
 ## types over one representation, so a kernel argument of the wrong format is
 ## a type error and not a launch failure.
 pub opaque type Tensor[D] = (Int, Int)
@@ -722,7 +543,7 @@ fn refuse(kind: String, message: String) -> ForeignError =
 
 ## A tensor of `len` elements of format `d`. `Err(kind: "gpu.bad_length")`
 ## for a `len` below one, before any handler is asked.
-pub fn alloc[D: Dtype](d: D, len: Int) -> Result[Tensor[D], ForeignError] !Gpu =
+pub fn alloc[D](d: Dtype[D], len: Int) -> Result[Tensor[D], ForeignError] !Gpu =
   if len < 1 {
     Err(refuse("gpu.bad_length", "gpu.alloc: a tensor has at least one element, got ${len}"))
   } else {
@@ -1178,7 +999,7 @@ pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Tensor[A], b: T
 ## when the same symbol was already looked up as another format: the handle
 ## carries the format it was issued with, and reinterpreting one global's
 ## storage two ways is not something either handler offers.
-pub fn module_global[D: Dtype](d: D, kernel: String, name: String) -> Result[Tensor[D], ForeignError] !Gpu =
+pub fn module_global[D](d: Dtype[D], kernel: String, name: String) -> Result[Tensor[D], ForeignError] !Gpu =
   match gpu_module_global(kernel, name, dtype_name(d)) {
     Ok(p) -> {
       let (h, n) = p
@@ -1783,7 +1604,7 @@ fn masked_lanes(old: List[Float], n: Int, f: fn(Int) -> Float) -> List[Float] =
 # a driver, and its report is compared byte for byte. The real handler
 # against a real device is scripts/tile-gpu-diff, and its ledger.
 
-fn vadd_as[D: Dtype](d: D, kernel: String, xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+fn vadd_as[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let n = len(xs)
   let a = alloc(d, n)?
   let b = alloc(d, n)?
@@ -1893,8 +1714,8 @@ test "upload of a vector of the wrong length is refused above the effect" {
 }
 
 fn alloc_refusals() -> (String, String, String) !Gpu = {
-  let empty: Result[Tensor[F64], ForeignError] = alloc(F64, 0)
-  let negative: Result[Tensor[F64], ForeignError] = alloc(F64, 0 - 4)
+  let empty: Result[Tensor[Float], ForeignError] = alloc(F64, 0)
+  let negative: Result[Tensor[Float], ForeignError] = alloc(F64, 0 - 4)
   let f32: Result[Tensor[F32], ForeignError] = alloc(F32, 4)
   (kind_of(empty), kind_of(negative), kind_of(f32))
 }
@@ -1903,11 +1724,11 @@ test "alloc refuses an empty tensor above the effect, and the fake device refuse
   assert with_gpu_fake(reference_kernels(), alloc_refusals)
     == ("gpu.bad_length", "gpu.bad_length", "gpu.unsupported_dtype")
   assert dtype_name(F64) == "f64"
-  assert dtype_bytes(F64) == 8
+  assert element_bytes(dtype_name(F64)) == Some(8)
   assert dtype_name(F32) == "f32"
-  assert dtype_bytes(F32) == 4
+  assert element_bytes(dtype_name(F32)) == None
   assert dtype_name(BF16) == "bf16"
-  assert dtype_bytes(BF16) == 2
+  assert element_bytes(dtype_name(BF16)) == Some(2)
   # the one table both handlers accept formats from
   assert element_bytes("f64") == Some(8)
   assert element_bytes("bf16") == Some(2)
@@ -2055,7 +1876,7 @@ test "uploading Floats off the bf16 grid rounds them on the way in, so the fake 
 }
 
 fn launch_refusals() -> List[String] !Gpu = {
-  let a: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
+  let a: Result[Tensor[Float], ForeignError] = alloc(F64, 2)
   let h = match a {
     Ok(t) -> handle_of(t)
     Err(_) -> 0 - 1
@@ -2147,8 +1968,8 @@ test "the fake device refuses one buffer short instead of overwriting an input" 
 }
 
 fn use_after_free() -> (Int, Int, String, String) !Gpu = {
-  let a: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
-  let b: Result[Tensor[F64], ForeignError] = alloc(F64, 2)
+  let a: Result[Tensor[Float], ForeignError] = alloc(F64, 2)
+  let b: Result[Tensor[Float], ForeignError] = alloc(F64, 2)
   match (a, b) {
     (Ok(ta), Ok(tb)) -> {
       let freed = kind_of(free(ta))
@@ -2269,7 +2090,7 @@ test "the fake device's globals are held to the format their declaration used" {
 
 fn real_refusals() -> List[String] !Gpu = {
   # a handle nothing issued: every operation on it is answered from the table
-  let ghost: Tensor[F64] = (7, 2)
+  let ghost: Tensor[Float] = (7, 2)
   let f32: Result[Tensor[F32], ForeignError] = alloc(F32, 4)
   [
     kind_of(f32),
@@ -2314,7 +2135,7 @@ test "an f16 buffer holds the nearest binary16 of what was uploaded, low byte fi
   let inf = 1.0 / 0.0
   let xs = [0.1, -2.0, 1.0e-8, 70000.0, 0.0 * (0.0 - 1.0), inf, 65504.0]
   let back = unpack_f16(pack_f16(xs))
-  assert to_string(back) == to_string(list.map(xs, x => narrow.round_fp16(x)))
+  assert to_string(back) == to_string(list.map(xs, x => narrow.round_f16(x)))
   assert 1.0 / back[4] == 0.0 - inf
   assert back[3] == inf
   assert bytes.len(pack_f16(xs)) == 14
@@ -2483,11 +2304,11 @@ test "f16 vadd on the fake device is narrow's add, bit for bit, over a spread of
   # same function, and the device's `addf` is what layer 2 holds to it.
   let pats = list.filter(range(0, 65536), b => b % 37 == 0 && b != 0x7C00 && b != 0xFC00)
   let xs = list.map(pats, b => {
-    let v = narrow.fp16_of_bits(b)
+    let v = narrow.f16_of_bits(b)
     if v != v { 0.0 } else { v }
   })
   let ys = list.map(range(0, len(xs)), i => 0.375 * to_float(i % 17) - 3.0)
-  let want = list.map(range(0, len(xs)), i => narrow.round_fp16(xs[i] + narrow.round_fp16(ys[i])))
+  let want = list.map(range(0, len(xs)), i => narrow.round_f16(xs[i] + narrow.round_f16(ys[i])))
   assert with_gpu_fake(reference_kernels(), () => f16_vadds(xs, ys)) == Ok(want)
 }
 
@@ -2597,12 +2418,12 @@ fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> Li
 
 fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   # vadd with no extent: the grid is the launch's, the cells cover it
-  let e: Entry3[F64, F64, F64] = entry3("vadd", arg_in([0 - 1], [128], [0]), arg_in([0 - 1], [128], [0]),
+  let e: Entry3[Float, Float, Float] = entry3("vadd", arg_in([0 - 1], [128], [0]), arg_in([0 - 1], [128], [0]),
     arg_out([0 - 1], [128]))
   # a kernel with no Out: the grid is the caller's alone
-  let s: Entry2[F64, I32] = entry2("hist", arg_in_whole(), arg_shared())
+  let s: Entry2[Float, I32] = entry2("hist", arg_in_whole(), arg_shared())
   # an In with a static extent along a dynamic axis is held at the launch
-  let f: Entry2[F64, F64] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
+  let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
   match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
     (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
       launch_entry3(e, a, b, a, grid: [4]),
