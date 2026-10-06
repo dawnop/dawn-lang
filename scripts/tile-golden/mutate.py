@@ -31,6 +31,7 @@ RENDER = "packages/tileir/src/render.dawn"
 DEV = "packages/tileir/src/dev.dawn"
 BYTECODE = "packages/tileir/src/bytecode.dawn"
 PROG = "packages/tileir/src/prog.dawn"
+LOWER = "packages/tileir/src/lower.dawn"
 
 MUTATIONS = {
     "drop-store-token": ((
@@ -435,6 +436,40 @@ MUTATIONS = {
         BYTECODE,
         '  "ftof_zero" -> ROUND_ZERO',
         '  "ftof_zero" -> ROUND_NEAREST_AWAY',
+    ),),
+    "scalar-param-as-ptr": (
+        (
+            BYTECODE,
+            'use lower.{kparam_ty, Kernel,',
+            'use lower.{param_ty, Kernel,',
+        ),
+        (
+            BYTECODE,
+            'use prog.{TileProg, ByPtr, ',
+            'use prog.{TileProg, ByPtr, ByValue, ',
+        ),
+        (
+            BYTECODE,
+            '    let (w1, pi) = ty(w, kparam_ty(kp))',
+            '    let (w1, pi) = ty(w, param_ty(match kp {\n      ByPtr(d) -> d\n      ByValue(d) -> d\n    }))',
+        ),
+    ),
+    "scalar-dtype-as-i32": (
+        (
+            BYTECODE,
+            'use prog.{TileProg, ByPtr, ',
+            'use prog.{TileProg, ByPtr, ByValue, ',
+        ),
+        (
+            BYTECODE,
+            '    let (w1, pi) = ty(w, kparam_ty(kp))',
+            '    let (w1, pi) = ty(w, kparam_ty(match kp {\n      ByPtr(d) -> ByPtr(d)\n      ByValue(_d) -> ByValue("i32")\n    }))',
+        ),
+    ),
+    "scalar-arg-index-shifted": ((
+        LOWER,
+        '    bind(l0, dst, Arg(param), num_tile([], dtype))',
+        '    bind(l0, dst, Arg(param + 1), num_tile([], dtype))',
     ),),
     "out-along-twice-accepted": ((
         PROG,

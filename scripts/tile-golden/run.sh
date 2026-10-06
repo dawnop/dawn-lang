@@ -485,7 +485,8 @@ kernels=(
   view_dyn_transpose view_tensor_shape view_index_space
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
   insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg
-  flash_attn idx_softmax carry_extent flash_attn_bf16)
+  flash_attn idx_softmax carry_extent flash_attn_bf16
+  scalar_scale scalar_len scalar_wide)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -599,6 +600,9 @@ mutants=(
   loop-return-as-break
   ftof-zero-as-nearest-away
   out-along-twice-accepted
+  scalar-param-as-ptr
+  scalar-dtype-as-i32
+  scalar-arg-index-shifted
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -1146,6 +1150,39 @@ writer_mutant_checks() { # name, kernel, shape, fragment
     echo "PASS  mutant: $name ($k.mlir untouched, $k.tilebc red on both backends; tileiras: $fragment)"
   else
     echo "PASS  mutant: $name ($k.mlir untouched, $k.tilebc red on both backends)"
+    echo "SKIP  mutant: $name not handed to tileiras (--without-tileiras)"
+  fi
+}
+
+# A lowering mutant that moves the text and the bytes together: <kernel>'s
+# text and bytecode differ from the goldens on both backends and the two
+# backends agree with each other, and tileiras refuses the mutant's bytes
+# with <fragment> in its output.
+lowering_mutant_checks() { # name, kernel, fragment
+  local name="$1" k="$2" fragment="$3" backend out
+  mutant_run "$name" "$k"
+  mutant_run_bytecode "$name" "$k"
+  for backend in jvm native; do
+    out="$work/m-$name.$k.$backend"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$out.err" >&2; fail "$name: $k did not render on $backend"; }
+    cmp -s "$here/$k.mlir" "$out" && fail "$name mutant stayed green on $backend: $k.mlir still matches"
+    out="$work/m-$name.$k.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$work/m-$name.$k.$backend.out.err" >&2; fail "$name: $k did not encode on $backend"; }
+    cmp -s "$here/$k.tilebc" "$out" && fail "$name mutant stayed green on $backend: $k.tilebc still matches"
+  done
+  cmp -s "$work/m-$name.$k.jvm" "$work/m-$name.$k.native" ||
+    fail "$name: the two backends disagree on the mutant's text"
+  cmp -s "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.$k.native.tilebc" ||
+    fail "$name: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    if assemble "$work/m-$name.$k.jvm.tilebc" "$work/m-$name.cubin" "$(kernel_arch "$k")"; then
+      fail "$name mutant stayed green: tileiras accepted the mutant's bytecode"
+    fi
+    grep -Fq "$fragment" "$work/m-$name.cubin.log" ||
+      { cat "$work/m-$name.cubin.log" >&2; fail "$name: tileiras refused the bytecode for something other than: $fragment"; }
+    echo "PASS  mutant: $name ($k.mlir and $k.tilebc red on both backends; tileiras: $fragment)"
+  else
+    echo "PASS  mutant: $name ($k.mlir and $k.tilebc red on both backends)"
     echo "SKIP  mutant: $name not handed to tileiras (--without-tileiras)"
   fi
 }
@@ -2355,6 +2392,44 @@ if run_item out-along-twice-accepted; then
       { cat "$out.err" >&2; fail "out-along-twice-accepted mutant stayed green on $backend: out_along_twice is still refused"; }
   done
   echo "PASS  mutant: out-along-twice-accepted (out_along_twice refused by name when clean, recorded and rendered under the mutant, both backends)"
+fi
+
+# ---- knife K4.1: scalar kernel parameters ----
+#
+# Three claims, each held by a mutant that must go red where the claim says.
+# scalar_scale and scalar_len are the kernels; the first reads an f32 scalar
+# and the second an i32 one, so the three mutants share the two.
+
+# 76. The writer types a by-value parameter as a pointer to its format
+#     (`tile<ptr<f32>>` where the entry says `tile<f32>`). The text is the
+#     lowering's and does not move; the bytes put a pointer where the
+#     kernel's `mulf` wants a float tile, and tileiras refuses the operand.
+if run_item scalar-param-as-ptr; then
+  mutant_project scalar-param-as-ptr bytecode.dawn
+  writer_mutant_checks scalar-param-as-ptr scalar_scale file-shorter \
+    "'cuda_tile.reshape' op requires the same element type for all operands and results"
+fi
+
+# 77. The writer types an f32 by-value parameter as i32: the same width, a
+#     different kind. The file is shorter, not the same length, because the
+#     i32 scalar tile is a type the table already holds for scalar_scale's
+#     block id and the f32 one is no longer written; what refuses it is the
+#     reshape of an i32 value into an f32 tile.
+if run_item scalar-dtype-as-i32; then
+  mutant_project scalar-dtype-as-i32 bytecode.dawn
+  writer_mutant_checks scalar-dtype-as-i32 scalar_scale file-shorter \
+    "'cuda_tile.reshape' op requires the same element type for all operands and results"
+fi
+
+# 78. The lowering binds a scalar read to the parameter AFTER its own, so
+#     scalar_len's `n` is the out buffer's pointer. Unlike the two above this
+#     moves the text as well as the bytes (`%arg2` where the golden says
+#     `%arg1`), on both backends, and tileiras refuses the program because the
+#     pointer the shifted read names is not the i32 tile the reshape wants.
+if run_item scalar-arg-index-shifted; then
+  mutant_project scalar-arg-index-shifted lower.dawn
+  lowering_mutant_checks scalar-arg-index-shifted scalar_len \
+    "'cuda_tile.reshape' op requires the same element type for all operands and results"
 fi
 
 _item_tick ""

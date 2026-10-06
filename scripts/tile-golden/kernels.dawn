@@ -24,7 +24,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   or_i, xor_i, shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
   ext_u4, trunc_i4, arange, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_scan, d_scan2,
-  erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, d_fork2, insert, powi, ptrs,
+  erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, scalar, d_fork2, insert, powi, ptrs,
   ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64, d_global, Visibility,
   global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, shli, shri, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
   gt_u, ge_u, atomic_rmw, Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy,
@@ -33,7 +33,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of }
-use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
+use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
   Whole, FREE_AXIS }
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
@@ -5293,6 +5293,13 @@ fn trace(name: String) -> TileProg = match name {
       Out(F64, cells([IS_N / 2, IS_D], [IS_T, IS_D])), idx_softmax)
     p
   }
+  "scalar_scale" -> trace_kernel("scalar_scale", [ByPtr("f32"), ByValue("f32"), ByPtr("f32")],
+    () => scalar_scale(param(F32, 0), param(F32, 1), param(F32, 2)))
+  "scalar_len" -> trace_kernel("scalar_len", [ByPtr("f32"), ByValue("i32"), ByPtr("f32")],
+    () => scalar_len(param(F32, 0), param(I32, 1), param(F32, 2)))
+  "scalar_wide" -> trace_kernel("scalar_wide",
+    [ByPtr("f64"), ByPtr("i64"), ByValue("f64"), ByValue("i64"), ByPtr("f64"), ByPtr("i64")],
+    () => scalar_wide(param(F64, 0), param(I64, 1), param(F64, 2), param(I64, 3), param(F64, 4), param(I64, 5)))
   "carry_extent" -> {
     let (p, _e) = trace2("carry_extent",
       In(F64, cells([CE_N, 128], [CE_T, 128], along: [FREE_AXIS, FREE_AXIS])),
@@ -5877,6 +5884,46 @@ fn trace(name: String) -> TileProg = match name {
     p
   }
   _ -> panic("tile-golden: no kernel named `${name}`")
+}
+
+# ---- knife K4.1: scalar kernel parameters ----
+#
+# The first entry parameters that are not pointers: a `tile<f32>`, `tile<i32>`,
+# `tile<f64>` or `tile<i64>` the launch passes by value, read with `scalar`.
+# Nothing is loaded, so a kernel that reads one has no memory operation and no
+# buffer for it (the T12 kernels' `dims` buffer was both). These three are
+# recorded with `trace_kernel` and `ByPtr`/`ByValue`: the typed entries
+# (`trace1` to `trace5`) have no scalar marker until the host side of the
+# launch can carry one (docs/tileir-k4-design.md 5, knife 2).
+const SK_TILE: Int = 128
+const SK_WIDE_TILE: Int = 64
+
+# `out = x * s`, `s` an f32 that the launch picks: the same cubin scales by
+# any value, where `f_const(F32, s)` is one program a value.
+fn scalar_scale(x: Param[F32], s: Param[F32], out: Param[F32]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), SK_TILE)
+  store(out, base, load(x, base, [SK_TILE]) * scalar(s))
+}
+
+# A length the launch picks, as the bound of a mask: the lanes at or past `n`
+# are neither read nor written, so the out buffer past `n` keeps whatever the
+# host put there. `scalar(n)` reaches the mask through `idx_of`, the one
+# `Tile[I32]` to `Idx` step, and not through a buffer.
+fn scalar_len(x: Param[F32], n: Param[I32], out: Param[F32]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), SK_TILE)
+  let live = lt_i(lanes(base, [SK_TILE]), broadcast(idx_as_tile(idx_of(scalar(n))), [SK_TILE]))
+  let v = load(x, base, [SK_TILE], mask: Some(live), pad: Some(f_const(F32, 0.0)))
+  store(out, base, v, mask: Some(live))
+}
+
+# The two 64-bit formats beside a pointer of the other kind: an f64 scale and
+# an i64 offset, each read as a tile of its own format. The i64 is where the
+# parameter area's 8-byte case is first measured.
+fn scalar_wide(xf: Param[Float], xi: Param[Int], a: Param[Float], k: Param[Int],
+  out_f: Param[Float], out_i: Param[Int]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), SK_WIDE_TILE)
+  store(out_f, base, load(xf, base, [SK_WIDE_TILE]) * scalar(a))
+  store(out_i, base, add_i64(load(xi, base, [SK_WIDE_TILE]), scalar(k)))
 }
 
 # Trace `name` twice and answer the record, or panic if the two runs differ.
