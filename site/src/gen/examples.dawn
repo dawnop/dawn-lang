@@ -20,6 +20,7 @@ use hl/dawn.{highlight_dawn}
 use html/page.{Assets, Lang, En, Zh, PageHead, page, lang_path, playground_label, section_crumb, here, chip}
 use html/play.{Play, play_block, code_window, win_bar}
 use gen/common.{must_read, must_list, write_page}
+use gen/screens.{has_escape, screens_html}
 
 ## One example: its slug (the page's name), its group (the directory under
 ## examples/), its `.dawn` files in the order the page shows them, and
@@ -43,6 +44,7 @@ type Chrome = {
   stdin: String,
   stderr: String,
   exit: String,
+  start: String,
 }
 
 fn chrome(lang: Lang) -> Chrome =
@@ -59,6 +61,7 @@ fn chrome(lang: Lang) -> Chrome =
       stdin: "with this on stdin:",
       stderr: "on stderr:",
       exit: "exit status",
+      start: "first paint",
     }
     Zh -> Chrome {
       heading: "示例",
@@ -71,6 +74,7 @@ fn chrome(lang: Lang) -> Chrome =
       stdin: "stdin：",
       stderr: "stderr：",
       exit: "退出码",
+      start: "首次绘制",
     }
   }
 
@@ -395,6 +399,29 @@ fn shell_word(s: String) -> String = {
   if plain { s } else { "'" ++ str.replace(s, "'", "'\\''") ++ "'" }
 }
 
+## A terminal program's output as the screens a reader would have seen, one per
+## line of stdin plus the first paint, each under the line that produced it
+## (gen/screens.dawn says why the bytes are not printed as they are).
+fn screens_of(c: Chrome, k: Case) -> String = {
+  let none: List[String] = []
+  let lines = if k.stdin == "" { none } else { str.split(str.trim_end(k.stdin), "\n") }
+  let shots = screens_html(k.stdout, len(lines))
+  var out = `<div class="screens">` ++ "\n"
+  var i = 0
+  for s in shots {
+    let cap =
+      if i == 0 {
+        `<span class="screen-start">` ++ escape_html(c.start) ++ "</span>"
+      } else {
+        "<code>" ++ escape_html(lines[i - 1]) ++ "</code>"
+      }
+    out = out ++ `<figure class="screen"><figcaption class="screen-cap">` ++ cap ++ "</figcaption>\n"
+      ++ `<pre class="output"><code>` ++ s ++ "</code></pre></figure>\n"
+    i = i + 1
+  }
+  out ++ "</div>\n"
+}
+
 ## One case, as a terminal window: the command line after a `$`, the stdin it
 ## was fed if any, and the output.
 fn case_html(c: Chrome, target: String, k: Case) -> String = {
@@ -417,6 +444,8 @@ fn case_html(c: Chrome, target: String, k: Case) -> String = {
   let stdout =
     if k.stdout == "" {
       ""
+    } else if has_escape(k.stdout) {
+      screens_of(c, k)
     } else {
       `<pre class="output"><code>` ++ escape_html(str.trim_end(k.stdout)) ++ "</code></pre>\n"
     }
