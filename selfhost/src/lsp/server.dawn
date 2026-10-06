@@ -4207,9 +4207,7 @@ test "a type and a constant spelled alike are told apart by position" {
     assert as_type.hover == "opaque type W8"
     assert as_value.hover == "const W8: W8 = 8"
 
-    # each lands in the module that declares the pair. The constant's jump is
-    # to its own name; the type's span is empty (0, 0) for an opaque type in
-    # std today (#589), which is a gap in definition, not in telling the two apart.
+    # each lands in the module that declares the pair, on its own name
     let dec = canon_identity("${root}/pairprobe.dawn")
     let src = match io.read_file(dec) {
       Ok(x) -> x
@@ -4217,6 +4215,9 @@ test "a type and a constant spelled alike are told apart by position" {
     }
     assert as_type.def_path == Some(dec)
     assert as_value.def_path == Some(dec)
+    let (tlo, thi) = def_probe_span(as_type, "the type")
+    assert str.slice(src, tlo, thi) == "W8"
+    assert tlo == str.len("pub opaque type ")
     let (vlo, vhi) = def_probe_span(as_value, "the constant")
     assert str.slice(src, vlo, vhi) == "W8"
     assert vlo == str.len("pub opaque type W8 = Int\n\npub const ")
