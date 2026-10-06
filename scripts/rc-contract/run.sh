@@ -126,6 +126,16 @@ echo "== small stack =="
   -o "$work/rc_plain" "$here/rc_test.c" "$root/runtime/c/dawn_rt.c"
 ( ulimit -s 512 && "$work/rc_plain" )
 
+# The inline dup/drop fast paths (dawn_rt.h, -DDAWN_RT_INLINE_RC) are a second
+# spelling of the same counting rules, and the default build never compiles
+# them. This leg is what keeps that spelling from rotting: the same roster,
+# at -O2 so the inlined copies are the ones that run.
+echo "== inline rc fast paths =="
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  -DDAWN_RT_INLINE_RC "${warn[@]}" -I "$root/runtime/c" \
+  -o "$work/rc_inline" "$here/rc_test.c" "$root/runtime/c/dawn_rt.c"
+"$work/rc_inline"
+
 # Residency questions get a fresh process too. The full roster is still run
 # above to catch interactions, but neither verdict may depend on pages or ASan
 # shadow made resident by an earlier case.
