@@ -219,6 +219,42 @@ impl FloatDtype[F8E5M2] {
   fn float_dtype() -> Dtype[F8E5M2] = F8E5M2
 }
 
+## The formats a kernel parameter may be passed in BY VALUE (knife K4.1):
+## `I32`, `I64` (`Int`), `F32` and `F64` (`Float`), the four whose argument
+## area layout is a plain 4 or 8 bytes (docs/tileir-k4-design.md 3.2). Its
+## own trait and not `HasDtype` for the reason `FloatDtype` is: Dawn has no
+## supertraits, so a subset of the formats `HasDtype` covers can only be
+## named by a bound of its own.
+##
+## The bound is NOT the whole fence. An opaque type uses its target's impl
+## when it has none of its own (spec, `opaque type`), so `F16`, `BF16` and
+## the other floats over `Float` resolve to `F64`'s impl, and `I8` and
+## `I16` to `I64`'s: `scalar` of an `F16` parameter checks. What refuses it
+## is the recording, twice: a `ByValue` that is not `i32`, `i64`, `f32` or
+## `f64` is refused where the kernel's parameters are declared, and
+## `scalar` of a parameter declared in another format is refused where it
+## reads it. The bound keeps out what has no number under it (a `Bool`, a
+## record).
+pub trait ScalarDtype[D] {
+  fn scalar_dtype() -> Dtype[D]
+}
+
+impl ScalarDtype[Float] {
+  fn scalar_dtype() -> Dtype[Float] = F64
+}
+
+impl ScalarDtype[Int] {
+  fn scalar_dtype() -> Dtype[Int] = I64
+}
+
+impl ScalarDtype[I32] {
+  fn scalar_dtype() -> Dtype[I32] = I32
+}
+
+impl ScalarDtype[F32] {
+  fn scalar_dtype() -> Dtype[F32] = F32
+}
+
 ## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:
 ## the element format the pointers point AT, so a `Ptrs[Float]` where a
 ## `Ptrs[I32]` is wanted is a type error.
@@ -678,6 +714,7 @@ pub effect Dev {
     v: Int, mask: Option[Int]) -> Int
   fn t_atomic_cas(param: Int, dtype: String, index: Int, shape: List[Int],
     cmp: Int, v: Int, mask: Option[Int]) -> Int
+  fn t_scalar(param: Int, dtype: String) -> Int
   fn t_constf(dtype: String, shape: List[Int], value: Float) -> Int
   fn t_consti(dtype: String, shape: List[Int], value: Int) -> Int
   fn t_iota(n: Int) -> Int
@@ -2991,6 +3028,20 @@ pub fn num_blocks(axis: Int) -> Idx !Dev = called("num_blocks", () => {
   h
 })
 
+## Parameter `p` of the entry, read as a rank-0 tile: the value the launch
+## passed by value (a `ByValue` parameter of `trace_kernel`).
+## Nothing is loaded: the dialect's entry parameter IS the tile, so this
+## issues no instruction and a kernel that reads it twice reads one SSA value.
+## Arithmetic with it follows the rank-0 rule, so `mul(t, scalar(scale))`
+## scales every lane of `t`, and `idx_of(scalar(n))` is a runtime extent or
+## loop bound. A parameter that is a buffer, or one declared in another
+## format, is refused when the kernel records (tileir 0.12.0).
+pub fn scalar[D: ScalarDtype](p: Param[D]) -> Tile[D] !Dev = called("scalar", () => {
+  let d: Dtype[D] = scalar_dtype()
+  let h: Tile[D] = t_scalar(position(p), dtype_name(d))
+  h
+})
+
 ## How many elements `p`'s tensor has along dimension `dim`, as an index:
 ## the number its cells declare, or for a `DYN_DIM` dimension the grid's
 ## blocks along the axis it follows times its tile, which is what such an
@@ -3941,6 +3992,11 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
+    t_scalar(_param, _dtype) => {
+      let h = next
+      next = next + 1
+      h
+    }
     t_extent_of(_param, _dim, _blocks) => {
       let h = next
       next = next + 1
@@ -4369,6 +4425,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["num_blocks ${axis}"]
       53
     }
+    t_scalar(param, dtype) => {
+      log = log ++ ["scalar ${param} ${dtype}"]
+      53
+    }
     t_extent_of(param, dim, blocks) => {
       log = log ++ ["extent_of ${param} ${dim} ${blocks}"]
       53
@@ -4640,6 +4700,17 @@ test "the knife K2 parameters hand the handler the names the suffixed functions 
   assert list.any(seen, l => str.starts_with(l, "binaryi subi_nuw "))
   assert list.any(seen, l => str.starts_with(l, "binaryi muli_nw "))
   assert list.any(seen, l => str.starts_with(l, "binaryi addi_nw "))
+}
+
+test "K4.1: scalar hands the handler the parameter's position and the format the bound names, not the one the Param carries" {
+  let seen = logged(() => {
+    let _a = scalar(param(F32, 3))
+    let _b = scalar(param(I32, 0))
+    let _c = scalar(param(F64, 1))
+    let _d = scalar(param(I64, 2))
+    ()
+  })
+  assert seen == ["scalar 3 f32", "scalar 0 i32", "scalar 1 f64", "scalar 2 i64"]
 }
 
 test "a rounding direction is spelt as the dialect spells it and as std/narrow's header pairs it" {
@@ -5080,6 +5151,7 @@ test "d_range hands the body the carried handle and passes its answer back as th
       t_cat(_dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) => 51
       t_permute(_dtype, _shape, _perm, _src) => 52
       t_num_blocks(_axis) => 53
+      t_scalar(_param, _dtype) => 53
       t_extent_of(_param, _dim, _blocks) => 53
       t_carry_new(init) => {
         carries = carries ++ [init]

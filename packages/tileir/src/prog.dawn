@@ -30,7 +30,7 @@ use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, D
   float_to_float, sub, add_i, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
-  idx_rem, idx_sub, extent_of, blocks_of }
+  idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile }
 use std/narrow.{F32, F16, BF16, Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
@@ -180,6 +180,7 @@ pub type TileOp =
   | Cat(dst: Int, dtype: String, dim: Int, lhs_shape: List[Int], rhs_shape: List[Int], lhs: Int, rhs: Int)
   | Permute(dst: Int, dtype: String, shape: List[Int], perm: List[Int], src: Int)
   | NumBlocks(dst: Int, axis: Int)
+  | ScalarArg(dst: Int, param: Int, dtype: String)
   | JoinToks(dst: Int, toks: List[Int])
   | MakePtrs(dst: Int, param: Int, dtype: String, shape: List[Int])
   | PtrAdd(dst: Int, dtype: String, shape: List[Int], ptrs: Int, offs: Int)
@@ -256,8 +257,26 @@ pub type Global = {
   constant: Bool,
 } derive Show
 
-## A kernel as recorded: its entry name, the dtype name of each parameter in
-## order (every parameter is a pointer to that format), the globals its
+## How one entry parameter reaches the kernel. `ByPtr` is a buffer: the
+## parameter is a scalar `tile<ptr<dtype>>` and the kernel loads and stores
+## through it. `ByValue` is a scalar the launch passes in the argument area
+## itself (knife K4.1): the parameter is a rank-0 `tile<dtype>` and the kernel
+## reads it with `scalar` (in dev), never through memory. Only `i32`, `i64`,
+## `f32` and `f64` are accepted by value; the others have an argument-area
+## layout nobody has measured (docs/tileir-k4-design.md 3.2).
+pub type KParam =
+  | ByPtr(dtype: String)
+  | ByValue(dtype: String)
+derive Show
+
+## The dtype name `k` carries, whichever way it is passed.
+pub fn kparam_dtype(k: KParam) -> String = match k {
+  ByPtr(d) -> d
+  ByValue(d) -> d
+}
+
+## A kernel as recorded: its entry name, how each parameter is passed in
+## order (`ByPtr` for a buffer, `ByValue` for a scalar), the globals its
 ## module declares in declaration order, its operations in issue order
 ## (`MakeToken(0)` first), and the `optimization_hints` of the entry itself.
 ##
@@ -268,7 +287,7 @@ pub type Global = {
 ## body (BytecodeWriter.cpp's `writeFunctionTableSection`).
 pub type TileProg = {
   name: String,
-  params: List[String],
+  params: List[KParam],
   globals: List[Global],
   ops: List[TileOp],
   hints: Hints,
@@ -772,13 +791,53 @@ fn conversion_end(cs: List[String], i: Int) -> Option[Int] =
 # was declared with. Both are the body's `Param[D]` against the `params` list
 # the caller gave `trace_kernel`, and disagreement is a bug in the caller: the
 # entry signature would say one format and the load another.
-fn check_param(name: String, params: List[String], pos: Int, dtype: String, verb: String) -> Unit =
+fn check_param(name: String, params: List[KParam], pos: Int, dtype: String, verb: String) -> Unit =
   if pos < 0 || pos >= len(params) {
     refuse(name, "${verb} names parameter ${pos}, but ${len(params)} parameter(s) are declared")
-  } else if params[pos] != dtype {
-    refuse(name, "parameter ${pos} is declared ${params[pos]}, but a ${verb} reads it as ${dtype}")
   } else {
-    ()
+    match params[pos] {
+      ByValue(d) -> refuse(name, "parameter ${pos} is a ${d} passed by value, and a ${verb} reads memory through a pointer; read it with `scalar`")
+      ByPtr(d) -> if d != dtype {
+        refuse(name, "parameter ${pos} is declared ${d}, but a ${verb} reads it as ${dtype}")
+      } else {
+        ()
+      }
+    }
+  }
+
+# Only these formats go in the argument area as a plain 4 or 8 byte value
+# (docs/tileir-k4-design.md 3.2); the smaller ones have a layout nobody has
+# measured and `i1` has no host bit. `dev.ScalarDtype` cannot keep the others
+# out by type, because an opaque type over `Float` or `Int` uses its target's
+# impl, so the declaration is where they are refused.
+fn check_by_value(name: String, params: List[KParam]) -> Unit = {
+  for k in range(0, len(params)) {
+    match params[k] {
+      ByValue(d) -> if not one_of(["i32", "i64", "f32", "f64"], d) {
+        refuse(name, "parameter ${k} is passed by value as ${d}; a scalar parameter is i32, i64, f32 or f64")
+      } else {
+        ()
+      }
+      ByPtr(_d) -> ()
+    }
+  }
+}
+
+# `scalar` names a declared parameter that is passed by value, in the format
+# it was declared with: the mirror of `check_param`, which refuses exactly
+# those parameters.
+fn check_scalar(name: String, params: List[KParam], pos: Int, dtype: String) -> Unit =
+  if pos < 0 || pos >= len(params) {
+    refuse(name, "scalar names parameter ${pos}, but ${len(params)} parameter(s) are declared")
+  } else {
+    match params[pos] {
+      ByPtr(d) -> refuse(name, "parameter ${pos} is a buffer (a pointer to ${d}), and a scalar read takes a parameter passed by value")
+      ByValue(d) -> if d != dtype {
+        refuse(name, "parameter ${pos} is declared ${d} by value, but a scalar reads it as ${dtype}")
+      } else {
+        ()
+      }
+    }
   }
 
 # An open region: the operations of the enclosing region as they stood when
@@ -1335,9 +1394,11 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
 }
 
 ## Run `body` once under a handler that records what it issues, and answer
-## the record. `params` is the dtype name of each entry parameter in order;
-## the body's `param(d, pos)` values must agree with it (position in range,
-## same format) or the run panics. Two runs of the same body answer equal
+## the record. `params` says how each entry parameter is passed, in order
+## (`ByPtr(dtype)` for a buffer, `ByValue(dtype)` for a scalar); the body's
+## `param(d, pos)` values must agree with it (position in range, same
+## format, a buffer for a memory operation and a scalar for `scalar`) or the
+## run panics. Two runs of the same body answer equal
 ## programs.
 ##
 ## Regions: `t_loop_begin` pushes the operations recorded so far and opens an
@@ -1356,7 +1417,7 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
 ## before it had a default still read the same (knife K2 folded
 ## `trace_kernel_hinted` into it; docs/std-defaults-design.md 3 says why the
 ## defaults go after the body).
-pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = []) -> TileProg = {
+pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: Hints = []) -> TileProg = {
   let (prog, _calls) = trace_calls(name, params, body, hints: hints)
   prog
 }
@@ -1574,7 +1635,7 @@ fn entry_args(name: String, sigs: List[Sig]) -> List[EntryArg] = {
 }
 
 fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: Hints) -> TileProg = {
-  let (prog, _calls) = record_calls(name, list.map(sigs, s => s.dtype), list.map(sigs, s => s.access),
+  let (prog, _calls) = record_calls(name, list.map(sigs, s => ByPtr(s.dtype)), list.map(sigs, s => s.access),
     list.map(sigs, s => s.g), body, hints)
   prog
 }
@@ -2280,7 +2341,7 @@ fn kernel_side(marks: List[Mark]) -> Bool =
 ## the program is the one they answer: the body then reads its parameters
 ## with `param(d, k)` in the markers' formats. What the site's call map of a
 ## kernel recorded with cells runs.
-pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, hints: Hints = [],
+pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: Hints = [],
   markers: List[Marker] = []) -> (TileProg, List[Call]) =
   if len(markers) == 0 {
     record_calls(name, params, [], [], body, hints)
@@ -2292,16 +2353,17 @@ pub fn trace_calls(name: String, params: List[String], body: fn() -> Unit !Dev, 
       sg
     })
     let _args = entry_args(name, sigs)
-    record_calls(name, list.map(sigs, s => s.dtype), list.map(sigs, s => s.access), list.map(sigs, s => s.g), body,
-      hints)
+    record_calls(name, list.map(sigs, s => ByPtr(s.dtype)), list.map(sigs, s => s.access), list.map(sigs, s => s.g),
+      body, hints)
   }
 
 # `trace_calls` with a role for each parameter (knife C2) and its cells (the
 # batch's PR-1): both empty for the two public recorders above, which know
 # no roles and refuse nothing on their account and have no cells to read,
 # and one per parameter for `trace1` to `trace5`.
-fn record_calls(name: String, params: List[String], roles: List[Access], geoms: List[Cells],
+fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: List[Cells],
   body: fn() -> Unit !Dev, hints: Hints) -> (TileProg, List[Call]) = {
+  check_by_value(name, params)
   let (globals, ops, calls) = {
     with handle Dev {
       var next: Int = 1
@@ -2501,6 +2563,14 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         next = mint(name, next, 2)
         ops = ops ++ [AtomicCAS(d, t, param, dtype, index, shape, cmp, v, mask, tok)]
         tok = t
+        d
+      }
+      t_scalar(param, dtype) => {
+        check_scalar(name, params, param, dtype)
+        held = hold(held, next, dtype, [])
+        let d = next
+        next = mint(name, next, 1)
+        ops = ops ++ [ScalarArg(d, param, dtype)]
         d
       }
       t_constf(dtype, shape, value) => {
@@ -3907,7 +3977,7 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
       t_cell_fill(param, value) => {
         let asking = writer(marks, calls, "cell_fill")
         let (_extent, tile, _pad, _along) = cells_of(name, frames, ops, geoms, roles, param, asking)
-        let dtype = params[param]
+        let dtype = kparam_dtype(params[param])
         let whole = is_float_dtype(dtype) || to_float(to_int(value)) == value
         if not whole {
           refuse_at(name, frames, ops, asking, "parameter ${param} is ${dtype}, and ${value} is not a whole number")
@@ -4198,6 +4268,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Cat(dst, _dtype, _dim, _lhs_shape, _rhs_shape, _lhs, _rhs) -> [dst]
   Permute(dst, _dtype, _shape, _perm, _src) -> [dst]
   NumBlocks(dst, _axis) -> [dst]
+  ScalarArg(dst, _param, _dtype) -> [dst]
   JoinToks(dst, _toks) -> [dst]
   MakePtrs(dst, _param, _dtype, _shape) -> [dst]
   PtrAdd(dst, _dtype, _shape, _ptrs, _offs) -> [dst]
@@ -4258,12 +4329,12 @@ fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 fn trace_vadd() -> TileProg =
-  trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
+  trace_kernel("vadd", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
 
 test "vadd records seven operations behind the entry token, with the token chain threaded through the memory ones" {
   let p = trace_vadd()
   assert p.name == "vadd"
-  assert p.params == ["f64", "f64", "f64"]
+  assert p.params == [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")]
   assert p.ops == [
     MakeToken(0),
     BlockId(1, 0),
@@ -4288,7 +4359,7 @@ fn scale_f32(x: Param[F32], out: Param[F32]) -> Unit !Dev = {
 }
 
 test "an f32 kernel records f32 loads, stores and sums" {
-  let p = trace_kernel("scale_f32", ["f32", "f32"], () => scale_f32(param(F32, 0), param(F32, 1)))
+  let p = trace_kernel("scale_f32", [ByPtr("f32"), ByPtr("f32")], () => scale_f32(param(F32, 0), param(F32, 1)))
   assert p.ops == [
     MakeToken(0),
     BlockId(1, 0),
@@ -4323,7 +4394,7 @@ fn sum(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
 }
 
 fn trace_sum() -> TileProg =
-  trace_kernel("sum", ["f64", "f64"], () => sum(param(F64, 0), param(F64, 1), 4))
+  trace_kernel("sum", [ByPtr("f64"), ByPtr("f64")], () => sum(param(F64, 0), param(F64, 1), 4))
 
 test "a loop records as one For holding the body's operations, with the token carried in and out as the last value" {
   let p = trace_sum()
@@ -4376,7 +4447,7 @@ fn two_carried(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev
 }
 
 test "a loop carrying two tiles answers two results in order, the token behind them" {
-  let p = trace_kernel("two", ["f64", "f64", "f64"], () => two_carried(param(F64, 0), param(F64, 1), param(F64, 2)))
+  let p = trace_kernel("two", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => two_carried(param(F64, 0), param(F64, 1), param(F64, 2)))
   let loop = p.ops[len(p.ops) - 3]
   match loop {
     For(iv, lower, upper, step, unsigned, inits, carried, results, body) -> {
@@ -4407,7 +4478,7 @@ fn nested(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "loops nest: the inner For sits in the outer body and the outer continue passes the inner result" {
-  let p = trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+  let p = trace_kernel("nested", [ByPtr("f64"), ByPtr("f64")], () => nested(param(F64, 0), param(F64, 1)))
   match p.ops[len(p.ops) - 2] {
     For(_iv, _lo, _up, _st, _unsigned, _inits, _carried, results, body) -> {
       assert len(body) == 2
@@ -4421,7 +4492,7 @@ test "loops nest: the inner For sits in the outer body and the outer continue pa
     }
     _ -> { assert false }
   }
-  assert p == trace_kernel("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+  assert p == trace_kernel("nested", [ByPtr("f64"), ByPtr("f64")], () => nested(param(F64, 0), param(F64, 1)))
 }
 
 # A loop whose trip count is a value the body computes: knife T5's shape.
@@ -4441,7 +4512,7 @@ fn spin(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "a loop records a Loop whose body ends in the exit if and a continue, and the break carries what entered" {
-  let p = trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
+  let p = trace_kernel("spin", [ByPtr("f64"), ByPtr("f64")], () => spin(param(F64, 0), param(F64, 1)))
   match p.ops[len(p.ops) - 2] {
     Loop(inits, carried, results, body) -> {
       # the token rides as the last carried value, as a `for`'s does
@@ -4466,7 +4537,7 @@ test "a loop records a Loop whose body ends in the exit if and a continue, and t
     }
     _ -> { assert false }
   }
-  assert p == trace_kernel("spin", ["f64", "f64"], () => spin(param(F64, 0), param(F64, 1)))
+  assert p == trace_kernel("spin", [ByPtr("f64"), ByPtr("f64")], () => spin(param(F64, 0), param(F64, 1)))
 }
 
 # `spin` with an early exit as well (knife T17): the block returns when its
@@ -4487,7 +4558,7 @@ fn spin_or_leave(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "a return inside a loop records the early exit's if where it was called, before the loop's own exit" {
-  let p = trace_kernel("leave", ["f64", "f64"], () => spin_or_leave(param(F64, 0), param(F64, 1)))
+  let p = trace_kernel("leave", [ByPtr("f64"), ByPtr("f64")], () => spin_or_leave(param(F64, 0), param(F64, 1)))
   match p.ops[len(p.ops) - 2] {
     Loop(_inits, _carried, _results, body) -> {
       # one early exit, an `if` with no results whose then-branch returns
@@ -4513,11 +4584,11 @@ test "a return inside a loop records the early exit's if where it was called, be
   }
   # it defines nothing, and the program after the loop is unchanged
   assert defined(If([], 1, [Return], [Yield([])])) == []
-  assert p == trace_kernel("leave", ["f64", "f64"], () => spin_or_leave(param(F64, 0), param(F64, 1)))
+  assert p == trace_kernel("leave", [ByPtr("f64"), ByPtr("f64")], () => spin_or_leave(param(F64, 0), param(F64, 1)))
 }
 
 test "a return under a for, a reduction or a scan is refused when the kernel is recorded" {
-  let in_for = catch_panic(() => trace_kernel("bad_return", ["f64"], () => {
+  let in_for = catch_panic(() => trace_kernel("bad_return", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
     for _i in d_range(idx_const(0), idx_const(2), step: By(idx_const(1))) {
@@ -4529,7 +4600,7 @@ test "a return under a for, a reduction or a scan is refused when the kernel is 
     Err(e) -> { assert str.contains(e.message, "a return inside a for, reduce or scan region") }
   }
   # at the top of the entry it is the 13.1 shape and is recorded as such
-  let top = trace_kernel("top_return", ["f64"], () => {
+  let top = trace_kernel("top_return", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
     d_return_if(gt(f_const(F64, 1.0), reduce_max(t)))
@@ -4562,7 +4633,7 @@ test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
   assert ftof_mode("ftof", "f32") == "nearest_even"
   assert ftof_mode("ftof", "f8E8M0FNU") == "zero"
   assert ftof_mode("ftof_away", "tf32") == "nearest_away"
-  let away = catch_panic(() => trace_kernel("bad_ftof", ["f64"], () => {
+  let away = catch_panic(() => trace_kernel("bad_ftof", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8]).float_to_float(F32)
     let _h = t.float_to_float(F16, rounding: NearestAway)
@@ -4573,7 +4644,7 @@ test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
     Err(e) -> { assert str.contains(e.message, "ftof from f32 to f16 takes nearest_even or zero, not nearest_away") }
   }
   # the pair that does take it is recorded
-  let fine = trace_kernel("good_ftof", ["f64"], () => {
+  let fine = trace_kernel("good_ftof", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let _h = load(x, idx_const(0), [8]).float_to_float(F32, rounding: TowardZero)
     ()
@@ -4587,7 +4658,7 @@ test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
 # The conversion `float_to_float` records for `r`, from f32 to f64 (an exact
 # widening, which takes every mode).
 fn widened_op(r: Rounding) -> String = {
-  let p = trace_kernel("widen", ["f32"], () => {
+  let p = trace_kernel("widen", [ByPtr("f32")], () => {
     let x = param(F32, 0)
     let _h = load(x, idx_const(0), [8]).float_to_float(F64, rounding: r)
     ()
@@ -4598,7 +4669,7 @@ fn widened_op(r: Rounding) -> String = {
   })
 }
 
-fn refused_as(name: String, body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel(name, ["f32"], body)) {
+fn refused_as(name: String, body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel(name, [ByPtr("f32")], body)) {
   Ok(_) -> "accepted"
   Err(e) -> e.message
 }
@@ -4629,7 +4700,7 @@ test "knife K2: every rounding records the mode its dialect name says, and a com
 }
 
 test "knife K2: d_range takes the unsigned comparison d_for_unsigned alone used to spell, before its body" {
-  let p = trace_kernel("ucmp2", ["f64"], () => {
+  let p = trace_kernel("ucmp2", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let a = carry(load(x, idx_const(0), [8]))
     let z = idx_const(0)
@@ -4652,7 +4723,7 @@ fn indexed(idx: Param[I32], src: Param[Float], out: Param[Float]) -> Unit !Dev =
 }
 
 test "a gather and a scatter record their index tile and sit in the token chain, and neither carries a stride" {
-  let p = trace_kernel("indexed", ["i32", "f64", "f64"],
+  let p = trace_kernel("indexed", [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
     () => indexed(param(I32, 0), param(F64, 1), param(F64, 2)))
   # make_token 0, idx_const 1, load 2 + token 3; the constant 8 is the
   # handle 4 and is made, at the comparison's shape, as 5 just before the
@@ -4671,7 +4742,7 @@ test "a gather and a scatter record their index tile and sit in the token chain,
     Scatter(_t, _param, _dt, _i, _s, _v, _m, _ti) -> true
     _ -> false
   }) == [Scatter(11, 2, "f64", 2, [8], 9, None, 10)]
-  assert p == trace_kernel("indexed", ["i32", "f64", "f64"],
+  assert p == trace_kernel("indexed", [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
     () => indexed(param(I32, 0), param(F64, 1), param(F64, 2)))
 }
 
@@ -4686,7 +4757,7 @@ fn atomics(hist: Param[I32], slots: Param[I32]) -> Unit !Dev = {
 }
 
 test "the atomics record their mode, index tile and comparison value, and sit in the token chain" {
-  let p = trace_kernel("atomics", ["i32", "i32"],
+  let p = trace_kernel("atomics", [ByPtr("i32"), ByPtr("i32")],
     () => atomics(param(I32, 0), param(I32, 1)))
   # make_token 0, idx_const 1, load 2 + token 3, the constant 8 (4) made as
   # 5, cmpi 6, the constant 1 (7) made as 8, atomic_rmw 9 + token 10, the
@@ -4699,12 +4770,12 @@ test "the atomics record their mode, index tile and comparison value, and sit in
     AtomicCAS(_d, _t, _param, _dt, _i, _s, _c, _v, _m, _ti) -> true
     _ -> false
   }) == [AtomicCAS(15, 16, 1, "i32", 2, [8], 13, 14, None, 10)]
-  assert p == trace_kernel("atomics", ["i32", "i32"],
+  assert p == trace_kernel("atomics", [ByPtr("i32"), ByPtr("i32")],
     () => atomics(param(I32, 0), param(I32, 1)))
 }
 
 test "an atomic mode outside the dialect's enumeration is refused when the kernel is recorded" {
-  let outcome = catch_panic(() => trace_kernel("bad_mode", ["i32"], () => {
+  let outcome = catch_panic(() => trace_kernel("bad_mode", [ByPtr("i32")], () => {
     let hist = param(I32, 0)
     let i = load(hist, idx_const(0), [8])
     let _r = atomic_rmw(hist, "sub", i, i_const(1))
@@ -4717,7 +4788,7 @@ test "an atomic mode outside the dialect's enumeration is refused when the kerne
 }
 
 test "assert records outside the token chain, assume defines one handle, and print sits in the chain between two stores" {
-  let prog = trace_kernel("dbg", ["i32", "i32"], () => {
+  let prog = trace_kernel("dbg", [ByPtr("i32"), ByPtr("i32")], () => {
     let x = param(I32, 0)
     let out = param(I32, 1)
     let v = load(x, idx_const(0), [8])
@@ -4771,7 +4842,7 @@ test "assert records outside the token chain, assume defines one handle, and pri
 }
 
 test "a print whose format expressions do not count its operands, and an assume the dialect's own verifier would refuse, are refused when the kernel is recorded" {
-  let bad_count = catch_panic(() => trace_kernel("bad_print", ["i32"], () => {
+  let bad_count = catch_panic(() => trace_kernel("bad_print", [ByPtr("i32")], () => {
     let x = param(I32, 0)
     let v = load(x, idx_const(0), [8])
     d_print("%d and %d", [reduce_sum(v)])
@@ -4783,7 +4854,7 @@ test "a print whose format expressions do not count its operands, and an assume 
   # `%%` is an escaped percent and takes no operand: the same string with
   # one real conversion is accepted, which is what makes the count a rule
   # and not a count of `%` characters
-  let escaped = catch_panic(() => trace_kernel("ok_print", ["i32"], () => {
+  let escaped = catch_panic(() => trace_kernel("ok_print", [ByPtr("i32")], () => {
     let x = param(I32, 0)
     let v = load(x, idx_const(0), [8])
     d_print("100%% of %d", [reduce_sum(v)])
@@ -4792,7 +4863,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Ok(_) -> true
     Err(_e) -> false
   }
-  let bad_insert = catch_panic(() => trace_kernel("bad_insert", ["f64"], () => {
+  let bad_insert = catch_panic(() => trace_kernel("bad_insert", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [16, 8])
     let s = load(x, idx_const(0), [8, 16])
@@ -4803,7 +4874,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "insert dimension 1: 16 does not divide 8 evenly") }
   }
-  let short_insert = catch_panic(() => trace_kernel("short_insert", ["f64"], () => {
+  let short_insert = catch_panic(() => trace_kernel("short_insert", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [16, 8])
     let _r = insert(extract(t, [8, 4], [idx_const(0), idx_const(0)]), t, [idx_const(0)])
@@ -4814,7 +4885,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Err(e) -> { assert str.contains(e.message, "insert into a 2-dimensional tile takes that many slice indices, got 1") }
   }
   # i64 is an integer tile format here and NOT one of fpowi's four
-  let wide_exponent = catch_panic(() => trace_kernel("wide_powi", ["f64", "i64"], () => {
+  let wide_exponent = catch_panic(() => trace_kernel("wide_powi", [ByPtr("f64"), ByPtr("i64")], () => {
     let x = param(F64, 0)
     let n = param(I64, 1)
     let _r = powi(load(x, idx_const(0), [8]), load(n, idx_const(0), [8]))
@@ -4824,7 +4895,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "powi's exponent is an i1, i8, i16 or i32 tile, got `i64`") }
   }
-  let bad_divisor = catch_panic(() => trace_kernel("bad_assume", ["i32"], () => {
+  let bad_divisor = catch_panic(() => trace_kernel("bad_assume", [ByPtr("i32")], () => {
     let x = param(I32, 0)
     let _a = assume_div_by(load(x, idx_const(0), [8]), 24)
     ()
@@ -4833,7 +4904,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "assume div_by wants a positive power of two, got 24") }
   }
-  let bad_rank = catch_panic(() => trace_kernel("bad_same", ["i32"], () => {
+  let bad_rank = catch_panic(() => trace_kernel("bad_same", [ByPtr("i32")], () => {
     let x = param(I32, 0)
     let _a = assume_same_elements(load(x, idx_const(0), [8]), [2, 2])
     ()
@@ -4842,7 +4913,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "assume same_elements carries one value per dimension") }
   }
-  let bad_bounds = catch_panic(() => trace_kernel("bad_bounded", ["i32"], () => {
+  let bad_bounds = catch_panic(() => trace_kernel("bad_bounded", [ByPtr("i32")], () => {
     let x = param(I32, 0)
     let hi: Option[Int] = Some(0)
     let lo: Option[Int] = Some(7)
@@ -4853,7 +4924,7 @@ test "a print whose format expressions do not count its operands, and an assume 
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "assume bounded wants a lower bound at most the upper one") }
   }
-  let inside = catch_panic(() => trace_kernel("bad_print_region", ["i32"], () => {
+  let inside = catch_panic(() => trace_kernel("bad_print_region", [ByPtr("i32")], () => {
     let x = param(I32, 0)
     let v = load(x, idx_const(0), [8])
     let _r = d_reduce(v, 0.0, (acc, e) => {
@@ -4869,7 +4940,7 @@ test "a print whose format expressions do not count its operands, and an assume 
 }
 
 test "a gather inside a reduction region is refused: a pure region carries no memory order" {
-  let outcome = catch_panic(() => trace_kernel("bad_gather", ["i32", "f64"], () => {
+  let outcome = catch_panic(() => trace_kernel("bad_gather", [ByPtr("i32"), ByPtr("f64")], () => {
     let idx = param(I32, 0)
     let src = param(F64, 1)
     let i = load(idx, idx_const(0), [8])
@@ -4895,7 +4966,7 @@ fn deeper(x: Param[Float], depth: Int, t: Carry[Float]) -> Unit !Dev = {
 }
 
 test "a body that recurses through d_range is refused at the depth limit rather than unrolled forever" {
-  let outcome = catch_panic(() => trace_kernel("deep", ["f64"], () => {
+  let outcome = catch_panic(() => trace_kernel("deep", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     deeper(x, 0, carry(load(x, block_id(0), [8])))
   }))
@@ -4914,7 +4985,7 @@ fn total(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 fn trace_total() -> TileProg =
-  trace_kernel("total", ["f64", "f64"], () => total(param(F64, 0), param(F64, 1)))
+  trace_kernel("total", [ByPtr("f64"), ByPtr("f64")], () => total(param(F64, 0), param(F64, 1)))
 
 test "a reduction records as one Reduce holding its region, with the accumulator and the element as its arguments" {
   let p = trace_total()
@@ -4946,7 +5017,7 @@ fn branch(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "an if records two regions, each ending in its own yield, and one result after both" {
-  let p = trace_kernel("branch", ["f64", "f64"], () => branch(param(F64, 0), param(F64, 1)))
+  let p = trace_kernel("branch", [ByPtr("f64"), ByPtr("f64")], () => branch(param(F64, 0), param(F64, 1)))
   match p.ops[5] {
     If(results, cond, on_true, on_false) -> {
       assert results == [8]
@@ -5063,7 +5134,7 @@ fn never_opened() -> Unit !Dev = {
   ()
 }
 
-fn refusal(body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", ["f64"], body)) {
+fn refusal(body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", [ByPtr("f64")], body)) {
   Ok(_) -> "accepted"
   Err(e) -> e.message
 }
@@ -5076,7 +5147,7 @@ test "a loop body answering the wrong number of carried values, a loop never clo
 
 # ---- knife T7: the module's static globals
 
-fn two_globals() -> TileProg = trace_kernel("globals", ["f64"], () => {
+fn two_globals() -> TileProg = trace_kernel("globals", [ByPtr("f64")], () => {
   let out = param(F64, 0)
   d_global("a", F64, [1.0, 2.0, 4.0])
   d_global("b", F64, [8.0, 16.0, 32.0], align: 256)
@@ -5103,7 +5174,7 @@ test "a global is recorded beside the entry and not in it, and get_global names 
 }
 
 test "a store through a pointer tile sits in the token chain where a store through a parameter does" {
-  let p = trace_kernel("scratch", ["f64"], () => {
+  let p = trace_kernel("scratch", [ByPtr("f64")], () => {
     let out = param(F64, 0)
     d_global("g", F64, [0.0, 0.0])
     let base = idx_const(0)
@@ -5131,7 +5202,7 @@ test "a store through a pointer tile sits in the token chain where a store throu
 }
 
 test "a global declared twice, one declared inside a region, an empty one, and a get_global naming none are all refused" {
-  let twice = catch_panic(() => trace_kernel("twice", ["f64"], () => {
+  let twice = catch_panic(() => trace_kernel("twice", [ByPtr("f64")], () => {
     d_global("a", F64, [1.0])
     d_global("a", F64, [2.0])
   }))
@@ -5139,7 +5210,7 @@ test "a global declared twice, one declared inside a region, an empty one, and a
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "the global `a` is declared twice") }
   }
-  let inside = catch_panic(() => trace_kernel("inside", ["f64"], () => {
+  let inside = catch_panic(() => trace_kernel("inside", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let zero = idx_const(0)
     let one = idx_const(1)
@@ -5150,14 +5221,14 @@ test "a global declared twice, one declared inside a region, an empty one, and a
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "is declared inside a region; a global belongs to the module") }
   }
-  let empty = catch_panic(() => trace_kernel("empty", ["f64"], () => {
+  let empty = catch_panic(() => trace_kernel("empty", [ByPtr("f64")], () => {
     d_global("a", F64, [])
   }))
   match empty {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "is initialized with no values") }
   }
-  let unknown = catch_panic(() => trace_kernel("unknown", ["f64"], () => {
+  let unknown = catch_panic(() => trace_kernel("unknown", [ByPtr("f64")], () => {
     let _p = global_ptrs("nope", F64, [4])
     ()
   }))
@@ -5165,7 +5236,7 @@ test "a global declared twice, one declared inside a region, an empty one, and a
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "get_global names `nope`, which no global declares") }
   }
-  let wrong = catch_panic(() => trace_kernel("wrong", ["f64"], () => {
+  let wrong = catch_panic(() => trace_kernel("wrong", [ByPtr("f64")], () => {
     d_global("a", F64, [1.0])
     let _p = global_ptrs("a", I32, [4])
     ()
@@ -5192,7 +5263,7 @@ fn vadd_half(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
 }
 
 test "knife C1: an element-wise operation whose operands disagree in shape is refused when recorded, by number and name" {
-  let r = catch_panic(() => trace_kernel("vadd_half", ["f64", "f64", "f64"], () => vadd_half(param(F64, 0), param(F64, 1), param(F64, 2))))
+  let r = catch_panic(() => trace_kernel("vadd_half", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd_half(param(F64, 0), param(F64, 1), param(F64, 2))))
   match r {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.starts_with(e.message, "tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>") }
@@ -5202,13 +5273,13 @@ test "knife C1: an element-wise operation whose operands disagree in shape is re
 test "knife C1: op #k is the operation's position in the recorded program read depth first" {
   # the same body with the shapes agreeing records; its #6 is the addf the
   # refusal above names
-  let p = trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
+  let p = trace_kernel("vadd", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd(param(F64, 0), param(F64, 1), param(F64, 2)))
   match p.ops[6] {
     BinaryF(_d, op, _dt, _s, _a, _b) -> { assert op == "addf" }
     _ -> { assert false }
   }
   # inside a loop body: the For counts once ahead of its body
-  let r = catch_panic(() => trace_kernel("in_loop", ["f64"], () => {
+  let r = catch_panic(() => trace_kernel("in_loop", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let zero = idx_const(0)
     let one = idx_const(1)
@@ -5267,7 +5338,7 @@ fn view_read_half() -> Unit !Dev = {
   ()
 }
 
-fn refusal_in(params: List[String], body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", params, body)) {
+fn refusal_in(params: List[KParam], body: fn() -> Unit !Dev) -> String = match catch_panic(() => trace_kernel("raw", params, body)) {
   Ok(_) -> "accepted"
   Err(e) -> e.message
 }
@@ -5317,7 +5388,7 @@ test "knife C1': a tile read through a view has the view's tile as its row, and 
 }
 
 test "knife C1': t_shape_of answers each handle's row, a view's as Held says, and refuses a token by number" {
-  let p = trace_kernel("noted", ["f64"], shapes_noted)
+  let p = trace_kernel("noted", [ByPtr("f64")], shapes_noted)
   assert list.map(p.globals, g => g.sym) == [
     "f64 [-1, 4] #2",
     "f64 [8, 4] #3",
@@ -5364,7 +5435,7 @@ test "knife C1': an mma whose operands disagree on K is refused, by the right-ha
   })
   assert str.contains(l, "`mmaf`: lhs is tile<16x8xf64>, whose K (dimension 1) is 8, declared k = 16")
   # the same rule for the integer one
-  let i = refusal_in(["i8", "i32"], () => {
+  let i = refusal_in([ByPtr("i8"), ByPtr("i32")], () => {
     let x = t_idx_const(0)
     let a = t_load(0, "i8", x, [16, 32], [32, 1], None, None, [])
     let b = t_load(0, "i8", x, [16, 16], [16, 1], None, None, [])
@@ -5386,7 +5457,7 @@ fn forked(gap: Int) -> Unit !Dev = {
 }
 
 test "knife D-1: the two chains of a fork may not write one element, and halves that do not meet are recorded" {
-  let ok = trace_kernel("raw", ["f64"], () => forked(64))
+  let ok = trace_kernel("raw", [ByPtr("f64")], () => forked(64))
   assert list.any(ok.ops, op => match op {
     JoinToks(_d, toks) -> len(toks) == 2
     _ -> false
@@ -5396,12 +5467,12 @@ test "knife D-1: the two chains of a fork may not write one element, and halves 
   # the same element from both sides, the plainest overlap
   assert str.contains(refusal(() => forked(0)), "the first writes elements 0 to 63 and the second 0 to 63")
   # one past the end is not an overlap
-  let _edge = trace_kernel("raw", ["f64"], () => forked(0 - 64))
+  let _edge = trace_kernel("raw", [ByPtr("f64")], () => forked(0 - 64))
   ()
 }
 
 test "knife D-1: a write the recording cannot place is refused in a fork, and writes to two parameters are not compared" {
-  let two = trace_kernel("two", ["f64", "f64"], () => {
+  let two = trace_kernel("two", [ByPtr("f64"), ByPtr("f64")], () => {
     let x = param(F64, 0)
     let y = param(F64, 1)
     let t = load(x, idx_const(0), [8])
@@ -5451,7 +5522,7 @@ test "knife C2: trace3 records the program trace_kernel records for the same bod
   let (q, _e2) = trace3("vadd", In(F64, Whole), Shared(F64), Shared(F64), vadd)
   assert q == trace_vadd()
   let (s, _e3) = trace2("scale_f32", In(F32, Whole), Shared(F32), scale_f32)
-  assert s.params == ["f32", "f32"]
+  assert s.params == [ByPtr("f32"), ByPtr("f32")]
 }
 
 # Each body writes parameter 0 one way; parameter 1 is the one it reads.
@@ -5537,7 +5608,7 @@ test "D-7: an Out is written through its cells and every other write into one is
   # with no In and no Out, a write through forged pointers threatens nothing
   assert marked(() => trace2("w", Shared(F64), Shared(F64), into_forged)) == "accepted"
   # and trace_kernel knows no roles: it refuses none of these
-  assert marked(() => trace_kernel("w", ["f64", "f64"], () => into_first_store(param(F64, 0), param(F64, 1)))) == "accepted"
+  assert marked(() => trace_kernel("w", [ByPtr("f64"), ByPtr("f64")], () => into_first_store(param(F64, 0), param(F64, 1)))) == "accepted"
 }
 
 fn two(_x: Param[Float], _y: Param[Float]) -> Unit !Dev = ()
@@ -5678,7 +5749,7 @@ test "PR-3: trace_calls with erased markers records what trace3 records, and ref
     markers: [erase(In(F64, g)), erase(In(F64, g)), erase(Out(F64, g))])
   assert p == q
   assert list.map(calls, c => c.name) == ["load_cell", "load_cell", "add", "store_cell"]
-  match catch_panic(() => trace_calls("both", ["f64"], () => (), markers: [erase(In(F64, g))])) {
+  match catch_panic(() => trace_calls("both", [ByPtr("f64")], () => (), markers: [erase(In(F64, g))])) {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "formats or markers, not both") }
   }
@@ -5730,7 +5801,7 @@ test "0.8.2: a kept dimension widens as broadcast would; a dropped one and a ran
     let t = load_cell(x)
     store_cell(o, sub(t, reshape(reduce_max(t, keepdims: true), [32])))
   })), "tileir: kernel `rows`: op #11 `subf`: rhs is tile<32xf64>, declared tile<32x64xf64>")
-  assert str.starts_with(marked(() => trace_kernel("fmt", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("fmt", [ByPtr("f64")], () => {
     let x = t_constf("f64", [8], 1.0)
     let y = t_constf("f32", [], 2.0)
     let _z = t_binaryf("addf", "f64", [8], x, y)
@@ -5898,7 +5969,7 @@ test "PR-1: cells come from markers: a Whole, a Shared, a trace_kernel parameter
   assert str.starts_with(marked(() => trace2("c", Shared(F64), Out(F64, cells([8], [8])),
     (x, o) => store_cell(o, zeros(x)))),
     "tileir: kernel `c`: op #1 `zeros`: parameter 0 is a Shared, which has no cells")
-  assert str.starts_with(marked(() => trace_kernel("c", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("c", [ByPtr("f64")], () => {
     let _t = load_cell(param(F64, 0))
     ()
   })), "tileir: kernel `c`: op #1 `load_cell`: parameter 0 has no marker")
@@ -5912,22 +5983,22 @@ test "PR-1: cells come from markers: a Whole, a Shared, a trace_kernel parameter
 }
 
 test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the kernel records" {
-  assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     let c = t_cmpi("lt", [8], t_iota(8), t_iota(8))
     t_if_begin(c)
     t_if_else([])
     let _r = t_if_end([])
     ()
   })), "tileir: kernel `r`: op #4 `if`: condition is tile<8xi1>, and it must be the rank-0 tile<i1>")
-  assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     t_return_if(t_cmpi("lt", [8], t_iota(8), t_iota(8)))
   })), "tileir: kernel `r`: op #4 `return`: condition is tile<8xi1>, and it must be the rank-0 tile<i1>")
-  assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     let _c = t_while_begin([])
     let _r = t_while_end(t_cmpi("lt", [8], t_iota(8), t_iota(8)), [])
     ()
   })), "tileir: kernel `r`: op #5 `loop`: exit condition is tile<8xi1>, and it must be the rank-0 tile<i1>")
-  assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     let t = t_constf("f64", [8], 1.0)
     let args = t_reduce_begin(0, [8], [IdF("f64", 0.0)], [t])
     let wide = t_constf("f64", [8], 1.0)
@@ -5935,7 +6006,7 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
     let _unused = args
     ()
   })), "tileir: kernel `r`: op #4 `reduce`: yield 0 is tile<8xf64>, and it must be the rank-0 tile<f64>")
-  assert str.starts_with(marked(() => trace_kernel("r", ["f64"], () => {
+  assert str.starts_with(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     let acc = carry(broadcast(f_const(F64, 0.0), [8]))
     for _k in d_range(idx_of(arange(8)), idx_const(2), step: By(idx_const(1))) { acc.set(acc.get()) }
   })), "tileir: kernel `r`: op #5 `d_range`: lower bound is tile<8xi32>, and it must be the rank-0 tile<i32>")
@@ -5945,7 +6016,7 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
   })), "tileir: kernel `r`: op #2 `load_at`: cell index is tile<4xi32>, and it must be the rank-0 tile<i32>")
   # and since `Scalar[D]` is gone, the rank of an `if`'s condition is held
   # here and nowhere else: a wide comparison handed to `d_if` is refused
-  assert str.contains(marked(() => trace_kernel("r", ["f64"], () => {
+  assert str.contains(marked(() => trace_kernel("r", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
     d_if(lt(t, t), () => (), () => ())
@@ -5953,7 +6024,7 @@ test "PR-1 (n9): a place that wants a rank-0 tile refuses a wider one while the 
 }
 
 test "C3': a constant takes no shape: it is made where it is used, at the shape the use wants, and not at all when unused" {
-  let p = trace_kernel("consts", ["f64", "f64"], () => {
+  let p = trace_kernel("consts", [ByPtr("f64"), ByPtr("f64")], () => {
     let x = param(F64, 0)
     let out = param(F64, 1)
     let half = f_const(F64, 0.5)
@@ -6004,29 +6075,29 @@ test "C3': a constant used inside a region is made there, at rank 0 in a reducti
 }
 
 test "C3': a carry that starts as a bare constant and is set to a tile is refused, by the value that changed shape" {
-  assert str.contains(marked(() => trace_kernel("bare", ["f64"], () => {
+  assert str.contains(marked(() => trace_kernel("bare", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let acc = carry(f_const(F64, 0.0))
     for _k in d_range(0, 2) { acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
   })), "`set`: carry 0 holds tile<f64>, and is set to tile<8xf64>")
-  assert marked(() => trace_kernel("shaped", ["f64"], () => {
+  assert marked(() => trace_kernel("shaped", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let acc = carry(broadcast(f_const(F64, 0.0), [8]))
     for _k in d_range(0, 2) { acc.set(add(acc.get(), load(x, idx_const(0), [8]))) }
   })) == "accepted"
-  assert str.contains(marked(() => trace_kernel("branches", ["f64"], () => {
+  assert str.contains(marked(() => trace_kernel("branches", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let r = carry(load(x, idx_const(0), [8]))
     d_if(idx_eq(idx_const(0), idx_const(0)), () => (), () => r.set(f_const(F64, 1.0)))
   })), "`set`: carry 0 holds tile<8xf64>, and is set to tile<f64>")
-  assert str.contains(marked(() => trace_kernel("weak", ["f64"], () => {
+  assert str.contains(marked(() => trace_kernel("weak", [ByPtr("f64")], () => {
     let _c: Carry[Float] = carry(lit(0.5))
     ()
   })), "`carry`: a carry starts from a tile with a format of its own")
 }
 
 test "tileir 0.10: mma takes bf16 operands into an f32 accumulator, and a lit accumulator is made in the accumulator's format" {
-  let p = trace_kernel("mixed", ["bf16", "f32"], () => {
+  let p = trace_kernel("mixed", [ByPtr("bf16"), ByPtr("f32")], () => {
     let x = param(BF16, 0)
     let out = param(F32, 1)
     let a = load(x, idx_const(0), [16, 16])
@@ -6058,7 +6129,7 @@ test "tileir 0.10: an mma pair outside the dialect's table is refused with the t
 }
 
 test "tileir 0.10: full is broadcast of f_const, transpose is permute_tile [1, 0], and to its own format records nothing" {
-  let k1 = (spelt: Bool) => trace_kernel("same", ["f64", "f64"], () => {
+  let k1 = (spelt: Bool) => trace_kernel("same", [ByPtr("f64"), ByPtr("f64")], () => {
     let x = param(F64, 0)
     let out = param(F64, 1)
     let a = load(x, idx_const(0), [16, 8])
@@ -6067,7 +6138,7 @@ test "tileir 0.10: full is broadcast of f_const, transpose is permute_tile [1, 0
     store(out, idx_const(0), add(t, z))
   })
   assert k1(true) == k1(false)
-  let p = trace_kernel("narrow", ["f32", "bf16"], () => {
+  let p = trace_kernel("narrow", [ByPtr("f32"), ByPtr("bf16")], () => {
     let x = param(F32, 0)
     let out = param(BF16, 1)
     store(out, idx_const(0), load(x, idx_const(0), [16]).to(BF16))
@@ -6084,7 +6155,7 @@ test "tileir 0.10: full is broadcast of f_const, transpose is permute_tile [1, 0
 }
 
 test "C3': a broadcast constant and a zero accumulator are one constant of the shape, and an mma widens a rank-0 accumulator" {
-  let p = trace_kernel("acc", ["f16", "f16"], () => {
+  let p = trace_kernel("acc", [ByPtr("f16"), ByPtr("f16")], () => {
     let x = param(F16, 0)
     let out = param(F16, 1)
     let a = load(x, idx_const(0), [16, 16])
@@ -6099,7 +6170,7 @@ test "C3': a broadcast constant and a zero accumulator are one constant of the s
   assert len(ops_where(p.ops, is_const)) == 2
   assert len(ops_where(p.ops, is_spread)) == 0
   # a store writes a tile with a dimension
-  assert str.contains(marked(() => trace_kernel("r0", ["f64"], () => store(param(F64, 0), idx_const(0), f_const(F64, 1.0)))),
+  assert str.contains(marked(() => trace_kernel("r0", [ByPtr("f64")], () => store(param(F64, 0), idx_const(0), f_const(F64, 1.0)))),
     "`store`: a store writes a tile with a dimension, and this value is rank 0")
 }
 
@@ -6217,7 +6288,7 @@ fn combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
 }
 
 test "PR-2: a strided load with hints, a masked load with no pad and a strided masked store with hints record as such" {
-  let p = trace_kernel("combos", ["f64", "f64"], () => combos(param(F64, 0), param(F64, 1)))
+  let p = trace_kernel("combos", [ByPtr("f64"), ByPtr("f64")], () => combos(param(F64, 0), param(F64, 1)))
   let loads = list.filter(p.ops, o => match o {
     Load(_d, _t, _p, _dt, _b, _s, _st, _m, _pd, _ti, _h) -> true
     _ -> false
@@ -6271,7 +6342,7 @@ test "PR-2: a pad with no mask is refused when the kernel is recorded, naming th
 }
 
 test "PR-3: a rank-0 pad is widened to the load's shape, as one constant made where the load is" {
-  let p = trace_kernel("padded", ["f64"], () => {
+  let p = trace_kernel("padded", [ByPtr("f64")], () => {
     let b = block_id(0)
     let m = tail_mask(b, [128], 1000)
     let _t = load(param(F64, 0), b, [128], mask: Some(m), pad: Some(f_const(F64, 0.0)))
@@ -6314,7 +6385,7 @@ test "0.8.2: lit is refused by name where no operation gives it a format" {
 }
 
 test "0.8.2: idx_div, idx_rem and idx_sub are the signed i32 operations on the index tile" {
-  let p = trace_kernel("ix", ["f64"], () => {
+  let p = trace_kernel("ix", [ByPtr("f64")], () => {
     let b = block_id(0)
     let g = idx_const(4)
     let _q = idx_div(b, g)
@@ -6335,7 +6406,7 @@ test "0.8.2: idx_div, idx_rem and idx_sub are the signed i32 operations on the i
 # ---- tileir 0.9.0: carries
 
 test "0.9.0: a carry only one branch sets is an if result, and the other branch yields what it held before" {
-  let p = trace_kernel("half", ["f64", "f64"], () => {
+  let p = trace_kernel("half", [ByPtr("f64"), ByPtr("f64")], () => {
     let x = param(F64, 0)
     let out = param(F64, 1)
     let i = block_id(0)
@@ -6362,7 +6433,7 @@ test "0.9.0: a carry only one branch sets is an if result, and the other branch 
     _ -> { assert false }
   }
   # the trials left nothing: the program is the one recorded twice
-  assert p == trace_kernel("half", ["f64", "f64"], () => {
+  assert p == trace_kernel("half", [ByPtr("f64"), ByPtr("f64")], () => {
     let x = param(F64, 0)
     let out = param(F64, 1)
     let i = block_id(0)
@@ -6375,7 +6446,7 @@ test "0.9.0: a carry only one branch sets is an if result, and the other branch 
 }
 
 test "0.9.0: a carry set inside a reduction's body is refused, and so is a region left open by a trial" {
-  assert str.contains(marked(() => trace_kernel("red", ["f64"], () => {
+  assert str.contains(marked(() => trace_kernel("red", [ByPtr("f64")], () => {
     let x = param(F64, 0)
     let t = load(x, idx_const(0), [8])
     let c = carry(t)
@@ -6385,7 +6456,7 @@ test "0.9.0: a carry set inside a reduction's body is refused, and so is a regio
     })
     ()
   })), "a carry is set inside a reduce or scan body")
-  assert str.contains(marked(() => trace_kernel("open", ["f64"], () => t_trial_begin())), "the body ended inside a trial")
+  assert str.contains(marked(() => trace_kernel("open", [ByPtr("f64")], () => t_trial_begin())), "the body ended inside a trial")
 }
 
 test "0.9.0: extent_of and blocks_of are host constants for a static dimension and the grid's for a dynamic one" {
@@ -6502,4 +6573,92 @@ test "L3: Idx operators record the index operations, and an integer literal on t
     IdxConst(_d, _v) -> true
     _ -> false
   }) >= 4
+}
+
+# ---- knife K4.1: parameters passed by value
+
+fn scale_by(x: Param[F32], s: Param[F32], out: Param[F32]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 8)
+  store(out, base, mul(load(x, base, [8]), scalar(s)))
+}
+
+fn trace_scale_by() -> TileProg = trace_kernel("scale_by", [ByPtr("f32"), ByValue("f32"), ByPtr("f32")],
+  () => scale_by(param(F32, 0), param(F32, 1), param(F32, 2)))
+
+test "K4.1: a by-value parameter is read by scalar as one ScalarArg, and the program says how it is passed" {
+  let p = trace_scale_by()
+  assert p.params == [ByPtr("f32"), ByValue("f32"), ByPtr("f32")]
+  assert count_ops(p.ops, o => match o {
+    ScalarArg(_d, 1, "f32") -> true
+    _ -> false
+  }) == 1
+  # the only memory operations are the buffer's load and store: reading the
+  # scalar loads nothing
+  assert count_ops(p.ops, o => match o {
+    Load(_d, _t, _p, _dt, _b, _s, _st, _m, _pd, _ti, _h) -> true
+    _ -> false
+  }) == 1
+  assert count_ops(p.ops, o => match o {
+    Store(_to, _p, _dt, _b, _s, _st, _v, _m, _ti, _h) -> true
+    _ -> false
+  }) == 1
+  assert trace_scale_by() == p
+}
+
+test "K4.1: scalar of a buffer parameter, of another format, or past the list is refused when the kernel records" {
+  let buffer = refusal_in([ByPtr("f32")], () => {
+    let _s = scalar(param(F32, 0))
+    ()
+  })
+  assert str.starts_with(buffer, "tileir: kernel `raw`: parameter 0 is a buffer (a pointer to f32), and a scalar read takes a parameter passed by value")
+  let other = refusal_in([ByValue("i32")], () => {
+    let _s = scalar(param(F32, 0))
+    ()
+  })
+  assert str.starts_with(other, "tileir: kernel `raw`: parameter 0 is declared i32 by value, but a scalar reads it as f32")
+  let past = refusal_in([ByValue("f32")], () => {
+    let _s = scalar(param(F32, 1))
+    ()
+  })
+  assert str.starts_with(past, "tileir: kernel `raw`: scalar names parameter 1, but 1 parameter(s) are declared")
+}
+
+test "K4.1: a memory operation on a by-value parameter is refused, whichever operation it is" {
+  let loaded = refusal_in([ByValue("f32")], () => {
+    let _t = load(param(F32, 0), idx_const(0), [8])
+    ()
+  })
+  assert str.starts_with(loaded, "tileir: kernel `raw`: parameter 0 is a f32 passed by value, and a load reads memory through a pointer; read it with `scalar`")
+  let stored = refusal_in([ByValue("f32")], () => store(param(F32, 0), idx_const(0), full([8], 1.0)))
+  assert str.starts_with(stored, "tileir: kernel `raw`: parameter 0 is a f32 passed by value, and a store reads memory through a pointer; read it with `scalar`")
+  let atomic = refusal_in([ByValue("i32")], () => {
+    let _t = atomic_add(param(I32, 0), arange(8), i_const(1))
+    ()
+  })
+  assert str.contains(atomic, "passed by value")
+}
+
+test "K4.1: a scalar is a rank-0 tile: it widens against a tile, and idx_of turns it into an extent" {
+  let p = trace_kernel("extent", [ByPtr("f32"), ByValue("i32"), ByPtr("f32")], () => {
+    let n = idx_of(scalar(param(I32, 1)))
+    let base = tile_at(block_id(0), 8)
+    let live = lt_i(lanes(base, [8]), broadcast(idx_as_tile(n), [8]))
+    store(param(F32, 2), base, load(param(F32, 0), base, [8], mask: Some(live), pad: Some(f_const(F32, 0.0))), mask: Some(live))
+  })
+  assert count_ops(p.ops, o => match o {
+    ScalarArg(_d, 1, "i32") -> true
+    _ -> false
+  }) == 1
+}
+
+test "K4.1: a by-value parameter of any format but i32, i64, f32 and f64 is refused where it is declared" {
+  let small = refusal_in([ByValue("f16")], () => ())
+  assert str.starts_with(small, "tileir: kernel `raw`: parameter 0 is passed by value as f16; a scalar parameter is i32, i64, f32 or f64")
+  let mask = refusal_in([ByPtr("f32"), ByValue("i1")], () => ())
+  assert str.starts_with(mask, "tileir: kernel `raw`: parameter 1 is passed by value as i1; a scalar parameter is i32, i64, f32 or f64")
+  let fine = refusal_in([ByValue("i32"), ByValue("i64"), ByValue("f32"), ByValue("f64")], () => ())
+  assert fine == "accepted"
+  # the narrower formats still go by pointer
+  let ptr = refusal_in([ByPtr("f16"), ByPtr("i8")], () => ())
+  assert ptr == "accepted"
 }

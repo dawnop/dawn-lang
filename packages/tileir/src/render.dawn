@@ -21,8 +21,8 @@ use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Paddi
   Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
   load_cell, store_cell, tail_mask, for_arch, hint_latency }
-use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{kparam_ty, Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -611,8 +611,8 @@ pub fn render_kernel(k: Kernel) -> String = {
 fn kernel_lines(k: Kernel, owners: List[Owner]) -> (List[String], List[Int]) = {
   var args: List[String] = []
   var i = 0
-  for dt in k.params {
-    args = args ++ ["%arg${i}: ${ty(Tile([], PtrTo(dt)))}"]
+  for kp in k.params {
+    args = args ++ ["%arg${i}: ${ty(kparam_ty(kp))}"]
     i = i + 1
   }
   let head = commas(args)
@@ -780,7 +780,7 @@ pub fn render(prog: TileProg) -> String = render_kernel(lower(prog))
 fn two_loads_one_param() -> TileProg = TileProg {
   hints: [],
   name: "twice",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -817,7 +817,7 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
   let p = TileProg {
     hints: [],
     name: "atomics",
-    params: ["i32", "i32"],
+    params: [ByPtr("i32"), ByPtr("i32")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -845,17 +845,23 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {
-  let p = TileProg { hints: [], name: "k", params: ["f32", "f64"], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { hints: [], name: "k", params: [ByPtr("f32"), ByPtr("f64")], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
   assert str.ends_with(text, "    return\n  }\n}\n")
+}
+
+test "K4.1: a by-value parameter is a rank-0 tile of its format in the entry signature, beside the pointers" {
+  let p = TileProg { hints: [], name: "k", params: [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals: [], ops: [MakeToken(0)] }
+  let text = render(p)
+  assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<i32>, %arg2: tile<f64>) {\n")
 }
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
     hints: [],
     name: "axes",
-    params: ["f64"],
+    params: [ByPtr("f64")],
     globals: [],
     ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
       Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, [])]
@@ -878,7 +884,7 @@ test "rendering the same program twice gives the same text" {
 fn sum_prog() -> TileProg = TileProg {
   hints: [],
   name: "sum",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -918,7 +924,7 @@ test "a loop is its header with the carried values, a body two columns in, and a
 fn spin_prog() -> TileProg = TileProg {
   hints: [],
   name: "spin",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -951,7 +957,7 @@ test "an early return inside a loop is an if around the dialect's bare return, a
   let p = TileProg {
     hints: [],
     name: "t17",
-    params: ["f64", "i32"],
+    params: [ByPtr("f64"), ByPtr("i32")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -985,7 +991,7 @@ test "an early return inside a loop is an if around the dialect's bare return, a
 fn total_prog() -> TileProg = TileProg {
   hints: [],
   name: "total",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1016,7 +1022,7 @@ test "a reduction is its header with the dimension, the identities and the regio
 fn branch_prog() -> TileProg = TileProg {
   hints: [],
   name: "branch",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1050,7 +1056,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   let p = TileProg {
     hints: [],
     name: "m",
-    params: ["f64"],
+    params: [ByPtr("f64")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -1084,7 +1090,7 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
   let p = TileProg {
     hints: [],
     name: "dbg",
-    params: ["i32", "i32"],
+    params: [ByPtr("i32"), ByPtr("i32")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -1143,7 +1149,7 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
   let p = TileProg {
     hints: [],
     name: "shapes",
-    params: ["f64", "f64"],
+    params: [ByPtr("f64"), ByPtr("f64")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -1174,7 +1180,7 @@ test "insert names its subtile, its destination in brackets and both types, and 
   let p = TileProg {
     hints: [],
     name: "t16",
-    params: ["f64", "i32", "f64"],
+    params: [ByPtr("f64"), ByPtr("i32"), ByPtr("f64")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -1206,7 +1212,7 @@ test "the pointer surface spells the ladder a body built, its three conversions 
   let p = TileProg {
     hints: [],
     name: "ptrs",
-    params: ["f64", "i32"],
+    params: [ByPtr("f64"), ByPtr("i32")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -1239,7 +1245,7 @@ test "a fork issues two stores from one token and joins them before the load tha
   let p = TileProg {
     hints: [],
     name: "fork",
-    params: ["f64", "f64"],
+    params: [ByPtr("f64"), ByPtr("f64")],
     globals: [],
     ops: [
       MakeToken(0),
@@ -1262,7 +1268,7 @@ test "a fork issues two stores from one token and joins them before the load tha
 fn globals_prog() -> TileProg = TileProg {
   hints: [],
   name: "g",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [
     Global { sym: "tbl", dtype: "f64", values: [1.0, 2.5], align: 0, is_private: false, constant: false },
     Global { sym: "pad", dtype: "i32", values: [7.0], align: 128, is_private: false, constant: false },
@@ -1370,7 +1376,7 @@ fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
 
 fn vadd_body() -> Unit !Dev = vadd(param(F64, 0), param(F64, 1), param(F64, 2))
 
-fn vadd_calls() -> (TileProg, List[Call]) = trace_calls("vadd", ["f64", "f64", "f64"], () => vadd_body())
+fn vadd_calls() -> (TileProg, List[Call]) = trace_calls("vadd", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd_body())
 
 fn names_of(calls: List[Call]) -> List[String] = list.map(calls, c => c.name)
 
@@ -1401,7 +1407,7 @@ test "the side table holds vadd's six calls in source order, the kernel's own on
 
 test "the marks put nothing into the program: trace_calls records what trace_kernel records" {
   let (p, _calls) = vadd_calls()
-  assert p == trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd_body())
+  assert p == trace_kernel("vadd", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd_body())
 }
 
 test "every line of vadd's text belongs to exactly one call, the prologue or the epilogue" {
@@ -1440,7 +1446,7 @@ fn is_err(r: Result[LineMap, String]) -> Bool = match r {
 fn is_ok(r: Result[LineMap, String]) -> Bool = not is_err(r)
 
 test "an operation issued outside any public call has no owner, and the map says so" {
-  let (p, calls) = trace_calls("raw", ["f64"], () => {
+  let (p, calls) = trace_calls("raw", [ByPtr("f64")], () => {
     let _i: Int = t_block_id(0)
     ()
   })
@@ -1477,7 +1483,7 @@ fn every_line_once(m: LineMap) -> Bool = {
 }
 
 test "what a loop's body calls are the d_range's children, and the d_range keeps its header, its continue and its brace" {
-  let (p, calls) = trace_calls("summed", ["f64", "f64"], () => summed(param(F64, 0), param(F64, 1)))
+  let (p, calls) = trace_calls("summed", [ByPtr("f64"), ByPtr("f64")], () => summed(param(F64, 0), param(F64, 1)))
   # `carry`, `get` and `set` are calls that record nothing, and the trial
   # that found the loop's carry left no row behind
   assert tree_of(calls) == [("block_id", 0 - 1), ("tile_at", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1),
@@ -1502,7 +1508,7 @@ fn scanned(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "a call inside a scan's closure is the d_scan's child, and the d_scan keeps its header, its yield and its brace" {
-  let (p, calls) = trace_calls("scanned", ["f64", "f64"], () => scanned(param(F64, 0), param(F64, 1)))
+  let (p, calls) = trace_calls("scanned", [ByPtr("f64"), ByPtr("f64")], () => scanned(param(F64, 0), param(F64, 1)))
   assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1), ("d_scan", 0 - 1), ("max", 3),
     ("store", 0 - 1)]
   let m = must_map(p, calls)
@@ -1531,7 +1537,7 @@ fn nested(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "regions inside regions nest the rows: each call's parent is the region whose closure it is in" {
-  let (p, calls) = trace_calls("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
+  let (p, calls) = trace_calls("nested", [ByPtr("f64"), ByPtr("f64")], () => nested(param(F64, 0), param(F64, 1)))
   assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("carry", 0 - 1), ("d_range", 0 - 1),
     ("d_range", 4), ("get", 5), ("d_reduce", 5), ("max", 7), ("broadcast", 5), ("add", 5), ("set", 5), ("get", 0 - 1),
     ("store", 0 - 1)]
@@ -1562,17 +1568,17 @@ fn regions(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 
 test "the marks put nothing into the program: trace_calls records what trace_kernel records" {
   let (p, _calls) = vadd_calls()
-  assert p == trace_kernel("vadd", ["f64", "f64", "f64"], () => vadd_body())
+  assert p == trace_kernel("vadd", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd_body())
   # the body marks neither: every region function that takes a closure
-  let (q, calls) = trace_calls("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
-  assert q == trace_kernel("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
+  let (q, calls) = trace_calls("regions", [ByPtr("f64"), ByPtr("f64")], () => regions(param(F64, 0), param(F64, 1)))
+  assert q == trace_kernel("regions", [ByPtr("f64"), ByPtr("f64")], () => regions(param(F64, 0), param(F64, 1)))
   assert every_line_once(must_map(q, calls))
   # and a pair issued by hand around a call is nothing either
-  let bare = trace_kernel("bare", ["f64"], () => {
+  let bare = trace_kernel("bare", [ByPtr("f64")], () => {
     let _b = block_id(0)
     ()
   })
-  let marked = trace_kernel("bare", ["f64"], () => {
+  let marked = trace_kernel("bare", [ByPtr("f64")], () => {
     t_body_enter()
     let _b = block_id(0)
     t_body_exit()
@@ -1581,7 +1587,7 @@ test "the marks put nothing into the program: trace_calls records what trace_ker
 }
 
 test "every region function's closure is a body: what it calls is the region call's child" {
-  let (_q, calls) = trace_calls("regions", ["f64", "f64"], () => regions(param(F64, 0), param(F64, 1)))
+  let (_q, calls) = trace_calls("regions", [ByPtr("f64"), ByPtr("f64")], () => regions(param(F64, 0), param(F64, 1)))
   assert tree_of(calls) == [("idx_const", 0 - 1), ("load", 0 - 1), ("lt", 0 - 1), ("d_reduce", 0 - 1), ("max", 3),
     ("d_scan", 0 - 1), ("max", 5), ("gt", 0 - 1), ("carry", 0 - 1), ("d_loop", 0 - 1), ("get", 9), ("mul", 9), ("set", 9),
     ("get", 0 - 1), ("carry", 0 - 1), ("d_if", 0 - 1), ("get", 15), ("get", 15), ("add", 15), ("set", 15), ("get", 15),
@@ -1628,7 +1634,7 @@ fn sentinels(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "the map agrees with sentinels: every line is the call that ran between the two sentinels around it" {
-  let (p, calls) = trace_calls("sentinels", ["f64", "f64"], () => sentinels(param(F64, 0), param(F64, 1)))
+  let (p, calls) = trace_calls("sentinels", [ByPtr("f64"), ByPtr("f64")], () => sentinels(param(F64, 0), param(F64, 1)))
   let m = must_map(p, calls)
   assert every_line_once(m)
   let lines = str.split(m.text, "\n")
@@ -1673,7 +1679,7 @@ fn tabled(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 }
 
 test "a global's line belongs to the call that declared it" {
-  let (p, calls) = trace_calls("tabled", ["f64", "f64"], () => tabled(param(F64, 0), param(F64, 1)))
+  let (p, calls) = trace_calls("tabled", [ByPtr("f64"), ByPtr("f64")], () => tabled(param(F64, 0), param(F64, 1)))
   # arguments left to right, each call after its own arguments: store's
   # `idx_const(0)` runs before anything inside its `add`
   assert names_of(calls) == ["d_global", "global_ptrs", "load_ptrs", "idx_const", "idx_const", "load", "add", "store"]
@@ -1740,7 +1746,7 @@ fn merged_combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
 }
 
 test "PR-2: a hinted load, a masked load with no padding value and a masked hinted store render as the dialect spells them" {
-  let text = render(trace_kernel("combos", ["f64", "f64"], () => merged_combos(param(F64, 0), param(F64, 1))))
+  let text = render(trace_kernel("combos", [ByPtr("f64"), ByPtr("f64")], () => merged_combos(param(F64, 0), param(F64, 1))))
   assert str.contains(text, "%15, %16 = load_ptr_tko weak %14 token=%0 optimization_hints=<sm_86 = {latency = 2}> : tile<128xptr<f64>> -> tile<128xf64>, token")
   assert str.contains(text, "%17, %18 = load_ptr_tko weak %14, %11 token=%16 : tile<128xptr<f64>>, tile<128xi1> -> tile<128xf64>, token")
   assert str.contains(text, "%23 = store_ptr_tko weak %22, %19, %11 token=%18 optimization_hints=<sm_86 = {latency = 2}> : tile<128xptr<f64>>, tile<128xf64>, tile<128xi1> -> token")

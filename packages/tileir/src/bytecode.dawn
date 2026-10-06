@@ -73,8 +73,8 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
-use prog.{TileProg, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use prog.{TileProg, ByPtr, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
+use lower.{kparam_ty, Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -2152,8 +2152,8 @@ fn magic() -> bytes.Buf = bytes.put(bytes.put(bytes.put(bytes.put(bytes.put(byte
 pub fn encode_kernel(k: Kernel) -> Bytes = {
   var w = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: len(k.params) }
   var params: List[Int] = []
-  for dt in k.params {
-    let (w1, pi) = ty(w, Tile([], PtrTo(dt)))
+  for kp in k.params {
+    let (w1, pi) = ty(w, kparam_ty(kp))
     w = w1
     params = params ++ [pi]
   }
@@ -2292,7 +2292,7 @@ test "a tile type names its element type first, so the element's index is lower"
 fn vadd() -> TileProg = TileProg {
   hints: [],
   name: "vadd",
-  params: ["f64", "f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2330,7 +2330,7 @@ test "encoding the same program twice gives the same bytes" {
 fn sum_prog() -> TileProg = TileProg {
   hints: [],
   name: "sum",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2402,7 +2402,7 @@ test "a for is its opcode, result count and types, the flags, the operand count 
 fn spin_prog() -> TileProg = TileProg {
   hints: [],
   name: "spin",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2512,7 +2512,7 @@ test "a hint dictionary is a count, then per architecture a string index, the Di
 fn total_prog() -> TileProg = TileProg {
   hints: [],
   name: "total",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2556,7 +2556,7 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 fn branch_prog() -> TileProg = TileProg {
   hints: [],
   name: "branch",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2792,7 +2792,7 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 fn shapes_prog() -> TileProg = TileProg {
   hints: [],
   name: "shapes",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2813,7 +2813,7 @@ fn shapes_prog() -> TileProg = TileProg {
 fn ptrs_prog() -> TileProg = TileProg {
   hints: [],
   name: "ptrs",
-  params: ["f64", "i32"],
+  params: [ByPtr("f64"), ByPtr("i32")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -2835,7 +2835,7 @@ fn ptrs_prog() -> TileProg = TileProg {
 fn fork_prog() -> TileProg = TileProg {
   hints: [],
   name: "fork",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -3028,7 +3028,7 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
 fn globals_prog() -> TileProg = TileProg {
   hints: [],
   name: "g",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [
     Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0, is_private: false, constant: false },
     Global { sym: "pad", dtype: "f64", values: [4.0], align: 256, is_private: false, constant: false }
@@ -3039,7 +3039,7 @@ fn globals_prog() -> TileProg = TileProg {
 fn private_globals_prog() -> TileProg = TileProg {
   hints: [],
   name: "g",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [
     Global { sym: "tbl", dtype: "f64", values: [1.0, 2.0], align: 0, is_private: true, constant: false },
     Global { sym: "pad", dtype: "f64", values: [4.0], align: 256, is_private: false, constant: true }
@@ -3345,7 +3345,7 @@ test "the two varints the record grew at 13.3 carry the visibility and the const
 fn alloca_prog() -> TileProg = TileProg {
   hints: [],
   name: "a",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [],
   ops: [MakeToken(0), Alloca(1, "f64", 192, 8, false, [8]), Alloca(2, "f64", 192, 8, true, [8])]
 }
@@ -3377,7 +3377,7 @@ test "alloca writes its opcode, its result type, a flags word and its two counts
 fn mmaf_scaled_prog() -> TileProg = TileProg {
   hints: [],
   name: "s",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [],
   # the fp8 operands come from `ftof` and not from `constant`: this writer
   # has no float payload for a one-byte format (float_payload), which is
