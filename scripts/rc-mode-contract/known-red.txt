@@ -2,20 +2,24 @@
 # ratchet rules: an unlisted failure is fatal, and so is a listed check that
 # starts passing -- fix means delete the line and upgrade the expectation.
 #
-# One finding stays open. `xs[i]` lowers to the Core intrinsic `list_index`
-# (`ir/lower.dawn`); only the C emitter maps it onto `std/pvec.index`. So
-# the function's executed call sites never consult the mode table, and the
-# coherent flip leaks (measured: LSan direct leak -- the intrinsic-lowered
-# callers keep the all-owned convention while the callee stops dropping).
-# This is exactly why the inference pass must pin every intrinsic-backed
-# `std/pvec` function owned; the entry doubles as the production mutant for
-# that pin -- delete the pin and this both-flip is the red it produces. It
-# comes out the day the intrinsic lowering reads the same table.
+# `std/pvec:index` held the intrinsic-jurisdiction finding here while the
+# whole pvec surface was pinned owned (its both-flip was an LSan leak: the
+# `list_index` call sites never read the table). The C emitter reads the
+# callee's row at every list-primitive call site now, so `index` is an
+# ordinary borrowed row and the flip is green; the entry came out the day the
+# intrinsic lowering read the same table, as it said it would.
 #
+# What stays pinned is `list_push`'s list operand, which the primitive
+# consumes by its own convention (`c/infer.list_owned_positions`). `push`'s
+# body consumes it too, so the coherent flip is refused at compile time, like
+# the three entries below; the probe is on the roster so that pin has a
+# corpus site, not because it is a leak finding.
+std/pvec:push:2:0=both
+
 # (The other five both-flips went green when `rc_check` learned the table
 # and the mode-contract assertion landed -- knife 2 step 0; the five
 # known-red lines that pinned the checker gap came out then.)
-std/pvec:index:2:0=both
+std/pvec:push:2:0=both
 
 # Three sites whose parameter the inference decided OWNED (the body
 # consumes it: str.len hands s to count, whose TCO loop reassigns its

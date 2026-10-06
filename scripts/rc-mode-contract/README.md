@@ -56,7 +56,7 @@ unmutated compiler.
 
 ## The matrix
 
-Six sites (roster.txt), three shapes each, plus per-program clean controls.
+Seven sites (roster.txt), three shapes each, plus per-program clean controls.
 Since the inference landed (knife 2), a flip means TOGGLE: the single-sided
 shapes toggle one half of what the inference decided, and `both` re-runs
 the whole fixpoint with the position forced the other way — a coherent
@@ -70,9 +70,10 @@ What the harness pins **today**:
 | std/cursor:done:2:0 | assertion ✓ | assertion ✓ | green ✓           |
 | std/cursor:next:2:0 | assertion ✓ | assertion ✓ | green ✓           |
 | std/str:len:1:0     | assertion ✓ | assertion ✓ | known-red: refusal|
-| std/pvec:index:2:0  | assertion ✓ | assertion ✓ | known-red: leak   |
+| std/pvec:index:2:0  | assertion ✓ | assertion ✓ | green ✓           |
 | std/list:reverse:1:0| assertion ✓ | assertion ✓ | known-red: refusal|
 | std/list:take:2:0   | assertion ✓ | assertion ✓ | known-red: refusal|
+| std/pvec:push:2:0   | assertion ✓ | assertion ✓ | known-red: refusal|
 
 "assertion" is the compile-time panic `rc: mode contract disagrees in ...`,
 which names the function, the position and both halves' answers. A mutant
@@ -82,8 +83,7 @@ exit. A mutant that sails through everything fails the run by name.
 
 The coherent flip (both) must be green end to end — same bytes, clean
 sanitizers — except where a machine refuses it for a reason worth pinning,
-and those reasons are the ratchet entries in known-red.txt: the leak is
-the intrinsic-jurisdiction finding below, and the three refusals are
+and those reasons are the ratchet entries in known-red.txt: the four refusals are
 `rc.rw`'s borrowed-consume panic holding the zero-new-dup contract against
 a forced borrow of a parameter whose body consumes it (the inference had
 said owned; the toggle demands the opposite; the refusal is the answer).
@@ -122,26 +122,22 @@ uncompilable — right or wrong — and five known-red lines pinned that gap.
 Teaching the checker the table flipped them green and the ratchet took them
 out.)
 
-## Finding: `list_index` is outside the table's jurisdiction (1 known-red)
+## History: `list_index` was outside the table's jurisdiction
 
-`xs[i]` lowers to the Core intrinsic `list_index`
-(`ir/lower.dawn`); only the C emitter maps it onto `std/pvec.index`. So the
-function's *executed* call sites never consult the mode table — flipping
-`std/pvec:index` at the callsite changes exactly one call in the whole
-program (`nth`, which nothing runs), and the coherent flip still leaks: the
-intrinsic-lowered callers keep the all-owned convention while the callee
-stops dropping. `both` is an LSan direct leak, and without the contract
-assertion the callsite mutant *survives* the sanitizers (measured; the
-assertion is what catches it today, with no call site needed at all).
+`xs[i]` lowers to the Core intrinsic `list_index` (`ir/lower.dawn`); only the
+C emitter maps it onto `std/pvec.index`. While that call spelled itself with
+the all-owned convention, flipping `std/pvec:index` at the callsite changed
+one call in the whole program (`nth`, which nothing runs), and the coherent
+flip leaked (LSan direct leak). The inference therefore pinned every
+intrinsic-backed `std/pvec` function owned, and this directory carried the
+production mutant for the pin as a known-red entry.
 
-The obligation this pins on the inference pass: **a function reachable
-through an intrinsic lowering (`list_index` / `list_slice` / `list_push`
-family, and every other `std/pvec` function the emitter names directly)
-must not have its callee side stamped borrowed** unless the intrinsic
-lowering reads the same table. This entry is the production mutant for that
-pin: delete the pin and the stamp it would produce is this both-flip, an
-LSan red. The entry comes out the day the intrinsic lowering reads the same
-table.
+The emitter now reads the callee's table row at every list-primitive call
+site (`emitc.list_call_args`), the day this section said the entry would come
+out, so `len`, `xs[i]` and `get` run on borrowed rows and cost no dup/drop
+pair. Pinned still: the boundary spellings (`from_array`, `to_array`,
+`concat`) and the positions an intrinsic consumes (`list_push`'s list), see
+`c/infer.list_owned_positions`.
 
 ## The harness's own reds
 

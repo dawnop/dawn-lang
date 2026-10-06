@@ -74,12 +74,11 @@ fn eligible(p: CParam) -> Bool = is_ref_ty(p.ty) && not fn_typed(p.ty)
 ## The functions whose call sites are outside the table's jurisdiction, so
 ## their parameters must stay owned whatever their bodies do:
 ##
-##   * the `std/pvec` functions the C emitter names directly -- the list
-##     primitives (`xs[i]` is the Core intrinsic `list_index`, mapped to
-##     `std/pvec.index` only by `reach.list_primitive_table`) plus the
-##     literal/concat lowering targets, all of `reach.list_roots()`. Their
-##     executed call sites never consult the table;
-##     scripts/rc-mode-contract's known-red entry is the measured leak.
+##   * the three `std/pvec` boundary spellings the C emitter writes itself
+##     (`reach.list_boundary_roots`: literal/host `from_array`, `to_array`,
+##     `concat`). The list primitives' targets are not pinned as whole
+##     functions: the emitter reads their table rows (`list_owned_positions`
+##     keeps only the operands an intrinsic consumes).
 ##   * every function a dictionary slot names: a `CMethod` call reads the
 ##     slot as a bare function pointer and hands arguments over owned.
 ##   * every function a `CClosure` names: a function value is called
@@ -89,7 +88,7 @@ fn eligible(p: CParam) -> Bool = is_ref_ty(p.ty) && not fn_typed(p.ty)
 ##     direct call inside.)
 fn pinned(ms: List[CModule]) -> Set[(String, String)] = {
   var out: Set[(String, String)] = set.empty()
-  for pr in reach.list_roots() { out = set.insert(out, pr) }
+  for pr in reach.list_boundary_roots() { out = set.insert(out, pr) }
   for m in ms {
     for d in m.dicts {
       for s in d.slots {
@@ -531,23 +530,49 @@ fn plain(f: CFun) -> Bool =
       }
   }
 
+## The positions of the list primitives' `std/pvec` targets that stay owned.
+##
+## The C emitter spells a list primitive (`len`, `xs[i]`, `get`, ...) as a
+## direct call of its `std/pvec` function, and the rc pass treats the
+## primitive as an intrinsic: borrowed except at `intr_owned_args`. The call
+## used to hold the whole function all-owned (the emitter dups every borrowed
+## operand to feed it), which cost a dup and a drop on every `len`, `xs[i]`
+## and `get`, 5 to 6 of the 11 per element of a `for x in xs`. The emitter
+## now reads the target's table row like any `CDirect` call site, so the only
+## positions that must stay owned are the ones the primitive itself consumes
+## (`list_push`'s list). Fn-typed operands (`sort_by`'s comparator) are owned
+## through `eligible`, and the emitter dups them by the same row.
+fn list_owned_positions() -> Set[(String, String, Int)] = {
+  var out: Set[(String, String, Int)] = set.empty()
+  for pr in reach.list_primitive_table() {
+    let (prim, target) = pr
+    for i in intr_owned_args(prim) {
+      out = set.insert(out, (reach.LIST_MOD, target, i))
+    }
+  }
+  out
+}
+
 ## The optimistic start: every eligible parameter of every candidate
 ## borrowed. Rows are only created where at least one position could be
 ## borrowed; everything else is the absent row, all owned.
 fn seed(ms: List[CModule], pin: Set[(String, String)]) -> Map[(String, String), List[CMode]] = {
   var table: Map[(String, String), List[CMode]] = map.empty()
+  let held = list_owned_positions()
   for m in ms {
     for f in m.fns {
       if plain(f) && not set.has(pin, (f.owner, f.name)) {
         var row: List[CMode] = []
         var any = false
+        var pi = 0
         for p in f.params {
-          if eligible(p) {
+          if eligible(p) && not set.has(held, (f.owner, f.name, pi)) {
             row = row ++ [CBorrowed]
             any = true
           } else {
             row = row ++ [COwned]
           }
+          pi = pi + 1
         }
         if any { table = map.insert(table, (f.owner, f.name), row) }
       }
@@ -807,7 +832,7 @@ test "the rebuild shape demands its container; a plain getter does not" {
   assert len(t_row(infer_modes([t_mod("m", [split])]), "m", "split")) == 0
 }
 
-test "jurisdiction pins: closures, dictionary slots, pvec, fn-typed" {
+test "jurisdiction pins: closures, dictionary slots, pvec boundary, fn-typed" {
   let lst = TyList(TyInt)
   let read_body = CIntrinsic("len", [CLocal(1, lst)], TyInt, CNoSite)
   # named by a CClosure somewhere: called through CDynamic, all owned
@@ -825,10 +850,20 @@ test "jurisdiction pins: closures, dictionary slots, pvec, fn-typed" {
     next_sym: 100
   }
   assert len(t_row(infer_modes([dm]), "m", "sl")) == 0
-  # the emitter-named pvec surface: reached from intrinsics, not CDirect
+  # the pvec boundary spellings are written by the emitter itself (`concat`
+  # dups both sides): pinned whole
+  let cc = t_fn("std/pvec", "concat", [CParam { sym: 1, ty: lst, mode: COwned },
+    CParam { sym: 2, ty: lst, mode: COwned }], TyInt, read_body)
+  assert len(t_row(infer_modes([t_mod("std/pvec", [cc])]), "std/pvec", "concat")) == 0
+  # `list_push` consumes its list: that position stays owned though the body
+  # only reads it; `index` has no owned position, so its row is a real one
+  let pu = t_fn("std/pvec", "push", [CParam { sym: 1, ty: lst, mode: COwned },
+    CParam { sym: 2, ty: TyInt, mode: COwned }], TyInt, read_body)
+  assert len(t_row(infer_modes([t_mod("std/pvec", [pu])]), "std/pvec", "push")) == 0
   let px = t_fn("std/pvec", "index", [CParam { sym: 1, ty: lst, mode: COwned },
     CParam { sym: 2, ty: TyInt, mode: COwned }], TyInt, read_body)
-  assert len(t_row(infer_modes([t_mod("std/pvec", [px])]), "std/pvec", "index")) == 0
+  let ix = t_row(infer_modes([t_mod("std/pvec", [px])]), "std/pvec", "index")
+  assert len(ix) == 2 && not mode_owned(ix[0])
   # a fn-typed parameter: higher-order is owned by consensus
   let fty = TyFn([], TyInt, EPure)
   let ho = t_fn("m", "ho", [CParam { sym: 1, ty: fty, mode: COwned }], TyInt,
