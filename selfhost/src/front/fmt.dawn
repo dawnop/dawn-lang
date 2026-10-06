@@ -490,7 +490,11 @@ fn contextual_keywords(raw: List[Token]) -> Set[Int] = {
 ## A still-open bracket: the indent (in levels) its closer aligns to, and whether
 ## it is a brace. The brace flag is what tells a *body* from a mid-expression
 ## bracket when `reflow` picks an anchor.
-type Opener = { at: Int, brace: Bool }
+##
+## `lat`/`ld` are the statement anchor (`logical_indent`, `logical_depth` in
+## `reflow`) as it stood when the bracket opened; closing the bracket gives it
+## back, because whatever the inside moved it to belongs to the inside (#545).
+type Opener = { at: Int, brace: Bool, lat: Int, ld: Int }
 
 ## An `if` reflow has seen: the bracket depth it stands at and the indent of
 ## its line.
@@ -644,10 +648,17 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       openers = openers ++ [Opener {
         at: if header { header_indent } else if body { logical_indent } else { line_indent },
         brace: t.kind == LBRACE,
+        lat: logical_indent,
+        ld: logical_depth,
       }]
       if header { header_indent = -1 }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
-      if len(openers) > 0 { openers = list.take(openers, len(openers) - 1) }
+      if len(openers) > 0 {
+        let inner = openers[len(openers) - 1]
+        logical_indent = inner.lat
+        logical_depth = inner.ld
+        openers = list.take(openers, len(openers) - 1)
+      }
       if len(openers) < header_depth { header_indent = -1 }
     }
     prev = t
@@ -1499,4 +1510,16 @@ test "the operand of a spread on the next line is a continuation" {
   # a rest pattern's closer still lines up with its opener
   let r = "fn k(xs: List[Int]) -> Int =\n  match xs {\n    [x, ..\n    ] -> x\n    _ -> 0\n  }\n"
   assert fmt_of(r) == r
+}
+
+## #545: the statement anchor is given back when a bracket closes. Arm lines
+## inside a `match` that sits in an `if` header moved it to the arm's depth;
+## after the header closed, a `{ {` whose depth happened to be the same took
+## that stale anchor for its own statement's and printed the block one level
+## too deep.
+test "a bracket's close gives back the statement anchor it found" {
+  let a = "fn f() -> Int = {\n  let v = (if (((1, 2) != match (3) {\n    x -> 1\n  })) { (if (false) { {\n    let a = 1\n    a\n  } } else { 3 }) } else { 4 })\n  v\n}\n"
+  assert fmt_of(a) == a
+  let b = "fn f() -> Int = {\nlet v = (if (((1, 2) != match (3) {\nx -> 1\n})) { (if (false) { {\nlet a = 1\na\n} } else { 3 }) } else { 4 })\nv\n}\n"
+  assert fmt_of(b) == a
 }
