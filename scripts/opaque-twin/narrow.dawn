@@ -14,12 +14,14 @@
 # compile error on both sides. `<` is the order Float does have, and it is
 # checked.
 #
-# What is deliberately not compared: the arithmetic. `narrow.add(a, b)` is not
-# `to_f64(a) + to_f64(b)` -- it rounds -- and spec 2.7 says the conversion is
-# at assignment, argument and return position and never inside an
-# expression, so `a + b` on a BF16 is a compile error in both spellings. The
-# exact values the arithmetic must produce are the narrow contract's
-# (scripts/narrow-contract), not the twin's.
+# What is deliberately not compared: the arithmetic. `a + b` on a BF16 is
+# std/narrow's own `impl Add[BF16]`, which rounds, and not the Float's `+`:
+# an opaque type inherits no arithmetic from its target, for exactly this
+# reason (docs/arith-operator-traits-design.md D4). So the property is not
+# "BF16's `+` is Float's", and the case checks only what the twin can say,
+# that the operator and the named member agree. The exact values the
+# arithmetic must produce are the narrow contract's (scripts/narrow-contract),
+# not the twin's.
 use std/narrow
 
 opaque type Twin = Float
@@ -58,6 +60,11 @@ pub fn main() -> Unit !io = {
   same("lt", to_string(x < y), to_string(fx < fy))
   same("gt", to_string(y < x), to_string(fy < fx))
   println(to_string(x < y))
+
+  println("-- the operators are std/narrow's own, and agree with the named members --")
+  same("add", to_string(x + y), to_string(narrow.add(x, y)))
+  same("neg", to_string(-x), to_string(narrow.neg(x)))
+  println(to_string(x + y))
 
   println("-- the other two formats, the same way --")
   let h = narrow.fp16(0.1)
