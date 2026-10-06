@@ -686,6 +686,10 @@ callee 半翻 = LSan direct leak）。
   里面的直呼调用照常读表）、impl/default/带捕获的函数（`CFun.name` 与普通
   函数可撞名，表键不上）、fn 类型的参数（高阶恒 owned，Lean/Koka/Swift 共识）。
   **删一条 pin 是泄漏**，spike 语料的 asan 档与探针都能点名（见下表）。
+
+  （2026-10-07 修订：上面「`std/pvec` 面」与「impl」两条已收窄。五个列表原语的目标函数不再整函数钉死，
+  emitc 在调用点读它们的表行，只剩 intrinsic 自己消耗的位置与三个边界拼写；impl 方法有了自己的表键，
+  `CImpl` 调用点读表。见 [native-iter-rc-design.md](native-iter-rc-design.md)。）
 - **需求规则**：参数到达消费位就翻 owned——被返回（体尾/`CReturn`）、存进
   构造器/元组/列表、被闭包捕获、`let` 别名、被重赋值（TCO 循环变量：自尾递归
   在 Core 已是对参数的赋值，赋值展开要 drop 旧值，而 drop 是调用方从没授权过的
