@@ -5648,7 +5648,15 @@ fn check_binary_expr(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: 
     return check_binary_lit_left(cx, op, left, right, olo, ohi, lo, hi)
   }
   let before = len(cx.diags)
-  let (left_cx, lt, lx) = check_expr(cx, left, no_expected())
+  # The node's own expectation reaches the left operand when it is a library
+  # type that takes the operator through a trait (`mma(a, b, 0.0) * lit(s)`
+  # where a Tile[A] is expected); Int and Float expectations stop here
+  # (docs/arith-operator-traits-design.md D7, ruling 2026-10-06).
+  let lexp: Option[Ty] = match expected {
+    Some(et) -> if is_arith_op(op) && arith_routed(cx, et) { Some(et) } else { None }
+    None -> None
+  }
+  let (left_cx, lt, lx) = check_expr(cx, left, lexp)
   let arith = is_arith_op(op)
   if arith && arith_routed(left_cx, lt) {
     return check_arith_trait(left_cx, arith_tid(op), lt, lx, Some(right), olo, ohi, lo, hi)
