@@ -4801,7 +4801,13 @@ pub(pkg) fn resolve_witness(
               "the representation it hides; write `impl Show` for `" ++ ts ++
               "` in the module declaring it, or convert to the target there first"), no_wit())
         }
-        return resolve_witness(cx, trait_id, tgt, lo, hi, requirer)
+        # Nor the literal traits, for the reason `lit_target` gives: a literal
+        # becomes an opaque type only through its own `FromInt`/`FromFloat`.
+        # Falling back would also report the miss at the target (`FromFloat`
+        # for `Int` when the subject was `U8`), naming a type nobody wrote.
+        if trait_id != FROM_INT_ID && trait_id != FROM_FLOAT_ID {
+          return resolve_witness(cx, trait_id, tgt, lo, hi, requirer)
+        }
       }
     }
     _ -> ()
@@ -4887,7 +4893,14 @@ pub(pkg) fn resolve_witness(
           let ts = ty_show(cx.adts, t)
           let scalar_order = trait_id == ORD_ID && not is_adt(t)
           let nongeneric = not scalar_order && is_nongeneric_adt(cx, t)
-          let hint = if scalar_order {
+          let literal_opaque = (trait_id == FROM_INT_ID || trait_id == FROM_FLOAT_ID) && match t {
+            TyOpaque(_, _, _, _, _) -> true
+            _ -> false
+          }
+          let hint = if literal_opaque {
+            "there are no implicit conversions; a literal becomes `" ++ ts ++ "` only through `" ++
+              impl_shape(cx, trait_name, t) ++ "`, written in the module declaring it"
+          } else if scalar_order {
             "the orderable scalars are " ++ ord_scalar_names() ++
               "; Float has no total order (NaN), and everything else needs an `impl Ord`"
           } else if nongeneric {
