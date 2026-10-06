@@ -424,10 +424,67 @@ dawn_unit dawn_unbox_unit(void *b);
  * persistent vector or a HAMT is deep, and dropping a hundred-thousand-node
  * structure would otherwise overflow. That is not a tuning choice; the
  * symptom without it is a segfault that only appears on large inputs. */
+
+/* The two hot paths of the counting can live here, inline, and the cold rest
+ * in dawn_rt.c. They are off by default and `-DDAWN_RT_INLINE_RC` turns them
+ * on, for one measured reason (docs/native-inline-design.md):
+ *
+ *   on:  a program whose drops mostly just decrement runs 7-37% faster
+ *        without -flto (the native compiler on its own bootstrap load -21%),
+ *        because a dup and a decrement-only drop stop being calls; a program
+ *        whose objects die at rc == 1 gets no benefit and measured up to 17%
+ *        slower, the inline test being paid and then failed;
+ *   off: the cc time of a program does not move. On the whole native compiler
+ *        (4,460 functions) the inline copies are +30% code and +83% cc CPU.
+ *
+ * So the build that compiles one small program decides, not this header. The
+ * flag has to reach every translation unit of the program, dawn_rt.c
+ * included: with it, dawn_rt.c defines `dawn_drop_slow` and no `dawn_dup`;
+ * without it, `dawn_drop` and `dawn_dup`. A mixed build fails to link, which
+ * is the loud way to be wrong.
+ *
+ * The semantics are the ones the out-of-line bodies always had:
+ *
+ *   dup:  NULL passes through, an immortal header is left unwritten, else
+ *         rc++.
+ *   drop: NULL and --rc=leak are no-ops; rc > 1 decrements (an immortal
+ *         header reads as a large rc and is left unwritten) and returns;
+ *         rc <= 1 is the walk, which also owns the misuse diagnostic and the
+ *         release.
+ *
+ * `dawn_rc_leak` is read on every inline drop, as the out-of-line one does. */
 extern bool dawn_rc_leak; /* --rc=leak: drop becomes a no-op (plan 6 R3) */
 
+#ifdef DAWN_RT_INLINE_RC
+static inline void *dawn_dup(void *p) {
+  if (p != NULL) {
+    dawn_hdr *h = (dawn_hdr *)p;
+    if (h->rc != DAWN_IMMORTAL) {
+      h->rc++;
+    }
+  }
+  return p;
+}
+
+void dawn_drop_slow(void *p);
+
+static inline void dawn_drop(void *p) {
+  if (p == NULL || dawn_rc_leak) {
+    return;
+  }
+  dawn_hdr *h = (dawn_hdr *)p;
+  if (h->rc > 1) {
+    if (h->rc != DAWN_IMMORTAL) {
+      h->rc--;
+    }
+    return;
+  }
+  dawn_drop_slow(p);
+}
+#else
 void *dawn_dup(void *p);
 void dawn_drop(void *p);
+#endif
 bool dawn_is_unique(const void *p);
 
 /* ---- the small-object allocator -----------------------------------------
@@ -989,8 +1046,26 @@ int64_t dawn_cmp_bytes(const dawn_bytes *a, const dawn_bytes *b);
 /* arithmetic whose C behaviour would be undefined where the JVM's is not.
  * The shifts are the third member of this family and are emitted inline --
  * masking the count to six bits is an expression, so it needs no call. */
-int64_t dawn_idiv(int64_t a, int64_t b);
-int64_t dawn_imod(int64_t a, int64_t b);
+void dawn_idiv_zero(void) __attribute__((noreturn));
+void dawn_imod_zero(void) __attribute__((noreturn));
+
+static inline int64_t dawn_idiv(int64_t a, int64_t b) {
+  if (__builtin_expect(b == 0, 0)) {
+    dawn_idiv_zero();
+  }
+  /* INT64_MIN / -1 overflows and is UB in C; the JVM defines it as
+   * wrapping back to INT64_MIN. */
+  if (a == INT64_MIN && b == -1) return INT64_MIN;
+  return a / b;
+}
+
+static inline int64_t dawn_imod(int64_t a, int64_t b) {
+  if (__builtin_expect(b == 0, 0)) {
+    dawn_imod_zero();
+  }
+  if (a == INT64_MIN && b == -1) return 0;
+  return a % b;
+}
 int64_t dawn_int_of_float(double v); /* Float -> Int, saturating like D2L */
 
 /* One lookup in an evidence pack: the `ev_get` intrinsic, whose contract is

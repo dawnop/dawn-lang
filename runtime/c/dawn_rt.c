@@ -1124,6 +1124,7 @@ dawn_unit dawn_unbox_unit(void *b) {
 
 bool dawn_rc_leak = false;
 
+#ifndef DAWN_RT_INLINE_RC
 void *dawn_dup(void *p) {
   if (p == NULL) {
     return p;
@@ -1134,6 +1135,7 @@ void *dawn_dup(void *p) {
   }
   return p;
 }
+#endif
 
 bool dawn_is_unique(const void *p) {
   return p != NULL && ((const dawn_hdr *)p)->rc == 1;
@@ -1256,7 +1258,15 @@ void dawn_immortal(void *p) {
 static void dawn_ctl_dispose(void *p);
 #endif
 
+/* With -DDAWN_RT_INLINE_RC this is the cold half of `dawn_drop` (dawn_rt.h
+ * holds the inline fast path); without it, the whole of it. Either way it
+ * keeps the original body, fast-path test included, so a caller that reaches
+ * it directly behaves the same. */
+#ifdef DAWN_RT_INLINE_RC
+void dawn_drop_slow(void *p) {
+#else
 void dawn_drop(void *p) {
+#endif
   if (dawn_rc_leak || p == NULL) {
     return;
   }
@@ -1617,22 +1627,14 @@ int64_t dawn_cmp_bytes(const dawn_bytes *a, const dawn_bytes *b) {
   return a->len < b->len ? -1 : (a->len > b->len ? 1 : 0);
 }
 
-int64_t dawn_idiv(int64_t a, int64_t b) {
-  if (b == 0) {
-    dawn_panic(DAWN_LIT("Int division by zero"));
-  }
-  /* INT64_MIN / -1 overflows and is UB in C; the JVM defines it as
-   * wrapping back to INT64_MIN. */
-  if (a == INT64_MIN && b == -1) return INT64_MIN;
-  return a / b;
+void dawn_idiv_zero(void) {
+  dawn_panic(DAWN_LIT("Int division by zero"));
+  __builtin_unreachable(); /* a panic unwinds; it never returns here */
 }
 
-int64_t dawn_imod(int64_t a, int64_t b) {
-  if (b == 0) {
-    dawn_panic(DAWN_LIT("Int modulo by zero"));
-  }
-  if (a == INT64_MIN && b == -1) return 0;
-  return a % b;
+void dawn_imod_zero(void) {
+  dawn_panic(DAWN_LIT("Int modulo by zero"));
+  __builtin_unreachable(); /* a panic unwinds; it never returns here */
 }
 
 int64_t dawn_int_of_float(double v) {
