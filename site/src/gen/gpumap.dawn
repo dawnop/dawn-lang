@@ -268,11 +268,37 @@ pub fn check(rec: Recorded, first: Int, src: List[String], ir: List[String]) -> 
   }
 }
 
+# Whether the source text at a call's name span is how that call is spelled:
+# the callee's own name, or the operator `a + b` is (`add`, `addi`,
+# `idx_add`...), or, for the three calls a `var` makes (`carry` where a loop
+# opens it, `get` where it is read or the loop hands it back, `set` where it is
+# assigned), the variable's name or the loop's `for`.
+fn spelled(name: String, text: String) -> Bool =
+  if text == name {
+    true
+  } else if name == "carry" || name == "get" || name == "set" {
+    text != ""
+  } else if str.starts_with(name, "add") || str.starts_with(name, "idx_add") {
+    text == "+"
+  } else if str.starts_with(name, "sub") || str.starts_with(name, "idx_sub") {
+    text == "-"
+  } else if str.starts_with(name, "mul") || str.starts_with(name, "idx_mul") {
+    text == "*"
+  } else if str.starts_with(name, "div") || str.starts_with(name, "idx_div") {
+    text == "/"
+  } else if str.starts_with(name, "idx_rem") {
+    text == "%"
+  } else if str.starts_with(name, "neg") {
+    text == "-"
+  } else {
+    false
+  }
+
 ## Why call `c` (of `calls`) does not fit the text, or "". Shared with the
 ## explorer page (gen/explorer.dawn), whose calls are checked the same way.
 pub fn call_fault(calls: List[MCall], first: Int, last: Int, src: List[String], c: MCall) -> String = {
   let inside_fn = c.from.line >= first && c.to.line <= last
-  let named = text_at(src, first, c.name_from, c.name_to) == c.name
+  let named = spelled(c.name, text_at(src, first, c.name_from, c.name_to))
   let name_inside = before_or_at(c.from, c.name_from) && before_or_at(c.name_to, c.to)
   let parent_ok = c.parent >= 0 - 1 && c.parent < c.id
   let in_parent =

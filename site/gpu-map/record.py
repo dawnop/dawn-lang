@@ -208,23 +208,121 @@ def parse_tree(dump: str, name: str) -> Node:
     return root
 
 
-def static_calls(n: Node, dev: set) -> list:
+class Env:
+    """What the walk knows about names. `decls` are the `var`s declared so far
+    (name, Let node) in order, `cells` the ones the staged `for` being walked
+    carries (each mention is a recorded `get`, each assignment a `set`),
+    `tiles` the names bound to something tile-valued (so that an operator over
+    them is a recorded call and an operator over host numbers is not)."""
+
+    def __init__(self):
+        self.decls, self.cells, self.tiles = [], set(), set()
+
+
+OPERATORS = {"ADD": {"add", "addi", "idx_add"}, "SUB": {"sub", "subi", "idx_sub"},
+             "MUL": {"mul", "muli", "idx_mul"}, "DIV": {"div", "divi", "idx_div"},
+             "REM": {"idx_rem"}}
+SRC = ""
+
+
+def node_name(n: Node) -> str:
+    return n.text.split(" ")[1]
+
+
+def tile_valued(n: Node, dev: set, env: Env) -> bool:
+    """Whether an expression's value is a tile (or an index): it calls a
+    recorded function, mentions a cell, or mentions a name bound to one. The
+    pairing below proves the guess: a host operation taken for a tile
+    operation, or the reverse, makes the two lists of calls differ."""
+    if n.kind == "Apply" and n.kids and n.kids[0].kind == "Var" and node_name(n.kids[0]) in dev:
+        return True
+    if n.kind == "MethodCall" and node_name(n) in dev:
+        return True
+    if n.kind == "Var" and (node_name(n) in env.tiles or node_name(n) in env.cells):
+        return True
+    return any(tile_valued(k, dev, env) for k in n.kids)
+
+
+def assigned_in(n: Node) -> list:
+    out = []
+    if n.kind == "Assign":
+        out.append(node_name(n))
+    for k in n.kids:
+        out += assigned_in(k)
+    return out
+
+
+def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
     """The calls of `dev` under `n` in evaluation order, each a dict with its
-    span, its name's span and its children (the calls in a closure it takes)."""
+    span, its name's span and its children (the calls in a closure it takes).
+    A call's `names` are the recorded names it may have and `text` what its
+    name span holds in the source (an operator, a `var`'s name, a callee)."""
+    env = env or Env()
     kind = n.kind
     if kind == "Lambda":
         fail(f"a closure at {n.lo}..{n.hi} is not an argument of a call that runs it")
+    if kind == "Let":
+        name = node_name(n)
+        inner = [k for k in n.kids if k.kind not in ("TNamed", "TApp", "TFn", "PBind")]
+        calls = []
+        for k in inner:
+            calls += static_calls(k, dev, env)
+        if inner and tile_valued(inner[-1], dev, env):
+            env.tiles.add(name)
+        if "mut=true" in n.text:
+            env.decls.append((name, n))
+            env.tiles.add(name)
+        return calls
+    if kind == "Assign":
+        name = node_name(n)
+        calls = []
+        for k in n.kids:
+            calls += static_calls(k, dev, env)
+        if name in env.cells:
+            m = re.search(r"name@(\d+)\.\.(\d+)", n.text)
+            calls.append({"names": {"set"}, "span": (n.lo, n.hi), "name_span": (int(m.group(1)), int(m.group(2))),
+                          "text": name, "kids": []})
+        return calls
+    if kind == "Var" and node_name(n) in env.cells:
+        return [{"names": {"get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.hi), "text": node_name(n), "kids": []}]
+    if kind == "Binary":
+        op = n.text.split(" ")[1]
+        m = re.search(r"op@(\d+)\.\.(\d+)", n.text)
+        calls = static_calls(n.kids[0], dev, env) + static_calls(n.kids[1], dev, env)
+        if op in OPERATORS and tile_valued(n, dev, env):
+            calls.append({"names": OPERATORS[op], "span": (n.lo, n.hi), "name_span": (int(m.group(1)), int(m.group(2))),
+                          "text": SRC[int(m.group(1)):int(m.group(2))], "kids": []})
+        return calls
+    if kind == "Unary" and n.text.split(" ")[1] == "NEG" and tile_valued(n, dev, env):
+        calls = static_calls(n.kids[0], dev, env)
+        calls.append({"names": {"neg", "negi"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.lo + 1), "text": "-", "kids": []})
+        return calls
     if kind == "For" and len(n.kids) == 3 and n.kids[1].kind == "Apply" and n.kids[1].kids \
-            and n.kids[1].kids[0].kind == "Var" and n.kids[1].kids[0].text.split(" ")[1] in dev:
+            and n.kids[1].kids[0].kind == "Var" and node_name(n.kids[1].kids[0]) in dev:
         # A staged `for` over a region call (`for j in d_range(..) { .. }`): the
         # region is the call, its span is the whole statement, and the body's
         # calls are its children, as the closure's were before `for` was staged.
+        # Before it, one `carry` for each `var` the body assigns, in declaration
+        # order; after it, one `get` for each, which hands the host variable
+        # what the loop left in the cell.
         head = n.kids[1].kids[0]
         before = []
         for a in n.kids[1].kids[1:]:
-            before += static_calls(a, dev)
-        return before + [{"name": head.text.split(" ")[1], "span": (n.lo, n.hi), "name_span": (head.lo, head.hi),
-                          "kids": static_calls(n.kids[2], dev)}]
+            before += static_calls(a, dev, env)
+        written = set(assigned_in(n.kids[2]))
+        carried = [(name, let) for name, let in env.decls if name in written]
+        opened = []
+        for name, let in carried:
+            at = let.lo + SRC[let.lo:let.hi].index(name, 3)
+            opened.append({"names": {"carry"}, "span": (let.lo, let.hi), "name_span": (at, at + len(name)),
+                           "text": name, "kids": []})
+        inside = Env()
+        inside.decls, inside.tiles, inside.cells = env.decls, set(env.tiles), set(name for name, _ in carried)
+        kids = static_calls(n.kids[2], dev, inside)
+        closed = [{"names": {"get"}, "span": (n.lo, n.hi), "name_span": (n.lo, n.lo + 3), "text": "for", "kids": []}
+                  for _ in carried]
+        return before + opened + [{"names": {node_name(head)}, "span": (n.lo, n.hi), "name_span": (head.lo, head.hi),
+                                   "text": node_name(head), "kids": kids}] + closed
     if kind in ("If", "Match", "For", "While") and any_call(n, dev):
         fail(f"a call under host control flow at {n.lo}..{n.hi}")
     if kind in ("Apply", "MethodCall"):
@@ -245,19 +343,20 @@ def static_calls(n: Node, dev: set) -> list:
                     fail(f"a closure at {inner.lo}..{inner.hi} is handed to `{callee}`, which is not a call the recording sees")
                 for k in inner.kids:
                     if k.kind != "LParam":
-                        closures += static_calls(k, dev)
+                        closures += static_calls(k, dev, env)
             else:
-                before += static_calls(a, dev)
+                before += static_calls(a, dev, env)
         if head is not None and head.kind != "Var":
-            before = static_calls(head, dev) + before
+            before = static_calls(head, dev, env) + before
         if callee in dev:
-            return before + [{"name": callee, "span": (n.lo, n.hi), "name_span": name_span, "kids": closures}]
+            return before + [{"names": {callee}, "span": (n.lo, n.hi), "name_span": name_span, "text": callee,
+                              "kids": closures}]
         if closures:
             fail(f"`{callee}` takes a closure the recording does not see into")
         return before
     out = []
     for k in n.kids:
-        out += static_calls(k, dev)
+        out += static_calls(k, dev, env)
     return out
 
 
@@ -280,9 +379,9 @@ def pair(static: list, rows: list) -> list:
 
     def walk(sl, parent):
         ran = kids.get(parent, [])
-        if [s["name"] for s in sl] != [r["name"] for r in ran]:
+        if len(sl) != len(ran) or any(r["name"] not in s["names"] for s, r in zip(sl, ran)):
             under = "the top of the body" if parent < 0 else f"row {parent} (`{rows[parent]['name']}`)"
-            fail(f"under {under} the source calls {[s['name'] for s in sl]} "
+            fail(f"under {under} the source calls {[sorted(s['names']) for s in sl]} "
                  f"and the recording ran {[r['name'] for r in ran]}")
         for s, r in zip(sl, ran):
             paired[r["id"]] = s
@@ -321,6 +420,8 @@ def record() -> str:
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
         fail(f"{NAME} is not a function with a block body")
+    global SRC
+    SRC = src
     static = static_calls(body[0], dev)
     rows, head, tail, ops = [], None, None, None
     for line in ran.splitlines():
@@ -338,8 +439,8 @@ def record() -> str:
     paired = pair(static, rows)
     at = place(src)
     for s in paired:
-        if src[s["name_span"][0]:s["name_span"][1]] != s["name"]:
-            fail(f"the parser's name span for `{s['name']}` holds {src[s['name_span'][0]:s['name_span'][1]]!r}")
+        if src[s["name_span"][0]:s["name_span"][1]] != s["text"]:
+            fail(f"the parser's name span for `{sorted(s['names'])}` holds {src[s['name_span'][0]:s['name_span'][1]]!r}, not {s['text']!r}")
     golden = (GOLDEN / f"{NAME}.mlir").read_text(encoding="utf-8")
     if int(tail.split("-")[1]) - 1 != golden.count("\n"):
         fail(f"the map ends at line {int(tail.split('-')[1]) - 1}, {NAME}.mlir has {golden.count(chr(10))} lines")

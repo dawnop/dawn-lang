@@ -1579,7 +1579,9 @@ test "flash_attn lines up with its golden, call by call" {
 # of the operation. A reduction with `keepdims` ends in the reshape that
 # keeps the dimension. `carry`, `get` and `set` record nothing (tileir
 # 0.9.0): what a carry is, is the loop's block arguments and its `continue`,
-# which are `d_range`'s lines.
+# which are `d_range`'s lines. Since the loop is a `for` over `var`s they are
+# spelled by the variable's name, or by the `for` that hands it back, and an
+# operator is spelled `+`, `-`, `*` or `/`.
 fn ops_for(name: String) -> List[String] =
   match name {
     "load_cell" -> ["load_view_tko"]
@@ -1634,7 +1636,13 @@ test "every call's Tile IR is the operation it is for, and the page marks it as 
     }
     let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
     for c in m.calls {
-      assert len(str.split(p, """data-c="${c.id}" """)) == 2
+      # one span, one highlight: the loop's three `get`s that hand its `var`s
+      # back are spelled by the same `for`, and the first of them wears it
+      let wears = match named_at(m.calls, c.name_from.line, c.name_from.col, c.name_to.col) {
+        Some(w) -> w.id == c.id
+        None -> false
+      }
+      assert len(str.split(p, """data-c="${c.id}" """)) == (if wears { 2 } else { 1 })
       let mine = len(str.split(p, """data-o="${c.id}">""")) - 1
       assert mine == list.fold(c.lines, 0, (n, r) => {
         let (a, b) = r
@@ -1717,7 +1725,7 @@ test "the facts beside the map are the map's and the files' numbers" {
       }
     assert kf.bytes == size
     assert kf.lines == len(m.ir)
-    assert kf.calls == 37
+    assert kf.calls == 38
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }

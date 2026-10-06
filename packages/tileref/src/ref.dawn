@@ -26,6 +26,7 @@
 # format holds.
 use std/list
 use std/narrow
+use std/float.{INFINITY}
 use std/gpu.{round_to, wrap_i4, wrap_i8, wrap_i16, wrap_i32, nibble_at, nibble_word}
 
 # ---- references for kernels with a boundary ----
@@ -2002,8 +2003,6 @@ pub fn apsp_step_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> Li
 fn bt_dot(a: List[Float], b: List[Float], k: Int, i: Int, j: Int) -> Float =
   list.fold(range(0, k), 0.0, (acc, p) => acc + a[i * k + p] * b[j * k + p])
 
-fn ref_neg_inf() -> Float = 0.0 - 1.0 / 0.0
-
 ## FlashAttention's ONLINE softmax, `softmax(scale * q k^T) v` for `m`
 ## queries against `n` keys of `d` features, one query row at a time and
 ## the keys `bk` at a time: the running maximum `mx`, the running sum `l`
@@ -2032,13 +2031,13 @@ pub fn flash_attn_ref(m: Int, n: Int, d: Int, bk: Int, scale: Float, dtypes: Lis
   let dt = dtypes[3]
   var out: List[Float] = []
   for i in range(0, m) {
-    var mx = ref_neg_inf()
+    var mx = -INFINITY
     var l = 0.0
     var acc = list.map(range(0, d), _c => 0.0)
     for b in range(0, n / bk) {
       let keys = range(b * bk, b * bk + bk)
       let s = list.map(keys, j => scale * bt_dot(q, k, d, i, j))
-      let block_max = list.fold(s, ref_neg_inf(), (a, x) => if x > a { x } else { a })
+      let block_max = list.fold(s, -INFINITY, (a, x) => if x > a { x } else { a })
       let mx_new = if block_max > mx { block_max } else { mx }
       let alpha = ref_exp(mx - mx_new)
       let p = list.map(s, x => ref_exp(x - mx_new))
@@ -2065,7 +2064,7 @@ pub fn causal_scores_ref(m: Int, k: Int, n: Int, scale: Float, dtypes: List[Stri
   list.map(range(0, m * n), idx => {
     let i = idx / n
     let j = idx % n
-    if j <= i { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { ref_neg_inf() }
+    if j <= i { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { -INFINITY }
   })
 }
 
@@ -2096,7 +2095,7 @@ pub fn window_scores_ref(m: Int, k: Int, n: Int, scale: Float, w: Int,
     let i = idx / n
     let j = idx % n
     let d = if i > j { i - j } else { j - i }
-    if d <= w { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { ref_neg_inf() }
+    if d <= w { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { -INFINITY }
   })
 }
 
@@ -2112,7 +2111,7 @@ pub fn sink_scores_ref(m: Int, k: Int, n: Int, scale: Float, sinks: Int, w: Int,
     let i = idx / n
     let j = idx % n
     let allowed = j <= i && (j < sinks || j >= i - w + 1)
-    if allowed { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { ref_neg_inf() }
+    if allowed { round_to(dt, scale * bt_dot(a, b, k, i, j)) } else { -INFINITY }
   })
 }
 
@@ -3037,7 +3036,7 @@ pub fn gqa_causal_scores_ref(hq: Int, hkv: Int, s: Int, d: Int, scale: Float,
     let j = idx % s
     let kv = h / groups
     if j > i {
-      ref_neg_inf()
+      -INFINITY
     } else {
       round_to(dt, scale * list.fold(range(0, d), 0.0, (acc, c) =>
           acc + q[(h * s + i) * d + c] * k[(kv * s + j) * d + c]))
@@ -5178,8 +5177,8 @@ test "the online softmax answers what the three-launch chain does, including whe
   # how many rows have their maximum OUTSIDE the first block: the rows on
   # which the online form had to rescale what it had already summed
   let raised = list.fold(range(0, m), 0, (acc, i) => {
-    let first = list.fold(range(0, bk), ref_neg_inf(), (a, j) => if s[i * n + j] > a { s[i * n + j] } else { a })
-    let whole = list.fold(range(0, n), ref_neg_inf(), (a, j) => if s[i * n + j] > a { s[i * n + j] } else { a })
+    let first = list.fold(range(0, bk), -INFINITY, (a, j) => if s[i * n + j] > a { s[i * n + j] } else { a })
+    let whole = list.fold(range(0, n), -INFINITY, (a, j) => if s[i * n + j] > a { s[i * n + j] } else { a })
     if whole > first { acc + 1 } else { acc }
   })
   assert raised > 0

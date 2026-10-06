@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 30a2632e38dd598a -->
+<!-- doc-check: translation-of docs/tutorial.md @ f51fa6390ea9ec51 -->
 
 # Dawn 教程
 
@@ -1796,14 +1796,14 @@ Ok([0.09003057317038043, 0.24472847105479767, 0.6652409557748218, 9.0])
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, carry, get, set}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
-  let acc = carry(zeros(c))
-  for k in d_range(0, 256 / 32) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
-  store_cell(c, acc.get())
+  var acc = zeros(c)
+  for k in d_range(0, 256 / 32) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
+  store_cell(c, acc)
 }
 
 pub fn main() -> Unit !io = {
@@ -1829,7 +1829,7 @@ continue %26, %25 : tile<64x64xf64>, token
 `along` 说格子的每一维跟网格的哪个轴走。`a` 的第 0 维（行）跟网格轴 0，第 1 维（沿 K）不跟任何
 轴：`FREE_AXIS` 的意思是这一维由 kernel 自己挑格子，挑法就是 `load_at(a, [k])`。`b` 正好反过来，
 `c` 是 `Out`，它的格子就是网格。`for k in d_range(0, 8) { .. }` 是走八趟的循环。累加器是一个
-`Carry`，即设备变量：`carry(zeros(c))` 造出它，`acc.get()` 读它，`acc.set(..)` 换成同形状的另一个
+`var`，循环替它携带：`var acc = zeros(c)` 造出它，体里的 `acc = ..` 把它换成同形状的另一个
 tile。`zeros(c)` 是一个形状和 `c` 的一格相同的 tile，所以累加器的形状从头到尾不用写；`mma` 从
 操作数读出 m、k、n（`a` 和 `b` 的 k 对不上，记录时就拒）。它记录的是 Tile IR 的浮点乘加 `mmaf`。
 
@@ -1894,14 +1894,14 @@ tileir: kernel `row_softmax`: op #9 `subf`: rhs is tile<32xf64>, declared tile<3
 第二个 kernel 去掉了 `keepdims`，最大值成了 `[32]`，阶不同，在减法处被拒；拒绝里写的是 `subf`，
 即 `sub` 记录下的 Tile IR 操作。`broadcast(t, shape)` 是显式写法，用在不是逐元素操作的地方。
 循环的初值通常写 `full(shape, value)`：这个形状的 tile，格式取它被检查时期望的那个：
-`let m: Carry[F32] = carry(full([32, 1], 0.0))`。
+`var m: Tile[F32] = full([32, 1], 0.0)`。
 
 NumPy 连 `[32]` 也会替你加宽。不这么做，是因为它的规则会在一种情况下错得像对的：对一个方的
 `[64, 64]` tile 不带 `keepdims` 做归约，NumPy 把 `[64]` 的结果对齐到最后一个轴，于是元素 (i, j)
 减去的是第 j 行的最大值。这里那种写法被拒，`keepdims` 就是归约说明自己指哪个轴的方式。
 
 把这一步放进一个沿 key/value 块走的循环，带上一路的最大值和一路的和，就是 FlashAttention：
-`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环：三个 carry，同一批操作；旁边的
+`scripts/tile-golden/kernels.dawn` 里的 `flash_attn` 就是这个循环：三个 `var`，同一批操作；旁边的
 `flash_attn_bf16` 是同一个循环，输入 bf16、累加 f32，第二次乘积之前 `p.to(BF16)`。
 [GPU 页](https://dawn-lang.dawnop.com/zh/gpu.html)展示了后端为这种规模的 kernel 记录下来的东西，
 以及它们在设备上的答案是怎么被核对的。
