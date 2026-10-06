@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ d48fb425642fe41a -->
+<!-- doc-check: translation-of docs/spec.md @ cc134f6c603b19e1 -->
 
 # Dawn Language Specification
 
@@ -4176,6 +4176,7 @@ two together; one module too many or too few fails it):
   arithmetic (§11 "Fixed-width integers")
 - `std/int/u64`: the unsigned 64-bit integer `U64`, an opaque type over `Int` with wrapping
   arithmetic (§11 "Fixed-width integers")
+- `std/float`: the two `Float` values no literal spells, `INFINITY` and `NAN`
 - `std/list`: `List` functions and the `Iter` instance
 - `std/bytes`: byte strings, with UTF-8, hex and base64 encoding
 - `std/io`: console, files, environment and subprocesses (the `Fs`/`Proc`/`Env` effects

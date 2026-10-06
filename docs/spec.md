@@ -3307,6 +3307,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/int/u16`：无符号 16 位整数 `U16`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
 - `std/int/u32`：无符号 32 位整数 `U32`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
 - `std/int/u64`：无符号 64 位整数 `U64`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
+- `std/float`：`Float` 的两个无字面量的值 `INFINITY` 与 `NAN`
 - `std/list`：`List` 的函数与 `Iter` 实例
 - `std/bytes`：字节串，及 UTF-8、hex、base64 编解码
 - `std/io`：控制台、文件、环境与子进程（`Fs`/`Proc`/`Env` 等效果）

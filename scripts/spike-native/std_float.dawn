@@ -1,0 +1,24 @@
+# std/float's INFINITY and NAN, differentially: the two backends must agree on
+# the values the constants hold, not only that each passes its own std tests.
+# A comptime-folded `1.0 / 0.0` and `0.0 / 0.0` are the case that could differ
+# (docs/tileir-011-design.md 8.4), so the constants are read here through a
+# function the folder cannot see through as well as directly.
+use std/float
+
+fn pick(flag: Bool, a: Float, b: Float) -> Float = if flag { a } else { b }
+
+pub fn main() -> Unit !io = {
+  let ninf = -float.INFINITY
+  println("${float.INFINITY}")
+  println("${ninf}")
+  println("${float.INFINITY > 1.0e308}")
+  println("${ninf < -1.0e308}")
+  println("${float.NAN == float.NAN}")
+  println("${float.NAN != float.NAN}")
+  println("${float.NAN < 0.0} ${float.NAN > 0.0}")
+  let a = pick(true, float.INFINITY, 0.0)
+  let n = pick(false, 0.0, float.NAN)
+  println("${a == float.INFINITY} ${n != n}")
+  println("${ninf + float.INFINITY != ninf + float.INFINITY}")
+  println("${1.0 / float.INFINITY} ${ninf * 0.0 != ninf * 0.0}")
+}
