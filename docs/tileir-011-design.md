@@ -405,6 +405,16 @@ A 里「同名类型加常量」的两个风险用测试钉住，不靠早合暴
 **发版**：栈合并后先发一个编译器 release（承载 U1、F0、U2 的 std 改动），推进种子，再发 tileir 0.11.0（tileir 不是编译器 release 的一部分，按自己的版本线）。
 tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 
+### 7.1 PR B 的实现记录（与上文计划的差异）
+
+- **M 并入 U2。** `FloatDtype` 答 `Dtype[D]`、`mma`/`full` 签名不变，这一步依赖 U2 才有的类型（`Float`、narrow 的 `F32`），单独成刀只能写一份随即作废的中间态，所以与 U2 同一个提交。
+- **S2 的步长是 `Step[B] = One | By(by: B)`**（ruling-drange-step-20261006），不是 `step: B = 1`；`Unit` 是内建类型名故用 `One`；`Step[B]` 没有 `FromInt`（`from_int` 不可按名调用），字面量步长写 `By(2)`。`d_range` 的描述符是 `DRange[B]`，`Item = Idx`。
+- **L3 带修复。** `add` 对 `Tile[I32]` 记 `addf`（#591）：handler 现在拒绝浮点算子配整数格式，运算符 impl 按格式分派到整数算子；整数 tile 因此也有运算符，没有无符号整数 tile 格式，除法只有有符号的 `divi`。
+- **站点调用图。** `site/gpu-map/record.py` 学会了 staged `for`（region 调用 + 每个被赋值 `var` 一个 `carry` 与事后一个 `get`）、`var` 的读写（`get`/`set`）与 tile 算子；`flash_attn.map` 现在是 38 个调用（原 37）。`gen/gpumap` 的名字检查接受运算符与变量名作为调用名的拼写。
+- **narrow 的只存储类型没有 `to_f64`**：该名字是 `Narrow` 的成员，trait 方法共享函数命名空间，第二个同名方法编不过；只给 `FromFloat` 与 `Show`。
+- **`std/moved.txt` 只加了 `fp16` 四个名字的 `no-hint` 行**（删除门要求每个被删 pub fn 有交代）；格式标记与 `Tile[F64]` 没有提示。
+- dawnop-site（`.dawn-version` v0.84.0）整仓没有 `fp16`、`std/narrow`、`std/gpu`、`tileir` 的引用，升钉无迁移项。
+
 ## 8. 开放风险
 
 1. **`impl[D] Add[Tile[D]]` 对整数 tile 的行为：已实测、已修（#591）。** `add` 在 `Tile[I32]` 上记成 `addf`，不被拒；L3 刀让 handler 拒绝浮点算子配整数格式，运算符 impl 按格式选浮点或整数算子，并有 `Tile[I32]` 的 `+ - * / -` 记 `addi/subi/muli/divi/negi` 的测试与一个负控（`add` 配 i32 被拒，`addi` 配 f64 被拒）。

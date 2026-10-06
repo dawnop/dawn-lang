@@ -1,5 +1,6 @@
 ## Narrow binary floating point: bfloat16, IEEE binary16 and binary32 as
-## opaque types over Float, with correctly rounded arithmetic on each.
+## opaque types over Float, with correctly rounded arithmetic on each, and the
+## five storage-only formats the tile dialect also has.
 #
 # Dawn has one floating type, the 64-bit `Float`. Code that wants to know what
 # a computation does at a narrower width (quantised weights, a kernel that
@@ -73,20 +74,110 @@
 # The type is public so that packages/tileir can take the same value for its
 # own `rounding` attribute; the function from variant to dialect spelling
 # belongs there, next to the dialect, and not in a module about arithmetic.
-# The per-format functions (`round_bf16`, `round_fp16`, the f8 family) take
+# The per-format functions (`round_bf16`, `round_f16`, the f8 family) take
 # no mode: the format is the function's identity, the f8 formats saturate
 # and so are not IEEE roundings at all, and no caller has asked for one.
 
 # ---- the formats ----
 
+# Each format is also a device format (std/dtype): the constant spelled like
+# its type is the format's witness, so that `use std/narrow.{BF16}` brings in
+# the type and the witness together, and `alloc(BF16, n)`, `p.to(BF16)` and
+# `Tile[BF16]` read as they always did. `impl HasDtype` lets generic code ask
+# for the witness by type. The names are the tile dialect's.
+
+use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}
+
 ## A bfloat16 value: 8 significand bits, exponents -126..127.
 pub opaque type BF16 = Float
 
+## The bfloat16 device format, the witness of [`BF16`].
+pub const BF16: Dtype[BF16] = dtype_named("bf16")
+
+impl HasDtype[BF16] {
+  fn dtype_of() -> Dtype[BF16] = BF16
+}
+
 ## An IEEE binary16 value: 11 significand bits, exponents -14..15.
-pub opaque type FP16 = Float
+pub opaque type F16 = Float
+
+## The binary16 device format, the witness of [`F16`].
+pub const F16: Dtype[F16] = dtype_named("f16")
+
+impl HasDtype[F16] {
+  fn dtype_of() -> Dtype[F16] = F16
+}
 
 ## An IEEE binary32 value: 24 significand bits, exponents -126..127.
 pub opaque type F32 = Float
+
+## The binary32 device format, the witness of [`F32`].
+pub const F32: Dtype[F32] = dtype_named("f32")
+
+impl HasDtype[F32] {
+  fn dtype_of() -> Dtype[F32] = F32
+}
+
+# The storage-only formats: the dialect has them as tile and buffer element
+# types and gives them no arithmetic (tf32 only reaches `ftof` and memory,
+# the fp8 and fp4 types only conversions), so each is an opaque Float with a
+# literal and a rendering and nothing else, and its rounding is the
+# `round_*` function of the same format. There is no `to_f64` for them: that
+# name is a member of `Narrow` and trait methods share the function namespace,
+# so a second one would not compile. cutile-rs has the same split ("no host
+# arithmetic, storage only").
+
+## A TensorFloat-32 value: `round_tf32`'s grid.
+pub opaque type TF32 = Float
+
+## The TensorFloat-32 device format, the witness of [`TF32`].
+pub const TF32: Dtype[TF32] = dtype_named("tf32")
+
+impl HasDtype[TF32] {
+  fn dtype_of() -> Dtype[TF32] = TF32
+}
+
+## An OCP fp8 value with four exponent bits and three significand bits and
+## no infinity: `round_f8e4m3fn`'s grid.
+pub opaque type F8E4M3FN = Float
+
+## The `f8E4M3FN` device format, the witness of [`F8E4M3FN`].
+pub const F8E4M3FN: Dtype[F8E4M3FN] = dtype_named("f8E4M3FN")
+
+impl HasDtype[F8E4M3FN] {
+  fn dtype_of() -> Dtype[F8E4M3FN] = F8E4M3FN
+}
+
+## An OCP fp8 value with five exponent bits and two significand bits:
+## `round_f8e5m2`'s grid.
+pub opaque type F8E5M2 = Float
+
+## The `f8E5M2` device format, the witness of [`F8E5M2`].
+pub const F8E5M2: Dtype[F8E5M2] = dtype_named("f8E5M2")
+
+impl HasDtype[F8E5M2] {
+  fn dtype_of() -> Dtype[F8E5M2] = F8E5M2
+}
+
+## An fp8 exponent value, a power of two: `round_f8e8m0`'s grid.
+pub opaque type F8E8M0FNU = Float
+
+## The `f8E8M0FNU` device format, the witness of [`F8E8M0FNU`].
+pub const F8E8M0FNU: Dtype[F8E8M0FNU] = dtype_named("f8E8M0FNU")
+
+impl HasDtype[F8E8M0FNU] {
+  fn dtype_of() -> Dtype[F8E8M0FNU] = F8E8M0FNU
+}
+
+## An OCP MX fp4 value: `round_f4e2m1`'s grid.
+pub opaque type F4E2M1FN = Float
+
+## The `f4E2M1FN` device format, the witness of [`F4E2M1FN`].
+pub const F4E2M1FN: Dtype[F4E2M1FN] = dtype_named("f4E2M1FN")
+
+impl HasDtype[F4E2M1FN] {
+  fn dtype_of() -> Dtype[F4E2M1FN] = F4E2M1FN
+}
 
 # ---- rounding ----
 
@@ -185,7 +276,7 @@ fn pow2(k: Int) -> Float = {
 pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 127)
 
 ## `x` rounded to binary16.
-pub fn round_fp16(x: Float) -> Float = round_binary(x, 11, -14, 15)
+pub fn round_f16(x: Float) -> Float = round_binary(x, 11, -14, 15)
 
 ## `x` rounded to binary32 in the direction `mode` names.
 pub fn round_f32(x: Float, mode: Rounding = NearestEven) -> Float = round_binary(x, 24, -126, 127, mode)
@@ -339,7 +430,7 @@ pub fn round_f8e8m0(x: Float) -> Float =
 pub fn bf16(x: Float) -> BF16 = round_bf16(x)
 
 ## The binary16 nearest to `x`.
-pub fn fp16(x: Float) -> FP16 = round_fp16(x)
+pub fn f16(x: Float) -> F16 = round_f16(x)
 
 ## The binary32 nearest to `x`.
 pub fn f32(x: Float) -> F32 = round_f32(x)
@@ -357,8 +448,8 @@ impl Show[BF16] {
   fn show(x: BF16) -> String = show(to_f64(x))
 }
 
-impl Show[FP16] {
-  fn show(x: FP16) -> String = show(to_f64(x))
+impl Show[F16] {
+  fn show(x: F16) -> String = show(to_f64(x))
 }
 
 impl Show[F32] {
@@ -429,37 +520,37 @@ impl Narrow[BF16] {
   }
 }
 
-impl Narrow[FP16] {
-  fn to_f64(a: FP16) -> Float = a
-  fn add(a: FP16, b: FP16) -> FP16 = {
+impl Narrow[F16] {
+  fn to_f64(a: F16) -> Float = a
+  fn add(a: F16, b: F16) -> F16 = {
     let x: Float = a
     let y: Float = b
-    round_fp16(x + y)
+    round_f16(x + y)
   }
-  fn sub(a: FP16, b: FP16) -> FP16 = {
+  fn sub(a: F16, b: F16) -> F16 = {
     let x: Float = a
     let y: Float = b
-    round_fp16(x - y)
+    round_f16(x - y)
   }
-  fn mul(a: FP16, b: FP16) -> FP16 = {
+  fn mul(a: F16, b: F16) -> F16 = {
     let x: Float = a
     let y: Float = b
-    round_fp16(x * y)
+    round_f16(x * y)
   }
-  fn div(a: FP16, b: FP16) -> FP16 = {
+  fn div(a: F16, b: F16) -> F16 = {
     let x: Float = a
     let y: Float = b
-    round_fp16(x / y)
+    round_f16(x / y)
   }
-  fn sqrt(a: FP16) -> FP16 = {
+  fn sqrt(a: F16) -> F16 = {
     let x: Float = a
     sqrt_binary(x, 11)
   }
-  fn neg(a: FP16) -> FP16 = {
+  fn neg(a: F16) -> F16 = {
     let x: Float = a
     -x
   }
-  fn abs(a: FP16) -> FP16 = {
+  fn abs(a: F16) -> F16 = {
     let x: Float = a
     magnitude(x)
   }
@@ -521,7 +612,7 @@ impl Narrow[F32] {
 #
 # `FromFloat` is the constructor: a literal at a format is the format's
 # nearest value to the Float the literal denotes (literal design D8). There
-# is no `FromInt`. bf16 has 256 consecutive integers and fp16 2048; a
+# is no `FromInt`. bf16 has 256 consecutive integers and f16 2048; a
 # `let w: BF16 = 1000001` that quietly meant 999424 is the surprise a
 # literal at a narrow type must not have, and `1000001.0` says what it
 # costs.
@@ -558,36 +649,36 @@ impl FromFloat[BF16] {
   fn from_float(x: Float) -> BF16 = bf16(x)
 }
 
-impl Add[FP16] {
-  fn add(a: FP16, b: FP16) -> FP16 = add(a, b)
+impl Add[F16] {
+  fn add(a: F16, b: F16) -> F16 = add(a, b)
 }
 
-impl Sub[FP16] {
-  fn sub(a: FP16, b: FP16) -> FP16 = sub(a, b)
+impl Sub[F16] {
+  fn sub(a: F16, b: F16) -> F16 = sub(a, b)
 }
 
-impl Mul[FP16] {
-  fn mul(a: FP16, b: FP16) -> FP16 = mul(a, b)
+impl Mul[F16] {
+  fn mul(a: F16, b: F16) -> F16 = mul(a, b)
 }
 
-impl Div[FP16] {
-  fn div(a: FP16, b: FP16) -> FP16 = div(a, b)
+impl Div[F16] {
+  fn div(a: F16, b: F16) -> F16 = div(a, b)
 }
 
-impl Rem[FP16] {
-  fn rem(a: FP16, b: FP16) -> FP16 = {
+impl Rem[F16] {
+  fn rem(a: F16, b: F16) -> F16 = {
     let x: Float = a
     let y: Float = b
     x % y
   }
 }
 
-impl Neg[FP16] {
-  fn neg(a: FP16) -> FP16 = neg(a)
+impl Neg[F16] {
+  fn neg(a: F16) -> F16 = neg(a)
 }
 
-impl FromFloat[FP16] {
-  fn from_float(x: Float) -> FP16 = fp16(x)
+impl FromFloat[F16] {
+  fn from_float(x: Float) -> F16 = f16(x)
 }
 
 impl Add[F32] {
@@ -620,6 +711,61 @@ impl Neg[F32] {
 
 impl FromFloat[F32] {
   fn from_float(x: Float) -> F32 = f32(x)
+}
+
+impl FromFloat[TF32] {
+  fn from_float(x: Float) -> TF32 = round_tf32(x)
+}
+
+impl FromFloat[F8E4M3FN] {
+  fn from_float(x: Float) -> F8E4M3FN = round_f8e4m3fn(x)
+}
+
+impl FromFloat[F8E5M2] {
+  fn from_float(x: Float) -> F8E5M2 = round_f8e5m2(x)
+}
+
+impl FromFloat[F8E8M0FNU] {
+  fn from_float(x: Float) -> F8E8M0FNU = round_f8e8m0(x)
+}
+
+impl FromFloat[F4E2M1FN] {
+  fn from_float(x: Float) -> F4E2M1FN = round_f4e2m1(x)
+}
+
+impl Show[TF32] {
+  fn show(x: TF32) -> String = {
+    let v: Float = x
+    show(v)
+  }
+}
+
+impl Show[F8E4M3FN] {
+  fn show(x: F8E4M3FN) -> String = {
+    let v: Float = x
+    show(v)
+  }
+}
+
+impl Show[F8E5M2] {
+  fn show(x: F8E5M2) -> String = {
+    let v: Float = x
+    show(v)
+  }
+}
+
+impl Show[F8E8M0FNU] {
+  fn show(x: F8E8M0FNU) -> String = {
+    let v: Float = x
+    show(v)
+  }
+}
+
+impl Show[F4E2M1FN] {
+  fn show(x: F4E2M1FN) -> String = {
+    let v: Float = x
+    show(v)
+  }
 }
 
 # `<=` rather than `<` so that -0.0 comes out as +0.0, as the IEEE operation
@@ -746,7 +892,7 @@ pub fn bf16_bits(x: Float) -> Int =
 ## The 16-bit pattern of the IEEE binary16 value `x`: the sign bit, five
 ## exponent bits biased by 15, ten significand bits, as the value sits in
 ## memory. The bfloat16 function's shape at binary16's widths, and the same
-## contract: `x` is a value of the format, as [`round_fp16`] leaves it, and a
+## contract: `x` is a value of the format, as [`round_f16`] leaves it, and a
 ## Float off the binary16 grid answers the pattern with the extra
 ## significand bits dropped rather than the nearest binary16. A value beyond
 ## the format's range answers the infinity of its sign; NaN answers the
@@ -755,7 +901,7 @@ pub fn bf16_bits(x: Float) -> Int =
 ## The subnormal arm counts quanta of 2^-24, which is binary16's least
 ## positive value, where bfloat16 counts 2^-133; the two formats differ in
 ## every constant here and in nothing else.
-pub fn fp16_bits(x: Float) -> Int =
+pub fn f16_bits(x: Float) -> Int =
   if x != x {
     0x7E00
   } else {
@@ -785,7 +931,7 @@ pub fn fp16_bits(x: Float) -> Int =
 ## all ones is the infinity of the sign when the significand field is zero
 ## and NaN otherwise; an exponent field of zero is a subnormal, or the zero
 ## of the sign.
-pub fn fp16_of_bits(bits: Int) -> Float = {
+pub fn f16_of_bits(bits: Int) -> Float = {
   let b = bits & 0xFFFF
   let neg = (b & 0x8000) != 0
   let e = (b >>> 10) & 0x1F
@@ -1066,7 +1212,7 @@ test "rounding breaks ties to even and rounds away otherwise" {
   assert round_bf16(1.0 + 3.0 / 512.0) == 1.0 + 1.0 / 128.0
   assert round_bf16(1.0 + 1.0 / 512.0) == 1.0
   # the same tie in the two other formats, at their own last places
-  assert round_fp16(1.0 + 1.0 / 2048.0) == 1.0
+  assert round_f16(1.0 + 1.0 / 2048.0) == 1.0
   assert round_f32(1.0 + 1.0 / 16777216.0) == 1.0
 }
 
@@ -1076,17 +1222,17 @@ test "rounding overflows to infinity and keeps the largest finite value" {
   assert round_bf16(3.3895313892515355e38) == 3.3895313892515355e38
   assert round_bf16(3.4e38) == inf
   assert round_bf16(-3.4e38) == -inf
-  # fp16 max finite is 65504; 65520 is the midpoint above it and rounds even,
+  # f16 max finite is 65504; 65520 is the midpoint above it and rounds even,
   # which is the carry out of the top exponent, so infinity
-  assert round_fp16(65504.0) == 65504.0
-  assert round_fp16(65519.0) == 65504.0
-  assert round_fp16(65520.0) == inf
+  assert round_f16(65504.0) == 65504.0
+  assert round_f16(65519.0) == 65504.0
+  assert round_f16(65520.0) == inf
   # f32 max finite
   assert round_f32(3.4028234663852886e38) == 3.4028234663852886e38
   assert round_f32(3.4028235677973366e38) == inf
   # the non-finite values pass through
   assert round_bf16(inf) == inf
-  assert round_fp16(-inf) == -inf
+  assert round_f16(-inf) == -inf
   let nan = round_f32(0.0 / 0.0)
   assert nan != nan
 }
@@ -1099,8 +1245,8 @@ test "rounding lands tiny values on the subnormal grid" {
   assert round_bf16(4.591774807899561e-41) == 0.0
   # a negative underflow is the negative zero
   assert 1.0 / round_bf16(-4.591774807899561e-41) == -1.0 / 0.0
-  # fp16: quantum 2^-24, so 1e-7 (1.68 quanta) rounds to two of them
-  assert round_fp16(1.0e-7) == 1.1920928955078125e-7
+  # f16: quantum 2^-24, so 1e-7 (1.68 quanta) rounds to two of them
+  assert round_f16(1.0e-7) == 1.1920928955078125e-7
   # f32: the smallest subnormal is 2^-149
   assert round_f32(1.401298464324817e-45) == 1.401298464324817e-45
   assert round_f32(1.0e-46) == 0.0
@@ -1116,7 +1262,7 @@ test "the operators are the named members, and remainder is exact" {
   assert to_f64(one + half_ulp) == 1.0
   assert one + half_ulp == add(one, half_ulp)
   assert to_f64(one - half_ulp) == round_bf16(1.0 - 1.0 / 256.0)
-  assert fp16(3.0) * fp16(1.0 / 3.0) == mul(fp16(3.0), fp16(1.0 / 3.0))
+  assert f16(3.0) * f16(1.0 / 3.0) == mul(f16(3.0), f16(1.0 / 3.0))
   assert to_f64(f32(1.0) / f32(3.0)) == round_f32(1.0 / 3.0)
   assert to_f64(-bf16(1.5)) == -1.5
   # a negative zero survives negation, as the format's own does
@@ -1125,7 +1271,7 @@ test "the operators are the named members, and remainder is exact" {
   # the last place of 1e10 in binary32 (1024)
   assert to_f64(bf16(7.0) % bf16(2.5)) == 2.0
   assert to_f64(f32(1.0e10) % f32(3.0)) == 1.0
-  assert to_f64(fp16(-7.0) % fp16(2.0)) == -1.0
+  assert to_f64(f16(-7.0) % f16(2.0)) == -1.0
 }
 
 test "directed rounding takes the neighbour on the named side" {
@@ -1222,13 +1368,13 @@ test "the trait operations are the format's, with the theorem's rounding" {
   # division and square root round the same way
   assert to_f64(div(bf16(1.0), bf16(3.0))) == 0.333984375
   assert to_f64(sqrt(bf16(2.0))) == 1.4140625
-  assert to_f64(sqrt(fp16(2.0))) == 1.4140625
+  assert to_f64(sqrt(f16(2.0))) == 1.4140625
   assert to_f64(sqrt(f32(2.0))) == 1.4142135381698608
   # overflow is the infinity, underflow the zero of the sign
   let inf = 1.0 / 0.0
   assert to_f64(mul(bf16(3.0e38), bf16(2.0))) == inf
-  assert to_f64(div(fp16(1.0), fp16(0.0))) == inf
-  assert 1.0 / to_f64(mul(fp16(-1.0e-7), fp16(0.25))) == -inf
+  assert to_f64(div(f16(1.0), f16(0.0))) == inf
+  assert 1.0 / to_f64(mul(f16(-1.0e-7), f16(0.25))) == -inf
   # the exact operations
   assert to_f64(neg(bf16(1.5))) == -1.5
   assert to_f64(abs(bf16(-1.5))) == 1.5
@@ -1263,7 +1409,7 @@ test "every bf16 bit pattern round-trips through its value, and the value is on 
   assert nans == 254
 }
 
-test "every fp16 bit pattern round-trips through its value, and the value is on round_fp16's grid" {
+test "every f16 bit pattern round-trips through its value, and the value is on round_f16's grid" {
   # The bf16 exhaustive check at binary16's widths. 2046 NaN patterns here
   # against bf16's 254: binary16 has a ten-bit significand under an
   # all-ones exponent, and both signs.
@@ -1271,11 +1417,11 @@ test "every fp16 bit pattern round-trips through its value, and the value is on 
   var nans = 0
   var b = 0
   while b < 65536 {
-    let v = fp16_of_bits(b)
+    let v = f16_of_bits(b)
     if v != v {
       nans = nans + 1
-      if fp16_bits(v) != 0x7E00 { bad = bad + 1 } else { () }
-    } else if fp16_bits(v) != b || round_fp16(v) != v {
+      if f16_bits(v) != 0x7E00 { bad = bad + 1 } else { () }
+    } else if f16_bits(v) != b || round_f16(v) != v {
       bad = bad + 1
     } else {
       ()
@@ -1286,35 +1432,35 @@ test "every fp16 bit pattern round-trips through its value, and the value is on 
   assert nans == 2046
 }
 
-test "the fp16 codec spells the special values and the named boundaries" {
+test "the f16 codec spells the special values and the named boundaries" {
   let inf = 1.0 / 0.0
-  assert fp16_bits(1.0) == 0x3C00
-  assert fp16_bits(-1.5) == 0xBE00
-  assert fp16_bits(0.0) == 0x0000
+  assert f16_bits(1.0) == 0x3C00
+  assert f16_bits(-1.5) == 0xBE00
+  assert f16_bits(0.0) == 0x0000
   # the negative zero keeps its sign, both ways
-  assert fp16_bits(0.0 * (0.0 - 1.0)) == 0x8000
-  assert 1.0 / fp16_of_bits(0x8000) == -inf
-  assert fp16_bits(inf) == 0x7C00
-  assert fp16_bits(-inf) == 0xFC00
-  assert fp16_of_bits(0x7C00) == inf
-  let nan = fp16_of_bits(0x7C01)
+  assert f16_bits(0.0 * (0.0 - 1.0)) == 0x8000
+  assert 1.0 / f16_of_bits(0x8000) == -inf
+  assert f16_bits(inf) == 0x7C00
+  assert f16_bits(-inf) == 0xFC00
+  assert f16_of_bits(0x7C00) == inf
+  let nan = f16_of_bits(0x7C01)
   assert nan != nan
-  assert fp16_bits(0.0 / 0.0) == 0x7E00
+  assert f16_bits(0.0 / 0.0) == 0x7E00
   # the smallest subnormal (2^-24), the largest subnormal, the smallest normal
-  assert fp16_of_bits(0x0001) == 5.960464477539063e-8
-  assert fp16_bits(5.960464477539063e-8) == 0x0001
-  assert fp16_of_bits(0x03FF) == 1023.0 * 5.960464477539063e-8
-  assert fp16_of_bits(0x0400) == 0.00006103515625
+  assert f16_of_bits(0x0001) == 5.960464477539063e-8
+  assert f16_bits(5.960464477539063e-8) == 0x0001
+  assert f16_of_bits(0x03FF) == 1023.0 * 5.960464477539063e-8
+  assert f16_of_bits(0x0400) == 0.00006103515625
   # the largest finite value
-  assert fp16_of_bits(0x7BFF) == 65504.0
-  assert fp16_bits(65504.0) == 0x7BFF
+  assert f16_of_bits(0x7BFF) == 65504.0
+  assert f16_bits(65504.0) == 0x7BFF
   # off the grid: the bits truncate, the rounding does not; a value past the
   # range is the infinity
-  assert fp16_bits(1.0 + 3.0 / 4096.0) == 0x3C00
-  assert fp16_bits(round_fp16(1.0 + 3.0 / 4096.0)) == 0x3C01
-  assert fp16_bits(1.0e300) == 0x7C00
+  assert f16_bits(1.0 + 3.0 / 4096.0) == 0x3C00
+  assert f16_bits(round_f16(1.0 + 3.0 / 4096.0)) == 0x3C01
+  assert f16_bits(1.0e300) == 0x7C00
   # bits above the sixteenth are ignored
-  assert fp16_of_bits(0x13C00) == 1.0
+  assert f16_of_bits(0x13C00) == 1.0
 }
 
 test "the bf16 codec spells the special values and the named boundaries" {
@@ -1570,7 +1716,7 @@ test "the binary32 codec spells the special values and the named boundaries" {
   assert f32_of_bits(0x00800000) == pow2(-126)
   assert f32_of_bits(0x7F7FFFFF) == 3.4028234663852886e38
   assert f32_bits(3.4028234663852886e38) == 0x7F7FFFFF
-  # off the grid the bits truncate, as bf16_bits and fp16_bits do
+  # off the grid the bits truncate, as bf16_bits and f16_bits do
   assert f32_bits(1.0 + pow2(-30)) == 0x3F800000
 }
 
@@ -1617,4 +1763,35 @@ test "f4E2M1FN rounds to nearest even, saturates instead of overflowing, and sen
   # the subnormal grid is 0.5 and nothing lives under it
   assert round_f4e2m1(0.2) == 0.0
   assert round_f4e2m1(0.3) == 0.5
+}
+
+test "every narrow format is a device format, named as the dialect names it, by witness and by type" {
+  assert dtype_name(BF16) == "bf16"
+  assert dtype_name(F16) == "f16"
+  assert dtype_name(F32) == "f32"
+  assert dtype_name(TF32) == "tf32"
+  assert dtype_name(F8E4M3FN) == "f8E4M3FN"
+  assert dtype_name(F8E5M2) == "f8E5M2"
+  assert dtype_name(F8E8M0FNU) == "f8E8M0FNU"
+  assert dtype_name(F4E2M1FN) == "f4E2M1FN"
+  let by_type: Dtype[F16] = dtype_of()
+  assert dtype_name(by_type) == "f16"
+  let again: Dtype[BF16] = dtype_of()
+  assert dtype_name(again) == dtype_name(BF16)
+}
+
+test "a storage-only value shows as the Float it holds, and a literal at one is the nearest value (compile-time fold)" {
+  # inside this module a literal at an own type is the unrounded Float (D7), so
+  # the values are made with the rounding functions; the literal rule itself
+  # is held by the impls' bodies, which are those functions
+  let a: TF32 = round_tf32(1.0000001)
+  assert show(a) == "1.0"
+  let b: F8E4M3FN = round_f8e4m3fn(0.3)
+  assert show(b) == "0.3125"
+  let c: F8E5M2 = round_f8e5m2(0.3)
+  assert show(c) == "0.3125"
+  let d: F8E8M0FNU = round_f8e8m0(3.0)
+  assert show(d) == "2.0"
+  let e: F4E2M1FN = round_f4e2m1(2.4)
+  assert show(e) == "2.0"
 }

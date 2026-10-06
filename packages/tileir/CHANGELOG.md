@@ -7,6 +7,45 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.11.0 (2026-10-07)
+
+Breaking: a kernel's loops, carried values, arithmetic and formats are
+written the way the language writes them, and the format markers are gone.
+Needs a compiler whose std has `std/float`, `std/dtype` and the witnesses in
+`std/narrow` and `std/int/*` (the release after 0.85.0). Every kernel in
+`scripts/tile-golden` records the bytes it did: the 195 `.mlir` and `.tilebc`
+goldens are unchanged on both backends.
+
+- A loop is `for j in d_range(lower, upper) { .. }`. `d_range` takes `Int`
+  bounds (fixed when the kernel is recorded) or `Idx` bounds (computed on the
+  device), `step: One` by default or `By(n)` (`By(nprog)` for a grid-stride
+  loop), and `unsigned_cmp`. It replaces both the closure form of `d_range`
+  and `d_for`, which is deleted. The body of a `for` carries the `var`s it
+  assigns: `var acc = zeros(c)` and `acc = mma(.., acc)` are `carry`, `get`
+  and `set`, which stay public for `d_loop`.
+- `+ - * /` and unary `-` work on tiles and on `Idx`, a float literal on a
+  tile is `lit`, an integer literal on an `Idx` is `idx_const`. Over a float
+  tile they record the float operations, over an integer tile the integer
+  ones (`addi`, `subi`, `muli`, `divi`, `negi`).
+- A float operation (`add`, `neg`, `exp`, ...) over an integer tile is now
+  refused when the kernel is recorded. Before, `add` over a `Tile[I32]`
+  recorded an `addf` over an i32 tile and nothing refused it (#591).
+- A format is a value type with a witness of the same name. `Tile[F64]`,
+  `Param[F64]`, `Tensor[F64]` are `Tile[Float]`, `Param[Float]`,
+  `Tensor[Float]`; `I64` is `Int` and `I1` is `Bool` in type position. The
+  witnesses `F64`, `I64`, `I1` come from `std/dtype`, `BF16`, `F16`, `F32`,
+  `TF32`, `F8E4M3FN`, `F8E5M2`, `F8E8M0FNU`, `F4E2M1FN` from `std/narrow`,
+  `I8`, `I16`, `I32`, `U8` from `std/int/*`, and `I4` from `std/gpu`. Calls
+  that name a format (`param(F64, 0)`, `In(BF16, ..)`, `f_const(F32, 0.5)`,
+  `p.to(BF16)`) are spelled as before; only the `use` lines change.
+  `std/narrow`'s `FP16` is `F16` (`f16`, `round_f16`, `f16_bits`,
+  `f16_of_bits`). The `param`/`f_const`/`to`/`unpack_bytes`/`d_global`
+  family takes a `Dtype[T]` instead of a marker with a `Dtype` bound.
+- `FloatDtype::float_dtype` answers a `Dtype[D]`, and `float_name` is gone:
+  write `dtype_name(float_dtype())`. `I1` is no longer declared here.
+- `-INFINITY` and `INFINITY` come from `std/float`; the kernels' and the
+  reference's private negative infinity are gone.
+
 ## 0.10.0 (2026-10-06)
 
 Breaking: the float matrix product is `mma` and takes an accumulator of

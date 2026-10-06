@@ -1536,8 +1536,8 @@ memory, where launching a kernel calls the host reference function registered un
 name. It is pure, so this runs anywhere, with no GPU, no driver and no `!io`:
 
 ```dawn run
-use std/gpu.{Gpu, F64, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake,
-  reference_kernels}
+use std/gpu.{Gpu, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake, reference_kernels}
+use std/dtype.{F64}
 
 # The host half of a GPU program: allocate, upload, launch, wait, read back.
 # Its only effect is `!Gpu`; which device answers is the caller's choice.
@@ -1593,7 +1593,7 @@ with `tileir` under its `[deps]` (chapter 18) rather than one file, and it has n
 Playground link, because the Playground runs one file:
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store_cell}
 use tileir/prog.{trace2, cells, In, Out}
@@ -1601,7 +1601,7 @@ use tileir/render.{render}
 
 # One tile block reads its cell of `x` and writes it to its cell of `out`.
 # Nothing is copied here: the body runs once, under a handler that records it.
-fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, load_cell(x))
+fn copy(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, load_cell(x))
 
 # The operation a line of Tile IR performs: the word after `=`, if it has one.
 fn op_of(line: String) -> Option[String] = match str.split_once(line, " = ") {
@@ -1665,13 +1665,13 @@ at `packages/tileir` in your checkout, as `examples/projects/gpu_fake/dawn.toml`
 ### A kernel is a function that records
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 
 # Each tile block reads its cell of `a` and of `b` and writes its cell of `out`.
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
 pub fn main() -> Unit !io = {
@@ -1713,9 +1713,9 @@ describes (`make_partition_view`). `get_tile_block_id` is the block that is runn
 pointer's alignment that the assembler may use.
 
 `!Dev` is the body's only effect, so no host memory is in reach and there is no number to
-look at: a kernel can do exactly what `Dev` offers. `Param[F64]` is a parameter whose
-elements are in `std/gpu`'s `F64` format, the same marker a host buffer carries, so a
-`Tensor[F32]` passed where this kernel takes `F64` is a type error.
+look at: a kernel can do exactly what `Dev` offers. `Param[Float]` is a parameter whose
+elements are in the `F64` format (the type is `Float`, the witness `F64` from `std/dtype`), the same
+format a host buffer carries, so a `Tensor[F32]` passed where this kernel takes `Float` is a type error.
 
 ### Cells: where the shape lives
 
@@ -1727,12 +1727,13 @@ reading and writing cell `i`. A lane past the extent reads the marker's padding 
 unless the marker says otherwise) and is not written back, so the tail needs no mask.
 
 ```dawn run deps=tileir
-use std/gpu.{Gpu, F64, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/dtype.{F64}
 use std/list
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
 # The host half: three buffers of `n` elements, launched over cells of 1000.
@@ -1779,27 +1780,27 @@ reference is a question for a real card (the last section).
 
 ### What the recording refuses
 
-The type checker sees formats: a `Tile[F32]` where a `Tile[F64]` belongs is a type error.
+The type checker sees formats: a `Tile[F32]` where a `Tile[Float]` belongs is a type error.
 Shapes, roles and grids are not in the types, and the recording checks them as it goes.
 A refusal is a panic that names the kernel and the operation, numbered in recording order,
 before any bytecode exists:
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store_cell, store, add, f_const, broadcast, block_id,
   tile_at}
 use tileir/prog.{trace2, cells, In, Out}
 
-fn adds_one(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn adds_one(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(x), f_const(F64, 1.0)))
 
-fn writes_its_input(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(x))
+fn writes_its_input(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(x, load_cell(x))
 
-fn adds_two_shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn adds_two_shapes(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
 
-fn stores_by_pointer(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn stores_by_pointer(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store(out, tile_at(block_id(0), 128), load_cell(x))
 
 # A panic's message ends with where it was raised; keep what it says.
@@ -1808,7 +1809,7 @@ fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
   None -> message
 }
 
-fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+fn try_record(body: fn(Param[Float], Param[Float]) -> Unit !Dev) -> String = {
   let g = cells([256], [128])
   match catch_panic(() => trace2("k", In(F64, g), Out(F64, g), body)) {
     Ok(_) -> "recorded"
@@ -1848,8 +1849,8 @@ A softmax over four lanes that hold three values. This time the fake device runs
 reference written here rather than one from `std/gpu`:
 
 ```dawn run deps=tileir,tileref
-use std/gpu.{Gpu, F64, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels,
-  launch_entry2, last_out}
+use std/gpu.{Gpu, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry2, last_out}
+use std/dtype.{F64}
 use std/list
 use std/map
 use std/str
@@ -1859,7 +1860,7 @@ use tileir/prog.{trace2, cells, In, Out}
 use tileir/render.{render}
 use tileref/ref.{ref_exp}
 
-fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)                        # the lane past the extent reads -inf
   let e = exp(sub(t, reduce_max(t)))          # reduce_max(t) is rank 0, and widens
   store_cell(out, div(e, reduce_sum(e)))      # nothing past the extent is written
@@ -1875,7 +1876,7 @@ fn softmax_ref(n: Int, _formats: List[String], bufs: List[List[Float]]) -> List[
   list.map(es, v => v / total) ++ list.drop(bufs[1], n)
 }
 
-fn run(entry: Entry2[F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let x = alloc(F64, 4)?
   let out = alloc(F64, 4)?
   upload(x, [1.0, 2.0, 3.0, 0.0])?
@@ -1922,13 +1923,13 @@ the references for the repository's own kernels live.
 A matrix product, one 64 by 64 tile of `c` per block, walking along K:
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
-fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   var acc = zeros(c)
   for k in d_range(0, 256 / 32) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
@@ -1985,19 +1986,19 @@ In two dimensions a reduction has a dimension to work along. Here each block tak
 of 64 scores and turns each row into a softmax:
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum}
 use tileir/prog.{trace2, cells, In, Out}
 
-fn row_softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn row_softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)                                   # [32, 64]
   let p = exp(sub(s, reduce_max(s, keepdims: true)))     # [32, 1], widened to [32, 64]
   store_cell(out, div(p, reduce_sum(p, keepdims: true)))
 }
 
 # The same, with the first `keepdims` left out.
-fn row_softmax_dropped(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn row_softmax_dropped(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)
   let p = exp(sub(s, reduce_max(s)))                     # [32]
   store_cell(out, div(p, reduce_sum(p, keepdims: true)))
@@ -2008,7 +2009,7 @@ fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
   None -> message
 }
 
-fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+fn try_record(body: fn(Param[Float], Param[Float]) -> Unit !Dev) -> String = {
   let g = cells([256, 64], [32, 64])     # eight blocks of 32 rows
   match catch_panic(() => trace2("row_softmax", In(F64, g), Out(F64, g), body)) {
     Ok(_) -> "recorded"
@@ -2057,14 +2058,14 @@ transpose breaks that, because block (i, j) reads cell (i, j) of `x` and writes 
 (j, i) of `out`:
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store, block_id, idx_add, idx_mul, idx_const}
 use tileir/prog.{Arg, trace2, cells, In, Out, Shared}
 
 # A 128 by 64 matrix in 32 by 32 tiles. Block (i, j) reads its cell of `x`
 # and writes it, transposed, at tile (j, i) of a 64 by 128 `out`.
-fn transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn transpose(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let at = idx_add(idx_mul(block_id(1), idx_const(32 * 128)), idx_mul(block_id(0), idx_const(32)))
   store(out, at, t, strides: Some([1, 128]))     # out's strides, swapped: the layout transposes
@@ -2075,7 +2076,7 @@ fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
   None -> message
 }
 
-fn try_record(out: Arg[F64]) -> String = {
+fn try_record(out: Arg[Float]) -> String = {
   let x = In(F64, cells([128, 64], [32, 32]))     # 4 by 2 cells
   match catch_panic(() => trace2("transpose", x, out, transpose)) {
     Ok(_) -> "recorded"
@@ -2113,7 +2114,8 @@ kernel's name to an assembled module instead of a reference:
 
 <!-- doc-check: skip-check needs an NVIDIA GPU, its driver and tileiras, which CI does not have -->
 ```dawn skip-check
-use std/gpu.{Gpu, F64, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/gpu.{Gpu, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/dtype.{F64}
 use std/io
 use std/io.{with_fs_real}
 use std/list
@@ -2122,10 +2124,10 @@ use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/bytecode.{encode}
 
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
-fn add_1000(entry: Entry3[F64, F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+fn add_1000(entry: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let xs = list.map(range(0, 1000), i => to_float(i))
   let a = alloc(F64, 1000)?
   let b = alloc(F64, 1000)?

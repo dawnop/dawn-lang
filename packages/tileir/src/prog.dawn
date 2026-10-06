@@ -17,8 +17,11 @@
 use std/list
 use std/map
 use std/str
-use std/gpu.{Gpu, F64, F32, F16, BF16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
-  entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
+use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, EntryArg, Entry1,
+  Entry2, Entry3, Entry4, Entry5, entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out,
+  arg_shared, entry_grid}
+use std/dtype.{F64, I64, Dtype, dtype_name}
+use std/int/i32.{I32}
 use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
@@ -28,7 +31,7 @@ use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, D
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
   idx_rem, idx_sub, extent_of, blocks_of }
-use std/narrow.{Rounding}
+use std/narrow.{F32, F16, BF16, Rounding}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -1363,7 +1366,7 @@ pub fn trace_kernel(name: String, params: List[String], body: fn() -> Unit !Dev,
 # `trace_kernel` takes the parameters' formats as a list of strings because
 # Dawn has no variadic generics: the list is the only way to say "this many
 # parameters, of these formats" in one signature, and it repeats what the
-# body's own `Param[F64]` already says (191 of 191 kernels in
+# body's own `Param[Float]` already says (191 of 191 kernels in
 # scripts/tile-golden). `trace1` to `trace5` take one MARKER per parameter
 # instead, the way `d_for2` to `d_for4` took one carried value each, and
 # compute the list: `In(F64, cells(..))` says the format once, and says the
@@ -1430,9 +1433,9 @@ pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
 ## - `Shared` is read and written in ways no cell describes: atomics,
 ##   scatters, a stencil's neighbours.
 pub type Arg[D] =
-  | In(d: D, g: Cells)
-  | Out(d: D, g: Cells)
-  | Shared(d: D)
+  | In(d: Dtype[D], g: Cells)
+  | Out(d: Dtype[D], g: Cells)
+  | Shared(d: Dtype[D])
 
 # What the recording holds a parameter to: its role without its format.
 type Access =
@@ -1452,7 +1455,7 @@ type Sig = {
   g: Cells,
 }
 
-fn marker[D](a: Arg[D]) -> D = match a {
+fn marker[D](a: Arg[D]) -> Dtype[D] = match a {
   In(d, _g) -> d
   Out(d, _g) -> d
   Shared(d) -> d
@@ -1463,12 +1466,12 @@ fn marker[D](a: Arg[D]) -> D = match a {
 pub opaque type Marker = Sig
 
 ## `a` as a [`Marker`].
-pub fn erase[D: Dtype](a: Arg[D]) -> Marker = {
+pub fn erase[D](a: Arg[D]) -> Marker = {
   let m: Marker = sig_of(a)
   m
 }
 
-fn sig_of[D: Dtype](a: Arg[D]) -> Sig = match a {
+fn sig_of[D](a: Arg[D]) -> Sig = match a {
   In(d, g) -> Sig { dtype: dtype_name(d), access: Reading, g: g }
   Out(d, g) -> Sig { dtype: dtype_name(d), access: Owning, g: g }
   Shared(d) -> Sig { dtype: dtype_name(d), access: Sharing, g: Whole }
@@ -1583,7 +1586,7 @@ fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: Hi
 ## disagree with another's or with the grid, is refused before the body
 ## runs; a write into an `In` parameter is refused while it records. The
 ## program is the one `trace_kernel` records for the same body.
-pub fn trace1[A: Dtype](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
+pub fn trace1[A](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
   hints: Hints = []) -> (TileProg, Entry1[A]) = {
   let args = entry_args(name, [sig_of(a)])
   let prog = record_sigs(name, [sig_of(a)], () => body(param(marker(a), 0)), hints)
@@ -1591,7 +1594,7 @@ pub fn trace1[A: Dtype](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev
 }
 
 ## [`trace1`] for two parameters.
-pub fn trace2[A: Dtype, B: Dtype](name: String, a: Arg[A], b: Arg[B],
+pub fn trace2[A, B](name: String, a: Arg[A], b: Arg[B],
   body: fn(Param[A], Param[B]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry2[A, B]) = {
   let sigs = [sig_of(a), sig_of(b)]
   let args = entry_args(name, sigs)
@@ -1600,7 +1603,7 @@ pub fn trace2[A: Dtype, B: Dtype](name: String, a: Arg[A], b: Arg[B],
 }
 
 ## [`trace1`] for three parameters.
-pub fn trace3[A: Dtype, B: Dtype, C: Dtype](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+pub fn trace3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
   body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry3[A, B, C]) = {
   let sigs = [sig_of(a), sig_of(b), sig_of(c)]
   let args = entry_args(name, sigs)
@@ -1610,7 +1613,7 @@ pub fn trace3[A: Dtype, B: Dtype, C: Dtype](name: String, a: Arg[A], b: Arg[B], 
 }
 
 ## [`trace1`] for four parameters.
-pub fn trace4[A: Dtype, B: Dtype, C: Dtype, E: Dtype](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
+pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
   d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev,
   hints: Hints = []) -> (TileProg, Entry4[A, B, C, E]) = {
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d)]
@@ -1621,7 +1624,7 @@ pub fn trace4[A: Dtype, B: Dtype, C: Dtype, E: Dtype](name: String, a: Arg[A], b
 }
 
 ## [`trace1`] for five parameters.
-pub fn trace5[A: Dtype, B: Dtype, C: Dtype, E: Dtype, F: Dtype](name: String, a: Arg[A], b: Arg[B],
+pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
   c: Arg[C], d: Arg[E], e: Arg[F],
   body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev,
   hints: Hints = []) -> (TileProg, Entry5[A, B, C, E, F]) = {
@@ -4246,7 +4249,7 @@ pub fn defined_inside(ops: List[TileOp]) -> List[Int] = {
 
 # ---- tests ----
 
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let i = block_id(0)
   let base = tile_at(i, 128)
   let ta = load(a, base, [128])
@@ -4306,7 +4309,7 @@ test "every handle an operation defines is fresh and increasing" {
 
 # Each block folds `chunks` consecutive 128-wide tiles of `x` into one tile
 # of `out`: the first tile enters the loop, the loop adds the rest in order.
-fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
+fn sum(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(chunks)
   let base = idx_mul(b, n)
@@ -4357,7 +4360,7 @@ test "the same loop traced twice records the same program, and every handle is f
     == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 19, 20, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 23]
 }
 
-fn two_carried(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn two_carried(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let zero = idx_const(0)
   let two = idx_const(2)
@@ -4390,7 +4393,7 @@ test "a loop carrying two tiles answers two results in order, the token behind t
   assert p.ops[len(p.ops) - 1] == Store(23, 2, "f64", 1, [8], [1], 22, None, 21, [])
 }
 
-fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn nested(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let zero = idx_const(0)
   let two = idx_const(2)
@@ -4424,7 +4427,7 @@ test "loops nest: the inner For sits in the outer body and the outer continue pa
 # A loop whose trip count is a value the body computes: knife T5's shape.
 # What it computes is beside the point (it doubles the tile until the
 # largest lane is not under one); what the test is about is the record.
-fn spin(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn spin(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let v0 = load(x, b, [8])
   let v = carry(v0)
@@ -4468,7 +4471,7 @@ test "a loop records a Loop whose body ends in the exit if and a continue, and t
 
 # `spin` with an early exit as well (knife T17): the block returns when its
 # largest lane passes 4, before the loop's own exit is tested.
-fn spin_or_leave(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn spin_or_leave(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let v0 = load(x, b, [8])
   let v = carry(v0)
@@ -4641,7 +4644,7 @@ test "knife K2: d_range takes the unsigned comparison d_for_unsigned alone used 
 
 # A gather through an index tile read out of one buffer, and a scatter of
 # the result through the same tile: the shape of every knife-12 kernel.
-fn indexed(idx: Param[I32], src: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn indexed(idx: Param[I32], src: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let i = load(idx, idx_const(0), [8])
   let ok = lt_i(i, i_const(8))
   let v = gather(src, i, mask: Some(ok), pad: Some(f_const(F64, 0.0)))
@@ -4882,7 +4885,7 @@ test "a gather inside a reduction region is refused: a pure region carries no me
   }
 }
 
-fn deeper(x: Param[F64], depth: Int, t: Carry[F64]) -> Unit !Dev = {
+fn deeper(x: Param[Float], depth: Int, t: Carry[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
   let one = idx_const(1)
   for i in d_range(zero, one, step: By(one)) {
@@ -4904,7 +4907,7 @@ test "a body that recurses through d_range is refused at the depth limit rather 
 
 # A block-wide sum, widened back and stored at element 0: the shape every
 # reduction kernel of knife 7b has.
-fn total(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn total(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let i = block_id(0)
   let t = load(x, i, [8])
   store(out, i, broadcast(d_reduce(t, 0.0, (acc, e) => add(acc, e)), [1]))
@@ -4934,7 +4937,7 @@ test "a reduction records as one Reduce holding its region, with the accumulator
   assert defined_inside(p.ops) == [0, 1, 2, 3, 7, 4, 5, 6, 8, 9]
 }
 
-fn branch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn branch(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let i = block_id(0)
   let t = load(x, i, [8])
   let r = carry(t)
@@ -5181,7 +5184,7 @@ test "a global declared twice, one declared inside a region, an empty one, and a
 # The recording refuses it, naming the operation. Since the batch's PR-3 the
 # surface reads the shape off the operands, so this is the one way left to
 # get a shape wrong: two operands that disagree.
-fn vadd_half(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn vadd_half(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), 128)
   let ta = load(a, base, [64])
   let tb = load(b, base, [128])
@@ -5452,25 +5455,25 @@ test "knife C2: trace3 records the program trace_kernel records for the same bod
 }
 
 # Each body writes parameter 0 one way; parameter 1 is the one it reads.
-fn into_first_store(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn into_first_store(x: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), 8)
   store(x, base, load(y, base, [8]))
 }
 
-fn into_first_view(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn into_first_view(x: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
   let at = [block_id(0)]
   let t = load_view(partition_view(tensor_view(y, zero, [64], [1]), [8], [0], PadZero), at)
   store_view(partition_view(tensor_view(x, zero, [64], [1]), [8], [0], NoPadding), at, t)
 }
 
-fn into_first_ptrs(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn into_first_ptrs(x: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), 8)
   let t = load(y, base, [8])
   store_ptrs(ptr_offset(ptrs(x, [8]), lanes(base, [8])), t)
 }
 
-fn into_first_scatter(x: Param[F64], y: Param[F64]) -> Unit !Dev =
+fn into_first_scatter(x: Param[Float], y: Param[Float]) -> Unit !Dev =
   scatter(x, arange(8), load(y, idx_const(0), [8]))
 
 fn into_first_atomic(x: Param[I32], y: Param[I32]) -> Unit !Dev = {
@@ -5480,19 +5483,19 @@ fn into_first_atomic(x: Param[I32], y: Param[I32]) -> Unit !Dev = {
 
 # A store through a pointer tile made from integers: the recording cannot
 # say which parameter it lands in.
-fn into_forged(x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn into_forged(x: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let t = load(y, idx_const(0), [8])
   store_ptrs(int_to_ptr(ptr_to_int(ptrs(x, [8])), F64), t)
 }
 
 # A store into module memory, which is no parameter.
-fn into_global(x: Param[F64], _y: Param[F64]) -> Unit !Dev = {
+fn into_global(x: Param[Float], _y: Param[Float]) -> Unit !Dev = {
   d_global("scratch", F64, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
   store_ptrs(global_ptrs("scratch", F64, [8]), load(x, idx_const(0), [8]))
 }
 
 # The cell write the body above would have been: what an Out takes.
-fn into_first_cell(x: Param[F64], y: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(y))
+fn into_first_cell(x: Param[Float], y: Param[Float]) -> Unit !Dev = store_cell(x, load_cell(y))
 
 test "knife C2: every way of writing an In parameter is refused while the kernel records, by number and by the call that wrote" {
   let g = cells([64], [8])
@@ -5537,11 +5540,11 @@ test "D-7: an Out is written through its cells and every other write into one is
   assert marked(() => trace_kernel("w", ["f64", "f64"], () => into_first_store(param(F64, 0), param(F64, 1)))) == "accepted"
 }
 
-fn two(_x: Param[F64], _y: Param[F64]) -> Unit !Dev = ()
+fn two(_x: Param[Float], _y: Param[Float]) -> Unit !Dev = ()
 
-fn three(_x: Param[F64], _y: Param[F64], _z: Param[F64]) -> Unit !Dev = ()
+fn three(_x: Param[Float], _y: Param[Float], _z: Param[Float]) -> Unit !Dev = ()
 
-fn never_runs(_x: Param[F64], _y: Param[F64]) -> Unit !Dev = panic("the body ran")
+fn never_runs(_x: Param[Float], _y: Param[Float]) -> Unit !Dev = panic("the body ran")
 
 test "knife C2: cells that disagree with one another or with the grid are refused before the body runs" {
   # two Out cuts make two grids
@@ -5643,7 +5646,7 @@ fn is_const(o: TileOp) -> Bool = match o {
 }
 
 # vadd over cells: no base, no shape at the memory operations.
-fn vadd_cells(a: Param[F64], b: Param[F64], o: Param[F64]) -> Unit !Dev =
+fn vadd_cells(a: Param[Float], b: Param[Float], o: Param[Float]) -> Unit !Dev =
   store_cell(o, add(load_cell(a), load_cell(b)))
 
 test "PR-1: load_cell and store_cell read and write through one cell view per parameter, aligned on both sides since PR-2" {
@@ -5682,7 +5685,7 @@ test "PR-3: trace_calls with erased markers records what trace3 records, and ref
 }
 
 # softmax over one row of 1000, a tile of 1024: the pad is the mask.
-fn softmax_cells(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn softmax_cells(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let e = exp(sub(t, reduce_max(t)))
   store_cell(o, div(e, reduce_sum(e)))
@@ -5736,7 +5739,7 @@ test "0.8.2: a kept dimension widens as broadcast would; a dropped one and a ran
 }
 
 # flash attention's row statistics in the textbook shape.
-fn rows_cells(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn rows_cells(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let m = broadcast(reduce_max(t, keepdims: true), [32, 64])
   let e = exp(sub(t, m))
@@ -5775,7 +5778,7 @@ test "PR-1: keepdims keeps the folded dimension at length 1, and broadcast widen
 }
 
 # a [32, 32] product written into the [1, 32, 32] cell of a batch.
-fn batch_cell(x: Param[F64], o: Param[F64]) -> Unit !Dev =
+fn batch_cell(x: Param[Float], o: Param[Float]) -> Unit !Dev =
   store_cell(o, reshape(load_cell(x), [1, 32, 32]))
 
 test "0.8.1: reshape regroups a tile's lanes in row-major order, keeps every lane and spreads a rank-0 tile" {
@@ -6017,7 +6020,7 @@ test "C3': a carry that starts as a bare constant and is set to a tile is refuse
     d_if(idx_eq(idx_const(0), idx_const(0)), () => (), () => r.set(f_const(F64, 1.0)))
   })), "`set`: carry 0 holds tile<8xf64>, and is set to tile<f64>")
   assert str.contains(marked(() => trace_kernel("weak", ["f64"], () => {
-    let _c: Carry[F64] = carry(lit(0.5))
+    let _c: Carry[Float] = carry(lit(0.5))
     ()
   })), "`carry`: a carry starts from a tile with a format of its own")
 }
@@ -6059,7 +6062,7 @@ test "tileir 0.10: full is broadcast of f_const, transpose is permute_tile [1, 0
     let x = param(F64, 0)
     let out = param(F64, 1)
     let a = load(x, idx_const(0), [16, 8])
-    let z: Tile[F64] = if spelt { full([8, 16], 2.0) } else { broadcast(f_const(F64, 2.0), [8, 16]) }
+    let z: Tile[Float] = if spelt { full([8, 16], 2.0) } else { broadcast(f_const(F64, 2.0), [8, 16]) }
     let t = if spelt { transpose(a).to(F64) } else { permute_tile(a, [1, 0]) }
     store(out, idx_const(0), add(t, z))
   })
@@ -6157,7 +6160,7 @@ test "C4: retile reads a parameter through another cut, read only" {
 # Three tensors of the lengths `n` on the fake device, `a` and `b` filled,
 # and `e` launched over them: as given (`swap` 0), with `a` as both inputs
 # (1), or with `a` as the output too (2).
-fn run_entry(e: Entry3[F64, F64, F64], n: List[Int], swap: Int,
+fn run_entry(e: Entry3[Float, Float, Float], n: List[Int], swap: Int,
   grid: List[Int]) -> Result[List[Float], ForeignError] !Gpu = {
   let a = alloc(F64, n[0])?
   let b = alloc(F64, n[1])?
@@ -6174,7 +6177,7 @@ fn run_entry(e: Entry3[F64, F64, F64], n: List[Int], swap: Int,
   download(o)
 }
 
-fn launched(e: Entry3[F64, F64, F64], n: List[Int], swap: Int, grid: List[Int]) -> String !Gpu =
+fn launched(e: Entry3[Float, Float, Float], n: List[Int], swap: Int, grid: List[Int]) -> String !Gpu =
   match run_entry(e, n, swap, grid) {
     Ok(v) -> "${v[0]} ${v[3]} ${v[len(v) - 1]}"
     Err(err) -> "${err.kind}: ${err.message}"
@@ -6204,7 +6207,7 @@ test "knife C2: the entry trace3 answers runs on the fake device, and a launch i
 # What the five 0.6.0 names could not say: a strided load with hints, a
 # masked load with no pad, a strided masked store with hints. The names
 # themselves were removed in 0.8.0.
-fn combos(a: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let m = tail_mask(b, [128], 1000)
   let h = [for_arch("sm_86", [hint_latency(2)])]

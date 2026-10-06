@@ -44,8 +44,9 @@
 #     per-channel `gamma` with a stride of ZERO.
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, F64, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, sync, handle_of }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
+  launch, sync, handle_of}
+use std/dtype.{F64}
 use tileref/ref.{matmul_ref, matvec_ref, batched_matmul_ref, transpose_ref, layer_norm_ref, batch_norm_ref,
   group_norm_ref, fused_rms_norm_ref }
 use std/list
@@ -121,7 +122,7 @@ fn message[T](r: Result[T, ForeignError]) -> String = match r {
 fn blank() -> Trace =
   Trace { alloc: "-", upload: "-", launch: "-", sync: "-", download: "-", result: None, note: "" }
 
-fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
+fn release(ts: List[Tensor[Float]]) -> Unit !Gpu = {
   for t in ts {
     let _ = free(t)
   }
@@ -130,7 +131,7 @@ fn release(ts: List[Tensor[F64]]) -> Unit !Gpu = {
 # One buffer a data set, each as long as its own data: unlike the earlier
 # programs here, a kernel's buffers are not all the same length (a
 # per-feature `gamma` is one row of what it scales).
-fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[F64]]) -> Result[List[Tensor[F64]], ForeignError] !Gpu =
+fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[Float]]) -> Result[List[Tensor[Float]], ForeignError] !Gpu =
   if i >= len(sizes) {
     Ok(acc)
   } else {
@@ -140,7 +141,7 @@ fn alloc_all(sizes: List[Int], i: Int, acc: List[Tensor[F64]]) -> Result[List[Te
     }
   }
 
-fn upload_all(ts: List[Tensor[F64]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
   if i >= len(ts) {
     Ok(())
   } else {

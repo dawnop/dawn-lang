@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ f51fa6390ea9ec51 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 908cf748050e6a21 -->
 
 # Dawn 教程
 
@@ -1433,8 +1433,8 @@ subdir = "packages/json"      # 包在归档里的位置
 驱动，也不要 `!io`：
 
 ```dawn run
-use std/gpu.{Gpu, F64, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake,
-  reference_kernels}
+use std/gpu.{Gpu, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake, reference_kernels}
+use std/dtype.{F64}
 
 # GPU 程序的宿主一半：分配、上传、启动、等待、读回。
 # 它唯一的效果是 `!Gpu`；由哪台设备应答，是调用方的选择。
@@ -1487,7 +1487,7 @@ kernel 本身也是 Dawn，对着 `packages/tileir` 写：它的 `Dev` 效果把
 Playground 只跑单个文件：
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store_cell}
 use tileir/prog.{trace2, cells, In, Out}
@@ -1495,7 +1495,7 @@ use tileir/render.{render}
 
 # 每个 tile 块读 `x` 里属于自己的那一格，写进 `out` 里属于自己的那一格。
 # 这里一个数也没拷：函数体只跑一次，跑在一个把它记录下来的 handler 底下。
-fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, load_cell(x))
+fn copy(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, load_cell(x))
 
 # 一行 Tile IR 执行的操作：`=` 后面的那个词，如果有的话。
 fn op_of(line: String) -> Option[String] = match str.split_once(line, " = ") {
@@ -1556,13 +1556,13 @@ GPU 程序分两层，每层一个效果。kernel 体唯一的效果是 `!Dev`�
 ### kernel 是一个会被记录的函数
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/render.{render}
 
 # 每个 tile 块读 `a` 和 `b` 里属于自己的那一格，写进 `out` 里属于自己的那一格。
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
 pub fn main() -> Unit !io = {
@@ -1602,8 +1602,8 @@ cuda_tile.module @m {
 `assume div_by<16>` 是关于指针对齐的一个承诺，汇编器可以利用它。
 
 `!Dev` 是函数体唯一的效果，所以够不到宿主内存，也没有数可看：kernel 能做的恰好就是 `Dev`
-提供的那些。`Param[F64]` 是元素格式为 `std/gpu` 的 `F64` 的参数，和宿主缓冲区带的是同一个
-标记，所以在这个 kernel 要 `F64` 的位置传 `Tensor[F32]` 是类型错误。
+提供的那些。`Param[Float]` 是元素格式为 `F64`（类型是 `Float`，见证是 `std/dtype` 的 `F64`）的参数，和宿主缓冲区带的是同一个
+格式，所以在这个 kernel 要 `Float` 的位置传 `Tensor[F32]` 是类型错误。
 
 ### 格子：形状写在哪里
 
@@ -1613,12 +1613,13 @@ kernel 对每个参数做什么，而 `Out` 的格子就是启动网格：八个
 extent 的 lane 读到的是标记的填充值（标记不另说就是零），而且不写回，所以尾巴不需要 mask。
 
 ```dawn run deps=tileir
-use std/gpu.{Gpu, F64, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/dtype.{F64}
 use std/list
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
 # 宿主一半：三个 `n` 元素的缓冲区，按 1000 个元素的格子启动。
@@ -1661,26 +1662,26 @@ extent 的末尾。它还拒绝和格子不一致的网格，以及和别的参�
 
 ### 记录拒绝什么
 
-类型检查看得见格式：在该放 `Tile[F64]` 的地方放 `Tile[F32]` 是类型错误。形状、角色和网格不在
+类型检查看得见格式：在该放 `Tile[Float]` 的地方放 `Tile[F32]` 是类型错误。形状、角色和网格不在
 类型里，由记录边走边查。拒绝是一个 panic，报出 kernel 名和操作（按记录顺序编号），这时还没有
 任何字节码：
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store_cell, store, add, f_const, broadcast, block_id,
   tile_at}
 use tileir/prog.{trace2, cells, In, Out}
 
-fn adds_one(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn adds_one(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(x), f_const(F64, 1.0)))
 
-fn writes_its_input(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(x, load_cell(x))
+fn writes_its_input(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(x, load_cell(x))
 
-fn adds_two_shapes(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn adds_two_shapes(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(x), broadcast(f_const(F64, 1.0), [64])))
 
-fn stores_by_pointer(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn stores_by_pointer(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store(out, tile_at(block_id(0), 128), load_cell(x))
 
 # panic 的消息末尾是它在哪里被抛出；只留它说了什么。
@@ -1689,7 +1690,7 @@ fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
   None -> message
 }
 
-fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+fn try_record(body: fn(Param[Float], Param[Float]) -> Unit !Dev) -> String = {
   let g = cells([256], [128])
   match catch_panic(() => trace2("k", In(F64, g), Out(F64, g), body)) {
     Ok(_) -> "recorded"
@@ -1724,8 +1725,8 @@ tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written throu
 四个 lane 装三个值的 softmax。这次假设备跑的参考实现是这里写的，不是 `std/gpu` 自带的：
 
 ```dawn run deps=tileir,tileref
-use std/gpu.{Gpu, F64, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels,
-  launch_entry2, last_out}
+use std/gpu.{Gpu, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry2, last_out}
+use std/dtype.{F64}
 use std/list
 use std/map
 use std/str
@@ -1735,7 +1736,7 @@ use tileir/prog.{trace2, cells, In, Out}
 use tileir/render.{render}
 use tileref/ref.{ref_exp}
 
-fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)                        # 越过 extent 的那个 lane 读到 -inf
   let e = exp(sub(t, reduce_max(t)))          # reduce_max(t) 是 0 阶的，会自己加宽
   store_cell(out, div(e, reduce_sum(e)))      # extent 之外一个也不写
@@ -1751,7 +1752,7 @@ fn softmax_ref(n: Int, _formats: List[String], bufs: List[List[Float]]) -> List[
   list.map(es, v => v / total) ++ list.drop(bufs[1], n)
 }
 
-fn run(entry: Entry2[F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let x = alloc(F64, 4)?
   let out = alloc(F64, 4)?
   upload(x, [1.0, 2.0, 3.0, 0.0])?
@@ -1794,13 +1795,13 @@ Ok([0.09003057317038043, 0.24472847105479767, 0.6652409557748218, 9.0])
 矩阵乘，每个块算 `c` 的一个 64×64 tile，沿 K 走：
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
-fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   var acc = zeros(c)
   for k in d_range(0, 256 / 32) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
@@ -1847,19 +1848,19 @@ kernel 体就是 bf16 tile 相乘、累加进 f32，tensor core 本来就该这�
 二维时，归约要选一维来做。这里每个块拿 32 行、每行 64 个分数，把每一行变成 softmax：
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store_cell, exp, sub, div, reduce_max, reduce_sum}
 use tileir/prog.{trace2, cells, In, Out}
 
-fn row_softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn row_softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)                                   # [32, 64]
   let p = exp(sub(s, reduce_max(s, keepdims: true)))     # [32, 1]，加宽到 [32, 64]
   store_cell(out, div(p, reduce_sum(p, keepdims: true)))
 }
 
 # 同一个 kernel，去掉了第一个 `keepdims`。
-fn row_softmax_dropped(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn row_softmax_dropped(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = load_cell(x)
   let p = exp(sub(s, reduce_max(s)))                     # [32]
   store_cell(out, div(p, reduce_sum(p, keepdims: true)))
@@ -1870,7 +1871,7 @@ fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
   None -> message
 }
 
-fn try_record(body: fn(Param[F64], Param[F64]) -> Unit !Dev) -> String = {
+fn try_record(body: fn(Param[Float], Param[Float]) -> Unit !Dev) -> String = {
   let g = cells([256, 64], [32, 64])     # 八个块，每块 32 行
   match catch_panic(() => trace2("row_softmax", In(F64, g), Out(F64, g), body)) {
     Ok(_) -> "recorded"
@@ -1912,14 +1913,14 @@ NumPy 连 `[32]` 也会替你加宽。不这么做，是因为它的规则会在
 (i, j) 读 `x` 的第 (i, j) 格，写的却是 `out` 的第 (j, i) 个 tile：
 
 ```dawn run deps=tileir
-use std/gpu.{F64}
+use std/dtype.{F64}
 use std/str
 use tileir/dev.{Dev, Param, load_cell, store, block_id, idx_add, idx_mul, idx_const}
 use tileir/prog.{Arg, trace2, cells, In, Out, Shared}
 
 # 128×64 的矩阵，切成 32×32 的 tile。块 (i, j) 读 `x` 里属于自己的那一格，
 # 转置后写到 64×128 的 `out` 的第 (j, i) 个 tile。
-fn transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn transpose(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let at = idx_add(idx_mul(block_id(1), idx_const(32 * 128)), idx_mul(block_id(0), idx_const(32)))
   store(out, at, t, strides: Some([1, 128]))     # out 的步长，对调：布局本身完成转置
@@ -1930,7 +1931,7 @@ fn reason(message: String) -> String = match str.rsplit_once(message, " at ") {
   None -> message
 }
 
-fn try_record(out: Arg[F64]) -> String = {
+fn try_record(out: Arg[Float]) -> String = {
   let x = In(F64, cells([128, 64], [32, 32]))     # 4×2 格
   match catch_panic(() => trace2("transpose", x, out, transpose)) {
     Ok(_) -> "recorded"
@@ -1965,7 +1966,8 @@ recorded
 
 <!-- doc-check: skip-check 需要 NVIDIA GPU、它的驱动和 tileiras，CI 上都没有 -->
 ```dawn skip-check
-use std/gpu.{Gpu, F64, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/gpu.{Gpu, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/dtype.{F64}
 use std/io
 use std/io.{with_fs_real}
 use std/list
@@ -1974,10 +1976,10 @@ use tileir/dev.{Dev, Param, load_cell, store_cell, add}
 use tileir/prog.{trace3, cells, In, Out}
 use tileir/bytecode.{encode}
 
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
-fn add_1000(entry: Entry3[F64, F64, F64]) -> Result[List[Float], ForeignError] !Gpu = {
+fn add_1000(entry: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let xs = list.map(range(0, 1000), i => to_float(i))
   let a = alloc(F64, 1000)?
   let b = alloc(F64, 1000)?

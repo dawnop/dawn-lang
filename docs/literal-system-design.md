@@ -24,7 +24,7 @@
 
 ### D1 数值类型：编译器原语保持两个（N0+）
 
-`Int`（i64，环绕）与 `Float`（double）仍是唯一由编译器拥有的数。定宽类型（`I8..I32`、`U8..U32`、`U64`，以及现有的 `BF16/FP16/F32`）
+`Int`（i64，环绕）与 `Float`（double）仍是唯一由编译器拥有的数。定宽类型（`I8..I32`、`U8..U32`、`U64`，以及现有的 `BF16/F16/F32`）
 是 std 的 opaque 类型，回绕语义同 `Int`（刀 N2）。否决一等定宽原语（N1）：两后端逐宽度展开、`Ty` 新变体波及上百处、comptime 值、
 装箱、std N×N 转换，而它唯一独有的收益（密集存储）在 Dawn 今天的容器里不存在。重开条件：定宽密集容器进入路线图，或刀 N2 后实测
 sha2/inflate 用 std `U32` 比 `Int + MASK` 慢 2 倍以上且 `-flto` 补不回来。
@@ -50,7 +50,7 @@ sha2/inflate 用 std `U32` 比 `Int + MASK` 慢 2 倍以上且 `-flto` 补不回
 
 ### D3 不做无类型具名常量与常量算术
 
-`const X: Float = 0.5` 照旧有类型；`s * X`（`s: Tile[F64]`）照旧不成立，写 `s * lit(X)`。字面量原子之上的复合表达式（`2 * 3`）不是无类型常量，
+`const X: Float = 0.5` 照旧有类型；`s * X`（`s: Tile[Float]`）照旧不成立，写 `s * lit(X)`。字面量原子之上的复合表达式（`2 * 3`）不是无类型常量，
 是普通运算，期望怎么进入它们由 D5 决定。否决 Go 的无类型具名常量与任意精度常量算术：`const` 会有第二种语义，编译器要自带大数，而且
 `int-min-literal-design.md` 的纪律要求字面量先是 64 位词法值。
 
@@ -158,7 +158,7 @@ trait FromFloat[T] { effect FromFloat = !()  fn from_float(x: Float) -> T !T.Fro
 | `let f: Float = 1`、`r * 2`、`2 * r`（`r: Float`） | 报错 | 合法 |
 | `let f: Float = 9007199254740993` | `… Float … Int` | D6 专属 |
 | `let b: U8 = 300`（模块外） | `… is U8 but … Int` | D6 专属（折叠 panic） |
-| `t * 2`（`Tile` 只有 `FromFloat`） | `both sides must have the same type: Tile[F64] vs Int` | 同句，落在字面量上 + hint ``` `Tile[F64]` takes Float literals: write `2.0` ``` |
+| `t * 2`（`Tile` 只有 `FromFloat`） | `both sides must have the same type: Tile[Float] vs Int` | 同句，落在字面量上 + hint ``` `Tile[Float]` takes Float literals: write `2.0` ``` |
 | `2 * t` | 同上（span 在运算符） | 同上，span 改落在字面量 |
 | `w + 1`、`1 + w`（`W` 有 `Add` 无 `FromInt`） | `both sides must have the same type` | 同句，落在字面量上 + hint「there are no implicit conversions; a literal becomes `W` only through `impl FromInt[W]`, written in the module declaring it」 |
 | `1 + 2.0`、`3.14159 * 2 * r` | `Int vs Float` | 合法（混合种类） |
@@ -169,7 +169,7 @@ trait FromFloat[T] { effect FromFloat = !()  fn from_float(x: Float) -> T !T.Fro
 | `g(1, s)`，`fn g[T](a: T, b: T)`，`s: String` | 报在 `s` | 报在 `1`（等待的字面量在 `s` 定下 `T` 之后检查） |
 | `g(1, 2.5)` | 报在 `2.5` | 合法，`T = Float` |
 | `const K: Traced = 3`（impl 带效果） | `… is Traced but … Int` | D9 那句 |
-| `lit(2.0) * t`，节点期望是 `Tile[F64]`（返回类型或注解） | `cannot infer type parameter(s) D for `lit`` | 合法：节点期望是走 trait 的库类型时下传给左操作数（运算符设计 D7，C0 刀）；无期望时同句不变 |
+| `lit(2.0) * t`，节点期望是 `Tile[Float]`（返回类型或注解） | `cannot infer type parameter(s) D for `lit`` | 合法：节点期望是走 trait 的库类型时下传给左操作数（运算符设计 D7，C0 刀）；无期望时同句不变 |
 | `from_int(3)` | `undefined function` | 不变（不注入） |
 
 所有变化都是**原本报错**的程序：要么变合法，要么换文字。checker-corpus 新增 `literals`、`literal_folds`、`literal_float_ops` 三例钉住；`arith_ops`、`binary_ops` 两例的 golden 随之重录。
@@ -239,7 +239,7 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 
 - 运算符设计的 D7（字面量单态）由本文取代：字面量按期望定型，恰一侧是字面量时向另一侧让步，`t * 0.5` 与 `0.5 * t` 在 `Tile` 有 `FromFloat` 时都成立。
   **左锚定的不对称对非字面量只收窄一步**（C0 刀，2026-10-06）：仍不做右回填，但运算符节点自己的期望是走 trait 的库类型时下传给左操作数，
-  `lit(2.0) * t` 在期望 `Tile[F64]` 下成立；`Int`/`Float` 期望不下传，`let f: Float = 1 / 2` 照旧报错。理由与边界见运算符设计 D7。
+  `lit(2.0) * t` 在期望 `Tile[Float]` 下成立；`Int`/`Float` 期望不下传，`let f: Float = 1 / 2` 照旧报错。理由与边界见运算符设计 D7。
 - 运算符设计的 D10（不给 `Zero`）：`[T: FromInt]` 下的 `0` 就是零，`var n: T = 0`、`n = n + 1` 都成立。没有 `FromInt` 的主体照旧显式传单位元。
 
 ## 8. 刀序
@@ -252,7 +252,7 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 | 1′ | 发 release N（与运算符刀 1 同一个），推进种子 | 待做 |
 | L2 | LSP：字面量悬停显示定型结果与折叠值（`lspeval` 读折叠表）；`EUnary(-, 字面量)` 与 `XComptime` 配对 | 完成 |
 | L3 | tileir：`FromFloat[Tile[D]]`、`FromInt[Idx]`（与运算符刀 3 同批） | 待种子 |
-| N1 | `std/narrow`：`FromFloat[BF16/FP16/F32]`（不给 `FromInt`：bf16 只有 256 个连续整数）；`narrow-contract` 把每个有限的舍入输入写成该格式的字面量，编译期折叠的值对 oracle。顺带修了 `-0.0` 字面量经 trait 时丢符号（`0.0 - 0.0` 是 +0.0） | 完成 |
+| N1 | `std/narrow`：`FromFloat[BF16/F16/F32]`（不给 `FromInt`：bf16 只有 256 个连续整数）；`narrow-contract` 把每个有限的舍入输入写成该格式的字面量，编译期折叠的值对 oracle。顺带修了 `-0.0` 字面量经 trait 时丢符号（`0.0 - 0.0` 是 +0.0） | 完成 |
 | N2 | std 定宽整数（D13）：七个模块、`FromInt` 与六个算术 trait、`Show`、`U64` 的 `Ord`、`of`/`wrap`/`to_int`、具名按位、`checked_*` | 完成 |
 | N3 | 按位 trait（独立设计） | — |
 | — | 模式里的字面量（D10） | 有消费者时 |

@@ -8,11 +8,15 @@
 # which run.sh holds against toolchain.txt).
 use std/list
 use std/io.{with_fs_real, write_bytes}
-use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, I4, F4E2M1FN}
-use std/narrow.{Rounding}
+use std/gpu.{I4}
+use std/dtype.{F64, I64}
+use std/int/i8.{I8}
+use std/int/i16.{I16}
+use std/int/i32.{I32}
+use std/narrow.{F32, BF16, F16, TF32, F8E4M3FN, F8E5M2, F8E8M0FNU, F4E2M1FN, Rounding}
 use std/float.{INFINITY}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
-use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, store, row_major, permute, coord,
+use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, row_major, permute, coord,
   and_mask, or_mask, in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_eq,
   d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
@@ -40,7 +44,7 @@ use tileir/bytecode.{encode, bytecode_version}
 # Since the batch's PR-3 every one of its three parameters is cut into
 # cells of 128 (`run_of(128)`, a run as long as the grid makes it), so the
 # body names no shape and no offset: the cells are the addressing.
-fn vadd(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, load_cell(a) + load_cell(b))
 
 # The same kernel over f32 and 64-wide tiles: the case that reds when a load
@@ -66,7 +70,7 @@ fn vadd_bf16(a: Param[BF16], b: Param[BF16], out: Param[BF16]) -> Unit !Dev =
 #
 # `x`'s cells are the chunks and follow no grid axis (the block picks them
 # itself, `load_at`); `out`'s are one per block.
-fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
+fn sum(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(chunks)
   let base = b * n
@@ -105,25 +109,25 @@ const CLIP_TILE: Int = 64
 # block's 24 lanes past the end read the padding (0) and are not written.
 # The mask the kernels below used to build and carry to every load and
 # store is gone; `copy` and `relu` are the same two lines over one cell.
-fn vadd_tail(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn vadd_tail(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, load_cell(a) + load_cell(b))
 
 # Element-wise copy: leetgpu 31 (Matrix Copy). The mask is the whole kernel.
-fn copy(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, load_cell(x))
+fn copy(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, load_cell(x))
 
 # max(x, 0): leetgpu 21 (ReLU).
-fn relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, max(load_cell(x), f_const(F64, 0.0)))
+fn relu(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, max(load_cell(x), f_const(F64, 0.0)))
 
 # x where x >= 0, 0.01 * x where x < 0: leetgpu 23 (Leaky ReLU). Written with
 # `lt` and `select` rather than `maxf`, because that is the shape every
 # masked-branch kernel later takes.
-fn leaky_relu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn leaky_relu(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   store_cell(out, select(lt(t, f_const(F64, 0.0)), t * f_const(F64, 0.01), t))
 }
 
 # min(max(x, -1), 1) over a second shape: leetgpu 62 (Value Clipping).
-fn clip(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn clip(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, min(max(load_cell(x), f_const(F64, -1.0)), f_const(F64, 1.0)))
 
 # No leetgpu problem needs this one: it exists so that every operation knife
@@ -135,7 +139,7 @@ fn clip(x: Param[F64], out: Param[F64]) -> Unit !Dev =
 # The fused multiply-add is `a * 2 + b`: the product is exact, so a host
 # reference that multiplies and then adds rounds once as well and the two
 # agree bit for bit (a general `fma` does not, and the reference says so).
-fn elemops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn elemops(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let two = f_const(F64, 2.0)
   let a = load_cell(x)
   let b = load_cell(y)
@@ -194,7 +198,7 @@ const FOLD_BLOCKS: Int = 2
 fn mc_scale() -> Float = (MC_B - MC_A) / to_float(RED_N)
 
 # The sum of a tile, rank 0: what a one-answer kernel stores.
-fn sum_of(t: Tile[F64]) -> Tile[F64] !Dev = reduce_sum(t)
+fn sum_of(t: Tile[Float]) -> Tile[Float] !Dev = reduce_sum(t)
 
 # The one-block reductions below read their RED_N values through cells of
 # RED_TILE (`red_in(pad)`), so the 24 lanes past the end read `pad` and the
@@ -208,7 +212,7 @@ fn sum_of(t: Tile[F64]) -> Tile[F64] !Dev = reduce_sum(t)
 # reduction's own and the fold is the device's; `tileiras` accepts a wrong
 # identity (measured), which is what scripts/tile-gpu-diff's
 # reduce-identity-wrong mutant rests on.
-fn sum_reduction(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, sum_of(load_cell(x)))
+fn sum_reduction(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, sum_of(load_cell(x)))
 
 # exp(x - max) / sum(exp(x - max)): leetgpu 5 (Softmax). Two reductions, a
 # transcendental and a division. The maximum is subtracted so that a corpus
@@ -216,7 +220,7 @@ fn sum_reduction(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, 
 # softmax-no-max-subtract removes. The lanes past RED_N read -inf, so their
 # exponential is exactly 0 and the sum is the row's; nothing past RED_N is
 # written.
-fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn softmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let ex = exp(t - reduce_max(t))
   store_cell(out, ex / reduce_sum(ex))
@@ -224,25 +228,25 @@ fn softmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 # sum(a * b): leetgpu 17 (Dot Product). The lanes past the end read 0.0, so
 # their product is 0.0 and the identity carries them.
-fn dot(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn dot(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, sum_of(load_cell(a) * load_cell(b)))
 
 # mean((p - t)^2): leetgpu 27 (Mean Squared Error).
-fn mse(pred: Param[F64], target: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn mse(pred: Param[Float], target: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let d = load_cell(pred) - load_cell(target)
   store_cell(out, sum_of(d * d) / f_const(F64, to_float(RED_N)))
 }
 
 # (b - a) * mean(y): leetgpu 35 (Monte Carlo Integration). `a` and `b` are
 # host constants of the recorded kernel, as every shape here is.
-fn monte_carlo(y: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn monte_carlo(y: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, sum_of(load_cell(y)) * f_const(F64, mc_scale()))
 
 # x / sqrt(mean(x^2) + eps): leetgpu 50 (RMS Normalization). `sqrt` is the
 # one operation knife 7b adds that IEEE 754 requires to be correctly
 # rounded, so this kernel can be held to the bit-exact tier while its
 # neighbours cannot.
-fn rms_norm(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn rms_norm(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let mean = reduce_sum(t * t) / f_const(F64, to_float(RED_N))
   store_cell(out, t / sqrt(mean + f_const(F64, RMS_EPS)))
@@ -250,24 +254,24 @@ fn rms_norm(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 # x / (1 + exp(-x)): leetgpu 52 (Sigmoid Linear Unit). No reduction, so the
 # tolerance is `exp`'s alone.
-fn silu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn silu(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   store_cell(out, t / (f_const(F64, 1.0) + exp(-t)))
 }
 
 # 1 / (1 + exp(-x)): leetgpu 68 (Sigmoid Activation).
-fn sigmoid(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn sigmoid(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let one = f_const(F64, 1.0)
   store_cell(out, one / (one + exp(-load_cell(x))))
 }
 
 # The lanes of the one block that hold one of the RED_N values: what a
 # kernel whose folded term is not 0 at a padded lane selects with.
-fn red_live() -> Tile[I1] !Dev = tail_mask(tile_at(block_id(0), RED_TILE), [RED_TILE], RED_N)
+fn red_live() -> Tile[Bool] !Dev = tail_mask(tile_at(block_id(0), RED_TILE), [RED_TILE], RED_N)
 
 # -mean(min(r * A, clip(r, 1 - e, 1 + e) * A)) with r = exp(new - old):
 # leetgpu 107 (PPO Clipped Surrogate Loss).
-fn ppo_loss(new: Param[F64], old: Param[F64], adv: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn ppo_loss(new: Param[Float], old: Param[Float], adv: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let ta = load_cell(adv)
   let r = exp(load_cell(new) - load_cell(old))
   let clipped = min(max(r, f_const(F64, 1.0 - PPO_EPS)), f_const(F64, 1.0 + PPO_EPS))
@@ -280,7 +284,7 @@ fn ppo_loss(new: Param[F64], old: Param[F64], adv: Param[F64], out: Param[F64]) 
 # Sequence Loss). `log` and `exp` in one kernel, so the tolerance covers
 # both. A padded lane's term is log(1/2), not 0, which is why this one keeps
 # its mask.
-fn dpo_loss(pc: Param[F64], pr: Param[F64], rc: Param[F64], rr: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn dpo_loss(pc: Param[Float], pr: Param[Float], rc: Param[Float], rr: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let one = f_const(F64, 1.0)
   let a = load_cell(pc) - load_cell(pr)
   let b = load_cell(rc) - load_cell(rr)
@@ -298,7 +302,7 @@ fn dpo_loss(pc: Param[F64], pr: Param[F64], rc: Param[F64], rr: Param[F64], out:
 # float tile and answers one -- moves the sum by far more than the
 # tolerance. Tolerance tier, and no corpus could make it exact. The lanes
 # past the end read 0 and take a logarithm of it; nothing stores them.
-fn mathops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn mathops(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = load_cell(x)
   let b = load_cell(y)
   let s1 = exp(a) + exp2(a)
@@ -320,7 +324,7 @@ fn mathops(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # and the range everywhere else. Both branches are taken by the corpus,
 # because the grid has two blocks. `x`'s cells are the chunks, which no grid
 # axis picks: the block reads them `load_at`.
-fn foldif(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
+fn foldif(x: Param[Float], out: Param[Float], chunks: Int) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(chunks)
   let base = b * n
@@ -346,7 +350,7 @@ fn foldif(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
 # so that both halves of the pair are visible in an f64 buffer: the value
 # decides who wins and the INDEX decides where the 1 lands. The lanes past
 # RED_N read -inf and lose.
-fn argmax(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn argmax(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let lane = lanes(tile_at(block_id(0), RED_TILE), [RED_TILE])
   let (_best, where) = d_reduce2(load_cell(x), lane, -INFINITY, 0 - 1, (av, ai, ev, ei) => {
     let win = gt(av, ev)
@@ -381,7 +385,7 @@ const MM_TK: Int = 32
 # markers (`mm_cells`): A's rows follow grid axis 0 and its K the loop,
 # B's columns follow axis 1 and its K the loop, C's cell is the block's.
 # So the body is the textbook loop, with no base, no stride and no shape.
-fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+fn matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   var acc = zeros(c)
   for k in d_range(0, MM_K / MM_TK) { acc = mma(load_at(a, [k]), load_at(b, [k]), acc) }
   store_cell(c, acc)
@@ -404,7 +408,7 @@ const BMM_T: Int = 32
 # (docs/tile-backend-design.md 6.27), because the blocks running together
 # then belong to different products. The reads stay on the pointer path,
 # which is what run.sh's load-dtype-f64 mutant aims at.
-fn batched_matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+fn batched_matmul(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   let bm = block_id(0)
   let bn = block_id(1)
   let bb = block_id(2)
@@ -438,7 +442,7 @@ const TR_TILE: Int = 32
 # is this kernel's whole point. The function is `transpose_matrix` and the
 # kernel `transpose`: since tileir 0.10.0 `transpose` is the rank-2 tile
 # operation this module imports, and the golden keeps its name.
-fn transpose_matrix(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn transpose_matrix(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let bi = block_id(0)
   let bj = block_id(1)
   let t = load_cell(x)
@@ -455,7 +459,7 @@ const LN_EPS: Float = 1.0e-5
 
 # `(t - mean) / sqrt(var + eps)`, the normalisation every kernel below
 # shares, over a tile of `shape` holding `count` values.
-fn normalise(count: Int, eps: Float, t: Tile[F64]) -> Tile[F64] !Dev = {
+fn normalise(count: Int, eps: Float, t: Tile[Float]) -> Tile[Float] !Dev = {
   let n = f_const(F64, to_float(count))
   let d = t - reduce_sum(t) / n
   let variance = reduce_sum(d * d) / n
@@ -464,7 +468,7 @@ fn normalise(count: Int, eps: Float, t: Tile[F64]) -> Tile[F64] !Dev = {
 
 # `x` and `out` are cut into rows (one a block); `gamma` and `beta` are one
 # cell each, which no grid axis picks: every block reads cell 0.
-fn layer_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn layer_norm(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let at = [idx_const(0)]
   let r = normalise(LN_D, LN_EPS, load_cell(x))
   store_cell(out, r * load_at(gamma, at) + load_at(beta, at))
@@ -484,7 +488,7 @@ const BN_EPS: Float = 1.0e-5
 # and the scale is read with a stride of zero: neither cut is a cell in the
 # grid's own order, so all four parameters are read and written through the
 # pointer path, `out` as a Shared.
-fn batch_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn batch_norm(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let col = block_id(0)
   let t = load(x, col, [BN_ROWS], strides: Some([BN_CHANNELS]))
   let g = load(gamma, col, [BN_ROWS], strides: Some([0]))
@@ -513,9 +517,9 @@ fn gn_per_group() -> Int = GN_C / GN_GROUPS
 # then the length-1 dimension 0, which folds the same values in the same
 # groups as before. The scale is a [1, per, 1] cell of the (1, GN_C, 1)
 # view of `gamma`, widened along the spatial dimension by `broadcast`.
-fn sum3(t: Tile[F64]) -> Tile[F64] !Dev = reduce_sum(reduce_sum(reduce_sum(t, dim: 2), dim: 1))
+fn sum3(t: Tile[Float]) -> Tile[Float] !Dev = reduce_sum(reduce_sum(reduce_sum(t, dim: 2), dim: 1))
 
-fn group_norm(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn group_norm(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [1, gn_per_group(), GN_HW]
   let t = load_cell(x)
   let at = [idx_const(0), idx_const(0)]
@@ -535,7 +539,7 @@ const FR_ROWS: Int = 64
 const FR_D: Int = 256
 const FR_EPS: Float = 1.0e-5
 
-fn fused_rms_norm(x: Param[F64], res: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn fused_rms_norm(x: Param[Float], res: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let h = load_cell(x) + load_cell(res)
   let ms = reduce_sum(h * h) / f_const(F64, to_float(FR_D))
   store_cell(out, h / sqrt(ms + f_const(F64, FR_EPS)) * load_at(w, [idx_const(0)]))
@@ -583,7 +587,7 @@ const TT_ROWS: Int = 100
 const TT_COLS: Int = 60
 const TT_TILE: Int = 32
 
-fn transpose_tail(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn transpose_tail(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [TT_TILE, TT_TILE]
   let bi = block_id(0)
   let bj = block_id(1)
@@ -608,7 +612,7 @@ const C1_TILE: Int = 128
 
 fn c1_out() -> Int = C1_N - C1_K + 1
 
-fn conv1d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn conv1d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [C1_TILE]
   let blk = tile_at(block_id(0), C1_TILE)
   let m = tail_mask(blk, shape, c1_out())
@@ -634,7 +638,7 @@ fn c2_oh() -> Int = C2_H - C2_K + 1
 
 fn c2_ow() -> Int = C2_W - C2_K + 1
 
-fn conv2d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn conv2d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [C2_TILE, C2_TILE]
   let bi = block_id(0)
   let bj = block_id(1)
@@ -668,7 +672,7 @@ fn mp_oh() -> Int = MP_H / MP_K
 
 fn mp_ow() -> Int = MP_W / MP_K
 
-fn max_pool(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn max_pool(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [MP_TILE, MP_TILE]
   let bi = block_id(0)
   let bj = block_id(1)
@@ -695,7 +699,7 @@ fn max_pool(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 const IL_N: Int = 500
 const IL_TILE: Int = 128
 
-fn interleave(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn interleave(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [IL_TILE]
   let blk = tile_at(block_id(0), IL_TILE)
   let m = tail_mask(blk, shape, IL_N)
@@ -717,7 +721,7 @@ const RG_R: Float = 0.299
 const RG_G: Float = 0.587
 const RG_B: Float = 0.114
 
-fn rgb_gray(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn rgb_gray(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [RG_TILE]
   let blk = tile_at(block_id(0), RG_TILE)
   let m = tail_mask(blk, shape, RG_N)
@@ -741,7 +745,7 @@ const JC_H: Int = 34
 const JC_W: Int = 34
 const JC_TILE: Int = 16
 
-fn jacobi(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn jacobi(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [JC_TILE, JC_TILE]
   let bi = block_id(0)
   let bj = block_id(1)
@@ -776,7 +780,7 @@ const DW_TL: Int = 32
 
 fn dw_out() -> Int = DW_L - DW_K + 1
 
-fn depthwise_conv1d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn depthwise_conv1d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [DW_TC, DW_TL]
   let bc = block_id(0)
   let bl = block_id(1)
@@ -817,7 +821,7 @@ fn gb_lo(t: Int) -> Int = if t < gb_half() { gb_half() - t } else { 0 }
 
 fn gb_hi(n: Int, t: Int) -> Int = if t > gb_half() { n - (t - gb_half()) } else { n }
 
-fn gaussian_blur(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gaussian_blur(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let shape = [GB_TILE, GB_TILE]
   let bi = block_id(0)
   let bj = block_id(1)
@@ -1017,7 +1021,7 @@ const WIDE_TILE: Int = 128
 # gives the multi-output path a golden and a device, the way `int_ops` did
 # for the integer opcodes. A device that wrote only its last argument would
 # leave `sum` holding the sentinel.
-fn sum_diff(a: Param[F64], b: Param[F64], sum: Param[F64], diff: Param[F64]) -> Unit !Dev = {
+fn sum_diff(a: Param[Float], b: Param[Float], sum: Param[Float], diff: Param[Float]) -> Unit !Dev = {
   let ta = load_cell(a)
   let tb = load_cell(b)
   store_cell(sum, ta + tb)
@@ -1042,7 +1046,7 @@ const REV_TILE: Int = 128
 #
 # Two regions a block, its tile and the mirror of it, so the parameter is a
 # Shared and the kernel stays on the pointer path: a cell is one region.
-fn reverse(x: Param[F64]) -> Unit !Dev = {
+fn reverse(x: Param[Float]) -> Unit !Dev = {
   let s = [REV_TILE]
   let blk = tile_at(block_id(0), REV_TILE)
   let m = tail_mask(blk, s, REV_N / 2)
@@ -1074,7 +1078,7 @@ fn invert(img: Param[I8]) -> Unit !Dev =
 # `((a + b) * a) - b` over f16 tiles: the f16 twin of `elemops` and
 # `int_ops`, and no leetgpu problem. Three operations the double-rounding
 # theorem covers, each landing its result in an f16 tile, so every one of
-# them is `narrow.round_fp16` of the exact answer and the whole kernel is
+# them is `narrow.round_f16` of the exact answer and the whole kernel is
 # bit-exact against a host reference that rounds after each step.
 const F16E_N: Int = 1000
 const F16E_TILE: Int = 128
@@ -1085,7 +1089,7 @@ fn f16_ops(a: Param[F16], b: Param[F16], out: Param[F16]) -> Unit !Dev = {
   store_cell(out, (ta + tb) * ta - tb)
 }
 
-# The dot product of two f16 vectors into an f64 answer: leetgpu 58 (FP16
+# The dot product of two f16 vectors into an f64 answer: leetgpu 58 (F16
 # Dot Product), and the one client of `ftof`.
 #
 # The operands are f16 and the arithmetic is not: each tile is widened with
@@ -1098,7 +1102,7 @@ fn f16_ops(a: Param[F16], b: Param[F16], out: Param[F16]) -> Unit !Dev = {
 const DF16_N: Int = 1000
 const DF16_TILE: Int = 1024
 
-fn dot_f16(a: Param[F16], b: Param[F16], out: Param[F64]) -> Unit !Dev = {
+fn dot_f16(a: Param[F16], b: Param[F16], out: Param[Float]) -> Unit !Dev = {
   let ta = float_to_float(load_cell(a), F64)
   let tb = float_to_float(load_cell(b), F64)
   store_cell(out, reduce_sum(ta * tb))
@@ -1233,7 +1237,7 @@ const EMB_MISS: Float = 0.0 - 777.0
 # is the block's TOK_TILE rows, an Out cell whose row count is the grid's
 # (`DYN_DIM`): the last block's four rows past TOK_N are written too, MISS
 # rows, exactly as the unmasked store wrote them.
-fn token_embed(ids: Param[I32], table: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn token_embed(ids: Param[I32], table: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [TOK_TILE, EMB_DIM]
   let id = load(ids, tile_at(block_id(0), TOK_TILE), s, strides: Some(axis_strides(2, 0, 1)))
   let ok = in_range(id, 0, EMB_ROWS)
@@ -1260,7 +1264,7 @@ const SORT_N: Int = 32
 # The count is folded in f64 over ones and zeroes, so the fold order the
 # dialect leaves unspecified cannot show: every partial sum is an integer
 # below 32 and exact in binary64.
-fn sort_rank(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn sort_rank(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s2 = [SORT_N, SORT_N]
   let s1 = [SORT_N]
   let zero = idx_const(0)
@@ -1283,7 +1287,7 @@ const MG_N: Int = 32
 # two rank sets disjoint when the buffers share a value, so the two
 # scatters never write one element twice; the corpus puts values in both
 # buffers on purpose.
-fn merge_rank(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn merge_rank(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s2 = [MG_N, MG_N]
   let s1 = [MG_N]
   let zero = idx_const(0)
@@ -1310,7 +1314,7 @@ const SC_TILE: Int = 128
 # behind it whose only job is to give the masked scatter a golden and a
 # device. `reverse` (knife 11) writes a permutation too, but with a
 # STRIDE; this one reads its permutation out of a buffer.
-fn scatter_perm(perm: Param[I32], x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn scatter_perm(perm: Param[I32], x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let p = load_cell(perm)
   let dst = and_i(p, i_const(SC_N - 1))
   scatter(out, dst, load_cell(x), mask: Some(in_range(p, 0, SC_N)))
@@ -1359,7 +1363,7 @@ const SCAN_N: Int = 100
 # Sum). Masked at both ends of the operation, so the lanes past the end are
 # neither read nor written and the padding zero they fold in is the sum's
 # identity.
-fn prefix_sum(x: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn prefix_sum(x: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, d_scan(load_cell(x), 0.0, (acc, e) => acc + e))
 
 # The sliding window's shape: MSA_W consecutive of MSA_N values, in one
@@ -1418,7 +1422,7 @@ fn max_subarray(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 # two-operand scan. The corpus must set the flag of lane 0: with no
 # segment open at all there is nothing to subtract, and leetgpu's own tests
 # always open one there.
-fn seg_scan(values: Param[F64], flags: Param[I32], out: Param[F64]) -> Unit !Dev = {
+fn seg_scan(values: Param[Float], flags: Param[I32], out: Param[Float]) -> Unit !Dev = {
   let v = load_cell(values)
   let f = int_to_float(load_cell(flags), F64)
   let excl = sub(d_scan(v, 0.0, (acc, e) => acc + e), v)
@@ -1444,7 +1448,7 @@ fn seg_scan(values: Param[F64], flags: Param[I32], out: Param[F64]) -> Unit !Dev
 #
 # The lanes past SCAN_N read 0, which is not positive, so `keep` leaves
 # them out with no mask of its own; the output is a scatter, a Shared.
-fn compact(a: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn compact(a: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(a)
   let keep = gt(t, f_const(F64, 0.0))
   let ones = select(keep, i_const(1), i_const(0))
@@ -1470,7 +1474,7 @@ const LR_L: Int = 64
 # `h[0] = x[0]` falls out of the identity not being folded in: the prefix
 # of one element is that element, so lane 0 is `(a[0], x[0])` and `a[0]` is
 # never used. That is exactly what leetgpu's reference does.
-fn linrec(a: Param[F64], x: Param[F64], h: Param[F64]) -> Unit !Dev = {
+fn linrec(a: Param[Float], x: Param[Float], h: Param[Float]) -> Unit !Dev = {
   let (_c, hh) = d_scan2(load_cell(a), load_cell(x), 1.0, 0.0, (ac, av, ec, ev) => (ec * ac, fma(ec, av, ev)))
   store_cell(h, hh)
 }
@@ -1501,7 +1505,7 @@ fn gae_lam() -> Float = 0.95
 #
 # `values` is read twice, by its cell and one lane late by a gather: an In
 # with cells takes both, since a gather is a read.
-fn gae(rewards: Param[F64], values: Param[F64], adv: Param[F64]) -> Unit !Dev = {
+fn gae(rewards: Param[Float], values: Param[Float], adv: Param[Float]) -> Unit !Dev = {
   let s = [GAE_S]
   let blk = tile_at(block_id(0), GAE_S)
   let nxt = and_i(add_i(lanes(blk, s), i_const(1)), i_const(GAE_B * GAE_S - 1))
@@ -1536,8 +1540,8 @@ const SSM_N: Int = 16
 # constant along the state axis (stride 0), `A` is constant along the step
 # axis, and `B` and `C` are dense in both. Nothing is masked: every extent
 # divides its tile.
-fn ssm_scan(u: Param[F64], delta: Param[F64], amat: Param[F64], bmat: Param[F64],
-  cmat: Param[F64], skip: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn ssm_scan(u: Param[Float], delta: Param[Float], amat: Param[Float], bmat: Param[Float],
+  cmat: Param[Float], skip: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let s2 = [SSM_T, SSM_N]
   let s1 = [SSM_T]
   let b = block_id(0)
@@ -1680,7 +1684,7 @@ const ERF_TILE: Int = 128
 # the error function inside a product, where a large multiplier could hide
 # where the error is; here it is on its own, so what layer 2 measures is
 # 7.1.26's error and nothing else.
-fn erf_sweep(x: Param[F64], out: Param[F64]) -> Unit !Dev = store_cell(out, erf(load_cell(x)))
+fn erf_sweep(x: Param[Float], out: Param[Float]) -> Unit !Dev = store_cell(out, erf(load_cell(x)))
 
 # The gate's shape: the input is one buffer of 2 * GEGLU_HALF values, its
 # first half the values to gate and its second half the gates, which is
@@ -1706,7 +1710,7 @@ const GEGLU_INV_SQRT2: Float = 0.7071067811865475
 # The two halves are one buffer read at two bases under one mask, which is
 # the pointer path's (an In of the whole tensor); the output is the block's
 # cell.
-fn geglu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn geglu(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GEGLU_TILE]
   let blk = tile_at(block_id(0), GEGLU_TILE)
   let m = tail_mask(blk, s, GEGLU_HALF)
@@ -1754,7 +1758,7 @@ const TRIG_TILE: Int = 128
 # TRIG_N is also what stops the tail; the mask is the reads'. So is every
 # other segmented kernel below (the element format kernels and the pack
 # round trip).
-fn trig_sweep(x: Param[F64], y: Param[F64], z: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn trig_sweep(x: Param[Float], y: Param[Float], z: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [TRIG_TILE]
   let blk = tile_at(block_id(0), TRIG_TILE)
   let m = tail_mask(blk, s, TRIG_N)
@@ -1763,7 +1767,7 @@ fn trig_sweep(x: Param[F64], y: Param[F64], z: Param[F64], out: Param[F64]) -> U
   let a = load(x, blk, s, mask: Some(m), pad: Some(zero))
   let b = load(y, blk, s, mask: Some(m), pad: Some(one))
   let c = load(z, blk, s, mask: Some(m), pad: Some(one))
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [j, 0], reshape(t, [1, TRIG_TILE]))
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, TRIG_TILE]))
   seg(0, sin(a))
   seg(1, cos(a))
   seg(2, tan(a))
@@ -1802,7 +1806,7 @@ const ROPE_ROWS: Int = 32
 # Since the batch's PR-3 every buffer is cut into the halves of a row block
 # (`rope_half()`, one half picked by `load_at`), and the output's cell, the
 # whole row block, is written in its two halves (`store_sub`).
-fn rope(q: Param[F64], cs: Param[F64], sn: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn rope(q: Param[Float], cs: Param[Float], sn: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let lo = [idx_const(0)]
   let x1 = load_at(q, lo)
   let x2 = load_at(q, [idx_const(1)])
@@ -1862,8 +1866,8 @@ fn dtype_i16(a: Param[I16], b: Param[I16], out: Param[I16]) -> Unit !Dev = {
 # anything about is the wrap at 2^63, because the host channel is
 # `List[Float]` and a binary64 significand stops at 2^53; that debt is named
 # in std/gpu's `I64` and in scripts/tileir-features/types.txt.
-fn dtype_i64(a: Param[I64], b: Param[I64], out: Param[I64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[I64]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
+fn dtype_i64(a: Param[Int], b: Param[Int], out: Param[Int]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Int]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
   let ta = load_cell(a)
   let tb = load_cell(b)
   seg(0, addi(ta, tb))
@@ -1886,20 +1890,20 @@ const I64_STEP: Int = 4294967296
 # and goes there and back. The first is the storage form and the second is
 # the conversion, and a format that had only one of them would still have a
 # kernel here.
-fn dtype_tf32(x: Param[TF32], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
+fn dtype_tf32(x: Param[TF32], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
   seg(0, float_to_float(load_cell(x), F64))
   seg(1, float_to_float(float_to_float(load_cell(y), TF32), F64))
 }
 
-fn dtype_e4m3(x: Param[F8E4M3FN], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
+fn dtype_e4m3(x: Param[F8E4M3FN], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
   seg(0, float_to_float(load_cell(x), F64))
   seg(1, float_to_float(float_to_float(load_cell(y), F8E4M3FN), F64))
 }
 
-fn dtype_e5m2(x: Param[F8E5M2], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
+fn dtype_e5m2(x: Param[F8E5M2], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
   seg(0, float_to_float(load_cell(x), F64))
   seg(1, float_to_float(float_to_float(load_cell(y), F8E5M2), F64))
 }
@@ -1919,8 +1923,8 @@ fn dtype_e5m2(x: Param[F8E5M2], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # and not a property of the format: docs/tile-backend-design.md 6.6 records
 # it, because a later tileiras that fixes it should let this kernel lose
 # two conversions.
-fn dtype_e8m0(x: Param[F8E8M0FNU], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
+fn dtype_e8m0(x: Param[F8E8M0FNU], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, DT_TILE]))
   seg(0, float_to_float(load_cell(x), F64))
   let narrowed = float_to_float(load_cell(y), F32)
   let exponent = float_to_float(narrowed, F8E8M0FNU)
@@ -1997,8 +2001,8 @@ const E2M1_TILE: Int = 128
 const E2M1_BYTES: Int = 64
 const E2M1_WORDS: Int = 16
 
-fn dtype_e2m1(x: Param[I32], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [j, 0], reshape(t, [1, E2M1_TILE]))
+fn dtype_e2m1(x: Param[I32], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [j, 0], reshape(t, [1, E2M1_TILE]))
   let nibbles = unpack_bytes(pack_bytes(load_cell(x)), F4E2M1FN)
   seg(0, float_to_float(nibbles, F64))
   seg(1, float_to_float(float_to_float(load_cell(y), F4E2M1FN), F64))
@@ -2055,7 +2059,7 @@ const LORA_SCALE: Float = 0.5
 # wants by `transpose` in registers, where the pointer path read them
 # with the two strides swapped; the three LoRA launches and the attention
 # family below read every transposed operand that way.
-fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
+fn lora_base(x: Param[Float], w: Param[Float], base: Param[Float]) -> Unit !Dev = {
   var acc = zeros(base)
   for k in d_range(0, LORA_DIN / LORA_T) {
     acc = mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc)
@@ -2065,7 +2069,7 @@ fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
 
 # The low-rank projection, launch 2 of 3: h[M, RANK] = x[M, DIN] * A[RANK, DIN]^T.
 # One block: RANK is narrower than a tile, which is the point of a rank.
-fn lora_hidden(x: Param[F64], a: Param[F64], h: Param[F64]) -> Unit !Dev = {
+fn lora_hidden(x: Param[Float], a: Param[Float], h: Param[Float]) -> Unit !Dev = {
   var acc = zeros(h)
   for k in d_range(0, LORA_DIN / LORA_T) {
     acc = mma(load_at(x, [k]), load_at(a, [k]).transpose(), acc)
@@ -2075,7 +2079,7 @@ fn lora_hidden(x: Param[F64], a: Param[F64], h: Param[F64]) -> Unit !Dev = {
 
 # The sum, launch 3 of 3: out = base + scale * (h[M, RANK] * B[DOUT, RANK]^T).
 # This is the launch that reads what BOTH earlier launches wrote.
-fn lora_out(base: Param[F64], h: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn lora_out(base: Param[Float], h: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let at = [idx_const(0)]
   let delta = mma(load_at(h, at), load_at(b, at).transpose(), f_const(F64, 0.0))
   store_cell(out, load_cell(base) + f_const(F64, LORA_SCALE) * delta)
@@ -2096,7 +2100,7 @@ const ATT_INV_SQRT_D: Float = 0.17677669529663687
 
 # Launch 1 of 3: S[M, N] = Q[M, D] * K[N, D]^T / sqrt(D). K is stored one
 # key a row, so this is the transposed product again.
-fn attn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = store_cell(s, att_scaled(q, k))
+fn attn_scores(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = store_cell(s, att_scaled(q, k))
 
 # Launch 2 of 3: the softmax of each row of S, one row a block. Reads the
 # whole row, so no mask: ATT_N is the tile.
@@ -2104,14 +2108,14 @@ fn attn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = store
 # Its rows are a run as long as the grid makes it (`run_of(ATT_N)`), which
 # is what lets the multi-head and the int8-cache sequences launch it over
 # more rows than this family has.
-fn attn_softmax(s: Param[F64], p: Param[F64]) -> Unit !Dev = {
+fn attn_softmax(s: Param[Float], p: Param[Float]) -> Unit !Dev = {
   let t = load_cell(s)
   let ex = exp(t - reduce_max(t))
   store_cell(p, ex / reduce_sum(ex))
 }
 
 # Launch 3 of 3: O[M, D] = P[M, N] * V[N, D], an ordinary row-major product.
-fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev = {
   var acc = zeros(o)
   for k in d_range(0, ATT_N / ATT_T) { acc = mma(load_at(p, [k]), load_at(v, [k]), acc) }
   store_cell(o, acc)
@@ -2155,19 +2159,19 @@ fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
 # algorithm, and `flash_attn_bf16` below is it.
 #
 # The format is written where a value is first made and nowhere else: the
-# two running tiles' starting values are `full` under a `Tile[F64]`, and the
-# scores are a `Tile[F64]` so that the `lit(0.0)` accumulator of the first
+# two running tiles' starting values are `full` under a `Tile[Float]`, and the
+# scores are a `Tile[Float]` so that the `lit(0.0)` accumulator of the first
 # `mma` has a format to be made in.
 const FA_BQ: Int = 32
 const FA_BK: Int = ATT_D
 
-fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let tq = load_cell(q)
-  var m: Tile[F64] = full([FA_BQ, 1], -INFINITY)
-  var l: Tile[F64] = full([FA_BQ, 1], 0.0)
+  var m: Tile[Float] = full([FA_BQ, 1], -INFINITY)
+  var l: Tile[Float] = full([FA_BQ, 1], 0.0)
   var acc = zeros(o)
   for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[F64] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * lit(ATT_INV_SQRT_D)
+    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * lit(ATT_INV_SQRT_D)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
@@ -2193,7 +2197,7 @@ fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Uni
 # a row of the dialect's `mmaf` table, bf16 into bf16 is not. Tolerance
 # tier, and not the f64 kernels' tolerance: see scripts/tile-gpu-diff's
 # seq_diff for the bound and what it is derived from.
-fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[F64]) -> Unit !Dev = {
+fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float]) -> Unit !Dev = {
   let tq = load_cell(q)
   var m: Tile[F32] = full([FA_BQ, 1], -INFINITY)
   var l: Tile[F32] = full([FA_BQ, 1], 0.0)
@@ -2224,7 +2228,7 @@ const IS_D: Int = 64
 # `remi` and `subi` on the index tile), two `[16, 1]` row statistics that
 # meet the `[16, 64]` tile with no `broadcast` (the same-rank rule), and a
 # `lit` that takes the operation's f64.
-fn idx_softmax(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn idx_softmax(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let n = idx_const(IS_N / IS_T)
   let j = (b + n / 2) % n
@@ -2249,7 +2253,7 @@ const CE_T: Int = 64
 # sets it, the loop's upper bound from `blocks_of` (a static FREE_AXIS
 # dimension, so a constant) and the divisor from `extent_of` (the `Out`'s
 # DYN_DIM dimension, so the grid's blocks times the tile).
-fn carry_extent(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn carry_extent(x: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
   let best = carry(reduce_max(load_at(x, [zero, zero]), dim: 0))
   let total = carry(zeros(o))
@@ -2268,7 +2272,7 @@ fn carry_extent(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
 # a host value, and the kernel does not know how many times it runs.
 const MP_N: Int = 32
 
-fn matpow_step(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev =
+fn matpow_step(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev =
   store_cell(c, mma(load_cell(a), load_cell(b), f_const(F64, 0.0)))
 
 # leetgpu 84 (SwiGLU MLP Block): (silu(x Wg) * (x Wu)) Wd, four launches
@@ -2281,7 +2285,7 @@ const SW_DFFN: Int = 128
 const SW_T: Int = 32
 
 # Launches 1 and 2 of 4: y[M, DFFN] = x[M, DMODEL] * w[DMODEL, DFFN].
-fn swiglu_proj(x: Param[F64], w: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn swiglu_proj(x: Param[Float], w: Param[Float], y: Param[Float]) -> Unit !Dev = {
   var acc = zeros(y)
   for k in d_range(0, SW_DMODEL / SW_T) { acc = mma(load_at(x, [k]), load_at(w, [k]), acc) }
   store_cell(y, acc)
@@ -2291,14 +2295,14 @@ fn swiglu_proj(x: Param[F64], w: Param[F64], y: Param[F64]) -> Unit !Dev = {
 # block. The launch that reads what the two projections wrote.
 const SW_ACT_TILE: Int = 128
 
-fn swiglu_act(gate: Param[F64], up: Param[F64], h: Param[F64]) -> Unit !Dev = {
+fn swiglu_act(gate: Param[Float], up: Param[Float], h: Param[Float]) -> Unit !Dev = {
   let tg = load_cell(gate)
   let d = f_const(F64, 1.0) + exp(-tg)
   store_cell(h, tg / d * load_cell(up))
 }
 
 # Launch 4 of 4: out[M, DMODEL] = h[M, DFFN] * Wd[DFFN, DMODEL].
-fn swiglu_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn swiglu_down(h: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, SW_DFFN / SW_T) { acc = mma(load_at(h, [k]), load_at(w, [k]), acc) }
   store_cell(out, acc)
@@ -2319,7 +2323,7 @@ fn swiglu_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # store: the round reads the matrix as it was before it.
 const APSP_N: Int = 16
 
-fn apsp_step(d: Param[F64], kb: Param[I32]) -> Unit !Dev = {
+fn apsp_step(d: Param[Float], kb: Param[I32]) -> Unit !Dev = {
   let sh = [APSP_N, APSP_N]
   let k = gather(kb, i_const(0))
   let row = add_i(mul_i(k, i_const(APSP_N)), coord(idx_const(0), sh, 1, 1))
@@ -2344,7 +2348,7 @@ fn apsp_step(d: Param[F64], kb: Param[I32]) -> Unit !Dev = {
 ## matrix, the query rows following grid axis 0 and the key rows axis 1
 ## (`att_qk`), each read as its one cell along the head dimension. Written once here rather than five more times; the trace is the
 ## same operations in the same order either way.
-fn att_scaled(q: Param[F64], k: Param[F64]) -> Tile[F64] !Dev = {
+fn att_scaled(q: Param[Float], k: Param[Float]) -> Tile[Float] !Dev = {
   let at = [idx_const(0)]
   let acc = mma(load_at(q, at), load_at(k, at).transpose(), f_const(F64, 0.0))
   acc * f_const(F64, ATT_INV_SQRT_D)
@@ -2359,7 +2363,7 @@ fn att_col(bn: Idx) -> Tile[I32] !Dev = coord(bn * idx_const(ATT_T), [ATT_T, ATT
 
 # leetgpu 53 (Causal Self-Attention): the score at a key in the query's
 # future is -inf, so `attn_softmax` gives it weight exactly zero.
-fn attn_causal(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn attn_causal(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let bm = block_id(0)
   let bn = block_id(1)
   let v = att_scaled(q, k)
@@ -2372,7 +2376,7 @@ fn attn_causal(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # finite and the slope is a host constant of the recording.
 const ATT_ALIBI: Float = 0.0 - 0.125
 
-fn attn_alibi(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn attn_alibi(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let bm = block_id(0)
   let bn = block_id(1)
   let v = att_scaled(q, k)
@@ -2385,7 +2389,7 @@ fn attn_alibi(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # not causal.
 const ATT_WINDOW: Int = 8
 
-fn attn_window(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn attn_window(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let bm = block_id(0)
   let bn = block_id(1)
   let v = att_scaled(q, k)
@@ -2399,7 +2403,7 @@ fn attn_window(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 const ATT_SINKS: Int = 4
 const ATT_SINK_WINDOW: Int = 16
 
-fn attn_sinks(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn attn_sinks(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let bm = block_id(0)
   let bn = block_id(1)
   let v = att_scaled(q, k)
@@ -2423,7 +2427,7 @@ fn attn_sinks(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # a `pow` whose two sides would be two different approximations.
 const ATT_LN_GAMMA: Float = 0.0 - 0.10536051565782628
 
-fn attn_decay(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn attn_decay(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let bm = block_id(0)
   let bn = block_id(1)
   let v = att_scaled(q, k)
@@ -2446,7 +2450,7 @@ const CCE_C: Int = 32
 # index is not an argument, so it is read out of the lane numbers: lane `l`
 # of a 1-wide tile at block `i` is `i`, and `i * C + label[i]` is the
 # element of `logits` the true class sits at.
-fn cce_row(logits: Param[F64], labels: Param[I32], loss: Param[F64]) -> Unit !Dev = {
+fn cce_row(logits: Param[Float], labels: Param[I32], loss: Param[Float]) -> Unit !Dev = {
   let i = block_id(0)
   let t = load(logits, tile_at(i, CCE_C), [CCE_C])
   let mx = reduce_max(t)
@@ -2459,7 +2463,7 @@ fn cce_row(logits: Param[F64], labels: Param[I32], loss: Param[F64]) -> Unit !De
 # Launch 2 of 2: the mean of the CCE_N row losses, one block over one tile.
 # It reads no block id at all, which is why the grid mutant is invisible
 # here (run.sh's table says so beside the other two).
-fn cce_mean(l: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn cce_mean(l: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, reduce_sum(load_cell(l)) / f_const(F64, to_float(CCE_N)))
 
 # ---- knife 18: the mechanism-complete singles, and the head axis ----
@@ -2480,7 +2484,7 @@ fn cce_mean(l: Param[F64], out: Param[F64]) -> Unit !Dev =
 const MV_M: Int = 64
 const MV_N: Int = 64
 
-fn matvec(a: Param[F64], x: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn matvec(a: Param[Float], x: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let tx = load(x, idx_const(0), [MV_M, MV_N], strides: Some(axis_strides(2, 1, 1)))
   store_cell(y, reduce_sum(load_cell(a) * tx))
 }
@@ -2556,7 +2560,7 @@ fn subarray_sum3d(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 const SWH_HALF: Int = 500
 const SWH_TILE: Int = 128
 
-fn swiglu_half(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn swiglu_half(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let sh = [SWH_TILE]
   let blk = tile_at(block_id(0), SWH_TILE)
   let m = tail_mask(blk, sh, SWH_HALF)
@@ -2580,7 +2584,7 @@ const DQ_TS: Int = 16
 
 fn dq_cols() -> Int = DQ_N / DQ_TS
 
-fn dequant(x: Param[F64], s: Param[F64], y: Param[F64]) -> Unit !Dev = {
+fn dequant(x: Param[Float], s: Param[Float], y: Param[Float]) -> Unit !Dev = {
   let sh = [DQ_M, DQ_N]
   let zero = idx_const(0)
   let ts = i_const(DQ_TS)
@@ -2608,7 +2612,7 @@ fn c3_oh() -> Int = C3_H - C3_KH + 1
 
 fn c3_ow() -> Int = C3_W - C3_KW + 1
 
-fn conv3d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn conv3d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let sh = [C3_TILE, C3_TILE]
   let bd = block_id(0)
   let zero = idx_const(0)
@@ -2653,7 +2657,7 @@ const MHA_INV_SQRT_DK: Float = 0.17677669529663687
 # grid's THIRD axis and the head's columns at `bh * MHA_DK`. The scores are
 # cut [1, T, T] with the head following axis 2 (`along: [2, 0, 1]`), and
 # the product is reshaped to the cell.
-fn mha_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn mha_scores(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let acc = mma(load_cell(q), load_cell(k).transpose(), f_const(F64, 0.0))
   store_cell(s, reshape(acc * f_const(F64, MHA_INV_SQRT_DK), [1, MHA_T, MHA_T]))
 }
@@ -2662,7 +2666,7 @@ fn mha_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # probabilities and the head's columns of `V`, and writing the head's
 # columns of the output: its cell, whose columns follow axis 2 where the
 # head is (`along: [0, 2]`).
-fn mha_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn mha_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let rows = block_id(2) * idx_const(MHA_N * MHA_N) + block_id(0) * idx_const(MHA_T * MHA_N)
   var acc = zeros(o)
   for kk in d_range(0, MHA_N / MHA_T) {
@@ -2695,7 +2699,7 @@ const AG_N: Int = 64
 const AG_R2: Float = 25.0
 const AG_ALPHA: Float = 0.05
 
-fn agent_step(a: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn agent_step(a: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let i = block_id(0)
   let sh = [AG_N]
   let one = [1]
@@ -2745,7 +2749,7 @@ fn agent_step(a: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # that the corpus has none.
 const NN_N: Int = 64
 
-fn nearest_idx(p: Param[F64], out: Param[I32]) -> Unit !Dev = {
+fn nearest_idx(p: Param[Float], out: Param[I32]) -> Unit !Dev = {
   let i = block_id(0)
   let sh = [NN_N]
   let base = i * 3
@@ -2786,12 +2790,12 @@ const XA_T: Int = 32
 # 1 / sqrt(XA_D), to the nearest Float.
 const XA_INV_SQRT_D: Float = 0.17677669529663687
 
-fn xattn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn xattn_scores(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let acc = mma(load_cell(q), load_cell(k).transpose(), f_const(F64, 0.0))
   store_cell(s, reshape(acc * f_const(F64, XA_INV_SQRT_D), [1, XA_T, XA_T]))
 }
 
-fn xattn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn xattn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let rows = block_id(2) * idx_const(XA_M * XA_N) + block_id(0) * idx_const(XA_T * XA_N)
   var acc = zeros(o)
   for kk in d_range(0, XA_N / XA_T) {
@@ -2828,14 +2832,14 @@ const GQ_INV_SQRT_D: Float = 0.17677669529663687
 # `(kv, g)`: `kv` follows axis 2 and `g` axis 0 (`along: [2, 0, 1]`), and
 # the product is reshaped to the cell's leading 1. `gqa_context`'s output
 # is cut the same way.
-fn gqa_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn gqa_scores(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let qh = block_id(2) * idx_const(GQ_GROUPS) + block_id(0)
   let tq = load(q, qh * idx_const(GQ_S * GQ_D), [GQ_S, GQ_D])
   let acc = mma(tq, load_cell(k).transpose(), f_const(F64, 0.0))
   store_cell(s, reshape(acc * f_const(F64, GQ_INV_SQRT_D), [1, GQ_S, GQ_S]))
 }
 
-fn gqa_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn gqa_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let bkv = block_id(2)
   let qh = bkv * idx_const(GQ_GROUPS) + block_id(0)
   let rows = qh * idx_const(GQ_S * GQ_S)
@@ -2865,7 +2869,7 @@ const GR_STD_EPS: Float = 1.0e-8
 # Launch 1 of 3: the group-normalised advantage of every reward, one batch
 # a block. The problem's standard deviation is the BIASED one (torch's
 # `unbiased=False`), so both moments divide by GR_G.
-fn grpo_adv(r: Param[F64], adv: Param[F64]) -> Unit !Dev = {
+fn grpo_adv(r: Param[Float], adv: Param[Float]) -> Unit !Dev = {
   let g = f_const(F64, to_float(GR_G))
   let t = load_cell(r)
   let d = t - reduce_sum(t) / g
@@ -2876,8 +2880,8 @@ fn grpo_adv(r: Param[F64], adv: Param[F64]) -> Unit !Dev = {
 # Launch 2 of 3: minus the mean over the sequence of the clipped surrogate
 # less the KL penalty, one (batch, group) row a block. The row's advantage
 # is one number read with a stride of ZERO.
-fn grpo_row(lp: Param[F64], lo: Param[F64], lr: Param[F64], adv: Param[F64],
-  rows: Param[F64]) -> Unit !Dev = {
+fn grpo_row(lp: Param[Float], lo: Param[Float], lr: Param[Float], adv: Param[Float],
+  rows: Param[Float]) -> Unit !Dev = {
   let a = broadcast(load_cell(adv), [GR_S])
   let p = load_cell(lp)
   let ratio = exp(p - load_cell(lo))
@@ -2901,7 +2905,7 @@ fn grpo_row(lp: Param[F64], lo: Param[F64], lr: Param[F64], adv: Param[F64],
 const KM_N: Int = 64
 const KM_K: Int = 4
 
-fn kmeans_assign(dx: Param[F64], dy: Param[F64], cx: Param[F64], cy: Param[F64],
+fn kmeans_assign(dx: Param[Float], dy: Param[Float], cx: Param[Float], cy: Param[Float],
   lab: Param[I32]) -> Unit !Dev = {
   let i = block_id(0)
   let sh = [KM_K]
@@ -2917,8 +2921,8 @@ fn kmeans_assign(dx: Param[F64], dy: Param[F64], cx: Param[F64], cy: Param[F64],
   store_cell(lab, which)
 }
 
-fn kmeans_centroid(dx: Param[F64], dy: Param[F64], lab: Param[I32], cx: Param[F64],
-  cy: Param[F64]) -> Unit !Dev = {
+fn kmeans_centroid(dx: Param[Float], dy: Param[Float], lab: Param[I32], cx: Param[Float],
+  cy: Param[Float]) -> Unit !Dev = {
   let at = [idx_const(0)]
   let nil = f_const(F64, 0.0)
   let mine = eq_i(load_at(lab, at), idx_as_tile(block_id(0)))
@@ -2972,7 +2976,7 @@ fn i8_signed(t: Tile[I8]) -> Tile[I32] !Dev =
 ## The dequantised cache block of head `h`: `K[h, j, d] * scale[h, j]` as
 ## an f64 tile of KV_S rows by KV_D columns, the scale broadcast along the
 ## row with a stride of zero.
-fn kv_dequant(c: Param[I8], scale: Param[F64], h: Idx) -> Tile[F64] !Dev = {
+fn kv_dequant(c: Param[I8], scale: Param[Float], h: Idx) -> Tile[Float] !Dev = {
   let ts = load(scale, h * idx_const(KV_S), [KV_S, KV_D], strides: Some(axis_strides(2, 0, 1)))
   int_to_float(i8_signed(load_cell(c)), F64) * ts
 }
@@ -2980,7 +2984,7 @@ fn kv_dequant(c: Param[I8], scale: Param[F64], h: Idx) -> Tile[F64] !Dev = {
 # Launch 1 of 3: s[h, j] = (Q[h, :] . dequant(K)[h, j, :]) / sqrt(D). One
 # block a head, and the query row is read with a stride of ZERO down the
 # key axis so that one row of Q serves all KV_S keys.
-fn kv_scores(q: Param[F64], k: Param[I8], ks: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn kv_scores(q: Param[Float], k: Param[I8], ks: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let h = block_id(0)
   let tq = load(q, h * idx_const(KV_D), [KV_S, KV_D], strides: Some(axis_strides(2, 1, 1)))
   let dot = reduce_sum(tq * kv_dequant(k, ks, h))
@@ -2990,7 +2994,7 @@ fn kv_scores(q: Param[F64], k: Param[I8], ks: Param[F64], s: Param[F64]) -> Unit
 # Launch 3 of 3: o[h, d] = sum_j p[h, j] * dequant(V)[h, j, d]. The weight
 # is the one read with a stride of zero this time, down the FEATURE axis,
 # and the fold is along the key axis rather than across it.
-fn kv_context(p: Param[F64], v: Param[I8], vs: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn kv_context(p: Param[Float], v: Param[I8], vs: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let h = block_id(0)
   let tw = load(p, h * idx_const(KV_S), [KV_S, KV_D], strides: Some(axis_strides(2, 0, 1)))
   store_cell(o, reduce_sum(tw * kv_dequant(v, vs, h), dim: 0))
@@ -3018,7 +3022,7 @@ fn kv_context(p: Param[F64], v: Param[I8], vs: Param[F64], o: Param[F64]) -> Uni
 # both dV = P^T dO and dK = dS^T Q are. One block a row block of C,
 # folding over M in ATT_T-wide chunks; the transpose is in the STRIDES of
 # A's tile and nowhere else.
-fn attn_bwd_mmt(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
+fn attn_bwd_mmt(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
   var acc = zeros(c)
   for k in d_range(0, ATT_M / ATT_T) {
     acc = mma(load_at(a, [k]).transpose(), load_at(b, [k]), acc)
@@ -3030,7 +3034,7 @@ fn attn_bwd_mmt(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
 # softmax Jacobian, and the same row-wide reduction `attn_softmax` does
 # with the maximum replaced by nothing: the row is ATT_N wide and the tile
 # is the whole of it, so there is no mask.
-fn attn_bwd_ds(dp: Param[F64], p: Param[F64], ds: Param[F64]) -> Unit !Dev = {
+fn attn_bwd_ds(dp: Param[Float], p: Param[Float], ds: Param[Float]) -> Unit !Dev = {
   let tp = load_cell(p)
   let prod = load_cell(dp) * tp
   store_cell(ds, prod - tp * reduce_sum(prod))
@@ -3050,12 +3054,12 @@ const LA_T: Int = 32
 ## `phi(x) = ELU(x) + 1`, which is `x + 1` above zero and `exp(x)` at or
 ## below it: `ELU(x) = exp(x) - 1` there, so the +1 cancels exactly and no
 ## kernel here ever computes `exp(x) - 1 + 1`.
-fn la_phi(t: Tile[F64]) -> Tile[F64] !Dev =
+fn la_phi(t: Tile[Float]) -> Tile[Float] !Dev =
   select(gt(t, f_const(F64, 0.0)), t + f_const(F64, 1.0), exp(t))
 
 # Launch 1 and 2 of 3: S[a, b] = sum_j phi(K[j, a]) * V[j, b]. One block
 # over the whole D by D answer, folding over the M rows in LA_T chunks.
-fn lin_attn_s(k: Param[F64], v: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn lin_attn_s(k: Param[Float], v: Param[Float], s: Param[Float]) -> Unit !Dev = {
   var acc = zeros(s)
   for j in d_range(0, LA_M / LA_T) {
     acc = mma(la_phi(load_at(k, [j]).transpose()), load_at(v, [j]), acc)
@@ -3069,7 +3073,7 @@ fn lin_attn_s(k: Param[F64], v: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # by D matrix and reading it with a column stride of zero makes every
 # column of the product the row's denominator. One product, one divide,
 # and no rank-1 tile to spread back out.
-fn lin_attn_out(q: Param[F64], s: Param[F64], z: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn lin_attn_out(q: Param[Float], s: Param[Float], z: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let zero = f_const(F64, 0.0)
   let tq = la_phi(load_cell(q))
   let tz = load(z, idx_const(0), [LA_D, LA_D], strides: Some(axis_strides(2, 0, LA_D)))
@@ -3102,7 +3106,7 @@ const OLS_W: Int = 16
 # a host reference add them in index order and every partial sum is the
 # same f64 -- which is why this sequence is exact tier and the GEMM
 # sequences beside it are not.
-fn ols_gram(x: Param[F64], y: Param[F64], a: Param[F64]) -> Unit !Dev = {
+fn ols_gram(x: Param[Float], y: Param[Float], a: Param[Float]) -> Unit !Dev = {
   let sh = [OLS_F, OLS_W]
   let col = coord(idx_const(0), sh, 1, 1)
   let inside = lt_i(col, i_const(OLS_F))
@@ -3128,7 +3132,7 @@ fn ols_gram(x: Param[F64], y: Param[F64], a: Param[F64]) -> Unit !Dev = {
 # One block over the whole matrix, so every read precedes the store and
 # the step sees the matrix as it was. That is not a preference here but a
 # requirement: a block writing row r reads row k, so two blocks would race.
-fn ols_elim(a: Param[F64], kb: Param[I32]) -> Unit !Dev = {
+fn ols_elim(a: Param[Float], kb: Param[I32]) -> Unit !Dev = {
   let sh = [OLS_F, OLS_W]
   let k = gather(kb, i_const(0))
   let row = coord(idx_const(0), sh, 0, 1)
@@ -3145,7 +3149,7 @@ fn ols_elim(a: Param[F64], kb: Param[I32]) -> Unit !Dev = {
 # with a stride of OLS_W. The whole of the last launch, and the reason the
 # sequence has one at all: what the caller asked for is F numbers and what
 # the elimination leaves is an F by W matrix.
-fn ols_beta(a: Param[F64], beta: Param[F64]) -> Unit !Dev =
+fn ols_beta(a: Param[Float], beta: Param[Float]) -> Unit !Dev =
   store_cell(beta, load(a, idx_const(OLS_F), [OLS_F], strides: Some([OLS_W])))
 
 # ---- knife 21: the two transformer blocks ----
@@ -3206,7 +3210,7 @@ const GP_GELU_K: Float = 0.044715
 # block. `layer_norm` is this kernel at another shape (64 rows of 256); a
 # recording is one shape, so the block's own 64 by 64 is a recording of its
 # own.
-fn gpt_ln(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gpt_ln(x: Param[Float], gamma: Param[Float], beta: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let at = [idx_const(0)]
   let r = normalise(GP_D, GP_EPS, load_cell(x))
   store_cell(out, r * load_at(gamma, at) + load_at(beta, at))
@@ -3218,10 +3222,10 @@ fn gpt_ln(x: Param[F64], gamma: Param[F64], beta: Param[F64], out: Param[F64]) -
 # `batch_norm` reads its per-channel scale.
 ## The `[GP_S, GP_T]` block of `bias` this block's columns add: a stride of
 ## zero down the rows, which is a pointer read (a cell is never a broadcast).
-fn gpt_bias(bias: Param[F64]) -> Tile[F64] !Dev =
+fn gpt_bias(bias: Param[Float]) -> Tile[Float] !Dev =
   load(bias, block_id(1) * idx_const(GP_T), [GP_S, GP_T], strides: Some([0, 1]))
 
-fn gpt_qkv(x: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gpt_qkv(x: Param[Float], w: Param[Float], bias: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, GP_D / GP_T) { acc = mma(load_at(x, [k]), load_at(w, [k]), acc) }
   store_cell(out, acc + gpt_bias(bias))
@@ -3231,7 +3235,7 @@ fn gpt_qkv(x: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> U
 # grid's third axis, both operands read out of the packed QKV buffer. The
 # scores are GP_H * GP_S rows of GP_S, a head one cell, its rows following
 # axis 2 (`along: [2, 0]`).
-fn gpt_scores(qkv: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn gpt_scores(qkv: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let bh = block_id(2)
   let tq = load_at(qkv, [bh])
   let tk = load_at(qkv, [idx_const(GP_D / GP_DH) + bh])
@@ -3243,7 +3247,7 @@ fn gpt_scores(qkv: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # probabilities against V's columns of the packed buffer, into the head's
 # columns of a GP_S by GP_D output: its cell, the columns following axis 2
 # where the head is (`along: [0, 2]`).
-fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
+fn gpt_context(p: Param[Float], qkv: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let vh = idx_const(2 * GP_D / GP_DH) + block_id(2)
   var acc = zeros(o)
   for k in d_range(0, GP_S / GP_T) { acc = mma(load_at(p, [k]), load_at(qkv, [k, vh]), acc) }
@@ -3252,7 +3256,7 @@ fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
 
 # Launch 6 of 12: the attention output projection, y[GP_S, GP_D] =
 # a[GP_S, GP_D] * W[GP_D, GP_D] + b[GP_D].
-fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gpt_dense(a: Param[Float], w: Param[Float], bias: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, GP_D / GP_T) { acc = mma(load_at(a, [k]), load_at(w, [k]), acc) }
   store_cell(out, acc + gpt_bias(bias))
@@ -3261,7 +3265,7 @@ fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) ->
 # Launch 9 of 12: the first feed-forward projection, y[GP_S, GP_F] =
 # a[GP_S, GP_D] * W[GP_D, GP_F] + b[GP_F]. Not `gpt_dense`: the output is
 # GP_F wide, and a width is a store stride and a weight stride.
-fn gpt_fc(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gpt_fc(a: Param[Float], w: Param[Float], bias: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, GP_D / GP_T) { acc = mma(load_at(a, [k]), load_at(w, [k]), acc) }
   store_cell(out, acc + gpt_bias(bias))
@@ -3271,7 +3275,7 @@ fn gpt_fc(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Un
 # element-wise, the tanh approximation of the gelu. The one launch of this
 # block that is a transcendental function, and `tanh` is an operation the
 # package has had since knife 7b.
-fn gpt_gelu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gpt_gelu(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let cube = t * (t * t)
   let inner = f_const(F64, GP_GELU_C) * (t + f_const(F64, GP_GELU_K) * cube)
@@ -3282,7 +3286,7 @@ fn gpt_gelu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # Launch 11 of 12: the second feed-forward projection, out[GP_S, GP_D] =
 # h[GP_S, GP_F] * W[GP_F, GP_D] + b[GP_D]. `gpt_dense`'s shape with GP_F
 # where its inner dimension is, so its loop runs twice as many rounds.
-fn gpt_down(h: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn gpt_down(h: Param[Float], w: Param[Float], bias: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, GP_F / GP_T) { acc = mma(load_at(h, [k]), load_at(w, [k]), acc) }
   store_cell(out, acc + gpt_bias(bias))
@@ -3321,7 +3325,7 @@ const LM_INV_SQRT_HD: Float = 0.17677669529663687
 # weight, one row a block. Not `rms_norm` (leetgpu 50 has no weight and is
 # recorded over a masked 1000-lane vector) and not `fused_rms_norm` (which
 # adds a residual first and is 64 rows of 256).
-fn llama_rms(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn llama_rms(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load_cell(x)
   let ms = reduce_sum(t * t) / f_const(F64, to_float(LM_D))
   let r = t * rsqrt(ms + f_const(F64, LM_EPS))
@@ -3335,7 +3339,7 @@ fn llama_rms(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # (`DYN_DIM`, its rows following axis 1), so the SAME kernel is Q at a grid
 # of LM_HQ heads and K and V at a grid of LM_HKV: the buffer's total width
 # never enters it.
-fn llama_qkv(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn llama_qkv(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, LM_D / LM_T) {
     acc = mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc)
@@ -3348,7 +3352,7 @@ fn llama_qkv(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # head's row. The head's block is its cell, cut as `llama_qkv`'s, and the
 # two halves are its pieces `[0, 0]` and `[0, 1]`; `cos` and `sin` are LM_S
 # by LM_HALF and every head reads the same table.
-fn llama_rope(x: Param[F64], cs: Param[F64], sn: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn llama_rope(x: Param[Float], cs: Param[Float], sn: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let x1 = load_at(x, [idx_const(0)])
   let x2 = load_at(x, [idx_const(1)])
   let at = [idx_const(0), idx_const(0)]
@@ -3363,7 +3367,7 @@ fn llama_rope(x: Param[F64], cs: Param[F64], sn: Param[F64], out: Param[F64]) ->
 # score at a key in the query's future is -inf, so `attn_softmax` gives it
 # weight exactly zero. One block a query head over the whole LM_S by LM_S
 # block, so the coordinates are read from the tile's own base.
-fn llama_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
+fn llama_scores(q: Param[Float], k: Param[Float], s: Param[Float]) -> Unit !Dev = {
   let qh = block_id(2) * idx_const(LM_HQ / LM_HKV) + block_id(0)
   let sh = [LM_S, LM_S]
   let tq = load(q, qh * idx_const(LM_S * LM_HD), [LM_S, LM_HD])
@@ -3377,7 +3381,7 @@ fn llama_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # concat_h(A_h) * W^T for a W stored OUT by IN. The merge is the LOOP: round
 # h reads head h's contiguous LM_S by LM_HD block and the weight columns
 # h * LM_HD onward, so no launch ever writes a merged copy.
-fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn llama_out(a: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for h in d_range(0, LM_D / LM_HD) {
     acc = mma(load_at(a, [h]), load_at(w, [h]).transpose(), acc)
@@ -3389,7 +3393,7 @@ fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # x[LM_S, LM_D] * W^T for W stored LM_F by LM_D. One kernel, two launches,
 # two weight buffers into two outputs: knife 16's `swiglu_proj` spends the
 # same coin on a weight stored IN by OUT.
-fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn llama_ffn(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, LM_D / LM_T) {
     acc = mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc)
@@ -3399,7 +3403,7 @@ fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 # Launch 16 of 17: the down projection, out[LM_S, LM_D] = h[LM_S, LM_F] *
 # W^T for W stored LM_D by LM_F. `llama_ffn` with the two widths exchanged.
-fn llama_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn llama_down(h: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   var acc = zeros(out)
   for k in d_range(0, LM_F / LM_T) {
     acc = mma(load_at(h, [k]), load_at(w, [k]).transpose(), acc)
@@ -3424,7 +3428,7 @@ fn llama_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # differ is refused by the assembler (PermuteOp's verifier derives the
 # result shape from the attribute), and a mutant that never reaches the
 # device says nothing about what the device does.
-fn shape_ops(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn shape_ops(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let base = tile_at(b, 128)
   let obase = tile_at(b, 192)
@@ -3447,7 +3451,7 @@ fn shape_ops(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # This is the only shape in which `get_num_tile_blocks` is visible at
 # layer 2: a kernel that merely stored the number would be testing the
 # store.
-fn grid_stride(x: Param[F64], out: Param[F64], rounds: Int) -> Unit !Dev = {
+fn grid_stride(x: Param[Float], out: Param[Float], rounds: Int) -> Unit !Dev = {
   let b = block_id(0)
   let nb = num_blocks(0)
   for k in d_range(0, rounds) {
@@ -3464,7 +3468,7 @@ fn grid_stride(x: Param[F64], out: Param[F64], rounds: Int) -> Unit !Dev = {
 # The judgement is that the load reads what the two stores wrote, so the
 # scratch buffer's own contents before the launch are the sentinel and
 # nothing here reproduces them.
-fn token_join(x: Param[F64], mid: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn token_join(x: Param[Float], mid: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), 128)
   let high = base + 64
   let lo = load(x, base, [64])
@@ -3478,7 +3482,7 @@ fn token_join(x: Param[F64], mid: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # BYTES, and the answer is read back as pointers and loaded through. The
 # judgement is that this reads exactly what a load at `base + delta` would,
 # so the input buffer carries `delta` elements past the last block's chunk.
-fn ptr_roundtrip(x: Param[F64], out: Param[F64], delta: Int) -> Unit !Dev = {
+fn ptr_roundtrip(x: Param[Float], out: Param[Float], delta: Int) -> Unit !Dev = {
   let b = block_id(0)
   let base = tile_at(b, 128)
   let here = ptr_offset(ptrs(x, [128]), lanes(base, [128]))
@@ -3492,7 +3496,7 @@ fn ptr_roundtrip(x: Param[F64], out: Param[F64], delta: Int) -> Unit !Dev = {
 # the addresses are the same numbers and only the READING changes; that is
 # the whole of what `ptr_to_ptr` does, and the reason the two formats here
 # have one width.
-fn ptr_recast(x: Param[I32], out: Param[F64]) -> Unit !Dev = {
+fn ptr_recast(x: Param[I32], out: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let base = tile_at(b, 128)
   let words = ptr_offset(ptrs(x, [128]), lanes(base, [128]))
@@ -3606,7 +3610,7 @@ fn loop_bound(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 # `x <- 0.5 * (x + a / x)`, three correctly rounded operations in an order
 # the host reference repeats, so the answer is exact tier; the round count
 # is carried alongside and lands in the second tile of the output.
-fn loop_until(a: Param[F64], out: Param[F64], eps: Float) -> Unit !Dev = {
+fn loop_until(a: Param[Float], out: Param[Float], eps: Float) -> Unit !Dev = {
   let av = load_cell(a)
   let half = f_const(F64, 0.5)
   let start = broadcast(f_const(F64, NEWTON_START), [LOOP_TILE])
@@ -3637,7 +3641,7 @@ fn loop_until(a: Param[F64], out: Param[F64], eps: Float) -> Unit !Dev = {
 # it run exactly one iteration and stop, rather than never stopping, and a
 # mutant that hangs the device is not a verdict (the same sentence
 # `grid_stride` is written under).
-fn loop_none(x: Param[F64], out: Param[F64], threshold: Float, step: Float) -> Unit !Dev = {
+fn loop_none(x: Param[Float], out: Param[Float], threshold: Float, step: Float) -> Unit !Dev = {
   let v = carry(load_cell(x))
   d_loop {
     let done = gt(f_const(F64, threshold), reduce_max(v.get()))
@@ -3740,7 +3744,7 @@ const ATTR_MEMSEM_SEGS: Int = 3
 #
 # The block's six segments are one cell of `attr_segs(6, 8)`: six is not a
 # power of two, so the cell has eight rows and the extent stops the last two.
-fn attr_round(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn attr_round(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let seg = (j: Int, t: Tile[F32]) => store_sub(out, [0, j, 0], reshape(float_to_float(t, F64), [1, 1, ATTR_TILE]))
   let a = float_to_float(load_cell(x), F32)
   let c = float_to_float(load_cell(y), F32)
@@ -3761,7 +3765,7 @@ fn attr_round(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # because a reader wants to see WHICH lane disagreed. Everything here is
 # f64: `propagate_nan` is not one of the f32-only modifiers, and the
 # comparison attribute is a property of `cmpf` at every width.
-fn attr_nan(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn attr_nan(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = load_cell(x)
   let c = load_cell(y)
   store_sub(out, [0], as_float(eq(a, c)))
@@ -3783,14 +3787,14 @@ fn attr_nan(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 }
 
 # A mask as 1.0 and 0.0, which is how attr_nan stores a comparison.
-fn as_float(m: Tile[I1]) -> Tile[F64] !Dev = int_to_float(mask_to_int(m), F64)
+fn as_float(m: Tile[Bool]) -> Tile[Float] !Dev = int_to_float(mask_to_int(m), F64)
 
 # `flush_to_zero` on the sum and the product, against the same two
 # operations without it. The corpus is f32 subnormals and pairs whose
 # exact f32 result is subnormal, so the attribute has something to flush;
 # on ordinary operands the four segments would be two pairs of equals and
 # the kernel would say nothing.
-fn attr_ftz(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn attr_ftz(x: Param[Float], y: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = float_to_float(load_cell(x), F32)
   let c = float_to_float(load_cell(y), F32)
   store_sub(out, [0], float_to_float(a + c, F64))
@@ -3805,7 +3809,7 @@ fn attr_ftz(x: Param[F64], y: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # and attr_diff prints that distance rather than asserting a bound on it.
 # The tier is tolerance for the same reason every transcendental kernel is
 # (docs 6.6): the device's approximation is not the host's.
-fn attr_approx(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn attr_approx(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = float_to_float(load_cell(x), F32)
   store_sub(out, [0], float_to_float(sqrt(a), F64))
   store_sub(out, [1], float_to_float(sqrt_approx(a), F64))
@@ -3857,7 +3861,7 @@ fn attr_memsem(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 # and the values are small integers, exact in binary32 under any order, so
 # the tier is exact by algebra and not by luck (the same argument knife
 # 14 wrote down for the integer histogram).
-fn attr_addf(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn attr_addf(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [ATTR_TILE]
   let b = block_id(0)
   let base = tile_at(b, ATTR_TILE)
@@ -3907,7 +3911,7 @@ fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
 # judgement holds only the saturating half on those lanes.
 const ATTR_SAT_SEGS: Int = 2
 
-fn attr_sat(x: Param[F64], out: Param[I32]) -> Unit !Dev = {
+fn attr_sat(x: Param[Float], out: Param[I32]) -> Unit !Dev = {
   let s = [ATTR_TILE]
   let b = block_id(0)
   let base = tile_at(b, ATTR_TILE)
@@ -3936,8 +3940,8 @@ const ATTR_FTOF_SEGS: Int = 11
 
 #
 # The eleven segments are a cell of `attr_segs(11, 16)`, as `attr_round`'s.
-fn attr_ftof(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
-  let seg = (j: Int, t: Tile[F64]) => store_sub(out, [0, j, 0], reshape(t, [1, 1, ATTR_TILE]))
+fn attr_ftof(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let seg = (j: Int, t: Tile[Float]) => store_sub(out, [0, j, 0], reshape(t, [1, 1, ATTR_TILE]))
   let a = load_cell(x)
   let f = float_to_float(a, F32)
   seg(0, float_to_float(f, F64))
@@ -4088,7 +4092,7 @@ fn assume_bounded(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
 const GLOBAL_TILE: Int = 128
 const GLOBAL_ALIGN: Int = 256
 
-fn global_table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn global_table(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("tbl_a", F64, global_table_a(GLOBAL_TILE))
   d_global("tbl_b", F64, global_table_b(GLOBAL_TILE), align: GLOBAL_ALIGN)
@@ -4103,7 +4107,7 @@ fn global_table(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 # The same two segments from two buffers. No `global`, no `get_global`, and
 # the same answer.
-fn global_ctl(a: Param[F64], b: Param[F64], x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn global_ctl(a: Param[Float], b: Param[Float], x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tx = load_cell(x)
   store_sub(out, [0], load_cell(a) + tx)
   store_sub(out, [1], load_cell(b) + tx)
@@ -4113,7 +4117,7 @@ fn global_ctl(a: Param[F64], b: Param[F64], x: Param[F64], out: Param[F64]) -> U
 # words the record grew room for at 13.3: `@hidden` is private and `@frozen`
 # is constant. It reads them and never stores through either, which the
 # second one requires and the dialect does not enforce.
-fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn global_flags(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("hidden", F64, global_table_a(GLOBAL_TILE), visibility: Private)
   d_global("frozen", F64, global_table_b(GLOBAL_TILE), constant: true)
@@ -4138,7 +4142,7 @@ fn global_flags(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # `global_flags` above holds the same two words for layer 1 and is left
 # alone: knife T8's measurements of the Global section's record are written
 # against its bytes.
-fn global_syms(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn global_syms(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("shown", F64, global_table_a(GLOBAL_TILE))
   d_global("hidden", F64, global_table_b(GLOBAL_TILE), visibility: Private)
@@ -4159,7 +4163,7 @@ fn global_syms(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # because the global carried the first launch's sum into the second; on a
 # device that reloaded the module between launches it would be the input
 # both times.
-fn global_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn global_scratch(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [GLOBAL_TILE]
   d_global("scratch", F64, zeros_tile(GLOBAL_TILE))
   let blk = tile_at(block_id(0), GLOBAL_TILE)
@@ -4196,13 +4200,13 @@ fn hint_entry_hints() -> Hints = [
   for_arch("default", [hint_occupancy(4)]),
   for_arch("sm_86", [hint_num_cta_in_cga(1), hint_num_worker_warps_per_cta(8), hint_occupancy(2)])]
 
-fn hint_entry(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev =
+fn hint_entry(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, load_cell(a) + load_cell(b))
 
 # `vadd` with hints on a LOAD and on the STORE. The second load carries
 # none, so one kernel holds both states of the flag bit: `latency` is the
 # one key `load_ptr_tko` and `store_ptr_tko` accept.
-fn hint_memory(a: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn hint_memory(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), 128)
   let ta = load(a, blk, [128], hints: [for_arch("sm_86", [hint_latency(4)])])
   let tb = load(b, blk, [128])
@@ -4234,7 +4238,7 @@ const ALLOCA_ALIGN: Int = 8
 # scratch holds `2 * x` and the kernel adds the input to what it reads
 # back. A scratch that answered zeros, or an address the store never
 # reached, would answer `x`.
-fn alloca_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn alloca_scratch(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [ALLOCA_TILE]
   let blk = tile_at(block_id(0), ALLOCA_TILE)
   let off = lanes(idx_const(0), s)
@@ -4253,7 +4257,7 @@ fn alloca_scratch(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # The second allocation carries the dialect's `global` unit attribute and
 # the first does not, so one kernel holds both states of the flag bit, the
 # way hint_memory holds both states of a load's hint bit.
-fn alloca_two(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn alloca_two(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let s = [ALLOCA_TILE]
   let blk = tile_at(block_id(0), ALLOCA_TILE)
   let off = lanes(idx_const(0), s)
@@ -4267,7 +4271,7 @@ fn alloca_two(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 # alloca_scratch's answer with no allocation in it: the control that tells
 # "the mutant broke alloca" from "the mutant broke the tree".
-fn alloca_ctl(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn alloca_ctl(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tx = load_cell(x)
   store_cell(out, tx + tx + tx)
 }
@@ -4295,7 +4299,7 @@ const MMS_N: Int = 32
 const MMS_V: Int = 32
 
 fn mmaf_scaled_e4m3(a: Param[F8E4M3FN], b: Param[F8E4M3FN], sa: Param[F8E8M0FNU],
-  sb: Param[F8E8M0FNU], out: Param[F64]) -> Unit !Dev = {
+  sb: Param[F8E8M0FNU], out: Param[Float]) -> Unit !Dev = {
   let r = mma_scaled(load_cell(a), load_cell(b), f_const(F32, 0.0), load_cell(sa), load_cell(sb))
   store_cell(out, float_to_float(r, F64))
 }
@@ -4357,7 +4361,7 @@ const VT_ROWS: Int = 100
 const VT_COLS: Int = 60
 const VT_TILE: Int = 32
 
-fn view_transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn view_transpose(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tile = [VT_TILE, VT_TILE]
   let dm = [0, 1]
   let zero = idx_const(0)
@@ -4380,7 +4384,7 @@ fn vm_oh() -> Int = VM_H / VM_K
 
 fn vm_ow() -> Int = VM_W / VM_K
 
-fn view_max_pool(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn view_max_pool(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tile = [VM_TILE, VM_TILE]
   let dm = [0, 1]
   let shape = [vm_oh(), vm_ow()]
@@ -4405,7 +4409,7 @@ fn vc_oh() -> Int = VC_H - VC_K + 1
 
 fn vc_ow() -> Int = VC_W - VC_K + 1
 
-fn view_conv2d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn view_conv2d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tile = [VC_TILE, VC_TILE]
   let dm = [0, 1]
   let shape = [vc_oh(), vc_ow()]
@@ -4512,7 +4516,7 @@ fn dyn_dims(dims: Param[I32]) -> (Idx, Idx, Idx) !Dev = {
   (rows, cols, unit)
 }
 
-fn view_dyn_transpose(dims: Param[I32], x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn view_dyn_transpose(dims: Param[I32], x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tile = [VD_TILE, VD_TILE]
   let dm = [0, 1]
   let zero = idx_const(0)
@@ -4526,7 +4530,7 @@ fn view_dyn_transpose(dims: Param[I32], x: Param[F64], out: Param[F64]) -> Unit 
   store_view(dst, at, load_view(src, at))
 }
 
-fn view_tensor_shape(dims: Param[I32], x: Param[F64], out: Param[F64],
+fn view_tensor_shape(dims: Param[I32], x: Param[Float], out: Param[Float],
   shape_out: Param[I32]) -> Unit !Dev = {
   let lane = [VD_LANES]
   let zero = idx_const(0)
@@ -4552,7 +4556,7 @@ fn view_tensor_shape(dims: Param[I32], x: Param[F64], out: Param[F64],
   store(shape_out, one, broadcast(idx_as_tile(c), [1]))
 }
 
-fn view_index_space(dims: Param[I32], x: Param[F64], out: Param[F64],
+fn view_index_space(dims: Param[I32], x: Param[Float], out: Param[Float],
   shape_out: Param[I32]) -> Unit !Dev = {
   let tile = [VD_SUM_TILE, VD_SUM_TILE]
   let zero = idx_const(0)
@@ -4622,7 +4626,7 @@ const VS_K: Int = 4
 
 fn vs_out() -> Int = VS_N - VS_K + 1
 
-fn view_conv1d(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn view_conv1d(x: Param[Float], w: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let tile = [VS_K]
   let zero = idx_const(0)
   # the sliding window: traversal ONE against a tile of four, so index i
@@ -4641,7 +4645,7 @@ const VG_DIM: Int = 16
 const VG_TILE: Int = 8
 const VG_N: Int = 104
 
-fn view_token_embed(ids: Param[I32], table: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn view_token_embed(ids: Param[I32], table: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let zero = idx_const(0)
   # the row numbers this block collects: an ordinary cell of i32, which
   # becomes the gather view's index at `sparse_dim`; every other index is a
@@ -4678,7 +4682,7 @@ fn va_reduce(p: Param[I32], mode: String, t: Tile[I32]) -> Unit !Dev = {
   atomic_red_view(v, [zero], mode, "device", t)
 }
 
-fn view_atomic(x: Param[I32], o_add: Param[I32], o_addf: Param[F64], o_and: Param[I32],
+fn view_atomic(x: Param[I32], o_add: Param[I32], o_addf: Param[Float], o_and: Param[I32],
   o_or: Param[I32], o_xor: Param[I32], o_max: Param[I32], o_min: Param[I32],
   o_umax: Param[I32], o_umin: Param[I32]) -> Unit !Dev = {
   let bins = [VA_BINS]
@@ -4785,7 +4789,7 @@ fn view_gather_pad(ids: Param[I32], x: Param[F32], out: Param[F32]) -> Unit !Dev
 # [1, 0] and [0, 1] are then two different quarters that are both in
 # bounds, so the mutant that writes the indices in the opposite order is a
 # wrong answer rather than an undefined one, and it moves BOTH halves.
-fn insert_tile(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+fn insert_tile(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let t = load(x, tile_at(block_id(0), 128), [16, 8])
   let q = extract(t, [8, 4], [idx_const(1), idx_const(0)])
   store_sub(out, [0, 0], insert(q, t, [idx_const(1), idx_const(0)]))
@@ -4798,7 +4802,7 @@ fn insert_tile(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # the dialect reads as SIGNED: every exponent in the corpus fits in an i8, so
 # the two halves agree exactly when that reading holds, and a negative
 # exponent read as unsigned would be 256 more than it is.
-fn powi_sweep(x: Param[F64], n: Param[I32], out: Param[F64]) -> Unit !Dev = {
+fn powi_sweep(x: Param[Float], n: Param[I32], out: Param[Float]) -> Unit !Dev = {
   let tx = load_cell(x)
   let tn = load_cell(n)
   store_sub(out, [0], powi(tx, tn))
@@ -4862,7 +4866,7 @@ fn llama_heads() -> Cells = cells([DYN_DIM, LM_HD], [LM_S, LM_HD], along: [1, 0]
 ## The score kernels of the attention family: queries by row block along
 ## grid axis 0, keys by row block along axis 1, each read as its one cell
 ## along the head dimension, and the scores' ATT_T by ATT_T block.
-fn att_qk(name: String, body: fn(Param[F64], Param[F64], Param[F64]) -> Unit !Dev) -> TileProg = {
+fn att_qk(name: String, body: fn(Param[Float], Param[Float], Param[Float]) -> Unit !Dev) -> TileProg = {
   let (p, _e) = trace3(name, In(F64, cells([ATT_M, ATT_D], [ATT_T, ATT_D], along: [0, FREE_AXIS])),
     In(F64, cells([ATT_N, ATT_D], [ATT_T, ATT_D], along: [1, FREE_AXIS])),
     Out(F64, cells([ATT_M, ATT_N], [ATT_T, ATT_T])), body)
@@ -4887,7 +4891,7 @@ fn kv_cache() -> Cells = cells([KV_H * KV_S, KV_D], [KV_S, KV_D])
 ## The four GPT-2 products: `a[GP_S, k] w[k, n] + bias`, GP_T columns a
 ## block, the bias read by the pointer path (a stride of zero is no cell).
 fn gpt_mm(name: String, k: Int, n: Int,
-  body: fn(Param[F64], Param[F64], Param[F64], Param[F64]) -> Unit !Dev) -> TileProg = {
+  body: fn(Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev) -> TileProg = {
   let (p, _e) = trace4(name, In(F64, cells([GP_S, k], [GP_S, GP_T], along: [0, FREE_AXIS])),
     In(F64, cells([k, n], [GP_T, GP_T], along: [FREE_AXIS, 1])), In(F64, Whole),
     Out(F64, cells([GP_S, n], [GP_S, GP_T])), body)
