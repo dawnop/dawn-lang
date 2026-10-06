@@ -44,7 +44,7 @@ use check/tast.{
   x_lo, x_hi, tex_ty
 }
 use check/types.{
-  Ty, TyAdt, TyFn, TyOpaque, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
+  Ty, TyAdt, TyFn, TyOpaque, RESULT_ID, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
   STAGED_VAR_ID, STAGED_ITER_ID, is_lit_trait, impl_at,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
@@ -59,7 +59,7 @@ use front/lexer.{slice_cps}
 use lsp/lspv.{
   value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
 }
-use lsp/lspinlay.{InlayOpts, Hint, DefaultArg, type_hint, effect_hint, param_hint, default_args_hint, reads_name}
+use lsp/lspinlay.{InlayOpts, Hint, DefaultArg, type_hint, effect_hint, propagate_hint, param_hint, default_args_hint, reads_name}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -2946,6 +2946,21 @@ fn via_impl(qc: QCx, tid: Int, subj: Ty) -> (String, Site) =
 fn impl_text(qc: QCx, tid: Int, subj: Ty) -> String =
   "via impl " ++ trait_of(qc.entry.cx.traits, tid).name ++ "[" ++ show_ty(qc, subj) ++ "]"
 
+## `⇡ E` after a `?` over a `Result[T, E]`, when the collection wants it (§Q1).
+fn hint_propagated(qc: QCx, q: Q, operand_ty: Ty, at: Int) -> Q =
+  match inlay_opts(q) {
+    Some(o) ->
+      if not o.propagated_errors {
+        q
+      } else {
+        match operand_ty {
+          TyAdt(aid, [_, e]) -> if aid == RESULT_ID { add_hint(q, propagate_hint(at, show_ty(qc, e))) } else { q }
+          _ -> q
+        }
+      }
+    None -> q
+  }
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
   # generic fallback: the expression's own type, which names no declaration
@@ -3193,9 +3208,12 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
         _ -> { q = walk_e(qc, q, body, None) }
       }
-    EPropagate(operand, _, _) ->
+    EPropagate(operand, _, hi) ->
       match te {
-        Some(XPropagate(t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+        Some(XPropagate(t, _, _, _)) -> {
+          q = hint_propagated(qc, q, tex_ty(t), hi)
+          q = walk_e(qc, q, operand, Some(t))
+        }
         _ -> { q = walk_e(qc, q, operand, None) }
       }
     EUnwrap(operand, _, _) ->

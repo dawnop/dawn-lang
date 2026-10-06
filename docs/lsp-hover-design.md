@@ -424,11 +424,11 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
 ```json
 "initializationOptions": { "inlayHints": {
   "letTypes": true, "lambdaParamTypes": true, "callEffects": true, "parameterNames": false,
-  "defaultArguments": true, "defaultArgumentValues": true
+  "defaultArguments": true, "defaultArgumentValues": true, "propagatedErrors": false
 } }
 ```
 
-`defaultArguments` 是 B1 加的（§B1.4），`defaultArgumentValues` 是 C4 加的（§C4.4）。六个键都可省，省了取上表的默认值；类型不对的值也按省略处理。只在 `initialize` 读一次。
+`defaultArguments` 是 B1 加的（§B1.4），`defaultArgumentValues` 是 C4 加的（§C4.4），`propagatedErrors` 是 Q1 加的（默认关）。七个键都可省，省了取上表的默认值；类型不对的值也按省略处理。只在 `initialize` 读一次。
 
 不用 `workspace/configuration`：那是服务端向客户端发的请求，server 今天除了一次
 `client/registerCapability` 之外从不向客户端发请求，也不处理客户端的回包（`is_response` 一律丢掉）；为一组
@@ -475,7 +475,7 @@ VS Code 扩展不改：四个默认值就是扩展想要的，`vscode-languagecl
 
 - **被省略的默认实参**：A4 时以为要显示求得的值才比 signatureHelp 多给信息，B1 推翻了这个前提，
   以源码文本落地，见 §B1。
-- **`?` 传播的错误类型**（`parse(s)?« ⇡ ParseError»`）：价值中等，要先从外层返回类型里取错误分量；放 B 组。
+- **`?` 传播的错误类型**（`parse(s)?« ⇡ ParseError»`）：A4 时放 B 组，现在落地为 §Q1（默认关）。
 - **闭合括号注释**（`}« // fn handle»`）：Dawn 的函数普遍很短，`dawn fmt` 的缩进模型已经够读（§8）。
 - **效果多态调用的实例化行**：见 A4.1，`XCallFn` 不带实例化的行；放 B 组。
 - **`for` 的循环变量类型、`match` 臂的绑定类型**：本刀只做任务定下的 `let` 与 lambda；`for x in xs` 的 `x`
@@ -1325,5 +1325,5 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | H1（handler 臂的操作名） | 实现随 `0e6ef2c2`（v0.83.0）落地；测试与本节合入后由协调者回填 | |
 | O1（运算符悬停） | 已落地 | 合入后由协调者回填 |
 | L2（字面量定型与折叠值） | 已落地 | 合入后由协调者回填 |
-| Q1（`?` 的错误类型 inlay） | 设计 | |
+| Q1（`?` 的错误类型 inlay） | 已落地 | 合入后由协调者回填 |
 | B 组其余 | 未立项 | |

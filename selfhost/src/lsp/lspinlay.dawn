@@ -28,14 +28,17 @@ pub type InlayOpts = {
   call_effects: Bool,
   param_names: Bool,
   default_args: Bool,
-  default_values: Bool
+  default_values: Bool,
+  propagated_errors: Bool
 }
 
 ## Types and effects on, parameter names off: Dawn has named arguments, so an
 ## author who wants a reader to see a name can write it (gopls keeps these off
 ## for the same reason). Left-out defaults on: unlike a parameter name, the
 ## call does not spell them at all, and an argument passed without a trace in
-## the source is what a reader cannot recover by reading it (§B1).
+## the source is what a reader cannot recover by reading it (§B1). The error
+## a `?` hands up is off: it is the operand's own type, one hover away, and a
+## hint on every `?` is noise in code that uses it as designed (§Q1).
 pub fn default_inlay_opts() -> InlayOpts =
   InlayOpts {
     let_types: true,
@@ -43,7 +46,8 @@ pub fn default_inlay_opts() -> InlayOpts =
     call_effects: true,
     param_names: false,
     default_args: true,
-    default_values: true
+    default_values: true,
+    propagated_errors: false
   }
 
 ## LSP 3.17's `InlayHintKind`: Type = 1, Parameter = 2. An effect row is a
@@ -107,6 +111,16 @@ pub fn effect_hint(at: Int, eff: Eff) -> Option[Hint] =
       pad_right: false,
       left_out: None
     })
+  }
+
+## `⇡ E` after a `?` on a `Result[T, E]`, or nothing: an `Option` hands up no
+## error, and the type is held to the length and error rules a type hint is
+## (§Q1).
+pub fn propagate_hint(at: Int, shown: String) -> Option[Hint] =
+  if str.len(shown) > TYPE_HINT_SHOWN || str.contains(shown, "?") {
+    None
+  } else {
+    Some(Hint { at: at, label: "⇡ " ++ shown, kind: HintType, pad_left: true, pad_right: false, left_out: None })
   }
 
 ## `name:` before a positional argument, or nothing. `shown` is how many
@@ -242,6 +256,20 @@ test "a type hint is the type after a colon, unless long or erroneous" {
   # code points, not bytes or UTF-16 units
   assert type_hint(0, str.repeat("é", 25)) != None
   assert type_hint(0, "List[?]") == None
+}
+
+test "a propagated error hint is an arrow and the type, held to a type hint's rules" {
+  match propagate_hint(9, "ParseError") {
+    Some(h) -> {
+      assert h.at == 9
+      assert h.label == "⇡ ParseError"
+      assert h.pad_left
+      assert not h.pad_right
+    }
+    None -> { assert false }
+  }
+  assert propagate_hint(0, "A_type_name_that_is_much_too_long") == None
+  assert propagate_hint(0, "List[?]") == None
 }
 
 test "an effect hint needs a named effect and a ground row" {
