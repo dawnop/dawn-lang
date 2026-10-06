@@ -1,0 +1,313 @@
+# A terminal screen, interpreted from the bytes a terminal program wrote, so an
+# example page can show what a reader would have SEEN rather than the bytes.
+#
+# Why this exists: packages/tea-term paints with ANSI (clear screen, absolute
+# cursor addressing, erase line, bold/dim/underline). The gallery prints the
+# stdout the example registry pins, and for tea_todo that stdout is those
+# bytes. Escaped into a <pre> the ESC byte is invisible and the page read
+# `[2J[H[1;1H[2K[1mtodo (0/0 done)...`, which is garbage to a reader. The
+# ruling was to fix it on the site side (no isatty primitive, no change to
+# tea-term): replay the bytes onto a grid and print the grid.
+#
+# Why a SUBSET and a hard failure: the interpreter knows exactly the sequences
+# tea-term emits (packages/tea-term/src/render.dawn and present.dawn): `ESC[2J`
+# `ESC[H` `ESC[r;cH` `ESC[2K` and SGR 0, 1, 2, 4. Any other escape, and any
+# other control character, panics the build. The alternative, ignoring what we
+# do not know, is how a new tea-term feature would quietly regress the page
+# into a screen that is wrong but looks plausible.
+#
+# Why one screen per stdin line: the example is a line-mode program, and the
+# registry feeds it a script. A screen is cut at each prompt the program
+# prints (the erase of the prompt row followed by `> `), so screen 0 is the
+# first paint, and screen k is what the program showed after the k-th line.
+# The count must equal the number of stdin lines plus one, or the build stops:
+# a segmentation that disagrees with the script is a wrong page.
+#
+# Everything here is pure (strings in, strings out) so the tests need no files.
+
+use std/str
+use std/char
+use std/list.{take, drop}
+use html/escape.{escape_html}
+use gen/links.{files_under}
+use gen/common.{must_read}
+use std/io.{Fs}
+
+## One character cell: the text (a code point as a string) and its style,
+## a bit set of 1 bold, 2 dim, 4 underline.
+type Cell = { ch: String, st: Int }
+
+## The screen grid, the cursor (0-based) and the style new text is written in.
+type Term = { rows: List[List[Cell]], row: Int, col: Int, st: Int }
+
+fn fresh() -> Term = Term { rows: [], row: 0, col: 0, st: 0 }
+
+fn esc() -> Char = '\u{001B}'
+
+fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
+
+fn has_bit(st: Int, bit: Int) -> Bool = (st / bit) % 2 == 1
+
+fn with_bit(st: Int, bit: Int) -> Int = if has_bit(st, bit) { st } else { st + bit }
+
+## Replace element i, padding nothing: the caller has made the list long enough.
+fn set_at[T](xs: List[T], i: Int, v: T) -> List[T] = take(xs, i) ++ [v] ++ drop(xs, i + 1)
+
+fn put(t: Term, ch: String) -> Term = {
+  var rows = t.rows
+  let none: List[Cell] = []
+  while len(rows) <= t.row {
+    rows = rows ++ [none]
+  }
+  var line = rows[t.row]
+  while len(line) < t.col {
+    line = line ++ [Cell { ch: " ", st: 0 }]
+  }
+  let cell = Cell { ch: ch, st: t.st }
+  let line2 = if len(line) == t.col { line ++ [cell] } else { set_at(line, t.col, cell) }
+  Term { rows: set_at(rows, t.row, line2), row: t.row, col: t.col + 1, st: t.st }
+}
+
+fn ints_of(params: String, where: String) -> List[Int] =
+  if params == "" {
+    []
+  } else {
+    map(str.split(params, ";"), p =>
+        match parse_int(p) {
+          Some(n) -> n
+          None -> panic("screens: unsupported escape parameter `${p}` in ${where}")
+        })
+  }
+
+## Apply one CSI sequence, or stop the build on one outside the subset.
+fn apply(t: Term, params: String, final: Char) -> Term = {
+  let where = "ESC[${params}${str.from_char(final)}"
+  let ns = ints_of(params, where)
+  if final == 'J' && ns == [2] {
+    Term { ..t, rows: [] }
+  } else if final == 'K' && ns == [2] {
+    let none: List[Cell] = []
+    var rows = t.rows
+    while len(rows) <= t.row {
+      rows = rows ++ [none]
+    }
+    Term { ..t, rows: set_at(rows, t.row, none) }
+  } else if final == 'H' && len(ns) == 0 {
+    Term { ..t, row: 0, col: 0 }
+  } else if final == 'H' && len(ns) == 2 && ns[0] >= 1 && ns[1] >= 1 {
+    Term { ..t, row: ns[0] - 1, col: ns[1] - 1 }
+  } else if final == 'm' && len(ns) == 1 && ns[0] == 0 {
+    Term { ..t, st: 0 }
+  } else if final == 'm' && len(ns) == 1 && ns[0] == 1 {
+    Term { ..t, st: with_bit(t.st, 1) }
+  } else if final == 'm' && len(ns) == 1 && ns[0] == 2 {
+    Term { ..t, st: with_bit(t.st, 2) }
+  } else if final == 'm' && len(ns) == 1 && ns[0] == 4 {
+    Term { ..t, st: with_bit(t.st, 4) }
+  } else {
+    panic("screens: the escape sequence ${where} is outside the subset packages/tea-term emits; "
+        ++ "teach site/src/gen/screens.dawn about it before the page can show it")
+  }
+}
+
+## Feed bytes (as text) to the terminal.
+fn feed(t0: Term, s: String) -> Term = {
+  let cs = code_points(s)
+  var t = t0
+  var i = 0
+  while i < len(cs) {
+    let c = cs[i]
+    if c == esc() {
+      if i + 1 >= len(cs) || cs[i + 1] != '[' {
+        panic("screens: an ESC that does not open a CSI sequence")
+      }
+      var j = i + 2
+      var params: List[Char] = []
+      while j < len(cs) && (is_digit(cs[j]) || cs[j] == ';') {
+        params = params ++ [cs[j]]
+        j = j + 1
+      }
+      if j >= len(cs) {
+        panic("screens: an escape sequence cut off by the end of the output")
+      }
+      t = apply(t, from_code_points(params), cs[j])
+      i = j + 1
+    } else if c < ' ' || c == '\u{007F}' {
+      panic("screens: a control character (code ${char.code(c)}) outside the subset packages/tea-term emits")
+    } else {
+      t = put(t, str.from_char(c))
+      i = i + 1
+    }
+  }
+  t
+}
+
+fn style_class(st: Int) -> String = {
+  var cl: List[String] = []
+  if has_bit(st, 1) { cl = cl ++ ["sg-b"] }
+  if has_bit(st, 2) { cl = cl ++ ["sg-d"] }
+  if has_bit(st, 4) { cl = cl ++ ["sg-u"] }
+  join(cl, " ")
+}
+
+fn is_blank(c: Cell) -> Bool = c.ch == " " && c.st == 0
+
+fn row_html(row: List[Cell]) -> String = {
+  var end = len(row)
+  while end > 0 && is_blank(row[end - 1]) {
+    end = end - 1
+  }
+  var out = ""
+  var i = 0
+  while i < end {
+    let st = row[i].st
+    var text = ""
+    while i < end && row[i].st == st {
+      text = text ++ row[i].ch
+      i = i + 1
+    }
+    out = out ++ if st == 0 {
+      escape_html(text)
+    } else {
+      "<span class=\"" ++ style_class(st) ++ "\">" ++ escape_html(text) ++ "</span>"
+    }
+  }
+  out
+}
+
+## The grid as the text of a <pre>: styled runs as spans, trailing blank rows
+## dropped.
+fn screen_html(t: Term) -> String = {
+  var n = len(t.rows)
+  while n > 0 && row_html(t.rows[n - 1]) == "" {
+    n = n - 1
+  }
+  join(map(take(t.rows, n), r => row_html(r)), "\n")
+}
+
+fn prompt_mark() -> String = "\u{001B}[2K> "
+
+## The screens a program's output draws, one per prompt plus the last paint,
+## as the inner HTML of a <pre>. `lines` is how many lines the program was fed:
+## screen 0 is the first paint and screen k what showed after line k, so the
+## count must be lines + 1 or the build stops.
+pub fn screens_html(stdout: String, lines: Int) -> List[String] = {
+  let parts = str.split(stdout, prompt_mark())
+  var t = fresh()
+  var out: List[String] = []
+  var k = 0
+  for p in parts {
+    t = feed(t, p)
+    if k < len(parts) - 1 {
+      t = feed(t, prompt_mark())
+      out = out ++ [screen_html(t)]
+    } else if p != "" {
+      out = out ++ [screen_html(t)]
+    }
+    k = k + 1
+  }
+  if len(out) != lines + 1 {
+    panic("screens: the output draws ${len(out)} screens but its stdin has ${lines} lines (want ${lines + 1}); "
+        ++ "the prompt is no longer what cuts the screens")
+  }
+  out
+}
+
+## True when the text holds a byte this module would have to interpret.
+pub fn has_escape(s: String) -> Bool = str.contains(s, str.from_char(esc()))
+
+## What is wrong with a rendered page, as one message per finding: an ESC byte
+## anywhere, or terminal residue (`[2J`, `[1;1H`, `[0m`) inside an output block.
+## The page is judged as bytes because a regression would be one: a program
+## whose output the gallery escaped without interpreting.
+pub fn ansi_findings(name: String, html: String) -> List[String] = {
+  var bad: List[String] = []
+  if has_escape(html) {
+    bad = bad ++ ["${name}: contains an ESC (0x1b) byte"]
+  }
+  let open = `<pre class="output"><code>`
+  for chunk in drop(str.split(html, open), 1) {
+    let body = unwrap_or(get(str.split(chunk, "</code></pre>"), 0), "")
+    if has_residue(body) {
+      bad = bad ++ ["${name}: an output block shows terminal escape residue (`[2J`-style)"]
+    }
+  }
+  bad
+}
+
+## `[` followed by digits and `;` and a final letter of the subset
+## (H J K m), or `[H` itself: what an unescaped sequence leaves behind once the
+## ESC byte is invisible.
+fn has_residue(body: String) -> Bool = {
+  let cs = code_points(body)
+  var found = false
+  var i = 0
+  while i < len(cs) {
+    if cs[i] == '[' {
+      var j = i + 1
+      while j < len(cs) && (is_digit(cs[j]) || cs[j] == ';') {
+        j = j + 1
+      }
+      let letter = j < len(cs) && (cs[j] == 'H' || cs[j] == 'J' || cs[j] == 'K' || cs[j] == 'm')
+      # a bare `[H` is residue only when no word follows (`[Hello]` is not)
+      let bare_ok = j + 1 >= len(cs) || not (cs[j + 1] >= 'a' && cs[j + 1] <= 'z')
+      if letter && (j > i + 1 || (cs[j] == 'H' && bare_ok)) {
+        found = true
+      }
+    }
+    i = i + 1
+  }
+  found
+}
+
+## Stop the build when any page under `out` shows raw terminal bytes.
+pub fn check_no_ansi(out: String) -> Unit !Fs !io = {
+  var bad: List[String] = []
+  var pages = 0
+  for f in files_under(out, "") {
+    if str.ends_with(f, ".html") {
+      pages = pages + 1
+      bad = bad ++ ansi_findings(f, must_read("${out}/${f}"))
+    }
+  }
+  if len(bad) > 0 {
+    panic("terminal escapes reach the site:\n" ++ join(bad, "\n"))
+  }
+  println("no ANSI residue in ${pages} pages")
+}
+
+test "tea-term's subset replays onto a grid" {
+  let s = "\u{001B}[2J\u{001B}[H\u{001B}[1;1H\u{001B}[2K\u{001B}[1mhead\u{001B}[0m"
+    ++ "\u{001B}[2;1H\u{001B}[2K\u{001B}[2mdim\u{001B}[0m"
+  let t = feed(fresh(), s)
+  assert screen_html(t) == `<span class="sg-b">head</span>` ++ "\n" ++ `<span class="sg-d">dim</span>`
+}
+
+test "an erase leaves the rows around it and a rewrite replaces a row" {
+  let a = feed(fresh(), "\u{001B}[1;1H\u{001B}[2Kone\u{001B}[2;1H\u{001B}[2Ktwo")
+  let b = feed(a, "\u{001B}[1;1H\u{001B}[2Kuno")
+  assert screen_html(b) == "uno\ntwo"
+}
+
+test "styles stack until reset and text is escaped" {
+  let t = feed(fresh(), "\u{001B}[1m\u{001B}[4m<b>\u{001B}[0m!")
+  assert screen_html(t) == `<span class="sg-b sg-u">&lt;b&gt;</span>!`
+}
+
+test "the prompt cuts one screen per line fed" {
+  let go = "\u{001B}[1;1H\u{001B}[2Kzero\u{001B}[2;1H\u{001B}[2K> \u{001B}[1;1H\u{001B}[2Kone"
+    ++ "\u{001B}[2;1H\u{001B}[2K> \u{001B}[1;1H\u{001B}[2Ktwo"
+  let ss = screens_html(go, 2)
+  assert len(ss) == 3
+  assert ss[0] == "zero\n&gt;"
+  assert ss[1] == "one\n&gt;"
+  assert ss[2] == "two\n&gt;"
+}
+
+test "residue and ESC bytes are findings, escaped text is not" {
+  let o = `<pre class="output"><code>`
+  assert len(ansi_findings("a.html", o ++ "[2J[H[1;1H[2Kx</code></pre>")) == 1
+  assert len(ansi_findings("a.html", "x\u{001B}y")) == 1
+  assert len(ansi_findings("a.html", o ++ "a[1] and b[i]</code></pre>")) == 0
+  assert len(ansi_findings("a.html", "<p>[2J</p>")) == 0
+}
