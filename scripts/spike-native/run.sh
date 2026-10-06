@@ -535,6 +535,7 @@ fi
 stdcopy="$work/std"
 mkdir -p "$stdcopy"
 cp "$root"/std/*.dawn "$root/std/modules.txt" "$stdcopy/"
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$stdcopy/"; fi; done
 cp "$here/stdext/raw.dawn" "$stdcopy/"
 echo raw >> "$stdcopy/modules.txt"
 

@@ -33,6 +33,7 @@ cd "$root"
 std="$work/std"
 mkdir -p "$std"
 cp "$root"/std/*.dawn "$root/std/modules.txt" "$std/"
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$std/"; fi; done
 cp "$sn/stdext/raw.dawn" "$std/"
 echo raw >> "$std/modules.txt"
 

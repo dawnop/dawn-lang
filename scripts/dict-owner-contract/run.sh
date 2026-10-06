@@ -35,7 +35,9 @@ trap 'rm -rf "$work"' EXIT
 # illegal makes `__emitc` fail below rather than pass quietly.
 mkdir -p "$work/std-late" "$work/std-early"
 cp "$root"/std/*.dawn "$work/std-late/"
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$work/std-late/"; fi; done
 cp "$root"/std/*.dawn "$work/std-early/"
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$work/std-early/"; fi; done
 cp "$root/std/modules.txt" "$work/std-late/modules.txt"
 awk '
   { line = $0 }

@@ -25,6 +25,8 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 cp "$root"/std/*.dawn "$root/std/modules.txt" "$work/"
+
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$work/"; fi; done
 cp "$here/hamtcheck.dawn" "$work/"
 echo hamtcheck >> "$work/modules.txt"
 

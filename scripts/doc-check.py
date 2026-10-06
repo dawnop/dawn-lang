@@ -529,7 +529,10 @@ BUILTIN_DECL_PATH = ROOT / "selfhost/builtins.dawn"
 # dependency order for the build, and nothing in the spec promises that.
 SPEC_BUNDLED_MODULES_MARKER = "<!-- doc-check: bundled-modules -->"
 STD_MODULES_PATH = ROOT / "std/modules.txt"
-SPEC_BUNDLED_MODULE_ITEM = re.compile(r"^- `std/([a-z][a-z0-9_]*)`")
+# A module may sit in a subdirectory (`std/int/u32`, a path whose segments are
+# each a module-path segment); the name compared is the whole path under std/,
+# which is how modules.txt spells it.
+SPEC_BUNDLED_MODULE_ITEM = re.compile(r"^- `std/([a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*)`")
 
 HISTORICAL_V01_MARKER = "<!-- doc-check: historical-v0-1 -->"
 

@@ -75,6 +75,7 @@ EOF
 skew="$work/skew"
 mkdir -p "$skew"
 cp "$root"/std/*.dawn "$root/std/modules.txt" "$skew/"
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$skew/"; fi; done
 printf '0.0.1-contract\n' > "$skew/VERSION"
 printf '\npub fn contract_unparseable( = {\n' >> "$skew/str.dawn"
 
@@ -83,6 +84,7 @@ printf '\npub fn contract_unparseable( = {\n' >> "$skew/str.dawn"
 unstamped="$work/unstamped"
 mkdir -p "$unstamped"
 cp "$root"/std/*.dawn "$root/std/modules.txt" "$unstamped/"
+for d in "$root"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$unstamped/"; fi; done
 printf '\npub fn contract_bad_type() -> Int = "not an Int"\n' >> "$unstamped/str.dawn"
 
 # ---- assertions -------------------------------------------------------------
