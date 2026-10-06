@@ -194,6 +194,11 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   device loop be written as a plain `for` with plain `var`s. `StagedIter` and `StagedVar` are
   now taken for a `trait` or an `effect` (on main, not yet released).
   ([staged-for-design.md](staged-for-design.md))
+- **2026-10-06.** `std/narrow`'s bfloat16, binary16 and binary32 take the operators and
+  float literals: `a + b` on a `BF16` is its correctly rounded sum, `a % b` the exact
+  remainder, and `let w: BF16 = 0.1` is `bf16(0.1)`, folded at compile time. The named
+  functions stay (on main, not yet released).
+  ([arith-operator-traits-design.md](arith-operator-traits-design.md))
 
 From v0.1.0 on 2026-07-17 to v0.81.0 on 2026-10-01 there have been 83 release tags.
 

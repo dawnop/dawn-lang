@@ -4,11 +4,27 @@
 # Dawn has one floating type, the 64-bit `Float`. Code that wants to know what
 # a computation does at a narrower width (quantised weights, a kernel that
 # will run on hardware in bf16) needs the narrow formats as *values* whose
-# every operation rounds the way the hardware rounds. There is no
-# float-to-bits primitive and the operators are not user traits (spec 3.5),
-# so this is not a new numeric type; it is three opaque types (spec 2.7) whose
-# invariant is "the Float inside is representable in the format", a rounding
-# function that establishes it, and a trait whose every operation re-rounds.
+# every operation rounds the way the hardware rounds. The compiler owns two
+# numbers, Int and Float, and no float-to-bits primitive
+# (docs/literal-system-design.md D1), so this is not a new numeric type; it
+# is three opaque types (spec 2.7) whose invariant is "the Float inside is
+# representable in the format", a rounding function that establishes it, and
+# arithmetic whose every operation re-rounds.
+#
+# The arithmetic has two spellings and one definition. `a + b`, `a - b`,
+# `a * b`, `a / b`, `a % b` and `-a` on a BF16 are the impls of `Add` ..
+# `Neg` below (spec 3.5): the format's default operation, ties to even,
+# which is the only one the hardware's plain instruction performs. The
+# `Narrow` trait's members are the same operations by name; `+` IS
+# `narrow.add`, the impl calls it, and the names stay because `sqrt` and
+# `abs` have no operator and removing the others would break every caller
+# for nothing. A literal at one of these types goes through `FromFloat`
+# (`let w: BF16 = 0.1` is `bf16(0.1)`, folded at compile time), and an
+# integer literal does not: a format that only holds a few hundred integers
+# exactly should not look as if it took any. Inside this module none of that
+# applies to literals: the module sees through its own types, so
+# `let w: BF16 = 0.1` here is the unrounded Float (literal design D7), which
+# is why the code below builds its values with `bf16(..)` and friends.
 #
 # Why "compute in Float, then round" is the format's own answer, and for
 # which operations: Figueroa's double-rounding theorem. When the wide format
@@ -355,7 +371,9 @@ impl Show[F32] {
 ## `sqrt` are the format's correctly rounded operations (ties to even, overflow
 ## to infinity, gradual underflow); `neg` and `abs` are exact. Equality and
 ## order are the Float's, as on any opaque type, so `==` and `<` need no
-## member.
+## member. `a + b`, `a - b`, `a * b`, `a / b` and `-a` are `add`, `sub`,
+## `mul`, `div` and `neg` under the operator's name, and `a % b` is the
+## exact truncating remainder.
 pub trait Narrow[T] {
   ## The value as a Float; exact, since every value of the format is one.
   fn to_f64(a: T) -> Float
@@ -481,6 +499,127 @@ impl Narrow[F32] {
     let x: Float = a
     magnitude(x)
   }
+}
+
+# ---- operators and literals ----
+#
+# The operators are the `Narrow` members above under the operator's name,
+# one impl per operator and format. Each body is a call, not a copy: the
+# rounding is written once, and scripts/narrow-contract runs the operator
+# and the named member over the same oracle cases, so a body that drifted
+# from its name would be red there. Inside an impl body `add` names the
+# `Narrow` member, since an operator trait's methods are not functions of
+# the module (docs/arith-operator-traits-design.md D9).
+#
+# `%` has no `Narrow` member and needs no rounding. Float's `%` is the
+# truncating remainder (the JVM's DREM, C's `fmod`), and that operation is
+# exact in every binary format: the answer is `a - n * b` for an integer `n`,
+# smaller in magnitude than `b`, and a multiple of the coarser of the two
+# operands' quanta, so it is a value of the format both came from. The
+# contract checks that against the rational definition rather than taking it
+# on trust. tileir's `remf` rests on the same fact.
+#
+# `FromFloat` is the constructor: a literal at a format is the format's
+# nearest value to the Float the literal denotes (literal design D8). There
+# is no `FromInt`. bf16 has 256 consecutive integers and fp16 2048; a
+# `let w: BF16 = 1000001` that quietly meant 999424 is the surprise a
+# literal at a narrow type must not have, and `1000001.0` says what it
+# costs.
+
+impl Add[BF16] {
+  fn add(a: BF16, b: BF16) -> BF16 = add(a, b)
+}
+
+impl Sub[BF16] {
+  fn sub(a: BF16, b: BF16) -> BF16 = sub(a, b)
+}
+
+impl Mul[BF16] {
+  fn mul(a: BF16, b: BF16) -> BF16 = mul(a, b)
+}
+
+impl Div[BF16] {
+  fn div(a: BF16, b: BF16) -> BF16 = div(a, b)
+}
+
+impl Rem[BF16] {
+  fn rem(a: BF16, b: BF16) -> BF16 = {
+    let x: Float = a
+    let y: Float = b
+    x % y
+  }
+}
+
+impl Neg[BF16] {
+  fn neg(a: BF16) -> BF16 = neg(a)
+}
+
+impl FromFloat[BF16] {
+  fn from_float(x: Float) -> BF16 = bf16(x)
+}
+
+impl Add[FP16] {
+  fn add(a: FP16, b: FP16) -> FP16 = add(a, b)
+}
+
+impl Sub[FP16] {
+  fn sub(a: FP16, b: FP16) -> FP16 = sub(a, b)
+}
+
+impl Mul[FP16] {
+  fn mul(a: FP16, b: FP16) -> FP16 = mul(a, b)
+}
+
+impl Div[FP16] {
+  fn div(a: FP16, b: FP16) -> FP16 = div(a, b)
+}
+
+impl Rem[FP16] {
+  fn rem(a: FP16, b: FP16) -> FP16 = {
+    let x: Float = a
+    let y: Float = b
+    x % y
+  }
+}
+
+impl Neg[FP16] {
+  fn neg(a: FP16) -> FP16 = neg(a)
+}
+
+impl FromFloat[FP16] {
+  fn from_float(x: Float) -> FP16 = fp16(x)
+}
+
+impl Add[F32] {
+  fn add(a: F32, b: F32) -> F32 = add(a, b)
+}
+
+impl Sub[F32] {
+  fn sub(a: F32, b: F32) -> F32 = sub(a, b)
+}
+
+impl Mul[F32] {
+  fn mul(a: F32, b: F32) -> F32 = mul(a, b)
+}
+
+impl Div[F32] {
+  fn div(a: F32, b: F32) -> F32 = div(a, b)
+}
+
+impl Rem[F32] {
+  fn rem(a: F32, b: F32) -> F32 = {
+    let x: Float = a
+    let y: Float = b
+    x % y
+  }
+}
+
+impl Neg[F32] {
+  fn neg(a: F32) -> F32 = neg(a)
+}
+
+impl FromFloat[F32] {
+  fn from_float(x: Float) -> F32 = f32(x)
 }
 
 # `<=` rather than `<` so that -0.0 comes out as +0.0, as the IEEE operation
@@ -968,6 +1107,25 @@ test "rounding lands tiny values on the subnormal grid" {
   # a Float subnormal is far below every grid here
   assert round_bf16(5.0e-324) == 0.0
   assert round_f32(5.0e-324) == 0.0
+}
+
+test "the operators are the named members, and remainder is exact" {
+  let one = bf16(1.0)
+  let half_ulp = bf16(1.0 / 256.0)
+  # 1 + 2^-8 is the bf16 tie from the first test: `+` rounds it, to even
+  assert to_f64(one + half_ulp) == 1.0
+  assert one + half_ulp == add(one, half_ulp)
+  assert to_f64(one - half_ulp) == round_bf16(1.0 - 1.0 / 256.0)
+  assert fp16(3.0) * fp16(1.0 / 3.0) == mul(fp16(3.0), fp16(1.0 / 3.0))
+  assert to_f64(f32(1.0) / f32(3.0)) == round_f32(1.0 / 3.0)
+  assert to_f64(-bf16(1.5)) == -1.5
+  # a negative zero survives negation, as the format's own does
+  assert 1.0 / to_f64(-bf16(0.0)) == -1.0 / 0.0
+  # 7 % 2.5 is 2 exactly, and so is 1e10 % 3, whose answer 1 lies far below
+  # the last place of 1e10 in binary32 (1024)
+  assert to_f64(bf16(7.0) % bf16(2.5)) == 2.0
+  assert to_f64(f32(1.0e10) % f32(3.0)) == 1.0
+  assert to_f64(fp16(-7.0) % fp16(2.0)) == -1.0
 }
 
 test "directed rounding takes the neighbour on the named side" {

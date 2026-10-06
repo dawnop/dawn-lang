@@ -67,10 +67,15 @@ GPU 的机器上用假设备跑完并给出相同答案**。后半句是让宿�
 
 维护者给了三条前提（窄浮点 opaque、张量幻影参数、倾向分阶段路线）。核实后三处要改：
 
-1. **「每个运算 = f64 运算后 `round_bf16`」成立，但拼不成运算符。** Dawn 只有 `Index`
-   可由用户实现，`+ - * /` 不是 trait（spec.md §3.5 预置的七个，spec.md:575），且 opaque
-   在声明模块内也不许 `u + 1`（spec.md:385）。所以 bf16 是一族具名函数
-   `narrow.add / mul / ...`，不是 `a + b`。语义结论不变，人体工学降一档（§3.2）。
+1. **「每个运算 = f64 运算后 `round_bf16`」成立。** 写这一节时（2026-09）它拼不成运算符：
+   `+ - * /` 不是 trait，opaque 在声明模块内也不许 `u + 1`，所以 bf16 是一族具名函数
+   `narrow.add / mul / ...`，人体工学降一档。**2026-10-06 起这一档补回来了**：运算符 trait
+   （[arith-operator-traits-design.md](arith-operator-traits-design.md)）与字面量 trait
+   （[literal-system-design.md](literal-system-design.md)）随 v0.85.0 成为种子后，`std/narrow`
+   给三个格式写了 `Add`…`Neg`、`Rem` 与 `FromFloat` 的 impl：`a + b` 就是 `narrow.add(a, b)`，
+   `a % b` 是精确的截断余数，`let w: BF16 = 0.1` 在编译期折叠成 `bf16(0.1)`。具名函数保留
+   （`sqrt`、`abs` 没有运算符，删其余的是无谓的破坏）。运算符只给默认舍入（ties to even），
+   语义结论不变（§3.2）；`narrow-contract` 让运算符与具名成员跑同一批 oracle 用例。
 2. **「opaque-twin 门禁成立」对 `BF16` 成立，对 `Tensor[D]` 幻影不成立。** 把
    `pub opaque type Tensor[D] = ...` 换成 `alias` 后 `D` 失去载体，`upload[D](t: Tensor[D])`
    一类签名处处「cannot infer type parameter(s) D」。这是 spec.md:397 五件事里的
