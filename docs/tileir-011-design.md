@@ -1,6 +1,7 @@
 # tileir 0.11 设计：一次破坏性发布，收齐四件已裁决的事
 
 > 状态：**proposed**。2026-10-06 写成，范围与刀序可读；§9 的八个开放问题已于同日裁决并写入本文（改动处已同步），但整篇尚未经评审通过，动码前仍以各刀自己的验收为准。
+> 实现按三个 PR 切（§7）：A（F0 + U1，纯增量，不动 tile 输入摘要）、B（S2 + L3 + M，含 kernel 迁移与 `neg_inf` 换 `-INFINITY`）、C（U2 + R，破坏性切换，含 `FP16`→`F16` 与唯一一次台账重录）。A 已落地，见 §7。
 > 它不引入新的语言特性，只把四条各自已有裁决的改动排进同一个 tileir 版本，并回答「谁先谁后、哪些必须同 PR、
 > golden 靠什么证明没动」。四条的权威设计各在自己的文档：
 > [staged-for-design.md](staged-for-design.md)（`for` + `var`）、[arith-operator-traits-design.md](arith-operator-traits-design.md)
@@ -40,8 +41,13 @@ for j in d_range(0, N / BK) {
 
 编译器侧 S1 已落地（staged-for-design §8）。本版只做库侧：
 
-- 描述符类型与 `StagedIter` impl。终态拼写就是目标写法里的 `d_range`：`d_range(lower: Int, upper: Int, step: Int = 1) -> DRange`
-  （`Item = Idx`），再加 Idx 界的版本 `d_for(lower: Idx, upper: Idx, step: Idx, unsigned_cmp: Bool = false) -> DFor`（今天闭包形式 `d_for` 的同名描述符版，`unsigned_cmp` 一个不少；Idx 版的名字裁决只说「对应的 Idx 版」，沿用 `d_for` 是本文的选择，见 §9 Q2）。这意味着闭包形式的 `d_range`/`d_for` 在 0.11.0 变成同名的描述符，调用方同一版内一次迁完。不引入 `d_range`，不发弃用别名。栈中间提交若新旧并存，临时名只活在中间提交，R 之前收回。两者的 `effect StagedIter = !Dev`，`staged_for` 的体调用今天的区域栈记录机制，
+- 描述符类型与 `StagedIter` impl。终态拼写就是目标写法里的 `d_range`，且**只有一个**：
+  `d_range[B: RangeBound](lower: B, upper: B, step: B = 1, unsigned_cmp: Bool = false) -> DRange[B]`（`Item = B`）。
+  `RangeBound` 是 tileir 里的小 trait，`Int`（宿主边界，录制时固定）与 `Idx`（设备边界）各给一个 impl；
+  今天闭包形式的 `d_range`（Int 界）与 `d_for`（Idx 界）因此合成一个名字，`unsigned_cmp` 一个不少，IR 与 golden 不变（裁决补充 9）。
+  不引入 `d_span`；`d_for` 在 0.11.0 **直接删除**，不留别名。闭包形式的 `d_range` 在 0.11.0 变成同名的描述符，
+  调用方同一版内一次迁完。栈中间提交若新旧并存，临时名只活在中间提交，R 之前收回。`effect StagedIter = !Dev`，
+  `staged_for` 的体调用今天的区域栈记录机制，
   所以 `For` 的降低、渲染、字节码一行不改。
 - `impl[D] StagedVar[Tile[D]]`：`type Cell = Carry[D]`，`var_open(v) = carry(v)`，`var_get(c) = get(c)`，`var_set(c, v) = set(c, v)`，`effect StagedVar = !Dev`。
   泛型 blanket impl 已在 main 上实测可用（research-generic-kernel-report §1.2），`generic_carry` 那条限制不放宽（ruling-generic-kernel 第 1 条，没有真实消费者）。
@@ -82,7 +88,7 @@ for j in d_range(0, N / BK) {
   文档里 `neg_inf()` 出现在 tileir README 1 处、tutorial 与译本各 3 处、tile-backend-design 3 处、std-defaults-design 1 处。
 - `NAN` 今天没有任何消费者（view 的 `PadNaN` 是枚举，不是值）。它随 `INFINITY` 一起进是裁决的要求，意义是 `x != x` 之外第二个说得出 NaN 的办法。
   风险（§8.4）：编译期求值 `0.0 / 0.0` 在两个后端是否产出同一个 NaN 位型，实现刀必须测。
-- 住在新模块 `std/float`（裁决，§9 Q1）：不在 tile 路径上，F0 不触发 `tile.yml`；`MAX`、`EPSILON`、`is_nan` 以后同处。负无穷写 `-INFINITY`，不另给 `NEG_INFINITY`。kernels 与 `tileref` 加 `use std/float.{INFINITY}`。`std/float` 是新 std 文件，要进 `std/modules.txt` 并过 `gen-stdsrc`（嵌入的 stdsrc 随之变，Emit-Change 与 core-golden 同 §6.2）。
+- 住在新模块 `std/float`（裁决，§9 Q1）：不在 tile 路径上，F0 不触发 `tile.yml`；`MAX`、`EPSILON`、`is_nan` 以后同处。负无穷写 `-INFINITY`，不另给 `NEG_INFINITY`。kernels 与 `tileref` 加 `use std/float.{INFINITY}`（这一步属 PR B：两处都在 tile 路径上；PR A 只加模块）。`std/float` 是新 std 文件，要进 `std/modules.txt` 并过 `gen-stdsrc`（嵌入的 stdsrc 随之变，Emit-Change 与 core-golden 同 §6.2）。
 
 ### 2.4 U1 + U2：格式统一
 
@@ -107,7 +113,7 @@ for j in d_range(0, N / BK) {
   - 规则一句话：**类型位置写值类型，值位置写格式名；两者对 narrow 与定宽整数同名，对内建三种是 `Float`/`F64`、`Int`/`I64`、`Bool`/`I1`。**
   - 语言事实（调研在 v0.82.0 种子上实测，我复核了依赖的修复）：同模块的 `pub opaque type X` 与 `pub const X` 并存且 `use m.{X}` 同时引入两者；返回位 trait 由期望类型选 impl；
     跨模块常量初始化调用其他模块函数依赖 #416（修复 c89862ac，已在当前种子 v0.85.0 内）。不需要编译器改动。
-- **U1** 是纯增量加一次改名：建 `std/dtype`，给 narrow 与 `std/int` 加见证与 impl，加只存储类型，`FP16` 改名 `F16`。`std/gpu` 的旧标记此刻原样保留（它整模块 `use std/narrow`，用限定名，不撞）。
+- **U1**：建 `std/dtype`，给 `std/int` 的 `I8 I16 I32 U8` 与内建三种加见证与 impl（PR A，纯增量）；给 narrow 加见证与 impl、加只存储类型、`FP16` 改名 `F16`（PR C，因为 `std/narrow.dawn` 是 tile 输入，见 §7）。`std/gpu` 的旧标记此刻原样保留（它整模块 `use std/narrow`，用限定名，不撞）。
 - **U2** 是一次性切换：删 `std/gpu` 的 15 个标记（`I4` 例外）与旧 `Dtype` trait（`dtype_name(d: D)`），`alloc`/`module_global` 收 `Dtype[T]`；tileir 删 `I1`，
   `Param/Ptrs/TensorView/GridView/GatherScatterView/Tile/Arg` 的参数改成值类型，`param`/`f_const`/`to`/`unpack_bytes`/`float_to_float` 等收 `Dtype[B]`（不再带 trait bound）。
 
@@ -221,7 +227,7 @@ let b = block_id(0)
 let n: Idx = idx_const(chunks)           # chunks 是宿主变量，不是字面量，idx_const 保留
 let base = b * n
 var total = load_at(x, [base])
-for k in d_for(base + 1, base + n, 1) { total = total + load_at(x, [k]) }
+for k in d_range(base + 1, base + n, 1) { total = total + load_at(x, [k]) }
 store_cell(out, total)
 ```
 
@@ -284,8 +290,10 @@ store_cell(s, select(allowed, v, f_const(F64, -INFINITY)))     # 0.11.0
 | `narrow.FP16`、`fp16()`、`round_fp16`、`fp16_bits`、`fp16_of_bits` | 改 `F16`、`f16()`、`round_f16`、`f16_bits`、`f16_of_bits`（std 公开面破坏，随承载它的编译器 release 一起发） |
 | tileir 删 `I1` 类型与 `impl Dtype[I1]` | `Tile[Bool]`；见证 `I1` 来自 `std/dtype` |
 | `FloatDtype::float_dtype` 的答案类型 `D` 改为 `Dtype[D]`，`float_name` 删除 | 自写泛型 kernel 的 `[D: FloatDtype]` 约束不变；读 `float_name(d)` 的改 `dtype_name(float_dtype())` |
-| 闭包形式的 `d_range(lo, hi) { i => .. }`、`d_for(lo, hi, step) { i => .. }` 被同名描述符取代（§9 Q2，无别名） | `for i in d_range(lo, hi) { .. }`、`for i in d_for(lo, hi, step) { .. }`；体内的外层 `Carry` 改 `var` |
+| 闭包形式的 `d_range(lo, hi) { i => .. }` 被同名描述符取代；`d_for(lo, hi, step) { i => .. }` 删除，并入 `d_range`（`B: RangeBound`，Int 与 Idx 各一个 impl；§9 Q2，无别名） | `for i in d_range(lo, hi) { .. }`；原 `d_for` 调用改 `d_range`（边界是 `Idx` 即得 Idx 版）；体内的外层 `Carry` 改 `var` |
 | `neg_inf()` 一类自写常量 | 由 `-INFINITY` 取代（它们本来就不在 tileir 的公开面，是 kernels/ref 里的私有函数） |
+
+旧名（`std/gpu` 的 `F64` 等标记、`Tile[F64]`、`FP16`）**不给迁移提示**：`std/moved.txt` 不扩展到类型名，不加弃用别名。仓内没有别的消费者，U2 直接删旧名，调用方由编译错误引到新写法（§9 Q5）。
 
 不破坏：`carry`/`get`/`set`/`Carry` 保持公开；所有算术函数名（`add`、`mul`、`max` 等）保持，运算符是加法；`lit` 保持；
 所有 kernel 的行为与 `.mlir`/`.tilebc` 输出不变。
@@ -314,7 +322,7 @@ CHANGELOG 的第一行写明承载这些的最小 dawn 版本；发版顺序见 
 | 项 | 为什么动 | 怎么处理 |
 |---|---|---|
 | `std/stdsrc` 嵌入与 std 的 JVM 类 | U1/U2/F0 改了 std 源 | `emit *` 一族标签（`scripts/emit-labels.txt` 的 10 个 `emit` 行，加 `doc --builtins`、`doc site`）预计命中；以 `selfhost-prev-diff.sh` 与 `selfhost-run-diff.sh` 的**实际输出**为准，逐 label 写 `Emit-Change(<label>): …`，不接受通配 |
-| core-golden | std 公开面改了 | 重录（arch-split-memo 的教训：core-golden 必重录） |
+| Core IR | std 公开面改了 | 树里已不存的 core-golden（`scripts/core-golden/` 已删，`selfhost-core-diff.sh` 是按需对比两个 revision 的工具，不是门禁），没有要重录的东西；需要时贴 `selfhost-core-diff.sh` 的输出做证据 |
 | checker-corpus | `imports.expected`、`phantom_opaque`、`arith_ops_opaque`、`literals` 里的 `Tile[F64]` 与导入 | 重录并核对差异只有拼写 |
 | `site/gpu-map/flash_attn.map` | 调用名与列位置整体变（`mul(`→`*`，`d_range`→`for`） | 重录，核对调用数 37 降到更低的新数 |
 | 教程与 spec 中英的摘要 | 文档改 | `doc-check.py` 重登记 |
@@ -356,22 +364,31 @@ CHANGELOG 的第一行写明承载这些的最小 dawn 版本；发版顺序见 
 |---|---|---|---|---|
 | Z0 | 本文 | 无 | 否 | 单独一个文档 PR |
 | C0 | 编译器小刀：二元运算左操作数接收期望类型（ruling-generic-kernel 第 2 条，约 5 行；已实现，改写运算符设计 D7，见 arith-operator-traits-design D7） | 无 | 否 | **单独 PR**，可与一切并行；不阻塞 tileir 0.11（本版写法 `lit(2.0) * t` 的需求不在目标写法里），属于「可与 S2 并行」那把 |
-| F0 | 新模块 `std/float`：`INFINITY`/`NAN` | 无 | 否（加法） | **单独 PR**。不在 tile 路径上，不触发 `tile.yml`；要 `gen-stdsrc` 与 core-golden 重录 |
-| U1 | `std/dtype`、narrow 与 `std/int` 的见证与 impl、只存储类型、`FP16`→`F16` | std 定宽整数合并 | 仅 `FP16` 改名 | 栈的第一块 |
-| S2 | tileir 的 `d_range`/`d_for`/`StagedIter`/`StagedVar` impl | S1（已合） | 否 | 栈 |
+| F0 | 新模块 `std/float`：`INFINITY`/`NAN`（`neg_inf()` 的迁移不在本刀，归 B，因为改 kernels 与 tileref 会动 tile 输入摘要） | 无 | 否（加法） | **PR A**。不在 tile 路径上，不触发 `tile.yml`；要 `gen-stdsrc`，新增 spike-native 的两后端对拍用例 |
+| U1 | `std/dtype`、`std/int` 四个类型的见证与 impl（`I8 I16 I32 U8`，经 `scripts/fixed-ints/gen.py`）、内建三个见证（`F64 I64 I1`）。**narrow 一侧**（`BF16 F16 F32` 的见证与 impl、只存储类型、`FP16`→`F16`）：`std/narrow.dawn` 是 tile 输入，动它就动摘要，所以留给 C | std 定宽整数合并 | 否（加法） | **PR A**（与 F0 同 PR，各一个提交）；narrow 一侧归 C |
+| S2 | tileir 的 `d_range[B: RangeBound]`（Int 与 Idx 各一个 impl，取代 `d_range`/`d_for` 两个闭包形式）、`StagedIter`/`StagedVar` impl；不引入 `d_span`；`d_for` 不留别名 | S1（已合） | 否 | **PR B** |
 | L3 | tileir 的运算符与字面量 impl；**第一步先实测** `add(Tile[I32], Tile[I32])` 今天的行为（§8.1），按结果决定 impl 体是否走检查 helper、是否开 issue | 运算符与 L1（已合） | 否 | 栈 |
-| M | `kernels.dawn`、`prog.dawn` 内联测试、`gpu_fake`、`tile-gpu-diff` 程序按 S2/L3/F0 迁移；加计数断言 | S2、L3、F0 | 否（旧 API 仍在） | 栈 |
-| U2 | 一次性格式切换，加 `std/moved.txt` 的类型名条目与选择性引入命中它的最小扩展（§8.5） | U1、M | **是** | 栈，**必须同一个 PR 完成**（见下） |
-| R | 版本号 0.11.0、把闭包形式的 `d_range`/`d_for` 收回（栈中间的临时名一并清掉）、CHANGELOG 迁移表、README、教程中英、spec、site gpu 页与调用图、台账重录 | U2 | 是 | 栈的最后一块 |
+| M | `kernels.dawn`、`prog.dawn` 内联测试、`gpu_fake`、`tile-gpu-diff` 程序按 S2/L3/F0 迁移（含 `neg_inf()`/`ref_neg_inf()` 换 `-INFINITY`，`use std/float.{INFINITY}`）；加计数断言 | S2、L3、F0 | 否（旧 API 仍在） | **PR B** |
+| U2 | 一次性格式切换（含 narrow 一侧的见证、`FP16`→`F16`）；**不**扩展 `std/moved.txt`，旧名直接删（§8.5、§9 Q5） | U1、M | **是** | **PR C**，**必须同一个 PR 完成**（见下） |
+| R | 版本号 0.11.0、把闭包形式的 `d_range` 收回（栈中间的临时名一并清掉；`d_for` 已在 S2 删除）、CHANGELOG 迁移表、README、教程中英、spec、site gpu 页与调用图、台账重录 | U2 | 是 | 栈的最后一块 |
 
 **必须同 PR / 同栈**：
 
 1. U2 内部不可拆。`std/gpu` 删标记与 tileir 改签名、33 个 `use std/gpu` 文件的迁移同时发生，否则中间态编不过（旧 tileir 引不到被删的标记）。这是 §4.2 的 675 处类型位置加约 33 个引入块，按「机械轮派新写者」的惯例整块做。
-2. 台账只重录一次，所以 U1、S2、L3、M、U2、R 是**一个 PR 栈**（K1+K2 的先例），在栈顶重录。栈内每一块各自须通过自己的 tile-golden 逐字节检查；台账与集群门禁走栈顶。
+2. 台账只重录一次，并且只在最后一个 PR（C）里重录。三个 PR 的分界按「动不动 tile 输入摘要」划：A 不动，B 动（kernels、tileref 在 `TILE_PATHS` 里）但台账 verdict 不变，C 动 `std/narrow.dawn`、`std/gpu.dawn` 与全部消费者并重录。每个 PR 各自须通过 tile-golden 逐字节检查。
 3. R 必须在 U2 之后：收回闭包形式之前，所有仓内消费者必须已迁完（M 保证）。S2 到 R 之间若新旧同名无法并存，S2 先用临时名（例如 `d_range_staged`）发描述符，M 迁完后在 R 改回终态名；临时名不得出现在栈顶。
 
-**可独立成 PR 的**：Z0、C0、F0。U1 理论上可独立合并（纯增量加一次 std 改名），但它碰 `std/narrow`，会触发 `tile.yml` 并要求先重录本机台账；与其为它单独重录一次，不如放进栈。
-U1 留在栈内（裁决，§9 Q3）。「同名类型加常量」的两个风险不靠早合暴露，而是在 U1 刀内用测试钉住：`dawn doc` 的锚点（类型与常量各自唯一可寻址）与 LSP 悬停（值位置悬停 `BF16` 显示常量、类型位置显示类型、跳转各落各处），后者进 `selfhost-lsp-diff.sh` 的会话用例。
+**三个 PR（2026-10-06 裁定的切法）**：
+
+| PR | 内容 | tile 输入摘要 | 破坏 |
+|---|---|---|---|
+| A | F0 + U1，一刀一个提交 | **不动**。`std/float`、`std/dtype`、`std/int/*`、`scripts/fixed-ints`、`scripts/spike-native` 都不在 `TILE_PATHS`；`run.sh --check` 在 A 上必须原样绿 | 否，纯增量 |
+| B | S2 + L3 + M：`d_range[B: RangeBound]`、`StagedIter`/`StagedVar` 与运算符/字面量 impl，`kernels.dawn` 与 `tileref` 迁移（含 `neg_inf()`/`ref_neg_inf()` 换 `-INFINITY`） | 动（tileir、tileref、kernels 都在 `TILE_PATHS`），tile-golden 逐字节不变；台账在本 PR 内要么重录要么随 C 一并重录，由 B 开 PR 时按当时的 tile.yml 门禁裁 | 内部 API：`d_for` 删除，旧 `d_range` 闭包形式换成描述符 |
+| C | U2 + R：格式一次性切换、`FP16`→`F16`、narrow 一侧的见证与只存储类型、版本 0.11.0、文档与台账重录 | 动 | 是 |
+
+U1 的 narrow 一侧留给 C 的原因：`std/narrow.dawn` 在 `TILE_PATHS`（`scripts/tile-gpu-diff/inputs.py`），而见证常量必须与类型同名同模块（`use std/narrow.{BF16}` 一次拿到类型与见证，这是 a1 的全部意义），不能放进 `std/dtype`：同时引入 `std/dtype.{BF16}` 与 `std/narrow.{BF16}` 会撞名。`impl HasDtype[..]` 按孤儿规则可以写在 trait 所在的 `std/dtype`，所以只有常量卡住。A 里 `std/int/{i8,i16,i32,u8}` 与内建三个见证不碰 tile 输入，照常做。
+
+A 里「同名类型加常量」的两个风险用测试钉住，不靠早合暴露：`dawn doc` 的锚点（类型与常量各自唯一可寻址）与 LSP 悬停（值位置悬停显示常量、类型位置显示类型、跳转各落各处）。C 里 narrow 的同名对沿用同一批用例。
 
 **排序理由**：M 在 U2 之前，是因为 U2 改的是 `kernels.dawn` 里 `Tile[F64]` 一类 449 处纯机械拼写，M 改的是循环与算术行；先 M 后 U2，U2 的 diff 才是纯机械、可由脚本验证。
 反过来 U2 先，M 的每一处改写都要对着新拼写重写一遍。F0 在 M 之前，是因为 M 要用 `-INFINITY`。
@@ -385,8 +402,8 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 2. **`dawn doc` 的锚点。** 同模块里 `pub opaque type BF16` 与 `pub const BF16` 并存时，`dawn doc` 生成的锚点是否冲突（两者都叫 `BF16`）。U1 刀先用语料钉住；若冲突，给常量与类型分前缀锚点。
 3. **LSP 悬停。** 一个格式名在值位置（`p.to(BF16)`）悬停该显示 `const BF16: Dtype[BF16]` 还是类型；跳转定义落到哪个。`lspeval` 对常量折叠表的读法是 L2 的缺口（literal 裁决点名）。需要 LSP 会话对拍（`selfhost-lsp-diff.sh`）加一个用例。
 4. **`NAN` 与 `INFINITY` 的编译期求值。** `0.0 / 0.0` 与 `1.0 / 0.0` 在 comptime 折叠与两个后端（JVM、C）是否一致，NaN 的位型是否被保持。`INFINITY` 的位型可测（`0x7FF0000000000000`）；`NAN` 的 payload 无消费者，只要求 `x != x`。F0 刀加内联测试，两后端各跑一次。
-5. **写错格式时的 hint。** 旧代码写 `use std/gpu.{F64}` 与 `Tile[F64]`，新版里 `std/gpu` 不再导出 `F64`。裁决（§9 Q5）：提示走 `std/moved.txt`（`std/gpu F64 -> Float`、`I64 -> Int`、`I1 -> Bool`，其余 15 个标记指到新模块）。读码核实：`docs/std-moved-design.md` 的表只服务函数（限定调用 `alias.old(..)`），并明说不对 `types`/`consts` 设门（该文 §「不做」），所以**机制不直接支持类型名**，要做一次最小扩展：让选择性引入 `use std/gpu.{F64}` 命中同一张表（私有名诊断 `private_name_diagnostic` 与表已经共用，扩的是「被移走的名字」的种类，不是新开检查器特例）。提示出现在 import 行，而每个旧调用者都有这一行，所以比在 `Tile[F64]` 处报更早也更准。这把扩展并进 U2（std 公开面的破坏刀），不再是单独一把小刀；`until` 取默认十个 minor。
-6. **`FP16` 改名是 std 公开面破坏。** 它随 U1 进编译器 release；`examples/data/narrow.dawn`、play-ui 样例、`spike-native` 同步改。dawnop-site 升钉前要 grep `narrow.fp16`/`FP16`，裁决（§9 Q8）要求把这条写进它的升钉清单（本仓不替它做）。
+5. **写错格式时的 hint：不做。** 旧代码写 `use std/gpu.{F64}` 与 `Tile[F64]`，新版里 `std/gpu` 不再导出 `F64`，得到的是普通的「没有导出此名」错误。裁决（§9 Q5，10-06 更正）：不给 `Tile[F64]` 提示，不扩展 `std/moved.txt`（它今天只管函数，扩展到类型名等于为一次迁移造兼容机制），U2 直接删旧名。
+6. **`FP16` 改名是 std 公开面破坏。** 它随 U2（PR C）进编译器 release；`examples/data/narrow.dawn`、play-ui 样例、`spike-native` 同步改。dawnop-site 升钉前要 grep `narrow.fp16`/`FP16`，裁决（§9 Q8）要求把这条写进它的升钉清单（本仓不替它做）。
 7. **import 块变长。** `kernels.dawn` 与每个 `tile-gpu-diff` 程序的 `use std/gpu.{F64, BF16, I32, ..}` 一行会变成 `std/dtype`、`std/narrow`、`std/int/i32` 等多行。核实结果：**Dawn 没有 re-export**（`spec.md` 没有 `pub use` 或同义条文，`std/` 与 `packages/` 里没有一处 `pub use`，只有选择性引入与整模块引入），所以 tileir 无法提供聚合出口。裁决（§9 Q7）：不为此引入 re-export，33 个文件各多 2 到 3 行 import 可以接受。
 8. **泛型 kernel。** `var m: Tile[A]` 对裸类型参数 `A` 走 blanket `impl[D] StagedVar[Tile[D]]` 已在 main 上通过（调研 §1.2）；`generic_carry`（`T` 本身作携带类型）仍被拒，不属于本版。
 9. **`d_loop` 与 `var` 混用。** 本版 `d_loop` kernel 不迁，`carry` 仍公开；若一个 kernel 同时有 `for` 与 `d_loop`，两种携带并存。树里没有这样的 kernel（4 个 `d_loop` 函数都不用 `for`），但文档要写清边界。
@@ -397,10 +414,10 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 八个开放问题已由维护者裁决（记录在 agent-handoff 的 ruling-tileir-011-open-20261006），下面每条一行理由，改动已写入对应章节。
 
 - **Q1** `INFINITY`/`NAN` 放新模块 `std/float`（§2.3）。理由：`Float` 是内建类型，常量挂专门模块（Rust `f64::INFINITY`、Zig `std.math.inf` 的思路），不在 tile 路径上所以 F0 不触发 `tile.yml`，以后 `MAX`/`EPSILON`/`is_nan` 同处。
-- **Q2** 终态拼写是 `d_range`（Idx 版沿用 `d_for`），不引入 `d_span`，不发弃用别名（§2.1、§7）。理由：目标写法就是用户看过的 `for j in d_range(..)`；同一个破坏性版本内调用方一次迁完，别名只会多留两个名字。临时名只活在栈的中间提交，R 之前收回。
+- **Q2** 终态拼写是 `d_range`，且只有一个：`d_range[B: RangeBound](lower: B, upper: B, step: B = 1, unsigned_cmp: Bool = false)`，`Int` 与 `Idx` 各实现 `RangeBound`；`d_for` 删除，不引入 `d_span`，不发弃用别名（§2.1、§7）。理由：目标写法就是用户看过的 `for j in d_range(..)`；Int 界与 Idx 界只差边界类型，用 trait 区分比起两个名字更少记一个；同一个破坏性版本内调用方一次迁完，别名只会多留名字。IR 与 golden 不变。临时名只活在栈的中间提交，R 之前收回。（原「Idx 版沿用 `d_for`」于 10-06 由维护者推翻。）
 - **Q3** U1 留在栈内，不单独先合（§7）。理由：不多付一次台账重录；同名类型加常量的 `dawn doc` 锚点与 LSP 悬停风险在 U1 刀内用测试钉住。
 - **Q4** `FloatDtype` 与 `HasDtype` 分开保留（§2.5）。理由：mma 组合表只收七个算术浮点，并入会把整数与只存储格式放进 `full` 的约束，类型错误退成运行期拒绝。
-- **Q5** `Tile[F64]` 的提示走 `std/moved.txt`（§8.5）。理由：已有机制，不另开编译器特例；读码发现它今天只管函数，所以做最小扩展使选择性引入的类型名也命中，并进 U2。
+- **Q5** 不做 `Tile[F64]` 提示，也不扩展 `std/moved.txt` 支持类型名（§8.5）。理由：仓内没有别的消费者，破坏性变更直接删旧名，编译错误已足够；为一次性迁移扩展机制是兼容层。（原裁决「走 `std/moved.txt` 并最小扩展」于 10-06 由维护者推翻。）
 - **Q6** `Tile[I32]` 的 `add` 先实测，作为 L3 的第一步（§8.1）。理由：静态读码看不到浮点检查；若确是未经检查的 `addf`，开公开 issue 并让运算符 impl 经检查过的 helper。整数 tile 的运算符本版仍不给（§10 第 1 条）。
 - **Q7** 不引入 re-export（§8.7）。理由：核实语言没有 re-export；每个文件多两三行 import 可以接受。
 - **Q8** dawnop-site 升钉前 grep `narrow.fp16`/`FP16`，写进它的升钉清单（§8.6）。理由：本仓不替下游迁移，但清单项不能漏。
@@ -420,4 +437,7 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 11. **staged `while`、`break`/`return` 离开 staged 体**：staged-for-design §9 已否；数据相关退出用 `d_loop`。
 12. **本版做类型化 `download`（U3）与常量带宿主值类型（U4）**：U3 要改线协议（Bytes），i64 精确性另有一条债；U4 可能动 golden。各自另设计，不与一次「golden 零变化」的发布混装。
 13. **本版做 K4 运行期标量参数**：独立，碰 `std/gpu` 的 `Gpu` 效果面与 Core golden，可并行，不并入。
-14. **逐刀各发一个版本**：见 §1，同一批行改四遍，台账重录四次。
+14. **`d_span`、`d_for` 别名、两个并列的循环描述符**：`d_range[B: RangeBound]` 一个名字覆盖 Int 与 Idx 界，另起名字只会多留一个要记的词（§9 Q2）。
+15. **`Tile[F64]` 迁移提示与 `std/moved.txt` 对类型名的扩展**：没有别的消费者，旧名直接删；为一次迁移扩展机制就是兼容层（§9 Q5）。
+16. **在 PR A 里动 `std/narrow.dawn` 或迁 `neg_inf()`**：两者都在 `TILE_PATHS` 内，会改变 tile 输入摘要；A 的承诺是摘要不动（§7）。
+17. **逐刀各发一个版本**：见 §1，同一批行改四遍，台账重录四次。
