@@ -5869,10 +5869,13 @@ fn lit_int_value(e: Expr) -> Int =
     _ -> 0
   }
 
+# Negation and not subtraction from zero: `0.0 - 0.0` is +0.0, and `-0.0` is
+# how a negative zero is written (D6), so a literal `-0.0` at a library type
+# would hand `from_float` the wrong zero.
 fn lit_float_value(e: Expr) -> Float =
   match e {
     EFloat(v, _, _) -> v
-    EUnary(_, inner, _, _) -> 0.0 - lit_float_value(inner)
+    EUnary(_, inner, _, _) -> -lit_float_value(inner)
     _ -> 0.0
   }
 
@@ -5969,7 +5972,10 @@ test "a literal at Int or Float is the literal it always was, and elsewhere its 
     "fn f() -> Float = 1.5\n" ++
     "fn n() -> Int = -1\n" ++
     "fn x() -> Float = -2\n" ++
-    "fn m() -> M = 3\n"
+    "fn m() -> M = 3\n" ++
+    "type G = { x: Float }\n" ++
+    "impl FromFloat[G] {\n  fn from_float(x: Float) -> G = G { x: x }\n}\n" ++
+    "fn z() -> G = -0.0\n"
   let (md, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
@@ -6000,6 +6006,12 @@ test "a literal at Int or Float is the literal it always was, and elsewhere its 
     _ -> false
   }
   assert folded
+  # the negative zero reaches `from_float` as itself
+  let signed_zero = match arith_body(tm, "z") {
+    XComptime(XCallFn(_, _, [XFloat(v, ..)], [_], _, Some(tid), ..), ..) -> tid == FROM_FLOAT_ID && v == 0.0 && 1.0 / v < 0.0
+    _ -> false
+  }
+  assert signed_zero
 }
 
 ## `from_int(n)` at a type already known: the witness is resolved directly,
