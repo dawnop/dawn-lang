@@ -790,9 +790,10 @@ pub fn list_primitive_fn(n: String) -> Option[String] = {
 }
 
 ## Every `std/pvec` function an emitter may name directly: the primitives'
-## targets and the three boundary spellings. Each one is a call site that
-## never reads the parameter-mode table either, so `c/infer` pins them owned
-## for the same reason they are roots here.
+## targets and the three boundary spellings. Each one is a call no chain in
+## Core reaches, which is why they are roots; whether its operands are owned
+## is a separate question (`c/infer.list_owned_positions` and the boundary
+## roots below).
 pub fn list_root_names() -> List[String] = {
   var out: List[String] = []
   for pr in list_primitive_table() {
@@ -810,12 +811,30 @@ pub fn is_list_root(n: String) -> Bool = {
   false
 }
 
+## The `(owner, name)` an emitter reads the parameter-mode table with for a
+## `std/pvec` function it spells, refusing a name outside `list_root_names()`
+## for the reason `emitc.pvec_call` does: pruning keeps only those.
+pub fn list_root_key(n: String) -> (String, String) =
+  if is_list_root(n) {
+    (LIST_MOD, n)
+  } else {
+    panic("reach: `" ++ LIST_MOD ++ "." ++ n ++ "` is not in list_root_names()")
+  }
+
 ## `list_root_names` as `live_set`'s `list_roots`.
 pub fn list_roots() -> List[(String, String)] = {
   var out: List[(String, String)] = []
   for n in list_root_names() { out = out ++ [(LIST_MOD, n)] }
   out
 }
+
+## The three boundary spellings alone: calls whose operands the C emitter
+## hands over by its own rule (`emitc` dups both sides of a concat, takes the
+## literal's buffer), whatever a mode table might say. The five list
+## primitives are not here: their operands follow the callee's table row,
+## see `c/infer.list_owned_positions`.
+pub fn list_boundary_roots() -> List[(String, String)] =
+  [(LIST_MOD, LIST_FROM_ARRAY), (LIST_MOD, LIST_TO_ARRAY), (LIST_MOD, LIST_CONCAT)]
 
 # ---- tests ----
 
