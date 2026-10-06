@@ -171,6 +171,17 @@ fn plus(x: F32, y: F32) -> F32 = x + y
 fn prim(a: Int, b: Int) -> Bool = a + 1 < b
 
 fn folded() -> Int = 6 * 7
+
+fn lits() -> Unit = {
+  let a: Float = 7
+  let b: F32 = 0.1
+  let c: F32 = -0.0
+  let d: Int = 200
+  let e: Float = -1.5
+  let f: Float = 1.0 / 2
+  let g: Int = -0xFF
+  let _ = (a, b, c, d, e, f, g)
+}
 EOF
 
 # Folded values on hover (docs/lsp-hover-design.md §C5): a closed, pure
@@ -639,6 +650,14 @@ for needle, occ, delta in [
     ("a + 1 < b", 1, 2),        # a primitive
     ("a + 1 < b", 1, 6),        # a comparison
     ("6 * 7", 1, 2),            # folded, the value on the type line
+    ("= 7", 1, 2),              # an integer taken at Float
+    ("0.1", 1, 1),              # a Float literal at F32, rounded
+    ("-0.0", 1, 0),             # a negated literal is one literal
+    ("-0.0", 1, 1),
+    ("200", 1, 1),              # an integer, unchanged
+    ("-1.5", 1, 2),
+    ("1.0 / 2", 1, 6),          # an integer taken at Float by the mixed rule
+    ("-0xFF", 1, 3),
 ]:
     req("textDocument/hover", at(opt_uri, opt_text, needle, occ, delta))
     req("textDocument/definition", at(opt_uri, opt_text, needle, occ, delta))

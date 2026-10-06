@@ -3,7 +3,7 @@
 > 状态：**current** —— 刀 L1（2026-10-06）落地：两个 prelude trait、字面量按期望定型、二元运算的字面量让步与混合种类规则、
 > 调用实参在两轮推断之间检查等待中的字面量、纯 impl 的编译期折叠与它的报错措辞、折叠缓存。权威条文在 [spec.md](spec.md) §1.5、§2.1、§3.5、§4.3。
 > 与 [arith-operator-traits-design.md](arith-operator-traits-design.md)（运算符刀 1）同一个 release。
-> N1（`std/narrow` 的 `FromFloat` impl）与 N2（std 定宽整数，D13）已落地。未做：L2（LSP 悬停显示字面量的定型与折叠值）、
+> N1（`std/narrow` 的 `FromFloat` impl）与 N2（std 定宽整数，D13）已落地。L2（LSP 悬停显示字面量的定型与折叠值，[lsp-hover-design.md](lsp-hover-design.md) §L2）已落地。未做：
 > L3（tileir 的 `FromFloat[Tile[D]]`/`FromInt[Idx]`），见 §8。std 里的 impl 都要等种子推进到本 release 之后（std 在自举 closure 里，种子不认识这两个 trait）。
 > 前置阅读：[int-min-literal-design.md](int-min-literal-design.md)、[effect-params-design.md](effect-params-design.md) §9（关联效果默认值）。
 
@@ -250,7 +250,7 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 | L0′ | #563 comptime 块键 | 完成（先行合入） |
 | L1 | 本文 | 完成 |
 | 1′ | 发 release N（与运算符刀 1 同一个），推进种子 | 待做 |
-| L2 | LSP：字面量悬停显示定型结果与折叠值（`lspeval` 读折叠表）；`EUnary(-, 字面量)` 与 `XComptime` 配对 | 待做 |
+| L2 | LSP：字面量悬停显示定型结果与折叠值（`lspeval` 读折叠表）；`EUnary(-, 字面量)` 与 `XComptime` 配对 | 完成 |
 | L3 | tileir：`FromFloat[Tile[D]]`、`FromInt[Idx]`（与运算符刀 3 同批） | 待种子 |
 | N1 | `std/narrow`：`FromFloat[BF16/FP16/F32]`（不给 `FromInt`：bf16 只有 256 个连续整数）；`narrow-contract` 把每个有限的舍入输入写成该格式的字面量，编译期折叠的值对 oracle。顺带修了 `-0.0` 字面量经 trait 时丢符号（`0.0 - 0.0` 是 +0.0） | 完成 |
 | N2 | std 定宽整数（D13）：七个模块、`FromInt` 与六个算术 trait、`Show`、`U64` 的 `Ord`、`of`/`wrap`/`to_int`、具名按位、`checked_*` | 完成 |

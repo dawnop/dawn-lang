@@ -4755,6 +4755,52 @@ test "hover on a literal shows its type and a value line in the one fence" {
   }))
 }
 
+fn typed_literal_probe_text() -> String =
+  join([
+    "use std/narrow.{F32}",
+    "use std/int/u8.{U8}",
+    "",
+    "fn lits() -> Unit = {",
+    "  let a: Float = 7",
+    "  let b: F32 = 0.1",
+    "  let c: F32 = -0.0",
+    "  let d: U8 = 200",
+    "  let e: Float = -1.5",
+    "  let f: Float = 1.0 / 2",
+    "  let g: Int = -0xFF",
+    "  let h: F32 = 2.0",
+    "  let _ = (a, b, c, d, e, f, g, h)",
+    "}",
+    ""
+  ], "\n")
+
+test "hover on a typed literal shows the type it took and the value it folded to" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = typed_literal_probe_text()
+    let d = def_probe_doc_named(st, "typedlits.dawn", text)
+    # an integer taken at Float is that Float, read off the typed node
+    assert eval_probe_at(st, d, text, "= 7", 2) == "Float = 7.0"
+    assert eval_probe_at(st, d, text, "1.0 / 2", 6) == "Float = 2.0"
+    # a library type's value is what its impl made of the literal
+    assert eval_probe_at(st, d, text, "0.1", 0) == "F32 = 0.10000000149011612\n0.1  (not exactly representable)"
+    # a value that is the spelling says nothing more than the type
+    assert eval_probe_at(st, d, text, "= 2.0", 2) == "F32\n2.0  (exact)"
+    assert eval_probe_at(st, d, text, "200", 0) == "U8\n200  (0xC8)"
+    # a sign and its digits are one literal, whichever the cursor is on
+    assert eval_probe_at(st, d, text, "-0.0", 0) == "F32\n-0.0  (exact)"
+    assert eval_probe_at(st, d, text, "-0.0", 1) == "F32\n-0.0  (exact)"
+    assert eval_probe_at(st, d, text, "-1.5", 0) == "Float\n-1.5  (exact)"
+    assert eval_probe_at(st, d, text, "-1.5", 2) == "Float\n-1.5  (exact)"
+    assert eval_probe_at(st, d, text, "-0xFF", 0) == "Int\n-0xFF = -255"
+    assert eval_probe_at(st, d, text, "-0xFF", 3) == "Int\n-0xFF = -255"
+  }))
+}
+
 ## Where `needle` + `skip` is in the probe text.
 fn probe_offset(text: String, needle: String, skip: Int) -> Int =
   match str.index_of(text, needle) {
