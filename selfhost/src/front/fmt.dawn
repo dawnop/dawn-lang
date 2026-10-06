@@ -527,6 +527,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # wrapped signature made the `{` that ends it a statement body one level in.
   var logical_indent = 0
   var logical_depth = 0
+  # the first token of the line the anchor last moved to
+  var logical_first = toks[0].kind
   var anchor_pending = false
   var anchor_moves = false
   # The innermost `if`/`match`/`while`/`for` whose body brace has not opened
@@ -625,7 +627,12 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         out = out ++ [str.repeat("  ", lvl)]
         out = out ++ [ttext]
         anchor_pending = not is_closer(t.kind)
-        anchor_moves = not (cont && continues_operand(pl, t, marks))
+        # a `:` that ends a `let`/`var`/`const` line is its annotation's colon,
+        # and the type on the next line is part of the same statement, so a `{`
+        # after its `=` is that statement's body, not a new expression's
+        let annotation = pl.kind == COLON && len(openers) == logical_depth &&
+          (logical_first == LET || logical_first == VAR || logical_first == CONST)
+        anchor_moves = not (cont && (annotation || continues_operand(pl, t, marks)))
       }
     }
     # A line with no `(`/`[` open above it begins a construct, even when it
@@ -637,6 +644,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       if anchor_moves && in_block(openers) {
         logical_indent = line_indent
         logical_depth = len(openers)
+        logical_first = line_first.kind
       }
     }
     let headed = t.kind == IF || t.kind == MATCH || t.kind == WHILE || t.kind == FOR
@@ -1645,4 +1653,14 @@ test "a leading else lines up with its if past comments and wrapped chains" {
   let c = "fn j(d: String) -> Int =\n  if a(d) { 1 }\n  else if b(d,\n    \"D\") { 2 }\n# why\n  else { 3 }\n"
   assert fmt_of(c) == c
   assert fmt_of("fn j(d: String) -> Int =\n  if a(d) { 1 }\n  else if b(d,\n    \"D\") { 2 }\n# why\nelse { 3 }\n") == c
+}
+
+## #545: the `:` that ends a `let` line is the annotation's colon. The type on
+## the next line belongs to the same statement, so the `{` after its `=` is
+## that statement's body. Reading `:` as the start of a new expression
+## anchored the body to the type's line, a level too deep.
+test "a block after a wrapped let annotation follows the statement" {
+  let a = "fn f(c: Bool) -> Bool = {\n  let v:\n    Bool = {\n    let a = 1\n    c\n  }\n  v\n}\n"
+  assert fmt_of(a) == a
+  assert fmt_of("fn f(c: Bool) -> Bool = {\nlet v:\nBool = {\nlet a = 1\nc\n}\nv\n}\n") == a
 }
