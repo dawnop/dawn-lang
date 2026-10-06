@@ -20,3 +20,15 @@ for pkg in packages/*/; do
   pkg="${pkg%/}"
   if [ -f "$pkg/dawn.toml" ]; then printf '%s\0' "${pkg#packages/}"; fi
 done | xargs -0 -P 4 -I{} sh -c './bin/dawn doc "packages/$1" > "$2/$1.json"' sh {} "$out"
+
+# A document that is not JSON stops here, naming the file and what it starts
+# with. `dawn doc` writes the document to stdout, so anything else the JVM or
+# the launcher prints there (a log line, a rebuild notice) lands in the file
+# and would otherwise surface much later as an offset in a parser's error from
+# gen/packages.dawn, with nothing to say whose output it was.
+for f in "$out"/*.json; do
+  if [ "$(head -c 1 "$f")" != "{" ]; then
+    echo "site/package-docs.sh: $f does not start with '{', it starts with: $(head -c 200 "$f" | head -n 3)" >&2
+    exit 1
+  fi
+done
