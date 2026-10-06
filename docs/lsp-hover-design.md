@@ -1,4 +1,4 @@
-# LSP 悬停与内联提示：设计（A1–A4、B1、C4、C5、H1）
+# LSP 悬停与内联提示：设计（A1–A4、B1、C4、C5、H1、O1、L2、Q1）
 
 > 状态：current。本线的总纲：除类型之外，hover 与 inlay 还能告诉读者什么、按什么刀序做。
 > A1（hover 显示 const 与 comptime 块的值）已落地；A2 已落地（§4）；A3 已落地（§A3）；A4（inlay hints）已落地（§A4）；
@@ -7,6 +7,7 @@
 > C5（纯且闭合表达式的 hover 求值）已落地：解释器入口 C5-1 与 LSP 接线 C5-2（§C5）。
 > C4（省略的默认实参显示求得的值，复用 C5 的求值）已落地（§C4）。
 > H1（handler 臂的操作名 hover 与跳转定义）：v0.83.0 起已在，本节记实测、测试与负控（§H1）。
+> O1（运算符悬停显示 impl 或原语）、L2（字面量悬停显示定型结果与折叠值）、Q1（`?` 的错误类型 inlay）：设计已写（各节），实现按刀落地。
 > B 组立项时在这里改写被事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2）。
 
 ---
@@ -1132,6 +1133,93 @@ references、documentHighlight 与 rename 读的是同一份 walk（lsp-referenc
   两者 AST 上都有，查的是 checker 自己填的名字表，回写多一个 typed 节点却不多一条信息，还要动 Core 降级与两个后端。
 - **inlay 给臂加效果行**：A4 报告把「handler 臂不给效果行」定为设计，这条不改。
 
+## O1. 运算符悬停：走哪个 impl，或是原语
+
+#566 以后 `+ - * / %` 与一元 `-` 在带 head 的类型上走 prelude trait，typed 树里是 `XCallFn(.., Some(trait_id))`；
+Int、Float 上仍是 `XBinary`/`XUnary`。两种形状在运算符上原本都没有答案（光标落在 `+` 上，最内层节点是整个表达式，
+悬停只回它的类型）。
+
+### O1.1 回什么
+
+光标在运算符记号上（`EBinary` 的 `olo..ohi`，一元 `-` 取 `lo` 起一个字符、`not` 取三个），悬停是两行：
+
+```
+F32
++ via impl Add[F32]: fn(F32, F32) -> F32
+```
+
+- 第一行与改动前同样的东西：整个表达式的类型；表达式闭合且纯时，C5 照旧把折叠值接在这一行末尾（`F32 = 3.0`）。
+  实现上 `lspeval.with_value` 把值接在**第一行**，其余行原样跟在后面，这是对它唯一的改动，单行的 hover 不受影响。
+- 第二行：运算符的写法（从文档文本按 span 切出来，不另做一张运算符表）、`via impl Trait[Subject]` 或 `(primitive)`、
+  实际的操作数与结果类型。`Int`/`Float` 上的 `+` 是 `+ (primitive): fn(Int, Int) -> Int`；比较给 `fn(Int, Int) -> Bool`。
+  `Eq`/`Ord` 在 ADT 与 opaque 上经 `XBinary.wit`（`WConcrete`），同样写 `via impl Ord[Point]`；在语言自己的类型上写 `(primitive)`。
+- 跳转：落到 impl 里**方法的名字**（`impl Add[F32] { fn add(..) }` 的 `add`），文件是 impl 所在模块的文件，std 的 impl
+  跳进 std 文件。impl 里的 `##` 文档照常跟在围栏后。找不到声明时（`derive` 出来的 impl、种子内嵌的 std 没有文件）
+  只给文本，不给 definition，与 `Holder.jump` 的既有规则相同。
+
+### O1.2 impl 怎么找
+
+`ImplI.lo/hi` 在别的模块眼里是 0（`exported_impl` 为保持导出面稳定而清零，`exported_alias` 同理，#589 就是这个原因），
+所以不读它。按 `impl_at(impl_table, trait_id, subject)` 取到 `ImplI.owner`，进该模块的 parse 树，找 trait 名相同、
+subject 的类型头（`TNamed.name`/`TQual.name`）与 `subject` 的头同名的 `DImpl`。一个 (trait, 头) 至多一个 impl（coherence，
+`Impls` 就是按它建的表），所以头名就够定位，不比对类型实参。语言自己的类型（`Int`、`Bool`、`String`、`List` 等，没有一个读者
+打得开的 impl 声明）一律写 `(primitive)`，不给跳转；ADT 与 opaque 才写 `via impl`，`derive` 出来的 impl 只给文本。
+
+### O1.3 不做的（O1 内，理由）
+
+- **运算符上的 references / rename**：运算符不是名字，没有可改的东西；references 对运算符两侧的名字早已正确（#566 的配对修复）。
+- **`&&`、`||`、`++`、`==` 在标量上的专门文案**：同样写 `(primitive)` 与实际类型，不另立措辞。
+- **泛型函数里受 bound 约束的运算符**：`a + b` 在 `[T: Add]` 里写作 `via bound Add[T]`，没有可跳的 impl（调用点才知道是哪个）。
+
+## L2. 字面量悬停：定型结果与折叠值
+
+字面量设计的 L2 刀（literal-system-design.md §8）。#567 以后一个字面量按期望定型：`Int`/`Float` 期望下仍是它自己，
+`Int` 字面量在 `Float` 期望下是精确的 `Float`，库类型有 `FromInt`/`FromFloat` 时是该 impl 的调用（纯 impl 折叠成
+`XComptime`）。A2 的悬停只按**写的**字面量说话，所以：
+
+- `7` 在 `Float` 期望下回 `Float`，不说它已经是 `7.0`；
+- `2.0` 在 `F32` 下回 `F32` 加「`2.0  (exact)`」，那句话说的是写下的十进制是不是一个 double，与 `F32` 无关；`0.1` 在
+  `F32` 下读者要的是舍入以后的值；
+- `-1.5`、`-0.0` 的负号是 `EUnary`，光标在数字上回的是不带符号的 `1.5`，在 `-` 上只有类型；库类型下 `-0.0` 的 typed 节点
+  是 `XComptime`，与 `EUnary` 配不上，整个字面量什么都没有。
+
+### L2.1 规则
+
+1. **字面量原子**（`EInt`、`EFloat`，或 `-` 直接加在其一上，与检查器的 `is_lit_atom` 同一个判据）按一个节点悬停，范围是整个原子，
+   所以 `-` 与数字回同一个答案，值带符号。原子内部不再往下走。
+2. **第一行是定型后的类型，定型值与写下的数不同时接 ` = 值`**：
+   - `Int` 字面量在 `Float` 期望下：`Float = 7.0`（typed 节点是 `XFloat`，值直接读，不求值）；
+   - 库类型：typed 节点是 `XComptime(XCallFn(.., FromInt|FromFloat))`，交给 C5 的折叠（`lspeval` 把这种节点从「不算计算」里
+     挑出来），值渲染与 A1 相同；`F32` 下 `0.1` 是 `F32 = 0.10000000149011612`。值与写下的拼写相同（`2.0`、`-0.0`）时不接，C5 原有的回显规则；
+   - 折叠失败、被拒、带效果的 impl（typed 节点是 `XCallFn`，不折叠）：只有类型。
+3. **第二行**仍是 A2 的「写下的字面量」那一行，不变（`0xFF = 255`、`1_000_000  (0xF4240)`、`'é'  U+00E9  UTF-8: C3 A9` 等），
+   带符号的原子用带符号的拼写与值。`Int` 字面量在 `Float` 下，单个十进制数字没有这一行（A2 的规则：回显而已）。
+4. 没有 typed 树（模块有错、旧分析）时与改动前相同：只有 A2 的文本或类型。
+
+### L2.2 不做的（L2 内，理由）
+
+- **库类型下给出 `(exact)`/`(not exactly representable)` 之外的「F32 精确与否」**：要么写精确展开（A2 已定不做），要么显示 double
+  的最短拼写，后者看着像随意的近似。第一行的折叠值已经是读者要的那个数。
+- **`-` 与数字分开回答**：它们是同一个字面量，光标放哪一边都该读到同一个值。
+- **模式里的字面量**（字面量设计 D10）：模式里不走期望定型，没有 typed 的折叠节点。
+
+## Q1. `?` 传播的错误类型（inlay hint）
+
+A4.6 与调研 C4 放在 B 组的一项：`parse(s)?« ⇡ ParseError»`。调研已定的部分：**默认关**、数据是被传播的错误分量、价值中等。
+
+- 形状：`Result[T, E]` 上的 `?`，在 `?` 之后给一条 `⇡ E` 的提示（`label: " ⇡ E"`，`kind: 1`，`paddingLeft`）。
+  `Option` 上的 `?` 没有错误分量，不给。`E` 就是 typed 树里操作数 `Result[T, E]` 的第二个实参，检查器要求它与外层返回类型的错误分量
+  相同，所以不必另读外层签名。
+- 长度与含错误类型的规则同类型提示（`TYPE_HINT_SHOWN`，含 `TyError` 不给）。
+- 配置：`initializationOptions.inlayHints.propagatedErrors`，默认 **关**（A4.3 的第七个键）。
+- 位置：`?` 记号之后。`EPropagate` 的 span 以 `?` 收尾，提示落在 `hi`。
+
+### Q1.1 不做的（Q1 内，理由）
+
+- **效果多态调用的实例化行**：`XCallFn` 不带实例化的行，要给 checker 的 typed 树加字段，牵动 Core 降级，不是 LSP 一侧的改动；
+  没有一个读者说得清想要的措辞（`!e` 展开成什么、嵌套 handler 下是外层还是内层）。留在 B 组，不立项。
+- **`for` 循环变量、`match` 臂绑定的类型**：A4.6 已写「需要时同一套规则加一处」，没有需要，也没有定下默认开还是关；不猜。
+
 ## 5. 门禁与契约
 
 - `./bin/dawn test selfhost`：`lsp/lspv` 五条（每种值、记录与和类、十六进制阈值、截断、函数值）；
@@ -1235,4 +1323,7 @@ comptime 本来就在每次分析里跑（sync 不变）。
 | C5-2（hover 接线） | 已落地 | `ff7a77b2`（main 上的哈希，PR #442） |
 | C4（默认实参值 inlay） | 合入后由协调者回填 | |
 | H1（handler 臂的操作名） | 实现随 `0e6ef2c2`（v0.83.0）落地；测试与本节合入后由协调者回填 | |
+| O1（运算符悬停） | 设计 | |
+| L2（字面量定型与折叠值） | 设计 | |
+| Q1（`?` 的错误类型 inlay） | 设计 | |
 | B 组其余 | 未立项 | |
