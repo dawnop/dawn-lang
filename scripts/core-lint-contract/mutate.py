@@ -124,7 +124,7 @@ MUTATIONS = {
     dicts: [],
     evs: evps,
     ret: ret,
-    body: if len(raw) < 0 { body } else { CIntrinsic(name, raw, ret) },""",
+    body: if len(raw) < 0 { body } else { CIntrinsic(name, raw, ret, CNoSite) },""",
     ),),
     # #13: a zero-goal conditional impl's dictionary built as an application
     # of a def that records no arguments.

@@ -8,7 +8,11 @@ A rule that has never been seen red is a claim, so mutate.py puts back one
 defect per rule in a private copy of the compiler, a jar is built from the
 copy, and the rule has to fail on it in its own words:
 
-  absolute       check.py fails with "is no call the parser sees"
+  absolute       check.py fails with "is no call the parser sees" or "fall in
+                 no function of the file" (doubled offsets land either inside
+                 a checked kernel, which is the first, or past every function,
+                 which is the second; which one shows depends on how large the
+                 kernels are, so either one proves the mutant was detected)
   nlo            check.py fails with "has its name at"
   rc-drops-site  check.py fails with "has no site"
   dump-prints    the Core dump of the corpus (`__lower --dump`) differs from the
@@ -39,9 +43,9 @@ HERE = ROOT / "scripts" / "core-sites"
 DAWN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
 
 EXPECT = {
-    "absolute": "is no call the parser sees",
-    "nlo": "has its name at",
-    "rc-drops-site": "has no site",
+    "absolute": ("is no call the parser sees", "fall in no function of the file"),
+    "nlo": ("has its name at",),
+    "rc-drops-site": ("has no site",),
     "dump-prints": None,
 }
 
@@ -111,10 +115,10 @@ def main() -> None:
                     failures.append(f"{name}: the Core dump did not change")
             else:
                 result = checked(jar)
-                if result.returncode != 0 and words in result.stdout:
-                    print(f"OK: {name} turns check.py red ({words})", flush=True)
+                if result.returncode != 0 and any(w in result.stdout for w in words):
+                    print(f"OK: {name} turns check.py red ({' | '.join(words)})", flush=True)
                 else:
-                    failures.append(f"{name}: check.py did not fail with `{words}`\n{result.stdout[-3000:]}")
+                    failures.append(f"{name}: check.py did not fail with `{' | '.join(words)}`\n{result.stdout[-3000:]}")
             shutil.rmtree(tree)
     if failures:
         for f in failures:

@@ -79,6 +79,10 @@ LINT = {
 REFUSED_ON_HEAD = {"lint-43", "lint-54"}
 
 
+class HarnessError(Exception):
+    """A mutant that is broken itself, as opposed to one the check missed."""
+
+
 def run(cmd, cwd=ROOT, env=None, timeout=900):
     return subprocess.run(cmd, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, timeout=timeout)
@@ -110,7 +114,11 @@ def static_red(name: str, kind: str, target: str, owner: str, result) -> bool:
     if kind == "parity":
         return owner in result.stdout
     if re.search(r"^error:", result.stdout, re.M):
-        return False  # a mutant that does not compile proves nothing
+        # a mutant that does not compile proves nothing; the caller reports it
+        # as a harness error, not as "did not go red" (4a5b4e3d added a field
+        # to CIntrinsic and this mutant silently stopped compiling)
+        raise HarnessError(f"{name}: the mutant does not compile, so it proves nothing; "
+                           f"update its edit in mutate.py\n{result.stdout[-3000:]}")
     # a single-module run prints the bare test name, a run that tested its
     # imports too prefixes the module
     return re.search(r"^FAIL\s+(?:" + re.escape(module_of(target)) + r" :: )?" + re.escape(owner) + r"$",
@@ -161,7 +169,11 @@ def main() -> None:
                 copy_tree(tree)
                 apply(name, tree)
                 result = probe_static(tree, kind, target)
-                if static_red(name, kind, target, owner, result):
+                try:
+                    red = static_red(name, kind, target, owner, result)
+                except HarnessError as e:
+                    raise SystemExit(f"HARNESS ERROR: {e}")
+                if red:
                     print(f"OK: {name} turns `{owner}` red", flush=True)
                 else:
                     failures.append(f"{name}: `{owner}` did not go red\n{result.stdout[-3000:]}")
