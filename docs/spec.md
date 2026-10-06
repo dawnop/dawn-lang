@@ -3299,6 +3299,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/char`：字符 `Char`
 - `std/fmt`：数字的渲染与解析（见下）
 - `std/loc`：调用点位置 `Loc` 的读法与 `here()`（§8.4）
+- `std/dtype`：设备元素格式 `Dtype[T]` 与 `HasDtype`，定宽整数与内建三种格式的见证住这里或各自的模块
 - `std/narrow`：窄二进制浮点 bf16、binary16、binary32，逐运算正确舍入（§11「数学内建」）
 - `std/int/i8`：有符号 8 位整数 `I8`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
 - `std/int/i16`：有符号 16 位整数 `I16`，`Int` 上的不透明类型，回绕算术（§11「定宽整数」）
