@@ -1,5 +1,5 @@
 # checker.dawn, ir/interp.dawn: numeric literals typed by their expectation (literal-system-design D11)
-use u8.{Tile, F64, lit}
+use u8.{Tile, F64, lit, mma, Plain, id_of}
 
 pub effect Log {
   fn note(s: String) -> Unit
@@ -35,3 +35,30 @@ fn g[T](a: T, b: T) -> T = b
 pub fn literal_waits(s: String) -> String = g(1, s)
 
 pub fn undeclared() -> Traced = 5
+
+# the node's expectation reaches the left operand of a trait-routed library type
+pub fn mma_left(a: Tile[F64], b: Tile[F64]) -> Tile[F64] = mma(a, b, 0.0) * lit(2.0)
+
+pub fn mma_left_literal(a: Tile[F64], b: Tile[F64]) -> Tile[F64] = mma(a, b, 0.0) * 2.0
+
+pub fn mma_left_let(a: Tile[F64], b: Tile[F64]) -> Tile[F64] = {
+  let s: Tile[F64] = mma(a, b, 0.0) * lit(2.0)
+  s
+}
+
+# no expectation, nothing to infer from: unchanged
+pub fn mma_no_expectation(a: Tile[F64], b: Tile[F64]) -> Tile[F64] = {
+  let s = mma(a, b, 0.0) * lit(2.0)
+  s
+}
+
+# the expectation arrives, but Plain has no FromFloat: the diagnostic is on the literal
+pub fn plain_left(p: Plain[F64]) -> Plain[F64] = id_of(2.0) * p
+
+# Int and Float expectations still stop at the operator
+pub fn float_stops() -> Float = {
+  let f: Float = 1 / 2
+  f
+}
+
+pub fn float_left_mix(r: Float) -> Float = id_of(1) * r

@@ -136,9 +136,21 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 ### D7 字面量
 
 本刀单独看时字面量仍是单态的：`2.0` 是 `Float`，`t * 2.0` 报两侧类型不同。字面量随期望定型、向有类型的一侧让步是
-[literal-system-design.md](literal-system-design.md) 的 L1，与本刀同一个 release 落地，取代这一条。**左锚定的不对称对非字面量写死**：`lit(2.0) * t` 推不出 `D`，现成的「cannot infer type parameter(s) D for `lit`」
-加专属 hint「an operator gives its left operand's type to the right one, not the other way round: swap the operands, or bind the left one with an annotated `let`」
-（只在左操作数恰报了这一条、右操作数类型已知时替换 hint）。不做「左推不出时以右回填」：那就是双向求解的第一步。
+[literal-system-design.md](literal-system-design.md) 的 L1，与本刀同一个 release 落地，取代这一条。**左锚定的不对称对非字面量收窄**（C0 刀，2026-10-06 裁决，推翻原判）：原判是「`lit(2.0) * t` 推不出 `D`，不做左推不出时以右回填」，
+理由是右回填就是双向求解的第一步。这一条仍然成立，**不做右回填**；改变的是另一个方向：二元算术运算符节点**自己的期望类型**，
+当它是走 trait 的库类型（`arith_routed` 为真，即不是 `Int`/`Float`、不是错误类型、有类型头或是刚性类型参数）时，**下传给左操作数**。
+于是 `fn f(t: Tile[F64]) -> Tile[F64] = lit(2.0) * t` 的 `D` 由返回类型定下，`let s: Tile[A] = mma(q, k, 0.0) * lit(scale)` 的累加器格式 `C` 由 let 注解定下。
+期望只是期望，不是约束：左操作数类型与期望不符时，二元节点上原有的类型不符诊断照旧。
+
+理由：左右不对称在字面量裁决之后成了缺陷而不是设计。右操作数早就以左类型为期望，字面量裁决又规定库类型的期望照常流动；
+唯独「运算符节点自己的期望」被左操作数丢掉，使得 `mma(..) * lit(s)` 这种最自然的泛型 kernel 写法必须拆成两个 let。
+先例是 Zig 的 result type（期望自外向内、单向、无搜索），与 Dawn 的局部检查器同构；Rust 靠推断变量延后解，Swift 靠约束求解，这两条 Dawn 都不走（literal-system-design D2）。
+调研与裁决见维护者工作区的 research-generic-kernel-report-20261006.md 与 ruling-generic-kernel-20261006.md 第 2 条。
+
+边界：
+- `Int`/`Float` 期望不下传，所以 `let f: Float = 1 / 2` 仍报错（`Float` 期望不穿过运算符，literal-system-design D5.2）；`Int`/`Float` 混合规则不变；
+- 比较与 `==` 不下传（结果是 `Bool`，期望与操作数类型无关）；
+- 左操作数推不出类型参数、且期望也不是走 trait 的库类型时，原来的 `make() + p` 专属 hint 照旧。
 
 ### D8 降级：非原生的运算符在 TAST 就是调用，后端永远只见原生 `CBinary`
 
@@ -183,7 +195,7 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 | `[T: Add]` 但行里没 `!T.Add` | 不可达 | 现成的「the effect `T.Add` needs evidence here」，落在运算符上 |
 | `[T: Add]` 实例化到没有 impl 的类型 | — | `no impl of `Add` for `V`` + 上面同一族 hint（不再指向「声明 `Add` 的模块」） |
 | `w + 1`（`W` 有 `Add`） | `arithmetic expects numbers, left side is W` | `both sides must have the same type: W vs Int` + `there are no implicit conversions` |
-| `make() + p`（左推不出类型参数） | 现成的 cannot infer | 同句 + D7 的专属 hint |
+| `make() + p`（左推不出类型参数，节点无库类型期望） | 现成的 cannot infer | 同句 + D7 的专属 hint |
 | `1 + w`、`1 + 2.0` | `both sides must have the same type` | **不变**（左是数，原路径） |
 | `(1, 2) + (3, 4)`、`-(1, 2)` | 原文 | **不变**（元组无 head） |
 | `-"a"` | `negation expects a number, got String`（span 是操作数） | `` `-` needs a `Neg` impl for `String` ``，span 改为 `-` 本身 |

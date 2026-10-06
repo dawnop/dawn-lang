@@ -169,7 +169,7 @@ trait FromFloat[T] { effect FromFloat = !()  fn from_float(x: Float) -> T !T.Fro
 | `g(1, s)`，`fn g[T](a: T, b: T)`，`s: String` | 报在 `s` | 报在 `1`（等待的字面量在 `s` 定下 `T` 之后检查） |
 | `g(1, 2.5)` | 报在 `2.5` | 合法，`T = Float` |
 | `const K: Traced = 3`（impl 带效果） | `… is Traced but … Int` | D9 那句 |
-| `lit(2.0) * t` | `cannot infer type parameter(s) D for `lit`` | 不变（运算符设计 D7 的 hint） |
+| `lit(2.0) * t`，节点期望是 `Tile[F64]`（返回类型或注解） | `cannot infer type parameter(s) D for `lit`` | 合法：节点期望是走 trait 的库类型时下传给左操作数（运算符设计 D7，C0 刀）；无期望时同句不变 |
 | `from_int(3)` | `undefined function` | 不变（不注入） |
 
 所有变化都是**原本报错**的程序：要么变合法，要么换文字。checker-corpus 新增 `literals`、`literal_folds`、`literal_float_ops` 三例钉住；`arith_ops`、`binary_ops` 两例的 golden 随之重录。
@@ -221,7 +221,8 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 ## 7. 与运算符设计相交处
 
 - 运算符设计的 D7（字面量单态）由本文取代：字面量按期望定型，恰一侧是字面量时向另一侧让步，`t * 0.5` 与 `0.5 * t` 在 `Tile` 有 `FromFloat` 时都成立。
-  **左锚定的不对称对非字面量仍然写死**：`lit(2.0) * t` 推不出 `D`。
+  **左锚定的不对称对非字面量只收窄一步**（C0 刀，2026-10-06）：仍不做右回填，但运算符节点自己的期望是走 trait 的库类型时下传给左操作数，
+  `lit(2.0) * t` 在期望 `Tile[F64]` 下成立；`Int`/`Float` 期望不下传，`let f: Float = 1 / 2` 照旧报错。理由与边界见运算符设计 D7。
 - 运算符设计的 D10（不给 `Zero`）：`[T: FromInt]` 下的 `0` 就是零，`var n: T = 0`、`n = n + 1` 都成立。没有 `FromInt` 的主体照旧显式传单位元。
 
 ## 8. 刀序
@@ -246,7 +247,7 @@ sha256 用 `U32` 对比 `Int + MASK` 的两后端吞吐。
 3. **无类型具名常量**（Go `const x = 0.5` 到使用处定型）：`const` 会有两种语义，且要编译器自带大数。
 4. **任意精度常量算术**：同上；`int-min-literal-design.md` 的纪律。
 5. **字面量作为推断变量 + defaulting**（Haskell/Lean/Swift）：Dawn 是局部检查器，这一步就是 Swift 的放大器。
-6. **一般的右锚回填**（`lit(2.0) * t`）：运算符设计 D7 原判；本设计只为语法上可识别的字面量让步。
+6. **一般的右锚回填**（无期望时由右操作数定左操作数类型）：运算符设计 D7 原判，仍不做；本设计只为语法上可识别的字面量让步。有库类型期望时的 `lit(2.0) * t` 已由 C0 刀的左操作数期望解决，不是回填。
 7. **整数字面量经 `FromFloat` 回退**：回退链是隐式规则，类型作者自己写 `FromInt`。
 8. **浮点字面量进整数类型**（Zig 允许无小数部分的 `2.0` 进整数）：同一个值两种拼写，Dawn 只要一种；混合规则也只让整数原子取 `Float`。
 9. **字面量推进第二轮**（草稿原文的 D5.3）：会让今天能编译的程序编不过（L0 §4.1），改为两轮之间。

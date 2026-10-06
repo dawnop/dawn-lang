@@ -355,7 +355,7 @@ CHANGELOG 的第一行写明承载这些的最小 dawn 版本；发版顺序见 
 | 刀 | 内容 | 依赖 | 破坏 | 打包 |
 |---|---|---|---|---|
 | Z0 | 本文 | 无 | 否 | 单独一个文档 PR |
-| C0 | 编译器小刀：二元运算左操作数接收期望类型（ruling-generic-kernel 第 2 条，约 5 行） | 无 | 否 | **单独 PR**，可与一切并行；不阻塞 tileir 0.11（本版写法 `lit(2.0) * t` 的需求不在目标写法里），属于「可与 S2 并行」那把 |
+| C0 | 编译器小刀：二元运算左操作数接收期望类型（ruling-generic-kernel 第 2 条，约 5 行；已实现，改写运算符设计 D7，见 arith-operator-traits-design D7） | 无 | 否 | **单独 PR**，可与一切并行；不阻塞 tileir 0.11（本版写法 `lit(2.0) * t` 的需求不在目标写法里），属于「可与 S2 并行」那把 |
 | F0 | 新模块 `std/float`：`INFINITY`/`NAN` | 无 | 否（加法） | **单独 PR**。不在 tile 路径上，不触发 `tile.yml`；要 `gen-stdsrc` 与 core-golden 重录 |
 | U1 | `std/dtype`、narrow 与 `std/int` 的见证与 impl、只存储类型、`FP16`→`F16` | std 定宽整数合并 | 仅 `FP16` 改名 | 栈的第一块 |
 | S2 | tileir 的 `d_range`/`d_for`/`StagedIter`/`StagedVar` impl | S1（已合） | 否 | 栈 |
