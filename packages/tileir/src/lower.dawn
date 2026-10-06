@@ -50,7 +50,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, padding_present}
-use prog.{TileOp, TileProg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
+use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -311,7 +311,7 @@ pub type Instr =
 derive Show
 
 ## A lowered kernel: its entry name, the dtype name of each parameter in
-## order (every parameter is a scalar `tile<ptr<dtype>>`), the module's
+## order (a `ByPtr` parameter is a scalar `tile<ptr<dtype>>`, a `ByValue` one a rank-0 `tile<dtype>`), the module's
 ## globals in declaration order, and its body, `Ret` last.
 ##
 ## The globals ride through the lowering untouched: they are records of the
@@ -320,7 +320,7 @@ derive Show
 ## entry and `encode_kernel` writes them as the Global section.
 pub type Kernel = {
   name: String,
-  params: List[String],
+  params: List[KParam],
   globals: List[Global],
   body: List[Instr],
   hints: Hints,
@@ -334,6 +334,13 @@ pub fn i32_tile(shape: List[Int]) -> Ty = Tile(shape, Num("i32"))
 
 ## The scalar pointer tile an entry parameter of format `dtype` is.
 pub fn param_ty(dtype: String) -> Ty = Tile([], PtrTo(dtype))
+
+## The type of entry parameter `k`: the scalar pointer tile of a buffer, the
+## rank-0 `tile<dtype>` of a scalar passed by value.
+pub fn kparam_ty(k: KParam) -> Ty = match k {
+  ByPtr(dtype) -> param_ty(dtype)
+  ByValue(dtype) -> Tile([], Num(dtype))
+}
 
 ## The `i1` tile of `shape`, the type of a mask and of a comparison; the
 ## empty shape is the rank-0 `tile<i1>` an `if` branches on.
@@ -1001,6 +1008,9 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     let (l1, v) = define(l0, dst, out)
     emit(l1, PermuteTile(v, s, perm, num_tile(shape, dtype), out))
   }
+  ScalarArg(dst, param, dtype) ->
+    # No instruction: the entry parameter is already the rank-0 tile.
+    bind(l0, dst, Arg(param), num_tile([], dtype))
   NumBlocks(dst, axis) -> {
     let (l1, x) = fresh(l0)
     let (l2, y) = fresh(l1)
@@ -1618,7 +1628,7 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
 fn two_loads_one_param() -> TileProg = TileProg {
   hints: [],
   name: "twice",
-  params: ["f64"],
+  params: [ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1662,7 +1672,7 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
 fn gather_then_scatter() -> TileProg = TileProg {
   hints: [],
   name: "indexed",
-  params: ["i32", "f64", "f64"],
+  params: [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1726,11 +1736,33 @@ test "the ladder reads the entry parameter as an argument, not as a value" {
   assert k.body[8] == Reshape(10, Arg(0), Tile([], PtrTo("f64")), Tile([1], PtrTo("f64")))
 }
 
+test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parameter itself, and it has no owner row" {
+  let p = TileProg {
+    hints: [],
+    name: "scalar",
+    params: [ByValue("i32")],
+    globals: [],
+    ops: [MakeToken(0), ScalarArg(1, 0, "i32"), IdxConst(2, 8), IdxMul(3, 1, 2)],
+  }
+  let (k, owners) = lower_spans(p)
+  assert k.params == [ByValue("i32")]
+  # the make_token, the constant and the product: nothing for the scalar
+  assert len(k.body) == 4
+  assert k.body[2] == MulInt(2, i32_scalar(), Arg(0), Val(1))
+  assert k.body[3] == Ret
+  # one owner per instruction but the return, and none of them is operation 1
+  assert len(owners) == 3
+  assert list.all(owners, o => o.op != 1)
+  # and the entry parameter's type is the rank-0 value, not a pointer
+  assert kparam_ty(ByValue("i32")) == i32_scalar()
+  assert kparam_ty(ByPtr("f64")) == param_ty("f64")
+}
+
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
     hints: [],
     name: "axes",
-    params: ["f64"],
+    params: [ByPtr("f64")],
     globals: [],
     ops: [MakeToken(0), BlockId(1, 2), IdxConst(2, 8), IdxMul(3, 1, 2),
       Load(4, 5, 0, "f64", 3, [8], [1], None, None, 0, [])]
@@ -1748,7 +1780,7 @@ test "lowering the same program twice gives the same table" {
 fn sum_prog() -> TileProg = TileProg {
   hints: [],
   name: "sum",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1779,7 +1811,7 @@ fn sum_prog() -> TileProg = TileProg {
 fn spin_prog() -> TileProg = TileProg {
   hints: [],
   name: "spin",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1882,7 +1914,7 @@ test "after a loop the store consumes the loop's results, not values from inside
 fn total_prog() -> TileProg = TileProg {
   hints: [],
   name: "total",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),
@@ -1941,7 +1973,7 @@ test "spread lowers to a reshape to one lane and a broadcast to the width" {
 fn branch_prog() -> TileProg = TileProg {
   hints: [],
   name: "branch",
-  params: ["f64", "f64"],
+  params: [ByPtr("f64"), ByPtr("f64")],
   globals: [],
   ops: [
     MakeToken(0),

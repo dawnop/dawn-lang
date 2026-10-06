@@ -55,9 +55,11 @@ The full public surface is what `./bin/dawn doc packages/tileir` prints.
   answers; `along[j]` is the grid axis dimension `j` follows, or `FREE_AXIS`
   when the kernel picks that cell itself.
 
-`trace_kernel(name, formats, body)` records a body over `param(d, pos)`
+`trace_kernel(name, params, body)` records a body over `param(d, pos)`
 handles, every one `Shared`; it is there for kernels with more than five
-parameters. `launch_entryN` refuses an `Out` or `Shared` argument that
+parameters. `params` says how each is passed: `ByPtr("f32")` is a buffer,
+`ByValue("f32")` a scalar the launch hands over (`i32`, `i64`, `f32` or
+`f64`), which the body reads with `scalar(p)` and never through memory. `launch_entryN` refuses an `Out` or `Shared` argument that
 aliases another argument, a grid that disagrees with the cells and a tensor
 shorter than its cells, before any handler runs.
 

@@ -7,6 +7,40 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.12.0 (2026-10-07)
+
+Breaking, and the first knife of the runtime scalar parameters
+(`docs/tileir-k4-design.md`, knife 1; the host side follows in knife 2).
+Every one of the 195 existing `.mlir` and `.tilebc` goldens is unchanged on
+both backends.
+
+- An entry parameter says how it is passed. `TileProg.params` and
+  `Kernel.params` are `List[KParam]`, `KParam = ByPtr(dtype) | ByValue(dtype)`,
+  where they were `List[String]` and every parameter a pointer. `trace_kernel`
+  and `trace_calls` take the list: `["f64", "f64"]` is
+  `[ByPtr("f64"), ByPtr("f64")]`. A `ByValue` parameter is a rank-0
+  `tile<dtype>` in the entry signature, with no instruction and no value of
+  its own: the entry parameter is the tile.
+- `scalar(p)` reads a by-value parameter as a rank-0 tile. Arithmetic with it
+  follows the rank-0 rule, so `load(x, ..) * scalar(s)` scales a tile by a
+  value the launch picks, and `idx_of(scalar(n))` is a runtime extent.
+  `scalar` is bounded by the new `ScalarDtype` (`I32`, `I64`, `F32`, `F64`),
+  its own trait and not `HasDtype` because Dawn has no supertraits. The bound
+  keeps out only what has no number under it: an opaque type over `Float` or
+  `Int` uses its target's impl, so `F16` or `I8` still check, and the
+  recording is the fence for those (a `ByValue` of any format but `i32`,
+  `i64`, `f32` and `f64` is refused where it is declared). A new `Dev`
+  operation, `t_scalar`: a handler written outside the package must answer
+  it. The recording also refuses `scalar` of a buffer or of another format,
+  and refuses `load`, `store`, `gather`, `scatter`, atomics, pointers and
+  views of a by-value parameter.
+- Three kernels in `scripts/tile-golden` (`scalar_scale`, `scalar_len`,
+  `scalar_wide`) assemble under `tileiras` 13.4.92 for sm_86 and read the
+  right values on the RTX 3080, including the 64-bit formats and an `i32`
+  whose argument word has garbage in its high half. The typed entries
+  (`trace1` to `trace5`) have no scalar marker yet; that comes with the
+  launch (knife 2).
+
 ## 0.11.0 (2026-10-07)
 
 Breaking: a kernel's loops, carried values, arithmetic and formats are
