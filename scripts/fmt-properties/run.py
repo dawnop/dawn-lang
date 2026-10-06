@@ -345,6 +345,7 @@ class Layout:
                     not self.call_paren(i - 1, text):
                 i -= 1
             self.lo_min[id(n)] = self.code[i].lo
+        self.index = index
         self.modifier_of = {}  # a modifier token's lo -> its declaration's start
         # a declaration's modifiers (`pub`, `pub(pkg)`, `ctl`) stand before
         # its span; the declaration starts at the first of them
@@ -477,6 +478,11 @@ def line_lead(lay, k):
     if t is None:
         return None
     if t.lo == lo:
+        i = lay.index.get(lo)
+        if i and lay.code[i - 1].kind == "PIPE" and lay.line_of(lay.code[i - 1].lo) < ln:
+            # an arm's leading bar alone on the line above: the arm began there,
+            # and this line continues it (fmt indents the pattern one level)
+            return None
         return t
     for u in lay.code_on(ln):
         if u.lo >= lo:
@@ -899,6 +905,8 @@ def self_test(dawn):
          "fn f(a: Int, b: Int) -> Int = {\n  let r = a\n  (\n    g(r,\n      28) &\n      (a & b))\n}\n", None),
         ("members of a trait whose modifier wrapped",
          "pub(\n  pkg) trait W[T] {\n  fn w(\n    x: T) -> Int\n}\n", None),
+        ("an arm whose leading bar stands alone on the line above",
+         "fn f(o: Int) -> Int = match o {\n  1 -> 1\n  |\n    2 -> 0\n}\n", None),
         ("a grouping parenthesis on a line of its own",
          "fn f() -> Int = {\n  let r = b\n  (\n    h(r) << 2) + h(\n      r)\n}\n", None),
     ]
