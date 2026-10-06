@@ -21,7 +21,8 @@ does:
 
 <item> is `<module>.<fn>`, `<module>.<Trait>.<method>`, `<module>.<Effect>.<op>`,
 `prelude.<Trait>.<method>` or `builtins.<fn>`, where <module> is a name in
-std/modules.txt (checked: `prelude` and `builtins` may never be one). One slot
+std/modules.txt, spelt as there (`int/u32` for a module in a subdirectory;
+checked: `prelude` and `builtins` may never be one). One slot
 per line; `<old> -> -` says the parameter is gone. There is no reason field:
 the commit body around the lines is the reason, and the pair itself is what
 gets checked.
@@ -100,9 +101,11 @@ IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 # rule can wrap onto a line that begins with it.
 DECL_START = re.compile(r"^Param-Change\s*[(:]", re.I)
 DECL = re.compile(
-    rf"^Param-Change\((?P<item>{IDENT}(?:\.{IDENT})+)\): "
+    rf"^Param-Change\((?P<item>{IDENT}(?:/{IDENT})*(?:\.{IDENT})+)\): "
     rf"(?P<old>{IDENT}) -> (?P<new>{IDENT}|-)[ \t]*$")
 PSEUDO = ("prelude", "builtins")
+# A std module path under std/: one or more module-path segments.
+STD_MODULE_NAME = re.compile(r"[a-z_][a-z0-9_]*(?:/[a-z_][a-z0-9_]*)*")
 # Where the two pseudo-modules' signatures are declared, named in the message
 # for an undeclared change to one of them: a std item says which file moved by
 # its module name, and these two would otherwise send the reader to std/.
@@ -230,7 +233,7 @@ def callees(doc, where):
 
     for module in doc["modules"]:
         path = module.get("path", "")
-        if not path.startswith("std/") or "/" in path[4:] or not path[4:]:
+        if not path.startswith("std/") or not STD_MODULE_NAME.fullmatch(path[4:]):
             raise ParamError(f"{where}: module path {path!r} is not std/<name>")
         name = path[4:]
         if name in PSEUDO:
@@ -498,6 +501,26 @@ MUTANTS = (
     ("an unbalanced signature", _doc(fns=[("f", "fn f(a: List[Int) -> Int")])),
     ("a parameter with no type", _doc(fns=[("f", "fn f(a) -> Int")])),
     ("a callee listed twice", _doc(fns=[_SPLIT, _SPLIT])),
+    ("a std module path with an empty segment",
+     {"groups": [], "traits": [], "modules": [{"path": "std/int//u8"}]}),
+)
+
+
+def _nested(sig):
+    doc = _with()
+    doc["modules"].append({"path": "std/int/u8", "fns": [{"name": "wrap", "sig": sig}]})
+    return doc
+
+
+# A module in a subdirectory of std is named by its whole path under std/,
+# as std/modules.txt spells it: (label, N-1 sig, HEAD sig, lines, failures).
+NESTED = (
+    ("a nested module's rename, undeclared",
+     "fn wrap(n: Int) -> U8", "fn wrap(m: Int) -> U8", [], 1),
+    ("a nested module's rename, declared by its path",
+     "fn wrap(n: Int) -> U8", "fn wrap(m: Int) -> U8", ["Param-Change(int/u8.wrap): n -> m"], 0),
+    ("a nested module's rename, declared by its last segment only",
+     "fn wrap(n: Int) -> U8", "fn wrap(m: Int) -> U8", ["Param-Change(u8.wrap): n -> m"], 2),
 )
 
 # The whole-std check: (label, N-1 callees, HEAD callees, the refusal's
@@ -517,6 +540,17 @@ def self_test(verbose=True):
     for label, new_doc, lines, want in CASES:
         decls, problems = declarations(lines)
         fails, _notes, _n = compare(base, callees(new_doc, label), decls)
+        got = len(problems) + len(fails)
+        if got != want:
+            failures.append(f"{label}: expected {want} failure(s), got {got}:"
+                            f" {problems + fails}")
+        elif verbose:
+            print(f"  {'refused' if want else 'accepted'}: {label}"
+                  + (f" ({got})" if got > 1 else ""))
+    for label, old_sig, new_sig, lines, want in NESTED:
+        decls, problems = declarations(lines)
+        fails, _notes, _n = compare(callees(_nested(old_sig), "base"),
+                                    callees(_nested(new_sig), label), decls)
         got = len(problems) + len(fails)
         if got != want:
             failures.append(f"{label}: expected {want} failure(s), got {got}:"
@@ -550,7 +584,7 @@ def self_test(verbose=True):
         print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
     if failures:
         return 1
-    print(f"selftest: {len(CASES)} case(s) as expected, {len(MUTANTS)} malformed"
+    print(f"selftest: {len(CASES) + len(NESTED)} case(s) as expected, {len(MUTANTS)} malformed"
           f" input(s) refused, {len(SIZES)} whole-std size(s) as expected")
     return 0
 

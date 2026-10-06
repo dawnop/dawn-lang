@@ -189,14 +189,26 @@ fn fns_in_order(path: String, m: Json) -> (List[Json], List[Json]) = {
     filter(fns, f => is_reference_kernel(path, field(f, "name"))))
 }
 
+## The name a caller qualifies with: the module path's last segment, which is
+## what `use` binds (spec 10.2). `use std/str` binds `str`, and
+## `use std/int/u32` binds `u32`, not `int/u32`.
+pub fn call_alias(path: String) -> String = {
+  let parts = str.split(path, "/")
+  parts[len(parts) - 1]
+}
+
+test "the call alias is the last segment of a std path" {
+  assert call_alias("std/str") == "str"
+  assert call_alias("std/int/u32") == "u32"
+}
+
 fn modules_html(c: Chrome, pg: Pg, root: Json) -> (String, List[TocEntry]) = {
   var html: List[String] = []
   var toc: List[TocEntry] = []
   for m in modules_in_order(root) {
     let path = field(m, "path")
     let id = "m-" ++ slug(path)
-    # the call-site alias is the file's own name: `use std/str` binds `str`
-    let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
+    let qual = call_alias(path)
     toc = toc ++ [TocEntry { level: 3, id: id, text: path }]
     html = html ++ [sub(id, path) ++ doc_prose(pg, m) ++ impls_html(c.impls_lead, c.impls_sep, m)
         ++ decls_html(pg, qual, slug(path), m)]
@@ -255,7 +267,7 @@ pub fn api_rows(api: Json) -> List[ApiRow] = {
   for m in modules_in_order(api) {
     let path = field(m, "path")
     let base = slug(path)
-    let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
+    let qual = call_alias(path)
     rows = rows ++ [api_row(path, "module", unlinked(m), "m-${base}")]
     rows = rows ++ decl_rows(qual, base, m)
     let (used, refs) = fns_in_order(path, m)

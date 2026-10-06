@@ -269,6 +269,7 @@ pair_expect_exit 0 "check (multiple targets)" check "$ARITY_A" "$ARITY_B"
 SKEW_STD="$OUT/skew-std"
 mkdir -p "$SKEW_STD"
 cp "$ROOT"/std/*.dawn "$ROOT/std/modules.txt" "$SKEW_STD/"
+for d in "$ROOT"/std/*/; do if [ -d "$d" ]; then cp -r "$d" "$SKEW_STD/"; fi; done
 printf '0.0.1-native-cli-diff\n' > "$SKEW_STD/VERSION"
 DAWN_VERSION=$(sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' "$ROOT/selfhost/src/version.dawn")
 SKEW_EXPECT="error: std version mismatch: the std in $SKEW_STD is 0.0.1-native-cli-diff,"

@@ -180,6 +180,11 @@ def main():
     hidden = internal_std(os.path.join(src, "check/types.dawn"))
     stds = std_modules(os.path.join(root, "std/modules.txt"))
     stds -= {p.split("/", 1)[1] for p in hidden}
+    # A std module in a subdirectory (`int/u32`) is offered the way a project
+    # directory is in (b): `use std/` offers the directory `int/`, and
+    # `use std/int/` its modules.
+    std_top = {m if "/" not in m else m.split("/", 1)[0] + "/" for m in stds}
+    std_dirs = sorted({m.split("/", 1)[0] for m in stds if "/" in m})
     lexer = pub_names(os.path.join(src, "front/lexer.dawn"))
 
     cases = [
@@ -187,6 +192,7 @@ def main():
         "use check/",
         "use std/",
         "use std/pvec.{",
+    ] + ["use std/%s/" % d for d in std_dirs] + [
         "use front/lexer.{",
         "use front/lexer.{view_of, ",
         "use front/lexer ",
@@ -224,7 +230,12 @@ def main():
     #     the server's own StdCtx, and modules.txt is what built that.
     got_std = labels(got["use std/"])
     expect("use std/", "exactly the modules in std/modules.txt",
-           got_std == sorted(stds), "want %s\n        got  %s" % (sorted(stds), got_std))
+           got_std == sorted(std_top), "want %s\n        got  %s" % (sorted(std_top), got_std))
+    for d in std_dirs:
+        want_d = sorted(m.split("/", 1)[1] for m in stds if m.startswith(d + "/"))
+        got_d = labels(got["use std/%s/" % d])
+        expect("use std/%s/" % d, "exactly the modules modules.txt lists under std/%s" % d,
+               got_d == want_d, "want %s\n        got  %s" % (want_d, got_d))
     # (c2) and not the ones the checker will refuse. `std/hamt` and `std/pvec`
     #      are in modules.txt and in the server's StdCtx all the same -- they
     #      are how `Map`, `Set` and `List` are represented, nameable from
