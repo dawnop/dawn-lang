@@ -341,7 +341,7 @@ class Layout:
                 continue
             i = index[lo]
             while i > 0 and self.code[i - 1].kind == "LPAREN" and \
-                    i - 1 in match and self.code[match[i - 1]].lo <= n.hi and \
+                    i - 1 in match and self.closes_node(match[i - 1], n.hi) and \
                     not self.call_paren(i - 1, text):
                 i -= 1
             self.lo_min[id(n)] = self.code[i].lo
@@ -374,6 +374,18 @@ class Layout:
         self.by_line = {}
         for t in self.code:
             self.by_line.setdefault(self.line_of(t.lo), []).append(t)
+
+    def closes_node(self, m, hi):
+        """Whether the `)` at code index `m` closes right after a node that ends
+        at `hi`. A node's span leaves out the parentheses around its last
+        operand too (`(a & (b & c))` ends at `c`), so any closers between the
+        end and this one count as part of the node."""
+        j = m
+        while j > 0 and self.code[j - 1].lo >= hi:
+            if self.code[j - 1].kind != "RPAREN":
+                return False
+            j -= 1
+        return True
 
     def call_paren(self, i, text):
         """Whether the `(` at code index `i` opens a call's arguments, not a
@@ -879,6 +891,8 @@ def self_test(dawn):
          "fn f() -> Int = {\n  let a = (\n    if c {\n      1\n    } else {\n      2\n    })\n  a\n}\n", None),
         ("the same body one level shallower",
          "fn f() -> Int = {\n  let a = (\n    if c {\n    1\n    } else {\n      2\n    })\n  a\n}\n", "item-indent"),
+        ("a grouping parenthesis closing after its last operand's own parenthesis",
+         "fn f(a: Int, b: Int) -> Int = {\n  let r = a\n  (\n    g(r,\n      28) &\n      (a & b))\n}\n", None),
         ("a grouping parenthesis on a line of its own",
          "fn f() -> Int = {\n  let r = b\n  (\n    h(r) << 2) + h(\n      r)\n}\n", None),
     ]
