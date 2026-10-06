@@ -66,7 +66,14 @@ pub(pkg) fn with_value(qc: QCx, t: Target, opts: CtOpts) -> String !io =
     None -> t.hover
     Some(e) ->
       match folded_text(qc, t.lo, t.hi, e, opts) {
-        Some(v) -> t.hover ++ " = " ++ v
+        Some(v) -> {
+          # the value belongs to the type on the first line; what follows it
+          # (an operator's line, a literal's line) stays where it was
+          match str.index_of(t.hover, "\n") {
+            Some(i) -> str.slice(t.hover, 0, i) ++ " = " ++ v ++ str.slice(t.hover, i, str.len(t.hover))
+            None -> t.hover ++ " = " ++ v
+          }
+        }
         None -> t.hover
       }
   }

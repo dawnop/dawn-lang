@@ -38,13 +38,14 @@ use check/tast.{
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XUnit,
   TListElem, TLEExpr, TLESpread, TLEIf, TModule, TConst,
-  XComptime, XBinary, XUnary, XIf, XMatch, XBlock,
+  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, WitRef, WForward, WConcrete, WApply,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   x_lo, x_hi, tex_ty
 }
 use check/types.{
-  Ty, TyAdt, TyFn, Sig, Sym, CtorI, STAGED_VAR_ID, STAGED_ITER_ID,
+  Ty, TyAdt, TyFn, TyOpaque, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
+  STAGED_VAR_ID, STAGED_ITER_ID, impl_at,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -2734,6 +2735,135 @@ fn literal_string(parts: List[StrPart]) -> Option[String] = {
   Some(out)
 }
 
+# ---- operators (docs/lsp-hover-design.md §O1) ----
+
+fn head_name_of(qc: QCx, t: Ty) -> Option[String] =
+  match t {
+    TyAdt(aid, _) -> Some(adt_of(qc.entry.cx.adts, aid).name)
+    TyOpaque(_, n, _, _, _) -> Some(n)
+    TyList(_) -> Some("List")
+    TyMap(_, _) -> Some("Map")
+    TySet(_) -> Some("Set")
+    TyString -> Some("String")
+    TyBool -> Some("Bool")
+    _ -> None
+  }
+
+fn typeref_head(t: TypeRef) -> String =
+  match t {
+    TNamed(n, _, _, _, _) -> n
+    TQual(_, n, _, _, _, _) -> n
+    _ -> ""
+  }
+
+## Where the impl of trait `tid` at `subject` is written: the name of its
+## first trait method, or the impl's own trait name when it has none of its
+## own. An impl is unique per (trait, head), so the head names it. Read off
+## the declaring module's parse: an importer's `ImplI` has its span zeroed
+## (`exported_impl`). A derived impl, or a module with no file, has no site.
+fn site_of_impl_method(qc: QCx, tid: Int, subject: Ty) -> Site = {
+  let im = match impl_at(qc.entry.cx.impl_table, tid, subject) {
+    Some(x) -> x
+    None -> return no_site()
+  }
+  if im.derived { return no_site() }
+  let hd = match head_name_of(qc, subject) {
+    Some(n) -> n
+    None -> return no_site()
+  }
+  let owner = match im.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  let tr = trait_of(qc.entry.cx.traits, tid)
+  let mname = match get(tr.methods, 0) {
+    Some(pr) -> { let (n, _) = pr
+      n }
+    None -> ""
+  }
+  match holder_by_class(qc, owner) {
+    Some(h) -> {
+      for d in h.m.decls {
+        match d {
+          DImpl(_, tn, tlo, thi, subj, methods, _, _, lo, _) ->
+            if tn == tr.name && typeref_head(subj) == hd {
+              for m in methods {
+                if m.name == mname { return site_in(h, m.nlo, m.nhi, m.lo) }
+              }
+              return site_in(h, tlo, thi, lo)
+            }
+          _ -> ()
+        }
+      }
+      no_site()
+    }
+    None -> no_site()
+  }
+}
+
+## What an operator token answers with: the expression's type (the fold of
+## the whole expression attaches to this line, §C5), then the operator, how it
+## is carried out and its operands and result. Not offered while the walk
+## collects uses: an operator is no name, and a rename of the impl's method
+## must not reach it.
+fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
+  match q.found {
+    Some(_) -> return q
+    None -> ()
+  }
+  if not live(q, olo, ohi) { return q }
+  let op = spelling(qc, olo, ohi)
+  if op == "" { return q }
+  let (args, via, site) = match t {
+    XBinary(_, tl, tr2, wit, _, _, _, _, _) -> {
+      let (v, st) = match wit {
+        Some(w) -> operator_via(qc, w, None, tex_ty(tl))
+        None -> ("(primitive)", no_site())
+      }
+      ([tl, tr2], v, st)
+    }
+    XUnary(_, o, _, _, _) -> ([o], "(primitive)", no_site())
+    XCallFn(_, _, xs, wits, _, Some(tid), _, _, _, _) -> {
+      if len(xs) == 0 { return q }
+      let (v, st) = match get(wits, 0) {
+        Some(w) -> operator_via(qc, w, Some(tid), tex_ty(xs[0]))
+        None -> operator_via(qc, WConcrete(tid, tex_ty(xs[0])), None, tex_ty(xs[0]))
+      }
+      (xs, v, st)
+    }
+    _ -> return q
+  }
+  let ty = show_ty(qc, tex_ty(t))
+  let sg = "fn(" ++ join(map(args, a => show_ty(qc, tex_ty(a))), ", ") ++ ") -> " ++ ty
+  offer_target(q, Target {
+    lo: olo, hi: ohi, hover: ty ++ "\n" ++ op ++ " " ++ via ++ ": " ++ sg, def: site.def, def_path: site.dp,
+    sig: None, doc: site.doc, expr: Some(t)
+  })
+}
+
+fn operator_via(qc: QCx, w: WitRef, tid0: Option[Int], left: Ty) -> (String, Site) =
+  match w {
+    WConcrete(tid, subj) -> via_impl(qc, tid, subj)
+    WApply(tid, subj, _) -> via_impl(qc, tid, subj)
+    WForward(_) ->
+      match tid0 {
+        Some(tid) -> ("via bound " ++ trait_of(qc.entry.cx.traits, tid).name ++ "[" ++ show_ty(qc, left) ++ "]", no_site())
+        None -> ("via a trait bound", no_site())
+      }
+  }
+
+## A type of the language's own (`Int`, `Bool`, `List`, ...) has no impl
+## written anywhere a reader could open: its operator is the primitive one.
+fn via_impl(qc: QCx, tid: Int, subj: Ty) -> (String, Site) =
+  match subj {
+    TyAdt(_, _) -> (impl_text(qc, tid, subj), site_of_impl_method(qc, tid, subj))
+    TyOpaque(_, _, _, _, _) -> (impl_text(qc, tid, subj), site_of_impl_method(qc, tid, subj))
+    _ -> ("(primitive)", no_site())
+  }
+
+fn impl_text(qc: QCx, tid: Int, subj: Ty) -> String =
+  "via impl " ++ trait_of(qc.entry.cx.traits, tid).name ++ "[" ++ show_ty(qc, subj) ++ "]"
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
   # generic fallback: the expression's own type, which names no declaration
@@ -2996,7 +3126,11 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XUnwrap(t, _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
         _ -> { q = walk_e(qc, q, operand, None) }
       }
-    EBinary(_, left, right, _, _, _, _) ->
+    EBinary(_, left, right, olo, ohi, _, _) -> {
+      match te {
+        Some(t) -> { q = offer_operator(qc, q, t, olo, ohi) }
+        None -> ()
+      }
       match te {
         Some(XBinary(_, tl, tr2, _, _, _, _, _, _)) -> {
           q = walk_e(qc, q, left, Some(tl))
@@ -3015,12 +3149,18 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           q = walk_e(qc, q, right, None)
         }
       }
-    EUnary(_, operand, _, _) ->
+    }
+    EUnary(_, operand, lo, _) -> {
+      match te {
+        Some(t) -> { q = offer_operator(qc, q, t, lo, lo + (if spelled(qc, lo, lo + 3, "not") { 3 } else { 1 })) }
+        None -> ()
+      }
       match te {
         Some(XUnary(_, t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
         Some(XCallFn(_, _, [t], _, _, Some(_), _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
         _ -> { q = walk_e(qc, q, operand, None) }
       }
+    }
     EIf(cond, thn, els, _, _) ->
       match te {
         Some(XIf(tc, tt, tels, _, _, _)) -> {
