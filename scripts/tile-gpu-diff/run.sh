@@ -3094,8 +3094,8 @@ mutant_mma_src="$work/kernels-mma.dawn"
 cp "$golden/kernels.dawn" "$mutant_mma_src"
 before=$(digest "$mutant_mma_src")
 python3 "$here/mutate.py" "$mutant_mma_src" mma-acc-not-carried \
-  '  d_range(0, MM_K / MM_TK) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }' \
-  '  d_range(0, MM_K / MM_TK) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), zeros(c))) }'
+  '  for k in d_range(0, MM_K / MM_TK) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }' \
+  '  for k in d_range(0, MM_K / MM_TK) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), zeros(c))) }'
 after=$(digest "$mutant_mma_src")
 echo "      mma-acc-not-carried: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-mma/src"

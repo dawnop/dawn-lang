@@ -18,8 +18,8 @@ use std/list
 use std/str
 use std/gpu.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
-  Dev, Param, param, block_id, tile_at, load, store, add, idx_const, d_for, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
-  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
+  Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
+  t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
   load_cell, store_cell, tail_mask, for_arch, hint_latency }
 use prog.{TileProg, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
@@ -634,7 +634,7 @@ fn kernel_lines(k: Kernel, owners: List[Owner]) -> (List[String], List[Int]) = {
 ## its children's left out: its globals' lines and the lines of the
 ## operations it issued itself, each a 1-based half-open range, in text
 ## order, empty ranges left out. `parent` is the call's row's `parent`, so
-## the rows are the side table's tree. A region call (`d_for`, `d_scan`)
+## the rows are the side table's tree. A region call (`d_range`, `d_scan`)
 ## has the region's header line, its terminator and its closing brace; the
 ## lines between are its children's.
 pub type CallLines = { name: String, parent: Int, lines: List[(Int, Int)] } derive Show
@@ -1454,7 +1454,7 @@ fn summed(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let first = load(x, tile_at(b, 128), [128])
   let one = idx_const(1)
   let acc = carry(first)
-  d_for(one, idx_const(4), one) { k => acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
+  for k in d_range(one, idx_const(4), step: By(one)) { acc.set(add(acc.get(), load(x, tile_at(k, 128), [128]))) }
   store(out, tile_at(b, 128), acc.get())
 }
 
@@ -1476,12 +1476,12 @@ fn every_line_once(m: LineMap) -> Bool = {
   list.all(range(1, n + 1), k => owners(all_ranges(m), k) == 1)
 }
 
-test "what a loop's body calls are the d_for's children, and the d_for keeps its header, its continue and its brace" {
+test "what a loop's body calls are the d_range's children, and the d_range keeps its header, its continue and its brace" {
   let (p, calls) = trace_calls("summed", ["f64", "f64"], () => summed(param(F64, 0), param(F64, 1)))
   # `carry`, `get` and `set` are calls that record nothing, and the trial
   # that found the loop's carry left no row behind
   assert tree_of(calls) == [("block_id", 0 - 1), ("tile_at", 0 - 1), ("load", 0 - 1), ("idx_const", 0 - 1),
-    ("carry", 0 - 1), ("idx_const", 0 - 1), ("d_for", 0 - 1), ("get", 6), ("tile_at", 6), ("load", 6), ("add", 6),
+    ("carry", 0 - 1), ("idx_const", 0 - 1), ("d_range", 0 - 1), ("get", 6), ("tile_at", 6), ("load", 6), ("add", 6),
     ("set", 6), ("tile_at", 0 - 1), ("get", 0 - 1), ("store", 0 - 1)]
   # a call's range holds its children's
   assert calls[6].ops_from < calls[8].ops_from && calls[10].ops_to < calls[6].ops_to
@@ -1521,8 +1521,8 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let one = idx_const(1)
   let first = load(x, z, [8])
   let acc = carry(first)
-  d_for(z, one, one) { _i =>
-    d_for(z, one, one) { _j =>
+  for _i in d_range(z, one, step: By(one)) {
+    for _j in d_range(z, one, step: By(one)) {
       let u = acc.get()
       acc.set(add(u, broadcast(d_reduce(u, 0.0, (a, e) => max(a, e)), [8])))
     }
@@ -1532,8 +1532,8 @@ fn nested(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 
 test "regions inside regions nest the rows: each call's parent is the region whose closure it is in" {
   let (p, calls) = trace_calls("nested", ["f64", "f64"], () => nested(param(F64, 0), param(F64, 1)))
-  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("carry", 0 - 1), ("d_for", 0 - 1),
-    ("d_for", 4), ("get", 5), ("d_reduce", 5), ("max", 7), ("broadcast", 5), ("add", 5), ("set", 5), ("get", 0 - 1),
+  assert tree_of(calls) == [("idx_const", 0 - 1), ("idx_const", 0 - 1), ("load", 0 - 1), ("carry", 0 - 1), ("d_range", 0 - 1),
+    ("d_range", 4), ("get", 5), ("d_reduce", 5), ("max", 7), ("broadcast", 5), ("add", 5), ("set", 5), ("get", 0 - 1),
     ("store", 0 - 1)]
   let m = must_map(p, calls)
   assert every_line_once(m)
@@ -1607,7 +1607,7 @@ fn sentinels(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let n = idx_const(2)
   s("4")
   let acc = carry(t)
-  d_for(i0, n, n) { k =>
+  for k in d_range(i0, n, step: By(n)) {
     s("5")
     let v = load(x, k, [8])
     s("6")
@@ -1662,8 +1662,8 @@ test "the map agrees with sentinels: every line is the call that ran between the
   })
   # the constant is made where it is first used, by the broadcast, so the
   # `f_const` call has no line of its own
-  assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_for"], ["load"], ["d_scan"],
-    ["max"], ["d_scan"], ["add"], ["d_for"], ["store"], ["tail"]]
+  assert slots == [["head", "broadcast", "lt"], ["idx_const"], ["load"], ["idx_const"], ["d_range"], ["load"], ["d_scan"],
+    ["max"], ["d_scan"], ["add"], ["d_range"], ["store"], ["tail"]]
 }
 
 fn tabled(x: Param[F64], out: Param[F64]) -> Unit !Dev = {

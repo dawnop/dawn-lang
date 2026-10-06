@@ -1930,7 +1930,7 @@ use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 256 / 32) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, 256 / 32) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -1957,7 +1957,7 @@ continue %26, %25 : tile<64x64xf64>, token
 `along` says which grid axis each dimension of a cell follows. Dimension 0 of `a` (its
 rows) follows grid axis 0, and dimension 1 (along K) follows none: `FREE_AXIS` means the
 kernel picks that cell itself, and `load_at(a, [k])` is how. `b` is the other way round,
-and the cells of `c`, the `Out`, are the grid. `d_range(0, 8) { k => .. }` is a loop of
+and the cells of `c`, the `Out`, are the grid. `for k in d_range(0, 8) { .. }` is a loop of
 eight trips. The accumulator is a `Carry`, a device variable: `carry(zeros(c))` makes it,
 `acc.get()` reads it and `acc.set(..)` replaces it with a tile of the same shape.
 `zeros(c)` is a tile shaped like one cell of `c`, so the accumulator's shape is never

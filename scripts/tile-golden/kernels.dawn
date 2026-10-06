@@ -14,7 +14,7 @@ use tileref/ref.{global_table_a, global_table_b, global_syms_c}
 use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, store, row_major, permute, coord,
   and_mask, or_mask, in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
-  d_for, d_loop, Carry, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
+  d_loop, Carry, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
   d_reduce2, d_if, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i, and_i,
   or_i, xor_i, shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
@@ -26,7 +26,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, store
   hint_latency, tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
   idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
-  store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, DYN_DIM, idx_div, idx_rem, idx_sub, idx_lt, extent_of,
+  store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_div, idx_rem, idx_sub, idx_lt, extent_of,
   blocks_of }
 use tileir/prog.{TileProg, Cells, trace_kernel, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
   Whole, FREE_AXIS }
@@ -74,7 +74,7 @@ fn sum(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let lo = idx_add(base, one)
   let up = idx_add(base, n)
   let total = carry(first)
-  d_for(lo, up, one) { k => total.set(add(total.get(), load_at(x, [k]))) }
+  for k in d_range(lo, up, step: By(one)) { total.set(add(total.get(), load_at(x, [k]))) }
   store_cell(out, total.get())
 }
 
@@ -337,7 +337,7 @@ fn foldif(x: Param[F64], out: Param[F64], chunks: Int) -> Unit !Dev = {
   let total = carry(first)
   let hi = carry(first)
   let lo = carry(first)
-  d_for(idx_add(base, one), idx_add(base, n), one) { k =>
+  for k in d_range(idx_add(base, one), idx_add(base, n), step: By(one)) {
     let t = load_at(x, [k])
     total.set(add(total.get(), t))
     hi.set(max(hi.get(), t))
@@ -391,7 +391,7 @@ const MM_TK: Int = 32
 # So the body is the textbook loop, with no base, no stride and no shape.
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, MM_K / MM_TK) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, MM_K / MM_TK) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -420,7 +420,7 @@ fn batched_matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let b_col = idx_add(idx_mul(bb, idx_const(BMM_K * BMM_N)), idx_mul(bn, idx_const(BMM_T)))
   let zero = broadcast(f_const(F64, 0.0), [BMM_T, BMM_T])
   let acc = carry(zero)
-  d_for(idx_const(0), idx_const(BMM_K / BMM_T), idx_const(1)) { k =>
+  for k in d_range(idx_const(0), idx_const(BMM_K / BMM_T), step: By(idx_const(1))) {
     let ta = load(a, idx_add(a_row, idx_mul(k, idx_const(BMM_T))), [BMM_T, BMM_T], strides: Some([BMM_K, 1]))
     let tb = load(b, idx_add(b_col, idx_mul(k, idx_const(BMM_T * BMM_N))), [BMM_T, BMM_T], strides: Some([BMM_N, 1]))
     acc.set(mma(ta, tb, acc.get()))
@@ -1132,7 +1132,7 @@ const MMF_T: Int = 32
 # memory either way.
 fn matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, MMF_K / MMF_T) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, MMF_K / MMF_T) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -1154,7 +1154,7 @@ fn batched_matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev 
   let b_col = idx_add(idx_mul(bb, idx_const(BMF_K * BMF_N)), idx_mul(bn, idx_const(BMF_T)))
   let zero = broadcast(f_const(F16, 0.0), [BMF_T, BMF_T])
   let acc = carry(zero)
-  d_for(idx_const(0), idx_const(BMF_K / BMF_T), idx_const(1)) { k =>
+  for k in d_range(idx_const(0), idx_const(BMF_K / BMF_T), step: By(idx_const(1))) {
     let ta = load(a, idx_add(a_row, idx_mul(k, idx_const(BMF_T))), [BMF_T, BMF_T], strides: Some([BMF_K, 1]))
     let tb = load(b, idx_add(b_col, idx_mul(k, idx_const(BMF_T * BMF_N))), [BMF_T, BMF_T], strides: Some([BMF_N, 1]))
     acc.set(mma(ta, tb, acc.get()))
@@ -1178,7 +1178,7 @@ const MMI_T: Int = 32
 
 fn matmul_i8(a: Param[I8], b: Param[I8], c: Param[I32]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, MMI_K / MMI_T) { k => acc.set(mmai(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, MMI_K / MMI_T) { acc.set(mmai(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -2065,7 +2065,7 @@ const LORA_SCALE: Float = 0.5
 # family below read every transposed operand that way.
 fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(base))
-  d_range(0, LORA_DIN / LORA_T) { k =>
+  for k in d_range(0, LORA_DIN / LORA_T) {
     acc.set(mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(base, acc.get())
@@ -2075,7 +2075,7 @@ fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
 # One block: RANK is narrower than a tile, which is the point of a rank.
 fn lora_hidden(x: Param[F64], a: Param[F64], h: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(h))
-  d_range(0, LORA_DIN / LORA_T) { k =>
+  for k in d_range(0, LORA_DIN / LORA_T) {
     acc.set(mma(load_at(x, [k]), load_at(a, [k]).transpose(), acc.get()))
   }
   store_cell(h, acc.get())
@@ -2121,7 +2121,7 @@ fn attn_softmax(s: Param[F64], p: Param[F64]) -> Unit !Dev = {
 # Launch 3 of 3: O[M, D] = P[M, N] * V[N, D], an ordinary row-major product.
 fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(o))
-  d_range(0, ATT_N / ATT_T) { k => acc.set(mma(load_at(p, [k]), load_at(v, [k]), acc.get())) }
+  for k in d_range(0, ATT_N / ATT_T) { acc.set(mma(load_at(p, [k]), load_at(v, [k]), acc.get())) }
   store_cell(o, acc.get())
 }
 
@@ -2178,7 +2178,7 @@ fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Uni
   let m: Carry[F64] = carry(full([FA_BQ, 1], neg_inf()))
   let l: Carry[F64] = carry(full([FA_BQ, 1], 0.0))
   let acc = carry(zeros(o))
-  d_range(0, ATT_N / FA_BK) { j =>
+  for j in d_range(0, ATT_N / FA_BK) {
     let s: Tile[F64] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(ATT_INV_SQRT_D))
     let m_new = max(m.get(), reduce_max(s, keepdims: true))
     let p = exp(sub(s, m_new))
@@ -2210,7 +2210,7 @@ fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[F64]
   let m: Carry[F32] = carry(full([FA_BQ, 1], neg_inf()))
   let l: Carry[F32] = carry(full([FA_BQ, 1], 0.0))
   let acc: Carry[F32] = carry(full([FA_BQ, ATT_D], 0.0))
-  d_range(0, ATT_N / FA_BK) { j =>
+  for j in d_range(0, ATT_N / FA_BK) {
     let s: Tile[F32] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(ATT_INV_SQRT_D))
     let m_new = max(m.get(), reduce_max(s, keepdims: true))
     let p = exp(sub(s, m_new))
@@ -2265,7 +2265,7 @@ fn carry_extent(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let zero = idx_const(0)
   let best = carry(reduce_max(load_at(x, [zero, zero]), dim: 0))
   let total = carry(zeros(o))
-  d_for(idx_const(1), blocks_of(x, 0), idx_const(1)) { j =>
+  for j in d_range(idx_const(1), blocks_of(x, 0), step: By(idx_const(1))) {
     let m = reduce_max(load_at(x, [j, zero]), dim: 0)
     d_if(idx_lt(j, idx_const(2)), () => best.set(max(best.get(), m)), () => ())
     total.set(add(total.get(), m))
@@ -2295,7 +2295,7 @@ const SW_T: Int = 32
 # Launches 1 and 2 of 4: y[M, DFFN] = x[M, DMODEL] * w[DMODEL, DFFN].
 fn swiglu_proj(x: Param[F64], w: Param[F64], y: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(y))
-  d_range(0, SW_DMODEL / SW_T) { k => acc.set(mma(load_at(x, [k]), load_at(w, [k]), acc.get())) }
+  for k in d_range(0, SW_DMODEL / SW_T) { acc.set(mma(load_at(x, [k]), load_at(w, [k]), acc.get())) }
   store_cell(y, acc.get())
 }
 
@@ -2312,7 +2312,7 @@ fn swiglu_act(gate: Param[F64], up: Param[F64], h: Param[F64]) -> Unit !Dev = {
 # Launch 4 of 4: out[M, DMODEL] = h[M, DFFN] * Wd[DFFN, DMODEL].
 fn swiglu_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, SW_DFFN / SW_T) { k => acc.set(mma(load_at(h, [k]), load_at(w, [k]), acc.get())) }
+  for k in d_range(0, SW_DFFN / SW_T) { acc.set(mma(load_at(h, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, acc.get())
 }
 
@@ -2677,7 +2677,7 @@ fn mha_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 fn mha_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let rows = idx_add(idx_mul(block_id(2), idx_const(MHA_N * MHA_N)), idx_mul(block_id(0), idx_const(MHA_T * MHA_N)))
   let acc = carry(zeros(o))
-  d_range(0, MHA_N / MHA_T) { kk =>
+  for kk in d_range(0, MHA_N / MHA_T) {
     let tp = load(p, idx_add(rows, idx_mul(kk, idx_const(MHA_T))), [MHA_T, MHA_T], strides: Some([MHA_N, 1]))
     acc.set(mma(tp, load_at(v, [kk]), acc.get()))
   }
@@ -2806,7 +2806,7 @@ fn xattn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 fn xattn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let rows = idx_add(idx_mul(block_id(2), idx_const(XA_M * XA_N)), idx_mul(block_id(0), idx_const(XA_T * XA_N)))
   let acc = carry(zeros(o))
-  d_range(0, XA_N / XA_T) { kk =>
+  for kk in d_range(0, XA_N / XA_T) {
     let tp = load(p, idx_add(rows, idx_mul(kk, idx_const(XA_T))), [XA_T, XA_T], strides: Some([XA_N, 1]))
     acc.set(mma(tp, load_at(v, [kk]), acc.get()))
   }
@@ -2852,7 +2852,7 @@ fn gqa_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let qh = idx_add(idx_mul(bkv, idx_const(GQ_GROUPS)), block_id(0))
   let rows = idx_mul(qh, idx_const(GQ_S * GQ_S))
   let acc = carry(broadcast(f_const(F64, 0.0), [GQ_S, GQ_D]))
-  d_range(0, GQ_S / GQ_T) { kk =>
+  for kk in d_range(0, GQ_S / GQ_T) {
     let tp = load(p, idx_add(rows, idx_mul(kk, idx_const(GQ_T))), [GQ_S, GQ_T], strides: Some([GQ_S, 1]))
     let tv = load(v, idx_add(idx_mul(bkv, idx_const(GQ_S * GQ_D)), idx_mul(kk, idx_const(GQ_T * GQ_D))),
       [GQ_T, GQ_D])
@@ -3032,7 +3032,7 @@ fn kv_context(p: Param[F64], v: Param[I8], vs: Param[F64], o: Param[F64]) -> Uni
 # A's tile and nowhere else.
 fn attn_bwd_mmt(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, ATT_M / ATT_T) { k =>
+  for k in d_range(0, ATT_M / ATT_T) {
     acc.set(mma(load_at(a, [k]).transpose(), load_at(b, [k]), acc.get()))
   }
   store_cell(c, acc.get())
@@ -3069,7 +3069,7 @@ fn la_phi(t: Tile[F64]) -> Tile[F64] !Dev =
 # over the whole D by D answer, folding over the M rows in LA_T chunks.
 fn lin_attn_s(k: Param[F64], v: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(s))
-  d_range(0, LA_M / LA_T) { j =>
+  for j in d_range(0, LA_M / LA_T) {
     acc.set(mma(la_phi(load_at(k, [j]).transpose()), load_at(v, [j]), acc.get()))
   }
   store_cell(s, acc.get())
@@ -3110,7 +3110,7 @@ const OLS_F: Int = 8
 const OLS_W: Int = 16
 
 # Launch 1: the augmented normal equations, one block over the whole F by
-# W answer. The fold is a `d_for` over the samples, so both the device and
+# W answer. The fold is a `d_range` over the samples, so both the device and
 # a host reference add them in index order and every partial sum is the
 # same f64 -- which is why this sequence is exact tier and the GEMM
 # sequences beside it are not.
@@ -3121,7 +3121,7 @@ fn ols_gram(x: Param[F64], y: Param[F64], a: Param[F64]) -> Unit !Dev = {
   let is_rhs = eq_i(col, i_const(OLS_F))
   let zero = f_const(F64, 0.0)
   let acc = carry(zeros(a))
-  d_range(0, OLS_N) { i =>
+  for i in d_range(0, OLS_N) {
     let base = idx_mul(i, idx_const(OLS_F))
     let xr = load(x, base, sh, strides: Some(axis_strides(2, 0, 1)))
     let xc = load(x, base, sh, strides: Some(axis_strides(2, 1, 1)), mask: Some(inside), pad: Some(zero))
@@ -3235,7 +3235,7 @@ fn gpt_bias(bias: Param[F64]) -> Tile[F64] !Dev =
 
 fn gpt_qkv(x: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_D / GP_T) { k => acc.set(mma(load_at(x, [k]), load_at(w, [k]), acc.get())) }
+  for k in d_range(0, GP_D / GP_T) { acc.set(mma(load_at(x, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3258,7 +3258,7 @@ fn gpt_scores(qkv: Param[F64], s: Param[F64]) -> Unit !Dev = {
 fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let vh = idx_add(idx_const(2 * GP_D / GP_DH), block_id(2))
   let acc = carry(zeros(o))
-  d_range(0, GP_S / GP_T) { k => acc.set(mma(load_at(p, [k]), load_at(qkv, [k, vh]), acc.get())) }
+  for k in d_range(0, GP_S / GP_T) { acc.set(mma(load_at(p, [k]), load_at(qkv, [k, vh]), acc.get())) }
   store_cell(o, acc.get())
 }
 
@@ -3266,7 +3266,7 @@ fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
 # a[GP_S, GP_D] * W[GP_D, GP_D] + b[GP_D].
 fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_D / GP_T) { k => acc.set(mma(load_at(a, [k]), load_at(w, [k]), acc.get())) }
+  for k in d_range(0, GP_D / GP_T) { acc.set(mma(load_at(a, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3275,7 +3275,7 @@ fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) ->
 # GP_F wide, and a width is a store stride and a weight stride.
 fn gpt_fc(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_D / GP_T) { k => acc.set(mma(load_at(a, [k]), load_at(w, [k]), acc.get())) }
+  for k in d_range(0, GP_D / GP_T) { acc.set(mma(load_at(a, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3296,7 +3296,7 @@ fn gpt_gelu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # where its inner dimension is, so its loop runs twice as many rounds.
 fn gpt_down(h: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_F / GP_T) { k => acc.set(mma(load_at(h, [k]), load_at(w, [k]), acc.get())) }
+  for k in d_range(0, GP_F / GP_T) { acc.set(mma(load_at(h, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3349,7 +3349,7 @@ fn llama_rms(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # never enters it.
 fn llama_qkv(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, LM_D / LM_T) { k =>
+  for k in d_range(0, LM_D / LM_T) {
     acc.set(mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
@@ -3391,7 +3391,7 @@ fn llama_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 # h * LM_HD onward, so no launch ever writes a merged copy.
 fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, LM_D / LM_HD) { h =>
+  for h in d_range(0, LM_D / LM_HD) {
     acc.set(mma(load_at(a, [h]), load_at(w, [h]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
@@ -3403,7 +3403,7 @@ fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # same coin on a weight stored IN by OUT.
 fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, LM_D / LM_T) { k =>
+  for k in d_range(0, LM_D / LM_T) {
     acc.set(mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
@@ -3413,7 +3413,7 @@ fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # W^T for W stored LM_D by LM_F. `llama_ffn` with the two widths exchanged.
 fn llama_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, LM_F / LM_T) { k =>
+  for k in d_range(0, LM_F / LM_T) {
     acc.set(mma(load_at(h, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
@@ -3462,7 +3462,7 @@ fn shape_ops(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn grid_stride(x: Param[F64], out: Param[F64], rounds: Int) -> Unit !Dev = {
   let b = block_id(0)
   let nb = num_blocks(0)
-  d_range(0, rounds) { k =>
+  for k in d_range(0, rounds) {
     let base = tile_at(idx_add(b, idx_mul(k, nb)), 128)
     store(out, base, mul(load(x, base, [128]), f_const(F64, 2.0)))
   }
@@ -3604,7 +3604,7 @@ fn loop_bound(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   let none = broadcast(i_const(0), [LOOP_TILE])
   let v = carry(load_cell(x))
   let steps = carry(none)
-  d_range(0, COLLATZ_ROUNDS) { _k =>
+  for _k in d_range(0, COLLATZ_ROUNDS) {
     let (nv, ns) = collatz_step(v.get(), steps.get())
     v.set(nv)
     steps.set(ns)
@@ -3890,11 +3890,11 @@ const ATTR_UCMP_HI: Int = 0x80000010
 fn attr_ucmp(out: Param[I32]) -> Unit !Dev = {
   let zero = i_const(0)
   let signed = carry(zero)
-  d_for(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1)) { _i =>
+  for _i in d_range(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), step: By(idx_const(1))) {
     signed.set(add_i(signed.get(), i_const(1)))
   }
   let unsigned = carry(zero)
-  d_for(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), idx_const(1), unsigned_cmp: true) { _i =>
+  for _i in d_range(idx_const(ATTR_UCMP_LO), idx_const(ATTR_UCMP_HI), step: By(idx_const(1)), unsigned_cmp: true) {
     unsigned.set(add_i(unsigned.get(), i_const(1)))
   }
   store_sub(out, [0], broadcast(signed.get(), [ATTR_TILE]))
@@ -4578,8 +4578,8 @@ fn view_index_space(dims: Param[I32], x: Param[F64], out: Param[F64],
   let gi = index_space_dim(pv, 0)
   let gj = index_space_dim(pv, 1)
   let acc = carry(zeros(out))
-  d_for(zero, gi, one) { i =>
-    d_for(zero, gj, one) { j => acc.set(add(acc.get(), load_view(pv, [i, j]))) }
+  for i in d_range(zero, gi, step: By(one)) {
+    for j in d_range(zero, gj, step: By(one)) { acc.set(add(acc.get(), load_view(pv, [i, j]))) }
   }
   store_cell(out, acc.get())
   store_sub(shape_out, [0], broadcast(idx_as_tile(gi), [1]))

@@ -194,7 +194,7 @@ lowering 读的是它。体内的名字照 D4 解析到原 `var`；格子符号�
    两者等同，留待有真实泛型 kernel 时再议。
 
 1. `lit` 初值：`StagedVar[Tile[D]]` 的 `var_open` 走 `carry`，拒无格式初值；第一刀初值写 `f_const`，等 GPU 格式标签调研再定。
-2. `d_for` 名字是否作为 `d_span` 的别名保留（S2 决定）。
+2. `d_for` 名字是否作为 `d_span` 的别名保留：**已决（tileir 0.11 S2）**：不保留，`d_for` 删除，`d_range` 一个名字（见 tileir-011-design §2.1）。
 3. 悬停是否追加「carried by the staged loop」一行。
 
 ## 8. 刀序

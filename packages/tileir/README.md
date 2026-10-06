@@ -66,12 +66,12 @@ block reads and writes, element-wise operations take their shape and format
 from their operands, and a matrix product's from its two factors:
 
 ```dawn
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, carry, get, set}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, By, carry, get, set}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 256 / 32) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  for k in d_range(0, 256 / 32) { acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -151,7 +151,7 @@ a `lit`. This is FlashAttention with bf16 inputs and f32 accumulation:
 let m: Carry[F32] = carry(full([BQ, 1], neg_inf()))
 let l: Carry[F32] = carry(full([BQ, 1], 0.0))
 let acc: Carry[F32] = carry(full([BQ, D], 0.0))
-d_range(0, N / BK) { j =>
+for j in d_range(0, N / BK) {
   let s: Tile[F32] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(scale))
   let m_new = max(m.get(), reduce_max(s, keepdims: true))
   let p = exp(sub(s, m_new))
@@ -163,10 +163,13 @@ d_range(0, N / BK) { j =>
 store_cell(o, div(acc.get(), l.get()).to(F64))   # o: Param[F64]
 ```
 
-- `d_range(lower, upper, step: 1) { j => .. }` is a loop over host bounds;
-  `d_for(lower, upper, step, unsigned_cmp: false) { j => .. }` takes `Idx`
-  bounds the device computes (`extent_of(p, dim)` and `blocks_of(p, dim)`
-  are a parameter's extent and its number of cells along a dimension).
+- `for j in d_range(lower, upper, step: By(n), unsigned_cmp: false) { .. }` is
+  a loop. The bounds are host numbers (`Int`, fixed when the kernel is
+  recorded) or `Idx` values the device computes; the step is `One` by default,
+  or `By(n)` of the same kind as the bounds, so a grid-stride loop writes
+  `step: By(nprog)`. The induction variable is always an `Idx`.
+  (`extent_of(p, dim)` and `blocks_of(p, dim)` are a parameter's extent and
+  its number of cells along a dimension.)
 - `d_loop { .. }` runs until its body answers a true rank-0 mask. On the
   iteration that answers true the loop stops with the carries as they
   entered it, so compute the mask before the `set`s.

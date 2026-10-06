@@ -42,11 +42,17 @@ for j in d_range(0, N / BK) {
 编译器侧 S1 已落地（staged-for-design §8）。本版只做库侧：
 
 - 描述符类型与 `StagedIter` impl。终态拼写就是目标写法里的 `d_range`，且**只有一个**：
-  `d_range[B: RangeBound](lower: B, upper: B, step: B = 1, unsigned_cmp: Bool = false) -> DRange[B]`（`Item = B`）。
-  `RangeBound` 是 tileir 里的小 trait，`Int`（宿主边界，录制时固定）与 `Idx`（设备边界）各给一个 impl；
+  `d_range[B: RangeBound](lower: B, upper: B, step: Step[B] = One, unsigned_cmp: Bool = false) -> DRange[B]`。
+  `RangeBound` 是 tileir 里的小 trait（`range_idx(b) -> Idx !Dev`），`Int`（宿主边界，录制时固定，转成 `idx_const`）与 `Idx`（设备边界，原样）各给一个 impl；
   今天闭包形式的 `d_range`（Int 界）与 `d_for`（Idx 界）因此合成一个名字，`unsigned_cmp` 一个不少，IR 与 golden 不变（裁决补充 9）。
+  **`Item = Idx`**（原稿写 `Item = B`，是错的：循环体吃 `Idx`，`load_at` 也吃 `Idx`，`Int` 界的循环变量同样是 `Idx`）。
+  **步长是独立的小类型 `pub type Step[B] = One | By(by: B)`**（ruling-drange-step-20261006）：原定 `step: B = 1` 写不出来，
+  因为默认值必须纯（spec 默认值一节），泛型 `B` 上的字面量要 `B.FromInt` 证据，且 `Idx` 的常量 1 是 `idx_const(1)`，会记一条 op。
+  默认 `One` 是纯构造器，循环开始时才降成常量 1（`Idx` 界在 kernel 的 `!Dev` 里记 op）；字面量步长写 `step: By(2)`，设备步长（网格步进、持久化 kernel）写 `step: By(nprog)`
+  （Triton 的 `tl.range(row_start, n_rows, row_step)` 同形）。没有给 `Step[B]` 实现 `FromInt`：prelude 的 `from_int` 不可按名调用，条件 impl 无法把字面量转交给 `B`，所以 `step: 2` 不成立，不加特例。
+  名字 `Step`/`One`/`By` 在 tileir 里查过无冲突；`Unit` 是内建类型名，不能当构造器，故用 `One`。构造器字段必须具名，故 `By(by: B)`，写 `By(x)` 位置传参照常。
   不引入 `d_span`；`d_for` 在 0.11.0 **直接删除**，不留别名。闭包形式的 `d_range` 在 0.11.0 变成同名的描述符，
-  调用方同一版内一次迁完。栈中间提交若新旧并存，临时名只活在中间提交，R 之前收回。`effect StagedIter = !Dev`，
+  调用方同一版内一次迁完（S2 刀同一提交内完成，没有用到临时名）。`effect StagedIter = !Dev`，
   `staged_for` 的体调用今天的区域栈记录机制，
   所以 `For` 的降低、渲染、字节码一行不改。
 - `impl[D] StagedVar[Tile[D]]`：`type Cell = Carry[D]`，`var_open(v) = carry(v)`，`var_get(c) = get(c)`，`var_set(c, v) = set(c, v)`，`effect StagedVar = !Dev`。
@@ -227,7 +233,7 @@ let b = block_id(0)
 let n: Idx = idx_const(chunks)           # chunks 是宿主变量，不是字面量，idx_const 保留
 let base = b * n
 var total = load_at(x, [base])
-for k in d_range(base + 1, base + n, 1) { total = total + load_at(x, [k]) }
+for k in d_range(base + 1, base + n) { total = total + load_at(x, [k]) }
 store_cell(out, total)
 ```
 
@@ -290,7 +296,7 @@ store_cell(s, select(allowed, v, f_const(F64, -INFINITY)))     # 0.11.0
 | `narrow.FP16`、`fp16()`、`round_fp16`、`fp16_bits`、`fp16_of_bits` | 改 `F16`、`f16()`、`round_f16`、`f16_bits`、`f16_of_bits`（std 公开面破坏，随承载它的编译器 release 一起发） |
 | tileir 删 `I1` 类型与 `impl Dtype[I1]` | `Tile[Bool]`；见证 `I1` 来自 `std/dtype` |
 | `FloatDtype::float_dtype` 的答案类型 `D` 改为 `Dtype[D]`，`float_name` 删除 | 自写泛型 kernel 的 `[D: FloatDtype]` 约束不变；读 `float_name(d)` 的改 `dtype_name(float_dtype())` |
-| 闭包形式的 `d_range(lo, hi) { i => .. }` 被同名描述符取代；`d_for(lo, hi, step) { i => .. }` 删除，并入 `d_range`（`B: RangeBound`，Int 与 Idx 各一个 impl；§9 Q2，无别名） | `for i in d_range(lo, hi) { .. }`；原 `d_for` 调用改 `d_range`（边界是 `Idx` 即得 Idx 版）；体内的外层 `Carry` 改 `var` |
+| 闭包形式的 `d_range(lo, hi) { i => .. }` 被同名描述符取代；`d_for(lo, hi, step) { i => .. }` 删除，并入 `d_range`（`B: RangeBound`，Int 与 Idx 各一个 impl，步长是 `Step[B] = One | By(by: B)`；§9 Q2，无别名） | `for i in d_range(lo, hi) { .. }`；原 `d_for` 调用改 `d_range`（边界是 `Idx` 即得 Idx 版）；体内的外层 `Carry` 改 `var` |
 | `neg_inf()` 一类自写常量 | 由 `-INFINITY` 取代（它们本来就不在 tileir 的公开面，是 kernels/ref 里的私有函数） |
 
 旧名（`std/gpu` 的 `F64` 等标记、`Tile[F64]`、`FP16`）**不给迁移提示**：`std/moved.txt` 不扩展到类型名，不加弃用别名。仓内没有别的消费者，U2 直接删旧名，调用方由编译错误引到新写法（§9 Q5）。
@@ -415,7 +421,7 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 八个开放问题已由维护者裁决（记录在 agent-handoff 的 ruling-tileir-011-open-20261006），下面每条一行理由，改动已写入对应章节。
 
 - **Q1** `INFINITY`/`NAN` 放新模块 `std/float`（§2.3）。理由：`Float` 是内建类型，常量挂专门模块（Rust `f64::INFINITY`、Zig `std.math.inf` 的思路），不在 tile 路径上所以 F0 不触发 `tile.yml`，以后 `MAX`/`EPSILON`/`is_nan` 同处。
-- **Q2** 终态拼写是 `d_range`，且只有一个：`d_range[B: RangeBound](lower: B, upper: B, step: B = 1, unsigned_cmp: Bool = false)`，`Int` 与 `Idx` 各实现 `RangeBound`；`d_for` 删除，不引入 `d_span`，不发弃用别名（§2.1、§7）。理由：目标写法就是用户看过的 `for j in d_range(..)`；Int 界与 Idx 界只差边界类型，用 trait 区分比起两个名字更少记一个；同一个破坏性版本内调用方一次迁完，别名只会多留名字。IR 与 golden 不变。临时名只活在栈的中间提交，R 之前收回。（原「Idx 版沿用 `d_for`」于 10-06 由维护者推翻。）
+- **Q2** 终态拼写是 `d_range`，且只有一个：`d_range[B: RangeBound](lower: B, upper: B, step: Step[B] = One, unsigned_cmp: Bool = false)`（步长形状见 §2.1 与 ruling-drange-step-20261006；原 `step: B = 1` 写不出来），`Int` 与 `Idx` 各实现 `RangeBound`；`d_for` 删除，不引入 `d_span`，不发弃用别名（§2.1、§7）。理由：目标写法就是用户看过的 `for j in d_range(..)`；Int 界与 Idx 界只差边界类型，用 trait 区分比起两个名字更少记一个；同一个破坏性版本内调用方一次迁完，别名只会多留名字。IR 与 golden 不变。临时名只活在栈的中间提交，R 之前收回。（原「Idx 版沿用 `d_for`」于 10-06 由维护者推翻。）
 - **Q3** U1 留在栈内，不单独先合（§7）。理由：不多付一次台账重录；同名类型加常量的 `dawn doc` 锚点与 LSP 悬停风险在 U1 刀内用测试钉住。
 - **Q4** `FloatDtype` 与 `HasDtype` 分开保留（§2.5）。理由：mma 组合表只收七个算术浮点，并入会把整数与只存储格式放进 `full` 的约束，类型错误退成运行期拒绝。
 - **Q5** 不做 `Tile[F64]` 提示，也不扩展 `std/moved.txt` 支持类型名（§8.5）。理由：仓内没有别的消费者，破坏性变更直接删旧名，编译错误已足够；为一次性迁移扩展机制是兼容层。（原裁决「走 `std/moved.txt` 并最小扩展」于 10-06 由维护者推翻。）

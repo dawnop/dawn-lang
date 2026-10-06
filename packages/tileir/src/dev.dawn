@@ -393,7 +393,7 @@ pub opaque type Ptrs[D] = Int
 ## different loop whenever the range straddles 2^31. The handler carries
 ## the memory ordering token through the loop on its own; a body never
 ## sees it. Only
-## the `d_for` family calls the pair; a body calls those.
+## the `d_range` family calls the pair; a body calls those.
 ##
 ## `t_while_begin` / `t_while_end` bracket the OTHER loop region, the one
 ## whose trip count is not known when it opens (knife T5).
@@ -674,10 +674,10 @@ pub opaque type Ptrs[D] = Int
 ## side table beside the program, and every other handler answers `()`. They
 ## are the only way that is known exactly, because the mapping is not one to
 ## one (`tile_at` issues `t_idx_const` and `t_idx_mul`, `add` issues
-## `t_binaryf`, `d_for` a whole region).
+## `t_binaryf`, `d_range` a whole region).
 ##
 ## `t_body_enter()` and `t_body_exit()` record nothing either. Every public
-## function that takes a closure (`d_for`, `d_range`, `d_loop`, the
+## function that takes a closure (`d_range`, `d_range`, `d_loop`, the
 ## reductions, the scans, `d_if`, `d_fork2`) runs that closure between the
 ## two, and runs nothing else between them; a region's trial (`Carry`) runs
 ## it between them too, and the trial's calls are thrown away with the rest. A call marked inside a body
@@ -2463,7 +2463,7 @@ fn carry_sets(cs: List[Int], hs: List[Int]) -> Unit !Dev = {
 }
 
 # A `for` over the index range `[lower, upper)` by `step` carrying what
-# `body` sets (`trial`). Private: `d_for` and `d_range` are the spellings.
+# `body` sets (`trial`). Private: `d_range` is the spelling.
 fn loop_carrying(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, body: fn(Idx) -> Unit !Dev) -> Unit !Dev = {
   let lo: Int = lower
   let up: Int = upper
@@ -2483,45 +2483,79 @@ fn loop_carrying(lower: Idx, upper: Idx, step: Idx, unsigned: Bool, body: fn(Idx
   carry_sets(cs, t_loop_end(carry_gets(cs)))
 }
 
-## A `for` over the index range `[lower, upper)` by `step` inside the
-## kernel: `body` runs on the host with the induction variable, and what it
-## issues falls inside the loop's region. The carries it sets are carried
-## through the loop (`Carry`); after the loop they hold what the last
-## iteration set.
+## How a loop steps: by one, or by a bound's own kind of value. `One` is a
+## constructor and not a literal because a parameter default must be pure
+## (spec, default values): the constant 1 of an `Idx` loop is an operation
+## the kernel records, so it is made when the loop starts, not when the
+## range is written. A literal step is `By(2)`; a device step is
+## `By(nprog)` (a grid-stride loop, ruling-drange-step-20261006).
+pub type Step[B] = One | By(by: B)
+
+## What a loop's bounds may be: a host number, fixed when the kernel is
+## recorded (`Int`), or a value the device computes (`Idx`). Both come to
+## an `Idx` when the loop starts; an `Int` records an `idx_const` for it.
+pub trait RangeBound[B] {
+  fn range_idx(b: B) -> Idx !Dev
+}
+
+impl RangeBound[Int] {
+  fn range_idx(b: Int) -> Idx !Dev = idx_const(b)
+}
+
+impl RangeBound[Idx] {
+  fn range_idx(b: Idx) -> Idx !Dev = b
+}
+
+## The index range `[lower, upper)` by `step`, to loop over with `for`:
 ##
-## This is an ordinary function rather than an operation because the
-## operation's own declaration could not name a `!Dev` body
-## (tile-backend-design 5.2). A body may nest `d_for`; the handler bounds the
-## depth. The memory ordering token is carried through the loop by the
-## handler, so a store after the loop is ordered after every store inside it.
+##     for j in d_range(0, K / TK) { acc = mma(load_at(a, [j]), load_at(b, [j]), acc) }
+##
+## The body runs once, on the host, with the induction variable (an `Idx`
+## whichever kind the bounds are), and what it issues falls inside the
+## loop's region. A `var` the body assigns is carried through the loop and
+## holds what the last iteration assigned after it. A body may nest a
+## `for`; the handler bounds the depth. The memory ordering token is carried
+## by the handler, so a store after the loop is ordered after every store
+## inside it. `break`, `continue` and `return` are not allowed in the body
+## (staged-for-design); a data-dependent exit is `d_loop`.
+##
+## With `Int` bounds the range records `idx_const` for lower, upper and step,
+## in that order; with `Idx` bounds it records only what the step needs.
 ##
 ## `unsigned_cmp` sets the loop's `unsignedCmp` unit attribute (knife T4):
 ## the induction variable is compared against the upper bound as an
 ## UNSIGNED 32-bit integer, so a range whose bounds straddle 2^31 runs
 ## forward instead of not running at all. Its own kernel is
-## scripts/tile-golden's attr_ucmp, and the difference is a lane count and
-## not a rounding, which is why this is the one unit attribute of knife T4
-## with an unmistakable device answer.
-##
-## `body` is the last parameter, so it is written as a tail block:
-## `d_for(lo, hi, one) { j => .. }`.
-pub fn d_for(lower: Idx, upper: Idx, step: Idx, unsigned_cmp: Bool = false,
-  body: fn(Idx) -> Unit !Dev) -> Unit !Dev = called("d_for", () => {
-    loop_carrying(lower, upper, step, unsigned_cmp, body)
-  })
+## scripts/tile-golden's attr_ucmp.
+pub fn d_range[B: RangeBound](lower: B, upper: B, step: Step[B] = One, unsigned_cmp: Bool = false) -> DRange[B] =
+  DRange { lower: lower, upper: upper, step: step, unsigned: unsigned_cmp }
 
-## `d_for` over HOST bounds: the index range `[lower, upper)` by `step`,
-## each a number fixed when the kernel is recorded, which is what nearly
-## every loop here has (the `k` of a matrix product walks `0 .. K / TK`).
-## It records exactly what `d_for(idx_const(lower), idx_const(upper),
-## idx_const(step)) { .. }` records, in that order; it is a spelling, not an
-## operation (the batch's C4, cutile-rs's `d_range`).
-pub fn d_range(lower: Int, upper: Int, step: Int = 1, body: fn(Idx) -> Unit !Dev) -> Unit !Dev = called("d_range", () => {
-  let lo = idx_const(lower)
-  let up = idx_const(upper)
-  let st = idx_const(step)
-  loop_carrying(lo, up, st, false, body)
-})
+## What `d_range` answers: the range, not yet recorded.
+pub type DRange[B] = { lower: B, upper: B, step: Step[B], unsigned: Bool }
+
+impl[B: RangeBound] StagedIter[DRange[B]] {
+  type Item = Idx
+  effect StagedIter = !Dev
+  fn staged_for(r: DRange[B], body: fn(Idx) -> Unit !Dev) -> Unit !Dev = called("d_range", () => {
+    let lo = range_idx(r.lower)
+    let up = range_idx(r.upper)
+    let st = match r.step {
+      One -> idx_const(1)
+      By(s) -> range_idx(s)
+    }
+    loop_carrying(lo, up, st, r.unsigned, body)
+  })
+}
+
+## A tile a `for` over a `d_range` carries, as `var`: `var acc = zeros(c)`
+## and `acc = mma(.., acc)` in the body are `carry`, `get` and `set`.
+impl[D] StagedVar[Tile[D]] {
+  type Cell = Carry[D]
+  effect StagedVar = !Dev
+  fn var_open(v: Tile[D]) -> Carry[D] !Dev = carry(v)
+  fn var_get(c: Carry[D]) -> Tile[D] !Dev = get(c)
+  fn var_set(c: Carry[D], v: Tile[D]) -> Unit !Dev = set(c, v)
+}
 
 ## The loop whose trip count the DATA decides: `body` runs on the host and
 ## answers a rank-0 mask, true when the loop is to stop here; the carries it
@@ -2531,8 +2565,8 @@ pub fn d_range(lower: Int, upper: Int, step: Int = 1, body: fn(Idx) -> Unit !Dev
 ## that stopped it is discarded. Compute the mask from what the iteration
 ## started with, before the `set`s, unless that is not what you mean.
 ##
-## This is `d_for`'s sibling and the only other region that iterates. The
-## difference is where the trip count comes from: `d_for`'s bounds are
+## This is `d_range`'s sibling and the only other region that iterates. The
+## difference is where the trip count comes from: `d_range`'s bounds are
 ## index handles the host or the grid supplies, and this one's exit is a
 ## value the kernel computes from the tiles it is carrying. A body that
 ## never answers a true mask never terminates on the device, exactly as a
@@ -2564,7 +2598,7 @@ pub fn d_loop(body: fn() -> Tile[I1] !Dev) -> Unit !Dev = called("d_loop", () =>
 ## it runs for a block whose `cond` was true, including the code after the
 ## loop. Where `cond` is false it does nothing and the body carries on.
 ##
-## Not inside `d_for`, a reduction or a scan: the dialect forbids a `return`
+## Not inside `d_range`, a reduction or a scan: the dialect forbids a `return`
 ## under a `for` (use the `loop` for an early exit, Ops.td says) and the
 ## other two are pure regions. The recording refuses all three.
 pub fn d_return_if(cond: Tile[I1]) -> Unit !Dev = called("d_return_if", () => {
@@ -2899,7 +2933,7 @@ pub fn extent_of[D](p: Param[D], dim: Int) -> Idx !Dev = called("extent_of", () 
 ## How many cells `p` is cut into along dimension `dim`: the extent over
 ## the tile, rounded up, or for a `DYN_DIM` dimension the grid's blocks
 ## along the axis it follows. The upper bound of a loop over a dimension of
-## an `In` that follows no grid axis: `d_for(idx_const(0), blocks_of(k, 0),
+## an `In` that follows no grid axis: `d_range(idx_const(0), blocks_of(k, 0),
 ## idx_const(1)) { j => .. load_at(k, [j]) .. }` (tileir 0.9.0).
 pub fn blocks_of[D](p: Param[D], dim: Int) -> Idx !Dev = called("blocks_of", () => {
   let h: Idx = t_extent_of(position(p), dim, true)
@@ -2985,7 +3019,7 @@ pub fn ptr_to_ptr[A, B: Dtype](ps: Ptrs[A], to_d: B) -> Ptrs[B] !Dev = called("p
 ## sentence.
 ##
 ## This is a MODULE-LEVEL declaration and not an instruction: it answers
-## nothing, and issuing it inside a `d_for`, a `d_loop`, a `d_if` or a
+## nothing, and issuing it inside a `d_range`, a `d_loop`, a `d_if` or a
 ## reduction is refused. Declare each global once, before the
 ## `get_global` that names it.
 ##
@@ -4739,7 +4773,7 @@ test "a loop carries the carries its body sets, in the order they were made, and
     let q = carry(x)
     let r = carry(x)
     let w = carry(x)
-    d_for(z, z, z) { _k =>
+    for _k in d_range(z, z, step: By(z)) {
       r.set(r.get())
       p.set(p.get())
       q.set(q.get())
@@ -4759,20 +4793,36 @@ test "a loop carries the carries its body sets, in the order they were made, and
   assert seen == (109, 110, 111, 103)
 }
 
-test "d_range issues its three bounds as index constants, then the loop, as d_for over them does" {
+test "d_range over host bounds issues its three bounds as index constants, then the loop, as d_range over those constants does" {
   let ranged = under_counter(() => {
     let c = carry(broadcast(f_const(F64, 0.0), [8]))
-    d_range(2, 9, step: 3) { _k => c.set(c.get()) }
+    for _k in d_range(2, 9, step: By(3)) { c.set(c.get()) }
     let h: Int = c.get()
     h
   })
   let spelled = under_counter(() => {
     let c = carry(broadcast(f_const(F64, 0.0), [8]))
-    d_for(idx_const(2), idx_const(9), idx_const(3)) { _k => c.set(c.get()) }
+    for _k in d_range(idx_const(2), idx_const(9), step: By(idx_const(3))) { c.set(c.get()) }
     let h: Int = c.get()
     h
   })
   assert ranged == spelled
+}
+
+test "d_range with no step records the constant 1 as the step, after the bounds, when the loop starts" {
+  let unit = under_counter(() => {
+    let c = carry(broadcast(f_const(F64, 0.0), [8]))
+    for _k in d_range(2, 9) { c.set(c.get()) }
+    let h: Int = c.get()
+    h
+  })
+  let by_one = under_counter(() => {
+    let c = carry(broadcast(f_const(F64, 0.0), [8]))
+    for _k in d_range(2, 9, step: By(1)) { c.set(c.get()) }
+    let h: Int = c.get()
+    h
+  })
+  assert unit == by_one
 }
 
 test "the six comparison predicates reach the handler by name, floating point and integer alike" {
@@ -4869,7 +4919,7 @@ fn loop_seen() -> (Int, Int, Int, Int, Int) !Dev = {
   let up = idx_add(b, idx_mul(b, lo))
   let first = load(a, b, [8])
   let acc = carry(first)
-  d_for(lo, up, lo) { i => acc.set(add(acc.get(), load(a, i, [8]))) }
+  for i in d_range(lo, up, step: By(lo)) { acc.set(add(acc.get(), load(a, i, [8]))) }
   let hb: Int = b
   let hup: Int = up
   let hfirst: Int = first
@@ -4885,7 +4935,7 @@ test "a loop's induction variable, carried handle and result are the handles the
   assert under_counter(loop_seen) == (100, 101, 103, 104, 109)
 }
 
-test "d_for hands the body the carried handle and passes its answer back as the continue value" {
+test "d_range hands the body the carried handle and passes its answer back as the continue value" {
   let seen = {
     with handle Dev {
       var log: List[String] = []
