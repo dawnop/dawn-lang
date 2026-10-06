@@ -1,0 +1,23 @@
+# The expected type reaches the left operand of an operator that std's
+# narrow floats and fixed-width integers take through a trait (the C0 ruling
+# of docs/arith-operator-traits-design.md D7): a generic call on the left has
+# no argument that names its type, and the annotated result is what fixes it.
+# Int and Float expectations still stop at the operator, and the last
+# function, whose left operand wants a Float literal in a U8 slot, still
+# fails on that literal.
+use std/narrow
+use std/int/u8
+
+fn same_i[T: FromInt](x: T) -> T = x
+fn same_f[T: FromFloat](x: T) -> T = x
+
+fn left_u8(b: u8.U8) -> u8.U8 = same_i(3) * b
+fn left_f32(b: narrow.F32) -> narrow.F32 = same_f(1.5) * b
+fn left_sub_zero(b: narrow.F32) -> narrow.F32 = same_f(-0.0) - b
+fn negated_zero(b: narrow.F32) -> narrow.F32 = -0.0 * b
+fn literal_left(b: narrow.F32) -> narrow.F32 = 2.0 * b
+fn at_int(x: Int) -> Int = same_i(3) * x
+fn at_float(x: Float) -> Float = same_f(1.5) * x
+fn float_in_u8(b: u8.U8) -> u8.U8 = same_f(1.5) * b
+
+pub fn main() -> Unit !io = println("${left_u8(1)}")
