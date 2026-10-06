@@ -495,6 +495,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/tile-gpu-diff"
+# shellcheck source=scripts/tile-gpu-diff/fold_verdict.sh
+. "$here/fold_verdict.sh"
 golden="$root/scripts/tile-golden"
 default_ledger="$here/ledger.txt"
 default_toolchain="$golden/toolchain.txt"
@@ -2412,6 +2414,25 @@ case "$seq_control_shape" in
   *) fail "the decoupled control's second launch reads the first's output, so it is not a control: $seq_control_shape" ;;
 esac
 
+# THE NEGATIVE CONTROL OF flash_bf16's TOLERANCE (seq_diff.dawn's
+# `tolerance_of` says why it is 2^-16 * max|v|): the reference that never
+# narrows p must be judged red. The host line needs no GPU and is held on
+# every driver, so a loosened tolerance cannot hide behind a blocked one;
+# the device line is the same judgement with the device's answer in the
+# chair, held when the sequence family ran.
+unrounded_host="$(grep -c '^control unrounded-reference host sequence=flash_bf16 verdict differ:result ' "$work/seq.out" || true)"
+[ "$unrounded_host" = 1 ] ||
+  { grep '^control unrounded-reference' "$work/seq.out" >&2 || true
+    fail "flash_bf16's tolerance judged the reference that never narrows p as something other than differ:result"; }
+echo "PASS  control: flash_bf16's tolerance reds the reference that forgets to narrow p ($(sed -n 's/^control unrounded-reference host .* miss //p' "$work/seq.out" | sed -n 1p))"
+if [ "$seq_verdict" = pass ]; then
+  unrounded_device="$(grep -c '^control unrounded-reference device sequence=flash_bf16 verdict differ:result$' "$work/seq.out" || true)"
+  [ "$unrounded_device" = 1 ] ||
+    { grep '^control unrounded-reference' "$work/seq.out" >&2 || true
+      fail "the device's answer was not told apart from the reference that never narrows p"; }
+  echo "PASS  control: the device's flash_bf16 answer is not the answer of a reference that skips the p narrowing"
+fi
+
 # `repeat`'s two boundaries. A repetition whose count is a host value can be
 # off by one in a way every sequence above would agree with, because they
 # would all be off by one together.
@@ -2643,6 +2664,12 @@ elif [ "$verdict" = pass ] && [ "$masked_verdict" = pass ]; then
 elif [ "$verdict" = pass ]; then
   verdict="$masked_verdict"
 fi
+
+# The sequence family's verdict was never read by the cascade above, so a
+# driver that refused seq_diff still ended on `pass` (fold_verdict.sh says
+# why the fold is a function and carries its negative control).
+fold_verdict_selftest || fail "the verdict fold's negative control failed"
+verdict="$(fold_family_verdict "$verdict" "$seq_verdict")"
 
 # ---- mutants: a copy of std with one anchor rewritten in std/gpu.dawn
 if command -v md5sum > /dev/null 2>&1; then
@@ -5540,7 +5567,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
   scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
-  scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py)"
+  scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
   { printf '%s\n' "$dirty" >&2; fail "tile paths have uncommitted changes: the ledger line would name a tree that was not run. Commit first."; }
 commit="$(git rev-parse --short=12 HEAD)"
