@@ -7,6 +7,47 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.10.0 (2026-10-06)
+
+Breaking: the float matrix product is `mma` and takes an accumulator of
+another format, and `Dev`'s `t_mmaf` gains that format: a handler written
+outside the package must answer `t_mmaf(dtype, acc, m, k, n, a, b, c)`.
+Every kernel in `scripts/tile-golden` records the bytes it did; the new
+`flash_attn_bf16` is the one new golden. §6.31.
+
+- `mma[A, C](a: Tile[A], b: Tile[A], acc: Tile[C]) -> Tile[C]` replaces
+  `mmaf`. The operands share a format and the accumulator may have another,
+  as the dialect's table allows: f8E4M3FN, f8E5M2 and f16 operands into an
+  f16 or f32 accumulator, bf16, tf32 and f32 into f32, f64 into f64. The
+  recording refuses any other pair and lists these. bf16 operands with an
+  f32 accumulator assemble for sm_86's tensor cores.
+- `mmaf_scaled` is `mma_scaled`. `mmai` keeps its name: its formats are
+  fixed and its tier is exact, as `addi` keeps its `i` beside `add`.
+- `full(shape, value)`: a float tile of `shape` in the format it is checked
+  against, `let m: Tile[F32] = full([32, 1], 0.0)`. It records what
+  `broadcast(f_const(F32, 0.0), [32, 1])` does.
+- `t.to(fmt)`: `float_to_float` at nearest even, answering `t` unchanged
+  and recording nothing when it is already in `fmt`.
+- `t.transpose()`: `permute_tile(t, [1, 0])` for a rank-2 tile.
+- New trait `FloatDtype[D]` (`float_dtype()`, `float_name(d)`) for the
+  seven arithmetic float formats: how `full` and `mma` learn a format from
+  the type alone. A kernel generic in its format bounds it with
+  `[D: FloatDtype]` to call either with a `Tile[D]` in hand.
+- `prog.MmaF` carries the accumulator's format as `out`, and
+  `prog.mma_accumulators(dtype)` answers the table.
+
+| 0.9 | 0.10 |
+|---|---|
+| `mmaf(a, b, c)` | `mma(a, b, c)` |
+| `mmaf_scaled(a, b, c, sa, sb)` | `mma_scaled(a, b, c, sa, sb)` |
+| `carry(broadcast(f_const(F64, 0.0), [32, 1]))` | `let c: Carry[F64] = carry(full([32, 1], 0.0))` |
+| `float_to_float(p, BF16)` | `p.to(BF16)` |
+| `permute_tile(t, [1, 0])` | `t.transpose()` |
+
+A module that defines its own `transpose`, `full` or `to` and imports the
+whole of these from `tileir/dev` now has a clash; `scripts/tile-golden`'s
+`transpose` kernel function is `transpose_matrix` for that reason.
+
 ## 0.9.0 (2026-10-06)
 
 Breaking: loops and `if`s carry device variables instead of tuples, and the

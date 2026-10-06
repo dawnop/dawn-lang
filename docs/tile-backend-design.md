@@ -5373,6 +5373,82 @@ grid_stride 是协调者裁的第三处：不再写一个原样答回的 `set` �
 - 写一侧计算下标（调研 I-C）：`Out` 仍只写本格，`along` 的单射证明保留；第一个真需要的 kernel 出现时另裁（K6）。
 - `get` / `set` 不发操作、不做「读后写」检查：Carry 只是记录期的名字，SSA 本身没有可变量，检查无对象。
 
+### 6.31 tileir 0.10.0：混合精度 `mma`、`full`、`.to`、`.transpose`（K2.5）
+
+依据：flash_attn 评审（10-06）四条：`mmaf[D]` 三个操作数同格式，写不出 bf16 入、f32 累加的 FlashAttention；初值只能
+`broadcast(f_const(F64, x), shape)`；`mmaf` 与 K2 的 `addf → add` 命名不一致，`permute_tile(t, [1, 0])`、
+`float_to_float(p, BF16)` 太长；kernel 体里写死 `F64`，对格式泛型不了。破坏性，0.10.0（每个 PR 一个版本号的惯例：
+0.8.1、0.8.2、0.9.0 都在 v0.84.0 之后，都没发布过）。
+
+**一、`mma[A, C]`。**
+
+```dawn
+pub trait FloatDtype[D] { fn float_dtype() -> D  fn float_name(d: D) -> String }
+pub fn mma[A, C: FloatDtype](a: Tile[A], b: Tile[A], acc: Tile[C]) -> Tile[C] !Dev
+pub fn full[D: FloatDtype](shape: List[Int], value: Float) -> Tile[D] !Dev
+pub fn to[A, B: Dtype](a: Tile[A], fmt: B) -> Tile[B] !Dev
+pub fn transpose[D](t: Tile[D]) -> Tile[D] !Dev
+```
+
+- 允许的组合照方言 `Ops.td` 的 MmaFOp 表（开源 clone 1520–1532 行）：f8E4M3FN / f8E5M2 / f16 → f16 或 f32，
+  bf16 / tf32 / f32 → f32，f64 → f64。记录时 `prog.check_mma_pair` 查表，拒绝文案把整张表列出来（例：
+  「bf16 operands with a f16 accumulator is not a pair the dialect allows; it allows ...」）。另查右操作数与左操作数同格式、
+  累加器是声明的格式。
+- `Dev` 的 `t_mmaf` 多一个参数 `acc`（累加器格式），`prog.MmaF` 多一个字段 `out`。bytecode 只写结果类型，操作数类型
+  从定义处读，所以 `bytecode.dawn` 一行不改；`lower.dawn` 的结果类型改用 `out`，操作数类型仍是 `dtype`（render 的
+  类型注解因此对混合精度也是对的）。
+- 累加器格式为什么要 trait：`Tile[D]` 运行期擦除，`lit(0.0)` 当累加器时格式只在类型里。std/gpu 的 `Dtype` 每个方法都以
+  标记值为首参（类型参数不出现在实参位置就推不出来），泛型函数手里没有 `D` 的值就拿不到格式名。`FloatDtype` 的
+  `float_dtype()` 只在返回位置出现 `D`，调用点由期望类型定（刚性 `D` 视同具体类型，实测通过），字典把格式送进来。
+  放在 tileir 而不是给 std/gpu 的 `Dtype` 加方法：后者要动 std（stdsrc 重生成、所有 `Dtype` impl 补方法，tileir 自己的
+  `I1` 就是一个），且整数格式用不上。七个 impl 是方言的算术浮点格式；`f8E8M0FNU`、`f4E2M1FN` 不进（没有算术操作收它们）。
+- Dawn 的推断是局部的（实测：`let s = mul(mma(a, lit(3)), lit(4))` 报 cannot infer），所以 `lit` 累加器要有期望类型：
+  flash_attn 写 `let s: Tile[F64] = mul(mma(tq, ..., lit(0.0)), lit(scale))`。泛型 kernel 写 `Tile[D]`。
+- sm_86 可汇编性先查清：落刀前用 scratch 里的探针 kernel（bf16×bf16→f32 与 f16×f16→f32 的 `mmaf`）过 tileiras 13.4.92
+  `--gpu-name sm_86`，都 rc=0，`--remarks=tensorcore` 报「Tensor-core SM80」。sm_80 同。
+- 命名：`mmaf → mma`、`mmaf_scaled → mma_scaled`（浮点族去后缀，同 6.30 二）；`mmai` 不改：格式由方言定死（i8×i8→i32）、
+  精确层而非容差层，与整数族保留 `addi` 同理；并成一个 `mma` 会让 I8 操作数先过类型检查、到记录时才被浮点表拒。
+  `Dev` 操作名（`t_mmaf` 等）与 golden kernel 名（`mmaf_scaled_e4m3`）仍拼方言操作码，不改。
+
+**二、`full`、`.to`、`.transpose`。**
+
+- `full(shape, v)` 就是 `broadcast(f_const(D, v), shape)`：同样的两个效果操作，字节必然相同（`prog` 的内联测试逐个对比
+  两种写法的记录）。`zeros(p)` / `fill(p, v)` 保留：格式与形状都来自参数，且能造整数 tile；`full` 只造浮点。
+- `.to(fmt)`：`float_to_float` 的就近偶数舍入；源格式已是 `fmt` 时原样答回、不发操作（`ftof` 同格式 tileiras 拒），
+  泛型 kernel 可以写 `p.to(D)`。其余舍入仍走 `float_to_float`。
+- `.transpose()`：`t_permute` 带 `[1, 0]`，与 `permute_tile(t, [1, 0])` 同一条指令；非 2 阶由记录器的置换检查拒。
+
+**三、迁移与 golden。** kernels.dawn 一次迁完：35 处 `mmaf → mma`、1 处 `mmaf_scaled → mma_scaled`、16 处
+`permute_tile(.., [1, 0]) → .transpose()`（协调者裁全迁，kernels.dawn 当示例读）、flash_attn 两个初值改 `full`。
+`transpose` kernel 的函数名改 `transpose_matrix`（与导入的 `transpose` 冲突），kernel 名与 golden 文件名不变。
+全量 tile-golden（sm_86，13.4.92）：已有 194 个 kernel 的 `.mlir` 与 `.tilebc` 在 JVM 与 native 上逐字节不变，
+加新的一个共 195 个全部汇编通过，273 个变异体全红，墙钟 3114 s。新 golden `flash_attn_bf16`：bf16 的 q、k、v，f32 的 m、l、acc（三个初值都是 `full`），第二次乘积前
+`p.to(BF16)`，答案 `.to(F64)` 加宽后存（f32 是 tile 格式而不是 std/gpu 搬运的缓冲格式，第一版用 `Out(F32)`，
+设备核对在分配处 `gpu.unsupported_dtype`；加宽是精确的，不引入要比的舍入）。63 行 / 800 字节，sm_86 汇编通过。site 调用图重录（flash_attn 的调用数 39 → 37：两对 `f_const` +
+`broadcast` 各并成一个 `full`，`ops 49` 不变）。
+
+**四、`flash_attn_bf16` 的设备核对与容差。** 放进 seq_diff，作为单 launch 的 `flash_bf16` 序列（与 `flash` 同构），
+参考是 `flash_attn_ref` 加的 `p_round: "bf16"`：只有第二次乘积用收窄后的 `p`，`l` 加未收窄的，与 kernel 一致。
+leetgpu 的 atol = rtol = 1e-5 对它不成立，`flash_bf16` 单独取 `(2^-8 · max|v|, 1e-5)`（`tolerance_of`）。推导：
+设备的 `p` 来自 f32 的分数与 f32 的 `exp`，参考来自 f64，二者相差约 1e-7 相对；若一个 bf16 舍入边界恰落在二者之间，
+两边收窄到相邻的 bf16 值，相差一个 bf16 步长，即 `p` 的 2^-8 到 2^-7。一次这样的分歧让输出移动至多
+`2^-7 · (p_j / l) · |v_j|`，`p_j / l` 是该 key 在这一行权重中的份额，所以 `2^-8 · max|v|` 覆盖份额合计不超过半行的
+任何一组分歧。其余全是 f32 运算，约 1e-7 相对，仍由 rtol 1e-5 覆盖。本语料 max|v| = 0.9，atol = 0.0035。
+实测（sm_86，RTX 3080，tileiras 13.4.92）：`miss 5.24e-6`，即最大偏差约 1.8e-8 绝对值，是界的五十万分之一，
+本语料上没有发生一次 `p` 的收窄分歧。对照：宿主上把参考的 `p_round` 去掉，答案移动 4.09e-4，是界的 0.116，
+也就是说这个容差**分不出**「参考忘了收窄 `p`」；反过来，leetgpu 的 1e-5 在本语料上既能让设备通过（1.8e-8）又能
+分出这一点（4.09e-4）。按裁决落的是 `2^-8 · max|v|`，这一权衡记在这里，收紧与否交协调者。
+
+**不做的（理由）：**
+
+- 3 维（批量）`mma`：方言允许，tileir 的 `matrix_dims` 只认 2 阶；本仓没有用 3 阶 `mmaf` 的 kernel，等第一个真需要的。
+- 让 `full` 收整数格式：值是 `Float`，整数初值已有 `fill(p, v)` 与 `i_const` + `broadcast`；要做就另起 `full_i`。
+- `mma` 推断累加器格式（如 C 缺省等于 A）：Dawn 没有类型参数缺省，也不该为此加；期望类型标注一次即可。
+- `mmai` 并入 `mma`：见一。
+- 给 std/gpu 的 `Dtype` 加无值方法：见一。等「GPU 格式标签与值类型统一」调研（字面量裁决第 5 条末项）再看两者是否合一。
+- 其余 kernel 里的 7 处 `broadcast(f_const(..))` 与 40 处 `float_to_float(..)` 不迁：字节不变，迁移只为读者；协调者
+  只裁了 `[1, 0]` 转置全迁，这两类留给碰到它们的提交。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`

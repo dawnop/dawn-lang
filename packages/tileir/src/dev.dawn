@@ -31,7 +31,7 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, TF32, I32, I8, I64, I4}
+use std/gpu.{Dtype, dtype_name, dtype_bytes, F64, F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, I32, I8, I64, I4}
 use std/narrow.{Rounding}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it,
@@ -176,6 +176,63 @@ impl Dtype[I1] {
   fn dtype_bytes(d: I1) -> Int = 1
 }
 
+## The float formats a constant can be made in when nothing but the TYPE
+## names the format (tileir 0.10.0): `full` and `mma`'s accumulator read
+## theirs off this rather than off a marker argument, so
+## `let m: Tile[F32] = full([32, 1], 0.0)` is an f32 tile and
+## `full([32, 1], 0.0)` with no expected type does not check.
+##
+## `float_dtype` answers the marker of `D` from the type alone. std/gpu's
+## `Dtype` cannot: its methods take the marker as their first argument
+## (a type parameter that appears in no argument position cannot be
+## inferred there), and a `Tile[D]` is erased at run time, so a function
+## generic in `D` and given no `D` value has no other way to learn which
+## format it is making. The dictionary this bound passes is that way.
+## `float_name` is the format's name, so one bound is enough; it agrees
+## with `Dtype`'s `dtype_name` for every format here. The seven formats
+## are the dialect's arithmetic floats: the operands `mmaf` takes. The
+## exponent-only `f8E8M0FNU` and the sub-byte `f4E2M1FN` are left out,
+## as no arithmetic operation takes either.
+pub trait FloatDtype[D] {
+  fn float_dtype() -> D
+  fn float_name(d: D) -> String
+}
+
+impl FloatDtype[F64] {
+  fn float_dtype() -> F64 = F64
+  fn float_name(d: F64) -> String = "f64"
+}
+
+impl FloatDtype[F32] {
+  fn float_dtype() -> F32 = F32
+  fn float_name(d: F32) -> String = "f32"
+}
+
+impl FloatDtype[TF32] {
+  fn float_dtype() -> TF32 = TF32
+  fn float_name(d: TF32) -> String = "tf32"
+}
+
+impl FloatDtype[F16] {
+  fn float_dtype() -> F16 = F16
+  fn float_name(d: F16) -> String = "f16"
+}
+
+impl FloatDtype[BF16] {
+  fn float_dtype() -> BF16 = BF16
+  fn float_name(d: BF16) -> String = "bf16"
+}
+
+impl FloatDtype[F8E4M3FN] {
+  fn float_dtype() -> F8E4M3FN = F8E4M3FN
+  fn float_name(d: F8E4M3FN) -> String = "f8E4M3FN"
+}
+
+impl FloatDtype[F8E5M2] {
+  fn float_dtype() -> F8E5M2 = F8E5M2
+  fn float_name(d: F8E5M2) -> String = "f8E5M2"
+}
+
 # The 64-bit integer format is std/gpu's `I64` and not one of this
 # module's own. Knife T2 declared it here, beside `I1`, on the grounds that
 # it was a tile element format and not a buffer format: `ptr_to_int` answers
@@ -267,7 +324,10 @@ pub opaque type Ptrs[D] = Int
 ## NaN operand. `t_select` takes an `i1` tile and two `dtype` tiles and
 ## answers the second where the condition is 1 and the third where it is 0.
 ## `t_mmaf` is the matrix multiply-accumulate: `a` is `[m, k]`, `b` is
-## `[k, n]`, `c` and the answer are `[m, n]`. `t_mmai` is the INTEGER one
+## `[k, n]`, `c` and the answer are `[m, n]`. `dtype` is the operands'
+## format and `acc` the accumulator's and the answer's, which may differ
+## (tileir 0.10.0): the dialect's table pairs each operand format with the
+## accumulators it allows, and the recording holds a kernel to it. `t_mmai` is the INTEGER one
 ## (knife 11): its `a` and `b` are `i8` tiles, its `c` and its answer are
 ## `i32` ones, and both operands are read SIGNED. It takes no dtype
 ## argument for that reason -- the three formats are fixed by the dialect
@@ -647,7 +707,7 @@ pub effect Dev {
   fn t_unaryf(op: String, dtype: String, shape: List[Int], a: Int) -> Int
   fn t_binaryf(op: String, dtype: String, shape: List[Int], a: Int, b: Int) -> Int
   fn t_fma(dtype: String, shape: List[Int], a: Int, b: Int, c: Int) -> Int
-  fn t_mmaf(dtype: String, m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
+  fn t_mmaf(dtype: String, acc: String, m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
   fn t_mmaf_scaled(dtype: String, scale: String, dims: List[Int],
     a: Int, b: Int, c: Int, sa: Int, sb: Int) -> Int
   fn t_mmai(m: Int, k: Int, n: Int, a: Int, b: Int, c: Int) -> Int
@@ -1616,26 +1676,46 @@ fn handle[D](t: Tile[D]) -> Int = {
   h
 }
 
-## The matrix multiply-accumulate `a * b + c`: `a` is `[m, k]`, `b` is
-## `[k, n]` and `c` and the answer are `[m, n]`, all of one format. The
-## three numbers are the operands' own, and the recording refuses a `b`
-## whose K is not `a`'s; a rank-0 `c` (the zero accumulator,
-## `f_const(F64, 0.0)`) is widened to `[m, n]`. This is the ONE operation
-## here whose summation over `k` has no specified order and no promised
-## instruction: `tileiras --remarks=tensorcore` says whether the device
-## used a tensor core or plain FMAs, and either way a kernel built on it is
-## a tolerance-tier kernel (docs/tile-backend-design.md 6.5).
+## The matrix multiply-accumulate `a * b + acc`: `a` is `[m, k]`, `b` is
+## `[k, n]` and `acc` and the answer are `[m, n]`. The two operands share
+## one format and the accumulator may have another (tileir 0.10.0; 0.9's
+## `mmaf` took three of one format): bf16 operands into an f32
+## accumulator is `mma(a, b, acc)` with `a: Tile[BF16]` and
+## `acc: Tile[F32]`. The pairs the dialect allows (Ops.td's MmaFOp table)
+## are the only ones the recording takes:
 ##
-## `fast_acc` is a 13.3 flag and is never written here.
-pub fn mmaf[D](a: Tile[D], b: Tile[D], c: Tile[D]) -> Tile[D] !Dev = called("mmaf", () => {
+## | operands | accumulator |
+## |---|---|
+## | `f8E4M3FN`, `f8E5M2`, `f16` | `f16` or `f32` |
+## | `bf16`, `tf32`, `f32` | `f32` |
+## | `f64` | `f64` |
+##
+## and it refuses any other pair with this table in the message. The
+## accumulator's format is `C`, read from the type (`FloatDtype`), so a
+## format-less `lit(0.0)` accumulator is made in it: `C` comes from the
+## accumulator's own type or from what the answer is checked against, as
+## in `let s: Tile[F32] = mma(a, b, lit(0.0))`.
+##
+## The three numbers are the operands' own, and the recording refuses a `b`
+## whose K is not `a`'s; a rank-0 accumulator is widened to `[m, n]`. This
+## is the ONE operation here whose summation over `k` has no specified
+## order and no promised instruction: `tileiras --remarks=tensorcore` says
+## whether the device used a tensor core or plain FMAs, and either way a
+## kernel built on it is a tolerance-tier kernel
+## (docs/tile-backend-design.md 6.5).
+##
+## `fast_acc` is a 13.3 flag and is never written here. The Tile IR
+## operation is still `mmaf`; the integer one is `mmai` below.
+pub fn mma[A, C: FloatDtype](a: Tile[A], b: Tile[A], acc: Tile[C]) -> Tile[C] !Dev = called("mma", () => {
   let x: Int = a
   let y: Int = b
-  let z: Int = c
+  let z: Int = acc
   let (dt, sa) = row_of(x)
   let sb = shape_of(y)
   let (m, k) = matrix_dims(sa)
   let (_k2, n) = matrix_dims(sb)
-  let h: Tile[D] = t_mmaf(dt, m, k, n, x, y, z)
+  let c: C = float_dtype()
+  let h: Tile[C] = t_mmaf(dt, float_name(c), m, k, n, x, y, z)
   h
 })
 
@@ -1644,9 +1724,9 @@ pub fn mmaf[D](a: Tile[D], b: Tile[D], c: Tile[D]) -> Tile[D] !Dev = called("mma
 # is the message that names the mistake.
 fn matrix_dims(s: List[Int]) -> (Int, Int) = if len(s) == 2 { (s[0], s[1]) } else { (1, 1) }
 
-## The BLOCK-SCALED floating-point matrix multiply-accumulate (knife T10):
-## `mmaf` for the low-precision formats that carry a separate exponent per
-## run of K. `a` is `[m, k]`, `b` is `[k, n]`, `c` and the answer are f32
+## The BLOCK-SCALED floating-point matrix multiply-accumulate (knife T10;
+## `mmaf_scaled` before tileir 0.10.0): `mma` for the low-precision
+## formats that carry a separate exponent per run of K. `a` is `[m, k]`, `b` is `[k, n]`, `c` and the answer are f32
 ## tiles of `[m, n]`, and `sa` and `sb` are scale tiles of `[m, k / block]`
 ## and `[k / block, n]`: each scale element multiplies a run of `block`
 ## elements along K in the matrix beside it, and `block` is read off `sa`.
@@ -1657,7 +1737,7 @@ fn matrix_dims(s: List[Int]) -> (Int, Int) = if len(s) == 2 { (s[0], s[1]) } els
 ## There is no combination with a wide operand format, which is why this
 ## operation cannot be assembled for this machine's sm_86 at all: every
 ## operand type it takes is one `tileiras` refuses below sm_100.
-pub fn mmaf_scaled[D, S](a: Tile[D], b: Tile[D], c: Tile[F32], sa: Tile[S], sb: Tile[S]) -> Tile[F32] !Dev = called("mmaf_scaled", () => {
+pub fn mma_scaled[D, S](a: Tile[D], b: Tile[D], c: Tile[F32], sa: Tile[S], sb: Tile[S]) -> Tile[F32] !Dev = called("mma_scaled", () => {
   let x: Int = a
   let y: Int = b
   let z: Int = c
@@ -1680,10 +1760,16 @@ pub fn mmaf_scaled[D, S](a: Tile[D], b: Tile[D], c: Tile[F32], sa: Tile[S], sb: 
 ## surface fixes both, because a kernel that wanted the unsigned reading
 ## would want a `u8` tile type the dialect does not have).
 ##
-## Unlike `mmaf`, this is an EXACT operation: every partial product of two
+## Unlike `mma`, this is an EXACT operation: every partial product of two
 ## i8 values fits in 15 bits and the accumulator is i32, so the sum over `k`
 ## is the same integer whatever order the device folds it in. A kernel built
 ## on it is exact tier, and that is a theorem rather than a corpus.
+##
+## It keeps its `i` where the float `mma` dropped its `f` (tileir 0.10.0),
+## as the integer arithmetic keeps `addi` beside the float `add`: its
+## formats are the dialect's and not the caller's, its tier is exact where
+## `mma`'s is tolerance, and one name over both would check an `I8` operand
+## against the float table and refuse it only when the kernel records.
 pub fn mmai(a: Tile[I8], b: Tile[I8], c: Tile[I32]) -> Tile[I32] !Dev = called("mmai", () => {
   let x: Int = a
   let y: Int = b
@@ -1702,7 +1788,9 @@ pub fn mmai(a: Tile[I8], b: Tile[I8], c: Tile[I32]) -> Tile[I32] !Dev = called("
 # `[1024]` tile records one `constant <f64: 0.5> : tile<1024xf64>` just
 # before the `mulf`. A constant that is never used records nothing. A
 # constant that must have a shape of its own (a loop's starting value) is
-# `broadcast(f_const(F64, 0.0), [64, 64])`, or `zeros(p)` for a cell of `p`.
+# `full([64, 64], 0.0)` under an annotation that names its format,
+# `broadcast(f_const(F64, 0.0), [64, 64])` written out, or `zeros(p)` for a
+# cell of `p`.
 
 ## The rank-0 tile of format `d` holding `value`, fixed when the kernel is
 ## recorded, which is what a host `Float` in a kernel body means.
@@ -1725,6 +1813,24 @@ pub fn f_const[D: Dtype](d: D, value: Float) -> Tile[D] !Dev = called("f_const",
 pub fn lit[D](value: Float) -> Tile[D] !Dev = called("lit", () => {
   let h: Tile[D] = t_constf("", [], value)
   h
+})
+
+## The tile of `shape` every lane of which holds `value`, in the format the
+## call is checked against (tileir 0.10.0): `let m: Tile[F32] =
+## full([32, 1], 0.0)`, or a `Carry[F32]` annotation on the `carry` it
+## starts. Like `lit`, its format comes from where it is used; unlike
+## `lit`, it has one of its own once made, so it can be what a `broadcast`
+## or a loop's starting value cannot take a `lit` for. It records exactly
+## what `broadcast(f_const(F32, 0.0), [32, 1])` records (one `constant` of
+## that shape, made where it is used), so swapping the two changes no byte.
+##
+## `zeros(p)` and `fill(p, v)` are the same tile shaped like a cell of `p`
+## in `p`'s format; they stay, because there the parameter already says
+## both, and they also make integer tiles, which this does not.
+pub fn full[D: FloatDtype](shape: List[Int], value: Float) -> Tile[D] !Dev = called("full", () => {
+  let d: D = float_dtype()
+  let c: Tile[D] = t_constf(float_name(d), [], value)
+  broadcast(c, shape)
 })
 
 ## The rank-0 i32 tile holding `value`.
@@ -2128,6 +2234,24 @@ fn convert_to[A, B](op: String, to: String, a: Tile[A]) -> Tile[B] !Dev = {
 ## not here.
 pub fn float_to_float[A, B: Dtype](a: Tile[A], to_d: B, rounding: Rounding = NearestEven) -> Tile[B] !Dev = called("float_to_float", () => {
   convert_to("ftof" ++ rounding_suffix(rounding), dtype_name(to_d), a)
+})
+
+## `a` in the float format `fmt`, rounded to nearest even: `p.to(BF16)`
+## (tileir 0.10.0). `float_to_float` with its default rounding, except
+## that a tile already in `fmt` is answered as it is and records nothing,
+## where `float_to_float` would ask `tileiras` for an `ftof` between equal
+## formats, which it refuses. A kernel generic in its format can then write
+## `p.to(D)` and get no instruction where `D` is the format `p` has.
+## Another rounding is `float_to_float`'s third argument.
+pub fn to[A, B: Dtype](a: Tile[A], fmt: B) -> Tile[B] !Dev = called("to", () => {
+  let x: Int = a
+  let (from, _shape) = row_of(x)
+  if from == dtype_name(fmt) {
+    let same: Tile[B] = x
+    same
+  } else {
+    float_to_float(a, fmt)
+  }
 })
 
 ## The i32 tile holding each lane of the `i8` tile `a` widened UNSIGNED, so
@@ -2737,6 +2861,18 @@ pub fn permute_tile[D](t: Tile[D], perm: List[Int]) -> Tile[D] !Dev = called("pe
   let x: Int = t
   let (dt, shape) = row_of(x)
   let r: Tile[D] = t_permute(dt, shape, perm, x)
+  r
+})
+
+## The rank-2 `t` with its two dimensions exchanged: `permute_tile(t,
+## [1, 0])`, the same instruction (tileir 0.10.0). A tile of another rank
+## is refused when the kernel records, by the check every permutation
+## passes ("a permutation of a 3-dimensional tile has that many entries");
+## `permute_tile` with the whole permutation is what a higher rank writes.
+pub fn transpose[D](t: Tile[D]) -> Tile[D] !Dev = called("transpose", () => {
+  let x: Int = t
+  let (dt, shape) = row_of(x)
+  let r: Tile[D] = t_permute(dt, shape, [1, 0], x)
   r
 })
 
@@ -3406,7 +3542,7 @@ pub fn scan_sum[D](t: Tile[D], dim: Int = -1, reverse: Bool = false) -> Tile[D] 
 ## becomes one `constant` of that shape). This is the explicit half of the
 ## rank-0 rule: a `[BQ, 1]` row statistic is `broadcast(m, [BQ, BK])`
 ## before it meets a `[BQ, BK]` tile, and a loop's starting value is
-## `broadcast(f_const(F64, 0.0), [64, 64])`.
+## `broadcast(f_const(F64, 0.0), [64, 64])`, which `full` writes for you.
 pub fn broadcast[D](t: Tile[D], shape: List[Int]) -> Tile[D] !Dev = called("broadcast", () => {
   let h: Int = t
   let (dtype, from) = t_shape_of(h)
@@ -3520,7 +3656,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       next = next + 1
       h
     }
-    t_mmaf(_dtype, _m, _k, _n, _a, _b, _c) => {
+    t_mmaf(_dtype, _acc, _m, _k, _n, _a, _b, _c) => {
       let h = next
       next = next + 1
       h
@@ -4019,9 +4155,9 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       rows = [(8, dtype, shape)] ++ rows
       8
     }
-    t_mmaf(dtype, m, k, n, a, b, c) => {
-      log = log ++ ["mmaf ${dtype} ${m} ${k} ${n} ${a} ${b} ${c}"]
-      rows = [(17, dtype, [m, n])] ++ rows
+    t_mmaf(dtype, acc, m, k, n, a, b, c) => {
+      log = log ++ ["mmaf ${dtype} ${acc} ${m} ${k} ${n} ${a} ${b} ${c}"]
+      rows = [(17, acc, [m, n])] ++ rows
       17
     }
     t_mmai(m, k, n, a, b, c) => {
@@ -4696,13 +4832,13 @@ test "a matrix product reads m, k and n off its operands" {
     let a = param(F16, 0)
     let x = load(a, idx_const(0), [16, 32])
     let y = load(a, idx_const(0), [32, 8])
-    let _c = mmaf(x, y, f_const(F16, 0.0))
+    let _c = mma(x, y, f_const(F32, 0.0))
     ()
   })
   # both loads answer 1, and the row of 1 is the last load's: what the
   # surface reads for `a` is therefore [32, 8] here, so this pins the
   # reading order rather than the numbers a real recording would see
-  assert list.any(seen, l => str.starts_with(l, "mmaf f16 "))
+  assert list.any(seen, l => str.starts_with(l, "mmaf f16 f32 "))
 }
 
 test "the cell writes and the escape hatch hand the handler what they are named with and nothing else" {
@@ -4777,7 +4913,7 @@ test "d_for hands the body the carried handle and passes its answer back as the 
         2
       }
       t_fma(_dtype, _shape, _a, _b, _c) => 7
-      t_mmaf(_dtype, _m, _k, _n, _a, _b, _c) => 17
+      t_mmaf(_dtype, _acc, _m, _k, _n, _a, _b, _c) => 17
       t_mmai(_m, _k, _n, _a, _b, _c) => 18
       t_cmpf(_pred, _dtype, _shape, _a, _b) => 8
       t_cmpi(_pred, _shape, _a, _b) => 9

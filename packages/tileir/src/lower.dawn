@@ -839,11 +839,14 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatFma(d, ty, a, b, c))
   }
-  MmaF(dst, dtype, m, k, n, lhs, rhs, acc) -> {
+  MmaF(dst, dtype, out, m, k, n, lhs, rhs, acc) -> {
     let a = ref_of(l0, lhs, "mmaf lhs")
     let b = ref_of(l0, rhs, "mmaf rhs")
     let c = ref_of(l0, acc, "mmaf accumulator")
-    let ty = num_tile([m, n], dtype)
+    # the operands are `dtype` and the accumulator and the result `out`,
+    # which differ for bf16 into f32 (tileir 0.10.0); the bytecode writes
+    # only the result type and reads the operands' off their definitions
+    let ty = num_tile([m, n], out)
     let (l1, d) = define(l0, dst, ty)
     emit(l1, FloatMma(d, ty, num_tile([m, k], dtype), num_tile([k, n], dtype), a, b, c))
   }

@@ -66,12 +66,12 @@ block reads and writes, element-wise operations take their shape and format
 from their operands, and a matrix product's from its two factors:
 
 ```dawn
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range, carry, get, set}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, carry, get, set}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 256 / 32) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  d_range(0, 256 / 32) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -89,7 +89,9 @@ let (prog, entry) = trace3("matmul",
   are the only writes an `Out` takes: a `store`, `scatter`, atomic or
   `store_view` into one is refused while recording.
 - `zeros(p)` and `fill(p, v)` are a tile shaped like a cell of `p`, the
-  accumulator a block starts from.
+  accumulator a block starts from. `full(shape, v)` is a float tile of any
+  shape whose format is the one it is checked against:
+  `let m: Tile[F32] = full([BQ, 1], 0.0)`.
 - A constant is rank 0: `f_const(F64, 0.5)`, `i_const(3)`. `lit(0.5)` is
   a float constant with no format, which takes the format of the
   element-wise operation it meets (`mul(s, lit(0.5))`; write it after a
@@ -106,6 +108,16 @@ let (prog, entry) = trace3("matmul",
 - `Idx` arithmetic is `idx_add`, `idx_sub`, `idx_mul`, `idx_div` and
   `idx_rem` (signed, toward zero): a grid axis that holds a head and a
   group folded together is read back as `idx_div(b, g)` and `idx_rem(b, g)`.
+- `mma(a, b, acc)` is the matrix product `a * b + acc`. `a` and `b` share
+  a format and `acc` may have another, from the dialect's table: f8E4M3FN,
+  f8E5M2 and f16 operands into f16 or f32, bf16, tf32 and f32 into f32,
+  f64 into f64. A `lit(0.0)` accumulator takes the accumulator's format, so
+  it needs one from the context: `let s: Tile[F32] = mma(a, b, lit(0.0))`.
+  `mma_scaled` is the block-scaled product and `mmai` the i8 one.
+- `t.to(BF16)` converts a float tile, rounding to nearest even (a tile
+  already in that format is answered unchanged); `float_to_float` takes the
+  other roundings. `t.transpose()` swaps a rank-2 tile's dimensions;
+  `permute_tile(t, perm)` reorders any rank.
 - `reshape(t, shape)` regroups `t`'s lanes into `shape`, row-major, as
   many lanes as before: a `[T, T]` product goes into a `[1, T, T]` cell as
   `store_cell(o, reshape(acc, [1, T, T]))`. No write reshapes on its own.
@@ -132,22 +144,23 @@ let (prog, entry) = trace3("matmul",
 A value that changes as a loop goes is a `Carry`, a device variable:
 `let acc = carry(init)`, `acc.get()` to read it, `acc.set(t)` to replace it
 with a tile of the same format and shape. A carry starts from a tile with a
-shape (`zeros(p)`, a `broadcast`), not from a rank-0 constant or a `lit`.
+shape (`zeros(p)`, `full`, a `broadcast`), not from a rank-0 constant or
+a `lit`. This is FlashAttention with bf16 inputs and f32 accumulation:
 
 ```dawn
-let m = carry(broadcast(f_const(F64, neg_inf()), [BQ, 1]))
-let l = carry(broadcast(f_const(F64, 0.0), [BQ, 1]))
-let acc = carry(zeros(o))
+let m: Carry[F32] = carry(full([BQ, 1], neg_inf()))
+let l: Carry[F32] = carry(full([BQ, 1], 0.0))
+let acc: Carry[F32] = carry(full([BQ, D], 0.0))
 d_range(0, N / BK) { j =>
-  let s = mul(mmaf(tq, permute_tile(load_at(k, [j]), [1, 0]), lit(0.0)), lit(scale))
+  let s: Tile[F32] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(scale))
   let m_new = max(m.get(), reduce_max(s, keepdims: true))
   let p = exp(sub(s, m_new))
   let alpha = exp(sub(m.get(), m_new))
   l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims: true)))
-  acc.set(mmaf(p, load_at(v, [j]), mul(acc.get(), alpha)))
+  acc.set(mma(p.to(BF16), load_at(v, [j]), mul(acc.get(), alpha)))
   m.set(m_new)
 }
-store_cell(o, div(acc.get(), l.get()))
+store_cell(o, div(acc.get(), l.get()).to(F64))   # o: Param[F64]
 ```
 
 - `d_range(lower, upper, step: 1) { j => .. }` is a loop over host bounds;
@@ -183,7 +196,8 @@ measurement is in §6.26 of the design document.
 
 Each value handle has a format and a shape, and every element-wise operand is
 held to the shape the operation takes from its operands (after the rank-0
-and same-rank rules), as is the `k` of `mmaf`, `mmaf_scaled` and `mmai`. A mismatch panics
+and same-rank rules), as is the `k` of `mma`, `mma_scaled` and `mmai` and the format pair of
+`mma`. A mismatch panics
 while the kernel records, naming the operation by its depth-first number in
 `TileProg.ops` (`MakeToken(0)` is #0), for example:
 ``tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>``.

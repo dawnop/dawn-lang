@@ -2017,8 +2017,15 @@ fn ref_neg_inf() -> Float = 0.0 - 1.0 / 0.0
 ## of this file, so the two references are two algorithms that must agree
 ## rather than one algorithm written twice. The first block's rescale is
 ## `exp(-inf)`, which `ref_exp` answers 0.0, so nothing special-cases it.
+##
+## `p_round` names the format the probabilities are narrowed to before the
+## second product, `""` for none: `"bf16"` is scripts/tile-golden's
+## `flash_attn_bf16`, which writes `p.to(BF16)` there. Only that product
+## sees the narrowed `p`; the running sum `l` adds the unrounded ones, as
+## the kernel does, so the two halves of `acc / l` are not rounded alike on
+## either side.
 pub fn flash_attn_ref(m: Int, n: Int, d: Int, bk: Int, scale: Float, dtypes: List[String],
-  ins: List[List[Float]]) -> List[Float] = {
+  ins: List[List[Float]], p_round: String = "") -> List[Float] = {
   let q = ins[0]
   let k = ins[1]
   let v = ins[2]
@@ -2036,9 +2043,10 @@ pub fn flash_attn_ref(m: Int, n: Int, d: Int, bk: Int, scale: Float, dtypes: Lis
       let alpha = ref_exp(mx - mx_new)
       let p = list.map(s, x => ref_exp(x - mx_new))
       l = l * alpha + list.fold(p, 0.0, (a, x) => a + x)
+      let pv = if p_round == "" { p } else { list.map(p, x => round_to(p_round, x)) }
       let before = acc
       acc = list.map(range(0, d), c =>
-          before[c] * alpha + list.fold(range(0, bk), 0.0, (a, t) => a + p[t] * v[(b * bk + t) * d + c]))
+          before[c] * alpha + list.fold(range(0, bk), 0.0, (a, t) => a + pv[t] * v[(b * bk + t) * d + c]))
       mx = mx_new
     }
     let total = l
@@ -5180,4 +5188,13 @@ test "the online softmax answers what the three-launch chain does, including whe
   for i in range(0, m * d) {
     assert close(single[i], want[i], 1.0e-13)
   }
+  # narrowing the probabilities to bf16 moves the answer, by less than one
+  # bf16 step (2^-7 relative at most) of the largest value
+  let narrowed = flash_attn_ref(m, n, d, bk, scale, ["f64", "f64", "f64", "f64"], [q, k, v, old], p_round: "bf16")
+  let moved = list.fold(range(0, m * d), 0.0, (a, i) => {
+    let e = if narrowed[i] > got[i] { narrowed[i] - got[i] } else { got[i] - narrowed[i] }
+    if e > a { e } else { a }
+  })
+  assert moved > 0.0
+  assert moved <= 0.9 / 128.0
 }

@@ -12,16 +12,16 @@ use std/gpu.{F64, F32, BF16, F16, I32, I8, I16, I64, TF32, F8E4M3FN, F8E5M2, F8E
 use std/narrow.{Rounding}
 use tileref/ref.{global_table_a, global_table_b, global_syms_c}
 use tileir/dev.{Dev, Param, Tile, Idx, I1, param, block_id, tile_at, load, store, row_major, permute, coord,
-  and_mask, or_mask, in_range, axis_mask, gather, scatter, axis_strides, ge_i, mmaf, add, sub, mul, div, max, min,
+  and_mask, or_mask, in_range, axis_mask, gather, scatter, axis_strides, ge_i, mma, full, transpose, to, add, sub, mul, div, max, min,
   neg, abs, fma, f_const, lt, le, gt, ge, eq, ne, eq_i, select, tail_mask, idx_const, idx_add, idx_mul, idx_eq,
-  d_for, d_loop, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
+  d_for, d_loop, Carry, carry, get, set, lit, exp, exp2, log, log2, sqrt, rsqrt, tanh, floor, ceil, pow, lanes, d_reduce,
   d_reduce2, d_if, i_const, add_i, sub_i, mul_i, Overflow, div_i, rem_i, max_i, min_i, mulhi_i, and_i,
   or_i, xor_i, shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
   ext_u4, trunc_i4, arange, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_scan, d_scan2,
   erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, d_fork2, insert, powi, ptrs,
   ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64, d_global, Visibility,
-  global_ptrs, alloca_ptrs, mmaf_scaled, addi, subi, muli, shli, shri, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
+  global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, shli, shri, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
   gt_u, ge_u, atomic_rmw, Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy,
   hint_latency, tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
   idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
@@ -391,7 +391,7 @@ const MM_TK: Int = 32
 # So the body is the textbook loop, with no base, no stride and no shape.
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, MM_K / MM_TK) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  d_range(0, MM_K / MM_TK) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -423,7 +423,7 @@ fn batched_matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   d_for(idx_const(0), idx_const(BMM_K / BMM_T), idx_const(1)) { k =>
     let ta = load(a, idx_add(a_row, idx_mul(k, idx_const(BMM_T))), [BMM_T, BMM_T], strides: Some([BMM_K, 1]))
     let tb = load(b, idx_add(b_col, idx_mul(k, idx_const(BMM_T * BMM_N))), [BMM_T, BMM_T], strides: Some([BMM_N, 1]))
-    acc.set(mmaf(ta, tb, acc.get()))
+    acc.set(mma(ta, tb, acc.get()))
   }
   store_cell(c, reshape(acc.get(), [1, BMM_T, BMM_T]))
 }
@@ -443,8 +443,10 @@ const TR_TILE: Int = 32
 # The input is read by its cells; the output cannot be an Out, because block
 # (i, j) writes the tile at (j, i), and an Out's cells are the grid in the
 # grid's own order. It is a Shared, written through the pointer path, which
-# is this kernel's whole point.
-fn transpose(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
+# is this kernel's whole point. The function is `transpose_matrix` and the
+# kernel `transpose`: since tileir 0.10.0 `transpose` is the rank-2 tile
+# operation this module imports, and the golden keeps its name.
+fn transpose_matrix(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let bi = block_id(0)
   let bj = block_id(1)
   let t = load_cell(x)
@@ -1112,7 +1114,8 @@ fn dot_f16(a: Param[F16], b: Param[F16], out: Param[F64]) -> Unit !Dev = {
 
 # The f16 GEMM: leetgpu 22. Knife 8's `matmul` at f16, with an f16
 # accumulator (the dialect allows f16 operands with an f16 or an f32
-# result; this surface's `mmaf` takes one format for all three).
+# result; this kernel keeps f16 for all three, and since tileir 0.10.0
+# `mma` could take the f32 accumulator too: `flash_attn_bf16` does).
 #
 # `--remarks=tensorcore` says this one DOES reach a tensor core on sm_86
 # (`Tensor-core SM80, Shape = [16, 8, 16]`), which knife 8 found only bf16
@@ -1129,7 +1132,7 @@ const MMF_T: Int = 32
 # memory either way.
 fn matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, MMF_K / MMF_T) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  d_range(0, MMF_K / MMF_T) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -1154,7 +1157,7 @@ fn batched_matmul_f16(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev 
   d_for(idx_const(0), idx_const(BMF_K / BMF_T), idx_const(1)) { k =>
     let ta = load(a, idx_add(a_row, idx_mul(k, idx_const(BMF_T))), [BMF_T, BMF_T], strides: Some([BMF_K, 1]))
     let tb = load(b, idx_add(b_col, idx_mul(k, idx_const(BMF_T * BMF_N))), [BMF_T, BMF_T], strides: Some([BMF_N, 1]))
-    acc.set(mmaf(ta, tb, acc.get()))
+    acc.set(mma(ta, tb, acc.get()))
   }
   store_cell(c, reshape(acc.get(), [1, BMF_T, BMF_T]))
 }
@@ -2057,13 +2060,13 @@ const LORA_SCALE: Float = 0.5
 #
 # Since the batch's PR-3 the weights are read by their cells, which are rows
 # of `w` (`out` by `in`), and turned into the column block the product
-# wants by `permute_tile` in registers, where the pointer path read them
+# wants by `transpose` in registers, where the pointer path read them
 # with the two strides swapped; the three LoRA launches and the attention
 # family below read every transposed operand that way.
 fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(base))
   d_range(0, LORA_DIN / LORA_T) { k =>
-    acc.set(mmaf(load_at(x, [k]), permute_tile(load_at(w, [k]), [1, 0]), acc.get()))
+    acc.set(mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(base, acc.get())
 }
@@ -2073,7 +2076,7 @@ fn lora_base(x: Param[F64], w: Param[F64], base: Param[F64]) -> Unit !Dev = {
 fn lora_hidden(x: Param[F64], a: Param[F64], h: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(h))
   d_range(0, LORA_DIN / LORA_T) { k =>
-    acc.set(mmaf(load_at(x, [k]), permute_tile(load_at(a, [k]), [1, 0]), acc.get()))
+    acc.set(mma(load_at(x, [k]), load_at(a, [k]).transpose(), acc.get()))
   }
   store_cell(h, acc.get())
 }
@@ -2082,7 +2085,7 @@ fn lora_hidden(x: Param[F64], a: Param[F64], h: Param[F64]) -> Unit !Dev = {
 # This is the launch that reads what BOTH earlier launches wrote.
 fn lora_out(base: Param[F64], h: Param[F64], b: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let at = [idx_const(0)]
-  let delta = mmaf(load_at(h, at), permute_tile(load_at(b, at), [1, 0]), f_const(F64, 0.0))
+  let delta = mma(load_at(h, at), load_at(b, at).transpose(), f_const(F64, 0.0))
   store_cell(out, add(load_cell(base), mul(f_const(F64, LORA_SCALE), delta)))
 }
 
@@ -2118,7 +2121,7 @@ fn attn_softmax(s: Param[F64], p: Param[F64]) -> Unit !Dev = {
 # Launch 3 of 3: O[M, D] = P[M, N] * V[N, D], an ordinary row-major product.
 fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(o))
-  d_range(0, ATT_N / ATT_T) { k => acc.set(mmaf(load_at(p, [k]), load_at(v, [k]), acc.get())) }
+  d_range(0, ATT_N / ATT_T) { k => acc.set(mma(load_at(p, [k]), load_at(v, [k]), acc.get())) }
   store_cell(o, acc.get())
 }
 
@@ -2157,28 +2160,66 @@ fn attn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
 # are knife 16's. The same format as the three launches is what lets the
 # host compare the two algorithms at one tolerance (packages/tileref's
 # `flash_attn_ref` is this loop on the host, held to the three references
-# chained), and sm_86 assembles f64 `mmaf` the way it does for the rest of
-# the attention family. The FlashAttention of the paper is f16 operands with
-# an f32 accumulator; that is a different tolerance, not a different
-# algorithm.
+# chained), and sm_86 assembles f64 `mma` the way it does for the rest of
+# the attention family. The FlashAttention of the paper is 16-bit operands
+# with an f32 accumulator; that is a different tolerance, not a different
+# algorithm, and `flash_attn_bf16` below is it.
+#
+# The format is written where a value is first made and nowhere else: the
+# two carries' starting tiles are `full` under a `Carry[F64]`, and the
+# scores are a `Tile[F64]` so that the `lit(0.0)` accumulator of the first
+# `mma` has a format to be made in. (Before tileir 0.10.0 the carries were
+# `broadcast(f_const(F64, ..), ..)`; the recording is the same.)
 const FA_BQ: Int = 32
 const FA_BK: Int = ATT_D
 
 fn flash_attn(q: Param[F64], k: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let tq = load_cell(q)
-  let m = carry(broadcast(f_const(F64, neg_inf()), [FA_BQ, 1]))
-  let l = carry(broadcast(f_const(F64, 0.0), [FA_BQ, 1]))
+  let m: Carry[F64] = carry(full([FA_BQ, 1], neg_inf()))
+  let l: Carry[F64] = carry(full([FA_BQ, 1], 0.0))
   let acc = carry(zeros(o))
   d_range(0, ATT_N / FA_BK) { j =>
-    let s = mul(mmaf(tq, permute_tile(load_at(k, [j]), [1, 0]), lit(0.0)), lit(ATT_INV_SQRT_D))
+    let s: Tile[F64] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(ATT_INV_SQRT_D))
     let m_new = max(m.get(), reduce_max(s, keepdims: true))
     let p = exp(sub(s, m_new))
     let alpha = exp(sub(m.get(), m_new))
     l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims: true)))
-    acc.set(mmaf(p, load_at(v, [j]), mul(acc.get(), alpha)))
+    acc.set(mma(p, load_at(v, [j]), mul(acc.get(), alpha)))
     m.set(m_new)
   }
   store_cell(o, div(acc.get(), l.get()))
+}
+
+# `flash_attn` as the paper runs it (tileir 0.10.0): bf16 queries, keys and
+# values, every product accumulated in f32, and the probabilities narrowed
+# to bf16 before the second product, which is the one place a bf16 kernel
+# rounds that the f64 one does not. The running maximum `m`, the running
+# sum `l` and the accumulator stay f32; `l` sums the f32 probabilities and
+# the accumulator the bf16 ones, as FlashAttention's own kernels do, so the
+# two halves of the final division are not rounded alike. The answer is
+# widened to f64 to be stored, exactly: f32 is a tile format and not a
+# buffer format std/gpu moves, and widening adds no rounding to compare.
+#
+# sm_86 assembles both products to its bf16 tensor core (`--remarks=
+# tensorcore`: `Tensor-core SM80`); bf16 operands into an f32 accumulator is
+# a row of the dialect's `mmaf` table, bf16 into bf16 is not. Tolerance
+# tier, and not the f64 kernels' tolerance: see scripts/tile-gpu-diff's
+# seq_diff for the bound and what it is derived from.
+fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[F64]) -> Unit !Dev = {
+  let tq = load_cell(q)
+  let m: Carry[F32] = carry(full([FA_BQ, 1], neg_inf()))
+  let l: Carry[F32] = carry(full([FA_BQ, 1], 0.0))
+  let acc: Carry[F32] = carry(full([FA_BQ, ATT_D], 0.0))
+  d_range(0, ATT_N / FA_BK) { j =>
+    let s: Tile[F32] = mul(mma(tq, load_at(k, [j]).transpose(), lit(0.0)), lit(ATT_INV_SQRT_D))
+    let m_new = max(m.get(), reduce_max(s, keepdims: true))
+    let p = exp(sub(s, m_new))
+    let alpha = exp(sub(m.get(), m_new))
+    l.set(add(mul(l.get(), alpha), reduce_sum(p, keepdims: true)))
+    acc.set(mma(p.to(BF16), load_at(v, [j]), mul(acc.get(), alpha)))
+    m.set(m_new)
+  }
+  store_cell(o, div(acc.get(), l.get()).to(F64))
 }
 
 # ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
@@ -2240,7 +2281,7 @@ fn carry_extent(x: Param[F64], o: Param[F64]) -> Unit !Dev = {
 const MP_N: Int = 32
 
 fn matpow_step(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev =
-  store_cell(c, mmaf(load_cell(a), load_cell(b), f_const(F64, 0.0)))
+  store_cell(c, mma(load_cell(a), load_cell(b), f_const(F64, 0.0)))
 
 # leetgpu 84 (SwiGLU MLP Block): (silu(x Wg) * (x Wu)) Wd, four launches
 # over three kernels -- the projection kernel is launched TWICE, on two
@@ -2254,7 +2295,7 @@ const SW_T: Int = 32
 # Launches 1 and 2 of 4: y[M, DFFN] = x[M, DMODEL] * w[DMODEL, DFFN].
 fn swiglu_proj(x: Param[F64], w: Param[F64], y: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(y))
-  d_range(0, SW_DMODEL / SW_T) { k => acc.set(mmaf(load_at(x, [k]), load_at(w, [k]), acc.get())) }
+  d_range(0, SW_DMODEL / SW_T) { k => acc.set(mma(load_at(x, [k]), load_at(w, [k]), acc.get())) }
   store_cell(y, acc.get())
 }
 
@@ -2271,7 +2312,7 @@ fn swiglu_act(gate: Param[F64], up: Param[F64], h: Param[F64]) -> Unit !Dev = {
 # Launch 4 of 4: out[M, DMODEL] = h[M, DFFN] * Wd[DFFN, DMODEL].
 fn swiglu_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, SW_DFFN / SW_T) { k => acc.set(mmaf(load_at(h, [k]), load_at(w, [k]), acc.get())) }
+  d_range(0, SW_DFFN / SW_T) { k => acc.set(mma(load_at(h, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, acc.get())
 }
 
@@ -2317,7 +2358,7 @@ fn apsp_step(d: Param[F64], kb: Param[I32]) -> Unit !Dev = {
 ## same operations in the same order either way.
 fn att_scaled(q: Param[F64], k: Param[F64]) -> Tile[F64] !Dev = {
   let at = [idx_const(0)]
-  let acc = mmaf(load_at(q, at), permute_tile(load_at(k, at), [1, 0]), f_const(F64, 0.0))
+  let acc = mma(load_at(q, at), load_at(k, at).transpose(), f_const(F64, 0.0))
   mul(acc, f_const(F64, ATT_INV_SQRT_D))
 }
 
@@ -2625,7 +2666,7 @@ const MHA_INV_SQRT_DK: Float = 0.17677669529663687
 # cut [1, T, T] with the head following axis 2 (`along: [2, 0, 1]`), and
 # the product is reshaped to the cell.
 fn mha_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
-  let acc = mmaf(load_cell(q), permute_tile(load_cell(k), [1, 0]), f_const(F64, 0.0))
+  let acc = mma(load_cell(q), load_cell(k).transpose(), f_const(F64, 0.0))
   store_cell(s, reshape(mul(acc, f_const(F64, MHA_INV_SQRT_DK)), [1, MHA_T, MHA_T]))
 }
 
@@ -2638,7 +2679,7 @@ fn mha_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(o))
   d_range(0, MHA_N / MHA_T) { kk =>
     let tp = load(p, idx_add(rows, idx_mul(kk, idx_const(MHA_T))), [MHA_T, MHA_T], strides: Some([MHA_N, 1]))
-    acc.set(mmaf(tp, load_at(v, [kk]), acc.get()))
+    acc.set(mma(tp, load_at(v, [kk]), acc.get()))
   }
   store_cell(o, acc.get())
 }
@@ -2758,7 +2799,7 @@ const XA_T: Int = 32
 const XA_INV_SQRT_D: Float = 0.17677669529663687
 
 fn xattn_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
-  let acc = mmaf(load_cell(q), permute_tile(load_cell(k), [1, 0]), f_const(F64, 0.0))
+  let acc = mma(load_cell(q), load_cell(k).transpose(), f_const(F64, 0.0))
   store_cell(s, reshape(mul(acc, f_const(F64, XA_INV_SQRT_D)), [1, XA_T, XA_T]))
 }
 
@@ -2767,7 +2808,7 @@ fn xattn_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(o))
   d_range(0, XA_N / XA_T) { kk =>
     let tp = load(p, idx_add(rows, idx_mul(kk, idx_const(XA_T))), [XA_T, XA_T], strides: Some([XA_N, 1]))
-    acc.set(mmaf(tp, load_at(v, [kk]), acc.get()))
+    acc.set(mma(tp, load_at(v, [kk]), acc.get()))
   }
   store_cell(o, acc.get())
 }
@@ -2802,7 +2843,7 @@ const GQ_INV_SQRT_D: Float = 0.17677669529663687
 fn gqa_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let qh = idx_add(idx_mul(block_id(2), idx_const(GQ_GROUPS)), block_id(0))
   let tq = load(q, idx_mul(qh, idx_const(GQ_S * GQ_D)), [GQ_S, GQ_D])
-  let acc = mmaf(tq, permute_tile(load_cell(k), [1, 0]), f_const(F64, 0.0))
+  let acc = mma(tq, load_cell(k).transpose(), f_const(F64, 0.0))
   store_cell(s, reshape(mul(acc, f_const(F64, GQ_INV_SQRT_D)), [1, GQ_S, GQ_S]))
 }
 
@@ -2815,7 +2856,7 @@ fn gqa_context(p: Param[F64], v: Param[F64], o: Param[F64]) -> Unit !Dev = {
     let tp = load(p, idx_add(rows, idx_mul(kk, idx_const(GQ_T))), [GQ_S, GQ_T], strides: Some([GQ_S, 1]))
     let tv = load(v, idx_add(idx_mul(bkv, idx_const(GQ_S * GQ_D)), idx_mul(kk, idx_const(GQ_T * GQ_D))),
       [GQ_T, GQ_D])
-    acc.set(mmaf(tp, tv, acc.get()))
+    acc.set(mma(tp, tv, acc.get()))
   }
   store_cell(o, reshape(acc.get(), [1, GQ_S, GQ_D]))
 }
@@ -2992,7 +3033,7 @@ fn kv_context(p: Param[F64], v: Param[I8], vs: Param[F64], o: Param[F64]) -> Uni
 fn attn_bwd_mmt(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
   d_range(0, ATT_M / ATT_T) { k =>
-    acc.set(mmaf(permute_tile(load_at(a, [k]), [1, 0]), load_at(b, [k]), acc.get()))
+    acc.set(mma(load_at(a, [k]).transpose(), load_at(b, [k]), acc.get()))
   }
   store_cell(c, acc.get())
 }
@@ -3029,7 +3070,7 @@ fn la_phi(t: Tile[F64]) -> Tile[F64] !Dev =
 fn lin_attn_s(k: Param[F64], v: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(s))
   d_range(0, LA_M / LA_T) { j =>
-    acc.set(mmaf(la_phi(permute_tile(load_at(k, [j]), [1, 0])), load_at(v, [j]), acc.get()))
+    acc.set(mma(la_phi(load_at(k, [j]).transpose()), load_at(v, [j]), acc.get()))
   }
   store_cell(s, acc.get())
 }
@@ -3044,7 +3085,7 @@ fn lin_attn_out(q: Param[F64], s: Param[F64], z: Param[F64], out: Param[F64]) ->
   let zero = f_const(F64, 0.0)
   let tq = la_phi(load_cell(q))
   let tz = load(z, idx_const(0), [LA_D, LA_D], strides: Some(axis_strides(2, 0, LA_D)))
-  store_cell(out, div(mmaf(tq, load_at(s, [idx_const(0), idx_const(0)]), zero), mmaf(tq, tz, zero)))
+  store_cell(out, div(mma(tq, load_at(s, [idx_const(0), idx_const(0)]), zero), mma(tq, tz, zero)))
 }
 
 # leetgpu 33 (Ordinary Least Squares): beta solves X^T X beta = X^T y.
@@ -3194,7 +3235,7 @@ fn gpt_bias(bias: Param[F64]) -> Tile[F64] !Dev =
 
 fn gpt_qkv(x: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_D / GP_T) { k => acc.set(mmaf(load_at(x, [k]), load_at(w, [k]), acc.get())) }
+  d_range(0, GP_D / GP_T) { k => acc.set(mma(load_at(x, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3206,7 +3247,7 @@ fn gpt_scores(qkv: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let bh = block_id(2)
   let tq = load_at(qkv, [bh])
   let tk = load_at(qkv, [idx_add(idx_const(GP_D / GP_DH), bh)])
-  let acc = mmaf(tq, permute_tile(tk, [1, 0]), f_const(F64, 0.0))
+  let acc = mma(tq, tk.transpose(), f_const(F64, 0.0))
   store_cell(s, mul(acc, f_const(F64, GP_INV_SQRT_DH)))
 }
 
@@ -3217,7 +3258,7 @@ fn gpt_scores(qkv: Param[F64], s: Param[F64]) -> Unit !Dev = {
 fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
   let vh = idx_add(idx_const(2 * GP_D / GP_DH), block_id(2))
   let acc = carry(zeros(o))
-  d_range(0, GP_S / GP_T) { k => acc.set(mmaf(load_at(p, [k]), load_at(qkv, [k, vh]), acc.get())) }
+  d_range(0, GP_S / GP_T) { k => acc.set(mma(load_at(p, [k]), load_at(qkv, [k, vh]), acc.get())) }
   store_cell(o, acc.get())
 }
 
@@ -3225,7 +3266,7 @@ fn gpt_context(p: Param[F64], qkv: Param[F64], o: Param[F64]) -> Unit !Dev = {
 # a[GP_S, GP_D] * W[GP_D, GP_D] + b[GP_D].
 fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_D / GP_T) { k => acc.set(mmaf(load_at(a, [k]), load_at(w, [k]), acc.get())) }
+  d_range(0, GP_D / GP_T) { k => acc.set(mma(load_at(a, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3234,7 +3275,7 @@ fn gpt_dense(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) ->
 # GP_F wide, and a width is a store stride and a weight stride.
 fn gpt_fc(a: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_D / GP_T) { k => acc.set(mmaf(load_at(a, [k]), load_at(w, [k]), acc.get())) }
+  d_range(0, GP_D / GP_T) { k => acc.set(mma(load_at(a, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3255,7 +3296,7 @@ fn gpt_gelu(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
 # where its inner dimension is, so its loop runs twice as many rounds.
 fn gpt_down(h: Param[F64], w: Param[F64], bias: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
-  d_range(0, GP_F / GP_T) { k => acc.set(mmaf(load_at(h, [k]), load_at(w, [k]), acc.get())) }
+  d_range(0, GP_F / GP_T) { k => acc.set(mma(load_at(h, [k]), load_at(w, [k]), acc.get())) }
   store_cell(out, add(acc.get(), gpt_bias(bias)))
 }
 
@@ -3309,7 +3350,7 @@ fn llama_rms(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn llama_qkv(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
   d_range(0, LM_D / LM_T) { k =>
-    acc.set(mmaf(load_at(x, [k]), permute_tile(load_at(w, [k]), [1, 0]), acc.get()))
+    acc.set(mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
 }
@@ -3338,7 +3379,7 @@ fn llama_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
   let qh = idx_add(idx_mul(block_id(2), idx_const(LM_HQ / LM_HKV)), block_id(0))
   let sh = [LM_S, LM_S]
   let tq = load(q, idx_mul(qh, idx_const(LM_S * LM_HD)), [LM_S, LM_HD])
-  let acc = mmaf(tq, permute_tile(load_cell(k), [1, 0]), f_const(F64, 0.0))
+  let acc = mma(tq, load_cell(k).transpose(), f_const(F64, 0.0))
   let scaled = mul(acc, f_const(F64, LM_INV_SQRT_HD))
   let allowed = ge_i(coord(idx_const(0), sh, 0, 1), coord(idx_const(0), sh, 1, 1))
   store_cell(s, reshape(select(allowed, scaled, f_const(F64, neg_inf())), [1, LM_S, LM_S]))
@@ -3351,7 +3392,7 @@ fn llama_scores(q: Param[F64], k: Param[F64], s: Param[F64]) -> Unit !Dev = {
 fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
   d_range(0, LM_D / LM_HD) { h =>
-    acc.set(mmaf(load_at(a, [h]), permute_tile(load_at(w, [h]), [1, 0]), acc.get()))
+    acc.set(mma(load_at(a, [h]), load_at(w, [h]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
 }
@@ -3363,7 +3404,7 @@ fn llama_out(a: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
   d_range(0, LM_D / LM_T) { k =>
-    acc.set(mmaf(load_at(x, [k]), permute_tile(load_at(w, [k]), [1, 0]), acc.get()))
+    acc.set(mma(load_at(x, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
 }
@@ -3373,7 +3414,7 @@ fn llama_ffn(x: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
 fn llama_down(h: Param[F64], w: Param[F64], out: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(out))
   d_range(0, LM_F / LM_T) { k =>
-    acc.set(mmaf(load_at(h, [k]), permute_tile(load_at(w, [k]), [1, 0]), acc.get()))
+    acc.set(mma(load_at(h, [k]), load_at(w, [k]).transpose(), acc.get()))
   }
   store_cell(out, acc.get())
 }
@@ -4243,7 +4284,7 @@ fn alloca_ctl(x: Param[F64], out: Param[F64]) -> Unit !Dev = {
   store_cell(out, add(add(tx, tx), tx))
 }
 
-# ---- knife T10: `mmaf_scaled` (0x72) ----
+# ---- knife T10: `mma_scaled`, Tile IR's `mmaf_scaled` (0x72) ----
 #
 # The block-scaled MMA. It reaches LAYER 1 AND NO FURTHER on this machine,
 # and the reason is the operation's own type table rather than anything
@@ -4267,7 +4308,7 @@ const MMS_V: Int = 32
 
 fn mmaf_scaled_e4m3(a: Param[F8E4M3FN], b: Param[F8E4M3FN], sa: Param[F8E8M0FNU],
   sb: Param[F8E8M0FNU], out: Param[F64]) -> Unit !Dev = {
-  let r = mmaf_scaled(load_cell(a), load_cell(b), f_const(F32, 0.0), load_cell(sa), load_cell(sb))
+  let r = mma_scaled(load_cell(a), load_cell(b), f_const(F32, 0.0), load_cell(sa), load_cell(sb))
   store_cell(out, float_to_float(r, F64))
 }
 
@@ -5006,7 +5047,7 @@ fn trace(name: String) -> TileProg = match name {
   }
   "transpose" -> {
     let (p, _e) = trace2("transpose",
-      In(F64, cells([TR_ROWS, TR_COLS], [TR_TILE, TR_TILE])), Shared(F64), transpose)
+      In(F64, cells([TR_ROWS, TR_COLS], [TR_TILE, TR_TILE])), Shared(F64), transpose_matrix)
     p
   }
   "layer_norm" -> {
@@ -5246,6 +5287,12 @@ fn trace(name: String) -> TileProg = match name {
     let (p, _e) = trace4("flash_attn",
       In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, fa_kv()), In(F64, fa_kv()),
       Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), flash_attn)
+    p
+  }
+  "flash_attn_bf16" -> {
+    let (p, _e) = trace4("flash_attn_bf16",
+      In(BF16, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(BF16, fa_kv()), In(BF16, fa_kv()),
+      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), flash_attn_bf16)
     p
   }
   "idx_softmax" -> {
