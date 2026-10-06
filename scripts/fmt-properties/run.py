@@ -547,6 +547,10 @@ def check_layout(lay):
             want = lay.indent_at(p.lo if p is not None else c.lo)
         elif c.kind in ("Block", "Match", "Handle") and c.lo not in lay.first_lo:
             want = lay.indent_at(body_anchor(lay, c, bases)) + 2
+        elif c.kind in ("Impl", "Trait", "Effect"):
+            # the declaration starts at its first modifier (`pub(` / `pkg)`
+            # wrapped), which sits outside the node's span
+            want = lay.indent_at(lay.lo_min[id(c)]) + 2
         else:
             want = lay.indent_at(c.lo) + 2
         for k in item_children(c):
@@ -893,6 +897,8 @@ def self_test(dawn):
          "fn f() -> Int = {\n  let a = (\n    if c {\n    1\n    } else {\n      2\n    })\n  a\n}\n", "item-indent"),
         ("a grouping parenthesis closing after its last operand's own parenthesis",
          "fn f(a: Int, b: Int) -> Int = {\n  let r = a\n  (\n    g(r,\n      28) &\n      (a & b))\n}\n", None),
+        ("members of a trait whose modifier wrapped",
+         "pub(\n  pkg) trait W[T] {\n  fn w(\n    x: T) -> Int\n}\n", None),
         ("a grouping parenthesis on a line of its own",
          "fn f() -> Int = {\n  let r = b\n  (\n    h(r) << 2) + h(\n      r)\n}\n", None),
     ]
