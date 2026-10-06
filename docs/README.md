@@ -176,6 +176,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [staged-for-design.md](staged-for-design.md) | **current** | `for` + `var` 写设备循环：`StagedIter`/`StagedVar` 两个 prelude trait，检查器把循环体改写成交给 `staged_for` 的闭包、把体中提到的外层 `var` 改写成按声明序打开的格子；编译器刀于 2026-10-06 落地，权威条文在 spec §3.5、§4.5、§4.7。 |
 | [literal-system-design.md](literal-system-design.md) | **current** | 数字字面量没有自己的类型、按期望定型：`FromInt`/`FromFloat` 两个 prelude trait，二元运算向有类型的一侧让步，纯 impl 编译期折叠（`let b: U8 = 300` 是编译错误）；L1 于 2026-10-06 落地，权威条文在 spec §1.5、§4.3。 |
 | [arith-operator-traits-design.md](arith-operator-traits-design.md) | **current** | `+ - * / %` 与一元 `-` 背后的六个 prelude trait（`Add`…`Neg`），各带同名关联效果；opaque 不继承算术；刀 1 于 2026-10-06 落地，权威条文在 spec §3.5、§4.3。 |
+| [tileir-011-design.md](tileir-011-design.md) | proposed | tileir 0.11 一次破坏性发布的排期：`StagedIter`/`StagedVar` 实现与 `for` + `var` 迁移（S2）、`Tile`/`Idx` 的运算符与字面量 impl（L3）、std `INFINITY`/`NAN`、格式与值类型统一（`std/dtype`、同名见证常量、`FP16` 改 `F16`、`Tile[F64]` 改 `Tile[Float]`），含 flash_attn 前后对照、全仓迁移计数、tile-golden 逐字节不变的变异体证明、刀序与 PR 切分、开放风险。 |
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
 | [effects-window-design.md](effects-window-design.md) | current | 裁决 4、5 的效果窗口：`io` 是唯一的环境效果、效果原子按声明表分类；效果限定名与通用的选择性引入改名 `use m.{x as y}`；`catch_panic` 去 `!io`；`with_fs_real`/`with_gpu_real` 效果多态；删除 `unsafe_pure` 与 `--comptime-ffi`；`main` 只在入口模块保留。 |
