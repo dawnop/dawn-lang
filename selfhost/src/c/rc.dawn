@@ -2008,8 +2008,14 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
         let (st2, t) = fresh(st1)
         return (st2, [CSLet(t, ty, v1), CSDrop(sym), CSAssign(sym, CLocal(t, ty))])
       }
+      # The target is dead on the right-hand side's after-set: whatever reads
+      # it later reads the NEW value, and the old one is exactly what the
+      # value may consume. Keeping it in `after` pinned the old value with
+      # one extra reference (`t = incr(t); tot = tot + sum(t)` dup'd the root
+      # and shared the whole tree). The jump-out paths above keep the
+      # conservative set: they do not re-home the binding.
       let st0 = bind(strip_syms(st, [sym]), sym)
-      let (st1, v1) = rw(st0, value, true, after)
+      let (st1, v1) = rw(st0, value, true, set.remove(after, sym))
       let (st2, t) = fresh(st1)
       if scope_index_of(st1, sym) < 0 {
         # taken: the old value's single release already happened inside `v1`
@@ -3320,6 +3326,36 @@ test "reassignment from the old value is a hand-over, not copy and drop" {
       match ss[1] {
         CSAssign(_, _) -> ()
         _ -> panic("expected the assignment right after, with no drop between")
+      }
+    }
+    _ -> panic("expected a block")
+  }
+}
+
+test "a read after the assignment sees the new value, so the old one is handed over" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  # `m = g(m); h(m)`: the later read is of the NEW m. Pinning the old one
+  # for it dup'd the argument and left the callee a shared value.
+  let body = CBlock(
+    [
+      CSAssign(1, CCall(CDirect("m", "g"), [CLocal(1, lst)], lst, CNoSite)),
+      CSDiscard(CCall(CDirect("m", "h"), [CLocal(1, lst)], lst, CNoSite))
+    ],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[0] {
+        CSLet(_, _, CCall(_, args2, _, _)) ->
+          match args2[0] {
+            CLocal(s, _) -> { assert s == 1 }
+            _ -> panic("expected the old value handed into the call, not a dup")
+          }
+        _ -> panic("expected the value named first")
       }
     }
     _ -> panic("expected a block")
