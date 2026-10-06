@@ -39,7 +39,7 @@ use ir/core.{
   CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
-  CMode, COwned, mode_owned,
+  CMode, COwned, mode_owned, mode_key, callee_mode_key,
   cex_ty, diverges
 }
 use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, TyVar, TyFn, EPure,
@@ -917,9 +917,10 @@ fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], L
 ## common case, the all-owned convention, which must stay on `consume_all`'s
 ## exact path.
 ##
-## Only a `CDirect` callee can carry borrowed positions: the table is keyed
-## by the name a call site can see, and a dynamic target, a dictionary
-## method or an impl/default symbol stays all-owned (see core.CMode). A
+## Only a `CDirect` or `CImpl` callee can carry borrowed positions: the table
+## is keyed by the name a call site can see (`core.callee_mode_key`), and a
+## dynamic target, a dictionary method or a default symbol stays all-owned
+## (see core.CMode). A
 ## table row covers the callee's declared parameters; argument positions
 ## past it (forwarded dictionaries, evidence atoms) are owned -- a
 ## dictionary is not counted anyway and evidence is an ordinary counted
@@ -933,9 +934,9 @@ fn owned_positions(
   callee: CCallee,
   n: Int
 ) -> Option[List[Int]] =
-  match callee {
-    CDirect(owner, name) ->
-      match map.get(modes, (owner, name)) {
+  match callee_mode_key(callee) {
+    Some(key) ->
+      match map.get(modes, key) {
         None -> None
         Some(ms) -> {
           var any_borrowed = false
@@ -958,7 +959,7 @@ fn owned_positions(
           Some(out)
         }
       },
-    _ -> None
+    None -> None
   }
 
 ## The general operand-list rewrite: borrowed positions as `borrow_all` says,
@@ -2213,38 +2214,31 @@ pub fn rc_module(m: CModule, modes: Map[(String, String), List[CMode]]) -> CModu
 ## the call-site table, as sentences. A missing row and an all-owned row
 ## both mean all-owned parameters.
 ##
-## Impl and default-method bodies stay out: the table is keyed by the name a
-## `CDirect` call site spells, and an impl's `CFun.name` is its method name
-## -- two impls of `show` in one module share it, so a row for a plain
-## function of the same name would be compared against parameters it never
-## described. Their call sites (`CImpl`/`CDefault`/`CMethod`) never read the
-## table, and the inference pass must never stamp them for the same reason.
+## Default-method bodies and captured lambdas stay out (`core.mode_key` has
+## none for them): their call sites never read the table. An impl method is in,
+## under the key its `CImpl` call sites spell (`core.impl_mode_name`), not under
+## its bare method name, which two impls of `show` in one module share.
 fn mode_mismatch(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[String] = {
   var errs: List[String] = []
   for f in m.fns {
-    let plain = match f.impl_of {
-      Some(_) -> false
-      None ->
-        match f.default_of {
-          Some(_) -> false
-          None -> true
+    match mode_key(f) {
+      None -> ()
+      Some(key) -> {
+        let row = match map.get(modes, key) {
+          Some(r) -> r
+          None -> []
         }
-    }
-    if plain {
-      let row = match map.get(modes, (f.owner, f.name)) {
-        Some(r) -> r
-        None -> []
-      }
-      var i = 0
-      for p in f.params {
-        let table_owned = if i < len(row) { mode_owned(row[i]) } else { true }
-        if table_owned != mode_owned(p.mode) {
-          errs = errs ++ [f.name ++ ": parameter " ++ to_string(i) ++
-              " is " ++ (if mode_owned(p.mode) { "owned" } else { "borrowed" }) ++
-              " on the callee and " ++ (if table_owned { "owned" } else { "borrowed" }) ++
-              " in the table"]
+        var i = 0
+        for p in f.params {
+          let table_owned = if i < len(row) { mode_owned(row[i]) } else { true }
+          if table_owned != mode_owned(p.mode) {
+            errs = errs ++ [f.name ++ ": parameter " ++ to_string(i) ++
+                " is " ++ (if mode_owned(p.mode) { "owned" } else { "borrowed" }) ++
+                " on the callee and " ++ (if table_owned { "owned" } else { "borrowed" }) ++
+                " in the table"]
+          }
+          i = i + 1
         }
-        i = i + 1
       }
     }
   }

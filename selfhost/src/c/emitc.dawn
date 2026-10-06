@@ -41,7 +41,7 @@ use embed/unicode_class
 use ir/core.{
   CSite, CNoSite, CAt, CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict, VCursor,
   diverges,
-  CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned,
+  CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup, CUpdate,
@@ -52,7 +52,7 @@ use ir/core.{
   CBinOp,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  cex_ty, ty_key, subject_key
+  cex_ty, ty_key
 }
 
 ## A module together with the comptime values its bodies refer to. A `const`
@@ -1499,9 +1499,9 @@ fn all_flags(n: Int, v: Bool) -> List[Bool] = {
 ## `rc.owned_positions` gives, read from the same table. The borrowed arm is
 ## unreachable while the table is empty.
 fn arg_flags(st: CSt, callee: CCallee, n: Int) -> List[Bool] =
-  match callee {
-    CDirect(owner, name) ->
-      match map.get(st.modes, (owner, name)) {
+  match callee_mode_key(callee) {
+    Some(key) ->
+      match map.get(st.modes, key) {
         None -> all_flags(n, true)
         Some(ms) -> {
           var out: List[Bool] = []
@@ -1512,7 +1512,7 @@ fn arg_flags(st: CSt, callee: CCallee, n: Int) -> List[Bool] =
           out
         }
       },
-    _ -> all_flags(n, true)
+    None -> all_flags(n, true)
   }
 
 ## Emit a row of value operands preserving written order. C leaves the
@@ -1735,7 +1735,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
 fn dict_symbol(key: String) -> String = "dawn_${escape_part(key)}"
 
 fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
-  mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ subject_key(subject) ++ "$" ++ method)
+  mangle(owner, impl_mode_name(tid, subject, method))
 
 fn default_symbol(owner: String, tid: Int, method: String) -> String =
   mangle(owner, "default$" ++ to_string(tid) ++ "$" ++ method)
