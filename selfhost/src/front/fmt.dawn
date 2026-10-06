@@ -520,11 +520,11 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # The anchor moves where a statement or a new expression begins, never on a
   # line that only continues an operand (`if a &&` / `b {`, a signature wrapped
   # after `->`, a pattern after `|`): the brace there still opens the body of
-  # what began a line further up (#532). And it moves at the line's first token
-  # that is not a closer, once the closers have been popped: before, a line
-  # opening with `}` was weighed with that brace still on the stack, and a
-  # record brace inside a later call (`g(` / `S {`) happened to match the
-  # stale depth and was taken for a statement body (#533).
+  # what began a line further up (#532). And a line opening with a closer never
+  # moves it: that line carries on what the bracket began, and closing the
+  # bracket has already given back the anchor it found (#533, #545). Before, it
+  # moved at the line's first token that is not a closer, so `) -> (` in a
+  # wrapped signature made the `{` that ends it a statement body one level in.
   var logical_indent = 0
   var logical_depth = 0
   var anchor_pending = false
@@ -602,7 +602,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
         out = out ++ [ttext]
-        anchor_pending = true
+        anchor_pending = not is_closer(t.kind)
         anchor_moves = not (cont && continues_operand(pl, t, marks))
       }
     }
@@ -1522,4 +1522,14 @@ test "a bracket's close gives back the statement anchor it found" {
   assert fmt_of(a) == a
   let b = "fn f() -> Int = {\nlet v = (if (((1, 2) != match (3) {\nx -> 1\n})) { (if (false) { {\nlet a = 1\na\n} } else { 3 }) } else { 4 })\nv\n}\n"
   assert fmt_of(b) == a
+}
+
+## #545: a line that opens with a closer carries on the construct the bracket
+## began, so it does not start a statement. A signature wrapped inside its
+## brackets put `) -> (` at the parameter level, and the anchor followed it, so
+## the body of the function sat one level in.
+test "a line that opens with a closer does not move the statement anchor" {
+  let w = "pub fn w[T,\n  !e](\n    a: Int,\n    b: List[(\n      String,\n      String)]\n  ) -> (\n    T, Int) !e = {\n  let x = 1\n  x\n}\n"
+  assert fmt_of(w) == w
+  assert fmt_of("pub fn w[T,\n!e](\na: Int,\nb: List[(\nString,\nString)]\n) -> (\nT, Int) !e = {\nlet x = 1\nx\n}\n") == w
 }
