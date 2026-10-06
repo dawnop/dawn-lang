@@ -2216,7 +2216,7 @@ fn client_defaults_item_data(params: Json) -> Bool = {
 }
 
 ## The inlay hints the client asked for: `initializationOptions.inlayHints`,
-## six optional booleans over `default_inlay_opts`. A key that is missing or
+## seven optional booleans over `default_inlay_opts`. A key that is missing or
 ## not a boolean keeps its default; read once, at `initialize`
 ## (docs/lsp-hover-design.md §A4.3 says why not `workspace/configuration`).
 fn inlay_opts_of(params: Json) -> InlayOpts = {
@@ -2228,7 +2228,8 @@ fn inlay_opts_of(params: Json) -> InlayOpts = {
     call_effects: json_flag(j, "callEffects", d.call_effects),
     param_names: json_flag(j, "parameterNames", d.param_names),
     default_args: json_flag(j, "defaultArguments", d.default_args),
-    default_values: json_flag(j, "defaultArgumentValues", d.default_values)
+    default_values: json_flag(j, "defaultArgumentValues", d.default_values),
+    propagated_errors: json_flag(j, "propagatedErrors", d.propagated_errors)
   }
 }
 
@@ -5939,6 +5940,45 @@ test "inlay hints: a left-out default is a parameter hint with no padding, and c
       ]))]))]))
     }
     assert defaults_probe(off, d) == []
+  }))
+}
+
+# ---- the error a `?` hands up (docs/lsp-hover-design.md §Q1) ----
+
+fn propagate_probe_text() -> String =
+  join([
+    "type ParseError = | Empty | Bad(at: Int)",
+    "",
+    "fn parse(s: String) -> Result[Int, ParseError] = if s == \"\" { Err(Empty) } else { Ok(1) }",
+    "",
+    "fn first(xs: List[Int]) -> Option[Int] = if len(xs) == 0 { None } else { Some(xs[0]) }",
+    "",
+    "fn twice(s: String) -> Result[Int, ParseError] = {",
+    "  let a = parse(s)?",
+    "  Ok(a + parse(s)?)",
+    "}",
+    "",
+    "fn head(xs: List[Int]) -> Option[Int] = Some(first(xs)? + 1)",
+    ""
+  ], "\n")
+
+test "inlay hints: the error a ? hands up is off unless asked for, and only on a Result" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st0, "propagate.dawn", propagate_probe_text())
+    let quiet = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, let_types: false } }
+    assert inlay_probe(quiet, d, 0, 0, 14, 0) == []
+    let st = LspState {
+      ..st0,
+      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+        ("propagatedErrors", JBool(true)),
+        ("letTypes", JBool(false))
+      ]))]))]))
+    }
+    assert inlay_probe(st, d, 0, 0, 14, 0) == [
+      "let a = parse(s)?« ⇡ ParseError»",
+      "Ok(a + parse(s)?« ⇡ ParseError»)"
+    ]
   }))
 }
 
