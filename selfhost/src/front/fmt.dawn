@@ -649,6 +649,10 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         hdrs = hdrs ++ [IfAt { depth: d, at: ifs[len(ifs) - 1].at }]
       }
     }
+    # a brace straight after a binary operator is a block operand, not the
+    # header's body: a body brace follows the condition's last operand
+    let operand = t.kind == LBRACE && have_prev_code &&
+      (is_cont_starter(prev_code.kind) || prev_code.kind == NOT)
     let tail_brace = t.kind == LBRACE && have_prev_code &&
       (prev_code.kind == RPAREN || prev_code.kind == IDENT)
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
@@ -667,13 +671,14 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       # this statement's body, and follows the statement. Anything else -- a
       # `(`/`[`, or a brace nested inside one (a closure argument, say) -- belongs
       # to the line it is written on.
-      let header = t.kind == LBRACE && len(hdrs) > 0 && hdrs[len(hdrs) - 1].depth == len(openers)
+      let header = t.kind == LBRACE && not operand && len(hdrs) > 0 &&
+        hdrs[len(hdrs) - 1].depth == len(openers)
       let header_indent = if header { hdrs[len(hdrs) - 1].at } else { -1 }
       let body = t.kind == LBRACE && len(openers) == logical_depth
       openers = openers ++ [Opener {
         at: if header {
           header_indent
-        } else if tail_brace {
+        } else if tail_brace || operand {
           line_indent
         } else if body {
           logical_indent
@@ -1607,4 +1612,13 @@ test "a header inside another header's brackets anchors its own body" {
   let m = "fn f() -> Int = {\n  if (match (\n    29) {\n    1 -> true\n    _ ->\n      false\n  }) { 3 } else { 4 }\n}\n"
   assert fmt_of(m) == m
   assert fmt_of("fn f() -> Int = {\nif (match (\n29) {\n1 -> true\n_ ->\nfalse\n}) { 3 } else { 4 }\n}\n") == m
+}
+
+## #545: after a binary operator a `{` opens a block operand, so it is not the
+## header's body brace. Taking it for one anchored the operand's statements to
+## the header and left them level with the brace that opens them.
+test "a block operand in a header's condition anchors its own body" {
+  let b = "fn f(rs: List[Int], i: Int) -> Int =\n  if i < len(rs) &&\n    {\n      let h = rs[i]\n      h < 3\n    } {\n    1\n  } else { 2 }\n"
+  assert fmt_of(b) == b
+  assert fmt_of("fn f(rs: List[Int], i: Int) -> Int =\nif i < len(rs) &&\n{\nlet h = rs[i]\nh < 3\n} {\n1\n} else { 2 }\n") == b
 }
