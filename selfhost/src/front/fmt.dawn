@@ -540,6 +540,12 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # it anchors where that `if` did, even when the `else` sits on a line the
   # header was wrapped to; an `else if` is a new `if` on its own line.
   var ifs: List[IfAt] = []
+  # The anchor of the parenthesis `)` last closed, and whether the `=>` just
+  # seen stood right after it: a lambda `(a,` / `b) => {` whose parameters
+  # wrapped. Its body follows the line the parameters began on, not the wrapped
+  # line the arrow ended up on (#545).
+  var rparen_at = 0
+  var arrow_after_rparen = false
   var line_first = toks[0]
   var prev = toks[0]
   # Last *code* token seen, which is what decides whether a new line continues
@@ -634,6 +640,13 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         header_depth = d
       }
     }
+    let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
+      prev_code.kind == FATARROW
+    if t.kind == FATARROW {
+      arrow_after_rparen = have_prev_code && prev_code.kind == RPAREN
+    } else if t.kind != COMMENT {
+      arrow_after_rparen = false
+    }
     if t.kind != COMMENT {
       prev_code = t
       have_prev_code = true
@@ -646,7 +659,15 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       let header = t.kind == LBRACE && header_indent >= 0 && len(openers) == header_depth
       let body = t.kind == LBRACE && len(openers) == logical_depth
       openers = openers ++ [Opener {
-        at: if header { header_indent } else if body { logical_indent } else { line_indent },
+        at: if header {
+          header_indent
+        } else if body {
+          logical_indent
+        } else if lambda_brace {
+          rparen_at
+        } else {
+          line_indent
+        },
         brace: t.kind == LBRACE,
         lat: logical_indent,
         ld: logical_depth,
@@ -655,6 +676,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
       if len(openers) > 0 {
         let inner = openers[len(openers) - 1]
+        if t.kind == RPAREN { rparen_at = inner.at }
         logical_indent = inner.lat
         logical_depth = inner.ld
         openers = list.take(openers, len(openers) - 1)
@@ -1532,4 +1554,17 @@ test "a line that opens with a closer does not move the statement anchor" {
   let w = "pub fn w[T,\n  !e](\n    a: Int,\n    b: List[(\n      String,\n      String)]\n  ) -> (\n    T, Int) !e = {\n  let x = 1\n  x\n}\n"
   assert fmt_of(w) == w
   assert fmt_of("pub fn w[T,\n!e](\na: Int,\nb: List[(\nString,\nString)]\n) -> (\nT, Int) !e = {\nlet x = 1\nx\n}\n") == w
+}
+
+## #545: a lambda whose parameter list wrapped has its body follow the line the
+## parameters began on. The arrow lands on the wrapped line, and the body used
+## to step in from that one, a level too deep. A brace on a line of its own is
+## the line's.
+test "a lambda body follows the line its wrapped parameters began on" {
+  let w = "fn f() -> Int = {\n  g(ps,\n    none, (acc,\n      p) => {\n    let r = h(p)\n    r\n  })\n}\n"
+  assert fmt_of(w) == "fn f() -> Int = {\n  g(ps,\n    none, (acc,\n      p) => {\n      let r = h(p)\n      r\n    })\n}\n"
+  let a = "fn f() -> Int = {\n  g(l, (\n    acc, k) => {\n      1\n    })\n}\n"
+  assert fmt_of(a) == "fn f() -> Int = {\n  g(l, (\n    acc, k) => {\n    1\n  })\n}\n"
+  let b = "fn f() -> Int = {\n  g(\n    () =>\n      {\n        1\n      })\n}\n"
+  assert fmt_of(b) == b
 }
