@@ -19,7 +19,7 @@ use std/map
 use std/str
 use std/gpu.{Gpu, F64, F32, F16, BF16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
   entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
-use dev.{Dev, Param, Tile, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
+use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
@@ -596,6 +596,15 @@ fn check_rmw_mode(name: String, mode: String) -> Unit =
     ()
   } else {
     refuse(name, "`${mode}` is not an atomic read-modify-write mode")
+  }
+
+# A float operation over an integer tile used to be recorded as it came
+# (`addf` over `tile<64xi32>`), a program no assembler accepts (issue #591).
+fn check_float_dtype(name: String, op: String, dtype: String) -> Unit =
+  if is_float_dtype(dtype) {
+    ()
+  } else {
+    refuse(name, "`${op}` is a float operation and `${dtype}` is not a float tile format; an integer tile takes the integer operations (`addi`, `add_i`, ...)")
   }
 
 fn check_int_dtype(name: String, dtype: String) -> Unit =
@@ -2548,6 +2557,7 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         held = g.held
         spreads = g.spreads
         check_operand(name, frames, ops, held, op, "operand", a, dtype, shape)
+        check_float_dtype(name, op, dtype)
         held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
@@ -2566,6 +2576,7 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         let b = ws[1]
         check_operand(name, frames, ops, held, op, "lhs", a, dtype, shape)
         check_operand(name, frames, ops, held, op, "rhs", b, dtype, shape)
+        check_float_dtype(name, op, dtype)
         held = hold(held, next, dtype, shape)
         let d = next
         next = mint(name, next, 1)
@@ -6410,4 +6421,82 @@ test "0.9.0: extent_of and blocks_of are host constants for a static dimension a
     let _b = blocks_of(k, 2)
     store_cell(o, zeros(o))
   })), "has 2 dimension(s), and the call names dimension 2")
+}
+
+fn count_ops(ops: List[TileOp], want: fn(TileOp) -> Bool) -> Int = len(ops_where(ops, want))
+
+test "L3: + - * / and unary - over an integer tile record the integer operations, never a float one (issue 591)" {
+  let (p, _e) = trace2("ints", In(I32, cells([64], [64])), Out(I32, cells([64], [64])), (x, o) => {
+    let t = load_cell(x)
+    store_cell(o, -(t + t - t) * t / t)
+  })
+  let ints = list.map(ops_where(p.ops, op => match op {
+    BinaryI(_d, _o, "i32", _s, _a, _b) -> true
+    _ -> false
+  }), op => match op {
+    BinaryI(_d, name, _t, _s, _a, _b) -> name
+    _ -> ""
+  })
+  assert ints == ["addi", "subi", "muli", "divi"]
+  assert count_ops(p.ops, op => match op {
+    UnaryI(_d, "negi", "i32", _s, _a) -> true
+    _ -> false
+  }) == 1
+  assert count_ops(p.ops, op => match op {
+    BinaryF(_d, _o, _t, _s, _a, _b) -> true
+    UnaryF(_d, _o, _t, _s, _a) -> true
+    _ -> false
+  }) == 0
+}
+
+test "L3: the same operators over a float tile record the float operations, and a literal takes the other operand's format" {
+  let (p, _e) = trace2("floats", In(F64, cells([64], [64])), Out(F64, cells([64], [64])), (x, o) => {
+    let t = load_cell(x)
+    store_cell(o, -(t + t - t) * t / 2.0)
+  })
+  let named = list.map(ops_where(p.ops, op => match op {
+    BinaryF(_d, _o, "f64", _s, _a, _b) -> true
+    UnaryF(_d, _o, "f64", _s, _a) -> true
+    _ -> false
+  }), op => match op {
+    BinaryF(_d, name, _t, _s, _a, _b) -> name
+    UnaryF(_d, name, _t, _s, _a) -> name
+    _ -> ""
+  })
+  # source order: t + t, - t, negation of the pair, * t, / the literal
+  assert named == ["addf", "subf", "negf", "mulf", "divf"]
+}
+
+test "L3 negative control: a float operation over an integer tile is refused when the kernel records (issue 591)" {
+  let msg = marked(() => trace2("bad", In(I32, cells([64], [64])), Out(I32, cells([64], [64])), (x, o) => {
+    let t = load_cell(x)
+    store_cell(o, add(t, t))
+  }))
+  assert str.starts_with(msg, "tileir: kernel `bad`: `addf` is a float operation")
+  assert str.contains(msg, "`addf` is a float operation and `i32` is not a float tile format")
+  let neg_msg = marked(() => trace2("bad", In(I32, cells([64], [64])), Out(I32, cells([64], [64])), (x, o) => {
+    store_cell(o, neg(load_cell(x)))
+  }))
+  assert str.contains(neg_msg, "`negf` is a float operation and `i32` is not a float tile format")
+  # and the integer operation over a float tile was refused already
+  let up = marked(() => trace2("bad", In(F64, cells([64], [64])), Out(F64, cells([64], [64])), (x, o) => {
+    let t = load_cell(x)
+    store_cell(o, addi(t, t))
+  }))
+  assert str.contains(up, "`f64` is not an integer tile format")
+}
+
+test "L3: Idx operators record the index operations, and an integer literal on the Idx side is idx_const" {
+  let p = trace_kernel("idx", [], () => {
+    let b = block_id(0)
+    let n: Idx = 4
+    let _r = (b * n + 1 - n) / n % n
+    ()
+  })
+  assert count_ops(p.ops, op => match op {
+    IdxMul(_d, _a, _b) -> true
+    IdxAdd(_d, _a, _b) -> true
+    IdxConst(_d, _v) -> true
+    _ -> false
+  }) >= 4
 }

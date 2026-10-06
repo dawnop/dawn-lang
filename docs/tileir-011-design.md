@@ -69,17 +69,19 @@ for j in d_range(0, N / BK) {
 
 | impl | 体 | 效果 |
 |---|---|---|
-| `impl[D] Add[Tile[D]]`、`Sub`、`Mul`、`Div` | `add`、`sub`、`mul`、`div`（默认 rounding 与 ftz） | `!Dev` |
-| `impl[D] Neg[Tile[D]]` | `neg` | `!Dev` |
+| `impl[D] Add[Tile[D]]`、`Sub`、`Mul`、`Div` | 浮点格式：`add`、`sub`、`mul`、`div`（默认 rounding 与 ftz）；整数格式：`addi`、`subi`、`muli`、`divi` | `!Dev` |
+| `impl[D] Neg[Tile[D]]` | 浮点 `neg`，整数 `negi` | `!Dev` |
 | `impl[D] FromFloat[Tile[D]]` | `lit(x)` | `!Dev` |
 | `impl Add[Idx]`、`Sub`、`Mul`、`Div`、`Rem` | `idx_add`、`idx_sub`、`idx_mul`、`idx_div`、`idx_rem` | `!Dev` |
-| `impl FromInt[Idx]` | `idx_const(n)` | `!Dev` |
+| `impl FromInt[Idx]` | `idx_const(n)`（`FromInt` 不能按名调用，故 `step: By(1)` 的 `1` 经它定型） | `!Dev` |
 
 要点与取舍：
 
-- **Tile 的运算符 impl 是浮点的。** 今天 `add[D]` 对任何 `D` 都发 `addf`，整数 tile 另有 `add_i`/`sub_i`/`mul_i`/`div_i`/`neg_i`（只收 `Tile[I32]`）。
-  `impl[D] Add[Tile[D]]` 与 `impl Add[Tile[I32]]` 会重叠，条件 impl 不可写（arith D5），所以 `Tile[I32]` 的运算符**不给**，`kernels.dawn` 里的 `*_i` 调用（64 处）保持函数形。
-  这是一个有牙的限制，不是疏漏；风险见 §8.1。
+- **Tile 的运算符 impl 按格式分派（#591 的修法）。** 实测（L3 第一步）：`add[D]` 对 `Tile[I32]` 记成 `addf`（`t_binaryf` 臂只核形状、op 名与两侧格式相等），
+  没有任何拒绝，是正确性缺陷（公开 issue #591）。修法两半：记录 handler 的 `t_binaryf`/`t_unaryf` 臂拒绝非浮点格式（报错指向整数算子），
+  运算符 impl 读操作数的格式：浮点格式调 `add`/`sub`/`mul`/`div`/`neg`，整数格式调 `addi`/`subi`/`muli`、`divi`、`negi`。
+  所以 `impl[D] Add[Tile[D]]` 同时覆盖 `Tile[I32]`，没有与 `impl Add[Tile[I32]]` 重叠的问题（只有一个 impl），原先写的「`Tile[I32]` 的运算符不给」作废。
+  `*_i` 函数形（64 处）保持不动，不强迁。设备上没有无符号整数 tile 格式，所以只有有符号的 `divi`/`remi`；tile 没有 `Rem`。
 - 不给 `FromInt[Tile[D]]`：`t * 2` 报错，写 `t * 2.0`（literal D12 原文）。`FromFloat[Tile[D]]` 让字面量 `2.0` 在 `Tile[D]` 一侧自动成 `lit(2.0)`。
 - 具名常量不是字面量（literal D3）。`t * ATT_INV_SQRT_D` 仍是类型错误，写 `t * lit(ATT_INV_SQRT_D)`。`kernels.dawn` 里这种写法约 3 处具名加 2 处宿主变量（`lit(step)` 一类），`lit` 因此保留（ruling-arith-literal-final 第 3 条）。
 - 比较、`max`/`min`、`exp` 等不是运算符，保持函数。
@@ -405,7 +407,7 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 
 ## 8. 开放风险
 
-1. **`impl[D] Add[Tile[D]]` 对整数 tile 的行为。** 静态阅读：`add[D]` 经 `binary` 调 `t_binaryf`，记录 handler 的 `t_binaryf` 臂（`prog.dawn:2557`）只检查形状、操作名与操作数格式一致，我没有读到「`dtype` 必须是浮点」的检查，所以 `add` 在 `Tile[I32]` 上大概率发出 `addf` 而不被拒。这只是读码结论，**未实测**。裁决（§9 Q6）：L3 的**第一步**是实测（记录一个 `add(Tile[I32], Tile[I32])` 看是拒绝、还是产出非法 IR）；若是未经检查的 `addf`，开公开 issue（英文，file:line，验收判据），并让运算符 impl 经一个检查 `D` 为浮点格式的 helper 实现，而不是直接调 `add`。
+1. **`impl[D] Add[Tile[D]]` 对整数 tile 的行为：已实测、已修（#591）。** `add` 在 `Tile[I32]` 上记成 `addf`，不被拒；L3 刀让 handler 拒绝浮点算子配整数格式，运算符 impl 按格式选浮点或整数算子，并有 `Tile[I32]` 的 `+ - * / -` 记 `addi/subi/muli/divi/negi` 的测试与一个负控（`add` 配 i32 被拒，`addi` 配 f64 被拒）。
 2. **`dawn doc` 的锚点。** 同模块里 `pub opaque type BF16` 与 `pub const BF16` 并存时，`dawn doc` 生成的锚点是否冲突（两者都叫 `BF16`）。U1 刀先用语料钉住；若冲突，给常量与类型分前缀锚点。
 3. **LSP 悬停。** 一个格式名在值位置（`p.to(BF16)`）悬停该显示 `const BF16: Dtype[BF16]` 还是类型；跳转定义落到哪个。`lspeval` 对常量折叠表的读法是 L2 的缺口（literal 裁决点名）。需要 LSP 会话对拍（`selfhost-lsp-diff.sh`）加一个用例。
 4. **`NAN` 与 `INFINITY` 的编译期求值。** `0.0 / 0.0` 与 `1.0 / 0.0` 在 comptime 折叠与两个后端（JVM、C）是否一致，NaN 的位型是否被保持。`INFINITY` 的位型可测（`0x7FF0000000000000`）；`NAN` 的 payload 无消费者，只要求 `x != x`。F0 刀加内联测试，两后端各跑一次。
@@ -425,13 +427,13 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 - **Q3** U1 留在栈内，不单独先合（§7）。理由：不多付一次台账重录；同名类型加常量的 `dawn doc` 锚点与 LSP 悬停风险在 U1 刀内用测试钉住。
 - **Q4** `FloatDtype` 与 `HasDtype` 分开保留（§2.5）。理由：mma 组合表只收七个算术浮点，并入会把整数与只存储格式放进 `full` 的约束，类型错误退成运行期拒绝。
 - **Q5** 不做 `Tile[F64]` 提示，也不扩展 `std/moved.txt` 支持类型名（§8.5）。理由：仓内没有别的消费者，破坏性变更直接删旧名，编译错误已足够；为一次性迁移扩展机制是兼容层。（原裁决「走 `std/moved.txt` 并最小扩展」于 10-06 由维护者推翻。）
-- **Q6** `Tile[I32]` 的 `add` 先实测，作为 L3 的第一步（§8.1）。理由：静态读码看不到浮点检查；若确是未经检查的 `addf`，开公开 issue 并让运算符 impl 经检查过的 helper。整数 tile 的运算符本版仍不给（§10 第 1 条）。
+- **Q6** `Tile[I32]` 的 `add` 先实测，作为 L3 的第一步（§8.1）。理由：静态读码看不到浮点检查；若确是未经检查的 `addf`，开公开 issue 并让运算符 impl 经检查过的 helper。结果：helper 按格式分派，整数 tile 也有运算符（§2.2；§10 第 1 条已作废）。
 - **Q7** 不引入 re-export（§8.7）。理由：核实语言没有 re-export；每个文件多两三行 import 可以接受。
 - **Q8** dawnop-site 升钉前 grep `narrow.fp16`/`FP16`，写进它的升钉清单（§8.6）。理由：本仓不替下游迁移，但清单项不能漏。
 
 ## 10. 不做的（理由）
 
-1. **给 `Tile[I32]` 运算符**：与浮点 blanket impl 重叠，条件 impl 不可写（arith D5）；整数 tile 的 `*_i` 调用保持函数形，是 64 处不迁的代价，换来 impl 不歧义。
+1. **（已作废）给 `Tile[I32]` 单写一个运算符 impl**：条件 impl 不可写（arith D5），但不需要：一个 `impl[D]` 在记录时按格式分派到整数或浮点算子（§2.2）。
 2. **`FromInt[Tile[D]]`**：`t * 2` 对浮点 tile 含义不明（整数字面量转浮点 tile），literal D12 已裁暂不给；写 `t * 2.0`。
 3. **具名常量参与运算符**：`t * ATT_INV_SQRT_D` 仍要 `lit(..)`。literal D3 否决无类型具名常量与常量算术，本版不为 tileir 开例外。
 4. **`pub alias F64 = Float`（让 `Tile[F64]` 零迁移）**：一个类型两个名字，悬停与诊断仍印 `Float`，读者要多记一层映射；675 处机械替换不值得换这个（调研 §5）。
