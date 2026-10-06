@@ -2557,6 +2557,100 @@ impl[D] StagedVar[Tile[D]] {
   fn var_set(c: Carry[D], v: Tile[D]) -> Unit !Dev = set(c, v)
 }
 
+# ---- operators (knife L3) ----
+#
+# `+ - * /` and unary `-` on tiles, and on `Idx`. A tile's format is a fact
+# of the recording, not of the type (`Tile[D]` is a phantom), so the impl
+# for any `D` reads the format off the operand and records the float
+# operation for a float format and the integer one for an integer format.
+# Before knife L3 `add` on a `Tile[I32]` recorded an `addf` over an i32
+# tile and nothing refused it (issue #591); the handler now refuses a float
+# operation on an integer tile and an integer operation on a float one, and
+# the operators pick the right family, so `a + b` is `addi` over i32 tiles.
+# Each body is the function call it replaces, so the recorded calls, and
+# with them the operation sequence, are the ones the function spelling made.
+# There is no `Rem` for tiles (a float remainder is `remf`, not an operator
+# the dialect's integer `remi` should share) and no `FromInt[Tile[D]]`:
+# write `t * 2.0` (literal-system-design D12).
+
+fn tile_add[D](a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = add(a, b)
+fn tile_sub[D](a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = sub(a, b)
+fn tile_mul[D](a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = mul(a, b)
+fn tile_div[D](a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = div(a, b)
+fn tile_neg[D](a: Tile[D]) -> Tile[D] !Dev = neg(a)
+
+fn is_float_tile[D](a: Tile[D]) -> Bool !Dev = {
+  let x: Int = a
+  is_float_dtype(dtype_of(x))
+}
+
+fn neg_int_at[D](a: Tile[D]) -> Tile[D] !Dev = {
+  let x: Int = a
+  let (dt, s) = row_of(x)
+  let h: Tile[D] = t_unaryi("negi", dt, s, x)
+  h
+}
+
+impl[D] Add[Tile[D]] {
+  effect Add = !Dev
+  fn add(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = if is_float_tile(a) { tile_add(a, b) } else { addi(a, b) }
+}
+
+impl[D] Sub[Tile[D]] {
+  effect Sub = !Dev
+  fn sub(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = if is_float_tile(a) { tile_sub(a, b) } else { subi(a, b) }
+}
+
+impl[D] Mul[Tile[D]] {
+  effect Mul = !Dev
+  fn mul(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = if is_float_tile(a) { tile_mul(a, b) } else { muli(a, b) }
+}
+
+impl[D] Div[Tile[D]] {
+  effect Div = !Dev
+  fn div(a: Tile[D], b: Tile[D]) -> Tile[D] !Dev = if is_float_tile(a) { tile_div(a, b) } else { called("div", () => binary_int_at("divi", a, b)) }
+}
+
+impl[D] Neg[Tile[D]] {
+  effect Neg = !Dev
+  fn neg(a: Tile[D]) -> Tile[D] !Dev = if is_float_tile(a) { tile_neg(a) } else { called("neg", () => neg_int_at(a)) }
+}
+
+impl[D] FromFloat[Tile[D]] {
+  effect FromFloat = !Dev
+  fn from_float(x: Float) -> Tile[D] !Dev = lit(x)
+}
+
+impl Add[Idx] {
+  effect Add = !Dev
+  fn add(a: Idx, b: Idx) -> Idx !Dev = idx_add(a, b)
+}
+
+impl Sub[Idx] {
+  effect Sub = !Dev
+  fn sub(a: Idx, b: Idx) -> Idx !Dev = idx_sub(a, b)
+}
+
+impl Mul[Idx] {
+  effect Mul = !Dev
+  fn mul(a: Idx, b: Idx) -> Idx !Dev = idx_mul(a, b)
+}
+
+impl Div[Idx] {
+  effect Div = !Dev
+  fn div(a: Idx, b: Idx) -> Idx !Dev = idx_div(a, b)
+}
+
+impl Rem[Idx] {
+  effect Rem = !Dev
+  fn rem(a: Idx, b: Idx) -> Idx !Dev = idx_rem(a, b)
+}
+
+impl FromInt[Idx] {
+  effect FromInt = !Dev
+  fn from_int(n: Int) -> Idx !Dev = idx_const(n)
+}
+
 ## The loop whose trip count the DATA decides: `body` runs on the host and
 ## answers a rank-0 mask, true when the loop is to stop here; the carries it
 ## sets are carried (`Carry`). When the mask is true the loop stops with the
