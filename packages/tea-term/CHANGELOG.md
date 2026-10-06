@@ -1,5 +1,13 @@
 # tea_term changelog
 
+## 0.4.1 (2026-10-07)
+
+`present` erases the row just below the old frame when the new frame is
+shorter. That row is where the driver parked the prompt, and the next `park`
+writes the new prompt higher up, so the old one stayed on screen and the
+terminal showed two prompt lines after a shrink. A patch: the bytes change
+only for a shrinking frame, and only by one more erased row.
+
 ## 0.4.0 (2026-10-05)
 
 `runtime.run` times subscriptions on the monotonic clock (std/io's `Clock`).

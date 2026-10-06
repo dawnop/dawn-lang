@@ -14,7 +14,10 @@
 #
 # Rows are addressed absolutely (`ESC[r;1H`), 1-based, and each rewrite erases
 # the row first (`ESC[2K`) so a shorter new row leaves no tail of the old one.
-# When the new frame has fewer rows, the leftover rows are erased in place.
+# When the new frame has fewer rows, the leftover rows are erased in place,
+# and so is the row just below the old frame: that is where the driver parked
+# the prompt (`park`), and the next `park` writes the new prompt higher up, so
+# nothing else would ever clear the old one.
 
 use std/str
 
@@ -24,7 +27,12 @@ pub fn frame_lines(frame: String) -> List[String] = str.split(frame, "\n")
 ## The bytes that turn a screen showing `prev` into one showing `next`.
 ## Identical frames emit nothing at all.
 pub fn present(prev: List[String], next: List[String]) -> String =
-  present_go(prev, next, 0, "")
+  present_go(prev, next, 0, "") ++ stale_prompt(prev, next)
+
+# The old prompt sits on row `len(prev) + 1`; only a shrink leaves it exposed,
+# since a frame that grows or keeps its height is painted over it or parks on it.
+fn stale_prompt(prev: List[String], next: List[String]) -> String =
+  if len(next) < len(prev) { goto(len(prev) + 1) ++ erase() } else { "" }
 
 ## Park the cursor on the first row below an `nrows`-tall frame and clear
 ## that row; a driver prints its prompt there, over the previous prompt.
@@ -71,7 +79,29 @@ test "growth writes only the new rows" {
 test "shrink erases the leftover rows in place" {
   let a = ["keep", "gone", "gone too"]
   let b = ["keep"]
+  assert present(a, b)
+    == "\u{001B}[2;1H\u{001B}[2K" ++ "\u{001B}[3;1H\u{001B}[2K" ++ "\u{001B}[4;1H\u{001B}[2K"
+}
+
+test "shrink by one erases the old prompt row too" {
+  let a = ["head", "status"]
+  let b = ["head"]
   assert present(a, b) == "\u{001B}[2;1H\u{001B}[2K" ++ "\u{001B}[3;1H\u{001B}[2K"
+}
+
+test "shrink by several rows erases through the old prompt row" {
+  let a = ["r1", "r2", "r3", "r4"]
+  let b = ["r1"]
+  assert present(a, b)
+    == "\u{001B}[2;1H\u{001B}[2K" ++ "\u{001B}[3;1H\u{001B}[2K" ++ "\u{001B}[4;1H\u{001B}[2K"
+    ++ "\u{001B}[5;1H\u{001B}[2K"
+}
+
+test "a shrink that also rewrites rows still erases the old prompt row" {
+  let a = ["x", "old", "tail"]
+  let b = ["x", "new"]
+  assert present(a, b)
+    == "\u{001B}[2;1H\u{001B}[2K" ++ "new" ++ "\u{001B}[3;1H\u{001B}[2K" ++ "\u{001B}[4;1H\u{001B}[2K"
 }
 
 test "first paint over a cleared screen writes every row" {

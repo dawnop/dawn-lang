@@ -69,7 +69,8 @@ newline, `Button` shows `[label]`, `Styled` wraps its child in ANSI SGR codes.
 
 `present(prev, next)` compares two rendered frames row by row and answers the
 cursor-addressed bytes that rewrite only the rows that changed, or `""` for an
-identical frame. `frame_lines` cuts a frame into rows and `park(nrows)` puts
+identical frame. When the new frame is shorter it also erases the row below
+the old frame, where the previous prompt was parked. `frame_lines` cuts a frame into rows and `park(nrows)` puts
 the prompt below it. The caller keeps the rows it last painted.
 
 ## Routing
