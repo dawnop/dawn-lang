@@ -1,0 +1,62 @@
+## The two `Float` values that no literal spells: positive infinity and NaN.
+#
+# Why a module and not a literal or a builtin: `Float` is the compiler's own
+# type, and its special values were only ever reachable as `1.0 / 0.0` and
+# `0.0 / 0.0`, which every caller that wanted one wrote out for itself
+# (std/fmt does, the tile kernels' `neg_inf()` is the same expression). A named
+# constant is the one place that fact is written down, in the way Rust has
+# `f64::INFINITY` and Zig has `std.math.inf`. `MAX`, `EPSILON` and `is_nan`
+# belong here too when something needs them.
+#
+# Negative infinity is `-INFINITY`; there is no `NEG_INFINITY`, since unary
+# minus on a `Float` is the native negation and a second name would only be
+# one more thing to look up.
+#
+# NaN is asked about with `x != x` and never compared: the IEEE rule that a
+# NaN equals nothing, itself included, is the same on both backends. Nothing
+# here promises a NaN payload; only that the value is not equal to itself.
+
+## Positive infinity. Greater than every finite `Float`; `-INFINITY` is less.
+pub const INFINITY: Float = 1.0 / 0.0
+
+## Not a number. Unequal to every `Float`, itself included.
+pub const NAN: Float = 0.0 / 0.0
+
+# A negative operand is bound before the assert: `dawn fmt` rewrites
+# `assert -x < y` to `assert - x < y` (#588), which reads as a subtraction.
+
+test "infinity bounds every finite float from the right side" {
+  let ninf = -INFINITY
+  let low = -1.0e308
+  assert ninf < low
+  assert low < INFINITY
+  assert ninf < 0.0
+  assert 0.0 < INFINITY
+  assert ninf < INFINITY
+  assert INFINITY == INFINITY
+  assert ninf == -INFINITY
+  assert ninf != INFINITY
+  assert INFINITY + 1.0 == INFINITY
+  assert ninf * 2.0 == ninf
+  assert 1.0 / INFINITY == 0.0
+}
+
+test "nan is unequal to everything and ordered against nothing" {
+  assert NAN != NAN
+  assert NAN != 0.0
+  assert NAN != INFINITY
+  assert not (NAN < 0.0)
+  assert not (NAN > 0.0)
+  assert not (NAN <= NAN)
+  assert not (NAN >= NAN)
+  assert INFINITY - INFINITY != INFINITY - INFINITY
+}
+
+test "the constants are the values the expressions spell" {
+  let z = 0.0
+  let ninf = -INFINITY
+  assert INFINITY == 1.0 / 0.0
+  assert ninf == -1.0 / z
+  assert INFINITY == 1.0 / z
+  assert NAN != 0.0 / z
+}
