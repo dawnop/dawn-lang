@@ -640,6 +640,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         header_depth = d
       }
     }
+    let tail_brace = t.kind == LBRACE && have_prev_code &&
+      (prev_code.kind == RPAREN || prev_code.kind == IDENT)
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
       prev_code.kind == FATARROW
     if t.kind == FATARROW {
@@ -661,6 +663,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       openers = openers ++ [Opener {
         at: if header {
           header_indent
+        } else if tail_brace {
+          line_indent
         } else if body {
           logical_indent
         } else if lambda_brace {
@@ -1567,4 +1571,15 @@ test "a lambda body follows the line its wrapped parameters began on" {
   assert fmt_of(a) == "fn f() -> Int = {\n  g(l, (\n    acc, k) => {\n    1\n  })\n}\n"
   let b = "fn f() -> Int = {\n  g(\n    () =>\n      {\n        1\n      })\n}\n"
   assert fmt_of(b) == b
+}
+
+## #545: a tail block starts a lambda at its brace, so its body follows the line
+## the brace is on. With the call's arguments wrapped, that line is not the
+## statement's, and the body used to step in from the statement.
+test "a tail block's body follows the line its brace is on" {
+  let w = "fn f() -> Int = {\n  let e = map(\n    xs) { x =>\n      let y = x\n      y\n    }\n  g(a,\n    b) {\n      s()\n    }\n  e\n}\n"
+  assert fmt_of(w) == w
+  assert fmt_of("fn f() -> Int = {\n  let e = map(\n    xs) { x =>\n    let y = x\n    y\n  }\n  g(a,\n    b) {\n    s()\n  }\n  e\n}\n") == w
+  let o = "fn f() -> Int = {\n  xs.each { x =>\n    g(x)\n  }\n}\n"
+  assert fmt_of(o) == o
 }
