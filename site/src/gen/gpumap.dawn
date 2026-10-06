@@ -64,7 +64,8 @@ pub type Recorded = {
   tail: (Int, Int),
 }
 
-fn parse_range(s: String) -> Option[(Int, Int)] =
+## `a-b` as a half-open run, or None when it is not two numbers in order.
+pub fn parse_range(s: String) -> Option[(Int, Int)] =
   match str.split_once(s, "-") {
     Some((a, b)) ->
       match (parse_int(a), parse_int(b)) {
@@ -84,8 +85,8 @@ fn parse_pos(s: String) -> Option[Pos] =
     None -> None
   }
 
-# `l:c-l:c`
-fn parse_span(s: String) -> Option[(Pos, Pos)] =
+## `l:c-l:c`, a span in the text, or None.
+pub fn parse_span(s: String) -> Option[(Pos, Pos)] =
   match str.split_once(s, "-") {
     Some((a, b)) ->
       match (parse_pos(a), parse_pos(b)) {
@@ -95,7 +96,8 @@ fn parse_span(s: String) -> Option[(Pos, Pos)] =
     None -> None
   }
 
-fn parse_ranges(toks: List[String]) -> Option[List[(Int, Int)]] = {
+## Every token as a run, or None if any is not one.
+pub fn parse_ranges(toks: List[String]) -> Option[List[(Int, Int)]] = {
   let rs = map(toks, parse_range)
   if list.all(rs, r => r != None) {
     Some(map(rs, r => unwrap_or(r, (0, 0))))
@@ -104,7 +106,8 @@ fn parse_ranges(toks: List[String]) -> Option[List[(Int, Int)]] = {
   }
 }
 
-fn words(s: String) -> List[String] = filter(str.split(s, " "), w => w != "")
+## The non-empty words of a line.
+pub fn words(s: String) -> List[String] = filter(str.split(s, " "), w => w != "")
 
 ## Whether `a` is at or before `b` in the text.
 pub fn before_or_at(a: Pos, b: Pos) -> Bool = a.line < b.line || (a.line == b.line && a.col <= b.col)
@@ -224,12 +227,12 @@ fn text_at(src: List[String], first: Int, a: Pos, b: Pos) -> String =
 ## fit.
 pub fn check(rec: Recorded, first: Int, src: List[String], ir: List[String]) -> Result[KernelMap, String] = {
   let last = first + len(src) - 1
-  let fault = list.find(rec.calls, c => call_fault(rec, first, last, src, c) != "")
+  let fault = list.find(rec.calls, c => call_fault(rec.calls, first, last, src, c) != "")
   if rec.first != first || rec.last != last {
     Err("the recording is of lines ${rec.first}-${rec.last}, the function is ${first}-${last}: record again")
   } else {
     match fault {
-      Some(c) -> Err(call_fault(rec, first, last, src, c))
+      Some(c) -> Err(call_fault(rec.calls, first, last, src, c))
       None -> {
         let n_ir = len(ir)
         let none: List[(Int, Int)] = []
@@ -265,15 +268,16 @@ pub fn check(rec: Recorded, first: Int, src: List[String], ir: List[String]) -> 
   }
 }
 
-# Why call `c` does not fit the text, or "".
-fn call_fault(rec: Recorded, first: Int, last: Int, src: List[String], c: MCall) -> String = {
+## Why call `c` (of `calls`) does not fit the text, or "". Shared with the
+## explorer page (gen/explorer.dawn), whose calls are checked the same way.
+pub fn call_fault(calls: List[MCall], first: Int, last: Int, src: List[String], c: MCall) -> String = {
   let inside_fn = c.from.line >= first && c.to.line <= last
   let named = text_at(src, first, c.name_from, c.name_to) == c.name
   let name_inside = before_or_at(c.from, c.name_from) && before_or_at(c.name_to, c.to)
   let parent_ok = c.parent >= 0 - 1 && c.parent < c.id
   let in_parent =
     if c.parent >= 0 && c.parent < c.id {
-      let p = rec.calls[c.parent]
+      let p = calls[c.parent]
       before_or_at(p.from, c.from) && before_or_at(c.to, p.to)
     } else {
       true

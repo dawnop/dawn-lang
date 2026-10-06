@@ -1,0 +1,677 @@
+# The explorer page, explorer.html: a Dawn function beside the Tile IR, the C
+# and the JVM bytecode it compiles to, a click on a call lighting the lines it
+# wrote in each, and a click on a line finding its call. The page is the
+# Compiler Explorer's shape at the finer unit this repository has: not a line
+# of source but a call, with its nesting.
+#
+# Where every line of it comes from, and why this module trusts none of it.
+# site/explorer/record.py asks each compiler for its own account (the Tile IR
+# recording site/gpu-map/flash_attn.map, `__emitc --map`, `__emit --map` and
+# javap), restricts it to the function shown and writes one format, `.xmap`
+# (docs/explorer-page-design.md section 4), into site/build/explorer/, which
+# is generated and not tracked: the C and the bytecode are the compiler's
+# function, so a checked-in copy would go stale at the next change to it.
+# This module reads that format and checks it again before drawing a line:
+# every call's name is at its name span, every span is inside the function and
+# inside its parent's, every pane has exactly one account of every call, every
+# line it names exists, a Tile IR line has at most one owner. A gap is a
+# `panic`, so a broken mapping stops the build instead of drawing a page that
+# says less than it seems to.
+#
+# What it does not do: open a window a script has to fill. Every pane's text
+# and every line's owners are in the markup, so with no script the page is the
+# source and the three listings one under another, complete and unclickable;
+# site/assets/explorer.js only makes clicking, tabs and the keyboard work.
+# The owners are attributes (`data-o`), not a JSON blob the script fetches:
+# the page is one file and what the script knows is what it can read off it.
+#
+# What a call owns. A pane's line is owned by every call whose run of lines
+# holds it. The Tile IR pane gives a call the lines it wrote itself, so a
+# line has one owner; in C and the bytecode a nested call's code sits inside
+# its caller's, and a line holding both has two owners, the innermost first
+# (what a click on that line picks).
+
+use std/str
+use std/list
+use std/io
+use std/bytes
+use std/io.{Fs, with_fs_real}
+use html/page.{Assets, Lang, En, Zh, PageHead, shell_ext, section_crumb, here, chip, repo_url, plain_assets}
+use hl/dawn.{highlight_dawn}
+use html/escape.{escape_html}
+use gen/common.{must_read, write_page, map_doc_url, doc_files}
+use gen/fingerprint.{fingerprint}
+use gen/copy.{Copy, load_copy, line, plain, body}
+use gen/gpumap.{MCall, Pos, parse_range, parse_ranges, parse_span, words, call_fault, cuts, covering, named_at}
+use gen/gpu.{ir_html}
+
+# ---- the recording ----
+
+## One pane's account of one call: the runs of lines in the pane's text it
+## wrote itself (1-based, half-open; none for a call that wrote no line of
+## its own, which only the Tile IR pane allows), the columns it holds on a
+## line (`(line, from, to)`, 0-based, half-open), and the lines of the
+## instruction that implements it.
+pub type Out = { call: Int, lines: List[(Int, Int)], marks: List[(Int, Int, Int)], keys: List[Int] }
+
+## A pane as the recording names it: its kind (`tile`, `c` or `jvm`), the file
+## its text is in, how many lines the program's whole output had (what the
+## pane shows is the shown function's share of it) and its accounts.
+pub type PaneRec = { kind: String, file: String, total: Int, outs: List[Out] }
+
+## A `.xmap` read, before it is held to its source and its panes' texts.
+pub type Recording = { name: String, path: String, first: Int, last: Int, calls: List[MCall], panes: List[PaneRec] }
+
+## A pane with its text read in.
+pub type Pane = { kind: String, total: Int, text: List[String], outs: List[Out] }
+
+## A program ready to draw: its source lines (`first` is the first one's line
+## number in its file), its calls and its panes, in the order of the tabs.
+pub type Program = { name: String, path: String, first: Int, src: List[String], calls: List[MCall], panes: List[Pane] }
+
+fn kinds() -> List[String] = ["tile", "c", "jvm"]
+
+fn kind_label(kind: String) -> String =
+  match kind {
+    "tile" -> "Tile IR"
+    "c" -> "C"
+    _ -> "JVM"
+  }
+
+fn parse_mark(tok: String) -> Option[(Int, Int, Int)] =
+  match str.split_once(str.drop(tok, 1), ":") {
+    Some((l, r)) ->
+      match (parse_int(l), parse_range(r)) {
+        (Some(n), Some((a, b))) -> if n > 0 && a < b { Some((n, a, b)) } else { None }
+        _ -> None
+      }
+    None -> None
+  }
+
+# `out <kind> <id> <runs or -> [@line:a-b]... [!line]...`
+fn parse_out(ws: List[String]) -> Option[Out] = {
+  let rest = list.drop(ws, 3)
+  let runs = filter(rest, t => not str.starts_with(t, "@") && not str.starts_with(t, "!") && t != "-")
+  let marks = map(filter(rest, t => str.starts_with(t, "@")), parse_mark)
+  let keys = map(filter(rest, t => str.starts_with(t, "!")), t => parse_int(str.drop(t, 1)))
+  let ranges = parse_ranges(runs)
+  match (parse_int(ws[2]), ranges) {
+    (Some(id), Some(rs)) ->
+      if list.all(marks, m => m != None) && list.all(keys, k => k != None) && (len(rs) > 0 || rest == ["-"]) {
+        Some(Out {
+          call: id,
+          lines: rs,
+          marks: map(marks, m => unwrap_or(m, (0, 0, 0))),
+          keys: map(keys, k => unwrap_or(k, 0)),
+        })
+      } else {
+        None
+      }
+    _ -> None
+  }
+}
+
+## A program's `.xmap` as a `Recording`. Every row has to be one of the five
+## shapes record.py writes, in its order, a call its row number in turn, an
+## `out` after the `pane` it is of; a row of any other shape is an error
+## rather than a row skipped.
+pub fn parse_xmap(text: String) -> Result[Recording, String] = {
+  var rec = Recording { name: "", path: "", first: 0, last: 0, calls: [], panes: [] }
+  var bad = ""
+  var n = 0
+  for raw in str.split(text, "\n") {
+    n = n + 1
+    let ws = words(raw)
+    let at = n
+    let fail = (why: String) => "line ${at}: ${why}"
+    if bad == "" && len(ws) > 0 {
+      if n == 1 {
+        if ws != ["xmap", "1"] {
+          bad = fail("the first line is not `xmap 1`")
+        }
+      } else if ws[0] == "program" && len(ws) == 2 {
+        rec = Recording { ..rec, name: ws[1] }
+      } else if ws[0] == "source" && len(ws) == 4 {
+        match (parse_int(ws[2]), parse_int(ws[3])) {
+          (Some(a), Some(b)) -> {
+            rec = Recording { ..rec, path: ws[1], first: a, last: b }
+          }
+          _ -> {
+            bad = fail("`${raw}` is not a source")
+          }
+        }
+      } else if ws[0] == "call" && len(ws) == 6 {
+        match (parse_int(ws[1]), parse_int(ws[2]), parse_span(ws[4]), parse_span(ws[5])) {
+          (Some(id), Some(parent), Some((from, to)), Some((nf, nt))) -> {
+            if id != len(rec.calls) {
+              bad = fail("call ${id} is not row ${len(rec.calls)}")
+            } else {
+              let c = MCall { id: id, parent: parent, name: ws[3], from: from, to: to, name_from: nf, name_to: nt, lines: [] }
+              rec = Recording { ..rec, calls: rec.calls ++ [c] }
+            }
+          }
+          _ -> {
+            bad = fail("`${raw}` is not a call")
+          }
+        }
+      } else if ws[0] == "pane" && len(ws) == 4 {
+        match parse_int(ws[3]) {
+          Some(total) -> {
+            rec = Recording { ..rec, panes: rec.panes ++ [PaneRec { kind: ws[1], file: ws[2], total: total, outs: [] }] }
+          }
+          None -> {
+            bad = fail("`${raw}` is not a pane")
+          }
+        }
+      } else if ws[0] == "out" && len(ws) >= 4 {
+        let k = len(rec.panes) - 1
+        if k < 0 || rec.panes[k].kind != ws[1] {
+          bad = fail("`${raw}` is not of the pane before it")
+        } else {
+          match parse_out(ws) {
+            Some(o) -> {
+              let p = rec.panes[k]
+              let before = rec.panes
+              let panes = map(range(0, len(before)), i => if i == k { PaneRec { ..p, outs: p.outs ++ [o] } } else { before[i] })
+              rec = Recording { ..rec, panes: panes }
+            }
+            None -> {
+              bad = fail("`${raw}` is not an out row")
+            }
+          }
+        }
+      } else {
+        bad = fail("`${raw}` is none of program, source, call, pane or out")
+      }
+    }
+  }
+  if bad != "" {
+    Err(bad)
+  } else if rec.name == "" || rec.path == "" || len(rec.calls) == 0 || len(rec.panes) == 0 {
+    Err("the recording has no program, source, call or pane")
+  } else {
+    Ok(rec)
+  }
+}
+
+# ---- holding it to the text ----
+
+# The owners of each line of a pane, as lists of call rows, innermost first.
+fn depth_of(calls: List[MCall], id: Int) -> Int = {
+  var d = 0
+  var k = calls[id].parent
+  var guard = 0
+  while k >= 0 && guard < 64 {
+    d = d + 1
+    k = calls[k].parent
+    guard = guard + 1
+  }
+  d
+}
+
+fn owns(o: Out, n: Int) -> Bool = list.any(o.lines, r => {
+  let (a, b) = r
+  a <= n && n < b
+})
+
+## The calls whose own lines hold line `n` of a pane, the innermost first (the
+## deeper in the tree, the earlier; the same depth, the earlier row).
+pub fn owners_of(calls: List[MCall], outs: List[Out], n: Int) -> List[Int] = {
+  let ids = map(filter(outs, o => owns(o, n)), o => o.call)
+  sort_by(ids, (a, b) => {
+    let da = depth_of(calls, a)
+    let db = depth_of(calls, b)
+    if da != db { db - da } else { a - b }
+  })
+}
+
+# Why pane `p` (of `n` lines of text `text`) does not fit `calls`, or "".
+fn pane_fault(calls: List[MCall], p: Pane) -> String = {
+  let n = len(p.text)
+  let at = (id: Int) => "${kind_label(p.kind)} pane, call ${id} (`${calls[id].name}`)"
+  let outs = sort_by(p.outs, (a, b) => a.call - b.call)
+  let bad_id = list.find(p.outs, o => o.call < 0 || o.call >= len(calls))
+  if bad_id != None {
+    "${kind_label(p.kind)} pane has an account of call ${unwrap_or(map_opt(bad_id, o => o.call), 0 - 1)}, which is no call"
+  } else if map(outs, o => o.call) != range(0, len(calls)) {
+    let missing = list.find(range(0, len(calls)), id => len(filter(outs, o => o.call == id)) != 1)
+    "${kind_label(p.kind)} pane has no single account of call ${unwrap_or(missing, 0)} (`${calls[unwrap_or(missing, 0)].name}`)"
+  } else {
+    let off = list.find(outs, o => list.any(o.lines, r => {
+      let (a, b) = r
+      a < 1 || b > n + 1 || a >= b
+    }))
+    let bare = list.find(outs, o => len(o.lines) == 0 && p.kind != "tile")
+    let wide = list.find(outs, o => list.any(o.marks, m => {
+      let (l, a, b) = m
+      l < 1 || l > n || b > str.len(p.text[l - 1]) || not owns(o, l)
+    }))
+    let key = list.find(outs, o => list.any(o.keys, l => l < 1 || l > n || not owns(o, l)))
+    let doubled = list.find(range(1, n + 1), k => p.kind == "tile" && len(owners_of(calls, outs, k)) > 1)
+    match (off, bare, wide, key, doubled) {
+      (Some(o), _, _, _, _) -> "${at(o.call)} names lines outside the ${n} it has"
+      (_, Some(o), _, _, _) -> "${at(o.call)} wrote no lines, which only the Tile IR pane allows"
+      (_, _, Some(o), _, _) -> "${at(o.call)} marks columns outside its lines"
+      (_, _, _, Some(o), _) -> "${at(o.call)} names an instruction line it did not write"
+      (_, _, _, _, Some(k)) -> "line ${k} of the Tile IR is owned more than once"
+      _ -> ""
+    }
+  }
+}
+
+fn map_opt[A, B](x: Option[A], f: fn(A) -> B) -> Option[B] =
+  match x {
+    Some(v) -> Some(f(v))
+    None -> None
+  }
+
+## `rec` held to the text of its source (`src`, the lines `rec.first` to
+## `rec.last`) and to its panes' texts (`texts`, by kind), or why the two do
+## not fit.
+pub fn assemble(rec: Recording, src: List[String], texts: List[(String, List[String])]) -> Result[Program, String] = {
+  let kind_ok = list.all(rec.panes, p => list.any(kinds(), k => k == p.kind))
+  let dup = list.find(rec.panes, p => len(filter(rec.panes, q => q.kind == p.kind)) > 1)
+  let fault = list.find(rec.calls, c => call_fault(rec.calls, rec.first, rec.last, src, c) != "")
+  let panes = map(rec.panes, p => {
+    let text = match list.find(texts, t => {
+      let (k, _) = t
+      k == p.kind
+    }) {
+      Some((_, t)) -> t
+      None -> []
+    }
+    Pane { kind: p.kind, total: p.total, text: text, outs: p.outs }
+  })
+  let pf = list.find(panes, p => len(p.text) == 0 || pane_fault(rec.calls, p) != "")
+  if len(src) != rec.last - rec.first + 1 {
+    Err("the source is ${len(src)} lines, the recording's function is ${rec.first}-${rec.last}")
+  } else if not kind_ok {
+    Err("a pane is of none of tile, c, jvm")
+  } else if dup != None {
+    Err("two panes of one kind")
+  } else {
+    match (fault, pf) {
+      (Some(c), _) -> Err(call_fault(rec.calls, rec.first, rec.last, src, c))
+      (_, Some(p)) ->
+        if len(p.text) == 0 {
+          Err("the ${kind_label(p.kind)} pane has no text")
+        } else {
+          Err(pane_fault(rec.calls, p))
+        }
+      _ -> Ok(Program { name: rec.name, path: rec.path, first: rec.first, src: src, calls: rec.calls, panes: panes })
+    }
+  }
+}
+
+# ---- reading the build's files ----
+
+fn dir() -> String = "site/build/explorer"
+
+## The programs the build recorded, in the page's order.
+pub fn program_names() -> List[String] !Fs =
+  filter(map(str.split(must_read("${dir()}/programs.txt"), "\n"), str.trim), n => n != "")
+
+fn must_parse(path: String) -> Recording !Fs =
+  match parse_xmap(must_read(path)) {
+    Ok(r) -> r
+    Err(e) -> panic("${path}: ${e}")
+  }
+
+fn text_lines(path: String) -> List[String] !Fs = str.split(str.trim_end(must_read(path)), "\n")
+
+## One program, read from `site/build/explorer/` and its source file, and held
+## to both.
+pub fn load_program(name: String) -> Program !Fs = {
+  let path = "${dir()}/${name}.xmap"
+  let rec = must_parse(path)
+  if rec.name != name {
+    panic("${path} records `${rec.name}`, not `${name}`")
+  }
+  let all = str.split(must_read(rec.path), "\n")
+  if rec.first < 1 || rec.last > len(all) {
+    panic("${path}: the source ${rec.path} has ${len(all)} lines, not ${rec.last}")
+  }
+  let src = map(range(rec.first - 1, rec.last), i => all[i])
+  let texts = map(rec.panes, p => (p.kind, text_lines("${dir()}/${p.file}")))
+  match assemble(rec, src, texts) {
+    Ok(p) -> p
+    Err(e) -> panic("`${name}` does not line up with its output: ${e}")
+  }
+}
+
+# ---- markup ----
+
+fn gh(path: String) -> String = "${repo_url()}/blob/main/${path}"
+
+fn at_text(p: Pos) -> String = "${p.line}:${p.col}"
+
+## A call's place as the reader says it: `3:28–3:31`.
+fn call_place(c: MCall) -> String = "${at_text(c.from)}–${at_text(c.to)}"
+
+## One source line, cut where the calls on it start, end and name themselves.
+## A call's name is the thing a reader can pick (`data-c` its row, `data-p`
+## its parent's, `data-s` its place); every piece inside a call's span says
+## which rows it is inside (`data-k`), so a picked call's whole span can be
+## underlined. Indentation is plain: the page does not draw dots in it.
+pub fn src_line(calls: List[MCall], first: Int, src: List[String], l: Int) -> String = {
+  let text = src[l - first]
+  let cs = cuts(calls, l, str.len(text))
+  var out = ""
+  for k in range(0, len(cs) - 1) {
+    let a = cs[k]
+    let b = cs[k + 1]
+    let piece = str.slice(text, a - 1, b - 1)
+    let html =
+      match named_at(calls, l, a, b) {
+        Some(c) -> """<span class="xc" data-c="${c.id}" data-p="${c.parent}" data-s="${call_place(c)}">${highlight_dawn(piece)}</span>"""
+        None -> highlight_dawn(piece)
+      }
+    let around = covering(calls, l, a, b)
+    out = out ++ if len(around) == 0 {
+      html
+    } else {
+      """<span data-k="${join(map(around, x => "${x}"), " ")}">${html}</span>"""
+    }
+  }
+  out
+}
+
+fn ids_attr(ids: List[Int]) -> String = join(map(ids, x => "${x}"), " ")
+
+# A C line cut where the marks on it begin and end, each piece inside the
+# calls whose columns hold it.
+fn c_html(text: String, marks: List[(Int, Int, Int)]) -> String = {
+  let n = str.len(text)
+  var at: List[Int] = [0, n]
+  for m in marks {
+    let (_c, a, b) = m
+    at = at ++ [a, b]
+  }
+  let cs = list.unique(sort(at))
+  var out = ""
+  for k in range(0, len(cs) - 1) {
+    let a = cs[k]
+    let b = cs[k + 1]
+    let ids = map(filter(marks, m => {
+      let (_c, x, y) = m
+      x <= a && b <= y
+    }), m => {
+      let (c, _x, _y) = m
+      c
+    })
+    let piece = escape_html(str.slice(text, a, b))
+    out = out ++ if len(ids) == 0 { piece } else { """<span data-k="${ids_attr(ids)}">${piece}</span>""" }
+  }
+  out
+}
+
+# A javap line with its `// ...` tail (the constant's meaning) faint.
+fn jvm_html(text: String) -> String =
+  match str.split_once(text, "//") {
+    Some((a, b)) -> escape_html(a) ++ """<span class="ty">//${escape_html(b)}</span>"""
+    None -> escape_html(text)
+  }
+
+# The columns marked on line `n`, as (call, from, to).
+fn marks_on(outs: List[Out], n: Int) -> List[(Int, Int, Int)] =
+  list.fold(outs, [], (acc, o) => acc ++ map(filter(o.marks, m => {
+    let (l, _a, _b) = m
+    l == n
+  }), m => {
+    let (_l, a, b) = m
+    (o.call, a, b)
+  }))
+
+## One line of a pane: its number, its text, who owns it (`data-o`, the
+## innermost first) and whose instruction it is (`data-i`).
+pub fn pane_line(calls: List[MCall], p: Pane, n: Int) -> String = {
+  let text = p.text[n - 1]
+  let owners = owners_of(calls, p.outs, n)
+  let made = map(filter(p.outs, o => list.any(o.keys, l => l == n)), o => o.call)
+  let html =
+    match p.kind {
+      "tile" -> ir_html(text, false)
+      "c" -> c_html(text, marks_on(p.outs, n))
+      _ -> jvm_html(text)
+    }
+  let o = if len(owners) == 0 { "" } else { " data-o=\"" ++ ids_attr(owners) ++ "\"" }
+  let i = if len(made) == 0 { "" } else { " data-i=\"" ++ ids_attr(made) ++ "\"" }
+  """<span class="xl" data-n="${n}"${o}${i}><i>${n}</i>${html}</span>"""
+}
+
+fn pane_html(c: Copy, mu: fn(String) -> String, prog: Program, p: Pane) -> String = {
+  let id = "${prog.name}-${p.kind}"
+  let shown = str.replace(str.replace(plain(c, "shown"), "{n}", "${len(p.text)}"), "{total}", "${p.total}")
+  let ls = map(range(1, len(p.text) + 1), n => pane_line(prog.calls, p, n))
+  """<div class="xp-pane" id="${id}" role="tabpanel" aria-labelledby="${id}-tab" data-kind="${p.kind}">
+<p class="xp-head"><span>${line(c, "pane-${p.kind}", mu)}</span><span class="xp-shown">${escape_html(shown)}</span></p>
+<pre class="xp-code" aria-label="${escape_html(kind_label(p.kind))}"><code>${join(ls, "")}</code></pre>
+</div>"""
+}
+
+fn tab_html(prog: Program, p: Pane, selected: Bool) -> String = {
+  let id = "${prog.name}-${p.kind}"
+  let sel = if selected { "true" } else { "false" }
+  let ti = if selected { "0" } else { "-1" }
+  """<button class="xp-tab" type="button" role="tab" id="${id}-tab" aria-controls="${id}" aria-selected="${sel}" tabindex="${ti}" data-kind="${p.kind}">${kind_label(p.kind)}</button>"""
+}
+
+fn figure_html(c: Copy, mu: fn(String) -> String, prog: Program) -> String = {
+  let last = prog.first + len(prog.src) - 1
+  let src_link = """<a href="${gh(prog.path)}#L${prog.first}-L${last}"><code>${escape_html(prog.path)}:${prog.first}–${last}</code></a>"""
+  let ls = map(range(prog.first, last + 1), l => """<span class="xl"><i>${l}</i>${src_line(prog.calls, prog.first, prog.src, l)}</span>""")
+  let tabs = map(range(0, len(prog.panes)), k => tab_html(prog, prog.panes[k], k == 0))
+  let panes = map(prog.panes, p => pane_html(c, mu, prog, p))
+  let words_attr = (k: String) => escape_html(plain(c, k))
+  """<figure class="xp" id="${prog.name}-explorer" data-prog="${prog.name}" data-w-line="${words_attr("word-line")}" data-w-lines="${words_attr("word-lines")}" data-w-none="${words_attr("word-none")}">
+<figcaption class="xp-cap"><span class="xp-name"><code>${escape_html(prog.name)}</code></span><span class="xp-facts"><b>${len(prog.calls)}</b> ${line(c, "facts-calls", mu)}</span></figcaption>
+<div class="xp-grid">
+<div class="xp-src">
+<p class="xp-head"><span>${line(c, "src-head", mu)}</span><span class="xp-shown">${src_link}</span></p>
+<pre class="xp-code" aria-label="${escape_html(plain(c, "src-head"))}"><code>${join(ls, "")}</code></pre>
+</div>
+<div class="xp-out">
+<div class="xp-tabs" role="tablist" aria-label="${escape_html(plain(c, "tabs-label"))}" hidden>${join(tabs, "")}</div>
+${join(panes, "\n")}
+</div>
+</div>
+<p class="xp-status" role="status" aria-live="polite"></p>
+<p class="xp-note" hidden>${line(c, "note", mu)}</p>
+</figure>"""
+}
+
+fn program_section(c: Copy, mu: fn(String) -> String, prog: Program) -> String =
+  """<section class="xp-prog" aria-labelledby="${prog.name}-h">
+<div class="col prose"><h2 id="${prog.name}-h">${line(c, "prog-${prog.name}-title", mu)}</h2>
+${body(c, "prog-${prog.name}-body", mu)}</div>
+${figure_html(c, mu, prog)}
+</section>"""
+
+## The copy file of one language.
+pub fn copy_file(lang: Lang) -> String =
+  match lang {
+    En -> "site/pages/explorer.md"
+    Zh -> "site/pages/explorer.zh.md"
+  }
+
+## The page as markup, in one language, without writing it: what the tests
+## read. Paired: `pair` is "explorer.html", so each language's header offers
+## the other. The trail is the GPU section's, then this page: the page is
+## what the GPU page's call map grew into, and sits under it.
+pub fn explorer_page(a: Assets, js: String, lang: Lang, progs: List[Program], docs: List[String]) -> String !Fs = {
+  let root =
+    match lang {
+      En -> "."
+      Zh -> ".."
+    }
+  let c = load_copy(copy_file(lang))
+  let mu = (u: String) => map_doc_url(root, docs, u)
+  let title = plain(c, "title")
+  let head = PageHead {
+    crumbs: [section_crumb(lang, root, "gpu", true), here(escape_html(plain(c, "crumb")))],
+    title: line(c, "title", mu),
+    lede: line(c, "lede", mu),
+    meta: [chip("Tile IR · C · JVM")],
+    extra: "",
+    cls: "col",
+  }
+  let intro = """<div class="col prose"><h2 id="how">${line(c, "how-title", mu)}</h2>""" ++ "\n" ++ body(c, "how-body", mu) ++ "</div>"
+  let outro = """<div class="col prose"><h2 id="built">${line(c, "built-title", mu)}</h2>""" ++ "\n" ++ body(c, "built-body", mu) ++ "</div>"
+  let main = `<main class="wrap page xp-page">` ++ "\n" ++ intro ++ "\n"
+    ++ join(map(progs, p => program_section(c, mu, p)), "\n") ++ "\n" ++ outro ++ "\n</main>"
+  let script = """<script src="${root}/assets/${js}" defer></script>"""
+  shell_ext(a, lang, "explorer.html", title, root, "gpu", script, head, main)
+}
+
+## Write the page: English at the site root, Chinese under `/zh/`. The
+## English run also writes the script both pages share, under a
+## content-hashed name as every asset is (gen/pages.emit_asset).
+pub fn gen_explorer(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
+  let progs = map(program_names(), load_program)
+  if len(progs) == 0 {
+    panic("${dir()}/programs.txt lists no program")
+  }
+  let js_text = bytes.utf8(str.trim(must_read("site/assets/explorer.js")) ++ "\n")
+  let js = fingerprint("explorer.js", js_text)
+  let dst =
+    match lang {
+      En -> {
+        for name in [js, "explorer.js"] {
+          match io.write_bytes("${out}/assets/${name}", js_text) {
+            Ok(_) -> ()
+            Err(e) -> panic("cannot write assets/${name}: ${e}")
+          }
+        }
+        "${out}/explorer.html"
+      }
+      Zh -> "${out}/zh/explorer.html"
+    }
+  write_page(dst, explorer_page(a, js, lang, progs, doc_files()))
+}
+
+# ---- tests ----
+
+fn sample_xmap() -> String =
+  "xmap 1\nprogram demo\nsource demo.dawn 3 6\n"
+  ++ "call 0 -1 f 4:11-4:18 4:11-4:12\n"
+  ++ "call 1 0 g 4:13-4:17 4:13-4:14\n"
+  ++ "pane tile demo.tile.txt 5\nout tile 0 2-3\nout tile 1 3-5\n"
+  ++ "pane c demo.c.txt 90\nout c 0 1-4 @3:10-17\nout c 1 3-4 @3:12-16\n"
+  ++ "pane jvm demo.jvm.txt 70\nout jvm 0 2-3 !2\nout jvm 1 1-3 !1\n"
+
+fn sample_src() -> List[String] = ["fn h(x: Int) -> Int = {", "  let y = f(g(x))", "  y", "}"]
+
+fn sample_texts() -> List[(String, List[String])] =
+  [
+    ("tile", ["a", "b", "c", "d"]),
+    ("c", ["l1", "l2", "  int y = f(g(x));", "l4"]),
+    ("jvm", ["  0: iload_0", "  1: invokestatic #1  // Method g", "  4: invokestatic #2 // Method f"]),
+  ]
+
+fn must_rec(text: String) -> Recording = match parse_xmap(text) {
+  Ok(r) -> r
+  Err(e) -> panic(e)
+}
+
+fn sample_prog() -> Program = match assemble(must_rec(sample_xmap()), sample_src(), sample_texts()) {
+  Ok(p) -> p
+  Err(e) -> panic(e)
+}
+
+fn refused(xmap: String) -> String =
+  match parse_xmap(xmap) {
+    Err(e) -> e
+    Ok(r) ->
+      match assemble(r, sample_src(), sample_texts()) {
+        Err(e) -> e
+        Ok(_) -> ""
+      }
+  }
+
+test "a recording reads back call by call and pane by pane" {
+  let r = must_rec(sample_xmap())
+  assert (r.name, r.path, r.first, r.last) == ("demo", "demo.dawn", 3, 6)
+  assert map(r.calls, c => (c.name, c.parent)) == [("f", 0 - 1), ("g", 0)]
+  assert map(r.panes, p => (p.kind, p.total)) == [("tile", 5), ("c", 90), ("jvm", 70)]
+  assert r.panes[1].outs[0].marks == [(3, 10, 17)]
+  assert r.panes[2].outs[1].keys == [1]
+  assert r.panes[0].outs[1].lines == [(3, 5)]
+}
+
+test "a line's owners are the calls whose lines hold it, the innermost first" {
+  let p = sample_prog()
+  assert owners_of(p.calls, p.panes[1].outs, 3) == [1, 0]
+  assert owners_of(p.calls, p.panes[1].outs, 1) == [0]
+  assert owners_of(p.calls, p.panes[1].outs, 4) == []
+  assert owners_of(p.calls, p.panes[0].outs, 3) == [1]
+}
+
+## The negative controls: each way the recording can disagree with the text it
+## is shown beside is refused, in words that name the call, not drawn.
+test "a recording that does not fit the text is refused, not drawn" {
+  let ok = sample_xmap()
+  assert refused(ok) == ""
+  assert str.contains(refused(str.replace(ok, "call 1 0 g 4:13-4:17 4:13-4:14", "call 1 0 g 4:14-4:18 4:14-4:15")), "the text at 4:14 is")
+  assert str.contains(refused(str.replace(ok, "call 1 0 g 4:13-4:17", "call 1 0 g 4:13-4:19")), "not inside its parent's span")
+  assert str.contains(refused(str.replace(ok, "call 0 -1 f 4:11-4:18", "call 0 -1 f 9:11-9:18")), "outside the function")
+  assert str.contains(refused(str.replace(ok, "out tile 1 3-5\n", "")), "no single account of call 1")
+  assert str.contains(refused(str.replace(ok, "out c 1 3-4 @3:12-16", "out c 1 3-9 @3:12-16")), "outside the 4 it has")
+  assert str.contains(refused(str.replace(ok, "@3:10-17", "@3:10-99")), "marks columns outside")
+  assert str.contains(refused(str.replace(ok, "out jvm 1 1-3 !1", "out jvm 1 1-3 !3")), "an instruction line it did not write")
+  assert str.contains(refused(str.replace(ok, "out tile 1 3-5", "out tile 1 2-5")), "owned more than once")
+  assert str.contains(refused(str.replace(ok, "out c 1 3-4 @3:12-16", "out c 1 -")), "wrote no lines")
+  assert str.contains(refused(str.replace(ok, "out jvm 0 2-3 !2", "out jvm 7 2-3 !2")), "which is no call")
+}
+
+test "a row of any other shape is an error" {
+  let ok = sample_xmap()
+  assert str.contains(refused("xmap 2\n"), "not `xmap 1`")
+  assert str.contains(refused(ok ++ "wat 1 2\n"), "none of program, source, call, pane or out")
+  assert str.contains(refused(str.replace(ok, "call 1 0 g", "call 5 0 g")), "is not row 1")
+  assert str.contains(refused(str.replace(ok, "out tile 0 2-3", "out c 0 2-3")), "not of the pane before it")
+  assert str.contains(refused(str.replace(ok, "pane jvm demo.jvm.txt 70\nout jvm 0 2-3 !2\nout jvm 1 1-3 !1\n", "pane x demo.x.txt 70\nout x 0 2-3\nout x 1 1-3\n")), "none of tile, c, jvm")
+}
+
+test "a pane with no text is refused" {
+  match assemble(must_rec(sample_xmap()), sample_src(), [("tile", ["a", "b", "c", "d"]), ("c", ["l1", "l2", "  int y = f(g(x));", "l4"])]) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e, "the JVM pane has no text") }
+  }
+}
+
+test "a source line wraps each call's name and says which calls its pieces are inside" {
+  let p = sample_prog()
+  let l = src_line(p.calls, p.first, p.src, 4)
+  assert str.contains(l, `data-c="0" data-p="-1" data-s="4:11–4:18"`)
+  assert str.contains(l, `data-c="1" data-p="0" data-s="4:13–4:17"`)
+  assert str.contains(l, `data-k="0 1"`)
+  assert not str.contains(src_line(p.calls, p.first, p.src, 5), "data-c")
+}
+
+test "a pane line says who owns it and whose instruction it is, and C columns nest" {
+  let p = sample_prog()
+  let c = p.panes[1]
+  assert str.contains(pane_line(p.calls, c, 3), `data-o="1 0"`)
+  assert str.contains(pane_line(p.calls, c, 3), """<span data-k="0">""")
+  assert str.contains(pane_line(p.calls, c, 3), """<span data-k="0 1">""")
+  assert not str.contains(pane_line(p.calls, c, 4), "data-o")
+  let j = p.panes[2]
+  assert str.contains(pane_line(p.calls, j, 1), `data-i="1"`)
+  assert str.contains(pane_line(p.calls, j, 2), """<span class="ty">// Method g</span>""")
+}
+
+test "the page draws every program's tabs and panes, and says nothing without the script" {
+  with_fs_real(() => {
+    let p = Program { ..sample_prog(), name: "attend" }
+    let en = explorer_page(plain_assets(), "explorer.js", En, [p], [])
+    assert str.contains(en, "<title>")
+    assert str.contains(en, `<div class="xp-tabs" role="tablist"`)
+    assert str.contains(en, `id="attend-tile" role="tabpanel"`)
+    assert str.contains(en, `id="attend-jvm" role="tabpanel"`)
+    assert str.contains(en, """<p class="xp-note" hidden>""")
+    assert str.contains(en, `hreflang="zh-CN"`)
+    let zh = explorer_page(plain_assets(), "explorer.js", Zh, [p], [])
+    assert str.contains(zh, `href="../zh/gpu.html"`)
+    assert str.contains(zh, `<html lang="zh`)
+  })
+}

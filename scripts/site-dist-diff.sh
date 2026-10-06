@@ -96,6 +96,10 @@ tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' \
 mkdir -p "$SNAP/site/build"
 ./bin/dawn doc --stdlib > "$SNAP/site/build/stdlib.json"
 site/package-docs.sh "$SNAP/site/build/packages"
+# The explorer page's listings are the compiler's function, so they are written
+# fresh into the snapshot too (site/explorer/record.py): both legs read the
+# same files, and a copy left behind by an earlier build cannot be what is shown.
+python3 site/explorer/record.py --out "$SNAP/site/build/explorer"
 
 echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 

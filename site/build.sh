@@ -17,6 +17,16 @@ site/package-docs.sh site/build/packages
 echo "=== checking the cuTile call map ==="
 python3 site/gpu-map/record.py
 
+# The explorer page's listings: a Dawn function beside the Tile IR, C and JVM
+# bytecode its calls wrote, from each compiler's own side table
+# (site/explorer/record.py says what and why). Written into site/build/explorer
+# and not tracked, because the C and the bytecode are the compiler's function
+# and a checked-in copy would be stale at its next change. A call a side table
+# has no place for stops the build here, and the generator checks the result
+# again.
+echo "=== recording the explorer page's listings ==="
+python3 site/explorer/record.py
+
 # The Playground editor bundle (CodeMirror 6 + Dawn mode). Built locally with
 # node; the server never runs node — it only receives site/dist. Skipped with a
 # warning if npm is unavailable, so the rest of the site still builds.
