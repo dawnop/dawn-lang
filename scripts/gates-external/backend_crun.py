@@ -572,8 +572,23 @@ class CrunBackend:
                        check=True)
         subprocess.run(["git", "-C", str(tmp), "update-ref", "refs/heads/gates-tree", self.tree],
                        check=True)
+        # The range leg of the differentials (scripts/emitrange.sh) takes the
+        # change's base as merge-base(main, HEAD), and a bundle with only the
+        # commit and tags has no main to take it with. origin/main goes in as
+        # refs/heads/main; a source repository without one ships without it
+        # and the leg says so, loudly, rather than guessing a base.
+        refs = ["refs/heads/gates-tree"]
+        main = subprocess.run(["git", "-C", str(tmp), "rev-parse", "--verify", "-q",
+                               "refs/remotes/origin/main"], capture_output=True, text=True)
+        if main.returncode != 0:
+            main = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "--verify", "-q",
+                                   "refs/remotes/origin/main"], capture_output=True, text=True)
+        if main.returncode == 0 and main.stdout.strip():
+            subprocess.run(["git", "-C", str(tmp), "update-ref", "refs/heads/main",
+                            main.stdout.strip()], check=True)
+            refs.append("refs/heads/main")
         subprocess.run(["git", "-C", str(tmp), "bundle", "create", "-q", str(bundle),
-                        "refs/heads/gates-tree", "--tags"], check=True)
+                        *refs, "--tags"], check=True)
         shutil.rmtree(tmp)
 
     def _verify_remote(self, machine, sync):

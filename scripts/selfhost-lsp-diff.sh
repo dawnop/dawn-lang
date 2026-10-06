@@ -24,6 +24,10 @@ cd "$(dirname "$0")/.."
 
 ROOT=$(pwd)
 . scripts/seedjar.sh
+# EMITCHANGE_MODE=range turns "the seed" into the change's base toolchain
+# (scripts/emitrange.sh); the rest of the script is unchanged.
+. scripts/emitrange.sh
+range_enter
 SELF=${DAWN_SELF:-./bin/dawn}
 OUT=${TMPDIR:-/tmp}/selfhost-lsp-diff.$$
 mkdir -p "$OUT/proj/src"

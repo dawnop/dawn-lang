@@ -39,22 +39,29 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . scripts/seedjar.sh
+# EMITCHANGE_MODE=range turns "the seed" into the change's base toolchain
+# (scripts/emitrange.sh); the rest of the script is unchanged.
+. scripts/emitrange.sh
+range_enter
 
 OUT=${TMPDIR:-/tmp}/selfhost-param-diff.$$
 mkdir -p "$OUT/seed-cwd" "$OUT/canary"
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
 
-TAG=$(tr -d ' \n' < scripts/seed-release.txt)
+TAG=${RANGE_TAG:-$(tr -d ' \n' < scripts/seed-release.txt)}
+DECL_RANGE=$TAG..HEAD
 SEEDJAR="$(seed_jar)"
 SEEDJAVA="$(seed_java)"
 SEED_STD="$(seed_std_dir)"
 # seed_std_dir fetches the tag when the clone lacks it; the window below is
 # read from that tag, and an unreadable window would read as "declared
 # nothing", so its absence is an error here rather than an empty log.
-git rev-parse -q --verify "refs/tags/$TAG^{commit}" > /dev/null || {
+if [ "${EMITCHANGE_MODE:-}" = range ]; then
+  DECL_RANGE=$EMITCHANGE_RANGE
+elif ! git rev-parse -q --verify "refs/tags/$TAG^{commit}" > /dev/null; then
   echo "FAIL the seed tag $TAG is not in this clone; the declaration window $TAG..HEAD cannot be read"
   exit 1
-}
+fi
 
 # The one seed invocation, used for the dump and the canary alike, so the
 # canary tests the very command line that produced the dump.
@@ -87,5 +94,5 @@ if cmp -s "$OUT/seed.json" "$OUT/head.json"; then
 fi
 
 python3 scripts/param-change.py compare --old "$OUT/seed.json" --new "$OUT/head.json" \
-  --range "$TAG..HEAD"
+  --range "$DECL_RANGE"
 echo "OK: every std parameter-name change since $TAG is declared"

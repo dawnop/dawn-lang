@@ -352,7 +352,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 17686s (the most this file's `3x` claims may add up to)
+# push-total: 18026s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3572,12 +3572,25 @@ jobs:
     # 10-05T11:35Z, holds a 295s run whose steps digest is this job's (run
     # 37300879320). Restated to that plus a tenth, rounded up to 5s, 325s
     # (285s before), and the timeout to 3x that.
-    # budget: 3x 325s worst observed plus a tenth (run 37300879320)
-    timeout-minutes: 17
+    # 2026-10-06, the second baseline (docs/emitchange-range-design.md): five
+    # more steps run the same five scripts against the compiler at the change's
+    # own base. Measured on the local development machine, HEAD toolchain built,
+    # one run each: the five window steps 156s (prev 44, run 93, fmt 14, lsp 3,
+    # param 3), the five range steps 154s (prev 38, run 94, fmt 15, lsp 4,
+    # param 4), plus about 20s to build the base toolchain once (the base
+    # builds from its own sources, so a change that touches the compiler pays
+    # it and an identical base only pays the digest read). The CI runner is
+    # about 1.9x that machine (the window steps' 295s worst against 156s plus
+    # setup), so the added work is taken as 340s: 325 + 340 = 665s. A planning
+    # value, to be restated from the first window of runs that carry the new
+    # steps.
+    # budget: 3x 665s planning value (325s worst observed, run 37300879320, plus 340s for the range steps)
+    timeout-minutes: 34
     steps:
       - uses: actions/checkout@v4
         with:
-          # the declared-change scan walks commits since the N-1 tag
+          # the declared-change scan walks commits since the N-1 tag, and the
+          # range leg needs the change's base commit and its toolchain sources
           fetch-depth: 0
 
       # build: false — every script below drives the seed and builds what it
@@ -3605,6 +3618,28 @@ jobs:
       # toolchain run-diff built is reused.
       - name: std parameter names vs N-1
         run: ./scripts/selfhost-param-diff.sh
+
+      # The second baseline (docs/emitchange-range-design.md). The five steps
+      # above judge HEAD against the previous release, where one declaration
+      # approves a label for the rest of the seed window. These five judge HEAD
+      # against the compiler at this change's own base (a PR's first parent, a
+      # push's `before`) and accept only declarations from this change's own
+      # commits. The base toolchain is built once by the first step and reused;
+      # a base and HEAD with identical toolchain digests skip, printing both.
+      - name: N vs change base
+        run: EMITCHANGE_MODE=range ./scripts/selfhost-prev-diff.sh
+
+      - name: run/test transcript vs change base
+        run: EMITCHANGE_MODE=range ./scripts/selfhost-run-diff.sh
+
+      - name: formatter vs change base
+        run: EMITCHANGE_MODE=range ./scripts/selfhost-fmt-diff.sh
+
+      - name: lsp transcript vs change base
+        run: EMITCHANGE_MODE=range ./scripts/selfhost-lsp-diff.sh
+
+      - name: std parameter names vs change base
+        run: EMITCHANGE_MODE=range ./scripts/selfhost-param-diff.sh
 
   # SEM-07: a public declaration may only name identities its audience can
   # name. The evidence is 24 mutant compilers -- one per rule -- and a mutant

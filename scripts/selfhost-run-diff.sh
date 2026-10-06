@@ -8,6 +8,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . scripts/seedjar.sh
+# EMITCHANGE_MODE=range turns "the seed" into the change's base toolchain
+# (scripts/emitrange.sh); the rest of the script is unchanged.
+. scripts/emitrange.sh
+range_enter
 
 OUT=${TMPDIR:-/tmp}/selfhost-run-diff.$$
 mkdir -p "$OUT"

@@ -22,7 +22,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 . scripts/seedjar.sh
-TAG=$(tr -d ' \n' < scripts/seed-release.txt)
+# EMITCHANGE_MODE=range turns "the seed" into the change's base toolchain
+# (scripts/emitrange.sh); the rest of the script is unchanged.
+. scripts/emitrange.sh
+range_enter
+TAG=${RANGE_TAG:-$(tr -d ' \n' < scripts/seed-release.txt)}
 
 OUT=${TMPDIR:-/tmp}/selfhost-fmt-diff.$$
 mkdir -p "$OUT/k" "$OUT/d"

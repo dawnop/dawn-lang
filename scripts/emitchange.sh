@@ -17,7 +17,10 @@
 #   Emit-Change(lsp): completion offers `Index` among the prelude traits
 #
 # Declarations are read from the commit messages between scripts/seed-release.txt
-# and HEAD, so a release resets the window.
+# and HEAD, so a release resets the window. That is the window leg. The range
+# leg (EMITCHANGE_MODE=range, scripts/emitrange.sh) reads only EMITCHANGE_RANGE,
+# the change's own commits, and compares the change's base compiler with HEAD:
+# a declaration written for one change approves nothing about the next.
 #
 # ======================== WHAT IT REFUSES, AND WHY ========================
 #
@@ -76,10 +79,13 @@
 #   touches every class in the corpus, and `fmt`/`lsp`/`run ...` compare text
 #   with no file set at all.
 #
-# * Expire a wildcard at the commit that declares it. Unworkable: the
-#   differential compares the previous release against HEAD, so the diff a
-#   declaration approves is still present at HEAD. An expiry would red the
-#   very next commit and every one after it.
+# * Expire a wildcard at the commit that declares it, on the window leg alone.
+#   Unworkable there: that differential compares the previous release against
+#   HEAD, so the diff a declaration approves is still present at HEAD, and an
+#   expiry would red the very next commit and every one after it. The range
+#   leg is what makes per-change scope possible: it compares the change's own
+#   base with HEAD, so an approved difference is gone from the next change's
+#   comparison. (The wildcard stays refused for the reason in 1.)
 #
 # * Red a declaration whose label turns out identical ("over-declared"). It
 #   does not address the reported blindness -- at 1b8ee7f all six labels
@@ -88,15 +94,31 @@
 #
 # ============================== RESIDUAL ==============================
 #
-# A label that is declared once stays exempt until the seed advances, even if
-# its diff grows. That is the window design, and REL-02 recorded it as the
-# caveat that only golden snapshots in-repo can close (docs/codebase-audit.md,
-# REL-02). #124 removes something narrower and worse: the exemption of labels
-# nobody ever looked at.
+# On the window leg a label that is declared once stays exempt until the seed
+# advances, even if its diff grows. REL-02 recorded that as the caveat that only
+# golden snapshots in-repo can close (docs/codebase-audit.md, REL-02). The range
+# leg closes it at the granularity of one change: a later change that moves the
+# label again must declare it again, in its own commits. What is still open is
+# inside one range (declare, then move the same label further, in the same PR),
+# and a push that CI cancelled before the range leg ran.
 
 # Parsed declarations, one per line, as "<label><TAB><full declaration line>".
 _EC_DECLS=
 _EC_LOADED=
+
+_ec_range_mode() { [ "${EMITCHANGE_MODE:-}" = range ]; }
+
+# How a message names the scope a declaration was read from.
+_ec_scope_desc() {
+  if _ec_range_mode; then
+    # full shas are what git needs; twelve characters are what a person reads
+    local r=${EMITCHANGE_RANGE:-<no range>}
+    [ -z "${EMITCHANGE_BASE:-}" ] || r=${r//$EMITCHANGE_BASE/${EMITCHANGE_BASE:0:12}}
+    printf 'in %s' "$r"
+  else
+    printf 'since %s' "${EMITCHANGE_TAG:-the tag}"
+  fi
+}
 
 _ec_root() { git rev-parse --show-toplevel; }
 
@@ -128,7 +150,22 @@ _ec_suggest() { # scope
 # The raw commit-message lines the window contains. EMITCHANGE_SOURCE lets the
 # self-test drive the parser without inventing commits.
 _ec_source_lines() {
-  if [ -n "${EMITCHANGE_SOURCE:-}" ]; then
+  if _ec_range_mode; then
+    # Range mode never falls back to the window: the whole point is that the
+    # window's declarations do not count here. EMITCHANGE_RANGE_SOURCE is the
+    # self-test's stand-in for the range's messages, separate from
+    # EMITCHANGE_SOURCE so a test can put a declaration in the window and
+    # leave the range empty.
+    if [ -n "${EMITCHANGE_RANGE_SOURCE:-}" ]; then
+      cat "$EMITCHANGE_RANGE_SOURCE"
+    elif [ -n "${EMITCHANGE_RANGE:-}" ]; then
+      # not `|| true`: an unreadable range must not read as "declared nothing"
+      git log "$EMITCHANGE_RANGE" --format=%B
+    else
+      echo "FAIL range mode without a range (EMITCHANGE_RANGE is empty)" >&2
+      return 1
+    fi
+  elif [ -n "${EMITCHANGE_SOURCE:-}" ]; then
     cat "$EMITCHANGE_SOURCE"
   else
     git log "$EMITCHANGE_TAG..HEAD" --format=%B 2>/dev/null || true
@@ -140,7 +177,7 @@ _ec_source_lines() {
 emitchange_load() {
   local line rest scope why bad=0 opens closes
   _EC_DECLS=
-  if [ -n "${EMITCHANGE_SOURCE:-}" ]; then
+  if [ -n "${EMITCHANGE_SOURCE:-}${EMITCHANGE_RANGE_SOURCE:-}" ]; then
     EMITCHANGE_TAG=${EMITCHANGE_TAG:-the tag}
   else
     EMITCHANGE_TAG=$(tr -d ' \n' < "$(_ec_root)/scripts/seed-release.txt")
@@ -221,7 +258,7 @@ emitchange_load() {
     fi
 
     _EC_DECLS+="$scope"$'\t'"$line"$'\n'
-  done < <(_ec_source_lines)
+  done < <(_ec_source_lines || echo "Emit-Change: unreadable range")
 
   if [ "$bad" != 0 ]; then
     echo "FAIL: the Emit-Change declarations in this window do not parse." >&2
@@ -268,9 +305,15 @@ emit_gate() { # label differs [detail]
   fi
 
   if [ -n "$decls" ]; then
-    echo "NOTE $label differs${detail:+ ($detail)} — declared since ${EMITCHANGE_TAG:-the tag}:"
+    echo "NOTE $label differs${detail:+ ($detail)} — declared $(_ec_scope_desc):"
     echo "$decls" | sed 's/^/       /'
     return 0
+  fi
+  if _ec_range_mode; then
+    echo "FAIL $label differs${detail:+ ($detail)} vs base ${EMITCHANGE_BASE:0:12} and no commit $(_ec_scope_desc) declares it"
+    echo "     (this change moved the label; declare it in one of its own commits with"
+    echo "      'Emit-Change(<label>): why' -- a declaration from an earlier change does not count)"
+    return 1
   fi
   echo "FAIL $label differs${detail:+ ($detail)} and no commit since the tag declares it"
   echo "     (declare it with 'Emit-Change(<label>): why' — this label is '$label')"
