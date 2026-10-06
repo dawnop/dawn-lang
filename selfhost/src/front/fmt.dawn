@@ -676,9 +676,17 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     # header's body: a body brace follows the condition's last operand
     let operand = t.kind == LBRACE && have_prev_code &&
       (is_cont_starter(prev_code.kind) || prev_code.kind == NOT)
-    # the block of `return {` or `comptime {` starts where that keyword does
+    # the block of `return {` or `comptime {` starts where that keyword does,
+    # and a record field's `b: {` where the field is written
     let kw_brace = t.kind == LBRACE && have_prev_code &&
-      (prev_code.kind == RETURN || prev_code.kind == COMPTIME || prev_code.kind == BREAK)
+      (prev_code.kind == RETURN || prev_code.kind == COMPTIME || prev_code.kind == BREAK ||
+          prev_code.kind == COLON)
+    let guard_brace = t.kind == LBRACE && have_prev_code && prev_code.kind == ARROW
+    # `({` with the `(` opening its own line inside a header's condition: the
+    # block is part of that header, so it follows the header's line
+    let group_brace = t.kind == LBRACE && nl == 0 && have_prev_code &&
+      prev_code.kind == LPAREN && line_first.lo == prev_code.lo && len(hdrs) > 0 &&
+      hdrs[len(hdrs) - 1].depth < len(openers)
     let tail_brace = t.kind == LBRACE && have_prev_code &&
       (prev_code.kind == RPAREN || prev_code.kind == IDENT)
     let lambda_brace = t.kind == LBRACE && nl == 0 && arrow_after_rparen && have_prev_code &&
@@ -697,8 +705,10 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       # this statement's body, and follows the statement. Anything else -- a
       # `(`/`[`, or a brace nested inside one (a closure argument, say) -- belongs
       # to the line it is written on.
-      let header = t.kind == LBRACE && not operand && len(hdrs) > 0 &&
-        hdrs[len(hdrs) - 1].depth == len(openers)
+      # the `if` of an arm's guard has no body brace: the brace after the
+      # arm's `->` is the arm's, so it ends that header without using it
+      let waiting = t.kind == LBRACE && len(hdrs) > 0 && hdrs[len(hdrs) - 1].depth == len(openers)
+      let header = waiting && not operand && not guard_brace
       let header_indent = if header { hdrs[len(hdrs) - 1].at } else { -1 }
       let body = t.kind == LBRACE && len(openers) == logical_depth
       openers = openers ++ [Opener {
@@ -708,6 +718,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
           line_indent
         } else if lambda_brace {
           rparen_at
+        } else if group_brace {
+          hdrs[len(hdrs) - 1].at
         } else if body {
           logical_indent
         } else if operand && len(openers) > 0 && not openers[len(openers) - 1].brace {
@@ -719,7 +731,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         lat: logical_indent,
         ld: logical_depth,
       }]
-      if header { hdrs = list.take(hdrs, len(hdrs) - 1) }
+      if waiting && (header || guard_brace) { hdrs = list.take(hdrs, len(hdrs) - 1) }
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
       if len(openers) > 0 {
         let inner = openers[len(openers) - 1]
@@ -1699,5 +1711,15 @@ test "a minus after assert is a negation" {
 ## wrapped.
 test "a block follows the line its own construct starts on" {
   let a = "fn f(c: Bool) -> Int = {\n  let v:\n    Int = return {\n      1\n    }\n  let w:\n    Bool = comptime {\n      true\n    }\n  let g:\n    Fn = (a,\n      b) => {\n      a\n    }\n  match c {\n    true ->\n      {\n        1\n      }\n    _ -> 2\n  }\n}\n"
+  assert fmt_of(a) == a
+}
+
+## #545: three more braces that belong to a construct other than the line
+## above them. The brace after an arm's `->` is the arm's even when a guard
+## `if` came first (it was taken for that `if`'s body). A record field's
+## `b: {` starts where the field is written. A `({` that opens its line inside
+## a header's condition follows the header.
+test "a guard's arm, a record field and a grouped block anchor to their own construct" {
+  let a = "fn f(x: Option[Int]) -> Int = {\n  match x {\n    Some(\n      n) if (\n        n >\n          3) -> {\n      let a = 1\n      a\n    }\n    _ -> 0\n  }\n}\n\nfn g() -> Int = {\n  if (false) {\n    var v:\n      R =\n      R { a:\n          s(\n            \"x\"), b: {\n              let w = 1\n              w\n            } }\n  }\n  trace = trace ++ [(if (\n    ({\n    if (true) { return 1 }\n    true\n  })) { 1 } else { 2 })]\n  1\n}\n"
   assert fmt_of(a) == a
 }
