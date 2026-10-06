@@ -1924,13 +1924,13 @@ A matrix product, one 64 by 64 tile of `c` per block, walking along K:
 ```dawn run deps=tileir
 use std/gpu.{F64}
 use std/str
-use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mmaf, d_range, carry, get, set}
+use tileir/dev.{Dev, Param, load_at, store_cell, zeros, mma, d_range, carry, get, set}
 use tileir/prog.{trace3, cells, In, Out, FREE_AXIS}
 use tileir/render.{render}
 
 fn matmul(a: Param[F64], b: Param[F64], c: Param[F64]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 256 / 32) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  d_range(0, 256 / 32) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -1961,8 +1961,16 @@ and the cells of `c`, the `Out`, are the grid. `d_range(0, 8) { k => .. }` is a 
 eight trips. The accumulator is a `Carry`, a device variable: `carry(zeros(c))` makes it,
 `acc.get()` reads it and `acc.set(..)` replaces it with a tile of the same shape.
 `zeros(c)` is a tile shaped like one cell of `c`, so the accumulator's shape is never
-written out, and `mmaf` reads m, k and n off its operands (a k on which `a` and `b`
-disagree is refused while recording).
+written out, and `mma` reads m, k and n off its operands (a k on which `a` and `b`
+disagree is refused while recording). It records Tile IR's `mmaf`, the float one.
+
+The two factors share a format, and the accumulator may have a wider one: with
+`a: Param[BF16]`, `b: Param[BF16]` and `c: Param[F32]` the same body multiplies bf16
+tiles into an f32 accumulator, which is how tensor cores are meant to be used. The pairs
+allowed are the dialect's (f16 and the 8-bit floats into f16 or f32, bf16, tf32 and f32
+into f32, f64 into f64), and any other pair is refused while recording, with the list.
+`t.to(BF16)` narrows a tile to another float format, and `t.transpose()` swaps the two
+dimensions of a matrix.
 
 The loop's body ran on the host, like the kernel's, and the record holds one `for`
 region; the device runs its eight trips. The loop carries what its body sets, and the
@@ -2026,7 +2034,8 @@ has the operation's rank, and a rank-0 tile widens to any shape. The second kern
 `keepdims`, so the maximum is a `[32]` tile, of another rank, and it is refused at the
 subtraction; the refusal names `subf`, the Tile IR operation `sub` records.
 `broadcast(t, shape)` is the explicit spelling, for a place that is not an element-wise
-operation, such as a loop's starting value.
+operation. A loop's starting value is usually `full(shape, value)`, a tile of that shape
+in the format it is checked against: `let m: Carry[F32] = carry(full([32, 1], 0.0))`.
 
 NumPy would have widened the `[32]` too. The reason not to is the case its rule gets
 wrong while looking right: reduce a square `[64, 64]` tile without `keepdims` and NumPy
@@ -2035,7 +2044,9 @@ of row j. Here that is refused, and `keepdims` is how a reduction says which axi
 
 Put this step in a loop over blocks of keys and values, carry a running maximum and a
 running sum, and it is FlashAttention: `flash_attn` in `scripts/tile-golden/kernels.dawn`
-is that loop, three carries and these same operations. The
+is that loop, three carries and these same operations, and `flash_attn_bf16` beside it
+is the same loop with bf16 inputs, f32 accumulators and `p.to(BF16)` before the second
+product. The
 [GPU page](https://dawn-lang.dawnop.com/gpu.html) shows what the backend records for
 kernels of that size, and how their answers on a device are checked.
 

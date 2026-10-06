@@ -17,14 +17,14 @@
 use std/list
 use std/map
 use std/str
-use std/gpu.{Gpu, F64, F32, F16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
+use std/gpu.{Gpu, F64, F32, F16, BF16, I32, I64, Dtype, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, dtype_name, EntryArg, Entry1, Entry2, Entry3, Entry4, Entry5,
   entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out, arg_shared, entry_grid }
-use dev.{Dev, Param, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
+use dev.{Dev, Param, Tile, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_for, d_range, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
-  float_to_float, sub, add_i, d_fork2, select, lt, arange, mmaf, rounding_name, Overflow, Padding, PadZero, padding_name,
+  float_to_float, sub, add_i, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
   idx_rem, idx_sub, extent_of, blocks_of }
@@ -147,7 +147,7 @@ pub type TileOp =
   | UnaryF(dst: Int, op: String, dtype: String, shape: List[Int], src: Int)
   | BinaryF(dst: Int, op: String, dtype: String, shape: List[Int], lhs: Int, rhs: Int)
   | Fma(dst: Int, dtype: String, shape: List[Int], lhs: Int, rhs: Int, acc: Int)
-  | MmaF(dst: Int, dtype: String, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
+  | MmaF(dst: Int, dtype: String, out: String, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
   | MmaFScaled(dst: Int, dtype: String, scale: String, m: Int, k: Int, n: Int, block: Int,
     lhs: Int, rhs: Int, acc: Int, lhs_scale: Int, rhs_scale: Int)
   | MmaI(dst: Int, m: Int, k: Int, n: Int, lhs: Int, rhs: Int, acc: Int)
@@ -1002,6 +1002,45 @@ fn check_k(name: String, frames: List[Frame], ops: List[TileOp], held: Map[Int, 
         refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, which is not a matrix")
       } else if x.shape[axis] != k {
         refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, whose K (dimension ${axis}) is ${x.shape[axis]}, declared k = ${k}")
+      } else {
+        ()
+      }
+    None -> ()
+  }
+
+## The accumulator formats the dialect's `mmaf` allows over operands of
+## `dtype` (Ops.td's MmaFOp table, tileir 0.10.0), or none for a format it
+## does not take as an operand at all. What `dev.mma` is held to.
+pub fn mma_accumulators(dtype: String) -> List[String] =
+  if dtype == "f8E4M3FN" || dtype == "f8E5M2" || dtype == "f16" {
+    ["f16", "f32"]
+  } else if dtype == "bf16" || dtype == "tf32" || dtype == "f32" {
+    ["f32"]
+  } else if dtype == "f64" {
+    ["f64"]
+  } else {
+    []
+  }
+
+# An `mma` of `dtype` operands into an `out` accumulator against that table,
+# which the message spells out whole: the pair is the caller's choice, and
+# the table is what to choose from.
+fn check_mma_pair(name: String, frames: List[Frame], ops: List[TileOp], dtype: String, out: String) -> Unit =
+  if list.any(mma_accumulators(dtype), a => a == out) {
+    ()
+  } else {
+    refuse_at(name, frames, ops, "mmaf", "${dtype} operands with a ${out} accumulator is not a pair the dialect allows;"
+        ++ " it allows f8E4M3FN, f8E5M2 and f16 operands into f16 or f32, bf16, tf32 and f32 into f32, and f64 into f64")
+  }
+
+# One operand of an `mma` against the format it is declared to have. A
+# handle with no row is not compared, as in `check_operand`.
+fn check_format(name: String, frames: List[Frame], ops: List[TileOp], held: Map[Int, Held],
+  op: String, role: String, h: Int, dtype: String) -> Unit =
+  match tile_row(name, frames, ops, held, op, role, h) {
+    Some(x) ->
+      if x.dtype != dtype {
+        refuse_at(name, frames, ops, op, "${role} is ${tile_text(x.dtype, x.shape)}, declared ${dtype}")
       } else {
         ()
       }
@@ -2552,10 +2591,11 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         ops = ops ++ [Fma(d, dtype, shape, a, b, c)]
         d
       }
-      t_mmaf(dtype, m, k, n, a0, b0, c0) => {
+      t_mmaf(dtype, out, m, k, n, a0, b0, c0) => {
         check_shape(name, [m, k, n])
+        check_mma_pair(name, frames, ops, dtype, out)
         let (g0, ab) = settle_all(name, frames, grown(next, ops, held, spreads, pending), [a0, b0])
-        let (g, c) = widen(name, frames, g0, c0, dtype, [m, n])
+        let (g, c) = widen(name, frames, g0, c0, out, [m, n])
         next = g.next
         ops = g.ops
         held = g.held
@@ -2564,10 +2604,12 @@ fn record_calls(name: String, params: List[String], roles: List[Access], geoms: 
         let b = ab[1]
         check_k(name, frames, ops, held, "mmaf", "lhs", a, 1, k)
         check_k(name, frames, ops, held, "mmaf", "rhs", b, 0, k)
-        held = hold(held, next, dtype, [m, n])
+        check_format(name, frames, ops, held, "mmaf", "rhs", b, dtype)
+        check_format(name, frames, ops, held, "mmaf", "accumulator", c, out)
+        held = hold(held, next, out, [m, n])
         let d = next
         next = mint(name, next, 1)
-        ops = ops ++ [MmaF(d, dtype, m, k, n, a, b, c)]
+        ops = ops ++ [MmaF(d, dtype, out, m, k, n, a, b, c)]
         d
       }
       t_mmaf_scaled(dtype, scale, dims, a0, b0, c0, sa0, sb0) => {
@@ -4113,7 +4155,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   UnaryF(dst, _op, _dtype, _shape, _src) -> [dst]
   BinaryF(dst, _op, _dtype, _shape, _lhs, _rhs) -> [dst]
   Fma(dst, _dtype, _shape, _lhs, _rhs, _acc) -> [dst]
-  MmaF(dst, _dtype, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
+  MmaF(dst, _dtype, _out, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
   MmaFScaled(dst, _dtype, _scale, _m, _k, _n, _block, _lhs, _rhs, _acc, _lhs_scale, _rhs_scale) -> [dst]
   MmaI(dst, _m, _k, _n, _lhs, _rhs, _acc) -> [dst]
   CmpF(dst, _pred, _dtype, _shape, _lhs, _rhs) -> [dst]
@@ -5290,7 +5332,7 @@ test "knife C1': an mma whose operands disagree on K is refused, by the right-ha
     let a = load(x, zero, [16, 8])
     let b = load(x, zero, [16, 16])
     let c = load(x, zero, [16, 16])
-    let _d = mmaf(a, b, c)
+    let _d = mma(a, b, c)
     ()
   })
   # the surface reads K off the left operand, so the right one is the side
@@ -5302,7 +5344,7 @@ test "knife C1': an mma whose operands disagree on K is refused, by the right-ha
     let zero = t_idx_const(0)
     let a = t_load(0, "f64", zero, [16, 8], [8, 1], None, None, [])
     let c = t_load(0, "f64", zero, [16, 16], [16, 1], None, None, [])
-    let _d = t_mmaf("f64", 16, 16, 16, a, c, c)
+    let _d = t_mmaf("f64", "f64", 16, 16, 16, a, c, c)
     let _x = x
     ()
   })
@@ -5786,7 +5828,7 @@ test "PR-1: the named folds over an integer tile fold with integer operations an
 # matmul over cells: A's K and B's K are the loop's.
 fn mm_cells(a: Param[F16], b: Param[F16], c: Param[F16]) -> Unit !Dev = {
   let acc = carry(zeros(c))
-  d_range(0, 2) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }
+  d_range(0, 2) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }
   store_cell(c, acc.get())
 }
 
@@ -5805,7 +5847,7 @@ test "PR-1: load_at names the cells of the dimensions that follow no axis, zeros
   })) == 2
   # m, k and n are the operands' own
   assert len(ops_where(p.ops, o => match o {
-    MmaF(_d, "f16", 64, 32, 64, _a, _b, _c) -> true
+    MmaF(_d, "f16", "f16", 64, 32, 64, _a, _b, _c) -> true
     _ -> false
   })) == 1
   assert str.starts_with(marked(() => trace3("mm", In(F16, ga), In(F16, gb), Out(F16, gc), (a, _b, c) => {
@@ -5969,13 +6011,71 @@ test "C3': a carry that starts as a bare constant and is set to a tile is refuse
   })), "`carry`: a carry starts from a tile with a format of its own")
 }
 
+test "tileir 0.10: mma takes bf16 operands into an f32 accumulator, and a lit accumulator is made in the accumulator's format" {
+  let p = trace_kernel("mixed", ["bf16", "f32"], () => {
+    let x = param(BF16, 0)
+    let out = param(F32, 1)
+    let a = load(x, idx_const(0), [16, 16])
+    let c: Tile[F32] = mma(a, transpose(a), lit(0.0))
+    store(out, idx_const(0), c)
+  })
+  assert len(ops_where(p.ops, o => match o {
+    MmaF(_d, "bf16", "f32", 16, 16, 16, _a, _b, _c) -> true
+    _ -> false
+  })) == 1
+  assert len(ops_where(p.ops, o => match o {
+    ConstF(_d, "f32", [16, 16], 0.0) -> true
+    _ -> false
+  })) == 1
+}
+
+test "tileir 0.10: an mma pair outside the dialect's table is refused with the table" {
+  let r = refused_as("pair", () => {
+    let x = param(F32, 0)
+    let a: Tile[BF16] = float_to_float(load(x, idx_const(0), [16, 16]), BF16)
+    let _c = mma(a, a, f_const(F16, 0.0))
+    ()
+  })
+  assert str.contains(r, "`mmaf`: bf16 operands with a f16 accumulator is not a pair the dialect allows;"
+      ++ " it allows f8E4M3FN, f8E5M2 and f16 operands into f16 or f32, bf16, tf32 and f32 into f32, and f64 into f64")
+  assert mma_accumulators("f16") == ["f16", "f32"]
+  assert mma_accumulators("tf32") == ["f32"]
+  assert mma_accumulators("f8E8M0FNU") == []
+}
+
+test "tileir 0.10: full is broadcast of f_const, transpose is permute_tile [1, 0], and to its own format records nothing" {
+  let k1 = (spelt: Bool) => trace_kernel("same", ["f64", "f64"], () => {
+    let x = param(F64, 0)
+    let out = param(F64, 1)
+    let a = load(x, idx_const(0), [16, 8])
+    let z: Tile[F64] = if spelt { full([8, 16], 2.0) } else { broadcast(f_const(F64, 2.0), [8, 16]) }
+    let t = if spelt { transpose(a).to(F64) } else { permute_tile(a, [1, 0]) }
+    store(out, idx_const(0), add(t, z))
+  })
+  assert k1(true) == k1(false)
+  let p = trace_kernel("narrow", ["f32", "bf16"], () => {
+    let x = param(F32, 0)
+    let out = param(BF16, 1)
+    store(out, idx_const(0), load(x, idx_const(0), [16]).to(BF16))
+  })
+  assert len(ops_where(p.ops, o => match o {
+    Convert(_d, "ftof", "f32", "bf16", [16], _a) -> true
+    _ -> false
+  })) == 1
+  assert str.contains(refused_as("t3", () => {
+    let x = param(F32, 0)
+    let _t = transpose(load(x, idx_const(0), [2, 4, 8]))
+    ()
+  }), "a permutation of a 3-dimensional tile has that many entries, got 2")
+}
+
 test "C3': a broadcast constant and a zero accumulator are one constant of the shape, and an mma widens a rank-0 accumulator" {
   let p = trace_kernel("acc", ["f16", "f16"], () => {
     let x = param(F16, 0)
     let out = param(F16, 1)
     let a = load(x, idx_const(0), [16, 16])
     let z = broadcast(f_const(F16, 0.0), [16, 16])
-    let c = mmaf(a, a, f_const(F16, 0.0))
+    let c = mma(a, a, f_const(F16, 0.0))
     store(out, idx_const(0), add(c, z))
   })
   assert list.filter(ops_where(p.ops, is_const), o => match o {

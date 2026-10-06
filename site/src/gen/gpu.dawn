@@ -1,5 +1,5 @@
 # The cuTile backend's page, gpu.html: the two layers, how a kernel is
-# written against tileir 0.9.0, a kernel lined up line by line with the Tile
+# written against tileir 0.10.0, a kernel lined up line by line with the Tile
 # IR it records, the three coverage tables, the three
 # gates and the mutants they catch, and the last line of every device ledger.
 #
@@ -36,7 +36,7 @@
 # or the build stops.
 #
 # Why the section on writing a kernel is cut, not written. It shows what
-# tileir 0.9.0 asks of a kernel (markers that are the addressing, shapes read
+# tileir 0.10.0 asks of a kernel (markers that are the addressing, shapes read
 # off operands, rank-0 and same-rank widening, writes only through `Out`, `Shared` as the
 # escape hatch, reductions that keep their dimension) with code the gates
 # hold: golden kernels of kernels.dawn, the dispatch arms that trace them
@@ -1574,7 +1574,8 @@ test "flash_attn lines up with its golden, call by call" {
 # owned once. A constant writes nothing where it is called and is made where
 # it is used (tileir 0.8.0), so `f_const` and `lit` are for no line at all,
 # and a call that takes one may end in it: `broadcast` of a constant is that
-# constant at the wider shape, and `mmaf` and `mul` write theirs just ahead
+# constant at the wider shape (and `full` is that broadcast), and `mma` and
+# `mul` write theirs just ahead
 # of the operation. A reduction with `keepdims` ends in the reshape that
 # keeps the dimension. `carry`, `get` and `set` record nothing (tileir
 # 0.9.0): what a carry is, is the loop's block arguments and its `continue`,
@@ -1592,8 +1593,10 @@ fn ops_for(name: String) -> List[String] =
     "get" -> []
     "set" -> []
     "broadcast" -> ["broadcast", "constant"]
+    "full" -> ["constant"]
     "permute_tile" -> ["permute"]
-    "mmaf" -> ["mmaf"]
+    "transpose" -> ["permute"]
+    "mma" -> ["mmaf"]
     "mul" -> ["mulf"]
     "sub" -> ["subf"]
     "add" -> ["addf"]
@@ -1714,7 +1717,7 @@ test "the facts beside the map are the map's and the files' numbers" {
       }
     assert kf.bytes == size
     assert kf.lines == len(m.ir)
-    assert kf.calls == 39
+    assert kf.calls == 37
     for v in [m.ops, len(m.ir), size, len(m.calls)] {
       assert str.contains(p, "<b>${v}</b>")
     }

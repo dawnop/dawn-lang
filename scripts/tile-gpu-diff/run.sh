@@ -1104,7 +1104,7 @@ sequenced=(lora_base lora_hidden lora_out attn_scores attn_softmax attn_context
   ols_gram ols_elim ols_beta
   gpt_ln gpt_qkv gpt_scores gpt_context gpt_dense gpt_fc gpt_gelu gpt_down
   llama_rms llama_qkv llama_rope llama_scores llama_out llama_ffn llama_down
-  flash_attn)
+  flash_attn flash_attn_bf16)
 
 # `vadd` is assembled with the first milestone's pair above, so it is not in
 # `sequenced` (that list is what the assemble loop walks) but it IS the
@@ -2145,7 +2145,7 @@ cat "$work/seq.out"
 seq_verdict="$(verdict_of "$work/seq.out")"
 case "$seq_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the twenty-two multi-launch problems, the fused attention and the decoupled control agree with the fake device, sequence for sequence" ;;
+        echo "PASS  native: the twenty-two multi-launch problems, the fused attention at f64 and at bf16 and the decoupled control agree with the fake device, sequence for sequence" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $seq_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $seq_verdict" ;;
   fail) cat "$work/seq.err" >&2; fail "the device answered and disagreed with the fake device on a sequence (see the transcript above)" ;;
@@ -2394,9 +2394,10 @@ esac
 # it is two launches whose second does not read the first's output, and it
 # is the control that says the counter can print a zero at all. Without
 # it, "has never printed zero" and "cannot print zero" look the same.
-# `flash` is in neither list: it is ONE launch, so there is no earlier
-# launch for its answer to depend on, and its corpus claim is the
-# `probe flash` line held further down instead.
+# `flash` and `flash_bf16` are in neither list: each is ONE launch, so there
+# is no earlier launch for its answer to depend on, and their corpus claim
+# is the `probe flash` line held further down instead (the bf16 kernel reads
+# the same q, k and v, rounded to bf16).
 for s in lora attention matpow swiglu apsp causal alibi window sinks decay cce mha xattn gqa grpo kmeans \
   kv attnbwd linattn ols gpt2 llama; do
   seq_shape="$(awk -v want="$s" '$1 == "sequence" && $2 == want {f=1} f && /^  index /{print; exit}' "$work/seq.out")"
@@ -2515,20 +2516,21 @@ done
 # output nothing has written yet, and there is no second launch to reorder
 # or to hand the first one's grid.
 seq_reds="$seq_reds last-launch-dropped:flash"
+seq_reds="$seq_reds last-launch-dropped:flash_bf16"
 seq_reds="$seq_reds last-launch-dropped:decoupled"
 if [ "$seq_verdict" = pass ]; then
   seq_probe="$(sed -n 's/^probe mutants //p' "$work/seq.out" | tail -n 1)"
-  [ "$seq_probe" = "red=81 $seq_reds" ] ||
-    { printf 'wanted: red=81 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
+  [ "$seq_probe" = "red=82 $seq_reds" ] ||
+    { printf 'wanted: red=82 %s\ngot:    %s\n' "$seq_reds" "$seq_probe" >&2
       fail "the sequence mutants' red set moved"; }
-  echo "PASS  mutant: the four sequence mutants red on exactly 81 of the 96 (mutant, sequence) pairs, by name"
+  echo "PASS  mutant: the four sequence mutants red on exactly 82 of the 100 (mutant, sequence) pairs, by name"
   seq_controls="$(grep -c '^control intermediate-round-tripped ' "$work/seq.out" || true)"
   seq_controls_moved="$(grep -c '^control intermediate-round-tripped .* verdict differ:result$' "$work/seq.out" || true)"
-  if [ "$seq_controls" != 24 ] || [ "$seq_controls_moved" != 0 ]; then
+  if [ "$seq_controls" != 25 ] || [ "$seq_controls_moved" != 0 ]; then
     cat "$work/seq.out" >&2
     fail "the round-trip control moved a verdict: $seq_controls_moved of $seq_controls"
   fi
-  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (24 of 24)"
+  echo "PASS  control: sending an intermediate through the host and back changes no sequence's verdict (25 of 25)"
 else
   echo "SKIP  mutant: the sequence mutants are not verifiable on this driver: the clean run is $seq_verdict, before any launch reaches the device"
 fi
@@ -3065,8 +3067,8 @@ mutant_mma_src="$work/kernels-mma.dawn"
 cp "$golden/kernels.dawn" "$mutant_mma_src"
 before=$(digest "$mutant_mma_src")
 python3 "$here/mutate.py" "$mutant_mma_src" mma-acc-not-carried \
-  '  d_range(0, MM_K / MM_TK) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), acc.get())) }' \
-  '  d_range(0, MM_K / MM_TK) { k => acc.set(mmaf(load_at(a, [k]), load_at(b, [k]), zeros(c))) }'
+  '  d_range(0, MM_K / MM_TK) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), acc.get())) }' \
+  '  d_range(0, MM_K / MM_TK) { k => acc.set(mma(load_at(a, [k]), load_at(b, [k]), zeros(c))) }'
 after=$(digest "$mutant_mma_src")
 echo "      mma-acc-not-carried: scripts/tile-golden/kernels.dawn md5 $before -> $after"
 mkdir -p "$work/proj-mma/src"
