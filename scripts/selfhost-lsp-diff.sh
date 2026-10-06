@@ -142,6 +142,14 @@ pub fn floats() -> List[Float] = [1.5, 1.1]
 pub fn strings() -> List[String] = ["héllo\n", "n = ${MASK}"]
 EOF
 
+# A std opaque type written in a signature: hover names it, and definition
+# names the declaration's own name in std's file (#589).
+cat > "$OUT/proj/src/stdtype.dawn" <<'EOF'
+use std/cursor.{Cursor}
+
+pub fn keep(c: Cursor) -> Cursor = c
+EOF
+
 # Folded values on hover (docs/lsp-hover-design.md §C5): a closed, pure
 # expression shows its value after the type; one that names an outer local,
 # calls something with an effect, runs past the editor's fuel or depth, only
@@ -584,6 +592,16 @@ for needle, occ, delta in [
 ]:
     req("textDocument/hover", at(lits_uri, lits_text, needle, occ, delta))
 note("textDocument/didClose", tdoc(lits_uri))
+
+# a std opaque type: hover, then definition into std's file
+stdt_path = f"{out_dir}/proj/src/stdtype.dawn"
+stdt_uri = "file://" + stdt_path
+stdt_text = open(stdt_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": stdt_uri, "languageId": "dawn", "version": 1, "text": stdt_text}})
+req("textDocument/hover", at(stdt_uri, stdt_text, "c: Cursor", 1, 3))
+req("textDocument/definition", at(stdt_uri, stdt_text, "c: Cursor", 1, 3))
+note("textDocument/didClose", tdoc(stdt_uri))
 
 # folded values on hover
 evals_path = f"{out_dir}/proj/src/evals.dawn"

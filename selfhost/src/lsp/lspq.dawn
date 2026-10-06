@@ -1504,7 +1504,17 @@ fn alias_text(qc: QCx, name: String, opaque: Bool, target: Option[Ty]) -> String
 fn site_of_alias(qc: QCx, owner: String, name: String, nlo: Int, nhi: Int) -> Site = {
   let o = if owner == "" { qc.entry.class_name } else { owner }
   match holder_by_class(qc, o) {
-    Some(h) -> site_in(h, nlo, nhi, unwrap_or(decl_lo_named(h.m, name), nlo))
+    Some(h) -> {
+      # an alias an importer sees has no name span (`exported_alias` zeroes it),
+      # so the declaring module's own parse names where it is written
+      for d in h.m.decls {
+        match d {
+          DType(t) -> if t.name == name { return site_in(h, t.nlo, t.nhi, t.lo) }
+          _ -> ()
+        }
+      }
+      site_in(h, nlo, nhi, unwrap_or(decl_lo_named(h.m, name), nlo))
+    }
     None -> no_site()
   }
 }
