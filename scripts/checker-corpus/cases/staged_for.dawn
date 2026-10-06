@@ -1,0 +1,89 @@
+# checker.dawn: staged `for` refusals (docs/staged-for-design.md D6)
+pub effect Rec { fn emit(s: String) -> Unit }
+
+pub type Val = { name: String }
+pub type Slot = { tag: String }
+pub type Span = { n: Int }
+
+impl StagedIter[Span] {
+  type Item = Val
+  effect StagedIter = !Rec
+  fn staged_for(r: Span, body: fn(Val) -> Unit !Rec) -> Unit !Rec = body(Val { name: "i" })
+}
+
+impl StagedVar[Val] {
+  type Cell = Slot
+  effect StagedVar = !Rec
+  fn var_open(v: Val) -> Slot !Rec = Slot { tag: v.name }
+  fn var_get(c: Slot) -> Val !Rec = Val { name: c.tag }
+  fn var_set(c: Slot, v: Val) -> Unit !Rec = emit(c.tag ++ v.name)
+}
+
+pub type Both = { n: Int }
+
+impl Iter[Both] {
+  type Cur = Int
+  type Item = Int
+  fn iter_start(it: Both) -> Int = 0
+  fn iter_done(it: Both, c: Int) -> Bool = c >= it.n
+  fn iter_next(it: Both, c: Int) -> Int = c + 1
+  fn iter_get(it: Both, c: Int) -> Int = c
+}
+
+impl StagedIter[Both] {
+  type Item = Int
+  effect StagedIter = !Rec
+  fn staged_for(r: Both, body: fn(Int) -> Unit !Rec) -> Unit !Rec = body(0)
+}
+
+pub fn host_written(r: Span) -> Int !Rec = {
+  var n = 0
+  for x in r { n = n + 1 }
+  n
+}
+
+pub fn host_read(r: Span) -> Unit !Rec = {
+  var n = 0
+  for x in r { emit(to_string(n)) }
+}
+
+pub fn jumps(r: Span) -> Option[Int] !Rec = {
+  for x in r {
+    if x.name == "a" { break }
+    if x.name == "b" { continue }
+    if x.name == "c" { return Some(2) }
+    let y = Some(1)?
+  }
+  None
+}
+
+pub fn captured(r: Span) -> Unit !Rec = {
+  var acc = Val { name: "acc" }
+  for x in r {
+    let f = () => acc
+    let g = (v: Val) => { acc = v }
+  }
+}
+
+pub fn ambiguous(b: Both) -> Unit !Rec = {
+  for x in b { emit("x") }
+}
+
+pub fn effect_leak(r: Span) -> Unit !(Rec | io) = {
+  for x in r { println(x.name) }
+}
+
+pub fn inner_var_ok(r: Span) -> Unit !Rec = {
+  for x in r {
+    var k = 0
+    k = k + 1
+  }
+}
+
+# generic over both traits: the body charges T.StagedVar, which the iterator's
+# row T.StagedIter does not declare, so this is refused (docs/staged-for-design.md §7)
+pub fn generic_carry[T: StagedIter + StagedVar](t: T, f: fn(T) -> T) -> T !(T.StagedIter | T.StagedVar) = {
+  var acc = t
+  for i in t { acc = f(acc) }
+  acc
+}

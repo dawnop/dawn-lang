@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ eaad6c511a5d89b8 -->
+<!-- doc-check: translation-of docs/history.md @ 3651652ff39da028 -->
 
 # 历史
 
@@ -166,6 +166,10 @@
 - **2026-10-06。** 数字字面量按期望定型：`let f: Float = 1` 与 `3.14159 * 2 * r` 都能编译，
   程序自己的类型经 `FromInt`、`FromFloat` 接收字面量，纯 impl 在编译期执行，所以 `let b: U8 = 300`
   是编译错误，而范围写在库里（已在 main，尚未发版）。（[literal-system-design.md](literal-system-design.md)）
+- **2026-10-06。** 对实现了 `StagedIter` 的类型写 `for`，循环体作为闭包交给库；体中提到的每个外层 `var`
+  经库通过 `StagedVar` 选定的格子传递，按声明序打开。被记录的设备循环因此可以写成普通 `for` 加普通 `var`。
+  `StagedIter` 与 `StagedVar` 从此不能再用作 `trait` 或 `effect` 的名字（已在 main，尚未发版）。
+  （[staged-for-design.md](staged-for-design.md)）
 
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
 

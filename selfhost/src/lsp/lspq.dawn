@@ -44,7 +44,7 @@ use check/tast.{
   x_lo, x_hi, tex_ty
 }
 use check/types.{
-  Ty, TyAdt, TyFn, Sig, Sym, CtorI,
+  Ty, TyAdt, TyFn, Sig, Sym, CtorI, STAGED_VAR_ID, STAGED_ITER_ID,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -2619,6 +2619,81 @@ fn walk_rest(qc: QCx, q0: Q, rest: Expr, trest: Option[TExpr]) -> Q = {
   }
 }
 
+# ---- staged `for` ----
+#
+# A staged `for` has no typed node of its own either: the checker rewrites it
+# (`check.checker.check_staged_for`, docs/staged-for-design.md) into a block
+# that binds the subject, opens one cell per carried `var`, calls
+# `staged_for` with the body as a closure, and reads the cells back. Inside
+# the body a carried `var` is read as `var_get` on its cell and written as
+# `var_set`. The cell's symbol carries the `var`'s own declaration span, so
+# answering with it lands hover, definition, references and rename on the
+# `var` the author wrote.
+
+## The typed pieces of a staged loop: the pattern, the subject and the body,
+## in the shape the walkers pair with `SFor`. `None` for any other shape.
+fn staged_for_parts(ts: Option[TStmt], pat: Pattern) -> Option[(TPat, TExpr, TExpr)] = {
+  let stmts = match ts {
+    Some(TSExpr(XBlock(ss, None, _, _, _), _, _)) -> ss
+    _ -> return None
+  }
+  let tfrom = match get(stmts, 0) {
+    Some(TSLet(Some(_), _, init, _, _)) -> init
+    _ -> return None
+  }
+  for st in stmts {
+    match st {
+      TSExpr(XCallFn(_, _, [_, XLambda(psyms, _, tbody, _, _, _, _)], _, _, Some(tid), _, _, _, _), _, _) ->
+        if tid == STAGED_ITER_ID {
+          match pat {
+            PBind(name, _, _) ->
+              match get(psyms, 0) {
+                Some(psym) -> return Some((TPBind(psym, name), tfrom, tbody))
+                None -> return None
+              }
+            _ ->
+              match tbody {
+                XBlock([TSLetPat(tp, _, _, _)], Some(inner), _, _, _) -> return Some((tp, tfrom, inner))
+                _ -> return None
+              }
+          }
+        }
+      _ -> ()
+    }
+  }
+  None
+}
+
+## The cell a staged `var_get` or `var_set` goes through, if `x` is one.
+fn staged_cell_use(x: TExpr) -> Option[(Int, List[TExpr])] =
+  match x {
+    XCallFn(_, _, args, _, _, Some(tid), _, _, _, _) ->
+      if tid == STAGED_VAR_ID {
+        match get(args, 0) {
+          Some(XLocal(sid, _, _, _, _)) -> Some((sid, args))
+          _ -> None
+        }
+      } else {
+        None
+      }
+    _ -> None
+  }
+
+## A carried `var` at one of its spellings inside a staged body, at the
+## value type `ty`. `assigned`: the name is the target of a write.
+fn offer_staged(qc: QCx, q0: Q, sid: Int, ty: Ty, lo: Int, hi: Int, assigned: Bool) -> Q =
+  match sym_get(qc, sid) {
+    Some(sym) -> {
+      let hover = "var " ++ sym.name ++ ": " ++ show_ty(qc, ty)
+      if assigned {
+        offer_assigned(q0, lo, hi, hover, (sym.dlo, sym.dhi))
+      } else {
+        offer(q0, lo, hi, hover, Some((sym.dlo, sym.dhi)), None)
+      }
+    }
+    None -> q0
+  }
+
 # ---- literals (docs/lsp-hover-design.md §4) ----
 
 ## A literal's type, then the value line `lspv` renders for it, both in the one
@@ -2702,6 +2777,15 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
             }
           }
         }
+        # a `var` a staged loop carries, read through its cell
+        Some(XCallFn(_, _, _, _, _, _, _, _, _, ty)) ->
+          match staged_cell_use(te.unwrap_or(XUnit(0, 0))) {
+            Some(cu) -> {
+              let (sid, _) = cu
+              q = offer_staged(qc, q, sid, ty, lo, hi, false)
+            }
+            None -> ()
+          }
         # no typed node: a qualified access's receiver, which the checker
         # never typed because it is a module alias rather than a value
         None -> { q = offer_module_alias(qc, q, name, lo, hi) }
@@ -3671,7 +3755,23 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
               }
               q = walk_e(qc, q, value, get(cargs, 1))
             }
-            None -> { q = walk_e(qc, q, value, None) }
+            None ->
+              # a `var` a staged loop carries, written through its cell
+              match staged_cell_use(x) {
+                Some(cu) -> {
+                  let (sid, sargs) = cu
+                  let vt = match get(sargs, 1) {
+                    Some(v) -> Some(v)
+                    None -> None
+                  }
+                  match vt {
+                    Some(v) -> { q = offer_staged(qc, q, sid, tex_ty(v), nlo, nhi, true) }
+                    None -> ()
+                  }
+                  q = walk_e(qc, q, value, vt)
+                }
+                None -> { q = walk_e(qc, q, value, None) }
+              }
           }
         _ -> { q = walk_e(qc, q, value, None) }
       }
@@ -3710,15 +3810,24 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           }
           q = walk_e(qc, q, body, Some(tbody))
         }
-        _ -> {
-          q = visit_pat(qc, q, pat, None)
-          q = walk_e(qc, q, from, None)
-          match to {
-            Some(e) -> { q = walk_e(qc, q, e, None) }
-            None -> ()
+        _ ->
+          match staged_for_parts(ts, pat) {
+            Some(parts) -> {
+              let (tpat, tfrom, tbody) = parts
+              q = visit_pat(qc, q, pat, Some(tpat))
+              q = walk_e(qc, q, from, Some(tfrom))
+              q = walk_e(qc, q, body, Some(tbody))
+            }
+            None -> {
+              q = visit_pat(qc, q, pat, None)
+              q = walk_e(qc, q, from, None)
+              match to {
+                Some(e) -> { q = walk_e(qc, q, e, None) }
+                None -> ()
+              }
+              q = walk_e(qc, q, body, None)
+            }
           }
-          q = walk_e(qc, q, body, None)
-        }
       }
     }
     _ -> ()
@@ -4203,7 +4312,7 @@ fn collect_s(
       }
       acc = collect_e(qc, acc, init, tinit, before)
     }
-    SFor(_, from, to, body, _, _) -> {
+    SFor(pat, from, to, body, _, _) -> {
       let (tpat, tfrom, tto, tbody) = match ts {
         Some(TSFor(tp, _, tf, tt, _, tb, _, _, _)) -> (Some(tp), Some(tf), tt, Some(tb))
         _ -> {
@@ -4211,7 +4320,13 @@ fn collect_s(
           let n2: Option[TExpr] = None
           let n3: Option[TExpr] = None
           let n4: Option[TExpr] = None
-          (n1, n2, n3, n4)
+          match staged_for_parts(ts, pat) {
+            Some(parts) -> {
+              let (sp, sf, sb) = parts
+              (Some(sp), Some(sf), n3, Some(sb))
+            }
+            None -> (n1, n2, n3, n4)
+          }
         }
       }
       if e_lo(from) <= before && before <= e_hi(from) {

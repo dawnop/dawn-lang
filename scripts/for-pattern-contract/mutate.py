@@ -199,13 +199,13 @@ MUTATIONS = {
       None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
     }
   }
-  let d = len(cx1.frame.loop_stack)
+  (cx1, tp)
 ''',
             '''      Some(false) -> ()
       None -> ()
     }
   }
-  let d = len(cx1.frame.loop_stack)
+  (cx1, tp)
 ''',
         ),),
     ),

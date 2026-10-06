@@ -4763,6 +4763,67 @@ test "an operator over a type of its own keeps its operands' references and hove
   }))
 }
 
+test "a var a staged loop carries answers as the var at every spelling inside the body" {
+  # A staged `for` is checked as a `staged_for` call whose body is a closure,
+  # and every mention of a carried `var` in it as `var_get`/`var_set` on a
+  # cell (docs/staged-for-design.md). Hover, definition and references still
+  # name the `var` the author wrote, and the loop variable is a binding.
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = join([
+      "type V = { n: Int }",
+      "type C = { n: Int }",
+      "type R = { n: Int }",
+      "impl StagedIter[R] {",
+      "  type Item = V",
+      "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n: 0 })",
+      "}",
+      "impl StagedVar[V] {",
+      "  type Cell = C",
+      "  fn var_open(v: V) -> C = C { n: v.n }",
+      "  fn var_get(c: C) -> V = V { n: c.n }",
+      "  fn var_set(c: C, v: V) -> Unit = ()",
+      "}",
+      "fn g(a: V, b: V) -> V = a",
+      "fn f(r: R) -> V = {",
+      "  var acc = V { n: 1 }",
+      "  for j in r {",
+      "    acc = g(acc, j)",
+      "  }",
+      "  acc",
+      "}",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "staged.dawn", text)
+    let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
+    let decl = probe_offset(text, "acc = V", 0)
+    let write = probe_offset(text, "acc = g", 0)
+    let read = probe_offset(text, "acc, j", 0)
+    let after = probe_offset(text, "acc\n}", 0)
+    assert map(occurrences(qc, read, true), o => o.lo) == [decl, write, read, after]
+    assert map(occurrences(qc, write, true), o => o.write) == [true, true, false, false]
+    # the jump lands where it does from the ordinary read after the loop
+    let plain = def_probe_at(st, d, text, "acc\n}", 0)
+    assert plain.hover == "var acc: V"
+    let site = def_probe_span(plain, "the read after the loop")
+    let w = def_probe_at(st, d, text, "acc = g", 0)
+    assert w.hover == "var acc: V"
+    assert def_probe_span(w, "the carried write") == site
+    let r = def_probe_at(st, d, text, "acc, j", 0)
+    assert r.hover == "var acc: V"
+    assert def_probe_span(r, "the carried read") == site
+    let j = def_probe_at(st, d, text, "j)", 0)
+    assert j.hover == "let j: V"
+    let jdecl = probe_offset(text, "j in r", 0)
+    assert def_probe_span(j, "the loop variable") == (jdecl, jdecl + 1)
+  }))
+}
+
 test "on a constant's name the constant answers, on its literal the literal does" {
   io.with_fs_real(() => io.with_env_real(() => {
     let std = match load_std("std") {

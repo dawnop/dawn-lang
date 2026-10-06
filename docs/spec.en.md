@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3f0f507bc1c2d23a -->
+<!-- doc-check: translation-of docs/spec.md @ 054d554e1f171c9a -->
 
 # Dawn Language Specification
 
@@ -991,18 +991,20 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the five
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the ten whose method name the
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the twelve whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
   bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
   (consumed by `to_string` and `${...}`, §4.3), the six arithmetic traits
-  `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3) and `FromInt`/`FromFloat`
-  (consumed by numeric literals, §1.5).
-- **Fifteen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3), `FromInt`/`FromFloat`
+  (consumed by numeric literals, §1.5) and `StagedIter`/`StagedVar` (consumed by the staged
+  `for`, §4.7).
+- **Seventeen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
   `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Index` (behind `[]`, §4.8),
   `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
-  the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below), and
-  `FromInt`/`FromFloat` behind numeric literals (the entry after that).
+  the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below),
+  `FromInt`/`FromFloat` behind numeric literals (the entry after that), and
+  `StagedIter`/`StagedVar` behind the staged `for` (the entry after that).
   The impls for the scalars ship with the language;
   `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
   `Display` cannot be derived (the reason is under `Display` below).
@@ -1075,6 +1077,15 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   the compile-time rule of §1.5) and `FromFloat[Float]`, and no `FromFloat[Int]`. In generic code
   a `0` under `[T: FromInt]` is `from_int(0)`. Both names are taken in trait and effect position
   from now on as well.
+- **`StagedIter`** and **`StagedVar`** (behind the staged `for`, §4.7):
+  `trait StagedIter[R] { type Item  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter) -> Unit !R.StagedIter }`,
+  `trait StagedVar[T] { type Cell  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`.
+  The language consumes both traits' method names, so they do **not** enter the function
+  namespace. Neither can be derived. Each has one associated effect named like the trait and
+  pure by default, as the arithmetic and literal traits have, so generic code over a type that
+  implements both writes `!T.StagedIter` and `!T.StagedVar` without ambiguity. The language
+  provides no impl of either for any type. Both names are taken in trait and effect
+  position from now on as well.
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
   rule**: an impl can only be written in the module that declares the trait or the subject type.
   Impls take effect globally, no `use` needed.
@@ -1677,6 +1688,9 @@ xs |> map(x => x * x)             # parentheses optional for a single parameter
   dedicated diagnostic for this, not "expected `{`".
 - A closure captures bindings by value (capturing a `var` is a compile error — to share
   mutable state, pass it explicitly).
+- There are exactly two exceptions, and both are **cells**: a handler's cells (§6.5) and the
+  staged `for`'s cells (§4.7). Each crosses only the closures it is licensed for, as a cell, and
+  reads and writes go through the cell; every other closure is unchanged.
 - **Division of labour between the arrows (design verdict, 2026-07-31, deliberately not
   unified)**: `->` is the **clause arrow** and appears only in "declaration-shaped"
   positions — function types (§2.2) and match arms (§5.1); `=>` is the **expression arrow**,
@@ -1733,6 +1747,27 @@ while queue.non_empty() { ... }
   `[C: Iter]` in a generic function is equally `for`-able (dictionary forwarding). The
   iteration order is the impl's cursor order (`String` by code point, `Map`/`Set` the same
   as `entries`/`to_list`).
+- **Staged `for`**: when the type of `e` implements `StagedIter`, `for pattern in e { body }` is
+  not a host loop. It is handed to that impl's `staged_for`. `body` becomes a closure, and the
+  impl decides how to run it (tileir uses it to record a device loop). `e` is still evaluated
+  exactly once, in the outer scope, before any cell is opened. Each outer `var` the body
+  mentions, by reading or writing it, is resolved by scope and excludes `var`s the body
+  declares itself. Before the loop, each such `var` gets a cell (`StagedVar.var_open`), opened
+  in **declaration order**; inside the body its reads and writes go through the cell, and after
+  the loop it is read back. A nested staged loop reuses a cell the outer one has already opened.
+  The type of such a `var` must implement `StagedVar`, or it is a compile error (a host value
+  means nothing in a recorded body). An ordinary lambda in the body cannot capture a carried
+  name. `break`/`continue`/`return`/`?` cannot leave a staged body. The body may perform only
+  the effects `StagedIter[R]` declares. A range `a..b` is always a host loop, and a type that
+  implements both `Iter` and `StagedIter` cannot be iterated by `for`.
+
+  ```dawn
+  var acc = zeros(o)                    # Tile[F64]; tileir provides StagedVar[Tile[D]]
+  for k in d_range(0, K / T) {          # tileir provides StagedIter[DRange]
+    acc = mmaf(load_at(a, [k]), load_at(b, [k]), acc)
+  }
+  store_cell(o, acc)
+  ```
 - `for pattern in a..b` supports half-open integer ranges (not via `Iter`, with `Int` items).
   `a` is evaluated before `b`; each bound is evaluated exactly once, and both are evaluated
   before the loop starts.
@@ -1880,7 +1915,8 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
   `with` can be neither assigned nor read in the rest of the block after it; a `var` declared
   **after** the `with` belongs to the sugared region itself and is unaffected. To carry a value
   from before the sugared region into it, bind a snapshot with `let` first, or pass it in as a
-  parameter.
+  parameter. The staged `for` (§4.7) is another closure the author did not write, and the only
+  outer `var`s it can reach are the ones that can be carried in a cell.
 
   ```dawn
   var n = 1

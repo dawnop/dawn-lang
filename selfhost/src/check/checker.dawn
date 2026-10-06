@@ -70,6 +70,7 @@ use check/types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
   NEG_ID, is_arith_trait, arith_trait_name, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
+  STAGED_ITER_ID, STAGED_VAR_ID,
   head_of, impl_at, has_impl_at,
   is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld, PkgDep
@@ -84,7 +85,7 @@ use check/cx.{
   label_eff,
   ExportDiagnostic,
   write_symbol, write_signature, write_bounds,
-  AliasE, Cx, Frame, LambdaCx, LocalFn, ModExports, package_of, pkg_private, pkg_private_export,
+  AliasE, Cx, Frame, LambdaCx, LocalFn, StagedCell, ModExports, package_of, pkg_private, pkg_private_export,
   pkg_private_err, private_name_diagnostic, moved_module_key,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
@@ -392,7 +393,8 @@ fn ev_expr(
 test "evidence reads preserve distinct origins behind the same runtime key" {
   let base = push_scope(test_cx())
   let closure = LambdaCx { boundary: len(base.frame.scopes), expected_ret: None,
-    captures: [], sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None }
+    captures: [], sugar: false, arm: false, ctl: false, local_fn: None, handler_of: None,
+    staged_loop: false, staged: map.empty() }
   let origins: List[EvidenceRole] = [LabelSlot(71), VariableSlot(72),
     AssociatedSlot(73, 74, "E"), AssociatedSlot(75, 74, "E"), AssociatedSlot(75, 74, "F")]
   for origin in origins {
@@ -2335,6 +2337,10 @@ pub(pkg) fn capture_cell_msg(lc: LambdaCx, name: String) -> (String, String) =
 ## target type or errors. Returns Some(target) when a value should be checked
 ## against it, None when the return is malformed (already reported).
 pub(pkg) fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
+  if in_staged_body(cx) {
+    let (msg, hint) = staged_jump_msg("return")
+    return (cerr_h(cx, msg, lo, hi, hint), None)
+  }
   if len(cx.frame.lambda_stack) > 0 {
     # A `with` region is refused outright rather than quietly returning from the
     # synthesized closure: that reads as the enclosing function's return only
@@ -2379,6 +2385,10 @@ pub(pkg) fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) 
   }
   let depth = cx.frame.loop_stack[len(cx.frame.loop_stack) - 1]
   if depth != len(cx.frame.lambda_stack) {
+    if in_staged_body(cx) {
+      let (msg, hint) = staged_jump_msg(kw)
+      return (cerr_h(cx, msg, lo, hi, hint), false)
+    }
     if in_with_sugar(cx) {
       let hint = if in_control_arm(cx) {
         # a control arm is further from the loop still: it does not run where
@@ -2431,6 +2441,10 @@ pub(pkg) fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: I
   let node = (t: Ty) => XPropagate(operand, owner_off(cx, lo), owner_off(cx, hi), t)
   # inside a lambda, ? returns from the lambda — its return type must be known
   var sig_ret = TyError
+  if in_staged_body(cx) {
+    let (msg, hint) = staged_jump_msg("?")
+    return (cerr_h(cx, msg, lo, hi, hint), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
   if len(cx.frame.lambda_stack) > 0 {
     let lc = cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1]
     sig_ret = match lc.expected_ret {
@@ -2574,7 +2588,9 @@ test "loop jumps respect lambda boundaries" {
         arm: false,
         ctl: false,
         local_fn: None,
-        handler_of: None
+        handler_of: None,
+        staged_loop: false,
+        staged: map.empty()
       }]
     }
   }
@@ -4005,7 +4021,9 @@ test "an isolated context reports its own effects, then restores all ten fields"
       dict_syms: outer_dicts,
       lambda_stack: [LambdaCx {
         boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
-        ctl: false, local_fn: None, handler_of: None
+        ctl: false, local_fn: None, handler_of: None,
+        staged_loop: false,
+        staged: map.empty()
       }],
       loop_stack: [7],
       isolated: false,
@@ -4423,7 +4441,9 @@ fn eta_bounded_fn_value(
     arm: false,
     ctl: false,
     local_fn: None,
-    handler_of: None
+    handler_of: None,
+    staged_loop: false,
+    staged: map.empty()
   }
   var cx1 = Cx {
     ..cx,
@@ -6644,6 +6664,13 @@ pub(pkg) fn resolve_local(
     match map.get(cx.frame.scopes[i], name) {
       Some(id) -> {
         let sym = sym_of(cx, id)
+        # an outer `var` inside a staged body is carried by a cell, not
+        # captured (docs/staged-for-design.md D4); the name still resolves to
+        # the `var` itself
+        if sym.mutable && cell_hid(sym) == None && sym.ev_of == None {
+          let from = staged_entry_frame(cx.frame.lambda_stack, i)
+          if from >= 0 { return (resolve_staged(cx, id, sym, i, from, lo, hi), Some(id)) }
+        }
         var cx1 = cx
         var stack: List[LambdaCx] = []
         for lc in cx1.frame.lambda_stack {
@@ -6803,6 +6830,10 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
   match found {
     Some(id) -> {
       let sym = sym_of(cx1, id)
+      match staged_cell_of(cx1, id) {
+        Some(sc) -> return staged_read(cx1, sc, name, lo, hi)
+        None -> ()
+      }
       match sym.cell_of {
         # A handler state cell reads through its slot, and the expression's
         # type is what the slot holds, not the slot. `sym.ty` is the erased
@@ -6962,7 +6993,9 @@ fn check_lambda(
       arm: arm,
       ctl: ctl,
       local_fn: local_fn,
-      handler_of: handler_of
+      handler_of: handler_of,
+      staged_loop: false,
+      staged: map.empty()
     }
   cx1 = Cx {
     ..cx1,
@@ -8392,6 +8425,10 @@ fn check_assign(
     }
     Some(sid) -> {
       let sym = sym_of(cx1, sid)
+      match staged_cell_of(cx1, sid) {
+        Some(sc) -> return staged_write(cx1, sc, name, value, nlo, nhi, lo, hi)
+        None -> ()
+      }
       match sym.cell_of {
         # A handler state cell is written through its slot, so this is a
         # `cell_set` and not a `TSAssign`: the binding itself never
@@ -8490,6 +8527,9 @@ fn check_for(
   var cx1 = cx
   let (cxa, ft, fx) = check_expr(cx1, from, no_expected())
   cx1 = cxa
+  if to_opt == None && has_trait_at(cx1, STAGED_ITER_ID, ft) {
+    return check_staged_for(cx1, pat, from, ft, fx, body, lo, hi)
+  }
   var loop_t = TyError
   var tx_to: Option[TExpr] = None
   var wit: Option[WitRef] = None
@@ -8537,23 +8577,8 @@ fn check_for(
     }
   }
   cx1 = push_scope(cx1)
-  let pat_diag_count = len(cx1.diags)
-  let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
+  let (cxc, tp) = check_for_pattern(cx1, pat, loop_t)
   cx1 = cxc
-  if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
-    match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [loop_t]) {
-      Some(true) -> {
-        let (plo, phi) = match refutable_span(cx1, pat) {
-          Some(sp) -> sp
-          None -> (pat_lo(pat), pat_hi(pat))
-        }
-        cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
-          "use match or filter before the loop to handle items this pattern does not match")
-      }
-      Some(false) -> ()
-      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
-    }
-  }
   let d = len(cx1.frame.loop_stack)
   let loops = cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)]
   cx1 = Cx { ..cx1, frame: Frame { ..cx1.frame, loop_stack: loops } }
@@ -8575,6 +8600,601 @@ fn check_for(
   }
   cx1 = pop_scope(cx1)
   (cx1, TSFor(tp, loop_t, fx, tx_to, wit, bx, hj, owner_off(cx, lo), owner_off(cx, hi)))
+}
+
+## The loop pattern of a `for`, bound into the scope the caller has pushed and
+## held to matching every item. Shared by the host loop and the staged one, so
+## the two refuse a refutable pattern in the same words.
+fn check_for_pattern(cx: Cx, pat: Pattern, loop_t: Ty) -> (Cx, TPat) = {
+  var cx1 = cx
+  let pat_diag_count = len(cx1.diags)
+  let (cxc, tp) = check_pattern(cx1, pat, loop_t, false)
+  cx1 = cxc
+  if not is_errorish(loop_t) && len(cx1.diags) == pat_diag_count {
+    match useful_result(cx1.adts, [[to_spat(tp)]], [SWild], [loop_t]) {
+      Some(true) -> {
+        let (plo, phi) = match refutable_span(cx1, pat) {
+          Some(sp) -> sp
+          None -> (pat_lo(pat), pat_hi(pat))
+        }
+        cx1 = cerr_h(cx1, "for pattern must match every item", plo, phi,
+          "use match or filter before the loop to handle items this pattern does not match")
+      }
+      Some(false) -> ()
+      None -> { cx1 = usefulness_too_complex(cx1, pat_lo(pat), pat_hi(pat)) }
+    }
+  }
+  (cx1, tp)
+}
+
+# ---- staged `for` (docs/staged-for-design.md) ----
+#
+# `for p in r { B }` where `r`'s type implements `StagedIter` is not a host
+# loop. The checker rewrites it, here and nowhere else, into nodes every later
+# layer already handles:
+#
+#   { let $staged = r                         # evaluated once, first
+#     let m$ = var_open(m)  ...               # one cell per carried `var`,
+#                                             # in declaration order
+#     staged_for($staged, ($item) => { let p = $item; B' })
+#     m = var_get(m$)  ... }                  # read back, same order
+#
+# where `B'` reads `m` as `var_get(m$)` and writes it as `var_set(m$, v)`.
+# Lowering and both backends see a block, lets, trait calls and a lambda.
+#
+# Which `var`s are carried is found while `B` is checked, not before: the
+# first mention of an outer `var` that crosses the staged closure mints its
+# cell (`resolve_local`). The scope answer is therefore the checker's own,
+# shadowing included, and a method name that happens to spell a `var` is not
+# a mention (an up-front `name_refs` pass would have counted it). The order
+# the cells are opened in is the `var`s' declaration order, sorted after the
+# body, so the order the body happens to mention them in never leaks into it.
+
+## Does `t` have an impl of `tid`, without resolving or reporting anything? A
+## rigid parameter answers through its bounds, an opaque type for itself and
+## then through its target, as `resolve_witness` does.
+fn has_trait_at(cx: Cx, tid: Int, t: Ty) -> Bool =
+  match t {
+    TyVar(_, vid) -> map.get(cx.frame.dict_syms, (vid, tid)) != None
+    TyOpaque(_, _, _, _, tgt) -> has_impl_at(cx.impl_table, tid, t) || has_trait_at(cx, tid, tgt)
+    _ -> head_of(t) != None && has_impl_at(cx.impl_table, tid, t)
+  }
+
+## A local the rewrite needs and nobody can name: minted and recorded, never
+## put in a scope, so no spelling reaches it.
+fn hidden_local(cx: Cx, name: String, ty: Ty, lo: Int, hi: Int) -> (Cx, Int) = {
+  let (cx1, id) = fresh(cx)
+  (write_symbol(cx1, id, Sym {
+    name: name,
+    ty: ty,
+    mutable: false,
+    dlo: owner_off(cx, lo),
+    dhi: owner_off(cx, hi),
+    dict_of: None,
+    ev_of: None,
+    cell_of: None
+  }), id)
+}
+
+## The cell carrying `var` `id` through the staged body being checked,
+## if one is open on the closure stack. Every staged frame that holds it holds
+## the same cell, so the first one found answers.
+fn staged_cell_of(cx: Cx, id: Int) -> Option[StagedCell] = {
+  for lc in cx.frame.lambda_stack {
+    match map.get(lc.staged, id) {
+      Some(sc) -> return Some(sc)
+      None -> ()
+    }
+  }
+  None
+}
+
+## The cell for the `var` `id`, minted at its first mention `lo..hi` inside a
+## staged body. A type with no `StagedVar` impl is refused here, once: a host
+## value in a recorded body would be computed when the body is recorded, not
+## on each iteration, and silently be wrong (D1, D6). The refusal is kept in
+## the frame as a cell with no witness, so later mentions are error nodes
+## without a second diagnostic.
+##
+## The cell's symbol shares the `var`'s declaration span, so a reader of the
+## typed tree (the language server) that follows it lands on the `var`.
+fn mint_staged_cell(cx: Cx, id: Int, sym: Sym, lo: Int, hi: Int) -> (Cx, StagedCell) = {
+  let t = sym.ty
+  let refused = StagedCell { orig: id, cell: id, ty: t, wit: None, use_lo: lo, use_hi: hi }
+  if is_errorish(t) { return (cx, refused) }
+  if not has_trait_at(cx, STAGED_VAR_ID, t) {
+    let ts = ty_show(cx.adts, t)
+    return (cerr_h(cx, "`" ++ sym.name ++ "` is a `var` of type " ++ ts ++
+        ", which a staged loop cannot carry (no `StagedVar[" ++ ts ++ "]`)", lo, hi,
+      "the body is recorded rather than run once per iteration; compute it with a `let` " ++
+        "before the loop, or declare the `var` inside the body"), refused)
+  }
+  let (cx1, w) = resolve_witness(cx, STAGED_VAR_ID, t, lo, hi, "a staged loop")
+  if w == None { return (cx1, refused) }
+  let cell_ty = reduce_assoc(cx1, TyAssoc(t, STAGED_VAR_ID, "Cell"))
+  let (cx2, cid) = fresh(cx1)
+  let cx3 = write_symbol(cx2, cid, Sym {
+    name: sym.name,
+    ty: cell_ty,
+    mutable: false,
+    dlo: sym.dlo,
+    dhi: sym.dhi,
+    dict_of: None,
+    ev_of: None,
+    cell_of: None
+  })
+  (cx3, StagedCell { orig: id, cell: cid, ty: t, wit: w, use_lo: lo, use_hi: hi })
+}
+
+## The outermost closure frame a `var` found at scope `i` crosses that is a
+## staged body, or -1. Frames outside it are crossed by the loop's own
+## `var_open` read too, which is where they are charged.
+fn staged_entry_frame(stack: List[LambdaCx], i: Int) -> Int = {
+  var k = 0
+  for lc in stack {
+    if i < lc.boundary && lc.staged_loop { return k }
+    k = k + 1
+  }
+  -1
+}
+
+## A `var` mention inside a staged body, at scope `i`, against the closure
+## stack: `resolve_local`'s arm for it. From the outermost staged frame
+## inwards, a staged frame captures the cell and any other closure refuses
+## it, since only a staged body is licensed to carry it; the frames outside
+## are left to the `var_open` read the loop makes (see above).
+fn resolve_staged(cx: Cx, id: Int, sym: Sym, i: Int, from: Int, lo: Int, hi: Int) -> Cx = {
+  var cx1 = cx
+  var stack: List[LambdaCx] = []
+  var entry: Option[StagedCell] = None
+  var k = 0
+  for lc in cx.frame.lambda_stack {
+    if i < lc.boundary && k >= from {
+      if lc.staged_loop {
+        var sc = match map.get(lc.staged, id) {
+          Some(x) -> x
+          None ->
+            match entry {
+              Some(x) -> x
+              None -> {
+                let (cxm, x) = mint_staged_cell(cx1, id, sym, lo, hi)
+                cx1 = cxm
+                x
+              }
+            }
+        }
+        entry = Some(sc)
+        let lc2 = LambdaCx { ..lc, staged: map.insert(lc.staged, id, sc) }
+        stack = stack ++ [if sc.wit == None { lc2 } else { capture_into(lc2, sc.cell) }]
+      } else {
+        let (msg, hint) = capture_staged_msg(lc, sym.name)
+        cx1 = cerr_h(cx1, msg, lo, hi, hint)
+        stack = stack ++ [lc]
+      }
+    } else {
+      stack = stack ++ [lc]
+    }
+    k = k + 1
+  }
+  Cx { ..cx1, frame: Frame { ..cx1.frame, lambda_stack: stack } }
+}
+
+## A carried `var` reaching a closure inside the staged body, in the words of
+## that closure. The staged body is licensed to carry it; nothing inside is,
+## because a closure may outlive the iteration it was made in.
+pub(pkg) fn capture_staged_msg(lc: LambdaCx, name: String) -> (String, String) =
+  if lc.arm {
+    ("`" ++ name ++ "` is carried by the staged loop and a `with handle` arm cannot use it",
+      "bind it to a `let` inside the loop body first")
+  } else if lc.sugar {
+    ("`" ++ name ++ "` is carried by the staged loop and cannot cross the closure `with` introduced",
+      "bind it to a `let` inside the loop body first")
+  } else {
+    ("`" ++ name ++ "` is carried by the staged loop and a lambda cannot capture it",
+      "bind it to a `let` inside the loop body first")
+  }
+
+## A jump leaving a staged body, as (message, hint). The body is a closure the
+## author did not write, handed to `staged_for` once, so there is no iteration
+## for `break` or `continue` to end and no frame for `return` or `?` to leave.
+pub(pkg) fn staged_jump_msg(kw: String) -> (String, String) = {
+  let msg = "`" ++ kw ++ "` cannot leave a staged loop: its body is handed to `staged_for` " ++
+    "once, as a closure, and recorded rather than run here"
+  let hint = if kw == "break" {
+    "a staged loop runs every iteration; for an exit that depends on the data, use the " ++
+      "library's own loop with an exit (tileir: `d_loop`)"
+  } else if kw == "continue" {
+    "put the rest of the body under an `if` instead"
+  } else if kw == "?" {
+    "handle the Option or Result with `match` inside the body"
+  } else {
+    "compute the result after the loop, from the `var`s it carried"
+  }
+  (msg, hint)
+}
+
+## Is the innermost closure a staged body?
+pub(pkg) fn in_staged_body(cx: Cx) -> Bool =
+  len(cx.frame.lambda_stack) > 0 && cx.frame.lambda_stack[len(cx.frame.lambda_stack) - 1].staged_loop
+
+## One call of a staged trait's method at `subject`, built the way an
+## operator's is (`arith_call`): the witness is already resolved, the effect
+## the impl binds is charged at `lo..hi`, and its evidence travels with the
+## call.
+fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], w: WitRef,
+  ret: Ty, lo: Int, hi: Int) -> (Cx, TExpr) = {
+  let tr = trait_of(cx.traits, tid)
+  var found: Option[Sig] = None
+  for pr in tr.methods {
+    let (n, ms) = pr
+    if n == mname { found = Some(ms.sig) }
+  }
+  let s = match found {
+    Some(x) -> x
+    None -> panic("staged_call: `" ++ mname ++ "` is no method of the trait")
+  }
+  let tvid = match tr.tvar {
+    TyVar(_, v) -> v
+    _ -> -1
+  }
+  let m: Map[Int, Ty] = map.from([(tvid, subject)])
+  let em: Map[Int, Eff] = map.empty()
+  let callee_eff = reduce_eff(cx, s.eff, m)
+  let (cx1, evs, unanswered, vinsts, adropped) = named_evidence_args(cx, s, m, em, lo, hi)
+  let charged = eff_union([callee_eff] ++ vinsts)
+  let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo, hi,
+    mname)
+  (cx2, XCallFn(s.owner, emitted_fn_name(s, mname), args, [w], evs, Some(tid), owner_off(cx, lo),
+    owner_off(cx, hi), owner_off(cx, lo), ret))
+}
+
+## A read of a carried `var`: `var_get` on its cell, at the `var`'s type.
+fn staged_read(cx: Cx, sc: StagedCell, name: String, lo: Int, hi: Int) -> (Cx, Ty, TExpr) =
+  match sc.wit {
+    None -> (cx, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    Some(w) -> {
+      let cell = XLocal(sc.cell, name, owner_off(cx, lo), owner_off(cx, hi), sym_of(cx, sc.cell).ty)
+      let (cx1, x) = staged_call(cx, STAGED_VAR_ID, "var_get", sc.ty, [cell], w, sc.ty, lo, hi)
+      (cx1, sc.ty, x)
+    }
+  }
+
+## `m = v` for a carried `var`: `var_set` on its cell. The value is checked
+## against the `var`'s type exactly as an ordinary assignment's is.
+fn staged_write(cx: Cx, sc: StagedCell, name: String, value: Expr, nlo: Int, nhi: Int, lo: Int,
+  hi: Int) -> (Cx, TStmt) !io = {
+  let (cx1, vt, vx) = check_expr(cx, value, Some(sc.ty))
+  var cx2 = cx1
+  if not assignable(cx2, vt, sc.ty) {
+    cx2 = cerr(cx2, "`" ++ name ++ "` is " ++ ty_show(cx2.adts, sc.ty) ++ ", cannot assign " ++
+        ty_show(cx2.adts, vt), e_lo(value), e_hi(value))
+  }
+  match sc.wit {
+    None -> (cx2, TSExpr(XError(owner_off(cx, lo), owner_off(cx, hi)), owner_off(cx, lo), owner_off(cx, hi)))
+    Some(w) -> {
+      let cell = XLocal(sc.cell, name, owner_off(cx, nlo), owner_off(cx, nhi), sym_of(cx2, sc.cell).ty)
+      let (cx3, x) = staged_call(cx2, STAGED_VAR_ID, "var_set", sc.ty, [cell, vx], w, TyUnit, lo, hi)
+      (cx3, TSExpr(x, owner_off(cx, lo), owner_off(cx, hi)))
+    }
+  }
+}
+
+## The body of a staged `for` as the closure `staged_for` receives: one
+## parameter of the iterator's `Item`, the loop pattern bound from it, the
+## body checked against Unit. Returns the closure, its row, and the cells its
+## body minted.
+##
+## It is `check_lambda`'s frame discipline with two differences: the frame is
+## marked `staged_loop`, which is the licence `resolve_local` reads, and the
+## loop is pushed on the loop stack *outside* the closure, so a `break` in the
+## body sees the closure between it and its loop and is refused in the staged
+## loop's words rather than reported as being outside any loop.
+fn check_staged_body(cx: Cx, pat: Pattern, item: Ty, body: Expr, lo: Int,
+  hi: Int) -> (Cx, TExpr, Eff, Map[Int, StagedCell]) !io = {
+  var cx1 = cx
+  let saved_used = cx1.frame.used_effects
+  let saved_wit = cx1.frame.eff_witness
+  let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
+  let d = len(cx1.frame.loop_stack)
+  let ctx = LambdaCx {
+    boundary: len(cx1.frame.scopes),
+    expected_ret: Some(TyUnit),
+    captures: [],
+    sugar: false,
+    arm: false,
+    ctl: false,
+    local_fn: None,
+    handler_of: None,
+    staged_loop: true,
+    staged: map.empty()
+  }
+  cx1 = Cx {
+    ..cx1,
+    frame: Frame {
+      ..cx1.frame,
+      used_effects: [],
+      eff_witness: empty_w,
+      loop_stack: cx1.frame.loop_stack ++ [len(cx1.frame.lambda_stack)],
+      lambda_stack: cx1.frame.lambda_stack ++ [ctx]
+    }
+  }
+  cx1 = push_scope(cx1)
+  var psym = 0
+  var pname = "\$item"
+  var pre: List[TStmt] = []
+  match pat {
+    PBind(name, plo, phi) -> {
+      let (cxa, sid) = declare(cx1, name, item, false, plo, phi)
+      cx1 = cxa
+      psym = sid
+      pname = name
+    }
+    _ -> {
+      let (cxa, sid) = hidden_local(cx1, pname, item, pat_lo(pat), pat_hi(pat))
+      cx1 = cxa
+      psym = sid
+      let (cxp, tp) = check_for_pattern(cx1, pat, item)
+      cx1 = cxp
+      let src = XLocal(sid, pname, owner_off(cx, pat_lo(pat)), owner_off(cx, pat_hi(pat)), item)
+      pre = [TSLetPat(tp, src, owner_off(cx, pat_lo(pat)), owner_off(cx, pat_hi(pat)))]
+    }
+  }
+  let (cx2, bt, bx) = check_expr(cx1, body, Some(TyUnit))
+  var cx3 = pop_scope(cx2)
+  if bt != TyUnit && not is_errorish(bt) {
+    let text = ty_show(cx3.adts, bt)
+    cx3 = cerr(cx3, "the loop body's value is discarded (" ++ text ++ ")", e_lo(body), e_hi(body))
+  }
+  let popped = cx3.frame.lambda_stack[len(cx3.frame.lambda_stack) - 1]
+  let outer_lams = list.take(cx3.frame.lambda_stack, len(cx3.frame.lambda_stack) - 1)
+  let lam_eff = eff_union(cx3.frame.used_effects)
+  cx3 = Cx {
+    ..cx3,
+    frame: Frame {
+      ..cx3.frame,
+      lambda_stack: outer_lams,
+      used_effects: saved_used,
+      eff_witness: saved_wit,
+      loop_stack: list.take(cx3.frame.loop_stack, len(cx3.frame.loop_stack) - 1),
+      loop_jumps: set.remove(cx3.frame.loop_jumps, d)
+    }
+  }
+  let bx2 = if len(pre) == 0 { bx } else { XBlock(pre, Some(bx), x_lo(bx), x_hi(bx), TyUnit) }
+  let t = TyFn([item], TyUnit, lam_eff)
+  (cx3, XLambda([psym], [pname], bx2, popped.captures, owner_off(cx, e_lo(body)),
+    owner_off(cx, e_hi(body)), t), lam_eff, popped.staged)
+}
+
+## The cells a staged body minted that this loop opens: those no enclosing
+## staged body holds (that one opened it, and this loop only passes it
+## through), refused ones dropped, in the declaration order of their `var`s
+## (D5) -- never the order the body first mentioned them in.
+fn staged_opens(cx: Cx, minted: Map[Int, StagedCell]) -> List[StagedCell] = {
+  var keyed: List[(Int, StagedCell)] = []
+  for id in map.keys(minted) {
+    match map.get(minted, id) {
+      Some(sc) ->
+        if sc.wit != None && staged_cell_of(cx, id) == None {
+          keyed = keyed ++ [(sym_of(cx, id).dlo, sc)]
+        }
+      None -> ()
+    }
+  }
+  map(sort_by(keyed, (a, b) => {
+    let (x, _) = a
+    let (y, _) = b
+    x - y
+  }), p => {
+    let (_, sc) = p
+    sc
+  })
+}
+
+## `for pat in from { body }` where `from: ft` implements `StagedIter`, as the
+## block above. `fx` is the subject, already checked.
+fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: Expr, lo: Int,
+  hi: Int) -> (Cx, TStmt) !io = {
+  var cx1 = cx
+  let flo = e_lo(from)
+  let fhi = e_hi(from)
+  let olo = owner_off(cx, lo)
+  let ohi = owner_off(cx, hi)
+  let err_stmt = TSExpr(XError(olo, ohi), olo, ohi)
+  if has_trait_at(cx1, ITER_ID, ft) {
+    let ts = ty_show(cx1.adts, ft)
+    return (cerr_h(cx1, "`" ++ ts ++ "` implements both `Iter` and `StagedIter`, so `for` " ++
+        "cannot tell a host loop from a staged one", flo, fhi,
+      "a type is either walked on the host or recorded; drop one of the two impls"), err_stmt)
+  }
+  let (cxw, w) = resolve_witness(cx1, STAGED_ITER_ID, ft, flo, fhi, "for..in")
+  cx1 = cxw
+  let wr = match w {
+    Some(x) -> x
+    None -> return (cx1, err_stmt)
+  }
+  let item = reduce_assoc(cx1, TyAssoc(ft, STAGED_ITER_ID, "Item"))
+  # the subject is evaluated once, before any cell is opened
+  let (cxr, rsid) = hidden_local(cx1, "\$staged", ft, flo, fhi)
+  cx1 = cxr
+  var stmts: List[TStmt] = [TSLet(Some(rsid), "\$staged", fx, owner_off(cx, flo), owner_off(cx, fhi))]
+  let (cxb, lam, lam_eff, minted) = check_staged_body(cx1, pat, item, body, lo, hi)
+  cx1 = cxb
+  # the body may perform only what the impl declares: it is recorded, and
+  # whatever runs it runs it under the impl's row
+  let tr = trait_of(cx1.traits, STAGED_ITER_ID)
+  let (_, ms) = tr.methods[0]
+  let row = match ms.sig.param_tys[1] {
+    TyFn(_, _, e) -> {
+      let rvid = match tr.tvar {
+        TyVar(_, v) -> v
+        _ -> -1
+      }
+      reduce_eff(cx1, e, map.from([(rvid, ft)]))
+    }
+    _ -> EPure
+  }
+  if not eff_carries(row, lam_eff) {
+    let declared = if row == EPure { "nothing" } else { "!" ++ eff_show(row) }
+    cx1 = cerr_h(cx1, "this staged loop's body performs !" ++ eff_show(lam_eff) ++ ", but `StagedIter[" ++
+        ty_show(cx1.adts, ft) ++ "]` declares " ++ declared, e_lo(body), e_hi(body),
+      "a staged loop body is recorded, so it may only perform what `StagedIter[R]` declares")
+  }
+  let opens = staged_opens(cx1, minted)
+  for sc in opens {
+    let name = sym_of(cx1, sc.orig).name
+    # the `var` itself is read here, outside the body: an ordinary read, so
+    # a closure between it and the loop refuses it as it would any `var`
+    let (cxo, _) = resolve_local(cx1, name, sc.use_lo, sc.use_hi, false)
+    cx1 = cxo
+    let cell_ty = sym_of(cx1, sc.cell).ty
+    match sc.wit {
+      Some(vw) -> {
+        let (cxc, open) = staged_call(cx1, STAGED_VAR_ID, "var_open", sc.ty,
+          [XLocal(sc.orig, name, olo, ohi, sc.ty)], vw, cell_ty, lo, hi)
+        cx1 = cxc
+        stmts = stmts ++ [TSLet(Some(sc.cell), name, open, olo, ohi)]
+      }
+      None -> ()
+    }
+  }
+  let (cxf, call) = staged_call(cx1, STAGED_ITER_ID, "staged_for", ft,
+    [XLocal(rsid, "\$staged", owner_off(cx, flo), owner_off(cx, fhi), ft), lam], wr, TyUnit, lo, hi)
+  cx1 = cxf
+  stmts = stmts ++ [TSExpr(call, olo, ohi)]
+  for sc in opens {
+    let name = sym_of(cx1, sc.orig).name
+    let (cxg, _, back) = staged_read(cx1, sc, name, lo, hi)
+    cx1 = cxg
+    stmts = stmts ++ [TSAssign(sc.orig, name, back, olo, ohi)]
+  }
+  (cx1, TSExpr(XBlock(stmts, None, olo, ohi, TyUnit), olo, ohi))
+}
+
+## The source the staged-`for` tests check: a recording iterator and cell
+## over `V`, both pure, and `f` with a body that mentions its `var`s in an
+## order different from the one they are declared in.
+fn staged_src(body: String) -> String =
+  "type V = { n: Int }\ntype C = { n: Int }\ntype R = { n: Int }\n" ++
+  "impl StagedIter[R] {\n  type Item = V\n" ++
+  "  fn staged_for(r: R, body: fn(V) -> Unit) -> Unit = body(V { n: 0 })\n}\n" ++
+  "impl StagedVar[V] {\n  type Cell = C\n" ++
+  "  fn var_open(v: V) -> C = C { n: v.n }\n  fn var_get(c: C) -> V = V { n: c.n }\n" ++
+  "  fn var_set(c: C, v: V) -> Unit = ()\n}\n" ++
+  "fn g(a: V, b: V) -> V = a\n" ++ body
+
+## The names a staged block opens cells for, the call in the middle, and the
+## names it reads back, out of `f`'s typed body.
+fn staged_shape(tm: TModule) -> (List[String], Bool, List[String]) = {
+  let stmts = match arith_body(tm, "f") {
+    XBlock(ss, _, ..) -> ss
+    _ -> []
+  }
+  var opens: List[String] = []
+  var called = false
+  var backs: List[String] = []
+  for st in stmts {
+    match st {
+      TSExpr(XBlock(inner, None, ..), ..) -> {
+        for s2 in inner {
+          match s2 {
+            TSLet(Some(_), n, XCallFn(_, "var_open", [XLocal(..)], _, _, Some(_), ..), ..) -> {
+              opens = opens ++ [n]
+            }
+            TSExpr(XCallFn(_, "staged_for", [XLocal(..), XLambda(..)], _, _, Some(_), ..), ..) -> {
+              called = true
+            }
+            TSAssign(_, n, XCallFn(_, "var_get", [XLocal(..)], _, _, Some(_), ..), ..) -> {
+              backs = backs ++ [n]
+            }
+            _ -> ()
+          }
+        }
+      }
+      _ -> ()
+    }
+  }
+  (opens, called, backs)
+}
+
+test "a staged for opens its cells in declaration order, not mention or assignment order" {
+  # `acc` is mentioned first and `m` assigned last; a cell order taken from
+  # either would differ from m, l, acc. `k` is declared inside the body and
+  # is the body's own; the outer `l` the inner block shadows is still carried,
+  # because the body also mentions it outside that block.
+  let src = staged_src("fn f(r: R) -> V = {\n  var m = V { n: 1 }\n  var l = V { n: 2 }\n" ++
+      "  var acc = V { n: 3 }\n  var unused = V { n: 4 }\n  for j in r {\n" ++
+      "    acc = g(acc, j)\n    { let l = j }\n    var k = j\n    k = g(k, l)\n" ++
+      "    l = g(l, m)\n    m = g(m, j)\n  }\n  g(m, g(l, acc))\n}\n")
+  let (md, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 0
+  let (opens, called, backs) = staged_shape(tm)
+  assert opens == ["m", "l", "acc"]
+  assert called
+  assert backs == ["m", "l", "acc"]
+}
+
+test "a read-only var is carried, and a name shadowed in the body is not a mention" {
+  let src = staged_src("fn f(r: R) -> V = {\n  var a = V { n: 1 }\n  var b = V { n: 2 }\n" ++
+      "  for j in r {\n    let b = j\n    let x = g(a, b)\n  }\n  g(a, b)\n}\n")
+  let (md, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 0
+  let (opens, _, backs) = staged_shape(tm)
+  assert opens == ["a"]
+  assert backs == ["a"]
+}
+
+test "an inner staged loop passes the outer cell through and opens only its own" {
+  let src = staged_src("fn f(r: R) -> V = {\n  var s = V { n: 1 }\n  for i in r {\n" ++
+      "    var t = V { n: 2 }\n    for k in r {\n      s = g(s, k)\n      t = g(t, i)\n    }\n" ++
+      "  }\n  s\n}\n")
+  let (md, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, tm) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 0
+  let (opens, _, _) = staged_shape(tm)
+  assert opens == ["s"]
+  # the inner loop sits in the outer body: one cell, for `t`
+  let inner_opens = match arith_body(tm, "f") {
+    XBlock([_, TSExpr(XBlock(outer, ..), ..)], ..) ->
+      match outer[2] {
+        TSExpr(XCallFn(_, "staged_for", [_, XLambda(_, _, XBlock(body, ..), ..)], ..), ..) ->
+          match body[1] {
+            TSExpr(XBlock(ss, ..), ..) -> {
+              var ns: List[String] = []
+              for s2 in ss {
+                match s2 {
+                  TSLet(Some(_), n, XCallFn(_, "var_open", ..), ..) -> { ns = ns ++ [n] }
+                  _ -> ()
+                }
+              }
+              ns
+            }
+            _ -> ["?"]
+          }
+        _ -> ["?"]
+      }
+    _ -> ["?"]
+  }
+  assert inner_opens == ["t"]
+}
+
+test "a host var in a staged body is refused at its first mention, once" {
+  let src = staged_src("fn f(r: R) -> Int = {\n  var n = 0\n  for j in r {\n" ++
+      "    n = n + 1\n    n = n + 2\n  }\n  n\n}\n")
+  let (md, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), md, env)
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg ==
+    "`n` is a `var` of type Int, which a staged loop cannot carry (no `StagedVar[Int]`)"
 }
 
 ## fn name(params) -> T [!Row] = body, statement form (the Kotlin checkLocalFn).
@@ -16298,7 +16918,9 @@ fn arm_cx() -> Cx =
           arm: true,
           ctl: false,
           local_fn: None,
-          handler_of: None
+          handler_of: None,
+          staged_loop: false,
+          staged: map.empty()
         }]
       }
     }

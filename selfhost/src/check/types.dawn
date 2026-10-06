@@ -2598,6 +2598,28 @@ pub const FROM_FLOAT_ID: Int = 14
 
 pub fn is_lit_trait(tid: Int) -> Bool = tid == FROM_INT_ID || tid == FROM_FLOAT_ID
 
+## The staged-loop traits, behind a `for` whose subject is not a host
+## collection (docs/staged-for-design.md). Ids 15 and 16. A library that
+## records a loop rather than running it (tileir's device loops) implements
+## `StagedIter` for its range descriptor, and `StagedVar` for each value type
+## the loop may carry; the checker rewrites `for x in r { .. }` into one
+## `staged_for` call whose body is a closure, and every outer `var` the body
+## mentions into a cell opened before the loop and read back after it.
+##
+## Two traits rather than one because the cell type is chosen by the carried
+## value, not by the iterator: a `type Cell[T]` member on the iterator would
+## be a higher-kinded associated type, which Dawn does not have, and a cell
+## generic over every `T` would let a host Int into a recorded body, where it
+## would be computed once at record time and silently be wrong (D1).
+##
+## Neither injects: the language consumes the method names, as `index` and
+## `display` are consumed, so they name no function anywhere. Each has one
+## effect member named like the trait and pure by default, as the operators'
+## are: a type implementing both projects `T.StagedIter` and `T.StagedVar`,
+## where two members named `E` would make `T.E` ambiguous.
+pub const STAGED_ITER_ID: Int = 15
+pub const STAGED_VAR_ID: Int = 16
+
 ## One prelude trait `derive` can mint an impl of.
 pub type Derivable = { name: String, trait_id: Int, adjective: String }
 
@@ -2929,7 +2951,69 @@ pub fn prelude_traits() -> Traits = {
     (REM_ID, arith_trait(REM_ID, "Rem", "rem", -27, 2)),
     (NEG_ID, arith_trait(NEG_ID, "Neg", "neg", -28, 1)),
     (FROM_INT_ID, lit_trait(FROM_INT_ID, "FromInt", "from_int", TyInt, -29)),
-    (FROM_FLOAT_ID, lit_trait(FROM_FLOAT_ID, "FromFloat", "from_float", TyFloat, -30))])
+    (FROM_FLOAT_ID, lit_trait(FROM_FLOAT_ID, "FromFloat", "from_float", TyFloat, -30)),
+    (STAGED_ITER_ID, staged_iter_trait()), (STAGED_VAR_ID, staged_var_trait())])
+}
+
+## `trait StagedIter[R] { type Item  effect StagedIter = !()
+## fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter) -> Unit !R.StagedIter }`.
+## The body's row is the projection the call's own row is, so a body may only
+## perform what the impl declares (D6).
+fn staged_iter_trait() -> TraitI = {
+  let rv = TyVar("R", -31)
+  let item = TyAssoc(rv, STAGED_ITER_ID, "Item")
+  let e = EffAssoc("R", -31, STAGED_ITER_ID, "StagedIter")
+  let body = TyFn([item], TyUnit, e)
+  let sig = Sig {
+    ..prelude_method(STAGED_ITER_ID, rv, "staged_for", [rv, body], ["r", "body"], TyUnit),
+    eff: e
+  }
+  TraitI {
+    id: STAGED_ITER_ID,
+    name: "StagedIter",
+    tvar: rv,
+    audience: AWorld,
+    owner: None,
+    src_path: None,
+    methods: [("staged_for", MethodSig { sig: sig, has_default: false })],
+    assoc: ["Item"],
+    eff_assoc: ["StagedIter"],
+    eff_defaults: [("StagedIter", EPure)],
+    injects: false
+  }
+}
+
+## `trait StagedVar[T] { type Cell  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar
+## fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`.
+## `var_get` has the subject only in its return position, like `from_int`:
+## nothing calls it by name, the checker inserts it at a type it already
+## knows and resolves the witness directly.
+fn staged_var_trait() -> TraitI = {
+  let tv = TyVar("T", -32)
+  let cell = TyAssoc(tv, STAGED_VAR_ID, "Cell")
+  let e = EffAssoc("T", -32, STAGED_VAR_ID, "StagedVar")
+  let m = (name: String, ptys: List[Ty], pns: List[String], ret: Ty) =>
+    (name, MethodSig {
+      sig: Sig { ..prelude_method(STAGED_VAR_ID, tv, name, ptys, pns, ret), eff: e },
+      has_default: false
+    })
+  TraitI {
+    id: STAGED_VAR_ID,
+    name: "StagedVar",
+    tvar: tv,
+    audience: AWorld,
+    owner: None,
+    src_path: None,
+    methods: [
+      m("var_open", [tv], ["v"], cell),
+      m("var_get", [cell], ["c"], tv),
+      m("var_set", [cell, tv], ["c", "v"], TyUnit)
+    ],
+    assoc: ["Cell"],
+    eff_assoc: ["StagedVar"],
+    eff_defaults: [("StagedVar", EPure)],
+    injects: false
+  }
 }
 
 ## `trait FromInt[T] { effect FromInt = !()  fn from_int(n: Int) -> T !T.FromInt }`
@@ -2984,7 +3068,7 @@ fn arith_trait(tid: Int, name: String, m: String, tvid: Int, arity: Int) -> Trai
 ## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
 pub fn prelude_trait_ids() -> List[Int] =
   [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID,
-    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID]
+    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID, STAGED_ITER_ID, STAGED_VAR_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -4624,6 +4708,26 @@ test "prelude shapes" {
     assert not tr.injects
     assert tr.eff_assoc == [tr.name]
     assert tr.eff_defaults == [(tr.name, EPure)]
+  }
+  # the staged-loop traits: consumed by `for`, so not injected; one effect
+  # member each named like the trait and pure by default, as the operators'
+  # are, and no prelude impl of either
+  for tid in [STAGED_ITER_ID, STAGED_VAR_ID] {
+    let tr = trait_of(traits, tid)
+    assert not tr.injects
+    assert tr.eff_assoc == [tr.name]
+    assert tr.eff_defaults == [(tr.name, EPure)]
+  }
+  assert trait_of(traits, STAGED_ITER_ID).assoc == ["Item"]
+  assert trait_of(traits, STAGED_VAR_ID).assoc == ["Cell"]
+  var vnames: List[String] = []
+  for pr in trait_of(traits, STAGED_VAR_ID).methods {
+    let (n, _) = pr
+    vnames = vnames ++ [n]
+  }
+  assert vnames == ["var_open", "var_get", "var_set"]
+  for pi in prelude_impls() {
+    assert pi.trait_id != STAGED_ITER_ID && pi.trait_id != STAGED_VAR_ID
   }
   var tbl: Impls = map.empty()
   for i in prelude_impls() { tbl = insert_impl(tbl, i) }

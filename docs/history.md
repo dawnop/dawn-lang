@@ -188,6 +188,12 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   `FromInt` and `FromFloat`, whose pure impls run at compile time, so `let b: U8 = 300` is a
   compile error whose range the library states (on main, not yet released).
   ([literal-system-design.md](literal-system-design.md))
+- **2026-10-06.** A `for` over a type that implements `StagedIter` hands its body to a library
+  as a closure, and each outer `var` the body mentions travels through a cell the library
+  chooses through `StagedVar`, opened in declaration order. This is what lets a recorded
+  device loop be written as a plain `for` with plain `var`s. `StagedIter` and `StagedVar` are
+  now taken for a `trait` or an `effect` (on main, not yet released).
+  ([staged-for-design.md](staged-for-design.md))
 
 From v0.1.0 on 2026-07-17 to v0.81.0 on 2026-10-01 there have been 83 release tags.
 

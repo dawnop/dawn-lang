@@ -31,6 +31,7 @@ use check/types.{
   prelude_adts, prelude_traits
 }
 use check/jsig.{Jsig, jsig_refused}
+use check/tast.{WitRef}
 use front/suggest
 use front/effect_name
 
@@ -393,6 +394,21 @@ pub(pkg) type Cx = {
 ## A local `fn`'s name and the row it declared (see `LambdaCx.local_fn`).
 pub type LocalFn = { name: String, row: Eff }
 
+## One outer `var` a staged loop carries (docs/staged-for-design.md D4): the
+## cell local its reads and writes go through, the value type, and the
+## `StagedVar` witness -- `None` when the type has none, which was reported at
+## the first mention and turns every later one into an error node silently.
+## `orig` is the `var` itself and `use_lo`/`use_hi` the first mention, which
+## is where the loop's own `var_open` read of it is charged.
+pub(pkg) type StagedCell = {
+  orig: Int,
+  cell: Int,
+  ty: Ty,
+  wit: Option[WitRef],
+  use_lo: Int,
+  use_hi: Int
+}
+
 pub(pkg) type LambdaCx =
   {
     boundary: Int,
@@ -430,7 +446,17 @@ pub(pkg) type LambdaCx =
     # separate field from `sugar` on purpose -- the remainder of a
     # `with x <- f()` is sugar too, and it is handed to a *user* function that
     # may store it, so sugar is not evidence of belonging to anything.
-    handler_of: Option[Int]
+    handler_of: Option[Int],
+    # This closure is the body of a staged `for` (docs/staged-for-design.md):
+    # a jump out of it is refused in the staged loop's own words, and an outer
+    # `var` crossing it is carried through a cell rather than refused.
+    staged_loop: Bool,
+    # The outer `var`s this staged body carries, by the `var`'s own symbol id.
+    # Filled while the body is checked, the first time a mention of a `var`
+    # crosses this frame (`checker.resolve_local`); a nested staged body that
+    # mentions the same `var` holds the same cell, and only the outermost one
+    # opens it. Empty on every other closure.
+    staged: Map[Int, StagedCell]
   }
 
 ## A fresh checker state for one module.
