@@ -548,6 +548,8 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # seen stood right after it: a lambda `(a,` / `b) => {` whose parameters
   # wrapped. Its body follows the line the parameters began on, not the wrapped
   # line the arrow ended up on (#545).
+  # whether the last `else` began its line
+  var else_leads = false
   var rparen_at = 0
   var arrow_after_rparen = false
   var line_first = toks[0]
@@ -611,6 +613,13 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         let in_header = len(hdrs) > 0 && hdrs[len(hdrs) - 1].depth == len(openers)
         let header_indent = if len(hdrs) > 0 { hdrs[len(hdrs) - 1].at } else { -1 }
         line_indent = indent_of(t, openers, line_indent, cont)
+        if t.kind == ELSE {
+          # a leading `else` lines up with the `if` it follows, not with the
+          # line above, which a comment or a wrapped operand may have moved
+          var k = len(ifs) - 1
+          while k >= 0 && ifs[k].depth > len(openers) { k = k - 1 }
+          if k >= 0 && ifs[k].depth == len(openers) { line_indent = ifs[k].at }
+        }
         if cont && in_header && line_indent <= header_indent { line_indent = header_indent + 1 }
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
@@ -638,13 +647,19 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       if top == d && else_if { hdrs = list.take(hdrs, len(hdrs) - 1) }
       if top < d || else_if { hdrs = hdrs ++ [IfAt { depth: d, at: line_indent }] }
     }
+    if t.kind == ELSE { else_leads = line_first.lo == t.lo }
     if t.kind == IF || t.kind == ELSE {
       let d = len(openers)
       while len(ifs) > 0 && ifs[len(ifs) - 1].depth > d { ifs = list.take(ifs, len(ifs) - 1) }
       let seen = len(ifs) > 0 && ifs[len(ifs) - 1].depth == d
       if t.kind == IF {
+        # an `else if` that starts its line stays in its chain: the next `else`
+        # lines up with the first `if`, not with the line this one was wrapped
+        # to. After a `}` on the same line it is a new `if` on that line.
+        let chained = seen && have_prev_code && prev_code.kind == ELSE && else_leads
+        let at = if chained { ifs[len(ifs) - 1].at } else { line_indent }
         if seen { ifs = list.take(ifs, len(ifs) - 1) }
-        ifs = ifs ++ [IfAt { depth: d, at: line_indent }]
+        ifs = ifs ++ [IfAt { depth: d, at: at }]
       } else if seen && (len(hdrs) == 0 || hdrs[len(hdrs) - 1].depth < d) {
         hdrs = hdrs ++ [IfAt { depth: d, at: ifs[len(ifs) - 1].at }]
       }
@@ -1621,4 +1636,13 @@ test "a block operand in a header's condition anchors its own body" {
   let b = "fn f(rs: List[Int], i: Int) -> Int =\n  if i < len(rs) &&\n    {\n      let h = rs[i]\n      h < 3\n    } {\n    1\n  } else { 2 }\n"
   assert fmt_of(b) == b
   assert fmt_of("fn f(rs: List[Int], i: Int) -> Int =\nif i < len(rs) &&\n{\nlet h = rs[i]\nh < 3\n} {\n1\n} else { 2 }\n") == b
+}
+
+## #545: a leading `else` lines up with the `if` it follows. It took the indent
+## of the line above, which is wrong after a comment (a comment line is placed
+## by the brackets alone, column 0 here) and after an `else if` wrapped its condition.
+test "a leading else lines up with its if past comments and wrapped chains" {
+  let c = "fn j(d: String) -> Int =\n  if a(d) { 1 }\n  else if b(d,\n    \"D\") { 2 }\n# why\n  else { 3 }\n"
+  assert fmt_of(c) == c
+  assert fmt_of("fn j(d: String) -> Int =\n  if a(d) { 1 }\n  else if b(d,\n    \"D\") { 2 }\n# why\nelse { 3 }\n") == c
 }
