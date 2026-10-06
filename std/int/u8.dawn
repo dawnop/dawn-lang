@@ -43,6 +43,12 @@
 # traits of their own; `complement` and not `not`, which is a keyword. A
 # shift or rotation count is taken modulo 8, as the JVM and the hardware do
 # for Int's own shifts.
+#
+# `U8` is also a device format (std/dtype): the constant `U8` below is its
+# witness, spelled like the type so that `use std/int/u8.{U8}` brings in both,
+# and `impl HasDtype[U8]` lets generic code ask for it by type.
+
+use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}
 
 ## A unsigned 8-bit integer.
 pub opaque type U8 = Int
@@ -52,6 +58,13 @@ pub const MIN: U8 = 0
 
 ## The greatest `U8`, 255.
 pub const MAX: U8 = 255
+
+## The device format of `U8`: `u8`.
+pub const U8: Dtype[U8] = dtype_named("u8")
+
+impl HasDtype[U8] {
+  fn dtype_of() -> Dtype[U8] = U8
+}
 
 ## `n` as a `U8`, or `None` when it is outside 0..255.
 pub fn of(n: Int) -> Option[U8] = if n < 0 || n > 255 { None } else { Some(n) }
@@ -202,6 +215,12 @@ pub fn rotr(a: U8, n: Int) -> U8 = {
   let u = x & 0xFF
   let k = n & 7
   wrap((u >>> k) | (u << (8 - k)))
+}
+
+test "the witness is the format the dialect names, found by value or by type" {
+  let by_type: Dtype[U8] = dtype_of()
+  assert dtype_name(U8) == "u8"
+  assert dtype_name(by_type) == "u8"
 }
 
 # Representative cases; scripts/spike-native/fixed_ints holds the seven types

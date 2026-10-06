@@ -44,6 +44,12 @@
 # traits of their own; `complement` and not `not`, which is a keyword. A
 # shift or rotation count is taken modulo 32, as the JVM and the hardware do
 # for Int's own shifts.
+#
+# `I32` is also a device format (std/dtype): the constant `I32` below is its
+# witness, spelled like the type so that `use std/int/i32.{I32}` brings in both,
+# and `impl HasDtype[I32]` lets generic code ask for it by type.
+
+use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}
 
 ## A signed 32-bit integer.
 pub opaque type I32 = Int
@@ -53,6 +59,13 @@ pub const MIN: I32 = -2147483648
 
 ## The greatest `I32`, 2147483647.
 pub const MAX: I32 = 2147483647
+
+## The device format of `I32`: `i32`.
+pub const I32: Dtype[I32] = dtype_named("i32")
+
+impl HasDtype[I32] {
+  fn dtype_of() -> Dtype[I32] = I32
+}
 
 ## `n` as a `I32`, or `None` when it is outside -2147483648..2147483647.
 pub fn of(n: Int) -> Option[I32] = if n < -2147483648 || n > 2147483647 { None } else { Some(n) }
@@ -205,6 +218,12 @@ pub fn rotr(a: I32, n: Int) -> I32 = {
   let u = x & 0xFFFFFFFF
   let k = n & 31
   wrap((u >>> k) | (u << (32 - k)))
+}
+
+test "the witness is the format the dialect names, found by value or by type" {
+  let by_type: Dtype[I32] = dtype_of()
+  assert dtype_name(I32) == "i32"
+  assert dtype_name(by_type) == "i32"
 }
 
 # Representative cases; scripts/spike-native/fixed_ints holds the seven types

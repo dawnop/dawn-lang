@@ -480,6 +480,22 @@ test "a type with no constructors keeps its representation to itself" {
   assert type_decl(opaque) == "type Cursor"
 }
 
+test "a type and a constant spelled alike are two anchors, not one" {
+  # std/int/i8 declares `type I8` and `const I8` (the device format's witness,
+  # std/dtype); the page has to be able to link to each of them.
+  let ty = jobj([("name", JStr("I8")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("ctors", JArr([]))])
+  let witness = jobj([("name", JStr("I8")), ("type", JStr("Dtype[I8]"))])
+  let m = jobj([("types", JArr([ty])), ("consts", JArr([witness]))])
+  let rows = decl_rows("i8", "std-int-i8", m)
+  assert len(rows) == 2
+  assert rows[0].anchor == "std-int-i8-type-I8"
+  assert rows[1].anchor == "std-int-i8-I8"
+  assert rows[0].anchor != rows[1].anchor
+  assert rows[0].decl == "type I8"
+  assert rows[1].decl == "const I8: Dtype[I8]"
+}
+
 test "records and sums reassemble into their declarations" {
   let field_of = (n: String, t: String) =>
     jobj([("name", JStr(n)), ("type", JStr(t))])

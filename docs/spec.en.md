@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ cc134f6c603b19e1 -->
+<!-- doc-check: translation-of docs/spec.md @ 804220e6070f14aa -->
 
 # Dawn Language Specification
 
@@ -4160,6 +4160,7 @@ two together; one module too many or too few fails it):
 - `std/char`: the character type `Char`
 - `std/fmt`: rendering and parsing numbers (see below)
 - `std/loc`: reading a call site `Loc`, and `here()` (§8.4)
+- `std/dtype`: the device element format `Dtype[T]` and `HasDtype`; the integer modules and the three builtin formats declare their witnesses against it
 - `std/narrow`: the narrow binary floats bf16, binary16 and binary32, correctly rounded
   per operation (§11 "Math builtins")
 - `std/int/i8`: the signed 8-bit integer `I8`, an opaque type over `Int` with wrapping

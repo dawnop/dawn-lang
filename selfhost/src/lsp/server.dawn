@@ -4170,6 +4170,59 @@ test "a definition of a std constant names std's file too" {
   }))
 }
 
+test "a type and a constant spelled alike are told apart by position" {
+  io.with_fs_real(() => no_host(() => {
+    # std/int/i8 declares `type I8` and `const I8` (the device format's
+    # witness, std/dtype), and one `use std/int/i8.{I8}` brings in both. The
+    # editor has to answer with the constant where a value is written and with
+    # the type where a type is, and jump to the declaration of the one asked
+    # about. A probe std stands in for the real bundle, as the constant probe
+    # above does, so that what is under test is the pair and not i8.
+    let root = "/tmp/dawn-selfhost-lsp-def/pairstd"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "pairprobe\n")
+    def_probe_put("${root}/pairprobe.dawn", join([
+      "pub opaque type W8 = Int",
+      "",
+      "pub const W8: W8 = 8",
+      ""
+    ], "\n"))
+    let pstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(pstd)
+    let text = join([
+      "use std/pairprobe.{W8}",
+      "",
+      "fn widen(a: W8) -> W8 = a",
+      "",
+      "fn eight() -> W8 = W8",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "pairuser.dawn", text)
+
+    let as_type = def_probe_at(st, d, text, "a: W8", 3)
+    let as_value = def_probe_at(st, d, text, "= W8\n", 2)
+    assert as_type.hover == "opaque type W8"
+    assert as_value.hover == "const W8: W8 = 8"
+
+    # each lands in the module that declares the pair. The constant's jump is
+    # to its own name; the type's span is empty (0, 0) for an opaque type in
+    # std today (#589), which is a gap in definition, not in telling the two apart.
+    let dec = canon_identity("${root}/pairprobe.dawn")
+    let src = match io.read_file(dec) {
+      Ok(x) -> x
+      Err(e) -> panic("probe std module: ${e.message}")
+    }
+    assert as_type.def_path == Some(dec)
+    assert as_value.def_path == Some(dec)
+    let (vlo, vhi) = def_probe_span(as_value, "the constant")
+    assert str.slice(src, vlo, vhi) == "W8"
+    assert vlo == str.len("pub opaque type W8 = Int\n\npub const ")
+  }))
+}
+
 test "a local definition still resolves against the requesting document" {
   # the real handler stays: `load_std("std")` names a relative directory, so
   # the working directory this runs in is one of the inputs.

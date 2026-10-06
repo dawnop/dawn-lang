@@ -33,6 +33,11 @@ SPIKE = ROOT / "scripts" / "spike-native"
 
 # ---------------------------------------------------------------- the modules
 
+# The types with a device format, and the name the tile dialect gives it. U16,
+# U32 and U64 have none: the dialect has no unsigned integer types, so a
+# `Tensor[U32]` should be a type error and not a guess (std/dtype's header).
+DTYPES = {"I8": "i8", "I16": "i16", "I32": "i32", "U8": "u8"}
+
 TYPES = [
     ("I8", 8, True), ("I16", 16, True), ("I32", 32, True),
     ("U8", 8, False), ("U16", 16, False), ("U32", 32, False), ("U64", 64, False),
@@ -119,7 +124,15 @@ def module(name, w, signed):
     a("# traits of their own; `complement` and not `not`, which is a keyword. A")
     a(f"# shift or rotation count is taken modulo {w}, as the JVM and the hardware do")
     a("# for Int's own shifts.")
+    if T in DTYPES:
+        a("#")
+        a(f"# `{T}` is also a device format (std/dtype): the constant `{T}` below is its")
+        a(f"# witness, spelled like the type so that `use std/int/{m}.{{{T}}}` brings in both,")
+        a(f"# and `impl HasDtype[{T}]` lets generic code ask for it by type.")
     a("")
+    if T in DTYPES:
+        a("use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}")
+        a("")
     a(f"## A {kind} {w}-bit integer.")
     a(f"pub opaque type {T} = Int")
     a("")
@@ -133,6 +146,14 @@ def module(name, w, signed):
         a(f"## The greatest `{T}`, {hi}.")
         a(f"pub const MAX: {T} = {hi}")
     a("")
+    if T in DTYPES:
+        a(f"## The device format of `{T}`: `{DTYPES[T]}`.")
+        a(f"pub const {T}: Dtype[{T}] = dtype_named(\"{DTYPES[T]}\")")
+        a("")
+        a(f"impl HasDtype[{T}] {{")
+        a(f"  fn dtype_of() -> Dtype[{T}] = {T}")
+        a("}")
+        a("")
     # of / wrap / to_int
     if big:
         a("## `n` as a `U64`, or `None` when `n` is negative: a negative Int is not a")
@@ -343,6 +364,13 @@ def module(name, w, signed):
             a(f"  (u {l} k) | (u {r} ({w} - k))")
         else:
             a(f"  wrap((u {l} k) | (u {r} ({w} - k)))")
+        a("}")
+        a("")
+    if T in DTYPES:
+        a('test "the witness is the format the dialect names, found by value or by type" {')
+        a(f"  let by_type: Dtype[{T}] = dtype_of()")
+        a(f'  assert dtype_name({T}) == "{DTYPES[T]}"')
+        a(f'  assert dtype_name(by_type) == "{DTYPES[T]}"')
         a("}")
         a("")
     # tests: representative only; scripts/spike-native/fixed_ints is the

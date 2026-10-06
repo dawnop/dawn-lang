@@ -44,6 +44,12 @@
 # traits of their own; `complement` and not `not`, which is a keyword. A
 # shift or rotation count is taken modulo 16, as the JVM and the hardware do
 # for Int's own shifts.
+#
+# `I16` is also a device format (std/dtype): the constant `I16` below is its
+# witness, spelled like the type so that `use std/int/i16.{I16}` brings in both,
+# and `impl HasDtype[I16]` lets generic code ask for it by type.
+
+use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}
 
 ## A signed 16-bit integer.
 pub opaque type I16 = Int
@@ -53,6 +59,13 @@ pub const MIN: I16 = -32768
 
 ## The greatest `I16`, 32767.
 pub const MAX: I16 = 32767
+
+## The device format of `I16`: `i16`.
+pub const I16: Dtype[I16] = dtype_named("i16")
+
+impl HasDtype[I16] {
+  fn dtype_of() -> Dtype[I16] = I16
+}
 
 ## `n` as a `I16`, or `None` when it is outside -32768..32767.
 pub fn of(n: Int) -> Option[I16] = if n < -32768 || n > 32767 { None } else { Some(n) }
@@ -205,6 +218,12 @@ pub fn rotr(a: I16, n: Int) -> I16 = {
   let u = x & 0xFFFF
   let k = n & 15
   wrap((u >>> k) | (u << (16 - k)))
+}
+
+test "the witness is the format the dialect names, found by value or by type" {
+  let by_type: Dtype[I16] = dtype_of()
+  assert dtype_name(I16) == "i16"
+  assert dtype_name(by_type) == "i16"
 }
 
 # Representative cases; scripts/spike-native/fixed_ints holds the seven types

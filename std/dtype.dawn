@@ -1,0 +1,80 @@
+## The format a value has on a device: `Dtype[T]` names the format of `T`.
+#
+# Why this module exists: Dawn has no type arguments at a call site (spec 2.5),
+# so the only way to say "the bf16 format" where a function is called is to
+# pass a value. std/gpu's format markers were that value, and they cost a
+# second type per format beside the host value type of the same name
+# (`gpu.BF16` is a label, `narrow.BF16` is a number). Here the host value type
+# is the format: `Dtype[T]` carries its name at run time and `T` at the type
+# level, and a type that has a device format declares, in its own module, a
+# constant spelled like the type (`I8` beside `I8`) holding its `Dtype`. One
+# `use std/int/i8.{I8}` then brings in the type and its witness together, and
+# `alloc(I8, n)` reads as it always did. The premise std/gpu's header gave for
+# not reusing the host types, that doing so needs a value made just to be a
+# label, no longer holds; docs/tileir-011-design.md 2.4 has the whole account.
+#
+# Why a module of its own: the integer modules and std/narrow both declare
+# witnesses, and neither may depend on std/gpu (it uses narrow), so the format
+# type sits below all of them. This module imports nothing.
+#
+# Only std can mint a `Dtype`: its representation is opaque and `dtype_named`
+# is `pub(pkg)`, so a program cannot claim that its own type has a device
+# format. A type opts in with `impl HasDtype`, written in its own module. U16,
+# U32 and U64 have none on purpose: the tile dialect has no unsigned integer
+# types (signedness is a property of the operation), so a `Tensor[U32]` should
+# be a type error at `alloc` and not a wrong guess.
+#
+# The three builtin formats live here because Float, Int and Bool belong to no
+# module. Their witnesses are `F64`, `I64` and `I1`: a constant must be
+# SCREAMING_SNAKE_CASE, so `Float` cannot be the name of its own witness.
+
+## A device format for values of type `T`.
+pub opaque type Dtype[T] = String
+
+## The format called `name`. Only std makes formats.
+pub(pkg) fn dtype_named[T](name: String) -> Dtype[T] = name
+
+## The name the format goes by in a tile dialect, such as `f64` or `bf16`.
+pub fn dtype_name[T](d: Dtype[T]) -> String = d
+
+## A type with a device format. `T` is only in the return position, so the
+## expected type picks the impl in any other module: `let f: Dtype[Float] =
+## dtype_of()`. (Inside this module an opaque type is its target, a `String`,
+## so `T` is unconstrained and nothing here can infer it;
+## scripts/spike-native/std_dtype.dawn covers the inference.)
+pub trait HasDtype[T] {
+  fn dtype_of() -> Dtype[T]
+}
+
+## The format of `Float`, 64-bit IEEE.
+pub const F64: Dtype[Float] = dtype_named("f64")
+
+## The format of `Int`, 64-bit two's complement.
+pub const I64: Dtype[Int] = dtype_named("i64")
+
+## The format of `Bool` in a tile: a one-bit mask.
+pub const I1: Dtype[Bool] = dtype_named("i1")
+
+impl HasDtype[Float] {
+  fn dtype_of() -> Dtype[Float] = F64
+}
+
+impl HasDtype[Int] {
+  fn dtype_of() -> Dtype[Int] = I64
+}
+
+impl HasDtype[Bool] {
+  fn dtype_of() -> Dtype[Bool] = I1
+}
+
+test "the builtin witnesses carry the dialect's names" {
+  assert dtype_name(F64) == "f64"
+  assert dtype_name(I64) == "i64"
+  assert dtype_name(I1) == "i1"
+}
+
+test "a format is as long-lived as its name" {
+  let again: Dtype[Float] = dtype_named("f64")
+  assert dtype_name(again) == dtype_name(F64)
+  assert dtype_name(F64) != dtype_name(I64)
+}
