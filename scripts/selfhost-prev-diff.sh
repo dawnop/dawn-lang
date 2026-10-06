@@ -114,6 +114,11 @@ if [ "$CHECK_PIN" = 1 ]; then
 fi
 
 . scripts/seedjar.sh
+# EMITCHANGE_MODE=range turns "the seed" into the change's base toolchain
+# (scripts/emitrange.sh); the rest of the script is unchanged.
+. scripts/emitrange.sh
+range_enter
+TAG=${RANGE_TAG:-$TAG}
 # on bin/dawn's JDK, not PATH's java (seedjar.sh seed_java, issue #267)
 PREV=("$(seed_java)" -Xss512m -jar "$(seed_jar)")
 # the seed compiles against the std it released with, not today's std/ --
@@ -149,9 +154,12 @@ else
   echo "SKIP backend-dawn corpus (--corpus site enables it; nightly.yml passes it)"
 fi
 
-# feature discipline: the previous release must compile today's selfhost
-"${PREV[@]}" build selfhost "${PREV_STD[@]}" -o "$OUT/head-by-prev.jar" > /dev/null
-echo "OK   $TAG compiles HEAD selfhost (seed feature discipline)"
+# feature discipline: the previous release must compile today's selfhost.
+# The window leg owns it; the base of a change is not a seed.
+if [ "${EMITCHANGE_MODE:-}" != range ]; then
+  "${PREV[@]}" build selfhost "${PREV_STD[@]}" -o "$OUT/head-by-prev.jar" > /dev/null
+  echo "OK   $TAG compiles HEAD selfhost (seed feature discipline)"
+fi
 
 # HEAD toolchain (bin/dawn builds it on demand)
 ./bin/dawn --version > /dev/null
