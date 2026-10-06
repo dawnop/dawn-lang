@@ -150,6 +150,29 @@ use std/cursor.{Cursor}
 pub fn keep(c: Cursor) -> Cursor = c
 EOF
 
+# Operators and typed literals on hover (docs/lsp-hover-design.md §O1, §L2):
+# an operator over a type's own impl (here and in std), over a primitive and
+# folded; a literal taken at Float and at library types, signed and not.
+cat > "$OUT/proj/src/optypes.dawn" <<'EOF'
+use std/narrow.{F32}
+
+type V = { n: Int }
+
+impl Add[V] {
+  fn add(a: V, b: V) -> V = V { n: a.n + b.n }
+}
+
+fn sum(p: V, q: V) -> V = p + q
+
+fn neg(x: F32) -> F32 = -x
+
+fn plus(x: F32, y: F32) -> F32 = x + y
+
+fn prim(a: Int, b: Int) -> Bool = a + 1 < b
+
+fn folded() -> Int = 6 * 7
+EOF
+
 # Folded values on hover (docs/lsp-hover-design.md §C5): a closed, pure
 # expression shows its value after the type; one that names an outer local,
 # calls something with an effect, runs past the editor's fuel or depth, only
@@ -603,6 +626,24 @@ req("textDocument/hover", at(stdt_uri, stdt_text, "c: Cursor", 1, 3))
 req("textDocument/definition", at(stdt_uri, stdt_text, "c: Cursor", 1, 3))
 note("textDocument/didClose", tdoc(stdt_uri))
 
+# operators and typed literals
+opt_path = f"{out_dir}/proj/src/optypes.dawn"
+opt_uri = "file://" + opt_path
+opt_text = open(opt_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": opt_uri, "languageId": "dawn", "version": 1, "text": opt_text}})
+for needle, occ, delta in [
+    ("p + q", 1, 2),            # an impl of the module's own type
+    ("x + y", 1, 2),            # an impl in std
+    ("-x", 1, 0),               # a unary operator over a library type
+    ("a + 1 < b", 1, 2),        # a primitive
+    ("a + 1 < b", 1, 6),        # a comparison
+    ("6 * 7", 1, 2),            # folded, the value on the type line
+]:
+    req("textDocument/hover", at(opt_uri, opt_text, needle, occ, delta))
+    req("textDocument/definition", at(opt_uri, opt_text, needle, occ, delta))
+note("textDocument/didClose", tdoc(opt_uri))
+
 # folded values on hover
 evals_path = f"{out_dir}/proj/src/evals.dawn"
 evals_uri = "file://" + evals_path
@@ -610,14 +651,14 @@ evals_text = open(evals_path).read()
 note("textDocument/didOpen", {"textDocument": {
     "uri": evals_uri, "languageId": "dawn", "version": 1, "text": evals_text}})
 for needle, occ, delta in [
-    ("fib(15) + 1", 1, 8),      # a call of the module's own function
+    ("fib(15) + 1", 1, 7),      # a call of the module's own function
     ('"n=', 1, 0),              # interpolation reading a constant
     ("map([1, 2, 3]", 1, 3),    # effect-polymorphic callee, pure lambda
-    ("k + 1", 1, 2),            # an outer local: the type alone
-    ("noisy(1) + 2", 1, 9),     # a callee declared !io: the type alone
-    ("spin(60000) + 3", 1, 12), # past the fuel: the type alone
-    ("down(1600) + 4", 1, 11),  # past the depth: the type alone
-    ("down(1400) + 5", 1, 11),  # under the depth: folded
+    ("k + 1", 1, 1),            # an outer local: the type alone
+    ("noisy(1) + 2", 1, 8),     # a callee declared !io: the type alone
+    ("spin(60000) + 3", 1, 11), # past the fuel: the type alone
+    ("down(1600) + 4", 1, 10),  # past the depth: the type alone
+    ("down(1400) + 5", 1, 10),  # under the depth: folded
     ("[1, 2, 3]\n", 1, 0),      # only repeats its source: the type alone
     ("if 1 > 2", 1, 0),         # Unit: the type alone
     ("if 1 > 3", 1, 0),         # may return out of itself: the type alone
@@ -784,7 +825,7 @@ if diff "$OUT/kotlin.txt" "$OUT/self.txt" > "$OUT/diff.txt" 2>&1; then
   emit_gate "lsp" 0
 else
   emit_gate "lsp" 1 "$(grep -c '^[<>]' "$OUT/diff.txt") lines" \
-    || { head -30 "$OUT/diff.txt"; exit 1; }
+    || { head -${DIFF_HEAD:-30} "$OUT/diff.txt"; exit 1; }
 fi
 n=$(wc -l < "$OUT/kotlin.txt")
 echo "OK: $SELF agrees with the previous release over $n lsp messages"

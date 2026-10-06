@@ -2,7 +2,7 @@
 
 > 状态：**current** —— 运算符刀 1（2026-10-06）落地：六个 prelude trait、检查器在今天报错的那条分支上改道、
 > opaque 不继承算术、诊断、core lint 的槽位证据规则、LSP 配对。权威条文在 [spec.md](spec.md) §2.7、§3.1、§3.5、§4.3。
-> 刀 4（`std/narrow` 的 impl，2026-10-06）已落地；刀 2（LSP 运算符悬停显示 impl、goto 跳 impl）、刀 3（tileir 的 `Tile[D]`/`Idx` impl）未做，见 §8。
+> 刀 4（`std/narrow` 的 impl，2026-10-06）已落地；刀 2（LSP 运算符悬停显示 impl、goto 跳 impl）已落地（[lsp-hover-design.md](lsp-hover-design.md) §O1）；刀 3（tileir 的 `Tile[D]`/`Idx` impl）未做，见 §8。
 > 前置阅读：[operator-traits-design.md](operator-traits-design.md)（`Index`，本文同构的先例）、
 > [assoc-types-design.md](assoc-types-design.md)、[effect-params-design.md](effect-params-design.md) 刀 5 与 §9（关联效果及默认值）、
 > [builtin-privileges-design.md](builtin-privileges-design.md) §4（opaque 不继承 Show）。
@@ -239,7 +239,7 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 | 0 | 探针 P1–P4、负控 M2/M3 | 完成（`chore/arith-ops-probes`，只入报告） |
 | 1 | 本文 | 完成 |
 | 1′ | 发 release N（与字面量 L1 同一个 release），`advance-seed.sh` | 待做 |
-| 2 | LSP：运算符悬停显示 impl 签名、goto 跳 impl 方法、`lspeval` 折用户 impl 的闭合算术 | 待做 |
+| 2 | LSP：运算符悬停显示 impl 签名、goto 跳 impl 方法、`lspeval` 折用户 impl 的闭合算术 | 完成（折叠本来就读 `XCallFn`，运算符悬停的第一行带值） |
 | 3 | tileir：`impl[D] Add/Sub/Mul/Div/Rem/Neg[Tile[D]]`（`effect X = !Dev`）、`Idx` 的 impl；判词 tile-golden 逐字节零变化 | 待种子 |
 | 4 | `std/narrow`：`BF16/FP16/F32` 的 impl（含 `Rem`：截断余数在任何二进制格式里都精确，不需重新舍入），改写其头注与 `tile-backend-design.md` 的「人体工学降一档」；`narrow-contract` 让运算符与具名成员跑同一批 oracle 用例 | 完成 |
 | 5 | 教程 §16（英文先、中文后）、站点 GPU 页示例 | 待 3、4 |

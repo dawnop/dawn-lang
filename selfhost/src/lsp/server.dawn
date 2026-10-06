@@ -4329,7 +4329,7 @@ test "a handler state cell answers at every spelling of it" {
     # the right-hand side itself has a type again -- `Int` and not the block's
     # `List[Int]`, which is what the whole handler answered with when nothing
     # inside it was walked
-    let rhs = def_probe_at(st, d, text, "w * 2", 2)
+    let rhs = def_probe_at(st, d, text, "w * 2", 1)
     assert rhs.hover == "Int"
 
     # the arm's parameter, which is only reachable once the arm is paired with
@@ -4463,7 +4463,7 @@ test "hover shows a constant's value and a comptime block's, as analysis left th
     # the keyword answers with the block's value; inside the block the
     # innermost node still wins
     assert def_probe_at(st, d, text, "comptime { 1", 0).hover == "comptime: Int = 1048576  (0x100000)"
-    assert def_probe_at(st, d, text, "1 << 20", 2).hover == "Int"
+    assert def_probe_at(st, d, text, "1 << 20", 1).hover == "Int"
     assert def_probe_at(st, d, text, "1 << 20", 0).hover == "Int"
     # a constant comptime refused: its diagnostic, first line, says why
     assert def_probe_at(st, d, text, "HASHED", 0).hover ==
@@ -4589,7 +4589,7 @@ test "hover folds a closed, pure expression and shows its value after the type" 
     let text = eval_probe_text()
     let d = def_probe_doc_named(st, "evals.dawn", text)
     # a call of the module's own function, with A1's hexadecimal
-    assert eval_probe_at(st, d, text, "fib(15) + 1", 8) == "Int = 611  (0x263)"
+    assert eval_probe_at(st, d, text, "fib(15) + 1", 7) == "Int = 611  (0x263)"
     # interpolation reading a constant: the string the program would build
     assert eval_probe_at(st, d, text, "\"n=", 0) == "String = \"n=55 limit=10\""
     # an effect-polymorphic callee, instantiated with a pure lambda
@@ -4598,9 +4598,9 @@ test "hover folds a closed, pure expression and shows its value after the type" 
     assert eval_probe_at(st, d, text, "{\n    let z", 0) == "Int = 9"
     # ... but `z * z` alone names a `z` bound outside it, and the cursor's
     # innermost node is folded, never an ancestor
-    assert eval_probe_at(st, d, text, "z * z", 2) == "Int"
+    assert eval_probe_at(st, d, text, "z * z", 1) == "Int"
     # just under the editor's depth: folded
-    assert eval_probe_at(st, d, text, "down(1400) + 5", 11) == "Int = 1405  (0x57D)"
+    assert eval_probe_at(st, d, text, "down(1400) + 5", 10) == "Int = 1405  (0x57D)"
   }))
 }
 
@@ -4614,16 +4614,16 @@ test "hover shows the type alone where it may not fold or folding fails" {
     let text = eval_probe_text()
     let d = def_probe_doc_named(st, "evals.dawn", text)
     # a free local: nothing to fold, and no line saying so
-    assert eval_probe_at(st, d, text, "k + 1", 2) == "Int"
+    assert eval_probe_at(st, d, text, "k + 1", 1) == "Int"
     # an effect declared on the callee, though its body does nothing: the
     # judgement reads the row, so the interpreter never runs it
-    assert eval_probe_at(st, d, text, "noisy(1) + 2", 9) == "Int"
+    assert eval_probe_at(st, d, text, "noisy(1) + 2", 8) == "Int"
     # an effectful lambda handed to an effect-polymorphic callee
     assert eval_probe_at(st, d, text, "map([1, 2], x", 3) == "List[Int]"
     # past the fuel: a build would fold this, a hover gives up
-    assert eval_probe_at(st, d, text, "spin(60000) + 3", 12) == "Int"
+    assert eval_probe_at(st, d, text, "spin(60000) + 3", 11) == "Int"
     # past the depth, 1,600 calls where the editor allows 1,500 on every host
-    assert eval_probe_at(st, d, text, "down(1600) + 4", 11) == "Int"
+    assert eval_probe_at(st, d, text, "down(1600) + 4", 10) == "Int"
     # a value that only repeats its source, and Unit, say nothing new
     assert eval_probe_at(st, d, text, "[1, 2, 3]\n", 0) == "List[Int]"
     assert eval_probe_at(st, d, text, "if 1 > 2", 0) == "Unit"
@@ -4649,7 +4649,73 @@ test "hover folds nothing in a module with errors" {
       ""
     ], "\n")
     let d = def_probe_doc_named(st, "evalbroken.dawn", text)
-    assert eval_probe_at(st, d, text, "6 * 7", 2) == "Int"
+    assert eval_probe_at(st, d, text, "6 * 7", 1) == "Int"
+  }))
+}
+
+# ---- operators on hover (docs/lsp-hover-design.md §O1) ----
+
+fn operator_probe_text() -> String =
+  join([
+    "use std/narrow.{F32}",
+    "",
+    "type V = { n: Int }",
+    "",
+    "impl Add[V] {",
+    "  fn add(a: V, b: V) -> V = V { n: a.n + b.n }",
+    "}",
+    "",
+    "fn sum(p: V, q: V) -> V = p + q",
+    "",
+    "fn neg(x: F32) -> F32 = -x",
+    "",
+    "fn plus(x: F32, y: F32) -> F32 = x + y",
+    "",
+    "fn prim(a: Int, b: Int) -> Bool = a + 1 < b",
+    "",
+    "fn folded() -> Int = 6 * 7",
+    ""
+  ], "\n")
+
+test "an operator answers with the impl that carries it out, or the primitive" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = operator_probe_text()
+    let d = def_probe_doc_named(st, "operators.dawn", text)
+    # an impl of the module's own type: the jump is its method, in this buffer
+    let own = def_probe_at(st, d, text, "p + q", 2)
+    assert own.hover == "V\n+ via impl Add[V]: fn(V, V) -> V"
+    assert own.def_path == None
+    let (lo, hi) = def_probe_span(own, "the impl method")
+    assert str.slice(text, lo, hi) == "add"
+    assert lo == probe_offset(text, "fn add", 3)
+    # an impl in std: the jump is into std's file, at the method's name
+    let lib = def_probe_at(st, d, text, "x + y", 2)
+    assert lib.hover == "F32\n+ via impl Add[F32]: fn(F32, F32) -> F32"
+    let dp = match lib.def_path {
+      Some(p) -> p
+      None -> panic("an impl in std must name std's file")
+    }
+    assert dp == canon_identity("std/narrow.dawn")
+    let src = match io.read_file(dp) {
+      Ok(x) -> x
+      Err(e) -> panic("std/narrow.dawn: ${e.message}")
+    }
+    let (slo, shi) = def_probe_span(lib, "std's impl method")
+    assert str.slice(src, slo, shi) == "add"
+    # a unary operator is one character at the start of its expression
+    assert def_probe_at(st, d, text, "-x", 0).hover == "F32\n- via impl Neg[F32]: fn(F32) -> F32"
+    # Int and Float keep the primitive, whatever the result type
+    assert def_probe_at(st, d, text, "a + 1 < b", 2).hover == "Int\n+ (primitive): fn(Int, Int) -> Int"
+    assert def_probe_at(st, d, text, "a + 1 < b", 6).hover == "Bool\n< (primitive): fn(Int, Int) -> Bool"
+    # the fold of a closed expression still heads the first line
+    assert eval_probe_at(st, d, text, "6 * 7", 2) == "Int = 42  (0x2A)\n* (primitive): fn(Int, Int) -> Int"
+    # the operands keep their own answers
+    assert def_probe_at(st, d, text, "p + q", 0).hover == "let p: V"
   }))
 }
 
