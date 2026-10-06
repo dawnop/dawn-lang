@@ -787,16 +787,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
   今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter` 五个预置 trait 也注入；
-  **方法名由语言代用户消费掉的十个不注入**，它们的方法名只在 impl 体、文档与错误消息里
+  **方法名由语言代用户消费掉的十二个不注入**，它们的方法名只在 impl 体、文档与错误消息里
   出现：`Index`（`[]` 消费它，§4.8）、`Display`（`to_string` 与 `${...}` 消费它，§4.3）、
-  六个算术 trait `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`（运算符消费它们，§4.3）与
-  `FromInt`/`FromFloat`（数字字面量消费它们，§1.5）。
-- **预置 trait 十五个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+  六个算术 trait `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`（运算符消费它们，§4.3）、
+  `FromInt`/`FromFloat`（数字字面量消费它们，§1.5）与
+  `StagedIter`/`StagedVar`（staged `for` 消费它们，§4.7）。
+- **预置 trait 十七个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，**嵌套**渲染，也是 `to_string`
   要的 bound）、`Iter`（背后是 `for..in`，§4.7）、`Index`（背后是 `[]`，§4.8）、
   `Display`（`display`，**顶层**渲染，背后是 `to_string` 与 `${...}`，§4.3），
-  背后是 `+ - * / %` 与一元 `-` 的六个算术 trait（见下面那条），以及背后是数字字面量的
-  `FromInt`/`FromFloat`（再下一条）。
+  背后是 `+ - * / %` 与一元 `-` 的六个算术 trait（见下面那条）、背后是数字字面量的
+  `FromInt`/`FromFloat`（再下一条），以及背后是 staged `for` 的 `StagedIter`/`StagedVar`
+  （再下一条）。
   标量的 impl 随语言提供；
   `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl；
   `Display` 不可 derive（理由见下面 `Display` 那条）。
@@ -852,6 +854,12 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `FromInt[Float]`（不精确即 panic，与 §1.5 的编译期判据相同）与 `FromFloat[Float]`，
   不提供 `FromFloat[Int]`。泛型代码里 `[T: FromInt]` 下的 `0` 就是 `from_int(0)`。
   两个名字同样从此在 trait 与效果位置被占用。
+- **`StagedIter`** 与 **`StagedVar`**（背后是 staged `for`，§4.7）：
+  `trait StagedIter[R] { type Item  effect StagedIter = !()  fn staged_for(r: R, body: fn(R.Item) -> Unit !R.StagedIter) -> Unit !R.StagedIter }`，
+  `trait StagedVar[T] { type Cell  effect StagedVar = !()  fn var_open(v: T) -> T.Cell !T.StagedVar  fn var_get(c: T.Cell) -> T !T.StagedVar  fn var_set(c: T.Cell, v: T) -> Unit !T.StagedVar }`。
+  两者的方法名由语言消费，**不**进入函数命名空间；不可 derive；各带一个与 trait 同名的关联效果，
+  默认纯（与算术、字面量 trait 同），所以同时实现两者的类型在泛型代码里写 `!T.StagedIter`、
+  `!T.StagedVar` 不会混淆；语言不为任何类型提供 impl。两个名字同样从此在 trait 与效果位置被占用。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -1318,6 +1326,8 @@ xs |> map(x => x * x)             # 单参数可省括号
 - **lambda 不能直接当 `if`/`while` 的条件**：`if x => { ... }` 会把本该是循环体的
   花括号吃成 lambda 的 body。这是一条专门的诊断，不是「expected `{`」。
 - 闭包按值捕获绑定（捕获 `var` 是编译错误——想共享可变状态请显式传递）。
+- 例外只有两处，且都是**格子**：handler 的格子（§6.5）与 staged `for` 的格子（§4.7）。
+  它们以格子身份穿过各自被授权的闭包，读写经过格子；其余闭包照旧。
 - **箭头分工（设计裁决，2026-07-31，刻意不统一）**：`->` 是**子句箭头**，只出现在
   「声明形状」的位置——函数类型（§2.2）与 match 臂（§5.1）；`=>` 是**表达式箭头**，
   唯一职责是标记一个匿名函数的起点。两者不互相客串：臂体是 lambda 时
@@ -1363,6 +1373,23 @@ while queue.non_empty() { ... }
   的 `Item`。std 的五个容器（`List`/`String`/`Bytes`/`Map`/`Set`）开箱可迭代；
   泛型函数里 `[C: Iter]` 的参数同样可 `for`（字典转发）。迭代序即 impl 的游标序
   （`String` 按码点、`Map`/`Set` 同 `entries`/`to_list`）。
+- **staged `for`**：`e` 的类型实现了 `StagedIter` 时，`for pattern in e { body }` 不是宿主
+  循环，而是交给该 impl 的 `staged_for`：`body` 成为一个闭包，由 impl 决定怎么跑（tileir
+  用它记录设备循环）。`e` 仍在外层恰好求值一次，先于一切格子。体中提到的每个外层 `var`
+  （读或写，按作用域，不含体内自己声明的）在进循环前按**声明序**各开一个格子
+  （`StagedVar.var_open`），体内对它的读写经过格子，循环后写回；嵌套的 staged 循环复用外层
+  已开的格子。这样的 `var` 的类型必须实现 `StagedVar`，否则是编译错误（宿主值在被记录的体里
+  没有意义）；体内的普通 lambda 不能捕获格子名；`break`/`continue`/`return`/`?` 不能离开
+  staged 体；体只能执行 `StagedIter[R]` 声明的效果。区间 `a..b` 永远是宿主循环；同时实现
+  `Iter` 与 `StagedIter` 的类型不能被 `for` 迭代。
+
+  ```dawn
+  var acc = zeros(o)                    # Tile[F64]，tileir 提供 StagedVar[Tile[D]]
+  for k in d_range(0, K / T) {          # tileir 提供 StagedIter[DRange]
+    acc = mmaf(load_at(a, [k]), load_at(b, [k]), acc)
+  }
+  store_cell(o, acc)
+  ```
 - `for pattern in a..b` 支持右开区间的整数范围（不经 `Iter`，元素类型是 `Int`）。
   `a` 先于 `b` 求值；
   两端各恰好求值一次，且都在进入循环前求值。即使区间为空，这些保证仍成立。
@@ -1487,6 +1514,7 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
   而闭包按值捕获、拒绝捕获 `var`（§4.5）。所以 `with` **之前**声明的每个 `var`，
   在它之后的块剩余里既不能赋值也不能读；`with` **之后**声明的 `var` 属于糖区自己，
   不受影响。要把糖区之前的值带进来，先 `let` 一个快照，或者把它作为参数传进去。
+  staged `for`（§4.7）是另一个作者没写出来的闭包；那里能碰到的外层 `var` 只有能进格子的那些。
 
   ```dawn
   var n = 1

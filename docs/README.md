@@ -172,6 +172,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [trait-v2-design.md](trait-v2-design.md) | historical | 八刀，`==` 走 `Eq` bound；权威描述在 spec §3.5 与 trait.md。 |
 | [semantics-closure-design.md](semantics-closure-design.md) | **current** | S1：把一件事的 N 份定义收成一份。§9 那张表的步 1–5 已落地，**步 6 只做了一半**；§10–§12 是这条线的尾款。 |
 | [assoc-types-design.md](assoc-types-design.md) | **current** | `type Item` 与投影 `T.Item`，两刀均于 2026-08-02 落地；运算符 trait 的前置。 |
+| [staged-for-design.md](staged-for-design.md) | **current** | `for` + `var` 写设备循环：`StagedIter`/`StagedVar` 两个 prelude trait，检查器把循环体改写成交给 `staged_for` 的闭包、把体中提到的外层 `var` 改写成按声明序打开的格子；编译器刀于 2026-10-06 落地，权威条文在 spec §3.5、§4.5、§4.7。 |
 | [literal-system-design.md](literal-system-design.md) | **current** | 数字字面量没有自己的类型、按期望定型：`FromInt`/`FromFloat` 两个 prelude trait，二元运算向有类型的一侧让步，纯 impl 编译期折叠（`let b: U8 = 300` 是编译错误）；L1 于 2026-10-06 落地，权威条文在 spec §1.5、§4.3。 |
 | [arith-operator-traits-design.md](arith-operator-traits-design.md) | **current** | `+ - * / %` 与一元 `-` 背后的六个 prelude trait（`Add`…`Neg`），各带同名关联效果；opaque 不继承算术；刀 1 于 2026-10-06 落地，权威条文在 spec §3.5、§4.3。 |
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
