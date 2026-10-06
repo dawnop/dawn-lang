@@ -25,7 +25,7 @@ use front/ast.{
   ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf,
   EComptime, EBinary, EUnary, EIf, EMatch,
-  EBlock, EHandle,
+  EBlock, EHandle, OpNeg,
   PBind, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
@@ -38,14 +38,14 @@ use check/tast.{
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XUnit,
   TListElem, TLEExpr, TLESpread, TLEIf, TModule, TConst,
-  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, WitRef, WForward, WConcrete, WApply,
+  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XFloat, WitRef, WForward, WConcrete, WApply,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   x_lo, x_hi, tex_ty
 }
 use check/types.{
   Ty, TyAdt, TyFn, TyOpaque, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
-  STAGED_VAR_ID, STAGED_ITER_ID, impl_at,
+  STAGED_VAR_ID, STAGED_ITER_ID, is_lit_trait, impl_at,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -2705,7 +2705,7 @@ fn offer_staged(qc: QCx, q0: Q, sid: Int, ty: Ty, lo: Int, hi: Int, assigned: Bo
     None -> q0
   }
 
-# ---- literals (docs/lsp-hover-design.md §4) ----
+# ---- literals (docs/lsp-hover-design.md §4, §L2) ----
 
 ## A literal's type, then the value line `lspv` renders for it, both in the one
 ## fence. Offered over the literal's own span after the generic fallback, so on
@@ -2716,6 +2716,88 @@ fn offer_literal(qc: QCx, q: Q, te: Option[TExpr], lo: Int, hi: Int, line: Strin
     Some(t) -> offer(q, lo, hi, show_ty(qc, tex_ty(t)) ++ "\n" ++ line, None, None)
     None -> q
   }
+
+## `-` directly before a number: one literal, as the checker's `is_lit_atom`
+## reads it, so the sign and the digits answer alike.
+fn lit_atom_inner(pe: Expr) -> Option[(Bool, Expr)] =
+  match pe {
+    EInt(_, _, _) -> Some((false, pe))
+    EFloat(_, _, _) -> Some((false, pe))
+    EUnary(op, inner, _, _) ->
+      if op != OpNeg {
+        None
+      } else {
+        match inner {
+          EInt(_, _, _) -> Some((true, inner))
+          EFloat(_, _, _) -> Some((true, inner))
+          _ -> None
+        }
+      }
+    _ -> None
+  }
+
+## A literal taken at a library type: the call of its `FromInt`/`FromFloat`
+## impl the checker folded into a comptime block (docs/literal-system-design.md D6).
+pub(pkg) fn lit_via_trait_node(te: TExpr) -> Bool =
+  match te {
+    XComptime(XCallFn(_, _, _, _, _, Some(tid), _, _, _, _), _, _, _) -> is_lit_trait(tid)
+    _ -> false
+  }
+
+## A number literal or a negated one, at the type it was checked at (§L2).
+## The type heads the fence; when the typed value is not the number that was
+## written it follows as ` = value` -- read straight off an `XFloat` for an
+## integer taken at `Float`, left to the fold (`lspeval`) for a library type,
+## which is why that target carries its typed expression. The second line is
+## still the literal as written (§4), signed.
+fn offer_lit_atom(qc: QCx, q: Q, pe: Expr, te: Option[TExpr]) -> Q = {
+  let (neg, lit) = match lit_atom_inner(pe) {
+    Some(r) -> r
+    None -> return q
+  }
+  let t = match te {
+    Some(x) -> x
+    None -> return q
+  }
+  let lo = e_lo(pe)
+  let hi = e_hi(pe)
+  let body = spelling(qc, e_lo(lit), e_hi(lit))
+  let written = if neg { if body == "" { "" } else { "-" ++ body } } else { body }
+  let line: Option[String] = match lit {
+    EInt(v, _, _) -> {
+      let sv = if neg { 0 - v } else { v }
+      # a single decimal digit, signed or not, is its own value line
+      if neg && v >= 0 && v <= 9 && not str.contains(body, "_") && not str.starts_with(body, "0x") && not str.starts_with(body, "0b") {
+        None
+      } else {
+        int_literal_text(written, sv)
+      }
+    }
+    EFloat(v, _, _) -> {
+      # exactness is a fact about the digits; the sign goes in front of the line
+      let l = float_literal_text(body, v)
+      Some(if neg { "-" ++ l } else { l })
+    }
+    _ -> None
+  }
+  let ty = show_ty(qc, tex_ty(t))
+  let first = match t {
+    XFloat(fv, _, _) ->
+      match lit {
+        EInt(_, _, _) -> ty ++ " = " ++ to_string(fv)
+        _ -> ty
+      }
+    _ -> ty
+  }
+  let hover = match line {
+    Some(l) -> first ++ "\n" ++ l
+    None -> first
+  }
+  if line == None && first == ty && not lit_via_trait_node(t) { return q }
+  let target = Target { lo: lo, hi: hi, hover: hover, def: None, def_path: None, sig: None, doc: None,
+    expr: if lit_via_trait_node(t) { Some(t) } else { None } }
+  offer_target(q, target)
+}
 
 ## The source text of `lo..hi`, empty when the span is not inside the document
 ## (an analysis of another revision): the renderers then fall back to the
@@ -3075,14 +3157,9 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
         _ -> { q = walk_e(qc, q, target, None) }
       }
-    EInt(v, lo, hi) ->
-      # no line (a single decimal digit): the generic type offer above stands
-      match int_literal_text(spelling(qc, lo, hi), v) {
-        Some(line) -> { q = offer_literal(qc, q, te, lo, hi, line) }
-        None -> ()
-      }
+    EInt(_, _, _) -> { q = offer_lit_atom(qc, q, pe, te) }
     EChar(v, lo, hi) -> { q = offer_literal(qc, q, te, lo, hi, char_literal_text(v)) }
-    EFloat(v, lo, hi) -> { q = offer_literal(qc, q, te, lo, hi, float_literal_text(spelling(qc, lo, hi), v)) }
+    EFloat(_, _, _) -> { q = offer_lit_atom(qc, q, pe, te) }
     EStr(parts, lo, hi) -> {
       # only a string with no interpolation is a literal: one with `${...}`
       # is an expression, and its type is all there is to say about it
@@ -3150,17 +3227,22 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
       }
     }
-    EUnary(_, operand, lo, _) -> {
-      match te {
-        Some(t) -> { q = offer_operator(qc, q, t, lo, lo + (if spelled(qc, lo, lo + 3, "not") { 3 } else { 1 })) }
-        None -> ()
+    EUnary(_, operand, lo, _) ->
+      match lit_atom_inner(pe) {
+        # a negated number is one literal (§L2): no operator, nothing inside
+        Some(_) -> { q = offer_lit_atom(qc, q, pe, te) }
+        None -> {
+          match te {
+            Some(t) -> { q = offer_operator(qc, q, t, lo, lo + (if spelled(qc, lo, lo + 3, "not") { 3 } else { 1 })) }
+            None -> ()
+          }
+          match te {
+            Some(XUnary(_, t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+            Some(XCallFn(_, _, [t], _, _, Some(_), _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+            _ -> { q = walk_e(qc, q, operand, None) }
+          }
+        }
       }
-      match te {
-        Some(XUnary(_, t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
-        Some(XCallFn(_, _, [t], _, _, Some(_), _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
-        _ -> { q = walk_e(qc, q, operand, None) }
-      }
-    }
     EIf(cond, thn, els, _, _) ->
       match te {
         Some(XIf(tc, tt, tels, _, _, _)) -> {
