@@ -701,12 +701,14 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       openers = openers ++ [Opener {
         at: if header {
           header_indent
-        } else if tail_brace || operand {
+        } else if tail_brace || (operand && nl > 0) {
           line_indent
         } else if body {
           logical_indent
         } else if lambda_brace {
           rparen_at
+        } else if operand && len(openers) > 0 && not openers[len(openers) - 1].brace {
+          openers[len(openers) - 1].at
         } else {
           line_indent
         },
@@ -1663,4 +1665,13 @@ test "a block after a wrapped let annotation follows the statement" {
   let a = "fn f(c: Bool) -> Bool = {\n  let v:\n    Bool = {\n    let a = 1\n    c\n  }\n  v\n}\n"
   assert fmt_of(a) == a
   assert fmt_of("fn f(c: Bool) -> Bool = {\nlet v:\nBool = {\nlet a = 1\nc\n}\nv\n}\n") == a
+}
+
+## #545: a block operand that ends a wrapped line inside brackets, `(a ++ [` /
+## `b]) ++ {`, belongs to the expression the bracket opened, so its statements
+## step in from the line that bracket is on and not from the continuation line
+## the brace landed on.
+test "a block operand inside brackets follows the bracket's line" {
+  let o = "fn f(p: List[Int]) -> Int = {\n  let v: List[Int] = ((p ++ [\n    1]) ++ {\n    let b = 2\n    [b]\n  })\n  1\n}\n"
+  assert fmt_of(o) == o
 }
