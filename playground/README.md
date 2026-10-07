@@ -35,6 +35,12 @@ curl --noproxy '*' -X POST --data '{"code":"pub fn main() -> Unit !io = println(
 live diagnostics endpoint. `{"ok":true,"phase":"check","ms":N}` when clean,
 otherwise the same `phase:"compile"` shape as `/run`.
 
+`POST /compile` takes `{"code": ..., "target": "c" | "jvm"}` and answers with
+the program's own C text or JVM listing and which call wrote which of its
+lines (`packages/xmap`), compile-only. A program that does not compile gets
+`/check`'s diagnostics. It needs `javap` (a JDK, not only a JRE); without it the
+endpoint answers 503. The design is `docs/playground-compile-design.md`.
+
 For local UI development, start the native gateway explicitly (the unsafe flag
 is required outside the production systemd sandbox):
 

@@ -16,6 +16,10 @@ dawn-play (unprivileged service user)
                  output -> <dir>/run.txt
                 └─ systemd-run --wait --pipe --unit=dawn-play-run-<id>  (DynamicUser, PrivateNetwork, …)
                      └─ the untrusted command; stdout piped back to a file
+  └─ POST /compile instead of phases 1 and 2 (compile only, nothing is run):
+       sudo -n run-sandboxed.sh run <id> <dir>/box  env LC_ALL=C.UTF-8 dawn __emitc …  (C text + map)
+       sudo -n run-sandboxed.sh run <id> <dir>/box  env LC_ALL=C.UTF-8 dawn __emit …   (classes + map), side by side
+       then   run <id> <dir>/box  env LC_ALL=C.UTF-8 javap -c -p -s box/classes/prog.class
   └─ on a timeout: sudo -n run-sandboxed.sh stop <id>, then wait for the phase to end
   └─ rm -rf <dir>, on every way out
 ```
@@ -69,7 +73,8 @@ exports reaches either phase. Two consequences that are easy to get wrong:
 
 - **`java` is found on systemd's default `PATH`**
   (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin`), not through
-  `JAVA_HOME`. On the server that resolves to `/usr/bin/java`, the apt JRE 21.
+  `JAVA_HOME`. On the server that resolves to `/usr/bin/java`, the apt JDK 21, and
+  `javap` (which `POST /compile` runs) is found the same way, at `/usr/bin/javap`.
   A JDK under `$HOME` cannot work: `ProtectHome=yes` hides it. This is why
   `bin/dawn`'s `JAVA_HOME` probe is irrelevant here and the launcher falls
   through to plain `java`.
@@ -90,6 +95,45 @@ The **run** phase gets its ceiling on the argv the runner builds,
 contained by the cgroup as an opaque kill (checklist item 3 below).
 `JAVA_TOOL_OPTIONS` was not an option because `redirectErrorStream(true)`
 merges its "Picked up …" banner into the program's own output.
+
+## `POST /compile` (2026-10-07)
+
+The compile view runs three kinds of unit and runs none of the user's program:
+`dawn __emitc --map` and `dawn __emit --map` (side by side, one unit each),
+then `javap -c -p -s` of the module's class. Each unit is the same
+`run-sandboxed.sh` with every limit above, unchanged; nothing was relaxed for
+this endpoint. What differs:
+
+- The three units share the compile budget (`PLAY_COMPILE_TIMEOUT`, 30 s), so
+  one request holds its permit no longer than a `/check` does. Each unit still
+  has its own `RuntimeMaxSec=15` and 512M.
+- The compilers write `out.c`, `c.dawnmap`, `jvm.dawnmap` and `classes/` into
+  the box. The runner reads them back after the unit has ended with the same
+  read as the diagnostics (a regular file, no link followed), up to 8 MiB each
+  and no more in memory; a larger one answers 422 "too large to show" and is
+  never mapped. The listing is the unit's stdout, so it goes to a file the
+  runner opened, like every phase's output. The `javap` argv is fixed and
+  names `box/classes/prog.class`, a path the runner chose.
+- The commands run under `env LC_ALL=C.UTF-8`. The unit's environment is
+  empty, which the JVM reads as the POSIX locale; there `dawn __emit -o`
+  cannot write a class file whose name has a non-ASCII character in it, and
+  `javap` prints such names as `?`. The wrapper is untouched, so `/run` and
+  `/check` keep the environment they have.
+- `javap` lives in the JDK package, not the JRE (DEPLOY.md step 2); the runner
+  probes it at start and answers `POST /compile` with 503 when it is missing.
+
+Measured on the dev box (WSL2, 16 cores, other jobs running; load 5 to 9, so
+the numbers are orders, not promises): a unit with this wrapper's whole
+property set running `true` costs 0.08 to 0.14 s of `systemd-run` overhead
+over running it bare; `dawn __emitc` and `dawn __emit` take 1.7 to 2.0 s each
+and `javap` 0.2 s on their own. The 11 starter programs, a fresh runner, the
+commands outside the sandbox: a cold request is 2.3 to 2.7 s (median 2.6 s)
+with the compilers side by side, against 3.6 to 4.0 s one after the other,
+which is why they run side by side. The run with the load at 9 was 2.4 to 5.2 s.
+A hit, including the other target of a program just built, is 7 to 26 ms. The
+sandboxed figure adds three units' overhead, about 0.2 to 0.3 s, which was
+computed from the numbers above and not measured with the real jars, because
+the dev box has no `/opt/dawn` for the wrapper to bind.
 
 ## Cross-uid work dir — resolved on first deploy (2026-07-12)
 
