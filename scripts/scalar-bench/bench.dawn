@@ -1,0 +1,108 @@
+# Host-observed cost of one launch of each of the three spellings in
+# kernels.dawn, on the machine's GPU (docs/tileir-k4-design.md 1.2).
+#
+#   bench <bench_param.cubin> <bench_buffer.cubin> <bench_const.cubin> <launches> <reps>
+#
+# For each variant and each grid size: a warm-up of 200 launches, then `reps`
+# repetitions of `launches` launches followed by one `sync`, each timed with
+# the monotonic clock, printed as nanoseconds per launch. The timer starts
+# before the first launch and stops after `sync`, so it is the HOST's view of
+# a stream of launches: argument marshalling, `cuLaunchKernel`, and the
+# kernel's own run time when it is the slower of the two. A one-block grid
+# makes the launch the cost; a large grid makes the kernel's memory traffic
+# part of it.
+#
+# The parameter variant passes the scale as a `scalar`; the buffer variant
+# passes a one-element buffer; the constant variant passes neither. Nothing
+# is downloaded inside the timing loop; the answer of the last launch is
+# checked once at the end, so a variant that did not compute `x * 3` cannot
+# post a time.
+use std/io
+use std/io.{Exit, with_fs_real, with_clock_real, Clock, now, elapsed_ns}
+use std/gpu
+use std/gpu.{Gpu, with_gpu_real, alloc, upload, download, launch, sync, buffer, erase, scalar}
+use std/dtype.{F64}
+use std/list
+use std/map
+use std/fmt
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("bench: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    panic("unreachable")
+  }
+}
+
+alias Vec = gpu.Tensor[Float]
+
+fn once(variant: String, g: Int, x: Vec, s: Vec, out: Vec) -> Result[Unit, ForeignError] !Gpu =
+  if variant == "bench_param" {
+    launch(variant, g, [erase(buffer(x)), erase(scalar(3.0)), erase(buffer(out))])
+  } else if variant == "bench_buffer" {
+    launch(variant, g, [erase(buffer(x)), erase(buffer(s)), erase(buffer(out))])
+  } else {
+    launch(variant, g, [erase(buffer(x)), erase(buffer(out))])
+  }
+
+fn run_many(variant: String, g: Int, n: Int, x: Vec, s: Vec, out: Vec) -> Result[Unit, ForeignError] !Gpu = {
+  for _i in range(0, n) {
+    once(variant, g, x, s, out)?
+  }
+  sync()
+}
+
+fn measure(variant: String, g: Int, n: Int, reps: Int) -> Result[List[Int], ForeignError] !Gpu !Clock = {
+  let len = g * 128
+  let x = alloc(F64, len)?
+  let s = alloc(F64, 1)?
+  let out = alloc(F64, len)?
+  upload(x, list.map(range(0, len), i => to_float(i % 17 + 1)))?
+  upload(s, [3.0])?
+  upload(out, list.map(range(0, len), _i => 0.0))?
+  run_many(variant, g, 200, x, s, out)?
+  var times: List[Int] = []
+  for _r in range(0, reps) {
+    let t0 = now()
+    run_many(variant, g, n, x, s, out)?
+    let t1 = now()
+    times = times ++ [elapsed_ns(t0, t1) / n]
+  }
+  let got = download(out)?
+  let ok = list.all(range(0, len), i => got[i] == to_float(i % 17 + 1) * 3.0)
+  if not ok { panic("bench: ${variant} did not compute x * 3") } else { () }
+  Ok(times)
+}
+
+pub fn main() -> Unit !io = io.with_exit_real(() => {
+  let a = args()
+  if len(a) != 5 {
+    io.eprintln("usage: bench <bench_param.cubin> <bench_buffer.cubin> <bench_const.cubin> <launches> <reps>")
+    io.exit(2)
+  } else {
+    ()
+  }
+  let names = ["bench_param", "bench_buffer", "bench_const"]
+  var loaded: Map[String, Bytes] = map.empty()
+  for i in range(0, 3) {
+    loaded = map.insert(loaded, names[i], read_cubin(a[i]))
+  }
+  let cubins = loaded
+  let n = to_int_or(a[3], 2000)
+  let reps = to_int_or(a[4], 3)
+  for g in [1, 1024] {
+    for v in names {
+      let r = with_clock_real(() => with_gpu_real(cubins, () => measure(v, g, n, reps)))
+      match r {
+        Ok(ts) -> io.println("bench ${v} grid=${g} launches=${n} ns_per_launch=${to_string(ts)}")
+        Err(e) -> io.println("bench ${v} grid=${g} refused ${e.kind}: ${e.message}")
+      }
+    }
+  }
+})
+
+fn to_int_or(s: String, d: Int) -> Int = match fmt.parse_int(s) {
+  Some(n) -> n
+  None -> d
+}
