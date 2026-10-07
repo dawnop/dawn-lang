@@ -151,7 +151,7 @@ xs |> filter(x => x > 0)    # 选择性引入的短名进管道，零摩擦
 
 > **0.82.0 起表中 `gpu.*_ref` 与 `gpu.ref_atan` / `gpu.ref_atan2` 这 12 行（11 个函数）已迁出 std**，
 > 到源码包 `packages/tileref`（写作 `tileref/ref.<name>`），形参名照上表不变。它们从此不受
-> `Param-Change` 冻结门与 `std-moved-check` 管（两者只看 std）；理由与实测见
+> `Param-Change` 冻结门管（它只看 std）；理由与实测见
 > [tile-backend-design.md](tile-backend-design.md) §5.3「参考实现迁出」。`gpu.pack_to` /
 > `gpu.unpack_from` 两行仍在 std。
 

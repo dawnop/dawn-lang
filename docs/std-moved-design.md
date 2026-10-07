@@ -1,6 +1,20 @@
 # std 的迁移提示归 std：`std/moved.txt`、到期与「删 pub 必须表态」
 
-> 状态：**current**。2026-10-01，issue #211（分支 `fix/std-moved-table`）。
+> 状态：**historical，已撤回（2026-10-07）**。原状态为 current，2026-10-01，issue #211（分支 `fix/std-moved-table`）。
+>
+> **撤回**：维护者 2026-10-07 裁决撤掉整套机制。理由：项目目前没有外部使用者，迁移提示没有读者；
+> 破坏性改动直接改并迁移仓内调用方，旧名得到的是普通的「未定义」「没有导出此名」诊断。
+>
+> **已删除的部分**：`std/moved.txt`；`driver/stdlib.dawn` 里读它的解析与装载（`MovedEntry`、`parse_moved`、
+> `install_moved`、`StdMovedMalformed`、`release_key`/`release_before`）及其测试；`check/cx.dawn` 的
+> `moved_module_key` 与 `private_name_diagnostic` 对它的查询、`check_module_call` 里按模块路径查提示的分支；
+> `scripts/gen-stdsrc.py` 对它的内嵌；`dawn test selfhost` 的到期检查；`scripts/std-moved-check/` 与它在
+> `gates.yml` 的 `std-version` job 里的步骤及 `steps.lock.json` 的登记。**保留**的是由导出面自动生成的那部分
+> `cx.moved`（`trim` → `use std/str, then str.trim(...)`），它不是历史数据。删除 pub std 函数不再需要登记。
+>
+> **重开条件**：出现大规模外部使用者。重开时以下正文为起点，但要重新核对数据格式与到期规则。
+>
+> 以下正文是撤回前的设计记录，不再描述现状。
 > 调研是 `research-issue-severity-20261001` 的 §#211（严重度 S2-3，批 B3）；本文记文件格式、到期规则、门与不做的。
 
 ## 问题

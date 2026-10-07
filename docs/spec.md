@@ -2966,7 +2966,7 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 > 这个内建到 v0.30.0 为止叫 `java_try`，v0.31.0 改名。它拦的是 **fault**——外部世界
 > 造成的失败——而这个分类自 native 有了失败种类之后就是两个后端共用的
 > （[`native-backend-plan.md`](native-backend-plan.md) §14.9），和 Java 无关了；名字比理由多活了一阵。
-> 旧名字的迁移提示按 `std/moved.txt` 的到期规则已于 v0.41.0 到期删除（[`std-moved-design.md`](std-moved-design.md)），
+> 旧名字的迁移提示已随 `std/moved.txt` 机制一并撤回（[`std-moved-design.md`](std-moved-design.md)），
 > 今天写 `java_try` 得到的是普通的未定义函数诊断。
 
 Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（等同 panic 语义）。
@@ -3265,7 +3265,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 所有声明默认模块私有；`pub` 导出 `fn`/`type`/`alias`/`const`/`trait`/`effect`
 （`pub type` 连带构造器与字段，见 §3.3）。
 访问或引入非 `pub` 项 → 错误（`` `parse` is private to module json/parser ``，附 hint：加 `pub`）。
-标准库的非 `pub` 项例外：std 不归用户改，报它不属于 std 的公开 API（`` `atoi` is not part of std's public API (`std/fmt` declares it privately) ``），不给「加 `pub`」的 hint；`std/moved.txt` 有该名字的条目时以那条为 hint（#296）。
+标准库的非 `pub` 项例外：std 不归用户改，报它不属于 std 的公开 API（`` `atoi` is not part of std's public API (`std/fmt` declares it privately) ``），不给「加 `pub`」的 hint（#296）。
 导出的声明内部也不得泄漏模块外无法命名的私有 type / trait / effect；transparent alias、opaque
 边界、公开 trait/effect 与可达 impl 的完整判定在 §3.3，错误报在声明处而不是使用处。
 
@@ -3402,8 +3402,7 @@ radix  = [ "+" | "-" ] rdigit { rdigit }
 
 `parse_int(s, radix: r)`（`radix` 缺省 10）用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`
 （值 = 10..35，大小写同值），数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。radix 为 10
-时它与 `int` 是同一语言。0.83.0 以前 radix 版本是另一个 builtin `parse_int_radix`，现已并入
-（`std/moved.txt` 给提示）。整数超出 64 位范围是 `None` 不是环绕。
+时它与 `int` 是同一语言。0.83.0 以前 radix 版本是另一个 builtin `parse_int_radix`，现已并入。整数超出 64 位范围是 `None` 不是环绕。
 **有意排除**（今天的宿主解析器有的收、Dawn 一律拒绝）：下划线、`0x` 前缀与十六进制浮点
 （`0x1p3`）、`f/F/d/D` 后缀、`inf`/`nan` 等小写变体、带符号的 `NaN` 与 `+Infinity`
 （合法特殊拼写恰是 `to_string` 能输出的三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等
