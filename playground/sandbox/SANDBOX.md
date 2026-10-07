@@ -18,7 +18,7 @@ dawn-play (unprivileged service user)
                      └─ the untrusted command; stdout piped back to a file
   └─ POST /compile instead of phases 1 and 2 (compile only, nothing is run):
        sudo -n run-sandboxed.sh run <id> <dir>/box  env LC_ALL=C.UTF-8 dawn __emitc …  (C text + map)
-       sudo -n run-sandboxed.sh run <id> <dir>/box  env LC_ALL=C.UTF-8 dawn __emit …   (classes + map), side by side
+       sudo -n run-sandboxed.sh run <id> <dir>/box  env LC_ALL=C.UTF-8 dawn __emit …   (classes + map), one after the other
        then   run <id> <dir>/box  env LC_ALL=C.UTF-8 javap -c -p -s box/classes/prog.class
   └─ on a timeout: sudo -n run-sandboxed.sh stop <id>, then wait for the phase to end
   └─ rm -rf <dir>, on every way out
@@ -99,7 +99,7 @@ merges its "Picked up …" banner into the program's own output.
 ## `POST /compile` (2026-10-07)
 
 The compile view runs three kinds of unit and runs none of the user's program:
-`dawn __emitc --map` and `dawn __emit --map` (side by side, one unit each),
+`dawn __emitc --map` and `dawn __emit --map` (one unit each, one after the other),
 then `javap -c -p -s` of the module's class. Each unit is the same
 `run-sandboxed.sh` with every limit above, unchanged; nothing was relaxed for
 this endpoint. What differs:
@@ -127,11 +127,11 @@ the numbers are orders, not promises): a unit with this wrapper's whole
 property set running `true` costs 0.08 to 0.14 s of `systemd-run` overhead
 over running it bare; `dawn __emitc` and `dawn __emit` take 1.7 to 2.0 s each
 and `javap` 0.2 s on their own. The 11 starter programs, a fresh runner, the
-commands outside the sandbox: a cold request is 2.3 to 2.7 s (median 2.6 s)
-with the compilers side by side, against 3.6 to 4.0 s one after the other,
-which is why they run side by side. The run with the load at 9 was 2.4 to 5.2 s.
-A hit, including the other target of a program just built, is 7 to 26 ms. The
-sandboxed figure adds three units' overhead, about 0.2 to 0.3 s, which was
+commands outside the sandbox: a cold request is 3.9 to 4.9 s (load 8 to 12)
+because the compilers run one after the other, which the small production host
+asks for (side by side it was 2.0 to 2.2 s, at four compiler JVMs under two
+permits). A hit, including the other target of a program just built, is under
+30 ms. The sandboxed figure adds three units' overhead, about 0.2 to 0.3 s,
 computed from the numbers above and not measured with the real jars, because
 the dev box has no `/opt/dawn` for the wrapper to bind.
 

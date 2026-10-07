@@ -260,8 +260,8 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
   （沿用 `exec.dawn` 的「runner 先开文件、读回有界」，`exec.dawn` 文件头注释）。不运行产物。
   **K2 实现时对「一个请求只算被选中的那一栏」的修正：** 调用表是 C 侧表与 JVM 侧表**都有行**的调用的交集（`packages/xmap` 的
   `table_from_maps`，缺一边就是缺口），所以请求任何一栏都要两个编译器的侧表；只剩 `javap` 是 JVM 栏独有，它 0.2 s，不值得省。
-  于是一次构建同时产出两栏，缓存里两个 target 各存一份，第二个标签页是一次查表。两个编译器互相独立，**并排**起（先后跑是 3.6 至 4.0 s，
-  并排 2.3 至 2.7 s），`javap` 要等 class，跟在后面。代价是一个请求最多同时两个编译器 JVM，两个许可就是四个；闸门的 2 是这个数字的界。限制沿用 `run-sandboxed.sh`
+  于是一次构建同时产出两栏，缓存里两个 target 各存一份，第二个标签页是一次查表。两个编译器**先后**跑（C 再 JVM，`javap` 跟在后面）：生产机小、还要服务 `/run` 与 `/check`，一个许可下起两个编译器 JVM（两个许可就是四个）不是合适的默认（协调者 2026-10-07 裁决）。
+  本机实测先后跑冷请求 3.6 至 4.0 s，并排只要 2.0 至 2.2 s，这笔差价由「同构建的第二个标签页是命中」找回。限制沿用 `run-sandboxed.sh`
   现有的全部属性（`MemoryMax`、`TasksMax`、`LimitFSIZE`、`RuntimeMaxSec`、无网），**不为 `/compile` 放宽任何一条**。
   `comptime` 仍会在编译里跑用户代码，所以编译超时用现有的 30 s（`config.dawn:29`），编译阶段的威胁面与 `/check` 相同，不更大。
 - javap 读的是编译器写出的 class，不是用户给的字节，但它仍在同一个单元里跑，不放在 runner 进程里。
@@ -269,6 +269,7 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
   执行放宽到「`/compile` 只编译」的口径里，也不单独给它更高的超时。
 - 响应硬上限：每栏文本 ≤ 256 KB（超出截断并带 `truncated`，与 `OUTPUT_LIMIT` 同类处理），`calls` ≤ 2,000 条。
   依据：样例用户模块最大 17 KB / 24 KB（3.2 表）；上限给 10 倍余量，是估计，不是实测，上线一周后按观测收紧（第八节第 7 条）。
+- 原料读回上限：C 文本、两张侧表、javap 列表各 **8 MiB**（K2 新增，估计值：最大起始样例的整份 C 文本 871 KB，几乎全是标准库；上线一周后按观测收紧）；超出答 422，不映射。
 
 ### 6.3 缓存与并发
 
@@ -332,17 +333,17 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 - 墙钟：合约多约 10 个用例 × 约 1.5 s ≈ 15 s，加在 `docs` 作业里（605 s 规划值内；**CI 上的实测在 PR 里报**）。
 
 **K2 落地记录（2026-10-07）。**
-- **实现：** `playground/src/play/exec.dawn`（`view_raw`：三个单元、有界读回）、`play/view.dawn`（xmap 配对、限额、JSON）、
+- **实现：** `playground/src/play/exec.dawn`（`view_raw`：三个单元先后跑、有界读回）、`play/view.dawn`（xmap 配对、限额、JSON）、
   `play/cache.dawn`（有界 LRU）、`main.dawn`（路由、闸门）。请求体沿用 `{"code": ..., "target": "c"|"jvm"}`；`target` 取值白名单，
   `"tile"` 在 K5 之前也是 400。响应字段比 6.1 的草图多：`calls_total`、`calls_truncated`、`pane.truncated`、每个 out 带 `key`（JVM 栏的 `!` 行）。
   缓存值分两半：请求无关的「其余」与每次请求自己写的头（`cached`、`ms`），所以命中与新鲜答案只差这两个字段。
 - **限额（起始值，估计，上线一周后按实测收紧）：** 每栏文本 256 KB（按行截断，`truncated`），每响应 2,000 个调用（前缀，`calls_truncated`），
-  原料每个文件 8 MiB（超出答 422，不映射；最大的起始样例 871 KB，几乎都是标准库的 C）。缓存 128 条、32M 字符，单条超四分之一不留。
+  原料每个文件 8 MiB（同为估计，不是实测，上线一周后按观测收紧；超出答 422，不映射；最大的起始样例 871 KB，几乎都是标准库的 C）。缓存 128 条、32M 字符，单条超四分之一不留。
 - **实测的单元开销：** 本机（WSL2）带 `run-sandboxed.sh` 全部属性的一个 `systemd-run` 单元跑 `true`：0.08 至 0.14 s。三个单元合计约 0.2 至 0.3 s，
   这个沙箱内的总数是**推算**的，没有用真的 jar 量过（本机没有 `/opt/dawn` 供包装脚本绑定，`$HOME` 下的 JDK 又被 `ProtectHome` 藏起来）。
-- **延迟（11 个起始样例，真 runner、沙箱外，本机负载 5 至 9，只作量级）：** 冷 C 2.35 至 2.67 s（中位 2.55 s）；冷 JVM 2.4 至 5.2 s
-  （这一轮负载涨到 9）；命中 7 至 26 ms。目标「hello 冷 ≤ 3 s、命中 ≤ 50 ms」：命中达标；冷请求在负载 5 时达标，负载 9 时不达标。
-  十一个样例**全部 `gaps == 0`**（C 与 JVM 两栏，冷与命中都检了）。
+- **延迟（11 个起始样例，真 runner、沙箱外，编译器先后跑；本机负载 8 至 12，只作量级）：** 冷（C 先请求或 JVM 先请求结果相同）3.85 至 4.89 s，中位约 4.4 s；
+  命中 8 至 19 ms。目标「hello 冷 ≤ 3 s」**不达标**：先后跑是协调者的裁决（生产机小），代价就是冷请求约 4 s，由缓存找回第二个标签页；
+  并排起（已放弃）负载 5 时是 2.35 至 2.67 s。命中 ≤ 50 ms 达标。十一个样例**全部 `gaps == 0`**（C 与 JVM 两栏，冷与命中都检了）。
 - **实测中发现并修了两个只有「带怪字符的源码」才暴露的缺陷：** (1) `packages/xmap` 的 `javap` 成员头只认 ASCII，`größe` 这样的函数名整个方法落成缺口
   （xmap 0.1.1，带负控）；(2) 沙箱单元的环境是空的，JVM 读成 POSIX 区域，`dawn __emit -o` 写不出 `prog$Wéird.class`（「unmappable characters」），
   `javap` 把这些名字印成 `?`。runner 在三个命令前加 `env LC_ALL=C.UTF-8`，包装脚本不动，`/run`、`/check` 的环境不变。合约测试把 runner 自己起在 POSIX 区域里。

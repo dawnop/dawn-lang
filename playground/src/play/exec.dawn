@@ -443,31 +443,31 @@ fn raw_file(path: String, what: String) -> Result[String, ViewRaw] !io = {
   if cut { Err(RawTooLarge(what)) } else { Ok(text) }
 }
 
-# The two compilers read the same source and write apart (the C text and its
-# map; the classes and theirs), so they run side by side and the request waits
-# for the slower, not for both: measured, 3.6 s of three units one after the
-# other against 2.0 s with the compilers abreast (the listing needs the
-# classes and follows). The cost is that one request has two JVMs going, each
-# with the unit's own limits, so two requests can mean four; the gate's two
-# permits are what bounds that, and it is the number to look at if the host
-# turns out too small for it.
+# The two compilers read the same source and write apart, and they run one
+# after the other: the production host is small and also serves /run and
+# /check, and a request that started both at once would put two compiler JVMs
+# under one permit, four under two. Measured on the dev box, sequential is
+# 3.6 to 4.0 s cold against 2.0 to 2.2 s side by side; the second tab of a
+# program is a cache hit either way, which is where the repeat cost goes.
 fn view_staged(dir: String, box: String) -> ViewRaw !io = {
   let started = System.nanoTime()
   let prog = "${box}/prog.dawn"
-  let c_unit = launch(dir, box, "emitc", [dawn_bin(), "__emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"])
-  let j_unit = launch(dir, box, "emit", [dawn_bin(), "__emit", prog, "-o", "${box}/classes", "--map", "${box}/jvm.dawnmap"])
-  let c_end = await(c_unit, budget_left(started))
-  # a failed first compiler need not keep the second going: wait zero seconds
-  # for it, which stops it unless it is already done
-  let j_end = await(j_unit, if c_end == Some(0) { budget_left(started) } else { 0 })
-  match (c_end, j_end) {
-    (None, _) -> RawTimedOut(compile_timeout_secs())
-    (Some(code), _) if code != 0 -> RawFail(CompileError(diagnostics(dir, box, "emitc")))
-    (_, None) -> RawTimedOut(compile_timeout_secs())
-    (_, Some(code)) if code != 0 -> RawFail(CompileError(diagnostics(dir, box, "emit")))
-    _ -> list_and_gather(dir, box, started)
+  match emit_unit(dir, box, "emitc", [dawn_bin(), "__emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"], started) {
+    Some(fail) -> fail
+    None -> match emit_unit(dir, box, "emit", [dawn_bin(), "__emit", prog, "-o", "${box}/classes", "--map", "${box}/jvm.dawnmap"], started) {
+      Some(fail) -> fail
+      None -> list_and_gather(dir, box, started)
+    }
   }
 }
+
+# One compiler unit: None when it succeeded, else the answer that ends the
+# request, which is /check's: the diagnostics, or the timeout.
+fn emit_unit(dir: String, box: String, name: String, argv: List[String], started: Int) -> Option[ViewRaw] !io =
+  match await(launch(dir, box, name, argv), budget_left(started)) {
+    None -> Some(RawTimedOut(compile_timeout_secs()))
+    Some(code) -> if code != 0 { Some(RawFail(CompileError(diagnostics(dir, box, name)))) } else { None }
+  }
 
 fn diagnostics(dir: String, box: String, name: String) -> String !io = {
   let (diags, _) = shown("${dir}/${name}.txt", dir, box)
