@@ -18,12 +18,12 @@ echo "=== checking the cuTile call map ==="
 python3 site/gpu-map/record.py
 
 # The explorer page's listings: a Dawn function beside the Tile IR, C and JVM
-# bytecode its calls wrote, from each compiler's own side table
-# (site/explorer/record.py says what and why). Written into site/build/explorer
+# bytecode its calls wrote. This runs the compilers and javap and keeps what
+# they said (site/explorer/record.py says what and why), into site/build/explorer
 # and not tracked, because the C and the bytecode are the compiler's function
-# and a checked-in copy would be stale at its next change. A call a side table
-# has no place for stops the build here, and the generator checks the result
-# again.
+# and a checked-in copy would be stale at its next change. The pairing of that
+# with the source is packages/xmap's, done by the generator, which stops the
+# build on a call a side table has no place for.
 echo "=== recording the explorer page's listings ==="
 python3 site/explorer/record.py
 

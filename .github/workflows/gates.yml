@@ -352,7 +352,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 18391s (the most this file's `3x` claims may add up to)
+# push-total: 18456s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3107,8 +3107,16 @@ jobs:
     # on top of the 443s observation is 547s, past the 490s claim. Restated
     # as a planning value, that plus a tenth rounded up to 5s, 605s, and the
     # timeout to 3x that; to be restated from the first observed runs.
-    # budget: 3x 605s planning value (443s worst observed, run 37097362181, plus 104s for chapter 20's blocks, plus a tenth)
-    timeout-minutes: 31
+    # 2026-10-07, the starter programs' mapping step (scripts/xmap-samples):
+    # it records the 11 Playground samples (a C and a JVM compile each, plus
+    # javap, three at a time), maps them with packages/xmap, and runs the
+    # five controls of its header. 30.5s wall locally at a load of about 6 on
+    # 16 cores, 226s of CPU. Doubled for the runner, 61s on top of the 547s
+    # above is 608s, and that plus a tenth rounded up to 5s is 670s (605s
+    # before), and the timeout 3x that; to be restated from the first
+    # observed runs.
+    # budget: 3x 670s planning value (443s worst observed, run 37097362181, plus 104s for chapter 20's blocks, plus 61s for the starter programs' mapping, plus a tenth)
+    timeout-minutes: 34
     steps:
       - uses: actions/checkout@v4
 
@@ -3142,6 +3150,18 @@ jobs:
 
       - name: site tests
         run: ./bin/dawn test site
+
+      # The Playground's online compile view pairs a visitor's code with its
+      # C and bytecode through packages/xmap and says nothing of a call a
+      # compiler's side table has no place for. The eleven programs a visitor
+      # starts from and the two the explorer page shows are held to none: each
+      # is recorded and mapped strictly, then the script puts three defects
+      # into real maps and two mutations into the package and requires each
+      # to be refused (its header). It is where a gap in a compiler's table
+      # turns red, so it is not folded into `site builds`, which only maps the
+      # two the page shows.
+      - name: the starter programs map with no gap
+        run: ./scripts/xmap-samples/run.sh
 
       # The playground runs a public endpoint that compiles and executes code
       # strangers send it, and nothing here ever ran its contract test: the

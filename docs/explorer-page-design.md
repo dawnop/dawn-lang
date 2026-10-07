@@ -13,7 +13,7 @@
 > 读原料、调 `xmap.explore_strict`（有缺口即失败，与下文「表里的每一个调用在每一栏都必须有出处」同一条规则），
 > 再用页面自己的 `assemble` 检查一遍要画的内容。下文关于算法与规则的叙述不变，只是执行者换了；
 > 搬家时 Python 与 Dawn 两份逐字节对拍过（`flash_attn`、`attend` 与 Playground 的 11 个样例），
-> 对拍与「11 个样例零缺口」由 `scripts/xmap-diff/run.sh` 守着。
+> 对拍与「11 个样例零缺口」由 `scripts/xmap-samples/run.sh` 守着。
 
 ## 一、要什么，不要什么
 
