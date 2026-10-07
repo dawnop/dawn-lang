@@ -463,7 +463,7 @@ export class ComparePane {
     this.host.picked(null)
     const m = this.model()
     const c = m && id !== null ? m.view.calls[id] : null
-    if (again || !m || !c) {
+    if (again || !m || !c || id === null) {
       this.say(m ? HINT : '')
       return
     }
