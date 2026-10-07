@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ cb65a93bb38b0011 -->
+<!-- doc-check: translation-of docs/spec.md @ 03129dd462990ee4 -->
 
 # Dawn Language Specification
 
@@ -1622,6 +1622,50 @@ implementations are cross-checked against this, "happens to agree" is not allowe
     `Show` is the nested one and `Display` the top-level one, matching Rust's `Debug` and
     `Display`; there used to be a single trait doing both jobs, and these two rules are where
     the seam was cut.
+
+#### Dot calls (UFCS)
+
+`x.f(a, b)` is another spelling of `f(x, a, b)`: the receiver `x` fills the **first parameter**
+of `f`, and the arguments in the parentheses fill the rest in order. This is pure sugar and
+introduces no new node. It is the same call as the pipe `x |> f(a, b)` (§4.4); the three
+spellings (`f(x, a, b)`, `x.f(a, b)`, `x |> f(a, b)`) have the same types, effects, evaluation
+order and diagnostics. The dot is a postfix (row 13 of the §4.3 table) and binds tighter than
+unary operators and `|>`: `a + b |> f` is `f(a + b)`, while `(a + b).f()` applies `f` to the sum.
+
+What `recv` is decides which kind of call `recv.name(args)` is, tried in this order:
+
+1. **Module alias**: `recv` is the alias of a whole-module import, so this is the qualified
+   call `alias.name(args)` (§10.3). An alias sharing its name with any binding of this module
+   is a compile error, so this step never competes with the ones below.
+2. **Java static**: `recv` is a class name brought in by `use java` (`Math.floor(x)`,
+   `StringBuilder.new()`).
+3. **Java instance**: `recv` is a value whose type is a Java class with an instance method
+   named `name`.
+4. **fn-typed record field**: `recv` is a record value with a fn-typed field named `name`, so
+   the function value stored in the field is called (§2.4). If a function named `name` is also
+   in scope, this spelling is a **compile error** (ambiguity); disambiguate with `(r.name)(a)`
+   or the direct call `name(r, a)`.
+5. **UFCS**: otherwise `name` is looked up as a **bare name** in the current scope as a
+   function, and `recv` becomes its first argument. What it finds can be a function of this
+   module, a selectively imported name (`use std/str.{split}`), a prelude builtin, or a trait
+   method (trait methods enter the module function namespace).
+
+Step 5 only sees names that are in scope **unqualified**. A whole-module `use std/str` binds
+only the alias `str` and does not bring `split` into scope, so `s.split(",")` does not hold
+and the compiler reports:
+
+```
+error: undefined function: split
+  = hint: `split` is not in scope unqualified, but an import exports it: write
+    `str.split(...)`, or add `use std/str.{split}` to keep the dot call
+```
+
+Either write the qualified call `str.split(s, ",")` (or the pipe `s |> str.split(",")`, which
+needs no import of the bare name), or import selectively and keep the dot.
+
+Named arguments work as usual; the receiver already took the first slot by position, so
+`x.f(self: y)` reports "parameter `self` is given twice" (the named-argument item of §4.3).
+A tail block also lands on a dot call: `xs.each { x => e }` is `each(xs, x => e)`.
 
 ### 4.4 Pipelines
 

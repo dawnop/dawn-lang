@@ -1276,6 +1276,43 @@ let area = {
     `Show` 是嵌套那一份、`Display` 是顶层那一份，两个名字对上 Rust 的 `Debug` 与
     `Display`；这里曾经只有一个 trait 兼二职，这两条就是它拆开的位置。
 
+#### 点调用（UFCS）
+
+`x.f(a, b)` 是 `f(x, a, b)` 的另一种写法：接收者 `x` 占 `f` 的**第一个参数**，
+括号里的实参依次填其余形参。这是纯语法糖，不引入新节点；与管道 `x |> f(a, b)`（§4.4）
+是同一次调用，三种拼写（`f(x, a, b)`、`x.f(a, b)`、`x |> f(a, b)`）的类型、效果、
+求值顺序与诊断全部相同。点是后缀（§4.3 表第 13 级），比一元运算符和 `|>` 都紧：
+`a + b |> f` 是 `f(a + b)`，而 `(a + b).f()` 才把 `f` 作用在和上。
+
+`recv.name(args)` 的 `recv` 是什么，决定这是哪一种调用，按下列顺序认：
+
+1. **模块别名**：`recv` 是整模块引入的别名，则是限定调用 `alias.name(args)`（§10.3）。
+   别名与本模块任何绑定同名是编译错误，所以这一步不会与下面几步争。
+2. **Java 静态**：`recv` 是 `use java` 引入的类名（`Math.floor(x)`、`StringBuilder.new()`）。
+3. **Java 实例**：`recv` 是一个值，其类型是 Java 类，且该类有名为 `name` 的实例方法。
+4. **fn 类型的记录字段**：`recv` 是记录值且有名为 `name` 的 fn 类型字段，则调用字段里存的函数值
+   （§2.4）。作用域里同时有名为 `name` 的函数时，这个写法是**编译错误**（歧义），
+   消歧写 `(r.name)(a)` 或直呼 `name(r, a)`。
+5. **UFCS**：其余情形，`name` 按**裸名**在当前作用域找一个函数，把 `recv` 作为第一个实参。
+   找到的可以是本模块的 fn、选择性引入的名字（`use std/str.{split}`）、prelude 的 builtin，
+   以及 trait 方法（trait 方法进入模块函数命名空间）。
+
+第 5 步只看**无限定地在作用域内**的名字。整模块引入 `use std/str` 只绑定别名 `str`，
+不把 `split` 带进作用域，所以 `s.split(",")` 不成立，编译器报：
+
+```
+error: undefined function: split
+  = hint: `split` is not in scope unqualified, but an import exports it: write
+    `str.split(...)`, or add `use std/str.{split}` to keep the dot call
+```
+
+要么写限定调用 `str.split(s, ",")`（或管道 `s |> str.split(",")`，限定名不需要引入），
+要么选择性引入后用点写法。
+
+具名实参照常可用，接收者已按位置占掉第一个槽：`x.f(self: y)` 报
+「parameter `self` is given twice」（§4.3 具名实参一条）。尾块也落在点调用上：
+`xs.each { x => e }` 就是 `each(xs, x => e)`。
+
 ### 4.4 管道
 
 `x |> f(a, b)` 等价于 `f(x, a, b)`——把左侧塞进**第一个参数**。
