@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 08581571c36a44ec -->
+<!-- doc-check: translation-of docs/spec.md @ 54147e458366640a -->
 
 # Dawn Language Specification
 
@@ -3725,8 +3725,8 @@ into Dawn values (§9.6); passing null for an `Option` argument is unsupported (
 > intercepts is a **fault** — a failure caused by the outside world — and ever since
 > native grew failure kinds that classification has been shared by both backends
 > ([`native-backend-plan.md`](native-backend-plan.md) §14.9) and has nothing to do with Java; the name outlived its
-> reason by a while. The old name's migration hint expired at v0.41.0 under the
-> expiry rule of `std/moved.txt` ([`std-moved-design.md`](std-moved-design.md)), so
+> reason by a while. The old name's migration hint was withdrawn together with the
+> `std/moved.txt` mechanism ([`std-moved-design.md`](std-moved-design.md)), so
 > writing `java_try` today gets the ordinary undefined-function diagnostic.
 
 Dawn has no exceptions: an exception thrown by a Java call passes through unchanged by
@@ -4114,8 +4114,7 @@ All declarations are module-private by default; `pub` exports `fn`/`type`/`alias
 non-`pub` item → error (`` `parse` is private to module json/parser ``, with a hint: add
 `pub`). A non-`pub` item of the standard library is the exception: std is not the
 user's to edit, so the error says the item is not part of std's public API (`` `atoi` is not part
-of std's public API (`std/fmt` declares it privately) ``) with no "add `pub`" hint, and where
-`std/moved.txt` has an entry for the name, that entry is the hint (#296). An exported declaration must not leak a private type, trait or effect that cannot be named
+of std's public API (`std/fmt` declares it privately) ``) with no "add `pub`" hint (#296). An exported declaration must not leak a private type, trait or effect that cannot be named
 outside the module either; the full rules for transparent aliases, the opaque boundary, public
 traits/effects and reachable impls are in §3.3, and the error is reported at the declaration rather
 than at the use site.
@@ -4300,7 +4299,7 @@ radix  = [ "+" | "-" ] rdigit { rdigit }
 `0-9 a-z A-Z` (value = 10..35, upper and lower case have the same value), and a digit whose
 value is ≥ radix is rejected; a radix outside 2..36 answers `None`. At radix 10 it is the
 same language as `int`. Before 0.83.0 the radix version was a separate builtin,
-`parse_int_radix`, now folded in (`std/moved.txt` carries the hint). An integer outside the 64-bit range is `None`, not
+`parse_int_radix`, now folded in. An integer outside the 64-bit range is `None`, not
 wrap-around. **Deliberately excluded** (things today's host parsers do accept and Dawn
 rejects across the board): underscores, the `0x` prefix and hexadecimal floats (`0x1p3`),
 the `f/F/d/D` suffixes, lower-case variants such as `inf`/`nan`, a signed `NaN` and
