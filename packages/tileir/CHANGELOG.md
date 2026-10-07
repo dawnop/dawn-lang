@@ -9,8 +9,8 @@ Chinese).
 
 ## 0.12.0 (2026-10-07)
 
-Breaking, and the first knife of the runtime scalar parameters
-(`docs/tileir-k4-design.md`, knife 1; the host side follows in knife 2).
+Breaking: runtime scalar kernel parameters (`docs/tileir-k4-design.md`,
+knives 1 and 2).
 Every one of the 195 existing `.mlir` and `.tilebc` goldens is unchanged on
 both backends.
 
@@ -24,8 +24,8 @@ both backends.
 - `scalar(p)` reads a by-value parameter as a rank-0 tile. Arithmetic with it
   follows the rank-0 rule, so `load(x, ..) * scalar(s)` scales a tile by a
   value the launch picks, and `idx_of(scalar(n))` is a runtime extent.
-  `scalar` is bounded by the new `ScalarDtype` (`I32`, `I64`, `F32`, `F64`),
-  its own trait and not `HasDtype` because Dawn has no supertraits. The bound
+  `scalar` is bounded by `std/gpu`'s new `ScalarDtype` (`I32`, `I64`, `F32`,
+  `F64`), its own trait and not `HasDtype` because Dawn has no supertraits. The bound
   keeps out only what has no number under it: an opaque type over `Float` or
   `Int` uses its target's impl, so `F16` or `I8` still check, and the
   recording is the fence for those (a `ByValue` of any format but `i32`,
@@ -37,9 +37,15 @@ both backends.
 - Three kernels in `scripts/tile-golden` (`scalar_scale`, `scalar_len`,
   `scalar_wide`) assemble under `tileiras` 13.4.92 for sm_86 and read the
   right values on the RTX 3080, including the 64-bit formats and an `i32`
-  whose argument word has garbage in its high half. The typed entries
-  (`trace1` to `trace5`) have no scalar marker yet; that comes with the
-  launch (knife 2).
+  whose argument word has garbage in its high half.
+- `Scalar(F32)` is the fourth marker of `trace1` to `trace5`, beside `In`,
+  `Out` and `Shared`: the parameter is a `ByValue`, has no cells, and the
+  entry the recorder answers takes a scalar at that position
+  (`std/gpu`'s `arg_scalar`). `launch_entryN` takes `Launch[A]` arguments,
+  `buffer(t)` or `scalar(v)`, and holds each position to the kind the entry
+  says (`gpu.bad_entry`). Needs the `std/gpu` of the same release: `launch`
+  takes `List[LaunchArg]` (`erase(buffer(t))`, `erase(scalar(v))`) and the
+  fake device's `WideRefFn` takes the launch's scalars as a third argument.
 
 ## 0.11.0 (2026-10-07)
 

@@ -175,7 +175,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buf(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -404,11 +404,11 @@ fn case_reads(i: Int) -> List[Int] = {
 fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   let name = case_name(i)
   if name == "sum_diff" {
-    map.from([("sum_diff", (4, (dts, ins) => sum_diff_ref(WIDE_N, dts, ins)))])
+    map.from([("sum_diff", (4, (dts, ins, _ss) => sum_diff_ref(WIDE_N, dts, ins)))])
   } else if name == "reverse" {
-    map.from([("reverse", (1, (dts, ins) => reverse_ref(REV_N, dts, ins)))])
+    map.from([("reverse", (1, (dts, ins, _ss) => reverse_ref(REV_N, dts, ins)))])
   } else if name == "invert" {
-    map.from([("invert", (1, (dts, ins) => invert_ref(INV_N, dts, ins)))])
+    map.from([("invert", (1, (dts, ins, _ss) => invert_ref(INV_N, dts, ins)))])
   } else if name == "f16_ops" {
     map.from([("f16_ops", (3, last_out((dts, ins) => f16_ops_ref(F16E_N, dts, ins))))])
   } else if name == "dot_f16" {

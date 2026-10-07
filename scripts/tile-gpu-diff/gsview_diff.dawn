@@ -226,7 +226,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buf(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -532,7 +532,7 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
       (3, last_out((dts, ins) => token_embed_ref(VG_N, VG_ROWS, VG_DIM, 0.0, dts, ins))))])
   } else if name == "view_atomic" {
     map.from([("view_atomic",
-      (10, (dts, ins) => view_atomic_ref(VA_N, VA_BINS, VA_TILE, VA_BIAS, dts, ins)))])
+      (10, (dts, ins, _ss) => view_atomic_ref(VA_N, VA_BINS, VA_TILE, VA_BIAS, dts, ins)))])
   } else if name == "view_stride_pad" {
     map.from([("view_stride_pad", (2, last_out((_dts, ins) =>
         strided_pad_ref(VE_N, VE_TILE, VE_TRAV, nan_bits(), ins[0], ins[1]))))])

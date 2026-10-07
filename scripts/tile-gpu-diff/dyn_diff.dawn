@@ -161,7 +161,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buf(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -378,10 +378,10 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
     map.from([(name, (3, last_out((dts, ins) =>
         transpose_ref(rows, cols, [dts[1], dts[2]], [ins[1], ins[2]]))))])
   } else if name == "view_tensor_shape" {
-    map.from([(name, (4, (_dts, ins) =>
+    map.from([(name, (4, (_dts, ins, _ss) =>
         [(2, masked_double_ref(cols, ins[1], ins[2])), (3, shape_out_ref(i, ins[3]))]))])
   } else {
-    map.from([(name, (4, (_dts, ins) =>
+    map.from([(name, (4, (_dts, ins, _ss) =>
         [(2, view_grid_sum_ref(rows, cols, VD_SUM_TILE, ins[1], ins[2])),
           (3, shape_out_ref(i, ins[3]))]))])
   }

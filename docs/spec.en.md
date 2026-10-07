@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 54147e458366640a -->
+<!-- doc-check: translation-of docs/spec.md @ cb65a93bb38b0011 -->
 
 # Dawn Language Specification
 
@@ -4904,8 +4904,8 @@ The reasons, the roadmap and the measurements are in
 - Outputs: `tileir/render`'s `render(prog)` gives text in the `cuda_tile` dialect, and
   `tileir/bytecode`'s `encode(prog)` gives `cuda-tile` bytecode whose version is pinned in
   `BYTECODE_MAJOR` / `BYTECODE_MINOR`. One `TileProg` is one module holding one
-  `entry @<name>`, where `name` is `trace_kernel`'s first argument; every entry parameter is a
-  pointer to its format. Turning the bytecode into a device image (a cubin) is done by
+  `entry @<name>`, where `name` is `trace_kernel`'s first argument; every entry parameter is
+  either a pointer to its format (`ByPtr`, a buffer) or a rank-0 value (`ByValue`, a scalar passed by value). Turning the bytecode into a device image (a cubin) is done by
   NVIDIA's `tileiras`, outside the Dawn toolchain; this specification does not say who calls
   it or when.
 
@@ -4921,8 +4921,9 @@ program uses the typed functions over them: `alloc`, `upload`, `download`, `free
   asked. Every other answer is the raw outcome of the device the handler stands for: the
   seam sits below the error surface.
 - **`launch` names a kernel by a string**: `launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`;
-  `grid`, `gy` and `gz` are the three axes of the grid, counting tile blocks; `args` are buffer handles
-  (`handle_of(t)`), in the order of the entry parameters. The binding from names to kernels
+  `grid`, `gy` and `gz` are the three axes of the grid, counting tile blocks; `args` is a list of `LaunchArg`, in the
+  order of the entry parameters: `erase(buffer(t))` is a buffer and `erase(scalar(v))` a scalar passed by value
+  (`i32`, `i64`, `f32` or `f64`). The binding from names to kernels
   is the table the handler is installed with, and a name not in it answers `gpu.no_kernel`
   under both handlers. The language checks neither that this name is the one `trace_kernel`
   was given nor that `args` agree with the entry signature in number and format: that is the
@@ -5010,9 +5011,10 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   format, or truncates and wraps (`round_to`), and `download` answers what the buffer holds
   exactly. The channel is lossless for `i32`, `i16`, `i8` and `u8`, and exact for `i64` only
   within ±2^53.
-- **No scalar crosses**: a launch's arguments are buffer handles only (every entry parameter
-  is a pointer). A host number reaches a kernel only as a constant written into the program
-  at recording time, or in a buffer.
+- **Scalars cross by value**: a launch's arguments are buffer handles or scalars passed by value
+  (`i32`, `i64`, `f32`, `f64`; the argument-area layout of smaller formats has not been measured, so
+  they are not accepted). A host number reaches a kernel as a constant written into the program at
+  recording time (one program per value), or as a `ByValue` parameter passed at run time (one cubin).
 
 **Checked by machine** (where, and what):
 

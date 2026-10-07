@@ -3853,7 +3853,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 - 产物：`tileir/render` 的 `render(prog)` 给 `cuda_tile` 方言的文本，`tileir/bytecode` 的
   `encode(prog)` 给 `cuda-tile` 字节码，版本钉在 `BYTECODE_MAJOR` / `BYTECODE_MINOR`。一个
   `TileProg` 是一个模块，含一个 `entry @<name>`，`name` 即 `trace_kernel` 的第一个实参；每个
-  入口参数都是其格式的指针。字节码变成设备映像（cubin）由 NVIDIA 的 `tileiras` 完成，在 Dawn
+  入口参数要么是其格式的指针（`ByPtr`，缓冲），要么是 rank-0 的值（`ByValue`，按值传的标量）。字节码变成设备映像（cubin）由 NVIDIA 的 `tileiras` 完成，在 Dawn
   工具链之外；本规范不规定由谁、在何时调用它。
 
 **`Gpu` 效果**有七个操作（`gpu_alloc`、`gpu_upload`、`gpu_download`、`gpu_launch`、
@@ -3865,7 +3865,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
   `size(t)`）、`gpu.bad_grid`（grid 某一轴小于 1）。这三种都在问 handler 之前发出。其余答复是
   handler 所代表的设备的原样结果：接缝在错误面之下。
 - **`launch` 以字符串点名 kernel**：`launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`，
-  `grid`、`gy`、`gz` 是 grid 的三根轴，计 tile block 的个数；`args` 是缓冲句柄（`handle_of(t)`），按入口参数的顺序。
+  `grid`、`gy`、`gz` 是 grid 的三根轴，计 tile block 的个数；`args` 是 `LaunchArg` 的列表，按入口参数的顺序：`erase(buffer(t))` 是缓冲，`erase(scalar(v))` 是按值传的标量（`i32`、`i64`、`f32`、`f64`）。
   名字到 kernel 的绑定是安装 handler 时交给它的表，名字不在表里，两个 handler 都答
   `gpu.no_kernel`。语言不检查这个名字与 `trace_kernel` 用的名字一致，也不检查 `args` 的个数与
   格式与入口签名一致：那是程序的责任。
@@ -3930,8 +3930,9 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 - 值以 `List[Float]` 进出，每种格式都是如此：`upload` 按缓冲格式舍入，或截断再回绕
   （`round_to`），`download` 精确答出缓冲持有的值。这条通道对 `i32`、`i16`、`i8`、`u8` 无损，
   对 `i64` 只在 ±2^53 之内精确。
-- **标量不过界**：launch 的实参只有缓冲句柄（每个入口参数都是指针）。宿主的数要进 kernel，
-  只能在记录时作为常量写进程序，或者放进缓冲。
+- **标量按值过界**：launch 的实参是缓冲句柄或按值传的标量（`i32`、`i64`、`f32`、`f64`；更小的格式的参数区布局
+  没量过，不收）。宿主的数要进 kernel，可以在记录时作为常量写进程序（每个值一个程序），
+  或者作为 `ByValue` 参数运行期传入（同一个 cubin）。
 
 **机器核对**（在哪、核什么）：
 

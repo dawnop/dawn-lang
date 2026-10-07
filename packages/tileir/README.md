@@ -50,6 +50,9 @@ The full public surface is what `./bin/dawn doc packages/tileir` prints.
   batch on axis 2 with `cells([B, M, N], [1, T, T], along: [2, 0, 1])`.
 - `Shared(d)` is the escape hatch: atomics, scatters, a block that writes two
   regions, a write through pointers. `grep Shared(` finds every one.
+- `Scalar(d)` is a value the launch passes by value (`i32`, `i64`, `f32` or
+  `f64`), not a buffer: no cells, read in the body with `scalar(p)`, and
+  passed with `std/gpu`'s `scalar(v)`.
 - `cells(extent, tile, pad: PadZero, along: ..)` cuts the tensor. An extent
   of `DYN_DIM` is the grid's to decide; `pad` is what a read past the extent
   answers; `along[j]` is the grid axis dimension `j` follows, or `FREE_AXIS`
