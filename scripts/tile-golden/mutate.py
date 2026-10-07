@@ -484,8 +484,8 @@ MUTATIONS = {
     # was before tileir 0.12.0 (docs/tileir-k4-design.md 5, knife 5).
     "scale-baked-again": ((
         KERNELS,
-        '.transpose(), lit(0.0)) * scalar(scale)\n',
-        '.transpose(), lit(0.0)) * f_const(F64, ATT_INV_SQRT_D)\n',
+        'let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * scalar(scale)\n',
+        'let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * f_const(F64, ATT_INV_SQRT_D)\n',
     ),),
 }
 
