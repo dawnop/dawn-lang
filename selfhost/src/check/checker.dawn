@@ -86,7 +86,7 @@ use check/cx.{
   ExportDiagnostic,
   write_symbol, write_signature, write_bounds,
   AliasE, Cx, Frame, LambdaCx, LocalFn, StagedCell, ModExports, package_of, pkg_private, pkg_private_export,
-  pkg_private_err, private_name_diagnostic, moved_module_key,
+  pkg_private_err, private_name_diagnostic,
   cx_new, test_cx, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
@@ -6738,9 +6738,8 @@ pub(pkg) fn resolve_local(
 }
 
 ## The hint for a bare name that is not a builtin: where it lives (a std
-## export's qualified spelling, or a `builtin` entry of std/moved.txt, both put
-## in `cx.moved` by the std loader), else did-you-mean. No version in the
-## message -- the names in that map left at different times.
+## export's qualified spelling, put in `cx.moved` by the std loader), else
+## did-you-mean.
 pub(pkg) fn moved_or_suggest(cx: Cx, name: String, pool: List[String]) -> Option[String] =
   match map.get(cx.moved, name) {
     Some(w) -> Some("`" ++ name ++ "` is not a builtin; " ++ w)
@@ -12464,18 +12463,6 @@ fn check_module_call(
       let mod_path = match map.get(cx1.module_aliases, al) {
         Some(p) -> p
         None -> al
-      }
-      # A name std/moved.txt says left this module. Asked before the
-      # "private" and "did you mean" branches below: `suggest.hint` does not
-      # reach `slice` from `substring`, and the hint reads as an answer to
-      # "where did it go", which is the question the message asks. The private
-      # branch carries the same hint (#296), for the selective-import path
-      # that has no such lookup ahead of it.
-      match map.get(cx1.moved, moved_module_key(mod_path, name)) {
-        Some(h) ->
-          return (cerr_h(cx1, "module `" ++ mod_path ++ "` has no exported function `" ++
-              name ++ "`", nlo, nhi, h), TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
-        None -> ()
       }
       match map.get(cx1.module_exports, al) {
         Some(exp) -> {

@@ -27,7 +27,7 @@ use check/types.{
   OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID
 }
 use check/tast.{TFun, TModule}
-use check/cx.{ModExports, cx_new, Cx, moved_module_key}
+use check/cx.{ModExports, cx_new, Cx}
 use check/checker.{check_module, exports_of}
 use check/identity.{Minted}
 use ir/interp.{
@@ -53,8 +53,7 @@ pub(pkg) type StdCtx = {
   # the implicitly-visible surface: the PRELUDE names only
   std_fns: Map[String, Sig],
   # a bare name → where it lives now (every std export, by its qualified
-  # spelling), plus std/moved.txt's hints: flat entries under the old name,
-  # module-qualified ones under `moved_module_key(module, old)`
+  # spelling)
   moved: Map[String, String],
   # flat name → direct typed fn, for the comptime interpreter
   fn_decls: Map[String, TFun],
@@ -145,129 +144,6 @@ fn prelude_owner(n: String) -> String =
     "std/list"
   }
 
-## One line of std/moved.txt: a name that left std, how to write it now, and
-## until which release the hint is kept (docs/std-moved-design.md).
-##
-## The data lives with std rather than in the compiler because it is std's
-## release history, and a compiler only ever loads the std it shipped with.
-pub(pkg) type MovedEntry = {
-  # `builtin` for a flat spelling, else the `std/<module>` it left
-  scope: String,
-  old: String,
-  # the spelling to use now, or `-`
-  replacement: String,
-  since: String,
-  until: String,
-  # the diagnostic hint, verbatim; `no-hint` is a removal on purpose
-  hint: String
-}
-
-## A release number `X.Y.Z` as three integers, or `None` when `v` is not one.
-## Digits only: `parse_int` alone would accept a sign or blanks.
-pub(pkg) fn release_key(v: String) -> Option[(Int, Int, Int)] = {
-  let parts = str.split(v, ".")
-  if len(parts) != 3 { return None }
-  var nums: List[Int] = []
-  for p in parts {
-    if p == "" { return None }
-    for c in str.chars(p) {
-      if not str.contains("0123456789", c) { return None }
-    }
-    match parse_int(p) {
-      Some(n) -> { nums = nums ++ [n] }
-      None -> return None
-    }
-  }
-  Some((nums[0], nums[1], nums[2]))
-}
-
-## Is release `a` strictly before release `b`?
-pub(pkg) fn release_before(a: (Int, Int, Int), b: (Int, Int, Int)) -> Bool = {
-  let (a1, a2, a3) = a
-  let (b1, b2, b3) = b
-  if a1 != b1 { a1 < b1 } else if a2 != b2 { a2 < b2 } else { a3 < b3 }
-}
-
-## The first blank-separated field of `s` and the rest, both with their
-## leading blanks dropped.
-fn moved_field(s: String) -> (String, String) = {
-  let t = str.trim_start(s)
-  match str.split_once(t, " ") {
-    Some(pair) -> {
-      let (head, rest) = pair
-      (head, str.trim_start(rest))
-    }
-    None -> (t, "")
-  }
-}
-
-## std/moved.txt as entries, or the first line that is not one, as its
-## 1-based number and what is wrong with it. `#` starts a comment anywhere,
-## which is why a hint cannot contain one.
-pub(pkg) fn parse_moved(text: String) -> Result[List[MovedEntry], (Int, String)] = {
-  var out: List[MovedEntry] = []
-  var seen: Set[String] = set.empty()
-  var n = 0
-  for raw in str.split(text, "\n") {
-    n = n + 1
-    let cut = match str.index_of(raw, "#") {
-      Some(i) -> str.take(raw, i)
-      None -> raw
-    }
-    let line = str.trim(str.replace(cut, "\t", " "))
-    if line == "" { continue }
-    let (scope, r1) = moved_field(line)
-    let (old, r2) = moved_field(r1)
-    let (replacement, r3) = moved_field(r2)
-    let (since, r4) = moved_field(r3)
-    let (until, hint) = moved_field(r4)
-    if hint == "" {
-      return Err((n, "expected `scope old new since until hint`"))
-    }
-    if scope != "builtin" && not str.starts_with(scope, "std/") {
-      return Err((n, "scope `${scope}` is neither `builtin` nor `std/<module>`"))
-    }
-    match (release_key(since), release_key(until)) {
-      (Some(s), Some(u)) ->
-        if not release_before(s, u) {
-          return Err((n, "until ${until} is not after since ${since}"))
-        }
-      _ -> return Err((n, "since and until must be releases written X.Y.Z"))
-    }
-    let key = moved_key(scope, old)
-    if set.has(seen, key) {
-      return Err((n, "`${old}` of `${scope}` is listed twice"))
-    }
-    seen = set.insert(seen, key)
-    out = out ++ [MovedEntry {
-      scope: scope,
-      old: old,
-      replacement: replacement,
-      since: since,
-      until: until,
-      hint: hint
-    }]
-  }
-  Ok(out)
-}
-
-## Where an entry goes in `cx.moved`: a flat spelling under its own name, a
-## module-qualified one under the key `check_module_call` asks with.
-fn moved_key(scope: String, old: String) -> String =
-  if scope == "builtin" { old } else { moved_module_key(scope, old) }
-
-## `moved` with every hinted entry added. Entries override the export-derived
-## hints under the same key, as the hand-kept table this replaced did.
-fn install_moved(moved0: Map[String, String], entries: List[MovedEntry]) -> Map[String, String] = {
-  var moved = moved0
-  for e in entries {
-    if e.hint != "no-hint" {
-      moved = map.insert(moved, moved_key(e.scope, e.old), e.hint)
-    }
-  }
-  moved
-}
-
 ## Which half of `std_read` answered for a file.
 ##
 ## The two are not interchangeable in a diagnostic. The embedded copy is
@@ -284,8 +160,7 @@ pub type StdOrigin =
 ## sentence. `StdVersionSkew` is the directory declaring a release this
 ## toolchain is not; `StdFileMissing` is a name in modules.txt that is in
 ## neither the directory nor the embedded copy; `StdModulesMissing` is every
-## module modules.txt lists that the half which answered for it does not have;
-## `StdMovedMalformed` is a line of moved.txt that is not an entry.
+## module modules.txt lists that the half which answered for it does not have.
 pub type StdFail =
   | StdVersionSkew
   | StdFileMissing(file: String, why: String)
@@ -293,7 +168,6 @@ pub type StdFail =
   | StdModuleParse(mod_path: String, diag: String)
   | StdModuleCheck(mod_path: String, diag: String)
   | StdModuleEval(mod_path: String, diag: String)
-  | StdMovedMalformed(line: Int, why: String)
 
 ## A failed `load_std`, with enough context to say which std failed and why.
 pub type StdLoadError = {
@@ -402,7 +276,6 @@ fn why_text(w: StdFail) -> String =
     StdModuleParse(mp, d) -> "module `" ++ mp ++ "` does not parse: " ++ d
     StdModuleCheck(mp, d) -> "module `" ++ mp ++ "` does not check: " ++ d
     StdModuleEval(mp, d) -> "module `" ++ mp ++ "` does not evaluate: " ++ d
-    StdMovedMalformed(n, w) -> "`moved.txt` line ${n}: ${w}"
   }
 
 ## Whether this failure is the compiler's own fault. Only the embedded std is:
@@ -562,22 +435,6 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
   if len(missing) > 0 {
     return Err(StdLoadError { origin: origin, declared: declared, why: StdModulesMissing(missing) })
   }
-  # The migration hints, from the same half as the modules and before any of
-  # them is parsed. Optional: a std without the file has no hints, which is
-  # every one-module std a test assembles and every copy of `*.dawn` plus
-  # modules.txt; a hint is a sentence, and missing one changes no program.
-  var moved_entries: List[MovedEntry] = []
-  match std_module_text(dir, idx_from_dir, "moved.txt") {
-    Some(t) ->
-      match parse_moved(t) {
-        Ok(es) -> { moved_entries = es }
-        Err(bad) -> {
-          let (n, w) = bad
-          return Err(StdLoadError { origin: origin, declared: declared, why: StdMovedMalformed(n, w) })
-        }
-      }
-    None -> ()
-  }
   var exports: Map[String, ModExports] = map.empty()
   var std_fns: Map[String, Sig] = map.empty()
   var moved: Map[String, String] = map.empty()
@@ -685,7 +542,6 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
     mods = mods ++ [(mod_path, cx1, tm, ct)]
     srcs = srcs ++ [(mod_path, text, m)]
   }
-  moved = install_moved(moved, moved_entries)
   var std_names: Set[String] = set.empty()
   for k in map.keys(fn_decls) { std_names = set.insert(std_names, k) }
   Ok(StdCtx {
@@ -788,12 +644,6 @@ test "the embedded std matches std/ on disk" {
     }
     var files = ["modules.txt"]
     for n in names { files = files ++ ["${n}.dawn"] }
-    # the migration hints ride along, and the loader reads them from the
-    # embedded copy whenever the embedded copy answered for modules.txt
-    match io.read_file("std/moved.txt") {
-      Ok(_) -> { files = files ++ ["moved.txt"] }
-      Err(_) -> ()
-    }
     for f in files {
       let disk = match io.read_file("std/${f}") {
         Ok(t) -> t
@@ -1369,72 +1219,16 @@ fn diag_with(ds: List[Diag], msg: String) -> Option[Diag] = {
   None
 }
 
-test "a std/moved.txt entry answers both kinds of call with its hint" {
-  io.with_fs_real(() => no_host(() => {
-    # The shipped moved.txt has no live entries today (every one the two old
-    # tables held had expired, docs/std-moved-design.md §2), so the path from
-    # the file to the diagnostic is pinned on a std of this test's own.
-    let root = "/tmp/dawn-selfhost-stdlib/moved"
-    let _ = io.mkdirs(root)
-    put("${root}/modules.txt", "mv\n")
-    put("${root}/mv.dawn", "pub fn fresh() -> Int = 1\nfn kept() -> Int = 2\n")
-    put("${root}/moved.txt", join([
-      "# scope old new since until hint",
-      "std/mv stale mv.fresh 0.79.0 0.89.0 renamed: write `mv.fresh()`",
-      "std/mv kept - 0.79.0 0.89.0 std-internal now: write `fresh()`",
-      "builtin old_flat mv.fresh 0.79.0 0.89.0 use std/mv, then mv.fresh()",
-      "std/mv gone - 0.79.0 0.89.0 no-hint",
-      ""
-    ], "\n"))
-    let std = match load_std(root) {
-      Ok(s) -> s
-      Err(e) -> panic("std: ${std_load_error_text(e)}")
-    }
-    # a `no-hint` line is a decision for the gate, not a hint
-    assert not map.has(std.moved, moved_module_key("std/mv", "gone"))
-    let src = join([
-      "use std/mv",
-      "pub fn a() -> Int = mv.stale()",
-      "pub fn b() -> Int = mv.kept()",
-      "pub fn c() -> Int = old_flat()",
-      ""
-    ], "\n")
-    let (m, pdiags) = parser.parse_module(src)
-    assert len(pdiags) == 0
-    var cx = cx_new(None, None)
-    cx = Cx { ..cx, identities: std.identities, impl_table: std.impls, moved: std.moved }
-    let (cx1, _) = check_module(cx, m, std.exports)
-    # the qualified entry, in the shape the checker's hand-kept table had
-    match diag_with(cx1.diags, "module `std/mv` has no exported function `stale`") {
-      Some(d) -> { assert d.hint == "renamed: write `mv.fresh()`" }
-      None -> panic("no diagnostic for mv.stale()")
-    }
-    # asked before the private branch: a name std still declares is answered
-    # as one that left, with the hint
-    match diag_with(cx1.diags, "module `std/mv` has no exported function `kept`") {
-      Some(d) -> { assert d.hint == "std-internal now: write `fresh()`" }
-      None -> panic("no diagnostic for mv.kept()")
-    }
-    # the flat entry, through `moved_or_suggest`
-    match diag_with(cx1.diags, "undefined function: old_flat") {
-      Some(d) -> { assert d.hint == "`old_flat` is not a builtin; use std/mv, then mv.fresh()" }
-      None -> panic("no diagnostic for old_flat()")
-    }
-  }))
-}
-
 test "a private std function is outside std's public API, not a missing `pub` (#296)" {
   io.with_fs_real(() => no_host(() => {
     let root = "/tmp/dawn-selfhost-stdlib/private"
     let _ = io.mkdirs(root)
     put("${root}/modules.txt", "pv\n")
     put("${root}/pv.dawn", join([
-      "pub fn open() -> Int = inner() + moved_away()",
+      "pub fn open() -> Int = inner()",
       "fn inner() -> Int = 1",
-      "fn moved_away() -> Int = 2",
       ""
     ], "\n"))
-    put("${root}/moved.txt", "std/pv moved_away pv.open 0.80.0 0.90.0 std-internal now: write `pv.open()`\n")
     let std = match load_std(root) {
       Ok(s) -> s
       Err(e) -> panic("std: ${std_load_error_text(e)}")
@@ -1459,85 +1253,5 @@ test "a private std function is outside std's public API, not a missing `pub` (#
       Some(d) -> { assert d.hint == "" }
       None -> panic("no diagnostic for use std/pv.{inner}")
     }
-    # a std/moved.txt entry is the hint on the import path too
-    let moved = check("use std/pv.{moved_away}\npub fn a() -> Int = moved_away()\n")
-    match diag_with(moved, "`moved_away` is not part of std's public API (`std/pv` declares it privately)") {
-      Some(d) -> { assert d.hint == "std-internal now: write `pv.open()`" }
-      None -> panic("no diagnostic for use std/pv.{moved_away}")
-    }
   }))
-}
-
-test "a malformed std/moved.txt fails the load with its line" {
-  io.with_fs_real(() => no_host(() => {
-    let root = "/tmp/dawn-selfhost-stdlib/moved-bad"
-    let _ = io.mkdirs(root)
-    put("${root}/modules.txt", "mv\n")
-    put("${root}/mv.dawn", "pub fn fresh() -> Int = 1\n")
-    put("${root}/moved.txt", "# header\n\nstd/mv stale mv.fresh 0.89.0 0.79.0 until before since\n")
-    match load_std(root) {
-      Ok(_) -> panic("a moved.txt whose until precedes its since loaded")
-      Err(e) -> {
-        assert not std_load_is_bug(e)
-        assert str.contains(std_load_error_text(e), "`moved.txt` line 3: until 0.79.0 is not after since 0.89.0")
-      }
-    }
-  }))
-}
-
-test "moved.txt lines are parsed or refused one field at a time" {
-  let ok = match parse_moved("builtin  a\tstr.b  0.1.0 0.11.0   the rest, verbatim  # comment\n") {
-    Ok(es) -> es
-    Err(bad) -> {
-      let (n, w) = bad
-      panic("line ${n}: ${w}")
-    }
-  }
-  assert len(ok) == 1
-  assert ok[0].scope == "builtin" && ok[0].old == "a" && ok[0].replacement == "str.b"
-  assert ok[0].since == "0.1.0" && ok[0].until == "0.11.0"
-  assert ok[0].hint == "the rest, verbatim"
-  for bad in [
-    "builtin a b 0.1.0 0.11.0",
-    "lib/x a b 0.1.0 0.11.0 hint",
-    "builtin a b 0.1 0.11.0 hint",
-    "builtin a b 0.1.0 +0.11.0 hint",
-    "builtin a b 0.11.0 0.11.0 hint",
-    "builtin a b 0.1.0 0.11.0 hint\nbuiltin a c 0.2.0 0.12.0 again"
-  ] {
-    match parse_moved(bad) {
-      Ok(_) -> panic("accepted: ${bad}")
-      Err(_) -> ()
-    }
-  }
-  assert release_before((0, 9, 0), (0, 10, 0))
-  assert not release_before((1, 0, 0), (0, 99, 0))
-}
-
-test "no std/moved.txt entry has outlived its until" {
-  # The expiry rule (docs/std-moved-design.md §2): once VERSION reaches an
-  # entry's `until`, the entry is deleted or its `until` is moved, and either
-  # way somebody decided. The embedded copy is read because it is what ships;
-  # the round-trip test above holds it to std/ on disk.
-  let text = match stdsrc.source("moved.txt") {
-    Some(t) -> t
-    None -> panic("std/moved.txt is not embedded (run python3 scripts/gen-stdsrc.py)")
-  }
-  let now = release_key(VERSION).expect("VERSION is X.Y.Z")
-  let entries = match parse_moved(text) {
-    Ok(es) -> es
-    Err(bad) -> {
-      let (n, w) = bad
-      panic("std/moved.txt line ${n}: ${w}")
-    }
-  }
-  var expired = 0
-  for e in entries {
-    let until = release_key(e.until).expect("parse_moved checked it")
-    if not release_before(now, until) {
-      println("std/moved.txt: `${e.old}` of `${e.scope}` expired at ${e.until}; this is ${VERSION}")
-      expired = expired + 1
-    }
-  }
-  assert expired == 0
 }
