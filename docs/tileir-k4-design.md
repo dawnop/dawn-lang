@@ -360,5 +360,4 @@ PR-A 与 PR-B 都动 tile 摘要，各自带自己的 ledger 重录；为减少�
   `word-high-bits-cleared` 是宿主侧清高位仍绿的对照）。
 - `std/gpu` 的缓冲区没有 f32（`element_bytes` 里没有），所以 `scalar_scale` 与 `scalar_len` 用 f64 缓冲区，`scalar_scale` 在设备上把 f32 标量加宽成 f64 再乘。
 - 新 golden 四个（`scalar_scale`、`scalar_len`、`scalar_loop`、`scalar_wide`），新 mutant 六条（三条 golden 层，三条设备层）。
-- **刀 5（把 `flash_attn` 的 `ATT_INV_SQRT_D` 迁成 `scalar(scale)`）没做**：它要给 `seq_diff` 的一串序列、参考函数与 `flash_attn` 的 golden 同时加标量，
-  远不止「改一个 kernel」，且要另一份台账重录；留给有消费者的时候。
+- **刀 5（把 `flash_attn` 的 `ATT_INV_SQRT_D` 迁成 `scalar(scale)`）后来做了**：f64 与 bf16 两个 kernel 各一个提交，golden 只动入口签名与那一处常量，变异体 `scale-baked-again`；复核与剩余缺口见 [flash-attn-ideal-audit.md](flash-attn-ideal-audit.md)。当时认为它「远不止改一个 kernel」，实际落点是 `seq_diff` 的 `Step` 多一个 `scalars` 字段、参考函数读启动标量，以及 `record.py` 认 `Scalar` 标记。
