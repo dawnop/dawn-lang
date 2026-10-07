@@ -1,0 +1,205 @@
+# Reading a `.dawnmap`, the side table `dawn __emitc --map` (C) and
+# `dawn __emit --map` (JVM) write (docs/source-span-map-design.md sections 12
+# and 13).
+#
+# Why this is Dawn and a second reader of the format. scripts/c-map/dawnmap.py
+# is the first, and the checker beside it still uses that one. This one exists
+# because the online compile view (docs/playground-compile-design.md) reads the
+# table on a request, in a Dawn process that must not start Python, and the
+# static explorer page now builds from the same code. The two readers agree on
+# the format's compatibility rule: a version this reader does not know is
+# refused, a row kind it does not know is skipped, so a new row kind does not
+# break it and a changed meaning of an old field does.
+#
+# Only what the pairing needs is kept: the `fn` and `call` rows. The `text`,
+# `unit` and `src` rows describe the file the map was written beside and are
+# skipped like any row kind not asked for. The two backends share a row's
+# source half (module, origin, symbol; module, lo, hi, nlo, what) and differ in
+# its output half, so each backend has its own record and its own reader; a map
+# of the other backend is refused at the header rather than read with the wrong
+# keys. A `?` or `-` in a number field (no declaration base on record, no
+# place in the output) is `None`: it is the pairing's to report as a gap, not
+# this reader's to refuse.
+
+use std/str
+use std/list
+
+## A `fn` row of a C map: the lines `[first, last]` of the whole C text the
+## function was written to (from 1), and the module, origin and symbol.
+pub type CFn = { first: Int, last: Int, module: String, origin: String, symbol: String }
+
+## A `call` row of a C map: the C lines it spans (`first` to `line`, the last
+## one carrying columns `clo` to `chi`, half-open), and where the call is in
+## its module's source (code point offsets `lo` to `hi`, its name at `nlo`).
+pub type CCall = {
+  first: Option[Int],
+  line: Option[Int],
+  clo: Option[Int],
+  chi: Option[Int],
+  module: String,
+  lo: Option[Int],
+  hi: Option[Int],
+  nlo: Option[Int],
+  what: String,
+}
+
+## A C map's rows.
+pub type CMap = { fns: List[CFn], calls: List[CCall] }
+
+## A `fn` row of a JVM map: its method's number `k` and the byte length `len`
+## of its code, and the module, origin and `symbol` (`owner.name:descriptor`).
+pub type JFn = { k: Int, len: Int, module: String, origin: String, symbol: String }
+
+## A `call` row of a JVM map: the method `k` it is in, the pc range
+## `[pclo, pchi)` of its bytecode, and the pc of the instruction that
+## implements it (`ipc`).
+pub type JCall = {
+  k: Option[Int],
+  pclo: Option[Int],
+  pchi: Option[Int],
+  ipc: Option[Int],
+  module: String,
+  lo: Option[Int],
+  hi: Option[Int],
+  nlo: Option[Int],
+  what: String,
+}
+
+## A JVM map's rows.
+pub type JMap = { fns: List[JFn], calls: List[JCall] }
+
+fn num(s: String) -> Option[Int] = if s == "-" || s == "?" { None } else { parse_int(s) }
+
+fn is_num(s: String) -> Bool = s == "-" || s == "?" || parse_int(s) != None
+
+fn int_of(s: String) -> Int = unwrap_or(parse_int(s), 0)
+
+# The header and the rows of kind `fn` or `call`, each split at its tabs;
+# every other row is skipped. Err names the first row that is not what its
+# kind says.
+fn rows_of(text: String, backend: String) -> Result[(List[List[String]], List[List[String]]), String] = {
+  let rows = map(str.split(text, "\n"), l => str.split(l, "\t"))
+  let head = rows[0]
+  if len(head) != 3 || head[0] != "dawnmap" || head[1] != "1" {
+    return Err("not a version 1 dawnmap: ${join(head, " ")}")
+  }
+  if head[2] != backend {
+    return Err("a dawnmap for backend `${head[2]}`, not `${backend}`")
+  }
+  var fns: List[List[String]] = []
+  var calls: List[List[String]] = []
+  var n = 1
+  for r in list.drop(rows, 1) {
+    n = n + 1
+    if r[0] == "fn" {
+      if len(r) < 6 || parse_int(r[1]) == None || parse_int(r[2]) == None {
+        return Err("line ${n}: not a fn row")
+      }
+      fns = fns ++ [r]
+    } else if r[0] == "call" {
+      if len(r) < 10 || not list.all(list.take(list.drop(r, 1), 4), is_num) || not list.all(list.take(list.drop(r, 6), 3), is_num) {
+        return Err("line ${n}: not a call row")
+      }
+      calls = calls ++ [r]
+    }
+  }
+  Ok((fns, calls))
+}
+
+## A C map, or why `text` is not one.
+pub fn parse_c(text: String) -> Result[CMap, String] =
+  match rows_of(text, "c") {
+    Err(e) -> Err(e)
+    Ok((fns, calls)) ->
+      Ok(CMap {
+        fns: map(fns, r => CFn { first: int_of(r[1]), last: int_of(r[2]), module: r[3], origin: r[4], symbol: r[5] }),
+        calls: map(calls, r => CCall {
+          first: num(r[1]),
+          line: num(r[2]),
+          clo: num(r[3]),
+          chi: num(r[4]),
+          module: r[5],
+          lo: num(r[6]),
+          hi: num(r[7]),
+          nlo: num(r[8]),
+          what: r[9],
+        }),
+      })
+  }
+
+## A JVM map, or why `text` is not one.
+pub fn parse_jvm(text: String) -> Result[JMap, String] =
+  match rows_of(text, "jvm") {
+    Err(e) -> Err(e)
+    Ok((fns, calls)) ->
+      Ok(JMap {
+        fns: map(fns, r => JFn { k: int_of(r[1]), len: int_of(r[2]), module: r[3], origin: r[4], symbol: r[5] }),
+        calls: map(calls, r => JCall {
+          k: num(r[1]),
+          pclo: num(r[2]),
+          pchi: num(r[3]),
+          ipc: num(r[4]),
+          module: r[5],
+          lo: num(r[6]),
+          hi: num(r[7]),
+          nlo: num(r[8]),
+          what: r[9],
+        }),
+      })
+  }
+
+fn c_sample() -> String =
+  "dawnmap\t1\tc\ntext\t54\nunit\t0\ttu00.c\t9\t54\nsrc\thello\thello.dawn\n"
+  ++ "fn\t36\t46\thello\tNf4:main\tdawn_hello__main\n"
+  ++ "call\t42\t42\t9\t56\thello\t52\t81\t52\tdirect std/io.println\n"
+  ++ "call\t-\t-\t-\t-\thello\t?\t?\t?\tdirect x\n"
+
+fn jvm_sample() -> String =
+  "dawnmap\t1\tjvm\nsrc\thello\thello.dawn\n"
+  ++ "fn\t0\t13\thello\tNf4:main\thello.main:()Ldawn/rt/Unit;\n"
+  ++ "call\t0\t3\t12\t9\thello\t52\t81\t52\tdirect std/io.println\n"
+
+test "a C map's fn and call rows are read, a missing field is None" {
+  match parse_c(c_sample()) {
+    Err(e) -> { assert e == "" }
+    Ok(m) -> {
+      assert m.fns == [CFn { first: 36, last: 46, module: "hello", origin: "Nf4:main", symbol: "dawn_hello__main" }]
+      assert len(m.calls) == 2
+      assert m.calls[0].line == Some(42)
+      assert (m.calls[0].clo, m.calls[0].chi) == (Some(9), Some(56))
+      assert (m.calls[0].lo, m.calls[0].hi, m.calls[0].nlo) == (Some(52), Some(81), Some(52))
+      assert m.calls[0].what == "direct std/io.println"
+      assert (m.calls[1].first, m.calls[1].lo) == (None, None)
+    }
+  }
+}
+
+test "a JVM map's fn and call rows are read" {
+  match parse_jvm(jvm_sample()) {
+    Err(e) -> { assert e == "" }
+    Ok(m) -> {
+      assert (m.fns[0].k, m.fns[0].len, m.fns[0].symbol) == (0, 13, "hello.main:()Ldawn/rt/Unit;")
+      assert (m.calls[0].k, m.calls[0].pclo, m.calls[0].pchi, m.calls[0].ipc) == (Some(0), Some(3), Some(12), Some(9))
+    }
+  }
+}
+
+test "a map of the other backend, another version or a malformed row is refused" {
+  assert is_err(parse_jvm(c_sample()))
+  assert is_err(parse_c(jvm_sample()))
+  assert is_err(parse_c(str.replace(c_sample(), "dawnmap\t1\tc", "dawnmap\t2\tc")))
+  assert is_err(parse_c(""))
+  assert is_err(parse_c(str.replace(c_sample(), "fn\t36\t46", "fn\t36\tx")))
+  assert is_err(parse_c(str.replace(c_sample(), "\t52\t81\t52\t", "\t52\tx\t52\t")))
+  assert is_err(parse_c(c_sample() ++ "call\t1\n"))
+}
+
+test "a row kind this reader does not know is skipped" {
+  assert not is_err(parse_c(c_sample() ++ "wat\t1\t2\n"))
+}
+
+fn is_err[A](r: Result[A, String]) -> Bool =
+  match r {
+    Err(_) -> true
+    Ok(_) -> false
+  }

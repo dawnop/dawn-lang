@@ -1,0 +1,332 @@
+# The call table: which calls of a function there are, where each is in the
+# source, and which call is inside which.
+#
+# Where the table comes from, and why there are two ways. For a plain program
+# the table is what the two host maps agree on: the C map and the JVM map each
+# say, per call of the source, a span and a name span, and a call is in the
+# table when both say it, in the same words. A call one map has and the other
+# lacks is a gap and stays out, because a call with an account in one pane and
+# none in the other would draw a click that lights half a page. For a Tile IR
+# kernel the table is the recording `site/gpu-map/flash_attn.map` keeps, which
+# is packages/tileir's account of the kernel's calls (the host maps cannot say
+# which calls the *kernel* made: it runs on the host, and its calls are
+# `trace_calls`' to record).
+#
+# Nesting is read off spans, whatever the recording's own parent says. The
+# Tile IR recording's parent is the region a call ran in, which is not what a
+# reader means by a call inside a call (`mul(mma(..), ..)`); in C and bytecode
+# it is the span that says whose code sits inside whose. A call's parent is the
+# innermost other call whose span holds its own.
+#
+# What it checks, and what a failed check is. Every check returns a message
+# naming the call, never a panic and never a silent fix: the strict entry
+# (xmap.explore_strict) refuses a table with any, the degrading entry reports
+# them as gaps and leaves the table as it is.
+
+use std/str
+use std/list
+use std/set
+use dawnmap.{CMap, JMap}
+use source.{Src, src_of, at, off, pos, ident_at, text_between}
+
+## One call of the table. `id` is its row (source order, from 0) and `parent`
+## the row of the call that holds it, -1 at the top. The span `[lo, hi)` and
+## the name's `[nlo, nhi)` are code point offsets into the source. `lines` is
+## what the Tile IR recording says the call wrote (`a-b` words), empty
+## otherwise.
+pub type Call = { id: Int, parent: Int, name: String, lo: Int, hi: Int, nlo: Int, nhi: Int, lines: List[String] }
+
+## A call row of `flash_attn.map`, before its positions are offsets.
+pub type TileCall = { name: String, lo: (Int, Int), hi: (Int, Int), nlo: (Int, Int), nhi: (Int, Int), lines: List[String] }
+
+## `flash_attn.map` read: the lines `first` to `last` of the kernel's source
+## its function is on, and its calls.
+pub type TileMap = { first: Int, last: Int, calls: List[TileCall] }
+
+# ---- the Tile IR recording ----
+
+fn parse_pos(s: String) -> Option[(Int, Int)] =
+  match str.split_once(s, ":") {
+    Some((a, b)) ->
+      match (parse_int(a), parse_int(b)) {
+        (Some(x), Some(y)) -> Some((x, y))
+        _ -> None
+      }
+    None -> None
+  }
+
+fn parse_span(s: String) -> Option[((Int, Int), (Int, Int))] =
+  match str.split_once(s, "-") {
+    Some((a, b)) ->
+      match (parse_pos(a), parse_pos(b)) {
+        (Some(x), Some(y)) -> Some((x, y))
+        _ -> None
+      }
+    None -> None
+  }
+
+## `flash_attn.map` as a `TileMap`, or why `text` is not one. The calls `carry`,
+## `get` and `set` are what a `var` is to the Tile IR (its loop arguments, its
+## reads, its assignments): a host map has no call for any of them, they wrote
+## no Tile IR line of their own, and a click on one would light nothing, so
+## they are left out.
+pub fn parse_tile_map(text: String) -> Result[TileMap, String] = {
+  let rows = map(filter(str.split(text, "\n"), l => l != ""), l => str.split(l, " "))
+  let fnrow = list.find(rows, w => w[0] == "fn")
+  var calls: List[TileCall] = []
+  for w in rows {
+    if w[0] == "call" && len(w) >= 6 && not list.contains(["carry", "get", "set"], w[3]) {
+      match (parse_span(w[4]), parse_span(w[5])) {
+        (Some((a, b)), Some((na, nb))) -> {
+          calls = calls ++ [TileCall { name: w[3], lo: a, hi: b, nlo: na, nhi: nb, lines: list.drop(w, 6) }]
+        }
+        _ -> {
+          return Err("not a call row: ${join(w, " ")}")
+        }
+      }
+    }
+  }
+  match fnrow {
+    Some(w) ->
+      if len(w) < 2 {
+        Err("the fn row has no lines")
+      } else {
+        match str.split_once(w[1], "-") {
+          Some((a, b)) ->
+            match (parse_int(a), parse_int(b)) {
+              (Some(x), Some(y)) -> Ok(TileMap { first: x, last: y, calls: calls })
+              _ -> Err("the fn row's lines are not numbers: ${w[1]}")
+            }
+          None -> Err("the fn row's lines are not a range: ${w[1]}")
+        }
+      }
+    None -> Err("the recording has no fn row")
+  }
+}
+
+# ---- the tree ----
+
+fn by_span(a: Call, b: Call) -> Int = if a.lo != b.lo { a.lo - b.lo } else if a.hi != b.hi { b.hi - a.hi } else { a.nlo - b.nlo }
+
+fn holds(p: Call, r: Call) -> Bool = p.lo <= r.lo && r.hi <= p.hi && not (p.lo == r.lo && p.hi == r.hi)
+
+# The first of `ps` with the shortest span.
+fn narrowest(ps: List[Call]) -> Call = list.fold(list.drop(ps, 1), ps[0], (best, p) => if p.hi - p.lo < best.hi - best.lo { p } else { best })
+
+## `rows` in source order, numbered from 0, each with its innermost enclosing
+## call by span as its parent.
+pub fn tree(rows: List[Call]) -> List[Call] = {
+  let sorted = sort_by(rows, by_span)
+  let numbered = map(range(0, len(sorted)), i => Call { ..sorted[i], id: i })
+  map(numbered, r => {
+    let holders = filter(numbered, p => holds(p, r))
+    Call { ..r, parent: if len(holders) == 0 { -1 } else { narrowest(holders).id } }
+  })
+}
+
+## The calls of the Tile IR recording as the table, in the source's own
+## coordinates.
+pub fn table_from_tile(src: Src, t: TileMap) -> List[Call] =
+  tree(map(t.calls, c => {
+    let (l0, c0) = c.lo
+    let (l1, c1) = c.hi
+    let (n0, m0) = c.nlo
+    let (n1, m1) = c.nhi
+    Call { id: 0, parent: -1, name: c.name, lo: off(src, l0, c0), hi: off(src, l1, c1), nlo: off(src, n0, m0), nhi: off(src, n1, m1), lines: c.lines }
+  }))
+
+# ---- the host maps ----
+
+fn key_of(lo: Option[Int], hi: Option[Int], nlo: Option[Int]) -> (Int, Int, Int) = (unwrap_or(lo, -1), unwrap_or(hi, -1), unwrap_or(nlo, -1))
+
+# The `(lo, hi, nlo)` of each call of `module` that lies on lines `first` to
+# `last` of the source, once each.
+fn c_keys(src: Src, module: String, first: Int, last: Int, m: CMap) -> List[(Int, Int, Int)] = {
+  let rows = filter(m.calls, r => r.module == module && r.lo != None)
+  let inside = filter(rows, r => {
+    let (l, _c) = at(src, unwrap_or(r.lo, 0))
+    first <= l && l <= last
+  })
+  list.unique(map(inside, r => key_of(r.lo, r.hi, r.nlo)))
+}
+
+fn j_keys(src: Src, module: String, first: Int, last: Int, m: JMap) -> List[(Int, Int, Int)] = {
+  let rows = filter(m.calls, r => r.module == module && r.lo != None)
+  let inside = filter(rows, r => {
+    let (l, _c) = at(src, unwrap_or(r.lo, 0))
+    first <= l && l <= last
+  })
+  list.unique(map(inside, r => key_of(r.lo, r.hi, r.nlo)))
+}
+
+fn by_key(a: (Int, Int, Int), b: (Int, Int, Int)) -> Int = {
+  let (alo, ahi, anlo) = a
+  let (blo, bhi, bnlo) = b
+  if alo != blo { alo - blo } else if ahi != bhi { bhi - ahi } else { anlo - bnlo }
+}
+
+## The calls of `module` on lines `first` to `last` that both host maps have a
+## row for, in source order with the tree read off their spans, and a message
+## for each call only one of the maps has.
+pub fn table_from_maps(src: Src, module: String, first: Int, last: Int, c: CMap, j: JMap) -> (List[Call], List[String]) = {
+  let ck = c_keys(src, module, first, last, c)
+  let jk = j_keys(src, module, first, last, j)
+  let cs = set.from(ck)
+  let js = set.from(jk)
+  let both = filter(sort_by(ck, by_key), k => set.has(js, k))
+  var gaps: List[String] = []
+  for k in sort_by(filter(ck, k => not set.has(js, k)), by_key) {
+    let (lo, _hi, _nlo) = k
+    gaps = gaps ++ ["the call at ${pos(at(src, lo))} has a row in the c map and not in the other"]
+  }
+  for k in sort_by(filter(jk, k => not set.has(cs, k)), by_key) {
+    let (lo, _hi, _nlo) = k
+    gaps = gaps ++ ["the call at ${pos(at(src, lo))} has a row in the jvm map and not in the other"]
+  }
+  var rows: List[Call] = []
+  for k in both {
+    let (lo, hi, nlo) = k
+    match ident_at(src, nlo) {
+      Some(name) -> {
+        rows = rows ++ [Call { id: 0, parent: -1, name: name, lo: lo, hi: hi, nlo: nlo, nhi: nlo + str.len(name), lines: [] }]
+      }
+      None -> {
+        gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
+      }
+    }
+  }
+  (tree(rows), gaps)
+}
+
+# ---- checking it ----
+
+## Whether the source text at a call's name span is how that call is spelled:
+## the callee's own name, an operator for the arithmetic calls (`a + b` is
+## `add`, `addi`, `idx_add`...), or, for the three calls a `var` makes (`carry`
+## where a loop opens it, `get` where it is read, `set` where it is assigned),
+## the variable's name or the loop's `for`.
+pub fn spelled(name: String, text: String) -> Bool = {
+  if text == name {
+    return true
+  }
+  if list.contains(["carry", "get", "set"], name) {
+    return text != ""
+  }
+  let ops = [("add", "+"), ("idx_add", "+"), ("sub", "-"), ("idx_sub", "-"), ("mul", "*"), ("idx_mul", "*"), ("div", "/"), ("idx_div", "/"), ("idx_rem", "%"), ("neg", "-")]
+  list.any(ops, o => {
+    let (stem, op) = o
+    str.starts_with(name, stem) && text == op
+  })
+}
+
+## What is wrong with `table` as a table of the function on lines `first` to
+## `last` of `src`, one message for each fault, in call order.
+pub fn check_table(src: Src, table: List[Call], first: Int, last: Int) -> List[String] = {
+  var gaps: List[String] = []
+  for c in table {
+    let (l0, _a) = at(src, c.lo)
+    let (l1, _b) = at(src, c.hi)
+    let who = "call ${c.id} (`${c.name}`)"
+    if not (first <= l0 && l1 <= last) {
+      gaps = gaps ++ ["${who} is outside the function"]
+    }
+    let written = text_between(src, c.nlo, c.nhi)
+    if not spelled(c.name, written) {
+      gaps = gaps ++ ["${who}: the text at ${pos(at(src, c.nlo))} is ${repr(written)}"]
+    }
+    if not (c.lo <= c.nlo && c.nhi <= c.hi) {
+      gaps = gaps ++ ["${who}: its name is outside its span"]
+    }
+    if c.parent >= 0 {
+      let p = table[c.parent]
+      if not (p.lo <= c.lo && c.hi <= p.hi) {
+        gaps = gaps ++ ["${who} is not inside its parent's span"]
+      }
+    }
+  }
+  gaps
+}
+
+# A string as Python's repr writes one, for the cases that happen: single
+# quotes unless the text holds one and no double quote.
+fn repr(s: String) -> String =
+  if str.contains(s, "'") && not str.contains(s, "\"") { "\"${s}\"" } else { "'${esc(s)}'" }
+
+fn esc(s: String) -> String = str.replace(str.replace(str.replace(str.replace(s, "\\", "\\\\"), "\n", "\\n"), "\t", "\\t"), "'", "\\'")
+
+## The row numbers of the calls each call holds directly, by row.
+pub fn children_of(table: List[Call]) -> List[List[Int]] =
+  map(table, c => map(filter(table, k => k.parent == c.id), k => k.id))
+
+fn sample_map() -> String =
+  "fn 4-9 flash\n"
+  ++ "call 0 -1 mul 5:3-5:21 5:13-5:14 1-3\n"
+  ++ "call 1 0 mma 5:3-5:12 5:3-5:6 4-6\n"
+  ++ "call 2 0 get 6:3-6:4 6:3-6:4 4-6\n"
+  ++ "call 3 -1 add 7:3-7:8 7:5-7:6 6-7\n"
+
+fn sample_src() -> Src = src_of("\n\n\nfn f(a) = {\n  mma(a, b) * lit(a)\n  a\n  x + y\n}\n")
+
+test "the Tile IR recording is read, var calls left out, and nested by span" {
+  match parse_tile_map(sample_map()) {
+    Err(e) -> { assert e == "" }
+    Ok(t) -> {
+      assert (t.first, t.last) == (4, 9)
+      assert map(t.calls, c => c.name) == ["mul", "mma", "add"]
+      let table = table_from_tile(sample_src(), t)
+      assert map(table, c => (c.name, c.parent)) == [("mul", -1), ("mma", 0), ("add", -1)]
+    }
+  }
+}
+
+test "a call that wrote no Tile IR line is still a call of the recording" {
+  match parse_tile_map("fn 4-9 f\ncall 0 -1 lit 5:3-5:8 5:3-5:6\ncall 1 -1 mul 5:9-5:12 5:9-5:12 1-2\n") {
+    Ok(t) -> {
+      assert map(t.calls, c => (c.name, len(c.lines))) == [("lit", 0), ("mul", 1)]
+    }
+    Err(e) -> { assert e == "" }
+  }
+  assert is_err(parse_tile_map("call 0 -1 lit 5:3-5:8 5:3-5:6\n"))
+  assert is_err(parse_tile_map("fn 4-9 f\ncall 0 -1 lit x 5:3-5:6\n"))
+}
+
+fn is_err[A](r: Result[A, String]) -> Bool =
+  match r {
+    Err(_) -> true
+    Ok(_) -> false
+  }
+
+test "a call inside another's span has it as its parent, the innermost one" {
+  let src = sample_src()
+  let outer = Call { id: 0, parent: -1, name: "f", lo: 10, hi: 40, nlo: 10, nhi: 11, lines: [] }
+  let mid = Call { ..outer, name: "g", lo: 12, hi: 30, nlo: 12, nhi: 13 }
+  let inner = Call { ..outer, name: "h", lo: 14, hi: 20, nlo: 14, nhi: 15 }
+  let t = tree([inner, outer, mid])
+  assert map(t, c => (c.name, c.id, c.parent)) == [("f", 0, -1), ("g", 1, 0), ("h", 2, 1)]
+  assert children_of(t) == [[1], [2], []]
+  assert len(src.lines) > 0
+}
+
+test "a name is spelled as itself, an operator or a var's own name" {
+  assert spelled("mma", "mma")
+  assert spelled("add", "+")
+  assert spelled("idx_rem", "%")
+  assert spelled("get", "x")
+  assert not spelled("get", "")
+  assert not spelled("mma", "mmb")
+  assert not spelled("mul", "+")
+}
+
+test "a table is checked against the source it names" {
+  let src = sample_src()
+  match parse_tile_map(sample_map()) {
+    Err(e) -> { assert e == "" }
+    Ok(t) -> {
+      let table = table_from_tile(src, t)
+      assert check_table(src, table, 4, 9) == []
+      assert len(check_table(src, table, 8, 9)) > 0
+      let moved = map(table, c => if c.name == "mma" { Call { ..c, nlo: c.nlo + 1, nhi: c.nhi + 1 } } else { c })
+      assert str.contains(check_table(src, moved, 4, 9)[0], "the text at 5:4 is")
+    }
+  }
+}

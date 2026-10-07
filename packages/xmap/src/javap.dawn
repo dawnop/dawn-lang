@@ -1,0 +1,209 @@
+# Reading the listing `javap -c -p -s` writes for a class: which lines belong
+# to which method, and on which line each instruction is.
+#
+# Why the listing is read and not made. The compiler does not write a
+# bytecode listing, and writing a disassembler here (an operand width for
+# each of some two hundred opcodes, `tableswitch` padding, `wide`) would be a
+# second reading of the class file to keep in step with the first. The reader
+# of a map runs the JDK's own `javap`, on the JDK the toolchain runs on
+# (docs/source-span-map-design.md section 13.6), and this module only cuts
+# what it printed. The format it cuts is javap's, not a contract: the header
+# of a member, its `descriptor:` line, its `Code:` listing, a blank line to
+# end it; an instruction is `  <pc>: <opcode> ...`, and a `tableswitch` or
+# `lookupswitch` has a table of lines inside braces whose entries look like
+# instructions' numbers and are not.
+#
+# Members are told apart by name and descriptor, because overloads share a
+# name and the JVM map's `symbol` carries the descriptor. A method name may
+# hold a `-` (a bridge named after an operator's type), which is why a name
+# is whatever stands between the last space and the `(`.
+
+use std/str
+use std/list
+use std/map
+
+## One member's block of the listing: its lines, the instruction pcs in
+## ascending order, and the index into `lines` of the line each pc is on.
+pub type Method = { lines: List[String], pcs: List[Int], line_of: Map[Int, Int] }
+
+## A listing's members by `(name, descriptor)`.
+pub type Listing = { methods: Map[(String, String), Method] }
+
+fn prefix_char(c: String) -> Bool = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.$[]<>, ", c)
+
+fn name_char(c: String) -> Bool = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$<>-", c)
+
+# A member header (`  public static int f(int);`) names its member by the
+# token just before the first `(`, which has to be the line's only
+# parenthesised part up to a closing `);`. `static {};` is the class
+# initializer.
+fn header_name(line: String) -> Option[String] = {
+  match str.split_once(line, "(") {
+    Some((before, after)) -> {
+      let head = str.trim_start(before)
+      let words = str.split(head, " ")
+      let token = words[len(words) - 1]
+      let others = join(list.take(words, len(words) - 1), " ")
+      let lead = str.starts_with(before, " ") || str.starts_with(before, "\t")
+      let ok = lead && str.contains(after, ");") && token != "" && list.all(str.chars(token), name_char)
+        && list.all(str.chars(others), prefix_char)
+      if ok { Some(token) } else { None }
+    }
+    None -> if str.trim(line) == "static {};" { Some("<clinit>") } else { None }
+  }
+}
+
+fn is_digits(s: String) -> Bool = s != "" && list.all(str.chars(s), c => str.contains("0123456789", c))
+
+# The pc of an instruction line, `  12: invokestatic ...`, and its opcode.
+fn insn_of(line: String) -> Option[(Int, String)] =
+  if not (str.starts_with(line, " ") || str.starts_with(line, "\t")) {
+    None
+  } else {
+    match str.split_once(str.trim_start(line), ": ") {
+      Some((pc, rest)) -> {
+        let op = opcode(rest)
+        if is_digits(pc) && op != "" {
+          Some((int_of(pc), op))
+        } else {
+          None
+        }
+      }
+      None -> None
+    }
+  }
+
+fn int_of(s: String) -> Int = unwrap_or(parse_int(s), 0)
+
+fn word_char(c: String) -> Bool = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", c)
+
+# The word `rest` starts with (an opcode name), "" when it starts with none.
+fn opcode(rest: String) -> String = {
+  var out = ""
+  var going = true
+  for c in str.chars(rest) {
+    going = going && word_char(c)
+    if going {
+      out = out ++ c
+    }
+  }
+  out
+}
+
+fn method_of(lines: List[String]) -> Method = {
+  var pcs: List[Int] = []
+  var line_of: Map[Int, Int] = map.empty()
+  var in_table = false
+  var i = 0
+  for l in lines {
+    if in_table {
+      if str.trim(l) == "}" {
+        in_table = false
+      }
+    } else {
+      match insn_of(l) {
+        Some((pc, op)) -> {
+          pcs = pcs ++ [pc]
+          line_of = map.insert(line_of, pc, i)
+          if op == "tableswitch" || op == "lookupswitch" {
+            in_table = true
+          }
+        }
+        None -> ()
+      }
+    }
+    i = i + 1
+  }
+  Method { lines: lines, pcs: sort(pcs), line_of: line_of }
+}
+
+## The members of `text`, a `javap -c -p -s` listing.
+pub fn parse_listing(text: String) -> Listing = {
+  var methods: Map[(String, String), Method] = map.empty()
+  var block: List[String] = []
+  for raw in str.split(text, "\n") ++ [""] {
+    let line = str.trim_end(raw)
+    if line == "" {
+      if len(block) > 0 {
+        let desc = list.find(block, l => str.contains(l, "descriptor: "))
+        match (header_name(block[0]), desc) {
+          (Some(name), Some(d)) ->
+            match str.split_once(d, "descriptor: ") {
+              Some((_, rest)) -> {
+                methods = map.insert(methods, (name, rest), method_of(block))
+              }
+              None -> ()
+            }
+          _ -> ()
+        }
+      }
+      block = []
+    } else if line == "}" {
+      ()
+    } else if str.starts_with(line, "  ") && not str.starts_with(line, "   ") && len(block) == 0 {
+      block = [line]
+    } else if len(block) > 0 {
+      block = block ++ [line]
+    }
+  }
+  Listing { methods: methods }
+}
+
+## The member `name` with descriptor `desc`, if the listing has it.
+pub fn find_method(l: Listing, name: String, desc: String) -> Option[Method] = map.get(l.methods, (name, desc))
+
+fn sample() -> String =
+  "public final class hello {\n"
+  ++ "  public static java.lang.String[] dawn\$args;\n"
+  ++ "    descriptor: [Ljava/lang/String;\n\n"
+  ++ "  public static dawn.rt.Unit main();\n"
+  ++ "    descriptor: ()Ldawn/rt/Unit;\n"
+  ++ "    Code:\n"
+  ++ "       0: ldc           #10                 // String Dawn\n"
+  ++ "       2: astore_0\n"
+  ++ "       9: invokestatic  #24                 // Method std/io.println:(Ljava/lang/String;)Ldawn/rt/Unit;\n"
+  ++ "      12: areturn\n\n"
+  ++ "  static dawn.rt.Unit bridge\$3\$Op-2_Int\$show(java.lang.Object, java.lang.Object);\n"
+  ++ "    descriptor: (Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;\n"
+  ++ "    Code:\n"
+  ++ "       0: iload_0\n"
+  ++ "       1: tableswitch   { // 0 to 1\n"
+  ++ "                     0: 28\n"
+  ++ "               default: 31\n"
+  ++ "          }\n"
+  ++ "      28: areturn\n\n"
+  ++ "  static {};\n"
+  ++ "    descriptor: ()V\n"
+  ++ "    Code:\n"
+  ++ "       0: return\n"
+  ++ "}\n"
+
+test "a listing is cut into its methods by name and descriptor" {
+  let l = parse_listing(sample())
+  match find_method(l, "main", "()Ldawn/rt/Unit;") {
+    Some(m) -> {
+      assert m.pcs == [0, 2, 9, 12]
+      assert m.lines[m.line_of[9]] == "       9: invokestatic  #24                 // Method std/io.println:(Ljava/lang/String;)Ldawn/rt/Unit;"
+      assert m.lines[0] == "  public static dawn.rt.Unit main();"
+    }
+    None -> { assert false }
+  }
+  assert find_method(l, "main", "()V") == None
+  assert find_method(l, "dawn\$args", "[Ljava/lang/String;") == None
+}
+
+test "a name with a dash, the class initializer and a switch table" {
+  let l = parse_listing(sample())
+  assert find_method(l, "bridge\$3\$Op-2_Int\$show", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;") != None
+  match find_method(l, "<clinit>", "()V") {
+    Some(m) -> { assert m.pcs == [0] }
+    None -> { assert false }
+  }
+  match find_method(l, "bridge\$3\$Op-2_Int\$show", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;") {
+    Some(m) -> {
+      # the table's `0: 28` and `default: 31` are not instructions
+      assert m.pcs == [0, 1, 28]
+    }
+    None -> { assert false }
+  }
+}
