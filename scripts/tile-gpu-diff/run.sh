@@ -2780,8 +2780,8 @@ roundtrip_mutant_checks pack-truncates "$std_pt" bf16 3
 #    the mutant cannot be told from it, and saying PASS would be the green
 #    with no information in it; it is a SKIP with the reason.
 std_gz="$(mutant_std grid-zero \
-  '                  gpu_launch_host(m, kernel, gx, gy, gz, device_pointers(table, args))' \
-  '                  gpu_launch_host(m, kernel, 0, gy, gz, device_pointers(table, args))')"
+  '                  gpu_launch_host(m, kernel, gx, gy, gz, device_pointers(table, launched))' \
+  '                  gpu_launch_host(m, kernel, 0, gy, gz, device_pointers(table, launched))')"
 build_native "$std_gz" "$work/m-grid-zero.bin"
 rc=0
 device "$work/m-grid-zero.bin" "${cubins[@]}" > "$work/m-grid-zero.out" 2>&1 || rc=$?
