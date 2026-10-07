@@ -206,5 +206,11 @@ export function compileViewTests(expect: Expect): number {
   t('the pane and the work area may shrink', [/\.dp-work\s*\{[^}]*min-width:\s*0/.test(css), /\.dp-view\s*\{[^}]*min-width:\s*0/.test(css)], [true, true])
   t('the listing scrolls in its own box', /\.xp pre\.xp-code[^}]*overflow:\s*auto/.test(site), true)
 
+  // The run limits live in a "?" popover in the output header, not on a row
+  // of their own: if these rules go, the note would render as a bare line.
+  for (const sel of ['.dp-help {', '.dp-help[aria-expanded', '.dp-limits[hidden]', '.dp-limits {', 'bottom: calc(100% + 0.3rem)']) {
+    t(`playground.css still styles ${sel}`, css.includes(sel), true)
+  }
+
   return fails
 }
