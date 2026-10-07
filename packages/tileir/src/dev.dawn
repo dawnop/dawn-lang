@@ -36,7 +36,7 @@ use std/str
 use std/dtype.{Dtype, dtype_name, F64, I64, I1}
 use std/int/i32.{I32}
 use std/int/i8.{I8}
-use std/gpu.{I4}
+use std/gpu.{I4, ScalarDtype, scalar_dtype}
 use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it,
@@ -217,42 +217,6 @@ impl FloatDtype[F8E4M3FN] {
 
 impl FloatDtype[F8E5M2] {
   fn float_dtype() -> Dtype[F8E5M2] = F8E5M2
-}
-
-## The formats a kernel parameter may be passed in BY VALUE (knife K4.1):
-## `I32`, `I64` (`Int`), `F32` and `F64` (`Float`), the four whose argument
-## area layout is a plain 4 or 8 bytes (docs/tileir-k4-design.md 3.2). Its
-## own trait and not `HasDtype` for the reason `FloatDtype` is: Dawn has no
-## supertraits, so a subset of the formats `HasDtype` covers can only be
-## named by a bound of its own.
-##
-## The bound is NOT the whole fence. An opaque type uses its target's impl
-## when it has none of its own (spec, `opaque type`), so `F16`, `BF16` and
-## the other floats over `Float` resolve to `F64`'s impl, and `I8` and
-## `I16` to `I64`'s: `scalar` of an `F16` parameter checks. What refuses it
-## is the recording, twice: a `ByValue` that is not `i32`, `i64`, `f32` or
-## `f64` is refused where the kernel's parameters are declared, and
-## `scalar` of a parameter declared in another format is refused where it
-## reads it. The bound keeps out what has no number under it (a `Bool`, a
-## record).
-pub trait ScalarDtype[D] {
-  fn scalar_dtype() -> Dtype[D]
-}
-
-impl ScalarDtype[Float] {
-  fn scalar_dtype() -> Dtype[Float] = F64
-}
-
-impl ScalarDtype[Int] {
-  fn scalar_dtype() -> Dtype[Int] = I64
-}
-
-impl ScalarDtype[I32] {
-  fn scalar_dtype() -> Dtype[I32] = I32
-}
-
-impl ScalarDtype[F32] {
-  fn scalar_dtype() -> Dtype[F32] = F32
 }
 
 ## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:

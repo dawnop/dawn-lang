@@ -53,7 +53,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, sync, handle_of }
+  launch, buffer, erase, sync }
 use std/dtype.{F64}
 use tileref/ref.{ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref,
   monte_carlo_ref, rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref, agent_step_ref }
@@ -165,7 +165,7 @@ fn stages(kernel: String, grid: Int, data: List[List[Float]]) -> Trace !Gpu = {
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match launch(kernel, grid, list.map(ts, handle_of)) {
+          match launch(kernel, grid, list.map(ts, t => erase(buffer(t)))) {
             Err(e) -> {
               release(ts)
               Trace { ..t1, launch: e.kind, note: e.message }

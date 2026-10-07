@@ -1536,7 +1536,7 @@ memory, where launching a kernel calls the host reference function registered un
 name. It is pure, so this runs anywhere, with no GPU, no driver and no `!io`:
 
 ```dawn run
-use std/gpu.{Gpu, alloc, upload, download, launch, sync, free, handle_of, with_gpu_fake, reference_kernels}
+use std/gpu.{Gpu, alloc, upload, download, launch, sync, free, buffer, erase, with_gpu_fake, reference_kernels}
 use std/dtype.{F64}
 
 # The host half of a GPU program: allocate, upload, launch, wait, read back.
@@ -1548,7 +1548,7 @@ fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignEr
   let out = alloc(F64, n)?
   upload(a, xs)?
   upload(b, ys)?
-  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
   sync()?
   let got = download(out)?
   free(a)?
@@ -1559,7 +1559,7 @@ fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignEr
 
 fn unknown_kernel() -> Result[Unit, ForeignError] !Gpu = {
   let h = alloc(F64, 1)?
-  launch("vmul", 1, [handle_of(h)])
+  launch("vmul", 1, [erase(buffer(h))])
 }
 
 pub fn main() -> Unit !io = {
@@ -1727,7 +1727,7 @@ reading and writing cell `i`. A lane past the extent reads the marker's padding 
 unless the marker says otherwise) and is not written back, so the tail needs no mask.
 
 ```dawn run deps=tileir
-use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3}
+use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, buffer}
 use std/dtype.{F64}
 use std/list
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
@@ -1746,7 +1746,7 @@ fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
   let out = alloc(F64, n)?
   upload(a, xs)?
   upload(b, xs)?
-  launch_entry3(entry, a, b, out)?
+  launch_entry3(entry, buffer(a), buffer(b), buffer(out))?
   download(out)
 }
 
@@ -1769,7 +1769,7 @@ tensors whose formats the entry's type fixes. Before any handler is asked, it ho
 buffers against the cells: a 999-element buffer does not reach the end of a 1000-element
 extent. It also refuses a grid that disagrees with the cells, and an `Out` that shares its
 buffer with another argument. An extent of `DYN_DIM` leaves the number of cells to the
-launch, as in `launch_entry3(entry, a, b, out, grid: [8])`, and then the buffers have to
+launch, as in `launch_entry3(entry, buffer(a), buffer(b), buffer(out), grid: [8])`, and then the buffers have to
 cover the whole of every cell: 1024 elements for eight cells of 128.
 
 The `1998.0` is a reference's answer, not the kernel's. The fake device never runs a
@@ -1849,7 +1849,7 @@ A softmax over four lanes that hold three values. This time the fake device runs
 reference written here rather than one from `std/gpu`:
 
 ```dawn run deps=tileir,tileref
-use std/gpu.{Gpu, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry2, last_out}
+use std/gpu.{Gpu, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry2, last_out, buffer}
 use std/dtype.{F64}
 use std/list
 use std/map
@@ -1881,7 +1881,7 @@ fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = 
   let out = alloc(F64, 4)?
   upload(x, [1.0, 2.0, 3.0, 0.0])?
   upload(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] is past the extent: the kernel leaves it
-  launch_entry2(entry, x, out)?
+  launch_entry2(entry, buffer(x), buffer(out))?
   download(out)
 }
 
@@ -2100,7 +2100,7 @@ escape hatch: a parameter the kernel addresses itself, through the pointer path.
 `store` writes the tile at an element offset with `out`'s strides swapped, so the tile
 lands transposed and no element moves inside it. Atomics, scatters and a block that
 writes two regions are `Shared` for the same reason, and `grep Shared(` finds every one.
-With no `Out` the grid is the caller's: `launch_entry2(entry, x, out, grid: [4, 2])`.
+With no `Out` the grid is the caller's: `launch_entry2(entry, buffer(x), buffer(out), grid: [4, 2])`.
 
 Two more ways out, each a sentence. A kernel that reads one `In` in two shapes takes a
 second view of it with `retile(p, extent, tile)`. `trace1` to `trace5` record kernels of
@@ -2114,7 +2114,7 @@ kernel's name to an assembled module instead of a reference:
 
 <!-- doc-check: skip-check needs an NVIDIA GPU, its driver and tileiras, which CI does not have -->
 ```dawn skip-check
-use std/gpu.{Gpu, Entry3, alloc, upload, download, launch_entry3, with_gpu_real}
+use std/gpu.{Gpu, Entry3, alloc, upload, download, launch_entry3, with_gpu_real, buffer}
 use std/dtype.{F64}
 use std/io
 use std/io.{with_fs_real}
@@ -2134,7 +2134,7 @@ fn add_1000(entry: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignEr
   let out = alloc(F64, 1000)?
   upload(a, xs)?
   upload(b, xs)?
-  launch_entry3(entry, a, b, out)?
+  launch_entry3(entry, buffer(a), buffer(b), buffer(out))?
   download(out)
 }
 

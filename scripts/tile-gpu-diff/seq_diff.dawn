@@ -444,7 +444,7 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
       Ok(_) -> {
         let s = steps[i]
         let hands = list.map(s.args, a => hs[buf_pos(bufs, a)])
-        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, hands) {
+        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, list.map(hands, h => gpu.Buf(h))) {
           Ok(_) -> launch_all(hs, bufs, steps, i + 1, at, reset, trip)
           Err(e) -> Err(e)
         }
@@ -1547,7 +1547,7 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
   } else if name == "kmeans" {
     map.from([
       ("kmeans_assign", (5, last_out((dts, ins) => kmeans_assign_ref(KM_N, KM_K, dts, ins)))),
-      ("kmeans_centroid", (5, (dts, ins) => kmeans_centroid_ref(KM_N, KM_K, dts, ins)))])
+      ("kmeans_centroid", (5, (dts, ins, _ss) => kmeans_centroid_ref(KM_N, KM_K, dts, ins)))])
   } else if name == "kv" {
     map.from([
       ("kv_scores", (4, last_out((dts, ins) =>
@@ -1570,7 +1570,7 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
   } else if name == "ols" {
     map.from([
       ("ols_gram", (3, last_out((dts, ins) => ols_gram_ref(OLS_N, OLS_F, OLS_W, dts, ins)))),
-      ("ols_elim", (2, (dts, ins) => ols_elim_ref(OLS_F, OLS_W, dts, ins))),
+      ("ols_elim", (2, (dts, ins, _ss) => ols_elim_ref(OLS_F, OLS_W, dts, ins))),
       ("ols_beta", (2, last_out((dts, ins) => ols_beta_ref(OLS_F, OLS_W, dts, ins))))])
   } else if name == "gpt2" {
     map.from([
@@ -1613,7 +1613,7 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
     map.from([("flash_attn_bf16", (4, last_out((dts, ins) =>
         flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins))))])
   } else if name == "apsp" {
-    map.from([("apsp_step", (2, (dts, ins) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
+    map.from([("apsp_step", (2, (dts, ins, _ss) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
     map.from([("matpow_step", (3, last_out((dts, ins) => matmul_ref(MP_N, MP_N, MP_N, dts, ins))))])
   }

@@ -1018,6 +1018,51 @@ pub fn f32_of_bits(bits: Int) -> Float = {
   if neg { -a } else { a }
 }
 
+## The 64-bit pattern of the binary64 value `x`, in an `Int` (the top bit is
+## the sign, so a negative value answers a negative `Int`): the sign bit,
+## eleven exponent bits biased by 1023, fifty-two significand bits.
+## [`f32_bits`]'s shape at binary64's widths; every `Float` is a binary64
+## value, so there is no off-the-grid case. A NaN answers the canonical
+## quiet one, `0x7FF8000000000000`; the payload a NaN carries is not kept.
+pub fn f64_bits(x: Float) -> Int =
+  if x != x {
+    0x7FF8000000000000
+  } else {
+    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
+    let sign = if neg { 1 << 63 } else { 0 }
+    let a = if neg { -x } else { x }
+    if a == 0.0 {
+      sign
+    } else if a == 1.0 / 0.0 {
+      sign | 0x7FF0000000000000
+    } else {
+      let e = exponent(a)
+      if e < -1022 {
+        # below the normal range: no hidden bit, the significand counts
+        # quanta of 2^-1074
+        sign | to_int(a / pow2(-1074))
+      } else {
+        sign | ((e + 1023) << 52) | to_int((a / pow2(e) - 1.0) * pow2(52))
+      }
+    }
+  }
+
+## The binary64 value whose 64-bit pattern is `bits`, exactly (the inverse
+## of [`f64_bits`] on every value but a NaN's payload).
+pub fn f64_of_bits(bits: Int) -> Float = {
+  let neg = bits < 0
+  let e = (bits >>> 52) & 0x7FF
+  let m = bits & 0xFFFFFFFFFFFFF
+  let a = if e == 0x7FF {
+    if m == 0 { 1.0 / 0.0 } else { 0.0 / 0.0 }
+  } else if e == 0 {
+    to_float(m) * pow2(-1074)
+  } else {
+    (1.0 + to_float(m) / pow2(52)) * pow2(e - 1023)
+  }
+  if neg { -a } else { a }
+}
+
 ## The 32-bit pattern of the TensorFloat-32 value `x`: a binary32 word whose
 ## bottom THIRTEEN bits are zero. tf32 is nineteen bits of information (a
 ## sign, binary32's eight exponent bits and ten significand bits) and the
@@ -1794,4 +1839,32 @@ test "a storage-only value shows as the Float it holds, and a literal at one is 
   assert show(d) == "2.0"
   let e: F4E2M1FN = round_f4e2m1(2.4)
   assert show(e) == "2.0"
+}
+
+test "the binary64 codec spells the special values and the named boundaries, and round trips" {
+  let inf = 1.0 / 0.0
+  assert f64_bits(1.0) == 0x3FF0000000000000
+  assert f64_bits(-2.0) == (1 << 63) | 0x4000000000000000
+  assert f64_bits(0.0) == 0
+  assert f64_bits(0.0 * (0.0 - 1.0)) == 1 << 63
+  assert f64_bits(inf) == 0x7FF0000000000000
+  assert f64_bits(-inf) == (1 << 63) | 0x7FF0000000000000
+  assert f64_bits(0.0 / 0.0) == 0x7FF8000000000000
+  assert f64_bits(pow2(-1074)) == 1
+  assert f64_of_bits(1) == pow2(-1074)
+  assert f64_of_bits(0x0010000000000000) == pow2(-1022)
+  assert f64_of_bits(0x7FEFFFFFFFFFFFFF) == 1.7976931348623157e308
+  assert f64_bits(1.7976931348623157e308) == 0x7FEFFFFFFFFFFFFF
+  assert f64_bits(0.1) == 0x3FB999999999999A
+  assert f64_of_bits(0x3FB999999999999A) == 0.1
+  assert 1.0 / f64_of_bits(1 << 63) == -inf
+  let nan = f64_of_bits(0x7FF0000000000001)
+  assert nan != nan
+  assert f64_of_bits(f64_bits(1.5)) == 1.5
+  assert f64_of_bits(f64_bits(-3.25)) == -3.25
+  assert f64_of_bits(f64_bits(123456.789)) == 123456.789
+  assert f64_of_bits(f64_bits(1e-300)) == 1e-300
+  assert f64_of_bits(f64_bits(-1e300)) == -1e300
+  assert f64_of_bits(f64_bits(4.9e-324)) == 4.9e-324
+  assert f64_of_bits(f64_bits(2.2250738585072014e-308)) == 2.2250738585072014e-308
 }

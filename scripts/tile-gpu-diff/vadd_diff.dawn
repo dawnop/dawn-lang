@@ -37,7 +37,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, upload, download, free,
-  launch, sync, handle_of }
+  launch, buffer, erase, sync }
 use std/dtype.{Dtype, F64, dtype_name}
 use std/narrow.{BF16}
 use std/list
@@ -119,7 +119,7 @@ fn stages[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> T
             (_, Err(e)) -> e.kind
           }
           let t2 = Trace { ..t1, roundtrip: rt, note: message(back) ++ message(back2) }
-          let l = launch(kernel, n / 128, [handle_of(a), handle_of(b), handle_of(out)])
+          let l = launch(kernel, n / 128, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])
           match l {
             Ok(_) -> {
               let s = sync()

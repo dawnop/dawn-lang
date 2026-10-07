@@ -134,7 +134,7 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])],
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, 1, 1, hs) {
+          match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buf(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -357,7 +357,7 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] =
   if case_name(i) == "histogram" {
     map.from([("histogram", (2, last_out((dts, ins) => histogram_ref(HIST_N, HIST_BINS, dts, ins))))])
   } else {
-    map.from([("cas_swap", (4, (dts, ins) => cas_swap_ref(CAS_SLOTS, dts, ins)))])
+    map.from([("cas_swap", (4, (dts, ins, _ss) => cas_swap_ref(CAS_SLOTS, dts, ins)))])
   }
 
 ## A vector as a line: its length, its first lanes and its last ones.

@@ -30,8 +30,9 @@ use std/bytes
 use std/list
 use std/map
 use std/narrow
-use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, F64}
+use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, F64, I64}
 use std/narrow.{BF16, F16, F32}
+use std/int/i32
 use std/int/i32.{I32}
 
 # ---- element formats ----
@@ -496,7 +497,7 @@ pub fn unpack_f8e8m0(b: Bytes) -> List[Float] =
 ## a type error and not a launch failure.
 pub opaque type Tensor[D] = (Int, Int)
 
-## The handle a handler issued for `t`, as [`launch`] wants it.
+## The handle a handler issued for `t`, as [`Buf`] wants it.
 pub fn handle_of[D](t: Tensor[D]) -> Int = {
   let p: (Int, Int) = t
   let (h, _n) = p
@@ -510,6 +511,83 @@ pub fn size[D](t: Tensor[D]) -> Int = {
   n
 }
 
+# ---- launch arguments ----
+
+## One argument of a launch as the device takes it: a buffer by the handle
+## the device issued, or a scalar by value. A `Word` is the scalar's
+## `dtype` name and its bit pattern, in the low 32 bits of `bits` for
+## `i32` and `f32` and all 64 for `i64` and `f64`, which is the form the
+## argument area of `cuLaunchKernel` takes (every parameter there is one
+## 8-byte word, and the driver reads the width the kernel declared).
+pub type LaunchArg =
+  | Buf(handle: Int)
+  | Word(dtype: String, bits: Int)
+derive Show
+
+## The formats a kernel parameter may be passed in BY VALUE: `I32`, `I64`
+## (`Int`), `F32` and `F64` (`Float`), the four whose argument-area layout
+## is a plain 4 or 8 bytes. `scalar_dtype` is the format's witness, which
+## `packages/tileir` reads to name the format of a scalar parameter, and
+## `scalar_word` is the value as the launch passes it. A trait of its own
+## and not `HasDtype` because Dawn has no supertraits, so a subset of the
+## formats `HasDtype` covers can only be named by a bound of its own. The
+## bound keeps out what has no number under it; an opaque type over `Float`
+## or `Int` uses its target's impl (spec, `opaque type`), so the recording
+## in `packages/tileir` is what refuses an `F16` parameter.
+pub trait ScalarDtype[A] {
+  fn scalar_dtype() -> Dtype[A]
+  fn scalar_word(v: A) -> LaunchArg
+}
+
+impl ScalarDtype[Float] {
+  fn scalar_dtype() -> Dtype[Float] = F64
+  fn scalar_word(v: Float) -> LaunchArg = Word("f64", narrow.f64_bits(v))
+}
+
+impl ScalarDtype[Int] {
+  fn scalar_dtype() -> Dtype[Int] = I64
+  fn scalar_word(v: Int) -> LaunchArg = Word("i64", v)
+}
+
+impl ScalarDtype[I32] {
+  fn scalar_dtype() -> Dtype[I32] = I32
+  fn scalar_word(v: I32) -> LaunchArg = Word("i32", i32.to_int(v) & 0xFFFFFFFF)
+}
+
+impl ScalarDtype[F32] {
+  fn scalar_dtype() -> Dtype[F32] = F32
+  fn scalar_word(v: F32) -> LaunchArg = Word("f32", narrow.f32_bits(narrow.to_f64(v)))
+}
+
+## One argument of a typed launch, its format `A` in the type: a buffer
+## made by [`buffer`] or a scalar made by [`scalar`]. What the type cannot
+## say, which of the two the kernel wants at a position, is checked above
+## the effect by [`launch_entry1`] and its siblings (`gpu.bad_entry`).
+pub opaque type Launch[A] = (LaunchArg, Int)
+
+## `t` as an argument of a launch: the handle, and the element count a
+## typed launch holds the entry's cells to.
+pub fn buffer[A](t: Tensor[A]) -> Launch[A] = {
+  let l: Launch[A] = (Buf(handle_of(t)), size(t))
+  l
+}
+
+## The value `v` as an argument of a launch, passed by value. `A` is its
+## host value type, which is the kernel parameter's format: an `F32` is an
+## f32 parameter, a `Float` an f64 one, an `Int` an i64 one.
+pub fn scalar[A: ScalarDtype](v: A) -> Launch[A] = {
+  let l: Launch[A] = (scalar_word(v), 0)
+  l
+}
+
+## `l` without its format, which is the form [`launch`] takes: buffers and
+## scalars of any formats in one list.
+pub fn erase[A](l: Launch[A]) -> LaunchArg = {
+  let p: (LaunchArg, Int) = l
+  let (a, _n) = p
+  a
+}
+
 # ---- the effect ----
 
 ## The device, as operations a handler answers. Names carry a `gpu_` prefix
@@ -520,7 +598,7 @@ pub fn size[D](t: Tensor[D]) -> Int = {
 ## refused. `gpu_alloc` answers a fresh handle for `len` elements of the named
 ## format; `gpu_upload` and `gpu_download` move a whole buffer; `gpu_launch`
 ## runs the kernel of that name over a `gx` by `gy` by `gz` grid of tile
-## blocks with the given buffers as its arguments; `gpu_sync` waits for
+## blocks with the given arguments, buffers and scalars, in order; `gpu_sync` waits for
 ## every launch so far. `gpu_module_global` looks one MODULE-LEVEL SYMBOL up
 ## in the module that defines `kernel` and answers a handle over its storage
 ## together with the number of elements of `dtype` it holds; a symbol the
@@ -530,7 +608,7 @@ pub effect Gpu {
   fn gpu_alloc(dtype: String, len: Int) -> Result[Int, ForeignError]
   fn gpu_upload(handle: Int, data: List[Float]) -> Result[Unit, ForeignError]
   fn gpu_download(handle: Int) -> Result[List[Float], ForeignError]
-  fn gpu_launch(kernel: String, gx: Int, gy: Int, gz: Int, args: List[Int]) -> Result[Unit, ForeignError]
+  fn gpu_launch(kernel: String, gx: Int, gy: Int, gz: Int, args: List[LaunchArg]) -> Result[Unit, ForeignError]
   fn gpu_module_global(kernel: String, name: String, dtype: String) -> Result[(Int, Int), ForeignError]
   fn gpu_free(handle: Int) -> Result[Unit, ForeignError]
   fn gpu_sync() -> Result[Unit, ForeignError]
@@ -581,14 +659,15 @@ pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handl
 # to reach `args` positionally, which is every call but the 2D and 3D few.
 
 ## Run the kernel named `kernel` over a `grid` by `gy` by `gz` grid of tile
-## blocks with `args` as its arguments, in order. A kernel reads the three
+## blocks with `args` as its arguments, in order: `erase(buffer(t))` for a
+## tensor, `erase(scalar(v))` for a value passed by value. A kernel reads the three
 ## axes with `block_id(0)` / `block_id(1)` / `block_id(2)`; a one-dimensional
 ## launch leaves `gy` and `gz` at 1, so a kernel that only reads
 ## `block_id(0)` sees the grid it always did.
 ## `Err(kind: "gpu.bad_grid")` for an axis below one, before any handler is
 ## asked; a name no handler knows is the handler's refusal
 ## (`gpu.no_kernel` from the fake device).
-pub fn launch(kernel: String, grid: Int, args: List[Int], gy: Int = 1, gz: Int = 1) -> Result[Unit, ForeignError] !Gpu =
+pub fn launch(kernel: String, grid: Int, args: List[LaunchArg], gy: Int = 1, gz: Int = 1) -> Result[Unit, ForeignError] !Gpu =
   if grid < 1 || gy < 1 || gz < 1 {
     Err(refuse("gpu.bad_grid",
       "gpu.launch: a grid has at least one block along each axis, got (${grid}, ${gy}, ${gz})"))
@@ -619,15 +698,17 @@ pub fn launch(kernel: String, grid: Int, args: List[Int], gy: Int = 1, gz: Int =
 const ROLE_IN: Int = 0
 const ROLE_OUT: Int = 1
 const ROLE_SHARED: Int = 2
+const ROLE_SCALAR: Int = 3
 
 # A dimension whose extent the launch decides, and a cut dimension that
 # follows no grid axis. Both are -1; packages/tileir's `DYN_DIM` and
 # `FREE_AXIS` are the same numbers.
 const DYNAMIC: Int = 0 - 1
 
-## One buffer argument of an entry: what the kernel does to the buffer and,
-## when it cuts the buffer into cells, how. Made by [`arg_in`],
-## [`arg_in_whole`], [`arg_out`] and [`arg_shared`].
+## One argument of an entry: what the kernel does to a buffer and, when it
+## cuts the buffer into cells, how, or that the argument is a scalar passed
+## by value. Made by [`arg_in`], [`arg_in_whole`], [`arg_out`],
+## [`arg_shared`] and [`arg_scalar`].
 pub opaque type EntryArg = (Int, List[Int], List[Int], List[Int])
 
 ## An argument the kernel only reads, cut into cells of `tile` over a tensor
@@ -664,13 +745,21 @@ pub fn arg_shared() -> EntryArg = {
   a
 }
 
+## An argument that is a scalar the launch passes by value: no buffer, no
+## cells, nothing about it held to the grid. The launch must pass a
+## [`scalar`] there, and a [`buffer`] anywhere else.
+pub fn arg_scalar() -> EntryArg = {
+  let a: EntryArg = (ROLE_SCALAR, [], [], [])
+  a
+}
+
 fn arg_parts(a: EntryArg) -> (Int, List[Int], List[Int], List[Int]) = {
   let p: (Int, List[Int], List[Int], List[Int]) = a
   p
 }
 
 fn role_word(role: Int) -> String =
-  if role == ROLE_IN { "In" } else if role == ROLE_OUT { "Out" } else { "Shared" }
+  if role == ROLE_IN { "In" } else if role == ROLE_OUT { "Out" } else if role == ROLE_SCALAR { "Scalar" } else { "Shared" }
 
 fn arg_word(args: List[EntryArg], i: Int) -> String = {
   let (role, _e, _t, _a) = arg_parts(args[i])
@@ -833,48 +922,103 @@ fn reach(a: EntryArg, grid: List[Int]) -> Int = {
 # order: the entry, the buffers' identity, the grid, the cells against the
 # grid, and each buffer against its cells. Pure, so it is the same under
 # every handler and a test can call it alone.
-fn launch_plan(args: List[EntryArg], handles: List[Int], sizes: List[Int],
+# The first argument whose kind is not the one the entry wants there: a
+# scalar where the kernel reads a buffer, or a buffer where it takes a
+# value. The count is the type's, so only the kinds are left to say.
+fn kind_problem(args: List[EntryArg], launches: List[(LaunchArg, Int)]) -> Option[String] =
+  if len(launches) != len(args) {
+    Some("the entry has ${len(args)} argument(s) and the launch passes ${len(launches)}")
+  } else {
+    match list.find(range(0, len(args)), i => {
+      let (role, _e, _t, _a) = arg_parts(args[i])
+      let (a, _n) = launches[i]
+      match a {
+        Buf(_h) -> role == ROLE_SCALAR
+        Word(_d, _b) -> role != ROLE_SCALAR
+      }
+    }) {
+      Some(i) -> {
+        let (a, _n) = launches[i]
+        match a {
+          Buf(_h) -> Some("${arg_word(args, i)} takes a value passed by value (`scalar`), and the launch passes a buffer")
+          Word(_d, _b) -> Some("${arg_word(args, i)} is a buffer, and the launch passes a value (`scalar`)")
+        }
+      }
+      None -> None
+    }
+  }
+
+fn handle_of_launch(a: LaunchArg) -> Int = match a {
+  Buf(h) -> h
+  Word(_d, _b) -> 0 - 1
+}
+
+fn launch_plan(args: List[EntryArg], launches: List[(LaunchArg, Int)],
   given: List[Int]) -> Result[List[Int], (String, String)] =
   match entry_grid(args) {
     Err(p) -> Err(("gpu.bad_entry", p))
-    Ok(grid) -> {
-      let n = len(args)
-      let clash = list.find(range(0, n * n), x => {
-        let i = x / n
-        let j = x % n
-        let (ri, _e1, _t1, _a1) = arg_parts(args[i])
-        let (rj, _e2, _t2, _a2) = arg_parts(args[j])
-        i < j && handles[i] == handles[j] && (ri != ROLE_IN || rj != ROLE_IN)
-      })
-      match clash {
-        Some(x) -> Err(("gpu.aliased_argument", "${arg_word(args, x / n)} and ${arg_word(args, x % n)} are one buffer (handle ${handles[x / n]}); an Out or Shared argument shares its buffer with no other"))
-        None -> match resolve_grid(grid, given) {
-          Err(e) -> Err(e)
-          Ok(g) -> if list.any(g, b => b < 1) {
-            Err(("gpu.bad_grid", "a grid has at least one block along each axis, got ${show(g)}"))
-          } else {
-            match follow_problem(args, g) {
-              Some(p) -> Err(("gpu.grid_mismatch", p))
-              None -> match list.find(range(0, n), i => sizes[i] < reach(args[i], g)) {
-                Some(i) -> Err(("gpu.short_tensor", "${arg_word(args, i)} holds ${sizes[i]} element(s) and its cells reach ${reach(args[i], g)}"))
-                None -> Ok(g)
-              }
-            }
+    Ok(grid) -> match kind_problem(args, launches) {
+      Some(p) -> Err(("gpu.bad_entry", p))
+      None -> launch_buffers(args, launches, given, grid)
+    }
+  }
+
+fn launch_buffers(args: List[EntryArg], launches: List[(LaunchArg, Int)], given: List[Int],
+  grid: List[Int]) -> Result[List[Int], (String, String)] = {
+  let handles = list.map(launches, l => {
+    let (a, _n) = l
+    handle_of_launch(a)
+  })
+  let sizes = list.map(launches, l => {
+    let (_a, n) = l
+    n
+  })
+  let n = len(args)
+  let clash = list.find(range(0, n * n), x => {
+    let i = x / n
+    let j = x % n
+    let (ri, _e1, _t1, _a1) = arg_parts(args[i])
+    let (rj, _e2, _t2, _a2) = arg_parts(args[j])
+    i < j && ri != ROLE_SCALAR && rj != ROLE_SCALAR && handles[i] == handles[j] && (ri != ROLE_IN || rj != ROLE_IN)
+  })
+  match clash {
+    Some(x) -> Err(("gpu.aliased_argument", "${arg_word(args, x / n)} and ${arg_word(args, x % n)} are one buffer (handle ${handles[x / n]}); an Out or Shared argument shares its buffer with no other"))
+    None -> match resolve_grid(grid, given) {
+      Err(e) -> Err(e)
+      Ok(g) -> if list.any(g, b => b < 1) {
+        Err(("gpu.bad_grid", "a grid has at least one block along each axis, got ${show(g)}"))
+      } else {
+        match follow_problem(args, g) {
+          Some(p) -> Err(("gpu.grid_mismatch", p))
+          None -> match list.find(range(0, n), i => sizes[i] < reach(args[i], g)) {
+            Some(i) -> Err(("gpu.short_tensor", "${arg_word(args, i)} holds ${sizes[i]} element(s) and its cells reach ${reach(args[i], g)}"))
+            None -> Ok(g)
           }
         }
       }
     }
   }
+}
 
-fn launch_args(kernel: String, args: List[EntryArg], handles: List[Int], sizes: List[Int],
+fn launch_args(kernel: String, args: List[EntryArg], launches: List[(LaunchArg, Int)],
   given: List[Int]) -> Result[Unit, ForeignError] !Gpu =
-  match launch_plan(args, handles, sizes, given) {
+  match launch_plan(args, launches, given) {
     Err(e) -> {
       let (kind, message) = e
       Err(refuse(kind, "gpu.launch_entry: kernel `${kernel}`: ${message}"))
     }
-    Ok(g) -> launch(kernel, g[0], handles, gy: g[1], gz: g[2])
+    Ok(g) -> launch(kernel, g[0], list.map(launches, l => erase_pair(l)), gy: g[1], gz: g[2])
   }
+
+fn pair[A](l: Launch[A]) -> (LaunchArg, Int) = {
+  let p: (LaunchArg, Int) = l
+  p
+}
+
+fn erase_pair(l: (LaunchArg, Int)) -> LaunchArg = {
+  let (a, _n) = l
+  a
+}
 
 ## A kernel of one buffer argument of format `A`, as its recorder answers
 ## it: the kernel's name and what it does to the buffer. [`launch_entry1`]
@@ -926,54 +1070,53 @@ pub fn entry5[A, B, C, D, E](kernel: String, a: EntryArg, b: EntryArg, c: EntryA
   e
 }
 
-## Run `e` with `a` as its argument. The grid is the one the Out cells
+## Run `e` with `a` as its argument, a [`buffer`] or a [`scalar`] as the entry says. The grid is the one the Out cells
 ## make; `grid` names the axes the entry leaves to the launch (a dynamic Out
 ## extent), or all of them when no argument is an Out, and an axis it names
 ## that the entry knows must agree with it. Before any handler is asked:
-## `Err(kind: "gpu.bad_entry")` for an entry whose cells are malformed,
+## `Err(kind: "gpu.bad_entry")` for an entry whose cells are malformed or
+## whose argument kinds disagree with the launch (a [`scalar`] where the
+## kernel reads a buffer, a [`buffer`] where it takes a value),
 ## `gpu.aliased_argument` when an Out or Shared argument is the buffer of
 ## another argument, `gpu.grid_mismatch` when `grid` or an In argument's
 ## cells disagree with the Out cells, `gpu.short_tensor` when a tensor is
 ## shorter than its cells reach, and `gpu.bad_grid` as [`launch`] has it.
-pub fn launch_entry1[A](e: Entry1[A], a: Tensor[A], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+pub fn launch_entry1[A](e: Entry1[A], a: Launch[A], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
   let p: (String, List[EntryArg]) = e
   let (kernel, args) = p
-  launch_args(kernel, args, [handle_of(a)], [size(a)], grid)
+  launch_args(kernel, args, [pair(a)], grid)
 }
 
 ## [`launch_entry1`] for two arguments.
-pub fn launch_entry2[A, B](e: Entry2[A, B], a: Tensor[A], b: Tensor[B],
+pub fn launch_entry2[A, B](e: Entry2[A, B], a: Launch[A], b: Launch[B],
   grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
   let p: (String, List[EntryArg]) = e
   let (kernel, args) = p
-  launch_args(kernel, args, [handle_of(a), handle_of(b)], [size(a), size(b)], grid)
+  launch_args(kernel, args, [pair(a), pair(b)], grid)
 }
 
 ## [`launch_entry1`] for three arguments.
-pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Tensor[A], b: Tensor[B], c: Tensor[C],
+pub fn launch_entry3[A, B, C](e: Entry3[A, B, C], a: Launch[A], b: Launch[B], c: Launch[C],
   grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
   let p: (String, List[EntryArg]) = e
   let (kernel, args) = p
-  launch_args(kernel, args, [handle_of(a), handle_of(b), handle_of(c)],
-    [size(a), size(b), size(c)], grid)
+  launch_args(kernel, args, [pair(a), pair(b), pair(c)], grid)
 }
 
 ## [`launch_entry1`] for four arguments.
-pub fn launch_entry4[A, B, C, D](e: Entry4[A, B, C, D], a: Tensor[A], b: Tensor[B],
-  c: Tensor[C], d: Tensor[D], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+pub fn launch_entry4[A, B, C, D](e: Entry4[A, B, C, D], a: Launch[A], b: Launch[B],
+  c: Launch[C], d: Launch[D], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
   let p: (String, List[EntryArg]) = e
   let (kernel, args) = p
-  launch_args(kernel, args, [handle_of(a), handle_of(b), handle_of(c), handle_of(d)],
-    [size(a), size(b), size(c), size(d)], grid)
+  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d)], grid)
 }
 
 ## [`launch_entry1`] for five arguments.
-pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Tensor[A], b: Tensor[B],
-  c: Tensor[C], d: Tensor[D], x: Tensor[E], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
+pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Launch[A], b: Launch[B],
+  c: Launch[C], d: Launch[D], x: Launch[E], grid: List[Int] = []) -> Result[Unit, ForeignError] !Gpu = {
   let p: (String, List[EntryArg]) = e
   let (kernel, args) = p
-  launch_args(kernel, args, [handle_of(a), handle_of(b), handle_of(c), handle_of(d), handle_of(x)],
-    [size(a), size(b), size(c), size(d), size(x)], grid)
+  launch_args(kernel, args, [pair(a), pair(b), pair(c), pair(d), pair(x)], grid)
 }
 
 ## The module-level global named `name`, in the module that defines
@@ -1065,15 +1208,27 @@ pub fn sum_ref(dtypes: List[String], ins: List[List[Float]]) -> List[Float] = {
 ## LAST buffer holds afterwards. `last_out` makes one a `WideRefFn`.
 pub alias RefFn = fn(List[String], List[List[Float]]) -> List[Float]
 
-## A host reference as the fake device runs it: the same two arguments, and
-## the argument POSITIONS the kernel wrote paired with what each holds
-## afterwards.
-pub alias WideRefFn = fn(List[String], List[List[Float]]) -> List[(Int, List[Float])]
+## A host reference as the fake device runs it: the same two arguments, the
+## launch's scalars as `Float`s in the order the launch passed them (an
+## `i32` or `i64` value as the integer it is, an `f32` as the binary32 value
+## its bits spell), and the argument POSITIONS among the BUFFERS the kernel
+## wrote paired with what each holds afterwards.
+pub alias WideRefFn = fn(List[String], List[List[Float]], List[Float]) -> List[(Int, List[Float])]
+
+## A host reference for a kernel that takes scalars and writes one buffer:
+## [`RefFn`] with the launch's scalars as a third argument. `last_out_with`
+## makes one a `WideRefFn`.
+pub alias ScalarRefFn = fn(List[String], List[List[Float]], List[Float]) -> List[Float]
 
 ## `f`, which answers the contents of the LAST argument buffer, as a
 ## reference the fake device can run: it writes back to `len(ins) - 1` and
-## nowhere else.
-pub fn last_out(f: RefFn) -> WideRefFn = (dts, ins) => [(len(ins) - 1, f(dts, ins))]
+## nowhere else. The kernel takes no scalars; a launch that passes some is
+## the reference's to refuse, and this one ignores them.
+pub fn last_out(f: RefFn) -> WideRefFn = (dts, ins, _scalars) => [(len(ins) - 1, f(dts, ins))]
+
+## [`last_out`] for a reference that reads the launch's scalars.
+pub fn last_out_with(f: ScalarRefFn) -> WideRefFn =
+  (dts, ins, scalars) => [(len(ins) - 1, f(dts, ins, scalars))]
 
 ## The reference implementations the fake device answers [`launch`] with, by
 ## kernel name. Each entry carries the exact number of buffers the device
@@ -1085,6 +1240,27 @@ pub fn last_out(f: RefFn) -> WideRefFn = (dts, ins) => [(len(ins) - 1, f(dts, in
 pub fn reference_kernels() -> Map[String, (Int, WideRefFn)] =
   map.from([("vadd", (3, last_out(vadd_ref))), ("vadd_bf16", (3, last_out(vadd_ref))),
     ("sum", (2, last_out(sum_ref)))])
+
+# The buffers of a launch's arguments, in order, and the scalars as the
+# values the fake device hands a reference.
+fn buffers_of(args: List[LaunchArg]) -> List[Int] =
+  list.fold(args, [], (acc, a) => match a {
+    Buf(h) -> acc ++ [h]
+    Word(_d, _b) -> acc
+  })
+
+fn word_value(dtype: String, bits: Int) -> Float = match dtype {
+  "f64" -> narrow.f64_of_bits(bits)
+  "f32" -> narrow.f32_of_bits(bits)
+  "i32" -> to_float(wrap_i32(bits))
+  _ -> to_float(bits)
+}
+
+fn scalars_of(args: List[LaunchArg]) -> List[Float] =
+  list.fold(args, [], (acc, a) => match a {
+    Buf(_h) -> acc
+    Word(d, b) -> acc ++ [word_value(d, b)]
+  })
 
 fn no_such_buffer(who: String, handle: Int) -> ForeignError =
   refuse("gpu.no_such_buffer", "${who}: no buffer with handle ${handle}")
@@ -1198,9 +1374,10 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
       }
       None -> Err(no_such_buffer("fake device", handle))
     }
-    gpu_launch(kernel, _gx, _gy, _gz, args) => match map.get(kernels, kernel) {
+    gpu_launch(kernel, _gx, _gy, _gz, launched) => match map.get(kernels, kernel) {
       Some(entry) -> {
         let (arity, f) = entry
+        let args = buffers_of(launched)
         if len(args) == 0 {
           Err(no_arguments("fake device", kernel))
         } else if len(args) != arity {
@@ -1224,7 +1401,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
               # (a position that is also an input) sees what the device's
               # loads saw, not what an earlier pair of this same launch
               # left behind
-              let writes = f(dtypes, ins)
+              let writes = f(dtypes, ins, scalars_of(launched))
               match list.find(writes, w => {
                 let (pos, _v) = w
                 pos < 0 || pos >= len(args)
@@ -1360,17 +1537,23 @@ fn to_array(xs: List[Float]) -> Array[Float] = {
 
 fn of_array(a: Array[Float]) -> List[Float] = list.map(range(0, array_len(a)), i => array_get(a, i))
 
-# The device pointers behind `args`, in order. Every handle was checked
-# against the table before this is called.
-fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[Int]) -> Array[Int] = {
+# The argument words behind `args`, in order: a buffer's device pointer, a
+# scalar's bit pattern. Every handle was checked against the table before
+# this is called.
+fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[LaunchArg]) -> Array[Int] = {
   var a: Array[Int] = array_new()
-  for h in args {
-    match map.get(table, h) {
-      Some(b) -> {
-        let (p, _n, _dt) = b
-        a = array_push(a, p)
+  for arg in args {
+    match arg {
+      Buf(h) -> match map.get(table, h) {
+        Some(b) -> {
+          let (p, _n, _dt) = b
+          a = array_push(a, p)
+        }
+        None -> ()
       }
-      None -> ()
+      Word(_d, bits) -> {
+        a = array_push(a, bits)
+      }
     }
   }
   a
@@ -1473,14 +1656,14 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
       }
       None -> Err(no_such_buffer("real device", handle))
     }
-    gpu_launch(kernel, gx, gy, gz, args) => match map.get(kernels, kernel) {
+    gpu_launch(kernel, gx, gy, gz, launched) => match map.get(kernels, kernel) {
       Some(cubin) ->
-        if len(args) == 0 {
+        if len(buffers_of(launched)) == 0 {
           Err(no_arguments("real device", kernel))
         } else {
           # a handler's state cell cannot be captured by a lambda: read it first
           let table = bufs
-          match list.find(args, a => not map.has(table, a)) {
+          match list.find(buffers_of(launched), a => not map.has(table, a)) {
             Some(missing) -> Err(no_such_buffer("real device", missing))
             None -> {
               let loaded: Result[Int, ForeignError] = match map.get(mods, kernel) {
@@ -1490,7 +1673,7 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
               match loaded {
                 Ok(m) -> {
                   mods = map.insert(mods, kernel, m)
-                  gpu_launch_host(m, kernel, gx, gy, gz, device_pointers(table, args))
+                  gpu_launch_host(m, kernel, gx, gy, gz, device_pointers(table, launched))
                 }
                 Err(e) -> Err(e)
               }
@@ -1611,7 +1794,7 @@ fn vadd_as[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> 
   let out = alloc(d, n)?
   upload(a, xs)?
   upload(b, ys)?
-  launch(kernel, 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  launch(kernel, 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
   sync()?
   let r = download(out)?
   free(a)?
@@ -1636,7 +1819,7 @@ fn sum_on_device(xs: List[Float], blocks: Int) -> Result[List[Float], ForeignErr
   let x = alloc(F64, len(xs))?
   let out = alloc(F64, blocks * 128)?
   upload(x, xs)?
-  launch("sum", blocks, [handle_of(x), handle_of(out)])?
+  launch("sum", blocks, [erase(buffer(x)), erase(buffer(out))])?
   sync()?
   let r = download(out)?
   free(x)?
@@ -1878,15 +2061,15 @@ test "uploading Floats off the bf16 grid rounds them on the way in, so the fake 
 fn launch_refusals() -> List[String] !Gpu = {
   let a: Result[Tensor[Float], ForeignError] = alloc(F64, 2)
   let h = match a {
-    Ok(t) -> handle_of(t)
-    Err(_) -> 0 - 1
+    Ok(t) -> Buf(handle_of(t))
+    Err(_) -> Buf(0 - 1)
   }
   [
     # the grid is checked before the name is looked up: `nope` never reaches the device
     kind_of(launch("nope", 0, [h])),
     kind_of(launch("nope", 1, [h])),
     kind_of(launch("vadd", 1, [])),
-    kind_of(launch("vadd", 1, [h, h, 99])),
+    kind_of(launch("vadd", 1, [h, h, Buf(99)])),
     kind_of(launch("vadd", 4, [h, h, h]))
   ]
 }
@@ -1938,7 +2121,7 @@ test "launch hands the handler a grid whose second and third axes default to one
 
 fn too_few_buffers() -> Result[Unit, ForeignError] !Gpu = {
   let a = alloc(F64, 2)?
-  launch("vadd", 1, [handle_of(a)])
+  launch("vadd", 1, [erase(buffer(a))])
 }
 
 test "the fake device refuses too few buffers before invoking the reference kernel" {
@@ -1954,7 +2137,7 @@ test "the fake device refuses too few buffers before invoking the reference kern
 fn one_short_buffer() -> Result[Unit, ForeignError] !Gpu = {
   let a = alloc(F64, 2)?
   let b = alloc(F64, 2)?
-  launch("vadd", 1, [handle_of(a), handle_of(b)])
+  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b))])
 }
 
 test "the fake device refuses one buffer short instead of overwriting an input" {
@@ -2058,7 +2241,7 @@ fn global_launch_reads_the_write() -> Result[List[Float], ForeignError] !Gpu = {
   let x = alloc(F64, 4)?
   let out = alloc(F64, 12)?
   upload(x, [1.0, 1.0, 1.0, 1.0])?
-  launch("k", 1, [handle_of(x), handle_of(out)])?
+  launch("k", 1, [erase(buffer(x)), erase(buffer(out))])?
   sync()?
   download(out)
 }
@@ -2098,10 +2281,10 @@ fn real_refusals() -> List[String] !Gpu = {
     kind_of(download(ghost)),
     kind_of(free(ghost)),
     # the name is looked up before anything else
-    kind_of(launch("nope", 1, [handle_of(ghost)])),
+    kind_of(launch("nope", 1, [erase(buffer(ghost))])),
     # a known name with no buffers, and with a buffer nobody has
     kind_of(launch("vadd", 1, [])),
-    kind_of(launch("vadd", 1, [handle_of(ghost)]))
+    kind_of(launch("vadd", 1, [erase(buffer(ghost))]))
   ]
 }
 
@@ -2227,11 +2410,11 @@ fn pow_two(k: Int) -> Float = {
 # on the fake device, with a third buffer nobody touches as the control.
 fn wide_kernels() -> Map[String, (Int, WideRefFn)] =
   map.from([
-    ("sum_diff", (4, (dts, ins) => [(2, masked_lanes(ins[2], 3, i => round_to(dts[2], ins[0][i] + ins[1][i]))),
+    ("sum_diff", (4, (dts, ins, _ss) => [(2, masked_lanes(ins[2], 3, i => round_to(dts[2], ins[0][i] + ins[1][i]))),
       (3, masked_lanes(ins[3], 3, i => round_to(dts[3], ins[0][i] - ins[1][i])))])),
-    ("reverse", (1, (dts, ins) => [(0, masked_lanes(ins[0], 4, i => round_to(dts[0], ins[0][3 - i])))])),
-    ("invert", (1, (dts, ins) => [(0, masked_lanes(ins[0], 3, i => round_to(dts[0], 255.0 - ins[0][i])))])),
-    ("off_the_end", (1, (_dts, _ins) => [(1, [0.0])]))
+    ("reverse", (1, (dts, ins, _ss) => [(0, masked_lanes(ins[0], 4, i => round_to(dts[0], ins[0][3 - i])))])),
+    ("invert", (1, (dts, ins, _ss) => [(0, masked_lanes(ins[0], 3, i => round_to(dts[0], 255.0 - ins[0][i])))])),
+    ("off_the_end", (1, (_dts, _ins, _ss) => [(1, [0.0])]))
   ])
 
 # One buffer per list, allocated and filled in order, and each read back.
@@ -2255,7 +2438,7 @@ fn wide_read(hs: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
 
 fn wide_run(kernel: String, dtype: String, bufs: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu = {
   let hs = wide_alloc(dtype, bufs)?
-  gpu_launch(kernel, 1, 1, 1, hs)?
+  gpu_launch(kernel, 1, 1, 1, list.map(hs, h => Buf(h)))?
   wide_read(hs)
 }
 
@@ -2292,7 +2475,7 @@ fn f16_vadds(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignErr
   let out = alloc(F16, n)?
   upload(a, xs)?
   upload(b, ys)?
-  launch("vadd", 1, [handle_of(a), handle_of(b), handle_of(out)])?
+  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
   download(out)
 }
 
@@ -2334,7 +2517,7 @@ fn masked_run(kernel: String, xs: List[Float], ys: List[Float]) -> Result[List[F
       let _u1 = upload(a, xs)
       let _u2 = upload(b, ys)
       let _u3 = upload(out, tail)
-      let args = if len(ys) == 0 { [handle_of(a), handle_of(out)] } else { [handle_of(a), handle_of(b), handle_of(out)] }
+      let args = if len(ys) == 0 { [erase(buffer(a)), erase(buffer(out))] } else { [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))] }
       match launch(kernel, 1, args) {
         Ok(_) -> download(out)
         Err(e) -> Err(e)
@@ -2392,6 +2575,9 @@ test "the sub-byte layout is eight lanes to a word, low nibble first" {
 # A handler that allocates, answers each launch with the grid and the
 # buffers it was handed as a refusal, and does nothing else: what an entry's
 # launch hands the device, or why it never got there.
+fn scalar_suffix(args: List[LaunchArg]) -> String =
+  if len(scalars_of(args)) == 0 { "" } else { " scalars ${show(scalars_of(args))}" }
+
 fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> List[String] = {
   let rs = {
     with handle Gpu {
@@ -2403,7 +2589,7 @@ fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> Li
       }
       gpu_upload(_handle, _data) => Ok(())
       gpu_download(_handle) => Ok([])
-      gpu_launch(kernel, gx, gy, gz, args) => Err(refuse("test.launch", "${kernel} ${gx} ${gy} ${gz} ${show(args)}"))
+      gpu_launch(kernel, gx, gy, gz, args) => Err(refuse("test.launch", "${kernel} ${gx} ${gy} ${gz} ${show(buffers_of(args))}${scalar_suffix(args)}"))
       gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
       gpu_free(_handle) => Ok(())
       gpu_sync() => Ok(())
@@ -2426,17 +2612,17 @@ fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
   match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
     (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
-      launch_entry3(e, a, b, a, grid: [4]),
-      launch_entry3(e, a, b, b, grid: [4]),
-      launch_entry3(e, a, a, b, grid: [4]),
-      launch_entry3(e, a, b, short, grid: [4]),
-      launch_entry3(e, a, b, short, grid: [3]),
-      launch_entry3(e, a, b, short),
-      launch_entry3(e, a, b, short, grid: [3, 2]),
-      launch_entry2(s, a, h, grid: [8, 2]),
-      launch_entry2(s, a, h),
-      launch_entry2(f, a, b, grid: [4]),
-      launch_entry2(f, a, b, grid: [2])
+      launch_entry3(e, buffer(a), buffer(b), buffer(a), grid: [4]),
+      launch_entry3(e, buffer(a), buffer(b), buffer(b), grid: [4]),
+      launch_entry3(e, buffer(a), buffer(a), buffer(b), grid: [4]),
+      launch_entry3(e, buffer(a), buffer(b), buffer(short), grid: [4]),
+      launch_entry3(e, buffer(a), buffer(b), buffer(short), grid: [3]),
+      launch_entry3(e, buffer(a), buffer(b), buffer(short)),
+      launch_entry3(e, buffer(a), buffer(b), buffer(short), grid: [3, 2]),
+      launch_entry2(s, buffer(a), buffer(h), grid: [8, 2]),
+      launch_entry2(s, buffer(a), buffer(h)),
+      launch_entry2(f, buffer(a), buffer(b), grid: [4]),
+      launch_entry2(f, buffer(a), buffer(b), grid: [2])
     ]
     _ -> []
   }
@@ -2477,4 +2663,85 @@ test "entry_grid is the Out cells' grid, checked argument by argument and agains
     == Err("argument 0 (In) follows grid axes [3]; a grid has axes 0, 1 and 2, and -1 follows none")
   assert entry_grid([arg_out([], [])])
     == Err("argument 0 (Out) has no cells; the cells of the Out arguments are the grid")
+}
+
+# ---- scalar arguments ----
+
+test "a scalar is the bit pattern of its value in the width its format has" {
+  assert erase(scalar(1.5)) == Word("f64", 0x3FF8000000000000)
+  assert erase(scalar(narrow.f32(1.5))) == Word("f32", 0x3FC00000)
+  assert erase(scalar(7)) == Word("i64", 7)
+  assert erase(scalar(0 - 7)) == Word("i64", 0 - 7)
+  assert erase(scalar(i32.wrap(0 - 2))) == Word("i32", 0xFFFFFFFE)
+  assert erase(scalar(i32.wrap(5))) == Word("i32", 5)
+}
+
+fn scale_entry() -> Entry4[Float, Float, Float, Float] =
+  entry4("vadd_scaled", arg_in([4], [4], [0]), arg_in([4], [4], [0]), arg_scalar(), arg_out([4], [4]))
+
+fn scaled_kernels() -> Map[String, (Int, WideRefFn)] =
+  map.from([("vadd_scaled", (3, last_out_with((dts, ins, ss) =>
+      list.map(range(0, len(ins[0])), i => round_to(dts[2], (ins[0][i] + ins[1][i]) * ss[0])))))])
+
+fn scaled_run(scale: Float) -> Result[List[Float], ForeignError] !Gpu = {
+  let a = alloc(F64, 4)?
+  let b = alloc(F64, 4)?
+  let out = alloc(F64, 4)?
+  upload(a, [1.0, 2.0, 3.0, 4.0])?
+  upload(b, [10.0, 20.0, 30.0, 40.0])?
+  launch_entry4(scale_entry(), buffer(a), buffer(b), scalar(scale), buffer(out))?
+  download(out)
+}
+
+test "the fake device hands a reference the launch's scalars: one kernel, two scales, two answers" {
+  assert with_gpu_fake(scaled_kernels(), () => scaled_run(2.0)) == Ok([22.0, 44.0, 66.0, 88.0])
+  assert with_gpu_fake(scaled_kernels(), () => scaled_run(0.5)) == Ok([5.5, 11.0, 16.5, 22.0])
+}
+
+fn scalar_kinds() -> List[Result[Unit, ForeignError]] !Gpu = {
+  let e = scale_entry()
+  match (alloc(F64, 4), alloc(F64, 4), alloc(F64, 4)) {
+    (Ok(a), Ok(b), Ok(out)) -> [
+      launch_entry4(e, buffer(a), buffer(b), scalar(2.0), buffer(out)),
+      # a buffer where the kernel takes a value, and a value where it reads a buffer
+      launch_entry4(e, buffer(a), buffer(b), buffer(b), buffer(out)),
+      launch_entry4(e, buffer(a), scalar(1.0), scalar(2.0), buffer(out)),
+      # a scalar is no buffer: passing the same value twice aliases nothing
+      launch_entry4(e, buffer(a), buffer(b), scalar(0.0), buffer(out), grid: [1])
+    ]
+    _ -> []
+  }
+}
+
+test "an entry's launch holds each position to the kind the kernel takes there" {
+  assert entry_launches(scalar_kinds) == [
+    "test.launch: vadd_scaled 1 1 1 [1, 2, 3] scalars [2.0]",
+    "gpu.bad_entry: gpu.launch_entry: kernel `vadd_scaled`: argument 2 (Scalar) takes a value passed by value (`scalar`), and the launch passes a buffer",
+    "gpu.bad_entry: gpu.launch_entry: kernel `vadd_scaled`: argument 1 (In) is a buffer, and the launch passes a value (`scalar`)",
+    "test.launch: vadd_scaled 1 1 1 [1, 2, 3] scalars [0.0]"
+  ]
+  # the count is the type's, so only a plan made by hand can get it wrong
+  let args = [arg_in_whole(), arg_scalar()]
+  assert launch_plan(args, [(Buf(1), 4)], []) == Err(("gpu.bad_entry", "the entry has 2 argument(s) and the launch passes 1"))
+}
+
+fn arity_run() -> Result[Unit, ForeignError] !Gpu = {
+  let a = alloc(F64, 4)?
+  launch("vadd_scaled", 1, [erase(buffer(a)), erase(scalar(1.0))])
+}
+
+fn echo_kernels() -> Map[String, (Int, WideRefFn)] =
+  map.from([("k", (1, last_out_with((_dts, _ins, ss) => ss)))])
+
+fn echo_run() -> Result[List[Float], ForeignError] !Gpu = {
+  let t = alloc(F64, 3)?
+  launch("k", 1, [erase(scalar(i32.wrap(0 - 2))), erase(buffer(t)), erase(scalar(narrow.f32(1.5))), erase(scalar(0 - 9))])?
+  download(t)
+}
+
+test "a scalar does not count toward a reference's buffers, and arrives decoded" {
+  # the arity is the number of buffers: three here, and one buffer with a scalar beside it is one
+  assert kind_of(with_gpu_fake(scaled_kernels(), arity_run)) == "gpu.bad_arity"
+  # an i32 and an f32 reach the reference as the numbers they hold
+  assert with_gpu_fake(echo_kernels(), echo_run) == Ok([0.0 - 2.0, 1.5, 0.0 - 9.0])
 }

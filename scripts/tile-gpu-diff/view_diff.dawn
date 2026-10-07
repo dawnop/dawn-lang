@@ -203,7 +203,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, gy, gz, hs) {
+          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buf(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -399,7 +399,7 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
     map.from([("view_conv2d",
       (3, last_out((dts, ins) => conv2d_ref(VC_H, VC_W, VC_K, dts, ins))))])
   } else if name == "view_padding" {
-    map.from([("view_padding", (6, (_dts, ins) => list.map(range(0, 5), k =>
+    map.from([("view_padding", (6, (_dts, ins, _ss) => list.map(range(0, 5), k =>
         (k + 1, view_padding_ref(VP_N, VP_OUT, pad_bits(k), ins[0], ins[k + 1])))))])
   } else if name == "view_pad_i32" {
     map.from([("view_pad_i32", (2, last_out((_dts, ins) =>

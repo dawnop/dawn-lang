@@ -17,9 +17,10 @@
 use std/list
 use std/map
 use std/str
-use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, EntryArg, Entry1,
+use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, buffer, arg_scalar, last_out_with, EntryArg, Entry1,
   Entry2, Entry3, Entry4, Entry5, entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out,
   arg_shared, entry_grid }
+use std/gpu
 use std/dtype.{F64, I64, Dtype, dtype_name}
 use std/int/i32.{I32}
 use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
@@ -1493,16 +1494,21 @@ pub fn cells(extent: List[Int], tile: List[Int], pad: Padding = PadZero,
 ##   launch grid; it may be read (an in-place kernel reads its cell first).
 ## - `Shared` is read and written in ways no cell describes: atomics,
 ##   scatters, a stencil's neighbours.
+## - `Scalar` is no buffer: the launch passes a value (`std/gpu`'s `scalar`),
+##   the entry parameter is a rank-0 `tile<dtype>` and the body reads it with
+##   `scalar(p)`. It is `i32`, `i64`, `f32` or `f64`, and it has no cells.
 pub type Arg[D] =
   | In(d: Dtype[D], g: Cells)
   | Out(d: Dtype[D], g: Cells)
   | Shared(d: Dtype[D])
+  | Scalar(d: Dtype[D])
 
 # What the recording holds a parameter to: its role without its format.
 type Access =
   | Reading
   | Owning
   | Sharing
+  | Passing
 
 # The aim of a pointer tile or view that addresses no parameter: a global's
 # or an alloca's memory.
@@ -1520,6 +1526,7 @@ fn marker[D](a: Arg[D]) -> Dtype[D] = match a {
   In(d, _g) -> d
   Out(d, _g) -> d
   Shared(d) -> d
+  Scalar(d) -> d
 }
 
 ## A parameter's marker with its format erased, so markers of several
@@ -1536,12 +1543,18 @@ fn sig_of[D](a: Arg[D]) -> Sig = match a {
   In(d, g) -> Sig { dtype: dtype_name(d), access: Reading, g: g }
   Out(d, g) -> Sig { dtype: dtype_name(d), access: Owning, g: g }
   Shared(d) -> Sig { dtype: dtype_name(d), access: Sharing, g: Whole }
+  Scalar(d) -> Sig { dtype: dtype_name(d), access: Passing, g: Whole }
 }
+
+# How a marker's parameter is passed: a `Scalar` by value, every other role
+# through a pointer.
+fn kparam_of(s: Sig) -> KParam = if s.access == Passing { ByValue(s.dtype) } else { ByPtr(s.dtype) }
 
 fn access_word(a: Access) -> String = match a {
   Reading -> "In"
   Owning -> "Out"
   Sharing -> "Shared"
+  Passing -> "Scalar"
 }
 
 # The checks only Tile IR makes of one parameter's cells: each tile
@@ -1596,6 +1609,7 @@ fn entry_arg(s: Sig) -> EntryArg = match (s.access, s.g) {
     arg_out(e, t)
   }
   (Sharing, _g) -> arg_shared()
+  (Passing, _g) -> arg_scalar()
 }
 
 # An Out's cut as std/gpu's `arg_out` takes it, whose dimension k is grid
@@ -1635,7 +1649,7 @@ fn entry_args(name: String, sigs: List[Sig]) -> List[EntryArg] = {
 }
 
 fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: Hints) -> TileProg = {
-  let (prog, _calls) = record_calls(name, list.map(sigs, s => ByPtr(s.dtype)), list.map(sigs, s => s.access),
+  let (prog, _calls) = record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access),
     list.map(sigs, s => s.g), body, hints)
   prog
 }
@@ -2078,6 +2092,8 @@ fn cells_of(name: String, frames: List[Frame], ops: List[TileOp], geoms: List[Ce
       Whole ->
         if roles[param] == Sharing {
           refuse_at(name, frames, ops, op, "parameter ${param} is a Shared, which has no cells")
+        } else if roles[param] == Passing {
+          refuse_at(name, frames, ops, op, "parameter ${param} is a Scalar, passed by value, which has no cells")
         } else {
           refuse_at(name, frames, ops, op, "parameter ${param} is an ${access_word(roles[param])} of the whole tensor, which has no cells")
         }
@@ -2353,7 +2369,7 @@ pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, 
       sg
     })
     let _args = entry_args(name, sigs)
-    record_calls(name, list.map(sigs, s => ByPtr(s.dtype)), list.map(sigs, s => s.access), list.map(sigs, s => s.g),
+    record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access), list.map(sigs, s => s.g),
       body, hints)
   }
 
@@ -6239,11 +6255,11 @@ fn run_entry(e: Entry3[Float, Float, Float], n: List[Int], swap: Int,
   upload(a, list.map(range(0, n[0]), i => to_float(i)))?
   upload(b, list.map(range(0, n[1]), i => to_float(2 * i)))?
   if swap == 1 {
-    launch_entry3(e, a, a, o, grid: grid)?
+    launch_entry3(e, buffer(a), buffer(a), buffer(o), grid: grid)?
   } else if swap == 2 {
-    launch_entry3(e, a, b, a, grid: grid)?
+    launch_entry3(e, buffer(a), buffer(b), buffer(a), grid: grid)?
   } else {
-    launch_entry3(e, a, b, o, grid: grid)?
+    launch_entry3(e, buffer(a), buffer(b), buffer(o), grid: grid)?
   }
   download(o)
 }
@@ -6661,4 +6677,42 @@ test "K4.1: a by-value parameter of any format but i32, i64, f32 and f64 is refu
   # the narrower formats still go by pointer
   let ptr = refusal_in([ByPtr("f16"), ByPtr("i8")], () => ())
   assert ptr == "accepted"
+}
+
+fn scale_ref(_dts: List[String], ins: List[List[Float]], ss: List[Float]) -> List[Float] =
+  list.map(ins[0], x => x * ss[0])
+
+fn scale_by64(x: Param[Float], s: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 8)
+  store(out, base, mul(load(x, base, [8]), scalar(s)))
+}
+
+fn run_scale(scale: Float) -> Result[List[Float], ForeignError] !Gpu = {
+  let (_p, e) = trace3("scale_by", In(F64, Whole), Scalar(F64), Shared(F64), scale_by64)
+  let x = alloc(F64, 8)?
+  let o = alloc(F64, 8)?
+  upload(x, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])?
+  launch_entry3(e, buffer(x), gpu.scalar(scale), buffer(o), grid: [1])?
+  download(o)
+}
+
+test "K4.2: a Scalar marker records a by-value parameter, and its entry takes a scalar where the kernel does" {
+  let (p, _e) = trace3("scale_by", In(F32, Whole), Scalar(F32), Shared(F32), scale_by)
+  assert p.params == [ByPtr("f32"), ByValue("f32"), ByPtr("f32")]
+  # the markers put nothing into the program: it is the one trace_kernel records
+  assert p == trace_scale_by()
+  # one entry, two scales, two answers, on the fake device
+  let table = map.from([("scale_by", (2, last_out_with(scale_ref)))])
+  assert with_gpu_fake(table, () => run_scale(2.0)) == Ok([2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0])
+  assert with_gpu_fake(table, () => run_scale(0.5)) == Ok([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
+}
+
+test "K4.2: a Scalar has no cells, is never loaded, and only the four scalar formats are accepted" {
+  let g = cells([8], [8])
+  let cellless = marked(() => trace2("c", Scalar(F32), Out(F32, g), (s, o) => store_cell(o, load_cell(s))))
+  assert str.contains(cellless, "parameter 0 is a Scalar, passed by value, which has no cells")
+  let loaded = marked(() => trace2("c", Scalar(F32), Out(F32, g), (s, o) => store(o, idx_const(0), load(s, idx_const(0), [8]))))
+  assert str.contains(loaded, "parameter 0 is a f32 passed by value, and a load reads memory through a pointer")
+  let small = marked(() => trace2("c", Scalar(F16), Out(F16, g), (_s, o) => store_cell(o, zeros(o))))
+  assert str.starts_with(small, "tileir: kernel `c`: parameter 0 is passed by value as f16; a scalar parameter is i32, i64, f32 or f64")
 }

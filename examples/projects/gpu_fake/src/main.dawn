@@ -33,7 +33,7 @@
 
 use std/gpu
 use std/gpu.{Gpu, WideRefFn, last_out, with_gpu_fake, reference_kernels, alloc, upload, download, launch, free,
-  sync, handle_of, vadd_ref }
+  sync, vadd_ref, buffer, erase }
 use std/dtype.{F64}
 use std/narrow.{F32, F8E4M3FN}
 use std/int/i32.{I32}
@@ -279,7 +279,7 @@ fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !G
   let out = alloc(F64, n)?
   upload(a, xs)?
   upload(b, ys)?
-  launch("vadd", blocks(n), [handle_of(a), handle_of(b), handle_of(out)])?
+  launch("vadd", blocks(n), [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
   sync()?
   let got = download(out)?
   free(a)?
@@ -312,7 +312,7 @@ fn alloc_upload(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
 ## pure and takes them with it.
 fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], ForeignError] !Gpu = {
   let hs = alloc_upload(bufs)?
-  launch(name, grid, hs)?
+  launch(name, grid, list.map(hs, h => gpu.Buf(h)))?
   sync()?
   let got = gpu.gpu_download(hs[len(hs) - 1])?
   for h in hs {
