@@ -1,0 +1,106 @@
+# The programs the view contract runs under AddressSanitizer and LeakSanitizer.
+# Each function is one shape of a borrowed view (selfhost/src/c/views.dawn):
+#
+#   sum         children read out of a borrowed parameter and only read
+#   spine       a view that is returned, so it must be copied on the way out
+#   left_depth  a variable that is only ever given views, walking down a tree
+#   read_wrap   the same projection of an OWNED parameter, which must stay a
+#               counted copy: `wrap(p)` takes p away and frees it before the
+#               children are read again, so a view of p would read freed memory
+#   the list loops  std/pvec.leaf_for and the element reads behind `xs[i]`,
+#               `get` and `for x in xs`, which are where a view and an
+#               element read meet
+use std/str
+
+type T =
+  | Leaf
+  | Node(l: T, v: Int, r: T)
+
+fn build(lo: Int, hi: Int) -> T =
+  if lo >= hi {
+    Leaf
+  } else {
+    let m = (lo + hi) / 2
+    Node(build(lo, m), m, build(m + 1, hi))
+  }
+
+fn sum(t: T) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, v, r) -> sum(l) + v + sum(r)
+  }
+
+fn spine(t: T) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, _, _) -> l
+  }
+
+fn left_depth(t: T) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, _, _) -> {
+      var cur = l
+      var n = 1
+      var go = true
+      while go {
+        match cur {
+          Leaf -> { go = false }
+          Node(l2, _, _) -> {
+            cur = l2
+            n = n + 1
+          }
+        }
+      }
+      n
+    }
+  }
+
+fn wrap(t: T) -> T = Node(t, 0, Leaf)
+
+fn read_wrap(p: T) -> Int =
+  match p {
+    Leaf -> 0
+    Node(l, v, r) -> {
+      let w = wrap(p)
+      v + sum(l) + sum(r)
+    }
+  }
+
+fn lengths(names: List[String]) -> Int = {
+  var total = 0
+  var i = 0
+  while i < len(names) {
+    total = total + str.len(names[i])
+    i = i + 1
+  }
+  for s in names { total = total + str.len(s) }
+  match names.get(7) {
+    Some(s) -> total + str.len(s)
+    None -> total
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let t = build(0, 100)
+  println("sum " ++ to_string(sum(t)))
+  println("spine " ++ to_string(sum(spine(build(0, 50)))))
+  println("depth " ++ to_string(left_depth(build(0, 300))))
+  println("wrap " ++ to_string(read_wrap(build(0, 64))))
+  let names = map(range(0, 3000), i => "n" ++ to_string(i))
+  println("lengths " ++ to_string(lengths(names)))
+  var xs: List[Int] = []
+  var i = 0
+  while i < 5000 {
+    xs = xs ++ [i]
+    i = i + 1
+  }
+  var acc = 0
+  var j = 0
+  while j < len(xs) {
+    acc = acc + xs[j]
+    j = j + 1
+  }
+  for x in xs { acc = acc + x }
+  println("list " ++ to_string(acc))
+}

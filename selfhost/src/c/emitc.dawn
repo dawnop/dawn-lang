@@ -33,6 +33,7 @@ use check/types.{
   ev_pack_adt, EV_MISS_MSG
 }
 use ir/reach
+use c/views
 use ir/coresites
 use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use embed/unicode_case
@@ -52,6 +53,7 @@ use ir/core.{
   CBinOp,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
+  CBorrowed,
   cex_ty, ty_key
 }
 
@@ -128,6 +130,11 @@ pub type CSt = {
   # emit_expr's `k`.
   slots: Map[Int, Int],
   nslots: Int,
+  # The current function's views (c/views): bindings that read a value a
+  # borrowed parameter keeps alive and own nothing. They get no own-slot --
+  # the unwinder would release a reference they never took -- and stay plain
+  # C locals, like the scalars and the borrowed parameters they read from.
+  views: Set[Int],
   # The call-site half of the parameter-mode contract (core.CMode), the same
   # table `rc.rc_module` rewrote with: which of a named callee's argument
   # positions are borrowed, and so read (k=false) rather than consumed. The
@@ -1323,6 +1330,7 @@ fn bin_test_st() -> CSt =
     cmap: map.empty(),
     slots: map.empty(),
     nslots: 0,
+    views: set.empty(),
     modes: map.empty(),
     mapping: false,
     pend: [],
@@ -1352,6 +1360,27 @@ test "a strict binary operator emits each operand once, in written order" {
     assert str.contains(v, "t0")
     assert str.contains(v, "t1")
   }
+}
+
+test "a view is a plain C local, not a slot of the frame's cleanup array" {
+  # `fn f(p: borrowed) = { let y = p.field; ...y... }` after the rewrite: the
+  # binding owns nothing, so a slot would have the frame release a reference
+  # it never took
+  let node = TyList(TyInt)
+  let proj = CField(CLocal(1, node), 7, 1, 0, node)
+  let body = CBlock(
+    [CSLet(2, node, proj)],
+    Some(CField(CLocal(2, node), 7, 1, 1, TyInt)),
+    TyInt
+  )
+  let f = CFun {
+    name: "f", owner: "t", captures: [],
+    params: [CParam { sym: 1, ty: node, mode: CBorrowed }], dicts: [], evs: [],
+    ret: TyInt, body: body, is_test: false, impl_of: None, default_of: None, origin: ""
+  }
+  let text = join(emit_fn(bin_test_st(), f).out, "")
+  assert not str.contains(text, "dawn_own")
+  assert str.contains(text, "v2 =")
 }
 
 test "a left-nested arithmetic chain emits its leaves once each" {
@@ -1850,8 +1879,7 @@ test "every list primitive is the std/pvec call reach's table names" {
   }
 }
 
-## The primitives that hand back something they do not own: an element still
-## inside its container, or an argument passed straight through.
+## The primitives that hand back an argument passed straight through.
 ##
 ## Every other primitive allocates what it returns, and the arguments it was
 ## given stay the caller's (dawn_rt.h's calling convention). Core has one rule
@@ -1859,8 +1887,13 @@ test "every list primitive is the std/pvec call reach's table names" {
 ## and these are where that rule would otherwise release someone else's value.
 ## The reference is taken here rather than inside the runtime function because
 ## the runtime calls these itself, where borrowing is what it wants.
+##
+## `array_get` used to be the first of them: an element still inside its
+## array. It is a projection like a field read, so `rc` takes the reference
+## (a `CDup` where the value is consumed) and a view's binding can go without
+## one.
 fn returns_borrow(n: String) -> Bool =
-  n == "array_get" || n == "expect" || n == "unwrap_or" || n == "cast"
+  n == "expect" || n == "unwrap_or" || n == "cast"
 
 ## A primitive its runtime module owns, as the C symbol that implements it.
 ##
@@ -2232,7 +2265,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       # a static outside the ledger, and dropping one would read a header it
       # does not have. One slot per symbol: lowering may bind one symbol in
       # each arm of a branch, and both arms mean the same slot.
-      let own = is_ref_ty(ty) && not emit_dictish(init)
+      let own = is_ref_ty(ty) && not emit_dictish(init) && not set.has(st.views, sym)
       if own {
         let (st1b, idx) = match map.get(st1.slots, sym) {
           Some(i) -> (st1, i)
@@ -2466,7 +2499,11 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # needs is only known afterwards, and the array that holds them has to
   # precede every statement and every label -- Core's loops land on `goto`
   # labels, and jumping past a cleanup variable's initializer is undefined.
-  let st1 = CSt { ..st, tmp: 0, slots: slots, nslots: n, out: [], ind: 1, pend: [], rows: [] }
+  let st1 = CSt {
+    ..st,
+    tmp: 0, slots: slots, nslots: n, views: views.view_syms(st.dict_syms, f),
+    out: [], ind: 1, pend: [], rows: []
+  }
   let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
     if peel_opaque(f.ret) == TyUnit {
@@ -2505,6 +2542,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     ind: st.ind,
     slots: map.empty(),
     nslots: 0,
+    views: set.empty(),
     pend: [],
     rows: if st3.mapping { st.rows ++ placed_rows(st3, f, len(st.out) + len(head)) } else { st.rows }
   }
@@ -2705,6 +2743,7 @@ fn emit_units(
     cmap: map.empty(),
     slots: map.empty(),
     nslots: 0,
+    views: set.empty(),
     modes: modes,
     mapping: mapping,
     pend: [],

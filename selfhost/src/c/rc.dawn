@@ -47,6 +47,7 @@ use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, T
 use std/list
 use std/map
 use ir/reach.{LIST_MOD, LIST_FROM_ARRAY}
+use c/views
 use std/set
 
 # ---- state ----
@@ -87,6 +88,12 @@ type RSt = {
   # balanced locally -- rc_check watches it -- so it is not a consuming use
   # of the parameter, just its spelling under hoisting.
   borrowed_syms: Set[Int],
+  # The let-bound locals that are views (c/views): no count of their own, read
+  # out of a borrowed parameter. A binding or assignment of one is rewritten
+  # as a read, and a consuming use of one is a dup, like a borrowed
+  # parameter's -- but a view reaches a consuming position legitimately, so
+  # there is no panic.
+  views: Set[Int],
   hoisting: Bool,
   # the name of the function being rewritten, for the panic above
   fname: String,
@@ -1610,7 +1617,9 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
           panic("rc: borrowed parameter " ++ to_string(sym) ++ " of " ++
               st.fname ++ " reached a consuming position")
         }
-        # the last consuming use takes the value; every earlier one copies
+        # the last consuming use takes the value; every earlier one copies.
+        # A view is in no scope, so `transferable` refuses it and its every
+        # consuming use copies, as a borrowed parameter's does.
         if not st.pinned && not set.has(after, sym) && transferable(st, sym, after) {
           (release(st, sym), e)
         } else {
@@ -1713,7 +1722,13 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     # except the argument positions the reuse analysis flipped to owned.
     CIntrinsic(name, args, ity, site) -> {
       let (st1, lets, args1, temps) = intr_args(st, args, intr_owned_args(name), after)
-      wrap(st1, lets, CIntrinsic(name, args1, ity, site), ity, temps)
+      let call = CIntrinsic(name, args1, ity, site)
+      # An element read hands back the element still inside its array, which
+      # the emitter used to dup unconditionally. It is a projection like a
+      # field read, so the copy is made here, where a use that only reads (a
+      # view's binding) can go without it.
+      let node = if consume && name == "array_get" && is_ref_ty(ity) { CDup(call, ity) } else { call }
+      wrap(st1, lets, node, ity, temps)
     }
 
     CCtor(adt, ci, args, cty) -> {
@@ -2034,14 +2049,20 @@ fn rw_stmts(st: RSt, stmts0: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) 
 
 fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
   match s {
-    CSLet(sym, ty, init) -> {
-      let (st1, i1) = rw(st, init, true, after)
-      # a literal-initialised binding is tracked like any other -- its scope
-      # drop is a no-op on the static header, and one rule beats two; only a
-      # dictionary stays out (no header to speak to)
-      let st2 = if is_ref_ty(ty) && not dictish(st, init) { bind(st1, sym) } else { st1 }
-      (st2, [CSLet(sym, ty, i1)])
-    }
+    # A view owns nothing: its value is read, never copied, and it never
+    # enters the ledger. Anything else is tracked like any other binding --
+    # a literal-initialised one too, since its scope drop is a no-op on the
+    # static header and one rule beats two; only a dictionary stays out (no
+    # header to speak to).
+    CSLet(sym, ty, init) ->
+      if set.has(st.views, sym) {
+        let (st1, i1) = rw(st, init, false, after)
+        (st1, [CSLet(sym, ty, i1)])
+      } else {
+        let (st1, i1) = rw(st, init, true, after)
+        let st2 = if is_ref_ty(ty) && not dictish(st, init) { bind(st1, sym) } else { st1 }
+        (st2, [CSLet(sym, ty, i1)])
+      },
 
     # The new value is computed first: `s = s ++ "x"` reads the old one, and
     # the old one is released only once the new value holds its own
@@ -2057,6 +2078,12 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
     # conservative form.
     CSAssign(sym, value) -> {
       let ty = cex_ty(value)
+      # a view is overwritten by another read: there is no old reference to
+      # release and no new one to hold
+      if set.has(st.views, sym) {
+        let (st1, v1) = rw(st, value, false, after)
+        return (st1, [CSAssign(sym, v1)])
+      }
       # the shortcut is for scalars and dictionaries only: an immortal
       # literal on the right still overwrites an old value that may be the
       # last counted reference, so it takes the dropping path below
@@ -2215,6 +2242,7 @@ fn rc_fn(
   }
   var st = RSt {
     scopes: [], dict_syms: dicts, modes: modes, borrowed_syms: bsyms,
+    views: views.view_syms(dicts, f),
     hoisting: false, fname: f.owner ++ "." ++ f.name, next_sym: next_sym, pinned: false
   }
   st = push(st, -1, true)
@@ -2338,7 +2366,10 @@ type Chk = {
   # the same call-site table the rewrite classified with: a borrowed
   # argument position is a read, not a transfer, and the walk must not
   # count it as a release
-  modes: Map[(String, String), List[CMode]]
+  modes: Map[(String, String), List[CMode]],
+  # the function's views (c/views): bindings that own nothing, so the walk
+  # expects no release of them
+  views: Set[Int]
 }
 
 fn chk_err(c: Chk, msg: String) -> Chk = Chk { ..c, errs: c.errs ++ [msg] }
@@ -2519,7 +2550,8 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
   match s {
     CSLet(sym, ty, init) -> {
       let c1 = chk_expr(c, init, true)
-      if is_ref_ty(ty) && not chk_dictish(init) && not set.has(c1.live, sym) {
+      if is_ref_ty(ty) && not chk_dictish(init) && not set.has(c1.live, sym) &&
+        not set.has(c.views, sym) {
         Chk { ..c1, live: set.insert(c1.live, sym) }
       } else {
         c1
@@ -2527,7 +2559,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
     }
     CSAssign(sym, value) -> {
       let c1 = chk_expr(c, value, true)
-      if is_ref_ty(cex_ty(value)) && not chk_dictish(value) {
+      if is_ref_ty(cex_ty(value)) && not chk_dictish(value) && not set.has(c.views, sym) {
         Chk { ..c1, live: set.insert(c1.live, sym) }
       } else {
         c1
@@ -2607,7 +2639,11 @@ pub fn rc_check(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[S
         live = set.insert(live, p.sym)
       }
     }
-    let c = chk_expr(Chk { live: live, gone: false, errs: [], modes: modes }, f.body, true)
+    let c = chk_expr(
+      Chk { live: live, gone: false, errs: [], modes: modes, views: views.view_syms(base, f) },
+      f.body,
+      true
+    )
     var here = c.errs
     if not c.gone && set.len(c.live) > 0 {
       here = here ++ ["a body left " ++ to_string(set.len(c.live)) ++ " binding(s) held"]
@@ -3086,7 +3122,7 @@ test "a reassigned record is not lifted ahead of the assignment" {
   )
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
-    borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
+    borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
     next_sym: 100, pinned: false
   }
   let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(tail))
@@ -3110,7 +3146,7 @@ test "a constructor written out whole is not taken for an update" {
   ], rec)
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
-    borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
+    borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
     next_sym: 100, pinned: false
   }
   let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
@@ -3134,7 +3170,7 @@ test "an update nested in a written field keeps its node until its own block" {
   ], rec)
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
-    borrowed_syms: set.empty(), hoisting: false, fname: "m.f",
+    borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
     next_sym: 100, pinned: false
   }
   let (_st1, ss1, tail1) = schedule_record_update(st, [CSLet(2, rec, CLocal(1, rec))], Some(outer))
@@ -3358,7 +3394,7 @@ test "an owned operand ahead of a leaving one is named, and only then" {
   assert len(rc_check(m, owned_modes())) == 0
   let st0 = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(), borrowed_syms: set.empty(),
-    hoisting: false, fname: "m.f", next_sym: 100, pinned: false
+    views: set.empty(), hoisting: false, fname: "m.f", next_sym: 100, pinned: false
   }
   assert held_before_exit(st0, [fresh_list, cont], [0, 1])
   # the same row with the jump inside a loop of its own leaves nothing, and
@@ -3484,5 +3520,128 @@ test "a fused self tail call hands its parameter over with no dup" {
         _ -> panic("expected the value named first")
       }
     _ -> panic("expected a block")
+  }
+}
+
+# ---- views ----
+
+fn t_borrowed(sym: Int, ty: Ty) -> CParam = CParam { sym: sym, ty: ty, mode: CBorrowed }
+
+fn t_row1(name: String) -> Map[(String, String), List[CMode]] =
+  map.insert(owned_modes(), ("m", name), [CBorrowed])
+
+## `fn f(p: borrowed T) = <stmts>; tail` under the table its own row makes
+## consistent, rewritten and checked.
+fn t_view_fn(stmts: List[CStmt], tail: CExpr, ret: Ty) -> (CModule, Map[(String, String), List[CMode]]) = {
+  let node = TyList(TyInt)
+  let modes = t_row1("f")
+  let m = one_fn([t_borrowed(1, node)], ret, CBlock(stmts, Some(tail), ret))
+  (rc_module(m, modes), modes)
+}
+
+fn t_child(sym: Int) -> CExpr = CField(CLocal(sym, TyList(TyInt)), 7, 1, 0, TyList(TyInt))
+
+fn t_len(e: CExpr) -> CExpr = CIntrinsic("list_len", [e], TyInt, CNoSite)
+
+fn t_stmts(m: CModule) -> List[CStmt] =
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> ss
+    _ -> panic("expected a block")
+  }
+
+fn t_has_drop(ss: List[CStmt]) -> Bool = {
+  for s in ss {
+    match s {
+      CSDrop(_) -> { return true }
+      _ -> ()
+    }
+  }
+  false
+}
+
+test "a child read out of a borrowed parameter is a view: no dup, no drop" {
+  let node = TyList(TyInt)
+  let (m, modes) = t_view_fn([CSLet(2, node, t_child(1))], t_len(CLocal(2, node)), TyInt)
+  assert len(rc_check(m, modes)) == 0
+  let ss = t_stmts(m)
+  assert not t_has_drop(ss)
+  match ss[0] {
+    CSLet(_, _, CField(_, _, _, _, _)) -> ()
+    _ -> panic("expected the projection bare: a view binds with no dup")
+  }
+}
+
+test "a view that reaches an owned position is dup'ed there" {
+  let node = TyList(TyInt)
+  let (m, modes) = t_view_fn([CSLet(2, node, t_child(1))], CLocal(2, node), node)
+  assert len(rc_check(m, modes)) == 0
+  match m.fns[0].body {
+    CBlock(_, Some(CDup(CLocal(s, _), _)), _) -> { assert s == 2 }
+    _ -> panic("expected the returned view to be copied")
+  }
+}
+
+test "a variable only ever given views is a view, assignments included" {
+  let node = TyList(TyInt)
+  let (m, modes) = t_view_fn(
+    [CSLet(2, node, t_child(1)), CSAssign(2, t_child(2))],
+    t_len(CLocal(2, node)),
+    TyInt
+  )
+  assert len(rc_check(m, modes)) == 0
+  let ss = t_stmts(m)
+  assert not t_has_drop(ss)
+  match ss[1] {
+    CSAssign(_, CField(_, _, _, _, _)) -> ()
+    _ -> panic("expected the assigned projection bare")
+  }
+}
+
+test "one value that is not a view makes the whole variable counted" {
+  let node = TyList(TyInt)
+  let fresh_node = CCall(CDirect("m", "mk"), [], node, CNoSite)
+  let (m, modes) = t_view_fn(
+    [CSLet(2, node, t_child(1)), CSAssign(2, fresh_node)],
+    t_len(CLocal(2, node)),
+    TyInt
+  )
+  assert len(rc_check(m, modes)) == 0
+  let ss = t_stmts(m)
+  assert t_has_drop(ss)
+  match ss[0] {
+    CSLet(_, _, CDup(_, _)) -> ()
+    _ -> panic("expected the projection copied: the variable owns what it holds")
+  }
+}
+
+test "an owned parameter has no views: its projections are copied as before" {
+  let node = TyList(TyInt)
+  let p = CParam { sym: 1, ty: node, mode: COwned }
+  let body = CBlock([CSLet(2, node, t_child(1))], Some(t_len(CLocal(2, node))), TyInt)
+  let m = rc_module(one_fn([p], TyInt, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  match t_stmts(m)[0] {
+    CSLet(_, _, CDup(_, _)) -> ()
+    _ -> panic("expected a counted projection of an owned parameter")
+  }
+}
+
+test "an element read is copied where it is kept and bare where it is a view" {
+  let node = TyList(TyInt)
+  let elem = CIntrinsic("array_get", [t_child(1), CInt(0)], node, CNoSite)
+  # kept: returned
+  let (kept, km) = t_view_fn([], elem, node)
+  assert len(rc_check(kept, km)) == 0
+  match kept.fns[0].body {
+    CBlock(_, Some(CDup(CIntrinsic(_, _, _, _), _)), _) -> ()
+    _ -> panic("expected the returned element copied")
+  }
+  # viewed: bound and only read
+  let (viewed, vm) = t_view_fn([CSLet(2, node, elem)], t_len(CLocal(2, node)), TyInt)
+  assert len(rc_check(viewed, vm)) == 0
+  assert not t_has_drop(t_stmts(viewed))
+  match t_stmts(viewed)[0] {
+    CSLet(_, _, CIntrinsic(_, _, _, _)) -> ()
+    _ -> panic("expected the element bound bare")
   }
 }

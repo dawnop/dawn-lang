@@ -352,7 +352,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 18556s (the most this file's `3x` claims may add up to)
+# push-total: 18596s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2216,6 +2216,9 @@ jobs:
     # map reuse 48 + tea reconciler 105 + atomic write 98 + RC 24 + ctl-live
     # 12 + RC mode 64 + source loop label 46 + range bound order 31 +
     # display layering 37 = 465s, plus 50s fixed overhead = 515s.
+    # 2026-10-07: the RC view contract adds a planning 40s (31s measured on
+    # four cores, 2026-10-07), so the claim goes from 550s to 590s and the
+    # timeout to 3x that.
     # 2026-09-24, restated: 488s worst (run 35860976205) over its 4 successful
     # main runs of 09-23 (gate-observations --since 2026-09-23T00:00:00Z).
     # 2026-09-25, restated: 497s worst (run 36121790909) over the
@@ -2231,8 +2234,8 @@ jobs:
     # 09-27T18:00Z whose steps digest is this job's, the worst 497s
     # (run 36121790909). Restated to that plus a tenth, rounded up to 5s,
     # 550s (490s before), and the timeout to 3x that.
-    # budget: 3x 550s worst observed plus a tenth (run 36121790909)
-    timeout-minutes: 28
+    # budget: 3x 590s planning value (550s worst observed plus a tenth, run 36121790909, and the view contract's 40s)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2312,6 +2315,18 @@ jobs:
       # read that file before touching them.
       - name: RC parameter-mode mutants
         run: ./scripts/rc-mode-contract/run.sh
+
+      # The borrowed views (selfhost/src/c/views.dawn): a local with no count of
+      # its own, read out of a borrowed parameter. The saving is a dup and a drop
+      # per projected child, and the risk is a view that outlives what it reads
+      # or one that is released though it took nothing. The probe runs under
+      # AddressSanitizer and LeakSanitizer, three functions' emitted C is held
+      # to carry no counting, and one private compiler per mutation takes away
+      # one of the things that keep a view safe, each of which has to turn the
+      # contract red. Measured 2026-10-07: 31s on four cores, six private
+      # compilers built side by side.
+      - name: RC view contract
+        run: ./scripts/rc-view-contract/run.sh
 
       # RC's match-only unloop rewrite must not erase a source loop that still
       # owns a named break or continue target. The compiling mutant restores

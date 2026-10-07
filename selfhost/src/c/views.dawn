@@ -1,0 +1,271 @@
+# Borrowed views: locals that read a value someone else keeps alive.
+#
+# `let l = t.left` copies a reference out of `t`, and the counting rewrite
+# pays for the copy: a dup at the binding, a drop at the end of the scope. For
+# a reader that never keeps the value that pair is pure overhead -- it is
+# what made `fn sum(t: T) = match t { Node(l, v, r) -> sum(l) + v + sum(r) }`
+# cost two dups and two drops per node even once `t` itself was borrowed
+# (docs/perceus-reuse-design.md 2.5), and what made `std/pvec.leaf_for` pay
+# three per level of the trie.
+#
+# A *view* is a local with no count of its own. Every value it can hold is
+# read out of something that outlives the function body:
+#
+#   * a borrowed parameter -- the caller holds it for the whole call
+#     (`core.CMode`); or
+#   * a field, tuple member, boxed or unboxed reference or array element of
+#     such a value; or
+#   * another view.
+#
+# Values are immutable and a unique reference is the only licence to change
+# one in place, so nothing reachable from a borrowed parameter can be freed or
+# overwritten while the body runs: the body cannot make a unique reference to
+# it without a dup, and a dup is exactly what makes it shared. That is the
+# frame-limited argument the borrowed parameters already stand on, one step
+# further down the structure.
+#
+# A view that flows into a position that keeps its value (a constructor field,
+# a return, an owned argument) is dup'ed there, like a borrowed parameter in
+# the same place. So making a binding a view never changes how many references
+# the program ends up holding. It removes the pair at the binding and
+# moves any dup to the consuming use, where an owned binding would have
+# transferred -- the same count, with one fewer when the value is only read.
+#
+# ## Scope of this version
+#
+# Roots are borrowed parameters only. A view of an owned local would hold the
+# local alive for as long as the view is read, and that is the one thing
+# Perceus reuse cannot afford: a `reset` wants the matched node to die as soon
+# as it is last used, so that the fields it shares drop to a count of one
+# (docs/perceus-reuse-design.md 4.3). The criterion for when an owned root may
+# be viewed belongs to the knife that adds `reset`, so it is not guessed at
+# here.
+#
+# ## One definition, three readers
+#
+# The set is a function of a function body and nothing else, and it is the
+# same function before and after counting: a counted binding's initialiser is
+# a dup or a call, never a bare projection of a borrowed value, so the
+# analysis reads the rewritten body and finds the views it found in the
+# original. `rc` rewrites a view's binding as a read, `rc_check` expects it to
+# own nothing, and the emitter keeps it out of the frame's own-slot array
+# (which would release it on unwind). Three readers of one answer, recomputed
+# rather than carried, so no side table can drift from the code it describes.
+#
+# ## The greatest fixpoint
+#
+# A view may be assigned from itself or from another view (`node = child`),
+# so the question "is every value this variable is ever given a view?" is
+# circular. It is answered the usual way for a property that must hold of
+# every definition: start by assuming every candidate is a view and strike
+# the ones with a definition that is not, until nothing changes.
+
+use ir/core.{
+  CNoSite, CFun, CParam, CExpr, CStmt, CLocal, CField, CTupleGet, CBox, CUnbox, CIntrinsic,
+  CBlock, CIf, CCall, CDirect, CSLet, CSAssign, CBool, CInt, COwned, CBorrowed, mode_owned, cex_ty
+}
+use check/types.{Ty, TyInt, TyList, TyNever, is_ref_ty}
+use c/cwalk
+use std/map
+use std/set
+
+## Every binding site and assignment in a function.
+type Defs = {
+  # the values each let-bound reference symbol is ever given
+  defs: Map[Int, List[CExpr]],
+  # symbols some let binds at a reference type
+  bound: Set[Int],
+  # symbols assigned anywhere
+  assigned: Set[Int]
+}
+
+fn gather(d: Defs, s: CStmt) -> Defs =
+  match s {
+    CSLet(sym, ty, init) ->
+      if is_ref_ty(ty) { add_def(Defs { ..d, bound: set.insert(d.bound, sym) }, sym, init) } else { d }
+    CSAssign(sym, v) -> add_def(Defs { ..d, assigned: set.insert(d.assigned, sym) }, sym, v)
+    _ -> d
+  }
+
+fn add_def(d: Defs, sym: Int, e: CExpr) -> Defs = {
+  let prior = match map.get(d.defs, sym) {
+    Some(es) -> es
+    None -> []
+  }
+  Defs { ..d, defs: map.insert(d.defs, sym, prior ++ [e]) }
+}
+
+## Whether `e` reads a value kept alive by something in `ok`: a bare symbol of
+## the set, or a projection chain over one. A path that never delivers a value
+## (a panic, a jump) reads nothing, so it agrees with every other path.
+fn reads_kept(ok: Set[Int], e: CExpr) -> Bool =
+  if cex_ty(e) == TyNever {
+    true
+  } else {
+    match e {
+      CLocal(sym, _) -> set.has(ok, sym)
+      CField(t, _, _, _, _) -> reads_kept(ok, t)
+      CTupleGet(t, _, _) -> reads_kept(ok, t)
+      CBox(inner, from) -> is_ref_ty(from) && reads_kept(ok, inner)
+      CUnbox(inner, to) -> is_ref_ty(to) && reads_kept(ok, inner)
+      # an element still inside its array (`returns_borrow` before the rewrite
+      # took the dup over), and the placeholder a match's result variable
+      # starts as
+      CIntrinsic(name, args, _, _) ->
+        if name == "array_get" && len(args) == 2 {
+          reads_kept(ok, args[0])
+        } else {
+          name == "null_ref" && len(args) == 0
+        }
+      CBlock(_, tail, _) ->
+        match tail {
+          Some(t) -> reads_kept(ok, t)
+          None -> false
+        }
+      CIf(_, thn, els, _) ->
+        match els {
+          Some(x) -> reads_kept(ok, thn) && reads_kept(ok, x)
+          None -> false
+        }
+      _ -> false
+    }
+  }
+
+## The let-bound symbols of `f` that are views, given the module-wide
+## dictionary symbols (a dictionary is never counted and so never a root).
+pub fn view_syms(dicts: Set[Int], f: CFun) -> Set[Int] = {
+  let empty = Defs { defs: map.empty(), bound: set.empty(), assigned: set.empty() }
+  let d = cwalk.fold_expr(f.body, empty, (a: Defs, _e: CExpr) => a, gather)
+  if set.len(d.bound) == 0 { return set.empty() }
+  # the roots: borrowed reference parameters nothing reassigns
+  var ok: Set[Int] = set.empty()
+  for p in f.captures ++ f.params ++ f.evs {
+    if is_ref_ty(p.ty) && not mode_owned(p.mode) && not set.has(dicts, p.sym) &&
+      not set.has(d.assigned, p.sym) {
+      ok = set.insert(ok, p.sym)
+    }
+  }
+  var cands: Set[Int] = set.empty()
+  for sym in set.to_list(d.bound) {
+    if not set.has(dicts, sym) { cands = set.insert(cands, sym) }
+  }
+  for sym in set.to_list(cands) { ok = set.insert(ok, sym) }
+  var changed = true
+  while changed {
+    changed = false
+    for sym in set.to_list(cands) {
+      var holds = true
+      match map.get(d.defs, sym) {
+        Some(es) -> {
+          for e in es {
+            if holds && not reads_kept(ok, e) { holds = false }
+          }
+        }
+        None -> { holds = false }
+      }
+      if not holds {
+        cands = set.remove(cands, sym)
+        ok = set.remove(ok, sym)
+        changed = true
+      }
+    }
+  }
+  cands
+}
+
+# ---- tests ----
+
+fn t_fn(mode: CParam, body: CExpr) -> CFun =
+  CFun {
+    name: "f", owner: "m", captures: [], params: [mode], dicts: [], evs: [],
+    ret: TyInt, body: body, is_test: false, impl_of: None, default_of: None,
+    origin: ""
+  }
+
+fn t_node() -> Ty = TyList(TyInt)
+
+fn t_child(sym: Int) -> CExpr = CField(CLocal(sym, t_node()), 7, 1, 0, t_node())
+
+fn t_views(p: CParam, stmts: List[CStmt]) -> List[Int] = {
+  let none: Set[Int] = set.empty()
+  set.to_list(view_syms(none, t_fn(p, CBlock(stmts, Some(CInt(0)), TyInt))))
+}
+
+fn t_borrowed() -> CParam = CParam { sym: 1, ty: t_node(), mode: CBorrowed }
+
+test "a projection chain over a borrowed parameter is a view" {
+  let lt = t_node()
+  let vs = t_views(t_borrowed(), [
+    CSLet(2, lt, t_child(1)),
+    CSLet(3, lt, t_child(2))
+  ])
+  assert vs == [2, 3]
+}
+
+test "nothing is a view of an owned parameter" {
+  let lt = t_node()
+  let owned = CParam { sym: 1, ty: lt, mode: COwned }
+  assert len(t_views(owned, [CSLet(2, lt, t_child(1))])) == 0
+}
+
+test "a call result is not a view, and neither is what is built from it" {
+  let lt = t_node()
+  let fresh = CCall(CDirect("m", "mk"), [], lt, CNoSite)
+  let vs = t_views(t_borrowed(), [
+    CSLet(2, lt, fresh),
+    CSLet(3, lt, t_child(2)),
+    CSLet(4, lt, t_child(1))
+  ])
+  assert vs == [4]
+}
+
+test "a variable is a view only if every assignment is" {
+  let lt = t_node()
+  let fresh = CCall(CDirect("m", "mk"), [], lt, CNoSite)
+  let steady = t_views(t_borrowed(), [
+    CSLet(2, lt, t_child(1)),
+    CSAssign(2, t_child(2))
+  ])
+  assert steady == [2]
+  let broken = t_views(t_borrowed(), [
+    CSLet(2, lt, t_child(1)),
+    CSAssign(2, fresh)
+  ])
+  assert len(broken) == 0
+}
+
+test "two variables that only feed each other still need a root" {
+  let lt = t_node()
+  let fresh = CCall(CDirect("m", "mk"), [], lt, CNoSite)
+  # a starts from a call: the cycle a <- b <- a has no borrowed root under it
+  let vs = t_views(t_borrowed(), [
+    CSLet(2, lt, fresh),
+    CSLet(3, lt, CLocal(2, lt)),
+    CSAssign(2, CLocal(3, lt))
+  ])
+  assert len(vs) == 0
+}
+
+test "a branch and a block are views when every arm is, and a panic arm agrees" {
+  let lt = t_node()
+  let boom = CIntrinsic("panic", [], TyNever, CNoSite)
+  let arm = CIf(CBool(true), t_child(1), Some(boom), lt)
+  let blk = CBlock([], Some(t_child(1)), lt)
+  let vs = t_views(t_borrowed(), [CSLet(2, lt, arm), CSLet(3, lt, blk)])
+  assert vs == [2, 3]
+  let fresh = CCall(CDirect("m", "mk"), [], lt, CNoSite)
+  let mixed = CIf(CBool(true), t_child(1), Some(fresh), lt)
+  assert len(t_views(t_borrowed(), [CSLet(2, lt, mixed)])) == 0
+}
+
+test "an element of a viewed array is a view" {
+  let lt = t_node()
+  let elem = CIntrinsic("array_get", [t_child(1), CInt(0)], lt, CNoSite)
+  assert t_views(t_borrowed(), [CSLet(2, lt, elem)]) == [2]
+}
+
+test "a parameter the body assigns is no root" {
+  let lt = t_node()
+  let fresh = CCall(CDirect("m", "mk"), [], lt, CNoSite)
+  assert len(t_views(t_borrowed(), [CSAssign(1, fresh), CSLet(2, lt, t_child(1))])) == 0
+}
