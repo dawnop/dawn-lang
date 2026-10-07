@@ -280,6 +280,23 @@ def table_from_maps(src, module, first, last, c, j):
     return tree(rows)
 
 
+def spelled(name, text):
+    """Whether the source text at a call's name span is how that call is spelled:
+    the callee's own name, an operator for the arithmetic calls (`a + b` is
+    `add`, `addi`, `idx_add`...), or, for the three calls a `var` makes (`carry`
+    where a loop opens it, `get` where it is read, `set` where it is assigned),
+    the variable's name or the loop's `for`. The same rule as gen/gpumap.dawn."""
+    if text == name:
+        return True
+    if name in ("carry", "get", "set"):
+        return text != ""
+    for stem, op in (("add", "+"), ("idx_add", "+"), ("sub", "-"), ("idx_sub", "-"), ("mul", "*"),
+                     ("idx_mul", "*"), ("div", "/"), ("idx_div", "/"), ("idx_rem", "%"), ("neg", "-")):
+        if name.startswith(stem):
+            return text == op
+    return False
+
+
 def check_table(src, table, first, last):
     by_id = {c["id"]: c for c in table}
     for c in table:
@@ -287,7 +304,7 @@ def check_table(src, table, first, last):
         l1, _ = src.at(c["hi"])
         if not (first <= l0 and l1 <= last):
             fail(f"call {c['id']} (`{c['name']}`) is outside the function")
-        if src.text[c["nlo"]:c["nhi"]] != c["name"]:
+        if not spelled(c["name"], src.text[c["nlo"]:c["nhi"]]):
             fail(f"call {c['id']} (`{c['name']}`): the text at {pos(src.at(c['nlo']))} is "
                  f"{src.text[c['nlo']:c['nhi']]!r}")
         if not (c["lo"] <= c["nlo"] and c["nhi"] <= c["hi"]):
