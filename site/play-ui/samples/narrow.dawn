@@ -8,28 +8,28 @@
 use std/narrow.{BF16, bf16, f16, to_f64, add, mul, sqrt}
 
 ## The same number in three widths. `to_f64` is exact, so this shows rounding.
-fn widths(x: Float) -> List[Float] = [x, to_f64(bf16(x)), to_f64(f16(x))]
+fn widths(x: Float) -> List[Float] = [x, bf16(x).to_f64(), f16(x).to_f64()]
 
 ## `x` added up `n` times, every intermediate rounded to bfloat16.
 fn step_by_step(x: Float, n: Int) -> Float = {
   var acc: BF16 = bf16(0.0)
   for _i in range(0, n) {
-    acc = add(acc, bf16(x))
+    acc = acc.add(bf16(x))
   }
-  to_f64(acc)
+  acc.to_f64()
 }
 
 ## The same sum kept in `Float` and rounded once at the end.
 fn once_at_the_end(x: Float, n: Int) -> Float =
-  to_f64(bf16(fold(range(0, n), 0.0, (a, _i) => a + x)))
+  bf16(range(0, n).fold(0.0, (a, _i) => a + x)).to_f64()
 
 ## Products drift too; 1.01 is not a bfloat16, so the drift starts at the input.
 fn compound(rate: Float, n: Int) -> Float = {
   var acc: BF16 = bf16(1.0)
   for _i in range(0, n) {
-    acc = mul(acc, bf16(rate))
+    acc = acc.mul(bf16(rate))
   }
-  to_f64(acc)
+  acc.to_f64()
 }
 
 pub fn main() -> Unit !io = {
@@ -37,8 +37,8 @@ pub fn main() -> Unit !io = {
   println("ten times 0.1, rounded every step: ${step_by_step(0.1, 10)}")
   println("ten times 0.1, rounded once:       ${once_at_the_end(0.1, 10)}")
   println("1.01 compounded 100 times in bf16: ${compound(1.01, 100)}")
-  println("sqrt 2 in bf16: ${to_f64(sqrt(bf16(2.0)))}")
-  println("65504 and 70000 in f16: ${to_f64(f16(65504.0))} ${to_f64(f16(70000.0))}")
+  println("sqrt 2 in bf16: ${bf16(2.0).sqrt().to_f64()}")
+  println("65504 and 70000 in f16: ${f16(65504.0).to_f64()} ${f16(70000.0).to_f64()}")
   # order and equality come from the Float inside
   println("bf16(0.1) < bf16(0.2): ${bf16(0.1) < bf16(0.2)}")
 }

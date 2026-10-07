@@ -5,18 +5,18 @@
 # catches nothing, it only promises that `release` runs on every way out. A
 # panic is a bug, not a value, and only `catch_panic` stops one.
 
-use std/str
+use std/str.{split, split_once, trim}
 
 type Server = { host: String, port: Int }
 
 const CONFIG: String = "host = db.internal\nport = 5432\n"
 
 fn field(text: String, key: String) -> Result[String, String] = {
-  for line in str.split(text, "\n") {
-    match str.split_once(line, "=") {
+  for line in text.split("\n") {
+    match line.split_once("=") {
       Some((name, value)) ->
-        if str.trim(name) == key {
-          return Ok(str.trim(value))
+        if name.trim() == key {
+          return Ok(value.trim())
         }
       None -> ()
     }
@@ -26,7 +26,7 @@ fn field(text: String, key: String) -> Result[String, String] = {
 
 ## `parse_int` answers with an Option; turning it into an error is four lines.
 fn as_int(what: String, s: String) -> Result[Int, String] =
-  match parse_int(s) {
+  match s.parse_int() {
     Some(n) -> Ok(n)
     None -> Err("${what} is not a number: ${s}")
   }
@@ -41,9 +41,9 @@ fn close(_text: String) -> Unit !io = println("  close")
 ## `with` hands the rest of the block to `bracket`, so `close` runs whether
 ## this returns `Ok` or leaves early through `?`.
 fn load(text: String) -> Result[Server, String] !io = {
-  with t <- bracket(open(text), close)
-  let host = field(t, "host")?
-  let port = as_int("port", field(t, "port")?)?
+  with t <- bracket(text.open(), close)
+  let host = t.field("host")?
+  let port = as_int("port", t.field("port")?)?
   Ok(Server { host: host, port: port })
 }
 
@@ -51,7 +51,7 @@ fn always_panics(_text: String) -> Int !io = panic("boom")
 
 pub fn main() -> Unit !io = {
   for text in [CONFIG, "host = db.internal\n", "host = db.internal\nport = eight\n"] {
-    match load(text) {
+    match text.load() {
       Ok(s) -> println("  ok: ${s.host}:${s.port}")
       Err(m) -> println("  error: ${m}")
     }

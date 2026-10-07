@@ -4,17 +4,22 @@
 # A string's characters come out of `code_points`; none of this is bytes or
 # UTF-16 units, which is why the balloon below counts as one character.
 
+# The selective imports are what let `c.is_alnum()` and `c.code()` be dot calls;
+# the whole-module imports keep `char.of` and `str.len` qualified, where a bare
+# `of` or `len` would read as something else.
+use std/char.{is_alnum, code}
 use std/char
+use std/str.{to_lower, to_upper, split, is_empty, from_char, at}
 use std/str
 
 ## Lower case, letters and digits kept, every other run one hyphen.
-## `char.is_alnum` answers Unicode's question, so Greek letters survive.
+## `is_alnum` answers Unicode's question, so Greek letters survive.
 fn slug(title: String) -> String = {
   var out: List[Char] = []
   var gap = false
-  for c in code_points(str.to_lower(title)) {
-    if char.is_alnum(c) {
-      if gap && len(out) > 0 { out = out ++ ['-'] }
+  for c in title.to_lower().code_points() {
+    if c.is_alnum() {
+      if gap && out.len() > 0 { out = out ++ ['-'] }
       out = out ++ [c]
       gap = false
     } else {
@@ -28,9 +33,9 @@ fn slug(title: String) -> String = {
 ## `String`, because it is not one character for one character in general.
 fn initials(name: String) -> String = {
   var out = ""
-  for word in str.split(name, " ") {
-    if not str.is_empty(word) {
-      out = out ++ str.to_upper(str.from_char(str.at(word, 0)))
+  for word in name.split(" ") {
+    if not word.is_empty() {
+      out = out ++ from_char(word.at(0)).to_upper()
     }
   }
   out
@@ -38,15 +43,15 @@ fn initials(name: String) -> String = {
 
 pub fn main() -> Unit !io = {
   for title in ["Hello, World!", "Dawn v0.57 released", "Καλημέρα κόσμε 🎈"] {
-    println("${title} -> ${slug(title)}")
+    println("${title} -> ${title.slug()}")
   }
 
   println(initials("ada lovelace"))
 
   # `"${c}"` is the character; inside a list it keeps its quotes
-  println("'a' interpolates as ${'a'}, and inside a list as ${to_string(['a'])}")
+  println("'a' interpolates as ${'a'}, and inside a list as ${['a'].to_string()}")
 
-  let third = str.at("a🎈b", 2)
-  println("\"a🎈b\" is ${str.len("a🎈b")} characters, the third being ${str.from_char(third)}")
-  println("code of 'a': ${char.code('a')}, next char: ${char.of(char.code('a') + 1)}")
+  let third = "a🎈b".at(2)
+  println("\"a🎈b\" is ${str.len("a🎈b")} characters, the third being ${from_char(third)}")
+  println("code of 'a': ${'a'.code()}, next char: ${char.of('a'.code() + 1)}")
 }
