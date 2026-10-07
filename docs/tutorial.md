@@ -118,8 +118,50 @@ pub fn main() -> Unit !io = {
 13
 ```
 
-The pipe `|>` puts its left-hand side into the first argument of the call on its right,
-so a line reads in the direction the data flows:
+### Dot calls: `x.f(a)` is `f(x, a)`
+
+When a function is about its first argument, write that argument first. `x.f(a)` is exactly
+`f(x, a)`: the receiver fills the first parameter and the parentheses hold the rest. A chain of
+dot calls reads in the direction the data flows, where nested calls read inside out:
+
+```dawn run
+fn double(x: Int) -> Int = x * 2
+fn inc(x: Int) -> Int = x + 1
+
+pub fn main() -> Unit !io = {
+  let n = 5
+  n.double().inc().to_string().println()
+  let total = [1, 2, 3, 4]
+    .filter(x => x > 1)
+    .map(double)
+    .fold(0, (acc, x) => acc + x)
+  println(total.to_string())
+}
+```
+```output
+11
+18
+```
+
+Two or more steps on the same value are always a chain, never nested calls: write
+`e.insert(5).insert(2)`, not `insert(insert(e, 5), 2)`. A long chain goes one step per line,
+with the `.` at the start of each continuation line. Calls with no natural subject stay
+ordinary calls: constructors (`Node(l, v, r)`), `range(0, n)`, `println("hi")`, and symmetric
+functions like `max(a, b)`.
+
+A dot call only finds a function that is in scope under its bare name: your own functions,
+prelude builtins, and names imported selectively. After a plain `use std/str`, `s.split(",")`
+is an error, and the message says to write `str.split(s, ",")` or to add `use std/str.{split}`.
+The spec has the full resolution order (§4.3).
+
+### The pipe `|>`
+
+The pipe is the same call in a different spelling: `x |> f(a)` is `f(x, a)`. Reach for it when
+the dot does not fit: the data starts as a literal or a bigger expression, the last step is a
+sink or a lambda, the function is module-qualified and you would rather not import its bare name
+(`s |> str.split(",")`), or the right-hand side is a function value rather than a call. It binds
+looser than everything else, so `a + b |> f` is `f(a + b)`. A chain uses either dots or pipes,
+not both.
 
 ```dawn run
 fn double(x: Int) -> Int = x * 2

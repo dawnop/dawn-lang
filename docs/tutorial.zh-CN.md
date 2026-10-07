@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ e350b00e6e9a3dd7 -->
+<!-- doc-check: translation-of docs/tutorial.md @ fdad6eb49fc08537 -->
 
 # Dawn 教程
 
@@ -113,7 +113,44 @@ pub fn main() -> Unit !io = {
 13
 ```
 
-管道 `|>` 把左侧塞进右侧调用的第一个参数，读起来是数据的流向：
+### 点调用：`x.f(a)` 就是 `f(x, a)`
+
+函数主要作用于它的第一个参数时，就把这个参数写在前面。`x.f(a)` 与 `f(x, a)` 完全等价：
+接收者填第一个形参，括号里是其余实参。点调用连成链，读起来是数据的流向；嵌套调用则要由内向外读：
+
+```dawn run
+fn double(x: Int) -> Int = x * 2
+fn inc(x: Int) -> Int = x + 1
+
+pub fn main() -> Unit !io = {
+  let n = 5
+  n.double().inc().to_string().println()
+  let total = [1, 2, 3, 4]
+    .filter(x => x > 1)
+    .map(double)
+    .fold(0, (acc, x) => acc + x)
+  println(total.to_string())
+}
+```
+```output
+11
+18
+```
+
+对同一个值的两步及以上操作一律写成链，不写嵌套调用：写 `e.insert(5).insert(2)`，
+不写 `insert(insert(e, 5), 2)`。链太长就一步一行，续行以 `.` 开头。没有天然主语的调用保持普通写法：
+构造器（`Node(l, v, r)`）、`range(0, n)`、`println("hi")`，以及 `max(a, b)` 这类对称函数。
+
+点调用只找得到以**裸名**在作用域内的函数：你自己的函数、prelude 的 builtin、选择性引入的名字。
+只写 `use std/str` 时，`s.split(",")` 是错误，报错会提示写 `str.split(s, ",")`，
+或加上 `use std/str.{split}`。完整的解析顺序见 spec §4.3。
+
+### 管道 `|>`
+
+管道是同一个调用的另一种拼写：`x |> f(a)` 就是 `f(x, a)`。点写法不合适时用它：数据起点是字面量或较大的表达式、
+最后一步是汇或 lambda、函数带模块限定而你不想引入它的裸名（`s |> str.split(",")`），
+或者右侧是函数值而不是调用。它的优先级比其余运算符都低，所以 `a + b |> f` 是 `f(a + b)`。
+一条链要么全用点，要么全用管道，不混写。
 
 ```dawn run
 fn double(x: Int) -> Int = x * 2
