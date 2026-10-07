@@ -1,0 +1,203 @@
+# Whole-tree walks over Core, spelled once for the passes that sit beside the
+# reference-counting rewrite: alias elimination (c/alias) before it, the view
+# analysis (c/views) before and after it.
+#
+# Why a file of its own. `rc.dawn` and `infer.dawn` each carry their own
+# enumerated traversal, and they have to: each one answers a different
+# question about every node (consuming or borrowing position, which symbols
+# are live), so a shared walker would be a lambda per question and would hide
+# the one thing those walks exist to show, which is that no Core node is
+# skipped. The two passes added here ask structural questions that do not
+# depend on the position -- "which symbols are assigned anywhere", "which
+# expressions define this binding", "rebuild this tree with a symbol
+# renamed" -- so the walk is the same for all of them, and one enumeration
+# is one place a node added later has to be taught to.
+#
+# The leaves are listed rather than swept up by a wildcard, for
+# `rc.fv_expr`'s reason: a node a walker silently skips is a symbol it never
+# saw, and for these passes that is a rename applied to half a tree.
+#
+# A `CForeign` is read but never rebuilt. The native backend refuses it
+# outright, so a function that holds one cannot be compiled to C and the
+# passes leave such a function alone (`fold_expr` reaches the node, so a
+# caller can notice it).
+
+use ir/core.{
+  CExpr, CStmt, CUpdField,
+  CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
+  CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
+  CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
+  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDynamic, CDirect, CMethod, CImpl, CDefault, CInt, CFloat, CBool, CStr, CUnit
+}
+use std/list
+
+# ---- folding ----
+
+## Visit every expression and every statement under `e`, parents before
+## children, threading `acc`. `fe` sees expressions, `fs` statements; a block's
+## statements are visited as statements, and so are the expressions inside
+## them.
+pub fn fold_expr[A](e: CExpr, acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) -> A = {
+  let a = fe(acc, e)
+  fold_kids(e, a, fe, fs)
+}
+
+pub fn fold_stmt[A](s: CStmt, acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) -> A = {
+  let a = fs(acc, s)
+  match s {
+    CSLet(_, _, init) -> fold_expr(init, a, fe, fs)
+    CSAssign(_, v) -> fold_expr(v, a, fe, fs)
+    CSDiscard(x) -> fold_expr(x, a, fe, fs)
+    CSLoop(_, body, step) -> fold_opt(step, fold_expr(body, a, fe, fs), fe, fs)
+    CSIf(cond, thn, els) -> fold_opt(els, fold_expr(thn, fold_expr(cond, a, fe, fs), fe, fs), fe, fs)
+    CSDrop(_) -> a
+  }
+}
+
+fn fold_opt[A](e: Option[CExpr], acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) -> A =
+  match e {
+    None -> acc
+    Some(x) -> fold_expr(x, acc, fe, fs)
+  }
+
+fn fold_list[A](es: List[CExpr], acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) -> A = {
+  var a = acc
+  for e in es { a = fold_expr(e, a, fe, fs) }
+  a
+}
+
+fn fold_kids[A](e: CExpr, acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) -> A =
+  match e {
+    CCall(callee, args, _, _) -> {
+      let a = match callee {
+        CDynamic(t) -> fold_expr(t, acc, fe, fs)
+        CMethod(dict, _, _, _, _) -> fold_expr(dict, acc, fe, fs)
+        CDirect(_, _) -> acc
+        CImpl(_, _, _, _) -> acc
+        CDefault(_, _, _) -> acc
+      }
+      fold_list(args, a, fe, fs)
+    }
+    CIntrinsic(_, args, _, _) -> fold_list(args, acc, fe, fs)
+    CCtor(_, _, args, _) -> fold_list(args, acc, fe, fs)
+    CUpdate(base, _, _, fields, _) -> {
+      var a = fold_expr(base, acc, fe, fs)
+      for f in fields { a = fold_opt(f.value, a, fe, fs) }
+      a
+    }
+    CField(t, _, _, _, _) -> fold_expr(t, acc, fe, fs)
+    CIsCtor(t, _, _) -> fold_expr(t, acc, fe, fs)
+    CTagOf(t, _) -> fold_expr(t, acc, fe, fs)
+    CClosure(_, _, caps, _) -> fold_list(caps, acc, fe, fs)
+    CDictApply(_, args, _) -> fold_list(args, acc, fe, fs)
+    CDictArg(d, _, _, _, _) -> fold_expr(d, acc, fe, fs)
+    CTuple(elems, _) -> fold_list(elems, acc, fe, fs)
+    CTupleGet(t, _, _) -> fold_expr(t, acc, fe, fs)
+    CBox(inner, _) -> fold_expr(inner, acc, fe, fs)
+    CUnbox(inner, _) -> fold_expr(inner, acc, fe, fs)
+    CBinary(_, l, r, _) -> fold_expr(r, fold_expr(l, acc, fe, fs), fe, fs)
+    CUnary(_, x, _) -> fold_expr(x, acc, fe, fs)
+    CIf(cond, thn, els, _) ->
+      fold_opt(els, fold_expr(thn, fold_expr(cond, acc, fe, fs), fe, fs), fe, fs)
+    CBlock(stmts, tail, _) -> {
+      var a = acc
+      for s in stmts { a = fold_stmt(s, a, fe, fs) }
+      fold_opt(tail, a, fe, fs)
+    }
+    CListLit(elems, _) -> fold_list(elems, acc, fe, fs)
+    CReturn(v) -> fold_opt(v, acc, fe, fs)
+    CDup(inner, _) -> fold_expr(inner, acc, fe, fs)
+    CForeign(j, _, _) -> {
+      let a = fold_opt(j.target, acc, fe, fs)
+      fold_list(sam_ev_exprs(j), fold_list(j.args, a, fe, fs), fe, fs)
+    }
+    CInt(_) -> acc
+    CFloat(_) -> acc
+    CBool(_) -> acc
+    CStr(_) -> acc
+    CUnit -> acc
+    CLocal(_, _) -> acc
+    CFnRef(_, _, _) -> acc
+    CDictRef(_, _, _, _) -> acc
+    CConstRef(_, _, _) -> acc
+    CComptime(_, _, _) -> acc
+    CBreak(_) -> acc
+    CContinue(_) -> acc
+  }
+
+# ---- rebuilding ----
+
+## `e` with `f` applied to each direct child expression, the statements of a
+## block included. The node itself is not offered to `f`: the caller decides
+## what to do at the nodes it cares about and delegates the rest here.
+pub fn map_kids(e: CExpr, f: fn(CExpr) -> CExpr) -> CExpr =
+  match e {
+    CCall(callee, args, ty, site) -> {
+      let c1 = match callee {
+        CDynamic(t) -> CDynamic(f(t))
+        CMethod(dict, trait_id, method, idx, nev) -> CMethod(f(dict), trait_id, method, idx, nev)
+        CDirect(_, _) -> callee
+        CImpl(_, _, _, _) -> callee
+        CDefault(_, _, _) -> callee
+      }
+      CCall(c1, list.map(args, f), ty, site)
+    }
+    CIntrinsic(name, args, ty, site) -> CIntrinsic(name, list.map(args, f), ty, site)
+    CCtor(adt, ci, args, ty) -> CCtor(adt, ci, list.map(args, f), ty)
+    CUpdate(base, adt, ci, fields, ty) -> {
+      var out: List[CUpdField] = []
+      for fl in fields {
+        out = out ++ [CUpdField { ..fl, value: map_opt(fl.value, f) }]
+      }
+      CUpdate(f(base), adt, ci, out, ty)
+    }
+    CField(t, adt, ci, idx, ty) -> CField(f(t), adt, ci, idx, ty)
+    CIsCtor(t, adt, ci) -> CIsCtor(f(t), adt, ci)
+    CTagOf(t, adt) -> CTagOf(f(t), adt)
+    CClosure(name, owner, caps, ty) -> CClosure(name, owner, list.map(caps, f), ty)
+    CDictApply(key, args, ty) -> CDictApply(key, list.map(args, f), ty)
+    CDictArg(d, owner, key, idx, ty) -> CDictArg(f(d), owner, key, idx, ty)
+    CTuple(elems, ty) -> CTuple(list.map(elems, f), ty)
+    CTupleGet(t, idx, ty) -> CTupleGet(f(t), idx, ty)
+    CBox(inner, from) -> CBox(f(inner), from)
+    CUnbox(inner, to) -> CUnbox(f(inner), to)
+    CBinary(op, l, r, ty) -> CBinary(op, f(l), f(r), ty)
+    CUnary(op, x, ty) -> CUnary(op, f(x), ty)
+    CIf(cond, thn, els, ty) -> CIf(f(cond), f(thn), map_opt(els, f), ty)
+    CBlock(stmts, tail, ty) -> CBlock(list.map(stmts, (s: CStmt) => map_stmt(s, f)), map_opt(tail, f), ty)
+    CListLit(elems, ty) -> CListLit(list.map(elems, f), ty)
+    CReturn(v) -> CReturn(map_opt(v, f))
+    CDup(inner, ty) -> CDup(f(inner), ty)
+    # never rebuilt: see the header
+    CForeign(_, _, _) -> e
+    CInt(_) -> e
+    CFloat(_) -> e
+    CBool(_) -> e
+    CStr(_) -> e
+    CUnit -> e
+    CLocal(_, _) -> e
+    CFnRef(_, _, _) -> e
+    CDictRef(_, _, _, _) -> e
+    CConstRef(_, _, _) -> e
+    CComptime(_, _, _) -> e
+    CBreak(_) -> e
+    CContinue(_) -> e
+  }
+
+pub fn map_opt(e: Option[CExpr], f: fn(CExpr) -> CExpr) -> Option[CExpr] =
+  match e {
+    None -> None
+    Some(x) -> Some(f(x))
+  }
+
+pub fn map_stmt(s: CStmt, f: fn(CExpr) -> CExpr) -> CStmt =
+  match s {
+    CSLet(sym, ty, init) -> CSLet(sym, ty, f(init))
+    CSAssign(sym, v) -> CSAssign(sym, f(v))
+    CSDiscard(x) -> CSDiscard(f(x))
+    CSLoop(id, body, step) -> CSLoop(id, f(body), map_opt(step, f))
+    CSIf(cond, thn, els) -> CSIf(f(cond), f(thn), map_opt(els, f))
+    CSDrop(_) -> s
+  }
