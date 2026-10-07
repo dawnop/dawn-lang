@@ -1,0 +1,116 @@
+# The compile view's answer cache: a bounded, process-local, least-recently-used
+# map from a request's key to its answer text.
+#
+# Why this and not a Java LinkedHashMap with access order or a library. The
+# map's two jobs (find an answer, forget the oldest) need an ordering the
+# runner can bump on a hit, and `use java` gives back erased `Object`s that
+# have to be claimed as strings anyway; a HashMap for lookup plus an ArrayDeque
+# of keys in use order, both only ever holding strings, is the shortest thing
+# that is plainly correct. One lock guards both: a hit moves its key to the
+# back of the deque, which is not something two threads may do at once, and an
+# answer is looked up once a request, far from hot enough to want anything
+# finer.
+#
+# Two bounds, because one is not enough. The entry count alone lets a few
+# large answers (a pane is up to 256 KB) fill the heap; the size alone lets
+# thousands of tiny ones turn the deque's linear `remove` into the cost of a
+# request. An answer larger than a quarter of the size bound is not kept: it
+# would evict most of what is there to make room for one request's repeat.
+use std/str
+use java "java.util.HashMap"
+use java "java.util.ArrayDeque"
+use java "java.util.concurrent.Semaphore"
+use java "java.lang.String"
+use java "java.lang.Object"
+use java "java.util.concurrent.atomic.AtomicInteger"
+
+pub type Cache = { entries: HashMap, order: ArrayDeque, lock: Semaphore, chars: AtomicInteger, max_entries: Int, max_chars: Int }
+
+## An empty cache that keeps at most `max_entries` answers and `max_chars`
+## characters of them in all.
+pub fn new_cache(max_entries: Int, max_chars: Int) -> Cache !io =
+  Cache { entries: HashMap.new(), order: ArrayDeque.new(), lock: Semaphore.new(1), chars: AtomicInteger.new(0), max_entries: max_entries, max_chars: max_chars }
+
+fn leave(lock: Semaphore) -> Unit !io = lock.release()
+
+fn text_of(v: Object) -> String !io = String.valueOf(v).unwrap_or("")
+
+fn len_of(c: Cache, key: String) -> Int !io =
+  match c.entries.get(key) {
+    Some(v) -> str.len(text_of(v))
+    None -> 0
+  }
+
+## The answer kept under `key`, which a hit makes the most recently used.
+pub fn cache_get(c: Cache, key: String) -> Option[String] !io = {
+  c.lock.acquire()
+  with _l <- bracket(c.lock, leave)
+  match c.entries.get(key) {
+    None -> None
+    Some(v) -> {
+      let _r = c.order.remove(key)
+      let _a = c.order.addLast(key)
+      Some(text_of(v))
+    }
+  }
+}
+
+## Keep `value` under `key`, forgetting the least recently used answers until
+## both bounds hold again. A value too large for the bound is not kept.
+pub fn cache_put(c: Cache, key: String, value: String) -> Unit !io = {
+  let n = str.len(value)
+  if n * 4 > c.max_chars {
+    ()
+  } else {
+    c.lock.acquire()
+    with _l <- bracket(c.lock, leave)
+    forget(c, key)
+    let _p = c.entries.put(key, value)
+    let _a = c.order.addLast(key)
+    c.chars.set(c.chars.get() + n)
+    while c.order.size() > c.max_entries || c.chars.get() > c.max_chars {
+      match c.order.peekFirst() {
+        Some(oldest) -> forget(c, text_of(oldest))
+        None -> break
+      }
+    }
+  }
+}
+
+# Drop `key`, wherever it is, and the characters it held.
+fn forget(c: Cache, key: String) -> Unit !io = {
+  c.chars.set(c.chars.get() - len_of(c, key))
+  let _e = c.entries.remove(key)
+  let _o = c.order.remove(key)
+  ()
+}
+
+## How many answers are kept.
+pub fn cache_size(c: Cache) -> Int !io = c.entries.size()
+
+test "a hit keeps an answer, and the least recently used one goes first" {
+  let c = new_cache(2, 1000)
+  cache_put(c, "a", "1")
+  cache_put(c, "b", "2")
+  assert cache_get(c, "a") == Some("1")
+  # a was used last, so b is the one that goes
+  cache_put(c, "c", "3")
+  assert cache_get(c, "b") == None
+  assert cache_get(c, "a") == Some("1")
+  assert cache_get(c, "c") == Some("3")
+  assert cache_size(c) == 2
+}
+
+test "the size bound forgets answers too, and an answer past a quarter of it is not kept" {
+  let c = new_cache(100, 40)
+  cache_put(c, "a", "0123456789")
+  cache_put(c, "b", "0123456789")
+  cache_put(c, "c", "0123456789")
+  cache_put(c, "d", "0123456789")
+  cache_put(c, "e", "0123456789")
+  assert cache_size(c) == 4
+  assert cache_get(c, "a") == None
+  cache_put(c, "big", "01234567890")
+  assert cache_get(c, "big") == None
+  assert cache_size(c) == 4
+}

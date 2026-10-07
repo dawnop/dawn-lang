@@ -3,15 +3,20 @@
 # server written in Dawn (spec §9 interop dogfood, M6 warm-up) — and the first
 # service on the `web` framework, which it doubles as the acceptance test for.
 use std/bytes
+use std/str
+use std/io
 use java "java.util.concurrent.Semaphore"
-use web/types.{Request, Response, HttpError, raw, body_text}
+use web/types.{Request, Response, HttpError, Text, raw, body_text, response_status, response_body}
 use web/router.{route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
-use play/contract.{parse_request, render_outcome, render_check, render_error, render_health}
-use play/exec.{execute, check, compiler_id, CompilerId}
+use play/contract.{parse_request, parse_compile_request, render_outcome, render_check, render_error, render_health}
+use play/exec.{execute, check, compiler_id, CompilerId, view_raw, javap_id}
+use play/view.{build_view, respond, cache_key, Mapped, Done}
+use play/cache.{Cache, new_cache, cache_get, cache_put}
 use play/gate.{new_gate, with_gate}
 use play/config.{port}
+use java "java.lang.System"
 
 const MAX_BODY: Int = 65536
 const JSON_CT: String = "application/json; charset=utf-8"
@@ -20,6 +25,15 @@ const QUEUE_WAIT_SECS: Int = 15
 # Editor diagnostics are advisory: don't queue behind runs, fail fast so the
 # client just keeps its previous squiggles and retries on the next pause.
 const CHECK_WAIT_SECS: Int = 2
+# The compile view is advisory in the same way, and shares the same two
+# permits: a second pool for it would double the compilers the host runs at
+# once, and nobody would be counting them.
+const COMPILE_WAIT_SECS: Int = CHECK_WAIT_SECS
+# At most this many answers, and this many characters of them, are kept
+# (play/cache.dawn). An answer is kept under one key a target, so a program the
+# visitor has looked at in both tabs is two entries.
+const CACHE_ENTRIES: Int = 128
+const CACHE_CHARS: Int = 33554432
 
 # JSON since the editor started showing the compiler version; deploy checks
 # only look at the status (curl -f).
@@ -56,12 +70,120 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
     }
   }
 
+# What /compile needs to know of the machine it runs on, asked once at start.
+type View = { toolchain: String, build: String, javap: Bool, cache: Cache }
+
+# The view's cache lines: "<status>:<kind>:" and then the text. A kind is `S`,
+# the program's part of a success answer (the head is written per request), or
+# `F`, an answer that is complete as kept.
+fn kept_line(status: Int, kind: String, text: String) -> String = "${status}:${kind}:${text}"
+
+fn serve_kept(view: View, target: String, started: Int, line: String) -> Response !io =
+  match str.split_once(line, ":") {
+    None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
+    Some((status, rest)) -> match str.split_once(rest, ":") {
+      None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
+      Some((kind, text)) ->
+        if kind == "S" {
+          raw(200, JSON_CT, respond(target, view.build, true, (System.nanoTime() - started) / 1000000, text))
+        } else {
+          raw(parse_int(status).unwrap_or(500), JSON_CT, text)
+        }
+    }
+  }
+
+# The refusal when the machine cannot make the view at all: the JVM listing is
+# `javap`'s, which only a JDK has, and the call table needs that listing for
+# either target. A clear 503 rather than a request that fails inside a
+# sandbox unit; deploys refuse to ship without it (deploy/redeploy.sh), so
+# seeing this means a machine that was set up by hand.
+fn unavailable(view: View) -> Option[Response] =
+  if view.javap {
+    None
+  } else {
+    Some(raw(503, JSON_CT, render_error("the compile view is unavailable: this server has no javap (it needs a JDK, not only a JRE)")))
+  }
+
+# POST /compile: the program's C text or JVM listing, paired with the source
+# (packages/xmap). Same body limit, same JSON refusals and same gate as /check;
+# the work is play/exec.view_raw's and the answer is play/view.dawn's.
+fn compile_rpc(req: Request, gate: Semaphore, view: View) -> Result[Response, HttpError] !io =
+  if bytes.len(req.body) > MAX_BODY {
+    Ok(raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes")))
+  } else {
+    match body_text(req) {
+      Err(e) -> Ok(raw(400, JSON_CT, render_error(e.message)))
+      Ok(source) -> match parse_compile_request(source) {
+        Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
+        Ok((code, target)) ->
+          match unavailable(view) {
+            Some(refusal) -> Ok(refusal)
+            None -> Ok(compile_view(gate, view, code, target))
+          }
+      }
+    }
+  }
+
+fn compile_view(gate: Semaphore, view: View, code: String, target: String) -> Response !io = {
+  let started = System.nanoTime()
+  let base = cache_key(view.toolchain, code)
+  match cache_get(view.cache, "${base}/${target}") {
+    Some(line) -> serve_kept(view, target, started, line)
+    None ->
+      match with_gate(gate, COMPILE_WAIT_SECS, () => build_view(code, view_raw(code))) {
+        None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
+        Some(Mapped(c, jvm, gaps)) -> {
+          if gaps > 0 {
+            println("compile view: ${gaps} gap(s) in program ${str.take(base, 12)}")
+          }
+          cache_put(view.cache, "${base}/c", kept_line(200, "S", c))
+          cache_put(view.cache, "${base}/jvm", kept_line(200, "S", jvm))
+          raw(200, JSON_CT, respond(target, view.build, false, (System.nanoTime() - started) / 1000000, if target == "c" { c } else { jvm }))
+        }
+        Some(Done(status, body, keep)) -> {
+          if keep {
+            cache_put(view.cache, "${base}/c", kept_line(status, "F", body))
+            cache_put(view.cache, "${base}/jvm", kept_line(status, "F", body))
+          }
+          raw(status, JSON_CT, body)
+        }
+      }
+  }
+}
+
 pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
   let id = compiler_id()
+  let javap = javap_id()
+  if javap == "" {
+    io.eprintln("dawn-play: javap is not available; POST /compile will answer 503 until it is installed (a JDK, not only a JRE)")
+  }
+  let view = View {
+    toolchain: "${id.version} ${id.build} ${javap}",
+    build: id.build,
+    javap: javap != "",
+    cache: new_cache(CACHE_ENTRIES, CACHE_CHARS),
+  }
   serve_app(port(), [
     route_get("/health", req => health(id)),
     route_post("/run", req => rpc(req, gate, false)),
     route_post("/check", req => rpc(req, gate, true)),
+    route_post("/compile", req => compile_rpc(req, gate, view)),
   ], [with_logging])
+}
+
+test "without javap the view is refused with a 503 that says why" {
+  let view = View { toolchain: "", build: "", javap: false, cache: new_cache(2, 100) }
+  match unavailable(view) {
+    Some(r) -> {
+      assert response_status(r) == 503
+      match response_body(r) {
+        Text(t) -> { assert str.contains(t, "javap") }
+        _ -> { assert false }
+      }
+    }
+    None -> { assert false }
+  }
+  let with_javap = View { toolchain: "", build: "", javap: true, cache: new_cache(2, 100) }
+  assert match unavailable(with_javap) { Some(_) -> false, None -> true }
 }
