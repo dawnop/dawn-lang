@@ -411,9 +411,11 @@ bool dawn_std_list__iter_done(void* v234, int64_t v235) {
 
 `show_go` 的循环第一轮就把自己遍历的那张表放掉了。**规则**：凡是 emitc 用 Dawn 函数
 实现的 intrinsic/运算符，引用要在**调用点**取（`own_args`）。同理，返回值指向参数
-内部的那几个（`array_get` / `expect` / `unwrap_or` / `cast`）也在调用点 dup，这样
+内部的那几个（`expect` / `unwrap_or` / `cast`）也在调用点 dup，这样
 「调用结果 owned」这条 Core 规则在 C 层才成立——放进运行时函数里不行，运行时自己也
-调它们，那里要的正是借用。
+调它们，那里要的正是借用。（`array_get` 原先也在这一列。它是字段读取一类的投影，
+所以 dup 改由 `rc.dawn` 在值被保留的位置补 `CDup`，借用视图可以不拷；
+见 [perceus-reuse-design.md](perceus-reuse-design.md) §4.3。）
 
 闭包同理：`env->caps[i]` 交给的那个函数按 owned 参数收，会 drop 它。adapter 得先 dup，
 否则第一次调用就把闭包自己指着的东西放掉了。
