@@ -1,0 +1,300 @@
+# Alias `let` elimination: `let s = t` is not a binding, it is a second name.
+#
+# Lowering binds every `match` scrutinee to a fresh symbol, so the arms can
+# read it more than once; when the scrutinee is already a local that binding
+# is `let s = t`, a pure alias. Counting cannot see through it: the rewrite
+# treats the initialiser as a consuming use of `t`, which makes `t` owned
+# wherever it is a parameter (`infer.dm_stmt`) and costs a dup or a transfer
+# plus a drop of `s` wherever it is not. Naming the one value twice is what
+# kept `fn sum(t: T)` an owned parameter: its own body only reads `t`, and
+# every call site paid `sum(dup(l))` for it (docs/perceus-reuse-design.md
+# 2.5).
+#
+# The pass renames `s` to `t` for the rest of the block and drops the `let`.
+# It runs on the C path only, between lowering and the mode inference, and
+# not inside lowering: the JVM has a collector and no use for this, and
+# lowering's output is what the Core golden and every JVM emit byte are
+# measured against (ruling 5 of 2026-10-07). Both drivers that count (the C
+# driver and `__lower --dump`) call it at the same place, so the golden shows
+# the Core the C backend compiles.
+#
+# ## When it is sound
+#
+# Values are immutable and evaluation is strict, so `s` and `t` denote the
+# same value for as long as neither is assigned. Three refusals:
+#
+#   * `s` is assigned anywhere in the function: it is a variable, not an
+#     alias.
+#   * `t` is assigned between the `let` and the end of the block `s` lives in.
+#     A `var` read through an alias keeps the value it had at the `let`;
+#     renaming would read the new one. `t` being assigned *elsewhere* -- after
+#     the block, say, as `node = match node { .. }` does -- is harmless, which
+#     is why the check is on the rest of the block and not on the function.
+#   * `s` is the base of a record update. `rc.schedule_record_update` finds
+#     the projections to move by looking for the `let` that binds the base;
+#     renaming the base to its source would turn every `{ ..r, f: v }` chain
+#     back into a per-record dup and drop pair (measured: update.dawn,
+#     docs/perceus-reuse-design.md 2.4).
+#
+# A dictionary local is never renamed: it lives outside the ledger (`rc`'s
+# `dictish`) and has no header to count, so it has nothing to gain.
+#
+# A function that holds a `CForeign` is left alone: the native backend
+# refuses it, and the walk cannot rebuild it.
+
+use ir/core.{
+  CNoSite, CModule, CFun, CParam, CExpr, CStmt, CUpdField, CLocal, CBlock, CSLet, CSAssign,
+  CUpdate, CForeign, CIntrinsic, CCall, CDirect, COwned, mode_owned
+}
+use check/types.{Ty, TyInt, TyList, is_ref_ty}
+use c/cwalk
+use c/infer
+use std/list
+use std/map
+use std/set
+
+## What one walk over a function learns before anything is renamed.
+type Facts = {
+  # every symbol that is the target of an assignment
+  assigned: Set[Int],
+  # the locals a record update names as its base
+  bases: Set[Int],
+  foreign: Bool
+}
+
+fn gather_expr(f: Facts, e: CExpr) -> Facts =
+  match e {
+    CUpdate(CLocal(b, _), _, _, _, _) -> Facts { ..f, bases: set.insert(f.bases, b) }
+    CForeign(_, _, _) -> Facts { ..f, foreign: true }
+    _ -> f
+  }
+
+fn gather_stmt(f: Facts, s: CStmt) -> Facts =
+  match s {
+    CSAssign(sym, _) -> Facts { ..f, assigned: set.insert(f.assigned, sym) }
+    _ -> f
+  }
+
+## Every symbol assigned anywhere in `stmts` or `tail`.
+fn assigned_in(stmts: List[CStmt], tail: Option[CExpr]) -> Set[Int] = {
+  let none: Set[Int] = set.empty()
+  var acc = none
+  for s in stmts {
+    acc = cwalk.fold_stmt(s, acc, (a: Set[Int], _e: CExpr) => a,
+      (a: Set[Int], t: CStmt) => match t {
+        CSAssign(sym, _) -> set.insert(a, sym)
+        _ -> a
+      })
+  }
+  match tail {
+    None -> acc
+    Some(t) -> cwalk.fold_expr(t, acc, (a: Set[Int], _e: CExpr) => a,
+      (a: Set[Int], u: CStmt) => match u {
+        CSAssign(sym, _) -> set.insert(a, sym)
+        _ -> a
+      })
+  }
+}
+
+type Cx = { facts: Facts, dicts: Set[Int] }
+
+fn rename(cx: Cx, env: Map[Int, Int], e: CExpr) -> CExpr =
+  match e {
+    CLocal(sym, ty) ->
+      match map.get(env, sym) {
+        Some(t) -> CLocal(t, ty)
+        None -> e
+      }
+    CBlock(stmts, tail, ty) -> block(cx, env, stmts, tail, ty)
+    _ -> cwalk.map_kids(e, (x: CExpr) => rename(cx, env, x))
+  }
+
+fn block(cx: Cx, env0: Map[Int, Int], stmts: List[CStmt], tail: Option[CExpr], ty: Ty) -> CExpr = {
+  var env = env0
+  var out: List[CStmt] = []
+  var i = 0
+  let n = len(stmts)
+  while i < n {
+    let s = stmts[i]
+    var kept = true
+    match s {
+      CSLet(sym, sty, init) -> {
+        let init1 = rename(cx, env, init)
+        match init1 {
+          CLocal(t, tty) ->
+            if eligible(cx, sym, sty, t, tty) && stable(cx, t, list.drop(stmts, i + 1), tail) {
+              env = map.insert(env, sym, t)
+              kept = false
+            }
+          _ -> ()
+        }
+        if kept { out = out ++ [CSLet(sym, sty, init1)] }
+      }
+      _ -> {
+        let here = env
+        out = out ++ [cwalk.map_stmt(s, (x: CExpr) => rename(cx, here, x))]
+      }
+    }
+    i = i + 1
+  }
+  let here = env
+  CBlock(out, cwalk.map_opt(tail, (x: CExpr) => rename(cx, here, x)), ty)
+}
+
+## `let sym: sty = local t: tty` names `t` a second time and nothing else.
+fn eligible(cx: Cx, sym: Int, sty: Ty, t: Int, tty: Ty) -> Bool =
+  is_ref_ty(sty) && is_ref_ty(tty) && sym != t && not set.has(cx.dicts, t) &&
+  not set.has(cx.facts.assigned, sym) && not set.has(cx.facts.bases, sym)
+
+## `t` keeps its value through the rest of the block.
+fn stable(cx: Cx, t: Int, rest: List[CStmt], tail: Option[CExpr]) -> Bool =
+  if not set.has(cx.facts.assigned, t) { true } else { not set.has(assigned_in(rest, tail), t) }
+
+fn elim_fn(dicts: Set[Int], f: CFun) -> CFun = {
+  let empty = Facts { assigned: set.empty(), bases: set.empty(), foreign: false }
+  let facts = cwalk.fold_expr(f.body, empty, gather_expr, gather_stmt)
+  if facts.foreign { return f }
+  let cx = Cx { facts: facts, dicts: dicts }
+  CFun { ..f, body: rename(cx, map.empty(), f.body) }
+}
+
+## The module with its alias `let`s renamed away. Idempotent.
+pub fn elim_module(m: CModule) -> CModule = {
+  # the module-wide dictionary union `rc.rc_module` takes: a lifted lambda
+  # that captured a dictionary carries it as a capture, not in its own `dicts`
+  var dicts: Set[Int] = set.empty()
+  for f in m.fns {
+    for d in f.dicts { dicts = set.insert(dicts, d.sym) }
+  }
+  let shared = dicts
+  CModule { ..m, fns: list.map(m.fns, (f: CFun) => elim_fn(shared, f)) }
+}
+
+# ---- tests ----
+
+fn t_fn(params: List[CParam], ret: Ty, body: CExpr) -> CFun =
+  CFun {
+    name: "f", owner: "m", captures: [], params: params, dicts: [], evs: [],
+    ret: ret, body: body, is_test: false, impl_of: None, default_of: None,
+    origin: ""
+  }
+
+fn t_mod(fns: List[CFun]) -> CModule = CModule { owner: "m", fns: fns, dicts: [], next_sym: 100 }
+
+fn t_node() -> Ty = TyList(TyInt)
+
+fn t_param(sym: Int) -> CParam = CParam { sym: sym, ty: t_node(), mode: COwned }
+
+## How many `let`s the first function's top block still has.
+fn t_lets(m: CModule) -> Int =
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> len(ss)
+    _ -> -1
+  }
+
+fn t_read(sym: Int) -> CExpr =
+  CIntrinsic("list_len", [CLocal(sym, t_node())], TyInt, CNoSite)
+
+test "an alias let is renamed away and its uses read the original" {
+  let lt = t_node()
+  let body = CBlock([CSLet(2, lt, CLocal(1, lt))], Some(t_read(2)), TyInt)
+  let m = elim_module(t_mod([t_fn([t_param(1)], TyInt, body)]))
+  assert t_lets(m) == 0
+  match m.fns[0].body {
+    CBlock(_, Some(CIntrinsic(_, args, _, _)), _) ->
+      match args[0] {
+        CLocal(s, _) -> { assert s == 1 }
+        _ -> panic("expected the original local")
+      }
+    _ -> panic("expected a block with an intrinsic tail")
+  }
+}
+
+test "a chain of aliases collapses onto the first name" {
+  let lt = t_node()
+  let body = CBlock([CSLet(2, lt, CLocal(1, lt)), CSLet(3, lt, CLocal(2, lt))], Some(t_read(3)), TyInt)
+  let m = elim_module(t_mod([t_fn([t_param(1)], TyInt, body)]))
+  assert t_lets(m) == 0
+  match m.fns[0].body {
+    CBlock(_, Some(CIntrinsic(_, args, _, _)), _) ->
+      match args[0] {
+        CLocal(s, _) -> { assert s == 1 }
+        _ -> panic("expected the original local")
+      }
+    _ -> panic("expected a block with an intrinsic tail")
+  }
+}
+
+test "an alias of a variable the rest of the block assigns stays a binding" {
+  let lt = t_node()
+  # `var v = g(); let s = v; v = g(); read s` : s keeps the OLD value
+  let g = CCall(CDirect("m", "g"), [], lt, CNoSite)
+  let body = CBlock(
+    [CSLet(2, lt, g), CSLet(3, lt, CLocal(2, lt)), CSAssign(2, g)],
+    Some(t_read(3)),
+    TyInt
+  )
+  let m = elim_module(t_mod([t_fn([], TyInt, body)]))
+  assert t_lets(m) == 3
+}
+
+test "an assignment after the block the alias lives in does not stop it" {
+  let lt = t_node()
+  # `v = { let s = v; read s }` : v is assigned, but not while s is alive
+  let g = CCall(CDirect("m", "g"), [], lt, CNoSite)
+  let inner = CBlock([CSLet(3, lt, CLocal(2, lt))], Some(CLocal(3, lt)), lt)
+  let body = CBlock([CSLet(2, lt, g), CSAssign(2, inner)], Some(t_read(2)), TyInt)
+  let m = elim_module(t_mod([t_fn([], TyInt, body)]))
+  match m.fns[0].body {
+    CBlock(ss, _, _) ->
+      match ss[1] {
+        CSAssign(_, CBlock(inner_stmts, _, _)) -> { assert len(inner_stmts) == 0 }
+        _ -> panic("expected the assignment of a block")
+      }
+    _ -> panic("expected a block")
+  }
+}
+
+test "an alias that is itself assigned is a variable and stays" {
+  let lt = t_node()
+  let g = CCall(CDirect("m", "g"), [], lt, CNoSite)
+  let body = CBlock([CSLet(2, lt, CLocal(1, lt)), CSAssign(2, g)], Some(t_read(2)), TyInt)
+  let m = elim_module(t_mod([t_fn([t_param(1)], TyInt, body)]))
+  assert t_lets(m) == 2
+}
+
+test "the base of a record update keeps its binding" {
+  let lt = t_node()
+  let upd = CUpdate(CLocal(2, lt), 7, 0, [CUpdField { ty: TyInt, value: None }], lt)
+  let body = CBlock([CSLet(2, lt, CLocal(1, lt))], Some(upd), lt)
+  let m = elim_module(t_mod([t_fn([t_param(1)], lt, body)]))
+  assert t_lets(m) == 1
+}
+
+test "a scalar alias is not touched" {
+  let body = CBlock([CSLet(2, TyInt, CLocal(1, TyInt))], Some(CLocal(2, TyInt)), TyInt)
+  let m = elim_module(t_mod([t_fn([CParam { sym: 1, ty: TyInt, mode: COwned }], TyInt, body)]))
+  assert t_lets(m) == 1
+}
+
+test "renaming is what lets a matched parameter stay borrowed" {
+  let lt = t_node()
+  # `fn f(p) = { let s = p; len(s) }`: the alias is a consuming use of p
+  let body = CBlock([CSLet(2, lt, CLocal(1, lt))], Some(t_read(2)), TyInt)
+  let before = t_mod([t_fn([t_param(1)], TyInt, body)])
+  let owned = infer.infer_modes([before])
+  assert map.len(owned) == 0
+  let after = infer.infer_modes([elim_module(before)])
+  match map.get(after, ("m", "f")) {
+    Some(row) -> { assert not mode_owned(row[0]) }
+    None -> panic("expected a row for f")
+  }
+}
+
+test "renaming twice changes nothing more" {
+  let lt = t_node()
+  let body = CBlock([CSLet(2, lt, CLocal(1, lt))], Some(t_read(2)), TyInt)
+  let once = elim_module(t_mod([t_fn([t_param(1)], TyInt, body)]))
+  let twice = elim_module(once)
+  assert t_lets(twice) == 0
+}

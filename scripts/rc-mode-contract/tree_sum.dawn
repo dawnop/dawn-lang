@@ -1,0 +1,37 @@
+# A recursive read over a user-defined tree: the shape `match t { Node(l, v, r)
+# -> f(l) + v + f(r) }`. Lowering binds the scrutinee to a fresh symbol, and
+# until c/unalias renamed that alias away the binding was a consuming use of
+# `t`, so `sum`'s parameter was owned and every call paid `sum(dup(l))`. It is
+# borrowed now, which makes it a mode-table site like the std ones: the flips
+# below prove the net under it catches each half of a disagreement here too.
+# `incr` rebuilds the tree it takes apart, so its parameter stays owned and is
+# the control that the borrowed row belongs to `sum` alone.
+type T =
+  | Leaf
+  | Node(l: T, v: Int, r: T)
+
+fn build(lo: Int, hi: Int) -> T =
+  if lo >= hi {
+    Leaf
+  } else {
+    let m = (lo + hi) / 2
+    Node(build(lo, m), m, build(m + 1, hi))
+  }
+
+fn sum(t: T) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, v, r) -> sum(l) + v + sum(r)
+  }
+
+fn incr(t: T) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(incr(l), v + 1, incr(r))
+  }
+
+pub fn main() -> Unit !io = {
+  let t = build(0, 100)
+  let u = incr(t)
+  println(to_string(sum(t)) ++ " " ++ to_string(sum(u)))
+}

@@ -21,6 +21,7 @@ use check/jsig.{jsig_refused}
 use ir/lower
 use ir/lint
 use c/rc
+use c/unalias
 use c/infer
 use c/infer.{ForcedMode}
 use ir/reach
@@ -420,9 +421,19 @@ fn build_units(
   # disagreement `rc_module`'s contract assertion exists to catch. The
   # table rides back out because the emitter reads call sites with the same
   # table the rewrite used.
+  var lowered: List[CModule] = []
+  for u2 in pre { lowered = lowered ++ [u2.m] }
+  if linting { lint.enforce(found ++ lint.lint_program(adts, lowered) ++ lint.check_slots(traits, lowered)) }
+  # alias `let`s are renamed away only now: the lint above judges lowering's
+  # own output, and the mode inference below must see what the rewrite will
   var cores: List[CModule] = []
-  for u2 in pre { cores = cores ++ [u2.m] }
-  if linting { lint.enforce(found ++ lint.lint_program(adts, cores) ++ lint.check_slots(traits, cores)) }
+  var renamed: List[EmitMod] = []
+  for u2 in pre {
+    let m2 = unalias.elim_module(u2.m)
+    cores = cores ++ [m2]
+    renamed = renamed ++ [EmitMod { ..u2, m: m2 }]
+  }
+  pre = renamed
   let inferred0 = infer.infer_modes(cores)
   var forced: List[ForcedMode] = []
   for fl in flips {
