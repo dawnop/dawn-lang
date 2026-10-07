@@ -59,6 +59,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 // set them (run and compile budgets, MAX_BODY, OUTPUT_LIMIT, MAX_CONCURRENT).
 // Copied rather than fetched: they change with a deploy of that service, and a
 // stale line here costs a reader less than another request on every load.
+// Shown in the output header's "?" popover, not on a row of its own.
 const LIMITS =
   'Limits: 10 s to run, 30 s to compile, 64 KiB of source and of output, ' +
   '2 programs at a time. Runs on the JVM; there is no stdin.'
@@ -160,9 +161,39 @@ function mount(root: HTMLElement) {
   const outClose = el('button', 'dp-outclose', '×')
   outClose.type = 'button'
   outClose.title = 'Close output'
-  outHead.append(outTitle, outMeta, outClose)
+  const helpBtn = el('button', 'dp-help')
+  helpBtn.type = 'button'
+  helpBtn.setAttribute('aria-label', 'Run limits')
+  helpBtn.setAttribute('aria-expanded', 'false')
+  helpBtn.setAttribute('aria-controls', 'dp-limits')
+  // A circled question mark drawn inline: no icon font, no extra request.
+  helpBtn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">' +
+    '<circle cx="8" cy="8" r="6.8" fill="none" stroke="currentColor" stroke-width="1.3"/>' +
+    '<path d="M6.1 6.2a1.95 1.95 0 1 1 2.9 1.7c-.7.4-1 .8-1 1.5" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+    '<circle cx="8" cy="11.7" r="0.85" fill="currentColor"/></svg>'
+  const limits = el('div', 'dp-limits', LIMITS)
+  limits.id = 'dp-limits'
+  limits.setAttribute('role', 'note')
+  limits.hidden = true
+  // Click alone must work (touch has no hover): toggle, and close on Esc or a
+  // click anywhere else.
+  const setHelp = (open: boolean) => {
+    limits.hidden = !open
+    helpBtn.setAttribute('aria-expanded', open ? 'true' : 'false')
+  }
+  helpBtn.addEventListener('click', () => setHelp(limits.hidden))
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !limits.hidden) { setHelp(false); helpBtn.focus() }
+  })
+  document.addEventListener('click', (e) => {
+    const t = e.target as Node
+    if (!limits.hidden && !limits.contains(t) && !helpBtn.contains(t)) setHelp(false)
+  })
+  outHead.append(outTitle, outMeta, helpBtn, outClose)
   const output = el('pre', 'dp-console')
-  outPanel.append(outHead, output, el('div', 'dp-limits', LIMITS))
+  outPanel.append(outHead, output, limits)
 
   // The tab last shown, which the toolbar button reopens.
   let lastTarget: Target = 'c'
