@@ -4351,6 +4351,49 @@ pub fn alloca_ctl_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> L
   segments(ins[1], n, 1, (_seg, i) => round_to(dt, round_to(dt, x[i] + x[i]) + x[i]))
 }
 
+# ---- references for kernels with scalar parameters (tileir 0.12.0) ----
+#
+# A scalar is not a buffer, so it is not in `ins`: the fake device hands the
+# reference the launch's scalars in a third list, as `Float`s in the order the
+# launch passed them. An i32 is the integer it holds and an f32 the binary32
+# value its bits spell, so every value here is exact in binary64.
+
+## `scalar_scale`: `ins` is `[x, out]` and `scalars` is `[s]`. The first `n`
+## lanes of `out` are `x * s` in binary64 (the kernel widens its f32 scalar
+## first, which is exact); the rest of `out` is its own tail.
+pub fn scalar_scale_ref(n: Int, ins: List[List[Float]], scalars: List[Float]) -> List[Float] =
+  list.map(range(0, len(ins[1])), i => if i < n { ins[0][i] * scalars[0] } else { ins[1][i] })
+
+## `scalar_len`: `ins` is `[x, out]` and `scalars` is `[n]`. Lane `i` of `out`
+## is `x[i]` for `i < n` and what `out` held for every other lane: the mask
+## bound is the launch's value, and a negative one masks every lane.
+pub fn scalar_len_ref(ins: List[List[Float]], scalars: List[Float]) -> List[Float] =
+  list.map(range(0, len(ins[1])), i => if to_float(i) < scalars[0] { ins[0][i] } else { ins[1][i] })
+
+## `scalar_loop`: `ins` is `[x, out]`, `scalars` is `[n]` and `tile` is the
+## block's width. The first `tile` lanes of `out` are the first `n` tiles of
+## `x` summed lane by lane in order, starting from zero, which is the loop's
+## own fold; `n` below one is the empty sum, zeros. The rest of `out` is its
+## own tail.
+pub fn scalar_loop_ref(tile: Int, ins: List[List[Float]], scalars: List[Float]) -> List[Float] = {
+  let rounds = to_int(scalars[0])
+  list.map(range(0, len(ins[1])), i =>
+      if i < tile {
+        list.fold(range(0, rounds), 0.0, (acc, j) => acc + ins[0][j * tile + i])
+      } else {
+        ins[1][i]
+      })
+}
+
+## `scalar_wide`: `ins` is `[xf, xi, out_f, out_i]` and `scalars` is
+## `[a, k]`. `out_f` is `xf * a` and `out_i` is `xi + k`, each over the whole
+## of its buffer's first `n` lanes. Answers the two buffers written, as the
+## (position, contents) pairs a `WideRefFn` answers.
+pub fn scalar_wide_ref(n: Int, ins: List[List[Float]], scalars: List[Float]) -> List[(Int, List[Float])] = [
+  (2, list.map(range(0, len(ins[2])), i => if i < n { ins[0][i] * scalars[0] } else { ins[2][i] })),
+  (3, list.map(range(0, len(ins[3])), i => if i < n { ins[1][i] + scalars[1] } else { ins[3][i] }))
+]
+
 # ---- tests ----
 
 # How far apart two Floats are, relatively, for the assertions below.
@@ -5196,4 +5239,18 @@ test "the online softmax answers what the three-launch chain does, including whe
   })
   assert moved > 0.0
   assert moved <= 0.9 / 128.0
+}
+
+test "the scalar references read the launch's scalars, not a buffer" {
+  let x = [1.0, 2.0, 3.0, 4.0]
+  let out = [9.0, 9.0, 9.0, 9.0]
+  assert scalar_scale_ref(3, [x, out], [2.0]) == [2.0, 4.0, 6.0, 9.0]
+  assert scalar_len_ref([x, out], [2.0]) == [1.0, 2.0, 9.0, 9.0]
+  assert scalar_len_ref([x, out], [0.0 - 1.0]) == out
+  # two tiles of two lanes, summed in order; none gives the empty sum
+  assert scalar_loop_ref(2, [x, out], [2.0]) == [4.0, 6.0, 9.0, 9.0]
+  assert scalar_loop_ref(2, [x, out], [1.0]) == [1.0, 2.0, 9.0, 9.0]
+  assert scalar_loop_ref(2, [x, out], [0.0]) == [0.0, 0.0, 9.0, 9.0]
+  let w = scalar_wide_ref(2, [x, x, out, out], [10.0, 5.0])
+  assert w == [(2, [10.0, 20.0, 9.0, 9.0]), (3, [6.0, 7.0, 9.0, 9.0])]
 }

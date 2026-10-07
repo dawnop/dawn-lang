@@ -5293,10 +5293,12 @@ fn trace(name: String) -> TileProg = match name {
       Out(F64, cells([IS_N / 2, IS_D], [IS_T, IS_D])), idx_softmax)
     p
   }
-  "scalar_scale" -> trace_kernel("scalar_scale", [ByPtr("f32"), ByValue("f32"), ByPtr("f32")],
-    () => scalar_scale(param(F32, 0), param(F32, 1), param(F32, 2)))
-  "scalar_len" -> trace_kernel("scalar_len", [ByPtr("f32"), ByValue("i32"), ByPtr("f32")],
-    () => scalar_len(param(F32, 0), param(I32, 1), param(F32, 2)))
+  "scalar_scale" -> trace_kernel("scalar_scale", [ByPtr("f64"), ByValue("f32"), ByPtr("f64")],
+    () => scalar_scale(param(F64, 0), param(F32, 1), param(F64, 2)))
+  "scalar_len" -> trace_kernel("scalar_len", [ByPtr("f64"), ByValue("i32"), ByPtr("f64")],
+    () => scalar_len(param(F64, 0), param(I32, 1), param(F64, 2)))
+  "scalar_loop" -> trace_kernel("scalar_loop", [ByPtr("f64"), ByValue("i32"), ByPtr("f64")],
+    () => scalar_loop(param(F64, 0), param(I32, 1), param(F64, 2)))
   "scalar_wide" -> trace_kernel("scalar_wide",
     [ByPtr("f64"), ByPtr("i64"), ByValue("f64"), ByValue("i64"), ByPtr("f64"), ByPtr("i64")],
     () => scalar_wide(param(F64, 0), param(I64, 1), param(F64, 2), param(I64, 3), param(F64, 4), param(I64, 5)))
@@ -5898,22 +5900,36 @@ fn trace(name: String) -> TileProg = match name {
 const SK_TILE: Int = 128
 const SK_WIDE_TILE: Int = 64
 
-# `out = x * s`, `s` an f32 that the launch picks: the same cubin scales by
-# any value, where `f_const(F32, s)` is one program a value.
-fn scalar_scale(x: Param[F32], s: Param[F32], out: Param[F32]) -> Unit !Dev = {
+# `out = x * s`, `s` an f32 the launch picks: the same cubin scales by any
+# value, where `f_const(F32, s)` is one program a value. The buffers are f64
+# (std/gpu moves no f32 buffer), so the scalar is widened on the device: the
+# one case where a by-value f32 meets a float operation of another format.
+fn scalar_scale(x: Param[Float], s: Param[F32], out: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), SK_TILE)
-  store(out, base, load(x, base, [SK_TILE]) * scalar(s))
+  store(out, base, load(x, base, [SK_TILE]) * scalar(s).to(F64))
 }
 
 # A length the launch picks, as the bound of a mask: the lanes at or past `n`
 # are neither read nor written, so the out buffer past `n` keeps whatever the
 # host put there. `scalar(n)` reaches the mask through `idx_of`, the one
 # `Tile[I32]` to `Idx` step, and not through a buffer.
-fn scalar_len(x: Param[F32], n: Param[I32], out: Param[F32]) -> Unit !Dev = {
+fn scalar_len(x: Param[Float], n: Param[I32], out: Param[Float]) -> Unit !Dev = {
   let base = tile_at(block_id(0), SK_TILE)
   let live = lt_i(lanes(base, [SK_TILE]), broadcast(idx_as_tile(idx_of(scalar(n))), [SK_TILE]))
-  let v = load(x, base, [SK_TILE], mask: Some(live), pad: Some(f_const(F32, 0.0)))
+  let v = load(x, base, [SK_TILE], mask: Some(live), pad: Some(f_const(F64, 0.0)))
   store(out, base, v, mask: Some(live))
+}
+
+# The same i32 as the UPPER BOUND of a loop: one block sums the first `n`
+# tiles of x lane by lane, in order, so the trip count is the launch's and
+# the cubin is one program for every `n`, including 0 (the loop never runs
+# and the block stores its zeros).
+fn scalar_loop(x: Param[Float], n: Param[I32], out: Param[Float]) -> Unit !Dev = {
+  var acc: Tile[Float] = full([SK_TILE], 0.0)
+  for j in d_range(idx_const(0), idx_of(scalar(n))) {
+    acc = acc + load(x, tile_at(j, SK_TILE), [SK_TILE])
+  }
+  store(out, tile_at(block_id(0), SK_TILE), acc)
 }
 
 # The two 64-bit formats beside a pointer of the other kind: an f64 scale and

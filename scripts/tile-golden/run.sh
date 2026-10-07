@@ -486,7 +486,7 @@ kernels=(
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
   insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg
   flash_attn idx_softmax carry_extent flash_attn_bf16
-  scalar_scale scalar_len scalar_wide)
+  scalar_scale scalar_len scalar_loop scalar_wide)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -1136,6 +1136,9 @@ writer_mutant_checks() { # name, kernel, shape, fragment
       file-shorter)
         [ "$mutant_size" -lt "$golden_size" ] ||
           fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected a shorter file" ;;
+      file-longer)
+        [ "$mutant_size" -gt "$golden_size" ] ||
+          fail "$name: $k.tilebc is $golden_size bytes and the mutant's is $mutant_size on $backend; expected a longer file" ;;
       *) fail "writer_mutant_checks: unknown shape $shape" ;;
     esac
   done
@@ -2403,22 +2406,23 @@ fi
 # 76. The writer types a by-value parameter as a pointer to its format
 #     (`tile<ptr<f32>>` where the entry says `tile<f32>`). The text is the
 #     lowering's and does not move; the bytes put a pointer where the
-#     kernel's `mulf` wants a float tile, and tileiras refuses the operand.
+#     kernel's `ftof` wants a float tile, and the file is LONGER (the
+#     pointer type is new to the table).
 if run_item scalar-param-as-ptr; then
   mutant_project scalar-param-as-ptr bytecode.dawn
-  writer_mutant_checks scalar-param-as-ptr scalar_scale file-shorter \
-    "'cuda_tile.reshape' op requires the same element type for all operands and results"
+  writer_mutant_checks scalar-param-as-ptr scalar_scale file-longer \
+    "'cuda_tile.ftof' op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32"
 fi
 
 # 77. The writer types an f32 by-value parameter as i32: the same width, a
 #     different kind. The file is shorter, not the same length, because the
 #     i32 scalar tile is a type the table already holds for scalar_scale's
 #     block id and the f32 one is no longer written; what refuses it is the
-#     reshape of an i32 value into an f32 tile.
+#     widening `ftof`, which takes a float tile and is handed an i32 one.
 if run_item scalar-dtype-as-i32; then
   mutant_project scalar-dtype-as-i32 bytecode.dawn
   writer_mutant_checks scalar-dtype-as-i32 scalar_scale file-shorter \
-    "'cuda_tile.reshape' op requires the same element type for all operands and results"
+    "'cuda_tile.ftof' op operand #0 must be tile of f16 or bf16 or f32 or f64 or tf32"
 fi
 
 # 78. The lowering binds a scalar read to the parameter AFTER its own, so

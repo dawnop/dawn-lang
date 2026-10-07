@@ -102,7 +102,11 @@
 #             ones written through `tensor_view` and `partition_view` and
 #             are held to the same host references, so the judgement is
 #             that two ways of computing an address answer the same bits)
-#             and dyn_diff.dawn the three dynamic-dimension kernels of
+#             and scalar_diff.dawn the four scalar-parameter kernels of tileir
+#             0.12.0 (one cubin per kernel launched on several values of its
+#             by-value f32, i32, f64 and i64 parameters, three of them with
+#             garbage in the upper half of the argument word) and
+#             dyn_diff.dawn the three dynamic-dimension kernels of
 #             knife T12 with `view_transpose` beside them (the first family
 #             whose unit of comparison is a KERNEL AND A SHAPE: the tensors
 #             these read have no extent in the program, so each cubin is
@@ -1063,6 +1067,13 @@ view_order=("${views[@]}" transpose_tail)
 dyns=(view_dyn_transpose view_tensor_shape view_index_space)
 dyn_order=("${dyns[@]}" view_transpose)
 
+# The scalar-parameter kernels of tileir 0.12.0, in the order scalar_diff
+# takes them. Their scalars are launch arguments, so each cubin is launched
+# on several values (and, for three of the cases, with garbage in the upper
+# half of the 8-byte argument word); that is a property of scalar_diff's case
+# list and not of this one.
+scalars=(scalar_scale scalar_len scalar_loop scalar_wide)
+
 # The rest of the view family (knife T13), in the order gsview_diff takes
 # them: the two views a grid view cannot spell (a strided one, whose
 # traversal need not be its tile, and a gather/scatter one, whose index at
@@ -1159,7 +1170,7 @@ echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kern
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${views[@]}" "${dyns[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
+  "${hints[@]}" "${views[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
   "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
@@ -1212,6 +1223,8 @@ dyn_cubins=()
 for k in "${dyn_order[@]}"; do dyn_cubins+=("$work/$k.cubin"); done
 gsview_cubins=()
 for k in "${gsview_order[@]}"; do gsview_cubins+=("$work/$k.cubin"); done
+scalar_cubins=()
+for k in "${scalars[@]}"; do scalar_cubins+=("$work/$k.cubin"); done
 seq_cubins=()
 for k in "${seq_order[@]}"; do seq_cubins+=("$work/$k.cubin"); done
 
@@ -2591,6 +2604,51 @@ print(f'PASS  measured: Abramowitz-Stegun 7.1.26 is out by {e:.3e} on the device
 " "$as_error" || fail "the erf composition's measured error is outside the bound it claims ($as_error)"
 fi
 
+# ---- native, the scalar-parameter kernels (tileir 0.12.0)
+#
+# The verdict is the usual one. What is new is what the cases do: each cubin
+# is launched on more than one value of its scalar, three cases put garbage
+# in the upper 32 bits of the 8-byte argument word (docs/tileir-k4-design.md
+# 3.6's assumption that the driver reads the declared width), and the
+# transcript's `probe scalars` line says whether the answers moved with the
+# value.
+build_native "$root/std" "$work/scalar.bin" "$here/scalar_diff.dawn"
+rc=0
+device "$work/scalar.bin" "${scalar_cubins[@]}" > "$work/scalar.out" 2> "$work/scalar.err" || rc=$?
+cat "$work/scalar.out"
+scalar_verdict="$(verdict_of "$work/scalar.out")"
+case "$scalar_verdict" in
+  pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
+        echo "PASS  native: the ${#scalars[@]} scalar-parameter kernels agree with the fake device bit for bit on every value" ;;
+  blocked:*) [ "$rc" = 0 ] || fail "verdict $scalar_verdict with exit $rc"
+        echo "BLOCKED  native: the driver refused before a result could be compared: $scalar_verdict" ;;
+  fail) cat "$work/scalar.err" >&2; fail "the device answered and disagreed with the fake device on a scalar-parameter kernel (see the transcript above)" ;;
+  *) cat "$work/scalar.err" >&2; fail "scalar_diff printed no verdict (exit $rc)" ;;
+esac
+[ -n "$note" ] || note="$(sed -n 's/^  note  //p' "$work/scalar.out" | sed -n 1p)"
+
+# The scalar corpus, held field by field. `garbage` is the cases that hand the
+# device a word with garbage in its upper half; zero would mean the
+# assumption was never tested. `masked` is the lanes the mask bound switched
+# off in the n=5 case. The probe line says the answers MOVED with the value
+# (`distinct`) and that the garbage cases answered what their clean twin did
+# (`highbits=ignored`): `same` there would mean the scalar never arrived.
+scalar_shape_line="$(awk '/^  index /{sub(/^  index /, ""); print; exit}' "$work/scalar.out")"
+[ -n "$scalar_shape_line" ] || fail "scalar_diff printed no index line"
+scalar_probe="$(sed -n 's/^probe scalars //p' "$work/scalar.out" | tail -n 1)"
+if [ "$scalar_verdict" = pass ]; then
+  for field in garbage masked; do
+    value="$(printf '%s\n' "$scalar_shape_line" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+    [ "$value" -gt 0 ] 2> /dev/null ||
+      fail "the scalar corpus has $field=$value, so that claim is not tested: $scalar_shape_line"
+  done
+  [ "$scalar_probe" = "highbits=ignored scales=distinct lens=distinct trips=distinct" ] ||
+    fail "the scalar probe is not the one the claims need ($scalar_probe)"
+  echo "PASS  corpus: the answers move with every scalar, the garbage-high-half cases answer what their clean words do ($scalar_shape_line $scalar_probe)"
+else
+  echo "SKIP  corpus: the scalar counts are not verifiable on this driver ($scalar_verdict)"
+fi
+
 # The tier summary and the fold-order probe go into the ledger note: the
 # probe is a RECORD and not an assertion (docs 6.5), so a tileiras upgrade
 # that changes the device's reduction tree shows up in the ledger rather
@@ -2617,6 +2675,7 @@ tiers="$tiers global:$(sed -n 's/^tiers //p' "$work/global.out" | tail -n 1)"
 tiers="$tiers syms:$(sed -n 's/^tiers //p' "$work/sym.out" | tail -n 1)"
 tiers="$tiers alloca:$(sed -n 's/^tiers //p' "$work/alloca.out" | tail -n 1)"
 tiers="$tiers seq:$(sed -n 's/^tiers //p' "$work/seq.out" | tail -n 1)"
+tiers="$tiers scalar:$(sed -n 's/^tiers //p' "$work/scalar.out" | tail -n 1)"
 probe="$(sed -n 's/^probe fold-order //p' "$work/reduced.out" | tail -n 1)"
 scan_probe="$(awk '/^  order /{sub(/^  order /, ""); print; exit}' "$work/scan.out")"
 erf_probe="$(sed -n 's/^probe as-error //p' "$work/erf.out" | tail -n 1)"
@@ -2641,6 +2700,7 @@ verdict_families=(
   dtype_verdict arch_verdict loop_verdict dbg_verdict dbg_fail_verdict
   dbg_print_verdict shape_verdict attr_verdict global_verdict sym_verdict
   alloca_verdict view_verdict dyn_verdict gsview_verdict hint_verdict seq_verdict
+  scalar_verdict
 )
 fold_verdict_selftest || fail "the verdict fold's negative control failed"
 fold_script_selftest "$here/run.sh" || fail "a family verdict is assigned in run.sh but not read by the fold"
@@ -5520,6 +5580,132 @@ shape_pkg_mutant insert-indices-reversed bytecode.dawn \
   'list.fold(list.reverse(indices), emit_ref(emit_ref(w1, src), dest), emit_ref)' \
   insert_tile
 
+# ---- the scalar-parameter mutants (tileir 0.12.0): the real handler's argument
+# words. Each is a copy of std with one anchor rewritten in std/gpu.dawn's
+# `device_pointers`, the function that turns a launch's arguments into the
+# 8-byte words `cuLaunchKernel` reads.
+#
+# What a scalar_diff mutant must do: a control stays pass and its probe line
+# stays what the clean run's is, and a red mutant says `differ:result` for
+# exactly the named cases and for no other.
+scalar_std_mutant() { # name, std-dir, red tags...
+  local name="$1" std_dir="$2" rc=0 mverdict differ
+  shift 2
+  local red=("$@")
+  build_native "$std_dir" "$work/m-$name.bin" "$here/scalar_diff.dawn"
+  if [ "$scalar_verdict" != pass ]; then
+    echo "SKIP  mutant: $name not verifiable on this driver: the clean run is $scalar_verdict, before any launch reaches the device"
+    return 0
+  fi
+  device "$work/m-$name.bin" "${scalar_cubins[@]}" > "$work/m-$name.out" 2>&1 || rc=$?
+  mverdict="$(verdict_of "$work/m-$name.out")"
+  if [ "${#red[@]}" = 0 ]; then
+    [ "$mverdict" = pass ] && [ "$rc" = 0 ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name is a control and must stay green, got $mverdict (exit $rc)"; }
+    [ "$(sed -n 's/^probe scalars //p' "$work/m-$name.out" | tail -n 1)" = "$scalar_probe" ] ||
+      { cat "$work/m-$name.out" >&2; fail "$name: the control's probe line moved"; }
+    echo "PASS  mutant: $name (control: the host clearing the upper half of an i32 or f32 word changes nothing, so the device never read it; verdict pass)"
+    return 0
+  fi
+  differ=$(grep -c '^  verdict differ:result$' "$work/m-$name.out" || true)
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ] || [ "$differ" != "${#red[@]}" ]; then
+    cat "$work/m-$name.out" >&2
+    fail "$name stayed green: expected fail (exit 1) with exactly ${red[*]} saying differ:result, got $mverdict (exit $rc, $differ differing)"
+  fi
+  for t in "${red[@]}"; do
+    awk -v want="$t" '/^kernel /{cur=$3} /^  verdict differ:result$/ && cur == want {seen=1} END {exit !seen}' \
+      "$work/m-$name.out" || { cat "$work/m-$name.out" >&2; fail "$name: $t is one of the cases that should differ"; }
+  done
+  echo "PASS  mutant: $name (on the device ${red[*]} differ and the other cases do not)"
+}
+
+# 55. word-high-bits-cleared: the real handler clears the upper 32 bits of an
+#     i32 or f32 word before it is passed. This is the CONTROL for the
+#     assumption in docs/tileir-k4-design.md 3.6: if the device read the upper
+#     half, clearing it would change the garbage-word cases' answers; it does
+#     not, so the clean run and this one agree on every case and the
+#     garbage-high-half cases do not owe their pass to the host.
+std_hb="$(mutant_std word-high-bits-cleared \
+  '      Word(_d, bits) -> {
+        a = array_push(a, bits)
+      }' \
+  '      Word(d, bits) -> {
+        a = array_push(a, if d == "i32" || d == "f32" { bits & 0xFFFFFFFF } else { bits })
+      }')"
+scalar_std_mutant word-high-bits-cleared "$std_hb"
+
+# 56. scalar-passed-as-handle: the real handler treats a scalar's value as a
+#     buffer handle first, and passes that buffer's device POINTER when it
+#     is one. The only case whose value is a live handle is scalar_len n=2
+#     (its buffers are handles 1 and 2): every lane's mask then opens,
+#     because a pointer is a very large length, and its answer is the whole
+#     input. No other case's value names a buffer, which is also why no trip
+#     count in the corpus is 1 or 2.
+std_ph="$(mutant_std scalar-passed-as-handle \
+  '      Word(_d, bits) -> {
+        a = array_push(a, bits)
+      }' \
+  '      Word(_d, bits) -> match map.get(table, bits) {
+        Some(b) -> {
+          let (p, _n, _dt) = b
+          a = array_push(a, p)
+        }
+        None -> {
+          a = array_push(a, bits)
+        }
+      }')"
+scalar_std_mutant scalar-passed-as-handle "$std_ph" n2
+
+# 57. scalars-swapped: the real handler passes the launch's scalars in the
+#     opposite order among themselves. Only scalar_wide takes two (an f64 and
+#     an i64), so the two cases of it are red and every other case, with one
+#     scalar, is the identity.
+std_sw="$(mutant_std scalars-swapped \
+  '  var a: Array[Int] = array_new()
+  for arg in args {
+    match arg {
+      Buf(h) -> match map.get(table, h) {
+        Some(b) -> {
+          let (p, _n, _dt) = b
+          a = array_push(a, p)
+        }
+        None -> ()
+      }
+      Word(_d, bits) -> {
+        a = array_push(a, bits)
+      }
+    }
+  }
+  a' \
+  '  var a: Array[Int] = array_new()
+  var seen = 0
+  let words = list.filter(args, w => match w {
+    Word(_d, _b) -> true
+    Buf(_h) -> false
+  })
+  for arg in args {
+    match arg {
+      Buf(h) -> match map.get(table, h) {
+        Some(b) -> {
+          let (p, _n, _dt) = b
+          a = array_push(a, p)
+        }
+        None -> ()
+      }
+      Word(_d, _bits) -> {
+        match words[len(words) - 1 - seen] {
+          Word(_d2, other) -> {
+            a = array_push(a, other)
+          }
+          Buf(_h2) -> ()
+        }
+        seen = seen + 1
+      }
+    }
+  }
+  a')"
+scalar_std_mutant scalars-swapped "$std_sw" a-big a-3
+
 # ---- ledger
 if [ "$append" = no ]; then
   echo "      --dry: ledger not written (would record: $verdict)"
@@ -5540,7 +5726,7 @@ dirty="$(git status --porcelain -- packages/tileir packages/tileref std/gpu.dawn
   scripts/tile-gpu-diff/global_diff.dawn scripts/tile-gpu-diff/sym_diff.dawn \
   scripts/tile-gpu-diff/hint_diff.dawn \
   scripts/tile-gpu-diff/alloca_diff.dawn scripts/tile-gpu-diff/view_diff.dawn \
-  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn \
+  scripts/tile-gpu-diff/dyn_diff.dawn scripts/tile-gpu-diff/gsview_diff.dawn scripts/tile-gpu-diff/scalar_diff.dawn \
   scripts/tile-gpu-diff/seq_diff.dawn scripts/tile-gpu-diff/arch_diff.dawn \
   scripts/tile-gpu-diff/mutate.py scripts/tile-gpu-diff/inputs.py scripts/tile-gpu-diff/fold_verdict.sh)"
 [ -z "$dirty" ] ||
@@ -5555,6 +5741,7 @@ summary="$summary seq-launches=$seq_launch_probe loop-rounds=$loop_probe"
 summary="$summary alloca=$alloca_shape symbols=$sym_probe views=$view_shape_line powi=$powi_shape"
 summary="$summary dyn=$dyn_shape_line $dyn_probe"
 summary="$summary gsview=$gsview_shape_line $gsview_probe"
+summary="$summary scalar=$scalar_shape_line $scalar_probe"
 summary="$summary arch=$arch_probe"
 summary="$summary asm=$asm_probe"
 if [ -n "$note" ]; then line="$line # inputs=$inputs_digest $note; $summary"; else line="$line # inputs=$inputs_digest $summary"; fi
