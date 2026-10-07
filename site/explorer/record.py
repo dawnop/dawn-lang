@@ -4,6 +4,15 @@
     python3 site/explorer/record.py              # write site/build/explorer/
     python3 site/explorer/record.py --out DIR    # write DIR (site-dist-diff's snapshot)
     python3 site/explorer/record.py --self-test  # each way of getting it wrong is red
+    python3 site/explorer/record.py [--samples] --raw DIR [--legacy-out DIR]
+
+TRANSITION. The page now reads the raw material this script gathers (what
+`--out` and the default write: per program a directory with the C text, the
+two maps, the javap listing and a spec) through packages/xmap, which does
+what the rest of this file does. The assembly below stays for one more
+commit as the other end of scripts/xmap-diff/run.sh's differential
+(`--legacy-out` writes its `.xmap` files from the same compiler run), and
+goes when that has passed.
 
 The explorer page (site/src/gen/explorer.dawn, docs/explorer-page-design.md)
 puts a program's Dawn source beside the output it compiles to, and a click on
@@ -590,21 +599,6 @@ def main_raw(out, programs=None, legacy_out=None):
         (legacy_out / "programs.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
 
 
-def main_write(out, programs=None):
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-    names = []
-    for prog in programs or PROGRAMS:
-        b = build(prog)
-        write(prog, b, out)
-        names.append(prog["name"])
-        print(f"explorer: {prog['name']}: {len(b['table'])} calls, "
-              + ", ".join(f"{k} {len(t)} lines" for k, (t, _), _n in b["panes"])
-              + (f"; {b['skipped']} host-only call(s) not shown" if b["skipped"] else ""))
-    (out / "programs.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
-
-
 # ---- the negative controls ----
 
 def self_test():
@@ -683,17 +677,15 @@ def main():
     if args == ["--self-test"]:
         self_test()
     elif args == []:
-        main_write(OUT)
+        main_raw(OUT)
     elif len(args) == 2 and args[0] == "--out":
-        main_write(Path(args[1]))
-    elif len(args) == 3 and args[0] == "--samples" and args[1] == "--out":
-        main_write(Path(args[2]), SAMPLES)
+        main_raw(Path(args[1]))
     elif args[:1] == ["--raw"] and len(args) in (2, 4) and (len(args) == 2 or args[2] == "--legacy-out"):
         main_raw(Path(args[1]), None, Path(args[3]) if len(args) == 4 else None)
     elif args[:2] == ["--samples", "--raw"] and len(args) in (3, 5) and (len(args) == 3 or args[3] == "--legacy-out"):
         main_raw(Path(args[2]), SAMPLES, Path(args[4]) if len(args) == 5 else None)
     else:
-        fail("usage: record.py [--out DIR | --self-test]")
+        fail("usage: record.py [--out DIR | --self-test | [--samples] --raw DIR [--legacy-out DIR]]")
 
 
 if __name__ == "__main__":
