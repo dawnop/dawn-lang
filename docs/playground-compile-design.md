@@ -1,6 +1,6 @@
 # Playground 在线编译：改过的代码也能对照 C / JVM / Tile IR
 
-> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）与 K2（runner 的 `POST /compile`）已实现，见第七节；前端 K3 起尚无代码）。这是 `docs/explorer-page-design.md`
+> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）与 K3（前端窗格，C 与 JVM）已实现，见第七节；K4 起尚无代码）。这是 `docs/explorer-page-design.md`
 > 第九节留的「下一步」：把 `--map` 接到 Playground，让浏览器里现改的代码也能和产物对照，形态向
 > Compiler Explorer 看齐。依赖：M3/M4（`__emitc --map`、`__emit --map`，`docs/source-span-map-design.md`
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
@@ -363,6 +363,37 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 - 门禁：`site builds end-to-end`（含 Playground 编辑器 bundle）、`site dist, JVM vs native`；若拆分改变了发布的 `explorer.js` 字节，
   按站点输出变化声明。
 - 墙钟：bundle 体积增量在 PR 里报（以 PR 内实测为准，不在此处断言数字）。
+
+**K3 落地记录（2026-10-07）。**
+- **实现：** `site/play-ui/src/` 新增四个模块。`explorer-core.ts`（线上格式的校验 `readView`、拥有关系 `Model`、点击与方向键的去向、状态行文字，纯函数）、
+  `compile-state.ts`（`/compile` 各种回答的含义、`?view=` 读写、自动重编的暂停与恢复，纯函数）、`call-marks.ts`（编辑器一侧：调用名的虚线、选中调用的整段下划线，
+  区间放在编辑器状态里随编辑映射）、`compile-view.ts`（窗格的 DOM 与请求）。`main.ts` 只接线；`endpoints.ts` 多一个 `compile`。
+- **与第五节的两处不同（请裁决是否认）：** (1) 5.1 写的是窗格与输出面板「共用一个标签条」。实做为工具栏的 `C / JVM` 开关加一个独立窗格，Run 的控制台不动：
+  控制台是一次运行的结果，窗格是随输入重算的、要指着看的东西，放进同一个条里两边的状态（空闲、编译中、过期）会互相踩。`Tile IR` 标签没有占位，K5 再加。
+  (2) 5.2 推荐的「把 `explorer.js` 拆成 core 两边共用」**没有做**：`explorer.js` 是站点原样发布的普通脚本（带指纹、无模块、无构建），读的是服务端 HTML 里的属性，
+  而这边收到的是 JSON、自己画行，两边没有一个函数能真共用。共用的是**契约**：同样的 class（`xl`、`xp-hit`、`xp-in`、`xp-ipc`、`xp-on`）、同样的 `data-o`/`data-i`/`data-k`、
+  同样的状态行措辞，样式用站点的 `style.css`；`selftest.ts` 读 `style.css`，哪天它不再有窗格用到的选择器就红。把 `explorer.js` 改成本 bundle 的构建产物会改动发布字节、
+  并让静态页的构建依赖 node，为一百来行规则不值得。
+- **行为：** 窗格默认关；打开即编译；`?view=c|jvm` 记当前标签（旧链接无此参数则关；`output`、`tile` 或别的值也当作关），刷新与「Share」保持标签，选中的调用不入 URL。
+  编辑后立刻标「Out of date」，空闲 1.5 s 自动重编，下一次按键取消在途请求并重计时；`/compile` 或 `/run` 答 429 即退回仅手动（两者共用两个许可），
+  读者主动按 Compile 且服务不答 429 时恢复自动。每个可见标签一个请求，另一半靠服务端缓存（切标签约 10 ms）。
+  点击源码里的调用名选中，窗格里它自己写的行（强调色边与行号）、里面嵌套的调用写的行（更淡的边）亮起，C 栏的列段加下划线，JVM 栏的指令加粗；点窗格里的行选中最内层所有者；
+  再点一次、Esc（窗格内或编辑器内）取消；切标签保留选中。状态行是 `role=status` 的礼貌 live region，文字与静态页一致（`println · 14:5–14:22 → C line 62`）。
+  窗格里的行是 roving tabindex（一个 tab 停靠点，方向键、Home、End 在有主的行间走，Enter/空格选中）。
+- **编辑器里的键盘：** CodeMirror 的正文是可编辑文本，调用名不能像静态页那样成为 tab 停靠点，Enter 也必须仍是换行，所以键盘入口是 **Alt-Enter**（选中光标处最内层的调用，再按一次取消）与
+  Esc。光标不在任何调用上时状态行说 `No call at the cursor.`。窗格没有选中项时，状态行提示这两个入口。
+- **失败态：** 编译错误：窗格顶部显示 `/compile` 的诊断原文（与 `/check`、`/run` 控制台逐字节同源，合约已测），上一次的列表保留并标过期，编辑器里的波浪线仍由 LSP 或 `/check` 画，不重复推送；
+  429、413、422、503、其他状态、网络错误各有一句话（`compile-state.ts` 的 `messageOf`）；`gaps.count > 0`、`pane.truncated`、`calls_truncated` 各一条不阻塞的提示，列表照常可用。
+  服务答的内容过不了 `readView` 的检查（调用行号不连续、区间越界等），显示「an answer this page cannot read」，不画一个会高亮错行的窗格。
+- **布局：** 宽屏窗格在编辑器右侧（44%），`max-width: 44rem` 以下叠在编辑器下（46%），沿用 `playground.css` 现有断点。窗格与工作区都设 `min-width: 0`，列表在自己的框里横向滚动。
+  `site/play-ui/test/layout-check.mjs`（手工脚本，不进 CI：docs 作业没有浏览器驱动）在真浏览器里量页面宽度，用一份比屏幕宽得多的假列表与假诊断，
+  375、320、1280 px 各量一次，页面宽度均不超过视口；`selftest.ts` 另守住使之成立的 CSS 规则。
+- **门禁缺口（发现，未处理）：** `site/play-ui` 的 `npm test`（`selftest.ts`）**从未在 CI 里跑过**：`gates.yml` 与其他工作流都没有这一步，`editor-grammar.yml` 跑的是 `editors/vscode` 的。
+  本刀的 K3 验收（选择、反查、Esc、键盘、负控）因此只在本机成立。接进 docs 作业是一步（约 5 至 8 s，`site/build.sh` 已装好依赖），但要改 `steps.lock.json`、
+  开新的观测窗口，需要裁决，没有擅自加。
+- **负控：** 把 `Model` 的所有者排序改成「最外层在前」，`selftest.ts` 的 `a line is owned by every call that wrote it, the innermost first` 与 `a clicked line is the innermost owner` 两条红；还原后绿。
+- **bundle 体积（gzip -9）：** `playground.js` 129,437 -> 135,252 B（+5.8 KB；未压缩 397.05 -> 415.64 kB），`playground.css` 2,201 -> 2,639 B；两者合计 +6.3 KB gzip。
+  窗格关着也在 bundle 里；若要让不开窗格的人不付，需要把它拆成动态 import 的 chunk，而 `vite.config.ts` 现在只有一个具名 chunk、站点生成器按名字改指纹，留给有需要时。
 
 **K4：反代限流与部署说明。** `nginx-play.conf` 示例块、`DEPLOY.md`、`SANDBOX.md` 的限制表加 `/compile` 一行；纯文档加配置，无新测试。
 
