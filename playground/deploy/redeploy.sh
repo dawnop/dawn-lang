@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Push the playground runner to production. REPEATABLE step — assumes the
-# one-time server setup in DEPLOY.md is already done (dawn-play user, JRE 21,
+# one-time server setup in DEPLOY.md is already done (dawn-play user, JDK 21,
 # sudoers, and the gateway service/slice installed).
 #
 # Does NOT run itself as part of any build. Run it by hand when you mean to ship.
@@ -45,6 +45,19 @@ NATIVE_BUILD=${NATIVE_VERSION#"dawnc $VERSION (native)"}
 if [ "$NATIVE_BUILD" = "$NATIVE_VERSION" ] ||
     ! [[ -z "$NATIVE_BUILD" || "$NATIVE_BUILD" =~ ^\ b1:[0123456789abcdef]{12}$ ]]; then
   echo "error: native artifact says '$NATIVE_VERSION', expected dawnc $VERSION (native) [b1:<12 hex>]" >&2
+  exit 1
+fi
+
+# POST /compile lists the class it compiles with javap, which only a JDK has
+# (DEPLOY.md step 2). A runner without it still starts and answers every other
+# endpoint, which is how a deploy would go wrong quietly: the editor's output
+# tab would show a 503 and the health check would be green. So it is checked
+# here, before anything is shipped, the way the native artifact's version is.
+echo "=== checking $HOST has javap ==="
+# shellcheck disable=SC2029
+if ! ssh "$HOST" 'command -v javap >/dev/null 2>&1 && javap -version >/dev/null 2>&1'; then
+  echo "error: javap is missing on the server, so POST /compile cannot work" >&2
+  echo "install the JDK package, not only the JRE: apt-get install -y openjdk-21-jdk-headless (DEPLOY.md step 2)" >&2
   exit 1
 fi
 
