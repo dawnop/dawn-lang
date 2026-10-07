@@ -48,16 +48,24 @@ if [ "$NATIVE_BUILD" = "$NATIVE_VERSION" ] ||
   exit 1
 fi
 
-# POST /compile lists the class it compiles with javap, which only a JDK has
-# (DEPLOY.md step 2). A runner without it still starts and answers every other
-# endpoint, which is how a deploy would go wrong quietly: the editor's output
-# tab would show a 503 and the health check would be green. So it is checked
-# here, before anything is shipped, the way the native artifact's version is.
-echo "=== checking $HOST has javap ==="
+# The runner runs everything on one pinned GraalVM CE 21.0.2 unpacked for it
+# alone (DEPLOY.md step 2, playground/deploy/install-jdk.sh): the compiler and
+# user programs for /run and /check, and javap for /compile, which only a JDK
+# has. It is the toolchain CI tests on, and it is not the system's, so that no
+# package changes the JRE other JVM services on the host share. The path is the
+# one dawn-play.service gives the runner as PLAY_JDK and run-sandboxed.sh gives
+# the units as JAVA_HOME. A runner without javap still starts and answers every
+# other endpoint, which is how a deploy would go wrong quietly: the editor's
+# output tab would show a 503 and the health check would be green. And a
+# missing java would fail every /run. So both are checked here, before anything
+# is shipped, the way the native artifact's version is.
+PLAY_JDK_REMOTE="$REMOTE/graalvm-21"
+echo "=== checking $HOST has GraalVM 21.0.2 at $PLAY_JDK_REMOTE ==="
 # shellcheck disable=SC2029
-if ! ssh "$HOST" 'command -v javap >/dev/null 2>&1 && javap -version >/dev/null 2>&1'; then
-  echo "error: javap is missing on the server, so POST /compile cannot work" >&2
-  echo "install the JDK package, not only the JRE: apt-get install -y openjdk-21-jdk-headless (DEPLOY.md step 2)" >&2
+if ! ssh "$HOST" "'$PLAY_JDK_REMOTE/bin/java' -version 2>&1 | grep -q 'version \"21\\.0\\.2\"' &&
+    '$PLAY_JDK_REMOTE/bin/javap' -version 2>&1 | grep -qx '21\\.0\\.2'"; then
+  echo "error: $PLAY_JDK_REMOTE/bin/java or javap is missing or is not 21.0.2 on the server" >&2
+  echo "install the pinned JDK with playground/deploy/install-jdk.sh (DEPLOY.md step 2)" >&2
   exit 1
 fi
 

@@ -1000,36 +1000,67 @@ def assert_native_guard(block):
 
 
 def javap_deploy_contract():
-    """A deploy that cannot list classes must be refused before it ships.
+    """A deploy that cannot run on the pinned JDK must be refused before it ships.
 
-    POST /compile needs `javap`, which the JDK package has and the JRE package
-    does not. A runner without it starts and passes its health check, so the
+    The server runs everything on one GraalVM CE 21.0.2 in its own directory,
+    never from apt, so that it matches the toolchain CI tests on and no package
+    moves the JRE other JVM services on the host share. POST /compile needs its
+    `javap`. A runner without it starts and passes its health check, so the
     only place the gap is visible is the deploy: redeploy.sh asks the server
-    before it syncs anything, and DEPLOY.md installs the JDK package.
+    for java and javap there before it syncs anything, and the service unit,
+    the sandbox wrapper (JAVA_HOME of the units), the deploy and the install
+    helper must all name the same directory and version.
     """
     redeploy = read_text(os.path.join(DEPLOY, "redeploy.sh"))
     doc = read_text(os.path.join(DEPLOY, "DEPLOY.md"))
+    unit = read_text(os.path.join(DEPLOY, "dawn-play.service"))
+    install = read_text(os.path.join(DEPLOY, "install-jdk.sh"))
+    wrapper = read_text(os.path.join(ROOT, "playground", "sandbox", "run-sandboxed.sh"))
 
-    def holds(script, setup):
-        assert "command -v javap" in script, "the deploy does not ask for javap"
-        guard = script.index("command -v javap")
+    def holds(script, setup, service, helper, sandbox):
+        assert 'PLAY_JDK_REMOTE="$REMOTE/graalvm-21"' in script, "the deploy does not name the isolated JDK"
+        assert "Environment=PLAY_JDK=/opt/dawn/graalvm-21\n" in service, "the unit does not point PLAY_JDK at it"
+        assert "Environment=JAVA_HOME=/opt/dawn/graalvm-21\n" in service, "the runner itself is not on it"
+        assert "\nSANDBOX_JAVA_HOME=/opt/dawn/graalvm-21\n" in sandbox, "the sandbox units are not on it"
+        assert '--setenv="JAVA_HOME=$SANDBOX_JAVA_HOME"' in sandbox, "the sandbox does not pass it"
+        assert 'TARGET="$REMOTE/graalvm-21"' in helper and "REMOTE=/opt/dawn\n" in helper, "the helper installs elsewhere"
+        guard = script.index("'$PLAY_JDK_REMOTE/bin/java' -version")
         first_sync = script.index("rsync -avz bin/")
-        assert guard < first_sync, "javap is checked after the first sync"
-        assert "exit 1" in script[guard:first_sync], "the javap check does not stop the deploy"
-        assert "openjdk-21-jdk-headless" in setup, "DEPLOY.md does not install the JDK package"
-        assert "openjdk-21-jre-headless python3" not in setup, "DEPLOY.md installs only the JRE"
+        assert guard < first_sync, "the JDK is checked after the first sync"
+        assert "exit 1" in script[guard:first_sync], "the JDK check does not stop the deploy"
+        assert "bin/javap' -version" in script[guard:first_sync], "the check does not ask javap"
+        assert script[guard:first_sync].count("21\\\\.0\\\\.2") == 2, "the check does not require 21.0.2 of both"
+        assert "command -v javap" not in script, "the deploy looks for javap on the system PATH"
+        assert "install-jdk.sh" in setup and "/opt/dawn/graalvm-21" in setup, "DEPLOY.md does not install the isolated JDK"
+        assert "apt-get install -y openjdk-21-jdk" not in setup, "DEPLOY.md installs the system JDK package"
+        assert "sha256sum -c" in helper, "the helper does not verify the tarball"
+        assert "graalvm-community-jdk-21.0.2_linux-x64_bin.tar.gz" in helper, "the helper is not on the pinned tarball"
 
-    holds(redeploy, doc)
+    holds(redeploy, doc, unit, install, wrapper)
     expect_contract_red(
-        "no javap check", lambda: holds(redeploy.replace("command -v javap", "command -v java"), doc)
+        "javap looked up on the system PATH",
+        lambda: holds(
+            redeploy.replace('PLAY_JDK_REMOTE="$REMOTE/graalvm-21"', "command -v javap"), doc, unit, install, wrapper
+        ),
     )
     keeps_going = mutate_once(redeploy, '  exit 1\nfi\n\necho "=== syncing', '  true\nfi\n\necho "=== syncing')
-    expect_contract_red("javap check that does not stop", lambda: holds(keeps_going, doc))
+    expect_contract_red("JDK check that does not stop", lambda: holds(keeps_going, doc, unit, install, wrapper))
     expect_contract_red(
-        "JRE only",
-        lambda: holds(redeploy, doc.replace("openjdk-21-jdk-headless python3", "openjdk-21-jre-headless python3")),
+        "unit points elsewhere",
+        lambda: holds(redeploy, doc, unit.replace("PLAY_JDK=/opt/dawn/graalvm-21", "PLAY_JDK=/usr"), install, wrapper),
     )
-    ok("a deploy without javap is refused before anything ships")
+    expect_contract_red(
+        "sandbox units left on the system java",
+        lambda: holds(redeploy, doc, unit, install, wrapper.replace('  --setenv="JAVA_HOME=$SANDBOX_JAVA_HOME" \\\n', "")),
+    )
+    expect_contract_red(
+        "system JDK package",
+        lambda: holds(redeploy, doc + "\n   sudo apt-get install -y openjdk-21-jdk-headless python3\n", unit, install, wrapper),
+    )
+    expect_contract_red(
+        "unverified tarball", lambda: holds(redeploy, doc, unit, install.replace("sha256sum -c", "true"), wrapper)
+    )
+    ok("a deploy without the pinned JDK is refused before anything ships")
 
 
 def native_version_guard_contract():

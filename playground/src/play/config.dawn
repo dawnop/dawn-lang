@@ -11,15 +11,34 @@ fn env_or(name: String, fallback: String) -> String !io =
 # The `dawn` CLI used to compile user code. Server sets DAWN_BIN=/opt/dawn/bin/dawn.
 pub fn dawn_bin() -> String !io = env_or("DAWN_BIN", "dawn")
 
-# The `java` used to run the compiled jar. Server puts the JDK on PATH.
-pub fn java_bin() -> String !io = env_or("PLAY_JAVA", "java")
+# The JDK the server runs everything on: the compiler and the user's program
+# for /run and /check, and `javap` for /compile. It is a pinned GraalVM CE
+# unpacked for the runner alone (playground/deploy/DEPLOY.md step 2), so that
+# the server runs the toolchain CI tests on and no system package moves the JRE
+# other JVM services on the host share. Empty means "whatever is on the PATH",
+# which is how a dev box runs.
+pub fn jdk_home() -> String !io = env_or("PLAY_JDK", "")
+
+# `bin/<tool>` of a JDK, or the bare name when there is no JDK configured. An
+# absolute path matters in the sandbox: a unit starts with an empty environment
+# and its PATH is systemd's default, which has no such JDK on it.
+pub fn jdk_tool(jdk: String, tool: String) -> String =
+  if jdk == "" { tool } else { "${jdk}/bin/${tool}" }
+
+test "a tool is the bare name without a JDK and an absolute path with one" {
+  assert jdk_tool("", "javap") == "javap"
+  assert jdk_tool("/opt/dawn/graalvm-21", "java") == "/opt/dawn/graalvm-21/bin/java"
+}
+
+# The `java` used to run the compiled jar. PLAY_JAVA names another one (the
+# contract test sets it to the JDK it runs on); otherwise PLAY_JDK's.
+pub fn java_bin() -> String !io = env_or("PLAY_JAVA", jdk_tool(jdk_home(), "java"))
 
 # The `javap` that lists the class the JVM view shows. It must come from the
 # same JDK major as the one `dawn` runs on (docs/source-span-map-design.md
-# 13.6: the listing is read on the pinned JDK), which is why a deploy needs the
-# JDK package and not only the JRE. Resolved the way `java` is, by name on the
-# PATH of whoever runs it, in the sandbox the unit's.
-pub fn javap_bin() -> String !io = env_or("PLAY_JAVAP", "javap")
+# 13.6: the listing is read on the pinned JDK), which is why a deploy needs a
+# JDK and not only a JRE. PLAY_JAVAP overrides, as PLAY_JAVA does.
+pub fn javap_bin() -> String !io = env_or("PLAY_JAVAP", jdk_tool(jdk_home(), "javap"))
 
 # Wall-clock seconds a user program may run before it is force-killed.
 pub fn timeout_secs() -> Int !io =
