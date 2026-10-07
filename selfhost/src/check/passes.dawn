@@ -41,7 +41,7 @@ use check/types.{
   hard_reserved_builtin_type_name, peel_opaque,
   prelude_impls, prelude_trait_ids, fn_max_params, ctl_max_op_params,
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
-  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, ord_scalars, Head, head_of, impl_at,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, opaque_inherits, eq_scalars, hash_scalars, ord_scalars, Head, head_of, impl_at,
   derivable_traits, derivable_named, derivable_names, adt_derives,
   has_impl_at, insert_impl, type_args_of, sub_goals
 }
@@ -491,11 +491,11 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
             # Whether a field can be ordered is a question about the value,
             # and an opaque type's value is its target's (spec 2.7). Below
             # the `impl_at` above, so an impl on the wrapper answers first.
-            # Rendering is the exception: an opaque type does not inherit its
-            # target's `Show` (checker.resolve_witness says why), so a field
-            # of one is printable only through an impl written on it.
+            # Only the relations fall through (`opaque_inherits`), so a field
+            # of an opaque type is printable only through an impl written on
+            # it: checker.resolve_witness says why `Show` does not.
             TyOpaque(_, _, _, _, tgt) ->
-              if tid == SHOW_ID { false } else { derived_field_ok(cx, tid, own, tgt) }
+              if opaque_inherits(tid) { derived_field_ok(cx, tid, own, tgt) } else { false }
             _ -> false
           }
       }
