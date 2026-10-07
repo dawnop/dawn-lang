@@ -130,7 +130,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, vadd_ref}
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, last_out_with, vadd_ref}
 use tileref/ref.{matmul_ref, matmul_bt_ref, lora_out_ref, row_softmax_ref, swiglu_act_ref, apsp_step_ref,
   causal_scores_ref, alibi_scores_ref, window_scores_ref, sink_scores_ref, decay_scores_ref, cce_row_ref,
   mean_ref, mha_scores_ref, mha_context_ref, xattn_scores_ref, xattn_context_ref, gqa_scores_ref,
@@ -302,8 +302,10 @@ pub const APSP_FAR: Float = 50.0
 type Buf = { name: String, dtype: String, data: List[Float] }
 
 ## One launch of a sequence: the kernel, the grid, and the buffers it is
-## handed, by name, in argument order.
-type Step = { kernel: String, gx: Int, gy: Int, gz: Int, args: List[String] }
+## handed, by name, in argument order. `scalars` are the values it is handed
+## BY VALUE, after the buffers (tileir 0.12: a kernel parameter that is no
+## buffer, `flash_attn`'s softmax scale); most steps pass none.
+type Step = { kernel: String, gx: Int, gy: Int, gz: Int, args: List[String], scalars: List[gpu.LaunchArg] }
 
 ## A whole sequence.
 ##
@@ -333,7 +335,11 @@ type Seq = {
 }
 
 fn step(kernel: String, gx: Int, gy: Int, gz: Int, args: List[String]) -> Step =
-  Step { kernel: kernel, gx: gx, gy: gy, gz: gz, args: args }
+  Step { kernel: kernel, gx: gx, gy: gy, gz: gz, args: args, scalars: [] }
+
+## A step that also hands the kernel scalars, after its buffers.
+fn step_scalars(kernel: String, gx: Int, gy: Int, gz: Int, args: List[String], scalars: List[gpu.LaunchArg]) -> Step =
+  Step { kernel: kernel, gx: gx, gy: gy, gz: gz, args: args, scalars: scalars }
 
 ## `body(0) ++ body(1) ++ .. ++ body(n - 1)`: a fixed-length repetition
 ## whose length is a host value and whose rounds may differ.
@@ -444,7 +450,7 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
       Ok(_) -> {
         let s = steps[i]
         let hands = list.map(s.args, a => hs[buf_pos(bufs, a)])
-        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, list.map(hands, h => gpu.Buf(h))) {
+        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, list.map(hands, h => gpu.Buf(h)) ++ s.scalars) {
           Ok(_) -> launch_all(hs, bufs, steps, i + 1, at, reset, trip)
           Err(e) -> Err(e)
         }
@@ -1323,7 +1329,7 @@ fn flash_seq() -> Seq = Seq {
   name: "flash",
   tier: "tolerance",
   bufs: flash_bufs(),
-  steps: [step("flash_attn", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"])],
+  steps: [step_scalars("flash_attn", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"], [gpu.erase(gpu.scalar(ATT_INV_SQRT_D))])],
   reads: ["o"],
   via: "o",
   stale_at: 0
@@ -1602,8 +1608,8 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
       ("swiglu_act", (3, last_out((dts, ins) => swiglu_act_ref(LM_S * LM_F, dts, ins)))),
       ("llama_down", (3, last_out((dts, ins) => matmul_bt_ref(LM_S, LM_F, LM_D, 1.0, dts, ins))))])
   } else if name == "flash" {
-    map.from([("flash_attn", (4, last_out((dts, ins) =>
-        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins))))])
+    map.from([("flash_attn", (4, last_out_with((dts, ins, ss) =>
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ss[0], dts, ins))))])
   } else if name == "flash_bf16" {
     map.from([("flash_attn_bf16", (4, last_out((dts, ins) =>
         flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins, p_round: "bf16"))))])
@@ -1678,11 +1684,17 @@ fn buffers_of(s: Seq) -> String =
     acc ++ sep ++ b.name ++ ":" ++ b.dtype ++ "[" ++ to_string(len(b.data)) ++ "]"
   })
 
+fn scalar_label(w: gpu.LaunchArg) -> String = match w {
+  gpu.Word(dtype, _bits) -> "scalar:" ++ dtype
+  _ -> "buffer"
+}
+
 fn launches_of(s: Seq) -> String =
   list.fold(s.steps, "", (acc, t) => {
     let sep = if acc == "" { "" } else { " " }
     acc ++ sep ++ t.kernel ++ "(" ++ list.fold(t.args, "", (a, n) =>
-        if a == "" { n } else { a ++ "," ++ n }) ++ ")@" ++ to_string(t.gx) ++ "x"
+        if a == "" { n } else { a ++ "," ++ n }) ++ list.fold(t.scalars, "", (a, w) => a ++ "," ++ scalar_label(w))
+      ++ ")@" ++ to_string(t.gx) ++ "x"
       ++ to_string(t.gy) ++ "x" ++ to_string(t.gz)
   })
 

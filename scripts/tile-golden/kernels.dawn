@@ -34,7 +34,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of }
 use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
-  Whole, FREE_AXIS }
+  Whole, FREE_AXIS, Scalar }
 use tileir/render.{render}
 use tileir/bytecode.{encode, bytecode_version}
 
@@ -2165,13 +2165,13 @@ fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev 
 const FA_BQ: Int = 32
 const FA_BK: Int = ATT_D
 
-fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev = {
+fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float]) -> Unit !Dev = {
   let tq = load_cell(q)
   var m: Tile[Float] = full([FA_BQ, 1], -INFINITY)
   var l: Tile[Float] = full([FA_BQ, 1], 0.0)
   var acc = zeros(o)
   for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * lit(ATT_INV_SQRT_D)
+    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
@@ -5276,9 +5276,9 @@ fn trace(name: String) -> TileProg = match name {
     p
   }
   "flash_attn" -> {
-    let (p, _e) = trace4("flash_attn",
+    let (p, _e) = trace5("flash_attn",
       In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, fa_kv()), In(F64, fa_kv()),
-      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), flash_attn)
+      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), flash_attn)
     p
   }
   "flash_attn_bf16" -> {
