@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/stdlib.md @ ad9b9fbb78e0a125 -->
+<!-- doc-check: translation-of site/pages/stdlib.md @ d6955a3ac7fab1d2 -->
 <!-- 本文是 stdlib.md 的译本，stdlib.md 是正本：改文案先改英文，再改这里。
      上面那行标记记着正本的摘要，英文动了而这里没跟，scripts/doc-check.py 会红。 -->
 
@@ -16,6 +16,9 @@
 - **prelude** 里的名字隐式可见，不必 `use`，直接写 `println("hi")`、`sort(xs)`。
 - 其余以 `use std/x` 引入，再限定调用：`use std/str` 之后写 `str.trim(s)`；
   常用的名字也可以选择性引入（`use std/str.{trim}`）。
+- 第一个参数就是被操作对象的函数也可以用点调用：`xs.sort()` 就是 `sort(xs)`；
+  `use std/str.{trim}` 之后，`s.trim()` 就是 `trim(s)`（[规范 §4.3](spec.html#s4-3)）。
+  只写整模块引入 `use std/str` 时只有限定写法 `str.trim(s)`。
 - 同一个函数在「prelude」和它所属模块里各出现一次是正常的：`sort(xs)` 与
   `list.sort(xs)` 是同一个函数的两种写法。
 - 签名里 `[T: Ord]` 是类型参数与它的约束（[规范 §3.5](spec.html#s3-5)），

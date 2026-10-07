@@ -21,6 +21,10 @@ How to read it:
 - The rest come in with `use std/x` and are then called qualified: after
   `use std/str`, write `str.trim(s)`. A single name can be imported on its own
   (`use std/str.{trim}`).
+- A function whose first parameter is the thing it works on can also be called with a
+  dot: `xs.sort()` is `sort(xs)`, and after `use std/str.{trim}`, `s.trim()` is
+  `trim(s)` ([spec §4.3](spec.html#s4-3)). A whole-module `use std/str` alone gives only the
+  qualified `str.trim(s)`.
 - A function appearing once under "prelude" and once under its module is
   normal: `sort(xs)` and `list.sort(xs)` are two ways of writing the same
   function.
