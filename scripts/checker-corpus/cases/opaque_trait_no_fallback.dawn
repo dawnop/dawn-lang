@@ -1,0 +1,42 @@
+# checker.dawn resolve_witness: an opaque type with no impl of its own falls
+# back to its target for exactly `Eq`, `Hash` and `Ord` (spec 2.7). Every
+# other trait asks only the type's own impls, so a user trait, a library
+# trait and a format-identity trait are all refused where the type wrote
+# none. `HasDtype[U16]` is the case that was silently answered as `Int`'s
+# `"i64"` before; std/dtype.dawn says it must be a type error.
+use std/dtype.{Dtype, dtype_of}
+use std/int/u16.{U16}
+use std/map
+
+opaque type Id = Int
+
+opaque type Tagged = Int
+
+trait Describe[T] {
+  fn describe(x: T) -> String
+}
+
+impl Describe[Int] {
+  fn describe(x: Int) -> String = "int"
+}
+
+impl Describe[Tagged] {
+  fn describe(x: Tagged) -> String = "tagged"
+}
+
+fn mk(n: Int) -> Id = n
+
+fn tag(n: Int) -> Tagged = n
+
+fn describe_it[T: Describe](x: T) -> String = describe(x)
+
+pub fn no_user_impl() -> String = describe_it(mk(1))
+
+pub fn own_impl() -> String = describe_it(tag(1))
+
+pub fn dtype_of_u16() -> Dtype[U16] = dtype_of()
+
+pub fn relations() -> Bool = {
+  let m: Map[Id, Int] = map.insert(map.empty(), mk(1), 1)
+  mk(1) == mk(1) && mk(1) < mk(2) && cmp(mk(1), mk(2)) < 0 && map.has(m, mk(1))
+}

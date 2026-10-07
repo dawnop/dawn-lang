@@ -10,6 +10,8 @@
 # with no impl of its own is a compile error where the alias prints. The cases
 # render through the target explicitly; the refusal itself is pinned by
 # scripts/checker-corpus/cases/opaque_show.dawn.
+# Since 2026-10-07 the same holds for every trait outside `Eq`/`Hash`/`Ord`
+# (spec 2.7); the fourth verdict below pins that.
 #
 #   ./scripts/opaque-twin/run.sh              # every case
 #   ./scripts/opaque-twin/run.sh str bytes    # just these
@@ -64,6 +66,18 @@
 # The opaque side still runs in full, so the identity claims it makes (`==`,
 # hash, rendering are the tuple's) are still checked, against the target,
 # inside one run, the way char.dawn does it.
+#
+# ## The fourth verdict: the alias side compiles, the opaque side is refused
+#
+# spec 2.7 lets an opaque type inherit only `Eq`, `Hash` and `Ord` from its
+# target. For every other trait the two spellings are *supposed* to differ: the
+# alias answers with the target's impl, the opaque type with its own, and with
+# none that is an error. A case that pins this carries
+# `# twin-refused-alias-ok: <text>`, and means: the alias twin must compile and
+# run, the opaque side must be refused, and every error the opaque side gives
+# must contain <text>. A fallback that came back (the opaque side compiling), a
+# twin that stopped compiling (the alias side failing), and a refusal for some
+# other reason (an error without <text>) each fail the case.
 #
 # `--self-check` drives 1 and 2 with deliberately broken toolchains and requires
 # a non-zero exit, since a liveness check nobody has seen fail is a comment.
@@ -180,6 +194,34 @@ for c in "${cases[@]}"; do
   opaque_rc=$?
   "$DAWN" run "$OUT/${c}_twin.dawn" > "$OUT/$c.alias" 2>&1
   alias_rc=$?
+
+  # The refusal verdict (see header): opaque refused, alias twin runs.
+  if grep -q '^# twin-refused-alias-ok' "$src"; then
+    want=$(sed -n 's/^# twin-refused-alias-ok: *//p' "$src" | head -n 1)
+    if [ -z "$want" ]; then
+      printf 'FAIL %s -- twin-refused-alias-ok needs the expected error text after the colon\n' "$c"
+      fail=1
+    elif [ "$opaque_rc" -eq 0 ]; then
+      printf 'FAIL %s -- declares twin-refused-alias-ok, but the opaque side compiles and runs now:\n' "$c"
+      printf '       the type inherits something outside Eq, Hash and Ord again\n'
+      fail=1
+    elif [ "$alias_rc" -ne 0 ]; then
+      printf 'FAIL %s -- its alias twin does not compile and run (exit %d), so the refusal proves nothing\n' "$c" "$alias_rc"
+      sed 's/^/       /' "$OUT/$c.alias" | sed -n '1,10p'
+      fail=1
+    elif ! grep -q '^error:' "$OUT/$c.opaque"; then
+      printf 'FAIL %s -- the opaque side failed (exit %d) without a diagnostic\n' "$c" "$opaque_rc"
+      sed 's/^/       /' "$OUT/$c.opaque" | sed -n '1,10p'
+      fail=1
+    elif grep '^error:' "$OUT/$c.opaque" | grep -vF -- "$want" >/dev/null; then
+      printf 'FAIL %s -- the opaque side is refused for something other than "%s"\n' "$c" "$want"
+      grep '^error:' "$OUT/$c.opaque" | grep -vF -- "$want" | sed 's/^/       /' | sed -n '1,10p'
+      fail=1
+    else
+      printf 'ok   %s (opaque side refused, alias twin runs)\n' "$c"
+    fi
+    continue
+  fi
 
   # The case's own verdict, declared in the case. Without this a case that
   # stops compiling keeps agreeing with itself forever; with it, "rejected" is
