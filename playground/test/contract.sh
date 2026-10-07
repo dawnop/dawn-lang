@@ -43,6 +43,8 @@ export JAVA_HOME
 export PATH="$JAVA_HOME/bin:$PATH"
 export DAWN_BIN="$ROOT/bin/dawn"
 export PLAY_JAVA="$JAVA_HOME/bin/java"
+# /compile lists the class with javap, which belongs to the same JDK as java.
+export PLAY_JAVAP="$JAVA_HOME/bin/javap"
 export PLAY_TIMEOUT=3
 export PLAY_COMPILE_TIMEOUT=60
 # The sandbox is on unless something opts out (config.sandbox_enabled is
@@ -83,7 +85,12 @@ LOG=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test.XXXXXX")
 # by port. The old cleanup ran `fuser -k` on the port, which on a shared
 # machine kills whatever else holds it. python3 does the setsid because it is
 # already required here and, unlike setsid(1), exists on macOS.
-python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+#
+# It also starts in the POSIX locale with no LANG, which is the environment a
+# systemd unit gives the compilers it starts: file names are then ASCII to the
+# JVM, and the /compile cases with non-ASCII names only pass because the
+# runner asks for a UTF-8 locale on those commands (play/exec.utf8_env).
+python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
   "$DAWN_BIN" run "$ROOT/playground" >"$LOG" 2>&1 &
 SRV=$!
 # Guards keep a failed kill from turning into the script's exit status (dash:
@@ -91,7 +98,7 @@ SRV=$!
 # runner is outside the terminal's process group now, so ^C no longer reaches
 # it; the signal traps route through exit so the EXIT trap still kills it.
 # `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}"; rm -f "${WORK:?}.canary"; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}" "${WORK:?}.cases"; rm -f "${WORK:?}.canary"; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -245,6 +252,145 @@ check "/check on bad code -> compile diagnostics" \
   '{"code":"pub fn main() -> Unit !io = println(nope)"}' \
   'not d["ok"] and d["phase"]=="compile" and "prog.dawn" in d["output"] and "undefined" in d["output"]' \
   check
+
+# ---- POST /compile: the program's C text or JVM listing, paired with the source
+#
+# The programs the cases send are files, built here, so a program is read once
+# and sent as exactly what it is: a starter, a program of odd names, and two
+# generated ones that are over the answer's limits.
+CASES="$WORK.cases"
+mkdir -p "$CASES"
+python3 - "$CASES" "$ROOT" <<'PY'
+import sys
+out, root = sys.argv[1], sys.argv[2]
+open(f"{out}/starter.dawn", "w", encoding="utf-8").write(open(f"{root}/site/play-ui/samples/fizzbuzz.dawn", encoding="utf-8").read())
+# non-ASCII names for a function, a type and a constructor, a string with an
+# astral character and every escape, and a comment with a tab
+open(f"{out}/odd.dawn", "w", encoding="utf-8").write(
+    '# comment with a tab\there and a 中文 word\n'
+    'type Wéird = | A_1 | B\n'
+    'fn größe(x: Int) -> Int = x + 1\n'
+    'fn _a__b(x: Int) -> Int = größe(x) * 2\n'
+    'pub fn main() -> Unit !io = {\n'
+    '  let s = "line1\\nline2 \\"q\\" \\\\ \U0001F600 中"\n'
+    '  println(s ++ to_string(_a__b(3)))\n'
+    '}\n')
+# 1,500 small functions: far more listing than a pane may carry
+open(f"{out}/wide.dawn", "w").write(
+    "".join(f"pub fn f{i}(x: Int) -> Int = x * {i} + x\n" for i in range(1500))
+    + 'pub fn main() -> Unit !io = println(to_string(f1(2)))\n')
+# 2,500 calls: more than an answer carries
+open(f"{out}/many.dawn", "w").write(
+    'pub fn main() -> Unit !io = {\n' + '  println("x")\n' * 2500 + '}\n')
+open(f"{out}/fresh.dawn", "w").write('pub fn main() -> Unit !io = println("fresh")\n')
+open(f"{out}/broken.dawn", "w").write('pub fn main() -> Unit !io = println(nope)\n')
+PY
+compile_body() { # program file, target
+  python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1], encoding="utf-8").read(), "target": sys.argv[2]}))' "$1" "$2"
+}
+# One /compile request whose answer is kept (in $CASES/resp.N, the previous
+# one's name in $PREV) for the next case to compare with.
+RESP_N=0
+PREV=""
+ccheck() { # name, program file, target, python-assertion
+  RESP_N=$((RESP_N + 1))
+  out="$CASES/resp.$RESP_N"
+  curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$(compile_body "$2" "$3")" \
+    "http://127.0.0.1:$PORT/compile" >"$out" || true
+  if PREV="$PREV" python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); prev=json.load(open(os.environ['PREV'])) if os.environ['PREV'] else None; assert ($4), d" <"$out" 2>/dev/null; then
+    pass=$((pass + 1)); echo "  ok  $1"
+  else
+    fail=$((fail + 1)); echo "FAIL  $1"; echo "        $(head -c 600 "$out")"
+  fi
+  PREV="$out"
+}
+
+# What a good answer is made of, whichever target: the head, a call table whose
+# ids are its rows, a pane whose accounts of its lines stay inside its text and
+# whose marks stay inside their lines, and no trace of where the runner works.
+SOUND='d["ok"] is True and d["phase"]=="compile-view" and d["gaps"]["count"]==0 and [c["id"] for c in d["calls"]]==list(range(len(d["calls"]))) and all(c["parent"]<c["id"] for c in d["calls"]) and d["pane"]["shown"]==len(d["pane"]["text"]) and [o["call"] for o in d["pane"]["outs"]]==list(range(len(d["pane"]["outs"]))) and all(1<=a<z<=d["pane"]["shown"]+1 for o in d["pane"]["outs"] for a,z in o["lines"]) and all(1<=l<=d["pane"]["shown"] and 0<=a<=z<=len(d["pane"]["text"][l-1]) for o in d["pane"]["outs"] for l,a,z in o["marks"]) and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and re.search(r"\"ms\":[0-9]+[,}]", raw)'
+
+ccheck "compile: the C text of a starter, no gap, its calls placed in it" "$CASES/starter.dawn" c \
+  "$SOUND"' and d["target"]=="c" and d["cached"] is False and d["pane"]["kind"]=="c" and len(d["calls"])>=1 and any("prog__main" in l for l in d["pane"]["text"]) and any(o["marks"] for o in d["pane"]["outs"]) and re.fullmatch(r"b1:[0-9a-f]{12}", d["build"])'
+
+ccheck "compile: the same program again is a hit that differs only in its head" "$CASES/starter.dawn" c \
+  'd["cached"] is True and prev is not None and {k:v for k,v in d.items() if k not in ("cached","ms")}=={k:v for k,v in prev.items() if k not in ("cached","ms")}'
+
+ccheck "compile: the JVM listing of it is the other half of the same build, already kept" "$CASES/starter.dawn" jvm \
+  "$SOUND"' and d["target"]=="jvm" and d["cached"] is True and d["pane"]["kind"]=="jvm" and any(o["key"] for o in d["pane"]["outs"]) and any("invokestatic" in l for l in d["pane"]["text"]) and d["calls"]==prev["calls"]'
+
+ccheck "compile: names outside ASCII map with no gap (JVM)" "$CASES/odd.dawn" jvm \
+  "$SOUND"' and any("größe" in l for l in d["pane"]["text"]) and d["cached"] is False'
+ccheck "compile: and so does the C text of them" "$CASES/odd.dawn" c \
+  "$SOUND"' and d["cached"] is True and len(d["calls"])>=3'
+
+# The program that does not compile gets /check's diagnostics, word for word,
+# and the same for either target, the second from the cache.
+ccheck "compile: an error carries the diagnostics, without the work directory" "$CASES/broken.dawn" c \
+  'not d["ok"] and d["phase"]=="compile" and "prog.dawn:1" in d["output"] and "undefined variable: nope" in d["output"] and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and "cached" not in d'
+checked=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$(python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1]).read()}))' "$CASES/broken.dawn")" "http://127.0.0.1:$PORT/check" || true)
+if printf '%s' "$checked" | CASE="$PREV" python3 -c "import os,sys,json; assert json.load(sys.stdin) == json.load(open(os.environ['CASE']))" 2>/dev/null; then
+  pass=$((pass + 1)); echo "  ok  compile: the diagnostics are /check's, byte for byte"
+else
+  fail=$((fail + 1)); echo "FAIL  compile: the diagnostics are /check's, byte for byte"; echo "        $checked"
+fi
+ccheck "compile: the same error for the other target" "$CASES/broken.dawn" jvm \
+  'not d["ok"] and d["phase"]=="compile" and d == prev'
+
+# The two limits. 1,500 functions list to more than 256 KB; 2,500 calls are
+# more than 2,000. Each answer is cut, says so, and is still a sound answer.
+ccheck "compile: a pane past its byte limit is cut at a line and says so" "$CASES/wide.dawn" jvm \
+  "$SOUND"' and d["pane"]["truncated"] is True and d["pane"]["shown"]<d["pane"]["total"] and sum(len(l.encode())+1 for l in d["pane"]["text"])<=262144 and sum(len(l.encode())+1 for l in d["pane"]["text"])>262144-400'
+ccheck "compile: calls past 2,000 are left out, counted and the rest stays whole" "$CASES/many.dawn" c \
+  "$SOUND"' and d["calls_truncated"] is True and len(d["calls"])==2000 and d["calls_total"]==2500 and len(d["pane"]["outs"])==2000'
+ccheck "compile: a program inside both limits is not marked cut" "$CASES/starter.dawn" c \
+  'd["pane"]["truncated"] is False and d["calls_truncated"] is False and d["calls_total"]==len(d["calls"])'
+
+# Refusals before anything runs.
+body_status() { # data, expected status
+  got=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o "$CASES/refusal" -w '%{http_code}' -X POST --data "$1" "http://127.0.0.1:$PORT/compile" || true)
+  [ "$got" = "$2" ]
+}
+refuses() { # name, data, status, text the refusal must name
+  if body_status "$2" "$3" && grep -q "$4" "$CASES/refusal" && grep -q '"phase":"error"' "$CASES/refusal"; then
+    pass=$((pass + 1)); echo "  ok  $1"
+  else
+    fail=$((fail + 1)); echo "FAIL  $1 (wanted $3 naming $4)"; echo "        $(head -c 300 "$CASES/refusal")"
+  fi
+}
+refuses "compile: a target that is not offered is 400" '{"code":"x","target":"asm"}' 400 'target'
+refuses "compile: tile is not offered yet" '{"code":"x","target":"tile"}' 400 'one of: c, jvm'
+refuses "compile: no target is 400" '{"code":"x"}' 400 'missing field'
+refuses "compile: a target that is not a string is 400" '{"code":"x","target":3}' 400 'must be a string'
+refuses "compile: no code is 400" '{"target":"c"}' 400 'code'
+refuses "compile: bad JSON is 400" 'not json' 400 'invalid JSON'
+bigc=$(python3 -c 'print("{\"target\":\"c\",\"code\":\"" + "/"*70000 + "\"}")')
+if body_status "$bigc" 413; then
+  pass=$((pass + 1)); echo "  ok  compile: an oversized body is 413"
+else
+  fail=$((fail + 1)); echo "FAIL  compile: an oversized body is 413 (got $got)"
+fi
+code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/compile" || true)
+[ "$code" = "405" ] && { pass=$((pass+1)); echo "  ok  compile: GET -> 405"; } || { fail=$((fail+1)); echo "FAIL  compile: GET -> $code"; }
+
+# /compile shares /check's two permits and its two-second patience. Two runs of
+# a program that never ends hold both permits for the run budget (3 s) and the
+# compile before it; a compile that arrives meanwhile is turned away at two
+# seconds. A /compile with a gate of its own would be let in and answer 200.
+SPIN='{"code":"fn s(n: Int) -> Unit !io = s(n+1)\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}'
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "http://127.0.0.1:$PORT/run" >/dev/null &
+SPIN1=$!
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "http://127.0.0.1:$PORT/run" >/dev/null &
+SPIN2=$!
+sleep 0.7
+unique=$(python3 -c 'import json; print(json.dumps({"code": "pub fn main() -> Unit !io = println(\"saturated\")", "target": "c"}))')
+if body_status "$unique" 429 && grep -q 'server busy' "$CASES/refusal"; then
+  pass=$((pass + 1)); echo "  ok  compile: with both permits held it is turned away with 429"
+else
+  fail=$((fail + 1)); echo "FAIL  compile: with both permits held it is turned away with 429 (got $got)"; echo "        $(head -c 300 "$CASES/refusal")"
+fi
+wait "$SPIN1" "$SPIN2" || true
+ccheck "compile: the permits come back" "$CASES/fresh.dawn" c 'd["ok"] is True and d["cached"] is False'
 
 check "bad JSON -> error" \
   'not json at all' \

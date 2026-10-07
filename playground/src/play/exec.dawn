@@ -43,7 +43,7 @@ use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/config.{dawn_bin, java_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root}
+use play/config.{dawn_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root}
 
 ## The most output, in bytes, a response carries. Bytes rather than
 ## characters because bytes are what the read can bound before decoding.
@@ -99,7 +99,12 @@ fn close_in(s: InputStream) -> Unit !io = {
 # the runner created this file itself, so anything else means something else
 # put it there. A read that fails reads as empty too; the outcome still says
 # whether the program finished.
-fn read_capped(path: String) -> (String, Bool) !io = {
+fn read_capped(path: String) -> (String, Bool) !io = read_capped_to(path, OUTPUT_LIMIT)
+
+# [`read_capped`] with the limit named: the compile view reads the compilers'
+# own files, which are far larger than any diagnostic (an 870 KB C text is
+# ordinary), under the limit that view states for them.
+fn read_capped_to(path: String, limit: Int) -> (String, Bool) !io = {
   let got = catch_fault(() => {
     let p = Path.of(path)!
     let nofollow = LinkOption.valueOf("NOFOLLOW_LINKS")!
@@ -107,9 +112,9 @@ fn read_capped(path: String) -> (String, Bool) !io = {
       ("", false)
     } else {
       with s <- bracket(Files.newInputStream(p, nofollow)!, close_in)
-      let raw = s.readNBytes(OUTPUT_LIMIT + 1)!
-      if bytes.len(raw) > OUTPUT_LIMIT {
-        (bytes.decode_utf8_lossy(whole_chars(bytes.slice(raw, 0, OUTPUT_LIMIT))), true)
+      let raw = s.readNBytes(limit + 1)!
+      if bytes.len(raw) > limit {
+        (bytes.decode_utf8_lossy(whole_chars(bytes.slice(raw, 0, limit))), true)
       } else {
         (bytes.decode_utf8_lossy(raw), false)
       }
@@ -242,13 +247,18 @@ fn fresh_dir() -> String !io = {
 # panic, and a JVM Error (bracket catches Throwable on the JVM). Without it, a
 # failure between staging and cleanup left the directory, and whatever the
 # child had written into it, on disk for good.
-fn with_request(code: String, body: fn(String, String) -> Outcome !io) -> Outcome !Fs !io = {
+fn with_request(code: String, body: fn(String, String) -> Outcome !io) -> Outcome !Fs !io =
+  with_staged(code, msg => CompileError(msg), body)
+
+# [`with_request`] for a body of any result type: `unstaged` says what the
+# request answers when the source cannot be written into the box.
+fn with_staged[T](code: String, unstaged: fn(String) -> T, body: fn(String, String) -> T !io) -> T !Fs !io = {
   let dir = fresh_dir()
   with d <- bracket(dir, cleanup)
   let box = "${d}/box"
   # write_file creates parent directories as needed
   match io.write_file("${box}/prog.dawn", code) {
-    Err(e) -> CompileError("cannot stage source: ${e}")
+    Err(e) -> unstaged("cannot stage source: ${e}")
     Ok(_) -> {
       open_box(d, box)
       body(d, box)
@@ -310,6 +320,201 @@ fn execute_staged(dir: String, box: String) -> Outcome !io =
     Err(diags) -> CompileError(diags)
     Ok(_) -> run_phase(dir, box)
   }
+
+# ---- the compile view (POST /compile) ----
+#
+# What the sandbox produces for the view is raw material only: the C text and
+# the two side tables, which `dawn __emitc --map` and `dawn __emit --map`
+# write beside the source, and the listing `javap -c -p -s` prints for the
+# module's class. Nothing is run. Pairing them is packages/xmap's job, in the
+# runner's own process, on text this module has bounded (play/view.dawn).
+#
+# Both compilers run for either target. The call table is the calls both
+# side tables have a row for (that is how a call one backend lost is found
+# and counted as a gap instead of silently shown), so even a request for the C
+# text needs the JVM table, and the listing is the one more unit that makes the
+# other target's answer cacheable under the same key.
+#
+# Each phase is its own `systemd-run` unit with every limit the other phases
+# have (sandbox/run-sandboxed.sh), and the three share one wall-clock budget,
+# the compile budget, so the request holds its gate permit no longer than a
+# /check does. The compilers write into `box/` (they are given paths there) and
+# the runner reads those files back after the unit has ended, with the read
+# `/check`'s diagnostics get: a regular file only, no link followed, at most
+# VIEW_RAW_LIMIT bytes in memory. The listing is the sandbox's stdout, so it
+# goes through a file the runner opened, as every phase's output does.
+
+## The most bytes of one raw file (the C text, either table, the listing) the
+## view reads. The largest of the 11 starter programs is 871 KB, almost all of
+## it the standard library's share of the C text; this is about ten times that.
+## A file past it answers "too large" and is never mapped.
+const VIEW_RAW_LIMIT: Int = 8388608
+
+## What the compilers and `javap` wrote for one program, as text, and how long
+## they took together.
+pub type ViewParts = { ctext: String, cmap: String, jmap: String, javap: String, ms: Int }
+
+## How a view's raw material came out: the material; a failure of the program
+## (its diagnostics, like /check's); the compile budget spent; a failure that is not the
+## visitor's (the listing tool failed, an output could not be read); or a file
+## past the limit, named.
+pub type ViewRaw =
+  | RawOk(parts: ViewParts)
+  | RawFail(outcome: Outcome)
+  | RawTimedOut(secs: Int)
+  | RawBroken(message: String)
+  | RawTooLarge(what: String)
+
+## Whether `javap` can be started: the toolchain id the view's cache key
+## carries (its `-version` line), or "" when it cannot. Asked once at startup
+## like [`compiler_id`]: the unit that runs it later finds the same binary by
+## the same name, or the view answers that it is missing.
+pub fn javap_id() -> String !io = id_of_tool(javap_bin())
+
+# The first line `bin -version` prints, or "" when `bin` cannot be started, is
+# not there, exits with a failure or does not answer in five seconds. Starting
+# a program that does not exist is a fault of the start, not an absent answer,
+# so it is caught here: a missing javap must leave the runner up, saying so.
+fn id_of_tool(bin: String) -> String !io = {
+  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
+  with out <- bracket("${temp_root()}/dawn-play-javap-${id}.txt", cleanup)
+  let p = ProcessBuilder.new([bin, "-version"])
+  p.redirectErrorStream(true)
+  p.redirectOutput(File.new(out))
+  match catch_fault(() => p.start()) {
+    Ok(Some(proc)) -> {
+      let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
+      if proc.waitFor(5, secs) {
+        let (text, _) = read_capped(out)
+        if proc.exitValue() == 0 { str.trim(text) } else { "" }
+      } else {
+        proc.destroyForcibly()
+        proc.waitFor()
+        ""
+      }
+    }
+    _ -> ""
+  }
+}
+
+test "a tool that is not there has no id, one that is has" {
+  assert id_of_tool("/nonexistent/javap") == ""
+  assert id_of_tool(java_bin()) != ""
+}
+
+# The view's commands run in a UTF-8 locale. A unit starts with an empty
+# environment, which the JVM reads as the POSIX locale: its file names are then
+# ASCII, and `dawn __emit -o` could not write `prog$Wéird.class` for a type
+# named Wéird ("unmappable characters"), where `dawn build` puts the same class
+# in a jar by a name that is not a file's and never noticed. `javap` prints
+# such a name as `?` in the same locale. The locale is set on the command, not
+# in the sandbox wrapper, so /run and /check keep the environment they have.
+fn utf8_env(argv: List[String]) -> List[String] = ["env", "LC_ALL=C.UTF-8"] ++ argv
+
+# One sandboxed unit of the view, started: `argv` in the box, its output in
+# `<dir>/<name>.txt`, and the id its unit can be stopped by.
+type Launched = { unit: String, proc: Process }
+
+fn launch(dir: String, box: String, name: String, argv: List[String]) -> Launched !io = {
+  let unit = fresh_unit()
+  let pb = ProcessBuilder.new(sandboxed(unit, box, utf8_env(argv)))
+  pb.redirectErrorStream(true)
+  pb.redirectOutput(File.new("${dir}/${name}.txt"))
+  Launched { unit: unit, proc: pb.start().expect("failed to start ${name}") }
+}
+
+# Wait up to `secs` for a launched unit: Some(exit status), or None on a
+# timeout, the unit having been stopped by then. Either way it has ended when
+# this returns, which is what lets the request release its permit.
+fn await(l: Launched, secs: Int) -> Option[Int] !io =
+  if finish_or_stop(l.proc, secs, stop_argv(l.unit)) { Some(l.proc.exitValue()) } else { None }
+
+# Seconds of the shared budget not yet spent, at least one.
+fn budget_left(started: Int) -> Int !io = {
+  let spent = (System.nanoTime() - started) / 1000000000
+  let left = compile_timeout_secs() - spent
+  if left < 1 { 1 } else { left }
+}
+
+# One of a compiler's files from the box: the text, or the reason it is not
+# usable (past the limit).
+fn raw_file(path: String, what: String) -> Result[String, ViewRaw] !io = {
+  let (text, cut) = read_capped_to(path, VIEW_RAW_LIMIT)
+  if cut { Err(RawTooLarge(what)) } else { Ok(text) }
+}
+
+# The two compilers read the same source and write apart (the C text and its
+# map; the classes and theirs), so they run side by side and the request waits
+# for the slower, not for both: measured, 3.6 s of three units one after the
+# other against 2.0 s with the compilers abreast (the listing needs the
+# classes and follows). The cost is that one request has two JVMs going, each
+# with the unit's own limits, so two requests can mean four; the gate's two
+# permits are what bounds that, and it is the number to look at if the host
+# turns out too small for it.
+fn view_staged(dir: String, box: String) -> ViewRaw !io = {
+  let started = System.nanoTime()
+  let prog = "${box}/prog.dawn"
+  let c_unit = launch(dir, box, "emitc", [dawn_bin(), "__emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"])
+  let j_unit = launch(dir, box, "emit", [dawn_bin(), "__emit", prog, "-o", "${box}/classes", "--map", "${box}/jvm.dawnmap"])
+  let c_end = await(c_unit, budget_left(started))
+  # a failed first compiler need not keep the second going: wait zero seconds
+  # for it, which stops it unless it is already done
+  let j_end = await(j_unit, if c_end == Some(0) { budget_left(started) } else { 0 })
+  match (c_end, j_end) {
+    (None, _) -> RawTimedOut(compile_timeout_secs())
+    (Some(code), _) if code != 0 -> RawFail(CompileError(diagnostics(dir, box, "emitc")))
+    (_, None) -> RawTimedOut(compile_timeout_secs())
+    (_, Some(code)) if code != 0 -> RawFail(CompileError(diagnostics(dir, box, "emit")))
+    _ -> list_and_gather(dir, box, started)
+  }
+}
+
+fn diagnostics(dir: String, box: String, name: String) -> String !io = {
+  let (diags, _) = shown("${dir}/${name}.txt", dir, box)
+  str.trim(diags)
+}
+
+# javap names the class by a path the runner chose: the module of a single
+# file is its stem, and the file is always prog.dawn.
+fn list_and_gather(dir: String, box: String, started: Int) -> ViewRaw !io = {
+  let argv = [javap_bin(), "-J-Xmx128m", "-J-Dstdout.encoding=UTF-8", "-c", "-p", "-s", "${box}/classes/prog.class"]
+  match await(launch(dir, box, "javap", argv), budget_left(started)) {
+    None -> RawBroken("the listing tool timed out")
+    Some(code) ->
+      if code != 0 {
+        RawBroken("the listing tool failed: ${diagnostics(dir, box, "javap")}")
+      } else {
+        gather(dir, box, started)
+      }
+  }
+}
+
+fn gather(dir: String, box: String, started: Int) -> ViewRaw !io =
+  match raw_file("${box}/out.c", "the C text") {
+    Err(e) -> e
+    Ok(ctext) -> match raw_file("${box}/c.dawnmap", "the C map") {
+      Err(e) -> e
+      Ok(cmap) -> match raw_file("${box}/jvm.dawnmap", "the JVM map") {
+        Err(e) -> e
+        Ok(jmap) -> match raw_file("${dir}/javap.txt", "the JVM listing") {
+          Err(e) -> e
+          Ok(javap) -> RawOk(ViewParts {
+            ctext: ctext,
+            cmap: cmap,
+            jmap: jmap,
+            javap: javap,
+            ms: (System.nanoTime() - started) / 1000000,
+          })
+        }
+      }
+    }
+  }
+
+## The raw material of `code`'s compile view, from the sandbox. Compile-only:
+## the program is never run, though `comptime` still runs inside the compiler,
+## which is why the compilers are sandboxed like /check's.
+pub fn view_raw(code: String) -> ViewRaw !io =
+  with_fs_real(() => with_staged(code, msg => RawFail(CompileError(msg)), view_staged))
 
 # Phase 2: run the compiled jar under a wall-clock limit.
 fn run_phase(dir: String, box: String) -> Outcome !io = {

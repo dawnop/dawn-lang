@@ -2,6 +2,8 @@
 #   {"ok": true,  "phase": "run",     "exit": 0, "output": "...", "truncated": false, "ms": 620}
 #   {"ok": false, "phase": "compile", "output": "<Dawn diagnostics>"}
 #   {"ok": false, "phase": "timeout", "output": "<partial output>"}
+# POST /compile takes {"code": ..., "target": "c" | "jvm"} and answers like /check
+# when the program does not compile; what it answers when it does is play/view.dawn's.
 # GET /health answers {"ok": true, "version": "0.81.0", "build": "b1:2bfef5fb3622"}.
 # Everything is a JSON object built from the vendored M4 json library and
 # rendered with its RFC-8259 string escaping — no hand-rolled quoting.
@@ -9,6 +11,7 @@
 # (`"exit":0.0`), which a client comparing `exit === 0` in a stricter language
 # reads as a different value. test/contract.sh checks the literal bytes.
 use std/map
+use std/list
 use json/value.{Json, JBool, JInt, JStr, JObj, error_text}
 use json/parser.{parse}
 use json/render.{render}
@@ -20,21 +23,55 @@ pub type Outcome =
   | Timeout(output: String)
 derive Show
 
-# Pull the "code" field out of a request body. Errors are the client's fault
-# (400): malformed JSON, not an object, or no string "code".
-pub fn parse_request(body: String) -> Result[String, String] =
+# The request body as a JSON object's entries. Errors are the client's fault
+# (400): malformed JSON, or not an object.
+fn request_object(body: String) -> Result[Map[String, Json], String] =
   match parse(body) {
     Err(e) -> Err("invalid JSON: " ++ error_text(e))
     Ok(j) ->
       match j {
-        JObj(entries) ->
-          match map.get(entries, "code") {
-            Some(JStr(code)) -> Ok(code)
-            Some(_) -> Err("field \"code\" must be a string")
-            None -> Err("missing field \"code\"")
-          }
+        JObj(entries) -> Ok(entries)
         _ -> Err("request must be a JSON object")
       }
+  }
+
+# A string field of a request, or why it is not one.
+fn string_field(entries: Map[String, Json], name: String) -> Result[String, String] =
+  match map.get(entries, name) {
+    Some(JStr(v)) -> Ok(v)
+    Some(_) -> Err("field \"${name}\" must be a string")
+    None -> Err("missing field \"${name}\"")
+  }
+
+# Pull the "code" field out of a request body. Errors are the client's fault
+# (400): malformed JSON, not an object, or no string "code".
+pub fn parse_request(body: String) -> Result[String, String] =
+  match request_object(body) {
+    Err(e) -> Err(e)
+    Ok(entries) -> string_field(entries, "code")
+  }
+
+## What /compile can show, in the order of the tabs. "tile" joins when the
+## runner can produce it.
+pub fn targets() -> List[String] = ["c", "jvm"]
+
+# A /compile request: the "code" and a "target" from [`targets`]. The target
+# is checked against that list and nothing else reaches the sandbox.
+pub fn parse_compile_request(body: String) -> Result[(String, String), String] =
+  match request_object(body) {
+    Err(e) -> Err(e)
+    Ok(entries) -> match string_field(entries, "code") {
+      Err(e) -> Err(e)
+      Ok(code) -> match string_field(entries, "target") {
+        Err(e) -> Err(e)
+        Ok(target) ->
+          if list.contains(targets(), target) {
+            Ok((code, target))
+          } else {
+            Err("field \"target\" must be one of: ${join(targets(), ", ")}")
+          }
+      }
+    }
   }
 
 fn obj(entries: List[(String, Json)]) -> String = render(JObj(map.from(entries)))

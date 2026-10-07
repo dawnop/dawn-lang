@@ -1,0 +1,221 @@
+# The compile view's answer: a program's raw material (what the compilers and
+# `javap` wrote, play/exec.dawn) paired by packages/xmap, cut to the limits
+# below and written as the JSON /compile sends. The wire shape is
+# docs/playground-compile-design.md section 6.1: every field is the `.xmap`
+# format's own (the call table, each pane's account of which call wrote which
+# of its lines) as JSON, so the page and the online view share their rules.
+#
+# Why one build serves both targets. The call table is the calls the C map and
+# the JVM map both have a row for, so a request for either text needs both
+# compilers' tables, and the listing is cheap next to them. Building both
+# panes once and keeping both answers under one key means the second tab a
+# visitor opens costs a lookup, which is the design's "the cache absorbs the
+# repeats" (section 8, item 6) without a second compile.
+#
+# What an answer is made of, and why it is stored in two parts. The head
+# (`ok`, `phase`, `target`, `build`, `cached`, `ms`) says what this request
+# was; the rest (source lines, calls, the pane, the gaps) is the same for
+# every request with the same program, so the cache keeps the rest and each
+# request writes its own head. A hit then differs from a fresh answer in
+# `cached` and `ms` and in nothing else, byte for byte.
+#
+# Limits are per response and hold whatever the program does: a pane's text
+# past PANE_LIMIT bytes is cut at a line end and says so (`truncated`), and
+# calls past CALL_LIMIT are left out with their lines (`calls_truncated`;
+# `calls_total` says how many there were). A call's parent always comes before
+# it in the table, so the calls kept are a prefix that needs no renumbering.
+# Both numbers are the design's starting values (section 8, item 7): estimates
+# from the largest of the 11 starter programs (16.8 KB of C, 23.7 KB of
+# listing), ten times over, to be tightened with a week of real use.
+use std/str
+use std/map
+use std/list
+use std/bytes
+use json/value.{Json, JBool, JInt, JStr, JArr, JObj}
+use json/render.{render}
+use sha2/sha256
+use xmap/xmap.{Spec, Raw, Built, explore}
+use xmap/table.{Call}
+use xmap/panes.{Out}
+use xmap/source.{at}
+use play/contract.{CompileError, render_check, render_error}
+use play/exec.{ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
+
+## The most bytes of text one pane's answer carries.
+pub const PANE_LIMIT: Int = 262144
+
+## The most calls one answer carries.
+pub const CALL_LIMIT: Int = 2000
+
+# How many gap messages an answer quotes; the count is always whole.
+const GAPS_SHOWN: Int = 5
+
+## What building a view came to. `Mapped` holds, for each target, the part of
+## the answer that does not depend on the request; `Done` is an answer that is
+## complete as it stands, with its HTTP status and whether it may be kept for
+## the next request with the same program (a compile error may, a failure of
+## the runner's own may not).
+pub type Viewed =
+  | Mapped(c: String, jvm: String, gaps: Int)
+  | Done(status: Int, body: String, keep: Bool)
+
+## The key an answer is kept under: the toolchains that wrote it and the
+## program, hashed, so that a different compiler or a different `javap` is a
+## different key and not a stale hit. The target is added by the caller.
+pub fn cache_key(toolchain: String, code: String) -> String =
+  sha256.hex(bytes.utf8("${toolchain}\n${code}"))
+
+# The module of a single file is its stem, and the runner stages every program
+# as prog.dawn.
+fn spec() -> Spec = Spec { name: "prog", path: "prog.dawn", fn_name: "", module: "prog", kernel: false }
+
+fn num(n: Int) -> Json = JInt(n)
+
+fn pair(a: Int, b: Int) -> Json = JArr([num(a), num(b)])
+
+fn at_json(b: Built, off: Int) -> Json = {
+  let (l, c) = at(b.src, off)
+  pair(l, c)
+}
+
+fn call_json(b: Built, c: Call, kept: Int) -> Json =
+  JObj(map.from([
+    ("id", num(c.id)),
+    ("parent", num(if c.parent < kept { c.parent } else { -1 })),
+    ("name", JStr(c.name)),
+    ("from", at_json(b, c.lo)),
+    ("to", at_json(b, c.hi)),
+    ("nfrom", at_json(b, c.nlo)),
+    ("nto", at_json(b, c.nhi)),
+  ]))
+
+# How many whole lines of `lines` fit in `limit` bytes of UTF-8 (a newline
+# counted for each), and whether any were left out.
+fn fit(lines: List[String], limit: Int) -> (Int, Bool) = {
+  var used = 0
+  var n = 0
+  for l in lines {
+    let w = bytes.len(bytes.utf8(l)) + 1
+    if used + w > limit {
+      return (n, true)
+    }
+    used = used + w
+    n = n + 1
+  }
+  (n, false)
+}
+
+# One call's account of a pane cut to `shown` lines: its runs of lines, the
+# columns it holds and the lines of its instructions, each only as far as the
+# text that is still there.
+fn out_json(id: Int, o: Out, shown: Int) -> Json = {
+  let runs = filter(map(o.lines, r => {
+    let (a, z) = r
+    (a, if z > shown + 1 { shown + 1 } else { z })
+  }), r => {
+    let (a, z) = r
+    a < z
+  })
+  let marks = filter(o.marks, m => {
+    let (l, _a, _z) = m
+    l <= shown
+  })
+  JObj(map.from([
+    ("call", num(id)),
+    ("lines", JArr(map(runs, r => {
+      let (a, z) = r
+      pair(a, z)
+    }))),
+    ("marks", JArr(map(marks, m => {
+      let (l, a, z) = m
+      JArr([num(l), num(a), num(z)])
+    }))),
+    ("key", JArr(map(filter(o.key, l => l <= shown), l => num(l)))),
+  ]))
+}
+
+# The rest of the answer for one pane's kind. `outs` are in call order, so an
+# out's call is its index: the one place that renumbers is here, where `0` was
+# a placeholder above.
+fn rest_of(b: Built, kind: String) -> String = {
+  let kept = if len(b.calls) > CALL_LIMIT { CALL_LIMIT } else { len(b.calls) }
+  let pane = match filter(b.panes, p => p.kind == kind) {
+    [p, ..] -> p
+    [] -> panic("no ${kind} pane")
+  }
+  let (shown, cut) = fit(pane.text, PANE_LIMIT)
+  let outs = map(range_list(kept), i => out_json(i, pane.outs[i], shown))
+  let body = JObj(map.from([
+    ("src", JObj(map.from([("first", num(b.first)), ("last", num(b.last))]))),
+    ("calls_total", num(len(b.calls))),
+    ("calls_truncated", JBool(len(b.calls) > kept)),
+    ("calls", JArr(map(list.take(b.calls, kept), c => call_json(b, c, kept)))),
+    ("pane", JObj(map.from([
+      ("kind", JStr(pane.kind)),
+      ("total", num(pane.total)),
+      ("shown", num(shown)),
+      ("truncated", JBool(cut)),
+      ("text", JArr(map(list.take(pane.text, shown), l => JStr(l)))),
+      ("outs", JArr(outs)),
+    ]))),
+    ("gaps", JObj(map.from([
+      ("count", num(len(b.gaps))),
+      ("first", JArr(map(list.take(b.gaps, GAPS_SHOWN), g => JStr(g)))),
+    ]))),
+  ]))
+  str.strip_prefix(render(body), "{").unwrap_or("")
+}
+
+fn range_list(n: Int) -> List[Int] = {
+  var xs: List[Int] = []
+  for i in 0..n {
+    xs = xs ++ [i]
+  }
+  xs
+}
+
+## The view of `code` from the raw material the sandbox wrote for it.
+pub fn build_view(code: String, raw: ViewRaw) -> Viewed =
+  match raw {
+    RawFail(outcome) -> Done(200, render_check(outcome), true)
+    # a timeout says how loaded the machine was, not what the program is: not kept
+    RawTimedOut(secs) -> Done(200, render_check(CompileError("compilation timed out after ${secs}s")), false)
+    RawBroken(message) -> Done(500, render_error("the compile view failed: ${message}"), false)
+    RawTooLarge(what) -> Done(422, render_error("${what} is too large to show"), true)
+    RawOk(p) -> mapped(code, p)
+  }
+
+fn mapped(code: String, p: ViewParts) -> Viewed =
+  match explore(spec(), Raw { source: code, ctext: p.ctext, cmap: p.cmap, jmap: p.jmap, javap: p.javap, tile_map: "", golden: "" }) {
+    Err(e) -> Done(500, render_error("the compile view failed: ${e}"), false)
+    Ok(b) -> Mapped(rest_of(b, "c"), rest_of(b, "jvm"), len(b.gaps))
+  }
+
+## The answer to one request from the part that is the program's: the head
+## says which target, which build wrote it, whether it came from the cache and
+## how long this request took.
+pub fn respond(target: String, build: String, cached: Bool, ms: Int, rest: String) -> String = {
+  let head = render(JObj(map.from([
+    ("ok", JBool(true)),
+    ("phase", JStr("compile-view")),
+    ("target", JStr(target)),
+    ("build", JStr(build)),
+    ("cached", JBool(cached)),
+    ("ms", num(ms)),
+  ])))
+  str.strip_suffix(head, "}").unwrap_or(head) ++ "," ++ rest
+}
+
+test "a response is one JSON object with the head's fields first" {
+  let r = respond("c", "b1:abc", true, 3, "\"src\":{}}")
+  assert r == "{\"ok\":true,\"phase\":\"compile-view\",\"target\":\"c\",\"build\":\"b1:abc\",\"cached\":true,\"ms\":3,\"src\":{}}"
+}
+
+test "fit cuts at a line end and counts bytes, not characters" {
+  assert fit(["ab", "cd"], 100) == (2, false)
+  # "ab\n" is 3 bytes: two lines need 6
+  assert fit(["ab", "cd"], 5) == (1, true)
+  # a three-byte character is three bytes
+  assert fit(["中", "中"], 6) == (1, true)
+  assert fit([], 0) == (0, false)
+}
