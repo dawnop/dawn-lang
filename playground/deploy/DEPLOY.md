@@ -11,13 +11,22 @@ by hand, with the server reachable.
    useradd --system --no-create-home --shell /usr/sbin/nologin dawn-play
    ```
 
-2. **JRE 21 + Python 3** — a headless JRE is enough for `/run` and `/check`;
-   the bounded WebSocket gateway uses only Python's standard library. On
-   Ubuntu 22.04:
+2. **JDK 21 + Python 3**: the headless JDK, not only the JRE. `/run` and
+   `/check` need `java`, and `/compile` lists the compiled class with `javap`
+   (`docs/playground-compile-design.md` section 6.5), which only the JDK
+   package has. It must be the same major as the JDK `bin/dawn` runs on. The
+   bounded WebSocket gateway uses only Python's standard library. On Ubuntu
+   22.04:
    ```sh
-   sudo apt-get install -y openjdk-21-jre-headless python3
-   # lands at /usr/lib/jvm/java-21-openjdk-amd64, java at /usr/bin/java
+   sudo apt-get install -y openjdk-21-jdk-headless python3
+   # lands at /usr/lib/jvm/java-21-openjdk-amd64, java and javap in /usr/bin
+   javap -version   # must print 21.x: redeploy.sh refuses to ship without it
    ```
+   A host that already has `openjdk-21-jre-headless` gets the JDK package on
+   top of it; the JRE stays, nothing about `/run` changes. Without `javap` the
+   runner still starts and `POST /compile` answers 503 saying so, which is
+   why `redeploy.sh` checks for it before it syncs anything. `PLAY_JAVAP`
+   names another `javap` (the contract test sets it to the JDK it runs on).
 
 3. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
    ```

@@ -999,6 +999,39 @@ def assert_native_guard(block):
             assert "error: native artifact says" in result.stdout, (printed, result.stdout)
 
 
+def javap_deploy_contract():
+    """A deploy that cannot list classes must be refused before it ships.
+
+    POST /compile needs `javap`, which the JDK package has and the JRE package
+    does not. A runner without it starts and passes its health check, so the
+    only place the gap is visible is the deploy: redeploy.sh asks the server
+    before it syncs anything, and DEPLOY.md installs the JDK package.
+    """
+    redeploy = read_text(os.path.join(DEPLOY, "redeploy.sh"))
+    doc = read_text(os.path.join(DEPLOY, "DEPLOY.md"))
+
+    def holds(script, setup):
+        assert "command -v javap" in script, "the deploy does not ask for javap"
+        guard = script.index("command -v javap")
+        first_sync = script.index("rsync -avz bin/")
+        assert guard < first_sync, "javap is checked after the first sync"
+        assert "exit 1" in script[guard:first_sync], "the javap check does not stop the deploy"
+        assert "openjdk-21-jdk-headless" in setup, "DEPLOY.md does not install the JDK package"
+        assert "openjdk-21-jre-headless python3" not in setup, "DEPLOY.md installs only the JRE"
+
+    holds(redeploy, doc)
+    expect_contract_red(
+        "no javap check", lambda: holds(redeploy.replace("command -v javap", "command -v java"), doc)
+    )
+    keeps_going = mutate_once(redeploy, '  exit 1\nfi\n\necho "=== syncing', '  true\nfi\n\necho "=== syncing')
+    expect_contract_red("javap check that does not stop", lambda: holds(keeps_going, doc))
+    expect_contract_red(
+        "JRE only",
+        lambda: holds(redeploy, doc.replace("openjdk-21-jdk-headless python3", "openjdk-21-jre-headless python3")),
+    )
+    ok("a deploy without javap is refused before anything ships")
+
+
 def native_version_guard_contract():
     """Run redeploy.sh's native version guard against stubbed `dawnc version`.
 
@@ -1093,6 +1126,7 @@ def measurement_evidence_contract():
 def main():
     deployment_contract()
     remote_restart_contract()
+    javap_deploy_contract()
     native_version_guard_contract()
     measurement_evidence_contract()
     diagnostics_params_contract()
