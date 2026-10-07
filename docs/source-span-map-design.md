@@ -436,8 +436,9 @@ emitc 把表达式拼成字符串往上交，写行的只有 `line`（`emitc.daw
 
 ### 12.6 给 M7 的读取方
 
-M7 页面的读取方是 Python（M1 的 `site/gpu-map/record.py` 那一层），用 `scripts/c-map/dawnmap.py` 的
-`load(path) -> {units, srcs, fns, calls}`，它需要的全在表里：
+M7 页面的读取方起初是 Python（M1 的 `site/gpu-map/record.py` 那一层），用 `scripts/c-map/dawnmap.py` 的
+`load(path) -> {units, srcs, fns, calls}`；K1 之后是 Dawn 包 `packages/xmap`（`src/dawnmap.dawn` 读同一种表，只取
+`fn` 与 `call` 两种行，其余行种按本节的兼容规则跳过）。它需要的全在表里：
 
 - 源码栏：`src` 给路径，`call` 给 `[nlo, hi)` 高亮被调名、`[lo, hi)` 是整个调用；嵌套由 span 包含还原。
 - C 栏：`[first, line]` 与末行列区间；要逐行着色（CE 的形态）时，每行取覆盖它的最内层调用。
