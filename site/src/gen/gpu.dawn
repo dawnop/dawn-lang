@@ -1436,15 +1436,15 @@ test "the golden kernels are the ones kernels.dawn dispatches" {
     var arms: List[String] = []
     for l in str.split(must_read(kernels_file()), "\n") {
       match str.strip_prefix(l, "  \"") {
-        Some(rest) ->
-          match str.strip_suffix(str.trim_end(str.replace(rest, " -> {", " ->")), "\" ->") {
-            Some(name) -> {
-              if not str.contains(name, "\"") {
-                arms = arms ++ [name]
-              }
-            }
-            None -> ()
+        Some(rest) -> {
+          # an arm is `  "<name>" -> {` or, for a kernel whose body is one
+          # expression, `  "<name>" -> trace_kernel(..`: the name is what
+          # stands before the first `" ->`
+          let parts = str.split(rest, "\" ->")
+          if len(parts) >= 2 && not str.contains(parts[0], "\"") {
+            arms = arms ++ [parts[0]]
           }
+        }
         None -> ()
       }
     }
