@@ -29,9 +29,16 @@ pub type Method = { lines: List[String], pcs: List[Int], line_of: Map[Int, Int] 
 ## A listing's members by `(name, descriptor)`.
 pub type Listing = { methods: Map[(String, String), Method] }
 
-fn prefix_char(c: String) -> Bool = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.$[]<>, ", c)
+# What may stand in a member's header, named by what may not, because the
+# names a program gives its functions and types are not only ASCII: Dawn takes
+# `größe` as a name and javap prints it as it is (given a UTF-8 stdout, which
+# the runner asks for), and a list of the characters allowed lost the method
+# and every call in it as a gap. What is left out is what makes a line some
+# other kind of line: an instruction's `:` and `#`, a comment's `/`, a quote, a
+# tab, a parenthesis and the punctuation of a descriptor or a type list.
+fn prefix_char(c: String) -> Bool = not str.contains(":#=/\"\t()*", c)
 
-fn name_char(c: String) -> Bool = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$<>-", c)
+fn name_char(c: String) -> Bool = not str.contains(" (),;.[]/:#=\"\t*", c)
 
 # A member header (`  public static int f(int);`) names its member by the
 # token just before the first `(`, which has to be the line's only
@@ -190,6 +197,32 @@ test "a listing is cut into its methods by name and descriptor" {
   }
   assert find_method(l, "main", "()V") == None
   assert find_method(l, "dawn\$args", "[Ljava/lang/String;") == None
+}
+
+test "a method and a type named outside ASCII are found" {
+  let text = "Compiled from \"prog.dawn\"\n"
+    ++ "public final class prog {\n"
+    ++ "  public static long größe(long);\n"
+    ++ "    descriptor: (J)J\n"
+    ++ "    Code:\n"
+    ++ "       0: lload_0\n"
+    ++ "       1: lreturn\n"
+    ++ "\n"
+    ++ "  public static Wéird mk(int);\n"
+    ++ "    descriptor: (I)LWéird;\n"
+    ++ "    Code:\n"
+    ++ "       0: aconst_null\n"
+    ++ "       1: areturn\n"
+    ++ "}\n"
+  let l = parse_listing(text)
+  match find_method(l, "größe", "(J)J") {
+    Some(m) -> { assert m.pcs == [0, 1] }
+    None -> { assert false }
+  }
+  match find_method(l, "mk", "(I)LWéird;") {
+    Some(m) -> { assert m.pcs == [0, 1] }
+    None -> { assert false }
+  }
 }
 
 test "a name with a dash, the class initializer and a switch table" {
