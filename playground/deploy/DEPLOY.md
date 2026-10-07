@@ -11,22 +11,44 @@ by hand, with the server reachable.
    useradd --system --no-create-home --shell /usr/sbin/nologin dawn-play
    ```
 
-2. **JDK 21 + Python 3**: the headless JDK, not only the JRE. `/run` and
-   `/check` need `java`, and `/compile` lists the compiled class with `javap`
-   (`docs/playground-compile-design.md` section 6.5), which only the JDK
-   package has. It must be the same major as the JDK `bin/dawn` runs on. The
-   bounded WebSocket gateway uses only Python's standard library. On Ubuntu
-   22.04:
+2. **A private GraalVM CE 21.0.2, and Python 3.** The runner needs `java` for
+   `/run` and `/check` (the compiler and the user's program) and `javap` for
+   `/compile` (`docs/playground-compile-design.md` section 6.5), which only a
+   JDK has. All of it runs on one pinned GraalVM Community Edition 21.0.2, the
+   JDK the dev box and CI test the compiler on, unpacked to
+   `/opt/dawn/graalvm-21`. It does **not** come from apt:
+   `openjdk-21-jdk-headless` would put `javap` in `/usr/bin` through
+   alternatives and move the patch level of the JRE that every other JVM
+   service on this host shares. This tree is on no PATH and registered with no
+   alternatives; only the runner and its sandbox units use it. It is outside
+   `$HOME` because the sandbox units run with `ProtectHome=yes`; they see
+   `/opt/dawn` through a read-only bind, and the runner passes absolute paths
+   (`PLAY_JDK` in `dawn-play.service`) while `run-sandboxed.sh` sets the units'
+   `JAVA_HOME` to the same directory, so their empty environment and systemd's
+   default PATH no longer decide which `java` runs. Whatever JRE the host has
+   is left as it is. The bounded WebSocket gateway uses only Python's standard
+   library and the native `dawnc`, no JVM.
    ```sh
-   sudo apt-get install -y openjdk-21-jdk-headless python3
-   # lands at /usr/lib/jvm/java-21-openjdk-amd64, java and javap in /usr/bin
-   javap -version   # must print 21.x: redeploy.sh refuses to ship without it
+   sudo apt-get install -y python3
    ```
-   A host that already has `openjdk-21-jre-headless` gets the JDK package on
-   top of it; the JRE stays, nothing about `/run` changes. Without `javap` the
-   runner still starts and `POST /compile` answers 503 saying so, which is
-   why `redeploy.sh` checks for it before it syncs anything. `PLAY_JAVAP`
-   names another `javap` (the contract test sets it to the JDK it runs on).
+   The server cannot reach GitHub, where the tarball
+   (`graalvm-community-jdk-21.0.2_linux-x64_bin.tar.gz`, from
+   `graalvm/graalvm-ce-builds` release `jdk-21.0.2`) is hosted, so the helper
+   runs on **your** machine: it downloads the tarball, checks the pinned
+   sha256, rsyncs it to the server and swaps it in atomically (unpacked beside
+   the target, then renamed):
+   ```sh
+   DEPLOY_USER=<server login> ./playground/deploy/install-jdk.sh
+   # its last lines on the server: java and javap -version -> 21.0.2
+   ```
+   `redeploy.sh` asks the server for `/opt/dawn/graalvm-21/bin/java -version`
+   and `javap -version` before it syncs anything, and refuses to ship unless
+   both report 21.0.2. Without `javap` the runner still starts and
+   `POST /compile` answers 503 saying so. To move the pin, change the pinned
+   lines in `install-jdk.sh`, the version check in `redeploy.sh` and
+   `SANDBOX_JAVA_HOME` in `run-sandboxed.sh` together. (The contract test sets
+   `PLAY_JAVA` and `PLAY_JAVAP` to the JDK it runs on; they win over
+   `PLAY_JDK`.)
 
 3. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
    ```

@@ -15,8 +15,17 @@ User=dawn-play
 Group=dawn-play
 WorkingDirectory=/opt/dawn
 
-# /opt/dawn/bin/dawn is the launcher; it uses JAVA_HOME (apt JDK 21: the JDK package, for javap).
-Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+# One pinned GraalVM CE 21.0.2 for everything the runner launches, unpacked for
+# it alone (DEPLOY.md step 2, install-jdk.sh): the server runs the toolchain CI
+# and the dev box test on, and no system package (a JDK from apt would move the
+# patch level of the JRE other JVM services on this host share) is involved.
+# /opt/dawn/bin/dawn is the launcher; it uses JAVA_HOME for the runner itself.
+# PLAY_JDK is where the runner takes `java` (/run) and `javap` (/compile) from,
+# as absolute paths on the sandbox units' argv, since a unit starts with an
+# empty environment. The units' own `dawn` finds this JDK through JAVA_HOME,
+# which run-sandboxed.sh sets to the same path.
+Environment=JAVA_HOME=/opt/dawn/graalvm-21
+Environment=PLAY_JDK=/opt/dawn/graalvm-21
 # Heap ceiling for the broker, kept under MemoryMax below. `dawn run` compiles
 # the runner in-process at startup, and bin/dawn's default -Xmx2g is twice that
 # cap on a box with 3.4G total and no swap -- the JVM would aim past the cgroup
@@ -31,7 +40,6 @@ Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 # -Xmx off the running process rather than trusting the unit file.)
 Environment="DAWN_JVM_OPTS=-Xss512m -Xmx512m"
 Environment=DAWN_BIN=/opt/dawn/bin/dawn
-Environment=PLAY_JAVA=/usr/bin/java
 Environment=PLAY_PORT=8087
 Environment=PLAY_TIMEOUT=10
 # The sandbox is fail-closed in config.sandbox_enabled, so there is nothing to

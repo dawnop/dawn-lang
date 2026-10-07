@@ -71,11 +71,19 @@ The runner's `PLAY_TIMEOUT` (default 10s) kills the child first for a clean
 `systemd-run` starts the unit with a **clean environment** — nothing the runner
 exports reaches either phase. Two consequences that are easy to get wrong:
 
-- **`java` is found on systemd's default `PATH`**
-  (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin`), not through
-  `JAVA_HOME`. On the server that resolves to `/usr/bin/java`, the apt JDK 21, and
-  `javap` (which `POST /compile` runs) is found the same way, at `/usr/bin/javap`.
-  A JDK under `$HOME` cannot work: `ProtectHome=yes` hides it. This is why
+- **No JDK is on systemd's default `PATH`** that the server means to use
+  (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin` would give
+  whatever JRE the OS packages, which other JVM services share). Before
+  2026-10-07 the units ran on that `/usr/bin/java`. Now every JVM the units
+  start is the pinned GraalVM CE 21.0.2 at `/opt/dawn/graalvm-21`, the
+  toolchain CI tests on, found explicitly: the run phase's `java` and the
+  view's `javap` are absolute paths on the argv the runner builds (`PLAY_JDK`),
+  and the compiler units get `JAVA_HOME=/opt/dawn/graalvm-21` from
+  `run-sandboxed.sh` (`--setenv`, a path fixed in that root-run script), which
+  `bin/dawn` honours before any probe. A JDK under `$HOME` cannot work:
+  `ProtectHome=yes` hides it, while `/opt/dawn` is bound read-only into every
+  unit. The tree is private to the runner (no PATH, no alternatives, no apt) so
+  that nothing moves the JRE other services use. This is why
   `bin/dawn`'s `JAVA_HOME` probe is irrelevant here and the launcher falls
   through to plain `java`.
 - **Heap ceilings must be passed with `--setenv`**, which is what the
@@ -88,6 +96,18 @@ exports reaches either phase. Two consequences that are easy to get wrong:
   and the kernel SIGKILLs it — contained, but as an opaque kill rather than a
   diagnostic. At `-Xmx256m` it stays inside and reports an `OutOfMemoryError`
   the runner can render.
+
+Measured 2026-10-07 on the dev box (WSL2, other jobs running, so orders and
+not promises): `/run` and `/check` of the 11 starter programs through a fresh
+runner, outside the sandbox, every request a cold JVM start, median of three
+per program, averaged over the programs. Homebrew OpenJDK 21.0.11 (HotSpot, a
+stand-in for the apt JDK 21 the server had) against GraalVM CE 21.0.2, each run
+twice, alternating: OpenJDK `/run` 1.69 s and 1.86 s, `/check` 1.70 s and
+1.84 s; GraalVM CE `/run` 1.69 s and 2.20 s, `/check` 1.65 s and 2.07 s. The
+spread between the two runs of the same JDK (0.15 to 0.5 s, load from other
+sessions) is larger than the difference between the JDKs, so no latency
+difference is shown either way. Runner startup was 3.1 to 4.1 s on both. Not
+measured: the sandboxed units' extra systemd cost, and the production host.
 
 The **run** phase gets its ceiling on the argv the runner builds,
 `java -Xmx256m -jar prog.jar` (`RUN_HEAP` in `play/exec.dawn`), since
@@ -119,8 +139,8 @@ this endpoint. What differs:
   cannot write a class file whose name has a non-ASCII character in it, and
   `javap` prints such names as `?`. The wrapper is untouched, so `/run` and
   `/check` keep the environment they have.
-- `javap` lives in the JDK package, not the JRE (DEPLOY.md step 2); the runner
-  probes it at start and answers `POST /compile` with 503 when it is missing.
+- `javap` lives in a JDK, not the JRE: the server's is the private GraalVM CE in
+  `/opt/dawn/graalvm-21` (DEPLOY.md step 2); the runner probes it at start and answers `POST /compile` with 503 when it is missing.
 
 Measured on the dev box (WSL2, 16 cores, other jobs running; load 5 to 9, so
 the numbers are orders, not promises): a unit with this wrapper's whole

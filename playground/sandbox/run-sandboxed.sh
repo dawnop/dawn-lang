@@ -85,6 +85,15 @@ esac
 # shrinking it would fail deeply nested programs the parser handles today.
 SANDBOX_JVM_OPTS="-Xss512m -Xmx256m"
 
+# The JDK the unit's `bin/dawn` launches the compiler on. The unit's PATH is
+# systemd's default, where `java` is whatever the OS packages (the JRE other
+# services share), not the pinned GraalVM CE the server is meant to match CI
+# with (DEPLOY.md step 2). bin/dawn takes JAVA_HOME before it looks anywhere
+# else, so naming it here is enough; the path is fixed in this root-run script,
+# not taken from the caller. The run phase's `java` and the view's `javap` need
+# no help: the runner puts their absolute paths on argv.
+SANDBOX_JAVA_HOME=/opt/dawn/graalvm-21
+
 # The largest file the unit may write, its stdout included: the runner opened
 # that file and the unit writes through the descriptor, but RLIMIT_FSIZE is
 # the writer's, so it applies all the same. MemoryMax bounds what the private
@@ -99,6 +108,7 @@ exec systemd-run \
   --quiet --wait --pipe --collect \
   --unit="$unit" \
   --setenv="DAWN_JVM_OPTS=$SANDBOX_JVM_OPTS" \
+  --setenv="JAVA_HOME=$SANDBOX_JAVA_HOME" \
   --property=DynamicUser=yes \
   --property=PrivateNetwork=yes \
   --property=PrivateDevices=yes \

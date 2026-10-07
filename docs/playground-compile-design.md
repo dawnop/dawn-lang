@@ -122,8 +122,8 @@ javap -c -p -s -cp jo hello
 设计 `source-span-map-design.md` 13.6 已裁：列表由读取方跑 `javap -c -p -s`，编译器不写列表，Dawn 里也不重写反汇编器
 （要 200 来个操作码的长度表、`tableswitch` 对齐与 `wide`）。静态页在建站机上有 JDK。**runner 机器只有 JRE**（第二节），所以：
 
-- 方案 A（已裁决，第八节第 1 条）：部署侧装 `openjdk-21-jdk-headless`（同一主版本，与 `bin/dawn` 钉的 JDK 21 一致，13.6 要求列表在钉住的 JDK 上读），
-  javap 与对照脚本在**同一个沙箱单元**里跑。代价：一条运维前提，镜像变大（未测，由运维定）。
+- 方案 A（已裁决，第八节第 1 条）：部署侧带一份与系统隔离的 GraalVM CE 21.0.2（6.5；同一主版本，与 `bin/dawn` 钉的 JDK 21 一致，13.6 要求列表在钉住的 JDK 上读），
+  javap 与对照脚本在**同一个沙箱单元**里跑。代价：一条运维前提，多一个目录（体积未测，由运维定）。
 - 方案 B（已否决）：在 Dawn 里写反汇编，扩展 `selfhost/src/jvm/classread.dawn`（今天 109 行，只读方法的名字、描述符与 `code_length`）。
   需要常量池解析出 `// Method owner.name:desc` 注释、全部操作码的操作数宽度。工作量与出错面都远大于 A，且 13.6 已论证过为何不做。
   只有「运维不允许装 JDK」时才重开。
@@ -292,9 +292,19 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 
 ### 6.5 部署侧的新依赖
 
-- **`openjdk-21-jdk-headless`**（取代 `DEPLOY.md` 一次性设置里的 `openjdk-21-jre-headless`；JDK 包含 JRE，运行 `/run` 的 `java` 不变）：
-  JVM 栏要 `javap`，且它必须与 `bin/dawn` 钉的 JDK 同主版本（13.6）。K2 同时改 `playground/deploy/DEPLOY.md` 的第 2 步，
-  并让 `redeploy.sh` 在缺 `javap` 时拒绝发布（与它现在对 `dawnc` 版本的核对同一种态度）。包体积与镜像变化**未测**，由运维评估。
+- **一份固定版本的 GraalVM CE 21.0.2，解到 `/opt/dawn/graalvm-21`，只给 runner 用**（2026-10-07 裁决，取代先前的 `openjdk-21-jdk-headless`，
+  也取代同日先写的 Temurin 方案）：JVM 栏要 `javap`，且它必须与 `bin/dawn` 钉的 JDK 同主版本（13.6）。选 GraalVM CE 21.0.2 是因为它就是开发机与 CI
+  （`setup-graalvm`，`graalvm-community`，java 21）测编译器用的那个 JDK，服务器因此跑的就是被测过的工具链。为什么不用 apt：该包经 alternatives
+  把 `javap` 放进 `/usr/bin`，还会把同机其它 JVM 服务共用的 JRE 补丁级一并挪动，而这台机器上不只有 runner 一个 JVM 服务。所以 JDK 与系统隔离：
+  不进系统 PATH、不走 alternatives、不用 apt。runner 启动的**所有** JVM 都用它：`dawn-play.service` 设 `JAVA_HOME` 与 `PLAY_JDK` 为该目录，
+  runner 由 `PLAY_JDK` 推出 `java`（`/run`）与 `javap`（`/compile`）的绝对路径写进沙箱单元的 argv；单元环境为空、PATH 是 systemd 默认值，
+  编译器那几个单元则由 `run-sandboxed.sh` 用 `--setenv` 给 `JAVA_HOME`（路径写死在这个以 root 跑的脚本里，不取自调用方），`bin/dawn` 先认它。
+  放在 `/opt/dawn` 而不是 `$HOME`，因为沙箱单元带 `ProtectHome=yes`，而 `/opt/dawn` 被只读绑进每个单元。这是对 `/run`、`/check` 的一处**有意**改动：
+  它们先前跑在系统的 `/usr/bin/java` 上，现在跑在 GraalVM CE 上（延迟差异见 `playground/sandbox/SANDBOX.md` 的实测）。
+  服务器连不上 GitHub，所以由运维在自己的机器上跑 `playground/deploy/install-jdk.sh`：下载钉死的 tarball、核对 sha256、rsync 到服务器、
+  先解到旁边再改名换入。`DEPLOY.md` 第 2 步写明这些，`redeploy.sh` 在同步任何文件之前核对 `bin/java -version` 与 `bin/javap -version`
+  都是 21.0.2，否则拒绝发布（与它对 `dawnc` 版本的核对同一种态度）。tarball 289 MB（`content-length` 实测 288,637,296 字节），解开后的体积**未测**，由运维评估。
+  LSP 网关用的是原生 `dawnc`，不起 JVM，不受影响。
 - `packages/xmap`（暂名）随 `packages/` 一起同步，沿用 `DEPLOY.md` 里 `packages/` 与 `playground/` 并排的约定，不增加新的目录。
 - `/api/compile` 的限流区与请求体上限写进 `nginx-play.conf` 示例块（K4）。
 
@@ -322,7 +332,7 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 - **收尾（同一刀的最后一个提交，或紧随的一刀）：**对拍通过后删去 `record.py` 里的组装与校验，只留取原料那层。
 
 **K2：`/compile`，目标 C 与 JVM。**
-- 内容：`playground/src/play/` 加编译视图的执行与 JSON 渲染，`main.dawn` 加路由，同一闸门；部署侧 javap 前提（`openjdk-21-jdk-headless`，已裁决，见第八节与 6.5）；
+- 内容：`playground/src/play/` 加编译视图的执行与 JSON 渲染，`main.dawn` 加路由，同一闸门；部署侧 javap 前提（隔离的 GraalVM CE 21.0.2，已裁决，见第八节与 6.5）；
   `contract.sh` 加用例：C 成功、JVM 成功、编译错误与 `/run` 同形、超限 413、`target` 非法 400、路径不泄漏、第二次同请求 `cached:true`、
   闸门饱和 429、类名带怪字符的源码。
 - 验收：`PLAY_TEST_PORT=18097 ./playground/test/contract.sh` 全绿；样例响应的 `gaps` 为 0；对 hello 首次冷请求 ≤ 3 s、
@@ -348,7 +358,7 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
   （xmap 0.1.1，带负控）；(2) 沙箱单元的环境是空的，JVM 读成 POSIX 区域，`dawn __emit -o` 写不出 `prog$Wéird.class`（「unmappable characters」），
   `javap` 把这些名字印成 `?`。runner 在三个命令前加 `env LC_ALL=C.UTF-8`，包装脚本不动，`/run`、`/check` 的环境不变。合约测试把 runner 自己起在 POSIX 区域里。
 - **`javap` 缺失：** runner 启动时探测（`javap -version`），缺则 `POST /compile` 答 503 并说明，其余端点照常；`redeploy.sh` 在同步任何文件之前先问服务器，
-  缺 `javap` 则拒绝发布；`DEPLOY.md` 第 2 步改装 `openjdk-21-jdk-headless`；`playground/test/lsp_contract.py` 有对应的门禁与变异体。
+  缺 `javap` 则拒绝发布；`DEPLOY.md` 第 2 步先写的是装 `openjdk-21-jdk-headless`，同日改为隔离的 GraalVM CE 21.0.2（`PLAY_JDK`，见 6.5）；`playground/test/lsp_contract.py` 有对应的门禁与变异体。
 - **合约用例（`playground/test/contract.sh`，19 → 40 项）：** C 与 JVM 成功（结构自检：调用 id、out 区间与标记列都在文本内）、同请求命中（只差头）、
   JVM 栏是同一次构建的另一半（命中）、怪字符名字零缺口、编译错误与 `/check` 逐字节相同且不泄漏工作目录、超栏限额截断、超调用限额、
   400（target 非法/缺失/非字符串、无 code、坏 JSON）、413、405、闸门饱和 429、许可归还。
@@ -408,8 +418,9 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 
 原先的八个开放问题全部有了裁决；二、三节的方案按它们修订。
 
-1. **`javap`：装 `openjdk-21-jdk-headless`。已裁决。**沿用 `source-span-map-design.md` 13.6 的旧裁决。理由：Dawn 里自写反汇编器是一整条线，
-   收益只是少一个系统包。**部署文档要写明这个依赖**（6.5）。
+1. **`javap`：用 JDK 自带的，不自写。已裁决。**沿用 `source-span-map-design.md` 13.6 的旧裁决。理由：Dawn 里自写反汇编器是一整条线，
+   收益只是少一个依赖。**修订（同日，维护者）：**不装 `openjdk-21-jdk-headless`，改用与系统隔离、与 CI 一致的固定版本 GraalVM CE 21.0.2
+   （`/opt/dawn/graalvm-21`，`PLAY_JDK`），免得 apt 动到同机其它 JVM 服务共用的 JRE，且 runner 的所有 JVM 都跑在它上面。**部署文档要写明这个依赖**（6.5）。
 2. **映射转换的核心：Dawn 模块，不要 Python。已裁决（否决了「`record.py` 做成 Python 库给 runner 调」）。**
    理由：生产 runner 是 Dawn 程序，请求路径上不起 Python；站点生成器已经是 Dawn。落地见 3.4 与 K1：模块站点与 runner 共用，过渡期与
    `record.py` 逐字节对拍，对拍通过后 `record.py` 只剩调用编译器取原料的那层。
