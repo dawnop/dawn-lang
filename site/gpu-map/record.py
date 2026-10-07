@@ -131,7 +131,7 @@ def harness_source(src: str) -> str:
     if len(args) != count + 2 or args[0] != f'"{NAME}"' or args[-1] != NAME:
         fail(f"the {NAME} arm does not trace {NAME} itself with {count} markers: {body}")
     markers = args[1:-1]
-    formats = [re.match(r'(?:In|Out|Shared)\(([A-Z0-9]+)', k).group(1) for k in markers]
+    formats = [re.match(r'(?:In|Out|Shared|Scalar)\(([A-Z0-9]+)', k).group(1) for k in markers]
     params = ", ".join(f"param({d}, {k})" for k, d in enumerate(formats))
     erased = ", ".join(f"erase({k})" for k in markers)
     traced = f'trace_calls("{NAME}", [], () => {NAME}({params}), markers: [{erased}])'
