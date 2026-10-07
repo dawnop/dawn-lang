@@ -46,6 +46,7 @@ import {
   type LspInlayHint,
 } from '../src/lsp'
 import { playEndpoints } from '../src/endpoints'
+import { compileViewTests } from './compile-selftest'
 
 let fails = 0
 function expect(name: string, got: unknown, want: unknown) {
@@ -298,12 +299,14 @@ expect('HTTPS endpoint becomes WSS', lspWebSocketUrl('/api/lsp', 'https://exampl
 expect('relative endpoint stays on the page origin', playEndpoints('/api/run', 'https://site.example.test/zh/playground.html'), {
   run: 'https://site.example.test/api/run',
   check: 'https://site.example.test/api/check',
+  compile: 'https://site.example.test/api/compile',
   health: 'https://site.example.test/api/health',
   lsp: 'wss://site.example.test/api/lsp',
 })
 expect('absolute endpoint moves every service to its origin', playEndpoints('https://play.example.test/api/run', 'https://site.example.test/playground.html'), {
   run: 'https://play.example.test/api/run',
   check: 'https://play.example.test/api/check',
+  compile: 'https://play.example.test/api/compile',
   health: 'https://play.example.test/api/health',
   lsp: 'wss://play.example.test/api/lsp',
 })
@@ -915,6 +918,8 @@ expect('CONNECTING blackhole retries once then falls back', [
   blackholeSockets.length, blackholeClient.status,
 ], [2, 'fallback'])
 blackholeClient.stop()
+
+fails += compileViewTests(expect)
 
 console.log(fails === 0 ? 'ALL PASS' : `${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)

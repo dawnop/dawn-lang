@@ -20,6 +20,7 @@ export default defineConfig({
     proxy: {
       '/api/run': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/run/, '/run') },
       '/api/check': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/check/, '/check') },
+      '/api/compile': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/compile/, '/compile') },
       '/api/health': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/health/, '/health') },
       '/api/lsp': {
         target: 'ws://127.0.0.1:8088',

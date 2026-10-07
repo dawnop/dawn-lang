@@ -25,6 +25,9 @@ import {
   lspSemanticTokens,
   prefetchWhenOffline,
 } from './lsp'
+import { callMarks, pickCall, rangesOf, setCalls } from './call-marks'
+import { ComparePane } from './compile-view'
+import { targetOfSearch, withView, type Target } from './compile-state'
 import { playEndpoints } from './endpoints'
 import { SAMPLES } from './samples'
 import './playground.css'
@@ -131,14 +134,22 @@ function mount(root: HTMLElement) {
   const spacer = el('div', 'dp-spacer')
   const version = el('span', 'dp-version')
   version.title = 'The compiler release the run service uses'
+  const viewBtn = el('button', 'dp-share dp-viewtoggle', 'C / JVM')
+  viewBtn.type = 'button'
+  viewBtn.title = 'Show the C and JVM code this program compiles to; click a call to follow it'
+  viewBtn.setAttribute('aria-controls', 'dp-view')
+  viewBtn.setAttribute('aria-expanded', 'false')
   const shareBtn = el('button', 'dp-share', 'Share')
   shareBtn.type = 'button'
   const runBtn = el('button', 'dp-run')
   runBtn.type = 'button'
   runBtn.append('Run ', el('kbd', undefined, isMac ? '⌘⏎' : 'Ctrl ⏎'))
   runBtn.title = isMac ? 'Run (⌘ Enter)' : 'Run (Ctrl Enter)'
-  bar.append(fname, checking, spacer, version, shareBtn, runBtn)
+  bar.append(fname, checking, spacer, version, viewBtn, shareBtn, runBtn)
 
+  // The editor and, when asked for, the generated code beside it (stacked
+  // under it on a narrow screen): one row, so the console stays below both.
+  const work = el('div', 'dp-work')
   const editorHost = el('div', 'dp-editor')
 
   const outPanel = el('div', 'dp-outpanel')
@@ -153,7 +164,28 @@ function mount(root: HTMLElement) {
   const output = el('pre', 'dp-console')
   outPanel.append(outHead, output, el('div', 'dp-limits', LIMITS))
 
-  main.append(bar, editorHost, outPanel)
+  // The tab last shown, which the toolbar button reopens.
+  let lastTarget: Target = 'c'
+  const pane = new ComparePane({
+    endpoint: endpoints.compile,
+    code: () => view.state.doc.toString(),
+    opened: (t) => {
+      if (t) lastTarget = t
+      viewBtn.setAttribute('aria-expanded', t ? 'true' : 'false')
+      viewBtn.classList.toggle('active', t !== null)
+      // `?view=` is the open tab; the hash (the program) is not touched.
+      try {
+        window.history.replaceState(window.history.state, '', withView(location.href, t))
+      } catch {
+        // a sandboxed frame may refuse; the pane works without the URL
+      }
+    },
+    calls: (cs) => view.dispatch({ effects: setCalls.of(rangesOf(view.state.doc, cs)) }),
+    picked: (id) => view.dispatch({ effects: pickCall.of(id) }),
+  })
+  work.append(editorHost, pane.root)
+
+  main.append(bar, work, outPanel)
   ide.append(side, main)
   root.appendChild(ide)
 
@@ -224,6 +256,11 @@ function mount(root: HTMLElement) {
         lspSemanticTokens(lsp),
         lspDefinition(lsp),
         errorLens,
+        callMarks({
+          pick: (id) => pane.pick(id),
+          none: () => pane.announce('No call at the cursor.'),
+          release: () => (pane.hasPick() ? (pane.pick(null), true) : false),
+        }),
         lintGutter(),
         bracketMatching(),
         closeBrackets(),
@@ -242,6 +279,7 @@ function mount(root: HTMLElement) {
         EditorView.updateListener.of((u) => {
           if (u.docChanged) {
             lsp.update(u.state.doc.toString())
+            pane.edited()
             refreshChrome()
             scheduleDraft()
           }
@@ -253,6 +291,9 @@ function mount(root: HTMLElement) {
   lsp.start(initialCode)
   prefetchWhenOffline(lsp, loadBuiltins)
   refreshChrome()
+  // A link that names a tab opens it, and opening compiles.
+  const asked = targetOfSearch(location.search)
+  if (asked) pane.open(asked)
 
   // ---- draft: debounced, so typing does not write storage per keystroke ----
   let draftTimer: ReturnType<typeof setTimeout> | null = null
@@ -301,6 +342,8 @@ function mount(root: HTMLElement) {
         body: JSON.stringify({ code: currentCode() }),
       })
       if (res.status === 429) {
+        // /run and /compile share two permits: stop recompiling by itself
+        pane.serviceBusy()
         render({ ok: false, phase: 'error', output: 'Server busy — try again shortly' })
       } else if (res.status === 413) {
         render({ ok: false, phase: 'error', output: 'Source too long' })
@@ -333,6 +376,7 @@ function mount(root: HTMLElement) {
   }
 
   runBtn.addEventListener('click', run)
+  viewBtn.addEventListener('click', () => (pane.isOpen() ? pane.close() : pane.open(lastTarget)))
   outClose.addEventListener('click', () => {
     outPanel.hidden = true
   })
