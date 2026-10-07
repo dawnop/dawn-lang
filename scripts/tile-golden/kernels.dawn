@@ -2162,6 +2162,12 @@ fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev 
 # two running tiles' starting values are `full` under a `Tile[Float]`, and the
 # scores are a `Tile[Float]` so that the `lit(0.0)` accumulator of the first
 # `mma` has a format to be made in.
+#
+# The softmax scale `1 / sqrt(d)` is the kernel's fifth parameter, passed by
+# value (tileir 0.12.0, `Scalar(F64)`, read with `scalar(scale)`), and not a
+# constant of the recording: one cubin serves every head size, the way the
+# scale of Triton's tutorial kernel (`sm_scale`) and cutile-rs's `qk_scale`
+# are launch arguments. ATT_INV_SQRT_D is what the tests launch it with.
 const FA_BQ: Int = 32
 const FA_BK: Int = ATT_D
 
@@ -2197,13 +2203,13 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 # a row of the dialect's `mmaf` table, bf16 into bf16 is not. Tolerance
 # tier, and not the f64 kernels' tolerance: see scripts/tile-gpu-diff's
 # seq_diff for the bound and what it is derived from.
-fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float]) -> Unit !Dev = {
+fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float], scale: Param[F32]) -> Unit !Dev = {
   let tq = load_cell(q)
   var m: Tile[F32] = full([FA_BQ, 1], -INFINITY)
   var l: Tile[F32] = full([FA_BQ, 1], 0.0)
   var acc: Tile[F32] = full([FA_BQ, ATT_D], 0.0)
   for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * lit(ATT_INV_SQRT_D)
+    let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
@@ -5282,9 +5288,9 @@ fn trace(name: String) -> TileProg = match name {
     p
   }
   "flash_attn_bf16" -> {
-    let (p, _e) = trace4("flash_attn_bf16",
+    let (p, _e) = trace5("flash_attn_bf16",
       In(BF16, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(BF16, fa_kv()), In(BF16, fa_kv()),
-      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), flash_attn_bf16)
+      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F32), flash_attn_bf16)
     p
   }
   "idx_softmax" -> {
