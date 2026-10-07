@@ -47,6 +47,15 @@ both backends.
   says (`gpu.bad_entry`). Needs the `std/gpu` of the same release: `launch`
   takes `List[LaunchArg]` (`erase(buffer(t))`, `erase(scalar(v))`) and the
   fake device's `WideRefFn` takes the launch's scalars as a third argument.
+- Measured on the device: `scripts/tile-gpu-diff/scalar_diff.dawn` runs the
+  four scalar kernels (`scalar_scale`, `scalar_len`, `scalar_loop`,
+  `scalar_wide`) bit for bit against the fake device, each cubin on several
+  values, with the upper half of the argument word garbage in three cases
+  (the device does not read it). A scalar parameter costs about 0.4
+  microseconds per launch more than a baked constant and about 0.35 less
+  than a one-element buffer on sm_100, and the two compile alike
+  (`docs/tileir-k4-design.md` 1.2). `ScalarArg` is the one new operation;
+  no opcode, so `scripts/tileir-features` is unchanged.
 
 ## 0.11.0 (2026-10-07)
 
