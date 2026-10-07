@@ -1,6 +1,6 @@
 # flash_attn 对照理想写法的复核（tileir 0.12）
 
-> 状态：**audit**（2026-10-07）。基线 `origin/main` = 50f15459（tileir 0.12.0，K4 已合）。
+> 状态：**current**（2026-10-07）。基线 `origin/main` = 50f15459（tileir 0.12.0，K4 已合）。
 > 理想写法取自 [tileir-011-design.md](tileir-011-design.md) §3.1（0.11 目标写法）、
 > [tileir-k4-design.md](tileir-k4-design.md)（运行期标量）与维护者工作区的
 > research-generic-kernel-report-20261006（泛型 kernel 的目标形状 `fn flash_attn[D, A](.., scale)`）；
