@@ -130,6 +130,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
+use std/narrow
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, last_out_with, vadd_ref}
 use tileref/ref.{matmul_ref, matmul_bt_ref, lora_out_ref, row_softmax_ref, swiglu_act_ref, apsp_step_ref,
   causal_scores_ref, alibi_scores_ref, window_scores_ref, sink_scores_ref, decay_scores_ref, cce_row_ref,
@@ -1352,7 +1353,8 @@ fn flash_bf16_seq() -> Seq = Seq {
   name: "flash_bf16",
   tier: "tolerance",
   bufs: flash_bf16_bufs(),
-  steps: [step("flash_attn_bf16", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"])],
+  steps: [step_scalars("flash_attn_bf16", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"],
+    [gpu.erase(gpu.scalar(narrow.f32(ATT_INV_SQRT_D)))])],
   reads: ["o"],
   via: "o",
   stale_at: 0
@@ -1611,13 +1613,13 @@ fn refs_for(name: String) -> Map[String, (Int, WideRefFn)] =
     map.from([("flash_attn", (4, last_out_with((dts, ins, ss) =>
         flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ss[0], dts, ins))))])
   } else if name == "flash_bf16" {
-    map.from([("flash_attn_bf16", (4, last_out((dts, ins) =>
-        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins, p_round: "bf16"))))])
+    map.from([("flash_attn_bf16", (4, last_out_with((dts, ins, ss) =>
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ss[0], dts, ins, p_round: "bf16"))))])
   } else if name == "flash_bf16_unrounded" {
     # NOT a sequence of `sequences()`: the control's reference, the honest
     # one with `p_round` left out (see `tolerance_of`).
-    map.from([("flash_attn_bf16", (4, last_out((dts, ins) =>
-        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ATT_INV_SQRT_D, dts, ins))))])
+    map.from([("flash_attn_bf16", (4, last_out_with((dts, ins, ss) =>
+        flash_attn_ref(ATT_M, ATT_N, ATT_D, FA_BK, ss[0], dts, ins))))])
   } else if name == "apsp" {
     map.from([("apsp_step", (2, (dts, ins, _ss) => [(0, apsp_step_ref(APSP_N, dts, ins))]))])
   } else {
