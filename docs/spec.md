@@ -526,7 +526,21 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 同样的相等、哈希与序（`Eq`/`Hash`/`Ord`，以及 `Index`/`Iter`，自己没写就用目标的），
 两个后端都如此，零开销。`opaque` 是软关键字，只有 `opaque type` 有意义。
 
-**两个例外：渲染与算术**。不透明类型**不**继承目标的 `Show`（也就不继承 `Display`）。
+**继承的只有关系：一张封闭白名单**。不透明类型自己没写 impl 时，只有 `Eq`、`Hash`、`Ord`
+落到目标；**其余一切 trait**——`Show`/`Display`、算术、`FromInt`/`FromFloat`、
+`HasDtype` 这类「格式身份」trait，以及用户或库声明的任何 trait——只问类型自己的 impl，
+没写就是编译错误：`no impl of …` / `… has no such impl`。判据只有一条：关系只回答真假或符号，
+不暴露表示，也不铸造值；其余 trait 描述的是类型的**身份、格式或行为**，借目标的答案就是把
+目标的身份白送给一个声明过「我不是它」的类型。（2026-10-07 起；此前是「默认落回、黑名单
+排除 Show、算术、FromInt/FromFloat」，每出现一个新 trait 就要多加一处特例，
+`HasDtype[U16]` 因此静默解析成 `Int` 的 `"i64"`，与 `std/dtype` 声明的「应是类型错误」相反。
+Haskell newtype、Rust newtype、Scala 3 opaque type、Kotlin value class 默认都不继承；
+GHC 的 `GeneralizedNewtypeDeriving` 复用表示的字典，也唯独 `Show`/`Read` 例外。要继承就在
+声明模块写两行转发 impl。）
+
+下面两段是这条规则在渲染与算术上的具体后果。
+
+**渲染**。不透明类型**不**继承目标的 `Show`（也就不继承 `Display`）。
 关系只回答真假或符号，不暴露表示；渲染把表示原样印出来，而那正是这个类型要藏的东西。
 要打印就在声明模块写 `impl Show[N]`（需要时再写 `impl Display[N]`）；没写，`to_string`、
 `${…}`、`derive Show` 的字段、`[T: Show]` 约束对它都是编译错误。
@@ -551,15 +565,16 @@ GHC 同一条切分：`Num` 不随 newtype 白给，要显式 `deriving newtype`
 > 若某个函数的答案变了，它要么是下面六件事之一，要么就是 bug。**只有六件事**允许看见
 > `TyOpaque`：可赋值性与统一判定（谁能转换）、impl 选择（`head_of`/`impl_at`）、
 > 符号命名（`ty_key`/`dict_key`/impl 方法名）、诊断里的类型名、公开面可见性校验
-> （§3.3：查 identity 与显式实参，**不查** representation），以及 `Show` 与算术见证解析
-> （上两段的例外：不落回目标）。
+> （§3.3：查 identity 与显式实参，**不查** representation），以及白名单之外的见证解析
+> （只有 `Eq`/`Hash`/`Ord` 落回目标）。
 > 其余每一个吃 `Ty` 的函数——宽度、描述符、槽位、装箱、哪条指令、能不能当常量、
 > 某个 trait 有没有答案——都取目标的答案。
 > 次序也是定的：**先问身份再问表示**，`impl Eq[UserId]` 必须先于「按 Int 比较」，
 > 否则声明它就没意义了。
 > 机器化在 `scripts/opaque-twin/`：每个语料跑两遍，一遍原样一遍换成 `alias`，
 > 输出必须一致（编译错误也算输出）。2026-07-27 用手工做这件事一次抓出 12 处。
-> 渲染与算术因上面的例外不在这个性质里，语料经目标显式渲染、显式运算。
+> 白名单之外的 trait（渲染、算术等）因上面的规则不在这个性质里，语料经目标显式渲染、显式运算；
+> 「别名侧能编译、opaque 侧必须被拒」由 `twin-refused-alias-ok` 判决单独钉住。
 
 可以给不透明类型写自己的 impl（`impl Show[UserId]`、`impl Display[UserId]`），它优先于
 目标类型的；孤儿规则把不透明类型算作声明模块的本地类型。`Char` 两层都写了

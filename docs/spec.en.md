@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 804220e6070f14aa -->
+<!-- doc-check: translation-of docs/spec.md @ 3651aaeea8cfcb28 -->
 
 # Dawn Language Specification
 
@@ -663,7 +663,24 @@ target type — the same representation, the same equality, hashing and ordering
 and `Index`/`Iter`, the target's unless the type writes its own), on both backends, at zero cost.
 `opaque` is a soft keyword; only `opaque type` means anything.
 
-**Two exceptions, rendering and arithmetic.** An opaque type does **not** inherit its target's `Show` (and so
+**What it inherits is the relations, a closed allowlist.** An opaque type with no impl of its own falls
+back to its target for `Eq`, `Hash` and `Ord` only. **Every other trait** (`Show`/`Display`, arithmetic,
+`FromInt`/`FromFloat`, format-identity traits such as `HasDtype`, and any trait a user or library
+declares) asks only the type's own impls, and a missing one is a compile error: `no impl of …` /
+`… has no such impl`. There is one criterion: a relation only answers true/false or a sign, exposes
+no representation and mints no value; every other trait describes the type's **identity, format or
+behaviour**, and borrowing the target's answer would hand the target's identity to a type that
+declared "I am not it". (Since 2026-10-07; before that the rule was "fall back by default, with a
+blacklist of Show, arithmetic, FromInt/FromFloat", every new trait meant one more special case, and
+`HasDtype[U16]` silently resolved to `Int`'s `"i64"`, the opposite of the "should be a type error"
+`std/dtype` declares. Haskell newtypes, Rust newtypes, Scala 3 opaque types and Kotlin value classes
+all inherit nothing by default; GHC's `GeneralizedNewtypeDeriving` reuses the representation's
+dictionary, again except for `Show`/`Read`. To inherit, write a two-line forwarding impl in the
+declaring module.)
+
+The next two paragraphs are what this rule means for rendering and arithmetic.
+
+**Rendering.** An opaque type does **not** inherit its target's `Show` (and so
 not its `Display` either). A relation only answers true/false or a sign and exposes nothing; a
 rendering prints the representation as it is, which is exactly what the type hides. To print one,
 write `impl Show[N]` in the declaring module (and `impl Display[N]` when needed); without it,
@@ -696,8 +713,8 @@ arguments along. "The representation is not public" does not imply "the type par
 > unification decision (who can convert), impl selection (`head_of`/`impl_at`), symbol naming
 > (`ty_key`/`dict_key`/impl method names), the type name in diagnostics, export-surface
 > visibility (§3.3: it checks the identity and the explicit arguments, **not** the representation),
-> and `Show` and arithmetic witness resolution (the exceptions above: they do not fall back to the
-> target).
+> and witness resolution outside the allowlist
+> (only `Eq`/`Hash`/`Ord` fall back to the target).
 > Every other function that eats a `Ty` — width, descriptor, slot, boxing, which instruction,
 > whether it can be a constant, whether some trait has an answer — takes the target's answer.
 > The order is fixed too: **ask about identity before representation**. `impl Eq[UserId]` must come
@@ -705,8 +722,9 @@ arguments along. "The representation is not public" does not imply "the type par
 > The mechanised form is in `scripts/opaque-twin/`: every corpus program is run twice, once as
 > written and once with `alias` substituted, and the outputs must agree (a compile error counts as
 > output). Doing this by hand once on 2026-07-27 caught 12 places.
-> Rendering and arithmetic are outside that property because of the exceptions above; the corpus
-> renders and computes through the target explicitly.
+> Traits outside the allowlist (rendering, arithmetic and the rest) are outside that property because
+> of the rule above; the corpus renders and computes through the target explicitly, and "the alias side
+> compiles, the opaque side is refused" is pinned separately by the `twin-refused-alias-ok` verdict.
 
 An opaque type can be given its own impls (`impl Show[UserId]`, `impl Display[UserId]`), which take
 precedence over the target type's; the orphan rule counts an opaque type as a local type of the
