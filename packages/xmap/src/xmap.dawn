@@ -1,0 +1,393 @@
+# From the compilers' raw side tables to the explorer's data: one program's
+# call table, and for each pane its text and which call wrote which of its
+# lines, in the format `.xmap` (docs/explorer-page-design.md section 4).
+#
+# Why this is a package. The static explorer page (site/) and the Playground's
+# online compile view (docs/playground-compile-design.md) do the same job on
+# different inputs: the page on a few fixed programs at build time, the view
+# on whatever a visitor typed. The first version of the job was a Python
+# script, which a Dawn request handler cannot call without starting an
+# interpreter on every request. So the job is a function of strings and
+# records, with no I/O: the caller runs the compilers and `javap` (it knows
+# which sandbox they run in) and hands over what they printed.
+#
+# Two entries, one computation. `explore` always answers with the program's
+# panes and a list of gaps: every place where the maps and the text did not
+# line up (a call a map has no row for, a pc range with no instruction, a
+# column past the end of its line). A call with a gap is shown without its
+# lines in that pane and the text of the pane is whole, which is what the
+# online view wants for code nobody has checked: it counts the gaps and says
+# so. `explore_strict` is the same answer or the first gap as an error, which
+# is what the static page wants of code the repository owns: the build stops,
+# because a page that says less than it seems to is worse than no page. The
+# Playground's eleven starter programs are held to zero gaps by
+# scripts/xmap-samples, so a gap there is a compiler defect to file, not a
+# state to live with.
+
+use std/str
+use std/list
+use std/set
+use std/map
+use dawnmap.{CMap, JMap, CCall, JCall, JFn, parse_c, parse_jvm}
+use javap.{Listing, parse_listing}
+use source.{Src, src_of, at, span_text}
+use table.{Call, TileMap, parse_tile_map, table_from_tile, table_from_maps, check_table}
+use panes.{Out, PaneBuild, c_pane, jvm_pane, tile_pane, chomp}
+
+## Which program to map and how: its name, the path its source is shown by,
+## the function the page shows (`""`: the whole file), the module the
+## compilers named it (the file's stem for a single file; `main` for a
+## project) and whether it is a Tile IR kernel (its table and its Tile IR pane
+## then come from the recording).
+pub type Spec = { name: String, path: String, fn_name: String, module: String, kernel: Bool }
+
+## What the compilers printed, as text: the source, the C text and its map,
+## the JVM map and `javap -c -p -s` of the class, and, for a kernel, the Tile
+## IR recording and the golden Tile IR text (`""` otherwise).
+pub type Raw = { source: String, ctext: String, cmap: String, jmap: String, javap: String, tile_map: String, golden: String }
+
+## The raw material parsed. A caller that wants to change one part (a test
+## that injects a defect) changes it here and calls [`map_program`].
+pub type Inputs = {
+  src: Src,
+  ctext: List[String],
+  c_total: Int,
+  cmap: CMap,
+  jmap: JMap,
+  listing: Listing,
+  j_total: Int,
+  tile: Option[TileMap],
+  tile_text: String,
+}
+
+## One pane: its kind (`tile`, `c` or `jvm`), the file name its text is kept
+## under, how many lines the program's whole output had (what the pane shows
+## is the function's share of it), its text and its account of every call.
+pub type Pane = { kind: String, file: String, total: Int, text: List[String], outs: List[Out] }
+
+## A program mapped: its source and the lines of it the table covers, the
+## calls, the panes in the order of the tabs, the gaps found and how many calls
+## the host maps have in the function that the table does not (the calls a
+## Tile IR kernel's host run made that its recording does not list).
+pub type Built = { name: String, path: String, src: Src, first: Int, last: Int, calls: List[Call], panes: List[Pane], gaps: List[String], skipped: Int }
+
+## The paths of the files a program's raw material comes from beyond the
+## compilers' own output: its source, and for a kernel the Tile IR recording
+## and the golden Tile IR text (`""` for a program that has none).
+pub type Files = { source: String, tile_map: String, golden: String }
+
+## The names the raw files of one program have in its directory, which the
+## caller reads: the C text, the C map, the JVM map and the javap listing.
+pub fn raw_files() -> List[String] = ["out.c", "c.dawnmap", "jvm.dawnmap", "javap.txt"]
+
+## A program's `spec.txt`, which says what its raw material is. One
+## `key value` row to a line: `source <path>` and `module <name>` always, `fn
+## <name>` when the page shows one function (the whole file otherwise), and
+## `tile-map <path>` with `tile-golden <path>` for a Tile IR kernel. `name` is
+## the program's, which is its directory's.
+pub fn parse_spec(name: String, text: String) -> Result[(Spec, Files), String] = {
+  var kv: Map[String, String] = map.empty()
+  for l in filter(str.split(text, "\n"), l => l != "") {
+    match str.split_once(l, " ") {
+      Some((k, v)) -> {
+        kv = map.insert(kv, k, v)
+      }
+      None -> {
+        return Err("`${l}` is not a `key value` row")
+      }
+    }
+  }
+  let rows = kv
+  let get_or = (k: String, d: String) => unwrap_or(map.get(rows, k), d)
+  let kernel = map.has(rows, "tile-map")
+  if get_or("source", "") == "" || get_or("module", "") == "" {
+    Err("the spec of ${name} has no source or no module")
+  } else if kernel != map.has(rows, "tile-golden") {
+    Err("the spec of ${name} has one of tile-map and tile-golden, not both")
+  } else {
+    let files = Files { source: get_or("source", ""), tile_map: get_or("tile-map", ""), golden: get_or("tile-golden", "") }
+    Ok((Spec { name: name, path: files.source, fn_name: get_or("fn", ""), module: get_or("module", ""), kernel: kernel }, files))
+  }
+}
+
+fn line_count(text: String) -> Int = len(str.split(chomp(text), "\n"))
+
+## `raw` parsed, or why one of its parts is not what it claims to be.
+pub fn parse_raw(spec: Spec, raw: Raw) -> Result[Inputs, String] =
+  match (parse_c(raw.cmap), parse_jvm(raw.jmap)) {
+    (Err(e), _) -> Err("the C map: ${e}")
+    (_, Err(e)) -> Err("the JVM map: ${e}")
+    (Ok(c), Ok(j)) -> {
+      let tile: Option[Result[TileMap, String]] = if spec.kernel { Some(parse_tile_map(raw.tile_map)) } else { None }
+      match tile {
+        Some(Err(e)) -> Err("the Tile IR recording: ${e}")
+        Some(Ok(t)) -> Ok(inputs(raw, c, j, Some(t)))
+        None -> Ok(inputs(raw, c, j, None))
+      }
+    }
+  }
+
+fn inputs(raw: Raw, c: CMap, j: JMap, tile: Option[TileMap]) -> Inputs =
+  Inputs {
+    src: src_of(raw.source),
+    ctext: str.split(raw.ctext, "\n"),
+    c_total: line_count(raw.ctext),
+    cmap: c,
+    jmap: j,
+    listing: parse_listing(raw.javap),
+    j_total: line_count(raw.javap),
+    tile: tile,
+    tile_text: raw.golden,
+  }
+
+# The calls the C map has in the function that the table has no row for.
+fn host_only(src: Src, spec: Spec, first: Int, last: Int, c: CMap, table: List[Call]) -> Int = {
+  let known = set.from(map(table, t => (t.lo, t.hi)))
+  let seen = filter(c.calls, r => r.module == spec.module && r.lo != None && {
+    let (l, _col) = at(src, unwrap_or(r.lo, 0))
+    first <= l && l <= last
+  } && not set.has(known, (unwrap_or(r.lo, 0), unwrap_or(r.hi, -1))))
+  len(list.unique(map(seen, r => (unwrap_or(r.lo, 0), unwrap_or(r.hi, -1)))))
+}
+
+fn pane_of(kind: String, spec: Spec, total: Int, b: PaneBuild) -> Pane =
+  Pane { kind: kind, file: "${spec.name}.${kind}.txt", total: total, text: b.text, outs: b.outs }
+
+## The program `spec` names, mapped from parsed inputs.
+pub fn map_program(spec: Spec, inp: Inputs) -> Built = {
+  let src = inp.src
+  let (first, last, table, table_gaps) = match inp.tile {
+    Some(t) -> (t.first, t.last, table_from_tile(src, t), [])
+    None -> {
+      let l = len(src.lines) - if str.ends_with(src.text, "\n") { 1 } else { 0 }
+      let (calls, gaps) = table_from_maps(src, spec.module, 1, l, inp.cmap, inp.jmap)
+      (1, l, calls, gaps)
+    }
+  }
+  let none: List[String] = if len(table) == 0 { ["${spec.name}: no calls to show"] } else { [] }
+  let faults = table_gaps ++ none ++ check_table(src, table, first, last)
+  let tile: Option[PaneBuild] = if spec.kernel { Some(tile_pane(spec.name, inp.tile_text, table)) } else { None }
+  let c = c_pane(spec.name, spec.fn_name, inp.ctext, inp.cmap, spec.module, table, src)
+  let j = jvm_pane(spec.name, spec.fn_name, inp.listing, inp.jmap, spec.module, table, src)
+  let panes = match tile {
+    Some(t) -> [pane_of("tile", spec, len(t.text), t), pane_of("c", spec, inp.c_total, c), pane_of("jvm", spec, inp.j_total, j)]
+    None -> [pane_of("c", spec, inp.c_total, c), pane_of("jvm", spec, inp.j_total, j)]
+  }
+  let tile_gaps = match tile {
+    Some(t) -> t.gaps
+    None -> []
+  }
+  Built {
+    name: spec.name,
+    path: spec.path,
+    src: src,
+    first: first,
+    last: last,
+    calls: table,
+    panes: panes,
+    gaps: faults ++ tile_gaps ++ c.gaps ++ j.gaps,
+    skipped: host_only(src, spec, first, last, inp.cmap, table),
+  }
+}
+
+## The program `spec` names, mapped from what the compilers printed, with its
+## gaps listed. An error only when a part of `raw` cannot be read at all.
+pub fn explore(spec: Spec, raw: Raw) -> Result[Built, String] =
+  match parse_raw(spec, raw) {
+    Err(e) -> Err(e)
+    Ok(inp) -> Ok(map_program(spec, inp))
+  }
+
+## [`explore`], or the first gap as the error.
+pub fn explore_strict(spec: Spec, raw: Raw) -> Result[Built, String] =
+  match explore(spec, raw) {
+    Err(e) -> Err(e)
+    Ok(b) -> strict(b)
+  }
+
+## `b`, or its first gap as the error.
+pub fn strict(b: Built) -> Result[Built, String] = if len(b.gaps) == 0 { Ok(b) } else { Err(b.gaps[0]) }
+
+# ---- the format ----
+
+fn out_row(kind: String, id: Int, o: Out) -> String = {
+  let rs = if len(o.lines) == 0 { "-" } else { join(map(o.lines, r => {
+    let (a, b) = r
+    "${a}-${b}"
+  }), " ") }
+  let marks = join(map(o.marks, m => {
+    let (l, a, b) = m
+    " @${l}:${a}-${b}"
+  }), "")
+  let keys = join(map(o.key, l => " !${l}"), "")
+  "out ${kind} ${id} ${rs}${marks}${keys}"
+}
+
+## `b` in the `.xmap` format, one row to a line.
+pub fn to_xmap(b: Built) -> String = {
+  var rows = ["xmap 1", "program ${b.name}", "source ${b.path} ${b.first} ${b.last}"]
+  for c in b.calls {
+    rows = rows ++ ["call ${c.id} ${c.parent} ${c.name} ${span_text(b.src, c.lo, c.hi)} ${span_text(b.src, c.nlo, c.nhi)}"]
+  }
+  for p in b.panes {
+    rows = rows ++ ["pane ${p.kind} ${p.file} ${p.total}"]
+    for c in b.calls {
+      rows = rows ++ [out_row(p.kind, c.id, p.outs[c.id])]
+    }
+  }
+  join(rows, "\n") ++ "\n"
+}
+
+## A pane's text as the file `.xmap` names it holds it.
+pub fn pane_text(p: Pane) -> String = join(p.text, "\n") ++ "\n"
+
+fn fixture_spec() -> String = "source demo.dawn\nmodule demo\nfn f\n"
+
+test "a spec says what a program's raw material is" {
+  match parse_spec("demo", fixture_spec()) {
+    Ok((s, f)) -> {
+      assert (s.name, s.path, s.fn_name, s.module, s.kernel) == ("demo", "demo.dawn", "f", "demo", false)
+      assert f == Files { source: "demo.dawn", tile_map: "", golden: "" }
+    }
+    Err(e) -> { assert e == "" }
+  }
+  match parse_spec("k", fixture_spec() ++ "tile-map a.map\ntile-golden a.mlir\n") {
+    Ok((s, f)) -> {
+      assert s.kernel
+      assert (f.tile_map, f.golden) == ("a.map", "a.mlir")
+    }
+    Err(e) -> { assert e == "" }
+  }
+}
+
+test "a spec with a row, a source or a pair of files missing is refused" {
+  assert is_err(parse_spec("d", "source demo.dawn\nmodule demo\nwat\n"))
+  assert is_err(parse_spec("d", "module demo\n"))
+  assert is_err(parse_spec("d", "source demo.dawn\n"))
+  assert is_err(parse_spec("d", fixture_spec() ++ "tile-map a.map\n"))
+}
+
+fn is_err[A](r: Result[A, String]) -> Bool =
+  match r {
+    Err(_) -> true
+    Ok(_) -> false
+  }
+
+# ---- a small program, mapped by hand ----
+#
+# `println(show(1))` in a function of its own: two calls, one inside the
+# other, on one line of C and a handful of instructions. Every number below is
+# what a compiler would say for it, written out so that a test can break one.
+
+fn demo_spec() -> Spec = Spec { name: "demo", path: "demo.dawn", fn_name: "main", module: "demo", kernel: false }
+
+fn demo_raw() -> Raw =
+  Raw {
+    source: "fn main() -> Unit !io = {\n  println(show(1))\n}\n",
+    ctext: "// header\nvoid main(void) {\n  dawn_println(dawn_show(1));\n}\n",
+    cmap: "dawnmap\t1\tc\ntext\t4\nsrc\tdemo\tdemo.dawn\n"
+      ++ "fn\t2\t4\tdemo\tNf4:main\tdawn_main\n"
+      ++ "call\t3\t3\t2\t28\tdemo\t28\t44\t28\tdirect println\n"
+      ++ "call\t3\t3\t15\t27\tdemo\t36\t43\t36\tdirect show\n",
+    jmap: "dawnmap\t1\tjvm\nsrc\tdemo\tdemo.dawn\n"
+      ++ "fn\t0\t8\tdemo\tNf4:main\tdemo.main:()Ldawn/rt/Unit;\n"
+      ++ "call\t0\t0\t7\t4\tdemo\t28\t44\t28\tdirect println\n"
+      ++ "call\t0\t0\t4\t1\tdemo\t36\t43\t36\tdirect show\n",
+    javap: "public final class demo {\n  public static dawn.rt.Unit main();\n    descriptor: ()Ldawn/rt/Unit;\n    Code:\n"
+      ++ "       0: iconst_1\n"
+      ++ "       1: invokestatic  #2   // Method show:(I)Ljava/lang/String;\n"
+      ++ "       4: invokestatic  #3   // Method println:(Ljava/lang/String;)Ldawn/rt/Unit;\n"
+      ++ "       7: areturn\n}\n",
+    tile_map: "",
+    golden: "",
+  }
+
+fn demo() -> Inputs =
+  match parse_raw(demo_spec(), demo_raw()) {
+    Ok(i) -> i
+    Err(e) -> panic(e)
+  }
+
+# `i` with its first C call (`f`) changed, and the same for the JVM map.
+fn c_first(i: Inputs, f: fn(CCall) -> CCall) -> Inputs =
+  Inputs { ..i, cmap: CMap { ..i.cmap, calls: map(range(0, len(i.cmap.calls)), n => if n == 0 { f(i.cmap.calls[n]) } else { i.cmap.calls[n] }) } }
+
+fn j_first(i: Inputs, f: fn(JCall) -> JCall) -> Inputs =
+  Inputs { ..i, jmap: JMap { ..i.jmap, calls: map(range(0, len(i.jmap.calls)), n => if n == 0 { f(i.jmap.calls[n]) } else { i.jmap.calls[n] }) } }
+
+# What a strict mapping of `i` says, "" for none.
+fn refused(i: Inputs) -> String =
+  match strict(map_program(demo_spec(), i)) {
+    Ok(_) -> ""
+    Err(e) -> e
+  }
+
+test "a program is mapped call by call, the inner call under the outer" {
+  let b = map_program(demo_spec(), demo())
+  assert b.gaps == []
+  assert map(b.calls, c => (c.name, c.parent)) == [("println", -1), ("show", 0)]
+  assert (b.first, b.last, b.skipped) == (1, 3, 0)
+  assert to_xmap(b)
+    == "xmap 1\nprogram demo\nsource demo.dawn 1 3\n"
+    ++ "call 0 -1 println 2:3-2:19 2:3-2:10\ncall 1 0 show 2:11-2:18 2:11-2:15\n"
+    ++ "pane c demo.c.txt 4\nout c 0 2-3 @2:2-28\nout c 1 2-3 @2:15-27\n"
+    ++ "pane jvm demo.jvm.txt 9\nout jvm 0 6-7 !6\nout jvm 1 4-6 !5\n"
+  assert pane_text(b.panes[0]) == "void main(void) {\n  dawn_println(dawn_show(1));\n}\n"
+  assert len(b.panes[1].text) == 7
+}
+
+test "the same raw material is mapped from text, and strictly it is the same answer" {
+  match (explore(demo_spec(), demo_raw()), explore_strict(demo_spec(), demo_raw())) {
+    (Ok(a), Ok(b)) -> {
+      assert to_xmap(a) == to_xmap(b)
+    }
+    _ -> { assert false }
+  }
+}
+
+## The negative controls: each way a side table can disagree with the text it
+## is held to is a gap that names the call, and the strict entry refuses it.
+test "a call one map has no row for is a gap" {
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, lo: Some(-5), hi: Some(-4) })), "and not in the other")
+  assert str.contains(refused(j_first(demo(), r => JCall { ..r, lo: Some(-5), hi: Some(-4) })), "and not in the other")
+}
+
+test "a pc range that is past its method or between instructions is a gap" {
+  assert str.contains(refused(j_first(demo(), r => JCall { ..r, pchi: Some(100000) })), "are outside its method's code")
+  let far = j_first(demo(), r => JCall { ..r, pclo: Some(99999), pchi: Some(100000) })
+  let long = Inputs { ..far, jmap: JMap { ..far.jmap, fns: map(far.jmap.fns, f => JFn { ..f, len: 100001 }) } }
+  assert str.contains(refused(long), "no instruction in pcs")
+}
+
+test "a C row that did not land, lands outside the function or has columns past its line is a gap" {
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, first: None })), "did not land in the C text")
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, first: Some(1), line: Some(1) })), "outside the function's")
+  assert str.contains(refused(c_first(demo(), r => CCall { ..r, clo: Some(0), chi: Some(100000) })), "are outside C line")
+}
+
+test "a method javap does not list is a gap" {
+  let raw = Raw { ..demo_raw(), javap: str.replace(demo_raw().javap, "main();", "mainx();") }
+  match parse_raw(demo_spec(), raw) {
+    Ok(i) -> { assert str.contains(refused(i), "javap lists no method main") }
+    Err(e) -> { assert e == "" }
+  }
+}
+
+test "a name that is not at its span is a gap" {
+  let c = c_first(demo(), r => CCall { ..r, nlo: Some(24) })
+  let both = j_first(c, r => JCall { ..r, nlo: Some(24) })
+  assert str.contains(refused(both), "which is no identifier")
+}
+
+test "a function the maps do not have, and a program with no calls, are gaps, not panics" {
+  let b = map_program(Spec { ..demo_spec(), fn_name: "other" }, demo())
+  assert str.contains(b.gaps[0], "the C map has no function of `other`")
+  assert len(b.panes[0].text) == 0
+  let none = Inputs { ..demo(), cmap: CMap { ..demo().cmap, calls: [] }, jmap: JMap { ..demo().jmap, calls: [] } }
+  assert str.contains(refused(none), "no calls to show")
+}
+
+test "a map that is not one is an error at the door" {
+  assert is_err(explore(demo_spec(), Raw { ..demo_raw(), cmap: demo_raw().jmap }))
+  assert is_err(explore(demo_spec(), Raw { ..demo_raw(), jmap: "" }))
+}

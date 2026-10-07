@@ -1,0 +1,369 @@
+# The three panes' accounts: for each call of the table, which lines of a
+# pane's text it wrote itself.
+#
+# What "wrote itself" means. A call's code in C and in bytecode sits inside its
+# caller's, so a line holding both has two owners; a click on the line has to
+# pick the innermost, and a click on the caller has to light the lines the
+# caller owns *and* the callee's. Both are served by one rule: a call's own
+# lines are its whole run minus the runs of the calls it holds, plus the line
+# it ends on (C) or the instruction that implements it (bytecode), which is
+# the one line a reader means by "this call's result". The page nests the
+# rest. The Tile IR pane needs no such rule: the recording already gives each
+# call the lines it wrote and no others.
+#
+# Why each function returns its text and its gaps together. The pane's text is
+# the compiler's output, complete whatever the table could pair with it; a call
+# the side table has no row for, or whose row points outside the text, costs
+# that call its lines and nothing else. Each such thing is one message naming
+# the call, and the caller decides what a gap is worth (the static page stops,
+# the online view counts it).
+#
+# C lines are the whole text's, from 1; a function's share is copied out under
+# a blank line between functions, so a pane's line numbers are not the C
+# text's: `place` moves one into the other. Bytecode pcs are moved the same
+# way, to the line of the javap listing each is on.
+
+use std/str
+use std/list
+use std/map
+use std/set
+use dawnmap.{CMap, JMap, CCall, JCall, JFn}
+use javap.{Listing, Method, find_method}
+use source.{Src, at, pos}
+use table.{Call, children_of}
+
+## One call's account of one pane: the runs of lines it wrote itself (1-based,
+## half-open), the columns it holds on a line (`(line, from, to)`, 0-based,
+## half-open; C only), and the lines of the instructions that implement it
+## (bytecode only).
+pub type Out = { lines: List[(Int, Int)], marks: List[(Int, Int, Int)], key: List[Int] }
+
+## A pane's text with an account of every call of the table (in row order),
+## and what could not be accounted.
+pub type PaneBuild = { text: List[String], outs: List[Out], gaps: List[String] }
+
+## The name a function has in the maps' `origin` column.
+pub fn origin_of(name: String) -> String = "Nf${str.len(name)}:${name}"
+
+## Sorted, distinct line numbers as half-open runs.
+pub fn ranges(xs: List[Int]) -> List[(Int, Int)] = {
+  var out: List[(Int, Int)] = []
+  for n in sort(list.unique(xs)) {
+    let k = len(out)
+    if k > 0 {
+      let (a, b) = out[k - 1]
+      if b == n {
+        out = list.take(out, k - 1) ++ [(a, n + 1)]
+      } else {
+        out = out ++ [(n, n + 1)]
+      }
+    } else {
+      out = [(n, n + 1)]
+    }
+  }
+  out
+}
+
+fn nothing(table: List[Call]) -> List[Out] = map(table, c => Out { lines: [], marks: [], key: [] })
+
+fn who(prog: String, c: Call) -> String = "${prog}: call ${c.id} (`${c.name}`)"
+
+fn all_of(xs: List[List[Int]], ids: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  for i in ids {
+    out = out ++ xs[i]
+  }
+  out
+}
+
+# ---- the C pane ----
+
+fn c_rows(cmap: CMap, module: String) -> Map[(Int, Int), List[CCall]] = {
+  var rows: Map[(Int, Int), List[CCall]] = map.empty()
+  for r in filter(cmap.calls, r => r.module == module && r.lo != None) {
+    let key = (unwrap_or(r.lo, 0), unwrap_or(r.hi, -1))
+    rows = map.insert(rows, key, unwrap_or(map.get(rows, key), []) ++ [r])
+  }
+  rows
+}
+
+## The C pane of `fn_name` (the functions of the whole module when it is "")
+## of program `prog`: the text of each function copied from `ctext` (the whole
+## C text, by lines), and every call's lines and columns in it.
+pub fn c_pane(prog: String, fn_name: String, ctext: List[String], cmap: CMap, module: String, table: List[Call], src: Src) -> PaneBuild = {
+  let found = filter(cmap.fns, f => f.module == module && (fn_name == "" || f.origin == origin_of(fn_name)))
+  if len(found) == 0 {
+    return PaneBuild { text: [], outs: nothing(table), gaps: ["${prog}: the C map has no function of `${fn_name}`"] }
+  }
+  let want = sort_by(found, (a, b) => a.first - b.first)
+  var text: List[String] = []
+  var base: List[(Int, Int, Int)] = []
+  for f in want {
+    if len(text) > 0 {
+      text = text ++ [""]
+    }
+    base = base ++ [(f.first, f.last, len(text) + 1)]
+    text = text ++ map(list.slice(ctext, f.first - 1, f.last), l => str.trim_end(l))
+  }
+  let bases = base
+  let place = (line: Int) => match list.find(bases, b => {
+    let (a, z, _s) = b
+    a <= line && line <= z
+  }) {
+    Some((a, _z, s)) -> Some(s + line - a)
+    None -> None
+  }
+  let rows = c_rows(cmap, module)
+  var gaps: List[String] = []
+  var fulls: List[List[Int]] = []
+  var lasts: List[List[Int]] = []
+  var markss: List[List[(Int, Int, Int)]] = []
+  for c in table {
+    var full: List[Int] = []
+    var last: List[Int] = []
+    var marks: List[(Int, Int, Int)] = []
+    let rs = unwrap_or(map.get(rows, (c.lo, c.hi)), [])
+    if len(rs) == 0 {
+      gaps = gaps ++ ["${who(prog, c)} at ${pos(at(src, c.lo))} has no row in the C map"]
+    }
+    for r in rs {
+      match (r.first, r.line) {
+        (Some(f), Some(l)) ->
+          match (place(f), place(l)) {
+            (Some(a), Some(b)) ->
+              if b < a {
+                gaps = gaps ++ ["${who(prog, c)}: C lines ${f}-${l} are outside the function's"]
+              } else {
+                full = full ++ range(a, b + 1)
+                last = last ++ [b]
+                match (r.clo, r.chi) {
+                  (Some(x), Some(y)) ->
+                    if 0 <= x && x < y && y <= str.len(text[b - 1]) {
+                      marks = marks ++ [(b, x, y)]
+                    } else {
+                      gaps = gaps ++ ["${who(prog, c)}: columns ${x}-${y} are outside C line ${b}"]
+                    }
+                  _ -> ()
+                }
+              }
+            _ -> {
+              gaps = gaps ++ ["${who(prog, c)}: C lines ${f}-${l} are outside the function's"]
+            }
+          }
+        _ -> {
+          gaps = gaps ++ ["${who(prog, c)} did not land in the C text"]
+        }
+      }
+    }
+    fulls = fulls ++ [full]
+    lasts = lasts ++ [last]
+    markss = markss ++ [marks]
+  }
+  let kids = children_of(table)
+  let fulls_of = fulls
+  let lasts_of = lasts
+  let marks_of = markss
+  let outs = map(table, c => {
+    let under = set.from(all_of(fulls_of, kids[c.id]))
+    let mine = filter(fulls_of[c.id], n => not set.has(under, n)) ++ lasts_of[c.id]
+    Out { lines: ranges(mine), marks: marks_of[c.id], key: [] }
+  })
+  PaneBuild { text: text, outs: outs, gaps: gaps }
+}
+
+# ---- the JVM pane ----
+
+fn j_rows(jmap: JMap, module: String) -> Map[(Int, Int), List[JCall]] = {
+  var rows: Map[(Int, Int), List[JCall]] = map.empty()
+  for r in filter(jmap.calls, r => r.module == module && r.lo != None) {
+    let key = (unwrap_or(r.lo, 0), unwrap_or(r.hi, -1))
+    rows = map.insert(rows, key, unwrap_or(map.get(rows, key), []) ++ [r])
+  }
+  rows
+}
+
+# `owner.name:descriptor` as the method's name and descriptor.
+fn name_and_desc(symbol: String) -> (String, String) = {
+  let (head, desc) = unwrap_or(str.split_once(symbol, ":"), (symbol, ""))
+  match str.rsplit_once(head, ".") {
+    Some((_, name)) -> (name, desc)
+    None -> (head, desc)
+  }
+}
+
+fn is_lambda(f: JFn) -> Bool = {
+  let (name, _d) = name_and_desc(f.symbol)
+  str.starts_with(name, "lambda$")
+}
+
+# A function, then what was lifted out of it.
+fn source_order(a: JFn, b: JFn) -> Int = {
+  let la = is_lambda(a)
+  let lb = is_lambda(b)
+  if la != lb {
+    if la { 1 } else { -1 }
+  } else {
+    a.k - b.k
+  }
+}
+
+## The JVM pane of `fn_name` (the whole module's methods when it is "") of
+## program `prog`: each method's block of the javap listing, and every call's
+## lines in it.
+pub fn jvm_pane(prog: String, fn_name: String, listing: Listing, jmap: JMap, module: String, table: List[Call], src: Src) -> PaneBuild = {
+  let found = filter(jmap.fns, f => f.module == module && (fn_name == "" || f.origin == origin_of(fn_name)))
+  if len(found) == 0 {
+    return PaneBuild { text: [], outs: nothing(table), gaps: ["${prog}: the JVM map has no method of `${fn_name}`"] }
+  }
+  let want = sort_by(found, source_order)
+  var gaps: List[String] = []
+  var text: List[String] = []
+  var where: Map[(Int, Int), Int] = map.empty()
+  var listed: Map[Int, (JFn, Method)] = map.empty()
+  for f in want {
+    let (name, desc) = name_and_desc(f.symbol)
+    match find_method(listing, name, desc) {
+      None -> {
+        gaps = gaps ++ ["${prog}: javap lists no method ${name}${desc} (the JVM map's ${f.symbol})"]
+      }
+      Some(m) -> {
+        if len(text) > 0 {
+          text = text ++ [""]
+        }
+        for pc in m.pcs {
+          where = map.insert(where, (f.k, pc), len(text) + unwrap_or(map.get(m.line_of, pc), 0) + 1)
+        }
+        listed = map.insert(listed, f.k, (f, m))
+        text = text ++ m.lines
+      }
+    }
+  }
+  let rows = j_rows(jmap, module)
+  var takens: List[Map[Int, List[Int]]] = []
+  var ipcs: List[List[Int]] = []
+  for c in table {
+    var taken: Map[Int, List[Int]] = map.empty()
+    var keys: List[Int] = []
+    let rs = unwrap_or(map.get(rows, (c.lo, c.hi)), [])
+    if len(rs) == 0 {
+      gaps = gaps ++ ["${who(prog, c)} at ${pos(at(src, c.lo))} has no row in the JVM map"]
+    }
+    for r in rs {
+      match (r.k, r.pclo, r.pchi) {
+        (Some(k), Some(lo), Some(hi)) ->
+          match map.get(listed, k) {
+            None -> {
+              gaps = gaps ++ ["${who(prog, c)} is in method ${k}, which is not one of the page's"]
+            }
+            Some((f, m)) ->
+              if not (0 <= lo && lo < hi && hi <= f.len) {
+                gaps = gaps ++ ["${who(prog, c)}: pcs ${lo}-${hi} are outside its method's code (${f.len} bytes)"]
+              } else {
+                let pcs = filter(m.pcs, p => lo <= p && p < hi)
+                if len(pcs) == 0 {
+                  gaps = gaps ++ ["${who(prog, c)}: no instruction in pcs ${lo}-${hi}"]
+                } else {
+                  taken = map.insert(taken, k, unwrap_or(map.get(taken, k), []) ++ pcs)
+                }
+                match r.ipc {
+                  Some(ip) ->
+                    if list.contains(m.pcs, ip) {
+                      keys = keys ++ [unwrap_or(map.get(where, (k, ip)), 0)]
+                    } else {
+                      gaps = gaps ++ ["${who(prog, c)}: ipc ${ip} is no instruction"]
+                    }
+                  None -> ()
+                }
+              }
+          }
+        _ -> {
+          gaps = gaps ++ ["${who(prog, c)} did not land in the bytecode"]
+        }
+      }
+    }
+    takens = takens ++ [taken]
+    ipcs = ipcs ++ [keys]
+  }
+  let kids = children_of(table)
+  let taken_of = takens
+  let ipcs_of = ipcs
+  let line_at = where
+  let outs = map(table, c => {
+    var mine: List[Int] = []
+    for k in map.keys(taken_of[c.id]) {
+      var held: List[Int] = []
+      for kid in kids[c.id] {
+        held = held ++ unwrap_or(map.get(taken_of[kid], k), [])
+      }
+      let under = set.from(held)
+      for p in unwrap_or(map.get(taken_of[c.id], k), []) {
+        if not set.has(under, p) {
+          mine = mine ++ [unwrap_or(map.get(line_at, (k, p)), 0)]
+        }
+      }
+    }
+    Out { lines: ranges(mine ++ ipcs_of[c.id]), marks: [], key: sort(list.unique(ipcs_of[c.id])) }
+  })
+  PaneBuild { text: text, outs: outs, gaps: gaps }
+}
+
+# ---- the Tile IR pane ----
+
+## `s` without the newlines it ends with.
+pub fn chomp(s: String) -> String =
+  match str.strip_suffix(s, "\n") {
+    Some(t) -> chomp(t)
+    None -> s
+  }
+
+## The Tile IR pane of kernel `prog`: the golden's text, and the lines each
+## call of the recording wrote.
+pub fn tile_pane(prog: String, golden: String, table: List[Call]) -> PaneBuild = {
+  let text = str.split(chomp(golden), "\n")
+  var gaps: List[String] = []
+  var outs: List[Out] = []
+  for c in table {
+    var rs: List[(Int, Int)] = []
+    for w in c.lines {
+      match str.split_once(w, "-") {
+        Some((x, y)) ->
+          match (parse_int(x), parse_int(y)) {
+            (Some(a), Some(b)) ->
+              if 1 <= a && a < b && b <= len(text) + 1 {
+                rs = rs ++ [(a, b)]
+              } else {
+                gaps = gaps ++ ["${who(prog, c)}: Tile IR lines ${a}-${b} are outside the golden"]
+              }
+            _ -> {
+              gaps = gaps ++ ["${who(prog, c)}: Tile IR lines ${w} are not a range"]
+            }
+          }
+        None -> {
+          gaps = gaps ++ ["${who(prog, c)}: Tile IR lines ${w} are not a range"]
+        }
+      }
+    }
+    outs = outs ++ [Out { lines: rs, marks: [], key: [] }]
+  }
+  PaneBuild { text: text, outs: outs, gaps: gaps }
+}
+
+test "line numbers become runs, adjacent ones joining" {
+  assert ranges([]) == []
+  assert ranges([3, 1, 2, 2, 7, 5, 6]) == [(1, 4), (5, 8)]
+  assert ranges([4]) == [(4, 5)]
+}
+
+test "newlines at the end are dropped, those inside stay" {
+  assert chomp("a\n\nb\n\n\n") == "a\n\nb"
+  assert chomp("") == ""
+  assert origin_of("main") == "Nf4:main"
+}
+
+test "a name and a descriptor are cut from a symbol, a lifted lambda after its function" {
+  assert name_and_desc("hello.main:()Ldawn/rt/Unit;") == ("main", "()Ldawn/rt/Unit;")
+  assert name_and_desc("std/io.println:(Ljava/lang/String;)V") == ("println", "(Ljava/lang/String;)V")
+  let f = JFn { k: 3, len: 1, module: "m", origin: "o", symbol: "m.f:()V" }
+  let l = JFn { ..f, k: 1, symbol: "m.lambda\$f\$0:()V" }
+  assert map(sort_by([l, f], source_order), x => x.k) == [3, 1]
+}
