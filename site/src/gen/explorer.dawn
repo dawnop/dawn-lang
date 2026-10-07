@@ -5,18 +5,22 @@
 # of source but a call, with its nesting.
 #
 # Where every line of it comes from, and why this module trusts none of it.
-# site/explorer/record.py asks each compiler for its own account (the Tile IR
-# recording site/gpu-map/flash_attn.map, `__emitc --map`, `__emit --map` and
-# javap), restricts it to the function shown and writes one format, `.xmap`
-# (docs/explorer-page-design.md section 4), into site/build/explorer/, which
-# is generated and not tracked: the C and the bytecode are the compiler's
-# function, so a checked-in copy would go stale at the next change to it.
-# This module reads that format and checks it again before drawing a line:
-# every call's name is at its name span, every span is inside the function and
-# inside its parent's, every pane has exactly one account of every call, every
-# line it names exists, a Tile IR line has at most one owner. A gap is a
-# `panic`, so a broken mapping stops the build instead of drawing a page that
-# says less than it seems to.
+# site/explorer/record.py asks each compiler for its own account (`__emitc
+# --map`, `__emit --map` and javap) and writes them, untouched, under
+# site/build/explorer/ (generated and not tracked: the C and the bytecode are
+# the compiler's function, so a checked-in copy would go stale at the next
+# change to it). packages/xmap pairs those accounts with the program's source
+# and the Tile IR recording site/gpu-map/flash_attn.map keeps, restricted to
+# the function shown, and refuses a program with any gap: a call a side table
+# has no row for, a row with no place, a range outside the function, a name
+# that is not at its span. The same package makes the Playground's online
+# compile view, which is why the pairing is not here. What the package makes
+# is the `.xmap` format (docs/explorer-page-design.md section 4), and this
+# module reads that and checks it once more against what it is about to draw:
+# every pane has exactly one account of every call, every line it names
+# exists, a Tile IR line has at most one owner. A gap is a `panic`, so a
+# broken mapping stops the build instead of drawing a page that says less
+# than it seems to.
 #
 # What it does not do: open a window a script has to fill. Every pane's text
 # and every line's owners are in the markup, so with no script the page is the
@@ -44,6 +48,7 @@ use gen/fingerprint.{fingerprint}
 use gen/copy.{Copy, load_copy, line, plain, body}
 use gen/gpumap.{MCall, Pos, parse_range, parse_ranges, parse_span, words, call_fault, cuts, covering, named_at}
 use gen/gpu.{ir_html}
+use xmap/xmap.{Files, Raw, parse_spec, raw_files, explore_strict, to_xmap, pane_text}
 
 # ---- the recording ----
 
@@ -311,28 +316,45 @@ fn dir() -> String = "site/build/explorer"
 pub fn program_names() -> List[String] !Fs =
   filter(map(str.split(must_read("${dir()}/programs.txt"), "\n"), str.trim), n => n != "")
 
-fn must_parse(path: String) -> Recording !Fs =
-  match parse_xmap(must_read(path)) {
-    Ok(r) -> r
-    Err(e) -> panic("${path}: ${e}")
+fn read_raw(dir: String, files: Files) -> Raw !Fs = {
+  let at = (name: String) => must_read("${dir}/${name}")
+  let rf = raw_files()
+  Raw {
+    source: must_read(files.source),
+    ctext: at(rf[0]),
+    cmap: at(rf[1]),
+    jmap: at(rf[2]),
+    javap: at(rf[3]),
+    tile_map: if files.tile_map == "" { "" } else { must_read(files.tile_map) },
+    golden: if files.golden == "" { "" } else { must_read(files.golden) },
   }
+}
 
-fn text_lines(path: String) -> List[String] !Fs = str.split(str.trim_end(must_read(path)), "\n")
-
-## One program, read from `site/build/explorer/` and its source file, and held
-## to both.
+## One program: what the compilers said of it, read from
+## `site/build/explorer/<name>/`, paired by packages/xmap (which refuses a gap)
+## and held to the text it is drawn beside.
 pub fn load_program(name: String) -> Program !Fs = {
-  let path = "${dir()}/${name}.xmap"
-  let rec = must_parse(path)
-  if rec.name != name {
-    panic("${path} records `${rec.name}`, not `${name}`")
+  let at = "${dir()}/${name}"
+  let (spec, files) = match parse_spec(name, must_read("${at}/spec.txt")) {
+    Ok(p) -> p
+    Err(e) -> panic("${at}/spec.txt: ${e}")
+  }
+  let built = match explore_strict(spec, read_raw(at, files)) {
+    Ok(b) -> b
+    Err(e) -> panic("${name} does not map to its output: ${e}")
+  }
+  let rec = match parse_xmap(to_xmap(built)) {
+    Ok(r) -> r
+    Err(e) -> panic("${name}: the package's .xmap is not one: ${e}")
   }
   let all = str.split(must_read(rec.path), "\n")
   if rec.first < 1 || rec.last > len(all) {
-    panic("${path}: the source ${rec.path} has ${len(all)} lines, not ${rec.last}")
+    panic("${name}: the source ${rec.path} has ${len(all)} lines, not ${rec.last}")
   }
   let src = map(range(rec.first - 1, rec.last), i => all[i])
-  let texts = map(rec.panes, p => (p.kind, text_lines("${dir()}/${p.file}")))
+  # what a pane's file held: its text and a newline, read back with the newlines
+  # at the end dropped
+  let texts = map(built.panes, p => (p.kind, str.split(str.trim_end(pane_text(p)), "\n")))
   match assemble(rec, src, texts) {
     Ok(p) -> p
     Err(e) -> panic("`${name}` does not line up with its output: ${e}")

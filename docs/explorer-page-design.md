@@ -5,6 +5,16 @@
 > `site/gpu-map/flash_attn.map`）、M2（Core 调用节点的 site）、M3（`__emitc --map`，第十二节）、
 > M4（`__emit --map`，第十三节）。不依赖 M5、M6。
 
+> **K1 之后的分工（2026-10-07）。** 下文把「取原料、换算坐标、建调用表、严查、写 `.xmap`」都记在
+> `site/explorer/record.py` 名下，那是本页最初的实现。在线编译视图（`docs/playground-compile-design.md`）
+> 要在请求路径上做同一件事，而 runner 是 Dawn 程序、不起 Python，所以这一半搬进了 `packages/xmap`
+> （纯函数：dawnmap、javap 列表、源码进，调用表、各栏每个调用的行、缺口出）。现在的 `record.py` 只剩
+> 「调用编译器与 `javap`、把原料连同一份 `spec.txt` 写进 `site/build/explorer/<程序>/`」；`gen/explorer.dawn`
+> 读原料、调 `xmap.explore_strict`（有缺口即失败，与下文「表里的每一个调用在每一栏都必须有出处」同一条规则），
+> 再用页面自己的 `assemble` 检查一遍要画的内容。下文关于算法与规则的叙述不变，只是执行者换了；
+> 搬家时 Python 与 Dawn 两份逐字节对拍过（`flash_attn`、`attend` 与 Playground 的 11 个样例），
+> 对拍与「11 个样例零缺口」由 `scripts/xmap-diff/run.sh` 守着。
+
 ## 一、要什么，不要什么
 
 站点上多一页 `explorer.html`（中文在 `zh/explorer.html`）：左边是 Dawn 源码，右边是同一段源码编出来的产物，
