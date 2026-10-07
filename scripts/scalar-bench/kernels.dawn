@@ -1,0 +1,55 @@
+# The three spellings of one kernel that docs/tileir-k4-design.md 1.2 compares:
+# `out = x * 3.0` over one 128-lane tile per block, where the 3.0 reaches the
+# kernel as a SCALAR PARAMETER (`scalar`), as an element of a ONE-ELEMENT
+# BUFFER it loads (the T12 `dims` way) or as a HOST CONSTANT baked into the
+# program (`f_const`). Everything else is identical, so what the three
+# measure apart is the cost of how the number gets there: a parameter word,
+# an extra buffer and a load, or nothing at all.
+#
+#   kernels <param|buffer|const> [--bytecode <path>]
+#
+# run.sh builds this as a one-file project against packages/tileir, the way
+# scripts/tile-golden/run.sh builds kernels.dawn, and assembles the bytecode.
+use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, idx_const, f_const, scalar}
+use tileir/prog.{TileProg, trace_kernel, ByPtr, ByValue}
+use tileir/render.{render}
+use tileir/bytecode.{encode}
+use std/dtype.{F64}
+use std/io
+
+const TILE: Int = 128
+
+fn by_param(x: Param[Float], s: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), TILE)
+  store(out, base, load(x, base, [TILE]) * scalar(s))
+}
+
+fn by_buffer(x: Param[Float], s: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), TILE)
+  store(out, base, load(x, base, [TILE]) * load(s, idx_const(0), []))
+}
+
+fn by_const(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), TILE)
+  store(out, base, load(x, base, [TILE]) * f_const(F64, 3.0))
+}
+
+fn trace(name: String) -> TileProg = match name {
+  "param" -> trace_kernel("bench_param", [ByPtr("f64"), ByValue("f64"), ByPtr("f64")],
+    () => by_param(param(F64, 0), param(F64, 1), param(F64, 2)))
+  "buffer" -> trace_kernel("bench_buffer", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
+    () => by_buffer(param(F64, 0), param(F64, 1), param(F64, 2)))
+  _ -> trace_kernel("bench_const", [ByPtr("f64"), ByPtr("f64")], () => by_const(param(F64, 0), param(F64, 1)))
+}
+
+pub fn main() -> Unit !io = match args() {
+  [name] -> print(render(trace(name)))
+  [name, "--bytecode", path] -> {
+    let bytes = encode(trace(name))
+    match io.with_fs_real(() => io.write_bytes(path, bytes)) {
+      Ok(_) -> ()
+      Err(_e) -> panic("scalar-bench: cannot write the bytecode to `${path}`")
+    }
+  }
+  _ -> panic("usage: kernels <param|buffer|const> [--bytecode <path>]")
+}
