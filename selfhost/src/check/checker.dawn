@@ -744,18 +744,11 @@ pub(pkg) fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
     _ -> ty_map_children(t, x => reduce_assoc(cx, x))
   }
 
-## The impl a projection reduces through: the subject's own, or -- for an
-## opaque subject with no impl of its own -- its target's, the order
-## resolve_witness uses.
+## The impl a projection reduces through: the subject's own and nobody
+## else's. An opaque subject does not borrow its target's: only the relations
+## fall back (`opaque_inherits`), and a relation has no associated types.
 fn assoc_impl_of(cx: Cx, tid: Int, s: Ty) -> Option[ImplI] =
-  match impl_at(cx.impl_table, tid, s) {
-    Some(ii) -> Some(ii)
-    None ->
-      match s {
-        TyOpaque(_, _, _, _, tgt) -> assoc_impl_of(cx, tid, tgt)
-        _ -> None
-      }
-  }
+  impl_at(cx.impl_table, tid, s)
 
 ## `reduce_assoc`'s twin on the effect axis: rewrite a row's projections
 ## through the call-site type bindings. An atom whose subject was just bound
@@ -1823,11 +1816,10 @@ fn ord_subject(cx: Cx, t: Ty) -> Ty =
   }
 
 ## The closed list of traits an opaque type with no impl of its own inherits
-## from its target (Index and Iter leave it in the next knife). One rule, so no pass keeps a private blacklist of traits
+## from its target. One rule, so no pass keeps a private blacklist of traits
 ## that must not fall back (spec 2.7).
 fn opaque_inherits(trait_id: Int) -> Bool =
-  trait_id == EQ_ID || trait_id == HASH_ID || trait_id == ORD_ID ||
-    trait_id == INDEX_ID || trait_id == ITER_ID
+  trait_id == EQ_ID || trait_id == HASH_ID || trait_id == ORD_ID
 
 pub(pkg) fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
   if is_errorish(t) { return (cx, no_wit()) }
@@ -2633,18 +2625,10 @@ pub(pkg) fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: 
   }
 }
 
-## Does `t` -- or, if it is opaque and has none of its own, its target -- have
-## an `Index` impl? The same order `resolve_witness` and `reduce_assoc` use, so
-## the message below cannot refuse what they would have accepted.
-fn has_index_impl(cx: Cx, t: Ty) -> Bool =
-  if has_impl_at(cx.impl_table, INDEX_ID, t) {
-    true
-  } else {
-    match t {
-      TyOpaque(_, _, _, _, tgt) -> has_index_impl(cx, tgt)
-      _ -> false
-    }
-  }
+## Does `t` have an `Index` impl of its own? The same question
+## `resolve_witness` and `reduce_assoc` ask, so the message below cannot refuse
+## what they would have accepted.
+fn has_index_impl(cx: Cx, t: Ty) -> Bool = has_impl_at(cx.impl_table, INDEX_ID, t)
 
 ## Record field access p.x — resolve against the record's single constructor.
 pub(pkg) fn check_field_access_typed(
@@ -8693,12 +8677,11 @@ fn check_for_pattern(cx: Cx, pat: Pattern, loop_t: Ty) -> (Cx, TPat) = {
 # body, so the order the body happens to mention them in never leaks into it.
 
 ## Does `t` have an impl of `tid`, without resolving or reporting anything? A
-## rigid parameter answers through its bounds, an opaque type for itself and
-## then through its target, as `resolve_witness` does.
+## rigid parameter answers through its bounds, anything else through its own
+## impls (an opaque type does not borrow its target's, `opaque_inherits`).
 fn has_trait_at(cx: Cx, tid: Int, t: Ty) -> Bool =
   match t {
     TyVar(_, vid) -> map.get(cx.frame.dict_syms, (vid, tid)) != None
-    TyOpaque(_, _, _, _, tgt) -> has_impl_at(cx.impl_table, tid, t) || has_trait_at(cx, tid, tgt)
     _ -> head_of(t) != None && has_impl_at(cx.impl_table, tid, t)
   }
 
@@ -15444,25 +15427,20 @@ test "`[]` names the subject it could not index, whatever shape it is" {
   assert msgs_of("${grid}pub fn f(g: Grid) -> Int = g[\"x\"]\n") ==
     ["this index must be `Int`, got `String`"]
 
-  # an opaque subject falls through to its target's impl, so the requirer
-  # reports the *identity* (the opaque name applied to its arguments, which is
-  # all the caller sees) while the trait and type report the gap inside the
-  # target. `M[K]` and not `M`: an opaque type carries its arguments, so a
-  # diagnostic about `M[Int]` cannot read as one about `M[String]`
+  # an opaque subject does not fall through to its target's `Index` (spec
+  # 2.7: only Eq, Hash and Ord do), so the miss is about the opaque type
+  # itself, and it carries its arguments: a diagnostic about `M[Int]` cannot
+  # read as one about `M[String]`
   let opq = "opaque type M[K] = Map[K, Int]\n" ++
     "pub fn f[K](m: M[K], k: K) -> Int = m[k]\n"
-  assert msgs_of(opq) == ["indexing a M[K] requires `Eq[K]`, but `K` has no such bound",
-    "indexing a M[K] requires `Hash[K]`, but `K` has no such bound",
-    "indexing a M[K] requires `Show[K]`, but `K` has no such bound"]
+  assert msgs_of(opq) == ["indexing a M[K] requires `Index[M[K]]`, but `M[K]` has no such impl"]
 
-  # a ground gap inside the target does NOT read as the requirer: a missing
-  # impl at a concrete type is `resolve_witness`'s own message, which never
-  # mentions who asked. Pinned because docs/operator-traits-design.md D6
-  # predicted otherwise.
+  # a ground opaque subject keeps the message that points at get, for the same
+  # reason a ground Bool does (next test): the gap is in the type, not the key
   assert msgs_of("type Foo = { v: Int }\n" ++
       "opaque type Keyed = Map[Foo, Int]\n" ++
       "pub fn g(m: Keyed, k: Foo) -> Int = m[k]\n") ==
-    ["no impl of `Show` for `Foo`"]
+    ["`[]` needs an `Index` impl for `Keyed`"]
 
   # a bare rigid parameter: the bound it is missing is `Index` itself
   assert msgs_of("pub fn f[C](c: C, i: Int) -> Int = c[i]\n") ==

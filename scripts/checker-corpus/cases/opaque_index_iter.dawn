@@ -1,0 +1,41 @@
+# checker.dawn resolve_witness: `Index` and `Iter` are not among the traits an
+# opaque type inherits from its target (spec 2.7, 2026-10-07). A subscript or
+# a loop over an opaque type without its own impl is refused, where it used to
+# fall through to the List or the Map underneath; the type that wrote its own
+# impl is indexed and iterated as before.
+use std/map
+
+opaque type Vec = List[Int]
+
+opaque type Env = Map[String, Int]
+
+opaque type Mine = List[Int]
+
+impl Index[Mine] {
+  type Idx = Int
+  type Item = Int
+  fn index(v: Mine, i: Int) -> Int = {
+    let xs: List[Int] = v
+    xs[i]
+  }
+}
+
+fn mkv() -> Vec = [1, 2, 3]
+
+fn mke() -> Env = map.from([("a", 1)])
+
+fn mkm() -> Mine = [4, 5]
+
+pub fn subscript_vec() -> Int = mkv()[0]
+
+pub fn subscript_env() -> Int = mke()["a"]
+
+pub fn loop_vec() -> Int = {
+  var total = 0
+  for x in mkv() {
+    total = total + x
+  }
+  total
+}
+
+pub fn own_index() -> Int = mkm()[1]

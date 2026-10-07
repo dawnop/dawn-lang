@@ -1,45 +1,31 @@
-# An opaque type over a List or a Map: what it gets for free.
+# An opaque type over a List or a Map: what it gets for free, and what it must
+# write itself.
 #
-# `==`, `${...}`, `for..in` and -- since knife 2 of
-# docs/operator-traits-design.md -- `[]` all resolve their witness through the
-# opaque and land on the target's impl. That fall-through is one branch in
-# `resolve_witness` (checker.dawn:5738-5745), mirrored by `assoc_impl_of` for
-# projections (checker.dawn:1266-1277), and `[]` joined the list by being
-# routed through the resolver rather than by anything being added for it.
-#
-# Knife 1 pinned the state before, where `v[0]` was
-#
-#   error: `[]` indexes a List or Map, got Vec
-#
-# and could not appear in this file at all. Design D2 is the decision to
-# accept the widening; the two subscripts in `main` are what it bought, and
-# they are here rather than in a note because an accepted set is a thing a
-# corpus can hold.
+# `==` and `${...}` of the representation resolve their witness through the
+# opaque and land on the target's impl: `Eq`, `Hash` and `Ord` are the only
+# traits an opaque type inherits (spec 2.7, 2026-10-07). `[]` and `for..in`
+# are not among them: a subscript and an iteration hand the elements out of
+# the module, which is what the opaque type was declared to hide, so `Vec` and
+# `Env` write their own `impl Index` and `impl Iter` below, each one a
+# two-line forward to the representation. Until 2026-10-07 this file had no
+# such impls and the subscripts fell through to the target; the output is the
+# same, and what changed is that the impls are now the only way in. The
+# refusal itself is pinned by scripts/checker-corpus/cases/opaque_index_iter.dawn.
 #
 # The direction matters, and the two halves of `main` show both. An opaque as
-# the *subject* of `[]` falls through to its target. An opaque as the *index*
-# does not: with `opaque type Key = String` and `m: Map[Key, Int]`, `m["b"]`
-# is refused --
-#
-#   error: this index must be `Key`, got `String`
-#
-# -- even inside the declaring module, exactly as `v == [1, 2, 4]` is refused
-# below. Nothing is inconsistent about that. The subject position asks "which
-# impl", and impl lookup falls through; the index position asks "do these two
-# types match", and an opaque binds rather than converts wherever a type has
-# to match. `Env`'s `Idx` reduces through the opaque to `String`, so `e["a"]`
-# works -- the opacity there is on the container, not on the key.
+# the *subject* of `[]` asks for its own impl. An opaque as the *index* is
+# matched like any type: with `opaque type Key = String` and `m: Map[Key,
+# Int]`, `m["b"]` is refused -- "this index must be `Key`, got `String`" --
+# even inside the declaring module, exactly as `v == [1, 2, 4]` is refused
+# below. `Env`'s `Idx` is written as `String` in its impl, so `e["a"]` works:
+# the opacity there is on the container, not on the key.
 #
 # opaque.dawn next door covers opaque *scalars* -- that an opaque has no
 # representation of its own at run time. This one is about witness
-# resolution through one, which is a different mechanism and the one `[]` is
-# moving onto.
+# resolution through one, which is a different mechanism.
 #
 # Single-module on purpose: the conversions between `Vec` and `List[Int]` are
-# only legal inside the declaring module, and none of the lines below relies
-# on one -- `v` is used as a `Vec` throughout. A line like `get(v, 0)` would
-# compile today too, but through the opaque *conversion* rather than through a
-# witness, and pinning that here would say nothing about `[]`.
+# only legal inside the declaring module.
 use std/map
 
 opaque type Vec = List[Int]
@@ -48,7 +34,41 @@ opaque type Env = Map[String, Int]
 
 fn mkv() -> Vec = [1, 2, 3]
 
+impl Index[Vec] {
+  type Idx = Int
+  type Item = Int
+  fn index(v: Vec, i: Int) -> Int = {
+    let xs: List[Int] = v
+    xs[i]
+  }
+}
+
+impl Iter[Vec] {
+  type Cur = Int
+  type Item = Int
+
+  fn iter_start(v: Vec) -> Int = 0
+  fn iter_done(v: Vec, c: Int) -> Bool = {
+    let xs: List[Int] = v
+    c >= len(xs)
+  }
+  fn iter_next(v: Vec, c: Int) -> Int = c + 1
+  fn iter_get(v: Vec, c: Int) -> Int = {
+    let xs: List[Int] = v
+    xs[c]
+  }
+}
+
 fn mke() -> Env = map.from([("a", 1)])
+
+impl Index[Env] {
+  type Idx = String
+  type Item = Int
+  fn index(e: Env, k: String) -> Int = {
+    let m: Map[String, Int] = e
+    m[k]
+  }
+}
 
 ## The other side of an inequality has to be a `Vec` too: `v == [1, 2, 4]` is
 ## rejected even inside the declaring module (`== requires both sides to have
@@ -82,7 +102,7 @@ pub fn main() -> Unit !io = {
   println(to_string(e == other_e()))
   println("${map_of(e)}")
 
-  println("-- and the subscript, which knife 2 added --")
+  println("-- and the subscript, through the type's own impl --")
   println(to_string(v[0]))
   println(to_string(v[2]))
   println(to_string(e["a"]))
