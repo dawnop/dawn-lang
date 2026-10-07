@@ -25,11 +25,12 @@ both backends.
   follows the rank-0 rule, so `load(x, ..) * scalar(s)` scales a tile by a
   value the launch picks, and `idx_of(scalar(n))` is a runtime extent.
   `scalar` is bounded by `std/gpu`'s new `ScalarDtype` (`I32`, `I64`, `F32`,
-  `F64`), its own trait and not `HasDtype` because Dawn has no supertraits. The bound
-  keeps out only what has no number under it: an opaque type over `Float` or
-  `Int` uses its target's impl, so `F16` or `I8` still check, and the
-  recording is the fence for those (a `ByValue` of any format but `i32`,
-  `i64`, `f32` and `f64` is refused where it is declared). A new `Dev`
+  `F64`), its own trait and not `HasDtype` because Dawn has no supertraits.
+  An opaque type inherits only `Eq`, `Hash` and `Ord` from its target, so
+  `scalar(param(F16, 0))` does not check. What a type cannot say is still
+  refused when the kernel records: a `ByValue` of any format but `i32`,
+  `i64`, `f32` and `f64`, whether named by a string or by a `Scalar(F16)`
+  marker. A new `Dev`
   operation, `t_scalar`: a handler written outside the package must answer
   it. The recording also refuses `scalar` of a buffer or of another format,
   and refuses `load`, `store`, `gather`, `scatter`, atomics, pointers and
