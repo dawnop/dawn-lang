@@ -35,7 +35,7 @@ sides, parameter names are compared BY POSITION, so a swap of two parameters is
 two changes. When the arity differs, pairing is unknowable, so every N-1 name
 missing from HEAD needs a line (its new name, or `-`), and a new parameter
 needs none (api-diff reports an added parameter; a caller naming it did not
-exist yet). A callee on one side only is not a rename (api-diff, std/moved.txt
+exist yet). A callee on one side only is not a rename (api-diff
 and std-version own additions and removals).
 
 Refused: an undeclared change; a declaration whose item is not an N-1 callee;

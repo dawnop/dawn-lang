@@ -4,7 +4,7 @@
 The embedded std used to ride as jar resources read back through
 ClassLoader.getSystemResourceAsStream -- a host-specific acquisition path the
 native backend cannot share. This generator turns std/modules.txt plus every
-module it lists, and std/moved.txt when there is one, into one ordinary Dawn
+module it lists into one ordinary Dawn
 module of string constants, so both
 backends carry the embedded std the same way they carry any other compiled
 code (docs/std-audit.md §2, native-backend-plan §14.20).
@@ -63,17 +63,13 @@ def esc(text: str) -> str:
 def main() -> None:
     idx_text = (STD / "modules.txt").read_text(encoding="utf-8")
     files = ["modules.txt"] + [n + ".dawn" for n in index_names(idx_text)]
-    # the migration hints are std data like the modules, and the loader reads
-    # them from the same half that answered for modules.txt
-    if (STD / "moved.txt").is_file():
-        files.append("moved.txt")
 
     lines = [
         "## GENERATED FILE -- do not edit. Regenerate with `python3 scripts/gen-stdsrc.py`",
         "## after any edit under std/; the round-trip test in stdlib.dawn fails when stale.",
         "##",
-        "## The embedded standard library: std/modules.txt, every module it lists and",
-        "## std/moved.txt, verbatim, as string constants. stdlib.std_read falls back to this when the",
+        "## The embedded standard library: std/modules.txt and every module it lists,",
+        "## verbatim, as string constants. stdlib.std_read falls back to this when the",
         "## --std directory is absent, which is what makes a standalone toolchain",
         "## self-contained on every backend without a host resource API",
         "## (docs/std-audit.md §2, native-backend-plan §14.20).",
