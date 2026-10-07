@@ -183,6 +183,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [arith-operator-traits-design.md](arith-operator-traits-design.md) | **current** | `+ - * / %` 与一元 `-` 背后的六个 prelude trait（`Add`…`Neg`），各带同名关联效果；opaque 不继承算术；刀 1 于 2026-10-06 落地，权威条文在 spec §3.5、§4.3。 |
 | [tileir-011-design.md](tileir-011-design.md) | proposed | tileir 0.11 一次破坏性发布的排期：`StagedIter`/`StagedVar` 实现与 `for` + `var` 迁移（S2）、`Tile`/`Idx` 的运算符与字面量 impl（L3）、std `INFINITY`/`NAN`、格式与值类型统一（`std/dtype`、同名见证常量、`FP16` 改 `F16`、`Tile[F64]` 改 `Tile[Float]`），含 flash_attn 前后对照、全仓迁移计数、tile-golden 逐字节不变的变异体证明、刀序与 PR 切分、开放风险。 |
 | [tileir-k4-design.md](tileir-k4-design.md) | proposed | tileir K4：kernel 的运行期标量参数。今天的入口只有指针、标量只能烧成常量或经缓冲区读入；提议 `Scalar` 角色与 `scalar` 读取、`KParam` 入口签名、`LaunchArg` 启动参数、五刀与台账影响、七个已裁问题。 |
+| [flash-attn-ideal-audit.md](flash-attn-ideal-audit.md) | audit | flash_attn 对照理想写法与 Triton 教程的逐行复核：scale 迁成运行期标量参数的前后对照，剩余缺口分类（今天能写 / 要新 API / 要语言特性）与五个待裁问题。 |
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
 | [effects-window-design.md](effects-window-design.md) | current | 裁决 4、5 的效果窗口：`io` 是唯一的环境效果、效果原子按声明表分类；效果限定名与通用的选择性引入改名 `use m.{x as y}`；`catch_panic` 去 `!io`；`with_fs_real`/`with_gpu_real` 效果多态；删除 `unsafe_pure` 与 `--comptime-ffi`；`main` 只在入口模块保留。 |
