@@ -1,0 +1,85 @@
+# Turn the raw material site/explorer/record.py gathers into `.xmap` files with
+# packages/xmap, and say how many gaps each program had.
+#
+#     dawn run scripts/xmap-diff <raw dir> <out dir> [--strict]
+#
+# Why a program of its own. The static page reads the raw material through the
+# site generator, which writes HTML and nothing else; the checks that compare
+# what the package makes with another account of the same programs (the
+# differential against record.py's own assembly, the zero-gap gate over the
+# Playground's samples, the negative controls) need the `.xmap` files
+# themselves and the gap counts, and need to point at a package that is not the
+# checked-in one (a mutated copy) without touching the generator. So this is the
+# smallest consumer of the package that writes what it makes: the raw
+# directory's layout is the one packages/xmap documents (`programs.txt`, then
+# one directory a program holding `spec.txt` and the raw files), and the output
+# is what record.py writes beside it (`<name>.xmap`, `<name>.<kind>.txt`).
+#
+# `--strict` is the static page's rule (`explore_strict`): a gap panics, naming
+# the first. Without
+# it the run answers every program and prints `gaps <name> <n>` and each gap
+# under it, which is what the zero-gap gate reads.
+
+use std/str
+use std/io
+use std/io.{Fs, with_fs_real}
+use xmap/xmap.{Files, Raw, parse_spec, raw_files, explore, explore_strict, to_xmap, pane_text}
+
+fn read(path: String) -> String !Fs =
+  match io.read_file(path) {
+    Ok(t) -> t
+    Err(e) -> panic("cannot read ${path}: ${e}")
+  }
+
+fn write(path: String, text: String) -> Unit !Fs =
+  match io.write_file(path, text) {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot write ${path}: ${e}")
+  }
+
+fn read_raw(dir: String, files: Files) -> Raw !Fs = {
+  let at = (name: String) => read("${dir}/${name}")
+  let rf = raw_files()
+  Raw {
+    source: read(files.source),
+    ctext: at(rf[0]),
+    cmap: at(rf[1]),
+    jmap: at(rf[2]),
+    javap: at(rf[3]),
+    tile_map: if files.tile_map == "" { "" } else { read(files.tile_map) },
+    golden: if files.golden == "" { "" } else { read(files.golden) },
+  }
+}
+
+pub fn main() -> Unit !io = {
+  let a = args()
+  if len(a) < 2 {
+    panic("usage: xmap-diff <raw dir> <out dir> [--strict]")
+  }
+  let strict = len(a) > 2 && a[2] == "--strict"
+  with_fs_real(() => {
+    let names = filter(map(str.split(read("${a[0]}/programs.txt"), "\n"), str.trim), n => n != "")
+    for name in names {
+      let dir = "${a[0]}/${name}"
+      let (spec, files) = match parse_spec(name, read("${dir}/spec.txt")) {
+        Ok(p) -> p
+        Err(e) -> panic("${dir}/spec.txt: ${e}")
+      }
+      let raw = read_raw(dir, files)
+      match if strict { explore_strict(spec, raw) } else { explore(spec, raw) } {
+        Err(e) -> panic("${name}: ${e}")
+        Ok(b) -> {
+          for p in b.panes {
+            write("${a[1]}/${name}.${p.kind}.txt", pane_text(p))
+          }
+          write("${a[1]}/${name}.xmap", to_xmap(b))
+          println("gaps ${name} ${len(b.gaps)}")
+          for g in b.gaps {
+            println("  ${g}")
+          }
+        }
+      }
+    }
+    write("${a[1]}/programs.txt", join(names, "\n") ++ "\n")
+  })
+}

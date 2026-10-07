@@ -64,6 +64,15 @@ PROGRAMS = [
 ]
 
 
+# The Playground's starter programs (site/play-ui/samples): not on the page,
+# but the corpus the online compile view (docs/playground-compile-design.md,
+# K1) has to map with no gap, so `--samples` records them the same way.
+SAMPLES = [
+    {"name": p.stem, "source": f"site/play-ui/samples/{p.name}", "fn": None, "kernel": False}
+    for p in sorted((ROOT / "site" / "play-ui" / "samples").glob("*.dawn"))
+]
+
+
 def fail(msg):
     print(f"site/explorer/record.py: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -194,7 +203,7 @@ def parse_javap(text):
 
 
 def header_name(line):
-    m = re.match(r"^\s+(?:[\w.$\[\]<>, ]+ )?([\w$<>]+)\(.*\);", line)
+    m = re.match(r"^\s+(?:[\w.$\[\]<>, ]+ )?([\w$<>-]+)\(.*\);", line)
     if m:
         return m.group(1)
     return "<clinit>" if line.strip() == "static {};" else None
@@ -505,6 +514,28 @@ def write(prog, built, outdir):
     (outdir / f"{prog['name']}.xmap").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
+def write_raw(prog, outdir, legacy_out=None):
+    """The compilers' account of one program, as the files packages/xmap reads
+    (its `parse_spec` says what spec.txt holds, its `raw_files` the rest).
+    With `legacy_out`, this script's own assembly of the same run is written
+    there too: the other end of the transition's differential."""
+    d = outdir / prog["name"]
+    d.mkdir(parents=True)
+    with tempfile.TemporaryDirectory(prefix="explorer.") as w:
+        c = compile_both(prog, Path(w))
+        for name in ("out.c", "c.dawnmap", "jvm.dawnmap"):
+            shutil.copy(Path(w) / name, d / name)
+    (d / "javap.txt").write_text(c["javap"], encoding="utf-8")
+    spec = [f"source {prog['source']}", f"module {c['module']}"]
+    if prog["fn"]:
+        spec.append(f"fn {prog['fn']}")
+    if prog["kernel"]:
+        spec += [f"tile-map {TILE_MAP.relative_to(ROOT)}", f"tile-golden {GOLDEN.relative_to(ROOT)}"]
+    (d / "spec.txt").write_text("\n".join(spec) + "\n", encoding="utf-8")
+    if legacy_out is not None:
+        write(prog, build(prog, c), legacy_out)
+
+
 def build(prog, compiled=None):
     """The page's data for one program, or a failure."""
     src = Source((ROOT / prog["source"]).read_text(encoding="utf-8"))
@@ -544,12 +575,27 @@ def host_only_calls(src, module, first, last, c, table):
     return len(seen)
 
 
-def main_write(out):
+def main_raw(out, programs=None, legacy_out=None):
+    for d in (out, legacy_out):
+        if d is not None:
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True)
+    names = []
+    for prog in programs or PROGRAMS:
+        write_raw(prog, out, legacy_out)
+        names.append(prog["name"])
+    (out / "programs.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+    if legacy_out is not None:
+        (legacy_out / "programs.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+
+
+def main_write(out, programs=None):
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
     names = []
-    for prog in PROGRAMS:
+    for prog in programs or PROGRAMS:
         b = build(prog)
         write(prog, b, out)
         names.append(prog["name"])
@@ -640,6 +686,12 @@ def main():
         main_write(OUT)
     elif len(args) == 2 and args[0] == "--out":
         main_write(Path(args[1]))
+    elif len(args) == 3 and args[0] == "--samples" and args[1] == "--out":
+        main_write(Path(args[2]), SAMPLES)
+    elif args[:1] == ["--raw"] and len(args) in (2, 4) and (len(args) == 2 or args[2] == "--legacy-out"):
+        main_raw(Path(args[1]), None, Path(args[3]) if len(args) == 4 else None)
+    elif args[:2] == ["--samples", "--raw"] and len(args) in (3, 5) and (len(args) == 3 or args[3] == "--legacy-out"):
+        main_raw(Path(args[2]), SAMPLES, Path(args[4]) if len(args) == 5 else None)
     else:
         fail("usage: record.py [--out DIR | --self-test]")
 
