@@ -603,6 +603,7 @@ mutants=(
   scalar-param-as-ptr
   scalar-dtype-as-i32
   scalar-arg-index-shifted
+  scale-baked-again
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -986,6 +987,24 @@ mutant_project() { # name, module
   echo "      $name: packages/tileir/src/$module md5 $before -> $after"
   project "$work/m-$name" "$pkg"
   build_native "$work/m-$name" "$work/m-$name.bin" -O0
+}
+
+# A mutant of a KERNEL, not of packages/tileir: kernels.dawn is copied under
+# the tree, mutate.py edits the copy, and the project is built over the
+# unmodified package with the edited copy as its main module.
+kernel_mutant_project() { # name
+  local name="$1"
+  local tree="$work/tree-$name"
+  mkdir -p "$tree/scripts/tile-golden"
+  cp "$here/kernels.dawn" "$tree/scripts/tile-golden/kernels.dawn"
+  local before after
+  before=$(digest "$tree/scripts/tile-golden/kernels.dawn")
+  python3 "$here/mutate.py" "$name" "$tree"
+  after=$(digest "$tree/scripts/tile-golden/kernels.dawn")
+  [ "$before" != "$after" ] || fail "mutant $name: mutate.py left kernels.dawn as it was"
+  echo "      $name: kernels.dawn md5 $before -> $after"
+  project "$work/m-$name" "$root/packages/tileir"
+  cp "$tree/scripts/tile-golden/kernels.dawn" "$work/m-$name/src/main.dawn"
 }
 
 # Run one kernel's text under a mutant on both backends into
@@ -2434,6 +2453,37 @@ if run_item scalar-arg-index-shifted; then
   mutant_project scalar-arg-index-shifted lower.dawn
   lowering_mutant_checks scalar-arg-index-shifted scalar_len \
     "'cuda_tile.reshape' op requires the same element type for all operands and results"
+fi
+
+# ---- tileir 0.12.0 knife 5: flash_attn's scale is a parameter ----
+
+# 79. flash_attn's softmax scale goes back to the host constant it was before
+#     the knife (`f_const(F64, ATT_INV_SQRT_D)` for `scalar(scale)`). The
+#     kernel still declares its fifth parameter and still assembles, so
+#     tileiras has nothing to say: the golden is the whole claim. The text
+#     carries the constant again and no read of `%arg4`, the bytes differ, and
+#     no other kernel is involved. One backend (the JVM) because the edit is
+#     to the kernel's source, which both backends compile alike; the two
+#     already agree on the clean golden above.
+if run_item scale-baked-again; then
+  kernel_mutant_project scale-baked-again
+  mutant_dir="$work/m-scale-baked-again"
+  rc=0; run_jvm "$mutant_dir" "$work/m-scale-baked-again.flash_attn.jvm" flash_attn || rc=$?
+  [ "$rc" = 0 ] || { cat "$work/m-scale-baked-again.flash_attn.jvm.err" >&2; fail "scale-baked-again: flash_attn did not trace and render on the JVM"; }
+  rc=0; run_jvm "$mutant_dir" "$work/m-scale-baked-again.flash_attn.jvm.out" flash_attn \
+    --bytecode "$work/m-scale-baked-again.flash_attn.jvm.tilebc" || rc=$?
+  [ "$rc" = 0 ] || { cat "$work/m-scale-baked-again.flash_attn.jvm.out.err" >&2; fail "scale-baked-again: flash_attn did not encode on the JVM"; }
+  cmp -s "$here/flash_attn.mlir" "$work/m-scale-baked-again.flash_attn.jvm" &&
+    fail "scale-baked-again mutant stayed green: flash_attn.mlir still matches"
+  cmp -s "$here/flash_attn.tilebc" "$work/m-scale-baked-again.flash_attn.jvm.tilebc" &&
+    fail "scale-baked-again mutant stayed green: flash_attn.tilebc still matches"
+  grep -Fq 'constant <f64: 0.17677669529663687>' "$work/m-scale-baked-again.flash_attn.jvm" ||
+    fail "scale-baked-again: the mutant's text does not carry the scale as a constant"
+  grep -Fq 'reshape %arg4' "$work/m-scale-baked-again.flash_attn.jvm" &&
+    fail "scale-baked-again: the mutant still reads its scale parameter"
+  grep -Fq 'reshape %arg4' "$here/flash_attn.mlir" ||
+    fail "scale-baked-again: the golden does not read its scale parameter, so the mutant says nothing"
+  echo "PASS  mutant: scale-baked-again (flash_attn.mlir and .tilebc red: the scale is a constant again and %arg4 is unread)"
 fi
 
 _item_tick ""

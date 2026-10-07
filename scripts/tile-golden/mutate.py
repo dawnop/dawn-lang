@@ -17,7 +17,9 @@ What each mutant claims, and how it has to go red, stays in run.sh beside
 its assertions; the keys here are the names run.sh's `mutants` list and
 matrix.txt use, in the same order. A mutant is an ordered tuple of edits,
 each applied to the text the previous one left, with paths relative to the
-tree root: run.sh forks packages/tileir to `<tree>/packages/tileir`.
+tree root: run.sh forks packages/tileir to `<tree>/packages/tileir`, and
+copies kernels.dawn to `<tree>/scripts/tile-golden/` for the mutant that edits
+a kernel.
 
 Changing this file changes the tile input digest (scripts/tile-gpu-diff/
 inputs.py hashes everything under scripts/tile-golden), so it needs a new
@@ -32,6 +34,7 @@ DEV = "packages/tileir/src/dev.dawn"
 BYTECODE = "packages/tileir/src/bytecode.dawn"
 PROG = "packages/tileir/src/prog.dawn"
 LOWER = "packages/tileir/src/lower.dawn"
+KERNELS = "scripts/tile-golden/kernels.dawn"
 
 MUTATIONS = {
     "drop-store-token": ((
@@ -475,6 +478,14 @@ MUTATIONS = {
         PROG,
         '} else if list.any(range(0, len(along)), j => list.any(range(0, j), i => along[i] == along[j])) {',
         '} else if false {',
+    ),),
+    # The one mutant that edits a KERNEL and not packages/tileir: flash_attn's
+    # softmax scale read from its parameter goes back to the host constant it
+    # was before tileir 0.12.0 (docs/tileir-k4-design.md 5, knife 5).
+    "scale-baked-again": ((
+        KERNELS,
+        '.transpose(), lit(0.0)) * scalar(scale)\n',
+        '.transpose(), lit(0.0)) * f_const(F64, ATT_INV_SQRT_D)\n',
     ),),
 }
 
