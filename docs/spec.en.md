@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3651aaeea8cfcb28 -->
+<!-- doc-check: translation-of docs/spec.md @ 7f2bf5f30b87be1c -->
 
 # Dawn Language Specification
 
@@ -660,7 +660,7 @@ decision in the implementation rather than special cases scattered everywhere.
 
 **Opacity blocks the view, it does not change the semantics**: at runtime an opaque type **is** its
 target type — the same representation, the same equality, hashing and ordering (`Eq`/`Hash`/`Ord`,
-and `Index`/`Iter`, the target's unless the type writes its own), on both backends, at zero cost.
+the target's unless the type writes its own), on both backends, at zero cost.
 `opaque` is a soft keyword; only `opaque type` means anything.
 
 **What it inherits is the relations, a closed allowlist.** An opaque type with no impl of its own falls
@@ -1139,8 +1139,9 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     type. A projection on a rigid subject (a `T` inside a generic body) stays as it is, and
     unifies only with a literally identical projection.
   - An associated type name **lives only inside the trait's scope**; it does not enter the module
-    type namespace, and `T.Item` is the only way to reach it. An opaque subject looks in its own
-    impls first, and falls back to the target's (same order as witnesses). Zero representation at
+    type namespace, and `T.Item` is the only way to reach it. An opaque subject looks only in its own
+    impls and does not fall back to the target's (same rule as witnesses: only `Eq`/`Hash`/`Ord`
+    fall back, and a relation has no associated types). Zero representation at
     run time: types are erased as usual, and a dictionary gains no extra slot.
   - **A projection in an argument position takes no part in inference**: the type parameters are
     fixed by the **non-projection** argument positions; the projection is then reduced through
@@ -1809,8 +1810,8 @@ let c = rows[1][0]   # chainable, composes with ?/./()
 - Indexing is resolved by the built-in trait **`Index`** (§3.5): the impls for `List`
   (`Idx = Int`) and `Map` (`Idx` = the key type) ship with the language, and **a user type
   gets `[]` by writing one `impl Index`**; a type with no impl is a compile error. An
-  `opaque type` inherits its target type's impl (as with `==`/`for..in`; rendering is the
-  exception, §2.7).
+  `opaque type` does **not** inherit its target's `Index`: a subscript hands elements out of the
+  module, the same shape as rendering, so `[]` needs the type's own `impl Index` (§2.7).
 - comptime supports `List` indexing (out of range is a compile error).
 - **Read-only** — there is no `xs[i] = v`, and `Index` has no corresponding write method.
   Lists and maps are immutable; a user type, even a mutable one, is not written through `[]`.
