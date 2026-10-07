@@ -1,6 +1,6 @@
 # Playground 在线编译：改过的代码也能对照 C / JVM / Tile IR
 
-> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；只有设计，没有代码）。这是 `docs/explorer-page-design.md`
+> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）与 K2（runner 的 `POST /compile`）已实现，见第七节；前端 K3 起尚无代码）。这是 `docs/explorer-page-design.md`
 > 第九节留的「下一步」：把 `--map` 接到 Playground，让浏览器里现改的代码也能和产物对照，形态向
 > Compiler Explorer 看齐。依赖：M3/M4（`__emitc --map`、`__emit --map`，`docs/source-span-map-design.md`
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
@@ -140,7 +140,7 @@ javap -c -p -s -cp jo hello
   取用户模块的函数、建调用表与各栏 `out` 行，并返回 `gaps`。输入输出都是字符串与记录，没有 IO，所以 inline tests 与对拍都容易写。
 - **runner 里的分工：**沙箱单元只产原料（`dawn __emitc --map` 或 `dawn __emit --map`，JVM 栏再在第二个单元里跑 `javap`，
   各自写 `box/` 里的文件），runner 进程只读回**有界**的原料文本（沿用 `exec.dawn` 的有界读回）再调这个模块。解析运行在 runner 进程里，
-  输入是有界的文本，不执行任何东西；沙箱单元数从一个变成最多两个，每多一个 `systemd-run` 的开销**未测**，K2 要测。
+  输入是有界的文本，不执行任何东西；沙箱单元数从一个变成三个（K2 实测的修正见 6.2：C 与 JVM 两张侧表缺一不可，所以两个编译器各一个单元、再加一个 `javap`），每个单元的 `systemd-run` 开销 K2 已测：0.08 至 0.14 s（见第七节 K2）。
 - **过渡期对拍：**`record.py` 保留，对 `flash_attn`、`attend` 与 11 个样例，Dawn 模块产出的 `.xmap` 与 `record.py` **逐字节相同**；
   静态页（`site-dist-diff.sh`）是回归。对拍通过后，`record.py` 只剩「调用编译器、javap、`dawn parse` 取原料」那一层，
   组装与校验都由 Dawn 模块做，`gen/explorer.dawn` 不再重复一份校验。Tile 栏仍读 `flash_attn.map`（T2 不在本批，第四节）。
@@ -256,8 +256,12 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 
 ### 6.2 执行与沙箱
 
-- C / JVM：沙箱单元只产原料：`dawn __emitc/__emit --map`，JVM 栏再一个单元跑 `javap`（3.4），只写 `box/`，只读回有界输出
-  （沿用 `exec.dawn` 的「runner 先开文件、读回有界」，`exec.dawn` 文件头注释）。不运行产物。限制沿用 `run-sandboxed.sh`
+- C / JVM：沙箱单元只产原料：`dawn __emitc --map` 与 `dawn __emit --map`，再一个单元跑 `javap`（3.4），只写 `box/`，只读回有界输出
+  （沿用 `exec.dawn` 的「runner 先开文件、读回有界」，`exec.dawn` 文件头注释）。不运行产物。
+  **K2 实现时对「一个请求只算被选中的那一栏」的修正：** 调用表是 C 侧表与 JVM 侧表**都有行**的调用的交集（`packages/xmap` 的
+  `table_from_maps`，缺一边就是缺口），所以请求任何一栏都要两个编译器的侧表；只剩 `javap` 是 JVM 栏独有，它 0.2 s，不值得省。
+  于是一次构建同时产出两栏，缓存里两个 target 各存一份，第二个标签页是一次查表。两个编译器互相独立，**并排**起（先后跑是 3.6 至 4.0 s，
+  并排 2.3 至 2.7 s），`javap` 要等 class，跟在后面。代价是一个请求最多同时两个编译器 JVM，两个许可就是四个；闸门的 2 是这个数字的界。限制沿用 `run-sandboxed.sh`
   现有的全部属性（`MemoryMax`、`TasksMax`、`LimitFSIZE`、`RuntimeMaxSec`、无网），**不为 `/compile` 放宽任何一条**。
   `comptime` 仍会在编译里跑用户代码，所以编译超时用现有的 30 s（`config.dawn:29`），编译阶段的威胁面与 `/check` 相同，不更大。
 - javap 读的是编译器写出的 class，不是用户给的字节，但它仍在同一个单元里跑，不放在 runner 进程里。
@@ -327,6 +331,29 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
   只要不改编译器输出就不需要 `Emit-Change`）；新增 Dawn 的 inline tests 由 `./bin/dawn test playground` 跑。
 - 墙钟：合约多约 10 个用例 × 约 1.5 s ≈ 15 s，加在 `docs` 作业里（605 s 规划值内；**CI 上的实测在 PR 里报**）。
 
+**K2 落地记录（2026-10-07）。**
+- **实现：** `playground/src/play/exec.dawn`（`view_raw`：三个单元、有界读回）、`play/view.dawn`（xmap 配对、限额、JSON）、
+  `play/cache.dawn`（有界 LRU）、`main.dawn`（路由、闸门）。请求体沿用 `{"code": ..., "target": "c"|"jvm"}`；`target` 取值白名单，
+  `"tile"` 在 K5 之前也是 400。响应字段比 6.1 的草图多：`calls_total`、`calls_truncated`、`pane.truncated`、每个 out 带 `key`（JVM 栏的 `!` 行）。
+  缓存值分两半：请求无关的「其余」与每次请求自己写的头（`cached`、`ms`），所以命中与新鲜答案只差这两个字段。
+- **限额（起始值，估计，上线一周后按实测收紧）：** 每栏文本 256 KB（按行截断，`truncated`），每响应 2,000 个调用（前缀，`calls_truncated`），
+  原料每个文件 8 MiB（超出答 422，不映射；最大的起始样例 871 KB，几乎都是标准库的 C）。缓存 128 条、32M 字符，单条超四分之一不留。
+- **实测的单元开销：** 本机（WSL2）带 `run-sandboxed.sh` 全部属性的一个 `systemd-run` 单元跑 `true`：0.08 至 0.14 s。三个单元合计约 0.2 至 0.3 s，
+  这个沙箱内的总数是**推算**的，没有用真的 jar 量过（本机没有 `/opt/dawn` 供包装脚本绑定，`$HOME` 下的 JDK 又被 `ProtectHome` 藏起来）。
+- **延迟（11 个起始样例，真 runner、沙箱外，本机负载 5 至 9，只作量级）：** 冷 C 2.35 至 2.67 s（中位 2.55 s）；冷 JVM 2.4 至 5.2 s
+  （这一轮负载涨到 9）；命中 7 至 26 ms。目标「hello 冷 ≤ 3 s、命中 ≤ 50 ms」：命中达标；冷请求在负载 5 时达标，负载 9 时不达标。
+  十一个样例**全部 `gaps == 0`**（C 与 JVM 两栏，冷与命中都检了）。
+- **实测中发现并修了两个只有「带怪字符的源码」才暴露的缺陷：** (1) `packages/xmap` 的 `javap` 成员头只认 ASCII，`größe` 这样的函数名整个方法落成缺口
+  （xmap 0.1.1，带负控）；(2) 沙箱单元的环境是空的，JVM 读成 POSIX 区域，`dawn __emit -o` 写不出 `prog$Wéird.class`（「unmappable characters」），
+  `javap` 把这些名字印成 `?`。runner 在三个命令前加 `env LC_ALL=C.UTF-8`，包装脚本不动，`/run`、`/check` 的环境不变。合约测试把 runner 自己起在 POSIX 区域里。
+- **`javap` 缺失：** runner 启动时探测（`javap -version`），缺则 `POST /compile` 答 503 并说明，其余端点照常；`redeploy.sh` 在同步任何文件之前先问服务器，
+  缺 `javap` 则拒绝发布；`DEPLOY.md` 第 2 步改装 `openjdk-21-jdk-headless`；`playground/test/lsp_contract.py` 有对应的门禁与变异体。
+- **合约用例（`playground/test/contract.sh`，19 → 40 项）：** C 与 JVM 成功（结构自检：调用 id、out 区间与标记列都在文本内）、同请求命中（只差头）、
+  JVM 栏是同一次构建的另一半（命中）、怪字符名字零缺口、编译错误与 `/check` 逐字节相同且不泄漏工作目录、超栏限额截断、超调用限额、
+  400（target 非法/缺失/非字符串、无 code、坏 JSON）、413、405、闸门饱和 429、许可归还。
+- **负控（均先绿后红再还原）：** 抹掉 `strip_dir` 令「不泄漏路径」与「诊断逐字节同 /check」红；给 `/compile` 独立闸门令「429」红；去掉 UTF-8 区域令怪字符两例红；
+  抬高栏限额与调用限额各令对应例红；缓存永不命中令三例红；`javap` 恒可用令 503 单元测试红；探测遇缺失工具崩溃令探测测试红；`redeploy.sh` 的 `javap` 门禁有三个变异体。
+- **没做的：** 不做反代限流（K4）；`/compile` 与 `/check` 的并发排队行为只在合约里测了「两个许可被占满则 429」，多个浏览器同时自动重编的行为未测，留给 K3 联调。
 **K3：前端窗格，C 与 JVM。**
 - 内容：`site/play-ui` 标签条 + 窗格 + 渲染 JSON 到与静态页同一个 DOM 约定；按 5.2 甲拆 `explorer-core`；`?view=` 查询串；窄屏叠放。
 - 验收：`npm test`（`site/play-ui/test/selftest.ts`）加用例：选择/反查/Esc/键盘与静态页一致；手机宽度无横向页面滚动（用 Vite 起页后
