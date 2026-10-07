@@ -226,7 +226,11 @@ def table_from_tile(src, first, last):
     rows = []
     for l in TILE_MAP.read_text(encoding="utf-8").splitlines():
         w = l.split(" ")
-        if w[0] == "call":
+        # `carry`, `get` and `set` are what a `var` is to the Tile IR (its loop
+        # arguments, its reads, its assignments). A host map has no call for any
+        # of them, they wrote no Tile IR line of their own, and a click on one
+        # would light nothing, so the page does not list them.
+        if w[0] == "call" and w[3] not in ("carry", "get", "set"):
             a, b = w[4].split("-")
             na, nb = w[5].split("-")
             p = lambda s: tuple(int(x) for x in s.split(":"))
