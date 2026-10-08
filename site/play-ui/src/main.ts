@@ -282,6 +282,7 @@ function mount(root: HTMLElement) {
         highlightActiveLine(),
         dawn(lspCompletionSource(lsp, staticCompletions, dawnCompletions)),
         dawnDiagnostics(checkEndpoint, lsp, (busy) => (checking.hidden = !busy)),
+        lsp.extension(),
         lspHover(lsp),
         lspInlayHints(lsp),
         lspSemanticTokens(lsp),
