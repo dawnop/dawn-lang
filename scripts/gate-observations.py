@@ -96,38 +96,51 @@ from datetime import datetime, timezone
 import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
 
 
-def gh_json(args):
-    """Run `gh` and parse its stdout as JSON, with the proxy vars cleared."""
+# `gh api` against a 5xx or a dropped connection is the server's trouble, not
+# an answer: the nightly of 2026-10-07 died on one HTTP 502 for
+# runs/37270212284/jobs, a run whose jobs the same call returned a few hours
+# later (#610). A refusal that says anything else (404, 403, a bad argument)
+# is final and is not repeated.
+GH_ATTEMPTS = 3
+GH_RETRY_WAIT = 5  # seconds before the second try, doubled for the third
+_TRANSIENT = (
+    "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504", "Server Error",
+    "connection reset", "timeout", "timed out", "EOF",
+)
+
+
+def _gh(args):
+    """Run `gh` with the proxy vars cleared, retrying a transient failure;
+    -> the stdout, or a SystemExit naming the last failure."""
     env = dict(os.environ)
     for key in (
         "https_proxy", "http_proxy", "all_proxy", "HTTPS_PROXY", "HTTP_PROXY"
     ):
         env.pop(key, None)
-    proc = subprocess.run(
-        args, capture_output=True, text=True, env=env, check=False
-    )
-    if proc.returncode != 0:
-        raise SystemExit(
-            f"{' '.join(args)} failed ({proc.returncode}):\n{proc.stderr.strip()}"
+    for attempt in range(1, GH_ATTEMPTS + 1):
+        proc = subprocess.run(
+            args, capture_output=True, text=True, env=env, check=False
         )
-    return json.loads(proc.stdout)
+        if proc.returncode == 0:
+            return proc.stdout
+        transient = any(t in proc.stderr for t in _TRANSIENT)
+        if not transient or attempt == GH_ATTEMPTS:
+            break
+        time.sleep(GH_RETRY_WAIT * 2 ** (attempt - 1))
+    raise SystemExit(
+        f"{' '.join(args)} failed ({proc.returncode}) after {attempt}"
+        f" attempt(s):\n{proc.stderr.strip()}"
+    )
+
+
+def gh_json(args):
+    """Run `gh` and parse its stdout as JSON."""
+    return json.loads(_gh(args))
 
 
 def gh_text(args):
-    """Run `gh` and return its stdout, with the proxy vars cleared."""
-    env = dict(os.environ)
-    for key in (
-        "https_proxy", "http_proxy", "all_proxy", "HTTPS_PROXY", "HTTP_PROXY"
-    ):
-        env.pop(key, None)
-    proc = subprocess.run(
-        args, capture_output=True, text=True, env=env, check=False
-    )
-    if proc.returncode != 0:
-        raise SystemExit(
-            f"{' '.join(args)} failed ({proc.returncode}):\n{proc.stderr.strip()}"
-        )
-    return proc.stdout
+    """Run `gh` and return its stdout."""
+    return _gh(args)
 
 
 # Spelled from this file rather than as a join on the repository root, for
