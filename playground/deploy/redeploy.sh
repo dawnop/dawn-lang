@@ -4,9 +4,38 @@
 # sudoers, and the gateway service/slice installed).
 #
 # Does NOT run itself as part of any build. Run it by hand when you mean to ship.
-# Prerequisites: SSH key loaded; JAVA_HOME set or a GraalVM under ~/tools.
+# Prerequisites: SSH key loaded; JAVA_HOME set or a GraalVM under ~/tools;
+# DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) of the checkout this script is in.
 set -euo pipefail
-cd "$(dirname "$0")/../.."   # repo root
+# The repo is resolved from this script's own location, never from $PWD (the
+# same rule as site/redeploy.sh, which learned it on 2026-10-08 when a `cd`
+# into a deleted worktree ran the script from the wrong checkout and shipped
+# the wrong commit). The caller names the commit it means to ship
+# (DAWN_DEPLOY_COMMIT, the full sha) and the script refuses unless its own
+# checkout is exactly that commit with no tracked changes. This runs before
+# anything is built or sent: the deploy now ships a compiler, a native runner
+# and two units that must all come from one commit.
+repo="$(cd "$(dirname "$0")/../.." && pwd)" || { echo "error: cannot resolve the repo from $0" >&2; exit 1; }
+want_commit="${DAWN_DEPLOY_COMMIT:-}"
+if ! printf '%s' "$want_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "refusing to deploy: DAWN_DEPLOY_COMMIT must be the full 40-hex commit sha to ship." >&2
+  echo "  got: \"$want_commit\"" >&2
+  echo "  e.g. DAWN_DEPLOY_COMMIT=\$(git rev-parse HEAD) in the checkout you mean to deploy" >&2
+  exit 1
+fi
+have_commit="$(git -C "$repo" rev-parse HEAD)"
+if [ "$have_commit" != "$want_commit" ]; then
+  echo "refusing to deploy: this checkout ($repo) is not the requested commit." >&2
+  echo "  DAWN_DEPLOY_COMMIT: $want_commit" >&2
+  echo "  git rev-parse HEAD: $have_commit" >&2
+  exit 1
+fi
+if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
+  echo "refusing to deploy: the checkout has uncommitted changes to tracked files (HEAD $have_commit)." >&2
+  git -C "$repo" status --porcelain --untracked-files=no >&2
+  exit 1
+fi
+cd "$repo"
 
 # Server login name is not committed (public repo); set DEPLOY_USER in your env.
 HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
