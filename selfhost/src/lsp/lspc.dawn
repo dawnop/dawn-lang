@@ -1243,7 +1243,7 @@ pub(pkg) fn completions_at(
     match qualified_alias_before_dot(cps, ws) {
       Some(pair) -> {
         let (module_alias, alias_lo) = pair
-        if in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos) {
+        if for_on_line(cps, ls, pos) && (in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos)) {
           return whole(qualified_pattern_constructors(qc, module_alias))
         }
         return whole(member_items(qc, v, module_alias, local_names(qc, pos)))
@@ -1315,6 +1315,14 @@ pub(pkg) fn completions_at(
   if ws == pos { return Completions { items: it.out, incomplete: true } }
   whole(qualified_items(qc, v, it, from_code_points(slice_cps(cps, ws, pos)), names_of(locals)).out)
 }
+
+## Whether a `for` keyword stands on the cursor's line before it. A `for`
+## header is one line, and asking the query whether the cursor is inside a
+## pattern walks the whole tree, which a plain `x.` has no reason to pay for
+## (and which, on a buffer that does not parse, looks up types the buffer's
+## own context does not hold).
+fn for_on_line(cps: List[Char], ls: Int, pos: Int) -> Bool =
+  str.contains(from_code_points(slice_cps(cps, ls, pos)), "for ")
 
 fn whole(items: List[CItem]) -> Completions = Completions { items: items, incomplete: false }
 
