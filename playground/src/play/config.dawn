@@ -1,9 +1,10 @@
 # Runtime configuration, read from the environment so the same binary runs both
 # locally (direct) and on the server (sandboxed). Sensible defaults everywhere.
-use java "java.lang.System"
+use std/io
+use std/io.{with_env_real}
 
 fn env_or(name: String, fallback: String) -> String !io =
-  match System.getenv(name) {
+  match with_env_real(() => io.getenv(name)) {
     Some(v) -> v
     None -> fallback
   }
@@ -86,7 +87,7 @@ pub fn port() -> Int !io =
     None -> 8087
   }
 
-# Root for per-request work dirs. Empty = fall back to java.io.tmpdir (local dev).
+# Root for per-request work dirs. Empty = fall back to $TMPDIR, else /tmp (local dev).
 # Under the sandbox this MUST NOT be /tmp: DynamicUser implies a private /tmp, so
 # a /tmp workdir can't be bind-mounted in. The server sets it to a dedicated
 # path (e.g. /var/lib/dawn-play/work) that ReadWritePaths can grant.

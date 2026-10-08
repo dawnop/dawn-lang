@@ -23,6 +23,15 @@
 # OutOfMemoryError and no response. The disk side is the sandbox's: the unit
 # runs with LimitFSIZE (sandbox/run-sandboxed.sh).
 #
+# No `use java` here (K3 of docs/playground-native-runner-design.md): every
+# child is a `Proc.run` of a coreutils command, so the module builds natively.
+# `Proc.run` is synchronous and has no timeout and no kill, so a phase's budget
+# is `timeout(1)` wrapped around a `sh -c` that writes the child's output and
+# its exit status to files the runner owns (`run_timed`); a phase that was cut
+# off leaves no status file, which is how it tells "ran out of time" from a
+# program that happened to exit 124. File modes are `chmod`, the clock is the
+# `Clock` effect, ids come from the kernel's uuid.
+#
 # Why a file and not a pipe: a pipe needs the runner to keep draining it, and
 # once the child is gone the JDK drains whatever is left into memory with no
 # bound of its own, which a writer that outlives the direct child (the sandbox
@@ -30,18 +39,7 @@
 use std/str
 use std/bytes
 use std/io
-use std/io.{Fs, with_fs_real}
-use java "java.lang.ProcessBuilder"
-use java "java.lang.Process"
-use java "java.io.File"
-use java "java.io.InputStream"
-use java "java.nio.file.Files"
-use java "java.nio.file.Path"
-use java "java.nio.file.LinkOption"
-use java "java.nio.file.attribute.PosixFilePermissions"
-use java "java.util.concurrent.TimeUnit"
-use java "java.util.UUID"
-use java "java.lang.System"
+use std/io.{Fs, with_fs_real, with_proc_real, with_clock_real, with_env_real, Instant, now, now_wall_ns, elapsed_ns}
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
 use play/config.{dawn_bin, native_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
 
@@ -57,15 +55,15 @@ const OUTPUT_LIMIT: Int = 65536
 const RUN_HEAP: String = "-Xmx256m"
 
 # Where per-request work dirs live: PLAY_WORK_ROOT if set (the sandbox needs a
-# non-/tmp path, see config.work_root), else java.io.tmpdir. Trailing slash is
-# dropped (java.io.tmpdir carries one on macOS) so paths match diagnostics.
+# non-/tmp path, see config.work_root), else $TMPDIR, else /tmp. Trailing slash is
+# dropped (macOS's TMPDIR carries one) so paths match diagnostics.
 fn temp_root() -> String !io = {
   let configured = work_root()
   let d = if configured != "" {
     configured
   } else {
-    match System.getProperty("java.io.tmpdir") {
-      Some(v) -> v
+    match with_env_real(() => io.getenv("TMPDIR")) {
+      Some(v) -> if v == "" { "/tmp" } else { v }
       None -> "/tmp"
     }
   }
@@ -89,39 +87,71 @@ fn whole_chars(b: Bytes) -> Bytes = {
   if i >= 0 && i + utf8_width(bytes.at(b, i)) > n { bytes.slice(b, 0, i) } else { b }
 }
 
-fn close_in(s: InputStream) -> Unit !io = {
-  let _ = catch_fault(() => s.close())
-  ()
+## Run `argv` to completion, its output to the two files (an empty path leaves
+## that stream where the process's own is). The thin wrapper every child goes
+## through; an `Err` is a command that could not be started.
+fn run_cmd(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
+  with_proc_real(() => io.run(argv, out_path, err_path))
+
+## A point on the monotonic clock, and the milliseconds since one.
+pub fn tick() -> Instant !io = with_clock_real(() => now())
+
+pub fn ms_since(t: Instant) -> Int !io = elapsed_ns(t, tick()) / 1000000
+
+# A fresh random id in the uuid's dashed form. The kernel hands one out at
+# /proc/sys/kernel/random/uuid (every read a new one, 122 random bits, the
+# source `UUID.randomUUID` drew on); a host without it (macOS, where the
+# long-lived server is run for development) asks `uuidgen`.
+fn uuid() -> String !io = {
+  let kernel = with_fs_real(() => io.read_file("/proc/sys/kernel/random/uuid"))
+  match kernel {
+    Ok(t) -> str.trim(t)
+    Err(_) -> {
+      let out = "${temp_root()}/dawn-play-uuid-${with_clock_real(() => now_wall_ns())}.txt"
+      let _ = run_cmd(["uuidgen"], out, "/dev/null")
+      let got = with_fs_real(() => io.read_file(out))
+      let _ = with_fs_real(() => io.delete(out))
+      match got {
+        Ok(t) -> str.to_lower(str.trim(t))
+        Err(_) -> panic("cannot make a random id: no /proc/sys/kernel/random/uuid and no uuidgen")
+      }
+    }
+  }
 }
 
 # The first OUTPUT_LIMIT bytes of the file at `path`, decoded, and whether
 # there was more. Anything but a regular file, links included, reads as empty:
 # the runner created this file itself, so anything else means something else
 # put it there. A read that fails reads as empty too; the outcome still says
-# whether the program finished.
-fn read_capped(path: String) -> (String, Bool) !io = read_capped_to(path, OUTPUT_LIMIT)
+# whether the program finished. `scratch` is a directory the runner owns.
+fn read_capped(path: String, scratch: String) -> (String, Bool) !io = read_capped_to(path, OUTPUT_LIMIT, scratch)
+
+# The check and the cut are one `sh`: `[ -f ]` refuses a FIFO or device before
+# anything opens it (an open of a FIFO with no writer would block for good),
+# `[ ! -L ]` refuses a link, and `head -c` is what bounds the bytes. They land
+# in a scratch file the runner names, and only that file, never the child's
+# path, is read into memory. The files read this way are written by units that
+# have ended, so nothing swaps a name between the test and the open.
+const CAP_SH: String = "[ -f \"$1\" ] && [ ! -L \"$1\" ] && exec head -c \"$2\" -- \"$1\""
 
 # [`read_capped`] with the limit named: the compile view reads the compilers'
 # own files, which are far larger than any diagnostic (an 870 KB C text is
 # ordinary), under the limit that view states for them.
-fn read_capped_to(path: String, limit: Int) -> (String, Bool) !io = {
-  let got = catch_fault(() => {
-    let p = Path.of(path)!
-    let nofollow = LinkOption.valueOf("NOFOLLOW_LINKS")!
-    if not Files.isRegularFile(p, nofollow) {
-      ("", false)
-    } else {
-      with s <- bracket(Files.newInputStream(p, nofollow)!, close_in)
-      let raw = s.readNBytes(limit + 1)!
-      if bytes.len(raw) > limit {
-        (bytes.decode_utf8_lossy(whole_chars(bytes.slice(raw, 0, limit))), true)
+fn read_capped_to(path: String, limit: Int, scratch: String) -> (String, Bool) !io = {
+  let tmp = "${scratch}/cap-${uuid()}"
+  let status = run_cmd(["sh", "-c", CAP_SH, "sh", path, "${limit + 1}"], tmp, "/dev/null")
+  let raw = match status {
+    Ok(0) -> with_fs_real(() => io.read_bytes(tmp))
+    _ -> Ok(bytes.utf8(""))
+  }
+  let _ = with_fs_real(() => io.delete(tmp))
+  match raw {
+    Ok(b) ->
+      if bytes.len(b) > limit {
+        (bytes.decode_utf8_lossy(whole_chars(bytes.slice(b, 0, limit))), true)
       } else {
-        (bytes.decode_utf8_lossy(raw), false)
+        (bytes.decode_utf8_lossy(b), false)
       }
-    }
-  })
-  match got {
-    Ok(v) -> v
     Err(_) -> ("", false)
   }
 }
@@ -141,7 +171,7 @@ fn strip_dir(text: String, dir: String) -> String =
 # directories stripped from what is left (the box first, since its path
 # starts with the request directory's), then the truncation marked.
 fn shown(path: String, dir: String, box: String) -> (String, Bool) !io = {
-  let (raw, cut) = read_capped(path)
+  let (raw, cut) = read_capped(path, dir)
   let clean = strip_dir(strip_dir(raw, box), dir)
   if cut { (clean ++ "\n… (output truncated)", true) } else { (clean, false) }
 }
@@ -164,53 +194,56 @@ fn stop_argv(unit: String) -> List[String] !io =
   if sandbox_enabled() { ["sudo", "-n", sandbox_script(), "stop", unit] } else { [] }
 
 # A fresh unit id: 32 lowercase hex digits, the only shape the wrapper takes.
-fn fresh_unit() -> String !io =
-  str.replace(UUID.randomUUID().expect("uuid").toString().expect("uuid string"), "-", "")
+fn fresh_unit() -> String !io = str.replace(uuid(), "-", "")
 
 ## How long a `stop` may take before the runner gives up on it. The unit's
 ## own TimeoutStopSec is 3 s; past this the unit's RuntimeMaxSec is the
 ## backstop.
 const STOP_SECS: Int = 10
 
-# Wait up to `secs` for `proc`. On a timeout, stop it and wait until it has
-# ended, so the gate is released only when the work is gone; answer whether it
-# finished on its own.
+# The `sh` of [`run_timed`]: `$1` is the status file, `$2` the output file, the
+# rest the command. The output and the status are written by the runner's own
+# `sh`, in files the runner named in a directory the sandbox cannot change; the
+# child writes only through the descriptor `sh` opened for it.
+const TIMED_SH: String = "rc=\"$1\"; out=\"$2\"; shift 2; \"$@\" >\"\$out\" 2>&1; echo $? >\"\$rc\""
+
+# Run `argv` for at most `secs`, its combined output in the file `out`:
+# Some(exit status), or None when the budget ran out, the work being gone by
+# then. `status_file` is a path the runner owns.
 #
-# Under the sandbox `proc` is `sudo`, and the work is a systemd unit that
-# `systemd-run --wait` started on its behalf. A SIGKILL to `sudo` does not
-# reach the unit, and an unprivileged runner may not be allowed to signal a
-# root `sudo` at all. Killing only `proc` therefore either let the unit run
-# on to RuntimeMaxSec while the gate admitted the next request, or blocked
-# here until it did. `stop` ends the unit, after which `systemd-run`, and
-# `sudo` with it, exits by itself; `destroyForcibly` is left for the
-# unsandboxed case, where `proc` is the work.
-fn finish_or_stop(proc: Process, secs: Int, stop: List[String]) -> Bool !io = {
-  let unit = TimeUnit.valueOf("SECONDS").expect("seconds")
-  if proc.waitFor(secs, unit) {
-    true
-  } else {
-    if len(stop) > 0 {
-      let sp = ProcessBuilder.new(stop)
-      sp.redirectErrorStream(true)
-      sp.redirectOutput(File.new("/dev/null"))
-      match sp.start() {
-        Some(s) ->
-          if not s.waitFor(STOP_SECS, unit) {
-            let _ = s.destroyForcibly()
-            ()
-          }
-        None -> ()
+# `timeout` ends the process group on the deadline (TERM, then KILL after two
+# more seconds), and the `sh` inside it writes the status only when the command
+# came back, so a missing status is a timeout and an exit status of 124 is
+# just a program's own.
+#
+# Under the sandbox `argv` is `sudo`, and the work is a systemd unit that
+# `systemd-run --wait` started on its behalf. A signal to `sudo` does not reach
+# the unit, and an unprivileged runner may not be allowed to signal a root
+# `sudo` at all. Ending the group alone therefore let the unit run on to
+# RuntimeMaxSec while the gate admitted the next request. `stop` ends the unit,
+# after which `systemd-run`, and `sudo` with it, exits by itself; it is empty
+# when there is no unit. The caller's gate permit is held until this returns,
+# which is what keeps the host from running more compilers than it has permits.
+fn run_timed(argv: List[String], out: String, status_file: String, secs: Int, stop: List[String]) -> Option[Int] !io = {
+  let _ = with_fs_real(() => io.delete(status_file))
+  let wrapped = ["timeout", "-k", "2", "${secs}", "sh", "-c", TIMED_SH, "sh", status_file, out] ++ argv
+  let _ = run_cmd(wrapped, "/dev/null", "/dev/null")
+  let got = with_fs_real(() => io.read_file(status_file))
+  let _ = with_fs_real(() => io.delete(status_file))
+  match got {
+    Ok(t) -> parse_int(str.trim(t))
+    Err(_) -> {
+      if len(stop) > 0 {
+        let _ = run_cmd(["timeout", "-k", "2", "${STOP_SECS}"] ++ stop, "/dev/null", "/dev/null")
       }
+      None
     }
-    proc.destroyForcibly()
-    proc.waitFor()
-    false
   }
 }
 
-# Set a directory's mode outright, umask aside, without a child process.
+# Set a directory's mode outright, umask aside; `mode` is octal digits.
 fn set_mode(dir: String, mode: String) -> Unit !io = {
-  let _ = Files.setPosixFilePermissions(Path.of(dir)!, PosixFilePermissions.fromString(mode)!)
+  let _ = run_cmd(["chmod", mode, dir], "/dev/null", "/dev/null")
   ()
 }
 
@@ -221,8 +254,8 @@ fn set_mode(dir: String, mode: String) -> Unit !io = {
 # root is 0711, so neither can be listed or found.
 fn open_box(dir: String, box: String) -> Unit !io =
   if sandbox_enabled() {
-    set_mode(dir, "rwx--x--x")
-    set_mode(box, "rwxrwxrwx")
+    set_mode(dir, "711")
+    set_mode(box, "777")
   } else {
     ()
   }
@@ -244,16 +277,17 @@ fn cleanup(dir: String) -> Unit !io =
 # Delete `dir` recursively. None on success, else why not (rm's output, or the
 # exit status when it said nothing).
 fn remove_tree(dir: String) -> Option[String] !io = {
-  let p = ProcessBuilder.new(["rm", "-rf", dir])
-  p.redirectErrorStream(true)
-  let got = catch_fault(() => {
-    let proc = p.start()!
-    let said = bytes.decode_utf8_lossy(proc.getInputStream()!.readAllBytes()!)
-    (proc.waitFor(), said)
-  })
+  # rm's words go to a file beside the tree, which is not inside what it removes
+  let said_in = "${dir}.rm-${uuid()}"
+  let got = run_cmd(["rm", "-rf", dir], "/dev/null", said_in)
+  let said = match with_fs_real(() => io.read_file(said_in)) {
+    Ok(t) -> t
+    Err(_) -> ""
+  }
+  let _ = with_fs_real(() => io.delete(said_in))
   match got {
-    Ok((0, _)) -> None
-    Ok((code, said)) -> {
+    Ok(0) -> None
+    Ok(code) -> {
       let t = str.trim(said)
       Some(if t == "" { "rm exited ${code}" } else { str.slice(t, 0, 500) })
     }
@@ -264,7 +298,7 @@ fn remove_tree(dir: String) -> Option[String] !io = {
 # Remove request directories an earlier runner left behind (a crash, a kill, a
 # deploy mid-request, or a tree cleanup could not empty). Called once from
 # main before the server listens, so no request is in flight and nothing live
-# can be taken. Only under a configured work root: the java.io.tmpdir fallback
+# can be taken. Only under a configured work root: the TMPDIR fallback
 # is shared with other programs. Returns how many it removed.
 fn sweep_stale(root: String) -> Int !Fs !io = {
   match io.list_dir(root) {
@@ -294,8 +328,7 @@ pub fn sweep_work_root() -> Unit !io = {
 
 # A fresh request directory under the work root, not yet created.
 fn fresh_dir() -> String !io = {
-  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  "${temp_root()}/dawn-play-${id}"
+  "${temp_root()}/dawn-play-${uuid()}"
 }
 
 # Stage the source into a fresh box and run `body` with the request directory
@@ -365,18 +398,14 @@ fn compile_input(dir: String, box: String, input: String) -> Result[Int, String]
 fn compile_with(dir: String, box: String, argv: List[String]) -> Result[Int, String] !io = {
   let build_out = "${dir}/build.txt"
   let unit = fresh_unit()
-  let bp = ProcessBuilder.new(sandboxed(unit, box, argv))
-  bp.redirectErrorStream(true)
-  bp.redirectOutput(File.new(build_out))
-  let started = System.nanoTime()
-  let build = bp.start().expect("failed to start compiler")
-  if not finish_or_stop(build, compile_timeout_secs(), stop_argv(unit)) {
-    Err("compilation timed out after ${compile_timeout_secs()}s")
-  } else if build.exitValue() != 0 {
-    let (diags, _) = shown(build_out, dir, box)
-    Err(str.trim(diags))
-  } else {
-    Ok((System.nanoTime() - started) / 1000000)
+  let started = tick()
+  match run_timed(sandboxed(unit, box, argv), build_out, "${dir}/build.rc", compile_timeout_secs(), stop_argv(unit)) {
+    None -> Err("compilation timed out after ${compile_timeout_secs()}s")
+    Some(0) -> Ok(ms_since(started))
+    Some(_) -> {
+      let (diags, _) = shown(build_out, dir, box)
+      Err(str.trim(diags))
+    }
   }
 }
 
@@ -492,26 +521,35 @@ pub fn javap_id() -> String !io = id_of_tool(javap_bin())
 fn id_of_tool(bin: String) -> String !io = first_line_of(bin, "-version")
 
 fn first_line_of(bin: String, flag: String) -> String !io = {
-  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  with out <- bracket("${temp_root()}/dawn-play-javap-${id}.txt", cleanup)
-  let p = ProcessBuilder.new([bin, flag])
-  p.redirectErrorStream(true)
-  p.redirectOutput(File.new(out))
-  match catch_fault(() => p.start()) {
-    Ok(Some(proc)) -> {
-      let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
-      if proc.waitFor(5, secs) {
-        let (text, _) = read_capped(out)
-        if proc.exitValue() == 0 { str.trim(text) } else { "" }
-      } else {
-        proc.destroyForcibly()
-        proc.waitFor()
-        ""
-      }
+  let root = temp_root()
+  let base = "${root}/dawn-play-probe-${uuid()}"
+  with out <- bracket("${base}.txt", cleanup_file)
+  match run_timed([bin, flag], out, "${base}.rc", 5, []) {
+    Some(0) -> {
+      let (text, _) = read_capped(out, root)
+      str.trim(text)
     }
     _ -> ""
   }
 }
+
+fn cleanup_file(path: String) -> Unit !io = {
+  let _ = with_fs_real(() => io.delete(path))
+  ()
+}
+
+## Whether `bin` can be found: a path that exists, or a bare name `command -v`
+## finds. The serve path asks this instead of running `javap -version` (a JVM
+## start) for every request.
+pub fn tool_present(bin: String) -> Bool !io =
+  if str.contains(bin, "/") {
+    with_fs_real(() => io.exists(bin))
+  } else {
+    match run_cmd(["sh", "-c", "command -v \"$1\"", "sh", bin], "/dev/null", "/dev/null") {
+      Ok(0) -> true
+      _ -> false
+    }
+  }
 
 test "a tool that is not there has no id, one that is has" {
   assert id_of_tool("/nonexistent/javap") == ""
@@ -527,35 +565,26 @@ test "a tool that is not there has no id, one that is has" {
 # in the sandbox wrapper, so /run and /check keep the environment they have.
 fn utf8_env(argv: List[String]) -> List[String] = ["env", "LC_ALL=C.UTF-8"] ++ argv
 
-# One sandboxed unit of the view, started: `argv` in the box, its output in
-# `<dir>/<name>.txt`, and the id its unit can be stopped by.
-type Launched = { unit: String, proc: Process }
-
-fn launch(dir: String, box: String, name: String, argv: List[String]) -> Launched !io = {
+# One sandboxed unit of the view: `argv` in the box, its output in
+# `<dir>/<name>.txt`. Some(exit status), or None on a timeout, the unit having
+# been stopped by then. Either way it has ended when this returns, which is
+# what lets the request release its permit.
+fn await_unit(dir: String, box: String, name: String, argv: List[String], secs: Int) -> Option[Int] !io = {
   let unit = fresh_unit()
-  let pb = ProcessBuilder.new(sandboxed(unit, box, utf8_env(argv)))
-  pb.redirectErrorStream(true)
-  pb.redirectOutput(File.new("${dir}/${name}.txt"))
-  Launched { unit: unit, proc: pb.start().expect("failed to start ${name}") }
+  run_timed(sandboxed(unit, box, utf8_env(argv)), "${dir}/${name}.txt", "${dir}/${name}.rc", secs, stop_argv(unit))
 }
 
-# Wait up to `secs` for a launched unit: Some(exit status), or None on a
-# timeout, the unit having been stopped by then. Either way it has ended when
-# this returns, which is what lets the request release its permit.
-fn await(l: Launched, secs: Int) -> Option[Int] !io =
-  if finish_or_stop(l.proc, secs, stop_argv(l.unit)) { Some(l.proc.exitValue()) } else { None }
-
 # Seconds of the shared budget not yet spent, at least one.
-fn budget_left(started: Int) -> Int !io = {
-  let spent = (System.nanoTime() - started) / 1000000000
+fn budget_left(started: Instant) -> Int !io = {
+  let spent = ms_since(started) / 1000
   let left = compile_timeout_secs() - spent
   if left < 1 { 1 } else { left }
 }
 
 # One of a compiler's files from the box: the text, or the reason it is not
 # usable (past the limit).
-fn raw_file(path: String, what: String) -> Result[String, ViewRaw] !io = {
-  let (text, cut) = read_capped_to(path, VIEW_RAW_LIMIT)
+fn raw_file(path: String, what: String, scratch: String) -> Result[String, ViewRaw] !io = {
+  let (text, cut) = read_capped_to(path, VIEW_RAW_LIMIT, scratch)
   if cut { Err(RawTooLarge(what)) } else { Ok(text) }
 }
 
@@ -566,7 +595,7 @@ fn raw_file(path: String, what: String) -> Result[String, ViewRaw] !io = {
 # 3.6 to 4.0 s cold against 2.0 to 2.2 s side by side; the second tab of a
 # program is a cache hit either way, which is where the repeat cost goes.
 fn view_staged(dir: String, box: String, native: Bool) -> ViewRaw !io = {
-  let started = System.nanoTime()
+  let started = tick()
   let prog = "${box}/prog.dawn"
   match emitc_unit(dir, box, prog, native, started) {
     Some(fail) -> fail
@@ -580,7 +609,7 @@ fn view_staged(dir: String, box: String, native: Bool) -> ViewRaw !io = {
 # The C half of the view. `dawnc emitc` writes the same C text and map as
 # `dawn __emitc` (byte-compared in test/contract.sh) and costs a tenth of the
 # memory; a program it declines goes to the JVM compiler, as in [`check_phase`].
-fn emitc_unit(dir: String, box: String, prog: String, native: Bool, started: Int) -> Option[ViewRaw] !io = {
+fn emitc_unit(dir: String, box: String, prog: String, native: Bool, started: Instant) -> Option[ViewRaw] !io = {
   let jvm = [dawn_bin(), "__emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"]
   if not native {
     emit_unit(dir, box, "emitc", jvm, started)
@@ -595,8 +624,8 @@ fn emitc_unit(dir: String, box: String, prog: String, native: Bool, started: Int
 
 # One compiler unit: None when it succeeded, else the answer that ends the
 # request, which is /check's: the diagnostics, or the timeout.
-fn emit_unit(dir: String, box: String, name: String, argv: List[String], started: Int) -> Option[ViewRaw] !io =
-  match await(launch(dir, box, name, argv), budget_left(started)) {
+fn emit_unit(dir: String, box: String, name: String, argv: List[String], started: Instant) -> Option[ViewRaw] !io =
+  match await_unit(dir, box, name, argv, budget_left(started)) {
     None -> Some(RawTimedOut(compile_timeout_secs()))
     Some(code) -> if code != 0 { Some(RawFail(CompileError(diagnostics(dir, box, name)))) } else { None }
   }
@@ -608,9 +637,9 @@ fn diagnostics(dir: String, box: String, name: String) -> String !io = {
 
 # javap names the class by a path the runner chose: the module of a single
 # file is its stem, and the file is always prog.dawn.
-fn list_and_gather(dir: String, box: String, started: Int) -> ViewRaw !io = {
+fn list_and_gather(dir: String, box: String, started: Instant) -> ViewRaw !io = {
   let argv = [javap_bin(), "-J-Xmx128m", "-J-Dstdout.encoding=UTF-8", "-c", "-p", "-s", "${box}/classes/prog.class"]
-  match await(launch(dir, box, "javap", argv), budget_left(started)) {
+  match await_unit(dir, box, "javap", argv, budget_left(started)) {
     None -> RawBroken("the listing tool timed out")
     Some(code) ->
       if code != 0 {
@@ -621,21 +650,21 @@ fn list_and_gather(dir: String, box: String, started: Int) -> ViewRaw !io = {
   }
 }
 
-fn gather(dir: String, box: String, started: Int) -> ViewRaw !io =
-  match raw_file("${box}/out.c", "the C text") {
+fn gather(dir: String, box: String, started: Instant) -> ViewRaw !io =
+  match raw_file("${box}/out.c", "the C text", dir) {
     Err(e) -> e
-    Ok(ctext) -> match raw_file("${box}/c.dawnmap", "the C map") {
+    Ok(ctext) -> match raw_file("${box}/c.dawnmap", "the C map", dir) {
       Err(e) -> e
-      Ok(cmap) -> match raw_file("${box}/jvm.dawnmap", "the JVM map") {
+      Ok(cmap) -> match raw_file("${box}/jvm.dawnmap", "the JVM map", dir) {
         Err(e) -> e
-        Ok(jmap) -> match raw_file("${dir}/javap.txt", "the JVM listing") {
+        Ok(jmap) -> match raw_file("${dir}/javap.txt", "the JVM listing", dir) {
           Err(e) -> e
           Ok(javap) -> RawOk(ViewParts {
             ctext: ctext,
             cmap: cmap,
             jmap: jmap,
             javap: javap,
-            ms: (System.nanoTime() - started) / 1000000,
+            ms: ms_since(started),
           })
         }
       }
@@ -688,15 +717,7 @@ test "the manifest names exactly two dependencies, both under the packages direc
 ## and says why, as it does for a missing `javap`.
 pub fn tile_ready() -> Bool !io = {
   let root = packages_root()
-  let found = catch_fault(() => {
-    let nofollow = LinkOption.valueOf("NOFOLLOW_LINKS")!
-    Files.isRegularFile(Path.of("${root}/tileir/dawn.toml")!, nofollow) &&
-      Files.isRegularFile(Path.of("${root}/tileref/dawn.toml")!, nofollow)
-  })
-  match found {
-    Ok(b) -> b
-    Err(_) -> false
-  }
+  with_fs_real(() => io.exists("${root}/tileir/dawn.toml") && io.exists("${root}/tileref/dawn.toml"))
 }
 
 ## Run `code` as the `src/main.dawn` of a Tile IR project and answer what /run
@@ -716,18 +737,17 @@ fn tile_staged(dir: String, box: String) -> Outcome !io =
 fn run_phase(dir: String, box: String) -> Outcome !io = {
   let run_out = "${dir}/run.txt"
   let unit = fresh_unit()
-  let rp = ProcessBuilder.new(sandboxed(unit, box, [java_bin(), RUN_HEAP, "-jar", "${box}/prog.jar"]))
-  rp.redirectErrorStream(true)
-  rp.redirectOutput(File.new(run_out))
-  let started = System.nanoTime()
-  let proc = rp.start().expect("failed to start program")
-  if finish_or_stop(proc, timeout_secs(), stop_argv(unit)) {
-    let ms = (System.nanoTime() - started) / 1000000
-    let (out, cut) = shown(run_out, dir, box)
-    Compiled(out, proc.exitValue(), cut, ms)
-  } else {
-    let (out, _) = shown(run_out, dir, box)
-    Timeout(out)
+  let started = tick()
+  match run_timed(sandboxed(unit, box, [java_bin(), RUN_HEAP, "-jar", "${box}/prog.jar"]), run_out, "${dir}/run.rc", timeout_secs(), stop_argv(unit)) {
+    Some(code) -> {
+      let ms = ms_since(started)
+      let (out, cut) = shown(run_out, dir, box)
+      Compiled(out, code, cut, ms)
+    }
+    None -> {
+      let (out, _) = shown(run_out, dir, box)
+      Timeout(out)
+    }
   }
 }
 
@@ -748,24 +768,26 @@ fn run_phase(dir: String, box: String) -> Outcome !io = {
 pub type CompilerId = { version: String, build: String }
 
 pub fn compiler_id() -> CompilerId !io = {
-  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
-  with out <- bracket("${temp_root()}/dawn-play-version-${id}.txt", cleanup)
-  let p = ProcessBuilder.new([dawn_bin(), "--version"])
-  p.redirectErrorStream(true)
-  p.redirectOutput(File.new(out))
-  let unknown = CompilerId { version: "", build: "" }
-  match p.start() {
-    None -> unknown
-    Some(proc) -> {
-      let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
-      if proc.waitFor(5, secs) {
-        let (text, _) = read_capped(out)
-        id_of(text)
-      } else {
-        proc.destroyForcibly()
-        proc.waitFor()
-        unknown
-      }
+  # A deploy that already knows its toolchain says so (PLAY_TOOLCHAIN_ID is
+  # "<version> <build>", e.g. "0.85.0 b1:2bfef5fb3622", what `dawn --version`
+  # prints after its name): the process-per-request entry then answers /health
+  # without a child, where `dawn --version` costs a quarter second a request.
+  let told = with_env_real(() => io.getenv("PLAY_TOOLCHAIN_ID"))
+  match told {
+    Some(v) -> if v != "" { id_of("dawn " ++ v) } else { probe_compiler_id() }
+    None -> probe_compiler_id()
+  }
+}
+
+fn probe_compiler_id() -> CompilerId !io = {
+  let root = temp_root()
+  let base = "${root}/dawn-play-version-${uuid()}"
+  with out <- bracket("${base}.txt", cleanup_file)
+  match run_timed([dawn_bin(), "--version"], out, "${base}.rc", 5, []) {
+    None -> CompilerId { version: "", build: "" }
+    Some(_) -> {
+      let (text, _) = read_capped(out, root)
+      id_of(text)
     }
   }
 }
@@ -861,7 +883,7 @@ test "id_of takes the build digest when the compiler prints one" {
 
 # Test-only: run a fixed argv to completion.
 fn sh_run(argv: List[String]) -> Unit !io = {
-  ProcessBuilder.new(argv).start().expect("start").waitFor()
+  let _ = run_cmd(argv, "/dev/null", "/dev/null")
   ()
 }
 
@@ -884,11 +906,11 @@ test "read_capped holds at most the limit and says it cut" {
     assert match io.write_file("${d}/big.txt", str.repeat(line, 20 * 64)) { Ok(_) -> true, Err(_) -> false }
     assert match io.write_file("${d}/small.txt", "hi\n") { Ok(_) -> true, Err(_) -> false }
   })
-  let (big, cut) = read_capped("${d}/big.txt")
+  let (big, cut) = read_capped("${d}/big.txt", d)
   assert cut
   assert str.len(big) == OUTPUT_LIMIT
-  assert read_capped("${d}/small.txt") == ("hi\n", false)
-  assert read_capped("${d}/absent.txt") == ("", false)
+  assert read_capped("${d}/small.txt", d) == ("hi\n", false)
+  assert read_capped("${d}/absent.txt", d) == ("", false)
 }
 
 test "read_capped neither follows a link nor waits on a special file" {
@@ -899,12 +921,12 @@ test "read_capped neither follows a link nor waits on a special file" {
   })
   sh_run(["ln", "-s", "${d}/secret.txt", "${d}/link.txt"])
   sh_run(["mkfifo", "${d}/fifo.txt"])
-  assert read_capped("${d}/link.txt") == ("", false)
+  assert read_capped("${d}/link.txt", d) == ("", false)
   # a FIFO with no writer would block an open for good; this returning at all
   # is half the assertion
-  assert read_capped("${d}/fifo.txt") == ("", false)
+  assert read_capped("${d}/fifo.txt", d) == ("", false)
   # and the link's target is still readable when asked for by its own name
-  assert read_capped("${d}/secret.txt") == ("secret\n", false)
+  assert read_capped("${d}/secret.txt", d) == ("secret\n", false)
 }
 
 test "shown strips the box before the request directory, then marks a cut" {
@@ -929,12 +951,12 @@ test "with_request removes the request directory when the body fails" {
     Err(e) -> str.split(e.message, "|").get(0).unwrap_or("")
   }
   assert str.contains(named, "/dawn-play-")
-  assert not Files.exists(Path.of(named)!, LinkOption.valueOf("NOFOLLOW_LINKS")!)
+  assert not present(named)
 }
 
 # Test-only: a stand-in for the sandbox wrapper with the property that matters.
-# `run` starts the work in the background and waits for it, so killing the
-# wrapper leaves the work running, as killing `sudo` leaves the unit; `stop`
+# `run` starts the work in a session of its own and waits for it, so killing the
+# wrapper's group leaves the work running, as killing `sudo` leaves the unit; `stop`
 # ends the work by the pid `run` recorded under the unit id.
 fn fake_wrapper(d: String) -> String !io = {
   let path = "${d}/fake-sandbox.sh"
@@ -942,7 +964,7 @@ fn fake_wrapper(d: String) -> String !io = {
     "#!/bin/sh\n" ++
     "d=\$(dirname \"\$0\")\n" ++
     "case \"\$1\" in\n" ++
-    "  run) id=\$2; shift 2; \"\$@\" & echo \$! > \"\$d/\$id.pid\"; wait \$! ;;\n" ++
+    "  run) id=\$2; shift 2; setsid \"\$@\" & echo \$! > \"\$d/\$id.pid\"; wait \$! ;;\n" ++
     "  stop) kill \"\$(cat \"\$d/\$2.pid\")\" ;;\n" ++
     "esac\n"
   let _ = with_fs_real(() => io.write_file(path, body))
@@ -955,8 +977,10 @@ fn alive(d: String, unit: String) -> Bool !io = {
     Ok(t) -> t
     Err(_) -> ""
   })
-  let p = ProcessBuilder.new(["kill", "-0", str.trim(pid)]).start().expect("start")
-  p.waitFor() == 0
+  match run_cmd(["kill", "-0", str.trim(pid)], "/dev/null", "/dev/null") {
+    Ok(0) -> true
+    _ -> false
+  }
 }
 
 test "a timed-out phase is stopped through the wrapper, not only killed" {
@@ -965,10 +989,18 @@ test "a timed-out phase is stopped through the wrapper, not only killed" {
   let fake = fake_wrapper(d)
   let unit = fresh_unit()
   assert str.len(unit) == 32
-  let p = ProcessBuilder.new(["sh", fake, "run", unit, "sleep", "30"]).start().expect("start")
-  assert not finish_or_stop(p, 1, ["sh", fake, "stop", unit])
+  assert run_timed(["sh", fake, "run", unit, "sleep", "30"], "${d}/o.txt", "${d}/o.rc", 1, ["sh", fake, "stop", unit]) == None
   # the work the wrapper started is gone by the time the phase returns
   assert not alive(d, unit)
+}
+
+test "a program's own exit 124 is its status, not a timeout" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  sh_run(["mkdir", "-p", d])
+  assert run_timed(["sh", "-c", "exit 124"], "${d}/o.txt", "${d}/o.rc", 5, []) == Some(124)
+  assert run_timed(["sh", "-c", "echo hi; exit 3"], "${d}/o.txt", "${d}/o.rc", 5, []) == Some(3)
+  assert read_capped("${d}/o.txt", d) == ("hi\n", false)
 }
 
 test "with no stop command a timed-out wrapper's work outlives it" {
@@ -978,8 +1010,7 @@ test "with no stop command a timed-out wrapper's work outlives it" {
   with d <- bracket(dir, cleanup)
   let fake = fake_wrapper(d)
   let unit = fresh_unit()
-  let p = ProcessBuilder.new(["sh", fake, "run", unit, "sleep", "30"]).start().expect("start")
-  assert not finish_or_stop(p, 1, [])
+  assert run_timed(["sh", fake, "run", unit, "sleep", "30"], "${d}/o.txt", "${d}/o.rc", 1, []) == None
   assert alive(d, unit)
   sh_run(["sh", fake, "stop", unit])
 }
@@ -1007,7 +1038,7 @@ test "remove_tree says why a tree it cannot empty stays, and cleans one it can" 
 }
 
 test "sweep_stale removes dawn-play-* under the root, counts them, and leaves the rest" {
-  let root = "${temp_root()}/dawn-play-sweeptest-${UUID.randomUUID().expect("uuid").toString().expect("s")}"
+  let root = "${temp_root()}/dawn-play-sweeptest-${uuid()}"
   sh_run(["mkdir", "-p", "${root}/dawn-play-aaa/box/classes", "${root}/dawn-play-bbb", "${root}/keep"])
   sh_run(["touch", "${root}/dawn-play-aaa/box/classes/A.class", "${root}/keep/f"])
   let n = with_fs_real(() => sweep_stale(root))
