@@ -78,7 +78,7 @@ export class ComparePane {
   readonly root = el('section', 'dp-view xp')
   private readonly tabs: HTMLButtonElement[] = []
   private readonly meta = el('span', 'dp-viewmeta')
-  private readonly compileBtn = el('button', 'dp-viewgo', 'Compile')
+  private readonly compileBtn = el('button', 'dp-viewgo', 'Codegen')
   private readonly closeBtn = el('button', 'dp-outclose', '×')
   private readonly notice = el('div', 'dp-viewnote')
   private readonly errBox = el('div', 'dp-viewerr')
@@ -135,7 +135,7 @@ export class ComparePane {
       strip.appendChild(b)
     })
     this.compileBtn.type = 'button'
-    this.compileBtn.title = 'Compile the program in the editor now'
+    this.compileBtn.title = 'Generate the code for the program in the editor now'
     this.compileBtn.addEventListener('click', () => this.compile(true))
     this.closeBtn.type = 'button'
     this.closeBtn.title = 'Close the generated code'
