@@ -76,6 +76,9 @@ COORDINATE_ALLOWED = [
      f"`server {{ server_name {SITE_HOST}; … }}`, and all listed",
      "operator prose naming the nginx server block, which lives outside this repository"),
     ("playground/deploy/nginx-play.conf",
+     f'#       "{SITE_ORIGIN}" $http_origin;',
+     "the CORS allow-list map example; nginx cannot read repo.env"),
+    ("playground/deploy/nginx-play.conf",
      f"# `server {{ server_name {SITE_HOST}; ... }}` block (the static site is",
      "a comment naming the nginx server block, which lives outside this repository"),
 ]

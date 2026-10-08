@@ -128,6 +128,12 @@ by hand, with the server reachable.
    (`playrun`, `playcheck`, `playcompile`); a missing `/api/compile` location
    answers 404 from the static site, not from the runner. The `playcompile`
    rate (30r/m, burst 6) is provisional until a week of access-log data.
+   When the site page and the API are on different hosts (the live setup:
+   the site calls a dedicated play host), also declare the
+   `$play_cors` map from the snippet's header in `http { … }`; the REST
+   locations then answer preflight and add `Access-Control-Allow-Origin` (with
+   `always`, so 413/429 carry it) for that one origin only. `/api/lsp` gets no
+   CORS headers, the gateway checks `Origin` itself.
    `/api/lsp` must preserve the browser's
    `Origin` and `Sec-WebSocket-Protocol: dawn-lsp-v1` headers and rewrite to the
    gateway's loopback-only `/lsp` route, as the shipped snippet does.
