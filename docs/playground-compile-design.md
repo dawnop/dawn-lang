@@ -1,6 +1,6 @@
 # Playground 在线编译：改过的代码也能对照 C / JVM / Tile IR
 
-> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）与 K3（前端窗格，C 与 JVM）已实现，见第七节；K4 起尚无代码）。这是 `docs/explorer-page-design.md`
+> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）与 K5（Tile IR 文本）已实现，见第七节；K4 与 K6 尚无代码）。这是 `docs/explorer-page-design.md`
 > 第九节留的「下一步」：把 `--map` 接到 Playground，让浏览器里现改的代码也能和产物对照，形态向
 > Compiler Explorer 看齐。依赖：M3/M4（`__emitc --map`、`__emit --map`，`docs/source-span-map-design.md`
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
@@ -411,6 +411,30 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 第四节「未验证项」。验收：含 `use tileir/` 的 `vadd` 样例 `/compile {"target":"tile"}` 得到与 `dawn run` 相同的文本；用户在源码里写
 `use tileir/` 之外的包（例如伪造路径）解析失败；不含 `use tileir/` 的程序请求 tile 得到一句明确的错误。负控：让 runner 不再生成
 `dawn.toml`（改成读用户提供的），要求「夹带路径依赖」用例红。墙钟：每个 Tile 用例约 4.5 s，合约只放 2 个。
+
+**K5 落地记录（2026-10-08）。**
+- **实现：** runner：`play/exec.dawn` 的 `tile_run`（项目模式：`box/src/main.dawn` 加 runner 自己写的 `box/dawn.toml`，然后 `dawn build <box>` 与 `java -jar`，
+  即 `/run` 的两个单元与全部预算）、`tile_ready`（启动时探测两个包的 `dawn.toml`，缺则 503）；`play/view.dawn` 的 `tile_view`（程序的标准输出按行成为窗格）；
+  `main.dawn` 的 `tile_ir`（服务端复判 `use tileir/`、同一缓存、同样两个许可与 `/check` 的 2 s 耐心）；`play/config.dawn` 的 `PLAY_PACKAGES`（默认 `/opt/dawn/packages`）。
+  前端：`compile-state.ts`/`compile-view.ts` 加 `Tile IR` 标签，纯文本、带行号，无调用表。
+- **响应：** 成功是 `{"ok":true,"phase":"compile-view","target":"tile",...,"pane":{"kind":"tile","total","shown","truncated","text":[...]}}`，没有 `src`/`calls`/`gaps`。
+  编译错误与 `/check` 同形；程序非零退出是 `{"ok":false,"phase":"run","exit","output"}`，超时是 `phase:"timeout"`，都是 200。没有 `use tileir/` 是 400 一句话。
+  **只缓存成功**：失败可能是机器负载（超时、堆），而且窗格随下一次编辑重写。
+- **第一步的结论（4.1 的未验证项）：项目模式不写 `box/` 之外。** 本机没有 `/opt/dawn`，真沙箱（`systemd-run`、`PLAY_UNSAFE_LOCAL` 关）不可复现；
+  所做的是：(1) 静态推理，`dawn build <项目> -o <box>/prog.jar` 只写 `-o` 指定的 jar，清单没有 `[deps.java]`，所以不解析、不取、不写 `dawn.lock`；
+  (2) 实验，`bwrap --ro-bind / /` 只放开 box 可写、`/tmp` 为空 tmpfs，构建成功，之后 box 里只有暂存的两个文件与 `prog.jar`，tmpfs 里只有 JVM 的 `hsperfdata`；
+  (3) 同一程序 `dawn run` 与这条路径的输出逐字节相同。这等价于 `ProtectSystem=strict` 加私有 `/tmp`，但**不是**那个单元本身。
+- **部署时要在服务器上核对的（协调者）：** (a) 真沙箱里 `dawn build /var/lib/dawn-play/work/<id>/box -o .../prog.jar` 成功，且之后 box 外无新文件；
+  (b) `dawn-play` 能读 `/opt/dawn/packages/tileir/dawn.toml`、`tileref/dawn.toml`（启动日志无 503 说明，`POST /compile` 对 tile 不答 503）；
+  (c) 单元里 `DynamicUser` 读 `box/src`（runner 以其自己的 umask 建，需目录 0755、文件 0644，`open_box` 只放开 box 本身）；
+  (d) 一次冷 tile 请求的墙钟，本机约 2.6 s（见下），生产机小，实测后回填；(e) 一个 `use json/...` 的程序在服务器上同样解析失败。
+- **合约用例（`contract.sh`，40 → 42 项）：** (1) tile 成功：窗格文本与同一程序作为项目的 `dawn run` 输出逐字节相同，无 `calls`，不泄漏工作目录；
+  (2) 夹带：请求里多带一个 `dawn_toml` 字段，并让源码 `use json/...`，要求仍然 `phase:"compile"` 解析失败；另把「tile 尚未提供」那条换成「没有 `use tileir/` 的 tile 请求 400 一句话」。
+- **负控（先绿后红再还原）：** 让 runner 读请求里的 `dawn_toml` 作清单，夹带用例红（答出了窗格）；还原后 42 项全绿。
+- **延迟（本机 WSL2，负载不低，量级）：** 冷 tile 请求响应里的 `ms` 为 2.6 s（沙箱外、unsafe-local，含编译 `tileir` 与运行）；同一项目 `dawn run` 为 2.5 s。目标 4.5 s 以内，本机达标；沙箱单元的额外开销（约 0.1 s 一个）与生产机未测。
+- **bundle（gzip -9）：** `playground.js` 135,735 -> 136,384 B（+649 B；未压缩 416.92 -> 419.35 kB），`playground.css` 不变（2,800 B）。
+- **没做的：** 不加 Tile IR 的样例（`doc-check` 的样例检查以单文件运行 `site/play-ui/samples`，`use tileir/` 在那里解析不了，而 `/run` 也一样）；
+  不做逐调用对照（K6）；`/compile` 的限流区与权限的共用仍归 K4。
 
 **K6（可选，第八节第 4 条：等 `tileir` 稳定入口）：Tile IR 逐调用对照（T2）**，在 `packages/tileir` 的稳定入口落地之后；单独裁决，不在本批。
 
