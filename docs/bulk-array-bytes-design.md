@@ -29,8 +29,17 @@ JVM 是 `Object[]` 里放 `Long`/`Double`；native 是 `void*` 槽指向 `dawn_b
 | 1M f64：Dawn 侧 `Buf.put` 逐字节编码 JVM 123 ms、native 279 ms；`List` 拷贝基线 JVM 36 ms、native 64 ms | 维护者实测，记在调研报告 §5.2 |
 | JVM 上 `pack_i64` 187 ms，`unpack_i64` 300+ ms，`pack_i32` 87 ms | `gpu-typed-transfer-design.md` §3.5 |
 | JVM 装箱数组的运行时紧循环（读箱 + `ByteBuffer.putLong`）1M 元素：第 1 轮 11.1 ms，第 5 轮 1.8 ms；原生 `double[]` 批量 6.0 / 1.0 ms；噪声大，只当量级 | 调研报告 §2.4 |
-| native C 紧循环 | **未量**，K0 量 |
-| `list.map` 一遍的占比（报告 §4.5） | **未量**，K0 量 |
+| native C 紧循环（K0，链接真实 `runtime/c/dawn_rt.c`，clang-20 -O2 同 `native-selfhost-tests.sh`，1M 元素，5 取最好；机器负载 3.5 到 6，抖动 20% 到 30%，只当量级；bench 源在临时目录，未入库）：memcpy 8 MB 0.2 到 0.3 ms；`dawn_array` 经 `push_own`+`dup` 拷贝 21 到 30 ms（`List` 拷贝下界）；pack f64 小端/大端 1.5 / 1.0 ms（乱序箱 1.6 ms，故读箱缓存未命中不是瓶颈，bswap 免费），i64 1.5 / 1.3 ms，i32 1.0 / 1.0 ms；unpack 逐元素 `push_own`：f64 29 到 31 ms，i64 37 ms，i32 29 到 30 ms；unpack 写入预分配缓冲一次填满：8.4 ms；单独分配 1M 个 `dawn_box_float` 6.2 ms；Dawn 侧逐字节 `Buf.put` 编码复测 292 到 341 ms | 本次 K0 实测 |
+| 真实 pvec `list.map` 一遍（Dawn 程序内） | 58 到 90 ms，本次 K0 实测 |
+| 真实 pvec `List` 与 `Array` 互转的占比（报告 §4.5） | **未量** |
+| JVM 紧循环 | **未量** |
+
+K0 的结论（native）：
+
+- pack 在 native 上有约 20 倍余量（1.0 到 1.5 ms 对 30 ms 目标）。读箱、字节序都不是成本。
+- unpack 的 29 ms 里约 70% 是 `push_own` 每元素新分配数组头并释放旧头，分配 1M 个浮点箱本身只要 6.2 ms。逐元素 `push_own` 恰好压在 30 ms 目标线上，没有余量。
+- 因此 unpack 的实现**必须**经运行时内部的预分配入口（形如 `dawn_array_from_boxes(n)` 的内部辅助；`dawn_array_buf_new` 现在在 `dawn_rt.c` 里是 `static`，需要对内开放），一次分配、一次填满，实测 8.4 ms；**不得**写成 `push_own` 循环。
+- 逐字节 `Buf.put` 编码在 native 上复测 292 到 341 ms，与 §1.3 第一行的 279 ms 同量级，pack 的收益约两个数量级。
 
 ## 2. 方案：一族契约原语
 
@@ -71,7 +80,7 @@ JVM 是 `Object[]` 里放 `Long`/`Double`；native 是 `void*` 槽指向 `dawn_b
 ## 5. 边界（诚实声明）
 
 - bf16/f16/tf32/f8 的舍入是逐元素算术（`narrow.round_*`），仍在 Dawn 里逐元素算位型，之后的「位型到字节」一步批量。
-- `DeviceBits` 路径上 `List[I32]`/`List[BF16]` 等不透明元素到 `List[Int]`/`List[Float]`：**裁决取 (a)**，接受一次 `list.map`，不做恒等表示转换；K0 量 `list.map` 的占比，占比大再重评。`Float`/`Int`（f64/i64）路径不经此。
+- `DeviceBits` 路径上 `List[I32]`/`List[BF16]` 等不透明元素到 `List[Int]`/`List[Float]`：**裁决取 (a)**，接受一次 `list.map`，不做恒等表示转换；K0 已量：native 真实 pvec `list.map` 58 到 90 ms，大约是 pack 原语（约 1.5 ms）的数十倍，换言之该路径的成本主要在 `list.map` 与 `List` 互转，不在原语；真实 `List` 与 `Array` 互转占比和 JVM 紧循环尚未量，量完再决定是否重评恒等表示转换。`Float`/`Int`（f64/i64）路径不经此。
 - `Buf.put_bytes` 的非对齐路径靠 K6 解决；`bytes_from_array` 在 `freeze` 中仍读一遍不超过 4096 个的尾部箱，但走同一原语。
 
 ## 6. 验收与刀序
@@ -89,7 +98,7 @@ JVM 是 `Object[]` 里放 `Long`/`Double`；native 是 `void*` 槽指向 `dawn_b
 
 | 刀 | 内容 | 破坏 | 负控 |
 |---|---|---|---|
-| K0 | 只量：native 1M f64 的 C 紧循环、`List` 拷贝、`list.map` 一遍；JVM 同；填 `gpu-typed-transfer-design.md` 开放问题 4 | 否 | 无 |
+| K0 | 只量：native 1M f64 的 C 紧循环、`List` 拷贝、`list.map` 一遍（native 已量，见 §1.3；真实 pvec 互转占比与 JVM 紧循环待量）；填 `gpu-typed-transfer-design.md` 开放问题 4 | 否 | 无 |
 | K1 | 本文 | 否 | 无 |
 | K2 | `array_extend`/`array_slice` + `pvec` 三处改用 + `scripts/array-contract` 两条断言 | 否 | 区间右端开闭错一位，合约红；native `array_extend` 漏一次 dup，ASan 门红 |
 | K3 | 整数族 + 骨架生成函数 + 删 `bytes_from_array`（6 处）+ 合约 `scripts/bytes-pack-contract`（两后端同一 `.expect`） | 是 | 字节序写反（非对称值）；宽度错一档；符号扩展写成零扩展（`0x80`）；截断改饱和（`300`） |
