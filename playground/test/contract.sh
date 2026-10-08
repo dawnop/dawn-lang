@@ -2,6 +2,19 @@
 # Contract test for dawn-play: boots the runner in local (direct) mode, drives
 # /run through every branch, checks the JSON responses, then shuts it down.
 # Requires: a built dawn.jar, a JDK, python3 (for JSON assertions), curl.
+#
+# Two ways to boot the runner, one set of cases (K4 of
+# docs/playground-native-runner-design.md). The default is the long-lived JVM
+# server, `dawn run playground`, on a TCP port. PLAY_TEST_MODE=native boots the
+# process-per-request binary instead: `systemd-socket-activate -a --inetd
+# $PLAY_TEST_NATIVE_BIN serve` on a unix socket, so every request is a fresh
+# process exactly as under dawn-play-native.socket, and curl reaches it with
+# --unix-socket. Build the binary with
+# `dawnc build playground/native -o dawn-play-linux-x86_64` (what
+# PLAY_TEST_NATIVE_BIN defaults to, in the repository root). The cases that are
+# about the JVM server itself (its startup sweep, its answer cache, the second
+# JVM runner the dawnc comparison needs) are skipped in native mode and say so;
+# every other case, the response bytes included, is the same.
 set -e
 cd "$(dirname "$0")/.."
 ROOT=$(cd .. && pwd)
@@ -32,6 +45,24 @@ wrap_refuses 2 stop "$ID" extra
 wrap_refuses 3 run "$ID" /etc true
 echo "  ok  the run wrapper takes only run/stop with a unit id"
 
+# The K4 deploy pieces that run without a server. The canary check's pure parts
+# (percentile, the 2x gate, the normalization of the two fields that differ by
+# design); the nginx variant generator: `jvm` is the live file byte for byte,
+# `native` changes only the upstream of the four runner locations and leaves
+# the WebSocket gateway's alone.
+python3 -I -B deploy/canary-check.py --self-test >/dev/null || { echo "FAIL: canary-check.py self-test"; exit 1; }
+sh -n deploy/nginx-switch.sh
+sh deploy/nginx-switch.sh jvm | cmp -s - deploy/nginx-play.conf || { echo "FAIL: nginx-switch.sh jvm is not nginx-play.conf"; exit 1; }
+nat_conf=$(sh deploy/nginx-switch.sh native)
+nat_count() { printf '%s\n' "$nat_conf" | grep -c "$1"; }
+if [ "$(nat_count 'proxy_pass http://unix:/run/dawn-play/http.sock:/')" != 4 ] ||
+    [ "$(nat_count 'proxy_pass http://127.0.0.1:8087')" != 0 ] ||
+    [ "$(nat_count 'proxy_pass http://127.0.0.1:8088/lsp')" != 1 ] ||
+    [ "$(nat_count 'client_body_timeout 10s')" != 3 ]; then
+  echo "FAIL: nginx-switch.sh native does not retarget exactly the four runner locations"; exit 1
+fi
+echo "  ok  canary check self-test; nginx variant generator"
+
 # Both layouts: macOS bundles the JDK under Contents/Home, Linux tarballs put
 # bin/ at the top level. Same probe as bin/dawn.
 if [ -z "$JAVA_HOME" ]; then
@@ -53,6 +84,12 @@ export PLAY_COMPILE_TIMEOUT=60
 # fail-closed since the audit). There is no systemd-run wrapper on a dev box or
 # in CI, so this harness is exactly the caller that has to say so.
 export PLAY_UNSAFE_LOCAL=1
+MODE=${PLAY_TEST_MODE:-jvm}
+case "$MODE" in jvm|native) ;; *) echo "FAIL: PLAY_TEST_MODE must be jvm or native, not '$MODE'"; exit 1 ;; esac
+# What a repeated /compile of one program reports: the JVM server keeps its
+# answers, the native runner has no cache (ruling 4 of the K4 design).
+CACHED_HIT=True
+[ "$MODE" = native ] && CACHED_HIT=False
 # The native compiler /check and the C view prefer (play/exec.native_ready).
 # The runner only uses one of the release `dawn` is, so the case below skips
 # unless PLAY_TEST_DAWNC (default: ./dawnc-linux-x86_64, what
@@ -64,7 +101,11 @@ NATIVE_DIR=""
 want_ver=$("$DAWN_BIN" --version 2>/dev/null | sed -n 's/^dawn \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
 have_ver=""
 [ -x "$DAWNC_REAL" ] && have_ver=$("$DAWNC_REAL" --version 2>/dev/null | sed -n 's/^dawnc \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
-if [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
+if [ "$MODE" = native ]; then
+  # The call-logging wrapper and the comparison it feeds need a JVM runner
+  # beside the native one; this mode hands dawnc over as it is.
+  export DAWNC_BIN="$DAWNC_REAL"
+elif [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
   NATIVE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-native.XXXXXX")
   NATLOG="$NATIVE_DIR/calls"
   : >"$NATLOG"
@@ -98,7 +139,7 @@ echo "port: $PORT"
 
 # A stale server on the port would answer every check while the fresh one
 # dies on bind — fail fast instead of green-lighting an orphan.
-if curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+if [ "$MODE" = jvm ] && curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
   echo "FAIL: something already listens on $PORT (stale server?)"; exit 1
 fi
 
@@ -122,15 +163,38 @@ LOG=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test.XXXXXX")
 # systemd unit gives the compilers it starts: file names are then ASCII to the
 # JVM, and the /compile cases with non-ASCII names only pass because the
 # runner asks for a UTF-8 locale on those commands (play/exec.utf8_env).
+if [ "$MODE" = native ]; then
+  NATIVE_BIN=${PLAY_TEST_NATIVE_BIN:-$ROOT/dawn-play-linux-x86_64}
+  [ -x "$NATIVE_BIN" ] || { echo "FAIL: no native runner at $NATIVE_BIN (dawnc build playground/native -o $NATIVE_BIN)"; exit 1; }
+  command -v systemd-socket-activate >/dev/null || { echo "FAIL: native mode needs systemd-socket-activate"; exit 1; }
+  SOCK="$WORK.sock"
+  # A deploy writes this from the tree it ships (redeploy.sh); /health then
+  # answers without a child, as in production.
+  PLAY_TOOLCHAIN_ID=$("$DAWN_BIN" --version 2>/dev/null | tail -n 1 | sed -e 's/^dawn //' -e 's/ (selfhost)//')
+  export PLAY_TOOLCHAIN_ID
+  # systemd-socket-activate hands the child only the variables named with -E.
+  SA_ENV=""
+  for v in $(env | sed -n 's/^\(\(PLAY_\|DAWN\)[A-Z_]*\)=.*/\1/p') PATH JAVA_HOME HOME TMPDIR; do
+    SA_ENV="$SA_ENV -E $v"
+  done
+  # shellcheck disable=SC2086  # SA_ENV is a list of words on purpose
+  python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
+    systemd-socket-activate -l "$SOCK" -a --inetd $SA_ENV "$NATIVE_BIN" serve >"$LOG" 2>&1 &
+  SRV=$!
+  # Every case below talks to the runner with curl; this makes the same
+  # command line reach the socket (the URL's host and port are then ignored).
+  curl() { command curl --unix-socket "$SOCK" "$@"; }
+else
 python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
   "$DAWN_BIN" run "$ROOT/playground" >"$LOG" 2>&1 &
 SRV=$!
+fi
 # Guards keep a failed kill from turning into the script's exit status (dash:
 # set -e applies inside an EXIT trap). The log is kept on failure only. The
 # runner is outside the terminal's process group now, so ^C no longer reaches
 # it; the signal traps route through exit so the EXIT trap still kills it.
 # `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}" "${WORK:?}.cases"; rm -f "${WORK:?}.canary"; [ -n "$NATIVE_DIR" ] && rm -rf "$NATIVE_DIR"; [ -n "${SRV2:-}" ] && kill -TERM "-$SRV2" 2>/dev/null; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}" "${WORK:?}.cases"; rm -f "${WORK:?}.canary" "${WORK:?}.sock"; [ -n "$NATIVE_DIR" ] && rm -rf "$NATIVE_DIR"; [ -n "${SRV2:-}" ] && kill -TERM "-$SRV2" 2>/dev/null; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -165,6 +229,14 @@ fi
 echo "runner answered /health after $(($(date +%s) - wait_started))s"
 
 sweep_ok=1
+if [ "$MODE" = native ]; then
+  # The per-request process must not sweep: it would delete the directories of
+  # the requests running in its siblings. Remove the leftovers by hand so the
+  # "nothing left behind" case at the end looks only at this run's requests.
+  chmod 0755 "$WORK/dawn-play-stale-locked/box/classes"
+  rm -rf "${WORK:?}/dawn-play-stale-ok" "${WORK:?}/dawn-play-stale-locked"
+  echo "  --  native mode: the startup sweep cases are the JVM server's and are skipped"
+else
 [ ! -e "$WORK/dawn-play-stale-ok" ] || { echo "FAIL: the startup sweep left a removable stale directory"; sweep_ok=0; }
 [ -e "$WORK/dawn-play-stale-locked" ] || { echo "FAIL: the sweep removed a directory the test made undeletable?"; sweep_ok=0; }
 grep -q "removed 1 stale request directories" "$LOG" || { echo "FAIL: the sweep did not log its count"; sweep_ok=0; }
@@ -173,6 +245,7 @@ chmod 0755 "$WORK/dawn-play-stale-locked/box/classes"
 rm -rf "$WORK/dawn-play-stale-locked"
 [ "$sweep_ok" = 1 ] || { tail -n 20 "$LOG"; exit 1; }
 echo "  ok  the startup sweep removes stale request directories and logs what it cannot"
+fi
 
 pass=0
 fail=0
@@ -361,15 +434,15 @@ ccheck "compile: the C text of a starter, no gap, its calls placed in it" "$CASE
   "$SOUND"' and d["target"]=="c" and d["cached"] is False and d["pane"]["kind"]=="c" and len(d["calls"])>=1 and any("prog__main" in l for l in d["pane"]["text"]) and any(o["marks"] for o in d["pane"]["outs"]) and re.fullmatch(r"b1:[0-9a-f]{12}", d["build"])'
 
 ccheck "compile: the same program again is a hit that differs only in its head" "$CASES/starter.dawn" c \
-  'd["cached"] is True and prev is not None and {k:v for k,v in d.items() if k not in ("cached","ms")}=={k:v for k,v in prev.items() if k not in ("cached","ms")}'
+  'd["cached"] is '"$CACHED_HIT"' and prev is not None and {k:v for k,v in d.items() if k not in ("cached","ms")}=={k:v for k,v in prev.items() if k not in ("cached","ms")}'
 
 ccheck "compile: the JVM listing of it is the other half of the same build, already kept" "$CASES/starter.dawn" jvm \
-  "$SOUND"' and d["target"]=="jvm" and d["cached"] is True and d["pane"]["kind"]=="jvm" and any(o["key"] for o in d["pane"]["outs"]) and any("invokestatic" in l for l in d["pane"]["text"]) and d["calls"]==prev["calls"]'
+  "$SOUND"' and d["target"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["pane"]["kind"]=="jvm" and any(o["key"] for o in d["pane"]["outs"]) and any("invokestatic" in l for l in d["pane"]["text"]) and d["calls"]==prev["calls"]'
 
 ccheck "compile: names outside ASCII map with no gap (JVM)" "$CASES/odd.dawn" jvm \
   "$SOUND"' and any("größe" in l for l in d["pane"]["text"]) and d["cached"] is False'
 ccheck "compile: and so does the C text of them" "$CASES/odd.dawn" c \
-  "$SOUND"' and d["cached"] is True and len(d["calls"])>=3'
+  "$SOUND"' and d["cached"] is '"$CACHED_HIT"' and len(d["calls"])>=3'
 
 # The program that does not compile gets /check's diagnostics, word for word,
 # and the same for either target, the second from the cache.
@@ -471,7 +544,9 @@ ccheck "compile: the permits come back" "$CASES/fresh.dawn" c 'd["ok"] is True a
 # diagnostics and a program's C view are the same bytes whichever compiler
 # answered (a second runner without dawnc is the reference); and the refusal
 # the fallback keys on is what the real binary says.
-if [ -n "$NATIVE_DIR" ]; then
+if [ "$MODE" = native ]; then
+  echo "  --  native mode: the dawnc comparison against a second JVM runner is skipped"
+elif [ -n "$NATIVE_DIR" ]; then
   calls() { wc -l <"$NATLOG" | tr -d ' '; }
   post() { # port, endpoint, data
     curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$3" "http://127.0.0.1:$1/$2" || true
