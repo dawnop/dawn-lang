@@ -140,12 +140,12 @@ hint 给出标注写法（`let x: Int = id(...)` 或带标注参数的 lambda）
 | `74635037` | SPC-10：`Ord[Bool]`/`Ord[Bytes]`，`<` 快路径读 `ord_scalars()`；运行时 `dawn_cmp_bool`/`dawn_cmp_bytes` |
 | `26ccc4bb` | SPC-03：`Unit` 进四张表，`lower.unit_relation` 折常量；std/io 八个 `ok` lambda 删除 |
 | `39e3b90e` | SPC-08：`derivable_traits()` 表，`AdtI.derives: List[Int]` |
-| `511dd8f6` | gates-external：crun 作业失败时回显失败步骤的日志（见下） |
+| `511dd8f6` | gates-external：远端作业失败时回显失败步骤的日志（见下） |
 | `48e2e813` | SPC-17：opaque 不继承 `Show`；std/narrow 三个 `impl Show`；opaque-twin、display-layering 契约改写 |
 | `e6c2501a` | SPC-18：`f[T](x)` 一条诊断；参数已报错时不再追报未绑定类型参数 |
 | `3f68a6b7` | Core golden 在最终树上重录 |
 
-集群全套（`--jobs 16`，39 个 job、175 个 run step）：`3f68a6b7` 上 `complete=true`，墙钟 2678 s。
+外部 runner全套（`--jobs 16`，39 个 job、175 个 run step）：`3f68a6b7` 上 `complete=true`，墙钟 2678 s。
 没有任何 emit/run/fmt/lsp 差分变动，因此没有 `Emit-Change` 声明。
 
 途中实测到的三件事：

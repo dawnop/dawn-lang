@@ -165,7 +165,7 @@ pub fn instant_at_ns(ns: Int) -> Instant
   周期，旧写法会在之后每一轮都再触发一次直到补齐，即它注释里说不会发生的连发。
 - **web 的访问日志（未合入，等种子）**：`with_logging` 改用 `now`/`elapsed_ns` 的提交已写好
   （本地分支 `feat/clock-web-log`），但 packages/web 在 prev-diff 的语料里，v0.83.0 的编译器加它
-  自带的 std 没有 `Clock`，编不动（集群 prev-diff 实测红：`module std/io has no exported name
+  自带的 std 没有 `Clock`，编不动（外部 runner prev-diff 实测红：`module std/io has no exported name
   Clock`）。种子推进到含 `Clock` 的 release 之后再合。形状已定：`Handler` 的行是 `!io`，若把
   `!Clock` 放进行里，`Handler` 类型要变，每个应用都得在 handler 栈外装 `with_clock_real`，而读钟的
   只有这一个中间件；所以在返回的闭包里就地装，每个请求多一个 handler 帧（JVM 微基准与直接调

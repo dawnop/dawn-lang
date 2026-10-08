@@ -237,7 +237,7 @@ On real hardware
 
 ## ledger-body
 
-The last line of each machine's ledger. CI reads the first; the cluster's two reach the fp8, fp4 and block-scaled rows an Ampere card cannot load.
+The last line of each machine's ledger. CI reads the first; the sm_90 and sm_100 ledgers reach the fp8, fp4 and block-scaled rows an Ampere card cannot load.
 
 ## ledger-tiers
 

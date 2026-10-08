@@ -138,7 +138,7 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   scheduling it left behind stay. ([incremental-semantics-removal.md](incremental-semantics-removal.md),
   [incremental-semantics-design.md](history/incremental-semantics-design.md))
 - **2026-09-23 to 09-26, v0.78.0 to v0.79.0.** Gates outside GitHub: the full gate set runs
-  locally or on a cluster, its evidence is signed into `refs/notes/gates`, releases accept
+  locally or on an external runner, its evidence is signed into `refs/notes/gates`, releases accept
   it (09-24), and pull requests carrying it skip the hosted gates (09-26).
   ([gates-external-design.md](gates-external-design.md))
 - **2026-09-24 to 09-25, v0.78.0.** The rulings of 09-24 land together: `pub(pkg)`; a syntax

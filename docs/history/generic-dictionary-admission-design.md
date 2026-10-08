@@ -358,7 +358,7 @@ semantic-cache memory.
 These numbers are superseded. After `f4f6062e` the same 1,000-function
 workload measured locally (2026-09-22) replayed generic bodies in 46.5 ms
 against 52.2 ms cold (0.89), which did not reproduce elsewhere. The
-2026-09-24 remeasurement at `b2e19e06` on a cluster machine, three rounds of
+2026-09-24 remeasurement at `b2e19e06` on an external runner, three rounds of
 18 samples each, every round followed by an adjacent cold guard, gives these
 median replay/cold ratios: calls 0.80, generic 1.15 (1.08 to 1.24), lambda
 inferred 1.17 (no body admitted) and primitive inferred about 1.5. Renewal is

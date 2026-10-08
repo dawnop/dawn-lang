@@ -248,7 +248,7 @@ JVM 上的趋势：每多一个字节约 20 ns，字节数决定成本；f64 从
 | U3d | 已立项并通用化，范围与刀序（K0 到 K7）见 [bulk-array-bytes-design.md](bulk-array-bytes-design.md)；其 K5 与 U3c 合并或紧随 | 是 | 见该文 §6 | 见该文 §6 |
 
 U3 不碰 `packages/tileir` 的代码，所以不需要 tileir 的次版本；U4 复用 `DeviceBits`（取回宿主 `Float` 的缺口就是这个 trait 补上的）。
-U3c 与「改 CI 必报墙钟」：本文不改 workflows，不新增 gate；`std/gpu.dawn` 的变更会让 tile 台账摘要变，触发的重录成本由所有者的集群重录承担，不在 PR CI 里。
+U3c 与「改 CI 必报墙钟」：本文不改 workflows，不新增 gate；`std/gpu.dawn` 的变更会让 tile 台账摘要变，触发的重录成本由所有者在外部 runner 上的重录承担，不在 PR CI 里。
 
 ## 8. 开放问题（需要裁决）
 

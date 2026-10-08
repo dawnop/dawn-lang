@@ -71,7 +71,7 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
    或者保留 `lit(0.0)` 的显式写法。
 3. **键数作运行期标量**。要不要把 T12 的 `dims` 缓冲区迁成标量参数，并让 `flash_attn` 读它。
 4. **尺寸参数化**（P-A）要不要现在做，还是等 K3。
-5. **`exp2`**。要不要先在集群上量一次再决定。
+5. **`exp2`**。要不要先在外部 runner上量一次再决定。
 
 ## 4. 本 PR 的验证
 

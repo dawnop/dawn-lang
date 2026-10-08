@@ -505,7 +505,7 @@ Playground：网关的白名单里没有 references 与 documentHighlight（`pla
 135 条消息里只有这一条不同：真父只给出本文件的两处（导入列表与调用），R2 多出 util.dawn 里的声明。会话里的 hover、definition、诊断等逐字不变。
 会话的 proj 没有 `dawn.toml`，所以这一条看到的是「导入闭包内跨文件」；「未被导入的文件」由 R2.7 的夹具守。提交里写一行 `Emit-Change(lsp)`。
 
-**补全的一处 panic。** 第一版把全仓装进诊断程序时，`lsp-use-completion.py` 在集群全套里红了：`use a/b.{` 的补全在模块已在程序里时走 `exported_items`，
+**补全的一处 panic。** 第一版把全仓装进诊断程序时，`lsp-use-completion.py` 在外部 runner全套里红了：`use a/b.{` 的补全在模块已在程序里时走 `exported_items`，
 用**文档自己的**类型表渲染那个模块的签名，而这条 `use` 还没写完，文档的表里没有那个模块的类型，`adt_of` 当场 panic。诊断程序回到导入闭包后
 那个夹具不再触发它，但同一个洞在真父上也够得着：另一个打开的文档导入了那个模块，它就在程序里，而正在写 `use` 的这个文档的表里没有。
 所以修法保留：`exported_items` 先取导出面自带的 `adt_infos`/`trait_infos`，再叠上文档自己的（同一个 id 在两边指同一个声明）。

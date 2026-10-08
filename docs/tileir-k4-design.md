@@ -56,9 +56,9 @@ fn dyn_dims(dims: Param[I32]) -> (Idx, Idx, Idx) !Dev = {
   一次重复 N 次 launch，共 3 次重复，取中位数，写最小与最大。网格取 1 块（launch 本身是成本）与 1024 块（kernel 的访存也算进来）。
   每份在计时之后读回一次结果，确认算的是 `x * 3`。
 - 命令：`scripts/scalar-bench/run.sh --tileiras <tileiras> --gpu-name sm_NN [--launches N]`；本机 3080 直接跑，
-  B200 是 `crun run` 在本仓库镜像里跑同一个脚本，tileiras 用本机 `install-tileiras.sh` 装出的三个文件
+  B200 由外部 runner 在本仓库镜像里跑同一个脚本，tileiras 用本机 `install-tileiras.sh` 装出的三个文件
   （`bin/tileiras`、`bin/ptxas`、`lib/libnvvm.so.4`）随工作树带过去，远端先核 sha256（`8733d2ef`、`6f6a7015`、`eeef1ca7` 前缀）。
-- 机器：RTX 3080（sm_86，WSL2，驱动 616.56，本机 16 核，非独占，无锁频）；B200（sm_100，驱动 580.159.04，卡由集群占位独占，无锁频）。
+- 机器：RTX 3080（sm_86，WSL2，驱动 616.56，本机 16 核，非独占，无锁频）；B200（sm_100，驱动 580.159.04，卡独占，无锁频）。
 
 **编译（`tileiras`，毫秒，中位数 最小 最大）**
 
@@ -261,8 +261,8 @@ fake 设备（`with_gpu_fake`，`std/gpu.dawn:1349`）：宿主参考函数 `Wid
 - **现有 191 个 kernel 的 `.mlir` 与 `.tilebc` 逐字节不变**：`params` 里每一项都是 `ByPtr`，渲染与编码走原来的臂。这是第 1 刀的判据，不是推测；
   `tile-golden/run.sh` 的层 0 会直接红绿。变异体负控见 §5 第 1 刀。
 - **tile 输入摘要会动**：`packages/tileir`、`packages/tileref`、`std/gpu.dawn` 都在 `TILE_PATHS`（`scripts/tile-gpu-diff/inputs.py:34`）。
-  按项目规则，凡是动摘要的 PR 带自己的台账重录（`ledger.txt`、`ledger-sm90.txt`、`ledger-sm100.txt`，层 2；sm_90 / sm_100 走集群）。
-  本机 3080 是 sm_86，所以 sm_86 的账本机录，另两本走集群 crun。
+  按项目规则，凡是动摘要的 PR 带自己的台账重录（`ledger.txt`、`ledger-sm90.txt`、`ledger-sm100.txt`，层 2；sm_90 / sm_100 走外部 runner）。
+  本机 3080 是 sm_86，所以 sm_86 的账本机录，另两本走外部 runner。
 - 新增 golden：每个新 kernel 一对 `.mlir`/`.tilebc`，进 `matrix.txt`。现在是 241 项十一片，每片 575 到 608 秒，pole 660 秒（`tile-backend-design.md` §6.5 的 T12 行）。
   新增项会不会越过 pole **未量**：第 1 刀用 `ITEM_TIMES` 量新项耗时再判断要不要分第十二片。**改 CI 必须报墙钟**，所以这条在第 1 刀的 PR 里写数。
 - `std/gpu.dawn` 与 `std/narrow.dawn` 改动：要跑 `scripts/gen-stdsrc.py`，`stdsrc.dawn` 同批提交，Core golden 之后重录（T12 刀的前例，`tile-backend-design.md` §6.15）。
@@ -287,13 +287,13 @@ PR-A 与 PR-B 都动 tile 摘要，各自带自己的 ledger 重录；为减少�
 |---|---|---|---|
 | 1 | **量**：手写 `tile<i32>`、`tile<f32>` 入口字节码，`tileiras` 汇编，3080 上读回。再做 `KParam`、`Scalar`、`scalar`、`ScalarArg`、渲染与编码两臂，写 `scalar_scale` 与 `scalar_len` 两个新 kernel | 层 0：新 golden 两个；**现有 191 对 golden 零字节变化**。层 1：`tileiras --gpu-name sm_86` 收下。包内测试：`ScalarArg` 不发指令、`Owner` 表无行、`scalar` 对非 `Scalar` 参数拒绝、`load` 对 `Scalar` 参数拒绝 | 层 0/1 变异体三条：`scalar-param-as-ptr`（写入器把标量参数仍写成 `tile<ptr<..>>`，文本与字节、`tileiras` 都应红）、`scalar-dtype-as-i32`（`f32` 写成 `i32`，同宽异类，`tileiras` 应拒）、`scalar-arg-index-shifted`（值编号错一位，另一参数被当标量，`tileiras` 或设备红）。每条先证明会红再接入矩阵 |
 | 2 | **宿主**：`LaunchArg`、`gpu_launch` 新签名、**公开 `launch` 改收 `List[LaunchArg]` 并在同一刀迁完 `scripts/tile-gpu-diff/*.dawn` 里约 26 个 `launch(` 调用点及其余调用方**、`arg_scalar`、`Launch[A]`、`buffer`/`scalar`/`erase`、`launch_entryN` 新形参；fake 设备的 `WideRefFn` 多接 `scalars`；`f64_bits`；两个 handler 的测试 | 包内与 `dawn test --stdlib`：种类不符 `gpu.bad_entry`、标量个数不符、`F16` 等被拒的格式在 `Scalar` 构造点报；`with_gpu_fake` 下 `vadd_scaled` 在两个 scale 值上得两个不同答案 | `std` 变异体：`scalar` 把 `F32` 位模式当 `F64` 写（宿主测试红）、`launch_plan` 不核对种类（`gpu.bad_entry` 的测试红）。**变异体改 `std/gpu.dawn` 必须同时跑 `gen-stdsrc.py`**，否则等于没改（既有教训：std 变异体不跑 gen-stdsrc 等于没改） |
-| 3 | **设备判词**：`scripts/tile-gpu-diff` 新增一个族 `scalar_diff.dawn`：同一个 cubin 两个标量值各一次，另有 `I32` 长度当掩码边界与当循环上界两个用例；并量 §3.6 的「高位垃圾」假设 | 3080 上全部 `identical:exact` 或在已声明容差内；**同一 cubin、两个 scale 值都对**是判词；`bits` 带垃圾高位与干净位模式结果相同（假设成立的证据） | 层 2 变异体三条：`word-high-bits-cleared`（宿主在传 `I32` 前清高位时仍应绿，作为假设的控制）、`scalar-passed-as-handle`（`Word` 当 `Buf` 走 `device_pointers`，设备应红）、`scalars-swapped`（两个标量位置对调，两个用例都红）。集群 sm_90 / sm_100 重录 |
-| 4 | **量**：同一个 kernel 的「标量参数版」「缓冲区读标量版」「宿主常量版」三份，在 3080 与集群 sm_100 上量单次 launch 与编译（`tileiras`）耗时，写回本文 §1.2 的「未量」 | 数字入文档，带命令与机器。**只有这一刀产出性能结论** | 无变异体，量的是时间不是正确性；重复三次取中位数并写离散度 |
+| 3 | **设备判词**：`scripts/tile-gpu-diff` 新增一个族 `scalar_diff.dawn`：同一个 cubin 两个标量值各一次，另有 `I32` 长度当掩码边界与当循环上界两个用例；并量 §3.6 的「高位垃圾」假设 | 3080 上全部 `identical:exact` 或在已声明容差内；**同一 cubin、两个 scale 值都对**是判词；`bits` 带垃圾高位与干净位模式结果相同（假设成立的证据） | 层 2 变异体三条：`word-high-bits-cleared`（宿主在传 `I32` 前清高位时仍应绿，作为假设的控制）、`scalar-passed-as-handle`（`Word` 当 `Buf` 走 `device_pointers`，设备应红）、`scalars-swapped`（两个标量位置对调，两个用例都红）。外部 runner sm_90 / sm_100 重录 |
+| 4 | **量**：同一个 kernel 的「标量参数版」「缓冲区读标量版」「宿主常量版」三份，在 3080 与外部 runner sm_100 上量单次 launch 与编译（`tileiras`）耗时，写回本文 §1.2 的「未量」 | 数字入文档，带命令与机器。**只有这一刀产出性能结论** | 无变异体，量的是时间不是正确性；重复三次取中位数并写离散度 |
 | 5 | **迁移**（可选、可拖）：把 `flash_attn`（`kernels.dawn` 的 `ATT_INV_SQRT_D`）改成 `scalar(scale)` 一份新 kernel；`T12` 的 `dyn_dims` 一族是否改标量参数，另议 | 被改 kernel 的 golden 重录，且重录差异**只**在入口签名与那一处常量；其余 kernel 逐字节不变 | `tile-golden` 里被迁移的 kernel 的变异体沿用；新增一条 `scale-baked-again`（`scalar(scale)` 又写成 `f_const`，golden 应红，证明迁移真的发生了） |
 
 提交信息英文、一行祈使句主题，不带 Claude 署名。
 
-**依赖**：第 1 刀先量 `tileiras` 是否接受 rank-0 i32/f32 入口参数，测不通就停下报告，不硬做（§7 末段）。第 1 刀不依赖别的刀。第 2 刀依赖第 1 刀的 `KParam`（`arg_scalar` 对应 `ByValue`）。第 3、4 刀依赖 3080 与集群。K4 排在 0.11 之后、native 性能刀之间（§7 第 7 条）；与 S2/L3/`Step` 无硬依赖，但 §3.4 的持久化写法要等 `Step` 落地，所以第 5 刀排在 0.11 之后。
+**依赖**：第 1 刀先量 `tileiras` 是否接受 rank-0 i32/f32 入口参数，测不通就停下报告，不硬做（§7 末段）。第 1 刀不依赖别的刀。第 2 刀依赖第 1 刀的 `KParam`（`arg_scalar` 对应 `ByValue`）。第 3、4 刀依赖 3080 与外部 runner。K4 排在 0.11 之后、native 性能刀之间（§7 第 7 条）；与 S2/L3/`Step` 无硬依赖，但 §3.4 的持久化写法要等 `Step` 落地，所以第 5 刀排在 0.11 之后。
 **版本**：`KParam` 与 `ScalarArg` 是新 `Dev` 操作与公开类型的变化，按 CHANGELOG 的规则（a new `Dev` operation moves the minor）是一次 minor；`gpu_launch` 与 `WideRefFn` 签名变是 `std/gpu` 的破坏性变化。
 版本已裁：单独作为 tileir 0.12.0，不并进 0.11（§7 第 6 条）。
 

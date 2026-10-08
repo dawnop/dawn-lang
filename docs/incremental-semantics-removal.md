@@ -16,7 +16,7 @@
 
 G3 的判据是三类重放的每体代价低于冷检。表中是「重放 / 冷检」的每体代价比，大于 1 即重放更贵：
 
-| 类 | 09-24（`b2e19e06`，集群） | 09-26 S2 后（`ec95246c`，集群） | 09-27 大方法刀 2 后（`98d83a6d` 同源，集群空闲节点，作定论） |
+| 类 | 09-24（`b2e19e06`，外部 runner） | 09-26 S2 后（`ec95246c`，外部 runner） | 09-27 大方法刀 2 后（`98d83a6d` 同源，外部 runner空闲节点，作定论） |
 |---|---:|---:|---:|
 | calls | 0.80 | 0.80 | **1.65**（重放 33.07 ms / 冷检 20.05 ms） |
 | generic | 1.15 | 0.94 | **2.22**（65.03 / 29.32） |
@@ -150,7 +150,7 @@ SCC 和 `BodyExecutor` 这个插口。
 ## 七、出处
 
 - 用户裁决：2026-09-27（拆 / 不拆继续养 / 先不动只停工，选拆）。
-- 三次 G3 实测：09-24 `b2e19e06`、09-26 `ec95246c`、09-27 `98d83a6d`，均在集群上跑 `bench-replay`，表中数字取自各次报告。
+- 三次 G3 实测：09-24 `b2e19e06`、09-26 `ec95246c`、09-27 `98d83a6d`，均在外部 runner上跑 `bench-replay`，表中数字取自各次报告。
 - 代价与清单：拆除前调研，基线 `98d83a6d`，`wc`/`grep` 实测，CI 秒数取 `gates.yml` 的 `# budget: 3x` 声明。
 - 外部：<https://rust-analyzer.github.io/book/contributing/architecture.html>、
   <https://rust-analyzer.github.io//blog/2020/07/20/three-architectures-for-responsive-ide.html>、

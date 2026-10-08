@@ -66,7 +66,7 @@ issue 实测 bench-replay 稳态冷检因此慢 20% 到 27%。
 
 2026-09-26 实测，三个 bench-replay jar（`e7880d1c`、`origin/main` `51c8dfbd` 即刀 1 之后、本分支）由各自树的
 `bench-replay.py` 构建，逐轮交错、5 轮，每轮每个 jar 一个新 JVM，`java -Xss64m -Xmx2g -XX:+UseSerialGC -jar X <mode> <class> 1000 30`
-去前 12 轮取中位数，再取 5 轮中位数（ms/1000 体）。下表是集群单机（256 核，负载 1 到 3，OpenJDK 21.0.7，顶层 C2）的数；
+去前 12 轮取中位数，再取 5 轮中位数（ms/1000 体）。下表是外部 runner 单机（低负载，OpenJDK 21.0.7，顶层 C2）的数；
 本机（GraalVM CE 21.0.2，顶层 Graal JIT）同表同协议也跑了，但同时有别的会话，负载 4 到 31，个别轮慢 3 倍，只作方向参考。
 
 | class | mode | e7880d1c | 刀 1 后 | 本刀 | 本刀/刀 1 后 | 本刀/e7880d1c |
@@ -94,7 +94,7 @@ issue 实测 bench-replay 稳态冷检因此慢 20% 到 27%。
 慢 14.5%，刀 1 后已是 1.146，本刀未动它（0.999），来源在刀 1 报告列的 S2/S3 每体簿记，不在本刀范围。
 
 一次性 `dawn check selfhost`（`java -Xss512m -Xmx2g -XX:+UseSerialGC -jar X check selfhost`，6 轮交错去首轮，`os.wait4` 取 CPU）：
-集群墙钟 7.01 → 6.73 s（−4%），CPU 17.98 → 18.67 s（+4%，多出来的是 JIT 线程编这些方法的工作），峰值 RSS 1050 → 1100 MB；
+外部 runner墙钟 7.01 → 6.73 s（−4%），CPU 17.98 → 18.67 s（+4%，多出来的是 JIT 线程编这些方法的工作），峰值 RSS 1050 → 1100 MB；
 本机墙钟 15.69 → 14.21 s、CPU 43.81 → 42.89 s，负载 8 到 10，离散大。调研预测「一次性进程也会受益」，墙钟上看到约 4%，
 在离散边缘，不作定论。
 

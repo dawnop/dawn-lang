@@ -1,6 +1,6 @@
 # 在 GitHub 之外跑完整门禁集
 
-> 状态：**current**。第 1 刀（本地后端 + 证据包）、第 2 刀（签名、`refs/notes/gates`、`verify-external.yml` 回写 commit status）、第 3 刀（prefix、离线输入包、隔离证明、crun 后端）、第 3b′ 刀（集群上 `complete = true`：启动器 shim、非 root 与私有 `/tmp`、wasi-sdk 与 npm 离线）、第 4 刀（2026-09-24：release 守卫接受外部证据；`steps.lock.json` 进 tree-policy，关 #167）与第 5 刀（2026-09-24：C 编译器进输入包，本机与集群证据包的 `toolchain` 逐字段相等）已落地；自动触发仍记在「不做的」。首次正向发布已做（14535104）：集群全套 `complete = true`，签名 note 推上 `refs/notes/gates`，`verify-external.yml`（run 35932235187）给该提交写出 `gates/maintainer` = `success`，见「签名、落盘与 GitHub 侧核验」一节的实测。2026-10-04 起 crun 后端按负载把 job 分到集群的多台机器上，见「多机分派」一节。
+> 状态：**current**。第 1 刀（本地后端 + 证据包）、第 2 刀（签名、`refs/notes/gates`、`verify-external.yml` 回写 commit status）、第 3 刀（prefix、离线输入包、隔离证明、远端后端）、第 3b′ 刀（外部 runner上 `complete = true`：启动器 shim、非 root 与私有 `/tmp`、wasi-sdk 与 npm 离线）、第 4 刀（2026-09-24：release 守卫接受外部证据；`steps.lock.json` 进 tree-policy，关 #167）与第 5 刀（2026-09-24：C 编译器进输入包，本机与外部 runner证据包的 `toolchain` 逐字段相等）已落地；自动触发仍记在「不做的」。首次正向发布已做（14535104）：外部 runner 全套 `complete = true`，签名 note 推上 `refs/notes/gates`，`verify-external.yml`（run 35932235187）给该提交写出 `gates/maintainer` = `success`，见「签名、落盘与 GitHub 侧核验」一节的实测。2026-10-04 起远端后端按负载把 job 分到外部 runner 的多台机器上，见「多机分派」一节。
 
 ## 要解决的问题
 
@@ -10,7 +10,7 @@
 
 - `run.sh --sha <sha> --backend local [--jobs N] --out <dir>`：在给定提交的树上执行 `gates.yml` 每个 job 的每一条 `run:` 步骤；
 - `bundle.json`：证据包，字段白名单，`complete` 可以由任何人从 git 重新算出来；
-- 后端契约：「给一棵树与输入，按命令清单跑，还退出码与输出摘要」。第 1 刀只有 local 一个实现；第 3 刀加了 crun 后端（`backend_crun.py`）。
+- 后端契约：「给一棵树与输入，按命令清单跑，还退出码与输出摘要」。第 1 刀只有 local 一个实现；第 3 刀加了远端后端（现为插件，不在本仓）。
 
 ## 为什么从 gates.yml 派生
 
@@ -105,7 +105,7 @@
 
 后端是一个 `backend_<name>.py` 模块，暴露 `create(ctx)`，返回的对象实现 `prepare()`、`run_job(job, artifacts)`、`toolchain()`、`cleanup()`。`run_job` 拿到的是 `gatesplan` 给的一个 job（有序的 run 步骤与带替换 id 的 use 步骤）和本次运行的制品目录，还回每个 run 步骤的 `executed`、`exit_code`、两个输出哈希。
 
-分工：`gatesplan.py` 决定跑什么，后端决定在哪跑、每个替换 id 怎么实现，`bundle.py` 决定结果算不算完整，`runner.py` 只管调度（按 `gates.yml` 的定义顺序，即预期时长降序，最多 `--jobs` 个并行；有 `needs:` 的 job 等依赖结束后照跑，对应 `if: always()` 与 `if: !cancelled()`）。crun 后端因此只需新增 `backend_crun.py`，通过 `--backend crun` 选中，不改现有文件。后端专属选项走 `--backend-opt KEY=VALUE`，也不需要改 `run.sh`。
+分工：`gatesplan.py` 决定跑什么，后端决定在哪跑、每个替换 id 怎么实现，`bundle.py` 决定结果算不算完整，`runner.py` 只管调度（按 `gates.yml` 的定义顺序，即预期时长降序，最多 `--jobs` 个并行；有 `needs:` 的 job 等依赖结束后照跑，对应 `if: always()` 与 `if: !cancelled()`）。远端后端因此只需新增一个 `backend_<name>.py`，通过 `--backend <name>` 选中，不改现有文件。后端专属选项走 `--backend-opt KEY=VALUE`，也不需要改 `run.sh`。
 
 ## 签名、落盘与 GitHub 侧核验（第 2 刀）
 
@@ -148,7 +148,7 @@ status 步骤 `if: always()`，verify 步骤的 outcome 不是 `success` 就写 
 
 | 项 | 结果 |
 |---|---|
-| 证据包 | 集群全套 `--jobs 16`，墙钟 1722s（准备 26s），39/39 job 绿，175/175 run 步骤执行且退出 0，39 次隔离检查全部 0 条 |
+| 证据包 | 外部 runner 全套 `--jobs 16`，墙钟 1722s（准备 26s），39/39 job 绿，175/175 run 步骤执行且退出 0，39 次隔离检查全部 0 条 |
 | `publish.py` | 23:10:16Z 起，签名、推 `refs/notes/gates`、派发共约 10s |
 | `verify-external.yml` run 35932235187 | 23:10:26Z 创建；verify job 23:10:30Z 起、23:10:37Z 完成，**job 7s**；run 23:10:38Z 结束，**派发到 status 落地 12s**。估计的 15s 到 30s 偏高 |
 | `gates/maintainer` status | `success`，23:10:35Z，creator `github-actions[bot]`，描述 "Signed external run of the full gate set verified"，`target_url` 指向该 run |
@@ -160,7 +160,7 @@ status 步骤 `if: always()`，verify 步骤的 outcome 不是 `success` 就写 
 
 ### 为什么
 
-第 1 刀的本地后端拿宿主环境减去一张黑名单交给步骤，工具链就是机器上碰巧有的那套：本机 `python3` 是 3.14，而 3.14 会让 playground 合约变红（#170）；集群容器的 `JAVA_HOME` 是给 Hadoop 的 Java 8。黑名单只能删掉想到的东西。第 3 刀反过来：步骤看到的环境从空开始构造，每个路径都指进同一个 prefix 目录，prefix 里的工具链和输入由 `inputs.py` 下载并逐件校验。prefix 在哪由参数给，代码里不写死任何路径：本机是 `~/dawn-gates`，集群是持久盘上的一个目录，布局相同。
+第 1 刀的本地后端拿宿主环境减去一张黑名单交给步骤，工具链就是机器上碰巧有的那套：本机 `python3` 是 3.14，而 3.14 会让 playground 合约变红（#170）；外部 runner 的容器的 `JAVA_HOME` 是给 Hadoop 的 Java 8。黑名单只能删掉想到的东西。第 3 刀反过来：步骤看到的环境从空开始构造，每个路径都指进同一个 prefix 目录，prefix 里的工具链和输入由 `inputs.py` 下载并逐件校验。prefix 在哪由参数给，代码里不写死任何路径：本机是 `~/dawn-gates`，外部 runner 是持久盘上的一个目录，布局相同。
 
 ### 布局
 
@@ -199,11 +199,11 @@ prefix 模式下一个 job 的环境等价于 `env -i` 加白名单：`PATH` = p
 
 `prefix.py check-isolation` 在 prefix 里放一个 marker，跑命令，再对 `/` 与 prefix 所在文件系统各做一次 `find -xdev`（剪掉 `/proc` `/sys` `/dev` `/run`、prefix 本身与 `--exclude` 列出的路径），列出 mtime 或 ctime 新于 marker 的一切。
 
-实测中查出并修掉的一处：HotSpot 把 `hsperfdata_<用户>` 写在写死的 `/tmp`，不看 `TMPDIR`。第 3 刀只在后端探测 JDK 版本的那次 `java -version` 命令行上加了 `-XX:-UsePerfData`，门禁步骤自己起的 JVM 仍然写，集群全套运行后 `/tmp/hsperfdata_root` 的 mtime 落在运行窗口里。
+实测中查出并修掉的一处：HotSpot 把 `hsperfdata_<用户>` 写在写死的 `/tmp`，不看 `TMPDIR`。第 3 刀只在后端探测 JDK 版本的那次 `java -version` 命令行上加了 `-XX:-UsePerfData`，门禁步骤自己起的 JVM 仍然写，外部 runner 全套运行后 `/tmp/hsperfdata_root` 的 mtime 落在运行窗口里。
 
-第 3b′ 刀改成 prefix 布局的一部分：`inputs.py` 解包 GraalVM 之后把 `bin/java` 改名 `bin/java.real`，在原位置写一个 shim，`exec` 同目录的 `java.real` 并把 `-XX:-UsePerfData` 放在调用者参数之前。shim 的内容与 prefix 在哪无关（它按自己的位置找 `java.real`），所以工具链的目录树摘要在本机与集群上相同。锁里的 GraalVM 条目不变：原件还是那些字节，shim 是 `build`/`install` 解包后写的；`MANIFEST.json` 记下原件里 `bin/java` 的 sha256，`verify` 核 `java.real` 等于它、shim 逐字节等于 `inputs.py` 里的那份。不用 `JAVA_TOOL_OPTIONS`/`JDK_JAVA_OPTIONS`：它们让每个 JVM 往 stderr 打一行 `Picked up ...`，改变被测输出。第一版只包了 `java`，理由是门禁里起 JVM 的都是它；这个判断错了：incremental 家族的七八个合约脚本直接跑 `javac --release 21` 与 `jar cf`，`configured-lsp-contract.py` 也按 `$JAVA_HOME/bin/javac` 调用。所以现在 `bin/` 里每个普通文件启动器都换成 shim（符号链接如 `native-image` 指向 `lib/`，不动）：`java` 前置 `-XX:-UsePerfData`，其余前置 `-J-XX:-UsePerfData`（JDK 启动器把 `-J` 选项交给自己的 JVM）。`MANIFEST.json` 记原件里每个启动器的 sha256（从原件读，不从解包后的树读）。
+第 3b′ 刀改成 prefix 布局的一部分：`inputs.py` 解包 GraalVM 之后把 `bin/java` 改名 `bin/java.real`，在原位置写一个 shim，`exec` 同目录的 `java.real` 并把 `-XX:-UsePerfData` 放在调用者参数之前。shim 的内容与 prefix 在哪无关（它按自己的位置找 `java.real`），所以工具链的目录树摘要在本机与外部 runner上相同。锁里的 GraalVM 条目不变：原件还是那些字节，shim 是 `build`/`install` 解包后写的；`MANIFEST.json` 记下原件里 `bin/java` 的 sha256，`verify` 核 `java.real` 等于它、shim 逐字节等于 `inputs.py` 里的那份。不用 `JAVA_TOOL_OPTIONS`/`JDK_JAVA_OPTIONS`：它们让每个 JVM 往 stderr 打一行 `Picked up ...`，改变被测输出。第一版只包了 `java`，理由是门禁里起 JVM 的都是它；这个判断错了：incremental 家族的七八个合约脚本直接跑 `javac --release 21` 与 `jar cf`，`configured-lsp-contract.py` 也按 `$JAVA_HOME/bin/javac` 调用。所以现在 `bin/` 里每个普通文件启动器都换成 shim（符号链接如 `native-image` 指向 `lib/`，不动）：`java` 前置 `-XX:-UsePerfData`，其余前置 `-J-XX:-UsePerfData`（JDK 启动器把 `-J` 选项交给自己的 JVM）。`MANIFEST.json` 记原件里每个启动器的 sha256（从原件读，不从解包后的树读）。
 
-shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`，进程的 `argv[0]` 就成了 `java.real`；`scripts/selfhost-bench.py` 按 `argv[0]` 的基名是不是 `java` 认 JVM，于是 `compiler-weight-contract` 与 `dependency-heap-contract` 在集群全套里以「role parent/compiler is missing an actual MaxHeapSize」红。现在 shim 是 bash，`exec -a "$0"` 保留调用者的 `argv[0]`；启动器按 `/proc/self/exe` 找自己的 home，`java.home` 不变。shim 也不再 fork（不用 `dirname`/`readlink`，用 `${0%/*}`）：exec 之前进程还是 bash，而那个 bench 每 2ms 采一次 `/proc`。带 fork 的版本在本机把 `compiler-weight-contract` 的一个变异体对照跑红过一次（`sampling-200ms` 多红了 `bench.vmhwm_reads_proc`），另两次绿；不 fork 的版本在集群上两个 job 各连跑两次全绿，隔离 0 条。
+shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`，进程的 `argv[0]` 就成了 `java.real`；`scripts/selfhost-bench.py` 按 `argv[0]` 的基名是不是 `java` 认 JVM，于是 `compiler-weight-contract` 与 `dependency-heap-contract` 在外部 runner 全套里以「role parent/compiler is missing an actual MaxHeapSize」红。现在 shim 是 bash，`exec -a "$0"` 保留调用者的 `argv[0]`；启动器按 `/proc/self/exe` 找自己的 home，`java.home` 不变。shim 也不再 fork（不用 `dirname`/`readlink`，用 `${0%/*}`）：exec 之前进程还是 bash，而那个 bench 每 2ms 采一次 `/proc`。带 fork 的版本在本机把 `compiler-weight-contract` 的一个变异体对照跑红过一次（`sampling-200ms` 多红了 `bench.vmhwm_reads_proc`），另两次绿；不 fork 的版本在外部 runner 上两个 job 各连跑两次全绿，隔离 0 条。
 
 负控（本机，`bwrap` 给命令一个私有 `/tmp`）：在 prefix 里的新检出上跑会触发重建的 `./bin/dawn --version`，没有 shim 时私有 `/tmp` 里出现 `hsperfdata_dawn`，有 shim 时为空。逐个启动器同样：`java.real -version`、`java.real -cp . A`、`javac.real -d`、`jar.real cf` 各留下 `hsperfdata_dawn`，经 shim 的同一命令都为空。把 `java.real` 或 `javac.real` 改一个字节，`inputs.py verify` 红（目录树摘要与「不是原件的启动器」两条），复原后绿。
 
@@ -212,7 +212,7 @@ shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`
 - `--readonly-root`：用 bubblewrap 让命令看到的整个文件系统只读、只有 prefix 可写。命令在里面跑绿，说明它不需要往 prefix 外写任何东西；往外写会直接失败，而不是事后被找到。
 - 同一次运行里的 `find` 清单只剩被沙箱挡在外面的进程写的东西（`/tmp`、`/var/tmp` 目录的 mtime），`--exclude` 列出的其余写者随结果打印。
 
-集群容器上没有 bubblewrap（也不允许 apt），只用 `find`。
+外部 runner 的容器上没有 bubblewrap（也不允许 apt），只用 `find`。
 
 ### 实测（2026-09-23，本机）
 
@@ -228,38 +228,40 @@ shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`
 | #170 | 在 prefix 里用 python 3.12.3 单跑 `playground/test/contract.sh`：10 passed，20s。同一检出换宿主 3.14.7：`socket closed inside a frame` 红 |
 | 离线 | 在 `bwrap --unshare-net` 里对新 clone 跑 `./bin/dawn --version`：成功，coursier 全部命中 prefix 缓存 |
 
-### crun 后端（`backend_crun.py`）
+### 远端后端（插件，不在本仓）
 
-集群容器没有外网，`JAVA_HOME` 是 Hadoop 的 Java 8，python 与 gcc 是镜像自带的。所以 crun 后端自己不在集群上执行任何门禁逻辑：它把输入包与本目录的工具送过去，每个 job 在集群上跑 `prefix.py run-job`，而 `run-job` 就是 prefix 模式的本地后端。两边执行 job 的是同一份代码，证据包的工具链字段因此必须与本机 prefix 运行一致；这个相等就是「后端只换了在哪跑、没换跑什么」的判据。
+外部 runner 的容器没有外网，`JAVA_HOME` 是 Hadoop 的 Java 8，python 与 gcc 是镜像自带的。所以远端后端自己不在 runner 上执行任何门禁逻辑：它把输入包与本目录的工具送过去，每个 job 在 runner 上跑 `run-job`（远端半边，随后端一起放在插件里），而 `run-job` 就是 prefix 模式的本地后端。两边执行 job 的是同一份代码，证据包的工具链字段因此必须与本机 prefix 运行一致；这个相等就是「后端只换了在哪跑、没换跑什么」的判据。
+
+2026-10-09 起这个后端不再在本仓：`runner.py` 只带 `local`，其余后端是 `backend_<name>.py` 插件，由 `DAWN_GATES_BACKENDS`（或被忽略的本地文件 `scripts/gates-external/backends.local`）指向的目录提供，`plugin_selftest.py` 用一个假后端守加载。证据的签名、发布与验证（`publish.py`、`verify_note.py`）不变。本节下面记的是后端当时守住的契约，不是本仓里还有的代码。
 
 流程：
 
-1. 本机 staging 目录（在本机 prefix 的 `stage/` 下，不在 worktree 里）放本目录的工具、一个 git bundle（该提交加全部 tag）、每个 job 一份 JSON、一个 `.crun.yaml`。`remote_root` 是 `<集群 prefix>/jobs/<sha>/tree-<工具摘要>`，按提交与工具版本唯一，不会与别的项目互相 `rsync --delete`（第 5 刀之前只按提交区分，见该节「途中查出」）。`.crun.yaml` 不进仓库。
-2. 在集群上跑 `inputs.py verify`。缺或红时，用第二个 staging 目录（硬链接到本机 prefix 的 `inputs/`）推到 `<集群 prefix>/inputs`，先用 `tar` 解出 python（此时 prefix 里还没有解释器），再由 `inputs.py install` 解包其余工具链并整体复核。
-3. 每个 job 一次 `crun run -n 0 --no-build -- env -i ... prefix.py run-job`，并行度由 `--jobs` 给。crun 从控制端每次都会推一次 staging 目录，未变时 3s 左右，推送由 crun 自己串行化。（2026-09-25 起改为 `-d` 后台运行加轮询，见「集群运行可续」一节。）
-4. `run-job` 把结果片段打印成一行、同时存进 `<集群 prefix>/out/<sha>/<run>/fragments`；日志与制品留在集群的 `out/<sha>/<run>/`，不拉回。本机只解析片段，照常由 runner 合成 `bundle.json`。
+1. 本机 staging 目录（在本机 prefix 的 `stage/` 下，不在 worktree 里）放本目录的工具、一个 git bundle（该提交加全部 tag）、每个 job 一份 JSON、一个同步配置文件（不进仓库）。远端根是 `<remote-prefix>/jobs/<sha>/tree-<工具摘要>`，按提交与工具版本唯一，不会与别的项目互相覆盖（第 5 刀之前只按提交区分，见该节「途中查出」）。
+2. 在 runner 上跑 `inputs.py verify`。缺或红时，用第二个 staging 目录（硬链接到本机 prefix 的 `inputs/`）推到 `<remote-prefix>/inputs`，先用 `tar` 解出 python（此时 prefix 里还没有解释器），再由 `inputs.py install` 解包其余工具链并整体复核。
+3. 每个 job 一次远端命令 `env -i ... run-job`，并行度由 `--jobs` 给。每次启动都会推一次 staging 目录，未变时 3s 左右，推送由 runner 自己串行化。（2026-09-25 起改为后台运行加轮询，见下面的「可续」一节。）
+4. `run-job` 把结果片段打印成一行、同时存进 `<remote-prefix>/out/<sha>/<run>/fragments`；日志与制品留在 runner 的 `out/<sha>/<run>/`，不拉回。本机只解析片段，照常由 runner.py 合成 `bundle.json`。
 
 偏离任务单的三处：
 
-- staging 不是「该 sha 的 detached worktree」。job 要历史（tree-policy 回读到上一个 tag 的 Emit-Change 声明、重放钉住的提交），而且每个 job 本来就要自己的新检出。worktree 的 `.git` 只是指回本机仓库的指针，到了集群上没有意义。所以送的是 git bundle（0a0b46e8 上 12.9 MiB），集群上 `git clone --bare` 一次，各 job 再 `git clone --shared`。
-- 集群上的输出按控制端的运行 id 再分一层（`out/<sha>/<run>/`）。同一提交跑第二次时，上一次的制品还在，`upload-artifact` 的重名检查会让它失败。
-- 集群上的隔离检查把 marker 放在 prefix 里，而不是 `/`：往 `/` 写 marker 本身就违反「不写 prefix 之外」。`find` 的根仍然是 `/`，另加 prefix 所在文件系统的挂载根（集群上是 `/data0` 下的个人目录，与 `/` 不是同一个文件系统）。
+- staging 不是「该 sha 的 detached worktree」。job 要历史（tree-policy 回读到上一个 tag 的 Emit-Change 声明、重放钉住的提交），而且每个 job 本来就要自己的新检出。worktree 的 `.git` 只是指回本机仓库的指针，到了 runner 上没有意义。所以送的是 git bundle（0a0b46e8 上 12.9 MiB），runner 上 `git clone --bare` 一次，各 job 再 `git clone --shared`。
+- runner 上的输出按控制端的运行 id 再分一层（`out/<sha>/<run>/`）。同一提交跑第二次时，上一次的制品还在，`upload-artifact` 的重名检查会让它失败。
+- runner 上的隔离检查把 marker 放在 prefix 里，而不是 `/`：往 `/` 写 marker 本身就违反「不写 prefix 之外」。`find` 的根仍然是 `/`，另加 prefix 所在文件系统的挂载根（它与 `/` 不是同一个文件系统）。
 
-集群侧的 prefix 路径由 `--backend-opt remote-prefix=` 给，代码里没有默认值：共享集群盘上的路径含个人用户名，不该进公开仓库。
+runner 侧的 prefix 路径由 `--backend-opt remote-prefix=` 给，代码里没有默认值：共享盘上的路径含个人用户名，不该进公开仓库。
 
-另一处范围外改动：`scripts/gate-map/unseen.txt` 加了 `inputs.py`、`inputs.lock.json`、`prefix.py`、`backend_crun.py` 四行。gate map 的棘轮要求每个新文件要么有门禁看着、要么在这里写明为什么没有，不加 tree-policy 就红（本机 prefix 实测过一次红）。
+另一处范围外改动：`scripts/gate-map/unseen.txt` 加了 `inputs.py`、`inputs.lock.json`、`prefix.py` 和后端本身四行。gate map 的棘轮要求每个新文件要么有门禁看着、要么在这里写明为什么没有，不加 tree-policy 就红（本机 prefix 实测过一次红）。
 
-### 实测（2026-09-24，集群 B200 编译机容器，`crun run -n 0`）
+### 实测（2026-09-24，外部 runner 的编译机容器）
 
 | 项 | 结果 |
 |---|---|
 | 首次推送 staging（工具 + bundle，13.6 MB） | 23s |
-| 首次送输入包（578 MiB）并在集群上解包、复核 | 604s；之后每次 `inputs.py verify` 绿，推送加复核约 10s |
+| 首次送输入包（578 MiB）并在外部 runner 上解包、复核 | 604s；之后每次 `inputs.py verify` 绿，推送加复核约 10s |
 | `--only tree-policy`（带 `isolation=1`） | 5 步全绿，job 176s（含隔离检查的两次 `find`）；`check-isolation` 在 `/` 与 prefix 所在文件系统上 0 条 |
-| 工具链字段对比本机 prefix | `java`、`node`、`python` 逐字相同（`21.0.2+13-jvmci-23.1-b30`、`v20.20.2`、`3.12.3`）；`cc` 不同（本机 gcc 13.3，集群 gcc 11.4），当时记在「不做的」，第 5 刀已收 |
+| 工具链字段对比本机 prefix | `java`、`node`、`python` 逐字相同（`21.0.2+13-jvmci-23.1-b30`、`v20.20.2`、`3.12.3`）；`cc` 不同（本机 gcc 13.3，外部 runner 的 gcc 11.4），当时记在「不做的」，第 5 刀已收 |
 | 全套 `--jobs 16` | 墙钟 1348s（本机 `--jobs 8` 是 4969s）；35 个 job 里 31 个全绿；131 个 run 步骤执行 114 个，110 个退出码 0；`complete = false`；`bundle.py verify` 复算一致；种子摘要与 `seed-checksums.txt` 一致 |
 
-四个红 job 全部是集群环境造成的，不是替换表或 prefix 的问题，照实记录、没有改仓库源码：
+四个红 job 全部是外部 runner环境造成的，不是替换表或 prefix 的问题，照实记录、没有改仓库源码：
 
 | job | 红的步骤 | 原因 |
 |---|---|---|
@@ -268,31 +270,31 @@ shim 还要保住 `argv[0]`。第一版用 `/bin/sh` 直接 `exec .../java.real`
 | `wasm-target` | 钉住的 wasi-sdk（exit 28，curl 超时） | 容器没有外网。prefix 里有同一个包，但步骤自己下载，见「不做的」 |
 | `docs` | `playground/test/contract.sh`（exit 127） | 合约本身 10 passed、0 failed（python 3.12.3 下 #170 同样不复现），收尾的 `fuser -k` 找不到命令：容器没有 psmisc，而本任务不许 apt。其后的 site 构建（`npm install` 要外网）因此没有执行 |
 
-全套运行没有套隔离检查（任务单只要求一次，放在不起 JVM 的 tree-policy 上）。事后只读查看，容器里 `/tmp/hsperfdata_root` 的 mtime 落在全套运行窗口内，目录为空：门禁步骤起的 JVM 在 prefix 外留了痕迹，就是「不做的」里 hsperfdata 那一条。在集群上它违反「不写 prefix 之外」，修法（每 job 一个指进 prefix 的私有 `/tmp`，要容器允许 `unshare -m`）尚未验证。第 3b′ 刀已收掉：启动器 shim 关掉 hsperfdata，私有 `/tmp` 实测可用，全套 39 个 job 都套了隔离检查，见下节。
+全套运行没有套隔离检查（任务单只要求一次，放在不起 JVM 的 tree-policy 上）。事后只读查看，容器里 `/tmp/hsperfdata_root` 的 mtime 落在全套运行窗口内，目录为空：门禁步骤起的 JVM 在 prefix 外留了痕迹，就是「不做的」里 hsperfdata 那一条。在外部 runner 上它违反「不写 prefix 之外」，修法（每 job 一个指进 prefix 的私有 `/tmp`，要容器允许 `unshare -m`）尚未验证。第 3b′ 刀已收掉：启动器 shim 关掉 hsperfdata，私有 `/tmp` 实测可用，全套 39 个 job 都套了隔离检查，见下节。
 
-要在集群上拿到 `complete = true`，还差：以非 root 身份执行 job（例如 `setpriv` 降到一个无特权 uid，prefix 相应 chown，不需要写 prefix 外）；`wasm-target` 能用预置的 wasi-sdk；`fuser` 进输入包或合约不再依赖它；npm 依赖进输入包。前一条是后端的事，后三条要改 `gates.yml` 或被测脚本，都不在本刀。（第 3b′ 刀：非 root、wasi-sdk、npm 三条已做；`fuser` 由 #173 从合约里去掉。）
+要在外部 runner 上拿到 `complete = true`，还差：以非 root 身份执行 job（例如 `setpriv` 降到一个无特权 uid，prefix 相应 chown，不需要写 prefix 外）；`wasm-target` 能用预置的 wasi-sdk；`fuser` 进输入包或合约不再依赖它；npm 依赖进输入包。前一条是后端的事，后三条要改 `gates.yml` 或被测脚本，都不在本刀。（第 3b′ 刀：非 root、wasi-sdk、npm 三条已做；`fuser` 由 #173 从合约里去掉。）
 
-## 第 3b′ 刀：集群跑到 complete
+## 第 3b′ 刀：外部 runner跑到 complete
 
-第 3 刀的集群全套 31/35 绿，四个红 job 全是容器事实，另有 hsperfdata 一条隔离破规。本刀逐条收掉，每条一个提交。
+第 3 刀的外部 runner 全套 31/35 绿，四个红 job 全是容器事实，另有 hsperfdata 一条隔离破规。本刀逐条收掉，每条一个提交。
 
 ### 非 root 执行
 
-容器里只有 root；CI 的每个 job 是普通用户，`atomic-write-contract` 与 `java-target-classpath-contract` 的 unreadable-lock 都在 root 下必红（root 读得了 `chmod 000`、写得进不可写目录）。做法：`prefix.py run-job --run-as 20000:20000` 以 root 启动，先把 prefix 里 job 该写的部分（`home/`、`tmp/`、`cache/`、`repos/<sha>.git`、`jobs/<sha>`、`out/<sha>`）交给该身份，只改属主不对的条目；再经 `setpriv --reuid --regid --clear-groups --no-new-privs` 以该身份重新执行自己。`toolchain/` 与 `inputs/` 仍归 root，job 改不了量它的工具链。
+容器里只有 root；CI 的每个 job 是普通用户，`atomic-write-contract` 与 `java-target-classpath-contract` 的 unreadable-lock 都在 root 下必红（root 读得了 `chmod 000`、写得进不可写目录）。做法：`run-job --run-as UID:GID` 以 root 启动，先把 prefix 里 job 该写的部分（`home/`、`tmp/`、`cache/`、`repos/<sha>.git`、`jobs/<sha>`、`out/<sha>`）交给该身份，只改属主不对的条目；再经 `setpriv --reuid --regid --clear-groups --no-new-privs` 以该身份重新执行自己。`toolchain/` 与 `inputs/` 仍归 root，job 改不了量它的工具链。
 
-选 `setpriv` 不选 `unshare -U`：用户命名空间若把 job 的 uid 映射到真 root，prefix 外所有 root 的文件在 job 眼里都成了自己的，照样可写；真实的 uid 切换让它们仍归 root。uid 20000 在容器的 `/etc/passwd` 里没有条目，这是有意的：借镜像里现成的 `nobody`，就与容器里别的以 `nobody` 跑的东西共享 prefix 的写权限。没有条目的代价实测过：JVM 的 `user.name` 是 `?`，`user.home` 回落到 `$HOME`（prefix 的 `home/`），python 的 `~` 同样取 `$HOME`。反倒是以 root 跑时 JVM 的 `user.home` 取自 passwd，是 prefix 外的 `/root`。
+选 `setpriv` 不选 `unshare -U`：用户命名空间若把 job 的 uid 映射到真 root，prefix 外所有 root 的文件在 job 眼里都成了自己的，照样可写；真实的 uid 切换让它们仍归 root。这个 uid 在容器的 `/etc/passwd` 里没有条目，这是有意的：借镜像里现成的 `nobody`，就与容器里别的以 `nobody` 跑的东西共享 prefix 的写权限。没有条目的代价实测过：JVM 的 `user.name` 是 `?`，`user.home` 回落到 `$HOME`（prefix 的 `home/`），python 的 `~` 同样取 `$HOME`。反倒是以 root 跑时 JVM 的 `user.home` 取自 passwd，是 prefix 外的 `/root`。
 
 uid 切换挡不住 `/tmp`、`/var/tmp`、`/dev/shm`：它们人人可写。第一次非 root 试跑时两个 job 的隔离检查都报了 `/tmp` 的 mtime（目录里没留下东西，是建了又删）。容器是多人共用的，这一条分不清是谁写的；门禁里的 JVM 本来就会写：`java.io.tmpdir` 不看 `TMPDIR`，默认就是 `/tmp`。所以 job 另得一个私有 mount 命名空间（容器允许 `unshare -m`，实测过），里面这三处各是 prefix 里一个每 job 的目录（`jobs/<sha>/<run>-<job>-shared-tmp/`）的 bind mount。这与 CI 一致：每个 job 是一台新 VM，`/tmp` 本来就是它自己的。`run-job` 在 job 结束时记录私有 `/tmp` 有没有被动过，于是「job 自己用了 `/tmp`」与「别的租户写了真 `/tmp`」分得开；后者仍由外面的 `check-isolation` 看见。`run-as=root` 是负控，`private-tmp=0` 保留共享的三处。
 
-实测（2026-09-24，集群，08a5232e，`--only contracts-2,java-target-classpath --jobs 2`，`isolation=1`）：
+实测（2026-09-24，外部 runner，08a5232e，`--only contracts-2,java-target-classpath --jobs 2`，`isolation=1`）：
 
 | 运行 | 结果 |
 |---|---|
-| uid 20000，共享 `/tmp` | 两个 job 全绿（415s、454s）；隔离检查各报 `OUTSIDE /tmp` 一条 |
-| uid 20000，私有 `/tmp`（默认） | 两个 job 全绿（415s、452s，墙钟 501s）；隔离检查各 0 条；两个 job 的私有 `/tmp` 都被动过、结束时 0 个条目，所以上一行的 `/tmp` 是 job 自己写的 |
+| 非 root 用户，共享 `/tmp` | 两个 job 全绿（415s、454s）；隔离检查各报 `OUTSIDE /tmp` 一条 |
+| 非 root 用户，私有 `/tmp`（默认） | 两个 job 全绿（415s、452s，墙钟 501s）；隔离检查各 0 条；两个 job 的私有 `/tmp` 都被动过、结束时 0 个条目，所以上一行的 `/tmp` 是 job 自己写的 |
 | `run-as=root`（负控） | `contracts-2` 的 atomic write 退出 1：`this contract must not run as root`；`java-target-classpath` 第一步退出 1：`unreadable-lock did not fail closed on stderr with exit 1` |
 
-负控第一次跑时两个 job 都在检出一步失败：上一次以 uid 20000 建的 `repos/<sha>.git` 归 20000，git 以 root 打开时报 dubious ownership。所以 root 模式下 `run-job` 同样把可写部分交回 root。
+负控第一次跑时两个 job 都在检出一步失败：上一次以该用户建的 `repos/<sha>.git` 归该用户，git 以 root 打开时报 dubious ownership。所以 root 模式下 `run-job` 同样把可写部分交回 root。
 
 ### wasi-sdk 步骤离线
 
@@ -318,16 +320,16 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 2. **只包了 `java`。** `javac`、`jar` 起的 JVM 照样写 hsperfdata。改成包 `bin/` 里全部启动器，见「隔离证明」。
 3. **shim 改了 `argv[0]`。** `selfhost-bench.py` 按 `argv[0]` 认 JVM，两个 heap 合约红。改成 `exec -a`，见「隔离证明」。
 
-### 实测（2026-09-24，第 3b′ 刀，集群 `--jobs 16`，每个 job 套隔离检查）
+### 实测（2026-09-24，第 3b′ 刀，外部 runner `--jobs 16`，每个 job 套隔离检查）
 
 | 运行 | 墙钟 | 结果 |
 |---|---|---|
 | main 97af76ce（第 2、3 处修正之前） | 1570s | 39 个 job 里 36 个绿；红：`wasm-target`（main 的 wasi-sdk 步骤还只会 `curl`，exit 28）、`compiler-weight-contract` 与 `dependency-heap-contract`（上面第 3 处）。39 次隔离检查全部 0 条 |
 | 5f18182b（main 984d2076 + 本刀） | 1730s | **`complete = true`**，175 个 run 步骤全部执行、全部退出 0，39 个 job 全绿；39 次隔离检查全部 0 条；`bundle.py verify` 复算一致 |
 
-5f18182b 那次各 job 的秒数（含 crun 推送与两次 `find`）：最长的是 `incremental-2` 921s、`test` 884s、`syntax-mutants-1/2` 878/871s、`incremental-4` 867s；`wasm-target` 497s（wasi-sdk 走输入包），`docs` 449s（npm 离线）。工具链字段：`java` `21.0.2+13-jvmci-23.1-b30`、`python` `3.12.3`、`node` `v20.20.2`、种子 `a320e3ee…e679`，`cc` 是集群的 gcc 11.4。
+5f18182b 那次各 job 的秒数（含推送与两次 `find`）：最长的是 `incremental-2` 921s、`test` 884s、`syntax-mutants-1/2` 878/871s、`incremental-4` 867s；`wasm-target` 497s（wasi-sdk 走输入包），`docs` 449s（npm 离线）。工具链字段：`java` `21.0.2+13-jvmci-23.1-b30`、`python` `3.12.3`、`node` `v20.20.2`、种子 `a320e3ee…e679`，`cc` 是外部 runner 的 gcc 11.4。
 
-本机 prefix 全套（5f18182b，`--jobs 8`，load 约 28）：墙钟 4893s，39 个 job 里 38 个绿，`complete = false`。红的是 `compiler-weight-contract` 的一个变异体对照：`sampling-200ms` 预期只让「采样间隔」一条断言红，负载下 `bench.vmhwm_reads_proc` 也红了。不是 shim 造成的：同一检出单跑这个合约，用不带 shim 的同一 GraalVM 构建，在 24 个 busy loop（load 约 25）下以逐字相同的断言红过；空闲时带 shim 本机两次绿、集群三次绿。两份证据包的 `toolchain` 里 `java`、`python`、`node`、种子摘要相等，`cc` 不等（集群 gcc 11.4、本机 gcc 13.3，cc 当时不在输入包里；第 5 刀已收，见该节）。
+本机 prefix 全套（5f18182b，`--jobs 8`，load 约 28）：墙钟 4893s，39 个 job 里 38 个绿，`complete = false`。红的是 `compiler-weight-contract` 的一个变异体对照：`sampling-200ms` 预期只让「采样间隔」一条断言红，负载下 `bench.vmhwm_reads_proc` 也红了。不是 shim 造成的：同一检出单跑这个合约，用不带 shim 的同一 GraalVM 构建，在 24 个 busy loop（load 约 25）下以逐字相同的断言红过；空闲时带 shim 本机两次绿、外部 runner三次绿。两份证据包的 `toolchain` 里 `java`、`python`、`node`、种子摘要相等，`cc` 不等（外部 runner 的 gcc 11.4、本机 gcc 13.3，cc 当时不在输入包里；第 5 刀已收，见该节）。
 
 私有 `/tmp` 也说明了它为什么必要：5f18182b 那次有 20 个 job 结束时在自己的 `/tmp` 里留了东西（`dawn-selfhost-stdlib`、`dawn-selfhost-lsp-def`、`dawn-lsp-standalone-close-*.tmp`、`dawn-map-fold-*`、`dawn-spike-io-cli` 等）。这些是门禁脚本与 JVM 直接写 `/tmp` 的产物，CI 上随 VM 消失；没有私有 `/tmp` 时它们会留在共享容器的 `/tmp` 里。没有一个 job 留下 `hsperfdata_*`。
 
@@ -335,7 +337,7 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 ### 为什么
 
-第 3 刀之后，步骤里只剩 C 编译器还取自 `/usr/bin`：同一个提交，集群的证据包写 `cc` = gcc 11.4，本机写 gcc 13.3。集群的 gcc 11.4 带 ASan，`native-diff` 因此能绿，但它不是 CI 用的编译器，证据包也就说不清跑的是什么。
+第 3 刀之后，步骤里只剩 C 编译器还取自 `/usr/bin`：同一个提交，外部 runner的证据包写 `cc` = gcc 11.4，本机写 gcc 13.3。外部 runner 的 gcc 11.4 带 ASan，`native-diff` 因此能绿，但它不是 CI 用的编译器，证据包也就说不清跑的是什么。
 
 ### 选什么
 
@@ -343,8 +345,8 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 | 候选 | 结论 |
 |---|---|
-| LLVM 官方预编译 tarball | 否。是 clang，不是 CI 用的编译器；18.1.8 为 1.04 GB，19.1.7 为 1.65 GB，20.1.8 为 2.02 GB（GitHub 返回的 `content-length`），按 0.6 MB/s 推到集群要 30 到 55 分钟 |
-| Ubuntu 24.04 的 deb（gcc-13、libasan8 等） | 否。对 glibc 2.39 构建，集群容器是 glibc 2.35，编译器本身与它链出的程序都可能起不来 |
+| LLVM 官方预编译 tarball | 否。是 clang，不是 CI 用的编译器；18.1.8 为 1.04 GB，19.1.7 为 1.65 GB，20.1.8 为 2.02 GB（GitHub 返回的 `content-length`），按 0.6 MB/s 推到外部 runner要 30 到 55 分钟 |
+| Ubuntu 24.04 的 deb（gcc-13、libasan8 等） | 否。对 glibc 2.39 构建，外部 runner 的容器是 glibc 2.35，编译器本身与它链出的程序都可能起不来 |
 | zig cc | 否。不带 ASan 运行时，`spike-native` 缺 ASan 即失败 |
 | conda-forge 的 gcc 13.3.0 | 采用。可重定位；编译器二进制对 glibc 2.17 构建，只依赖 libc、libm、libdl；自带 sysroot，glibc 版本可选 |
 
@@ -352,14 +354,14 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 两处取舍：
 
-- **sysroot 选 2.34，不选 CI 的 2.39。** 链出的程序在宿主上用宿主的 `libc.so.6` 运行，要求的符号版本不能新于宿主。集群是 2.35，2.34 是不超过它的最新一版（conda-forge 另有 2.17、2.28、2.39）。头文件因此与 CI 不同；`-std=c11` 下的运行时没有用到 2.34 与 2.39 之间新增的接口，下面的集群全套为证。
+- **sysroot 选 2.34，不选 CI 的 2.39。** 链出的程序在宿主上用宿主的 `libc.so.6` 运行，要求的符号版本不能新于宿主。外部 runner是 2.35，2.34 是不超过它的最新一版（conda-forge 另有 2.17、2.28、2.39）。头文件因此与 CI 不同；`-std=c11` 下的运行时没有用到 2.34 与 2.39 之间新增的接口，下面的外部 runner 全套为证。
 - **运行时是 14.2.0，不是与编译器同源的 13.3.0。** 这不只是为了与 CI 一致。conda-forge 的 gcc 13.3.0 自带的 libasan 在本机内核上（高熵 ASLR，mmap 随机化 32 位）随机死于 `AddressSanitizer:DEADLYSIGNAL`：一个最小的 ASan 程序连跑 50 次，9 次卡死；换成 14.2.0 的 libasan，100 次 0 次；宿主的 Ubuntu 组合 50 次 0 次。`scripts/spike-native/run.sh` 在 ASan 不可用时 fail-closed，这种随机失败会直接变成门禁的偶发红。libasan.so.8 的 ABI 在 13 与 14 之间不变，Ubuntu 这样配也是这个道理。
 
 ### 解包与重定位
 
-`.conda` 是 zip，里面是 zstd 压缩的 tar。prefix 的 python 3.12 没有 zstd 模块，集群容器有没有 `zstd` 命令不知道，也不许装。所以锁里另钉一个 `zstandard` 0.23.0 的 cp312 wheel，由 prefix 的 python 带着它解包（`inputs.py conda-unpack`，`build` 与 `install` 都调它）：两边是同一个解释器、同一份代码，不依赖宿主工具。解包按每个包自己的 `info/paths.json` 核：只解出其中列出的文件（`gcc` 包 payload 里的 `info/licenses/LICENSE` 这类 conda 留在包缓存、不链进环境的文件跳过），多一个少一个都拒绝，每个普通文件按其中记录的 sha256 核，两个包给出同一路径也拒绝。
+`.conda` 是 zip，里面是 zstd 压缩的 tar。prefix 的 python 3.12 没有 zstd 模块，外部 runner 的容器有没有 `zstd` 命令不知道，也不许装。所以锁里另钉一个 `zstandard` 0.23.0 的 cp312 wheel，由 prefix 的 python 带着它解包（`inputs.py conda-unpack`，`build` 与 `install` 都调它）：两边是同一个解释器、同一份代码，不依赖宿主工具。解包按每个包自己的 `info/paths.json` 核：只解出其中列出的文件（`gcc` 包 payload 里的 `info/licenses/LICENSE` 这类 conda 留在包缓存、不链进环境的文件跳过），多一个少一个都拒绝，每个普通文件按其中记录的 sha256 核，两个包给出同一路径也拒绝。
 
-这十个包里有 85 个文本文件带着构建前缀的占位符（gcc 的 `specs`、binutils 的链接脚本、sysroot 的 clang 配置等），`conda install` 会把占位符换成安装位置，`inputs.py` 照做。其中 gcc 的 `specs` 给每次非静态链接加 `-rpath <工具链>/lib`，ASan 程序就是靠它找到输入包里的 libasan：不这样，本机会悄悄用上宿主的 libasan8，集群上只有 gcc 11 的 libasan6，程序起不来。代价是这些文件里写着 prefix 的绝对路径，所以目录树摘要对它们先把实际位置换回占位符再算（`MANIFEST.json` 的该行记下是哪些文件、各自的占位符），同一份包解在任何位置摘要都相同。实测：在一个目录 `build`，把 `inputs/` 硬链接到另一个目录再 `install`，摘要一致、`verify` 绿，后者 `specs` 里的 rpath 指向后者。
+这十个包里有 85 个文本文件带着构建前缀的占位符（gcc 的 `specs`、binutils 的链接脚本、sysroot 的 clang 配置等），`conda install` 会把占位符换成安装位置，`inputs.py` 照做。其中 gcc 的 `specs` 给每次非静态链接加 `-rpath <工具链>/lib`，ASan 程序就是靠它找到输入包里的 libasan：不这样，本机会悄悄用上宿主的 libasan8，外部 runner上只有 gcc 11 的 libasan6，程序起不来。代价是这些文件里写着 prefix 的绝对路径，所以目录树摘要对它们先把实际位置换回占位符再算（`MANIFEST.json` 的该行记下是哪些文件、各自的占位符），同一份包解在任何位置摘要都相同。实测：在一个目录 `build`，把 `inputs/` 硬链接到另一个目录再 `install`，摘要一致、`verify` 绿，后者 `specs` 里的 rpath 指向后者。
 
 ### 注入：只动 PATH
 
@@ -376,25 +378,25 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 ### 与并行使用者兼容
 
-本机 `~/dawn-gates` 与集群 prefix 同时被别的分支的旧 `inputs.py` 使用。旧 `verify` 只读 `MANIFEST.json` 的 `items`，按它自己的锁给每个 download 行取摘要（新包名不在旧锁里，会抛异常），并且不做重定位就算目录树摘要（`cc` 那一行会红）。所以新行放在新键 `conda_items` 下，旧工具看不见。同一理由的两处小改：`build` 写 MANIFEST 改为先写临时文件再改名；npm 缓存在仍然完好时沿用上次的，不再每次重填（重填的字节必然不同，会在别人用着时改掉缓存和摘要）。实测：本机 prefix `build` 前后 `items` 除 `download_seconds` 外逐项相同；改动前的 `inputs.py verify` 在新包上绿（本机与另一目录各一次）。
+本机 `~/dawn-gates` 与外部 runner prefix 同时被别的分支的旧 `inputs.py` 使用。旧 `verify` 只读 `MANIFEST.json` 的 `items`，按它自己的锁给每个 download 行取摘要（新包名不在旧锁里，会抛异常），并且不做重定位就算目录树摘要（`cc` 那一行会红）。所以新行放在新键 `conda_items` 下，旧工具看不见。同一理由的两处小改：`build` 写 MANIFEST 改为先写临时文件再改名；npm 缓存在仍然完好时沿用上次的，不再每次重填（重填的字节必然不同，会在别人用着时改掉缓存和摘要）。实测：本机 prefix `build` 前后 `items` 除 `download_seconds` 外逐项相同；改动前的 `inputs.py verify` 在新包上绿（本机与另一目录各一次）。
 
 ### 途中查出：staging 只按提交区分
 
-第一次集群全套（b2e19e06，本分支的工具）的证据包 `toolchain.cc` 是 `null`：39 个 job 里 21 个报输入包的 gcc 13.3，18 个报容器的 gcc 11.4，`crun backend: jobs disagree on toolchain.cc`。原因不在编译器：本机 staging 目录是 `stage/jobs/<sha>`，远端树是 `jobs/<sha>/tree`，只按提交区分；而 origin/main 的头正是别的写者会拿来当基线跑的提交。本次 prepare 之后一分钟（10:05:33），另一个分支的控制端用它自己的旧工具重新 stage 了同一个 sha，此后每次 crun 推送都把旧的 `prefix.py` 推到同一个远端树，后启动的 job 跑的就是它（事后本机 staging 里的 `prefix.py` 不含 `conda_toolchains`，mtime 是那个 worktree 的）。一个 job 跑什么，由提交和这套工具共同决定，所以 staging 目录与远端树现在都带上工具摘要（`TOOL_FILES` 的 sha256 前 12 位）：`stage/jobs/<sha>-<摘要>`、`jobs/<sha>/tree-<摘要>`。输入包的 staging 目录同理改成每次运行一个，推完删掉。
+第一次外部 runner 全套（b2e19e06，本分支的工具）的证据包 `toolchain.cc` 是 `null`：39 个 job 里 21 个报输入包的 gcc 13.3，18 个报容器的 gcc 11.4，`backend: jobs disagree on toolchain.cc`。原因不在编译器：本机 staging 目录是 `stage/jobs/<sha>`，远端树是 `jobs/<sha>/tree`，只按提交区分；而 origin/main 的头正是别的写者会拿来当基线跑的提交。本次 prepare 之后一分钟（10:05:33），另一个分支的控制端用它自己的旧工具重新 stage 了同一个 sha，此后每次推送都把旧的 `prefix.py` 推到同一个远端树，后启动的 job 跑的就是它（事后本机 staging 里的 `prefix.py` 不含 `conda_toolchains`，mtime 是那个 worktree 的）。一个 job 跑什么，由提交和这套工具共同决定，所以 staging 目录与远端树现在都带上工具摘要（`TOOL_FILES` 的 sha256 前 12 位）：`stage/jobs/<sha>-<摘要>`、`jobs/<sha>/tree-<摘要>`。输入包的 staging 目录同理改成每次运行一个，推完删掉。
 
 ### 实测（2026-09-24）
 
 | 项 | 结果 |
 |---|---|
 | 本机 `inputs.py build`（下载已在，只加编译器） | 19s；十个包解包加重定位 2.3s，85 个文件重定位；`toolchain/gcc-13.3.0` 解开 764.5 MiB |
-| 送到集群 | 首次 `inputs.py verify` 红（锁里的编译器不在远端 MANIFEST），`inputs/` 再推一次、远端 `install`、复核共 225s；已有的四套工具链 `already matches`，只解了编译器（2.5s） |
+| 送到外部 runner | 首次 `inputs.py verify` 红（锁里的编译器不在远端 MANIFEST），`inputs/` 再推一次、远端 `install`、复核共 225s；已有的四套工具链 `already matches`，只解了编译器（2.5s） |
 | 本机 prefix `--only native-selfhost-tests,native-diff-1`（62481320，`--jobs 2`） | 5 个 run 步骤全部 exit 0，墙钟 891s |
-| 集群同上 | 5 个 run 步骤全部 exit 0，墙钟 997s（含上一行的 225s） |
+| 外部 runner同上 | 5 个 run 步骤全部 exit 0，墙钟 997s（含上一行的 225s） |
 | 两份证据包的 `toolchain` | 逐字段相等，`diff` 输出为空：`cc` `cc (conda-forge gcc 13.3.0-2) 13.3.0`、`java` `21.0.2+13-jvmci-23.1-b30`、`python` `3.12.3`、`node` `v20.20.2`、`seed_jar_sha256` `a320e3ee…e679`；`substitutions` 也相同 |
 | ASan 真的跑了 | 本机 `spike-native` 分片 1 的逐项结果与改动前（宿主 gcc）那次逐字相同：只有 `ctl_vthread`、`effect_sam_snapshot` 两个条目整条 `blocked`（改动前也是），其余条目的 `:asan` 都是 ok。缺 ASan 时每个条目的 `:asan` 都会是 `blocked` |
-| 集群全套，origin/main 头 b2e19e06，本分支工具（d3ec809b），`--jobs 16`，每个 job 套隔离检查 | **`complete = true`**：175 个 run 步骤全部执行、全部 exit 0，39 个 job 全绿；`bundle.py verify` `COMPLETE`；39 次隔离检查全部 0 条；证据包 sha256 `62470de4…4526`。墙钟 2892s（上次全套 1722s；这次另有三个写者同时占着集群，最长的 `incremental-2` 1535s，上次 925s） |
-| 集群全套的 `toolchain` 对本机 `--only` | 逐字段相等，`diff` 输出为空 |
-| 修 staging 之前的那次全套（同一提交，d3ec809b 之前的工具） | `toolchain.cc` 为 `null`（见上一节），另有两处红：`compiler-weight-contract` 的 `selfhost-bench-contract/run.py`（exit 1）与 `docs` 的 `playground/test/contract.sh`（exit 7；脚本在 `set -e` 下把 `$(curl …)` 赋给变量，7 最可能是 curl 的「连不上」，步骤日志留在集群上没有取回）。两者都不调 C 编译器；那次各 job 比上次慢 2 到 3 倍（`list-elems-contract` 1838s，上次 587s）。同一 job 在本机 prefix 单跑绿（370s），修好后的全套里两者也都绿。归为负载下的计时，照实记下，没有改被测脚本 |
+| 外部 runner 全套，origin/main 头 b2e19e06，本分支工具（d3ec809b），`--jobs 16`，每个 job 套隔离检查 | **`complete = true`**：175 个 run 步骤全部执行、全部 exit 0，39 个 job 全绿；`bundle.py verify` `COMPLETE`；39 次隔离检查全部 0 条；证据包 sha256 `62470de4…4526`。墙钟 2892s（上次全套 1722s；这次另有三个写者同时占着外部 runner，最长的 `incremental-2` 1535s，上次 925s） |
+| 外部 runner 全套的 `toolchain` 对本机 `--only` | 逐字段相等，`diff` 输出为空 |
+| 修 staging 之前的那次全套（同一提交，d3ec809b 之前的工具） | `toolchain.cc` 为 `null`（见上一节），另有两处红：`compiler-weight-contract` 的 `selfhost-bench-contract/run.py`（exit 1）与 `docs` 的 `playground/test/contract.sh`（exit 7；脚本在 `set -e` 下把 `$(curl …)` 赋给变量，7 最可能是 curl 的「连不上」，步骤日志留在外部 runner 上没有取回）。两者都不调 C 编译器；那次各 job 比上次慢 2 到 3 倍（`list-elems-contract` 1838s，上次 587s）。同一 job 在本机 prefix 单跑绿（370s），修好后的全套里两者也都绿。归为负载下的计时，照实记下，没有改被测脚本 |
 
 ### 负控
 
@@ -420,7 +422,7 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 上一节的口子按那里写的做法收了。
 
-- **版本恰好相同。** conda-forge 有 18.1.3 的构建（`clang-18-18.1.3-default_h127d8a8_0` 等，2024-04-08 上传），锁里作为第二个 conda 工具链 `clang`（目录 `clang-18.1.3/`）钉了十九个包：`clang`、`clang-18`、`libclang-cpp18.1`、`libllvm18`、`compiler-rt`（含 `compiler-rt_linux-64` 的 ASan 等运行时）及 libLLVM 的动态库依赖 `libxml2`、`icu`、`libiconv`、`xz`、`libzlib`、`zstd`，再加 gcc 工具链已有的 sysroot、binutils、`libgcc-devel` 与 14.2.0 运行时七个包（同一归档，不必重新下载）。新下载 110 MiB，解开 994.7 MiB。没用 LLVM 官方 tarball：预编译包在 1 到 2 GB（`inputs.py` 文件头已记），送集群按 0.6 MB/s 算要半小时以上。
+- **版本恰好相同。** conda-forge 有 18.1.3 的构建（`clang-18-18.1.3-default_h127d8a8_0` 等，2024-04-08 上传），锁里作为第二个 conda 工具链 `clang`（目录 `clang-18.1.3/`）钉了十九个包：`clang`、`clang-18`、`libclang-cpp18.1`、`libllvm18`、`compiler-rt`（含 `compiler-rt_linux-64` 的 ASan 等运行时）及 libLLVM 的动态库依赖 `libxml2`、`icu`、`libiconv`、`xz`、`libzlib`、`zstd`，再加 gcc 工具链已有的 sysroot、binutils、`libgcc-devel` 与 14.2.0 运行时七个包（同一归档，不必重新下载）。新下载 110 MiB，解开 994.7 MiB。没用 LLVM 官方 tarball：预编译包在 1 到 2 GB（`inputs.py` 文件头已记），送外部 runner按 0.6 MB/s 算要半小时以上。
 - **怎么找到 sysroot 与链接器。** conda-forge 的 clang 默认目标是 `x86_64-conda-linux-gnu`，clang 18 按默认目标在自己的 `bin/` 找 `x86_64-conda-linux-gnu-clang.cfg`（以 `clang-18` 调用也读），里面是 `--sysroot <工具链>/x86_64-conda-linux-gnu/sysroot`（文本占位符，照常重定位）；gcc 安装（`crtbegin.o`、`libgcc.a`）与 `x86_64-conda-linux-gnu-ld` 在同一目录里找到。所以这些包必须与 clang 解在同一个目录，不能借 gcc 工具链的目录。实测本机 `env -i` 下编译、链接、`-fsanitize=address` 都通，产物只依赖 `libc`/`libm`。
 - **不进 PATH，用 `DAWN_PINNED_CC` 点名。** CI 上裸 `cc` 仍是 gcc，只有 `CC` 是 clang；这个工具链的 `bin/` 还带着 icu、xz、zstd 的命令行工具，进 PATH 会挡住 `/usr/bin`。所以锁里 `bin` 为 null，另记 `pinned_cc: bin/clang-18`，`prefix.job_env` 据此设 `DAWN_PINNED_CC`。`pinned-cc.sh` 见到它就把它当作 runner 上 `command -v clang-18` 的结果，照样核版本（`-dumpversion` 必须是 18.1.3）、照样写 `CC` 进 `GITHUB_ENV`；外部 runner 本来就按步骤给 `GITHUB_ENV` 文件，并带到后续步骤。没有伪造 `GITHUB_ACTIONS`：那是 runner 自己的变量，伪造它等于让所有按它分支的脚本都以为在 GitHub 上。
 - **`toolchain.cc`。** 改记 `$DAWN_PINNED_CC --version` 的首行（没有该变量时仍是 `cc --version`）。conda-forge 的首行带 feedstock 的 URL，证据包的泄露过滤见斜杠就拒，所以去掉 URL 的协议与目录，留下 `clang version 18.1.3 (clangdev-feedstock 9d0fad6b23c7f8bf40587b7924996e1cfbdcaffd)`。`bundle.py` 与 `verify_note.py` 对 `toolchain.cc` 只做字符串与泄露检查，不认具体值，所以 main 上的核验器不需要改，已发布的证据包也不受影响；替换表照旧不加行（理由同「不进替换表」）。
@@ -439,131 +441,49 @@ job 看到的是 `cache/npm`，由后端在 prepare 时从 `inputs/npm-cache` �
 
 墙钟：0。`verified` job 的 API 查询次数不变，只是本地多过滤一步。行为变化：非 main 分支上的 push 运行不再被接受（今天 `ci.yml` 只在 main 上响应 push，`ci.yml:25-26`，所以没有这种运行）。
 
-## 集群运行可续（2026-09-25）
+## 远端插件后端：可续、多机、依赖产物（2026-09-25 至 10-05）
 
-### 为什么
+远端后端（把 job 派到一个外部 runner 上跑的那个）已不在本仓：它是 `backend_<name>.py` 插件，放在 `DAWN_GATES_BACKENDS` 指向的目录里，由 `runner.py` 的 `load_backend` 加载，本仓只带 `local`。本节记它当时为 runner 契约带来的三件事，因为这三件是契约的一部分，换任何远端后端都要满足。
 
-同步的 `crun run` 在整个 job 期间占着一条 SSH 会话，而 crun 自己的断连哨兵会在会话断开时杀掉远端任务（它本来是为了「本地被杀、远端别留着」）。全套跑到二十多分钟时 crun 退出 255 已观测两次，两次都整批作废；原先的重试只覆盖「job 还没开始就失败」。
+### 可续（2026-09-25）
 
-### 两个前提（先核实，再动码）
+同步地占着一条会话跑 job 时，会话一断远端任务就被杀；全套跑到二十多分钟时退出 255 已观测两次，两次都整批作废。做法：
 
-| 前提 | 做法 | 结果 |
-|---|---|---|
-| `-d` 能与 `-n 0` 同用 | 从一个只含 `.crun.yaml` 的临时 staging 目录跑 `crun run -n 0 --no-build -d -- bash -c 'sleep 300; echo alive > <prefix>/tmp/probe-…'` | 成立：11s 返回，退出 0，打印 job id；`crun jobs` 显示 running |
-| tmux 会话在 SSH 断开后存活 | 上一行的 crun 返回时它的 SSH 会话就已结束；5 分钟后读 probe 文件 | 成立：文件在启动后 301s 写出，内容 `alive`，`crun jobs -a` 记 `exit:0`；之后 probe 文件与临时 staging 目录已删 |
+- **后台启动。** 每个 job 以分离方式启动，远端命令不变，包装只多三件事：先建 `<prefix>/out/<sha>/<run>.ctl/<job>.claim` 认领（已存在就什么也不做、退出 0，重复启动无害）；把 stdout、stderr 写进同一目录；最后用 rename 写 `<job>.exit`（退出码与起止时刻）。控制目录放在 `out/<sha>/<run>` 旁边而不是里面，因为 `<run>` 目录由降权后的用户创建。
+- **轮询。** 一个线程，每 `poll=`（默认 30）秒一次短命令，问完所有未收回的 job：没认领、已认领、或已结束（附退出码与片段）。一次轮询或启动超过 300s 按断连处理，只丢这一轮。
+- **启动没确认。** 不重试，交给下一轮轮询：已认领就收养，连续两轮没认领才重新启动（至多三次）。
+- **判红。** 结束了但没有片段的 job 判红；超过 `timeout-minutes × (timeout-scale + 1)` 还没结束的判红并终止。
+- **续跑。** runner 每次运行写 `<out>/invocation.json`，后端把运行 id 写进自己的目录。`run.sh --resume <out>` 复用两者（只许改 `--jobs`），prepare 时轮询全部 job 一次：已结束的由 runner 直接记为完成、不占 worker；还在跑的等它；没认领的启动。后端声明 `RESUMABLE` 才能续；本地后端不能（它的 job 是控制端的子进程），runner 直接拒绝。
 
-### 做法
+桩自测（现在在维护者的私有后端仓里）覆盖：干净运行、轮询与启动在执行前后各断一次（与参照证据包逐字节相同、没有 job 被重复启动）、轮询时杀掉控制端再 `--resume`（逐字节相同；已收回、还在跑、由续跑启动三类都得出现）、以及负控：job 结束后删掉一个远端片段再 `--resume`，退出 1、`complete = false`。一次真实全套：569s 时 `kill -9` 控制端，7s 后续跑，`complete = true`，175 个 run 步骤全部执行且退出 0，没有 job 被启动两次。
 
-- **后台启动。** 每个 job 是一次 `crun run -n 0 --no-build -d -- bash -c <包装>`。远端命令不变（仍是 `env -i … prefix.py run-job`），包装只多三件事：先 `mkdir <prefix>/out/<sha>/<run>.ctl/<job>.claim` 认领（已存在就什么也不做、退出 0，所以重复启动无害）；把 run-job 的 stdout、stderr 写进同一目录；最后用 rename 写 `<job>.exit`（退出码与远端起止时刻）。控制目录放在 `out/<sha>/<run>` 旁边而不是里面：`<run>` 目录由降权后的 uid 创建，root 先建了它，那个 uid 就写不进 `fragments/`。
-- **轮询。** 一个轮询线程，每 `poll=`（默认 30）秒一次短 `crun run -n 0 --no-sync --no-build`，一次问完所有未收回的 job：没认领（absent）、已认领（running）、或已结束（附退出码、片段、stdout、stderr，base64）。轮询断连只丢这一轮。一次轮询或启动超过 300s 按断连处理。
-- **启动没确认。** crun 返回非 0 或没打印 job id 时不重试，交给下一轮轮询：已认领就收养，连续两轮没认领才重新启动（至多三次）。
-- **判红。** 结束了但没有片段的 job 判红；超过 `timeout-minutes × (timeout-scale + 1)` 还没结束的判红并 `crun kill`。run-job 里本地后端自己的超时是 `timeout-minutes × timeout-scale`，先触发，所以正常情况下超时会以步骤结果的形式回来。
-- **续跑。** runner 每次运行写 `<out>/invocation.json`，crun 后端把运行 id 写进 `<out>/crun/run-id`。`run.sh --resume <out>` 复用两者（只许改 `--jobs`），prepare 时轮询全部 job 一次：已结束的由 runner 直接记为完成、不占 worker；还在跑的等它；没认领的启动。本地后端不支持续跑（它的 job 是控制端的子进程，随控制端一起死），runner 直接拒绝。
+不做的（理由）：按外部 runner 自己的日志布局取结果（那是别人的内部格式，认领目录与 `.exit` 的语义由本仓的包装自己定）；续跑时重跑没有片段的 job（没有片段通常意味着 job 本身坏了，悄悄重跑会把它藏起来，判红后整次再跑即可）；每个 job 一个轮询（推送串行，轮询开销应与 job 数无关）。
 
-`--no-sync` 并不省掉推送：从控制端发起的 crun 每次都会先推 staging 目录（它只跳过集群内跨机同步），所以一次轮询约等于一次推送加一条短命令。轮询是一个线程统一发的，不是每个 job 一个，推送次数与 job 数无关。
+### 多机分派（2026-10-04）
 
-### 桩自测（`crun_stub_selftest.py`）
+零卡运行默认都落在同一台首选机上；多个写者同时各跑 `--jobs 8` 时它的 load 远超核数，一轮全套从约 20 分钟拉到约 65 分钟，`--jobs 39` 时负载敏感的门禁必红。后端于是：
 
-桩 crun 在本机执行命令，用一个目录充当集群 prefix；prefix 里的 python3 也是桩，对 `prefix.py run-job` 按 job 文件算出固定的片段。中间的 runner、backend_crun、bundle 都是真代码，计划来自真实提交上的 gates.yml。本机 24s：
+- **机器集合。** 外部 runner 报告的机器，按出现顺序在日志与 `dispatch.txt` 里只用序号；序号与地址的对应只写在本机的 `<out>` 目录里。`machines=auto`（默认）用全部，`machines=N` 留负载最低的 N 台，`machines=primary` 不分派（旧行为）。
+- **每台各自 prepare。** 并行地做「读 load、job 用户能否启动 prefix 的 python、`inputs.py verify`」；红了就把输入包送到那台。
+- **选机。** 每次启动挑 `(load + job-load × 近 90s 内本控制端在该机启动的 job 数) / 核数` 最小的一台，不轮转（其他控制端不轮转，轮转仍会把一部分 job 送到最热的那台）。`job-load` 默认 4，来自实测：8 时一台副机在九次快速启动后就「显得满了」，大批 job 去了已经很热的首选机。
+- **掉机。** prepare 时不应答、job 用户用不了、或送包后仍验不过的机器，本次运行不用；运行中某台的轮询或启动连续 `dead-after`（默认 6）次失败就判掉线，它上面的 job 到别的机器重新启动。
+- **证据包不变。** 片段里没有机器信息；`toolchain` 由各 job 自报，跨机器不一致时置 `null` 并记日志，这正是「换了在哪跑、没换跑什么」的核对。
 
-| 情形 | 结果 |
-|---|---|
-| 干净运行 | 参照证据包，`complete = true` |
-| 第 2、5 次轮询断在执行前，第 3 次断在执行后 | 与参照逐字节相同 |
-| 第 1、7 次启动断在执行前 | 逐字节相同；两个 job 各启动两次 |
-| 第 2、9 次启动断在执行后（已在「集群」上跑起来） | 逐字节相同；没有 job 被重复启动 |
-| 第 3 次轮询时 SIGKILL 控制端，然后 `--resume` | 逐字节相同；某次是 7 个收回、16 个还在跑并等到、16 个由续跑的控制端启动（三类的比例随调度略有出入，三类都得出现，否则自测判红） |
-| 负控：job 结束后删掉 `test` 的远端片段，再 `--resume` | 退出 1，`complete = false`，`test` 的步骤全部记为未执行 |
+两个途中查出的错：一台机器上 job 用户进不去 prefix 的上层目录（`exit 127`，加载 `libpython` 报 Permission denied），所以 prepare 加了这步检查，那台机器被摘掉；第一版检查用 `"GATES-NOREACH" in stdout` 判，而外部 runner 会把命令原样回显在同一个 stdout 里，所有机器都被摘掉，改成整行匹配，桩也照样回显，这类错今后在桩自测里就红。
 
-变异体：把「启动没确认」改回旧行为（直接判失败），两个启动断连的情形变红；让 runner 忽略 `--resume`（每次都新建运行 id），续跑情形与负控都变红。
+实测（同一提交，34 个 job、125 个 run 步骤）：单机基线 `--jobs 8` 2096s；多机 `--jobs 39` 949s，全绿，包括 compiler-weight-contract 与 docs；多机 `--jobs 8` 2076s。`--jobs 8` 的墙钟由 8 路宽度与最长链决定，多机在这个宽度上的收益只在首选机被别人压满时才出现，本节没有在那种条件下测到同一提交的对照，只有开头那组六个控制端的 3358–3727s。push-total 不变：这是外部后端，没有工作流被改动。
 
-### 实测（集群）
-
-| 项 | 结果 |
-|---|---|
-| 小跑 `--only std-version,export-surface`（a95a505d，`poll=45`） | 两个 job 全绿；一次轮询端到端 8s（推送加短命令），11 次轮询 0 次断；控制端比远端多占 27s 与 57s（启动约 10s 加等下一轮轮询）。据此默认改为 30s |
-| 全套 368b4a09，`--jobs 16`，`isolation=1`，`--keep-going` | 01:37:10 起跑；569s 时 `kill -9` 控制端（此时 20 个 job 已启动，4 个已收回）；7s 后 `run.sh --resume` |
-| 续跑 prepare 的一次轮询 | `4 done, 16 running, 19 absent`：4 个直接收回（不占 worker），16 个等原来的 job 跑完，19 个由续跑的控制端启动；`dispatch.txt` 共 39 行，**没有 job 被启动两次** |
-| 结果 | **`complete = true`**：175 个 run 步骤全部执行、全部退出 0；`bundle.py verify` `COMPLETE`；39 次隔离检查全部 0 条；证据包 sha256 `de7e0ba5…` |
-| 墙钟 | 续跑段 1657s（45 次轮询，0 次断），两段合计 2233s（含 7s 间隔与续跑的 23s prepare）。同步后端此前两次全套 1722s、1730s；这次另有一个写者的全套同时占着集群（它仍用同步后端），最长的 job `native-selfhost-tests` 远端 869s，所以 2233s 不是干净的对比，只能说明量级 |
-| 每 job 控制端额外占用 | 本控制端启动的 23 个 job：最少 28s、中位 52s、最多 113s、平均 53s（含排队等推送锁的启动，启动本身 11–60s、中位 15s，加等下一轮轮询）。它占的是 worker 名额，不在远端的 job 时长里 |
-
-### 不做的（理由）
-
-- **按 `crun logs` 或 `/run/crun/jobs/*.exit` 取结果。** 那是 crun 的内部布局，退出码也只是外层流水线的；认领目录与 `.exit` 在 prefix 里，由本仓的包装写，语义自己定。
-- **续跑时重跑没有片段的 job。** 任务单允许「重跑或判红」。重跑要先清掉认领与上次的制品目录，而没有片段通常意味着 job 本身坏了（或有人动了集群上的文件），悄悄重跑会把这件事藏起来；判红后整次再跑一遍即可。
-- **每个 job 一个轮询。** 推送由 crun 串行化，16 个 job 各自轮询会把推送排满；一个线程一次问完，轮询开销与 job 数无关。
-- **`anchor-readers.txt` 登记。** 新代码不按字面量读源码文本（只读 gates.yml 的计划与集群上的 JSON），不涉及。`steps_lock.py` 也不涉及：没有碰 gates.yml 的 run 行。
-
-## 多机分派（2026-10-04）
-
-### 为什么
-
-不带 `-m` 的零卡 `crun run` 一律落在 crun 的主力机上。10-04 晚六个写者各跑 `--jobs 8`，主力机（256 核）load 在 175–205 之间，另两台 H200（各 224 核）load 2–5。单个 job 从约 10 分钟拉到 20 分钟以上，一轮全套从约 20 分钟拉到约 65 分钟（当时六个控制端的全套墙钟 3358–3727s）；`--jobs 39` 时负载敏感的门禁（compiler-weight-contract 的 `sampling_targets_two_ms` 等）必红。
-
-### 先探清的三件事
-
-| 问题 | 做法 | 结果 |
-|---|---|---|
-| `-m` 时树推到哪 | 读 crun 源码，再从临时 staging 目录 `crun run -n 0 -m <机器>` | 控制端照旧先推到主力机的 `remote_root`，主力机上的内层 crun 再把同一路径 rsync 到目标机（`--no-sync` 只跳过这一步）；三台机器上路径相同 |
-| prefix 是否共享 | 三台各 `df` 一次 prefix 所在目录 | 不共享：各是本机磁盘。输入包、工具链、认领目录与片段都只在 job 所在的机器上 |
-| load 从哪读 | 同上 | 每次远端命令前加一行 `nproc` 与 `/proc/loadavg`，不另起探测 |
-
-### 做法
-
-- **机器集合。** `crun status` 列出的、有 GPU 行回来的机器，按出现顺序记为 A、B、C；字母与地址的对应只写在 `<out>/crun/machines.json`（本机），日志、`dispatch.txt`、认领目录里只出现字母。`--backend-opt machines=auto`（默认）用全部；`machines=N` 在 prepare 后留负载最低的 N 台；`machines=primary` 不带 `-m`，即旧行为。
-- **每台各自 prepare。** 并行地对每台跑一次「load 探测 → job uid 能否启动 prefix 的 python → `inputs.py verify`」。红了就把输入包送到那台：走 crun 自己的路线（推到主力机，主力机已有同一份所以几乎零字节；再由主力机集群内 rsync 过去），然后 `inputs.py install`。两台空机器各 63–64s（775 MiB），远小于从本机直推的 0.6 MB/s。送包串行，因为每次都推进主力机上同一个 `remote_root`。
-- **选机。** 每次启动挑 `(load + job-load × 近 90s 内本控制端在该机启动的 job 数) / 核数` 最小的一台。load 是最近一次轮询或 prepare 读到的 1 分钟均值；第二项补的是 1 分钟均值还没反映出来的新 job。不用轮转：其他控制端不轮转，轮转仍会把三分之一的 job 送到最热的那台。`job-load` 默认 4，来自实测（见下）。
-- **记录与轮询。** `dispatch.txt` 每行多一列 `machine <字母>`，认领目录里写一个 `machine` 文件。轮询按机器分组，每轮每台一次短 crun，并行发出，顺带带回该机 load（逐条记在本机 `<out>/crun/loads.txt`）。job 换了机器后，旧机器那一轮的状态按过期丢弃。
-- **续跑。** 读回 `machines.json`，在每台机器上把全部 job 轮询一次再合并：done 胜 running 胜 absent，同级取 `dispatch.txt` 最后记的那台；还在跑的就在它那台上等。
-- **掉机。** prepare 时不应答、job uid 用不了、或送包后仍验不过的机器，本次运行不用；运行中某台的轮询或启动连续 `dead-after`（默认 6，默认轮询下约 3 分钟）次失败就判掉线，它上面的 job 到别的机器重新启动。原机器上晚跑完的那份留在它自己的盘上，没人读。只有一台都不剩时整轮才失败。
-- **证据包不变。** 片段里没有机器信息；`toolchain` 由各 job 自报，跨机器不一致时照旧置 `null` 并记日志，这正是「换了在哪跑、没换跑什么」的核对。
-
-### 途中查出
-
-- **一台机器上 job uid 进不去 prefix。** 第一次多机全套，B 上 13 个 job 全部 `exit 127`：降权到 uid 20000 后加载 prefix python 的 `libpython` 报 Permission denied。原因是 prefix 上面一层目录在那台机器上是 700、属主是别的 uid；那不是我们的目录，不能改。所以 prepare 加了上面那步 uid 检查，B 因此在 prepare 就被摘掉，本节其余实测都是 A 加主力机两台。
-- **标记被 crun 的回显命中。** 第一版 uid 检查用 `"GATES-NOREACH" in stdout` 判，而 crun 会把要执行的命令原样回显在同一个 stdout 里，三台机器全被摘掉。改成整行匹配；桩 crun 也照样回显命令，这类错今后在桩自测里就红。
-
-### 实测（同一提交 6c85e112，origin/main，34 个 job、125 个 run 步骤）
-
-| 运行 | 墙钟 | complete | job 分布 | 各机 load 峰值 | 同时在跑的其他控制端 |
-|---|---|---|---|---|---|
-| 单机基线 `machines=primary --jobs 8` | **2096s** | true | 全在主力机 | 主力机 87 | 起跑 1 个，结束时 0 个 |
-| 多机 `--jobs 39`（`job-load=8`） | **949s** | true | A 21、主力机 13 | A 75，主力机 185 | 起跑 2 个，结束时 3 个 |
-| 多机 `--jobs 8`（`job-load=4`） | **2076s** | true | A 34、主力机 0 | A 47 | 起跑 3 个，结束时 1 个 |
-
-参照：当晚六个控制端各自单机 `--jobs 8` 的全套是 3358–3727s（不同提交）。
-
-- `--jobs 39` 全绿，包括 compiler-weight-contract（387s）与 docs（848s）。负载敏感门禁的修复不在本刀，这一轮绿是因为 A 只到 75/224；主力机那边同时有别人的 job，到 185/256。
-- `job-load` 原来是 8：A 在九次快速启动后就「显得满了」，13 个 job 去了起跑时 load 已 81 的主力机。主力机上的 job 平均 585s，A 上 386s，最长的五个都在主力机上。A 放了 21 个 job、峰值 75，约每 job 3.6，所以改为 4。
-- 单机基线与多机 `--jobs 8` 几乎一样（2096s 对 2076s，job 远端平均 378s 对 369s）：这两轮跑时别的控制端已基本收工，主力机只到 87/256，没有可躲的负载；`--jobs 8` 的墙钟由 8 路宽度与最长链决定。多机在 `--jobs 8` 上的收益只在主力机被别人压满时才出现，本节没有在那种条件下测到同一提交的对照，只有开头那组六控制端的 3358–3727s。
-- `--jobs 8` 多机时 8 个 job 全落 A：A 起跑 load 2.3，按 4 算要十几个并发 job 才追上主力机的 77/256，`--jobs 8` 到不了。这说明选机在按负载走，而不是在轮转。
-
-### 墙钟影响
-
-push-total 不变：这是外部后端，`gates.yml` 与任何工作流都没动。桩自测本机 24s → 31s（多了四种情形），它不在 CI 里。
-
-### 不做的（理由）
-
-- **改那台机器上 prefix 上层目录的权限。** 不是我们的目录，门禁运行只准写 prefix；摘掉那台机器即可。
-- **跨控制端的全局调度。** 其他控制端（旧工具）不带 `-m`，也不报计划；要全局调度就得在集群上放一个常驻协调者，与「集群侧是可丢弃镜像」相悖。按当前 load 选机已经把负载从最热的那台挪开。
-- **job 中途迁移。** 掉线机器上的 job 重新启动，不搬运半截结果；半截结果在那台盘上，读不到，也不可信。
-- **按 job 历史时长加权选机。** 需要入库或本机的时长台账，台账会过期；`job-load` 一个常数加 1 分钟均值已经够分流。
-- **探测机器时用 `crun status` 之外的路径。** 机器清单与可达性以 crun 自己的视图为准，后端不读它的配置文件，代码与日志里也就不会出现地址。
+不做的（理由）：改机器上 prefix 上层目录的权限（不是我们的目录，门禁运行只准写 prefix，摘掉那台机器即可）；跨控制端的全局调度（要放一个常驻协调者，与「外部侧是可丢弃镜像」相悖）；job 中途迁移（半截结果读不到也不可信）；按 job 历史时长加权选机（要有会过期的台账，一个常数加 1 分钟均值已经够分流）；读外部 runner 的配置文件取机器清单（后端只用它的状态视图，代码与日志里也就不会出现地址）。
 
 ### 依赖产物跨机器（2026-10-05）
 
-多机分派合入后，一个写者的全套 `complete = false`，唯一的红是 `mutant-shards-complete`：`builtin-type-3-3` 跑在另一台机器上，汇总 job 在自己那台的产物目录里找不到它的覆盖记录（分片本身是绿的）。每台机器的 prefix 是它自己的盘，产物只在 job 跑过的那台上。
+多机分派后，一个写者的全套 `complete = false`，唯一的红是 `mutant-shards-complete`：某个分片跑在另一台机器上，汇总 job 在自己那台的产物目录里找不到它的覆盖记录。每台机器的 prefix 是它自己的盘，产物只在 job 跑过的那台上。
 
-**依赖有哪些。** 计划里读别的 job 产物的只有一处：`gates.yml` 头部注释写明除 `plan` 外 job 之间不许 `needs:`，唯一例外是 `mutant-shards-complete`，它 `needs` 八个变异分片（`native-diff-1/2`、`syntax-mutants-3-1..3`、`builtin-type-3-1..3`），用 `download-artifact` 按 `mutant-coverage-*` 取它们 `upload-artifact` 上传的覆盖记录。没有别的共享路径：其余 job 只写自己的工作目录与 `RUNNER_TEMP`。
+计划里读别的 job 产物的只有一处：`gates.yml` 头部注释写明除 `plan` 外 job 之间不许 `needs:`，唯一例外是 `mutant-shards-complete`，它 `needs` 八个变异分片，用 `download-artifact` 按 `mutant-coverage-*` 取它们 `upload-artifact` 上传的覆盖记录。
 
-**做法：产物随结果回到控制端，再随启动送到需要它的机器（任务单的 (b)）。** 轮询报告一个 job 结束时，顺带把它上传的产物打成 tar.gz（名字取计划里上传步骤字面的 `name:`；名字是表达式的，prepare 时拒绝，不猜），控制端留着。启动一个带 `needs` 的 job 时，凡它需要的 job 跑在别的机器上，就把那份 tar 放进 staging 目录的 `xfer/<run>/`，随 crun 每次启动本来就有的推送到达目标机；包装在 run-job 之前把它解进本次运行的产物目录，并把新建的目录交给 job 的 uid（那个目录若由 root 先建，job 就写不进片段）。同一台机器上的依赖不搬。`--resume` 时，前一个控制端已收完的 job 的产物在 prepare 那次轮询里一并取回。
+做法：产物随结果回到控制端，再随启动送到需要它的机器。轮询报告一个 job 结束时，顺带把它上传的产物打成 tar.gz（名字取计划里上传步骤字面的 `name:`；名字是表达式的，prepare 时拒绝，不猜），控制端留着；启动一个带 `needs` 的 job 时，凡它需要的 job 跑在别的机器上，就把那份 tar 随启动送去，在 run 步骤之前解进本次运行的产物目录。同一台机器上的依赖不搬。`--resume` 时，前一个控制端已收完的 job 的产物在 prepare 那次轮询里一并取回。桩自测现在照本地后端的样子上传与下载，干净运行要求至少一个被需要的 job 与汇总 job 不在同一台桩机器上；用旧后端跑这里就红。
 
-**为什么不把依赖闭包钉在一台机器上（(a)）。** 八个分片是全套里最长的一批 job 之一，钉在一起正好重建多机分派要拆掉的集中；而且得在第一个分片启动时就定机器，那时离汇总 job 启动还早，负载早变了。搬产物的代价是每个分片几 KiB 的覆盖记录，走的是已有的轮询与推送，不多一次 crun。
-
-**桩自测。** 桩 python 现在照本地后端的样子上传与下载：上传写 `artifacts/<name>/`，下载时若所需 job 上传的某个产物不在本机，后面的 run 步骤全部退出 1。干净运行另要求至少一个被需要的 job 与汇总 job 不在同一台桩机器上（实测 8 个里 6 个跨了）。用旧后端跑，干净运行在这里就红（汇总 job FAILED）；用新后端全绿。
-
-**不做的。** 把产物放到主力机上一个共享位置再分发：多一跳，也多一个要清理的公共目录；控制端本来就逐个收 job 的结果，顺带收产物最省。按 `download-artifact` 的 pattern 取全部产物：只取所需 job 上传的，避免把别的还在上传中的 job 的半截目录带过去。
+不做的：把依赖闭包钉在一台机器上（八个分片是全套里最长的一批，钉在一起正好重建多机分派要拆掉的集中）；把产物放到一个共享位置再分发（多一跳，也多一个要清理的公共目录）。
 
 ## PR 与 main 上的证据档（2026-09-25）
 
@@ -592,11 +512,11 @@ PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全
 
 ### 为什么 rebase 后的 sha 要重跑
 
-证据是签给**一个提交**的：bundle 的 `tree` 是那个 sha，`gates_blob` 是那个 sha 上的 `gates.yml`，tree-policy 还会回读到上一个 tag 为止的提交历史（`Emit-Change`、`Anchor-Change` 声明），所以门禁结论依赖历史，不只依赖树。rebase 之后头提交换了，新 sha 上没有 status，plan 照常走子集或全集。这正是想要的：维护者 PR 的首轮（最贵、最可能红）由集群裁，rebase 之后的最终 sha 在 GitHub 上跑一次；按树认证据不成立，理由同上。「rebase 轮不重跑集群」的规矩不变。
+证据是签给**一个提交**的：bundle 的 `tree` 是那个 sha，`gates_blob` 是那个 sha 上的 `gates.yml`，tree-policy 还会回读到上一个 tag 为止的提交历史（`Emit-Change`、`Anchor-Change` 声明），所以门禁结论依赖历史，不只依赖树。rebase 之后头提交换了，新 sha 上没有 status，plan 照常走子集或全集。这正是想要的：维护者 PR 的首轮（最贵、最可能红）由外部 runner裁，rebase 之后的最终 sha 在 GitHub 上跑一次；按树认证据不成立，理由同上。「rebase 轮不重跑外部 runner」的规矩不变。
 
 ### 为什么 fork PR 不变
 
-维护者不会对 fork 代码跑集群（集群多人共用，任务以维护者身份执行），fork 的头提交永远没有 `gates/maintainer`，plan 读不到证据就照旧规划。fork PR 的只读 token 本来就能读公开仓库的 status 与 run，不需要 `pull_request_target`。`publish.py --rerun-ci` 只重跑 `head_repository` 是本仓的运行。
+维护者不会对 fork 代码跑外部 runner（它多人共用，任务以维护者身份执行），fork 的头提交永远没有 `gates/maintainer`，plan 读不到证据就照旧规划。fork PR 的只读 token 本来就能读公开仓库的 status 与 run，不需要 `pull_request_target`。`publish.py --rerun-ci` 只重跑 `head_repository` 是本仓的运行。
 
 ### 时序：publish 之后自动重跑 ci（第 2 刀）
 
@@ -614,7 +534,7 @@ PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全
 - `release_evidence.py --selftest`：`--external-only` 8 例（接受、不查 ci、无 status、个人账户、`target_url` 指向 `ci.yml` 的 run、pending、被 failure 覆盖、API 不可读退出 2）；默认模式加 3 例与一条单独断言（证据档运行不算第 1 条）。
 - `plan.py --selftest`：从 `gates.yml` 取出 plan job 的两步 shell，桩 `gh` 下跑 8 例（其中 push 两例：`head` 为空、以及带 `head` 且证据可接受，都必须不调 `gh`、照常规划）；接受时规划步的 `GITHUB_OUTPUT` 必须恰为 `all=false\njobs=[]\n`，其余必须落到规划器并在日志里写出原因。`--check-wiring` 新增 5 个变异体：`ci.yml` 不传 `head`、`ci.yml` 无条件传 `head`、删掉证据步骤、plan job 丢 `statuses: read`、`ci.yml` 的 test job 丢 `actions: read`。
 - `publish.py --selftest`（及只跑这一半的 `--selftest-rerun-ci`）：`--rerun-ci` 6 例加一条顺序断言（verify 失败不重跑；status 被拒不重跑；无 ci 运行只提示；只有 push 运行也只提示；在跑的先取消、等落定、再重跑；只重跑本仓最新一次 PR 运行，不碰 fork 与 push 的）。
-- `release_evidence.py --selftest` 与 `publish.py --selftest-rerun-ci` 进 tree-policy 的新一步（本地 0.03 s 与 0.13 s），`steps.lock.json` 相应多两条。不放完整的 `publish.py --selftest`：它的签名那一半调 `ssh-keygen`，而外部运行以没有 passwd 条目的 uid 执行（第 3b′ 刀），`ssh-keygen` 在那里报 `No user exists for uid ...` 退出 255；第一次集群全套就是因此 `complete=false`。
+- `release_evidence.py --selftest` 与 `publish.py --selftest-rerun-ci` 进 tree-policy 的新一步（本地 0.03 s 与 0.13 s），`steps.lock.json` 相应多两条。不放完整的 `publish.py --selftest`：它的签名那一半调 `ssh-keygen`，而外部运行以没有 passwd 条目的 uid 执行（第 3b′ 刀），`ssh-keygen` 在那里报 `No user exists for uid ...` 退出 255；第一次外部 runner 全套就是因此 `complete=false`。
 
 ### 不做的（理由）
 
@@ -671,12 +591,12 @@ PR 上的 plan 跑的是 PR 自己的代码，恶意 PR 改掉这一步就能全
 - **自动触发。** `publish.py` 之后派发工作流是手动的一步（脚本替维护者执行 `gh workflow run`）。不做推 `refs/notes/gates` 时自动触发：Actions 的 `push` 触发器按分支与 tag 过滤，推 notes ref 能否可靠地触发工作流没有实测；更要紧的是，自动触发意味着任何能推 notes 的人都能让 runner 替他写 status，而派发是一个需要写权限、留在 Actions 记录里的显式动作。
 - **发布红的证据。** `publish.py` 拒绝 `complete` 不为 true 的包。签名的「门禁没过」不能让任何人做任何事，没有绿 status 已经说明了这一点。
 - **多钥与轮换过渡期。** `allowed_signers` 只有一行。换钥即改这一行，旧 note 从此核不过；要保留旧证据的可核验性，需要按时间段接受多把钥，等真的换钥时再说。
-- **crun 后端占卡。** crun 后端只用零卡运行（`-n 0`）。`gates.yml` 今天没有 GPU 门禁（tile 的 GPU 差分在 `tile.yml`，不在本刀范围）。
-- **在集群上建用户。** 非 root 执行（第 3b′ 刀）用的是没有 passwd 条目的 uid；建用户要写 `/etc/passwd`，在 prefix 外。
+- **远端后端占卡。** 远端后端只用零卡运行。`gates.yml` 今天没有 GPU 门禁（tile 的 GPU 差分在 `tile.yml`，不在本刀范围）。
+- **在外部 runner 上建用户。** 非 root 执行（第 3b′ 刀）用的是没有 passwd 条目的 uid；建用户要写 `/etc/passwd`，在 prefix 外。
 - **时长字段。** 证据包不记时长。时长是机器画像的一部分（核数、负载、邻居），不是树的性质；它也无法被验证者复核。本地计时写在 `summary.json`，只给跑的人看。
 - **把 `/tmp/gate-emit` 改掉。** 任务单明确本刀不改仓库源码，且 #168 正在改 `gates.yml`；列进上一节。（8097 与 `fuser -k` 已由 #173 改掉。）
 - **解析复合 action 并逐步替换其内部步骤。** 复合 action 的内部是 GraalVM 下载与缓存，没有门禁；整体替换加指纹更简单，也更早暴露变化。
-- **宿主的 glibc 运行时。** 第 5 刀的 sysroot 只管链接；链出的程序运行时仍用宿主的 `libc.so.6`（集群 2.35，本机 2.39），与 git、bash 一样是宿主的。把 glibc 也带进来要连动态加载器一起带，那是容器镜像的事。
+- **宿主的 glibc 运行时。** 第 5 刀的 sysroot 只管链接；链出的程序运行时仍用宿主的 `libc.so.6`（外部 runner 2.35，本机 2.39），与 git、bash 一样是宿主的。把 glibc 也带进来要连动态加载器一起带，那是容器镜像的事。
 - **`clang` 与 binutils 的无前缀名。** 输入包的 `bin/` 上 PATH 的只有 gcc 的名字（`cc`、`gcc`、`cpp`、`gcov*`、`gcc-ar/nm/ranlib`），binutils 只有 `x86_64-conda-linux-gnu-*` 前缀名，gcc 自己按相对路径找 `as`、`ld`。门禁里直接调的 binutils 只有 `release-native.sh` 的 `readelf`（只读检查产物的 ELF 头），用宿主的；`clang` 只在 `DAWN_WASM_CC` 未设时作 wasm 的默认值，而 `wasm-target` 总会设它。
 - **node 版本与 `lts/*`。** `docs` job 在 CI 上用 `setup-node` 的 `lts/*`，按任务单这里钉的是 20 LTS；两者不一定相同，证据包如实记录 `node` 字段。
-- **覆盖 `tile.yml`、`editor-grammar.yml`、`nightly.yml`。** 任务单的范围是 `gates.yml`。前两个是按路径触发的门禁工作流，`tile.yml` 需要 GPU；把它们纳入是 crun 后端那一刀的事。
+- **覆盖 `tile.yml`、`editor-grammar.yml`、`nightly.yml`。** 任务单的范围是 `gates.yml`。前两个是按路径触发的门禁工作流，`tile.yml` 需要 GPU；把它们纳入是远端后端那一刀的事。

@@ -97,7 +97,7 @@ matmul 64³ −26.5%、128 级 +45%→−17.7% 这些数只在 §6.26 的 Markdo
 - 只改 `site/`（`gen/gpu.dawn`、`pages/gpu.md`、`gpu.zh.md`、`assets/gpu.js`、`assets/style.css`）与本文、`docs/README.md`
   索引一行；**不碰 TILE_PATHS**（`kernels.dawn` 只读）。
 - 本机：`dawn test site`、`site/build.sh`（带 `DAWN_SITE_PLAY_ORIGIN`、`DAWN_WASM_CC=clang-20`）、fmt、doc-check、
-  gatemap 列出的其余本机项；静态服务下桌面与手机宽度截图。集群全套 `--jobs 8`。
+  gatemap 列出的其余本机项；静态服务下桌面与手机宽度截图。外部 runner全套 `--jobs 8`。
 - 新测试：四张卡片的源码等于 `kernels.dawn` 里同名函数 / 派发臂；臂里 trace 的就是卡片的函数；`keepdims` 链接指向的
   调用确实在 `flash_attn.map` 里；两份文案 key 相同。
 

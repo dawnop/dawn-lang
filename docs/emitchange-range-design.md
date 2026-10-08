@@ -28,7 +28,7 @@
 |---|---|---|---|
 | pull_request（检出的是合并引用） | `HEAD^1` | `HEAD^1..HEAD^2` | 不能用 merge-base：合并引用里有 main 新提交，会把别人的改动算到本 PR 头上 |
 | push | 事件的 `before`（从 `$GITHUB_EVENT_PATH` 读） | `before..HEAD` | rebase 合并保留消息，声明随提交走；`before` 为零或不是祖先时退到 `HEAD^`，大声打印 `delta base fell back` |
-| 集群证据 / 本地 | `merge-base(origin/main, HEAD)` | `base..HEAD` | HEAD 不含 main 新提交，merge-base 正确；HEAD 已在 main 里时退到 `HEAD^` |
+| 外部 runner证据 / 本地 | `merge-base(origin/main, HEAD)` | `base..HEAD` | HEAD 不含 main 新提交，merge-base 正确；HEAD 已在 main 里时退到 `HEAD^` |
 | `EMITCHANGE_BASE_REF=<rev>` | 该 rev | `rev..HEAD` | 覆盖以上三条，供验收与排查 |
 
 `workflow_call` 下 `GITHUB_EVENT_NAME` 仍是调用方（ci.yml）的事件，所以不用把表达式传进 `run:`（外部 runner 不建模 `run:` 里的表达式）。
@@ -52,8 +52,8 @@
 - `prev-diff-native` 里以 native 为被测的 fmt / lsp（`native-cli-diff.sh`）只有窗口检查。native fmt 已被钉到 JVM HEAD 字节，等价于传递覆盖；
   **native lsp 仍然窗口失明**，单列为后续「native lsp == JVM HEAD lsp」同 HEAD 比较。
 - `Param-Change`（`selfhost-param-diff.sh`）同构，**同刀一起做了**：它读的是同一个 `seed_jar` / `seed_std_dir`，覆盖后只需把声明区间换成 `EMITCHANGE_RANGE`。
-- 外部集群证据档：证据 runner 的仓库是 bundle 克隆，原来只带 `gates-tree` 与 tag，没有 main，范围检查解析不出基。
-  `backend_crun.py` 的 `_make_bundle` 现在把源仓库的 `origin/main` 作为 `refs/heads/main` 一并打进 bundle（没有 `origin/main` 就不带，范围检查会明确失败并要求 `EMITCHANGE_BASE_REF`，不猜）。
+- 外部 runner 证据档：证据 runner 的仓库是 bundle 克隆，原来只带 `gates-tree` 与 tag，没有 main，范围检查解析不出基。
+  外部 backend 的 `_make_bundle` 现在把源仓库的 `origin/main` 作为 `refs/heads/main` 一并打进 bundle（没有 `origin/main` 就不带，范围检查会明确失败并要求 `EMITCHANGE_BASE_REF`，不猜）。
   基随之是证据档写者的 `origin/main` 与 sha 的 merge-base。
 
 ## 防止这条检查静默失效
