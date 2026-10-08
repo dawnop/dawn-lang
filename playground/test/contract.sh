@@ -102,6 +102,14 @@ if curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
   echo "FAIL: something already listens on $PORT (stale server?)"; exit 1
 fi
 
+# Leftovers from an earlier runner: one the startup sweep can remove, and one
+# it cannot (a read-only directory with a file in it, the shape the sandbox's
+# transient uid left in box/classes). The sweep must take the first, keep the
+# second, and say so in the log instead of ignoring it.
+mkdir -p "$WORK/dawn-play-stale-ok/box/classes" "$WORK/dawn-play-stale-locked/box/classes"
+: >"$WORK/dawn-play-stale-ok/box/classes/A.class"
+: >"$WORK/dawn-play-stale-locked/box/classes/A.class"
+chmod 0555 "$WORK/dawn-play-stale-locked/box/classes"
 LOG=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test.XXXXXX")
 # The runner starts in a session (and so a process group) of its own, whose id
 # is its pid: `dawn run` executes the program in a child JVM that outlives its
@@ -155,6 +163,16 @@ if [ -n "$waited" ]; then
   exit 1
 fi
 echo "runner answered /health after $(($(date +%s) - wait_started))s"
+
+sweep_ok=1
+[ ! -e "$WORK/dawn-play-stale-ok" ] || { echo "FAIL: the startup sweep left a removable stale directory"; sweep_ok=0; }
+[ -e "$WORK/dawn-play-stale-locked" ] || { echo "FAIL: the sweep removed a directory the test made undeletable?"; sweep_ok=0; }
+grep -q "removed 1 stale request directories" "$LOG" || { echo "FAIL: the sweep did not log its count"; sweep_ok=0; }
+grep -q "cannot remove stale .*dawn-play-stale-locked" "$LOG" || { echo "FAIL: the sweep did not log the directory it could not remove"; sweep_ok=0; }
+chmod 0755 "$WORK/dawn-play-stale-locked/box/classes"
+rm -rf "$WORK/dawn-play-stale-locked"
+[ "$sweep_ok" = 1 ] || { tail -n 20 "$LOG"; exit 1; }
+echo "  ok  the startup sweep removes stale request directories and logs what it cannot"
 
 pass=0
 fail=0
