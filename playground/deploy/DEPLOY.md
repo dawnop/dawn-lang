@@ -142,7 +142,7 @@ by hand, with the server reachable.
 
 ```sh
 ./scripts/release-native.sh -o dawnc-linux-x86_64  # or reuse CI's artifact
-playground/deploy/redeploy.sh      # sync jar/native/gateway, restart, health-check
+DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh  # sync jar/native/gateway, restart, health-check
 scripts/play-live-check.py         # then verify what is actually deployed
 ```
 
@@ -151,7 +151,9 @@ status: `deploy/lsp-smoke.py` performs the WebSocket handshake, initializes the
 real sandboxed native server, opens the fixed scratch buffer, waits for a
 diagnostics notification and completes the close handshake.
 
-`redeploy.sh` does **not** install the primary systemd units; when
+`redeploy.sh` refuses to run unless `DAWN_DEPLOY_COMMIT` is the full sha of its own
+checkout's HEAD and tracked files are clean (before any build or ssh). It does
+**not** install the primary systemd units; when
 `dawn-play.service`, `dawn-play-lsp.service` or the slice changes, copy it to
 `/etc/systemd/system/`, `daemon-reload` and restart by hand. The one exception
 is the native canary pair (next section), which it installs itself. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` selects an already verified
@@ -224,7 +226,7 @@ off it, next to the compiler):
 
 ```sh
 ./dawnc-linux-x86_64 build playground/native -o dawn-play-linux-x86_64
-DEPLOY_USER=<server login> playground/deploy/redeploy.sh
+DEPLOY_USER=<server login> DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh
 ```
 
 Before it ships anything it asks the binary for `/health` with this tree's

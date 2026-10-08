@@ -730,6 +730,7 @@ def deployment_contract():
     ) == 1
     assert '*) NATIVE_BIN="$PWD/$NATIVE_BIN" ;;' in redeploy
     assert 'NATIVE_VERSION=$("$NATIVE_BIN" version)' in redeploy
+    commit_guard_contract(redeploy)
     sample_deployment_coupling(redeploy, measure_harness)
     sample_deployment_negative_controls(redeploy, measure_harness)
     # The unit is present on the production host, so only the other branch can
@@ -931,6 +932,98 @@ def remote_restart_contract():
         lambda: assert_health_budget(no_retry),
     )
     ok("attempt-count, retry-bound, timeout and health-ceiling mutants turn red")
+
+
+COMMIT_GUARD_START = 'repo="$(cd "$(dirname "$0")/../.." && pwd)"'
+COMMIT_GUARD_END = 'cd "$repo"\n'
+
+
+def commit_guard_block(redeploy):
+    """redeploy.sh's commit-match guard: from the repo resolution to `cd "$repo"`."""
+    start = redeploy.index(COMMIT_GUARD_START)
+    return redeploy[start:redeploy.index(COMMIT_GUARD_END, start) + len(COMMIT_GUARD_END)]
+
+
+def run_commit_guard(block):
+    """Run the guard as playground/deploy/redeploy.sh of a scratch git repo.
+
+    Returns {case: (exit status, output)}. The script prints PROCEEDED after
+    the guard; cwd is a directory outside the repo, because the guard must not
+    depend on $PWD. No network is involved: the script is only the guard.
+    """
+    with tempfile.TemporaryDirectory(prefix="dawn-commit-guard-") as temp:
+        repo = os.path.join(temp, "repo")
+        deploy = os.path.join(repo, "playground", "deploy")
+        os.makedirs(deploy)
+        script = os.path.join(deploy, "redeploy.sh")
+        with open(script, "w", encoding="utf-8") as stream:
+            stream.write("#!/usr/bin/env bash\nset -euo pipefail\n" + block + "echo PROCEEDED\n")
+        with open(os.path.join(repo, "tracked.txt"), "w", encoding="utf-8") as stream:
+            stream.write("a\n")
+        git_env = {"PATH": "/usr/bin:/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t", "HOME": temp}
+        for args in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "x"]):
+            subprocess.run(["git", "-C", repo] + args, env=git_env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], env=git_env,
+                              check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+        elsewhere = os.path.join(temp, "elsewhere")
+        os.makedirs(elsewhere)
+
+        def go(commit):
+            env = dict(git_env)
+            if commit is not None:
+                env["DAWN_DEPLOY_COMMIT"] = commit
+            r = subprocess.run(["bash", script], env=env, cwd=elsewhere, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, timeout=10)
+            return r.returncode, r.stdout
+
+        out = {"unset": go(None), "short": go(head[:12]), "mismatch": go("0" * 40),
+               "match": go(head)}
+        with open(os.path.join(repo, "tracked.txt"), "w", encoding="utf-8") as stream:
+            stream.write("b\n")
+        out["dirty"] = go(head)
+        out["head"] = head
+        return out
+
+
+def assert_commit_guard(block):
+    r = run_commit_guard(block)
+    for case in ("unset", "short", "mismatch", "dirty"):
+        status, text = r[case]
+        assert status == 1 and "refusing to deploy" in text and "PROCEEDED" not in text, (case, r[case])
+    # A short sha is refused as malformed, not merely as unequal to HEAD.
+    assert "full 40-hex" in r["short"][1] and "full 40-hex" in r["unset"][1], r
+    assert "full 40-hex" not in r["mismatch"][1] and "not the requested commit" in r["mismatch"][1], r
+    assert "uncommitted changes" in r["dirty"][1], r["dirty"]
+    assert "0" * 40 in r["mismatch"][1] and r["head"] in r["mismatch"][1], r["mismatch"]
+    assert r["match"] == (0, "PROCEEDED\n"), r["match"]
+
+
+def commit_guard_contract(redeploy):
+    block = commit_guard_block(redeploy)
+    assert_commit_guard(block)
+    # The guard runs before the first build or ssh of the script.
+    assert redeploy.index(COMMIT_GUARD_END) < redeploy.index("./bin/dawn --version")
+    assert redeploy.index(COMMIT_GUARD_END) < redeploy.index("ssh ")
+    ok("redeploy.sh refuses an unset, short, mismatched or dirty deploy commit and proceeds on a match")
+    expect_contract_red(
+        "commit comparison removed",
+        lambda: assert_commit_guard(mutate_once(block, '[ "$have_commit" != "$want_commit" ]', "false")),
+    )
+    expect_contract_red(
+        "dirty-tree check removed",
+        lambda: assert_commit_guard(mutate_once(block, '[ -n "$(git -C "$repo" status', '[ -n "$(echo ""; : ')),
+    )
+    expect_contract_red(
+        "short sha accepted",
+        lambda: assert_commit_guard(mutate_once(block, "{40}", "{4,40}")),
+    )
+    expect_contract_red(
+        "repo resolved from the working directory",
+        lambda: assert_commit_guard(mutate_once(block, 'git -C "$repo" rev-parse HEAD', "git rev-parse HEAD")),
+    )
+    ok("commit-guard mutants turn red")
 
 
 NATIVE_GUARD_START = 'NATIVE_VERSION=$("$NATIVE_BIN" version)\n'

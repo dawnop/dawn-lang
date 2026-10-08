@@ -87,7 +87,7 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    `scripts/repo.env` 的 `DAWN_GITHUB_REPO` 一行；仓库换组织时改这一行，信任仍由摘要表决定，
    与 URL 无关。
    推进完成后接着部署，同样以这个 tag 为准：在 tag 的检出上先跑
-   `playground/deploy/redeploy.sh`，再跑 `DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
+   `DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh`，再跑 `DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com DAWN_WASM_CC=clang-20 ./site/redeploy.sh`。
    站点曾因部署与发版脱钩，在 v0.78.0 已拒绝 `$name` 插值后仍教了三周旧写法。
    下面的链条表记的是**种子形态变过的那几环**，不是每一次 bump——每次 bump 的记录
    就是上述三文件和它们的提交，再抄一遍只会过期（这张表一度写着「逐条记」，却停在
