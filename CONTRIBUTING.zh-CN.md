@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ 706ca3c53527b591 -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ 7a27c6ae6a32a1d2 -->
 
 # 怎么在这个仓库里做事
 
@@ -156,7 +156,7 @@ tag 指向的 commit 上绿过，上面那句「等 main CI 通过」买的就�
   - **判据 2（问询，`Option`/`Bool`）** 的词是 `get`：越界/缺席是调用方要分的正常分支。
     `list.get`、`map.get`、`index_of` 族。
   - **判据 3（钳位，永不 panic）** 是区间函数：`slice`、`take`、`drop`、`seek`。参数是
-    一个**区间或落点**，说的是「要这一段里有的部分」，不断言端点存在。
+    一个**区间或落点**，说的是「要这一段里有的部分」，不断言端点存在。往缓冲里**写**的区间操作不属于这一档：它们不钳位，越界写入 panic。
   一个名字**不能同时扛两条政策**。`cursor.at` 曾经是钳位的、`str.at` 是 panic 的，
   同一个词的含义取决于读者当时在哪个模块里——那不是取舍，是缺陷；解法是改名
   （`cursor.at` → `cursor.seek`），不是把两者统一到一条政策上，因为两者各自都是对的。
