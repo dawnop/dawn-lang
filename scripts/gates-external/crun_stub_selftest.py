@@ -213,6 +213,8 @@ def stub_crun(argv):
     # job-uid check answers what that machine's fault list says.
     reach = "false" if f"noreach={host}" in os.environ.get("STUB_FAULTS", "").split(",") else "true"
     command = [re.sub(r"setpriv .*? -c pass \|\|", f"{reach} ||", part) for part in command]
+    command = [re.sub(r"setpriv [^|]*? /bin/sh -c '[^']*'.*? \|\|", f"{reach} ||", part)
+               for part in command]
     # nor give files away: the wrapper's chown segments become no-ops
     command = [re.sub(r"chown (-R )?\d+:\d+ [^;]*;", "true;", part) for part in command]
     if detach:
@@ -407,9 +409,32 @@ def self_test(repo, sha):
         if done.returncode != 0 or world.bundle("machine-out-of-reach") != reference:
             failures.append(f"a machine the job uid cannot use: exit {done.returncode}, "
                             "bundle differs")
+        if (root / "out-machine-out-of-reach" / "crun" / "inputs-ship-B.txt").exists():
+            failures.append("the input pack was shipped to a machine the job uid cannot reach")
         running = next((line for line in log.splitlines() if "running on" in line), "")
         if "machine B dropped from this run: uid" not in log or " B (" in running:
             failures.append("a machine the job uid cannot use was not dropped")
+
+        # The same machine with an empty prefix: nothing to run python from,
+        # so the old order shipped the whole input pack first and only then
+        # found the uid locked out. No ship may be recorded.
+        tool = world.roots[1] / "toolchain"
+        aside = world.roots[1] / "toolchain.aside"
+        tool.rename(aside)
+        try:
+            done = world.run("empty-out-of-reach", "noreach=stub-b")
+        finally:
+            if tool.exists():
+                shutil.rmtree(tool)
+            aside.rename(tool)
+        log = (root / "log-empty-out-of-reach.txt").read_text()
+        if done.returncode != 0:
+            failures.append(f"an unreachable machine with an empty prefix: exit {done.returncode}")
+        if (root / "out-empty-out-of-reach" / "crun" / "inputs-ship-B.txt").exists():
+            failures.append("the input pack was shipped to an unreachable machine with an "
+                            "empty prefix")
+        if "machine B dropped from this run: uid" not in log:
+            failures.append("an unreachable machine with an empty prefix was not dropped")
 
         done = world.run("machine-never-answers", "down=stub-c@0")
         log = (root / "log-machine-never-answers.txt").read_text()
