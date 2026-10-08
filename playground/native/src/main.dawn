@@ -1,0 +1,26 @@
+# The native entry of the Playground runner: the same routes as the long-lived
+# server (../src/main.dawn) behind a main that imports nothing from `web` and
+# nothing that needs Java, so `dawnc build playground/native` makes the binary
+# the socket-activated unit runs (docs/playground-native-runner-design.md, K3).
+#
+# It is its own project, depending on `playground` for the `play/*` modules,
+# because a project has exactly one entry and the JVM server's main imports
+# the web framework, which sits on `use java`. Only the modules this file
+# reaches are compiled, so the framework and the JVM host (play/jvmhost)
+# the dependency also holds are never read.
+#
+#   dawn-play serve        answer the one HTTP request on stdin, then exit
+#   dawn-play job <dir>    the child the flock gate starts (play/gate)
+use std/io
+use std/io.{with_exit_real}
+use playground/play/serve.{serve_one, serve_job}
+
+pub fn main() -> Unit !io =
+  match args() {
+    ["serve", ..] -> serve_one()
+    ["job", dir] -> serve_job(dir)
+    _ -> {
+      io.eprintln("usage: dawn-play serve | dawn-play job <dir>")
+      with_exit_real(() => io.exit(2))
+    }
+  }
