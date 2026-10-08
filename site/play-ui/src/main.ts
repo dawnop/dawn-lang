@@ -137,7 +137,7 @@ function mount(root: HTMLElement) {
   version.title = 'The compiler release the run service uses'
   const viewBtn = el('button', 'dp-share dp-viewtoggle', 'C / JVM')
   viewBtn.type = 'button'
-  viewBtn.title = 'Show the C and JVM code this program compiles to; click a call to follow it'
+  viewBtn.title = 'Show the C and JVM code this program compiles to (and Tile IR for a tileir program); click a call to follow it'
   viewBtn.setAttribute('aria-controls', 'dp-view')
   viewBtn.setAttribute('aria-expanded', 'false')
   const shareBtn = el('button', 'dp-share', 'Share')
