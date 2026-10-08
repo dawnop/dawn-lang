@@ -118,7 +118,12 @@ by hand, with the server reachable.
 8. **nginx**: add `nginx-play.conf`'s locations into the existing
    `server { server_name dawn-lang.dawnop.com; … }`, and all listed
    `limit_req_zone` / `limit_conn_zone` declarations into `http { … }`. Then
-   `nginx -t && systemctl reload nginx`. `/api/lsp` must preserve the browser's
+   `nginx -t && systemctl reload nginx`. The shipped snippet routes `/api/run`,
+   `/api/check` and `/api/compile` to the runner, each with its own zone
+   (`playrun`, `playcheck`, `playcompile`); a missing `/api/compile` location
+   answers 404 from the static site, not from the runner. The `playcompile`
+   rate (30r/m, burst 6) is provisional until a week of access-log data.
+   `/api/lsp` must preserve the browser's
    `Origin` and `Sec-WebSocket-Protocol: dawn-lsp-v1` headers and rewrite to the
    gateway's loopback-only `/lsp` route, as the shipped snippet does.
 
