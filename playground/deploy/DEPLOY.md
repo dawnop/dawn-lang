@@ -67,7 +67,12 @@ by hand, with the server reachable.
    ```
    The runner's `main.dawn` imports the `web`/`json` packages by path
    (`playground/dawn.toml` → `../packages`), so `packages/` must sit beside
-   `playground/` — `redeploy.sh` syncs both.
+   `playground/` — `redeploy.sh` syncs both. The Tile IR view (`POST /compile`
+   with `target: "tile"`) points a generated project at `packages/tileir` and
+   `packages/tileref` there too: `PLAY_PACKAGES` names the directory and
+   defaults to `/opt/dawn/packages`, which is where the sync puts it, so the
+   unit file needs no new line. The runner checks both manifests exist at start
+   and answers that target with 503 when they do not.
 
 4. **Work root** — per-request dirs live here, NOT under /tmp (DynamicUser
    implies a private /tmp that can't bind a /tmp work dir). Parents are `0711`
