@@ -1,0 +1,72 @@
+# The long-lived server's host: a job runs in the same process under an
+# in-process permit, and answers are kept in a process-local cache. This is the
+# one module of the runner that still needs the JVM (a `Semaphore`, and the
+# cache's `HashMap`); main.dawn imports it and serve does not, so `dawnc build`
+# of the serve entry never sees a `use java`. See play/host for why the
+# entries differ here and nowhere else.
+#
+# A global concurrency gate. Each /run acquires a permit before compiling and
+# releases it after; excess requests get 429 rather than piling compilers onto a
+# 4-core box. The Semaphore is a plain Java object shared across request threads.
+use java "java.util.concurrent.Semaphore"
+use java "java.util.concurrent.TimeUnit"
+use play/host.{Host}
+use play/job.{exec_job}
+use play/cache.{new_cache, cache_get, cache_put}
+
+# One shared instance for the process. `fair=true` keeps queued requests in order.
+pub fn new_gate(permits: Int) -> Semaphore !io = Semaphore.new(permits, true)
+
+# Try to take a permit, waiting up to `wait_secs`. False means the server is
+# saturated — the caller should answer 429.
+pub fn try_enter(gate: Semaphore, wait_secs: Int) -> Bool !io =
+  gate.tryAcquire(wait_secs, TimeUnit.valueOf("SECONDS").expect("seconds"))
+
+pub fn leave(gate: Semaphore) -> Unit !io = gate.release()
+
+# Run `body` while holding a permit, waiting up to `wait_secs` to acquire one.
+# None means the gate was saturated and the caller should answer 429. The permit
+# is released even if `body` panics: execute() can panic on a compiler-internal
+# bug, and without a finally that permit leaks — after `permits` such panics the
+# gate wedges shut and every later request 429s. The bracket is that finally,
+# and it re-raises the original failure rather than a copy of its message, so
+# the caller still sees the framework's 500 path (spec §9.8) unchanged. The
+# permit spans `body` only — callers render the reply after with_gate returns.
+pub fn with_gate[T](gate: Semaphore, wait_secs: Int, body: fn() -> T !io) -> Option[T] !io =
+  if try_enter(gate, wait_secs) {
+    with permit <- bracket(gate, leave)
+    Some(body())
+  } else {
+    None
+  }
+
+## The host of the long-lived server: `permits` at once, and an answer cache
+## of at most `entries` answers and `chars` characters.
+pub fn jvm_host(permits: Int, entries: Int, chars: Int) -> Host !io = {
+  let gate = new_gate(permits)
+  let cache = new_cache(entries, chars)
+  Host {
+    call: (wait, job) => with_gate(gate, wait, () => exec_job(job)),
+    keep_get: key => cache_get(cache, key),
+    keep_put: (key, text) => cache_put(cache, key, text),
+  }
+}
+
+test "with_gate releases the permit even when body panics" {
+  let gate = new_gate(1)
+  # with_gate re-raises the body's panic after releasing; catch it so the test
+  # survives, then prove the single permit came back by acquiring it again.
+  # body is Never (panic), so T can't be inferred from it — pin it via the annotation
+  let first: Result[Option[Int], ForeignError] = catch_panic(() => with_gate(gate, 0, () => panic("boom")))
+  assert match first { Ok(_) -> false, Err(_) -> true }
+  let second: Result[Option[Int], ForeignError] = catch_panic(() => with_gate(gate, 0, () => panic("boom")))
+  assert match second { Ok(_) -> false, Err(_) -> true }
+  # permit returned each time: a fresh non-panicking body still gets in
+  assert match with_gate(gate, 0, () => 42) { Some(v) -> v == 42, None -> false }
+}
+
+test "with_gate returns None when no permit is available" {
+  let gate = new_gate(1)
+  assert try_enter(gate, 0)
+  assert match with_gate(gate, 0, () => 1) { Some(_) -> false, None -> true }
+}

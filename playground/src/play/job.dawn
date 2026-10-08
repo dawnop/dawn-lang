@@ -1,0 +1,203 @@
+# A job as bytes, and the `job` subcommand that runs one. The flock gate
+# (play/gate) cannot hold a permit across a closure, so the front process
+# writes the job to a file, starts a child of this same binary that holds the
+# permit, and reads the result back from another file. This module is both
+# ends of that file: `encode_job`/`decode_job` and `encode_result`/
+# `decode_result` are the format, `job_main` is the child.
+#
+# Why length-prefixed fields and not the JSON package: a result carries the
+# compilers' files whole (an 870 KB C text is ordinary, the limit 8 MB), and a
+# length-prefixed field is cut out of the bytes by arithmetic where a JSON
+# string has to be scanned and unescaped character by character. The whole
+# format is `<byte length>\n<bytes>` repeated, and a first field naming the
+# case.
+use std/bytes
+use std/str
+use std/io
+use std/io.{with_fs_real, with_exit_real}
+use play/contract.{Outcome, Compiled, CompileError, Timeout}
+use play/exec.{execute, check, view_raw, tile_run, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
+use play/host.{Job, JRun, JCheck, JView, JTile, JobResult, JOutcome, JViewRaw, JBroken}
+
+## Run a job in this process. What a host does once it has a permit.
+pub fn exec_job(job: Job) -> JobResult !io =
+  match job {
+    JRun(code) -> JOutcome(execute(code))
+    JCheck(code, native) -> JOutcome(check(code, native))
+    JView(code, native) -> JViewRaw(view_raw(code, native))
+    JTile(code) -> JOutcome(tile_run(code))
+  }
+
+## Strings as bytes: each is `<its UTF-8 byte length>\n` and then those bytes.
+pub fn pack(fields: List[String]) -> Bytes = {
+  var b = bytes.buf()
+  for f in fields {
+    let raw = bytes.utf8(f)
+    b = bytes.put_bytes(b, bytes.utf8("${bytes.len(raw)}\n"))
+    b = bytes.put_bytes(b, raw)
+  }
+  bytes.freeze(b)
+}
+
+## The strings [`pack`] made, or None for bytes that are not its output.
+pub fn unpack(b: Bytes) -> Option[List[String]] = {
+  var fields: List[String] = []
+  var pos = 0
+  let nl = bytes.utf8("\n")
+  while pos < bytes.len(b) {
+    match bytes.index_of(b, nl, pos) {
+      None -> return None
+      Some(at) -> match parse_int(bytes.decode_utf8_lossy(bytes.slice(b, pos, at))) {
+        None -> return None
+        Some(n) -> {
+          if n < 0 || at + 1 + n > bytes.len(b) { return None }
+          fields = fields ++ [bytes.decode_utf8_lossy(bytes.slice(b, at + 1, at + 1 + n))]
+          pos = at + 1 + n
+        }
+      }
+    }
+  }
+  Some(fields)
+}
+
+fn flag(b: Bool) -> String = if b { "1" } else { "0" }
+
+pub fn encode_job(job: Job) -> Bytes =
+  pack(match job {
+    JRun(code) -> ["run", code]
+    JCheck(code, native) -> ["check", code, flag(native)]
+    JView(code, native) -> ["view", code, flag(native)]
+    JTile(code) -> ["tile", code]
+  })
+
+pub fn decode_job(b: Bytes) -> Option[Job] =
+  match unpack(b) {
+    Some(["run", code]) -> Some(JRun(code))
+    Some(["check", code, native]) -> Some(JCheck(code, native == "1"))
+    Some(["view", code, native]) -> Some(JView(code, native == "1"))
+    Some(["tile", code]) -> Some(JTile(code))
+    _ -> None
+  }
+
+fn outcome_fields(o: Outcome) -> List[String] =
+  match o {
+    Compiled(output, exit, truncated, ms) -> ["compiled", output, "${exit}", flag(truncated), "${ms}"]
+    CompileError(output) -> ["cerr", output]
+    Timeout(output) -> ["timeout", output]
+  }
+
+pub fn encode_result(r: JobResult) -> Bytes =
+  pack(match r {
+    JOutcome(o) -> ["out"] ++ outcome_fields(o)
+    JBroken(m) -> ["broken", m]
+    JViewRaw(raw) -> match raw {
+      RawOk(p) -> ["raw", "ok", p.ctext, p.cmap, p.jmap, p.javap, "${p.ms}"]
+      RawFail(o) -> ["raw", "fail"] ++ outcome_fields(o)
+      RawTimedOut(secs) -> ["raw", "timeout", "${secs}"]
+      RawBroken(m) -> ["raw", "broken", m]
+      RawTooLarge(what) -> ["raw", "big", what]
+    }
+  })
+
+fn outcome_of(f: List[String]) -> Option[Outcome] =
+  match f {
+    ["compiled", output, exit, truncated, ms] ->
+      match (parse_int(exit), parse_int(ms)) {
+        (Some(e), Some(m)) -> Some(Compiled(output, e, truncated == "1", m))
+        _ -> None
+      }
+    ["cerr", output] -> Some(CompileError(output))
+    ["timeout", output] -> Some(Timeout(output))
+    _ -> None
+  }
+
+pub fn decode_result(b: Bytes) -> Option[JobResult] =
+  match unpack(b) {
+    Some(["broken", m]) -> Some(JBroken(m))
+    Some(["raw", "ok", ctext, cmap, jmap, javap, ms]) ->
+      match parse_int(ms) {
+        Some(n) -> Some(JViewRaw(RawOk(ViewParts { ctext: ctext, cmap: cmap, jmap: jmap, javap: javap, ms: n })))
+        None -> None
+      }
+    Some(["raw", "timeout", secs]) ->
+      match parse_int(secs) {
+        Some(n) -> Some(JViewRaw(RawTimedOut(n)))
+        None -> None
+      }
+    Some(["raw", "broken", m]) -> Some(JViewRaw(RawBroken(m)))
+    Some(["raw", "big", what]) -> Some(JViewRaw(RawTooLarge(what)))
+    Some(["raw", "fail", a]) -> wrap_fail([a])
+    Some(["raw", "fail", a, b2]) -> wrap_fail([a, b2])
+    Some(["raw", "fail", a, b2, c, d, e]) -> wrap_fail([a, b2, c, d, e])
+    Some(["out", a]) -> wrap_out([a])
+    Some(["out", a, b2]) -> wrap_out([a, b2])
+    Some(["out", a, b2, c, d, e]) -> wrap_out([a, b2, c, d, e])
+    _ -> None
+  }
+
+fn wrap_out(f: List[String]) -> Option[JobResult] =
+  match outcome_of(f) {
+    Some(o) -> Some(JOutcome(o))
+    None -> None
+  }
+
+fn wrap_fail(f: List[String]) -> Option[JobResult] =
+  match outcome_of(f) {
+    Some(o) -> Some(JViewRaw(RawFail(o)))
+    None -> None
+  }
+
+## The `job <dir>` subcommand: read `<dir>/in.bin`, run the job it holds, write
+## `<dir>/out.bin`. The permit is not this function's business; the process is
+## started holding it (play/gate) and it ends when this process does. A job
+## that cannot be read or a result that cannot be written is a nonzero exit,
+## which the front process answers with a 500.
+pub fn job_main(dir: String) -> Unit !io = {
+  let result = match with_fs_real(() => io.read_bytes("${dir}/in.bin")) {
+    Err(e) -> JBroken("cannot read the job: ${e}")
+    Ok(b) -> match decode_job(b) {
+      None -> JBroken("the job file is not a job")
+      Some(job) -> exec_job(job)
+    }
+  }
+  match with_fs_real(() => io.write_bytes("${dir}/out.bin", encode_result(result))) {
+    Ok(_) -> ()
+    Err(e) -> {
+      io.eprintln("dawn-play job: cannot write the result: ${e}")
+      with_exit_real(() => io.exit(1))
+    }
+  }
+}
+
+test "a job survives the round trip" {
+  for j in [JRun("fn main() = ()"), JCheck("é\nz", true), JView("a", false), JTile("")] {
+    assert decode_job(encode_job(j)) == Some(j)
+  }
+  assert decode_job(bytes.utf8("3\nab")) == None
+  assert decode_job(bytes.utf8("x\n")) == None
+}
+
+test "every result survives the round trip, long fields and awkward text included" {
+  let big = str.repeat("line é\n", 20000)
+  let parts = ViewParts { ctext: big, cmap: "", jmap: "7\nbad", javap: "\n", ms: 12 }
+  for r in [
+    JOutcome(Compiled("out\n", 3, true, 41)),
+    JOutcome(CompileError("")),
+    JOutcome(Timeout("partial")),
+    JBroken("it died"),
+    JViewRaw(RawOk(parts)),
+    JViewRaw(RawFail(CompileError("prog.dawn:1: nope"))),
+    JViewRaw(RawFail(Compiled("x", 0, false, 1))),
+    JViewRaw(RawTimedOut(30)),
+    JViewRaw(RawBroken("javap")),
+    JViewRaw(RawTooLarge("the C text")),
+  ] {
+    assert decode_result(encode_result(r)) == Some(r)
+  }
+}
+
+test "pack and unpack agree on empty fields and on none" {
+  assert unpack(pack([])) == Some([])
+  assert unpack(pack(["", ""])) == Some(["", ""])
+  assert unpack(pack(["a\n1\nb"])) == Some(["a\n1\nb"])
+}

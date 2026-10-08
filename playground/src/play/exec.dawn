@@ -57,7 +57,7 @@ const RUN_HEAP: String = "-Xmx256m"
 # Where per-request work dirs live: PLAY_WORK_ROOT if set (the sandbox needs a
 # non-/tmp path, see config.work_root), else $TMPDIR, else /tmp. Trailing slash is
 # dropped (macOS's TMPDIR carries one) so paths match diagnostics.
-fn temp_root() -> String !io = {
+pub fn temp_root() -> String !io = {
   let configured = work_root()
   let d = if configured != "" {
     configured
@@ -90,7 +90,7 @@ fn whole_chars(b: Bytes) -> Bytes = {
 ## Run `argv` to completion, its output to the two files (an empty path leaves
 ## that stream where the process's own is). The thin wrapper every child goes
 ## through; an `Err` is a command that could not be started.
-fn run_cmd(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
+pub fn run_cmd(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
   with_proc_real(() => io.run(argv, out_path, err_path))
 
 ## A point on the monotonic clock, and the milliseconds since one.
@@ -102,7 +102,7 @@ pub fn ms_since(t: Instant) -> Int !io = elapsed_ns(t, tick()) / 1000000
 # /proc/sys/kernel/random/uuid (every read a new one, 122 random bits, the
 # source `UUID.randomUUID` drew on); a host without it (macOS, where the
 # long-lived server is run for development) asks `uuidgen`.
-fn uuid() -> String !io = {
+pub fn uuid() -> String !io = {
   let kernel = with_fs_real(() => io.read_file("/proc/sys/kernel/random/uuid"))
   match kernel {
     Ok(t) -> str.trim(t)
@@ -205,7 +205,7 @@ const STOP_SECS: Int = 10
 # rest the command. The output and the status are written by the runner's own
 # `sh`, in files the runner named in a directory the sandbox cannot change; the
 # child writes only through the descriptor `sh` opened for it.
-const TIMED_SH: String = "rc=\"$1\"; out=\"$2\"; shift 2; \"$@\" >\"\$out\" 2>&1; echo $? >\"\$rc\""
+const TIMED_SH: String = "rc=\"$1\"; out=\"$2\"; shift 2; \"$@\" >\"\$out\" 2>&1 9>&-; echo $? >\"\$rc\""
 
 # Run `argv` for at most `secs`, its combined output in the file `out`:
 # Some(exit status), or None when the budget ran out, the work being gone by
@@ -268,7 +268,7 @@ fn open_box(dir: String, box: String) -> Unit !io =
 # compiler's classes/ made by a transient uid under umask 022) stayed on disk
 # with no trace, one box per successful /compile. A failure is now logged, once
 # per path, with rm's own words.
-fn cleanup(dir: String) -> Unit !io =
+pub fn cleanup(dir: String) -> Unit !io =
   match remove_tree(dir) {
     Some(why) -> io.eprintln("dawn-play: cannot remove ${dir}: ${why}")
     None -> ()
