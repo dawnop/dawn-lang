@@ -525,8 +525,13 @@ class CrunBackend:
         left alone (no deletion, no --adopt), for the owner to clear.
         """
         primary = Machine("primary", None)
-        code, out, err = self._crun(self.stage, primary, self._envi() + ["true"],
-                                    "first-push", sync=False, timeout=POLL_TIMEOUT * 4)
+        for attempt in (1, 2):
+            code, out, err = self._crun(self.stage, primary, self._envi() + ["true"],
+                                        "first-push", sync=False, timeout=POLL_TIMEOUT * 4)
+            if code == 0 or STRAY_MARK in err + out or attempt == 2:
+                break
+            self.log(f"crun backend: the first serial push to the primary failed (exit {code}): "
+                     f"{first_error_line(err + out)}; retrying once")
         if code == 0:
             return
         line = first_error_line(err + out)
@@ -553,6 +558,11 @@ class CrunBackend:
                  f"{machine.load}; first push and inputs verify: exit {code} in "
                  f"{time.monotonic() - t0:.0f}s")
         if code != 0:
+            if not self._uid_reaches(machine):
+                self._drop(machine, f"uid {self.run_as} cannot reach {self.remote} there "
+                                    f"(a directory on its path is closed to that uid); "
+                                    f"the input pack was not shipped")
+                return
             try:
                 self._ship_inputs(machine)
             except MachineError as error:
@@ -567,6 +577,26 @@ class CrunBackend:
                                     f"{(out + err)[-500:]}")
                 return
         self.log(f"crun backend: machine {machine.label}: the input pack verifies")
+
+    def _uid_reaches(self, machine):
+        """Whether the job uid can walk to the prefix, asked before shipping.
+
+        Needs no prefix python, so it can run on a machine whose prefix is
+        empty. Without it a closed directory above the prefix is found only
+        after the whole input pack was shipped and installed, which also
+        regrows the residue that was cleared there. Every existing level
+        from the prefix up must be searchable (x) by the uid.
+        """
+        if not self.run_as:
+            return True
+        uid, gid = self.run_as.split(":")
+        walk = (f"p={shlex.quote(self.remote)}; while [ \"$p\" != / ]; do "
+                f"if [ -e \"$p\" ]; then test -x \"$p\" || exit 1; fi; p=$(dirname \"$p\"); done")
+        script = (f"setpriv --reuid={uid} --regid={gid} --clear-groups --no-new-privs "
+                  f"/bin/sh -c {shlex.quote(walk)} || {{ echo GATES-NOREACH; exit 3; }}")
+        code, out, err = self._crun(self.stage, machine, self._envi() + ["bash", "-c", script],
+                                    "uid-reach", sync=False)
+        return "GATES-NOREACH" not in out.splitlines()
 
     def _resume_states(self, ids):
         """Every job's state on every machine, merged; the machine each is on."""
