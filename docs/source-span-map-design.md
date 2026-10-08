@@ -110,13 +110,15 @@ pub type CSite =
   回指到哪段源码（整个运算符表达式？），是 M3/M4 的设计问题，`CSite` 届时可以加一个 `CImplied(lo, hi)`
   构造器，不改本刀已有的东西。
 
-- 运算符与 staged `var` 也是检查器代写的调用：`a + b` 在用户类型上是 `Add` 的 impl 调用，carried `var` 的
-  读写是 `StagedVar` 的 `var_get`/`var_set`。它们在 parser 一侧是 `Binary`/`Var`，没有 `Apply` 可配，
-  所以同样 `nlo = NO_NAME`、`CNoSite`；曾把运算符起点或变量起点填进 `nlo`，第七节的 oracle 在 flash_attn
-  上报「is no call the parser sees」，那是检查器写错，不是规则错。
-  carried `var` 的 `for` 本身是作者写的调用：循环被降成一次 `staged_for`，它保留整条语句的 site，名字起点
-  是 `for` 关键字；parser 一侧配对的是 `For` 节点（oracle 只允许 `impl staged_for` 这一种 site 配 `For`，
-  完备性仍只数 `Apply`/`MethodCall`）。GPU 页的 region 调用（`d_range` 的整条语句）靠这一行进 C 侧表。
+- 运算符与 staged `for` 是**书写的调用，只是不写成 `Apply`**：`a + b` 在用户类型上是 `Add` 的 impl 调用，
+  `-a` 是 `Neg` 的，carried `var` 的 `for` 降成一次 `staged_for`。它们保留整条表达式（语句）的 site，
+  名字起点是运算符记号（`for` 关键字）。parser 一侧配对的是 `Binary`/`Unary`/`For` 节点；oracle 只允许
+  `impl add/sub/mul/div/rem` 配 `Binary`、`impl neg` 配 `Unary`、`impl staged_for` 配 `For`，别的 site 落在这些节点上
+  仍是「is no call the parser sees」。完备性仍只数 `Apply`/`MethodCall`：`+` 与 `for` 在 parse 里通常不是调用，
+  只有检查器路由到 trait 方法的才有 site。GPU 页把 tile 运算符与 `d_range` 的整条语句当调用，靠这些行进 C 侧表。
+- 同一次降级里检查器**自己加**的是另一回事：`var_open`/`var_get`/`var_set` 没有书写对应物，`nlo = NO_NAME`、
+  `CNoSite`。曾把它们的 `nlo` 填成变量或语句起点，oracle 在 flash_attn 上报「is no call the parser sees」，
+  那是检查器写错，不是规则错。
 - 检查器替别的构造写出的调用也不是书写调用：`with handle` 把块的余下部分包成闭包再空参应用
   （`checker.check_handle`），省掉默认实参的 `f$default$k`，`caller()` 占位，eta 包装体，`ev_append`
   拼证据包，处理器的 cell 与 one-shot 原语，`use java` 静态字段读。它们的 `nlo` 都是 `tast.NO_NAME`，
