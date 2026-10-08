@@ -115,7 +115,7 @@ def _machine_down(state, host):
     return False
 
 
-def _push(state, host=None):
+def _push(state, host=None, adopt=False):
     """What crun does first on every run: mirror this directory to remote_root.
 
     Serialised, and each file replaced by rename, so a job reading its job
@@ -127,7 +127,19 @@ def _push(state, host=None):
     remote = next(line.split(":", 1)[1].strip() for line in config.read_text().splitlines()
                   if line.startswith("remote_root:"))
     remote = _on_machine(remote, host)
-    if host is None and not (Path(remote) / ".crun.yaml").exists():
+    fresh = os.environ.get("STUB_FRESH")
+    if fresh and host is None and not (Path(remote) / ".crun.yaml").exists():
+        # crun's own race inside ONE call: the `.crun/deps` note lands before
+        # the push's check, which then sees a non-empty directory without
+        # `.crun.yaml`. "foreign" also leaves a file that is not crun's.
+        (Path(remote) / ".crun").mkdir(parents=True, exist_ok=True)
+        (Path(remote) / ".crun" / "deps").write_text("deps\n")
+        if fresh == "foreign":
+            (Path(remote) / "foreign.txt").write_text("not ours\n")
+        if not adopt:
+            return (f"[crun] 错误: 编译机上 {remote} 已存在且不是 crun 管理的镜像"
+                    "（无 .crun.yaml）")
+    elif host is None and not (Path(remote) / ".crun.yaml").exists():
         # crun runs `push_source` and the `.crun/deps` note in parallel. Alone
         # on a fresh remote_root the push wins. With another crun call in
         # flight against the same fresh root, the stub makes the bad
@@ -199,7 +211,7 @@ def stub_crun(argv):
         return 255
     # crun pushes to its primary on every call, then (without --no-sync)
     # rsyncs from there to the machine the command runs on
-    refused = _push(state)
+    refused = _push(state, adopt="--adopt" in flags)
     if refused:
         print(refused, file=sys.stderr)
         return 1
@@ -337,11 +349,11 @@ class World:
             else:
                 path.write_text(text)
 
-    def run(self, name, faults="", resume=None, expect_killed=False, opts=()):
+    def run(self, name, faults="", resume=None, expect_killed=False, opts=(), fresh=""):
         state = self.root / f"state-{name}"
         state.mkdir(exist_ok=True)
         env = dict(os.environ, STUB_STATE=str(state), STUB_FAULTS=faults,
-                   STUB_REMOTE=str(self.remote))
+                   STUB_REMOTE=str(self.remote), STUB_FRESH=fresh)
         if resume:
             argv = ["--resume", str(resume), "--jobs", "16"]
         else:
@@ -520,6 +532,28 @@ def self_test(repo, sha):
         else:
             print(f"  negative control: {victim}'s fragment deleted, resume exit 1, "
                   f"complete=false")
+        # crun's own `.crun/deps` race on a fresh job directory: the first
+        # push is refused, the directory holds only that note, so the backend
+        # adopts it and the run completes with the same bytes.
+        shutil.rmtree(world.remote / "jobs")  # a fresh job directory again
+        done = world.run("fresh-race", opts=("machines=primary",), fresh="note")
+        log = (root / "log-fresh-race.txt").read_text()
+        if done.returncode != 0 or world.bundle("fresh-race") != reference \
+                or "retrying once with --adopt" not in log:
+            failures.append(f"fresh job directory race: exit {done.returncode}, "
+                            "bundle differs or no --adopt retry")
+        else:
+            print("  fresh job directory refused over crun's own note: adopted, same bytes")
+        # Negative control: a foreign file beside the note is never adopted.
+        shutil.rmtree(world.remote / "jobs")
+        done = world.run("fresh-foreign", opts=("machines=primary",), fresh="foreign")
+        log = (root / "log-fresh-foreign.txt").read_text()
+        if done.returncode == 0 or "not adopted" not in log or "foreign.txt" not in log \
+                or "retrying once with --adopt" in log:
+            failures.append(f"foreign file in the job directory: exit {done.returncode}, "
+                            "not refused cleanly or adopted")
+        else:
+            print("  foreign file in the job directory: not adopted, failed with the reason")
     except AssertionError as error:
         failures.append(str(error))
     for line in failures:
@@ -529,7 +563,7 @@ def self_test(repo, sha):
     shutil.rmtree(root, ignore_errors=True)
     print("OK: crun stub self-test, clean with artifacts across machines, one machine, "
           "3 fault kinds, 3 machine faults, "
-          "killed and resumed, deleted fragment")
+          "killed and resumed, deleted fragment, fresh-directory adopt and its foreign-file refusal")
     return 0
 
 

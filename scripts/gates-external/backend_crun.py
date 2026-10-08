@@ -187,6 +187,7 @@ import shutil
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -354,7 +355,8 @@ class CrunBackend:
         """The literal `env -i` every remote command starts from."""
         return ["env", "-i", "PATH=/usr/bin:/bin", f"HOME={self.remote}/home", "LANG=C.UTF-8"]
 
-    def _crun(self, stage, machine, command, label, sync=True, detach=False, timeout=None):
+    def _crun(self, stage, machine, command, label, sync=True, detach=False, timeout=None,
+              flags=()):
         """One zero-card crun from a staging directory; (exit, stdout, stderr).
 
         With a timeout, a crun that hangs (an SSH session that stalls rather
@@ -370,6 +372,7 @@ class CrunBackend:
             argv.append("--no-sync")
         if detach:
             argv.append("-d")
+        argv += list(flags)
         argv += ["--"] + command
         t0 = time.monotonic()
         try:
@@ -521,28 +524,63 @@ class CrunBackend:
         manage. With several probes starting at once that failed every fresh
         sha. One push first lands `.crun.yaml`; the probes then find a
         managed mirror. A stray `.crun/` left by an earlier failed attempt
-        makes this push fail the same way: that is reported by path and
-        left alone (no deletion, no --adopt), for the owner to clear.
+        makes this push fail the same way, and so does the retry. The race is
+        crun's own, so when a read-only listing shows the job directory holds
+        nothing but `.crun/` (and its `deps` note) the push is retried once
+        with --adopt; a directory with anything else is never adopted.
         """
         primary = Machine("primary", None)
+        adopt = ()
         for attempt in (1, 2):
             code, out, err = self._crun(self.stage, primary, self._envi() + ["true"],
-                                        "first-push", sync=False, timeout=POLL_TIMEOUT * 4)
-            if code == 0 or STRAY_MARK in err + out or attempt == 2:
+                                        "first-push", sync=False, timeout=POLL_TIMEOUT * 4,
+                                        flags=adopt)
+            if code == 0 or attempt == 2:
                 break
+            if STRAY_MARK in err + out:
+                # The refusal is crun's own race with itself (see above), not
+                # a foreign directory, when nothing but its `.crun/deps` note
+                # is there. Adopt only on that proof, read-only.
+                found = self._only_crun_note()
+                if found is not True:
+                    raise SystemExit(
+                        f"crun backend: {self.tree_remote} on the primary machine is not a "
+                        f"managed mirror and holds {found}; crun refuses to push over it and "
+                        f"it is not adopted. Remove that one directory by hand and rerun; "
+                        f"nothing was deleted. crun said: {first_error_line(err + out)}")
+                self.log("crun backend: the first push met crun's own `.crun/deps` note in a "
+                         "fresh job directory; retrying once with --adopt")
+                adopt = ("--adopt",)
+                continue
             self.log(f"crun backend: the first serial push to the primary failed (exit {code}): "
                      f"{first_error_line(err + out)}; retrying once")
         if code == 0:
             return
-        line = first_error_line(err + out)
-        if STRAY_MARK in err + out:
-            raise SystemExit(
-                f"crun backend: {self.tree_remote} on the primary machine holds a stray "
-                f"`.crun/` without `.crun.yaml` (left by an earlier failed push); crun refuses "
-                f"to push over it. Remove that one directory by hand and rerun; nothing was "
-                f"deleted. crun said: {line}")
         self.log(f"crun backend: the first serial push to the primary failed (exit {code}): "
-                 f"{line}; the per-machine probes will report their own")
+                 f"{first_error_line(err + out)}; the per-machine probes will report their own")
+
+    def _only_crun_note(self):
+        """True when the job directory holds nothing but crun's `.crun/deps` note.
+
+        A read-only listing through a bare crun (cwd without `.crun.yaml`, so it
+        pushes nothing and cannot hit the same refusal). Otherwise a string
+        saying what is there.
+        """
+        tree = self.tree_remote
+        with tempfile.TemporaryDirectory(prefix="crun-list-") as bare:
+            code, out, err = self._crun(Path(bare), Machine("primary", None),
+                                        ["find", tree, "-mindepth", "1"],
+                                        "first-push-list", sync=False, timeout=POLL_TIMEOUT)
+        if code != 0:
+            return f"something unlistable (listing exit {code})"
+        found = {line.strip()[len(tree) + 1:] for line in out.splitlines()
+                 if line.strip().startswith(tree + "/")}
+        extra = sorted(found - {".crun", ".crun/deps"})
+        if extra:
+            return "other entries (" + ", ".join(extra[:5]) + ")"
+        if ".crun" not in found:
+            return "no .crun/ at all"
+        return True
 
     def _prepare_machine(self, machine):
         t0 = time.monotonic()
