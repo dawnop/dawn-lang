@@ -1,0 +1,35 @@
+# Socket for the native runner canary (docs/playground-native-runner-design.md,
+# K4). systemd accepts every connection itself (Accept=yes) and starts one
+# dawn-play-native@.service instance per connection, with the connection as the
+# instance's stdin and stdout; nothing is resident between requests.
+#
+# The JVM runner (dawn-play.service on 127.0.0.1:8087) stays the primary. This
+# socket takes no traffic until nginx is pointed at it on purpose
+# (playground/deploy/nginx-switch.sh native); until then only the canary check
+# in redeploy.sh talks to it.
+#
+# The socket lives in /run/dawn-play, which this unit makes (root-owned, 0755).
+# It is NOT the service's RuntimeDirectory: a RuntimeDirectory is removed when
+# the service that names it stops, and with Accept=yes every request is a
+# service that stops, so the socket would be deleted under the next client.
+# The flock slots have a RuntimeDirectory of their own (dawn-play-native@.service).
+[Unit]
+Description=dawn-play native runner socket (canary)
+
+[Socket]
+ListenStream=/run/dawn-play/http.sock
+Accept=yes
+SocketUser=dawn-play
+# nginx's user must be able to connect; the other users of the host must not.
+SocketGroup=www-data
+SocketMode=0660
+# A ceiling on connections alive at once (each is a process, most of them
+# waiting on the flock gate): MaxConnections is a refusal, not a queue, which is
+# why it is not the concurrency gate (two flock slots are, design 4.1).
+MaxConnections=16
+# Deliberately no TriggerLimit* lines: when a socket's trigger limit is hit the
+# socket unit goes to failed and stays down until someone restarts it, which
+# would turn a burst of requests into an outage once nginx points here.
+
+[Install]
+WantedBy=sockets.target
