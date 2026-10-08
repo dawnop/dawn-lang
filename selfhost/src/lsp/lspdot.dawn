@@ -30,9 +30,10 @@ use std/map
 use std/set
 use std/str
 use check/types.{
-  Ty, TyAdt, TyVar, TyError, Eff, Sig, subst, adt_of, ty_show, sig_render, bounds_of
+  Ty, TyAdt, TyVar, TyError, Eff, Sig, AdtI, TraitI, subst, adt_of, ty_show, sig_render, bounds_of
 }
 use check/checker.{unify_into, resolve_witness}
+use check/cx.{ModExports}
 use front/token.{
   Token, IDENT, TYPEIDENT, STRING, RPAREN, RBRACKET, LPAREN, LBRACKET, DOT, NEWLINE, EOF,
   QUESTION, BANG
@@ -41,7 +42,19 @@ use front/lexer.{lex, slice_cps}
 use lsp/lspq.{QCx, type_of_span}
 
 ## One entry after the dot. `field` ranks it before the functions.
-pub(pkg) type DotCand = { name: String, detail: String, field: Bool }
+##
+## `module` is the std module that exports a function the document has not
+## imported: the caller turns it into the `use` line that makes the dot call
+## compile. None for a field and for a function already in scope.
+pub(pkg) type DotCand = { name: String, detail: String, field: Bool, module: Option[String] }
+
+## The most functions from modules the document has not imported that one
+## answer carries, by name. Measured over std: a `String` reaches 95 of them
+## (`std/str` and the modules taking a path string), a `List` 15, a `Map` 7,
+## so the cap is a bound on a receiver such as a type variable that reaches
+## everything, not a cut anyone meets. A tighter one (50) dropped `split`
+## from a `String`'s list, which is the name the feature exists for.
+pub(pkg) const FOREIGN_CAP: Int = 150
 
 # ---- finding the receiver ----
 
@@ -208,10 +221,29 @@ fn reaches(qc: QCx, s: Sig, rt: Ty) -> Bool = {
   ok && bounds_hold(qc, s, m, em)
 }
 
+## Whether every trait `s` bounds a type parameter by is one the document's
+## tables know. A function of a module the document does not import can be
+## bounded by a trait declared there, which the bound check cannot look up:
+## such a function is left out rather than guessed at.
+fn bounds_known(qc: QCx, s: Sig) -> Bool = {
+  var i = 0
+  for tp in s.tparams {
+    for tid in bounds_of(s, i) {
+      if not map.has(qc.entry.cx.traits, tid) { return false }
+    }
+    i = i + 1
+  }
+  true
+}
+
 ## What follows `expr.` when the receiver ends at code point `dot` of `cps`
 ## (the text with the dot already cut): `locals` are the names in scope there
-## (a local shadows a function of its name for the call).
-pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[String]) -> List[DotCand] = {
+## (a local shadows a function of its name for the call). `foreign` are the std
+## modules the document may import and has not (in whole): their functions the
+## receiver reaches follow the ones in scope, up to FOREIGN_CAP of them by name,
+## each marked with its module. A name already in scope, a local, or an earlier
+## module's is not offered again: importing it would clash.
+pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[String], foreign: List[ModExports]) -> List[DotCand] = {
   let none: List[DotCand] = []
   let from = if dot > WINDOW { dot - WINDOW } else { 0 }
   let (all, _) = lex(slice_cps(cps, from, dot))
@@ -241,7 +273,7 @@ pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[Strin
       if ad.is_record && len(ad.ctors) > 0 {
         for f in ad.ctors[0].fields {
           match field_of(qc, rt, f.name) {
-            Some(ft) -> { out = out ++ [DotCand { name: f.name, detail: ty_show(adts, ft), field: true }] }
+            Some(ft) -> { out = out ++ [DotCand { name: f.name, detail: ty_show(adts, ft), field: true, module: None }] }
             None -> ()
           }
         }
@@ -259,11 +291,58 @@ pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[Strin
           out = out ++ [DotCand {
             name: name,
             detail: sig_render(adts, qc.entry.cx.traits, without_first(s)),
-            field: false
+            field: false,
+            module: None
           }]
         }
       }
     }
   }
-  out
+  var extra: Map[String, (Sig, ModExports)] = map.empty()
+  for ex in foreign {
+    for pr in map.entries(ex.fns) {
+      let (name, s) = pr
+      if not set.has(seen, name) && not set.has(locals, name) && not str.contains(name, "\$") && bounds_known(qc, s) && reaches(qc, s, rt) {
+        seen = set.insert(seen, name)
+        extra = map.insert(extra, name, (s, ex))
+      }
+    }
+  }
+  # the signatures name the exporting module's types, which the document's
+  # tables hold only when it imports them: its own tables come first and the
+  # document's are laid over them (an id means the same in both), once per
+  # module and only for the names that are shown
+  var tables: Map[String, (Map[Int, AdtI], Map[Int, TraitI])] = map.empty()
+  var picked: List[DotCand] = []
+  for name in list.take(sort(map.keys(extra)), FOREIGN_CAP) {
+    match map.get(extra, name) {
+      Some((s, ex)) -> {
+        let (adts2, traits2) = match map.get(tables, ex.mod_path) {
+          Some(t) -> t
+          None -> {
+            var a2 = ex.adt_infos
+            for pr in map.entries(adts) {
+              let (id, a) = pr
+              a2 = map.insert(a2, id, a)
+            }
+            var t2 = ex.trait_infos
+            for pr in map.entries(qc.entry.cx.traits) {
+              let (id, t) = pr
+              t2 = map.insert(t2, id, t)
+            }
+            tables = map.insert(tables, ex.mod_path, (a2, t2))
+            (a2, t2)
+          }
+        }
+        picked = picked ++ [DotCand {
+          name: name,
+          detail: sig_render(adts2, traits2, without_first(s)),
+          field: false,
+          module: Some(ex.mod_path)
+        }]
+      }
+      None -> ()
+    }
+  }
+  out ++ picked
 }

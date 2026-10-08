@@ -1339,17 +1339,47 @@ fn for_on_line(cps: List[Char], ls: Int, pos: Int) -> Bool =
 ## After `value.`, answered off the analysis of the text with the dot cut
 ## (`Completions.dot`): `dot` is where the receiver ends. Its record fields,
 ## then the functions a dot call reaches, each with the signature the call
-## spells (lspdot.dawn).
-pub(pkg) fn dot_completions_at(qc: QCx, cps: List[Char], dot: Int) -> List[CItem] = {
+## spells (lspdot.dawn); then those of the std modules the text has not
+## imported, each carrying the selective `use` that brings the function in
+## (`use std/str.{split}`: a dot call needs the name unqualified).
+pub(pkg) fn dot_completions_at(qc: QCx, v: SourceView, dot: Int) -> List[CItem] = {
+  let uses = scan_uses(v)
   var it = Items { out: [], seen: set.empty() }
-  for c in dot_candidates(qc, cps, dot, local_names(qc, dot)) {
-    it = if c.field {
-      add(it, c.name, 5, Some(c.detail), "0")
-    } else {
-      add(it, c.name, 3, Some(c.detail), "1")
+  for c in dot_candidates(qc, v.cps, dot, local_names(qc, dot), foreign_modules(qc, uses)) {
+    it = match c.module {
+      Some(mp) -> {
+        let e = use_edit(v.cps, uses, "${mp}.{${c.name}}")
+        # the edit lands in the text with the dot cut, which the client does
+        # not have past the dot: one there has no position to give
+        if e.at > dot { it } else { add_edit(it, c.name, 3, Some(c.detail), "2", Some(mp), Some(e)) }
+      }
+      None ->
+        if c.field {
+          add(it, c.name, 5, Some(c.detail), "0")
+        } else {
+          add(it, c.name, 3, Some(c.detail), "1")
+        }
     }
   }
   it.out
+}
+
+## The std modules a dot call may take a function from by adding a `use`: the
+## ones the document may name and has no selective import of (a second one is
+## "imported more than once"; a plain `use std/str` or an `as` one is fine to
+## add beside), in path order.
+fn foreign_modules(qc: QCx, uses: List[UseLine]) -> List[ModExports] = {
+  var out: List[ModExports] = []
+  for mp in sort(map.keys(qc.std.exports)) {
+    if str.starts_with(mp, "std/") && mp != qc.entry.mod_path && may_name_module(qc, mp) &&
+      not list.any(uses, u => u.path == mp && u.binds == None) {
+      match map.get(qc.exports_env, mp) {
+        Some(ex) -> { out = out ++ [ex] }
+        None -> ()
+      }
+    }
+  }
+  out
 }
 
 fn whole(items: List[CItem]) -> Completions = Completions { items: items, incomplete: false, dot: None }
