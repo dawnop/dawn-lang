@@ -380,7 +380,7 @@ pub fn tokens(s: String) -> List[String] = {
   var go = true
   while go {
     let fin = cursor.done(t, at)
-    let cls = if fin { 0 } else { kind_of(cursor.char(t, at)) }
+    let cls = if fin { 0 } else { cursor.char(t, at).kind_of() }
     let nx = cursor.next(t, at)
     if cls == 3 {
       if not in_run {
@@ -441,7 +441,7 @@ fn runs(s: String) -> List[String] = {
   var go = true
   while go {
     let fin = cursor.done(t, at)
-    let cls = if fin { 0 } else { kind_of(cursor.char(t, at)) }
+    let cls = if fin { 0 } else { cursor.char(t, at).kind_of() }
     if cls != 0 {
       if not in_run {
         in_run = true
@@ -492,7 +492,7 @@ pub fn body_terms(s: String) -> List[String] = {
       rest = rest ++ [c]
     }
   }
-  tokens(from_code_points(rest)) ++ han
+  rest.from_code_points().tokens() ++ han
 }
 
 ## Whether `c` is a Han character: the CJK unified ideographs, extension A,
@@ -533,7 +533,7 @@ pub fn terms(q: String) -> List[Term] = {
     let last = i == len(rs) - 1
     let w = trim_dots(r, not last)
     let ks = code_points(w)
-    if list.any(ks, c => kind_of(char.code(c)) == 3) {
+    if list.any(ks, c => char.code(c).kind_of() == 3) {
       let fit = if list.any(ks, c => char.code(c) > 127) {
         Within
       } else if last {
@@ -625,15 +625,15 @@ pub fn body_of(j: Json, entries: List[Entry]) -> Option[Body] = {
   } else {
     let by_href = hrefs_of(entries)
     let terms = list.map(jarr(fs[2]), t => jstr_or(t, ""))
-    let posts = list.map(jarr(fs[3]), g => sums(jarr(g)))
+    let posts = list.map(jarr(fs[3]), g => g.jarr().sums())
     if len(posts) != len(terms) {
       None
     } else {
       Some(Body {
-        secs: list.map(jarr(fs[1]), s => sec_of(jarr(s), by_href)),
+        secs: list.map(jarr(fs[1]), s => s.jarr().sec_of(by_href)),
         terms: terms,
         posts: posts,
-        paras: list.map(jarr(fs[4]), p => para_of(jarr(p))),
+        paras: list.map(jarr(fs[4]), p => p.jarr().para_of()),
       })
     }
   }
@@ -660,7 +660,7 @@ fn sec_of(fs: List[Json], by_href: Map[String, Int]) -> Sec = {
     href: href,
     title: if len(fs) == 3 { jstr_or(fs[2], "") } else { "" },
     group: doc_group(doc),
-    entry: unwrap_or(map.get(by_href, href), -1),
+    entry: map.get(by_href, href).unwrap_or(-1),
   }
 }
 
@@ -777,7 +777,7 @@ fn han_word(w: String) -> Bool = list.any(code_points(w), c => is_han(c))
 ## The query's last run, without its dots, when the query ends with it, and
 ## empty otherwise.
 fn last_run(low: String) -> String = {
-  let rs = runs(from_code_points(list.map(code_points(low), c => if is_han(c) { ' ' } else { c })))
+  let rs = list.map(code_points(low), c => if is_han(c) { ' ' } else { c }).from_code_points().runs()
   if len(rs) == 0 {
     ""
   } else {
@@ -825,7 +825,7 @@ fn squash(s: String) -> String = {
 fn postings(b: Body, t: BodyTerm) -> List[Int] = {
   let lo = lower_bound(b.terms, t.word)
   if t.prefix {
-    union(list.slice(b.posts, lo, past_prefix(b.terms, t.word, lo)))
+    list.slice(b.posts, lo, past_prefix(b.terms, t.word, lo)).union()
   } else if lo < len(b.terms) && b.terms[lo] == t.word {
     b.posts[lo]
   } else {
@@ -1114,7 +1114,7 @@ fn shown_para(b: Body, h: BodyHit, ts: List[Term]) -> Int = {
 ## How many places the words are found in `text`, per thousand code points.
 fn density(text: String, ts: List[Term]) -> Int = {
   let low = str.to_lower(text)
-  let found = list.fold(ts, 0, (acc, t) => acc + len(places(low, t)))
+  let found = list.fold(ts, 0, (acc, t) => acc + low.places(t).len())
   found * 1000 / (str.len(low) + 1)
 }
 
@@ -1145,7 +1145,7 @@ fn crumb(s: Sec, code: String) -> String = {
   } else {
     say(code, "History", "历史")
   }
-  let (path, anchor) = unwrap_or(str.split_once(s.href, "#"), (s.href, ""))
+  let (path, anchor) = str.split_once(s.href, "#").unwrap_or((s.href, ""))
   let at = if s.doc == "spec" && str.starts_with(anchor, "s") {
     "§" ++ str.replace(str.drop(anchor, 1), "-", ".")
   } else if s.doc == "tutorial" {
@@ -1160,13 +1160,13 @@ fn crumb(s: Sec, code: String) -> String = {
 fn chapter(path: String, code: String) -> String = {
   let parts = str.split(path, "/")
   let file = parts[len(parts) - 1]
-  let num = unwrap_or(str.strip_suffix(file, ".html"), "")
+  let num = str.strip_suffix(file, ".html").unwrap_or("")
   let digits = list.all(code_points(num), c => char.is_digit(c))
   if num == "" || not digits {
     ""
   } else {
     var n = num
-    while len(code_points(n)) > 1 && str.starts_with(n, "0") {
+    while n.code_points().len() > 1 && str.starts_with(n, "0") {
       n = str.drop(n, 1)
     }
     say(code, "Chapter ${n}", "第 ${n} 章")
@@ -1258,7 +1258,7 @@ pub fn answer(state: State, query: String, scope: Int) -> Answer = {
     let titles = matches(state.keys, q, ts)
     let bodies = text_rows(state, q, titles)
     let found = titles ++ text_scored(state, bodies)
-    let counts = list.map(range(0, len(groups())), g => len(list.filter(found, s => s.group == g)))
+    let counts = list.map(range(0, groups().len()), g => list.filter(found, s => s.group == g).len())
     let kept = if scope >= 0 && scope < len(counts) && counts[scope] > 0 { scope } else { -1 }
     let narrowed = if kept >= 0 { list.filter(found, s => s.group == kept) } else { found }
     Answer { hits: list.map(arrange(narrowed), id => shown_id(state, bodies, id, ts)), counts: counts, scope: kept }
@@ -1289,7 +1289,7 @@ fn text_rows(state: State, q: String, titles: List[Scored]) -> List[BodyHit] = {
 
 fn sec_at(state: State, sec: Int) -> Sec =
   match state.body {
-    Some(b) -> unwrap_or(get(b.secs, sec), Sec { doc: "", href: "", title: "", group: -1, entry: -1 })
+    Some(b) -> b.secs.get(sec).unwrap_or(Sec { doc: "", href: "", title: "", group: -1, entry: -1 })
     None -> Sec { doc: "", href: "", title: "", group: -1, entry: -1 }
   }
 
@@ -1336,14 +1336,14 @@ fn matches(keys: List[Key], q: String, ts: List[Term]) -> List[Scored] = {
 fn arrange(found: List[Scored]) -> List[Int] = {
   let best_first = sort_by(found, (a, b) => if a.rank != b.rank { b.rank - a.rank } else { b.weight - a.weight })
   var per: List[List[Scored]] = []
-  for g in range(0, len(groups())) {
+  for g in range(0, groups().len()) {
     let mine = list.filter(best_first, s => s.group == g)
     if len(mine) > 0 {
       per = per ++ [mine]
     }
   }
   let order = sort_by(per, (a, b) => b[0].rank - a[0].rank)
-  let quota = shares(list.map(order, xs => len(xs)), cap())
+  let quota = list.map(order, xs => len(xs)).shares(cap())
   var out: List[Int] = []
   for i in range(0, len(order)) {
     for s in list.take(order[i], quota[i]) {
@@ -1516,7 +1516,7 @@ fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
           }
           let xn = str.len(x)
           if xn - n <= limit && n - xn <= limit {
-            out = map.insert(out, x, unwrap_or(map.get(out, x), 0) + 1)
+            out = map.insert(out, x, map.get(out, x).unwrap_or(0) + 1)
           }
         }
       }
@@ -1535,7 +1535,7 @@ fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
           let x = b.terms[i]
           let xn = str.len(x)
           if xn - n <= limit && n - xn <= limit {
-            out = map.insert(out, x, unwrap_or(map.get(out, x), 0) + len(b.posts[i]))
+            out = map.insert(out, x, map.get(out, x).unwrap_or(0) + len(b.posts[i]))
           }
         }
       }
@@ -1557,7 +1557,7 @@ pub fn near_words(state: State, w: String, last: Bool) -> List[Near] = reach(sta
 type Reach = { dead: Bool, near: List[Near] }
 
 fn reach(state: State, w: String, last: Bool) -> Reach = {
-  let limit = allowed(str.len(w))
+  let limit = str.len(w).allowed()
   let ascii = list.all(code_points(w), c => char.code(c) < 128)
   if limit == 0 || not ascii {
     Reach { dead: false, near: [] }
@@ -1633,7 +1633,7 @@ type Guess = { words: List[String], dist: Int }
 ## most [tries_cap] of them. The count is what the suggested query answers
 ## when asked ([tally_of]), which is the number the reader gets by taking it.
 pub fn suggest(state: State, q: String) -> (String, Int) = {
-  let ts = terms(str.to_lower(str.trim(q)))
+  let ts = str.to_lower(str.trim(q)).terms()
   var guesses: List[Guess] = [Guess { words: [], dist: 0 }]
   var changed = false
   var dead = 0
@@ -1696,7 +1696,7 @@ pub fn tally_of(state: State, query: String) -> Int = {
     0
   } else {
     let titles = matches(state.keys, q, terms(q))
-    len(titles) + len(text_rows(state, q, titles))
+    len(titles) + state.text_rows(q, titles).len()
   }
 }
 
@@ -1954,8 +1954,8 @@ fn places(low: String, t: Term) -> List[(Int, Int)] = {
     match str.index_of(str.drop(low, from), w) {
       Some(i) -> {
         let p = from + i
-        let starts = p == 0 || kind_of(char.code(str.at(low, p - 1))) != 3
-        let ends = t.fit != Whole || p + wl >= str.len(low) || kind_of(char.code(str.at(low, p + wl))) != 3
+        let starts = p == 0 || char.code(str.at(low, p - 1)).kind_of() != 3
+        let ends = t.fit != Whole || p + wl >= str.len(low) || char.code(str.at(low, p + wl)).kind_of() != 3
         if t.fit == Within || (starts && ends) {
           out = out ++ [(p, p + wl)]
         }
@@ -2049,7 +2049,7 @@ fn status(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
     if shown {
       []
     } else if q == "" {
-      [el("p", class: "search-status", kids: [text(prompt_line(lang()))])]
+      [el("p", class: "search-status", kids: [text(lang().prompt_line())])]
     } else {
       [el("div", class: "search-nothing", kids: nothing(lang(), q, m.fix, m.fix_hits))]
     }
@@ -2148,7 +2148,7 @@ fn pills(m: Model) -> Node[Msg] !Ctx = {
     kids = kids ++ [pill(say(code, "All", "全部"), total, -1, m.scope == -1)]
     var i = 0
     for g in groups() {
-      let n = unwrap_or(get(m.counts, i), 0)
+      let n = m.counts.get(i).unwrap_or(0)
       kids = kids ++ [pill(if code == "zh-CN" { g.pill_zh } else { g.pill_en }, n, i, m.scope == i)]
       i = i + 1
     }
@@ -2194,7 +2194,7 @@ fn starts(state: State) -> List[Entry] = {
 ## and the suggestions before one. The arrows, Home, End and the pointer are
 ## all bounded by this.
 fn shown_rows(state: State, m: Model) -> Int =
-  if idle(m) { len(state.recent) + len(starts(state)) } else { len(m.hits) }
+  if idle(m) { len(state.recent) + state.starts().len() } else { len(m.hits) }
 
 ## What Enter does on an idle row: a recent query is asked again, which is the
 ## field taking that text, and a suggestion is opened like a result.
@@ -2203,7 +2203,7 @@ fn idle_choice(state: State, sel: Int) -> Cmd[Msg] = {
   if sel >= 0 && sel < n {
     SendMsg(msg: Typed(text: state.recent[sel]))
   } else {
-    match get(starts(state), sel - n) {
+    match state.starts().get(sel - n) {
       Some(e) -> SendMsg(msg: Chose(href: e.href))
       None -> NoCmd
     }
@@ -2430,20 +2430,20 @@ pub fn init(flags: Option[String]) -> (State, Model) =
       match parse(text) {
         Ok(j) -> {
           let index = jget(j, "index")
-          let entries = entries_of(jget(index, "items"))
+          let entries = index.jget("items").entries_of()
           let state = State {
-            root: jstr_or(jget(j, "root"), "."),
-            lang: jstr_or(jget(index, "lang"), "en"),
-            mod_key: jstr_or(jget(j, "mod"), "⌘"),
+            root: j.jget("root").jstr_or("."),
+            lang: index.jget("lang").jstr_or("en"),
+            mod_key: j.jget("mod").jstr_or("⌘"),
             entries: entries,
             keys: list.map(entries, e => key_of(e)),
-            start: list.map(jarr(jget(index, "start")), s => jint_or(s, -1)),
-            recent: recent_of(jget(j, "recent")),
-            body: body_of(jget(j, "body"), entries),
+            start: list.map(index.jget("start").jarr(), s => jint_or(s, -1)),
+            recent: j.jget("recent").recent_of(),
+            body: j.jget("body").body_of(entries),
           }
           # A shared link's query is answered in the first turn, so the
           # panel opens on its results rather than on an empty field.
-          let q = jstr_or(jget(j, "q"), "")
+          let q = j.jget("q").jstr_or("")
           (state, if q == "" { blank() } else { asked(state, blank(), q, -1) })
         }
         Err(_) -> (blank_state(), blank())
@@ -2588,7 +2588,7 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
 
 fn jget(j: Json, key: String) -> Json =
   match j {
-    JObj(entries) -> unwrap_or(map.get(entries, key), JNull)
+    JObj(entries) -> map.get(entries, key).unwrap_or(JNull)
     _ -> JNull
   }
 
@@ -2653,9 +2653,9 @@ pub fn encode(m: Model) -> String =
   ++ ",\"sel\":" ++ to_string(m.sel)
   ++ ",\"open\":" ++ (if m.open { "true" } else { "false" })
   ++ ",\"goto\":" ++ quoted(m.goto)
-  ++ ",\"hits\":[" ++ join(list.map(m.hits, h => to_string(h)), ",") ++ "]"
+  ++ ",\"hits\":[" ++ list.map(m.hits, h => to_string(h)).join(",") ++ "]"
   ++ ",\"scope\":" ++ to_string(m.scope)
-  ++ ",\"counts\":[" ++ join(list.map(m.counts, c => to_string(c)), ",") ++ "]"
+  ++ ",\"counts\":[" ++ list.map(m.counts, c => to_string(c)).join(",") ++ "]"
   ++ ",\"fix\":" ++ quoted(m.fix)
   ++ ",\"fix_hits\":" ++ to_string(m.fix_hits)
   ++ "}"
@@ -2669,15 +2669,15 @@ pub fn decode(s: String) -> Model =
       match j {
         JObj(_) ->
           Model {
-            query: jstr_or(jget(j, "q"), ""),
-            sel: jint_or(jget(j, "sel"), 0),
-            open: jbool_or(jget(j, "open"), true),
-            goto: jstr_or(jget(j, "goto"), ""),
-            hits: list.map(jarr(jget(j, "hits")), h => jint_or(h, -1)),
-            scope: jint_or(jget(j, "scope"), -1),
-            counts: list.map(jarr(jget(j, "counts")), c => jint_or(c, 0)),
-            fix: jstr_or(jget(j, "fix"), ""),
-            fix_hits: jint_or(jget(j, "fix_hits"), 0),
+            query: j.jget("q").jstr_or(""),
+            sel: j.jget("sel").jint_or(0),
+            open: j.jget("open").jbool_or(true),
+            goto: j.jget("goto").jstr_or(""),
+            hits: list.map(j.jget("hits").jarr(), h => jint_or(h, -1)),
+            scope: j.jget("scope").jint_or(-1),
+            counts: list.map(j.jget("counts").jarr(), c => jint_or(c, 0)),
+            fix: j.jget("fix").jstr_or(""),
+            fix_hits: j.jget("fix_hits").jint_or(0),
           }
         _ -> blank()
       }
@@ -2709,7 +2709,7 @@ fn probe_index() -> List[Entry] = [
 fn state_of(entries: List[Entry]) -> State =
   State { ..blank_state(), entries: entries, keys: list.map(entries, e => key_of(e)) }
 
-fn probe_state() -> State = state_of(probe_index())
+fn probe_state() -> State = probe_index().state_of()
 
 fn shown(state: State, q: String) -> List[String] =
   list.map(scan(state, search(state, q), 0).hits, h => h.entry.title)
@@ -2891,7 +2891,7 @@ test "each group's rows stay inside that group's section" {
   # results list holds two sections and no row, and each section holds one row;
   # each section's dot takes its group's hue, not its place on screen
   assert kid_classes(v, "search-results") == ["search-group hue-3", "search-group hue-2"]
-  assert list.map(all_with_class(v, "search-group-rows"), n => len(kids_of(n))) == [1, 1]
+  assert list.map(all_with_class(v, "search-group-rows"), n => n.kids_of().len()) == [1, 1]
 }
 
 ## The conditional half of the same rule: a group with no hits is absent, not
@@ -2914,14 +2914,14 @@ test "a group with no hits emits no section at all" {
 test "the page's root and language reach the leaves through the handler" {
   let en_state = State { ..probe_state(), root: ".." }
   let m = typed(en_state, "str.trim")
-  assert hrefs(view(en_state, m)) == ["../stdlib.html#std-str-trim"]
-  assert str.contains(show_tree(view(en_state, m)), "Standard library")
+  assert en_state.view(m).hrefs() == ["../stdlib.html#std-str-trim"]
+  assert str.contains(en_state.view(m).show_tree(), "Standard library")
   let zh_state = State { ..en_state, lang: "zh-CN", root: "../.." }
-  assert hrefs(view(zh_state, m)) == ["../../stdlib.html#std-str-trim"]
-  assert str.contains(show_tree(view(zh_state, m)), "标准库")
+  assert zh_state.view(m).hrefs() == ["../../stdlib.html#std-str-trim"]
+  assert str.contains(zh_state.view(m).show_tree(), "标准库")
   # the scope line follows it too, which is the expectation this panel manages
-  assert str.contains(show_tree(view(en_state, m)), "Searches titles and API names")
-  assert str.contains(show_tree(view(zh_state, m)), "只搜标题与 API 名")
+  assert str.contains(en_state.view(m).show_tree(), "Searches titles and API names")
+  assert str.contains(zh_state.view(m).show_tree(), "只搜标题与 API 名")
 }
 
 test "a note's backticks are code, and an unpaired one is a backtick" {
@@ -2956,7 +2956,7 @@ test "arrows move the selection and stop at both ends" {
   assert turn(state, down, Pressed(key: "ArrowDown")).sel == 1
   assert turn(state, down, Pressed(key: "ArrowUp")).sel == 0
   # the selected row is the one that says so, and it is the only one
-  assert selected_titles(view(state, down)) == ["str.split"]
+  assert state.view(down).selected_titles() == ["str.split"]
   # a key nothing is bound to leaves the model alone, so the turn has no patches
   assert turn(state, down, Pressed(key: "x")) == down
 }
@@ -2979,7 +2979,7 @@ test "enter marks a destination and escape renders nothing at all" {
   let m = Model { ..typed(state, "str."), sel: 1 }
   let go = turn(state, m, Pressed(key: "Enter"))
   assert go.goto == "stdlib.html#std-str-split"
-  assert str.contains(show_tree(view(state, go)), "data-goto")
+  assert str.contains(state.view(go).show_tree(), "data-goto")
   # the next message clears it, so one Enter is one navigation
   assert turn(state, go, Typed(text: "str.")).goto == ""
   let cleared = turn(state, go, Pressed(key: "Escape"))
@@ -3045,14 +3045,14 @@ test "an index row is five strings, in this order" {
 test "only the mutable model round-trips through its text" {
   let state = probe_state()
   let m = typed(state, "str.")
-  assert decode(encode(m)) == m
+  assert m.encode().decode() == m
   assert encode(m)
     == "{\"q\":\"str.\",\"sel\":0,\"open\":true,\"goto\":\"\",\"hits\":[0,1],"
     ++ "\"scope\":-1,\"counts\":[2,0,0,0,0],\"fix\":\"\",\"fix_hits\":0}"
   assert not str.contains(encode(m), "root")
   assert not str.contains(encode(m), "items")
   let shut = turn(state, turn(state, m, Pressed(key: "Escape")), Pressed(key: "Escape"))
-  assert decode(encode(shut)).open == false
+  assert shut.encode().decode().open == false
   assert decode("not json at all") == blank()
   assert decode("[1,2]") == blank()
   # an object missing every field is the blank model, field by field
@@ -3068,11 +3068,11 @@ test "only the mutable model round-trips through its text" {
 
 fn show_tree(w: Node[Msg]) -> String = to_string(w)
 
-fn count_class(w: Node[Msg], cls: String) -> Int = len(all_with_class(w, cls))
+fn count_class(w: Node[Msg], cls: String) -> Int = w.all_with_class(cls).len()
 
 ## The class attribute of each child of the first element carrying `cls`.
 fn kid_classes(w: Node[Msg], cls: String) -> List[String] =
-  match get(all_with_class(w, cls), 0) {
+  match w.all_with_class(cls).get(0) {
     None -> []
     Some(found) -> list.map(kids_of(found), k => class_of(k))
   }
@@ -3131,7 +3131,7 @@ fn kids_of(w: Node[Msg]) -> List[Node[Msg]] =
 fn text_of(w: Node[Msg]) -> String =
   match w {
     Text(s) -> s
-    Elem(_, _, _, kids, ..) -> join(list.map(kids, k => text_of(k)), "")
+    Elem(_, _, _, kids, ..) -> list.map(kids, k => text_of(k)).join("")
   }
 
 fn has_class(w: Node[Msg], cls: String) -> Bool =
@@ -3175,7 +3175,7 @@ test "hovering a row selects it" {
   let m = typed(state, "str.")
   let on_second = turn(state, m, Hovered(at: 1))
   assert on_second.sel == 1
-  assert selected_titles(view(state, on_second)) == ["str.split"]
+  assert state.view(on_second).selected_titles() == ["str.split"]
   assert turn(state, on_second, Pressed(key: "Enter")).goto == "stdlib.html#std-str-split"
   # the row that is already selected, and rows that do not exist, change nothing
   assert turn(state, on_second, Hovered(at: 1)) == on_second
@@ -3218,7 +3218,7 @@ test "the field, the list and the rows carry the combobox roles" {
   assert prop_of(rows_box, "role") == "group"
   assert prop_of(rows_box, "aria-labelledby") == "dawn-search-g-stdlib"
   # with nothing listed the popup is collapsed and nothing is active
-  let empty = all_with_class(view(state, typed(state, "nothing here")), "search-input")[0]
+  let empty = state.view(typed(state, "nothing here")).all_with_class("search-input")[0]
   assert prop_of(empty, "aria-expanded") == "false"
   assert prop_of(empty, "aria-activedescendant") == ""
 }
@@ -3228,14 +3228,14 @@ test "the panel's own words follow the page's language" {
   let en = probe_state()
   let zh = State { ..en, lang: "zh-CN" }
   let m = typed(en, "str.")
-  let en_text = show_tree(view(en, m))
-  let zh_text = show_tree(view(zh, m))
+  let en_text = en.view(m).show_tree()
+  let zh_text = zh.view(m).show_tree()
   assert str.contains(en_text, "Cancel")
   assert str.contains(zh_text, "取消")
   assert not str.contains(zh_text, "Cancel")
   assert str.contains(en_text, "open")
   assert str.contains(zh_text, "打开")
-  assert prop_of(all_with_class(view(zh, m), "search-input")[0], "aria-label") == "搜索本站"
+  assert prop_of(zh.view(m).all_with_class("search-input")[0], "aria-label") == "搜索本站"
 }
 
 ## The mark is where a word of the query begins a word of the text, or
@@ -3342,7 +3342,7 @@ test "an empty query lists the recent queries, then where to start" {
   assert kid_classes(fresh, "search-results") == ["search-group search-group-start"]
   assert prop_of(all_with_class(fresh, "search-row")[0], "id") == "dawn-search-opt-0"
   # nothing at all to show: the prompt, as before
-  let bare = view(probe_state(), blank())
+  let bare = probe_state().view(blank())
   assert count_class(bare, "search-group") == 0
   assert count_class(bare, "search-status") == 1
   assert prop_of(all_with_class(bare, "search-input")[0], "aria-expanded") == "false"
@@ -3417,11 +3417,11 @@ test "a query nothing answers says so, with three tips" {
 ## The foot names the modifier the reader's own keyboard has.
 test "the new-tab hint uses the modifier the page names" {
   let ctrl = State { ..probe_state(), mod_key: "Ctrl" }
-  let text_ctrl = show_tree(view(ctrl, blank()))
+  let text_ctrl = ctrl.view(blank()).show_tree()
   assert str.contains(text_ctrl, "Ctrl")
   assert str.contains(text_ctrl, "new tab")
-  assert str.contains(show_tree(view(probe_state(), blank())), "⌘")
-  assert str.contains(show_tree(view(State { ..ctrl, lang: "zh-CN" }, blank())), "新标签页")
+  assert str.contains(probe_state().view(blank()).show_tree(), "⌘")
+  assert str.contains(view(State { ..ctrl, lang: "zh-CN" }, blank()).show_tree(), "新标签页")
 }
 
 ## Copy link is in the foot only while the field holds a query, names itself
@@ -3429,12 +3429,12 @@ test "the new-tab hint uses the modifier the page names" {
 ## and its status line in the page's language.
 test "the foot offers copy link only while there is a query" {
   let state = probe_state()
-  assert count_class(view(state, blank()), "search-copy") == 0
-  assert count_class(view(state, typed(state, "   ")), "search-copy") == 0
+  assert state.view(blank()).count_class("search-copy") == 0
+  assert state.view(typed(state, "   ")).count_class("search-copy") == 0
   let v = view(state, typed(state, "str."))
   let copy = all_with_class(v, "search-copy")
   assert len(copy) == 1
-  assert len(all_with_class(all_with_class(v, "search-foot")[0], "search-copy")) == 1
+  assert all_with_class(all_with_class(v, "search-foot")[0], "search-copy").len() == 1
   assert prop_of(copy[0], "data-copy-link") == "1"
   assert prop_of(copy[0], "id") == "dawn-search-copy"
   let heard = match copy[0] {
@@ -3451,7 +3451,7 @@ test "the foot offers copy link only while there is a query" {
   assert text_of(all_with_class(w, "search-copy-done")[0]) == "已复制"
   assert text_of(all_with_class(w, "search-copy-said")[0]) == "链接已复制"
   # a query with no hits can be shared as well: the link asks it again
-  assert count_class(view(state, typed(state, "zzzz")), "search-copy") == 1
+  assert state.view(typed(state, "zzzz")).count_class("search-copy") == 1
 }
 
 ## The pills narrow the matches the query already has: All and each group,
@@ -3477,7 +3477,7 @@ test "a scope pill narrows the list to one group and counts every group" {
   assert spec.sel == 0
   assert list.map(scan(state, spec.hits, 0).hits, h => h.entry.title) == ["6.5 Named effects"]
   assert spec.counts == m.counts
-  assert prop_of(all_with_class(view(state, spec), "search-pill")[2], "aria-pressed") == "true"
+  assert prop_of(state.view(spec).all_with_class("search-pill")[2], "aria-pressed") == "true"
   # the pill that is on changes nothing, and All undoes it
   assert turn(state, spec, Scoped(group: 1)) == spec
   assert turn(state, spec, Scoped(group: -1)).hits == m.hits
@@ -3490,8 +3490,8 @@ test "a scope pill narrows the list to one group and counts every group" {
   assert other.scope == -1
   assert len(other.hits) == 2
   # no query, or nothing matched: the row is there and empty
-  assert kids_of(all_with_class(view(state, blank()), "search-pills")[0]) == []
-  assert kids_of(all_with_class(view(state, typed(state, "nothing here")), "search-pills")[0]) == []
+  assert kids_of(state.view(blank()).all_with_class("search-pills")[0]) == []
+  assert kids_of(state.view(typed(state, "nothing here")).all_with_class("search-pills")[0]) == []
   # escape takes the scope back with the query
   let cleared = turn(state, spec, Pressed(key: "Escape"))
   assert cleared.scope == -1
@@ -3550,13 +3550,13 @@ fn body_asset(version: Int, secs: List[List[String]], paras: List[(Int, String)]
   for para in paras {
     let (_, text) = para
     for w in list.unique(body_terms(text)) {
-      table = map.insert(table, w, unwrap_or(map.get(table, w), []) ++ [p])
+      table = map.insert(table, w, map.get(table, w).unwrap_or([]) ++ [p])
     }
     p = p + 1
   }
   let t = table
-  let words = sort_by(map.keys(t), (a, b) => order(a, b))
-  let gaps = list.map(words, w => JArr(items: list.map(gaps_of(unwrap_or(map.get(t, w), [])), g => JInt(value: g))))
+  let words = map.keys(t).sort_by((a, b) => order(a, b))
+  let gaps = list.map(words, w => JArr(items: list.map(map.get(t, w).unwrap_or([]).gaps_of(), g => JInt(value: g))))
   render(JArr(items: [
     JInt(value: version),
     JArr(items: list.map(secs, s => JArr(items: list.map(s, f => JStr(value: f))))),
@@ -3599,7 +3599,7 @@ fn en_paras() -> List[(Int, String)] = [
 ## The probe index, with the text of five sections beside it.
 fn text_state() -> State = {
   let titles = probe_state()
-  let j = json_of(body_asset(1, en_secs(), en_paras()))
+  let j = body_asset(1, en_secs(), en_paras()).json_of()
   State { ..titles, body: body_of(j, titles.entries) }
 }
 
@@ -3608,7 +3608,7 @@ fn sections_of(hs: List[BodyHit]) -> List[(Int, Int)] = list.map(hs, h => (h.sec
 test "the body index is read in format 1 only, and its gaps are added up" {
   let titles = probe_state()
   let asset = body_asset(1, en_secs(), en_paras())
-  match body_of(json_of(asset), titles.entries) {
+  match asset.json_of().body_of(titles.entries) {
     Some(b) -> {
       assert len(b.secs) == 5
       assert len(b.paras) == 6
@@ -3627,7 +3627,7 @@ test "the body index is read in format 1 only, and its gaps are added up" {
     None -> panic("a format 1 body index must be read")
   }
   # another version, or something that is not one, is no body at all
-  let other = json_of(body_asset(2, en_secs(), en_paras()))
+  let other = body_asset(2, en_secs(), en_paras()).json_of()
   assert not has_body(State { ..titles, body: body_of(other, titles.entries) })
   assert not has_body(State { ..titles, body: body_of(JNull, titles.entries) })
   match parse("[1,[],[\"a\"],[],[]]") {
@@ -3647,11 +3647,11 @@ test "the flags carry the body index, and the foot says whether it is in" {
   assert not has_body(old_body)
   let (none, _) = init(Some("{${index}}"))
   assert not has_body(none)
-  assert str.contains(show_tree(view(with_body, blank())), "Searches titles, API names and the documents' text.")
-  assert str.contains(show_tree(view(old_body, blank())), "Searches titles and API names, not body text.")
+  assert str.contains(with_body.view(blank()).show_tree(), "Searches titles, API names and the documents' text.")
+  assert str.contains(old_body.view(blank()).show_tree(), "Searches titles and API names, not body text.")
   let zh = State { ..with_body, lang: "zh-CN" }
-  assert str.contains(show_tree(view(zh, blank())), "搜标题、API 名与文档正文。")
-  assert prop_of(all_with_class(view(with_body, blank()), "search-input")[0], "placeholder")
+  assert str.contains(zh.view(blank()).show_tree(), "搜标题、API 名与文档正文。")
+  assert prop_of(with_body.view(blank()).all_with_class("search-input")[0], "placeholder")
     == "Search titles, API names and text"
 }
 
@@ -3679,13 +3679,13 @@ test "a query's words for the text, the ones it ends with as prefixes" {
 test "the text answers with the sections whose paragraphs have every word" {
   let state = text_state()
   # `keep` is whole: the paragraph with `keeps` does not have it
-  assert sections_of(body_hits(state, "keep sta")) == [(3, 0)]
+  assert state.body_hits("keep sta").sections_of() == [(3, 0)]
   # `handl` is the start of `handle`, `handler` and `handler's`
-  assert sections_of(body_hits(state, "handl")) == [(1, 0), (2, 0), (3, 0)]
+  assert state.body_hits("handl").sections_of() == [(1, 0), (2, 0), (3, 0)]
   let none: List[(Int, Int)] = []
-  assert sections_of(body_hits(state, "keep effects")) == none
+  assert state.body_hits("keep effects").sections_of() == none
   # and no text at all before the page has given it
-  assert sections_of(body_hits(probe_state(), "handl")) == none
+  assert probe_state().body_hits("handl").sections_of() == none
 }
 
 ## One row per section, and its excerpt is the paragraph where the words are
@@ -3706,7 +3706,7 @@ test "a section's row shows the paragraph where the words are densest" {
   assert hrefs(v) == ["./spec.html#s6-5-4", "./tutorial/09.html#s0-2"]
   assert turn(state, m, Pressed(key: "Enter")).goto == "spec.html#s6-5-4"
   # the model carries the paragraph, and reads back the same
-  assert decode(encode(m)) == m
+  assert m.encode().decode() == m
   assert str.contains(encode(m), "\"hits\":[1000003,1000004]")
 }
 
@@ -3728,8 +3728,8 @@ test "the text ranks below the titles and never repeats a title row" {
   let hist = turn(state, m, Scoped(group: 4))
   assert hist.hits == [body_base() + 5]
   # without the text the same query has the two title rows only
-  assert typed(probe_state(), "effects").hits == [4, 3]
-  assert typed(probe_state(), "effects").counts == [0, 1, 1, 0, 0]
+  assert probe_state().typed("effects").hits == [4, 3]
+  assert probe_state().typed("effects").counts == [0, 1, 1, 0, 0]
 }
 
 ## A question typed as a sentence has words no paragraph has all of. When
@@ -3737,12 +3737,12 @@ test "the text ranks below the titles and never repeats a title row" {
 ## them answer, weighed by how rare their words are, below every other row.
 test "a longer query nothing answers whole is answered by most of its words" {
   let state = text_state()
-  assert sections_of(body_hits(state, "where does the block handle")) == [(2, -2)]
+  assert state.body_hits("where does the block handle").sections_of() == [(2, -2)]
   let none: List[(Int, Int)] = []
   # two words are not a sentence: both, or nothing
-  assert sections_of(body_hits(state, "where handle")) == none
+  assert state.body_hits("where handle").sections_of() == none
   # and a query that does have an answer whole is not loosened
-  assert sections_of(body_hits(state, "the handler arms")) == [(2, 0)]
+  assert state.body_hits("the handler arms").sections_of() == [(2, 0)]
 }
 
 fn zh_secs() -> List[List[String]] = [
@@ -3763,17 +3763,17 @@ fn zh_paras() -> List[(Int, String)] = [
 ## the paragraphs that have its characters: found is sure, cut before it could
 ## be found is kept a tier lower, and not found in a whole paragraph is gone.
 test "a Chinese phrase is checked in the candidates' excerpts" {
-  let j = json_of(body_asset(1, zh_secs(), zh_paras()))
+  let j = body_asset(1, zh_secs(), zh_paras()).json_of()
   let state = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
   # paragraph 1 has every character and neither phrase; paragraph 3 has
   # `效果` across a folded line; paragraph 4 is cut
-  assert sections_of(body_hits(state, "效果 处理")) == [(0, 0), (1, 0), (2, -1)]
+  assert state.body_hits("效果 处理").sections_of() == [(0, 0), (1, 0), (2, -1)]
   let hs = body_hits(state, "效果 处理")
   assert hs[0].paras == [0]
   assert hs[1].paras == [3]
   assert hs[2].paras == [4]
   # one character is a word, and there is no phrase to check
-  assert sections_of(body_hits(state, "效")) == [(0, 0), (1, 0), (2, 0)]
+  assert state.body_hits("效").sections_of() == [(0, 0), (1, 0), (2, 0)]
   let m = typed(state, "效果 处理")
   let v = view(state, m)
   assert list.map(all_with_class(v, "search-detail"), d => text_of(d)) == ["规范 › §6.5", "教程 › 第 9 章", "历史"]
@@ -3837,10 +3837,9 @@ test "the first-letter bucket misses no word that a walk of the whole index find
   }
   let every_word = list.unique(vocab)
   for w in ["arns", "wiht", "thet", "hendl", "handel", "efects", "stae", "remve", "spilt"] {
-    let limit = allowed(str.len(w))
-    let walked = sort_by(list.filter(every_word, x => str.starts_with(x, str.take(w, 1)) && x != w && distance(w, x, limit) <= limit),
-      (a, b) => order(a, b))
-    let bucketed = sort_by(list.map(near_words(state, w, false), x => x.word), (a, b) => order(a, b))
+    let limit = str.len(w).allowed()
+    let walked = list.filter(every_word, x => str.starts_with(x, str.take(w, 1)) && x != w && distance(w, x, limit) <= limit).sort_by((a, b) => order(a, b))
+    let bucketed = list.map(near_words(state, w, false), x => x.word).sort_by((a, b) => order(a, b))
     assert bucketed == walked
   }
   # and the bucket holds both indexes: `spilt` reaches a title's word,
@@ -3874,7 +3873,7 @@ test "a suggestion is looked for only when neither index answers" {
   assert alone.hits == []
   assert alone.fix == "handle"
   # and the titles alone know no word near it
-  assert typed(probe_state(), "handel").fix == ""
+  assert probe_state().typed("handel").fix == ""
 }
 
 ## Each word the index lacks is replaced; the ones it has are kept. The
@@ -3934,15 +3933,15 @@ test "did you mean names the query and asks it on a click or on enter" {
   assert taken.query == "handle"
   assert len(taken.hits) == 3
   assert taken.fix == ""
-  assert count_class(view(state, taken), "search-fix") == 0
+  assert state.view(taken).count_class("search-fix") == 0
   # one result is one
-  assert text_of(all_with_class(view(state, typed(state, "wiht handel")), "search-fix-count")[0]) == "1 result"
+  assert text_of(state.view(typed(state, "wiht handel")).all_with_class("search-fix-count")[0]) == "1 result"
   # the Chinese page says it in Chinese
   let zh = State { ..state, lang: "zh-CN" }
-  assert text_of(all_with_class(view(zh, typed(zh, "handel")), "search-fix")[0]) == "你是想找 handle？3 条结果"
+  assert text_of(zh.view(typed(zh, "handel")).all_with_class("search-fix")[0]) == "你是想找 handle？3 条结果"
   # Escape takes the suggestion with the query, and the model carries it
   assert turn(state, m, Pressed(key: "Escape")).fix == ""
-  assert decode(encode(m)) == m
+  assert m.encode().decode() == m
   assert str.contains(encode(m), "\"fix\":\"handle\",\"fix_hits\":3")
 }
 

@@ -142,17 +142,17 @@ pub fn decode(s: String) -> Counter =
 fn turn(m: Counter, msg: Msg) -> Counter = fold_msg(m, msg, update)
 
 test "update folds messages and the model round-trips through its text" {
-  let m = turn(turn(init(), Inc), Inc)
+  let m = init().turn(Inc).turn(Inc)
   assert m == Counter { n: 2 }
   assert turn(m, Dec) == Counter { n: 1 }
   assert turn(m, Reset) == init()
-  assert decode(encode(m)) == m
-  assert decode(encode(Counter { n: -17 })) == Counter { n: -17 }
+  assert m.encode().decode() == m
+  assert encode(Counter { n: -17 }).decode() == Counter { n: -17 }
   assert decode("not a number") == init()
 }
 
 test "this application commands nothing, so a turn is exactly its update" {
-  let (m, c) = update(init(), Inc)
+  let (m, c) = init().update(Inc)
   assert m == Counter { n: 1 }
   let nothing: Cmd[Msg] = NoCmd
   assert c == nothing
@@ -171,7 +171,7 @@ test "the view is a value, so a frame is one assertion" {
         button("boom", Boom),
       ]),
     ])
-  assert view(init()) == want
+  assert init().view() == want
 }
 
 test "the bar is the only child list whose length the model decides" {
@@ -181,7 +181,7 @@ test "the bar is the only child list whose length the model decides" {
   let none: List[Node[Msg]] = []
   assert ticks(0) == none
   assert ticks(-3) == none
-  assert len(ticks(3)) == 3
+  assert ticks(3).len() == 3
   assert ticks(3) == [tick(), tick(), tick()]
   let two: List[Patch[Node[Msg]]] = diff(view(Counter { n: 1 }), view(Counter { n: 2 }))
   assert len(two) == 2
