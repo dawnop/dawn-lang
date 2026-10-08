@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 03129dd462990ee4 -->
+<!-- doc-check: translation-of docs/spec.md @ 06118d848408d344 -->
 
 # Dawn Language Specification
 
@@ -4998,8 +4998,12 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   `[(argument position, contents)]`, and each pair is rounded to the format of **that** buffer
   (`round_to`) and written back; a position out of range answers `gpu.bad_write_back` and
   writes nothing. Every input is read before any write-back. The grid is not read.
-- A buffer holds what memory of its format would hold: `upload` and write-back both round to
-  the buffer's format, and `download` answers what is held unchanged.
+- A buffer holds bytes, as memory does: `upload` stores them as given and `download` answers
+  them unchanged, so an upload followed by a download is the identity for every format and
+  every value. A reference implementation sees `Float`s, so at a launch the fake device
+  decodes each buffer to `Float`s, and an `i64` buffer holding a value a `Float` cannot hold
+  exactly (beyond ±2^53) is refused with `gpu.fake_inexact`, naming the buffer and the
+  element, rather than rounded. A write-back is rounded to the buffer's format.
 - `globals` maps a kernel name to the globals its module exports (symbol name, format, the
   contents the declaration gives them); `module_global` answers from it, and a name not in it
   answers `gpu.no_module_symbol`. Left out, no module exports a global. It comes after `body`
@@ -5046,15 +5050,27 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   arithmetic); `I8`, `I16`, `I32` and `U8` in `std/int/*`; `I4` in `std/gpu`. `U16`, `U32` and
   `U64` have none (the dialect has no unsigned integer tile types), so a `Tensor[U32]` is a type
   error at `alloc`.
+- In type position write the value type; in value position write the format's name. For
+  `std/narrow` and the fixed-width integers the two are spelled alike (`Tile[BF16]`,
+  `alloc(BF16, n)`); for the three builtins they are `Float`/`F64`, `Int`/`I64`, `Bool`/`I1`.
 - The formats a buffer can be allocated in are exactly the 12 `element_bytes` knows: `f64`,
   `i64`, `i32`, `tf32`, `bf16`, `f16`, `i16`, `i8`, `u8`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`.
   Both handlers answer `gpu.unsupported_dtype` for the rest, `F32` included: it can be written
   in a type but not allocated. `I4` and `F4E2M1FN` are tile formats only, and no buffer of
   either exists.
-- Values go in and out as `List[Float]`, under every format: `upload` rounds to the buffer's
-  format, or truncates and wraps (`round_to`), and `download` answers what the buffer holds
-  exactly. The channel is lossless for `i32`, `i16`, `i8` and `u8`, and exact for `i64` only
-  within ±2^53.
+- Values go in and out as `List[T]`, where `T` is the tensor's element type:
+  `upload(t: Tensor[T], xs: List[T])` and `download(t: Tensor[T]) -> Result[List[T], _]` need
+  `T: HasDtype + DeviceBits`. `upload` writes each element as the format's bit pattern,
+  little-endian, and nothing is rounded on the way in (the value is already the format's: a
+  `BF16` is a bfloat16, and an `Int` crosses whole); `download` answers exactly what the buffer
+  holds. That makes every format lossless, an `i64` beyond ±2^53 and a NaN's payload included.
+  `DeviceBits` is implemented by the formats a buffer can hold; `Bool`, `I4` and `F4E2M1FN` have
+  a format and no buffer, so uploading a `Tensor[Bool]` is a type error. On the effect, the
+  data crosses as `Bytes` (`gpu_upload(handle, data: Bytes)`, `gpu_download(handle) ->
+  Result[Bytes, _]`), element `i` in bytes `[i * w, (i + 1) * w)` for the format's width `w`,
+  little-endian. `pack_to(dtype, xs: List[Float])` and `unpack_from(dtype, bytes)` are the same
+  encoding by format name over `Float`s, for a program whose buffers have no common element
+  type; an `i64` beyond ±2^53 does not survive them.
 - **Scalars cross by value**: a launch's arguments are buffer handles or scalars passed by value
   (`i32`, `i64`, `f32`, `f64`; the argument-area layout of smaller formats has not been measured, so
   they are not accepted). A host number reaches a kernel as a constant written into the program at
@@ -5090,7 +5106,7 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   result of a tolerance-tier kernel is **undefined**.
 - The real device's behaviour when the arguments disagree with the kernel's entry in number or
   format: **undefined**.
-- The round trip through the `List[Float]` channel of values beyond ±2^53 in an `i64` buffer.
+- That an `i64` beyond ±2^53 is computed on by the fake device: it holds one and refuses to launch on it.
 - Recording, encoding or running a kernel at comptime.
 
 ---

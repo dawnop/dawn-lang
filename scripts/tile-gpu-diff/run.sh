@@ -158,7 +158,7 @@
 #             answering the honest sequence. Their red sets are held by
 #             name and by count where the seq family runs, below:
 #
-#     download-short   the handler asks the device for n-1 f64 elements ->
+#     download-short   the handler asks the device for n-1 f64 elements (eight bytes fewer) ->
 #                      every f64 set's round trip differs, verdict `fail`.
 #                      A handler-layer claim, so it is required on every
 #                      driver, blocked or not: the memory path is the part
@@ -327,7 +327,7 @@
 #                      is deliberately off the bf16 grid, can see it. Three
 #                      f16 kernels as the control and a fourth that reds is a
 #                      stronger statement than four that red
-#     u8-reads-signed  the real handler unpacks a u8 buffer with `unpack_i8`,
+#     u8-reads-signed  the u8 reader (`unpack_from`'s u8 arm) sign-extends,
 #                      so an octet above 127 comes back negative -> layers 0
 #                      and 1 blind, and `invert` alone reds: it is the only
 #                      kernel here over an 8-bit buffer, and its corpus spans
@@ -1508,7 +1508,7 @@ cat "$work/dtype.out"
 dtype_verdict="$(verdict_of "$work/dtype.out")"
 case "$dtype_verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: the ${#dtypes[@]} element format kernels agree with the fake device bit for bit" ;;
+        echo "PASS  native: the ${#dtypes[@]} element format kernels and the i64 corpus past 2^53 agree with the fake device bit for bit" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $dtype_verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $dtype_verdict" ;;
   fail) cat "$work/dtype.err" >&2; fail "the device answered and disagreed with the fake device on an element format kernel (see the transcript above)" ;;
@@ -2374,6 +2374,20 @@ i64_inside="$(printf '%s\n' "$i64_shape" | tr ' ' '\n' | sed -n 's/^products_ins
   fail "the i64 corpus has $i64_inside of $i64_lanes products inside 2^52; past that the List[Float] channel is not exact: $i64_shape"
 echo "PASS  corpus: every i64 product is inside 2^52, so the host channel is exact ($i64_inside of $i64_lanes)"
 
+# The same kernel past that edge, through the typed Tensor[Int] transfer
+# (std/gpu 'upload'), against tileref's Int twin. Each field is a claim: lanes
+# beyond 2^53, lanes whose Int is not a Float at all (the Float channel would
+# have rounded them), and products that wrapped at 2^64 (the device wraps).
+big_shape="$(awk '/^kernel dtype_i64_big /{f=1} f && /^  index /{sub(/^  index /, ""); print; exit}' "$work/dtype.out")"
+[ -n "$big_shape" ] || fail "dtype_diff printed no index line for dtype_i64_big"
+for field in negative beyond_2p53 not_a_float products_wrapped; do
+  value="$(printf '%s\n' "$big_shape" | tr ' ' '\n' | sed -n "s/^$field=//p")"
+  [ -n "$value" ] || fail "dtype_i64_big's index line names no $field: $big_shape"
+  [ "$value" -gt 0 ] ||
+    fail "dtype_i64_big has $field=0, so that claim is not being tested: $big_shape"
+done
+echo "PASS  corpus: dtype_i64_big covers lanes past 2^53, lanes no Float holds, and wrapped products ($big_shape)"
+
 # leetgpu 14's corpus is two claims in one line. A flock where every agent
 # has a neighbour would never take the branch that keeps an agent's own
 # velocity, and one where none does would leave all three reductions with
@@ -2757,11 +2771,12 @@ roundtrip_mutant_checks() { # name, std-dir, dtype, count
 }
 
 # 1. download-short: the real handler asks the device for one f64 element
-#    fewer than the buffer holds. The round trip is then one element short
-#    in every f64 set; the bf16 sets, which download bytes, are untouched.
+#    fewer than the buffer holds (eight bytes, only for the f64 format). The
+#    round trip is then one element short in every f64 set; the bf16 sets
+#    are untouched.
 std_ds="$(mutant_std download-short \
-  '          match gpu_download_host(p, n) {' \
-  '          match gpu_download_host(p, n - 1) {')"
+  '        gpu_download_bytes_host(p, n * unwrap_or(element_bytes(dt), 1))' \
+  '        gpu_download_bytes_host(p, n * unwrap_or(element_bytes(dt), 1) - (if dt == "f64" { 8 } else { 0 }))')"
 roundtrip_mutant_checks download-short "$std_ds" f64 4
 
 # 2. pack-truncates: the bf16 packer no longer rounds, so narrow.bf16_bits
@@ -2770,8 +2785,8 @@ roundtrip_mutant_checks download-short "$std_ds" f64 4
 #    bf16 set carries Floats off the grid, so every bf16 round trip differs
 #    from what the format holds; the f64 sets are untouched.
 std_pt="$(mutant_std pack-truncates \
-  '    let bits = narrow.bf16_bits(narrow.round_bf16(x))' \
-  '    let bits = narrow.bf16_bits(x)')"
+  '  "bf16" -> x => narrow.bf16_bits(narrow.round_bf16(x))' \
+  '  "bf16" -> x => narrow.bf16_bits(x)')"
 roundtrip_mutant_checks pack-truncates "$std_pt" bf16 3
 
 # 3. grid-zero: the real handler launches over zero tile blocks. Where the
@@ -3534,8 +3549,8 @@ fi
 #     so it still holds the corpus, and the other six read back an output
 #     buffer that still holds the sentinel. The gate requires both.
 std_iw="$(mutant_std inplace-writes-copy \
-  '                    store = map.insert(store, args[pos], (dt, list.map(v, x => round_to(dt, x))))' \
-  '                    store = map.insert(store, 0 - 1 - pos, (dt, list.map(v, x => round_to(dt, x))))')"
+  '                        store = map.insert(store, args[pos], (dt, pack_to(dt, v)))' \
+  '                        store = map.insert(store, 0 - 1 - pos, (dt, pack_to(dt, v)))')"
 build_native "$std_iw" "$work/m-inplace-writes-copy.bin" "$here/wide_diff.dawn"
 rc=0
 device "$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
@@ -3562,12 +3577,14 @@ else
   echo "SKIP  mutant: inplace-writes-copy not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
 fi
 
-# 14. f16-rounds-like-bf16: the f16 packer rounds with `narrow.round_bf16`
+# 14. f16-rounds-like-bf16: the f16 encoder rounds with `narrow.round_bf16`
 #     and then lays down the binary16 pattern of THAT. It is the mistake of
-#     copying `pack_bf16` and changing only the codec, and it is invisible
-#     everywhere but on a device: `round_to("f16", ..)` is a different
-#     function and still rounds correctly, so the fake device holds the
-#     right number and the real one holds a bf16.
+#     copying the bf16 arm and changing only the codec, and it is invisible
+#     to the device-against-fake comparison: since the codec is one function
+#     (`pack_to`) both devices are handed the same wrong bytes. What sees it
+#     is wide_diff's host-only codec probe, which holds `pack_to` /
+#     `unpack_from` to `round_to("f16", ..)`, the independent statement of
+#     what an f16 buffer holds.
 #
 #     Exactly ONE of the eight goes red, and the other three f16 kernels are
 #     the reason to say it: `dot_f16` uploads small integers and the two
@@ -3576,8 +3593,8 @@ fi
 #     corpus is tenths rounded to the f16 grid, is off the bf16 grid, and
 #     that is why its corpus is written the way it is.
 std_f16="$(mutant_std f16-rounds-like-bf16 \
-  '    let bits = narrow.f16_bits(narrow.round_f16(x))' \
-  '    let bits = narrow.f16_bits(narrow.round_bf16(x))')"
+  '  "f16" -> x => narrow.f16_bits(narrow.round_f16(x))' \
+  '  "f16" -> x => narrow.f16_bits(narrow.round_bf16(x))')"
 build_native "$std_f16" "$work/m-f16-bf16.bin" "$here/wide_diff.dawn"
 rc=0
 "$work/m-f16-bf16.bin" "${wide_cubins[@]}" > "$work/m-f16-bf16.out" 2>&1 || rc=$?
@@ -3607,10 +3624,12 @@ else
   echo "SKIP  mutant: f16-rounds-like-bf16 not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
 fi
 
-# 15. u8-reads-signed: the real handler unpacks a u8 buffer the way it
-#     unpacks an i8 one, so an octet above 127 comes back negative. The
+# 15. u8-reads-signed: the u8 reader (`unpack_from`'s u8 arm) reads an octet
+#     the way the i8 one does, so an octet above 127 comes back negative. The
 #     bytes on the device are the same bytes; what moves is the reading,
 #     which is the whole of the difference between the two 8-bit formats.
+#     Reader and writer are one function on both sides, so what reds is
+#     wide_diff's codec probe against `round_to("u8", ..)`.
 #
 #     `invert` alone is over an 8-bit buffer and it alone reds -- and only
 #     because its corpus covers the WHOLE octet range. Half the lanes of
@@ -3618,8 +3637,8 @@ fi
 #     this mutant completely, which is knife 10's shri-always-logical
 #     lesson at another width.
 std_u8="$(mutant_std u8-reads-signed \
-  '  "u8" -> unpack_u8(b)' \
-  '  "u8" -> unpack_i8(b)')"
+  '  "u8" -> bits => to_float(bits)' \
+  '  "u8" -> bits => to_float(wrap_i8(bits))')"
 build_native "$std_u8" "$work/m-u8-signed.bin" "$here/wide_diff.dawn"
 rc=0
 "$work/m-u8-signed.bin" "${wide_cubins[@]}" > "$work/m-u8-signed.out" 2>&1 || rc=$?
@@ -4535,6 +4554,43 @@ else
   [ "$mverdict" = "$dtype_verdict" ] ||
     { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: the clean run is $dtype_verdict but the mutant is $mverdict"; }
   echo "SKIP  mutant: pack-halves-swapped not verifiable on this driver: the clean run is $dtype_verdict, before any launch reaches the device"
+fi
+# wire-big-endian: the word assembly writes each element's bytes high first.
+# Every multi-byte case goes red, and for two different reasons. The Float-view
+# cases upload the swapped bytes to both devices, but the real device writes
+# its answer little-endian while the fake device's write-back goes through the
+# same swapped writer, so the two answers disagree. dtype_i64_big is the one
+# case whose expectation (tileref's Int twin) does not pass through the writer
+# at all, so it is red even if both devices were swapped alike; it is required
+# by name.
+std_be="$(mutant_std wire-big-endian \
+  '    var v = word
+    for _k in range(0, w) {
+      b = bytes.put(b, v & 0xFF)
+      v = v >>> 8
+    }' \
+  '    var v = word
+    for k in range(0, w) {
+      b = bytes.put(b, (word >>> (8 * (w - 1 - k))) & 0xFF)
+      v = v >>> 8
+    }')"
+build_native "$std_be" "$work/m-wire-be.bin" "$here/dtype_diff.dawn"
+rc=0
+device "$work/m-wire-be.bin" "${dtype_cubins[@]}" > "$work/m-wire-be.out" 2>&1 || rc=$?
+mverdict="$(verdict_of "$work/m-wire-be.out")"
+if [ "$dtype_verdict" = pass ]; then
+  if [ "$mverdict" != fail ] || [ "$rc" != 1 ]; then
+    cat "$work/m-wire-be.out" >&2
+    fail "wire-big-endian mutant stayed green: expected verdict fail (exit 1), got $mverdict (exit $rc)"
+  fi
+  awk '/^kernel /{cur=$2} /^  verdict differ:result$/ && cur == "dtype_i64_big" {hit=1} END {exit !hit}' \
+    "$work/m-wire-be.out" ||
+    { cat "$work/m-wire-be.out" >&2; fail "wire-big-endian: dtype_i64_big did not say differ:result"; }
+  echo "PASS  mutant: wire-big-endian (every multi-byte case reds, dtype_i64_big included: its expectation does not pass through the writer)"
+else
+  [ "$mverdict" = "$dtype_verdict" ] ||
+    { cat "$work/m-wire-be.out" >&2; fail "wire-big-endian: the clean run is $dtype_verdict but the mutant is $mverdict"; }
+  echo "SKIP  mutant: wire-big-endian not verifiable on this driver: the clean run is $dtype_verdict, before any launch reaches the device"
 fi
 # ---- knife T4's six package mutants
 #

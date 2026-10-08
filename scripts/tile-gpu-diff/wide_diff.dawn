@@ -131,16 +131,17 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    let (_dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], data)?
+    let (dt, data) = bufs[i]
+    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
   }
   Ok(())
 }
 
-fn download_all(hs: List[Int], reads: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
+fn download_all(hs: List[Int], bufs: List[(String, List[Float])], reads: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
   var out: List[List[Float]] = []
   for r in reads {
-    out = out ++ [gpu.gpu_download(hs[r])?]
+    let (read_dt, _read) = bufs[r]
+    out = out ++ [gpu.unpack_from(read_dt, gpu.gpu_download(hs[r])?)]
   }
   Ok(out)
 }
@@ -182,7 +183,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
-              let r = download_all(hs, reads)
+              let r = download_all(hs, bufs, reads)
               release(hs)
               let value = match r {
                 Ok(v) -> Some(v)
@@ -263,16 +264,30 @@ fn misses(got: Option[List[List[Float]]], want: Option[List[List[Float]]], reads
 ## read back), `differ:result`, or `blocked:<kind>@<stage>` where the driver
 ## stopped. There is no tolerance branch: every kernel here is exact tier,
 ## for the three reasons the header gives.
-fn verdict(fake: Trace, real: Trace) -> String = {
+fn verdict(fake: Trace, real: Trace, codec: Int) -> String = {
   let stop = stopped(real)
   if stop != "" {
     "blocked:" ++ stop
-  } else if same_bits(real.results, fake.results) {
+  } else if same_bits(real.results, fake.results) && codec == 0 {
     "identical:exact"
   } else {
     "differ:result"
   }
 }
+
+# The buffers whose Float view disagrees with `round_to`. The fake device and
+# the real one are handed the same bytes by the same writer (`pack_to`) and
+# their answers are decoded by the same reader (`unpack_from`), so a codec
+# that is wrong in the same way on both sides is invisible to the comparison
+# above. `round_to` is the independent statement of what a buffer of a format
+# holds, and this host-only probe holds the codec to it on every corpus
+# buffer: a packer that rounds f16 like bf16, or a reader that takes a u8 for
+# an i8, moves it. It reads no device.
+fn codec_misses(bufs: List[(String, List[Float])]) -> Int =
+  len(list.filter(bufs, b => {
+    let (dt, data) = b
+    to_string(gpu.unpack_from(dt, gpu.pack_to(dt, data))) != to_string(list.map(data, x => gpu.round_to(dt, x)))
+  }))
 
 # ---- the corpora ----
 
@@ -498,12 +513,14 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     let refs = case_kernels(i)
     let fake = with_gpu_fake(refs, () => stages(name, gx, gy, gz, bufs, reads))
     let real = with_gpu_real(cubins, () => stages(name, gx, gy, gz, bufs, reads))
-    let v = verdict(fake, real)
+    let codec = codec_misses(bufs)
+    let v = verdict(fake, real, codec)
     io.println("kernel ${name} tier=exact ${shape_of(i)} grid=(${gx}, ${gy}, ${gz})")
     io.println("  fake  launch=${fake.launch} result=${shown(fake.results)}")
     io.println("  real  alloc=${real.alloc} upload=${real.upload} launch=${real.launch}"
         ++ " sync=${real.sync} download=${real.download} result=${shown(real.results)}")
     io.println("  miss  ${misses(real.results, fake.results, reads)}")
+    io.println("  codec misses=${codec}")
     if real.note != "" { io.println("  note  ${real.note}") }
     io.println("  verdict ${v}")
     if v == "identical:exact" { exact_count = exact_count + 1 } else { () }

@@ -3926,7 +3926,10 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   `gpu.no_such_buffer`；然后把每个实参缓冲的格式名与内容按序交给参考实现。参考实现答
   `[(实参位置, 内容)]`，每一对按**该**缓冲的格式舍入（`round_to`）后写回；有位置越界则答
   `gpu.bad_write_back`，什么也不写。所有输入在任何一次写回之前读完。grid 不被读取。
-- 缓冲持有它的格式的内存会持有的值：`upload` 与写回都按缓冲格式舍入，`download` 原样答出。
+- 缓冲持有的是字节，和内存一样：`upload` 原样存，`download` 原样答，所以对任何格式、任何值，
+  上传再下载都是恒等。参考实现看到的是 `Float`，所以 launch 时假设备把每个缓冲解码成 `Float`；
+  `i64` 缓冲里有 `Float` 装不下的值（超出 ±2^53）时，以 `gpu.fake_inexact` 拒绝（消息指明哪个
+  缓冲、哪个下标），而不是舍入。写回按缓冲格式舍入。
 - `globals` 把 kernel 名映到它所在模块导出的全局（符号名、格式、声明给的内容），`module_global`
   从这里答，表里没有的名字答 `gpu.no_module_symbol`；省略即每个模块都不导出全局。它排在 `body`
   之后（带默认的形参排在不带默认的之后），所以尾块落在 `globals` 上，`body` 写在括号里。
@@ -3960,13 +3963,21 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   在 `std/dtype`；`BF16`、`F16`、`F32`、`TF32`、`F8E4M3FN`、`F8E5M2`、`F8E8M0FNU`、`F4E2M1FN` 在 `std/narrow`（后五个只作存储，没有算术）；
   `I8`、`I16`、`I32`、`U8` 在 `std/int/*`；`I4` 在 `std/gpu`。`U16`、`U32`、`U64` 没有（方言没有无符号整数 tile 类型），
   所以 `Tensor[U32]` 在 `alloc` 处是类型错误。
+- 类型位置写值类型，值位置写格式名。对 `std/narrow` 与定宽整数两者同名（`Tile[BF16]`、
+  `alloc(BF16, n)`）；对三个内建类型分别是 `Float`/`F64`、`Int`/`I64`、`Bool`/`I1`。
 - 能分配成缓冲的格式恰好是 `element_bytes` 认识的 12 个：`f64`、`i64`、`i32`、`tf32`、`bf16`、
   `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
   `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN` 只是 tile
   的格式，没有这种缓冲。
-- 值以 `List[Float]` 进出，每种格式都是如此：`upload` 按缓冲格式舍入，或截断再回绕
-  （`round_to`），`download` 精确答出缓冲持有的值。这条通道对 `i32`、`i16`、`i8`、`u8` 无损，
-  对 `i64` 只在 ±2^53 之内精确。
+- 值以 `List[T]` 进出，`T` 是张量的元素类型：`upload(t: Tensor[T], xs: List[T])` 与
+  `download(t: Tensor[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`upload` 把每个元素
+  写成格式的位型（小端），上传时不舍入（值在 `T` 里已经是格式的值：`BF16` 就是 bfloat16，`Int`
+  整个过去）；`download` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 NaN 的
+  载荷也在内。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN` 有格式没有缓冲，
+  上传 `Tensor[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_upload(handle, data: Bytes)`、
+  `gpu_download(handle) -> Result[Bytes, _]`），第 `i` 个元素占 `[i * w, (i + 1) * w)` 字节，`w` 是格式的宽度，
+  小端。`pack_to(dtype, xs: List[Float])` 与 `unpack_from(dtype, bytes)` 是同一编码按格式名对 `Float` 的视图，
+  给缓冲没有共同元素类型的程序用；超出 ±2^53 的 `i64` 过不了它们。
 - **标量按值过界**：launch 的实参是缓冲句柄或按值传的标量（`i32`、`i64`、`f32`、`f64`；更小的格式的参数区布局
   没量过，不收）。宿主的数要进 kernel，可以在记录时作为常量写进程序（每个值一个程序），
   或者作为 `ByValue` 参数运行期传入（同一个 cubin）。
@@ -3995,7 +4006,7 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   不证明设备的答案到达了 CI。
 - 归约与扫描的折叠顺序：Tile IR 不规定树形，容差档 kernel 的逐位结果**未定义**。
 - 实参个数或格式与 kernel 入口不符时真设备的行为：**未定义**。
-- `i64` 缓冲中超出 ±2^53 的值经 `List[Float]` 通道往返。
+- 假设备在超出 ±2^53 的 `i64` 上做计算：它能持有，但拒绝在其上 launch。
 - 在 comptime 记录、编码或运行 kernel。
 
 ---

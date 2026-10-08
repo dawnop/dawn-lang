@@ -36,7 +36,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, upload, download, free,
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, free,
   launch, buffer, erase, sync }
 use std/dtype.{Dtype, F64, dtype_name}
 use std/narrow.{BF16}
@@ -93,6 +93,18 @@ fn held[D](d: Dtype[D], xs: List[Float]) -> List[Float] = {
 
 ## The whole vadd of format `d` through `kernel`, one stage at a time,
 ## stopping at the first refusal and saying which stage it was.
+# The Float view of a tensor by its format's name: the corpus holds Floats
+# off the format's grid on purpose (bf16 rounds them on the way in), which
+# a typed `upload` of a `BF16` cannot say.
+fn put[D](d: Dtype[D], t: Tensor[D], xs: List[Float]) -> Result[Unit, ForeignError] !Gpu =
+  gpu.gpu_upload(gpu.handle_of(t), gpu.pack_to(dtype_name(d), xs))
+
+fn get[D](d: Dtype[D], t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
+  match gpu.gpu_download(gpu.handle_of(t)) {
+    Ok(raw) -> Ok(gpu.unpack_from(dtype_name(d), raw))
+    Err(e) -> Err(e)
+  }
+
 fn stages[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> Trace !Gpu = {
   let n = len(xs)
   let ra = alloc(d, n)
@@ -101,13 +113,13 @@ fn stages[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> T
   match (ra, rb, ro) {
     (Ok(a), Ok(b), Ok(out)) -> {
       let t0 = Trace { ..blank(), alloc: "ok" }
-      let up = upload(a, xs)
-      let up2 = upload(b, ys)
+      let up = put(d, a, xs)
+      let up2 = put(d, b, ys)
       match (up, up2) {
         (Ok(_), Ok(_)) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          let back = download(a)
-          let back2 = download(b)
+          let back = get(d, a)
+          let back2 = get(d, b)
           let rt = match (back, back2) {
             (Ok(v), Ok(w)) ->
               if to_string(v) == to_string(held(d, xs)) && to_string(w) == to_string(held(d, ys)) {
@@ -123,7 +135,7 @@ fn stages[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> T
           match l {
             Ok(_) -> {
               let s = sync()
-              let r = download(out)
+              let r = get(d, out)
               release([a, b, out])
               let value = match r {
                 Ok(v) -> Some(v)

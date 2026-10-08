@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ fdad6eb49fc08537 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 09c3cee987c3558c -->
 
 # Dawn 教程
 
@@ -1516,6 +1516,10 @@ refused: gpu.no_kernel
 `vector_add` 一字不改，就能在真卡上跑在 `with_gpu_real(kernels, body)` 底下：它用 CUDA
 驱动应答同样的操作，`kernels` 把每个名字映到编译好的模块。这个 handler 需要 C 后端
 （在 JVM 上每个操作都答 `gpu.unsupported_backend`），还需要一台装了 NVIDIA 驱动的机器。
+
+`upload` 与 `download` 搬的是张量元素类型的值，不是每种格式都过一遍 Float：`Tensor[Float]` 收
+`List[Float]`，`Tensor[Int]` 收 `Int` 且每一位都保留（超出 2^53 的 i64 也在内），`Tensor[BF16]` 收 `BF16`
+值，所以上传时什么也不舍入。没有缓冲的格式搬不了：上传 `Tensor[Bool]` 是类型错误，不是运行期拒绝。
 
 kernel 本身也是 Dawn，对着 `packages/tileir` 写：它的 `Dev` 效果把 kernel 执行的操作记录
 下来，记录再编码成 NVIDIA 的 Tile IR 字节码，由 `tileiras` 汇编成 `with_gpu_real` 装载的
