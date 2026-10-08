@@ -130,6 +130,7 @@ exec systemd-run \
   --property=MemorySwapMax=0 \
   --property=TasksMax=64 \
   --property=LimitFSIZE=$SANDBOX_FSIZE \
+  --property=UMask=0000 \
   --property=CPUQuota=200% \
   --property=RuntimeMaxSec=15 \
   --property=TimeoutStopSec=3s \

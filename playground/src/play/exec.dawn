@@ -227,13 +227,69 @@ fn open_box(dir: String, box: String) -> Unit !io =
     ()
   }
 
-# Remove a per-request work dir. The runner owns it, and the 0777 box inside,
-# so it can unlink files there even though the sandbox's DynamicUser wrote
-# them. `rm -rf` does not follow links.
-fn cleanup(dir: String) -> Unit !io = {
+# Remove a per-request work dir. The runner owns it, and the 0777 box inside;
+# the sandbox units run with UMask=0000, so what the DynamicUser wrote into the
+# box is deletable by the runner too. `rm -rf` does not follow links.
+#
+# `rm -rf` used to be fire-and-forget: a tree the runner could not empty (the
+# compiler's classes/ made by a transient uid under umask 022) stayed on disk
+# with no trace, one box per successful /compile. A failure is now logged, once
+# per path, with rm's own words.
+fn cleanup(dir: String) -> Unit !io =
+  match remove_tree(dir) {
+    Some(why) -> io.eprintln("dawn-play: cannot remove ${dir}: ${why}")
+    None -> ()
+  }
+
+# Delete `dir` recursively. None on success, else why not (rm's output, or the
+# exit status when it said nothing).
+fn remove_tree(dir: String) -> Option[String] !io = {
   let p = ProcessBuilder.new(["rm", "-rf", dir])
-  p.start().expect("rm").waitFor()
-  ()
+  p.redirectErrorStream(true)
+  let got = catch_fault(() => {
+    let proc = p.start()!
+    let said = bytes.decode_utf8_lossy(proc.getInputStream()!.readAllBytes()!)
+    (proc.waitFor(), said)
+  })
+  match got {
+    Ok((0, _)) -> None
+    Ok((code, said)) -> {
+      let t = str.trim(said)
+      Some(if t == "" { "rm exited ${code}" } else { str.slice(t, 0, 500) })
+    }
+    Err(e) -> Some("rm did not run: ${e}")
+  }
+}
+
+# Remove request directories an earlier runner left behind (a crash, a kill, a
+# deploy mid-request, or a tree cleanup could not empty). Called once from
+# main before the server listens, so no request is in flight and nothing live
+# can be taken. Only under a configured work root: the java.io.tmpdir fallback
+# is shared with other programs. Returns how many it removed.
+fn sweep_stale(root: String) -> Int !Fs !io = {
+  match io.list_dir(root) {
+    Err(_) -> 0
+    Ok(names) -> {
+      var n = 0
+      for name in names {
+        if str.starts_with(name, "dawn-play-") {
+          match remove_tree("${root}/${name}") {
+            None -> { n = n + 1 }
+            Some(why) -> io.eprintln("dawn-play: cannot remove stale ${root}/${name}: ${why}")
+          }
+        }
+      }
+      n
+    }
+  }
+}
+
+# The startup sweep over the configured work root, logging the count.
+pub fn sweep_work_root() -> Unit !io = {
+  if work_root() != "" {
+    let n = with_fs_real(() => sweep_stale(temp_root()))
+    io.eprintln("dawn-play: removed ${n} stale request directories from ${temp_root()}")
+  }
 }
 
 # A fresh request directory under the work root, not yet created.
@@ -926,4 +982,37 @@ test "with no stop command a timed-out wrapper's work outlives it" {
   assert not finish_or_stop(p, 1, [])
   assert alive(d, unit)
   sh_run(["sh", fake, "stop", unit])
+}
+
+fn present(path: String) -> Bool !io = with_fs_real(() => io.exists(path))
+
+test "remove_tree says why a tree it cannot empty stays, and cleans one it can" {
+  let dir = fresh_dir()
+  sh_run(["mkdir", "-p", "${dir}/box/classes"])
+  sh_run(["touch", "${dir}/box/classes/A.class"])
+  assert remove_tree(dir) == None
+  assert not present(dir)
+  # a directory the runner may not write into: the shape the sandbox's
+  # transient uid left behind under umask 022
+  sh_run(["mkdir", "-p", "${dir}/box/classes"])
+  sh_run(["touch", "${dir}/box/classes/A.class"])
+  sh_run(["chmod", "0555", "${dir}/box/classes"])
+  match remove_tree(dir) {
+    Some(why) -> { assert str.contains(why, "classes") }
+    None -> { assert false }
+  }
+  assert present(dir)
+  sh_run(["chmod", "0755", "${dir}/box/classes"])
+  assert remove_tree(dir) == None
+}
+
+test "sweep_stale removes dawn-play-* under the root, counts them, and leaves the rest" {
+  let root = "${temp_root()}/dawn-play-sweeptest-${UUID.randomUUID().expect("uuid").toString().expect("s")}"
+  sh_run(["mkdir", "-p", "${root}/dawn-play-aaa/box/classes", "${root}/dawn-play-bbb", "${root}/keep"])
+  sh_run(["touch", "${root}/dawn-play-aaa/box/classes/A.class", "${root}/keep/f"])
+  let n = with_fs_real(() => sweep_stale(root))
+  assert n == 2
+  assert present("${root}/keep/f")
+  assert not present("${root}/dawn-play-aaa")
+  assert remove_tree(root) == None
 }

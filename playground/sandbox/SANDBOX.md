@@ -200,8 +200,13 @@ Three things make this work, learned the hard way on the server:
 3. **The box is `0777`, its parent `0711`**, set by the runner before the
    phases (`open_box`, gated on the sandbox switch). The name is an unguessable
    uuid and the parents are `0711` (unlistable), so world-writable is fine.
-   Default `DynamicUser` umask (0022) leaves `prog.jar` world-readable, which is
-   what the next phase's different uid needs. Until 2026-10-04 the whole request
+   The unit runs with `UMask=0000`: the default `DynamicUser` umask (0022)
+   made `box/classes` (written by `__emit -o`) `0755` and owned by a transient
+   uid, which the runner (a different uid) could neither empty nor remove, so
+   every successful uncached `/compile` leaked a ~0.5 MB box. With 0000 every
+   directory a phase creates is `0777` and every file `0666`, so the runner can
+   unlink them, and `prog.jar` stays readable for the next phase's uid. The box
+   was already writable by any uid, so this widens nothing. Until 2026-10-04 the whole request
    directory was `0777` and the output files lived in it.
 
 The runner `rm -rf`s each request directory on every way out, a JVM `Error`
@@ -209,6 +214,14 @@ included (`bracket`, in `play/exec.dawn`). It owns the directory and the box,
 so it can unlink the DynamicUser-owned files inside. Before 2026-10-04 the
 removal ran only after a normal return, and an `OutOfMemoryError` on the read
 left the directory behind.
+
+`cleanup` checks `rm -rf`'s exit status and logs a failure once per path to
+the runner's stderr (`dawn-play: cannot remove <path>: <why>`); it used to
+ignore it. At startup, before the server listens, the runner also sweeps
+`dawn-play-*` entries out of the configured work root and logs the count
+(`dawn-play: removed N stale request directories ...`), so a box an earlier
+runner could not remove does not stay for good. The sweep runs as the runner
+user and needs no sudo.
 
 ## Malicious-sample checklist (run on the server after wiring)
 
