@@ -1,6 +1,6 @@
 # Perceus 复用：ADT/记录的 reset/reuse，与借用的模式绑定
 
-> 状态：**current**（已裁决：七个开放问题于 2026-10-07 全部按推荐裁决，见 `agent-handoff/ruling-perceus-reuse-20261007.md` 与 §7.2；设计稿，未动码）。native 性能线刀 3。2026-10-07，基线 `origin/main` = 7d06b29c。
+> 状态：**current**（已裁决：七个开放问题于 2026-10-07 全部按推荐裁决，见 `agent-handoff/ruling-perceus-reuse-20261007.md` 与 §7.2；PR-A、PR-B、PR-C 已实现，见 §十）。native 性能线刀 3。2026-10-07，基线 `origin/main` = 7d06b29c。
 > 依据：`agent-handoff/research-value-repr-report-20261006.md`（update 链每步 5 次分配、复用 0，tree 的 `incr` 每节点一次分配；小对象一整圈约 4.5 到 5 ns）；
 > `agent-handoff/native-iter-report-20261007.md` 与 PR #594（分支 `perf/native-iter-rc`，b11342f3，`docs/native-iter-rc-design.md`）：刀 2 把每次元素访问的 dup 从 10.97 降到 5.97，
 > 剩下的主体是 `std/pvec.leaf_for` 每层 3 次 dup，需要借用的模式绑定或 dup/drop 融合，且与早 drop、复用必须一起设计；
@@ -375,3 +375,30 @@ JVM 不经过 rc，`emit` 字节不变，预计无需 `Emit-Change`；C 文本�
 所有计数与墙钟的脚手架在 agent 的 scratch（WSL 重启会清）：`/tmp/claude-1000/-home-dawn-workspace-dawn-lang/41c80d08-ff29-4bdd-bcaf-8aef4fe819ee/scratchpad/reuse/`
 （`build.sh` 从 `.dawn` 经 `dawn __emitc --split` 出 C 并用计数器运行时与原运行时各编一份，`cc.sh` 重编手改的 C，`patch_update.py`/`patch_tree.py` 是三处手改，
 `walls.sh` 是墙钟，`rt/` 是挂了计数器的运行时副本，`rt3/` 另挂了邻接环与偷字段统计）。摘要同时写进 `agent-handoff/reuse-design-report-20261007.md`。
+
+## 十、实现记录（PR-C，K3.3 到 K3.5）
+
+PR-A 是 #604，PR-B 是 #608。PR-C 的提交：K3.3 `8d01885b`（运行时），K3.4 `4bfe6f32`（配对、展开前的发射、契约），K3.5 是本节所在的提交。
+
+**与设计稿不同的地方（实现时定的）。**
+
+- 没有新增语句节点。`CReset(inner, ty)` 与 `CReuse(tok, ctor, ty)` 是两个只在 rc 之后存在的表达式，包着 `CDup` 那样的壳；令牌是一个普通的计数局部，`let tok = reset(s)`。所以 `rc_check` 只多两个臂、没有新规则：令牌在每条路径上恰好被一次构造器转移或一次作用域退出释放，这就是已有的账本规则。`sweep` 只需要不碰令牌。
+- 配对按 ADT 类型而不是按字段数：`sweep` 看到后缀（同一块里剩下的语句加尾表达式）里有同一 ADT 的构造器，且字段数在 1 到 64 之间，就把那次释放换成 reset。每块按「后缀里的构造器数减去已持有的令牌数」限量。构造器从最近的同类型令牌取，取之前要过 `transferable`，所以令牌不会被花在它所在的循环之外，也不会花在短路右侧。同类型但字段数不同的构造器（一个类型的几个构造器宽度不同）由运行时兜底：`dawn_adt_reuse` 遇到宽度不符的令牌就放回并新分配，记为未命中。
+- 以 `null_ref` 占位开头的绑定不作候选。`std/pvec.push_tail` 的 match 结果槽在 reset 时是 NULL，第一版崩在这里；运行时也对 NULL 和非 ADT kind 做了兜底，各有断言与变异体。
+- 偷字段的快路径展开（§4.2 的 `if (rc == 1) { 偷 } else { dup+drop }`）**没有做**。简单 reset 先释放子节点再交回壳，省的是 malloc/free 与槽的重写，不省子节点的 dup 与随后递减。验收（update 零分配、tree 复用率）不需要它；是否做它看下面的墙钟剩余。
+- K3.5 的「reset 候选并入借用推断」不需要新代码：`infer.proj_demands` 早就有「函数里构造了某 ADT，则对该 ADT 参数的投影要求 owned」这一条（重建形状规则），它与 reset 候选判据重合。验收已经由现有契约覆盖：`rc-mode-contract` 的 `tree_sum` 里 `sum` 借用、`incr` 的参数 owned；`map-reuse-contract` 与 `array-contract` 的比例没有降。
+- 元组与擦除位置的令牌（K3.6）没有做。
+
+**验收实测**（本机，clang-18 -O2，`scripts/adt-reuse-contract/run.sh`）。
+
+| 判据 | 结果 |
+|---|---|
+| update 稳态零分配 | 10000 步到 20000 步：+50000 次复用，+0 次节点分配 |
+| tree `incr` 复用率 | 20000/20000 次访问复用，0 次分配（预算 95%） |
+| 自定义 cons 链 `bump` | 20000/20000 |
+| 在 effect handler 的挂起中复用 | 204/200 |
+| `boom`（令牌持有期间 panic 被接住）与共享树见证 | ASan、LSan 绿，答案与复用前的记录一致 |
+
+墙钟（交错 7 次取中位数，机器负载 11 到 13，所以只看量级）：nbody −3.0%，pair −4.6%，option −10.4%，listf −2.7%，update −65.0%，tree −45.9%。自举负载 `dawnc emitc nmain.dawn`：23.6 s → 22.7 s（−3.9%，在噪声内；自编译里复用 5020 万次命中、1992 万次未命中）。原生编译器的 cc 构建时间 13.4 s → 13.1 s，不变。
+
+契约的墙钟：`adt-reuse-contract` 本机 16 核 47 s，接在 contracts-2 的 RC view contract 之后。
