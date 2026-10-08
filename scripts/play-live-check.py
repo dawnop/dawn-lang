@@ -21,6 +21,16 @@ with no nginx in front wants `--runner-only`, which skips the static checks and
 talks to `PLAY_BASE_URL` with no `/api` prefix. Exit status is 0 only when
 every check passed.
 
+The page check reads the `data-endpoint` the live playground page hands the
+editor and asserts that the origin it resolves to is `PLAY_EXPECT_ORIGIN`
+(default `https://play.dawnop.com`), that this origin's `/api/health` answers
+200, and that it allows the site origin by CORS. It exists because a deploy
+built without DAWN_SITE_PLAY_ORIGIN (2026-10-08) shipped a page calling its own
+CDN, and every other check here passed: they all talk to the API origin
+directly and never look at what the page points at. `--page-file F` checks a
+saved page instead of fetching one (the live health probe still runs).
+`--page-only` runs just this group.
+
 `--self-test` runs the offline cases of the sample comparison below and talks
 to no server.
 
@@ -44,6 +54,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import repo_env  # scripts/repo_env.py, the reader of scripts/repo.env
@@ -53,6 +64,7 @@ SAMPLES = ROOT / "site" / "play-ui" / "samples"
 VERSION_DAWN = ROOT / "selfhost" / "src" / "version.dawn"
 DEFAULT_BASE = repo_env.site_origin()
 DEFAULT_API = "https://play.dawnop.com/api"
+DEFAULT_PLAY_ORIGIN = "https://play.dawnop.com"
 
 # Never route through a dev proxy: this box has http_proxy set, and urllib
 # honours it, which turns a localhost check into a 502 from somebody else.
@@ -139,13 +151,37 @@ def post_run(api, code, timeout=120):
     raise RuntimeError("unreachable")
 
 
-def get(url, timeout=30):
+def get(url, timeout=30, headers=None):
     """GET a URL. Returns (status, body-bytes, final-url); never raises on HTTP error."""
+    return get_full(url, timeout, headers)[:3]
+
+
+def get_full(url, timeout=30, headers=None):
+    """Like get, plus the response headers as a fourth element."""
     try:
-        with OPENER.open(urllib.request.Request(url), timeout=timeout) as resp:
-            return resp.status, resp.read(), resp.url
+        req = urllib.request.Request(url, headers=headers or {})
+        with OPENER.open(req, timeout=timeout) as resp:
+            return resp.status, resp.read(), resp.url, resp.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), url
+        return e.code, e.read(), url, e.headers
+
+
+def page_play_origin(html, page_url):
+    """The origin the playground page's editor will call, or None if no mount.
+
+    The mount is `<div id="dawn-playground" data-endpoint="...">`; the value is
+    `/api/run` (same origin as the page) or `https://host/api/run`. Resolved
+    against the page URL exactly as site/play-ui/src/endpoints.ts does.
+    """
+    m = re.search(
+        r'<div[^>]*\bid="dawn-playground"[^>]*\bdata-endpoint="([^"]*)"', html
+    ) or re.search(
+        r'<div[^>]*\bdata-endpoint="([^"]*)"[^>]*\bid="dawn-playground"', html
+    )
+    if not m:
+        return None
+    u = urllib.parse.urlsplit(urllib.parse.urljoin(page_url, m.group(1)))
+    return f"{u.scheme}://{u.netloc}"
 
 
 def tree_version():
@@ -294,6 +330,65 @@ def check_site(base, r):
         )
 
 
+def check_page(base, expect, r, page_file=None):
+    """What the live playground page points at, and that target is healthy."""
+    page_url = base + "/playground.html"
+    print(f"== page: {page_url} -> {expect} ==")
+    if page_file:
+        html = pathlib.Path(page_file).read_text(encoding="utf-8", errors="replace")
+    else:
+        status, body, _ = get(page_url)
+        if status != 200:
+            r.check(False, "playground page served", f"got {status}")
+            return
+        html = body.decode("utf-8", "replace")
+    got = page_play_origin(html, page_url)
+    r.check(
+        got == expect,
+        f"playground page calls the Playground origin ({expect})",
+        f"the page points at {got!r}; was it built without DAWN_SITE_PLAY_ORIGIN?",
+    )
+    status, body, _, hdrs = get_full(
+        f"{expect}/api/health", headers={"Origin": base}
+    )
+    r.check(status == 200, f"{expect}/api/health -> 200", f"got {status}")
+    allow = hdrs.get("Access-Control-Allow-Origin")
+    r.check(
+        allow == base,
+        f"{expect}/api/health allows the site origin by CORS",
+        f"Access-Control-Allow-Origin is {allow!r}, want {base!r}",
+    )
+
+
+def self_test_page():
+    """page_play_origin offline: the incident's page and the right one."""
+    base = "https://site.example.test"
+    page = base + "/playground.html"
+    good = '<div id="dawn-playground" data-endpoint="https://play.example.test/api/run"></div>'
+    bad = '<div id="dawn-playground" data-endpoint="/api/run"></div>'
+    flipped = '<div data-endpoint="https://play.example.test/api/run" id="dawn-playground"></div>'
+    cases = (
+        ("absolute endpoint gives its origin", good, "https://play.example.test"),
+        ("attribute order does not matter", flipped, "https://play.example.test"),
+        ("relative endpoint (the incident) resolves to the site", bad, base),
+        ("no mount gives None", "<p>hi</p>", None),
+    )
+    failed = 0
+    for label, html, want in cases:
+        if page_play_origin(html, page) == want:
+            print(f"  ok   {label}")
+        else:
+            failed += 1
+            print(f"FAIL   {label}")
+    # The incident page must be red against the expected origin.
+    if page_play_origin(bad, page) != "https://play.example.test":
+        print("  ok   the incident page differs from the expected origin")
+    else:
+        failed += 1
+        print("FAIL   the incident page differs from the expected origin")
+    return failed
+
+
 def self_test():
     """The sample comparison, offline: what it forgives and what it still catches."""
     out = b"caught: boom at barriers.dawn:50:46\n"
@@ -343,6 +438,7 @@ def self_test():
         print("FAIL   barriers.out names its own file and every mention is rewritten")
     else:
         print("  ok   barriers.out names its own file and every mention is rewritten")
+    failed += self_test_page()
     print(f"\nself-test: {failed} failed")
     return 1 if failed else 0
 
@@ -359,6 +455,15 @@ def main():
         action="store_true",
         help="check only the runner, and talk to it directly (no /api prefix, no static site)",
     )
+    ap.add_argument(
+        "--page-file",
+        help="check this saved playground page instead of fetching one (implies --page-only)",
+    )
+    ap.add_argument(
+        "--page-only",
+        action="store_true",
+        help="run only the check of what the playground page points at",
+    )
     args = ap.parse_args()
     if args.self_test:
         return self_test()
@@ -367,11 +472,19 @@ def main():
     api = base if args.runner_only else DEFAULT_API
     api = os.environ.get("PLAY_API_URL", api).rstrip("/")
 
-    # A bare runner has no nginx in front of it, so nothing to pace for.
     r = Results()
+    if args.page_file or args.page_only:
+        expect = os.environ.get("PLAY_EXPECT_ORIGIN", DEFAULT_PLAY_ORIGIN).rstrip("/")
+        check_page(base, expect, r, args.page_file)
+        print(f"\n{r.passed} passed, {r.failed} failed")
+        return 1 if r.failed else 0
+
+    # A bare runner has no nginx in front of it, so nothing to pace for.
     check_runner(api, r, 0.0 if args.runner_only else RUN_PACE_SECS)
     if not args.runner_only:
         check_site(base, r)
+        expect = os.environ.get("PLAY_EXPECT_ORIGIN", DEFAULT_PLAY_ORIGIN).rstrip("/")
+        check_page(base, expect, r)
 
     print(f"\n{r.passed} passed, {r.failed} failed")
     return 1 if r.failed else 0
