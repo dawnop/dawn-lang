@@ -221,6 +221,15 @@ fn reaches(qc: QCx, s: Sig, rt: Ty) -> Bool = {
   ok && bounds_hold(qc, s, m, em)
 }
 
+## Whether `s` takes a bare type variable first: it unifies with every
+## receiver, so offering it from a module the document has not imported is
+## noise (`arg_in`, `back`), not a candidate.
+fn bare_var_first(s: Sig) -> Bool =
+  len(s.param_tys) > 0 && match s.param_tys[0] {
+    TyVar(_, _) -> true
+    _ -> false
+  }
+
 ## Whether every trait `s` bounds a type parameter by is one the document's
 ## tables know. A function of a module the document does not import can be
 ## bounded by a trait declared there, which the bound check cannot look up:
@@ -302,7 +311,7 @@ pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[Strin
   for ex in foreign {
     for pr in map.entries(ex.fns) {
       let (name, s) = pr
-      if not set.has(seen, name) && not set.has(locals, name) && not str.contains(name, "\$") && bounds_known(qc, s) && reaches(qc, s, rt) {
+      if not set.has(seen, name) && not set.has(locals, name) && not str.contains(name, "\$") && not bare_var_first(s) && bounds_known(qc, s) && reaches(qc, s, rt) {
         seen = set.insert(seen, name)
         extra = map.insert(extra, name, (s, ex))
       }
