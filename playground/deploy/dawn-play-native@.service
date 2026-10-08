@@ -1,0 +1,65 @@
+# One process per connection of dawn-play-native.socket: the native runner
+# (docs/playground-native-runner-design.md, K3 and K4). It reads one HTTP/1.1
+# request from stdin, answers on stdout and exits.
+#
+# Same posture as dawn-play.service, for the same reason: this process only
+# brokers. The untrusted code runs in the transient units
+# `sudo run-sandboxed.sh` starts, which carry the full sandbox set, and sudo
+# needs setuid, so NoNewPrivileges and every option that implies it stay off
+# here (the dawn-play-lsp.service comment records the first-production failure
+# that taught it). There is no DynamicUser either: the work root belongs to
+# the dawn-play user and the sandbox's own DynamicUser traverses it by mode.
+# What is added over the JVM unit is the per-request ceiling, which the
+# instance-per-connection shape makes meaningful.
+[Unit]
+Description=dawn-play native runner (one request)
+# The runner is a deployed binary; without it the socket would accept
+# connections and every one would fail. Better the unit says why.
+ConditionFileIsExecutable=/opt/dawn/bin/dawn-play
+
+[Service]
+Type=simple
+ExecStart=/opt/dawn/bin/dawn-play serve
+User=dawn-play
+Group=dawn-play
+WorkingDirectory=/opt/dawn
+
+StandardInput=socket
+StandardOutput=socket
+# The access log and the compile-gap lines go to stderr, which is journald's.
+StandardError=journal
+
+# No JAVA_HOME and no DAWN_JVM_OPTS: the runner is not a JVM. It still needs the
+# JVM toolchain for /run, which it launches in the sandbox from PLAY_JDK.
+Environment=PLAY_JDK=/opt/dawn/graalvm-21
+Environment=DAWN_BIN=/opt/dawn/bin/dawn
+Environment=DAWNC_BIN=/opt/dawn/bin/dawnc
+Environment=PLAY_TIMEOUT=10
+Environment=PLAY_SANDBOX_SCRIPT=/opt/dawn/playground/sandbox/run-sandboxed.sh
+# per-request work dirs: not under /tmp, as in dawn-play.service
+Environment=PLAY_WORK_ROOT=/var/lib/dawn-play/work
+# The flock slot files, shared by every instance (see RuntimeDirectory below).
+Environment=PLAY_SLOT_DIR=/run/dawn-play-slots
+# "<version> <build>", what `dawn --version` prints after its name. Written by
+# redeploy.sh from the tree it ships; it makes /health answer without a child.
+# Without the file the unit does not start, instead of answering with the
+# version of some other toolchain.
+EnvironmentFile=/opt/dawn/playground/toolchain.env
+
+# The slot files are what keeps two heavy requests at a time. Preserve: without
+# it the directory, and with it the slots, would be removed whenever one
+# instance exits while others still hold locks in it.
+RuntimeDirectory=dawn-play-slots
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# Backstop for a client that declares a body and never sends it (the process
+# blocks in read; design 3.1 lesson 2). nginx's client_body_timeout cuts the
+# slow client first; this is for everything that is not nginx.
+RuntimeMaxSec=60
+# Per request, not per service: each instance is its own cgroup. The heavy work
+# is in the sandbox units, so this only has to hold the broker, the job child
+# and the sh/timeout/flock around it.
+MemoryMax=256M
+TasksMax=64
+LimitCORE=0
