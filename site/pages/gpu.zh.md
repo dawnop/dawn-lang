@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 26c22c0fe3236f13 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ bc32d81ccaaba1a8 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -232,7 +232,7 @@ Tile IR 版本里每个公开 opcode、类型 tag 和属性值都有一行，记
 
 ## ledger-body
 
-每台机器台账的最后一行。CI 读第一行；集群的两台覆盖了 Ampere 卡加载不了的 fp8、fp4 与 block-scaled 那几行。
+每台机器台账的最后一行。CI 读第一行；sm_90 与 sm_100 两本覆盖了 Ampere 卡加载不了的 fp8、fp4 与 block-scaled 那几行。
 
 ## ledger-tiers
 

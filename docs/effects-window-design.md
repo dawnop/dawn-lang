@@ -238,7 +238,7 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 
 ### Emit-Change
 
-`cli error (run)` 等帮助文本类 label（`--comptime-ffi` 从用法里消失），以集群 run-diff 实际报出的为准逐个写。
+`cli error (run)` 等帮助文本类 label（`--comptime-ffi` 从用法里消失），以外部 runner run-diff 实际报出的为准逐个写。
 
 ## 7. SPC-04：`main` 只在入口模块保留
 
@@ -281,7 +281,7 @@ Effekt extern 的 `{}` capture 标注（出处见调研报告第五节）。Dawn
 ## 验证路径
 
 本机只跑单文件 `dawn check`、`fmt --check`、doc-check 与探针；编译与门禁全部经
-`scripts/gates-external/run.sh --backend crun`（任务单公共段的命令）。每个提交后跑 gatemap 列出的 coupled 门；
+`scripts/gates-external/run.sh --backend <name>`（任务单公共段的命令）。每个提交后跑 gatemap 列出的 coupled 门；
 碰 `check/` 的提交跑 `--only incremental-*`；交付前全套 `--jobs 16`。Core golden 在 rebase 到最新 `origin/main`
 之后的最终树上重录。
 

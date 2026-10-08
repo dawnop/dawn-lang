@@ -32,7 +32,7 @@
 #                  declarations = before..HEAD. A rebase merge keeps messages,
 #                  so declarations travel with the commits. A `before` that is
 #                  zero or not an ancestor falls back to HEAD^ and says so.
-#   anything else  (cluster evidence, a developer's checkout) base =
+#   anything else  (external runner evidence, a developer's checkout) base =
 #                  merge-base(origin/main, HEAD), declarations = base..HEAD.
 #   EMITCHANGE_BASE_REF=<rev> overrides all three.
 #

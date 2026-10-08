@@ -13,7 +13,7 @@ JDK 21 的 C2 表示不了那么多栈传参（JDK-8325467，只修在 JDK 26 b1
 x86_64、JDK 21 的精确阈值是 **54 个 JVM 实参**（含接收者；构造器 53 个字段可编、54 个起拒编），long 与 double 不另算；
 JDK-8342156 记录过 x86_64 在 APX 改动后一度只剩 38；JDK 26 发布说明写的是「greater than 30」。aarch64 没有实测数据。
 
-影响面：CI 的门禁 job 跑 GraalVM CE 21（顶层 Graal JIT，不受影响），受影响的是集群基准（OpenJDK 21 C2）、
+影响面：CI 的门禁 job 跑 GraalVM CE 21（顶层 Graal JIT，不受影响），受影响的是外部 runner基准（OpenJDK 21 C2）、
 playground 生产（发行版 OpenJDK 21，长驻进程）、release 构建矩阵与任何用普通 JDK 21 的用户。
 调研实测：一次性 `check selfhost` 的上界约为零（同一 jar 在 JDK 21 与 26 上 6.54 s 对 6.68 s），稳态（bench-replay）
 原型对基线在 JDK 21 上 0.82 到 0.95、在 JDK 26 上 0.92 到 1.04。
@@ -131,7 +131,7 @@ Core dump（`__lower --dump`、`selfhost-core-diff.sh`）打的是 rc 之后的 
 
   读法：一次性进程墙钟不变，CPU 多约 6%。来源是 C2 的编译工作：`-XX:+CITime` 三轮交错（K1 之后的 `e4f2029e` 对本分支），C2 标准编译时间 11.0/9.1/9.4 s 对 13.8/10.3/10.9 s（中位 +1.5 s），C2 编的方法 868/859/855 对 886/879/892，编进 C2 的字节 +4.5%；C1 时间基本不变（2.5/2.4/2.4 对 3.0/2.3/2.4 s）。即以前被拒、留在 C1 的那 20 个方法及内联它们的调用方现在进了 C2，编译线程多花约 1.5 s CPU，一次性进程活不到这份代码的回本点；长驻进程里检查函数体的负载快 5% 到 14%。
   playground 的 `/check` 每个请求起一个 `dawn build` 子进程，是一次性进程，不是长驻编译器：小程序（`examples/data/shapes.dawn`）
-  的 `build` 墙钟比值 0.997。以上是本机数，没有集群的同协议复测。
+  的 `build` 墙钟比值 0.997。以上是本机数，没有外部 runner的同协议复测。
 
 ## 不做的（理由）
 

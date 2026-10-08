@@ -334,7 +334,7 @@ CHANGELOG 的第一行写明承载这些的最小 dawn 版本；发版顺序见 
 | checker-corpus | `imports.expected`、`phantom_opaque`、`arith_ops_opaque`、`literals` 里的 `Tile[F64]` 与导入 | 重录并核对差异只有拼写 |
 | `site/gpu-map/flash_attn.map` | 调用名与列位置整体变（`mul(`→`*`，`d_range`→`for`） | 重录，核对调用数 37 降到更低的新数 |
 | 教程与 spec 中英的摘要 | 文档改 | `doc-check.py` 重登记 |
-| tile 台账 `inputs=` | TILE_PATHS 命中 | sm_86 本机重录一次；sm_90、sm_100 由所有者在集群重录（既有惯例，K2.5 报告「未做」栏同） |
+| tile 台账 `inputs=` | TILE_PATHS 命中 | sm_86 本机重录一次；sm_90、sm_100 由所有者在外部 runner重录（既有惯例，K2.5 报告「未做」栏同） |
 
 ### 6.3 变异体（证明检查有牙）
 
@@ -426,7 +426,7 @@ tileir 的 `dawn.toml` 版本 0.10.0 到 0.11.0 改在 R。
 7. **import 块变长。** `kernels.dawn` 与每个 `tile-gpu-diff` 程序的 `use std/gpu.{F64, BF16, I32, ..}` 一行会变成 `std/dtype`、`std/narrow`、`std/int/i32` 等多行。核实结果：**Dawn 没有 re-export**（`spec.md` 没有 `pub use` 或同义条文，`std/` 与 `packages/` 里没有一处 `pub use`，只有选择性引入与整模块引入），所以 tileir 无法提供聚合出口。裁决（§9 Q7）：不为此引入 re-export，33 个文件各多 2 到 3 行 import 可以接受。
 8. **泛型 kernel。** `var m: Tile[A]` 对裸类型参数 `A` 走 blanket `impl[D] StagedVar[Tile[D]]` 已在 main 上通过（调研 §1.2）；`generic_carry`（`T` 本身作携带类型）仍被拒，不属于本版。
 9. **`d_loop` 与 `var` 混用。** 本版 `d_loop` kernel 不迁，`carry` 仍公开；若一个 kernel 同时有 `for` 与 `d_loop`，两种携带并存。树里没有这样的 kernel（4 个 `d_loop` 函数都不用 `for`），但文档要写清边界。
-10. **台账的集群部分。** sm_90 与 sm_100 的重录依赖集群与所有者；栈合并后这两行 `inputs=` 在所有者重录前是陈旧的。K2.5 同样处理，不是新问题。
+10. **台账的外部 runner 部分。** sm_90 与 sm_100 的重录依赖外部 runner与所有者；栈合并后这两行 `inputs=` 在所有者重录前是陈旧的。K2.5 同样处理，不是新问题。
 
 ## 9. 裁决（2026-10-06）
 

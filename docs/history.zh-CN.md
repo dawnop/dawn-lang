@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ ffd18ebb32328c0b -->
+<!-- doc-check: translation-of docs/history.md @ 46fdf5330498989b -->
 
 # 历史
 
@@ -122,7 +122,7 @@
   对照目标实测三次，其 opt-in 切片于 09-27 拆除（tag `incremental-slice-final`）；
   它留下的身份与调度保留。（[incremental-semantics-removal.md](incremental-semantics-removal.md)、
   [incremental-semantics-design.md](history/incremental-semantics-design.md)）
-- **2026-09-23 至 09-26，v0.78.0 至 v0.79.0。** GitHub 之外的门禁：全部门禁可在本地或集群上跑，
+- **2026-09-23 至 09-26，v0.78.0 至 v0.79.0。** GitHub 之外的门禁：全部门禁可在本地或外部 runner上跑，
   证据签名写进 `refs/notes/gates`，release 接受它（09-24），带着它的 pull request 跳过托管门禁（09-26）。
   （[gates-external-design.md](gates-external-design.md)）
 - **2026-09-24 至 09-25，v0.78.0。** 09-24 的各条裁决一起落地：`pub(pkg)`；语法窗口

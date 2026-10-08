@@ -332,14 +332,14 @@ Core golden 不变（可见性是检查期概念）；astdump 对不写 `pub(pkg
   内建类型 `Array`（`BtStdOnly`）的 audience，`export-surface` 契约钉着它的诊断措辞
   `standard-library-internal type` 和两个变异体。按裁决只做前半，删除另议。
   连带一处门禁修正：真 std 里不再有 `StdOnly` 根，`stdonly-collapses-to-world` 变异体
-  在真 std 上存活（集群 export-surface 红，实测）。契约改为往 std 副本的 `pvec.dawn`
+  在真 std 上存活（外部 runner export-surface 红，实测）。契约改为往 std 副本的 `pvec.dawn`
   追加一个只提 `Array` 的 `pub fn`，未变异时必须通过，变异体瞄准这份副本。
 - **ARCH-N05**（`fa5ebea0`）。`ir/lower` 的 `subst_subject`、`trait_method_sig` 改
   `pub(pkg)`；`jvm/emit` 删掉自己的 `trait_method_sig`、`subst_subject`、`subst_tvar`
   （77 行），改 `use ir/lower.{LMod, subst_subject, trait_method_sig}`，顺带去掉因此不再用的
   四个 `check/types` 导入；panic 前缀统一为 `lower:`。两份替换并非同一个遍历：
   `types.subst` 在函数类型上还会对效果行跑 `subst_eff`（空映射下只经 `eff_union` 重新规范化），
-  `subst_tvar` 原样保留效果。验收：集群 `prev-diff`（五语料 class 逐字节）、`prev-diff-native`、
+  `subst_tvar` 原样保留效果。验收：外部 runner `prev-diff`（五语料 class 逐字节）、`prev-diff-native`、
   `native-diff-1/2`、`classfile-never-mutants` 全绿，没有差异可报。
 - **ARCH-N12 未做**。把 `Cx`/`Frame`/`LambdaCx` 改 `pub(pkg)` 后 `dawn check selfhost` 报
   354 条泄漏诊断（第一层，14 个文件）：326 条 `public function ... exposes package-private type Cx`、
@@ -353,11 +353,11 @@ Core golden 不变（可见性是检查期概念）；astdump 对不写 `pub(pkg
   selfhost 对包外暴露的检查器 API 是什么（契约探针要的是内部件，不是公开入口），
   那是另一个设计问题，不是可见性改写。**后续：已由 §10.2 收掉**，答案是「不对包外暴露，
   探针搬进包内」。
-- **外部门禁输入包的种子**（`08e6c99c`）。种子推进后集群输入包仍只有 v0.77.0：
+- **外部门禁输入包的种子**（`08e6c99c`）。种子推进后外部 runner输入包仍只有 v0.77.0：
   `inputs.py verify` 只拿每一行对 MANIFEST 和锁文件，旧种子的包照样全绿，后端于是不重推，
-  每个 toolchain 步骤转去 GitHub 拉 v0.78.0，而集群节点连不上，
+  每个 toolchain 步骤转去 GitHub 拉 v0.78.0，而外部 runner节点连不上，
   `test`、`checker-corpus`、`contracts-1`、`prev-diff` 开跑 40 s 内全红。
-  `verify` 加 `--seed-tag`，MANIFEST 缺该 tag 的种子或 std 即红；crun 后端从被测提交的
+  `verify` 加 `--seed-tag`，MANIFEST 缺该 tag 的种子或 std 即红；远端 backend 从被测提交的
   `scripts/seed-release.txt` 取 tag 传给远端与本地两次 verify；prefix 内的本地后端缺种子时
   直接报缺哪个，不再去碰网络。负控：对未重建的本地包 `verify --seed-tag v0.78.0` 报两项 FAIL。
 
