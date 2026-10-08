@@ -157,6 +157,31 @@ permits). A hit, including the other target of a program just built, is under
 computed from the numbers above and not measured with the real jars, because
 the dev box has no `/opt/dawn` for the wrapper to bind.
 
+## `POST /compile` with `target: "tile"` (2026-10-08)
+
+The Tile IR view is the one `/compile` target that runs the visitor's program:
+`packages/tileir` records a kernel and the program prints its text. It is
+therefore `/run` on a project instead of a file, with nothing relaxed: the same
+two units (`dawn build`, then `java -Xmx256m -jar`), the same 30 s and 10 s
+budgets, the same 64 KiB output read-back through files the runner opened.
+
+- The box holds `dawn.toml` and `src/main.dawn`. The runner writes the manifest
+  (two path dependencies, `tileir` and `tileref`, under `PLAY_PACKAGES`, default
+  `/opt/dawn/packages`); the request supplies only the program text and any
+  other field is ignored, so a program can reach those two packages and `std`
+  and nothing else. `packages/` is inside the existing `BindReadOnlyPaths=/opt/dawn`,
+  so the sandbox script is unchanged.
+- Where a project build writes: `dawn build <box> -o <box>/prog.jar` was run
+  under `bwrap --ro-bind / /` with only the box writable and a fresh tmpfs for
+  `/tmp`: the box ended up with the staged files and `prog.jar`, the tmpfs held
+  only the JVM's `hsperfdata`. No lock file, cache or build directory exists
+  outside the box. (The manifest has no `[deps.java]`, so nothing is resolved
+  or fetched.) That approximates `ProtectSystem=strict` plus a private `/tmp`;
+  it is not the unit itself, see "To confirm on the server" in
+  `docs/playground-compile-design.md`.
+- A 4 s cold request locally (2.5 s compile of the package, 0.2 s run), so it
+  holds a permit about as long as a `/run`.
+
 ## Cross-uid work dir — resolved on first deploy (2026-07-12)
 
 `DynamicUser=yes` gives each invocation a *different* transient uid, so phase 1

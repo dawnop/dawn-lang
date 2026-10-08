@@ -43,7 +43,7 @@ use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/config.{dawn_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root}
+use play/config.{dawn_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
 
 ## The most output, in bytes, a response carries. Bytes rather than
 ## characters because bytes are what the read can bound before decoding.
@@ -252,18 +252,34 @@ fn with_request(code: String, body: fn(String, String) -> Outcome !io) -> Outcom
 
 # [`with_request`] for a body of any result type: `unstaged` says what the
 # request answers when the source cannot be written into the box.
-fn with_staged[T](code: String, unstaged: fn(String) -> T, body: fn(String, String) -> T !io) -> T !Fs !io = {
+fn with_staged[T](code: String, unstaged: fn(String) -> T, body: fn(String, String) -> T !io) -> T !Fs !io =
+  with_files([("prog.dawn", code)], unstaged, body)
+
+# [`with_staged`] for a program of several files, named relative to the box
+# (a project is `dawn.toml` and `src/main.dawn`).
+fn with_files[T](files: List[(String, String)], unstaged: fn(String) -> T, body: fn(String, String) -> T !io) -> T !Fs !io = {
   let dir = fresh_dir()
   with d <- bracket(dir, cleanup)
   let box = "${d}/box"
-  # write_file creates parent directories as needed
-  match io.write_file("${box}/prog.dawn", code) {
+  match write_all(box, files) {
     Err(e) -> unstaged("cannot stage source: ${e}")
     Ok(_) -> {
       open_box(d, box)
       body(d, box)
     }
   }
+}
+
+# Write each file into the box. write_file creates parent directories as needed.
+fn write_all(box: String, files: List[(String, String)]) -> Result[Unit, String] !Fs !io = {
+  for f in files {
+    let (name, text) = f
+    match io.write_file("${box}/${name}", text) {
+      Err(e) -> return Err("${e}")
+      Ok(_) -> ()
+    }
+  }
+  Ok(())
 }
 
 # Run `dawn build` on the staged source. Ok(ms), or Err(diagnostics) with the
@@ -280,10 +296,15 @@ fn with_staged[T](code: String, unstaged: fn(String) -> T, body: fn(String, Stri
 # The budget is `compile_timeout_secs()` — separate from the run budget, since
 # a cold compiler is legitimately slower than the program it produces. The
 # diagnostics are capped like the run output: comptime can print too.
-fn compile_phase(dir: String, box: String) -> Result[Int, String] !io = {
+fn compile_phase(dir: String, box: String) -> Result[Int, String] !io =
+  compile_input(dir, box, "${box}/prog.dawn")
+
+# [`compile_phase`] for an input of the caller's choosing: the staged file, or
+# the box itself when it holds a project.
+fn compile_input(dir: String, box: String, input: String) -> Result[Int, String] !io = {
   let build_out = "${dir}/build.txt"
   let unit = fresh_unit()
-  let bp = ProcessBuilder.new(sandboxed(unit, box, [dawn_bin(), "build", "${box}/prog.dawn", "-o", "${box}/prog.jar"]))
+  let bp = ProcessBuilder.new(sandboxed(unit, box, [dawn_bin(), "build", input, "-o", "${box}/prog.jar"]))
   bp.redirectErrorStream(true)
   bp.redirectOutput(File.new(build_out))
   let started = System.nanoTime()
@@ -515,6 +536,70 @@ fn gather(dir: String, box: String, started: Int) -> ViewRaw !io =
 ## which is why the compilers are sandboxed like /check's.
 pub fn view_raw(code: String) -> ViewRaw !io =
   with_fs_real(() => with_staged(code, msg => RawFail(CompileError(msg)), view_staged))
+
+# ---- the Tile IR view (POST /compile with target "tile") ----
+#
+# "Compiling to Tile IR" is running: a program that imports packages/tileir
+# records a kernel with the package's `Dev` handler and prints `render` of it
+# (docs/playground-compile-design.md section 4). So this view is `/run` on a
+# project instead of a file, with everything /run has: the same sandbox units,
+# the compile and run budgets, the output limit and the output files the runner
+# opened. The program's standard output is the view.
+#
+# The project is the runner's. The visitor supplies the text of `src/main.dawn`
+# and nothing else: `dawn.toml` is written here, with two path dependencies on
+# the deployed packages and no others, so a program's `use` can reach those and
+# the standard library and an import of anything else fails to resolve. A
+# manifest taken from the request would let a program name any directory the
+# unit can read as a package.
+#
+# Where `dawn build` of a project writes: nowhere but the jar it was asked for.
+# It was checked in a unit with the wrapper's whole property set and, apart,
+# under a read-only root with only the box writable: the box ends up holding the
+# staged files and `prog.jar`, and no lock file, cache or build directory is
+# made beside them (the manifest has no `[deps.java]`, so there is nothing to
+# resolve). The packages are read from the same read-only bind as the compiler.
+
+## The manifest of a Tile IR project: `packages` is the directory holding the
+## `tileir` and `tileref` packages. Fixed text but for that path.
+pub fn tile_manifest(packages: String) -> String =
+  "schema = 1\nname = \"tile\"\nversion = \"0.0.0\"\n\n[deps]\ntileir = \"${packages}/tileir\"\ntileref = \"${packages}/tileref\"\n"
+
+test "the manifest names exactly two dependencies, both under the packages directory" {
+  let m = tile_manifest("/opt/dawn/packages")
+  assert str.contains(m, "tileir = \"/opt/dawn/packages/tileir\"\n")
+  assert str.contains(m, "tileref = \"/opt/dawn/packages/tileref\"\n")
+  assert len(str.split(m, " = \"/")) == 3
+}
+
+## Whether this machine has the packages the view imports; asked once at start.
+## Without them every request would fail inside a unit, so the view answers 503
+## and says why, as it does for a missing `javap`.
+pub fn tile_ready() -> Bool !io = {
+  let root = packages_root()
+  let found = catch_fault(() => {
+    let nofollow = LinkOption.valueOf("NOFOLLOW_LINKS")!
+    Files.isRegularFile(Path.of("${root}/tileir/dawn.toml")!, nofollow) &&
+      Files.isRegularFile(Path.of("${root}/tileref/dawn.toml")!, nofollow)
+  })
+  match found {
+    Ok(b) -> b
+    Err(_) -> false
+  }
+}
+
+## Run `code` as the `src/main.dawn` of a Tile IR project and answer what /run
+## answers: the diagnostics, the program's output and exit status, or a timeout.
+pub fn tile_run(code: String) -> Outcome !io = {
+  let files = [("src/main.dawn", code), ("dawn.toml", tile_manifest(packages_root()))]
+  with_fs_real(() => with_files(files, msg => CompileError(msg), tile_staged))
+}
+
+fn tile_staged(dir: String, box: String) -> Outcome !io =
+  match compile_input(dir, box, box) {
+    Err(diags) -> CompileError(diags)
+    Ok(_) -> run_phase(dir, box)
+  }
 
 # Phase 2: run the compiled jar under a wall-clock limit.
 fn run_phase(dir: String, box: String) -> Outcome !io = {
