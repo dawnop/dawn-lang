@@ -46,6 +46,26 @@ pub trait HasDtype[T] {
   fn dtype_of() -> Dtype[T]
 }
 
+## The bit pattern a value has as an element of a device buffer. A format
+## with no host value that can travel (`I1`, `I4`, `F4E2M1FN`, and the
+## unsigned widths, which have no format at all) has no impl, so moving one
+## is a type error and not a refusal at run time.
+##
+## The contract is one `Int` per element: the low `width` bits are the
+## format's pattern, read unsigned, and an 8-byte format fills the whole `Int`
+## (so `Float` and `Int` may answer a negative one). `from_bits` ignores the
+## bits above `width`. The width is not a method: a method without a `T` in
+## it cannot pick its impl, and the width is `element_bytes` of the format's
+## name. The wire form is these words, little-endian, packed once in std/gpu
+## (docs/gpu-typed-transfer-design.md section 2).
+##
+## A type's impl is written in its own module, beside its `HasDtype`; the
+## builtins `Float` and `Int` belong to no module, so theirs are here.
+pub trait DeviceBits[T] {
+  fn bits_of(v: T) -> Int
+  fn from_bits(bits: Int) -> T
+}
+
 ## The format of `Float`, 64-bit IEEE.
 pub const F64: Dtype[Float] = dtype_named("f64")
 
@@ -67,6 +87,19 @@ impl HasDtype[Bool] {
   fn dtype_of() -> Dtype[Bool] = I1
 }
 
+# The raw pattern, not `narrow.f64_bits`: that one is arithmetic and answers
+# the canonical NaN, so a payload would not survive a trip to the device, and
+# std/narrow sits after this module anyway.
+impl DeviceBits[Float] {
+  fn bits_of(v: Float) -> Int = float_to_bits(v)
+  fn from_bits(bits: Int) -> Float = float_of_bits(bits)
+}
+
+impl DeviceBits[Int] {
+  fn bits_of(v: Int) -> Int = v
+  fn from_bits(bits: Int) -> Int = bits
+}
+
 test "the builtin witnesses carry the dialect's names" {
   assert dtype_name(F64) == "f64"
   assert dtype_name(I64) == "i64"
@@ -77,4 +110,39 @@ test "a format is as long-lived as its name" {
   let again: Dtype[Float] = dtype_named("f64")
   assert dtype_name(again) == dtype_name(F64)
   assert dtype_name(F64) != dtype_name(I64)
+}
+
+test "Float bits are the IEEE pattern, the sign and a NaN's payload included" {
+  let one: Float = from_bits(0x3FF0000000000000)
+  assert one == 1.0
+  assert bits_of(1.0) == 0x3FF0000000000000
+  assert bits_of(-2.0) == (1 << 63) | 0x4000000000000000
+  assert bits_of(0.0) == 0
+  assert bits_of(1.0 / 0.0) == 0x7FF0000000000000
+  let tiny: Float = from_bits(1)
+  assert bits_of(tiny) == 1
+  let neg_zero: Float = from_bits(1 << 63)
+  assert 1.0 / neg_zero < 0.0
+  assert bits_of(neg_zero) == 1 << 63
+  assert bits_of(0.1) == 0x3FB999999999999A
+  let payload = 0x7FF0000000000001
+  let nan: Float = from_bits(payload)
+  assert nan != nan
+  assert bits_of(nan) == payload
+  let quiet = 0x7FF8DEADBEEF1234
+  let q: Float = from_bits(quiet)
+  assert bits_of(q) == quiet
+  let signed = (1 << 63) | 0x7FF4000000000001
+  let s: Float = from_bits(signed)
+  assert bits_of(s) == signed
+}
+
+test "Int bits are the Int, past the 53 bits a Float holds" {
+  let big = 9007199254740993
+  assert bits_of(big) == big
+  let back: Int = from_bits(big)
+  assert back == big
+  assert bits_of(-1) == -1
+  let min: Int = from_bits(1 << 63)
+  assert min == -9223372036854775807 - 1
 }

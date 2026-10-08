@@ -21,7 +21,7 @@ use java "org.objectweb.asm.Label"
 use java "java.util.Objects"
 use java "java.lang.Long"
 use jvm/ops.{
-  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+  ACC_ABSTRACT, OP_DLOAD, OP_DRETURN, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
   ACC_VOLATILE,
   COMPUTE_FRAMES,
   OP_AALOAD,
@@ -688,6 +688,20 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
     "(Ljava/nio/charset/Charset;)[B", false)
   uv.visitInsn(OP_ARETURN)
   close_mv(uv)
+
+  # float_to_bits(x) = Double.doubleToRawLongBits(x): the payload of a NaN is kept
+  let fb = open_static(cw, "float_to_bits", "(D)J")
+  fb.visitVarInsn(OP_DLOAD, 0)
+  fb.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "doubleToRawLongBits", "(D)J", false)
+  fb.visitInsn(OP_LRETURN)
+  close_mv(fb)
+
+  # float_of_bits(b) = Double.longBitsToDouble(b)
+  let fo = open_static(cw, "float_of_bits", "(J)D")
+  fo.visitVarInsn(OP_LLOAD, 0)
+  fo.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "longBitsToDouble", "(J)D", false)
+  fo.visitInsn(OP_DRETURN)
+  close_mv(fo)
 
   # bytes_len(b) = b.length
   let lv = open_static(cw, "bytes_len", "([B)J")

@@ -86,7 +86,7 @@
 # `Tile[BF16]` read as they always did. `impl HasDtype` lets generic code ask
 # for the witness by type. The names are the tile dialect's.
 
-use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}
+use std/dtype.{DeviceBits, Dtype, HasDtype, bits_of, dtype_name, dtype_named, dtype_of, from_bits}
 
 ## A bfloat16 value: 8 significand bits, exponents -126..127.
 pub opaque type BF16 = Float
@@ -96,6 +96,11 @@ pub const BF16: Dtype[BF16] = dtype_named("bf16")
 
 impl HasDtype[BF16] {
   fn dtype_of() -> Dtype[BF16] = BF16
+}
+
+impl DeviceBits[BF16] {
+  fn bits_of(v: BF16) -> Int = bf16_bits(v)
+  fn from_bits(bits: Int) -> BF16 = bf16_of_bits(bits)
 }
 
 ## An IEEE binary16 value: 11 significand bits, exponents -14..15.
@@ -108,6 +113,11 @@ impl HasDtype[F16] {
   fn dtype_of() -> Dtype[F16] = F16
 }
 
+impl DeviceBits[F16] {
+  fn bits_of(v: F16) -> Int = f16_bits(v)
+  fn from_bits(bits: Int) -> F16 = f16_of_bits(bits)
+}
+
 ## An IEEE binary32 value: 24 significand bits, exponents -126..127.
 pub opaque type F32 = Float
 
@@ -116,6 +126,11 @@ pub const F32: Dtype[F32] = dtype_named("f32")
 
 impl HasDtype[F32] {
   fn dtype_of() -> Dtype[F32] = F32
+}
+
+impl DeviceBits[F32] {
+  fn bits_of(v: F32) -> Int = f32_bits(v)
+  fn from_bits(bits: Int) -> F32 = f32_of_bits(bits)
 }
 
 # The storage-only formats: the dialect has them as tile and buffer element
@@ -137,6 +152,11 @@ impl HasDtype[TF32] {
   fn dtype_of() -> Dtype[TF32] = TF32
 }
 
+impl DeviceBits[TF32] {
+  fn bits_of(v: TF32) -> Int = tf32_bits(v)
+  fn from_bits(bits: Int) -> TF32 = tf32_of_bits(bits)
+}
+
 ## An OCP fp8 value with four exponent bits and three significand bits and
 ## no infinity: `round_f8e4m3fn`'s grid.
 pub opaque type F8E4M3FN = Float
@@ -146,6 +166,11 @@ pub const F8E4M3FN: Dtype[F8E4M3FN] = dtype_named("f8E4M3FN")
 
 impl HasDtype[F8E4M3FN] {
   fn dtype_of() -> Dtype[F8E4M3FN] = F8E4M3FN
+}
+
+impl DeviceBits[F8E4M3FN] {
+  fn bits_of(v: F8E4M3FN) -> Int = f8e4m3fn_bits(v)
+  fn from_bits(bits: Int) -> F8E4M3FN = f8e4m3fn_of_bits(bits)
 }
 
 ## An OCP fp8 value with five exponent bits and two significand bits:
@@ -159,6 +184,11 @@ impl HasDtype[F8E5M2] {
   fn dtype_of() -> Dtype[F8E5M2] = F8E5M2
 }
 
+impl DeviceBits[F8E5M2] {
+  fn bits_of(v: F8E5M2) -> Int = f8e5m2_bits(v)
+  fn from_bits(bits: Int) -> F8E5M2 = f8e5m2_of_bits(bits)
+}
+
 ## An fp8 exponent value, a power of two: `round_f8e8m0`'s grid.
 pub opaque type F8E8M0FNU = Float
 
@@ -167,6 +197,11 @@ pub const F8E8M0FNU: Dtype[F8E8M0FNU] = dtype_named("f8E8M0FNU")
 
 impl HasDtype[F8E8M0FNU] {
   fn dtype_of() -> Dtype[F8E8M0FNU] = F8E8M0FNU
+}
+
+impl DeviceBits[F8E8M0FNU] {
+  fn bits_of(v: F8E8M0FNU) -> Int = f8e8m0_bits(v)
+  fn from_bits(bits: Int) -> F8E8M0FNU = f8e8m0_of_bits(bits)
 }
 
 ## An OCP MX fp4 value: `round_f4e2m1`'s grid.
@@ -1020,48 +1055,15 @@ pub fn f32_of_bits(bits: Int) -> Float = {
 
 ## The 64-bit pattern of the binary64 value `x`, in an `Int` (the top bit is
 ## the sign, so a negative value answers a negative `Int`): the sign bit,
-## eleven exponent bits biased by 1023, fifty-two significand bits.
-## [`f32_bits`]'s shape at binary64's widths; every `Float` is a binary64
-## value, so there is no off-the-grid case. A NaN answers the canonical
-## quiet one, `0x7FF8000000000000`; the payload a NaN carries is not kept.
-pub fn f64_bits(x: Float) -> Int =
-  if x != x {
-    0x7FF8000000000000
-  } else {
-    let neg = x < 0.0 || (x == 0.0 && 1.0 / x < 0.0)
-    let sign = if neg { 1 << 63 } else { 0 }
-    let a = if neg { -x } else { x }
-    if a == 0.0 {
-      sign
-    } else if a == 1.0 / 0.0 {
-      sign | 0x7FF0000000000000
-    } else {
-      let e = exponent(a)
-      if e < -1022 {
-        # below the normal range: no hidden bit, the significand counts
-        # quanta of 2^-1074
-        sign | to_int(a / pow2(-1074))
-      } else {
-        sign | ((e + 1023) << 52) | to_int((a / pow2(e) - 1.0) * pow2(52))
-      }
-    }
-  }
+## eleven exponent bits biased by 1023, fifty-two significand bits. Every
+## `Float` is a binary64 value, so there is no off-the-grid case. The pattern
+## is the raw one: a NaN keeps its payload and its sign (what a NaN computed
+## as `0.0 / 0.0` carries is the host's, so this module's tests do not pin it).
+pub fn f64_bits(x: Float) -> Int = float_to_bits(x)
 
-## The binary64 value whose 64-bit pattern is `bits`, exactly (the inverse
-## of [`f64_bits`] on every value but a NaN's payload).
-pub fn f64_of_bits(bits: Int) -> Float = {
-  let neg = bits < 0
-  let e = (bits >>> 52) & 0x7FF
-  let m = bits & 0xFFFFFFFFFFFFF
-  let a = if e == 0x7FF {
-    if m == 0 { 1.0 / 0.0 } else { 0.0 / 0.0 }
-  } else if e == 0 {
-    to_float(m) * pow2(-1074)
-  } else {
-    (1.0 + to_float(m) / pow2(52)) * pow2(e - 1023)
-  }
-  if neg { -a } else { a }
-}
+## The binary64 value whose 64-bit pattern is `bits`, exactly, a NaN's payload
+## included (the inverse of [`f64_bits`] on every pattern).
+pub fn f64_of_bits(bits: Int) -> Float = float_of_bits(bits)
 
 ## The 32-bit pattern of the TensorFloat-32 value `x`: a binary32 word whose
 ## bottom THIRTEEN bits are zero. tf32 is nineteen bits of information (a
@@ -1849,7 +1851,8 @@ test "the binary64 codec spells the special values and the named boundaries, and
   assert f64_bits(0.0 * (0.0 - 1.0)) == 1 << 63
   assert f64_bits(inf) == 0x7FF0000000000000
   assert f64_bits(-inf) == (1 << 63) | 0x7FF0000000000000
-  assert f64_bits(0.0 / 0.0) == 0x7FF8000000000000
+  # the sign of a computed NaN is the host's; its exponent and quiet bit are not
+  assert (f64_bits(0.0 / 0.0) & 0x7FFFFFFFFFFFFFFF) == 0x7FF8000000000000
   assert f64_bits(pow2(-1074)) == 1
   assert f64_of_bits(1) == pow2(-1074)
   assert f64_of_bits(0x0010000000000000) == pow2(-1022)
@@ -1860,6 +1863,9 @@ test "the binary64 codec spells the special values and the named boundaries, and
   assert 1.0 / f64_of_bits(1 << 63) == -inf
   let nan = f64_of_bits(0x7FF0000000000001)
   assert nan != nan
+  # the payload of a NaN survives both ways, which the old arithmetic did not do
+  assert f64_bits(nan) == 0x7FF0000000000001
+  assert f64_bits(f64_of_bits(0x7FF8DEADBEEF1234)) == 0x7FF8DEADBEEF1234
   assert f64_of_bits(f64_bits(1.5)) == 1.5
   assert f64_of_bits(f64_bits(-3.25)) == -3.25
   assert f64_of_bits(f64_bits(123456.789)) == 123456.789
@@ -1867,4 +1873,67 @@ test "the binary64 codec spells the special values and the named boundaries, and
   assert f64_of_bits(f64_bits(-1e300)) == -1e300
   assert f64_of_bits(f64_bits(4.9e-324)) == 4.9e-324
   assert f64_of_bits(f64_bits(2.2250738585072014e-308)) == 2.2250738585072014e-308
+}
+
+test "every narrow device format moves as its pattern, little ends known, high bits ignored" {
+  # one known pattern per format fixes the width and the layout, so an impl
+  # that truncated, shifted or took the wrong half would not match
+  let bf: BF16 = round_bf16(1.0)
+  assert bits_of(bf) == 0x3F80
+  let hf: F16 = round_f16(1.0)
+  assert bits_of(hf) == 0x3C00
+  let f32: F32 = round_f32(-2.5)
+  assert bits_of(f32) == 0xC0200000
+  let tf: TF32 = round_tf32(1.0)
+  assert bits_of(tf) == 0x3F800000
+  let e4: F8E4M3FN = round_f8e4m3fn(1.0)
+  assert bits_of(e4) == 0x38
+  let e5: F8E5M2 = round_f8e5m2(1.0)
+  assert bits_of(e5) == 0x3C
+  let e8: F8E8M0FNU = round_f8e8m0(1.0)
+  assert bits_of(e8) == 0x7F
+  # a word with bits above the width reads as its low bits
+  let h: BF16 = from_bits(0xABCD0000 | 0x3F80)
+  assert bits_of(h) == 0x3F80
+  let b: F8E5M2 = from_bits(0x1234 << 16 | 0x3C)
+  assert bits_of(b) == 0x3C
+}
+
+test "every storage and narrow format round trips over its whole pattern space" {
+  var i = 0
+  while i < 256 {
+    let e5: F8E5M2 = from_bits(i)
+    let e4: F8E4M3FN = from_bits(i)
+    let e8: F8E8M0FNU = from_bits(i)
+    # NaN has several patterns and answers its canonical one
+    let t5 = bits_of(e5)
+    let t4 = bits_of(e4)
+    let t8 = bits_of(e8)
+    assert t5 == i || (e5 != e5 && t5 == 0x7E)
+    assert t4 == i || (e4 != e4 && t4 == 0x7F)
+    assert t8 == i || (e8 != e8 && t8 == 0xFF)
+    i = i + 1
+  }
+  var w = 0
+  while w < 65536 {
+    let h: F16 = from_bits(w)
+    let g: BF16 = from_bits(w)
+    let th = bits_of(h)
+    let tg = bits_of(g)
+    assert th == w || (h != h && th == 0x7E00)
+    assert tg == w || (g != g && tg == 0x7FC0)
+    w = w + 1
+  }
+  let words = [0, 1, 0x3F800000, 0x80000000, 0x7F800000, 0xFF800000, 0x7F7FFFFF, 0x00800000, 0x00000001, 0xBF99999A]
+  var k = 0
+  while k < len(words) {
+    let x = words[k]
+    let f: F32 = from_bits(x)
+    assert bits_of(f) == x
+    let t: TF32 = from_bits(x & 0xFFFFE000)
+    assert bits_of(t) == x & 0xFFFFE000
+    k = k + 1
+  }
+  let nanf: F32 = from_bits(0x7FC00000)
+  assert nanf != nanf
 }
