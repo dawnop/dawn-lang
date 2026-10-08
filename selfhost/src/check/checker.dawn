@@ -6174,11 +6174,9 @@ fn arith_call(cx: Cx, tid: Int, lt: Ty, lx: TExpr, rhs: Option[(Ty, TExpr)], olo
       let charged = eff_union([callee_eff] ++ vinsts)
       let cx4 = record_effect(cx3, eff_drop_assocs(eff_drop(charged, unanswered), adropped),
         olo, ohi, mname)
-      # No name was written: the operator is the call, and the parser has no
-      # call node to pair a site with (docs/source-span-map-design.md section
-      # 4: implied calls carry none), so the callee start is NO_NAME.
+      # The operator is the call the author wrote, named where it starts.
       (cx4, lt, XCallFn(s.owner, emitted_fn_name(s, mname), args, [wr], evs, Some(tid),
-        owner_off(cx, lo), owner_off(cx, hi), NO_NAME, lt))
+        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt))
     }
   }
 }
@@ -6225,8 +6223,8 @@ test "an operator on Int or Float stays native, and on a type of its own calls t
   let routed = match arith_body(tm, "v") {
     XCallFn(_, _, [XLocal(..), XCallFn(_, _, [_], [_], _, Some(nid), _, _, inner, _)], [_], _, Some(aid),
       _, _, outer, _) ->
-      # neither call has a written callee name, so neither has a site
-      aid == ADD_ID && nid == NEG_ID && inner == NO_NAME && outer == NO_NAME
+      # each operator is a written call: sited, named at its token
+      aid == ADD_ID && nid == NEG_ID && inner != NO_NAME && outer != NO_NAME
     _ -> false
   }
   assert routed
