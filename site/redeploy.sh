@@ -18,6 +18,14 @@
 # toolchain at all it skips the step and leaves whatever an older build left,
 # so a reactor from last month would pass a presence check. The stamp below is
 # what tells the two apart.
+#
+# The Playground origin is the same kind of hole. site/build.sh lets
+# DAWN_SITE_PLAY_ORIGIN default to empty, which is right for development (the
+# page calls its own /api) and wrong for production, where the pages sit on a
+# CDN with no /api at all: a deploy without it ships a Playground that calls
+# the CDN and gets 404 (2026-10-08), and play-live-check still passed because
+# it never looked at what the page points at. So this script refuses an empty
+# value and checks the built pages carry it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,6 +35,21 @@ export DAWN_WASM_CC="${DAWN_WASM_CC:-clang-20}"
 # environment wins). It is what the CDN purge refreshes and what this prints.
 site_origin="${DAWN_SITE_ORIGIN:-$(. scripts/repo.env && printf '%s' "$DAWN_SITE_ORIGIN")}"
 [ -n "$site_origin" ] || { echo "error: scripts/repo.env names no DAWN_SITE_ORIGIN" >&2; exit 1; }
+
+play_origin="${DAWN_SITE_PLAY_ORIGIN:-}"
+if [ -z "$play_origin" ]; then
+  echo "refusing to deploy: DAWN_SITE_PLAY_ORIGIN is unset or empty." >&2
+  echo "  The production pages are served by a CDN that has no /api; without the" >&2
+  echo "  Playground's origin the page would call the CDN and get 404." >&2
+  echo "  Set it to a bare origin, e.g. DAWN_SITE_PLAY_ORIGIN=https://play.dawnop.com" >&2
+  exit 1
+fi
+if ! printf '%s' "$play_origin" | grep -Eq '^https?://[A-Za-z0-9.:-]+$'; then
+  echo "refusing to deploy: DAWN_SITE_PLAY_ORIGIN is \"$play_origin\", not an origin." >&2
+  echo "  Want http(s)://host[:port] with no path and no trailing slash," >&2
+  echo "  e.g. https://play.dawnop.com" >&2
+  exit 1
+fi
 
 stamp="$(mktemp)"
 trap 'rm -f "$stamp"' EXIT
@@ -61,6 +84,14 @@ if [ "$bad" != 0 ]; then
   echo "  wasm32 reactors (Debian/Ubuntu: clang-20 lld wasi-libc libclang-rt-20-dev-wasm32)." >&2
   exit 1
 fi
+
+# The built pages must point at that origin, in both languages.
+for page in site/dist/playground.html site/dist/zh/playground.html; do
+  if ! grep -qF "data-endpoint=\"$play_origin/api/run\"" "$page" 2>/dev/null; then
+    echo "refusing to deploy: $page does not carry data-endpoint=\"$play_origin/api/run\"." >&2
+    exit 1
+  fi
+done
 
 echo "=== deploying to ${site_origin#https://} ==="
 rsync -avz --delete site/dist/ "$HOST:/var/www/dawnlang/dist/"
