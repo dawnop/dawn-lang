@@ -3857,11 +3857,10 @@ pub fn builtins() -> Map[String, Sig] = {
     # runtime refuses every one with `gpu.unsupported_backend`.
     #
     # Buffers cross as raw device pointers, kernels as the CUmodule handle
-    # `gpu_load_module_host` answered, data as `Array[Float]` for f64 (the
-    # shape both backends can name, copied double for double) or as `Bytes`
-    # for a packed format (bf16: std/gpu packs and unpacks, the runtime copies
-    # bytes and knows no format); the handle table and the List<->Array walk
-    # stay std's. `gpu_launch_host` runs `kernel` from `module` over a
+    # `gpu_load_module_host` answered, data as `Bytes` for every format
+    # (std/gpu encodes and decodes, the runtime copies bytes and knows no
+    # format); the handle table stays std's. The two copies are named for the
+    # driver calls they wrap (`cuMemcpyHtoD`, `cuMemcpyDtoH`). `gpu_launch_host` runs `kernel` from `module` over a
     # `gx` by `gy` by `gz` grid of tile blocks with `args` as its
     # device-pointer parameters in order.
     # `gpu_module_global_host` answers the device address and the byte size
@@ -3875,12 +3874,12 @@ pub fn builtins() -> Map[String, Sig] = {
     ),
     eff1(bsig("gpu_alloc_host", [TyInt], ["nbytes"], result_ty(TyInt, foreign_error_ty())), EIo),
     eff1(
-      bsig("gpu_upload_bytes_host", [TyInt, TyBytes], ["devptr", "data"],
+      bsig("gpu_memcpy_htod_host", [TyInt, TyBytes], ["devptr", "data"],
         result_ty(TyUnit, foreign_error_ty())),
       EIo
     ),
     eff1(
-      bsig("gpu_download_bytes_host", [TyInt, TyInt], ["devptr", "nbytes"],
+      bsig("gpu_memcpy_dtoh_host", [TyInt, TyInt], ["devptr", "nbytes"],
         result_ty(TyBytes, foreign_error_ty())),
       EIo
     ),
@@ -4082,7 +4081,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # The GPU primitives: one runtime module, every one std-only. std/gpu is the
   # only caller, and the handler above them is where a device pointer becomes
   # a handle a program cannot forge.
-  for op in ["load_module", "alloc", "upload", "download", "upload_bytes", "download_bytes", "launch", "module_global", "free", "sync", "close"] {
+  for op in ["load_module", "alloc", "memcpy_htod", "memcpy_dtoh", "launch", "module_global", "free", "sync", "close"] {
     rt_of = map.insert(rt_of, "gpu_" ++ op ++ "_host", RtGpu)
     internal = set.insert(internal, "gpu_" ++ op ++ "_host")
   }

@@ -32,8 +32,8 @@
 # Run: dawn run examples/projects/gpu_fake
 
 use std/gpu
-use std/gpu.{Gpu, WideRefFn, last_out, with_gpu_fake, reference_kernels, alloc, upload, download, launch, free,
-  sync, vadd_ref, buffer, erase }
+use std/gpu.{Gpu, WideRefFn, last_out, with_gpu_fake, reference_kernels, alloc, copy_from_host, copy_to_host, launch, free,
+  sync, vadd_ref, buffer_arg, erase }
 use std/dtype.{F64}
 use std/narrow.{F32, F8E4M3FN}
 use std/int/i32.{I32}
@@ -282,11 +282,11 @@ fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !G
   let a = alloc(F64, n)?
   let b = alloc(F64, n)?
   let out = alloc(F64, n)?
-  upload(a, xs)?
-  upload(b, ys)?
-  launch("vadd", blocks(n), [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
+  copy_from_host(a, xs)?
+  copy_from_host(b, ys)?
+  launch("vadd", blocks(n), [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
   sync()?
-  let got = download(out)?
+  let got = copy_to_host(out)?
   free(a)?
   free(b)?
   free(out)?
@@ -305,7 +305,7 @@ fn alloc_upload(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
   var hs: List[Int] = []
   for (dt, data) in bufs {
     let h = gpu.gpu_alloc(dt, len(data))?
-    gpu.gpu_upload(h, gpu.pack_to(dt, data))?
+    gpu.gpu_copy_from_host(h, gpu.encode_floats(dt, data))?
     hs = hs ++ [h]
   }
   Ok(hs)
@@ -317,10 +317,10 @@ fn alloc_upload(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
 ## pure and takes them with it.
 fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], ForeignError] !Gpu = {
   let hs = alloc_upload(bufs)?
-  launch(name, grid, list.map(hs, h => gpu.Buf(h)))?
+  launch(name, grid, list.map(hs, h => gpu.Buffer(h)))?
   sync()?
   let (last_dt, _last) = bufs[len(bufs) - 1]
-  let got = gpu.unpack_from(last_dt, gpu.gpu_download(hs[len(hs) - 1])?)
+  let got = gpu.decode_floats(last_dt, gpu.gpu_copy_to_host(hs[len(hs) - 1])?)
   for h in hs {
     let _ = gpu.gpu_free(h)
   }
@@ -448,7 +448,7 @@ fn module_globals() -> Map[String, List[(String, String, List[Float])]] =
 ## out of it, and the refusal for a name it does not declare.
 fn symbols() -> Result[(List[Float], String), ForeignError] !Gpu = {
   let a = gpu.module_global(F64, "table", "tbl_a")?
-  let held = download(a)?
+  let held = copy_to_host(a)?
   let missing = match gpu.module_global(F64, "table", "no_such_table") {
     Ok(_) -> "found"
     Err(e) -> e.kind

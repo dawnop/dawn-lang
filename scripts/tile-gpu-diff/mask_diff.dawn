@@ -33,8 +33,8 @@
 # has pinned neither (std/gpu's relu_ref says so as well).
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, buffer, erase, sync }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, copy_from_host, copy_to_host, free,
+  launch, buffer_arg, erase, sync }
 use std/dtype.{F64}
 use tileref/ref.{masked_vadd_ref, masked_copy_ref, relu_ref, leaky_relu_ref, clip_ref}
 use std/list
@@ -113,7 +113,7 @@ fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Resul
   if i >= len(ts) {
     Ok(())
   } else {
-    match upload(ts[i], data[i]) {
+    match copy_from_host(ts[i], data[i]) {
       Ok(_) -> upload_all(ts, data, i + 1)
       Err(e) -> Err(e)
     }
@@ -137,20 +137,20 @@ fn stages(kernel: String, grid: Int, data: List[List[Float]]) -> Trace !Gpu = {
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          let back = download(ts[0])
+          let back = copy_to_host(ts[0])
           let rt = match back {
             Ok(v) -> if to_string(v) == to_string(data[0]) { "same" } else { "differ" }
             Err(e) -> e.kind
           }
           let t2 = Trace { ..t1, roundtrip: rt, note: message(back) }
-          match launch(kernel, grid, list.map(ts, t => erase(buffer(t)))) {
+          match launch(kernel, grid, list.map(ts, t => erase(buffer_arg(t)))) {
             Err(e) -> {
               release(ts)
               Trace { ..t2, launch: e.kind, note: e.message }
             }
             Ok(_) -> {
               let s = sync()
-              let r = download(ts[len(ts) - 1])
+              let r = copy_to_host(ts[len(ts) - 1])
               release(ts)
               let value = match r {
                 Ok(v) -> Some(v)

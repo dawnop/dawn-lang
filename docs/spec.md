@@ -3893,20 +3893,20 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
   入口参数要么是其格式的指针（`ByPtr`，缓冲），要么是 rank-0 的值（`ByValue`，按值传的标量）。字节码变成设备映像（cubin）由 NVIDIA 的 `tileiras` 完成，在 Dawn
   工具链之外；本规范不规定由谁、在何时调用它。
 
-**`Gpu` 效果**有七个操作（`gpu_alloc`、`gpu_upload`、`gpu_download`、`gpu_launch`、
+**`Gpu` 效果**有七个操作（`gpu_alloc`、`gpu_copy_from_host`、`gpu_copy_to_host`、`gpu_launch`、
 `gpu_module_global`、`gpu_free`、`gpu_sync`），单态、句柄级；程序用的是其上的类型化函数
-`alloc`、`upload`、`download`、`free`、`launch`、`module_global`、`sync`。
+`alloc`、`copy_from_host`、`copy_to_host`、`free`、`launch`、`module_global`、`sync`。
 
 - 每个操作答 `Result[_, ForeignError]`。std 在操作之上自己发三种拒绝，在每个 handler 下字节相同：
-  `gpu.bad_length`（`alloc` 的长度小于 1）、`gpu.length_mismatch`（`upload` 的数据长度不等于
+  `gpu.bad_length`（`alloc` 的长度小于 1）、`gpu.length_mismatch`（`copy_from_host` 的数据长度不等于
   `size(t)`）、`gpu.bad_grid`（grid 某一轴小于 1）。这三种都在问 handler 之前发出。其余答复是
   handler 所代表的设备的原样结果：接缝在错误面之下。
 - **`launch` 以字符串点名 kernel**：`launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`，
-  `grid`、`gy`、`gz` 是 grid 的三根轴，计 tile block 的个数；`args` 是 `LaunchArg` 的列表，按入口参数的顺序：`erase(buffer(t))` 是缓冲，`erase(scalar(v))` 是按值传的标量（`i32`、`i64`、`f32`、`f64`）。
+  `grid`、`gy`、`gz` 是 grid 的三根轴，计 tile block 的个数；`args` 是 `LaunchArg` 的列表，按入口参数的顺序：`erase(buffer_arg(t))` 是缓冲，`erase(scalar_arg(v))` 是按值传的标量（`i32`、`i64`、`f32`、`f64`）。
   名字到 kernel 的绑定是安装 handler 时交给它的表，名字不在表里，两个 handler 都答
   `gpu.no_kernel`。语言不检查这个名字与 `trace_kernel` 用的名字一致，也不检查 `args` 的个数与
   格式与入口签名一致：那是程序的责任。
-- `launch` 返回不等于 kernel 已经跑完。`sync` 之后的 `download` 才保证看到此前各次 launch 的写入。
+- `launch` 返回不等于 kernel 已经跑完。`sync` 之后的 `copy_to_host` 才保证看到此前各次 launch 的写入。
 - `module_global(d, kernel, name)` 答一个覆盖该 kernel 所在模块中一个导出全局的 `Tensor[D]`，
   与模块共享存储；同一符号查两次答同一个句柄；对它 `free` 被接受且什么也不做。
 
@@ -3926,7 +3926,7 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   `gpu.no_such_buffer`；然后把每个实参缓冲的格式名与内容按序交给参考实现。参考实现答
   `[(实参位置, 内容)]`，每一对按**该**缓冲的格式舍入（`round_to`）后写回；有位置越界则答
   `gpu.bad_write_back`，什么也不写。所有输入在任何一次写回之前读完。grid 不被读取。
-- 缓冲持有的是字节，和内存一样：`upload` 原样存，`download` 原样答，所以对任何格式、任何值，
+- 缓冲持有的是字节，和内存一样：`copy_from_host` 原样存，`copy_to_host` 原样答，所以对任何格式、任何值，
   上传再下载都是恒等。参考实现看到的是 `Float`，所以 launch 时假设备把每个缓冲解码成 `Float`；
   `i64` 缓冲里有 `Float` 装不下的值（超出 ±2^53）时，以 `gpu.fake_inexact` 拒绝（消息指明哪个
   缓冲、哪个下标），而不是舍入。写回按缓冲格式舍入。
@@ -3969,14 +3969,14 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
   `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN` 只是 tile
   的格式，没有这种缓冲。
-- 值以 `List[T]` 进出，`T` 是张量的元素类型：`upload(t: Tensor[T], xs: List[T])` 与
-  `download(t: Tensor[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`upload` 把每个元素
+- 值以 `List[T]` 进出，`T` 是张量的元素类型：`copy_from_host(t: Tensor[T], xs: List[T])` 与
+  `copy_to_host(t: Tensor[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`copy_from_host` 把每个元素
   写成格式的位型（小端），上传时不舍入（值在 `T` 里已经是格式的值：`BF16` 就是 bfloat16，`Int`
-  整个过去）；`download` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 NaN 的
+  整个过去）；`copy_to_host` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 NaN 的
   载荷也在内。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN` 有格式没有缓冲，
-  上传 `Tensor[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_upload(handle, data: Bytes)`、
-  `gpu_download(handle) -> Result[Bytes, _]`），第 `i` 个元素占 `[i * w, (i + 1) * w)` 字节，`w` 是格式的宽度，
-  小端。`pack_to(dtype, xs: List[Float])` 与 `unpack_from(dtype, bytes)` 是同一编码按格式名对 `Float` 的视图，
+  上传 `Tensor[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_copy_from_host(handle, data: Bytes)`、
+  `gpu_copy_to_host(handle) -> Result[Bytes, _]`），第 `i` 个元素占 `[i * w, (i + 1) * w)` 字节，`w` 是格式的宽度，
+  小端。`encode_floats(dtype, xs: List[Float])` 与 `decode_floats(dtype, bytes)` 是同一编码按格式名对 `Float` 的视图，
   给缓冲没有共同元素类型的程序用；超出 ±2^53 的 `i64` 过不了它们。
 - **标量按值过界**：launch 的实参是缓冲句柄或按值传的标量（`i32`、`i64`、`f32`、`f64`；更小的格式的参数区布局
   没量过，不收）。宿主的数要进 kernel，可以在记录时作为常量写进程序（每个值一个程序），

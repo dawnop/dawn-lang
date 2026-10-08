@@ -5077,7 +5077,7 @@ dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
 /* The packed-format seam: std/gpu has already laid the buffer out byte for
  * byte (every format, f64 and i64 included: std/gpu's `pack_words`), so the
  * runtime copies and knows no format. */
-dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
+dawn_adt *dawn_gpu_memcpy_htod_host(int64_t devptr, const dawn_bytes *data) {
   dawn_adt *e = dawn_gpu_open();
   if (e != NULL) return e;
   dawn_cu_result r = dawn_gpu.memcpy_htod((dawn_cu_deviceptr)devptr, data->p, (size_t)data->len);
@@ -5085,10 +5085,10 @@ dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
   return dawn_ok(dawn_box_unit(DAWN_UNIT));
 }
 
-dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes) {
+dawn_adt *dawn_gpu_memcpy_dtoh_host(int64_t devptr, int64_t nbytes) {
   dawn_adt *e = dawn_gpu_open();
   if (e != NULL) return e;
-  if (nbytes < 0) return dawn_gpu_refuse("gpu.bad_length", "gpu_download_bytes_host: negative byte count");
+  if (nbytes < 0) return dawn_gpu_refuse("gpu.bad_length", "gpu_memcpy_dtoh_host: negative byte count");
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(nbytes > 0 ? nbytes : 1));
   dawn_cu_result r = dawn_gpu.memcpy_dtoh(buf, (dawn_cu_deviceptr)devptr, (size_t)nbytes);
   if (r != 0) {
@@ -5205,15 +5205,15 @@ dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
   (void)nbytes;
   return dawn_gpu_refuse_wasi("gpu_alloc_host");
 }
-dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
+dawn_adt *dawn_gpu_memcpy_htod_host(int64_t devptr, const dawn_bytes *data) {
   (void)devptr;
   (void)data;
-  return dawn_gpu_refuse_wasi("gpu_upload_bytes_host");
+  return dawn_gpu_refuse_wasi("gpu_memcpy_htod_host");
 }
-dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes) {
+dawn_adt *dawn_gpu_memcpy_dtoh_host(int64_t devptr, int64_t nbytes) {
   (void)devptr;
   (void)nbytes;
-  return dawn_gpu_refuse_wasi("gpu_download_bytes_host");
+  return dawn_gpu_refuse_wasi("gpu_memcpy_dtoh_host");
 }
 dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int64_t gy,
                                int64_t gz, const dawn_array *args) {

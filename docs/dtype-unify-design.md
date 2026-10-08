@@ -3,7 +3,7 @@
 > 状态：**proposed**。2026-10-08 写成。本文有两半，生命周期不同：
 > 规则、依赖方向、见证铸造、`HasDtype`、只存储格式（§1 到 §3）描述的是**已经落地**的 U1 与 U2
 > （提交 3aa0f8aa、24d3fcd2，2026-10-06 至 07，权威条文在 spec §12.6），读作现状；
-> 尚未落地、待评审的只有 U3（类型化 `upload`/`download`）与 U4（常量带宿主值类型），即 §6 与 §7。
+> 尚未落地、待评审的只有 U3（类型化 `copy_from_host`/`copy_to_host`）与 U4（常量带宿主值类型），即 §6 与 §7。
 > 依据：维护者工作区的调研报告 research-format-types-unify-report-20261006（下称「10-06 报告」）。
 > 基线：`origin/main` = c7c81203，种子 v0.85.0，`packages/tileir` 0.12.0。
 > 本文所有计数都在这个提交上用 `git grep` 数出来，不含 `selfhost/src/embed`；没有量过的写「未量」。
@@ -115,14 +115,14 @@ spec §12.6（`docs/spec.md` 的「设备后端：GPU」）与英文译本已随
   `U16 U32 U64` 没有，所以 `Tensor[U32]` 在 `alloc` 处是类型错误（见本文 §2 末行的精确说法，spec 这句是简写）。
 - 一句话规则目前**没有**逐字写进 spec；散落在 `use std/narrow.{BF16}` 同时带来类型与见证那句里。是否把 §1 的规则句加进 §12.6 是 §7 的开放问题 3。
 
-## 6. U3：类型化 `upload`/`download`
+## 6. U3：类型化 `copy_from_host`/`copy_to_host`
 
 ### 6.1 现状与目标
 
-今天宿主值一律是 `List[Float]`：`gpu_upload(handle, data: List[Float])`、`gpu_download(handle) -> Result[List[Float], ForeignError]`，
+今天宿主值一律是 `List[Float]`：`gpu_copy_from_host(handle, data: List[Float])`、`gpu_copy_to_host(handle) -> Result[List[Float], ForeignError]`，
 native 的 `gpu_upload_host`/`gpu_download_host` 在 `selfhost/src/check/types.dawn` 里也是 `TyArray(TyFloat)`。对 `i64` 只在 ±2^53 内精确
 （`std/gpu.dawn` 的格式注释与 `scripts/tile-gpu-diff/dtype_diff.dawn` 的 i64 语料明写了这条债，语料限制在 ±2^52 内）。
-统一之后得到的前提是：`Tensor[T]` 的 `T` 已经是宿主值类型。目标：`upload(t: Tensor[T], data: List[T])`、`download(t) -> List[T]`，
+统一之后得到的前提是：`Tensor[T]` 的 `T` 已经是宿主值类型。目标：`copy_from_host(t: Tensor[T], data: List[T])`、`copy_to_host(t) -> List[T]`，
 `Tensor[U8]` 下得到 `List[U8]`，`Tensor[Int]` 下得到 `List[Int]` 且精确。
 
 ### 6.2 设计要点（待裁）
@@ -130,19 +130,19 @@ native 的 `gpu_upload_host`/`gpu_download_host` 在 `selfhost/src/check/types.d
 1. **编码从哪来。** `HasDtype` 只给名字，不给编解码。需要一个新 trait（暂记 `Pod[T]`：`to_bits`/`of_bits`，或直接 `Bytes` 读写），
    由各类型在自己的模块里 impl，与见证并排。`BF16 F16 F32 I8 I16 I32 U8` 的位型已有函数（`narrow.*_bits`、整数模块的 `wrap`）；
    只存储格式没有 `to_f64`（§3），但有 `*_bits`，所以编解码走位型而不走 `to_f64`。`F64`/`Int`/`Bool` 在 `std/dtype` 或 prelude 一侧 impl。
-2. **线上走什么。** 走 `Bytes`，每个元素 `element_bytes` 字节、小端；`gpu_upload`/`gpu_download` 两个效果操作的签名随之改（`Bytes` 取代 `List[Float]`），
+2. **线上走什么。** 走 `Bytes`，每个元素 `element_bytes` 字节、小端；`gpu_copy_from_host`/`gpu_copy_to_host` 两个效果操作的签名随之改（`Bytes` 取代 `List[Float]`），
    native 运行时与 `gpu_*_host` 内建同步改。JVM 与 wasm 本来就答 `gpu.unsupported_backend`，只是类型签名变。
 3. **假设备。** 现在缓冲存 `List[Float]` 并按名 `round_to`；U3 后参考实现（`WideRefFn`）仍可保持 `List[Float]` 通道（它是「参考」，不是设备），只在边界解码：
    这是 10-06 报告写的「参考实现通道仍是 `List[Float]`」，本文沿用，因为改它会动 `packages/tileref` 全部参考实现且没有收益。
-4. **`download` 的返回格式不在 `Tensor` 的类型里的情形。** `Tensor[F32]` 可写不可分配，`download` 对它无从谈起，与现状同。
+4. **`copy_to_host` 的返回格式不在 `Tensor` 的类型里的情形。** `Tensor[F32]` 可写不可分配，`copy_to_host` 对它无从谈起，与现状同。
 
 ### 6.3 §12.6 要动的句子（U3 落地时）
 
 只动这些：
 
 - 「值以 `List[Float]` 进出，每种格式都是如此……对 `i64` 只在 ±2^53 之内精确」整条改写为：值以 `List[T]` 进出，`T` 是张量的元素类型；
-  `upload` 把每个值编码成格式的位型（宽整数不再经 `Float`），`download` 精确答出；`i64` 的精确性债从此关闭。
-- 「`upload` 的数据长度不等于 `size(t)`」的 `gpu.length_mismatch` 不变；`upload` 的舍入（`round_to`）一句改为「值在 `T` 里已经是该格式的值，`upload` 不再舍入」（`FromFloat`/`FromInt` 在构造时已舍入或范围检查）。
+  `copy_from_host` 把每个值编码成格式的位型（宽整数不再经 `Float`），`copy_to_host` 精确答出；`i64` 的精确性债从此关闭。
+- 「`copy_from_host` 的数据长度不等于 `size(t)`」的 `gpu.length_mismatch` 不变；`copy_from_host` 的舍入（`round_to`）一句改为「值在 `T` 里已经是该格式的值，`copy_from_host` 不再舍入」（`FromFloat`/`FromInt` 在构造时已舍入或范围检查）。
 - 假设备「按缓冲格式舍入」一句同步。
 
 本文不提前改 spec：规范文本在 U3 落地前动，会让规范领先实现。
@@ -153,9 +153,9 @@ native 的 `gpu_upload_host`/`gpu_download_host` 在 `selfhost/src/check/types.d
 |---|---|---|---|---|
 | U3a | 设计稿：`docs/gpu-typed-transfer-design.md`（编码 trait 形状、线协议、native 运行时改动、`Gpu` 效果面、迁移量）；实测 `Bytes` 路径与现 `List[Float]` 路径的墙钟（性能断言要有出处） | 否 | 裁决 | — |
 | U3b | std 增量：编码 trait 与各类型 impl；`upload_typed`/`download_typed` 暂以新名并存（只存在于这一刀与下一刀之间，U3c 同提交内收回，不留别名） | 否 | std 测试；`dawn doc`/LSP 同名语料不受影响 | 把某类型的 `of_bits` 少一个字节宽，其 round-trip 测试红 |
-| U3c | 切换：`Gpu` 效果的 `gpu_upload`/`gpu_download` 改 `Bytes`；`upload`/`download` 收 `List[T]`；native 运行时；迁移 `tile-gpu-diff` 的 26 个驱动、`gpu_fake`、教程中英、spec §12.6、site gpu 页 | 是（std/gpu、`Gpu` 效果、native 运行时） | `dtype_diff` 的 i64 语料越过 2^53（例如 2^53+1 与 -2^62）逐位相等；tile golden 不变（不碰 tile 输入以外的路径，但 `std/gpu.dawn` 在 `TILE_PATHS`，所以 `inputs=` 摘要变，台账 verdict 不变、sm_86 重录、sm_90/sm_100 由所有者重录）；`Emit-Change` 逐 label；`selfhost-run-diff.sh` | ①把 `download` 解码改回经 `Float`，i64 语料在 2^53+1 红；②把 `upload` 的位型字节序写反，`dtype_diff` 红 |
+| U3c | 切换：`Gpu` 效果的 `gpu_copy_from_host`/`gpu_copy_to_host` 改 `Bytes`；`copy_from_host`/`copy_to_host` 收 `List[T]`；native 运行时；迁移 `tile-gpu-diff` 的 26 个驱动、`gpu_fake`、教程中英、spec §12.6、site gpu 页 | 是（std/gpu、`Gpu` 效果、native 运行时） | `dtype_diff` 的 i64 语料越过 2^53（例如 2^53+1 与 -2^62）逐位相等；tile golden 不变（不碰 tile 输入以外的路径，但 `std/gpu.dawn` 在 `TILE_PATHS`，所以 `inputs=` 摘要变，台账 verdict 不变、sm_86 重录、sm_90/sm_100 由所有者重录）；`Emit-Change` 逐 label；`selfhost-run-diff.sh` | ①把 `copy_to_host` 解码改回经 `Float`，i64 语料在 2^53+1 红；②把 `copy_from_host` 的位型字节序写反，`dtype_diff` 红 |
 
-U3 不碰 tileir 包本身（tileir 不引 `upload`/`download`），所以不需要 tileir 的 minor；若迁移期要动 `tileref`，随它自己的版本线。
+U3 不碰 tileir 包本身（tileir 不引 `copy_from_host`/`copy_to_host`），所以不需要 tileir 的 minor；若迁移期要动 `tileref`，随它自己的版本线。
 
 ## 7. U4：常量带宿主值类型
 
@@ -174,7 +174,7 @@ U4 想要 `full[D: ..](shape, v: D)`：宿主侧的舍入（`let w: BF16 = 0.1` 
 1. U3 的编码 trait 放哪、叫什么：`std/dtype` 里与 `HasDtype` 并列，还是 `Dtype[T]` 本身携带编解码闭包（铸造处一次给齐）。后者让 `Dtype[T]` 变成「名字 + 编解码」，`pub(pkg)` 铸造的论证不变，且不新增 trait，但 `Dtype` 不再是 `String` 的薄包装。
 2. 只存储格式没有 `to_f64`（trait 方法共享函数命名空间）：是否值得为此给 `Narrow` 之外起新名（如 `value_of`），还是 U3/U4 一律走位型。倾向走位型。
 3. 是否把 §1 的一句话规则逐字加进 spec §12.6（以及 §2.5 的「没有调用点类型实参」附近加一条指回）。加了就要同时动 `docs/spec.en.md` 并重登记译本摘要。
-4. U3 是否一并把 `Gpu` 效果的 `launch` 实参里的 `Word` 位型与 `upload` 的位型编码统一成一个 trait（K4 的 `ScalarDtype` 与 U3 的编码 trait 有重叠：二者都是「某类型的位型」）。倾向 U3a 设计稿里一并回答。
+4. U3 是否一并把 `Gpu` 效果的 `launch` 实参里的 `Word` 位型与 `copy_from_host` 的位型编码统一成一个 trait（K4 的 `ScalarDtype` 与 U3 的编码 trait 有重叠：二者都是「某类型的位型」）。倾向 U3a 设计稿里一并回答。
 5. `Tensor[U32]` 目前类型层可写（§2 末行）。是否要让 `Tensor[D]` 的构造点（`alloc`）以外也拒绝，需要 `Tensor[D: HasDtype]` 类约束，而 opaque 类型的类型参数没有约束位置。不建议做，除非出现真实误用。
 
 ## 9. 不做的（理由）
@@ -186,6 +186,6 @@ U4 想要 `full[D: ..](shape, v: D)`：宿主侧的舍入（`let w: BF16 = 0.1` 
 5. **给 `U16 U32 U64` 造设备格式**：方言没有无符号整数 tile 类型，不 impl `HasDtype` 才是诚实的。
 6. **把 `Dtype` 放进 `narrow` 或 `gpu`**：narrow 不该依赖 gpu，整数模块也要用它，所以单独一个底层小模块。
 7. **给旧标记写迁移提示或 `std/moved.txt` 条目**：没有外部消费者，旧名直接删；`std/moved.txt` 机制本身已于 10-07 撤销。
-8. **为 U3 保留 `List[Float]` 的旧 `upload`/`download` 作别名**：破坏性变更不做兼容层，调用方（26 个驱动与示例）同提交迁完。
+8. **为 U3 保留 `List[Float]` 的旧 `copy_from_host`/`copy_to_host` 作别名**：破坏性变更不做兼容层，调用方（26 个驱动与示例）同提交迁完。
 9. **改参考实现（`WideRefFn`）的 `List[Float]` 通道**：它是宿主参考而非设备，改了动 `packages/tileref` 全部参考实现且没有收益（§6.2 第 3 条）。
 10. **让 `Tile[Float]` 与 `Tile[BF16]` 之间可隐式转换**：区分靠 `BF16` 是 opaque，转换用 `.to(BF16)`，这是统一的目的而不是代价。

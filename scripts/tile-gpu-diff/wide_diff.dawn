@@ -132,7 +132,7 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
     let (dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
   }
   Ok(())
 }
@@ -141,7 +141,7 @@ fn download_all(hs: List[Int], bufs: List[(String, List[Float])], reads: List[In
   var out: List[List[Float]] = []
   for r in reads {
     let (read_dt, _read) = bufs[r]
-    out = out ++ [gpu.unpack_from(read_dt, gpu.gpu_download(hs[r])?)]
+    out = out ++ [gpu.decode_floats(read_dt, gpu.gpu_copy_to_host(hs[r])?)]
   }
   Ok(out)
 }
@@ -159,8 +159,8 @@ fn release(hs: List[Int]) -> Unit !Gpu = {
 ## also an input.
 ##
 ## The operations are `gpu`'s raw ones rather than the typed `alloc` /
-## `upload` / `download`, because a case's buffers do not share a format and
-## `Tensor[D]` is one format per handle. The length check `upload` makes
+## `copy_from_host` / `copy_to_host`, because a case's buffers do not share a format and
+## `Tensor[D]` is one format per handle. The length check `copy_from_host` makes
 ## above the effect is not skipped: every buffer here is allocated with the
 ## length of the data that is about to go into it.
 fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
@@ -176,7 +176,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buf(h))) {
+          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buffer(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -276,8 +276,8 @@ fn verdict(fake: Trace, real: Trace, codec: Int) -> String = {
 }
 
 # The buffers whose Float view disagrees with `round_to`. The fake device and
-# the real one are handed the same bytes by the same writer (`pack_to`) and
-# their answers are decoded by the same reader (`unpack_from`), so a codec
+# the real one are handed the same bytes by the same writer (`encode_floats`) and
+# their answers are decoded by the same reader (`decode_floats`), so a codec
 # that is wrong in the same way on both sides is invisible to the comparison
 # above. `round_to` is the independent statement of what a buffer of a format
 # holds, and this host-only probe holds the codec to it on every corpus
@@ -286,7 +286,7 @@ fn verdict(fake: Trace, real: Trace, codec: Int) -> String = {
 fn codec_misses(bufs: List[(String, List[Float])]) -> Int =
   len(list.filter(bufs, b => {
     let (dt, data) = b
-    to_string(gpu.unpack_from(dt, gpu.pack_to(dt, data))) != to_string(list.map(data, x => gpu.round_to(dt, x)))
+    to_string(gpu.decode_floats(dt, gpu.encode_floats(dt, data))) != to_string(list.map(data, x => gpu.round_to(dt, x)))
   }))
 
 # ---- the corpora ----

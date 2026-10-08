@@ -1578,7 +1578,7 @@ memory, where launching a kernel calls the host reference function registered un
 name. It is pure, so this runs anywhere, with no GPU, no driver and no `!io`:
 
 ```dawn run
-use std/gpu.{Gpu, alloc, upload, download, launch, sync, free, buffer, erase, with_gpu_fake, reference_kernels}
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, launch, sync, free, buffer_arg, erase, with_gpu_fake, reference_kernels}
 use std/dtype.{F64}
 
 # The host half of a GPU program: allocate, upload, launch, wait, read back.
@@ -1588,11 +1588,11 @@ fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignEr
   let a = alloc(F64, n)?
   let b = alloc(F64, n)?
   let out = alloc(F64, n)?
-  upload(a, xs)?
-  upload(b, ys)?
-  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
+  copy_from_host(a, xs)?
+  copy_from_host(b, ys)?
+  launch("vadd", 1, [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
   sync()?
-  let got = download(out)?
+  let got = copy_to_host(out)?
   free(a)?
   free(b)?
   free(out)?
@@ -1601,7 +1601,7 @@ fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignEr
 
 fn unknown_kernel() -> Result[Unit, ForeignError] !Gpu = {
   let h = alloc(F64, 1)?
-  launch("vmul", 1, [erase(buffer(h))])
+  launch("vmul", 1, [erase(buffer_arg(h))])
 }
 
 pub fn main() -> Unit !io = {
@@ -1627,7 +1627,7 @@ and whose `kernels` maps each name to its compiled module. That handler needs th
 backend (on the JVM every operation answers `gpu.unsupported_backend`) and a machine with
 an NVIDIA driver.
 
-`upload` and `download` move values of the tensor's element type, not Floats under every
+`copy_from_host` and `copy_to_host` move values of the tensor's element type, not Floats under every
 format: a `Tensor[Float]` takes a `List[Float]`, a `Tensor[Int]` takes `Int`s and keeps every bit
 of them (an i64 beyond 2^53 included), and a `Tensor[BF16]` takes `BF16` values, so nothing is
 rounded on the way in. A format with no buffer cannot be moved: uploading a `Tensor[Bool]` is a
@@ -1775,7 +1775,7 @@ reading and writing cell `i`. A lane past the extent reads the marker's padding 
 unless the marker says otherwise) and is not written back, so the tail needs no mask.
 
 ```dawn run deps=tileir
-use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, buffer}
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg}
 use std/dtype.{F64}
 use std/list
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
@@ -1792,10 +1792,10 @@ fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
   let a = alloc(F64, n)?
   let b = alloc(F64, n)?
   let out = alloc(F64, n)?
-  upload(a, xs)?
-  upload(b, xs)?
-  launch_entry3(entry, buffer(a), buffer(b), buffer(out))?
-  download(out)
+  copy_from_host(a, xs)?
+  copy_from_host(b, xs)?
+  launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 pub fn main() -> Unit !io = {
@@ -1817,7 +1817,7 @@ tensors whose formats the entry's type fixes. Before any handler is asked, it ho
 buffers against the cells: a 999-element buffer does not reach the end of a 1000-element
 extent. It also refuses a grid that disagrees with the cells, and an `Out` that shares its
 buffer with another argument. An extent of `DYN_DIM` leaves the number of cells to the
-launch, as in `launch_entry3(entry, buffer(a), buffer(b), buffer(out), grid: [8])`, and then the buffers have to
+launch, as in `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid: [8])`, and then the buffers have to
 cover the whole of every cell: 1024 elements for eight cells of 128.
 
 The `1998.0` is a reference's answer, not the kernel's. The fake device never runs a
@@ -1897,7 +1897,7 @@ A softmax over four lanes that hold three values. This time the fake device runs
 reference written here rather than one from `std/gpu`:
 
 ```dawn run deps=tileir,tileref
-use std/gpu.{Gpu, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry2, last_out, buffer}
+use std/gpu.{Gpu, Entry2, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry2, last_out, buffer_arg}
 use std/dtype.{F64}
 use std/list
 use std/map
@@ -1927,10 +1927,10 @@ fn softmax_ref(n: Int, _formats: List[String], bufs: List[List[Float]]) -> List[
 fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let x = alloc(F64, 4)?
   let out = alloc(F64, 4)?
-  upload(x, [1.0, 2.0, 3.0, 0.0])?
-  upload(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] is past the extent: the kernel leaves it
-  launch_entry2(entry, buffer(x), buffer(out))?
-  download(out)
+  copy_from_host(x, [1.0, 2.0, 3.0, 0.0])?
+  copy_from_host(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] is past the extent: the kernel leaves it
+  launch_entry2(entry, buffer_arg(x), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 pub fn main() -> Unit !io = {
@@ -2148,7 +2148,7 @@ escape hatch: a parameter the kernel addresses itself, through the pointer path.
 `store` writes the tile at an element offset with `out`'s strides swapped, so the tile
 lands transposed and no element moves inside it. Atomics, scatters and a block that
 writes two regions are `Shared` for the same reason, and `grep Shared(` finds every one.
-With no `Out` the grid is the caller's: `launch_entry2(entry, buffer(x), buffer(out), grid: [4, 2])`.
+With no `Out` the grid is the caller's: `launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid: [4, 2])`.
 
 Two more ways out, each a sentence. A kernel that reads one `In` in two shapes takes a
 second view of it with `retile(p, extent, tile)`. `trace1` to `trace5` record kernels of
@@ -2162,7 +2162,7 @@ kernel's name to an assembled module instead of a reference:
 
 <!-- doc-check: skip-check needs an NVIDIA GPU, its driver and tileiras, which CI does not have -->
 ```dawn skip-check
-use std/gpu.{Gpu, Entry3, alloc, upload, download, launch_entry3, with_gpu_real, buffer}
+use std/gpu.{Gpu, Entry3, alloc, copy_from_host, copy_to_host, launch_entry3, with_gpu_real, buffer_arg}
 use std/dtype.{F64}
 use std/io
 use std/io.{with_fs_real}
@@ -2180,10 +2180,10 @@ fn add_1000(entry: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignEr
   let a = alloc(F64, 1000)?
   let b = alloc(F64, 1000)?
   let out = alloc(F64, 1000)?
-  upload(a, xs)?
-  upload(b, xs)?
-  launch_entry3(entry, buffer(a), buffer(b), buffer(out))?
-  download(out)
+  copy_from_host(a, xs)?
+  copy_from_host(b, xs)?
+  launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 pub fn main() -> Unit !io = {

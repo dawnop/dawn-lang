@@ -162,7 +162,7 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
     let (dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
   }
   Ok(())
 }
@@ -189,7 +189,7 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buf(h))) {
+          match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buffer(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }
@@ -197,8 +197,8 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !
             Ok(_) -> {
               let s = gpu.gpu_sync()
               let (last_dt, _last) = bufs[len(bufs) - 1]
-              let r: Result[List[Float], ForeignError] = match gpu.gpu_download(hs[len(hs) - 1]) {
-                Ok(raw) -> Ok(gpu.unpack_from(last_dt, raw))
+              let r: Result[List[Float], ForeignError] = match gpu.gpu_copy_to_host(hs[len(hs) - 1]) {
+                Ok(raw) -> Ok(gpu.decode_floats(last_dt, raw))
                 Err(e) -> Err(e)
               }
               release(hs)
@@ -309,7 +309,7 @@ fn sentinel_buffer(n: Int) -> List[Float] = list.map(range(0, n), _i => SENTINEL
 fn filled(n: Int, v: Float) -> List[Float] = list.map(range(0, n), _i => v)
 
 ## The f8E4M3FN storage corpus: the format's own boundaries on the first
-## lanes and an ordinary sweep after them. `upload` rounds every lane into
+## lanes and an ordinary sweep after them. `copy_from_host` rounds every lane into
 ## the format, so segment 0 answers the buffer rather than these values; the
 ## pinned lanes are here so that the buffer holds a zero, a negative zero,
 ## the smallest subnormal, the largest finite value and its negation.
@@ -412,7 +412,7 @@ fn e5m2_y() -> List[Float] =
       })
 
 ## The f8E8M0FNU storage corpus: the format is the exponent alone, so every
-## lane a buffer of it can hold is a power of two and `upload` rounds each
+## lane a buffer of it can hold is a power of two and `copy_from_host` rounds each
 ## of these DOWN to one. The pinned lanes are the two ends of the range.
 fn e8m0_x() -> List[Float] =
   list.map(range(0, DT_N), i =>

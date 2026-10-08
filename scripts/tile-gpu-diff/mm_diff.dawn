@@ -44,8 +44,8 @@
 #     per-channel `gamma` with a stride of ZERO.
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, buffer, erase, sync }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, copy_from_host, copy_to_host, free,
+  launch, buffer_arg, erase, sync }
 use std/dtype.{F64}
 use tileref/ref.{matmul_ref, matvec_ref, batched_matmul_ref, transpose_ref, layer_norm_ref, batch_norm_ref,
   group_norm_ref, fused_rms_norm_ref }
@@ -145,7 +145,7 @@ fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Resul
   if i >= len(ts) {
     Ok(())
   } else {
-    match upload(ts[i], data[i]) {
+    match copy_from_host(ts[i], data[i]) {
       Ok(_) -> upload_all(ts, data, i + 1)
       Err(e) -> Err(e)
     }
@@ -167,14 +167,14 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) ->
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match launch(kernel, gx, list.map(ts, t => erase(buffer(t))), gy: gy, gz: gz) {
+          match launch(kernel, gx, list.map(ts, t => erase(buffer_arg(t))), gy: gy, gz: gz) {
             Err(e) -> {
               release(ts)
               Trace { ..t1, launch: e.kind, note: e.message }
             }
             Ok(_) -> {
               let s = sync()
-              let r = download(ts[len(ts) - 1])
+              let r = copy_to_host(ts[len(ts) - 1])
               release(ts)
               let value = match r {
                 Ok(v) -> Some(v)
