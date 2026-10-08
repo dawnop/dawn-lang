@@ -1,0 +1,73 @@
+# `serve`: one HTTP request per process (K2 of docs/playground-native-runner-design.md).
+# systemd hands the process an accepted connection as stdin and stdout; it reads
+# one request with play/http1, answers it through the same handlers the
+# long-lived server uses (play/routes), logs one line to stderr (journald's) and
+# exits.
+#
+# What K2 decided, and what it left: the handlers still reach exec/gate/cache,
+# which sit on `use java`, so this entry is JVM-built (`dawn run playground
+# serve`); nothing on it touches Java for I/O except what routes.dawn lists.
+# The permit gate is a per-process Semaphore here, which in a process of its
+# own request always grants: the cross-process flock gate and the job
+# subprocess are K3, so K2's serve must not be put in front of traffic.
+# Stdout carries the response and only that, so nothing on this path may
+# `println` (routes logs to stderr).
+#
+# No startup sweep: the sweep deletes every request directory, including those
+# of requests running in sibling processes right now.
+use std/io
+use play/http1.{read_request, respond, respond_reject, Request}
+use play/routes.{Reply, health, rpc, compile_rpc, view_of, MAX_CONCURRENT}
+use play/exec.{compiler_id, native_ready, javap_id}
+use play/gate.{new_gate}
+
+const JSON_CT: String = "application/json; charset=utf-8"
+
+fn answer(r: Reply) -> Unit !io = respond(r.status, JSON_CT, r.body)
+
+# The 404 and 405 bodies are the web framework's, byte for byte, so the two
+# entries answer a stray request alike.
+#
+# Which methods a path takes, for the 405: None means no such route.
+fn allowed(path: String) -> Option[String] =
+  match path {
+    "/health" -> Some("GET")
+    "/run" -> Some("POST")
+    "/check" -> Some("POST")
+    "/compile" -> Some("POST")
+    _ -> None
+  }
+
+fn dispatch(req: Request) -> Reply !io =
+  match allowed(req.path) {
+    None -> Reply { status: 404, body: "{\"error\":\"Not Found\"}" }
+    Some(m) ->
+      if m != req.method {
+        Reply { status: 405, body: "{\"error\":\"Method Not Allowed\"}" }
+      } else if req.path == "/health" {
+        health(compiler_id())
+      } else {
+        let gate = new_gate(MAX_CONCURRENT)
+        let id = compiler_id()
+        let native = native_ready(id)
+        match req.path {
+          "/run" -> rpc(req.body, gate, false, native)
+          "/check" -> rpc(req.body, gate, true, native)
+          _ -> compile_rpc(req.body, gate, view_of(id, native, javap_id()))
+        }
+      }
+  }
+
+## Read one request from stdin, answer it on stdout, drain, return.
+pub fn serve_one() -> Unit !io =
+  match read_request() {
+    Err(r) -> {
+      io.eprintln("${r.status} (unreadable request)")
+      respond_reject(r)
+    }
+    Ok(req) -> {
+      let reply = dispatch(req)
+      io.eprintln("${reply.status} ${req.method} ${req.path}")
+      answer(reply)
+    }
+  }
