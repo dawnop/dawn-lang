@@ -151,9 +151,10 @@ status: `deploy/lsp-smoke.py` performs the WebSocket handshake, initializes the
 real sandboxed native server, opens the fixed scratch buffer, waits for a
 diagnostics notification and completes the close handshake.
 
-`redeploy.sh` does **not** install systemd units; when a `.service` or `.slice`
-file changes, copy it to `/etc/systemd/system/`, `daemon-reload` and restart by
-hand. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` selects an already verified
+`redeploy.sh` does **not** install the primary systemd units; when
+`dawn-play.service`, `dawn-play-lsp.service` or the slice changes, copy it to
+`/etc/systemd/system/`, `daemon-reload` and restart by hand. The one exception
+is the native canary pair (next section), which it installs itself. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` selects an already verified
 artifact outside the repository root.
 
 Before first exposure, run the fresh-process resource matrix inside the final
@@ -204,6 +205,61 @@ turns the native path off for the whole process, so the runner is then exactly
 the JVM-only runner. A program `dawnc` refuses (`use java`) is compiled again
 by the JVM compiler within the same request. To switch the native path off,
 point `DAWNC_BIN` at a path that does not exist.
+
+## The native runner canary
+
+`dawn-play-native.socket` and `dawn-play-native@.service` run the native
+runner (`docs/playground-native-runner-design.md`): systemd accepts every
+connection on `/run/dawn-play/http.sock` (`Accept=yes`) and starts one
+`dawn-play serve` process for it, which answers one request and exits. The JVM
+runner stays the primary and keeps `127.0.0.1:8087`; nothing routes to the
+socket until nginx is pointed at it on purpose.
+
+One-time, before the first deploy that ships it: `www-data` (the group the socket
+admits) must exist, which it does where nginx runs as `www-data`; on a host
+where nginx runs as another user, change `SocketGroup=` in the socket unit.
+
+Per deploy, `redeploy.sh` (no C compiler on the server; the binary is built
+off it, next to the compiler):
+
+```sh
+./dawnc-linux-x86_64 build playground/native -o dawn-play-linux-x86_64
+DEPLOY_USER=<server login> playground/deploy/redeploy.sh
+```
+
+Before it ships anything it asks the binary for `/health` with this tree's
+toolchain id (a binary of another release stops the deploy), and asks the
+server whether `timeout flock head chmod rm sh` exist on the default PATH (the
+runner runs them; a missing one would otherwise show as a failing `/run` behind
+a green `/health`). After the JVM runner is restarted and healthy it installs
+the two units, writes `/opt/dawn/playground/toolchain.env`
+(`PLAY_TOOLCHAIN_ID`, the unit's `EnvironmentFile`) and runs
+`canary-check.py` as `dawn-play`:
+
+- the same requests go to both runners and the status and body (`ms` and
+  `cached` normalized) must be identical;
+- the ruling's gate: p95 of the native `/health` over 100 new connections,
+  with the real `Accept=yes` start-up cost, is at most twice the JVM
+  runner's.
+
+A failing check fails the deploy with the JVM runner already serving; do not
+switch nginx then. `DAWN_PLAY_NATIVE=0` ships the JVM runner alone.
+
+The socket is its own directory (`/run/dawn-play`), the flock slots another
+(`RuntimeDirectory=dawn-play-slots` in the service, `Preserve=yes`). They must
+not be one directory: a `RuntimeDirectory` is removed when its service stops,
+and with `Accept=yes` every request is a service that stops.
+
+Switching nginx is a decision, not a deploy step. `nginx-switch.sh native`
+prints `nginx-play.conf` with the four runner locations proxied to the unix
+socket (and `client_body_timeout 10s` on the three POSTs); `nginx-switch.sh jvm`
+prints the file as it is, which is what is live. Apply by hand, then
+`nginx -t && nginx -s reload`. Rolling back is the other direction; the JVM unit
+stays enabled throughout.
+
+Watch while canarying: `journalctl -u 'dawn-play-native@*'` (one access line per
+request on stderr, and the `429` waits of the flock gate) and
+`systemctl status dawn-play-native.socket`.
 
 ## Rollback
 
