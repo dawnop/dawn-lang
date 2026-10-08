@@ -824,6 +824,14 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       if hard_reserved_builtin_type_name(c.name) {
         cx1 = cerr(cx1, "constructor `" ++ c.name ++
             "` uses a compiler-owned reserved type name", c.nlo, c.nhi)
+        # A record has exactly one constructor for every later pass, so a
+        # rejected name still keeps its slot; only the namespace insert is skipped.
+        if d.is_record {
+          ctor_infos = ctor_infos ++ [CtorI { adt: aid, name: c.name, fields: [] }]
+          accepted = accepted ++ [(pi, slot)]
+          if pi == 0 { first_ok = true }
+          slot = slot + 1
+        }
         pi = pi + 1
         continue
       }
@@ -849,9 +857,25 @@ pub(pkg) fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
           cx1 = cerr(cx1, "constructor `" ++ c.name ++ "` collides with a builtin type name",
             c.nlo, c.nhi)
         }
+        # A record has exactly one constructor for every later pass, so a
+        # rejected name still keeps its slot; only the namespace insert is skipped.
+        if d.is_record {
+          ctor_infos = ctor_infos ++ [CtorI { adt: aid, name: c.name, fields: [] }]
+          accepted = accepted ++ [(pi, slot)]
+          if pi == 0 { first_ok = true }
+          slot = slot + 1
+        }
       } else if map.has(cbn, c.name) {
         cx1 = cerr(cx1, "constructor `" ++ c.name ++
             "` is already defined (constructors share one module-wide namespace)", c.nlo, c.nhi)
+        # A record has exactly one constructor for every later pass, so a
+        # rejected name still keeps its slot; only the namespace insert is skipped.
+        if d.is_record {
+          ctor_infos = ctor_infos ++ [CtorI { adt: aid, name: c.name, fields: [] }]
+          accepted = accepted ++ [(pi, slot)]
+          if pi == 0 { first_ok = true }
+          slot = slot + 1
+        }
       } else {
         cbn = map.insert(cbn, c.name, (aid, slot))
         ctor_infos = ctor_infos ++ [CtorI { adt: aid, name: c.name, fields: [] }]
