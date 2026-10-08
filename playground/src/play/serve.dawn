@@ -1,25 +1,34 @@
-# `serve`: one HTTP request per process (K2 of docs/playground-native-runner-design.md).
-# systemd hands the process an accepted connection as stdin and stdout; it reads
-# one request with play/http1, answers it through the same handlers the
-# long-lived server uses (play/routes), logs one line to stderr (journald's) and
-# exits.
+# `serve`: one HTTP request per process (K2 and K3 of
+# docs/playground-native-runner-design.md). systemd hands the process an
+# accepted connection as stdin and stdout; it reads one request with
+# play/http1, answers it through the same handlers the long-lived server uses
+# (play/routes), logs one line to stderr (journald's) and exits.
 #
-# What K2 decided, and what it left: the handlers still reach exec/gate/cache,
-# which sit on `use java`, so this entry is JVM-built (`dawn run playground
-# serve`); nothing on it touches Java for I/O except what routes.dawn lists.
-# The permit gate is a per-process Semaphore here, which in a process of its
-# own request always grants: the cross-process flock gate and the job
-# subprocess are K3, so K2's serve must not be put in front of traffic.
+# Nothing on this path uses Java, so `dawnc build` makes it a native binary.
+# The heavy part of /run, /check and /compile is a job: the process writes it
+# to a file and runs `gate.sh` (play/gate), which takes one of two flock slots
+# and then starts this same binary as `job <dir>` holding the lock, so the
+# permit spans the compile and the run and goes back to the kernel when the job
+# ends, whatever ends it. Waiting for a slot and the 429 are the long-lived
+# server's: 15 s for /run, 2 s for /check and /compile.
+#
+# What a request costs in children: /health none (the version is
+# PLAY_TOOLCHAIN_ID when the deploy sets it, else one probe of `dawn
+# --version`), /run the job, /check and /compile one `dawnc --version` for the
+# native check and the job. `javap` is looked for, not run.
+#
 # Stdout carries the response and only that, so nothing on this path may
-# `println` (routes logs to stderr).
+# `println` (routes logs to stderr), and the job child's stdout is /dev/null.
 #
 # No startup sweep: the sweep deletes every request directory, including those
 # of requests running in sibling processes right now.
 use std/io
 use play/http1.{read_request, respond, respond_reject, Request}
-use play/routes.{Reply, health, rpc, compile_rpc, view_of, MAX_CONCURRENT}
-use play/exec.{compiler_id, native_ready, javap_id}
-use play/gate.{new_gate}
+use play/routes.{Reply, health, rpc, compile_rpc, view_of}
+use play/exec.{compiler_id, native_ready, tool_present}
+use play/config.{javap_bin}
+use play/gate.{flock_host}
+use play/job.{job_main}
 
 const JSON_CT: String = "application/json; charset=utf-8"
 
@@ -47,16 +56,21 @@ fn dispatch(req: Request) -> Reply !io =
       } else if req.path == "/health" {
         health(compiler_id())
       } else {
-        let gate = new_gate(MAX_CONCURRENT)
-        let id = compiler_id()
-        let native = native_ready(id)
+        let host = flock_host()
         match req.path {
-          "/run" -> rpc(req.body, gate, false, native)
-          "/check" -> rpc(req.body, gate, true, native)
-          _ -> compile_rpc(req.body, gate, view_of(id, native, javap_id()))
+          "/run" -> rpc(req.body, host, false, false)
+          "/check" -> rpc(req.body, host, true, native_ready(compiler_id()))
+          _ -> {
+            let id = compiler_id()
+            let javap = if tool_present(javap_bin()) { "present" } else { "" }
+            compile_rpc(req.body, host, view_of(id, native_ready(id), javap))
+          }
         }
       }
   }
+
+## `job <dir>`: the child `gate.sh` starts holding a slot (play/job).
+pub fn serve_job(dir: String) -> Unit !io = job_main(dir)
 
 ## Read one request from stdin, answer it on stdout, drain, return.
 pub fn serve_one() -> Unit !io =

@@ -5,22 +5,19 @@
 # wire its own way, so the two cannot drift apart in what they answer.
 #
 # Why this module imports nothing from `web`: `web/types` sits on `use java`
-# (InputStream), and serve has to be buildable natively once exec/gate/cache
-# lose theirs (K3). What still blocks that today is only below this file:
-# play/exec (ProcessBuilder, Files, UUID), play/gate (Semaphore), play/cache,
-# and System.nanoTime here. Those are K3's list; this file adds none of its own
-# except the Semaphore in signatures and nanoTime, which K3 replaces with the
-# flock gate and Clock.
+# (InputStream), and serve is built natively. Nor does anything below it:
+# the heavy part of a request is a `Job` handed to a `Host` (play/host), so the
+# in-process Semaphore and the answer cache the long-lived server uses stay in
+# play/jvmhost, and the flock gate serve uses is play/gate. Timing is the
+# `Clock` effect through play/exec.
 use std/bytes
 use std/str
 use std/io
-use java "java.util.concurrent.Semaphore"
-use java "java.lang.System"
+use std/io.{Instant}
 use play/contract.{parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
-use play/exec.{execute, check, CompilerId, view_raw, tile_run, tile_ready}
-use play/view.{build_view, respond, cache_key, Mapped, Done, tile_view, TileShown, TileFailed}
-use play/cache.{Cache, new_cache, cache_get, cache_put}
-use play/gate.{with_gate}
+use play/exec.{CompilerId, tile_ready, tick, ms_since}
+use play/view.{build_view, respond, cache_key, Viewed, Mapped, Done, tile_view, TileShown, TileFailed}
+use play/host.{Host, JobResult, JRun, JCheck, JView, JTile, JOutcome, JViewRaw, JBroken}
 
 pub type Reply = { status: Int, body: String }
 
@@ -54,7 +51,7 @@ pub fn health(id: CompilerId) -> Reply =
 # executor and queue patience. The wire format predates the framework, so
 # errors are rendered into the contract's own JSON shapes (via raw), not the
 # framework's Err branch.
-pub fn rpc(body: Bytes, gate: Semaphore, check_only: Bool, native: Bool) -> Reply !io =
+pub fn rpc(body: Bytes, host: Host, check_only: Bool, native: Bool) -> Reply !io =
   # bytes, not code points: str.len counts characters, so a program written in
   # CJK got up to three times the stated budget
   if bytes.len(body) > MAX_BODY {
@@ -68,11 +65,12 @@ pub fn rpc(body: Bytes, gate: Semaphore, check_only: Bool, native: Bool) -> Repl
         Err(msg) -> raw(400, JSON_CT, render_error(msg))
         Ok(code) -> {
           let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
-          # Hold a permit across execution only; with_gate releases it even if the
-          # compiler panics, then we render outside the permit. None = saturated.
-          match with_gate(gate, wait, () => if check_only { check(code, native) } else { execute(code) }) {
-            Some(outcome) ->
+          # The host holds a permit across the job only and releases it however
+          # the job ends, then we render outside the permit. None = saturated.
+          match host.call(wait, if check_only { JCheck(code, native) } else { JRun(code) }) {
+            Some(JOutcome(outcome)) ->
               raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) })
+            Some(other) -> failed(other)
             None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
           }
         }
@@ -80,22 +78,30 @@ pub fn rpc(body: Bytes, gate: Semaphore, check_only: Bool, native: Bool) -> Repl
     }
   }
 
+# A job that came back as something its route did not ask for, or did not come
+# back: the runner's own fault, so a 500.
+fn failed(r: JobResult) -> Reply =
+  match r {
+    JBroken(m) -> raw(500, JSON_CT, render_error("internal error: ${m}"))
+    _ -> raw(500, JSON_CT, render_error("internal error: the job answered another kind of result"))
+  }
+
 # What /compile needs to know of the machine it runs on, asked once at start.
-pub type View = { toolchain: String, build: String, javap: Bool, tile: Bool, native: Bool, cache: Cache }
+pub type View = { toolchain: String, build: String, javap: Bool, tile: Bool, native: Bool }
 
 # The view's cache lines: "<status>:<kind>:" and then the text. A kind is `S`,
 # the program's part of a success answer (the head is written per request), or
 # `F`, an answer that is complete as kept.
 fn kept_line(status: Int, kind: String, text: String) -> String = "${status}:${kind}:${text}"
 
-fn serve_kept(view: View, target: String, started: Int, line: String) -> Reply !io =
+fn serve_kept(view: View, target: String, started: Instant, line: String) -> Reply !io =
   match str.split_once(line, ":") {
     None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
     Some((status, rest)) -> match str.split_once(rest, ":") {
       None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
       Some((kind, text)) ->
         if kind == "S" {
-          raw(200, JSON_CT, respond(target, view.build, true, (System.nanoTime() - started) / 1000000, text))
+          raw(200, JSON_CT, respond(target, view.build, true, ms_since(started), text))
         } else {
           raw(parse_int(status).unwrap_or(500), JSON_CT, text)
         }
@@ -117,7 +123,7 @@ pub fn unavailable(view: View) -> Option[Reply] =
 # POST /compile: the program's C text or JVM listing, paired with the source
 # (packages/xmap). Same body limit, same JSON refusals and same gate as /check;
 # the work is play/exec.view_raw's and the answer is play/view.dawn's.
-pub fn compile_rpc(body: Bytes, gate: Semaphore, view: View) -> Reply !io =
+pub fn compile_rpc(body: Bytes, host: Host, view: View) -> Reply !io =
   if bytes.len(body) > MAX_BODY {
     raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes"))
   } else {
@@ -127,11 +133,11 @@ pub fn compile_rpc(body: Bytes, gate: Semaphore, view: View) -> Reply !io =
         Err(msg) -> raw(400, JSON_CT, render_error(msg))
         Ok((code, target)) ->
           if target == "tile" {
-            tile_ir(gate, view, code)
+            tile_ir(host, view, code)
           } else {
             match unavailable(view) {
               Some(refusal) -> refusal
-              None -> compile_view(gate, view, code, target)
+              None -> compile_view(host, view, code, target)
             }
           }
       }
@@ -142,54 +148,65 @@ pub fn compile_rpc(body: Bytes, gate: Semaphore, view: View) -> Reply !io =
 # the Tile IR view). The program must import tileir, which the page also
 # checks and the server checks again; it runs under /run's limits and one of
 # the same two permits, with /check's patience, because the pane is advisory.
-fn tile_ir(gate: Semaphore, view: View, code: String) -> Reply !io =
+fn tile_ir(host: Host, view: View, code: String) -> Reply !io =
   if not wants_tileir(code) {
     raw(400, JSON_CT, render_error("the Tile IR view needs a program that imports tileir (add a line such as `use tileir/dev.{Dev}`)"))
   } else if not view.tile {
     raw(503, JSON_CT, render_error("the Tile IR view is unavailable: this server has no packages/tileir"))
   } else {
-    let started = System.nanoTime()
+    let started = tick()
     let key = "${cache_key(view.toolchain, code)}/tile"
-    match cache_get(view.cache, key) {
+    match host.keep_get(key) {
       Some(line) -> serve_kept(view, "tile", started, line)
       None ->
-        match with_gate(gate, COMPILE_WAIT_SECS, () => tile_view(tile_run(code))) {
+        match host.call(COMPILE_WAIT_SECS, JTile(code)) {
           None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
-          Some(TileFailed(status, body)) -> raw(status, JSON_CT, body)
-          Some(TileShown(rest)) -> {
-            cache_put(view.cache, key, kept_line(200, "S", rest))
-            raw(200, JSON_CT, respond("tile", view.build, false, (System.nanoTime() - started) / 1000000, rest))
+          Some(JOutcome(outcome)) -> match tile_view(outcome) {
+            TileFailed(status, body) -> raw(status, JSON_CT, body)
+            TileShown(rest) -> {
+              host.keep_put(key, kept_line(200, "S", rest))
+              raw(200, JSON_CT, respond("tile", view.build, false, ms_since(started), rest))
+            }
           }
+          Some(other) -> failed(other)
         }
     }
   }
 
-fn compile_view(gate: Semaphore, view: View, code: String, target: String) -> Reply !io = {
-  let started = System.nanoTime()
+fn compile_view(host: Host, view: View, code: String, target: String) -> Reply !io = {
+  let started = tick()
   let base = cache_key(view.toolchain, code)
-  match cache_get(view.cache, "${base}/${target}") {
+  match host.keep_get("${base}/${target}") {
     Some(line) -> serve_kept(view, target, started, line)
     None ->
-      match with_gate(gate, COMPILE_WAIT_SECS, () => build_view(code, view_raw(code, view.native))) {
+      match host.call(COMPILE_WAIT_SECS, JView(code, view.native)) {
         None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
-        Some(Mapped(c, jvm, gaps)) -> {
-          if gaps > 0 {
-            io.eprintln("compile view: ${gaps} gap(s) in program ${str.take(base, 12)}")
-          }
-          cache_put(view.cache, "${base}/c", kept_line(200, "S", c))
-          cache_put(view.cache, "${base}/jvm", kept_line(200, "S", jvm))
-          raw(200, JSON_CT, respond(target, view.build, false, (System.nanoTime() - started) / 1000000, if target == "c" { c } else { jvm }))
-        }
-        Some(Done(status, body, keep)) -> {
-          if keep {
-            cache_put(view.cache, "${base}/c", kept_line(status, "F", body))
-            cache_put(view.cache, "${base}/jvm", kept_line(status, "F", body))
-          }
-          raw(status, JSON_CT, body)
-        }
+        Some(JViewRaw(parts)) -> mapped(host, view, code, target, base, started, build_view(code, parts))
+        Some(other) -> failed(other)
       }
   }
 }
+
+# The view's answer once the raw material is paired (packages/xmap) and cut:
+# here, outside the permit, which the job has already given back.
+fn mapped(host: Host, view: View, code: String, target: String, base: String, started: Instant, built: Viewed) -> Reply !io =
+  match built {
+    Mapped(c, jvm, gaps) -> {
+      if gaps > 0 {
+        io.eprintln("compile view: ${gaps} gap(s) in program ${str.take(base, 12)}")
+      }
+      host.keep_put("${base}/c", kept_line(200, "S", c))
+      host.keep_put("${base}/jvm", kept_line(200, "S", jvm))
+      raw(200, JSON_CT, respond(target, view.build, false, ms_since(started), if target == "c" { c } else { jvm }))
+    }
+    Done(status, body, keep) -> {
+      if keep {
+        host.keep_put("${base}/c", kept_line(status, "F", body))
+        host.keep_put("${base}/jvm", kept_line(status, "F", body))
+      }
+      raw(status, JSON_CT, body)
+    }
+  }
 
 ## What /compile needs to know of the machine, asked of the toolchain. The
 ## long-lived server asks once at start; serve asks per request, since its
@@ -201,11 +218,10 @@ pub fn view_of(id: CompilerId, native: Bool, javap: String) -> View !io =
     javap: javap != "",
     tile: tile_ready(),
     native: native,
-    cache: new_cache(CACHE_ENTRIES, CACHE_CHARS),
   }
 
 test "without javap the view is refused with a 503 that says why" {
-  let view = View { toolchain: "", build: "", javap: false, tile: false, native: false, cache: new_cache(2, 100) }
+  let view = View { toolchain: "", build: "", javap: false, tile: false, native: false }
   match unavailable(view) {
     Some(r) -> {
       assert r.status == 503
@@ -213,6 +229,6 @@ test "without javap the view is refused with a 503 that says why" {
     }
     None -> { assert false }
   }
-  let with_javap = View { toolchain: "", build: "", javap: true, tile: false, native: false, cache: new_cache(2, 100) }
+  let with_javap = View { toolchain: "", build: "", javap: true, tile: false, native: false }
   assert match unavailable(with_javap) { Some(_) -> false, None -> true }
 }

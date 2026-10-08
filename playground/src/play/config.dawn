@@ -100,3 +100,20 @@ pub fn work_root() -> String !io = env_or("PLAY_WORK_ROOT", "")
 # (play/exec.dawn, `tile_manifest`). Absolute because the manifest is read
 # from the box, not from the runner's working directory.
 pub fn packages_root() -> String !io = env_or("PLAY_PACKAGES", "/opt/dawn/packages")
+
+# Where the flock slot files of the process-per-request entry live (play/gate).
+# The unit's RuntimeDirectory (/run/dawn-play) is the intended place: a
+# directory the runner's user owns that the system clears at boot. Absent a
+# setting, a directory under the work root, which every deployment already
+# gives the runner (named so the startup sweep, which removes `dawn-play-*`
+# there, leaves it alone).
+pub fn slot_dir() -> String !io = env_or("PLAY_SLOT_DIR", "${default_slot_root()}/play-slots")
+
+fn default_slot_root() -> String !io =
+  match work_root() {
+    "" -> match env_or("TMPDIR", "/tmp") {
+      "" -> "/tmp"
+      t -> t
+    }
+    w -> w
+  }

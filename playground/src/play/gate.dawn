@@ -1,50 +1,117 @@
-# A global concurrency gate. Each /run acquires a permit before compiling and
-# releases it after; excess requests get 429 rather than piling compilers onto a
-# 4-core box. The Semaphore is a plain Java object shared across request threads.
-use java "java.util.concurrent.Semaphore"
-use java "java.util.concurrent.TimeUnit"
+# The cross-process concurrency gate of the process-per-request runner: two
+# slot files and `flock(1)`, in place of the long-lived server's in-process
+# Semaphore (play/jvmhost). Nothing here needs the JVM.
+#
+# Why the permit is a child process. A permit has to span a whole job
+# (compile, then run), and `Proc.run` is "run a command to completion", so a
+# `flock` command alone would drop the lock the moment it returned. Instead the
+# front process writes the job to a file and starts `gate.sh`, the script below,
+# which takes a slot and then `exec`s this binary's `job` subcommand with the
+# lock's descriptor still open. The kernel ties the lock to that open file
+# description, so it is held for exactly as long as the job runs, and it is
+# released when the job ends however it ends: a panic, an OOM kill, SIGKILL.
+# The in-process gate needed a `bracket` to survive a panic; here there is
+# nothing to leak.
+#
+# What it gives up, and the ruling that accepted it (ruling-native-runner,
+# item 3): the Semaphore was fair (`fair=true`, first come first served) and
+# polling `flock -n` is not. With nginx limiting /run to 12 requests a minute
+# per address and two slots, the window in which a waiter can be overtaken is
+# small, and the cost of fairness would be a daemon, which is the thing this
+# runner is built not to have. 429s and wait times are logged to watch it.
+#
+# A job's children do not inherit the slot (play/exec TIMED_SH closes it for
+# them), so a program that outlives its job cannot keep a slot taken after the
+# job is gone; the unit's `RuntimeMaxSec` is what ends such a program.
+use std/io
+use std/io.{with_fs_real}
+use play/config.{slot_dir}
+use play/exec.{temp_root, run_cmd, uuid, cleanup}
+use play/host.{Host, Job, JobResult, JBroken, no_keep_get, no_keep_put}
+use play/job.{encode_job, decode_result}
 
-# One shared instance for the process. `fair=true` keeps queued requests in order.
-pub fn new_gate(permits: Int) -> Semaphore !io = Semaphore.new(permits, true)
+## The number of slots, the number of compilers the host runs at once.
+pub const SLOTS: Int = 2
 
-# Try to take a permit, waiting up to `wait_secs`. False means the server is
-# saturated — the caller should answer 429.
-pub fn try_enter(gate: Semaphore, wait_secs: Int) -> Bool !io =
-  gate.tryAcquire(wait_secs, TimeUnit.valueOf("SECONDS").expect("seconds"))
+## Exit status of the gate script when no slot freed up in time: `sysexits`
+## EX_TEMPFAIL, which no job exits with on its own.
+pub const BUSY: Int = 75
 
-pub fn leave(gate: Semaphore) -> Unit !io = gate.release()
+# `$1` is the slot directory, `$2` the slot count, `$3` the number of polls
+# (a quarter of a second apart, at least one), the rest the command. Each pass
+# tries every slot without waiting; the first lock taken is kept by `exec`,
+# which hands descriptor 9 on to the command. `exec 9>&-` closes the ones
+# that were not.
+const GATE_SH: String = "dir=\"$1\"; slots=\"$2\"; polls=\"$3\"; shift 3; mkdir -p \"\$dir\" || exit 1; while :; do i=0; while [ \"\$i\" -lt \"\$slots\" ]; do exec 9>>\"\$dir/slot.\$i\" || exit 1; if flock -n 9; then exec \"$@\"; fi; exec 9>&-; i=$((i + 1)); done; polls=$((polls - 1)); [ \"\$polls\" -le 0 ] && exit 75; sleep 0.25; done"
 
-# Run `body` while holding a permit, waiting up to `wait_secs` to acquire one.
-# None means the gate was saturated and the caller should answer 429. The permit
-# is released even if `body` panics: execute() can panic on a compiler-internal
-# bug, and without a finally that permit leaks — after `permits` such panics the
-# gate wedges shut and every later request 429s. The bracket is that finally,
-# and it re-raises the original failure rather than a copy of its message, so
-# the caller still sees the framework's 500 path (spec §9.8) unchanged. The
-# permit spans `body` only — callers render the reply after with_gate returns.
-pub fn with_gate[T](gate: Semaphore, wait_secs: Int, body: fn() -> T !io) -> Option[T] !io =
-  if try_enter(gate, wait_secs) {
-    with permit <- bracket(gate, leave)
-    Some(body())
-  } else {
-    None
+# The path of this binary: the child is the same program with another
+# subcommand, so the two cannot be different releases.
+fn self_exe() -> String !io =
+  match with_fs_real(() => io.real_path("/proc/self/exe")) {
+    Ok(p) -> p
+    Err(_) -> "dawn-play"
   }
 
-test "with_gate releases the permit even when body panics" {
-  let gate = new_gate(1)
-  # with_gate re-raises the body's panic after releasing; catch it so the test
-  # survives, then prove the single permit came back by acquiring it again.
-  # body is Never (panic), so T can't be inferred from it — pin it via the annotation
-  let first: Result[Option[Int], ForeignError] = catch_panic(() => with_gate(gate, 0, () => panic("boom")))
-  assert match first { Ok(_) -> false, Err(_) -> true }
-  let second: Result[Option[Int], ForeignError] = catch_panic(() => with_gate(gate, 0, () => panic("boom")))
-  assert match second { Ok(_) -> false, Err(_) -> true }
-  # permit returned each time: a fresh non-panicking body still gets in
-  assert match with_gate(gate, 0, () => 42) { Some(v) -> v == 42, None -> false }
+fn int_str(n: Int) -> String = "${n}"
+
+fn broken(why: String) -> Option[JobResult] = Some(JBroken(why))
+
+# One job through the gate: None when no slot freed within `wait_secs`.
+fn through_gate(wait_secs: Int, job: Job) -> Option[JobResult] !io = {
+  let dir = "${temp_root()}/dawn-play-job-${uuid()}"
+  with d <- bracket(dir, cleanup)
+  match with_fs_real(() => io.write_bytes("${d}/in.bin", encode_job(job))) {
+    Err(e) -> broken("cannot stage the job: ${e}")
+    Ok(_) -> {
+      let polls = wait_secs * 4 + 1
+      let argv = ["sh", "-c", GATE_SH, "gate", slot_dir(), int_str(SLOTS), int_str(polls), self_exe(), "job", d]
+      # the child's stdout is the connection; only the job's files carry results
+      match run_cmd(argv, "/dev/null", "") {
+        Err(e) -> broken("cannot start the gate: ${e}")
+        Ok(code) ->
+          if code == BUSY {
+            None
+          } else if code != 0 {
+            broken("the job ended with status ${code}")
+          } else {
+            match with_fs_real(() => io.read_bytes("${d}/out.bin")) {
+              Err(e) -> broken("the job left no result: ${e}")
+              Ok(b) -> match decode_result(b) {
+                Some(r) -> Some(r)
+                None -> broken("the job's result is unreadable")
+              }
+            }
+          }
+      }
+    }
+  }
 }
 
-test "with_gate returns None when no permit is available" {
-  let gate = new_gate(1)
-  assert try_enter(gate, 0)
-  assert match with_gate(gate, 0, () => 1) { Some(_) -> false, None -> true }
+## The host of the process-per-request entry: jobs through the flock slots, and
+## no answer cache.
+pub fn flock_host() -> Host =
+  Host { call: through_gate, keep_get: no_keep_get, keep_put: no_keep_put }
+
+# Test-only: run the gate script for `true` while slot 0 is held by an outer
+# shell (a separate open of the file, which is what a second process is), with
+# `slots` slots and one poll.
+fn gate_with_slot0_held(dir: String, slots: Int) -> Int !io = {
+  let held = "mkdir -p \"$1\"; exec 9>>\"$1/slot.0\"; flock -n 9 || exit 99; sh -c \"$2\" gate \"$1\" $3 1 true"
+  match run_cmd(["sh", "-c", held, "sh", dir, GATE_SH, int_str(slots)], "/dev/null", "/dev/null") {
+    Ok(code) -> code
+    Err(_) -> 98
+  }
+}
+
+test "with the only slot held the gate says busy, with a second slot it takes that" {
+  let dir = "${temp_root()}/dawn-play-gatetest-${uuid()}"
+  with d <- bracket(dir, cleanup)
+  assert gate_with_slot0_held(d, 1) == BUSY
+  assert gate_with_slot0_held(d, 2) == 0
+}
+
+test "a free gate runs the command and passes its status on" {
+  let dir = "${temp_root()}/dawn-play-gatetest-${uuid()}"
+  with d <- bracket(dir, cleanup)
+  assert run_cmd(["sh", "-c", GATE_SH, "gate", d, "2", "1", "sh", "-c", "exit 7"], "/dev/null", "") == Ok(7)
 }

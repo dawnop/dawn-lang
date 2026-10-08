@@ -7,11 +7,11 @@ use web/types.{Response, HttpError, raw}
 use web/router.{route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
-use play/routes.{Reply, JSON_CT, MAX_CONCURRENT, health, rpc, compile_rpc, view_of}
+use play/routes.{Reply, JSON_CT, MAX_CONCURRENT, CACHE_ENTRIES, CACHE_CHARS, health, rpc, compile_rpc, view_of}
 use play/exec.{compiler_id, native_ready, javap_id, sweep_work_root}
-use play/gate.{new_gate}
+use play/jvmhost.{jvm_host}
 use play/config.{port}
-use play/serve.{serve_one}
+use play/serve.{serve_one, serve_job}
 
 # The framework's Response is the Reply with the runner's one content type.
 fn wrap(r: Reply) -> Result[Response, HttpError] = Ok(raw(r.status, JSON_CT, r.body))
@@ -21,12 +21,13 @@ pub fn main() -> Unit !io =
   # no sweep, since the sweep would delete the work dirs of requests running now
   match args() {
     ["serve", ..] -> serve_one()
+    ["job", dir] -> serve_job(dir)
     _ -> serve_forever()
   }
 
 fn serve_forever() -> Unit !io = {
   sweep_work_root()
-  let gate = new_gate(MAX_CONCURRENT)
+  let host = jvm_host(MAX_CONCURRENT, CACHE_ENTRIES, CACHE_CHARS)
   let id = compiler_id()
   let javap = javap_id()
   let native = native_ready(id)
@@ -36,8 +37,8 @@ fn serve_forever() -> Unit !io = {
   let view = view_of(id, native, javap)
   serve_app(port(), [
     route_get("/health", req => wrap(health(id))),
-    route_post("/run", req => wrap(rpc(req.body, gate, false, native))),
-    route_post("/check", req => wrap(rpc(req.body, gate, true, native))),
-    route_post("/compile", req => wrap(compile_rpc(req.body, gate, view))),
+    route_post("/run", req => wrap(rpc(req.body, host, false, native))),
+    route_post("/check", req => wrap(rpc(req.body, host, true, native))),
+    route_post("/compile", req => wrap(compile_rpc(req.body, host, view))),
   ], [with_logging])
 }

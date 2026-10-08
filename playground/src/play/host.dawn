@@ -1,0 +1,51 @@
+# What the routes ask of the machine they run on, as data and one record of
+# functions. A route turns a request into a `Job` (the heavy part: stage the
+# source, run the compilers, run the program) and hands it to a `Host`, which
+# decides where the job runs and under what limit. The two entries differ
+# exactly there, so the routes (play/routes) are written once:
+#
+#   - main.dawn, the long-lived web server on the JVM, runs a job in the same
+#     process under an in-process permit and keeps a process-local answer cache
+#     (play/jvmhost, the only module that still needs `use java`);
+#   - serve, one process per request, runs a job in a child process that holds
+#     a cross-process flock permit for as long as it runs, and keeps no cache
+#     (play/gate). There is no process to hold a cache in, and the ruling on
+#     the native runner dropped it until the logs show repeated compiles worth
+#     a file cache.
+#
+# Why a record of functions and not an interface of two modules: the choice is
+# made once, at the entry, and the routes below it never learn which one they
+# got, which is what keeps `use java` out of everything the native entry
+# imports. The job is a closed set of cases and not a closure for the same
+# reason: a closure cannot cross into another process, a value can be written
+# to a file.
+use play/contract.{Outcome}
+use play/exec.{ViewRaw}
+
+## The heavy part of one request. `native` is whether `dawnc` may be used.
+pub type Job =
+  | JRun(code: String)
+  | JCheck(code: String, native: Bool)
+  | JView(code: String, native: Bool)
+  | JTile(code: String)
+
+## What a job came to. `JBroken` is a job that did not come back at all (the
+## child died or wrote nothing): the route answers 500 with the message.
+pub type JobResult =
+  | JOutcome(outcome: Outcome)
+  | JViewRaw(raw: ViewRaw)
+  | JBroken(message: String)
+
+## `call(wait_secs, job)` runs the job once a permit is free, waiting up to
+## `wait_secs` for one; None means the machine stayed saturated and the route
+## answers 429. `keep_get` and `keep_put` are the answer cache.
+pub type Host = {
+  call: fn(Int, Job) -> Option[JobResult] !io,
+  keep_get: fn(String) -> Option[String] !io,
+  keep_put: fn(String, String) -> Unit !io,
+}
+
+## The cache of a host that keeps none.
+pub fn no_keep_get(_key: String) -> Option[String] = None
+
+pub fn no_keep_put(_key: String, _text: String) -> Unit = ()
