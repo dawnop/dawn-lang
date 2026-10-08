@@ -248,6 +248,20 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
    `systemd-socket-activate -a --inetd` 驱动的 serve 比对，状态码与响应体逐字节一致（`ms` 与 `cached` 两个字段按设计归一：serve 没有缓存）；`contract.sh` 42 项全绿。
    sha2 64 KiB 在 native（dawnc 0.85.0）实测 0.87 到 1.16 ms/次（负载 7 到 9 的机器），摘要与 hashlib 一致，远低于裁决 8 的 20 ms 线。
 3. **K3：去 Java 化 `exec.dawn` / `cache` / `gate` / `config`**：22 行 `use java` 逐个换成 `Proc.run`、`Clock`、`Fs`、`env`；闸门换 `gate.sh`；缓存先砍。到这一刀才能 `dawnc build`。
+   **K3 落地记录（10-08）**：serve 路径上已无 `use java`，`dawnc build playground/native` 出 832 KB 的二进制（`serve` 与 `job <dir>` 两个子命令）。
+   - `exec.dawn`：每个子进程都是 `Proc.run`。`Proc.run` 同步、无超时无 kill，所以预算是 `timeout -k 2 N sh -c '…'`，里面的 `sh` 把输出与退出状态写进 runner 自己的文件，
+     **缺状态文件即超时**（程序自己 `exit 124` 仍是它的状态，有测试）；超时后再 `stop <unit>`。`chmod` 走命令，计时走 `Clock`，id 取 `/proc/sys/kernel/random/uuid`（无则 `uuidgen`）。
+     有界读取是一个 `sh`：`[ -f ] && [ ! -L ] && head -c`，结果落 scratch 文件再读，不跟链接、不在 FIFO 上阻塞。
+   - 闸门：路由不再碰 `Semaphore`，改为把 `Job` 交给 `Host`（`play/host.dawn`）。长驻 JVM 服务的 host 保留进程内公平 `Semaphore` 与答案缓存（`play/jvmhost.dawn`，全仓这条路径上仅剩的 `use java`）；
+     serve 的 host（`play/gate.dawn`）把任务写成文件，跑内嵌的 gate 脚本：轮询两个 `slot.N` 的 `flock -n`，拿到后 `exec <本二进制> job <dir>` 并让锁描述符 9 随之继承，
+     所以许可证跨编译与运行，进程怎么死（含 SIGKILL）内核都释放。拿不到则退出码 75，前端回 429，等待时长沿用 15 s（/run）与 2 s（/check、/compile）。
+     任务与结果用长度前缀字段写文件（`play/job.dawn`），不用 JSON：870 KB 的 C 文本是切片，不是逐字符扫描。作业的子进程会关掉 9 号描述符（`TIMED_SH`），逃逸的程序占不住槽位。
+   - 缓存：serve 不留（裁决 4）；JVM 服务照旧。`/health` 零子进程：部署设 `PLAY_TOOLCHAIN_ID="<version> <build>"`（`dawn --version` 名字之后的两词），未设则探一次 `dawn --version`（本机 0.27 s）。
+     `javap` 改为只查在不在（`command -v`），不再每请求起一个 JVM；`/run` 不再问 `dawnc`，`/check` 与 `/compile` 各一次 `dawnc --version`（约 11 ms）。
+   - 槽位目录 `PLAY_SLOT_DIR`（单元的 `RuntimeDirectory=/run/dawn-play`），缺省 `<work root>/play-slots`。`timeout`、`flock`、`head`、`chmod`、`rm` 是新的运行时依赖（coreutils 与 util-linux）。
+   - 验收：`playground/test/serve-compare.py <二进制> --gate --bench` 对现行 JVM runner 与 `systemd-socket-activate -a --inetd` 驱动的二进制比对 17 个请求（health、run 五种、check 两种、compile 三种、坏 JSON、坏 UTF-8、超限、空 body、404、405），
+     状态码与响应体逐字节一致（`ms`、`cached` 归一）；两槽三个并发慢 `/run`，第三个等到槽位才答；两槽占满时 `/check` 2.0 s 后 429；SIGKILL 两个作业后下一个请求立刻拿到槽位。
+     `contract.sh` 48 项在 JVM 入口上仍全绿；`playground/test/native-tests.sh` 在 `dawnc test` 下跑 89 个 test 块。
 4. **K4：部署单元与 nginx 切换。** 先在另一个 socket（如 `dawn-play-canary.socket`）上与 JVM runner 并行，对同一批请求做响应字节比对（沿用 `contract.sh` 的 48 项），再切 nginx。
 5. **K5：删 JVM runner 的启动路径**（保留 `dawn-play.service` 文件一个版本周期作回滚，再删）。
 
