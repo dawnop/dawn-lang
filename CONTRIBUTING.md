@@ -212,7 +212,8 @@ test** that cleanup left behind. It is not a historical record: check a new
   - **Criterion 3 (clamping, never panics)** is the range functions: `slice`,
     `take`, `drop`, `seek`. The argument is a **range or a landing point**, it
     asks for "whatever part of this stretch exists", and it asserts nothing
-    about the endpoints.
+    about the endpoints. Range operations that **write** into a buffer are not
+    in this bucket: they do not clamp, and an out-of-range write panics.
 
   One name **cannot carry two policies**. `cursor.at` used to clamp while
   `str.at` panicked, so the meaning of one word depended on which module the
