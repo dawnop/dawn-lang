@@ -500,6 +500,85 @@ type Opener = { at: Int, brace: Bool, lat: Int, ld: Int }
 ## its line.
 type IfAt = { depth: Int, at: Int }
 
+## The width past which a source line that holds a method chain is folded. It is
+## a limit for chains only: the formatter has no general line width, and a long
+## line without a chain link is left to its author.
+const CHAIN_WIDTH: Int = 100
+
+## Newlines in the gap before each token, in token order. `chain_folds` needs to
+## know where a physical line ends without re-walking the source, and `reflow`
+## consumes the same counts in step with its cursor.
+fn gap_newlines(cps: List[Char], toks: List[Token]) -> List[Int] = {
+  var out: List[Int] = []
+  var ci = 0
+  for t in toks {
+    let (gci, nl) = count_to(cps, ci, t.lo)
+    let (tci, _) = count_to(cps, gci, t.hi)
+    ci = tci
+    out = out ++ [nl]
+  }
+  out
+}
+
+## Whether the token at `j` is a chain link: a `.f(` that follows a call or an
+## index (`)` / `]`) or a postfix `?` / `!`. The first `.f(` after a plain name
+## is not one, because lexically `list.map(xs, f)` (a module call) and
+## `xs.map(f)` (a method call) look alike; it stays on the head of the chain.
+fn is_chain_link(toks: List[Token], nls: List[Int], marks: Marks, j: Int) -> Bool = {
+  if j < 1 || j + 2 >= len(toks) { return false }
+  if toks[j].kind != DOT || toks[j + 1].kind != IDENT || toks[j + 2].kind != LPAREN {
+    return false
+  }
+  if nls[j + 1] > 0 || nls[j + 2] > 0 { return false }
+  let p = toks[j - 1]
+  p.kind == RPAREN || p.kind == RBRACKET || p.kind == QUESTION ||
+    (p.kind == BANG && set.has(marks.postfix, p.lo))
+}
+
+## The chain links to break on the physical line whose first token is `toks[i]`
+## and which prints at `indent` levels, added to `folds`.
+##
+## A line is folded when it prints wider than CHAIN_WIDTH, its brackets balance
+## within the line (a line that opens a lambda body or closes a bracket is the
+## author's to lay out), it does not begin with a closer or a comment, and it
+## has links at its own bracket depth: every one of those gets a line, so only
+## the outermost chain folds and the pieces never hold a link again, which is
+## what makes the result a fixpoint. A trailing comment is not counted. The
+## width is the one the line prints at, so it is computed with `space`.
+fn chain_folds(
+  toks: List[Token],
+  nls: List[Int],
+  marks: Marks,
+  i: Int,
+  indent: Int,
+  folds: Set[Int]
+) -> Set[Int] = {
+  let first = toks[i].kind
+  if first == COMMENT || first == USE || is_closer(first) { return folds }
+  var width = indent * 2 + toks[i].hi - toks[i].lo
+  var depth = 0
+  var links: List[Int] = []
+  if first == LPAREN || first == LBRACKET || first == LBRACE { depth = 1 }
+  var j = i + 1
+  while j < len(toks) && nls[j] == 0 && toks[j].kind != COMMENT {
+    let t = toks[j]
+    if t.kind == STRING && str.contains(t.text, "\n") { return folds }
+    if depth == 0 && is_chain_link(toks, nls, marks, j) { links = links ++ [t.lo] }
+    if t.kind == LPAREN || t.kind == LBRACKET || t.kind == LBRACE { depth = depth + 1 }
+    if is_closer(t.kind) {
+      depth = depth - 1
+      if depth < 0 { return folds }
+    }
+    if space(toks[j - 1], t, marks, false) { width = width + 1 }
+    width = width + t.hi - t.lo
+    j = j + 1
+  }
+  if depth != 0 || width <= CHAIN_WIDTH { return folds }
+  var out = folds
+  for lo in links { out = set.insert(out, lo) }
+  out
+}
+
 fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) -> String = {
   let unary = marks.unary
   var out: List[String] = []
@@ -571,14 +650,21 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
   # the token span were each built into a string, one list cell per code point,
   # and the token's string was then discarded in favour of `t.text` -- see below.
   var cur_ci = 0
+  # The chain links to break, found once per source line at its first token
+  # (`chain_folds`), from the width that line will print at.
+  let nls = gap_newlines(cps, toks)
+  var folds: Set[Int] = set.empty()
   var i = 0
   while i < len(toks) {
     let t = toks[i]
     # Advance to this token's start (counting the newlines in the gap since the
     # previous token), then across the token itself.
-    let (gci, nl) = count_to(cps, cur_ci, t.lo)
+    let (gci, gap_nl) = count_to(cps, cur_ci, t.lo)
     let (tci, _) = count_to(cps, gci, t.hi)
     cur_ci = tci
+    # A chain link `chain_folds` chose breaks its line here, as if the author
+    # had written the newline.
+    let nl = if gap_nl == 0 && set.has(folds, t.lo) { 1 } else { gap_nl }
     # Every token reprints from `.text`, which for everything that can reach this
     # stream is the same string its span slices to -- comments included, since a
     # comment's text and its span both stop before the trailing whitespace. That
@@ -589,6 +675,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
     let ttext = t.text
     if i == 0 {
       out = out ++ [ttext]
+      folds = chain_folds(toks, nls, marks, 0, 0, folds)
     } else {
       if nl == 0 {
         let on_use_line = line_first.kind == USE
@@ -626,6 +713,7 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
         out = out ++ [ttext]
+        if gap_nl > 0 { folds = chain_folds(toks, nls, marks, i, lvl, folds) }
         anchor_pending = not is_closer(t.kind)
         # a `:` that ends a `let`/`var`/`const` line is its annotation's colon,
         # and the type on the next line is part of the same statement, so a `{`
@@ -1722,4 +1810,106 @@ test "a block follows the line its own construct starts on" {
 test "a guard's arm, a record field and a grouped block anchor to their own construct" {
   let a = "fn f(x: Option[Int]) -> Int = {\n  match x {\n    Some(\n      n) if (\n        n >\n          3) -> {\n      let a = 1\n      a\n    }\n    _ -> 0\n  }\n}\n\nfn g() -> Int = {\n  if (false) {\n    var v:\n      R =\n      R { a:\n          s(\n            \"x\"), b: {\n              let w = 1\n              w\n            } }\n  }\n  trace = trace ++ [(if (\n    ({\n    if (true) { return 1 }\n    true\n  })) { 1 } else { 2 })]\n  1\n}\n"
   assert fmt_of(a) == a
+}
+
+# ---- chain folding ----
+
+## `fn f() -> Int = { <line> }` around one body line.
+fn in_body(line: String) -> String = "fn f() -> Int = {\n" ++ line ++ "\n}\n"
+
+## A `let r = xs.map(f).filter(<name>)` body line that prints exactly `width`
+## columns wide, indent included.
+fn chain_of_width(width: Int) -> String =
+  "  let r = xs.map(f).filter(" ++ str.repeat("g", width - 28) ++ ")"
+
+test "a chain line wider than the limit folds at every link, not at the head call" {
+  let src = "fn f() -> Int = {\n  let total = xs.filter((x) => x > 0).map((x) => x * 2).filter((x) => x % 3 == 0).fold(0, (a, b) => a + b)\n  total\n}\n"
+  let want = "fn f() -> Int = {\n  let total = xs.filter((x) => x > 0)\n    .map((x) => x * 2)\n    .filter((x) => x % 3 == 0)\n    .fold(0, (a, b) => a + b)\n  total\n}\n"
+  assert fmt_of(src) == want
+}
+
+test "the fold threshold is the limit itself" {
+  let at = in_body(chain_of_width(100))
+  assert fmt_of(at) == at
+  let over = chain_of_width(101)
+  assert fmt_of(in_body(over)) ==
+    in_body("  let r = xs.map(f)\n    .filter(" ++ str.repeat("g", 73) ++ ")")
+}
+
+test "a long line without a chain link is not folded" {
+  # `xs.map(...)` after a plain name is a head call, not a link
+  let a = in_body("  let r = xs.map(" ++ str.repeat("g", 120) ++ ")")
+  assert fmt_of(a) == a
+  let b = in_body("  let r = f(" ++ str.repeat("g", 120) ++ ")")
+  assert fmt_of(b) == b
+}
+
+test "only the outermost chain folds" {
+  let inner = "ys.a(1).b(2).c(3)"
+  let src = in_body("  let r = xs.map(f).filter((x) => " ++ inner ++ ")" ++ str.repeat(" ", 1) ++
+      ".fold(" ++ str.repeat("g", 60) ++ ")")
+  let want = in_body("  let r = xs.map(f)\n    .filter((x) => " ++ inner ++ ")\n    .fold(" ++
+      str.repeat("g", 60) ++ ")")
+  assert fmt_of(src) == want
+  # a chain nested in an argument and nothing at the top level stays whole
+  let deep = in_body("  let r = f(" ++ inner ++ ", " ++ str.repeat("g", 100) ++ ")")
+  assert fmt_of(deep) == deep
+}
+
+test "a trailing lambda argument stays on its call" {
+  let src = in_body("  let r = xs.map(f).filter((a, b) => a + b + " ++ str.repeat("c", 80) ++ ")")
+  let want = in_body("  let r = xs.map(f)\n    .filter((a, b) => a + b + " ++ str.repeat("c", 80) ++ ")")
+  assert fmt_of(src) == want
+}
+
+test "a line whose bracket is left open is the author's to lay out" {
+  let a = "fn f() -> Int = {\n  let r = xs.map(f).filter((x) => {\n    x > " ++ str.repeat("n", 100) ++ "\n  }).len()\n  r\n}\n"
+  assert fmt_of(a) == a
+  let b = "fn f() -> Int = {\n  let r = xs.map(f).filter(" ++ str.repeat("g", 90) ++ ",\n    h).len()\n  r\n}\n"
+  assert fmt_of(b) == b
+  # a line opening with a closer is the tail of a call the author wrapped
+  let c = "fn f() -> Int = {\n  let r = g(\n    1\n  ).map(f).filter(" ++ str.repeat("g", 90) ++ ")\n  r\n}\n"
+  assert fmt_of(c) == c
+}
+
+test "a trailing comment does not count toward the width" {
+  let line = chain_of_width(100)
+  let a = in_body(line ++ " # a comment that runs far past the limit, which must not matter at all")
+  assert fmt_of(a) == a
+  # over the limit, the comment rides on the last piece
+  let b = in_body(chain_of_width(101) ++ " # note")
+  assert fmt_of(b) ==
+    in_body("  let r = xs.map(f)\n    .filter(" ++ str.repeat("g", 73) ++ ") # note")
+}
+
+test "a postfix unwrap or try before a dot is a link" {
+  let g = str.repeat("g", 85)
+  let q = in_body("  let r = a.b(" ++ g ++ ")?.c(x)?.d(y)")
+  assert fmt_of(q) == in_body("  let r = a.b(" ++ g ++ ")?\n    .c(x)?\n    .d(y)")
+  let b = in_body("  let r = a.b(" ++ g ++ ")!.c(x)!.d(y)")
+  assert fmt_of(b) == in_body("  let r = a.b(" ++ g ++ ")!\n    .c(x)!\n    .d(y)")
+  # an effect marker `!` is not a postfix unwrap and is never a link
+  let e = "fn f() -> Int !io = {\n  g(" ++ str.repeat("g", 100) ++ ")\n}\n"
+  assert fmt_of(e) == e
+  # the folded text lexes and keeps its tokens
+  assert lexes(fmt_of(q))
+  assert lexes(fmt_of(b))
+}
+
+test "a chain the author already wrote over several lines is left as written" {
+  let a = in_body("  let r = xs.map(f)\n    .filter(" ++ str.repeat("g", 120) ++ ")\n    .len()")
+  assert fmt_of(a) == a
+  # nor is a short one merged back
+  let b = in_body("  let r = xs.map(f)\n    .filter(g)")
+  assert fmt_of(b) == b
+}
+
+test "folding is idempotent and indentation does not change the result" {
+  let src = "fn f() -> Int = {\n  match x {\n    Some(v) -> v.a(1).b(2).c(" ++ str.repeat("q", 100) ++ ").d(3)\n    _ -> 0\n  }\n}\n"
+  let once = fmt_of(src)
+  assert once != src
+  assert fmt_of(once) == once
+  assert fmt_of(str.replace(src, "    Some", "Some")) == once
+  let deep = in_body("  let r = xs.map(f).filter(" ++ str.repeat("g", 100) ++ ").len()")
+  assert fmt_of(fmt_of(deep)) == fmt_of(deep)
 }
