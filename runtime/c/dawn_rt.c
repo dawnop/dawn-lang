@@ -688,13 +688,19 @@ static void dawn_rc_stats_dump(void) {
   fprintf(stderr,
           "rc-stats: array_with in-place %llu, copied %llu, "
           "array_steal taken %llu, dup %llu, "
-          "adt0 singleton hits %llu, missed %llu\n",
+          "adt0 singleton hits %llu, missed %llu, "
+          "adt reuse taken %llu, missed %llu\n",
           (unsigned long long)dawn_array_with_inplace,
           (unsigned long long)dawn_array_with_copied,
           (unsigned long long)dawn_array_steal_taken,
           (unsigned long long)dawn_array_steal_dup,
           (unsigned long long)dawn_adt0_hits,
-          (unsigned long long)dawn_adt0_missed);
+          (unsigned long long)dawn_adt0_missed,
+          (unsigned long long)dawn_adt_reuse_taken,
+          (unsigned long long)dawn_adt_reuse_missed);
+#ifdef DAWN_RC_CONTRACT
+  fprintf(stderr, "rc-contract: adt allocs %llu\n", (unsigned long long)dawn_adt_allocs);
+#endif
 }
 
 #ifndef __wasi__
@@ -862,7 +868,18 @@ static dawn_str *dawn_str_shrink(dawn_str *s, int64_t len) {
   return r;
 }
 
+#ifdef DAWN_RC_CONTRACT
+/* Test builds only: every node a program allocates, so a contract can say
+ * that a steady state allocates none (scripts/adt-reuse-contract). Reuse is
+ * the thing that makes the number small, and the rate alone cannot tell a
+ * reuse that happened from an allocation that was never asked for. */
+uint64_t dawn_adt_allocs = 0;
+#endif
+
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask) {
+#ifdef DAWN_RC_CONTRACT
+  dawn_adt_allocs++;
+#endif
   dawn_adt *a =
       (dawn_adt *)dawn_alloc(sizeof(dawn_adt) + (size_t)nfields * sizeof(dawn_slot));
   dawn_hdr_init(&a->h, DAWN_K_ADT);
@@ -901,6 +918,9 @@ uint64_t dawn_adt0_hits = 0;
 uint64_t dawn_adt0_missed = 0;
 
 dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask) {
+#ifdef DAWN_RC_CONTRACT
+  dawn_adt_allocs++;
+#endif
   dawn_adt *a =
       (dawn_adt *)dawn_alloc(sizeof(dawn_adt) + (size_t)nfields * sizeof(dawn_slot));
   dawn_hdr_init(&a->h, DAWN_K_ADT);
@@ -908,6 +928,84 @@ dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask) 
   a->nfields = nfields;
   a->ptrmask.wide = mask;
   return a;
+}
+
+/* ---- reset and reuse for ADT nodes (docs/perceus-reuse-design.md 4.2) ----
+ *
+ * `reset` is `drop` that keeps the block. A node the program is done with and
+ * is about to rebuild at the same size does not have to go back to the
+ * allocator and come out again: if nobody else holds it, release its children
+ * and hand the block over as a token for the constructor that follows.
+ *
+ * The token is a legal, field-less ADT: the mask is cleared before the
+ * children are released, so at any instant from here to the `reuse`, dropping
+ * it (a panic caught by `catch_fault` unwinds the frame that holds it) frees
+ * the shell and nothing twice. That one property is why the token needs no
+ * special case in drop, in LeakSanitizer, or in the effect-handler frames.
+ *
+ * Why these refusals fall back to a plain drop, answering NULL:
+ *   rc != 1      shared, or immortal (the field-less singletons, whose count
+ *                is DAWN_IMMORTAL): writing into it would be visible to
+ *                another holder, or would rewrite a static;
+ *   dawn_rc_leak counts only grow under --rc=leak, so rc == 1 proves nothing
+ *                about uniqueness (the same guard `dawn_array_with` has);
+ *   nfields > 64 the mask is a pointer into static data, and reuse would have
+ *                to swap it; wide nodes do not take part.
+ *
+ * Counted on the DAWN_RC_STATS line, because the win is an allocation that
+ * did not happen and an absence needs a number. A reset that finds no
+ * constructor to give its token to is not counted: only `reuse` knows, and it
+ * counts a token of the wrong field count as a miss. */
+uint64_t dawn_adt_reuse_taken = 0;
+uint64_t dawn_adt_reuse_missed = 0;
+
+#ifdef DAWN_REUSE_POISON
+/* Test builds only. Every slot of a reset node is overwritten with a word no
+ * valid pointer or count can be (non-canonical on x86-64 and AArch64), so a
+ * read of a field after the reset that should have preceded it faults at once.
+ * AddressSanitizer cannot say it: the block stays allocated, which is the
+ * whole point of reuse. */
+#define DAWN_REUSE_POISON_WORD ((void *)UINT64_C(0xdeaddeaddeaddead))
+#endif
+
+dawn_adt *dawn_adt_reset(dawn_adt *a) {
+  if (a == NULL) {
+    /* a slot that was declared but never assigned on this path; the plain
+     * drop of the same slot is a no-op too */
+    return NULL;
+  }
+  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {
+    uint64_t mask = a->ptrmask.narrow;
+    a->ptrmask.narrow = 0;
+    for (int32_t i = 0; i < a->nfields; i++) {
+      if (((mask >> (unsigned)i) & UINT64_C(1)) != 0) {
+        dawn_drop(a->fields[i].p);
+      }
+#ifdef DAWN_REUSE_POISON
+      a->fields[i].p = DAWN_REUSE_POISON_WORD;
+#endif
+    }
+    return a;
+  }
+  dawn_drop(a);
+  return NULL;
+}
+
+dawn_adt *dawn_adt_reuse(dawn_adt *tok, int32_t tag, int32_t nfields, uint64_t mask) {
+  /* A token of another field count is not an error: the compiler pairs by
+   * type, and a type with constructors of several widths hands a token from
+   * one to a build of another. The block is the wrong size for it (the slab
+   * class may differ), so it goes back and the build allocates. */
+  if (tok == NULL || tok->nfields != nfields) {
+    dawn_drop(tok);
+    dawn_adt_reuse_missed++;
+    return dawn_adt_new(tag, nfields, mask);
+  }
+  dawn_adt_reuse_taken++;
+  tok->tag = tag;
+  tok->nfields = nfields;
+  tok->ptrmask.narrow = mask;
+  return tok;
 }
 
 dawn_clo *dawn_clo_new(void *fn, int32_t ncap, uint64_t mask) {

@@ -357,6 +357,105 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
   cell->fields[0].p = x;
 }""",
     ),
+    # ---- reset and reuse of ADT nodes (docs/perceus-reuse-design.md 4.2) ----
+    #
+    # Reset without asking whether the node is alone. A node another variable
+    # still holds is rebuilt under its feet: every reader of the old value sees
+    # the new one. Nothing a unique-only workload prints changes, which is why
+    # a hand-written shared case owns it and the counter budgets cannot.
+    "reset-ignores-sharing": (
+        "dawn_rt.c",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+        """  if (!dawn_rc_leak && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+    ),
+    # The token keeps its old mask. Its children were released by the reset, so
+    # dropping it (a panic unwinding the frame that holds it) releases them
+    # again: a double free on the first path nothing else exercises.
+    "reset-keeps-the-mask": (
+        "dawn_rt.c",
+        """    uint64_t mask = a->ptrmask.narrow;
+    a->ptrmask.narrow = 0;
+""",
+        """    uint64_t mask = a->ptrmask.narrow;
+""",
+    ),
+    # The children are never released. The mask is cleared, so nothing will
+    # ever find them again: one leak per reuse.
+    "reset-keeps-the-children": (
+        "dawn_rt.c",
+        """      if (((mask >> (unsigned)i) & UINT64_C(1)) != 0) {
+        dawn_drop(a->fields[i].p);
+      }
+""",
+        """      (void)mask;
+""",
+    ),
+    # The new node is built with the previous node's mask, so the first drop of
+    # a reused node of a different shape walks the wrong fields.
+    "reuse-keeps-the-old-mask": (
+        "dawn_rt.c",
+        """  tok->ptrmask.narrow = mask;
+  return tok;""",
+        """  return tok;""",
+    ),
+    # A field-less singleton passes for a unique node. The next `reuse` writes a
+    # new tag into a static every `None` in the program shares.
+    "reset-takes-immortal": (
+        "dawn_rt.c",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+        """  if (!dawn_rc_leak && (a->h.rc == 1 || a->h.rc == DAWN_IMMORTAL) && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+    ),
+    # Under --rc=leak counts only grow, so rc == 1 proves nothing about who else
+    # holds the node.
+    "reset-ignores-leak-mode": (
+        "dawn_rt.c",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+        """  if (a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+    ),
+    # A node of more than 64 fields has its mask behind a pointer; the narrow
+    # read below takes the address for a mask.
+    "reset-takes-wide": (
+        "dawn_rt.c",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT) {""",
+    ),
+    # The poisoning build stops poisoning: a stale field read after the reset
+    # reads the old value and nothing notices.
+    "reset-forgets-the-poison": (
+        "dawn_rt.c",
+        """#ifdef DAWN_REUSE_POISON
+      a->fields[i].p = DAWN_REUSE_POISON_WORD;
+#endif
+""",
+        """""",
+    ),
+    # An unassigned slot is answered with a token made of nothing. The mutant
+    # does not drop the guard (the read of the header would fault, and a
+    # `counted` build cannot hold a fault) but keeps its place and lies in it.
+    "reset-reads-through-null": (
+        "dawn_rt.c",
+        """  if (a == NULL) {
+    /* a slot that was declared but never assigned on this path; the plain
+     * drop of the same slot is a no-op too */
+    return NULL;
+  }""",
+        """  if (a == NULL) {
+    return (dawn_adt *)dawn_box_int(0);
+  }""",
+    ),
+    # The kind test is gone: whatever sits behind the pointer is rewritten as a
+    # node.
+    "reset-ignores-kind": (
+        "dawn_rt.c",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
+        """  if (!dawn_rc_leak && a->h.rc == 1 && a->nfields <= 64) {""",
+    ),
+    # A token of another width is reused as it is; the build writes past it.
+    "reuse-ignores-width": (
+        "dawn_rt.c",
+        """  if (tok == NULL || tok->nfields != nfields) {""",
+        """  if (tok == NULL) {""",
+    ),
 }
 
 

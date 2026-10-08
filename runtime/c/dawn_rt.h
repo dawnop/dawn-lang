@@ -173,6 +173,21 @@ typedef struct {
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask);
 dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask);
 
+/* Reset and reuse of a node about to be rebuilt at the same field count (see
+ * dawn_rt.c above `dawn_adt_reuse_taken`). `reset` CONSUMES `a`: unique and
+ * narrow, its children are released, its mask cleared and the shell comes
+ * back as a token; otherwise it is dropped and NULL comes back. `reuse`
+ * CONSUMES the token (NULL allowed) and answers a node with rc 1 whose fields
+ * the caller fills, exactly as after `dawn_adt_new`. Neither names an
+ * intrinsic, so the marks live in prose like `dawn_array_push_own`'s. */
+dawn_adt *dawn_adt_reset(dawn_adt *a);
+dawn_adt *dawn_adt_reuse(dawn_adt *tok, int32_t tag, int32_t nfields, uint64_t mask);
+extern uint64_t dawn_adt_reuse_taken;
+extern uint64_t dawn_adt_reuse_missed;
+#ifdef DAWN_RC_CONTRACT
+extern uint64_t dawn_adt_allocs; /* test builds: every dawn_adt_new */
+#endif
+
 /* ---- the field-less constructors, shared ----
  *
  * A constructor with no fields has nothing in it: `tag`, an `nfields` of 0
