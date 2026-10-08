@@ -6174,8 +6174,11 @@ fn arith_call(cx: Cx, tid: Int, lt: Ty, lx: TExpr, rhs: Option[(Ty, TExpr)], olo
       let charged = eff_union([callee_eff] ++ vinsts)
       let cx4 = record_effect(cx3, eff_drop_assocs(eff_drop(charged, unanswered), adropped),
         olo, ohi, mname)
+      # No name was written: the operator is the call, and the parser has no
+      # call node to pair a site with (docs/source-span-map-design.md section
+      # 4: implied calls carry none), so the callee start is NO_NAME.
       (cx4, lt, XCallFn(s.owner, emitted_fn_name(s, mname), args, [wr], evs, Some(tid),
-        owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt))
+        owner_off(cx, lo), owner_off(cx, hi), NO_NAME, lt))
     }
   }
 }
@@ -6220,8 +6223,10 @@ test "an operator on Int or Float stays native, and on a type of its own calls t
   }
   assert negated
   let routed = match arith_body(tm, "v") {
-    XCallFn(_, _, [XLocal(..), XCallFn(_, _, [_], [_], _, Some(nid), ..)], [_], _, Some(aid), ..) ->
-      aid == ADD_ID && nid == NEG_ID
+    XCallFn(_, _, [XLocal(..), XCallFn(_, _, [_], [_], _, Some(nid), _, _, inner, _)], [_], _, Some(aid),
+      _, _, outer, _) ->
+      # neither call has a written callee name, so neither has a site
+      aid == ADD_ID && nid == NEG_ID && inner == NO_NAME && outer == NO_NAME
     _ -> false
   }
   assert routed
@@ -8862,8 +8867,10 @@ fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], 
   let charged = eff_union([callee_eff] ++ vinsts)
   let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo, hi,
     mname)
+  # The call is the checker's own (a `var` carried through a staged loop), so
+  # no callee name was written and the site stays empty (NO_NAME).
   (cx2, XCallFn(s.owner, emitted_fn_name(s, mname), args, [w], evs, Some(tid), owner_off(cx, lo),
-    owner_off(cx, hi), owner_off(cx, lo), ret))
+    owner_off(cx, hi), NO_NAME, ret))
 }
 
 ## A read of a carried `var`: `var_get` on its cell, at the `var`'s type.
