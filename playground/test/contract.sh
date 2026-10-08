@@ -53,6 +53,28 @@ export PLAY_COMPILE_TIMEOUT=60
 # fail-closed since the audit). There is no systemd-run wrapper on a dev box or
 # in CI, so this harness is exactly the caller that has to say so.
 export PLAY_UNSAFE_LOCAL=1
+# The native compiler /check and the C view prefer (play/exec.native_ready).
+# The runner only uses one of the release `dawn` is, so the case below skips
+# unless PLAY_TEST_DAWNC (default: ./dawnc-linux-x86_64, what
+# scripts/release-native.sh writes) says the same version. It runs behind a
+# wrapper that logs the subcommand each call was made with, which is how the
+# cases tell "dawnc answered" from "the JVM compiler answered".
+DAWNC_REAL="${PLAY_TEST_DAWNC:-$ROOT/dawnc-linux-x86_64}"
+NATIVE_DIR=""
+want_ver=$("$DAWN_BIN" --version 2>/dev/null | sed -n 's/^dawn \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
+have_ver=""
+[ -x "$DAWNC_REAL" ] && have_ver=$("$DAWNC_REAL" --version 2>/dev/null | sed -n 's/^dawnc \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
+if [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
+  NATIVE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-native.XXXXXX")
+  NATLOG="$NATIVE_DIR/calls"
+  : >"$NATLOG"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$1" >>"%s"\nexec "%s" "$@"\n' "$NATLOG" "$DAWNC_REAL" >"$NATIVE_DIR/dawnc"
+  chmod 755 "$NATIVE_DIR/dawnc"
+  export DAWNC_BIN="$NATIVE_DIR/dawnc"
+else
+  echo "note: no dawnc of release '$want_ver' (PLAY_TEST_DAWNC=$DAWNC_REAL, found '$have_ver'); the native cases are skipped"
+  export DAWNC_BIN=/nonexistent/dawnc
+fi
 # The work root is this run's own, so the run-output case below can name the
 # exact directory that must not reach a response (dawn-lang #401).
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-work.XXXXXX")
@@ -100,7 +122,7 @@ SRV=$!
 # runner is outside the terminal's process group now, so ^C no longer reaches
 # it; the signal traps route through exit so the EXIT trap still kills it.
 # `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}" "${WORK:?}.cases"; rm -f "${WORK:?}.canary"; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}" "${WORK:?}.cases"; rm -f "${WORK:?}.canary"; [ -n "$NATIVE_DIR" ] && rm -rf "$NATIVE_DIR"; [ -n "${SRV2:-}" ] && kill -TERM "-$SRV2" 2>/dev/null; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -424,6 +446,84 @@ else
 fi
 wait "$SPIN1" "$SPIN2" || true
 ccheck "compile: the permits come back" "$CASES/fresh.dawn" c 'd["ok"] is True and d["cached"] is False'
+
+# ---- native /check and C view (the dawnc step) ----
+# Cases: a plain program is checked by dawnc; a `use java` program, which dawnc
+# refuses, still passes /check through the JVM compiler; a broken program's
+# diagnostics and a program's C view are the same bytes whichever compiler
+# answered (a second runner without dawnc is the reference); and the refusal
+# the fallback keys on is what the real binary says.
+if [ -n "$NATIVE_DIR" ]; then
+  calls() { wc -l <"$NATLOG" | tr -d ' '; }
+  post() { # port, endpoint, data
+    curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$3" "http://127.0.0.1:$1/$2" || true
+  }
+  ok_case() { # name, condition-exit-status
+    if [ "$2" = "0" ]; then pass=$((pass + 1)); echo "  ok  $1"; else fail=$((fail + 1)); echo "FAIL  $1"; fi
+  }
+
+  n0=$(calls)
+  body=$(post "$PORT" check '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}')
+  st=0; printf '%s' "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is True, d' || st=1
+  [ "$(calls)" -gt "$n0" ] && [ "$(tail -n 1 "$NATLOG")" = "check" ] || st=1
+  ok_case "native check: a plain program is checked by dawnc" "$st"
+
+  n0=$(calls)
+  jcode='use java \"java.lang.System\"\npub fn main() -> Unit !io = println(System.getProperty(\"java.class.path\").expect(\"cp\"))'
+  body=$(post "$PORT" check "{\"code\":\"$jcode\"}")
+  st=0; printf '%s' "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is True, d' || st=1
+  [ "$(calls)" -gt "$n0" ] || st=1
+  ok_case "native check: a use java program is refused by dawnc and passes through the JVM compiler" "$st"
+
+  # `dawnc` answered as the fallback keys on: status 1 and the sentence.
+  printf 'use java "java.lang.System"\npub fn main() -> Unit !io = println("x")\n' >"$NATIVE_DIR/uj.dawn"
+  st=0
+  for sub in check emitc; do
+    out=$("$DAWNC_REAL" $sub "$NATIVE_DIR/uj.dawn" 2>&1) && st=1
+    case $out in *'`use java` is not available in this compiler'*) : ;; *) st=1 ;; esac
+  done
+  ok_case "dawnc refuses use java with status 1 and the sentence play/exec.dawn keys on" "$st"
+
+  # The reference: the same runner with no dawnc, so every answer is the JVM's.
+  PORT2=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  LOG2=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test2.XXXXXX")
+  DAWNC_BIN=/nonexistent/dawnc PLAY_PORT=$PORT2 python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$DAWN_BIN" run "$ROOT/playground" >"$LOG2" 2>&1 &
+  SRV2=$!
+  deadline2=$(($(date +%s) + HEALTH_WAIT))
+  until curl -s --noproxy '*' --max-time 5 -o /dev/null "http://127.0.0.1:$PORT2/health"; do
+    [ "$(date +%s)" -ge "$deadline2" ] && { echo "FAIL: the reference runner did not answer /health"; tail -n 20 "$LOG2"; exit 1; }
+    sleep 0.3
+  done
+  grep -q 'no native dawnc' "$LOG2" && st=0 || st=1
+  ok_case "the runner without dawnc says so once at startup" "$st"
+
+  bad='{"code":"type T = A | B\nfn f(t: T) -> Int = match t { A -> 1 }\npub fn main() -> Unit !io = println(nope + f(A))"}'
+  n0=$(calls)
+  a=$(post "$PORT" check "$bad"); b=$(post "$PORT2" check "$bad")
+  st=0
+  [ "$(calls)" -gt "$n0" ] || st=1
+  [ "$a" = "$b" ] || st=1
+  printf '%s' "$a" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is False and "undefined variable: nope" in d["output"] and "non-exhaustive" in d["output"], d' || st=1
+  [ "$st" = "0" ] || { echo "        dawnc: $a"; echo "        dawn:  $b"; }
+  ok_case "native check: a broken program's /check JSON is byte-identical to the JVM compiler's" "$st"
+
+  prog='{"code":"pub fn main() -> Unit !io = println(\"hi\")","target":"c"}'
+  n0=$(calls)
+  a=$(post "$PORT" compile "$prog"); b=$(post "$PORT2" compile "$prog")
+  st=0
+  [ "$(tail -n 1 "$NATLOG")" = "emitc" ] || st=1
+  A="$a" B="$b" python3 -c '
+import os,json
+def drop(t):
+    d=json.loads(t); d.pop("ms",None); d.pop("cached",None); return d
+a,b=drop(os.environ["A"]),drop(os.environ["B"])
+assert a["ok"] is True and a==b, (a,b)' || st=1
+  ok_case "native emitc: the C view (text and map) equals the JVM compiler's" "$st"
+
+  kill -TERM "-$SRV2" 2>/dev/null || true
+  rm -f "$LOG2"
+fi
 
 check "bad JSON -> error" \
   'not json at all' \
