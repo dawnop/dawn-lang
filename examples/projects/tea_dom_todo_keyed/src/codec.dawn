@@ -66,12 +66,12 @@ pub fn decode(s: String) -> Model =
     Err(_) -> init()
     Ok(JObj(entries)) ->
       Model {
-        todos: dec_todos(map.get(entries, "todos")),
-        next_id: dec_int(map.get(entries, "next"), 1),
-        filter: dec_filter(dec_str(map.get(entries, "filter"), "all")),
-        draft: dec_str(map.get(entries, "draft"), ""),
-        edit: dec_str(map.get(entries, "edit"), ""),
-        editing: dec_editing(map.get(entries, "editing")),
+        todos: map.get(entries, "todos").dec_todos(),
+        next_id: map.get(entries, "next").dec_int(1),
+        filter: map.get(entries, "filter").dec_str("all").dec_filter(),
+        draft: map.get(entries, "draft").dec_str(""),
+        edit: map.get(entries, "edit").dec_str(""),
+        editing: map.get(entries, "editing").dec_editing(),
       }
     Ok(_) -> init()
   }
@@ -104,9 +104,9 @@ fn dec_todo(j: Json) -> Todo =
   match j {
     JObj(entries) ->
       Todo {
-        id: dec_int(map.get(entries, "id"), 0),
-        title: dec_str(map.get(entries, "title"), ""),
-        done: dec_bool(map.get(entries, "done"), false),
+        id: map.get(entries, "id").dec_int(0),
+        title: map.get(entries, "title").dec_str(""),
+        done: map.get(entries, "done").dec_bool(false),
       }
     _ -> Todo { id: 0, title: "", done: false }
   }
@@ -142,15 +142,15 @@ fn sample() -> Model =
   }
 
 test "a model round-trips through its own text" {
-  assert decode(encode(sample())) == sample()
-  assert decode(encode(init())) == init()
+  assert sample().encode().decode() == sample()
+  assert init().encode().decode() == init()
   let all_open: List[Option[Int]] = [None, Some(1), Some(7)]
   let open_check =
-    list.all(all_open, e => decode(encode(Model { ..sample(), editing: e })).editing == e)
+    list.all(all_open, e => encode(Model { ..sample(), editing: e }).decode().editing == e)
   assert open_check
   let all_filters: List[Filter] = [All, Active, Done]
   assert list.all(all_filters, f =>
-      decode(encode(Model { ..sample(), filter: f })).filter == f)
+      encode(Model { ..sample(), filter: f }).decode().filter == f)
 }
 
 test "the encoding is one line, and a quote in a title cannot end it" {

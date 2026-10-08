@@ -158,7 +158,7 @@ test "the body arrives as a value inside update, not as a message" {
   assert waiting_on(asked) == Some("/greet?name=ada")
   match asked {
     Waiting(_, k) -> {
-      assert finished(k("hello, ada")) == "greeting=hello, ada asked=1"
+      assert k("hello, ada").finished() == "greeting=hello, ada asked=1"
     }
     Done(m) -> {
       assert render(m) == "the first turn should have suspended"
@@ -174,7 +174,7 @@ test "a message that asks nothing finishes in one turn" {
 }
 
 test "the continuation outlives the frame that installed the handler" {
-  let (waiting, first) = respond(start(), "type bob")
+  let (waiting, first) = start().respond("type bob")
   assert first == "GET /greet?name=bob"
   assert is_pending(waiting)
   let (answered, second) = respond(waiting, "body hello, bob")
@@ -183,7 +183,7 @@ test "the continuation outlives the frame that installed the handler" {
 }
 
 test "a cancelled request abandons its continuation and the session goes on" {
-  let (waiting, _) = respond(start(), "type ada")
+  let (waiting, _) = start().respond("type ada")
   let (cancelled, said) = respond(waiting, "cancel")
   assert said == "cancelled"
   assert not is_pending(cancelled)

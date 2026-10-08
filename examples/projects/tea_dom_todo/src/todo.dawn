@@ -146,7 +146,7 @@ impl App[Model] {
       # `serve` catches it at the boundary, the host keeps its model, and the
       # next message is answered normally. The counter carries the same
       # button for the same reason.
-      Boom -> panic("boom: update failed on purpose with " ++ to_string(len(m.todos)) ++ " todos")
+      Boom -> panic("boom: update failed on purpose with " ++ m.todos.len().to_string() ++ " todos")
     }
 
   fn view(m: Model) -> Node[Msg] = {
@@ -234,7 +234,7 @@ fn row(m: Model, t: Todo) -> Node[Msg] =
 
 fn summary(m: Model) -> String = {
   let total = len(m.todos)
-  let done = len(list.filter(m.todos, t => t.done))
+  let done = list.filter(m.todos, t => t.done).len()
   "${done} of ${total} done"
 }
 
@@ -247,7 +247,7 @@ fn summary(m: Model) -> String = {
 fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, update)
 
 test "this application commands nothing, so a turn is exactly its update" {
-  let (m, c) = update(init(), SetDraft(text: "buy milk"))
+  let (m, c) = init().update(SetDraft(text: "buy milk"))
   assert m.draft == "buy milk"
   let nothing: Cmd[Msg] = NoCmd
   assert c == nothing
@@ -259,7 +259,7 @@ fn seed_go(m: Model, i: Int, n: Int) -> Model =
   if i > n {
     m
   } else {
-    seed_go(turn(turn(m, SetDraft(text: "task" ++ to_string(i))), Add), i + 1, n)
+    seed_go(m.turn(SetDraft(text: "task" ++ to_string(i))).turn(Add), i + 1, n)
   }
 
 test "a payload lands in the field the listener that heard it names" {
@@ -270,16 +270,16 @@ test "a payload lands in the field the listener that heard it names" {
   # The composer's field and the row editor's field are two listeners that are
   # equal as far as the reconciler and the host are concerned, and mean two
   # different things. That is the whole of what has to be right here.
-  assert deliver(on_value("input", SetDraft), "buy milk") == SetDraft(text: "buy milk")
-  assert deliver(on_value("input", SetEdit), "new") == SetEdit(text: "new")
+  assert on_value("input", SetDraft).deliver("buy milk") == SetDraft(text: "buy milk")
+  assert on_value("input", SetEdit).deliver("new") == SetEdit(text: "new")
   # The two the wire cannot tell apart.
   assert on_value("input", SetDraft) == on_value("input", SetEdit)
   # A button's listener ignores what it is handed, which is what lets the
   # boundary pass `""` to every `NoData` listener.
-  assert deliver(on_click(Add), "buy milk") == Add
-  assert deliver(on_click(Toggle(id: 3)), "buy milk") == Toggle(id: 3)
+  assert on_click(Add).deliver("buy milk") == Add
+  assert on_click(Toggle(id: 3)).deliver("buy milk") == Toggle(id: 3)
   # And the field it lands in is the field `update` then writes.
-  let composing = turn(init(), deliver(on_value("input", SetDraft), "buy milk"))
+  let composing = init().turn(on_value("input", SetDraft).deliver("buy milk"))
   assert composing.draft == "buy milk"
   assert composing.edit == ""
 }
@@ -288,12 +288,12 @@ test "each of the two fields in the view is wired to its own message" {
   # The assertion the tree comparison below cannot make, at the two places it
   # matters. `first_kid` reaches the `<input>` of the composer and of an open
   # row; `listener_of` reads the one listener each declares.
-  match listener_of(first_kid(compose_row(init()))) {
+  match init().compose_row().first_kid().listener_of() {
     None -> { assert false }
     Some(l) -> { assert deliver(l, "buy milk") == SetDraft(text: "buy milk") }
   }
-  let open = turn(seeded(2), Edit(id: 2))
-  match listener_of(first_kid(row(open, Todo { id: 2, title: "task2", done: false }))) {
+  let open = seeded(2).turn(Edit(id: 2))
+  match row(open, Todo { id: 2, title: "task2", done: false }).first_kid().listener_of() {
     None -> { assert false }
     Some(l) -> { assert deliver(l, "task2!") == SetEdit(text: "task2!") }
   }
@@ -312,7 +312,7 @@ fn listener_of(n: Option[Node[Msg]]) -> Option[On[Msg]] =
 test "typing is one message whatever the length of what was typed" {
   # The thing the key palette could not do. A title of any length, a paste, an
   # IME commit: one `input` event, one message, one turn.
-  let m = turn(init(), SetDraft(text: "buy milk and eggs"))
+  let m = init().turn(SetDraft(text: "buy milk and eggs"))
   assert m.draft == "buy milk and eggs"
   # A field the user emptied is an empty draft rather than an unchanged one:
   # the payload is the field's value, not a keystroke to append.
@@ -320,7 +320,7 @@ test "typing is one message whatever the length of what was typed" {
 }
 
 test "add commits the draft and clears it" {
-  let m = turn(turn(init(), SetDraft(text: "buy milk")), Add)
+  let m = init().turn(SetDraft(text: "buy milk")).turn(Add)
   assert m.todos == [Todo { id: 1, title: "buy milk", done: false }]
   assert m.draft == ""
   assert m.next_id == 2
@@ -333,15 +333,15 @@ test "toggle, drop and filter are the plain list operations" {
   assert len(m.todos) == 3
   let t = turn(m, Toggle(id: 2))
   assert t.todos[1].done
-  assert len(visible(Model { ..t, filter: Active })) == 2
-  assert len(visible(Model { ..t, filter: Done })) == 1
+  assert visible(Model { ..t, filter: Active }).len() == 2
+  assert visible(Model { ..t, filter: Done }).len() == 1
   let d = turn(t, Drop(id: 2))
   assert len(d.todos) == 2
   assert d.todos[1].id == 3
 }
 
 test "an edit is a second field, and the two never feed each other" {
-  let m = turn(seeded(3), Edit(id: 2))
+  let m = seeded(3).turn(Edit(id: 2))
   assert m.editing == Some(2)
   assert m.edit == "task2"
   let typing = turn(m, SetEdit(text: "task2!"))
@@ -358,14 +358,14 @@ test "an edit is a second field, and the two never feed each other" {
 }
 
 test "dropping the row being edited closes the editor" {
-  let m = turn(seeded(3), Edit(id: 2))
+  let m = seeded(3).turn(Edit(id: 2))
   let d = turn(m, Drop(id: 2))
   assert d.editing == None
   assert d.edit == ""
 }
 
 test "the view is a value, so a frame is one assertion" {
-  let m = view(init())
+  let m = init().view()
   match m {
     Text(_) -> { assert false }
     Elem(tag, props, on, kids, ..) -> {
@@ -376,7 +376,7 @@ test "the view is a value, so a frame is one assertion" {
       assert len(kids) == 5
     }
   }
-  match view(turn(seeded(1), Edit(id: 1))) {
+  match seeded(1).turn(Edit(id: 1)).view() {
     Text(_) -> { assert false }
     Elem(_, props, ..) -> { assert props == [("class", "todo editing")] }
   }
@@ -387,10 +387,10 @@ test "both fields are controlled, so the document renders the model" {
   # the field would be the browser's and nothing could clear it -- `Add`
   # clears the draft, and this is what makes that reach the screen.
   let field: Node[Msg] = input(class: "field", value: "buy milk", on: [on_value("input", SetDraft)])
-  assert first_kid(compose_row(turn(init(), SetDraft(text: "buy milk")))) == Some(field)
+  assert init().turn(SetDraft(text: "buy milk")).compose_row().first_kid() == Some(field)
   let editor: Node[Msg] = input(class: "draft", value: "task2", on: [on_value("input", SetEdit)])
-  let open = turn(seeded(2), Edit(id: 2))
-  assert first_kid(row(open, Todo { id: 2, title: "task2", done: false })) == Some(editor)
+  let open = seeded(2).turn(Edit(id: 2))
+  assert row(open, Todo { id: 2, title: "task2", done: false }).first_kid() == Some(editor)
 }
 
 fn first_kid(n: Node[Msg]) -> Option[Node[Msg]] =

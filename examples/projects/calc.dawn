@@ -64,7 +64,7 @@ fn expr(p: Parser) -> Result[(Int, Parser), String] = {
   var (acc, cur) = term(p)?
   while peek(cur) == Some(Plus) || peek(cur) == Some(Minus) {
     let op = peek(cur)
-    let (rhs, next) = term(advance(cur))?
+    let (rhs, next) = cur.advance().term()?
     acc = match op { Some(Minus) -> acc - rhs, _ -> acc + rhs }
     cur = next
   }
@@ -75,7 +75,7 @@ fn term(p: Parser) -> Result[(Int, Parser), String] = {
   var (acc, cur) = atom(p)?
   while peek(cur) == Some(Star) || peek(cur) == Some(Slash) {
     let op = peek(cur)
-    let (rhs, next) = atom(advance(cur))?
+    let (rhs, next) = cur.advance().atom()?
     acc = match op {
       Some(Slash) -> if rhs == 0 { 0 } else { acc / rhs }
       _ -> acc * rhs
@@ -89,7 +89,7 @@ fn atom(p: Parser) -> Result[(Int, Parser), String] =
   match peek(p) {
     Some(Num(v)) -> Ok((v, advance(p)))
     Some(LParen) -> {
-      let (v, cur) = expr(advance(p))?
+      let (v, cur) = p.advance().expr()?
       match peek(cur) {
         Some(RParen) -> Ok((v, advance(cur)))
         _ -> Err("expected )")
@@ -104,7 +104,7 @@ fn advance(p: Parser) -> Parser = Parser { ..p, pos: p.pos + 1 }
 # ---- entry point ----
 
 const BANNER: String = comptime {
-  "dawn-calc (" ++ join(map(range(0, 3), n => to_string(n)), ".") ++ ")"
+  "dawn-calc (" ++ range(0, 3).map(n => to_string(n)).join(".") ++ ")"
 }
 
 pub fn main() -> Unit !io = {

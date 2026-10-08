@@ -63,7 +63,7 @@ pub fn parse_cmd(m: Model, line: String) -> Msg = {
   match str.split_once(t, " ") {
     Some((cmd, rest)) ->
       if cmd == "press" {
-        match parse_int(str.trim(rest)) {
+        match str.trim(rest).parse_int() {
           Some(n) ->
             match route.press(view(m), n) {
               Some(msg) -> msg
@@ -142,7 +142,7 @@ impl App[Model] {
   fn view(m: Model) -> Widget[Msg] = {
     let done = list.filter(m.todos, t => t.done)
     let header: Widget[Msg] = bold(text(
-      "todo (" ++ to_string(len(done)) ++ "/" ++ to_string(len(m.todos)) ++ " done)"))
+      "todo (" ++ done.len().to_string() ++ "/" ++ m.todos.len().to_string() ++ " done)"))
     column([
       header,
       ..if list.is_empty(m.todos) {
@@ -171,21 +171,21 @@ fn item_row(t: Todo) -> Widget[Msg] =
 fn turn(m: Model, msg: Msg) -> Model = fold_msg(m, msg, update)
 
 test "this application commands nothing, so a turn is exactly its update" {
-  let (m, c) = update(initial(), Add(title: "one"))
+  let (m, c) = initial().update(Add(title: "one"))
   assert len(m.todos) == 1
   let nothing: Cmd[Msg] = NoCmd
   assert c == nothing
 }
 
 test "add assigns increasing ids and never recycles them" {
-  let m = turn(turn(initial(), Add(title: "one")), Add(title: "two"))
+  let m = initial().turn(Add(title: "one")).turn(Add(title: "two"))
   assert list.map(m.todos, t => t.id) == [1, 2]
-  let m2 = turn(turn(m, Del(id: 2)), Add(title: "three"))
+  let m2 = m.turn(Del(id: 2)).turn(Add(title: "three"))
   assert list.map(m2.todos, t => t.id) == [1, 3]
 }
 
 test "toggle flips exactly the named todo, twice is identity" {
-  let m = turn(turn(initial(), Add(title: "a")), Add(title: "b"))
+  let m = initial().turn(Add(title: "a")).turn(Add(title: "b"))
   let once = turn(m, Toggle(id: 2))
   assert list.map(once.todos, t => t.done) == [false, true]
   let twice = turn(once, Toggle(id: 2))
@@ -193,7 +193,7 @@ test "toggle flips exactly the named todo, twice is identity" {
 }
 
 test "missing ids and bad input become notes, not changes" {
-  let m = turn(initial(), Add(title: "a"))
+  let m = initial().turn(Add(title: "a"))
   let miss = turn(m, Toggle(id: 9))
   assert miss.todos == m.todos
   assert miss.note == "no todo #9"
@@ -204,7 +204,7 @@ test "missing ids and bad input become notes, not changes" {
 }
 
 test "quit is a message and a model flag, not a driver special case" {
-  let m = turn(initial(), Quit)
+  let m = initial().turn(Quit)
   assert m.quit
   assert m.note == "bye"
 }
@@ -220,7 +220,7 @@ test "parse_line is total over junk" {
 }
 
 test "press routes through the current view's buttons" {
-  let m = turn(turn(initial(), Add(title: "a")), Add(title: "b"))
+  let m = initial().turn(Add(title: "a")).turn(Add(title: "b"))
   assert parse_cmd(m, "press 1") == Toggle(id: 1)
   assert parse_cmd(m, "press 2") == Toggle(id: 2)
   assert parse_cmd(m, "press 9") == Bad(input: "press 9")
@@ -230,12 +230,12 @@ test "press routes through the current view's buttons" {
 }
 
 test "press numbers rows, not ids: after a deletion they diverge" {
-  let m = turn(turn(turn(initial(), Add(title: "a")), Add(title: "b")), Del(id: 1))
+  let m = initial().turn(Add(title: "a")).turn(Add(title: "b")).turn(Del(id: 1))
   assert parse_cmd(m, "press 1") == Toggle(id: 2)
 }
 
 test "view snapshot: the tree is data and compares with ==" {
-  let m = turn(turn(turn(initial(), Add(title: "buy milk")), Add(title: "ship tea")), Toggle(id: 1))
+  let m = initial().turn(Add(title: "buy milk")).turn(Add(title: "ship tea")).turn(Toggle(id: 1))
   let want: Widget[Msg] = Column(kids: [
     Styled(style: Bold, child: Text(s: "todo (1/2 done)")),
     Row(kids: [
@@ -260,5 +260,5 @@ test "view of the empty model equals its bare-constructor twin too" {
     Styled(style: Dim, child: Text(s:
         "commands: add <title> | tog <id> | del <id> | press <n> | quit")),
   ])
-  assert view(initial()) == want
+  assert initial().view() == want
 }
