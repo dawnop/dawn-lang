@@ -70,10 +70,10 @@ before any of the body is read:
 
 ```dawn
 let tags = ["raw-body", "no-cors", "stream-body"]
-let put = guarded(
-  body_limit(tagged(route_put("/dav/{rest*}", put_file), tags), 4294967296),
-  check_credentials,
-)
+let put = route_put("/dav/{rest*}", put_file)
+  .tagged(tags)
+  .body_limit(4294967296)
+  .guarded(check_credentials)
 ```
 
 - `body_limit(route, n)` replaces `max_body` for that route, up or down. It

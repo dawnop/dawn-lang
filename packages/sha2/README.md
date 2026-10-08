@@ -6,7 +6,7 @@ SHA-256 (FIPS 180-4) in pure Dawn, with an incremental digest and a one-shot hex
 use sha2/sha256
 
 let one = sha256.hex(bytes)                       # 64 lower-case hex digits
-let d = sha256.update(sha256.update(sha256.new(), a), b)
+let d = sha256.new() |> sha256.update(a) |> sha256.update(b)
 let both = sha256.finish(d)                       # the digest of a then b
 ```
 
