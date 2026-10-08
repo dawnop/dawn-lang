@@ -47,7 +47,7 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 |---|---|---|---|---|---|
 | 签名 | `scale` 是第五个入口参数 | Triton 的 `sm_scale` 是运行期实参；cutile-rs 的 `qk_scale: f32` 同 | 本来是缺口（scale 烧进 cubin） | 1 | **本 PR 已修**（f64 与 bf16 两个 kernel，各一个提交） |
 | `* scalar(scale)` | 显式 `scalar(p)` | `s * sm_scale`（Python 里标量直接乘） | K4 §8 第 7 条已裁：`Tile * Float` 不做，运行期读入必须显式写 | 不是缺口 | 已裁，不动 |
-| `lit(0.0)` 累加器 | 显式 `lit` | 0.11 目标写成裸 `0.0`，由 `FromFloat[Tile[D]]` 折成 `lit` | 裸 `0.0` 今天能编，**golden 逐字节不变**（实测），但站点调用图（`record.py`、`gpumap.dawn`）把每个 `lit` 调用配到源码里的一个调用节点，裸字面量折出的 `lit` 没有源码 span，`record.py` 当场拒绝 | 1，但卡在站点调用图的配对规则 | **未做，待裁**（问题 2） |
+| `lit(0.0)` 累加器 | 显式 `lit` | 0.11 目标写成裸 `0.0`，由 `FromFloat[Tile[D]]` 折成 `lit` | 裸 `0.0` 今天能编，**golden 逐字节不变**（实测），但站点调用图（`record.py`、`gpumap.dawn`）把每个 `lit` 调用配到源码里的一个调用节点，裸字面量折出的 `lit` 没有源码 span，`record.py` 当场拒绝 | 1，但卡在站点调用图的配对规则 | **已做**：`record.py` 把裸数字配成可选的 `lit` 行，kernel 两处改写成裸 `0.0`，golden 逐字节不变 |
 | `var m/l/acc` 与 `for` | 声明序携带，`d_range` | 同 | 无 | 无 | 无 |
 | `f64` 与 `bf16` 两份几乎相同的函数 | `flash_attn`、`flash_attn_bf16` | `fn flash_attn[D, A]`，`var m: Tile[A]`，一份体 | 今天能写：用 `[D: FloatDtype, A: FloatDtype + ScalarDtype]`、`p.to(dt)`、`(acc / l).to(F64)`，两个 dispatch 臂各绑一组格式。**已在草稿工程里实测**：bf16 臂的 golden 与单独的 bf16 kernel 只差调用点的名字，f64 臂的累加器初值由 `zeros(o)`（一行）变 `full`（常量加 broadcast），多两个操作 | 1 | **未做，待裁**（问题 1）：它会让 GPU 页展示的那个 kernel 带上泛型签名 |
 | 尺寸 `FA_BQ`、`FA_BK`、`ATT_N`、`ATT_D` 是模块常量 | 常量 | Triton 的 `BLOCK_M`、`BLOCK_N`、`HEAD_DIM` 是 `tl.constexpr` 实参 | P-A（research-tile-surface-09 §5.3）：kernel 写成 `fn flash_attn(bq, bk) -> fn(..)`，字节零变化。当前没有第二个形状，没有消费者；页面、`record.py`、站点测试都把 `fn flash_attn(` 当作 kernel 自己的签名 | 1，无消费者 | **未做**（问题 4），等 K3 的 `flash_attn_gqa` |
