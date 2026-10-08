@@ -157,14 +157,17 @@ type Q = {
   in_for_pattern: Bool,
   inlay: Option[InlayRun],
   found: Option[List[Resolution]],
-  tps: List[TpBinder]
+  tps: List[TpBinder],
+  # the span whose typed expression is wanted, and its type once the walk met it
+  span: Option[(Int, Int)],
+  span_ty: Option[Ty]
 }
 
 ## A type parameter in scope, at the span of its name where it is declared.
 type TpBinder = { name: String, lo: Int, hi: Int }
 
 fn new_q(offset: Int) -> Q =
-  Q { offset: offset, best: None, in_for_pattern: false, inlay: None, found: None, tps: [] }
+  Q { offset: offset, best: None, in_for_pattern: false, inlay: None, found: None, tps: [], span: None, span_ty: None }
 
 fn query(qc: QCx, offset: Int) -> Q = {
   var q = new_q(offset)
@@ -175,6 +178,24 @@ fn query(qc: QCx, offset: Int) -> Q = {
 pub(pkg) fn find_target(qc: QCx, offset: Int) -> Option[Target] = query(qc, offset).best
 
 pub(pkg) fn in_for_pattern(qc: QCx, offset: Int) -> Bool = query(qc, offset).in_for_pattern
+
+## The checker's type for the expression spanning exactly `[lo, hi)`, the
+## outermost one when several nodes share the span, or None when the typed
+## tree has no node there (the enclosing function did not check, or the span
+## is not one expression). The same typed nodes hover reads, found by span
+## instead of by cursor.
+pub(pkg) fn type_of_span(qc: QCx, lo: Int, hi: Int) -> Option[Ty] = {
+  var q = Q { ..new_q(lo), span: Some((lo, hi)) }
+  for d in qc.entry.m.decls {
+    # a top-level function that does not hold the span cannot hold its node
+    let holds = match d {
+      DFn(f) -> f.lo <= lo && hi <= f.hi
+      _ -> true
+    }
+    if holds { q = visit_decl(qc, q, d) }
+  }
+  q.span_ty
+}
 
 # ---- resolutions (docs/lsp-references-design.md §T0) ----
 #
@@ -2961,8 +2982,26 @@ fn hint_propagated(qc: QCx, q: Q, operand_ty: Ty, at: Int) -> Q =
     None -> q
   }
 
+## The span query's bookkeeping, kept out of `walk_e` (whose bytecode is near
+## the JIT's huge-method limit): remember the first node spanning exactly the
+## wanted `[lo, hi)`.
+fn note_span(q: Q, pe: Expr, te: Option[TExpr]) -> Q =
+  match q.span {
+    Some((slo, shi)) ->
+      if q.span_ty == None && e_lo(pe) == slo && e_hi(pe) == shi {
+        match te {
+          Some(t) -> Q { ..q, span_ty: Some(tex_ty(t)) }
+          None -> q
+        }
+      } else {
+        q
+      }
+    None -> q
+  }
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
+  q = note_span(q, pe, te)
   # generic fallback: the expression's own type, which names no declaration
   # and so is only worth printing where it can be the answer
   match te {
