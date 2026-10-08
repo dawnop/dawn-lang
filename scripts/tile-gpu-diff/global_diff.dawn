@@ -106,7 +106,7 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
     let (dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
   }
   Ok(())
 }
@@ -120,7 +120,7 @@ fn launch_times(kernel: String, gx: Int, hs: List[Int], n: Int) -> Result[Unit, 
   if n <= 0 {
     Ok(())
   } else {
-    match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buf(h))) {
+    match gpu.gpu_launch(kernel, gx, 1, 1, list.map(hs, h => gpu.Buffer(h))) {
       Ok(_) -> launch_times(kernel, gx, hs, n - 1)
       Err(e) -> Err(e)
     }
@@ -156,8 +156,8 @@ fn stages(kernel: String, gx: Int, launches: Int, bufs: List[(String, List[Float
             Ok(_) -> {
               let s = gpu.gpu_sync()
               let (last_dt, _last) = bufs[len(bufs) - 1]
-              let r: Result[List[Float], ForeignError] = match gpu.gpu_download(hs[len(hs) - 1]) {
-                Ok(raw) -> Ok(gpu.unpack_from(last_dt, raw))
+              let r: Result[List[Float], ForeignError] = match gpu.gpu_copy_to_host(hs[len(hs) - 1]) {
+                Ok(raw) -> Ok(gpu.decode_floats(last_dt, raw))
                 Err(e) -> Err(e)
               }
               release(hs)

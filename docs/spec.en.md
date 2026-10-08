@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 06118d848408d344 -->
+<!-- doc-check: translation-of docs/spec.md @ ecbda04a4188aaa8 -->
 
 # Dawn Language Specification
 
@@ -4953,26 +4953,26 @@ The reasons, the roadmap and the measurements are in
   NVIDIA's `tileiras`, outside the Dawn toolchain; this specification does not say who calls
   it or when.
 
-**The `Gpu` effect** has seven operations (`gpu_alloc`, `gpu_upload`, `gpu_download`,
+**The `Gpu` effect** has seven operations (`gpu_alloc`, `gpu_copy_from_host`, `gpu_copy_to_host`,
 `gpu_launch`, `gpu_module_global`, `gpu_free`, `gpu_sync`), monomorphic and handle-level; a
-program uses the typed functions over them: `alloc`, `upload`, `download`, `free`, `launch`,
+program uses the typed functions over them: `alloc`, `copy_from_host`, `copy_to_host`, `free`, `launch`,
 `module_global` and `sync`.
 
 - Every operation answers `Result[_, ForeignError]`. Above the operations std mints three
   refusals of its own, byte-identical under every handler: `gpu.bad_length` (`alloc`'s length
-  below 1), `gpu.length_mismatch` (`upload`'s data length is not `size(t)`) and
+  below 1), `gpu.length_mismatch` (`copy_from_host`'s data length is not `size(t)`) and
   `gpu.bad_grid` (an axis of the grid below 1). All three are minted before any handler is
   asked. Every other answer is the raw outcome of the device the handler stands for: the
   seam sits below the error surface.
 - **`launch` names a kernel by a string**: `launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`;
   `grid`, `gy` and `gz` are the three axes of the grid, counting tile blocks; `args` is a list of `LaunchArg`, in the
-  order of the entry parameters: `erase(buffer(t))` is a buffer and `erase(scalar(v))` a scalar passed by value
+  order of the entry parameters: `erase(buffer_arg(t))` is a buffer and `erase(scalar_arg(v))` a scalar passed by value
   (`i32`, `i64`, `f32` or `f64`). The binding from names to kernels
   is the table the handler is installed with, and a name not in it answers `gpu.no_kernel`
   under both handlers. The language checks neither that this name is the one `trace_kernel`
   was given nor that `args` agree with the entry signature in number and format: that is the
   program's responsibility.
-- `launch` returning is not the kernel having run. Only a `download` after `sync` is
+- `launch` returning is not the kernel having run. Only a `copy_to_host` after `sync` is
   guaranteed to see the writes of the launches before it.
 - `module_global(d, kernel, name)` answers a `Tensor[D]` over one exported global of the
   module that defines the kernel, sharing the module's storage; two lookups of one symbol
@@ -4998,7 +4998,7 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   `[(argument position, contents)]`, and each pair is rounded to the format of **that** buffer
   (`round_to`) and written back; a position out of range answers `gpu.bad_write_back` and
   writes nothing. Every input is read before any write-back. The grid is not read.
-- A buffer holds bytes, as memory does: `upload` stores them as given and `download` answers
+- A buffer holds bytes, as memory does: `copy_from_host` stores them as given and `copy_to_host` answers
   them unchanged, so an upload followed by a download is the identity for every format and
   every value. A reference implementation sees `Float`s, so at a launch the fake device
   decodes each buffer to `Float`s, and an `i64` buffer holding a value a `Float` cannot hold
@@ -5059,16 +5059,16 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   in a type but not allocated. `I4` and `F4E2M1FN` are tile formats only, and no buffer of
   either exists.
 - Values go in and out as `List[T]`, where `T` is the tensor's element type:
-  `upload(t: Tensor[T], xs: List[T])` and `download(t: Tensor[T]) -> Result[List[T], _]` need
-  `T: HasDtype + DeviceBits`. `upload` writes each element as the format's bit pattern,
+  `copy_from_host(t: Tensor[T], xs: List[T])` and `copy_to_host(t: Tensor[T]) -> Result[List[T], _]` need
+  `T: HasDtype + DeviceBits`. `copy_from_host` writes each element as the format's bit pattern,
   little-endian, and nothing is rounded on the way in (the value is already the format's: a
-  `BF16` is a bfloat16, and an `Int` crosses whole); `download` answers exactly what the buffer
+  `BF16` is a bfloat16, and an `Int` crosses whole); `copy_to_host` answers exactly what the buffer
   holds. That makes every format lossless, an `i64` beyond ±2^53 and a NaN's payload included.
   `DeviceBits` is implemented by the formats a buffer can hold; `Bool`, `I4` and `F4E2M1FN` have
   a format and no buffer, so uploading a `Tensor[Bool]` is a type error. On the effect, the
-  data crosses as `Bytes` (`gpu_upload(handle, data: Bytes)`, `gpu_download(handle) ->
+  data crosses as `Bytes` (`gpu_copy_from_host(handle, data: Bytes)`, `gpu_copy_to_host(handle) ->
   Result[Bytes, _]`), element `i` in bytes `[i * w, (i + 1) * w)` for the format's width `w`,
-  little-endian. `pack_to(dtype, xs: List[Float])` and `unpack_from(dtype, bytes)` are the same
+  little-endian. `encode_floats(dtype, xs: List[Float])` and `decode_floats(dtype, bytes)` are the same
   encoding by format name over `Float`s, for a program whose buffers have no common element
   type; an `i64` beyond ±2^53 does not survive them.
 - **Scalars cross by value**: a launch's arguments are buffer handles or scalars passed by value

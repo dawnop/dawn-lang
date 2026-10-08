@@ -17,7 +17,7 @@
 use std/list
 use std/map
 use std/str
-use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, buffer, arg_scalar, last_out_with, EntryArg, Entry1,
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg, arg_scalar, last_out_with, EntryArg, Entry1,
   Entry2, Entry3, Entry4, Entry5, entry1, entry2, entry3, entry4, entry5, arg_in, arg_in_whole, arg_out,
   arg_shared, entry_grid }
 use std/gpu
@@ -6252,16 +6252,16 @@ fn run_entry(e: Entry3[Float, Float, Float], n: List[Int], swap: Int,
   let a = alloc(F64, n[0])?
   let b = alloc(F64, n[1])?
   let o = alloc(F64, n[2])?
-  upload(a, list.map(range(0, n[0]), i => to_float(i)))?
-  upload(b, list.map(range(0, n[1]), i => to_float(2 * i)))?
+  copy_from_host(a, list.map(range(0, n[0]), i => to_float(i)))?
+  copy_from_host(b, list.map(range(0, n[1]), i => to_float(2 * i)))?
   if swap == 1 {
-    launch_entry3(e, buffer(a), buffer(a), buffer(o), grid: grid)?
+    launch_entry3(e, buffer_arg(a), buffer_arg(a), buffer_arg(o), grid: grid)?
   } else if swap == 2 {
-    launch_entry3(e, buffer(a), buffer(b), buffer(a), grid: grid)?
+    launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(a), grid: grid)?
   } else {
-    launch_entry3(e, buffer(a), buffer(b), buffer(o), grid: grid)?
+    launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(o), grid: grid)?
   }
-  download(o)
+  copy_to_host(o)
 }
 
 fn launched(e: Entry3[Float, Float, Float], n: List[Int], swap: Int, grid: List[Int]) -> String !Gpu =
@@ -6691,9 +6691,9 @@ fn run_scale(scale: Float) -> Result[List[Float], ForeignError] !Gpu = {
   let (_p, e) = trace3("scale_by", In(F64, Whole), Scalar(F64), Shared(F64), scale_by64)
   let x = alloc(F64, 8)?
   let o = alloc(F64, 8)?
-  upload(x, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])?
-  launch_entry3(e, buffer(x), gpu.scalar(scale), buffer(o), grid: [1])?
-  download(o)
+  copy_from_host(x, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])?
+  launch_entry3(e, buffer_arg(x), gpu.scalar_arg(scale), buffer_arg(o), grid: [1])?
+  copy_to_host(o)
 }
 
 test "K4.2: a Scalar marker records a by-value parameter, and its entry takes a scalar where the kernel does" {

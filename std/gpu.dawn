@@ -13,7 +13,7 @@
 #
 # The seam sits BELOW the error surface, as `Fs`'s does. A handler answers
 # with the raw outcome of the device it stands for; the checks std makes
-# itself (`alloc`'s length, `upload`'s length, `launch`'s grid) live in the
+# itself (`alloc`'s length, `copy_from_host`'s length, `launch`'s grid) live in the
 # functions above the operations, so they are the code under test under
 # every handler, and the three failure kinds they mint are the same string
 # under every handler.
@@ -44,7 +44,7 @@ use std/int/i32.{I32}
 # `I16`, `I32` and `U8` are std/int's, and `I4` is declared below. A program
 # says `alloc(BF16, n)` and `Tensor[BF16]`; one `use std/narrow.{BF16}` brings
 # in the type and the witness. What a tensor holds under each format, and how
-# `upload` and `download` move it (the values a program moves are the
+# `copy_from_host` and `copy_to_host` move it (the values a program moves are the
 # tensor's element type `T`, [`DeviceBits`] encoding each as the format's
 # little-endian pattern, so nothing is rounded on the way in: a value of
 # type `BF16` already is a bfloat16, and an `Int` crosses to an i64 buffer
@@ -267,7 +267,7 @@ pub fn nibble_word(f: fn(Int) -> Int) -> Float = {
 # The runtime copies bytes and knows no format either.
 #
 # What differs per format is the Float view the name-dispatched pair
-# [`pack_to`] / [`unpack_from`] adds for callers whose buffers are
+# [`encode_floats`] / [`decode_floats`] adds for callers whose buffers are
 # heterogeneous (scripts/tile-gpu-diff's drivers, the fake device's launch
 # boundary): how a `Float` becomes a pattern (rounding or wrapping into the
 # format, which is [`round_to`]'s rule) and how a pattern becomes a `Float`.
@@ -315,7 +315,7 @@ fn encoder(dtype: String) -> fn(Float) -> Int = match dtype {
   "i16" -> x => wrap_i16(to_int(x))
   "i8" -> x => wrap_i8(to_int(x))
   "u8" -> x => wrap_u8(to_int(x))
-  _ -> panic("gpu.pack_to: `${dtype}` has no byte packing")
+  _ -> panic("gpu.encode_floats: `${dtype}` has no byte packing")
 }
 
 # The Float a pattern of the named format stands for. The pattern is read
@@ -333,7 +333,7 @@ fn decoder(dtype: String) -> fn(Int) -> Float = match dtype {
   "i16" -> bits => to_float(wrap_i16(bits))
   "i8" -> bits => to_float(wrap_i8(bits))
   "u8" -> bits => to_float(bits)
-  _ -> panic("gpu.unpack_from: `${dtype}` has no byte packing")
+  _ -> panic("gpu.decode_floats: `${dtype}` has no byte packing")
 }
 
 # ---- tensors ----
@@ -344,7 +344,7 @@ fn decoder(dtype: String) -> fn(Int) -> Float = match dtype {
 ## a type error and not a launch failure.
 pub opaque type Tensor[D] = (Int, Int)
 
-## The handle a handler issued for `t`, as [`Buf`] wants it.
+## The handle a handler issued for `t`, as [`Buffer`] wants it.
 pub fn handle_of[D](t: Tensor[D]) -> Int = {
   let p: (Int, Int) = t
   let (h, _n) = p
@@ -367,7 +367,7 @@ pub fn size[D](t: Tensor[D]) -> Int = {
 ## argument area of `cuLaunchKernel` takes (every parameter there is one
 ## 8-byte word, and the driver reads the width the kernel declared).
 pub type LaunchArg =
-  | Buf(handle: Int)
+  | Buffer(handle: Int)
   | Word(dtype: String, bits: Int)
 derive Show
 
@@ -379,7 +379,7 @@ derive Show
 ## and not `HasDtype` because Dawn has no supertraits, so a subset of the
 ## formats `HasDtype` covers can only be named by a bound of its own. An
 ## opaque type inherits only `Eq`, `Hash` and `Ord` from its target, so
-## `scalar` of an `F16`, a `BF16` or an `I8` does not check.
+## `scalar_arg` of an `F16`, a `BF16` or an `I8` does not check.
 pub trait ScalarDtype[A] {
   fn scalar_dtype() -> Dtype[A]
   fn scalar_word(v: A) -> LaunchArg
@@ -406,22 +406,22 @@ impl ScalarDtype[F32] {
 }
 
 ## One argument of a typed launch, its format `A` in the type: a buffer
-## made by [`buffer`] or a scalar made by [`scalar`]. What the type cannot
+## made by [`buffer_arg`] or a scalar made by [`scalar_arg`]. What the type cannot
 ## say, which of the two the kernel wants at a position, is checked above
 ## the effect by [`launch_entry1`] and its siblings (`gpu.bad_entry`).
 pub opaque type Launch[A] = (LaunchArg, Int)
 
 ## `t` as an argument of a launch: the handle, and the element count a
 ## typed launch holds the entry's cells to.
-pub fn buffer[A](t: Tensor[A]) -> Launch[A] = {
-  let l: Launch[A] = (Buf(handle_of(t)), size(t))
+pub fn buffer_arg[A](t: Tensor[A]) -> Launch[A] = {
+  let l: Launch[A] = (Buffer(handle_of(t)), size(t))
   l
 }
 
 ## The value `v` as an argument of a launch, passed by value. `A` is its
 ## host value type, which is the kernel parameter's format: an `F32` is an
 ## f32 parameter, a `Float` an f64 one, an `Int` an i64 one.
-pub fn scalar[A: ScalarDtype](v: A) -> Launch[A] = {
+pub fn scalar_arg[A: ScalarDtype](v: A) -> Launch[A] = {
   let l: Launch[A] = (scalar_word(v), 0)
   l
 }
@@ -442,7 +442,7 @@ pub fn erase[A](l: Launch[A]) -> LaunchArg = {
 ##
 ## Every operation answers `Result`, with an `Err` for what the device
 ## refused. `gpu_alloc` answers a fresh handle for `len` elements of the named
-## format; `gpu_upload` and `gpu_download` move a whole buffer; `gpu_launch`
+## format; `gpu_copy_from_host` and `gpu_copy_to_host` move a whole buffer; `gpu_launch`
 ## runs the kernel of that name over a `gx` by `gy` by `gz` grid of tile
 ## blocks with the given arguments, buffers and scalars, in order; `gpu_sync` waits for
 ## every launch so far. `gpu_module_global` looks one MODULE-LEVEL SYMBOL up
@@ -452,8 +452,8 @@ pub fn erase[A](l: Launch[A]) -> LaunchArg = {
 ## Handles are opaque integers a program never invents.
 pub effect Gpu {
   fn gpu_alloc(dtype: String, len: Int) -> Result[Int, ForeignError]
-  fn gpu_upload(handle: Int, data: Bytes) -> Result[Unit, ForeignError]
-  fn gpu_download(handle: Int) -> Result[Bytes, ForeignError]
+  fn gpu_copy_from_host(handle: Int, data: Bytes) -> Result[Unit, ForeignError]
+  fn gpu_copy_to_host(handle: Int) -> Result[Bytes, ForeignError]
   fn gpu_launch(kernel: String, gx: Int, gy: Int, gz: Int, args: List[LaunchArg]) -> Result[Unit, ForeignError]
   fn gpu_module_global(kernel: String, name: String, dtype: String) -> Result[(Int, Int), ForeignError]
   fn gpu_free(handle: Int) -> Result[Unit, ForeignError]
@@ -488,16 +488,16 @@ pub fn alloc[D](d: Dtype[D], len: Int) -> Result[Tensor[D], ForeignError] !Gpu =
 ## `F4E2M1FN` have a format and no buffer, so moving one is a type error.
 ## `Err(kind: "gpu.length_mismatch")` when `data` does not have exactly
 ## `size(t)` elements, before any handler is asked.
-pub fn upload[T: HasDtype + DeviceBits](t: Tensor[T], data: List[T]) -> Result[Unit, ForeignError] !Gpu = {
+pub fn copy_from_host[T: HasDtype + DeviceBits](t: Tensor[T], data: List[T]) -> Result[Unit, ForeignError] !Gpu = {
   let n = size(t)
   let d: Dtype[T] = dtype_of()
   if len(data) != n {
     Err(refuse("gpu.length_mismatch",
-      "gpu.upload: the tensor holds ${n} element(s), the data has ${len(data)}"))
+      "gpu.copy_from_host: the tensor holds ${n} element(s), the data has ${len(data)}"))
   } else {
     match element_bytes(dtype_name(d)) {
-      None -> Err(refuse("gpu.unsupported_dtype", "gpu.upload: ${dtype_name(d)} is not a buffer format"))
-      Some(w) -> gpu_upload(handle_of(t), pack_words(w, list.map(data, v => to_bits(v))))
+      None -> Err(refuse("gpu.unsupported_dtype", "gpu.copy_from_host: ${dtype_name(d)} is not a buffer format"))
+      Some(w) -> gpu_copy_from_host(handle_of(t), pack_words(w, list.map(data, v => to_bits(v))))
     }
   }
 }
@@ -505,11 +505,11 @@ pub fn upload[T: HasDtype + DeviceBits](t: Tensor[T], data: List[T]) -> Result[U
 ## The contents of `t`, `size(t)` elements, decoded from the tensor's format
 ## ([`DeviceBits`]). Exact for every value the format holds, an i64 past 2^53
 ## included.
-pub fn download[T: HasDtype + DeviceBits](t: Tensor[T]) -> Result[List[T], ForeignError] !Gpu = {
+pub fn copy_to_host[T: HasDtype + DeviceBits](t: Tensor[T]) -> Result[List[T], ForeignError] !Gpu = {
   let d: Dtype[T] = dtype_of()
   match element_bytes(dtype_name(d)) {
-    None -> Err(refuse("gpu.unsupported_dtype", "gpu.download: ${dtype_name(d)} is not a buffer format"))
-    Some(w) -> match gpu_download(handle_of(t)) {
+    None -> Err(refuse("gpu.unsupported_dtype", "gpu.copy_to_host: ${dtype_name(d)} is not a buffer format"))
+    Some(w) -> match gpu_copy_to_host(handle_of(t)) {
       Ok(raw) -> Ok(list.map(unpack_words(w, raw), bits => from_bits(bits)))
       Err(e) -> Err(e)
     }
@@ -525,8 +525,8 @@ pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handl
 # to reach `args` positionally, which is every call but the 2D and 3D few.
 
 ## Run the kernel named `kernel` over a `grid` by `gy` by `gz` grid of tile
-## blocks with `args` as its arguments, in order: `erase(buffer(t))` for a
-## tensor, `erase(scalar(v))` for a value passed by value. A kernel reads the three
+## blocks with `args` as its arguments, in order: `erase(buffer_arg(t))` for a
+## tensor, `erase(scalar_arg(v))` for a value passed by value. A kernel reads the three
 ## axes with `block_id(0)` / `block_id(1)` / `block_id(2)`; a one-dimensional
 ## launch leaves `gy` and `gz` at 1, so a kernel that only reads
 ## `block_id(0)` sees the grid it always did.
@@ -613,7 +613,7 @@ pub fn arg_shared() -> EntryArg = {
 
 ## An argument that is a scalar the launch passes by value: no buffer, no
 ## cells, nothing about it held to the grid. The launch must pass a
-## [`scalar`] there, and a [`buffer`] anywhere else.
+## [`scalar_arg`] there, and a [`buffer_arg`] anywhere else.
 pub fn arg_scalar() -> EntryArg = {
   let a: EntryArg = (ROLE_SCALAR, [], [], [])
   a
@@ -799,15 +799,15 @@ fn kind_problem(args: List[EntryArg], launches: List[(LaunchArg, Int)]) -> Optio
       let (role, _e, _t, _a) = arg_parts(args[i])
       let (a, _n) = launches[i]
       match a {
-        Buf(_h) -> role == ROLE_SCALAR
+        Buffer(_h) -> role == ROLE_SCALAR
         Word(_d, _b) -> role != ROLE_SCALAR
       }
     }) {
       Some(i) -> {
         let (a, _n) = launches[i]
         match a {
-          Buf(_h) -> Some("${arg_word(args, i)} takes a value passed by value (`scalar`), and the launch passes a buffer")
-          Word(_d, _b) -> Some("${arg_word(args, i)} is a buffer, and the launch passes a value (`scalar`)")
+          Buffer(_h) -> Some("${arg_word(args, i)} takes a value passed by value (`scalar_arg`), and the launch passes a buffer")
+          Word(_d, _b) -> Some("${arg_word(args, i)} is a buffer, and the launch passes a value (`scalar_arg`)")
         }
       }
       None -> None
@@ -815,7 +815,7 @@ fn kind_problem(args: List[EntryArg], launches: List[(LaunchArg, Int)]) -> Optio
   }
 
 fn handle_of_launch(a: LaunchArg) -> Int = match a {
-  Buf(h) -> h
+  Buffer(h) -> h
   Word(_d, _b) -> 0 - 1
 }
 
@@ -936,13 +936,13 @@ pub fn entry5[A, B, C, D, E](kernel: String, a: EntryArg, b: EntryArg, c: EntryA
   e
 }
 
-## Run `e` with `a` as its argument, a [`buffer`] or a [`scalar`] as the entry says. The grid is the one the Out cells
+## Run `e` with `a` as its argument, a [`buffer_arg`] or a [`scalar_arg`] as the entry says. The grid is the one the Out cells
 ## make; `grid` names the axes the entry leaves to the launch (a dynamic Out
 ## extent), or all of them when no argument is an Out, and an axis it names
 ## that the entry knows must agree with it. Before any handler is asked:
 ## `Err(kind: "gpu.bad_entry")` for an entry whose cells are malformed or
-## whose argument kinds disagree with the launch (a [`scalar`] where the
-## kernel reads a buffer, a [`buffer`] where it takes a value),
+## whose argument kinds disagree with the launch (a [`scalar_arg`] where the
+## kernel reads a buffer, a [`buffer_arg`] where it takes a value),
 ## `gpu.aliased_argument` when an Out or Shared argument is the buffer of
 ## another argument, `gpu.grid_mismatch` when `grid` or an In argument's
 ## cells disagree with the Out cells, `gpu.short_tensor` when a tensor is
@@ -995,8 +995,8 @@ pub fn launch_entry5[A, B, C, D, E](e: Entry5[A, B, C, D, E], a: Launch[A], b: L
 ## from the fake device). That is the whole observable difference between
 ## the two symbol visibilities, and it is the reason this operation exists.
 ##
-## The tensor SHARES the module's storage: [`upload`] writes what the next
-## launch reads and [`download`] reads what the last one wrote. Two lookups of
+## The tensor SHARES the module's storage: [`copy_from_host`] writes what the next
+## launch reads and [`copy_to_host`] reads what the last one wrote. Two lookups of
 ## one symbol answer the SAME handle, so a program cannot hold two aliases
 ## of one global and see them disagree, and [`free`] on that handle is
 ## ACCEPTED AND DOES NOTHING: the memory belongs to the module and the
@@ -1111,7 +1111,7 @@ pub fn reference_kernels() -> Map[String, (Int, WideRefFn)] =
 # values the fake device hands a reference.
 fn buffers_of(args: List[LaunchArg]) -> List[Int] =
   list.fold(args, [], (acc, a) => match a {
-    Buf(h) -> acc ++ [h]
+    Buffer(h) -> acc ++ [h]
     Word(_d, _b) -> acc
   })
 
@@ -1124,7 +1124,7 @@ fn word_value(dtype: String, bits: Int) -> Float = match dtype {
 
 fn scalars_of(args: List[LaunchArg]) -> List[Float] =
   list.fold(args, [], (acc, a) => match a {
-    Buf(_h) -> acc
+    Buffer(_h) -> acc
     Word(d, b) -> acc ++ [word_value(d, b)]
   })
 
@@ -1229,15 +1229,15 @@ fn zero_bytes(n: Int) -> Bytes = {
 
 ## Run `body` against a device that is a table in host memory. Handles count
 ## up from 1 per installation; a buffer is its format and the `Bytes` it
-## holds (exactly what [`upload`] wrote, so an upload followed by a download
+## holds (exactly what [`copy_from_host`] wrote, so an upload followed by a download
 ## is the identity on every format and every value, an i64 past 2^53
 ## included), and the formats are [`element_bytes`]'s
 ## (`gpu.unsupported_dtype` otherwise); a handle that was never issued or
 ## was freed answers `gpu.no_such_buffer`. [`gpu_launch`] looks `kernel` up in
 ## `kernels`, hands the reference implementation the format and the contents
-## of every argument buffer in order, decoded to `List[Float]` ([`unpack_from`]),
+## of every argument buffer in order, decoded to `List[Float]` ([`decode_floats`]),
 ## and stores each `(position, contents)` pair it returns ([`WideRefFn`]),
-## encoded back ([`pack_to`]), as the contents of the argument at that
+## encoded back ([`encode_floats`]), as the contents of the argument at that
 ## position. An i64 buffer holding an element a `Float` cannot hold exactly
 ## (past +/-2^53) is refused at the launch with `gpu.fake_inexact`, naming the
 ## buffer and the element: a reference sees `Float`s, and a silently rounded
@@ -1249,9 +1249,9 @@ fn zero_bytes(n: Int) -> Bytes = {
 ## otherwise); the grid is not consulted, a reference implementation
 ## computes the whole buffer at once; an unknown name answers
 ## `gpu.no_kernel`. A buffer holds what memory of its format would: what
-## [`gpu_upload`] stores is the bytes as given, and what a launch writes is
-## rounded to the buffer's format ([`round_to`], through [`pack_to`]), which
-## for `f64` is the data as given. The length check is [`upload`]'s, above the
+## [`gpu_copy_from_host`] stores is the bytes as given, and what a launch writes is
+## rounded to the buffer's format ([`round_to`], through [`encode_floats`]), which
+## for `f64` is the data as given. The length check is [`copy_from_host`]'s, above the
 ## operation, and is the same code under every handler.
 ##
 ## [`gpu_module_global`] answers from `globals`, and a name that is not in
@@ -1260,7 +1260,7 @@ fn zero_bytes(n: Int) -> Bytes = {
 ## lookup can see, so a `private` global is left out of it exactly as it is
 ## left out of a cubin's exported symbols. The handle it answers is an
 ## ordinary buffer of this store holding the global's declared contents, so
-## [`upload`] and [`download`] reach it the way they reach any other; the
+## [`copy_from_host`] and [`copy_to_host`] reach it the way they reach any other; the
 ## element FORMAT it is asked for must be the one the declaration used
 ## (`gpu.bad_global_dtype` otherwise), because the handle carries the format
 ## it was issued with and neither handler reinterprets one format's storage
@@ -1289,7 +1289,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
         Ok(h)
       }
     }
-    gpu_upload(handle, data) => match map.get(store, handle) {
+    gpu_copy_from_host(handle, data) => match map.get(store, handle) {
       Some(b) -> {
         let (dt, old) = b
         if bytes.len(data) != bytes.len(old) {
@@ -1302,7 +1302,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
       }
       None -> Err(no_such_buffer("fake device", handle))
     }
-    gpu_download(handle) => match map.get(store, handle) {
+    gpu_copy_to_host(handle) => match map.get(store, handle) {
       Some(b) -> {
         let (_dt, raw) = b
         Ok(raw)
@@ -1333,7 +1333,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
                 None -> {
                   let ins = list.map(bufs, b => {
                     let (dt, raw) = b
-                    unpack_from(dt, raw)
+                    decode_floats(dt, raw)
                   })
                   # every input was read above, so an in-place write-back
                   # (a position that is also an input) sees what the device's
@@ -1352,7 +1352,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
                       for w in writes {
                         let (pos, v) = w
                         let dt = dtypes[pos]
-                        store = map.insert(store, args[pos], (dt, pack_to(dt, v)))
+                        store = map.insert(store, args[pos], (dt, encode_floats(dt, v)))
                       }
                       Ok(())
                     }
@@ -1394,7 +1394,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
               } else {
                 let h = next
                 next = next + 1
-                store = map.insert(store, h, (dt, pack_to(dt, v)))
+                store = map.insert(store, h, (dt, encode_floats(dt, v)))
                 syms = map.insert(syms, kernel ++ "/" ++ name, h)
                 borrowed = map.insert(borrowed, h, true)
                 Ok((h, len(v)))
@@ -1432,20 +1432,20 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
 ## element type: a driver that allocates a list of `(format name, contents)`
 ## buffers, and the fake device at the line where it hands a reference
 ## implementation `Float`s. A program that knows its element type uses
-## [`upload`] and [`download`], which are exact for an `Int` past 2^53 where
-## this cannot be (`unpack_from` of an i64 rounds there).
+## [`copy_from_host`] and [`copy_to_host`], which are exact for an `Int` past 2^53 where
+## this cannot be (`decode_floats` of an i64 rounds there).
 ##
-## The pairing with [`unpack_from`] is what makes a format's round trip a
+## The pairing with [`decode_floats`] is what makes a format's round trip a
 ## property of one line rather than of the handler.
-pub fn pack_to(dtype: String, xs: List[Float]) -> Bytes = {
+pub fn encode_floats(dtype: String, xs: List[Float]) -> Bytes = {
   let enc = encoder(dtype)
   pack_words(unwrap_or(element_bytes(dtype), 1), list.map(xs, x => enc(x)))
 }
 
 ## The values a buffer of the named format holds, from its bytes: the
-## inverse of [`pack_to`] on every value the format can hold. An i64 beyond
+## inverse of [`encode_floats`] on every value the format can hold. An i64 beyond
 ## +/-2^53 comes back rounded to the nearest `Float`.
-pub fn unpack_from(dtype: String, b: Bytes) -> List[Float] = {
+pub fn decode_floats(dtype: String, b: Bytes) -> List[Float] = {
   let dec = decoder(dtype)
   list.map(unpack_words(unwrap_or(element_bytes(dtype), 1), b), bits => dec(bits))
 }
@@ -1457,7 +1457,7 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[LaunchArg]) -
   var a: Array[Int] = array_new()
   for arg in args {
     match arg {
-      Buf(h) -> match map.get(table, h) {
+      Buffer(h) -> match map.get(table, h) {
         Some(b) -> {
           let (p, _n, _dt) = b
           a = array_push(a, p)
@@ -1487,7 +1487,7 @@ fn device_pointers(table: Map[Int, (Int, Int, String)], args: List[LaunchArg]) -
 ## accepts the formats [`element_bytes`] knows, and answers
 ## `gpu.unsupported_dtype` otherwise, as the fake device does. EVERY format
 ## crosses to the runtime as `Bytes` (little-endian, `f64` and `i64`
-## included), laid out by [`upload`] and decoded by [`download`], so the
+## included), laid out by [`copy_from_host`] and decoded by [`copy_to_host`], so the
 ## runtime copies bytes and knows nothing about the format. The handler
 ## refuses a byte count that is not the buffer's (`gpu.length_mismatch`)
 ## before the driver is asked, because a copy that long would write past the
@@ -1538,7 +1538,7 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
         Err(e) -> Err(e)
       }
     }
-    gpu_upload(handle, data) => match map.get(bufs, handle) {
+    gpu_copy_from_host(handle, data) => match map.get(bufs, handle) {
       Some(b) -> {
         let (p, n, dt) = b
         let nbytes = n * unwrap_or(element_bytes(dt), 1)
@@ -1546,15 +1546,15 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
           Err(refuse("gpu.length_mismatch",
             "real device: buffer ${handle} holds ${nbytes} byte(s), the upload has ${bytes.len(data)}"))
         } else {
-          gpu_upload_bytes_host(p, data)
+          gpu_memcpy_htod_host(p, data)
         }
       }
       None -> Err(no_such_buffer("real device", handle))
     }
-    gpu_download(handle) => match map.get(bufs, handle) {
+    gpu_copy_to_host(handle) => match map.get(bufs, handle) {
       Some(b) -> {
         let (p, n, dt) = b
-        gpu_download_bytes_host(p, n * unwrap_or(element_bytes(dt), 1))
+        gpu_memcpy_dtoh_host(p, n * unwrap_or(element_bytes(dt), 1))
       }
       None -> Err(no_such_buffer("real device", handle))
     }
@@ -1690,14 +1690,14 @@ fn masked_lanes(old: List[Float], n: Int, f: fn(Int) -> Float) -> List[Float] =
 # against a real device is scripts/tile-gpu-diff, and its ledger.
 
 # The Float view of a tensor by its format's name: what a test says when it
-# wants a value off the format's grid to cross, which the typed `upload`
+# wants a value off the format's grid to cross, which the typed `copy_from_host`
 # cannot say (a `BF16` is already on the grid).
 fn upload_floats[D](d: Dtype[D], t: Tensor[D], xs: List[Float]) -> Result[Unit, ForeignError] !Gpu =
-  gpu_upload(handle_of(t), pack_to(dtype_name(d), xs))
+  gpu_copy_from_host(handle_of(t), encode_floats(dtype_name(d), xs))
 
 fn download_floats[D](d: Dtype[D], t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
-  match gpu_download(handle_of(t)) {
-    Ok(raw) -> Ok(unpack_from(dtype_name(d), raw))
+  match gpu_copy_to_host(handle_of(t)) {
+    Ok(raw) -> Ok(decode_floats(dtype_name(d), raw))
     Err(e) -> Err(e)
   }
 
@@ -1708,7 +1708,7 @@ fn vadd_as[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> 
   let out = alloc(d, n)?
   upload_floats(d, a, xs)?
   upload_floats(d, b, ys)?
-  launch(kernel, 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
+  launch(kernel, 1, [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
   sync()?
   let r = download_floats(d, out)?
   free(a)?
@@ -1732,10 +1732,10 @@ test "a !Gpu program runs vadd on a machine without a GPU and gets the right ans
 fn sum_on_device(xs: List[Float], blocks: Int) -> Result[List[Float], ForeignError] !Gpu = {
   let x = alloc(F64, len(xs))?
   let out = alloc(F64, blocks * 128)?
-  upload(x, xs)?
-  launch("sum", blocks, [erase(buffer(x)), erase(buffer(out))])?
+  copy_from_host(x, xs)?
+  launch("sum", blocks, [erase(buffer_arg(x)), erase(buffer_arg(out))])?
   sync()?
-  let r = download(out)?
+  let r = copy_to_host(out)?
   free(x)?
   free(out)?
   Ok(r)
@@ -1782,10 +1782,10 @@ fn kind_of[T](r: Result[T, ForeignError]) -> String = match r {
 
 fn wrong_length_upload() -> Result[List[Float], ForeignError] !Gpu = {
   let t = alloc(F64, 3)?
-  match upload(t, [1.0, 2.0, 3.0, 4.0]) {
+  match copy_from_host(t, [1.0, 2.0, 3.0, 4.0]) {
     Ok(_) -> Err(refuse("test.accepted", "a wrong-length upload was accepted"))
     Err(e) ->
-      if e.kind == "gpu.length_mismatch" { download(t) } else { Err(e) }
+      if e.kind == "gpu.length_mismatch" { copy_to_host(t) } else { Err(e) }
   }
 }
 
@@ -1797,8 +1797,8 @@ test "upload of a vector of the wrong length is refused above the effect" {
   let under_yes = {
     with handle Gpu {
       gpu_alloc(_dtype, _len) => Ok(1)
-      gpu_upload(_handle, _data) => Ok(())
-      gpu_download(_handle) => Ok(bytes.utf8(""))
+      gpu_copy_from_host(_handle, _data) => Ok(())
+      gpu_copy_to_host(_handle) => Ok(bytes.utf8(""))
       gpu_launch(_kernel, _gx, _gy, _gz, _args) => Ok(())
       gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
       gpu_free(_handle) => Ok(())
@@ -1859,17 +1859,17 @@ test "round_to i32 truncates toward zero and then wraps" {
 }
 
 test "an i32 buffer round-trips every value exactly, low byte first" {
-  assert bytes.to_hex(pack_to("i32", [1.0])) == "01000000"
-  assert bytes.to_hex(pack_to("i32", [0.0 - 1.0])) == "ffffffff"
-  assert bytes.to_hex(pack_to("i32", [0.0 - 2147483648.0])) == "00000080"
-  assert bytes.to_hex(pack_to("i32", [2147483647.0])) == "ffffff7f"
-  assert bytes.len(pack_to("i32", [1.0, 2.0, 3.0])) == 12
+  assert bytes.to_hex(encode_floats("i32", [1.0])) == "01000000"
+  assert bytes.to_hex(encode_floats("i32", [0.0 - 1.0])) == "ffffffff"
+  assert bytes.to_hex(encode_floats("i32", [0.0 - 2147483648.0])) == "00000080"
+  assert bytes.to_hex(encode_floats("i32", [2147483647.0])) == "ffffff7f"
+  assert bytes.len(encode_floats("i32", [1.0, 2.0, 3.0])) == 12
   # the List[Float] channel is LOSSLESS here: 53 significand bits cover the
   # whole i32 range, so every extreme comes back as itself
   let xs = [0.0, 1.0, 0.0 - 1.0, 2147483647.0, 0.0 - 2147483648.0, 123456789.0, 0.0 - 987654321.0]
-  assert unpack_from("i32", pack_to("i32", xs)) == xs
+  assert decode_floats("i32", encode_floats("i32", xs)) == xs
   # a value above the range wraps on the way in, exactly as round_to says
-  assert unpack_from("i32", pack_to("i32", [3000000000.0])) == [0.0 - 1294967296.0]
+  assert decode_floats("i32", encode_floats("i32", [3000000000.0])) == [0.0 - 1294967296.0]
 }
 
 # ---- bf16 ----
@@ -1877,17 +1877,17 @@ test "an i32 buffer round-trips every value exactly, low byte first" {
 test "packing rounds every value to bf16 and lays the pattern down low byte first; unpacking is exact" {
   # 1 + 3/512 is off the grid; its nearest bf16 is 1 + 1/128, and the two
   # pack alike. A truncating pack would give 1.0's bytes instead.
-  assert pack_to("bf16", [1.0 + 3.0 / 512.0]) == pack_to("bf16", [1.0 + 1.0 / 128.0])
-  assert bytes.to_hex(pack_to("bf16", [1.0 + 3.0 / 512.0])) == "813f"
-  assert bytes.to_hex(pack_to("bf16", [1.0, -1.5, 0.0])) == "803fc0bf0000"
+  assert encode_floats("bf16", [1.0 + 3.0 / 512.0]) == encode_floats("bf16", [1.0 + 1.0 / 128.0])
+  assert bytes.to_hex(encode_floats("bf16", [1.0 + 3.0 / 512.0])) == "813f"
+  assert bytes.to_hex(encode_floats("bf16", [1.0, -1.5, 0.0])) == "803fc0bf0000"
   let inf = 1.0 / 0.0
   let xs = [0.1, -2.0, 1.0e-40, 3.4e38, 0.0 * (0.0 - 1.0), inf, 65504.0]
-  let back = unpack_from("bf16", pack_to("bf16", xs))
+  let back = decode_floats("bf16", encode_floats("bf16", xs))
   assert to_string(back) == to_string(list.map(xs, x => narrow.round_bf16(x)))
   assert 1.0 / back[4] == 0.0 - inf
   assert back[3] == inf
-  assert bytes.len(pack_to("bf16", xs)) == 14
-  assert unpack_from("bf16", bytes.utf8("")) == []
+  assert bytes.len(encode_floats("bf16", xs)) == 14
+  assert decode_floats("bf16", bytes.utf8("")) == []
 }
 
 # A fixed-seed 31-bit LCG: the random half of every pair below is a function
@@ -1975,15 +1975,15 @@ test "uploading Floats off the bf16 grid rounds them on the way in, so the fake 
 fn launch_refusals() -> List[String] !Gpu = {
   let a: Result[Tensor[Float], ForeignError] = alloc(F64, 2)
   let h = match a {
-    Ok(t) -> Buf(handle_of(t))
-    Err(_) -> Buf(0 - 1)
+    Ok(t) -> Buffer(handle_of(t))
+    Err(_) -> Buffer(0 - 1)
   }
   [
     # the grid is checked before the name is looked up: `nope` never reaches the device
     kind_of(launch("nope", 0, [h])),
     kind_of(launch("nope", 1, [h])),
     kind_of(launch("vadd", 1, [])),
-    kind_of(launch("vadd", 1, [h, h, Buf(99)])),
+    kind_of(launch("vadd", 1, [h, h, Buffer(99)])),
     kind_of(launch("vadd", 4, [h, h, h]))
   ]
 }
@@ -2014,8 +2014,8 @@ test "launch hands the handler a grid whose second and third axes default to one
   let grids = {
     with handle Gpu {
       gpu_alloc(_dtype, _len) => Ok(1)
-      gpu_upload(_handle, _data) => Ok(())
-      gpu_download(_handle) => Ok(bytes.utf8(""))
+      gpu_copy_from_host(_handle, _data) => Ok(())
+      gpu_copy_to_host(_handle) => Ok(bytes.utf8(""))
       gpu_launch(_kernel, gx, gy, gz, _args) => Err(refuse("test.grid", "${gx} ${gy} ${gz}"))
       gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
       gpu_free(_handle) => Ok(())
@@ -2035,7 +2035,7 @@ test "launch hands the handler a grid whose second and third axes default to one
 
 fn too_few_buffers() -> Result[Unit, ForeignError] !Gpu = {
   let a = alloc(F64, 2)?
-  launch("vadd", 1, [erase(buffer(a))])
+  launch("vadd", 1, [erase(buffer_arg(a))])
 }
 
 test "the fake device refuses too few buffers before invoking the reference kernel" {
@@ -2051,7 +2051,7 @@ test "the fake device refuses too few buffers before invoking the reference kern
 fn one_short_buffer() -> Result[Unit, ForeignError] !Gpu = {
   let a = alloc(F64, 2)?
   let b = alloc(F64, 2)?
-  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b))])
+  launch("vadd", 1, [erase(buffer_arg(a)), erase(buffer_arg(b))])
 }
 
 test "the fake device refuses one buffer short instead of overwriting an input" {
@@ -2070,9 +2070,9 @@ fn use_after_free() -> (Int, Int, String, String) !Gpu = {
   match (a, b) {
     (Ok(ta), Ok(tb)) -> {
       let freed = kind_of(free(ta))
-      let after = kind_of(download(ta))
+      let after = kind_of(copy_to_host(ta))
       let twice = kind_of(free(ta))
-      let still = kind_of(download(tb))
+      let still = kind_of(copy_to_host(tb))
       (handle_of(ta), size(tb), freed ++ "/" ++ after ++ "/" ++ twice, still)
     }
     _ -> (0, 0, "alloc failed", "alloc failed")
@@ -2132,14 +2132,14 @@ test "the fake device answers a lookup for the globals its module declares, and 
 
 fn global_is_storage() -> Result[(List[Float], List[Float], List[Float]), ForeignError] !Gpu = {
   let a = module_global(F64, "k", "frozen")?
-  let before = download(a)?
+  let before = copy_to_host(a)?
   # a SECOND lookup of the same symbol, and `free` on the first: the handle
   # is the installation's and stays valid, and both names are one storage
   let _ = free(a)
   let b = module_global(F64, "k", "frozen")?
-  upload(b, [9.0, 8.0, 7.0, 6.0])?
-  let through_b = download(b)?
-  let through_a = download(a)?
+  copy_from_host(b, [9.0, 8.0, 7.0, 6.0])?
+  let through_b = copy_to_host(b)?
+  let through_a = copy_to_host(a)?
   Ok((before, through_b, through_a))
 }
 
@@ -2151,13 +2151,13 @@ test "a module global is one storage under every lookup of its name, and free le
 
 fn global_launch_reads_the_write() -> Result[List[Float], ForeignError] !Gpu = {
   let g = module_global(F64, "k", "shown")?
-  upload(g, [100.0, 200.0, 300.0, 400.0])?
+  copy_from_host(g, [100.0, 200.0, 300.0, 400.0])?
   let x = alloc(F64, 4)?
   let out = alloc(F64, 12)?
-  upload(x, [1.0, 1.0, 1.0, 1.0])?
-  launch("k", 1, [erase(buffer(x)), erase(buffer(out))])?
+  copy_from_host(x, [1.0, 1.0, 1.0, 1.0])?
+  launch("k", 1, [erase(buffer_arg(x)), erase(buffer_arg(out))])?
   sync()?
-  download(out)
+  copy_to_host(out)
 }
 
 test "the fake device's reference is handed the tables the caller installed it with" {
@@ -2191,14 +2191,14 @@ fn real_refusals() -> List[String] !Gpu = {
   let f32: Result[Tensor[F32], ForeignError] = alloc(F32, 4)
   [
     kind_of(f32),
-    kind_of(upload(ghost, [1.0, 2.0])),
-    kind_of(download(ghost)),
+    kind_of(copy_from_host(ghost, [1.0, 2.0])),
+    kind_of(copy_to_host(ghost)),
     kind_of(free(ghost)),
     # the name is looked up before anything else
-    kind_of(launch("nope", 1, [erase(buffer(ghost))])),
+    kind_of(launch("nope", 1, [erase(buffer_arg(ghost))])),
     # a known name with no buffers, and with a buffer nobody has
     kind_of(launch("vadd", 1, [])),
-    kind_of(launch("vadd", 1, [erase(buffer(ghost))]))
+    kind_of(launch("vadd", 1, [erase(buffer_arg(ghost))]))
   ]
 }
 
@@ -2226,86 +2226,86 @@ test "an f16 buffer holds the nearest binary16 of what was uploaded, low byte fi
   # 1 + 3/4096 is off the grid; its nearest binary16 is 1 + 1/1024, and the
   # two pack alike. A truncating pack would give 1.0's bytes instead, which
   # is the whole of f16-rounds-like-bf16's first half.
-  assert pack_to("f16", [1.0 + 3.0 / 4096.0]) == pack_to("f16", [1.0 + 1.0 / 1024.0])
-  assert bytes.to_hex(pack_to("f16", [1.0 + 3.0 / 4096.0])) == "013c"
-  assert bytes.to_hex(pack_to("f16", [1.0, -1.5, 0.0])) == "003c00be0000"
+  assert encode_floats("f16", [1.0 + 3.0 / 4096.0]) == encode_floats("f16", [1.0 + 1.0 / 1024.0])
+  assert bytes.to_hex(encode_floats("f16", [1.0 + 3.0 / 4096.0])) == "013c"
+  assert bytes.to_hex(encode_floats("f16", [1.0, -1.5, 0.0])) == "003c00be0000"
   let inf = 1.0 / 0.0
   let xs = [0.1, -2.0, 1.0e-8, 70000.0, 0.0 * (0.0 - 1.0), inf, 65504.0]
-  let back = unpack_from("f16", pack_to("f16", xs))
+  let back = decode_floats("f16", encode_floats("f16", xs))
   assert to_string(back) == to_string(list.map(xs, x => narrow.round_f16(x)))
   assert 1.0 / back[4] == 0.0 - inf
   assert back[3] == inf
-  assert bytes.len(pack_to("f16", xs)) == 14
-  assert unpack_from("f16", bytes.utf8("")) == []
+  assert bytes.len(encode_floats("f16", xs)) == 14
+  assert decode_floats("f16", bytes.utf8("")) == []
   # and it is NOT bf16's: the two formats disagree on every value whose
   # significand needs more than eight bits
-  assert pack_to("f16", [1.0]) != pack_to("bf16", [1.0])
+  assert encode_floats("f16", [1.0]) != encode_floats("bf16", [1.0])
 }
 
 test "an i8 and a u8 buffer hold the same octet and read it two ways" {
-  assert bytes.to_hex(pack_to("u8", [0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == "00017f80c8ff"
-  assert bytes.to_hex(pack_to("i8", [0.0, 1.0, 127.0, -128.0, -56.0, -1.0])) == "00017f80c8ff"
+  assert bytes.to_hex(encode_floats("u8", [0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == "00017f80c8ff"
+  assert bytes.to_hex(encode_floats("i8", [0.0, 1.0, 127.0, -128.0, -56.0, -1.0])) == "00017f80c8ff"
   # the same six bytes, the two readings
-  assert unpack_from("u8", pack_to("u8", [0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == [0.0, 1.0, 127.0, 128.0, 200.0, 255.0]
-  assert unpack_from("i8", pack_to("u8", [0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == [0.0, 1.0, 127.0, -128.0, -56.0, -1.0]
+  assert decode_floats("u8", encode_floats("u8", [0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == [0.0, 1.0, 127.0, 128.0, 200.0, 255.0]
+  assert decode_floats("i8", encode_floats("u8", [0.0, 1.0, 127.0, 128.0, 200.0, 255.0])) == [0.0, 1.0, 127.0, -128.0, -56.0, -1.0]
   # both wrap what does not fit, the way round_to says
-  assert unpack_from("u8", pack_to("u8", [300.0])) == [44.0]
-  assert unpack_from("i8", pack_to("i8", [300.0])) == [44.0]
+  assert decode_floats("u8", encode_floats("u8", [300.0])) == [44.0]
+  assert decode_floats("i8", encode_floats("i8", [300.0])) == [44.0]
   assert round_to("u8", 300.0) == 44.0
   assert round_to("i8", 200.0) == 0.0 - 56.0
   assert round_to("u8", 0.0 - 56.0) == 200.0
   assert wrap_i8(200) == 0 - 56
   assert wrap_u8(0 - 56) == 200
-  assert bytes.len(pack_to("i8", [1.0, 2.0, 3.0])) == 3
+  assert bytes.len(encode_floats("i8", [1.0, 2.0, 3.0])) == 3
 }
 
-test "pack_to and unpack_from are the round trip of every format the handlers move" {
+test "encode_floats and decode_floats are the round trip of every format the handlers move" {
   let xs = [0.0, 1.0, 2.0, 3.0]
   # every format but f8E8M0FNU, which has no zero: 0.0 is not one of its
   # values and it says so with a NaN, which is never equal to anything
   for dt in ["f64", "bf16", "f16", "tf32", "i32", "i16", "i64", "i8", "u8", "f8E4M3FN", "f8E5M2"] {
-    assert unpack_from(dt, pack_to(dt, xs)) == xs
-    assert bytes.len(pack_to(dt, xs)) == 4 * unwrap_or(element_bytes(dt), 0)
+    assert decode_floats(dt, encode_floats(dt, xs)) == xs
+    assert bytes.len(encode_floats(dt, xs)) == 4 * unwrap_or(element_bytes(dt), 0)
   }
   let powers = [0.25, 1.0, 2.0, 1024.0]
-  assert unpack_from("f8E8M0FNU", pack_to("f8E8M0FNU", powers)) == powers
-  assert bytes.len(pack_to("f8E8M0FNU", powers)) == 4
+  assert decode_floats("f8E8M0FNU", encode_floats("f8E8M0FNU", powers)) == powers
+  assert bytes.len(encode_floats("f8E8M0FNU", powers)) == 4
 }
 
 test "the formats knife T3 added hold what memory of them holds, low byte first" {
   # i16 wraps at 2^15 and keeps the octets in the device's order
-  assert unpack_from("i16", pack_to("i16", [1.0, -1.0, 32767.0, -32768.0])) == [1.0, -1.0, 32767.0, -32768.0]
-  assert bytes.at(pack_to("i16", [-2.0]), 0) == 0xFE
-  assert bytes.at(pack_to("i16", [-2.0]), 1) == 0xFF
+  assert decode_floats("i16", encode_floats("i16", [1.0, -1.0, 32767.0, -32768.0])) == [1.0, -1.0, 32767.0, -32768.0]
+  assert bytes.at(encode_floats("i16", [-2.0]), 0) == 0xFE
+  assert bytes.at(encode_floats("i16", [-2.0]), 1) == 0xFF
   assert round_to("i16", 32768.0) == 0.0 - 32768.0
   assert round_to("i16", -32769.0) == 32767.0
   assert wrap_i16(0x1FFFF) == -1
   # i64 crosses eight octets and is exact inside a binary64 significand
   let big = [4503599627370495.0, 0.0 - 4503599627370495.0, 8589934592.0]
-  assert unpack_from("i64", pack_to("i64", big)) == big
-  assert bytes.at(pack_to("i64", [-1.0]), 7) == 0xFF
-  assert bytes.at(pack_to("i64", [256.0]), 1) == 1
+  assert decode_floats("i64", encode_floats("i64", big)) == big
+  assert bytes.at(encode_floats("i64", [-1.0]), 7) == 0xFF
+  assert bytes.at(encode_floats("i64", [256.0]), 1) == 1
   # tf32 is four bytes with thirteen zero bits, and the packer rounds
-  assert unpack_from("tf32", pack_to("tf32", [1.0 + pow_two(-30)])) == [1.0]
-  assert bytes.at(pack_to("tf32", [1.0]), 0) == 0
-  assert bytes.at(pack_to("tf32", [1.0]), 3) == 0x3F
+  assert decode_floats("tf32", encode_floats("tf32", [1.0 + pow_two(-30)])) == [1.0]
+  assert bytes.at(encode_floats("tf32", [1.0]), 0) == 0
+  assert bytes.at(encode_floats("tf32", [1.0]), 3) == 0x3F
   # the three fp8 formats are one octet and the packer rounds each its own
   # way: e4m3 keeps four significand bits, e5m2 two, and e8m0 keeps none at
   # all and truncates the exponent
-  assert unpack_from("f8E4M3FN", pack_to("f8E4M3FN", [1.0 + 1.0 / 32.0])) == [1.0]
-  assert unpack_from("f8E5M2", pack_to("f8E5M2", [1.0 + 1.0 / 32.0])) == [1.0]
-  assert unpack_from("f8E8M0FNU", pack_to("f8E8M0FNU", [1.99])) == [1.0]
-  assert bytes.len(pack_to("f8E4M3FN", [1.0, 2.0, 3.0])) == 3
+  assert decode_floats("f8E4M3FN", encode_floats("f8E4M3FN", [1.0 + 1.0 / 32.0])) == [1.0]
+  assert decode_floats("f8E5M2", encode_floats("f8E5M2", [1.0 + 1.0 / 32.0])) == [1.0]
+  assert decode_floats("f8E8M0FNU", encode_floats("f8E8M0FNU", [1.99])) == [1.0]
+  assert bytes.len(encode_floats("f8E4M3FN", [1.0, 2.0, 3.0])) == 3
   # what a value outside a format answers: BOTH SATURATE at the largest
   # finite value, although only one of them has an infinity to overflow to.
   # Knife TA measured it on a B200 rather than reasoning about it, and the
   # earlier reading here (e5m2 to an infinity, e4m3 to NaN) was wrong on
   # both counts; std/narrow's two round functions carry the measurement.
-  assert unpack_from("f8E5M2", pack_to("f8E5M2", [1.0e30])) == [57344.0]
-  assert unpack_from("f8E4M3FN", pack_to("f8E4M3FN", [1.0e30])) == [448.0]
+  assert decode_floats("f8E5M2", encode_floats("f8E5M2", [1.0e30])) == [57344.0]
+  assert decode_floats("f8E4M3FN", encode_floats("f8E4M3FN", [1.0e30])) == [448.0]
   # and f8E8M0FNU takes the magnitude and clamps, so nothing but a NaN
   # answers one
-  assert unpack_from("f8E8M0FNU", pack_to("f8E8M0FNU", [0.0 - 3.0])) == [2.0]
+  assert decode_floats("f8E8M0FNU", encode_floats("f8E8M0FNU", [0.0 - 3.0])) == [2.0]
 }
 
 # 2^k, so the test above can name a value off the tf32 grid without a
@@ -2336,7 +2336,7 @@ fn wide_alloc(dtype: String, bufs: List[List[Float]]) -> Result[List[Int], Forei
   var hs: List[Int] = []
   for buf in bufs {
     let h = gpu_alloc(dtype, len(buf))?
-    gpu_upload(h, pack_to(dtype, buf))?
+    gpu_copy_from_host(h, encode_floats(dtype, buf))?
     hs = hs ++ [h]
   }
   Ok(hs)
@@ -2345,14 +2345,14 @@ fn wide_alloc(dtype: String, bufs: List[List[Float]]) -> Result[List[Int], Forei
 fn wide_read(dtype: String, hs: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
   var out: List[List[Float]] = []
   for h in hs {
-    out = out ++ [unpack_from(dtype, gpu_download(h)?)]
+    out = out ++ [decode_floats(dtype, gpu_copy_to_host(h)?)]
   }
   Ok(out)
 }
 
 fn wide_run(kernel: String, dtype: String, bufs: List[List[Float]]) -> Result[List[List[Float]], ForeignError] !Gpu = {
   let hs = wide_alloc(dtype, bufs)?
-  gpu_launch(kernel, 1, 1, 1, list.map(hs, h => Buf(h)))?
+  gpu_launch(kernel, 1, 1, 1, list.map(hs, h => Buffer(h)))?
   wide_read(dtype, hs)
 }
 
@@ -2389,7 +2389,7 @@ fn f16_vadds(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignErr
   let out = alloc(F16, n)?
   upload_floats(F16, a, xs)?
   upload_floats(F16, b, ys)?
-  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
+  launch("vadd", 1, [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
   download_floats(F16, out)
 }
 
@@ -2428,12 +2428,12 @@ fn masked_run(kernel: String, xs: List[Float], ys: List[Float]) -> Result[List[F
   let tail = list.map(range(0, 8), _i => 0.0 - 7.0)
   match (alloc(F64, 8), alloc(F64, 8), alloc(F64, 8)) {
     (Ok(a), Ok(b), Ok(out)) -> {
-      let _u1 = upload(a, xs)
-      let _u2 = upload(b, ys)
-      let _u3 = upload(out, tail)
-      let args = if len(ys) == 0 { [erase(buffer(a)), erase(buffer(out))] } else { [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))] }
+      let _u1 = copy_from_host(a, xs)
+      let _u2 = copy_from_host(b, ys)
+      let _u3 = copy_from_host(out, tail)
+      let args = if len(ys) == 0 { [erase(buffer_arg(a)), erase(buffer_arg(out))] } else { [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))] }
       match launch(kernel, 1, args) {
-        Ok(_) -> download(out)
+        Ok(_) -> copy_to_host(out)
         Err(e) -> Err(e)
       }
     }
@@ -2501,8 +2501,8 @@ fn entry_launches(launches: fn() -> List[Result[Unit, ForeignError]] !Gpu) -> Li
         next = next + 1
         Ok(h)
       }
-      gpu_upload(_handle, _data) => Ok(())
-      gpu_download(_handle) => Ok(bytes.utf8(""))
+      gpu_copy_from_host(_handle, _data) => Ok(())
+      gpu_copy_to_host(_handle) => Ok(bytes.utf8(""))
       gpu_launch(kernel, gx, gy, gz, args) => Err(refuse("test.launch", "${kernel} ${gx} ${gy} ${gz} ${show(buffers_of(args))}${scalar_suffix(args)}"))
       gpu_module_global(_kernel, _name, _dtype) => Ok((1, 0))
       gpu_free(_handle) => Ok(())
@@ -2526,17 +2526,17 @@ fn dynamic_launches() -> List[Result[Unit, ForeignError]] !Gpu = {
   let f: Entry2[Float, Float] = entry2("fixed", arg_in([512], [128], [0]), arg_out([0 - 1], [128]))
   match (alloc(F64, 512), alloc(F64, 512), alloc(F64, 500), alloc(I32, 4)) {
     (Ok(a), Ok(b), Ok(short), Ok(h)) -> [
-      launch_entry3(e, buffer(a), buffer(b), buffer(a), grid: [4]),
-      launch_entry3(e, buffer(a), buffer(b), buffer(b), grid: [4]),
-      launch_entry3(e, buffer(a), buffer(a), buffer(b), grid: [4]),
-      launch_entry3(e, buffer(a), buffer(b), buffer(short), grid: [4]),
-      launch_entry3(e, buffer(a), buffer(b), buffer(short), grid: [3]),
-      launch_entry3(e, buffer(a), buffer(b), buffer(short)),
-      launch_entry3(e, buffer(a), buffer(b), buffer(short), grid: [3, 2]),
-      launch_entry2(s, buffer(a), buffer(h), grid: [8, 2]),
-      launch_entry2(s, buffer(a), buffer(h)),
-      launch_entry2(f, buffer(a), buffer(b), grid: [4]),
-      launch_entry2(f, buffer(a), buffer(b), grid: [2])
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(a), grid: [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(b), grid: [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(a), buffer_arg(b), grid: [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid: [4]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid: [3]),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short)),
+      launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(short), grid: [3, 2]),
+      launch_entry2(s, buffer_arg(a), buffer_arg(h), grid: [8, 2]),
+      launch_entry2(s, buffer_arg(a), buffer_arg(h)),
+      launch_entry2(f, buffer_arg(a), buffer_arg(b), grid: [4]),
+      launch_entry2(f, buffer_arg(a), buffer_arg(b), grid: [2])
     ]
     _ -> []
   }
@@ -2582,12 +2582,12 @@ test "entry_grid is the Out cells' grid, checked argument by argument and agains
 # ---- scalar arguments ----
 
 test "a scalar is the bit pattern of its value in the width its format has" {
-  assert erase(scalar(1.5)) == Word("f64", 0x3FF8000000000000)
-  assert erase(scalar(narrow.f32(1.5))) == Word("f32", 0x3FC00000)
-  assert erase(scalar(7)) == Word("i64", 7)
-  assert erase(scalar(0 - 7)) == Word("i64", 0 - 7)
-  assert erase(scalar(i32.wrap(0 - 2))) == Word("i32", 0xFFFFFFFE)
-  assert erase(scalar(i32.wrap(5))) == Word("i32", 5)
+  assert erase(scalar_arg(1.5)) == Word("f64", 0x3FF8000000000000)
+  assert erase(scalar_arg(narrow.f32(1.5))) == Word("f32", 0x3FC00000)
+  assert erase(scalar_arg(7)) == Word("i64", 7)
+  assert erase(scalar_arg(0 - 7)) == Word("i64", 0 - 7)
+  assert erase(scalar_arg(i32.wrap(0 - 2))) == Word("i32", 0xFFFFFFFE)
+  assert erase(scalar_arg(i32.wrap(5))) == Word("i32", 5)
 }
 
 fn scale_entry() -> Entry4[Float, Float, Float, Float] =
@@ -2601,10 +2601,10 @@ fn scaled_run(scale: Float) -> Result[List[Float], ForeignError] !Gpu = {
   let a = alloc(F64, 4)?
   let b = alloc(F64, 4)?
   let out = alloc(F64, 4)?
-  upload(a, [1.0, 2.0, 3.0, 4.0])?
-  upload(b, [10.0, 20.0, 30.0, 40.0])?
-  launch_entry4(scale_entry(), buffer(a), buffer(b), scalar(scale), buffer(out))?
-  download(out)
+  copy_from_host(a, [1.0, 2.0, 3.0, 4.0])?
+  copy_from_host(b, [10.0, 20.0, 30.0, 40.0])?
+  launch_entry4(scale_entry(), buffer_arg(a), buffer_arg(b), scalar_arg(scale), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 test "the fake device hands a reference the launch's scalars: one kernel, two scales, two answers" {
@@ -2616,12 +2616,12 @@ fn scalar_kinds() -> List[Result[Unit, ForeignError]] !Gpu = {
   let e = scale_entry()
   match (alloc(F64, 4), alloc(F64, 4), alloc(F64, 4)) {
     (Ok(a), Ok(b), Ok(out)) -> [
-      launch_entry4(e, buffer(a), buffer(b), scalar(2.0), buffer(out)),
+      launch_entry4(e, buffer_arg(a), buffer_arg(b), scalar_arg(2.0), buffer_arg(out)),
       # a buffer where the kernel takes a value, and a value where it reads a buffer
-      launch_entry4(e, buffer(a), buffer(b), buffer(b), buffer(out)),
-      launch_entry4(e, buffer(a), scalar(1.0), scalar(2.0), buffer(out)),
+      launch_entry4(e, buffer_arg(a), buffer_arg(b), buffer_arg(b), buffer_arg(out)),
+      launch_entry4(e, buffer_arg(a), scalar_arg(1.0), scalar_arg(2.0), buffer_arg(out)),
       # a scalar is no buffer: passing the same value twice aliases nothing
-      launch_entry4(e, buffer(a), buffer(b), scalar(0.0), buffer(out), grid: [1])
+      launch_entry4(e, buffer_arg(a), buffer_arg(b), scalar_arg(0.0), buffer_arg(out), grid: [1])
     ]
     _ -> []
   }
@@ -2630,18 +2630,18 @@ fn scalar_kinds() -> List[Result[Unit, ForeignError]] !Gpu = {
 test "an entry's launch holds each position to the kind the kernel takes there" {
   assert entry_launches(scalar_kinds) == [
     "test.launch: vadd_scaled 1 1 1 [1, 2, 3] scalars [2.0]",
-    "gpu.bad_entry: gpu.launch_entry: kernel `vadd_scaled`: argument 2 (Scalar) takes a value passed by value (`scalar`), and the launch passes a buffer",
-    "gpu.bad_entry: gpu.launch_entry: kernel `vadd_scaled`: argument 1 (In) is a buffer, and the launch passes a value (`scalar`)",
+    "gpu.bad_entry: gpu.launch_entry: kernel `vadd_scaled`: argument 2 (Scalar) takes a value passed by value (`scalar_arg`), and the launch passes a buffer",
+    "gpu.bad_entry: gpu.launch_entry: kernel `vadd_scaled`: argument 1 (In) is a buffer, and the launch passes a value (`scalar_arg`)",
     "test.launch: vadd_scaled 1 1 1 [1, 2, 3] scalars [0.0]"
   ]
   # the count is the type's, so only a plan made by hand can get it wrong
   let args = [arg_in_whole(), arg_scalar()]
-  assert launch_plan(args, [(Buf(1), 4)], []) == Err(("gpu.bad_entry", "the entry has 2 argument(s) and the launch passes 1"))
+  assert launch_plan(args, [(Buffer(1), 4)], []) == Err(("gpu.bad_entry", "the entry has 2 argument(s) and the launch passes 1"))
 }
 
 fn arity_run() -> Result[Unit, ForeignError] !Gpu = {
   let a = alloc(F64, 4)?
-  launch("vadd_scaled", 1, [erase(buffer(a)), erase(scalar(1.0))])
+  launch("vadd_scaled", 1, [erase(buffer_arg(a)), erase(scalar_arg(1.0))])
 }
 
 fn echo_kernels() -> Map[String, (Int, WideRefFn)] =
@@ -2649,8 +2649,8 @@ fn echo_kernels() -> Map[String, (Int, WideRefFn)] =
 
 fn echo_run() -> Result[List[Float], ForeignError] !Gpu = {
   let t = alloc(F64, 3)?
-  launch("k", 1, [erase(scalar(i32.wrap(0 - 2))), erase(buffer(t)), erase(scalar(narrow.f32(1.5))), erase(scalar(0 - 9))])?
-  download(t)
+  launch("k", 1, [erase(scalar_arg(i32.wrap(0 - 2))), erase(buffer_arg(t)), erase(scalar_arg(narrow.f32(1.5))), erase(scalar_arg(0 - 9))])?
+  copy_to_host(t)
 }
 
 test "a scalar does not count toward a reference's buffers, and arrives decoded" {
@@ -2664,14 +2664,14 @@ test "a scalar does not count toward a reference's buffers, and arrives decoded"
 
 fn typed_trip[T: HasDtype + DeviceBits](d: Dtype[T], xs: List[T]) -> Result[List[T], ForeignError] !Gpu = {
   let t = alloc(d, len(xs))?
-  upload(t, xs)?
-  download(t)
+  copy_from_host(t, xs)?
+  copy_to_host(t)
 }
 
 fn raw_after_upload[T: HasDtype + DeviceBits](d: Dtype[T], xs: List[T]) -> Result[Bytes, ForeignError] !Gpu = {
   let t = alloc(d, len(xs))?
-  upload(t, xs)?
-  gpu_download(handle_of(t))
+  copy_from_host(t, xs)?
+  gpu_copy_to_host(handle_of(t))
 }
 
 test "an i64 buffer round-trips past 2^53 exactly, which the Float channel could not" {
@@ -2731,9 +2731,9 @@ test "narrow formats round trip through typed transfers with nothing rounded on 
 fn big_launch(xs: List[Int]) -> Result[List[Int], ForeignError] !Gpu = {
   let a = alloc(I64, len(xs))?
   let out = alloc(I64, len(xs))?
-  upload(a, xs)?
-  launch("copy", 1, [erase(buffer(a)), erase(buffer(out))])?
-  download(out)
+  copy_from_host(a, xs)?
+  launch("copy", 1, [erase(buffer_arg(a)), erase(buffer_arg(out))])?
+  copy_to_host(out)
 }
 
 test "the fake device refuses an i64 a Float cannot hold when a reference would see it, and holds it otherwise" {
@@ -2757,7 +2757,7 @@ test "the fake device refuses an i64 a Float cannot hold when a reference would 
 
 fn short_raw_upload() -> Result[Unit, ForeignError] !Gpu = {
   let t = alloc(I64, 2)?
-  gpu_upload(handle_of(t), bytes.utf8("12345678"))
+  gpu_copy_from_host(handle_of(t), bytes.utf8("12345678"))
 }
 
 test "a raw upload of the wrong byte count is refused by the fake device" {

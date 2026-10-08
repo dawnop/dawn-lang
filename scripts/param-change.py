@@ -13,7 +13,7 @@ does:
     Param-Change(<item>): <old> -> <new>
 
     Param-Change(str.split): sep -> delim
-    Param-Change(gpu.unpack_from): raw -> b
+    Param-Change(gpu.decode_floats): raw -> b
     Param-Change(narrow.Narrow.add): a -> lhs
     Param-Change(io.Fs.fs_rename): src -> from
     Param-Change(prelude.Index.index): c -> it

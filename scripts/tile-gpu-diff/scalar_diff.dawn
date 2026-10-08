@@ -38,7 +38,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out_with, LaunchArg, Word, Buf}
+use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out_with, LaunchArg, Word, Buffer}
 use std/narrow
 use std/int/i32
 use std/int/i32.{I32}
@@ -94,7 +94,7 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
     let (dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
   }
   Ok(())
 }
@@ -116,7 +116,7 @@ type Spec =
 
 fn args_of(spec: List[Spec], hs: List[Int]) -> List[LaunchArg] =
   list.map(spec, s => match s {
-    B(k) -> Buf(hs[k])
+    B(k) -> Buffer(hs[k])
     W(w) -> w
   })
 
@@ -144,9 +144,9 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])], spec: List
               var bad = "ok"
               for k in back {
                 let (back_dt, _back) = bufs[k]
-                match gpu.gpu_download(hs[k]) {
+                match gpu.gpu_copy_to_host(hs[k]) {
                   Ok(raw) -> {
-                    all = all ++ gpu.unpack_from(back_dt, raw)
+                    all = all ++ gpu.decode_floats(back_dt, raw)
                   }
                   Err(e) -> {
                     bad = e.kind
@@ -265,7 +265,7 @@ fn corpus_x(n: Int) -> List[Float] =
 
 fn corpus_ints(n: Int) -> List[Float] = list.map(range(0, n), i => to_float(i * 1000003 - 50000))
 
-fn f32_word(v: Float) -> LaunchArg = gpu.erase(gpu.scalar(narrow.f32(v)))
+fn f32_word(v: Float) -> LaunchArg = gpu.erase(gpu.scalar_arg(narrow.f32(v)))
 
 ## A word for an f32 or i32 whose upper half is garbage: what the device must
 ## not read.
@@ -321,7 +321,7 @@ fn wide_case(tag: String, a: Float, k: Int) -> Case =
     grid: 2,
     bufs: [("f64", corpus_x(128)), ("i64", corpus_ints(128)), ("f64", sentinel_buffer(136)),
       ("i64", sentinel_buffer(136))],
-    spec: [B(0), B(1), W(gpu.erase(gpu.scalar(a))), W(gpu.erase(gpu.scalar(k))), B(2), B(3)],
+    spec: [B(0), B(1), W(gpu.erase(gpu.scalar_arg(a))), W(gpu.erase(gpu.scalar_arg(k))), B(2), B(3)],
     back: [2, 3],
     refs: map.from([("scalar_wide", (4, (_d, ins, _ss) => scalar_wide_ref(128, ins, [a, to_float(k)])))])
   }
@@ -339,16 +339,16 @@ fn cases() -> List[Case] = [
   scale_case("s3", f32_word(3.0), 3.0),
   scale_case("s-quarter", f32_word(0.0 - 0.25), 0.0 - 0.25),
   scale_case("s3-garbage", dirty("f32", 0x40400000, 0xDEADBEEF), 3.0),
-  len_case("n200", gpu.erase(gpu.scalar(i32_of(200))), 200),
-  len_case("n5", gpu.erase(gpu.scalar(i32_of(5))), 5),
-  len_case("n128", gpu.erase(gpu.scalar(i32_of(128))), 128),
-  len_case("n2", gpu.erase(gpu.scalar(i32_of(2))), 2),
-  len_case("n-1", gpu.erase(gpu.scalar(i32_of(0 - 1))), 0 - 1),
+  len_case("n200", gpu.erase(gpu.scalar_arg(i32_of(200))), 200),
+  len_case("n5", gpu.erase(gpu.scalar_arg(i32_of(5))), 5),
+  len_case("n128", gpu.erase(gpu.scalar_arg(i32_of(128))), 128),
+  len_case("n2", gpu.erase(gpu.scalar_arg(i32_of(2))), 2),
+  len_case("n-1", gpu.erase(gpu.scalar_arg(i32_of(0 - 1))), 0 - 1),
   len_case("n3-garbage", dirty("i32", 3, 0x7FFFFFFF), 3),
   len_case("n-1-garbage", dirty("i32", 0xFFFFFFFF, 0xFFFFFFFF), 0 - 1),
-  loop_case("t3", gpu.erase(gpu.scalar(i32_of(3))), 3),
-  loop_case("t4", gpu.erase(gpu.scalar(i32_of(4))), 4),
-  loop_case("t0", gpu.erase(gpu.scalar(i32_of(0))), 0),
+  loop_case("t3", gpu.erase(gpu.scalar_arg(i32_of(3))), 3),
+  loop_case("t4", gpu.erase(gpu.scalar_arg(i32_of(4))), 4),
+  loop_case("t0", gpu.erase(gpu.scalar_arg(i32_of(0))), 0),
   loop_case("t2-garbage", dirty("i32", 2, 0xDEADBEEF), 2),
   wide_case("a-big", 0.0 - 25000000000.0, 1250999896491),
   wide_case("a-3", 3.0, 0 - 7)

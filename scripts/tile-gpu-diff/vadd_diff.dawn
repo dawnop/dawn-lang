@@ -37,7 +37,7 @@ use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, free,
-  launch, buffer, erase, sync }
+  launch, buffer_arg, erase, sync }
 use std/dtype.{Dtype, F64, dtype_name}
 use std/narrow.{BF16}
 use std/list
@@ -95,13 +95,13 @@ fn held[D](d: Dtype[D], xs: List[Float]) -> List[Float] = {
 ## stopping at the first refusal and saying which stage it was.
 # The Float view of a tensor by its format's name: the corpus holds Floats
 # off the format's grid on purpose (bf16 rounds them on the way in), which
-# a typed `upload` of a `BF16` cannot say.
+# a typed `copy_from_host` of a `BF16` cannot say.
 fn put[D](d: Dtype[D], t: Tensor[D], xs: List[Float]) -> Result[Unit, ForeignError] !Gpu =
-  gpu.gpu_upload(gpu.handle_of(t), gpu.pack_to(dtype_name(d), xs))
+  gpu.gpu_copy_from_host(gpu.handle_of(t), gpu.encode_floats(dtype_name(d), xs))
 
 fn get[D](d: Dtype[D], t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
-  match gpu.gpu_download(gpu.handle_of(t)) {
-    Ok(raw) -> Ok(gpu.unpack_from(dtype_name(d), raw))
+  match gpu.gpu_copy_to_host(gpu.handle_of(t)) {
+    Ok(raw) -> Ok(gpu.decode_floats(dtype_name(d), raw))
     Err(e) -> Err(e)
   }
 
@@ -131,7 +131,7 @@ fn stages[D](d: Dtype[D], kernel: String, xs: List[Float], ys: List[Float]) -> T
             (_, Err(e)) -> e.kind
           }
           let t2 = Trace { ..t1, roundtrip: rt, note: message(back) ++ message(back2) }
-          let l = launch(kernel, n / 128, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])
+          let l = launch(kernel, n / 128, [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])
           match l {
             Ok(_) -> {
               let s = sync()

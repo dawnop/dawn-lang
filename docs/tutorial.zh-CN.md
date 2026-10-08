@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 09c3cee987c3558c -->
+<!-- doc-check: translation-of docs/tutorial.md @ c9f39d764978e41b -->
 
 # Dawn 教程
 
@@ -1470,7 +1470,7 @@ subdir = "packages/json"      # 包在归档里的位置
 驱动，也不要 `!io`：
 
 ```dawn run
-use std/gpu.{Gpu, alloc, upload, download, launch, sync, free, buffer, erase, with_gpu_fake, reference_kernels}
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, launch, sync, free, buffer_arg, erase, with_gpu_fake, reference_kernels}
 use std/dtype.{F64}
 
 # GPU 程序的宿主一半：分配、上传、启动、等待、读回。
@@ -1480,11 +1480,11 @@ fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignEr
   let a = alloc(F64, n)?
   let b = alloc(F64, n)?
   let out = alloc(F64, n)?
-  upload(a, xs)?
-  upload(b, ys)?
-  launch("vadd", 1, [erase(buffer(a)), erase(buffer(b)), erase(buffer(out))])?
+  copy_from_host(a, xs)?
+  copy_from_host(b, ys)?
+  launch("vadd", 1, [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
   sync()?
-  let got = download(out)?
+  let got = copy_to_host(out)?
   free(a)?
   free(b)?
   free(out)?
@@ -1493,7 +1493,7 @@ fn vector_add(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignEr
 
 fn unknown_kernel() -> Result[Unit, ForeignError] !Gpu = {
   let h = alloc(F64, 1)?
-  launch("vmul", 1, [erase(buffer(h))])
+  launch("vmul", 1, [erase(buffer_arg(h))])
 }
 
 pub fn main() -> Unit !io = {
@@ -1517,7 +1517,7 @@ refused: gpu.no_kernel
 驱动应答同样的操作，`kernels` 把每个名字映到编译好的模块。这个 handler 需要 C 后端
 （在 JVM 上每个操作都答 `gpu.unsupported_backend`），还需要一台装了 NVIDIA 驱动的机器。
 
-`upload` 与 `download` 搬的是张量元素类型的值，不是每种格式都过一遍 Float：`Tensor[Float]` 收
+`copy_from_host` 与 `copy_to_host` 搬的是张量元素类型的值，不是每种格式都过一遍 Float：`Tensor[Float]` 收
 `List[Float]`，`Tensor[Int]` 收 `Int` 且每一位都保留（超出 2^53 的 i64 也在内），`Tensor[BF16]` 收 `BF16`
 值，所以上传时什么也不舍入。没有缓冲的格式搬不了：上传 `Tensor[Bool]` 是类型错误，不是运行期拒绝。
 
@@ -1654,7 +1654,7 @@ kernel 对每个参数做什么，而 `Out` 的格子就是启动网格：八个
 extent 的 lane 读到的是标记的填充值（标记不另说就是零），而且不写回，所以尾巴不需要 mask。
 
 ```dawn run deps=tileir
-use std/gpu.{Gpu, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry3, buffer}
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry3, buffer_arg}
 use std/dtype.{F64}
 use std/list
 use tileir/dev.{Dev, Param, load_cell, store_cell, add}
@@ -1671,10 +1671,10 @@ fn add_1000(n: Int) -> Result[List[Float], ForeignError] !Gpu = {
   let a = alloc(F64, n)?
   let b = alloc(F64, n)?
   let out = alloc(F64, n)?
-  upload(a, xs)?
-  upload(b, xs)?
-  launch_entry3(entry, buffer(a), buffer(b), buffer(out))?
-  download(out)
+  copy_from_host(a, xs)?
+  copy_from_host(b, xs)?
+  launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 pub fn main() -> Unit !io = {
@@ -1694,7 +1694,7 @@ refused: gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 0 (In) hold
 `trace3` 答回记录和一个入口，`launch_entry3` 接这个入口和三个张量，张量的格式由入口的类型
 定死。在问任何 handler 之前，它先拿缓冲区对照格子：999 个元素的缓冲区够不到 1000 个元素的
 extent 的末尾。它还拒绝和格子不一致的网格，以及和别的参数共用缓冲区的 `Out`。extent 写成
-`DYN_DIM` 时，格子数交给启动来定，比如 `launch_entry3(entry, buffer(a), buffer(b), buffer(out), grid: [8])`，这时缓冲区
+`DYN_DIM` 时，格子数交给启动来定，比如 `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid: [8])`，这时缓冲区
 要盖住每一格的全部：八格、每格 128，就是 1024 个元素。
 
 `1998.0` 是参考实现的答案，不是 kernel 的。假设备从不运行 kernel 体：它拿启动的名字查表，调用
@@ -1766,7 +1766,7 @@ tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written throu
 四个 lane 装三个值的 softmax。这次假设备跑的参考实现是这里写的，不是 `std/gpu` 自带的：
 
 ```dawn run deps=tileir,tileref
-use std/gpu.{Gpu, Entry2, alloc, upload, download, with_gpu_fake, reference_kernels, launch_entry2, last_out, buffer}
+use std/gpu.{Gpu, Entry2, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_kernels, launch_entry2, last_out, buffer_arg}
 use std/dtype.{F64}
 use std/list
 use std/map
@@ -1796,10 +1796,10 @@ fn softmax_ref(n: Int, _formats: List[String], bufs: List[List[Float]]) -> List[
 fn run(entry: Entry2[Float, Float]) -> Result[List[Float], ForeignError] !Gpu = {
   let x = alloc(F64, 4)?
   let out = alloc(F64, 4)?
-  upload(x, [1.0, 2.0, 3.0, 0.0])?
-  upload(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] 在 extent 之外：kernel 不碰它
-  launch_entry2(entry, buffer(x), buffer(out))?
-  download(out)
+  copy_from_host(x, [1.0, 2.0, 3.0, 0.0])?
+  copy_from_host(out, [9.0, 9.0, 9.0, 9.0])?     # out[3] 在 extent 之外：kernel 不碰它
+  launch_entry2(entry, buffer_arg(x), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 pub fn main() -> Unit !io = {
@@ -1994,7 +1994,7 @@ recorded
 之前就拒。`Shared(d)` 是逃生口：kernel 自己寻址的参数，走指针路。这里 `store` 在一个元素偏移处
 写 tile，用的是对调过的 `out` 步长，于是 tile 落下时就转置好了，tile 内部一个元素也没挪。原子
 操作、scatter、一个块写两块区域，都因为同样的理由是 `Shared`，`grep Shared(` 能把它们全找出来。
-没有 `Out` 时网格归调用方：`launch_entry2(entry, buffer(x), buffer(out), grid: [4, 2])`。
+没有 `Out` 时网格归调用方：`launch_entry2(entry, buffer_arg(x), buffer_arg(out), grid: [4, 2])`。
 
 另有两条出路，各一句话。一个 kernel 要用两种形状读同一个 `In`，就用 `retile(p, extent, tile)`
 给它第二个视图。`trace1` 到 `trace5` 记录最多五个参数的 kernel，参数更多时用 `trace_kernel`，
@@ -2007,7 +2007,7 @@ recorded
 
 <!-- doc-check: skip-check 需要 NVIDIA GPU、它的驱动和 tileiras，CI 上都没有 -->
 ```dawn skip-check
-use std/gpu.{Gpu, Entry3, alloc, upload, download, launch_entry3, with_gpu_real, buffer}
+use std/gpu.{Gpu, Entry3, alloc, copy_from_host, copy_to_host, launch_entry3, with_gpu_real, buffer_arg}
 use std/dtype.{F64}
 use std/io
 use std/io.{with_fs_real}
@@ -2025,10 +2025,10 @@ fn add_1000(entry: Entry3[Float, Float, Float]) -> Result[List[Float], ForeignEr
   let a = alloc(F64, 1000)?
   let b = alloc(F64, 1000)?
   let out = alloc(F64, 1000)?
-  upload(a, xs)?
-  upload(b, xs)?
-  launch_entry3(entry, buffer(a), buffer(b), buffer(out))?
-  download(out)
+  copy_from_host(a, xs)?
+  copy_from_host(b, xs)?
+  launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out))?
+  copy_to_host(out)
 }
 
 pub fn main() -> Unit !io = {

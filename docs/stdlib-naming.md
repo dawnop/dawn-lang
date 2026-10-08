@@ -145,15 +145,15 @@ xs |> filter(x => x > 0)    # 选择性引入的短名进管道，零摩擦
 | `gpu.ref_atan` | `t` | `x` | 标量数学族另外 12 个都是 `x` |
 | `gpu.ref_atan2` | `a` | `y` | 顺序敏感：第一个就是 y，C 的 `atan2(y, x)` |
 | `gpu.ref_atan2` | `b` | `x` | 同上 |
-| `gpu.pack_to` | `data` | `xs` | 11 个 `pack_<dt>(xs)` 的泛化版 |
-| `gpu.unpack_from` | `raw` | `b` | 11 个 `unpack_<dt>(b)` 的泛化版 |
+| `gpu.encode_floats` | `data` | `xs` | 11 个 `pack_<dt>(xs)` 的泛化版 |
+| `gpu.decode_floats` | `raw` | `b` | 11 个 `unpack_<dt>(b)` 的泛化版 |
 | prelude `Index.index` | `c` | `it` | 与 `Iter` 的接收者同名；`c` 在相邻的 `Iter` 里是游标 |
 
 > **0.82.0 起表中 `gpu.*_ref` 与 `gpu.ref_atan` / `gpu.ref_atan2` 这 12 行（11 个函数）已迁出 std**，
 > 到源码包 `packages/tileref`（写作 `tileref/ref.<name>`），形参名照上表不变。它们从此不受
 > `Param-Change` 冻结门管（它只看 std）；理由与实测见
-> [tile-backend-design.md](tile-backend-design.md) §5.3「参考实现迁出」。`gpu.pack_to` /
-> `gpu.unpack_from` 两行仍在 std。
+> [tile-backend-design.md](tile-backend-design.md) §5.3「参考实现迁出」。`gpu.encode_floats` /
+> `gpu.decode_floats` 两行仍在 std。
 
 同批把 `bytes.slice` 包的内部 intrinsic `bytes_slice` 的形参也改成 `from, to`
 （它不是 pub 面，改它只为读源码的人看到同一套名字），`selfhost/builtins.dawn` 镜像随改。

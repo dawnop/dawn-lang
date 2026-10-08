@@ -163,7 +163,7 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
     let (dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(dt, data))?
   }
   Ok(())
 }
@@ -172,7 +172,7 @@ fn download_all(hs: List[Int], bufs: List[(String, List[Float])], reads: List[In
   var out: List[List[Float]] = []
   for r in reads {
     let (read_dt, _read) = bufs[r]
-    out = out ++ [gpu.unpack_from(read_dt, gpu.gpu_download(hs[r])?)]
+    out = out ++ [gpu.decode_floats(read_dt, gpu.gpu_copy_to_host(hs[r])?)]
   }
   Ok(out)
 }
@@ -188,8 +188,8 @@ fn release(hs: List[Int]) -> Unit !Gpu = {
 ## and saying which stage it was. `reads` are the argument positions to
 ## download afterwards.
 ##
-## The raw `gpu` operations rather than the typed `alloc` / `upload` /
-## `download`, for wide_diff's reason: a case's buffers do not share a
+## The raw `gpu` operations rather than the typed `alloc` / `copy_from_host` /
+## `copy_to_host`, for wide_diff's reason: a case's buffers do not share a
 ## format and `Tensor[D]` is one format per handle.
 fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Float])],
   reads: List[Int]) -> Trace !Gpu =
@@ -204,7 +204,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buf(h))) {
+          match gpu.gpu_launch(kernel, gx, gy, gz, list.map(hs, h => gpu.Buffer(h))) {
             Err(e) -> {
               release(hs)
               Trace { ..t1, launch: e.kind, note: e.message }

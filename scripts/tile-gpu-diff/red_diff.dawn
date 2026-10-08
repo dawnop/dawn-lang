@@ -52,8 +52,8 @@
 # seen rather than discovered.
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, buffer, erase, sync }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, copy_from_host, copy_to_host, free,
+  launch, buffer_arg, erase, sync }
 use std/dtype.{F64}
 use tileref/ref.{ref_exp, ref_log, ref_sqrt, LN2, reduce_sum_ref, softmax_ref, dot_ref, mse_ref,
   monte_carlo_ref, rms_norm_ref, silu_ref, sigmoid_ref, ppo_loss_ref, dpo_loss_ref, agent_step_ref }
@@ -143,7 +143,7 @@ fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Resul
   if i >= len(ts) {
     Ok(())
   } else {
-    match upload(ts[i], data[i]) {
+    match copy_from_host(ts[i], data[i]) {
       Ok(_) -> upload_all(ts, data, i + 1)
       Err(e) -> Err(e)
     }
@@ -165,14 +165,14 @@ fn stages(kernel: String, grid: Int, data: List[List[Float]]) -> Trace !Gpu = {
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match launch(kernel, grid, list.map(ts, t => erase(buffer(t)))) {
+          match launch(kernel, grid, list.map(ts, t => erase(buffer_arg(t)))) {
             Err(e) -> {
               release(ts)
               Trace { ..t1, launch: e.kind, note: e.message }
             }
             Ok(_) -> {
               let s = sync()
-              let r = download(ts[len(ts) - 1])
+              let r = copy_to_host(ts[len(ts) - 1])
               release(ts)
               let value = match r {
                 Ok(v) -> Some(v)

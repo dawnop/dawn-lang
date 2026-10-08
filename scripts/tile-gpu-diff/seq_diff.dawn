@@ -400,7 +400,7 @@ fn alloc_all(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
 
 fn upload_all(hs: List[Int], bufs: List[Buf]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    gpu.gpu_upload(hs[i], gpu.pack_to(bufs[i].dtype, bufs[i].data))?
+    gpu.gpu_copy_from_host(hs[i], gpu.encode_floats(bufs[i].dtype, bufs[i].data))?
   }
   Ok(())
 }
@@ -410,7 +410,7 @@ fn download_all(hs: List[Int], bufs: List[Buf], names: List[String]) -> Result[L
   var out: List[Float] = []
   for name in names {
     let p = buf_pos(bufs, name)
-    out = out ++ gpu.unpack_from(bufs[p].dtype, gpu.gpu_download(hs[p])?)
+    out = out ++ gpu.decode_floats(bufs[p].dtype, gpu.gpu_copy_to_host(hs[p])?)
   }
   Ok(out)
 }
@@ -437,11 +437,11 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
   } else {
     let pre: Result[Unit, ForeignError] = if i == at && reset != "" {
       let p = buf_pos(bufs, reset)
-      gpu.gpu_upload(hs[p], gpu.pack_to(bufs[p].dtype, bufs[p].data))
+      gpu.gpu_copy_from_host(hs[p], gpu.encode_floats(bufs[p].dtype, bufs[p].data))
     } else if i == at && trip != "" {
       let p = buf_pos(bufs, trip)
-      match gpu.gpu_download(hs[p]) {
-        Ok(raw) -> gpu.gpu_upload(hs[p], raw)
+      match gpu.gpu_copy_to_host(hs[p]) {
+        Ok(raw) -> gpu.gpu_copy_from_host(hs[p], raw)
         Err(e) -> Err(e)
       }
     } else {
@@ -452,7 +452,7 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
       Ok(_) -> {
         let s = steps[i]
         let hands = list.map(s.args, a => hs[buf_pos(bufs, a)])
-        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, list.map(hands, h => gpu.Buf(h)) ++ s.scalars) {
+        match gpu.gpu_launch(s.kernel, s.gx, s.gy, s.gz, list.map(hands, h => gpu.Buffer(h)) ++ s.scalars) {
           Ok(_) -> launch_all(hs, bufs, steps, i + 1, at, reset, trip)
           Err(e) -> Err(e)
         }
@@ -1331,7 +1331,7 @@ fn flash_seq() -> Seq = Seq {
   name: "flash",
   tier: "tolerance",
   bufs: flash_bufs(),
-  steps: [step_scalars("flash_attn", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"], [gpu.erase(gpu.scalar(ATT_INV_SQRT_D))])],
+  steps: [step_scalars("flash_attn", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"], [gpu.erase(gpu.scalar_arg(ATT_INV_SQRT_D))])],
   reads: ["o"],
   via: "o",
   stale_at: 0
@@ -1355,7 +1355,7 @@ fn flash_bf16_seq() -> Seq = Seq {
   tier: "tolerance",
   bufs: flash_bf16_bufs(),
   steps: [step_scalars("flash_attn_bf16", ATT_M / FA_BQ, 1, 1, ["q", "k", "v", "o"],
-    [gpu.erase(gpu.scalar(narrow.f32(ATT_INV_SQRT_D)))])],
+    [gpu.erase(gpu.scalar_arg(narrow.f32(ATT_INV_SQRT_D)))])],
   reads: ["o"],
   via: "o",
   stale_at: 0

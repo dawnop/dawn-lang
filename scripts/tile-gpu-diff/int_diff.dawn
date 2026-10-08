@@ -60,8 +60,8 @@
 # [0, 32). `clamped` below is what keeps the first of those.
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, upload, download, free,
-  launch, buffer, erase, sync, wrap_i32 }
+use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, copy_from_host, copy_to_host, free,
+  launch, buffer_arg, erase, sync, wrap_i32 }
 use std/int/i32
 use std/int/i32.{I32}
 use tileref/ref.{count_eq_ref, subarray_sum_ref, subarray_sum2d_ref, subarray_sum3d_ref, rainbow_ref,
@@ -151,7 +151,7 @@ fn upload_all(ts: List[Tensor[I32]], data: List[List[Float]], i: Int) -> Result[
   if i >= len(ts) {
     Ok(())
   } else {
-    match upload(ts[i], list.map(data[i], x => i32.wrap(to_int(x)))) {
+    match copy_from_host(ts[i], list.map(data[i], x => i32.wrap(to_int(x)))) {
       Ok(_) -> upload_all(ts, data, i + 1)
       Err(e) -> Err(e)
     }
@@ -173,14 +173,14 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, data: List[List[Float]]) ->
         }
         Ok(_) -> {
           let t1 = Trace { ..t0, upload: "ok" }
-          match launch(kernel, gx, list.map(ts, t => erase(buffer(t))), gy: gy, gz: gz) {
+          match launch(kernel, gx, list.map(ts, t => erase(buffer_arg(t))), gy: gy, gz: gz) {
             Err(e) -> {
               release(ts)
               Trace { ..t1, launch: e.kind, note: e.message }
             }
             Ok(_) -> {
               let s = sync()
-              let r: Result[List[Float], ForeignError] = match download(ts[len(ts) - 1]) {
+              let r: Result[List[Float], ForeignError] = match copy_to_host(ts[len(ts) - 1]) {
                 Ok(v) -> Ok(list.map(v, x => to_float(i32.to_int(x))))
                 Err(e) -> Err(e)
               }

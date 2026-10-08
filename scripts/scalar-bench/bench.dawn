@@ -20,7 +20,7 @@
 use std/io
 use std/io.{Exit, with_fs_real, with_clock_real, Clock, now, elapsed_ns}
 use std/gpu
-use std/gpu.{Gpu, with_gpu_real, alloc, upload, download, launch, sync, buffer, erase, scalar}
+use std/gpu.{Gpu, with_gpu_real, alloc, copy_from_host, copy_to_host, launch, sync, buffer_arg, erase, scalar_arg}
 use std/dtype.{F64}
 use std/list
 use std/map
@@ -39,11 +39,11 @@ alias Vec = gpu.Tensor[Float]
 
 fn once(variant: String, g: Int, x: Vec, s: Vec, out: Vec) -> Result[Unit, ForeignError] !Gpu =
   if variant == "bench_param" {
-    launch(variant, g, [erase(buffer(x)), erase(scalar(3.0)), erase(buffer(out))])
+    launch(variant, g, [erase(buffer_arg(x)), erase(scalar_arg(3.0)), erase(buffer_arg(out))])
   } else if variant == "bench_buffer" {
-    launch(variant, g, [erase(buffer(x)), erase(buffer(s)), erase(buffer(out))])
+    launch(variant, g, [erase(buffer_arg(x)), erase(buffer_arg(s)), erase(buffer_arg(out))])
   } else {
-    launch(variant, g, [erase(buffer(x)), erase(buffer(out))])
+    launch(variant, g, [erase(buffer_arg(x)), erase(buffer_arg(out))])
   }
 
 fn run_many(variant: String, g: Int, n: Int, x: Vec, s: Vec, out: Vec) -> Result[Unit, ForeignError] !Gpu = {
@@ -58,9 +58,9 @@ fn measure(variant: String, g: Int, n: Int, reps: Int) -> Result[List[Int], Fore
   let x = alloc(F64, len)?
   let s = alloc(F64, 1)?
   let out = alloc(F64, len)?
-  upload(x, list.map(range(0, len), i => to_float(i % 17 + 1)))?
-  upload(s, [3.0])?
-  upload(out, list.map(range(0, len), _i => 0.0))?
+  copy_from_host(x, list.map(range(0, len), i => to_float(i % 17 + 1)))?
+  copy_from_host(s, [3.0])?
+  copy_from_host(out, list.map(range(0, len), _i => 0.0))?
   run_many(variant, g, 200, x, s, out)?
   var times: List[Int] = []
   for _r in range(0, reps) {
@@ -69,7 +69,7 @@ fn measure(variant: String, g: Int, n: Int, reps: Int) -> Result[List[Int], Fore
     let t1 = now()
     times = times ++ [elapsed_ns(t0, t1) / n]
   }
-  let got = download(out)?
+  let got = copy_to_host(out)?
   let ok = list.all(range(0, len), i => got[i] == to_float(i % 17 + 1) * 3.0)
   if not ok { panic("bench: ${variant} did not compute x * 3") } else { () }
   Ok(times)

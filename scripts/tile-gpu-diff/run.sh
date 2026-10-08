@@ -327,7 +327,7 @@
 #                      is deliberately off the bf16 grid, can see it. Three
 #                      f16 kernels as the control and a fourth that reds is a
 #                      stronger statement than four that red
-#     u8-reads-signed  the u8 reader (`unpack_from`'s u8 arm) sign-extends,
+#     u8-reads-signed  the u8 reader (`decode_floats`'s u8 arm) sign-extends,
 #                      so an octet above 127 comes back negative -> layers 0
 #                      and 1 blind, and `invert` alone reds: it is the only
 #                      kernel here over an 8-bit buffer, and its corpus spans
@@ -2775,8 +2775,8 @@ roundtrip_mutant_checks() { # name, std-dir, dtype, count
 #    round trip is then one element short in every f64 set; the bf16 sets
 #    are untouched.
 std_ds="$(mutant_std download-short \
-  '        gpu_download_bytes_host(p, n * unwrap_or(element_bytes(dt), 1))' \
-  '        gpu_download_bytes_host(p, n * unwrap_or(element_bytes(dt), 1) - (if dt == "f64" { 8 } else { 0 }))')"
+  '        gpu_memcpy_dtoh_host(p, n * unwrap_or(element_bytes(dt), 1))' \
+  '        gpu_memcpy_dtoh_host(p, n * unwrap_or(element_bytes(dt), 1) - (if dt == "f64" { 8 } else { 0 }))')"
 roundtrip_mutant_checks download-short "$std_ds" f64 4
 
 # 2. pack-truncates: the bf16 packer no longer rounds, so narrow.bf16_bits
@@ -3549,8 +3549,8 @@ fi
 #     so it still holds the corpus, and the other six read back an output
 #     buffer that still holds the sentinel. The gate requires both.
 std_iw="$(mutant_std inplace-writes-copy \
-  '                        store = map.insert(store, args[pos], (dt, pack_to(dt, v)))' \
-  '                        store = map.insert(store, 0 - 1 - pos, (dt, pack_to(dt, v)))')"
+  '                        store = map.insert(store, args[pos], (dt, encode_floats(dt, v)))' \
+  '                        store = map.insert(store, 0 - 1 - pos, (dt, encode_floats(dt, v)))')"
 build_native "$std_iw" "$work/m-inplace-writes-copy.bin" "$here/wide_diff.dawn"
 rc=0
 device "$work/m-inplace-writes-copy.bin" "${wide_cubins[@]}" > "$work/m-inplace.out" 2>&1 || rc=$?
@@ -3581,9 +3581,9 @@ fi
 #     and then lays down the binary16 pattern of THAT. It is the mistake of
 #     copying the bf16 arm and changing only the codec, and it is invisible
 #     to the device-against-fake comparison: since the codec is one function
-#     (`pack_to`) both devices are handed the same wrong bytes. What sees it
-#     is wide_diff's host-only codec probe, which holds `pack_to` /
-#     `unpack_from` to `round_to("f16", ..)`, the independent statement of
+#     (`encode_floats`) both devices are handed the same wrong bytes. What sees it
+#     is wide_diff's host-only codec probe, which holds `encode_floats` /
+#     `decode_floats` to `round_to("f16", ..)`, the independent statement of
 #     what an f16 buffer holds.
 #
 #     Exactly ONE of the eight goes red, and the other three f16 kernels are
@@ -3624,7 +3624,7 @@ else
   echo "SKIP  mutant: f16-rounds-like-bf16 not verifiable on this driver: the clean run is $wide_verdict, before any launch reaches the device"
 fi
 
-# 15. u8-reads-signed: the u8 reader (`unpack_from`'s u8 arm) reads an octet
+# 15. u8-reads-signed: the u8 reader (`decode_floats`'s u8 arm) reads an octet
 #     the way the i8 one does, so an octet above 127 comes back negative. The
 #     bytes on the device are the same bytes; what moves is the reading,
 #     which is the whole of the difference between the two 8-bit formats.
@@ -5720,7 +5720,7 @@ std_sw="$(mutant_std scalars-swapped \
   '  var a: Array[Int] = array_new()
   for arg in args {
     match arg {
-      Buf(h) -> match map.get(table, h) {
+      Buffer(h) -> match map.get(table, h) {
         Some(b) -> {
           let (p, _n, _dt) = b
           a = array_push(a, p)
@@ -5737,11 +5737,11 @@ std_sw="$(mutant_std scalars-swapped \
   var seen = 0
   let words = list.filter(args, w => match w {
     Word(_d, _b) -> true
-    Buf(_h) -> false
+    Buffer(_h) -> false
   })
   for arg in args {
     match arg {
-      Buf(h) -> match map.get(table, h) {
+      Buffer(h) -> match map.get(table, h) {
         Some(b) -> {
           let (p, _n, _dt) = b
           a = array_push(a, p)
@@ -5753,7 +5753,7 @@ std_sw="$(mutant_std scalars-swapped \
           Word(_d2, other) -> {
             a = array_push(a, other)
           }
-          Buf(_h2) -> ()
+          Buffer(_h2) -> ()
         }
         seen = seen + 1
       }
