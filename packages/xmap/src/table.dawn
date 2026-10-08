@@ -204,9 +204,13 @@ pub fn table_from_maps(src: Src, module: String, first: Int, last: Int, c: CMap,
 ## the callee's own name, an operator for the arithmetic calls (`a + b` is
 ## `add`, `addi`, `idx_add`...), or, for the three calls a `var` makes (`carry`
 ## where a loop opens it, `get` where it is read, `set` where it is assigned),
-## the variable's name or the loop's `for`.
+## the variable's name or the loop's `for`. A `lit` is also spelled by the bare
+## number it was made from (`mma(a, b, 0.0)`), which has no call of its own.
 pub fn spelled(name: String, text: String) -> Bool = {
   if text == name {
+    return true
+  }
+  if name == "lit" && list.any(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"], d => str.starts_with(text, d)) {
     return true
   }
   if list.contains(["carry", "get", "set"], name) {
@@ -313,6 +317,10 @@ test "a name is spelled as itself, an operator or a var's own name" {
   assert spelled("idx_rem", "%")
   assert spelled("get", "x")
   assert not spelled("get", "")
+  assert spelled("lit", "0.0")
+  assert spelled("lit", "2")
+  assert not spelled("lit", "x")
+  assert not spelled("mma", "0.0")
   assert not spelled("mma", "mmb")
   assert not spelled("mul", "+")
 }

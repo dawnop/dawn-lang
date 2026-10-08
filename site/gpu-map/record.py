@@ -50,6 +50,8 @@ header, its terminator and its closing brace.
 """
 
 from pathlib import Path
+import contextlib
+import io
 import re
 import subprocess
 import sys
@@ -346,6 +348,16 @@ def static_calls(n: Node, dev: set, env: "Env" = None) -> list:
                         closures += static_calls(k, dev, env)
             else:
                 before += static_calls(a, dev, env)
+                if inner.kind in ("Float", "Int") and callee in dev and callee != "lit":
+                    # A bare number handed to a call of the recording may be
+                    # made a tile constant by the compiler before the call
+                    # runs (`mma(a, b, 0.0)`), and that is a recorded `lit`
+                    # row with no call of its own in the source. It may also
+                    # stay a host number (`full(.., 0.0)`), so the entry is
+                    # optional: `pair` takes it when the run has the `lit`
+                    # row here and leaves it when it does not.
+                    before.append({"names": {"lit"}, "optional": True, "span": (inner.lo, inner.hi),
+                                   "name_span": (inner.lo, inner.hi), "text": SRC[inner.lo:inner.hi], "kids": []})
         if head is not None and head.kind != "Var":
             before = static_calls(head, dev, env) + before
         if callee in dev:
@@ -379,11 +391,19 @@ def pair(static: list, rows: list) -> list:
 
     def walk(sl, parent):
         ran = kids.get(parent, [])
-        if len(sl) != len(ran) or any(r["name"] not in s["names"] for s, r in zip(sl, ran)):
+        taken, j = [], 0
+        for s in sl:
+            if j < len(ran) and ran[j]["name"] in s["names"]:
+                taken.append((s, ran[j]))
+                j += 1
+            elif not s.get("optional"):
+                taken = None
+                break
+        if taken is None or j != len(ran):
             under = "the top of the body" if parent < 0 else f"row {parent} (`{rows[parent]['name']}`)"
             fail(f"under {under} the source calls {[sorted(s['names']) for s in sl]} "
                  f"and the recording ran {[r['name'] for r in ran]}")
-        for s, r in zip(sl, ran):
+        for s, r in taken:
             paired[r["id"]] = s
             walk(s["kids"], r["id"])
 
@@ -391,6 +411,28 @@ def pair(static: list, rows: list) -> list:
     if len(paired) != len(rows):
         fail(f"{len(rows) - len(paired)} recorded call(s) sit under no call of the source")
     return [paired[r["id"]] for r in rows]
+
+
+def selftest() -> None:
+    """The pairing's rules on made-up rows, so that a change to them is caught
+    without a kernel: a bare number is a `lit` row where the run has one and
+    nothing where it has none, and anything else still stops."""
+    def call(name, **kw):
+        return {"names": {name}, "span": (0, 0), "name_span": (0, 0), "text": name, "kids": [], **kw}
+    lit = call("lit", optional=True)
+    row = lambda i, name: {"id": i, "parent": -1, "name": name, "lines": []}
+    ok = pair([call("load"), lit, call("mma")], [row(0, "load"), row(1, "lit"), row(2, "mma")])
+    assert len(ok) == 3 and ok[1] is lit
+    assert pair([lit, call("full")], [row(0, "full")])[0]["names"] == {"full"}
+    for static, rows in (([call("load"), call("mma")], [row(0, "load"), row(1, "lit"), row(2, "mma")]),
+                         ([lit, call("mma")], [row(0, "lit"), row(1, "lit"), row(2, "mma")]),
+                         ([lit, call("mma")], [row(0, "mma"), row(1, "lit")])):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                pair(static, rows)
+        except SystemExit:
+            continue
+        raise AssertionError("a pairing that should stop did not")
 
 
 def place(src: str):
@@ -459,6 +501,7 @@ def main() -> None:
     write = sys.argv[1:] == ["--record"]
     if sys.argv[1:] not in ([], ["--record"]):
         fail("usage: record.py [--record]")
+    selftest()
     fresh = record()
     calls = fresh.count("\ncall ")
     if write:

@@ -1,5 +1,11 @@
 # xmap changelog
 
+## 0.1.2 (2026-10-08)
+
+A `lit` row is spelled by the bare number it was made from, so a Tile IR
+recording of `mma(a, b, 0.0)` (the compiler makes the tile constant itself)
+is no gap. Tables for programs written with `lit(..)` are unchanged.
+
 ## 0.1.1 (2026-10-07)
 
 A listing's member headers are recognised whatever characters the program's
