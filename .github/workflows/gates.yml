@@ -340,6 +340,16 @@ name: gates
 # were repartitioned by measured step time (the note above
 # incremental-memo-1) and restated to 820 / 935 / 820s from 855 / 905 / 830s
 # (-15s). The pole did not move.
+# 2026-10-08, not a change of the line: #530 (parallel cc over per-module C
+# units, 10-05T11:07Z) said it would restate prev-diff-native and
+# native-selfhost-tests from the first CI observations. The 54 successful
+# main runs after it took 483s worst / 443s median and 351s worst / 313s
+# median. Their steps digests did not change at #530, so the audit still
+# holds the claims to the 13 runs of 10-05T00:11Z .. 10-05T11:07Z that
+# precede it (572s and 380s worst) until those leave the seven-day window on
+# 10-12. Lowering now would turn the nightly audit red; the lowering to
+# 535s and 390s (-65s, push-total 19,041s) is for the first commit after
+# 10-12T10:00Z.
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -3315,6 +3325,12 @@ jobs:
     # whose steps digest is this job's (gate-observations --since
     # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
     # 5s, 585s (784s before), and the timeout to 3x that.
+    # 2026-10-08, observed after #530 (parallel cc over per-module C units): 483s
+    # worst (run 37490651117), median 443s, over the 54 successful main runs of
+    # 10-05T11:34Z .. 10-08T11:39Z; the 13 runs of this job's steps before it
+    # had a 532s median and a 572s worst (run 37272977720). The claim stays
+    # until those leave the audit's window on 10-12; then 483s plus a tenth,
+    # rounded up to 5s, is 535s with a 27 minute timeout.
     # budget: 3x 585s worst observed plus a tenth (run 36676798036)
     timeout-minutes: 30
     steps:
@@ -3400,7 +3416,16 @@ jobs:
     needs: [plan]
     if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'native-selfhost-tests') }}
     runs-on: ubuntu-latest
-    # No CI observation yet. Local, one machine, 2026-09-04: the script is
+    # 2026-10-08, observed after #530 (parallel cc over per-module C units,
+    # which cut the `cc` share the planning arithmetic below is built on):
+    # 351s worst (run 37460053597), median 313s, over the 54 successful main
+    # runs of 10-05T11:34Z .. 10-08T11:39Z; the 13 runs of this job's steps
+    # before it had a 356s median and a 380s worst (run 37288304802). The
+    # claim stays until those leave the audit's window on 10-12; then 351s
+    # plus a tenth, rounded up to 5s, is 390s with a 20 minute timeout. The
+    # arithmetic that follows is the history of the planning values, kept
+    # for the increments it records.
+    # Planning value when the job was added. Local, one machine, 2026-09-04: the script is
     # 109.1s end to end with the toolchain already built (`__emitc` 7.4s, `cc`
     # 42.6s, the test run 75.2s and 75.1s on two separate measurements), plus
     # ~20s for the toolchain build itself = ~129s. Scaled by
