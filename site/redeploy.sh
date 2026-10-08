@@ -27,7 +27,33 @@
 # it never looked at what the page points at. So this script refuses an empty
 # value and checks the built pages carry it.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# The repo is resolved from this script's own location, never from $PWD: on
+# 2026-10-08 an agent's `cd` into a deleted worktree failed, the script ran
+# from the wrong checkout and shipped the wrong commit. So the caller names the
+# commit it means to ship (DAWN_DEPLOY_COMMIT, the full sha) and the script
+# refuses unless its own checkout is exactly that commit and has no tracked
+# changes. This runs before anything is built or sent.
+repo="$(cd "$(dirname "$0")/.." && pwd)" || { echo "error: cannot resolve the repo from $0" >&2; exit 1; }
+want_commit="${DAWN_DEPLOY_COMMIT:-}"
+if ! printf '%s' "$want_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "refusing to deploy: DAWN_DEPLOY_COMMIT must be the full 40-hex commit sha to ship." >&2
+  echo "  got: \"$want_commit\"" >&2
+  echo "  e.g. DAWN_DEPLOY_COMMIT=\$(git rev-parse HEAD) in the checkout you mean to deploy" >&2
+  exit 1
+fi
+have_commit="$(git -C "$repo" rev-parse HEAD)"
+if [ "$have_commit" != "$want_commit" ]; then
+  echo "refusing to deploy: this checkout ($repo) is not the requested commit." >&2
+  echo "  DAWN_DEPLOY_COMMIT: $want_commit" >&2
+  echo "  git rev-parse HEAD: $have_commit" >&2
+  exit 1
+fi
+if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
+  echo "refusing to deploy: the checkout has uncommitted changes to tracked files (HEAD $have_commit)." >&2
+  git -C "$repo" status --porcelain --untracked-files=no >&2
+  exit 1
+fi
+cd "$repo"
 
 HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
 export DAWN_WASM_CC="${DAWN_WASM_CC:-clang-20}"

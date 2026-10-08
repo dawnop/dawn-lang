@@ -96,6 +96,7 @@ API origin 上线并通过 `PLAY_API_URL=<API origin>/api scripts/play-live-chec
 `site/redeploy.sh` 在变量为空或不是 origin 时拒绝部署，并核对构建出的两份 playground 页携带它；
 `play-live-check` 新增「页面所指」一组检查：取线上 playground 页，读 `data-endpoint`，断言是
 `PLAY_EXPECT_ORIGIN`（默认 `https://play.dawnop.com`），且该 origin 的 `/api/health` 为 200 并对站点 origin 带 CORS。
+另外 `site/redeploy.sh` 要求 `DAWN_DEPLOY_COMMIT=<40 位 sha>`，脚本所在检出的 HEAD 不等于它、或已跟踪文件有改动时在构建前拒绝（同日另一次事故：`cd` 进已删除的工作树失败，脚本在错误检出上跑并发布了错误提交）。
 `--page-file` 可对保存的页面离线复现（事故页红、正确页绿）。
 
 ## 六、验证（2026-10-02）
