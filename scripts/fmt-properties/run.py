@@ -41,6 +41,18 @@ inputs the formatter has not already settled:
        unwrap exactly where the parser built an unwrap, and a `-` as an infix
        operator exactly where it built a binary node.
 
+  (e)  chains fold: no output line is wider than 100 columns while it holds a
+       chain link at its own bracket depth (a `.f(` straight after `)`, `]`
+       or a postfix `?` / `!`), unless it is a line the formatter leaves to
+       its author (brackets open across the line, begins with a closer, a
+       comment or `use`, holds a multi-line string). A trailing comment is not
+       counted. The tracked files hold almost no such line, so a synthetic
+       chain corpus (`chain_inputs`: widths straddling 100, each link kind,
+       a non-ASCII string, a trailing comment, a chain nested in an argument)
+       is judged by (a)-(e) as well; a folding that is not a fixed point, or
+       that stops folding, shows there. The report on this cut has the
+       mutants.
+
 Inputs. Every tracked .dawn file that lexes (a) and parses cleanly (b-d), in
 three variants: as written; re-indented at random; and re-broken, a newline
 inserted after a random part of the tokens the lexer joins to the next line.
@@ -705,6 +717,75 @@ def generated_inputs(gen, seeds, cases, into):
     return out
 
 
+def chain_inputs(into):
+    """The synthetic chain corpus: `chains/c<N>.dawn`, each one function whose
+    body holds one long dot-call chain. Widths run from well under the limit
+    to well past it, so the threshold (a line of exactly 100 stays, 101
+    folds) is crossed from both sides; the link kinds are `)`, `]`, `?` and
+    `!`; the rest are shapes a lexical folder could get wrong (a comment after
+    the line, a non-ASCII string, a chain nested in an argument, a chain the
+    author already folded). Deterministic: no random draw."""
+    pad = lambda n: "a" * max(n, 1)
+    cases = []
+    for w in range(88, 116, 3):
+        # three links; the middle argument is sized so the line prints w wide
+        head = "  let r = xs.map(f)"
+        tail = ".filter(g).fold(0, h)"
+        cases.append(f"{head}.keep({pad(w - len(head) - len(tail) - 7)}){tail}")
+    cases += [
+        "  let r = " + "xs.map(f)" + ".step(" + pad(30) + ")?" + ".step(" + pad(30) + ")?" + ".done(" + pad(20) + ")",
+        "  let r = " + "xs.map(f)" + ".get(" + pad(30) + ")!" + ".get(" + pad(30) + ")!" + ".done(" + pad(20) + ")",
+        "  let r = " + "xs.map(f)" + "[0]" + ".name(" + pad(40) + ")" + "[1]" + ".name(" + pad(40) + ")",
+        "  let r = xs.map(f).keep(" + pad(60) + ").take(" + pad(30) + ") # " + "c" * 80,
+        "  let r = xs.map(f).keep(\"" + "\u00e9" * 60 + "\").take(" + pad(30) + ").done(1)",
+        "  let r = xs.map(f).keep(" + pad(120) + ")",
+        "  let r = xs.map(f).keep(" + pad(60) + ").take(ys.map(g).keep(" + pad(30) + ").take(" + pad(30) + "))",
+        "  let r = xs.map(f)\n    .keep(" + pad(60) + ")\n    .take(" + pad(60) + ")",
+    ]
+    out = []
+    for i, body in enumerate(cases):
+        rel = f"chains/c{i}.dawn"
+        write(os.path.join(into, rel), f"fn f() -> Int = {{\n{body}\n  r\n}}\n")
+        out.append(rel)
+    return out
+
+
+def check_chains(lay):
+    """Rule (e). Yields (rule, line number, detail)."""
+    openers = {"LPAREN", "LBRACKET", "LBRACE"}
+    for k, line in enumerate(lay.lines):
+        toks = lay.code_on(k)
+        if not toks:
+            continue
+        first = toks[0]
+        if first.kind in CLOSERS or first.kind in ("COMMENT", "USE"):
+            continue
+        # the code part of the line: up to a trailing comment
+        cut = next((t.lo for t in toks if t.kind == "COMMENT"), None)
+        code = [t for t in toks if cut is None or t.lo < cut]
+        if any(t.kind == "STRING" and "\n" in lay.text[t.lo:t.hi] for t in code):
+            continue
+        width = len(lay.lines[k] if cut is None else lay.text[lay.starts[k]:cut].rstrip())
+        if width <= 100:
+            continue
+        depth, bad, links = 0, False, 0
+        for j, t in enumerate(code):
+            if depth == 0 and j >= 1 and t.kind == "DOT" and j + 2 < len(code) \
+                    and code[j + 1].kind == "IDENT" and code[j + 2].kind == "LPAREN":
+                p = code[j - 1]
+                postfix = p.kind == "BANG" and p.hi == t.lo
+                if p.kind in ("RPAREN", "RBRACKET", "QUESTION") or postfix:
+                    links += 1
+            if t.kind in openers:
+                depth += 1
+            elif t.kind in CLOSERS:
+                depth -= 1
+                if depth < 0:
+                    bad = True
+        if links and depth == 0 and not bad:
+            yield ("chain-unfolded", k + 1, f"{width} columns with {links} chain link(s) left on the line")
+
+
 def read(path):
     with open(path, encoding="utf-8", newline="") as fh:
         return fh.read()
@@ -743,6 +824,7 @@ def main():
         inputs = [f for f in inputs if re.search(a.only, f)]
     for f in inputs:
         write(os.path.join(src, f), read(os.path.join(ROOT, f)))
+    inputs += chain_inputs(src)
     gen = a.gen or os.path.join(ROOT, "scripts", "fuzz3", "gen.py")
     if os.path.exists(gen):
         lo, _, hi = a.gen_seeds.partition("-")
@@ -846,6 +928,8 @@ def main():
             add("c", rule, v, f, f"line {ln}: {detail}")
         for rule, ln, detail in check_roles(lay):
             add("d", rule, v, f, f"line {ln}: {detail}")
+        for rule, ln, detail in check_chains(lay):
+            add("e", rule, v, f, f"line {ln}: {detail}")
 
     # one line per finding, the first few per (property, rule, file)
     seen = {}
@@ -909,6 +993,14 @@ def self_test(dawn):
          "fn f(o: Int) -> Int = match o {\n  1 -> 1\n  |\n    2 -> 0\n}\n", None),
         ("a grouping parenthesis on a line of its own",
          "fn f() -> Int = {\n  let r = b\n  (\n    h(r) << 2) + h(\n      r)\n}\n", None),
+        ("a chain line past 100 columns left whole",
+         "fn f() -> Int = {\n  let r = xs.map(f).keep(" + "a" * 70 + ").take(" + "a" * 20 + ")\n  r\n}\n",
+         "chain-unfolded"),
+        ("the same chain folded at its links",
+         "fn f() -> Int = {\n  let r = xs.map(f)\n    .keep(" + "a" * 70 + ")\n    .take(" + "a" * 20 + ")\n  r\n}\n",
+         None),
+        ("a wide line with no chain link is the author's",
+         "fn f() -> Int = {\n  let r = g(" + "a" * 70 + ", " + "b" * 40 + ")\n  r\n}\n", None),
     ]
     tmp = tempfile.mkdtemp(prefix="fmt-properties-self-")
     files = []
@@ -923,7 +1015,8 @@ def self_test(dawn):
         root, _, pd = parse_ast(ast[p])
         toks, _ = parse_lex(lex[p])
         lay = Layout(text, toks, root)
-        rules = {r for r, _, _ in check_layout(lay)} | {r for r, _, _ in check_roles(lay)}
+        rules = {r for r, _, _ in check_layout(lay)} | {r for r, _, _ in check_roles(lay)} \
+            | {r for r, _, _ in check_chains(lay)}
         ok = (want in rules) if want else not rules
         print(f"{'ok  ' if ok else 'FAIL'} {name}: {sorted(rules) or 'clean'}")
         bad += 0 if ok and not pd else 1
