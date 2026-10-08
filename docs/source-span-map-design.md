@@ -110,6 +110,10 @@ pub type CSite =
   回指到哪段源码（整个运算符表达式？），是 M3/M4 的设计问题，`CSite` 届时可以加一个 `CImplied(lo, hi)`
   构造器，不改本刀已有的东西。
 
+- 运算符与 staged `var` 也是检查器代写的调用：`a + b` 在用户类型上是 `Add` 的 impl 调用，carried `var` 的
+  读写是 `StagedVar` 的 `var_get`/`var_set`。它们在 parser 一侧是 `Binary`/`Var`，没有 `Apply` 可配，
+  所以同样 `nlo = NO_NAME`、`CNoSite`；曾把运算符起点或变量起点填进 `nlo`，第七节的 oracle 在 flash_attn
+  上报「is no call the parser sees」，那是检查器写错，不是规则错。
 - 检查器替别的构造写出的调用也不是书写调用：`with handle` 把块的余下部分包成闭包再空参应用
   （`checker.check_handle`），省掉默认实参的 `f$default$k`，`caller()` 占位，eta 包装体，`ev_append`
   拼证据包，处理器的 cell 与 one-shot 原语，`use java` 静态字段读。它们的 `nlo` 都是 `tast.NO_NAME`，
