@@ -11,6 +11,7 @@ import {
   staticCompletions,
 } from '../src/dawn-lang'
 import { BUILTINS } from '../src/builtins.generated'
+import { sanitizeTests } from './sanitize-tests'
 import { parseDawnDiagnostics } from '../src/lint'
 import { EditorState, Text } from '@codemirror/state'
 import { ensureSyntaxTree, matchBrackets } from '@codemirror/language'
@@ -595,7 +596,8 @@ class FakeSocket implements LspSocket {
   }
 }
 
-const tick = async () => { await Promise.resolve() }
+// LSPClient settles a response through a few promise hops; a timer turn outlasts them
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 let socket!: FakeSocket
 const client = new DawnLspClient(
   'ws://example.test/api/lsp',
@@ -608,7 +610,7 @@ client.start('first')
 socket.open()
 expect('requested fixed subprotocol', socket.requestedProtocol, DAWN_LSP_PROTOCOL)
 expect('initialize is first', socket.sent[0].method, 'initialize')
-socket.receive({ id: socket.sent[0].id, result: { capabilities: {} } })
+socket.receive({ id: socket.sent[0].id, result: { capabilities: { textDocumentSync: 1 } } })
 await tick()
 expect('fixed initialize/open sequence', socket.sent.slice(1).map((m) => m.method), [
   'initialized', 'textDocument/didOpen',
@@ -622,6 +624,7 @@ socket.receive({
   params: { uri: DAWN_LSP_URI, diagnostics: [] },
 })
 expect('stale diagnostics discarded', published, [])
+await tick()
 expect('latest Full sync follows stale diagnostics', socket.sent.at(-1)?.params.contentChanges, [{ text: 'second' }])
 socket.receive({
   method: 'textDocument/publishDiagnostics',
@@ -679,7 +682,7 @@ expect('inlay hint response keeps the well-formed hints', await inlay, [
   )
   semanticClient.start('let ab = f(1)')
   semanticSocket.open()
-  semanticSocket.receive({ id: semanticSocket.sent[0].id, result: { capabilities: {
+  semanticSocket.receive({ id: semanticSocket.sent[0].id, result: { capabilities: { textDocumentSync: 1,
     semanticTokensProvider: { legend: { tokenTypes: ['variable', 'function'], tokenModifiers: ['declaration'] }, range: true },
   } } })
   await tick()
@@ -799,7 +802,7 @@ versionClient.onDiagnostics((event) => versionEvents.push([
 ]))
 versionClient.start('AAA')
 versionSocket.open()
-versionSocket.receive({ id: versionSocket.sent[0].id, result: { capabilities: {} } })
+versionSocket.receive({ id: versionSocket.sent[0].id, result: { capabilities: { textDocumentSync: 1 } } })
 await tick()
 const openVersion = versionSocket.sent.at(-1)!.params.textDocument.version
 versionSocket.receive({
@@ -807,6 +810,7 @@ versionSocket.receive({
   params: { uri: DAWN_LSP_URI, version: openVersion, diagnostics: [] },
 })
 versionClient.update('BBB')
+await tick()
 const changeVersion = versionSocket.sent.at(-1)!.params.textDocument.version
 expect('each sync carries its own document version', changeVersion > openVersion, true)
 // The buffer is BBB and its sync is in flight, but the notification answers
@@ -835,7 +839,7 @@ versionClient.stop()
 const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }
 async function reachReady(target: FakeSocket) {
   target.open()
-  target.receive({ id: target.sent[0].id, result: { capabilities: {} } })
+  target.receive({ id: target.sent[0].id, result: { capabilities: { textDocumentSync: 1 } } })
   await tick()
 }
 async function reachDiagnostics(target: FakeSocket) {
@@ -919,7 +923,55 @@ expect('CONNECTING blackhole retries once then falls back', [
 ], [2, 'fallback'])
 blackholeClient.stop()
 
+// ---- the session core is LSPClient: what it adds to the old wire behaviour ----
+{
+  let coreSocket!: FakeSocket
+  const core = new DawnLspClient(
+    'ws://example.test/api/lsp',
+    (_url, protocol) => (coreSocket = new FakeSocket(protocol)),
+    () => 0,
+  )
+  const coreEvents: string[] = []
+  core.onDiagnostics((event) => coreEvents.push(event.text))
+  core.start('A')
+  coreSocket.open()
+  coreSocket.receive({ id: coreSocket.sent[0].id, result: { capabilities: { textDocumentSync: 1 } } })
+  await tick()
+  const diag = (version: number) => coreSocket.receive({
+    method: 'textDocument/publishDiagnostics', params: { uri: DAWN_LSP_URI, version, diagnostics: [] },
+  })
+  expect('the first document is version 1', coreSocket.sent.at(-1)?.params.textDocument.version, 1)
+  // a request the server makes of the client is answered, not left hanging
+  coreSocket.receive({ id: 77, method: 'workspace/configuration', params: { items: [] } })
+  await tick()
+  expect('a server request gets method-not-found', coreSocket.sent.at(-1), {
+    jsonrpc: '2.0', id: 77, error: { code: -32601, message: 'Method not implemented' },
+  })
+  // A -> B -> A while version 1 is in flight: the last text equals the one
+  // already sent, and still needs a version of its own
+  core.update('B')
+  core.update('A')
+  diag(1)
+  await tick()
+  const resend = coreSocket.sent.at(-1)!
+  expect('an edit undone in flight is sent again as its own version', [resend.method, resend.params.textDocument.version, resend.params.contentChanges], [
+    'textDocument/didChange', 2, [{ text: 'A' }],
+  ])
+  diag(2)
+  expect('the diagnostics for the resend are published', coreEvents, ['A'])
+  // a request in flight when the socket drops fails at once, not at its deadline
+  const hanging = core.definition(0, 60000).then(() => 'resolved', () => 'rejected')
+  await tick()
+  coreSocket.onclose?.()
+  expect('a request in flight is rejected when the connection drops', await hanging, 'rejected')
+  expect('and the client is back to fallback', core.status, 'fallback')
+  core.stop()
+  // the client's own editor extension and the sanitizer it carries
+  expect('the session exposes the LSPClient plugin for views', Array.isArray(core.extension()), true)
+}
+
 fails += compileViewTests(expect)
+fails += sanitizeTests(expect)
 
 console.log(fails === 0 ? 'ALL PASS' : `${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)

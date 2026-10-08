@@ -1,6 +1,12 @@
-// The Playground's LSP client and its CodeMirror glue. Every reply is checked
-// against the text it was asked about, so a late answer never describes newer
-// text. Inlay hints get their own hover route: a widget's document position is
+// The Playground's LSP client and its CodeMirror glue. The JSON-RPC session
+// (initialize, request ids, timeouts, server requests) is @codemirror/lsp-client's
+// `LSPClient`; what stays here is the product logic it does not have: a
+// reconnecting transport with its budget, one Full sync in flight at a time
+// paired to diagnostics by version, the `/api/check` fallback's status, and
+// the checks below. Every reply is checked against the text it was asked
+// about, so a late answer never describes newer text. Docs the server sends
+// as Markdown are rendered by the client's `marked` and must pass
+// `sanitizeHTML` (docs/play-lsp-client-design.md, stage 2). Inlay hints get their own hover route: a widget's document position is
 // also the position of the code beside it, so only the DOM under the pointer
 // tells the two apart.
 import type {
@@ -10,7 +16,8 @@ import type {
   CompletionSource,
 } from '@codemirror/autocomplete'
 import type { Diagnostic } from '@codemirror/lint'
-import type { Extension, Range } from '@codemirror/state'
+import { LSPClient, LSPPlugin, Workspace, type Transport, type WorkspaceFile } from '@codemirror/lsp-client'
+import { ChangeSet, type Extension, type Range, Text } from '@codemirror/state'
 import {
   closeHoverTooltip,
   Decoration,
@@ -23,6 +30,7 @@ import {
   type ViewUpdate,
   WidgetType,
 } from '@codemirror/view'
+import { sanitizeHTML } from './sanitize'
 
 export const DAWN_LSP_URI = 'untitled:dawn-playground/prog.dawn'
 export const DAWN_LSP_PROTOCOL = 'dawn-lsp-v1'
@@ -397,10 +405,134 @@ export function lspDiagnostics(
   })
 }
 
+// What the client tells the server it can render. `LSPClient` merges these
+// into its own set; the gateway rebuilds `initialize` itself, but a server
+// reached some other way reads them.
+const CLIENT_CAPABILITIES = {
+  textDocument: {
+    inlayHint: { dynamicRegistration: false },
+    semanticTokens: {
+      dynamicRegistration: false,
+      requests: { range: true, full: false },
+      tokenTypes: [],
+      tokenModifiers: [],
+      formats: ['relative'],
+    },
+    completion: { completionItem: { resolveSupport: { properties: ['documentation'] } } },
+  },
+}
+
+/** An `LSPClient` request fails with the response's error object, not an Error. */
+function rpcError(reason: unknown): Error {
+  const message = asRecord(reason)?.message
+  return reason instanceof Error ? reason : new Error(typeof message === 'string' ? message : 'LSP request failed')
+}
+
+/**
+ * One WebSocket as `LSPClient`'s transport. The reconnecting is the client's:
+ * every connection gets a new transport, and the old one is dropped with its
+ * socket. A send on a socket that is not open ends the connection (the
+ * client sends notifications from a promise callback, where a throw would be
+ * an unhandled rejection) instead of throwing.
+ */
+class SocketTransport implements Transport {
+  private handlers = new Set<(value: string) => void>()
+
+  constructor(
+    private readonly socket: LspSocket,
+    private readonly broken: (reason: Error) => void,
+  ) {}
+
+  send(message: string): void {
+    if (this.socket.readyState !== SOCKET_OPEN) {
+      this.broken(new Error('LSP WebSocket is not open'))
+      return
+    }
+    this.socket.send(message)
+  }
+
+  subscribe(handler: (value: string) => void): void {
+    this.handlers.add(handler)
+  }
+
+  unsubscribe(handler: (value: string) => void): void {
+    this.handlers.delete(handler)
+  }
+
+  deliver(message: string): void {
+    for (const handler of this.handlers) handler(message)
+  }
+}
+
+/**
+ * The one document the Playground has. `DawnLspClient` decides when a version
+ * goes out (one Full sync at a time, paired to diagnostics), so this only
+ * holds the text last sent and turns the next one into the change record
+ * `LSPClient.sync` wants. A sync is always a whole-text replacement, and is
+ * emitted even when the text equals the last sent: a buffer edited and edited
+ * back while a version was in flight still needs its own version, because the
+ * diagnostics that answer it are paired by version.
+ */
+class DawnWorkspace extends Workspace {
+  view: EditorView | null = null
+  readonly file: WorkspaceFile & { version: number; doc: Text }
+  files: WorkspaceFile[]
+  private staged: string | null = null
+
+  constructor(client: LSPClient) {
+    super(client)
+    this.file = {
+      uri: DAWN_LSP_URI,
+      languageId: 'dawn',
+      version: 0,
+      doc: Text.of(['']),
+      getView: () => this.view,
+    }
+    this.files = [this.file]
+  }
+
+  /** Start a connection's document: version 1, the text given. */
+  open(text: string): WorkspaceFile {
+    this.file.version = 1
+    this.file.doc = Text.of(text.split('\n'))
+    this.staged = null
+    return this.file
+  }
+
+  stage(text: string): void {
+    this.staged = text
+  }
+
+  syncFiles() {
+    if (this.staged == null) return []
+    const prevDoc = this.file.doc
+    const doc = Text.of(this.staged.split('\n'))
+    this.staged = null
+    const changes = ChangeSet.of({ from: 0, to: prevDoc.length, insert: doc }, prevDoc.length)
+    this.file.doc = doc
+    this.file.version++
+    return [{ file: this.file, prevDoc, changes }]
+  }
+
+  openFile(_uri: string, _languageId: string, view: EditorView): void {
+    this.view = view
+  }
+
+  closeFile(_uri: string, view: EditorView): void {
+    if (this.view === view) this.view = null
+  }
+
+  // the client opens the document itself, once a connection is initialized
+  connected(): void {}
+}
+
 export class DawnLspClient {
   private readonly socketFactory: LspSocketFactory
   private readonly reconnectDelay: () => number
   private socket: LspSocket | null = null
+  private readonly lsp: LSPClient
+  private readonly workspace: DawnWorkspace
+  private transport: SocketTransport | null = null
   private connection = 0
   private stopped = false
   private retryCount = 0
@@ -434,6 +566,29 @@ export class DawnLspClient {
   ) {
     this.socketFactory = socketFactory
     this.reconnectDelay = reconnectDelay
+    this.lsp = new LSPClient({
+      timeout: INITIALIZE_TIMEOUT_MS,
+      workspace: (client) => new DawnWorkspace(client),
+      sanitizeHTML: (html) => sanitizeHTML(html),
+      notificationHandlers: {
+        'textDocument/publishDiagnostics': (_client, params) => {
+          this.receiveDiagnostics(params)
+          return true
+        },
+      },
+      extensions: [{ clientCapabilities: CLIENT_CAPABILITIES }],
+    })
+    this.workspace = this.lsp.workspace as DawnWorkspace
+  }
+
+  /** The editor extension that gives views a `LSPPlugin` (doc rendering, positions). */
+  extension(): Extension {
+    return this.lsp.plugin(DAWN_LSP_URI, 'dawn')
+  }
+
+  /** The view the client's plugin is attached to, if the editor has one. */
+  get view(): EditorView | null {
+    return this.workspace.view
   }
 
   get status(): LspStatus {
@@ -608,38 +763,14 @@ export class DawnLspClient {
         this.abandon(connection, new Error('LSP subprotocol was not negotiated'), true)
         return
       }
-      this.requestRaw('initialize', {
-        processId: null,
-        clientInfo: { name: 'dawn-playground' },
-        rootUri: null,
-        workspaceFolders: null,
-        capabilities: {
-          textDocument: {
-            hover: { contentFormat: ['markdown', 'plaintext'] },
-            inlayHint: { dynamicRegistration: false },
-            semanticTokens: {
-              dynamicRegistration: false,
-              requests: { range: true, full: false },
-              tokenTypes: [],
-              tokenModifiers: [],
-              formats: ['relative'],
-            },
-            completion: {
-              completionItem: {
-                snippetSupport: false,
-                documentationFormat: ['markdown', 'plaintext'],
-                resolveSupport: { properties: ['documentation'] },
-              },
-              completionList: { itemDefaults: ['data'] },
-            },
-          },
-        },
-      }, INITIALIZE_TIMEOUT_MS).then((result) => {
+      const transport = new SocketTransport(socket, (reason) => this.abandon(connection, reason, true))
+      this.transport = transport
+      this.lsp.connect(transport)
+      const initializing = this.lsp.initializing
+      initializing.then(() => {
         if (!this.isCurrent(connection, socket)) return
-        this.legend = semanticLegendOf(asRecord(result)?.capabilities)
-        this.notify('initialized', {})
+        this.legend = semanticLegendOf(this.lsp.serverCapabilities)
         this.opened = false
-        this.version = 0
         this.inFlight = null
         this.diagnosedGeneration = -1
         this.readyAt = Date.now()
@@ -670,6 +801,8 @@ export class DawnLspClient {
     this.socket = null
     this.connection++
     this.clearConnectTimer()
+    this.transport = null
+    this.lsp.disconnect()
     if (socket != null && socket.readyState <= SOCKET_OPEN) {
       try { socket.close(1000, 'fallback') } catch { /* already closed */ }
     }
@@ -702,32 +835,28 @@ export class DawnLspClient {
     }
   }
 
-  private send(message: Record<string, unknown>): void {
-    if (this.socket == null || this.socket.readyState !== SOCKET_OPEN) {
-      throw new Error('LSP WebSocket is not open')
-    }
-    this.socket.send(JSON.stringify({ jsonrpc: '2.0', ...message }))
-  }
-
-  private notify(method: string, params: unknown): void {
-    this.send({ method, params })
-  }
-
+  /**
+   * A request to the server, ended by this client's own deadline and by the
+   * connection ending: `LSPClient` times a request out at its fixed 3 s and
+   * does not fail the ones in flight when the socket drops.
+   */
   private requestRaw(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
-    const id = this.nextId++
     return new Promise((resolve, reject) => {
+      const id = this.nextId++
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`${method} timed out`))
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
-      try {
-        this.send({ id, method, params })
-      } catch (reason) {
+      this.lsp.request<unknown, unknown>(method, params).then((value) => {
+        if (!this.pending.delete(id)) return
         clearTimeout(timer)
-        this.pending.delete(id)
-        reject(errorOf(reason))
-      }
+        resolve(value)
+      }, (reason) => {
+        if (!this.pending.delete(id)) return
+        clearTimeout(timer)
+        reject(rpcError(reason))
+      })
     })
   }
 
@@ -748,45 +877,23 @@ export class DawnLspClient {
       this.abandon(connection, new Error('LSP gateway sent an invalid JSON-RPC message'), false)
       return
     }
-    if (message.method === 'textDocument/publishDiagnostics') {
-      this.receiveDiagnostics(message.params)
-      return
-    }
-    if (typeof message.id !== 'number') return
-    const pending = this.pending.get(message.id)
-    if (pending == null) return
-    this.pending.delete(message.id)
-    clearTimeout(pending.timer)
-    if (message.error != null) {
-      const rpcError = asRecord(message.error)
-      pending.reject(new Error(String(rpcError?.message ?? 'LSP request failed')))
-    } else {
-      pending.resolve(message.result)
-    }
+    this.transport?.deliver(data)
   }
 
   private sendLatestText(): void {
     if (!this.isReady() || this.inFlight != null) return
-    this.version++
-    const flight = { generation: this.generation, text: this.text, version: this.version }
+    const text = this.text
+    const flight = { generation: this.generation, text, version: 0 }
     this.inFlight = flight
     try {
       if (!this.opened) {
         this.opened = true
-        this.notify('textDocument/didOpen', {
-          textDocument: {
-            uri: DAWN_LSP_URI,
-            languageId: 'dawn',
-            version: this.version,
-            text: flight.text,
-          },
-        })
+        this.lsp.didOpen(this.workspace.open(text))
       } else {
-        this.notify('textDocument/didChange', {
-          textDocument: { uri: DAWN_LSP_URI, version: this.version },
-          contentChanges: [{ text: flight.text }],
-        })
+        this.workspace.stage(text)
+        this.lsp.sync()
       }
+      flight.version = this.workspace.file.version
       this.clearDiagnosticTimer()
       const connection = this.connection
       this.diagnosticTimer = setTimeout(() => {
@@ -983,7 +1090,7 @@ export async function completionInfo(
 ): Promise<HTMLElement | null> {
   try {
     const doc = completionInfoText(await client.completionDoc(item, 1000))
-    return doc ? docNode(doc, 'dp-completion-doc') : null
+    return doc ? docElement(client.view, doc, 'dp-completion-doc') : null
   } catch {
     return null
   }
@@ -1131,6 +1238,25 @@ function docNode(doc: string, className = 'dp-hover-doc'): HTMLElement {
   return node
 }
 
+/**
+ * The doc as the client's Markdown renderer draws it, through the sanitizer
+ * configured on the `LSPClient` (`LSPPlugin.docToHTML` applies it). A view
+ * without the plugin, or a renderer that throws, gets the plain-text node.
+ */
+function docElement(view: EditorView | null, doc: string, className: string): HTMLElement {
+  const plugin = view != null ? LSPPlugin.get(view) : null
+  if (plugin == null) return docNode(doc, className)
+  try {
+    const html = plugin.docToHTML(doc, 'markdown')
+    const node = document.createElement('div')
+    node.className = className
+    node.innerHTML = html
+    return node
+  } catch {
+    return docNode(doc, className)
+  }
+}
+
 const inlayHoverTooltips = new WeakSet<Tooltip>()
 
 function hoverResult(contents: unknown, from: number, to: number, inlayDOM?: HTMLElement): Tooltip | null {
@@ -1140,14 +1266,14 @@ function hoverResult(contents: unknown, from: number, to: number, inlayDOM?: HTM
     pos: from,
     end: Math.max(from, to),
     above: true,
-    create: () => {
+    create: (view) => {
       const dom = document.createElement('div')
       dom.className = 'dp-hover'
       const code = document.createElement('div')
       code.className = 'dp-hover-code'
       code.textContent = parts.code.trim()
       dom.appendChild(code)
-      if (parts.doc) dom.appendChild(docNode(parts.doc))
+      if (parts.doc) dom.appendChild(docElement(view, parts.doc, 'dp-hover-doc'))
       return { dom, ...(inlayDOM ? { getCoords: () => inlayDOM.getBoundingClientRect() } : {}) }
     },
   }
