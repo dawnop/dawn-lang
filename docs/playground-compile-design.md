@@ -450,11 +450,28 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
    `record.py` 逐字节对拍，对拍通过后 `record.py` 只剩调用编译器取原料的那层。
 3. **何时编译：手动按钮 + 输出栏打开时空闲 1.5 s 自动重编。已裁决。**`/run` 出现 429 再退回仅手动。
 4. **Tile IR 逐调用高亮：先不做。已裁决。**先出纯文本（K5），K6 等 `tileir` 给出稳定入口再定。
-5. **native C 快路径：不开第二条路径。已裁决。**
+5. **native C 快路径：不开第二条路径。已裁决。****修订（2026-10-08，协调者）：**`dawnc` 与 `dawn` 对同一程序产出逐字节相同的 C 与映射（`playground/test/contract.sh` 对拍），
+   所以它不是第二条路径，是同一条路径换了更省的编译器。`/check` 与 C 视图改走 `dawnc`，见 8.1。
 6. **每个可见标签页一个请求，靠缓存吸收重复。已裁决。**
 7. **起始限额：30 次/分钟、每栏 256 KB、每响应 2,000 个调用，作为起始值采纳。已裁决。**这些是**估计**，不是实测：
    上线一周后按实测收紧，那一天再回填本文与 `nginx-play.conf` 的示例值。
 8. **缺口处理：静态页遇缺口建站失败，在线视图降级并计数。已裁决。**11 个样例必须零缺口，作为门禁（K1 的验收）。
+
+### 8.1 `/check` 与 C 视图走 native `dawnc`（2026-10-08）
+
+依据 `agent-handoff/research-native-services-20261007.md` 的 A 路；`/run` 与 JVM 视图不动，仍在 JVM 上。
+
+- **走哪条命令**：`/check` 用 `dawnc check`（原为 `dawn build` 出 jar 再丢弃），C 视图用 `dawnc emitc --map`（原为 `dawn __emitc --map`）。
+  沙箱单元、预算、限额一概不变，`dawnc` 与 JVM 编译器在同一个单元里、同一套属性下运行。
+- **回落规则**：`dawnc` 以退出码非 0 结束，且诊断里含 ``` `use java` is not available in this compiler ```（`pass_java_uses` 的拒绝句），
+  或诊断为空（编译器自己挂了，没有话可对访客说），则同一请求改由 JVM 编译器重做，用户可见的行为不变。
+  超时不重试。这句话是回落的全部依据，合约测试用真二进制钉住它，措辞一改测试就红。
+- **版本**：启动时 runner 问 `dawnc --version`，只比版本号，与 `dawn --version` 不同就在日志里说一次并整条停用 `dawnc`；
+  `dawnc` 不存在同样只记一次。不比 `b1:` 摘要：jar 与 native 二进制由不同工具链构建，同一个 release 的摘要本来就不同。
+  `/health` 仍只报 `dawn` 的版本。`DAWNC_BIN` 可指定路径，默认是 `DAWN_BIN` 旁边的 `dawnc`，部署不需要新增任何配置。
+- **实测（本机，v0.85.0，无沙箱）**：`/check` 三次 0.60 s，对比 JVM 路径 1.61–1.67 s；编译器单进程峰值 RSS 64 MB 对 500–520 MB
+  （`/usr/bin/time`）。C 视图墙钟与原来持平（`emitc` 不经 cc，见调研报告 §3.2），省的是内存。沙箱内的墙钟与 RSS 未测，见 PR 说明。
+- **不变的**：`MemoryMax`、`TasksMax`、`MAX_CONCURRENT` 都没动；`dawnc` 的内存余量可以以后另开一刀收紧。
 
 ## 九、他山之石
 
@@ -483,6 +500,6 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 - **不做服务端短链存储**：URL 片段够用，存储意味着新的持久化与滥用面。
 - **不把「选中的调用」放进 URL**：同静态页第十一节，先让点击与键盘对。
 - **不先做 Tile IR 逐调用对照**：要 `tileir` 的稳定入口，属 Tile 线（4.3）。
-- **不引入 native `dawnc` 作为第二条 C 路径**：见第八节第 5 条。
+- **不让 native `dawnc` 成为 C 视图的唯一路径**：`use java` 程序它拒绝，要回落 JVM 编译器（8.1）。
 - **不加兼容层**：片段格式不变，旧链接天然可用；标签放查询串，不改旧格式。
 - **不在 runner 里依赖站点生成器的代码**：方向反了（5.2 乙）。

@@ -11,7 +11,7 @@ use web/router.{route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
 use play/contract.{parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
-use play/exec.{execute, check, compiler_id, CompilerId, view_raw, javap_id, tile_run, tile_ready}
+use play/exec.{execute, check, compiler_id, native_ready, CompilerId, view_raw, javap_id, tile_run, tile_ready}
 use play/view.{build_view, respond, cache_key, Mapped, Done, tile_view, TileShown, TileFailed}
 use play/cache.{Cache, new_cache, cache_get, cache_put}
 use play/gate.{new_gate, with_gate}
@@ -44,7 +44,7 @@ fn health(id: CompilerId) -> Result[Response, HttpError] !io =
 # executor and queue patience. The wire format predates the framework, so
 # errors are rendered into the contract's own JSON shapes (via raw), not the
 # framework's Err branch.
-fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, HttpError] !io =
+fn rpc(req: Request, gate: Semaphore, check_only: Bool, native: Bool) -> Result[Response, HttpError] !io =
   # bytes, not code points: str.len counts characters, so a program written in
   # CJK got up to three times the stated budget
   if bytes.len(req.body) > MAX_BODY {
@@ -60,7 +60,7 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
           let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
           # Hold a permit across execution only; with_gate releases it even if the
           # compiler panics, then we render outside the permit. None = saturated.
-          match with_gate(gate, wait, () => if check_only { check(code) } else { execute(code) }) {
+          match with_gate(gate, wait, () => if check_only { check(code, native) } else { execute(code) }) {
             Some(outcome) ->
               Ok(raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) }))
             None -> Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
@@ -71,7 +71,7 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
   }
 
 # What /compile needs to know of the machine it runs on, asked once at start.
-type View = { toolchain: String, build: String, javap: Bool, tile: Bool, cache: Cache }
+type View = { toolchain: String, build: String, javap: Bool, tile: Bool, native: Bool, cache: Cache }
 
 # The view's cache lines: "<status>:<kind>:" and then the text. A kind is `S`,
 # the program's part of a success answer (the head is written per request), or
@@ -160,7 +160,7 @@ fn compile_view(gate: Semaphore, view: View, code: String, target: String) -> Re
   match cache_get(view.cache, "${base}/${target}") {
     Some(line) -> serve_kept(view, target, started, line)
     None ->
-      match with_gate(gate, COMPILE_WAIT_SECS, () => build_view(code, view_raw(code))) {
+      match with_gate(gate, COMPILE_WAIT_SECS, () => build_view(code, view_raw(code, view.native))) {
         None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
         Some(Mapped(c, jvm, gaps)) -> {
           if gaps > 0 {
@@ -185,6 +185,7 @@ pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
   let id = compiler_id()
   let javap = javap_id()
+  let native = native_ready(id)
   if javap == "" {
     io.eprintln("dawn-play: javap is not available; POST /compile will answer 503 until it is installed (a JDK, not only a JRE)")
   }
@@ -193,18 +194,19 @@ pub fn main() -> Unit !io = {
     build: id.build,
     javap: javap != "",
     tile: tile_ready(),
+    native: native,
     cache: new_cache(CACHE_ENTRIES, CACHE_CHARS),
   }
   serve_app(port(), [
     route_get("/health", req => health(id)),
-    route_post("/run", req => rpc(req, gate, false)),
-    route_post("/check", req => rpc(req, gate, true)),
+    route_post("/run", req => rpc(req, gate, false, native)),
+    route_post("/check", req => rpc(req, gate, true, native)),
     route_post("/compile", req => compile_rpc(req, gate, view)),
   ], [with_logging])
 }
 
 test "without javap the view is refused with a 503 that says why" {
-  let view = View { toolchain: "", build: "", javap: false, tile: false, cache: new_cache(2, 100) }
+  let view = View { toolchain: "", build: "", javap: false, tile: false, native: false, cache: new_cache(2, 100) }
   match unavailable(view) {
     Some(r) -> {
       assert response_status(r) == 503
@@ -215,6 +217,6 @@ test "without javap the view is refused with a 503 that says why" {
     }
     None -> { assert false }
   }
-  let with_javap = View { toolchain: "", build: "", javap: true, tile: false, cache: new_cache(2, 100) }
+  let with_javap = View { toolchain: "", build: "", javap: true, tile: false, native: false, cache: new_cache(2, 100) }
   assert match unavailable(with_javap) { Some(_) -> false, None -> true }
 }

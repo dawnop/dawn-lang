@@ -43,7 +43,7 @@ use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/config.{dawn_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
+use play/config.{dawn_bin, native_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
 
 ## The most output, in bytes, a response carries. Bytes rather than
 ## characters because bytes are what the read can bound before decoding.
@@ -301,10 +301,15 @@ fn compile_phase(dir: String, box: String) -> Result[Int, String] !io =
 
 # [`compile_phase`] for an input of the caller's choosing: the staged file, or
 # the box itself when it holds a project.
-fn compile_input(dir: String, box: String, input: String) -> Result[Int, String] !io = {
+fn compile_input(dir: String, box: String, input: String) -> Result[Int, String] !io =
+  compile_with(dir, box, [dawn_bin(), "build", input, "-o", "${box}/prog.jar"])
+
+# One sandboxed compiler command whose exit status and diagnostics are the
+# answer: `compile_input`'s `dawn build`, or /check's `dawnc check`.
+fn compile_with(dir: String, box: String, argv: List[String]) -> Result[Int, String] !io = {
   let build_out = "${dir}/build.txt"
   let unit = fresh_unit()
-  let bp = ProcessBuilder.new(sandboxed(unit, box, [dawn_bin(), "build", input, "-o", "${box}/prog.jar"]))
+  let bp = ProcessBuilder.new(sandboxed(unit, box, argv))
   bp.redirectErrorStream(true)
   bp.redirectOutput(File.new(build_out))
   let started = System.nanoTime()
@@ -326,14 +331,46 @@ fn compile_input(dir: String, box: String, input: String) -> Result[Int, String]
 ## them to `with_gate` as a `fn() -> T !io` body, a closed row the label
 ## cannot travel through (spec §6.5), and one snippet's staging directory is
 ## the whole unit of file work anyway.
-pub fn check(code: String) -> Outcome !io = with_fs_real(() => with_request(code, check_staged))
+## `native` is whether the runner may use the native `dawnc` (see
+## [`native_ready`]); the answer is the same either way, only the cost differs.
+pub fn check(code: String, native: Bool) -> Outcome !io =
+  with_fs_real(() => with_request(code, (dir, box) => check_staged(dir, box, native)))
 
 pub fn execute(code: String) -> Outcome !io = with_fs_real(() => with_request(code, execute_staged))
 
-fn check_staged(dir: String, box: String) -> Outcome !io =
-  match compile_phase(dir, box) {
+fn check_staged(dir: String, box: String, native: Bool) -> Outcome !io =
+  match check_phase(dir, box, native) {
     Err(diags) -> CompileError(diags)
     Ok(ms) -> Compiled("", 0, false, ms)
+  }
+
+# The text `dawnc` answers a `use java` program with
+# (selfhost/src/check/passes.dawn, pass_java_uses): the native compiler has no
+# JVM to resolve Java classes against, so it refuses the declaration. It is
+# the refusal's whole contract: exit status 1 and this sentence among the
+# diagnostics. The `dawnc check refuses use java` case in test/contract.sh
+# pins it against the real binary, so a reworded refusal turns that red
+# instead of silently making every `use java` program a compile error here.
+const NATIVE_REFUSAL: String = "`use java` is not available in this compiler"
+
+# Whether `dawnc`'s diagnostics are a refusal to compile (it cannot do this
+# program) and not a verdict on the program: the refusal sentence, or no
+# diagnostics at all from a failed run, which is a compiler that died and has
+# nothing to show the visitor either. Either way the JVM compiler decides.
+fn native_declined(diags: String) -> Bool = str.trim(diags) == "" || str.contains(diags, NATIVE_REFUSAL)
+
+# /check's compile: `dawnc check` when the runner may use it, with the JVM
+# `dawn build` as the answer for a program `dawnc` declines, so what the
+# editor shows does not depend on which compiler looked first. A timeout is
+# not a refusal and is not retried: the budget is spent.
+fn check_phase(dir: String, box: String, native: Bool) -> Result[Int, String] !io =
+  if not native {
+    compile_phase(dir, box)
+  } else {
+    match compile_with(dir, box, [native_bin(), "check", "${box}/prog.dawn"]) {
+      Ok(ms) -> Ok(ms)
+      Err(diags) -> if native_declined(diags) { compile_phase(dir, box) } else { Err(diags) }
+    }
   }
 
 fn execute_staged(dir: String, box: String) -> Outcome !io =
@@ -396,10 +433,12 @@ pub fn javap_id() -> String !io = id_of_tool(javap_bin())
 # not there, exits with a failure or does not answer in five seconds. Starting
 # a program that does not exist is a fault of the start, not an absent answer,
 # so it is caught here: a missing javap must leave the runner up, saying so.
-fn id_of_tool(bin: String) -> String !io = {
+fn id_of_tool(bin: String) -> String !io = first_line_of(bin, "-version")
+
+fn first_line_of(bin: String, flag: String) -> String !io = {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   with out <- bracket("${temp_root()}/dawn-play-javap-${id}.txt", cleanup)
-  let p = ProcessBuilder.new([bin, "-version"])
+  let p = ProcessBuilder.new([bin, flag])
   p.redirectErrorStream(true)
   p.redirectOutput(File.new(out))
   match catch_fault(() => p.start()) {
@@ -470,14 +509,30 @@ fn raw_file(path: String, what: String) -> Result[String, ViewRaw] !io = {
 # under one permit, four under two. Measured on the dev box, sequential is
 # 3.6 to 4.0 s cold against 2.0 to 2.2 s side by side; the second tab of a
 # program is a cache hit either way, which is where the repeat cost goes.
-fn view_staged(dir: String, box: String) -> ViewRaw !io = {
+fn view_staged(dir: String, box: String, native: Bool) -> ViewRaw !io = {
   let started = System.nanoTime()
   let prog = "${box}/prog.dawn"
-  match emit_unit(dir, box, "emitc", [dawn_bin(), "__emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"], started) {
+  match emitc_unit(dir, box, prog, native, started) {
     Some(fail) -> fail
     None -> match emit_unit(dir, box, "emit", [dawn_bin(), "__emit", prog, "-o", "${box}/classes", "--map", "${box}/jvm.dawnmap"], started) {
       Some(fail) -> fail
       None -> list_and_gather(dir, box, started)
+    }
+  }
+}
+
+# The C half of the view. `dawnc emitc` writes the same C text and map as
+# `dawn __emitc` (byte-compared in test/contract.sh) and costs a tenth of the
+# memory; a program it declines goes to the JVM compiler, as in [`check_phase`].
+fn emitc_unit(dir: String, box: String, prog: String, native: Bool, started: Int) -> Option[ViewRaw] !io = {
+  let jvm = [dawn_bin(), "__emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"]
+  if not native {
+    emit_unit(dir, box, "emitc", jvm, started)
+  } else {
+    match emit_unit(dir, box, "emitc", [native_bin(), "emitc", prog, "-o", "${box}/out.c", "--map", "${box}/c.dawnmap"], started) {
+      Some(RawFail(CompileError(diags))) ->
+        if native_declined(diags) { emit_unit(dir, box, "emitc", jvm, started) } else { Some(RawFail(CompileError(diags))) }
+      other -> other
     }
   }
 }
@@ -534,8 +589,8 @@ fn gather(dir: String, box: String, started: Int) -> ViewRaw !io =
 ## The raw material of `code`'s compile view, from the sandbox. Compile-only:
 ## the program is never run, though `comptime` still runs inside the compiler,
 ## which is why the compilers are sandboxed like /check's.
-pub fn view_raw(code: String) -> ViewRaw !io =
-  with_fs_real(() => with_staged(code, msg => RawFail(CompileError(msg)), view_staged))
+pub fn view_raw(code: String, native: Bool) -> ViewRaw !io =
+  with_fs_real(() => with_staged(code, msg => RawFail(CompileError(msg)), (dir, box) => view_staged(dir, box, native)))
 
 # ---- the Tile IR view (POST /compile with target "tile") ----
 #
@@ -657,6 +712,53 @@ pub fn compiler_id() -> CompilerId !io = {
       }
     }
   }
+}
+
+# Whether /check and the C view may use the native `dawnc`: it answers
+# `--version` and says the same release `dawn` does. Asked once at startup,
+# with `compiler_id`, and a "no" is logged once here, not per request: the
+# runner is then exactly the JVM-only runner it was. A missing `dawnc` is the
+# ordinary case on a dev box and says nothing alarming; a present one of
+# another release is a deploy that shipped half a toolchain, so it is named.
+# Only the version is compared, not the `b1:` digest: the jar and the native
+# binary are built by different toolchains from the same sources and print
+# different digests for the same release.
+pub fn native_ready(id: CompilerId) -> Bool !io = {
+  let line = first_line_of(native_bin(), "--version")
+  if line == "" {
+    io.eprintln("dawn-play: no native dawnc at ${native_bin()}; /check and the C view use the JVM compiler")
+    false
+  } else {
+    let v = native_version_of(line)
+    if v != "" && v == id.version {
+      true
+    } else {
+      io.eprintln("dawn-play: dawnc reports version '${v}' but dawn reports '${id.version}'; ignoring dawnc, /check and the C view use the JVM compiler")
+      false
+    }
+  }
+}
+
+# The second word of `dawnc <version> (native) ...`.
+fn native_version_of(line: String) -> String =
+  match str.strip_prefix(line, "dawnc ") {
+    Some(rest) -> match str.split(str.trim(rest), " ") {
+      [v, ..] -> str.trim(v)
+      [] -> ""
+    }
+    None -> ""
+  }
+
+test "the native version is the word after dawnc" {
+  assert native_version_of("dawnc 0.85.0 (native) b1:b45ed3c031a4") == "0.85.0"
+  assert native_version_of("dawn 0.85.0 (selfhost)") == ""
+  assert native_version_of("") == ""
+}
+
+test "an empty diagnostic or the refusal sentence is a refusal, a verdict is not" {
+  assert native_declined("")
+  assert native_declined("error: `use java` is not available in this compiler\n  --> prog.dawn:1:10\n")
+  assert not native_declined("error: undefined variable: nope\n")
 }
 
 # The words after "dawn " on the first line that starts with it. bin/dawn may

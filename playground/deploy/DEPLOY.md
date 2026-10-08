@@ -185,6 +185,20 @@ sample against the deployed `/api/run`, compares stdout byte-for-byte with the
 serves carries the current spelling. Health checks cannot see any
 of that — the old runner answered `/health` with `ok` the whole time.
 
+## The native compiler in `/check` and `/compile`
+
+`/check` and the C view of `/compile` run `/opt/dawn/bin/dawnc` (`check` and
+`emitc`) inside the same sandbox unit as before; `/run` and the JVM view stay
+on the JVM compiler. Nothing new has to be configured: `dawnc` is the one
+`redeploy.sh` already ships, and the runner looks for it beside `DAWN_BIN`
+(`DAWNC_BIN` names another). At startup the runner asks `dawnc --version` and
+compares the release number with `dawn --version`; a missing `dawnc` or a
+different release is logged once (`journalctl -u dawn-play | grep dawnc`) and
+turns the native path off for the whole process, so the runner is then exactly
+the JVM-only runner. A program `dawnc` refuses (`use java`) is compiled again
+by the JVM compiler within the same request. To switch the native path off,
+point `DAWNC_BIN` at a path that does not exist.
+
 ## Rollback
 
 ```sh
