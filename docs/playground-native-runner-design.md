@@ -263,6 +263,30 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
      状态码与响应体逐字节一致（`ms`、`cached` 归一）；两槽三个并发慢 `/run`，第三个等到槽位才答；两槽占满时 `/check` 2.0 s 后 429；SIGKILL 两个作业后下一个请求立刻拿到槽位。
      `contract.sh` 48 项在 JVM 入口上仍全绿；`playground/test/native-tests.sh` 在 `dawnc test` 下跑 89 个 test 块。
 4. **K4：部署单元与 nginx 切换。** 先在另一个 socket（如 `dawn-play-canary.socket`）上与 JVM runner 并行，对同一批请求做响应字节比对（沿用 `contract.sh` 的 48 项），再切 nginx。
+   **K4 落地记录（10-09，仅仓库侧，未部署）**：金丝雀单元、部署脚本、字节比对与 nginx 变体都在仓库里，生产上什么都没动。
+   - 单元：`playground/deploy/dawn-play-native.socket`（`/run/dawn-play/http.sock`，`Accept=yes`，`SocketUser=dawn-play`，`SocketGroup=www-data`，`0660`，`MaxConnections=16`）
+     与模板 `dawn-play-native@.service`（`StandardInput/Output=socket`，`RuntimeMaxSec=60`，`MemoryMax=256M`，`TasksMax=64`，`LimitCORE=0`），`systemd-analyze verify` 只剩「二进制尚未安装」一条。
+     与 6.1 草案的差别，各有理由：
+     (1) 名字是 `dawn-play-native` 而非 `dawn-play@`/`canary`，因为这一套就是将来切流量的那一套，K5 不必改名；
+     (2) 槽位目录**不是** `RuntimeDirectory=dawn-play`：`RuntimeDirectory` 在拥有它的服务停止时被删，而 `Accept=yes` 下每个请求都是一个会停止的服务，
+     套接字所在目录会在下一个客户端眼前被删。所以套接字在 `/run/dawn-play`（由 socket 单元建，root 属主），槽位在 `RuntimeDirectory=dawn-play-slots` 加 `RuntimeDirectoryPreserve=yes`，`PLAY_SLOT_DIR=/run/dawn-play-slots`；
+     (3) 与现行 JVM 单元一致，**没有** `DynamicUser` 和 `NoNewPrivileges`（runner 要 `sudo run-sandboxed.sh`，第五节已写明），也没有改 `UMask`（工作目录的 0711/0777 由 runner 显式 `chmod`，未测过 0077 是否安全，不拿它冒险）；
+     (4) 故意**不设** `TriggerLimit*`：套接字触发限速一旦触发，socket 单元进入 failed 并保持，切流量后一阵突发就成了停服；
+     (5) `ConditionFileIsExecutable=/opt/dawn/bin/dawn-play`，缺二进制时连接被关闭、journal 记条件失败，而不是每个请求一个失败的服务。
+     `/health` 的 `PLAY_TOOLCHAIN_ID` 经 `EnvironmentFile=/opt/dawn/playground/toolchain.env` 进来，文件缺失则单元不启动，不会拿别的工具链的版本应答。
+   - `redeploy.sh`：二进制由构建机产出（`dawnc build playground/native -o dawn-play-linux-x86_64`，服务器不装 cc），默认**必须**存在，`DAWN_PLAY_NATIVE=0` 才跳过（静默跳过正是该脚本其它检查在防的那类事）。
+     在传任何东西之前：用该二进制本机应答一次 `/health`（带本树的 `PLAY_TOOLCHAIN_ID`），版本不是本树的就停；ssh 检查服务器默认 PATH 上有 `timeout flock head chmod rm sh`。
+     同目录改名上传二进制，写 `toolchain.env`，**在 JVM runner 重启并 `/health` 通过之后**才装两个单元、`daemon-reload`、`enable`、重启 socket、跑金丝雀检查，
+     所以金丝雀失败时 JVM runner 已经在正常服务，脚本非零退出并提示不要切 nginx。JVM 单元仍是主，脚本不碰它们的启停语义，`REMOTE_RESTART` 与版本守卫原样（`lsp_contract.py` 对它们的文本与变异体断言都还在，28 项绿）。
+   - `playground/deploy/canary-check.py`（只用标准库，服务器上以 `dawn-play` 身份跑）：14 个请求对 JVM runner（TCP）与 native（unix 套接字）比状态码与响应体，`ms` 和 `cached` 归一，
+     是 `serve-compare.py` 里快速且对生产沙箱安全的子集；再按裁决 5 做闸：各 100 次新连接 `/health`，两边交错发，native p95 不超过 JVM p95 的 2 倍，否则非零退出。
+     本机对拍（JVM runner 在 18097，native 经 `systemd-socket-activate`）：14 个全一致，`/health` p95 JVM 2.22 ms、native 1.86 ms。这是**没有真 systemd 的** `Accept=yes` 数字，裁决 5 要的部署机实测要等真部署。
+   - nginx：`nginx-play.conf` **没动**，与线上一致。`playground/deploy/nginx-switch.sh jvm|native` 只打印：`jvm` 与原文件逐字节相同，`native` 只把 `/api/run`、`/api/check`、`/api/compile`、`/api/health` 四处 `proxy_pass` 换成 `http://unix:/run/dawn-play/http.sock:/<路径>`，
+     并给三个 POST 加 `client_body_timeout 10s`（3.1 教训 2：nginx 切断慢客户端，进程才读到输入结束）；`/api/lsp` 不动。不用手抄第二份文件，是怕 CORS 头与限速两份漂移。redeploy 不调用它，切换是人的决定。
+   - `contract.sh`：`PLAY_TEST_MODE=native`（`PLAY_TEST_NATIVE_BIN` 缺省仓库根的 `dawn-play-linux-x86_64`）改用 `systemd-socket-activate -a --inetd ... serve` 起 runner，把 `curl` 函数化为 `--unix-socket`，其余用例原样。
+     跳过的只有 JVM 服务自己的三类：启动清扫、第二个无 dawnc 的 JVM runner 对拍、答案缓存命中（native 无缓存，`cached` 期望换成 False，其余字段仍须与上一条相等）。
+     结果：native 模式 42 项全绿，JVM 模式 48 项全绿；另加一项覆盖 `canary-check.py --self-test` 与 nginx 变体的形状（四处换、不再剩 8087 的 `proxy_pass`、网关不动、三处超时）。
+   - 留给真正部署的：见 `DEPLOY.md` 的「The native runner canary」一节。已知未验证的假设有三个：服务器 nginx 用户确为 `www-data`；部署用户有无密码 `sudo install` 与 `sudo -n -u dawn-play`；真 `Accept=yes` 的 p95。
 5. **K5：删 JVM runner 的启动路径**（保留 `dawn-play.service` 文件一个版本周期作回滚，再删）。
 
 契约测试的做法：`playground/test/contract.sh` 现在起 `dawn run playground` 并用 curl 驱动。C 路不改它的 curl 部分，只加一个启动模式：
