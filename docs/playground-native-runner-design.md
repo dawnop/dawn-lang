@@ -237,6 +237,16 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
 1. **K1：`play/http1.dawn` 单请求解析与响应。** 纯函数加 stdin 薄层，`dawn test` 里用字节串喂；原型的 M1 场景（分段、短 body、超限、排空）变成永久测试。
 2. **K2：`serve` 子命令与路由。** 复用 `contract.dawn` 的渲染；`/health` 烘入版本；`/run`、`/check`、`/compile` 先**直接调**今天的 `exec.dawn`（它仍然 `use java`，所以此刀的二进制仍是 JVM 构建的）。
    这一刀的验收：同一份 `contract.sh` 在新旧两种入口下都过（见下）。
+   **K2 落地记录（10-08）**：`play/routes.dawn`（四条路由，输入 body 字节、输出 `Reply{status, body}`，不 import `web`）被
+   `main.dawn`（长驻 web 服务）与新的 `play/serve.dawn`（每进程一个请求）共用，两个入口不会在答案上漂移。入口选择：`dawn run playground -- serve`
+   或 `java -jar play.jar serve`。serve 仍是 JVM 构建，不能 `dawnc build`：路径上剩下的 `use java` 都在 K3 的清单里
+   （`exec` 16 行、`cache` 7 行、`gate` 2 行、`config` 1 行，加 `routes` 里的 `Semaphore` 与 `System.nanoTime`），另外 `main.dawn` 要拆成独立的 native 入口项目才不带 `web`。
+   serve 里的闸门是进程内 `Semaphore`，每个进程只有一个请求，所以恒放行：**K2 的 serve 不得挡在流量前面**，跨进程 flock 闸门与 job 子进程是 K3。
+   serve 不跑启动清扫（清扫会删掉兄弟进程正在用的工作目录）；access log 与 compile 缺口日志写 stderr，stdout 只有响应。
+   `/health` 与 `/run` 等每请求重新问一次工具链版本（子进程），烘入版本也是 K3。
+   验收：16 个请求（health、run 五种、check 两种、compile 三种、坏 JSON、坏 UTF-8、超限、空 body、404、405）对现行 JVM runner 与
+   `systemd-socket-activate -a --inetd` 驱动的 serve 比对，状态码与响应体逐字节一致（`ms` 与 `cached` 两个字段按设计归一：serve 没有缓存）；`contract.sh` 42 项全绿。
+   sha2 64 KiB 在 native（dawnc 0.85.0）实测 0.87 到 1.16 ms/次（负载 7 到 9 的机器），摘要与 hashlib 一致，远低于裁决 8 的 20 ms 线。
 3. **K3：去 Java 化 `exec.dawn` / `cache` / `gate` / `config`**：22 行 `use java` 逐个换成 `Proc.run`、`Clock`、`Fs`、`env`；闸门换 `gate.sh`；缓存先砍。到这一刀才能 `dawnc build`。
 4. **K4：部署单元与 nginx 切换。** 先在另一个 socket（如 `dawn-play-canary.socket`）上与 JVM runner 并行，对同一批请求做响应字节比对（沿用 `contract.sh` 的 48 项），再切 nginx。
 5. **K5：删 JVM runner 的启动路径**（保留 `dawn-play.service` 文件一个版本周期作回滚，再删）。

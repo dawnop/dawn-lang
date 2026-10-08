@@ -2,186 +2,29 @@
 # runs it inside a throwaway sandbox, streams back the output. The first real
 # server written in Dawn (spec §9 interop dogfood, M6 warm-up) — and the first
 # service on the `web` framework, which it doubles as the acceptance test for.
-use std/bytes
-use std/str
 use std/io
-use java "java.util.concurrent.Semaphore"
-use web/types.{Request, Response, HttpError, Text, raw, body_text, response_status, response_body}
+use web/types.{Response, HttpError, raw}
 use web/router.{route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
-use play/contract.{parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
-use play/exec.{execute, check, compiler_id, native_ready, CompilerId, view_raw, javap_id, tile_run, tile_ready, sweep_work_root}
-use play/view.{build_view, respond, cache_key, Mapped, Done, tile_view, TileShown, TileFailed}
-use play/cache.{Cache, new_cache, cache_get, cache_put}
-use play/gate.{new_gate, with_gate}
+use play/routes.{Reply, JSON_CT, MAX_CONCURRENT, health, rpc, compile_rpc, view_of}
+use play/exec.{compiler_id, native_ready, javap_id, sweep_work_root}
+use play/gate.{new_gate}
 use play/config.{port}
-use java "java.lang.System"
+use play/serve.{serve_one}
 
-const MAX_BODY: Int = 65536
-const JSON_CT: String = "application/json; charset=utf-8"
-const MAX_CONCURRENT: Int = 2
-const QUEUE_WAIT_SECS: Int = 15
-# Editor diagnostics are advisory: don't queue behind runs, fail fast so the
-# client just keeps its previous squiggles and retries on the next pause.
-const CHECK_WAIT_SECS: Int = 2
-# The compile view is advisory in the same way, and shares the same two
-# permits: a second pool for it would double the compilers the host runs at
-# once, and nobody would be counting them.
-const COMPILE_WAIT_SECS: Int = CHECK_WAIT_SECS
-# At most this many answers, and this many characters of them, are kept
-# (play/cache.dawn). An answer is kept under one key a target, so a program the
-# visitor has looked at in both tabs is two entries.
-const CACHE_ENTRIES: Int = 128
-const CACHE_CHARS: Int = 33554432
+# The framework's Response is the Reply with the runner's one content type.
+fn wrap(r: Reply) -> Result[Response, HttpError] = Ok(raw(r.status, JSON_CT, r.body))
 
-# JSON since the editor started showing the compiler version; deploy checks
-# only look at the status (curl -f).
-fn health(id: CompilerId) -> Result[Response, HttpError] !io =
-  Ok(raw(200, JSON_CT, render_health(id.version, id.build)))
-
-# Shared core of /run and /check: same body parsing and gate, different
-# executor and queue patience. The wire format predates the framework, so
-# errors are rendered into the contract's own JSON shapes (via raw), not the
-# framework's Err branch.
-fn rpc(req: Request, gate: Semaphore, check_only: Bool, native: Bool) -> Result[Response, HttpError] !io =
-  # bytes, not code points: str.len counts characters, so a program written in
-  # CJK got up to three times the stated budget
-  if bytes.len(req.body) > MAX_BODY {
-    Ok(raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes")))
-  } else {
-    # body_text refuses a malformed body; render the refusal in the contract's
-    # own error shape like every other refusal here, not the framework's
-    match body_text(req) {
-      Err(e) -> Ok(raw(400, JSON_CT, render_error(e.message)))
-      Ok(source) -> match parse_request(source) {
-        Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
-        Ok(code) -> {
-          let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
-          # Hold a permit across execution only; with_gate releases it even if the
-          # compiler panics, then we render outside the permit. None = saturated.
-          match with_gate(gate, wait, () => if check_only { check(code, native) } else { execute(code) }) {
-            Some(outcome) ->
-              Ok(raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) }))
-            None -> Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
-          }
-        }
-      }
-    }
+pub fn main() -> Unit !io =
+  # `dawn run playground serve` is the process-per-request entry (play/serve.dawn):
+  # no sweep, since the sweep would delete the work dirs of requests running now
+  match args() {
+    ["serve", ..] -> serve_one()
+    _ -> serve_forever()
   }
 
-# What /compile needs to know of the machine it runs on, asked once at start.
-type View = { toolchain: String, build: String, javap: Bool, tile: Bool, native: Bool, cache: Cache }
-
-# The view's cache lines: "<status>:<kind>:" and then the text. A kind is `S`,
-# the program's part of a success answer (the head is written per request), or
-# `F`, an answer that is complete as kept.
-fn kept_line(status: Int, kind: String, text: String) -> String = "${status}:${kind}:${text}"
-
-fn serve_kept(view: View, target: String, started: Int, line: String) -> Response !io =
-  match str.split_once(line, ":") {
-    None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
-    Some((status, rest)) -> match str.split_once(rest, ":") {
-      None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
-      Some((kind, text)) ->
-        if kind == "S" {
-          raw(200, JSON_CT, respond(target, view.build, true, (System.nanoTime() - started) / 1000000, text))
-        } else {
-          raw(parse_int(status).unwrap_or(500), JSON_CT, text)
-        }
-    }
-  }
-
-# The refusal when the machine cannot make the view at all: the JVM listing is
-# `javap`'s, which only a JDK has, and the call table needs that listing for
-# either target. A clear 503 rather than a request that fails inside a
-# sandbox unit; deploys refuse to ship without it (deploy/redeploy.sh), so
-# seeing this means a machine that was set up by hand.
-fn unavailable(view: View) -> Option[Response] =
-  if view.javap {
-    None
-  } else {
-    Some(raw(503, JSON_CT, render_error("the compile view is unavailable: this server has no javap (it needs a JDK, not only a JRE)")))
-  }
-
-# POST /compile: the program's C text or JVM listing, paired with the source
-# (packages/xmap). Same body limit, same JSON refusals and same gate as /check;
-# the work is play/exec.view_raw's and the answer is play/view.dawn's.
-fn compile_rpc(req: Request, gate: Semaphore, view: View) -> Result[Response, HttpError] !io =
-  if bytes.len(req.body) > MAX_BODY {
-    Ok(raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes")))
-  } else {
-    match body_text(req) {
-      Err(e) -> Ok(raw(400, JSON_CT, render_error(e.message)))
-      Ok(source) -> match parse_compile_request(source) {
-        Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
-        Ok((code, target)) ->
-          if target == "tile" {
-            Ok(tile_ir(gate, view, code))
-          } else {
-            match unavailable(view) {
-              Some(refusal) -> Ok(refusal)
-              None -> Ok(compile_view(gate, view, code, target))
-            }
-          }
-      }
-    }
-  }
-
-# target "tile": the program's output, which is its Tile IR (play/exec.dawn,
-# the Tile IR view). The program must import tileir, which the page also
-# checks and the server checks again; it runs under /run's limits and one of
-# the same two permits, with /check's patience, because the pane is advisory.
-fn tile_ir(gate: Semaphore, view: View, code: String) -> Response !io =
-  if not wants_tileir(code) {
-    raw(400, JSON_CT, render_error("the Tile IR view needs a program that imports tileir (add a line such as `use tileir/dev.{Dev}`)"))
-  } else if not view.tile {
-    raw(503, JSON_CT, render_error("the Tile IR view is unavailable: this server has no packages/tileir"))
-  } else {
-    let started = System.nanoTime()
-    let key = "${cache_key(view.toolchain, code)}/tile"
-    match cache_get(view.cache, key) {
-      Some(line) -> serve_kept(view, "tile", started, line)
-      None ->
-        match with_gate(gate, COMPILE_WAIT_SECS, () => tile_view(tile_run(code))) {
-          None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
-          Some(TileFailed(status, body)) -> raw(status, JSON_CT, body)
-          Some(TileShown(rest)) -> {
-            cache_put(view.cache, key, kept_line(200, "S", rest))
-            raw(200, JSON_CT, respond("tile", view.build, false, (System.nanoTime() - started) / 1000000, rest))
-          }
-        }
-    }
-  }
-
-fn compile_view(gate: Semaphore, view: View, code: String, target: String) -> Response !io = {
-  let started = System.nanoTime()
-  let base = cache_key(view.toolchain, code)
-  match cache_get(view.cache, "${base}/${target}") {
-    Some(line) -> serve_kept(view, target, started, line)
-    None ->
-      match with_gate(gate, COMPILE_WAIT_SECS, () => build_view(code, view_raw(code, view.native))) {
-        None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
-        Some(Mapped(c, jvm, gaps)) -> {
-          if gaps > 0 {
-            println("compile view: ${gaps} gap(s) in program ${str.take(base, 12)}")
-          }
-          cache_put(view.cache, "${base}/c", kept_line(200, "S", c))
-          cache_put(view.cache, "${base}/jvm", kept_line(200, "S", jvm))
-          raw(200, JSON_CT, respond(target, view.build, false, (System.nanoTime() - started) / 1000000, if target == "c" { c } else { jvm }))
-        }
-        Some(Done(status, body, keep)) -> {
-          if keep {
-            cache_put(view.cache, "${base}/c", kept_line(status, "F", body))
-            cache_put(view.cache, "${base}/jvm", kept_line(status, "F", body))
-          }
-          raw(status, JSON_CT, body)
-        }
-      }
-  }
-}
-
-pub fn main() -> Unit !io = {
+fn serve_forever() -> Unit !io = {
   sweep_work_root()
   let gate = new_gate(MAX_CONCURRENT)
   let id = compiler_id()
@@ -190,34 +33,11 @@ pub fn main() -> Unit !io = {
   if javap == "" {
     io.eprintln("dawn-play: javap is not available; POST /compile will answer 503 until it is installed (a JDK, not only a JRE)")
   }
-  let view = View {
-    toolchain: "${id.version} ${id.build} ${javap}",
-    build: id.build,
-    javap: javap != "",
-    tile: tile_ready(),
-    native: native,
-    cache: new_cache(CACHE_ENTRIES, CACHE_CHARS),
-  }
+  let view = view_of(id, native, javap)
   serve_app(port(), [
-    route_get("/health", req => health(id)),
-    route_post("/run", req => rpc(req, gate, false, native)),
-    route_post("/check", req => rpc(req, gate, true, native)),
-    route_post("/compile", req => compile_rpc(req, gate, view)),
+    route_get("/health", req => wrap(health(id))),
+    route_post("/run", req => wrap(rpc(req.body, gate, false, native))),
+    route_post("/check", req => wrap(rpc(req.body, gate, true, native))),
+    route_post("/compile", req => wrap(compile_rpc(req.body, gate, view))),
   ], [with_logging])
-}
-
-test "without javap the view is refused with a 503 that says why" {
-  let view = View { toolchain: "", build: "", javap: false, tile: false, native: false, cache: new_cache(2, 100) }
-  match unavailable(view) {
-    Some(r) -> {
-      assert response_status(r) == 503
-      match response_body(r) {
-        Text(t) -> { assert str.contains(t, "javap") }
-        _ -> { assert false }
-      }
-    }
-    None -> { assert false }
-  }
-  let with_javap = View { toolchain: "", build: "", javap: true, tile: false, native: false, cache: new_cache(2, 100) }
-  assert match unavailable(with_javap) { Some(_) -> false, None -> true }
 }
