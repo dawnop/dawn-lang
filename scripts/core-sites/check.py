@@ -124,8 +124,20 @@ def calls_under(n: Node, out: list) -> list:
     return out
 
 
+def staged_fors_under(n: Node, out: list) -> list:
+    """The `For` nodes: the only parser node a staged loop's one written call can pair with."""
+    if n.kind == "For":
+        out.append(n)
+    for k in n.kids:
+        staged_fors_under(k, out)
+    return out
+
+
 def callee(n: Node):
     """(name, name start) of a call node."""
+    if n.kind == "For":
+        # a staged loop is spelled `for`: the call is the statement, named at its keyword
+        return "for", n.lo
     if n.kind == "MethodCall":
         m = re.search(r"name@(\d+)\.\.(\d+)", n.text)
         return n.text.split(" ")[1], int(m.group(1))
@@ -193,6 +205,14 @@ def check(name: str, source: Path, fns, rows: list, tops: list) -> list:
     for t in chosen:
         for c in calls_under(t, []):
             by_span.setdefault((c.lo, c.hi), []).append((t, c))
+    # A `for` over a StagedIter type lowers to one `staged_for` call, which is
+    # that statement and nothing else the parser calls a call. It is the one
+    # site that pairs with a `For`; no other site may (a `for` in the parse is
+    # no call in general, so the completeness rule below never asks for one).
+    for_span = {}
+    for t in chosen:
+        for f in staged_fors_under(t, []):
+            for_span.setdefault((f.lo, f.hi), []).append((t, f))
     spans = [(t.lo, t.hi) for t in chosen]
     inside = [r for r in rows if any(a <= r["lo"] and r["hi"] <= b for a, b in spans)]
     if fns is None and len(inside) != len(rows):
@@ -201,6 +221,8 @@ def check(name: str, source: Path, fns, rows: list, tops: list) -> list:
     claimed = {}
     for r in inside:
         hits = by_span.get((r["lo"], r["hi"]), [])
+        if not hits and r["what"] == "impl staged_for":
+            hits = for_span.get((r["lo"], r["hi"]), [])
         if not hits:
             problems.append(f"{name}: site {r['lo']}..{r['hi']} ({r['what']} in {r['fn']}) is no call the parser sees")
             continue
@@ -226,6 +248,7 @@ def check(name: str, source: Path, fns, rows: list, tops: list) -> list:
             else:
                 excused[why] = excused.get(why, 0) + 1
     calls = sum(len(calls_under(t, [])) for t in chosen)
+    calls += sum(1 for k in claimed if k not in by_span)  # staged loops, claimed as `For`
     summary = ", ".join(f"{k} {v}" for k, v in sorted(excused.items())) or "none"
     print(f"{name}: {len(claimed)} of {calls} call(s) sited, excused: {summary}")
     return problems

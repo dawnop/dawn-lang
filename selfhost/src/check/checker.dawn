@@ -8843,9 +8843,10 @@ pub(pkg) fn in_staged_body(cx: Cx) -> Bool =
 ## One call of a staged trait's method at `subject`, built the way an
 ## operator's is (`arith_call`): the witness is already resolved, the effect
 ## the impl binds is charged at `lo..hi`, and its evidence travels with the
-## call.
+## call. `nlo` is where the callee's name starts when the author wrote the
+## call (the loop's `for`), and `NO_NAME` for a call the checker adds.
 fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], w: WitRef,
-  ret: Ty, lo: Int, hi: Int) -> (Cx, TExpr) = {
+  ret: Ty, lo: Int, hi: Int, nlo: Int) -> (Cx, TExpr) = {
   let tr = trait_of(cx.traits, tid)
   var found: Option[Sig] = None
   for pr in tr.methods {
@@ -8867,10 +8868,8 @@ fn staged_call(cx: Cx, tid: Int, mname: String, subject: Ty, args: List[TExpr], 
   let charged = eff_union([callee_eff] ++ vinsts)
   let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), lo, hi,
     mname)
-  # The call is the checker's own (a `var` carried through a staged loop), so
-  # no callee name was written and the site stays empty (NO_NAME).
   (cx2, XCallFn(s.owner, emitted_fn_name(s, mname), args, [w], evs, Some(tid), owner_off(cx, lo),
-    owner_off(cx, hi), NO_NAME, ret))
+    owner_off(cx, hi), nlo, ret))
 }
 
 ## A read of a carried `var`: `var_get` on its cell, at the `var`'s type.
@@ -8879,7 +8878,7 @@ fn staged_read(cx: Cx, sc: StagedCell, name: String, lo: Int, hi: Int) -> (Cx, T
     None -> (cx, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
     Some(w) -> {
       let cell = XLocal(sc.cell, name, owner_off(cx, lo), owner_off(cx, hi), sym_of(cx, sc.cell).ty)
-      let (cx1, x) = staged_call(cx, STAGED_VAR_ID, "var_get", sc.ty, [cell], w, sc.ty, lo, hi)
+      let (cx1, x) = staged_call(cx, STAGED_VAR_ID, "var_get", sc.ty, [cell], w, sc.ty, lo, hi, NO_NAME)
       (cx1, sc.ty, x)
     }
   }
@@ -8898,7 +8897,7 @@ fn staged_write(cx: Cx, sc: StagedCell, name: String, value: Expr, nlo: Int, nhi
     None -> (cx2, TSExpr(XError(owner_off(cx, lo), owner_off(cx, hi)), owner_off(cx, lo), owner_off(cx, hi)))
     Some(w) -> {
       let cell = XLocal(sc.cell, name, owner_off(cx, nlo), owner_off(cx, nhi), sym_of(cx2, sc.cell).ty)
-      let (cx3, x) = staged_call(cx2, STAGED_VAR_ID, "var_set", sc.ty, [cell, vx], w, TyUnit, lo, hi)
+      let (cx3, x) = staged_call(cx2, STAGED_VAR_ID, "var_set", sc.ty, [cell, vx], w, TyUnit, lo, hi, NO_NAME)
       (cx3, TSExpr(x, owner_off(cx, lo), owner_off(cx, hi)))
     }
   }
@@ -9075,15 +9074,19 @@ fn check_staged_for(cx: Cx, pat: Pattern, from: Expr, ft: Ty, fx: TExpr, body: E
     match sc.wit {
       Some(vw) -> {
         let (cxc, open) = staged_call(cx1, STAGED_VAR_ID, "var_open", sc.ty,
-          [XLocal(sc.orig, name, olo, ohi, sc.ty)], vw, cell_ty, lo, hi)
+          [XLocal(sc.orig, name, olo, ohi, sc.ty)], vw, cell_ty, lo, hi, NO_NAME)
         cx1 = cxc
         stmts = stmts ++ [TSLet(Some(sc.cell), name, open, olo, ohi)]
       }
       None -> ()
     }
   }
+  # The one call the author wrote: `for` is how the loop is spelled, so the
+  # call keeps the statement's site, named where the `for` starts. The cells'
+  # opens and reads around it are the checker's own and carry none.
   let (cxf, call) = staged_call(cx1, STAGED_ITER_ID, "staged_for", ft,
-    [XLocal(rsid, "\$staged", owner_off(cx, flo), owner_off(cx, fhi), ft), lam], wr, TyUnit, lo, hi)
+    [XLocal(rsid, "\$staged", owner_off(cx, flo), owner_off(cx, fhi), ft), lam], wr, TyUnit, lo, hi,
+    owner_off(cx, lo))
   cx1 = cxf
   stmts = stmts ++ [TSExpr(call, olo, ohi)]
   for sc in opens {

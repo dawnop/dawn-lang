@@ -114,6 +114,9 @@ pub type CSite =
   读写是 `StagedVar` 的 `var_get`/`var_set`。它们在 parser 一侧是 `Binary`/`Var`，没有 `Apply` 可配，
   所以同样 `nlo = NO_NAME`、`CNoSite`；曾把运算符起点或变量起点填进 `nlo`，第七节的 oracle 在 flash_attn
   上报「is no call the parser sees」，那是检查器写错，不是规则错。
+  carried `var` 的 `for` 本身是作者写的调用：循环被降成一次 `staged_for`，它保留整条语句的 site，名字起点
+  是 `for` 关键字；parser 一侧配对的是 `For` 节点（oracle 只允许 `impl staged_for` 这一种 site 配 `For`，
+  完备性仍只数 `Apply`/`MethodCall`）。GPU 页的 region 调用（`d_range` 的整条语句）靠这一行进 C 侧表。
 - 检查器替别的构造写出的调用也不是书写调用：`with handle` 把块的余下部分包成闭包再空参应用
   （`checker.check_handle`），省掉默认实参的 `f$default$k`，`caller()` 占位，eta 包装体，`ev_append`
   拼证据包，处理器的 cell 与 one-shot 原语，`use java` 静态字段读。它们的 `nlo` 都是 `tast.NO_NAME`，
