@@ -275,6 +275,13 @@ fn indent_at(cps: List[Char], off: Int) -> Int = {
   n
 }
 
+## Whether nothing but blanks stands between the start of the line and `off`.
+fn first_on_line(cps: List[Char], off: Int) -> Bool = {
+  var i = if off < len(cps) { off } else { len(cps) }
+  while i > 0 && (cps[i - 1] == ' ' || cps[i - 1] == '\t') { i = i - 1 }
+  i == 0 || cps[i - 1] == '\n'
+}
+
 fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
   var i = a
   while i < b && i < len(cps) {
@@ -301,7 +308,10 @@ fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
 ## nothing trustworthy about pairing and the diagnostics stay as they are),
 ## the suspect is picked with rustc's indentation heuristic
 ## (`report_suspicious_mismatch_block` in rustc_parse/lexer/diagnostics.rs):
-## among the pairs whose opening and closing lines are indented differently,
+## among the pairs whose closer starts its line and whose opening and closing
+## lines are indented differently (a closer that trails other tokens sits at
+## the indent of its continuation line, which says nothing about where it
+## belongs, as in `list.fold(` / `  xs, 0, f))`),
 ## drop those enclosed by a pair that is indented alike, and take the one
 ## that opens last. Unlike rustc, only pairs after the outermost unclosed
 ## opener count, since a pair before it cannot have taken its closer. With no
@@ -336,7 +346,8 @@ fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Di
   for m in pairs {
     let mo = toks[m.open].lo
     let mc = toks[m.close].lo
-    if mo > outer && not same_line(cps, mo, mc) && indent_at(cps, mo) != indent_at(cps, mc) {
+    if mo > outer && not same_line(cps, mo, mc) && first_on_line(cps, mc)
+      && indent_at(cps, mo) != indent_at(cps, mc) {
       var enclosed = false
       for w in pairs {
         let wo = toks[w.open].lo
