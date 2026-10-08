@@ -54,7 +54,9 @@ trap 'rm -rf "$work"' EXIT
 
 # DAWN_RC_CONTRACT exposes logical allocator state only to these test builds;
 # production objects and their hot path do not contain that observation port.
-warn=(-DDAWN_RC_CONTRACT -Wall -Wextra -Werror -Wno-unused-parameter)
+# DAWN_REUSE_POISON is the same kind of test-only switch: it makes a reset ADT
+# node's slots unreadable (dawn_rt.c, above `dawn_adt_reset`).
+warn=(-DDAWN_RC_CONTRACT -DDAWN_REUSE_POISON -Wall -Wextra -Werror -Wno-unused-parameter)
 
 # Pinned rather than inherited, because both halves of it decide whether the
 # poisoning leg means anything. allow_user_poisoning defaults on, and a

@@ -796,6 +796,203 @@ static void test_oversize_leaves_the_slab(void) {
   dawn_drop(small);
 }
 
+/* ---- reset and reuse of ADT nodes (docs/perceus-reuse-design.md 4.2) -------
+ *
+ * Every probe holds a heap child (a box) in field 0 and keeps a reference to
+ * it, so the child's count is the observation port: it says whether reset
+ * released it, and whether dropping the token released it a second time.
+ * Field 1 is a scalar. */
+/* Drop a token without relying on its mask being clear, which is the one
+ * thing only `adt_reset_token_is_a_shell` is allowed to ask: in a poisoned
+ * build a mask left set sends the drop into the poison word, and the other
+ * cases would die of a fault that belongs to someone else's name. */
+static void drop_token(dawn_adt *tok) {
+  tok->ptrmask.narrow = 0;
+  dawn_drop(tok);
+}
+
+static dawn_adt *reset_node(dawn_box *child) {
+  dawn_adt *a = dawn_adt_new(0, 2, UINT64_C(1));
+  a->fields[0].p = dawn_dup(child);
+  a->fields[1].i = 42;
+  return a;
+}
+
+/* A node somebody else also holds is not ours to write into: reset answers
+ * NULL, drops our reference and touches nothing else. */
+static void test_adt_reset_shared(void) {
+  dawn_box *child = dawn_box_int(1);
+  dawn_adt *a = reset_node(child);
+  dawn_adt *hold = (dawn_adt *)dawn_dup(a);
+  dawn_adt *tok = dawn_adt_reset(a);
+  check(tok == NULL, "a shared node gives no token");
+  check(hold->h.rc == 1, "the reset still gave up its own reference");
+  check(child->h.rc == 2, "and left the children to the other holder");
+  check(hold->ptrmask.narrow == UINT64_C(1), "and the mask alone");
+  dawn_drop(hold);
+  if (tok != NULL) {
+    dawn_drop(tok);
+  }
+  dawn_drop(child);
+}
+
+/* Alone, the node is handed back as the token and its children are released:
+ * the reference the field held is gone, the one the test kept is not. */
+static void test_adt_reset_releases_fields(void) {
+  dawn_box *child = dawn_box_int(2);
+  dawn_adt *a = reset_node(child);
+  check(child->h.rc == 2, "the node holds a reference to its child");
+  dawn_adt *tok = dawn_adt_reset(a);
+  check(tok == a, "a unique node is its own token");
+  check(child->h.rc == 1, "reset released the child");
+  drop_token(tok);
+  dawn_drop(child);
+}
+
+/* The token is a legal, field-less node. Dropping it frees the shell and
+ * releases nothing a second time, which is what a panic unwinding the frame
+ * that holds it relies on. A second holder of the child makes a double
+ * release a count and not a crash. */
+static void test_adt_reset_token_is_a_shell(void) {
+  dawn_box *child = dawn_box_int(3);
+  dawn_box *other = (dawn_box *)dawn_dup(child);
+  dawn_adt *a = reset_node(child);
+  dawn_adt *tok = dawn_adt_reset(a);
+  check(tok != NULL && tok->ptrmask.narrow == 0, "the token carries no pointer fields");
+  check(child->h.rc == 2, "the test's two references remain");
+  if (tok->ptrmask.narrow != 0) {
+    /* already reported; the slots hold poison, so letting the drop walk them
+     * would end the run in a fault instead of in a name */
+    tok->ptrmask.narrow = 0;
+  }
+  dawn_drop(tok);
+  check(child->h.rc == 2, "dropping the token releases no child");
+  dawn_drop(other);
+  dawn_drop(child);
+}
+
+/* `reuse` turns a token into the next node in place: same block, new tag and
+ * mask, one reference. With no token it allocates, and both are counted. */
+static void test_adt_reuse_rewrites(void) {
+  dawn_box *child = dawn_box_int(4);
+  dawn_box *other = (dawn_box *)dawn_dup(child);
+  dawn_adt *a = reset_node(child);
+  dawn_adt *tok = dawn_adt_reset(a);
+  uint64_t taken0 = dawn_adt_reuse_taken;
+  uint64_t missed0 = dawn_adt_reuse_missed;
+  dawn_adt *b = dawn_adt_reuse(tok, 5, 2, UINT64_C(2));
+  check(b == a, "reuse answers the token's own block");
+  check(b->tag == 5 && b->nfields == 2, "with the new tag and field count");
+  check(b->ptrmask.narrow == UINT64_C(2), "and the new mask");
+  check(b->h.rc == 1, "at one reference");
+  check(dawn_adt_reuse_taken == taken0 + 1 && dawn_adt_reuse_missed == missed0,
+        "and counts the reuse");
+  b->fields[0].i = 7;
+  b->fields[1].p = dawn_dup(child);
+  dawn_drop(b);
+  check(child->h.rc == 2, "the new mask decides what the drop releases");
+  dawn_adt *c = dawn_adt_reuse(NULL, 3, 2, UINT64_C(0));
+  check(c != NULL && c->tag == 3 && c->h.rc == 1, "without a token it allocates");
+  check(dawn_adt_reuse_missed == missed0 + 1 && dawn_adt_reuse_taken == taken0 + 1,
+        "and counts the miss");
+  dawn_drop(c);
+  dawn_drop(other);
+  dawn_drop(child);
+}
+
+/* A field-less constructor is one immortal static (`dawn_adt0`); its count is
+ * not 1, and writing a new tag into it would change every `None` in the
+ * program. */
+static void test_adt_reset_immortal(void) {
+  dawn_adt *s = dawn_adt0(9);
+  dawn_adt *tok = dawn_adt_reset(s);
+  check(tok == NULL, "a shared singleton gives no token");
+  check(s->tag == 9 && s->h.rc == DAWN_IMMORTAL, "and stays what it was");
+}
+
+/* Under --rc=leak counts only grow, so rc == 1 does not prove the node is
+ * alone; reset must take the plain-drop path, which there does nothing. */
+static void test_adt_reset_leak_mode(void) {
+  dawn_box *child = dawn_box_int(5);
+  dawn_adt *a = reset_node(child);
+  dawn_rc_leak = true;
+  dawn_adt *tok = dawn_adt_reset(a);
+  dawn_rc_leak = false;
+  check(tok == NULL, "leak mode gives no token");
+  check(child->h.rc == 2, "and releases nothing");
+  dawn_drop(a);
+  dawn_drop(child);
+}
+
+/* More than 64 fields keep their mask behind a pointer; those nodes do not
+ * take part, and the plain drop releases their children. */
+static void test_adt_reset_declines_wide(void) {
+  static const uint64_t wide_mask[2] = {UINT64_C(1), UINT64_C(0)};
+  dawn_box *child = dawn_box_int(6);
+  dawn_adt *a = dawn_adt_new_wide(0, 65, wide_mask);
+  for (int i = 0; i < 65; i++) {
+    a->fields[i].p = NULL;
+  }
+  a->fields[0].p = dawn_dup(child);
+  dawn_adt *tok = dawn_adt_reset(a);
+  check(tok == NULL, "a wide node gives no token");
+  check(child->h.rc == 1, "and was dropped whole");
+  dawn_drop(child);
+}
+
+/* Nothing to reset is not an error: a binding declared and not yet assigned
+ * on this path holds NULL, and the drop it replaces would have been a no-op. */
+static void test_adt_reset_null(void) {
+  check(dawn_adt_reset(NULL) == NULL, "a reset of nothing gives nothing");
+}
+
+/* Reset is typed by the compiler and checked here: a value that is not a
+ * constructed node (a string reached through an erased position) is dropped,
+ * not rewritten. The string is eight bytes long so that, read as a node, its
+ * length is a plausible tag and field count of zero, which is what keeps the
+ * mutant that skips this test from faulting instead of failing. */
+static void test_adt_reset_kind(void) {
+  dawn_str *s = dawn_str_copy("abcdefgh", 8);
+  dawn_adt *tok = dawn_adt_reset((dawn_adt *)s);
+  check(tok == NULL, "a string is no node");
+}
+
+/* The compiler pairs a token with a build of the same type, and a type with
+ * constructors of several widths can hand a token to the wrong one. The
+ * block is the wrong size; it goes back and the build allocates. */
+static void test_adt_reuse_mismatch(void) {
+  dawn_box *child = dawn_box_int(9);
+  dawn_adt *a = reset_node(child);
+  dawn_adt *tok = dawn_adt_reset(a);
+  tok->ptrmask.narrow = 0; /* the shell case's business; see drop_token */
+  uint64_t taken0 = dawn_adt_reuse_taken;
+  uint64_t missed0 = dawn_adt_reuse_missed;
+  dawn_adt *b = dawn_adt_reuse(tok, 1, 3, UINT64_C(0));
+  check(b->nfields == 3 && b->h.rc == 1, "a build of another width is a fresh node of that width");
+  check(dawn_adt_reuse_missed == missed0 + 1 && dawn_adt_reuse_taken == taken0,
+        "and counts as a miss");
+  dawn_drop(b);
+  dawn_drop(child);
+}
+
+/* Test builds define DAWN_REUSE_POISON (run.sh `warn`): a reset node's slots
+ * are then a word no valid value is, so a field read that should have come
+ * before the reset cannot go unnoticed. */
+static void test_adt_reset_poisons(void) {
+  dawn_box *child = dawn_box_int(7);
+  dawn_adt *a = reset_node(child);
+  dawn_adt *tok = dawn_adt_reset(a);
+#ifdef DAWN_REUSE_POISON
+  check(tok->fields[0].p == (void *)UINT64_C(0xdeaddeaddeaddead) &&
+            tok->fields[1].p == (void *)UINT64_C(0xdeaddeaddeaddead),
+        "every slot of a reset node is poisoned");
+#else
+  check(0, "the contract builds define DAWN_REUSE_POISON");
+#endif
+  drop_token(tok);
+  dawn_drop(child);
+}
+
 /* --rc=leak. Nothing is freed, so this runs last and the harness turns the
  * leak check off for it -- the leaks are the point. */
 static void test_leak_mode(void) {
@@ -827,6 +1024,17 @@ static const rc_case rc_cases[] = {
     {"array", test_array, 0},
     {"array_with", test_array_with, 0},
     {"array_steal", test_array_steal, 0},
+    {"adt_reset_shared", test_adt_reset_shared, 0},
+    {"adt_reset_releases_fields", test_adt_reset_releases_fields, 0},
+    {"adt_reset_token_is_a_shell", test_adt_reset_token_is_a_shell, 0},
+    {"adt_reuse_rewrites", test_adt_reuse_rewrites, 0},
+    {"adt_reset_immortal", test_adt_reset_immortal, 0},
+    {"adt_reset_leak_mode", test_adt_reset_leak_mode, 0},
+    {"adt_reset_declines_wide", test_adt_reset_declines_wide, 0},
+    {"adt_reset_null", test_adt_reset_null, 0},
+    {"adt_reset_kind", test_adt_reset_kind, 0},
+    {"adt_reuse_mismatch", test_adt_reuse_mismatch, 0},
+    {"adt_reset_poisons", test_adt_reset_poisons, 0},
     {"cell_set_releases_the_old_value", test_cell_set_releases_the_old_value, 0},
     {"cell_take_empties_and_transfers", test_cell_take_empties_and_transfers, 0},
     {"cell_get_does_not_transfer", test_cell_get_does_not_transfer, 0},

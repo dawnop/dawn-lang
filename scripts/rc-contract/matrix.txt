@@ -49,6 +49,17 @@ assert	mask_skips_scalars
 assert	array
 assert	array_with
 assert	array_steal
+assert	adt_reset_shared
+assert	adt_reset_releases_fields
+assert	adt_reset_token_is_a_shell
+assert	adt_reuse_rewrites
+assert	adt_reset_immortal
+assert	adt_reset_leak_mode
+assert	adt_reset_declines_wide
+assert	adt_reset_null
+assert	adt_reset_kind
+assert	adt_reuse_mismatch
+assert	adt_reset_poisons
 assert	cell_set_releases_the_old_value
 assert	cell_take_empties_and_transfers
 assert	cell_get_does_not_transfer
@@ -100,6 +111,8 @@ role	revert-adt0-to-fresh-allocation	counted
 owner	revert-adt0-to-fresh-allocation	adt0_singleton
 red	revert-adt0-to-fresh-allocation	adt0_singleton
 red	revert-adt0-to-fresh-allocation	none_is_shared
+# A fresh field-less node has rc 1, so reset takes it for a unique one.
+red	revert-adt0-to-fresh-allocation	adt_reset_immortal
 
 role	slab-never-recycles	counted
 owner	slab-never-recycles	slab_reuses_a_block
@@ -246,3 +259,70 @@ role	slab-leaves-the-link-live	poisoned
 owner	slab-leaves-the-link-live	slab_poisons_a_freed_block
 red	slab-leaves-the-link-live	slab_poisons_a_freed_block
 red	slab-leaves-the-link-live	slab_catches_a_double_free
+
+# ---- reset and reuse of ADT nodes (docs/perceus-reuse-design.md 4.2) -------
+# Eight mutants, each the loss of one thing a reuse needs to be safe. None of
+# them changes what a program that only ever resets unique nodes prints, so
+# every one of them needs its own hand-written case. All `counted`: the
+# children's counts are the observation port, and a sanitizer would turn the
+# double free of the second mutant into a crash instead of a name.
+
+# The node is rebuilt though another holder still reads it.
+role	reset-ignores-sharing	counted
+owner	reset-ignores-sharing	adt_reset_shared
+red	reset-ignores-sharing	adt_reset_shared
+# The singleton is shared too, so it is caught here as well.
+red	reset-ignores-sharing	adt_reset_immortal
+
+# The token keeps its mask: a second release of every child.
+role	reset-keeps-the-mask	counted
+owner	reset-keeps-the-mask	adt_reset_token_is_a_shell
+red	reset-keeps-the-mask	adt_reset_token_is_a_shell
+
+# The children are never released: a leak per reuse.
+role	reset-keeps-the-children	counted
+owner	reset-keeps-the-children	adt_reset_releases_fields
+red	reset-keeps-the-children	adt_reset_releases_fields
+# The two cases that read the child's count after a reset see the extra one.
+red	reset-keeps-the-children	adt_reset_token_is_a_shell
+red	reset-keeps-the-children	adt_reuse_rewrites
+
+# The reused node keeps the previous node's mask.
+role	reuse-keeps-the-old-mask	counted
+owner	reuse-keeps-the-old-mask	adt_reuse_rewrites
+red	reuse-keeps-the-old-mask	adt_reuse_rewrites
+
+# A field-less singleton passes for a unique node.
+role	reset-takes-immortal	counted
+owner	reset-takes-immortal	adt_reset_immortal
+red	reset-takes-immortal	adt_reset_immortal
+
+# --rc=leak: rc == 1 proves nothing there.
+role	reset-ignores-leak-mode	counted
+owner	reset-ignores-leak-mode	adt_reset_leak_mode
+red	reset-ignores-leak-mode	adt_reset_leak_mode
+
+# A wide node's mask is a pointer.
+role	reset-takes-wide	counted
+owner	reset-takes-wide	adt_reset_declines_wide
+red	reset-takes-wide	adt_reset_declines_wide
+
+# The poisoned test build stops poisoning.
+role	reset-forgets-the-poison	counted
+owner	reset-forgets-the-poison	adt_reset_poisons
+red	reset-forgets-the-poison	adt_reset_poisons
+
+# A reset of nothing: the placeholder slot of an unassigned binding.
+role	reset-reads-through-null	counted
+owner	reset-reads-through-null	adt_reset_null
+red	reset-reads-through-null	adt_reset_null
+
+# A value that is not a constructed node.
+role	reset-ignores-kind	counted
+owner	reset-ignores-kind	adt_reset_kind
+red	reset-ignores-kind	adt_reset_kind
+
+# A token of another width reused as it is.
+role	reuse-ignores-width	counted
+owner	reuse-ignores-width	adt_reuse_mismatch
+red	reuse-ignores-width	adt_reuse_mismatch
