@@ -352,7 +352,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 18596s (the most this file's `3x` claims may add up to)
+# push-total: 18601s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3138,7 +3138,14 @@ jobs:
     # now 658s (#605's first run, against the 670s above), so the figure is
     # 658 + 40 = 698s, plus a tenth, rounded up to 5s, 770s (670s before), and
     # the timeout 3x that; to be restated from the first observed runs.
-    # budget: 3x 770s planning value (658s worst observed on #605, plus 40s for the compile view's contract cases, plus a tenth)
+    # 2026-10-08, site/play-ui's `npm test` (selftest, compile-selftest) as a
+    # step of this job, after the site build that has already installed
+    # node_modules. Locally 29.6s on the first run (cold disk cache) and
+    # 3.0s, 3.6s on the next two. Taken at the warm figure doubled for the
+    # runner, 6s: 698 + 6 = 704s, plus a tenth, rounded up to 5s, 775s
+    # (770s before). 3x that is 2325s, inside the 39 minutes already set;
+    # to be restated from the first observed runs.
+    # budget: 3x 775s planning value (658s worst observed on #605, plus 40s for the compile view's contract cases, plus 6s for the play-ui tests, plus a tenth)
     timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
@@ -3197,6 +3204,13 @@ jobs:
       # differential below reads. They stay in this order.
       - name: site builds end-to-end (incl. the Playground editor bundle)
         run: ./site/build.sh
+
+      # The Playground editor's own selftests (the compile pane's DOM contract
+      # against style.css among them) ran in no workflow. They need
+      # node_modules, which the build above has just installed, so they follow
+      # it and add no setup of their own.
+      - name: Playground editor selftests
+        run: npm test --prefix site/play-ui
 
       # site/README.md has called "JVM and native write the same dist, byte for
       # byte" a project tradition since M5, and until now nothing enforced it --
