@@ -30,13 +30,11 @@ scripts/gates-external/prefix.py check-isolation --prefix ~/dawn-gates \
     --marker ~/dawn-gates/tmp/marker [--readonly-root] -- <command>
 scripts/gates-external/prefix.py selftest --prefix ~/dawn-gates [--break-env-i]
 
-# on the cluster, from a local prefix that holds the input pack
-scripts/gates-external/run.sh --sha <sha> --backend crun --prefix ~/dawn-gates --jobs 16 \
-    --backend-opt remote-prefix=<cluster dir> [--backend-opt isolation=1] [--only ...] \
-    [--backend-opt run-as=UID:GID|root] [--backend-opt private-tmp=0] [--backend-opt poll=30]
-    [--backend-opt machines=auto|N|primary] [--backend-opt job-load=4] [--backend-opt dead-after=6]
-scripts/gates-external/run.sh --resume <out> [--jobs N]   # after the controller died
-scripts/gates-external/crun_stub_selftest.py   # disconnects and --resume against a stub crun
+# a plugin backend (not shipped here): point the runner at its directory
+DAWN_GATES_BACKENDS=<dir holding backend_<name>.py> \
+  scripts/gates-external/run.sh --sha <sha> --backend <name> --prefix ~/dawn-gates --jobs 8 [--only ...]
+scripts/gates-external/run.sh --resume <out> [--jobs N]   # after the controller died (RESUMABLE backends)
+scripts/gates-external/plugin_selftest.py       # the plugin loading, with a fake backend
 ```
 
 Exit status of `run.sh`: 0 complete, 1 ran but not complete, 2 refused to
@@ -48,12 +46,11 @@ plan, 3 the bundle was refused (leak or schema), nothing written.
 |---|---|
 | `gatesplan.py` | what runs: every job and `run:` step of gates.yml at the commit, read from git; each `uses:` resolved through the substitution table, anything unmodelled refused |
 | `backend_local.py` | where and how: one job at a time on this machine, in a fresh worktree (a fresh clone inside a prefix) |
-| `backend_crun.py` | where and how, on the cluster: on every machine `crun status` lists, checks that the job uid can use the prefix and ships the input pack where it does not verify, then one detached zero-card `crun run -m <machine> -d` per job on the machine with the least load per core, each running `prefix.py run-job` (the local backend in prefix mode) inside that machine's prefix, and one poll per machine for its jobs still out every 30 s; a machine that stops answering is dropped and its jobs move; artifacts a job uploads come back with its result and travel to a job that needs it on another machine; resumable (`machines=primary` keeps every job on crun's primary) |
-| `crun_stub_selftest.py` | the crun backend against a stub crun with three stub machines: the fan-in job finding artifacts its needed jobs uploaded on other machines, dropped polls and launches, a machine the job uid cannot use, one that never answers and one lost mid-run all give the same bundle bytes, a killed controller resumed gives the same bytes, a fragment deleted before `--resume` gives `complete=false` |
+| `plugin_selftest.py` | the plugin loading: a fake backend in a temporary directory is found through `DAWN_GATES_BACKENDS` and through `backends.local`, an absent or malformed name is refused, and `runner.py` reaches the plugin end to end |
 | `bundle.py` | what it means: schema whitelist, leak filter, and `complete` |
-| `runner.py` | when: schedules jobs up to `--jobs`, honours `needs:`, writes `summary.json`, `bundle.json` and `invocation.json` (what `--resume` reads back) |
+| `runner.py` | when (and which backend: the shipped `local`, else a plugin from `DAWN_GATES_BACKENDS` or the gitignored `backends.local`): schedules jobs up to `--jobs`, honours `needs:`, writes `summary.json`, `bundle.json` and `invocation.json` (what `--resume` reads back) |
 | `run.sh` | the entry point |
-| `prefix.py` | the prefix layout, the whitelist environment every prefix job gets, `check-isolation`, and `run-job` (a crun job's remote half) |
+| `prefix.py` | the prefix layout, the whitelist environment every prefix job gets, `check-isolation` |
 | `inputs.py` | the offline input pack: download, check against `inputs.lock.json`, lay out, `verify` |
 | `inputs.lock.json` | name, version, URL and sha256 of every download the prefix holds |
 | `allowed_signers` | the one public key (identity and namespace `dawn-gates`) a signed bundle is verified against |
@@ -148,7 +145,7 @@ The C compiler is what ubuntu-latest's `cc` is: gcc 13.3.0, with the
 sanitizer, libgcc_s and libstdc++ runtimes Ubuntu 24.04 builds from gcc
 14.2.0. The lock pins it as ten conda-forge packages (`conda_toolchains`,
 121 MiB) with a glibc 2.34 sysroot, so what they link starts on a host from
-2.34 up (the cluster has 2.35). The 14.2.0 runtime is not cosmetic: gcc
+2.34 up (a remote runner has 2.35). The 14.2.0 runtime is not cosmetic: gcc
 13.3.0's own libasan dies with `AddressSanitizer:DEADLYSIGNAL` on a kernel
 with 32-bit mmap randomisation, and `spike-native` fails closed without
 ASan. The packages are unpacked by the prefix's python with a pinned
@@ -204,18 +201,10 @@ command instead of waiting to be found.
 Without `--prefix` nothing changes: the host-environment path of the first
 knife is kept as it was.
 
-On the cluster a container gives root and nothing else, while CI runs every
-job as an ordinary user, and two contracts refuse root (root reads a
-`chmod 000` file and writes an unwritable directory). So `prefix.py run-job`
-starts as root, hands the writable part of the prefix (`home/`, `tmp/`,
-`cache/`, `repos/<sha>.git`, `jobs/<sha>`, `out/<sha>`) to uid 20000, and
-re-executes itself through `setpriv --reuid --regid --clear-groups
---no-new-privs`. `toolchain/` and `inputs/` stay root's, so a job cannot
-change what it is measured with. A uid change does not close `/tmp`,
-`/var/tmp` and `/dev/shm`, which anyone may write, so the job also gets a
-private mount namespace in which each is a per-job directory in the prefix
-(what a fresh CI VM gives a job; a JVM's `java.io.tmpdir` ignores `TMPDIR`).
-`run-as=root` is the negative control; `private-tmp=0` keeps the shared ones.
+Two contracts refuse root (root reads a `chmod 000` file and writes an
+unwritable directory) while CI runs every job as an ordinary user. A plugin
+backend whose machine starts jobs as root must therefore drop to an ordinary
+user, and close the world-writable temp directories, before the steps run.
 
 ## The substitution table
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The offline input pack: every byte a gate run needs from the network.
 
-Why this exists. A cluster container with no route to the internet cannot run
+Why this exists. A remote container with no route to the internet cannot run
 setup-graalvm, download node, fetch the seed or ask Maven Central for asm, and
 a workstation that can should not be trusted to fetch the same bytes twice.
 So the downloads happen once, on a machine with a network, into a prefix
@@ -37,8 +37,8 @@ What the lock pins and what it does not:
     conda_items.
 
 Why the compiler is in the pack at all: it was the one tool the steps took
-from /usr/bin, so an external run's bundle said `cc` = gcc 11.4 on the
-cluster and gcc 13.3 on a workstation for the same commit. What CI runs is
+from /usr/bin, so an external run's bundle said `cc` = gcc 11.4 on a
+remote runner and gcc 13.3 on a workstation for the same commit. What CI runs is
 ubuntu-latest's `cc`, gcc 13.3.0, whose sanitizer, libgcc_s and libstdc++
 runtimes Ubuntu 24.04 builds from gcc 14.2.0; the lock pins conda-forge
 builds of exactly that pairing. The pairing is not cosmetic: gcc 13.3's own
@@ -53,7 +53,7 @@ prefix as a text placeholder (info/paths.json) and rewrites it to the
 install location. So does this module; gcc's specs are one of those files,
 and the `-rpath <toolchain>/lib` they add to every non-static link is how
 an ASan binary finds the pack's libasan instead of the host's (or none, on
-the cluster, which has only gcc 11's). Those files then name the prefix, so
+a remote runner that has only gcc 11's). Those files then name the prefix, so
 their digest is taken with the location put back to the placeholder: the
 same tree digest on every machine, as with the java shims.
 
@@ -475,7 +475,7 @@ def build(args):
     # before it entered the pack read only `items`, index every download row
     # there by the lock they carry, and hash every toolchain without
     # relocation, so a row of these in `items` would turn them red. The local
-    # and cluster prefixes are verified by several branches' tools at once.
+    # and remote prefixes are verified by several branches' tools at once.
     # The pinned clang's rows go under a key of their own (the entry's
     # manifest_key) for the same reason: a verifier from before it indexes
     # every download row of conda_items by its own lock and would fail on a
@@ -780,7 +780,7 @@ def verify(args):
     # A pack is built for one seed: the tag scripts/seed-release.txt named when
     # it was built. Every row above can verify and the pack still be one seed
     # behind the commit under test, and a job then goes to the network for the
-    # seed it lacks -- which a cluster node cannot reach. So the caller that
+    # seed it lacks -- which a remote node cannot reach. So the caller that
     # knows the commit says which seed it needs.
     tag = getattr(args, "seed_tag", None)
     if tag:

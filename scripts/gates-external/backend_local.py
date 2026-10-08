@@ -31,8 +31,9 @@ In words: given a tree and inputs, run the command list in order, and hand
 back an exit code and an output digest per command. A backend decides WHERE
 things run and HOW each replacement id is realised; it does not decide WHAT
 runs (gatesplan does) or what counts as complete (bundle.py does). A second
-backend (crun) is a new backend_<name>.py beside this one, selected with
-`--backend <name>`, and changes no existing file.
+backend is a new backend_<name>.py beside this one, selected with
+`--backend <name>`, and changes no existing file. It need not live in this
+repository: see load_backend in runner.py.
 
 Why every job gets its own worktree: CI gives every job a fresh checkout, and
 running several jobs in one tree collides on things gates.yml writes to fixed
@@ -112,7 +113,7 @@ class LocalBackend:
         opts = ctx["options"]
         self.prefix = Path(opts["prefix"]).resolve() if opts.get("prefix") else None
         # Where checkouts clone from in prefix mode: the repository itself here,
-        # a bare repository made from a shipped bundle on a cluster.
+        # a bare repository made from a shipped bundle on a remote runner.
         self.git_source = Path(opts.get("git-source") or self.repo)
         default_workdir = (self.prefix / "jobs" / self.tree if self.prefix
                            else self.repo.parent / "gates-external-jobs")

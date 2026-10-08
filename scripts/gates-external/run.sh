@@ -16,13 +16,18 @@
 #          [--only job1,job2] [--backend-opt KEY=VALUE ...] [--repo DIR]
 #   run.sh --sha <sha> --backend local --out <dir> --dry-run   # the plan only
 #   run.sh --sha <sha> --backend local --prefix DIR [--only ...]   # inside a prefix
-#   run.sh --sha <sha> --backend crun --prefix DIR --jobs 16       # on the cluster
-#   run.sh --resume <out> [--jobs N]   # continue a crun run whose controller died
+#   run.sh --sha <sha> --backend <name> --prefix DIR --jobs 16     # a plugin backend
+#   run.sh --resume <out> [--jobs N]   # continue a run whose controller died
+#
+# Only the local backend ships here. A plugin backend is a backend_<name>.py in
+# a directory named by DAWN_GATES_BACKENDS (several, separated like PATH) or
+# listed, one per line, in the gitignored scripts/gates-external/backends.local.
 #
 # --resume reads <out>/invocation.json, which every run writes, so it takes no
-# other option but --jobs. Jobs the cluster finished meanwhile are collected,
-# jobs still running are waited for, and jobs never started are launched; a
-# job that ended without a result fragment stays red (runner.py, backend_crun.py).
+# other option but --jobs, and works only for a backend that says RESUMABLE.
+# Jobs the backend finished meanwhile are collected, jobs still running are
+# waited for, and jobs never started are launched; a job that ended without a
+# result fragment stays red (runner.py).
 #
 # --prefix DIR runs every job inside the prefix prefix.py lays out and
 # inputs.py fills: its JDK, python, node and seed, an environment built from
