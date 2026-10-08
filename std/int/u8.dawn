@@ -48,7 +48,7 @@
 # witness, spelled like the type so that `use std/int/u8.{U8}` brings in both,
 # and `impl HasDtype[U8]` lets generic code ask for it by type.
 
-use std/dtype.{DeviceBits, Dtype, HasDtype, bits_of, dtype_name, dtype_named, dtype_of, from_bits}
+use std/dtype.{DeviceBits, Dtype, HasDtype, to_bits, dtype_name, dtype_from_name, dtype_of, from_bits}
 
 ## A unsigned 8-bit integer.
 pub opaque type U8 = Int
@@ -60,7 +60,7 @@ pub const MIN: U8 = 0
 pub const MAX: U8 = 255
 
 ## The device format of `U8`: `u8`.
-pub const U8: Dtype[U8] = dtype_named("u8")
+pub const U8: Dtype[U8] = dtype_from_name("u8")
 
 impl HasDtype[U8] {
   fn dtype_of() -> Dtype[U8] = U8
@@ -69,7 +69,7 @@ impl HasDtype[U8] {
 # The low bits of the two's complement, read unsigned: what a device buffer
 # holds for this element. Bits above the width are ignored on the way back.
 impl DeviceBits[U8] {
-  fn bits_of(v: U8) -> Int = to_int(v) & 0xFF
+  fn to_bits(v: U8) -> Int = to_int(v) & 0xFF
   fn from_bits(bits: Int) -> U8 = wrap(bits)
 }
 
@@ -231,9 +231,9 @@ test "the witness is the format the dialect names, found by value or by type" {
 }
 
 test "U8 moves as its low bits, unsigned, and reads back from any word" {
-  assert bits_of(wrap(1)) == 1
-  assert bits_of(MAX) == 0xFF
-  assert bits_of(MIN) == 0x0
+  assert to_bits(wrap(1)) == 1
+  assert to_bits(MAX) == 0xFF
+  assert to_bits(MIN) == 0x0
   assert to_int(from_bits(0xFF + 1)) == 0
   # the bits above the width are ignored
   let hi: U8 = from_bits(0x5A5A5A5A5A5A5A5A - (0x5A5A5A5A5A5A5A5A & 0xFF) + 3)
@@ -241,7 +241,7 @@ test "U8 moves as its low bits, unsigned, and reads back from any word" {
   var n = 0
   while n < 300 {
     let v: U8 = wrap(n * 7919 - 1000)
-    let back: U8 = from_bits(bits_of(v))
+    let back: U8 = from_bits(to_bits(v))
     assert back == v
     n = n + 1
   }
