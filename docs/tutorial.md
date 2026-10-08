@@ -1627,6 +1627,12 @@ and whose `kernels` maps each name to its compiled module. That handler needs th
 backend (on the JVM every operation answers `gpu.unsupported_backend`) and a machine with
 an NVIDIA driver.
 
+`upload` and `download` move values of the tensor's element type, not Floats under every
+format: a `Tensor[Float]` takes a `List[Float]`, a `Tensor[Int]` takes `Int`s and keeps every bit
+of them (an i64 beyond 2^53 included), and a `Tensor[BF16]` takes `BF16` values, so nothing is
+rounded on the way in. A format with no buffer cannot be moved: uploading a `Tensor[Bool]` is a
+type error, not a refusal at run time.
+
 The kernels are Dawn as well, written against `packages/tileir`: its `Dev` effect records
 the operations a kernel performs, and the record is encoded as NVIDIA's Tile IR bytecode,
 which `tileiras` assembles into the module `with_gpu_real` loads. Recording is pure as

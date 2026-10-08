@@ -181,8 +181,8 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    let (_dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], data)?
+    let (dt, data) = bufs[i]
+    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
   }
   Ok(())
 }
@@ -211,7 +211,11 @@ fn run_kernel(bufs: List[(String, List[Float])]) -> (String, Option[List[Float]]
         }
         Ok(_) -> {
           let s = gpu.gpu_sync()
-          let r = gpu.gpu_download(hs[len(hs) - 1])
+          let (last_dt, _last) = bufs[len(bufs) - 1]
+          let r: Result[List[Float], ForeignError] = match gpu.gpu_download(hs[len(hs) - 1]) {
+            Ok(raw) -> Ok(gpu.unpack_from(last_dt, raw))
+            Err(e) -> Err(e)
+          }
           release(hs)
           match s {
             Err(e) -> (e.kind ++ "@sync", None, e.message)

@@ -165,16 +165,17 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    let (_dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], data)?
+    let (dt, data) = bufs[i]
+    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
   }
   Ok(())
 }
 
-fn download_all(hs: List[Int], reads: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
+fn download_all(hs: List[Int], bufs: List[(String, List[Float])], reads: List[Int]) -> Result[List[List[Float]], ForeignError] !Gpu = {
   var out: List[List[Float]] = []
   for r in reads {
-    out = out ++ [gpu.gpu_download(hs[r])?]
+    let (read_dt, _read) = bufs[r]
+    out = out ++ [gpu.unpack_from(read_dt, gpu.gpu_download(hs[r])?)]
   }
   Ok(out)
 }
@@ -213,7 +214,7 @@ fn stages(kernel: String, gx: Int, gy: Int, gz: Int, bufs: List[(String, List[Fl
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
-              let r = download_all(hs, reads)
+              let r = download_all(hs, bufs, reads)
               release(hs)
               let value = match r {
                 Ok(v) -> Some(v)

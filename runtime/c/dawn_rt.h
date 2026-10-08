@@ -816,12 +816,11 @@ dawn_array *dawn_args(void);
  * and on wasm every one is "gpu.unsupported_backend". Arguments are borrowed
  * like every other intrinsic's; the Result and what it holds are the
  * caller's. Buffers are raw device pointers, a module is the CUmodule
- * handle load_module answered, `data` holds boxed doubles and `args` boxed
- * device pointers. */
+ * handle load_module answered, `data` is a buffer's bytes laid out by std/gpu
+ * (little-endian, whatever the format) and `args` holds boxed device
+ * pointers. */
 dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin);   /* Result[Int, _] */
 dawn_adt *dawn_gpu_alloc_host(int64_t nbytes);                   /* Result[Int, _] */
-dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data);
-dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len);   /* Result[Array[Float], _] */
 dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data);
 dawn_adt *dawn_gpu_download_bytes_host(int64_t devptr, int64_t nbytes); /* Result[Bytes, _] */
 dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int64_t gy,

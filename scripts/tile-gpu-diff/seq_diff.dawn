@@ -400,7 +400,7 @@ fn alloc_all(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
 
 fn upload_all(hs: List[Int], bufs: List[Buf]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    gpu.gpu_upload(hs[i], bufs[i].data)?
+    gpu.gpu_upload(hs[i], gpu.pack_to(bufs[i].dtype, bufs[i].data))?
   }
   Ok(())
 }
@@ -409,7 +409,8 @@ fn upload_all(hs: List[Int], bufs: List[Buf]) -> Result[Unit, ForeignError] !Gpu
 fn download_all(hs: List[Int], bufs: List[Buf], names: List[String]) -> Result[List[Float], ForeignError] !Gpu = {
   var out: List[Float] = []
   for name in names {
-    out = out ++ gpu.gpu_download(hs[buf_pos(bufs, name)])?
+    let p = buf_pos(bufs, name)
+    out = out ++ gpu.unpack_from(bufs[p].dtype, gpu.gpu_download(hs[p])?)
   }
   Ok(out)
 }
@@ -436,11 +437,11 @@ fn launch_all(hs: List[Int], bufs: List[Buf], steps: List[Step], i: Int,
   } else {
     let pre: Result[Unit, ForeignError] = if i == at && reset != "" {
       let p = buf_pos(bufs, reset)
-      gpu.gpu_upload(hs[p], bufs[p].data)
+      gpu.gpu_upload(hs[p], gpu.pack_to(bufs[p].dtype, bufs[p].data))
     } else if i == at && trip != "" {
       let p = buf_pos(bufs, trip)
       match gpu.gpu_download(hs[p]) {
-        Ok(v) -> gpu.gpu_upload(hs[p], v)
+        Ok(raw) -> gpu.gpu_upload(hs[p], raw)
         Err(e) -> Err(e)
       }
     } else {

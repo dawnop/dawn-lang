@@ -93,8 +93,8 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    let (_dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], data)?
+    let (dt, data) = bufs[i]
+    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
   }
   Ok(())
 }
@@ -143,9 +143,10 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])], spec: List
               var all: List[Float] = []
               var bad = "ok"
               for k in back {
+                let (back_dt, _back) = bufs[k]
                 match gpu.gpu_download(hs[k]) {
-                  Ok(v) -> {
-                    all = all ++ v
+                  Ok(raw) -> {
+                    all = all ++ gpu.unpack_from(back_dt, raw)
                   }
                   Err(e) -> {
                     bad = e.kind

@@ -3815,6 +3815,37 @@ pub fn dtype_i64_ref(n: Int, dtypes: List[String], ins: List[List[Float]]) -> Li
   })
 }
 
+## `dtype_i64_ref` over `Int`s, for a corpus that leaves +/-2^53: the same
+## five segments (`n` lanes each, `5 * n` answers, no output buffer to keep a
+## tail of), computed in the `Int`s the device computes in. `Int` addition,
+## subtraction and multiplication wrap at 2^64 here as the device's `addi`,
+## `subi` and `muli` do, so nothing in the three arithmetic segments is
+## approximate, and the constant segment is exact too. The last segment is
+## the kernel's own itof / ftoi round trip and it is NOT the identity past
+## 2^53: `to_float` rounds to the nearest binary64 (ties to even) and
+## `to_int` truncates it back, which is the device's `itof` and `ftoi`.
+##
+## Why a twin and not a change to [`dtype_i64_ref`]: the fake device hands
+## its references `List[Float]` (`WideRefFn`), and an i64 past 2^53 cannot
+## be one. This function is called by a driver that holds the corpus as
+## `Int`s and compares with a real device's typed download.
+pub fn dtype_i64_ref_int(n: Int, a: List[Int], b: List[Int]) -> List[Int] =
+  list.map(range(0, 5 * n), k => {
+    let seg = k / n
+    let i = k % n
+    if seg == 0 {
+      a[i] + b[i]
+    } else if seg == 1 {
+      a[i] - b[i]
+    } else if seg == 2 {
+      a[i] * b[i]
+    } else if seg == 3 {
+      a[i] + 4294967296
+    } else {
+      to_int(to_float(a[i]))
+    }
+  })
+
 ## The five segments of `dtype_i4`: the nibble-wise sum, the sign-extended
 ## nibble shifted right by one, the zero-extended one shifted right by one,
 ## the nibble-wise product, and a's nibble on even lanes with b's on odd
@@ -5028,6 +5059,16 @@ test "the element format references answer what a reader can check by hand" {
   let out64 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0 - 1.0]
   let got64 = dtype_i64_ref(1, ["i64", "i64", "i64"], [[big], [7.0], out64])
   assert got64 == [big + 7.0, big - 7.0, big * 7.0, big + 4294967296.0, big, 0.0 - 1.0]
+
+  # the Int twin: 64-bit wraparound, and an exact answer past 2^53 where the
+  # Float reference above cannot have one
+  let past = 9007199254740993
+  let twin = dtype_i64_ref_int(1, [past], [3])
+  assert twin == [past + 3, past - 3, past * 3, past + 4294967296, 9007199254740992]
+  let top = 9223372036854775807
+  assert dtype_i64_ref_int(1, [top], [2])[0] == 0 - 9223372036854775807 + 0
+  assert dtype_i64_ref_int(1, [top], [1])[0] == 0 - 9223372036854775807 - 1
+  assert dtype_i64_ref_int(1, [top], [2])[2] == 0 - 2
 
   # a conversion reference: segment 0 is the buffer as it stands, segment 1
   # is the format's rounding of the second buffer

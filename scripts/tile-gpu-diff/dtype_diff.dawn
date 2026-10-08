@@ -76,7 +76,8 @@ use std/io.{Exit, with_fs_real}
 use std/gpu
 use std/gpu.{Gpu, with_gpu_fake, with_gpu_real, WideRefFn, last_out, wrap_i16, wrap_i4, wrap_i32, nibble_at,
   nibble_word }
-use tileref/ref.{dtype_i16_ref, dtype_i64_ref, dtype_convert_ref, dtype_i4_ref, pack_roundtrip_ref}
+use std/dtype.{I64}
+use tileref/ref.{dtype_i16_ref, dtype_i64_ref, dtype_i64_ref_int, dtype_convert_ref, dtype_i4_ref, pack_roundtrip_ref}
 use std/list
 use std/map
 use std/narrow
@@ -139,8 +140,8 @@ fn alloc_all(bufs: List[(String, List[Float])]) -> Result[List[Int], ForeignErro
 
 fn upload_all(hs: List[Int], bufs: List[(String, List[Float])]) -> Result[Unit, ForeignError] !Gpu = {
   for i in 0..len(hs) {
-    let (_dt, data) = bufs[i]
-    gpu.gpu_upload(hs[i], data)?
+    let (dt, data) = bufs[i]
+    gpu.gpu_upload(hs[i], gpu.pack_to(dt, data))?
   }
   Ok(())
 }
@@ -174,7 +175,11 @@ fn stages(kernel: String, gx: Int, bufs: List[(String, List[Float])]) -> Trace !
             }
             Ok(_) -> {
               let s = gpu.gpu_sync()
-              let r = gpu.gpu_download(hs[len(hs) - 1])
+              let (last_dt, _last) = bufs[len(bufs) - 1]
+              let r: Result[List[Float], ForeignError] = match gpu.gpu_download(hs[len(hs) - 1]) {
+                Ok(raw) -> Ok(gpu.unpack_from(last_dt, raw))
+                Err(e) -> Err(e)
+              }
               release(hs)
               let value = match r {
                 Ok(v) -> Some(v)
@@ -435,6 +440,102 @@ fn shape_of(name: String) -> String =
       ++ " infinite=${len(infinite)} rounded_on_upload=${len(stored_off_f32)}"
   }
 
+# ---- the i64 corpus past 2^53 ----
+#
+# The dtype_i64 case above stays inside +/-2^52 because its buffers are
+# `List[Float]`, and a binary64 significand stops there. This one does not:
+# the same kernel and the same cubin, driven through the typed `Tensor[Int]`
+# transfer, which moves every bit of an `Int`, against `dtype_i64_ref_int`
+# (Int arithmetic wraps at 2^64 as the device's `addi`, `subi` and `muli`
+# do). Only the real device runs it: the fake device holds such a buffer
+# exactly and refuses to launch on it (`gpu.fake_inexact`), and that refusal
+# is the control printed beside the verdict.
+
+## The lanes pinned rather than swept: the first integer a binary64 cannot
+## hold, its negation, the two extremes of the format, and a value one
+## below the top that IS a Float (2^63 - 1024), so that the saturating
+## itof / ftoi segment is exercised at the edge without leaving the range.
+const BIG_PINNED_A: Int = 9007199254740993
+const BIG_MAX: Int = 9223372036854775807
+
+fn big_a() -> List[Int] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        BIG_PINNED_A
+      } else if i == 1 {
+        0 - BIG_PINNED_A
+      } else if i == 2 {
+        0 - BIG_MAX - 1
+      } else if i == 3 {
+        BIG_MAX - 1023
+      } else {
+        (i - 256) * 18014398509481985
+      })
+
+fn big_b() -> List[Int] =
+  list.map(range(0, DT_N), i =>
+      if i == 0 {
+        BIG_MAX
+      } else if i == 1 {
+        0 - BIG_MAX
+      } else if i % 97 == 0 {
+        4611686018427387905
+      } else {
+        ((i * 37) % 1021 - 510) * 1000003
+      })
+
+fn big_sentinels() -> List[Int] = list.map(range(0, TAIL), _i => 0 - 12345)
+
+## One launch of the dtype_i64 kernel over `Tensor[Int]` buffers, stopping at
+## the first refusal; the answer is the output buffer's `5 * DT_N` lanes and
+## its tail.
+fn big_stages() -> Result[List[Int], ForeignError] !Gpu = {
+  let a = gpu.alloc(I64, DT_N)?
+  let b = gpu.alloc(I64, DT_N)?
+  let out = gpu.alloc(I64, 5 * DT_N + TAIL)?
+  gpu.upload(a, big_a())?
+  gpu.upload(b, big_b())?
+  gpu.upload(out, list.map(range(0, 5 * DT_N), _i => 0 - 12345) ++ big_sentinels())?
+  gpu.launch("dtype_i64", DT_N / DT_TILE, [gpu.erase(gpu.buffer(a)), gpu.erase(gpu.buffer(b)), gpu.erase(gpu.buffer(out))])?
+  gpu.sync()?
+  let got = gpu.download(out)?
+  gpu.free(a)?
+  gpu.free(b)?
+  gpu.free(out)?
+  Ok(got)
+}
+
+## The same buffers on the fake device, as the control: it must refuse the
+## launch with `gpu.fake_inexact` and not answer something rounded.
+fn big_on_fake() -> String = {
+  let r = with_gpu_fake(map.from([("dtype_i64", (3, last_out((dts, ins) => dtype_i64_ref(DT_N, dts, ins))))]), big_stages)
+  match r {
+    Ok(_) -> "answered"
+    Err(e) -> e.kind
+  }
+}
+
+fn big_index() -> String = {
+  let a = big_a()
+  let b = big_b()
+  let idx = range(0, DT_N)
+  let beyond = list.filter(idx, i => a[i] > 9007199254740992 || a[i] < 0 - 9007199254740992)
+  let inexact = list.filter(idx, i => to_int(to_float(a[i])) != a[i])
+  let wrapped = list.filter(idx, i => {
+    let p = a[i] * b[i]
+    p / (if b[i] == 0 { 1 } else { b[i] }) != a[i]
+  })
+  let negative = list.filter(idx, i => a[i] < 0)
+  "lanes=${DT_N} negative=${len(negative)} beyond_2p53=${len(beyond)} not_a_float=${len(inexact)}"
+    ++ " products_wrapped=${len(wrapped)}"
+}
+
+fn big_first_difference(got: List[Int], want: List[Int]) -> String =
+  match list.find(range(0, len(want)), i => got[i] != want[i]) {
+    Some(i) -> "seg ${i / DT_N} lane ${i % DT_N}: device ${got[i]} host ${want[i]}"
+    None -> "-"
+  }
+
 # ---- the cases ----
 
 ## The kernels this program runs, in the order their cubins are given.
@@ -552,6 +653,33 @@ pub fn main() -> Unit !io = io.with_exit_real(() => {
     if v == "differ:result" { any_differ = true } else { () }
     if blocked == "" && not any_differ && v != "identical:exact" { blocked = v } else { () }
   }
+  # the i64 corpus past 2^53, typed: the real device against the Int twin
+  let big = with_gpu_real(cubins, big_stages)
+  let want = dtype_i64_ref_int(DT_N, big_a(), big_b())
+  io.println("kernel dtype_i64_big tier=exact bufs=i64[${DT_N}],i64[${DT_N}],i64[${5 * DT_N + TAIL}]"
+      ++ " grid=(${DT_N / DT_TILE}, 1, 1) segments=5")
+  io.println("  index ${big_index()}")
+  io.println("  fake  launch=${big_on_fake()}")
+  var big_verdict = ""
+  match big {
+    Err(e) -> {
+      io.println("  real  stopped=${e.kind}")
+      io.println("  note  ${e.message}")
+      big_verdict = "blocked:${e.kind}@big"
+    }
+    Ok(got) -> {
+      let lanes = list.take(got, 5 * DT_N)
+      let tail_ok = list.drop(got, 5 * DT_N) == big_sentinels()
+      io.println("  real  lanes=${len(got)} tail_untouched=${tail_ok}")
+      io.println("  first ${big_first_difference(lanes, want)}")
+      big_verdict = if lanes == want && tail_ok { "identical:exact" } else { "differ:result" }
+    }
+  }
+  io.println("  verdict ${big_verdict}")
+  if big_verdict == "identical:exact" { exact_count = exact_count + 1 } else { () }
+  if big_verdict != "identical:exact" { all_agreed = false } else { () }
+  if big_verdict == "differ:result" { any_differ = true } else { () }
+  if blocked == "" && not any_differ && big_verdict != "identical:exact" { blocked = big_verdict } else { () }
   io.println("tiers exact=${exact_count} tolerance=0")
   if all_agreed {
     io.println("tile-gpu-diff: pass")

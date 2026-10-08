@@ -5074,39 +5074,9 @@ dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
   return dawn_ok(dawn_box_int((int64_t)p));
 }
 
-dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data) {
-  dawn_adt *e = dawn_gpu_open();
-  if (e != NULL) return e;
-  int64_t n = dawn_array_len(data);
-  double *buf = (double *)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(double));
-  /* the slots are borrowed: read them, do not `dawn_unbox_*` them, which
-   * releases the box (see the note above dawn_unbox_int) */
-  for (int64_t i = 0; i < n; i++) buf[i] = ((dawn_box *)dawn_array_get(data, i))->val.f;
-  dawn_cu_result r = dawn_gpu.memcpy_htod((dawn_cu_deviceptr)devptr, buf, (size_t)n * sizeof(double));
-  free(buf);
-  if (r != 0) return dawn_gpu_cu_error("cuMemcpyHtoD_v2", r);
-  return dawn_ok(dawn_box_unit(DAWN_UNIT));
-}
-
-dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len) {
-  dawn_adt *e = dawn_gpu_open();
-  if (e != NULL) return e;
-  if (len < 0) return dawn_gpu_refuse("gpu.bad_length", "gpu_download_host: negative element count");
-  double *buf = (double *)dawn_alloc((size_t)(len > 0 ? len : 1) * sizeof(double));
-  dawn_cu_result r = dawn_gpu.memcpy_dtoh(buf, (dawn_cu_deviceptr)devptr, (size_t)len * sizeof(double));
-  if (r != 0) {
-    free(buf);
-    return dawn_gpu_cu_error("cuMemcpyDtoH_v2", r);
-  }
-  dawn_array *a = dawn_array_new();
-  for (int64_t i = 0; i < len; i++) a = dawn_array_push_own(a, dawn_box_float(buf[i]));
-  free(buf);
-  return dawn_ok(a);
-}
-
 /* The packed-format seam: std/gpu has already laid the buffer out byte for
- * byte (bf16: std/gpu.pack_bf16), so the runtime copies and knows no
- * format. */
+ * byte (every format, f64 and i64 included: std/gpu's `pack_words`), so the
+ * runtime copies and knows no format. */
 dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
   dawn_adt *e = dawn_gpu_open();
   if (e != NULL) return e;
@@ -5234,16 +5204,6 @@ dawn_adt *dawn_gpu_load_module_host(const dawn_bytes *cubin) {
 dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
   (void)nbytes;
   return dawn_gpu_refuse_wasi("gpu_alloc_host");
-}
-dawn_adt *dawn_gpu_upload_host(int64_t devptr, const dawn_array *data) {
-  (void)devptr;
-  (void)data;
-  return dawn_gpu_refuse_wasi("gpu_upload_host");
-}
-dawn_adt *dawn_gpu_download_host(int64_t devptr, int64_t len) {
-  (void)devptr;
-  (void)len;
-  return dawn_gpu_refuse_wasi("gpu_download_host");
 }
 dawn_adt *dawn_gpu_upload_bytes_host(int64_t devptr, const dawn_bytes *data) {
   (void)devptr;

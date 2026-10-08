@@ -305,7 +305,7 @@ fn alloc_upload(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
   var hs: List[Int] = []
   for (dt, data) in bufs {
     let h = gpu.gpu_alloc(dt, len(data))?
-    gpu.gpu_upload(h, data)?
+    gpu.gpu_upload(h, gpu.pack_to(dt, data))?
     hs = hs ++ [h]
   }
   Ok(hs)
@@ -319,7 +319,8 @@ fn run_kernel(name: String, grid: Int, bufs: List[Buf]) -> Result[List[Float], F
   let hs = alloc_upload(bufs)?
   launch(name, grid, list.map(hs, h => gpu.Buf(h)))?
   sync()?
-  let got = gpu.gpu_download(hs[len(hs) - 1])?
+  let (last_dt, _last) = bufs[len(bufs) - 1]
+  let got = gpu.unpack_from(last_dt, gpu.gpu_download(hs[len(hs) - 1])?)
   for h in hs {
     let _ = gpu.gpu_free(h)
   }
