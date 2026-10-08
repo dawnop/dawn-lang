@@ -38,7 +38,7 @@ use xmap/xmap.{Spec, Raw, Built, explore}
 use xmap/table.{Call}
 use xmap/panes.{Out}
 use xmap/source.{at}
-use play/contract.{CompileError, render_check, render_error}
+use play/contract.{Outcome, Compiled, CompileError, Timeout, render_check, render_error}
 use play/exec.{ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
 
 ## The most bytes of text one pane's answer carries.
@@ -218,4 +218,74 @@ test "fit cuts at a line end and counts bytes, not characters" {
   # a three-byte character is three bytes
   assert fit(["中", "中"], 6) == (1, true)
   assert fit([], 0) == (0, false)
+}
+
+## What running a program for the Tile IR view came to: the part of the answer
+## that is the program's (as `respond` takes it), or an answer complete as it
+## stands with its status and whether it may be kept. Only a success is kept: a
+## failure of the program may be the machine's load (a timeout, a heap), and
+## the pane is rewritten by the next edit anyway.
+pub type Tiled =
+  | TileShown(rest: String)
+  | TileFailed(status: Int, body: String)
+
+# The lines of a program's output: a final newline ends a line, it does not
+# start an empty one.
+fn lines_of(output: String) -> List[String] =
+  if output == "" { [] } else { str.split(str.strip_suffix(output, "\n").unwrap_or(output), "\n") }
+
+## The view of a program's outcome. Its standard output is the pane, cut like
+## any pane (PANE_LIMIT, at a line end); a program that exits with anything but
+## 0 has no Tile IR to show and answers as /run does, with its output.
+pub fn tile_view(o: Outcome) -> Tiled =
+  match o {
+    CompileError(_) -> TileFailed(200, render_check(o))
+    Timeout(_) -> TileFailed(200, render_check(o))
+    Compiled(output, exit, truncated, _) ->
+      if exit != 0 {
+        TileFailed(200, render(JObj(map.from([
+          ("ok", JBool(false)),
+          ("phase", JStr("run")),
+          ("exit", num(exit)),
+          ("output", JStr(output)),
+        ]))))
+      } else {
+        let lines = lines_of(output)
+        let (shown, cut) = fit(lines, PANE_LIMIT)
+        let body = JObj(map.from([
+          ("pane", JObj(map.from([
+            ("kind", JStr("tile")),
+            ("total", num(len(lines))),
+            ("shown", num(shown)),
+            ("truncated", JBool(cut || truncated)),
+            ("text", JArr(map(list.take(lines, shown), l => JStr(l)))),
+          ]))),
+        ]))
+        TileShown(str.strip_prefix(render(body), "{").unwrap_or(""))
+      }
+  }
+
+test "a program's output becomes the pane, one entry a line" {
+  match tile_view(Compiled("a\nb\n", 0, false, 5)) {
+    TileShown(rest) -> {
+      assert str.contains(rest, "\"text\":[\"a\",\"b\"]")
+      assert str.contains(rest, "\"kind\":\"tile\"")
+      assert str.contains(rest, "\"truncated\":false")
+    }
+    TileFailed(_, _) -> { assert false }
+  }
+}
+
+test "a program that fails has no pane, and says what /run says" {
+  match tile_view(Compiled("boom\n", 1, false, 5)) {
+    TileFailed(200, body) -> {
+      assert str.contains(body, "\"phase\":\"run\"")
+      assert str.contains(body, "\"ok\":false")
+    }
+    _ -> { assert false }
+  }
+  match tile_view(CompileError("x")) {
+    TileFailed(200, body) -> { assert str.contains(body, "\"phase\":\"compile\"") }
+    _ -> { assert false }
+  }
 }

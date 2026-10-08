@@ -2,8 +2,9 @@
 #   {"ok": true,  "phase": "run",     "exit": 0, "output": "...", "truncated": false, "ms": 620}
 #   {"ok": false, "phase": "compile", "output": "<Dawn diagnostics>"}
 #   {"ok": false, "phase": "timeout", "output": "<partial output>"}
-# POST /compile takes {"code": ..., "target": "c" | "jvm"} and answers like /check
-# when the program does not compile; what it answers when it does is play/view.dawn's.
+# POST /compile takes {"code": ..., "target": "c" | "jvm" | "tile"} and answers like
+# /check when the program does not compile; what it answers when it does is
+# play/view.dawn's. Only "tile" runs the program (the Tile IR is what it prints).
 # GET /health answers {"ok": true, "version": "0.81.0", "build": "b1:2bfef5fb3622"}.
 # Everything is a JSON object built from the vendored M4 json library and
 # rendered with its RFC-8259 string escaping — no hand-rolled quoting.
@@ -12,6 +13,7 @@
 # reads as a different value. test/contract.sh checks the literal bytes.
 use std/map
 use std/list
+use std/str
 use json/value.{Json, JBool, JInt, JStr, JObj, error_text}
 use json/parser.{parse}
 use json/render.{render}
@@ -51,9 +53,16 @@ pub fn parse_request(body: String) -> Result[String, String] =
     Ok(entries) -> string_field(entries, "code")
   }
 
-## What /compile can show, in the order of the tabs. "tile" joins when the
-## runner can produce it.
-pub fn targets() -> List[String] = ["c", "jvm"]
+## What /compile can show, in the order of the tabs.
+pub fn targets() -> List[String] = ["c", "jvm", "tile"]
+
+## Whether a program is one the Tile IR view is for: it imports the package.
+## The page asks the same question of the same text to decide whether to show
+## the tab, and the server asks it again because the page is not trusted. It is
+## a courtesy to the visitor, not a security boundary (the packages a program
+## can reach are fixed by the manifest the runner writes): a comment holding
+## the words passes it and gets the compiler's answer instead.
+pub fn wants_tileir(code: String) -> Bool = str.contains(code, "use tileir/")
 
 # A /compile request: the "code" and a "target" from [`targets`]. The target
 # is checked against that list and nothing else reaches the sandbox.
@@ -134,3 +143,10 @@ test "health names what it knows and leaves out what it does not" {
 
 pub fn render_error(message: String) -> String =
   render(JObj(map.from([("ok", JBool(false)), ("phase", JStr("error")), ("output", JStr(message))])))
+
+test "only a program that imports tileir is one the Tile IR view is for" {
+  assert wants_tileir("use std/io\nuse tileir/dev.{Dev}\n")
+  assert not wants_tileir("use std/io\npub fn main() -> Unit !io = println(\"hi\")\n")
+  assert not wants_tileir("use tileir.dev")
+  assert list.contains(targets(), "tile")
+}

@@ -45,6 +45,8 @@ export DAWN_BIN="$ROOT/bin/dawn"
 export PLAY_JAVA="$JAVA_HOME/bin/java"
 # /compile lists the class with javap, which belongs to the same JDK as java.
 export PLAY_JAVAP="$JAVA_HOME/bin/javap"
+# The Tile IR view imports the packages the runner's manifest names.
+export PLAY_PACKAGES="$ROOT/packages"
 export PLAY_TIMEOUT=3
 export PLAY_COMPILE_TIMEOUT=60
 # The sandbox is on unless something opts out (config.sandbox_enabled is
@@ -284,6 +286,11 @@ open(f"{out}/many.dawn", "w").write(
     'pub fn main() -> Unit !io = {\n' + '  println("x")\n' * 2500 + '}\n')
 open(f"{out}/fresh.dawn", "w").write('pub fn main() -> Unit !io = println("fresh")\n')
 open(f"{out}/broken.dawn", "w").write('pub fn main() -> Unit !io = println(nope)\n')
+# a Tile IR program, and the same program that also imports a package the
+# manifest does not name
+tile = open(f"{root}/playground/test/tile_vadd.dawn", encoding="utf-8").read()
+open(f"{out}/tile.dawn", "w", encoding="utf-8").write(tile)
+open(f"{out}/tile_smuggle.dawn", "w", encoding="utf-8").write("use json/value.{Json}\npub fn smuggled(j: Json) -> Json = j\n" + tile)
 PY
 compile_body() { # program file, target
   python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1], encoding="utf-8").read(), "target": sys.argv[2]}))' "$1" "$2"
@@ -337,6 +344,32 @@ fi
 ccheck "compile: the same error for the other target" "$CASES/broken.dawn" jvm \
   'not d["ok"] and d["phase"]=="compile" and d == prev'
 
+# ---- the Tile IR view: the program is run, its output is the pane.
+#
+# Expected text: what `dawn run` prints for the same program as a project with
+# the same two package dependencies.
+TILE_PROJ="$CASES/tileproj"
+mkdir -p "$TILE_PROJ/src"
+cp "$CASES/tile.dawn" "$TILE_PROJ/src/main.dawn"
+printf 'schema = 1\nname = "tp"\nversion = "0.0.0"\n\n[deps]\ntileir = "%s/packages/tileir"\ntileref = "%s/packages/tileref"\n' "$ROOT" "$ROOT" >"$TILE_PROJ/dawn.toml"
+"$DAWN_BIN" run "$TILE_PROJ" >"$CASES/tile.expected" 2>/dev/null || true
+tile_ccheck() { # name, program file, extra request fields (JSON object), assertion
+  RESP_N=$((RESP_N + 1))
+  out="$CASES/resp.$RESP_N"
+  curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST \
+    --data "$(python3 -c 'import json,sys; d={"code": open(sys.argv[1], encoding="utf-8").read(), "target": "tile"}; d.update(json.loads(sys.argv[2])); print(json.dumps(d))' "$2" "$3")" \
+    "http://127.0.0.1:$PORT/compile" >"$out" || true
+  if EXPECTED="$CASES/tile.expected" python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); expected=open(os.environ['EXPECTED'], encoding='utf-8').read(); assert ($4), d" <"$out" 2>/dev/null; then
+    pass=$((pass + 1)); echo "  ok  $1"
+  else
+    fail=$((fail + 1)); echo "FAIL  $1"; echo "        $(head -c 600 "$out")"
+  fi
+}
+tile_ccheck "compile: a tileir program's pane is the text dawn run prints" "$CASES/tile.dawn" '{}' \
+  'len(expected)>200 and d["ok"] is True and d["phase"]=="compile-view" and d["target"]=="tile" and d["cached"] is False and d["pane"]["kind"]=="tile" and "\n".join(d["pane"]["text"])+"\n"==expected and d["pane"]["shown"]==len(d["pane"]["text"]) and d["pane"]["truncated"] is False and "calls" not in d and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw'
+tile_ccheck "compile: a dependency the visitor supplies is not honoured, so another package does not resolve" "$CASES/tile_smuggle.dawn" "{\"dawn_toml\": \"schema = 1\\nname = \\\"x\\\"\\nversion = \\\"0.0.0\\\"\\n[deps]\\ntileir = \\\"$ROOT/packages/tileir\\\"\\njson = \\\"$ROOT/packages/json\\\"\\n\"}" \
+  'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"] and "pane" not in d'
+
 # The two limits. 1,500 functions list to more than 256 KB; 2,500 calls are
 # more than 2,000. Each answer is cut, says so, and is still a sound answer.
 ccheck "compile: a pane past its byte limit is cut at a line and says so" "$CASES/wide.dawn" jvm \
@@ -359,7 +392,7 @@ refuses() { # name, data, status, text the refusal must name
   fi
 }
 refuses "compile: a target that is not offered is 400" '{"code":"x","target":"asm"}' 400 'target'
-refuses "compile: tile is not offered yet" '{"code":"x","target":"tile"}' 400 'one of: c, jvm'
+refuses "compile: tile for a program that does not import tileir is 400, in one sentence" '{"code":"pub fn main() -> Unit !io = println(\"hi\")","target":"tile"}' 400 'imports tileir'
 refuses "compile: no target is 400" '{"code":"x"}' 400 'missing field'
 refuses "compile: a target that is not a string is 400" '{"code":"x","target":3}' 400 'must be a string'
 refuses "compile: no code is 400" '{"target":"c"}' 400 'code'

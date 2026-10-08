@@ -10,9 +10,9 @@ use web/types.{Request, Response, HttpError, Text, raw, body_text, response_stat
 use web/router.{route_get, route_post}
 use web/server.{serve_app}
 use web/middleware.{with_logging}
-use play/contract.{parse_request, parse_compile_request, render_outcome, render_check, render_error, render_health}
-use play/exec.{execute, check, compiler_id, CompilerId, view_raw, javap_id}
-use play/view.{build_view, respond, cache_key, Mapped, Done}
+use play/contract.{parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
+use play/exec.{execute, check, compiler_id, CompilerId, view_raw, javap_id, tile_run, tile_ready}
+use play/view.{build_view, respond, cache_key, Mapped, Done, tile_view, TileShown, TileFailed}
 use play/cache.{Cache, new_cache, cache_get, cache_put}
 use play/gate.{new_gate, with_gate}
 use play/config.{port}
@@ -71,7 +71,7 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
   }
 
 # What /compile needs to know of the machine it runs on, asked once at start.
-type View = { toolchain: String, build: String, javap: Bool, cache: Cache }
+type View = { toolchain: String, build: String, javap: Bool, tile: Bool, cache: Cache }
 
 # The view's cache lines: "<status>:<kind>:" and then the text. A kind is `S`,
 # the program's part of a success answer (the head is written per request), or
@@ -116,11 +116,41 @@ fn compile_rpc(req: Request, gate: Semaphore, view: View) -> Result[Response, Ht
       Ok(source) -> match parse_compile_request(source) {
         Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
         Ok((code, target)) ->
-          match unavailable(view) {
-            Some(refusal) -> Ok(refusal)
-            None -> Ok(compile_view(gate, view, code, target))
+          if target == "tile" {
+            Ok(tile_ir(gate, view, code))
+          } else {
+            match unavailable(view) {
+              Some(refusal) -> Ok(refusal)
+              None -> Ok(compile_view(gate, view, code, target))
+            }
           }
       }
+    }
+  }
+
+# target "tile": the program's output, which is its Tile IR (play/exec.dawn,
+# the Tile IR view). The program must import tileir, which the page also
+# checks and the server checks again; it runs under /run's limits and one of
+# the same two permits, with /check's patience, because the pane is advisory.
+fn tile_ir(gate: Semaphore, view: View, code: String) -> Response !io =
+  if not wants_tileir(code) {
+    raw(400, JSON_CT, render_error("the Tile IR view needs a program that imports tileir (add a line such as `use tileir/dev.{Dev}`)"))
+  } else if not view.tile {
+    raw(503, JSON_CT, render_error("the Tile IR view is unavailable: this server has no packages/tileir"))
+  } else {
+    let started = System.nanoTime()
+    let key = "${cache_key(view.toolchain, code)}/tile"
+    match cache_get(view.cache, key) {
+      Some(line) -> serve_kept(view, "tile", started, line)
+      None ->
+        match with_gate(gate, COMPILE_WAIT_SECS, () => tile_view(tile_run(code))) {
+          None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
+          Some(TileFailed(status, body)) -> raw(status, JSON_CT, body)
+          Some(TileShown(rest)) -> {
+            cache_put(view.cache, key, kept_line(200, "S", rest))
+            raw(200, JSON_CT, respond("tile", view.build, false, (System.nanoTime() - started) / 1000000, rest))
+          }
+        }
     }
   }
 
@@ -162,6 +192,7 @@ pub fn main() -> Unit !io = {
     toolchain: "${id.version} ${id.build} ${javap}",
     build: id.build,
     javap: javap != "",
+    tile: tile_ready(),
     cache: new_cache(CACHE_ENTRIES, CACHE_CHARS),
   }
   serve_app(port(), [
@@ -173,7 +204,7 @@ pub fn main() -> Unit !io = {
 }
 
 test "without javap the view is refused with a 503 that says why" {
-  let view = View { toolchain: "", build: "", javap: false, cache: new_cache(2, 100) }
+  let view = View { toolchain: "", build: "", javap: false, tile: false, cache: new_cache(2, 100) }
   match unavailable(view) {
     Some(r) -> {
       assert response_status(r) == 503
@@ -184,6 +215,6 @@ test "without javap the view is refused with a 503 that says why" {
     }
     None -> { assert false }
   }
-  let with_javap = View { toolchain: "", build: "", javap: true, cache: new_cache(2, 100) }
+  let with_javap = View { toolchain: "", build: "", javap: true, tile: false, cache: new_cache(2, 100) }
   assert match unavailable(with_javap) { Some(_) -> false, None -> true }
 }
