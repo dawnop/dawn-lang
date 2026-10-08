@@ -46,7 +46,7 @@ use lsp/lspq.{
 use lsp/lspdoc.{hover_markdown, doc_in, may_have_doc, link_markdown, cut_doc}
 use front/docs.{DocSrc, doc_src_of, doc_links, rewrite_links, module_doc_of, doc_link_spans}
 use driver/doclinks.{LinkScope, resolve_link}
-use lsp/lspc.{completions_at, signature_at}
+use lsp/lspc.{completions_at, dot_completions_at, signature_at, CItem, Completions}
 use lsp/lspinlay.{InlayOpts, HintParam, default_inlay_opts}
 use version.{VERSION}
 use lsp/lsptok.{semantic_tokens, token_types, token_modifiers, encode_tokens}
@@ -2443,6 +2443,53 @@ fn pos_offset(d: Doc, params: Json) -> Int = {
 
 # ---- language features ----
 
+## The items after `value.`: the document with the dot (and the word after
+## it) cut analyses as the program it was before the dot was typed, so the
+## receiver has a type to ask. The state is a scratch copy: nothing is
+## installed and nothing is published.
+fn dot_items_of(st: LspState, d: Doc, cut: (Int, Int)) -> List[CItem] !Fs !Proc !Env !io = {
+  let (lo, hi) = cut
+  let cps = d.view.cps
+  let text2 = from_code_points(list.take(cps, lo)) ++ from_code_points(list.drop(cps, hi))
+  let d2 = Doc { ..d, text: text2, view: view_of(text2), ls: line_starts_of(text2) }
+  let no_items: List[CItem] = []
+  let st2 = match d.analysis {
+    Standalone(_, _, modules) -> {
+      let source_path = match d.path {
+        Some(found) -> found
+        None -> "<lsp>"
+      }
+      let prog = standalone_analysis(st, source_path, text2)
+      let d3 = Doc { ..d2, analysis: Standalone(prog, standalone_entry(prog), modules) }
+      Some(LspState { ..st, docs: map.insert(st.docs, d.uri, d3) })
+    }
+    WorkspaceMember(identity) -> {
+      let st1 = LspState { ..st, docs: map.insert(st.docs, d.uri, d2) }
+      match map.get(st1.workspaces, identity.lookup_key) {
+        Some(Ready(ws)) ->
+          Some(LspState { ..st1, workspaces: map.insert(st1.workspaces, identity.lookup_key, Ready(rebuild_workspace(st1, ws))) })
+        _ -> None
+      }
+    }
+  }
+  match st2 {
+    Some(s2) ->
+      match map.get(s2.docs, d.uri) {
+        Some(d4) ->
+          match analysis_of(s2, d4) {
+            Some(a2) ->
+              match doc_qcx(s2, d4, a2) {
+                Some(qc2) -> dot_completions_at(qc2, d4.view.cps, lo)
+                None -> no_items
+              }
+            None -> no_items
+          }
+        None -> no_items
+      }
+    None -> no_items
+  }
+}
+
 fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
   match doc_of(st, params) {
     Some(d) ->
@@ -2451,7 +2498,11 @@ fn handle_completion(st: LspState, params: Json) -> Json !Fs !Proc !Env !io = {
           match doc_qcx(st, d, analysis) {
             Some(qc) -> {
               var items: List[Json] = []
-              let found = completions_at(qc, analysis.modules, d.text, pos_offset(d, params))
+              let found0 = completions_at(qc, analysis.modules, d.text, pos_offset(d, params))
+              let found = match found0.dot {
+                Some(cut) -> Completions { ..found0, items: dot_items_of(st, d, cut) }
+                None -> found0
+              }
               for it in found.items {
                 var fields: List[(String, Json)] = [("label", JStr(it.label))]
                 fields = fields ++ [("kind", JInt(it.kind))]
@@ -5461,6 +5512,98 @@ test "dbg is a builtin the editor offers and explains, and its argument hovers a
   })))
 }
 
+# ---- completion after `value.` (lspdot.dawn) ----
+
+## The completion reply for `stmt` (ending in the dot) as the only statement
+## of a function taking `params`, next to the declarations `dot_base` has.
+fn dot_reply(st0: LspState, params: String, stmt: String) -> Json !Fs !Proc !Env !io = {
+  let text = join([
+    dot_base(),
+    "fn probe(${params}) -> Int = {",
+    "  ${stmt}",
+    "}",
+    ""
+  ], "\n")
+  let d = def_probe_doc_named(st0, "dotprobe.dawn", text)
+  let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
+  handle_completion(st, d7_params(d, "\n  ${stmt}", str.len(stmt) + 3))
+}
+
+## The labels, in the order a client sorts them.
+fn dot_labels(st0: LspState, params: String, stmt: String) -> List[String] !Fs !Proc !Env !io = {
+  let keyed = list.map(ai_items(dot_reply(st0, params, stmt)),
+    it => ostr(it, "sortText") ++ "\n" ++ ostr(it, "label"))
+  list.map(list.sort(keyed), k => str.split(k, "\n")[1])
+}
+
+fn dot_detail(st0: LspState, params: String, stmt: String, label: String) -> String !Fs !Proc !Env !io =
+  ostr(d7_item_in(dot_reply(st0, params, stmt), label), "detail")
+
+fn dot_base() -> String =
+  join([
+    "type Pt = { x: Int, y: Int }",
+    "type Box[T] = { item: T, tag: String }",
+    "",
+    "fn norm(p: Pt) -> Int = p.x",
+    "fn bump(p: Pt, by: Int) -> Pt = p",
+    "fn grow(n: Int) -> Int = n",
+    "fn shout(s: String) -> String = s",
+    "fn firsts[T](xs: List[T]) -> Option[T] = None",
+    "fn mapl[T, U](xs: List[T], f: fn(T) -> U) -> List[U] = []",
+    "fn count_strs(xs: List[String]) -> Int = len(xs)",
+    "fn count_flags(xs: List[Bool]) -> Int = len(xs)",
+    "fn unbox[T](b: Box[T]) -> T = b.item",
+    ""
+  ], "\n")
+
+test "dot completion offers fields then the functions a dot call reaches" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    # fields first, then functions whose first parameter is a Pt
+    let rec = dot_labels(st, "p: Pt, name: String", "p.")
+    assert list.take(rec, 2) == ["x", "y"]
+    assert list.contains(rec, "norm") && list.contains(rec, "bump")
+    assert not list.contains(rec, "grow") && not list.contains(rec, "shout")
+    # the receiver fills the first parameter, so the detail starts at the second
+    assert dot_detail(st, "p: Pt", "p.", "bump") == "fn bump(by: Int) -> Pt"
+    # a String reaches shout, not the Pt functions
+    let s = dot_labels(st, "name: String", "name.")
+    assert list.contains(s, "shout") && not list.contains(s, "norm")
+    # a generic first parameter unifies, a concrete List[String] one does not
+    let l = dot_labels(st, "xs: List[Int]", "xs.")
+    assert list.contains(l, "firsts") && list.contains(l, "mapl")
+    assert not list.contains(l, "count_strs")
+    # a partial word and the text after the cursor do not change the answer
+    assert list.contains(dot_labels(st, "xs: List[Int]", "xs.fi"), "firsts")
+    # a lambda argument types the next link: List[String] reaches count_strs
+    let c = dot_labels(st, "xs: List[Int]", "xs.mapl(n => \"s\").")
+    assert list.contains(c, "count_strs") && not list.contains(c, "grow")
+    # forms the checker types and a hand-written pass would not: a block
+    # lambda with a let, and an if as the body
+    let b = dot_labels(st, "xs: List[Int]", "xs.mapl(n => {\n    let k = n + 1\n    k > 2\n  }).")
+    assert list.contains(b, "count_flags") && not list.contains(b, "count_strs")
+    let i = dot_labels(st, "xs: List[Int]", "xs.mapl(n => if n > 1 { \"a\" } else { \"b\" }).")
+    assert list.contains(i, "count_strs") && not list.contains(i, "count_flags")
+    # a parenthesised receiver
+    assert list.contains(dot_labels(st, "n: Int", "(n + 1)."), "grow")
+    # a let before the cursor gives the receiver its type
+    assert list.contains(dot_labels(st, "n: Int", "let q = Pt { x: n, y: n }\n  q."), "norm")
+    # type arguments flow into fields and into the generic that unwraps
+    let g = dot_labels(st, "b: Box[Int]", "b.")
+    assert list.take(g, 2) == ["item", "tag"]
+    assert dot_detail(st, "b: Box[Int]", "b.", "item") == "Int"
+    assert list.contains(g, "unbox")
+    # a local named like a function hides it from the dot call
+    assert not list.contains(dot_labels(st, "q: Pt, bump: Int", "q."), "bump")
+    # an unknown receiver offers nothing rather than a guess
+    assert dot_labels(st, "p: Pt", "zzz.") == []
+  })))
+}
+
 # ---- std names the buffer has not imported (docs/lsp-auto-import-design.md) ----
 
 ## The items of a completion reply of either shape.
@@ -5546,12 +5689,13 @@ test "after alias dot, the module's members, with the use when it is missing" {
     # renamed, `str.` is no longer the module: adding a second use would not compile
     let (st3, d3) = doc("aidotas2.dawn", "use std/str as s\n\npub fn main() -> Unit !io = {\n  let a = str.\n}\n")
     assert ai_items(handle_completion(st3, d7_params(d3, "str.\n", 4))) == []
-    # a local of that name: its fields, not the module's members
+    # a local of that name: what a dot call on it reaches, not the module's
+    # members, so no item brings a `use` line with it
     let (st4, d4) = doc("aidotlocal.dawn", "pub fn f(str: String) -> Int = {\n  str.\n  0\n}\n")
-    assert ai_items(handle_completion(st4, d7_params(d4, "str.\n", 4))) == []
+    assert not list.any(ai_items(handle_completion(st4, d7_params(d4, "str.\n", 4))), it => ai_edit(it) != "-")
     # even when the module is imported under that alias: the local shadows it
     let (st6, d6) = doc("aidotshadow.dawn", "use std/str\n\npub fn f(str: String) -> Int = {\n  str.\n  0\n}\n")
-    assert ai_items(handle_completion(st6, d7_params(d6, "str.\n", 4))) == []
+    assert not list.any(ai_items(handle_completion(st6, d7_params(d6, "str.\n", 4))), it => ai_edit(it) != "-")
     # not a module std has
     let (st5, d5) = doc("aidotnone.dawn", "pub fn main() -> Unit !io = {\n  let a = nosuch.\n}\n")
     assert ai_items(handle_completion(st5, d7_params(d5, "nosuch.", 7))) == []

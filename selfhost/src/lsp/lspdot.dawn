@@ -1,0 +1,269 @@
+# Completion after `expr.` where `expr` is a value: its record fields, and the
+# functions a dot call could reach (spec 4.3, step 5: `x.f(a)` is `f(x, a)`
+# for an `f` in scope unqualified).
+#
+# The receiver's type comes from the checker, not from here. The buffer at a
+# completion request is `xs.` plus a newline, which does not parse, and
+# analysis of an unparsable buffer checks nothing, so the server analyses a
+# copy with the dot and the word after it cut (server.dawn `dot_items_of`).
+# In that copy the receiver is an ordinary expression, and its type is what
+# `lspq.type_of_span` reads off the typed tree: the node hover reads, found by
+# the receiver's span. All this module does is find that span, by a token walk
+# back from the dot (syntax only), and filter candidates.
+#
+# When the typed tree has no node for the span nothing is offered, never a
+# guess. That happens when the function holding the receiver did not check in
+# the copy (another error in it that stops the checker before the node is
+# built), when the checker typed it as an error (an undefined name), and when
+# the span is not one expression, e.g. a receiver that
+# starts mid-expression because the token walk stopped early.
+#
+# A candidate is a name the checker's own UFCS step finds (`cx.fns`, then
+# `cx.std_fns`, then the visible builtins) whose first parameter the receiver
+# type unifies with (`unify_into`, the unifier a call uses), whose trait bounds
+# the bound type satisfies (`resolve_witness`, its errors discarded), and which
+# no local shadows. Names only an unimported module exports are not offered:
+# the checker rejects `s.split(",")` without `use std/str.{split}`.
+
+use std/list
+use std/map
+use std/set
+use std/str
+use check/types.{
+  Ty, TyAdt, TyVar, TyError, Eff, Sig, subst, adt_of, ty_show, sig_render, bounds_of
+}
+use check/checker.{unify_into, resolve_witness}
+use front/token.{
+  Token, IDENT, TYPEIDENT, STRING, RPAREN, RBRACKET, LPAREN, LBRACKET, DOT, NEWLINE, EOF,
+  QUESTION, BANG
+}
+use front/lexer.{lex, slice_cps}
+use lsp/lspq.{QCx, type_of_span}
+
+## One entry after the dot. `field` ranks it before the functions.
+pub(pkg) type DotCand = { name: String, detail: String, field: Bool }
+
+# ---- finding the receiver ----
+
+## The most code points read back from the dot to find where the receiver
+## starts. A chain longer than this is still completed from its last links.
+const WINDOW: Int = 4000
+
+## The token index where the receiver ending at token `i` starts, or None.
+## Walks postfix links back: `?`/`!`, a call or index group with its head, a
+## `.name` link (across a newline that precedes the dot), and stops at the
+## first token that cannot be part of one expression.
+fn receiver_start(ts: List[Token], i0: Int) -> Option[Int] = {
+  var i = i0
+  var guard = 0
+  while i >= 0 && guard < 10000 {
+    guard = guard + 1
+    let k = ts[i].kind
+    if k == QUESTION || k == BANG {
+      i = i - 1
+    } else if k == RPAREN || k == RBRACKET {
+      let open = match matching_open(ts, i) {
+        Some(o) -> o
+        None -> return None
+      }
+      let prev = open - 1
+      let callable = prev >= 0 && (ts[open].kind == LPAREN || ts[open].kind == LBRACKET) &&
+        (ts[prev].kind == IDENT || ts[prev].kind == TYPEIDENT || ts[prev].kind == RPAREN ||
+            ts[prev].kind == RBRACKET || ts[prev].kind == QUESTION)
+      if callable {
+        i = prev
+      } else if ts[open].kind == LPAREN {
+        match before_dot(ts, open) {
+          Some(j) -> { i = j }
+          None -> return Some(open)
+        }
+      } else {
+        return None
+      }
+    } else if k == IDENT || k == TYPEIDENT || k == STRING {
+      match before_dot(ts, i) {
+        Some(j) -> { i = j }
+        None -> return Some(i)
+      }
+    } else {
+      return None
+    }
+  }
+  None
+}
+
+## The index of the last token before a `.` that precedes token `at`, newlines
+## between them skipped, or None when `at` is not the member of a dot link.
+fn before_dot(ts: List[Token], at: Int) -> Option[Int] = {
+  var j = at - 1
+  if j < 0 || ts[j].kind != DOT { return None }
+  j = j - 1
+  while j >= 0 && ts[j].kind == NEWLINE { j = j - 1 }
+  if j < 0 { None } else { Some(j) }
+}
+
+fn matching_open(ts: List[Token], close: Int) -> Option[Int] = {
+  var depth = 0
+  var j = close
+  while j >= 0 {
+    let k = ts[j].kind
+    if k == RPAREN || k == RBRACKET {
+      depth = depth + 1
+    } else if k == LPAREN || k == LBRACKET {
+      depth = depth - 1
+      if depth == 0 { return Some(j) }
+    }
+    j = j - 1
+  }
+  None
+}
+
+# ---- fields and bounds ----
+
+fn bounds_hold(qc: QCx, s: Sig, m: Map[Int, Ty], em: Map[Int, Eff]) -> Bool = {
+  var i = 0
+  for tp in s.tparams {
+    match tp {
+      TyVar(_, id) ->
+        match map.get(m, id) {
+          Some(_) -> {
+            for tid in bounds_of(s, i) {
+              let (_, w) = resolve_witness(qc.entry.cx, tid, subst(tp, m, em), 0, 0, "")
+              if w == None { return false }
+            }
+          }
+          None -> ()
+        }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  true
+}
+
+## A record's field `name` at the type arguments of `t`.
+fn field_of(qc: QCx, t: Ty, name: String) -> Option[Ty] =
+  match t {
+    TyAdt(aid, targs) -> {
+      let ad = adt_of(qc.entry.cx.adts, aid)
+      if not ad.is_record || len(ad.ctors) == 0 { return None }
+      var im: Map[Int, Ty] = map.empty()
+      var ti = 0
+      for tp in ad.tparams {
+        match tp {
+          TyVar(_, vid) ->
+            match get(targs, ti) {
+              Some(ta) -> { im = map.insert(im, vid, ta) }
+              None -> ()
+            }
+          _ -> ()
+        }
+        ti = ti + 1
+      }
+      let em0: Map[Int, Eff] = map.empty()
+      match list.find(ad.ctors[0].fields, f => f.name == name) {
+        Some(f) -> Some(subst(f.ty, im, em0))
+        None -> None
+      }
+    }
+    _ -> None
+  }
+
+# ---- candidates ----
+
+## `s` as the dot call spells it: the receiver fills the first parameter, so it
+## drops out of the rendered signature.
+fn without_first(s: Sig) -> Sig = {
+  var shifted: List[Int] = []
+  for c in s.caller_params {
+    if c > 0 { shifted = shifted ++ [c - 1] }
+  }
+  Sig {
+    ..s,
+    param_tys: list.drop(s.param_tys, 1),
+    param_names: list.drop(s.param_names, 1),
+    param_defaults: list.drop(s.param_defaults, 1),
+    caller_params: shifted
+  }
+}
+
+## The checker's type for the receiver tokens `si..` end: the span of the whole
+## run, or, for a parenthesised receiver `(e)`, the span inside the parens
+## (the tree has no node for the parens themselves).
+fn receiver_type(qc: QCx, ts: List[Token], si: Int, from: Int, lo: Int, hi: Int) -> Option[Ty] =
+  match type_of_span(qc, lo, hi) {
+    Some(t) -> Some(t)
+    None ->
+      if ts[si].kind == LPAREN && ts[len(ts) - 1].kind == RPAREN &&
+        matching_open(ts, len(ts) - 1) == Some(si) {
+        type_of_span(qc, from + ts[si + 1].lo, from + ts[len(ts) - 2].hi)
+      } else {
+        None
+      }
+  }
+
+fn reaches(qc: QCx, s: Sig, rt: Ty) -> Bool = {
+  if len(s.param_tys) == 0 { return false }
+  let (m, em, ok) = unify_into(qc.entry.cx, s.param_tys[0], rt, map.empty(), map.empty())
+  ok && bounds_hold(qc, s, m, em)
+}
+
+## What follows `expr.` when the receiver ends at code point `dot` of `cps`
+## (the text with the dot already cut): `locals` are the names in scope there
+## (a local shadows a function of its name for the call).
+pub(pkg) fn dot_candidates(qc: QCx, cps: List[Char], dot: Int, locals: Set[String]) -> List[DotCand] = {
+  let none: List[DotCand] = []
+  let from = if dot > WINDOW { dot - WINDOW } else { 0 }
+  let (all, _) = lex(slice_cps(cps, from, dot))
+  var ts: List[Token] = []
+  for t in all {
+    if t.kind != EOF { ts = ts ++ [t] }
+  }
+  while len(ts) > 0 && ts[len(ts) - 1].kind == NEWLINE { ts = list.take(ts, len(ts) - 1) }
+  if len(ts) == 0 { return none }
+  let si = match receiver_start(ts, len(ts) - 1) {
+    Some(i) -> i
+    None -> return none
+  }
+  # the receiver ends at the last token before the dot, which is the dot
+  # itself unless whitespace or a newline separates them
+  let hi = from + ts[len(ts) - 1].hi
+  let lo = from + ts[si].lo
+  let rt = match receiver_type(qc, ts, si, from, lo, hi) {
+    Some(t) -> if t == TyError { return none } else { t }
+    None -> return none
+  }
+  var out: List[DotCand] = []
+  let adts = qc.entry.cx.adts
+  match rt {
+    TyAdt(aid, _) -> {
+      let ad = adt_of(adts, aid)
+      if ad.is_record && len(ad.ctors) > 0 {
+        for f in ad.ctors[0].fields {
+          match field_of(qc, rt, f.name) {
+            Some(ft) -> { out = out ++ [DotCand { name: f.name, detail: ty_show(adts, ft), field: true }] }
+            None -> ()
+          }
+        }
+      }
+    }
+    _ -> ()
+  }
+  var seen: Set[String] = set.empty()
+  for tbl in [qc.entry.cx.fns, qc.entry.cx.std_fns, qc.bins] {
+    for pr in map.entries(tbl) {
+      let (name, s) = pr
+      if not set.has(seen, name) && not set.has(locals, name) && not str.contains(name, "\$") {
+        seen = set.insert(seen, name)
+        if reaches(qc, s, rt) {
+          out = out ++ [DotCand {
+            name: name,
+            detail: sig_render(adts, qc.entry.cx.traits, without_first(s)),
+            field: false
+          }]
+        }
+      }
+    }
+  }
+  out
+}
