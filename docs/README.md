@@ -184,6 +184,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [arith-operator-traits-design.md](arith-operator-traits-design.md) | **current** | `+ - * / %` 与一元 `-` 背后的六个 prelude trait（`Add`…`Neg`），各带同名关联效果；opaque 不继承算术；刀 1 于 2026-10-06 落地，权威条文在 spec §3.5、§4.3。 |
 | [tileir-011-design.md](tileir-011-design.md) | proposed | tileir 0.11 一次破坏性发布的排期：`StagedIter`/`StagedVar` 实现与 `for` + `var` 迁移（S2）、`Tile`/`Idx` 的运算符与字面量 impl（L3）、std `INFINITY`/`NAN`、格式与值类型统一（`std/dtype`、同名见证常量、`FP16` 改 `F16`、`Tile[F64]` 改 `Tile[Float]`），含 flash_attn 前后对照、全仓迁移计数、tile-golden 逐字节不变的变异体证明、刀序与 PR 切分、开放风险。 |
 | [tileir-k4-design.md](tileir-k4-design.md) | proposed | tileir K4：kernel 的运行期标量参数。今天的入口只有指针、标量只能烧成常量或经缓冲区读入；提议 `Scalar` 角色与 `scalar` 读取、`KParam` 入口签名、`LaunchArg` 启动参数、五刀与台账影响、七个已裁问题。 |
+| [dtype-unify-design.md](dtype-unify-design.md) | proposed | GPU 元素格式与 std 值类型统一：规则（类型位置写值类型、值位置写格式名）、依赖方向、`pub(pkg)` 铸造、`HasDtype`、只存储格式；U1/U2 已随 tileir 0.11 落地，本篇复核 10-06 调研的盘点数字与六条语言事实（v0.85.0 种子重测），并立 U3（类型化 `upload`/`download`，i64 精确）与 U4（常量带宿主值类型）的刀表、判词与负控、开放问题与不做的。 |
 | [flash-attn-ideal-audit.md](flash-attn-ideal-audit.md) | current | flash_attn 对照理想写法与 Triton 教程的逐行复核：scale 迁成运行期标量参数的前后对照，剩余缺口分类（今天能写 / 要新 API / 要语言特性）与五个待裁问题。 |
 | [operator-traits-design.md](operator-traits-design.md) | historical | `[]` 背后的 `Index`，第六个 prelude trait；权威条文在 spec §4.8。 |
 | [prelude-namespace-design.md](prelude-namespace-design.md) | historical | 函数命名空间的「一道门」与追加兼容性，三刀于 2026-08-02 完成。 |
