@@ -135,7 +135,7 @@ function mount(root: HTMLElement) {
   const spacer = el('div', 'dp-spacer')
   const version = el('span', 'dp-version')
   version.title = 'The compiler release the run service uses'
-  const viewBtn = el('button', 'dp-share dp-viewtoggle', 'C / JVM')
+  const viewBtn = el('button', 'dp-share dp-viewtoggle', 'Generated Code')
   viewBtn.type = 'button'
   viewBtn.title = 'Show the C and JVM code this program compiles to (and Tile IR for a tileir program); click a call to follow it'
   viewBtn.setAttribute('aria-controls', 'dp-view')
