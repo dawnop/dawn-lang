@@ -139,6 +139,8 @@ this endpoint. What differs:
   cannot write a class file whose name has a non-ASCII character in it, and
   `javap` prints such names as `?`. The wrapper is untouched, so `/run` and
   `/check` keep the environment they have.
+- nginx fronts it at `/api/compile` with its own zone (`playcompile`, 30r/m,
+  burst 6, provisional), see `deploy/nginx-play.conf`.
 - `javap` lives in a JDK, not the JRE: the server's is the private GraalVM CE in
   `/opt/dawn/graalvm-21` (DEPLOY.md step 2); the runner probes it at start and answers `POST /compile` with 503 when it is missing.
 
