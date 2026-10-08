@@ -334,8 +334,12 @@ name: gates
 # incremental-memo-1, checker-corpus, java-member-dispatch and
 # dependency-heap-contract under runs of their current steps in the 150
 # main runs of 10-03T11:15Z .. 10-07T10:20Z, and each was restated to its
-# worst there plus a tenth (+520s). incremental-memo-2 (977s) is over the
-# pole and is not restated here: it needs a split or a pole ruling.
+# worst there plus a tenth (+520s). incremental-memo-2 (977s) was over
+# the pole; the next paragraph rebalances it instead.
+# The same day it went down to 19,106s: the three incremental-memo jobs
+# were repartitioned by measured step time (the note above
+# incremental-memo-1) and restated to 820 / 935 / 820s from 855 / 905 / 830s
+# (-15s). The pole did not move.
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -359,7 +363,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19121s (the most this file's `3x` claims may add up to)
+# push-total: 19106s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1889,6 +1893,21 @@ jobs:
   # module-memo.py's three shards, and the rest is dealt by the local sweep's
   # per-harness durations (sweep.sh --list; the table in each job below).
   #
+  # 2026-10-08, rebalanced by measured step times. The sweep hints above had
+  # memo-1/-2/-3 at 1151/1169/1017s, but the last 15 successful push runs
+  # (median / worst, s) were: shard 0 357/397, identity 310/334, lsp-module-memo
+  # 488/638, shard 1 224/294, shard 2 217/284, body-executor 85/113, cold 57/74,
+  # body-scheduler 33/45, plus ~42/50 of toolchain and checkout per job. The
+  # old split ran 667+712+392 step-seconds, so memo-2 reached 977s against the
+  # 950s pole while memo-3 never passed 562s. Steps are indivisible here
+  # (module-memo.py already deals its mutants by index, and the shard count
+  # is not what is uneven), so the nine steps were repartitioned for the
+  # smallest largest sum: memo-1 = shard 0 + shard 1 (581 median), memo-2 =
+  # lsp-module-memo + body-executor + body-scheduler (606), memo-3 = identity
+  # + shard 2 + cold (584). The partition does not move when a case is added
+  # to a harness; only a step that grows past its neighbours asks for a new
+  # deal. The "sweep hints" lines in each job below describe the old split.
+  #
   # Each planning value is an estimate, not an observation: the sweep hint
   # sum times 0.56 plus 50s fixed overhead, the ratio this repository's
   # runners showed against the same sweep for incremental-3-1 (849s hint,
@@ -1916,8 +1935,12 @@ jobs:
     # job's current steps in the 150 main runs of 10-03T11:15Z .. 10-07T10:20Z
     # (run 37584300090). Restated to that plus a tenth, rounded up to 5s, 855s,
     # and the timeout to 3x that.
-    # budget: 3x 855s worst observed plus a tenth (run 37584300090)
-    timeout-minutes: 43
+    # 2026-10-08, rebalanced (the steps moved between the three jobs; see the
+    # note above incremental-memo-1). Claim from the last 15 successful push
+    # runs of ci.yml: the sum of each step's worst time, module-memo shard 0 (397s) and shard 1 (294s),
+    # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
+    # budget: 3x 820s sum of per-step worst observed plus a tenth
+    timeout-minutes: 41
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1927,8 +1950,8 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/module-memo.py --self-test
       - name: module memo equivalence and execution counts, shard 0
         run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 0
-      - name: declaration identity, minting and carry contracts
-        run: python3 scripts/incremental-semantics-contract/identity.py
+      - name: module memo mutants shard 1
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 1
 
   incremental-memo-2:
     needs: [plan]
@@ -1951,17 +1974,29 @@ jobs:
     # 10-05T11:35Z, holds a 821s run whose steps digest is this job's (run
     # 37288304802). Restated to that plus a tenth, rounded up to 5s, 905s
     # (795s before), and the timeout to 3x that.
-    # budget: 3x 905s worst observed plus a tenth (run 37288304802)
-    timeout-minutes: 46
+    # 2026-10-08, rebalanced (the steps moved between the three jobs; see the
+    # note above incremental-memo-1). Claim from the last 15 successful push
+    # runs of ci.yml: the sum of each step's worst time, lsp-module-memo (638s), body-executor (113s), body-scheduler (45s) and the harness self-tests (1s),
+    # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
+    # budget: 3x 935s sum of per-step worst observed plus a tenth
+    timeout-minutes: 47
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: module memo mutants shard 1
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 1
       - name: LSP module memo, parse reuse and position resolver contracts
         run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py
+      - name: Stateful body executor contracts
+        run: python3 scripts/incremental-semantics-contract/body-executor.py
+      - name: Full-product frozen body scheduler oracle
+        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
+      - name: LSP harness self-tests
+        run: |
+          python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-configured.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-edit-matrix.py --self-test
+          python3 scripts/incremental-semantics-contract/lsp-project-matrix.py --self-test
 
   incremental-memo-3:
     needs: [plan]
@@ -1989,27 +2024,23 @@ jobs:
     # about 1.7 times its median (toolchain 59s against 34s, shard 2
     # 341s against 203s), and the other jobs of the run were normal.
     # The audit holds a claim to the worst run all the same.
-    # budget: 3x 830s worst observed plus a tenth (run 36906542838)
-    timeout-minutes: 42
+    # 2026-10-08, rebalanced (the steps moved between the three jobs; see the
+    # note above incremental-memo-1). Claim from the last 15 successful push
+    # runs of ci.yml: the sum of each step's worst time, identity (334s), module-memo shard 2 (284s) and cold (74s),
+    # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
+    # budget: 3x 820s sum of per-step worst observed plus a tenth
+    timeout-minutes: 41
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: declaration identity, minting and carry contracts
+        run: python3 scripts/incremental-semantics-contract/identity.py
       - name: module memo mutants shard 2
         run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 2
-      - name: Stateful body executor contracts
-        run: python3 scripts/incremental-semantics-contract/body-executor.py
       - name: frozen cold transition reference
         run: python3 scripts/incremental-semantics-contract/cold.py
-      - name: Full-product frozen body scheduler oracle
-        run: python3 scripts/incremental-semantics-contract/body-scheduler.py
-      - name: LSP harness self-tests
-        run: |
-          python3 scripts/incremental-semantics-contract/lsp-bench.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-configured.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-edit-matrix.py --self-test
-          python3 scripts/incremental-semantics-contract/lsp-project-matrix.py --self-test
 
   # contracts until 2026-09-23, split in two again because it had passed the
   # pole: 966s (run 35632425163) over the 15 completed main runs of
