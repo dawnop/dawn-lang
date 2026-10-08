@@ -45,7 +45,7 @@ use ir/core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
-  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup, CUpdate,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup, CReset, CReuse, CUpdate,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CConstRef, CComptime,
@@ -956,9 +956,14 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       let (st1, v) = emit_intrinsic(st, name, args, ty)
       (note_intrinsic(st1, len(st.out), name, s, v), v)
     }
-    CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false)
+    CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false, None)
     CUpdate(_, _, _, _, _) -> panic("emitc: a record update reached the emitter; rc.rw builds it whole")
-    CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
+    CTuple(elems, _) -> emit_alloc(st, 0, elems, true, None)
+    CReuse(tok, ctor, _) ->
+      match ctor {
+        CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false, Some(tok))
+        _ -> panic("emitc: a reuse token was handed to something that is not a constructor")
+      }
     CField(target, _, _, idx, ty) -> {
       let (st1, tv) = emit_expr(st, target, false)
       (st1, adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
@@ -996,6 +1001,12 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
     CDup(inner, ty) -> {
       let (st1, v) = emit_expr(st, inner, false)
       (st1, dup_expr(v, ty))
+    }
+    # the binding is consumed (k = true: a transfer out of its slot), and what
+    # comes back is the token or NULL, owned by whatever it is bound to next
+    CReset(inner, _) -> {
+      let (st1, v) = emit_expr(st, inner, true)
+      (st1, "dawn_adt_reset(" ++ v ++ ")")
     }
     CUnbox(inner, to) -> {
       let (st1, v) = emit_expr(st, inner, k && is_ref_ty(to))
@@ -1180,7 +1191,7 @@ fn adapter_name(owner: String, name: String) -> String =
 ## Core records that, so it has to be done here too -- and storing the 1 as an
 ## `int64_t` instead compiled fine and segfaulted the moment std read the
 ## field back at `K`, which is what `map_from` does with every key.
-fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, String) = {
+fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool, tok: Option[CExpr]) -> (CSt, String) = {
   # a constructor keeps its fields: consuming positions (chk k=true)
   let (st0, row) = emit_alloc_row(st, args, all_flags(len(args), true))
   var st1 = st0
@@ -1200,9 +1211,22 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, Strin
     return (line(st3, "dawn_adt* " ++ tmp ++ " = " ++ adt0_call(tag) ++ ";"), tmp)
   }
   let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
-  var st4 = line(st3m,
-    "dawn_adt* " ++ tmp ++ " = " ++ (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++
-      "(" ++ to_string(tag) ++ ", " ++ to_string(len(parts)) ++ ", " ++ mask ++ ");")
+  # A reused node is `dawn_adt_new` with the allocation answered by a token:
+  # the same call position, after the whole row has run, so what the fields
+  # are written from cannot see the difference. The token is taken here and
+  # not earlier, which is what keeps it in its slot (and so released by an
+  # unwind) while the operands run.
+  let (st3n, alloc) = match tok {
+    None -> (st3m, (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++
+        "(" ++ to_string(tag) ++ ", " ++ to_string(len(parts)) ++ ", " ++ mask ++ ")")
+    Some(t) -> {
+      if wide { panic("emitc: a wide constructor was paired with a reuse token") }
+      let (stt, tv) = emit_expr(st3m, t, true)
+      (stt, "dawn_adt_reuse(" ++ tv ++ ", " ++ to_string(tag) ++ ", " ++ to_string(len(parts)) ++
+          ", " ++ mask ++ ")")
+    }
+  }
+  var st4 = line(st3n, "dawn_adt* " ++ tmp ++ " = " ++ alloc ++ ";")
   var i = 0
   for p in parts {
     let slot = if erased { "p" } else { slot_of(cex_ty(args[i])) }

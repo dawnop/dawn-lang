@@ -58,6 +58,7 @@ ADAPTERS = {
     "range-bound-order-contract": (".",),
     "rc-contract": ("runtime/c",),
     "rc-view-contract": (".",),
+    "adt-reuse-contract": (".",),
     "selfhost-bench-contract": ("scripts/selfhost-bench.py",),
     "source-loop-label-contract": (".",),
     "syntax-small-contract": (".",),

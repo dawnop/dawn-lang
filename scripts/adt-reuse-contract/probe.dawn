@@ -1,0 +1,173 @@
+# The workloads of the ADT reuse contract (scripts/adt-reuse-contract/run.sh).
+#
+# One binary, one workload per run, chosen by the first argument, so that each
+# counter line on stderr belongs to exactly one question:
+#
+#   update N          a chain of five record updates per step, N steps
+#   tree N R          build an N-node tree, then R rounds of `incr` and `sum`
+#   list N R          the same over a hand-written cons list
+#   shared            the value-semantics witness: an old tree outlives `incr`
+#   ask N             `incr` whose node values come from an effect handler,
+#                     so the build is suspended between the reset and the reuse
+#   boom N            `incr` that panics between the reset and the reuse, caught
+#   loopy             a node dead before a loop whose body builds nodes of its type
+#
+# Every run prints one line on stdout, and the run script compares it with the
+# line it expects, so a reuse that changed an answer cannot hide behind a rate.
+use std/io
+
+type S = { a: Int, b: Int, c: Int, d: Int, e: Int }
+
+fn step(s: S) -> S = {
+  let s1 = S { ..s, a: s.a + 1 }
+  let s2 = S { ..s1, b: s1.b + s1.a }
+  let s3 = S { ..s2, c: s2.c + s2.b % 1000 }
+  let s4 = S { ..s3, d: s3.d + s3.c % 5 }
+  S { ..s4, e: s4.e + s4.d % 3 }
+}
+
+fn spin(s: S, i: Int, n: Int) -> S = if i == n { s } else { spin(step(s), i + 1, n) }
+
+type T =
+  | Leaf
+  | Node(l: T, v: Int, r: T)
+
+fn build(lo: Int, hi: Int) -> T =
+  if lo >= hi { Leaf } else {
+    let m = (lo + hi) / 2
+    Node(build(lo, m), m, build(m + 1, hi))
+  }
+
+fn sum(t: T) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, v, r) -> sum(l) + v + sum(r)
+  }
+
+fn incr(t: T) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(incr(l), v + 1, incr(r))
+  }
+
+type L =
+  | Nil
+  | Cons(h: Int, t: L)
+
+fn upto(i: Int, n: Int) -> L = if i >= n { Nil } else { Cons(i, upto(i + 1, n)) }
+
+fn total(l: L) -> Int =
+  match l {
+    Nil -> 0
+    Cons(h, t) -> h + total(t)
+  }
+
+fn bump(l: L) -> L =
+  match l {
+    Nil -> Nil
+    Cons(h, t) -> Cons(h + 1, bump(t))
+  }
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+fn incr_ask(t: T) -> T !Ask =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(incr_ask(l), ask(v), incr_ask(r))
+  }
+
+fn incr_boom(t: T, at: Int) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(incr_boom(l, at), if v == at { panic("boom at ${to_string(v)}") } else { v + 1 }, incr_boom(r, at))
+  }
+
+fn loopy(t: T, n: Int) -> Int =
+  match t {
+    Leaf -> 0
+    Node(_, v, _) -> {
+      var s = 0
+      for i in 0..n {
+        let x = Node(Leaf, v + i, Leaf)
+        s = s + sum(x)
+      }
+      s
+    }
+  }
+
+fn int_arg(i: Int, d: Int) -> Int !io = match args().get(i) {
+  Some(s) -> parse_int(s).unwrap_or(d)
+  None -> d
+}
+
+fn run_update(n: Int) -> Unit !io = {
+  let r = spin(S { a: 0, b: 0, c: 0, d: 0, e: 0 }, 0, n)
+  io.println("update ${r.a} ${r.b} ${r.c} ${r.d} ${r.e}")
+}
+
+fn run_tree(n: Int, reps: Int) -> Unit !io = {
+  var t = build(0, n)
+  var tot = 0
+  for _ in 0..reps {
+    t = incr(t)
+    tot = tot + sum(t)
+  }
+  io.println("tree ${tot}")
+}
+
+fn run_list(n: Int, reps: Int) -> Unit !io = {
+  var l = upto(0, n)
+  var tot = 0
+  for _ in 0..reps {
+    l = bump(l)
+    tot = tot + total(l)
+  }
+  io.println("list ${tot}")
+}
+
+fn run_shared() -> Unit !io = {
+  let old = build(0, 100)
+  let a = incr(old)
+  let b = incr(old)
+  let c = incr(a)
+  io.println("shared ${sum(old)} ${sum(a)} ${sum(b)} ${sum(c)}")
+}
+
+fn run_ask(n: Int) -> Unit !io = {
+  # The tree is built inside the handled block: a tree captured from outside
+  # would be held by the block's closure, and the rate would measure that
+  # instead of the suspension.
+  let total = {
+    with handle Ask { ask(v) resume k => k(v + 1) }
+    sum(incr_ask(build(0, n)))
+  }
+  io.println("ask ${total}")
+}
+
+fn run_boom(n: Int) -> Unit !io = {
+  let t = build(0, n)
+  match catch_panic(() => incr_boom(t, n / 2)) {
+    Ok(u) -> io.println("boom survived ${sum(u)}")
+    Err(e) -> io.println("boom caught ${e.message}")
+  }
+  let t2 = build(0, n)
+  let u2 = incr(t2)
+  io.println("boom after ${sum(u2)}")
+}
+
+fn run_loopy() -> Unit !io = io.println("loopy ${loopy(build(0, 10), 100)}")
+
+pub fn main() -> Unit !io = {
+  match args().get(0) {
+    Some("update") -> run_update(int_arg(1, 1000))
+    Some("tree") -> run_tree(int_arg(1, 1000), int_arg(2, 1))
+    Some("list") -> run_list(int_arg(1, 1000), int_arg(2, 1))
+    Some("shared") -> run_shared()
+    Some("ask") -> run_ask(int_arg(1, 100))
+    Some("boom") -> run_boom(int_arg(1, 100))
+    Some("loopy") -> run_loopy()
+    _ -> io.println("usage: probe update|tree|list|shared|ask|boom|loopy")
+  }
+}

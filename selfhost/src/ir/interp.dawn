@@ -55,7 +55,7 @@ use ir/core.{
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CUpdate, update_values,
-  CReturn, CBreak, CContinue, CForeign, CDup, CDictRef, CDictApply, CDictArg, CJava,
+  CReturn, CBreak, CContinue, CForeign, CDup, CReset, CReuse, CDictRef, CDictApply, CDictArg, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CCallee, CUpdField, CUnOp, CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CAnd, COr,
@@ -1883,6 +1883,9 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CBox(inner, _) -> ceval(icx, st, env, inner)
     CUnbox(inner, _) -> ceval(icx, st, env, inner)
     CDup(inner, _) -> ceval(icx, st, env, inner)
+    # C-only nodes; a token is never observable, so the value is the inner one
+    CReset(inner, _) -> ceval(icx, st, env, inner)
+    CReuse(_, ctor, _) -> ceval(icx, st, env, ctor)
     CClosure(name, owner, caps, _) -> ceval_closure(icx, st, env, name, owner, caps)
     CFnRef(_, name, _) -> unlifted_fn(st, env, name)
     CCall(callee, args, _, _) -> ceval_call(icx, st, env, callee, args)

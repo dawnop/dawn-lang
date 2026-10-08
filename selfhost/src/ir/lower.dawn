@@ -61,7 +61,7 @@ use ir/core.{
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
-  CForeign, CJava, CTagOf, CDup, CComptime, CConstRef, CUpdate, CUpdField, update_values,
+  CForeign, CJava, CTagOf, CDup, CReset, CReuse, CComptime, CConstRef, CUpdate, CUpdField, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
@@ -5311,6 +5311,8 @@ fn dense_expr(d: Dense, e: CExpr) -> Dense =
     CBox(inner, _) -> dense_expr(d, inner)
     CUnbox(inner, _) -> dense_expr(d, inner)
     CDup(inner, _) -> dense_expr(d, inner)
+    CReset(inner, _) -> dense_expr(d, inner)
+    CReuse(tok, ctor, _) -> dense_expr(dense_expr(d, tok), ctor)
     CBinary(_, l, r, _) -> dense_expr(dense_expr(d, l), r)
     CUnary(_, o, _) -> dense_expr(d, o)
     CIf(c, t, e2, _) -> dense_opt(dense_expr(dense_expr(d, c), t), e2)
@@ -5413,6 +5415,8 @@ fn moved_expr(d: Dense, e: CExpr) -> CExpr =
     CBox(inner, from) -> CBox(moved_expr(d, inner), from)
     CUnbox(inner, to) -> CUnbox(moved_expr(d, inner), to)
     CDup(inner, ty) -> CDup(moved_expr(d, inner), ty)
+    CReset(inner, ty) -> CReset(moved_expr(d, inner), ty)
+    CReuse(tok, ctor, ty) -> CReuse(moved_expr(d, tok), moved_expr(d, ctor), ty)
     CBinary(op, l, r, ty) -> CBinary(op, moved_expr(d, l), moved_expr(d, r), ty)
     CUnary(op, o, ty) -> CUnary(op, moved_expr(d, o), ty)
     CIf(c, t, e2, ty) -> CIf(moved_expr(d, c), moved_expr(d, t), moved_opt(d, e2), ty)

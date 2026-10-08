@@ -27,7 +27,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate,
+  CContinue, CForeign, CDup, CReset, CReuse, sam_ev_exprs, CUpdate,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CImpl, CDefault, CInt, CFloat, CBool, CStr, CUnit
 }
@@ -109,6 +109,8 @@ fn fold_kids[A](e: CExpr, acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) 
     CListLit(elems, _) -> fold_list(elems, acc, fe, fs)
     CReturn(v) -> fold_opt(v, acc, fe, fs)
     CDup(inner, _) -> fold_expr(inner, acc, fe, fs)
+    CReset(inner, _) -> fold_expr(inner, acc, fe, fs)
+    CReuse(tok, ctor, _) -> fold_expr(ctor, fold_expr(tok, acc, fe, fs), fe, fs)
     CForeign(j, _, _) -> {
       let a = fold_opt(j.target, acc, fe, fs)
       fold_list(sam_ev_exprs(j), fold_list(j.args, a, fe, fs), fe, fs)
@@ -170,6 +172,8 @@ pub fn map_kids(e: CExpr, f: fn(CExpr) -> CExpr) -> CExpr =
     CListLit(elems, ty) -> CListLit(list.map(elems, f), ty)
     CReturn(v) -> CReturn(map_opt(v, f))
     CDup(inner, ty) -> CDup(f(inner), ty)
+    CReset(inner, ty) -> CReset(f(inner), ty)
+    CReuse(tok, ctor, ty) -> CReuse(f(tok), f(ctor), ty)
     # never rebuilt: see the header
     CForeign(_, _, _) -> e
     CInt(_) -> e

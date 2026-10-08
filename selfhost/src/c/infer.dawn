@@ -44,7 +44,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_as_ctor,
+  CContinue, CForeign, CDup, CReset, CReuse, sam_ev_exprs, CUpdate, update_as_ctor,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CInt, CFloat, CBool, CStr, CUnit,
   CSlotFn, CSlotDefault,
@@ -158,6 +158,8 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
         Some(x) -> clo_expr(x, acc)
       },
     CDup(inner, _) -> clo_expr(inner, acc)
+    CReset(inner, _) -> clo_expr(inner, acc)
+    CReuse(tok, ctor, _) -> clo_expr(ctor, clo_expr(tok, acc))
     CForeign(j, _, _) -> {
       let a1 = match j.target {
         None -> acc
@@ -447,6 +449,8 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
     }
 
     CDup(inner, _) -> dm_expr(d, inner, k)
+    CReset(inner, _) -> dm_expr(d, inner, k)
+    CReuse(tok, ctor, _) -> dm_expr(dm_expr(d, tok, k), ctor, k)
     CDictApply(_, args, _) -> dm_list(d, args, false)
     CDictArg(dd, _, _, _, _) -> dm_expr(d, dd, false)
 

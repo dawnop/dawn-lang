@@ -227,6 +227,17 @@ pub type CExpr =
 # a projection, and there is no symbol to name until after the let. Built only
 # by `rc.dawn` (docs/perceus-design.md 5).
   | CDup(inner: CExpr, ty: Ty)
+# Reset and reuse of a constructed node (docs/perceus-reuse-design.md 4.2),
+# both built only by `rc.dawn` and both C-only. `CReset` CONSUMES `inner` (a
+# local, already dead after this point) and answers a token: the same block
+# with its children released when nobody else held it, NULL otherwise. The
+# token is bound like any counted local, so every path out of its scope
+# releases it (`dawn_drop` of a token frees the shell, of NULL does nothing),
+# and `CReuse` is its one consuming use: the constructor `ctor` built into the
+# token's block instead of a fresh allocation. Neither node needs a case in
+# the JVM, which never sees one.
+  | CReset(inner: CExpr, ty: Ty)
+  | CReuse(tok: CExpr, ctor: CExpr, ty: Ty)
 
 ## One field of a CUpdate. The declared type rides on the node for the same
 ## reason CField carries one: a backend that spells the kept fields out as
@@ -705,6 +716,8 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CContinue(_) -> TyNever
     CForeign(_, ty, _) -> ty
     CDup(_, ty) -> ty
+    CReset(_, ty) -> ty
+    CReuse(_, _, ty) -> ty
   }
 
 ## The written values of an update, in field order: its operands after the
