@@ -1,4 +1,4 @@
-// The compile pane: the C or JVM listing of the program in the editor, beside
+// The compile pane: the C, JVM or Tile IR text of the program in the editor, beside
 // it, and the two-way pointing between a call in the source and the lines it
 // wrote. Closed until asked for; opening it compiles.
 //
@@ -28,11 +28,15 @@ import {
   AutoPolicy,
   NETWORK_MESSAGE,
   TARGETS,
+  TILE_NEEDS,
   classify,
   messageOf,
   notesOf,
+  tileNotes,
+  wantsTileir,
   type Outcome,
   type Target,
+  type TileText,
 } from './compile-state'
 
 // How long the editor must be quiet before an open pane recompiles.
@@ -54,9 +58,12 @@ export interface PaneHost {
   picked(id: number | null): void
 }
 
+// A listing with its call table, or (the Tile IR tab) the program's output,
+// which has no calls to point at and so no model.
 interface Answer {
   code: string
-  model: Model
+  model: Model | null
+  tile?: TileText
   meta: string
 }
 
@@ -75,6 +82,7 @@ export class ComparePane {
   private readonly closeBtn = el('button', 'dp-outclose', '×')
   private readonly notice = el('div', 'dp-viewnote')
   private readonly errBox = el('div', 'dp-viewerr')
+  private readonly errHead = el('div', 'dp-viewerrhead', 'Compile error')
   private readonly errText = el('pre', 'dp-viewerrtext')
   private readonly panel = el('div', 'xp-pane')
   private readonly code = el('pre', 'xp-code')
@@ -103,7 +111,7 @@ export class ComparePane {
     const strip = el('div', 'xp-tabs')
     strip.setAttribute('role', 'tablist')
     strip.setAttribute('aria-label', 'Generated code')
-    TARGETS.forEach((t, i) => {
+    TARGETS.forEach((t) => {
       const b = el('button', 'xp-tab', t.label)
       b.type = 'button'
       b.id = `dp-view-tab-${t.target}`
@@ -114,11 +122,14 @@ export class ComparePane {
       b.tabIndex = -1
       b.addEventListener('click', () => this.open(t.target))
       b.addEventListener('keydown', (ev) => {
-        const to = moveTab(TARGETS.length, i, ev.key)
+        // the arrows go between the tabs that are there
+        const shown = this.shownTargets()
+        const at = shown.indexOf(t.target)
+        const to = moveTab(shown.length, at, ev.key)
         if (to === null) return
         ev.preventDefault()
-        this.open(TARGETS[to].target)
-        this.tabs[to].focus()
+        this.open(shown[to])
+        this.tabs[TARGETS.findIndex((x) => x.target === shown[to])].focus()
       })
       this.tabs.push(b)
       strip.appendChild(b)
@@ -136,7 +147,7 @@ export class ComparePane {
     this.notice.hidden = true
     this.errBox.hidden = true
     this.errBox.setAttribute('role', 'alert')
-    this.errBox.append(el('div', 'dp-viewerrhead', 'Compile error'), this.errText)
+    this.errBox.append(this.errHead, this.errText)
 
     this.panel.id = 'dp-view-panel'
     this.panel.setAttribute('role', 'tabpanel')
@@ -178,6 +189,19 @@ export class ComparePane {
     const a = this.target && this.answers[this.target]
     return a ? a.model : null
   }
+
+  // The tabs on offer: C and JVM always, Tile IR for a program that imports
+  // tileir, or while it is the one open (the tab does not vanish under the
+  // reader who is looking at it; its pane says what it needs instead).
+  private shownTargets(): Target[] {
+    const tile = wantsTileir(this.host.code()) || this.target === 'tile'
+    return TARGETS.map((t) => t.target).filter((t) => t !== 'tile' || tile)
+  }
+
+  private syncTabs() {
+    const shown = this.shownTargets()
+    this.tabs.forEach((b) => (b.hidden = !shown.includes(b.dataset.kind as Target)))
+  }
   private label(): string {
     return TARGETS.find((t) => t.target === this.target)?.label ?? ''
   }
@@ -189,6 +213,7 @@ export class ComparePane {
   open(target: Target) {
     this.target = target
     this.root.hidden = false
+    this.syncTabs()
     this.tabs.forEach((b) => {
       const on = b.dataset.kind === target
       b.setAttribute('aria-selected', on ? 'true' : 'false')
@@ -205,7 +230,7 @@ export class ComparePane {
       if (!this.stale) {
         // the calls of every tab are the same table, but the source's
         // underlines are only right for the code this listing is of
-        this.host.calls(a.model.view.calls)
+        this.host.calls(a.model ? a.model.view.calls : [])
         this.reapply()
         this.say(this.pickText())
         return
@@ -240,6 +265,7 @@ export class ComparePane {
   // date, and, while automatic compiling is on, a quiet 1.5 s asks again.
   edited() {
     if (this.target === null) return
+    this.syncTabs()
     this.abort()
     this.stale = Object.keys(this.answers).length > 0
     this.root.classList.toggle('dp-stale', this.stale)
@@ -270,6 +296,11 @@ export class ComparePane {
     if (target === null) return
     this.abort()
     const code = this.host.code()
+    if (target === 'tile' && !wantsTileir(code)) {
+      // answered here, as the server would: nothing is run for it
+      this.fail(TILE_NEEDS)
+      return
+    }
     const ctl = new AbortController()
     this.ctl = ctl
     this.root.classList.add('dp-busy')
@@ -315,12 +346,28 @@ export class ComparePane {
       this.host.calls(outcome.view.calls)
       this.reapply()
       this.say(this.picked !== null ? this.pickText() : `Compiled. ${HINT}`)
-    } else if (outcome.kind === 'diagnostics') {
+    } else if (outcome.kind === 'tile') {
+      this.stale = false
+      this.root.classList.remove('dp-stale')
+      this.errBox.hidden = true
+      const a: Answer = {
+        code,
+        model: null,
+        tile: outcome.tile,
+        meta: `${outcome.tile.text.length} of ${outcome.tile.total} lines · ${outcome.cached ? `${outcome.ms} ms, cached` : `${outcome.ms} ms`}`,
+      }
+      this.answers[target] = a
+      this.draw(a)
+      this.host.calls([])
+      this.reapply()
+      this.say('Tile IR: the text the program printed.')
+    } else if (outcome.kind === 'diagnostics' || outcome.kind === 'program') {
+      this.errHead.textContent = outcome.kind === 'program' ? outcome.title : 'Compile error'
       this.errText.textContent = outcome.text || '(no message)'
       this.errBox.hidden = false
       this.showNotice([])
       this.mark(true)
-      this.meta.textContent = 'Compile error'
+      this.meta.textContent = outcome.kind === 'program' ? outcome.title : 'Compile error'
       // the alert above says what happened; "Compiled." is no longer true
       this.say('')
     } else {
@@ -375,8 +422,30 @@ export class ComparePane {
     this.showNotice(this.busyNote ? [this.busyNote] : [])
   }
 
+  // The Tile IR text: a line each, numbered like the listings, nothing to pick.
+  private drawTile(a: Answer, tile: TileText) {
+    this.lineEls = new Map()
+    this.keyEls = new Map()
+    this.touched = []
+    const frag = document.createDocumentFragment()
+    tile.text.forEach((text, i) => {
+      const line = el('span', 'xl')
+      line.dataset.n = String(i + 1)
+      line.append(el('i', undefined, String(i + 1)), text)
+      frag.appendChild(line)
+    })
+    this.codeIn.replaceChildren(frag)
+    this.code.scrollTop = 0
+    this.showNotice(this.busyNote ? [this.busyNote] : tileNotes(tile))
+    this.meta.textContent = this.stale ? 'Out of date' : a.meta
+  }
+
   private draw(a: Answer) {
     const m = a.model
+    if (!m) {
+      if (a.tile) this.drawTile(a, a.tile)
+      return
+    }
     const pane = m.view.pane
     this.lineEls = new Map()
     this.keyEls = new Map()

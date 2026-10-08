@@ -10,18 +10,30 @@
 // gives: it is a reading position, not a thing to share.
 import { readView, type XView } from './explorer-core'
 
-export type Target = 'c' | 'jvm'
+export type Target = 'c' | 'jvm' | 'tile'
 
 export const TARGETS: { target: Target; label: string }[] = [
   { target: 'c', label: 'C' },
   { target: 'jvm', label: 'JVM' },
+  { target: 'tile', label: 'Tile IR' },
 ]
 
+// Whether a program is one the Tile IR tab is for. The server asks the same
+// question of the same text again (playground/src/play/contract.dawn,
+// wants_tileir), because this page is not trusted; this one only decides
+// whether the tab is offered.
+export function wantsTileir(code: string): boolean {
+  return code.includes('use tileir/')
+}
+
+// What the tab says when it is open on a program that does not import tileir.
+export const TILE_NEEDS = 'The Tile IR view needs a program that imports tileir. Add a line such as `use tileir/dev.{Dev}`.'
+
 // `?view=` as a target; anything else, a missing key and the name of a tab
-// this build does not have (`tile`, `output`) included, is "closed".
+// this build does not have (`output`) included, is "closed".
 export function targetOfSearch(search: string): Target | null {
   const v = new URLSearchParams(search).get('view')
-  return v === 'c' || v === 'jvm' ? v : null
+  return v === 'c' || v === 'jvm' || v === 'tile' ? v : null
 }
 
 // `href` with `view` set, or removed for null; the hash and every other
@@ -33,13 +45,24 @@ export function withView(href: string, target: Target | null): string {
   return u.toString()
 }
 
+// The Tile IR tab's answer: the program's output, a line each. No call table:
+// the text is whatever the program printed, so there is nothing to point at.
+export interface TileText {
+  text: string[]
+  total: number
+  truncated: boolean
+}
+
 export type Outcome =
   | { kind: 'ok'; view: XView; cached: boolean; ms: number }
+  | { kind: 'tile'; tile: TileText; cached: boolean; ms: number }
   | { kind: 'diagnostics'; text: string }
+  // the Tile IR program compiled and then failed or ran out of time
+  | { kind: 'program'; title: string; text: string }
   | { kind: 'busy' }
   | { kind: 'too-long' }
   | { kind: 'too-large' }
-  | { kind: 'unavailable' }
+  | { kind: 'unavailable'; tile: boolean }
   | { kind: 'unreadable' }
   | { kind: 'failed'; status: number; detail: string }
 
@@ -51,6 +74,16 @@ function detailOf(body: unknown): string {
   return ''
 }
 
+function readTile(o: Record<string, unknown>): TileText | null {
+  const p = o.pane
+  if (typeof p !== 'object' || p === null) return null
+  const pane = p as Record<string, unknown>
+  const text = pane.text
+  if (pane.kind !== 'tile' || !Array.isArray(text) || !text.every((l) => typeof l === 'string')) return null
+  if (pane.shown !== text.length || typeof pane.total !== 'number' || typeof pane.truncated !== 'boolean') return null
+  return { text: text as string[], total: pane.total, truncated: pane.truncated }
+}
+
 // One answer to a request for `target`: the HTTP status and the parsed body
 // (null when the body was not JSON). The statuses are the service's own
 // (playground/src/main.dawn): 429 is the gate, 413 the body limit, 422 a
@@ -59,10 +92,18 @@ export function classify(status: number, body: unknown, target: Target): Outcome
   if (status === 429) return { kind: 'busy' }
   if (status === 413) return { kind: 'too-long' }
   if (status === 422) return { kind: 'too-large' }
-  if (status === 503) return { kind: 'unavailable' }
+  if (status === 503) return { kind: 'unavailable', tile: target === 'tile' }
   const o = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : null
   if (status === 200 && o && o.ok === false && o.phase === 'compile') {
     return { kind: 'diagnostics', text: detailOf(o) }
+  }
+  if (status === 200 && o && o.ok === false && (o.phase === 'run' || o.phase === 'timeout')) {
+    return { kind: 'program', title: o.phase === 'run' ? 'Run error' : 'Timed out', text: detailOf(o) }
+  }
+  if (status === 200 && o && o.ok === true && o.phase === 'compile-view' && target === 'tile') {
+    const tile = o.target === 'tile' ? readTile(o) : null
+    if (!tile) return { kind: 'unreadable' }
+    return { kind: 'tile', tile, cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
   }
   if (status === 200 && o && o.ok === true && o.phase === 'compile-view') {
     const pane = o.pane as Record<string, unknown> | undefined
@@ -85,10 +126,14 @@ export function messageOf(o: Outcome): string {
     case 'too-large':
       return 'The generated code is too large to show.'
     case 'unavailable':
-      return 'The compile view is not available on this server (javap is missing).'
+      return o.tile
+        ? 'The Tile IR view is not available on this server.'
+        : 'The compile view is not available on this server (javap is missing).'
     case 'unreadable':
       return 'The service sent an answer this page cannot read.'
     case 'failed':
+      // the service's own one-sentence refusal (a 400) is for the reader
+      if (o.status === 400 && o.detail) return o.detail
       return `The compile service failed (HTTP ${o.status}).`
     default:
       return ''
@@ -96,6 +141,11 @@ export function messageOf(o: Outcome): string {
 }
 
 export const NETWORK_MESSAGE = 'Could not reach the compile service.'
+
+// The Tile IR pane's one note, when the program printed more than is shown.
+export function tileNotes(t: TileText): string[] {
+  return t.truncated ? [`The Tile IR text is cut: showing ${t.text.length} of ${t.total} lines.`] : []
+}
 
 // Calls that have no listing line, or a listing cut short, in one line each;
 // non-blocking, shown under the tabs and never in place of the listing.

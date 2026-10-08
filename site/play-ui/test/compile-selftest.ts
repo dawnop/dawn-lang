@@ -16,7 +16,11 @@ import {
   classify,
   messageOf,
   notesOf,
+  TILE_NEEDS,
+  TARGETS,
   targetOfSearch,
+  tileNotes,
+  wantsTileir,
   withView,
 } from '../src/compile-state'
 import { Model, moveAmong, moveTab, readView, runs, statusText } from '../src/explorer-core'
@@ -171,6 +175,35 @@ export function compileViewTests(expect: Expect): number {
   const cut = readView(wire({ pane: { ...(wire().pane as object), truncated: true, total: 99 } }))!
   t('a cut listing says how much is shown', notesOf(cut, 'C'), ['The C listing is cut: showing 4 of 99 lines.'])
 
+  // ---- the Tile IR tab ----
+  const tileWire = (over: Record<string, unknown> = {}) => ({
+    ok: true,
+    phase: 'compile-view',
+    target: 'tile',
+    build: 'b1:x',
+    cached: false,
+    ms: 2600,
+    pane: { kind: 'tile', total: 2, shown: 2, truncated: false, text: ['cuda_tile.module @m {', '}'] },
+    ...over,
+  })
+  t('the tab is offered for a program that imports tileir', [wantsTileir('use tileir/dev.{Dev}\n'), wantsTileir('use std/io\n'), wantsTileir('use tileir.dev')], [true, false, false])
+  t('the tabs are C, JVM and Tile IR', TARGETS.map((x) => x.label), ['C', 'JVM', 'Tile IR'])
+  t('the program\'s text is the pane', classify(200, tileWire(), 'tile'), {
+    kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false }, cached: false, ms: 2600,
+  })
+  t('a tile answer is not another tab\'s', [classify(200, tileWire(), 'c').kind, classify(200, wire(), 'tile').kind], ['unreadable', 'unreadable'])
+  t('a tile pane whose count is not its text is unreadable', classify(200, tileWire({ pane: { kind: 'tile', total: 2, shown: 5, truncated: false, text: ['a'] } }), 'tile').kind, 'unreadable')
+  t('a program that fails shows its output under its own heading', [
+    classify(200, { ok: false, phase: 'run', exit: 1, output: 'boom' }, 'tile'),
+    classify(200, { ok: false, phase: 'timeout', output: 'x' }, 'tile'),
+  ], [{ kind: 'program', title: 'Run error', text: 'boom' }, { kind: 'program', title: 'Timed out', text: 'x' }])
+  t('a compile error of the tile program is the diagnostics', classify(200, { ok: false, phase: 'compile', output: 'e' }, 'tile').kind, 'diagnostics')
+  t('the server\'s one-sentence refusal is what the reader sees', messageOf(classify(400, { ok: false, phase: 'error', output: 'the Tile IR view needs a program that imports tileir' }, 'tile')), 'the Tile IR view needs a program that imports tileir')
+  t('503 for the tile tab does not blame javap', [messageOf(classify(503, null, 'tile')).includes('javap'), messageOf(classify(503, null, 'c')).includes('javap')], [false, true])
+  t('without tileir the tab says what it needs', TILE_NEEDS.includes('tileir'), true)
+  t('a cut tile text says how much is shown', tileNotes({ text: ['a'], total: 9, truncated: true }), ['The Tile IR text is cut: showing 1 of 9 lines.'])
+  t('a whole tile text has no notes', tileNotes({ text: ['a'], total: 1, truncated: false }), [])
+
   // ---- automatic compiling ----
   const p = new AutoPolicy()
   t('automatic compiling starts on', p.auto, true)
@@ -181,8 +214,8 @@ export function compileViewTests(expect: Expect): number {
   t('a compile the reader asked for turns it back on', p.auto, true)
 
   // ---- the URL ----
-  t('view names the tab', [targetOfSearch('?view=c'), targetOfSearch('?view=jvm'), targetOfSearch('?a=1&view=jvm')], ['c', 'jvm', 'jvm'])
-  t('no view, or a tab this build does not have, is closed', [targetOfSearch(''), targetOfSearch('?view=tile'), targetOfSearch('?view=output'), targetOfSearch('?view=')], [null, null, null, null])
+  t('view names the tab', [targetOfSearch('?view=c'), targetOfSearch('?view=jvm'), targetOfSearch('?view=tile'), targetOfSearch('?a=1&view=jvm')], ['c', 'jvm', 'tile', 'jvm'])
+  t('no view, or a tab this build does not have, is closed', [targetOfSearch(''), targetOfSearch('?view=asm'), targetOfSearch('?view=output'), targetOfSearch('?view=')], [null, null, null, null])
   t('the tab goes in the query and the program stays in the hash', withView('https://x.test/play.html#bGV0', 'jvm'), 'https://x.test/play.html?view=jvm#bGV0')
   t('closing removes only view', withView('https://x.test/play.html?a=1&view=c#bGV0', null), 'https://x.test/play.html?a=1#bGV0')
   t('switching tabs replaces it', withView('https://x.test/play.html?view=c#h', 'jvm'), 'https://x.test/play.html?view=jvm#h')
