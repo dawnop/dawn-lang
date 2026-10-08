@@ -4,13 +4,14 @@
 Why this exists. The first knife ran each job with the host's environment
 minus a drop list, so the toolchain was whatever the machine happened to have:
 the host's python3 (3.14 here, and 3.14 turns the playground contract red),
-the host's node, and a cluster container whose JAVA_HOME is a Java 8 exported
+the host's node, and a remote container whose JAVA_HOME is a Java 8 exported
 for Hadoop. A drop list only removes what someone thought of. This module
 turns it around: a job sees exactly the environment built here (the effect of
 `env -i` plus a whitelist) and every path in it points into one prefix, whose
 toolchain and inputs were fetched and hashed by inputs.py. Where the prefix
 lives is always an argument; no location is written into the code, because
-the same layout is ~/dawn-gates on a workstation and a directory on a cluster's
+the same layout is ~/dawn-gates on a workstation and a directory on a remote
+runner's
 persistent disk.
 
 Layout (created by `layout`):
@@ -22,7 +23,7 @@ Layout (created by `layout`):
     inputs/seeds/<tag>/  inputs/std-seeds/<tag>/  inputs/coursier/
     inputs/MANIFEST.json what inputs.py put there, with a sha256 per item
     jobs/<sha>/          per-job checkouts and temp directories
-    repos/<sha>.git      a bare repository made from a shipped git bundle (crun)
+    repos/<sha>.git      a bare repository made from a shipped git bundle (a plugin backend)
     home/ tmp/ cache/    HOME (with the coursier cache where CI has it,
                          home/.cache/coursier/v1), lock files, npm's cache
     out/<sha>/           bundle.json, summary.json, logs/, artifacts/
@@ -36,7 +37,6 @@ Subcommands:
     env --prefix P                          print the whitelist environment
     exec --prefix P [--break-env-i] -- CMD  run CMD in that environment
     check-isolation --prefix P --marker M [--root R] [--exclude X] -- CMD
-    run-job ... [--run-as UID:GID]          the crun backend's remote half
     selftest --prefix P [--break-env-i]     the JAVA_HOME leak control
 """
 
@@ -335,239 +335,6 @@ def cmd_selftest(args):
     return 0 if ok else 1
 
 
-# ------------------------------------------------------------ identity
-
-def parse_identity(text):
-    uid, _, gid = text.partition(":")
-    uid, gid = int(uid), int(gid or uid)
-    if uid == 0 or gid == 0:
-        raise SystemExit("run-job: --run-as must name a non-root uid and gid")
-    return uid, gid
-
-
-def writable_paths(prefix, sha):
-    """What a job may write: everything else in the prefix stays root's.
-
-    toolchain/ and inputs/ are not in the list, so a job cannot change the
-    toolchain it is measured with; jobs/<sha>/tree-<tools> is crun's mirror of the
-    staging directory and is only read.
-    """
-    prefix = Path(prefix)
-    flat = [prefix / "jobs", prefix / "jobs" / sha, prefix / "repos", prefix / "out",
-            prefix / "out" / sha]
-    deep = [prefix / "home", prefix / "tmp", prefix / "cache", prefix / "repos" / f"{sha}.git"]
-    return flat, deep
-
-
-def hand_over(prefix, sha, uid, gid):
-    """As root: give the writable part of the prefix to uid:gid.
-
-    Only entries that are not already theirs are changed, so a second job of
-    the same run walks the trees and changes nothing. A previous run as root
-    (the negative control) leaves root-owned files behind; they are handed
-    over here rather than failing the job.
-    """
-    flat, deep = writable_paths(prefix, sha)
-    for path in flat:
-        path.mkdir(parents=True, exist_ok=True)
-    changed = 0
-
-    def own(path):
-        nonlocal changed
-        st = os.lstat(path)
-        if st.st_uid != uid or st.st_gid != gid:
-            os.lchown(path, uid, gid)
-            changed += 1
-    for path in flat:
-        own(path)
-    for root in deep:
-        if not root.exists():
-            continue
-        own(root)
-        for dirpath, dirnames, filenames in os.walk(root):
-            for name in dirnames + filenames:
-                own(os.path.join(dirpath, name))
-    return changed
-
-
-# The world-writable places a non-root job could still write outside the
-# prefix, each replaced by a per-job directory inside it.
-SHARED_TMP = ("/tmp", "/var/tmp", "/dev/shm")
-
-
-def private_tmp_dirs(prefix, sha, run_id, job_id, uid, gid):
-    base = Path(prefix) / "jobs" / sha / f"{run_id or 'run'}-{job_id}-shared-tmp"
-    dirs = {}
-    for target in SHARED_TMP:
-        path = base / target.strip("/").replace("/", "-")
-        path.mkdir(parents=True, exist_ok=True)
-        os.chown(path, uid, gid)
-        path.chmod(0o1777)
-        dirs[target] = path
-    os.chown(base, uid, gid)
-    return dirs
-
-
-def drop_to(uid, gid, argv, private_tmp):
-    """exec argv as uid:gid with no supplementary groups and no way back up.
-
-    setpriv rather than `unshare -U`: a user namespace that maps the job's
-    uid onto real root makes every root-owned file outside the prefix the
-    job's own, so it could write them; a real uid change leaves them root's.
-    --no-new-privs stops a setuid binary from undoing the drop.
-
-    A uid change does not close /tmp, /var/tmp and /dev/shm, which anyone
-    may write. With private_tmp ({target: dir}) the job gets a private mount
-    namespace in which each is a bind mount of a per-job directory in the
-    prefix: what CI gives a job (a fresh VM's /tmp), and a JVM's
-    java.io.tmpdir, which ignores TMPDIR, then lands in the prefix too.
-    """
-    drop = ["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups", "--no-new-privs",
-            "--"] + argv
-    if not private_tmp:
-        os.execvp(drop[0], drop)
-    binds = " && ".join(f'mount --bind "{src}" {target}' for target, src in private_tmp.items())
-    os.execvp("unshare", ["unshare", "--mount", "--propagation", "private", "--", "sh", "-c",
-                          f'{binds} && exec "$@"', "sh"] + drop)
-
-
-def shared_tmp_state():
-    """What a job's /tmp looks like now: (mtime_ns, entries)."""
-    try:
-        st = os.stat("/tmp")
-        return st.st_mtime_ns, sorted(os.listdir("/tmp"))
-    except OSError:
-        return None, []
-
-
-FAILED_LOG_TAIL = 80
-
-
-def report_failed_logs(logs, log):
-    """Echo the tail of the failing step's output to the controller.
-
-    The logs stay under the remote prefix, which the controller never reads
-    back, so a red job on the crun backend used to say which step failed and
-    nothing about why: finding out meant opening a shell on the cluster, which
-    the backend's contract rules out. The failing step is the last one that
-    ran (a job stops at its first failure unless keep-going is set, and then
-    the tail of the last is still the most useful single answer), so its two
-    streams are the newest files here. Printed to stderr, which the controller
-    keeps in out/crun/job-<id>.txt and does not put into the bundle.
-    """
-    if not logs.is_dir():
-        return
-    newest = sorted((f for f in logs.iterdir() if f.suffix in (".out", ".err")),
-                    key=lambda f: f.stat().st_mtime_ns)[-2:]
-    for f in sorted(newest):
-        every = f.read_text(errors="replace").splitlines()
-        # A test runner's verdict lines are rarely in its last lines: `dawn test`
-        # ends with a summary after hundreds of PASS lines. So the lines naming
-        # a failure come first, wherever they are, and then the tail.
-        failing = [line for line in every if "FAIL" in line][:FAILED_LOG_TAIL]
-        if failing:
-            log(f"failed step log {f.name}: {len(failing)} line(s) naming a failure:")
-            for line in failing:
-                log(f"  ! {line}")
-        lines = every[-FAILED_LOG_TAIL:]
-        log(f"failed step log {f.name} (last {len(lines)} lines):")
-        for line in lines:
-            log(f"  | {line}")
-
-
-def cmd_run_job(args):
-    """Run one planned job inside the prefix: the crun backend's remote half.
-
-    The job comes as JSON written by the controller (so this side needs no
-    PyYAML and never re-plans), the commit's objects as a git bundle. The
-    result is one fragment, written under out/<sha>/fragments and printed on
-    one line for the controller to parse; logs stay in out/<sha>/logs.
-
-    With --run-as UID:GID and started as root (a cluster container gives
-    nothing else), the writable part of the prefix is handed to UID:GID and
-    this command re-executes itself as that identity, without --run-as.
-    Two contracts refuse root outright (atomic-write, unreadable-lock),
-    because root reads a chmod 000 file and writes an unwritable directory,
-    and CI runs every job as an ordinary user.
-    """
-    sys.path.insert(0, str(HERE))
-    import backend_local
-    prefix = Path(args.prefix).resolve()
-    ensure_layout(prefix)
-    sha = args.sha
-    if args.run_as:
-        uid, gid = parse_identity(args.run_as)
-        if os.getuid() != uid:
-            if os.getuid() != 0:
-                raise SystemExit(f"run-job: --run-as {uid}:{gid} needs root to start from; "
-                                 f"running as uid {os.getuid()}")
-            changed = hand_over(prefix, sha, uid, gid)
-            job_id = Path(args.job_file).stem
-            private = (private_tmp_dirs(prefix, sha, args.run_id, job_id, uid, gid)
-                       if args.private_tmp else None)
-            print(f"[{job_id}] run-job: handed {changed} prefix entr(ies) to {uid}:{gid}; "
-                  f"dropping root{'; /tmp, /var/tmp, /dev/shm private' if private else ''}",
-                  file=sys.stderr, flush=True)
-            drop_to(uid, gid, [sys.executable] + sys.orig_argv[1:], private)
-    elif os.getuid() == 0:
-        # Root without --run-as (the negative control): what a run as another
-        # uid left behind goes back to root, or git refuses the repository
-        # as of dubious ownership before any step runs.
-        hand_over(prefix, sha, 0, 0)
-    repo = prefix / "repos" / f"{sha}.git"
-    with locked(prefix, f"repo-{sha}"):
-        if not repo.exists():
-            env = job_env(prefix)
-            tmp = repo.with_name(repo.name + ".tmp")
-            subprocess.run(["rm", "-rf", str(tmp)], check=True)
-            subprocess.run(["git", "clone", "-q", "--bare", args.git_bundle, str(tmp)],
-                           check=True, env=env)
-            got = subprocess.run(["git", "-C", str(tmp), "rev-parse", "gates-tree"],
-                                 check=True, capture_output=True, text=True, env=env).stdout.strip()
-            if got != sha:
-                raise SystemExit(f"run-job: the bundle carries {got}, not {sha}")
-            tmp.rename(repo)
-    job = json.loads(Path(args.job_file).read_text())
-    job["needs_results"] = dict(kv.split("=", 1) for kv in args.needs.split(",") if kv)
-    # One directory per controller run: a second run of the same commit must
-    # not find the first one's artifacts (upload refuses a duplicate name).
-    out = prefix / "out" / sha / args.run_id if args.run_id else prefix / "out" / sha
-
-    def log(message):
-        print(f"[{job['id']}] {message}", file=sys.stderr, flush=True)
-
-    options = {"prefix": str(prefix), "git-source": str(repo)}
-    for item in args.opt:
-        key, _, value = item.partition("=")
-        options[key] = value
-    backend = backend_local.create({"repo": repo, "tree": sha, "out": out,
-                                    "options": options, "log": log})
-    backend.prepare()
-    (out / "artifacts").mkdir(parents=True, exist_ok=True)
-    tmp_before = shared_tmp_state()
-    try:
-        result = backend.run_job(job, out / "artifacts")
-    finally:
-        backend.cleanup()
-    if args.private_tmp:
-        # The job's /tmp is a directory in the prefix here, so whether the
-        # job itself used /tmp is visible, apart from other tenants' writes
-        # to the real one, which check-isolation (outside) still sees.
-        tmp_after = shared_tmp_state()
-        log(f"private /tmp: {'modified' if tmp_after[0] != tmp_before[0] else 'untouched'} "
-            f"during the job, {len(tmp_after[1])} entr(ies) left "
-            f"{' '.join(tmp_after[1][:8])}")
-    if not result.get("ok"):
-        report_failed_logs(out / "logs" / job["id"], log)
-    fragment = {"job": job["id"], "result": result, "toolchain": backend.toolchain()}
-    fragments = out / "fragments"
-    fragments.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(fragment, sort_keys=True)
-    (fragments / f"{job['id']}.json").write_text(text + "\n")
-    print(f"GATES-FRAGMENT {text}", flush=True)
-    return 0
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -592,19 +359,6 @@ def main():
     p = sub.add_parser("selftest")
     p.add_argument("--prefix", required=True)
     p.add_argument("--break-env-i", action="store_true")
-    p = sub.add_parser("run-job")
-    p.add_argument("--prefix", required=True)
-    p.add_argument("--sha", required=True)
-    p.add_argument("--git-bundle", required=True)
-    p.add_argument("--job-file", required=True)
-    p.add_argument("--needs", default="")
-    p.add_argument("--run-id", default="")
-    p.add_argument("--opt", action="append", default=[])
-    p.add_argument("--run-as", default="",
-                   help="UID:GID to run the job as, dropped to from root with setpriv")
-    p.add_argument("--private-tmp", action="store_true",
-                   help="with --run-as: /tmp, /var/tmp and /dev/shm are per-job directories "
-                        "in the prefix (a private mount namespace)")
     args = parser.parse_args()
     if args.cmd == "layout":
         ensure_layout(args.prefix)
@@ -613,8 +367,8 @@ def main():
         for key, value in sorted(job_env(args.prefix).items()):
             print(f"{key}={value}")
         return 0
-    return {"exec": cmd_exec, "check-isolation": check_isolation, "selftest": cmd_selftest,
-            "run-job": cmd_run_job}[args.cmd](args)
+    return {"exec": cmd_exec, "check-isolation": check_isolation,
+            "selftest": cmd_selftest}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,8 @@ the point of the design, so it is spelled out:
 
   gatesplan.py   WHAT runs: every job and step of gates.yml at the tree,
                  with each `uses:` resolved to a replacement id, or a refusal
-  backend_*.py   WHERE and HOW: one job at a time, given the tree and the
+  backend_*.py   WHERE and HOW (only `local` ships; others are plugins loaded
+                 from DAWN_GATES_BACKENDS, see load_backend): one job at a time, given the tree and the
                  artifact store, returns an exit code and output digests per
                  run step (the contract is in backend_local.py's docstring)
   bundle.py      WHAT IT MEANS: the schema, the leak filter and `complete`
@@ -36,7 +37,10 @@ rather than trims.
 import argparse
 import concurrent.futures
 import importlib
+import importlib.util
 import json
+import os
+import re
 import sys
 import threading
 import time
@@ -46,6 +50,40 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import bundle as bundle_mod  # noqa: E402
 import gatesplan  # noqa: E402
+
+
+def backend_dirs():
+    """Directories that may hold backend_<name>.py beyond the shipped ones.
+
+    Only the local backend ships here. Any other backend is a plugin that
+    lives outside this repository: DAWN_GATES_BACKENDS names its directory
+    (several, separated like PATH), or the gitignored file
+    scripts/gates-external/backends.local lists one directory per line.
+    """
+    dirs = [d for d in os.environ.get("DAWN_GATES_BACKENDS", "").split(os.pathsep) if d]
+    config = HERE / "backends.local"
+    if config.is_file():
+        dirs += [line.strip() for line in config.read_text().splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+    return [Path(d).expanduser() for d in dirs]
+
+
+def load_backend(name):
+    """The module of backend `name`: a shipped one, else a plugin; ImportError if none."""
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        raise ImportError(f"{name!r} is not a backend name")
+    if (HERE / f"backend_{name}.py").is_file():
+        return importlib.import_module(f"backend_{name}")
+    for directory in backend_dirs():
+        path = directory / f"backend_{name}.py"
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location(f"backend_{name}", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            sys.path.insert(0, str(directory))
+            spec.loader.exec_module(module)
+            return module
+    raise ImportError(f"no backend_{name}.py here or in DAWN_GATES_BACKENDS / backends.local")
 
 
 class MemoryWatch:
@@ -164,7 +202,7 @@ def main():
     if args.prefix:
         options.setdefault("prefix", str(Path(args.prefix).resolve()))
     try:
-        module = importlib.import_module(f"backend_{args.backend}")
+        module = load_backend(args.backend)
     except ImportError as error:
         print(f"gates-external: no backend {args.backend!r} ({error})", file=sys.stderr)
         return 2
