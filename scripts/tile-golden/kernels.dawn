@@ -2160,7 +2160,7 @@ fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev 
 #
 # The format is written where a value is first made and nowhere else: the
 # two running tiles' starting values are `full` under a `Tile[Float]`, and the
-# scores are a `Tile[Float]` so that the `lit(0.0)` accumulator of the first
+# scores are a `Tile[Float]` so that the bare `0.0` accumulator of the first
 # `mma` has a format to be made in.
 #
 # The softmax scale `1 / sqrt(d)` is the kernel's fifth parameter, passed by
@@ -2177,7 +2177,7 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   var l: Tile[Float] = full([FA_BQ, 1], 0.0)
   var acc = zeros(o)
   for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * scalar(scale)
+    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
@@ -2209,7 +2209,7 @@ fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Floa
   var l: Tile[F32] = full([FA_BQ, 1], 0.0)
   var acc: Tile[F32] = full([FA_BQ, ATT_D], 0.0)
   for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * scalar(scale)
+    let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
