@@ -127,6 +127,24 @@ def _push(state, host=None):
     remote = next(line.split(":", 1)[1].strip() for line in config.read_text().splitlines()
                   if line.startswith("remote_root:"))
     remote = _on_machine(remote, host)
+    if host is None and not (Path(remote) / ".crun.yaml").exists():
+        # crun runs `push_source` and the `.crun/deps` note in parallel. Alone
+        # on a fresh remote_root the push wins. With another crun call in
+        # flight against the same fresh root, the stub makes the bad
+        # interleaving the only one: the note lands first, and a push into a
+        # directory that holds `.crun/` but no `.crun.yaml` is refused as one
+        # crun does not manage.
+        flight = Path(state) / ("inflight-" + hashlib.sha1(remote.encode()).hexdigest()[:8])
+        with open(Path(state) / "flight.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            flight.open("a").write("x")
+        time.sleep(0.5)  # the ssh round trip the calls overlap in
+        if flight.stat().st_size > 1:
+            (Path(remote) / ".crun").mkdir(parents=True, exist_ok=True)
+            (Path(remote) / ".crun" / "deps").write_text("deps\n")
+            if not (Path(remote) / ".crun.yaml").exists():
+                return (f"[crun] 错误: 编译机上 {remote} 已存在且不是 crun 管理的镜像"
+                        "（无 .crun.yaml）")
     with open(Path(state) / "push.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         for path in Path(".").rglob("*"):
@@ -138,6 +156,7 @@ def _push(state, host=None):
             tmp = target.with_name(target.name + ".push")
             shutil.copy2(path, tmp)
             os.replace(tmp, target)
+    return None
 
 
 def stub_status():
@@ -180,7 +199,10 @@ def stub_crun(argv):
         return 255
     # crun pushes to its primary on every call, then (without --no-sync)
     # rsyncs from there to the machine the command runs on
-    _push(state)
+    refused = _push(state)
+    if refused:
+        print(refused, file=sys.stderr)
+        return 1
     if host not in (None, STUB_MACHINES[0]) and "--no-sync" not in flags:
         _push(state, host)
     command = [_on_machine(part, host) for part in command]

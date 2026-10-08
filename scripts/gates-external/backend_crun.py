@@ -222,6 +222,21 @@ def create(ctx):
     return CrunBackend(ctx)
 
 
+STRAY_MARK = "不是 crun 管理的镜像"
+
+
+def first_error_line(text):
+    """The first `[crun] 错误` or error-looking line, with addresses redacted."""
+    pick = ""
+    for line in text.splitlines():
+        if "[crun] 错误" in line or re.search(r"\b(error|Error|ERROR)\b", line):
+            pick = line.strip()
+            break
+    pick = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}\b", "<addr>", pick)
+    pick = re.sub(r"\b[\w.-]+@[\w.-]+\b", "<user@host>", pick)
+    return pick[:300]
+
+
 class Machine:
     """One cluster machine, by letter; `host` is crun's -m value (None: no -m)."""
 
@@ -477,6 +492,7 @@ class CrunBackend:
                  f"jobs run as {self.run_as or 'root'}")
 
         self.machines = self._discover()
+        self._first_push()
         live = self._up()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(live))) as pool:
             list(pool.map(self._prepare_machine, live))
@@ -496,11 +512,39 @@ class CrunBackend:
         if self.resuming:
             self._resume_states([job["id"] for job in plan["jobs"]])
 
+    def _first_push(self):
+        """One serial push to the primary, before any concurrent probe.
+
+        crun's push runs `push_source` and the `.crun/deps` note in parallel.
+        Into a fresh remote_root, if the note wins, `.crun/` exists before
+        `.crun.yaml` and crun refuses the push as a directory it does not
+        manage. With several probes starting at once that failed every fresh
+        sha. One push first lands `.crun.yaml`; the probes then find a
+        managed mirror. A stray `.crun/` left by an earlier failed attempt
+        makes this push fail the same way: that is reported by path and
+        left alone (no deletion, no --adopt), for the owner to clear.
+        """
+        primary = Machine("primary", None)
+        code, out, err = self._crun(self.stage, primary, self._envi() + ["true"],
+                                    "first-push", sync=False, timeout=POLL_TIMEOUT * 4)
+        if code == 0:
+            return
+        line = first_error_line(err + out)
+        if STRAY_MARK in err + out:
+            raise SystemExit(
+                f"crun backend: {self.tree_remote} on the primary machine holds a stray "
+                f"`.crun/` without `.crun.yaml` (left by an earlier failed push); crun refuses "
+                f"to push over it. Remove that one directory by hand and rerun; nothing was "
+                f"deleted. crun said: {line}")
+        self.log(f"crun backend: the first serial push to the primary failed (exit {code}): "
+                 f"{line}; the per-machine probes will report their own")
+
     def _prepare_machine(self, machine):
         t0 = time.monotonic()
         code, out, err = self._verify_remote(machine, sync=True)
         if not machine.note_load(out):
-            self._drop(machine, f"no answer (crun exit {code})")
+            self._drop(machine, f"no answer (crun exit {code}): "
+                                f"{first_error_line(err + out) or 'no error line'}")
             return
         if "GATES-NOREACH" in out.splitlines():
             self._drop(machine, f"uid {self.run_as} cannot run the prefix python there")
