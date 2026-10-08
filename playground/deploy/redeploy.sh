@@ -16,6 +16,18 @@ case "$NATIVE_BIN" in
   /*) ;;
   *) NATIVE_BIN="$PWD/$NATIVE_BIN" ;;
 esac
+# The native runner (docs/playground-native-runner-design.md, K4): the
+# process-per-request binary the canary socket starts. Built like the compiler,
+# off the server, because the server has no C compiler and gets none:
+#   ./dawnc-linux-x86_64 build playground/native -o dawn-play-linux-x86_64
+# DAWN_PLAY_NATIVE=0 ships the JVM runner alone (and leaves an installed canary
+# as it is).
+PLAY_NATIVE="${DAWN_PLAY_NATIVE:-1}"
+PLAY_NATIVE_BIN="${DAWN_PLAY_NATIVE_BIN:-dawn-play-linux-x86_64}"
+case "$PLAY_NATIVE_BIN" in
+  /*) ;;
+  *) PLAY_NATIVE_BIN="$PWD/$PLAY_NATIVE_BIN" ;;
+esac
 
 if [ -z "${JAVA_HOME:-}" ]; then
   for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
@@ -46,6 +58,52 @@ if [ "$NATIVE_BUILD" = "$NATIVE_VERSION" ] ||
     ! [[ -z "$NATIVE_BUILD" || "$NATIVE_BUILD" =~ ^\ b1:[0123456789abcdef]{12}$ ]]; then
   echo "error: native artifact says '$NATIVE_VERSION', expected dawnc $VERSION (native) [b1:<12 hex>]" >&2
   exit 1
+fi
+
+# The native runner is a second program that answers the same requests, so it
+# is checked the way the compiler is: before anything is shipped, against what
+# this tree says. The toolchain id is what `dawn --version` prints after its
+# name ("0.85.0 b1:<12 hex>"); the unit gets it as PLAY_TOOLCHAIN_ID so that
+# /health answers without a child, and the binary is asked for /health with
+# that id, here, on this machine (no server, no sandbox: /health runs nothing).
+# A binary built from another tree, or one that cannot start, stops the deploy
+# here and not after the restart.
+PLAY_TOOLCHAIN_ID=$(./bin/dawn --version | tail -n 1 | sed -e 's/^dawn //' -e 's/ (selfhost)//')
+if [ "$PLAY_NATIVE" != 0 ]; then
+  if [ ! -x "$PLAY_NATIVE_BIN" ]; then
+    echo "error: $PLAY_NATIVE_BIN is missing or not executable" >&2
+    echo "build it first with: ./dawnc-linux-x86_64 build playground/native -o dawn-play-linux-x86_64" >&2
+    echo "(or set DAWN_PLAY_NATIVE=0 to ship the JVM runner alone)" >&2
+    exit 1
+  fi
+  PLAY_NATIVE_HEALTH=$(printf 'GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' |
+    PLAY_TOOLCHAIN_ID="$PLAY_TOOLCHAIN_ID" "$PLAY_NATIVE_BIN" serve 2>/dev/null || true)
+  case "$PLAY_NATIVE_HEALTH" in
+    *'"ok":true,"version":"'"$VERSION"'"'*) ;;
+    *)
+      echo "error: $PLAY_NATIVE_BIN does not answer /health as release $VERSION:" >&2
+      printf '%s\n' "$PLAY_NATIVE_HEALTH" >&2
+      exit 1 ;;
+  esac
+fi
+
+# The native runner runs commands from the unit's default PATH. They are
+# coreutils and util-linux on any Ubuntu, but a minimal image can lack one, and
+# the failure would be a 500 on /run only, behind a green /health: `timeout`
+# bounds a job, `flock` is the gate, `head` bounds a read, `chmod` and `rm`
+# prepare and clear a request's directory.
+if [ "$PLAY_NATIVE" != 0 ]; then
+  echo "=== checking $HOST has the commands the native runner runs ==="
+  # shellcheck disable=SC2016  # $c is the remote shell's
+  if ! ssh "$HOST" 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    missing=""
+    for c in timeout flock head chmod rm sh; do
+      command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+    done
+    if [ -n "$missing" ]; then echo "missing:$missing" >&2; exit 1; fi'; then
+    echo "error: the server lacks a command the native runner needs (timeout, flock, head, chmod, rm, sh)" >&2
+    exit 1
+  fi
 fi
 
 # The runner runs everything on one pinned GraalVM CE 21.0.2 unpacked for it
@@ -84,6 +142,21 @@ ssh "$HOST" "
   mv '$REMOTE/bin/.dawnc.next' '$REMOTE/bin/dawnc'
   mkdir -p '$REMOTE/site/play-ui/samples'
 "
+if [ "$PLAY_NATIVE" != 0 ]; then
+  # Same-directory rename, as for dawnc: a connection that arrives mid-transfer
+  # starts the old binary or the new one, never half of one.
+  rsync -avz "$PLAY_NATIVE_BIN" "$HOST:$REMOTE/bin/.dawn-play.next"
+  # The unit's EnvironmentFile; written whole and renamed for the same reason.
+  # shellcheck disable=SC2029
+  ssh "$HOST" "
+    set -e
+    chmod 755 '$REMOTE/bin/.dawn-play.next'
+    mv '$REMOTE/bin/.dawn-play.next' '$REMOTE/bin/dawn-play'
+    mkdir -p '$REMOTE/playground'
+    printf 'PLAY_TOOLCHAIN_ID=\"%s\"\n' '$PLAY_TOOLCHAIN_ID' >'$REMOTE/playground/toolchain.env.next'
+    mv '$REMOTE/playground/toolchain.env.next' '$REMOTE/playground/toolchain.env'
+  "
+fi
 # the runner sources + manifest (recompiled on service start) and the sandbox
 # scripts. main.dawn imports the `web`/`json` deps by path (playground/dawn.toml
 # -> ../packages), so those packages must ship too and resolve at $REMOTE/packages.
@@ -143,9 +216,43 @@ echo "=== restarting service ==="
 # shellcheck disable=SC2029
 ssh "$HOST" "$REMOTE_RESTART"
 
+# The canary: the native runner behind its own socket, next to the JVM runner
+# that has just been restarted and answered /health (it stays the primary;
+# nothing is taken off it here). Last, so a canary that fails cannot leave the
+# primary half-deployed, and its own variable for the reason REMOTE_RESTART is
+# one. The check runs as dawn-play, who owns the socket; it compares the two
+# runners' answers byte for byte and applies the ruling's gate: p95 of the
+# native /health at most twice the JVM's (playground/deploy/canary-check.py).
+# shellcheck disable=SC2016
+REMOTE_CANARY='
+  set -e
+  D=/opt/dawn/playground/deploy
+  sudo install -m 644 "$D/dawn-play-native.socket" /etc/systemd/system/dawn-play-native.socket
+  sudo install -m 644 "$D/dawn-play-native@.service" "/etc/systemd/system/dawn-play-native@.service"
+  sudo systemctl daemon-reload
+  sudo systemctl enable dawn-play-native.socket
+  sudo systemctl restart dawn-play-native.socket
+  sudo systemctl is-active --quiet dawn-play-native.socket
+  sudo -n -u dawn-play /usr/bin/python3 -I -B "$D/canary-check.py"
+'
+if [ "$PLAY_NATIVE" != 0 ]; then
+  echo "=== installing and checking the native canary ==="
+  # shellcheck disable=SC2029
+  if ! ssh "$HOST" "$REMOTE_CANARY"; then
+    echo "error: the native canary failed its check. The JVM runner is deployed and serving." >&2
+    echo "Do not point nginx at the native socket (playground/deploy/nginx-switch.sh); read" >&2
+    echo "  journalctl -u 'dawn-play-native@*' and systemctl status dawn-play-native.socket" >&2
+    exit 1
+  fi
+fi
+
 echo "=== done ==="
 # The public health endpoint is on the service's own origin: the pages sit
 # behind a CDN that cannot carry the LSP WebSocket, so the four `/api/*`
 # endpoints moved off the site's origin (docs/site-cdn-design.md).
 # Overridable for a deployment elsewhere.
+if [ "$PLAY_NATIVE" != 0 ]; then
+  echo "native canary is up on /run/dawn-play/http.sock and passed; nginx still routes to the JVM runner."
+  echo "to route to it: playground/deploy/nginx-switch.sh native (prints the config; apply by hand)."
+fi
 echo "verify: curl ${PLAY_HEALTH_URL:-https://play.dawnop.com/api/health}"
