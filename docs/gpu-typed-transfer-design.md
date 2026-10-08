@@ -245,7 +245,7 @@ JVM 上的趋势：每多一个字节约 20 ns，字节数决定成本；f64 从
 | U3b1 | 原始位型 intrinsic 一对（`Float`↔`Int`，JVM、C、wasi 桩、类型表、镜像、`narrow.f64_bits`/`f64_of_bits` 改封装）；先在 native 上量 1M 元素 f64 编码墙钟，决定 U3d | 否（加 intrinsic，旧函数行为只在 NaN 载荷上更保真） | 现有 narrow 测试全绿；新增 `0x7FF8000000000001` 往返保载荷；`native-fixpoint.sh` B==C；Emit-Change 声明 | 把 JVM 侧换成 `doubleToLongBits`（规范化 NaN），载荷测试必红 |
 | U3b2 | std 增量：`DeviceBits` trait 与 12 个 impl（含 `Float`、`Int`）；宽度通用的位型装配函数；`upload_typed`/`download_typed` 以新名并存（只活到 U3c，同提交内收回，不留别名）；`ScalarDtype` 改调 `bits_of` | 否 | std 测试；每个格式在边界值上的往返；`ScalarDtype` 五条断言原样；`dawn doc`/LSP 同名语料不受影响 | ①`I32` 的 `from_bits` 少一个字节宽，往返测试红；②字节序写反，往返测试在非对称值上红；③`upload_typed` 一个 `Tensor[Bool]` 必须是编译错误（负控是检查它**确实**报错，而不是用 `U32` 之类顺带过去） |
 | U3c | 切换：效果操作 `Bytes`；删 `Array[Float]` 两条 intrinsic；`upload`/`download` 收 `List[T]`；假设备存 `Bytes`、launch 边界 `fake_inexact`；`pack_to`/`unpack_from` 补 `f64`；tileref 加 `dtype_i64_ref_int`；迁移 §1.1 的全部调用点；教程中英；spec §12.6 中英；`dtype_diff` 越界语料 | 是 | §5.2 全部 | ①`download` 解码改回经 `Float`，i64 语料在 2^53+1 红；②`upload` 位型字节序写反，`dtype_diff` 红；③假设备往返 2^53+1 的 i64 必须逐位相等（把假设备改回存 `List[Float]`，此测试红） |
-| U3d（条件） | 宽度通用批量 intrinsic（RtBytes） | 否 | U3b1 的 native 数字出来后立项 | 打包宽度写错一档，往返红 |
+| U3d | 已立项并通用化，范围与刀序（K0 到 K7）见 [bulk-array-bytes-design.md](bulk-array-bytes-design.md)；其 K5 与 U3c 合并或紧随 | 是 | 见该文 §6 | 见该文 §6 |
 
 U3 不碰 `packages/tileir` 的代码，所以不需要 tileir 的次版本；U4 复用 `DeviceBits`（取回宿主 `Float` 的缺口就是这个 trait 补上的）。
 U3c 与「改 CI 必报墙钟」：本文不改 workflows，不新增 gate；`std/gpu.dawn` 的变更会让 tile 台账摘要变，触发的重录成本由所有者的集群重录承担，不在 PR CI 里。
@@ -255,7 +255,7 @@ U3c 与「改 CI 必报墙钟」：本文不改 workflows，不新增 gate；`st
 1. **原始位型 intrinsic 加不加（U3b1）。** 推荐加：孤儿规则让 `Float` 的 `DeviceBits` 必须在 `std/dtype`，而 `std/dtype` 排在 `narrow` 之前，不加 intrinsic 就写不出；同时保 NaN 载荷。若不加，退路是把 trait 声明挪到 `std/narrow`（让整数模块多依赖 `narrow`），并接受载荷规范化。
 2. **假设备存 `Bytes` 还是继续存 `List[Float]` 并在 `upload` 拒绝不精确的 i64。** 推荐前者（往返精确是一个可测的性质）；后者改动小，但 `Float` 存储下 `dtype_diff` 的假设备等价对照无法覆盖 2^53 以上。
 3. **`dtype_i64_ref_int` 放在 tileref 还是只放在 `dtype_diff` 里。** 推荐 tileref（它是参考实现的家，其余 i64 参考也在那里）；放 `dtype_diff` 里更局部但把参考逻辑散到驱动。
-4. **U3d 的入场线。** 本文不定数字；建议 U3b1 量出 native 上 1M 个 f64 的编码墙钟后，由量到的值相对 8 MB 拷贝（估计 0.3 到 0.7 ms，须在 B200 与 3080 上量）的比例定。
+4. **U3d 的入场线。** 已裁：U3d 立项并通用化为 [bulk-array-bytes-design.md](bulk-array-bytes-design.md)，由其 K0 量 native 数字。原建议如下：本文不定数字；建议 U3b1 量出 native 上 1M 个 f64 的编码墙钟后，由量到的值相对 8 MB 拷贝（估计 0.3 到 0.7 ms，须在 B200 与 3080 上量）的比例定。
 5. **`upload_typed` 并存期是否值得。** U0 的刀序里 U3b 与 U3c 之间有新旧并存。若 U3b2 与 U3c 能在同一个 PR 里分两个提交（每刀一个提交），并存名字就不会出现在 main 上，可省掉；取决于 PR 的体量（调用点 53 + 45 处），由写者在 U3b2 开工时报。
 
 ## 9. 不做的（理由）
