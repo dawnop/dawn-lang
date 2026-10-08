@@ -3492,6 +3492,13 @@ pub fn builtins() -> Map[String, Sig] = {
     # read with U+FFFD.
     bsig("bytes_decode_utf8", [TyBytes], ["b"], TyString),
     bsig("bytes_decode_latin1", [TyBytes], ["b"], TyString),
+    # The raw reinterpretation between a Float and its 64 bits (Java's
+    # `doubleToRawLongBits`, Rust's `f64::to_bits`). They sit with the byte
+    # primitives because the one thing they are for is the wire format of a
+    # device buffer: std/dtype's `DeviceBits[Float]` needs a bit pattern that
+    # keeps a NaN's payload, and the arithmetic `narrow.f64_bits` cannot.
+    bsig("float_to_bits", [TyFloat], ["x"], TyInt),
+    bsig("float_of_bits", [TyInt], ["b"], TyFloat),
     bsig("bytes_len", [TyBytes], ["b"], TyInt),
     bsig("bytes_at", [TyBytes, TyInt], ["b", "i"], TyInt),
     bsig("bytes_slice", [TyBytes, TyInt, TyInt], ["b", "from", "to"], TyBytes),
@@ -4127,6 +4134,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
     rt_of = map.insert(rt_of, n, RtArray)
     erased = set.insert(erased, n)
     internal = set.insert(internal, n)
+  }
+  for op in ["float_to_bits", "float_of_bits"] {
+    rt_of = map.insert(rt_of, op, RtBytes)
+    internal = set.insert(internal, op)
   }
   rt_of = map.insert(rt_of, "popcount", RtArray)
   internal = set.insert(internal, "popcount")
@@ -4901,7 +4912,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 114
+  assert map_size2(bs) == 116
 }
 
 test "the reclaim's failure is a value, under the one name left" {

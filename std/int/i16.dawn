@@ -49,7 +49,7 @@
 # witness, spelled like the type so that `use std/int/i16.{I16}` brings in both,
 # and `impl HasDtype[I16]` lets generic code ask for it by type.
 
-use std/dtype.{Dtype, HasDtype, dtype_name, dtype_named, dtype_of}
+use std/dtype.{DeviceBits, Dtype, HasDtype, bits_of, dtype_name, dtype_named, dtype_of, from_bits}
 
 ## A signed 16-bit integer.
 pub opaque type I16 = Int
@@ -65,6 +65,13 @@ pub const I16: Dtype[I16] = dtype_named("i16")
 
 impl HasDtype[I16] {
   fn dtype_of() -> Dtype[I16] = I16
+}
+
+# The low bits of the two's complement, read unsigned: what a device buffer
+# holds for this element. Bits above the width are ignored on the way back.
+impl DeviceBits[I16] {
+  fn bits_of(v: I16) -> Int = to_int(v) & 0xFFFF
+  fn from_bits(bits: Int) -> I16 = wrap(bits)
 }
 
 ## `n` as a `I16`, or `None` when it is outside -32768..32767.
@@ -224,6 +231,26 @@ test "the witness is the format the dialect names, found by value or by type" {
   let by_type: Dtype[I16] = dtype_of()
   assert dtype_name(I16) == "i16"
   assert dtype_name(by_type) == "i16"
+}
+
+test "I16 moves as its low bits, unsigned, and reads back from any word" {
+  assert bits_of(wrap(1)) == 1
+  assert bits_of(MAX) == 0x7FFF
+  assert bits_of(MIN) == 0x8000
+  assert bits_of(wrap(-1)) == 0xFFFF
+  let m: I16 = from_bits(0xFFFF)
+  assert m == wrap(-1)
+  assert to_int(from_bits(0xFFFF + 1)) == 0
+  # the bits above the width are ignored
+  let hi: I16 = from_bits(0x5A5A5A5A5A5A5A5A - (0x5A5A5A5A5A5A5A5A & 0xFFFF) + 3)
+  assert to_int(hi) == 3
+  var n = 0
+  while n < 300 {
+    let v: I16 = wrap(n * 7919 - 1000)
+    let back: I16 = from_bits(bits_of(v))
+    assert back == v
+    n = n + 1
+  }
 }
 
 # Representative cases; scripts/spike-native/fixed_ints holds the seven types

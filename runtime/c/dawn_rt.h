@@ -1016,6 +1016,9 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
  * replaced rather than refused, as `new String(bytes, charset)` does. */
 dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b);
 dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b);
+/* The raw bits of a double and back (memcpy, so a NaN's payload survives). */
+int64_t dawn_float_to_bits(double x);
+double dawn_float_of_bits(int64_t b);
 dawn_str *dawn_str_of_int(int64_t v);
 dawn_str *dawn_str_of_bool(bool v);
 /* `<N bytes>` -- the language renders a Bytes as its length, not its content.

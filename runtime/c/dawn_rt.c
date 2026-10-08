@@ -4057,6 +4057,21 @@ dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b) {
   return dawn_utf8_replace(b->p, b->len);
 }
 
+/* The bits of a double, by memcpy: a cast through a pointer or a union read is
+ * what the strict-aliasing rules leave open, memcpy is what they allow, and
+ * the compiler turns it into a register move. A NaN keeps its payload. */
+int64_t dawn_float_to_bits(double x) {
+  int64_t b;
+  memcpy(&b, &x, sizeof b);
+  return b;
+}
+
+double dawn_float_of_bits(int64_t b) {
+  double x;
+  memcpy(&x, &b, sizeof x);
+  return x;
+}
+
 /* One code point per byte, 0..255 -- so every byte string decodes and the
  * result is never longer than two UTF-8 bytes per input byte. */
 dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b) {
