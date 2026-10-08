@@ -17,7 +17,7 @@
 # witnesses, and neither may depend on std/gpu (it uses narrow), so the format
 # type sits below all of them. This module imports nothing.
 #
-# Only std can mint a `Dtype`: its representation is opaque and `dtype_named`
+# Only std can mint a `Dtype`: its representation is opaque and `dtype_from_name`
 # is `pub(pkg)`, so a program cannot claim that its own type has a device
 # format. A type opts in with `impl HasDtype`, written in its own module. U16,
 # U32 and U64 have none on purpose: the tile dialect has no unsigned integer
@@ -32,7 +32,7 @@
 pub opaque type Dtype[T] = String
 
 ## The format called `name`. Only std makes formats.
-pub(pkg) fn dtype_named[T](name: String) -> Dtype[T] = name
+pub(pkg) fn dtype_from_name[T](name: String) -> Dtype[T] = name
 
 ## The name the format goes by in a tile dialect, such as `f64` or `bf16`.
 pub fn dtype_name[T](d: Dtype[T]) -> String = d
@@ -62,18 +62,18 @@ pub trait HasDtype[T] {
 ## A type's impl is written in its own module, beside its `HasDtype`; the
 ## builtins `Float` and `Int` belong to no module, so theirs are here.
 pub trait DeviceBits[T] {
-  fn bits_of(v: T) -> Int
+  fn to_bits(v: T) -> Int
   fn from_bits(bits: Int) -> T
 }
 
 ## The format of `Float`, 64-bit IEEE.
-pub const F64: Dtype[Float] = dtype_named("f64")
+pub const F64: Dtype[Float] = dtype_from_name("f64")
 
 ## The format of `Int`, 64-bit two's complement.
-pub const I64: Dtype[Int] = dtype_named("i64")
+pub const I64: Dtype[Int] = dtype_from_name("i64")
 
 ## The format of `Bool` in a tile: a one-bit mask.
-pub const I1: Dtype[Bool] = dtype_named("i1")
+pub const I1: Dtype[Bool] = dtype_from_name("i1")
 
 impl HasDtype[Float] {
   fn dtype_of() -> Dtype[Float] = F64
@@ -91,12 +91,12 @@ impl HasDtype[Bool] {
 # the canonical NaN, so a payload would not survive a trip to the device, and
 # std/narrow sits after this module anyway.
 impl DeviceBits[Float] {
-  fn bits_of(v: Float) -> Int = float_to_bits(v)
+  fn to_bits(v: Float) -> Int = float_to_bits(v)
   fn from_bits(bits: Int) -> Float = float_of_bits(bits)
 }
 
 impl DeviceBits[Int] {
-  fn bits_of(v: Int) -> Int = v
+  fn to_bits(v: Int) -> Int = v
   fn from_bits(bits: Int) -> Int = bits
 }
 
@@ -107,7 +107,7 @@ test "the builtin witnesses carry the dialect's names" {
 }
 
 test "a format is as long-lived as its name" {
-  let again: Dtype[Float] = dtype_named("f64")
+  let again: Dtype[Float] = dtype_from_name("f64")
   assert dtype_name(again) == dtype_name(F64)
   assert dtype_name(F64) != dtype_name(I64)
 }
@@ -115,34 +115,34 @@ test "a format is as long-lived as its name" {
 test "Float bits are the IEEE pattern, the sign and a NaN's payload included" {
   let one: Float = from_bits(0x3FF0000000000000)
   assert one == 1.0
-  assert bits_of(1.0) == 0x3FF0000000000000
-  assert bits_of(-2.0) == (1 << 63) | 0x4000000000000000
-  assert bits_of(0.0) == 0
-  assert bits_of(1.0 / 0.0) == 0x7FF0000000000000
+  assert to_bits(1.0) == 0x3FF0000000000000
+  assert to_bits(-2.0) == (1 << 63) | 0x4000000000000000
+  assert to_bits(0.0) == 0
+  assert to_bits(1.0 / 0.0) == 0x7FF0000000000000
   let tiny: Float = from_bits(1)
-  assert bits_of(tiny) == 1
+  assert to_bits(tiny) == 1
   let neg_zero: Float = from_bits(1 << 63)
   assert 1.0 / neg_zero < 0.0
-  assert bits_of(neg_zero) == 1 << 63
-  assert bits_of(0.1) == 0x3FB999999999999A
+  assert to_bits(neg_zero) == 1 << 63
+  assert to_bits(0.1) == 0x3FB999999999999A
   let payload = 0x7FF0000000000001
   let nan: Float = from_bits(payload)
   assert nan != nan
-  assert bits_of(nan) == payload
+  assert to_bits(nan) == payload
   let quiet = 0x7FF8DEADBEEF1234
   let q: Float = from_bits(quiet)
-  assert bits_of(q) == quiet
+  assert to_bits(q) == quiet
   let signed = (1 << 63) | 0x7FF4000000000001
   let s: Float = from_bits(signed)
-  assert bits_of(s) == signed
+  assert to_bits(s) == signed
 }
 
 test "Int bits are the Int, past the 53 bits a Float holds" {
   let big = 9007199254740993
-  assert bits_of(big) == big
+  assert to_bits(big) == big
   let back: Int = from_bits(big)
   assert back == big
-  assert bits_of(-1) == -1
+  assert to_bits(-1) == -1
   let min: Int = from_bits(1 << 63)
   assert min == -9223372036854775807 - 1
 }

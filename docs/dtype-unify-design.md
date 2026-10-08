@@ -33,7 +33,7 @@ U0 的任务单假设 U1、U2 还没做。核对 `origin/main` 发现它们**已
 （dtype、narrow、int/i8 到 int/u64、float、……、gpu）。`Dtype` 不放进 narrow 或 gpu 的理由：
 narrow 不该依赖 gpu（反向成环），整数模块也要用它。
 
-**铸造**：`pub opaque type Dtype[T] = String`，唯一的构造函数 `dtype_named` 是 `pub(pkg)`，
+**铸造**：`pub opaque type Dtype[T] = String`，唯一的构造函数 `dtype_from_name` 是 `pub(pkg)`，
 所以只有捆绑 std（一个包，spec §10.4）里的模块能造一个格式；用户程序不能给自己的类型声明设备格式。
 一个类型要有设备格式，在**它自己的声明模块**里写三行并排：类型、同名 SCREAMING 见证常量、`impl HasDtype`。
 
@@ -93,9 +93,9 @@ tileir 另有 `FloatDtype`（只给七个算术浮点），与 `HasDtype` 分开
    另 `let d: Dtype[BF16] = dtype_of()` 后 `println("${dtype_name(d)} ${dtype_name(BF16)}")` 输出 `bf16 bf16`：类型位置的 `BF16` 与值位置的 `BF16` 来自同一条 `use std/narrow.{BF16}`。
 3. **常量名必须 SCREAMING。** `pub const Float: Int = 1` 报
    `error: constant names are SCREAMING_SNAKE_CASE`（hint 指向 spec §1.3）。所以 `Float` 当不了自己的见证名，见证是 `F64`。
-4. **`dtype_named` 是 `pub(pkg)`。** 用户程序 `use std/dtype` 后调 `dtype.dtype_named("mine")` 报
-   ``error: `dtype_named` is package-private to package `std` ``，hint `only modules of package `std` may name it`。
-   （直接 `use std/dtype.{dtype_named}` 更早报另一句「not a builtin」，是同一限制的另一个入口，不单列。）
+4. **`dtype_from_name` 是 `pub(pkg)`。** 用户程序 `use std/dtype` 后调 `dtype.dtype_from_name("mine")` 报
+   ``error: `dtype_from_name` is package-private to package `std` ``，hint `only modules of package `std` may name it`。
+   （直接 `use std/dtype.{dtype_from_name}` 更早报另一句「not a builtin」，是同一限制的另一个入口，不单列。）
 5. **没有 `HasDtype` 的类型拿不到格式。** `use std/int/u32.{U32}`，`let d: Dtype[U32] = dtype_of()` 报
    ``error: `dtype_of` requires `HasDtype[U32]`, but `U32` has no such impl``。
    `gpu.alloc(U32, 4)` 则是 ``undefined constructor: U32``（`std/int/u32` 没有同名常量）。
@@ -104,7 +104,7 @@ tileir 另有 `FloatDtype`（只给七个算术浮点），与 `HasDtype` 分开
 6. **撞名仍按本地名查，不分类别。** 两文件工程里 `use fmts.{BF16}` 加 `use std/narrow.{BF16}` 报
    ``error: `BF16` is imported more than once (from `fmts` and `std/narrow`)``，与 10-06 在 v0.82.0 上的文案一致。
    `use std/gpu.{BF16}` 现在报 ``module `std/gpu` has no exported name `BF16` ``：旧标记已不存在。
-7. **#416（跨模块常量初始化调用函数）在当前种子里。** `scripts/seed-release.txt` = v0.85.0，`std/narrow` 的 `pub const BF16: Dtype[BF16] = dtype_named("bf16")` 就依赖它，且 `std` 全量在当前工具链上编过；上面第 1、2 条的真 std 路径即是证据。
+7. **#416（跨模块常量初始化调用函数）在当前种子里。** `scripts/seed-release.txt` = v0.85.0，`std/narrow` 的 `pub const BF16: Dtype[BF16] = dtype_from_name("bf16")` 就依赖它，且 `std` 全量在当前工具链上编过；上面第 1、2 条的真 std 路径即是证据。
 
 ## 5. spec §12.6 现状
 
