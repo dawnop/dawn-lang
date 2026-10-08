@@ -91,6 +91,13 @@ bundle 增量：`playground.js` 原始 +262 B，gzip -9 +91 B（143,680 → 143,
 API origin 上线并通过 `PLAY_API_URL=<API origin>/api scripts/play-live-check.py`，再发布带绝对
 端点的页面，最后切 DNS；回滚时页面用空变量重建即可回到同源。
 
+2026-10-08 补：生产部署漏设该变量一次（页面调同源 `/api/health`，CDN 回 404），而
+`play-live-check` 当时 25/25 仍绿，因为它只测 API origin 本身、不看页面指向哪里。现在
+`site/redeploy.sh` 在变量为空或不是 origin 时拒绝部署，并核对构建出的两份 playground 页携带它；
+`play-live-check` 新增「页面所指」一组检查：取线上 playground 页，读 `data-endpoint`，断言是
+`PLAY_EXPECT_ORIGIN`（默认 `https://play.dawnop.com`），且该 origin 的 `/api/health` 为 200 并对站点 origin 带 CORS。
+`--page-file` 可对保存的页面离线复现（事故页红、正确页绿）。
+
 ## 六、验证（2026-10-02）
 
 - 生成器差分：`origin/main` 的生成器与本次的生成器，在同一份快照数据、同一个 bundle、
