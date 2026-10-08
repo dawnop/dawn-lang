@@ -541,6 +541,16 @@ req("completionItem/resolve", {"label": "str.trim", "kind": 3,
     "data": {"uri": auto_uri, "module": "std/str"}})
 note("textDocument/didClose", tdoc(auto_uri))
 
+# dot completion over std (lspdot.dawn): after `value.` the functions in scope,
+# then those of std modules the buffer has not imported, each with the
+# selective `use` that brings it in
+dot_text = "# Head.\n\npub fn shout(s: String) -> String = s\n\npub fn main(s: String) -> Unit !io = {\n  s.\n  println(s)\n}\n"
+dot_uri = "untitled:Untitled-dot"
+note("textDocument/didOpen", {"textDocument": {
+    "uri": dot_uri, "languageId": "dawn", "version": 1, "text": dot_text}})
+req("textDocument/completion", at(dot_uri, dot_text, "s.\n", 1, 2))
+note("textDocument/didClose", tdoc(dot_uri))
+
 req("textDocument/documentSymbol", tdoc(app_uri))
 
 # didChange: introduce a type error, diagnostics update

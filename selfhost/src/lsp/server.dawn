@@ -2479,7 +2479,7 @@ fn dot_items_of(st: LspState, d: Doc, cut: (Int, Int)) -> List[CItem] !Fs !Proc 
           match analysis_of(s2, d4) {
             Some(a2) ->
               match doc_qcx(s2, d4, a2) {
-                Some(qc2) -> dot_completions_at(qc2, d4.view.cps, lo)
+                Some(qc2) -> dot_completions_at(qc2, d4.view, lo)
                 None -> no_items
               }
             None -> no_items
@@ -5604,6 +5604,58 @@ test "dot completion offers fields then the functions a dot call reaches" {
   })))
 }
 
+test "dot completion offers the std functions the buffer has not imported, with the use that brings each in" {
+  io.with_fs_real(() => no_host(() => io.with_proc_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st0 = def_probe_state(std)
+    let doc = (name: String, text: String) => {
+      let d = def_probe_doc_named(st0, name, text)
+      (LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }, d)
+    }
+    let reply = (name: String, text: String) => {
+      let (st, d) = doc(name, text)
+      handle_completion(st, d7_params(d, "s.\n", 2))
+    }
+    # not imported: `split` takes a String first, and its `use` is selective
+    # (a dot call needs the name unqualified), above the code
+    let r1 = reply("dotstd1.dawn", "pub fn f(s: String) -> String = {\n  s.\n}\n")
+    let split = d7_item_in(r1, "split")
+    assert ai_edit(split) == "0:0 use std/str.{split}\n\n"
+    assert ostr(split, "detail") == "fn split(sep: String) -> List[String]"
+    assert ostr(split, "sortText") == "2split"
+    assert ostr(get_or_null(split, "labelDetails"), "description") == "use std/str.{split}"
+    # a function that does not take a String first is not offered
+    assert not list.contains(ai_labels(r1), "zip")
+    # the edit goes in sorted place among sorted std imports, and a plain
+    # `use std/str` does not stop the selective one beside it
+    let r2 = reply("dotstd2.dawn", "use std/list\nuse std/str\n\npub fn f(s: String) -> String = {\n  s.\n}\n")
+    assert ai_edit(d7_item_in(r2, "split")) == "2:0 use std/str.{split}\n"
+    # imported: no edit, ranked with the other functions in scope, and the
+    # module's other names are no longer offered (a second selective `use` of
+    # the module is "imported more than once")
+    let r3 = reply("dotstd3.dawn", "use std/str.{split}\n\npub fn f(s: String) -> String = {\n  s.\n}\n")
+    let have = d7_item_in(r3, "split")
+    assert ai_edit(have) == "-" && ostr(have, "sortText") == "1split"
+    assert not list.contains(ai_labels(r3), "trim")
+    # a name the file defines is its own, and a local of that name hides it:
+    # importing either would clash
+    let r4 = reply("dotstd4.dawn", "fn trim(s: String) -> String = s\n\npub fn f(s: String, split: Int) -> String = {\n  s.\n}\n")
+    assert ai_edit(d7_item_in(r4, "trim")) == "-"
+    assert not list.contains(ai_labels(r4), "split")
+    # the functions in scope come first, then the foreign ones
+    let keyed = list.sort(list.map(ai_items(r4), it => ostr(it, "sortText")))
+    assert str.starts_with(keyed[0], "1") && str.starts_with(keyed[len(keyed) - 1], "2")
+    # a receiver with many reachable functions is capped
+    let (st5, d5) = doc("dotstd5.dawn", "pub fn f(xs: List[Int]) -> Int = {\n  xs.\n}\n")
+    let r5 = handle_completion(st5, d7_params(d5, "xs.\n", 3))
+    assert len(list.filter(ai_items(r5), it => ai_edit(it) != "-")) <= 150
+    assert list.any(ai_items(r5), it => ai_edit(it) == "0:0 use std/list.{all}\n\n")
+  })))
+}
+
 # ---- std names the buffer has not imported (docs/lsp-auto-import-design.md) ----
 
 ## The items of a completion reply of either shape.
@@ -5692,10 +5744,10 @@ test "after alias dot, the module's members, with the use when it is missing" {
     # a local of that name: what a dot call on it reaches, not the module's
     # members, so no item brings a `use` line with it
     let (st4, d4) = doc("aidotlocal.dawn", "pub fn f(str: String) -> Int = {\n  str.\n  0\n}\n")
-    assert not list.any(ai_items(handle_completion(st4, d7_params(d4, "str.\n", 4))), it => ai_edit(it) != "-")
+    assert not list.any(ai_items(handle_completion(st4, d7_params(d4, "str.\n", 4))), it => ai_edit(it) != "-" && not str.contains(ai_edit(it), "{"))
     # even when the module is imported under that alias: the local shadows it
     let (st6, d6) = doc("aidotshadow.dawn", "use std/str\n\npub fn f(str: String) -> Int = {\n  str.\n  0\n}\n")
-    assert not list.any(ai_items(handle_completion(st6, d7_params(d6, "str.\n", 4))), it => ai_edit(it) != "-")
+    assert not list.any(ai_items(handle_completion(st6, d7_params(d6, "str.\n", 4))), it => ai_edit(it) != "-" && not str.contains(ai_edit(it), "{"))
     # not a module std has
     let (st5, d5) = doc("aidotnone.dawn", "pub fn main() -> Unit !io = {\n  let a = nosuch.\n}\n")
     assert ai_items(handle_completion(st5, d7_params(d5, "nosuch.", 7))) == []
