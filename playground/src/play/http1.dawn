@@ -1,0 +1,519 @@
+# Single-request HTTP/1.1 for the native runner (docs/playground-native-runner-design.md,
+# K1). systemd hands the process one accepted connection as stdin and stdout;
+# it reads one request, writes one response and exits, so there is no
+# keep-alive, no pipelining and no chunked request body, and the whole module
+# is the few hundred lines that needs.
+#
+# Why not packages/web: its server and `web/types` sit on `use java`
+# (HttpServer, InputStream), and the native backend refuses any reachable
+# `use java`. Splitting that package is a public-API change for one consumer
+# with four routes (ruling 2026-10-08), so the runner owns this file and
+# packages/web is untouched. Nothing here may use `use java`, here or in an
+# import: the same source must build on the JVM backend (`dawn test`) and the
+# native one (`dawnc test`).
+#
+# Shape: parsing and rendering are pure functions of Bytes and String, so the
+# tests below feed them strings. The IO layer is `read_request_from`, which
+# takes the reader as a function `read(pos, n)`; stdin ignores `pos`, tests
+# index into a Bytes with it. The only things that touch stdin and stdout are
+# `read_request`, `respond` and `drain`.
+#
+# Three facts measured in the design (section 3.1) shape the IO:
+#   * `read_stdin(n)` is "exactly n bytes", so the head is read one byte at a
+#     time to CRLFCRLF; a bigger read would block until n arrived.
+#   * A body longer than MAX_BODY is refused (413) without reading it.
+#   * Exiting with unread bytes in stdin makes the kernel send RST, and the
+#     client then loses a response that was already written. `drain` takes
+#     what has already arrived, with `stdin_ready(0)`: a longer wait costs
+#     every request that long (20 ms moved p50 from 1 to 21 ms).
+use std/bytes
+use std/str
+use std/list
+use std/io.{read_stdin, stdin_ready}
+use play/contract.{render_error}
+
+# The head (request line and headers) may not exceed this many bytes. nginx's
+# default is 8k a line; the runner is only ever reached through nginx, so this
+# is a bound on memory, not a policy.
+pub const MAX_HEAD: Int = 16384
+# The same cap main.dawn has always applied to the source (nginx lets 128k
+# through to be refused here with a JSON body, which the editor can show).
+pub const MAX_BODY: Int = 65536
+const MAX_HEADERS: Int = 100
+
+# A request the runner will not serve: the status to answer and the text for
+# the JSON error body.
+pub type Reject = { status: Int, message: String }
+
+pub type Request = { method: String, path: String, query: String, headers: List[(String, String)], body: Bytes }
+
+pub type Head = { method: String, path: String, query: String, headers: List[(String, String)] }
+
+fn reject(status: Int, message: String) -> Reject = Reject { status: status, message: message }
+
+## The reason phrase of the statuses the runner answers with.
+pub fn reason(status: Int) -> String =
+  match status {
+    200 -> "OK"
+    400 -> "Bad Request"
+    404 -> "Not Found"
+    405 -> "Method Not Allowed"
+    411 -> "Length Required"
+    413 -> "Payload Too Large"
+    429 -> "Too Many Requests"
+    431 -> "Request Header Fields Too Large"
+    500 -> "Internal Server Error"
+    505 -> "HTTP Version Not Supported"
+    _ -> "Status"
+  }
+
+## The response as it goes on the wire. `Content-Length` counts UTF-8 bytes,
+## not characters. `Connection: close` is always sent: one process, one request.
+pub fn render_response_with(status: Int, content_type: String, extra: List[(String, String)], body: String) -> String = {
+  var head = "HTTP/1.1 ${status} ${reason(status)}\r\nContent-Type: ${content_type}\r\nContent-Length: ${bytes.len(bytes.utf8(body))}\r\nConnection: close\r\n"
+  for h in extra {
+    let (k, v) = h
+    head = head ++ k ++ ": " ++ v ++ "\r\n"
+  }
+  head ++ "\r\n" ++ body
+}
+
+pub fn render_response(status: Int, content_type: String, body: String) -> String =
+  render_response_with(status, content_type, [], body)
+
+fn no_headers() -> List[(String, String)] = []
+
+## How a refusal is answered: the runner's own JSON error shape, plus the
+## `Allow` header a 405 needs.
+pub fn render_reject(r: Reject) -> String = {
+  let extra = if r.status == 405 { [("Allow", "GET, POST")] } else { no_headers() }
+  render_response_with(r.status, "application/json; charset=utf-8", extra, render_error(r.message))
+}
+
+fn is_digit_byte(c: Int) -> Bool = c >= 48 && c <= 57
+
+fn all_digits(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var ok = bytes.len(b) > 0
+  var i = 0
+  while i < bytes.len(b) {
+    if not is_digit_byte(bytes.at(b, i)) { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+fn is_upper_token(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var ok = bytes.len(b) > 0
+  var i = 0
+  while i < bytes.len(b) {
+    let c = bytes.at(b, i)
+    if c < 65 || c > 90 { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+# A header name is an RFC 7230 token; anything else (spaces, controls) would
+# be a request-smuggling vector once a second parser looks at it.
+fn is_token(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var ok = bytes.len(b) > 0
+  var i = 0
+  while i < bytes.len(b) {
+    let c = bytes.at(b, i)
+    let alnum = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    let punct = c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
+    if not (alnum || punct) { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+fn has_ctl(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var found = false
+  var i = 0
+  while i < bytes.len(b) {
+    let c = bytes.at(b, i)
+    if (c < 32 && c != 9) || c == 127 { found = true }
+    i = i + 1
+  }
+  found
+}
+
+fn parse_header_line(line: String) -> Result[(String, String), Reject] =
+  if str.starts_with(line, " ") || str.starts_with(line, "\t") {
+    Err(reject(400, "obsolete header line folding is not supported"))
+  } else {
+    match str.split_once(line, ":") {
+      None -> Err(reject(400, "malformed header line"))
+      Some((name, value)) ->
+        if not is_token(name) {
+          Err(reject(400, "malformed header name"))
+        } else if has_ctl(value) {
+          Err(reject(400, "control character in header value"))
+        } else {
+          Ok((str.to_lower(name), str.trim(value)))
+        }
+    }
+  }
+
+fn parse_headers(lines: List[String]) -> Result[List[(String, String)], Reject] = {
+  var out: List[(String, String)] = []
+  var err: Option[Reject] = None
+  for line in lines {
+    if err == None {
+      match parse_header_line(line) {
+        Err(e) -> { err = Some(e) }
+        Ok(h) -> { out = out ++ [h] }
+      }
+    }
+  }
+  match err {
+    Some(e) -> Err(e)
+    None -> Ok(out)
+  }
+}
+
+fn split_target(target: String) -> (String, String) =
+  match str.split_once(target, "?") {
+    Some((p, q)) -> (p, q)
+    None -> (target, "")
+  }
+
+## Parse a head: the request line and header lines, as the bytes up to and
+## including the blank line. Header names come back lower-cased (they are
+## case-insensitive); values are trimmed. Bytes are read as ISO-8859-1, so a
+## non-ASCII byte is carried through as one character rather than rejected.
+pub fn parse_head(raw: Bytes) -> Result[Head, Reject] = {
+  let text = bytes.decode_latin1(raw)
+  if not str.ends_with(text, "\r\n\r\n") {
+    Err(reject(400, "request head is not terminated"))
+  } else {
+    let lines = str.split(str.take(text, str.len(text) - 4), "\r\n")
+    let bare = list.any(lines, l => str.contains(l, "\n") || str.contains(l, "\r"))
+    if bare {
+      Err(reject(400, "bare CR or LF in request head"))
+    } else {
+      match lines {
+        [] -> Err(reject(400, "empty request"))
+        [first, ..rest] -> parse_request_line(first, rest)
+      }
+    }
+  }
+}
+
+fn parse_request_line(line: String, rest: List[String]) -> Result[Head, Reject] = {
+  let parts = str.split(line, " ")
+  match parts {
+    [method, target, version] ->
+      if not is_upper_token(method) || not str.starts_with(target, "/") || has_ctl(target) {
+        Err(reject(400, "malformed request line"))
+      } else if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        if str.starts_with(version, "HTTP/") {
+          Err(reject(505, "only HTTP/1.0 and HTTP/1.1 are supported"))
+        } else {
+          Err(reject(400, "malformed request line"))
+        }
+      } else if method != "GET" && method != "POST" {
+        Err(reject(405, "method ${method} is not allowed"))
+      } else if len(rest) > MAX_HEADERS {
+        Err(reject(431, "too many header lines"))
+      } else {
+        match parse_headers(rest) {
+          Err(e) -> Err(e)
+          Ok(hs) -> {
+            let (p, q) = split_target(target)
+            Ok(Head { method: method, path: p, query: q, headers: hs })
+          }
+        }
+      }
+    _ -> Err(reject(400, "malformed request line"))
+  }
+}
+
+fn name_is(h: (String, String), name: String) -> Bool =
+  match h {
+    (k, _) -> k == name
+  }
+
+fn value_of(h: (String, String)) -> String =
+  match h {
+    (_, v) -> v
+  }
+
+## Every value of the header `name` (given lower-case), in order.
+pub fn header_values(headers: List[(String, String)], name: String) -> List[String] =
+  list.map(list.filter(headers, h => name_is(h, name)), h => value_of(h))
+
+## The first value of the header `name` (given lower-case).
+pub fn header(headers: List[(String, String)], name: String) -> Option[String] =
+  match header_values(headers, name) {
+    [v, ..] -> Some(v)
+    [] -> None
+  }
+
+## How many body bytes to read. No `Content-Length` means none (what the design
+## says of a POST without one). A chunked or otherwise encoded body is 411;
+## a repeated, signed, non-numeric or absurdly long length is 400 (nginx
+## refuses a repeated one too, and two parsers disagreeing about which
+## wins is how requests get smuggled); more than MAX_BODY is 413.
+pub fn body_length(h: Head) -> Result[Int, Reject] =
+  if len(header_values(h.headers, "transfer-encoding")) > 0 {
+    Err(reject(411, "a request body must carry Content-Length; Transfer-Encoding is not supported"))
+  } else {
+    match header_values(h.headers, "content-length") {
+      [] -> Ok(0)
+      [v] ->
+        if not all_digits(v) || str.len(v) > 9 {
+          Err(reject(400, "invalid Content-Length"))
+        } else {
+          match parse_int(v) {
+            None -> Err(reject(400, "invalid Content-Length"))
+            Some(n) ->
+              if n > MAX_BODY {
+                Err(reject(413, "source exceeds ${MAX_BODY} bytes"))
+              } else {
+                Ok(n)
+              }
+          }
+        }
+      _ -> Err(reject(400, "duplicate Content-Length"))
+    }
+  }
+
+## Where the scan for CRLFCRLF stands after one more byte: how many bytes of
+## "\r\n\r\n" are matched at the end of what has been seen (4 means done).
+pub fn scan_step(state: Int, c: Int) -> Int =
+  if c == 13 && (state == 0 || state == 2) {
+    state + 1
+  } else if c == 10 && (state == 1 || state == 3) {
+    state + 1
+  } else if c == 13 {
+    1
+  } else {
+    0
+  }
+
+## Read the head one byte at a time, so nothing past the blank line is taken
+## from the stream. `read(pos, n)` returns up to `n` bytes at `pos`; fewer than
+## asked means the input ended.
+pub fn read_head_from(read: fn(Int, Int) -> Bytes !e) -> Result[Bytes, Reject] !e = {
+  var buf = bytes.buf()
+  var state = 0
+  var n = 0
+  var fail: Option[Reject] = None
+  while state < 4 && fail == None {
+    if n >= MAX_HEAD {
+      fail = Some(reject(431, "request head exceeds ${MAX_HEAD} bytes"))
+    } else {
+      let b = read(n, 1)
+      if bytes.len(b) == 0 {
+        fail = Some(reject(400, "request ended before the end of the head"))
+      } else {
+        let c = bytes.at(b, 0)
+        buf = bytes.put(buf, c)
+        state = scan_step(state, c)
+        n = n + 1
+      }
+    }
+  }
+  match fail {
+    Some(e) -> Err(e)
+    None -> Ok(bytes.freeze(buf))
+  }
+}
+
+## Read one whole request through `read`. The body length is checked before a
+## byte of body is read.
+pub fn read_request_from(read: fn(Int, Int) -> Bytes !e) -> Result[Request, Reject] !e =
+  match read_head_from(read) {
+    Err(e) -> Err(e)
+    Ok(raw) ->
+      match parse_head(raw) {
+        Err(e) -> Err(e)
+        Ok(h) ->
+          match body_length(h) {
+            Err(e) -> Err(e)
+            Ok(n) -> {
+              let body = if n == 0 { bytes.slice(raw, 0, 0) } else { read(bytes.len(raw), n) }
+              if bytes.len(body) < n {
+                Err(reject(400, "request body is shorter than Content-Length"))
+              } else {
+                Ok(Request { method: h.method, path: h.path, query: h.query, headers: h.headers, body: body })
+              }
+            }
+          }
+      }
+  }
+
+## One request from standard input.
+pub fn read_request() -> Result[Request, Reject] !io = read_request_from((_pos, n) => read_stdin(n))
+
+## Take whatever has already arrived on stdin and drop it, without waiting.
+## Call it after the response is written and before exiting (see the header).
+pub fn drain() -> Unit !io = {
+  var more = true
+  while more {
+    if stdin_ready(0) {
+      if bytes.len(read_stdin(1)) == 0 { more = false }
+    } else {
+      more = false
+    }
+  }
+}
+
+## Write the response to stdout, then drain stdin.
+pub fn respond(status: Int, content_type: String, body: String) -> Unit !io = {
+  print(render_response(status, content_type, body))
+  drain()
+}
+
+## Answer a refused request.
+pub fn respond_reject(r: Reject) -> Unit !io = {
+  print(render_reject(r))
+  drain()
+}
+
+# ---- tests -------------------------------------------------------------
+
+# A fake stdin: `read(pos, n)` is the slice of `data` at `pos`.
+fn from_bytes(data: Bytes) -> fn(Int, Int) -> Bytes =
+  (pos, n) => bytes.slice(data, pos, pos + n)
+
+fn req_of(s: String) -> Result[Request, Reject] = read_request_from(from_bytes(bytes.utf8(s)))
+
+fn status_of(r: Result[Request, Reject]) -> Int =
+  match r {
+    Ok(_) -> 0
+    Err(e) -> e.status
+  }
+
+test "a GET parses into method, path, query and lower-cased headers" {
+  match req_of("GET /health?x=1 HTTP/1.1\r\nHost: a\r\nX-Thing:  padded \r\n\r\n") {
+    Ok(r) -> {
+      assert r.method == "GET"
+      assert r.path == "/health"
+      assert r.query == "x=1"
+      assert header(r.headers, "x-thing") == Some("padded")
+      assert header(r.headers, "host") == Some("a")
+      assert bytes.len(r.body) == 0
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "a POST with Content-Length reads exactly that body" {
+  match req_of("POST /run HTTP/1.1\r\nContent-Length: 11\r\n\r\n{\"code\":\"\"}") {
+    Ok(r) -> {
+      assert r.method == "POST"
+      assert bytes.decode_utf8_lossy(r.body) == "{\"code\":\"\"}"
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "header names are case-insensitive" {
+  match req_of("POST /run HTTP/1.1\r\ncontent-length: 2\r\nCONTENT-TYPE: a/b\r\n\r\nhi") {
+    Ok(r) -> {
+      assert bytes.decode_utf8_lossy(r.body) == "hi"
+      assert header(r.headers, "content-type") == Some("a/b")
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "scan_step matches CRLFCRLF and restarts on a stray CR" {
+  var s = 0
+  for c in [13, 10, 13, 10] { s = scan_step(s, c) }
+  assert s == 4
+  var t = 0
+  for c in [13, 13, 10, 13, 10] { t = scan_step(t, c) }
+  assert t == 4
+  var u = 0
+  for c in [13, 10, 10, 13, 10] { u = scan_step(u, c) }
+  assert u != 4
+}
+
+test "a 64 KiB body is accepted whole" {
+  let body = str.repeat("x", 65536)
+  match req_of("POST /run HTTP/1.1\r\nContent-Length: 65536\r\n\r\n" ++ body) {
+    Ok(r) -> { assert bytes.len(r.body) == 65536 }
+    Err(_) -> { assert false }
+  }
+}
+
+test "a body over the cap is 413 and is not read" {
+  # no body bytes follow: reading them would be a 400, so a 413 proves the
+  # length was refused first
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: 65537\r\n\r\n")) == 413
+}
+
+test "an oversized head is 431" {
+  let big = str.repeat("a", MAX_HEAD)
+  assert status_of(req_of("GET / HTTP/1.1\r\nX: " ++ big ++ "\r\n\r\n")) == 431
+}
+
+test "too many header lines is 431" {
+  let many = str.repeat("A: b\r\n", 101)
+  assert status_of(req_of("GET / HTTP/1.1\r\n" ++ many ++ "\r\n")) == 431
+}
+
+test "a POST without Content-Length has an empty body and the stray bytes stay unread" {
+  match req_of("POST /run HTTP/1.1\r\nHost: a\r\n\r\nsurprise") {
+    Ok(r) -> { assert bytes.len(r.body) == 0 }
+    Err(_) -> { assert false }
+  }
+}
+
+test "a chunked body is 411" {
+  assert status_of(req_of("POST /run HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")) == 411
+}
+
+test "bad request lines are 400, 405 or 505" {
+  assert status_of(req_of("GARBAGE\r\n\r\n")) == 400
+  assert status_of(req_of("GET /a\r\n\r\n")) == 400
+  assert status_of(req_of("GET a HTTP/1.1\r\n\r\n")) == 400
+  assert status_of(req_of("get / HTTP/1.1\r\n\r\n")) == 400
+  assert status_of(req_of("GET / FTP/1.1\r\n\r\n")) == 400
+  assert status_of(req_of("GET / HTTP/2.0\r\n\r\n")) == 505
+  assert status_of(req_of("DELETE / HTTP/1.1\r\n\r\n")) == 405
+  assert status_of(req_of("GET  / HTTP/1.1\r\n\r\n")) == 400
+}
+
+test "malformed headers are 400" {
+  assert status_of(req_of("GET / HTTP/1.1\r\nno colon\r\n\r\n")) == 400
+  assert status_of(req_of("GET / HTTP/1.1\r\nBad Name: x\r\n\r\n")) == 400
+  assert status_of(req_of("GET / HTTP/1.1\r\nA: b\r\n folded\r\n\r\n")) == 400
+  assert status_of(req_of("GET / HTTP/1.1\nHost: a\n\n")) == 400
+}
+
+test "Content-Length that is repeated, signed or not a number is 400" {
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\nhi")) == 400
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: 2\r\ncontent-length: 3\r\n\r\nhi!")) == 400
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: -1\r\n\r\n")) == 400
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: +2\r\n\r\nhi")) == 400
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: two\r\n\r\n")) == 400
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: 9999999999\r\n\r\n")) == 400
+}
+
+test "input that ends early is 400" {
+  assert status_of(req_of("GET / HTTP/1.1\r\nHost: a\r\n")) == 400
+  assert status_of(req_of("")) == 400
+  assert status_of(req_of("POST /run HTTP/1.1\r\nContent-Length: 10\r\n\r\nshort")) == 400
+}
+
+test "a response carries the byte length and Connection: close" {
+  let r = render_response(200, "application/json", "{\"a\":\"é\"}")
+  assert r == "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10\r\nConnection: close\r\n\r\n{\"a\":\"é\"}"
+}
+
+test "a refusal is the runner's JSON error and a 405 names the methods" {
+  let r = render_reject(reject(405, "no"))
+  assert str.starts_with(r, "HTTP/1.1 405 Method Not Allowed\r\n")
+  assert str.contains(r, "Allow: GET, POST\r\n")
+  assert str.contains(r, "Connection: close\r\n")
+  assert str.contains(render_reject(reject(413, "big")), "\"ok\":false")
+}
