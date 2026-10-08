@@ -3912,6 +3912,50 @@ test "LSP analysis configuration keeps legacy defaults and rejects negative limi
   assert match catch_panic(() => validate_analysis_config(negative)) { Err(_) -> true, Ok(_) -> false }
 }
 
+test "a dot in a workspace member whose imported type it uses completes instead of crashing" {
+  # `p.` does not parse, so the member's own analysis checks nothing and its
+  # context holds no types, while its written `Pt` still resolves to the id
+  # the imported module declared. The for-pattern query used to walk that tree
+  # on every dot and look the id up in the empty table: "unknown adt id", and
+  # the server was gone (v0.85.0 on selfhost/src/check/checker.dawn).
+  let root = memfs.BASE ++ "/dot-project"
+  let path = root ++ "/src/main.dawn"
+  let uri = "file://" ++ path
+  let text = "use lib.{Pt}\n\npub fn f(p: Pt) -> Int = {\n  p.\n}\n"
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"dot_project\"\n")
+  files = memfs.put(files, root ++ "/src/lib.dawn", "pub type Pt = { x: Int }\n")
+  files = memfs.put(files, path, text)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let plan = project_plan(source.SourceFile(path))
+        let identity = workspace_identity(plan)
+        let doc = Doc {
+          uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
+          text: text, view: view_of(text), ls: line_starts_of(text),
+          analysis: WorkspaceMember(identity)
+        }
+        let base = def_probe_state(std)
+        let st0 = LspState { ..base, docs: map.insert(base.docs, uri, doc) }
+        let lease = jsig_refused_lease()
+        let empty = Workspace {
+          plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
+          prog: None, entry_by_uri: map.empty(), lease: lease,
+          cache: incremental.new(std, ct_default(), lease.jsig, 128),
+          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
+          refresh_problem: None, world: None
+        }
+        let ws = rebuild_workspace(st0, empty)
+        let st = LspState { ..st0, workspaces: map.insert(st0.workspaces, identity.lookup_key, Ready(ws)) }
+        let items = ai_items(handle_completion(st, d7_params(doc, "  p.", 4)))
+        assert len(items) >= 0
+      })))
+}
+
 test "workspace commits its module memo with its Program and drops it on conflict" {
   let root = memfs.BASE ++ "/prefix-project"
   let path = root ++ "/src/main.dawn"

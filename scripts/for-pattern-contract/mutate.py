@@ -389,7 +389,7 @@ MUTATIONS = {
     "skip-qualified-pattern-constructors": (
         "src/lsp/lspc.dawn",
         ((
-            '''        if in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos) {
+            '''        if for_on_line(cps, ls, pos) && (in_for_pattern(qc, pos) || in_incomplete_qualified_for_pattern(text, alias_lo, pos)) {
           return whole(qualified_pattern_constructors(qc, module_alias))
         }
 ''',
