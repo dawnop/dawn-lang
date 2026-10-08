@@ -36,18 +36,19 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
+  CContinue, CForeign, CDup, CReset, CReuse, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
   CMode, COwned, mode_owned, mode_key, callee_mode_key,
   cex_ty, diverges
 }
 use check/types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, TyVar, TyFn, EPure,
-  is_ref_ty, intr_owned_args }
+  TyAdt, DICT_ADT_ID, peel_opaque, is_ref_ty, intr_owned_args }
 use std/list
 use std/map
 use ir/reach.{LIST_MOD, LIST_FROM_ARRAY}
 use c/views
+use c/cwalk
 use std/set
 
 # ---- state ----
@@ -100,7 +101,18 @@ type RSt = {
   next_sym: Int,
   # inside the right side of && / ||, where evaluation is conditional and
   # transfers are refused -- see `rw_scircuit`
-  pinned: Bool
+  pinned: Bool,
+  # The ADT-typed bindings the ledger owns, by symbol: the candidates for a
+  # reset (docs/perceus-reuse-design.md 4.2), which is a drop that keeps the
+  # block when a constructor of the same type follows.
+  adt_tys: Map[Int, Ty],
+  # The reuse tokens this function has made, symbol to the ADT they were
+  # reset from. A token is an ordinary counted local (a scope end releases
+  # it, a `return` unwinds it) with two differences: `sweep` leaves it alone,
+  # since nothing later in the source names it, and a constructor of its type
+  # may consume it. Whether one is still held is the scopes' business, not
+  # this map's, so a branch that spent it needs no bookkeeping here.
+  toks: Map[Int, Int]
 }
 
 fn fresh(st: RSt) -> (RSt, Int) = (RSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
@@ -184,6 +196,18 @@ fn transferable(st: RSt, sym: Int, after: Set[Int]) -> Bool = {
 }
 
 fn release(st: RSt, sym: Int) -> RSt = strip_syms(st, [sym])
+
+## Remember that `sym` holds a constructed node, so a release of it may become
+## a reset. Not a binding that starts as a placeholder (`null_ref`, the zero a
+## match result or a loop variable is declared with): until its first
+## assignment it holds nothing, and a reset of nothing has no block to keep.
+fn note_adt(st: RSt, sym: Int, ty: Ty, init: CExpr) -> RSt = {
+  let placeholder = match init {
+    CIntrinsic(name, _, _, _) -> name == "null_ref"
+    _ -> false
+  }
+  if adt_id(ty) >= 0 && not placeholder { RSt { ..st, adt_tys: map.insert(st.adt_tys, sym, ty) } } else { st }
+}
 
 ## Which scope holds `sym`, outermost first; -1 when none does.
 fn scope_index_of(st: RSt, sym: Int) -> Int = {
@@ -274,6 +298,8 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
         Some(x) -> fv_expr(x, acc)
       },
     CDup(inner, _) -> fv_expr(inner, acc)
+    CReset(inner, _) -> fv_expr(inner, acc)
+    CReuse(tok, ctor, _) -> fv_expr(ctor, fv_expr(tok, acc))
     # a continue is a read of every binding its next iteration touches; the
     # pin stands in for all of them at once
     CContinue(lid) -> set.insert(acc, pin_of(lid))
@@ -430,6 +456,8 @@ fn falls_through(e: CExpr) -> Bool = {
     CBox(x, _) -> falls_through(x)
     CUnbox(x, _) -> falls_through(x)
     CDup(x, _) -> falls_through(x)
+    CReset(x, _) -> falls_through(x)
+    CReuse(t, c, _) -> falls_through(t) && falls_through(c)
     CUnary(_, x, _) -> falls_through(x)
     CBinary(op, l, r, _) ->
       match op {
@@ -530,6 +558,8 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
         Some(x) -> jumps(x, lid, brk, cont)
       },
     CDup(x, _) -> jumps(x, lid, brk, cont)
+    CReset(x, _) -> jumps(x, lid, brk, cont)
+    CReuse(t, c, _) -> jumps(t, lid, brk, cont) || jumps(c, lid, brk, cont)
     # The rest, enumerated for fv_expr's reason: a node added later must come
     # back here as a compile error. A jump wrongly reported absent is an
     # `unloop` that flattens an arm still holding a break.
@@ -638,6 +668,8 @@ fn leaves(e: CExpr, inner: List[Int]) -> Bool =
     }
     CListLit(es, _) -> leaves_list(es, inner)
     CDup(x, _) -> leaves(x, inner)
+    CReset(x, _) -> leaves(x, inner)
+    CReuse(t, c, _) -> leaves(t, inner) || leaves(c, inner)
     # The rest, enumerated for fv_expr's reason: a jump wrongly reported
     # absent is an earlier operand left out of the unwind (#506, #507).
     CInt(_) -> false
@@ -1418,6 +1450,9 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
       let (st1, x1) = lift_spread_expr(st, inner)
       (st1, CDup(x1, ty))
     }
+    # this pass makes both; nothing it lifts from holds one yet
+    CReset(_, _) -> (st, e)
+    CReuse(_, _, _) -> (st, e)
     # Foreign calls cannot reach the native emitter. Leaving one opaque is
     # conservative: if it is the base's only remaining use, liveness keeps
     # the record instead of moving a JVM-only access across the call.
@@ -1488,6 +1523,8 @@ fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
     CListLit(elems, _) -> assigns_spread_list(elems, sym)
     CReturn(value) -> assigns_spread_opt(value, sym)
     CDup(inner, _) -> assigns_spread_expr(inner, sym)
+    CReset(inner, _) -> assigns_spread_expr(inner, sym)
+    CReuse(tok, ctor, _) -> assigns_spread_expr(tok, sym) || assigns_spread_expr(ctor, sym)
     CForeign(j, _, _) -> {
       let in_target = match j.target {
         None -> false
@@ -1733,7 +1770,18 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
 
     CCtor(adt, ci, args, cty) -> {
       let (st1, lets, args1, temps) = consume_all(st, args, after)
-      wrap(st1, lets, CCtor(adt, ci, args1, cty), cty, temps)
+      # A token of this type that an earlier release left behind takes the
+      # allocation's place. The arguments have run by now, so everything the
+      # fields are written from is in hand; the token is spent here and the
+      # scope that held it forgets it.
+      match find_token(st1, adt, len(args), after) {
+        Some(tok) -> {
+          let tty = cex_ty(e)
+          wrap(release(st1, tok), lets,
+            CReuse(CLocal(tok, tty), CCtor(adt, ci, args1, cty), cty), cty, temps)
+        }
+        None -> wrap(st1, lets, CCtor(adt, ci, args1, cty), cty, temps)
+      }
     }
 
     # C builds a record whole: an update is its constructor with the kept
@@ -1830,7 +1878,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
         None -> after
         Some(t) -> fv_expr(t, after)
       }
-      let (st2, stmts1) = rw_stmts(st1, stmts0, base)
+      let (st2, stmts1) = rw_stmts(st1, stmts0, base, tail0)
       let (st3, tail1) = match tail0 {
         None -> (st2, None)
         Some(t) -> {
@@ -1920,6 +1968,9 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     CDictArg(_, _, _, _, _) -> (st, e)
     # this pass is what puts CDup in; nothing it is handed holds one yet
     CDup(_, _) -> (st, e)
+    # nor of these, which only this pass writes
+    CReset(_, _) -> (st, e)
+    CReuse(_, _, _) -> (st, e)
   }
 }
 
@@ -1942,13 +1993,94 @@ fn rw_callee(st: RSt, c: CCallee, after: Set[Int]) -> (RSt, List[CStmt], CCallee
 ## transfer's, and for the transfer's reasons: a binding outside the current
 ## loop is touched again next iteration even when this one is done with it,
 ## and inside a short-circuit right side a drop would only sometimes run.
-fn sweep(st: RSt, after: Set[Int]) -> (RSt, List[CStmt]) = {
+fn sweep(st: RSt, after: Set[Int], ctors: Map[Int, Int]) -> (RSt, List[CStmt]) = {
   if st.pinned { return (st, []) }
   var dead: List[Int] = []
   for sym in scope_syms(st) {
-    if not set.has(after, sym) && transferable(st, sym, after) { dead = dead ++ [sym] }
+    if not set.has(after, sym) && not map.has(st.toks, sym) && transferable(st, sym, after) {
+      dead = dead ++ [sym]
+    }
   }
-  if len(dead) == 0 { (st, []) } else { (strip_syms(st, dead), drops(dead)) }
+  if len(dead) == 0 { return (st, []) }
+  var st1 = strip_syms(st, dead)
+  var want = ctors
+  for tok in scope_syms(st1) {
+    match map.get(st1.toks, tok) {
+      Some(aid) -> { want = map.insert(want, aid, map.get(want, aid).unwrap_or(0) - 1) }
+      None -> ()
+    }
+  }
+  var out: List[CStmt] = []
+  for sym in dead {
+    let reset_ty: Option[Ty] = match map.get(st1.adt_tys, sym) {
+      Some(ty) -> if map.get(want, adt_id(ty)).unwrap_or(0) > 0 { Some(ty) } else { None }
+      None -> None
+    }
+    match reset_ty {
+      Some(ty) -> {
+        let aid = adt_id(ty)
+        let (st2, tok) = fresh(st1)
+        st1 = bind(RSt { ..st2, toks: map.insert(st2.toks, tok, aid) }, tok)
+        want = map.insert(want, aid, map.get(want, aid).unwrap_or(0) - 1)
+        out = out ++ [CSLet(tok, ty, CReset(CLocal(sym, ty), ty))]
+      }
+      None -> { out = out ++ [CSDrop(sym)] }
+    }
+  }
+  (st1, out)
+}
+
+## The ADT a binding of this type is a value of, or -1. Only a constructed
+## node can be reset; the dictionary pseudo-type is a static outside the
+## ledger.
+fn adt_id(ty: Ty) -> Int =
+  match peel_opaque(ty) {
+    TyAdt(aid, _) -> if aid == DICT_ADT_ID { -1 } else { aid }
+    _ -> -1
+  }
+
+## How many constructors of each ADT the rest of the block can build, counting
+## only the ones a token could be handed to: more than zero fields (a
+## field-less value is a shared static) and few enough for a narrow mask.
+## A record update is its constructor.
+fn ctor_counts(s: CStmt, acc: Map[Int, Int]) -> Map[Int, Int] =
+  cwalk.fold_stmt(s, acc, bump_ctor, (a: Map[Int, Int], x: CStmt) => a)
+
+fn ctor_counts_expr(e: CExpr, acc: Map[Int, Int]) -> Map[Int, Int] =
+  cwalk.fold_expr(e, acc, bump_ctor, (a: Map[Int, Int], x: CStmt) => a)
+
+fn bump_ctor(acc: Map[Int, Int], e: CExpr) -> Map[Int, Int] =
+  match e {
+    CCtor(adt, _, args, _) -> bump_adt(acc, adt, len(args))
+    CUpdate(_, adt, _, fields, _) -> bump_adt(acc, adt, len(fields))
+    _ -> acc
+  }
+
+fn bump_adt(acc: Map[Int, Int], adt: Int, n: Int) -> Map[Int, Int] =
+  if n >= 1 && n <= 64 { map.insert(acc, adt, map.get(acc, adt).unwrap_or(0) + 1) } else { acc }
+
+## A token this constructor can take: of its ADT, held by a scope the
+## constructor may release from (`transferable`), most recent first so that a
+## nested build takes the nearest one. None under a short-circuit's right
+## side, where nothing may be spent, and for a field count a token cannot
+## carry.
+fn find_token(st: RSt, adt: Int, n: Int, after: Set[Int]) -> Option[Int] = {
+  if st.pinned || n < 1 || n > 64 { return None }
+  var i = len(st.scopes) - 1
+  while i >= 0 {
+    let syms = st.scopes[i].syms
+    var j = len(syms) - 1
+    while j >= 0 {
+      let sym = syms[j]
+      match map.get(st.toks, sym) {
+        Some(aid) -> if aid == adt && transferable(st, sym, after) { return Some(sym) }
+        None -> ()
+      }
+      j = j - 1
+    }
+    i = i - 1
+  }
+  None
 }
 
 ## A self tail call lowers to `let t = f(p); ...; p = t; continue`: the
@@ -2023,15 +2155,24 @@ fn fuse_rebinds(stmts: List[CStmt], base: Set[Int]) -> List[CStmt] = {
 ## alive. The after-sets are built back to front so the whole list costs one
 ## walk, then spent front to back with the rewrite; a sweep between each pair
 ## of statements releases whatever the suffix no longer touches.
-fn rw_stmts(st: RSt, stmts0: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) = {
+fn rw_stmts(st: RSt, stmts0: List[CStmt], base: Set[Int], tail: Option[CExpr]) -> (RSt, List[CStmt]) = {
   let stmts = fuse_rebinds(stmts0, base)
   let n = len(stmts)
   var afters: List[Set[Int]] = []
+  # the constructors still to come, built the same way: what a reset between
+  # two statements may hope to hand its token to
+  var ctors_after: List[Map[Int, Int]] = []
   var acc = base
+  var cacc: Map[Int, Int] = match tail {
+    None -> map.empty()
+    Some(t) -> ctor_counts_expr(t, map.empty())
+  }
   var i = n - 1
   while i >= 0 {
     afters = afters ++ [acc]
+    ctors_after = ctors_after ++ [cacc]
     acc = fv_stmt(stmts[i], acc)
+    cacc = ctor_counts(stmts[i], cacc)
     i = i - 1
   }
   var st1 = st
@@ -2039,7 +2180,7 @@ fn rw_stmts(st: RSt, stmts0: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) 
   var j = 0
   for s in stmts {
     let (s2, ss) = rw_stmt(st1, s, afters[n - 1 - j])
-    let (s3, ds) = sweep(s2, afters[n - 1 - j])
+    let (s3, ds) = sweep(s2, afters[n - 1 - j], ctors_after[n - 1 - j])
     st1 = s3
     out = out ++ ss ++ ds
     j = j + 1
@@ -2060,7 +2201,7 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
         (st1, [CSLet(sym, ty, i1)])
       } else {
         let (st1, i1) = rw(st, init, true, after)
-        let st2 = if is_ref_ty(ty) && not dictish(st, init) { bind(st1, sym) } else { st1 }
+        let st2 = if is_ref_ty(ty) && not dictish(st, init) { note_adt(bind(st1, sym), sym, ty, init) } else { st1 }
         (st2, [CSLet(sym, ty, i1)])
       },
 
@@ -2243,7 +2384,8 @@ fn rc_fn(
   var st = RSt {
     scopes: [], dict_syms: dicts, modes: modes, borrowed_syms: bsyms,
     views: views.view_syms(dicts, f),
-    hoisting: false, fname: f.owner ++ "." ++ f.name, next_sym: next_sym, pinned: false
+    hoisting: false, fname: f.owner ++ "." ++ f.name, next_sym: next_sym, pinned: false,
+    adt_tys: map.empty(), toks: map.empty()
   }
   st = push(st, -1, true)
   # owned captures and parameters are the body's to release, so they enter
@@ -2257,7 +2399,7 @@ fn rc_fn(
   # carried in `dicts`.
   for p in f.captures ++ f.params ++ f.evs {
     if is_ref_ty(p.ty) && not set.has(dicts, p.sym) && mode_owned(p.mode) {
-      st = bind(st, p.sym)
+      st = note_adt(bind(st, p.sym), p.sym, p.ty, CUnit)
     }
   }
   let (st1, body1) = rw(st, f.body, true, no_syms())
@@ -2476,6 +2618,10 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
     CBreak(_) -> Chk { ..c, gone: true }
     CContinue(_) -> Chk { ..c, gone: true }
     CDup(inner, _) -> chk_expr(c, inner, false)
+    # a reset consumes its binding; a reuse consumes its token and builds the
+    # constructor as usual
+    CReset(inner, _) -> chk_expr(c, inner, true)
+    CReuse(tok, ctor, _) -> chk_walk(chk_expr(c, tok, true), ctor, k)
     CField(t, _, _, _, _) -> chk_expr(c, t, false)
     CTupleGet(t, _, _) -> chk_expr(c, t, false)
     CIsCtor(t, _, _) -> chk_expr(c, t, false)
@@ -3030,12 +3176,13 @@ test "a record update releases its spread owner before an updated field runs" {
       }
       # The old record dies after the two fields are safe and before the tail
       # call can run. Deleting the scheduling inserts this drop after `g`.
+      # (a reset: the rebuilt record is the same type, so the block is kept)
       match ss[3] {
-        CSDrop(2) -> ()
+        CSLet(_, _, CReset(CLocal(2, _), _)) -> ()
         _ -> panic("expected the spread owner released before the update")
       }
       match tail {
-        Some(CCtor(_, _, args, _)) -> {
+        Some(CReuse(_, CCtor(_, _, args, _), _)) -> {
           match args[0] {
             CLocal(_, _) -> ()
             _ -> panic("expected the unchanged field transferred from its temporary")
@@ -3084,7 +3231,7 @@ test "a record bound after an earlier statement is released before its update" {
         _ -> panic("expected the updated field lifted after the record binding")
       }
       match ss[4] {
-        CSDrop(2) -> ()
+        CSLet(_, _, CReset(CLocal(2, _), _)) -> ()
         _ -> panic("expected the earlier record binding released before the update")
       }
       match ss[5] {
@@ -3092,7 +3239,7 @@ test "a record bound after an earlier statement is released before its update" {
         _ -> panic("expected the following statement to remain after the release")
       }
       match tail {
-        Some(CCtor(_, _, [CLocal(_, _), CCall(_, [CLocal(_, _)], _, _)], _)) -> ()
+        Some(CReuse(_, CCtor(_, _, [CLocal(_, _), CCall(_, [CLocal(_, _)], _, _)], _), _)) -> ()
         _ -> panic("expected the rebuilt record to consume the lifted fields")
       }
     }
@@ -3123,7 +3270,7 @@ test "a reassigned record is not lifted ahead of the assignment" {
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
     borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
-    next_sym: 100, pinned: false
+    next_sym: 100, pinned: false, adt_tys: map.empty(), toks: map.empty()
   }
   let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(tail))
   assert st1.next_sym == 100
@@ -3147,7 +3294,7 @@ test "a constructor written out whole is not taken for an update" {
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
     borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
-    next_sym: 100, pinned: false
+    next_sym: 100, pinned: false, adt_tys: map.empty(), toks: map.empty()
   }
   let stmts = [CSLet(2, rec, CCall(CDirect("m", "load"), [], rec, CNoSite))]
   let (st1, ss1, tail1) = schedule_record_update(st, stmts, Some(rebuilt))
@@ -3171,7 +3318,7 @@ test "an update nested in a written field keeps its node until its own block" {
   let st = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(),
     borrowed_syms: set.empty(), views: set.empty(), hoisting: false, fname: "m.f",
-    next_sym: 100, pinned: false
+    next_sym: 100, pinned: false, adt_tys: map.empty(), toks: map.empty()
   }
   let (_st1, ss1, tail1) = schedule_record_update(st, [CSLet(2, rec, CLocal(1, rec))], Some(outer))
   # the outer kept field was lifted, and the outer update became a constructor
@@ -3394,7 +3541,8 @@ test "an owned operand ahead of a leaving one is named, and only then" {
   assert len(rc_check(m, owned_modes())) == 0
   let st0 = RSt {
     scopes: [], dict_syms: set.empty(), modes: owned_modes(), borrowed_syms: set.empty(),
-    views: set.empty(), hoisting: false, fname: "m.f", next_sym: 100, pinned: false
+    views: set.empty(), hoisting: false, fname: "m.f", next_sym: 100, pinned: false,
+    adt_tys: map.empty(), toks: map.empty()
   }
   assert held_before_exit(st0, [fresh_list, cont], [0, 1])
   # the same row with the jump inside a loop of its own leaves nothing, and
@@ -3644,4 +3792,89 @@ test "an element read is copied where it is kept and bare where it is a view" {
     CSLet(_, _, CIntrinsic(_, _, _, _)) -> ()
     _ -> panic("expected the element bound bare")
   }
+}
+
+# ---- reset and reuse ----
+
+## How many resets and reuses the function's body holds, found by walking it.
+type Reuses = { resets: Int, reuses: Int }
+
+fn t_reuse_counts(m: CModule) -> Reuses = {
+  let count = (a: Reuses, e: CExpr) => match e {
+    CReset(_, _) -> Reuses { ..a, resets: a.resets + 1 }
+    CReuse(_, _, _) -> Reuses { ..a, reuses: a.reuses + 1 }
+    _ -> a
+  }
+  cwalk.fold_expr(m.fns[0].body, Reuses { resets: 0, reuses: 0 }, count, (a: Reuses, s: CStmt) => a)
+}
+
+fn t_rec_fn(tail: CExpr, extra: List[CStmt]) -> CModule = {
+  let rec = TyAdt(7, [])
+  let p = CParam { sym: 1, ty: rec, mode: COwned }
+  # the field read is the last touch of the parameter
+  let read = CSLet(2, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt))
+  rc_module(one_fn([p], rec, CBlock([read] ++ extra, Some(tail), rec)), owned_modes())
+}
+
+test "a node released before a constructor of its type is reset and handed on" {
+  let rec = TyAdt(7, [])
+  let m = t_rec_fn(CCtor(7, 0, [CLocal(2, TyInt)], rec), [CSDiscard(CInt(0))])
+  assert len(rc_check(m, owned_modes())) == 0
+  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
+  # the reset sits where the drop would have, right after the read
+  match t_stmts(m)[1] {
+    CSLet(_, _, CReset(CLocal(1, _), _)) -> ()
+    _ -> panic("expected the release to be a reset")
+  }
+}
+
+test "a node of another type, or a constructor with no fields, is just dropped" {
+  let rec = TyAdt(7, [])
+  let other = TyAdt(8, [])
+  let a = t_rec_fn(CCtor(8, 0, [CInt(1)], other), [])
+  assert len(rc_check(a, owned_modes())) == 0
+  assert t_reuse_counts(a) == Reuses { resets: 0, reuses: 0 }
+  let b = t_rec_fn(CCtor(7, 0, [], rec), [])
+  assert len(rc_check(b, owned_modes())) == 0
+  assert t_reuse_counts(b) == Reuses { resets: 0, reuses: 0 }
+}
+
+test "a token an arm does not spend is released on that arm" {
+  let rec = TyAdt(7, [])
+  let cond = CCall(CDirect("m", "c"), [], TyBool, CNoSite)
+  let build = CCtor(7, 0, [CLocal(2, TyInt)], rec)
+  let other = CCall(CDirect("m", "other"), [], rec, CNoSite)
+  let m = t_rec_fn(CIf(cond, build, Some(other), rec), [])
+  assert len(rc_check(m, owned_modes())) == 0
+  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
+}
+
+test "a token made outside a loop is not spent inside it" {
+  let rec = TyAdt(7, [])
+  let looped = CSLoop(5, CBlock(
+    [CSDiscard(CCtor(7, 0, [CLocal(2, TyInt)], rec))],
+    Some(CBreak(5)),
+    TyNever
+  ), None)
+  let m = t_rec_fn(CCtor(8, 0, [CInt(0)], TyAdt(8, [])), [looped])
+  assert len(rc_check(m, owned_modes())) == 0
+  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 0 }
+}
+
+test "two dead nodes get a token each only when two constructors follow" {
+  let rec = TyAdt(7, [])
+  let p = CParam { sym: 1, ty: rec, mode: COwned }
+  let q = CParam { sym: 2, ty: rec, mode: COwned }
+  let reads = [
+    CSLet(3, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt)),
+    CSLet(4, TyInt, CField(CLocal(2, rec), 7, 0, 0, TyInt))
+  ]
+  let one = CCtor(7, 0, [CBinary(CAdd, CLocal(3, TyInt), CLocal(4, TyInt), TyInt)], rec)
+  let m1 = rc_module(one_fn([p, q], rec, CBlock(reads, Some(one), rec)), owned_modes())
+  assert len(rc_check(m1, owned_modes())) == 0
+  assert t_reuse_counts(m1) == Reuses { resets: 1, reuses: 1 }
+  let two = CTuple([one, CCtor(7, 0, [CLocal(3, TyInt)], rec)], TyTuple([rec, rec]))
+  let m2 = rc_module(one_fn([p, q], TyTuple([rec, rec]), CBlock(reads, Some(two), TyTuple([rec, rec]))), owned_modes())
+  assert len(rc_check(m2, owned_modes())) == 0
+  assert t_reuse_counts(m2) == Reuses { resets: 2, reuses: 2 }
 }

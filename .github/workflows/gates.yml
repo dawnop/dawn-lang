@@ -377,7 +377,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19346s (the most this file's `3x` claims may add up to)
+# push-total: 19396s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2314,8 +2314,11 @@ jobs:
     # steps (run 37765371280); 12 main runs of 10-07 .. 10-08 have them,
     # median 575s. Restated to that plus a tenth, rounded up to 5s, 695s
     # (590s before), and the timeout to 3x that.
-    # budget: 3x 695s worst observed plus a tenth (run 37765371280)
-    timeout-minutes: 35
+    # 2026-10-08, later: the ADT reuse contract adds a planning 50s (47s
+    # measured on 16 cores, five private compilers built side by side), so the
+    # claim goes from 695s to 745s and the timeout to 3x that.
+    # budget: 3x 745s worst observed plus a tenth (run 37765371280) and the reuse contract's planning 50s
+    timeout-minutes: 38
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2407,6 +2410,19 @@ jobs:
       # compilers built side by side.
       - name: RC view contract
         run: ./scripts/rc-view-contract/run.sh
+
+      # ADT reset/reuse (the runtime's dawn_adt_reset/dawn_adt_reuse and the
+      # rewrite's CReset/CReuse). Reuse changes no answer, and a stale read of
+      # a reused block is not a sanitizer report, so three oracles: stdout
+      # against the recording made before reuse existed (a shared tree must
+      # survive `incr`), AddressSanitizer and LeakSanitizer over runs that
+      # suspend or panic between a reset and its reuse, and the runtime's own
+      # counters as a difference of two sizes (a steady-state update chain
+      # allocates nothing; a tree or list walk reuses 95% of its nodes). One
+      # private compiler per mutation, and one private runtime, each of which
+      # has to turn it red. Measured 2026-10-08: 47s on 16 cores.
+      - name: ADT reuse contract
+        run: ./scripts/adt-reuse-contract/run.sh
 
       # RC's match-only unloop rewrite must not erase a source loop that still
       # owns a named break or continue target. The compiling mutant restores

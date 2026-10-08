@@ -44,7 +44,7 @@ use ir/core.{
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
-  CReturn, CBreak, CContinue, CForeign, CDup, sam_ev_exprs, CUpdate, update_values,
+  CReturn, CBreak, CContinue, CForeign, CDup, CReset, CReuse, sam_ev_exprs, CUpdate, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CBinOp, CUnOp,
@@ -119,6 +119,8 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CBox(inner, _) -> walk_expr(a, inner)
     CUnbox(inner, _) -> walk_expr(a, inner)
     CDup(inner, _) -> walk_expr(a, inner)
+    CReset(inner, _) -> walk_expr(a, inner)
+    CReuse(tok, ctor, _) -> walk_expr(walk_expr(a, tok), ctor)
     CBinary(_, l, r, _) -> walk_expr(walk_expr(a, l), r)
     CUnary(_, o, _) -> walk_expr(a, o)
     CIf(c, t, e2, _) -> walk_opt(walk_expr(walk_expr(a, c), t), e2)
@@ -354,6 +356,9 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
     CUnbox(inner, to) ->
       ind(d) ++ "unbox to=" ++ ty_str(adts, to) ++ "\n" ++ expr(adts, n, d + 1, inner)
     CDup(inner, _) -> ind(d) ++ "dup\n" ++ expr(adts, n, d + 1, inner)
+    CReset(inner, _) -> ind(d) ++ "reset\n" ++ expr(adts, n, d + 1, inner)
+    CReuse(tok, ctor, _) ->
+      ind(d) ++ "reuse\n" ++ expr(adts, n, d + 1, tok) ++ expr(adts, n, d + 1, ctor)
     CBinary(op, l, r, t) ->
       ind(d) ++ "binary " ++ bin_name(op) ++ ty(adts, t) ++ "\n" ++
       expr(adts, n, d + 1, l) ++ expr(adts, n, d + 1, r)
