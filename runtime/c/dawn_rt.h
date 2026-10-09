@@ -1020,6 +1020,12 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
  * length is not a multiple of `width`. */
 dawn_bytes *dawn_bytes_pack_int(const dawn_array *a, int64_t width, bool little);
 dawn_array *dawn_bytes_unpack_int(const dawn_bytes *b, int64_t width, bool is_signed, bool little);
+/* The same for doubles. `width` is 4 or 8. Width 8 is bit-exact, NaN payload
+ * and `-0.0` included; width 4 rounds to nearest even on the way in and widens
+ * exactly on the way out, and a NaN's payload is not promised. Unpack panics
+ * when the length is not a multiple of `width`. */
+dawn_bytes *dawn_bytes_pack_float(const dawn_array *a, int64_t width, bool little);
+dawn_array *dawn_bytes_unpack_float(const dawn_bytes *b, int64_t width, bool little);
 
 /* ---- I64Buf: a flat, mutable buffer of 64-bit integers ----
  * (docs/mem-buffer-design.md 6.1, 6.2)

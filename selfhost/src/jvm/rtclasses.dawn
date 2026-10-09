@@ -26,7 +26,7 @@ use jvm/ops.{
   COMPUTE_FRAMES,
   OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
-  OP_ATHROW, OP_BALOAD, OP_BIPUSH, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
+  OP_ATHROW, OP_BALOAD, OP_BIPUSH, OP_D2F, OP_F2D, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
   OP_GOTO, OP_I2B, OP_I2L, OP_I2S, OP_IADD, OP_IALOAD, OP_IASTORE, OP_ICONST_0, OP_ICONST_1, OP_ICONST_2,
   OP_ICONST_3, OP_ICONST_M1, OP_IDIV, OP_IFEQ, OP_IFGE, OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE,
   OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPLT,
@@ -1105,24 +1105,26 @@ fn gen_bytes_decode_fixed(cw: ClassWriter, name: String, field: String) -> Unit 
   close_mv(mv)
 }
 
-## The integer half of the Array <-> Bytes family: `bytes_pack_int` and
-## `bytes_unpack_int` (docs/bulk-array-bytes-design.md), each one loop per call
-## where the Dawn source used to make one call per byte.
+## The Array <-> Bytes family: `bytes_pack_int` and `bytes_unpack_int`, then
+## `bytes_pack_float` and `bytes_unpack_float` (docs/bulk-array-bytes-design.md),
+## each one loop per call where the Dawn source used to make one call per byte.
 ##
-## The pieces below are the loop skeleton the float family reuses: a width
-## check that answers the width as an int, a counted loop open/close, and an
-## arm per width that the caller fills with the read or the write of one
-## element. A `ByteBuffer` with its order set once does the byte work, so
-## there is no per-width shifting here and the order is the argument's, never
-## the host's.
+## The pieces below are the loop skeleton both halves share: a width check that
+## answers the width as an int, a counted loop open/close, and an arm per width
+## that the caller fills with the read or the write of one element. A
+## `ByteBuffer` with its order set once does the byte work, so there is no
+## per-width shifting here and the order is the argument's, never the host's.
 ##
-## The panic sentences are the native runtime's (`dawn_bytes_pack_int` in
-## runtime/c/dawn_rt.c), word for word.
+## The panic sentences are the native runtime's (`dawn_bytes_pack_int` and its
+## float twin in runtime/c/dawn_rt.c), word for word.
 fn gen_bytes_int_family(cw: ClassWriter) -> Unit !io = {
-  gen_int_width(cw)
+  gen_width_check(cw, "int_width", [1, 2, 4, 8], " is not 1, 2, 4 or 8")
+  gen_width_check(cw, "float_width", [4, 8], " is not 4 or 8")
   gen_unpack_count(cw)
   gen_bytes_pack_int(cw)
   gen_bytes_unpack_int(cw)
+  gen_bytes_pack_float(cw)
+  gen_bytes_unpack_float(cw)
 }
 
 ## Throw a PanicError whose message is the constant `head`, then whatever
@@ -1150,11 +1152,11 @@ fn sb_append_long(m: MethodVisitor) -> Unit !io = {
   ()
 }
 
-## int_width(width: long, who: String) -> int: the width as an int when it is
-## 1, 2, 4 or 8, otherwise a panic reading `<who>width <w> is not 1, 2, 4 or 8`.
-fn gen_int_width(cw: ClassWriter) -> Unit !io = {
-  let m = open_static(cw, "int_width", "(JLjava/lang/String;)I")
-  for w in [1, 2, 4, 8] {
+## `name`(width: long, who: String) -> int: the width as an int when it is one
+## of `ws`, otherwise a panic reading `<who>width <w><tail>`.
+fn gen_width_check(cw: ClassWriter, name: String, ws: List[Int], tail: String) -> Unit !io = {
+  let m = open_static(cw, name, "(JLjava/lang/String;)I")
+  for w in ws {
     let next = Label.new()
     m.visitVarInsn(OP_LLOAD, 0)
     m.visitLdcInsn(Long.valueOf(w).expect("boxed"))
@@ -1174,7 +1176,7 @@ fn gen_int_width(cw: ClassWriter) -> Unit !io = {
   append_const(m, "width ")
   m.visitVarInsn(OP_LLOAD, 0)
   sb_append_long(m)
-  append_const(m, " is not 1, 2, 4 or 8")
+  append_const(m, tail)
   panic_sb_close(m)
   close_mv(m)
 }
@@ -1383,6 +1385,115 @@ fn gen_bytes_unpack_int(cw: ClassWriter) -> Unit !io = {
   m.visitLabel(end)
   m.visitVarInsn(OP_ALOAD, 7)
   m.visitVarInsn(OP_ILOAD, 6)
+  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_wrap",
+    "([Ljava/lang/Object;I)L" ++ ARRAY_CLASS ++ ";", false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## bytes_pack_float(a, width, little) -> byte[]. Width 8 writes the double's
+## raw bits, so a NaN keeps its payload and sign; width 4 narrows with D2F (IEEE
+## round to nearest even) and writes the float's raw bits. `doubleToRawLongBits`
+## and `floatToRawIntBits`, never the non-raw spellings, which fold every NaN to
+## the canonical one. Locals: 0 a, 1-2 width, 3 little, 4 w, 5 n, 6 out, 7 bb, 8 i.
+fn gen_bytes_pack_float(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "bytes_pack_float", "(L" ++ ARRAY_CLASS ++ ";JZ)[B")
+  let end = Label.new()
+  m.visitVarInsn(OP_LLOAD, 1)
+  m.visitLdcInsn("bytes.pack: ")
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "float_width", "(JLjava/lang/String;)I", false)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_len", "(L" ++ ARRAY_CLASS ++ ";)J", false)
+  m.visitInsn(OP_L2I)
+  m.visitVarInsn(OP_ISTORE, 5)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_IMUL)
+  m.visitIntInsn(OP_NEWARRAY, T_BYTE)
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;",
+    false)
+  bb_set_order(m, 3)
+  m.visitVarInsn(OP_ASTORE, 7)
+  for w in [4, 8] {
+    let next = width_arm_open(m, 4, w)
+    let ls = loop_open(m, 8, 5)
+    m.visitVarInsn(OP_ALOAD, 7)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitVarInsn(OP_ILOAD, 8)
+    m.visitInsn(OP_I2L)
+    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_get",
+      "(L" ++ ARRAY_CLASS ++ ";J)Ljava/lang/Object;", false)
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    if w == 4 {
+      m.visitInsn(OP_D2F)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Float", "floatToRawIntBits", "(F)I", false)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putInt",
+        "(I)Ljava/nio/ByteBuffer;", false)
+    } else {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "doubleToRawLongBits", "(D)J", false)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putLong",
+        "(J)Ljava/nio/ByteBuffer;", false)
+    }
+    m.visitInsn(OP_POP)
+    loop_close(m, 8, ls)
+    width_arm_close(m, next, end)
+  }
+  m.visitLabel(end)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## bytes_unpack_float(b, width, little) -> Array. Width 8 reads raw bits back
+## with `longBitsToDouble`; width 4 reads a float with `intBitsToFloat` and
+## widens it with F2D, which is exact. Locals: 0 b, 1-2 width, 3 little, 4 w,
+## 5 n, 6 store, 7 bb, 8 i.
+fn gen_bytes_unpack_float(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "bytes_unpack_float", "([BJZ)L" ++ ARRAY_CLASS ++ ";")
+  let end = Label.new()
+  m.visitVarInsn(OP_LLOAD, 1)
+  m.visitLdcInsn("bytes.unpack: ")
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "float_width", "(JLjava/lang/String;)I", false)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "unpack_count", "([BI)I", false)
+  m.visitVarInsn(OP_ISTORE, 5)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitTypeInsn(OP_ANEWARRAY, obj())
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;",
+    false)
+  bb_set_order(m, 3)
+  m.visitVarInsn(OP_ASTORE, 7)
+  for w in [4, 8] {
+    let next = width_arm_open(m, 4, w)
+    let ls = loop_open(m, 8, 5)
+    m.visitVarInsn(OP_ALOAD, 6)
+    m.visitVarInsn(OP_ILOAD, 8)
+    m.visitVarInsn(OP_ALOAD, 7)
+    if w == 4 {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "getInt", "()I", false)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Float", "intBitsToFloat", "(I)F", false)
+      m.visitInsn(OP_F2D)
+    } else {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J", false)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "longBitsToDouble", "(J)D", false)
+    }
+    m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;",
+      false)
+    m.visitInsn(OP_AASTORE)
+    loop_close(m, 8, ls)
+    width_arm_close(m, next, end)
+  }
+  m.visitLabel(end)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitVarInsn(OP_ILOAD, 5)
   m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_wrap",
     "([Ljava/lang/Object;I)L" ++ ARRAY_CLASS ++ ";", false)
   m.visitInsn(OP_ARETURN)
