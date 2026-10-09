@@ -1,6 +1,6 @@
 # 平铺数值缓冲与 `Mem` 效果（可变数组线 K1）
 
-> 状态：**proposed**。2026-10-09 写成。基线 `origin/main` = 3cafc848（初稿写在 8025df1e 上，已 rebase）。
+> 状态：**proposed**；K2（两后端运行时）已落地，见 §9.1。2026-10-09 写成。基线 `origin/main` = 3cafc848（初稿写在 8025df1e 上，已 rebase）。
 > 调研报告：维护者工作区 `research-mutable-arrays-20261009.md`（含全部 `file:line` 与网页出处，本文只留结论）；
 > 裁决：同目录 `ruling-mutable-arrays-20261009.md`；上游裁决 `ruling-bulk-array-bytes-20261008.md`。
 > 触发：dawnop-site S5（纯 Dawn bcrypt）在 JVM 上比 jBCrypt 慢约 10 倍（cost 12：1.9 s 对 0.18 s）。
@@ -189,7 +189,7 @@ handler 域 `var` 的格子**不是值**：它没有可拼写的类型，用户�
 | `new(n)`，`n < 0` | `I64Buf.new: negative length N` |
 | `new(n)`，`n > MAX_LEN` | `I64Buf.new: length N is too large` |
 | `fill(b, from, to, v)`，不满足 `0 <= from <= to <= len` | `I64Buf.fill: range [F, T) out of bounds for length M` |
-| `copy_from(dst, dst_at, src, src_at, n)`，`n < 0` 或任一区间越界（`copy_within` 同） | `I64Buf.copy_from: range out of bounds` 加两段长度，K2 定死后进合约 |
+| `copy_from(dst, dst_at, src, src_at, n)`，`n < 0` 或任一区间越界（`copy_within` 同，它是 `copy_from` 的一行包装，文案里写的仍是 `copy_from`） | `I64Buf.copy_from: range out of bounds (dst_at D, src_at S, n N) for dst length DL and src length SL`（K2 定死，进合约） |
 
 - **下标是 `Int`（64 位）。** JVM 实现必须在截断成 `int` **之前**对 `long` 做范围比较（K0 的原型没做，见 §1.4 第 3 点）。
   候选写法是单次无符号比较 `Long.compareUnsigned(i, len) >= 0`（一次比较同时覆盖负数）；它与 C2 的范围检查消除如何相互作用**未量**，K2 在两种写法间量一次，选快的。
@@ -229,8 +229,8 @@ K0 的 native 数字（§1.3）：无 LTO 约 1.7 倍，加 `-flto` 约 1.0 倍�
 
 ### 6.3 JVM
 
-`I64Buf` 的 JVM 描述符是 `[J`，与 `Bytes` 是 `[B` 同构。原语是 `dawn/rt/Mem`（暂名，K2 定）上的静态方法：
-`at ([JJ)J`、`set ([JJJ)V`，句柄在局部变量里，C2 内联后基址可以提升出循环（**未量**，K0 是静态字段形态）。
+`I64Buf` 的 JVM 描述符是 `[J`，与 `Bytes` 是 `[B` 同构。原语是 `dawn/rt/Mem`（K2 定名）上的静态方法：
+`at ([JJ)J`、`set ([JJJ)Ldawn/rt/Unit;`（`Unit` 在 JVM 上是单例对象，不是 `V`），句柄在局部变量里，C2 内联后基址可以提升出循环（**未量**，K0 是静态字段形态）。
 越界走 §5 的显式比较，抛 `dawn/rt/PanicError`，与 `array_bounds_panic` 同路径。`fill` 用 `Arrays.fill`，`copy_from` 用 `System.arraycopy`（后者自带 memmove 语义，注意它的实参次序是源在前，包装时对调）。
 
 ### 6.4 契约表登记
@@ -318,6 +318,61 @@ pub fn hash_raw(password: Bytes, salt: Bytes, cost: Int) -> List[Int] =
 | K5 | `F64Buf`；`to_bytes`/`from_bytes` 与批量线原语的缓冲端点 | 1M 元素缓冲与 `Bytes` 往返：位保真（`0x7FF8000000000001`、`-0.0` 往返，两后端逐字节一致）；端到端耗时 <= 批量线同尺寸 `List` 路径（批量线通过线 1.5 倍 `List` 拷贝），实测数在本刀补记 | 字节序写反；宽度错一档；符号扩展写成零扩展 |
 | K6 | 可选：JVM 静态唯一性分析（裁决第 5 条） | 仅在出现按位置更新 `List` 的实测需求时再评 | |
 
+### 9.1 K2 落地记录（2026-10-09）
+
+实现提交：`5113c698`（内置类型与六个原语，两后端）、`aaff683a`（`std/mem` 与契约门）。基线 `origin/main` = e027347b。
+
+**做了什么。** 新增内置类型 `I64Buf`（`Ty` 的叶子变体 `TyI64Buf`，访问级别 `BtPublic`，不是 std-only：§3.1 说用户模块也可以拼写它，
+辅助函数要把缓冲当参数收；它没有 `Eq`、`Hash`、`Ord`、`Show`，与 `Array` 同，按身份持有）；运行时模块 `RtMem` 与六个 std-only 原语
+`i64buf_new/len/at/set/fill/copy_from`（comptime 一律拒绝）；JVM 类 `dawn/rt/Mem`（`I64Buf` 是裸 `long[]`，描述符 `[J`）；
+native 的 `dawn_i64buf`（头、`len`、柔性数组成员，一次 `calloc`，叶子对象，`DAWN_K_I64BUF`）与头文件里 `static inline` 的 `len`/`at`/`set`，
+越界走 `cold`、`noreturn`、`noinline` 的 `dawn_i64buf_oob`；`std/mem` 里是原语的薄包装加 `copy_within`、`clone`、`from_list`、`to_list`，
+暂无 `Mem` 效果，函数不带标签（K3 加）。`F64Buf` 仍是 K5。
+
+**契约门 `scripts/mem-contract`。** 一份用户程序 `probe.dawn`，三次对着手写的 `expected.txt` 逐字节比较：JVM、native（-O2）、native 加 ASan/LeakSanitizer/UBSan；
+第四步不比输出，检查探针的汇编里没有 `dawn_i64buf_at/set/len` 的符号（`static inline` 退回外联时输出仍然对，只有这一步红）。
+`expected.txt` 覆盖 §5 全表，加 `2^32 + 5`、`-(2^32 - 5)`、`INT64_MAX` 的别名与溢出探针，以及一个 `at + n` 会回绕的 `copy_from`。
+`std/mem` 的 test 块（`dawn test --stdlib`；`scripts/native-asan-tests.sh` 在 ASan 下原生再跑一遍）另有 §6.2 要求的三个释放用例：
+panic 被接住时缓冲活着；闭包捕获了缓冲后被丢弃。第三个（挂起的续延持有缓冲后被丢弃）需要 `ctl` 效果，而 std 的这个模块不引入也不声明效果（引入 `std/io` 的 `Exit` 会让 checker-corpus 与 identity 的 `mint-imported-effect` 变异体多红一批 std 测试），所以放在 `scripts/mem-contract/probe.dawn` 里，同样在 ASan 下跑。门禁接进 `gates.yml` 的 `contracts-1`（本机约 6 s，不改任何 budget 行）。
+
+**变异体负控**（每个都先让门变红，再还原）：
+
+| 变异 | 哪一步红 |
+|---|---|
+| native 的界检查 `>=` 写成 `>` | native 腿，`index` 行 `I64Buf index 8 ...` 变成 `no panic` |
+| JVM 先截断成 `int` 再比较（K0 的形态） | JVM 腿，`2^32 + 5` 与 `-(2^32 - 5)` 两行变成 `no panic (0)` |
+| native `copy_from` 按正向逐元素拷贝 | native 腿，`up`、`same` 两行 |
+| native `new` 用 `malloc` 而不是 `calloc` | native 腿（以及 ASan 腿），`zero`、`plain` 两行 |
+| `dawn_i64buf_at` 加 `noinline` | 内联检查，汇编里 19 行符号 |
+| `dawn_i64buf_new` 每次多泄漏一块 | ASan/LeakSanitizer 腿 |
+| `copy_from` 多拿一个对 `dst` 的引用不还 | `rc-contract` 的 `i64buf` 断言（登记为 `counted`，所有者 `i64buf`） |
+
+另外 `scripts/rc-contract` 加了 `i64buf` 断言：新缓冲 rc 为 1 且清零，任何原语和任何由原语抛出的 panic 都不动引用计数，`dawn_immortal` 能处理这个种类。
+核对 §6.2 的「热循环没有逐次 dup/drop」：bcrypt 的 emit 转储里 `feistel`、`encipher`、`rewrite` 对句柄只有借用，没有 `dawn_dup`/`dawn_drop`。
+
+**实测：重量 K0 的 bcrypt（句柄参数版、显式长整比较），cost 12 `checkpw`，同机同轮，每轮 12 次取后 8 次的中位数，三轮：**
+
+| | 秒 | 对 jBCrypt 0.4 |
+|---|---|---|
+| jBCrypt 0.4 | 0.158、0.158、0.158 | 1.00 |
+| Dawn JVM，`Long.compareUnsigned(i, len) >= 0` | 0.159、0.159、0.160 | 约 1.01，验收线 1.5 |
+| Dawn JVM，两次有符号比较（`i < 0`，`i >= len`） | 0.160、0.160、0.159 | 约 1.01，与上一行无差别 |
+| Dawn native，clang-20 -O2，无 LTO | 0.150、0.149、0.148 | 约 0.94，验收线 1.2 |
+| Dawn native，gcc 13 -O2，无 LTO | 0.143、0.142、0.142 | 约 0.90 |
+
+两处结论。一，**§5 留的二选一：两种 JVM 写法在噪声内相同，取单次无符号比较**（代码短一半，字节码里一个分支）；新增的显式长整比较没有可测的成本。
+二，**`static inline` 本身追平了 LTO**：native 不开 LTO 就比 jBCrypt 快，§6.1 的升级梯子一步都没用上，§11 第 14 条（不开 LTO）保持。
+这台机器上的 jBCrypt 是 0.158 s，比 K0 记的 0.19 s 快，所以验收线按比例（同机同轮）判：JVM 约 1.01 倍对 1.5 倍，native 约 0.9 倍对 1.2 倍；
+绝对数 0.27 s 和 0.23 s 是参考机上的，这里更宽。bcrypt 的源码是 K0 的 `k0/bcrypt_buf.dawn` 把全局缓冲换成句柄实参，不入库（K4 会带真正的迁移），
+六个已知 hash 向量在 JVM 上全过，native 输出 `true`。
+
+**K2 没覆盖、留给后面的。**
+
+- **整程序拆分后的跨翻译单元调用。** `std/mem` 的 `at`/`set` 是普通 Dawn 函数，包着内联的原语；bcrypt 这样的小程序是一个翻译单元，包装函数被 `cc` 一起内联。
+  程序的函数体超过 `TU_BYTES`（1.5 MB，`emitc.dawn`）后会切成多个翻译单元，调用方与 `std/mem` 的包装不在同一个单元时，包装函数本身是一次外联调用，
+  `static inline` 的好处在那一跳上丢掉。这一点**未量**；要不要让 emitc 把「只包一个原语」的 std 函数当内联形式，是 K3/K4 在 dawnop-site 规模上量过再裁的事。
+- 含 `Mem` 证据参数的 bcrypt（K3 的 10% 线），`Mem` 效果与逃逸规则（K3），`to_bytes`/`from_bytes` 与 `F64Buf`（K5）。
+
 **K3 的变异体负控清单**（每条先证明会红：关掉对应规则，夹具必须编过；再证明规则开着时夹具被拒。门禁的绿没有信息量，只有变异体分得清「没漏」和「没看」）：
 
 | 编号 | 夹具 | 由哪条规则拒 |
@@ -349,7 +404,8 @@ pub fn hash_raw(password: Bytes, salt: Bytes, cost: Int) -> List[Int] =
    备选的同级模块 `std/memf` 被否：它会把 `Mem` 效果拆到两个模块的依赖里，而 `with_mem` 只应有一个。例外的理由写进 `std/mem` 的模块头注，免得被当成惯例抄。
 4. **范围写入越界：已裁，panic，绝不夹取。** 夹取一个写操作会把越界 bug 悄悄变成少写了几个字。已作为一句话补进 CONTRIBUTING §7 与它的中文译本（同提交，更新了译文摘要）。
    **给 K2 的备注（本刀不实现）：** 若强制 §7 准入测试的脚本需要对应规则（例如「名字里带 `fill`/`copy_from` 的写入范围函数不得走夹取实现」），在 K2 里补，
-   此刻只记下，不动脚本。
+   此刻只记下，不动脚本。**K2 结果：仓库里没有强制 §7 准入测试的脚本**（`scripts/` 下没有按函数名检查夹取或判据的检查），所以没有可补的规则；
+   `fill`/`copy_from` 不夹取这条由 `scripts/mem-contract` 与 `std/mem` 的 test 块的越界用例钉住（见 §9.1）。
 5. **名字：已裁。** `with_mem` 不变。图形学行话 `blit` 废弃，区间拷贝取 Rust/Java 先例：`copy_from(dst, dst_at, src, src_at, n)`（目的在前，Rust `copy_from_slice` 同序）与 `copy_within(b, from, to_at, n)`；
    整份复制叫 `clone`，不叫 `copy`，使「写进已有缓冲」（`copy_*`）与「产出新缓冲」（`clone`）两簇不会混淆。理由见 §3.2。
 6. **`MAX_LEN = 2^31 - 9`：已裁，两后端取同值，通过。** 取同值换取行为一致，代价是 native 拿不到 2^31 以上的缓冲，没有调用点要它。
