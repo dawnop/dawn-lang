@@ -779,10 +779,13 @@ pub fn list_primitive_table() -> List[(String, String)] = [
   ("list_slice", "slice"),
   # `xs ++ [x]` after lowering's one-element rewrite
   ("list_push", "push"),
-  # the crossing std can name (docs/listarr-design.md): the same two functions
-  # the emitters already spell at the host boundary, now reachable from source
-  ("list_to_array", LIST_TO_ARRAY),
-  ("array_to_list", LIST_FROM_ARRAY)
+  # the crossing std can name (docs/listarr-design.md): the two functions the
+  # emitters already spell at the host boundary, now reachable from source.
+  # Literals rather than LIST_TO_ARRAY / LIST_FROM_ARRAY because
+  # scripts/intrinsic-parity.py reads this table as text; the test below pins
+  # them to the constants
+  ("list_to_array", "to_array"),
+  ("array_to_list", "from_array")
 ]
 
 ## The `std/pvec` function a list primitive calls, or None for a name that is
@@ -1057,6 +1060,8 @@ test "the list roots are the primitives' targets and the three boundary names" {
     i = i + 1
   }
   assert list_primitive_fn("list_index") == Some("index")
+  assert list_primitive_fn("list_to_array") == Some(LIST_TO_ARRAY)
+  assert list_primitive_fn("array_to_list") == Some(LIST_FROM_ARRAY)
   assert list_primitive_fn("index") == None
   assert is_list_root("concat")
   assert not is_list_root("len")
