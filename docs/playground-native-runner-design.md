@@ -279,8 +279,17 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
      同目录改名上传二进制，写 `toolchain.env`，**在 JVM runner 重启并 `/health` 通过之后**才装两个单元、`daemon-reload`、`enable`、重启 socket、跑金丝雀检查，
      所以金丝雀失败时 JVM runner 已经在正常服务，脚本非零退出并提示不要切 nginx。JVM 单元仍是主，脚本不碰它们的启停语义，`REMOTE_RESTART` 与版本守卫原样（`lsp_contract.py` 对它们的文本与变异体断言都还在，28 项绿）。
    - `playground/deploy/canary-check.py`（只用标准库，服务器上以 `dawn-play` 身份跑）：14 个请求对 JVM runner（TCP）与 native（unix 套接字）比状态码与响应体，`ms` 和 `cached` 归一，
-     是 `serve-compare.py` 里快速且对生产沙箱安全的子集；再按裁决 5 做闸：各 100 次新连接 `/health`，两边交错发，native p95 不超过 JVM p95 的 2 倍，否则非零退出。
-     本机对拍（JVM runner 在 18097，native 经 `systemd-socket-activate`）：14 个全一致，`/health` p95 JVM 2.22 ms、native 1.86 ms。这是**没有真 systemd 的** `Accept=yes` 数字，裁决 5 要的部署机实测要等真部署。
+     是 `serve-compare.py` 里快速且对生产沙箱安全的子集；再做延迟闸（10-09 按新裁决改判据，原判据是 `/health` p95 的 2 倍比值门）：
+     `/run` hello 与 `/check` hello 各 20 次新连接，两边交错、间隔发（不压生产沙箱），native p95 不超过 1.15 × JVM p95 + 100 ms；
+     `/health` 100 次，由比值门降为绝对上限，native p95 不超过 25 ms（防退化成秒级的启动病）；任一不过则非零退出，金丝雀不切入，JVM 照常服务。字节比对 14 项不变。
+     **改判据的实测依据**（生产主机，新连接，`Connection: close`）：`/health` JVM p95 1.41 到 1.55 ms，native 7.69 到 7.85 ms，稳定 5 倍以上，2 倍门必红；
+     native 的约 6 ms 里约 90% 是 systemd `Accept=yes` 每连接起一个服务实例的固定成本（约 2.7 ms 建单元，约 2.4 ms 套接字激活），进程与运行时初始化仅约 0.55 ms。
+     用户实际打的是 `/run`（墙钟约 3.0 s，大头是沙箱里的 `dawn build`）与 `/check`（约 1.23 s），两端 p95 比值 0.98 到 1.06，6 ms 只占 0.2% 到 0.5%，低于 20 个样本 p95 的约 ±100 ms 噪声；
+     两周日志里 `/api/run` 58、`/api/check` 16、`/api/compile` 3、`/api/health` 9。Rust Playground、Compiler Explorer、Go Playground 也都是每请求隔离、把启动成本计入预算。
+     不改成 native 常驻进程（要在 native 里加 socket 与并发，撞 10-04 的 FFI 与多线程裁决，且拿回设计要去掉的常驻内存），也不把比值门放宽到 6 倍（那是给一个不反映用户体验的指标调参）。
+     **墙钟影响（估算，未实测）**：每次部署的金丝雀多约 3.5 到 7 分钟（20 次 `/run` 两端合计约 2 分钟，20 次 `/check` 约 50 秒，加请求间隔约 40 秒，再加 100 次 `/health`）；
+     每次请求在生产沙箱里起一次编译，间隔发是为了不与线上流量叠峰。
+     本机对拍（JVM runner 在 18097，native 经 `systemd-socket-activate`）：14 个全一致，`/health` p95 JVM 2.22 ms、native 1.86 ms。这是**没有真 systemd 的** `Accept=yes` 数字，部署机上的真 `Accept=yes` 实测已在 10-09 做过（见上），闸门以那组数字为准，改判据后的整套检查仍要等真部署跑通一次。
    - nginx：`nginx-play.conf` **没动**，与线上一致。`playground/deploy/nginx-switch.sh jvm|native` 只打印：`jvm` 与原文件逐字节相同，`native` 只把 `/api/run`、`/api/check`、`/api/compile`、`/api/health` 四处 `proxy_pass` 换成 `http://unix:/run/dawn-play/http.sock:/<路径>`，
      并给三个 POST 加 `client_body_timeout 10s`（3.1 教训 2：nginx 切断慢客户端，进程才读到输入结束）；`/api/lsp` 不动。不用手抄第二份文件，是怕 CORS 头与限速两份漂移。redeploy 不调用它，切换是人的决定。
    - `contract.sh`：`PLAY_TEST_MODE=native`（`PLAY_TEST_NATIVE_BIN` 缺省仓库根的 `dawn-play-linux-x86_64`）改用 `systemd-socket-activate -a --inetd ... serve` 起 runner，把 `curl` 函数化为 `--unix-socket`，其余用例原样。
