@@ -567,9 +567,10 @@ pub fn from_base64(s: String, enc: Base64 = Standard) -> Option[Bytes] = b64_dec
 # The order is always an argument. There is no "native" order, because the
 # JVM and the native backend are required to produce the same bytes.
 #
-# The `List` to `Array` step is a loop here and not `std/pvec.to_array`: the
-# checker types `List[T]` and `pvec.Vec[T]` apart, so the vector's own
-# conversion is not callable from this side of the boundary.
+# The `List` to `Array` step is the `list_to_array` / `array_to_list` pair
+# (docs/listarr-design.md): the checker types `List[T]` and `pvec.Vec[T]`
+# apart, so the vector's own conversion cannot be called from source, and each
+# backend spells the call itself.
 
 ## Which end of a number comes first in memory: `Little` writes the least
 ## significant byte first, `Big` the most significant.
@@ -578,23 +579,6 @@ pub type Endian = Little | Big
 fn is_little(order: Endian) -> Bool = match order {
   Little -> true
   Big -> false
-}
-
-fn list_to_array[T](xs: List[T]) -> Array[T] = {
-  var a: Array[T] = array_new()
-  for x in xs { a = array_push(a, x) }
-  a
-}
-
-fn array_to_list[T](a: Array[T]) -> List[T] = {
-  var out: List[T] = []
-  let n = array_len(a)
-  var i = 0
-  while i < n {
-    out = out ++ [array_get(a, i)]
-    i = i + 1
-  }
-  out
 }
 
 ## Each element of `xs` as `width` bytes, which must be 1, 2, 4 or 8.
@@ -1235,5 +1219,28 @@ test "pack_floats and unpack_floats keep the bits at width 8 and round at width 
   match catch_panic(() => unpack_floats(from_hex("01020304050607").expect("hex"), 4) == []) {
     Ok(_) -> { assert false }
     Err(e) -> { assert e.message == "bytes.unpack: length 7 is not a multiple of 4" }
+  }
+}
+
+test "pack and unpack round-trip at the vector's block edges" {
+  # 32 is a full tail, 33 the first element of the next block, 1025 starts a
+  # third level: the sizes where a List built from an Array can go wrong
+  for n in [0, 1, 2, 31, 32, 33, 64, 65, 1024, 1025] {
+    var xs: List[Int] = []
+    var fs: List[Float] = []
+    for i in 0..n {
+      xs = xs ++ [i * 7919 - 3000]
+      fs = fs ++ [to_float(i) * 0.5 - 1.25]
+    }
+    let b = pack_ints(xs, 8)
+    assert len(b) == n * 8
+    let back = unpack_ints(b, 8, true)
+    assert back == xs
+    assert unpack_ints(pack_ints(xs, 4, Big), 4, true, Big) == xs
+    assert unpack_floats(pack_floats(fs, 8), 8) == fs
+    assert unpack_floats(pack_floats(fs, 4, Big), 4, Big) == fs
+    # the unpacked list grows and reads like any other
+    assert (back ++ [1])[n] == 1
+    assert list_len(back ++ [1, 2, 3]) == n + 3
   }
 }

@@ -69,13 +69,12 @@ pub fn clone(b: I64Buf) -> I64Buf = {
 
 ## A new buffer holding `xs`, in order.
 pub fn from_list(xs: List[Int]) -> I64Buf = {
-  # counted by a pass of its own: `len` in this module is the buffer's
-  var n = 0
-  for _ in xs { n = n + 1 }
+  let a = list_to_array(xs)
+  let n = array_len(a)
   let b = i64buf_new(n)
   var i = 0
-  for x in xs {
-    i64buf_set(b, i, x)
+  while i < n {
+    i64buf_set(b, i, array_get(a, i))
     i = i + 1
   }
   b
@@ -83,14 +82,14 @@ pub fn from_list(xs: List[Int]) -> I64Buf = {
 
 ## The elements of `b`, in order, as a list.
 pub fn to_list(b: I64Buf) -> List[Int] = {
-  var out: List[Int] = []
-  var i = 0
   let n = i64buf_len(b)
+  var a: Array[Int] = array_new()
+  var i = 0
   while i < n {
-    out = out ++ [i64buf_at(b, i)]
+    a = array_push(a, i64buf_at(b, i))
     i = i + 1
   }
-  out
+  array_to_list(a)
 }
 
 # ---- tests ----
@@ -244,6 +243,18 @@ test "clone is a buffer of its own, and from_list and to_list round-trip" {
     i = i + 1
   }
   assert to_list(from_list(big)) == big
+}
+
+test "from_list and to_list round-trip at the vector's block edges" {
+  for n in [0, 1, 2, 31, 32, 33, 64, 65, 1024, 1025] {
+    var xs: List[Int] = []
+    for i in 0..n { xs = xs ++ [i * i - 5] }
+    let b = from_list(xs)
+    assert len(b) == n
+    assert to_list(b) == xs
+    assert to_list(clone(b)) == xs
+    assert (to_list(b) ++ [7])[n] == 7
+  }
 }
 
 test "two names for one buffer see each other's writes" {
