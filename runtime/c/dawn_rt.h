@@ -63,6 +63,7 @@ enum {
   DAWN_K_BOX,
   DAWN_K_BYTES,
   DAWN_K_STR,
+  DAWN_K_I64BUF,
   /* One activation of a control handler (see "one-shot resumption" in
    * dawn_rt.c). It is in the ledger because the continuation a control arm
    * receives is an ordinary Dawn function value that captures it, so the
@@ -1019,6 +1020,60 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
  * length is not a multiple of `width`. */
 dawn_bytes *dawn_bytes_pack_int(const dawn_array *a, int64_t width, bool little);
 dawn_array *dawn_bytes_unpack_int(const dawn_bytes *b, int64_t width, bool is_signed, bool little);
+
+/* ---- I64Buf: a flat, mutable buffer of 64-bit integers ----
+ * (docs/mem-buffer-design.md 6.1, 6.2)
+ *
+ * A counted leaf object like `dawn_bytes`, with the elements in the same
+ * allocation as the header: the flexible array member saves the pointer hop
+ * a `dawn_bytes` pays to share a layout with strings. It is a plain RC object
+ * and not a region, so a panic, a control arm's discarded continuation and a
+ * `catch_panic` all free it through the ordinary drop path. Every primitive
+ * borrows the buffer; only `new` answers an owned one.
+ *
+ * `len`, `at` and `set` are `static inline` on purpose. Out of line they cost
+ * a cross-translation-unit call per access (1.7x a JVM bcrypt where inlining
+ * them, here by LTO, measured 1.0x); `static inline` buys the same without
+ * turning LTO on for every artifact. The failure arm is a separate cold,
+ * noreturn function so the hot path is one compare and a branch predicted
+ * not taken. The index is tested as unsigned: one compare covers negative and
+ * too large. */
+typedef struct {
+  dawn_hdr h;
+  int64_t len;
+  int64_t data[];
+} dawn_i64buf;
+
+dawn_i64buf *dawn_i64buf_new(int64_t n);
+void dawn_i64buf_oob(int64_t i, int64_t len) __attribute__((noreturn, cold, noinline));
+dawn_unit dawn_i64buf_fill(dawn_i64buf *b, int64_t from, int64_t to, int64_t v);
+dawn_unit dawn_i64buf_copy_from(dawn_i64buf *dst, int64_t dst_at, const dawn_i64buf *src,
+                                int64_t src_at, int64_t n);
+
+static inline int64_t dawn_i64buf_len(const dawn_i64buf *b) { return b->len; }
+
+/* The index test both accessors share. `len >= 0` is an invariant `new`
+ * establishes; stating it lets the compiler see that a constant index which is
+ * negative or beyond INT64_MAX fails the test, so the access behind it is dead
+ * code and not an out-of-bounds subscript worth a -Warray-bounds. */
+#define DAWN_I64BUF_CHECK(b, i)                                         \
+  do {                                                                  \
+    if ((b)->len < 0) __builtin_unreachable();                          \
+    if (__builtin_expect((uint64_t)(i) >= (uint64_t)(b)->len, 0)) {     \
+      dawn_i64buf_oob((i), (b)->len);                                   \
+    }                                                                   \
+  } while (0)
+
+static inline int64_t dawn_i64buf_at(const dawn_i64buf *b, int64_t i) {
+  DAWN_I64BUF_CHECK(b, i);
+  return b->data[i];
+}
+
+static inline dawn_unit dawn_i64buf_set(dawn_i64buf *b, int64_t i, int64_t v) {
+  DAWN_I64BUF_CHECK(b, i);
+  b->data[i] = v;
+  return DAWN_UNIT;
+}
 /* The two decodings the language promises, one function each rather than one
  * taking a charset name: the function name is the domain, both charsets read
  * every byte string, and so neither answers an Option. Malformed UTF-8 is

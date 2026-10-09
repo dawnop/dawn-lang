@@ -468,6 +468,13 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
         """  int32_t n = (int32_t)(to - from) - (to > from ? 1 : 0);
   dawn_array_buf *nb = dawn_array_buf_new(n);""",
     ),
+    # `copy_from` takes a reference to the destination and never gives it back.
+    "i64buf-copy-from-keeps-the-destination": (
+        "dawn_rt.c",
+        """  memmove(dst->data + dst_at, src->data + src_at, (size_t)n * sizeof(int64_t));""",
+        """  dawn_dup(dst);
+  memmove(dst->data + dst_at, src->data + src_at, (size_t)n * sizeof(int64_t));""",
+    ),
     # A token of another width is reused as it is; the build writes past it.
     "reuse-ignores-width": (
         "dawn_rt.c",

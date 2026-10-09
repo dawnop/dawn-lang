@@ -19,6 +19,7 @@ PUBLIC_TYPES = [
     {"name": "Bool", "params": []},
     {"name": "String", "params": []},
     {"name": "Bytes", "params": []},
+    {"name": "I64Buf", "params": []},
     {"name": "Unit", "params": []},
     {"name": "List", "params": ["T"]},
     {"name": "Map", "params": ["K", "V"]},
@@ -46,12 +47,12 @@ def java_command(jar, *args):
 
 def checker_is_complete(jar):
     source = (
-        "fn accepts(c: Char, b: Bytes, m: Map[String, Int], "
+        "fn accepts(c: Char, b: Bytes, w: I64Buf, m: Map[String, Int], "
         "s: Set[Int]) -> Unit = ()\n"
         "fn rejects(x: Zzzzz) -> Unit = ()\n"
     )
     expected_hint = (
-        "builtin types: Int, Char, Loc, Float, Bool, String, Bytes, Unit, "
+        "builtin types: Int, Char, Loc, Float, Bool, String, Bytes, I64Buf, Unit, "
         "List, Map, Set — or declare `type Zzzzz = ...`"
     )
     with tempfile.TemporaryDirectory(prefix="dawn-builtin-types-") as tmp:

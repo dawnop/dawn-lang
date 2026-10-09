@@ -668,6 +668,10 @@ pub type Ty =
   | TyBool
   | TyString
   | TyBytes
+# a flat, mutable buffer of 64-bit integers (docs/mem-buffer-design.md): a
+# leaf like Bytes, JVM `long[]`, native `dawn_i64buf *`. No Eq, Hash, Ord or
+# Show, like Array: it is held by identity and changes in place.
+  | TyI64Buf
   | TyUnit
 # bottom type: the "return type" of panic/todo; usable as any type
   | TyNever
@@ -761,6 +765,7 @@ pub fn is_ref_ty(t: Ty) -> Bool =
     TyVar(_, _) -> true
     TyError -> true
     TyBytes -> true
+    TyI64Buf -> true
     TyList(_) -> true
     TyMap(_, _) -> true
     TySet(_) -> true
@@ -843,6 +848,7 @@ pub fn builtin_type_inventory() -> List[BuiltinTypeI] = [
   BuiltinTypeI { name: "Bool", params: [], access: BtPublic, build: BtLeaf(TyBool) },
   BuiltinTypeI { name: "String", params: [], access: BtPublic, build: BtLeaf(TyString) },
   BuiltinTypeI { name: "Bytes", params: [], access: BtPublic, build: BtLeaf(TyBytes) },
+  BuiltinTypeI { name: "I64Buf", params: [], access: BtPublic, build: BtLeaf(TyI64Buf) },
   BuiltinTypeI { name: "Unit", params: [], access: BtPublic, build: BtLeaf(TyUnit) },
   BuiltinTypeI { name: "List", params: ["T"], access: BtPublic, build: BtList },
   BuiltinTypeI { name: "Map", params: ["K", "V"], access: BtPublic, build: BtMap },
@@ -1169,6 +1175,7 @@ fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool, java_fqn: Bool) -> String =
     TyBool -> "Bool"
     TyString -> "String"
     TyBytes -> "Bytes"
+    TyI64Buf -> "I64Buf"
     TyUnit -> "Unit"
     TyNever -> "Never"
     TyError -> "?"
@@ -1363,7 +1370,7 @@ pub fn ty_map_children(t: Ty, f: fn(Ty) -> Ty) -> Ty =
     TyAssoc(s, tid, n) -> TyAssoc(f(s), tid, n)
     TyFn(params, ret, eff) -> TyFn(map(params, f), f(ret), eff)
     TyVar(_, _) -> t
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf -> t
     TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
@@ -1381,7 +1388,7 @@ pub fn ty_any_child(t: Ty, f: fn(Ty) -> Bool) -> Bool =
     TyAssoc(s, _, _) -> f(s)
     TyFn(params, ret, _) -> list.any(params, f) || f(ret)
     TyVar(_, _) -> false
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> false
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf -> false
     TyUnit | TyNever | TyError | TyJava(_, _) -> false
   }
 
@@ -2134,7 +2141,7 @@ pub fn is_ground(t: Ty) -> Bool =
   match t {
     TyVar(_, _) -> false
     TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyI64Buf -> true
     TyUnit | TyNever | TyError | TyJava(_, _) -> true
     # A projection that survived reduction stands over a rigid subject (D3),
     # so it mentions a type parameter by construction and the canonical-form
@@ -3519,7 +3526,17 @@ pub fn builtins() -> Map[String, Sig] = {
     # tail. The contract is scripts/bytes-pack-contract.
     bsig("bytes_pack_int", [TyArray(TyInt), TyInt, TyBool], ["a", "width", "little"], TyBytes),
     bsig("bytes_unpack_int", [TyBytes, TyInt, TyBool, TyBool],
-      ["b", "width", "signed", "little"], TyArray(TyInt))
+      ["b", "width", "signed", "little"], TyArray(TyInt)),
+    # The flat 64-bit buffer family (docs/mem-buffer-design.md 6.4). Every
+    # access is a bounds-checked panic, never a sentinel: std/mem is a thin
+    # wrapper over these six, and the range writes panic rather than clamp.
+    bsig("i64buf_new", [TyInt], ["n"], TyI64Buf),
+    bsig("i64buf_len", [TyI64Buf], ["b"], TyInt),
+    bsig("i64buf_at", [TyI64Buf, TyInt], ["b", "i"], TyInt),
+    bsig("i64buf_set", [TyI64Buf, TyInt, TyInt], ["b", "i", "v"], TyUnit),
+    bsig("i64buf_fill", [TyI64Buf, TyInt, TyInt, TyInt], ["b", "from", "to", "v"], TyUnit),
+    bsig("i64buf_copy_from", [TyI64Buf, TyInt, TyI64Buf, TyInt, TyInt],
+      ["dst", "dst_at", "src", "src_at", "n"], TyUnit)
   ]
   sigs = sigs ++ [
     # The argv supplied when this program starts. It is process input and is
@@ -3989,6 +4006,7 @@ pub type Rt =
   | RtStrings
   | RtBytes
   | RtArray
+  | RtMem
   | RtIo
   | RtGpu
 
@@ -4071,6 +4089,12 @@ pub fn intrinsics() -> Map[String, Intr] = {
     "pack_int", "unpack_int"] {
     rt_of = map.insert(rt_of, "bytes_${op}", RtBytes)
     internal = set.insert(internal, "bytes_${op}")
+  }
+  # The flat buffer primitives are std-only like the byte ones: std/mem owns
+  # the surface, and its names (`at`, `set`) are not the primitives' (`i64buf_at`).
+  for op in ["new", "len", "at", "set", "fill", "copy_from"] {
+    rt_of = map.insert(rt_of, "i64buf_${op}", RtMem)
+    internal = set.insert(internal, "i64buf_${op}")
   }
   let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
@@ -4779,7 +4803,7 @@ test "prelude shapes" {
 
 test "builtin type inventory keeps its surface boundaries" {
   assert public_builtin_type_names() ==
-    ["Int", "Char", "Loc", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
+    ["Int", "Char", "Loc", "Float", "Bool", "String", "Bytes", "I64Buf", "Unit", "List", "Map", "Set"]
   var std_only: List[String] = []
   var return_only: List[String] = []
   var compiler_only: List[String] = []
@@ -4934,7 +4958,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 117
+  assert map_size2(bs) == 123
 }
 
 test "the reclaim's failure is a value, under the one name left" {

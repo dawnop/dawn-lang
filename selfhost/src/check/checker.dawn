@@ -1398,6 +1398,8 @@ pub(pkg) fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option
       # the D1 growable vector: mutable, and compared by reference. Until it
       # is a Dawn type with an impl there is no content equality to give.
       TyArray(_) -> Some(t)
+      # a flat mutable buffer: held by identity too, and it changes in place
+      TyI64Buf -> Some(t)
       # reached only for Hash: `Eq[Float]` is a prelude impl, so for equality
       # the table above has already answered
       TyFloat -> Some(t)
@@ -1492,6 +1494,12 @@ pub(pkg) fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: In
       ("`" ++ text ++ "` has no " ++ rel ++ ": an Array is held by identity, " ++
           "not by content",
         "use the List it backs instead")
+    }
+    TyI64Buf -> {
+      let text = ty_show(cx.adts, bad)
+      ("`" ++ text ++ "` has no " ++ rel ++ ": a buffer is held by identity, " ++
+          "not by content",
+        "read its elements into a List with mem.to_list and compare those")
     }
     # Same head as the fallback, different way out: a projection has no
     # contents to derive an answer from, so it gets the one hint every
