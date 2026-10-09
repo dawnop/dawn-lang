@@ -15,7 +15,7 @@
 # another toolchain file in scripts/tile-golden and appends to the ledger
 # whose name follows from it (`toolchain-sm100.txt` -> `ledger-sm100.txt`);
 # the file carries that machine's driver and gpu-name, and everything else
-# about the run is the same script. The GPU cluster's two ledgers are
+# about the run is the same script. The two remote ledgers are
 # recorded that way and no gate reads them: what they buy is the layer-2
 # rows the fp8, fp4 and block-scaled kernels could never reach on an Ampere
 # card, and they buy it as a record in the tree rather than as a claim.
@@ -485,7 +485,7 @@
 #   paths are packages/tileir, std/gpu.dawn, std/narrow.dawn (the bf16
 #   reference the fake device rounds with), scripts/tile-golden,
 #   scripts/tile-gpu-diff minus EVERY ledger in it (this gate's own and the
-#   cluster's ledger-sm*.txt alike: a line appended to another machine's
+#   remote ledger-sm*.txt alike: a line appended to another machine's
 #   record is not a change to what this machine ran), and the GPU section of
 #   runtime/c/dawn_rt.c (between its DAWN_RT_GPU_BEGIN / END markers; the
 #   rest of the runtime is not a tile path); and toolchain.txt's driver
@@ -569,7 +569,7 @@ import subprocess
 import sys
 
 ledger, toolchain = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-# Every ledger is excluded and not only this gate's own: the cluster's
+# Every ledger is excluded and not only this gate's own: the remote
 # ledger-sm100.txt and ledger-sm90.txt are records of other machines, and a
 # line appended to one of them is not a change to what this machine ran.
 TILE_PATHS = ["packages/tileir", "packages/tileref", "std/gpu.dawn", "std/narrow.dawn", "scripts/tile-golden",
@@ -696,7 +696,7 @@ fi
 # A second toolchain file carries what its MACHINE is (gpu-name, driver) and
 # repeats what the toolchain IS (bytecode, tileiras). The repetition is
 # held here rather than trusted: the wheels are pinned in toolchain.txt
-# alone, install-tileiras.sh reads that file and no other, so a cluster file
+# alone, install-tileiras.sh reads that file and no other, so a remote file
 # whose tileiras line had drifted would name a version nothing installs.
 if [ "$toolchain" != "$default_toolchain" ]; then
   for key in bytecode tileiras; do
@@ -753,7 +753,7 @@ grep -q "V${want_tileiras}\b" "$work/tileiras.version" ||
 # assembler version and the gpu-name, so pinning a fixed tileiras drops the
 # extra flag without an edit here, and sm_86 keeps the default level. The
 # answer is written into the ledger line as `asm=`, so a reader sees which
-# level a cluster line was assembled at.
+# level a remote line was assembled at.
 asm_proj="$work/proj-asm"
 mkdir -p "$asm_proj/src"
 cat > "$asm_proj/src/main.dawn" <<'DAWN'
@@ -939,7 +939,7 @@ i4_green=(dtype_i16 dtype_i64 dtype_tf32 pack_roundtrip)
 # f8E8M0FNU and not for f8E4M3FN, which is knife T10's reading confirmed:
 # the block-scaled product's wall is its SCALE format.
 #
-# So fp8 is not one wall but two, and the H200 ledger is what says so: it
+# So fp8 is not one wall but two, and the sm_90 ledger is what says so: it
 # runs three of these six and skips three.
 #
 # The sixth kernel is not an element format at all. view_atomic_bf16 is
