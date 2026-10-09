@@ -1,0 +1,247 @@
+# The I64Buf contract probe: one user program, run on both backends, whose
+# output has to equal expected.txt line for line. Every panic is printed as its
+# message, because the message is a value once `catch_panic` hands it back and
+# the two backends must not disagree on it.
+#
+# `use std/mem` only. Nothing here is a Java import, so the same file compiles
+# for the JVM and for native; the clock-based checks the Array contract needs
+# have no counterpart, because nothing about a buffer is unobservable.
+use std/mem
+
+fn int_text(f: fn() -> Int) -> String =
+  match catch_panic(f) {
+    Ok(v) -> "no panic (${v})"
+    Err(e) -> e.message
+  }
+
+fn unit_text(f: fn() -> Unit) -> String =
+  match catch_panic(f) {
+    Ok(_) -> "no panic"
+    Err(e) -> e.message
+  }
+
+## The elements as one line, so a value test is one `println`.
+fn show(b: I64Buf) -> String = "${mem.to_list(b)}"
+
+## A zeroed buffer reads back as zeros everywhere: native has to clear what
+## malloc does not, and the check has to look at every slot.
+fn zero_line() -> String = {
+  let z = mem.new(1000)
+  var nonzero = 0
+  var i = 0
+  while i < 1000 {
+    if mem.at(z, i) != 0 { nonzero = nonzero + 1 }
+    i = i + 1
+  }
+  "len=${mem.len(z)} nonzero=${nonzero} empty=${mem.len(mem.new(0))}"
+}
+
+fn extremes_line() -> String = {
+  let b = mem.new(3)
+  mem.set(b, 0, 9223372036854775807)
+  mem.set(b, 1, -9223372036854775808)
+  mem.set(b, 2, -1)
+  show(b)
+}
+
+## The index panics. 2^32 + 5 is the aliasing probe: truncated to 32 bits it is
+## 5, a real slot of the 8-element buffer, so a check made after the
+## truncation reads slot 5 instead of panicking.
+fn index_lines() -> List[String] = {
+  let b = mem.new(8)
+  [
+    int_text(() => mem.at(b, 8)),
+    int_text(() => mem.at(b, -1)),
+    int_text(() => mem.at(mem.new(0), 0)),
+    int_text(() => mem.at(b, 4294967301)),
+    int_text(() => mem.at(b, -4294967291)),
+    int_text(() => mem.at(b, 9223372036854775807)),
+    int_text(() => mem.at(b, 7)),
+    unit_text(() => mem.set(b, 8, 1)),
+    unit_text(() => mem.set(b, 4294967301, 1)),
+    unit_text(() => mem.set(b, -1, 1)),
+    "after ${show(b)}"
+  ]
+}
+
+fn new_lines() -> List[String] = [
+  int_text(() => mem.len(mem.new(-1))),
+  int_text(() => mem.len(mem.new(-9223372036854775808))),
+  int_text(() => mem.len(mem.new(2147483640))),
+  int_text(() => mem.len(mem.new(4294967296))),
+  int_text(() => mem.len(mem.new(9223372036854775807)))
+]
+
+fn fill_lines() -> List[String] = {
+  let b = mem.from_list([1, 2, 3, 4, 5])
+  mem.fill(b, 1, 4, 0)
+  let first = show(b)
+  mem.fill(b, 2, 2, 9)
+  mem.fill(b, 5, 5, 9)
+  mem.fill(b, 0, 0, 9)
+  let empties = show(b)
+  [
+    "values ${first} ${empties}",
+    unit_text(() => mem.fill(b, -1, 2, 0)),
+    unit_text(() => mem.fill(b, 0, 6, 0)),
+    unit_text(() => mem.fill(b, 3, 2, 0)),
+    unit_text(() => mem.fill(b, 6, 7, 0)),
+    unit_text(() => mem.fill(b, 0, 4294967301, 0)),
+    "after ${show(b)}"
+  ]
+}
+
+## memmove semantics and every refused range. The overlapping runs are the
+## ones a forward element-by-element copy gets wrong.
+fn copy_lines() -> List[String] = {
+  let src = mem.from_list([10, 11, 12, 13, 14, 15])
+  let dst = mem.new(6)
+  mem.copy_from(dst, 1, src, 2, 3)
+  let plain = show(dst)
+  let up = mem.from_list([0, 1, 2, 3, 4, 5])
+  mem.copy_within(up, 0, 2, 4)
+  let down = mem.from_list([0, 1, 2, 3, 4, 5])
+  mem.copy_within(down, 2, 0, 4)
+  let same = mem.from_list([0, 1, 2, 3, 4, 5])
+  mem.copy_from(same, 1, same, 0, 5)
+  let a = mem.from_list([1, 2, 3, 4])
+  let b = mem.from_list([5, 6, 7])
+  [
+    "plain ${plain}",
+    "up ${show(up)}",
+    "down ${show(down)}",
+    "same ${show(same)}",
+    unit_text(() => mem.copy_from(a, 0, b, 0, 4)),
+    unit_text(() => mem.copy_from(a, 3, b, 0, 2)),
+    unit_text(() => mem.copy_from(a, 0, b, 2, 2)),
+    unit_text(() => mem.copy_from(a, -1, b, 0, 1)),
+    unit_text(() => mem.copy_from(a, 0, b, -1, 1)),
+    unit_text(() => mem.copy_from(a, 0, b, 0, -1)),
+    unit_text(() => mem.copy_from(a, 1, b, 1, 9223372036854775807)),
+    unit_text(() => mem.copy_within(a, 3, 0, 2)),
+    "after ${show(a)} ${show(b)}"
+  ]
+}
+
+fn clone_line() -> String = {
+  let a = mem.from_list([3, -1, 4, 1, 5])
+  let c = mem.clone(a)
+  mem.set(c, 0, 100)
+  mem.set(a, 4, 200)
+  "${show(a)} ${show(c)} ${show(mem.clone(mem.new(0)))}"
+}
+
+## Primes below 1000 by a sieve in one buffer: reads and writes interleaved in
+## loops, the shape the buffer exists for.
+fn sieve_line() -> String = {
+  let n = 1000
+  let b = mem.new(n)
+  mem.fill(b, 2, n, 1)
+  var i = 2
+  while i * i < n {
+    if mem.at(b, i) == 1 {
+      var j = i * i
+      while j < n {
+        mem.set(b, j, 0)
+        j = j + i
+      }
+    }
+    i = i + 1
+  }
+  var count = 0
+  var last = 0
+  var k = 0
+  while k < n {
+    if mem.at(b, k) == 1 {
+      count = count + 1
+      last = k
+    }
+    k = k + 1
+  }
+  "primes=${count} last=${last}"
+}
+
+## A 64-bit congruential generator written into a buffer, then folded with a
+## multiplier. Both steps wrap, so the line is the same only if the two
+## backends wrap alike and every store and load keeps all 64 bits.
+fn lcg_line() -> String = {
+  let n = 4096
+  let b = mem.new(n)
+  var s = 12345
+  var i = 0
+  while i < 100000 {
+    s = s * 6364136223846793005 + 1442695040888963407
+    mem.set(b, i % n, s)
+    i = i + 1
+  }
+  var h = 0
+  var k = 0
+  while k < n {
+    h = h * 31 + mem.at(b, k)
+    k = k + 1
+  }
+  "s=${s} h=${h}"
+}
+
+## Shifting a window the way a sliding-window decoder does: overlap copies in
+## a loop, each one moving the whole window by one place.
+fn window_line() -> String = {
+  let n = 64
+  let w = mem.new(n)
+  var i = 0
+  while i < 1000 {
+    mem.copy_within(w, 1, 0, n - 1)
+    mem.set(w, n - 1, i)
+    i = i + 1
+  }
+  "${show(w)}"
+}
+
+fn big_line() -> String = {
+  let n = 1048576
+  let b = mem.new(n)
+  mem.fill(b, 0, n, 3)
+  var sum = 0
+  var i = 0
+  while i < n {
+    sum = sum + mem.at(b, i)
+    i = i + 1
+  }
+  "sum=${sum}"
+}
+
+## A `ctl` effect so an arm can drop a continuation that holds a buffer: the
+## release case std/mem cannot test itself. The sanitized leg turns a leak here
+## into a failure; the value is checked on every leg.
+ctl effect Ask {
+  fn ask() -> Int
+}
+
+fn ask_body() -> Int !Ask = {
+  let b = mem.from_list([1, 2, 3])
+  let n = ask()
+  mem.at(b, 0) + n
+}
+
+fn dropped_line() -> String = {
+  let r = {
+    with handle Ask { ask() resume k => 41 }
+    ask_body()
+  }
+  "result=${r}"
+}
+
+pub fn main() -> Unit !io = {
+  println("zero     ${zero_line()}")
+  println("extremes ${extremes_line()}")
+  for line in index_lines() { println("index    ${line}") }
+  for line in new_lines() { println("new      ${line}") }
+  for line in fill_lines() { println("fill     ${line}") }
+  for line in copy_lines() { println("copy     ${line}") }
+  println("clone    ${clone_line()}")
+  println("sieve    ${sieve_line()}")
+  println("lcg      ${lcg_line()}")
+  println("window   ${window_line()}")
+  println("big      ${big_line()}")
+  println("dropped  ${dropped_line()}")
+}
