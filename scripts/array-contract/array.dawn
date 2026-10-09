@@ -124,3 +124,90 @@ pub fn from_array() -> String = {
   let empty: Array[Int] = array_new()
   out ++ " empty=" ++ to_string(bytes.len(bytes_from_array(empty)))
 }
+
+## `array_extend` and `array_slice`, the bulk pair (docs/bulk-array-bytes-design.md).
+## Every line is the answer value semantics has to give, written before either
+## backend was asked: the inputs are never changed, two extends of one base
+## each see only their own tail, and extending an array by itself doubles it.
+pub fn bulk() -> List[String] = {
+  let a = build(3)
+  var b: Array[Int] = array_new()
+  b = array_push(b, 10)
+  b = array_push(b, 20)
+  let none: Array[Int] = array_new()
+  let ab = array_extend(a, b)
+  # two extends of one published base: one may win the in-place claim, the
+  # other must copy, and neither may show the other's tail
+  let p = array_extend(a, b)
+  let q = array_extend(a, array_extend(b, b))
+  let aa = array_extend(a, a)
+  # a slice is its own array: pushing onto it leaves the source alone
+  let mid = array_slice(ab, 1, 4)
+  let grown = array_push(mid, 99)
+  [
+    "extend   ${render(ab)} a=${render(a)} b=${render(b)}",
+    "twotails ${render(p)} / ${render(q)}",
+    "self     ${render(aa)}",
+    "edges    ${render(array_extend(a, none))} ${render(array_extend(none, b))} ${render(array_extend(none, none))}",
+    "slice    ${render(array_slice(ab, 1, 4))} ${render(array_slice(ab, 0, 5))} ${render(array_slice(ab, 5, 5))} ${render(array_slice(ab, 0, 0))}",
+    "grown    ${render(grown)} mid=${render(mid)} ab=${render(ab)}",
+    "chunks   ${chunked(1000, 7)}"
+  ]
+}
+
+## 1000 elements accumulated 7 at a time through `array_extend` must come back
+## as 0..999 in order: the in-place path, the copying path and the capacity
+## growth all run on the way.
+fn chunked(n: Int, step: Int) -> String = {
+  var out: Array[Int] = array_new()
+  var i = 0
+  while i < n {
+    var chunk: Array[Int] = array_new()
+    var j = i
+    while j < n && j < i + step {
+      chunk = array_push(chunk, j)
+      j = j + 1
+    }
+    out = array_extend(out, chunk)
+    i = i + step
+  }
+  var ok = array_len(out) == n
+  var k = 0
+  while k < n {
+    if array_get(out, k) != k { ok = false }
+    k = k + 1
+  }
+  "ok=${ok} len=${array_len(out)}"
+}
+
+## The accumulation shape for `array_extend`, for the clock in probe.dawn:
+## blocks of 32 appended to one growing array, the way `pvec.to_array` does.
+pub fn extend_linear(n: Int) -> Unit = {
+  var block: Array[Int] = array_new()
+  var i = 0
+  while i < 32 {
+    block = array_push(block, i)
+    i = i + 1
+  }
+  var out: Array[Int] = array_new()
+  var done = 0
+  while done < n {
+    out = array_extend(out, block)
+    done = done + 32
+  }
+  if array_len(out) != done { panic("extend lost elements") }
+}
+
+## The ranges `array_slice` refuses. Each is a panic, never a clamp, and the
+## message names the range and the length -- the same words on both backends.
+pub fn slice_panics() -> List[String] !io = {
+  let a = build(3)
+  var out: List[String] = []
+  for (f, t) in [(-1, 2), (0, 4), (2, 1), (4, 5), (3, 4)] {
+    match catch_panic(() => array_slice(a, f, t)) {
+      Ok(_) -> { out = out ++ ["no panic for [${f}, ${t})"] }
+      Err(m) -> { out = out ++ [m.message] }
+    }
+  }
+  out
+}

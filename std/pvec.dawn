@@ -48,15 +48,9 @@ fn arr1[T](x: T) -> Array[T] = {
 
 fn arr2[T](x: T, y: T) -> Array[T] = array_push(arr1(x), y)
 
-fn arr_slice[T](a: Array[T], from: Int, to: Int) -> Array[T] = {
-  var out: Array[T] = array_new()
-  var i = from
-  while i < to {
-    out = array_push(out, array_get(a, i))
-    i = i + 1
-  }
-  out
-}
+## `a[from, to)`. The primitive panics on a range outside `[0, len]`, and the
+## one caller (`msort`) only passes halves of the array it holds.
+fn arr_slice[T](a: Array[T], from: Int, to: Int) -> Array[T] = array_slice(a, from, to)
 
 # ---- shape ----
 
@@ -212,8 +206,17 @@ fn fold_block[T, A](blk: Array[T], i: Int, stop: Int, acc: A, f: fn(A, T) -> A !
 
 ## Every element in order, as one flat array.
 pub(pkg) fn to_array[T](v: Vec[T]) -> Array[T] = {
-  let e: Array[T] = array_new()
-  each_block(v, 0, e, (a, x) => array_push(a, x))
+  var out: Array[T] = array_new()
+  var i = 0
+  while i < v.cnt {
+    let blk = leaf_for(v, i)
+    let base = i - (i & MASK)
+    let stop = if base + array_len(blk) < v.cnt { base + array_len(blk) } else { v.cnt }
+    let part = if stop - base == array_len(blk) { blk } else { array_slice(blk, 0, stop - base) }
+    out = array_extend(out, part)
+    i = stop
+  }
+  out
 }
 
 ## A vector holding `a`'s elements in order.

@@ -170,6 +170,166 @@ static void test_array_steal(void) {
   dawn_drop(ys);
 }
 
+/* `n` boxed ints `base .. base+n-1`, built the way an accumulation does. */
+static dawn_array *ints(int base, int n) {
+  dawn_array *xs = dawn_array_new();
+  for (int i = 0; i < n; i++) {
+    dawn_box *e = dawn_box_int(base + i);
+    dawn_array *next = dawn_array_push(xs, e);
+    dawn_drop(e);
+    dawn_drop(xs);
+    xs = next;
+  }
+  return xs;
+}
+
+static int array_reads(const dawn_array *a, int base, int n) {
+  if (dawn_array_len(a) != n) {
+    return 0;
+  }
+  for (int i = 0; i < n; i++) {
+    if (((dawn_box *)dawn_array_get(a, i))->val.i != base + i) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* `array_extend` borrows both arrays and dups every element it copies, once
+ * for the buffer that now holds it -- the one reference-count site the
+ * primitive adds. The element's count is the oracle: a missing dup leaves the
+ * count where it was, and the drops below then free an element a live version
+ * still reads, which AddressSanitizer reports as a use-after-free and the
+ * sanitized leg catches even if this file's own checks were to pass. Both
+ * halves of the push rule are asserted: alone (the buffer's high-water mark
+ * is `a`'s end and there is room) the elements land in `a`'s own buffer, and
+ * a second extend of the same base finds the mark moved and copies. */
+static void test_array_extend(void) {
+  dawn_array *xs = ints(0, 3);
+  dawn_array *ys = ints(10, 3);
+  int32_t rc_y0 = ((dawn_box *)dawn_array_get(ys, 0))->h.rc;
+  int32_t rc_x0 = ((dawn_box *)dawn_array_get(xs, 0))->h.rc;
+
+  dawn_array *zs = dawn_array_extend(xs, ys);
+  check(dawn_array_len(zs) == 6, "extend answers the combined length");
+  check(zs->buf == xs->buf, "a lone array grows into its own buffer");
+  check(((dawn_box *)dawn_array_get(zs, 2))->val.i == 2 &&
+            ((dawn_box *)dawn_array_get(zs, 3))->val.i == 10 &&
+            ((dawn_box *)dawn_array_get(zs, 5))->val.i == 12,
+        "extend keeps a's elements then b's, in order");
+  check(array_reads(xs, 0, 3), "the base version is unchanged");
+  int dupped = ((dawn_box *)dawn_array_get(ys, 0))->h.rc == rc_y0 + 1;
+  check(dupped, "every element copied from b is dup'd for the new holder");
+  if (!dupped) {
+    /* the drops below would free elements a live version still reads. A
+     * failed check leaks instead, so a mutant of this count is read off the
+     * assertion rather than off a crash. */
+    return;
+  }
+  check(((dawn_box *)dawn_array_get(xs, 0))->h.rc == rc_x0,
+        "an element already in the buffer is not dup'd again in place");
+
+  /* the mark has moved past xs, so a second extend of xs copies */
+  dawn_array *ws = dawn_array_extend(xs, ys);
+  check(ws->buf != xs->buf, "a second extend of the same base copies");
+  check(((dawn_box *)dawn_array_get(ws, 0))->h.rc == rc_x0 + 1,
+        "a copied element is dup'd for the copy");
+  check(((dawn_box *)dawn_array_get(ws, 5))->val.i == 12 &&
+            array_reads(xs, 0, 3) && dawn_array_len(zs) == 6,
+        "and neither tail shows the other's");
+
+  /* an array extended by itself reads only below its own end */
+  dawn_array *dd = dawn_array_extend(ws, ws);
+  check(dawn_array_len(dd) == 12 && ((dawn_box *)dawn_array_get(dd, 6))->val.i == 0 &&
+            ((dawn_box *)dawn_array_get(dd, 11))->val.i == 12,
+        "extending an array by itself doubles it");
+
+  /* empty operands */
+  dawn_array *none = dawn_array_new();
+  dawn_array *same = dawn_array_extend(xs, none);
+  check(array_reads(same, 0, 3), "extend by empty is the same elements");
+  dawn_array *only = dawn_array_extend(none, ys);
+  check(array_reads(only, 10, 3), "extend of empty is b's elements");
+
+  dawn_drop(only);
+  dawn_drop(same);
+  dawn_drop(none);
+  dawn_drop(dd);
+  dawn_drop(ws);
+  dawn_drop(zs);
+  dawn_drop(ys);
+  dawn_drop(xs);
+}
+
+static dawn_array *slice_subject;
+static int64_t slice_from;
+static int64_t slice_to;
+
+static void *slice_out_of_range(dawn_clo *f) {
+  (void)f;
+  return dawn_array_slice(slice_subject, slice_from, slice_to);
+}
+
+/* `array_slice` borrows the array and answers an owned copy of `[from, to)`,
+ * each element dup'd. The half-open right end is the claim most worth a
+ * mutant: one element too many or too few, and the length check goes red.
+ * A range outside `[0, len]`, or with `from > to`, is a panic worded as the
+ * JVM words it -- never a clamp. */
+static void test_array_slice(void) {
+  dawn_array *xs = ints(0, 6);
+  int32_t rc_x2 = ((dawn_box *)dawn_array_get(xs, 2))->h.rc;
+
+  dawn_array *mid = dawn_array_slice(xs, 2, 5);
+  check(array_reads(mid, 2, 3), "slice [2, 5) is elements 2, 3, 4");
+  check(((dawn_box *)dawn_array_get(xs, 2))->h.rc == rc_x2 + 1,
+        "every element of the copy is dup'd");
+  check(array_reads(xs, 0, 6), "the source is unchanged");
+
+  dawn_array *all = dawn_array_slice(xs, 0, 6);
+  check(array_reads(all, 0, 6), "the full range is a copy of everything");
+  dawn_array *edge = dawn_array_slice(xs, 6, 6);
+  dawn_array *none = dawn_array_slice(xs, 0, 0);
+  check(dawn_array_len(edge) == 0 && dawn_array_len(none) == 0, "empty ranges are empty");
+
+  /* pushing onto a slice must not write into the source's buffer */
+  dawn_box *extra = dawn_box_int(99);
+  dawn_array *grown = dawn_array_push(mid, extra);
+  dawn_drop(extra);
+  check(array_reads(xs, 0, 6) && array_reads(mid, 2, 3) && dawn_array_len(grown) == 4,
+        "a slice is its own array");
+
+  static const char *const want[] = {
+      "array slice [-1, 2) out of bounds for length 6",
+      "array slice [0, 7) out of bounds for length 6",
+      "array slice [4, 3) out of bounds for length 6",
+      "array slice [7, 8) out of bounds for length 6",
+  };
+  static const int64_t bad[][2] = {{-1, 2}, {0, 7}, {4, 3}, {7, 8}};
+  slice_subject = xs;
+  for (int k = 0; k < 4; k++) {
+    slice_from = bad[k][0];
+    slice_to = bad[k][1];
+    dawn_clo *c = dawn_clo_new((void *)slice_out_of_range, 0, 0);
+    dawn_adt *r = dawn_catch_panic(c, NULL);
+    check(r->tag == DAWN_TAG_ERR, "a range outside the array raises a panic");
+    dawn_adt *err = (dawn_adt *)r->fields[0].p;
+    dawn_str *msg = (dawn_str *)err->fields[1].p;
+    size_t wl = strlen(want[k]);
+    check(msg->len == (int64_t)wl && memcmp(msg->p, want[k], wl) == 0,
+          "the slice panic names the range and the length");
+    dawn_drop(r);
+    dawn_drop(c);
+  }
+  slice_subject = NULL;
+
+  dawn_drop(grown);
+  dawn_drop(none);
+  dawn_drop(edge);
+  dawn_drop(all);
+  dawn_drop(mid);
+  dawn_drop(xs);
+}
+
 /* ---- a handler's state cells (docs/handler-state-design.md) --------------
  *
  * The only overwritable slot in the runtime, so the only place a superseded
@@ -1024,6 +1184,8 @@ static const rc_case rc_cases[] = {
     {"array", test_array, 0},
     {"array_with", test_array_with, 0},
     {"array_steal", test_array_steal, 0},
+    {"array_extend", test_array_extend, 0},
+    {"array_slice", test_array_slice, 0},
     {"adt_reset_shared", test_adt_reset_shared, 0},
     {"adt_reset_releases_fields", test_adt_reset_releases_fields, 0},
     {"adt_reset_token_is_a_shell", test_adt_reset_token_is_a_shell, 0},

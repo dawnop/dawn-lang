@@ -2135,6 +2135,12 @@ fn array_wrap_desc() -> String = "L" ++ ARRAY_CLASS ++ ";"
 const ARRAY_BOUNDS_HEAD: String = "array index "
 const ARRAY_BOUNDS_TAIL: String = " out of bounds for length "
 
+## `array_slice`'s panic: `array slice [<from>, <to>) out of bounds for length
+## <len>`. Same rule as above, the native runtime spells it identically.
+const ARRAY_SLICE_HEAD: String = "array slice ["
+const ARRAY_SLICE_SEP: String = ", "
+const ARRAY_SLICE_TAIL: String = ") out of bounds for length "
+
 ## Throw a PanicError whose message is `prefix ++ i ++ " out of bounds for
 ## length " ++ v.len`, with the array in local 0 and the index in local `ivar`.
 fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io = {
@@ -2223,6 +2229,8 @@ pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
   gen_array_steal(cw)
   gen_array_push(cw)
   gen_array_with(cw)
+  gen_array_extend(cw)
+  gen_array_slice(cw)
   gen_array_java(cw)
 
   # popcount(n) = Long.bitCount(n)
@@ -2441,6 +2449,184 @@ fn gen_array_push(cw: ClassWriter) -> Unit !io = {
   pv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
   pv.visitInsn(OP_ARETURN)
   close_mv(pv)
+}
+
+## array_extend(a, b) -> a followed by every element of b. The bulk form of
+## `array_push`, with the same fast path: when `a` ends at the shared watermark
+## and the store has room for all of `b`, one CAS claims the whole stretch and
+## the elements are copied in place, so an accumulation of blocks stays linear.
+## Otherwise it copies both into a store with slack. Copying from `b` while
+## writing past `a`'s end cannot overlap even when `b` is `a`, because the
+## claimed stretch starts at `a.len`, which is where `b`'s window ends.
+fn gen_array_extend(cw: ClassWriter) -> Unit !io = {
+  let ev = open_static(cw, "array_extend",
+    "(" ++ array_wrap_desc() ++ array_wrap_desc() ++ ")" ++ array_wrap_desc())
+  let slow = Label.new()
+  let some = Label.new()
+  # 2 = n = a.len, 3 = m = b.len
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  ev.visitVarInsn(OP_ISTORE, 2)
+  ev.visitVarInsn(OP_ALOAD, 1)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  ev.visitVarInsn(OP_ISTORE, 3)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitJumpInsn(OP_IFNE, some)
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitInsn(OP_ARETURN)
+  ev.visitLabel(some)
+
+  # room in the store for all of b?
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  ev.visitInsn(OP_ARRAYLENGTH)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitInsn(OP_IADD)
+  ev.visitJumpInsn(OP_IF_ICMPLT, slow)
+  # claim slots n .. n+m for this thread alone
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitInsn(OP_IADD)
+  ev.visitMethodInsn(OP_INVOKEVIRTUAL, ATOMIC_INT, "compareAndSet", "(II)Z", false)
+  ev.visitJumpInsn(OP_IFEQ, slow)
+  ev.visitVarInsn(OP_ALOAD, 1)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  ev.visitInsn(OP_ICONST_0)
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  ev.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  ev.visitInsn(OP_DUP)
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitInsn(OP_IADD)
+  ev.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  ev.visitInsn(OP_ARETURN)
+
+  ev.visitLabel(slow)
+  # store = new Object[max(MIN, 2 * (n + m))]
+  ev.visitIntInsn(OP_BIPUSH, ARRAY_MIN_CAP)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitInsn(OP_IADD)
+  ev.visitInsn(OP_ICONST_2)
+  ev.visitInsn(OP_IMUL)
+  ev.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "max", "(II)I", false)
+  ev.visitTypeInsn(OP_ANEWARRAY, obj())
+  ev.visitVarInsn(OP_ASTORE, 4)
+  ev.visitVarInsn(OP_ALOAD, 0)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  ev.visitInsn(OP_ICONST_0)
+  ev.visitVarInsn(OP_ALOAD, 4)
+  ev.visitInsn(OP_ICONST_0)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  ev.visitVarInsn(OP_ALOAD, 1)
+  ev.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  ev.visitInsn(OP_ICONST_0)
+  ev.visitVarInsn(OP_ALOAD, 4)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  ev.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  ev.visitInsn(OP_DUP)
+  ev.visitVarInsn(OP_ALOAD, 4)
+  ev.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  ev.visitInsn(OP_DUP)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitInsn(OP_IADD)
+  ev.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  ev.visitVarInsn(OP_ILOAD, 2)
+  ev.visitVarInsn(OP_ILOAD, 3)
+  ev.visitInsn(OP_IADD)
+  ev.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  ev.visitInsn(OP_ARETURN)
+  close_mv(ev)
+}
+
+## array_slice(v, from, to) -> a copy of v[from, to). A range outside
+## `[0, len]`, or with `from > to`, panics: it is a primitive under std's own
+## range functions, which do the clamping, so a bad range here is a bug and
+## not a question. Locals: 1-2 = from, 3-4 = to, 5 = the copy.
+fn gen_array_slice(cw: ClassWriter) -> Unit !io = {
+  let sv = open_static(cw, "array_slice",
+    "(" ++ array_wrap_desc() ++ "JJ)" ++ array_wrap_desc())
+  let bad = Label.new()
+  # from < 0
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitInsn(OP_LCONST_0)
+  sv.visitInsn(OP_LCMP)
+  sv.visitJumpInsn(OP_IFLT, bad)
+  # to > len
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  sv.visitInsn(OP_I2L)
+  sv.visitInsn(OP_LCMP)
+  sv.visitJumpInsn(OP_IFGT, bad)
+  # from > to
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitInsn(OP_LCMP)
+  sv.visitJumpInsn(OP_IFGT, bad)
+  # copy = Arrays.copyOfRange(a.a, (int) from, (int) to)
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitInsn(OP_L2I)
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitInsn(OP_L2I)
+  sv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOfRange",
+    "([Ljava/lang/Object;II)[Ljava/lang/Object;", false)
+  sv.visitVarInsn(OP_ASTORE, 5)
+  sv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  sv.visitInsn(OP_DUP)
+  sv.visitVarInsn(OP_ALOAD, 5)
+  sv.visitVarInsn(OP_ALOAD, 5)
+  sv.visitInsn(OP_ARRAYLENGTH)
+  sv.visitVarInsn(OP_ISTORE, 6)
+  sv.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  sv.visitInsn(OP_DUP)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  sv.visitInsn(OP_ARETURN)
+
+  sv.visitLabel(bad)
+  sv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  sv.visitInsn(OP_DUP)
+  sv.visitTypeInsn(OP_NEW, SB)
+  sv.visitInsn(OP_DUP)
+  sv.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(sv, ARRAY_SLICE_HEAD)
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
+  append_const(sv, ARRAY_SLICE_SEP)
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
+  append_const(sv, ARRAY_SLICE_TAIL)
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  sv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(I)L" ++ SB ++ ";", false)
+  sv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  sv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  sv.visitInsn(OP_ATHROW)
+  close_mv(sv)
 }
 
 ## array_with(v, i, x) -> v with slot i replaced. Always copies on this
@@ -4484,6 +4670,12 @@ test "the native runtime words an Array bounds panic the way this one does" {
   assert str.contains(c, "\"" ++ ARRAY_BOUNDS_HEAD ++ "%lld" ++ ARRAY_BOUNDS_TAIL ++ "%lld\"")
   # the old native wording carried neither the index nor the length
   assert not str.contains(c, "dawn_panic(DAWN_LIT(\"Array index out of bounds\"))")
+}
+
+test "the native runtime words an array_slice panic the way this one does" {
+  let c = rtsrc.source("dawn_rt.c").expect("the embedded runtime source")
+  assert str.contains(c, "\"" ++ ARRAY_SLICE_HEAD ++ "%lld" ++ ARRAY_SLICE_SEP ++ "%lld"
+      ++ ARRAY_SLICE_TAIL ++ "%lld\"")
 }
 
 # ---- the static methods the emitters call by hand ----

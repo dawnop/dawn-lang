@@ -52,7 +52,7 @@ K0 的结论（native）：
 | `bytes_pack_float` | `(a: Array[Float], width: Int, little: Bool) -> Bytes` | RtBytes |
 | `bytes_unpack_float` | `(b: Bytes, width: Int, little: Bool) -> Array[Float]` | RtBytes |
 | `array_extend` | `(a: Array[T], b: Array[T]) -> Array[T]`，批量追加 `b` 的全部元素（erased） | RtArray |
-| `array_slice` | `(a: Array[T], from: Int, to: Int) -> Array[T]`，区间拷贝（erased，夹取规则同 `bytes_slice`） | RtArray |
+| `array_slice` | `(a: Array[T], from: Int, to: Int) -> Array[T]`，区间拷贝（erased）。**越界 panic，不夹取**：区间落在 `[0, len]` 之外或 `from > to` 都是 panic，措辞两后端一致（`array slice [F, T) out of bounds for length N`）；它在 std 自己的夹取型 range 函数之下，坏区间是 std 的 bug，不是调用方的提问（CONTRIBUTING §7） | RtArray |
 
 - `Int` 与 `Float` 分两族：元素箱类型不同（`Long` 与 `Double`；`dawn_box.val.i` 与 `.val.f`），拆成两个原语比运行时再分派更快、更好验证。不用 `kind` 枚举参数（§8）。
 - **`bytes_from_array` 并入**：`bytes_from_array(a)` 等于 `bytes_pack_int(a, 1, true)`，删除旧原语（类型表、镜像、JVM、C、头文件、6 处调用点）。
@@ -100,7 +100,7 @@ K0 的结论（native）：
 |---|---|---|---|
 | K0 | 只量：native 1M f64 的 C 紧循环、`List` 拷贝、`list.map` 一遍（native 已量，见 §1.3；真实 pvec 互转占比与 JVM 紧循环待量）；填 `gpu-typed-transfer-design.md` 开放问题 4 | 否 | 无 |
 | K1 | 本文 | 否 | 无 |
-| K2 | `array_extend`/`array_slice` + `pvec` 三处改用 + `scripts/array-contract` 两条断言 | 否 | 区间右端开闭错一位，合约红；native `array_extend` 漏一次 dup，ASan 门红 |
+| K2（已实现，见下注） | `array_extend`/`array_slice` + `pvec` 改用 + `scripts/array-contract` 两条断言 | 否 | 区间右端开闭错一位，合约红；native `array_extend` 漏一次 dup，ASan 门红 |
 | K3 | 整数族 + 骨架生成函数 + 删 `bytes_from_array`（6 处）+ 合约 `scripts/bytes-pack-contract`（两后端同一 `.expect`） | 是 | 字节序写反（非对称值）；宽度错一档；符号扩展写成零扩展（`0x80`）；截断改饱和（`300`） |
 | K4 | 浮点族 + std/bytes `Endian` 与公开面 | 否 | JVM 换 `doubleToLongBits`（规范化 NaN），载荷用例红；native 经 `double` 算术而非 `memcpy`，同样红 |
 | K5 | GPU 重写（与 U3c 合并或紧随）：删 `gpu_*_host` 与桩、镜像，11 对收成位型 + `pack_ints` | 是 | `unpack_i32` 符号扩展改零扩展，`dtype_diff` 红；f64 改规范化 NaN，红 |
@@ -126,3 +126,9 @@ K2 与 K3 可并行。破坏性刀（K3、K5）用 `Emit-Change(<label>)` 声明
 8. **为 `bytes_from_array`、`gpu_upload_host`、`gpu_download_host` 留别名或迁移提示。** 无外部消费者，不做兼容层。
 9. **`DeviceBits` 路径上的恒等表示转换（报告 §4.5 的 (b)）。** 需要 checker 规则设计，收益只在窄整数格式；取 (a)，K0 量完再说。
 10. **把 `Buf` 换成真字节缓冲类型（`ByteBuf`）。** 已被 `docs/inflate-default-cap-design.md` §5.6 判为不做，本文不重裁。
+
+## 9. K2 落地记录
+
+- 实现：`array_extend` 沿用 `array_push` 的快路径（JVM 对整段 CAS，native 看高水位），慢路径一次拷两者进带余量的新缓冲；`array_slice` 越界 panic。`pvec` 改了两处：`to_array` 逐叶子 `array_extend`、`arr_slice` 直接 `array_slice`；`from_array` 要建 trie，不属于这两个原语，未动。
+- 验证：`scripts/array-contract`（JVM 值行、四种 panic、extend 累积时钟，外加 native 腿用 `native_probe.dawn` 对同一份 `expected.txt`）、`scripts/rc-contract`（两条断言、两个变异体：extend 漏 dup、slice 右端少一个）。手工变异：JVM 放宽上界检查红在 panic 行，JVM extend 永不就地红在时钟（41 s 对 3 s 预算）。提交哈希见合入后的 `git log`。
+

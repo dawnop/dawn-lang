@@ -450,6 +450,24 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
         """  if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {""",
         """  if (!dawn_rc_leak && a->h.rc == 1 && a->nfields <= 64) {""",
     ),
+    # `array_extend` stops taking a reference for the elements it writes into
+    # a buffer in place. Every answer is still right, so only the counts show
+    # it, and a program that dropped the result would free elements the source
+    # still reads (the sanitized leg reports that as a use-after-free).
+    "array-extend-skips-dup": (
+        "dawn_rt.c",
+        """      buf->data[n + k] = dawn_dup(b->buf->data[k]);""",
+        """      buf->data[n + k] = b->buf->data[k];""",
+    ),
+    # `array_slice` copies one element too few whenever the range is not
+    # empty: the half-open right end read as exclusive twice.
+    "array-slice-right-end-off-by-one": (
+        "dawn_rt.c",
+        """  int32_t n = (int32_t)(to - from);
+  dawn_array_buf *nb = dawn_array_buf_new(n);""",
+        """  int32_t n = (int32_t)(to - from) - (to > from ? 1 : 0);
+  dawn_array_buf *nb = dawn_array_buf_new(n);""",
+    ),
     # A token of another width is reused as it is; the build writes past it.
     "reuse-ignores-width": (
         "dawn_rt.c",
