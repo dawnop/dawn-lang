@@ -136,6 +136,14 @@ fn own_trait_ids(traits: Traits, cls: String) -> List[Int] = {
   out
 }
 
+## Does an impl bound none of its parameters?
+fn no_bounds(constraints: List[List[Int]]) -> Bool = {
+  for cs in constraints {
+    if len(cs) > 0 { return false }
+  }
+  true
+}
+
 ## Add a prelude trait to the set whose interface the program needs. Ord is
 ## unconditional and its methods are reached by name, so it is never wanted
 ## here; a user trait's interface comes from the module that declares it.
@@ -477,6 +485,12 @@ fn collect_program_full(
   for pr in map.entries(impl_table) {
     let (_k, imp) = pr
     if len(imp.tparams) == 0 { continue }
+    # `Len` at a List binds nothing and is the `len` primitive at every call
+    # lowering can see; a dictionary of it exists only to be handed to a
+    # function with a `[C: Len]` bound, and the bound scan above asks for the
+    # interface then. Asked for here unconditionally it would put one more
+    # class in every program, for the one trait whose std impl is always there.
+    if lower.is_len_primitive(imp.trait_id, imp.subject) && no_bounds(imp.constraints) { continue }
     wants = want_iface(wants, imp.trait_id)
     for cs in imp.constraints {
       for b in cs {

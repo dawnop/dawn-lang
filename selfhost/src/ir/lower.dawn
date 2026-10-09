@@ -34,7 +34,7 @@ use check/types.{
   Adts, adt_of, trait_of, prelude_adts, prelude_traits, prelude_impls, insert_impl,
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID, NEG_ID, is_arith_trait,
-  FROM_INT_ID, FROM_FLOAT_ID, is_lit_trait,
+  FROM_INT_ID, FROM_FLOAT_ID, is_lit_trait, LEN_ID,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, sub_goals
 }
@@ -1075,6 +1075,10 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       rendering became Dawn source (std/fmt.dtoa, audit
 ##                       RP-01) -- `show_at` writes a direct call, so no
 ##                       backend owes a float renderer any more
+##   len                 the length of a List, which the user writes as the prelude
+##                       `Len` trait's `len` (docs/len-trait-design.md). It left
+##                       the builtin table when the trait took the name; the
+##                       primitive stays, reached only through `list_len_call`
 ##   list_index list_slice
 ##                       `xs[i]` and a list pattern's `..rest`
 ##   list_push           `xs ++ [x]`, which `cat_list` rewrites from a
@@ -1144,7 +1148,7 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ## (The two figures above are what the tree held when this was measured; the
 ## sizes that have to stay true are asserted in the test below, not here.)
 pub fn internal_intrinsics() -> List[String] = [
-  "cmp", "hash", "java_eq", "java_hash", "show", "quote",
+  "cmp", "hash", "java_eq", "java_hash", "show", "quote", "len",
   "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "list_push", "null_ref", "ev_get", "ev_append",
   "cell_new", "cell_get", "cell_set", "cell_take",
@@ -1284,8 +1288,11 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## `char_unchecked` joins them for the plainest reason of all: `Char`'s
 ## representation is `Int`, so the bridge is the identity and lowering drops
 ## it. A backend never learns the name.
+## `list_len` is the name the prelude `Len` impl for List calls: lowering turns
+## it into the `len` primitive (`list_len_call`), the same one a `len(xs)` on a
+## List collapses to, so there is one List length and one place that spells it.
 pub fn lowered_intrinsics() -> List[String] = {
-  var out = ["parse_float", "char_unchecked", "dbg", "caller"]
+  var out = ["parse_float", "char_unchecked", "list_len", "dbg", "caller"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries", "fold"] {
     out = out ++ ["map_${op}"]
@@ -1365,11 +1372,11 @@ test "every intrinsic is owned by a runtime module, written inline, removed by l
   #    answers for the same list in the same paragraph.
   assert len(inline) == 39
   assert len(host) == 2
-  assert len(gone) == 22
+  assert len(gone) == 23
   assert len(staged) == 0
-  # and the five groups account for all 134 names, with none left over
+  # and the five groups account for all 148 names, with none left over
   assert len(map.keys(it)) == 125
-  assert len(internal) == 22
+  assert len(internal) == 23
 }
 
 # ---- trait witnesses ----
@@ -2989,6 +2996,17 @@ fn lower_trait_call(
   if len(ws) == 0 {
     panic("lower: trait method call without a witness: ${name}")
   }
+  # `Len` at a List is the `len` primitive, not a call on the impl's wrapper.
+  # Like the collapse below it is the definition rather than an optimisation:
+  # the prelude's name for a List's length has always been that primitive, and
+  # a wrapper call would add an invoke on the JVM, a translation-unit boundary
+  # on native, and a user-function call to a comptime fold's fuel. The impl's
+  # own body (`list_len`) serves the dictionary slot of a generic `[C: Len]`.
+  match ws[0] {
+    WForward(_) -> ()
+    WConcrete(_, subject) -> if is_len_primitive(tid, subject) { return list_len_call(st, args, ty, site) }
+    WApply(_, subject, _) -> if is_len_primitive(tid, subject) { return list_len_call(st, args, ty, site) }
+  }
   # A prelude or structural witness has no body to call. It collapses to the
   # primitive, which is not an optimisation but the definition -- the same
   # relation `==` emits, and what a bound instantiated at either has to end
@@ -3539,6 +3557,15 @@ test "a builtin taken as a value lowers as the call it wraps" {
       _ -> panic("`" ++ n ++ "` taken as a value is not a closure")
     }
     let body = st1.lifted[len(st1.lifted) - 1].body
+    # `list_len` is the one that lowers to an intrinsic, on purpose: the `len`
+    # primitive, which is internal and so not a name any source can write
+    if n == "list_len" {
+      match body {
+        CIntrinsic(got, _, _, _) -> { assert got == "len" }
+        _ -> panic("`list_len` taken as a value did not lower to the `len` primitive")
+      }
+      continue
+    }
     match body {
       CIntrinsic(got, _, _, _) ->
         panic("`" ++ n ++ "` taken as a value lowered to the intrinsic `" ++ got ++
@@ -3723,6 +3750,9 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # failure suffix `unsite` below would fold into a message
       if name == "dbg" {
         return lower_dbg(st, args, wits, ty)
+      }
+      if name == "list_len" {
+        return list_len_call(st, args, ty, site)
       }
       if name == "caller" {
         return lower_caller(st, args)
@@ -4507,6 +4537,29 @@ fn lower_caller(st: LSt, args: List[TExpr]) -> (LSt, CExpr) = {
   let lt = ty_loc()
   (st1, CBlock([CSLet(sym, lt, CStr(l.unwrap_or("")))], Some(CLocal(sym, lt)), lt))
 }
+
+## The length of a List: the `len` primitive. The one place that builds it, for
+## the two ways a program reaches a List's `Len` -- the `list_len` builtin the
+## prelude impl's body calls, and a `len(xs)` that resolved to that impl and
+## collapses here instead of calling the impl's wrapper
+## (`lower_trait_call`). Built exactly as the builtin `len` was, so the Core
+## for a List call site did not move when the name became a trait method.
+fn list_len_call(st: LSt, args: List[TExpr], ty: Ty, site: CSite) -> (LSt, CExpr) = {
+  let (st1, vs) = lower_all(st, args)
+  (st1, CIntrinsic("len", vs, ty, site))
+}
+
+## Is this `Len` at a List, the one trait relation that is the `len` primitive?
+## Not peeled, unlike `is_list_ty`: an opaque type over a List that writes its
+## own `Len` has its own length, and only the List itself is the primitive.
+## Public because the JVM driver asks it too: such an impl needs no trait
+## interface of its own (`main.dawn`, where the interfaces are chosen).
+pub fn is_len_primitive(tid: Int, subject: Ty) -> Bool =
+  tid == LEN_ID &&
+  match subject {
+    TyList(_) -> true
+    _ -> false
+  }
 
 ## `dbg(x)` as the block it means (docs/source-location-design.md section
 ## 6.3): bind the argument, write its line, answer it.

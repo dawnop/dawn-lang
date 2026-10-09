@@ -2633,6 +2633,12 @@ pub fn is_lit_trait(tid: Int) -> Bool = tid == FROM_INT_ID || tid == FROM_FLOAT_
 pub const STAGED_ITER_ID: Int = 15
 pub const STAGED_VAR_ID: Int = 16
 
+## `Len`: the length of a container, dispatched on the receiver type
+## (docs/len-trait-design.md). Id 17. Injects, so `len(x)` and `x.len()` both
+## reach it; an impl's `fn len` is not a module-level name and so shadows
+## nothing in the prelude.
+pub const LEN_ID: Int = 17
+
 ## One prelude trait `derive` can mint an impl of.
 pub type Derivable = { name: String, trait_id: Int, adjective: String }
 
@@ -2955,8 +2961,12 @@ pub fn prelude_traits() -> Traits = {
     eff_defaults: [],
     injects: false
   }
+  # Len: one subject in parameter 0, `-> Int`, injected like Show.
+  let lv = TyVar("T", -40)
+  let len_t = prelude_trait(LEN_ID, "Len", lv, "len",
+    prelude_method(LEN_ID, lv, "len", [lv], ["x"], TyInt))
   map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter),
-    (INDEX_ID, index), (DISPLAY_ID, display),
+    (INDEX_ID, index), (DISPLAY_ID, display), (LEN_ID, len_t),
     (ADD_ID, arith_trait(ADD_ID, "Add", "add", -23, 2)),
     (SUB_ID, arith_trait(SUB_ID, "Sub", "sub", -24, 2)),
     (MUL_ID, arith_trait(MUL_ID, "Mul", "mul", -25, 2)),
@@ -3081,7 +3091,7 @@ fn arith_trait(tid: Int, name: String, m: String, tvid: Int, arity: Int) -> Trai
 ## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
 pub fn prelude_trait_ids() -> List[Int] =
   [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID,
-    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID, STAGED_ITER_ID, STAGED_VAR_ID]
+    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID, STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -3424,7 +3434,7 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("caller", [], [], ty_loc()),
     bsig("to_float", [TyInt], ["n"], TyFloat),
     bsig("to_int", [TyFloat], ["x"], TyInt),
-    tp1(bsig("len", [TyList(t)], ["xs"], TyInt), t),
+    tp1(bsig("list_len", [TyList(t)], ["xs"], TyInt), t),
     tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
     bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
     effp1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
@@ -4073,6 +4083,11 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # takes the host's grammar.
   rt_of = map.insert(rt_of, "float_of_decimal", RtStrings)
   internal = set.insert(internal, "float_of_decimal")
+  # `len` on a List is the prelude's `Len` now, so the public name is a trait
+  # method (docs/len-trait-design.md). `list_len` is what that trait's List impl
+  # body calls: internal, so only std can spell it, and lowering turns it back
+  # into the `len` primitive.
+  internal = set.insert(internal, "list_len")
   for op in ["letter", "digit", "alnum", "upper", "lower", "space"] {
     rt_of = map.insert(rt_of, "char_is_${op}", RtStrings)
   }
@@ -4292,7 +4307,7 @@ test "every intrinsic property is declared against a real intrinsic" {
   # the three properties, spot-checked at the boundaries the old prefix chains
   # got wrong: `cursor_slice` is internal but has no runtime target (the
   # emitter writes it inline to check the range), `popcount` is owned by Array
-  # without being an `array_` name, and `len` is neither.
+  # without being an `array_` name, and `list_len` is neither.
   let slice = intr_at("cursor_slice").expect("cursor_slice")
   assert slice.internal
   assert slice.rt == None
@@ -4300,10 +4315,12 @@ test "every intrinsic property is declared against a real intrinsic" {
   assert pc.internal
   assert pc.rt == Some(RtArray)
   assert not pc.erased
-  let ln = intr_at("len").expect("len")
-  assert not ln.internal
+  let ln = intr_at("list_len").expect("list_len")
+  assert ln.internal
   assert not ln.erased
   assert ln.rt == None
+  # the public `len` is the trait method now: no builtin carries the name
+  assert intr_at("len") == None
   # erased is the container primitives, and only those
   assert intr_at("map_get").expect("map_get").erased
   assert intr_at("array_push").expect("array_push").erased

@@ -28,7 +28,7 @@ use check/types.{
   builtin_type_hard_reserved, builtin_type_apply, builtin_type_render,
   public_builtin_type_names,
   builtins, internal_builtins,
-  prelude_adts, prelude_traits
+  prelude_adts, prelude_traits, LEN_ID, insert_impl
 }
 use check/jsig.{Jsig, jsig_refused}
 use check/tast.{WitRef}
@@ -800,6 +800,37 @@ pub(pkg) fn private_name_err(cx: Cx, exp: ModExports, name: String, lo: Int, hi:
 
 ## A fresh state for the tests that live beside the checker.
 pub(pkg) fn test_cx() -> Cx = cx_new(None, None)
+
+## The `Len` impl std/list declares for a List, entered by hand for the
+## fixtures that have no std. `len(xs)` is the prelude trait's method now, so a
+## fixture that takes a List's length needs the impl in its table, the way a
+## `for` over a List needs std/list's `Iter` one. It cannot be written as source
+## in a fixture: an impl of a prelude trait at a List belongs to std/list, and
+## the orphan rule says so.
+##
+## The record names a method (`provided`), so lowering treats it as an impl
+## with a body rather than as a primitive relation; no body is ever run. A
+## fixture that only checks types never calls it, and one that folds or lowers
+## a call never reaches it either, because lowering collapses `Len` at a List
+## to the `len` primitive (docs/len-trait-design.md 3.1).
+pub(pkg) fn with_list_len(cx: Cx) -> Cx = {
+  let tv = TyVar("T", -50)
+  let imp = ImplI {
+    trait_id: LEN_ID,
+    subject: TyList(tv),
+    tparams: [tv],
+    constraints: [[]],
+    lo: 0,
+    hi: 1,
+    derived: false,
+    owner: Some("std/list"),
+    src_path: Some("list.dawn"),
+    provided: ["len"],
+    assoc_bindings: [],
+    eff_bindings: []
+  }
+  Cx { ..cx, impl_table: insert_impl(cx.impl_table, imp) }
+}
 
 # ---- diagnostics ----
 
