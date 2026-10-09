@@ -325,6 +325,12 @@ dawn_array *dawn_array_push(dawn_array *a, void *x);
 /* Consumes `a` and `x`: push for accumulation loops, where the superseded
  * header and the element reference are the loop's to give up. */
 dawn_array *dawn_array_push_own(dawn_array *a, void *x);
+/* Both borrowed. `a` then every element of `b`; each element is dup'd for the
+ * buffer that now holds it. Extends in place under push's rule. */
+dawn_array *dawn_array_extend(const dawn_array *a, const dawn_array *b);
+/* Borrowed in, owned out: a copy of `a[from, to)`. Panics unless
+ * `0 <= from <= to <= len`; never clamps. */
+dawn_array *dawn_array_slice(const dawn_array *a, int64_t from, int64_t to);
 /* Consumes `a` and `x` -- see the calling convention note below. */
 dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) DAWN_CONSUMES(0, 2);
 /* Borrows `a`, answers an owned reference to slot `i`. Alone (array and

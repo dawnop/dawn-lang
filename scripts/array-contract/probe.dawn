@@ -16,10 +16,16 @@ const LINEAR_N: Int = 200000
 ## point is to show it *is* the other path, not to wait for it.
 const FORK_N: Int = 20000
 
+## `array_extend` accumulating 32-element blocks: linear with the in-place
+## claim, and 62500 extends each copying the whole prefix without it.
+const EXTEND_N: Int = 2000000
+
 pub fn main() -> Unit !io = {
   for line in array.values() { println(line) }
   println("bounds   ${array.out_of_bounds()}")
   println("frombuf  ${array.from_array()}")
+  for line in array.bulk() { println(line) }
+  for line in array.slice_panics() { println("slicepanic ${line}") }
   # `array_push` extending in place is deliberately unobservable from Dawn,
   # so it is checked by the clock: the two shapes differ by a factor of n.
   let t0 = now_ms()
@@ -27,6 +33,9 @@ pub fn main() -> Unit !io = {
   let t1 = now_ms()
   array.forked_sum(FORK_N)
   let t2 = now_ms()
+  array.extend_linear(EXTEND_N)
+  let t3 = now_ms()
   println("linear   ${LINEAR_N} pushes in ${t1 - t0}ms")
   println("forked   ${FORK_N} pushes in ${t2 - t1}ms")
+  println("extendlinear ${EXTEND_N} elements in ${t3 - t2}ms")
 }

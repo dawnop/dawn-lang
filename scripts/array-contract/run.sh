@@ -45,7 +45,7 @@ echo array >> "$work/modules.txt"
 out="$work/out.txt"
 java -Xss512m -jar "$jar" run --std "$work" "$here/probe.dawn" > "$out"
 
-if ! diff -u "$here/expected.txt" <(grep -v '^linear\|^forked' "$out"); then
+if ! diff -u "$here/expected.txt" <(grep -v '^linear\|^forked\|^extendlinear' "$out"); then
   echo "FAIL: Array value semantics changed" >&2
   exit 1
 fi
@@ -65,7 +65,24 @@ if [ "$linear_ms" -gt "$linear_budget_ms" ]; then
   exit 1
 fi
 
-echo "PASS  values, bounds; 200k linear ${linear_ms}ms vs 20k forked ${forked_ms}ms"
+# `array_extend` accumulating blocks is the same kind of claim as `array_push`
+# extending in place: unobservable from Dawn, so the clock is the oracle. 2M
+# elements in 32-element blocks is milliseconds with the in-place claim and
+# 62500 prefix copies (~60G element moves) without it.
+extend_ms="$(sed -n 's/^extendlinear .* in \([0-9]*\)ms$/\1/p' "$out")"
+if [ -z "$extend_ms" ]; then
+  echo "FAIL: no array_extend timing in output" >&2
+  cat "$out" >&2
+  exit 1
+fi
+if [ "$extend_ms" -gt "$linear_budget_ms" ]; then
+  echo "FAIL: 2M elements via array_extend took ${extend_ms}ms (budget ${linear_budget_ms}ms)." >&2
+  echo "      array_extend stopped extending in place -- block accumulation is" >&2
+  echo "      quadratic again." >&2
+  exit 1
+fi
+
+echo "PASS  values, bounds; 200k linear ${linear_ms}ms vs 20k forked ${forked_ms}ms; 2M extend ${extend_ms}ms"
 
 # ---- native leg: the slot-steal transfer rate -------------------------------
 #
@@ -130,3 +147,35 @@ if [ $((with_cp * 5)) -gt $((with_in + with_cp)) ]; then
 fi
 
 echo "PASS  steal rate: with ${with_in}/$((with_in + with_cp)) in place, steal ${steal_tk}/$((steal_tk + steal_dp)) taken"
+
+# ---- native leg: the same value lines, the same expected.txt ----------------
+#
+# The values and the bounds panics are the contract both backends owe, so the
+# native build of the probe (native_probe.dawn: probe.dawn without its `use
+# java` timer, against the same std copy with array.dawn dropped in) is held to
+# the same file the JVM run was, byte for byte, panic wording included. The
+# extend workload rides at the end of that binary, and the shell's `timeout`
+# is its clock: milliseconds with the in-place claim, tens of minutes without.
+nat_bin="$work/probe_native"
+java -Xss512m -jar "$jar" __emitc --std "$work" "$here/native_probe.dawn" -o "$work/probe_native.c"
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
+  -Wall -Wextra -Werror \
+  -Wno-unused-variable -Wno-unused-but-set-variable \
+  -Wno-unused-parameter -Wno-unused-label -Wno-parentheses-equality \
+  -I "$root/runtime/c" \
+  -o "$nat_bin" "$work/probe_native.c" "$root/runtime/c/dawn_rt.c" -lm
+nat_t0="$(date +%s%N)"
+if ! timeout 60 "$nat_bin" > "$work/native_out.txt"; then
+  echo "FAIL: the native Array probe failed or took over 60s (array_extend lost its in-place path?)" >&2
+  exit 1
+fi
+nat_ms=$(( ($(date +%s%N) - nat_t0) / 1000000 ))
+if ! diff -u "$here/expected.txt" "$work/native_out.txt"; then
+  echo "FAIL: the native build of the Array probe disagrees with expected.txt" >&2
+  exit 1
+fi
+if [ "$nat_ms" -gt "$linear_budget_ms" ]; then
+  echo "FAIL: the native Array probe took ${nat_ms}ms (budget ${linear_budget_ms}ms)" >&2
+  exit 1
+fi
+echo "PASS  native values and bounds panics; whole probe incl. 2M extend ${nat_ms}ms"

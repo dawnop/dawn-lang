@@ -3475,6 +3475,67 @@ dawn_array *dawn_array_push_own(dawn_array *a, void *x) {
   return r;
 }
 
+/* `array_extend(a, b)`: `a` then every element of `b`, both borrowed. The bulk
+ * form of push with push's fast path: when `a` ends at the buffer's high-water
+ * mark and the buffer has room for all of `b`, the slots were never any
+ * version's, so they are written in place. Each element is dup'd for the
+ * buffer that now holds it, which is the one reference-count site this adds.
+ * `b` may be `a`: the slots read are below `a->len`, the slots written at or
+ * above it. */
+dawn_array *dawn_array_extend(const dawn_array *a, const dawn_array *b) {
+  int32_t n = a->len;
+  int32_t m = b->len;
+  if (m == 0) {
+    return (dawn_array *)dawn_dup((void *)a);
+  }
+  dawn_array_buf *buf = a->buf;
+  if (n == buf->high && (int64_t)n + m <= (int64_t)buf->cap) {
+    for (int32_t k = 0; k < m; k++) {
+      buf->data[n + k] = dawn_dup(b->buf->data[k]);
+    }
+    buf->high = n + m;
+    return dawn_array_of(dawn_dup(buf), n + m);
+  }
+  int32_t cap = n + m;
+  if (cap < n * 2) {
+    cap = n * 2;
+  }
+  dawn_array_buf *nb = dawn_array_buf_new(cap);
+  for (int32_t k = 0; k < n; k++) {
+    nb->data[k] = dawn_dup(buf->data[k]);
+  }
+  for (int32_t k = 0; k < m; k++) {
+    nb->data[n + k] = dawn_dup(b->buf->data[k]);
+  }
+  nb->high = n + m;
+  return dawn_array_of(nb, n + m);
+}
+
+/* The slice panic, worded exactly as the JVM's `gen_array_slice`
+ * (jvm/rtclasses.dawn) words it, for the reason the bounds panic above is. */
+static void dawn_array_slice_panic(int64_t from, int64_t to, int64_t len) {
+  char buf[128];
+  int n = snprintf(buf, sizeof buf, "array slice [%lld, %lld) out of bounds for length %lld",
+                   (long long)from, (long long)to, (long long)len);
+  dawn_panic(dawn_str_lit(buf, n));
+}
+
+/* `array_slice(a, from, to)`: a copy of `a[from, to)`, borrowed in, owned out.
+ * A range outside `[0, len]` or with `from > to` panics; clamping is the
+ * caller's business (std's range functions), not this primitive's. */
+dawn_array *dawn_array_slice(const dawn_array *a, int64_t from, int64_t to) {
+  if (from < 0 || to > (int64_t)a->len || from > to) {
+    dawn_array_slice_panic(from, to, (int64_t)a->len);
+  }
+  int32_t n = (int32_t)(to - from);
+  dawn_array_buf *nb = dawn_array_buf_new(n);
+  for (int32_t k = 0; k < n; k++) {
+    nb->data[k] = dawn_dup(a->buf->data[from + k]);
+  }
+  nb->high = n;
+  return dawn_array_of(nb, n);
+}
+
 uint64_t dawn_array_with_inplace = 0;
 uint64_t dawn_array_with_copied = 0;
 

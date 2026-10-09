@@ -3937,6 +3937,14 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("array_get", [TyArray(t), TyInt], ["a", "i"], t), t),
     tp1(bsig("array_push", [TyArray(t), t], ["a", "x"], TyArray(t)), t),
     tp1(bsig("array_with", [TyArray(t), TyInt, t], ["a", "i", "x"], TyArray(t)), t),
+    # The bulk pair (docs/bulk-array-bytes-design.md): one runtime loop where
+    # std used to push element by element. `array_extend` appends every element
+    # of `b`; `array_slice` copies `[from, to)` and panics on a range outside
+    # `[0, len]` or with `from > to` rather than clamping. It is a primitive
+    # under std's own range functions, which do their own clamping, so a bad
+    # range here is a bug in std and not a question the caller asked.
+    tp1(bsig("array_extend", [TyArray(t), TyArray(t)], ["a", "b"], TyArray(t)), t),
+    tp1(bsig("array_slice", [TyArray(t), TyInt, TyInt], ["a", "from", "to"], TyArray(t)), t),
     # `array_get` for a caller about to overwrite the slot: on native, a
     # unique array hands the slot's own reference out instead of pinning an
     # extra count on the child for the duration of the rebuild. Value
@@ -4118,7 +4126,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
     internal = set.insert(internal, n)
   }
   # Array is the one collection primitive a backend must implement (D1)
-  for op in ["new", "len", "get", "push", "with", "steal"] {
+  for op in ["new", "len", "get", "push", "with", "steal", "extend", "slice"] {
     let n = "array_${op}"
     rt_of = map.insert(rt_of, n, RtArray)
     erased = set.insert(erased, n)
@@ -4879,6 +4887,20 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
+  match map.get(bs, "array_extend") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn array_extend[T](a: Array[T], b: Array[T]) -> Array[T]"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "array_slice") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn array_slice[T](a: Array[T], from: Int, to: Int) -> Array[T]"
+    }
+    None -> { assert false }
+  }
   # The one entry that renders two ways. `Object` is what a reader wants and
   # what every consumer of `sig_render` gets; `java.lang.Object` is what a
   # mirror of this table needs, because the short name is in no file's scope
@@ -4901,7 +4923,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 114
+  assert map_size2(bs) == 116
 }
 
 test "the reclaim's failure is a value, under the one name left" {
