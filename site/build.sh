@@ -161,7 +161,7 @@ rm -rf site/dist
 # decision (2.6 lists the levers in order), and failing here puts it on the
 # change that crossed the line rather than on whoever builds next.
 search_over=0
-for search_body in en:120 zh:150; do
+for search_body in en:135 zh:150; do
   search_lang="${search_body%%:*}"
   search_budget_kb="${search_body##*:}"
   search_file="site/dist/assets/search-body-$search_lang.json"
