@@ -1,8 +1,43 @@
 #!/usr/bin/env bash
 # Run a build/gate command under three guards, always:
-#   1. a mutex          -- only one dcap runs on this box at a time
+#   1. a slot mutex     -- at most DCAP_SLOTS (default 2) dcap runs at a time
 #   2. a child scope    -- MemoryMax, so one runaway dies alone
 #   3. a parent slice   -- MemoryMax, so N runaways still die alone
+#
+# ------------------------------------------------------------------- slots ---
+# This used to be ONE slot. It is two now, and the arithmetic is the point:
+#
+#   2 x 6G (DCAP_MEM per run)  <=  14G (dawn.slice)  <=  19G (the VM)
+#
+# Why one was right, and why it no longer is: the two global OOMs of 2026-10-09
+# were not "two builds at once". They were ONE bare `bin/dawn check` that
+# diverged in the checker: the java process reached 18.9 GB of OFF-heap memory
+# while the heap stayed inside -Xmx2g (DAWN_JVM_OPTS="-Xss512m -Xmx2g
+# -XX:+UseSerialGC"), so no JVM flag bounded it and nothing cgroup-shaped was
+# around it. Serialising runs would not have helped; only a cap around the run
+# does. A hook now forces every heavy command through dcap, so a divergent run
+# is killed alone at DCAP_MEM and takes nothing else down. With that, the mutex
+# no longer has to double as a memory guard, and a second slot is affordable:
+# the slice (14G, of 19G RAM + 16G swap) still bounds the sum if both diverge.
+# No JAVA_TOOL_OPTIONS on purpose: the cgroup caps are the backstop.
+#
+# Swap: MemorySwapMax is 2G per scope and 4G for the slice. 0 would make a
+# near-limit build die at the first page of pressure; unbounded lets a runaway
+# thrash 16G of swap for minutes before anything dies (the 10-09 symptom). A
+# little swap absorbs a spike, a lot only delays the kill.
+#
+# Each slot is its own lock file AND its own fixed unit name (dawn-build-0.scope,
+# dawn-build-1.scope, ...), so both interlocks below hold per slot, unchanged.
+# A run takes the first free slot, else polls until one frees up (DCAP_WAIT).
+#
+# Which slice: dawn.slice is a SYSTEM slice (/etc/systemd/system/dawn.slice),
+# because the scopes are started with `sudo systemd-run` against the system
+# manager. `systemctl --user show dawn.slice` asks the USER manager, which has
+# never heard of it and reports MemoryMax=infinity: that is the wrong manager,
+# not an uncapped slice. Always query without --user. The /etc file can lag the
+# repo copy (scripts/dawn.slice), so dcap re-asserts the budget at runtime with
+# `systemctl set-property --runtime` (same sudo -n it already needs for
+# systemd-run); --runtime reverts at reboot and is reapplied on the next run.
 #
 # Why every invocation and not just "heavy" ones: bin/dawn silently does a
 # two-stage self-rebuild whenever sources changed (bin/dawn:139,142), so
@@ -78,18 +113,26 @@
 #
 # Usage:  dcap ./bin/dawn build ...          # default 6G
 #         DCAP_MEM=8G dcap ./scripts/native-fixpoint.sh
+#         DCAP_SLOTS=1 dcap ...                      # old behaviour, one at a time
+# Knobs:  DCAP_MEM per-run cap (6G)   DCAP_TOTAL_MEM slice cap (14G)
+#         DCAP_SWAP per-run swap (2G) DCAP_TOTAL_SWAP slice swap (4G)
 # Setup:  scripts/dawn.slice must be installed; dcap tells you how if it isn't.
 set -euo pipefail
 
 MEM="${DCAP_MEM:-6G}"
 SLICE="${DCAP_SLICE:-dawn.slice}"
-UNIT="${DCAP_UNIT:-dawn-build.scope}"
+SLOTS="${DCAP_SLOTS:-2}"
+UNIT_BASE="${DCAP_UNIT:-dawn-build}"; UNIT_BASE="${UNIT_BASE%.scope}"
+TOTAL_MEM="${DCAP_TOTAL_MEM:-14G}"
+SWAP="${DCAP_SWAP:-2G}"
+TOTAL_SWAP="${DCAP_TOTAL_SWAP:-4G}"
 STATE="${DCAP_STATE:-${XDG_CACHE_HOME:-$HOME/.cache}/dawn}"
-LOCK="${DCAP_LOCK:-$STATE/build.lock}"
+LOCK="${DCAP_LOCK:-$STATE/build.lock}"   # slot i locks "$LOCK.i"
 LOG="${DCAP_LOG:-$STATE/dcap.log}"
 WAIT="${DCAP_WAIT:-1800}"
 : "${JAVA_HOME:=$HOME/tools/graalvm-community-openjdk-21.0.2+13.1}"
 
+case "$SLOTS" in ''|*[!0-9]*|0) echo "dcap: DCAP_SLOTS=$SLOTS is not a positive integer" >&2; exit 2 ;; esac
 [ $# -gt 0 ] || { echo "dcap: nothing to run" >&2; exit 2; }
 mkdir -p "$STATE"
 # Payloads deliberately kept from signal-killed runs (see the end of this file)
@@ -127,10 +170,22 @@ dcap: $SLICE is not installed, so nothing would bound the TOTAL memory of
 EOF
   exit 78
 fi
+# Assert the budget on the real (system) slice. Only touch it when it differs,
+# so the common path costs one `systemctl show` and no sudo.
+total_bytes=$(to_bytes "$TOTAL_MEM") || { echo "dcap: DCAP_TOTAL_MEM=$TOTAL_MEM is not a size" >&2; exit 2; }
+to_bytes "$SWAP" >/dev/null || { echo "dcap: DCAP_SWAP=$SWAP is not a size" >&2; exit 2; }
+total_swap_bytes=$(to_bytes "$TOTAL_SWAP") || { echo "dcap: DCAP_TOTAL_SWAP=$TOTAL_SWAP is not a size" >&2; exit 2; }
 slice_max=$(systemctl show "$SLICE" -p MemoryMax --value 2>/dev/null || echo infinity)
+slice_swap=$(systemctl show "$SLICE" -p MemorySwapMax --value 2>/dev/null || echo infinity)
+if [ "$slice_max" != "$total_bytes" ] || [ "$slice_swap" != "$total_swap_bytes" ]; then
+  sudo -n systemctl set-property --runtime "$SLICE" \
+    MemoryMax="$TOTAL_MEM" MemorySwapMax="$TOTAL_SWAP" 2>/dev/null || true
+  slice_max=$(systemctl show "$SLICE" -p MemoryMax --value 2>/dev/null || echo infinity)
+fi
 if [ "$slice_max" = infinity ]; then
   echo "dcap: $SLICE has MemoryMax=infinity -- the total budget is not capped." >&2
-  echo "      Fix /etc/systemd/system/dawn.slice, then: sudo systemctl daemon-reload" >&2
+  echo "      (Query the SYSTEM manager, not --user.) Fix /etc/systemd/system/dawn.slice," >&2
+  echo "      then: sudo systemctl daemon-reload" >&2
   exit 78
 fi
 if [ "$mem_bytes" != infinity ] && [ "$mem_bytes" -gt "$slice_max" ]; then
@@ -139,11 +194,10 @@ dcap: DCAP_MEM=$MEM exceeds $SLICE's MemoryMax ($slice_max bytes), so the run
       would be capped lower than you asked for and die early for a reason that
       is not in its own log. Raise the total budget deliberately:
 
-        sudo systemctl set-property --runtime $SLICE MemoryMax=$MEM
+        DCAP_TOTAL_MEM=$MEM dcap ...
 
-      (--runtime reverts on reboot. This box's VM ceiling is set in
-      ~/.wslconfig; a build budget near it trades a contained cgroup kill for
-      an uncontained host-side one.)
+      (This box's VM ceiling is set in ~/.wslconfig; a build budget near it
+      trades a contained cgroup kill for an uncontained host-side one.)
 EOF
   exit 78
 fi
@@ -175,59 +229,64 @@ desc="dcap: $cmd_str"
 if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 2000000 ]; then
   mv -f "$LOG" "$LOG.1"
 fi
-printf '%s pid=%s unit=%s slice=%s mem=%s cwd=%s run=%s cmd=%s\n' \
-  "$(date -Is)" "$$" "$UNIT" "$SLICE" "$MEM" "$PWD" "$RUN" "$cmd_str" >> "$LOG"
+printf '%s pid=%s unit=%s-N.scope slots=%s slice=%s mem=%s cwd=%s run=%s cmd=%s\n' \
+  "$(date -Is)" "$$" "$UNIT_BASE" "$SLOTS" "$SLICE" "$MEM" "$PWD" "$RUN" "$cmd_str" >> "$LOG"
 
-# --- interlock 1: the file lock --------------------------------------------
-# Held on a fixed fd by THIS process for its whole life. dcap must therefore
-# not exec itself away -- which also restores the EXIT trap the old `exec
-# flock ...` silently disabled (it had leaked 213 scripts into /tmp).
-exec 9>"$LOCK"
-flock -x 9
-
-# --- interlock 2: the unit name, plus the run ------------------------------
+# --- interlocks, per slot ---------------------------------------------------
+# Interlock 1 is the slot's file lock, held on fd 9 by THIS process for its
+# whole life (dcap must therefore not exec itself away, which also keeps the
+# EXIT trap alive). Interlock 2 is the slot's fixed unit name, checked by pid 1.
+# Try slot 0, then 1, ...; the first whose lock is free AND whose unit starts
+# wins. If a lock is free but the unit name is taken (async teardown, or a
+# holder that bypassed the lock), release the lock and move on to the next slot.
 uid=$(id -u); gid=$(id -g)
-# Clear a unit left failed by a previous run before trying, not after failing to
-# start: the recovery works either way, but doing it here keeps the common
-# "Ctrl-C a build, run it again" path silent and immediate.
-if [ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)" = failed ]; then
-  sudo -n systemctl reset-failed "$UNIT" 2>/dev/null || true
-fi
 start=$(date +%s)
 deadline=$(( start + WAIT ))
-rc=0
+rc=0; UNIT=""; slot=-1; announced=0
 while :; do
-  rc=0
-  sudo -n systemd-run --scope --quiet --collect \
-    --unit="$UNIT" --slice="$SLICE" --description="$desc" \
-    -p MemoryMax="$MEM" -p MemorySwapMax=0 \
-    --uid="$uid" --gid="$gid" \
-    -E HOME="$HOME" -E JAVA_HOME="$JAVA_HOME" -E PATH="$PATH" \
-    "$RUN" || rc=$?
-  # Sentinel present => the payload really ran, so rc is the payload's.
-  [ -e "$STARTED" ] && break
-  # Absent => the scope never started. Either $UNIT is still being torn down
-  # from the previous run (teardown is async) or another run is holding it.
-  # A third case, which turns this interlock into a self-inflicted outage:
-  # ActiveState=failed with no processes left. --collect above prevents systemd
-  # from parking a unit there, but it cannot help when systemd-run ITSELF is
-  # killed (Ctrl-C, a harness timeout) -- it dies before it can deregister the
-  # scope, and the name stays taken forever. Clear that case; it is unambiguous,
-  # because a scope holding live processes is active or abandoned, never failed.
-  if [ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)" = failed ]; then
-    # Fall through to the deadline check rather than looping straight back: if
-    # reset-failed cannot clear it, retrying immediately is a busy loop.
-    sudo -n systemctl reset-failed "$UNIT" 2>/dev/null || true
-  fi
+  for (( i = 0; i < SLOTS; i++ )); do
+    exec 9>"$LOCK.$i"
+    flock -n 9 || continue
+    u="$UNIT_BASE-$i.scope"
+    # Clear a unit left failed by a previous run before trying: keeps the
+    # "Ctrl-C a build, run it again" path silent and immediate.
+    if [ "$(systemctl show "$u" -p ActiveState --value 2>/dev/null || true)" = failed ]; then
+      sudo -n systemctl reset-failed "$u" 2>/dev/null || true
+    fi
+    printf '%s pid=%s slot=%s unit=%s\n' "$(date -Is)" "$$" "$i" "$u" >> "$LOG"
+    rc=0
+    sudo -n systemd-run --scope --quiet --collect \
+      --unit="$u" --slice="$SLICE" --description="$desc" \
+      -p MemoryMax="$MEM" -p MemorySwapMax="$SWAP" \
+      --uid="$uid" --gid="$gid" \
+      -E HOME="$HOME" -E JAVA_HOME="$JAVA_HOME" -E PATH="$PATH" \
+      "$RUN" || rc=$?
+    # Sentinel present => the payload really ran, so rc is the payload's.
+    # Absent => the scope never started ("systemd-run refused" and "your command
+    # exited 1" are both rc=1, hence the sentinel).
+    if [ -e "$STARTED" ]; then UNIT="$u"; slot=$i; break 2; fi
+    # ActiveState=failed with no processes left: --collect cannot help when
+    # systemd-run ITSELF was killed (Ctrl-C, harness timeout) before it could
+    # deregister the scope. Unambiguous (a scope with live processes is active
+    # or abandoned, never failed), so clear it.
+    if [ "$(systemctl show "$u" -p ActiveState --value 2>/dev/null || true)" = failed ]; then
+      sudo -n systemctl reset-failed "$u" 2>/dev/null || true
+    fi
+    exec 9>&-
+  done
   if [ "$(date +%s)" -ge "$deadline" ]; then
-    echo "dcap: $UNIT still busy after ${WAIT}s -- inspect: systemctl status $UNIT" >&2
+    echo "dcap: all $SLOTS slot(s) still busy after ${WAIT}s -- inspect: systemctl status '$UNIT_BASE-*.scope'" >&2
     printf '%s pid=%s exit=blocked waited=%ss\n' "$(date -Is)" "$$" "$WAIT" >> "$LOG"
     exit 75
   fi
-  sleep 2
+  if [ "$announced" = 0 ]; then
+    echo "dcap: all $SLOTS slot(s) busy, waiting (up to ${WAIT}s)..." >&2
+    announced=1
+  fi
+  sleep 1
 done
 
-printf '%s pid=%s exit=%s elapsed=%ss\n' "$(date -Is)" "$$" "$rc" "$(( $(date +%s) - start ))" >> "$LOG"
+printf '%s pid=%s slot=%s exit=%s elapsed=%ss\n' "$(date -Is)" "$$" "$slot" "$rc" "$(( $(date +%s) - start ))" >> "$LOG"
 
 # --- interlock 2, the other half: the payload is done, so the unit must go ---
 # A scope stays ACTIVE while its cgroup is non-empty, and it is not systemd-run
