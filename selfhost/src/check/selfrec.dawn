@@ -1,0 +1,327 @@
+# A function or impl method that calls itself on every path before it can
+# return is a compile error (docs/self-recursion-design.md). This module
+# decides which bodies those are.
+#
+# Why a walk over the *typed* tree and not over the syntax: whether `len(b)`
+# inside `impl Len[Box] { fn len(b) = len(b) }` is the method itself is a
+# question about name resolution, which only the checker has answered. In the
+# syntax the same spelling can be a prelude function, an import, or the method.
+# The typed call carries the resolved owner, name, trait and witness, so
+# "itself" here means the same resolved symbol and nothing else.
+#
+# The walk errs one way only. Every construct it does not understand is read
+# as "this path may leave without a self-call", which silences the report.
+# A missed error costs a function that recurses forever; a false one breaks a
+# correct program, so only the former is accepted. In particular:
+#   * a call that raises an effect operation may be aborted by its handler, so
+#     it counts as a way out (`fn skip(p) !Fail = { expect(p); skip(p) }` ends
+#     when `expect` fails);
+#   * a lambda body is not evaluated where it is written, and a local function
+#     is not evaluated at all, so neither can supply the self-call;
+#   * mutual recursion is out of scope: only the function's own symbol counts.
+
+use check/cx.{Cx, cerr_h}
+use check/types.{Ty, TyNever, TyError, TyAdt, TyList, TyMap, TySet, TyArray, TyTuple, TyOpaque}
+use check/tast.{
+  TExpr, TStmt, TFun, WitRef, WConcrete, WApply, WForward, BAnd, BOr,
+  XStr, XCallDyn, XCallBuiltin, XCallFn, XApply, XJava, XCtor, XField, XListLit, XTupleLit,
+  XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue, XBinary, XUnary, XIf,
+  XMatch, XBlock, TSPText, TSPInterp, TLEExpr, TLESpread, TLEIf,
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
+}
+
+## What evaluating an expression does on the paths that complete normally.
+## `Free`: some path completes without having called the function.
+## `Hits`: every such path has called it (the span is the first call found).
+## `Stops`: no path completes (a panic, a jump).
+type Flow =
+  | Free
+  | Hits(lo: Int, hi: Int)
+  | Stops
+
+## `ret`: some path leaves the function without a self-call (an early
+## `return`, a `?`, a call that may be aborted). `jump`: some path leaves the
+## innermost loop the same way. Loops clear `jump`; nothing clears `ret`.
+type Fl = { n: Flow, ret: Bool, jump: Bool }
+
+## Which symbol "itself" is: the module that declares it, a name, and for an impl method also the trait and
+## the impl's subject type.
+type Me = { home: Option[String], name: String, trait_id: Option[Int], subject: Option[Ty] }
+
+fn free() -> Fl = Fl { n: Free, ret: false, jump: false }
+
+fn stops() -> Fl = Fl { n: Stops, ret: false, jump: false }
+
+## `a` first, then `b` on the paths that got through `a`. If every path through
+## `a` already called the function, `b` cannot change that.
+fn then(a: Fl, b: Fl) -> Fl =
+  match a.n {
+    Free -> Fl { n: b.n, ret: a.ret || b.ret, jump: a.jump || b.jump }
+    _ -> a
+  }
+
+## Two alternatives: everything must call for the result to call.
+fn either(a: Fl, b: Fl) -> Fl = {
+  let n = match (a.n, b.n) {
+    (Free, _) -> Free
+    (_, Free) -> Free
+    (Hits(lo, hi), _) -> Hits(lo, hi)
+    (_, Hits(lo, hi)) -> Hits(lo, hi)
+    _ -> Stops
+  }
+  Fl { n: n, ret: a.ret || b.ret, jump: a.jump || b.jump }
+}
+
+## A part that may not run at all: only its ways out survive.
+fn maybe(a: Fl) -> Fl = Fl { n: Free, ret: a.ret, jump: a.jump }
+
+fn flows(es: List[TExpr], me: Me) -> Fl = {
+  var acc = free()
+  for e in es { acc = then(acc, flow(e, me)) }
+  acc
+}
+
+fn opt(e: Option[TExpr], me: Me) -> Fl =
+  match e {
+    Some(x) -> flow(x, me)
+    None -> free()
+  }
+
+## Does `actual` have the shape an impl's subject `pattern` has? A generic
+## impl records its subject with every argument erased to `TyError` (`List[?]`
+## for `impl[T] Len[List[T]]`), and any instance of it is the same method, so
+## an erased argument fits anything.
+fn fits(pattern: Ty, actual: Ty) -> Bool =
+  match (pattern, actual) {
+    (TyError, _) -> true
+    (TyList(a), TyList(b)) -> fits(a, b)
+    (TySet(a), TySet(b)) -> fits(a, b)
+    (TyArray(a), TyArray(b)) -> fits(a, b)
+    (TyMap(k1, v1), TyMap(k2, v2)) -> fits(k1, k2) && fits(v1, v2)
+    (TyAdt(i, xs), TyAdt(j, ys)) -> i == j && fits_all(xs, ys)
+    (TyTuple(xs), TyTuple(ys)) -> fits_all(xs, ys)
+    (TyOpaque(i, _, _, xs, _), TyOpaque(j, _, _, ys, _)) -> i == j && fits_all(xs, ys)
+    _ -> pattern == actual
+  }
+
+fn fits_all(xs: List[Ty], ys: List[Ty]) -> Bool = {
+  if len(xs) != len(ys) { return false }
+  var ok = true
+  var i = 0
+  while i < len(xs) {
+    if not fits(xs[i], ys[i]) { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+fn witnesses_subject(ws: List[WitRef], tid: Int, subject: Ty) -> Bool = {
+  var found = false
+  for w in ws {
+    match w {
+      WConcrete(t, s) -> { if t == tid && fits(subject, s) { found = true } }
+      WApply(t, s, _) -> { if t == tid && fits(subject, s) { found = true } }
+      WForward(_) -> ()
+    }
+  }
+  found
+}
+
+fn is_self(me: Me, owner: Option[String], name: String, ws: List[WitRef], trait_id: Option[Int]) -> Bool =
+  if owner != me.home || name != me.name {
+    false
+  } else {
+    match (me.trait_id, me.subject) {
+      (Some(tid), Some(subject)) -> trait_id == Some(tid) && witnesses_subject(ws, tid, subject)
+      _ -> trait_id == None
+    }
+  }
+
+## A call other than the self-call: its arguments, then the call itself. A
+## callee with a row may be aborted by a handler; one that returns `Never`
+## does not complete.
+fn call(args: Fl, evidence: List[TExpr], ty: Ty) -> Fl = {
+  let a = if evidence == [] { args } else { Fl { ..args, ret: true } }
+  match a.n {
+    Free -> if ty == TyNever { Fl { ..a, n: Stops } } else { a }
+    _ -> a
+  }
+}
+
+fn flow(e: TExpr, me: Me) -> Fl =
+  match e {
+    XCallFn(owner, name, args, ws, evidence, trait_id, lo, hi, _, ty) -> {
+      let a = flows(args, me)
+      if is_self(me, owner, name, ws, trait_id) {
+        then(a, Fl { n: Hits(lo, hi), ret: false, jump: false })
+      } else {
+        call(a, evidence, ty)
+      }
+    }
+    XCallBuiltin(_, args, _, evidence, _, _, _, ty) -> call(flows(args, me), evidence, ty)
+    XCallDyn(_, _, args, evidence, _, _, _, ty) -> call(flows(args, me), evidence, ty)
+    XApply(target, args, evidence, _, _, _, ty) -> call(then(flow(target, me), flows(args, me)), evidence, ty)
+    XJava(c, _, _, _, _) -> then(opt(c.target, me), flows(c.args, me))
+    XStr(parts, _, _) -> {
+      var acc = free()
+      for p in parts {
+        match p {
+          TSPText(_) -> ()
+          TSPInterp(x, _) -> { acc = then(acc, flow(x, me)) }
+        }
+      }
+      acc
+    }
+    XCtor(_, _, written, _, spread, _, _, _) -> then(flows(written, me), opt(spread, me))
+    XField(t, _, _, _, _) -> flow(t, me)
+    XListLit(elems, _, _, _) -> {
+      var acc = free()
+      for el in elems {
+        match el {
+          TLEExpr(x) -> { acc = then(acc, flow(x, me)) }
+          TLESpread(x) -> { acc = then(acc, flow(x, me)) }
+          TLEIf(arms) -> {
+            for arm in arms {
+              acc = then(acc, maybe(then(flow(arm.cond, me), flow(arm.body, me))))
+            }
+          }
+        }
+      }
+      acc
+    }
+    XTupleLit(es, _, _, _) -> flows(es, me)
+    XPropagate(x, _, _, _) -> {
+      let a = flow(x, me)
+      match a.n {
+        Free -> Fl { ..a, ret: true }
+        _ -> a
+      }
+    }
+    XUnwrap(x, _, _, _, _) -> flow(x, me)
+    XIndex(t, i, _, _, _, _) -> then(flow(t, me), flow(i, me))
+    XReturn(v, _, _) -> {
+      let a = opt(v, me)
+      match a.n {
+        Hits(_, _) -> a
+        _ -> Fl { n: Stops, ret: true, jump: a.jump }
+      }
+    }
+    XBreak(_, _) -> Fl { n: Stops, ret: false, jump: true }
+    XContinue(_, _) -> Fl { n: Stops, ret: false, jump: true }
+    XBinary(op, l, r, _, _, _, _, _, _) -> {
+      let a = flow(l, me)
+      match op {
+        BAnd -> then(a, maybe(flow(r, me)))
+        BOr -> then(a, maybe(flow(r, me)))
+        _ -> then(a, flow(r, me))
+      }
+    }
+    XUnary(_, x, _, _, _) -> flow(x, me)
+    XIf(c, t, el, _, _, _) -> {
+      let other = match el {
+        Some(x) -> flow(x, me)
+        None -> free()
+      }
+      then(flow(c, me), either(flow(t, me), other))
+    }
+    XMatch(scrut, arms, _, _, _) -> {
+      var acc: Option[Fl] = None
+      for arm in arms {
+        let g = match arm.guard {
+          Some(x) -> maybe(flow(x, me))
+          None -> free()
+        }
+        let f = then(g, flow(arm.body, me))
+        acc = match acc {
+          Some(prev) -> Some(either(prev, f))
+          None -> Some(f)
+        }
+      }
+      then(flow(scrut, me), match acc {
+        Some(f) -> f
+        None -> stops()
+      })
+    }
+    XBlock(stmts, tail, _, _, _) -> {
+      var acc = free()
+      for s in stmts { acc = then(acc, stmt_flow(s, me)) }
+      then(acc, opt(tail, me))
+    }
+    # Not evaluated where written (lambda), compile-time (comptime), or
+    # nothing to evaluate (the rest).
+    _ -> free()
+  }
+
+fn stmt_flow(s: TStmt, me: Me) -> Fl =
+  match s {
+    TSLet(_, _, init, _, _) -> flow(init, me)
+    TSLetPat(_, init, _, _) -> flow(init, me)
+    TSLocalFn(..) -> free()
+    TSAssign(_, _, v, _, _) -> flow(v, me)
+    TSExpr(x, _, _) -> flow(x, me)
+    TSAssert(c, _, _, _) -> flow(c, me)
+    TSWhile(c, body, _, _, _) -> {
+      let head = flow(c, me)
+      loop_of(head, flow(body, me))
+    }
+    TSFor(_, _, from, to, _, body, _, _, _) -> loop_of(then(flow(from, me), opt(to, me)), flow(body, me))
+  }
+
+## A loop: its head runs once, its body zero or more times, and a `break` or
+## `continue` ends at the loop.
+fn loop_of(head: Fl, body: Fl) -> Fl =
+  match head.n {
+    Free -> Fl { n: Free, ret: head.ret || body.ret, jump: false }
+    _ -> Fl { ..head, jump: false }
+  }
+
+fn describe(me: Me) -> String =
+  match me.trait_id {
+    Some(_) -> "method `" ++ me.name ++ "`"
+    None -> "function `" ++ me.name ++ "`"
+  }
+
+fn report(cx: Cx, tf: TFun, impl_of: Bool) -> Cx = {
+  let me = if impl_of {
+    match tf.impl_of {
+      Some((tid, subject)) -> Me { home: cx.owner_class, name: tf.name, trait_id: Some(tid), subject: Some(subject) }
+      None -> Me { home: cx.owner_class, name: tf.name, trait_id: None, subject: None }
+    }
+  } else {
+    Me { home: cx.owner_class, name: tf.name, trait_id: None, subject: None }
+  }
+  let r = flow(tf.body, me)
+  match r.n {
+    Hits(lo, hi) -> if r.ret {
+      cx
+    } else {
+      cerr_h(cx, "unconditional recursion: " ++ describe(me) ++ " calls itself on every path and never returns",
+        lo, hi, hint_for(me))
+    }
+    _ -> cx
+  }
+}
+
+fn hint_for(me: Me) -> String =
+  match me.trait_id {
+    Some(_) ->
+      "inside an impl, `" ++ me.name ++ "` names this method, so a prelude or imported function of the same name is "
+      ++ "shadowed here; add a case that returns without the self-call, or call the other function through its module"
+    None ->
+      "add a case that returns without calling `" ++ me.name ++ "`; if another function of that name was meant, "
+      ++ "qualify it or rename one of them"
+  }
+
+## Report every body that cannot return without calling itself, in the order
+## the functions were checked -- but only for a module with no other
+## diagnostic, since a body that failed to check holds `XError` nodes and the
+## walk would read them as ways out anyway. Trait default bodies and tests are
+## not looked at: a default body's `m(x)` is a call through a witness, not to
+## itself, and a test is nobody's callee.
+pub(pkg) fn report_self_recursion(cx: Cx, functions: List[TFun], impl_methods: List[TFun]) -> Cx = {
+  if cx.diags != [] { return cx }
+  var cx1 = cx
+  for tf in functions { cx1 = report(cx1, tf, false) }
+  for tf in impl_methods { cx1 = report(cx1, tf, true) }
+  cx1
+}

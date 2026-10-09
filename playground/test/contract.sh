@@ -304,7 +304,7 @@ check "run output never names the work root" \
   'd["phase"]=="run" and d["exit"]==1 and "unwrapped None from f() at prog.dawn:2" in d["output"] and os.environ["PLAY_WORK_ROOT"] not in d["output"] and "dawn-play-" not in d["output"]'
 
 check "infinite loop times out" \
-  '{"code":"fn s(n: Int) -> Unit !io = s(n+1)\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}' \
+  '{"code":"fn s(n: Int) -> Unit !io = if n < 0 { () } else { s(n + 1) }\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}' \
   'not d["ok"] and d["phase"]=="timeout" and d["output"]=="x\n"'
 
 # The child's output files live beside its box, not in it, and the runner
@@ -523,7 +523,7 @@ code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}
 # a program that never ends hold both permits for the run budget (3 s) and the
 # compile before it; a compile that arrives meanwhile is turned away at two
 # seconds. A /compile with a gate of its own would be let in and answer 200.
-SPIN='{"code":"fn s(n: Int) -> Unit !io = s(n+1)\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}'
+SPIN='{"code":"fn s(n: Int) -> Unit !io = if n < 0 { () } else { s(n + 1) }\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}'
 curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "http://127.0.0.1:$PORT/run" >/dev/null &
 SPIN1=$!
 curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "http://127.0.0.1:$PORT/run" >/dev/null &

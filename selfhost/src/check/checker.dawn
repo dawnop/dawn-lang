@@ -100,6 +100,7 @@ use check/identity
 use check/identity.{minted, PathTable}
 use check/tast_positions
 use check/import_use
+use check/selfrec
 use check/decltests
 use check/passes.{
   seed_prelude, pass_java_uses, pass_imports, pass_type_shells, pass_ctor_fields,
@@ -15212,6 +15213,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   # Last, because whether an import is unused is only decided for a module
   # every other check passed (docs/unused-imports-design.md §2). Here and not
   # in `check_module`, so every body executor reaches the same end.
+  cx1 = selfrec.report_self_recursion(cx1, fns_out, impl_tfuns)
   cx1 = import_use.report_unused_imports(cx1, m)
   (state, ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
     impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests })
@@ -15397,6 +15399,75 @@ fn hints_of(src: String) -> List[String] !io = {
   let env: Map[String, ModExports] = map.empty()
   let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
   map(cx.diags, d => d.hint)
+}
+
+## The `unconditional recursion` message, for a body that is the whole source's
+## only diagnostic.
+fn selfrec_msg(kind: String, name: String) -> String =
+  "unconditional recursion: " ++ kind ++ " `" ++ name ++ "` calls itself on every path and never returns"
+
+test "a function that calls itself on every path is refused, at the call (docs/self-recursion-design.md)" {
+  # direct
+  let direct = "pub fn f(x: Int) -> Int = f(x)\n"
+  assert msgs_of(direct) == [selfrec_msg("function", "f")]
+  let (m, _) = parser.parse_module(direct)
+  let (cx, _) = check_module(seed_prelude(test_cx()), m, map.empty())
+  assert str.slice(direct, cx.diags[0].lo, cx.diags[0].hi) == "f(x)"
+  # after other work, and on both arms of an if
+  assert msgs_of("pub fn g(n: Int) -> Int = {\n  let m = n + 1\n  g(m) + 1\n}\n") == [selfrec_msg("function", "g")]
+  assert msgs_of("pub fn h(c: Bool, n: Int) -> Int = if c { h(c, n) } else { h(c, n + 1) }\n") ==
+    [selfrec_msg("function", "h")]
+  # every arm of a match
+  assert msgs_of("pub fn k(n: Option[Int]) -> Int = match n {\n  Some(x) -> k(Some(x))\n  None -> k(None)\n}\n") ==
+    [selfrec_msg("function", "k")]
+  # the call is an argument of another call, which does not leave
+  assert msgs_of("pub fn w(n: Int) -> Int = n + w(n)\n") == [selfrec_msg("function", "w")]
+  # the hint says what to do
+  assert hints_of(direct) == ["add a case that returns without calling `f`; if another function of that name was meant, qualify it or rename one of them"]
+}
+
+test "an impl method that calls itself on every path is refused (the shadowed `len` of std)" {
+  # inside an impl body the method's own name resolves to the method, so a
+  # prelude function of the same name is shadowed and the call recurses
+  let src = "trait Len[T] {\n  fn len(x: T) -> Int\n}\ntype Box = { n: Int }\n" ++
+    "impl Len[Box] {\n  fn len(b: Box) -> Int = len(b)\n}\n"
+  assert msgs_of(src) == [selfrec_msg("method", "len")]
+  let (m, _) = parser.parse_module(src)
+  let (cx, _) = check_module(seed_prelude(test_cx()), m, map.empty())
+  assert str.slice(src, cx.diags[0].lo, cx.diags[0].hi) == "len(b)"
+  # a generic subject, the shape the std prototype had
+  assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\n" ++
+      "impl[T] Len[List[T]] {\n  fn len(xs: List[T]) -> Int = len(xs)\n}\n") == [selfrec_msg("method", "len")]
+  # the same, called as a method
+  assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\ntype Box = { n: Int }\n" ++
+      "impl Len[Box] {\n  fn len(b: Box) -> Int = b.len()\n}\n") == [selfrec_msg("method", "len")]
+}
+
+test "a body with a way out, or a call that is not itself, is accepted" {
+  # a base case
+  assert msgs_of("pub fn fact(n: Int) -> Int = if n <= 1 { 1 } else { n * fact(n - 1) }\n") == []
+  # an early return before the call
+  assert msgs_of("pub fn a(n: Int) -> Int = {\n  if n == 0 { return 0 }\n  a(n - 1)\n}\n") == []
+  # a match with one arm that stops
+  assert msgs_of("pub fn b(n: Int) -> Int = match n {\n  0 -> 0\n  _ -> b(n - 1)\n}\n") == []
+  # tail recursion with a base case
+  assert msgs_of("pub fn sum(n: Int, acc: Int) -> Int = if n == 0 { acc } else { sum(n - 1, acc + n) }\n") == []
+  # a call under a condition that may be false, and one that never runs
+  assert msgs_of("pub fn c(n: Int) -> Bool = n > 0 && c(n - 1)\n") == []
+  assert msgs_of("pub fn d(n: Int) -> Int = {\n  while n > 0 { let _ = d(n - 1) }\n  0\n}\n") == []
+  assert msgs_of("pub fn e(n: Int) -> fn() -> Int = () => e(n)()\n") == []
+  # `?` may return before the call
+  assert msgs_of("pub fn p(o: Option[Int]) -> Option[Int] = {\n  let x = o?\n  p(Some(x))\n}\n") == []
+  # mutual recursion is out of scope: only a body's own symbol counts
+  assert msgs_of("pub fn even(n: Int) -> Bool = odd(n)\npub fn odd(n: Int) -> Bool = even(n)\n") == []
+  # the same trait method on another type is another symbol
+  assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\ntype Box = { items: List[Int] }\n" ++
+      "impl[T] Len[List[T]] {\n  fn len(x: List[T]) -> Int = 0\n}\n" ++
+      "impl Len[Box] {\n  fn len(b: Box) -> Int = len(b.items)\n}\n") == []
+  # a handler may abort the effect operation before the call
+  assert msgs_of("effect Stop {\n  fn stop() -> Int\n}\npub fn spin(n: Int) -> Int !Stop = {\n  let _ = stop()\n  spin(n)\n}\n") == []
+  # a local function of the same name is not the top-level one
+  assert msgs_of("pub fn z(n: Int) -> Int = {\n  fn z(m: Int) -> Int = m\n  z(n)\n}\n") == []
 }
 
 test "`[]` names the subject it could not index, whatever shape it is" {

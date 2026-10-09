@@ -1,0 +1,54 @@
+# A body that calls itself on every path before it can return is refused
+# (docs/self-recursion-design.md). The refused ones come first, then the
+# bodies that look alike and are fine, which must add nothing to the golden.
+
+trait Len[T] {
+  fn len(x: T) -> Int
+}
+
+type Box = { n: Int, items: List[Int] }
+
+# refused: inside the impl `len` is the method itself, so the prelude `len` is
+# shadowed and this recurses forever
+impl Len[Box] {
+  fn len(b: Box) -> Int = len(b)
+}
+
+# refused: the same through a generic subject
+impl[T] Len[List[T]] {
+  fn len(xs: List[T]) -> Int = len(xs)
+}
+
+# refused: a plain function
+fn forever(x: Int) -> Int = forever(x)
+
+# refused: every arm calls
+fn both_arms(c: Bool, n: Int) -> Int = if c { both_arms(c, n) } else { both_arms(c, n + 1) }
+
+# fine: a base case
+fn fact(n: Int) -> Int = if n <= 1 { 1 } else { n * fact(n - 1) }
+
+# fine: tail recursion with a base case
+fn sum(n: Int, acc: Int) -> Int = if n == 0 { acc } else { sum(n - 1, acc + n) }
+
+# fine: an early return comes first
+fn early(n: Int) -> Int = {
+  if n == 0 { return 0 }
+  early(n - 1)
+}
+
+# fine: mutual recursion is out of scope
+fn even(n: Int) -> Bool = odd(n)
+fn odd(n: Int) -> Bool = even(n)
+
+# fine: another symbol with the same trait method name, on another subject
+type Wrapper = { inner: Box }
+impl Len[Wrapper] {
+  fn len(w: Wrapper) -> Int = len(w.inner)
+}
+
+# fine: a local function of the same name
+fn shadow(n: Int) -> Int = {
+  fn shadow(m: Int) -> Int = m
+  shadow(n)
+}

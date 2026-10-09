@@ -228,7 +228,7 @@ user and needs no sudo.
 Each of these must be *contained*, and produce a clean JSON response, never a
 hang or a host-level effect:
 
-1. **Infinite loop** — `fn s(n:Int)->Unit !io = s(n+1)` → `phase:"timeout"`.
+1. **Infinite loop** — `fn s(n:Int)->Unit !io = if n < 0 { () } else { s(n+1) }` (a bare `s(n+1)` is now refused at compile time) → `phase:"timeout"`.
 2. **Fork bomb** — spawn threads/processes in a loop → killed by `TasksMax`, no
    host slowdown.
 3. **Memory bomb** — allocate an ever-growing list → OOM-killed at 512M, the host
