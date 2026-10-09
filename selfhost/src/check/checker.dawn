@@ -70,7 +70,7 @@ use check/types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
   NEG_ID, is_arith_trait, arith_trait_name, opaque_inherits, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
-  STAGED_ITER_ID, STAGED_VAR_ID,
+  STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID,
   head_of, impl_at, has_impl_at,
   is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
   AWorld, PkgDep
@@ -87,7 +87,7 @@ use check/cx.{
   write_symbol, write_signature, write_bounds,
   AliasE, Cx, Frame, LambdaCx, LocalFn, StagedCell, ModExports, package_of, pkg_private, pkg_private_export,
   pkg_private_err, private_name_diagnostic,
-  cx_new, test_cx, check_value_arity,
+  cx_new, test_cx, with_list_len, check_value_arity,
   cerr, cerr_h, cerr_o, owned_by, unowned, measured_from, owner_off, owner_at, eff_witness_at, fresh,
   enter_decl_owner, leave_decl_owner, mint_cursor, module_pool, alias_shadow, effect_of, resolve_eff_at,
   resolve_type, resolve_return_type,
@@ -2201,14 +2201,14 @@ pub(pkg) fn visible_builtin_names(cx: Cx) -> List[String] = {
 ## (docs/audit/re-audit-2026-07-30.md RD-02). A per-family sample fails the
 ## day a family is added without a decision about it.
 fn hidden_from_user_code() -> List[String] =
-  ["map_insert", "set_has", "array_push", "popcount", "cursor_next",
+  ["map_insert", "set_has", "array_push", "popcount", "cursor_next", "list_len",
     "io_read_file", "io_println", "io_run", "bytes_at", "bytes_pack_int",
     "str_upper", "reactor_state_get"]
 
 ## The prelude half: names spec 11 promises user code may write. A fix that
 ## over-reaches shows up here rather than in somebody's program.
 fn visible_to_user_code() -> List[String] =
-  ["len", "get", "range", "sort_by", "to_string", "join", "panic", "expect",
+  ["get", "range", "sort_by", "to_string", "join", "panic", "expect",
     "parse_float", "char_is_alnum", "code_points",
     "from_code_points", "args", "catch_fault", "catch_panic", "bracket", "cast"]
 
@@ -4574,15 +4574,15 @@ fn fn_value_eta_hint(cx: Cx, spelled: String, f: Sig) -> Option[String] = {
 test "fn values instantiate from the expected type" {
   let cx = test_cx()
   let bs = builtins()
-  # len: List[T] -> Int as a value with expected fn(List[Int]) -> Int
-  let len_sig = map.get(bs, "len").expect("len")
-  let (cx1, t1, _) = check_fn_value(cx, "len", "len", len_sig,
+  # list_len: List[T] -> Int as a value with expected fn(List[Int]) -> Int
+  let len_sig = map.get(bs, "list_len").expect("list_len")
+  let (cx1, t1, _) = check_fn_value(cx, "list_len", "list_len", len_sig,
     Some(TyFn([TyList(TyInt)], TyInt, EPure)), 0, 3)
   assert len(cx1.diags) == 0
   assert t1 == TyFn([TyList(TyInt)], TyInt, EPure)
   # without context the generic cannot instantiate
-  let (cx2, t2, _) = check_fn_value(cx, "len", "len", len_sig, None, 0, 3)
-  assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `len`")
+  let (cx2, t2, _) = check_fn_value(cx, "list_len", "list_len", len_sig, None, 0, 3)
+  assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `list_len`")
   # a bounded sig eta-expands once the expected type settles its subject; the
   # bound is Eq because that one answers structurally, so the exemplar needs no
   # impl table (no table builtin carries bounds since the ordering family moved
@@ -13003,8 +13003,12 @@ test "apply: piping arguments into an unannotated lambda" {
   assert str.contains(cx3.diags[0].msg, "`n` is not a function (it is Int)")
 }
 
+## A checking state that has std/list's `Len` impl for a List, for the fixtures
+## that build a call to `len` by hand.
+fn cx_with_list_len() -> Cx = seed_prelude(with_list_len(test_cx()))
+
 test "calls: builtins, dynamic targets, arity and undefined" {
-  var cx = seed_prelude(test_cx())
+  var cx = cx_with_list_len()
   cx = push_scope(cx)
   # len([1]) : Int
   let call = EApply(EVar("len", 0, 3), [pos_arg(EListLit([LeExpr(EInt(1, 5, 6))], 4, 7))], 0, 8)
@@ -13348,7 +13352,8 @@ test "a default reads the parameters before it, and names the ones it cannot" {
   # generics: the earlier parameter's type is the type parameter
   assert msgs_of("fn pair[T](a: T, b: T = a) -> (T, T) = (a, b)\nfn p() -> (Int, Int) = pair(1)\n") == []
   # the tail block fills the last parameter; the default between reads the first
-  assert msgs_of("fn each(xs: List[Int], n: Int = len(xs), body: fn(Int) -> Int) -> Int = body(n)\n" ++
+  assert msgs_of(
+    "fn each(xs: List[Int], n: Int = len(xs), body: fn(Int) -> Int) -> Int = body(n)\n" ++
       "fn q() -> Int = each([1, 2]) { x => x * 2 }\n") == []
   # its own parameter
   let own = "fn bump(a: Int = a + 1) -> Int = a\n"
@@ -13403,9 +13408,10 @@ test "the same call, four callees, four kinds of typed node" {
   cx = push_scope(cx)
   # a function name is a static call
   let (_, _, n1) = check_expr(cx,
-    EApply(EVar("len", 0, 3), [pos_arg(EListLit([LeExpr(EInt(1, 5, 6))], 4, 7))], 0, 8), no_expected())
+    EApply(EVar("get", 0, 3), [pos_arg(EListLit([LeExpr(EInt(1, 5, 6))], 4, 7)),
+      pos_arg(EInt(0, 8, 9))], 0, 10), no_expected())
   match n1 {
-    XCallBuiltin(n, ..) -> { assert n == "len" }
+    XCallBuiltin(n, ..) -> { assert n == "get" }
     _ -> { assert false }
   }
   # a local holding a function is a dynamic call, still by name
@@ -13718,16 +13724,19 @@ test "static field access reads Class.FIELD, maps types, rejects unknowns" {
 }
 
 test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {
-  var cx = seed_prelude(test_cx())
+  var cx = cx_with_list_len()
   cx = push_scope(cx)
   let (cxa, _) = declare(cx, "xs", TyList(TyInt), false, 0, 2)
   let u = EMethod(EVar("xs", 0, 2), "len", [], 3, 6, 0, 8)
   let (cx1, t, node) = check_expr(cxa, u, no_expected())
   assert t == TyInt
   assert len(cx1.diags) == 0
+  # `Len` is a trait method, so the rewritten call is a trait call with the
+  # receiver as its one argument
   match node {
-    XCallBuiltin(n, args2, ..) -> {
+    XCallFn(_, n, args2, _, _, tid, ..) -> {
       assert n == "len"
+      assert tid == Some(LEN_ID)
       assert len(args2) == 1
     }
     _ -> { assert false }
@@ -15298,7 +15307,7 @@ fn msgs_of(src: String) -> List[String] !io = {
   let (m, pdiags) = parser.parse_module(src)
   if len(pdiags) > 0 { panic("the source does not parse: ${pdiags[0].msg}") }
   let env: Map[String, ModExports] = map.empty()
-  let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
+  let (cx, _) = check_module(seed_prelude(with_list_len(test_cx())), m, env)
   map(cx.diags, d => d.msg)
 }
 
@@ -15429,23 +15438,26 @@ test "a function that calls itself on every path is refused, at the call (docs/s
 test "an impl method that calls itself on every path is refused (the shadowed `len` of std)" {
   # inside an impl body the method's own name resolves to the method, so a
   # prelude function of the same name is shadowed and the call recurses
-  let src = "trait Len[T] {\n  fn len(x: T) -> Int\n}\ntype Box = { n: Int }\n" ++
+  let src = "type Box = { n: Int }\n" ++
     "impl Len[Box] {\n  fn len(b: Box) -> Int = len(b)\n}\n"
   assert msgs_of(src) == [selfrec_msg("method", "len")]
   let (m, _) = parser.parse_module(src)
   let (cx, _) = check_module(seed_prelude(test_cx()), m, map.empty())
   assert str.slice(src, cx.diags[0].lo, cx.diags[0].hi) == "len(b)"
+  # a generic subject, the shape the std prototype had
+  # (as std/list would write it: the orphan rule keeps the impl of a prelude
+  # trait at a List there)
+  let std_list = "impl[T] Len[List[T]] {\n  fn len(xs: List[T]) -> Int = len(xs)\n}\n"
+  let (ml, _) = parser.parse_module(std_list)
+  let (cxl, _) = check_module(seed_prelude(cx_new(Some("std/list"), None)), ml, map.empty())
+  assert map(cxl.diags, d => d.msg) == [selfrec_msg("method", "len")]
   # and in a module that has a name, which is where a real program lives: the
-  # call's owner is the trait's declaring module (none for a prelude trait), not
-  # the module the impl is in
+  # call's owner is the prelude trait's (none), not the module the impl is in
   let (ma, _) = parser.parse_module(src)
   let (cxa, _) = check_module(seed_prelude(cx_new(Some("app"), None)), ma, map.empty())
   assert map(cxa.diags, d => d.msg) == [selfrec_msg("method", "len")]
-  # a generic subject, the shape the std prototype had
-  assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\n" ++
-      "impl[T] Len[List[T]] {\n  fn len(xs: List[T]) -> Int = len(xs)\n}\n") == [selfrec_msg("method", "len")]
   # the same, called as a method
-  assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\ntype Box = { n: Int }\n" ++
+  assert msgs_of("type Box = { n: Int }\n" ++
       "impl Len[Box] {\n  fn len(b: Box) -> Int = b.len()\n}\n") == [selfrec_msg("method", "len")]
 }
 
@@ -15467,8 +15479,7 @@ test "a body with a way out, or a call that is not itself, is accepted" {
   # mutual recursion is out of scope: only a body's own symbol counts
   assert msgs_of("pub fn even(n: Int) -> Bool = odd(n)\npub fn odd(n: Int) -> Bool = even(n)\n") == []
   # the same trait method on another type is another symbol
-  assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\ntype Box = { items: List[Int] }\n" ++
-      "impl[T] Len[List[T]] {\n  fn len(x: List[T]) -> Int = 0\n}\n" ++
+  assert msgs_of("type Box = { items: List[Int] }\n" ++
       "impl Len[Box] {\n  fn len(b: Box) -> Int = len(b.items)\n}\n") == []
   # a handler may abort the effect operation before the call
   assert msgs_of("effect Stop {\n  fn stop() -> Int\n}\npub fn spin(n: Int) -> Int !Stop = {\n  let _ = stop()\n  spin(n)\n}\n") == []
@@ -17525,7 +17536,7 @@ test "a local declaration shadows a prelude trait method rather than colliding" 
   # measurement 1). Adding a name to the prelude may not break a program that
   # checks today; shadowing is how that promise is kept.
   let env: Map[String, ModExports] = map.empty()
-  assert len(prelude_method_names()) == 8
+  assert len(prelude_method_names()) == 9
   for n in prelude_method_names() {
     # arity 1, where every prelude method of that name takes two or more
     let src = "fn " ++ n ++ "(x: Int) -> Int = x + 1\n" ++
@@ -17556,7 +17567,7 @@ test "a local declaration shadows a prelude trait method rather than colliding" 
 test "shadowing the prelude method names does not reach the operators or the sugar" {
   # Design §4.4 argument 2, mechanised: every prelude trait is consumed by an
   # operator or a piece of sugar that finds its impl by trait id, never through
-  # the function namespace. So a module may take all eight names for itself and
+  # the function namespace. So a module may take all nine names for itself and
   # still have `==`, `${...}`, `for..in` and its own impls behave exactly as
   # before -- what it gives up is the ability to spell those methods, and only
   # inside this module (argument 1).
@@ -17623,7 +17634,7 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
     "pub fn deep(xs: List[g.Pt]) -> Int = len(xs)\n"
   let (m2, pdiags2) = parser.parse_module(src2)
   assert len(pdiags2) == 0
-  let (cx2, _) = check_module(cx_new(Some("use_site"), None), m2, env)
+  let (cx2, _) = check_module(with_list_len(cx_new(Some("use_site"), None)), m2, env)
   assert len(cx2.diags) == 0
   # a type the module does not export is an error that names the module
   let src3 = "use geom as g\n" ++
@@ -17763,7 +17774,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
     "}\n"
   let (m2, pd2) = parser.parse_module(bad_break)
   assert len(pd2) == 0
-  let (cx2, _) = check_module(test_cx(), m2, env)
+  let (cx2, _) = check_module(with_list_len(test_cx()), m2, env)
   assert len(cx2.diags) > 0
   assert cx2.diags[0].msg == with_cross_msg("break")
   assert str.contains(cx2.diags[0].hint, "the loop is outside that closure")
@@ -17777,7 +17788,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
     "}\n"
   let (m3, pd3) = parser.parse_module(ok_break)
   assert len(pd3) == 0
-  let (cx3, _) = check_module(test_cx(), m3, env)
+  let (cx3, _) = check_module(with_list_len(test_cx()), m3, env)
   assert len(cx3.diags) == 0
 
   # a lambda the author *did* write, inside the region, keeps the old message
@@ -17792,7 +17803,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
     "}\n"
   let (m4, pd4) = parser.parse_module(inner)
   assert len(pd4) == 0
-  let (cx4, _) = check_module(test_cx(), m4, env)
+  let (cx4, _) = check_module(with_list_len(test_cx()), m4, env)
   assert len(cx4.diags) > 0
   assert str.contains(cx4.diags[0].msg, "cannot cross a lambda boundary")
 }

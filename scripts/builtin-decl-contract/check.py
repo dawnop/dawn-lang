@@ -1269,14 +1269,14 @@ def mutate_p9_flip_bytes_utf8(mirror, dump, interp, lower, header, export):
     return mirror, dump, interp, lower, header, _flip_export(export, None, "bytes_utf8", "ok")
 
 
-def mutate_p9_drop_len_s_flag(mirror, dump, interp, lower, header, export):
-    return mirror, dump, interp, lower, header, _flip_export(export, "list", "len", None)
+def mutate_p9_drop_get_s_flag(mirror, dump, interp, lower, header, export):
+    return mirror, dump, interp, lower, header, _flip_export(export, "list", "get", None)
 
 
 def mutate_p9_flag_std_bytes_len(mirror, dump, interp, lower, header, export):
-    """`std/bytes.len` is a Dawn function sharing the builtin `len`'s name. A
-    flag keyed on the name alone would put it there; P9 keys on where the
-    entry sits."""
+    """`std/bytes.len` is a Dawn function whose name a builtin carried until the
+    `Len` trait took it. A flag keyed on the name alone would put it there;
+    P9 keys on where the entry sits."""
     return mirror, dump, interp, lower, header, _flip_export(export, "std/bytes", "len", "ok")
 
 
@@ -1298,7 +1298,7 @@ MUTANTS = [
     ("p8-drop-cell_set-s-consumes-mark", mutate_p8_drop_cell_set_mark, "P8"),
     ("m3-owned-names-no-intrinsic", mutate_m3_owned_names_no_intrinsic, "M3"),
     ("p9-flip-bytes_utf8-in-the-export", mutate_p9_flip_bytes_utf8, "P9"),
-    ("p9-drop-len-s-flag", mutate_p9_drop_len_s_flag, "P9"),
+    ("p9-drop-get-s-flag", mutate_p9_drop_get_s_flag, "P9"),
     ("p9-flag-std-bytes-len", mutate_p9_flag_std_bytes_len, "P9"),
 ]
 

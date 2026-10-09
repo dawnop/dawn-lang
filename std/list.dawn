@@ -42,7 +42,7 @@ impl[T] Iter[List[T]] {
   type Item = T
 
   fn iter_start(xs: List[T]) -> Int = 0
-  fn iter_done(xs: List[T], c: Int) -> Bool = c >= len(xs)
+  fn iter_done(xs: List[T], c: Int) -> Bool = c >= list_len(xs)
   fn iter_next(xs: List[T], c: Int) -> Int = c + 1
   fn iter_get(xs: List[T], c: Int) -> T = xs[c]
 }
@@ -569,4 +569,16 @@ test "for over a List walks every element once, in order" {
   var empty = 0
   for _x in e { empty = empty + 1 }
   assert empty == 0
+}
+
+# ---- length ----
+#
+# The prelude's `len` is the `Len` trait (docs/len-trait-design.md), and this is
+# its List impl. A call on a List never reaches this body: lowering collapses
+# `Len` at a List to the `len` primitive, so the call sites cost what the old
+# builtin cost. The body serves the dictionary slot of a generic `[C: Len]`,
+# and calls the internal name, because `len(xs)` here would resolve to this very
+# impl.
+impl[T] Len[List[T]] {
+  fn len(xs: List[T]) -> Int = list_len(xs)
 }

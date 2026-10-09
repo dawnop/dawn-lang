@@ -17,7 +17,7 @@ use std/map
 use std/set
 use front/parser
 use front/lexer
-use check/cx.{ModExports, Cx, cx_new}
+use check/cx.{ModExports, Cx, cx_new, with_list_len}
 use check/checker.{check_module, exports_of}
 use check/tast.{TExpr, TFun, TModule, XError}
 use check/types.{Ty, TyInt, TyError, TyAdt, TyMap, TySet, Sig, EPure}
@@ -623,7 +623,7 @@ test "const initializers run blocks, local fns, matches and loops" {
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
-  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  let (cx1, tm) = check_module(with_list_len(cx_new(None, None)), m, env)
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
@@ -986,10 +986,14 @@ test "fuel exhaustion becomes a diagnostic" {
 ## Check `src` as module `name` and fold its consts with `fuel`: the
 ## diagnostics' messages and the folded consts. The size-charge tests below
 ## fold one source twice, once short of the charge and once with room for it.
+##
+## The context has the List `Len` impl a fixture without std lacks, so `len`
+## resolves. The call must reach the `len` primitive lowering collapses it to,
+## which these tests assert through the lengths and the fuel they charge.
 fn fold_src(name: String, src: String, fuel: Int) -> (List[String], Map[String, CValue]) !io = {
   let (m, pdiags) = parser.parse_module(src)
   let env: Map[String, ModExports] = map.empty()
-  let (cx1, tm) = check_module(cx_new(Some(name), Some("size.dawn")), m, env)
+  let (cx1, tm) = check_module(with_list_len(cx_new(Some(name), Some("size.dawn"))), m, env)
   # a source that does not check is a broken test, never a passing one
   if len(pdiags) > 0 || len(cx1.diags) > 0 { return (["the size source was rejected"], map.empty()) }
   let no_fns: Map[String, TFun] = map.empty()
@@ -1082,6 +1086,22 @@ test "a String concat pays for its result, a List concat for its right side" {
   let (msgs, consts) = fold_src("m", size_src("", "len(xs ++ [1, 2]) - 1024"), 20000)
   assert len(msgs) == 0
   assert map.get(consts, "V") == Some(VInt(40 * 2))
+}
+
+## `len` became the prelude `Len` trait's method, and lowering collapses it at a
+## List to the same primitive the builtin was. The fuel a fold spends is the
+## observable proof: 40 steps are enough for `len(xs ++ xs)` over sixteen
+## elements and 39 are not, the figures the builtin had before the trait
+## (measured on the parent commit, 2026-10-10). A call that went through the
+## impl instead would charge a user call and move the boundary.
+test "a List's len spends the fuel the builtin did" {
+  let src = "fn dbl(xs: List[Int]) -> Int = len(xs ++ xs)\n" ++
+    "const V: Int = dbl(range(0, 16))\n"
+  let (short, _) = fold_src("m", src, 39)
+  assert len(short) == 1 && exhausted(short[0])
+  let (msgs, consts) = fold_src("m", src, 40)
+  assert len(msgs) == 0
+  assert map.get(consts, "V") == Some(VInt(32))
 }
 
 test "list slices, joins and code point conversions pay for what they produce" {
