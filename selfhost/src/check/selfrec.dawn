@@ -127,13 +127,19 @@ fn witnesses_subject(ws: List[WitRef], tid: Int, subject: Ty) -> Bool = {
   found
 }
 
+## A trait method is told apart by its trait and its subject, never by where it
+## was declared. The call's owner is the module that declares the *trait* (none
+## for a prelude trait), and `home` is the module the impl lives in: the two
+## are the same only by accident, in a fixture with no module name. Comparing
+## them let `impl Len[Box] { fn len(b) = len(b) }` through in every real module,
+## the one place the shadowed prelude name does its damage.
 fn is_self(me: Me, owner: Option[String], name: String, ws: List[WitRef], trait_id: Option[Int]) -> Bool =
-  if owner != me.home || name != me.name {
+  if name != me.name {
     false
   } else {
     match (me.trait_id, me.subject) {
       (Some(tid), Some(subject)) -> trait_id == Some(tid) && witnesses_subject(ws, tid, subject)
-      _ -> trait_id == None
+      _ -> owner == me.home && trait_id == None
     }
   }
 
