@@ -1,6 +1,6 @@
 # prelude `Len` trait：std 范围统一的 `len`（K1，设计稿）
 
-> 状态：**proposed**。2026-10-10 写成。基线 `origin/main` = a8c53f6e。
+> 状态：**proposed**。K2 已实现（本地分支 `std/len-k2`，未推送）；§7 记实施与实测。2026-10-10 写成。基线 `origin/main` = a8c53f6e。
 > 动码前的**调研与方案**，不是设计定稿。
 > 调研报告与裁决（维护者工作区）：`research-std-len-20261009.md`、`ruling-std-len-20261009.md`，含全部 `file:line` 与外部出处，本文只留结论。裁决：采方案 (b)，prelude 加 `Len` trait。
 > K0 原型：本地分支 `proto/len-k0`（提交 05d2dc15，从未推送）。本文引它 2026-10-09 的实测，出处写作「K0 原型 05d2dc15，2026-10-09」（§5）；K0 没有测到的项写「未量」并写明由 K2 去量。
@@ -89,14 +89,15 @@ K2 的目标：这 18 条在同一次提交里全绿，且没有任何一条靠�
 | 断言 | 状态 | 出处 / 由谁量 |
 |---|---|---|
 | 未改写的 `Len[List]` 调用发 `invokestatic std/list.dawn$impl$Len$List$len` 而不是 `std/pvec.count`（循环与泛型 `len` 探针里都如此，JVM 后端；native 后端未量） | **已测** | K0 原型 05d2dc15，2026-10-09 |
-| 改写后 List 点位 emit 与 main 逐字节相同 | **未量**（目标 0 字节） | K2：`selfhost-prev-diff` 与小程序 `javap` 对照 |
+| 改写后 List 点位 emit 与 main 逐字节相同 | **已测**：prev-diff 范围模式 10 个 emit 标签全 0 字节（含 `emit selfhost`，约 2500 处 `len`）；探针的整个 jar 目录逐文件 `diff -r` 相同，`javap -c -p` 相同；native 探针的 C（单文件与 `--split` 各单元）`cmp` 相同 | K2，2026-10-10 |
 | 推断失败的调用点：`dawn check` selfhost 全图 0 错误（约 2500 处裸 `len`）；site、compiler-plan、playground、packages 的 json / web / fspath / sha2 / inflate 均通过；tea 不在 `packages/` 下，未检查。未标注形参的 lambda `let f = xs => len(xs)` 报 "cannot infer the type of xs"，种子 v0.85.0 同样报，不是回退 | **已测**（裁决门槛约 20 处，实测 0） | K0 原型 05d2dc15，2026-10-09 |
 | 遮蔽：模块里有 `impl Len[Tensor]` 时 `len(xs) + len(t)` 两者都解析，输出 7；模块级 `pub fn len(t: Tensor)` 仍遮蔽 List 的 `len`（现状） | **已测** | K0 原型 05d2dc15，2026-10-09 |
 | 泛型：`fn gen[T](xs: List[T]) = len(xs)` 与 `fn gen_len[C: Len](c: C)` 对 List 与用户类型 `Box` 都正确；fold 累加与 `xss.map(x => len(x))` 正常 | **已测** | K0 原型 05d2dc15，2026-10-09 |
 | 自编译墙钟：基线 9.19 / 9.92 / 9.09 s，候选 9.92 / 9.03 / 9.32 s，噪声之内 | **已测**（3 次） | K0 原型 05d2dc15，2026-10-09 |
 | 自递归 impl 体 `fn len(xs) = len(xs)`：在 `-Xss512m` 下 StackOverflow，堆外约 19 GB；当时 `check` 放行，#659 现已拒绝 | **已测**（事故） | K0 原型 05d2dc15，2026-10-09 |
 | selfhost 测试 18 / 1050 失败（见 3.4） | **已测** | K0 原型 05d2dc15，2026-10-09 |
-| comptime 燃料边界不变（二分取最小用尽值） | **未量**；K0 只看到 5 项燃料断言失败 | K2：3.3 的二分测试 |
+| comptime 燃料边界不变（二分） | **已测**：`len(xs ++ xs)`，xs 16 个元素：main 与候选都是 39 用尽、40 够；xs 1024 个元素：都是 2055 用尽、2056 够 | K2，2026-10-10，`--comptime-fuel` 二分，两侧各一份 jar |
+| 自编译墙钟（K2 后） | **已测**（3 次，`check selfhost` 与 `build selfhost`）：check 基线 4.66 / 4.57 / 4.65 s，候选 4.70 / 4.74 / 4.63 s；build 基线 8.19 / 7.77 / 7.72 s，候选 7.75 / 7.83 / 7.91 s，噪声之内 | K2，2026-10-10 |
 | 约 4200 处裸 `len(`、377 处点写法 `.len(`、341 处限定 `str/bytes/map/set.len(`、14 处 `bytes.size(`、7 处 Tensor `size` | 调研报告 §2 计数 | 调研报告，`std packages selfhost/src site playground examples` 的 grep |
 
 ## 6. 不做的（理由）
@@ -112,3 +113,18 @@ K2 的目标：这 18 条在同一次提交里全绿，且没有任何一条靠�
 - **不让 `Len[List]` 的 impl 方法体承担热路径**：热路径是 3.1 的 intrinsic 改写；impl 体只服务字典槽（泛型 `[C: Len]`）。
 - **不做兼容层**：`str.len` 等限定拼写在 K3 直接删并迁调用方（仓内外部消费者为 0）。
 - **不在 K2 前改 `CONTRIBUTING` §7**：它描述的是今天的 std；两条例外在 K3 / K5 落地时才删，先英后中。
+
+## 7. K2 实施记录（2026-10-10）
+
+提交（本地，未推送）：`fix` 先行一刀，再是编译器与 std，再是 spec。
+
+1. **自递归检查对真实模块是瞎的。** #659 的 `selfrec.is_self` 拿调用的 owner 与 impl 所在模块比较；trait 方法调用的 owner 是 *声明 trait 的模块*（预置 trait 为无），只有 `cx_new(None, None)` 的夹具里两者才相等，所以 `impl Len[Box] { fn len(b) = len(b) }` 在任何有模块名的文件里都通过 `dawn check`（本节写下前用探针复现）。改成 trait 方法只按 trait 与主语认「自己」，owner 仍只比较普通函数；这是 K2 之前就要补的第二道网，独立一刀。
+2. **3.1 的塌缩**：`lower_trait_call` 在 witness 是 `List` 时发 `len` intrinsic（`is_len_primitive`，不剥 opaque：opaque 包 List 且自写 `Len` 的类型有自己的长度）；`list_len` 内建与这条走同一个 `list_len_call`。`len` 退出 builtins 表，进 `internal_intrinsics`（lowering 的内部原语）；`list_len` 进 `lowered_intrinsics`。
+3. **额外发现一**：`std/list` 的 impl 只对排在它之后的 std 模块可见，`narrow` 等模块在 `list` 之前就用到 `len(List)`，`dawn check std` 报 no impl of `Len` for `List[Int]`。解法是把 `list` 挪到 `modules.txt` 里 `str` 之后（它只依赖 `str`）；没有 std 模块因此需要改。
+4. **额外发现二**：条件 impl 扫描让每个程序多出一个 `dawn/tr/Len.class` 接口，十个 emit 标签全动，这正是 3.1 说的「只因 impl 包装而移动」。`Len` 在 List 上无界、且被塌缩，它的字典只会为带 `[C: Len]` 界的函数而造，而界扫描本来就会要接口；`main.dawn` 对这种 impl 不再无条件要接口。带 `[C: Len]` 的探针（List 与用户类型 `Box` 都过字典）输出 28，与预期相同。
+5. **LSP 行号**：impl 放在 `std/list` 文件头部会让文件里所有定义整体下移（hover、definition 都动）。放到文件末尾后，lsp 差分只剩补全列表：少了 `fn len[T](xs: List[T]) -> Int`，多了 `trait Len[T]` 与 `fn len[T: Len](x: T) -> Int`。已按 `Emit-Change(lsp)` 声明；`doc --builtins` 同样声明。
+6. **3.4 的失败**：重现为 19 项（多出 `ir/lower` 的「内建当值」一项，对 `list_len` 的期望改成 lower 到 `len` 原语）。无 std 夹具用 `with_list_len(cx)` 把 `Len[List]` 记录放进 impl 表（impl 是预置 trait 在 List 上的，孤儿规则只许写在 `std/list`，所以夹具不能写源码；记录带 `provided: ["len"]`，不会被当成原语关系）。`prelude_method_names` 计数改 9；燃料断言一条没放宽，另加 `a List's len spends the fuel the builtin did` 钉住 39 / 40。
+7. **镜像**：`selfhost/builtins.dawn`（`len` 改为 std 内部的 `list_len`）、builtin-decl-contract 的一个变异体不再用公开 `len`（改用 `get`，名字 `p9-drop-get-s-flag`）、doc-check 的清单自检改用 `range`、checker-corpus 的 `self_recursion` 用例去掉本地 `trait Len` 与孤儿 List impl 并重录三份 golden（`calls`/`pipe` 的签名行变成 `fn len[T: Len](x: T) -> Int`）。
+8. **与 Bulk K4 的对账**：main 已到 b262fbd7（builtin 计数 125），`lower` 的分组计数断言的唯一冲突按 125 + `lowered` 23 / `internal` 23 合并。
+
+仍未做（K3 起）：String / Bytes / Buf / Map / Set 的 impl 与限定调用迁移；CONTRIBUTING §7 的两条例外；`std/str` 三个绕行函数。
