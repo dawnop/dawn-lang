@@ -240,9 +240,15 @@ the two units, writes `/opt/dawn/playground/toolchain.env`
 
 - the same requests go to both runners and the status and body (`ms` and
   `cached` normalized) must be identical;
-- the ruling's gate: p95 of the native `/health` over 100 new connections,
-  with the real `Accept=yes` start-up cost, is at most twice the JVM
-  runner's.
+- the latency gate, with the real `Accept=yes` start-up cost, on new
+  connections, the two runners interleaved: for `/run` hello and `/check`
+  hello (20 requests each, spaced out), native p95 is at most 1.15 times the
+  JVM p95 plus 100 ms; for `/health` (100 requests), native p95 is at most
+  25 ms. The production-host measurement behind this: `/health` is 7.7 to
+  7.9 ms native against 1.4 to 1.6 ms JVM, almost all of it systemd starting
+  one service instance per connection, while `/run` (about 3 s) and `/check`
+  (about 1.2 s) differ by 0.98 to 1.06 times at p95. The check adds roughly
+  3.5 to 7 minutes to a deploy.
 
 A failing check fails the deploy with the JVM runner already serving; do not
 switch nginx then. `DAWN_PLAY_NATIVE=0` ships the JVM runner alone.

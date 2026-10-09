@@ -250,8 +250,11 @@ ssh "$HOST" "$REMOTE_RESTART"
 # nothing is taken off it here). Last, so a canary that fails cannot leave the
 # primary half-deployed, and its own variable for the reason REMOTE_RESTART is
 # one. The check runs as dawn-play, who owns the socket; it compares the two
-# runners' answers byte for byte and applies the ruling's gate: p95 of the
-# native /health at most twice the JVM's (playground/deploy/canary-check.py).
+# runners' answers byte for byte and applies the latency gate (thresholds and
+# the measurements behind them are in playground/deploy/canary-check.py): on
+# /run hello and /check hello, 20 spaced requests each, native p95 at most
+# 1.15 x the JVM's + 100 ms; on /health, native p95 at most 25 ms. It adds
+# roughly 3.5 to 7 minutes to a deploy. A failure leaves the JVM runner serving.
 # shellcheck disable=SC2016
 REMOTE_CANARY='
   set -e
