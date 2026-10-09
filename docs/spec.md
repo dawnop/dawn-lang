@@ -3369,6 +3369,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/set`：`Set`
 - `std/hamt`：内部模块，`Map`/`Set` 的表示
 - `std/pvec`：内部模块，`List` 的表示
+- `std/mem`：平铺的可变 64 位整数缓冲 `I64Buf`（设计见 [`mem-buffer-design.md`](mem-buffer-design.md)）
 - `std/gpu`：GPU 的宿主层，`Gpu` 效果与张量（§12.6）
 - `std/memfs`：内存中的 `Fs` handler，供测试用；本规范别处不再讲它，设计见
   [`fs-real-path-design.md`](fs-real-path-design.md)

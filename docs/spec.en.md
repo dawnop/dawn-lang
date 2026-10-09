@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ ecbda04a4188aaa8 -->
+<!-- doc-check: translation-of docs/spec.md @ 5db506cc6030c061 -->
 
 # Dawn Language Specification
 
@@ -4250,6 +4250,8 @@ two together; one module too many or too few fails it):
 - `std/set`: `Set`
 - `std/hamt`: internal module, the representation of `Map`/`Set`
 - `std/pvec`: internal module, the representation of `List`
+- `std/mem`: flat, mutable buffers of 64-bit integers, `I64Buf` (design in
+  [`mem-buffer-design.md`](mem-buffer-design.md))
 - `std/gpu`: the host side of a GPU, the `Gpu` effect and tensors (§12.6)
 - `std/memfs`: an in-memory `Fs` handler for tests; the rest of this specification does
   not discuss it, and its design is in [`fs-real-path-design.md`](fs-real-path-design.md)

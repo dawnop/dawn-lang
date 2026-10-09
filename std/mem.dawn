@@ -1,0 +1,284 @@
+## Flat, mutable buffers of 64-bit integers: `I64Buf`, for the hot loop that
+## has to write as it reads (a cipher's S-boxes, a sliding window).
+#
+# Short names, module-qualified at the call site: `use std/mem`, then
+# `mem.at(b, i)` / `mem.set(b, i, v)`.
+#
+# Why a buffer and not a mutable `List`: every other value in the language is
+# persistent, and a persistent array pays a copy or a boxed read per update.
+# The measured cost was an order of magnitude on a pure-Dawn bcrypt
+# (docs/mem-buffer-design.md 1), and a flat `long[]` / `int64_t[]` closes it.
+# The price is that an `I64Buf` is the one value here that changes in place:
+# it has no `==`, no `Hash`, no `Show`, and two names for it see each other's
+# writes. Copy in with `from_list`, copy out with `to_list`.
+#
+# This is the runtime half only (design doc knife K2). The `Mem` effect, the
+# `with_mem` scope and the rules that keep a buffer from outliving it come
+# with the checker work (K3); until then these functions carry no effect row
+# and a buffer is an ordinary value. Nothing in std uses it yet.
+#
+# `at` and `set` assert a position, so an index outside `[0, len)` panics.
+# The range writes `fill` and `copy_from` panic too and never clamp: a write
+# that clamped would turn an out-of-range bug into a few elements quietly not
+# written, which is the opposite of what `slice` clamping is for
+# (CONTRIBUTING §7). The panic wording is the same on both backends.
+#
+# The longest buffer is 2^31 - 9 elements, the JVM's own limit; native takes
+# the same number so a program behaves the same on both.
+#
+# `F64Buf` joins this module in K5 with an `f64_` prefix on its functions: Dawn
+# has no overloading and `I64Buf` took the short names first, the way `Bytes`
+# did over `Buf` in std/bytes.
+
+## A buffer of `n` zeros. Panics when `n` is negative or above the limit.
+pub fn new(n: Int) -> I64Buf = i64buf_new(n)
+
+## The number of elements. It never changes after `new`.
+pub fn len(b: I64Buf) -> Int = i64buf_len(b)
+
+## The element at `i`. Panics when `i` is outside `[0, len(b))`.
+pub fn at(b: I64Buf, i: Int) -> Int = i64buf_at(b, i)
+
+## Stores `v` at `i`. Panics when `i` is outside `[0, len(b))`.
+pub fn set(b: I64Buf, i: Int, v: Int) -> Unit = i64buf_set(b, i, v)
+
+## Stores `v` in every position of `[from, to)`. Panics unless
+## `0 <= from <= to <= len(b)`; it never clamps.
+pub fn fill(b: I64Buf, from: Int, to: Int, v: Int) -> Unit = i64buf_fill(b, from, to, v)
+
+## Copies `n` elements from `src` starting at `src_at` to `dst` starting at
+## `dst_at`. The destination comes first, as in `memcpy`. The ranges may overlap
+## when both buffers are the same one: the result is as if the source were read
+## in full before anything was written. Panics when `n` is negative or either
+## range leaves its buffer; it never clamps.
+pub fn copy_from(dst: I64Buf, dst_at: Int, src: I64Buf, src_at: Int, n: Int) -> Unit =
+  i64buf_copy_from(dst, dst_at, src, src_at, n)
+
+## Copies `n` elements of `b` from `from` to `to_at`, within the same buffer.
+## `copy_from` with one buffer, and as safe under overlap.
+pub fn copy_within(b: I64Buf, from: Int, to_at: Int, n: Int) -> Unit =
+  i64buf_copy_from(b, to_at, b, from, n)
+
+## A new buffer with the same contents. The two do not see each other's writes.
+pub fn clone(b: I64Buf) -> I64Buf = {
+  let n = i64buf_len(b)
+  let c = i64buf_new(n)
+  i64buf_copy_from(c, 0, b, 0, n)
+  c
+}
+
+## A new buffer holding `xs`, in order.
+pub fn from_list(xs: List[Int]) -> I64Buf = {
+  # counted by a pass of its own: `len` in this module is the buffer's
+  var n = 0
+  for _ in xs { n = n + 1 }
+  let b = i64buf_new(n)
+  var i = 0
+  for x in xs {
+    i64buf_set(b, i, x)
+    i = i + 1
+  }
+  b
+}
+
+## The elements of `b`, in order, as a list.
+pub fn to_list(b: I64Buf) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  let n = i64buf_len(b)
+  while i < n {
+    out = out ++ [i64buf_at(b, i)]
+    i = i + 1
+  }
+  out
+}
+
+# ---- tests ----
+#
+# The panic wording is asserted whole, because a message is a value once
+# `catch_panic` hands it back and the two backends must agree on it. The same
+# lines are held across both backends by scripts/mem-contract.
+
+## The message of the panic `f` raises, or a marker when it does not raise.
+fn panic_text(f: fn() -> Int) -> String =
+  match catch_panic(f) {
+    Ok(_) -> "no panic"
+    Err(e) -> e.message
+  }
+
+fn unit_text(f: fn() -> Unit) -> String =
+  match catch_panic(f) {
+    Ok(_) -> "no panic"
+    Err(e) -> e.message
+  }
+
+test "a new buffer is all zeros, and set then at reads back" {
+  let b = new(5)
+  assert len(b) == 5
+  assert to_list(b) == [0, 0, 0, 0, 0]
+  set(b, 0, -1)
+  set(b, 4, 9223372036854775807)
+  set(b, 2, -9223372036854775808)
+  assert at(b, 0) == -1
+  assert at(b, 4) == 9223372036854775807
+  assert at(b, 2) == -9223372036854775808
+  assert at(b, 1) == 0
+  assert len(new(0)) == 0
+  assert to_list(new(0)) == []
+}
+
+test "at and set assert a position, including one a 32-bit truncation would alias" {
+  let b = new(8)
+  assert panic_text(() => at(b, 8)) == "I64Buf index 8 out of bounds for length 8"
+  assert panic_text(() => at(b, -1)) == "I64Buf index -1 out of bounds for length 8"
+  assert panic_text(() => at(new(0), 0)) == "I64Buf index 0 out of bounds for length 0"
+  # (int) (2^32 + 5) is 5: compared after truncation this would read slot 5
+  assert panic_text(() => at(b, 4294967301)) ==
+    "I64Buf index 4294967301 out of bounds for length 8"
+  assert panic_text(() => at(b, -4294967291)) ==
+    "I64Buf index -4294967291 out of bounds for length 8"
+  assert panic_text(() => at(b, 9223372036854775807)) ==
+    "I64Buf index 9223372036854775807 out of bounds for length 8"
+  assert unit_text(() => set(b, 8, 1)) == "I64Buf index 8 out of bounds for length 8"
+  assert unit_text(() => set(b, 4294967301, 1)) ==
+    "I64Buf index 4294967301 out of bounds for length 8"
+  assert unit_text(() => set(b, -1, 1)) == "I64Buf index -1 out of bounds for length 8"
+  # the refused writes left every slot alone
+  assert to_list(b) == [0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+test "new refuses a negative length and a length above the limit" {
+  assert panic_text(() => len(new(-1))) == "I64Buf.new: negative length -1"
+  assert panic_text(() => len(new(-9223372036854775808))) ==
+    "I64Buf.new: negative length -9223372036854775808"
+  assert panic_text(() => len(new(2147483640))) == "I64Buf.new: length 2147483640 is too large"
+  assert panic_text(() => len(new(4294967296))) == "I64Buf.new: length 4294967296 is too large"
+  assert panic_text(() => len(new(9223372036854775807))) ==
+    "I64Buf.new: length 9223372036854775807 is too large"
+}
+
+test "fill writes [from, to), and a range that leaves the buffer panics rather than clamps" {
+  let b = from_list([1, 2, 3, 4, 5])
+  fill(b, 1, 4, 0)
+  assert to_list(b) == [1, 0, 0, 0, 5]
+  fill(b, 2, 2, 9)
+  fill(b, 5, 5, 9)
+  fill(b, 0, 0, 9)
+  assert to_list(b) == [1, 0, 0, 0, 5]
+  fill(b, 0, 5, 7)
+  assert to_list(b) == [7, 7, 7, 7, 7]
+  let bad = "I64Buf.fill: range ["
+  assert unit_text(() => fill(b, -1, 2, 0)) == bad ++ "-1, 2) out of bounds for length 5"
+  assert unit_text(() => fill(b, 0, 6, 0)) == bad ++ "0, 6) out of bounds for length 5"
+  assert unit_text(() => fill(b, 3, 2, 0)) == bad ++ "3, 2) out of bounds for length 5"
+  assert unit_text(() => fill(b, 6, 7, 0)) == bad ++ "6, 7) out of bounds for length 5"
+  assert unit_text(() => fill(b, 0, 4294967301, 0)) ==
+    bad ++ "0, 4294967301) out of bounds for length 5"
+  # a refused fill wrote nothing
+  assert to_list(b) == [7, 7, 7, 7, 7]
+}
+
+test "copy_from moves a run between buffers, and copy_within is safe under overlap" {
+  let src = from_list([10, 11, 12, 13, 14, 15])
+  let dst = new(6)
+  copy_from(dst, 1, src, 2, 3)
+  assert to_list(dst) == [0, 12, 13, 14, 0, 0]
+  copy_from(dst, 0, src, 0, 0)
+  copy_from(dst, 6, src, 6, 0)
+  assert to_list(dst) == [0, 12, 13, 14, 0, 0]
+  # overlap toward the end: a forward element-by-element copy would smear 0
+  let up = from_list([0, 1, 2, 3, 4, 5])
+  copy_within(up, 0, 2, 4)
+  assert to_list(up) == [0, 1, 0, 1, 2, 3]
+  # overlap toward the start
+  let down = from_list([0, 1, 2, 3, 4, 5])
+  copy_within(down, 2, 0, 4)
+  assert to_list(down) == [2, 3, 4, 5, 4, 5]
+  # the same buffer through copy_from, overlapping
+  let same = from_list([0, 1, 2, 3, 4, 5])
+  copy_from(same, 1, same, 0, 5)
+  assert to_list(same) == [0, 0, 1, 2, 3, 4]
+}
+
+test "copy_from refuses every range that leaves a buffer, and writes nothing" {
+  let a = from_list([1, 2, 3, 4])
+  let b = from_list([5, 6, 7])
+  let head = "I64Buf.copy_from: range out of bounds ("
+  assert unit_text(() => copy_from(a, 0, b, 0, 4)) ==
+    head ++ "dst_at 0, src_at 0, n 4) for dst length 4 and src length 3"
+  assert unit_text(() => copy_from(a, 3, b, 0, 2)) ==
+    head ++ "dst_at 3, src_at 0, n 2) for dst length 4 and src length 3"
+  assert unit_text(() => copy_from(a, 0, b, 2, 2)) ==
+    head ++ "dst_at 0, src_at 2, n 2) for dst length 4 and src length 3"
+  assert unit_text(() => copy_from(a, -1, b, 0, 1)) ==
+    head ++ "dst_at -1, src_at 0, n 1) for dst length 4 and src length 3"
+  assert unit_text(() => copy_from(a, 0, b, -1, 1)) ==
+    head ++ "dst_at 0, src_at -1, n 1) for dst length 4 and src length 3"
+  assert unit_text(() => copy_from(a, 0, b, 0, -1)) ==
+    head ++ "dst_at 0, src_at 0, n -1) for dst length 4 and src length 3"
+  # a count so large that `at + n` would wrap if it were added
+  assert unit_text(() => copy_from(a, 1, b, 1, 9223372036854775807)) ==
+    head ++ "dst_at 1, src_at 1, n 9223372036854775807) for dst length 4 and src length 3"
+  assert unit_text(() => copy_from(a, 5, b, 0, 0)) ==
+    head ++ "dst_at 5, src_at 0, n 0) for dst length 4 and src length 3"
+  assert unit_text(() => copy_within(a, 3, 0, 2)) ==
+    head ++ "dst_at 0, src_at 3, n 2) for dst length 4 and src length 4"
+  assert to_list(a) == [1, 2, 3, 4]
+  assert to_list(b) == [5, 6, 7]
+}
+
+test "clone is a buffer of its own, and from_list and to_list round-trip" {
+  let a = from_list([3, -1, 4, 1, 5])
+  let c = clone(a)
+  assert to_list(c) == [3, -1, 4, 1, 5]
+  set(c, 0, 100)
+  set(a, 4, 200)
+  assert to_list(a) == [3, -1, 4, 1, 200]
+  assert to_list(c) == [100, -1, 4, 1, 5]
+  assert to_list(clone(new(0))) == []
+  assert to_list(from_list([])) == []
+  var big: List[Int] = []
+  var i = 0
+  while i < 1000 {
+    big = big ++ [i * i]
+    i = i + 1
+  }
+  assert to_list(from_list(big)) == big
+}
+
+test "two names for one buffer see each other's writes" {
+  let a = new(3)
+  let b = a
+  set(b, 1, 42)
+  assert at(a, 1) == 42
+}
+
+# The two cases below are for the native sanitizer run
+# (scripts/native-asan-tests.sh runs std's tests under ASan and LeakSanitizer):
+# a buffer is a counted object, so every way a program can stop holding one has
+# to free it, and none of them is a path an ordinary test would notice leaking.
+
+test "a panic caught while a buffer is live frees the buffer" {
+  let r = catch_panic(() => {
+    let b = from_list([1, 2, 3])
+    at(b, 3)
+  })
+  match r {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "I64Buf index 3 out of bounds for length 3" }
+  }
+}
+
+test "a closure that captured a buffer frees it when the closure goes" {
+  let f = {
+    let b = from_list([5, 6, 7])
+    () => at(b, 1)
+  }
+  assert f() == 6
+  assert f() == 6
+}
+
+# The third release case, a continuation that holds a buffer being dropped
+# unresumed, needs a `ctl` effect, and std keeps imported and declared effects
+# out of this module. It runs in scripts/mem-contract/probe.dawn instead, under
+# the same sanitizers.
