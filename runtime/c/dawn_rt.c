@@ -5366,7 +5366,7 @@ dawn_adt *dawn_gpu_alloc_host(int64_t nbytes) {
 }
 
 /* The packed-format seam: std/gpu has already laid the buffer out byte for
- * byte (every format, f64 and i64 included: std/gpu's `pack_words`), so the
+ * byte (every format, f64 and i64 included: std/gpu's `bytes.pack_ints`), so the
  * runtime copies and knows no format. */
 dawn_adt *dawn_gpu_memcpy_htod_host(int64_t devptr, const dawn_bytes *data) {
   dawn_adt *e = dawn_gpu_open();

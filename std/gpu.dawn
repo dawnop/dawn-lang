@@ -262,41 +262,17 @@ pub fn nibble_word(f: fn(Int) -> Int) -> Float = {
 # A buffer crosses the effect as `Bytes`, whatever its format (including f64
 # and i64): element `i` occupies bytes `[i * w, (i + 1) * w)`, its pattern
 # little-endian, `w` being [`element_bytes`] of the format. The pattern is one
-# `Int` per element ([`DeviceBits`]'s contract), so the byte assembly below
-# is the only place the layout is written, and it does not know any format.
-# The runtime copies bytes and knows no format either.
+# `Int` per element ([`DeviceBits`]'s contract), so the byte assembly is
+# `bytes.pack_ints` / `bytes.unpack_ints` (one runtime loop per call, low byte
+# first, only the low `w` bytes of a pattern written, read back unsigned) and
+# nothing here knows a format's layout. The runtime copies bytes and knows no
+# format either.
 #
 # What differs per format is the Float view the name-dispatched pair
 # [`encode_floats`] / [`decode_floats`] adds for callers whose buffers are
 # heterogeneous (scripts/tile-gpu-diff's drivers, the fake device's launch
 # boundary): how a `Float` becomes a pattern (rounding or wrapping into the
 # format, which is [`round_to`]'s rule) and how a pattern becomes a `Float`.
-
-# `words` as bytes, `w` bytes each, low byte first. Only the low `w` bytes of
-# a word are written, so a pattern that carries sign bits above its width
-# (a negative i32 from `wrap_i32`) is written as its width's two's complement.
-fn pack_words(w: Int, words: List[Int]) -> Bytes = {
-  var b = bytes.buf()
-  for word in words {
-    var v = word
-    for _k in range(0, w) {
-      b = bytes.put(b, v & 0xFF)
-      v = v >>> 8
-    }
-  }
-  bytes.freeze(b)
-}
-
-# The words `b` holds at `w` bytes each, read unsigned; a trailing partial
-# element is ignored.
-fn unpack_words(w: Int, b: Bytes) -> List[Int] =
-  list.map(range(0, bytes.len(b) / w), i => {
-    var v = 0
-    for k in range(0, w) {
-      v = v | (bytes.at(b, w * i + k) << (8 * k))
-    }
-    v
-  })
 
 # How a Float becomes the pattern a buffer of the named format holds. The
 # rounding is here and not in the codecs, which truncate a value off their
@@ -319,7 +295,7 @@ fn encoder(dtype: String) -> fn(Float) -> Int = match dtype {
 }
 
 # The Float a pattern of the named format stands for. The pattern is read
-# unsigned (`unpack_words`), so the signed formats sign-extend here.
+# unsigned (`unpack_ints` with `signed` false), so the signed formats sign-extend here.
 fn decoder(dtype: String) -> fn(Int) -> Float = match dtype {
   "f64" -> bits => float_of_bits(bits)
   "bf16" -> bits => narrow.bf16_of_bits(bits)
@@ -497,7 +473,7 @@ pub fn copy_from_host[T: HasDtype + DeviceBits](t: Tensor[T], data: List[T]) -> 
   } else {
     match element_bytes(dtype_name(d)) {
       None -> Err(refuse("gpu.unsupported_dtype", "gpu.copy_from_host: ${dtype_name(d)} is not a buffer format"))
-      Some(w) -> gpu_copy_from_host(handle_of(t), pack_words(w, list.map(data, v => to_bits(v))))
+      Some(w) -> gpu_copy_from_host(handle_of(t), bytes.pack_ints(list.map(data, v => to_bits(v)), w))
     }
   }
 }
@@ -510,7 +486,7 @@ pub fn copy_to_host[T: HasDtype + DeviceBits](t: Tensor[T]) -> Result[List[T], F
   match element_bytes(dtype_name(d)) {
     None -> Err(refuse("gpu.unsupported_dtype", "gpu.copy_to_host: ${dtype_name(d)} is not a buffer format"))
     Some(w) -> match gpu_copy_to_host(handle_of(t)) {
-      Ok(raw) -> Ok(list.map(unpack_words(w, raw), bits => from_bits(bits)))
+      Ok(raw) -> Ok(list.map(bytes.unpack_ints(raw, w, false), bits => from_bits(bits)))
       Err(e) -> Err(e)
     }
   }
@@ -1178,7 +1154,7 @@ fn inexact_buffer(kernel: String, dtypes: List[String], bufs: List[(String, Byte
   for pos in range(0, len(bufs)) {
     if dtypes[pos] == "i64" && not done {
       let (_dt, raw) = bufs[pos]
-      let words = unpack_words(8, raw)
+      let words = bytes.unpack_ints(raw, 8, false)
       match list.find(range(0, len(words)), i => not fits_float(words[i])) {
         Some(i) -> {
           found = Some(inexact_i64("fake device", kernel, pos, i, words[i]))
@@ -1439,7 +1415,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
 ## property of one line rather than of the handler.
 pub fn encode_floats(dtype: String, xs: List[Float]) -> Bytes = {
   let enc = encoder(dtype)
-  pack_words(unwrap_or(element_bytes(dtype), 1), list.map(xs, x => enc(x)))
+  bytes.pack_ints(list.map(xs, x => enc(x)), unwrap_or(element_bytes(dtype), 1))
 }
 
 ## The values a buffer of the named format holds, from its bytes: the
@@ -1447,7 +1423,7 @@ pub fn encode_floats(dtype: String, xs: List[Float]) -> Bytes = {
 ## +/-2^53 comes back rounded to the nearest `Float`.
 pub fn decode_floats(dtype: String, b: Bytes) -> List[Float] = {
   let dec = decoder(dtype)
-  list.map(unpack_words(unwrap_or(element_bytes(dtype), 1), b), bits => dec(bits))
+  list.map(bytes.unpack_ints(b, unwrap_or(element_bytes(dtype), 1), false), bits => dec(bits))
 }
 
 # The argument words behind `args`, in order: a buffer's device pointer, a
@@ -2717,6 +2693,19 @@ test "an f64 buffer keeps a NaN's payload and sign through the device and back" 
     }
     Err(_) -> { assert false }
   }
+}
+
+test "the name-dispatched f64 channel keeps a NaN's payload and sign, and a signed format comes back signed" {
+  let payload: Float = float_of_bits(0x7FF8000000000123)
+  let negative: Float = float_of_bits(0x7FF0000000000001 | (1 << 63))
+  let raw = encode_floats("f64", [payload, negative])
+  assert bytes.to_hex(raw) == "230100000000f87f" ++ "010000000000f0ff"
+  let back = decode_floats("f64", raw)
+  assert float_to_bits(back[0]) == 0x7FF8000000000123
+  assert float_to_bits(back[1]) == (0x7FF0000000000001 | (1 << 63))
+  assert decode_floats("i32", encode_floats("i32", [0.0 - 2.0, 7.0, 0.0 - 2147483648.0])) == [0.0 - 2.0, 7.0, 0.0 - 2147483648.0]
+  assert decode_floats("i16", encode_floats("i16", [0.0 - 1.0])) == [0.0 - 1.0]
+  assert decode_floats("i8", encode_floats("i8", [0.0 - 128.0, 127.0])) == [0.0 - 128.0, 127.0]
 }
 
 test "narrow formats round trip through typed transfers with nothing rounded on the way" {
