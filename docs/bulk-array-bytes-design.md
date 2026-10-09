@@ -102,7 +102,7 @@ K0 的结论（native）：
 | K1 | 本文 | 否 | 无 |
 | K2（已实现，见下注） | `array_extend`/`array_slice` + `pvec` 改用 + `scripts/array-contract` 两条断言 | 否 | 区间右端开闭错一位，合约红；native `array_extend` 漏一次 dup，ASan 门红 |
 | K3 | 整数族 + 骨架生成函数 + 删 `bytes_from_array`（6 处）+ 合约 `scripts/bytes-pack-contract`（两后端同一 `.expect`） | 是 | 字节序写反（非对称值）；宽度错一档；符号扩展写成零扩展（`0x80`）；截断改饱和（`300`） |
-| K4 | 浮点族 + std/bytes `Endian` 与公开面 | 否 | JVM 换 `doubleToLongBits`（规范化 NaN），载荷用例红；native 经 `double` 算术而非 `memcpy`，同样红 |
+| K4（已实现，见 §10） | 浮点族 + std/bytes `Endian` 与公开面 | 否 | JVM 换 `doubleToLongBits`（规范化 NaN），载荷用例红；native 经 `double` 算术而非 `memcpy`，同样红 |
 | K5 | GPU 重写（与 U3c 合并或紧随）：删 `gpu_*_host` 与桩、镜像，11 对收成位型 + `pack_ints` | 是 | `unpack_i32` 符号扩展改零扩展，`dtype_diff` 红；f64 改规范化 NaN，红 |
 | K6 | `Buf.put_bytes` 非对齐路径用 `bytes_unpack_int(width=1)` 批量进尾部 | 否 | 非对齐拷贝错位一字节，合约红 |
 | K7（条件） | 标量 `bytes_get_int`/`bytes_get_float`，改 sha256 `word`、tileir `put_le`、binfo | 否 | 大端写成小端，sha2 红 |
@@ -132,3 +132,24 @@ K2 与 K3 可并行。破坏性刀（K3、K5）用 `Emit-Change(<label>)` 声明
 - 实现：`array_extend` 沿用 `array_push` 的快路径（JVM 对整段 CAS，native 看高水位），慢路径一次拷两者进带余量的新缓冲；`array_slice` 越界 panic。`pvec` 改了两处：`to_array` 逐叶子 `array_extend`、`arr_slice` 直接 `array_slice`；`from_array` 要建 trie，不属于这两个原语，未动。
 - 验证：`scripts/array-contract`（JVM 值行、四种 panic、extend 累积时钟，外加 native 腿用 `native_probe.dawn` 对同一份 `expected.txt`）、`scripts/rc-contract`（两条断言、两个变异体：extend 漏 dup、slice 右端少一个）。手工变异：JVM 放宽上界检查红在 panic 行，JVM extend 永不就地红在时钟（41 s 对 3 s 预算）。提交哈希见合入后的 `git log`。
 
+## 10. K4 落地记录
+
+- 实现：`bytes_pack_float` / `bytes_unpack_float`（宽度 4 或 8，字节序 `little: Bool`），契约表、镜像、comptime 拒绝名单与计数同步（types/lower 125，interp rejects 81）。JVM 复用 K3 的循环骨架（宽度检查泛化成 `gen_width_check`，整数与浮点各一份文案），宽度 8 走 `doubleToRawLongBits` / `longBitsToDouble`，宽度 4 走 `D2F` + `floatToRawIntBits`；native 用 `memcpy` 在 `double`/`float` 与 `uint64_t`/`uint32_t` 之间搬位，`(float)d` 是 C 的就近偶数舍入。panic 文案两后端逐字一致：`bytes.pack: width W is not 4 or 8`，长度不整除沿用整数族的句子。
+- std/bytes 公开面：`type Endian = Little | Big`，`pack_ints` / `unpack_ints` / `pack_floats` / `unpack_floats`，`order` 默认 `Little`，内部只在一处把 `Endian` 变成 `Bool`。
+- **与 §2 的偏差**：设计稿写「内部是 `pvec.to_array` + 原语 + `pvec.from_array`」，做不到。checker 把 `List[T]` 和 `pvec.Vec[T]` 当两个类型（`argument type mismatch: expected Vec[T], got List[Int]`），`pvec` 的转换只有 lowering 生成的代码能调用；`std/bytes` 在模块顺序上也排在 `pvec` 之前。现在的包装是循环（`for x in xs` 加 `array_push`，反向 `out ++ [array_get(a, i)]`），与 `std/mem.from_list` / `to_list` 同形。代价见下表：端到端的大头是这两个循环，不是原语。若要逼近目标线，需要一个 std 可见的 List 与 Array 互转（形如 `join` 那类 emitter 包装的 intrinsic），那是一个独立的契约决定，未在本刀做。
+- 验证：`scripts/bytes-pack-contract` 加了 83 行期望（共 141 行），浮点部分由独立模型（Python `struct` 取 IEEE 位，`ctypes.c_float` 取 C 的窄化）算出，不是录自任何后端。覆盖：宽度 8 的 `-0.0`、两个无穷、带载荷的静默 NaN（正负）、信号 NaN、最小/最大次正规数、最大正规数、全异字节；宽度 4 的就近偶数三种平局、溢出到无穷、最大 float、溢出临界半点、float 次正规数的半点与略过半点、double 次正规数下溢为零、全异字节；宽度 4 拆包的精确拓宽；两种字节序读写；空输入；七种 panic 文案。f32 的 NaN 载荷按设计不承诺，只测规范 qNaN。负控（均红在预期一腿）：JVM `doubleToRawLongBits` 换成 `doubleToLongBits`（载荷与信号位丢失）；JVM 拆包字节序恒为小端；native 宽度 8 打包前经算术规范化 NaN（信号 NaN 行红）；native 宽度 4 打包改成截断尾数。
+- 实测（参考机负载下，7 轮取最好，1M 元素，`List` 到 `Bytes` 到 `List` 端到端；基线是同程序里 `list.map` 恒等拷贝一遍）：
+
+| 项 | JVM | native (clang-20 -O2) | 通过线 | 目标 |
+|---|---|---|---|---|
+| `List` 拷贝基线（本次同机） | 17.9 ms | 71.5 ms | 设计稿记 36 / 64 ms | |
+| `pack_floats` f64 | 9.7 ms（首轮 13.6） | 44.0 ms | <= 54 / 96 ms，过 | <= 15 / 30 ms，过 / 未过 |
+| `unpack_floats` f64 | 29.3 ms（首轮 46.3） | 54.9 ms | <= 54 / 96 ms，过 | <= 15 / 30 ms，未过 / 未过 |
+| `pack_ints` i64 | 10.8 ms | 41.7 ms | 比 187 ms 低一个数量级，过 | |
+| `unpack_ints` i64 | 22.4 ms | 51.5 ms | 比 300+ ms 低一个数量级，过 | |
+| 原语本身，pack f64（Array 层，扣掉建数组） | 约 6 ms | 约 2 ms | 与 `array_extend`（7.1 / 41.1 ms，含建数组）同量级，过 | <= 10 ms，过 |
+| 原语本身，unpack f64（Array 层，含释放结果） | 约 8 ms | 约 21 ms | 同上 | <= 10 ms，JVM 过 / native 未过 |
+
+  用对同机基线的相对口径（1.5 倍）：JVM `unpack_floats` 29.3 ms 对 26.9 ms 的线略超；用设计稿固定的 54 / 96 ms 则全部通过。机器有其它任务，JVM 各轮抖动达数倍，只当量级。native 的 pack 端到端 44 ms 里原语只占约 2 ms，其余是 `List` 到 `Array` 的循环；unpack 的 Array 层约 21 ms 含释放 1M 个浮点箱的开销（K0 的 8.4 ms 不含释放）。
+- 位保真：`0x7FF8000000000001` 与 `-0.0` 往返，JVM 与 native 逐字节一致，由合约的同一份 `expected.txt` 守护。
+- 提交哈希见合入后的 `git log`。
