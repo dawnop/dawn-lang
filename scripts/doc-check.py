@@ -1873,19 +1873,19 @@ def check_spec_contracts_selftest(texts: dict[pathlib.Path, str]) -> tuple[list[
         return ["spec contract self-test: a nonexistent builtin passed the prose mirror"], 0
 
     missing_builtin = dict(texts)
-    if "`len`/" not in missing_builtin[zh]:
+    if "`range`/" not in missing_builtin[zh]:
         return ["spec contract self-test: exact builtin fixture is absent"], 0
-    missing_builtin[zh] = missing_builtin[zh].replace("`len`/", "", 1)
+    missing_builtin[zh] = missing_builtin[zh].replace("`range`/", "", 1)
     bad, _ = spec_contract_problems(missing_builtin)
-    if not any("builtin inventory omits declared function(s): len" in problem
+    if not any("builtin inventory omits declared function(s): range" in problem
                for problem in bad):
         return ["spec contract self-test: an omitted builtin passed the inventory"], 0
 
     duplicate_builtin = dict(texts)
     duplicate_builtin[zh] = duplicate_builtin[zh].replace(
-        "`len`/", "`len`/`len`/", 1)
+        "`range`/", "`range`/`range`/", 1)
     bad, _ = spec_contract_problems(duplicate_builtin)
-    if not any("builtin inventory repeats function(s): len" in problem
+    if not any("builtin inventory repeats function(s): range" in problem
                for problem in bad):
         return ["spec contract self-test: a duplicate builtin passed the inventory"], 0
 

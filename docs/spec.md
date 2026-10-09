@@ -801,15 +801,15 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
-  今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter` 五个预置 trait 也注入；
+  今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` 六个预置 trait 也注入；
   **方法名由语言代用户消费掉的十二个不注入**，它们的方法名只在 impl 体、文档与错误消息里
   出现：`Index`（`[]` 消费它，§4.8）、`Display`（`to_string` 与 `${...}` 消费它，§4.3）、
   六个算术 trait `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`（运算符消费它们，§4.3）、
   `FromInt`/`FromFloat`（数字字面量消费它们，§1.5）与
   `StagedIter`/`StagedVar`（staged `for` 消费它们，§4.7）。
-- **预置 trait 十七个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+- **预置 trait 十八个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，**嵌套**渲染，也是 `to_string`
-  要的 bound）、`Iter`（背后是 `for..in`，§4.7）、`Index`（背后是 `[]`，§4.8）、
+  要的 bound）、`Iter`（背后是 `for..in`，§4.7）、`Len`（`len`，容器的元素个数）、`Index`（背后是 `[]`，§4.8）、
   `Display`（`display`，**顶层**渲染，背后是 `to_string` 与 `${...}`，§4.3），
   背后是 `+ - * / %` 与一元 `-` 的六个算术 trait（见下面那条）、背后是数字字面量的
   `FromInt`/`FromFloat`（再下一条），以及背后是 staged `for` 的 `StagedIter`/`StagedVar`
@@ -834,6 +834,13 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
   注入函数命名空间，与其余 prelude 名同待遇——**可被本模块的声明遮蔽**（§10.3）。
   形参名取自这份声明（具名实参，§4.3）：接收者 `it`、游标 `c`，所以写 `xs.iter_done(c: k)`。
+- **`Len`** 声明一个方法、无关联类型：`trait Len[C] { fn len(x: C) -> Int }`。
+  `len(c)` 与 `c.len()` 按接收者类型找 impl；`List` 的 impl 随 std 提供，用户类型
+  写 `impl Len[T]` 即得 `len`。`len` 这个名字随 prelude 注入（上条），但 impl 体里的
+  `fn len` 不是模块顶层声明，**不遮蔽**任何东西，这正是它存在的理由：一个模块可以给自己的
+  类型写 `len`，同一模块里对 `List` 的 `len(xs)` 照旧。
+  `Len` 在 `List` 上就是语言的 `len` 原语，不是一次对 impl 方法的调用；impl 体只服务
+  `[C: Len]` 的字典槽，并且只调内部名（调自己是无条件自递归，被检查器拒绝）。
 - **`Index`** 声明两个关联类型与一个方法：
   `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`。
   语言为 `List`（`Idx = Int`）与 `Map`（`Idx = 键类型`）提供 impl；用户类型实现
@@ -3389,7 +3396,7 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、`parse_int`（std/fmt）、内建的
 <!-- doc-check: builtin-inventory --> `panic`/`todo`/`caller`/`bracket`/`catch_fault`/`catch_panic`/
-`discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
+`discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`get`/`range`/
 `sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
 `char_is_lower`/`char_is_space`/`args`/`cast`，共一屏以内

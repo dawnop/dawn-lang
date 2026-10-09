@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5db506cc6030c061 -->
+<!-- doc-check: translation-of docs/spec.md @ f2bd7af80364df5a -->
 
 # Dawn Language Specification
 
@@ -1008,17 +1008,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
 - A trait has exactly one type parameter; its methods enter the module function namespace
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
-  namespace is decided by that trait. Today a `trait` declaration always injects, and the five
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter` inject too; **the twelve whose method name the
+  namespace is decided by that trait. Today a `trait` declaration always injects, and the six
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twelve whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
   bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
   (consumed by `to_string` and `${...}`, §4.3), the six arithmetic traits
   `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3), `FromInt`/`FromFloat`
   (consumed by numeric literals, §1.5) and `StagedIter`/`StagedVar` (consumed by the staged
   `for`, §4.7).
-- **Seventeen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+- **Eighteen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
-  `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Index` (behind `[]`, §4.8),
+  `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Len` (`len`, the number of elements a
+  container holds), `Index` (behind `[]`, §4.8),
   `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
   the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below),
   `FromInt`/`FromFloat` behind numeric literals (the entry after that), and
@@ -1051,6 +1052,15 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   prelude names — **they can be shadowed by a declaration in this module** (§10.3).
   The parameter names come from this declaration (named arguments, §4.3): the receiver is `it`
   and the cursor is `c`, so a caller writes `xs.iter_done(c: k)`.
+- **`Len`** declares one method and no associated types: `trait Len[C] { fn len(x: C) -> Int }`.
+  `len(c)` and `c.len()` find the impl by the receiver's type; the impl for `List` ships with std,
+  and a user type gets `len` by writing `impl Len[T]`. The name `len` is injected with the prelude
+  (the entry above), but an `fn len` inside an impl body is not a top-level declaration of the
+  module and **shadows nothing**, which is the point of it: a module may write `len` for its own
+  type while `len(xs)` on a `List` in the same module keeps working. At a `List`, `Len` is the
+  language's `len` primitive, not a call on the impl's method; the impl body serves only the
+  dictionary slot of a `[C: Len]` bound, and calls an internal name (calling itself is
+  unconditional self-recursion, which the checker rejects).
 - **`Index`** declares two associated types and one method:
   `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`.
   The language provides impls for `List` (`Idx = Int`) and `Map` (`Idx = key type`); a user type
@@ -4278,7 +4288,7 @@ The **prelude** is the high-traffic core of that, implicitly available without a
 constructors of `List`/`Option`/`Result`, `println`/`print`, `map`/`filter`/`fold`, the
 `sort` family (std/list), `parse_int` (std/fmt), and the builtin
 <!-- doc-check: builtin-inventory --> `panic`/`todo`/`caller`/`bracket`/`catch_fault`/`catch_panic`/
-`discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`len`/`get`/`range`/
+`discard`/`dbg`/`expect`/`unwrap_or`/`to_float`/`to_int`/`to_string`/`get`/`range`/
 `sort_by`/`join`/`parse_float`/`code_points`/
 `from_code_points`/`char_is_letter`/`char_is_digit`/`char_is_alnum`/`char_is_upper`/
 `char_is_lower`/`char_is_space`/`args`/`cast`, all within one screen (for the full set see
