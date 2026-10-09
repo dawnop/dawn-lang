@@ -3502,14 +3502,24 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("bytes_len", [TyBytes], ["b"], TyInt),
     bsig("bytes_at", [TyBytes, TyInt], ["b", "i"], TyInt),
     bsig("bytes_slice", [TyBytes, TyInt, TyInt], ["b", "from", "to"], TyBytes),
-    # The one way to *make* bytes that did not come from text. Without it
-    # `Bytes` is a read-only type: you can take the UTF-8 of a string, slice
-    # it and read it, but you cannot produce an arbitrary byte -- `0x80` would
-    # need a string whose UTF-8 encoding is that one byte, and there is none.
-    # Anything that decompresses has to write bytes it computed, so this is
-    # what std/bytes builds its `Buf` on. Elements outside 0..255 are the
-    # caller's error and are truncated, like a byte store anywhere else.
-    bsig("bytes_from_array", [TyArray(TyInt)], ["a"], TyBytes)
+    # The ways to *make* bytes that did not come from text, and to read them
+    # back as integers. Without them `Bytes` is a read-only type: you can take
+    # the UTF-8 of a string, slice it and read it, but you cannot produce an
+    # arbitrary byte -- `0x80` would need a string whose UTF-8 encoding is that
+    # one byte, and there is none. Anything that decompresses has to write
+    # bytes it computed, so these are what std/bytes builds its `Buf` on.
+    #
+    # One loop per call in the runtime, not one call per element
+    # (docs/bulk-array-bytes-design.md). `width` is 1, 2, 4 or 8 bytes per
+    # element and anything else panics. Byte order is an argument and never
+    # the host's: both backends must produce the same bytes. Packing keeps the
+    # low `8 * width` bits of each element (it wraps, it does not clamp);
+    # unpacking sign-extends when `signed` and zero-extends otherwise. A byte
+    # length that is not a multiple of `width` panics rather than dropping the
+    # tail. The contract is scripts/bytes-pack-contract.
+    bsig("bytes_pack_int", [TyArray(TyInt), TyInt, TyBool], ["a", "width", "little"], TyBytes),
+    bsig("bytes_unpack_int", [TyBytes, TyInt, TyBool, TyBool],
+      ["b", "width", "signed", "little"], TyArray(TyInt))
   ]
   sigs = sigs ++ [
     # The argv supplied when this program starts. It is process input and is
@@ -4055,9 +4065,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # `bytes_decode_utf8`/`bytes_decode_latin1` have no sentinel left to unwrap
   # and are std-only for the plainer reason: std/bytes owns the byte surface,
   # and two spellings of one operation is one too many.
-  # `bytes_from_array` also names Array, which is std-only on its own.
+  # `bytes_pack_int`/`bytes_unpack_int` also name Array, which is std-only on
+  # its own.
   for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
-    "from_array"] {
+    "pack_int", "unpack_int"] {
     rt_of = map.insert(rt_of, "bytes_${op}", RtBytes)
     internal = set.insert(internal, "bytes_${op}")
   }
@@ -4923,7 +4934,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 116
+  assert map_size2(bs) == 117
 }
 
 test "the reclaim's failure is a value, under the one name left" {

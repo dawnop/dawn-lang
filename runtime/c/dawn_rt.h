@@ -1012,9 +1012,13 @@ dawn_bytes *dawn_bytes_utf8(dawn_str *s);
 int64_t dawn_bytes_len(const dawn_bytes *b);
 int64_t dawn_bytes_at(const dawn_bytes *b, int64_t i); /* 0..255, -1 out of range */
 dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
-/* The one way to make bytes that did not come from text. Elements are boxed
- * (the array is erased) and truncated to a byte. */
-dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
+/* The ways to make bytes that did not come from text, and to read them back
+ * as integers. `width` is 1, 2, 4 or 8, anything else panics; the byte order
+ * is the argument's and never the host's. Pack wraps each element to its low
+ * `8 * width` bits. Unpack sign-extends when `is_signed`, and panics when the
+ * length is not a multiple of `width`. */
+dawn_bytes *dawn_bytes_pack_int(const dawn_array *a, int64_t width, bool little);
+dawn_array *dawn_bytes_unpack_int(const dawn_bytes *b, int64_t width, bool is_signed, bool little);
 /* The two decodings the language promises, one function each rather than one
  * taking a charset name: the function name is the domain, both charsets read
  * every byte string, and so neither answers an Option. Malformed UTF-8 is

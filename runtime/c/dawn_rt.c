@@ -4095,14 +4095,99 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to) {
   return dawn_bytes_of(buf, to - from);
 }
 
-dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
-  int64_t n = dawn_array_len(a);
-  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n + 1);
-  for (int64_t i = 0; i < n; i++) {
-    dawn_box *s = (dawn_box *)dawn_array_get(a, i);
-    buf[i] = (unsigned char)(s->val.i & 0xFF);
+/* ---- Int <-> bytes, one loop per call (docs/bulk-array-bytes-design.md) ----
+ *
+ * The panic sentences are the JVM runtime's (`int_width` and `unpack_count` in
+ * jvm/rtclasses.dawn) word for word: a panic message is a value once
+ * `catch_panic` hands it back, so the two backends may not disagree on it.
+ * scripts/bytes-pack-contract holds them together.
+ *
+ * The array's slots are boxes (`dawn_box`), so the loop still reads each one;
+ * what it does not do is allocate per element on the way in, or grow an array
+ * one push at a time on the way out. Unpack asks for the whole buffer up
+ * front and fills it once, which is the difference between 8 ms and 30 ms at
+ * a million elements (the K0 measurement in the design). */
+static void dawn_bytes_panic_width(const char *who, int64_t width) {
+  char msg[96];
+  int n = snprintf(msg, sizeof msg, "bytes.%s: width %lld is not 1, 2, 4 or 8", who,
+                   (long long)width);
+  dawn_panic(dawn_str_lit(msg, n));
+}
+
+/* The low `w` bytes of `x` at `p`, little or big end first. `w` is a
+ * compile-time constant at every call below, so each case is a plain store
+ * (and a bswap for the big end) after inlining. */
+static inline void dawn_put_int(unsigned char *p, uint64_t x, int w, bool little) {
+  for (int k = 0; k < w; k++) {
+    p[little ? k : w - 1 - k] = (unsigned char)(x >> (8 * k));
   }
-  return dawn_bytes_of(buf, n);
+}
+
+static inline uint64_t dawn_get_int(const unsigned char *p, int w, bool little) {
+  uint64_t x = 0;
+  for (int k = 0; k < w; k++) {
+    x |= (uint64_t)p[little ? k : w - 1 - k] << (8 * k);
+  }
+  return x;
+}
+
+dawn_bytes *dawn_bytes_pack_int(const dawn_array *a, int64_t width, bool little) {
+  if (width != 1 && width != 2 && width != 4 && width != 8) {
+    dawn_bytes_panic_width("pack", width);
+  }
+  int64_t n = dawn_array_len(a);
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(n * width) + 1);
+  void **slots = a->buf->data;
+#define DAWN_PACK_LOOP(W)                                                  \
+  for (int64_t i = 0; i < n; i++) {                                        \
+    dawn_put_int(buf + i * (W), (uint64_t)((dawn_box *)slots[i])->val.i,   \
+                 (W), little);                                             \
+  }
+  switch (width) {
+    case 1: DAWN_PACK_LOOP(1) break;
+    case 2: DAWN_PACK_LOOP(2) break;
+    case 4: DAWN_PACK_LOOP(4) break;
+    default: DAWN_PACK_LOOP(8) break;
+  }
+#undef DAWN_PACK_LOOP
+  return dawn_bytes_of(buf, n * width);
+}
+
+dawn_array *dawn_bytes_unpack_int(const dawn_bytes *b, int64_t width, bool is_signed,
+                                  bool little) {
+  if (width != 1 && width != 2 && width != 4 && width != 8) {
+    dawn_bytes_panic_width("unpack", width);
+  }
+  if (b->len % width != 0) {
+    char msg[96];
+    int m = snprintf(msg, sizeof msg, "bytes.unpack: length %lld is not a multiple of %lld",
+                     (long long)b->len, (long long)width);
+    dawn_panic(dawn_str_lit(msg, m));
+  }
+  int32_t n = (int32_t)(b->len / width);
+  dawn_array_buf *nb = dawn_array_buf_new(n);
+  void **slots = nb->data;
+  const unsigned char *p = b->p;
+  /* sign extension without a shift of a negative: flip the sign bit, then
+   * subtract it back out (all in uint64_t, so nothing overflows) */
+#define DAWN_UNPACK_LOOP(W)                                                \
+  for (int32_t i = 0; i < n; i++) {                                        \
+    uint64_t v = dawn_get_int(p + (int64_t)i * (W), (W), little);          \
+    if (is_signed && (W) < 8) {                                            \
+      uint64_t m = (uint64_t)1 << (8 * (W)-1);                             \
+      v = (v ^ m) - m;                                                     \
+    }                                                                      \
+    slots[i] = dawn_box_int((int64_t)v);                                   \
+  }
+  switch (width) {
+    case 1: DAWN_UNPACK_LOOP(1) break;
+    case 2: DAWN_UNPACK_LOOP(2) break;
+    case 4: DAWN_UNPACK_LOOP(4) break;
+    default: DAWN_UNPACK_LOOP(8) break;
+  }
+#undef DAWN_UNPACK_LOOP
+  nb->high = n;
+  return dawn_array_of(nb, n);
 }
 
 /* Malformed input is replaced, not refused -- what `new String(bytes,

@@ -65,7 +65,7 @@ pub fn buf() -> Buf = BufRep { chunks: array_new(), tail: array_new() }
 # A full tail becomes the next chunk.
 fn settle(chunks: Array[Bytes], tail: Array[Int]) -> BufRep =
   if array_len(tail) == CHUNK {
-    BufRep { chunks: array_push(chunks, bytes_from_array(tail)), tail: array_new() }
+    BufRep { chunks: array_push(chunks, bytes_pack_int(tail, 1, true)), tail: array_new() }
   } else {
     BufRep { chunks: chunks, tail: tail }
   }
@@ -92,7 +92,7 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
       tail = array_push(tail, bytes_at(src, i))
       i = i + 1
       if array_len(tail) == CHUNK {
-        chunks = array_push(chunks, bytes_from_array(tail))
+        chunks = array_push(chunks, bytes_pack_int(tail, 1, true))
         tail = array_new()
       }
     }
@@ -133,7 +133,7 @@ pub fn buf_at(b: Buf, i: Int) -> Int = {
 pub fn freeze(b: Buf) -> Bytes = {
   let r: BufRep = b
   let k = array_len(r.chunks)
-  let last = bytes_from_array(r.tail)
+  let last = bytes_pack_int(r.tail, 1, true)
   if k == 0 { last } else { join_chunks(r.chunks, last, 0, k + 1) }
 }
 
