@@ -1,0 +1,81 @@
+# Driver for the integer pack/unpack contract. The std-side module does the
+# naming of the primitives; this file states the cases and prints answers, and
+# run.sh holds the output to expected.txt on both backends.
+#
+# Every case is chosen so a plausible mistake changes the line: the values
+# have all-different bytes (a swapped order), reach past the width (a wrong
+# width, saturation instead of wrapping), and sit at the sign boundary (zero
+# extension where sign extension was meant, or the reverse).
+use std/bytespack
+
+fn line(label: String, xs: List[Int], width: Int, little: Bool) -> Unit !io = {
+  println("${label} ${bytespack.dump(bytespack.pack(xs, width, little))}")
+}
+
+fn back(label: String, vals: List[Int], width: Int) -> Unit !io = {
+  let b = bytespack.of_bytes(vals)
+  println("${label} s/le ${bytespack.unpack(b, width, true, true)}")
+  println("${label} u/le ${bytespack.unpack(b, width, false, true)}")
+  println("${label} s/be ${bytespack.unpack(b, width, true, false)}")
+  println("${label} u/be ${bytespack.unpack(b, width, false, false)}")
+}
+
+fn panics(label: String, f: fn() -> Int) -> Unit !io = {
+  match catch_panic(f) {
+    Ok(_) -> println("${label} no panic")
+    Err(m) -> println("${label} ${m.message}")
+  }
+}
+
+pub fn main() -> Unit !io = {
+  # byte order: all-different bytes, both ends
+  line("pack4 le", [0x01020304], 4, true)
+  line("pack4 be", [0x01020304], 4, false)
+  line("pack2 le", [0x0102, 0x0304], 2, true)
+  line("pack2 be", [0x0102, 0x0304], 2, false)
+  line("pack8 le", [0x0102030405060708], 8, true)
+  line("pack8 be", [0x0102030405060708], 8, false)
+  line("pack1 le", [1, 2, 3], 1, true)
+  line("pack1 be", [1, 2, 3], 1, false)
+
+  # wrapping: the low 8*width bits, never a clamp
+  line("wrap1", [0, 127, 128, 255, 256, 300, -1, -128, -129], 1, true)
+  line("wrap2 le", [65535, 65536, 65537, -2, 0x12345], 2, true)
+  line("wrap2 be", [65535, 65536, 65537, -2, 0x12345], 2, false)
+  line("wrap4 le", [-1, 0x100000001, -2147483648, 2147483648], 4, true)
+  line("wrap4 be", [-1, 0x100000001, -2147483648, 2147483648], 4, false)
+  line("wrap8 le", [-1, -9223372036854775807 - 1, 9223372036854775807], 8, true)
+  line("wrap8 be", [-1, -9223372036854775807 - 1, 9223372036854775807], 8, false)
+
+  # empty both ways
+  line("empty", [], 4, true)
+  println("empty unpack ${bytespack.unpack(bytespack.of_bytes([]), 8, true, true)}")
+
+  # unpack: the same bytes read all four ways, sign boundary at every width
+  back("back1", [0, 1, 127, 128, 255], 1)
+  back("back2", [0x00, 0x80, 0xFF, 0xFF, 0x34, 0x12, 0x01, 0x80], 2)
+  back("back4", [0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0x78, 0x56, 0x34, 0x12], 4)
+  back("back8", [1, 2, 3, 4, 5, 6, 7, 8, 255, 255, 255, 255, 255, 255, 255, 255,
+    0, 0, 0, 0, 0, 0, 0, 128], 8)
+
+  # round trip at every width and order: low bits survive, nothing else does
+  let xs = [0, 1, -1, 127, -128, 255, 32767, -32768, 65535, 2147483647, -2147483648]
+  for w in [1, 2, 4, 8] {
+    for little in [true, false] {
+      let b = bytespack.pack(xs, w, little)
+      println("trip${w} ${little} s ${bytespack.unpack(b, w, true, little)}")
+      println("trip${w} ${little} u ${bytespack.unpack(b, w, false, little)}")
+    }
+  }
+
+  # errors: a bad width and a ragged length panic, in both directions
+  panics("pack w3", () => bytespack.size(bytespack.pack([1], 3, true)))
+  panics("pack w0", () => bytespack.size(bytespack.pack([1], 0, true)))
+  panics("pack w16", () => bytespack.size(bytespack.pack([], 16, true)))
+  panics("pack w-1", () => bytespack.size(bytespack.pack([1], -1, true)))
+  panics("unpack w3", () => len(bytespack.unpack(bytespack.of_bytes([1, 2, 3]), 3, true, true)))
+  panics("unpack w0", () => len(bytespack.unpack(bytespack.of_bytes([]), 0, true, true)))
+  panics("unpack len7", () => len(bytespack.unpack(bytespack.of_bytes([1, 2, 3, 4, 5, 6, 7]), 4, true, true)))
+  panics("unpack len1", () => len(bytespack.unpack(bytespack.of_bytes([1]), 2, false, false)))
+  panics("unpack ok", () => len(bytespack.unpack(bytespack.of_bytes([1, 2, 3, 4]), 4, true, true)))
+}

@@ -1,0 +1,52 @@
+# The integer pack/unpack primitives, exercised from the only place that may
+# name them.
+#
+# `bytes_pack_int` and `bytes_unpack_int` take and return `Array`, which only
+# std can name (docs/native-backend-plan.md D1), so this file is dropped into a
+# copy of std/ by run.sh rather than sitting in examples/. It does no more than
+# convert `List[Int]` at the edge, so the probe can state its cases as list
+# literals and every output line is the primitive's own answer. No `use java`
+# for the reason scripts/array-contract/array.dawn gives.
+use std/bytes
+
+fn to_array(xs: List[Int]) -> Array[Int] = {
+  var a: Array[Int] = array_new()
+  for x in xs { a = array_push(a, x) }
+  a
+}
+
+fn to_list(a: Array[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  while i < array_len(a) {
+    out = out ++ [array_get(a, i)]
+    i = i + 1
+  }
+  out
+}
+
+## The bytes of `xs` at `width`, and the byte order named by `little`.
+pub fn pack(xs: List[Int], width: Int, little: Bool) -> Bytes =
+  bytes_pack_int(to_array(xs), width, little)
+
+## The integers `b` holds at `width`.
+pub fn unpack(b: Bytes, width: Int, signed: Bool, little: Bool) -> List[Int] =
+  to_list(bytes_unpack_int(b, width, signed, little))
+
+## Bytes built from byte values, so a case can say exactly which bytes it feeds
+## to `unpack` without going through `pack` (a round trip alone would pass a
+## pair of mutually inverse mistakes).
+pub fn of_bytes(vals: List[Int]) -> Bytes = bytes_pack_int(to_array(vals), 1, true)
+
+pub fn size(b: Bytes) -> Int = bytes.len(b)
+
+pub fn dump(b: Bytes) -> String = {
+  var s = ""
+  var i = 0
+  while i < bytes.len(b) {
+    if i > 0 { s = s ++ " " }
+    s = s ++ "${bytes.at(b, i)}"
+    i = i + 1
+  }
+  "[" ++ s ++ "]"
+}
