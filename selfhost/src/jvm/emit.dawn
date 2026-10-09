@@ -22,8 +22,8 @@ use std/str
 use std/list
 use std/map
 use check/types.{
-  Intr, Rt, RtStrings, RtBytes, RtArray, RtIo, RtGpu, peel_opaque, cast_target,
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
+  Intr, Rt, RtStrings, RtBytes, RtArray, RtMem, RtIo, RtGpu, peel_opaque, cast_target,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, EPure, EIo, EffVar, prelude_adts,
@@ -46,11 +46,11 @@ use jvm/codegen.{
 }
 use jvm/rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, close_mv,
-  PANIC_CLASS, UNIT_CLASS, SB, BYTES_CLASS, IO_CLASS, GPU_CLASS, STRINGS_CLASS,
+  PANIC_CLASS, UNIT_CLASS, SB, BYTES_CLASS, MEM_CLASS, IO_CLASS, GPU_CLASS, STRINGS_CLASS,
   HAMT_CLASS,
   PVEC_CLASS, ARRAY_CLASS,
   SHOW_CLASS, CTL_CLASS, supers_of, gen_show_class, gen_strings_class, gen_bytes_class,
-  gen_array_class, gen_io_class, gen_gpu_class, gen_ctl_class, emitter_rt_methods,
+  gen_array_class, gen_mem_class, gen_io_class, gen_gpu_class, gen_ctl_class, emitter_rt_methods,
   RtMethod, invoke_rt, rt_array_new, rt_array_push, rt_array_to_java, rt_array_of_java,
   rt_bytes_concat, rt_ctl_enter, rt_ctl_yield, rt_io_cast, rt_io_list_names, rt_io_run,
   rt_show_quote, rt_show_show, rt_strings_code_points, rt_strings_cursor_slice,
@@ -472,6 +472,7 @@ fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
     }
     TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
+    TyI64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
     TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(gx.adts, aid))) }
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
@@ -507,6 +508,7 @@ fn unerase_class(adts: Adts, t: Ty) -> String =
     TyBool -> "java/lang/Boolean"
     TyString -> "java/lang/String"
     TyBytes -> "[B"
+    TyI64Buf -> "[J"
     TyAdt(aid, _) -> adt_jvm_name(adt_of(adts, aid))
     TyList(_) -> PVEC_CLASS
     TyMap(_, _) -> HAMT_CLASS
@@ -854,6 +856,7 @@ fn rt_class(o: Rt) -> String =
     RtStrings -> STRINGS_CLASS
     RtBytes -> BYTES_CLASS
     RtArray -> ARRAY_CLASS
+    RtMem -> MEM_CLASS
     RtIo -> IO_CLASS
     RtGpu -> GPU_CLASS
   }
@@ -3791,6 +3794,7 @@ fn generated_rt_statics() -> List[String] !io = {
     (STRINGS_CLASS, gen_strings_class(sup, reach.all_tables())),
     (BYTES_CLASS, gen_bytes_class(sup)),
     (ARRAY_CLASS, gen_array_class(sup)),
+    (MEM_CLASS, gen_mem_class(sup)),
     (IO_CLASS, gen_io_class(sup)),
     (GPU_CLASS, gen_gpu_class(sup)),
     (CTL_CLASS, gen_ctl_class(sup))

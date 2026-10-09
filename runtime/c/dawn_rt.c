@@ -1340,6 +1340,7 @@ void dawn_immortal(void *p) {
       case DAWN_K_BOX:
       case DAWN_K_BYTES:
       case DAWN_K_STR:
+      case DAWN_K_I64BUF:
         break; /* no counted children */
       default:
         fprintf(stderr, "dawn: immortal of an unheaded pointer (kind %d)\n", h->kind);
@@ -1441,6 +1442,8 @@ void dawn_drop(void *p) {
         break;
       case DAWN_K_STR:
         break; /* one block: the bytes sit right after the header */
+      case DAWN_K_I64BUF:
+        break; /* one block, and the elements are plain integers */
 #ifndef __wasi__
       case DAWN_K_CTL:
         /* Not pushed onto the work list like every other child: the frames
@@ -4071,6 +4074,76 @@ dawn_bytes *dawn_bytes_utf8(dawn_str *s) {
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)s->len + 1);
   if (s->len > 0) memcpy(buf, s->p, (size_t)s->len);
   return dawn_bytes_of(buf, s->len);
+}
+
+/* ---- I64Buf (see dawn_rt.h) ----
+ *
+ * The panic wording is the JVM's, word for word (`gen_mem_class` in
+ * jvm/rtclasses.dawn): a panic message is a value once `catch_panic` hands it
+ * back, so the two backends must not disagree on it, and a test holds the
+ * strings below to the JVM's constants. */
+#define DAWN_I64BUF_MAX_LEN INT64_C(2147483639) /* 2^31 - 9, the JVM's limit; native agrees */
+
+static void dawn_i64buf_panic(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
+static void dawn_i64buf_panic(const char *fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  /* a stack string: `dawn_raise` copies the message into the payload */
+  dawn_panic(dawn_str_lit(buf, n));
+  __builtin_unreachable(); /* a panic unwinds; it never returns here */
+}
+
+void dawn_i64buf_oob(int64_t i, int64_t len) {
+  dawn_i64buf_panic("I64Buf index %lld out of bounds for length %lld", (long long)i, (long long)len);
+  __builtin_unreachable(); /* a panic unwinds; it never returns here */
+}
+
+/* Zero-filled: the elements are `calloc`ed with the header, so no program can
+ * read memory it did not write. */
+dawn_i64buf *dawn_i64buf_new(int64_t n) {
+  if (n < 0) {
+    dawn_i64buf_panic("I64Buf.new: negative length %lld", (long long)n);
+  }
+  if (n > DAWN_I64BUF_MAX_LEN) {
+    dawn_i64buf_panic("I64Buf.new: length %lld is too large", (long long)n);
+  }
+  dawn_i64buf *b = (dawn_i64buf *)calloc(1, sizeof(dawn_i64buf) + (size_t)n * sizeof(int64_t));
+  if (b == NULL) {
+    fputs("dawn: out of memory\n", stderr);
+    exit(1);
+  }
+  dawn_hdr_init(&b->h, DAWN_K_I64BUF);
+  b->len = n;
+  return b;
+}
+
+/* `0 <= from <= to <= len` or a panic: a range write that clamped would turn
+ * an out-of-range bug into a few elements quietly not written. */
+dawn_unit dawn_i64buf_fill(dawn_i64buf *b, int64_t from, int64_t to, int64_t v) {
+  if (from < 0 || to > b->len || from > to) {
+    dawn_i64buf_panic("I64Buf.fill: range [%lld, %lld) out of bounds for length %lld", (long long)from,
+                      (long long)to, (long long)b->len);
+  }
+  for (int64_t k = from; k < to; k++) b->data[k] = v;
+  return DAWN_UNIT;
+}
+
+/* memmove: `dst` and `src` may be the same buffer with overlapping ranges.
+ * The bound is tested as `at > len - n`, which cannot overflow once `n >= 0`
+ * has been checked and `len` is below 2^31. */
+dawn_unit dawn_i64buf_copy_from(dawn_i64buf *dst, int64_t dst_at, const dawn_i64buf *src,
+                                int64_t src_at, int64_t n) {
+  if (n < 0 || dst_at < 0 || src_at < 0 || dst_at > dst->len - n || src_at > src->len - n) {
+    dawn_i64buf_panic("I64Buf.copy_from: range out of bounds (dst_at %lld, src_at %lld, "
+                      "n %lld) for dst length %lld and src length %lld",
+                      (long long)dst_at, (long long)src_at, (long long)n, (long long)dst->len,
+                      (long long)src->len);
+  }
+  memmove(dst->data + dst_at, src->data + src_at, (size_t)n * sizeof(int64_t));
+  return DAWN_UNIT;
 }
 
 int64_t dawn_bytes_len(const dawn_bytes *b) { return b->len; }

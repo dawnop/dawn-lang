@@ -32,9 +32,9 @@ use jvm/ops.{
   OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPLT,
   OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL,
   OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_IRETURN, OP_ISTORE, OP_ISUB, OP_L2I, OP_LADD, OP_LCMP,
-  OP_LCONST_0, OP_LCONST_1, OP_LLOAD, OP_LMUL, OP_LRETURN, OP_LSTORE, OP_LSUB, OP_NEW, OP_NEWARRAY,
+  OP_LALOAD, OP_LASTORE, OP_LCONST_0, OP_LCONST_1, OP_LLOAD, OP_LMUL, OP_LRETURN, OP_LSTORE, OP_LSUB, OP_NEW, OP_NEWARRAY,
   OP_POP, OP_PUTFIELD, OP_PUTSTATIC,
-  OP_RETURN, T_BYTE, T_INT, V52
+  OP_RETURN, T_BYTE, T_INT, T_LONG, V52
 }
 
 # ---- naming (must match the Kotlin side byte for byte) ----
@@ -624,6 +624,8 @@ pub fn jdk_supers() -> List[String] = [
 
 pub const BYTES_CLASS: String = "dawn/rt/Bytes"
 
+pub const MEM_CLASS: String = "dawn/rt/Mem"
+
 pub const IO_CLASS: String = "dawn/rt/Io"
 
 pub const GPU_CLASS: String = "dawn/rt/Gpu"
@@ -800,6 +802,284 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   gen_bytes_decode_fixed(cw, "bytes_decode_latin1", "ISO_8859_1")
 
   gen_bytes_int_family(cw)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+# ---- dawn/rt/Mem: the flat 64-bit buffer runtime ----
+
+## `I64Buf` panic wording. The native runtime spells each of these the same
+## way (dawn_rt.c, `dawn_i64buf_*_panic`), and a test below holds the two to
+## it: a panic message is a value once `catch_panic` hands it back.
+const MEM_INDEX_HEAD: String = "I64Buf index "
+const MEM_INDEX_TAIL: String = " out of bounds for length "
+const MEM_NEW_NEG: String = "I64Buf.new: negative length "
+const MEM_NEW_BIG_HEAD: String = "I64Buf.new: length "
+const MEM_NEW_BIG_TAIL: String = " is too large"
+const MEM_FILL_HEAD: String = "I64Buf.fill: range ["
+const MEM_FILL_SEP: String = ", "
+const MEM_FILL_TAIL: String = ") out of bounds for length "
+const MEM_COPY_HEAD: String = "I64Buf.copy_from: range out of bounds (dst_at "
+const MEM_COPY_SRC: String = ", src_at "
+const MEM_COPY_N: String = ", n "
+const MEM_COPY_DL: String = ") for dst length "
+const MEM_COPY_SL: String = " and src length "
+
+## The longest `I64Buf`: the JVM's own practical array limit, 2^31 - 9. Native
+## takes the same number so a program behaves the same on both.
+const MEM_MAX_LEN: Int = 2147483639
+
+fn mem_panic_desc() -> String = "L" ++ PANIC_CLASS ++ ";"
+
+## `new PanicError(new StringBuilder()` ... the message is appended by the
+## caller and `mem_panic_close` finishes it, leaving the error on the stack.
+fn mem_panic_open(m: MethodVisitor) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  ()
+}
+
+fn mem_append_long(m: MethodVisitor, slot: Int) -> Unit !io = {
+  m.visitVarInsn(OP_LLOAD, slot)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
+  ()
+}
+
+fn mem_panic_close(m: MethodVisitor) -> Unit !io = {
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ARETURN)
+  ()
+}
+
+## One of the panic builders: a static taking `nargs` longs and answering the
+## error, which the access methods `athrow`. They are methods rather than
+## inline code so that the access methods stay small enough for C2 to inline
+## and the throw is a cold branch.
+fn gen_mem_panic(cw: ClassWriter, name: String, nargs: Int, body: fn(MethodVisitor) -> Unit !io) -> Unit !io = {
+  var d = ""
+  var k = 0
+  while k < nargs {
+    d = d ++ "J"
+    k = k + 1
+  }
+  let m = open_static(cw, name, "(" ++ d ++ ")" ++ mem_panic_desc())
+  mem_panic_open(m)
+  body(m)
+  mem_panic_close(m)
+  close_mv(m)
+}
+
+## The length of the array in local `slot`, as a long.
+fn mem_len_of(m: MethodVisitor, slot: Int) -> Unit !io = {
+  m.visitVarInsn(OP_ALOAD, slot)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitInsn(OP_I2L)
+  ()
+}
+
+## `if (i < 0 || i > bound) goto bad`-style tests are written out below with
+## LCMP on whole longs: a bound is compared BEFORE any truncation to int,
+## because `(int) (2^32 + 5)` is 5 and would alias a real slot.
+fn mem_jump_if_neg(m: MethodVisitor, slot: Int, bad: Label) -> Unit !io = {
+  m.visitVarInsn(OP_LLOAD, slot)
+  m.visitInsn(OP_LCONST_0)
+  m.visitInsn(OP_LCMP)
+  m.visitJumpInsn(OP_IFLT, bad)
+  ()
+}
+
+## dawn/rt/Mem: `I64Buf` is a bare `long[]`, the way `Bytes` is a `byte[]`.
+## The access methods are static and take the buffer, so C2 inlines them into
+## the caller's loop and hoists the array base out of it
+## (docs/mem-buffer-design.md 6.3). The index is compared as a whole long
+## before it is truncated; the unsigned compare folds "negative" and "too big"
+## into one test.
+pub fn gen_mem_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, MEM_CLASS, obj())
+
+  gen_mem_panic(cw, "panic_index", 2, m => {
+    append_const(m, MEM_INDEX_HEAD)
+    mem_append_long(m, 0)
+    append_const(m, MEM_INDEX_TAIL)
+    mem_append_long(m, 2)
+  })
+  gen_mem_panic(cw, "panic_new_neg", 1, m => {
+    append_const(m, MEM_NEW_NEG)
+    mem_append_long(m, 0)
+  })
+  gen_mem_panic(cw, "panic_new_big", 1, m => {
+    append_const(m, MEM_NEW_BIG_HEAD)
+    mem_append_long(m, 0)
+    append_const(m, MEM_NEW_BIG_TAIL)
+  })
+  gen_mem_panic(cw, "panic_fill", 3, m => {
+    append_const(m, MEM_FILL_HEAD)
+    mem_append_long(m, 0)
+    append_const(m, MEM_FILL_SEP)
+    mem_append_long(m, 2)
+    append_const(m, MEM_FILL_TAIL)
+    mem_append_long(m, 4)
+  })
+  gen_mem_panic(cw, "panic_copy", 5, m => {
+    append_const(m, MEM_COPY_HEAD)
+    mem_append_long(m, 0)
+    append_const(m, MEM_COPY_SRC)
+    mem_append_long(m, 2)
+    append_const(m, MEM_COPY_N)
+    mem_append_long(m, 4)
+    append_const(m, MEM_COPY_DL)
+    mem_append_long(m, 6)
+    append_const(m, MEM_COPY_SL)
+    mem_append_long(m, 8)
+  })
+
+  # i64buf_new(n): zero-filled; n < 0 and n > MAX_LEN panic
+  let nv = open_static(cw, "i64buf_new", "(J)[J")
+  let n_nonneg = Label.new()
+  let n_fits = Label.new()
+  nv.visitVarInsn(OP_LLOAD, 0)
+  nv.visitInsn(OP_LCONST_0)
+  nv.visitInsn(OP_LCMP)
+  nv.visitJumpInsn(OP_IFGE, n_nonneg)
+  nv.visitVarInsn(OP_LLOAD, 0)
+  nv.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, "panic_new_neg", "(J)" ++ mem_panic_desc(), false)
+  nv.visitInsn(OP_ATHROW)
+  nv.visitLabel(n_nonneg)
+  nv.visitVarInsn(OP_LLOAD, 0)
+  nv.visitLdcInsn(Long.valueOf(MEM_MAX_LEN).expect("boxed"))
+  nv.visitInsn(OP_LCMP)
+  nv.visitJumpInsn(OP_IFLE, n_fits)
+  nv.visitVarInsn(OP_LLOAD, 0)
+  nv.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, "panic_new_big", "(J)" ++ mem_panic_desc(), false)
+  nv.visitInsn(OP_ATHROW)
+  nv.visitLabel(n_fits)
+  nv.visitVarInsn(OP_LLOAD, 0)
+  nv.visitInsn(OP_L2I)
+  nv.visitIntInsn(OP_NEWARRAY, T_LONG)
+  nv.visitInsn(OP_ARETURN)
+  close_mv(nv)
+
+  # i64buf_len(b)
+  let lv = open_static(cw, "i64buf_len", "([J)J")
+  mem_len_of(lv, 0)
+  lv.visitInsn(OP_LRETURN)
+  close_mv(lv)
+
+  # i64buf_at(b, i): Long.compareUnsigned(i, len) >= 0 is out of range
+  let av = open_static(cw, "i64buf_at", "([JJ)J")
+  let a_bad = Label.new()
+  av.visitVarInsn(OP_LLOAD, 1)
+  mem_len_of(av, 0)
+  av.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "compareUnsigned", "(JJ)I", false)
+  av.visitJumpInsn(OP_IFGE, a_bad)
+  av.visitVarInsn(OP_ALOAD, 0)
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitInsn(OP_L2I)
+  av.visitInsn(OP_LALOAD)
+  av.visitInsn(OP_LRETURN)
+  av.visitLabel(a_bad)
+  av.visitVarInsn(OP_LLOAD, 1)
+  mem_len_of(av, 0)
+  av.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, "panic_index", "(JJ)" ++ mem_panic_desc(), false)
+  av.visitInsn(OP_ATHROW)
+  close_mv(av)
+
+  # i64buf_set(b, i, v)
+  let sv = open_static(cw, "i64buf_set", "([JJJ)L" ++ UNIT_CLASS ++ ";")
+  let s_bad = Label.new()
+  sv.visitVarInsn(OP_LLOAD, 1)
+  mem_len_of(sv, 0)
+  sv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "compareUnsigned", "(JJ)I", false)
+  sv.visitJumpInsn(OP_IFGE, s_bad)
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitInsn(OP_L2I)
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitInsn(OP_LASTORE)
+  return_unit(sv)
+  sv.visitLabel(s_bad)
+  sv.visitVarInsn(OP_LLOAD, 1)
+  mem_len_of(sv, 0)
+  sv.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, "panic_index", "(JJ)" ++ mem_panic_desc(), false)
+  sv.visitInsn(OP_ATHROW)
+  close_mv(sv)
+
+  # i64buf_fill(b, from, to, v): 0 <= from <= to <= len, else panic. Never clamps.
+  let fv = open_static(cw, "i64buf_fill", "([JJJJ)L" ++ UNIT_CLASS ++ ";")
+  let f_bad = Label.new()
+  mem_jump_if_neg(fv, 1, f_bad)
+  fv.visitVarInsn(OP_LLOAD, 3)
+  mem_len_of(fv, 0)
+  fv.visitInsn(OP_LCMP)
+  fv.visitJumpInsn(OP_IFGT, f_bad)
+  fv.visitVarInsn(OP_LLOAD, 1)
+  fv.visitVarInsn(OP_LLOAD, 3)
+  fv.visitInsn(OP_LCMP)
+  fv.visitJumpInsn(OP_IFGT, f_bad)
+  fv.visitVarInsn(OP_ALOAD, 0)
+  fv.visitVarInsn(OP_LLOAD, 1)
+  fv.visitInsn(OP_L2I)
+  fv.visitVarInsn(OP_LLOAD, 3)
+  fv.visitInsn(OP_L2I)
+  fv.visitVarInsn(OP_LLOAD, 5)
+  fv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "fill", "([JIIJ)V", false)
+  return_unit(fv)
+  fv.visitLabel(f_bad)
+  fv.visitVarInsn(OP_LLOAD, 1)
+  fv.visitVarInsn(OP_LLOAD, 3)
+  mem_len_of(fv, 0)
+  fv.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, "panic_fill", "(JJJ)" ++ mem_panic_desc(), false)
+  fv.visitInsn(OP_ATHROW)
+  close_mv(fv)
+
+  # i64buf_copy_from(dst, dst_at, src, src_at, n): memmove. System.arraycopy
+  # has that semantics for one array, and takes the source first, so the
+  # operands are swapped on the way in. Locals: 0 dst, 1 dst_at, 3 src,
+  # 4 src_at, 6 n.
+  let cv = open_static(cw, "i64buf_copy_from", "([JJ[JJJ)L" ++ UNIT_CLASS ++ ";")
+  let c_bad = Label.new()
+  mem_jump_if_neg(cv, 6, c_bad)
+  mem_jump_if_neg(cv, 1, c_bad)
+  mem_jump_if_neg(cv, 4, c_bad)
+  # dst_at > dst.length - n  (n >= 0 here, and a length is below 2^31: no overflow)
+  cv.visitVarInsn(OP_LLOAD, 1)
+  mem_len_of(cv, 0)
+  cv.visitVarInsn(OP_LLOAD, 6)
+  cv.visitInsn(OP_LSUB)
+  cv.visitInsn(OP_LCMP)
+  cv.visitJumpInsn(OP_IFGT, c_bad)
+  cv.visitVarInsn(OP_LLOAD, 4)
+  mem_len_of(cv, 3)
+  cv.visitVarInsn(OP_LLOAD, 6)
+  cv.visitInsn(OP_LSUB)
+  cv.visitInsn(OP_LCMP)
+  cv.visitJumpInsn(OP_IFGT, c_bad)
+  cv.visitVarInsn(OP_ALOAD, 3)
+  cv.visitVarInsn(OP_LLOAD, 4)
+  cv.visitInsn(OP_L2I)
+  cv.visitVarInsn(OP_ALOAD, 0)
+  cv.visitVarInsn(OP_LLOAD, 1)
+  cv.visitInsn(OP_L2I)
+  cv.visitVarInsn(OP_LLOAD, 6)
+  cv.visitInsn(OP_L2I)
+  cv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  return_unit(cv)
+  cv.visitLabel(c_bad)
+  cv.visitVarInsn(OP_LLOAD, 1)
+  cv.visitVarInsn(OP_LLOAD, 4)
+  cv.visitVarInsn(OP_LLOAD, 6)
+  mem_len_of(cv, 0)
+  mem_len_of(cv, 3)
+  cv.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, "panic_copy", "(JJJJJ)" ++ mem_panic_desc(), false)
+  cv.visitInsn(OP_ATHROW)
+  close_mv(cv)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")

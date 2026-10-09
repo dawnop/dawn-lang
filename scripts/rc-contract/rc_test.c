@@ -330,6 +330,80 @@ static void test_array_slice(void) {
   dawn_drop(xs);
 }
 
+static dawn_i64buf *i64_subject;
+static dawn_i64buf *volatile i64_immortal_root;
+
+static void *i64_read_out_of_range(dawn_clo *f) {
+  (void)f;
+  return (void *)(intptr_t)dawn_i64buf_at(i64_subject, 7);
+}
+
+static void *i64_copy_out_of_range(dawn_clo *f) {
+  (void)f;
+  dawn_i64buf_copy_from(i64_subject, 2, i64_subject, 0, 5);
+  return NULL;
+}
+
+/* An `I64Buf` is a counted leaf: one block, the elements right after the
+ * header, no children. Every primitive borrows it, so a program that calls
+ * `at`, `set`, `fill` or `copy_from` in a loop never moves the count -- the
+ * claim that keeps those loops free of dup and drop, and so the one worth a
+ * mutant: a primitive that takes a reference it does not give back is a leak
+ * the sanitized leg reports, and one that gives back a reference it never took
+ * is a double free. A panic raised from inside a primitive must leave the
+ * count where it was too, because `catch_panic` resumes with the buffer live. */
+static void test_i64buf(void) {
+  dawn_i64buf *b = dawn_i64buf_new(6);
+  check(b->h.rc == 1 && b->len == 6, "a new buffer is owned once and has its length");
+  int all_zero = 1;
+  for (int64_t i = 0; i < 6; i++) {
+    all_zero = all_zero && dawn_i64buf_at(b, i) == 0;
+  }
+  check(all_zero, "a new buffer is zero-filled");
+
+  dawn_i64buf_set(b, 1, 11);
+  dawn_i64buf_set(b, 5, INT64_MIN);
+  dawn_i64buf_fill(b, 2, 4, 7);
+  check(dawn_i64buf_at(b, 1) == 11 && dawn_i64buf_at(b, 2) == 7 && dawn_i64buf_at(b, 3) == 7 &&
+            dawn_i64buf_at(b, 4) == 0 && dawn_i64buf_at(b, 5) == INT64_MIN,
+        "set and fill write what at reads");
+  dawn_i64buf_copy_from(b, 0, b, 1, 4);
+  check(dawn_i64buf_at(b, 0) == 11 && dawn_i64buf_at(b, 1) == 7 && dawn_i64buf_at(b, 3) == 0 &&
+            dawn_i64buf_at(b, 5) == INT64_MIN,
+        "an overlapping copy within one buffer moves it as a memmove does");
+  check(b->h.rc == 1 && dawn_i64buf_len(b) == 6, "no primitive moves the count");
+
+  dawn_i64buf *c = dawn_i64buf_new(3);
+  dawn_i64buf_copy_from(c, 0, b, 1, 3);
+  check(b->h.rc == 1 && c->h.rc == 1, "a copy between two buffers moves neither count");
+
+  i64_subject = b;
+  dawn_clo *r1 = dawn_clo_new((void *)i64_read_out_of_range, 0, 0);
+  dawn_adt *e1 = dawn_catch_panic(r1, NULL);
+  check(e1->tag == DAWN_TAG_ERR, "a read past the end raises a panic");
+  dawn_clo *r2 = dawn_clo_new((void *)i64_copy_out_of_range, 0, 0);
+  dawn_adt *e2 = dawn_catch_panic(r2, NULL);
+  check(e2->tag == DAWN_TAG_ERR, "a copy past the end raises a panic");
+  check(b->h.rc == 1, "a panic from a primitive leaves the count where it was");
+  i64_subject = NULL;
+  dawn_drop(e2);
+  dawn_drop(r2);
+  dawn_drop(e1);
+  dawn_drop(r1);
+
+  dawn_i64buf *d = dawn_dup(b);
+  check(d == b && b->h.rc == 2, "a second holder is a count");
+  dawn_drop(d);
+  check(b->h.rc == 1, "and giving it up is one back");
+
+  dawn_i64buf_set(c, 0, 5);
+  i64_immortal_root = c; /* an immortal block is never freed; a global keeps it reachable */
+  dawn_immortal(c);
+  check(c->h.rc == DAWN_IMMORTAL && dawn_i64buf_at(c, 0) == 5,
+        "a buffer can be made immortal and reads the same");
+  dawn_drop(b);
+}
+
 /* ---- a handler's state cells (docs/handler-state-design.md) --------------
  *
  * The only overwritable slot in the runtime, so the only place a superseded
@@ -1186,6 +1260,7 @@ static const rc_case rc_cases[] = {
     {"array_steal", test_array_steal, 0},
     {"array_extend", test_array_extend, 0},
     {"array_slice", test_array_slice, 0},
+    {"i64buf", test_i64buf, 0},
     {"adt_reset_shared", test_adt_reset_shared, 0},
     {"adt_reset_releases_fields", test_adt_reset_releases_fields, 0},
     {"adt_reset_token_is_a_shell", test_adt_reset_token_is_a_shell, 0},
