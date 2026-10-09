@@ -582,3 +582,67 @@ test "for over a List walks every element once, in order" {
 impl[T] Len[List[T]] {
   fn len(xs: List[T]) -> Int = list_len(xs)
 }
+
+# ---- the Array crossing ----
+#
+# `list_to_array` and `array_to_list` are the vector's own `to_array` and
+# `from_array` (docs/listarr-design.md). The sizes straddle the vector's block
+# edges: 32 is a full tail, 33 is the first element in the trie's next block,
+# 1024 fills a 32-wide second level, and 1025 starts a third.
+
+fn crossing_sizes() -> List[Int] = [0, 1, 2, 31, 32, 33, 63, 64, 65, 1023, 1024, 1025, 1056, 1057, 2049]
+
+test "array_to_list builds a list that reads, grows and slices like any other" {
+  for n in crossing_sizes() {
+    let want = range(0, n)
+    let got = array_to_list(list_to_array(want))
+    assert list_len(got) == n
+    assert got == want
+    var i = 0
+    var sum = 0
+    for x in got {
+      assert x == i
+      assert got[i] == i
+      sum = sum + x
+      i = i + 1
+    }
+    assert i == n
+    assert sum == n * (n - 1) / 2
+    # growing past the block edge the build ended on
+    let more = got ++ [n, n + 1, n + 2]
+    assert list_len(more) == n + 3
+    assert more[n] == n
+    assert more[n + 2] == n + 2
+    assert more == range(0, n + 3)
+    # the built vector is not disturbed by growing a copy of it
+    assert got == want
+    assert slice(got, n / 2, n) == slice(want, n / 2, n)
+  }
+}
+
+test "list_to_array copies the elements in order, and the two directions round-trip" {
+  for n in crossing_sizes() {
+    let xs = map(range(0, n), x => x * 3 - 7)
+    let a = list_to_array(xs)
+    assert array_len(a) == n
+    var i = 0
+    while i < n {
+      assert array_get(a, i) == i * 3 - 7
+      i = i + 1
+    }
+    assert array_to_list(a) == xs
+  }
+}
+
+test "a list built from an array is a value: the array and its copies are independent" {
+  let a = list_to_array(range(0, 40))
+  let xs = array_to_list(a)
+  let ys = xs ++ [99]
+  let b = array_push(a, 100)
+  assert list_len(xs) == 40
+  assert list_len(ys) == 41
+  assert array_len(a) == 40
+  assert array_len(b) == 41
+  assert array_to_list(b) == range(0, 40) ++ [100]
+  assert xs == range(0, 40)
+}

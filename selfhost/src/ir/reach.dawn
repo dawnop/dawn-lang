@@ -778,7 +778,11 @@ pub fn list_primitive_table() -> List[(String, String)] = [
   ("list_index", "index"),
   ("list_slice", "slice"),
   # `xs ++ [x]` after lowering's one-element rewrite
-  ("list_push", "push")
+  ("list_push", "push"),
+  # the crossing std can name (docs/listarr-design.md): the same two functions
+  # the emitters already spell at the host boundary, now reachable from source
+  ("list_to_array", LIST_TO_ARRAY),
+  ("array_to_list", LIST_FROM_ARRAY)
 ]
 
 ## The `std/pvec` function a list primitive calls, or None for a name that is
@@ -800,7 +804,8 @@ pub fn list_root_names() -> List[String] = {
   var out: List[String] = []
   for pr in list_primitive_table() {
     let (_, target) = pr
-    out = out ++ [target]
+    # the crossing pair is a primitive and a boundary spelling at once
+    if target != LIST_FROM_ARRAY && target != LIST_TO_ARRAY { out = out ++ [target] }
   }
   out ++ [LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT]
 }
