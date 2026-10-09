@@ -8,18 +8,17 @@
 # machine. With a single run the scope's own 6G cap binds first and this does
 # nothing -- it is dormant until concurrency happens.
 #
-# Why 8G: it must be >= the largest legitimate single build (6G) with enough
-# headroom that slice pressure never kills a lone build earlier than its own
-# scope cap would, and small enough that dcap's total plus a normal agent
-# harness stays under the VM ceiling (~/.wslconfig, 16GiB). It cannot prevent
-# every global OOM -- the harness alone reached 13.8GiB on 2026-08-04 and is
-# not in this slice -- but it does bound dcap's contribution to one.
+# Why 14G: dcap runs two slots (2 x 6G = 12G <= 14G <= 19G VM RAM), see the
+# header of scripts/dcap. dcap re-asserts these values at runtime anyway
+# (set-property --runtime), so this file only matters across reboots.
+# Swap is 4G in total (2G per scope): enough to absorb a spike, too little for
+# a runaway to thrash 16G of swap before it is killed.
 #
 # Raise it deliberately and temporarily, never by editing this file in place:
-#   sudo systemctl set-property --runtime dawn.slice MemoryMax=12G
+#   sudo systemctl set-property --runtime dawn.slice MemoryMax=16G
 [Unit]
 Description=Dawn build sandbox -- total memory budget for all dcap scopes
 
 [Slice]
-MemoryMax=8G
-MemorySwapMax=0
+MemoryMax=14G
+MemorySwapMax=4G
