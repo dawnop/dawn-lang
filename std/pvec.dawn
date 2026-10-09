@@ -219,15 +219,44 @@ pub(pkg) fn to_array[T](v: Vec[T]) -> Array[T] = {
   out
 }
 
-## A vector holding `a`'s elements in order.
-pub(pkg) fn from_array[T](a: Array[T]) -> Vec[T] = {
-  var v: Vec[T] = empty()
-  var i = 0
-  while i < array_len(a) {
-    v = push(v, array_get(a, i))
-    i = i + 1
+## `v` with a full tail, extended by `blk`, which becomes the new tail. This is
+## `push`'s two full-tail branches with the one element replaced by a block of
+## 1 to 32, so `from_array` takes one trie descent per 32 elements instead of
+## one `push` per element. The caller promises `array_len(v.tail) == WIDTH`.
+fn push_block[T](v: Vec[T], blk: Array[T]) -> Vec[T] = {
+  let Vec { cnt, shift, root, tail } = v
+  let m = array_len(blk)
+  if (cnt >>> BITS) > (1 << shift) {
+    Vec {
+      cnt: cnt + m,
+      shift: shift + BITS,
+      root: VBranch(arr2(root, new_path(shift, VLeaf(tail)))),
+      tail: blk
+    }
+  } else {
+    Vec { cnt: cnt + m, shift: shift, root: push_tail(cnt, shift, root, tail), tail: blk }
   }
-  v
+}
+
+## A vector holding `a`'s elements in order. Up to 32 elements the array is the
+## tail itself; beyond that each block of 32 is one `array_slice` and one path
+## copy, not 32 appends. An array is a value, so sharing `a` as the tail is
+## unobservable.
+pub(pkg) fn from_array[T](a: Array[T]) -> Vec[T] = {
+  let n = array_len(a)
+  let e: Array[VNode[T]] = array_new()
+  if n <= WIDTH {
+    Vec { cnt: n, shift: BITS, root: VBranch(e), tail: a }
+  } else {
+    var v: Vec[T] = Vec { cnt: WIDTH, shift: BITS, root: VBranch(e), tail: array_slice(a, 0, WIDTH) }
+    var i = WIDTH
+    while i < n {
+      let stop = if i + WIDTH < n { i + WIDTH } else { n }
+      v = push_block(v, array_slice(a, i, stop))
+      i = stop
+    }
+    v
+  }
 }
 
 ## `a` then `b`. Linear in `b`, which is the shape `++` is used in: the right
