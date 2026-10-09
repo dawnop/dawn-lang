@@ -3998,6 +3998,12 @@ pub fn builtins() -> Map[String, Sig] = {
     # semantics are `array_get`'s -- the difference is a count, and only the
     # native runtime has counts (dawn_rt.h spells the caller's obligation).
     tp1(bsig("array_steal", [TyArray(t), TyInt], ["a", "i"], t), t),
+    # The List/Array crossing std can name (docs/listarr-design.md). A `List`
+    # is a vector in std/pvec and the checker keeps it apart from that
+    # module's own `Vec` type, so std source had no way to cross; each
+    # backend answers with the vector's own `to_array` / `from_array`.
+    tp1(bsig("list_to_array", [TyList(t)], ["xs"], TyArray(t)), t),
+    tp1(bsig("array_to_list", [TyArray(t)], ["a"], TyList(t)), t),
     # HAMT bitmaps; a pure-Dawn loop would do, so this is only here because
     # every target has the instruction (docs/runtime-intrinsics-design.md §5).
     bsig("popcount", [TyInt], ["n"], TyInt)
@@ -4189,6 +4195,12 @@ pub fn intrinsics() -> Map[String, Intr] = {
   for op in ["new", "len", "get", "push", "with", "steal", "extend", "slice"] {
     let n = "array_${op}"
     rt_of = map.insert(rt_of, n, RtArray)
+    erased = set.insert(erased, n)
+    internal = set.insert(internal, n)
+  }
+  # The crossing pair has no runtime module, for the reason the list
+  # primitives have none: each backend writes a call on the vector in std/pvec.
+  for n in ["list_to_array", "array_to_list"] {
     erased = set.insert(erased, n)
     internal = set.insert(internal, n)
   }
@@ -4985,7 +4997,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 125
+  assert map_size2(bs) == 127
 }
 
 test "the reclaim's failure is a value, under the one name left" {
