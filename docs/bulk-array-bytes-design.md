@@ -103,7 +103,7 @@ K0 的结论（native）：
 | K2（已实现，见下注） | `array_extend`/`array_slice` + `pvec` 改用 + `scripts/array-contract` 两条断言 | 否 | 区间右端开闭错一位，合约红；native `array_extend` 漏一次 dup，ASan 门红 |
 | K3 | 整数族 + 骨架生成函数 + 删 `bytes_from_array`（6 处）+ 合约 `scripts/bytes-pack-contract`（两后端同一 `.expect`） | 是 | 字节序写反（非对称值）；宽度错一档；符号扩展写成零扩展（`0x80`）；截断改饱和（`300`） |
 | K4（已实现，见 §10） | 浮点族 + std/bytes `Endian` 与公开面 | 否 | JVM 换 `doubleToLongBits`（规范化 NaN），载荷用例红；native 经 `double` 算术而非 `memcpy`，同样红 |
-| K5 | GPU 重写（与 U3c 合并或紧随）：删 `gpu_*_host` 与桩、镜像，11 对收成位型 + `pack_ints` | 是 | `unpack_i32` 符号扩展改零扩展，`dtype_diff` 红；f64 改规范化 NaN，红 |
+| K5（已实现，见 §11） | GPU 重写（与 U3c 合并或紧随）：删 `gpu_*_host` 与桩、镜像，11 对收成位型 + `pack_ints` | 是 | `unpack_i32` 符号扩展改零扩展，`dtype_diff` 红；f64 改规范化 NaN，红 |
 | K6 | `Buf.put_bytes` 非对齐路径用 `bytes_unpack_int(width=1)` 批量进尾部 | 否 | 非对齐拷贝错位一字节，合约红 |
 | K7（条件） | 标量 `bytes_get_int`/`bytes_get_float`，改 sha256 `word`、tileir `put_le`、binfo | 否 | 大端写成小端，sha2 红 |
 
@@ -152,4 +152,14 @@ K2 与 K3 可并行。破坏性刀（K3、K5）用 `Emit-Change(<label>)` 声明
 
   用对同机基线的相对口径（1.5 倍）：JVM `unpack_floats` 29.3 ms 对 26.9 ms 的线略超；用设计稿固定的 54 / 96 ms 则全部通过。机器有其它任务，JVM 各轮抖动达数倍，只当量级。native 的 pack 端到端 44 ms 里原语只占约 2 ms，其余是 `List` 到 `Array` 的循环；unpack 的 Array 层约 21 ms 含释放 1M 个浮点箱的开销（K0 的 8.4 ms 不含释放）。
 - 位保真：`0x7FF8000000000001` 与 `-0.0` 往返，JVM 与 native 逐字节一致，由合约的同一份 `expected.txt` 守护。
+- 提交哈希见合入后的 `git log`。
+
+## 11. K5 落地记录
+
+- **与 §2 的偏差：计划里要删的东西大多已经不在了。** 开工时核对 `origin/main`（790e9ba1）：`gpu_upload_host`/`gpu_download_host` 两条 intrinsic 及其 C、wasi 桩、JVM 桩、头文件、镜像，11 对 `pack_*`/`unpack_*`，f64 分支，都已在类型化传输（`gpu-typed-transfer-design.md` 的 U3）里删净；今天 `types.dawn`/`builtins.dawn` 里剩下的 `gpu_*_host` 九条（load_module、alloc、memcpy_htod/dtoh、launch、module_global、free、sync、close）是设备驱动入口，与本方案无关，保留。内置函数数量因此 K5 前后都是同一个数，没有契约表、镜像、`doc --builtins` 的变动，也就没有 Emit-Change。
+- **K5 实际剩下的一刀**：`std/gpu` 里还有一份 Dawn 侧字节装配 `pack_words`/`unpack_words`（逐字节 `Buf.put` 嵌套循环、逐元素移位循环），这就是 §1.3 要消灭的逐元素转换。现已改为 `bytes.pack_ints(bits, w)`/`bytes.unpack_ints(raw, w, false)`，调用点五处（`copy_from_host`、`copy_to_host`、`encode_floats`、`decode_floats`、假设备的 i64 精确性检查），两个辅助函数删除，无别名。
+- **符号扩展的位置**：位型一律按无符号读出（`signed` 传 false），有符号格式在各自的 `from_bits`（`I32` 是 `wrap`）和 `decoder` 的 `wrap_i32/i16/i8` 里扩展，这是类型化传输就定下的分工，K5 不改。所以 §6 的负控「`unpack_i32` 符号扩展改零扩展」没有一个叫 `unpack_i32` 的落点，改在 `decoder` 的 `i32` 一臂（去掉 `wrap_i32`）。同理「f64 经规范化 NaN」落在 `encoder` 的 `f64` 一臂。
+- **行为变化**：字节数不是宽度整倍数时，`unpack_words` 静默丢尾巴，`unpack_ints` 按 §3 第 4 条 panic。`gpu_alloc` 按 `len * w` 分配、假设备拒绝长度不符的上传，所以没有 handler 会产生这种输入。
+- **新增测试**：`std/gpu` 一条，经名字分派的 `encode_floats`/`decode_floats` 验 f64 NaN 载荷与符号（含逐字节十六进制）和 `i32`/`i16`/`i8` 负数往返；此前只有经 `DeviceBits` 的 `copy_*` 路径有 NaN 测试。
+- **负控**（`./bin/dawn test --stdlib`，均已还原）：`decoder` 的 `i32` 臂去掉 `wrap_i32`，2 项红（`an i32 buffer round-trips every value exactly, low byte first` 与新测试的 i32 断言）；`encoder` 的 `f64` 臂对 NaN 改成规范 NaN，新测试的十六进制断言红。设备侧 `dtype_diff` 的 i16/i64/tf32 经同一条 `encode_floats`/`decode_floats`，由 tile-gpu-diff 账本覆盖。
 - 提交哈希见合入后的 `git log`。
