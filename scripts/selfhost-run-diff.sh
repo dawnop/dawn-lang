@@ -41,13 +41,39 @@ SH=(./bin/dawn)
 emitchange_load
 
 fail=0
+# On a failed check the transcripts below are the only evidence, and $OUT is
+# deleted on exit. PR #653 once failed "test playground (with [deps]) differs
+# (exits 0 vs 1)" and the rerun passed; nothing in the log said what the
+# failing run had printed (and when only the exits differed, the diff step was
+# short-circuited, so the diff shown was a previous check's). So print both
+# sides (stdout+stderr as captured), bounded to the first and last
+# EVIDENCE_HALF lines. EVIDENCE_HALF=0 prints nothing.
+EVIDENCE_HALF=${EVIDENCE_HALF:-40}
+show_evidence() { # label file
+  local n
+  n=$(wc -l < "$2")
+  echo "---- $1 ($n lines) ----"
+  if [ "$n" -le $((EVIDENCE_HALF * 2)) ]; then
+    cat "$2"
+  else
+    head -n "$EVIDENCE_HALF" "$2"
+    echo "... $((n - EVIDENCE_HALF * 2)) lines omitted ..."
+    tail -n "$EVIDENCE_HALF" "$2"
+  fi
+}
 check() { # name ref-exit head-exit [gallery-target]
   local differs=0
-  if [ "$2" != "$3" ] || ! diff "$OUT/k.txt" "$OUT/d.txt" > "$OUT/check-diff.txt"; then
+  diff "$OUT/k.txt" "$OUT/d.txt" > "$OUT/check-diff.txt" || differs=1
+  if [ "$2" != "$3" ]; then
     differs=1
   fi
   if ! emit_gate "$1" "$differs" "exits $2 vs $3"; then
     head -20 "$OUT/check-diff.txt"
+    if [ "$EVIDENCE_HALF" -gt 0 ]; then
+      show_evidence "reference (previous release), exit $2" "$OUT/k.txt"
+      show_evidence "HEAD, exit $3" "$OUT/d.txt"
+      echo "---- end of evidence for $1 ----"
+    fi
     fail=1
   elif [ "$differs" = 1 ] && [ -n "${4:-}" ]; then
     # Settling a declared difference in a gallery example's transcript is not
