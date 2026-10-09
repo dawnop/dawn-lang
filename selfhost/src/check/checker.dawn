@@ -15435,6 +15435,12 @@ test "an impl method that calls itself on every path is refused (the shadowed `l
   let (m, _) = parser.parse_module(src)
   let (cx, _) = check_module(seed_prelude(test_cx()), m, map.empty())
   assert str.slice(src, cx.diags[0].lo, cx.diags[0].hi) == "len(b)"
+  # and in a module that has a name, which is where a real program lives: the
+  # call's owner is the trait's declaring module (none for a prelude trait), not
+  # the module the impl is in
+  let (ma, _) = parser.parse_module(src)
+  let (cxa, _) = check_module(seed_prelude(cx_new(Some("app"), None)), ma, map.empty())
+  assert map(cxa.diags, d => d.msg) == [selfrec_msg("method", "len")]
   # a generic subject, the shape the std prototype had
   assert msgs_of("trait Len[T] {\n  fn len(x: T) -> Int\n}\n" ++
       "impl[T] Len[List[T]] {\n  fn len(xs: List[T]) -> Int = len(xs)\n}\n") == [selfrec_msg("method", "len")]
