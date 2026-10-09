@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Contract test for the integer pack/unpack primitives, `bytes_pack_int` and
-# `bytes_unpack_int` (docs/bulk-array-bytes-design.md, section 3).
+# Contract test for the pack/unpack primitives, `bytes_pack_int`,
+# `bytes_unpack_int`, `bytes_pack_float` and `bytes_unpack_float`
+# (docs/bulk-array-bytes-design.md, section 3).
 #
 #   ./scripts/bytes-pack-contract/run.sh
 #
 # There is no `--record`. `expected.txt` is the answer the written semantics
 # give (byte order is the argument's, packing wraps to the low bits, unpacking
 # sign- or zero-extends, a bad width or a ragged length panics with a fixed
-# sentence), worked out by hand from the design rather than taken from a run:
+# sentence; floats: width 8 is bit-exact, width 4 is IEEE round to nearest
+# even), worked out from the design rather than taken from a run: the integer
+# lines by hand, the float lines by an independent model (Python's struct for
+# the raw IEEE bits, ctypes.c_float for the C narrowing), never by a backend:
 # a recording would be a report of what a backend does, and the point is a
 # check on it. Change what the probe prints and edit the file to match.
 #
@@ -56,4 +60,4 @@ if ! diff -u "$here/expected.txt" "$work/native.out"; then
   exit 1
 fi
 
-echo "PASS  bytes_pack_int/bytes_unpack_int: $(wc -l < "$here/expected.txt") lines, JVM and native"
+echo "PASS  bytes_pack/unpack int and float: $(wc -l < "$here/expected.txt") lines, JVM and native"

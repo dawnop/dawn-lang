@@ -1,10 +1,10 @@
-# The integer pack/unpack primitives, exercised from the only place that may
-# name them.
+# The pack/unpack primitives, integer and float, exercised from the only place
+# that may name them.
 #
-# `bytes_pack_int` and `bytes_unpack_int` take and return `Array`, which only
-# std can name (docs/native-backend-plan.md D1), so this file is dropped into a
+# `bytes_pack_int`, `bytes_unpack_int`, `bytes_pack_float` and
+# `bytes_unpack_float` take and return `Array`, which only std can name (docs/native-backend-plan.md D1), so this file is dropped into a
 # copy of std/ by run.sh rather than sitting in examples/. It does no more than
-# convert `List[Int]` at the edge, so the probe can state its cases as list
+# convert `List[Int]` and `List[Float]` at the edge, so the probe can state its cases as list
 # literals and every output line is the primitive's own answer. No `use java`
 # for the reason scripts/array-contract/array.dawn gives.
 use std/bytes
@@ -50,3 +50,38 @@ pub fn dump(b: Bytes) -> String = {
   }
   "[" ++ s ++ "]"
 }
+
+fn to_array_f(xs: List[Float]) -> Array[Float] = {
+  var a: Array[Float] = array_new()
+  for x in xs { a = array_push(a, x) }
+  a
+}
+
+fn to_list_f(a: Array[Float]) -> List[Float] = {
+  var out: List[Float] = []
+  var i = 0
+  while i < array_len(a) {
+    out = out ++ [array_get(a, i)]
+    i = i + 1
+  }
+  out
+}
+
+## The float bytes of `xs` at `width` (4 or 8), in the order `little` names.
+pub fn packf(xs: List[Float], width: Int, little: Bool) -> Bytes =
+  bytes_pack_float(to_array_f(xs), width, little)
+
+## The floats `b` holds at `width`.
+pub fn unpackf(b: Bytes, width: Int, little: Bool) -> List[Float] =
+  to_list_f(bytes_unpack_float(b, width, little))
+
+## The double whose bits are `hi` then `lo`, two 32-bit halves so every pattern
+## is a small literal. The halves go through the integer family and
+## `unpackf` -- no Dawn arithmetic builds the double -- which is what keeps a NaN
+## payload from being rewritten on the way in.
+pub fn f64_of(hi: Int, lo: Int) -> Float =
+  unpackf(bytes_pack_int(to_array([lo, hi]), 4, true), 8, true)[0]
+
+## The double a float of bits `bits` widens to.
+pub fn f32_of(bits: Int) -> Float =
+  unpackf(bytes_pack_int(to_array([bits]), 4, true), 4, true)[0]

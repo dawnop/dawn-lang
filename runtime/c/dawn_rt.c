@@ -4263,6 +4263,78 @@ dawn_array *dawn_bytes_unpack_int(const dawn_bytes *b, int64_t width, bool is_si
   return dawn_array_of(nb, n);
 }
 
+/* ---- Float <-> bytes, the same two loops over double boxes ----
+ *
+ * Width 8 moves the double's bits through `memcpy` into a `uint64_t` and never
+ * through arithmetic, so a NaN keeps its payload and sign and `-0.0` stays
+ * `-0.0` (the JVM twin uses the raw bit conversions for the same reason).
+ * Width 4 is the C conversion to `float`, IEEE round to nearest even, and its
+ * bits go the same way; a NaN's payload is not promised across it. Widening a
+ * `float` back is exact. */
+static void dawn_bytes_panic_float_width(const char *who, int64_t width) {
+  char msg[96];
+  int n = snprintf(msg, sizeof msg, "bytes.%s: width %lld is not 4 or 8", who, (long long)width);
+  dawn_panic(dawn_str_lit(msg, n));
+}
+
+dawn_bytes *dawn_bytes_pack_float(const dawn_array *a, int64_t width, bool little) {
+  if (width != 4 && width != 8) {
+    dawn_bytes_panic_float_width("pack", width);
+  }
+  int64_t n = dawn_array_len(a);
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(n * width) + 1);
+  void **slots = a->buf->data;
+  if (width == 8) {
+    for (int64_t i = 0; i < n; i++) {
+      double d = ((dawn_box *)slots[i])->val.f;
+      uint64_t bits;
+      memcpy(&bits, &d, sizeof bits);
+      dawn_put_int(buf + i * 8, bits, 8, little);
+    }
+  } else {
+    for (int64_t i = 0; i < n; i++) {
+      float f = (float)((dawn_box *)slots[i])->val.f;
+      uint32_t bits;
+      memcpy(&bits, &f, sizeof bits);
+      dawn_put_int(buf + i * 4, bits, 4, little);
+    }
+  }
+  return dawn_bytes_of(buf, n * width);
+}
+
+dawn_array *dawn_bytes_unpack_float(const dawn_bytes *b, int64_t width, bool little) {
+  if (width != 4 && width != 8) {
+    dawn_bytes_panic_float_width("unpack", width);
+  }
+  if (b->len % width != 0) {
+    char msg[96];
+    int m = snprintf(msg, sizeof msg, "bytes.unpack: length %lld is not a multiple of %lld",
+                     (long long)b->len, (long long)width);
+    dawn_panic(dawn_str_lit(msg, m));
+  }
+  int32_t n = (int32_t)(b->len / width);
+  dawn_array_buf *nb = dawn_array_buf_new(n);
+  void **slots = nb->data;
+  const unsigned char *p = b->p;
+  if (width == 8) {
+    for (int32_t i = 0; i < n; i++) {
+      uint64_t bits = dawn_get_int(p + (int64_t)i * 8, 8, little);
+      double d;
+      memcpy(&d, &bits, sizeof d);
+      slots[i] = dawn_box_float(d);
+    }
+  } else {
+    for (int32_t i = 0; i < n; i++) {
+      uint32_t bits = (uint32_t)dawn_get_int(p + (int64_t)i * 4, 4, little);
+      float f;
+      memcpy(&f, &bits, sizeof f);
+      slots[i] = dawn_box_float((double)f);
+    }
+  }
+  nb->high = n;
+  return dawn_array_of(nb, n);
+}
+
 /* Malformed input is replaced, not refused -- what `new String(bytes,
  * charset)` does. One U+FFFD per malformed sequence, not per byte: how many
  * bytes a replacement stands for is `dawn_utf8_step`'s answer, and it is the

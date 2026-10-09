@@ -1,4 +1,4 @@
-# Driver for the integer pack/unpack contract. The std-side module does the
+# Driver for the integer and float pack/unpack contract. The std-side module does the
 # naming of the primitives; this file states the cases and prints answers, and
 # run.sh holds the output to expected.txt on both backends.
 #
@@ -19,6 +19,24 @@ fn back(label: String, vals: List[Int], width: Int) -> Unit !io = {
   println("${label} s/be ${bytespack.unpack(b, width, true, false)}")
   println("${label} u/be ${bytespack.unpack(b, width, false, false)}")
 }
+
+fn le_be(label: String, xs: List[Float], width: Int) -> Unit !io = {
+  println("${label} le ${bytespack.dump(bytespack.packf(xs, width, true))} be ${bytespack.dump(bytespack.packf(xs, width, false))}")
+}
+
+fn pack8(label: String, hi: Int, lo: Int) -> Unit !io =
+  le_be("pack8 ${label}", [bytespack.f64_of(hi, lo)], 8)
+
+fn pack4(label: String, hi: Int, lo: Int) -> Unit !io =
+  le_be("pack4 ${label}", [bytespack.f64_of(hi, lo)], 4)
+
+## A float that arrived as 4 bytes, widened and written back as a big-endian
+## double: the widening is exact, so the digits are the float's own value.
+fn widen(label: String, bits: Int) -> Unit !io =
+  println("unpack4 ${label} ${bytespack.dump(bytespack.packf([bytespack.f32_of(bits)], 8, false))}")
+
+fn cls(label: String, x: Float) -> Unit !io =
+  println("class ${label} eq=${x == x} pos=${x > 0.0} neg=${x < 0.0}")
 
 fn panics(label: String, f: fn() -> Int) -> Unit !io = {
   match catch_panic(f) {
@@ -78,4 +96,114 @@ pub fn main() -> Unit !io = {
   panics("unpack len7", () => len(bytespack.unpack(bytespack.of_bytes([1, 2, 3, 4, 5, 6, 7]), 4, true, true)))
   panics("unpack len1", () => len(bytespack.unpack(bytespack.of_bytes([1]), 2, false, false)))
   panics("unpack ok", () => len(bytespack.unpack(bytespack.of_bytes([1, 2, 3, 4]), 4, true, true)))
+
+  floats()
+}
+
+fn f64(hi: Int, lo: Int) -> Float = bytespack.f64_of(hi, lo)
+
+fn f32(bits: Int) -> Float = bytespack.f32_of(bits)
+
+fn floats() -> Unit !io = {
+  # width 8 keeps every bit: zeros, infinities, NaN with payload and sign,
+  # signalling NaN, subnormals, extremes, and all-different bytes
+  pack8("one", 0x3FF00000, 0)
+  pack8("1.5", 0x3FF80000, 0)
+  pack8("zero", 0, 0)
+  pack8("negzero", 0x80000000, 0)
+  pack8("inf", 0x7FF00000, 0)
+  pack8("neginf", 0xFFF00000, 0)
+  pack8("qnan payload", 0x7FF80000, 1)
+  pack8("neg qnan payload", 0xFFF80000, 0xABCD)
+  pack8("snan", 0x7FF00000, 1)
+  pack8("min subnormal", 0, 1)
+  pack8("max subnormal", 0x000FFFFF, 0xFFFFFFFF)
+  pack8("max normal", 0x7FEFFFFF, 0xFFFFFFFF)
+  pack8("alldiff", 0x01020304, 0x05060708)
+  le_be("pack8 many", [f64(0x3FF00000, 0), f64(0xC0000000, 0), f64(0x7FF80000, 1)], 8)
+
+  # width 4: IEEE round to nearest even, exact where the float can hold it
+  pack4("one", 0x3FF00000, 0)
+  pack4("1.5", 0x3FF80000, 0)
+  pack4("tie down", 0x3FF00000, 0x10000000)
+  pack4("above tie", 0x3FF00000, 0x10000001)
+  pack4("tie up", 0x3FF00000, 0x30000000)
+  pack4("negzero", 0x80000000, 0)
+  pack4("inf", 0x7FF00000, 0)
+  pack4("neginf", 0xFFF00000, 0)
+  pack4("qnan", 0x7FF80000, 0)
+  pack4("1e300", 0x7E37E43C, 0x8800759C)
+  pack4("-1e300", 0xFE37E43C, 0x8800759C)
+  pack4("max float", 0x47EFFFFF, 0xE0000000)
+  pack4("halfway to inf", 0x47EFFFFF, 0xF0000000)
+  pack4("min float subnormal", 0x36A00000, 0)
+  pack4("half of it", 0x36900000, 0)
+  pack4("above half", 0x36900000, 1)
+  pack4("min float normal", 0x38100000, 0)
+  pack4("double subnormal", 0, 1)
+  le_be("pack4 alldiff", [f32(0x01020304)], 4)
+  le_be("pack4 many", [f64(0x3FF00000, 0), f64(0xC0000000, 0), f64(0x3FF80000, 0)], 4)
+
+  # width 8 reads: values, and the order the bytes are in
+  cls("8 1.5", f64(0x3FF80000, 0))
+  cls("8 -2", f64(0xC0000000, 0))
+  cls("8 inf", f64(0x7FF00000, 0))
+  cls("8 neginf", f64(0xFFF00000, 0))
+  cls("8 nan", f64(0x7FF80000, 1))
+  cls("8 zero", f64(0x80000000, 0))
+  println("unpack8 1.5 ${f64(0x3FF80000, 0) == 1.5} -2 ${f64(0xC0000000, 0) == -2.0}")
+  println("unpack8 le ${bytespack.unpackf(bytespack.of_bytes([0, 0, 0, 0, 0, 0, 0xF8, 0x3F]), 8, true) == [1.5]}")
+  println("unpack8 be ${bytespack.unpackf(bytespack.of_bytes([0x3F, 0xF8, 0, 0, 0, 0, 0, 0]), 8, false) == [1.5]}")
+  println("unpack8 wrong order ${bytespack.unpackf(bytespack.of_bytes([0x3F, 0xF8, 0, 0, 0, 0, 0, 0]), 8, true) == [1.5]}")
+
+  # width 4 reads: widened exactly, in both orders
+  cls("4 1.5", f32(0x3FC00000))
+  cls("4 -1.5", f32(0xBFC00000))
+  cls("4 inf", f32(0x7F800000))
+  cls("4 nan", f32(0x7FC00000))
+  println("unpack4 1.5 ${f32(0x3FC00000) == 1.5} -1.5 ${f32(0xBFC00000) == -1.5}")
+  println("unpack4 min subnormal ${f32(1) == f64(0x36A00000, 0)}")
+  println("unpack4 max subnormal ${f32(0x007FFFFF) == f64(0x380FFFFF, 0xC0000000)}")
+  println("unpack4 le ${bytespack.unpackf(bytespack.of_bytes([0, 0, 0xC0, 0x3F]), 4, true) == [1.5]}")
+  println("unpack4 be ${bytespack.unpackf(bytespack.of_bytes([0x3F, 0xC0, 0, 0]), 4, false) == [1.5]}")
+  println("unpack4 wrong order ${bytespack.unpackf(bytespack.of_bytes([0x3F, 0xC0, 0, 0]), 4, true) == [1.5]}")
+  widen("negzero", 0x80000000)
+  widen("inf", 0x7F800000)
+  widen("neginf", 0xFF800000)
+  widen("qnan", 0x7FC00000)
+  widen("max float", 0x7F7FFFFF)
+  widen("min normal", 0x00800000)
+  widen("min subnormal", 1)
+  widen("max subnormal", 0x007FFFFF)
+  widen("alldiff", 0x01020304)
+
+  # round trips at both widths and orders: the bytes come back as they went
+  let xs = [f64(0x3FF00000, 0), f64(0x80000000, 0), f64(0x7FF80000, 1), f64(0xFFF00000, 0),
+    f64(0, 1), f64(0x7FEFFFFF, 0xFFFFFFFF), f64(0xC0000000, 0)]
+  for little in [true, false] {
+    let b8 = bytespack.packf(xs, 8, little)
+    println("trip8 ${little} ${bytespack.dump(bytespack.packf(bytespack.unpackf(b8, 8, little), 8, little)) == bytespack.dump(b8)} ${bytespack.size(b8)}")
+    let b4 = bytespack.packf(xs, 4, little)
+    println("trip4 ${little} ${bytespack.dump(bytespack.packf(bytespack.unpackf(b4, 4, little), 4, little)) == bytespack.dump(b4)} ${bytespack.size(b4)}")
+  }
+
+  # empty both ways
+  println("empty pack ${bytespack.dump(bytespack.packf([], 8, true))}")
+  println("empty unpack ${len(bytespack.unpackf(bytespack.of_bytes([]), 4, false))}")
+
+  # errors: a bad width and a ragged length panic, in both directions
+  panics("packf w1", () => bytespack.size(bytespack.packf([], 1, true)))
+  panics("packf w2", () => bytespack.size(bytespack.packf([f64(0, 0)], 2, true)))
+  panics("packf w0", () => bytespack.size(bytespack.packf([], 0, true)))
+  panics("packf w16", () => bytespack.size(bytespack.packf([], 16, false)))
+  panics("packf w-4", () => bytespack.size(bytespack.packf([], -4, true)))
+  panics("packf w4", () => bytespack.size(bytespack.packf([], 4, true)))
+  panics("unpackf w2", () => len(bytespack.unpackf(bytespack.of_bytes([1, 2]), 2, true)))
+  panics("unpackf w3", () => len(bytespack.unpackf(bytespack.of_bytes([1, 2, 3]), 3, true)))
+  panics("unpackf w1", () => len(bytespack.unpackf(bytespack.of_bytes([]), 1, true)))
+  panics("unpackf w16", () => len(bytespack.unpackf(bytespack.of_bytes([]), 16, false)))
+  panics("unpackf len7", () => len(bytespack.unpackf(bytespack.of_bytes([1, 2, 3, 4, 5, 6, 7]), 4, true)))
+  panics("unpackf len4 w8", () => len(bytespack.unpackf(bytespack.of_bytes([1, 2, 3, 4]), 8, true)))
+  panics("unpackf len12 w8", () => len(bytespack.unpackf(bytespack.of_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), 8, false)))
+  panics("unpackf ok", () => len(bytespack.unpackf(bytespack.of_bytes([1, 2, 3, 4, 5, 6, 7, 8]), 8, true)))
 }

@@ -3527,6 +3527,16 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("bytes_pack_int", [TyArray(TyInt), TyInt, TyBool], ["a", "width", "little"], TyBytes),
     bsig("bytes_unpack_int", [TyBytes, TyInt, TyBool, TyBool],
       ["b", "width", "signed", "little"], TyArray(TyInt)),
+    # The same pair for doubles; `width` is 4 or 8 and anything else panics.
+    # Width 8 is bit-exact: the bits of the double go in and come out as they
+    # are, so a NaN keeps its payload and sign and `-0.0` stays `-0.0`. Width 4
+    # narrows to a float, IEEE round to nearest even, and widening it back is
+    # exact; a NaN's payload is not promised across the narrowing. Byte order
+    # is an argument for the reason `bytes_pack_int` gives, and a ragged
+    # length panics on the way back. The contract is scripts/bytes-pack-contract.
+    bsig("bytes_pack_float", [TyArray(TyFloat), TyInt, TyBool], ["a", "width", "little"], TyBytes),
+    bsig("bytes_unpack_float", [TyBytes, TyInt, TyBool], ["b", "width", "little"],
+      TyArray(TyFloat)),
     # The flat 64-bit buffer family (docs/mem-buffer-design.md 6.4). Every
     # access is a bounds-checked panic, never a sentinel: std/mem is a thin
     # wrapper over these six, and the range writes panic rather than clamp.
@@ -4083,10 +4093,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # `bytes_decode_utf8`/`bytes_decode_latin1` have no sentinel left to unwrap
   # and are std-only for the plainer reason: std/bytes owns the byte surface,
   # and two spellings of one operation is one too many.
-  # `bytes_pack_int`/`bytes_unpack_int` also name Array, which is std-only on
+  # The four `pack`/`unpack` primitives also name Array, which is std-only on
   # its own.
   for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
-    "pack_int", "unpack_int"] {
+    "pack_int", "unpack_int", "pack_float", "unpack_float"] {
     rt_of = map.insert(rt_of, "bytes_${op}", RtBytes)
     internal = set.insert(internal, "bytes_${op}")
   }
@@ -4958,7 +4968,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 123
+  assert map_size2(bs) == 125
 }
 
 test "the reclaim's failure is a value, under the one name left" {
