@@ -170,6 +170,10 @@ fn plus(x: F32, y: F32) -> F32 = x + y
 
 fn prim(a: Int, b: Int) -> Bool = a + 1 < b
 
+fn total[T: Add](a: T, b: T) -> T = a + b
+
+fn less[T: Ord](a: T, b: T) -> Bool = a < b
+
 fn folded() -> Int = 6 * 7
 
 fn lits() -> Unit = {
@@ -659,6 +663,8 @@ for needle, occ, delta in [
     ("-x", 1, 0),               # a unary operator over a library type
     ("a + 1 < b", 1, 2),        # a primitive
     ("a + 1 < b", 1, 6),        # a comparison
+    ("a + b", 1, 2),            # under a bound: the bound is the target
+    ("a < b", 1, 2),            # a comparison under a bound
     ("6 * 7", 1, 2),            # folded, the value on the type line
     ("= 7", 1, 2),              # an integer taken at Float
     ("0.1", 1, 1),              # a Float literal at F32, rounded
