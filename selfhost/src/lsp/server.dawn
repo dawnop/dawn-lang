@@ -2216,7 +2216,7 @@ fn client_defaults_item_data(params: Json) -> Bool = {
 }
 
 ## The inlay hints the client asked for: `initializationOptions.inlayHints`,
-## seven optional booleans over `default_inlay_opts`. A key that is missing or
+## eight optional booleans over `default_inlay_opts`. A key that is missing or
 ## not a boolean keeps its default; read once, at `initialize`
 ## (docs/lsp-hover-design.md §A4.3 says why not `workspace/configuration`).
 fn inlay_opts_of(params: Json) -> InlayOpts = {
@@ -2226,6 +2226,7 @@ fn inlay_opts_of(params: Json) -> InlayOpts = {
     let_types: json_flag(j, "letTypes", d.let_types),
     lambda_param_types: json_flag(j, "lambdaParamTypes", d.lambda_param_types),
     call_effects: json_flag(j, "callEffects", d.call_effects),
+    decl_effects: json_flag(j, "declarationEffects", d.decl_effects),
     param_names: json_flag(j, "parameterNames", d.param_names),
     default_args: json_flag(j, "defaultArguments", d.default_args),
     default_values: json_flag(j, "defaultArgumentValues", d.default_values),
@@ -6039,6 +6040,44 @@ fn std_for_probe() -> StdCtx !Fs !Env !io =
     Err(e) -> panic("std: ${std_load_error_text(e)}")
   }
 
+fn decl_effect_probe_text() -> String =
+  join([
+    "use std/io",
+    "",
+    "fn shout(s: String) = io.println(s)",
+    "",
+    "fn double(x: Int) = x * 2",
+    "",
+    "fn written(s: String) -> Unit !io = io.println(s)",
+    "",
+    "fn promised(x: Int) -> Int = x + 1",
+    "",
+    "fn row_only(s: String) !io = io.println(s)",
+    "",
+    "fn none() = io.println(\"-\")",
+    ""
+  ], "\n")
+
+test "inlay hints: an inferred io row is shown after the parameters, only where nothing was written" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st0, "decl_effects.dawn", decl_effect_probe_text())
+    assert inlay_probe(st0, d, 0, 0, 14, 0) == [
+      "fn shout(s: String)« !io» = io.println(s)",
+      "fn none()« !io» = io.println(\"-\")"
+    ]
+    let off = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, decl_effects: false } }
+    assert inlay_probe(off, d, 0, 0, 14, 0) == []
+    let viaopt = LspState {
+      ..st0,
+      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+        ("declarationEffects", JBool(false))
+      ]))]))]))
+    }
+    assert inlay_probe(viaopt, d, 0, 0, 14, 0) == []
+  }))
+}
+
 test "inlay hints: inferred let types, one per destructured name, none where written" {
   io.with_fs_real(() => io.with_env_real(() => {
     let st = def_probe_state(std_for_probe())
@@ -6204,7 +6243,7 @@ fn defaults_probe_text() -> String =
 fn defaults_probe(st: LspState, d: Doc) -> List[String] !io = {
   let st1 = LspState {
     ..st,
-    inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false }
+    inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false, decl_effects: false }
   }
   inlay_probe(st1, d, 0, 0, 40, 0)
 }
