@@ -221,6 +221,13 @@ pub type State = {
 ## keystroke from asking for a chunk already on its way, and it is how the
 ## panel knows an empty answer may only be an unfinished one. All three are on
 ## the wire only while they are not empty or zero.
+##
+## `stale` is the query the rows in `hits` answer, while that is not `query`:
+## typing a word whose chunks have not arrived leaves the last settled view in
+## place (its rows, counts, scope, suggestion and selection exactly as they
+## were, drawn dimmed with `aria-busy`) rather than recomputing against words
+## that are not here, and the view swaps to the new answer in one turn when
+## they arrive. "" whenever the rows answer the query.
 pub type Model = {
   query: String,
   sel: Int,
@@ -234,6 +241,7 @@ pub type Model = {
   asked: List[Int],
   chased: Int,
   loading: List[Int],
+  stale: String,
 }
 
 ## What the listeners mean, plus the one message no listener produces.
@@ -2753,13 +2761,16 @@ fn copy_link(code: String) -> List[Node[Msg]] = [
   ]),
 ]
 
+## `aria-busy` while the rows are the last settled answer and not this query's.
+fn busy(m: Model) -> List[(String, String)] = if m.stale == "" { [] } else { [("aria-busy", "true")] }
+
 fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
   let code = lang()
   let found: List[Node[Msg]] =
     if idle(m) {
       idle_sections(state, m.sel)
     } else {
-      sections(scan(state, m.hits, m.sel).hits, m.sel, terms(m.query))
+      sections(scan(state, m.hits, m.sel).hits, m.sel, terms(if m.stale == "" { m.query } else { m.stale }))
     }
   let label =
     if idle(m) { say(code, "Recent searches and suggestions", "最近搜索与推荐") } else { say(code, "Results", "结果") }
@@ -2771,8 +2782,8 @@ fn panel(state: State, m: Model) -> Node[Msg] !Ctx = {
     bar(m, if len(found) > 0 { shown_rows(state, m) } else { 0 }),
     el("div", [("aria-hidden", "true")], class: "search-line"),
     pills(m),
-    el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", label)], class: "search-results",
-      kids: found),
+    el("ul", [("id", list_id()), ("role", "listbox"), ("aria-label", label)] ++ busy(m),
+      class: if m.stale == "" { "search-results" } else { "search-results is-stale" }, kids: found),
     status(m, len(found) > 0),
     foot(state.mod_key, m),
   ] ++ goto_kids(m))
@@ -2853,7 +2864,7 @@ pub fn key_of(e: Entry) -> Key = {
 ## The model of a panel that has been left: closed, and holding nothing a
 ## reopening could mistake for its own.
 fn closed(m: Model) -> Model =
-  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0, loading: [] }
+  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0, loading: [], stale: "" }
 
 fn blank() -> Model =
   Model {
@@ -2869,6 +2880,7 @@ fn blank() -> Model =
     asked: [],
     chased: 0,
     loading: [],
+    stale: "",
   }
 
 ## What an answer still owes the host: the sections whose text would change it
@@ -2887,13 +2899,25 @@ type Owed = { secs: List[Int], words: List[Int] }
 fn asked(state: State, m: Model, text: String, scope: Int) -> (Model, Owed) = {
   let a = answer(state, text, scope)
   let none: List[Int] = []
-  let (fix, n, more) =
-    if len(a.hits) == 0 && len(a.words) == 0 { suggest_plan(state, text) } else { ("", 0, none) }
-  (
-    Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n, chased: 0 },
-    Owed { secs: a.need, words: merged(a.words, more) },
-  )
+  if len(a.words) > 0 && text != "" && has_text_rows(m) {
+    # the chunks of this query are not here: keep the last settled view as it
+    # was, and only note which query the rows answer
+    (
+      Model { ..m, query: text, goto: "", chased: 0, stale: if m.stale == "" { m.query } else { m.stale } },
+      Owed { secs: none, words: a.words },
+    )
+  } else {
+    let (fix, n, more) =
+      if len(a.hits) == 0 && len(a.words) == 0 { suggest_plan(state, text) } else { ("", 0, none) }
+    (
+      Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n, chased: 0, stale: "" },
+      Owed { secs: a.need, words: merged(a.words, more) },
+    )
+  }
 }
+
+## Whether the rows of `m` include any from the text's index.
+fn has_text_rows(m: Model) -> Bool = list.any(m.hits, h => h >= body_base())
 
 fn merged(a: List[Int], b: List[Int]) -> List[Int] = {
   var out = a
@@ -2912,6 +2936,15 @@ fn merged(a: List[Int], b: List[Int]) -> List[Int] = {
 ## unanswered, in which case it is made again, now that it may be made.
 fn refreshed(state: State, m: Model, words: Bool) -> (Model, Owed) = {
   let a = answer(state, m.query, m.scope)
+  if m.stale != "" && len(a.words) > 0 {
+    # still waiting on chunks: the snapshot stays
+    (m, Owed { secs: [], words: a.words })
+  } else {
+    settled(state, m, a, words)
+  }
+}
+
+fn settled(state: State, m: Model, a: Answer, words: Bool) -> (Model, Owed) = {
   let sel = if m.sel < len(a.hits) { m.sel } else if len(a.hits) > 0 { len(a.hits) - 1 } else { 0 }
   let again = words && len(a.words) == 0
   let none: List[Int] = []
@@ -2924,7 +2957,7 @@ fn refreshed(state: State, m: Model, words: Bool) -> (Model, Owed) = {
       (m.fix, m.fix_hits, none)
     }
   (
-    Model { ..m, sel: sel, hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n },
+    Model { ..m, sel: if m.stale == "" { sel } else { 0 }, hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n, stale: "" },
     Owed { secs: a.need, words: merged(a.words, more) },
   )
 }
@@ -3261,7 +3294,7 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     if m.query == "" {
       (closed(m), NoCmd)
     } else {
-      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0, loading: [] }, NoCmd)
+      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0, loading: [], stale: "" }, NoCmd)
     }
   } else {
     (m, NoCmd)
@@ -3344,6 +3377,7 @@ pub fn encode(m: Model) -> String =
   ++ ",\"fix_hits\":" ++ to_string(m.fix_hits)
   ++ (if len(m.asked) == 0 { "" } else { ",\"asked\":[" ++ list.map(m.asked, a => to_string(a)).join(",") ++ "]" })
   ++ (if m.chased == 0 { "" } else { ",\"chased\":" ++ to_string(m.chased) })
+  ++ (if m.stale == "" { "" } else { ",\"stale\":" ++ quoted(m.stale) })
   ++ (if len(m.loading) == 0 { "" } else { ",\"loading\":[" ++ list.map(m.loading, a => to_string(a)).join(",") ++ "]" })
   ++ "}"
 
@@ -3368,6 +3402,7 @@ pub fn decode(s: String) -> Model =
             asked: list.map(j.jget("asked").jarr(), a => jint_or(a, -1)),
             chased: j.jget("chased").jint_or(0),
             loading: list.map(j.jget("loading").jarr(), a => jint_or(a, -1)),
+            stale: j.jget("stale").jstr_or(""),
           }
         _ -> blank()
       }
@@ -4761,6 +4796,79 @@ test "a chunk that failed, or is not the one the manifest describes, has no word
   assert fetch_urls(c2) == []
   assert m2.hits == []
 }
+
+## Typing a word whose chunk has not been fetched must not blank the text
+## section the previous query showed: while any chunk the query needs is on
+## its way the panel keeps the last settled view as it was, and swaps to the
+## new settled answer when the chunks are here. Every message of typing
+## `handler state` is checked, with the host's replies held back one at a time.
+test "while chunks are on their way the panel keeps the last settled view, never an empty text section" {
+  let full = text_state()
+  var st = bare_state()
+  var m = blank()
+  var settled = blank()
+  let cs = code_points("handler state")
+  var kept = 0
+  for k in range(1, len(cs) + 1) {
+    let text = from_code_points(list.take(cs, k))
+    let here0 = st
+    let (m1, wanted) = fold_cmds(m, Typed(text: text), (acc, x) => update(here0, acc, x))
+    m = m1
+    var queue = wanted
+    var first = true
+    while first || len(queue) > 0 {
+      if not first {
+        let f = queue[0]
+        queue = list.drop(queue, 1)
+        let outcome: Result[String, String] = match map.get(fixture_files(), f.url) {
+          Some(b) -> Ok(b)
+          None -> Err("HTTP 404")
+        }
+        st = absorb(st, f.tag, outcome)
+        let here = st
+        let (m2, more) = fold_cmds(m, supplied(f.tag, outcome), (acc, x) => update(here, acc, x))
+        m = m2
+        queue = queue ++ more
+      }
+      first = false
+      let texty = list.any(settled.hits, h => h >= body_base())
+      let wanted_text = list.any(answer(full, text, -1).hits, h => h >= body_base())
+      if len(m.loading) > 0 {
+        if texty {
+          # waiting: exactly the last settled rows, counts and grouping
+          assert m.hits == settled.hits
+          assert m.counts == settled.counts
+          assert m.scope == settled.scope && m.sel == settled.sel && m.fix == settled.fix
+          assert m.stale == settled.query
+          assert m.query == text
+          let tree = st.view(m).show_tree()
+          assert str.contains(tree, "search-results is-stale")
+          assert str.contains(tree, "aria-busy")
+          kept = kept + 1
+        }
+      } else {
+        # settled: the answer a panel holding every chunk gives
+        assert list.any(m.hits, h => h >= body_base()) == wanted_text
+        assert m.hits == answer(full_with_texts(st), text, -1).hits
+        assert m.stale == ""
+        assert not str.contains(st.view(m).show_tree(), "aria-busy")
+        settled = m
+      }
+    }
+  }
+  assert kept > 0
+  # clearing the query clears at once, whatever is on its way
+  let (cleared, _) = update(st, Model { ..settled, stale: "handler", query: "handler s", loading: [1] }, Typed(text: ""))
+  assert cleared.hits == [] && cleared.stale == ""
+  # the snapshot is on the wire only while it is one
+  assert not str.contains(encode(settled), "stale")
+  let stale_m = Model { ..settled, stale: "handler", query: "handler s" }
+  assert decode(encode(stale_m)) == stale_m
+}
+
+## `full` with the section texts `st` has fetched, so that the paragraph a row
+## shows is chosen the way the live panel chose it.
+fn full_with_texts(st: State) -> State = State { ..text_state(), texts: st.texts }
 
 ## While the words are on their way a query nothing has answered is not "no
 ## matches": the panel is waiting, and says nothing until it knows.
