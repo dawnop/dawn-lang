@@ -1,6 +1,6 @@
 # Playground 在线编译：改过的代码也能对照 C / JVM / Tile IR
 
-> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）与 K5（Tile IR 文本）已实现，见第七节；K4 与 K6 尚无代码）。这是 `docs/explorer-page-design.md`
+> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）K4（反代与部署说明）、K5（Tile IR 文本）与 K6（Tile IR 逐调用对照）已实现，见第七节）。这是 `docs/explorer-page-design.md`
 > 第九节留的「下一步」：把 `--map` 接到 Playground，让浏览器里现改的代码也能和产物对照，形态向
 > Compiler Explorer 看齐。依赖：M3/M4（`__emitc --map`、`__emit --map`，`docs/source-span-map-design.md`
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
@@ -203,7 +203,7 @@ bin/dawn build tp -o tp.jar; java -jar tp.jar
 内部调 `trace_calls` + `line_map`，按约定输出一个协议块），并明确「哪些写法不支持、失败时怎么降级」。这会碰
 `packages/tileir`，进而触发 tile-golden / GPU diff 台账等一串门禁（`gatemap.py packages/tileir/src/prog.dawn` 报
 `tile-golden-1`、`tile-gpu-diff` 的 coupled 与 `site/explorer/record.py names packages/tileir` 等），属于 Tile 线所有者的决定，
-所以**本设计的 K1 至 K5 都不包含 T2**；K6 等 `tileir` 给出稳定入口再定（第八节第 4 条）。
+所以**本设计的 K1 至 K5 都不包含 T2**；K6 把它做了，并推翻了「要 `tileir` 配合」这个前提（见第七节 K6）。
 
 ## 五、前端
 
@@ -436,7 +436,57 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 - **没做的：** 不加 Tile IR 的样例（`doc-check` 的样例检查以单文件运行 `site/play-ui/samples`，`use tileir/` 在那里解析不了，而 `/run` 也一样）；
   不做逐调用对照（K6）；`/compile` 的限流区与权限的共用仍归 K4。
 
-**K6（可选，第八节第 4 条：等 `tileir` 稳定入口）：Tile IR 逐调用对照（T2）**，在 `packages/tileir` 的稳定入口落地之后；单独裁决，不在本批。
+**K6：Tile IR 逐调用对照（T2）。** 第 4.3 节与第八节第 4 条留的那一刀。K5 之后 Tile IR 窗格已经能在线编译、显示用户改过的 kernel；
+K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Tile IR 窗格里它写出的行亮起来，反过来点一行也找得到调用。
+
+**前提重估（2026-10-10）。** 4.3 写「要 `tileir` 提供一个稳定入口（例如 `tileir/explore`）」，并因此把 K6 挂在 Tile 线所有者的决定上。
+0.13 的现状推翻了这个前提：`trace_calls`（带调用侧表的记录）与 `render.line_map`（侧表到行号）都是 `pub`，站点的 `site/gpu-map/record.py`
+就是靠它们配对的。缺的不是 `tileir` 的入口，而是**把它们接到任意用户程序上**的那层，这层不需要碰 `packages/tileir`，
+所以 `scripts/tile-gpu-diff/inputs.py` 的 `TILE_PATHS` 一个字节没动，不触发任何台账。
+
+**做法。** 配对规则整个沿用 `record.py`（`docs/explorer-page-design.md` 的同一份契约），改成 Dawn 写的纯函数
+`playground/src/play/tilemap.dawn`，逐层严格配对：同一父调用下，源码里按求值顺序出现的调用名，必须**恰好等于**记录里按运行顺序的调用名
+（`lit` 常量行可选，`var` 的 `carry/get/set` 由分阶段 `for` 的规则生成）。对不上不是错误，是「这个程序不配对」，窗格照旧显示 Tile IR 文本并说出第一条原因。
+- **谁跑什么：** (1) `dawn parse` 在与 `/run` 同一个沙箱单元里解析用户源码（不运行任何东西）；(2) runner 走一遍语法树（`tilemap.dawn`），
+  找到唯一一处 `trace1` 至 `trace5` 的朴素调用（位置参数、无 `hints:`），其最后一个参数是同文件里的 kernel 函数；(3) 把这处调用包进 runner 自己的模块
+  `explore_probe.tapN(原调用, 原参数…)`，写入项目的 `src/explore_probe.dawn`，用户程序其余字节不变，原调用还在，所以它的 `use` 仍被用到（本语言把未用导入当错误）；
+  (4) `dawn build` 加 `java -jar`，探针用 `trace_calls`（标记擦除）再录一遍，两份程序不等就拒答，等则把 Tile IR 文本、侧表和每个调用的行区间打印成带 `@@tile ` 前缀的行，以 `@@tile end` 收尾；
+  (5) runner 读这些行，与第 2 步的静态调用逐层配对，写出 `site/gpu-map/flash_attn.map` 同格式的文本，再由 `packages/xmap` 的 `table_from_tile` / `tile_pane` 变成与 C、JVM 同形的响应。
+- **覆盖：** 校验语料是 `scripts/tile-golden/kernels.dawn` 的 `flash_attn`（分阶段 `for`、`var` 携带、运算符、`lit`、方法调用、命名参数全有）：
+  整段原样放进一个用户式程序，得到 25 个调用、`gaps.count == 0`，调用名的多重集与 `flash_attn.map` 去掉 `carry/get/set` 之后的 25 行相同（合约里钉成用例）。
+  不支持、于是降级的写法：主体里 `if/match/while` 包着调用、绑定后再调用的闭包、用户自己的有效果辅助函数、同文件里多于一处 `traceN`、带 `hints:` 的 `traceN`、kernel 不在同一文件里。
+
+**请求与响应。** 请求不变：`POST /compile {"code", "target":"tile"}`，没有新字段。响应在 K5 的基础上分两种：
+- 配对成功：与 C / JVM 同形，`src{first,last}`、`calls_total`、`calls_truncated`、`calls[{id,parent,name,from,to,nfrom,nto}]`、
+  `pane{kind:"tile",total,shown,truncated,text,outs[{call,lines,marks,key}]}`、`gaps{count,first}`。`pane.text` 是被记录的那份 Tile IR（不是用户程序打印的东西）。
+- 未配对：K5 的形状（程序的标准输出为窗格，没有 `calls`），多一个 `"unmapped": "<第一条原因>"`；程序非零退出、超时、编译错误与 K5 完全相同。
+- 缓存键与 K5 同（`<toolchain+code 哈希>/tile`），只缓存成功；两种形状都算成功。
+
+**沙箱与限额。** 没有新的未沙箱执行：`dawn parse`、`dawn build`、`java -jar` 都是 `sandboxed()` 包住的单元，与 `/run` 同一个包装脚本、同一份属性集、同一个许可（`/compile` 与 `/check` 共用的两个）。
+- 输入：请求体 64 KiB（K2 的 413，不变）；`dawn parse` 的输出读入上限 4 MiB，语法节点超过 12 万个则不配对；用户程序输出读入 64 KiB（`OUTPUT_LIMIT`），超限则不配对（读不全就不读）。
+- 时间：解析与构建共用 `PLAY_COMPILE_TIMEOUT`（默认 30 s）各自计时，运行用 `PLAY_TIMEOUT`（默认 10 s）；超时就地答复（`phase:"timeout"` 或编译超时的诊断），**不**再跑一遍降级路径，所以访客最多等一次超时。
+  只有「探针项目编不过」与「配对不成」才回退到 K5 的一次普通运行。
+- 响应：窗格 256 KB、2,000 个调用（K2 的限额）。
+- 不被用户影响的：`dawn.toml` 仍是 runner 写的，两个固定路径依赖；`explore_probe` 是 runner 的常量文本，用户不能提供或替换它（用户若自己写 `use explore_probe`，解析到的仍是 runner 写的那个文件）。
+- 用户伪造 `@@tile` 行只能改变自己的窗格：配对要求这些行与源码的调用逐层相符，读到的文本只进 `pane.text`，且响应经 `xmap` 的行号校验。
+
+**降级。** 服务不可用、429、网络错误：前端维持原有的各一句话，Tile IR 窗格保留上一次的答案并标过期（预计算的静态对照页 `explorer.html` 本来就独立于此，样例 kernel 未改动时行为不变）。
+配对不成：窗格显示 Tile IR 文本与一条提示「Calls are not matched to the Tile IR: <原因>」，源码不画下划线。
+
+**开销（本机 WSL2，量级）。** 冷请求 vadd 5.6 s、flash_attn 4.2 s 到 5.6 s，对比 K5 的 2.6 s：多出的是 `dawn parse` 一个 JVM 与探针里多编的约一百行。缓存命中不重算。生产机未测，部署后回填。
+
+**测试。** `playground/test/contract.sh` 的 tile 用例由 42 项增到 45 项：vadd 配对（调用名、父子、行区间、`gaps == 0`、文本与 `dawn run` 逐字节相同、响应里没有 `@@tile` 与 `explore_probe`）；
+`flash_attn` 整段配对（25 个调用，含 `d_range` 的子调用）；主体里 `if` 包着调用的 kernel 不配对、给出原因、窗格仍在；类型错误的 tile 程序得到诊断而不是窗格。
+`playground` 的单元测试覆盖任务序列化、`tile_mapped` 的响应形状与 `unmapped` 字段；前端 `site/play-ui/test/compile-selftest.ts` 覆盖「配对成功即列表」「同形但窗格种类不对即不可读」「无 calls 时保留文本与原因」。
+先红后绿：前端的新用例在旧 `compile-state.ts` 上 4 条红；合约的新用例在 K5 的 runner 上因没有 `calls` 而红。
+
+**不做的（理由）。**
+- **改 `packages/tileir` 加 `tileir/explore`：** 不需要（`trace_calls` 与 `line_map` 已够），并且会触发 `TILE_PATHS` 与 GPU 台账的重录，代价远大于收益。
+- **把任意写法都配对（用户自己的辅助函数里有效果、主体里的控制流）：** 静态配对必须与记录的运行顺序逐名相同，放宽就要猜；猜错的高亮比没有高亮更糟。降级成纯文本并说出原因。
+- **用探针取代用户程序的输出：** 配对成功时窗格是被记录的 Tile IR，不是用户 `println` 的东西；用户若打印别的，在 Output 控制台看，不在这一栏。
+- **同一请求里 C、JVM、Tile IR 三栏共表：** C / JVM 的表来自两个编译器的侧表，Tile 的表来自记录；三者调用集合不同（`explorer-page-design.md` 第三节），在线版先让 Tile 栏自成一表，三栏联动留给有需要时。
+- **多个 kernel（多处 `traceN`）：** 一个窗格只放一份 Tile IR，多于一处时选哪个是产品决定，现在降级并说原因。
+- **给 `selftest.ts` 接 CI：** 沿用 K3 记下的缺口，需要裁决（要改 `steps.lock.json`、开观测窗口），本刀没有改任何工作流，因此 CI 墙钟无变化。
 
 ## 八、已裁决（2026-10-07，协调者）
 
@@ -449,7 +499,7 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
    理由：生产 runner 是 Dawn 程序，请求路径上不起 Python；站点生成器已经是 Dawn。落地见 3.4 与 K1：模块站点与 runner 共用，过渡期与
    `record.py` 逐字节对拍，对拍通过后 `record.py` 只剩调用编译器取原料的那层。
 3. **何时编译：手动按钮 + 输出栏打开时空闲 1.5 s 自动重编。已裁决。**`/run` 出现 429 再退回仅手动。
-4. **Tile IR 逐调用高亮：先不做。已裁决。**先出纯文本（K5），K6 等 `tileir` 给出稳定入口再定。
+4. **Tile IR 逐调用高亮：先不做。已裁决。**先出纯文本（K5）。**修订（2026-10-10）：**K6 已做，不需要 `tileir` 新入口，见第七节。
 5. **native C 快路径：不开第二条路径。已裁决。****修订（2026-10-08，协调者）：**`dawnc` 与 `dawn` 对同一程序产出逐字节相同的 C 与映射（`playground/test/contract.sh` 对拍），
    所以它不是第二条路径，是同一条路径换了更省的编译器。`/check` 与 C 视图改走 `dawnc`，见 8.1。
 6. **每个可见标签页一个请求，靠缓存吸收重复。已裁决。**
