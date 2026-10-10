@@ -19,13 +19,17 @@
 use std/io
 use std/io.{Fs, Env}
 use std/str
+use std/list
 use std/map
 use std/set
 use front/ast.{Module}
 use check/types.{
   Sig, Adts, Impls, first_minted_id, adt_of, TyList,
-  OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID
+  OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
+  TyOpaque, TyAdt, ty_show, Head, HInt, HFloat, HBool, HString, HBytes, HUnit, HList, HMap, HSet, HArray,
+  builtin_type_inventory, BtLeaf, internal_std_modules
 }
+use check/passes.{head_owner}
 use check/tast.{TFun, TModule}
 use check/cx.{ModExports, cx_new, Cx}
 use check/checker.{check_module, exports_of}
@@ -401,6 +405,44 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
 pub(pkg) fn load_chosen_std_lean(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
   load_chosen_std_with(chosen, true)
 
+## The std modules a pruned load keeps, `std/..` paths, sorted.
+##
+## Not a list anyone maintains: each source of "the compiler needs this module
+## whether or not the program says `use`" is read from the place that already
+## states it, and the closure over `use` edges is taken by the loader.
+##
+##   - the owner of a builtin type with no declaration site (`Char`, `Loc`):
+##     `types.builtin_type_inventory`'s opaque leaves
+##   - the module that claims a builtin container or scalar head for the
+##     orphan rule, so its impls (`Eq[List[T]]`, `Iter[String]`, ..) stay
+##     visible to every program: `passes.head_owner`
+##   - the module a prelude name is harvested from: `prelude_owner`
+##   - the representation modules lowering calls into whatever the program
+##     imports: `types.internal_std_modules` (hamt, pvec; fmt is a prelude owner)
+##
+## The test "the base modules are the ones the compiler names" holds the result
+## to the list written out in docs/check-std-prune-design.md, so a change here is
+## a visible one. The loader adds the modules these import (`str` needs `cursor`).
+pub(pkg) fn std_base_modules() -> List[String] = {
+  var out: Set[String] = set.empty()
+  for info in builtin_type_inventory() {
+    match info.build {
+      BtLeaf(TyOpaque(_, _, owner, _, _)) -> { out = set.insert(out, owner) }
+      _ -> ()
+    }
+  }
+  let heads: List[Head] = [HInt, HFloat, HBool, HString, HBytes, HUnit, HList, HMap, HSet, HArray]
+  for h in heads {
+    match head_owner(h) {
+      Some(o) -> { out = set.insert(out, o) }
+      None -> ()
+    }
+  }
+  for n in prelude_names() { out = set.insert(out, prelude_owner(n)) }
+  for m in internal_std_modules() { out = set.insert(out, m) }
+  sort(set.to_list(out))
+}
+
 fn load_chosen_std_with(
   chosen: Option[String],
   lean: Bool
@@ -586,6 +628,57 @@ fn load_chosen_std_with(
   })
 }
 
+## The impls of std modules a pruned load may leave out that are visible to a
+## program which does not import them: one line each, empty when there are none.
+##
+## A pruned load drops every module outside `base` that the program does not
+## import. That is invisible exactly when nothing it declares can be reached
+## without naming it, and impls are the one thing a program meets without a
+## name: coherence is program-wide, `a == b` on two lists means the same thing in
+## a module that imports std/list and in one that does not. An impl is reached
+## by its trait or by its subject, so a module outside `base` is safe when each
+## of its impls has its trait or its subject type declared in that module (the
+## orphan rule, `passes.pass_register_impls`, already forces one of the two,
+## but lets a module that claims a builtin head (`passes.head_owner`) satisfy
+## it with a subject nobody declared; that is why `base` includes the
+## claimants and why a builtin subject does not count as declared here).
+##
+## Read off the finished tables, not the source: `StdCtx.impls` says which module
+## registered each impl, `identities` who minted each trait and nominal id, and
+## an opaque or builtin subject carries its owner.
+pub(pkg) fn orphan_violations(std: StdCtx, base: List[String]) -> List[String] = {
+  var out: List[String] = []
+  for pr in map.entries(std.impls) {
+    let (key, info) = pr
+    let (tid, _) = key
+    match info.owner {
+      None -> ()
+      Some(o) -> if str.starts_with(o, "std/") && not list.contains(base, o) {
+        let trait_here = match map.get(std.identities, tid) {
+          Some(mt) -> mt.owner == o
+          None -> false
+        }
+        let subject_here = match info.subject {
+          TyOpaque(_, _, ow, _, _) -> ow == o
+          TyAdt(aid, _) ->
+            match map.get(std.identities, aid) {
+              Some(mt) -> mt.owner == o
+              None -> false
+            }
+          # a builtin head is nobody's declaration: whoever claims it for the
+          # orphan rule (`passes.head_owner`) is in `base` or is a violation
+          _ -> false
+        }
+        if not trait_here && not subject_here {
+          out = out ++ ["${o}: impl of trait ${tid} for ${ty_show(std.adts, info.subject)} has " ++
+              "neither its trait nor its subject declared there"]
+        }
+      }
+    }
+  }
+  sort(out)
+}
+
 ## The std module path `path` was loaded as, or `None` when this file is not
 ## one of the sources this compiler's std came from.
 ##
@@ -736,6 +829,38 @@ test "a lean load of the embedded std differs from the full one only in its test
     assert lean.srcs == full.srcs
     assert lean.std_fns == full.std_fns
     assert lean.moved == full.moved
+  }))
+}
+
+test "the base modules are the ones the compiler names" {
+  # the written-out list in docs/check-std-prune-design.md: a change to what
+  # the compiler needs unconditionally has to change it too
+  assert std_base_modules() ==
+    ["std/bytes", "std/char", "std/fmt", "std/hamt", "std/io", "std/list", "std/loc",
+      "std/map", "std/pvec", "std/set", "std/str"]
+}
+
+test "no std module outside the base can be met without importing it" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let none: Option[String] = None
+    let full = match load_chosen_std(none) {
+      Ok(sc) -> sc
+      Err(e) -> panic("full: ${std_load_error_text(e)}")
+    }
+    assert orphan_violations(full, std_base_modules()) == []
+    # the guard is not vacuous: a module that gets its impls from a builtin
+    # head some other module claims is a violation the moment it is not base
+    # (negative control)
+    var without_list: List[String] = []
+    for b in std_base_modules() { if b != "std/list" { without_list = without_list ++ [b] } }
+    assert len(orphan_violations(full, without_list)) > 0
+    var without_str: List[String] = []
+    for b in std_base_modules() { if b != "std/str" { without_str = without_str ++ [b] } }
+    assert len(orphan_violations(full, without_str)) > 0
+    # and a module with no claim of that kind is not flagged for being outside it
+    var without_loc: List[String] = []
+    for b in std_base_modules() { if b != "std/loc" { without_loc = without_loc ++ [b] } }
+    assert orphan_violations(full, without_loc) == []
   }))
 }
 
