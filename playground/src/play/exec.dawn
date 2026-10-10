@@ -41,6 +41,7 @@ use std/bytes
 use std/io
 use std/io.{Fs, with_fs_real, with_proc_real, with_clock_real, with_env_real, Instant, now, now_wall_ns, elapsed_ns}
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
+use play/tilemap.{plan, Plan, dev_names, probe_source, read_recording, tile_map}
 use play/config.{dawn_bin, native_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
 
 ## The most output, in bytes, a response carries. Bytes rather than
@@ -726,6 +727,116 @@ pub fn tile_run(code: String) -> Outcome !io = {
   let files = [("src/main.dawn", code), ("dawn.toml", tile_manifest(packages_root()))]
   with_fs_real(() => with_files(files, msg => CompileError(msg), tile_staged))
 }
+
+## What the Tile IR view's job came to. `TileMapped` is the visitor's kernel
+## recorded with its calls paired to the source: the pairing in the format of
+## `site/gpu-map/flash_attn.map`, the Tile IR text, and the milliseconds the
+## instrumented run took. `TilePlain` is the program run as it is, its output
+## the pane (K5), with the reason there is no pairing (`""` when the program
+## failed or timed out and so has no Tile IR to pair).
+pub type TileRaw =
+  | TileMapped(map: String, golden: String, ms: Int)
+  | TilePlain(outcome: Outcome, why: String)
+
+# What trying to map a program came to: the mapping, the reason there is none
+# (the program is then run as it is), or an answer that stands as it is (the
+# instrumented program timed out or failed in a way the plain run would too).
+type Tried =
+  | TriedMapped(map: String, golden: String, ms: Int)
+  | TriedNot(why: String)
+  | TriedSettled(outcome: Outcome)
+
+# The most of `dawn parse`'s output the runner reads.
+const PARSE_LIMIT: Int = 4194304
+
+## The Tile IR view's job (POST /compile, target "tile"): try the program
+## instrumented, which pairs the calls of its kernel with the Tile IR lines
+## they wrote, and run it as it is when that cannot be done. Both runs are
+## sandboxed units of the same kind as /run's, under the same budgets; the
+## second only happens when the first came to no answer of its own, so the
+## visitor never waits for two timeouts.
+pub fn tile_job(code: String) -> TileRaw !io =
+  match tile_try(code) {
+    TriedMapped(map, golden, ms) -> TileMapped(map, golden, ms)
+    TriedSettled(outcome) -> TilePlain(outcome, "")
+    TriedNot(why) -> TilePlain(tile_run(code), why)
+  }
+
+fn tile_try(code: String) -> Tried !io =
+  match tile_plan(code) {
+    Err(why) -> TriedNot(why)
+    Ok(p) -> with_fs_real(() => with_files(
+      [
+        ("src/main.dawn", p.program),
+        ("src/explore_probe.dawn", probe_source()),
+        ("dawn.toml", tile_manifest(packages_root())),
+      ],
+      msg => TriedNot(msg),
+      (dir, box) => tile_probe(dir, box, code, p)
+    ))
+  }
+
+# The plan for `code`: `dawn parse` of it in a unit, then the walk of the
+# dump (play/tilemap.dawn). Nothing of the visitor's is run.
+fn tile_plan(code: String) -> Result[Plan, String] !io = {
+  let names = with_fs_real(() => match io.read_file("${packages_root()}/tileir/src/dev.dawn") {
+    Ok(text) -> dev_names(text)
+    Err(_) -> []
+  })
+  if len(names) == 0 {
+    Err("the recording's call names are unavailable")
+  } else {
+    with_fs_real(() => with_files([("orig.dawn", code)], msg => Err(msg), (dir, box) => parsed(dir, box, code, names)))
+  }
+}
+
+fn parsed(dir: String, box: String, code: String, names: List[String]) -> Result[Plan, String] !io = {
+  let out = "${dir}/parse.txt"
+  let unit = fresh_unit()
+  match run_timed(sandboxed(unit, box, [dawn_bin(), "parse", "${box}/orig.dawn"]), out, "${dir}/parse.rc", compile_timeout_secs(), stop_argv(unit)) {
+    None -> Err("the parse timed out")
+    Some(0) -> {
+      let (dump, cut) = read_capped_to(out, PARSE_LIMIT, dir)
+      if cut { Err("the parse is too large to map") } else { plan(code, dump, names) }
+    }
+    Some(_) -> Err("the program does not parse")
+  }
+}
+
+# Build and run the instrumented project; what it printed is the recording.
+fn tile_probe(dir: String, box: String, code: String, p: Plan) -> Tried !io =
+  match compile_input(dir, box, box) {
+    Err(diags) ->
+      if str.starts_with(diags, "compilation timed out") {
+        TriedSettled(CompileError(diags))
+      } else {
+        # the visitor's program compiled or not on its own; this one is the
+        # runner's doing, so the operator hears of it
+        io.eprintln("tile probe did not compile: ${str.take(diags, 400)}")
+        TriedNot("the instrumented program did not compile")
+      }
+    Ok(_) -> match run_phase(dir, box) {
+      Timeout(out) -> TriedSettled(Timeout(unmarked(out)))
+      CompileError(out) -> TriedNot(out)
+      Compiled(out, exit, cut, ms) ->
+        if exit != 0 {
+          TriedSettled(Compiled(unmarked(out), exit, cut, ms))
+        } else if cut {
+          TriedNot("the output is too long to read the recording from")
+        } else {
+          match read_recording(out) {
+            Err(why) -> TriedNot(why)
+            Ok(rec) -> match tile_map(code, p, rec) {
+              Err(why) -> TriedNot(why)
+              Ok(map) -> TriedMapped(map, join(rec.text, "\n"), ms)
+            }
+          }
+        }
+    }
+  }
+
+# A program's output without the lines the probe added.
+fn unmarked(out: String) -> String = join(filter(str.split(out, "\n"), l => not str.starts_with(l, "@@tile ")), "\n")
 
 fn tile_staged(dir: String, box: String) -> Outcome !io =
   match compile_input(dir, box, box) {

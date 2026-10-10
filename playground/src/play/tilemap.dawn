@@ -1,0 +1,814 @@
+# Which call of a visitor's kernel wrote which line of its Tile IR: the online
+# half of the explorer's Tile IR pane (docs/playground-compile-design.md
+# section 4.3, knife K6).
+#
+# Why this is a port of site/gpu-map/record.py and not a new idea. Two programs
+# know half of the answer each. packages/tileir knows which public call issued
+# which operation, because it ran them (`trace_calls`, `line_map`). Dawn's
+# parser knows where each call is in the source (`dawn parse`). The static page
+# pairs the two for one kernel the repository owns, and fails the build when
+# they disagree. This module does the same for a kernel nobody has checked, so
+# its contract is the opposite on the one point that matters: a pairing that
+# does not hold is not an error, it is "this program is not mapped" with the
+# first reason, and the pane keeps showing the Tile IR text. The pairing is
+# strict (the names the source calls under each parent, in evaluation order,
+# must be exactly the names the recording ran) so a wrong highlight cannot be
+# the result of a guess; the cost is that code the walk does not understand
+# (a call under host control flow, a closure bound before the call that runs
+# it, a helper that records) is unmapped rather than approximated.
+#
+# Where the pieces are. Everything here is a function of strings: the source,
+# the `dawn parse` dump of it, and what the instrumented program printed. The
+# runner runs the compiler and the program (play/exec.dawn) in the sandbox and
+# hands the text over, so nothing in this file runs user code or touches the
+# disk. The instrumentation is a module of the runner's own, `explore_probe`,
+# written into the project beside the visitor's `main.dawn`; the visitor's
+# program is changed in one place, its `traceN` call, which is wrapped in the
+# probe's `tapN` with its own arguments repeated (the call itself stays, so
+# its import is still used, which this language checks), and
+# `packages/tileir` is not touched.
+
+use std/str
+use std/list
+use xmap/source.{Src, src_of, at}
+
+## One line of a `dawn parse` dump as a tree: the node's kind (its first word),
+## its whole line without indentation, its code point span (-1 for a node
+## that has none, the module) and its children.
+pub type Node = { kind: String, text: String, lo: Int, hi: Int, kids: List[Node] }
+
+type Item = { depth: Int, text: String, lo: Int, hi: Int }
+
+# The most nodes a dump may have before the program is not mapped; a 64 KiB
+# source is far under it.
+const MAX_NODES: Int = 120000
+
+fn first_word(text: String) -> String =
+  match str.split_once(text, " ") {
+    Some((w, _rest)) -> w
+    None -> text
+  }
+
+fn second_word(text: String) -> String =
+  match str.split_once(text, " ") {
+    Some((_w, rest)) -> first_word(rest)
+    None -> ""
+  }
+
+# `a..b` as two numbers.
+fn range_of(s: String) -> Option[(Int, Int)] =
+  match str.split_once(s, "..") {
+    Some((x, y)) ->
+      match (parse_int(x), parse_int(y)) {
+        (Some(a), Some(b)) -> Some((a, b))
+        _ -> None
+      }
+    None -> None
+  }
+
+# The span a tag such as `name@` or `op@` names in a node's line.
+fn tagged(text: String, tag: String) -> Option[(Int, Int)] =
+  match str.index_of(text, tag) {
+    None -> None
+    Some(i) -> range_of(first_word(str.drop(text, i + str.len(tag))))
+  }
+
+fn item_of(line: String) -> Item = {
+  let body = str.trim_start(line)
+  let depth = (str.len(line) - str.len(body)) / 2
+  match str.rsplit_once(body, " @") {
+    Some((_head, tail)) ->
+      match range_of(tail) {
+        Some((lo, hi)) -> Item { depth: depth, text: body, lo: lo, hi: hi }
+        None -> Item { depth: depth, text: body, lo: -1, hi: -1 }
+      }
+    None -> Item { depth: depth, text: body, lo: -1, hi: -1 }
+  }
+}
+
+fn build(items: List[Item], i: Int) -> (Node, Int) = {
+  let it = items[i]
+  var kids: List[Node] = []
+  var j = i + 1
+  while j < len(items) && items[j].depth > it.depth {
+    let (k, next) = build(items, j)
+    kids = kids ++ [k]
+    j = next
+  }
+  (Node { kind: first_word(it.text), text: it.text, lo: it.lo, hi: it.hi, kids: kids }, j)
+}
+
+## The tree of a `dawn parse` dump, or why it is not one.
+pub fn parse_dump(dump: String) -> Result[Node, String] = {
+  let lines = filter(str.split(dump, "\n"), l => str.trim(l) != "" && not str.starts_with(l, "=="))
+  if len(lines) == 0 {
+    Err("the parse printed no tree")
+  } else if len(lines) > MAX_NODES {
+    Err("the program has too many syntax nodes to map")
+  } else {
+    let (root, _next) = build(map(lines, item_of), 0)
+    Ok(root)
+  }
+}
+
+# ---- what the source calls ----
+
+## A call the source makes, as the walk finds it: the names the recording may
+## have given it, whether the recording may not have it at all (a bare number
+## made a constant), its span and its name's span in code points, the text the
+## name span holds, and the calls in the closures it takes.
+pub type SCall = { names: List[String], optional: Bool, lo: Int, hi: Int, nlo: Int, nhi: Int, text: String, kids: List[SCall] }
+
+# What the walk knows about names: those bound to something tile-valued (so
+# that an operator over them is a recorded call and one over host numbers is
+# not), the `var`s of the loop being walked (each mention a recorded `get`,
+# each assignment a `set`), and the `var`s declared so far with the span of
+# their declaration.
+type Env = { tiles: List[String], cells: List[String], decls: List[(String, Int, Int)] }
+
+fn call_of(names: List[String], lo: Int, hi: Int, nlo: Int, nhi: Int, text: String, kids: List[SCall]) -> SCall =
+  SCall { names: names, optional: false, lo: lo, hi: hi, nlo: nlo, nhi: nhi, text: text, kids: kids }
+
+fn operator_names(op: String) -> List[String] =
+  if op == "ADD" {
+    ["add", "addi", "idx_add"]
+  } else if op == "SUB" {
+    ["sub", "subi", "idx_sub"]
+  } else if op == "MUL" {
+    ["mul", "muli", "idx_mul"]
+  } else if op == "DIV" {
+    ["div", "divi", "idx_div"]
+  } else if op == "REM" {
+    ["idx_rem"]
+  } else {
+    []
+  }
+
+# Whether an expression's value is a tile (or an index): it calls a recorded
+# function, mentions a cell, or mentions a name bound to one. The pairing
+# proves the guess: a host operation taken for a tile operation, or the
+# reverse, makes the two lists of calls differ.
+fn tile_valued(n: Node, dev: List[String], env: Env) -> Bool =
+  if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" && list.contains(dev, second_word(n.kids[0].text)) {
+    true
+  } else if n.kind == "MethodCall" && list.contains(dev, second_word(n.text)) {
+    true
+  } else if n.kind == "Var" && (list.contains(env.tiles, second_word(n.text)) || list.contains(env.cells, second_word(n.text))) {
+    true
+  } else {
+    list.any(n.kids, k => tile_valued(k, dev, env))
+  }
+
+fn any_call(n: Node, dev: List[String]) -> Bool =
+  if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" && list.contains(dev, second_word(n.kids[0].text)) {
+    true
+  } else if n.kind == "MethodCall" && list.contains(dev, second_word(n.text)) {
+    true
+  } else {
+    list.any(n.kids, k => any_call(k, dev))
+  }
+
+fn assigned_in(n: Node) -> List[String] = {
+  var out: List[String] = if n.kind == "Assign" { [second_word(n.text)] } else { [] }
+  for k in n.kids {
+    out = out ++ assigned_in(k)
+  }
+  out
+}
+
+# `line N` for an offset of the source.
+fn where_is(src: String, off: Int) -> String = "line ${1 + len(filter(str.chars(str.take(src, off)), c => c == "\n"))}"
+
+fn walk_all(ns: List[Node], dev: List[String], env0: Env, src: String) -> Result[(List[SCall], Env), String] = {
+  var env = env0
+  var out: List[SCall] = []
+  for k in ns {
+    match walk(k, dev, env, src) {
+      Err(e) -> {
+        return Err(e)
+      }
+      Ok((cs, env2)) -> {
+        out = out ++ cs
+        env = env2
+      }
+    }
+  }
+  Ok((out, env))
+}
+
+fn walk(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall], Env), String] =
+  if n.kind == "Lambda" {
+    Err("a closure at ${where_is(src, n.lo)} is not an argument of a call that runs it")
+  } else if n.kind == "Let" {
+    walk_let(n, dev, env, src)
+  } else if n.kind == "Assign" {
+    walk_assign(n, dev, env, src)
+  } else if n.kind == "Var" && list.contains(env.cells, second_word(n.text)) {
+    Ok(([call_of(["get"], n.lo, n.hi, n.lo, n.hi, second_word(n.text), [])], env))
+  } else if n.kind == "Binary" && len(n.kids) == 2 {
+    walk_binary(n, dev, env, src)
+  } else if n.kind == "Unary" && second_word(n.text) == "NEG" && tile_valued(n, dev, env) {
+    match walk_all(n.kids, dev, env, src) {
+      Err(e) -> Err(e)
+      Ok((cs, env2)) -> Ok((cs ++ [call_of(["neg", "negi"], n.lo, n.hi, n.lo, n.lo + 1, "-", [])], env2))
+    }
+  } else if n.kind == "For" && len(n.kids) == 3 && staged_head(n.kids[1], dev) != "" {
+    walk_staged_for(n, dev, env, src)
+  } else if (n.kind == "If" || n.kind == "Match" || n.kind == "For" || n.kind == "While") && any_call(n, dev) {
+    Err("a call under host control flow at ${where_is(src, n.lo)}")
+  } else if n.kind == "Apply" || n.kind == "MethodCall" {
+    walk_apply(n, dev, env, src)
+  } else {
+    walk_all(n.kids, dev, env, src)
+  }
+
+fn walk_let(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall], Env), String] = {
+  let name = second_word(n.text)
+  let inner = filter(n.kids, k => not list.contains(["TNamed", "TApp", "TFn", "PBind"], k.kind))
+  match walk_all(inner, dev, env, src) {
+    Err(e) -> Err(e)
+    Ok((cs, env2)) -> {
+      let is_tile = len(inner) > 0 && tile_valued(inner[len(inner) - 1], dev, env2)
+      let is_var = str.contains(n.text, "mut=true")
+      let tiles = if is_tile || is_var { env2.tiles ++ [name] } else { env2.tiles }
+      let decls = if is_var { env2.decls ++ [(name, n.lo, n.hi)] } else { env2.decls }
+      Ok((cs, Env { tiles: tiles, cells: env2.cells, decls: decls }))
+    }
+  }
+}
+
+fn walk_assign(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall], Env), String] = {
+  let name = second_word(n.text)
+  match walk_all(n.kids, dev, env, src) {
+    Err(e) -> Err(e)
+    Ok((cs, env2)) ->
+      if list.contains(env.cells, name) {
+        match tagged(n.text, "name@") {
+          Some((a, b)) -> Ok((cs ++ [call_of(["set"], n.lo, n.hi, a, b, name, [])], env2))
+          None -> Err("an assignment at ${where_is(src, n.lo)} has no name span")
+        }
+      } else {
+        Ok((cs, env2))
+      }
+  }
+}
+
+fn walk_binary(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall], Env), String] = {
+  let op = second_word(n.text)
+  match walk_all(n.kids, dev, env, src) {
+    Err(e) -> Err(e)
+    Ok((cs, env2)) ->
+      match tagged(n.text, "op@") {
+        Some((a, b)) ->
+          if len(operator_names(op)) > 0 && tile_valued(n, dev, env2) {
+            Ok((cs ++ [call_of(operator_names(op), n.lo, n.hi, a, b, str.slice(src, a, b), [])], env2))
+          } else {
+            Ok((cs, env2))
+          }
+        None -> Ok((cs, env2))
+      }
+  }
+}
+
+# The region function a staged `for` loops over (`for j in d_range(..) {..}`),
+# or "".
+fn staged_head(n: Node, dev: List[String]) -> String =
+  if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" && list.contains(dev, second_word(n.kids[0].text)) {
+    second_word(n.kids[0].text)
+  } else {
+    ""
+  }
+
+# A staged `for` over a region call: the region is the call, its span the whole
+# statement, and the body's calls its children, as the closure's were before
+# `for` was staged. Before it, one `carry` for each `var` the body assigns, in
+# declaration order; after it, one `get` for each, which hands the host
+# variable what the loop left in the cell.
+fn walk_staged_for(n: Node, dev: List[String], env: Env, src: String) -> Result[(List[SCall], Env), String] = {
+  let head = n.kids[1].kids[0]
+  match walk_all(list.drop(n.kids[1].kids, 1), dev, env, src) {
+    Err(e) -> Err(e)
+    Ok((before, env2)) -> {
+      let written = assigned_in(n.kids[2])
+      let carried = filter(env2.decls, d => {
+        let (name, _lo, _hi) = d
+        list.contains(written, name)
+      })
+      var opened: List[SCall] = []
+      for d in carried {
+        let (name, lo, hi) = d
+        match str.index_of(str.drop(str.slice(src, lo, hi), 3), name) {
+          Some(i) -> {
+            let at_name = lo + 3 + i
+            opened = opened ++ [call_of(["carry"], lo, hi, at_name, at_name + str.len(name), name, [])]
+          }
+          None -> {
+            return Err("the declaration of `${name}` at ${where_is(src, lo)} does not hold its name")
+          }
+        }
+      }
+      let inside = Env { tiles: env2.tiles, cells: map(carried, d => {
+        let (name, _lo, _hi) = d
+        name
+      }), decls: env2.decls }
+      match walk(n.kids[2], dev, inside, src) {
+        Err(e) -> Err(e)
+        Ok((kids, inner)) -> {
+          let closed = map(carried, _d => call_of(["get"], n.lo, n.hi, n.lo, n.lo + 3, "for", []))
+          let region = call_of([second_word(head.text)], n.lo, n.hi, head.lo, head.hi, second_word(head.text), kids)
+          Ok((before ++ opened ++ [region] ++ closed, Env { tiles: env2.tiles, cells: env2.cells, decls: inner.decls }))
+        }
+      }
+    }
+  }
+}
+
+fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(List[SCall], Env), String] = {
+  let is_apply = n.kind == "Apply"
+  let head: Option[Node] = if is_apply { Some(n.kids[0]) } else { None }
+  let args = if is_apply { list.drop(n.kids, 1) } else { n.kids }
+  let callee = match head {
+    Some(h) -> if h.kind == "Var" { second_word(h.text) } else { "" }
+    None -> second_word(n.text)
+  }
+  let name_span = match head {
+    Some(h) -> Some((h.lo, h.hi))
+    None -> tagged(n.text, "name@")
+  }
+  var env = env0
+  var before: List[SCall] = []
+  var closures: List[SCall] = []
+  for a in args {
+    let inner = if a.kind == "Arg" && len(a.kids) > 0 { a.kids[0] } else { a }
+    if inner.kind == "Lambda" {
+      if not list.contains(dev, callee) {
+        return Err("a closure at ${where_is(src, inner.lo)} is handed to `${callee}`, which is not a call the recording sees")
+      }
+      for k in inner.kids {
+        if k.kind != "LParam" {
+          match walk(k, dev, env, src) {
+            Err(e) -> {
+              return Err(e)
+            }
+            Ok((cs, env2)) -> {
+              closures = closures ++ cs
+              env = env2
+            }
+          }
+        }
+      }
+    } else {
+      match walk(a, dev, env, src) {
+        Err(e) -> {
+          return Err(e)
+        }
+        Ok((cs, env2)) -> {
+          before = before ++ cs
+          env = env2
+        }
+      }
+      if (inner.kind == "Float" || inner.kind == "Int") && list.contains(dev, callee) && callee != "lit" {
+        # A bare number handed to a call of the recording may be made a tile
+        # constant by the compiler before the call runs (`mma(a, b, 0.0)`),
+        # and that is a recorded `lit` row with no call of its own in the
+        # source. It may also stay a host number (`full(.., 0.0)`), so the
+        # entry is optional: the pairing takes it when the run has the `lit`
+        # row here and leaves it when it does not.
+        before = before ++ [SCall { names: ["lit"], optional: true, lo: inner.lo, hi: inner.hi, nlo: inner.lo, nhi: inner.hi, text: str.slice(src, inner.lo, inner.hi), kids: [] }]
+      }
+    }
+  }
+  match head {
+    Some(h) ->
+      if h.kind != "Var" {
+        match walk(h, dev, env, src) {
+          Err(e) -> {
+            return Err(e)
+          }
+          Ok((cs, env2)) -> {
+            before = cs ++ before
+            env = env2
+          }
+        }
+      }
+    None -> ()
+  }
+  match name_span {
+    None -> Err("a call at ${where_is(src, n.lo)} has no name span")
+    Some((nlo, nhi)) ->
+      if list.contains(dev, callee) {
+        Ok((before ++ [call_of([callee], n.lo, n.hi, nlo, nhi, callee, closures)], env))
+      } else if len(closures) > 0 {
+        Err("`${callee}` takes a closure the recording does not see into")
+      } else {
+        Ok((before, env))
+      }
+  }
+}
+
+# ---- the kernel and its trace call ----
+
+## The call that records the visitor's kernel and what the walk needs of it:
+## its markers' count, its span, the spans of its arguments and the kernel
+## function it names last.
+pub type Trace = { arity: Int, lo: Int, hi: Int, args: List[(Int, Int)], kernel: String }
+
+fn find_traces(n: Node, out: List[Trace]) -> List[Trace] = {
+  var found = out
+  if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" {
+    let callee = second_word(n.kids[0].text)
+    let arity = list.find([1, 2, 3, 4, 5], k => callee == "trace${k}")
+    match arity {
+      Some(k) -> {
+        let args = list.drop(n.kids, 1)
+        let last = args[len(args) - 1]
+        if len(args) == k + 2 && not list.any(args, a => a.kind == "Arg") && last.kind == "Var" {
+          found = found ++ [Trace { arity: k, lo: n.lo, hi: n.hi, args: map(args, a => (a.lo, a.hi)), kernel: second_word(last.text) }]
+        }
+      }
+      None -> ()
+    }
+  }
+  for k in n.kids {
+    found = find_traces(k, found)
+  }
+  found
+}
+
+## The kernel function and the body to walk: the `Fn` of that name at the top
+## of the module.
+fn kernel_fn(root: Node, name: String) -> Option[Node] =
+  list.find(root.kids, k => k.kind == "Fn" && second_word(k.text) == name)
+
+fn fn_body(f: Node) -> Option[Node] = {
+  let rest = filter(f.kids, k => not list.contains(["Param", "Ret", "TParam", "Where"], k.kind) && not str.starts_with(k.kind, "T"))
+  if len(rest) == 1 { Some(rest[0]) } else { None }
+}
+
+## What the walk of the visitor's program found: the program with its trace
+## call wrapped in the probe's, the kernel's name, the lines its function
+## occupies, and the calls its body makes.
+pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls: List[SCall] }
+
+## The plan for `code` from the dump `dump` of it and the names of the
+## functions the recording sees (`called("<name>"` marks of dev.dawn), or why
+## the program is not mapped. The program must record exactly one kernel, with
+## `trace1` to `trace5` called plainly (positional arguments, no hints), and
+## the kernel must be a function of the same file.
+pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, String] =
+  match parse_dump(dump) {
+    Err(e) -> Err(e)
+    Ok(root) -> {
+      let traces = find_traces(root, [])
+      if len(traces) == 0 {
+        Err("the program does not record a kernel with a plain `trace1` to `trace5` call")
+      } else if len(traces) > 1 {
+        Err("the program records more than one kernel")
+      } else {
+        let t = traces[0]
+        match kernel_fn(root, t.kernel) {
+          None -> Err("`${t.kernel}` is not a function of this file")
+          Some(f) ->
+            match fn_body(f) {
+              None -> Err("`${t.kernel}` has no body to walk")
+              Some(body) ->
+                match walk(body, dev, Env { tiles: [], cells: [], decls: [] }, code) {
+                  Err(e) -> Err(e)
+                  Ok((calls, _env)) -> {
+                    let s = src_of(code)
+                    let (first, _c) = at(s, f.lo)
+                    let (last, _d) = at(s, f.hi)
+                    let again = join(map(t.args, a => {
+                      let (alo, ahi) = a
+                      str.slice(code, alo, ahi)
+                    }), ", ")
+                    let renamed = str.take(code, t.lo) ++ "explore_probe.tap${t.arity}(" ++ str.slice(code, t.lo, t.hi) ++ ", " ++ again ++ ")" ++ str.drop(code, t.hi)
+                    Ok(Plan { program: "use explore_probe\n" ++ renamed, kernel: t.kernel, first: first, last: last, calls: calls })
+                  }
+                }
+            }
+        }
+      }
+    }
+  }
+
+# ---- the recording ----
+
+## One row of the recording: the call's number, the number of the call it is
+## inside (-1 at the top of the body), its name and the lines of the Tile IR
+## text it wrote itself, as `a-b` words.
+pub type Row = { id: Int, parent: Int, name: String, lines: List[String] }
+
+## What the instrumented program printed, read.
+pub type Recording = { ops: String, head: String, tail: String, rows: List[Row], text: List[String] }
+
+const MARK: String = "@@tile "
+
+## The recording in a program's output, or why there is none. The probe ends
+## what it prints with `@@tile end`; output cut short has no end and is not
+## read, so a half-written recording cannot be mistaken for a short one.
+pub fn read_recording(output: String) -> Result[Recording, String] = {
+  let lines = filter(str.split(output, "\n"), l => str.starts_with(l, MARK))
+  var ops = ""
+  var head = ""
+  var tail = ""
+  var ended = false
+  var rows: List[Row] = []
+  var text: List[String] = []
+  for l in lines {
+    let rest = str.drop(l, str.len(MARK))
+    let w = str.split(rest, " ")
+    if w[0] == "text" {
+      text = text ++ [str.drop(rest, 5)]
+    } else if w[0] == "ops" && len(w) == 2 {
+      ops = w[1]
+    } else if w[0] == "head" {
+      head = join(list.drop(w, 1), " ")
+    } else if w[0] == "tail" && len(w) == 2 {
+      tail = w[1]
+    } else if w[0] == "call" && len(w) >= 4 {
+      match (parse_int(w[1]), parse_int(w[2])) {
+        (Some(id), Some(parent)) -> {
+          rows = rows ++ [Row { id: id, parent: parent, name: w[3], lines: list.drop(w, 4) }]
+        }
+        _ -> {
+          return Err("the recording has a call row with no numbers")
+        }
+      }
+    } else if w[0] == "error" {
+      return Err("tileir could not map the kernel: ${str.drop(rest, 6)}")
+    } else if w[0] == "end" {
+      ended = true
+    }
+  }
+  if not ended || ops == "" || tail == "" || len(text) == 0 {
+    Err("the program printed no complete recording")
+  } else {
+    Ok(Recording { ops: ops, head: head, tail: tail, rows: rows, text: text })
+  }
+}
+
+# ---- the pairing ----
+
+fn names_of(sl: List[SCall]) -> String = join(map(sl, s => join(s.names, "|")), ", ")
+
+# The rows under `parent` with the calls of the source at that level, taken in
+# order, and then the same for each call's children. An optional call the run
+# does not have is skipped; any other difference stops the pairing with both
+# lists.
+fn pair_level(sl: List[SCall], parent: Int, rows: List[Row]) -> Result[List[(Int, SCall)], String] = {
+  let ran = filter(rows, r => r.parent == parent)
+  var taken: List[(SCall, Row)] = []
+  var j = 0
+  for s in sl {
+    if j < len(ran) && list.contains(s.names, ran[j].name) {
+      taken = taken ++ [(s, ran[j])]
+      j = j + 1
+    } else if not s.optional {
+      return Err("the source calls [${names_of(sl)}] and the recording ran [${join(map(ran, r => r.name), ", ")}]")
+    }
+  }
+  if j != len(ran) {
+    return Err("the source calls [${names_of(sl)}] and the recording ran [${join(map(ran, r => r.name), ", ")}]")
+  }
+  var out: List[(Int, SCall)] = []
+  for t in taken {
+    let (s, r) = t
+    out = out ++ [(r.id, s)]
+    match pair_level(s.kids, r.id, rows) {
+      Err(e) -> {
+        return Err(e)
+      }
+      Ok(more) -> {
+        out = out ++ more
+      }
+    }
+  }
+  Ok(out)
+}
+
+fn pos_text(p: (Int, Int)) -> String = {
+  let (l, c) = p
+  "${l}:${c}"
+}
+
+fn span_text(s: Src, lo: Int, hi: Int) -> String = "${pos_text(at(s, lo))}-${pos_text(at(s, hi))}"
+
+## The recording of the kernel paired with its source, in the format of
+## `site/gpu-map/flash_attn.map` (packages/xmap/src/table.dawn reads it), or
+## why they do not pair.
+pub fn tile_map(code: String, p: Plan, rec: Recording) -> Result[String, String] =
+  match pair_level(p.calls, -1, rec.rows) {
+    Err(e) -> Err(e)
+    Ok(paired) ->
+      if len(paired) != len(rec.rows) {
+        Err("${len(rec.rows) - len(paired)} recorded call(s) sit under no call of the source")
+      } else {
+        let s = src_of(code)
+        var out = ["kernel ${p.kernel}", "fn ${p.first}-${p.last}", "ops ${rec.ops}", "head ${rec.head}"]
+        for r in rec.rows {
+          let hit = list.find(paired, x => {
+            let (id, _s) = x
+            id == r.id
+          })
+          match hit {
+            None -> {
+              return Err("call ${r.id} (`${r.name}`) has no call of the source")
+            }
+            Some((_id, c)) -> {
+              if str.slice(code, c.nlo, c.nhi) != c.text {
+                return Err("the parser's name span for `${r.name}` holds `${str.slice(code, c.nlo, c.nhi)}`, not `${c.text}`")
+              }
+              out = out ++ [join(["call", "${r.id}", "${r.parent}", r.name, span_text(s, c.lo, c.hi), span_text(s, c.nlo, c.nhi)] ++ r.lines, " ")]
+            }
+          }
+        }
+        out = out ++ ["tail ${rec.tail}"]
+        Ok(join(out, "\n") ++ "\n")
+      }
+  }
+
+## The names the recording sees, out of the text of `dev.dawn`: every
+## `called("<name>"` mark.
+pub fn dev_names(dev_source: String) -> List[String] = {
+  var names: List[String] = []
+  for piece in list.drop(str.split(dev_source, "called(\""), 1) {
+    match str.split_once(piece, "\"") {
+      Some((name, _rest)) -> {
+        names = names ++ [name]
+      }
+      None -> ()
+    }
+  }
+  list.unique(names)
+}
+
+# ---- the probe ----
+
+## The source of `explore_probe`, the module the runner writes beside the
+## visitor's program. `tapN(r, name, markers.., body)` answers `r`, the
+## visitor's own `traceN` result, and prints besides the recording of the same
+## kernel with its call table as the lines `read_recording` reads. It runs the
+## kernel once more with `trace_calls`, the markers erased, and refuses to
+## answer when the two programs differ, which is the check that the marks put
+## nothing into the program (site/gpu-map/record.py does the same). The
+## visitor's program is otherwise as it was: it prints what it printed.
+pub fn probe_source() -> String = join(PROBE_LINES, "\n") ++ "\n"
+
+const PROBE_LINES: List[String] = [
+  "use std/str",
+  "use std/list",
+  "use std/dtype.{Dtype}",
+  "use std/gpu.{Entry1, Entry2, Entry3, Entry4, Entry5}",
+  "use tileir/dev.{Dev, Param, param}",
+  "use tileir/prog.{TileProg, Arg, In, Out, Shared, Scalar, Call, trace_calls, erase, op_count}",
+  "use tileir/render.{line_map}",
+  "",
+  "fn dt[D](a: Arg[D]) -> Dtype[D] = match a {",
+  "  In(d, _g) -> d",
+  "  Out(d, _g) -> d",
+  "  Shared(d) -> d",
+  "  Scalar(d) -> d",
+  "}",
+  "",
+  "fn spans(rs: List[(Int, Int)]) -> String =",
+  "  list.fold(rs, \"\", (acc, r) => {",
+  "    let (a, b) = r",
+  "    acc ++ \" \" ++ to_string(a) ++ \"-\" ++ to_string(b)",
+  "  })",
+  "",
+  "fn show(p: TileProg, calls: List[Call]) -> Unit !io =",
+  "  match line_map(p, calls) {",
+  "    Ok(m) -> {",
+  "      println(\"\")",
+  "      for l in str.split(m.text, \"\\n\") {",
+  "        println(\"@@tile text \" ++ l)",
+  "      }",
+  "      println(\"@@tile ops \" ++ to_string(op_count(p.ops)))",
+  "      println(\"@@tile head\" ++ spans(m.head))",
+  "      for k in range(0, len(calls)) {",
+  "        println(\"@@tile call \" ++ to_string(k) ++ \" \" ++ to_string(calls[k].parent) ++ \" \" ++ calls[k].name ++ spans(m.calls[k].lines))",
+  "      }",
+  "      let (ta, tb) = m.tail",
+  "      println(\"@@tile tail \" ++ to_string(ta) ++ \"-\" ++ to_string(tb))",
+  "      println(\"@@tile end\")",
+  "    }",
+  "    Err(e) -> println(\"\\n@@tile error \" ++ e)",
+  "  }",
+  "",
+  "fn check(p: TileProg, q: TileProg, calls: List[Call]) -> Unit !io =",
+  "  if p != q { println(\"\\n@@tile error the call marks changed the program\") } else { show(q, calls) }",
+  "",
+  "pub fn tap1[A](r: (TileProg, Entry1[A]), name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev) -> (TileProg, Entry1[A]) !io = {",
+  "  let (p, _e) = r",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0)), markers: [erase(a)])",
+  "  check(p, q, calls)",
+  "  r",
+  "}",
+  "",
+  "pub fn tap2[A, B](r: (TileProg, Entry2[A, B]), name: String, a: Arg[A], b: Arg[B], body: fn(Param[A], Param[B]) -> Unit !Dev) -> (TileProg, Entry2[A, B]) !io = {",
+  "  let (p, _e) = r",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1)), markers: [erase(a), erase(b)])",
+  "  check(p, q, calls)",
+  "  r",
+  "}",
+  "",
+  "pub fn tap3[A, B, C](r: (TileProg, Entry3[A, B, C]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev) -> (TileProg, Entry3[A, B, C]) !io = {",
+  "  let (p, _e) = r",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2)), markers: [erase(a), erase(b), erase(c)])",
+  "  check(p, q, calls)",
+  "  r",
+  "}",
+  "",
+  "pub fn tap4[A, B, C, E](r: (TileProg, Entry4[A, B, C, E]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev) -> (TileProg, Entry4[A, B, C, E]) !io = {",
+  "  let (p, _e) = r",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3)), markers: [erase(a), erase(b), erase(c), erase(d)])",
+  "  check(p, q, calls)",
+  "  r",
+  "}",
+  "",
+  "pub fn tap5[A, B, C, E, F](r: (TileProg, Entry5[A, B, C, E, F]), name: String, a: Arg[A], b: Arg[B], c: Arg[C], d: Arg[E], f: Arg[F], body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev) -> (TileProg, Entry5[A, B, C, E, F]) !io = {",
+  "  let (p, _e) = r",
+  "  let (q, calls) = trace_calls(name, [], () => body(param(dt(a), 0), param(dt(b), 1), param(dt(c), 2), param(dt(d), 3), param(dt(f), 4)), markers: [erase(a), erase(b), erase(c), erase(d), erase(f)])",
+  "  check(p, q, calls)",
+  "  r",
+  "}",
+  "",
+]
+
+# ---- tests ----
+
+const VADD_CODE: String = "use std/dtype.{F64}\nuse std/io\nuse tileir/dev.{Dev, Param, load_cell, store_cell, add, DYN_DIM}\nuse tileir/prog.{trace3, cells, In, Out}\nuse tileir/render.{render}\n\nfn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =\n  store_cell(out, add(load_cell(a), load_cell(b)))\n\npub fn main() -> Unit !io = {\n  let g = cells([DYN_DIM], [128])\n  let (prog, _entry) = trace3(\"vadd\", In(F64, g), In(F64, g), Out(F64, g), vadd)\n  io.print(render(prog))\n}\n"
+
+const VADD_DUMP: String = "== playground/test/tile_vadd.dawn ==\nModule\n  UseModule std/dtype name@4..13 @0..19\n    ImportName F64 @15..18\n  UseModule std/io name@24..30 @20..30\n  UseModule tileir/dev name@35..45 @31..95\n    ImportName Dev @47..50\n    ImportName Param @52..57\n    ImportName load_cell @59..68\n    ImportName store_cell @70..80\n    ImportName add @82..85\n    ImportName DYN_DIM @87..94\n  UseModule tileir/prog name@100..111 @96..136\n    ImportName trace3 @113..119\n    ImportName cells @121..126\n    ImportName In @128..130\n    ImportName Out @132..135\n  UseModule tileir/render name@141..154 @137..163\n    ImportName render @156..162\n  Fn vadd pub=false eff=Dev name@168..172 @165..291\n    Param a @173..174\n      TNamed Param @176..188\n        TNamed Float @182..187\n    Param b @190..191\n      TNamed Param @193..205\n        TNamed Float @199..204\n    Param out @207..210\n      TNamed Param @212..224\n        TNamed Float @218..223\n    Ret\n      TNamed Unit @229..233\n    Apply nargs=2 @243..291\n      Var store_cell @243..253\n      Var out @254..257\n      Apply nargs=2 @259..290\n        Var add @259..262\n        Apply nargs=1 @263..275\n          Var load_cell @263..272\n          Var a @273..274\n        Apply nargs=1 @277..289\n          Var load_cell @277..286\n          Var b @287..288\n  Fn main pub=true eff=io name@300..304 @297..464\n    Ret\n      TNamed Unit @310..314\n    Block tail=true @321..464\n      Let g mut=false ann=false @325..356\n        Apply nargs=2 @333..356\n          Var cells @333..338\n          ListLit @339..348\n            Ctor DYN_DIM @340..347\n          ListLit @350..355\n            Int 128 @351..354\n      LetPat mut=false @359..437\n        PTuple @363..377\n          PBind prog @364..368\n          PBind _entry @370..376\n        Apply nargs=5 @380..437\n          Var trace3 @380..386\n          Str @387..393\n            SText vadd\n          Apply nargs=2 @395..405\n            Ctor In @395..397\n            Ctor F64 @398..401\n            Var g @403..404\n          Apply nargs=2 @407..417\n            Ctor In @407..409\n            Ctor F64 @410..413\n            Var g @415..416\n          Apply nargs=2 @419..430\n            Ctor Out @419..422\n            Ctor F64 @423..426\n            Var g @428..429\n          Var vadd @432..436\n      MethodCall print nargs=1 name@443..448 @440..462\n        Var io @440..442\n        Apply nargs=1 @449..461\n          Var render @449..455\n          Var prog @456..460\n"
+
+fn failed[T](r: Result[T, String]) -> Bool =
+  match r {
+    Err(_) -> true
+    Ok(_) -> false
+  }
+
+fn dev() -> List[String] = ["load_cell", "store_cell", "add", "full", "lit"]
+
+test "the plan of a kernel names it, its lines, its calls in evaluation order, and wraps its trace call" {
+  match plan(VADD_CODE, VADD_DUMP, dev()) {
+    Ok(p) -> {
+      assert p.kernel == "vadd"
+      assert (p.first, p.last) == (7, 8)
+      assert map(p.calls, c => c.names[0]) == ["load_cell", "load_cell", "add", "store_cell"]
+      assert str.starts_with(p.program, "use explore_probe\n")
+      assert str.contains(p.program, "explore_probe.tap3(trace3(\"vadd\", In(F64, g), In(F64, g), Out(F64, g), vadd), \"vadd\", In(F64, g), In(F64, g), Out(F64, g), vadd)")
+    }
+    Err(e) -> { assert e == "" }
+  }
+}
+
+test "a program with no plain trace call, or two, is not mapped and says so" {
+  assert failed(plan("fn main() = ()\n", "Module\n  Fn main pub=false eff= name@3..7 @0..14\n", dev()))
+  assert failed(plan(VADD_CODE, "", dev()))
+}
+
+test "the recording is read only when it ends" {
+  let whole = "@@tile text a\n@@tile ops 3\n@@tile head 1-2\n@@tile call 0 -1 add 2-3\n@@tile tail 3-4\n@@tile end\nuser line\n"
+  match read_recording(whole) {
+    Ok(r) -> {
+      assert r.text == ["a"]
+      assert r.rows == [Row { id: 0, parent: -1, name: "add", lines: ["2-3"] }]
+      assert (r.ops, r.head, r.tail) == ("3", "1-2", "3-4")
+    }
+    Err(e) -> { assert e == "" }
+  }
+  assert failed(read_recording(str.replace(whole, "@@tile end\n", "")))
+  assert failed(read_recording("hello\n"))
+  assert failed(read_recording("@@tile error the call marks changed the program\n"))
+}
+
+test "the pairing writes the map, and stops at the first name that differs" {
+  match (plan(VADD_CODE, VADD_DUMP, dev()), read_recording("@@tile text m\n@@tile text add\n@@tile ops 5\n@@tile head 1-2\n@@tile call 0 -1 load_cell 2-3\n@@tile call 1 -1 load_cell 3-4\n@@tile call 2 -1 add 4-5\n@@tile call 3 -1 store_cell 5-6\n@@tile tail 6-7\n@@tile end\n")) {
+    (Ok(p), Ok(rec)) -> {
+      match tile_map(VADD_CODE, p, rec) {
+        Ok(text) -> {
+          assert str.contains(text, "kernel vadd\nfn 7-8\nops 5\nhead 1-2\n")
+          assert str.contains(text, "call 0 -1 load_cell 8:23-8:35 8:23-8:32 2-3\n")
+          assert str.contains(text, "call 1 -1 load_cell 8:37-8:49 8:37-8:46 3-4\n")
+          assert str.contains(text, "call 3 -1 store_cell 8:3-8:51 8:3-8:13 5-6\n")
+        }
+        Err(e) -> { assert e == "" }
+      }
+      let swapped = Recording { ..rec, rows: [Row { id: 0, parent: -1, name: "load_cell", lines: [] }, Row { id: 1, parent: -1, name: "mul", lines: [] }] }
+      assert failed(tile_map(VADD_CODE, p, swapped))
+    }
+    _ -> { assert false }
+  }
+}
+
+test "the names the recording sees are the called marks of dev.dawn" {
+  assert dev_names("pub fn a() = called(\"alpha\", () => 1)\npub fn b() = called(\"beta\", () => 2)\ncalled(\"alpha\"") == ["alpha", "beta"]
+}
+
+test "the probe is the module the plan names, one tap for each marker count" {
+  let src = probe_source()
+  for k in [1, 2, 3, 4, 5] {
+    assert str.contains(src, "pub fn tap${k}[")
+  }
+}

@@ -1,0 +1,37 @@
+use std/dtype.{F64}
+use std/io
+use std/float.{INFINITY}
+use tileir/dev.{Dev, Param, Tile, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, reduce_max, reduce_sum, d_range}
+use tileir/prog.{trace5, cells, In, Out, Scalar, FREE_AXIS}
+use tileir/render.{render}
+
+const ATT_M: Int = 64
+const ATT_N: Int = 64
+const ATT_D: Int = 32
+const FA_BQ: Int = 32
+const FA_BK: Int = ATT_D
+
+fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float]) -> Unit !Dev = {
+  let tq = load_cell(q)
+  var m: Tile[Float] = full([FA_BQ, 1], -INFINITY)
+  var l: Tile[Float] = full([FA_BQ, 1], 0.0)
+  var acc = zeros(o)
+  for j in d_range(0, ATT_N / FA_BK) {
+    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
+    let m_new = max(m, reduce_max(s, keepdims: true))
+    let p = exp(s - m_new)
+    let alpha = exp(m - m_new)
+    l = l * alpha + reduce_sum(p, keepdims: true)
+    acc = mma(p, load_at(v, [j]), acc * alpha)
+    m = m_new
+  }
+  store_cell(o, acc / l)
+}
+
+pub fn main() -> Unit !io = {
+  let kv = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along: [FREE_AXIS, 1])
+  let (prog, _e) = trace5("flash_attn",
+    In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, kv), In(F64, kv),
+    Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), flash_attn)
+  io.print(render(prog))
+}

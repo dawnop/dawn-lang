@@ -15,9 +15,9 @@ use std/str
 use std/io
 use std/io.{Instant}
 use play/contract.{parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
-use play/exec.{CompilerId, tile_ready, tick, ms_since}
-use play/view.{build_view, respond, cache_key, Viewed, Mapped, Done, tile_view, TileShown, TileFailed}
-use play/host.{Host, JobResult, JRun, JCheck, JView, JTile, JOutcome, JViewRaw, JBroken}
+use play/exec.{CompilerId, tile_ready, tick, ms_since, TileRaw, TileMapped, TilePlain}
+use play/view.{build_view, respond, cache_key, Viewed, Mapped, Done, tile_view, tile_mapped, Tiled, TileShown, TileFailed}
+use play/host.{Host, JobResult, JRun, JCheck, JView, JTile, JOutcome, JViewRaw, JTileRaw, JBroken}
 
 pub type Reply = { status: Int, body: String }
 
@@ -161,7 +161,7 @@ fn tile_ir(host: Host, view: View, code: String) -> Reply !io =
       None ->
         match host.call(COMPILE_WAIT_SECS, JTile(code)) {
           None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
-          Some(JOutcome(outcome)) -> match tile_view(outcome) {
+          Some(JTileRaw(made)) -> match tiled(code, made) {
             TileFailed(status, body) -> raw(status, JSON_CT, body)
             TileShown(rest) -> {
               host.keep_put(key, kept_line(200, "S", rest))
@@ -171,6 +171,14 @@ fn tile_ir(host: Host, view: View, code: String) -> Reply !io =
           Some(other) -> failed(other)
         }
     }
+  }
+
+# The Tile IR view's answer from what the job came to: the kernel's pairing as
+# a view of its own, or the program's output as the pane.
+fn tiled(code: String, raw: TileRaw) -> Tiled =
+  match raw {
+    TileMapped(map, golden, _ms) -> tile_mapped(code, map, golden)
+    TilePlain(outcome, why) -> tile_view(outcome, why)
   }
 
 fn compile_view(host: Host, view: View, code: String, target: String) -> Reply !io = {

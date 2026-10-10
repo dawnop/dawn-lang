@@ -182,6 +182,22 @@ budgets, the same 64 KiB output read-back through files the runner opened.
 - A 4 s cold request locally (2.5 s compile of the package, 0.2 s run), so it
   holds a permit about as long as a `/run`.
 
+### Call pairing for the Tile IR view (2026-10-10)
+
+The Tile IR view also tries to pair the kernel's calls with the source
+(docs/playground-compile-design.md, K6). That adds no unsandboxed execution
+and no new permit: `dawn parse` of the visitor's text, then `dawn build` and
+`java -jar` of a project in which the visitor's `src/main.dawn` has its
+`traceN` call wrapped by the runner's own `src/explore_probe.dawn`, are all
+units of the kind above, through the same wrapper, properties and the same two
+permits. Limits: the parse output is read up to 4 MiB (more syntax than 120,000
+nodes is not paired), the run output up to the usual 64 KiB (a recording that
+does not fit is not read), and a timeout in either unit is answered as it is
+and not retried as a plain run. A program that cannot be paired is run once
+more as it is (the earlier behaviour), after the failed attempt and never after
+a timeout, so a cold request can use two project builds, each inside the 30 s
+compile budget.
+
 ## Cross-uid work dir — resolved on first deploy (2026-07-12)
 
 `DynamicUser=yes` gives each invocation a *different* transient uid, so phase 1
