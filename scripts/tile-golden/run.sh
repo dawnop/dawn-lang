@@ -356,6 +356,23 @@
 #                            (two operations, a count and two elements
 #                            each), and the reader takes the view for the
 #                            count and loses the operand stream
+#     view-inbounds-all-true
+#                            the `inbounds` array is written all true
+#                            whatever the kernel promised -> view_transpose's
+#                            text is untouched, its bytes are the same
+#                            length and differ, and tileiras refuses them
+#                            with its unnamed `failed to compile Tile IR
+#                            program`: its source view has a padding value
+#                            and a promised load over one is not assembled
+#                            (docs 6.32)
+#     view-inbounds-promise-dropped
+#                            the array is written all false whatever the
+#                            kernel promised -> view_inbounds's text is
+#                            untouched, its bytes are the same length and
+#                            differ, tileiras ACCEPTS them, and the cubin's
+#                            code is the unpromised kernel's, byte for byte:
+#                            the one claim here only the assembler's output
+#                            can see
 #     header-minor-still-3   the header says 13.3 while the body is written
 #                            in the 13.4 shapes -> view_transpose's text is
 #                            untouched, its bytes differ in the tenth byte
@@ -485,6 +502,7 @@ kernels=(
   view_dyn_transpose view_tensor_shape view_index_space
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
   insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg
+  view_inbounds view_inbounds_off view_inbounds_dim
   flash_attn idx_softmax carry_extent flash_attn_bf16
   scalar_scale scalar_len scalar_loop scalar_wide)
 cc_bin="${CC:-cc}"
@@ -604,6 +622,8 @@ mutants=(
   scalar-dtype-as-i32
   scalar-arg-index-shifted
   scale-baked-again
+  view-inbounds-all-true
+  view-inbounds-promise-dropped
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -776,6 +796,34 @@ raise SystemExit(1)
 PY
 }
 
+# A digest of the code a cubin holds: the contents of every `.text.*` section,
+# without the names. Two kernels that differ only in their name and in what
+# they promise have different cubins whatever the promise did, so the cubins
+# themselves say nothing about it; their code does.
+cubin_text() { # cubin
+  python3 - "$1" <<'PY'
+import hashlib
+import struct
+import sys
+
+data = open(sys.argv[1], "rb").read()
+shoff = struct.unpack_from("<Q", data, 0x28)[0]
+shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3A)
+sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+names = sections[shstrndx][4]
+h = hashlib.sha256()
+n = 0
+for name, _kind, _flags, _addr, off, size, _link, _info, _align, _entsize in sections:
+    end = data.index(b"\0", names + name)
+    if data[names + name:end].startswith(b".text."):
+        h.update(data[off:off + size])
+        n += 1
+if n == 0:
+    raise SystemExit("no .text section in " + sys.argv[1])
+print(h.hexdigest())
+PY
+}
+
 # One OBJECT symbol of the cubin, as `<binding> <size>`, or nothing when the
 # name is not in the table. Binding is the ELF number: 0 LOCAL, 1 GLOBAL.
 # This is what the dialect's `symbol_visibility` reaches -- `tileiras` gives
@@ -940,6 +988,15 @@ for k in "${kernels[@]}"; do
     fi
     has_global_func "$work/$k.cubin" "$k" || fail "$k: the cubin has no GLOBAL FUNC named $k"
     echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, FUNC GLOBAL $k, tileiras V$want_tileiras, $arch)"
+    if [ "$k" = view_inbounds ]; then
+      # The promise reaches the code: the same copy with no promise is
+      # another program (knife T18). Its name differs, so compare the code.
+      assemble "$here/view_inbounds_off.tilebc" "$work/view_inbounds_off.cubin" "$arch" ||
+        { cat "$work/view_inbounds_off.cubin.log" >&2; fail "view_inbounds_off.tilebc: tileiras refused it at $arch"; }
+      [ "$(cubin_text "$work/$k.cubin")" != "$(cubin_text "$work/view_inbounds_off.cubin")" ] ||
+        fail "view_inbounds: the promised copy and the unpromised one assemble to the same code, so the promise reaches nothing"
+      echo "PASS  inbounds: view_inbounds and view_inbounds_off assemble to different code at $arch"
+    fi
     if [ "$k" = global_syms ]; then
       check_global_syms_symbols "$work/$k.cubin"
       echo "PASS  symbols: global_syms's cubin has @shown and @frozen GLOBAL and @hidden LOCAL, 1024 bytes each"
@@ -2484,6 +2541,49 @@ if run_item scale-baked-again; then
   grep -Fq 'reshape %arg4' "$here/flash_attn.mlir" ||
     fail "scale-baked-again: the golden does not read its scale parameter, so the mutant says nothing"
   echo "PASS  mutant: scale-baked-again (flash_attn.mlir and .tilebc red: the scale is a constant again and %arg4 is unread)"
+fi
+
+# 80. The `inbounds` array is written all true, whatever the kernel asked
+#     for. view_transpose reads through a view with a padding value, and a
+#     load that promises anything over one is refused by tileiras with a
+#     message that names nothing (the lowering refuses it by name, so a
+#     program cannot reach the assembler this way; the writer can).
+if run_item view-inbounds-all-true; then
+  mutant_project view-inbounds-all-true bytecode.dawn
+  writer_mutant_checks view-inbounds-all-true view_transpose same-size \
+    "failed to compile Tile IR program"
+fi
+
+# 81. The array is written all false, whatever the kernel asked for. The
+#     bytes differ from view_inbounds.tilebc in the array alone and the
+#     assembler accepts them, as it accepts every promise it can honour; the
+#     one place the promise shows is the code, which here is exactly the
+#     unpromised kernel's. Needs the assembler, so without it only the
+#     bytes are checked.
+if run_item view-inbounds-promise-dropped; then
+  mutant_project view-inbounds-promise-dropped bytecode.dawn
+  mutant_run_bytecode view-inbounds-promise-dropped view_inbounds
+  for backend in jvm native; do
+    out="$work/m-view-inbounds-promise-dropped.view_inbounds.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] ||
+      { cat "$work/m-view-inbounds-promise-dropped.view_inbounds.$backend.out.err" >&2; fail "view-inbounds-promise-dropped: view_inbounds did not encode on $backend"; }
+    cmp -s "$here/view_inbounds.tilebc" "$out" &&
+      fail "view-inbounds-promise-dropped mutant stayed green on $backend: view_inbounds.tilebc still matches"
+    [ "$(wc -c < "$out")" = "$(wc -c < "$here/view_inbounds.tilebc")" ] ||
+      fail "view-inbounds-promise-dropped: the mutant's bytes are not the golden's length on $backend"
+  done
+  if [ -n "$tileiras" ]; then
+    assemble "$work/m-view-inbounds-promise-dropped.view_inbounds.jvm.tilebc" "$work/m-view-inbounds-promise-dropped.cubin" "$gpu_name" ||
+      { cat "$work/m-view-inbounds-promise-dropped.cubin.log" >&2; fail "view-inbounds-promise-dropped: tileiras refused the mutant, which promises nothing"; }
+    assemble "$here/view_inbounds_off.tilebc" "$work/m-view-inbounds-promise-dropped.off.cubin" "$gpu_name" ||
+      fail "view-inbounds-promise-dropped: tileiras refused view_inbounds_off.tilebc"
+    [ "$(cubin_text "$work/m-view-inbounds-promise-dropped.cubin")" = "$(cubin_text "$work/m-view-inbounds-promise-dropped.off.cubin")" ] ||
+      fail "view-inbounds-promise-dropped: the mutant's code is not the unpromised kernel's"
+    echo "PASS  mutant: view-inbounds-promise-dropped (view_inbounds.tilebc red, same length; tileiras accepts it and its code is view_inbounds_off's)"
+  else
+    echo "PASS  mutant: view-inbounds-promise-dropped (view_inbounds.tilebc red on both backends)"
+    echo "SKIP  mutant: view-inbounds-promise-dropped not handed to tileiras (--without-tileiras)"
+  fi
 fi
 
 _item_tick ""

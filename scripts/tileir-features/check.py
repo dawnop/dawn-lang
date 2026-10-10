@@ -58,7 +58,7 @@ STATUSES = ("implemented", "unimplemented", "deferred", "structural")
 # here; it is listed because the set is the record of which knives are done
 # and not only of which ones a row may cite.
 LANDED_KNIVES = {"T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
-                 "T12", "T13", "T15", "T16", "T17", "TA", "TG"}
+                 "T12", "T13", "T15", "T16", "T17", "T18", "TA", "TG"}
 
 
 class Ledger:
@@ -1208,16 +1208,16 @@ def attr_cases(good, bytecode, files, ledger):
         # The anchor has moved with the table. It was a deferred row from
         # knife T10 on (padding.neg_inf, then the atomic modes), and the last
         # of those, `rmw.xchg`, became implemented with knife T17. What is
-        # left unimplemented is 13.4's `ptr_attr.none`, planned for T18, so
+        # left unimplemented is 13.4's `ptr_attr.none`, planned for T21, so
         # the case puts it under a knife that HAS landed.
         ("an unimplemented row under a knife that has landed",
-         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T18 ",
+         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T21 ",
                       "ptr_attr.none                | 0 | 13.4 | unimplemented | T8  "),
          "so its knife is a planned one"),
-        # No row is deferred since knife T17, so this one makes the T18 row
+        # No row is deferred since knife T17, so this one makes the T21 row
         # deferred and leaves its exemption column at `-`.
         ("a deferred row with no reason",
-         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T18 ",
+         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T21 ",
                       "ptr_attr.none                | 0 | 13.4 | deferred      | -   "),
          "is deferred with no named reason"),
         ("an empty ledger", "# nothing\n",

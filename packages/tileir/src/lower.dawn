@@ -49,7 +49,7 @@
 use std/list
 use std/map
 use std/str
-use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, padding_present}
+use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, NoPadding, padding_present, padding_name}
 use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
@@ -302,9 +302,9 @@ pub type Instr =
   | GetTensorShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
   | GetIndexSpaceShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
   | LoadViewTile(dst: Int, tok_out: Int, view: Ref, view_ty: Ty, indices: List[Ref],
-    idx_tys: List[Ty], ty: Ty, tok_in: Ref)
+    idx_tys: List[Ty], ty: Ty, tok_in: Ref, inbounds: List[Bool])
   | StoreViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty, indices: List[Ref],
-    idx_tys: List[Ty], tok_in: Ref)
+    idx_tys: List[Ty], tok_in: Ref, inbounds: List[Bool])
   | AtomicRedViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty,
     indices: List[Ref], idx_tys: List[Ty], mode: String, scope: String, tok_in: Ref)
   | Ret
@@ -432,6 +432,38 @@ fn shape_query(l0: L, dst: Int, src: Ref, src_ty: Ty, dim: Int, rank: Int,
 # `view_index_tys` is where the difference lives: every view but a
 # gather/scatter one wants a rank-0 i32 tile at every position, and that one
 # wants the 1D tile of row numbers at `sparse_dim`.
+# The `inbounds` array of a view load or store, one entry an index: the empty
+# list a kernel writes for "no promise" becomes all false, so the writer
+# never has two spellings of one thing, and any other length is refused here,
+# where the view's rank is known.
+fn inbounds_of(inbounds: List[Bool], rank: Int, what: String) -> List[Bool] =
+  if len(inbounds) == 0 {
+    list.map(range(0, rank), _k => false)
+  } else if len(inbounds) != rank {
+    panic("tileir: ${what} gives ${len(inbounds)} inbounds entries for ${rank} index operand(s); give none or one an index")
+  } else {
+    inbounds
+  }
+
+# A load that promises any dimension in bounds over a view that has a padding
+# value. `tileiras` 13.4.92 answers every such program with the unnamed
+# `failed to compile Tile IR program`, whatever the padding value, which
+# dimension is promised and whether the tile divides the tensor (docs 6.32);
+# a promised load reads nothing past the edge, so the value would fill no
+# lane. Said here, where the view's padding is in the type, instead.
+fn refuse_promise_over_padding(vt: Ty, flags: List[Bool]) -> Unit = {
+  let padding = match vt {
+    PartitionView(_ts, _e, _sh, _st, _dm, p) -> p
+    StridedView(_ts, _tr, _e, _sh, _st, _dm, p) -> p
+    _ -> NoPadding
+  }
+  if list.any(flags, b => b) && padding_present(padding) {
+    panic("tileir: load_view promises inbounds over a view with padding `${padding_name(padding)}`; tileiras refuses that with no message, and a promised load reads no padding, so cut the view with NoPadding")
+  } else {
+    ()
+  }
+}
+
 fn view_operands(l0: L, dtype: String, view: Int, indices: List[Int],
   what: String) -> (L, Ty, Ref, List[Ref], List[Ty]) = {
   let src = ref_of(l0, view, "${what} view")
@@ -1270,21 +1302,23 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
       _ -> panic("tileir: make_gather_scatter_view names handle ${view}, which is not a tensor view")
     }
   }
-  LoadView(dst, tok_out, dtype, view, indices, tok_in) -> {
+  LoadView(dst, tok_out, dtype, view, indices, tok_in, inbounds) -> {
     let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "load_view")
     let tile = view_tile_of(vt)
+    let flags = inbounds_of(inbounds, len(idx), "load_view")
+    refuse_promise_over_padding(vt, flags)
     let (l2, d) = define(l1, dst, tile)
     let (l3, tv) = define(l2, tok_out, Token)
     emit(l3, LoadViewTile(d, tv, src, vt, idx, idx_tys, tile,
-      ref_of(l0, tok_in, "load token")))
+      ref_of(l0, tok_in, "load token"), flags))
   }
-  StoreView(tok_out, dtype, view, indices, value, tok_in) -> {
+  StoreView(tok_out, dtype, view, indices, value, tok_in, inbounds) -> {
     let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "store_view")
     let val = ref_of(l1, value, "store value")
     let tile = view_tile_of(vt)
     let (l2, tv) = define(l1, tok_out, Token)
     emit(l2, StoreViewTile(tv, src, vt, val, tile, idx, idx_tys,
-      ref_of(l0, tok_in, "store token")))
+      ref_of(l0, tok_in, "store token"), inbounds_of(inbounds, len(idx), "store_view")))
   }
   AtomicRedViewOf(tok_out, dtype, view, indices, mode, scope, value, tok_in) -> {
     # `AtomicRedViewTkoOp::verify`: the view is a TileView and not a
@@ -1591,8 +1625,8 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   MakeGatherScatterView(dst, _src, _src_ty, _ty) -> [dst]
   GetTensorShape(dsts, _src, _src_ty, _res_ty) -> dsts
   GetIndexSpaceShape(dsts, _src, _src_ty, _res_ty) -> dsts
-  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_tys, _ty, _tok_in) -> [dst, tok_out]
-  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _tok_in) -> [tok_out]
+  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_tys, _ty, _tok_in, _ib) -> [dst, tok_out]
+  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _tok_in, _ib) -> [tok_out]
   AtomicRedViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _mode, _scope,
     _tok_in) -> [tok_out]
   Ret -> []
