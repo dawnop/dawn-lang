@@ -110,10 +110,48 @@ export class Reactor {
     return this.#keep(this.request(request));
   }
 
+  /**
+   * The host's answer to a `fetch` an earlier reply asked for: a later turn,
+   * against the model held here, carrying the tag the guest chose and the
+   * outcome as a value. `outcome` is `{ ok: true, body }` or
+   * `{ ok: false, error }` (what `runFetch` answers); a failure is an ordinary
+   * supply and not an error here, because the guest's application is the one
+   * that decides what a missing resource means.
+   */
+  supply(tag, outcome) {
+    const request = { op: 'supply', model: this.model, tag, ok: outcome.ok };
+    if (outcome.ok) request.body = outcome.body;
+    else request.error = outcome.error;
+    return this.#keep(this.request(request));
+  }
+
   // An error reply carries no model and no patches, so the one already held
   // stays valid: a failed turn leaves the page exactly as it was.
   #keep(reply) {
     if (reply.ok) this.model = reply.model;
     return reply;
+  }
+}
+
+/**
+ * Do one fetch a reply asked for, and answer its outcome as a value:
+ * `{ ok: true, body }` for a 2xx with its text, `{ ok: false, error }` for
+ * anything else -- a status outside 2xx (`HTTP 404`), a network failure, a
+ * body that could not be read. It never throws and never rejects, because the
+ * host acting for a guest that cannot act for itself has no one to throw at:
+ * the failure goes back to the guest as the answer it asked for.
+ *
+ * \`fetchImpl\` is read when called, not when this module loads, so a harness
+ * can stub \`globalThis.fetch\`. A relative \`url\` resolves against the
+ * host's own base (a worker's is its script's, so applications name resources
+ * by absolute path).
+ */
+export async function runFetch(url, fetchImpl = (...a) => globalThis.fetch(...a)) {
+  try {
+    const res = await fetchImpl(url);
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return { ok: true, body: await res.text() };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
   }
 }

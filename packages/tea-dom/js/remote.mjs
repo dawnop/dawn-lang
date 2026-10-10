@@ -49,8 +49,15 @@ export class Remote {
     this.next = 0;
     this.waiting = new Map();
     this.dead = null;
+    this.onfetched = null;
     worker.onmessage = (ev) => {
-      const { id, reply, thrown } = ev.data;
+      const { id, reply, thrown, fetched } = ev.data;
+      if (fetched !== undefined) {
+        // a fetch the guest asked for has finished (worker.mjs); `mount`
+        // turns it into a queued supply
+        if (this.onfetched) this.onfetched(fetched);
+        return;
+      }
       const w = this.waiting.get(id);
       if (!w) return;
       this.waiting.delete(id);
@@ -121,6 +128,14 @@ export class Remote {
       pump();
     }
 
+    // A finished fetch is a turn like any other and waits its place in the
+    // queue: behind an event already sent, whose address was recovered against
+    // the document as it stands, and ahead of nothing. It carries no element.
+    remote.onfetched = ({ tag, outcome }) => {
+      queue.push({ op: 'supply', tag, outcome });
+      pump();
+    };
+
     function idle() {
       if (!busy && queue.length === 0) return Promise.resolve();
       return new Promise((resolve) => idlers.push(resolve));
@@ -182,6 +197,8 @@ export class Remote {
           if (path === null) continue;
           request = { op: 'event', path, event: job.event };
           if (job.payload !== undefined) request.payload = job.payload;
+        } else if (job.op === 'supply') {
+          request = { op: 'supply', tag: job.tag, outcome: job.outcome };
         } else {
           request = { op: 'init' };
           if (job.flags !== undefined) request.flags = job.flags;

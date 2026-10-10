@@ -99,6 +99,10 @@ record=0
 # transcripts drive the synchronous host, where a turn cannot be queued, an
 # address cannot go stale and a reply cannot land behind the reader's typing.
 #
+# fetch.sh does it for the host half of a `Fetch` command (the executor, the
+# worker, the page's queue, app.mjs): the guest only describes the request, so
+# nothing a transcript records shows whether the host did it, and in what order.
+#
 # collect.sh is the odd one out: it needs bin/dawn rather than node, and what
 # it is about is the construction of a child list rather than the bridge. A
 # transcript is handed a finished node, so how the node was built is invisible
@@ -117,6 +121,7 @@ record=0
 "$(dirname "${BASH_SOURCE[0]}")/payload.sh"
 "$(dirname "${BASH_SOURCE[0]}")/foreign.sh"
 "$(dirname "${BASH_SOURCE[0]}")/remote.sh"
+"$(dirname "${BASH_SOURCE[0]}")/fetch.sh"
 "$(dirname "${BASH_SOURCE[0]}")/collect.sh"
 "$(dirname "${BASH_SOURCE[0]}")/flags.sh"
 

@@ -49,6 +49,7 @@ use std/map
 use json/value.{Json, JStr, JInt, JArr, JObj, JBool, error_text}
 use json/render.{render}
 use json/parser.{parse}
+use tea_core/cmd.{FetchReq}
 use tea_core/diff.{
   Patch,
   Replace,
@@ -80,9 +81,18 @@ use node.{Node, Text, Elem, On, NoData, Value, Key, with_key}
 ## admits one string per field and the application decodes it: putting
 ## `json/value.Json` in here would make the inbound half as wide as whatever
 ## the page felt like sending, which is the width `payload` refused.
+##
+## `Supply` is the host answering a `Fetch` an earlier reply asked for: the
+## model as the host holds it now, the `tag` the guest chose, and the outcome
+## as a value. A failed request -- no network, a non-2xx status -- is `Err`
+## with the host's sentence, not a malformed line, because the application is
+## the one that decides what a missing resource means. On the wire the outcome
+## is `"ok":true,"body":<string>` or `"ok":false,"error":<string>`, and any
+## other shape is `Bad`.
 pub type Request =
   | Init(flags: Option[String])
   | Event(model: String, path: List[Int], event: String, payload: Option[String])
+  | Supply(model: String, tag: String, outcome: Result[String, String])
   | Bad(reason: String)
 derive Show
 
@@ -211,7 +221,20 @@ pub fn enc_patch[M](p: Patch[Node[M]]) -> Json =
 ## `render` the tree spelling uses, and the pieces are joined once at the end.
 ## `enc_node`, `enc_self` and `enc_patch` stay as the readable statement of the
 ## shape; this is the same shape, written for speed.
-pub fn reply_ok[M](model: String, ps: List[Patch[Node[M]]]) -> String = {
+pub fn reply_ok[M](model: String, ps: List[Patch[Node[M]]]) -> String =
+  reply_ok_asking(model, ps, [])
+
+## `reply_ok` for a turn whose commands asked the host to fetch. The requests
+## ride after the patches as `"fetch":[{"url":..,"tag":..}]`, and the field is
+## absent when there are none, so every reply that asked for nothing is
+## byte-identical to what it was before the arm existed (the recorded
+## transcripts rely on that). The host acts on them after it has applied the
+## patches; the guest has done nothing but name them.
+pub fn reply_ok_asking[M](
+  model: String,
+  ps: List[Patch[Node[M]]],
+  asked: List[FetchReq],
+) -> String = {
   var out: List[String] = ["{\"ok\":true,\"model\":", quoted(model), ",\"patches\":["]
   var first = true
   for p in ps {
@@ -221,7 +244,13 @@ pub fn reply_ok[M](model: String, ps: List[Patch[Node[M]]]) -> String = {
     out = put_patch(out, p)
     first = false
   }
-  join(out ++ ["]}"], "")
+  if list.is_empty(asked) {
+    join(out ++ ["]}"], "")
+  } else {
+    let reqs = list.map(asked, a =>
+        "{\"url\":" ++ quoted(a.url) ++ ",\"tag\":" ++ quoted(a.tag) ++ "}")
+    join(out ++ ["],\"fetch\":[", join(reqs, ","), "]}"], "")
+  }
 }
 
 fn quoted(s: String) -> String = render(JStr(value: s))
@@ -373,6 +402,25 @@ pub fn decode_request(line: String) -> Request =
                   "an `event` needs `model`, an integer `path` and `event`, " ++
                   "and a `payload` if present must be a string",
               )
+          }
+        Some("supply") ->
+          match (
+            as_string(field(entries, "model")),
+            as_string(field(entries, "tag")),
+            field(entries, "ok"),
+          ) {
+            (Some(m), Some(tag), Some(JBool(true))) ->
+              match as_string(field(entries, "body")) {
+                Some(body) -> Supply(model: m, tag: tag, outcome: Ok(body))
+                None -> Bad(reason: "a successful `supply` needs a string `body`")
+              }
+            (Some(m), Some(tag), Some(JBool(false))) ->
+              match as_string(field(entries, "error")) {
+                Some(why) -> Supply(model: m, tag: tag, outcome: Err(why))
+                None -> Bad(reason: "a failed `supply` needs a string `error`")
+              }
+            _ ->
+              Bad(reason: "a `supply` needs `model`, `tag` and a boolean `ok`")
           }
         Some(other) -> Bad(reason: "unknown op `" ++ other ++ "`")
       }
@@ -636,6 +684,52 @@ test "a payload is optional, is a string, and is nothing else" {
   match decode_request("{\"op\":\"event\",\"model\":\"3\",\"path\":[1],\"event\":\"input\"," ++
       "\"payload\":null}") {
     Bad(_) -> { assert true }
+    _ -> { assert false }
+  }
+}
+
+test "a reply that asked for nothing is the reply it always was" {
+  let none: List[Patch[Node[ProbeMsg]]] = []
+  let asked: List[FetchReq] = []
+  assert reply_ok_asking("m", none, asked) == reply_ok("m", none)
+  assert reply_ok("m", none) == "{\"ok\":true,\"model\":\"m\",\"patches\":[]}"
+}
+
+test "fetches ride after the patches, in order, escaped like any string" {
+  let none: List[Patch[Node[ProbeMsg]]] = []
+  let asked = [
+    FetchReq { url: "/a.json", tag: "a" },
+    FetchReq { url: "/q\"x", tag: "t\n" },
+  ]
+  assert reply_ok_asking("m", none, asked) ==
+    "{\"ok\":true,\"model\":\"m\",\"patches\":[],\"fetch\":[" ++
+    "{\"url\":\"/a.json\",\"tag\":\"a\"},{\"url\":\"/q\\\"x\",\"tag\":\"t\\n\"}]}"
+}
+
+test "a supply carries its outcome as a value, failure included" {
+  assert decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":true,\"body\":\"hi\"}") ==
+    Supply(model: "3", tag: "t", outcome: Ok("hi"))
+  assert decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":true,\"body\":\"\"}") ==
+    Supply(model: "3", tag: "t", outcome: Ok(""))
+  assert decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":false,\"error\":\"HTTP 404\"}") ==
+    Supply(model: "3", tag: "t", outcome: Err("HTTP 404"))
+}
+
+test "a malformed supply is an answer, not a panic" {
+  match decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":true}") {
+    Bad(reason) -> { assert str.contains(reason, "string `body`") }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":false}") {
+    Bad(reason) -> { assert str.contains(reason, "string `error`") }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"supply\",\"model\":\"3\",\"ok\":true,\"body\":\"x\"}") {
+    Bad(reason) -> { assert str.contains(reason, "`tag`") }
+    _ -> { assert false }
+  }
+  match decode_request("{\"op\":\"supply\",\"model\":\"3\",\"tag\":\"t\",\"ok\":\"yes\",\"body\":\"x\"}") {
+    Bad(reason) -> { assert str.contains(reason, "boolean `ok`") }
     _ -> { assert false }
   }
 }

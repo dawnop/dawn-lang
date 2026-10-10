@@ -780,7 +780,9 @@ en 122.9 KB gzip 里，找的部分 69.6 KB，看的部分 51.5 KB；zh 是 67.5
 请求节片段。行先以标题与出处画出，片段到达后补上摘录并重排同节的命中段（9.3 的「词最密的一段」按全文算）。
 
 **通道。** guest 保持纯函数，不做 I/O。需要宿主执行的臂加在 `tea_core/cmd` 上：`Fetch(url, tag)`，reactor 的回复带
-`cmds`，`worker.mjs` 执行 fetch，把结果作为一条消息回灌（`supply`）。这是 Cmd 的 io 臂的第一个成员，不是搜索专用的口子；
+`cmds`，`worker.mjs` 执行 fetch，结果作为一个回合回灌（`supply`）。
+落地（刀 1）时改了草案一处：worker 不直接把结果喂给 reactor，而是报给页面，由页面按事件同一条队列排队再发，
+否则 supply 会抢在已发出的事件之前（理由与门禁在 `dom-bridge-design.md` 第十二节）。这是 Cmd 的 io 臂的第一个成员，不是搜索专用的口子；
 `search.js` 不再需要靠 restart 把正文塞进 flags（9.1），也不需要自己切查询词去决定取什么，选择权留在 guest 里
 （分词器只有一份，3 节）。
 
