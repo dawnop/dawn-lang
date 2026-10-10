@@ -77,7 +77,9 @@ assert	dict_family_is_keyed
 assert	slab_reuses_a_block
 assert	slab_never_shrinks_a_block
 assert	slab_returns_pages
+assert	slab_retains_a_burst
 assert	slab_bound_is_honoured
+assert	slab_returns_before_blocking
 assert	oversize_leaves_the_slab
 
 probe	slab_block_stays_clean_while_live
@@ -135,6 +137,21 @@ role	slab-never-retires	counted
 owner	slab-never-retires	slab_returns_pages
 red	slab-never-retires	slab_returns_pages
 red	slab-never-retires	slab_bound_is_honoured
+red	slab-never-retires	slab_retains_a_burst
+
+# The pre-decay allocator: a cap of four and an immediate release past it.
+# Pages go back, answers are right, and the only thing lost is the reuse of a
+# burst that was just freed, which is the property the decay was added for.
+role	slab-releases-at-once	counted
+owner	slab-releases-at-once	slab_retains_a_burst
+red	slab-releases-at-once	slab_retains_a_burst
+
+# The idle half: the blocking-read hook returns the surplus before the read
+# waits. Measured from outside the parked process, so no sweep of its own can
+# have run.
+role	slab-blocks-without-returning	counted
+owner	slab-blocks-without-returning	slab_returns_before_blocking
+red	slab-blocks-without-returning	slab_returns_before_blocking
 
 role	slab-swallows-oversize	counted
 owner	slab-swallows-oversize	oversize_leaves_the_slab

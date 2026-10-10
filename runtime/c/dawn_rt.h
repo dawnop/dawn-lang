@@ -577,10 +577,12 @@ void dawn_free(void *p);
 #endif
 
 /* The shape, out here because the bound is a claim about the program rather
- * than about the allocator's insides: at most DAWN_SLAB_KEEP empty slabs are
- * held per size class, over DAWN_SLAB_CLASSES classes, at 64KiB each, so no
- * more than 32MiB ever sits idle whatever the program does. Requests over
- * DAWN_SLAB_MAX are malloc's. scripts/rc-contract reads these. */
+ * than about the allocator's insides: after two quiet decay intervals at most
+ * DAWN_SLAB_KEEP empty slabs are held per size class, over DAWN_SLAB_CLASSES
+ * classes, at 64KiB each, so no more than 32MiB sits idle whatever the
+ * program did before. Between sweeps the cache is as large as the program's
+ * own peak made it. Requests over DAWN_SLAB_MAX are malloc's.
+ * scripts/rc-contract reads these. */
 #define DAWN_SLAB_GRAIN 16u /* size-class step, and the block alignment */
 #define DAWN_SLAB_MAX 2048u /* a bigger request goes to malloc */
 #define DAWN_SLAB_CLASSES (DAWN_SLAB_MAX / DAWN_SLAB_GRAIN + 1u)
@@ -594,6 +596,18 @@ void dawn_free(void *p);
  * for reuse, `retired` the slabs whose pages went back to the kernel. */
 bool dawn_slab_owns(const void *p);
 void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired);
+/* A blocking primitive calls this before it waits for an unknown time: the
+ * empty slabs a class holds above DAWN_SLAB_KEEP go back to the kernel at
+ * once. The decay clock is only read where the allocator is busy, and a
+ * process blocked in a read cannot be busy, so without this a program that
+ * allocated a burst and then sat on I/O would keep the burst for as long as
+ * it sat. */
+void dawn_slab_before_block(void);
+#ifdef DAWN_RC_CONTRACT
+/* Test-only: run the decay sweep twice, which is what two quiet intervals do
+ * (the first sweep only records how low each cache went). */
+void dawn_slab_quiesce(void);
+#endif
 #ifdef DAWN_RC_CONTRACT
 /* Test-only logical observation. mincore cannot distinguish a 32KiB tranche
  * from an eager 64KiB layout on a host whose page is itself 64KiB. */

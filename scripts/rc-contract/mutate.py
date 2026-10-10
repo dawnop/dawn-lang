@@ -55,7 +55,14 @@ MUTATIONS = {
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
     ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    /* The current slab is kept even at zero; see the heading. Reaching zero
+     * is also the one moment a steady loop that recycles a single slab gives
+     * the allocator, so it is where the decay clock is looked at, one time in
+     * DAWN_SL_PULSE so that a class holding one object at a time does not
+     * pay for a clock read per free. */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   *(void **)p = s->freelist;
@@ -67,7 +74,9 @@ MUTATIONS = {
   if (--s->used == 0) {""",
         """  if (s == dawn_sl_cur[cls]) {
     ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
@@ -86,16 +95,47 @@ MUTATIONS = {
         """  size_t cls = ((n + (DAWN_SL_GRAIN - 1)) / DAWN_SL_GRAIN) | 1u;""",
     ),
     # The load-bearing one. Empty slabs are kept without limit instead of
-    # being handed back past DAWN_SLAB_KEEP, which is what the allocator was
+    # being swept back down to DAWN_SLAB_KEEP, which is what the allocator was
     # written to do and the only property here that no answer a program
     # prints depends on. Every other assertion in this file stays green under
     # it, and so would every gate in the tree.
     "slab-never-retires": (
         "dawn_rt.c",
-        """  if (dawn_sl_empty_n[cls] < DAWN_SL_KEEP) {
-    dawn_sl_layout(s, cls);""",
-        """  if (1) {
-    dawn_sl_layout(s, cls);""",
+        """    while (low > DAWN_SL_KEEP && dawn_sl_empty[c] != NULL) {""",
+        """    while (0 && low > DAWN_SL_KEEP && dawn_sl_empty[c] != NULL) {""",
+    ),
+    # The retreat this knife came from: the cache is capped at DAWN_SLAB_KEEP
+    # and a slab past it is released the moment it empties, which is the
+    # allocator as it was before decay. Every program computes the same
+    # answers and the pages do go back; what is lost is that a loop which
+    # frees a structure and builds the next one pays a page fault for every
+    # page it had just returned.
+    "slab-releases-at-once": (
+        "dawn_rt.c",
+        """  dawn_sl_layout(s, cls);
+  dawn_sl_link(&dawn_sl_empty[cls], s, DAWN_SL_EMPTY);
+  dawn_sl_empty_n[cls]++;
+  dawn_sl_tick();""",
+        """  if (dawn_sl_empty_n[cls] >= DAWN_SL_KEEP) {
+    dawn_sl_release(s);
+    return;
+  }
+  dawn_sl_layout(s, cls);
+  dawn_sl_link(&dawn_sl_empty[cls], s, DAWN_SL_EMPTY);
+  dawn_sl_empty_n[cls]++;
+  dawn_sl_tick();""",
+    ),
+    # The blocking-read hook does nothing: a process that parks on stdin after
+    # a burst keeps the burst's empty slabs for as long as it is parked. Every
+    # answer is right and the sweeps still run for a busy program; only the
+    # idle case is lost, which no other assertion reaches.
+    "slab-blocks-without-returning": (
+        "dawn_rt.c",
+        """  if (poll(&p, 1, 0) == 0) {
+    dawn_slab_before_block();
+  }""",
+        """  if (poll(&p, 1, 0) == 0) {
+  }""",
     ),
     # The cap on what a size class covers is raised, so blocks the allocator
     # documents as malloc's come out of the reserve instead.
@@ -285,7 +325,14 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
     ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    /* The current slab is kept even at zero; see the heading. Reaching zero
+     * is also the one moment a steady loop that recycles a single slab gives
+     * the allocator, so it is where the decay clock is looked at, one time in
+     * DAWN_SL_PULSE so that a class holding one object at a time does not
+     * pay for a clock read per free. */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   *(void **)p = s->freelist;
@@ -294,7 +341,9 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
         """  if (s == dawn_sl_cur[cls]) {
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   *(void **)p = s->freelist;
@@ -315,7 +364,14 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
     ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    /* The current slab is kept even at zero; see the heading. Reaching zero
+     * is also the one moment a steady loop that recycles a single slab gives
+     * the allocator, so it is where the decay clock is looked at, one time in
+     * DAWN_SL_PULSE so that a class holding one object at a time does not
+     * pay for a clock read per free. */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   *(void **)p = s->freelist;
@@ -326,7 +382,9 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
     dawn_sl_head[cls] = p;
     ASAN_POISON_MEMORY_REGION((char *)p + sizeof(void *),
                               cls * DAWN_SL_GRAIN - sizeof(void *));
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   *(void **)p = s->freelist;
