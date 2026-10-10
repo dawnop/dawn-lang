@@ -377,7 +377,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19608s (the most this file's `3x` claims may add up to)
+# push-total: 19633s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3277,8 +3277,16 @@ jobs:
     # runner, 6s: 698 + 6 = 704s, plus a tenth, rounded up to 5s, 775s
     # (770s before). 3x that is 2325s, inside the 39 minutes already set;
     # to be restated from the first observed runs.
-    # budget: 3x 775s planning value (658s worst observed on #605, plus 40s for the compile view's contract cases, plus 6s for the play-ui tests, plus a tenth)
-    timeout-minutes: 39
+    # 2026-10-11, the search budget gate (site/search-budget.sh, three numbers
+    # in place of one gzip total) runs at the end of site/build.sh and costs a
+    # JVM start and the panel's own code over 27 sample queries: 4s locally.
+    # Its negative controls (site/search-budget-selftest.sh) are a step of
+    # their own after the build, 7s locally, no JVM. Both doubled for the
+    # runner, 22s: 704 + 22 = 726s, plus a tenth, rounded up to 5s, 800s
+    # (775s before). 3x that is 2400s, the 40 minutes set below; to be
+    # restated from the first observed runs.
+    # budget: 3x 800s planning value (658s worst observed on #605, plus 40s for the compile view's contract cases, plus 6s for the play-ui tests, plus 22s for the search budget gate and its negative controls, plus a tenth)
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -3336,6 +3344,14 @@ jobs:
       # differential below reads. They stay in this order.
       - name: site builds end-to-end (incl. the Playground editor bundle)
         run: ./site/build.sh
+
+      # The search budget gate ran inside the build above and was green. This
+      # shows it can go red: an oversized fragment, an oversized index and
+      # fragments each inside their budget but together over the first-query
+      # budget are made on a copy of the dist, and each has to fail on its
+      # own number and on no other. It reuses the panel run the build left.
+      - name: search budget gate negative controls
+        run: ./site/search-budget-selftest.sh
 
       # The Playground editor's own selftests (the compile pane's DOM contract
       # against style.css among them) ran in no workflow. They need

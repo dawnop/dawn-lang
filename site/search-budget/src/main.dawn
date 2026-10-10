@@ -1,0 +1,100 @@
+# Which text fragments the search panel fetches for a query, run on the built
+# assets with the panel's own code. site/search-budget.sh turns the answer into
+# bytes and holds it against the budgets (docs/site-search-design.md 13.7).
+#
+# Why the panel's own code and not a model of it: "the fragments a query needs"
+# is whatever `update` asks for, and `update` is a ranking, the look-ahead, the
+# unchecked Chinese candidates and the cap on them, all of which change when
+# someone edits the panel. A second implementation here would pass while the
+# panel got dearer. So this program starts the panel from the same flags the
+# page builds (the title index and the body index, as written to site/dist),
+# types the query whole, and answers every `Fetch` the panel commands from the
+# files in the dist, the way the worker does, until the panel asks for nothing
+# more. What it prints is the fragments, in the order they were asked.
+#
+# The query is typed whole, as a paste or a shared link would be. Typed one key
+# at a time the reader also fetches the rows of each prefix, which the browser's
+# cache serves again when a later prefix names the same fragment; that overhead
+# depends on timing and on typing speed, and a gate has to measure the same
+# thing every run.
+#
+# Input: DAWN_SEARCH_DIST (default site/dist) and DAWN_SEARCH_QUERIES (default
+# site/search-queries.txt), one `en <query>` or `zh <query>` per line, `#` for
+# comments. Output, one line per query:
+#   query <lang> <fragment path under assets/> ... <TAB> <query>
+# Failing to read an asset is a panic: a gate that reads nothing must not pass.
+
+use std/io
+use std/io.{Fs, getenv, with_fs_real, with_env_real}
+use std/str
+use std/list
+use tea_core/cmd.{fold_cmds}
+use tea_dom_search/search.{State, Model, Typed, init, update, absorb, supplied}
+
+fn must(path: String) -> String !Fs =
+  match io.read_file(path) {
+    Ok(t) -> t
+    Err(e) -> panic("search-budget: cannot read ${path}: ${e}")
+  }
+
+## The panel as the page starts it for one language: flags are the title index
+## and the body index, verbatim.
+fn started(dist: String, lang: String) -> (State, Model) !Fs = {
+  let index = str.trim(must("${dist}/assets/search-${lang}.json"))
+  let body = str.trim(must("${dist}/assets/search-body-${lang}.json"))
+  let flags = "{\"root\":\".\",\"q\":\"\",\"index\":${index},\"body\":${body}}"
+  init(Some(flags))
+}
+
+## The query typed whole, and every fetch it leads to answered from the dist:
+## the fragment paths asked for, in the order asked.
+fn fragments_for(dist: String, lang: String, q: String) -> List[String] !Fs = {
+  let (state0, model0) = started(dist, lang)
+  var state = state0
+  let (m1, wanted) = fold_cmds(model0, Typed(text: q), (acc, x) => update(state0, acc, x))
+  var model = m1
+  var queue = wanted
+  var asked: List[String] = []
+  while len(queue) > 0 {
+    let f = queue[0]
+    queue = list.drop(queue, 1)
+    if not list.contains(asked, f.url) {
+      asked = asked ++ [f.url]
+    }
+    let outcome: Result[String, String] = match io.read_file("${dist}/assets/${f.url}") {
+      Ok(text) -> Ok(text)
+      Err(e) -> Err("${e}")
+    }
+    state = absorb(state, f.tag, outcome)
+    let here = state
+    let (m2, more) = fold_cmds(model, supplied(f.tag, outcome), (acc, x) => update(here, acc, x))
+    model = m2
+    queue = queue ++ more
+  }
+  asked
+}
+
+pub fn main() -> Unit !io = {
+  let dist = with_env_real(() => unwrap_or(getenv("DAWN_SEARCH_DIST"), "site/dist"))
+  let queries = with_env_real(() => unwrap_or(getenv("DAWN_SEARCH_QUERIES"), "site/search-queries.txt"))
+  with_fs_real(() => run(dist, queries))
+}
+
+fn run(dist: String, queries: String) -> Unit !Fs !io = {
+  var seen = 0
+  for line in str.split(must(queries), "\n") {
+    let l = str.trim(line)
+    if l != "" && not str.starts_with(l, "#") {
+      let lang = str.take(l, 2)
+      let q = str.trim(str.drop(l, 2))
+      if (lang != "en" && lang != "zh") || q == "" {
+        panic("search-budget: ${queries}: a line is `en <query>` or `zh <query>`, got `${l}`")
+      }
+      seen = seen + 1
+      println("query ${lang} " ++ join(fragments_for(dist, lang, q), " ") ++ "\t${q}")
+    }
+  }
+  if seen == 0 {
+    panic("search-budget: ${queries} has no queries")
+  }
+}
