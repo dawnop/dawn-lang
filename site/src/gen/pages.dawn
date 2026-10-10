@@ -22,7 +22,7 @@ use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
 use gen/packages.{read_packages, read_doc}
-use gen/search_body.{search_body}
+use gen/search_body.{search_body, BodyAssets, TextFragment, fragment_path, text_dir}
 use gen/corpus.{Corpus}
 
 # Byte IO for the assets. read_file/write_file are UTF-8 string APIs and would
@@ -172,8 +172,8 @@ pub fn gen_assets(out: String, build: (String, String), en: Corpus, zh: Corpus) 
     # (gen/search_body.dawn, contract in docs/site-search-design.md). Fetched
     # by the panel only once a reader has typed something, so a reader who
     # only looks up a title never pays for it.
-    search_body_en: emit_body(out, "search-body-en.json", search_body(en, En)),
-    search_body_zh: emit_body(out, "search-body-zh.json", search_body(zh, Zh)),
+    search_body_en: emit_body(out, "search-body-en.json", En, search_body(en, En)),
+    search_body_zh: emit_body(out, "search-body-zh.json", Zh, search_body(zh, Zh)),
     home_css: home_css,
     home_js: emit_text(out, "home.js", str.trim(must_read("site/assets/home.js"))),
     theme_js: emit_text(out, "theme.js", str.trim(must_read("site/assets/theme.js"))),
@@ -238,15 +238,33 @@ fn splice(text: String, line: String, module: String) -> String !io =
         ++ "imports, and the bundled copy would import a file that is not there")
   }
 
-## A body index, written like any text asset, with its size said in the build
-## log. The budget is in gzip bytes and this generator has no compressor, so
-## the raw count is all it can say; site/build.sh prints the gzip count beside
-## it.
-fn emit_body(out: String, name: String, text: String) -> String !Fs !io = {
-  let fp = emit_text(out, name, text)
-  let size = bytes.len(bytes.utf8(text)) + 1
-  println("  ${name}: ${size} bytes")
+## A body index, written like any text asset, and the text fragments it names,
+## each under its fingerprinted name only. The fragments get no plain-name
+## alias: the alias exists for visitors holding HTML from before the
+## fingerprint change (see [emit_asset]), and no page has ever linked a
+## fragment by any other name. The sizes are said in the build log in raw
+## bytes; the budget is in gzip bytes and this generator has no compressor, so
+## site/build.sh takes those (docs/site-search-design.md 13.7).
+fn emit_body(out: String, name: String, lang: Lang, assets: BodyAssets) -> String !Fs !io = {
+  let fp = emit_text(out, name, assets.index)
+  let size = bytes.len(bytes.utf8(assets.index)) + 1
+  println("  ${name}: ${size} bytes, ${len(assets.fragments)} text fragments")
+  match io.mkdirs("${out}/assets/${text_dir(lang)}") {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot create ${out}/assets/${text_dir(lang)}: ${e}")
+  }
+  for f in assets.fragments {
+    emit_fragment(out, lang, f)
+  }
   fp
+}
+
+fn emit_fragment(out: String, lang: Lang, f: TextFragment) -> Unit !Fs !io = {
+  let path = "${out}/assets/${fragment_path(lang, f)}"
+  match io.write_bytes(path, bytes.utf8(f.text)) {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot write ${path}: ${e}")
+  }
 }
 
 fn bridge_src(name: String) -> String !Fs = str.trim(must_read("packages/tea-dom/js/${name}"))

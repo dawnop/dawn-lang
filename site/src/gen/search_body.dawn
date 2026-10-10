@@ -5,11 +5,20 @@
 # heading. Everything under the headings -- the spec's rules, the tutorial's
 # explanations, the timeline's entries -- was unsearchable: a word that is in
 # a paragraph and not in a title found nothing. This file is the generator's
-# half of fixing that. The panel's half, which fetches this asset the first
+# half of fixing that. The panel's half, which fetches the index the first
 # time a reader types and queries it, lives in examples/projects/
-# tea_dom_search and is a separate program; the asset between them is
-# specified in docs/site-search-design.md, section 2, and this file writes
-# exactly that.
+# tea_dom_search and is a separate program; the assets between them are
+# specified in docs/site-search-design.md, sections 2 and 13, and this file
+# writes exactly that.
+#
+# Two kinds of asset since format 2 (section 13): the index, which says WHERE
+# (sections, words, postings, and how many paragraphs each section has), and
+# one text fragment per section, which says WHAT (the section's paragraphs,
+# whole). The two grow differently and are read differently: a query needs the
+# whole index and the text of only the few rows it shows, so the text is
+# fetched row by row instead of riding in the index. The fragment's name
+# carries a hash of its bytes and the index names every fragment, so a change
+# to one section changes that fragment's URL and the index's, and nothing else.
 #
 # The choices that are not obvious from the code, each argued in that
 # document:
@@ -42,32 +51,26 @@ use gen/common.{pad2}
 use gen/corpus.{Corpus, read_corpus}
 use gen/tutorial.{split_chapters}
 use gen/search.{body_terms, is_han}
+use gen/fingerprint.{fingerprint}
+use std/bytes
 use md/parser
 use std/io
 
-## The asset's format version, its first field. The panel loads no body index
+## The index's format version, its first field. The panel loads no body index
 ## whose version it does not know, so a change to the format is a change here.
-pub fn body_version() -> Int = 1
+## 2 since the text left the index (docs/site-search-design.md section 13).
+pub fn body_version() -> Int = 2
 
-## How many display columns of a paragraph its excerpt keeps, before the `…`.
-##
-## 120 and not the 240 first drafted: at 240 the excerpts alone were 68 KB of
-## the English asset gzipped and 99 KB of the Chinese one, against budgets of
-## 100 and 130 for the whole file (docs/site-search-design.md 6 has the table).
-## 120 is about two lines of the panel; 80, which would have kept English under
-## the 90 first set, was ruled too short to read.
-##
-## Columns, not code points (docs/site-search-design.md 6.5): the bound was
-## always a width on the panel, and a Han character is two columns wide. Counted
-## in code points, a Chinese excerpt carried twice the text of an English one
-## and the Chinese asset alone went over its budget.
-fn excerpt_len() -> Int = 120
+## The fragment's format version, written nowhere: the fragment is
+## `[section, [paragraph, ...]]`, and the index that names it is the one that
+## carries the version.
 
 ## The columns `c` takes on the panel: 2 for the East Asian Wide and Fullwidth
 ## characters the documents use (Unicode UAX #11) -- Han, CJK punctuation,
 ## kana, Hangul syllables and the fullwidth forms -- and 1 for everything else.
-## A subset of the table rather than all of it: the corpus is English and
-## Chinese, and a wide character missing here only lets its excerpt run long.
+## Kept here although the generator no longer cuts excerpts: the panel does, at
+## draw time, with the same table (examples/projects/tea_dom_search), and this
+## copy is what its test is pinned to.
 pub fn columns(c: Char) -> Int = {
   let n = char.code(c)
   if is_han(c) || (n >= 0x3000 && n <= 0x30FF) || (n >= 0xAC00 && n <= 0xD7A3)
@@ -85,16 +88,16 @@ pub type Section = { doc: String, href: String, title: String, paras: List[Strin
 
 ## The whole index, before it is written.
 ##
-## A paragraph that yields at least one word gets an id, its index in
-## `excerpts`, counted in (section, paragraph) order; `postings[i]` is the ids
-## of the paragraphs `terms[i]` occurs in, ascending. An excerpt keeps its
-## (section, paragraph) pair here for the tests; the asset writes the section
-## only, the id being its position.
+## A paragraph that yields at least one word gets an id, counted in (section,
+## paragraph) order; `postings[i]` is the ids of the paragraphs `terms[i]`
+## occurs in, ascending. `indexed[id]` is the (section, paragraph) pair the id
+## stands for, for the tests and for the fragments; the asset writes only how
+## many ids each section has (`counts`), the id being a running position.
 pub type BodyIndex = {
   sections: List[Section],
   terms: List[String],
   postings: List[List[Int]],
-  excerpts: List[(Int, Int, String)],
+  indexed: List[(Int, Int)],
 }
 
 # ---- sections and paragraphs -----------------------------------------------
@@ -134,7 +137,7 @@ fn row_text(cells: List[List[Inline]]) -> List[String] = {
 ## The paragraphs one block contributes, in order. A list contributes the
 ## paragraphs inside each of its items, a table one per row, a quote what is
 ## inside it. Code contributes nothing and takes no number: it is not prose,
-## and an excerpt of it would be a line of a program cut at 240 characters.
+## and a row showing it would be a line of a program.
 fn paras_of(b: Block) -> List[String] =
   match b {
     Heading(_, items) -> text_of(items)
@@ -245,39 +248,6 @@ pub fn body_sections(c: Corpus, lang: Lang) -> List[Section] =
 
 # ---- the index -------------------------------------------------------------
 
-## A paragraph as the panel shows it: whole when it is at most [excerpt_len]
-## columns wide, otherwise cut and marked with `…`. The cut is at the last blank
-## that starts at or after half the bound, so that a word is not split; text
-## with no blank there (Chinese, mostly) is cut where the bound falls. For text
-## with no wide character a column is a code point, and this is the rule
-## docs/site-search-design.md 2.1 first wrote.
-pub fn excerpt(s: String) -> String = {
-  let cs = code_points(s)
-  let n = excerpt_len()
-  # at[i]: the columns the first i code points take
-  var at: List[Int] = [0]
-  var w = 0
-  for c in cs {
-    w = w + columns(c)
-    at = at ++ [w]
-  }
-  if w <= n {
-    s
-  } else {
-    # fit: how many code points fit in the bound
-    var fit = 0
-    while at[fit + 1] <= n {
-      fit = fit + 1
-    }
-    var i = fit
-    while i >= 0 && at[i] >= n / 2 && not char.is_space(cs[i]) {
-      i = i - 1
-    }
-    let keep = if i < 0 || at[i] < n / 2 { fit } else { i }
-    from_code_points(list.take(cs, keep)) ++ "…"
-  }
-}
-
 ## Invert the sections' paragraphs. Each paragraph's words are taken once;
 ## walking the paragraphs in (section, paragraph) order makes every posting
 ## list ascending without a sort. The terms are sorted by code point, which is
@@ -285,14 +255,14 @@ pub fn excerpt(s: String) -> String = {
 pub fn build_index(sections: List[Section]) -> BodyIndex = {
   let none: List[Int] = []
   var post: Map[String, List[Int]] = map.empty()
-  var excerpts: List[(Int, Int, String)] = []
+  var indexed: List[(Int, Int)] = []
   for si in range(0, len(sections)) {
     let ps = sections[si].paras
     for pi in range(0, len(ps)) {
       let words = list.unique(body_terms(ps[pi]))
       if len(words) > 0 {
-        let id = len(excerpts)
-        excerpts = excerpts ++ [(si, pi, excerpt(ps[pi]))]
+        let id = len(indexed)
+        indexed = indexed ++ [(si, pi)]
         for w in words {
           post = map.insert(post, w, unwrap_or(map.get(post, w), none) ++ [id])
         }
@@ -305,7 +275,7 @@ pub fn build_index(sections: List[Section]) -> BodyIndex = {
     sections: sections,
     terms: terms,
     postings: list.map(terms, t => unwrap_or(map.get(table, t), none)),
-    excerpts: excerpts,
+    indexed: indexed,
   }
 }
 
@@ -325,24 +295,109 @@ pub fn gaps(ids: List[Int]) -> List[Int] = {
   out
 }
 
-## The asset's bytes, docs/site-search-design.md 2.1:
-## `[version, sections, terms, postings, excerpts]`.
-pub fn index_json(ix: BodyIndex) -> String = {
-  let sections = list.map(ix.sections, s =>
-      "[" ++ quoted(s.doc) ++ "," ++ quoted(s.href) ++ "," ++ quoted(s.title) ++ "]")
+## How many ids section `si` has: its indexed paragraphs, which are a run in
+## `indexed` because the ids are counted in section order.
+fn counts_of(ix: BodyIndex) -> List[Int] = {
+  var out: List[Int] = []
+  for si in range(0, len(ix.sections)) {
+    var n = 0
+    for e in ix.indexed {
+      let (s, _) = e
+      if s == si {
+        n = n + 1
+      }
+    }
+    out = out ++ [n]
+  }
+  out
+}
+
+## The text of section `si`: the paragraphs that have an id, whole and in id
+## order, so that the n-th of them is the section's n-th id. Empty for a
+## section with no indexed paragraph, which has no fragment.
+fn texts_of(ix: BodyIndex, si: Int) -> List[String] = {
+  var out: List[String] = []
+  for e in ix.indexed {
+    let (s, pi) = e
+    if s == si {
+      out = out ++ [ix.sections[si].paras[pi]]
+    }
+  }
+  out
+}
+
+## One fragment as it is written: `[section, [paragraph, ...]]`. The section
+## number is there so that the panel can refuse a file that is not the one it
+## asked for (a stale cache, a bad rewrite) instead of showing another
+## section's text under this section's title.
+pub fn fragment_json(si: Int, texts: List[String]) -> String =
+  "[${si},[" ++ join(list.map(texts, t => quoted(t)), ",") ++ "]]"
+
+## The name of language `lang`'s fragment directory under /assets/.
+pub fn text_dir(lang: Lang) -> String =
+  match lang {
+    En -> "search-text/en"
+    Zh -> "search-text/zh"
+  }
+
+## One written fragment: the section it holds and the file's bytes (with the
+## newline every text asset ends in; the hash is of these bytes, so the name
+## follows the file exactly as gen/fingerprint promises). `hash` is the middle
+## of the fingerprinted name; the file is `<section>.<hash>.json` in the
+## language's fragment directory.
+pub type TextFragment = { sec: Int, hash: String, text: String }
+
+fn fragments_of(ix: BodyIndex) -> List[TextFragment] = {
+  var out: List[TextFragment] = []
+  for si in range(0, len(ix.sections)) {
+    let texts = texts_of(ix, si)
+    if len(texts) > 0 {
+      let text = fragment_json(si, texts) ++ "\n"
+      let named = fingerprint("${si}.json", bytes.utf8(text))
+      # `<section>.<hash>.json`: the hash is the middle part
+      out = out ++ [TextFragment { sec: si, hash: str.split(named, ".")[1], text: text }]
+    }
+  }
+  out
+}
+
+## The file name of a fragment, relative to /assets/.
+pub fn fragment_path(lang: Lang, f: TextFragment) -> String = "${text_dir(lang)}/${f.sec}.${f.hash}.json"
+
+## The index's bytes, docs/site-search-design.md 13.4:
+## `[version, fragment_dir, sections, terms, postings, counts]`, a section
+## being `[doc, href, title, fragment_hash]` with `""` for a section that has
+## no fragment, and `counts[s]` the number of ids section `s` holds.
+pub fn index_json(ix: BodyIndex, lang: Lang, frags: List[TextFragment]) -> String = {
+  var sections: List[String] = []
+  for si in range(0, len(ix.sections)) {
+    let s = ix.sections[si]
+    var hash = ""
+    for f in frags {
+      if f.sec == si {
+        hash = f.hash
+      }
+    }
+    sections = sections
+      ++ ["[" ++ quoted(s.doc) ++ "," ++ quoted(s.href) ++ "," ++ quoted(s.title) ++ "," ++ quoted(hash) ++ "]"]
+  }
   let terms = list.map(ix.terms, t => quoted(t))
   let postings = list.map(ix.postings, ps =>
       "[" ++ join(list.map(gaps(ps), g => "${g}"), ",") ++ "]")
-  let excerpts = list.map(ix.excerpts, e => {
-    let (s, _, text) = e
-    "[${s}," ++ quoted(text) ++ "]"
-  })
-  "[${body_version()},[" ++ join(sections, ",") ++ "],[" ++ join(terms, ",") ++ "],["
-    ++ join(postings, ",") ++ "],[" ++ join(excerpts, ",") ++ "]]"
+  let counts = list.map(counts_of(ix), c => "${c}")
+  "[${body_version()}," ++ quoted(text_dir(lang)) ++ ",[" ++ join(sections, ",") ++ "],["
+    ++ join(terms, ",") ++ "],[" ++ join(postings, ",") ++ "],[" ++ join(counts, ",") ++ "]]"
 }
 
-## One language's body index, as the bytes that go into /assets/.
-pub fn search_body(c: Corpus, lang: Lang) -> String = index_json(build_index(body_sections(c, lang)))
+## One language's body search, as the bytes that go into /assets/: the index,
+## and the fragments it names.
+pub type BodyAssets = { index: String, fragments: List[TextFragment] }
+
+pub fn search_body(c: Corpus, lang: Lang) -> BodyAssets = {
+  let ix = build_index(body_sections(c, lang))
+  let frags = fragments_of(ix)
+  BodyAssets { index: index_json(ix, lang, frags), fragments: frags }
+}
 
 # ---- tests -----------------------------------------------------------------
 
@@ -359,21 +414,46 @@ fn frag(href: String) -> String =
     _ -> ""
   }
 
-## The asset's first field, and the shape around it.
-test "the body index is version 1, positional" {
-  let ix = build_index(page_sections("spec", "spec.html", "Spec", md("## One\n\nA word.\n")))
-  let text = index_json(ix)
-  assert str.starts_with(text, "[1,[[\"spec\",\"spec.html\",\"Spec\"],[\"spec\",\"spec.html#s1\",\"One\"]],")
-  assert body_version() == 1
+## The index's first field, and the shape around it.
+test "the body index is version 2, positional, and holds no text" {
+  let secs = page_sections("spec", "spec.html", "Spec", md("## One\n\nA word.\n"))
+  let ix = build_index(secs)
+  let frags = fragments_of(ix)
+  let text = index_json(ix, En, frags)
+  assert body_version() == 2
   assert ix.terms == ["a", "word"]
   assert ix.postings == [[0], [0]]
-  assert ix.excerpts == [(1, 0, "A word.")]
-  assert str.ends_with(text, ",[\"a\",\"word\"],[[0],[0]],[[1,\"A word.\"]]]")
+  assert ix.indexed == [(1, 0)]
+  assert len(frags) == 1
+  assert frags[0].sec == 1
+  assert str.starts_with(text, "[2,\"search-text/en\",[[\"spec\",\"spec.html\",\"Spec\",\"\"],[\"spec\",\"spec.html#s1\",\"One\",\"${frags[0].hash}\"]],")
+  assert str.ends_with(text, ",[\"a\",\"word\"],[[0],[0]],[0,1]]")
+  # the paragraph is in the fragment and nowhere in the index
+  assert frags[0].text == "[1,[\"A word.\"]]\n"
+  assert not str.contains(text, "A word.")
+  assert fragment_path(En, frags[0]) == "search-text/en/1.${frags[0].hash}.json"
+  assert fragment_path(Zh, frags[0]) == "search-text/zh/1.${frags[0].hash}.json"
   # postings are written as gaps
   assert gaps([3, 4, 9, 10]) == [3, 1, 5, 1]
   let two = build_index(page_sections("spec", "spec.html", "Spec", md("A b.\n\nC.\n\nA.\n")))
   assert two.postings[0] == [0, 2]
-  assert str.contains(index_json(two), "[[0,2],")
+  assert str.contains(index_json(two, En, fragments_of(two)), "[[0,2],")
+}
+
+## The fragment's name follows its bytes: the same text is the same name, a
+## changed paragraph is another, and a section with nothing indexed has none.
+test "a fragment is named by its content and a section without text has none" {
+  let a = build_index(page_sections("spec", "spec.html", "Spec", md("Lead.\n\n## One\n\nA word.\n\n## Two\n\n```dawn\nlet x = 1\n```\n")))
+  let b = build_index(page_sections("spec", "spec.html", "Spec", md("Lead.\n\n## One\n\nA word!\n\n## Two\n\n```dawn\nlet x = 1\n```\n")))
+  let fa = fragments_of(a)
+  let fb = fragments_of(b)
+  # the lead and `One` have text, `Two` is only code
+  assert list.map(fa, f => f.sec) == [0, 1]
+  assert fa[0].hash == fb[0].hash
+  assert fa[1].hash != fb[1].hash
+  assert str.len(fa[0].hash) == 8
+  assert counts_of(a) == [1, 1, 0]
+  assert str.contains(index_json(a, En, fa), ",\"Two\",\"\"]")
 }
 
 ## A section is a page's lead plus one per anchored heading, h4 included, and
@@ -420,7 +500,7 @@ test "every body section on the real documents names an id its page renders" {
   })
 }
 
-## Code is neither indexed nor excerpted, and takes no paragraph number: the
+## Code is neither indexed nor written to a fragment, and takes no paragraph number: the
 ## paragraph after a code block is the next number, not the one after next.
 test "code blocks stay out of the index" {
   let body = md("## S\n\nBefore.\n\n```dawn\nlet zzcode = 1\n```\n\n```output\nzzout\n```\n\n- item zzitem\n\n| h | k |\n|---|---|\n| zzcell | v |\n")
@@ -431,41 +511,15 @@ test "code blocks stay out of the index" {
   assert not list.contains(ix.terms, "zzout")
   assert list.contains(ix.terms, "zzitem")
   assert list.contains(ix.terms, "zzcell")
-  for e in ix.excerpts {
-    let (_, _, text) = e
-    assert not str.contains(text, "zzcode")
+  for f in fragments_of(ix) {
+    assert not str.contains(f.text, "zzcode")
   }
 }
 
-## An excerpt is cut at a blank, never inside a word, and says it was cut. A
-## paragraph with no blank in the second half of the bound is cut at the bound.
-test "an excerpt is cut at a blank and marked" {
-  assert excerpt("short.") == "short."
-  let long = str.repeat("word ", 30) ++ str.repeat("longword ", 30)
-  let cut = excerpt(long)
-  assert str.ends_with(cut, "…")
-  let kept = code_points(cut)
-  assert len(kept) <= excerpt_len() + 1
-  # the kept text is a prefix of the paragraph that ends at a word boundary
-  let body = from_code_points(list.take(kept, len(kept) - 1))
-  assert str.starts_with(long, body)
-  assert char.is_space(code_points(long)[len(kept) - 1])
-  assert not str.ends_with(body, " ")
-  # no blank to cut at: the bound, which a Han character fills two columns
-  # at a time
-  let han = str.repeat("效", 300)
-  assert len(code_points(excerpt(han))) == excerpt_len() / 2 + 1
-  # exactly at the bound is not cut
-  let exact = str.repeat("x", excerpt_len())
-  assert excerpt(exact) == exact
-  let exact_han = str.repeat("效", excerpt_len() / 2)
-  assert excerpt(exact_han) == exact_han
-}
-
-## The bound is columns (docs/site-search-design.md 6.5): Han, CJK and
-## fullwidth punctuation are two, ASCII one, so a Chinese and an English
-## excerpt take the same room on the panel.
-test "an excerpt is bounded in display columns" {
+## The width table the panel draws excerpts with: Han, CJK and fullwidth
+## punctuation are two columns, ASCII one (docs/site-search-design.md 6.5). The
+## panel keeps its own copy of the cut itself; this pins the table.
+test "the column widths are East Asian wide for Han and fullwidth forms" {
   assert columns('a') == 1
   assert columns(' ') == 1
   assert columns('é') == 1
@@ -473,13 +527,6 @@ test "an excerpt is bounded in display columns" {
   assert columns('，') == 2
   assert columns('。') == 2
   assert columns('「') == 2
-  # mixed: an ASCII word between Han runs, cut at the blank after it
-  let mixed = str.repeat("效", 40) ++ " Fs " ++ str.repeat("果", 100)
-  let cut = excerpt(mixed)
-  assert cut == str.repeat("效", 40) ++ " Fs" ++ "…"
-  # a wide character that would straddle the bound is left out
-  let odd = "x" ++ str.repeat("效", 100)
-  assert len(code_points(excerpt(odd))) == 1 + (excerpt_len() - 1) / 2 + 1
 }
 
 ## A tiny deterministic generator, so that "twenty terms at random" is the
@@ -487,9 +534,9 @@ test "an excerpt is bounded in display columns" {
 fn next_seed(x: Int) -> Int = (x * 1103515245 + 12345) % 2147483648
 
 ## The inversion, checked from the far end: pick terms, follow every posting,
-## and the paragraph it names must yield that term. Also that each posting
-## has an excerpt, that the terms are sorted and unique, and that the
-## postings ascend.
+## and the paragraph it names must yield that term. Also that the terms are
+## sorted and unique, that the postings ascend, and that every id's text is in
+## its section's fragment at its position.
 test "every posting of a sampled term points at a paragraph that has the term" {
   io.with_fs_real(() => {
     for lang in [En, Zh] {
@@ -503,16 +550,14 @@ test "every posting of a sampled term points at a paragraph that has the term" {
         let t = ix.terms[i]
         assert len(ix.postings[i]) > 0
         for id in ix.postings[i] {
-          let (s, q, text) = ix.excerpts[id]
+          let (s, q) = ix.indexed[id]
           assert list.contains(body_terms(ix.sections[s].paras[q]), t)
-          let kept = if str.ends_with(text, "…") { str.take(text, str.len(text) - 1) } else { text }
-          assert str.starts_with(ix.sections[s].paras[q], kept)
         }
       }
       # the ids count paragraphs in (section, paragraph) order
-      for id in range(1, len(ix.excerpts)) {
-        let (a, b, _) = ix.excerpts[id - 1]
-        let (c, d, _) = ix.excerpts[id]
+      for id in range(1, len(ix.indexed)) {
+        let (a, b) = ix.indexed[id - 1]
+        let (c, d) = ix.indexed[id]
         assert a < c || (a == c && b < d)
       }
       for i in range(1, len(ix.terms)) {
@@ -522,6 +567,13 @@ test "every posting of a sampled term points at a paragraph that has the term" {
         for j in range(1, len(ps)) {
           assert ps[j - 1] < ps[j]
         }
+      }
+      # the counts add up to the ids, and a fragment is as long as its count
+      let counts = counts_of(ix)
+      assert list.fold(counts, 0, (acc, n) => acc + n) == len(ix.indexed)
+      for f in fragments_of(ix) {
+        assert len(texts_of(ix, f.sec)) == counts[f.sec]
+        assert counts[f.sec] > 0
       }
       # Chinese is there one character at a time, and so is the ASCII in it
       if lang == Zh {

@@ -45,6 +45,7 @@ use md/text.{cp_at}
 use gen/common.{must_read, must_list, take_n}
 use gen/fingerprint.{is_fingerprinted, plain_name}
 use html/page.{En, Zh, lang_code}
+use std/io
 use std/io.{Fs, with_fs_real}
 
 ## One `content:` declaration that puts words on a page: which file it is in,
@@ -299,7 +300,15 @@ fn check_alias_pairs(names: List[String]) -> List[String] = {
 
 pub fn check_assets(out: String) -> Unit !Fs !io = {
   let known = [default_code()] ++ override_codes()
-  let names = must_list("${out}/assets")
+  # Files only: `assets/search-text/` is a directory of fragments, each already
+  # under a content-hashed name that the body index names (and gen/links
+  # checks both ways), with no plain alias to pair.
+  var names: List[String] = []
+  for n in must_list("${out}/assets") {
+    if not io.is_dir("${out}/assets/${n}") {
+      names = names ++ [n]
+    }
+  }
   var bad: List[String] = check_alias_pairs(names)
   var texts: List[TextDecl] = []
   var sheets = 0
