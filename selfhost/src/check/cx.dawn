@@ -293,6 +293,14 @@ pub(pkg) type Cx = {
   in_test: Bool,
   # frame-triage: module identity
   is_std_module: Bool,
+  # The module is the embedded std, loaded by a command that does not run its
+  # tests (stdlib.load_chosen_std_lean), so what exists only to find mistakes
+  # in it is skipped: its test bodies, and the two reports that can do nothing
+  # but add a diagnostic (self-recursion, unused imports). CI checks the
+  # bundled std in full on every push; a user's compile has no use for the
+  # answer, and it was 22% of a cold start.
+  # frame-triage: module identity
+  std_trusted: Bool,
   # whether this module is the program's entry, the only one whose `main` is
   # the entry point (spec §10.5). Set by the loader; false for std, for a
   # dependency and for any module checked outside a program.
@@ -533,6 +541,7 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     current_tparam_bounds: map.empty(),
     in_test: false,
     is_std_module: is_std,
+    std_trusted: false,
     is_entry_module: false,
     dep_package: None,
     owner_class: owner_class,
