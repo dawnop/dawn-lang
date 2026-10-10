@@ -61,8 +61,8 @@ name: tile
 # `dedupe` job below asks scripts/tile-verified.py whether this commit's git
 # tree (`git rev-parse HEAD^{tree}`) already has a green run of this
 # workflow, recorded as an artifact named `tile-verified-v1-<tree>` that
-# tile-shards-complete uploads once all seven shards and the union check are
-# green (kept 90 days). If it has, the seven shards and tile-shards-complete
+# tile-shards-complete uploads once all eight shards and the union check are
+# green (kept 90 days). If it has, the eight shards and tile-shards-complete
 # are skipped and the step summary names the run that verified it. Only a
 # push is deduplicated: pull_request, schedule and workflow_dispatch always
 # run every shard, so the whole set runs on the pull request and every day,
@@ -102,7 +102,7 @@ name: tile
 # nightly.yml's totals report counts a tile trigger only when the
 # shards all ran green, so a deduplicated push is not counted as one.
 #
-# path-total: 7205s (the most this file's `3x` claims may add up to)
+# path-total: 7610s (the most this file's `3x` claims may add up to)
 on:
   push:
     branches: [main]
@@ -178,9 +178,10 @@ env:
   TILE_VERIFIED_PREFIX: tile-verified-v1-
 
 jobs:
-  # SEVEN round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
-  # 192 kernels, then the 77 mutants, in run order), eleven until 2026-09-11
-  # and six until knife T17 (2026-10-02; its paragraph below has why).
+  # EIGHT round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
+  # 199 kernels, then the 82 mutants, in run order), seven until 2026-10-10
+  # (#274; the last paragraph of the cost model below has why), eleven until
+  # 2026-09-11 and six until knife T17 (2026-10-02).
   # Sharding by kind was the plan written down at knife 7b and the phase
   # measurement retired it: neither half dominates, the kernel half grows
   # faster (~8s per new kernel against ~21s per new mutant), and a split by
@@ -288,6 +289,50 @@ jobs:
   # a taller pole. The path total moves from 6699s to the new claims' sum plus
   # dedupe's 910s, 7069s.
   #
+  #
+  # THE EIGHTH SHARD (2026-10-10, issue #274). Shard 1 took 968s on run
+  # 37820418771, 18s over the 950s pole, and the checker refuses a claim
+  # above the pole, so the claim stopped at 950s and the shard stayed
+  # under-declared. The other six observed 870 to 898s on that and later
+  # runs. The 7-way deal cannot be tuned out of it: the items are dealt by
+  # position, the kernel order is not a lever (matrix.txt), and a shard is
+  # 40 items against a pole that leaves 44 to 95s. So the deal goes to eight.
+  #
+  # The model is read off the job logs of the 30 tile.yml runs of 10-06 ..
+  # 10-10 (140 shard jobs, all at -O0, run ids in the commit message). Two
+  # runner types show up and are about 1.5x apart: a fast one (kernel 8.2s,
+  # mutant 20s, a shard of 500 to 600s) and a slow one (kernel 13s, mutant
+  # 31s, a shard of 800 to 900s). Which one a job gets is not under the
+  # workflow's control, and with seven or eight jobs at least one is slow in
+  # nearly every run, so the slow type is the one the span follows. Per item,
+  # the mean over the 77 slow-type jobs gives the work of each shard under
+  # either deal (position i, N shards, takes items i, i+N, ...); the fixed
+  # part is 60s before the first item (toolchain, clean build, first JVM
+  # start) plus 56s of job overhead around the steps, 73s for shard 1 with
+  # fetch-depth 0 and its extra gates. Replayed on the 7-way deal that
+  # model gives 886 / 839 / 826 / 845 / 851 / 851 / 860s against slow-type
+  # means of 889 / 840 / 825 / 847 / 854 / 848 / 858s observed, and the
+  # worst observations sit 2 to 9% over it (968s on shard 1 was the 9%).
+  #
+  # Dealt eight ways the same model gives 785 / 755 / 756 / 755 / 753 / 754 /
+  # 754 / 763s (36, 35, 35, 35, 35, 35, 35, 35 items; 25 kernels and 10 or 11
+  # mutants each, shard 8 24 and 11), 70 to 106s a shard below the 7-way
+  # model, and on the fast type 494 to 504s. There is no observation of the
+  # eight yet, so each claim is a planning value: the model plus a tenth
+  # (the largest overshoot seen was 9.3%), rounded up to 5s, which is 865 /
+  # 835 / 835 / 835 / 830 / 830 / 830 / 840s, every one under the pole with
+  # 85s or more to spare. The timeouts follow the 3x rule. The job names are
+  # kept, so the nightly audit, which matches tile.yml by name, reads the
+  # seven-day-old 7-way observations against the new, lower claims until
+  # they leave its window; that is expected and is not a restatement to make.
+  #
+  # What it costs: one more fixed part (116s of job time) and a taller sum
+  # of claims. The seven old claims added to 6295s and the eight new ones to
+  # 6700s, so the path total goes from 7205s to 7610s with dedupe's 910s.
+  # The real runner time of a full run on the slow type goes from 5958s to
+  # 6075s (+117s, 2%), and the critical path from 886s modelled (968s
+  # observed) to 785s modelled, a hundred seconds shorter.
+  #
   # The split cannot reach the verdicts. A kernel's four runs, its two goldens
   # and its assembly all happen inside one shard, and each mutant compares
   # against the recorded goldens on disk rather than against its own shard's
@@ -346,21 +391,18 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; the note above has the
-    # arithmetic. Shard 1 also carries the two ledger gates and the wheel
-    # cache contract, which are sub-second between them.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # 2026-10-10 (#274): the worst run since the -O0 change took 968s (run 37820418771),
-    # over the 950s run-pole, so this claims the pole and no more. The shard is
-    # 18s under-declared until the eighth shard splits it.
-    # budget: 3x 950s the run-pole, 18s under the 968s worst observed (run 37820418771)
-    timeout-minutes: 48
+    # 2026-10-10 (#274), eight shards: 36 items (281 = 8 x 35 + 1, and the
+    # odd one lands here), the ledger gates and fetch-depth 0, which is 17s
+    # more fixed cost than the other shards pay. Modelled at 785s on the
+    # slower runner type; the claim is a tenth over that, rounded up to 5s.
+    # The note above has the arithmetic.
+    # budget: 3x 865s planning value, model 785s plus a tenth (no observation yet)
+    timeout-minutes: 44
     steps:
       - uses: actions/checkout@v4
         with:
           # shard 1 alone reads git: the GPU diff ledger's ancestry test needs
-          # the history. The other five do not, and are not deepened.
+          # the history. The other seven do not, and are not deepened.
           fetch-depth: 0
 
       - uses: ./.github/actions/dawn-toolchain
@@ -382,10 +424,10 @@ jobs:
       - name: tileiras wheel cache refuses altered pins and bytes
         run: python3 scripts/tile-golden/install-contract.py
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 1 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 1 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/7
+        run: ./scripts/tile-golden/run.sh --shard 1/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -422,11 +464,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; see shard 1's note.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # budget: 3x 892s worst observed at -O0, held at the observation (run 37211185610)
-    timeout-minutes: 45
+    # 2026-10-10 (#274), eight shards: modelled at 755s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 835s planning value, model 755s plus a tenth (no observation yet)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -446,10 +488,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 2 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 2 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/7
+        run: ./scripts/tile-golden/run.sh --shard 2/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -463,11 +505,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; see shard 1's note.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # budget: 3x 906s worst observed at -O0, held at the observation (run 37223252757)
-    timeout-minutes: 46
+    # 2026-10-10 (#274), eight shards: modelled at 756s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 835s planning value, model 756s plus a tenth (no observation yet)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -487,10 +529,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 3 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 3 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 3/7
+        run: ./scripts/tile-golden/run.sh --shard 3/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -504,11 +546,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; see shard 1's note.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # budget: 3x 870s worst observed at -O0, held at the observation (run 37926751256)
-    timeout-minutes: 44
+    # 2026-10-10 (#274), eight shards: modelled at 755s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 835s planning value, model 755s plus a tenth (no observation yet)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -528,10 +570,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 4 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 4 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 4/7
+        run: ./scripts/tile-golden/run.sh --shard 4/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -545,11 +587,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; see shard 1's note.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # budget: 3x 885s worst observed at -O0, held at the observation (run 37820418771)
-    timeout-minutes: 45
+    # 2026-10-10 (#274), eight shards: modelled at 753s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 830s planning value, model 753s plus a tenth (no observation yet)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -569,10 +611,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 5 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 5 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 5/7
+        run: ./scripts/tile-golden/run.sh --shard 5/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -586,11 +628,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; see shard 1's note.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # budget: 3x 898s worst observed at -O0, held at the observation (run 37820418771)
-    timeout-minutes: 45
+    # 2026-10-10 (#274), eight shards: modelled at 754s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 830s planning value, model 754s plus a tenth (no observation yet)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -610,10 +652,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 6 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 6 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 6/7
+        run: ./scripts/tile-golden/run.sh --shard 6/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -627,11 +669,11 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 786s of items (5499 / 7) plus one 41s setup; see shard 1's note.
-    # 2026-10-05, restated from the -O0 runs (the note above, last
-    # paragraph of the cost model).
-    # budget: 3x 894s worst observed at -O0, held at the observation (run 37204733148)
-    timeout-minutes: 45
+    # 2026-10-10 (#274), eight shards: modelled at 754s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 830s planning value, model 754s plus a tenth (no observation yet)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
 
@@ -651,15 +693,56 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (191 kernels and seventy-seven mutants, both backends; shard 7 of 7)
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 7 of 8)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 7/7
+        run: ./scripts/tile-golden/run.sh --shard 7/8
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-tile-golden-7
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-8:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    # 2026-10-10 (#274), eight shards: modelled at 763s on the slower runner
+    # type; the claim is a tenth over that, rounded up to 5s. The note
+    # above has the arithmetic.
+    # budget: 3x 840s planning value, model 763s plus a tenth (no observation yet)
+    timeout-minutes: 42
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (199 kernels and eighty-two mutants, both backends; shard 8 of 8)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 8/8
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-8
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -691,7 +774,7 @@ jobs:
   # skipped with the shards when the dedupe job found this tree verified.
   #
   # Its last two steps write the verified-tree record the dedupe job reads,
-  # and only when all seven shards concluded success and the union held. The
+  # and only when all eight shards concluded success and the union held. The
   # artifact's name is the whole key; the small JSON inside is for a person.
   tile-shards-complete:
     needs:
@@ -703,6 +786,7 @@ jobs:
       - tile-golden-5
       - tile-golden-6
       - tile-golden-7
+      - tile-golden-8
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
@@ -730,7 +814,8 @@ jobs:
           && needs.tile-golden-4.result == 'success'
           && needs.tile-golden-5.result == 'success'
           && needs.tile-golden-6.result == 'success'
-          && needs.tile-golden-7.result == 'success' }}
+          && needs.tile-golden-7.result == 'success'
+          && needs.tile-golden-8.result == 'success' }}
         run: |
           tree=$(git rev-parse 'HEAD^{tree}')
           echo "TILE_TREE=$tree" >> "$GITHUB_ENV"
