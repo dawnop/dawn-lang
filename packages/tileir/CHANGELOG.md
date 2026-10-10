@@ -7,6 +7,27 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.13.0 (2026-10-10)
+
+Breaking: a float constant carries its format's own value
+(`docs/dtype-unify-design.md` section 7, knife U4).
+Every one of the 199 `.mlir` and `.tilebc` goldens is unchanged on both
+backends: none of them holds a narrow constant its format cannot represent.
+
+- `f_const(d, value)` and `full(shape, value)` take a `D` where they took a
+  `Float`, and `f_const` is bounded by `FloatDtype` as `full` already was.
+  A literal is typed by `FromFloat` and so rounded to the format where it is
+  written (`f_const(BF16, 0.1)` is the bfloat16 0.10009765625), and a host
+  `Float` is converted in plain sight (`f_const(BF16, bf16(x))`,
+  `full([BQ, 1], f32(-INFINITY))`). `F64` constants are spelled as before.
+- `FloatDtype` gains `host_float(v: D) -> Float`, the exact `Float` a value
+  of the format is, which is how the recording (still a `Float`) receives it.
+- What the measurement found (the design's open question): before this the
+  recording kept the raw literal and the bytecode writer rounded it, so the
+  bytes were already the format's value; the text rendering printed the raw
+  literal. Now both agree. `lit` is unchanged: it has no format until an
+  operation gives it one, so there is no `D` to round to at the call.
+
 ## 0.12.0 (2026-10-07)
 
 Breaking: runtime scalar kernel parameters (`docs/tileir-k4-design.md`,
