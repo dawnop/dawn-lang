@@ -3,7 +3,7 @@
 > 状态：**current / 已落地**。刀 1（模块级 + 函数级，两个后端的 emit 边界）已落地，
 > 尾款「pvec 的十个根改成有条件加」也已落地（§5 第二张表）。
 > 立项调研见 `~/workspace/agent-handoff/research/std-prune-prestudy.md`（内部，未入库），
-> 它的核心测量在下面 §5 复现。check 端的裁剪（调研里的方案 b）**不做**，理由在 §6。
+> 它的核心测量在下面 §5 复现。check 端的裁剪（调研里的方案 b）当时**不做**，理由在 §6；2026-10-11 重开，见 [check-std-prune-design.md](check-std-prune-design.md)。
 
 ## 1. 病
 
@@ -130,6 +130,8 @@ JVM 侧没有同一个缺陷：`dict_class(gx.class_name, key)` 本来就是每�
 剩下的 std 是走图能到达的真调用，没有第三个「发射器自己拼出来、Core 里没有节点」的族。
 
 ## 6. 不做的：check 端也裁
+
+> 2026-10-11：这条已被推翻，原因与做法见 [check-std-prune-design.md](check-std-prune-design.md)。下文保留当时的判断。
 
 调研里的方案 b（只加载可达的 std 模块）省 check 的约 35%，但要新加一个 parse-only 相位、
 会改 `no bundled std module std/X` 的候选清单（`scripts/checker-corpus/cases/imports.expected`
