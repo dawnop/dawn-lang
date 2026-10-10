@@ -1592,6 +1592,36 @@ test "an unclosed `(` that a later line cuts off is noted at the opener (#551)" 
   assert len(ds6[0].notes) == 0
 }
 
+test "a lost `}` is reported at its own opener when a later closer is of another kind (#670)" {
+  # the lambda's `}` closes the `else` block, so the `)` after it meets the
+  # lambda's `{` still open; the report used to stay at the end of the file
+  let src = "fn f() -> Unit = run(() => {\n  let a = 1\n  if a > 0 { g() } else { ()\n  h()\n})\n\nfn k() -> Int = 1"
+  let (_, ds) = parse_module(src)
+  assert len(ds) > 0
+  assert ds[0].msg == "unclosed `{`"
+  assert Some(ds[0].lo) == str.index_of(src, "{ ()")
+  assert len(ds[0].notes) > 0
+  assert ds[0].notes[len(ds[0].notes) - 1].msg == "expected `}` before this `)`"
+  # a stray closer no opener wants says nothing about pairing: left alone
+  let (_, stray) = parse_module("fn f() -> Int = {\n  1\n}\n}\n")
+  assert len(stray) > 0
+  assert stray[0].msg != "unclosed `{`"
+}
+
+test "a block opened on a continued line is no suspect for a lost `}` (#670)" {
+  # `a > 2 {` opens on a line indented as part of the condition, and its `}`
+  # sits at the statement's indent: in order, though the two indents differ
+  let src = "fn f() -> Unit = run(() => {\n  let a = 1\n  if a > 0 { g() else { () }\n  if a > 1 &&\n      a > 2 {\n    h()\n  } else {\n    ()\n  }\n})\n"
+  let (_, ds) = parse_module(src)
+  assert len(ds) > 0
+  assert ds[0].msg == "unclosed `{`"
+  assert Some(ds[0].lo) == str.index_of(src, "{ g()")
+  # the same shape with the condition on one line was already placed
+  let one = "fn f() -> Unit = run(() => {\n  let a = 1\n  if a > 0 { g() else { () }\n  if a > 1 && a > 2 {\n    h()\n  } else {\n    ()\n  }\n})\n"
+  let (_, ods) = parse_module(one)
+  assert Some(ods[0].lo) == str.index_of(one, "{ g()")
+}
+
 test "a lambda in a condition is reported as one" {
   # the block after `=>` would otherwise swallow the `{` that starts the body
   let (_, d1) = parse_module("fn f() -> Unit = {\n  if x => { g() } { h() }\n}")

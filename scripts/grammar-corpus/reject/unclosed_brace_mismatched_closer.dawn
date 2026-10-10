@@ -1,0 +1,23 @@
+# expect: unclosed `{`	this `{` is probably missing its own `}`
+# expect: expected a newline after this statement
+# expect: expected an expression, found `pub`
+# A one-line `else { () }` lost its `}` inside a lambda passed to a call. The
+# lambda's own `}` then closes the `else` block, and the `)` after it finds the
+# lambda's `{` open: a closer of another kind. The scan for unclosed delimiters
+# used to give up there, so the report stayed where the parser ran out, at the
+# end of the file (#670). It now pairs the `)` with its `(`, takes the opener
+# it skipped as the lost one, and the report lands on the `else`'s `{`.
+pub fn main() -> Unit !io = run(() => {
+  let a = 1
+  for i in range(0, 3) {
+    if a > i { io.println("lt") } else { ()
+    io.println("a")
+    if i == 2 {
+      io.println("two")
+    } else {
+      ()
+    }
+  }
+})
+
+pub fn later() -> Int = 1

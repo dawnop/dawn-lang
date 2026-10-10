@@ -127,32 +127,23 @@ b near packages/tileir/src/bytecode.dawn
 b near packages/tileir/src/lower.dawn
 b near scripts/spike-native/catch_kinds.dawn
 b near scripts/tile-gpu-diff/red_diff.dawn
-b near scripts/tile-gpu-diff/shape_diff.dawn
-b near selfhost/src/check/types.dawn
-b near site/src/gen/gpu.dawn
-b near site/src/gen/search.dawn
-b near std/memfs.dawn
 d decl-lost playground/src/play/exec.dawn
 """
 # Known defects and judge-too-strict cases found by the samples before the
 # 2026-10-10 change. A one-token witness is not in every sample, so these are
 # NOT judged stale (a run that does not reach one proves nothing); a line
 # leaves when its defect is fixed, and a run that finds one stays green.
-#   gzip, effect_type_args, unused_imports, complexity, record_update_native,
+#   effect_type_args, unused_imports, complexity, record_update_native,
 #   lexer/main, only_in_test, search_body, effects: pinned 2026-10-06, the
 #     first run; the diagnostic is more than 2 lines from the edit.
 #   stdlib: property too strict (`match () => {..}` reads the lambda as the
 #     scrutinee, so the missing `{` is reported after its three lines).
 #   probe: inserting `Show` before `{` makes a record literal, reported late.
-#   alloca_diff, dyn_diff: REAL. Recovery from a deleted `}` gives up on a
-#     mismatched closer and the first diagnostic lands 20 to 30 lines on
-#     (#577, #620); needs a redesign of mismatched-bracket recovery.
 #   traits: REAL, low severity. `assert cmp("b", "a") > 0` without the `0`:
 #     the newline after a trailing binary operator is swallowed, so the
 #     report lands on the statement 5 lines later (#577).
 KNOWN_DEFECTS = """\
 b near examples/traits/traits.dawn
-b near packages/inflate/src/gzip.dawn
 b near scripts/checker-corpus/cases/effect_type_args.dawn
 b near scripts/checker-corpus/cases/unused_imports.d/entry.dawn
 b near scripts/display-layering-contract/probe.dawn
@@ -160,8 +151,6 @@ b near scripts/for-pattern-contract/complexity.dawn
 b near scripts/map-reuse-contract/record_update_native.dawn
 b near scripts/slab-bench/workloads/lexer/src/main.dawn
 b near scripts/table-freight/only_in_test.dawn
-b near scripts/tile-gpu-diff/alloca_diff.dawn
-b near scripts/tile-gpu-diff/dyn_diff.dawn
 b near selfhost/src/driver/stdlib.dawn
 b near site/play-ui/samples/effects.dawn
 b near site/src/gen/search_body.dawn
