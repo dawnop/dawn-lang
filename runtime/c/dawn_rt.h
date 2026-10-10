@@ -680,6 +680,29 @@ static inline void *dawn_take(void **slot) {
   DAWN_CLEANUP(dawn_own_drop) void *dawn_own[(n) + 1] = { (void *)(intptr_t)(n) }
 #endif
 
+/* The ordinary exit of a function that has a frame. By the discipline above
+ * every slot is NULL by now, so the cleanup's scan has nothing to find; the
+ * count is zeroed before the cleanup runs and the scan is dead on this path
+ * (rbtree's `ins` walked 24 slots per call, about 28% of its instructions,
+ * measured with callgrind). The unwinding path never passes through here and
+ * reads the full count. The value is computed before the count is touched: a
+ * call in the return expression can raise, and that raise must still release
+ * the frame. DAWN_OWN_CHECK turns the discipline into an abort, so a build
+ * can ask whether any exit leaves a slot behind instead of trusting it. */
+#ifdef DAWN_OWN_CHECK
+void dawn_own_leftover(void *frame);
+#define DAWN_OWN_ASSERT_CLEAR() dawn_own_leftover(dawn_own)
+#else
+#define DAWN_OWN_ASSERT_CLEAR() ((void)0)
+#endif
+#define DAWN_RETURN(e) \
+  do { \
+    __auto_type dawn_ret_ = (e); \
+    DAWN_OWN_ASSERT_CLEAR(); \
+    dawn_own[0] = 0; \
+    return dawn_ret_; \
+  } while (0)
+
 /* Take a freshly built object graph out of the ledger for good: every node
  * reachable from `p` gets an immortal header, so dup and drop return
  * immediately on all of them and `dawn_is_unique` is false everywhere in it.

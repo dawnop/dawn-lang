@@ -920,9 +920,9 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       match v {
         Some(inner) -> {
           let (st1, cv) = emit_expr(st, inner, true)
-          (line(st1, "return " ++ cv ++ ";"), "DAWN_UNIT")
+          (line(st1, ret_stmt(st1, cv)), "DAWN_UNIT")
         }
-        None -> (line(st, "return DAWN_UNIT;"), "DAWN_UNIT")
+        None -> (line(st, ret_stmt(st, "DAWN_UNIT")), "DAWN_UNIT")
       }
     # Core names the loop, so leaving a non-innermost one is a plain goto.
     # C's own break/continue could only ever mean "innermost".
@@ -2497,6 +2497,18 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
   line(pop(st2), "}")
 }
 
+## A `return` out of the current function. Once the frame has any owned slot
+## the return disarms it first (`DAWN_RETURN`, dawn_rt.h): on every ordinary
+## exit the RC pass has already released or transferred each slot, so the
+## cleanup's scan of the array can only find NULLs, and zeroing the count
+## ahead of it lets the compiler drop the scan on that path. The raise path
+## still sees the full count. `nslots` only grows while a body is emitted, so
+## a `return` written before the frame's first slot appeared stays a plain one,
+## which is slower but not wrong: there was no frame to disarm at that point
+## in the text, and none of it can be reached holding a slot.
+fn ret_stmt(st: CSt, v: String) -> String =
+  if st.nslots > 0 { "DAWN_RETURN(" ++ v ++ ");" } else { "return " ++ v ++ ";" }
+
 fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # The owned parameters -- captures, params and evidence that arrive as
   # counted references (rc_fn binds exactly this set). Each is renamed in
@@ -2532,7 +2544,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
     if peel_opaque(f.ret) == TyUnit {
-      line(discard(st2, v), "return DAWN_UNIT;")
+      line(discard(st2, v), ret_stmt(st2, "DAWN_UNIT"))
     } else if no_value(f.body) {
       # Unreachable, and C still needs the `return` written: the function ends
       # in a `return` on every path, or in a panic. But the tail is discarded
@@ -2545,7 +2557,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
       # other call; a C expression never written down is never evaluated.
       line(discard(st2, v), "return " ++ c_zero(f.ret) ++ ";")
     } else {
-      line(st2, "return " ++ v ++ ";")
+      line(st2, ret_stmt(st2, v))
     }
   var head: List[String] = ["${fn_signature_def(f, shadowed)} {\n"]
   if st3.nslots > 0 {
