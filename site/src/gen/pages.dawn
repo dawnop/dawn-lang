@@ -22,7 +22,7 @@ use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/fingerprint.{fingerprint}
 use gen/search.{read_api, search_index}
 use gen/packages.{read_packages, read_doc}
-use gen/search_body.{search_body, BodyAssets, TextFragment, fragment_path, text_dir}
+use gen/search_body.{search_body, BodyAssets, TextFragment, PostingChunk, fragment_path, text_dir, chunk_path, chunk_dir}
 use gen/corpus.{Corpus}
 
 # Byte IO for the assets. read_file/write_file are UTF-8 string APIs and would
@@ -238,25 +238,38 @@ fn splice(text: String, line: String, module: String) -> String !io =
         ++ "imports, and the bundled copy would import a file that is not there")
   }
 
-## A body index, written like any text asset, and the text fragments it names,
-## each under its fingerprinted name only. The fragments get no plain-name
-## alias: the alias exists for visitors holding HTML from before the
-## fingerprint change (see [emit_asset]), and no page has ever linked a
-## fragment by any other name. The sizes are said in the build log in raw
+## A body manifest, written like any text asset, and the postings chunks and
+## text fragments it names, each under its fingerprinted name only. They get no
+## plain-name alias: the alias exists for visitors holding HTML from before the
+## fingerprint change (see [emit_asset]), and no page has ever linked a chunk
+## or a fragment by any other name. The sizes are said in the build log in raw
 ## bytes; the budget is in gzip bytes and this generator has no compressor, so
 ## site/build.sh takes those (docs/site-search-design.md 13.7).
 fn emit_body(out: String, name: String, lang: Lang, assets: BodyAssets) -> String !Fs !io = {
   let fp = emit_text(out, name, assets.index)
   let size = bytes.len(bytes.utf8(assets.index)) + 1
-  println("  ${name}: ${size} bytes, ${len(assets.fragments)} text fragments")
-  match io.mkdirs("${out}/assets/${text_dir(lang)}") {
-    Ok(_) -> ()
-    Err(e) -> panic("cannot create ${out}/assets/${text_dir(lang)}: ${e}")
+  println("  ${name}: ${size} bytes, ${len(assets.chunks)} postings chunks, ${len(assets.fragments)} text fragments")
+  for dir in [text_dir(lang), chunk_dir(lang)] {
+    match io.mkdirs("${out}/assets/${dir}") {
+      Ok(_) -> ()
+      Err(e) -> panic("cannot create ${out}/assets/${dir}: ${e}")
+    }
+  }
+  for c in assets.chunks {
+    emit_chunk(out, lang, c)
   }
   for f in assets.fragments {
     emit_fragment(out, lang, f)
   }
   fp
+}
+
+fn emit_chunk(out: String, lang: Lang, c: PostingChunk) -> Unit !Fs !io = {
+  let path = "${out}/assets/${chunk_path(lang, c)}"
+  match io.write_bytes(path, bytes.utf8(c.text)) {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot write ${path}: ${e}")
+  }
 }
 
 fn emit_fragment(out: String, lang: Lang, f: TextFragment) -> Unit !Fs !io = {

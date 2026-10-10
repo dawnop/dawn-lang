@@ -76,15 +76,22 @@
 # title that answered, with the paragraph that answered best as its excerpt;
 # the hit is still one integer in the model ([body_base]).
 #
-# The index holds no text (format 2, design section 13). What a row shows, and
-# what a Chinese phrase is checked against, is a section's text fragment, a
-# file of its own that the guest asks the host for (`Fetch`) for the rows the
-# reader can see and keeps in the retained state ([absorb]): fragments are
-# read-only data, so they stay out of the model that crosses the wire. A row
-# whose fragment has not arrived is drawn with its title and place and no
-# excerpt, and the answer is computed again when it does -- the ranking is a
-# function of the query and of what has arrived, so a late fragment reorders
-# rows rather than needing a second code path.
+# What reaches the guest is a manifest (format 3, design section 13): the
+# sections, and the names of the chunks the words and postings are cut into.
+# Everything else is fetched as a query needs it, by the guest asking the host
+# (`Fetch`) and keeping what comes back in the retained state ([absorb]) --
+# read-only data, so it stays out of the model that crosses the wire. The
+# words of a query are in a few chunks, found by binary search on the
+# chunks' first words; until they have all arrived the text answers nothing
+# (an intersection over a missing chunk would be wrong, not partial), and the
+# titles answer alone. What a row shows, and what a Chinese phrase is checked
+# against, is a section's text fragment, a file of its own asked for the rows
+# the reader can see. A row whose fragment has not arrived is drawn with its
+# title and place and no excerpt. In both cases the answer is computed again
+# when the file does arrive -- the ranking is a function of the query and of
+# what has arrived, so a late chunk or fragment reorders rows rather than
+# needing a second code path, and once everything asked for is here the answer
+# is the one a panel holding the whole index would give.
 #
 # A query neither index answers is looked at once more for slips of the
 # fingers ([suggest]): the words it lacks are measured against the words the
@@ -160,10 +167,12 @@ pub type Key = {
 ## reader's recent queries, newest first; the page keeps them and the guest
 ## only shows them, which is why they are here and not in the model.
 ##
-## `body` is the documents' text, once the page has fetched it and started
-## the panel again with it ([body_of]); until then, and for an asset in a
-## format this panel does not read, the panel searches titles only and says
-## so in its foot.
+## `body` is the manifest of the documents' text index, once the page has
+## fetched it and started the panel again with it ([body_of]); until then, and
+## for an asset in a format this panel does not read, the panel searches titles
+## only and says so in its foot. `texts` are the sections' paragraphs and
+## `chunks` the words and postings, each fetched when a query needs it
+## ([absorb]) and kept for the life of the panel.
 pub type State = {
   root: String,
   lang: String,
@@ -174,6 +183,7 @@ pub type State = {
   recent: List[String],
   body: Option[Body],
   texts: Map[Int, List[String]],
+  chunks: Map[Int, Posts],
 }
 
 ## The mutable model, and therefore the whole model text on the wire. `goto` is
@@ -206,8 +216,11 @@ pub type State = {
 ## `asked` is the sections whose text fragment has been requested and has not
 ## come back: what keeps a second keystroke from asking for the same file
 ## again. `chased` is how many sections' text this query has asked for only to
-## check a Chinese phrase ([verify_total]). Both are on the wire only while they
-## are not empty or zero.
+## check a Chinese phrase ([verify_total]). `loading` is the postings chunks
+## requested and not yet back, the same thing for the words: it keeps a second
+## keystroke from asking for a chunk already on its way, and it is how the
+## panel knows an empty answer may only be an unfinished one. All three are on
+## the wire only while they are not empty or zero.
 pub type Model = {
   query: String,
   sel: Int,
@@ -220,6 +233,7 @@ pub type Model = {
   fix_hits: Int,
   asked: List[Int],
   chased: Int,
+  loading: List[Int],
 }
 
 ## What the listeners mean, plus the one message no listener produces.
@@ -232,6 +246,9 @@ pub type Model = {
 ## host's answer to a `Fetch`, read by [supplied]. The text itself is not in the
 ## message; [absorb] has already put it in the retained state.
 ##
+## `Loaded` is the same for a postings chunk of the text's index: the words
+## are in the retained state, and the answer is asked again with them.
+##
 ## `Chose` cannot arrive from the page: a message reaches this application
 ## only through the `to_msg` of a listener `route.at` found in the tree, and no
 ## listener names it. It arrives from Enter's command and nowhere else.
@@ -243,6 +260,7 @@ pub type Msg =
   | Chose(href: String)
   | Scoped(group: Int)
   | Arrived(sec: Int)
+  | Loaded(chunk: Int)
 derive Show
 
 ## Where the page is, what language it is in, and whether the documents'
@@ -618,17 +636,32 @@ pub type Sec = { doc: String, href: String, title: String, group: Int, entry: In
 ## the index nowhere.
 pub type Para = { sec: Int, nth: Int }
 
-## The body index, read. `posts[i]` is the paragraph numbers `terms[i]` occurs
-## in, ascending: the asset writes the gaps between them, and init adds them
-## up once rather than every keystroke. `dir` is where the fragments are, and a
-## section's `frag` is the hash in the name of its file.
+## One postings chunk as the manifest lists it: the first word it holds and
+## the hash in the name of its file. Chunk `i` holds the words from its `first`
+## up to the next chunk's `first`, so which chunk has a word is a binary search
+## on the manifest and nothing else.
+pub type Chunk = { first: String, hash: String }
+
+## The body index, read: the manifest, which is all the page hands over.
+## `dir` is where the fragments are and a section's `frag` is the hash in the
+## name of its file; `chunk_dir` and a chunk's `hash` do the same for the
+## chunks of words and postings, which arrive on demand and are kept in the
+## state ([Posts]).
 pub type Body = {
   dir: String,
+  chunk_dir: String,
   secs: List[Sec],
-  terms: List[String],
-  posts: List[List[Int]],
+  chunks: List[Chunk],
   paras: List[Para],
 }
+
+## A chunk that has arrived: its words in code-point order, and `posts[i]`, the
+## paragraph numbers `terms[i]` occurs in, ascending (the asset writes the gaps
+## between them, and the chunk is summed once when it arrives rather than every
+## keystroke). A chunk that failed to come, or is not the one the manifest
+## describes, is recorded with no words at all: the words in it are then
+## words the index lacks, and it is not asked for again.
+pub type Posts = { terms: List[String], posts: List[List[Int]] }
 
 fn has_body(state: State) -> Bool =
   match state.body {
@@ -636,37 +669,39 @@ fn has_body(state: State) -> Bool =
     None -> false
   }
 
-## The body index out of its asset, or `None` for anything but format 2.
+## The body index out of its manifest, or `None` for anything but format 3.
 ##
 ## A version this panel does not know is not read at all, rather than read as
 ## far as it happens to agree: the version is the format's whole promise, and
 ## a panel without the text is a working panel that says it searches titles.
-## Inside format 2 the asset is a file the page fetched, and every lookup
+## Inside format 3 the asset is a file the page fetched, and every lookup
 ## below is total: a field of the wrong kind reads as empty and a number that
 ## names nothing is passed over.
 pub fn body_of(j: Json, entries: List[Entry]) -> Option[Body] = {
   let fs = jarr(j)
-  if len(fs) != 6 || jint_or(fs[0], 0) != 2 {
+  if len(fs) != 6 || jint_or(fs[0], 0) != 3 {
     None
   } else {
     let by_href = hrefs_of(entries)
-    let terms = list.map(jarr(fs[3]), t => jstr_or(t, ""))
-    let posts = list.map(jarr(fs[4]), g => g.jarr().sums())
     let secs = list.map(jarr(fs[2]), s => s.jarr().sec_of(by_href))
-    let counts = list.map(jarr(fs[5]), c => jint_or(c, 0))
-    if len(posts) != len(terms) || len(counts) != len(secs) {
+    let counts = list.map(jarr(fs[3]), c => jint_or(c, 0))
+    let chunks = list.map(jarr(fs[5]), c => chunk_of(c.jarr()))
+    if len(counts) != len(secs) || len(chunks) == 0 {
       None
     } else {
       Some(Body {
         dir: jstr_or(fs[1], ""),
+        chunk_dir: jstr_or(fs[4], ""),
         secs: secs,
-        terms: terms,
-        posts: posts,
+        chunks: chunks,
         paras: paras_of(counts),
       })
     }
   }
 }
+
+fn chunk_of(fs: List[Json]) -> Chunk =
+  if len(fs) == 2 { Chunk { first: jstr_or(fs[0], ""), hash: jstr_or(fs[1], "") } } else { Chunk { first: "", hash: "" } }
 
 ## The paragraph table out of the per-section counts: section 0's paragraphs
 ## first, then section 1's, each numbered from 0 within its section.
@@ -861,15 +896,96 @@ fn squash(s: String) -> String = {
   from_code_points(out)
 }
 
-## The paragraphs one word is in.
-fn postings(b: Body, t: BodyTerm) -> List[Int] = {
-  let lo = lower_bound(b.terms, t.word)
-  if t.prefix {
-    list.slice(b.posts, lo, past_prefix(b.terms, t.word, lo)).union()
-  } else if lo < len(b.terms) && b.terms[lo] == t.word {
-    b.posts[lo]
+# ---- which chunk has a word --------------------------------------------------
+
+## The chunk that holds the word `w` if the index has it: the last one whose
+## first word is not after `w`, or -1 when `w` sorts before every chunk (no
+## such word is in the index).
+fn chunk_at(b: Body, w: String) -> Int = {
+  var lo = 0
+  var hi = len(b.chunks)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if order(b.chunks[mid].first, w) <= 0 {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  lo - 1
+}
+
+## The chunks that can hold a word starting with `w` when `prefix`, or `w`
+## itself when not. A prefix's words are one run of the sorted list, so its
+## chunks are: the one `w` itself would be in, then each next one whose first
+## word still starts with `w` (a chunk that starts past the run ends it). The
+## first of them may hold only words before `w`; it is asked for anyway,
+## because the manifest cannot say.
+fn chunks_for(b: Body, w: String, prefix: Bool) -> List[Int] = {
+  let i = chunk_at(b, w)
+  if not prefix {
+    if i >= 0 { [i] } else { [] }
   } else {
-    []
+    var out: List[Int] = if i >= 0 { [i] } else { [] }
+    var j = i + 1
+    while j < len(b.chunks) && str.starts_with(b.chunks[j].first, w) {
+      out = out ++ [j]
+      j = j + 1
+    }
+    out
+  }
+}
+
+## The chunks a query's words are in, ascending, each once.
+fn chunks_of_query(b: Body, ts: List[BodyTerm]) -> List[Int] = {
+  var out: List[Int] = []
+  for t in ts {
+    for i in chunks_for(b, t.word, t.prefix) {
+      if not list.contains(out, i) {
+        out = out ++ [i]
+      }
+    }
+  }
+  sort_by(out, (x, y) => x - y)
+}
+
+## Those of `ids` whose words have neither arrived nor failed: what is still to
+## be asked for before a lookup in them means anything.
+fn not_here(state: State, ids: List[Int]) -> List[Int] = list.filter(ids, i => not map.has(state.chunks, i))
+
+## The chunks a query (lowercased and trimmed) would need that are not here
+## yet. Empty without the body index: there is nothing to ask for.
+pub fn body_need(state: State, q: String) -> List[Int] =
+  match state.body {
+    None -> []
+    Some(b) -> state.not_here(chunks_of_query(b, body_query(q)))
+  }
+
+## The words of chunk `i` and their postings, empty when it has not arrived.
+fn posts_at(state: State, i: Int) -> Posts =
+  map.get(state.chunks, i).unwrap_or(Posts { terms: [], posts: [] })
+
+## The paragraphs one word is in, from the chunks that hold it. A chunk that is
+## not here reads as having none of its words, which is why [body_hits] does not
+## look until every chunk the query needs is.
+fn postings(state: State, b: Body, t: BodyTerm) -> List[Int] = {
+  if t.prefix {
+    var lists: List[List[Int]] = []
+    for i in chunks_for(b, t.word, true) {
+      let c = posts_at(state, i)
+      let lo = lower_bound(c.terms, t.word)
+      lists = lists ++ list.slice(c.posts, lo, past_prefix(c.terms, t.word, lo))
+    }
+    union(lists)
+  } else {
+    let i = chunk_at(b, t.word)
+    if i < 0 {
+      []
+    } else {
+      let c = posts_at(state, i)
+      let lo = lower_bound(c.terms, t.word)
+      if lo < len(c.terms) && c.terms[lo] == t.word { c.posts[lo] } else { [] }
+    }
   }
 }
 
@@ -951,16 +1067,18 @@ pub fn body_hits(state: State, q: String) -> List[BodyHit] =
     None -> []
     Some(b) -> {
       let ts = body_query(q)
-      let lists = list.map(ts, t => postings(b, t))
-      let all = every(lists)
-      if len(ts) == 0 {
+      if len(ts) == 0 || len(state.not_here(chunks_of_query(b, ts))) > 0 {
         []
-      } else if len(all) > 0 {
-        checked(state, b, all, han_runs(q))
-      } else if len(ts) >= 3 && not han_word(q) {
-        most(b, lists)
       } else {
-        []
+        let lists = list.map(ts, t => postings(state, b, t))
+        let all = every(lists)
+        if len(all) > 0 {
+          checked(state, b, all, han_runs(q))
+        } else if len(ts) >= 3 && not han_word(q) {
+          most(b, lists)
+        } else {
+          []
+        }
       }
     }
   }
@@ -1353,8 +1471,10 @@ pub fn search(state: State, query: String) -> List[Int] = answer(state, query, -
 ## the candidates of a Chinese phrase query that could not be checked and are
 ## near enough the top of the order to matter ([verify_cap]). The rows on
 ## screen are not in it; those are asked for by their place in `hits`
-## ([visible_secs]).
-pub type Answer = { hits: List[Int], counts: List[Int], scope: Int, need: List[Int] }
+## ([visible_secs]). `words` is the chunks of the text's index the query
+## needs and that are not here: while it is not empty the text answers nothing
+## (the answer would be a guess), and the titles answer alone.
+pub type Answer = { hits: List[Int], counts: List[Int], scope: Int, need: List[Int], words: List[Int] }
 
 ##
 ## The tiers, best first. A title row is above every section of the text,
@@ -1376,7 +1496,7 @@ pub type Answer = { hits: List[Int], counts: List[Int], scope: Int, need: List[I
 pub fn answer(state: State, query: String, scope: Int) -> Answer = {
   let q = str.to_lower(str.trim(query))
   if q == "" {
-    Answer { hits: [], counts: [], scope: -1, need: [] }
+    Answer { hits: [], counts: [], scope: -1, need: [], words: [] }
   } else {
     let ts = terms(q)
     let titles = matches(state.keys, q, ts)
@@ -1390,6 +1510,7 @@ pub fn answer(state: State, query: String, scope: Int) -> Answer = {
       counts: counts,
       scope: kept,
       need: unchecked(state, bodies),
+      words: body_need(state, q),
     }
   }
 }
@@ -1682,23 +1803,65 @@ fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
   match state.body {
     None -> ()
     Some(b) -> {
-      let at = lower_bound(b.terms, w)
-      if at < len(b.terms) && (b.terms[at] == w || (last && str.starts_with(b.terms[at], w))) {
+      if body_has(state, b, w, last) {
         known = true
       }
       if not known {
-        let lo = lower_bound(b.terms, first)
-        for i in range(lo, past_prefix(b.terms, first, lo)) {
-          let x = b.terms[i]
-          let xn = str.len(x)
-          if xn - n <= limit && n - xn <= limit {
-            out = map.insert(out, x, map.get(out, x).unwrap_or(0) + len(b.posts[i]))
+        # the first letter's words, from whichever chunks are here
+        for ci in chunks_for(b, first, true) {
+          let c = posts_at(state, ci)
+          let lo = lower_bound(c.terms, first)
+          for i in range(lo, past_prefix(c.terms, first, lo)) {
+            let x = c.terms[i]
+            let xn = str.len(x)
+            if xn - n <= limit && n - xn <= limit {
+              out = map.insert(out, x, map.get(out, x).unwrap_or(0) + len(c.posts[i]))
+            }
           }
         }
       }
     }
   }
   Pool { known: known, words: out }
+}
+
+## Whether the text's index has the word `w`, or a word starting with it when
+## `prefix`, among the chunks that are here.
+fn body_has(state: State, b: Body, w: String, prefix: Bool) -> Bool =
+  list.any(chunks_for(b, w, prefix), ci => {
+    let c = posts_at(state, ci)
+    let at = lower_bound(c.terms, w)
+    at < len(c.terms) && (c.terms[at] == w || (prefix && str.starts_with(c.terms[at], w)))
+  })
+
+## Whether a title of the index has the word `w` (or a word starting with it
+## when `last`), which makes it no slip without looking at the text.
+fn title_has(state: State, w: String, last: Bool) -> Bool =
+  list.any(state.keys, k => k.group >= 0 && list.any(k.words, x => x == w || (last && str.starts_with(x, w))))
+
+## The chunks [reach] would read for the word `w` and that are not here: the
+## ones the word itself is in, and when the titles and those do not have it,
+## the first letter's. Asked in that order, one step at a time, so that a
+## correctly spelled word costs the first step only.
+fn reach_need(state: State, w: String, last: Bool) -> List[Int] = {
+  let limit = str.len(w).allowed()
+  let ascii = list.all(code_points(w), c => char.code(c) < 128)
+  match state.body {
+    None -> []
+    Some(b) ->
+      if limit == 0 || not ascii || title_has(state, w, last) {
+        []
+      } else {
+        let own = state.not_here(chunks_for(b, w, last))
+        if len(own) > 0 {
+          own
+        } else if body_has(state, b, w, last) {
+          []
+        } else {
+          state.not_here(chunks_for(b, str.take(w, 1), true))
+        }
+      }
+  }
 }
 
 ## What a query word may have meant: nothing when the index has it, and
@@ -1790,7 +1953,36 @@ type Guess = { words: List[String], dist: Int }
 ## most [tries_cap] of them. The count is what the suggested query answers
 ## when asked ([tally_of]), which is the number the reader gets by taking it.
 pub fn suggest(state: State, q: String) -> (String, Int) = {
+  let (fix, n, _) = suggest_plan(state, q)
+  (fix, n)
+}
+
+## [suggest], and the chunks of the text's index it still needs before it can
+## say: when the list is not empty the first two are not an answer, they are
+## "ask again once these are here". It is asked in the order the work goes in:
+## the chunks the query's words are in (and the first letters', for a word
+## that is no word), then the chunks of each query it would try, one query at
+## a time, so that a first guess that answers costs no chunks for the second.
+pub fn suggest_plan(state: State, q: String) -> (String, Int, List[Int]) = {
   let ts = str.to_lower(str.trim(q)).terms()
+  var reads: List[Int] = []
+  var at = 0
+  for t in ts {
+    for c in reach_need(state, t.word, at == len(ts) - 1) {
+      if not list.contains(reads, c) {
+        reads = reads ++ [c]
+      }
+    }
+    at = at + 1
+  }
+  if len(reads) > 0 {
+    ("", 0, reads)
+  } else {
+    suggest_ready(state, ts)
+  }
+}
+
+fn suggest_ready(state: State, ts: List[Term]) -> (String, Int, List[Int]) = {
   var guesses: List[Guess] = [Guess { words: [], dist: 0 }]
   var changed = false
   var dead = 0
@@ -1825,23 +2017,29 @@ pub fn suggest(state: State, q: String) -> (String, Int) = {
   # [most] starts at three), so a word nothing is near sinks every query
   # made from this one, and none is asked.
   if not changed || (dead > 0 && len(ts) < 3) {
-    ("", 0)
+    ("", 0, [])
   } else {
     var found = ""
     var count = 0
     var tried = 0
+    var pending: List[Int] = []
     for g in sort_by(guesses, (a, b) => a.dist - b.dist) {
-      if found == "" && tried < tries_cap() {
+      if found == "" && tried < tries_cap() && len(pending) == 0 {
         let fix = join(g.words, " ")
-        let n = tally_of(state, fix)
-        if n > 0 {
-          found = fix
-          count = n
+        let missing = body_need(state, str.to_lower(str.trim(fix)))
+        if len(missing) > 0 {
+          pending = missing
+        } else {
+          let n = tally_of(state, fix)
+          if n > 0 {
+            found = fix
+            count = n
+          }
+          tried = tried + 1
         }
-        tried = tried + 1
       }
     }
-    (found, count)
+    if len(pending) > 0 { ("", 0, pending) } else { (found, count, []) }
   }
 }
 
@@ -2201,6 +2399,9 @@ fn goto_kids(m: Model) -> List[Node[Msg]] !Ctx =
 ## anything yet (and says so only when there is no recent query and no
 ## suggestion to show instead), a query with no hits has.
 ##
+## A query whose words are still being fetched ([Model]'s `loading`) has not
+## been answered, so it says nothing yet rather than that nothing matches.
+##
 ## The region is there whether or not it says anything, because a live region
 ## that is inserted along with its text is one a screen reader may never
 ## announce; one that already exists and changes is announced.
@@ -2211,6 +2412,9 @@ fn status(m: Model, shown: Bool) -> Node[Msg] !Ctx = {
       []
     } else if q == "" {
       [el("p", class: "search-status", kids: [text(lang().prompt_line())])]
+    } else if len(m.loading) > 0 {
+      # words of the text's index are on their way: "nothing" is not yet an answer
+      []
     } else {
       [el("div", class: "search-nothing", kids: nothing(lang(), q, m.fix, m.fix_hits))]
     }
@@ -2602,6 +2806,7 @@ pub fn init(flags: Option[String]) -> (State, Model) =
             recent: j.jget("recent").recent_of(),
             body: j.jget("body").body_of(entries),
             texts: map.empty(),
+            chunks: map.empty(),
           }
           # A shared link's query is answered in the first turn, so the
           # panel opens on its results rather than on an empty field.
@@ -2614,7 +2819,7 @@ pub fn init(flags: Option[String]) -> (State, Model) =
   }
 
 fn blank_state() -> State =
-  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [], body: None, texts: map.empty() }
+  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [], body: None, texts: map.empty(), chunks: map.empty() }
 
 ## How many recent queries the panel shows. The page keeps no more than this
 ## either; the bound is restated here because flags are text a page may hand
@@ -2648,7 +2853,7 @@ pub fn key_of(e: Entry) -> Key = {
 ## The model of a panel that has been left: closed, and holding nothing a
 ## reopening could mistake for its own.
 fn closed(m: Model) -> Model =
-  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0 }
+  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0, loading: [] }
 
 fn blank() -> Model =
   Model {
@@ -2663,27 +2868,65 @@ fn blank() -> Model =
     fix_hits: 0,
     asked: [],
     chased: 0,
+    loading: [],
   }
 
-## The model after asking `text` within `scope`, selection at the top, and the
-## sections whose text would change the answer ([Answer]'s `need`).
+## What an answer still owes the host: the sections whose text would change it
+## ([Answer]'s `need`) and the chunks of the text's index it cannot be given
+## without (`words`, which also covers the chunks a suggestion is waiting for).
+type Owed = { secs: List[Int], words: List[Int] }
+
+## The model after asking `text` within `scope`, selection at the top, and what
+## the answer is still owed.
 ##
-## A suggestion is looked for only here, and only when neither index answered
-## anything: that is the whole of the trigger, and the reason a keystroke that
-## finds something never pays for it.
-fn asked(state: State, m: Model, text: String, scope: Int) -> (Model, List[Int]) = {
+## A suggestion is looked for only here and when a chunk arrives ([refreshed]),
+## and only when neither index answered anything: that is the whole of the
+## trigger, and the reason a keystroke that finds something never pays for it.
+## While the text's index is missing chunks the query needs, nothing has been
+## answered yet and no suggestion is made: it would be made from a guess.
+fn asked(state: State, m: Model, text: String, scope: Int) -> (Model, Owed) = {
   let a = answer(state, text, scope)
-  let (fix, n) = if len(a.hits) == 0 { suggest(state, text) } else { ("", 0) }
-  (Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n, chased: 0 }, a.need)
+  let none: List[Int] = []
+  let (fix, n, more) =
+    if len(a.hits) == 0 && len(a.words) == 0 { suggest_plan(state, text) } else { ("", 0, none) }
+  (
+    Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n, chased: 0 },
+    Owed { secs: a.need, words: merged(a.words, more) },
+  )
+}
+
+fn merged(a: List[Int], b: List[Int]) -> List[Int] = {
+  var out = a
+  for x in b {
+    if not list.contains(out, x) {
+      out = out ++ [x]
+    }
+  }
+  out
 }
 
 ## The same question asked again of the same query, because what the answer
-## depends on has changed (a fragment arrived). The selection stays on its row
-## number, held inside the new list, and the suggestion is left as it was.
-fn refreshed(state: State, m: Model) -> (Model, List[Int]) = {
+## depends on has changed: a fragment arrived, or (`words`) a chunk did. The
+## selection stays on its row number, held inside the new list. The suggestion
+## is left as it was, unless a chunk arrived and the question is still
+## unanswered, in which case it is made again, now that it may be made.
+fn refreshed(state: State, m: Model, words: Bool) -> (Model, Owed) = {
   let a = answer(state, m.query, m.scope)
   let sel = if m.sel < len(a.hits) { m.sel } else if len(a.hits) > 0 { len(a.hits) - 1 } else { 0 }
-  (Model { ..m, sel: sel, hits: a.hits, scope: a.scope, counts: a.counts }, a.need)
+  let again = words && len(a.words) == 0
+  let none: List[Int] = []
+  let (fix, n, more) =
+    if again && len(a.hits) == 0 {
+      suggest_plan(state, m.query)
+    } else if again {
+      ("", 0, none)
+    } else {
+      (m.fix, m.fix_hits, none)
+    }
+  (
+    Model { ..m, sel: sel, hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n },
+    Owed { secs: a.need, words: merged(a.words, more) },
+  )
 }
 
 # ---- fetching the text -----------------------------------------------------
@@ -2734,6 +2977,22 @@ fn fragment_url(state: State, sec: Int) -> String =
       }
   }
 
+## The chunk `c` of the text's index as the file the host should fetch, in the
+## same terms as [fragment_url], or "" for a chunk the manifest does not have.
+fn chunk_url(state: State, c: Int) -> String =
+  match state.body {
+    None -> ""
+    Some(b) ->
+      match get(b.chunks, c) {
+        Some(ch) -> if ch.hash == "" { "" } else { "${b.chunk_dir}/${c}.${ch.hash}.json" }
+        None -> ""
+      }
+  }
+
+## The name a chunk's request goes by: `c` and its position, as a section's is
+## `t` and its number.
+fn chunk_tag(c: Int) -> String = "c${c}"
+
 ## The name a section's request goes by. The host returns it verbatim with the
 ## outcome, and [sec_of_tag] reads it back.
 fn fetch_tag(sec: Int) -> String = "t${sec}"
@@ -2742,10 +3001,20 @@ fn fetch_tag(sec: Int) -> String = "t${sec}"
 ## the sections of the rows on screen (and the look-ahead), then `extra` (the
 ## unchecked candidates), minus what has arrived, what failed, and what is
 ## already on its way. Every file is asked for once per session of the panel.
-fn wanting(state: State, m: Model, extra: List[Int]) -> (Model, Cmd[Msg]) =
+fn wanting(state: State, m: Model, owed: Owed) -> (Model, Cmd[Msg]) =
   match state.body {
     None -> (m, NoCmd)
     Some(_) -> {
+      let extra = owed.secs
+      # the chunks first: the answer waits on them, and the rows to be asked
+      # the text of do not exist until they are here
+      var words: List[Int] = []
+      for c in owed.words {
+        if not map.has(state.chunks, c) && not list.contains(m.loading, c) && not list.contains(words, c)
+          && chunk_url(state, c) != "" {
+          words = words ++ [c]
+        }
+      }
       var want: List[Int] = []
       for sec in visible_secs(state, m) {
         if not list.contains(extra, sec) && askable(state, m, want, sec) {
@@ -2765,16 +3034,23 @@ fn wanting(state: State, m: Model, extra: List[Int]) -> (Model, Cmd[Msg]) =
           spent = spent + 1
         }
       }
-      if len(want) == 0 {
+      if len(want) == 0 && len(words) == 0 {
         (m, NoCmd)
       } else {
         (
-          Model { ..m, asked: m.asked ++ want, chased: m.chased + spent },
-          BatchCmd(cmds: list.map(want, sec => Fetch(url: fragment_url(state, sec), tag: fetch_tag(sec)))),
+          Model { ..m, asked: m.asked ++ want, chased: m.chased + spent, loading: m.loading ++ words },
+          BatchCmd(cmds: fetches_of(state, words, want)),
         )
       }
     }
   }
+
+## The fetches for `words` (chunks) and `want` (sections), chunks first.
+fn fetches_of(state: State, words: List[Int], want: List[Int]) -> List[Cmd[Msg]] = {
+  let a: List[Cmd[Msg]] = list.map(words, c => Fetch(url: chunk_url(state, c), tag: chunk_tag(c)))
+  let b: List[Cmd[Msg]] = list.map(want, sec => Fetch(url: fragment_url(state, sec), tag: fetch_tag(sec)))
+  a ++ b
+}
 
 ## Whether section `sec` still has to be asked for: it has a text file, and it
 ## has not arrived, failed, been asked for, or been put in `want` already.
@@ -2796,7 +3072,10 @@ fn join_cmds(a: Cmd[Msg], b: Cmd[Msg]) -> Cmd[Msg] =
 ## panel's (a request of a session that has since been restarted, say) is a
 ## section nobody has, and changes nothing.
 pub fn supplied(tag: String, _outcome: Result[String, String]) -> Msg =
-  Arrived(sec: sec_of_tag(tag))
+  if str.starts_with(tag, "c") { Loaded(chunk: chunk_of_tag(tag)) } else { Arrived(sec: sec_of_tag(tag)) }
+
+fn chunk_of_tag(tag: String) -> Int =
+  if str.starts_with(tag, "c") { parse_int(str.drop(tag, 1)).unwrap_or(-1) } else { -1 }
 
 fn sec_of_tag(tag: String) -> Int =
   if str.starts_with(tag, "t") { parse_int(str.drop(tag, 1)).unwrap_or(-1) } else { -1 }
@@ -2811,13 +3090,41 @@ fn sec_of_tag(tag: String) -> Int =
 ## stays unchecked.
 pub fn absorb(state: State, tag: String, outcome: Result[String, String]) -> State = {
   let sec = sec_of_tag(tag)
+  let chunk = chunk_of_tag(tag)
   match state.body {
     None -> state
     Some(b) ->
-      if sec < 0 || sec >= len(b.secs) {
+      if chunk >= 0 && chunk < len(b.chunks) {
+        State { ..state, chunks: map.insert(state.chunks, chunk, chunk_posts(chunk, outcome)) }
+      } else if sec < 0 || sec >= len(b.secs) {
         state
       } else {
         State { ..state, texts: map.insert(state.texts, sec, fragment_texts(b, sec, outcome)) }
+      }
+  }
+}
+
+## The words and postings a chunk file holds, or none if it is not the one the
+## manifest named (`[n, [word, ...], [[gap, ...], ...]]` with its own position,
+## and as many posting lists as words, the words in ascending code-point
+## order). The gaps are added up here, once, so that a keystroke does not.
+fn chunk_posts(n: Int, outcome: Result[String, String]) -> Posts = {
+  let none = Posts { terms: [], posts: [] }
+  match outcome {
+    Err(_) -> none
+    Ok(body) ->
+      match parse(body) {
+        Err(_) -> none
+        Ok(j) -> {
+          let fs = jarr(j)
+          if len(fs) != 3 || jint_or(fs[0], -1) != n {
+            none
+          } else {
+            let terms = list.map(jarr(fs[1]), t => jstr_or(t, ""))
+            let posts = list.map(jarr(fs[2]), g => g.jarr().sums())
+            if len(terms) == len(posts) { Posts { terms: terms, posts: posts } } else { none }
+          }
+        }
       }
   }
 }
@@ -2851,16 +3158,16 @@ pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
   match msg {
     # The arms that search ask for the text of what they answered.
     Typed(text) -> {
-      let (m1, need) = asked(state, m, text, m.scope)
-      wanting(state, m1, need)
+      let (m1, owed) = asked(state, m, text, m.scope)
+      wanting(state, m1, owed)
     }
     # A pill that is already on changes nothing.
     Scoped(g) ->
       if g == m.scope {
         (m, NoCmd)
       } else {
-        let (m1, need) = asked(state, m, m.query, g)
-        wanting(state, m1, need)
+        let (m1, owed) = asked(state, m, m.query, g)
+        wanting(state, m1, owed)
       }
     # A section's text is in: the same question has a better answer now.
     Arrived(sec) -> {
@@ -2868,15 +3175,25 @@ pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
       if m1.query == "" {
         (m1, NoCmd)
       } else {
-        let (m2, need) = refreshed(state, m1)
-        wanting(state, m2, need)
+        let (m2, owed) = refreshed(state, m1, false)
+        wanting(state, m2, owed)
+      }
+    }
+    # A chunk of words is in: the question may be answerable now.
+    Loaded(c) -> {
+      let m1 = Model { ..m, loading: list.filter(m.loading, x => x != c) }
+      if m1.query == "" {
+        (m1, NoCmd)
+      } else {
+        let (m2, owed) = refreshed(state, m1, true)
+        wanting(state, m2, owed)
       }
     }
     # Everything else reads `hits`, and may move the selection toward rows
     # whose text has not been asked for.
     _ -> {
       let (m1, c) = moved(state, m, msg)
-      let (m2, f) = wanting(state, m1, [])
+      let (m2, f) = wanting(state, m1, Owed { secs: [], words: [] })
       (m2, join_cmds(c, f))
     }
   }
@@ -2944,7 +3261,7 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     if m.query == "" {
       (closed(m), NoCmd)
     } else {
-      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0 }, NoCmd)
+      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0, loading: [] }, NoCmd)
     }
   } else {
     (m, NoCmd)
@@ -3027,6 +3344,7 @@ pub fn encode(m: Model) -> String =
   ++ ",\"fix_hits\":" ++ to_string(m.fix_hits)
   ++ (if len(m.asked) == 0 { "" } else { ",\"asked\":[" ++ list.map(m.asked, a => to_string(a)).join(",") ++ "]" })
   ++ (if m.chased == 0 { "" } else { ",\"chased\":" ++ to_string(m.chased) })
+  ++ (if len(m.loading) == 0 { "" } else { ",\"loading\":[" ++ list.map(m.loading, a => to_string(a)).join(",") ++ "]" })
   ++ "}"
 
 ## Total, because a host may hand back anything: an unreadable model reads as
@@ -3049,6 +3367,7 @@ pub fn decode(s: String) -> Model =
             fix_hits: j.jget("fix_hits").jint_or(0),
             asked: list.map(j.jget("asked").jarr(), a => jint_or(a, -1)),
             chased: j.jget("chased").jint_or(0),
+            loading: list.map(j.jget("loading").jarr(), a => jint_or(a, -1)),
           }
         _ -> blank()
       }
@@ -3914,12 +4233,45 @@ test "a body's words split by the table in docs/site-search-design.md 3.2" {
   }
 }
 
-## A body index in the asset's format (docs/site-search-design.md 13.4), built
-## from sections and paragraphs with this file's [body_terms] the way the
-## generator builds it with its own: words in code-point order, each with the
-## gaps between the paragraphs it is in, and per section how many paragraphs
-## it holds. A section that holds none has no fragment hash.
+## A body manifest in the asset's format (docs/site-search-design.md 13.4),
+## built from sections and paragraphs with this file's [body_terms] the way the
+## generator builds it with its own: per section how many paragraphs it holds
+## (and the hash of its fragment, none for a section that holds none), and the
+## words in code-point order cut into chunks of [fixture_chunk_words] words,
+## each named by its first word and a fixed hash. The chunk directory is the
+## fragment directory's sibling.
 fn body_asset(version: Int, dir: String, secs: List[List[String]], paras: List[(Int, String)]) -> String = {
+  let counts = list.map(range(0, len(secs)), i => len(list.filter(paras, x => {
+    let (sec, _) = x
+    sec == i
+  })))
+  var rows: List[Json] = []
+  for i in range(0, len(secs)) {
+    rows = rows ++ [JArr(items: list.map(secs[i], f => JStr(value: f)) ++ [JStr(value: if counts[i] > 0 { frag_hash() } else { "" })])]
+  }
+  let chunks = list.map(fixture_chunks(paras), c => {
+    let (first, _) = c
+    JArr(items: [JStr(value: first), JStr(value: chunk_hash())])
+  })
+  render(JArr(items: [
+    JInt(value: version),
+    JStr(value: dir),
+    JArr(items: rows),
+    JArr(items: list.map(counts, c => JInt(value: c))),
+    JStr(value: str.replace(dir, "search-text", "search-index")),
+    JArr(items: chunks),
+  ]))
+}
+
+fn chunk_hash() -> String = "feed5678"
+
+## How many words a fixture chunk holds: few, so that a handful of paragraphs
+## makes several chunks and a prefix has chunks to span.
+fn fixture_chunk_words() -> Int = 6
+
+## The fixture's postings in chunks: (first word, the chunk's file text) for
+## the words of `paras` in code-point order, [fixture_chunk_words] to a chunk.
+fn fixture_chunks(paras: List[(Int, String)]) -> List[(String, String)] = {
   var table: Map[String, List[Int]] = map.empty()
   var p = 0
   for para in paras {
@@ -3931,23 +4283,28 @@ fn body_asset(version: Int, dir: String, secs: List[List[String]], paras: List[(
   }
   let t = table
   let words = map.keys(t).sort_by((a, b) => order(a, b))
-  let gaps = list.map(words, w => JArr(items: list.map(map.get(t, w).unwrap_or([]).gaps_of(), g => JInt(value: g))))
-  let counts = list.map(range(0, len(secs)), i => len(list.filter(paras, x => {
-    let (sec, _) = x
-    sec == i
-  })))
-  var rows: List[Json] = []
-  for i in range(0, len(secs)) {
-    rows = rows ++ [JArr(items: list.map(secs[i], f => JStr(value: f)) ++ [JStr(value: if counts[i] > 0 { frag_hash() } else { "" })])]
+  var out: List[(String, String)] = []
+  var at = 0
+  while at < len(words) {
+    let here = list.slice(words, at, at + fixture_chunk_words())
+    let gaps = list.map(here, w => "[" ++ join(list.map(map.get(t, w).unwrap_or([]).gaps_of(), g => to_string(g)), ",") ++ "]")
+    out = out ++ [(here[0], "[${len(out)},[" ++ join(list.map(here, w => quoted(w)), ",") ++ "],[" ++ join(gaps, ",") ++ "]]")]
+    at = at + fixture_chunk_words()
   }
-  render(JArr(items: [
-    JInt(value: version),
-    JStr(value: dir),
-    JArr(items: rows),
-    JArr(items: list.map(words, w => JStr(value: w))),
-    JArr(items: gaps),
-    JArr(items: list.map(counts, c => JInt(value: c))),
-  ]))
+  out
+}
+
+## The fixture's chunk files, by url, under `dir` with the `search-index`
+## sibling of a fragment directory.
+fn chunk_files(dir: String, paras: List[(Int, String)]) -> Map[String, String] = {
+  var out: Map[String, String] = map.empty()
+  var i = 0
+  for c in fixture_chunks(paras) {
+    let (_, text) = c
+    out = map.insert(out, "${str.replace(dir, "search-text", "search-index")}/${i}.${chunk_hash()}.json", text)
+    i = i + 1
+  }
+  out
 }
 
 fn frag_hash() -> String = "abcd1234"
@@ -4016,17 +4373,48 @@ fn zh_paras() -> List[(Int, String)] = [
 ## Every fragment of both fixture documents, by url: what the host can serve.
 fn fixture_files() -> Map[String, String] = {
   var out = fragment_files("search-text/en", en_secs(), en_paras())
-  for k in map.keys(fragment_files("search-text/zh", zh_secs(), zh_paras())) {
-    out = map.insert(out, k, map.get(fragment_files("search-text/zh", zh_secs(), zh_paras()), k).unwrap_or(""))
+  let others = [
+    fragment_files("search-text/zh", zh_secs(), zh_paras()),
+    chunk_files("search-text/en", en_paras()),
+    chunk_files("search-text/zh", zh_paras()),
+  ]
+  for files in others {
+    for k in map.keys(files) {
+      out = map.insert(out, k, map.get(files, k).unwrap_or(""))
+    }
   }
   out
 }
 
-## The probe index, with the sections of five documents beside it. No text has
-## arrived yet: that is what [drive] brings.
-fn text_state() -> State = {
+## `state` with every chunk its manifest names read from `files`, as if the
+## host had answered them all: for the tests that ask a question of the state
+## directly and are not about the words arriving.
+fn with_words(state: State, files: Map[String, String]) -> State = {
+  var st = state
+  match state.body {
+    None -> ()
+    Some(b) -> {
+      for i in range(0, len(b.chunks)) {
+        let outcome: Result[String, String] = match map.get(files, chunk_url(state, i)) {
+          Some(text) -> Ok(text)
+          None -> Err("HTTP 404")
+        }
+        st = absorb(st, chunk_tag(i), outcome)
+      }
+    }
+  }
+  st
+}
+
+## The probe index, with the sections of five documents beside it and the
+## words of all of them. No section's text has arrived yet: that is what
+## [drive] brings.
+fn text_state() -> State = with_words(bare_state(), fixture_files())
+
+## The same, with the manifest only: not a chunk of words has arrived.
+fn bare_state() -> State = {
   let titles = probe_state()
-  let j = body_asset(2, "search-text/en", en_secs(), en_paras()).json_of()
+  let j = body_asset(3, "search-text/en", en_secs(), en_paras()).json_of()
   State { ..titles, body: body_of(j, titles.entries) }
 }
 
@@ -4062,38 +4450,62 @@ fn world(state: State, q: String) -> (State, Model) = drive(state, blank(), Type
 
 fn sections_of(hs: List[BodyHit]) -> List[(Int, Int)] = list.map(hs, h => (h.sec, h.rank))
 
-test "the body index is read in format 2 only, and its gaps are added up" {
+test "the manifest is read in format 3 only, and a chunk's gaps are added up when it arrives" {
   let titles = probe_state()
-  let asset = body_asset(2, "search-text/en", en_secs(), en_paras())
+  let asset = body_asset(3, "search-text/en", en_secs(), en_paras())
   match asset.json_of().body_of(titles.entries) {
     Some(b) -> {
       assert b.dir == "search-text/en"
+      assert b.chunk_dir == "search-index/en"
       assert len(b.secs) == 5
       assert len(b.paras) == 6
       # the counts [1, 1, 2, 1, 1] number the paragraphs section by section,
       # each from 0 within its own
       assert list.map(b.paras, p => (p.sec, p.nth)) == [(0, 0), (1, 0), (2, 0), (2, 1), (3, 0), (4, 0)]
       assert b.secs[2].frag == "abcd1234"
+      # the manifest has the chunks' first words, in code-point order, and
+      # nothing else about the words
+      assert len(b.chunks) > 3
+      assert b.chunks[0].first == "a"
+      assert list.all(range(1, len(b.chunks)), k => order(b.chunks[k - 1].first, b.chunks[k].first) < 0)
+      # a word is in the last chunk that starts at or before it
+      assert chunk_at(b, "a") == 0
+      assert chunk_at(b, "") == -1
+      assert chunk_at(b, "zzzz") == len(b.chunks) - 1
+      let i = chunk_at(b, "handler")
+      assert order(b.chunks[i].first, "handler") <= 0
+      assert i + 1 == len(b.chunks) || order("handler", b.chunks[i + 1].first) < 0
       # `handler` is in paragraphs 2, 3 and 4, written as the gaps 2, 1, 1
-      let i = lower_bound(b.terms, "handler")
-      assert b.terms[i] == "handler"
-      assert b.posts[i] == [2, 3, 4]
-      # the words are in code-point order
-      assert list.all(range(1, len(b.terms)), k => order(b.terms[k - 1], b.terms[k]) < 0)
+      let st = with_words(State { ..titles, body: Some(b) }, fixture_files())
+      let c = posts_at(st, i)
+      let at = lower_bound(c.terms, "handler")
+      assert c.terms[at] == "handler"
+      assert c.posts[at] == [2, 3, 4]
+      # the words of a chunk are in code-point order
+      assert list.all(range(1, len(c.terms)), k => order(c.terms[k - 1], c.terms[k]) < 0)
       # the section the title index also has knows its row, and the
       # design notes are drawn with history
       assert b.secs[1].entry == 3
       assert b.secs[2].entry == -1
       assert b.secs[4].group == group_index("history")
     }
-    None -> panic("a format 2 body index must be read")
+    None -> panic("a format 3 manifest must be read")
   }
   # another version, or something that is not one, is no body at all
   let other = body_asset(1, "search-text/en", en_secs(), en_paras()).json_of()
   assert not has_body(State { ..titles, body: body_of(other, titles.entries) })
+  let two = body_asset(2, "search-text/en", en_secs(), en_paras()).json_of()
+  assert not has_body(State { ..titles, body: body_of(two, titles.entries) })
   assert not has_body(State { ..titles, body: body_of(JNull, titles.entries) })
-  # a count list that does not match the section table is not an index either
-  match parse("[2,\"d\",[[\"spec\",\"a\",\"A\",\"\"]],[\"a\"],[[0]],[]]") {
+  # a count list that does not match the section table is not a manifest
+  # either, nor is one that lists no chunk
+  match parse("[3,\"d\",[[\"spec\",\"a\",\"A\",\"\"]],[],\"c\",[[\"a\",\"00000000\"]]]") {
+    Ok(j) -> {
+      assert not has_body(State { ..titles, body: body_of(j, titles.entries) })
+    }
+    Err(e) -> panic("the literal must parse: ${e}")
+  }
+  match parse("[3,\"d\",[[\"spec\",\"a\",\"A\",\"\"]],[0],\"c\",[]]") {
     Ok(j) -> {
       assert not has_body(State { ..titles, body: body_of(j, titles.entries) })
     }
@@ -4104,7 +4516,7 @@ test "the body index is read in format 2 only, and its gaps are added up" {
 ## It arrives in the flags, and the foot says what is searched either way.
 test "the flags carry the body index, and the foot says whether it is in" {
   let index = "\"index\":{\"v\":1,\"lang\":\"en\",\"items\":[]}"
-  let (with_body, _) = init(Some("{${index},\"body\":${body_asset(2, "search-text/en", en_secs(), en_paras())}}"))
+  let (with_body, _) = init(Some("{${index},\"body\":${body_asset(3, "search-text/en", en_secs(), en_paras())}}"))
   assert has_body(with_body)
   let (old_body, _) = init(Some("{${index},\"body\":${body_asset(1, "search-text/en", en_secs(), en_paras())}}"))
   assert not has_body(old_body)
@@ -4211,8 +4623,8 @@ test "a longer query nothing answers whole is answered by most of its words" {
 ## cannot be, and its candidates are kept a tier lower; once it has, a candidate
 ## has the phrase and is sure, or has not and is gone.
 test "a Chinese phrase is checked in the candidates' text once it has arrived" {
-  let j = body_asset(2, "search-text/zh", zh_secs(), zh_paras()).json_of()
-  let state = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
+  let j = body_asset(3, "search-text/zh", zh_secs(), zh_paras()).json_of()
+  let state = with_words(State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }, fixture_files())
   # nothing can be checked yet: every paragraph with all the characters is a
   # "may have it", paragraph 1 of section 0 and paragraph 2 of section 1 too
   assert state.body_hits("效果 处理").sections_of() == [(0, -1), (1, -1), (2, -1)]
@@ -4235,6 +4647,133 @@ test "a Chinese phrase is checked in the candidates' text once it has arrived" {
 # ---- fetching the text ----
 
 fn fetch_urls(c: Cmd[Msg]) -> List[String] = list.map(fetches(c), f => f.url)
+
+## The words arrive in chunks, on demand (docs/site-search-design.md 13.11). A
+## query asks for the chunks its words are in, before anything else; until they
+## are here the text answers nothing and the titles answer alone; once they are
+## here the answer is the one a panel holding every chunk gives.
+test "a query asks for the chunks of its words and the text answers when they are here" {
+  let bare = bare_state()
+  let (m, c) = update(bare, blank(), Typed(text: "handler"))
+  assert list.all(m.hits, h => h < body_base())
+  assert len(m.loading) == 1
+  assert fetch_urls(c) == ["search-index/en/${m.loading[0]}.feed5678.json"]
+  assert str.contains(encode(m), "\"loading\":[")
+  # the same keystroke again does not ask again for a chunk on its way
+  let (m2, c2) = update(bare, m, Typed(text: "handler"))
+  assert fetch_urls(c2) == []
+  assert m2.loading == m.loading
+  # the chunk arrives: the words are in the state, the message says which
+  let outcome: Result[String, String] = Ok(map.get(fixture_files(), "search-index/en/${m.loading[0]}.feed5678.json").unwrap_or(""))
+  let here = absorb(bare, "c${m.loading[0]}", outcome)
+  assert supplied("c${m.loading[0]}", outcome) == Loaded(chunk: m.loading[0])
+  let (m3, c3) = update(here, m, Loaded(chunk: m.loading[0]))
+  assert m3.loading == []
+  assert m3.hits == [body_base() + 2, body_base() + 4]
+  assert fetch_urls(c3) == ["search-text/en/2.abcd1234.json", "search-text/en/3.abcd1234.json"]
+  # a model that is waiting says so on the wire, and only then
+  assert decode(encode(m)) == m
+  assert not str.contains(encode(m3), "loading")
+}
+
+## Chunking changes what is fetched and nothing about the answer: every query
+## ends, once the host has answered what it asked, with the rows, counts and
+## suggestion a panel holding all the chunks from the start gives.
+test "a panel that fetches its chunks as it goes ends where one that has them all begins" {
+  for q in ["handler", "handler state", "with handle", "the", "effects", "han", "ha", "handel", "wiht handel",
+    "where does the spec say handle", "xyzzyx", "io.read_file", "algebraic effects multiple", "st", "s"] {
+    let (_, lazy) = world(bare_state(), q)
+    let (_, full) = world(text_state(), q)
+    assert lazy.hits == full.hits
+    assert lazy.counts == full.counts
+    assert lazy.fix == full.fix
+    assert lazy.fix_hits == full.fix_hits
+    assert lazy.loading == []
+  }
+  for q in ["效果", "效果 处理", "处理器", "效", "理由"] {
+    let j = body_asset(3, "search-text/zh", zh_secs(), zh_paras()).json_of()
+    let zh = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
+    let (_, lazy) = world(zh, q)
+    let (_, full) = world(with_words(zh, fixture_files()), q)
+    assert lazy.hits == full.hits
+    assert lazy.counts == full.counts
+    assert lazy.loading == []
+  }
+}
+
+## A prefix is a run of the sorted words and a run can cross a chunk boundary:
+## its postings are the union over every chunk the run touches, whatever the
+## chunk size. Checked against a scan of every word of every chunk, for each
+## prefix of two and three letters of every word the fixture has.
+test "a prefix spanning chunks finds what a scan of all the words finds" {
+  let state = text_state()
+  match state.body {
+    None -> panic("the text state has a body")
+    Some(b) -> {
+      var all_terms: List[String] = []
+      var all_posts: List[List[Int]] = []
+      for i in range(0, len(b.chunks)) {
+        all_terms = all_terms ++ posts_at(state, i).terms
+        all_posts = all_posts ++ posts_at(state, i).posts
+      }
+      var prefixes: List[String] = []
+      for w in all_terms {
+        for n in [2, 3] {
+          if str.len(w) >= n && not list.contains(prefixes, str.take(w, n)) {
+            prefixes = prefixes ++ [str.take(w, n)]
+          }
+        }
+      }
+      var spanning = 0
+      for p in prefixes {
+        var scan: List[List[Int]] = []
+        for i in range(0, len(all_terms)) {
+          if str.starts_with(all_terms[i], p) {
+            scan = scan ++ [all_posts[i]]
+          }
+        }
+        assert postings(state, b, BodyTerm { word: p, prefix: true }) == union(scan)
+        if len(chunks_for(b, p, true)) > 1 {
+          spanning = spanning + 1
+        }
+      }
+      assert len(prefixes) > 20
+      assert spanning > 0
+    }
+  }
+}
+
+## A chunk that cannot be had is recorded as having no words and is not asked
+## for again, so a missing file costs the words in it and not a request per key.
+test "a chunk that failed, or is not the one the manifest describes, has no words and is not asked again" {
+  let bare = bare_state()
+  let (m, _) = update(bare, blank(), Typed(text: "handler"))
+  let c = m.loading[0]
+  let good = map.get(fixture_files(), "search-index/en/${c}.feed5678.json").unwrap_or("")
+  assert len(posts_at(absorb(bare, "c${c}", Ok(good)), c).terms) > 0
+  assert posts_at(absorb(bare, "c${c}", Err("HTTP 404")), c) == Posts { terms: [], posts: [] }
+  assert posts_at(absorb(bare, "c${c}", Ok("<html>")), c).terms == []
+  assert posts_at(absorb(bare, "c${c}", Ok(str.replace(good, "[${c},", "[${c + 1},"))), c).terms == []
+  assert posts_at(absorb(bare, "c${c}", Ok("[${c},[\"a\",\"b\"],[[1]]]")), c).terms == []
+  assert absorb(bare, "c999", Ok(good)).chunks == bare.chunks
+  let failed = absorb(bare, "c${c}", Err("HTTP 404"))
+  let (m2, c2) = update(failed, Model { ..m, loading: [] }, Typed(text: "handler"))
+  assert fetch_urls(c2) == []
+  assert m2.hits == []
+}
+
+## While the words are on their way a query nothing has answered is not "no
+## matches": the panel is waiting, and says nothing until it knows.
+test "a query waiting for its words does not say that nothing matches" {
+  let bare = bare_state()
+  let (m, _) = update(bare, blank(), Typed(text: "zzyzx"))
+  assert m.hits == []
+  assert len(m.loading) > 0
+  assert m.fix == ""
+  assert not str.contains(bare.view(m).show_tree(), "Nothing matches")
+  let (_, done) = world(bare, "zzyzx")
+  assert str.contains(bare.view(done).show_tree(), "Nothing matches")
+}
 
 ## The first answer is from the index alone. The rows on screen ask for their
 ## sections' files, once each, under names the index gives them.
@@ -4308,8 +4847,8 @@ test "a fragment that failed, or is not the one the index describes, is no text 
 ## Text that comes late reorders: a candidate that could not be checked is in
 ## the tier below, and joins or leaves the first tier when its text is here.
 test "a late fragment moves a Chinese candidate between tiers" {
-  let j = body_asset(2, "search-text/zh", zh_secs(), zh_paras()).json_of()
-  let state = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
+  let j = body_asset(3, "search-text/zh", zh_secs(), zh_paras()).json_of()
+  let state = with_words(State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }, fixture_files())
   let (m, c) = update(state, blank(), Typed(text: "效果 处理"))
   assert len(m.hits) == 3
   # the three rows, and both asked for and unchecked sections are the same three
@@ -4340,8 +4879,8 @@ test "rows further down ask for their text when the selection comes near" {
     secs = secs ++ [["spec", "spec.html#s${i}", "Part ${i}"]]
     paras = paras ++ [(i, "common word${i}")]
   }
-  let j = body_asset(2, "search-text/en", secs, paras).json_of()
-  let state = State { ..blank_state(), body: body_of(j, []) }
+  let j = body_asset(3, "search-text/en", secs, paras).json_of()
+  let state = with_words(State { ..blank_state(), body: body_of(j, []) }, chunk_files("search-text/en", paras))
   let (m, c) = update(state, blank(), Typed(text: "common"))
   assert len(m.hits) == 14
   assert len(fetches(c)) == 10
@@ -4440,7 +4979,9 @@ test "the first-letter bucket misses no word that a walk of the whole index find
   }
   match state.body {
     Some(b) -> {
-      vocab = vocab ++ b.terms
+      for i in range(0, len(b.chunks)) {
+        vocab = vocab ++ posts_at(state, i).terms
+      }
     }
     None -> panic("the text state has a body")
   }

@@ -364,7 +364,7 @@ fn index_hrefs(name: String, text: String) -> List[String] = {
 ## -- so a renderer that moved its ids would show up here in hundreds.
 ##
 ## The shape around the hrefs is checked as far as reading them needs: the
-## asset is an array whose first field is the version the panel knows (2),
+## asset is an array whose first field is the version the panel knows (3),
 ## whose second is the fragment directory and whose third is the section table
 ## of four-string rows. Anything else is a generator that changed the format
 ## without bumping the version, and is reported rather than skipped.
@@ -403,14 +403,48 @@ fn body_dir(name: String, text: String) -> String =
     _ -> panic("assets/${name} is not a body index")
   }
 
+## The postings chunks a body manifest names, as paths under the site root
+## (`assets/<dir>/<n>.<hash>.json`), in order, each with the first word the
+## manifest says it starts at. The manifest's fifth field is the directory and
+## its sixth the `[first, hash]` rows. A row of another shape, or first words
+## that do not strictly ascend (the panel finds a chunk by binary search on
+## them), is a generator that changed the format without telling the panel.
+fn body_chunks(name: String, text: String) -> List[(String, String)] =
+  match parse(text) {
+    Ok(JArr(fields)) ->
+      match (get(fields, 4), get(fields, 5)) {
+        (Some(JStr(dir)), Some(JArr(rows))) -> {
+          var out: List[(String, String)] = []
+          var prev = ""
+          var at = 0
+          for row in rows {
+            match row {
+              JArr([JStr(first), JStr(hash)]) -> {
+                if at > 0 && not (cmp(code_points(prev), code_points(first)) < 0) {
+                  panic("assets/${name}: chunk ${at} starts at `${first}`, not after `${prev}`")
+                }
+                out = out ++ [("assets/${dir}/${at}.${hash}.json", first)]
+                prev = first
+                at = at + 1
+              }
+              _ -> panic("assets/${name}: a chunk row is not [first, hash]")
+            }
+          }
+          out
+        }
+        _ -> panic("assets/${name}: a body index's fifth and sixth fields are its chunk directory and chunk rows")
+      }
+    _ -> panic("assets/${name} is not a body index")
+  }
+
 fn body_rows(name: String, text: String) -> List[(String, String, String, String)] = {
   var out: List[(String, String, String, String)] = []
   match parse(text) {
     Ok(JArr(fields)) -> {
       match get(fields, 0) {
         Some(JInt(v)) -> {
-          if v != 2 {
-            panic("assets/${name}: body index version ${v}, and the panel reads 2")
+          if v != 3 {
+            panic("assets/${name}: body index version ${v}, and the panel reads 3")
           }
         }
         _ -> panic("assets/${name}: a body index opens with its version number")
@@ -547,6 +581,7 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
   var bodies = 0
   var index_links = 0
   var fragments = 0
+  var chunks = 0
   var named: List[String] = []
   for name in must_list("${out}/assets") {
     let is_body = is_search_body(name)
@@ -563,6 +598,20 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
           ++ ["assets/${name}: the search index is empty, so the panel can find nothing"]
       }
       if is_body {
+        for chunk in body_chunks(name, text) {
+          let (chunk_path, _) = chunk
+          chunks = chunks + 1
+          named = named ++ [chunk_path]
+          if not set.has(files, chunk_path) {
+            broken = broken
+              ++ ["assets/${name} -> ${chunk_path}: the manifest names a postings chunk that was never written"]
+          }
+          if not is_fingerprinted(last_segment(chunk_path)) {
+            broken = broken
+              ++ ["assets/${name} -> ${chunk_path}: a chunk's name carries no content hash, so its "
+                  ++ "URL cannot change when its bytes do"]
+          }
+        }
         for frag_path in body_fragments(name, text) {
           fragments = fragments + 1
           named = named ++ [frag_path]
@@ -594,12 +643,15 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       }
     }
   }
-  # The other direction: a fragment on disk that no index names is a file the
-  # build wrote for nothing (a stale one the clean step missed, or a name the
-  # index stopped using), and ships.
+  # The other direction: a fragment or chunk on disk that no manifest names is
+  # a file the build wrote for nothing (a stale one the clean step missed, or a
+  # name the manifest stopped using), and ships.
   for f in set.to_list(files) {
     if str.starts_with(f, "assets/search-text/") && not list.contains(named, f) {
       broken = broken ++ ["${f}: a text fragment no body index names"]
+    }
+    if str.starts_with(f, "assets/search-index/") && not list.contains(named, f) {
+      broken = broken ++ ["${f}: a postings chunk no body index names"]
     }
   }
   if indexes == 0 {
@@ -622,7 +674,7 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       ++ "heading id(s) across ${pages} pages, all resolve; ${assets} of them reach assets/ "
       ++ "and every one is content-hashed; ${payloads} prefilled Playground fragment(s) decode; "
       ++ "${index_links} search-index href(s) in ${indexes} title and ${bodies} body index(es) "
-      ++ "resolve, fragments included; ${fragments} text fragment(s) named by the body indexes all exist")
+      ++ "resolve, fragments included; ${fragments} text fragment(s) and ${chunks} postings chunk(s) named by the body indexes all exist")
 }
 
 test "resolution normalizes relative segments" {
@@ -671,11 +723,14 @@ test "a body index is told apart from a title index and read for its hrefs" {
   assert not is_search_body("search-body-zh.0123abcd.json")
   assert hrefs_of(`<div id="dawn-search" data-search-body="../assets/search-body-en.ab12cd34.json" hidden>`)
     == ["../assets/search-body-en.ab12cd34.json"]
-  let text = "[2,\"search-text/en\",[[\"spec\",\"spec.html\",\"Spec\",\"\"],[\"spec\",\"spec.html#s1\",\"One\",\"ab12cd34\"]],[],[],[0,1]]"
+  let text = "[3,\"search-text/en\",[[\"spec\",\"spec.html\",\"Spec\",\"\"],[\"spec\",\"spec.html#s1\",\"One\",\"ab12cd34\"]],[0,1],\"search-index/en\",[[\"a\",\"00ff00ff\"],[\"m\",\"11ee11ee\"]]]"
   assert body_hrefs("search-body-en.json", text) == ["spec.html", "spec.html#s1"]
   # the fragment is named by its section's position and its hash; a section
   # with no hash has none
   assert body_fragments("search-body-en.json", text) == ["assets/search-text/en/1.ab12cd34.json"]
+  # a chunk is named by its position and hash, and starts at its first word
+  assert body_chunks("search-body-en.json", text)
+    == [("assets/search-index/en/0.00ff00ff.json", "a"), ("assets/search-index/en/1.11ee11ee.json", "m")]
 }
 
 test "id extraction" {

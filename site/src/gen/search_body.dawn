@@ -11,14 +11,17 @@
 # specified in docs/site-search-design.md, sections 2 and 13, and this file
 # writes exactly that.
 #
-# Two kinds of asset since format 2 (section 13): the index, which says WHERE
-# (sections, words, postings, and how many paragraphs each section has), and
-# one text fragment per section, which says WHAT (the section's paragraphs,
-# whole). The two grow differently and are read differently: a query needs the
-# whole index and the text of only the few rows it shows, so the text is
-# fetched row by row instead of riding in the index. The fragment's name
-# carries a hash of its bytes and the index names every fragment, so a change
-# to one section changes that fragment's URL and the index's, and nothing else.
+# Three kinds of asset since format 3 (section 13): the manifest, which says
+# WHAT EXISTS (the sections, how many paragraphs each has, and the postings
+# chunks), the postings chunks, which say WHERE (a run of words in code-point
+# order, each with the paragraphs it is in), and one text fragment per section,
+# which says WHAT IT SAYS (the section's paragraphs, whole). They grow
+# differently and are read differently: a query needs the manifest, the chunks
+# of the words it names and the text of only the few rows it shows, so the
+# words and the text are fetched as they are needed instead of riding in one
+# file. A chunk's and a fragment's names carry a hash of their bytes and the
+# manifest names every one, so a change to one section's text changes that
+# fragment's URL, the chunks it touches and the manifest's, and nothing else.
 #
 # The choices that are not obvious from the code, each argued in that
 # document:
@@ -42,8 +45,9 @@ use std/str
 use std/list
 use std/char
 use std/map
-use json/value.{JStr}
+use json/value.{Json, JStr, JArr, JInt}
 use json/render.{render}
+use json/parser.{parse}
 use md/ast.{Inline, Block, Heading, Para, CodeBlock, Fragment, Program, UList, OList, Table, Quote, Rule}
 use html/render.{render_doc, inline_text, split_head}
 use html/page.{Lang, En, Zh, lang_path}
@@ -56,10 +60,19 @@ use std/bytes
 use md/parser
 use std/io
 
-## The index's format version, its first field. The panel loads no body index
-## whose version it does not know, so a change to the format is a change here.
-## 2 since the text left the index (docs/site-search-design.md section 13).
-pub fn body_version() -> Int = 2
+## The manifest's format version, its first field. The panel loads no body
+## index whose version it does not know, so a change to the format is a change
+## here. 2 when the text left the index, 3 when the words and postings left it
+## too and became chunks (docs/site-search-design.md section 13).
+pub fn body_version() -> Int = 3
+
+## About how many bytes of words and postings, written, one chunk holds: a
+## chunk is closed when the next word would take it past this, so a word with
+## a longer posting list than this is a chunk of its own. Chosen from the
+## sweep in docs/site-search-design.md 13.11: small enough that a query's
+## worst case is a few kilobytes of chunks next to the text it fetches, large
+## enough that the manifest stays a few kilobytes and a prefix spans few files.
+pub fn chunk_target() -> Int = 4000
 
 ## The fragment's format version, written nowhere: the fragment is
 ## `[section, [paragraph, ...]]`, and the index that names it is the one that
@@ -364,11 +377,72 @@ fn fragments_of(ix: BodyIndex) -> List[TextFragment] = {
 ## The file name of a fragment, relative to /assets/.
 pub fn fragment_path(lang: Lang, f: TextFragment) -> String = "${text_dir(lang)}/${f.sec}.${f.hash}.json"
 
-## The index's bytes, docs/site-search-design.md 13.4:
-## `[version, fragment_dir, sections, terms, postings, counts]`, a section
+## The name of language `lang`'s postings chunk directory under /assets/.
+pub fn chunk_dir(lang: Lang) -> String =
+  match lang {
+    En -> "search-index/en"
+    Zh -> "search-index/zh"
+  }
+
+## One written chunk: its position, the first word it holds, and the file's
+## bytes. Chunk `n` holds the words from its `first` up to, and not including,
+## the next chunk's `first` (the last chunk holds the rest), so a word is found
+## by the manifest alone and a chunk does not say where it ends. The file is
+## `[n, [word, ...], [[gap, ...], ...]]` -- the position repeated for the same
+## reason a fragment repeats its section -- in the language's chunk directory
+## as `<n>.<hash>.json`, the hash being the fingerprint of these bytes.
+pub type PostingChunk = { n: Int, first: String, hash: String, text: String }
+
+## How many bytes a word and its postings take written, the measure the chunks
+## are cut by. It leaves out one separator per word, so a written chunk is a
+## little over the target (never by more than a byte a word): the target is a
+## way of choosing a size, and 13.11 reports the sizes that came out.
+fn entry_size(term: String, gs: List[Int]) -> Int =
+  str.len(quoted(term)) + str.len(join(list.map(gs, g => "${g}"), ",")) + 3
+
+fn chunk_text(n: Int, terms: List[String], gaps_of_terms: List[List[Int]]) -> String =
+  "[${n},[" ++ join(list.map(terms, t => quoted(t)), ",") ++ "],["
+  ++ join(list.map(gaps_of_terms, gs => "[" ++ join(list.map(gs, g => "${g}"), ",") ++ "]"), ",") ++ "]]\n"
+
+fn chunks_of(ix: BodyIndex) -> List[PostingChunk] = {
+  var out: List[PostingChunk] = []
+  var terms: List[String] = []
+  var gs: List[List[Int]] = []
+  var size = 0
+  for i in range(0, len(ix.terms)) {
+    let g = gaps(ix.postings[i])
+    let e = entry_size(ix.terms[i], g)
+    if len(terms) > 0 && size + e > chunk_target() {
+      out = out ++ [close_chunk(len(out), terms, gs)]
+      terms = []
+      gs = []
+      size = 0
+    }
+    terms = terms ++ [ix.terms[i]]
+    gs = gs ++ [g]
+    size = size + e
+  }
+  if len(terms) > 0 {
+    out = out ++ [close_chunk(len(out), terms, gs)]
+  }
+  out
+}
+
+fn close_chunk(n: Int, terms: List[String], gs: List[List[Int]]) -> PostingChunk = {
+  let text = chunk_text(n, terms, gs)
+  let named = fingerprint("${n}.json", bytes.utf8(text))
+  PostingChunk { n: n, first: terms[0], hash: str.split(named, ".")[1], text: text }
+}
+
+## The file name of a chunk, relative to /assets/.
+pub fn chunk_path(lang: Lang, c: PostingChunk) -> String = "${chunk_dir(lang)}/${c.n}.${c.hash}.json"
+
+## The manifest's bytes, docs/site-search-design.md 13.4:
+## `[version, fragment_dir, sections, counts, chunk_dir, chunks]`, a section
 ## being `[doc, href, title, fragment_hash]` with `""` for a section that has
-## no fragment, and `counts[s]` the number of ids section `s` holds.
-pub fn index_json(ix: BodyIndex, lang: Lang, frags: List[TextFragment]) -> String = {
+## no fragment, `counts[s]` the number of ids section `s` holds, and a chunk
+## `[first_word, hash]`, in order.
+pub fn index_json(ix: BodyIndex, lang: Lang, frags: List[TextFragment], chunks: List[PostingChunk]) -> String = {
   var sections: List[String] = []
   for si in range(0, len(ix.sections)) {
     let s = ix.sections[si]
@@ -381,22 +455,22 @@ pub fn index_json(ix: BodyIndex, lang: Lang, frags: List[TextFragment]) -> Strin
     sections = sections
       ++ ["[" ++ quoted(s.doc) ++ "," ++ quoted(s.href) ++ "," ++ quoted(s.title) ++ "," ++ quoted(hash) ++ "]"]
   }
-  let terms = list.map(ix.terms, t => quoted(t))
-  let postings = list.map(ix.postings, ps =>
-      "[" ++ join(list.map(gaps(ps), g => "${g}"), ",") ++ "]")
   let counts = list.map(counts_of(ix), c => "${c}")
-  "[${body_version()}," ++ quoted(text_dir(lang)) ++ ",[" ++ join(sections, ",") ++ "],["
-    ++ join(terms, ",") ++ "],[" ++ join(postings, ",") ++ "],[" ++ join(counts, ",") ++ "]]"
+  let rows = list.map(chunks, c => "[" ++ quoted(c.first) ++ "," ++ quoted(c.hash) ++ "]")
+  "[${body_version()}," ++ quoted(text_dir(lang)) ++ ",[" ++ join(sections, ",") ++ "],[" ++ join(counts, ",") ++ "],"
+    ++ quoted(chunk_dir(lang)) ++ ",[" ++ join(rows, ",") ++ "]]"
 }
 
-## One language's body search, as the bytes that go into /assets/: the index,
-## and the fragments it names.
-pub type BodyAssets = { index: String, fragments: List[TextFragment] }
+## One language's body search, as the bytes that go into /assets/: the
+## manifest, the chunks of words and postings it names, and the text fragments
+## it names.
+pub type BodyAssets = { index: String, chunks: List[PostingChunk], fragments: List[TextFragment] }
 
 pub fn search_body(c: Corpus, lang: Lang) -> BodyAssets = {
   let ix = build_index(body_sections(c, lang))
   let frags = fragments_of(ix)
-  BodyAssets { index: index_json(ix, lang, frags), fragments: frags }
+  let chunks = chunks_of(ix)
+  BodyAssets { index: index_json(ix, lang, frags, chunks), chunks: chunks, fragments: frags }
 }
 
 # ---- tests -----------------------------------------------------------------
@@ -415,29 +489,37 @@ fn frag(href: String) -> String =
   }
 
 ## The index's first field, and the shape around it.
-test "the body index is version 2, positional, and holds no text" {
+test "the manifest is version 3, positional, and holds neither text nor words" {
   let secs = page_sections("spec", "spec.html", "Spec", md("## One\n\nA word.\n"))
   let ix = build_index(secs)
   let frags = fragments_of(ix)
-  let text = index_json(ix, En, frags)
-  assert body_version() == 2
+  let chunks = chunks_of(ix)
+  let text = index_json(ix, En, frags, chunks)
+  assert body_version() == 3
   assert ix.terms == ["a", "word"]
   assert ix.postings == [[0], [0]]
   assert ix.indexed == [(1, 0)]
   assert len(frags) == 1
   assert frags[0].sec == 1
-  assert str.starts_with(text, "[2,\"search-text/en\",[[\"spec\",\"spec.html\",\"Spec\",\"\"],[\"spec\",\"spec.html#s1\",\"One\",\"${frags[0].hash}\"]],")
-  assert str.ends_with(text, ",[\"a\",\"word\"],[[0],[0]],[0,1]]")
-  # the paragraph is in the fragment and nowhere in the index
+  # two words and their postings fit one chunk, which the manifest names by
+  # its first word and hash; the words themselves are in the chunk only
+  assert len(chunks) == 1
+  assert chunks[0].first == "a"
+  assert chunks[0].text == "[0,[\"a\",\"word\"],[[0],[0]]]\n"
+  assert str.starts_with(text, "[3,\"search-text/en\",[[\"spec\",\"spec.html\",\"Spec\",\"\"],[\"spec\",\"spec.html#s1\",\"One\",\"${frags[0].hash}\"]],")
+  assert str.ends_with(text, ",[0,1],\"search-index/en\",[[\"a\",\"${chunks[0].hash}\"]]]")
+  assert chunk_path(Zh, chunks[0]) == "search-index/zh/0.${chunks[0].hash}.json"
+  # the paragraph is in the fragment and nowhere in the manifest or a chunk
   assert frags[0].text == "[1,[\"A word.\"]]\n"
   assert not str.contains(text, "A word.")
+  assert not str.contains(text, "\"word\"")
   assert fragment_path(En, frags[0]) == "search-text/en/1.${frags[0].hash}.json"
   assert fragment_path(Zh, frags[0]) == "search-text/zh/1.${frags[0].hash}.json"
   # postings are written as gaps
   assert gaps([3, 4, 9, 10]) == [3, 1, 5, 1]
   let two = build_index(page_sections("spec", "spec.html", "Spec", md("A b.\n\nC.\n\nA.\n")))
   assert two.postings[0] == [0, 2]
-  assert str.contains(index_json(two, En, fragments_of(two)), "[[0,2],")
+  assert str.contains(chunks_of(two)[0].text, "[[0,2],")
 }
 
 ## The fragment's name follows its bytes: the same text is the same name, a
@@ -453,7 +535,7 @@ test "a fragment is named by its content and a section without text has none" {
   assert fa[1].hash != fb[1].hash
   assert str.len(fa[0].hash) == 8
   assert counts_of(a) == [1, 1, 0]
-  assert str.contains(index_json(a, En, fa), ",\"Two\",\"\"]")
+  assert str.contains(index_json(a, En, fa, chunks_of(a)), ",\"Two\",\"\"]")
 }
 
 ## A section is a page's lead plus one per anchored heading, h4 included, and
@@ -583,6 +665,71 @@ test "every posting of a sampled term points at a paragraph that has the term" {
     }
   })
 }
+
+## Chunking is a re-cut of the same words and postings and nothing else: read
+## back, the chunks are the whole word list in order with every posting list
+## intact, each starts at the first word the manifest says, none is larger than
+## the target unless it is a single word, and the manifest names them all.
+test "the chunks of the real documents are the word list, cut in order" {
+  io.with_fs_real(() => {
+    for lang in [En, Zh] {
+      let ix = build_index(body_sections(read_corpus(lang), lang))
+      let chunks = chunks_of(ix)
+      var at = 0
+      var n = 0
+      for c in chunks {
+        assert c.n == n
+        assert str.len(c.hash) == 8
+        match parse(c.text) {
+          Ok(JArr(fs)) -> {
+            assert fs[0] == JInt(value: n)
+            let terms = jarr_strs(fs[1])
+            let posts = jarr_gaps(fs[2])
+            assert len(terms) > 0 && len(terms) == len(posts)
+            assert terms[0] == c.first
+            if len(terms) > 1 {
+              assert str.len(c.text) <= chunk_target() + len(terms) + 40
+            }
+            for i in range(0, len(terms)) {
+              assert terms[i] == ix.terms[at + i]
+              assert posts[i] == gaps(ix.postings[at + i])
+            }
+            at = at + len(terms)
+          }
+          _ -> panic("a chunk is an array")
+        }
+        n = n + 1
+      }
+      assert at == len(ix.terms)
+      assert len(chunks) > 10
+      let manifest = index_json(ix, lang, fragments_of(ix), chunks)
+      for c in chunks {
+        assert str.contains(manifest, "[${quoted(c.first)},${quoted(c.hash)}]")
+      }
+    }
+  })
+}
+
+fn jarr_strs(j: Json) -> List[String] =
+  match j {
+    JArr(items) -> list.map(items, x => match x {
+      JStr(value) -> value
+      _ -> panic("a word is a string")
+    })
+    _ -> panic("words are an array")
+  }
+
+fn jarr_gaps(j: Json) -> List[List[Int]] =
+  match j {
+    JArr(rows) -> list.map(rows, r => match r {
+      JArr(items) -> list.map(items, x => match x {
+        JInt(value) -> value
+        _ -> panic("a gap is an integer")
+      })
+      _ -> panic("a posting is an array")
+    })
+    _ -> panic("postings are an array")
+  }
 
 ## The two languages' section tables line up one for one, which is what lets
 ## a reader switch languages and land on the same section: the same number of
