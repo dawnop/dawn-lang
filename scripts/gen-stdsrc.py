@@ -21,6 +21,7 @@ stamp from the directory only, for the same reason.
 """
 
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -60,6 +61,39 @@ def esc(text: str) -> str:
     return "".join(out)
 
 
+# What a module exports as a function: a top-level `pub fn` / `pub(pkg) fn`, and
+# the methods of a `pub` trait and the operations of a `pub` effect (indented
+# two spaces inside the block, which closes at a `}` in column 0). The loader
+# builds StdCtx.moved (the "use std/X, then X.f(...)" hint for a bare name that
+# is nobody's) from these, and a pruned load cannot, because it does not parse
+# the modules it leaves out. The test in driver/stdlib.dawn holds the rows
+# equal to a full load's table, so a std edit this misreads fails there.
+EXPORTED_FN = re.compile(r"^pub(?:\(pkg\))? fn ([a-z_][A-Za-z0-9_]*)")
+EXPORTED_BLOCK = re.compile(r"^pub(?:\(pkg\))? (?:ctl )?(?:trait|effect) ")
+BLOCK_FN = re.compile(r"^  fn ([a-z_][A-Za-z0-9_]*)")
+
+
+def moved_rows(names: list[str]) -> str:
+    rows = []
+    for n in names:
+        in_block = False
+        for line in (STD / (n + ".dawn")).read_text(encoding="utf-8").split("\n"):
+            if in_block:
+                if line.startswith("}"):
+                    in_block = False
+                else:
+                    m = BLOCK_FN.match(line)
+                    if m:
+                        rows.append(f"{m.group(1)}\t{n}")
+                continue
+            m = EXPORTED_FN.match(line)
+            if m:
+                rows.append(f"{m.group(1)}\t{n}")
+            elif EXPORTED_BLOCK.match(line) and line.rstrip().endswith("{"):
+                in_block = True
+    return "\n".join(rows)
+
+
 def main() -> None:
     idx_text = (STD / "modules.txt").read_text(encoding="utf-8")
     files = ["modules.txt"] + [n + ".dawn" for n in index_names(idx_text)]
@@ -87,6 +121,12 @@ def main() -> None:
     lines.append("  } else {")
     lines.append("    None")
     lines.append("  }")
+    lines.append("")
+    lines.append("## Every exported function of the embedded std as `name<TAB>module` rows, in")
+    lines.append("## modules.txt order: what a load that leaves modules out cannot read back out")
+    lines.append("## of them (stdlib.moved_table).")
+    lines.append("pub fn moved_rows() -> String =")
+    lines.append(f"  \"{esc(moved_rows(index_names(idx_text)))}\"")
     lines.append("")
 
     OUT.write_text("\n".join(lines), encoding="utf-8")

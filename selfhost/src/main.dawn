@@ -28,13 +28,14 @@ use driver/checkdump
 use ir/coredump
 use ir/coresites
 use driver/stdlib.{
-  StdCtx, StdLoadError, load_chosen_std, load_chosen_std_lean, cli_std_choice, std_choice_text, std_load_error_text,
+  StdCtx, StdLoadError, load_chosen_std, load_chosen_std_lean, load_chosen_std_pruned, cli_std_choice, std_choice_text, std_load_error_text,
   std_load_is_bug
 }
 use driver/analyze.{
   CheckedMod, LocDiag, LoadResult, Program, ProjectPlan,
   load_file, load_target, load_planned, project_plan_for_load, std_dir_target,
-  analyze_program, rendered_diags, dawn_files_under, planner_diags, own_module_paths
+  analyze_program, rendered_diags, dawn_files_under, planner_diags, own_module_paths,
+  std_imports, union_imports
 }
 use driver/clifail.{fail_compile, fail_planner}
 use compiler_plan/source
@@ -2416,25 +2417,55 @@ fn run_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return cli_error("source files must end in .dawn: ${t}")
     }
   }
-  let std = check_std_lean(std_flag)
   var all: List[LocDiag] = []
-  for t in targets {
-    # this command plans its own load rather than going through `load_target`,
-    # so the std directory has to be answered here too -- and with the same
-    # words, because scripts/native-cli-diff.sh compares the two drivers
-    match std_dir_target(std, t) {
-      Some(refusal) -> { all = all ++ refusal.diags }
-      None ->
-        match project_plan_for_load(source_target(t)) {
-          Err(rejected) -> { all = all ++ rejected.diags }
-          Ok(plan) -> {
-            let loaded = load_planned(plan)
-            match analyze_target_scoped(plan, loaded, std, opts) {
-              Ok(prog) -> { all = all ++ rendered_diags(prog) }
-              Err(e) -> return fail_target_setup(e)
+  if cli_std_choice(std_flag) == None {
+    # The embedded std is cut to what the targets import (docs/check-std-prune-design.md),
+    # so every target's plan and load come first and std once, after them.
+    var planned: List[(ProjectPlan, LoadResult)] = []
+    var wanted: Option[Set[String]] = Some(set.empty())
+    for t in targets {
+      match project_plan_for_load(source_target(t)) {
+        Err(rejected) -> { all = all ++ rejected.diags }
+        Ok(plan) -> {
+          let loaded = load_planned(plan)
+          wanted = union_imports(wanted, std_imports(loaded))
+          planned = planned ++ [(plan, loaded)]
+        }
+      }
+    }
+    if len(planned) > 0 {
+      let std = match load_chosen_std_pruned(None, wanted) {
+        Ok(sc) -> sc
+        Err(e) -> fail_std(e)
+      }
+      for item in planned {
+        let (plan, loaded) = item
+        match analyze_target_scoped(plan, loaded, std, opts) {
+          Ok(prog) -> { all = all ++ rendered_diags(prog) }
+          Err(e) -> return fail_target_setup(e)
+        }
+      }
+    }
+  } else {
+    let std = check_std_lean(std_flag)
+    for t in targets {
+      # this command plans its own load rather than going through `load_target`,
+      # so the std directory has to be answered here too -- and with the same
+      # words, because scripts/native-cli-diff.sh compares the two drivers
+      match std_dir_target(std, t) {
+        Some(refusal) -> { all = all ++ refusal.diags }
+        None ->
+          match project_plan_for_load(source_target(t)) {
+            Err(rejected) -> { all = all ++ rejected.diags }
+            Ok(plan) -> {
+              let loaded = load_planned(plan)
+              match analyze_target_scoped(plan, loaded, std, opts) {
+                Ok(prog) -> { all = all ++ rendered_diags(prog) }
+                Err(e) -> return fail_target_setup(e)
+              }
             }
           }
-        }
+      }
     }
   }
   if len(all) > 0 { return fail_compile(all) }

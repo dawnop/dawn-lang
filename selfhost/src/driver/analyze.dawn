@@ -26,7 +26,7 @@ use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
 use std/memfs
 use driver/stdlib.{
-  StdCtx, load_std, std_load_error_text, std_module_of, is_std_dir, read_index
+  StdCtx, load_std, std_load_error_text, std_module_of, is_std_dir, read_index, embedded_module_paths
 }
 use check/tast.{TModule}
 use check/types.{Sym, Impls, TyVar, EffVar}
@@ -413,6 +413,53 @@ pub(pkg) fn syntax_failure_diags(loaded: LoadResult) -> Option[List[LocDiag]] = 
   Some(rendered_diags(Program { modules: [], diags: diags, decl_spans: spans,
     ct_world: ct_world_empty() }))
 }
+
+## The std modules a loaded program names: every `use std/..` of every module
+## the load read, the root package's and each `[deps]` package's alike. This is
+## what a pruned std load adds to its base set (docs/check-std-prune-design.md).
+##
+## Read off the parsed module graph, not the text: a path dependency's `use
+## std/reactor` is as much the program's as the entry file's own.
+##
+## `None` when the program cannot be answered from a subset: a module that did
+## not parse (its imports are unknown), or an import of a std module the
+## embedded copy does not have (the "no bundled std module" hint lists the
+## modules that are loaded, and so must be the whole list).
+pub(pkg) fn std_imports(loaded: LoadResult) -> Option[Set[String]] = {
+  let known = set.from(embedded_module_paths())
+  var out: Set[String] = set.empty()
+  for lm in loaded.modules {
+    if len(lm.pdiags) > 0 {
+      let none: Option[Set[String]] = None
+      return none
+    }
+    for u in module_uses(lm.m) {
+      if len(u.segs) > 0 && u.segs[0] == "std" {
+        if not set.has(known, u.path) {
+          let none: Option[Set[String]] = None
+          return none
+        }
+        out = set.insert(out, u.path)
+      }
+    }
+  }
+  Some(out)
+}
+
+## The imports of two programs checked against one std: both sets, or `None`
+## (the whole std) as soon as either cannot be answered from a subset.
+pub(pkg) fn union_imports(a: Option[Set[String]], b: Option[Set[String]]) -> Option[Set[String]] =
+  match a {
+    Some(x) -> match b {
+      Some(y) -> {
+        var out = x
+        for p in set.to_list(y) { out = set.insert(out, p) }
+        Some(out)
+      }
+      None -> b
+    }
+    None -> a
+  }
 
 ## Canonicalize a package module's `use` paths to the name-qualified spelling
 ## (`use types` → `use web/types`; an aliased dep gains the dep's real name),
