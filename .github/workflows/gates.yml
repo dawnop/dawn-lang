@@ -377,7 +377,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19633s (the most this file's `3x` claims may add up to)
+# push-total: 19693s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3407,8 +3407,15 @@ jobs:
     # had a 532s median and a 572s worst (run 37272977720). The claim stays
     # until those leave the audit's window on 10-12; then 483s plus a tenth,
     # rounded up to 5s, is 535s with a 27 minute timeout.
-    # budget: 3x 585s worst observed plus a tenth (run 36676798036)
-    timeout-minutes: 30
+    # 2026-10-11: scripts/std-prune-diff.sh joins this job (the pruned std
+    # load against the full one over 241 checked units and 48 emitted
+    # programs, with its two controls). Measured locally with -P4 at load
+    # average 13 on a 16-core machine: 95s wall, 328 CPU-s; a 4-vCPU runner
+    # that is not shared with a dozen other builds is estimated at 50 to 60s
+    # of it. Planning value: 585 + 60 = 645s, restated from the first
+    # observations. The push total moves by the same 60s.
+    # budget: 3x 645s planning value (585s worst observed plus 60s for std-prune-diff)
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v4
         with:
@@ -3444,6 +3451,15 @@ jobs:
       # a tag would publish, not one built beside it with the same recipe.
       - name: driver subcommands on the native backend
         run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
+
+      # `check`, `emitc`, `build`, `run` and a program's `test` load only the
+      # std modules the program reaches (docs/check-std-prune-design.md). This
+      # holds that to its claim, on the binary a release would publish: for
+      # every unit of the checker corpus, examples, Playground samples and
+      # packages, the pruned load and `--std std` (the full one) agree byte for
+      # byte on diagnostics and on emitted C.
+      - name: pruned std load against the full one
+        run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/std-prune-diff.sh
 
   # `dawn test selfhost`, on the other backend.
   #
