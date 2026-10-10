@@ -2109,7 +2109,10 @@ fn rebind_partner(stmts: List[CStmt], a: Int, t: Int) -> Int = {
 
 fn can_fuse_rebind(stmts: List[CStmt], base: Set[Int], a: Int, b: Int, t: Int, p: Int) -> Bool = {
   # `base` is what the block's tail expression and everything after it read
-  if p == t || set.has(base, t) { return false }
+  # a let that never reads `p` is no rebind of it: `b = a` is plain copying and
+  # the assignment arm must see the temporary, not a value it would read as
+  # having consumed the old `b`
+  if p == t || set.has(base, t) || not reads_sym(stmts[a], p) { return false }
   var i = 0
   while i < len(stmts) {
     if i != a && i != b && reads_sym(stmts[i], t) { return false }
@@ -3626,14 +3629,15 @@ test "a self tail call's argument temporary fuses into the assignment unless it 
     _ -> panic("expected the plain assignment")
   }
   # `loop(b, a)`: the second temporary reads `a`, which the first assignment
-  # would already have overwritten, so that pair keeps its temporary
+  # would already have overwritten, and neither let reads the parameter it
+  # feeds, so both pairs keep their temporaries
   let swap = fuse_rebinds([
     CSLet(3, lst, CLocal(2, lst)),
     CSLet(4, lst, CLocal(1, lst)),
     CSAssign(1, CLocal(3, lst)),
     CSAssign(2, CLocal(4, lst))
   ], set.empty())
-  assert len(swap) == 3
+  assert len(swap) == 4
   # the temporary also read elsewhere stays a temporary
   let shared = fuse_rebinds([
     CSLet(3, lst, call),
@@ -3644,6 +3648,13 @@ test "a self tail call's argument temporary fuses into the assignment unless it 
   # ... and so does one the block's tail expression reads
   let tail_read = fuse_rebinds([CSLet(3, lst, call), CSAssign(1, CLocal(3, lst))], set.insert(set.empty(), 3))
   assert len(tail_read) == 2
+  # `b = a` lowers to the same two statements but the let never reads `b`: it
+  # is a copy between two bindings, not a rebind, and must keep its temporary
+  let copy = fuse_rebinds([
+    CSLet(3, lst, CLocal(2, lst)),
+    CSAssign(1, CLocal(3, lst))
+  ], set.empty())
+  assert len(copy) == 2
 }
 
 test "a fused self tail call hands its parameter over with no dup" {

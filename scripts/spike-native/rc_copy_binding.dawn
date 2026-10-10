@@ -1,0 +1,29 @@
+# Plain copies between list bindings, next to the self tail call that
+# the rc pass fuses (#632).
+#
+# A self tail call lowers to `let t = f(p); ...; p = t`, and rc collapses that
+# pair into `p = f(p)` so the call can take `p` over instead of dup'ing it.
+# Ordinary `b = a` lowers to the same two statements, but its right side
+# never reads `b`; collapsing that pair made the assignment arm believe the
+# old `b` had been consumed and the pass refused to compile the function
+# ("released a binding that was not held"). Both shapes are here so the
+# fusion keeps firing for the loop and stays away from the copy.
+
+fn copy_over(p0: Int) -> Int = {
+  var a: List[Int] = [p0, 24]
+  var b: List[Int] = [p0]
+  b = a
+  p0 + 25
+}
+
+fn countdown(xs: List[Int], n: Int) -> Int =
+  if n == 0 { len(xs) } else { countdown(xs ++ [n], n - 1) }
+
+fn swap_lists(a: List[Int], b: List[Int], n: Int) -> Int =
+  if n == 0 { len(a) * 100 + len(b) } else { swap_lists(b, a ++ [n], n - 1) }
+
+pub fn main() -> Unit !io = {
+  println("copy_over = ${copy_over(7)}")
+  println("countdown = ${countdown([], 5)}")
+  println("swap_lists = ${swap_lists([1], [2, 3], 3)}")
+}
