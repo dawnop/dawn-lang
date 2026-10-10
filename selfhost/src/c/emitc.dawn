@@ -34,6 +34,7 @@ use check/types.{
 }
 use ir/reach
 use c/views
+use c/quiet
 use ir/coresites
 use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use embed/unicode_case
@@ -130,6 +131,10 @@ pub type CSt = {
   # emit_expr's `k`.
   slots: Map[Int, Int],
   nslots: Int,
+  # The functions that cannot be discarded by a raise (c/quiet), as
+  # `quiet.key(owner, name)`. Their frame is a plain array: no cleanup, no
+  # registration, nothing for the unwinder to run.
+  quiet: Set[String],
   # The current function's views (c/views): bindings that read a value a
   # borrowed parameter keeps alive and own nothing. They get no own-slot --
   # the unwinder would release a reference they never took -- and stay plain
@@ -1355,6 +1360,7 @@ fn bin_test_st() -> CSt =
     cmap: map.empty(),
     slots: map.empty(),
     nslots: 0,
+    quiet: set.empty(),
     views: set.empty(),
     modes: map.empty(),
     mapping: false,
@@ -2565,8 +2571,10 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     # array declaration this line used to spell out (slot 0 the count, the
     # rest NULL), on wasm32-wasi the same plus registering the frame on the
     # shadow cleanup stack a raise walks in place of the missing unwinder
-    head = head ++ [pad(1) ++ "DAWN_OWN_FRAME(" ++
-        to_string(st3.nslots) ++ ");\n"]
+    # A quiet function (c/quiet) keeps the array, which the slots need as
+    # storage, and loses the cleanup that would scan it
+    let frame = if set.has(st.quiet, quiet.key(f.owner, f.name)) { "DAWN_QUIET_FRAME(" } else { "DAWN_OWN_FRAME(" }
+    head = head ++ [pad(1) ++ frame ++ to_string(st3.nslots) ++ ");\n"]
   }
   for p in shadows {
     head = head ++ [pad(1) ++
@@ -2760,6 +2768,7 @@ fn out_bytes(lines: List[String]) -> Int = {
 ## others that the head does not declare.
 fn emit_units(
   units: List[EmitMod],
+  qset: Set[String],
   u: TableUse,
   live: Option[Live],
   adts: Adts,
@@ -2780,6 +2789,7 @@ fn emit_units(
     cmap: map.empty(),
     slots: map.empty(),
     nslots: 0,
+    quiet: qset,
     views: set.empty(),
     modes: modes,
     mapping: mapping,
@@ -2985,13 +2995,14 @@ fn emit_units(
 
 pub fn emit_program(
   units: List[EmitMod],
+  qset: Set[String],
   entry: String,
   u: TableUse,
   live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> String = {
-  let (st, _fns) = program_st(units, entry, u, live, adts, modes, false)
+  let (st, _fns) = program_st(units, qset, entry, u, live, adts, modes, false)
   join(st.out, "")
 }
 
@@ -3000,13 +3011,14 @@ pub fn emit_program(
 ## built by the same `program_st`; `mapping` only adds the bookkeeping.
 pub fn emit_program_mapped(
   units: List[EmitMod],
+  qset: Set[String],
   entry: String,
   u: TableUse,
   live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> (String, List[MapRow], List[FnRow]) = {
-  let (st, fns) = program_st(units, entry, u, live, adts, modes, true)
+  let (st, fns) = program_st(units, qset, entry, u, live, adts, modes, true)
   let starts = chunk_lines(st.out)
   var rows: List[MapRow] = []
   for r in st.rows { rows = rows ++ [row_lines(st.out, starts, r)] }
@@ -3038,6 +3050,7 @@ fn row_lines(out: List[String], starts: List[Int], r: MapRow) -> MapRow = {
 
 fn program_st(
   units: List[EmitMod],
+  qset: Set[String],
   entry: String,
   u: TableUse,
   live: Option[Live],
@@ -3045,7 +3058,7 @@ fn program_st(
   modes: Map[(String, String), List[CMode]],
   mapping: Bool
 ) -> (CSt, List[FnRow]) = {
-  let (st0, fns) = emit_units(units, u, live, adts, modes, mapping)
+  let (st0, fns) = emit_units(units, qset, u, live, adts, modes, mapping)
   var st = st0
   # The program body runs on the runtime's own stack, not the OS default one
   # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
@@ -3072,12 +3085,13 @@ fn program_st(
 ## `testrun.dawn` synthesises a `dawn$TestMain` class beside the emitted ones.
 pub fn emit_headless(
   units: List[EmitMod],
+  qset: Set[String],
   u: TableUse,
   live: Option[Live],
   adts: Adts,
   modes: Map[(String, String), List[CMode]]
 ) -> String = {
-  let (st, _fns) = emit_units(units, u, live, adts, modes, false)
+  let (st, _fns) = emit_units(units, qset, u, live, adts, modes, false)
   join(st.out, "")
 }
 
