@@ -76,6 +76,16 @@
 # title that answered, with the paragraph that answered best as its excerpt;
 # the hit is still one integer in the model ([body_base]).
 #
+# The index holds no text (format 2, design section 13). What a row shows, and
+# what a Chinese phrase is checked against, is a section's text fragment, a
+# file of its own that the guest asks the host for (`Fetch`) for the rows the
+# reader can see and keeps in the retained state ([absorb]): fragments are
+# read-only data, so they stay out of the model that crosses the wire. A row
+# whose fragment has not arrived is drawn with its title and place and no
+# excerpt, and the answer is computed again when it does -- the ranking is a
+# function of the query and of what has arrived, so a late fragment reorders
+# rows rather than needing a second code path.
+#
 # A query neither index answers is looked at once more for slips of the
 # fingers ([suggest]): the words it lacks are measured against the words the
 # indexes have that begin with the same letter, and the first query so made
@@ -96,7 +106,7 @@ use json/value.{Json, JNull, JBool, JInt, JStr, JArr, JObj}
 use json/parser.{parse}
 use json/render.{render}
 use std/map
-use tea_core/cmd.{Cmd, NoCmd, SendMsg, fold_msg}
+use tea_core/cmd.{Cmd, NoCmd, SendMsg, BatchCmd, Fetch, fold_cmds, fetches}
 use tea_dom/node.{Node, On, NoData}
 use tea_dom/dsl.{el, div, span, text, on_value, on_key, on_click}
 
@@ -163,6 +173,7 @@ pub type State = {
   start: List[Int],
   recent: List[String],
   body: Option[Body],
+  texts: Map[Int, List[String]],
 }
 
 ## The mutable model, and therefore the whole model text on the wire. `goto` is
@@ -191,6 +202,12 @@ pub type State = {
 ## `fix` is the one query the panel suggests when nothing answered this one
 ## ([suggest]), and `fix_hits` how many rows that query answers; `""` and 0
 ## whenever something did answer. Written with `hits`, by the same arms.
+##
+## `asked` is the sections whose text fragment has been requested and has not
+## come back: what keeps a second keystroke from asking for the same file
+## again. `chased` is how many sections' text this query has asked for only to
+## check a Chinese phrase ([verify_total]). Both are on the wire only while they
+## are not empty or zero.
 pub type Model = {
   query: String,
   sel: Int,
@@ -201,6 +218,8 @@ pub type Model = {
   counts: List[Int],
   fix: String,
   fix_hits: Int,
+  asked: List[Int],
+  chased: Int,
 }
 
 ## What the listeners mean, plus the one message no listener produces.
@@ -208,6 +227,10 @@ pub type Model = {
 ## `Hovered` is the pointer resting on the row with that ordinal, and
 ## `Dismissed` the Cancel button a phone shows in place of the Escape key.
 ## `Scoped` is a scope pill: the group it narrows to, or -1 for All.
+##
+## `Arrived` is a section's text fragment having come back (or failed to): the
+## host's answer to a `Fetch`, read by [supplied]. The text itself is not in the
+## message; [absorb] has already put it in the retained state.
 ##
 ## `Chose` cannot arrive from the page: a message reaches this application
 ## only through the `to_msg` of a listener `route.at` found in the tree, and no
@@ -219,6 +242,7 @@ pub type Msg =
   | Dismissed
   | Chose(href: String)
   | Scoped(group: Int)
+  | Arrived(sec: Int)
 derive Show
 
 ## Where the page is, what language it is in, and whether the documents'
@@ -587,17 +611,19 @@ pub fn body_base() -> Int = 1000000
 ## the group of the panel it is drawn in (-1 for none), and the title row with
 ## the same href (-1 for none), which is the row that stands for it when both
 ## answer.
-pub type Sec = { doc: String, href: String, title: String, group: Int, entry: Int }
+pub type Sec = { doc: String, href: String, title: String, group: Int, entry: Int, frag: String }
 
-## One paragraph: its section, and its text as the excerpt shows it -- cut at
-## about 120 display columns (a Han character is two) and ending in `…` when
-## it was cut.
-pub type Para = { sec: Int, text: String }
+## One paragraph: its section, and its place among that section's paragraphs
+## that have a number. Its text is in the section's fragment, `nth`-th, and in
+## the index nowhere.
+pub type Para = { sec: Int, nth: Int }
 
 ## The body index, read. `posts[i]` is the paragraph numbers `terms[i]` occurs
 ## in, ascending: the asset writes the gaps between them, and init adds them
-## up once rather than every keystroke.
+## up once rather than every keystroke. `dir` is where the fragments are, and a
+## section's `frag` is the hash in the name of its file.
 pub type Body = {
+  dir: String,
   secs: List[Sec],
   terms: List[String],
   posts: List[List[Int]],
@@ -610,33 +636,50 @@ fn has_body(state: State) -> Bool =
     None -> false
   }
 
-## The body index out of its asset, or `None` for anything but format 1.
+## The body index out of its asset, or `None` for anything but format 2.
 ##
 ## A version this panel does not know is not read at all, rather than read as
 ## far as it happens to agree: the version is the format's whole promise, and
 ## a panel without the text is a working panel that says it searches titles.
-## Inside format 1 the asset is a file the page fetched, and every lookup
+## Inside format 2 the asset is a file the page fetched, and every lookup
 ## below is total: a field of the wrong kind reads as empty and a number that
 ## names nothing is passed over.
 pub fn body_of(j: Json, entries: List[Entry]) -> Option[Body] = {
   let fs = jarr(j)
-  if len(fs) != 5 || jint_or(fs[0], 0) != 1 {
+  if len(fs) != 6 || jint_or(fs[0], 0) != 2 {
     None
   } else {
     let by_href = hrefs_of(entries)
-    let terms = list.map(jarr(fs[2]), t => jstr_or(t, ""))
-    let posts = list.map(jarr(fs[3]), g => g.jarr().sums())
-    if len(posts) != len(terms) {
+    let terms = list.map(jarr(fs[3]), t => jstr_or(t, ""))
+    let posts = list.map(jarr(fs[4]), g => g.jarr().sums())
+    let secs = list.map(jarr(fs[2]), s => s.jarr().sec_of(by_href))
+    let counts = list.map(jarr(fs[5]), c => jint_or(c, 0))
+    if len(posts) != len(terms) || len(counts) != len(secs) {
       None
     } else {
       Some(Body {
-        secs: list.map(jarr(fs[1]), s => s.jarr().sec_of(by_href)),
+        dir: jstr_or(fs[1], ""),
+        secs: secs,
         terms: terms,
         posts: posts,
-        paras: list.map(jarr(fs[4]), p => p.jarr().para_of()),
+        paras: paras_of(counts),
       })
     }
   }
+}
+
+## The paragraph table out of the per-section counts: section 0's paragraphs
+## first, then section 1's, each numbered from 0 within its section.
+fn paras_of(counts: List[Int]) -> List[Para] = {
+  var out: List[Para] = []
+  var sec = 0
+  for n in counts {
+    for k in range(0, n) {
+      out = out ++ [Para { sec: sec, nth: k }]
+    }
+    sec = sec + 1
+  }
+  out
 }
 
 ## Each title row's href, to its id; the first row wins a shared href.
@@ -653,23 +696,18 @@ fn hrefs_of(entries: List[Entry]) -> Map[String, Int] = {
 }
 
 fn sec_of(fs: List[Json], by_href: Map[String, Int]) -> Sec = {
-  let doc = if len(fs) == 3 { jstr_or(fs[0], "") } else { "" }
-  let href = if len(fs) == 3 { jstr_or(fs[1], "") } else { "" }
+  let ok = len(fs) == 4
+  let doc = if ok { jstr_or(fs[0], "") } else { "" }
+  let href = if ok { jstr_or(fs[1], "") } else { "" }
   Sec {
     doc: doc,
     href: href,
-    title: if len(fs) == 3 { jstr_or(fs[2], "") } else { "" },
+    title: if ok { jstr_or(fs[2], "") } else { "" },
     group: doc_group(doc),
     entry: map.get(by_href, href).unwrap_or(-1),
+    frag: if ok { jstr_or(fs[3], "") } else { "" },
   }
 }
-
-fn para_of(fs: List[Json]) -> Para =
-  if len(fs) == 2 {
-    Para { sec: jint_or(fs[0], -1), text: jstr_or(fs[1], "") }
-  } else {
-    Para { sec: -1, text: "" }
-  }
 
 ## The group a document's sections are drawn in. The early design decisions
 ## are history, as they are in the title index; the body index keeps the two
@@ -918,7 +956,7 @@ pub fn body_hits(state: State, q: String) -> List[BodyHit] =
       if len(ts) == 0 {
         []
       } else if len(all) > 0 {
-        checked(b, all, han_runs(q))
+        checked(state, b, all, han_runs(q))
       } else if len(ts) >= 3 && not han_word(q) {
         most(b, lists)
       } else {
@@ -931,10 +969,12 @@ pub fn body_hits(state: State, q: String) -> List[BodyHit] =
 ## sections. Paragraph numbers ascend with section numbers (design 2.1), so a
 ## section's paragraphs are one run of the candidates.
 ##
-## A candidate whose excerpt has every phrase is sure. One whose excerpt does
-## not, but was cut, may have it in the part that was cut, and is kept a tier
-## lower (design 2.5); one that was not cut does not have it, and goes.
-fn checked(b: Body, ps: List[Int], phrases: List[String]) -> List[BodyHit] = {
+## A candidate whose text has every phrase is sure, and one whose text does not
+## goes. A candidate whose section's text has not arrived cannot be checked, and
+## is kept a tier lower (design 2.5, 13.7): all its characters are there, the
+## phrase may not be. Once the fragment is in, the same candidate is sure or
+## gone, which is how a late fragment reorders rows.
+fn checked(state: State, b: Body, ps: List[Int], phrases: List[String]) -> List[BodyHit] = {
   var out: List[BodyHit] = []
   var sec = -1
   var sure: List[Int] = []
@@ -942,7 +982,7 @@ fn checked(b: Body, ps: List[Int], phrases: List[String]) -> List[BodyHit] = {
   for p in ps {
     match get(b.paras, p) {
       Some(para) -> {
-        let v = verdict(para.text, phrases)
+        let v = verdict(para_text(state, p), phrases)
         if v > 0 {
           if para.sec != sec {
             out = out ++ section_hit(sec, sure, maybe)
@@ -963,19 +1003,37 @@ fn checked(b: Body, ps: List[Int], phrases: List[String]) -> List[BodyHit] = {
   out ++ section_hit(sec, sure, maybe)
 }
 
-## 2 when the excerpt has every phrase, 1 when it may, 0 when it does not.
-fn verdict(text: String, phrases: List[String]) -> Int =
+## 2 when the text has every phrase (or the query has none), 1 when the text
+## is not here to say, 0 when it is here and does not.
+fn verdict(text: Option[String], phrases: List[String]) -> Int =
   if len(phrases) == 0 {
     2
   } else {
-    let flat = squash(text)
-    if list.all(phrases, ph => str.contains(flat, ph)) {
-      2
-    } else if str.ends_with(text, "…") {
-      1
-    } else {
-      0
+    match text {
+      None -> 1
+      Some(t) -> {
+        let flat = squash(t)
+        if list.all(phrases, ph => str.contains(flat, ph)) { 2 } else { 0 }
+      }
     }
+  }
+
+## Paragraph `p`'s whole text, when its section's fragment has arrived. A
+## fragment that failed to come is recorded as empty and reads as absent, so a
+## section whose file is missing degrades to rows with no excerpt rather than
+## to a request made again on every keystroke.
+fn para_text(state: State, p: Int) -> Option[String] =
+  match state.body {
+    None -> None
+    Some(b) ->
+      match get(b.paras, p) {
+        None -> None
+        Some(para) ->
+          match map.get(state.texts, para.sec) {
+            None -> None
+            Some(ts) -> get(ts, para.nth)
+          }
+      }
   }
 
 fn section_hit(sec: Int, sure: List[Int], maybe: List[Int]) -> List[BodyHit] =
@@ -1096,14 +1154,16 @@ fn rarity(n: Int, df: Int) -> Int = {
 ## densest in the excerpt the reader will see, the first of equals. mdBook's
 ## teaser picked the section's first paragraph, which is often not where the
 ## words are (research report §4); a paragraph that answered is not enough
-## either, when its words were cut out of its excerpt.
-fn shown_para(b: Body, h: BodyHit, ts: List[Term]) -> Int = {
+## either, when its words fall outside what the excerpt keeps. Until the
+## section's text has arrived every paragraph scores alike, so the first one
+## stands in; the choice is made again when it does.
+fn shown_para(state: State, h: BodyHit, ts: List[Term]) -> Int = {
   var best = -1
   var best_score = -1
   for p in h.paras {
-    let s = match get(b.paras, p) {
-      Some(para) -> density(para.text, ts)
-      None -> -1
+    let s = match para_text(state, p) {
+      Some(t) -> density(excerpt(t), ts)
+      None -> 0
     }
     if s > best_score {
       best = p
@@ -1118,6 +1178,61 @@ fn density(text: String, ts: List[Term]) -> Int = {
   let low = str.to_lower(text)
   let found = list.fold(ts, 0, (acc, t) => acc + low.places(t).len())
   found * 1000 / (str.len(low) + 1)
+}
+
+# ---- what a row shows of a paragraph ---------------------------------------
+
+## How many display columns of a paragraph a row shows, before the `…`: about
+## two lines of the panel. The same 120 the index's excerpts were cut at before
+## format 2 (design 6.5); the cut moved here when the text left the index, and
+## it is a width on the panel, which is why the panel makes it.
+fn excerpt_len() -> Int = 120
+
+## The columns `c` takes on the panel: 2 for the East Asian Wide and Fullwidth
+## characters the documents use (Han, CJK punctuation, kana, Hangul syllables,
+## the fullwidth forms), 1 for everything else. A subset of UAX #11 for the
+## languages the documents are in; a wide character missing here only lets an
+## excerpt run long. The generator keeps the same table
+## (site/src/gen/search_body.dawn `columns`) and a test pins them together.
+pub fn columns(c: Char) -> Int = {
+  let n = char.code(c)
+  if is_han(c) || (n >= 0x3000 && n <= 0x30FF) || (n >= 0xAC00 && n <= 0xD7A3)
+    || (n >= 0xFF01 && n <= 0xFF60) || (n >= 0xFFE0 && n <= 0xFFE6) {
+    2
+  } else {
+    1
+  }
+}
+
+## A paragraph as a row shows it: whole when it is at most [excerpt_len]
+## columns wide, otherwise cut and marked with `…`. The cut is at the last blank
+## that starts at or after half the bound, so that a word is not split; text
+## with no blank there (Chinese, mostly) is cut where the bound falls.
+pub fn excerpt(s: String) -> String = {
+  let cs = code_points(s)
+  let n = excerpt_len()
+  # at[i]: the columns the first i code points take
+  var at: List[Int] = [0]
+  var w = 0
+  for c in cs {
+    w = w + columns(c)
+    at = at ++ [w]
+  }
+  if w <= n {
+    s
+  } else {
+    # fit: how many code points fit in the bound
+    var fit = 0
+    while at[fit + 1] <= n {
+      fit = fit + 1
+    }
+    var i = fit
+    while i >= 0 && at[i] >= n / 2 && not char.is_space(cs[i]) {
+      i = i - 1
+    }
+    let keep = if i < 0 || at[i] < n / 2 { fit } else { i }
+    from_code_points(list.take(cs, keep)) ++ "…"
+  }
 }
 
 ## The sorted `ids` hold `x`.
@@ -1233,7 +1348,13 @@ pub fn search(state: State, query: String) -> List[Int] = answer(state, query, -
 ## reader who narrowed to Spec and then typed a word only the standard
 ## library has sees its results rather than an empty list beside a pill that
 ## says why.
-pub type Answer = { hits: List[Int], counts: List[Int], scope: Int }
+##
+## `need` is the sections whose text, were it here, would change the answer:
+## the candidates of a Chinese phrase query that could not be checked and are
+## near enough the top of the order to matter ([verify_cap]). The rows on
+## screen are not in it; those are asked for by their place in `hits`
+## ([visible_secs]).
+pub type Answer = { hits: List[Int], counts: List[Int], scope: Int, need: List[Int] }
 
 ##
 ## The tiers, best first. A title row is above every section of the text,
@@ -1243,9 +1364,10 @@ pub type Answer = { hits: List[Int], counts: List[Int], scope: Int }
 ##
 ##   5..1  a title row, by [score]
 ##   0     a section with a paragraph that has every word of the query (and,
-##         for Chinese, every phrase of it in the paragraph's excerpt)
+##         for Chinese, every phrase of it in the paragraph's text)
 ##   -1    a section whose paragraphs have every character of a Chinese
-##         phrase, but whose excerpts were cut before it could be found
+##         phrase, but whose text has not arrived to say whether the phrase
+##         is there
 ##   -2    a query of three words or more that no paragraph has all of: a
 ##         section with a paragraph that has at least half of them ([most])
 ##
@@ -1254,7 +1376,7 @@ pub type Answer = { hits: List[Int], counts: List[Int], scope: Int }
 pub fn answer(state: State, query: String, scope: Int) -> Answer = {
   let q = str.to_lower(str.trim(query))
   if q == "" {
-    Answer { hits: [], counts: [], scope: -1 }
+    Answer { hits: [], counts: [], scope: -1, need: [] }
   } else {
     let ts = terms(q)
     let titles = matches(state.keys, q, ts)
@@ -1263,8 +1385,43 @@ pub fn answer(state: State, query: String, scope: Int) -> Answer = {
     let counts = list.map(range(0, groups().len()), g => list.filter(found, s => s.group == g).len())
     let kept = if scope >= 0 && scope < len(counts) && counts[scope] > 0 { scope } else { -1 }
     let narrowed = if kept >= 0 { list.filter(found, s => s.group == kept) } else { found }
-    Answer { hits: list.map(arrange(narrowed), id => shown_id(state, bodies, id, ts)), counts: counts, scope: kept }
+    Answer {
+      hits: list.map(arrange(narrowed), id => shown_id(state, bodies, id, ts)),
+      counts: counts,
+      scope: kept,
+      need: unchecked(state, bodies),
+    }
   }
+}
+
+## How far down the ordered sections of the text an unchecked one is still
+## worth asking the text of. The candidates of a two-character phrase are every
+## paragraph that has both characters somewhere, and a common pair has far more
+## of them than the panel can show; asking them all would cost as much as the
+## whole text. So only the sections in the first [verify_cap] places of the
+## order are asked, the order being the one the rows will take (sure before
+## unchecked, heavier before lighter). A section that is checked and has the
+## phrase moves up and one that has not drops out, so the places fill with
+## checked sections or run out of candidates, and the asking stops there
+## (design 13.7, measured in 13.9).
+pub fn verify_cap() -> Int = 10
+
+## How many sections' text one query may ask for only to check a phrase. The
+## places in the order fill with checked sections only if enough candidates
+## have the phrase; when it is rare among them (`内存`: most paragraphs with
+## both characters are about something else) filling them would mean asking for
+## every candidate, which is the whole-text download again by another road. So
+## the checking stops after this many, and the candidates left unchecked stay in
+## the tier below the sure ones, where an unchecked candidate always was.
+pub fn verify_total() -> Int = 12
+
+## The sections of `bodies` in the first [verify_cap] places that are in the
+## "may have the phrase" tier because their text is not here. A section whose
+## fragment was asked for already or failed is not asked again; that is
+## [wanting]'s test and the `texts` test here.
+fn unchecked(state: State, bodies: List[BodyHit]) -> List[Int] = {
+  let order = sort_by(bodies, (a, b) => if a.rank != b.rank { b.rank - a.rank } else { b.weight - a.weight })
+  list.map(list.filter(list.take(order, verify_cap()), h => h.rank == -1 && not map.has(state.texts, h.sec)), h => h.sec)
 }
 
 ## The sections of the text as matches: the `i`th is id `body_base() + i`
@@ -1291,8 +1448,9 @@ fn text_rows(state: State, q: String, titles: List[Scored]) -> List[BodyHit] = {
 
 fn sec_at(state: State, sec: Int) -> Sec =
   match state.body {
-    Some(b) -> b.secs.get(sec).unwrap_or(Sec { doc: "", href: "", title: "", group: -1, entry: -1 })
-    None -> Sec { doc: "", href: "", title: "", group: -1, entry: -1 }
+    Some(b) -> b.secs.get(sec)
+      .unwrap_or(Sec { doc: "", href: "", title: "", group: -1, entry: -1, frag: "" })
+    None -> Sec { doc: "", href: "", title: "", group: -1, entry: -1, frag: "" }
   }
 
 fn sec_group(state: State, sec: Int) -> Int = sec_at(state, sec).group
@@ -1305,10 +1463,7 @@ fn shown_id(state: State, bodies: List[BodyHit], id: Int, ts: List[Term]) -> Int
   if id < body_base() {
     id
   } else {
-    match state.body {
-      Some(b) -> body_base() + shown_para(b, bodies[id - body_base()], ts)
-      None -> -1
-    }
+    body_base() + shown_para(state, bodies[id - body_base()], ts)
   }
 
 ## Every entry that answers, in index order.
@@ -1767,7 +1922,10 @@ fn entry_at(state: State, id: Int) -> Option[Entry] =
                     group: groups()[s.group].id,
                     title: s.title,
                     detail: crumb(s, state.lang),
-                    note: p.text,
+                    note: match para_text(state, id - body_base()) {
+                      Some(t) -> excerpt(t)
+                      None -> ""
+                    },
                     href: s.href,
                   })
                 }
@@ -2443,18 +2601,20 @@ pub fn init(flags: Option[String]) -> (State, Model) =
             start: list.map(index.jget("start").jarr(), s => jint_or(s, -1)),
             recent: j.jget("recent").recent_of(),
             body: j.jget("body").body_of(entries),
+            texts: map.empty(),
           }
           # A shared link's query is answered in the first turn, so the
           # panel opens on its results rather than on an empty field.
           let q = j.jget("q").jstr_or("")
-          (state, if q == "" { blank() } else { asked(state, blank(), q, -1) })
+          let (first, _) = asked(state, blank(), q, -1)
+          (state, if q == "" { blank() } else { first })
         }
         Err(_) -> (blank_state(), blank())
       }
   }
 
 fn blank_state() -> State =
-  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [], body: None }
+  State { root: ".", lang: "en", mod_key: "⌘", entries: [], keys: [], start: [], recent: [], body: None, texts: map.empty() }
 
 ## How many recent queries the panel shows. The page keeps no more than this
 ## either; the bound is restated here because flags are text a page may hand
@@ -2488,7 +2648,7 @@ pub fn key_of(e: Entry) -> Key = {
 ## The model of a panel that has been left: closed, and holding nothing a
 ## reopening could mistake for its own.
 fn closed(m: Model) -> Model =
-  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0 }
+  Model { ..m, open: false, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0 }
 
 fn blank() -> Model =
   Model {
@@ -2501,27 +2661,230 @@ fn blank() -> Model =
     counts: [],
     fix: "",
     fix_hits: 0,
+    asked: [],
+    chased: 0,
   }
 
-## The model after asking `text` within `scope`, selection at the top.
+## The model after asking `text` within `scope`, selection at the top, and the
+## sections whose text would change the answer ([Answer]'s `need`).
 ##
 ## A suggestion is looked for only here, and only when neither index answered
 ## anything: that is the whole of the trigger, and the reason a keystroke that
 ## finds something never pays for it.
-fn asked(state: State, m: Model, text: String, scope: Int) -> Model = {
+fn asked(state: State, m: Model, text: String, scope: Int) -> (Model, List[Int]) = {
   let a = answer(state, text, scope)
   let (fix, n) = if len(a.hits) == 0 { suggest(state, text) } else { ("", 0) }
-  Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n }
+  (Model { ..m, query: text, sel: 0, goto: "", hits: a.hits, scope: a.scope, counts: a.counts, fix: fix, fix_hits: n, chased: 0 }, a.need)
 }
+
+## The same question asked again of the same query, because what the answer
+## depends on has changed (a fragment arrived). The selection stays on its row
+## number, held inside the new list, and the suggestion is left as it was.
+fn refreshed(state: State, m: Model) -> (Model, List[Int]) = {
+  let a = answer(state, m.query, m.scope)
+  let sel = if m.sel < len(a.hits) { m.sel } else if len(a.hits) > 0 { len(a.hits) - 1 } else { 0 }
+  (Model { ..m, sel: sel, hits: a.hits, scope: a.scope, counts: a.counts }, a.need)
+}
+
+# ---- fetching the text -----------------------------------------------------
+
+## How many rows from the top are fetched for at once, whatever the selection:
+## what a panel shows without scrolling. The rows after them are fetched as
+## the selection (arrow keys, the pointer resting on a row) comes within
+## [lookahead] of them.
+pub fn first_rows() -> Int = 10
+
+fn lookahead() -> Int = 5
+
+## The section a body row (`id` from [body_base] up) is a paragraph of, or -1.
+fn sec_of_id(state: State, id: Int) -> Int =
+  match state.body {
+    None -> -1
+    Some(b) ->
+      match get(b.paras, id - body_base()) {
+        Some(p) -> p.sec
+        None -> -1
+      }
+  }
+
+## The sections of the rows the reader can reach without scrolling: the first
+## [first_rows] rows, or [lookahead] rows past the selection when that is
+## further. Title rows have no section.
+fn visible_secs(state: State, m: Model) -> List[Int] = {
+  let upto = if m.sel + lookahead() > first_rows() { m.sel + lookahead() } else { first_rows() }
+  var out: List[Int] = []
+  for id in list.take(m.hits, upto) {
+    if id >= body_base() {
+      out = out ++ [sec_of_id(state, id)]
+    }
+  }
+  out
+}
+
+## The fragment of section `sec` as the file the host should fetch, relative to
+## the host's own base (a worker resolves against its script, which lives in
+## /assets/ with the directory beside it), or "" for a section with no text.
+fn fragment_url(state: State, sec: Int) -> String =
+  match state.body {
+    None -> ""
+    Some(b) ->
+      match get(b.secs, sec) {
+        Some(s) -> if s.frag == "" { "" } else { "${b.dir}/${sec}.${s.frag}.json" }
+        None -> ""
+      }
+  }
+
+## The name a section's request goes by. The host returns it verbatim with the
+## outcome, and [sec_of_tag] reads it back.
+fn fetch_tag(sec: Int) -> String = "t${sec}"
+
+## The model with the fetches it still owes, and the command that makes them:
+## the sections of the rows on screen (and the look-ahead), then `extra` (the
+## unchecked candidates), minus what has arrived, what failed, and what is
+## already on its way. Every file is asked for once per session of the panel.
+fn wanting(state: State, m: Model, extra: List[Int]) -> (Model, Cmd[Msg]) =
+  match state.body {
+    None -> (m, NoCmd)
+    Some(_) -> {
+      var want: List[Int] = []
+      for sec in visible_secs(state, m) {
+        if not list.contains(extra, sec) && askable(state, m, want, sec) {
+          want = want ++ [sec]
+        }
+      }
+      # the unchecked candidates, on screen or not, as many as this query has
+      # left to spend: a section on screen whose phrase is still unchecked is
+      # in `extra` too, and counts against the same budget, or a rare phrase
+      # would walk down its candidates one dropped row at a time
+      var left = verify_total() - m.chased
+      var spent = 0
+      for sec in extra {
+        if left > 0 && askable(state, m, want, sec) {
+          want = want ++ [sec]
+          left = left - 1
+          spent = spent + 1
+        }
+      }
+      if len(want) == 0 {
+        (m, NoCmd)
+      } else {
+        (
+          Model { ..m, asked: m.asked ++ want, chased: m.chased + spent },
+          BatchCmd(cmds: list.map(want, sec => Fetch(url: fragment_url(state, sec), tag: fetch_tag(sec)))),
+        )
+      }
+    }
+  }
+
+## Whether section `sec` still has to be asked for: it has a text file, and it
+## has not arrived, failed, been asked for, or been put in `want` already.
+fn askable(state: State, m: Model, want: List[Int], sec: Int) -> Bool =
+  sec >= 0 && fragment_url(state, sec) != "" && not map.has(state.texts, sec)
+  && not list.contains(m.asked, sec) && not list.contains(want, sec)
+
+## Two commands as one, with `NoCmd` the identity.
+fn join_cmds(a: Cmd[Msg], b: Cmd[Msg]) -> Cmd[Msg] =
+  match (a, b) {
+    (NoCmd, _) -> b
+    (_, NoCmd) -> a
+    _ -> BatchCmd(cmds: [a, b])
+  }
+
+## A fetch's outcome as the message for the turn it arrives in. The text is
+## already in the retained state ([absorb]); the message only says which
+## section, so that the answer is asked again. A tag that is not one of this
+## panel's (a request of a session that has since been restarted, say) is a
+## section nobody has, and changes nothing.
+pub fn supplied(tag: String, _outcome: Result[String, String]) -> Msg =
+  Arrived(sec: sec_of_tag(tag))
+
+fn sec_of_tag(tag: String) -> Int =
+  if str.starts_with(tag, "t") { parse_int(str.drop(tag, 1)).unwrap_or(-1) } else { -1 }
+
+## What a fetched fragment adds to the retained state: the section's paragraphs,
+## whole, under the section's number. This is `tea_dom/reactor`'s `absorbed`
+## hook, which runs before the turn's message is folded, so the turn that
+## answers `Arrived` already sees the text. A fragment that failed to arrive, is
+## not JSON, names another section or has another count of paragraphs than the
+## index says is recorded as no text at all: the section is not asked for
+## again, its rows are drawn without an excerpt, and a Chinese phrase in it
+## stays unchecked.
+pub fn absorb(state: State, tag: String, outcome: Result[String, String]) -> State = {
+  let sec = sec_of_tag(tag)
+  match state.body {
+    None -> state
+    Some(b) ->
+      if sec < 0 || sec >= len(b.secs) {
+        state
+      } else {
+        State { ..state, texts: map.insert(state.texts, sec, fragment_texts(b, sec, outcome)) }
+      }
+  }
+}
+
+## The paragraphs a fragment holds, or none if the file is not the one the index
+## describes (`[section, [paragraph, ...]]` with the section's own number and as
+## many paragraphs as the index counted for it).
+fn fragment_texts(b: Body, sec: Int, outcome: Result[String, String]) -> List[String] =
+  match outcome {
+    Err(_) -> none_texts()
+    Ok(body) ->
+      match parse(body) {
+        Err(_) -> none_texts()
+        Ok(j) -> {
+          let fs = jarr(j)
+          let none: List[String] = []
+          let texts = if len(fs) == 2 { list.map(jarr(fs[1]), t => jstr_or(t, "")) } else { none }
+          if len(fs) == 2 && jint_or(fs[0], -1) == sec && len(texts) == paras_in(b, sec) { texts } else { none }
+        }
+      }
+  }
+
+## How many numbered paragraphs the index gives section `sec`.
+fn none_texts() -> List[String] = []
+
+fn paras_in(b: Body, sec: Int) -> Int = len(list.filter(b.paras, p => p.sec == sec))
 
 ## One turn: the model the message leaves behind, and what the panel asks the
 ## driver for next.
 pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
   match msg {
-    # The two arms that search. Everything else reads `hits`.
-    Typed(text) -> (asked(state, m, text, m.scope), NoCmd)
+    # The arms that search ask for the text of what they answered.
+    Typed(text) -> {
+      let (m1, need) = asked(state, m, text, m.scope)
+      wanting(state, m1, need)
+    }
     # A pill that is already on changes nothing.
-    Scoped(g) -> if g == m.scope { (m, NoCmd) } else { (asked(state, m, m.query, g), NoCmd) }
+    Scoped(g) ->
+      if g == m.scope {
+        (m, NoCmd)
+      } else {
+        let (m1, need) = asked(state, m, m.query, g)
+        wanting(state, m1, need)
+      }
+    # A section's text is in: the same question has a better answer now.
+    Arrived(sec) -> {
+      let m1 = Model { ..m, asked: list.filter(m.asked, a => a != sec) }
+      if m1.query == "" {
+        (m1, NoCmd)
+      } else {
+        let (m2, need) = refreshed(state, m1)
+        wanting(state, m2, need)
+      }
+    }
+    # Everything else reads `hits`, and may move the selection toward rows
+    # whose text has not been asked for.
+    _ -> {
+      let (m1, c) = moved(state, m, msg)
+      let (m2, f) = wanting(state, m1, [])
+      (m2, join_cmds(c, f))
+    }
+  }
+
+## The messages that read `hits` and move the selection or leave the panel:
+## everything but the arms that search and the arrival of a fragment.
+fn moved(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
+  match msg {
     Pressed(key) -> pressed(state, m, key)
     # The pointer selects what it rests on. Resting on the row that is already
     # selected changes nothing, so the turn answers no patches.
@@ -2536,6 +2899,7 @@ pub fn update(state: State, m: Model, msg: Msg) -> (Model, Cmd[Msg]) =
     # `goto` rather than reading it, so the arm that commands it does not have
     # to clear the field first.
     Chose(href) -> (Model { ..m, goto: href }, NoCmd)
+    _ -> (m, NoCmd)
   }
 
 ## Closed is an empty tree, not a hidden one: the panel is a whole document
@@ -2580,7 +2944,7 @@ fn pressed(state: State, m: Model, key: String) -> (Model, Cmd[Msg]) = {
     if m.query == "" {
       (closed(m), NoCmd)
     } else {
-      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0 }, NoCmd)
+      (Model { ..m, query: "", sel: 0, goto: "", hits: [], scope: -1, counts: [], fix: "", fix_hits: 0, asked: [], chased: 0 }, NoCmd)
     }
   } else {
     (m, NoCmd)
@@ -2661,6 +3025,8 @@ pub fn encode(m: Model) -> String =
   ++ ",\"counts\":[" ++ list.map(m.counts, c => to_string(c)).join(",") ++ "]"
   ++ ",\"fix\":" ++ quoted(m.fix)
   ++ ",\"fix_hits\":" ++ to_string(m.fix_hits)
+  ++ (if len(m.asked) == 0 { "" } else { ",\"asked\":[" ++ list.map(m.asked, a => to_string(a)).join(",") ++ "]" })
+  ++ (if m.chased == 0 { "" } else { ",\"chased\":" ++ to_string(m.chased) })
   ++ "}"
 
 ## Total, because a host may hand back anything: an unreadable model reads as
@@ -2681,6 +3047,8 @@ pub fn decode(s: String) -> Model =
             counts: list.map(j.jget("counts").jarr(), c => jint_or(c, 0)),
             fix: j.jget("fix").jstr_or(""),
             fix_hits: j.jget("fix_hits").jint_or(0),
+            asked: list.map(j.jget("asked").jarr(), a => jint_or(a, -1)),
+            chased: j.jget("chased").jint_or(0),
           }
         _ -> blank()
       }
@@ -2690,10 +3058,13 @@ pub fn decode(s: String) -> Model =
 # ---- tests -----------------------------------------------------------------
 
 # One turn as the reactor commits it: `update`, then everything its command
-# asked for. `tea_dom/reactor.turn_with_state` folds with the same function,
-# so an assertion written on this is an assertion about what the page gets.
-fn turn(state: State, m: Model, msg: Msg) -> Model =
-  fold_msg(m, msg, (acc, x) => update(state, acc, x))
+# asked for, fetches included ([drive] answers them from the fixtures).
+# `tea_dom/reactor.turn_with_state` folds with the same function, so an
+# assertion written on this is an assertion about what the page gets.
+fn turn(state: State, m: Model, msg: Msg) -> Model = {
+  let (_, mo) = drive(state, m, msg)
+  mo
+}
 
 ## The model a reader leaves behind by typing `q` into a fresh panel.
 fn typed(state: State, q: String) -> Model = turn(state, blank(), Typed(text: q))
@@ -3543,11 +3914,12 @@ test "a body's words split by the table in docs/site-search-design.md 3.2" {
   }
 }
 
-## A body index in the asset's format (docs/site-search-design.md 2.1), built
+## A body index in the asset's format (docs/site-search-design.md 13.4), built
 ## from sections and paragraphs with this file's [body_terms] the way the
 ## generator builds it with its own: words in code-point order, each with the
-## gaps between the paragraphs it is in.
-fn body_asset(version: Int, secs: List[List[String]], paras: List[(Int, String)]) -> String = {
+## gaps between the paragraphs it is in, and per section how many paragraphs
+## it holds. A section that holds none has no fragment hash.
+fn body_asset(version: Int, dir: String, secs: List[List[String]], paras: List[(Int, String)]) -> String = {
   var table: Map[String, List[Int]] = map.empty()
   var p = 0
   for para in paras {
@@ -3560,16 +3932,44 @@ fn body_asset(version: Int, secs: List[List[String]], paras: List[(Int, String)]
   let t = table
   let words = map.keys(t).sort_by((a, b) => order(a, b))
   let gaps = list.map(words, w => JArr(items: list.map(map.get(t, w).unwrap_or([]).gaps_of(), g => JInt(value: g))))
+  let counts = list.map(range(0, len(secs)), i => len(list.filter(paras, x => {
+    let (sec, _) = x
+    sec == i
+  })))
+  var rows: List[Json] = []
+  for i in range(0, len(secs)) {
+    rows = rows ++ [JArr(items: list.map(secs[i], f => JStr(value: f)) ++ [JStr(value: if counts[i] > 0 { frag_hash() } else { "" })])]
+  }
   render(JArr(items: [
     JInt(value: version),
-    JArr(items: list.map(secs, s => JArr(items: list.map(s, f => JStr(value: f))))),
+    JStr(value: dir),
+    JArr(items: rows),
     JArr(items: list.map(words, w => JStr(value: w))),
     JArr(items: gaps),
-    JArr(items: list.map(paras, x => {
-      let (sec, text) = x
-      JArr(items: [JInt(value: sec), JStr(value: text)])
-    })),
+    JArr(items: list.map(counts, c => JInt(value: c))),
   ]))
+}
+
+fn frag_hash() -> String = "abcd1234"
+
+## The fragments of the same sections, as the host would serve them: url to
+## body, in the form the generator writes (`[section, [paragraph, ...]]`).
+fn fragment_files(dir: String, secs: List[List[String]], paras: List[(Int, String)]) -> Map[String, String] = {
+  var out: Map[String, String] = map.empty()
+  for i in range(0, len(secs)) {
+    let mine = list.filter(paras, x => {
+      let (sec, _) = x
+      sec == i
+    })
+    if len(mine) > 0 {
+      let texts = list.map(mine, x => {
+        let (_, text) = x
+        quoted(text)
+      })
+      out = map.insert(out, "${dir}/${i}.${frag_hash()}.json", "[${i},[" ++ join(texts, ",") ++ "]]")
+    }
+  }
+  out
 }
 
 fn gaps_of(ps: List[Int]) -> List[Int] = {
@@ -3599,22 +3999,81 @@ fn en_paras() -> List[(Int, String)] = [
   (4, "Full algebraic effects with multiple resumption are out of scope."),
 ]
 
-## The probe index, with the text of five sections beside it.
+fn zh_secs() -> List[List[String]] = [
+  ["spec", "zh/spec.html#s6-5", "6.5 命名效果"],
+  ["tutorial", "zh/tutorial/09.html", "9. 效果"],
+  ["history", "zh/history.html#s1", "历史"],
+]
+
+fn zh_paras() -> List[(Int, String)] = [
+  (0, "用户声明效果，并在别处处理它们。"),
+  (0, "效用与结果，处置与理由，各说各的。"),
+  (1, "处在开头的理由，效与果分开出现，这一段被截断…"),
+  (1, "`Fs`效 果的处理在这里：源文件里这一行折了。"),
+  (2, "处于理想，效率结果都要，这一段同样被截断…"),
+]
+
+## Every fragment of both fixture documents, by url: what the host can serve.
+fn fixture_files() -> Map[String, String] = {
+  var out = fragment_files("search-text/en", en_secs(), en_paras())
+  for k in map.keys(fragment_files("search-text/zh", zh_secs(), zh_paras())) {
+    out = map.insert(out, k, map.get(fragment_files("search-text/zh", zh_secs(), zh_paras()), k).unwrap_or(""))
+  }
+  out
+}
+
+## The probe index, with the sections of five documents beside it. No text has
+## arrived yet: that is what [drive] brings.
 fn text_state() -> State = {
   let titles = probe_state()
-  let j = body_asset(1, en_secs(), en_paras()).json_of()
+  let j = body_asset(2, "search-text/en", en_secs(), en_paras()).json_of()
   State { ..titles, body: body_of(j, titles.entries) }
 }
 
+## One message, as the host would carry it out: fold it with what it commands,
+## answer every fetch from `files` (a url not in it is a 404), put the text in
+## the state ([absorb]) and fold the arrival, until nothing is left to ask.
+## Returns the state the panel ends with beside the model, because the text a
+## row shows is in the state.
+fn drive(state: State, m: Model, msg: Msg) -> (State, Model) = {
+  let (m1, wanted) = fold_cmds(m, msg, (acc, x) => update(state, acc, x))
+  var st = state
+  var mo = m1
+  var queue = wanted
+  while len(queue) > 0 {
+    let f = queue[0]
+    queue = list.drop(queue, 1)
+    let outcome: Result[String, String] = match map.get(fixture_files(), f.url) {
+      Some(b) -> Ok(b)
+      None -> Err("HTTP 404")
+    }
+    st = absorb(st, f.tag, outcome)
+    let here = st
+    let (m2, more) = fold_cmds(mo, supplied(f.tag, outcome), (acc, x) => update(here, acc, x))
+    mo = m2
+    queue = queue ++ more
+  }
+  (st, mo)
+}
+
+## The panel after `q` is typed into a fresh one and everything it asked for
+## has come.
+fn world(state: State, q: String) -> (State, Model) = drive(state, blank(), Typed(text: q))
+
 fn sections_of(hs: List[BodyHit]) -> List[(Int, Int)] = list.map(hs, h => (h.sec, h.rank))
 
-test "the body index is read in format 1 only, and its gaps are added up" {
+test "the body index is read in format 2 only, and its gaps are added up" {
   let titles = probe_state()
-  let asset = body_asset(1, en_secs(), en_paras())
+  let asset = body_asset(2, "search-text/en", en_secs(), en_paras())
   match asset.json_of().body_of(titles.entries) {
     Some(b) -> {
+      assert b.dir == "search-text/en"
       assert len(b.secs) == 5
       assert len(b.paras) == 6
+      # the counts [1, 1, 2, 1, 1] number the paragraphs section by section,
+      # each from 0 within its own
+      assert list.map(b.paras, p => (p.sec, p.nth)) == [(0, 0), (1, 0), (2, 0), (2, 1), (3, 0), (4, 0)]
+      assert b.secs[2].frag == "abcd1234"
       # `handler` is in paragraphs 2, 3 and 4, written as the gaps 2, 1, 1
       let i = lower_bound(b.terms, "handler")
       assert b.terms[i] == "handler"
@@ -3627,13 +4086,14 @@ test "the body index is read in format 1 only, and its gaps are added up" {
       assert b.secs[2].entry == -1
       assert b.secs[4].group == group_index("history")
     }
-    None -> panic("a format 1 body index must be read")
+    None -> panic("a format 2 body index must be read")
   }
   # another version, or something that is not one, is no body at all
-  let other = body_asset(2, en_secs(), en_paras()).json_of()
+  let other = body_asset(1, "search-text/en", en_secs(), en_paras()).json_of()
   assert not has_body(State { ..titles, body: body_of(other, titles.entries) })
   assert not has_body(State { ..titles, body: body_of(JNull, titles.entries) })
-  match parse("[1,[],[\"a\"],[],[]]") {
+  # a count list that does not match the section table is not an index either
+  match parse("[2,\"d\",[[\"spec\",\"a\",\"A\",\"\"]],[\"a\"],[[0]],[]]") {
     Ok(j) -> {
       assert not has_body(State { ..titles, body: body_of(j, titles.entries) })
     }
@@ -3644,9 +4104,9 @@ test "the body index is read in format 1 only, and its gaps are added up" {
 ## It arrives in the flags, and the foot says what is searched either way.
 test "the flags carry the body index, and the foot says whether it is in" {
   let index = "\"index\":{\"v\":1,\"lang\":\"en\",\"items\":[]}"
-  let (with_body, _) = init(Some("{${index},\"body\":${body_asset(1, en_secs(), en_paras())}}"))
+  let (with_body, _) = init(Some("{${index},\"body\":${body_asset(2, "search-text/en", en_secs(), en_paras())}}"))
   assert has_body(with_body)
-  let (old_body, _) = init(Some("{${index},\"body\":${body_asset(2, en_secs(), en_paras())}}"))
+  let (old_body, _) = init(Some("{${index},\"body\":${body_asset(1, "search-text/en", en_secs(), en_paras())}}"))
   assert not has_body(old_body)
   let (none, _) = init(Some("{${index}}"))
   assert not has_body(none)
@@ -3694,8 +4154,7 @@ test "the text answers with the sections whose paragraphs have every word" {
 ## One row per section, and its excerpt is the paragraph where the words are
 ## densest, not the section's first: paragraph 3 says `handler` three times.
 test "a section's row shows the paragraph where the words are densest" {
-  let state = text_state()
-  let m = typed(state, "handler")
+  let (state, m) = world(text_state(), "handler")
   assert list.filter(m.hits, id => id >= body_base()) == [body_base() + 3, body_base() + 4]
   let v = view(state, m)
   let rows = all_with_class(v, "search-row")
@@ -3716,8 +4175,7 @@ test "a section's row shows the paragraph where the words are densest" {
 ## A title row is above every section of the text, and a section a title row
 ## already answered for is that row and not a second one.
 test "the text ranks below the titles and never repeats a title row" {
-  let state = text_state()
-  let m = typed(state, "effects")
+  let (state, m) = world(text_state(), "effects")
   # `Effects` is a title, `6.5 Named effects` has the word in its title and
   # its text, and the design notes have it only in their text
   assert m.hits == [4, 3, body_base() + 5]
@@ -3748,40 +4206,188 @@ test "a longer query nothing answers whole is answered by most of its words" {
   assert state.body_hits("the handler arms").sections_of() == [(2, 0)]
 }
 
-fn zh_secs() -> List[List[String]] = [
-  ["spec", "zh/spec.html#s6-5", "6.5 命名效果"],
-  ["tutorial", "zh/tutorial/09.html", "9. 效果"],
-  ["history", "zh/history.html#s1", "历史"],
-]
-
-fn zh_paras() -> List[(Int, String)] = [
-  (0, "用户声明效果，并在别处处理它们。"),
-  (0, "效用与结果，处置与理由，各说各的。"),
-  (1, "处在开头的理由，效与果分开出现，这一段被截断…"),
-  (1, "`Fs`效 果的处理在这里：源文件里这一行折了。"),
-  (2, "处于理想，效率结果都要，这一段同样被截断…"),
-]
-
-## Chinese is indexed by character, so a phrase is checked in the excerpts of
-## the paragraphs that have its characters: found is sure, cut before it could
-## be found is kept a tier lower, and not found in a whole paragraph is gone.
-test "a Chinese phrase is checked in the candidates' excerpts" {
-  let j = body_asset(1, zh_secs(), zh_paras()).json_of()
+## Chinese is indexed by character, so a phrase is checked in the text of the
+## paragraphs that have its characters. Until a section's text has arrived it
+## cannot be, and its candidates are kept a tier lower; once it has, a candidate
+## has the phrase and is sure, or has not and is gone.
+test "a Chinese phrase is checked in the candidates' text once it has arrived" {
+  let j = body_asset(2, "search-text/zh", zh_secs(), zh_paras()).json_of()
   let state = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
+  # nothing can be checked yet: every paragraph with all the characters is a
+  # "may have it", paragraph 1 of section 0 and paragraph 2 of section 1 too
+  assert state.body_hits("效果 处理").sections_of() == [(0, -1), (1, -1), (2, -1)]
+  let (loaded, m) = world(state, "效果 处理")
   # paragraph 1 has every character and neither phrase; paragraph 3 has
-  # `效果` across a folded line; paragraph 4 is cut
-  assert state.body_hits("效果 处理").sections_of() == [(0, 0), (1, 0), (2, -1)]
-  let hs = body_hits(state, "效果 处理")
+  # `效果` across a folded line; paragraph 4 has the characters but not the
+  # phrase, and goes
+  assert loaded.body_hits("效果 处理").sections_of() == [(0, 0), (1, 0)]
+  let hs = body_hits(loaded, "效果 处理")
   assert hs[0].paras == [0]
   assert hs[1].paras == [3]
-  assert hs[2].paras == [4]
   # one character is a word, and there is no phrase to check
-  assert state.body_hits("效").sections_of() == [(0, 0), (1, 0), (2, 0)]
-  let m = typed(state, "效果 处理")
-  let v = view(state, m)
-  assert list.map(all_with_class(v, "search-detail"), d => text_of(d)) == ["规范 › §6.5", "教程 › 第 9 章", "历史"]
+  assert loaded.body_hits("效").sections_of() == [(0, 0), (1, 0), (2, 0)]
+  let v = view(loaded, m)
+  assert list.map(all_with_class(v, "search-detail"), d => text_of(d)) == ["规范 › §6.5", "教程 › 第 9 章"]
   # the phrase is marked in the excerpt
   assert list.map(all_with_tag(all_with_class(v, "search-note")[0], "mark"), k => text_of(k)) == ["效果", "处理"]
+}
+
+# ---- fetching the text ----
+
+fn fetch_urls(c: Cmd[Msg]) -> List[String] = list.map(fetches(c), f => f.url)
+
+## The first answer is from the index alone. The rows on screen ask for their
+## sections' files, once each, under names the index gives them.
+test "the rows on screen ask for their sections' text, once" {
+  let state = text_state()
+  let (m, c) = update(state, blank(), Typed(text: "handler"))
+  assert m.hits == [body_base() + 2, body_base() + 4]
+  assert fetch_urls(c) == ["search-text/en/2.abcd1234.json", "search-text/en/3.abcd1234.json"]
+  assert list.map(fetches(c), f => f.tag) == ["t2", "t3"]
+  assert m.asked == [2, 3]
+  # no text yet: the rows are there, with their title and place and no excerpt
+  let rows = all_with_class(view(state, m), "search-row")
+  assert len(rows) == 2
+  assert list.map(rows, r => text_of(all_with_class(r, "search-title")[0])) == ["with handle", "Handlers keep state"]
+  assert list.map(rows, r => len(all_with_class(r, "search-note"))) == [0, 0]
+  # the next keystroke asks for nothing that is already on its way
+  let (m2, c2) = update(state, m, Typed(text: "handle"))
+  assert fetch_urls(c2) == ["search-text/en/1.abcd1234.json"]
+  assert m2.asked == [2, 3, 1]
+  let (_, c3) = update(state, m2, Typed(text: "handler"))
+  assert fetch_urls(c3) == []
+}
+
+test "a section's text arriving changes the answer and the row, and is asked for no more" {
+  let state = text_state()
+  let (m, _) = update(state, blank(), Typed(text: "handler"))
+  # section 2 answers with paragraphs 2 and 3; without text the first stands in
+  assert m.hits[0] == body_base() + 2
+  let outcome: Result[String, String] = Ok(map.get(fixture_files(), "search-text/en/2.abcd1234.json").unwrap_or(""))
+  let kept = absorb(state, "t2", outcome)
+  let (m2, c2) = update(kept, m, supplied("t2", outcome))
+  assert m2.asked == [3]
+  assert fetch_urls(c2) == []
+  # paragraph 3 says `handler` three times in what the row shows: it is the one
+  assert m2.hits == [body_base() + 3, body_base() + 4]
+  let note = all_with_class(all_with_class(view(kept, m2), "search-row")[0], "search-note")[0]
+  assert list.map(all_with_tag(note, "mark"), k => text_of(k)) == ["Handler", "handler", "handler"]
+  # the selection stayed where it was
+  let (moved, _) = update(kept, m2, Hovered(at: 1))
+  let (after, _) = update(kept, moved, Arrived(sec: 3))
+  assert after.sel == 1
+}
+
+test "a fragment that failed, or is not the one the index describes, is no text and is not asked again" {
+  let state = text_state()
+  let files = fixture_files()
+  let good = map.get(files, "search-text/en/2.abcd1234.json").unwrap_or("")
+  assert map.get(absorb(state, "t2", Ok(good)).texts, 2) == Some(["with handle E { arms } installs a handler for the rest of the block.",
+    "Handler-local state: a handler keeps its cells, and the handler's arms read them."])
+  # a 404, text that is not JSON, another section's number, a different count
+  let none: List[String] = []
+  assert map.get(absorb(state, "t2", Err("HTTP 404")).texts, 2) == Some(none)
+  assert map.get(absorb(state, "t2", Ok("<html>")).texts, 2) == Some(none)
+  assert map.get(absorb(state, "t2", Ok("[3,[\"a\",\"b\"]]")).texts, 2) == Some(none)
+  assert map.get(absorb(state, "t2", Ok("[2,[\"a\"]]")).texts, 2) == Some(none)
+  # and a tag that is not a section of this index changes nothing
+  assert absorb(state, "t99", Ok(good)).texts == state.texts
+  assert absorb(state, "other", Ok(good)).texts == state.texts
+  assert supplied("other", Ok("")) == Arrived(sec: -1)
+  # a failed section stays asked for no more, and its row has no excerpt
+  let failed = absorb(state, "t2", Err("HTTP 404"))
+  let (m, c) = update(failed, blank(), Typed(text: "handler"))
+  assert fetch_urls(c) == ["search-text/en/3.abcd1234.json"]
+  let first = all_with_class(view(failed, m), "search-row")[0]
+  assert len(all_with_class(first, "search-note")) == 0
+  let (m3, c3) = update(failed, m, Arrived(sec: 2))
+  assert fetch_urls(c3) == []
+  assert m3.hits == m.hits
+}
+
+## Text that comes late reorders: a candidate that could not be checked is in
+## the tier below, and joins or leaves the first tier when its text is here.
+test "a late fragment moves a Chinese candidate between tiers" {
+  let j = body_asset(2, "search-text/zh", zh_secs(), zh_paras()).json_of()
+  let state = State { ..blank_state(), lang: "zh-CN", body: body_of(j, []) }
+  let (m, c) = update(state, blank(), Typed(text: "效果 处理"))
+  assert len(m.hits) == 3
+  # the three rows, and both asked for and unchecked sections are the same three
+  assert fetch_urls(c) == ["search-text/zh/0.abcd1234.json", "search-text/zh/1.abcd1234.json", "search-text/zh/2.abcd1234.json"]
+  let outcome: Result[String, String] = Ok(map.get(fixture_files(), "search-text/zh/2.abcd1234.json").unwrap_or(""))
+  let kept = absorb(state, "t2", outcome)
+  let (m2, _) = update(kept, m, supplied("t2", outcome))
+  # section 2's only candidate has the characters but not the phrase: gone
+  assert len(m2.hits) == 2
+}
+
+test "the model says what it is waiting for only while it is waiting" {
+  let m = blank()
+  assert not str.contains(encode(m), "asked")
+  let w = Model { ..m, asked: [4, 9] }
+  assert str.ends_with(encode(w), ",\"asked\":[4,9]}")
+  assert decode(encode(w)) == w
+  assert decode(encode(m)) == m
+}
+
+## Rows past the first screen are asked for as the selection nears them, not
+## before: the fourteen sections here answer, ten are fetched, and moving to
+## the last row asks for the rest.
+test "rows further down ask for their text when the selection comes near" {
+  var secs: List[List[String]] = []
+  var paras: List[(Int, String)] = []
+  for i in range(0, 14) {
+    secs = secs ++ [["spec", "spec.html#s${i}", "Part ${i}"]]
+    paras = paras ++ [(i, "common word${i}")]
+  }
+  let j = body_asset(2, "search-text/en", secs, paras).json_of()
+  let state = State { ..blank_state(), body: body_of(j, []) }
+  let (m, c) = update(state, blank(), Typed(text: "common"))
+  assert len(m.hits) == 14
+  assert len(fetches(c)) == 10
+  let (m2, c2) = update(state, m, Pressed(key: "End"))
+  assert m2.sel == 13
+  assert fetch_urls(c2) == ["search-text/en/10.abcd1234.json", "search-text/en/11.abcd1234.json", "search-text/en/12.abcd1234.json", "search-text/en/13.abcd1234.json"]
+  # five rows of look-ahead: resting on row 6 asks for the row past ten, and
+  # each arrow down after it for one more
+  let (m3, c3) = update(state, m, Hovered(at: 6))
+  assert fetch_urls(c3) == ["search-text/en/10.abcd1234.json"]
+  let (_, c4) = update(state, m3, Pressed(key: "ArrowDown"))
+  assert fetch_urls(c4) == ["search-text/en/11.abcd1234.json"]
+}
+
+## The panel's cut and the generator's width table are one rule written twice
+## (site/src/gen/search_body.dawn `columns`), and this pins the panel's half.
+test "an excerpt is cut at a blank and marked, in display columns" {
+  assert excerpt("short.") == "short."
+  let long = str.repeat("word ", 30) ++ str.repeat("longword ", 30)
+  let cut = excerpt(long)
+  assert str.ends_with(cut, "…")
+  let kept = code_points(cut)
+  assert len(kept) <= excerpt_len() + 1
+  # the kept text is a prefix of the paragraph that ends at a word boundary
+  let body = from_code_points(list.take(kept, len(kept) - 1))
+  assert str.starts_with(long, body)
+  assert char.is_space(code_points(long)[len(kept) - 1])
+  assert not str.ends_with(body, " ")
+  # no blank to cut at: the bound, which a Han character fills two columns at a time
+  assert len(code_points(excerpt(str.repeat("效", 300)))) == excerpt_len() / 2 + 1
+  # exactly at the bound is not cut
+  let exact = str.repeat("x", excerpt_len())
+  assert excerpt(exact) == exact
+  let exact_han = str.repeat("效", excerpt_len() / 2)
+  assert excerpt(exact_han) == exact_han
+  assert columns('a') == 1
+  assert columns('é') == 1
+  assert columns('效') == 2
+  assert columns('，') == 2
+  assert columns('「') == 2
+  # mixed: an ASCII word between Han runs, cut at the blank after it
+  let mixed = str.repeat("效", 40) ++ " Fs " ++ str.repeat("果", 100)
+  assert excerpt(mixed) == str.repeat("效", 40) ++ " Fs" ++ "…"
+  # a wide character that would straddle the bound is left out
+  let odd = "x" ++ str.repeat("效", 100)
+  assert len(code_points(excerpt(odd))) == 1 + (excerpt_len() - 1) / 2 + 1
 }
 
 # ---- near misses ----

@@ -160,8 +160,12 @@ JSON 渲染器的键序是哈希的事实，而 `site-dist-diff.sh` 对这份文
 
 正文是第二份索引 `search-body-{en,zh}.json`（格式见 `docs/site-search-design.md`），挂载点
 `#dawn-search` 的 `data-search-body` 指向它。它比面板更懒：输入框**第一次出现非空查询**时
-才 fetch，每页至多一次；版本号是 1 才收下，然后 `search.js` 带着它重新 init 一次 guest
-（保留输入框的文字、焦点与光标），正文从此和标题一样是 guest 的只读状态，不过线。
+才 fetch，每页至多一次；版本号是 2 才收下，然后 `search.js` 带着它重新 init 一次 guest
+（保留输入框的文字、焦点与光标），索引从此和标题一样是 guest 的只读状态，不过线。
+索引里没有正文：每节的段落文本是 `assets/search-text/<lang>/` 下的一个小文件（名字带内容指纹，
+索引按名指它），guest 对屏幕上看得见的行用 `Fetch` 命令向 worker 要，到了并入同一个只读状态并重排；
+没到的行先只画标题与出处。构建时 `site/search-budget.sh` 量索引、最大的片段与固定样例查询的首查字节
+（`site/search-queries.txt`、`site/search-budget.txt`），任一超预算构建失败。
 fetch 失败或版本不认识时面板照旧只搜标题，底栏照旧写「只搜标题与 API 名，不搜正文」。
 
 标题与正文都零命中时，guest 对查询里缺的英文词在两份词表里找首字母相同、编辑距离 ≤1（五个字母起 ≤2）

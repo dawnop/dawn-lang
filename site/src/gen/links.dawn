@@ -39,6 +39,7 @@ use std/str
 use std/io
 use std/io.{Fs}
 use std/set
+use std/list
 use std/map
 use json/parser.{parse}
 use json/value.{Json, JArr, JStr, JInt, JObj, error_text}
@@ -358,39 +359,74 @@ fn index_hrefs(name: String, text: String) -> List[String] = {
 }
 
 ## Every href a body index carries: the second field of each entry of its
-## section table (docs/site-search-design.md 2.1). Same reasoning as
+## section table (docs/site-search-design.md 13.4). Same reasoning as
 ## [index_hrefs], and more of them -- every anchored heading of four documents
 ## -- so a renderer that moved its ids would show up here in hundreds.
 ##
 ## The shape around the hrefs is checked as far as reading them needs: the
-## asset is an array whose first field is the version the panel knows (1)
-## and whose second is the section table of three-string rows. Anything else
-## is a generator that changed the format without bumping the version, and is
-## reported rather than skipped.
+## asset is an array whose first field is the version the panel knows (2),
+## whose second is the fragment directory and whose third is the section table
+## of four-string rows. Anything else is a generator that changed the format
+## without bumping the version, and is reported rather than skipped.
 fn body_hrefs(name: String, text: String) -> List[String] = {
   var out: List[String] = []
+  for row in body_rows(name, text) {
+    let (_, href, _, _) = row
+    out = out ++ [href]
+  }
+  out
+}
+
+## The text fragments a body index names, as paths under the site root
+## (`assets/<dir>/<section>.<hash>.json`), for the sections that have one.
+fn body_fragments(name: String, text: String) -> List[String] = {
+  let dir = body_dir(name, text)
+  var out: List[String] = []
+  var at = 0
+  for row in body_rows(name, text) {
+    let (_, _, _, hash) = row
+    if hash != "" {
+      out = out ++ ["assets/${dir}/${at}.${hash}.json"]
+    }
+    at = at + 1
+  }
+  out
+}
+
+fn body_dir(name: String, text: String) -> String =
+  match parse(text) {
+    Ok(JArr(fields)) ->
+      match get(fields, 1) {
+        Some(JStr(dir)) -> dir
+        _ -> panic("assets/${name}: a body index's second field is its fragment directory")
+      }
+    _ -> panic("assets/${name} is not a body index")
+  }
+
+fn body_rows(name: String, text: String) -> List[(String, String, String, String)] = {
+  var out: List[(String, String, String, String)] = []
   match parse(text) {
     Ok(JArr(fields)) -> {
       match get(fields, 0) {
         Some(JInt(v)) -> {
-          if v != 1 {
-            panic("assets/${name}: body index version ${v}, and the panel reads 1")
+          if v != 2 {
+            panic("assets/${name}: body index version ${v}, and the panel reads 2")
           }
         }
         _ -> panic("assets/${name}: a body index opens with its version number")
       }
-      match get(fields, 1) {
+      match get(fields, 2) {
         Some(JArr(sections)) -> {
           for sec in sections {
             match sec {
-              JArr([JStr(_), JStr(href), JStr(_)]) -> {
-                out = out ++ [href]
+              JArr([JStr(doc), JStr(href), JStr(title), JStr(hash)]) -> {
+                out = out ++ [(doc, href, title, hash)]
               }
-              _ -> panic("assets/${name}: a body section is not three strings")
+              _ -> panic("assets/${name}: a body section is not four strings")
             }
           }
         }
-        _ -> panic("assets/${name}: a body index's second field is its section table")
+        _ -> panic("assets/${name}: a body index's third field is its section table")
       }
     }
     Ok(_) -> panic("assets/${name}: a body index is an array")
@@ -510,6 +546,8 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
   var indexes = 0
   var bodies = 0
   var index_links = 0
+  var fragments = 0
+  var named: List[String] = []
   for name in must_list("${out}/assets") {
     let is_body = is_search_body(name)
     if is_search_index(name) || is_body {
@@ -523,6 +561,21 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       if len(hrefs) == 0 {
         broken = broken
           ++ ["assets/${name}: the search index is empty, so the panel can find nothing"]
+      }
+      if is_body {
+        for frag_path in body_fragments(name, text) {
+          fragments = fragments + 1
+          named = named ++ [frag_path]
+          if not set.has(files, frag_path) {
+            broken = broken
+              ++ ["assets/${name} -> ${frag_path}: the index names a text fragment that was never written"]
+          }
+          if not is_fingerprinted(last_segment(frag_path)) {
+            broken = broken
+              ++ ["assets/${name} -> ${frag_path}: a fragment's name carries no content hash, so its "
+                  ++ "URL cannot change when its bytes do"]
+          }
+        }
       }
       for href in hrefs {
         index_links = index_links + 1
@@ -539,6 +592,14 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
           }
         }
       }
+    }
+  }
+  # The other direction: a fragment on disk that no index names is a file the
+  # build wrote for nothing (a stale one the clean step missed, or a name the
+  # index stopped using), and ships.
+  for f in set.to_list(files) {
+    if str.starts_with(f, "assets/search-text/") && not list.contains(named, f) {
+      broken = broken ++ ["${f}: a text fragment no body index names"]
     }
   }
   if indexes == 0 {
@@ -561,7 +622,7 @@ pub fn check_links(out: String) -> Unit !Fs !io = {
       ++ "heading id(s) across ${pages} pages, all resolve; ${assets} of them reach assets/ "
       ++ "and every one is content-hashed; ${payloads} prefilled Playground fragment(s) decode; "
       ++ "${index_links} search-index href(s) in ${indexes} title and ${bodies} body index(es) "
-      ++ "resolve, fragments included")
+      ++ "resolve, fragments included; ${fragments} text fragment(s) named by the body indexes all exist")
 }
 
 test "resolution normalizes relative segments" {
@@ -610,8 +671,11 @@ test "a body index is told apart from a title index and read for its hrefs" {
   assert not is_search_body("search-body-zh.0123abcd.json")
   assert hrefs_of(`<div id="dawn-search" data-search-body="../assets/search-body-en.ab12cd34.json" hidden>`)
     == ["../assets/search-body-en.ab12cd34.json"]
-  let text = "[1,[[\"spec\",\"spec.html\",\"Spec\"],[\"spec\",\"spec.html#s1\",\"One\"]],[],[],[]]"
+  let text = "[2,\"search-text/en\",[[\"spec\",\"spec.html\",\"Spec\",\"\"],[\"spec\",\"spec.html#s1\",\"One\",\"ab12cd34\"]],[],[],[0,1]]"
   assert body_hrefs("search-body-en.json", text) == ["spec.html", "spec.html#s1"]
+  # the fragment is named by its section's position and its hash; a section
+  # with no hash has none
+  assert body_fragments("search-body-en.json", text) == ["assets/search-text/en/1.ab12cd34.json"]
 }
 
 test "id extraction" {
