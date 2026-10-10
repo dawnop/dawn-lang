@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# The search assets' size gate (docs/site-search-design.md 13.7): three numbers
-# per language, each held against site/search-budget.txt, any over -> exit 1.
+# The search assets' size gate (docs/site-search-design.md 13.7, 13.11): four
+# numbers per language, each held against site/search-budget.txt, any over ->
+# exit 1.
 #
-#   index      the gzip size of search-body-<lang>.json: what every reader who
-#              types pays before the first result, and the part of the cost
-#              that grows with the vocabulary, not with the prose
+#   manifest   the gzip size of search-body-<lang>.json: the section table and
+#              the list of postings chunks, what every reader who types pays
+#              before anything is asked, and the part that grows with the
+#              number of sections and chunks, not with the prose
+#   chunk      the largest single postings chunk's gzip size: what one word
+#              can cost, and the number that says a word's postings outgrew
+#              the chunk size (a very common word is a chunk of its own)
 #   fragment   the largest single text fragment's gzip size: what one row can
 #              cost, and the one number that says a section grew past what a
 #              row should have to fetch
 #   first      the worst first-query bytes over site/search-queries.txt: the
-#              index plus every fragment the panel fetches for the query, run
-#              by the panel's own code on these assets (site/search-budget/)
+#              manifest plus every chunk and fragment the panel fetches for
+#              the query, run by the panel's own code on these assets
+#              (site/search-budget/)
 #
 # Total bytes are not a number here: a reader never downloads the total (13.1),
 # so a gate on it would turn every added paragraph into an argument about a
@@ -46,16 +52,38 @@ for lang in en zh; do
   index="$dist/assets/search-body-$lang.json"
   [ -f "$index" ] || { echo "error: $index is missing" >&2; exit 2; }
 
-  # 1. the index
+  # 1. the manifest
   index_gz=$(gz "$index")
-  index_budget=$(budget "$lang" index)
-  echo "  search $lang index: $(wc -c < "$index") bytes raw, $index_gz bytes gzip (budget $index_budget)"
+  index_budget=$(budget "$lang" manifest)
+  echo "  search $lang manifest: $(wc -c < "$index") bytes raw, $index_gz bytes gzip (budget $index_budget)"
   if [ "$index_gz" -gt "$index_budget" ]; then
-    echo "error: $index is over its $index_budget byte gzip budget (docs/site-search-design.md 13.7)" >&2
+    echo "error: $index is over its $index_budget byte gzip manifest budget (docs/site-search-design.md 13.7)" >&2
     over=1
   fi
 
-  # 2. the largest fragment
+  # 2. the largest postings chunk
+  chunk_max=0
+  chunk_name=""
+  chunk_n=0
+  chunk_total=0
+  for f in "$dist/assets/search-index/$lang"/*.json; do
+    [ -f "$f" ] || { echo "error: no chunks under $dist/assets/search-index/$lang" >&2; exit 2; }
+    n=$(gz "$f")
+    chunk_n=$((chunk_n + 1))
+    chunk_total=$((chunk_total + n))
+    if [ "$n" -gt "$chunk_max" ]; then
+      chunk_max=$n
+      chunk_name=$(basename "$f")
+    fi
+  done
+  chunk_budget=$(budget "$lang" chunk)
+  echo "  search $lang chunks: $chunk_n files, $chunk_total bytes gzip together, largest $chunk_name $chunk_max bytes (budget $chunk_budget)"
+  if [ "$chunk_max" -gt "$chunk_budget" ]; then
+    echo "error: $chunk_name ($lang) is over its $chunk_budget byte gzip chunk budget (docs/site-search-design.md 13.7)" >&2
+    over=1
+  fi
+
+  # 3. the largest fragment
   frag_max=0
   frag_name=""
   frag_n=0
@@ -78,7 +106,7 @@ for lang in en zh; do
   fi
 done
 
-# 3. the first query, on the panel's own code
+# 4. the first query, on the panel's own code
 if [ "${SEARCH_BUDGET_SKIP_QUERIES:-0}" != 1 ]; then
   # The run is kept where the self-test can find it: what the panel asks for
   # depends on the dist and the sample, not on the sizes, so a dist whose files
@@ -105,7 +133,7 @@ if [ "${SEARCH_BUDGET_SKIP_QUERIES:-0}" != 1 ]; then
         bytes=$((bytes + $(gz "$dist/assets/$p")))
         n=$((n + 1))
       done
-      printf '    %-2s %-34s %2d fragment(s), %6d bytes\n' "$lang" "$q" "$n" "$bytes"
+      printf '    %-2s %-34s %2d file(s), %6d bytes\n' "$lang" "$q" "$n" "$bytes"
       if [ "$bytes" -gt "$worst" ]; then
         worst=$bytes
         worst_q=$q
