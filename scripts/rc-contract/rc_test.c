@@ -23,6 +23,7 @@
 #if DAWN_SLAB_ACTIVE
 #include <sys/mman.h>
 #endif
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "unicode_stubs.h"
@@ -984,6 +985,11 @@ static void test_slab_returns_pages(void) {
   }
   long peak = rss_kib();
   dawn_drop(head);
+  /* The pages are held for reuse until the cache has gone unused for a decay
+   * interval; test_slab_retains_a_burst owns that half. What this case owns
+   * is that they do go back, so it asks for the sweeps a quiet pair of
+   * intervals would have run. */
+  dawn_slab_quiesce();
   long after = rss_kib();
 
   check(peak - base > 48 * 1024, "64MiB of live objects is resident");
@@ -993,13 +999,15 @@ static void test_slab_returns_pages(void) {
 
 /* The bound the header states, read off the counters rather than off the
  * source: slabs really are retired (a run that never called madvise has a
- * bound nothing is holding it to), and the empty ones being kept for reuse
- * are within DAWN_SLAB_KEEP per class. Runs after the case above, which is
- * what makes the retirement count non-trivial. */
+ * bound nothing is holding it to), and once the decay sweeps have run the
+ * empty ones being kept for reuse are within DAWN_SLAB_KEEP per class. Runs
+ * after the case above, which is what makes the retirement count
+ * non-trivial. */
 static void test_slab_bound_is_honoured(void) {
   uint64_t live = 0;
   uint64_t cached = 0;
   uint64_t retired = 0;
+  dawn_slab_quiesce();
   dawn_slab_stats(&live, &cached, &retired);
   check(retired > 0, "pages have gone back to the kernel");
   check(cached <= (uint64_t)DAWN_SLAB_KEEP * DAWN_SLAB_CLASSES,
@@ -1012,6 +1020,115 @@ static void test_slab_bound_is_honoured(void) {
   check((uint64_t)DAWN_SLAB_KEEP * (DAWN_SLAB_CLASSES - 1) * 65536u <= 33554432u,
         "and the whole idle budget stays within the documented 32MiB");
   check(live > 0, "while the slabs still in use are still there");
+}
+
+/* The idle half of the policy: a process that blocks after a burst has the
+ * burst's empty slabs returned before the block, not at some later sweep it
+ * would never get to run. The block is a real one, read_stdin on a pipe whose
+ * writer is a forked child. The child waits long enough for the parent to be
+ * parked in read(2), reads the parent's resident set from /proc, and sends
+ * that number down the pipe as the bytes the parent is waiting for. So the
+ * figure is what the parent held *while* blocked, taken from outside, with no
+ * sweep of the parent's own having had a chance to run. */
+static void test_slab_returns_before_blocking(void) {
+  size_t node = sizeof(dawn_adt) + sizeof(dawn_slot);
+  long count = (long)((64 * 1024 * 1024) / node);
+  long shadow_kib = 0;
+#if DAWN_ASAN
+  size_t block = ((node + DAWN_SLAB_GRAIN - 1) / DAWN_SLAB_GRAIN) * DAWN_SLAB_GRAIN;
+  size_t carved = ((size_t)count * block + 65535u) / 65536u * 65536u;
+  shadow_kib = (long)(carved / 8 / 1024);
+#endif
+  /* Start from a cache of the floor's size, whatever earlier cases left in
+   * it, so that the burst below has to fault fresh pages. */
+  dawn_slab_before_block();
+  long base = rss_kib();
+  dawn_adt *head = NULL;
+  for (long i = 0; i < count; i++) {
+    dawn_adt *n = dawn_adt_new(0, 1, MASK1);
+    n->fields[0].p = head;
+    head = n;
+  }
+  long peak = rss_kib();
+  dawn_drop(head);
+  check(peak - base > 48 * 1024, "64MiB of live objects is resident");
+
+  int fds[2];
+  check(pipe(fds) == 0, "a pipe can be made");
+  pid_t parent = getpid();
+  pid_t kid = fork();
+  if (kid == 0) {
+    char path[64];
+    char out[32];
+    snprintf(path, sizeof path, "/proc/%d/statm", (int)parent);
+    usleep(500 * 1000);
+    long resident = -1;
+    FILE *f = fopen(path, "r");
+    if (f != NULL) {
+      long total = 0;
+      if (fscanf(f, "%ld %ld", &total, &resident) != 2) resident = -1;
+      fclose(f);
+    }
+    int len = snprintf(out, sizeof out, "%ld\n", resident * (sysconf(_SC_PAGESIZE) / 1024));
+    if (write(fds[1], out, (size_t)len) < 0) _exit(1);
+    _exit(0);
+  }
+  close(fds[1]);
+  dup2(fds[0], 0);
+  dawn_bytes *got = dawn_io_read_stdin(1);
+  /* One byte asked for; the child's whole line is read by this loop below so
+   * the number is complete whatever the pipe's chunking. */
+  char line[32] = {0};
+  size_t have = 0;
+  if (dawn_bytes_len(got) == 1) line[have++] = (char)got->p[0];
+  dawn_drop(got);
+  while (have < sizeof line - 1) {
+    ssize_t k = read(0, line + have, 1);
+    if (k <= 0 || line[have] == '\n') break;
+    have++;
+  }
+  waitpid(kid, NULL, 0);
+  long blocked = atol(line);
+  check(blocked > 0, "the child reported the resident set");
+  check(blocked - base < 8 * 1024 + shadow_kib,
+        "and the burst was already back while the parent was blocked");
+}
+
+/* The other half of the policy: a burst that was just freed is not given back
+ * at once. A loop that builds and drops a structure takes its empty slabs
+ * straight back, and returning them to the kernel in between is what cost
+ * 595,164 page faults in a binary-trees run. Read off the counters: the
+ * retirement count must not move while the cache fills, and it must move
+ * once the sweeps have run. The 100 is far under what the loop frees (256
+ * slabs) and far over the KEEP floor, so neither the page size nor the
+ * classes the earlier cases left cached can move it. */
+static void test_slab_retains_a_burst(void) {
+  uint64_t live = 0;
+  uint64_t cached0 = 0;
+  uint64_t retired0 = 0;
+  dawn_slab_quiesce();
+  dawn_slab_stats(&live, &cached0, &retired0);
+  size_t node = sizeof(dawn_adt) + sizeof(dawn_slot);
+  long count = (long)((16 * 1024 * 1024) / node);
+  dawn_adt *head = NULL;
+  for (long i = 0; i < count; i++) {
+    dawn_adt *n = dawn_adt_new(0, 1, MASK1);
+    n->fields[0].p = head;
+    head = n;
+  }
+  dawn_drop(head);
+  uint64_t cached1 = 0;
+  uint64_t retired1 = 0;
+  dawn_slab_stats(&live, &cached1, &retired1);
+  check(cached1 > cached0 + 100, "a freed burst stays cached for reuse");
+  check(retired1 == retired0, "and none of it has gone back yet");
+  dawn_slab_quiesce();
+  uint64_t cached2 = 0;
+  uint64_t retired2 = 0;
+  dawn_slab_stats(&live, &cached2, &retired2);
+  check(retired2 > retired1 + 100, "until the cache goes unused for a while");
+  check(cached2 <= (uint64_t)DAWN_SLAB_KEEP * DAWN_SLAB_CLASSES,
+        "when the surplus goes back in one batch");
 }
 
 /* Past the documented cap a request is malloc's, which is what lets one
@@ -1286,7 +1403,9 @@ static const rc_case rc_cases[] = {
     {"slab_reuses_a_block", test_slab_reuses_a_block, 1},
     {"slab_never_shrinks_a_block", test_slab_never_shrinks_a_block, 1},
     {"slab_returns_pages", test_slab_returns_pages, 1},
+    {"slab_retains_a_burst", test_slab_retains_a_burst, 1},
     {"slab_bound_is_honoured", test_slab_bound_is_honoured, 1},
+    {"slab_returns_before_blocking", test_slab_returns_before_blocking, 1},
     {"oversize_leaves_the_slab", test_oversize_leaves_the_slab, 1},
 };
 

@@ -159,7 +159,7 @@ isolated() { # asan-options binary label case...
 
 echo "== isolated slab residency =="
 isolated "" "$work/rc_plain" plain \
-  slab_materializes_on_demand slab_returns_pages
+  slab_materializes_on_demand slab_returns_pages slab_returns_before_blocking
 
 # The roster the matrix names has to be the roster the binary runs, or the
 # comparison below is between two different questions.
@@ -268,7 +268,7 @@ fi
 
 echo "== isolated slab residency, sanitized =="
 isolated "$asan_opts" "$work/rc_asan_slab" forced \
-  slab_materializes_on_demand slab_returns_pages
+  slab_materializes_on_demand slab_returns_pages slab_returns_before_blocking
 
 awk -F '\t' '$1 == "probe" { print $2 }' "$here/matrix.txt" > "$work/probe_roster.txt"
 cut -f1 <<< "$probes" > "$work/probe_ran.txt"

@@ -96,14 +96,20 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
  *     DAWN_SL_BATCH tranche at a time instead. A class with a one-object live
  *     set therefore keeps the one-load, one-branch pop without first writing
  *     through all 64KiB of its logical slab.
- *   * A slab whose last block is freed is retired: up to DAWN_SL_KEEP empty
- *     slabs per class are held for reuse, and past that the pages go back to
- *     the kernel with madvise(MADV_DONTNEED) while the address range returns
- *     to the spare list. Retiring at the container is where every allocator
- *     that gives memory back does it (mimalloc pages, jemalloc slabs,
- *     tcmalloc spans). A bound on how many free *blocks* are cached, which
- *     is the shape tried first, gives nothing back at all: what it bounds is
- *     how much sits idle, and that was never the resident set.
+ *   * A slab whose last block is freed is retired into its class's cache of
+ *     empty slabs, and the cache decays rather than being capped: every
+ *     DAWN_SL_DECAY_MS the allocator gives back the empty slabs a class did
+ *     not dip below since the previous sweep, down to DAWN_SL_KEEP, with
+ *     madvise(MADV_DONTNEED) while the address range returns to the spare
+ *     list. A fixed cap of four was the shape tried first and it faulted
+ *     595,164 pages in a 2.4s binary-trees run, every one of them a page it
+ *     had just returned. Retiring at the container is still where every
+ *     allocator that gives memory back does it (mimalloc pages, jemalloc
+ *     slabs, tcmalloc spans), and the interval minimum is the same idea as
+ *     their decay: what a loop keeps taking back is not surplus. A bound on
+ *     how many free *blocks* are cached, which is the shape tried before
+ *     that, gives nothing back at all: what it bounds is how much sits idle,
+ *     and that was never the resident set.
  *
  * The one slab a class is currently allocating from is not retired when it
  * empties. Without that, a class holding one object at a time would take the
@@ -193,6 +199,10 @@ static int dawn_wasi_chmod(const char *path, mode_t mode) {
 #define DAWN_SL_MAX DAWN_SLAB_MAX
 #define DAWN_SL_CLASSES DAWN_SLAB_CLASSES
 #define DAWN_SL_KEEP DAWN_SLAB_KEEP
+#define DAWN_SL_PULSE 256u /* a power of two */
+#ifndef DAWN_SL_DECAY_MS
+#define DAWN_SL_DECAY_MS 1000
+#endif
 
 /* Materialize a fresh logical slab one measurement-selected tranche at a
  * time. Kept overrideable for the batch-tail contract and for repeating the
@@ -276,6 +286,11 @@ static dawn_sl_slab *dawn_sl_cur[DAWN_SL_CLASSES];
 static dawn_sl_slab *dawn_sl_partial[DAWN_SL_CLASSES];
 static dawn_sl_slab *dawn_sl_empty[DAWN_SL_CLASSES];
 static uint32_t dawn_sl_empty_n[DAWN_SL_CLASSES];
+/* The fewest empty slabs the class held since the last decay sweep. Whatever
+ * stayed above it for a whole interval was never needed. */
+static uint32_t dawn_sl_empty_low[DAWN_SL_CLASSES];
+static uint32_t dawn_sl_pulse;   /* counts current slabs reaching zero */
+static int64_t dawn_sl_sweep_ms; /* when the last sweep ran; 0 before the first */
 static uint64_t dawn_sl_live;    /* slabs holding pages */
 static uint64_t dawn_sl_retired; /* slabs whose pages went back to the kernel */
 
@@ -435,10 +450,13 @@ static void dawn_sl_reserve(void) {
   dawn_sl_span = span;
 }
 
+__attribute__((noinline)) static void dawn_sl_tick(void);
+
 /* The class's free list is empty: find or make a slab, make it current, and
  * hand out its first block. Reached on the first allocation of every class
  * too, which is where the reserve gets made. */
 static void *dawn_sl_slow(size_t cls, size_t n) {
+  dawn_sl_tick();
   if (dawn_sl_span == 0) {
     if (dawn_sl_refused) {
       return malloc(n);
@@ -468,6 +486,9 @@ static void *dawn_sl_slow(size_t cls, size_t n) {
   } else if ((s = dawn_sl_empty[cls]) != NULL) {
     dawn_sl_unlink(&dawn_sl_empty[cls], s);
     dawn_sl_empty_n[cls]--;
+    if (dawn_sl_empty_n[cls] < dawn_sl_empty_low[cls]) {
+      dawn_sl_empty_low[cls] = dawn_sl_empty_n[cls];
+    }
   } else if ((s = dawn_sl_carve(cls)) == NULL) {
     return malloc(n);
   }
@@ -511,19 +532,13 @@ static void *dawn_sl_get(size_t n) {
   return b;
 }
 
-static void dawn_sl_retire(dawn_sl_slab *s, size_t cls) {
-  if (s->list == DAWN_SL_PARTIAL) {
-    dawn_sl_unlink(&dawn_sl_partial[cls], s);
-  }
-  if (dawn_sl_empty_n[cls] < DAWN_SL_KEEP) {
-    dawn_sl_layout(s, cls);
-    dawn_sl_link(&dawn_sl_empty[cls], s, DAWN_SL_EMPTY);
-    dawn_sl_empty_n[cls]++;
-    return;
-  }
-  /* Past the bound the pages go back. The address range does not: the slot
-   * joins the spare list, so a program that churns slabs does not eat the
-   * reserve. */
+/* The three functions below are out of line on purpose: inlined into
+ * dawn_sl_put they grew the frame of every recursive caller of free, and
+ * 2MiB of stack ended up resident in the sanitized residency case. Give one
+ * empty slab's pages back. The address range does not go: the slot
+ * joins the spare list, so a program that churns slabs does not eat the
+ * reserve. */
+__attribute__((noinline)) static void dawn_sl_release(dawn_sl_slab *s) {
   madvise(dawn_sl_addr(s), DAWN_SL_SIZE, MADV_DONTNEED);
   /* The pages are gone but the address range is not, and a retired slot is
    * carved again later; poisoned is the right state for it in between. */
@@ -539,6 +554,63 @@ static void dawn_sl_retire(dawn_sl_slab *s, size_t cls) {
   dawn_sl_retired++;
 }
 
+static int64_t dawn_sl_now_ms(void) {
+  struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+  clockid_t clk = CLOCK_MONOTONIC_COARSE;
+#else
+  clockid_t clk = CLOCK_MONOTONIC;
+#endif
+  if (clock_gettime(clk, &ts) != 0) {
+    return 0;
+  }
+  return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000 + 1;
+}
+
+/* The decay sweep. A class's cache of empty slabs shrinks by the number it
+ * did not dip below since the previous sweep, down to DAWN_SL_KEEP: a class
+ * that empties and refills its cache inside an interval (every allocation
+ * loop that builds and drops a structure) never loses anything, and one that
+ * stopped using it loses all of the surplus in one batch. */
+__attribute__((noinline)) static void dawn_sl_sweep(void) {
+  for (size_t c = 1; c < DAWN_SL_CLASSES; c++) {
+    uint32_t low = dawn_sl_empty_low[c];
+    while (low > DAWN_SL_KEEP && dawn_sl_empty[c] != NULL) {
+      dawn_sl_slab *s = dawn_sl_empty[c];
+      dawn_sl_unlink(&dawn_sl_empty[c], s);
+      dawn_sl_empty_n[c]--;
+      dawn_sl_release(s);
+      low--;
+    }
+    dawn_sl_empty_low[c] = dawn_sl_empty_n[c];
+  }
+}
+
+/* Called where the allocator already left the fast path, which is the only
+ * place time is read. A program that neither takes nor retires a slab for a
+ * whole interval is not asking the allocator for anything, and is not given
+ * back anything either until it does; see the design for the blocking-read
+ * hook that would close that. */
+__attribute__((noinline)) static void dawn_sl_tick(void) {
+  int64_t now = dawn_sl_now_ms();
+  if (dawn_sl_sweep_ms == 0) {
+    dawn_sl_sweep_ms = now;
+  } else if (now - dawn_sl_sweep_ms >= DAWN_SL_DECAY_MS) {
+    dawn_sl_sweep_ms = now;
+    dawn_sl_sweep();
+  }
+}
+
+static void dawn_sl_retire(dawn_sl_slab *s, size_t cls) {
+  if (s->list == DAWN_SL_PARTIAL) {
+    dawn_sl_unlink(&dawn_sl_partial[cls], s);
+  }
+  dawn_sl_layout(s, cls);
+  dawn_sl_link(&dawn_sl_empty[cls], s, DAWN_SL_EMPTY);
+  dawn_sl_empty_n[cls]++;
+  dawn_sl_tick();
+}
+
 static void dawn_sl_put(void *p) {
   dawn_sl_slab *s = &dawn_sl_grid[((uintptr_t)p - dawn_sl_lo) >> DAWN_SL_BITS];
   size_t cls = s->cls;
@@ -546,7 +618,14 @@ static void dawn_sl_put(void *p) {
     *(void **)p = dawn_sl_head[cls];
     dawn_sl_head[cls] = p;
     ASAN_POISON_MEMORY_REGION(p, cls * DAWN_SL_GRAIN);
-    s->used--; /* the current slab is kept even at zero; see the heading */
+    /* The current slab is kept even at zero; see the heading. Reaching zero
+     * is also the one moment a steady loop that recycles a single slab gives
+     * the allocator, so it is where the decay clock is looked at, one time in
+     * DAWN_SL_PULSE so that a class holding one object at a time does not
+     * pay for a clock read per free. */
+    if (--s->used == 0 && (++dawn_sl_pulse & (DAWN_SL_PULSE - 1)) == 0) {
+      dawn_sl_tick();
+    }
     return;
   }
   *(void **)p = s->freelist;
@@ -594,6 +673,20 @@ void dawn_free(void *p) {
 
 bool dawn_slab_owns(const void *p) { return DAWN_SL_MINE(p); }
 
+void dawn_slab_before_block(void) {
+  /* A blocked process cannot sweep twice, so it gives the whole surplus back
+   * now: every class down to DAWN_SL_KEEP, whatever the interval says. */
+  for (size_t c = 1; c < DAWN_SL_CLASSES; c++) {
+    while (dawn_sl_empty_n[c] > DAWN_SL_KEEP) {
+      dawn_sl_slab *s = dawn_sl_empty[c];
+      dawn_sl_unlink(&dawn_sl_empty[c], s);
+      dawn_sl_empty_n[c]--;
+      dawn_sl_release(s);
+    }
+    dawn_sl_empty_low[c] = dawn_sl_empty_n[c];
+  }
+}
+
 void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
   uint64_t held = 0;
   for (size_t c = 0; c < DAWN_SL_CLASSES; c++) {
@@ -605,6 +698,11 @@ void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
 }
 
 #ifdef DAWN_RC_CONTRACT
+void dawn_slab_quiesce(void) {
+  dawn_sl_sweep();
+  dawn_sl_sweep();
+}
+
 size_t dawn_slab_materialized_bytes(const void *p) {
   if (!DAWN_SL_MINE(p)) return 0;
   const dawn_sl_slab *s =
@@ -626,6 +724,8 @@ size_t dawn_slab_materialized_bytes(const void *p) {
 
 void dawn_free(void *p) { free(p); }
 
+void dawn_slab_before_block(void) {}
+
 bool dawn_slab_owns(const void *p) {
   (void)p;
   return false;
@@ -638,6 +738,8 @@ void dawn_slab_stats(uint64_t *live, uint64_t *cached, uint64_t *retired) {
 }
 
 #ifdef DAWN_RC_CONTRACT
+void dawn_slab_quiesce(void) {}
+
 size_t dawn_slab_materialized_bytes(const void *p) {
   (void)p;
   return 0;
@@ -4429,11 +4531,27 @@ dawn_unit dawn_reactor_state_set(void *state) {
  * next read_line will swallow. */
 static bool dawn_stdin_skip_lf = false;
 
+/* Called before a read of standard input that may wait. If nothing can be
+ * read right now the process is about to block for an unknown time, and the
+ * slab's cache of empty slabs is returned first (see dawn_slab_before_block).
+ * A read that can be answered at once does not pay for it: a program fed from
+ * a file or a full pipe keeps its cache across lines. */
+static void dawn_stdin_may_block(void) {
+  struct pollfd p;
+  p.fd = 0;
+  p.events = POLLIN;
+  p.revents = 0;
+  if (poll(&p, 1, 0) == 0) {
+    dawn_slab_before_block();
+  }
+}
+
 dawn_adt *dawn_io_read_line(void) {
   size_t cap = 128;
   size_t n = 0;
   char *buf = (char *)dawn_alloc(cap);
   bool any = false;
+  dawn_stdin_may_block();
   for (;;) {
     char c;
     ssize_t k = read(0, &c, 1);
@@ -4918,6 +5036,7 @@ dawn_bytes *dawn_io_read_stdin(int64_t n) {
       buf = bigger;
       cap = next;
     }
+    dawn_stdin_may_block();
     ssize_t step = read(0, buf + got, (size_t)(cap - got));
     if (step < 0) {
       if (errno == EINTR) continue;
@@ -4949,6 +5068,10 @@ dawn_bytes *dawn_io_read_stdin(int64_t n) {
  * the kernel via FIONREAD, and POLLIN is only the wake-up. Measured, both
  * rows, in docs/audit/lsp-robustness-design.md 2.2.1. */
 bool dawn_io_stdin_ready(int64_t timeout_ms) {
+  /* About to wait. A zero timeout is a probe and never blocks. */
+  if (timeout_ms > 0) {
+    dawn_stdin_may_block();
+  }
   int ms;
   if (timeout_ms <= 0) {
     ms = 0;
@@ -5144,6 +5267,7 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
     dawn_fault(DAWN_LIT("io_run: cannot start the program"));
   }
   int status = 0;
+  dawn_slab_before_block(); /* the child runs for as long as it runs */
   while (waitpid(pid, &status, 0) < 0) {
     if (errno != EINTR) {
       dawn_run_child = 0;

@@ -516,8 +516,8 @@ class PreflightTests(unittest.TestCase):
         # Two mutants quote this line; the preflight names the first in order.
         self.assert_registry_drift_is_red("rc-contract", "slab-forgets-to-poison",
                                           "runtime/c/dawn_rt.c",
-                                          "    s->used--; /* the current slab",
-                                          "    s->used -= 1; /* the current slab")
+                                          "    if (--s->used == 0 && (++dawn_sl_pulse",
+                                          "    if (--s->used == 1 && (++dawn_sl_pulse")
         self.assert_stale_mutator_is_red("rc-contract", "revert-adt0-to-fresh-allocation",
                                          "    dawn_adt0_hits++;\n")
 
