@@ -1,6 +1,6 @@
 # check / emitc / build / run / test 只加载程序到得了的 std 模块
 
-> 状态：**proposed**。重开 [std-pruning-design.md](std-pruning-design.md) §6 否决过的「check 端也裁」。
+> 状态：**current / 已落地**（2026-10-11）。重开 [std-pruning-design.md](std-pruning-design.md) §6 否决过的「check 端也裁」。
 > 触发条件是该节自己写的重开门槛：check 时间本身成了瓶颈（[check-cold-start-design.md](check-cold-start-design.md)
 > 两刀之后，空程序 `dawnc check` 仍约 0.41 s，其中 std 加载约 0.35 s）。
 > 调研与裁决是内部文档（`~/workspace/agent-handoff/research-check-std-prune-reopen-20261011.md`、
@@ -72,9 +72,11 @@ impl，trait 或 subject 类型至少一个由该模块声明。孤儿规则（`
 `TyOpaque` 自带的属主。负控写在同一个测试里：把 `std/list` 或 `std/str` 从基座拿掉，守卫必须报告
 违例；拿掉没有这类认领的 `std/loc`，必须不报。
 
-**全量/裁剪差分门**（`scripts/std-prune-diff.sh`）。对检查器语料、`examples/`、Playground 样例，
+**全量/裁剪差分门**（`scripts/std-prune-diff.sh`，挂在 `prev-diff-native`，用同一个 release 产物）。对检查器语料、`examples/`、Playground 样例与 `packages/`，
 内嵌 std 的裁剪加载与 `--std std`（全量；`std/` 与内嵌副本逐字相同由既有测试保证）比较
 `check` 的退出码、stdout、stderr，以及 `emitc` 的 C 输出，逐字节相同。任何静默差异即红。
+两条对照先跑：空程序裁剪比全量至少快 20%（对没有裁剪的二进制它是红的），以及往一份 std 目录里改一个
+默认参数必须改变 `emitc` 的输出（比较本身看得见差异）。
 
 ## 6. 取消资格条件
 
@@ -82,7 +84,35 @@ impl，trait 或 subject 类型至少一个由该模块声明。孤儿规则（`
 
 ## 7. 实测
 
-（实现后补。）
+native，每项 15 次交错取最小值；机器 16 核，**load average 12 至 15**（别的会话在跑），绝对值
+偏悲观，比值可信。前 = `a27bfac5` 的 `release-native.sh` 产物，后 = 本分支同一配方的产物。
+
+| 判据 | 前 | 后 |
+|---|---:|---:|
+| native `check`，空程序 | 962 ms | 655 ms |
+| native `check`，24.8 KB 程序（190 个函数） | 828 ms | 612 ms |
+| native `emitc examples/basics/fib.dawn` | 735 ms | 398 ms |
+| JVM 发布 jar `check`，空程序（含 dcap 约 0.6 s 的底） | 1687 ms | 1380 ms |
+| JVM 发布 jar `check`，24.8 KB 程序（同上） | 1789 ms | 1455 ms |
+| 同一二进制内部：空程序 `check` 裁剪 / 全量（`--std std`），7 次取最小 | 196 ms | 546 ms |
+
+最后一行是差分门里的速度对照，同一个二进制、同一个 load 下的直接比：裁剪后 std 加载只剩全量的
+36%。调研预期的「空程序约 0.16 s」（扣掉 dcap 之后）在 load 12 至 15 下对不上号：前后两栏都没扣
+launcher，且基座比调研的 10 个多了 `hamt`、`pvec`（`lower` 无条件引用，`emitc` 的 list 原语同理）
+和 `cursor`（`str` 的依赖）。空程序加载 12 个模块，共 27 个。没有 perf，不再往下拆。
+
+差分门（`scripts/std-prune-diff.sh`）：241 个单元（检查器语料 190、examples、Playground 样例 11、
+`packages/*`）的 `check` 输出，与其中 48 个能通过检查的程序的 `emitc` 输出，裁剪与全量逐字节相同。
+本机 4 路并行、load 13 下 95 s 墙钟、328 CPU 秒。
+
+**差分在实现过程中抓到的一条真差异**：`emitc` 把字典按「各 unit 第一次索取的顺序」写出，unit 以
+`modules.txt` 的 std 顺序打头，所以谁先索取 `Int` 的 Eq/Hash 字典取决于哪些 std 模块被加载。
+`release-native.sh` 里「产物发射的 C 与造它的工具链相同」一项在 `nmain` 上红了（8 行顺序不同），
+改成按键排序写出（C 里定义顺序无意义），全量与裁剪、JVM 造的与 native 造的 C 一致。
+调研的 5 个程序没撞上这条，`nmain` 撞上了：差分的语料要有大程序。
+
+`moved` 表第一版（只认顶层 `pub fn`）漏了 `pub trait` 的方法与 `pub effect` 的操作，28 个键；
+内联测试对着全量加载逐键比较时抓到，已补。
 
 ## 8. 不做的（理由）
 
@@ -95,4 +125,8 @@ impl，trait 或 subject 类型至少一个由该模块声明。孤儿规则（`
   std。这一刀不扩大范围。
 - **把 `moved` 表改成运行期惰性求值**：要让加载器在报错路径上回头加载被裁的模块，把纯函数变成有状态的；
   生成一张表更小。
+- **JVM 的 `run/build/emitc` 与 `dawn test` 也裁剪**：它们这条路径本来没用 lean，且 `collect_program_full` 把
+  `std.mods` 交给 emit，这一刀没碰。`bin/dawn` 启动器默认设 `DAWN_STD`，所以开发者本机的 `./bin/dawn check`
+  走的是目录全量加载；裁剪只对 `DAWN_STD` 未设的发布 jar 与 native 二进制生效。
+- **Playground `/check` 单独量一遍**：它就是 `dawnc check`，上表 native 一栏的比值适用，没有另起一套量。
 - **新的 parse-only 相位**：被留下的模块照旧完整走原流程，只是 `names` 少几项。
