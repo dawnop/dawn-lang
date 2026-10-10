@@ -1,0 +1,46 @@
+# A constructor field that leaves the function, next to a reset it would
+# otherwise have reused (#632).
+#
+# `R { ..v, a: (if c { return v } else { 8 }) }` reads `v.b`, resets the dead
+# copy of `v`, and builds the new node out of the token -- but the field `a`
+# runs before the token is spent, and its early `return` has to release the
+# token on the way out. The emitter and the rewrite both order it that way
+# (fields, then the token); the balance checker consumed the token first and
+# called the release "a binding that was not held", so the function could not
+# be compiled at all. The loop forms (break, continue in a field) are here too:
+# they unwind through the same drops.
+
+type R = { a: Int, b: String }
+
+fn early_return(v: R) -> R =
+  R { ..v, a: (if (v.a > 5) { return v } else { 8 }) }
+
+fn plain_ctor(v: R) -> R =
+  R { a: (if (v.a > 5) { return v } else { 9 }), b: v.b ++ "!" }
+
+fn in_loop(xs: List[R]) -> Int = {
+  var total = 0
+  var i = 0
+  while i < len(xs) {
+    let v = xs[i]
+    i = i + 1
+    let w = R { ..v, a: (if (v.a == 0) { continue } else { v.a + 1 }) }
+    if w.a > 100 { break }
+    total = total + w.a
+  }
+  total
+}
+
+pub fn main() -> Unit !io = {
+  let small = R { a: 1, b: "s" }
+  let big = R { a: 9, b: "g" }
+  let r1 = early_return(small)
+  let r2 = early_return(big)
+  let r3 = plain_ctor(small)
+  let r4 = plain_ctor(big)
+  println("early_return small = ${r1.a} ${r1.b}")
+  println("early_return big = ${r2.a} ${r2.b}")
+  println("plain_ctor small = ${r3.a} ${r3.b}")
+  println("plain_ctor big = ${r4.a} ${r4.b}")
+  println("in_loop = ${in_loop([small, R { a: 0, b: "z" }, big, R { a: 200, b: "h" }, small])}")
+}
