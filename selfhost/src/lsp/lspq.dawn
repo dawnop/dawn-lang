@@ -412,6 +412,25 @@ fn pat_binders(tp: TPat) -> List[Int] =
     _ -> []
   }
 
+## `: T` after each name a `for` or `match` pattern binds, when the collection
+## wants this kind. The name's end is the symbol's declaration end, as for a
+## destructuring `let`.
+fn hint_pattern_binders(qc: QCx, q0: Q, tp: TPat) -> Q = {
+  let want = match inlay_opts(q0) {
+    Some(o) -> o.pattern_types
+    None -> false
+  }
+  if not want { return q0 }
+  var q = q0
+  for sid in pat_binders(tp) {
+    match sym_get(qc, sid) {
+      Some(sym) -> { q = hint_binding(qc, q, true, sid, sym.dhi) }
+      None -> ()
+    }
+  }
+  q
+}
+
 ## ` !io` after the parameter list of a function with neither a return type nor
 ## an effect row written, when the checker inferred it to do IO.
 fn hint_decl_effect(qc: QCx, q0: Q, f: FnDecl, tf: Option[TFun]) -> Q = {
@@ -3415,6 +3434,10 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           None -> None
         }
         q = visit_pat(qc, q, arm.pat, tp)
+        match tp {
+          Some(t) -> { q = hint_pattern_binders(qc, q, t) }
+          None -> ()
+        }
         match arm.guard {
           Some(g) -> {
             let tg: Option[TExpr] = match ta {
@@ -4168,6 +4191,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
       match ts {
         Some(TSFor(tpat, _, tfrom, tto, _, tbody, _, _, _)) -> {
           q = visit_pat(qc, q, pat, Some(tpat))
+          q = hint_pattern_binders(qc, q, tpat)
           q = walk_e(qc, q, from, Some(tfrom))
           match to {
             Some(e) -> { q = walk_e(qc, q, e, tto) }
@@ -4180,6 +4204,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
             Some(parts) -> {
               let (tpat, tfrom, tbody) = parts
               q = visit_pat(qc, q, pat, Some(tpat))
+              q = hint_pattern_binders(qc, q, tpat)
               q = walk_e(qc, q, from, Some(tfrom))
               q = walk_e(qc, q, body, Some(tbody))
             }

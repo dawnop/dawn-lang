@@ -2216,7 +2216,7 @@ fn client_defaults_item_data(params: Json) -> Bool = {
 }
 
 ## The inlay hints the client asked for: `initializationOptions.inlayHints`,
-## eight optional booleans over `default_inlay_opts`. A key that is missing or
+## nine optional booleans over `default_inlay_opts`. A key that is missing or
 ## not a boolean keeps its default; read once, at `initialize`
 ## (docs/lsp-hover-design.md §A4.3 says why not `workspace/configuration`).
 fn inlay_opts_of(params: Json) -> InlayOpts = {
@@ -2227,6 +2227,7 @@ fn inlay_opts_of(params: Json) -> InlayOpts = {
     lambda_param_types: json_flag(j, "lambdaParamTypes", d.lambda_param_types),
     call_effects: json_flag(j, "callEffects", d.call_effects),
     decl_effects: json_flag(j, "declarationEffects", d.decl_effects),
+    pattern_types: json_flag(j, "patternTypes", d.pattern_types),
     param_names: json_flag(j, "parameterNames", d.param_names),
     default_args: json_flag(j, "defaultArguments", d.default_args),
     default_values: json_flag(j, "defaultArgumentValues", d.default_values),
@@ -6078,6 +6079,68 @@ test "inlay hints: an inferred io row is shown after the parameters, only where 
   }))
 }
 
+fn pattern_probe_text() -> String =
+  join([
+    "type Shape = Circle(r: Int) | Rect(w: Int, h: Int)",
+    "",
+    "fn run(xs: List[Int], s: Shape, p: (Int, String), o: Option[Int]) -> Int = {",
+    "  var acc = 0",
+    "  for x in xs { acc = acc + x }",
+    "  for i in 0..3 { acc = acc + i }",
+    "  for (k, v) in [(1, \"a\")] { acc = acc + k + len(v) }",
+    "  let a = match s {",
+    "    Circle(r) -> r",
+    "    Rect(w: w, h: _) -> w",
+    "  }",
+    "  let b = match p {",
+    "    (n, _) -> n",
+    "  }",
+    "  let c = match o {",
+    "    Some(v) if v > 0 -> v",
+    "    Some(_) | None -> 0",
+    "  }",
+    "  let d = match xs {",
+    "    [first, ..rest] -> first + len(rest)",
+    "    [] -> 0",
+    "  }",
+    "  acc + a + b + c + d",
+    "}",
+    ""
+  ], "\n")
+
+test "inlay hints: for variables and match arm bindings, nested patterns included" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let st0 = def_probe_state(std_for_probe())
+    let d = def_probe_doc_named(st0, "patterns.dawn", pattern_probe_text())
+    let quiet = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, let_types: false } }
+    assert inlay_probe(quiet, d, 0, 0, 25, 0) == [
+      "for x«: Int» in xs { acc = acc + x }",
+      "for i«: Int» in 0..3 { acc = acc + i }",
+      "for (k«: Int», v«: String») in [(1, \"a\")] { acc = acc + k + len(v) }",
+      "Circle(r«: Int») -> r",
+      "Rect(w: w«: Int», h: _) -> w",
+      "(n«: Int», _) -> n",
+      "Some(v«: Int») if v > 0 -> v",
+      "[first«: Int», ..rest«: List[Int]»] -> first + len(rest)"
+    ]
+    # the let kind is a different switch: with it on, the `let a = match ...` lines come too
+    let with_lets = inlay_probe(st0, d, 0, 0, 25, 0)
+    assert list.contains(with_lets, "let a«: Int» = match s {")
+    assert len(with_lets) == 13
+    let off = LspState { ..st0, inlay: InlayOpts { ..st0.inlay, let_types: false, pattern_types: false } }
+    assert inlay_probe(off, d, 0, 0, 25, 0) == []
+    # the option key switches the kind off the way the client sends it
+    let viaopt = LspState {
+      ..st0,
+      inlay: inlay_opts_of(jobj([("initializationOptions", jobj([("inlayHints", jobj([
+        ("patternTypes", JBool(false)),
+        ("letTypes", JBool(false))
+      ]))]))]))
+    }
+    assert inlay_probe(viaopt, d, 0, 0, 25, 0) == []
+  }))
+}
+
 test "inlay hints: inferred let types, one per destructured name, none where written" {
   io.with_fs_real(() => io.with_env_real(() => {
     let st = def_probe_state(std_for_probe())
@@ -6119,8 +6182,8 @@ test "inlay hints: a call's named effects, none for pure or effect-polymorphic c
     assert list.contains(got, "let got«: Int» = twice(() => n)")
     assert list.contains(got, "let peek«: fn() -> Bool !Fs» = () => io.exists(p)« !Fs»")
     assert list.contains(got, "let seen«: Bool» = peek()« !Fs»")
-    # a match arm's binder is not a let
-    assert not list.any(got, l => str.contains(l, "Ok(t«"))
+    # a match arm's binder is a pattern binding, hinted by its own kind
+    assert list.contains(got, "Ok(t«: String») -> t ++ cut")
   }))
 }
 
@@ -6243,7 +6306,7 @@ fn defaults_probe_text() -> String =
 fn defaults_probe(st: LspState, d: Doc) -> List[String] !io = {
   let st1 = LspState {
     ..st,
-    inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false, decl_effects: false }
+    inlay: InlayOpts { ..st.inlay, let_types: false, lambda_param_types: false, call_effects: false, decl_effects: false, pattern_types: false }
   }
   inlay_probe(st1, d, 0, 0, 40, 0)
 }
