@@ -14,7 +14,7 @@ use std/set
 use front/ast.{
   TypeRef, TNamed, Module,
   module_fns, module_types, module_consts, module_traits,
-  module_impls, module_tests,
+  module_impls, module_tests, TestView,
   TraitMethod, Expr,
   FnDecl, Param, EBool, EVar, EInt, EChar,
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
@@ -15205,7 +15205,10 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     }
   }
   var ttests: List[TFun] = []
-  for t in module_tests(m) {
+  let all_tests = module_tests(m)
+  let no_tests: List[TestView] = []
+  let tests_to_check = if cx1.std_trusted { no_tests } else { all_tests }
+  for t in tests_to_check {
     let owner = enter_decl(cx1, view, [identity.Named(identity.TestDecl, t.name)])
     let (next_state, cxe, tf) = executor.test_body(state, owner.cx, t.name, t.body)
     state = next_state
@@ -15222,8 +15225,10 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   # Last, because whether an import is unused is only decided for a module
   # every other check passed (docs/unused-imports-design.md §2). Here and not
   # in `check_module`, so every body executor reaches the same end.
-  cx1 = selfrec.report_self_recursion(cx1, fns_out, impl_tfuns)
-  cx1 = import_use.report_unused_imports(cx1, m)
+  if not cx1.std_trusted {
+    cx1 = selfrec.report_self_recursion(cx1, fns_out, impl_tfuns)
+    cx1 = import_use.report_unused_imports(cx1, m)
+  }
   (state, ModuleBodies { cx: cx1, functions: fns_out, constants: tconsts,
     impl_methods: impl_tfuns, trait_defaults: default_tfuns, tests: ttests })
 }

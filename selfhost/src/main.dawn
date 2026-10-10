@@ -28,7 +28,7 @@ use driver/checkdump
 use ir/coredump
 use ir/coresites
 use driver/stdlib.{
-  StdCtx, StdLoadError, load_chosen_std, cli_std_choice, std_choice_text, std_load_error_text,
+  StdCtx, StdLoadError, load_chosen_std, load_chosen_std_lean, cli_std_choice, std_choice_text, std_load_error_text,
   std_load_is_bug
 }
 use driver/analyze.{
@@ -2383,6 +2383,14 @@ fn check_std(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
     Err(e) -> fail_std(e)
   }
 
+## `check_std` for `dawn check`, which runs no test of std's: see
+## `load_chosen_std_lean`.
+fn check_std_lean(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
+  match load_chosen_std_lean(cli_std_choice(std_flag)) {
+    Ok(sc) -> sc
+    Err(e) -> fail_std(e)
+  }
+
 ## `dawn check [--std <dir>] <target>...` — type-check and report.
 ##
 ## This is the command the spec points third-party CI at, so its exit status is
@@ -2408,7 +2416,7 @@ fn run_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return cli_error("source files must end in .dawn: ${t}")
     }
   }
-  let std = check_std(std_flag)
+  let std = check_std_lean(std_flag)
   var all: List[LocDiag] = []
   for t in targets {
     # this command plans its own load rather than going through `load_target`,

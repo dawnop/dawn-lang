@@ -34,13 +34,14 @@ use std/bytes
 use front/token.{Diag}
 use front/diag
 use driver/stdlib.{
-  StdCtx, StdLoadError, load_chosen_std, cli_std_choice, std_choice_text, std_load_error_text,
+  StdCtx, StdLoadError, load_chosen_std, load_chosen_std_lean, cli_std_choice, std_choice_text, std_load_error_text,
   std_load_is_bug
 }
 use ir/interp.{CtOpts, ct_default, ct_fuel, ct_lsp, ct_world_empty, ct_fuel_value, take_ct_fuel, DEFAULT_FUEL}
 use check/jsig.{JsigLease, jsig_refused, jsig_refused_lease}
 use driver/analyze.{
-  Program, LocDiag, LoadResult, load_target, analyze_program, rendered_diags, dawn_files_under,
+  Program, LocDiag, LoadResult, load_target, load_target_unstd, syntax_failure_diags, analyze_program,
+  rendered_diags, dawn_files_under,
   own_module_paths
 }
 use driver/clifail.{fail_compile, fail_planner}
@@ -415,6 +416,14 @@ fn load_or_die(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
     Err(e) -> fail_std(e)
   }
 
+## `load_or_die` for the commands that never run std's own tests; see
+## `load_chosen_std_lean`.
+fn load_or_die_lean(std_flag: Option[String]) -> StdCtx !Fs !Env !Exit !Console !io =
+  match load_chosen_std_lean(cli_std_choice(std_flag)) {
+    Ok(sc) -> sc
+    Err(e) -> fail_std(e)
+  }
+
 fn analyzed(std: StdCtx, target: String, opts: CtOpts) -> Program !Fs !Proc !Env !Exit !Console !io = {
   let (_, prog) = analyzed_load(std, target, opts)
   prog
@@ -459,7 +468,7 @@ fn emitted_with(
   with_info: Bool,
   with_map: Bool
 ) -> (String, String, String) !Fs !Proc !Env !Exit !Console !io = {
-  let std = load_or_die(std_flag)
+  let std = load_or_die_lean(std_flag)
   let (loaded, prog) = analyzed_load(std, target, opts)
   # `--map` takes the mapped entry, which builds the text the same way and
   # also says where each call landed (docs/source-span-map-design.md section 12)
@@ -793,12 +802,34 @@ fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       return cli_error("source files must end in .dawn: ${target}")
     }
   }
-  let std = load_or_die(std_flag)
   var all: List[LocDiag] = []
-  for target in targets {
-    let loaded = load_target(std, target)
-    let prog = analyze_program(loaded, std, opts, jsig_refused())
-    all = all ++ rendered_diags(prog)
+  if cli_std_choice(std_flag) == None {
+    # The embedded std: a target that does not parse is answered from the
+    # parse alone, before std is checked. std is loaded the
+    # first time a target needs it, and once.
+    var std: Option[StdCtx] = None
+    for target in targets {
+      let loaded = load_target_unstd(target)
+      match syntax_failure_diags(loaded) {
+        Some(ds) -> { all = all ++ ds }
+        None -> {
+          let sc = match std {
+            Some(sc) -> sc
+            None -> load_or_die_lean(std_flag)
+          }
+          std = Some(sc)
+          let prog = analyze_program(loaded, sc, opts, jsig_refused())
+          all = all ++ rendered_diags(prog)
+        }
+      }
+    }
+  } else {
+    let std = load_or_die(std_flag)
+    for target in targets {
+      let loaded = load_target(std, target)
+      let prog = analyze_program(loaded, std, opts, jsig_refused())
+      all = all ++ rendered_diags(prog)
+    }
   }
   if len(all) > 0 { return fail_compile(all) }
   console_println("ok")
@@ -1092,7 +1123,7 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
     (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
   )
-  let std = load_or_die(std_flag)
+  let std = if std_tests { load_or_die(std_flag) } else { load_or_die_lean(std_flag) }
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
   let prog = if std_tests { Program { modules: [], diags: [], decl_spans: no_spans, ct_world: ct_world_empty() } } else { analyzed(std, target, opts) }
   # the modules whose test blocks are being run: the target's, or std's own
