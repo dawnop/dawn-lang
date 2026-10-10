@@ -2621,10 +2621,14 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
     CBreak(_) -> Chk { ..c, gone: true }
     CContinue(_) -> Chk { ..c, gone: true }
     CDup(inner, _) -> chk_expr(c, inner, false)
-    # a reset consumes its binding; a reuse consumes its token and builds the
-    # constructor as usual
+    # a reset consumes its binding; a reuse builds the constructor as usual
+    # and consumes its token last. That is the order the emitter runs in
+    # (emit_alloc evaluates the fields, then takes the token) and the order
+    # `rw` rewrote in: a field that returns, breaks or continues releases the
+    # still-held token on its way out, which only balances if the token is
+    # still held while the fields are walked (#632)
     CReset(inner, _) -> chk_expr(c, inner, true)
-    CReuse(tok, ctor, _) -> chk_walk(chk_expr(c, tok, true), ctor, k)
+    CReuse(tok, ctor, _) -> chk_expr(chk_walk(c, ctor, k), tok, true)
     CField(t, _, _, _, _) -> chk_expr(c, t, false)
     CTupleGet(t, _, _) -> chk_expr(c, t, false)
     CIsCtor(t, _, _) -> chk_expr(c, t, false)
@@ -3837,6 +3841,21 @@ test "a node released before a constructor of its type is reset and handed on" {
     CSLet(_, _, CReset(CLocal(1, _), _)) -> ()
     _ -> panic("expected the release to be a reset")
   }
+}
+
+test "a constructor field that returns releases the token it would have spent" {
+  # `R { a: if c { return w } else { 2 }, b: v.b }` after `v` died: the field
+  # runs before the token is spent, so the return drops a token still held
+  let rec = TyAdt(7, [])
+  let cond = CCall(CDirect("m", "c"), [], TyBool, CNoSite)
+  let v = CParam { sym: 1, ty: rec, mode: COwned }
+  let w = CParam { sym: 5, ty: rec, mode: COwned }
+  let read = CSLet(2, TyInt, CField(CLocal(1, rec), 7, 0, 0, TyInt))
+  let field = CIf(cond, CReturn(Some(CLocal(5, rec))), Some(CInt(2)), TyInt)
+  let body = CBlock([read], Some(CCtor(7, 0, [field, CLocal(2, TyInt)], rec)), rec)
+  let m = rc_module(one_fn([v, w], rec, body), owned_modes())
+  assert len(rc_check(m, owned_modes())) == 0
+  assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
 }
 
 test "a node of another type, or a constructor with no fields, is just dropped" {
