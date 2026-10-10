@@ -106,7 +106,8 @@ WEEK = timedelta(days=7)
 # The shards every run since 2026-09-11 has, which is what makes a run that
 # has all of them a run that ran the matrix. Knife T17 added tile-golden-7;
 # it is not listed, because a run from before it never had one and a run
-# after it that concluded success ran all seven anyway.
+# after it that concluded success ran all seven anyway. The eighth
+# (2026-10-10) is left out for the same reason.
 TILE_SHARDS = tuple(f"tile-golden-{i}" for i in range(1, 7))
 GATES = ".github/workflows/gates.yml"
 HERE = Path(__file__).resolve().parent
