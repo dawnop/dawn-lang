@@ -168,9 +168,11 @@ pub fn turn_with_flags[Mo, M](
 ## `init` splits the optional flags into `(retained, model)`. Only the model is
 ## passed to `encode` and `decode`; `update` and `view` receive the retained
 ## value separately, and `update` cannot return a replacement for it. The first
-## component of this function's answer is therefore an init-time replacement:
-## `Some` only after a successful `Init`, and `None` on every `Event` and every
-## refusal. `serve_with_state` is the sole place that commits that replacement.
+## component of this function's answer is therefore a replacement made by the
+## host's side of the protocol, never by the application's `update`: `Some`
+## after a successful `Init`, and after a `Supply` when the application passed
+## `absorbed` (below), and `None` on every `Event` and every refusal.
+## `serve_with_state` is the sole place that commits that replacement.
 ##
 ## The current state is explicit so this remains a pure function. Besides
 ## making each branch testable, that keeps retained state out of the request
@@ -184,9 +186,10 @@ pub fn turn_with_state[S, Mo, M](
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
   supplied: Option[fn(String, Result[String, String]) -> M] = None,
+  absorbed: Option[fn(S, String, Result[String, String]) -> S] = None,
 ) -> (Option[S], String) = {
   let (replacement, _shown, reply) =
-    turn_shown(line, state, None, init, encode, decode, update, view, supplied)
+    turn_shown(line, state, None, init, encode, decode, update, view, supplied, absorbed)
   (replacement, reply)
 }
 
@@ -240,6 +243,20 @@ pub type Shown[M] = { model: String, tree: Node[M] }
 ## to know which request this answers. With `None`, a `supply` is `bad-request`.
 ## The turn that answers a `supply` is otherwise an `event` turn: same fold,
 ## same diff, and it may itself command more fetches.
+##
+## `absorbed` is what a fetched resource adds to the retained state. The
+## retained state exists so that a large read-only value stays out of the model
+## text crossing the wire on every turn; a resource the guest fetched after
+## `init` is the same kind of value (the search panel's text fragments are
+## a hundred kilobytes it must keep and must not re-send per keystroke), and the
+## message `supplied` builds could only put it in the model. So a supply may
+## fold the outcome into a new retained state first. The function is total over
+## the outcome (an `Err` is an outcome too), it runs once per supply before the
+## message is folded, and its result is what `update` and `view` receive in
+## that very turn and every later one. It is not an `update` that returns a
+## replacement: the application's own messages still cannot touch the retained
+## state, only the host's answer to a request the application made can. A turn
+## that panics commits nothing, so a failing `absorbed` leaves the old state.
 pub fn turn_shown[S, Mo, M](
   line: String,
   state: Option[S],
@@ -250,6 +267,7 @@ pub fn turn_shown[S, Mo, M](
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
   supplied: Option[fn(String, Result[String, String]) -> M] = None,
+  absorbed: Option[fn(S, String, Result[String, String]) -> S] = None,
 ) -> (Option[S], Option[Shown[M]], String) =
   match decode_request(line) {
     Bad(reason) -> (None, None, reply_err("bad-request", reason))
@@ -286,17 +304,27 @@ pub fn turn_shown[S, Mo, M](
         (None, _) ->
           (None, None, reply_err("bad-request", "a `supply` needs a successful `init` first"))
         (_, None) -> (None, None, reply_err("bad-request", no_supply(tag)))
-        (Some(kept), Some(to_msg)) -> {
+        (Some(kept0), Some(to_msg)) -> {
           let m0 = decode(model)
-          folded(
+          # What the outcome adds to the retained state is in place before the
+          # message is folded, so `update` and `view` of this very turn see it.
+          let kept = match absorbed {
+            Some(absorb) -> absorb(kept0, tag, outcome)
+            None -> kept0
+          }
+          let (_, tree, reply) = folded(
             kept,
-            held_tree(kept, shown, model, m0, view),
+            held_tree(kept0, shown, model, m0, view),
             m0,
             to_msg(tag, outcome),
             encode,
             update,
             view,
           )
+          (match absorbed {
+            Some(_) -> Some(kept)
+            None -> None
+          }, tree, reply)
         }
       }
   }
@@ -438,6 +466,7 @@ pub fn serve_with_state[S, Mo, M](
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
   supplied: Option[fn(String, Result[String, String]) -> M] = None,
+  absorbed: Option[fn(S, String, Result[String, String]) -> S] = None,
 ) -> Unit !io =
   session.serve((live: Option[Live[S, M]], line: String) => {
     if str.trim(line) == "" {
@@ -456,7 +485,7 @@ pub fn serve_with_state[S, Mo, M](
           None -> None
         }
       let (replacement, next_shown, reply) =
-        turn_shown(line, state, shown, init, encode, decode, update, view, supplied)
+        turn_shown(line, state, shown, init, encode, decode, update, view, supplied, absorbed)
       (relive(live, replacement, next_shown), Some(reply))
     }
   }, e => reply_err("panic", e.message))

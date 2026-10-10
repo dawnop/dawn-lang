@@ -2,6 +2,23 @@
 
 Newest first.
 
+## 0.5.0 (2026-10-11)
+
+A fetched resource can join the retained state.
+
+- Guest: `reactor.turn_with_state`, `turn_shown` and `serve_with_state` take a
+  further trailing `absorbed: Option[fn(S, String, Result[String, String]) -> S]
+  = None`. On a `supply` it runs first, with the retained state, the tag and the
+  outcome, and its result is the state that `update` and `view` receive in that
+  turn and afterwards (the first component of the answer is `Some` for it, as it
+  is after an `init`). The application's own messages still cannot replace the
+  retained state; only the host's answer to a request it made can. Without it
+  nothing changes. Reason: a resource fetched after `init` is read-only data of
+  the same kind as the flags, and carrying it in the model would put it back on
+  the wire with every event.
+
+No wire change; JS hosts are untouched.
+
 ## 0.4.0 (2026-10-10)
 
 The host side of tea_core 0.2.0's `Fetch` command.
