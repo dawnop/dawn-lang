@@ -27,6 +27,7 @@ use c/infer.{ForcedMode}
 use ir/reach
 use ir/reach.{TableUse, Live}
 use c/emitc
+use c/quiet
 use c/emitc.{EmitMod}
 use c/cmap
 use ir/coresites
@@ -500,6 +501,25 @@ fn live(units: List[EmitMod], prog: Program, std_tests: Bool) -> Option[Live] = 
   Some(reach.live_set(reach_mods, reach_roots, reach.list_roots()))
 }
 
+## The functions whose frame needs no unwind cleanup (c/quiet). The variable
+## is a test-only channel for scripts/frame-contract, like
+## `DAWN_RC_MODE_FLIPS`: it names one way for the analysis to be wrong on
+## purpose, and unset it is the real analysis, so every real compile is the
+## byte-for-byte same as one without the channel.
+fn frame_quiet(units: List[EmitMod]) -> Set[String] !Env = {
+  let name = match io.getenv("DAWN_FRAME_QUIET_MUTANT") {
+    Some(s) -> s
+    None -> ""
+  }
+  let p = match quiet.policy_named(name) {
+    Some(p) -> p
+    None -> panic("DAWN_FRAME_QUIET_MUTANT: unknown mutant `" ++ name ++ "`")
+  }
+  var mods: List[CModule] = []
+  for u in units { mods = mods ++ [u.m] }
+  quiet.quiet_fns(mods, p)
+}
+
 fn tables(live: Option[Live]) -> TableUse =
   match live {
     None -> reach.all_tables()
@@ -514,7 +534,7 @@ pub(pkg) fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !Env = 
   let (units, entry, adts, modes) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
   let lv = live(units, prog, false)
-  Ok(emitc.emit_program(units, entry, tables(lv), lv, adts, modes))
+  Ok(emitc.emit_program(units, frame_quiet(units), entry, tables(lv), lv, adts, modes))
 }
 
 ## `c_text` plus its side table, for `--map` (docs/source-span-map-design.md
@@ -524,7 +544,7 @@ pub(pkg) fn c_text_mapped(std: StdCtx, prog: Program) -> Result[(String, String)
   let (units, entry, adts, modes) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
   let lv = live(units, prog, false)
-  let (text, rows, fns) = emitc.emit_program_mapped(units, entry, tables(lv), lv, adts, modes)
+  let (text, rows, fns) = emitc.emit_program_mapped(units, frame_quiet(units), entry, tables(lv), lv, adts, modes)
   var srcs: Map[String, String] = map.empty()
   var bases: Map[String, Map[String, Int]] = map.empty()
   for sm in std.mods {
@@ -607,7 +627,7 @@ pub(pkg) fn c_test_text(
 ) -> Result[String, String] !Env = {
   let (units, _entry, adts, modes) = build_units(std, prog, true, std_tests)
   let lv = live(units, prog, std_tests)
-  Ok(emitc.emit_headless(units, tables(lv), lv, adts, modes) ++
+  Ok(emitc.emit_headless(units, frame_quiet(units), tables(lv), lv, adts, modes) ++
       ctestrun.runner(tests))
 }
 

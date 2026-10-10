@@ -680,6 +680,14 @@ static inline void *dawn_take(void **slot) {
   DAWN_CLEANUP(dawn_own_drop) void *dawn_own[(n) + 1] = { (void *)(intptr_t)(n) }
 #endif
 
+/* The frame of a function the compiler has shown cannot be discarded by a
+ * raise (selfhost/src/c/quiet.dawn): the same array, since the slots live in
+ * it, but no cleanup and no shadow-stack registration. Nothing runs over it
+ * on any path, so a slot left set at exit would be a leak -- the discipline
+ * that makes the cleanup a no-op on ordinary exits is what makes this one
+ * safe, and DAWN_OWN_CHECK below is how a build asks whether it holds. */
+#define DAWN_QUIET_FRAME(n) void *dawn_own[(n) + 1] = { (void *)(intptr_t)(n) }
+
 /* The ordinary exit of a function that has a frame. By the discipline above
  * every slot is NULL by now, so the cleanup's scan has nothing to find; the
  * count is zeroed before the cleanup runs and the scan is dead on this path

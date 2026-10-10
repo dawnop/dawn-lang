@@ -1,0 +1,292 @@
+# Which functions can never be discarded by a raise, so their owned-slot frame
+# needs no unwind cleanup.
+#
+# A native frame carries one `dawn_own` array and a cleanup attribute that
+# releases whatever the slots still hold when a raise (a panic, a fault, the
+# discard of a one-shot continuation) discards the frame by forced unwind
+# (dawn_rt.h, "unwind cleanup"). The cleanup is the price of that guarantee on
+# every function, whether or not anything under it can raise: rbtree's `ins`
+# paid a registered frame of 24 slots per call, and the ablation that dropped
+# the attribute altogether was worth 30 to 35% of its wall clock
+# (research-koka-gap-20261011, 3.1). Dropping it everywhere is not an option,
+# since the guarantee is what makes a caught panic leak-free. Dropping it
+# where nothing can arrive is.
+#
+# A frame is discarded only by a raise that starts below it, or by the carrier
+# of a parked continuation being reclaimed while the frame is suspended in a
+# call. Both need the frame's function to be calling something that raises or
+# suspends. So a function is *quiet* when its body, and every function it can
+# reach through a direct call, contains none of:
+#
+#   * a call whose target is not statically known (a function value, a
+#     dictionary method, a default): it can be anything, effect operations and
+#     `resume` included;
+#   * an intrinsic: most are total, but "most" is the same sentence as "the
+#     ones that panic on a bad index, a bad code point, a missing file", and
+#     the table does not say which. Kept out until a measured case needs one;
+#   * Int `/` and `%` (division by zero panics), or any arithmetic or
+#     comparison on a type that is not Int, Float or Bool (a narrowed or
+#     opaque type may check its range, a string or record compare calls into
+#     the runtime);
+#   * `++` and list literals, which the emitter spells as `std/pvec` calls;
+#   * a direct call to a function that is not quiet, or that is not in the
+#     program at all.
+#
+# The answer is the greatest fixpoint, not the least: a recursive function
+# whose only calls are to itself is quiet, which is the rbtree case and the
+# reason a one-pass "no calls at all" test would have missed it. Running out of
+# stack is not a raise here: there is no handler (dawn_rt.h, the program's
+# stack), the process dies, and no cleanup would have run either.
+#
+# The analysis is conservative in one direction only. Calling a quiet function
+# quiet saves a scan; calling a raising one quiet leaks what its frame held on
+# the first caught panic. `DAWN_FRAME_QUIET_MUTANT` (cdriver.dawn) is the
+# test-only way to be wrong on purpose, so scripts/frame-contract can check
+# that the sanitizers notice.
+
+use std/map
+use std/set
+use check/types.{Ty, TyInt, TyFloat, TyBool, TyUnit, peel_opaque}
+use ir/core.{
+  CModule, CExpr, CStmt, CSite, CAt, CNoSite,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic, CCtor,
+  CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg, CTuple,
+  CTupleGet, CBox, CUnbox, CBinary, CUnary, CIf, CBlock, CListLit, CConstRef,
+  CComptime, CReturn, CBreak, CContinue, CForeign, CDup, CReset, CReuse, CUpdate,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault,
+  CDiv, CMod, CAnd, COr, CConcat, cex_ty
+}
+
+## The ways to misjudge on purpose; each one is a source of raising the
+## analysis normally respects and the mutant stops respecting.
+pub type Policy = {
+  # intrinsics (panic among them) count as quiet
+  intrinsics: Bool,
+  # calls through function values, dictionaries and defaults count as quiet
+  dynamic: Bool,
+  # a direct call to a raising function does not make the caller raise
+  callees: Bool,
+  # Int `/` and `%` count as quiet
+  division: Bool
+}
+
+pub fn strict() -> Policy =
+  Policy { intrinsics: false, dynamic: false, callees: false, division: false }
+
+## `""` is the real analysis; the others are the mutants the harness names.
+pub fn policy_named(name: String) -> Option[Policy] =
+  match name {
+    "" -> Some(strict())
+    "intrinsics" -> Some(Policy { ..strict(), intrinsics: true })
+    "dynamic" -> Some(Policy { ..strict(), dynamic: true })
+    "callees" -> Some(Policy { ..strict(), callees: true })
+    "division" -> Some(Policy { ..strict(), division: true })
+    _ -> None
+  }
+
+pub fn key(owner: String, name: String) -> String = owner ++ "\n" ++ name
+
+# What one function body says: whether it holds a raiser itself, and which
+# named functions it calls.
+type Facts = { loud: Bool, calls: List[String] }
+
+fn join_facts(a: Facts, b: Facts) -> Facts =
+  Facts { loud: a.loud || b.loud, calls: a.calls ++ b.calls }
+
+fn none() -> Facts = Facts { loud: false, calls: [] }
+
+fn loud_fact() -> Facts = Facts { loud: true, calls: [] }
+
+fn scalar_ty(t: Ty) -> Bool =
+  match peel_opaque(t) {
+    TyInt -> true
+    TyFloat -> true
+    TyBool -> true
+    TyUnit -> true
+    _ -> false
+  }
+
+## `null_ref` is the zero of a reference type, the placeholder lowering binds
+## ahead of a branch that assigns it; the C is the literal NULL. The only
+## intrinsic admitted by name: see the list above for why the rest are not.
+
+## The panic `lower` writes at the end of a match whose arms the checker has
+## already shown to cover every value (ir/lower.dawn, the "unreachable match"
+## fallthrough). It is in nearly every function that matches, and it can never
+## run, so counting it as a raiser would keep every such function framed. The
+## test is the whole shape: the message, and no source site. A panic the user
+## wrote carries the site it was written at, whatever it says.
+fn is_unreachable_arm(name: String, args: List[CExpr], site: CSite) -> Bool =
+  match site {
+    CAt(_, _, _) -> false
+    CNoSite ->
+      name == "panic" && (match args {
+        [CStr(msg)] -> msg == "unreachable match"
+        _ -> false
+      })
+  }
+
+fn walk_all(p: Policy, es: List[CExpr]) -> Facts = {
+  var acc = none()
+  for e in es { acc = join_facts(acc, walk(p, e)) }
+  acc
+}
+
+fn walk_opt(p: Policy, e: Option[CExpr]) -> Facts =
+  match e {
+    Some(x) -> walk(p, x)
+    None -> none()
+  }
+
+fn walk_stmt(p: Policy, s: CStmt) -> Facts =
+  match s {
+    CSLet(_, _, init) -> walk(p, init)
+    CSAssign(_, value) -> walk(p, value)
+    CSDiscard(e) -> walk(p, e)
+    CSLoop(_, body, step) -> join_facts(walk(p, body), walk_opt(p, step))
+    CSIf(cond, thn, els) -> join_facts(join_facts(walk(p, cond), walk(p, thn)), walk_opt(p, els))
+    CSDrop(_) -> none()
+  }
+
+fn walk(p: Policy, e: CExpr) -> Facts =
+  match e {
+    CInt(_) -> none()
+    CFloat(_) -> none()
+    CBool(_) -> none()
+    CStr(_) -> none()
+    CUnit -> none()
+    CLocal(_, _) -> none()
+    CFnRef(_, _, _) -> none()
+    CCall(callee, args, _, _) -> {
+      let a = walk_all(p, args)
+      match callee {
+        CDirect(owner, name) -> join_facts(a, Facts { loud: false, calls: [key(owner, name)] })
+        CDynamic(target) ->
+          join_facts(a, if p.dynamic { walk(p, target) } else { loud_fact() })
+        CMethod(dict, _, _, _, _) ->
+          join_facts(a, if p.dynamic { walk(p, dict) } else { loud_fact() })
+        CImpl(_, _, _, _) -> if p.dynamic { a } else { loud_fact() }
+        CDefault(_, _, _) -> if p.dynamic { a } else { loud_fact() }
+      }
+    }
+    CIntrinsic(name, args, _, site) ->
+      if p.intrinsics || name == "null_ref" || is_unreachable_arm(name, args, site) {
+        walk_all(p, args)
+      } else {
+        join_facts(walk_all(p, args), loud_fact())
+      }
+    CCtor(_, _, args, _) -> walk_all(p, args)
+    CUpdate(base, _, _, fields, _) -> {
+      var acc = walk(p, base)
+      for f in fields { acc = join_facts(acc, walk_opt(p, f.value)) }
+      acc
+    }
+    CField(target, _, _, _, _) -> walk(p, target)
+    CIsCtor(target, _, _) -> walk(p, target)
+    CTagOf(target, _) -> walk(p, target)
+    CClosure(_, _, captures, _) -> walk_all(p, captures)
+    CDictRef(_, _, _, _) -> none()
+    CDictApply(_, args, _) -> walk_all(p, args)
+    CDictArg(dict, _, _, _, _) -> walk(p, dict)
+    CTuple(elems, _) -> walk_all(p, elems)
+    CTupleGet(target, _, _) -> walk(p, target)
+    CBox(inner, _) -> walk(p, inner)
+    CUnbox(inner, _) -> walk(p, inner)
+    CBinary(op, left, right, _) -> {
+      let operands = join_facts(walk(p, left), walk(p, right))
+      let own =
+        match op {
+          CAnd -> false
+          COr -> false
+          CConcat -> true
+          CDiv -> not (scalar_ty(cex_ty(left)) && (p.division || peel_opaque(cex_ty(left)) != TyInt))
+          CMod -> not (scalar_ty(cex_ty(left)) && (p.division || peel_opaque(cex_ty(left)) != TyInt))
+          _ -> not scalar_ty(cex_ty(left))
+        }
+      if own { Facts { ..operands, loud: true } } else { operands }
+    }
+    CUnary(_, operand, _) -> walk(p, operand)
+    CIf(cond, thn, els, _) -> join_facts(join_facts(walk(p, cond), walk(p, thn)), walk_opt(p, els))
+    CBlock(stmts, tail, _) -> {
+      var acc = walk_opt(p, tail)
+      for s in stmts { acc = join_facts(acc, walk_stmt(p, s)) }
+      acc
+    }
+    CListLit(_, _) -> loud_fact()
+    CConstRef(_, _, ty) -> if scalar_ty(ty) { none() } else { loud_fact() }
+    CComptime(_, _, ty) -> if scalar_ty(ty) { none() } else { loud_fact() }
+    CReturn(v) -> walk_opt(p, v)
+    CBreak(_) -> none()
+    CContinue(_) -> none()
+    CForeign(_, _, _) -> loud_fact()
+    CDup(inner, _) -> walk(p, inner)
+    CReset(inner, _) -> walk(p, inner)
+    CReuse(tok, ctor, _) -> join_facts(walk(p, tok), walk(p, ctor))
+  }
+
+## The quiet functions of a program, as `key(owner, name)`. One name can be
+## several functions (a trait impl method shares its owner and name with its
+## siblings); the name is quiet only if all of them are, because a call site
+## names the pair and nothing finer.
+pub fn quiet_fns(mods: List[CModule], p: Policy) -> Set[String] = {
+  var loud: Set[String] = set.empty()
+  var calls: Map[String, List[String]] = map.empty()
+  var names: List[String] = []
+  for m in mods {
+    for f in m.fns {
+      let k = key(f.owner, f.name)
+      let facts = walk(p, f.body)
+      match map.get(calls, k) {
+        Some(prev) -> { calls = map.insert(calls, k, prev ++ facts.calls) }
+        None -> {
+          names = names ++ [k]
+          calls = map.insert(calls, k, facts.calls)
+        }
+      }
+      if facts.loud { loud = set.insert(loud, k) }
+    }
+  }
+  # callers by callee, for the propagation below; an edge to a name that is
+  # not a function of the program is a raiser, since nothing is known of it
+  var callers: Map[String, List[String]] = map.empty()
+  var work: List[String] = []
+  for k in names {
+    if set.has(loud, k) { work = work ++ [k] }
+    for c in map.get(calls, k).expect("calls row") {
+      if p.callees { continue }
+      if not map.has(calls, c) {
+        if not set.has(loud, k) {
+          loud = set.insert(loud, k)
+          work = work ++ [k]
+        }
+      } else {
+        let prev = match map.get(callers, c) {
+          Some(l) -> l
+          None -> []
+        }
+        callers = map.insert(callers, c, prev ++ [k])
+      }
+    }
+  }
+  var i = 0
+  while i < len(work) {
+    let k = work[i]
+    i = i + 1
+    let ups = match map.get(callers, k) {
+      Some(l) -> l
+      None -> []
+    }
+    for caller in ups {
+      if not set.has(loud, caller) {
+        loud = set.insert(loud, caller)
+        work = work ++ [caller]
+      }
+    }
+  }
+  var quiet: Set[String] = set.empty()
+  for k in names {
+    if not set.has(loud, k) { quiet = set.insert(quiet, k) }
+  }
+  quiet
+}
