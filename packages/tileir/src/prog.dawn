@@ -23,7 +23,7 @@ use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, with_gpu_fake, reference_
 use std/gpu
 use std/dtype.{F64, I64, Dtype, dtype_name}
 use std/int/i32.{I32}
-use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, assume_div_by,
+use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, d_assert, d_print, memory_fence_alias, gdc_wait, gdc_launch_dependents, assume_div_by,
   assume_same_elements, assume_in_range, param, block_id, tile_at, load, store, gather, scatter, atomic_rmw, atomic_add,
   atomic_cas, add, mul, f_const, i_const, lanes, lt_i, idx_const, idx_add, idx_mul, idx_eq, d_range, By, d_loop, Carry, carry, get, set,
   d_reduce, d_if, max, gt, d_global, global_ptrs, load_ptrs, store_ptrs, ptr_offset, ptrs, int_to_ptr, ptr_to_int,
@@ -192,6 +192,7 @@ pub type TileOp =
   | Assert(shape: List[Int], cond: Int, message: String)
   | Assume(dst: Int, pred: AssumePred, dtype: String, shape: List[Int], src: Int)
   | Print(tok_out: Int, fmt: String, dtype: String, shape: List[Int], args: List[Int], tok_in: Int)
+  | TokenOnly(tok_out: Int, op: String, tok_in: Int)
   | StoreAt(tok_out: Int, dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int], tok_in: Int)
   | GetGlobal(dst: Int, sym: String, dtype: String, shape: List[Int])
   | Alloca(dst: Int, dtype: String, num_elem: Int, align: Int, shared: Bool, shape: List[Int])
@@ -757,6 +758,13 @@ fn check_assume(name: String, pred: AssumePred, shape: List[Int]) -> Unit = matc
   }
 }
 
+# The three operations that take the ordering token and answer the next and
+# nothing else (knife T19, bytecode 13.4): the alias proxy fence and the two
+# programmatic-dependent-launch signals. They share a record because their
+# shape is the same; the name is the dialect's own, and `t_token_only` refuses
+# any other.
+const TOKEN_ONLY_OPS: List[String] = ["memory_fence_alias_tko", "gdc_launch_dependents_tko", "gdc_wait_tko"]
+
 # How many format expressions `fmt` holds, by PrintTkoOp's own rule
 # (CudaTile.cpp's `extractFormatExpression`): a `%` runs to the first
 # conversion character, `%%` is an escaped percent and takes no operand, and
@@ -1297,6 +1305,7 @@ fn tok_step(op: TileOp) -> Option[(Int, List[Int])] = match op {
   LoadAt(_d, t, _dt, _s, _ps, _m, _pd, ti) -> Some((t, [ti]))
   StoreAt(t, _dt, _s, _ps, _v, _m, ti) -> Some((t, [ti]))
   Print(t, _f, _dt, _s, _a, ti) -> Some((t, [ti]))
+  TokenOnly(t, _op, ti) -> Some((t, [ti]))
   AtomicRedViewOf(t, _dt, _v, _ix, _mode, _scope, _val, ti) -> Some((t, [ti]))
   LoadView(_d, t, _dt, _v, _ix, ti, _ib) -> Some((t, [ti]))
   StoreView(t, _dt, _v, _ix, _val, ti, _ib) -> Some((t, [ti]))
@@ -3604,6 +3613,23 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         tok = tv
         ()
       }
+      t_token_only(op) => {
+        if not list.contains(TOKEN_ONLY_OPS, op) {
+          refuse(name, "`${op}` is not one of the token-only operations: ${join(TOKEN_ONLY_OPS, ", ")}")
+        } else {
+          ()
+        }
+        if list.any(frames, is_pure_region) {
+          refuse(name, "`${op}` inside a reduce, scan or if region has no memory order")
+        } else {
+          ()
+        }
+        let tv = next
+        next = mint(name, next, 1)
+        ops = ops ++ [TokenOnly(tv, op, tok)]
+        tok = tv
+        ()
+      }
       t_store_ptrs(dtype, shape, ptrs, value0, mask0) => {
         let (g0, value) = widen(name, frames, grown(next, ops, held, spreads, pending), value0, dtype, shape)
         let (g, mask) = widen_opt(name, frames, g0, mask0, "i1", shape)
@@ -4297,6 +4323,7 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   Assert(_shape, _cond, _message) -> []
   Assume(dst, _pred, _dtype, _shape, _src) -> [dst]
   Print(tok_out, _fmt, _dtype, _shape, _args, _tok_in) -> [tok_out]
+  TokenOnly(tok_out, _op, _tok_in) -> [tok_out]
   StoreAt(tok_out, _dtype, _shape, _ptrs, _value, _mask, _tok_in) -> [tok_out]
   GetGlobal(dst, _sym, _dtype, _shape) -> [dst]
   Alloca(dst, _dtype, _num_elem, _align, _shared, _shape) -> [dst]
@@ -4954,6 +4981,71 @@ test "a print whose format expressions do not count its operands, and an assume 
   match inside {
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a print inside a reduce, scan or if region has no memory order") }
+  }
+}
+
+test "the fence and the two gdc signals sit in the token chain between two stores, one record each" {
+  let prog = trace_kernel("fences", [ByPtr("i32"), ByPtr("i32")], () => {
+    let x = param(I32, 0)
+    let out = param(I32, 1)
+    gdc_wait()
+    let v = load(x, idx_const(0), [8])
+    store(out, idx_const(0), v)
+    memory_fence_alias()
+    store(out, idx_const(1), v)
+    gdc_launch_dependents()
+  })
+  let named = list.filter(prog.ops, op => match op {
+    TokenOnly(_t, _op, _ti) -> true
+    _ -> false
+  })
+  assert len(named) == 3
+  assert match named[0] {
+    TokenOnly(_t, op, _ti) -> op == "gdc_wait_tko"
+    _ -> false
+  }
+  assert match named[1] {
+    TokenOnly(_t, op, _ti) -> op == "memory_fence_alias_tko"
+    _ -> false
+  }
+  assert match named[2] {
+    TokenOnly(_t, op, _ti) -> op == "gdc_launch_dependents_tko"
+    _ -> false
+  }
+  # each takes the token the operation before it answered and answers the
+  # next: the wait takes the entry's, the load the wait's, the first store the
+  # load's, the fence the first store's, the second store the fence's, the launch the second's
+  let steps = list.filter(list.map(prog.ops, tok_step), o => o != None)
+  assert len(steps) == 6
+  let outs = list.map(steps, o => match o {
+    Some((out, _ins)) -> out
+    None -> 0 - 1
+  })
+  let ins = list.map(steps, o => match o {
+    Some((_out, xs)) -> xs[0]
+    None -> 0 - 1
+  })
+  assert ins[0] == 0
+  assert list.all(range(1, 6), i => ins[i] == outs[i - 1])
+}
+
+test "a fence or a gdc signal inside a reduce or an if region is refused, and so is a name outside the three" {
+  let in_reduce = catch_panic(() => trace_kernel("bad_fence", [ByPtr("f64")], () => {
+    let x = param(F64, 0)
+    let _r = d_reduce(load(x, idx_const(0), [8]), 0.0, (acc, e) => {
+      memory_fence_alias()
+      add(acc, e)
+    })
+    ()
+  }))
+  match in_reduce {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "`memory_fence_alias_tko` inside a reduce, scan or if region has no memory order") }
+  }
+  let unknown = catch_panic(() => trace_kernel("bad_name", [ByPtr("f64")], () => t_token_only("gdc_wait")))
+  match unknown {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "`gdc_wait` is not one of the token-only operations: memory_fence_alias_tko, gdc_launch_dependents_tko, gdc_wait_tko") }
   }
 }
 

@@ -50,7 +50,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, NoPadding, padding_present, padding_name}
-use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
+use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, TokenOnly, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -220,6 +220,10 @@ derive Show
 ## which is why each carries both its operand type and its result type and
 ## nothing else.
 ##
+## `TokenOnlyTile` is knife T19's: the alias fence and the two `gdc_*`
+## signals, which take a token, define the next and have no operand or
+## attribute of their own.
+##
 ## `AssertTile`, `AssumeTile` and `PrintTile` are knife T6's three.
 ## `AssertTile` defines nothing and takes the rank-1 or rank-0 `i1` tile
 ## its `cond_ty` names. `AssumeTile` defines a value of the SAME type as
@@ -292,6 +296,7 @@ pub type Instr =
   | AssertTile(cond: Ref, cond_ty: Ty, message: String)
   | AssumeTile(dst: Int, src: Ref, pred: AssumePred, ty: Ty)
   | PrintTile(tok_out: Int, fmt: String, args: List[Ref], arg_ty: Ty, tok_in: Ref)
+  | TokenOnlyTile(tok_out: Int, op: String, tok_in: Ref)
   | GetGlobalPtr(dst: Int, sym: String, ty: Ty)
   | AllocaPtr(dst: Int, num_elem: Int, align: Int, shared: Bool, ty: Ty)
   | MakeTensorView(dst: Int, base: Ref, base_ty: Ty, ty: Ty, dyn_shape: List[Ref],
@@ -1114,6 +1119,11 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     let (l1, tv) = define(l0, tok_out, Token)
     emit(l1, PrintTile(tv, fmt, refs, num_tile(shape, dtype), tin))
   }
+  TokenOnly(tok_out, op, tok_in) -> {
+    let tin = ref_of(l0, tok_in, "${op} token")
+    let (l1, tv) = define(l0, tok_out, Token)
+    emit(l1, TokenOnlyTile(tv, op, tin))
+  }
   StoreAt(tok_out, dtype, shape, ptrs, value, mask, tok_in) -> {
     let tin = ref_of(l0, tok_in, "store token")
     let m = opt_ref(l0, mask, "store mask")
@@ -1617,6 +1627,7 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   AssertTile(_cond, _cond_ty, _message) -> []
   AssumeTile(dst, _src, _pred, _ty) -> [dst]
   PrintTile(tok_out, _fmt, _args, _arg_ty, _tok_in) -> [tok_out]
+  TokenOnlyTile(tok_out, _op, _tok_in) -> [tok_out]
   GetGlobalPtr(dst, _sym, _ty) -> [dst]
   AllocaPtr(dst, _num_elem, _align, _shared, _ty) -> [dst]
   MakeTensorView(dst, _base, _base_ty, _ty, _dyn_shape, _dyn_strides, _dyn_ty) -> [dst]

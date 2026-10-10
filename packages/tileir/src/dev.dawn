@@ -749,6 +749,7 @@ pub effect Dev {
   fn t_assert(shape: List[Int], cond: Int, message: String) -> Unit
   fn t_assume(pred: AssumePred, dtype: String, shape: List[Int], src: Int) -> Int
   fn t_print(fmt: String, dtype: String, shape: List[Int], args: List[Int]) -> Unit
+  fn t_token_only(op: String) -> Unit
   fn t_store_ptrs(dtype: String, shape: List[Int], ptrs: Int, value: Int, mask: Option[Int]) -> Unit
   fn t_global(sym: String, dtype: String, values: List[Float], align: Int, is_private: Bool, constant: Bool) -> Unit
   fn t_get_global(sym: String, dtype: String, shape: List[Int]) -> Int
@@ -3563,6 +3564,35 @@ pub fn d_print[D](fmt: String, args: List[Tile[D]]) -> Unit !Dev = called("d_pri
   t_print(fmt, dt, none, hs)
 })
 
+## The alias proxy fence (`memory_fence_alias_tko`, bytecode 13.4). Along the
+## token chain it makes every earlier access that reaches the same physical
+## memory through a different virtual alias complete before anything after
+## it. It answers nothing: like `d_print` it takes the ordering token as it
+## stands and puts the next in its place, so it sits in the chain with the
+## loads and stores around it. Refused in a reduce, scan or `if` region for
+## the reason `d_print` is.
+pub fn memory_fence_alias() -> Unit !Dev = called("memory_fence_alias", () => {
+  t_token_only("memory_fence_alias_tko")
+})
+
+## Tell the grid's dependent kernel it may be scheduled (`gdc_launch_dependents_tko`,
+## Programmatic Dependent Launch, bytecode 13.4). Grid-wide: every block must
+## execute it, or finish, before the dependent is scheduled. It controls
+## scheduling only and orders no memory. On a target below sm_90 it is a
+## no-op, and so it is on any target when the kernel was not launched with
+## the programmatic stream serialization attribute, which std/gpu's launch
+## does not set.
+pub fn gdc_launch_dependents() -> Unit !Dev = called("gdc_launch_dependents", () => {
+  t_token_only("gdc_launch_dependents_tko")
+})
+
+## Wait for the predecessor kernel to complete (`gdc_wait_tko`): every store
+## it made is visible after this. The pair of `gdc_launch_dependents`, with
+## the same two no-op conditions.
+pub fn gdc_wait() -> Unit !Dev = called("gdc_wait", () => {
+  t_token_only("gdc_wait_tko")
+})
+
 # ---- cells, the named reductions and broadcast (the batch's PR-1 and PR-3) ----
 #
 # docs/tile-backend-design.md 6.25 and 6.26. What these functions have in
@@ -4066,6 +4096,7 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_print(_fmt, _dtype, _shape, _args) => ()
+    t_token_only(_op) => ()
     t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
     t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
     t_get_global(_sym, _dtype, _shape) => {
@@ -4506,6 +4537,10 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
       log = log ++ ["print ${fmt} ${dtype} ${show(shape)} ${show(args)}"]
       ()
     }
+    t_token_only(op) => {
+      log = log ++ ["token_only ${op}"]
+      ()
+    }
     t_store_ptrs(dtype, shape, ptrs, value, mask) => {
       log = log ++ ["store_ptrs ${dtype} ${show(shape)} ${ptrs} ${value} ${opt(mask)}"]
     }
@@ -4622,6 +4657,17 @@ test "insert reads the subtile's shape and the whole tile's off its operands; po
   # operands are whichever load came last; prog.dawn's refusal of an i64
   # exponent is where the pairing is held
   assert list.any(seen, l => str.starts_with(l, "powi ") && str.ends_with(l, " [16, 8] 1 1"))
+}
+
+fn t19_surface() -> Unit !Dev = {
+  gdc_wait()
+  memory_fence_alias()
+  gdc_launch_dependents()
+}
+
+test "the knife T19 surface hands the handler the dialect's own name of each token-only operation, and nothing else" {
+  let seen = logged(t19_surface)
+  assert seen == ["token_only gdc_wait_tko", "token_only memory_fence_alias_tko", "token_only gdc_launch_dependents_tko"]
 }
 
 fn t17_surface() -> Unit !Dev = {
@@ -5185,6 +5231,7 @@ test "d_range hands the body the carried handle and passes its answer back as th
       t_assert(_shape, _cond, _message) => ()
       t_assume(_pred, _dtype, _shape, _src) => 76
       t_print(_fmt, _dtype, _shape, _args) => ()
+      t_token_only(_op) => ()
       t_store_ptrs(_dtype, _shape, _ptrs, _value, _mask) => ()
       t_global(_sym, _dtype, _values, _align, _is_private, _constant) => ()
       t_get_global(_sym, _dtype, _shape) => 77

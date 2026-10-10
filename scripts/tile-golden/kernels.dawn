@@ -24,7 +24,8 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   or_i, xor_i, shl_i, shr_i, lt_i, shr_u, neg_i, abs_i, int_to_float, float_to_int, mask_to_int, int_to_mask,
   bits_to_float, bits_to_int, float_to_float, ext_u8, trunc_u8, mmai, d_return_if, pack_bytes, unpack_bytes, ext_i4,
   ext_u4, trunc_i4, arange, d_assert, d_print, assume_div_by, assume_same_elements, assume_in_range, d_scan, d_scan2,
-  erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, scalar, d_fork2, insert, powi, ptrs,
+  erf, sin, cos, tan, sinh, cosh, atan2, remf, extract, cat, permute_tile, num_blocks, scalar, d_fork2, insert, powi,
+  memory_fence_alias, gdc_wait, gdc_launch_dependents, ptrs,
   ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64, d_global, Visibility,
   global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, shli, shri, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
   gt_u, ge_u, atomic_rmw, Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy,
@@ -4866,6 +4867,27 @@ fn powi_sweep(x: Param[Float], n: Param[I32], out: Param[Float]) -> Unit !Dev = 
   store_sub(out, [1], powi(tx, trunc_u8(tn)))
 }
 
+# ---- knife T19: `memory_fence_alias_tko` (0x7A), `gdc_wait_tko` (0x78) and
+# `gdc_launch_dependents_tko` (0x77), bytecode 13.4 ----
+
+# The three token-only operations in one kernel, each in the chain it would
+# sit in: a `gdc_wait` first (the predecessor's stores are visible after it),
+# a block's chunk stored, an alias fence, the chunk read back from the same
+# buffer and added to the input, and a `gdc_launch_dependents` last. The
+# answer is the input doubled, which holds only if the load after the fence is
+# ordered after the store before it. That is the chain's job rather than the
+# fence's: the two `gdc_*` are no-ops below sm_90 and the fence orders nothing
+# a plain token edge did not (docs/tile-backend-design.md 6.33).
+fn token_fences(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 128)
+  gdc_wait()
+  let lx = load(x, base, [128])
+  store(out, base, lx)
+  memory_fence_alias()
+  store(out, base, load(out, base, [128]) + lx)
+  gdc_launch_dependents()
+}
+
 # ---- the markers ----
 #
 # Since the batch's PR-3 every kernel is recorded through `trace1` to
@@ -5708,6 +5730,10 @@ fn trace(name: String) -> TileProg = match name {
     let (p, _e) = trace2("insert_tile", In(F64, Whole), Out(F64, cells([DYN_DIM, 8], [32, 8])), insert_tile)
     p
   }
+  "token_fences" -> {
+    let (p, _e) = trace2("token_fences", In(F64, Whole), Shared(F64), token_fences)
+    p
+  }
   "powi_sweep" -> {
     let (p, _e) = trace3("powi_sweep",
       In(F64, run_of(128)), In(I32, run_of(128)), Out(F64, run_of(256)), powi_sweep)
@@ -6054,7 +6080,7 @@ pub fn main() -> Unit !io = match args() {
       ++ "|ols_gram|ols_elim|ols_beta"
       ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
       ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
-      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep"
+      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep|token_fences"
       ++ "|loop_count|loop_bound|loop_until|loop_none|loop_return"
       ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
       ++ "|attr_sat|attr_ftof|attr_xchg"
