@@ -197,6 +197,7 @@ fn lex_go(
         comments = comments ++ [tok(COMMENT, ctext, off(s, i0), off(s, e))]
       }
     } else if c == '"' || c == '`' || c == '\'' {
+      let i0 = i
       let r = if c == '"' {
         lex_string(s, i)
       } else if c == '`' {
@@ -216,6 +217,13 @@ fn lex_go(
           diags = diags ++ [d]
           i = fi
           while i < s.n && s.cps[i] != '\n' { i = i + 1 }
+          # the failed literal still stands in the token stream, covering the
+          # text up to the end of its line and carrying no segments: dropping
+          # it let the newline after a preceding `=` be read as a continuation
+          # and swallow the next declaration (#676)
+          if c == '"' || c == '`' {
+            toks = toks ++ [str_tok(s, i0, i, [])]
+          }
         }
       }
     } else if char_is_digit(c) {
@@ -1271,7 +1279,18 @@ test "interpolation skips nested strings" {
 test "unterminated string recovers at end of line" {
   let (toks, ds) = lex("\"abc\nx")
   assert ds[0].msg == "unterminated string"
-  assert kinds("\"abc\nx") == ["IDENT", "NEWLINE", "EOF"]
+  # the string stays in the stream, so the statement still ends at the line
+  assert kinds("\"abc\nx") == ["STRING", "NEWLINE", "IDENT", "NEWLINE", "EOF"]
+}
+
+test "an unclosed interpolation after `=` does not swallow the next line (#676)" {
+  let src = "a =\n  \"v \${x\ntest \"t\" {\n}\n"
+  let (_, ds) = lex(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "interpolation cannot span lines"
+  assert kinds(src) == [
+    "IDENT", "EQ", "STRING", "NEWLINE", "IDENT", "STRING", "LBRACE", "RBRACE", "NEWLINE", "EOF"
+  ]
 }
 
 test "an interpolation missing its brace is the error, not the string (#191)" {
