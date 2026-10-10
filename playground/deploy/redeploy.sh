@@ -284,7 +284,37 @@ echo "=== done ==="
 # endpoints moved off the site's origin (docs/site-cdn-design.md).
 # Overridable for a deployment elsewhere.
 if [ "$PLAY_NATIVE" != 0 ]; then
-  echo "native canary is up on /run/dawn-play/http.sock and passed; nginx still routes to the JVM runner."
-  echo "to route to it: playground/deploy/nginx-switch.sh native (prints the config; apply by hand)."
+  echo "native canary is up on /run/dawn-play/http.sock and passed."
+fi
+
+# Which runner nginx sends /api/run to is the server's configuration, changed
+# by hand (nginx-switch.sh only prints), so it is read, never assumed: this
+# line used to say "nginx still routes to the JVM runner" after every deploy,
+# and was wrong once the switch had been made (#682). Read-only: the
+# effective config (`nginx -T`, which needs root) or else the files under
+# /etc/nginx, reduced to the proxy_pass target of the /api/run location. The
+# `: nginx-routing` no-op is a marker for the contract test's ssh stub. Any
+# failure here is "cannot tell", never a failed deploy.
+# shellcheck disable=SC2016
+REMOTE_ROUTING=': nginx-routing
+  { sudo -n nginx -T 2>/dev/null || cat $(find /etc/nginx -type f 2>/dev/null) 2>/dev/null; } |
+  awk "
+    /^[ \t]*#/ { next }
+    /location[^{]*\/api\/run[ \t]*\{/ { inloc = 1; next }
+    /^[ \t]*location[ \t]/ { inloc = 0 }
+    inloc && /proxy_pass/ { t = \$0; sub(/^.*proxy_pass[ \t]+/, \"\", t); sub(/;.*/, \"\", t); print t; inloc = 0 }
+  "
+'
+# shellcheck disable=SC2029
+ROUTING_TARGETS=$(ssh "$HOST" "$REMOTE_ROUTING" 2>/dev/null | sed '/^$/d' | sort -u || true)
+case "$ROUTING_TARGETS" in
+  http://unix:*) ROUTING_LINE="nginx routes /api/run to the native runner ($ROUTING_TARGETS)." ;;
+  http://127.0.0.1:8087/*|http://localhost:8087/*) ROUTING_LINE="nginx routes /api/run to the JVM runner ($ROUTING_TARGETS)." ;;
+  "") ROUTING_LINE="cannot tell which runner nginx routes /api/run to: no proxy_pass found (config unreadable?). Check the server's nginx config." ;;
+  *) ROUTING_LINE="cannot tell which runner nginx routes /api/run to: unrecognised upstream(s): $(printf '%s' "$ROUTING_TARGETS" | tr '\n' ' '). Check the server's nginx config." ;;
+esac
+echo "$ROUTING_LINE"
+if [ "$PLAY_NATIVE" != 0 ]; then
+  echo "to route to the native runner: playground/deploy/nginx-switch.sh native (prints the config; apply by hand)."
 fi
 echo "verify: curl ${PLAY_HEALTH_URL:-https://play.dawnop.com/api/health}"

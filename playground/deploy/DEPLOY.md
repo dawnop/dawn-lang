@@ -265,6 +265,10 @@ prints the file as it is, which is what is live. Apply by hand, then
 `nginx -t && nginx -s reload`. Rolling back is the other direction; the JVM unit
 stays enabled throughout.
 
+redeploy.sh ends by reading, over its ssh session and read-only, which
+upstream the live nginx config gives `/api/run` and prints it (JVM, native, or
+"cannot tell" when the config is unreadable or the target is not one of the two).
+
 Watch while canarying: `journalctl -u 'dawn-play-native@*'` (one access line per
 request on stderr, and the `429` waits of the flock gate) and
 `systemctl status dawn-play-native.socket`.

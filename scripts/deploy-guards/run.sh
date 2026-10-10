@@ -46,6 +46,13 @@ printf '%s %s\n' "$(basename "$0")" "$*" >>"$STUB_LOG"
 if [ -n "${SSH_FAIL:-}" ] && printf '%s' "$*" | grep -q -- "$SSH_FAIL"; then
   exit 1
 fi
+# The routing read (redeploy.sh REMOTE_ROUTING, marked by `: nginx-routing`)
+# gets what the stubbed server's nginx would print: $STUB_ROUTING is the
+# proxy_pass target of its /api/run location, or unset when it has none.
+if [ "$(basename "$0")" = ssh ] && [ -n "${STUB_ROUTING:-}" ] &&
+    printf '%s' "$*" | grep -q -- ': nginx-routing'; then
+  printf '%s\n' "$STUB_ROUTING"
+fi
 exit 0
 SH
   chmod +x "$shims/$t"
@@ -207,6 +214,30 @@ c_p_canary() {
 c_p_native_off() { mkrepo play; GOODNATIVE; rm "$work/dawn-play"; deploy play DAWN_PLAY_NATIVE=0; shipped; }
 c_p_green()      { mkrepo play; GOODNATIVE; deploy play; shipped && grep -q 'canary-check' "$LOG"; }
 
+# The routing line is read from the server, not assumed (#682). The stub prints
+# the /api/run proxy_pass target; the deploy must say what it is.
+c_p_route_jvm() {
+  mkrepo play; GOODNATIVE; deploy play STUB_ROUTING=http://127.0.0.1:8087/run
+  shipped && grep -q 'nginx routes /api/run to the JVM runner' "$OUT" && ! grep -q 'native runner (' "$OUT"
+}
+c_p_route_native() {
+  mkrepo play; GOODNATIVE; deploy play STUB_ROUTING=http://unix:/run/dawn-play/http.sock:/run
+  shipped && grep -q 'nginx routes /api/run to the native runner' "$OUT" && ! grep -q 'JVM runner (' "$OUT"
+}
+c_p_route_unknown() {
+  mkrepo play; GOODNATIVE; deploy play
+  shipped && grep -q 'cannot tell which runner nginx routes' "$OUT" && ! grep -q 'nginx routes /api/run to the' "$OUT"
+}
+c_p_route_odd() {
+  mkrepo play; GOODNATIVE; deploy play STUB_ROUTING=http://10.9.9.9:1/run
+  shipped && grep -q 'unrecognised upstream' "$OUT"
+}
+c_p_route_native_off() { # the line is printed without a canary too
+  mkrepo play; GOODNATIVE; rm "$work/dawn-play"
+  deploy play DAWN_PLAY_NATIVE=0 STUB_ROUTING=http://unix:/run/dawn-play/http.sock:/run
+  shipped && grep -q 'to the native runner' "$OUT"
+}
+
 # What each mutant removes, as "from=>to". "-" = a control: nothing to remove.
 mutant_for() {
   case "$1" in
@@ -231,6 +262,9 @@ mutant_for() {
     c_p_remote_cmds) echo "if ! ssh \"\$HOST\" 'PATH=/usr=>if ! true \"\$HOST\" 'PATH=/usr" ;;
     c_p_jdk) echo "if ! ssh \"\$HOST\" \"'\$PLAY_JDK_REMOTE/bin/java'=>if ! true \"\$HOST\" \"'\$PLAY_JDK_REMOTE/bin/java'" ;;
     c_p_canary) echo 'if ! ssh "$HOST" "$REMOTE_CANARY"; then=>if ! true "$HOST" "$REMOTE_CANARY"; then' ;;
+    # the old hard-coded claim: native and unknown must then fail
+    c_p_route_jvm|c_p_route_native|c_p_route_unknown|c_p_route_odd|c_p_route_native_off)
+      echo 'echo "$ROUTING_LINE"=>echo "nginx still routes to the JVM runner."' ;;
     *) echo - ;;
   esac
 }
