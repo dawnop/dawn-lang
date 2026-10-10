@@ -139,7 +139,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [gpu-page-newapi-design.md](gpu-page-newapi-design.md) | current | GPU 页按 `tileir` 0.8.0 补「写一个 kernel」一节：七个要点各配 `kernels.dawn` 里哪段被门禁覆盖的真代码（vadd、softmax、matmul、histogram 的函数与派发臂，保维归约指回 flash_attn 调用图），占用率规则只写一句不新增 kernel；迁移表、别的 kernel 调用图、性能数字不上页的理由。 |
 | [site-pages-design.md](site-pages-design.md) | current | 首页以外的页面落到「Horizon」：短天空带与页头（eyebrow、标题、导语、译本说明）、亮暗 token 收进 `style.css` 全站共用、`theme.js` 与内页的 view transition 圆形展开（首页保留日月轮转）、渲染器的节号/锚点/表格容器/状态框/删除线/时间线列表、可运行代码窗、`/history.html` 由时间线文档生成；不做的。 |
 | [site-cdn-design.md](site-cdn-design.md) | current | 整站走 CDN 的仓库侧前置：CDN 不做 WebSocket，所以 Playground 的四个 `/api/*` 端点搬到独立 origin；构建变量 `DAWN_SITE_PLAY_ORIGIN`（空则挂载点逐字节不变，设则绝对端点、非法 origin 构建红）、前端由 run 的 URL 推出 check/health/lsp、源站须满足的 CORS 契约、`play-live-check` 与 `redeploy.sh` 的可配置健康 URL；不做的。 |
-| [site-search-design.md](site-search-design.md) | current | 站点搜索的正文索引（刀 4 生成器侧）与 `search-body-<lang>.json` 资产契约：位置数组五段（版本、节表、词表、倒排、摘录）、节 = 每页导言加带锚点的 h2–h4（锚点取自 `render_doc` 同一次调用）、段落与摘录截断规则、`body_terms`（汉字单字 + 刀 2 的 `tokens`）及两张分词样例表、给刀 5 的查询约束、大小预算与实测；不做 Pagefind、JS 库、bigram。 |
+| [site-search-design.md](site-search-design.md) | current | 站点搜索的正文索引（刀 4 生成器侧）与 `search-body-<lang>.json` 资产契约：位置数组六段的清单（版本、片段目录、节表、段落数、块目录、块名单）加按词序切的倒排块与按节的文本片段（格式 3）、节 = 每页导言加带锚点的 h2–h4（锚点取自 `render_doc` 同一次调用）、段落与摘录截断规则、`body_terms`（汉字单字 + 刀 2 的 `tokens`）及两张分词样例表、给刀 5 的查询约束、大小预算与实测；不做 Pagefind、JS 库、bigram。 |
 
 ## 旧审查设计材料（`docs/audit/`）
 
