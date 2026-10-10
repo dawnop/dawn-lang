@@ -113,6 +113,18 @@ line and compared with nothing. Jobs gatesplan does not model (gates.yml's
 and are still matched by name. --observed therefore needs PyYAML; the
 default invocation and --selftest do not.
 
+TILE.YML'S SHARDS (2026-10-10, issue #274). tile.yml's jobs are keyed by
+steps digest as well, by the plain reader steps_lock.plain_job_digests (the
+multiset of a job's `run:` texts, no composite expanded). A tile-golden shard's
+run text is `run.sh --shard I/N`, so dealing the matrix seven ways and then
+eight keeps the job names and changes the digests: the 7-way runs of the
+window are counted on the "older shape" line and compared with no claim, and
+only runs of the shape a claim is about hold it. Before this, the eighth
+shard would have been audited against a week of 7-way observations under the
+same names. A report written before tile.yml carried digests ("steps": {}) is
+read as having none, so its jobs are not compared; regenerate it with
+gate-observations.py (or --restep).
+
 WHOSE RUNS (2026-10-03). Each file is held to one workflow's report:
 gates.yml's and ci.yml's claims to ci.yml's runs (gates.yml is called from
 ci.yml, so its jobs are ci.yml's), tile.yml's to tile.yml's own, and any
@@ -201,6 +213,11 @@ POLE_EXEMPT = {"ci.yml", "release.yml"}
 # which its shards ran up to 980s on main against an 827s claim.
 OBSERVED_FROM = {"ci.yml": "ci.yml", "gates.yml": "ci.yml", "tile.yml": "tile.yml"}
 DEFAULT_SOURCE = "ci.yml"
+# Which files' claims are held to runs by steps digest rather than by name:
+# gates.yml's through gatesplan's digests, tile.yml's through the plain
+# reader's (a tile-golden shard's digest carries its `--shard I/N`).
+KEYED_FILES = {"gates.yml": "ci.yml", "tile.yml": "tile.yml"}
+TILE_PATH = ".github/workflows/tile.yml"
 
 
 def workflow_path(root, name):
@@ -398,7 +415,7 @@ class ShapedObservations:
             table[key] = seconds
 
     def for_file(self, name):
-        digests = self.digests if name == RUN_POLE_FILE else {}
+        digests = self.digests if name in KEYED_FILES else {}
         by_digest, by_name = self.by_digest, self.by_name
 
         class Lookup:
@@ -431,10 +448,13 @@ class ShapedObservations:
 def load_reports(reports, digests):
     """[gate-observations.py report] -> {workflow: ShapedObservations}.
 
+    `digests` is {workflow: {job: steps digest}} (current_digests).
+
     A report says which workflow it read ("workflow"; ci.yml when absent,
     which is what every report written before 2026-10-03 was). Only the
-    report that gates.yml's jobs arrive through is keyed by steps; the
-    others hold jobs gatesplan does not model, so they are matched by name.
+    report that gates.yml's jobs arrive through is keyed by steps, and so is
+    tile.yml's (its shards' `--shard I/N` is in the digest); anything else is
+    matched by name.
     Two reports of one workflow are refused: which window wins would be an
     accident of argument order.
     """
@@ -445,7 +465,7 @@ def load_reports(reports, digests):
             raise SystemExit(
                 f"two observation reports read {workflow}; pass one per"
                 " workflow so it is clear which window the claims are held to")
-        keyed = digests if workflow == OBSERVED_FROM[RUN_POLE_FILE] else {}
+        keyed = digests.get(workflow, {})
         observed[workflow] = ShapedObservations(report, keyed)
     return observed
 
@@ -483,7 +503,9 @@ def audit_observed(texts, observed):
 
 
 def current_digests():
-    """{job: steps digest} of this tree's gates.yml, via steps_lock.py.
+    """{workflow: {job: steps digest}} of this tree, via steps_lock.py:
+    gates.yml's jobs under ci.yml (the workflow that calls it) and tile.yml's
+    under tile.yml.
 
     The module directory is spelled from this file and not as a join on the
     repository root: gate-map's rule B reads a root join as this checker
@@ -492,7 +514,8 @@ def current_digests():
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent / "gates-external"))
     import steps_lock
-    return steps_lock.current_job_digests()
+    return {"ci.yml": steps_lock.current_job_digests(),
+            "tile.yml": steps_lock.current_plain_job_digests(TILE_PATH)}
 
 
 def find_run_pole(text, name):
@@ -914,7 +937,7 @@ jobs:
     ]
     for label, reports, want_red, says in source_cases:
         found, _notes = audit_observed(
-            source_files, load_reports(reports, today))
+            source_files, load_reports(reports, {"ci.yml": today}))
         if bool(found) != want_red or (
                 says is not None and not any(says in f for f in found)):
             failures.append(
@@ -923,8 +946,45 @@ jobs:
                 f" got {found or 'green'}")
         else:
             print(f"  {'refused' if want_red else 'accepted'}: {label}")
+    # 2026-10-10 (issue #274): tile.yml's shards keep their names when the
+    # matrix is dealt another way, so a name does not say which deal a run
+    # measured. The digest carries `--shard I/N`; an observation of the 7-way
+    # shard must not be held against the 8-way claim, and the 8-way one must.
+    tile_now = {"tile-golden-1": "shard-1-of-8"}
+    tile_claim = """\
+jobs:
+  tile-golden-1:
+    # budget: 3x 865s planning value
+    timeout-minutes: 44
+"""
+
+    def tile_shaped(seconds, digest):
+        return {"workflow": "tile.yml", "per_run": [
+            {"id": 7, "jobs": {"tile-golden-1": seconds},
+             "steps": {"tile-golden-1": digest}}]}
+
+    tile_cases = [
+        ("a 7-way tile-golden-1 run under the 8-way claim's name",
+         tile_shaped(968, "shard-1-of-7"), False),
+        ("an 8-way tile-golden-1 run over the 8-way claim",
+         tile_shaped(900, "shard-1-of-8"), True),
+        ("an 8-way tile-golden-1 run within the 8-way claim",
+         tile_shaped(800, "shard-1-of-8"), False),
+    ]
+    for label, report, want_red in tile_cases:
+        found, _notes = audit_observed(
+            {"tile.yml": tile_claim},
+            load_reports([ci_report, report],
+                         {"ci.yml": today, "tile.yml": tile_now}))
+        if bool(found) != want_red:
+            failures.append(
+                f"tile shard shape: {label}: expected"
+                f" {'red' if want_red else 'green'}, got {found or 'green'}")
+        else:
+            print(f"  {'refused' if want_red else 'accepted'}: {label}")
     try:
-        load_reports([ci_report, tile_report(800), tile_report(900)], today)
+        load_reports([ci_report, tile_report(800), tile_report(900)],
+                     {"ci.yml": today})
         failures.append("two tile.yml reports were both accepted")
     except SystemExit:
         print("  refused: two reports of one workflow")
@@ -1035,7 +1095,7 @@ def main():
         for report in reports:
             workflow = report.get("workflow") or DEFAULT_SOURCE
             keyed = ("by steps digest"
-                     if workflow == OBSERVED_FROM[RUN_POLE_FILE] else "by name")
+                     if workflow in KEYED_FILES.values() else "by name")
             print(
                 f"observations: {workflow}: {len(report['jobs'])} job name(s)"
                 f" over {observations[workflow].runs} run(s)"

@@ -110,6 +110,28 @@ def current():
     return families_of(gates, action)
 
 
+def plain_job_digests(workflow_text):
+    """{job id: steps digest} of a workflow gatesplan does not model.
+
+    tile.yml is the one that needs it (2026-10-10, issue #274): its eight
+    tile-golden shards differ in one run text, `run.sh --shard I/N`, so the
+    same digest as for gates.yml tells a 7-way shard from an 8-way one even
+    when the job keeps its name. Every job's `run:` texts, steps in a plain
+    list: no composite action is expanded, because nothing in tile.yml needs
+    it to be.
+    """
+    import yaml
+    doc = yaml.safe_load(workflow_text)
+    return {job_id: steps_digest([step["run"] for step in job.get("steps", [])
+                                  if isinstance(step, dict) and "run" in step])
+            for job_id, job in doc["jobs"].items()}
+
+
+def current_plain_job_digests(relative):
+    """plain_job_digests of this working tree's `relative` workflow file."""
+    return plain_job_digests((ROOT / relative).read_text(encoding="utf-8"))
+
+
 def current_job_digests():
     """job_digests of this working tree's gates.yml."""
     return job_digests((ROOT / gatesplan.GATES_PATH).read_text(encoding="utf-8"),
