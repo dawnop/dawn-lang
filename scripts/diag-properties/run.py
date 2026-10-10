@@ -127,7 +127,6 @@ b near packages/tileir/src/bytecode.dawn
 b near packages/tileir/src/lower.dawn
 b near scripts/spike-native/catch_kinds.dawn
 b near scripts/tile-gpu-diff/red_diff.dawn
-d decl-lost playground/src/play/exec.dawn
 """
 # Known defects and judge-too-strict cases found by the samples before the
 # 2026-10-10 change. A one-token witness is not in every sample, so these are

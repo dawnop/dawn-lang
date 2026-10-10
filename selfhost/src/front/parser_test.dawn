@@ -1996,3 +1996,22 @@ test "a with statement's call spans the statement and contains its children" {
     assert e_hi(call) == e_hi(body) - 1
   }
 }
+
+## #676: an interpolation left open on a line used to drop the whole string
+## token; the newline after the `=` before it was then a continuation, and the
+## next `test` was read into the expression and lost from the module.
+test "an unclosed interpolation after `=` keeps the declarations after it" {
+  let src = "fn f() -> String =\n  \"v = \${x\n\ntest \"one\" { assert true }\ntest \"two\" { assert true }\n"
+  let (m, ds) = parse_module(src)
+  var names: List[String] = []
+  for d in m.decls {
+    match d {
+      DTest(name, _, _, _, _, _, _) -> { names = names ++ [name] }
+      _ -> { }
+    }
+  }
+  assert names == ["one", "two"]
+  var n = 0
+  for d in ds { if d.msg == "interpolation cannot span lines" { n = n + 1 } }
+  assert n == 1
+}
