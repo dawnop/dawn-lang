@@ -75,6 +75,7 @@ quiet 函数的帧用 `DAWN_QUIET_FRAME(n)`：同样的数组与初始化，没�
   这是诚实的等价，不是漏测；防御顺序保留，harness 里不留一个永远绿的变异体。
 - **`adt-reuse-contract` 的一处反向变化**：变异体 `reset-keeps-the-slot`（发射器读槽而不 take）以前靠退出扫描把残留的槽**二次释放**才让 `update_zero_alloc` 等四条断言变红。
   二次释放随扫描一起消失，这四条红从 `matrix.txt` 删掉；该变异体仍红在 `finished` 与 `answers`，并且被 `DAWN_OWN_CHECK` 直接抓住。
+  `rc-view-contract` 的 `views-in-the-frame` 同理，`output` 一条红随扫描消失，仍红在 owner `sum_bare` 与 `leaf_for_bare`。
   这是诚实地承认：退出扫描曾经顺手兜住过一类发射器 bug，现在由一个显式的检查开关承担。
 
 ## 五、实测
@@ -125,8 +126,8 @@ cfold 的刀 1 略慢（0.552 → 0.595）在噪声内，刀 2 之后明显快�
 - **quiet 判定放进 Core 层（给 JVM 后端用）**：JVM 没有这个清理。
 - **把 `DAWN_OWN_CHECK` 接进 CI**：已在 `scripts/frame-contract` 的干净运行里用上；整套 native selfhost 测试开着它跑过一次（834 项），
   但 CI 常开会让每次 cc 多一个扫描，推迟到有人想要时再按 Gate-Budget 流程接。
-- **在 CI 里接 `scripts/frame-contract/run.sh`**：它约 2 分钟（6 次 `__emitc` 加 7 次 ASan 构建）。接入要改 `gates.yml`、重录 steps lock 并写 Gate-Budget 声明，
-  是单独的、要报墙钟的一刀，没有跟这两刀混在一起。
+- **把 `scripts/frame-contract/run.sh` 放进 push 门禁**：它约 50 秒 CPU（6 次 `__emitc` 加 7 次 ASan 构建），push-total 没有余量，
+  所以挂在 `nightly.yml` 的 `native-asan` 作业里（与 fuzz3、native-asan-tests 同一做法），红了开 issue。要进 push 需要 Gate-Budget 声明。
 
 ## 八、落地记录
 
