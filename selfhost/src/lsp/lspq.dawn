@@ -59,7 +59,7 @@ use front/lexer.{slice_cps}
 use lsp/lspv.{
   value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
 }
-use lsp/lspinlay.{InlayOpts, Hint, DefaultArg, type_hint, effect_hint, propagate_hint, param_hint, default_args_hint, reads_name}
+use lsp/lspinlay.{InlayOpts, Hint, DefaultArg, type_hint, effect_hint, decl_effect_hint, propagate_hint, param_hint, default_args_hint, reads_name}
 
 ## The document analysis a query runs against: the entry module's checked
 ## state plus everything needed to resolve names defined elsewhere.
@@ -411,6 +411,20 @@ fn pat_binders(tp: TPat) -> List[Int] =
     }
     _ -> []
   }
+
+## ` !io` after the parameter list of a function with neither a return type nor
+## an effect row written, when the checker inferred it to do IO.
+fn hint_decl_effect(qc: QCx, q0: Q, f: FnDecl, tf: Option[TFun]) -> Q = {
+  let want = match inlay_opts(q0) {
+    Some(o) -> o.decl_effects
+    None -> false
+  }
+  if not want || f.ret != None || len(f.effs) > 0 { return q0 }
+  match tf {
+    Some(t) -> add_hint(q0, decl_effect_hint(row_start(qc, None, params_end(f.nhi, f.params)), t.sig.eff))
+    None -> q0
+  }
+}
 
 ## `: T` after each unannotated parameter of a lambda or local fn.
 fn hint_lambda_params(qc: QCx, q0: Q, params: List[LambdaParam], psyms: List[Int]) -> Q = {
@@ -2285,6 +2299,7 @@ fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl, path: List[identity.Part]) -> Q = {
     None -> ()
   }
   let tf = tfun_at(qc, path)
+  q = hint_decl_effect(qc, q, f, tf)
   q = offer_params(qc, q, f.params, tf)
   # a parameter's default is an expression of the declaration and names what
   # any other expression does (`n: Int = len(xs)`): references, rename and

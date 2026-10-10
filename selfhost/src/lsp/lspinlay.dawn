@@ -26,6 +26,7 @@ pub type InlayOpts = {
   let_types: Bool,
   lambda_param_types: Bool,
   call_effects: Bool,
+  decl_effects: Bool,
   param_names: Bool,
   default_args: Bool,
   default_values: Bool,
@@ -44,6 +45,7 @@ pub fn default_inlay_opts() -> InlayOpts =
     let_types: true,
     lambda_param_types: true,
     call_effects: true,
+    decl_effects: true,
     param_names: false,
     default_args: true,
     default_values: true,
@@ -111,6 +113,20 @@ pub fn effect_hint(at: Int, eff: Eff) -> Option[Hint] =
       pad_right: false,
       left_out: None
     })
+  }
+
+## ` !io` after the parameter list of a function whose author wrote neither a
+## return type nor an effect row, or nothing. Those are the only functions
+## whose row the checker works out (spec §3.1: the base effect is inferred only
+## when both are left out; a named effect never is), so the hint is the one
+## place the reader can see the answer. A pure function has nothing to show,
+## the same as at a call (`effect_hint`). The caller decides that the function
+## qualifies; this decides what the row shows.
+pub fn decl_effect_hint(at: Int, eff: Eff) -> Option[Hint] =
+  match eff {
+    EIo ->
+      Some(Hint { at: at, label: "!io", kind: HintType, pad_left: true, pad_right: false, left_out: None })
+    _ -> None
   }
 
 ## `⇡ E` after a `?` on a `Result[T, E]`, or nothing: an `Option` hands up no
@@ -256,6 +272,21 @@ test "a type hint is the type after a colon, unless long or erroneous" {
   # code points, not bytes or UTF-16 units
   assert type_hint(0, str.repeat("é", 25)) != None
   assert type_hint(0, "List[?]") == None
+}
+
+test "a declaration effect hint is the inferred io row, and nothing for pure" {
+  match decl_effect_hint(12, EIo) {
+    Some(h) -> {
+      assert h.at == 12
+      assert h.label == "!io"
+      assert h.pad_left
+      assert h.kind == HintType
+    }
+    None -> { assert false }
+  }
+  assert decl_effect_hint(12, EPure) == None
+  # a named effect is never inferred, so it is never a function this hint is for
+  assert decl_effect_hint(12, ELabeled(EPure, [(7, "Fs")])) == None
 }
 
 test "a propagated error hint is an arrow and the type, held to a type hint's rules" {
