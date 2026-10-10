@@ -1169,7 +1169,30 @@ subject 的类型头（`TNamed.name`/`TQual.name`）与 `subject` 的头同名�
 
 - **运算符上的 references / rename**：运算符不是名字，没有可改的东西；references 对运算符两侧的名字早已正确（#566 的配对修复）。
 - **`&&`、`||`、`++`、`==` 在标量上的专门文案**：同样写 `(primitive)` 与实际类型，不另立措辞。
-- **泛型函数里受 bound 约束的运算符**：`a + b` 在 `[T: Add]` 里写作 `via bound Add[T]`，没有可跳的 impl（调用点才知道是哪个）。
+
+### O1.4 跳转目标的规则（按运算符的形态）
+
+悬停第二行说谁，definition 就跳谁，两者读同一个 `Site`。
+
+| 运算符形态 | 悬停第二行 | 跳转 |
+|---|---|---|
+| `Int`/`Float`/`Bool` 等语言自带类型上的二元与一元运算符 | `(primitive)` | 无（没有任何读者打得开的声明） |
+| ADT / opaque 上有 impl（`+ - * / %`、一元 `-`、`== !=`、`< > <= >=`） | `via impl Trait[Subject]` | impl 里**方法的名字**（O1.1，std 的 impl 跳进 std 文件） |
+| `derive` 出来的 impl | 同上 | 无（没有文本） |
+| `[T: Add]` 之类的 bound 下 | `via bound Trait[T]` | 签名里那个 bound 的名字：`[T: Add]` 的 `Add`，只在当前文件内 |
+
+- 比较运算符在 bound 下同样写 `via bound Ord[T]` / `via bound Eq[T]`（此前只写 `via a trait bound`）：`XBinary` 的 `WForward` 只带字典符号不带 trait，
+  由运算符的写法定 trait（`== !=` 为 `Eq`，`< > <= >=` 为 `Ord`）。算术运算符是 `XCallFn`，自带 trait id。
+- 跳到 bound 而不是 trait 方法：全部运算符 trait 都是 prelude trait（`Add`…`Neg`、`Eq`、`Ord`），没有源文件，也不在 `builtins.dawn`
+  的镜像里（那面镜像只有函数），trait 方法声明无处可跳。bound 是读者能指着说「`a + b` 在这里被允许」的最近一处文本。
+  同一个 bound 列表里有多个 trait（`[T: Add + Neg]`）时跳到匹配的那一个；`impl[T: Add] ...` 的方法里先找方法自己的类型参数，再找 impl 的。
+- 没有复合赋值运算符（`+=` 等），所以没有「复合形态」。
+
+### O1.5 不做的（O1.4 内，理由）
+
+- **嵌套局部函数 / lambda 自己带 bound 的情形**：只按最外层的 `fn` 或 impl 方法找 bound；bound 落在内层时找不到，只回悬停文本，不给跳转。
+- **trait 默认方法体里的运算符**（`trait` 声明里 `T` 来自 trait 自己的参数，没有 `[T: ...]` 列表）：同样只回文本。
+- **给 prelude trait 造一份可打开的声明镜像**：为一个跳转值得新建一张双向对账的表吗？不值；bound 已经够用，且镜像要进 builtin-decl-contract 的门禁。
 
 ## L2. 字面量悬停：定型结果与折叠值
 
