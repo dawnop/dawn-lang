@@ -763,8 +763,8 @@ pub effect Dev {
     padding: Padding) -> Int
   fn t_atomic_red_view(dtype: String, view: Int, indices: List[Int], mode: String, scope: String,
     value: Int) -> Unit
-  fn t_load_view(dtype: String, view: Int, indices: List[Int]) -> Int
-  fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int) -> Unit
+  fn t_load_view(dtype: String, view: Int, indices: List[Int], inbounds: List[Bool]) -> Int
+  fn t_store_view(dtype: String, view: Int, indices: List[Int], value: Int, inbounds: List[Bool]) -> Unit
   fn t_tensor_shape(view: Int, dim: Int) -> Int
   fn t_index_space_shape(view: Int, dim: Int) -> Int
   fn t_cell_view(param: Int, dtype: String, free: List[Int]) -> (Int, List[Int])
@@ -893,6 +893,12 @@ pub type Padding =
   | PadPosInf
   | PadNegInf
 derive Show
+
+## The suffix a recorded `load_view` or `store_view` carries in a handler's
+## log when it makes an `inbounds` promise, and nothing when it makes none, so
+## the logs of every kernel that makes none stay as they were.
+pub fn inbounds_note(inbounds: List[Bool]) -> String =
+  if list.any(inbounds, b => b) { " inbounds=${show(inbounds)}" } else { "" }
 
 ## The keyword the dialect spells a padding value with, for a diagnostic
 ## and for the renderer. The NUMBER each one carries on the wire is not
@@ -3329,9 +3335,17 @@ pub fn gather_scatter_view[D](tv: TensorView[D], tile_shape: List[Int], sparse_d
 ## The tile of `v`'s grid at `indices`, one index a tile dimension. In the
 ## token chain where every other load is; lanes that fall outside the
 ## underlying tensor read the view's padding value.
-pub fn load_view[D](v: GridView[D], indices: List[Idx]) -> Tile[D] !Dev = called("load_view", () => {
+##
+## `inbounds` (knife T18) is the dialect's `inbounds` array: `true` at a
+## dimension PROMISES that no tile this load reads is cut by the tensor's
+## edge along it, so the assembler may drop the bounds handling there.
+## `[]`, the default, promises nothing at any dimension; otherwise it holds
+## one entry per index. The promise is the caller's: the dialect makes a
+## broken one undefined behaviour, and `tileiras` answers a tile that does
+## reach the edge with an unnamed `failed to compile Tile IR program`.
+pub fn load_view[D](v: GridView[D], indices: List[Idx], inbounds: List[Bool] = []) -> Tile[D] !Dev = called("load_view", () => {
   let x: Int = v
-  let r: Tile[D] = t_load_view(dtype_of(x), x, list.map(indices, idx_handle))
+  let r: Tile[D] = t_load_view(dtype_of(x), x, list.map(indices, idx_handle), inbounds)
   r
 })
 
@@ -3341,10 +3355,11 @@ pub fn load_view[D](v: GridView[D], indices: List[Idx]) -> Tile[D] !Dev = called
 ## padding value is the load's half of. A view of an Out parameter is not
 ## one of its cells, so the recording refuses this into one (`store_cell`
 ## and `store_sub` are an Out's writes); a `Shared` parameter takes it.
-pub fn store_view[D](v: GridView[D], indices: List[Idx], t: Tile[D]) -> Unit !Dev = called("store_view", () => {
+## `inbounds` is [`load_view`]'s promise, for the lanes this store would mask.
+pub fn store_view[D](v: GridView[D], indices: List[Idx], t: Tile[D], inbounds: List[Bool] = []) -> Unit !Dev = called("store_view", () => {
   let x: Int = v
   let y: Int = t
-  t_store_view(dtype_of(x), x, list.map(indices, idx_handle), y)
+  t_store_view(dtype_of(x), x, list.map(indices, idx_handle), y, inbounds)
 })
 
 ## The handle behind one `GatherIdx`, whichever kind it is. Both are `Int`
@@ -3366,7 +3381,7 @@ fn gather_handle(g: GatherIdx) -> Int = match g {
 ## dimensions. In the token chain where every other load is.
 pub fn load_gather[D](v: GatherScatterView[D], indices: List[GatherIdx]) -> Tile[D] !Dev = called("load_gather", () => {
   let x: Int = v
-  let r: Tile[D] = t_load_view(dtype_of(x), x, list.map(indices, gather_handle))
+  let r: Tile[D] = t_load_view(dtype_of(x), x, list.map(indices, gather_handle), [])
   r
 })
 
@@ -3376,7 +3391,7 @@ pub fn load_gather[D](v: GatherScatterView[D], indices: List[GatherIdx]) -> Tile
 pub fn store_gather[D](v: GatherScatterView[D], indices: List[GatherIdx], t: Tile[D]) -> Unit !Dev = called("store_gather", () => {
   let x: Int = v
   let y: Int = t
-  t_store_view(dtype_of(x), x, list.map(indices, gather_handle), y)
+  t_store_view(dtype_of(x), x, list.map(indices, gather_handle), y, [])
 })
 
 ## `t` reduced into the tile of `v`'s grid at `indices`, one element at a
@@ -3577,7 +3592,7 @@ pub fn load_at[D](p: Param[D], free: List[Idx]) -> Tile[D] !Dev = called("load_a
 
 fn read_cell[D](p: Param[D], free: List[Idx]) -> Tile[D] !Dev = {
   let (v, ix) = t_cell_view(position(p), param_dtype(p), list.map(free, idx_handle))
-  let h: Tile[D] = t_load_view(param_dtype(p), v, ix)
+  let h: Tile[D] = t_load_view(param_dtype(p), v, ix, [])
   h
 }
 
@@ -3595,7 +3610,7 @@ fn read_cell[D](p: Param[D], free: List[Idx]) -> Tile[D] !Dev = {
 pub fn store_cell[D](p: Param[D], t: Tile[D]) -> Unit !Dev = called("store_cell", () => {
   let (v, ix) = t_cell_view(position(p), param_dtype(p), [])
   let y: Int = t
-  t_store_view(param_dtype(p), v, ix, y)
+  t_store_view(param_dtype(p), v, ix, y, [])
 })
 
 ## `t` written into piece `at` of this block's cell of `p`, an `Out`: the
@@ -3608,7 +3623,7 @@ pub fn store_cell[D](p: Param[D], t: Tile[D]) -> Unit !Dev = called("store_cell"
 pub fn store_sub[D](p: Param[D], at: List[Int], t: Tile[D]) -> Unit !Dev = called("store_sub", () => {
   let y: Int = t
   let (v, ix) = t_sub_view(position(p), param_dtype(p), shape_of(y), at)
-  t_store_view(param_dtype(p), v, ix, y)
+  t_store_view(param_dtype(p), v, ix, y, [])
 })
 
 ## A tile shaped like one cell of `p`, in `p`'s format, every lane zero:
@@ -4089,12 +4104,12 @@ fn under_counter[T](body: fn() -> T !Dev) -> T = {
       h
     }
     t_atomic_red_view(_dtype, _view, _indices, _mode, _scope, _value) => ()
-    t_load_view(_dtype, _view, _indices) => {
+    t_load_view(_dtype, _view, _indices, _inbounds) => {
       let h = next
       next = next + 1
       h
     }
-    t_store_view(_dtype, _view, _indices, _value) => ()
+    t_store_view(_dtype, _view, _indices, _value, _inbounds) => ()
     t_tensor_shape(_view, _dim) => {
       let h = next
       next = next + 1
@@ -4535,12 +4550,12 @@ fn logged(body: fn() -> Unit !Dev) -> List[String] = {
     t_atomic_red_view(dtype, view, indices, mode, scope, value) => {
       log = log ++ ["atomic_red_view ${dtype} ${view} ${show(indices)} ${mode} ${scope} ${value}"]
     }
-    t_load_view(dtype, view, indices) => {
-      log = log ++ ["load_view ${dtype} ${view} ${show(indices)}"]
+    t_load_view(dtype, view, indices, inbounds) => {
+      log = log ++ ["load_view ${dtype} ${view} ${show(indices)}${inbounds_note(inbounds)}"]
       82
     }
-    t_store_view(dtype, view, indices, value) => {
-      log = log ++ ["store_view ${dtype} ${view} ${show(indices)} ${value}"]
+    t_store_view(dtype, view, indices, value, inbounds) => {
+      log = log ++ ["store_view ${dtype} ${view} ${show(indices)} ${value}${inbounds_note(inbounds)}"]
     }
     t_tensor_shape(view, dim) => {
       log = log ++ ["tensor_shape ${view} ${dim}"]
@@ -5180,8 +5195,8 @@ test "d_range hands the body the carried handle and passes its answer back as th
       t_strided_view(_dtype, _view, _tile_shape, _traversal, _dim_map, _padding) => 85
       t_gather_view(_dtype, _view, _tile_shape, _sparse_dim, _padding) => 86
       t_atomic_red_view(_dtype, _view, _indices, _mode, _scope, _value) => ()
-      t_load_view(_dtype, _view, _indices) => 82
-      t_store_view(_dtype, _view, _indices, _value) => ()
+      t_load_view(_dtype, _view, _indices, _inbounds) => 82
+      t_store_view(_dtype, _view, _indices, _value, _inbounds) => ()
       t_tensor_shape(_view, _dim) => 83
       t_index_space_shape(_view, _dim) => 84
       t_cell_view(_param, _dtype, free) => (87, free)

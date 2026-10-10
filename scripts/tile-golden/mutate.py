@@ -400,8 +400,18 @@ MUTATIONS = {
     ),),
     "view-inbounds-unwritten": ((
         BYTECODE,
-        '  if view_has_inbounds() { list.fold(range(0, n), emit(w, n), (v, _k) => emit_byte(v, 0)) } else { w }',
-        '  w',
+        '    list.fold(flags, emit(w, len(flags)), (v, b) => emit_byte(v, if b { 1 } else { 0 }))',
+        '    w',
+    ),),
+    "view-inbounds-all-true": ((
+        BYTECODE,
+        '(v, b) => emit_byte(v, if b { 1 } else { 0 })',
+        '(v, _b) => emit_byte(v, 1)',
+    ),),
+    "view-inbounds-promise-dropped": ((
+        BYTECODE,
+        '(v, b) => emit_byte(v, if b { 1 } else { 0 })',
+        '(v, _b) => emit_byte(v, 0)',
     ),),
     "header-minor-still-3": ((
         BYTECODE,

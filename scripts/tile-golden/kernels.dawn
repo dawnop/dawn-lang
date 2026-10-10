@@ -2143,8 +2143,9 @@ fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev 
 # Two choices here that a reader of the textbook form should know about.
 #
 # A row statistic is a [FA_BQ, 1] tile: `reduce_max` and `reduce_sum` with
-# `keepdims` keep the folded dimension at length 1, and `broadcast` widens
-# it back to the scores and the accumulator where it meets them.
+# `keepdims` keep the folded dimension at length 1, and the same-rank
+# broadcasting rule (tileir 0.8.2) widens it to the scores and the
+# accumulator where it meets them, so the kernel names no `broadcast`.
 #
 # FA_BK is ATT_D: the key block is as wide as a head, so the scores, the
 # probabilities and the accumulator are all one FA_BQ by ATT_D shape.
@@ -4467,6 +4468,56 @@ fn view_pad_i32(x: Param[I32], out: Param[I32]) -> Unit !Dev = {
   store_cell(out, load_view(src, at))
 }
 
+# ---- knife T18: the `inbounds` promise of a view load and store ----
+#
+# `load_view_tko` and `store_view_tko` carry a required `inbounds` array at
+# 13.4, one entry an index. Every kernel above leaves it unwritten (all
+# false), which promises nothing. These three copy a matrix through a pair of
+# views and differ only in what they promise, so that one claim at a time can
+# be held to the assembler (docs/tile-backend-design.md 6.32):
+#
+#   view_inbounds      a [128, 64] matrix cut into [32, 32] tiles, which
+#                      divide it both ways, copied with `[true, true]` on the
+#                      load and on the store
+#   view_inbounds_off  the same copy with no promise: its bytes differ from
+#                      view_inbounds's in the array alone, and its cubin is
+#                      the one the promise is measured against
+#   view_inbounds_dim  a [100, 64] matrix, whose rows the tile does not
+#                      divide and whose columns it does, copied with
+#                      `[false, true]`: the promise is per dimension, so the
+#                      columns may be promised while the last row tile runs
+#                      past the end and its store is masked
+#
+# The source view has NO padding value, and that is not a choice: `tileiras`
+# 13.4.92 refuses a load that promises anything over a view that has one
+# (`failed to compile Tile IR program`, measured for zero, nan and neg_inf,
+# with the promise on either dimension), so the lowering refuses it by name.
+# A promised load reads nothing past the edge, so there is no lane a padding
+# value would fill.
+const VI_ROWS: Int = 128
+const VI_ROWS_PART: Int = 100
+const VI_COLS: Int = 64
+const VI_TILE: Int = 32
+
+fn view_inbounds_copy(x: Param[Float], out: Param[Float], rows: Int, promise: List[Bool]) -> Unit !Dev = {
+  let tile = [VI_TILE, VI_TILE]
+  let dm = [0, 1]
+  let zero = idx_const(0)
+  let src = partition_view(tensor_view(x, zero, [rows, VI_COLS], [VI_COLS, 1]), tile, dm, NoPadding)
+  let dst = partition_view(tensor_view(out, zero, [rows, VI_COLS], [VI_COLS, 1]), tile, dm, NoPadding)
+  let at = [block_id(0), block_id(1)]
+  store_view(dst, at, load_view(src, at, inbounds: promise), inbounds: promise)
+}
+
+fn view_inbounds(x: Param[Float], out: Param[Float]) -> Unit !Dev =
+  view_inbounds_copy(x, out, VI_ROWS, [true, true])
+
+fn view_inbounds_off(x: Param[Float], out: Param[Float]) -> Unit !Dev =
+  view_inbounds_copy(x, out, VI_ROWS, [])
+
+fn view_inbounds_dim(x: Param[Float], out: Param[Float]) -> Unit !Dev =
+  view_inbounds_copy(x, out, VI_ROWS_PART, [false, true])
+
 # ---- knife T12: dynamic dimensions and the two shape queries ----
 #
 # The view family's other half. A `tensor_view`'s extent along a dimension
@@ -5821,6 +5872,18 @@ fn trace(name: String) -> TileProg = match name {
     let (p, _e) = trace2("view_transpose", In(F64, Whole), Shared(F64), view_transpose)
     p
   }
+  "view_inbounds" -> {
+    let (p, _e) = trace2("view_inbounds", In(F64, Whole), Shared(F64), view_inbounds)
+    p
+  }
+  "view_inbounds_off" -> {
+    let (p, _e) = trace2("view_inbounds_off", In(F64, Whole), Shared(F64), view_inbounds_off)
+    p
+  }
+  "view_inbounds_dim" -> {
+    let (p, _e) = trace2("view_inbounds_dim", In(F64, Whole), Shared(F64), view_inbounds_dim)
+    p
+  }
   "view_max_pool" -> {
     let (p, _e) = trace2("view_max_pool",
       In(F64, Whole), Out(F64, cells([vm_oh(), vm_ow()], [VM_TILE, VM_TILE])), view_max_pool)
@@ -5997,6 +6060,6 @@ pub fn main() -> Unit !io = match args() {
       ++ "|attr_sat|attr_ftof|attr_xchg"
       ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
       ++ "|global_table|global_ctl|global_scratch|global_flags|global_syms"
-      ++ "|view_transpose|view_max_pool|view_conv2d|view_padding|view_pad_i32>"
+      ++ "|view_transpose|view_max_pool|view_conv2d|view_padding|view_pad_i32|view_inbounds|view_inbounds_off|view_inbounds_dim>"
       ++ " [--bytecode <path>] | kernels --bytecode-version")
 }

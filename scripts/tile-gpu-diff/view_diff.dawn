@@ -6,6 +6,7 @@
 #
 #   view_diff <view_transpose.cubin> <view_max_pool.cubin> <view_conv2d.cubin>
 #             <view_padding.cubin> <view_pad_i32.cubin> <transpose_tail.cubin>
+#             <view_inbounds.cubin> <view_inbounds_off.cubin> <view_inbounds_dim.cubin>
 #
 # The subject is the SECOND WAY TO ADDRESS MEMORY. Every kernel before this
 # one reaches global memory through a tile of pointers the lowering builds
@@ -44,6 +45,17 @@
 #     view wide enough to keep it. Every earlier kernel masked its tail
 #     away; `view_padding` writes it out, which is the only way the five
 #     padding values are visible from the host at all
+#
+# Knife T18 adds three cases after the control, and their subject is the
+# `inbounds` array of a view load and store. `view_inbounds` and
+# `view_inbounds_off` copy the same 128 by 64 matrix through [32, 32] tiles
+# that divide it, the first promising `[true, true]` on both accesses and the
+# second nothing; `view_inbounds_dim` copies a 100 by 64 one whose last row
+# of tiles runs off the end, promising only its columns. The verdict is that
+# all three answer the input lane for lane: a promise the assembler can
+# honour changes the code (scripts/tile-golden's view_inbounds check) and not
+# the answer. A promise about a tile the edge cuts is not measured here: it is
+# undefined behaviour, and the device is not asked to define it.
 #
 # Every case is EXACT tier. The first three only move elements and
 # multiply-add them in the order their references repeat; the last two move
@@ -100,6 +112,14 @@ pub const VC_H: Int = 40
 pub const VC_W: Int = 36
 pub const VC_K: Int = 3
 pub const VC_TILE: Int = 16
+
+## The `inbounds` copies of knife T18: a matrix of VI_ROWS by VI_COLS cut into
+## VI_TILE-square tiles, and the same with VI_ROWS_PART rows, which the tile
+## does not divide. The answer of all three is the input, lane for lane.
+pub const VI_ROWS: Int = 128
+pub const VI_ROWS_PART: Int = 100
+pub const VI_COLS: Int = 64
+pub const VI_TILE: Int = 32
 
 pub const VP_N: Int = 100
 pub const VP_TILE: Int = 32
@@ -332,7 +352,7 @@ fn blocks(n: Int, tile: Int) -> Int = (n + tile - 1) / tile
 ## `transpose_tail` is last and is the family's kernel-level control.
 fn case_name(i: Int) -> String =
   ["view_transpose", "view_max_pool", "view_conv2d", "view_padding", "view_pad_i32",
-    "transpose_tail"][i]
+    "transpose_tail", "view_inbounds", "view_inbounds_off", "view_inbounds_dim"][i]
 
 ## The kernels of the tolerance tier: NONE. See the header.
 ##
@@ -352,6 +372,10 @@ fn case_grid(i: Int) -> (Int, Int, Int) = {
     (blocks(VC_H - VC_K + 1, VC_TILE), blocks(VC_W - VC_K + 1, VC_TILE), 1)
   } else if name == "view_padding" || name == "view_pad_i32" {
     (blocks(VP_N, VP_TILE), 1, 1)
+  } else if name == "view_inbounds" || name == "view_inbounds_off" {
+    (blocks(VI_ROWS, VI_TILE), blocks(VI_COLS, VI_TILE), 1)
+  } else if name == "view_inbounds_dim" {
+    (blocks(VI_ROWS_PART, VI_TILE), blocks(VI_COLS, VI_TILE), 1)
   } else {
     (blocks(VT_ROWS, VT_TILE), blocks(VT_COLS, VT_TILE), 1)
   }
@@ -372,6 +396,10 @@ fn case_bufs(i: Int) -> List[(String, List[Float])] = {
       ++ list.map(range(0, 5), _k => ("i32", sentinel_i32(VP_OUT + TAIL)))
   } else if name == "view_pad_i32" {
     [("i32", distinct_i32(VP_N)), ("i32", sentinel_i32(VP_OUT + TAIL))]
+  } else if name == "view_inbounds" || name == "view_inbounds_off" {
+    [("f64", distinct(VI_ROWS * VI_COLS)), ("f64", sentinel_buffer(VI_ROWS * VI_COLS))]
+  } else if name == "view_inbounds_dim" {
+    [("f64", distinct(VI_ROWS_PART * VI_COLS)), ("f64", sentinel_buffer(VI_ROWS_PART * VI_COLS))]
   } else {
     [("f64", distinct(VT_ROWS * VT_COLS)), ("f64", sentinel_buffer(VT_ROWS * VT_COLS))]
   }
@@ -405,6 +433,8 @@ fn case_kernels(i: Int) -> Map[String, (Int, WideRefFn)] = {
   } else if name == "view_pad_i32" {
     map.from([("view_pad_i32", (2, last_out((_dts, ins) =>
         view_padding_ref(VP_N, VP_OUT, 0.0, ins[0], ins[1]))))])
+  } else if name == "view_inbounds" || name == "view_inbounds_off" || name == "view_inbounds_dim" {
+    map.from([(name, (2, last_out((_dts, ins) => ins[0])))])
   } else if name == "transpose_tail" {
     map.from([("transpose_tail",
       (2, last_out((dts, ins) => transpose_ref(VT_ROWS, VT_COLS, dts, ins))))])
@@ -478,11 +508,12 @@ fn corpus_shape(v: List[Float]) -> String = {
 # frame with nothing above it. `Fs` stays where it was, installed per read.
 pub fn main() -> Unit !io = io.with_exit_real(() => {
   let argv = args()
-  let count = 6
+  let count = 9
   if len(argv) != count {
     io.eprintln("usage: view_diff <view_transpose.cubin> <view_max_pool.cubin>"
         ++ " <view_conv2d.cubin> <view_padding.cubin> <view_pad_i32.cubin>"
-        ++ " <transpose_tail.cubin>")
+        ++ " <transpose_tail.cubin> <view_inbounds.cubin> <view_inbounds_off.cubin>"
+        ++ " <view_inbounds_dim.cubin>")
     io.exit(2)
   }
   var cubins: Map[String, Bytes] = map.empty()

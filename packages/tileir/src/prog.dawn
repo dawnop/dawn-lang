@@ -205,8 +205,10 @@ pub type TileOp =
     scope: String, value: Int, tok_in: Int)
   | PartitionViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
     padding: Padding)
-  | LoadView(dst: Int, tok_out: Int, dtype: String, view: Int, indices: List[Int], tok_in: Int)
-  | StoreView(tok_out: Int, dtype: String, view: Int, indices: List[Int], value: Int, tok_in: Int)
+  | LoadView(dst: Int, tok_out: Int, dtype: String, view: Int, indices: List[Int], tok_in: Int,
+    inbounds: List[Bool])
+  | StoreView(tok_out: Int, dtype: String, view: Int, indices: List[Int], value: Int, tok_in: Int,
+    inbounds: List[Bool])
   | TensorShapeOf(dst: Int, view: Int, dim: Int)
   | IndexSpaceShapeOf(dst: Int, view: Int, dim: Int)
   | CellViewOf(dst: Int, param: Int, dtype: String, align: Int, shape: List[Int], strides: List[Int],
@@ -1243,7 +1245,7 @@ fn writes_of(defs: Map[Int, TileOp], op: TileOp) -> List[Write] = match op {
   Scatter(_t, param, _dtype, _i, _s, _v, _m, _ti) -> [AnyOf(param)]
   AtomicRMW(_d, _t, param, _dtype, _mode, _i, _s, _v, _m, _ti) -> [AnyOf(param)]
   AtomicCAS(_d, _t, param, _dtype, _i, _s, _c, _v, _m, _ti) -> [AnyOf(param)]
-  StoreView(_t, _dtype, view, _ix, _v, _ti) -> [named(view_param(defs, view))]
+  StoreView(_t, _dtype, view, _ix, _v, _ti, _ib) -> [named(view_param(defs, view))]
   AtomicRedViewOf(_t, _dtype, view, _ix, _mode, _scope, _v, _ti) -> [named(view_param(defs, view))]
   For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> writes_in(defs, body)
   Loop(_inits, _carried, _results, body) -> writes_in(defs, body)
@@ -1296,8 +1298,8 @@ fn tok_step(op: TileOp) -> Option[(Int, List[Int])] = match op {
   StoreAt(t, _dt, _s, _ps, _v, _m, ti) -> Some((t, [ti]))
   Print(t, _f, _dt, _s, _a, ti) -> Some((t, [ti]))
   AtomicRedViewOf(t, _dt, _v, _ix, _mode, _scope, _val, ti) -> Some((t, [ti]))
-  LoadView(_d, t, _dt, _v, _ix, ti) -> Some((t, [ti]))
-  StoreView(t, _dt, _v, _ix, _val, ti) -> Some((t, [ti]))
+  LoadView(_d, t, _dt, _v, _ix, ti, _ib) -> Some((t, [ti]))
+  StoreView(t, _dt, _v, _ix, _val, ti, _ib) -> Some((t, [ti]))
   JoinToks(t, toks) -> Some((t, toks))
   For(_iv, _lower, _upper, _step, _unsigned, inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
   Loop(inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
@@ -3846,7 +3848,7 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         tok = tv
         ()
       }
-      t_load_view(dtype, view, indices0) => {
+      t_load_view(dtype, view, indices0, inbounds) => {
         let (g, indices) = settle_all(name, frames, grown(next, ops, held, spreads, pending), indices0)
         next = g.next
         ops = g.ops
@@ -3873,11 +3875,11 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         let d = next
         let tv = next + 1
         next = mint(name, next, 2)
-        ops = ops ++ [LoadView(d, tv, dtype, view, indices, tok)]
+        ops = ops ++ [LoadView(d, tv, dtype, view, indices, tok, inbounds)]
         tok = tv
         d
       }
-      t_store_view(dtype, view, indices0, value0) => {
+      t_store_view(dtype, view, indices0, value0, inbounds) => {
         let open = frames
         if list.any(open, is_pure_region) {
           refuse(name, "a store inside a reduce, scan or if region has no memory order")
@@ -3905,7 +3907,7 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         spreads = g.spreads
         let tv = next
         next = mint(name, next, 1)
-        ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok)]
+        ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok, inbounds)]
         tok = tv
         ()
       }
@@ -4303,8 +4305,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   StridedViewOf(dst, _dtype, _view, _tile_shape, _traversal, _dim_map, _padding) -> [dst]
   GatherViewOf(dst, _dtype, _view, _tile_shape, _sparse_dim, _padding) -> [dst]
   AtomicRedViewOf(tok_out, _dtype, _view, _indices, _mode, _scope, _value, _tok_in) -> [tok_out]
-  LoadView(dst, tok_out, _dtype, _view, _indices, _tok_in) -> [dst, tok_out]
-  StoreView(tok_out, _dtype, _view, _indices, _value, _tok_in) -> [tok_out]
+  LoadView(dst, tok_out, _dtype, _view, _indices, _tok_in, _inbounds) -> [dst, tok_out]
+  StoreView(tok_out, _dtype, _view, _indices, _value, _tok_in, _inbounds) -> [tok_out]
   TensorShapeOf(dst, _view, _dim) -> [dst]
   IndexSpaceShapeOf(dst, _view, _dim) -> [dst]
   CellViewOf(dst, _param, _dtype, _align, _shape, _strides, _dyn_shape, _dyn_strides) -> [dst]
@@ -5349,7 +5351,7 @@ fn view_read_half() -> Unit !Dev = {
   let x = t_idx_const(0)
   let tv = t_tensor_view(0, "f64", x, [64], [1], [], [])
   let v = t_partition_view("f64", tv, [8], [0], NoPadding)
-  let t = t_load_view("f64", v, [x])
+  let t = t_load_view("f64", v, [x], [])
   let _s = t_binaryf("addf", "f64", [4], t, t)
   ()
 }
@@ -5371,8 +5373,8 @@ fn shapes_noted() -> Unit !Dev = {
   let tv = t_tensor_view(0, "f64", zero, [DYN_DIM, 4], [4, 1], [zero], [])
   let g = t_gather_view("f64", tv, [8, 4], 0, NoPadding)
   let pv = t_strided_view("f64", tv, [2, 4], [1, 4], [0, 1], PadZero)
-  let rows = t_load_view("f64", g, [t_iota(8), zero])
-  let cell = t_load_view("f64", pv, [zero, zero])
+  let rows = t_load_view("f64", g, [t_iota(8), zero], [])
+  let cell = t_load_view("f64", pv, [zero, zero], [])
   note_shape(tv)
   note_shape(g)
   note_shape(pv)
@@ -5387,7 +5389,7 @@ test "knife C1': a tile read through a view has the view's tile as its row, and 
   let g = refusal(() => {
     let tv = t_tensor_view(0, "f64", t_idx_const(0), [64, 4], [4, 1], [], [])
     let gv = t_gather_view("f64", tv, [8, 4], 0, NoPadding)
-    let t = t_load_view("f64", gv, [t_iota(8), t_idx_const(0)])
+    let t = t_load_view("f64", gv, [t_iota(8), t_idx_const(0)], [])
     let _s = t_binaryf("mulf", "f64", [8], t, t)
     ()
   })
@@ -5943,7 +5945,7 @@ test "PR-1: load_at names the cells of the dimensions that follow no axis, zeros
     _ -> false
   })) == 1
   assert len(ops_where(p.ops, o => match o {
-    LoadView(_d, _t, "f16", _v, ix, _ti) -> len(ix) == 2
+    LoadView(_d, _t, "f16", _v, ix, _ti, _ib) -> len(ix) == 2
     _ -> false
   })) == 2
   # m, k and n are the operands' own
@@ -6212,7 +6214,7 @@ test "D-4: a rank-0 value stored into a cell fills it, and store_sub writes one 
   # the In's cells and the Out's pieces are both [8, 16]: two views
   assert len(parts) == 2
   assert len(ops_where(q.ops, o => match o {
-    StoreView(_t, "f64", _v, ix, _val, _ti) -> len(ix) == 2
+    StoreView(_t, "f64", _v, ix, _val, _ti, _ib) -> len(ix) == 2
     _ -> false
   })) == 4
   assert len(ops_where(q.ops, o => match o {

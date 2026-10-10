@@ -1890,7 +1890,7 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)
   MakeGatherScatterView(_dst, src, _src_ty, t) ->
     emit_ref(emit_op(w0, OP_MAKE_GATHER_SCATTER_VIEW, t), src)
-  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_tys, t, tok_in) -> {
+  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_tys, t, tok_in, flags) -> {
     # results: the count (2, written because `index` is variadic), the tile
     # and the token; flags: the token bit, and neither `memory_scope` nor
     # `optimization_hints`; then the required `memory_ordering_semantics`
@@ -1900,16 +1900,16 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w2, tk) = ty(w1, Token)
     let w3 = emit(emit(emit(emit(emit(emit(w2, OP_LOAD_VIEW_TKO), 2), ti), tk),
       VIEW_FLAG_TOKEN), ORDER_WEAK)
-    let w4 = emit(emit_ref(inbounds(w3, len(indices)), view), len(indices))
+    let w4 = emit(emit_ref(inbounds(w3, flags), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
-  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, tok_in) -> {
+  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, tok_in, flags) -> {
     # The same, with one result and the tile operand FIRST: the dialect's
     # argument order is `tile`, `view`, `index`, `token`, which is the
     # reverse of how the assembly reads for the first two.
     let (w1, tk) = ty(w0, Token)
     let w2 = emit(emit(emit(emit(w1, OP_STORE_VIEW_TKO), 1), tk), VIEW_FLAG_TOKEN)
-    let w3 = inbounds(emit(w2, ORDER_WEAK), len(indices))
+    let w3 = inbounds(emit(w2, ORDER_WEAK), flags)
     let w4 = emit(emit_ref(emit_ref(w3, value), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
@@ -2032,14 +2032,19 @@ fn ftoi_flag_word(op: String) -> Int = match op {
 # `load_view_tko` and `store_view_tko` grew a REQUIRED `inbounds`, a
 # DenseBoolArrayAttr with one element per index, at 13.4. Required means
 # inline, in declaration order after `memory_ordering_semantics`, with no
-# flag bit: the count as a varint and then one byte an element. Every
-# element is false here, which promises nothing, so the assembler keeps the
-# bounds handling the view's padding needs; a true on a shape the tile does
-# not divide is refused (6.18), and writing true is knife T18's business.
+# flag bit: the count as a varint and then one byte an element, 1 for true.
+# A false promises nothing, so the assembler keeps the bounds handling the
+# view's padding needs; a true on a tile the tensor's edge cuts is refused
+# (6.18), and the lowering has already made `flags` one entry an index
+# (knife T18, 6.32).
 fn view_has_inbounds() -> Bool = at_least(13, 4)
 
-fn inbounds(w: W, n: Int) -> W =
-  if view_has_inbounds() { list.fold(range(0, n), emit(w, n), (v, _k) => emit_byte(v, 0)) } else { w }
+fn inbounds(w: W, flags: List[Bool]) -> W =
+  if view_has_inbounds() {
+    list.fold(flags, emit(w, len(flags)), (v, b) => emit_byte(v, if b { 1 } else { 0 }))
+  } else {
+    w
+  }
 
 # The pinned version is at least `major.minor`.
 fn at_least(major: Int, minor: Int) -> Bool =
@@ -3293,18 +3298,27 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
   # and no padding operand: a view says what an out-of-bounds lane reads in
   # its TYPE.
   let ld = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
-    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3)))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3), [false, false]))
   assert hex(bytes.freeze(ld.body))
     == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "020000" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+  # one dimension promised in bounds and the other not: a byte an element
+  let ld1 = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
+    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3), [true, false]))
+  assert hex(bytes.freeze(ld1.body))
+    == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "020100" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
   assert VIEW_FLAG_TOKEN == 4
   assert view_has_inbounds()
   # the same shape with one result, and the TILE before the view: that is
   # the dialect's `arguments` order, which is the reverse of how the
   # assembly reads the two.
   let st = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
-    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3)))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3), [false, false]))
   assert hex(bytes.freeze(st.body))
     == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "020000" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+  let st1 = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
+    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3), [true, true]))
+  assert hex(bytes.freeze(st1.body))
+    == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "020101" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
 }
 
 test "the Global section is a count and six varints a record at 13.3, unaligned, and it comes before Func" {

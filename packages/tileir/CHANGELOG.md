@@ -7,6 +7,36 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.14.0 (2026-10-10)
+
+Breaking: a view load and store can promise `inbounds`
+(`docs/tile-backend-design.md` section 6.32, knife T18). All 199 existing
+`.mlir` and `.tilebc` goldens are unchanged on both backends: a call that
+promises nothing writes the all-false array it always wrote.
+
+- `load_view(v, indices, inbounds: [..])` and
+  `store_view(v, indices, t, inbounds: [..])` take the dialect's `inbounds`
+  array, one `Bool` an index. `true` at a dimension promises that no tile the
+  access touches is cut by the tensor's edge there, so the assembler may drop
+  the bounds handling. `[]`, the default, promises nothing. Any other length
+  than the index count is refused when the kernel is lowered.
+- A load that promises anything over a view with a padding value is refused
+  by name. `tileiras` 13.4.92 answers every such program with the unnamed
+  `failed to compile Tile IR program`, for every padding value and whichever
+  dimension is promised; a non-dividing shape over a view with no padding
+  value assembles. (The 13.4 upgrade notes read the unnamed failures as
+  caused by shapes the tile does not divide; the padding was the cause.) A
+  store has no padding and takes the promise anywhere.
+- The effect operations `t_load_view` and `t_store_view` gain a trailing
+  `inbounds: List[Bool]`, so a handler written outside the package must
+  answer the new arity. `load_cell`, `store_cell`, `store_sub`, `load_gather`
+  and `store_gather` pass `[]`.
+- The text rendering prints ` inbounds=[true, false]` after the token when an
+  entry is true, and nothing when none is, as the dialect's printer does.
+- Three kernels in `scripts/tile-golden` (`view_inbounds`,
+  `view_inbounds_off`, `view_inbounds_dim`) and three cases in
+  `scripts/tile-gpu-diff/view_diff.dawn`.
+
 ## 0.13.0 (2026-10-10)
 
 Breaking: a float constant carries its format's own value

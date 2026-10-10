@@ -20,7 +20,7 @@ use std/dtype.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
   Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
-  load_cell, store_cell, tail_mask, for_arch, hint_latency }
+  load_cell, store_cell, tail_mask, for_arch, hint_latency, tensor_view, partition_view, load_view, store_view }
 use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
 use lower.{kparam_ty, Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
@@ -100,6 +100,17 @@ fn name(r: Ref) -> String = match r {
 }
 
 fn v(id: Int) -> String = "%${id}"
+
+# The `inbounds` array a view load or store prints after its token, as the
+# dialect's printer does: ` inbounds=[true, false]`, and nothing at all when
+# no entry is true (the array is required in the bytes at 13.4 and its
+# all-false value is the printer's elided default).
+fn inbounds_attr(inbounds: List[Bool]) -> String =
+  if list.any(inbounds, b => b) {
+    " inbounds=[${commas(list.map(inbounds, b => if b { "true" } else { "false" }))}]"
+  } else {
+    ""
+  }
 
 fn commas(xs: List[String]) -> String =
   list.fold(xs, "", (acc, x) => if acc == "" { x } else { acc ++ ", " ++ x })
@@ -481,12 +492,12 @@ fn line(i: Instr) -> String = match i {
   MakeStridedView(dst, src, _src_ty, t) -> "${v(dst)} = make_strided_view ${name(src)} : ${ty(t)}"
   MakeGatherScatterView(dst, src, _src_ty, t) ->
     "${v(dst)} = make_gather_scatter_view ${name(src)} : ${ty(t)}"
-  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_tys, t, tok_in) ->
+  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_tys, t, tok_in, inbounds) ->
     "${v(dst)}, ${v(tok_out)} = load_view_tko weak ${name(view)}[${commas(list.map(indices, name))}]"
-    ++ " token=${name(tok_in)} : ${ty(view_ty)}${index_types(idx_tys)} -> ${ty(t)}, token"
-  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_tys, tok_in) ->
+    ++ " token=${name(tok_in)}${inbounds_attr(inbounds)} : ${ty(view_ty)}${index_types(idx_tys)} -> ${ty(t)}, token"
+  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_tys, tok_in, inbounds) ->
     "${v(tok_out)} = store_view_tko weak ${name(value)}, ${name(view)}"
-    ++ "[${commas(list.map(indices, name))}] token=${name(tok_in)}"
+    ++ "[${commas(list.map(indices, name))}] token=${name(tok_in)}${inbounds_attr(inbounds)}"
     ++ " : ${ty(val_ty)}, ${ty(view_ty)}${index_types(idx_tys)} -> token"
   # The value type comes FIRST here, as it does on a store: the dialect's
   # printer puts it there so that its own parser can find the end of the
@@ -1339,11 +1350,18 @@ test "a strided view spells its traversal, a gather/scatter view its sparse dime
   let rows = Tile([8], Num("i32"))
   let idx = Tile([], Num("i32"))
   let tile = Tile([8, 16], Num("f64"))
-  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3)))
+  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, false]))
     == "%9, %10 = load_view_tko weak %0[%1, %2] token=%3 : " ++ ty(gv)
     ++ ", tile<8xi32>, tile<i32> -> tile<8x16xf64>, token"
-  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3)))
+  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [false, false]))
     == "%9 = store_view_tko weak %4, %0[%1, %2] token=%3 : tile<8x16xf64>, " ++ ty(gv)
+    ++ ", tile<8xi32>, tile<i32> -> token"
+  # a promise prints after the token, an all-false array not at all
+  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, true]))
+    == "%9, %10 = load_view_tko weak %0[%1, %2] token=%3 inbounds=[false, true] : " ++ ty(gv)
+    ++ ", tile<8xi32>, tile<i32> -> tile<8x16xf64>, token"
+  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [true, true]))
+    == "%9 = store_view_tko weak %4, %0[%1, %2] token=%3 inbounds=[true, true] : tile<8x16xf64>, " ++ ty(gv)
     ++ ", tile<8xi32>, tile<i32> -> token"
 }
 
@@ -1750,4 +1768,42 @@ test "PR-2: a hinted load, a masked load with no padding value and a masked hint
   assert str.contains(text, "%15, %16 = load_ptr_tko weak %14 token=%0 optimization_hints=<sm_86 = {latency = 2}> : tile<128xptr<f64>> -> tile<128xf64>, token")
   assert str.contains(text, "%17, %18 = load_ptr_tko weak %14, %11 token=%16 : tile<128xptr<f64>>, tile<128xi1> -> tile<128xf64>, token")
   assert str.contains(text, "%23 = store_ptr_tko weak %22, %19, %11 token=%18 optimization_hints=<sm_86 = {latency = 2}> : tile<128xptr<f64>>, tile<128xf64>, tile<128xi1> -> token")
+}
+
+# ---- knife T18: the `inbounds` promise ----
+
+fn promised_copy(x: Param[Float], o: Param[Float], pad: Padding, load_promise: List[Bool], store_promise: List[Bool]) -> Unit !Dev = {
+  let zero = idx_const(0)
+  let src = partition_view(tensor_view(x, zero, [64, 32], [32, 1]), [16, 16], [0, 1], pad)
+  let dst = partition_view(tensor_view(o, zero, [64, 32], [32, 1]), [16, 16], [0, 1], NoPadding)
+  let at = [block_id(0), block_id(1)]
+  store_view(dst, at, load_view(src, at, inbounds: load_promise), inbounds: store_promise)
+}
+
+fn promised_text(pad: Padding, load_promise: List[Bool], store_promise: List[Bool]) -> String =
+  render(trace_kernel("p", [ByPtr("f64"), ByPtr("f64")],
+    () => promised_copy(param(F64, 0), param(F64, 1), pad, load_promise, store_promise)))
+
+fn promised_refusal(pad: Padding, load_promise: List[Bool], store_promise: List[Bool]) -> String =
+  match catch_panic(() => promised_text(pad, load_promise, store_promise)) {
+    Ok(_) -> "accepted"
+    Err(e) -> e.message
+  }
+
+test "knife T18: a promise prints after the token, and no promise prints nothing" {
+  let promised = promised_text(NoPadding, [true, false], [true, true])
+  assert str.contains(promised, "= load_view_tko weak %")
+  assert str.contains(promised, " inbounds=[true, false] : partition_view")
+  assert str.contains(promised, " inbounds=[true, true] : tile<16x16xf64>, partition_view")
+  assert not str.contains(promised_text(NoPadding, [], []), "inbounds")
+  assert not str.contains(promised_text(NoPadding, [false, false], []), "inbounds")
+}
+
+test "knife T18: a promise of the wrong length, and one over a padded view, are refused by name" {
+  assert str.contains(promised_refusal(NoPadding, [true], []), "load_view gives 1 inbounds entries for 2 index operand(s)")
+  assert str.contains(promised_refusal(NoPadding, [], [true, true, true]), "store_view gives 3 inbounds entries for 2 index operand(s)")
+  assert str.contains(promised_refusal(PadZero, [false, true], []), "load_view promises inbounds over a view with padding `zero`")
+  # no promise over a padded view is the usual load; and a store has no padding to refuse
+  assert promised_refusal(PadZero, [], [true, true]) == "accepted"
+  assert promised_refusal(PadZero, [false, false], []) == "accepted"
 }
