@@ -29,28 +29,29 @@ ANALYZE = "selfhost/src/driver/analyze.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
 
 MUTATIONS = {
-    # The loader both entries go through: `load_entries_over` for a command and
-    # the editor's `load_entries_reusing`, which reuses unchanged parses.
+    # The loader every entry goes through: `load_entries_over` for a command and
+    # the editor's `load_entries_reusing`, which reuses unchanged parses, both
+    # end in `load_source_entries`.
     "fresh-replan-loader": ((
         ANALYZE,
-        '''pub(pkg) fn load_entries_reusing(
-  plan: ProjectPlan,
+        '''fn load_source_entries(
+  sp: source.SourcePlan,
   entries: List[String],
   over: Map[String, String],
   previous: ParseMemo
 ) -> ReusingLoad !Fs !Env !io =
   resolve(
-    plan.source.source_root,
+    sp.source_root,
     entries,
-    planner_diags(plan.source.diags),
-    plan.source.pkgs,
+    planner_diags(sp.diags),
+    sp.pkgs,
     over,
-    entry_file(plan),
+    entry_file(sp.target),
     previous
   )
 ''',
-        '''pub(pkg) fn load_entries_reusing(
-  plan: ProjectPlan,
+        '''fn load_source_entries(
+  sp: source.SourcePlan,
   entries: List[String],
   over: Map[String, String],
   previous: ParseMemo
@@ -58,14 +59,14 @@ MUTATIONS = {
   # `project_plan` is `!Proc` since io.run moved onto the effect, and this row
   # is not; answering it here keeps the mutation to one function. `Env` is on
   # the row already: `resolve` reaches io.cwd whether or not this replans.
-  let fresh = io.with_proc_real(() => project_plan(plan.source.target))
+  let fresh = io.with_proc_real(() => project_plan(sp.target))
   resolve(
     fresh.source.source_root,
     entries,
     planner_diags(fresh.source.diags),
     fresh.source.pkgs,
     over,
-    entry_file(fresh),
+    entry_file(fresh.source.target),
     previous
   )
 }

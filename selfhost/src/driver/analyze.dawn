@@ -489,8 +489,13 @@ pub fn load_file(file: String) -> LoadResult !Fs !Proc !Env !io = {
 
 ## `load_file` with editor-buffer overrides.
 pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !Fs !Proc !Env !io = {
-  let plan = project_plan(source.SourceFile(file))
-  load_entries_over(plan, [file], over)
+  # No module index: this load reads the entry and the files its `use`s name,
+  # and neither the walk of the source root nor the reverse index built from
+  # it is ever looked at. `project_plan` pays for both, which for a file with
+  # no `src` ancestor means walking its whole directory tree (a file in a
+  # checkout root listed every directory of the checkout). Callers that
+  # keep the plan for completion or reloads call `project_plan` themselves.
+  load_source_entries(source.source_plan(source.SourceFile(file)), [file], over, no_parses()).loaded
 }
 
 ## Load entries against one already captured plan. This boundary deliberately
@@ -534,14 +539,23 @@ pub(pkg) fn load_entries_reusing(
   entries: List[String],
   over: Map[String, String],
   previous: ParseMemo
+) -> ReusingLoad !Fs !Env !io = load_source_entries(plan.source, entries, over, previous)
+
+## The load itself, which needs the captured source plan and nothing of the
+## module index `project_plan` derives from it.
+fn load_source_entries(
+  sp: source.SourcePlan,
+  entries: List[String],
+  over: Map[String, String],
+  previous: ParseMemo
 ) -> ReusingLoad !Fs !Env !io =
   resolve(
-    plan.source.source_root,
+    sp.source_root,
     entries,
-    planner_diags(plan.source.diags),
-    plan.source.pkgs,
+    planner_diags(sp.diags),
+    sp.pkgs,
     over,
-    entry_file(plan),
+    entry_file(sp.target),
     previous
   )
 
@@ -561,8 +575,8 @@ fn fresh_parse(text: String) -> Parsed = {
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
 ## a command named, or a project's `src/main.dawn`. An identity, because that
 ## is how the loader compares the files it reads.
-fn entry_file(plan: ProjectPlan) -> Option[String] !Fs !Env =
-  match plan.source.target {
+fn entry_file(target: source.SourceTarget) -> Option[String] !Fs !Env =
+  match target {
     source.SourceFile(file) -> Some(canon_identity(file))
     source.ProjectDirectory(dir) -> Some(canon_identity(dir ++ "/src/main.dawn"))
   }
