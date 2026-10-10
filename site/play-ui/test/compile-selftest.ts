@@ -191,6 +191,18 @@ export function compileViewTests(expect: Expect): number {
   t('the program\'s text is the pane', classify(200, tileWire(), 'tile'), {
     kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false }, cached: false, ms: 2600,
   })
+  // a kernel whose calls were paired with the source answers as a listing
+  const paired = (over: Record<string, unknown> = {}) =>
+    wire({ target: 'tile', pane: { ...(wire().pane as object), kind: 'tile' }, ...over })
+  const pk = classify(200, paired(), 'tile')
+  t('a paired kernel is a listing of the tile tab', [pk.kind, pk.kind === 'ok' ? pk.view.pane.kind : null], ['ok', 'tile'])
+  t('a paired answer with another pane kind is unreadable', classify(200, wire({ target: 'tile' }), 'tile').kind, 'unreadable')
+  t('a paired answer whose calls do not check is unreadable', classify(200, paired({ calls: [{ ...CALLS[0], id: 5 }] }), 'tile').kind, 'unreadable')
+  t('a paired answer is not the C tab\'s', classify(200, paired(), 'c').kind, 'unreadable')
+  t('without calls the tile tab keeps the plain text, with the reason', classify(200, tileWire({ unmapped: 'a call under host control flow at line 9' }), 'tile'), {
+    kind: 'tile', tile: { text: ['cuda_tile.module @m {', '}'], total: 2, truncated: false, unmapped: 'a call under host control flow at line 9' }, cached: false, ms: 2600,
+  })
+  t('the reason is a note under the tabs', tileNotes({ text: ['a'], total: 1, truncated: false, unmapped: 'x' }), ['Calls are not matched to the Tile IR: x.'])
   t('a tile answer is not another tab\'s', [classify(200, tileWire(), 'c').kind, classify(200, wire(), 'tile').kind], ['unreadable', 'unreadable'])
   t('a tile pane whose count is not its text is unreadable', classify(200, tileWire({ pane: { kind: 'tile', total: 2, shown: 5, truncated: false, text: ['a'] } }), 'tile').kind, 'unreadable')
   t('a program that fails shows its output under its own heading', [

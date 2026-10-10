@@ -45,12 +45,16 @@ export function withView(href: string, target: Target | null): string {
   return u.toString()
 }
 
-// The Tile IR tab's answer: the program's output, a line each. No call table:
-// the text is whatever the program printed, so there is nothing to point at.
+// The Tile IR tab's answer when the calls of the kernel could not be paired
+// with the source: the Tile IR text, a line each, and nothing to point at.
+// `unmapped` is the service's reason (absent when it did not try, as when the
+// program printed something other than a kernel). When they could be paired
+// the answer is an ordinary listing, `kind: 'ok'`, like C and JVM.
 export interface TileText {
   text: string[]
   total: number
   truncated: boolean
+  unmapped?: string
 }
 
 export type Outcome =
@@ -81,7 +85,13 @@ function readTile(o: Record<string, unknown>): TileText | null {
   const text = pane.text
   if (pane.kind !== 'tile' || !Array.isArray(text) || !text.every((l) => typeof l === 'string')) return null
   if (pane.shown !== text.length || typeof pane.total !== 'number' || typeof pane.truncated !== 'boolean') return null
-  return { text: text as string[], total: pane.total, truncated: pane.truncated }
+  const why = o.unmapped
+  return {
+    text: text as string[],
+    total: pane.total,
+    truncated: pane.truncated,
+    ...(typeof why === 'string' && why !== '' ? { unmapped: why } : {}),
+  }
 }
 
 // One answer to a request for `target`: the HTTP status and the parsed body
@@ -99,6 +109,12 @@ export function classify(status: number, body: unknown, target: Target): Outcome
   }
   if (status === 200 && o && o.ok === false && (o.phase === 'run' || o.phase === 'timeout')) {
     return { kind: 'program', title: o.phase === 'run' ? 'Run error' : 'Timed out', text: detailOf(o) }
+  }
+  if (status === 200 && o && o.ok === true && o.phase === 'compile-view' && target === 'tile' && Array.isArray(o.calls)) {
+    // the kernel's calls are paired with the source: a listing like the others
+    const view = readView(o)
+    if (!view || o.target !== 'tile' || view.pane.kind !== 'tile') return { kind: 'unreadable' }
+    return { kind: 'ok', view, cached: o.cached === true, ms: typeof o.ms === 'number' ? o.ms : 0 }
   }
   if (status === 200 && o && o.ok === true && o.phase === 'compile-view' && target === 'tile') {
     const tile = o.target === 'tile' ? readTile(o) : null
@@ -144,7 +160,10 @@ export const NETWORK_MESSAGE = 'Could not reach the compile service.'
 
 // The Tile IR pane's one note, when the program printed more than is shown.
 export function tileNotes(t: TileText): string[] {
-  return t.truncated ? [`The Tile IR text is cut: showing ${t.text.length} of ${t.total} lines.`] : []
+  const notes: string[] = []
+  if (t.unmapped) notes.push(`Calls are not matched to the Tile IR: ${t.unmapped}.`)
+  if (t.truncated) notes.push(`The Tile IR text is cut: showing ${t.text.length} of ${t.total} lines.`)
+  return notes
 }
 
 // Calls that have no listing line, or a listing cut short, in one line each;
