@@ -47,8 +47,18 @@ legitimately moves where a body ends, so (c) and (d) judge only the others.
 An interpolation's `}` is no bracket of the code around the string, and a
 lexer that recovers from it well leaves the code around the string intact.
 
-Determinism. File f's mutations draw from random.Random("<seed>:<f>"), so a
-finding is reproduced from the seed and the file; nothing reads the clock.
+Determinism. Every site decides for itself whether it is mutated, by a hash
+of the seed, the file's path and the texts of the three code tokens either
+side of it (and, for an insertion, the token copied in is the one whose own
+window ranks highest for that site). Nothing depends on the rest of the file
+or on a stream of draws, so editing one function changes the sample only
+around the edit; before 2026-10-10 the draws were seeded by the file's
+content and any edit reshuffled the whole file, so the pins below could never
+keep up (#577). A finding is reproduced from the seed and the file; nothing
+reads the clock. The rate is the share of code tokens mutated (--rate, 2%,
+which is about 8,800 mutants, 10,700 before); a file's
+share of the run now follows its size, up to 30 expected mutants (the rate
+halves per doubling past that, a subset of the rate before, so it is stable).
 --out keeps every mutant next to its original as `<stem>__m<k>.dawn`.
 
 Why a script outside the compiler. Same reason as scripts/fmt-properties:
@@ -75,10 +85,14 @@ to delete its line, and a later regression of the same file is a new red
 rather than a quiet return. A key is a (property, rule, file) triple, not a
 mutant, so another mutant of an already pinned file and rule is not new;
 that is the price of keys that survive unrelated edits to the file. The stale
-half is judged only on the default scope (no --only, --seed, --mutants,
+half is judged only on the default scope (no --only, --seed, --rate,
 --check-paths), because a narrower run cannot produce every key. --known FILE
 reads the keys from a file instead, and --known '' reports every finding.
-The list lives in this file, not beside it: a separate data file would be a
+Findings of the earlier, reshuffling samples that are real defects, or that
+the property judges too strictly, are listed in KNOWN_DEFECTS with a note
+each. They are never stale: one token is not in every sample, so not
+reaching it proves nothing, and it leaves when its defect is fixed.
+The lists live in this file, not beside it: a separate data file would be a
 path no gate watches (scripts/gate-map/unseen.txt), and run.py already is one
 recorded reason (nightly only), so the pins add no new unwatched path.
 
@@ -90,9 +104,9 @@ when anything is found.
 """
 
 import argparse
+import hashlib
 import io
 import os
-import random
 import re
 import shutil
 import subprocess
@@ -101,20 +115,43 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# Pinned on 2026-10-06 (the job's first run: 15 findings, 13 keys after the
-# opener rule in judge_parse excused the one `unclosed` report that is right).
-# This list only shrinks: a key the run no longer finds fails the run until its
-# line is deleted here, and a key not listed fails it as new. The first
-# diagnostic of each is more than 2 lines from the one-token edit.
-# 2026-10-08 (issue #577): lint, testrun and the new bytecode finding were one
-# defect, the indentation heuristic of place_unclosed naming a call whose `)`
-# trails its last argument; fixed in the parser, so lint and testrun left.
-# stdsrc left because the generated file changed and no mutant of it reaches
-# the key any more (the draw is seeded by the file's content). Added, as
-# judged not a recovery defect: stdlib (`match () => {..}` reads the lambda as
-# the scrutinee, so the missing `{` is reported after its three lines) and
-# alloca_diff (an unclosed `{` the parser runs on past, to be diagnosed).
+# 2026-10-10 (issue #577): the sampling became stable per site (see
+# "Determinism"), which replaced the whole sample once; the keys below are
+# what the first stable sample finds. They are stale-judged: a key here that
+# the run stops producing fails it until its line goes, which now means the
+# code around the site changed or the defect was fixed, not a reshuffle.
+# None of them has been triaged one by one; the judge for each is in
+# `run.py --known '' --only <file>`.
 KNOWN_KEYS = """\
+b near packages/tileir/src/bytecode.dawn
+b near packages/tileir/src/lower.dawn
+b near scripts/spike-native/catch_kinds.dawn
+b near scripts/tile-gpu-diff/red_diff.dawn
+b near scripts/tile-gpu-diff/shape_diff.dawn
+b near selfhost/src/check/types.dawn
+b near site/src/gen/gpu.dawn
+b near site/src/gen/search.dawn
+b near std/memfs.dawn
+d decl-lost playground/src/play/exec.dawn
+"""
+# Known defects and judge-too-strict cases found by the samples before the
+# 2026-10-10 change. A one-token witness is not in every sample, so these are
+# NOT judged stale (a run that does not reach one proves nothing); a line
+# leaves when its defect is fixed, and a run that finds one stays green.
+#   gzip, effect_type_args, unused_imports, complexity, record_update_native,
+#   lexer/main, only_in_test, search_body, effects: pinned 2026-10-06, the
+#     first run; the diagnostic is more than 2 lines from the edit.
+#   stdlib: property too strict (`match () => {..}` reads the lambda as the
+#     scrutinee, so the missing `{` is reported after its three lines).
+#   probe: inserting `Show` before `{` makes a record literal, reported late.
+#   alloca_diff, dyn_diff: REAL. Recovery from a deleted `}` gives up on a
+#     mismatched closer and the first diagnostic lands 20 to 30 lines on
+#     (#577, #620); needs a redesign of mismatched-bracket recovery.
+#   traits: REAL, low severity. `assert cmp("b", "a") > 0` without the `0`:
+#     the newline after a trailing binary operator is swallowed, so the
+#     report lands on the statement 5 lines later (#577).
+KNOWN_DEFECTS = """\
+b near examples/traits/traits.dawn
 b near packages/inflate/src/gzip.dawn
 b near scripts/checker-corpus/cases/effect_type_args.dawn
 b near scripts/checker-corpus/cases/unused_imports.d/entry.dawn
@@ -124,6 +161,7 @@ b near scripts/map-reuse-contract/record_update_native.dawn
 b near scripts/slab-bench/workloads/lexer/src/main.dawn
 b near scripts/table-freight/only_in_test.dawn
 b near scripts/tile-gpu-diff/alloca_diff.dawn
+b near scripts/tile-gpu-diff/dyn_diff.dawn
 b near selfhost/src/driver/stdlib.dawn
 b near site/play-ui/samples/effects.dawn
 b near site/src/gen/search_body.dawn
@@ -133,6 +171,7 @@ SPAN = re.compile(r"@(\d+)\.\.(\d+)$")
 BRACKETS = {"LPAREN", "RPAREN", "LBRACKET", "RBRACKET", "LBRACE", "RBRACE"}
 TOP_LEVEL = "are allowed at module top level"
 NEAR = 2  # lines either side of the mutated token
+RATE = 0.02
 
 # ---------------------------------------------------------------- toolchain
 
@@ -384,40 +423,80 @@ def enclosing_openers(code, at):
     return [o for o, c in pair.items() if o < c and o < at <= c]
 
 
-def mutate(text, toks, rng, n):
-    """n (mutant text, kind, at, shift, neutral, what, partner) for one file."""
+def digest(*parts):
+    """A float in [0, 1) that depends on the parts and on nothing else."""
+    h = hashlib.sha256("\x00".join(str(p) for p in parts).encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big") / 2.0 ** 64
+
+
+CAP = 30  # expected mutants per file, before the rate halves
+WINDOW = 3  # tokens either side of a site in its key
+
+
+def mutate(text, toks, seed, f, rate):
+    """(mutant text, kind, at, shift, neutral, what, partner) for one file.
+
+    Every site decides for itself whether it is mutated, from a key made of
+    the seed, the file's path and the texts of the WINDOW tokens either side
+    of it, never from the file's content as a whole or from a position in a
+    stream of draws. So an edit changes the sample only for the sites whose
+    window it touches, and a finding elsewhere in the file stays found
+    (see "Determinism" in the header). `rate` is the share of code tokens that
+    get a deletion or an insertion; interpolation closers have a rate of
+    their own, ten times as high, because there are few of them."""
     code = [t for t in toks if t.kind not in ("NEWLINE", "EOF", "COMMENT")
             and "\n" not in text[t.lo:t.hi]]
     if not code:
         return []
+    words = [text[t.lo:t.hi] for t in code]
+
+    def window(i):
+        return "\x01".join(words[max(0, i - WINDOW):i + WINDOW + 1])
+
+    wins = [window(i) for i in range(len(code))]
+    wh = [int(digest(w) * 2.0 ** 53) for w in wins]
     closers = interp_closers(text, toks)
     pair = partners(code)
-    out, made = [], set()
-    for _ in range(n):
-        r = rng.random()
-        if closers and r < 0.1:
-            at = rng.choice(closers)
+    # a big file would otherwise write a mutant per 330 tokens, each a copy of
+    # the file (stdsrc: 700 megabytes); past CAP expected mutants the rate
+    # halves per doubling, which is a subset of the rate before it, so an
+    # edit that does not cross a power of two does not move the sample
+    while rate * len(code) > CAP:
+        rate /= 2
+    out = []
+    for at in closers:
+        # the window of an interpolation closer is the source around it
+        key = (seed, f, "interp", text[max(0, at - 24):at + 24])
+        if digest(*key, "pick") < min(1.0, rate * 10):
             out.append((text[:at] + " " + text[at + 1:], "delete-interp", at, 0, True,
                         "deleted an interpolation's `}`", None))
-        elif r < 0.55:
-            t = rng.choice(code)
-            word = text[t.lo:t.hi]
+    for i, t in enumerate(code):
+        key = (seed, f, wins[i])
+        if digest(*key, "pick") >= rate:
+            continue
+        word = words[i]
+        if digest(*key, "kind") < 0.5:
             neutral = t.kind not in BRACKETS
             out.append((text[:t.lo] + " " * (t.hi - t.lo) + text[t.hi:],
                         "delete-" + ("other" if neutral else "bracket"), t.lo, 0, neutral,
                         f"deleted `{word[:30]}`", pair.get(t.lo)))
         else:
-            t = rng.choice(code)
-            src = rng.choice(code)
-            word = text[src.lo:src.hi]
-            ins = word + " "
+            # the token copied in is the one whose own window ranks highest
+            # for this site (rendezvous hashing): it changes only when that
+            # token, or this site's window, changes
+            site = int(digest(*key, "src") * 2.0 ** 53)
+            j = max(range(len(code)), key=lambda j: ((wh[j] ^ site) * 0x9E3779B97F4A7C15) % 2 ** 64)
+            src = code[j]
+            sw = words[j]
+            ins = sw + " "
             if t.lo > 0 and not text[t.lo - 1].isspace():
                 ins = " " + ins
             neutral = src.kind not in BRACKETS
             out.append((text[:t.lo] + ins + text[t.lo:],
                         "insert-" + ("other" if neutral else "bracket"), t.lo, len(ins), neutral,
-                        f"inserted `{word[:30]}` before `{text[t.lo:t.hi][:30]}`", None))
-    # the same token drawn twice is one mutant
+                        f"inserted `{sw[:30]}` before `{word[:30]}`", None))
+    # the same text drawn twice is one mutant
+    made = set()
     return [m for m in out if not (m[0] in made or made.add(m[0]))]
 
 
@@ -479,11 +558,11 @@ def judge_parse(mut, text, starts, root0, bodies, diags, root):
 # ---------------------------------------------------------------- driver
 
 
-def read_known(path):
+def read_known(path, text=None):
     """The pinned keys: (property, rule, file) per non-comment line, from
-    `path` or, when it is None, from KNOWN_KEYS."""
+    `path` or, when it is None, from `text` (default KNOWN_KEYS)."""
     keys = set()
-    with (open(path, encoding="utf-8") if path else io.StringIO(KNOWN_KEYS)) as fh:
+    with (open(path, encoding="utf-8") if path else io.StringIO(KNOWN_KEYS if text is None else text)) as fh:
         for n, line in enumerate(fh, 1):
             line = line.strip()
             if line and not line.startswith("#"):
@@ -494,10 +573,11 @@ def read_known(path):
     return keys
 
 
-def ratchet(found, known, full):
-    """(new keys, stale keys): what the run found that is not pinned, and,
-    when it covered everything, what is pinned that it no longer found."""
-    return sorted(found - known), (sorted(known - found) if full else [])
+def ratchet(found, known, full, defects=frozenset()):
+    """(new keys, stale keys): what the run found that is neither pinned nor a
+    known defect, and, when it covered everything, what is pinned that it no
+    longer found (a known defect is never stale: see KNOWN_DEFECTS)."""
+    return sorted(found - known - defects), (sorted(known - found) if full else [])
 
 
 def tracked(pattern):
@@ -521,7 +601,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dawn", default=os.path.join(ROOT, "bin", "dawn"))
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--mutants", type=int, default=12, help="mutants per file")
+    ap.add_argument("--rate", type=float, default=RATE,
+                    help="the share of code tokens mutated (interpolation closers: 10x)")
     ap.add_argument("--check-paths", default=".",
                     help="a regex: mutants of these files that still parse also go through "
                          "__check (default: every file)")
@@ -576,10 +657,9 @@ def main():
         text, _, _, _, toks = info[f]
         code = [t for t in toks if t.kind not in ("NEWLINE", "EOF", "COMMENT")
                 and "\n" not in text[t.lo:t.hi]]
-        rng = random.Random(f"{a.seed}:{f}")
         stem = f[:-len(".dawn")]
         for k, (mt, kind, off, shift, neutral, what, partner) in enumerate(
-                mutate(text, toks, rng, a.mutants)):
+                mutate(text, toks, a.seed, f, a.rate)):
             mp = f"{stem}__m{k}.dawn"
             write(at(mp), mt)
             muts.append((f, Mutant(mp, kind, off, shift, neutral, what, partner,
@@ -642,11 +722,12 @@ def main():
     if a.known != "":
         known = read_known(a.known)
         full = (a.only is None and a.seed == ap.get_default("seed")
-                and a.mutants == ap.get_default("mutants")
+                and a.rate == ap.get_default("rate")
                 and a.check_paths == ap.get_default("check_paths"))
-        new, stale = ratchet(set(seen), known, full)
+        defects = set() if a.known is not None else read_known(None, KNOWN_DEFECTS)
+        new, stale = ratchet(set(seen), known, full, defects)
         print(f"{len(findings)} findings in {len(seen)} (property, rule, file) keys; "
-              f"{len(known)} pinned, {len(new)} new, {len(stale)} stale")
+              f"{len(known)} pinned (+{len(defects)} known defects), {len(new)} new, {len(stale)} stale")
         for k in new:
             print("NEW   " + " ".join(k))
         for k in stale:
@@ -769,9 +850,38 @@ def self_test(dawn):
     expect("(ratchet) a pinned key passes", ratchet({k1}, {k1}, True) == ([], []))
     expect("(ratchet) an unpinned key is new", ratchet({k1, k2}, {k1}, True) == ([k2], []))
     expect("(ratchet) a pin nobody found is stale", ratchet({k1}, {k1, k2}, True) == ([], [k2]))
+    expect("(ratchet) a known defect is neither new nor stale",
+           ratchet({k1}, {k1}, True, {k2}) == ([], []) and ratchet({k1, k2}, {k1}, True, {k2}) == ([], []))
     expect("(ratchet) a narrow run leaves stale pins alone", ratchet({k1}, {k1, k2}, False) == ([], []))
     closers = interp_closers('f("a${x}b${g("}")}")', [Tok("STRING", 2, 19, ["T:a", "C:6:x", "T:b", "C:11:g(\"}\")"])])
     expect("an interpolation's closer is found past a nested string", closers == [7, 17])
+    # the sample is stable: editing one function leaves the mutants of the
+    # others as they were (compared by the text they leave outside the edit)
+    class T:
+        def __init__(self, kind, lo, hi):
+            self.kind, self.lo, self.hi, self.parts = kind, lo, hi, []
+
+    def toks_of(src):
+        return [T("LPAREN" if m.group() == "(" else "ID", m.start(), m.end())
+                for m in re.finditer(r"\w+|[^\w\s]", src)]
+
+    def fn(k, body):
+        return f"fn f{k}(x: Int) -> Int = {{\n  let a = x + {body}\n  a * {k} - x\n}}\n\n"
+
+    before = "".join(fn(k, k) for k in range(80))
+    after = "".join(fn(k, 7 if k == 40 else k) for k in range(80))
+    cut = before.index("fn f40"), before.index("fn f41")
+    delta = len(after) - len(before)
+    ma = mutate(before, toks_of(before), 1, "x.dawn", 0.012)
+    mb = mutate(after, toks_of(after), 1, "x.dawn", 0.012)
+    outside_a = {(m[1], m[2]) for m in ma if not cut[0] - 40 <= m[2] < cut[1] + 40}
+    outside_b = {(m[1], m[2] if m[2] < cut[0] else m[2] - delta) for m in mb
+                 if not cut[0] - 40 <= m[2] < cut[1] + 40 + delta}
+    expect("(sample) a sample of the file is drawn", len(ma) > 10)
+    expect("(sample) editing one function leaves the others' mutants alone",
+           outside_a == outside_b)
+    expect("(sample) the same file draws the same mutants",
+           [m[0] for m in ma] == [m[0] for m in mutate(before, toks_of(before), 1, "x.dawn", 0.012)])
     # a launcher that dies on one file: the batch is halved down to it
     tmp = tempfile.mkdtemp(prefix="diag-properties-self-")
     fake = os.path.join(tmp, "dawn")
