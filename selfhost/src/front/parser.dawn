@@ -291,6 +291,44 @@ fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
   true
 }
 
+## The note on an unclosed-delimiter report that says where the closer was
+## wanted: before the first closer of another kind, when a lost closer showed
+## there, else at the end of the file.
+fn ran_out_note(toks: List[Token], open_all: List[Int], first_bad: Option[Int], eof: Token) -> Note = {
+  let o = toks[open_all[len(open_all) - 1]]
+  match first_bad {
+    Some(b) -> Note {
+      msg: "expected `" ++ closer_text(o.kind) ++ "` before this `" ++ toks[b].text ++ "`",
+      lo: toks[b].lo,
+      hi: toks[b].hi
+    }
+    None -> eof_note(o, eof)
+  }
+}
+
+## Whether a token continues an expression across lines when it ends or leads
+## a line: the binary operators and `.`. The brackets, `,`, `=` and `=>` also
+## end a line without ending a statement, but what follows them starts a new
+## expression at its own indent, so they are not in the set.
+fn is_bin_cont(k: TokKind) -> Bool =
+  match k {
+    PLUS | MINUS | STAR | SLASH | PERCENT | PLUSPLUS | PIPEGT | PIPE | AMPAMP |
+      PIPEPIPE | AMP | CARET | SHL | SHR | USHR | EQEQ | NEQ | LT | LE | GT |
+      GE | DOT -> true
+    _ -> false
+  }
+
+## Whether the line holding token `i` is a continuation of an expression begun
+## on an earlier line: the line leads with a binary operator, or the token
+## before its first one ends the line above with one (the lexer drops the
+## newline there). The indent of such a line is the expression's own, not the
+## statement's, so it says nothing about where a block opened on it belongs.
+fn on_continuation_line(toks: List[Token], cps: List[Char], i: Int) -> Bool = {
+  var f = i
+  while f > 0 && same_line(cps, toks[f - 1].lo, toks[f].lo) { f = f - 1 }
+  is_bin_cont(toks[f].kind) || (f > 0 && is_bin_cont(toks[f - 1].kind))
+}
+
 ## Move the report of a delimiter left open at end of file to the opener.
 ##
 ## The parser only notices a missing closer when it runs out of tokens, so the
@@ -304,16 +342,20 @@ fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
 ##
 ## the `if` block takes the last `}` and the function body is what stays
 ## open. This rescans the token stream for brackets. When it ends with an
-## opener still open, and no closer was ever mismatched (then the stream says
-## nothing trustworthy about pairing and the diagnostics stay as they are),
+## opener still open, or a closer found others of a different kind open above
+## its own (they are the unclosed ones, and the report names a `{` among them;
+## #670), and no closer was ever stray (then the stream says nothing
+## trustworthy about pairing and the diagnostics stay as they are),
 ## the suspect is picked with rustc's indentation heuristic
 ## (`report_suspicious_mismatch_block` in rustc_parse/lexer/diagnostics.rs):
 ## among the pairs whose closer starts its line and whose opening and closing
 ## lines are indented differently (a closer that trails other tokens sits at
 ## the indent of its continuation line, which says nothing about where it
 ## belongs, as in `list.fold(` / `  xs, 0, f))`),
-## drop those enclosed by a pair that is indented alike, and take the one
-## that opens last. Unlike rustc, only pairs after the outermost unclosed
+## drop those enclosed by a pair that is indented alike and those opened on a
+## line that continues an expression (`a &&` above, or a leading operator: its
+## indent is the expression's, not the block's), and take the one that opens
+## last. Unlike rustc, only pairs after the outermost unclosed
 ## opener count, since a pair before it cannot have taken its closer. With no
 ## suspect the innermost unclosed opener is named.
 ##
@@ -324,6 +366,8 @@ fn same_line(cps: List[Char], a: Int, b: Int) -> Bool = {
 ## (docs/diag-notes-design.md §6).
 fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Diag] = {
   var stack: List[Int] = []
+  var lost: List[Int] = []
+  var first_bad: Option[Int] = None
   var pairs: List[DelimPair] = []
   var i = 0
   while i < len(toks) {
@@ -331,23 +375,35 @@ fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Di
     if closer_of(k) != None {
       stack = stack ++ [i]
     } else if is_closer(k) {
-      if len(stack) == 0 { return ds }
-      let top = stack[len(stack) - 1]
-      if closer_of(toks[top].kind) != Some(k) { return ds }
-      pairs = pairs ++ [DelimPair { open: top, close: i }]
-      stack = list.take(stack, len(stack) - 1)
+      # The closer pairs with the nearest opener of its own kind. Openers
+      # above it were never closed: a lost closer shows here, where the
+      # next closer of another kind reaches them, and this scan used to give
+      # up at that point (#670). A closer no opener wants is stray, which
+      # says nothing trustworthy about pairing, so the diagnostics stay.
+      var j = len(stack) - 1
+      while j >= 0 && closer_of(toks[stack[j]].kind) != Some(k) { j = j - 1 }
+      if j < 0 { return ds }
+      if j < len(stack) - 1 {
+        if first_bad == None { first_bad = Some(i) }
+        lost = lost ++ list.drop(stack, j + 1)
+      }
+      pairs = pairs ++ [DelimPair { open: stack[j], close: i }]
+      stack = list.take(stack, j)
     }
     i = i + 1
   }
-  if len(stack) == 0 { return ds }
+  let open_all = lost ++ stack
+  if len(open_all) == 0 { return ds }
   let eof = toks[len(toks) - 1]
-  let outer = toks[stack[0]].lo
+  let first_open = if len(lost) > 0 && (len(stack) == 0 || lost[0] < stack[0]) { lost[0] } else { stack[0] }
+  let outer = toks[first_open].lo
+  let ran_out = ran_out_note(toks, open_all, first_bad, eof)
   var suspect: Option[DelimPair] = None
   for m in pairs {
     let mo = toks[m.open].lo
     let mc = toks[m.close].lo
     if mo > outer && not same_line(cps, mo, mc) && first_on_line(cps, mc)
-      && indent_at(cps, mo) != indent_at(cps, mc) {
+      && indent_at(cps, mo) != indent_at(cps, mc) && not on_continuation_line(toks, cps, m.open) {
       var enclosed = false
       for w in pairs {
         let wo = toks[w.open].lo
@@ -363,6 +419,14 @@ fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Di
       if not enclosed && later { suspect = Some(m) }
     }
   }
+  # A lost closer that showed at a closer of another kind is a `}` only when
+  # the opener named is a `{`: a newline inside `(` and `[` is an error the
+  # parser places at the line that cut it off (#551), so nothing is moved.
+  let culprit = match suspect {
+    Some(m) -> toks[m.open]
+    None -> toks[open_all[len(open_all) - 1]]
+  }
+  if first_bad != None && culprit.kind != LBRACE { return ds }
   let d = match suspect {
     Some(m) -> {
       let o = toks[m.open]
@@ -377,16 +441,16 @@ fn place_unclosed(toks: List[Token], cps: List[Char], ds: List[Diag]) -> List[Di
             lo: c.lo,
             hi: c.hi
           },
-          eof_note(toks[stack[len(stack) - 1]], eof)
+          ran_out
         ]
       }
     }
     None -> {
-      let o = toks[stack[len(stack) - 1]]
+      let o = toks[open_all[len(open_all) - 1]]
       Diag {
         ..pd_h("unclosed `" ++ o.text ++ "`", o.lo, o.hi,
           "add the `" ++ closer_text(o.kind) ++ "` this `" ++ o.text ++ "` is missing"),
-        notes: [eof_note(o, eof)]
+        notes: [ran_out]
       }
     }
   }
