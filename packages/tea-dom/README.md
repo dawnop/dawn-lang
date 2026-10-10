@@ -104,7 +104,11 @@ is told event names and payload kinds, and sends back an address, an event
 name and at most one string, which the guest resolves against the current
 tree. The model crosses as opaque text, so a turn is a function of its inputs
 and one transcript replays alike on the JVM, natively and on wasm. A `Cmd`
-adds updates inside the turn and nothing on the wire.
+adds updates inside the turn; the one exception is `Fetch`, which rides the
+reply as `"fetch":[{"url","tag"}]` for the host to run and answers as a later
+`supply` request (`{"op":"supply","model","tag","ok","body"|"error"}`). An
+application that commands fetches passes `turn_shown` / `serve_with_state`
+its reading of the outcome, `supplied: fn(tag, Result[String, String]) -> M`.
 
 ## HTML
 

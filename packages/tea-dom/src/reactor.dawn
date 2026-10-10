@@ -40,11 +40,11 @@
 use std/io
 use std/reactor as session
 use std/str
-use tea_core/cmd.{Cmd, NoCmd, SendMsg, fold_msg}
+use tea_core/cmd.{Cmd, NoCmd, SendMsg, BatchCmd, Fetch, fold_msg, fold_cmds}
 use tea_core/diff.{Patch, Replace, diff}
 use node.{Node, Text, Elem, On, NoData, Value, Key, deliver}
 use route
-use wire.{Init, Event, Bad, decode_request, reply_ok, reply_err}
+use wire.{Init, Event, Supply, Bad, decode_request, reply_ok, reply_ok_asking, reply_err}
 
 ## Answer one request line.
 ##
@@ -68,6 +68,10 @@ use wire.{Init, Event, Bad, decode_request, reply_ok, reply_err}
 ##            whatever the command asked for after it, and the reply is the
 ##            new model plus `diff(old, new)`. One reply per request either
 ##            way: a command adds updates, never lines.
+##   `supply` the host answering a `Fetch` an earlier reply asked for (see
+##            `turn_shown`). Only the stateful entry points take it; this one
+##            answers `bad-request`, and a `Fetch` commanded here panics in
+##            `fold_msg`, because nothing could ever answer it.
 ##
 ## `M: Eq` and nothing else. The `Fill` bound this used to carry is gone with
 ## the trait: a listener holds the function, so there is nothing for an
@@ -136,6 +140,7 @@ pub fn turn_with_flags[Mo, M](
       let root: Patch[Node[M]] = Patch { path: [], op: Replace(w: view(m0)) }
       reply_ok(encode(m0), [root])
     }
+    Supply(_, tag, _) -> reply_err("bad-request", no_supply(tag))
     Event(model, path, event, payload) -> {
       let m0 = decode(model)
       let old = view(m0)
@@ -178,9 +183,10 @@ pub fn turn_with_state[S, Mo, M](
   decode: fn(String) -> Mo,
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
+  supplied: Option[fn(String, Result[String, String]) -> M] = None,
 ) -> (Option[S], String) = {
   let (replacement, _shown, reply) =
-    turn_shown(line, state, None, init, encode, decode, update, view)
+    turn_shown(line, state, None, init, encode, decode, update, view, supplied)
   (replacement, reply)
 }
 
@@ -223,6 +229,17 @@ pub type Shown[M] = { model: String, tree: Node[M] }
 ## after a successful init or event, `None` after any refusal, whose reply
 ## carries no patches and so leaves the host's document, and the kept tree,
 ## where they were. `serve_with_state` is the only caller that keeps it.
+##
+## `supplied` is the application's reading of a fetch's outcome: the `tag` its
+## `Fetch` named and the host's `Result` (`Err` carries the host's sentence for
+## a network failure or a non-2xx status), turned into a message. It is a
+## parameter and not part of the model or the request because a function cannot
+## cross the wire, and it is not stored in the command because the guest does
+## not remember commands between turns: a `supply` is a fresh request that
+## arrives with the model like an `event`, and the tag is all the guest needs
+## to know which request this answers. With `None`, a `supply` is `bad-request`.
+## The turn that answers a `supply` is otherwise an `event` turn: same fold,
+## same diff, and it may itself command more fetches.
 pub fn turn_shown[S, Mo, M](
   line: String,
   state: Option[S],
@@ -232,6 +249,7 @@ pub fn turn_shown[S, Mo, M](
   decode: fn(String) -> Mo,
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
+  supplied: Option[fn(String, Result[String, String]) -> M] = None,
 ) -> (Option[S], Option[Shown[M]], String) =
   match decode_request(line) {
     Bad(reason) -> (None, None, reply_err("bad-request", reason))
@@ -248,11 +266,7 @@ pub fn turn_shown[S, Mo, M](
           (None, None, reply_err("bad-request", "an `event` needs a successful `init` first"))
         Some(kept) -> {
           let m0 = decode(model)
-          let old =
-            match shown {
-              Some(s) if s.model == model -> s.tree
-              _ -> view(kept, m0)
-            }
+          let old = held_tree(kept, shown, model, m0, view)
           match route.at(old, path, event) {
             None ->
               (None, None, reply_err(
@@ -262,32 +276,70 @@ pub fn turn_shown[S, Mo, M](
             Some(listener) ->
               match settle(listener, payload) {
                 Err(why) -> (None, None, reply_err("bad-request", why))
-                Ok(msg) -> {
-                  let m1 = fold_msg(m0, msg, (acc, x) => update(kept, acc, x))
-                  let text = encode(m1)
-                  let new = view(kept, m1)
-                  (None, Some(Shown { model: text, tree: new }), reply_ok(text, diff(old, new)))
-                }
+                Ok(msg) -> folded(kept, old, m0, msg, encode, update, view)
               }
           }
         }
       }
+    Supply(model, tag, outcome) ->
+      match (state, supplied) {
+        (None, _) ->
+          (None, None, reply_err("bad-request", "a `supply` needs a successful `init` first"))
+        (_, None) -> (None, None, reply_err("bad-request", no_supply(tag)))
+        (Some(kept), Some(to_msg)) -> {
+          let m0 = decode(model)
+          folded(
+            kept,
+            held_tree(kept, shown, model, m0, view),
+            m0,
+            to_msg(tag, outcome),
+            encode,
+            update,
+            view,
+          )
+        }
+      }
   }
 
-# What arrived against what was asked for, and the message that results.
-#
-# A mismatch is refused rather than defaulted or dropped. The listener said
-# what it wanted and the host was told; a payload arriving where none was
-# declared, or missing where one was, means the two are looking at different
-# trees, which is the same desync `route.at` answering `None` reports and gets
-# the same treatment. Papering over it would turn a wrong reading -- a host
-# that sends `ev.key` where `ev.target.value` was asked for, say -- into a
-# message quietly built from the wrong text, and the transcripts would go on
-# being green.
-#
-# A `NoData` listener is handed `""` rather than given a second shape. It
-# declared that it wants nothing, so what it is handed cannot matter, and
-# `on_click` builds a function that ignores its argument.
+# The tree the host is holding for `model`: the kept one when it is exactly the
+# text the turn carries, and a fresh `view` of the decoded model otherwise (the
+# invalidation rule in `turn_shown`'s comment).
+fn held_tree[S, Mo, M](
+  kept: S,
+  shown: Option[Shown[M]],
+  model: String,
+  m0: Mo,
+  view: fn(S, Mo) -> Node[M],
+) -> Node[M] =
+  match shown {
+    Some(s) if s.model == model -> s.tree
+    _ -> view(kept, m0)
+  }
+
+# The second half of an event turn, and the whole of a supply turn: fold one
+# message the host did not name (a listener's, or the application's reading of
+# a fetch's outcome) and answer the new model, the diff, and any fetch that
+# folding commanded. A `supply` is an ordinary turn against whatever the model
+# is by then, which is why it shares this with `event` and nothing else.
+fn folded[S, Mo, M](
+  kept: S,
+  old: Node[M],
+  m0: Mo,
+  msg: M,
+  encode: fn(Mo) -> String,
+  update: fn(S, Mo, M) -> (Mo, Cmd[M]),
+  view: fn(S, Mo) -> Node[M],
+) -> (Option[S], Option[Shown[M]], String) = {
+  let (m1, asked) = fold_cmds(m0, msg, (acc, x) => update(kept, acc, x))
+  let text = encode(m1)
+  let new = view(kept, m1)
+  (None, Some(Shown { model: text, tree: new }), reply_ok_asking(text, diff(old, new), asked))
+}
+
+fn no_supply(tag: String) -> String =
+  "this application takes no `supply` (for `" ++ tag ++ "`): it was built without a "
+  ++ "function from a fetch's outcome to a message"
+
 fn settle[M](listener: On[M], payload: Option[String]) -> Result[M, String] =
   match (listener.payload, payload) {
     (NoData, None) -> Ok(deliver(listener, ""))
@@ -385,6 +437,7 @@ pub fn serve_with_state[S, Mo, M](
   decode: fn(String) -> Mo,
   update: fn(S, Mo, M) -> (Mo, Cmd[M]),
   view: fn(S, Mo) -> Node[M],
+  supplied: Option[fn(String, Result[String, String]) -> M] = None,
 ) -> Unit !io =
   session.serve((live: Option[Live[S, M]], line: String) => {
     if str.trim(line) == "" {
@@ -403,7 +456,7 @@ pub fn serve_with_state[S, Mo, M](
           None -> None
         }
       let (replacement, next_shown, reply) =
-        turn_shown(line, state, shown, init, encode, decode, update, view)
+        turn_shown(line, state, shown, init, encode, decode, update, view, supplied)
       (relive(live, replacement, next_shown), Some(reply))
     }
   }, e => reply_err("panic", e.message))
@@ -828,3 +881,109 @@ fn vw_twice(m: Counter) -> Node[Msg] =
       key: None,
     ),
   ], key: None)
+
+# ---- fetch ----------------------------------------------------------------
+#
+# A page that loads one resource: the model is a status word, the button asks
+# for the resource, and what comes back (or fails to) is a message in a later
+# turn. `turn_with_state` is not `!io`, which is the pure-guest boundary stated
+# as a type: everything these tests drive is a function of its lines, and the
+# only thing that ever leaves the guest is the request it names.
+
+type Loader = { status: String }
+
+type LoaderMsg =
+  | Load
+  | Got(text: String)
+  | Failed(why: String)
+  | Chain
+derive Show
+
+fn load_enc(m: Loader) -> String = m.status
+
+fn load_dec(s: String) -> Loader = Loader { status: s }
+
+fn load_init(_flags: Option[String]) -> (Int, Loader) = (0, Loader { status: "idle" })
+
+fn load_upd(_k: Int, m: Loader, msg: LoaderMsg) -> (Loader, Cmd[LoaderMsg]) =
+  match msg {
+    Load -> (Loader { status: "loading" }, Fetch(url: "/data.json", tag: "data"))
+    Got(text) -> (Loader { status: "got:" ++ text }, NoCmd)
+    Failed(why) -> (Loader { status: "failed:" ++ why }, NoCmd)
+    Chain -> (m, BatchCmd(cmds: [
+      Fetch(url: "/one", tag: "one"),
+      Fetch(url: "/two", tag: "two"),
+    ]))
+  }
+
+fn load_vw(_k: Int, m: Loader) -> Node[LoaderMsg] =
+  Elem(tag: "div", props: [], on: [
+    On { event: "click", payload: NoData, to_msg: _p => Load },
+    On { event: "dblclick", payload: NoData, to_msg: _p => Chain },
+  ], kids: [Text(s: m.status)], key: None)
+
+fn load_supplied(tag: String, outcome: Result[String, String]) -> LoaderMsg =
+  match outcome {
+    Ok(body) -> Got(text: tag ++ "=" ++ body)
+    Err(why) -> Failed(why: tag ++ "=" ++ why)
+  }
+
+fn load_ask(line: String) -> String = {
+  let (_, out) = turn_with_state(line, Some(0), load_init, load_enc, load_dec,
+    load_upd, load_vw, Some(load_supplied))
+  out
+}
+
+test "a command's fetch leaves the guest as a request and nothing else happens" {
+  let out = load_ask("{\"op\":\"event\",\"model\":\"idle\",\"path\":[],\"event\":\"click\"}")
+  # `update` ran (the status moved) and the request rides after the patches.
+  assert out ==
+    "{\"ok\":true,\"model\":\"loading\",\"patches\":" ++
+    "[{\"path\":[0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"loading\"}}]," ++
+    "\"fetch\":[{\"url\":\"/data.json\",\"tag\":\"data\"}]}"
+}
+
+test "a supplied body is the next turn, against the model the host holds" {
+  let out = load_ask("{\"op\":\"supply\",\"model\":\"loading\",\"tag\":\"data\",\"ok\":true,\"body\":\"{}\"}")
+  assert out ==
+    "{\"ok\":true,\"model\":\"got:data={}\",\"patches\":" ++
+    "[{\"path\":[0],\"op\":\"replace\",\"node\":{\"t\":\"text\",\"s\":\"got:data={}\"}}]}"
+}
+
+test "a failed fetch is a value the application matches on, not a failed turn" {
+  let out = load_ask("{\"op\":\"supply\",\"model\":\"loading\",\"tag\":\"data\",\"ok\":false,\"error\":\"HTTP 404\"}")
+  assert str.starts_with(out, "{\"ok\":true,\"model\":\"failed:data=HTTP 404\"")
+  assert not str.contains(out, "\"kind\"")
+}
+
+test "one turn may ask for several fetches and they keep their order" {
+  let out = load_ask("{\"op\":\"event\",\"model\":\"idle\",\"path\":[],\"event\":\"dblclick\"}")
+  assert str.contains(out, "\"fetch\":[{\"url\":\"/one\",\"tag\":\"one\"},{\"url\":\"/two\",\"tag\":\"two\"}]}")
+}
+
+test "a supply to an application with no reading of it is refused, not dropped" {
+  let (_, out) = turn_with_state(
+    "{\"op\":\"supply\",\"model\":\"loading\",\"tag\":\"data\",\"ok\":true,\"body\":\"x\"}",
+    Some(0), load_init, load_enc, load_dec, load_upd, load_vw)
+  assert str.starts_with(out, "{\"ok\":false,\"kind\":\"bad-request\",\"error\":\"this application takes no `supply`")
+}
+
+test "a supply before init is refused, and so is one on the stateless entry point" {
+  let (_, early) = turn_with_state(
+    "{\"op\":\"supply\",\"model\":\"loading\",\"tag\":\"data\",\"ok\":true,\"body\":\"x\"}",
+    None, load_init, load_enc, load_dec, load_upd, load_vw, Some(load_supplied))
+  assert str.contains(early, "a `supply` needs a successful `init` first")
+  let plain = ask("{\"op\":\"supply\",\"model\":\"0\",\"tag\":\"t\",\"ok\":true,\"body\":\"x\"}")
+  assert str.contains(plain, "\"kind\":\"bad-request\"")
+}
+
+test "the stateless entry point panics on a Fetch it could never answer" {
+  match catch_panic(() => turn("{\"op\":\"event\",\"model\":\"0\",\"path\":[2],\"event\":\"click\"}",
+    Counter { n: 0 }, enc, dec, upd_fetching, vw)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert str.contains(e.message, "this driver cannot run `Fetch`") }
+  }
+}
+
+fn upd_fetching(_m: Counter, _msg: Msg) -> (Counter, Cmd[Msg]) =
+  (Counter { n: 1 }, Fetch(url: "/x", tag: "x"))

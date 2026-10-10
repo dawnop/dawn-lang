@@ -65,8 +65,8 @@ MUTATIONS = {
     # back, matching text or not.
     "stale-tree": ((
         DOM_REACTOR,
-        '              Some(s) if s.model == model -> s.tree',
-        '              Some(s) -> s.tree',
+        '    Some(s) if s.model == model -> s.tree',
+        '    Some(s) -> s.tree',
     ),),
 
     # flags.sh: the host half of init flags, then the guest half.

@@ -9,7 +9,7 @@
 // alone and tell the page", because an error reply carries no patches by
 // construction, so there is no half-applied frame to undo.
 
-import { Reactor } from './reactor.mjs';
+import { Reactor, runFetch } from './reactor.mjs';
 import { DomHost } from './dom.mjs';
 
 /**
@@ -29,8 +29,14 @@ export async function mount(wasm, mountEl, { onError = defaultOnError, doc, flag
   const host = new DomHost(mountEl, dispatch, doc);
 
   function settle(reply) {
-    if (reply.ok) host.apply(reply.patches);
-    else onError(reply);
+    if (reply.ok) {
+      host.apply(reply.patches);
+      // The patches are in; now do what the guest asked for. Each outcome
+      // comes back as a turn of its own, whenever it arrives.
+      for (const f of reply.fetch || []) {
+        runFetch(f.url).then((outcome) => settle(reactor.supply(f.tag, outcome)));
+      }
+    } else onError(reply);
     return reply;
   }
 

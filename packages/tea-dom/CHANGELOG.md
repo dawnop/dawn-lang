@@ -2,6 +2,32 @@
 
 Newest first.
 
+## 0.4.0 (2026-10-10)
+
+The host side of tea_core 0.2.0's `Fetch` command.
+
+- Wire: a reply may carry `"fetch":[{"url","tag"}]` after its patches (absent
+  when empty, so every reply that asked for nothing is byte-identical), and a
+  new `supply` request returns the outcome: `{"op":"supply","model","tag",
+  "ok":true,"body"}` or `"ok":false,"error"`. `wire.Supply` and
+  `wire.reply_ok_asking` are new.
+- Guest: `reactor.turn_with_state`, `turn_shown` and `serve_with_state` take a
+  trailing `supplied: Option[fn(String, Result[String, String]) -> M] = None`,
+  the application's reading of an outcome. Without it a `supply` is a
+  `bad-request`. The stateless `turn`, `turn_with_flags`, `serve` and
+  `serve_with_flags` answer a `supply` the same way and panic on a commanded
+  `Fetch`.
+- Host (`js/`): `Reactor.supply(tag, outcome)` and `runFetch(url)`, which
+  answers `{ok, body}` or `{ok: false, error}` and never rejects. `worker.mjs`
+  runs a reply's fetches after posting the reply and reports each as
+  `{fetched: {tag, outcome}}`; `Remote` queues it as a turn like an event, so a
+  result never overtakes an event already in flight; `app.mjs` supplies the
+  guest directly. Relative urls resolve against the host's base (a worker's is
+  its script), so applications name resources by absolute path.
+
+Breaking only for code that matches `wire.Request` exhaustively. In 0.x the
+minor is the compatibility class, hence 0.4.0.
+
 ## 0.3.0 (2026-10-05)
 
 `render.to_html` and `render.to_document` take `at: Loc = caller()`, and a

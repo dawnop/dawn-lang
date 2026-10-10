@@ -116,6 +116,21 @@ value with nowhere to put them -- so sending some is never an error. Only
 them. A `flags` field that is present and is not a string is refused with
 `{"ok":false,"kind":"bad-request"}`, as a non-string payload is.
 
+## Fetches
+
+A reply may carry `fetch: [{url, tag}]`: the guest naming what it wants
+(`tea_core/cmd`'s `Fetch`), never doing it. The host fetches after applying the
+patches and answers with a later turn, `reactor.supply(tag, outcome)`, where
+`outcome` is `{ok: true, body}` or `{ok: false, error}` (`runFetch` makes it
+and never rejects: a network failure or a non-2xx status is a value the
+application matches on). In a worker, `worker.mjs` does the fetch and posts
+`{fetched: {tag, outcome}}`; `Remote` queues it behind any event already sent,
+because the supply's patches change the document those events were addressed
+against. Urls resolve against the host's base (a worker's is its script), so
+name resources by absolute path. A restart (`init`) does not cancel fetches in
+flight; their supplies reach the new session, which must tolerate a tag it did
+not ask for.
+
 ## Listeners and payloads
 
 An entry of `on` is either a bare event name, or `[name, kind]` where `kind`

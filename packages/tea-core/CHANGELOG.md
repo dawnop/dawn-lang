@@ -1,5 +1,19 @@
 # tea_core changelog
 
+## 0.2.0 (2026-10-10)
+
+`Cmd` gains `Fetch(url, tag)`, the first command whose answer arrives after
+the turn. It only describes a request: the host fetches and answers in a later
+turn with the same `tag`, as `Ok(body)` or `Err(reason)`. `cmd.fetches` lists
+a command's requests, `cmd.fold_cmds` folds a turn and returns them beside the
+model, and `FetchReq` is their type. Fetches count against `CMD_FOLD_LIMIT`
+with messages.
+
+Breaking: a `match` over `Cmd` must handle the new arm, and `cmd.fold_msg`
+and `fold_msgs` panic on a turn that commanded a `Fetch` (a driver with no host
+cannot answer it; dropping it would leave the application waiting forever).
+In 0.x the minor is the compatibility class, hence 0.2.0.
+
 ## 0.1.1 (2026-10-05)
 
 - `sub.elapse` keeps `waited % every_ms` past a boundary instead of

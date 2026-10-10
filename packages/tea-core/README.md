@@ -59,11 +59,17 @@ drivers take the view function as a parameter.
 
 ## Commands
 
-A `Cmd` is data: `NoCmd`, `SendMsg(msg)` (one more message in this same turn)
-and `BatchCmd(cmds)`. `cmd.fold_msg(m, msg, update)` runs a turn: the message,
-then every commanded message first in, first out. More than `CMD_FOLD_LIMIT`
-commanded messages in one turn panics rather than truncating. There is no
-command whose answer arrives after the turn yet.
+A `Cmd` is data: `NoCmd`, `SendMsg(msg)` (one more message in this same turn),
+`BatchCmd(cmds)` and `Fetch(url, tag)`. `cmd.fold_msg(m, msg, update)` runs a
+turn: the message, then every commanded message first in, first out. More than
+`CMD_FOLD_LIMIT` commanded messages or fetches in one turn panics rather than
+truncating.
+
+`Fetch` only describes a request: the host does the getting and answers in a
+later turn, with the same `tag`, as `Ok(body)` or `Err(reason)` (a network
+failure or a non-2xx status is an `Err`, not a crash). A driver that can fetch
+calls `cmd.fold_cmds`, which answers the model and the requested `FetchReq`s;
+`fold_msg` has no host to ask and panics on a turn that commanded one.
 
 ## Subscriptions
 

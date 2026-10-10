@@ -3,19 +3,37 @@
 # happen. `update` returns one alongside the new model, and the driver is the
 # only thing that acts on it.
 #
-# v2 step one has exactly one kind of command: another message. `SendMsg(msg)`
-# means "fold this message too, in this same turn", which is enough to express
-# the one shape applications were already hand-rolling before there was a
-# channel for it -- an instruction that a later message clears, smuggled
-# through the model because `update` had nowhere else to put it. `BatchCmd`
-# sequences several, and `NoCmd` is the identity that a turn with nothing to
-# say returns.
+# Step one had one kind of command: another message. `SendMsg(msg)` means
+# "fold this message too, in this same turn", which is enough to express the
+# one shape applications were already hand-rolling before there was a channel
+# for it -- an instruction that a later message clears, smuggled through the
+# model because `update` had nowhere else to put it. `BatchCmd` sequences
+# several, and `NoCmd` is the identity that a turn with nothing to say returns.
 #
-# What is deliberately absent: an io arm. A command that fetches, navigates or
-# writes needs the driver to answer *after* the turn, which is a reply the wire
-# has no op for and a re-entry `std/reactor`'s pure step callback forbids
-# (docs/oneshot-design.md §6.1). So the arms here are the ones a pure fold can
-# discharge, and everything else is step two.
+# Step two adds the first io arm, `Fetch(url, tag)`, and it is a description
+# and nothing else: the guest says "get this, and call the answer `tag`", and
+# the *host* does the getting. The old header ruled an io arm out because the
+# driver would have to answer *after* the turn, on a wire with no op for it and
+# through a re-entry `std/reactor`'s pure step callback forbids
+# (docs/oneshot-design.md §6.1). What changes is that the answer is not a
+# re-entry: it is the next turn. The host finishes the fetch on its own time,
+# then sends a `supply` request carrying the tag and the outcome, which is an
+# ordinary turn against whatever the model is by then. The guest never waits,
+# so nothing here needs a suspended computation, and the transcript still
+# replays identically on every backend because a supply is just one more line
+# of input.
+#
+# The outcome is a `Result[String, String]` handed to the application's own
+# function from (tag, outcome) to a message (`tea_dom/reactor`), and a failed
+# request -- no network, a refused connection, a non-2xx status -- is an `Err`
+# the application matches on, not a panic: whether a missing file is a
+# degraded feature or a dead page is the application's call.
+#
+# `fold_msg` is the driver that has no host to ask. It folds the messages and
+# refuses a turn that commanded a fetch, with a panic that names the arm,
+# because the alternative -- dropping the command -- would leave an application
+# waiting forever for an answer nobody was ever going to send. A driver that
+# can fetch uses `fold_cmds` and gets the requests back beside the model.
 #
 # Why a synchronous fold rather than a queue the driver drains across turns.
 # A turn is a function of its inputs on this boundary and a transcript has to
@@ -35,10 +53,22 @@ use std/str
 ## `Cmd.msg` and `Cmd.batch`; the names differ because `None` is already
 ## `Option`'s and a constructor that shadows it in every importing module is
 ## not worth the resemblance.
+##
+## `Fetch(url, tag)` asks the host to GET `url` and to answer with a `supply`
+## carrying `tag`, which the application's own function turns into a message
+## for a *later* turn. The guest only describes the request; it is not run
+## here and nothing about its answer is known in the turn that asked. `tag` is
+## the application's name for the request (the same url may be asked for twice
+## for different reasons) and is returned verbatim.
 pub type Cmd[M] =
   | NoCmd
   | SendMsg(msg: M)
   | BatchCmd(cmds: List[Cmd[M]])
+  | Fetch(url: String, tag: String)
+derive Show
+
+## One fetch a turn asked for, as the host receives it.
+pub type FetchReq = { url: String, tag: String }
 derive Show
 
 ## How many commanded messages one turn may fold before it is judged a loop.
@@ -56,9 +86,22 @@ pub fn msgs[M](c: Cmd[M]) -> List[M] =
   match c {
     NoCmd -> []
     SendMsg(m) -> [m]
+    Fetch(_, _) -> []
     BatchCmd(cs) -> {
       let empty: List[M] = []
       list.fold(cs, empty, (acc, inner) => acc ++ msgs(inner))
+    }
+  }
+
+## The fetches a command asks for, left to right, batches flattened.
+pub fn fetches[M](c: Cmd[M]) -> List[FetchReq] =
+  match c {
+    NoCmd -> []
+    SendMsg(_) -> []
+    Fetch(url, tag) -> [FetchReq { url: url, tag: tag }]
+    BatchCmd(cs) -> {
+      let empty: List[FetchReq] = []
+      list.fold(cs, empty, (acc, inner) => acc ++ fetches(inner))
     }
   }
 
@@ -67,21 +110,52 @@ pub fn msgs[M](c: Cmd[M]) -> List[M] =
 ##
 ## `step` is the application's `update`; a driver passes its own so that the
 ## fold is written once for every vocabulary rather than once per driver.
+## A driver with no host to fetch for uses this one, and a turn that commanded
+## a `Fetch` panics here (see the header).
 pub fn fold_msg[Mo, M](m: Mo, msg: M, step: fn(Mo, M) -> (Mo, Cmd[M]) !e) -> Mo !e =
-  drain(m, [msg], 0, 0, step)
+  fold_msgs(m, [msg], step)
 
 ## `fold_msg` for messages that arrive together, such as the timers a poll
 ## found due. The list is not itself commanded, so it does not count against
 ## `CMD_FOLD_LIMIT`; what the turn commands does.
-pub fn fold_msgs[Mo, M](m: Mo, queue: List[M], step: fn(Mo, M) -> (Mo, Cmd[M]) !e) -> Mo !e =
-  drain(m, queue, 0, 0, step)
+pub fn fold_msgs[Mo, M](m: Mo, queue: List[M], step: fn(Mo, M) -> (Mo, Cmd[M]) !e) -> Mo !e = {
+  let (next, wanted) = fold_cmds_all(m, queue, step)
+  if len(wanted) > 0 {
+    panic(
+      "tea_core/cmd: this driver cannot run `Fetch` (asked for "
+        ++ wanted[0].url
+        ++ "); use cmd.fold_cmds in a driver that has a host",
+    )
+  } else {
+    next
+  }
+}
+
+## `fold_msg` for a driver that can fetch: the model the turn ends with, and
+## every fetch its commands asked for, in the order they were asked.
+pub fn fold_cmds[Mo, M](
+  m: Mo,
+  msg: M,
+  step: fn(Mo, M) -> (Mo, Cmd[M]) !e,
+) -> (Mo, List[FetchReq]) !e = fold_cmds_all(m, [msg], step)
+
+fn fold_cmds_all[Mo, M](
+  m: Mo,
+  queue: List[M],
+  step: fn(Mo, M) -> (Mo, Cmd[M]) !e,
+) -> (Mo, List[FetchReq]) !e = {
+  let none: List[FetchReq] = []
+  drain(m, queue, 0, 0, none, step)
+}
 
 # The queue is first in, first out, and it grows at the end: a command's
 # messages run after everything already waiting, which is what makes a batch's
 # order the order it was written in and keeps one message's chain from cutting
 # ahead of its siblings.
 #
-# `spent` counts only what commands added. Overrunning it is a panic and not a
+# `spent` counts only what commands added, messages and fetches alike: a turn
+# that fans out a thousand fetches is the same runaway as one that fans out a
+# thousand messages. Overrunning it is a panic and not a
 # truncation because both alternatives to panicking lie: a truncated fold
 # answers with a model no sequence of messages produces, and there is no field
 # on this wire (nor any on the terminal's) in which a turn could report that it
@@ -96,14 +170,16 @@ fn drain[Mo, M](
   q: List[M],
   i: Int,
   spent: Int,
+  asked: List[FetchReq],
   step: fn(Mo, M) -> (Mo, Cmd[M]) !e,
-) -> Mo !e =
+) -> (Mo, List[FetchReq]) !e =
   if i >= len(q) {
-    m
+    (m, asked)
   } else {
     let (next, c) = step(m, q[i])
     let more = msgs(c)
-    let now = spent + len(more)
+    let wanted = fetches(c)
+    let now = spent + len(more) + len(wanted)
     if now > CMD_FOLD_LIMIT {
       panic(
         "tea_core/cmd: a turn's commands asked for more than "
@@ -111,7 +187,7 @@ fn drain[Mo, M](
           ++ " messages",
       )
     } else {
-      drain(next, q ++ more, i + 1, now, step)
+      drain(next, q ++ more, i + 1, now, asked ++ wanted, step)
     }
   }
 
@@ -244,4 +320,88 @@ fn fan_out_ok(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
   match msg {
     Bump -> (Probe { ..m, n: m.n + 1 }, BatchCmd(cmds: notes(CMD_FOLD_LIMIT)))
     _ -> probe_step(m, msg)
+  }
+
+# ---- Fetch ---------------------------------------------------------------
+#
+# `Fetch` is a description. What these pin is that asking for one runs nothing
+# (no model change, no message), that the requests come back in the order they
+# were written, and that a driver with no host refuses instead of dropping.
+
+fn fetch_step(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
+  match msg {
+    Bump -> (Probe { ..m, n: m.n + 1 }, Fetch(url: "/a.json", tag: "a"))
+    Both -> (m, BatchCmd(cmds: [
+      Fetch(url: "/b.json", tag: "b"),
+      SendMsg(msg: Bump),
+      BatchCmd(cmds: [Fetch(url: "/c.json", tag: "c"), NoCmd]),
+    ]))
+    _ -> probe_step(m, msg)
+  }
+
+test "a fetch is not a message, and fetches flatten left to right" {
+  let c: Cmd[ProbeMsg] = BatchCmd(cmds: [
+    Fetch(url: "/x", tag: "1"),
+    SendMsg(msg: Bump),
+    BatchCmd(cmds: [Fetch(url: "/y", tag: "2")]),
+  ])
+  assert msgs(c) == [Bump]
+  assert fetches(c) == [FetchReq { url: "/x", tag: "1" }, FetchReq { url: "/y", tag: "2" }]
+  let none: Cmd[ProbeMsg] = NoCmd
+  assert fetches(none) == []
+}
+
+test "fold_cmds answers the model and the requests, and runs nothing for them" {
+  let (m, asked) = fold_cmds(blank(), Bump, fetch_step)
+  # `Bump` moved the model once itself; the fetch it commanded added nothing.
+  assert m == Probe { n: 1, log: "" }
+  assert asked == [FetchReq { url: "/a.json", tag: "a" }]
+}
+
+test "fetches commanded through a batch keep their order next to messages" {
+  let (m, asked) = fold_cmds(blank(), Both, fetch_step)
+  # the batch's `SendMsg(Bump)` ran (and itself asked for /a.json, after /b and /c)
+  assert m == Probe { n: 1, log: "" }
+  assert asked == [
+    FetchReq { url: "/b.json", tag: "b" },
+    FetchReq { url: "/c.json", tag: "c" },
+    FetchReq { url: "/a.json", tag: "a" },
+  ]
+}
+
+test "a driver with no host refuses a fetch rather than dropping it" {
+  match catch_panic(() => fold_msg(blank(), Bump, fetch_step)) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert str.starts_with(e.message, "tea_core/cmd: this driver cannot run `Fetch` (asked for /a.json)")
+    }
+  }
+  # and the positive control: a fetch-free turn is untouched
+  assert fold_msg(blank(), Note(mark: "k"), fetch_step) == Probe { n: 0, log: "k" }
+}
+
+test "fetches count against the turn's limit like messages" {
+  match catch_panic(() => fold_cmds(blank(), Bump, fetch_fan_out)) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert str.starts_with(e.message,
+        "tea_core/cmd: a turn's commands asked for more than 64 messages at ")
+    }
+  }
+}
+
+fn fetch_fan_out(m: Probe, msg: ProbeMsg) -> (Probe, Cmd[ProbeMsg]) =
+  match msg {
+    Bump -> (m, BatchCmd(cmds: many_fetches(0, CMD_FOLD_LIMIT + 1, empty_cmds())))
+    _ -> probe_step(m, msg)
+  }
+
+fn empty_cmds() -> List[Cmd[ProbeMsg]] = []
+
+fn many_fetches(i: Int, n: Int, acc: List[Cmd[ProbeMsg]]) -> List[Cmd[ProbeMsg]] =
+  if i >= n {
+    acc
+  } else {
+    let one: Cmd[ProbeMsg] = Fetch(url: "/z", tag: "z")
+    many_fetches(i + 1, n, acc ++ [one])
   }

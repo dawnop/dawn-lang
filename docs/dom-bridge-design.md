@@ -490,3 +490,45 @@ todo、flags 三个演示，视图很小，省下的一次 `view` 在微秒级�
   别的应用未必），合并是应用的语义，不是桥该替它决定的。一回合的 `dawn_turn` 本身约 7 ms（§10.4），读者打字的间隔远大于此。
 - **补丁在 worker 里预先解析成 DOM 操作。** 应用补丁本来就只有几毫秒，剩下的主线程时间是浏览器自己的样式、布局与绘制
   （第十二节），搬不走。
+
+## 12. `Fetch`：tea 的 Cmd 第一个 io 臂（2026-10-10）
+
+起因是站点搜索要把索引与正文片段分开（`site-search-design.md` 第十三节）：守卫的 guest 是纯的，数据只经 `init` 的 flags 进，
+所以「按需取一个文件」必须由宿主做。这不是搜索专用的口子：`Cmd` 的 step 1 只有 `NoCmd`/`SendMsg`/`BatchCmd`，当时把 io 臂
+明确排除在外（`cmd.dawn` 旧头注），理由是回答发生在回合之后，而线上没有这个 op，`std/reactor` 的纯回调又不许重入
+（`oneshot-design.md` §6.1）。现在的做法绕开了那条理由：**回答不是重入，是下一回合。**
+
+**线。** `Fetch(url, tag)` 只是描述。一回合的命令里若有 `Fetch`，回复在补丁后多一个 `"fetch":[{"url","tag"}]`（为空时整个字段不写，
+所以没要求任何东西的回复与此前逐字节相同，已录的转录不动）。宿主应用补丁，再去取，取完发一条新请求
+`{"op":"supply","model","tag","ok":true,"body"}` 或 `"ok":false,"error"`。`supply` 与 `event` 一样带模型，
+是一个对「此刻模型」的普通回合，guest 不记得上一回合问过什么，也不需要等；`tag` 是应用给请求起的名字，原样回来。
+
+**失败是值。** 状态码非 2xx（`HTTP 404`）、网络错误、读不出 body 都变成 `Err(原因)`，由应用匹配：缺一个文件是降级还是
+死页面，是应用的判断，不是桥的。`runFetch` 永不抛、永不 reject，因为替 guest 办事的宿主没有人可抛。
+
+**guest 怎么读结果。** 函数过不了线，guest 也不在回合之间保存命令，所以应用另交一个 `supplied: fn(tag, Result[String, String]) -> M`
+给 `turn_shown`/`serve_with_state`（默认 `None`，此时 `supply` 是 `bad-request`）。无状态入口（`turn`、`turn_with_flags`）
+没有它：那里命令一个 `Fetch` 在 `fold_msg` 里 panic。没有宿主可问的驱动（`tea_term` 的 `runtime.run`）同理：
+静默丢掉命令会让应用永远等一个没人会发的回答。
+
+**宿主一侧的次序（draft 里写错的地方）。** 草案（`site-search-design.md` 13.4 的「通道」）写的是 worker 执行 fetch 后直接把结果
+回灌给 reactor。那会让 supply 抢在页面已经发出的事件之前：事件的地址是按旧文档算的，supply 的补丁会把元素挪走。
+所以 worker 只发 `{fetched: {tag, outcome}}` 给页面，页面（`Remote`）把它当一个回合排进与事件同一条队列，
+发出时才送回 worker 的 `supply`。这与 §11 的「一次只发一回合」同一条规矩，门禁里有变异体（`supply-jumps-the-queue`、
+`worker-supplies-itself`）钉着。同步宿主 `app.mjs` 没有队列，取完直接 supply。
+
+**限制。** 一回合的 `Fetch` 与 `SendMsg` 共用 `CMD_FOLD_LIMIT`（64）。跨回合的循环（supply 的回合又命令同一个 fetch）
+由应用负责，桥不限；`init` 重启不取消在飞的 fetch，其结果会进到新会话，应用要容忍不认识的 `tag`。
+
+**门禁。** `scripts/wasm-dom-contract/fetch.sh`（`run.sh` 在构建任何东西之前调用，只要 node）：`fetch.mjs` 用脚本化的
+reactor 与桩 `fetch` 驱动执行器、`worker.mjs`、`Remote`、`app.mjs`，20 条断言，十个变异体。Dawn 一侧是 `tea_core/cmd`、
+`tea_dom/wire`、`tea_dom/reactor` 的内联测试（成功、失败为值、多请求保序、无 `supplied` 与未 init 的拒绝、无状态入口 panic）。
+
+**不做的（理由）。**
+
+- **回调式 `Fetch(url, to_msg)`。** 函数过不了线，guest 也不保存命令；带 `tag` 的描述加一个应用级 `supplied` 是 Elm 之外
+  最小的做法，且命令保持可比较、可 `derive Show`。
+- **worker 自己回灌结果。** 见上，抢在在飞的事件之前。
+- **`Fetch` 带方法、头、请求体。** 第一个成员只做 GET 文本；要写（POST）时再加臂，那时才知道形状。
+- **取消与超时。** 没有真实需求；超时由应用在 `Err` 里表达或由宿主的 `fetch` 实现自己决定。
+
