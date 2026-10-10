@@ -360,7 +360,7 @@ export class ComparePane {
       this.draw(a)
       this.host.calls([])
       this.reapply()
-      this.say('Tile IR: the text the program printed.')
+      this.say(a.tile?.unmapped ? 'Tile IR. The calls could not be matched to it.' : 'Tile IR: the text the program printed.')
     } else if (outcome.kind === 'diagnostics' || outcome.kind === 'program') {
       this.errHead.textContent = outcome.kind === 'program' ? outcome.title : 'Compile error'
       this.errText.textContent = outcome.text || '(no message)'
@@ -467,6 +467,7 @@ export class ComparePane {
       if (made.length) line.dataset.i = made.join(' ')
       line.append(el('i', undefined, String(n)))
       if (pane.kind === 'c') this.cPieces(line, text, n, m)
+      else if (pane.kind === 'tile') line.append(text)
       else this.jvmPieces(line, text)
       this.lineEls.set(n, line)
       frag.appendChild(line)
