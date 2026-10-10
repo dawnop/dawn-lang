@@ -2856,12 +2856,16 @@ fn emit_units(
       }
     }
   }
-  # Written in the order the units first asked for each key, but filled from
-  # the copy `reach.dict_owners` picked rather than from the first one met:
-  # which module's slot bodies the program links against must not depend on
-  # the order std happens to load in (issue #69).
+  # Filled from the copy `reach.dict_owners` picked rather than from the first
+  # one met: which module's slot bodies the program links against must not
+  # depend on the order std happens to load in (issue #69). Written in key
+  # order, not in the order the units first asked for each key, for the same
+  # reason one step further: that order starts with whichever std module comes
+  # first, so a load that leaves modules out (docs/check-std-prune-design.md)
+  # wrote the same dictionaries in a different order. The order of these
+  # definitions means nothing to C.
   var dict_decls: List[String] = []
-  for k in dict_order {
+  for k in sort(dict_order) {
     if dict_kept(live, k) {
       match map.get(chosen, k) {
         Some(d) -> {
