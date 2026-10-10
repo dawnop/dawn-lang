@@ -109,6 +109,9 @@ reply as `"fetch":[{"url","tag"}]` for the host to run and answers as a later
 `supply` request (`{"op":"supply","model","tag","ok","body"|"error"}`). An
 application that commands fetches passes `turn_shown` / `serve_with_state`
 its reading of the outcome, `supplied: fn(tag, Result[String, String]) -> M`.
+A resource that is read-only data (not model) is folded into the retained
+state with `absorbed: fn(S, tag, Result[String, String]) -> S`, which runs
+before the message is folded.
 
 ## HTML
 
