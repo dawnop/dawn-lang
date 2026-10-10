@@ -403,6 +403,8 @@ open(f"{out}/broken.dawn", "w").write('pub fn main() -> Unit !io = println(nope)
 # manifest does not name
 tile = open(f"{root}/playground/test/tile_vadd.dawn", encoding="utf-8").read()
 open(f"{out}/tile.dawn", "w", encoding="utf-8").write(tile)
+for name in ("tile_attn", "tile_hostif", "tile_broken"):
+    open(f"{out}/{name}.dawn", "w", encoding="utf-8").write(open(f"{root}/playground/test/{name}.dawn", encoding="utf-8").read())
 open(f"{out}/tile_smuggle.dawn", "w", encoding="utf-8").write("use json/value.{Json}\npub fn smuggled(j: Json) -> Json = j\n" + tile)
 PY
 compile_body() { # program file, target
@@ -478,8 +480,14 @@ tile_ccheck() { # name, program file, extra request fields (JSON object), assert
     fail=$((fail + 1)); echo "FAIL  $1"; echo "        $(head -c 600 "$out")"
   fi
 }
-tile_ccheck "compile: a tileir program's pane is the text dawn run prints" "$CASES/tile.dawn" '{}' \
-  'len(expected)>200 and d["ok"] is True and d["phase"]=="compile-view" and d["target"]=="tile" and d["cached"] is False and d["pane"]["kind"]=="tile" and "\n".join(d["pane"]["text"])+"\n"==expected and d["pane"]["shown"]==len(d["pane"]["text"]) and d["pane"]["truncated"] is False and "calls" not in d and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw'
+tile_ccheck "compile: a tileir program's pane is the text dawn run prints, and its calls are paired with the source" "$CASES/tile.dawn" '{}' \
+  'len(expected)>200 and d["ok"] is True and d["phase"]=="compile-view" and d["target"]=="tile" and d["cached"] is False and d["pane"]["kind"]=="tile" and "\n".join(d["pane"]["text"])+"\n"==expected and d["pane"]["shown"]==len(d["pane"]["text"]) and d["pane"]["truncated"] is False and "unmapped" not in d and [c["name"] for c in d["calls"]]==["store_cell","add","load_cell","load_cell"] and [c["parent"] for c in d["calls"]]==[-1,0,1,1] and len(d["pane"]["outs"])==4 and all(o["lines"] for o in d["pane"]["outs"]) and d["gaps"]["count"]==0 and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and "explore_probe" not in raw and "@@tile" not in raw'
+tile_ccheck "compile: a kernel with a loop and carried variables is paired call by call" "$CASES/tile_attn.dawn" '{}' \
+  'd["ok"] is True and "unmapped" not in d and d["calls_total"]==25 and d["gaps"]["count"]==0 and any(c["name"]=="d_range" for c in d["calls"]) and any(c["parent"]>=0 and d["calls"][c["parent"]]["name"]=="d_range" for c in d["calls"]) and len(d["pane"]["outs"])==25 and d["src"]["first"]==14'
+tile_ccheck "compile: a kernel the pairing cannot follow keeps its plain pane and says why" "$CASES/tile_hostif.dawn" '{}' \
+  'd["ok"] is True and d["phase"]=="compile-view" and "calls" not in d and "host control flow" in d["unmapped"] and d["pane"]["kind"]=="tile" and any("cuda_tile.module" in l for l in d["pane"]["text"]) and "@@tile" not in raw'
+tile_ccheck "compile: a tileir program with a compile error answers a diagnostic, not a pane" "$CASES/tile_broken.dawn" '{}' \
+  'd["ok"] is False and d["phase"]=="compile" and "nope" in d["output"] and "pane" not in d and "@@tile" not in raw and "explore_probe" not in raw'
 tile_ccheck "compile: a dependency the visitor supplies is not honoured, so another package does not resolve" "$CASES/tile_smuggle.dawn" "{\"dawn_toml\": \"schema = 1\\nname = \\\"x\\\"\\nversion = \\\"0.0.0\\\"\\n[deps]\\ntileir = \\\"$ROOT/packages/tileir\\\"\\njson = \\\"$ROOT/packages/json\\\"\\n\"}" \
   'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"] and "pane" not in d'
 

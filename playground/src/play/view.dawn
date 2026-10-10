@@ -34,10 +34,10 @@ use std/bytes
 use json/value.{Json, JBool, JInt, JStr, JArr, JObj}
 use json/render.{render}
 use sha2/sha256
-use xmap/xmap.{Spec, Raw, Built, explore}
-use xmap/table.{Call}
-use xmap/panes.{Out}
-use xmap/source.{at}
+use xmap/xmap.{Spec, Raw, Built, Pane, explore}
+use xmap/table.{Call, parse_tile_map, table_from_tile, check_table}
+use xmap/panes.{Out, tile_pane}
+use xmap/source.{at, src_of}
 use play/contract.{Outcome, Compiled, CompileError, Timeout, render_check, render_error}
 use play/exec.{ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
 
@@ -237,7 +237,7 @@ fn lines_of(output: String) -> List[String] =
 ## The view of a program's outcome. Its standard output is the pane, cut like
 ## any pane (PANE_LIMIT, at a line end); a program that exits with anything but
 ## 0 has no Tile IR to show and answers as /run does, with its output.
-pub fn tile_view(o: Outcome) -> Tiled =
+pub fn tile_view(o: Outcome, why: String) -> Tiled =
   match o {
     CompileError(_) -> TileFailed(200, render_check(o))
     Timeout(_) -> TileFailed(200, render_check(o))
@@ -252,40 +252,85 @@ pub fn tile_view(o: Outcome) -> Tiled =
       } else {
         let lines = lines_of(output)
         let (shown, cut) = fit(lines, PANE_LIMIT)
-        let body = JObj(map.from([
-          ("pane", JObj(map.from([
-            ("kind", JStr("tile")),
-            ("total", num(len(lines))),
-            ("shown", num(shown)),
-            ("truncated", JBool(cut || truncated)),
-            ("text", JArr(map(list.take(lines, shown), l => JStr(l)))),
-          ]))),
+        let pane = JObj(map.from([
+          ("kind", JStr("tile")),
+          ("total", num(len(lines))),
+          ("shown", num(shown)),
+          ("truncated", JBool(cut || truncated)),
+          ("text", JArr(map(list.take(lines, shown), l => JStr(l)))),
         ]))
+        # why the calls are not paired with the source, when that was tried
+        let body = JObj(map.from(if why == "" { [("pane", pane)] } else { [("pane", pane), ("unmapped", JStr(why))] }))
         TileShown(str.strip_prefix(render(body), "{").unwrap_or(""))
       }
   }
 
 test "a program's output becomes the pane, one entry a line" {
-  match tile_view(Compiled("a\nb\n", 0, false, 5)) {
+  match tile_view(Compiled("a\nb\n", 0, false, 5), "") {
     TileShown(rest) -> {
       assert str.contains(rest, "\"text\":[\"a\",\"b\"]")
       assert str.contains(rest, "\"kind\":\"tile\"")
       assert str.contains(rest, "\"truncated\":false")
+      assert not str.contains(rest, "unmapped")
     }
     TileFailed(_, _) -> { assert false }
   }
 }
 
 test "a program that fails has no pane, and says what /run says" {
-  match tile_view(Compiled("boom\n", 1, false, 5)) {
+  match tile_view(Compiled("boom\n", 1, false, 5), "") {
     TileFailed(200, body) -> {
       assert str.contains(body, "\"phase\":\"run\"")
       assert str.contains(body, "\"ok\":false")
     }
     _ -> { assert false }
   }
-  match tile_view(CompileError("x")) {
+  match tile_view(CompileError("x"), "") {
     TileFailed(200, body) -> { assert str.contains(body, "\"phase\":\"compile\"") }
     _ -> { assert false }
+  }
+}
+
+test "the reason a program is not mapped rides with its plain pane" {
+  match tile_view(Compiled("a\n", 0, false, 5), "the source calls [load] and the recording ran []") {
+    TileShown(rest) -> { assert str.contains(rest, "\"unmapped\":\"the source calls [load]") }
+    TileFailed(_, _) -> { assert false }
+  }
+}
+
+## The view of a kernel recorded with its calls paired to the source: the same
+## answer a C or JVM view gives (`src`, `calls`, `pane` with an out for each
+## call, `gaps`), the pane being the Tile IR text. `map` is the pairing in the
+## format of packages/xmap (table.dawn), `golden` the text. A pairing that
+## holds no call to show (every call a `var`'s bookkeeping) answers as a plain
+## pane would.
+pub fn tile_mapped(code: String, tmap: String, golden: String) -> Tiled =
+  match parse_tile_map(tmap) {
+    Err(e) -> TileFailed(500, render_error("the Tile IR view failed: ${e}"))
+    Ok(t) -> {
+      let src = src_of(code)
+      let table = table_from_tile(src, t)
+      if len(table) == 0 {
+        tile_view(Compiled(golden ++ "\n", 0, false, 0), "the kernel makes no call the page can show")
+      } else {
+        let faults = check_table(src, table, t.first, t.last)
+        let pane = tile_pane("prog", golden, table)
+        let shown = Pane { kind: "tile", file: "prog.tile.txt", total: len(pane.text), text: pane.text, outs: pane.outs }
+        let b = Built { name: "prog", path: "prog.dawn", src: src, first: t.first, last: t.last, calls: table, panes: [shown], gaps: faults ++ pane.gaps, skipped: 0 }
+        TileShown(rest_of(b, "tile"))
+      }
+    }
+  }
+
+test "a pairing becomes calls and a pane with an out for each" {
+  let code = "fn k() = ()\n  add(a, b)\n"
+  let tmap = "kernel k\nfn 1-2\nops 3\nhead 1-2\ncall 0 -1 add 2:3-2:12 2:3-2:6 2-3\ntail 3-4\n"
+  match tile_mapped(code, tmap, "m\nadd\nret\n}") {
+    TileShown(rest) -> {
+      assert str.contains(rest, "\"calls\":[{")
+      assert str.contains(rest, "\"kind\":\"tile\"")
+      assert str.contains(rest, "\"outs\":[{\"call\":0")
+    }
+    TileFailed(_, body) -> { assert body == "" }
   }
 }

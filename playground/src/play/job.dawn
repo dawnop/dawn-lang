@@ -16,8 +16,8 @@ use std/str
 use std/io
 use std/io.{with_fs_real, with_exit_real}
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/exec.{execute, check, view_raw, tile_run, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
-use play/host.{Job, JRun, JCheck, JView, JTile, JobResult, JOutcome, JViewRaw, JBroken}
+use play/exec.{execute, check, view_raw, tile_job, TileMapped, TilePlain, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
+use play/host.{Job, JRun, JCheck, JView, JTile, JobResult, JOutcome, JViewRaw, JTileRaw, JBroken}
 
 ## Run a job in this process. What a host does once it has a permit.
 pub fn exec_job(job: Job) -> JobResult !io =
@@ -25,7 +25,7 @@ pub fn exec_job(job: Job) -> JobResult !io =
     JRun(code) -> JOutcome(execute(code))
     JCheck(code, native) -> JOutcome(check(code, native))
     JView(code, native) -> JViewRaw(view_raw(code, native))
-    JTile(code) -> JOutcome(tile_run(code))
+    JTile(code) -> JTileRaw(tile_job(code))
   }
 
 ## Strings as bytes: each is `<its UTF-8 byte length>\n` and then those bytes.
@@ -90,6 +90,10 @@ pub fn encode_result(r: JobResult) -> Bytes =
   pack(match r {
     JOutcome(o) -> ["out"] ++ outcome_fields(o)
     JBroken(m) -> ["broken", m]
+    JTileRaw(raw) -> match raw {
+      TileMapped(map, golden, ms) -> ["tile", "mapped", map, golden, "${ms}"]
+      TilePlain(o, why) -> ["tile", "plain", why] ++ outcome_fields(o)
+    }
     JViewRaw(raw) -> match raw {
       RawOk(p) -> ["raw", "ok", p.ctext, p.cmap, p.jmap, p.javap, "${p.ms}"]
       RawFail(o) -> ["raw", "fail"] ++ outcome_fields(o)
@@ -124,6 +128,13 @@ pub fn decode_result(b: Bytes) -> Option[JobResult] =
         Some(n) -> Some(JViewRaw(RawTimedOut(n)))
         None -> None
       }
+    Some(["tile", "mapped", map, golden, ms]) ->
+      match parse_int(ms) {
+        Some(n) -> Some(JTileRaw(TileMapped(map, golden, n)))
+        None -> None
+      }
+    Some(["tile", "plain", why, a, b2]) -> wrap_plain(why, [a, b2])
+    Some(["tile", "plain", why, a, b2, c, d, e]) -> wrap_plain(why, [a, b2, c, d, e])
     Some(["raw", "broken", m]) -> Some(JViewRaw(RawBroken(m)))
     Some(["raw", "big", what]) -> Some(JViewRaw(RawTooLarge(what)))
     Some(["raw", "fail", a]) -> wrap_fail([a])
@@ -138,6 +149,12 @@ pub fn decode_result(b: Bytes) -> Option[JobResult] =
 fn wrap_out(f: List[String]) -> Option[JobResult] =
   match outcome_of(f) {
     Some(o) -> Some(JOutcome(o))
+    None -> None
+  }
+
+fn wrap_plain(why: String, f: List[String]) -> Option[JobResult] =
+  match outcome_of(f) {
+    Some(o) -> Some(JTileRaw(TilePlain(o, why)))
     None -> None
   }
 
@@ -191,6 +208,10 @@ test "every result survives the round trip, long fields and awkward text include
     JViewRaw(RawTimedOut(30)),
     JViewRaw(RawBroken("javap")),
     JViewRaw(RawTooLarge("the C text")),
+    JTileRaw(TileMapped("kernel k\nfn 1-2\n", "a\n\nb", 9)),
+    JTileRaw(TilePlain(Compiled("x\n", 0, false, 3), "why not")),
+    JTileRaw(TilePlain(CompileError("boom"), "")),
+    JTileRaw(TilePlain(Timeout("partial"), "")),
   ] {
     assert decode_result(encode_result(r)) == Some(r)
   }
