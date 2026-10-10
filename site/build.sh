@@ -154,25 +154,12 @@ rm -rf site/dist
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
 ./bin/dawn run site
 
-# The search body indexes' size, raw and gzipped, against the budget in
-# docs/site-search-design.md 2.6. The generator prints the raw count itself but
-# has no compressor, and the budget is what a reader downloads, so the gzip
-# count is taken here. Over budget stops the build: the remedy is a design
-# decision (2.6 lists the levers in order), and failing here puts it on the
+# The search assets against their budgets (docs/site-search-design.md 13.7):
+# the index's gzip size, the largest text fragment's, and the worst first-query
+# bytes over the sample in site/search-queries.txt, which is measured by running
+# the panel's own code on this dist (site/search-budget/). The generator prints
+# raw sizes and has no compressor, and the budget is what a reader downloads,
+# so the gzip counts are taken here. Over budget stops the build: the remedy is
+# a design decision (13.9 lists the levers), and failing here puts it on the
 # change that crossed the line rather than on whoever builds next.
-search_over=0
-for search_body in en:135 zh:150; do
-  search_lang="${search_body%%:*}"
-  search_budget_kb="${search_body##*:}"
-  search_file="site/dist/assets/search-body-$search_lang.json"
-  search_raw=$(wc -c < "$search_file")
-  search_gz=$(gzip -9c "$search_file" | wc -c)
-  echo "  search body $search_lang: $search_raw bytes raw, $search_gz bytes gzip (budget ${search_budget_kb} KB)"
-  if [ "$search_gz" -gt $((search_budget_kb * 1024)) ]; then
-    echo "error: $search_file is over its ${search_budget_kb} KB gzip budget (docs/site-search-design.md 2.6)" >&2
-    search_over=1
-  fi
-done
-if [ "$search_over" -ne 0 ]; then
-  exit 1
-fi
+site/search-budget.sh site/dist
