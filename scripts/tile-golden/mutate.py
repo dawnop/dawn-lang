@@ -497,6 +497,21 @@ MUTATIONS = {
         'let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)\n',
         'let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * f_const(F64, ATT_INV_SQRT_D)\n',
     ),),
+    "fence-written-as-gdc-wait": ((
+        BYTECODE,
+        'emit_ref(emit_op(w0, OP_MEMORY_FENCE_ALIAS_TKO, Token), tok_in)',
+        'emit_ref(emit_op(w0, OP_GDC_WAIT_TKO, Token), tok_in)',
+    ),),
+    "gdc-token-flag-unwritten": ((
+        BYTECODE,
+        'emit_ref(emit(emit_op(w0, code, Token), GDC_FLAG_TOKEN), tok_in)',
+        'emit_ref(emit(emit_op(w0, code, Token), 0), tok_in)',
+    ),),
+    "gdc-operand-count-written": ((
+        BYTECODE,
+        'emit_ref(emit(emit_op(w0, code, Token), GDC_FLAG_TOKEN), tok_in)',
+        'emit_ref(emit(emit(emit_op(w0, code, Token), GDC_FLAG_TOKEN), 1), tok_in)',
+    ),),
 }
 
 

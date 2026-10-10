@@ -74,7 +74,7 @@ use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
 use prog.{TileProg, ByPtr, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{kparam_ty, Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use lower.{kparam_ty, Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -208,7 +208,10 @@ const OP_ATOMIC_RED_VIEW_TKO: Int = 0x75
 # slice indices); `fpowi` is `fpowf`'s with an integer exponent, and like
 # it carries no attribute and no optional field, so no flags word.
 const OP_INSERT: Int = 0x76
+const OP_GDC_LAUNCH_DEPENDENTS_TKO: Int = 0x77
+const OP_GDC_WAIT_TKO: Int = 0x78
 const OP_FPOWI: Int = 0x79
+const OP_MEMORY_FENCE_ALIAS_TKO: Int = 0x7A
 
 # The two shape queries (knife T12). `get_tensor_shape` asks a
 # `tensor_view` for its tensor's extents; `get_index_space_shape` asks any
@@ -415,6 +418,19 @@ const FTOI_FLAG_SATURATING: Int = 1
 # operation is 13.1 and its first optional field is not), and this writer
 # targets 13.3, so it is always written here.
 const PRINT_FLAG_TOKEN: Int = 1
+
+# `gdc_launch_dependents_tko` and `gdc_wait_tko` (13.4) carry one optional
+# operand, `token`, and it arrived with the operation itself, so the flags
+# word is always written (the version check only fires for an optional field
+# newer than its operation) and the token takes bit 0. The token is written
+# bare after the flags word, with no count: reading BytecodeGen.cpp suggested
+# a count of one here (an optional operand makes `writeOperands` encode a
+# size), and the first golden recorded that way was refused by `tileiras`
+# (`failed to get result type 0 for AddFOp`, the reader having lost its
+# place), while the bare token assembled and `tileirdisasm` printed it back
+# (docs/tile-backend-design.md 6.33). `memory_fence_alias_tko` has no
+# optional field at all, so it has no flags word either, only its token.
+const GDC_FLAG_TOKEN: Int = 1
 
 # Attribute tags (BytecodeAttrOpcodes.td, frozen). A reduction's identities
 # are an ArrayAttr, whose elements are written SELF-CONTAINED: each carries
@@ -1821,6 +1837,14 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     let (w2, si) = str_of(w1, fmt)
     emit_ref(list.fold(args, emit(emit(w2, si), len(args)), emit_ref), tok_in)
   }
+  TokenOnlyTile(_tok_out, op, tok_in) -> {
+    if op == "memory_fence_alias_tko" {
+      emit_ref(emit_op(w0, OP_MEMORY_FENCE_ALIAS_TKO, Token), tok_in)
+    } else {
+      let code = if op == "gdc_wait_tko" { OP_GDC_WAIT_TKO } else { OP_GDC_LAUNCH_DEPENDENTS_TKO }
+      emit_ref(emit(emit_op(w0, code, Token), GDC_FLAG_TOKEN), tok_in)
+    }
+  }
   AllocaPtr(_dst, num_elem, align, shared, t) -> {
     # opcode, result type, the flags varint, then the two REQUIRED
     # attributes in declaration order: `num_elem` then `alignment`. Both
@@ -2910,6 +2934,20 @@ test "assert writes its message as a bare string index, assume its predicate sel
 }
 
 fn none_int() -> Option[Int] = None
+
+test "the fence is an opcode and a token, and each gdc signal an opcode, a flags word naming the token, and the token with no count" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1)]), nvals: 2 }
+  # memory_fence_alias_tko: nothing optional and nothing variadic, so no
+  # flags word and no count; the result type (token) takes index 0.
+  let f = encode_instr(w0, TokenOnlyTile(5, "memory_fence_alias_tko", Val(1)))
+  assert hex(bytes.freeze(f.body)) == "7a" ++ "00" ++ "01"
+  # gdc_*: the optional `token` operand is bit 0 of the flags word.
+  let l = encode_instr(w0, TokenOnlyTile(5, "gdc_launch_dependents_tko", Val(1)))
+  assert hex(bytes.freeze(l.body)) == "77" ++ "00" ++ "01" ++ "01"
+  let wt = encode_instr(w0, TokenOnlyTile(5, "gdc_wait_tko", Val(0)))
+  assert hex(bytes.freeze(wt.body)) == "78" ++ "00" ++ "01" ++ "00"
+  assert OP_GDC_LAUNCH_DEPENDENTS_TKO == 0x77 && OP_GDC_WAIT_TKO == 0x78 && OP_MEMORY_FENCE_ALIAS_TKO == 0x7A
+}
 
 test "the shape operations are the frozen table's opcodes, with the permutation dense and extract's slice indices as operands" {
   let k = lower(shapes_prog())

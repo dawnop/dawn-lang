@@ -419,6 +419,24 @@
 #                            13.4's table for the first pair that does not
 #                            take the mode (f64 to f32)
 #
+#     fence-written-as-gdc-wait
+#                            `memory_fence_alias_tko` is written with
+#                            `gdc_wait_tko`'s opcode -> token_fences' text is
+#                            untouched, the file the same length, and the
+#                            fence's token index is read as the gdc record's
+#                            flags word, so an operand index runs off the
+#                            value table
+#     gdc-token-flag-unwritten
+#                            the `gdc_*` pair write a flags word of 0 and the
+#                            token operand anyway -> the same length, and
+#                            tileiras loses its place two operations later
+#     gdc-operand-count-written
+#                            the `gdc_*` pair write a count of one before
+#                            their token -> token_fences' Func section is two
+#                            bytes longer (one per signal), and tileiras
+#                            refuses it the way it refuses the mutant above,
+#                            one byte later
+#
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time, so splitting by kind would
 # leave one job carrying the slower half. The cost model, as measured
@@ -501,7 +519,7 @@ kernels=(
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
   view_conv1d view_token_embed view_atomic view_atomic_bf16 view_stride_pad view_gather_pad
-  insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg
+  insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg token_fences
   view_inbounds view_inbounds_off view_inbounds_dim
   flash_attn idx_softmax carry_extent flash_attn_bf16
   scalar_scale scalar_len scalar_loop scalar_wide)
@@ -624,6 +642,9 @@ mutants=(
   scale-baked-again
   view-inbounds-all-true
   view-inbounds-promise-dropped
+  fence-written-as-gdc-wait
+  gdc-token-flag-unwritten
+  gdc-operand-count-written
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -2584,6 +2605,42 @@ if run_item view-inbounds-promise-dropped; then
     echo "PASS  mutant: view-inbounds-promise-dropped (view_inbounds.tilebc red on both backends)"
     echo "SKIP  mutant: view-inbounds-promise-dropped not handed to tileiras (--without-tileiras)"
   fi
+fi
+
+# 82. The fence is written with `gdc_wait_tko`'s opcode (0x7A for 0x78). The
+#     two records are NOT one shape (the gdc pair has a flags word the fence
+#     does not), so the file is the same length and only the reader's
+#     reading of the bytes tells it apart: the fence's token index is read
+#     as the flags word. token_fences has both a fence and two gdc signals,
+#     so the golden is the control for the opposite swap.
+if run_item fence-written-as-gdc-wait; then
+  mutant_project fence-written-as-gdc-wait bytecode.dawn
+  writer_mutant_checks fence-written-as-gdc-wait token_fences same-size \
+    "operand index 61 out of bounds (size=22) for operand 0"
+fi
+
+# 83. The gdc signals write a flags word of 0 and still write the token
+#     operand after it. The record is the same length; the reader takes the
+#     flags as "no token operand" and the byte that follows as the next
+#     operation's opcode. The assembler reads the next record where the
+#     token was and names the operation it lost its place in (AddFOp, at
+#     offset 19 of the function body); item 84's mutant is refused with the
+#     same sentence at offset 20, so the two are told apart by the offset.
+if run_item gdc-token-flag-unwritten; then
+  mutant_project gdc-token-flag-unwritten bytecode.dawn
+  writer_mutant_checks gdc-token-flag-unwritten token_fences same-size \
+    "error at offset 19: failed to get result type 0 for AddFOp"
+fi
+
+# 84. The gdc signals write a count of one before the token, which is what
+#     reading BytecodeGen.cpp suggested (an optional operand makes
+#     `writeOperands` encode a size) and what the first golden of knife T19
+#     did. tileiras refused it, which is the measurement the writer's
+#     comment cites; this mutant keeps that claim from being edited away.
+if run_item gdc-operand-count-written; then
+  mutant_project gdc-operand-count-written bytecode.dawn
+  writer_mutant_checks gdc-operand-count-written token_fences func-two-long \
+    "error at offset 20: failed to get result type 0 for AddFOp"
 fi
 
 _item_tick ""

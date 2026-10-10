@@ -21,8 +21,8 @@ use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Paddi
   Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
   load_cell, store_cell, tail_mask, for_arch, hint_latency, tensor_view, partition_view, load_view, store_view }
-use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{kparam_ty, Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, TokenOnly, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
+use lower.{kparam_ty, Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -100,6 +100,12 @@ fn name(r: Ref) -> String = match r {
 }
 
 fn v(id: Int) -> String = "%${id}"
+
+# The three token-only operations (knife T19) spell their token differently:
+# the fence has the token as its one bare operand, the `gdc_*` pair carries it
+# as the optional `token =` clause and states the result type.
+fn token_only_text(dst: String, op: String, tok_in: String) -> String =
+  if op == "memory_fence_alias_tko" { "${dst} = ${op} ${tok_in}" } else { "${dst} = ${op} token = ${tok_in} -> token" }
 
 # The `inbounds` array a view load or store prints after its token, as the
 # dialect's printer does: ` inbounds=[true, false]`, and nothing at all when
@@ -471,6 +477,7 @@ fn line(i: Instr) -> String = match i {
   PtrToPtrTile(dst, src, from, to) -> "${v(dst)} = ptr_to_ptr ${name(src)} : ${ty(from)} -> ${ty(to)}"
   AssertTile(cond, cond_ty, message) -> "assert ${name(cond)}, ${quoted(message)} : ${ty(cond_ty)}"
   AssumeTile(dst, src, pred, t) -> "${v(dst)} = assume ${assume_predicate(pred)}, ${name(src)} : ${ty(t)}"
+  TokenOnlyTile(tok_out, op, tok_in) -> token_only_text(v(tok_out), op, name(tok_in))
   PrintTile(tok_out, fmt, args, arg_ty, tok_in) ->
     "${v(tok_out)} = print_tko ${quoted(fmt)}, ${commas(list.map(args, name))}"
     ++ " token=${name(tok_in)} : ${commas(list.map(args, _a => ty(arg_ty)))} -> token"
@@ -1136,6 +1143,22 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
   # token it answers. `%%` is an escaped percent and takes no operand, so
   # one operand is right for this string.
   assert str.contains(text, " = print_tko \"sum=%d and %% more\\n\", %22 token=%14 : tile<i32> -> token\n")
+}
+
+test "the fence prints its token bare and the gdc signals print it as the optional clause, with the result type stated" {
+  let p = TileProg {
+    hints: [],
+    name: "fences",
+    params: [],
+    globals: [],
+    ops: [MakeToken(0), TokenOnly(1, "gdc_wait_tko", 0), TokenOnly(2, "memory_fence_alias_tko", 1),
+      TokenOnly(3, "gdc_launch_dependents_tko", 2)]
+  }
+  let text = render(p)
+  assert str.contains(text, "\n    %0 = make_token : token\n")
+  assert str.contains(text, "\n    %1 = gdc_wait_tko token = %0 -> token\n")
+  assert str.contains(text, "\n    %2 = memory_fence_alias_tko %1\n")
+  assert str.contains(text, "\n    %3 = gdc_launch_dependents_tko token = %2 -> token\n")
 }
 
 test "an i32 constant prints what the tile holds, not what the kernel spelled" {

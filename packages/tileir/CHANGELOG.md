@@ -7,6 +7,34 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.15.0 (2026-10-11)
+
+Breaking: the last three opcodes bytecode 13.4 added
+(`docs/tile-backend-design.md` section 6.33, knife T19). The 202 existing
+`.mlir` and `.tilebc` goldens are unchanged on both backends.
+
+- `memory_fence_alias()` (`memory_fence_alias_tko`, 0x7A), `gdc_wait()`
+  (`gdc_wait_tko`, 0x78) and `gdc_launch_dependents()`
+  (`gdc_launch_dependents_tko`, 0x77) take the ordering token as it stands
+  and answer the next, like `d_print`, and answer nothing. Each is refused
+  inside a reduce, scan or `if` region, which carry no token.
+- The two `gdc_*` are Programmatic Dependent Launch signals. They are no-ops
+  below sm_90 and on any target when the kernel was not launched with the
+  programmatic stream serialization attribute, which `std/gpu`'s launch does
+  not set, so nothing here can observe them on a device yet.
+- One new `Dev` effect operation, `t_token_only(op)`, so a handler written
+  outside the package must answer it. The operation name is the dialect's own
+  and any other is refused when the kernel is recorded.
+- The `gdc_*` pair writes a flags word (bit 0, the optional `token` operand)
+  and the token with no count. Reading the table generator suggested a count
+  of one; `tileiras` 13.4.92 refuses that (`failed to get result type 0 for
+  AddFOp`, the reader having lost its place).
+- Text: `%t = memory_fence_alias_tko %tok` and
+  `%t = gdc_wait_tko token = %tok -> token`, which `tileirdisasm` 13.4.92
+  prints back for the bytes.
+- One kernel in `scripts/tile-golden` (`token_fences`), one case in
+  `scripts/tile-gpu-diff/shape_diff.dawn`, and three layer 1 mutants.
+
 ## 0.14.0 (2026-10-10)
 
 Breaking: a view load and store can promise `inbounds`
