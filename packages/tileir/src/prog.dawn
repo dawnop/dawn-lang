@@ -32,7 +32,7 @@ use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, D
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
   retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
   idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile }
-use std/narrow.{F32, F16, BF16, Rounding}
+use std/narrow.{F32, F16, BF16, Rounding, bf16}
 
 ## One SSA operation of a tile program. Every `dst` / `tok_out` is a handle
 ## this operation defines; every other handle field refers to an earlier
@@ -6383,6 +6383,41 @@ test "0.8.2: lit takes the format and the shape of the operation it meets, and r
   let (c, _e3) = trace2("s", In(F32, g), Out(F32, g), (x, o) => store_cell(o, mul(load_cell(x), lit(0.5))))
   let (d, _e4) = trace2("s", In(F32, g), Out(F32, g), (x, o) => store_cell(o, mul(load_cell(x), f_const(F32, 0.5))))
   assert c == d
+}
+
+# ---- tileir 0.13.0: a constant carries its format's own value
+
+# Which value a constant of format `fmt` was recorded with, for a kernel that
+# stores one `f_const`/`full` over a 64-wide cell.
+fn recorded_consts(p: TileProg, fmt: String) -> List[Float] = list.map(ops_where(p.ops, o => match o {
+  ConstF(_d, f, _s, _v) -> f == fmt
+  _ -> false
+}), o => match o {
+  ConstF(_d, _f, _s, v) -> v
+  _ -> 0.0
+})
+
+test "0.13.0: f_const of a narrow format records the format's value, not the host literal" {
+  let g = cells([64], [64])
+  let (a, _e1) = trace1("c", Out(BF16, g), o => store_cell(o, f_const(BF16, 0.1)))
+  assert recorded_consts(a, "bf16") == [0.10009765625]
+  let (b, _e2) = trace1("c", Out(F16, g), o => store_cell(o, f_const(F16, 0.1)))
+  assert recorded_consts(b, "f16") == [0.0999755859375]
+  let (c, _e3) = trace1("c", Out(F32, g), o => store_cell(o, f_const(F32, 0.1)))
+  assert recorded_consts(c, "f32") == [0.10000000149011612]
+  let (d, _e4) = trace1("c", Out(F64, g), o => store_cell(o, f_const(F64, 0.1)))
+  assert recorded_consts(d, "f64") == [0.1]
+}
+
+test "0.13.0: full records the format's value too, and a constant already of the format is kept" {
+  let g = cells([64], [64])
+  let (a, _e1) = trace1("c", Out(BF16, g), o => {
+    let t: Tile[BF16] = full([64], 0.1)
+    store_cell(o, t)
+  })
+  assert recorded_consts(a, "bf16") == [0.10009765625]
+  let (b, _e2) = trace1("c", Out(BF16, g), o => store_cell(o, f_const(BF16, bf16(0.1))))
+  assert recorded_consts(b, "bf16") == [0.10009765625]
 }
 
 test "0.8.2: lit is refused by name where no operation gives it a format" {

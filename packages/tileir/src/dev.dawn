@@ -33,11 +33,11 @@
 # refused by the checker.
 use std/list
 use std/str
-use std/dtype.{Dtype, dtype_name, F64, I64, I1}
+use std/dtype.{Dtype, dtype_name, to_bits, F64, I64, I1}
 use std/int/i32.{I32}
 use std/int/i8.{I8}
 use std/gpu.{I4, ScalarDtype, scalar_dtype}
-use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding}
+use std/narrow.{F32, F16, BF16, TF32, F8E4M3FN, F8E5M2, Rounding, to_f64, tf32_of_bits, f8e4m3fn_of_bits, f8e5m2_of_bits}
 
 ## A tile value inside a kernel: the SSA handle the handler issued for it,
 ## of any rank, rank 0 (`tile<f64>`) included. `D` is a phantom (spec 2.7):
@@ -189,34 +189,45 @@ pub fn hint_latency(n: Int) -> Hint = ("latency", n)
 ## into `full`'s bound, turning a type error into a recording refusal.
 pub trait FloatDtype[D] {
   fn float_dtype() -> Dtype[D]
+  ## The host `Float` a value of the format is, exactly: every value of a
+  ## narrow format is a binary64, and this is how a constant's `D` value
+  ## reaches the recording, which keeps a `Float` (tileir 0.13.0).
+  fn host_float(v: D) -> Float
 }
 
 impl FloatDtype[Float] {
   fn float_dtype() -> Dtype[Float] = F64
+  fn host_float(v: Float) -> Float = v
 }
 
 impl FloatDtype[F32] {
   fn float_dtype() -> Dtype[F32] = F32
+  fn host_float(v: F32) -> Float = to_f64(v)
 }
 
 impl FloatDtype[TF32] {
   fn float_dtype() -> Dtype[TF32] = TF32
+  fn host_float(v: TF32) -> Float = tf32_of_bits(to_bits(v))
 }
 
 impl FloatDtype[F16] {
   fn float_dtype() -> Dtype[F16] = F16
+  fn host_float(v: F16) -> Float = to_f64(v)
 }
 
 impl FloatDtype[BF16] {
   fn float_dtype() -> Dtype[BF16] = BF16
+  fn host_float(v: BF16) -> Float = to_f64(v)
 }
 
 impl FloatDtype[F8E4M3FN] {
   fn float_dtype() -> Dtype[F8E4M3FN] = F8E4M3FN
+  fn host_float(v: F8E4M3FN) -> Float = f8e4m3fn_of_bits(to_bits(v))
 }
 
 impl FloatDtype[F8E5M2] {
   fn float_dtype() -> Dtype[F8E5M2] = F8E5M2
+  fn host_float(v: F8E5M2) -> Float = f8e5m2_of_bits(to_bits(v))
 }
 
 ## A tile of POINTERS inside a kernel. `D` is a phantom as `Tile[D]`'s is:
@@ -1772,9 +1783,13 @@ pub fn mmai(a: Tile[I8], b: Tile[I8], c: Tile[I32]) -> Tile[I32] !Dev = called("
 # cell of `p`.
 
 ## The rank-0 tile of format `d` holding `value`, fixed when the kernel is
-## recorded, which is what a host `Float` in a kernel body means.
-pub fn f_const[D](d: Dtype[D], value: Float) -> Tile[D] !Dev = called("f_const", () => {
-  let h: Tile[D] = t_constf(dtype_name(d), [], value)
+## recorded, which is what a host value in a kernel body means. `value` is a
+## `D` (tileir 0.13.0), so the rounding to the format happens where the host
+## value is made, in plain sight: `f_const(BF16, 0.1)` types the literal as a
+## `BF16` and records the bfloat16 nearest to 0.1, the 0.10009765625 the device
+## holds, and a `Float` computed on the host is `f_const(BF16, bf16(x))`.
+pub fn f_const[D: FloatDtype](d: Dtype[D], value: D) -> Tile[D] !Dev = called("f_const", () => {
+  let h: Tile[D] = t_constf(dtype_name(d), [], host_float(value))
   h
 })
 
@@ -1806,9 +1821,9 @@ pub fn lit[D](value: Float) -> Tile[D] !Dev = called("lit", () => {
 ## `zeros(p)` and `fill(p, v)` are the same tile shaped like a cell of `p`
 ## in `p`'s format; they stay, because there the parameter already says
 ## both, and they also make integer tiles, which this does not.
-pub fn full[D: FloatDtype](shape: List[Int], value: Float) -> Tile[D] !Dev = called("full", () => {
+pub fn full[D: FloatDtype](shape: List[Int], value: D) -> Tile[D] !Dev = called("full", () => {
   let d: Dtype[D] = float_dtype()
-  let c: Tile[D] = t_constf(dtype_name(d), [], value)
+  let c: Tile[D] = t_constf(dtype_name(d), [], host_float(value))
   broadcast(c, shape)
 })
 

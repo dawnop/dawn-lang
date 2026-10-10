@@ -98,8 +98,11 @@ let (prog, entry) = trace3("matmul",
 - `zeros(p)` and `fill(p, v)` are a tile shaped like a cell of `p`, the
   accumulator a block starts from. `full(shape, v)` is a float tile of any
   shape whose format is the one it is checked against:
-  `let m: Tile[F32] = full([BQ, 1], 0.0)`.
-- A constant is rank 0: `f_const(F64, 0.5)`, `i_const(3)`. `lit(0.5)` is
+  `let m: Tile[F32] = full([BQ, 1], 0.0)`. The value is a `D`, so a literal
+  is already rounded to the format and a `Float` computed on the host is
+  written `f32(x)`.
+- A constant is rank 0: `f_const(F64, 0.5)`, `i_const(3)`; `f_const(BF16, 0.1)`
+  records the bfloat16 nearest to 0.1. `lit(0.5)` is
   a float constant with no format, which takes the format of the
   element-wise operation it meets (`mul(s, lit(0.5))`; write it after a
   typed operand, since the checker finds the format left to right); a
@@ -159,8 +162,9 @@ FlashAttention with bf16 inputs and f32 accumulation:
 
 ```dawn
 use std/float.{INFINITY}
+use std/narrow.{f32}
 
-var m: Tile[F32] = full([BQ, 1], -INFINITY)
+var m: Tile[F32] = full([BQ, 1], f32(-INFINITY))
 var l: Tile[F32] = full([BQ, 1], 0.0)
 var acc: Tile[F32] = full([BQ, D], 0.0)
 for j in d_range(0, N / BK) {
