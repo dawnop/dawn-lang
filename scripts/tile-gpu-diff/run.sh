@@ -884,7 +884,11 @@ trig_green=(rope)
 # `insert_tile` (`insert`, which calls `extract` on the way, so
 # extract-indices-reversed reds it as well as `shape_ops`) and `powi_sweep`
 # (`fpowi`, which nothing else here issues and no mutant below may move).
-shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast insert_tile powi_sweep)
+#
+# Knife T19 added `token_fences` (the alias fence and the two `gdc_*`
+# signals around a store and a load; no mutant below moves it, and the
+# claim it carries is the narrow one shape_diff.dawn's header states).
+shaped=(shape_ops grid_stride token_join ptr_roundtrip ptr_recast insert_tile powi_sweep token_fences)
 
 # The element format kernels of knife T3, in the order dtype_diff takes
 # them. Each is five or two segments of one output buffer, so a lane of one
