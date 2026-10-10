@@ -2727,22 +2727,25 @@ else
   digest() { md5 -q "$1"; }
 fi
 
-mutant_std() { # name, old, new  -> prints the std copy's path
+mutant_std() { # name, old, new [, old, new ...]  -> prints the std copy's path
   local dir="$work/std-$1"
   rm -rf "$dir"
   cp -r "$root/std" "$dir"
   local before after
   before=$(digest "$dir/gpu.dawn")
-  python3 - "$dir/gpu.dawn" "$1" "$2" "$3" <<'PY'
+  python3 - "$dir/gpu.dawn" "$@" <<'PY'
 import pathlib
 import sys
 
-path, label, old, new = sys.argv[1:]
+path, label, *pairs = sys.argv[1:]
 p = pathlib.Path(path)
 text = p.read_text()
-if text.count(old) != 1:
-    raise SystemExit(f"mutant {label}: anchor is not unique in std/gpu.dawn ({text.count(old)} matches)")
-p.write_text(text.replace(old, new))
+# One or more (old, new) pairs; each anchor must be unique on its own.
+for old, new in zip(pairs[0::2], pairs[1::2]):
+    if text.count(old) != 1:
+        raise SystemExit(f"mutant {label}: anchor is not unique in std/gpu.dawn ({text.count(old)} matches)")
+    text = text.replace(old, new)
+p.write_text(text)
 PY
   after=$(digest "$dir/gpu.dawn")
   echo "      $1: std/gpu.dawn md5 $before -> $after" >&2
@@ -4555,7 +4558,7 @@ else
     { cat "$work/m-pack-halves.out" >&2; fail "pack-halves-swapped: the clean run is $dtype_verdict but the mutant is $mverdict"; }
   echo "SKIP  mutant: pack-halves-swapped not verifiable on this driver: the clean run is $dtype_verdict, before any launch reaches the device"
 fi
-# wire-big-endian: the word assembly writes each element's bytes high first.
+# wire-big-endian: both byte assemblies (typed upload and the Float view) ask bytes.pack_ints for big-endian.
 # Every multi-byte case goes red, and for two different reasons. The Float-view
 # cases upload the swapped bytes to both devices, but the real device writes
 # its answer little-endian while the fake device's write-back goes through the
@@ -4564,16 +4567,10 @@ fi
 # at all, so it is red even if both devices were swapped alike; it is required
 # by name.
 std_be="$(mutant_std wire-big-endian \
-  '    var v = word
-    for _k in range(0, w) {
-      b = bytes.put(b, v & 0xFF)
-      v = v >>> 8
-    }' \
-  '    var v = word
-    for k in range(0, w) {
-      b = bytes.put(b, (word >>> (8 * (w - 1 - k))) & 0xFF)
-      v = v >>> 8
-    }')"
+  'bytes.pack_ints(list.map(data, v => to_bits(v)), w)' \
+  'bytes.pack_ints(list.map(data, v => to_bits(v)), w, bytes.Big)' \
+  'bytes.pack_ints(list.map(xs, x => enc(x)), unwrap_or(element_bytes(dtype), 1))' \
+  'bytes.pack_ints(list.map(xs, x => enc(x)), unwrap_or(element_bytes(dtype), 1), bytes.Big)')"
 build_native "$std_be" "$work/m-wire-be.bin" "$here/dtype_diff.dawn"
 rc=0
 device "$work/m-wire-be.bin" "${dtype_cubins[@]}" > "$work/m-wire-be.out" 2>&1 || rc=$?
