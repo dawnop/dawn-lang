@@ -82,6 +82,14 @@ since a job whose shape is unknown cannot be said to be today's. Jobs that
 gatesplan does not model (gates.yml's `plan`, and every job of another
 workflow, such as ci.yml's `secrets`) carry no digest and are still matched
 by name. The digests need PyYAML, as steps_lock.py does.
+
+A workflow gatesplan does not model gets the same treatment by its own reader
+(2026-10-10, issue #274). tile.yml's runs carry "steps" too: each job's
+digest is steps_lock.plain_job_digests of tile.yml at the run's commit, the
+multiset of its `run:` texts, which for a tile-golden shard includes
+`run.sh --shard I/N`. So a shard dealt seven ways and the same-named shard
+dealt eight ways are different shapes, and check-gate-budgets.py holds a
+claim only to runs of its own.
 """
 
 import argparse
@@ -214,6 +222,60 @@ class StepsAt:
                 self.by_blobs[key] = (None, str(error))
         self.by_commit[sha] = self.by_blobs[key]
         return self.by_commit[sha]
+
+
+class PlainStepsAt:
+    """{job: steps digest} of one workflow gatesplan does not model, at a commit.
+
+    The same idea as StepsAt for a file with no composite action in it
+    (tile.yml): the digest is steps_lock.plain_job_digests of the workflow
+    text at the run's commit, read once per distinct blob.
+    """
+
+    def __init__(self, repo, workflow, git_dir=HERE.parent):
+        sys.path.insert(0, str(GATES_EXTERNAL))
+        import steps_lock
+        self.steps_lock = steps_lock
+        self.repo = repo
+        self.path = f".github/workflows/{workflow}"
+        self.git_dir = git_dir
+        self.by_blob = {}
+        self.by_commit = {}
+        self.reads = {"commits": 0, "parsed": 0, "api": 0, "refused": 0}
+
+    def _git(self, *args):
+        proc = subprocess.run(
+            ["git", "-C", str(self.git_dir), *args],
+            capture_output=True, text=True, check=False)
+        return proc.stdout if proc.returncode == 0 else None
+
+    def at(self, sha):
+        """-> ({job: digest}, None) or (None, why the file was refused)."""
+        if sha in self.by_commit:
+            return self.by_commit[sha]
+        self.reads["commits"] += 1
+        blob = self._git("rev-parse", "--verify", "-q", f"{sha}:{self.path}")
+        text = self._git("cat-file", "blob", blob.strip()) if blob else None
+        key = blob.strip() if text is not None else ("commit", sha)
+        if key not in self.by_blob:
+            if text is None:
+                self.reads["api"] += 1
+                text = gh_text([
+                    "gh", "api", "-H", "Accept: application/vnd.github.raw",
+                    f"repos/{self.repo}/contents/{self.path}?ref={sha}"])
+            self.reads["parsed"] += 1
+            try:
+                self.by_blob[key] = (self.steps_lock.plain_job_digests(text), None)
+            except Exception as error:  # a file yaml or the shape refuses
+                self.reads["refused"] += 1
+                self.by_blob[key] = (None, str(error))
+        self.by_commit[sha] = self.by_blob[key]
+        return self.by_commit[sha]
+
+
+def steps_reader(repo, workflow):
+    """The StepsAt for gates.yml's workflow (ci.yml), PlainStepsAt otherwise."""
+    return StepsAt(repo) if workflow == "ci.yml" else PlainStepsAt(repo, workflow)
 
 
 def attach_steps(per_run, steps_at):
@@ -413,7 +475,8 @@ def main():
 
     if args.restep is not None:
         report = json.loads(args.restep.read_text(encoding="utf-8"))
-        steps_at = StepsAt(report.get("repo", args.repo))
+        steps_at = steps_reader(report.get("repo", args.repo),
+                                report.get("workflow") or "ci.yml")
         started = time.monotonic()
         attach_steps(report["per_run"], steps_at)
         report["steps_reads"] = {
@@ -428,7 +491,7 @@ def main():
         args.repo, args.branch, args.workflow, args.runs, since,
         args.allow_empty,
     )
-    steps_at = StepsAt(args.repo)
+    steps_at = steps_reader(args.repo, args.workflow)
     started = time.monotonic()
     attach_steps(per_run, steps_at)
     steps_seconds = time.monotonic() - started
