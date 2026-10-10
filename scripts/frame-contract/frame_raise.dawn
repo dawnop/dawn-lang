@@ -1,0 +1,99 @@
+# Owned values held across a raise: the program every frame-contract mutant
+# is run on.
+#
+# A function the compiler judges *quiet* (selfhost/src/c/quiet.dawn) gets no
+# unwind cleanup, so whatever its owned slots hold when a raise passes through
+# is leaked. Every function below holds a `Box` in a slot across the one
+# thing that can take it away, and each one is the case for one source of
+# raising the analysis counts:
+#
+#   hold   a `panic` of its own
+#   via    a call through a function value
+#   nest   a direct call to a function that panics
+#   quot   Int division by zero
+#   asker  a `ctl` operation whose continuation is discarded, so the frame is
+#          suspended and then reclaimed rather than raised through
+#
+# `calm` is the positive control: nothing in it can raise, it holds a slot,
+# and run.sh checks the compiler gave it the cleanup-free frame, so a harness
+# whose mutants all happen to leak cannot be mistaken for one that works.
+#
+# With the real analysis nothing leaks and the output is the .expect. Under a
+# mutant that stops counting one source, the function for that source is
+# judged quiet and AddressSanitizer's leak check goes red; run.sh holds each
+# mutant to that. The values are Box(String) so the allocation is a counted
+# reference the ledger knows about, and the operations on the Int are scalar
+# so nothing but the named source makes a function loud.
+use std/io
+
+type Box = Box(s: String)
+
+fn hold(s: String, k: Int) -> Int = {
+  let b = Box(s)
+  let r = if k > 0 { k } else { panic("neg") }
+  match b { Box(_) -> r }
+}
+
+fn via(f: fn(Int) -> Int, s: String, k: Int) -> Int = {
+  let b = Box(s)
+  let r = f(k)
+  match b { Box(_) -> r }
+}
+
+fn bare(k: Int) -> Int = if k > 0 { k } else { panic("neg") }
+
+fn nest(s: String, k: Int) -> Int = {
+  let b = Box(s)
+  let r = bare(k)
+  match b { Box(_) -> r }
+}
+
+fn quot(s: String, k: Int) -> Int = {
+  let b = Box(s)
+  let r = 100 / k
+  match b { Box(_) -> r }
+}
+
+fn calm(s: String) -> Int = {
+  let b = Box(s)
+  match b { Box(_) -> 1 }
+}
+
+ctl effect Ask {
+  fn ask(n: Int) -> Int
+}
+
+fn asker(s: String) -> Int !Ask = {
+  let b = Box(s)
+  let r = ask(1)
+  match b { Box(_) -> r }
+}
+
+fn discarding(s: String) -> Int !io = {
+  with handle Ask {
+    ask(n) resume k => {
+      discard(k)
+      n + 6
+    }
+  }
+  asker(s)
+}
+
+fn try(name: String, f: fn() -> Int !io) -> Unit !io =
+  match catch_panic(f) {
+    Ok(v) -> io.println(name ++ ": ok " ++ to_string(v))
+    Err(_) -> io.println(name ++ ": caught")
+  }
+
+pub fn main() -> Unit !io = {
+  try("hold ok", () => hold("a" ++ "1", 3))
+  try("hold", () => hold("a" ++ "2", 0))
+  try("via ok", () => via(n => n + 1, "b" ++ "1", 3))
+  try("via", () => via(n => bare(n), "b" ++ "2", 0))
+  try("nest ok", () => nest("c" ++ "1", 3))
+  try("nest", () => nest("c" ++ "2", 0))
+  try("quot ok", () => quot("d" ++ "1", 4))
+  try("quot", () => quot("d" ++ "2", 0))
+  try("calm", () => calm("f" ++ "1"))
+  try("discard", () => discarding("e" ++ "1"))
+}
