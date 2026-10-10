@@ -95,7 +95,8 @@
 #             opcode that knife adds, `mmaf_scaled`, takes only fp8 and fp4
 #             operands and is refused below sm_100, so no program here can
 #             launch it)
-#             and view_diff.dawn the five view kernels of knife T11 with
+#             and view_diff.dawn the five view kernels of knife T11 (and,
+#             since knife T18, three copies that promise `inbounds`) with
 #             `transpose_tail` beside them as the family's kernel-level
 #             control (the first family whose subject is a second way to
 #             ADDRESS memory: three of its kernels are knife 9's strided
@@ -1052,7 +1053,14 @@ hint_order=("${hints[@]}" vadd)
 # strided kernels); naming it here is what puts it on view_diff's command
 # line, exactly as `vadd` is named in hint_order.
 views=(view_transpose view_max_pool view_conv2d view_padding view_pad_i32)
-view_order=("${views[@]}" transpose_tail)
+# The `inbounds` copies of knife T18 ride after the control, in the order
+# view_diff takes them. They are in no mutant's `views`: the mutants below
+# change how a view is written, and these three copy through a square-free
+# pair of views with strides [64, 1] that a swapped pair would turn into a
+# different program, so they are the family's second control group and stay
+# on their clean cubins.
+inbounds_ks=(view_inbounds view_inbounds_off view_inbounds_dim)
+view_order=("${views[@]}" transpose_tail "${inbounds_ks[@]}")
 
 # The dynamic-dimension kernels of knife T12, in the order dyn_diff takes
 # them. Their tensors' extents and strides are OPERANDS rather than type
@@ -1170,7 +1178,7 @@ echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kern
 for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
-  "${hints[@]}" "${views[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
+  "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
   "${sequenced[@]}" ${arch_ran[@]+"${arch_ran[@]}"}; do
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
