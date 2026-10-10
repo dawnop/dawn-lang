@@ -1,9 +1,11 @@
 # 设备格式与 std 值类型统一：规则、现状复核、U3/U4
 
-> 状态：**proposed**。2026-10-08 写成。本文有两半，生命周期不同：
-> 规则、依赖方向、见证铸造、`HasDtype`、只存储格式（§1 到 §3）描述的是**已经落地**的 U1 与 U2
+> 状态：**current**（U1 到 U4 全部落地，U4 的记录见 §7.1）。2026-10-08 写成，2026-10-10 回填。本文有两半，生命周期不同：
+> 规则、依赖方向、见证铸造、`HasDtype`、只存储格式（§1 到 §3）描述的是 U1 与 U2
 > （提交 3aa0f8aa、24d3fcd2，2026-10-06 至 07，权威条文在 spec §12.6），读作现状；
-> 尚未落地、待评审的只有 U3（类型化 `copy_from_host`/`copy_to_host`）与 U4（常量带宿主值类型），即 §6 与 §7。
+> U3（类型化 `copy_from_host`/`copy_to_host`）按 [gpu-typed-transfer-design.md](gpu-typed-transfer-design.md)
+> 落地为 `DeviceBits` 与字节线格式（e5b3c847、63e65a9e，后续 448d0c01），§6 保留为立项时的推理；
+> U4（常量带宿主值类型）见 §7。
 > 依据：维护者工作区的调研报告 research-format-types-unify-report-20261006（下称「10-06 报告」）。
 > 基线：`origin/main` = c7c81203，种子 v0.85.0，`packages/tileir` 0.12.0。
 > 本文所有计数都在这个提交上用 `git grep` 数出来，不含 `selfhost/src/embed`；没有量过的写「未量」。
@@ -159,15 +161,50 @@ U3 不碰 tileir 包本身（tileir 不引 `copy_from_host`/`copy_to_host`），
 
 ## 7. U4：常量带宿主值类型
 
-`f_const(d, v: Float)` 与 `full[D](shape, v: Float)` 今天收 `Float`，舍入发生在记录或渲染一侧。
-U4 想要 `full[D: ..](shape, v: D)`：宿主侧的舍入（`let w: BF16 = 0.1` 已经是 `bf16(0.1)`，literal D7）在调用点可见，正对着 Triton #12102 那一类标量常量缺陷。
-**未量**：`f_const(BF16, 0.1)` 今天记录的是 0.1 还是已舍入的值，渲染出的常量文本是否会因 U4 改变。U4a 的第一步就是量这个，结果决定 U4 动不动 tile golden。
-`full` 的 `D` 需要从 `D` 取回 `Float`：`BF16 F16 F32` 有 `to_f64`（`Narrow`），只存储格式没有（§3），`Float` 自己是恒等；这条与 U3 的编码 trait 是同一个缺口，**U4 应排在 U3 之后，并复用 U3 的 trait**，而不是再造一个。
+`f_const(d, v: Float)` 与 `full[D](shape, v: Float)` 曾收 `Float`。U4 让它们收 `D`：宿主侧的舍入
+（`let w: BF16 = 0.1` 已经是 `bf16(0.1)`，literal D7）在调用点可见，正对着 Triton #12102 那一类标量常量缺陷。
+立项时**未量**的是：`f_const(BF16, 0.1)` 记录的是 0.1 还是已舍入的值，渲染出的常量文本是否会因 U4 改变。下面先量。
+
+### 7.1 U4a：实测（`packages/tileir` 0.12.0，main 0535dd0f）
+
+方法：一个不进仓库的小工程，依赖 `packages/tileir`，用 `trace1("k", Out(BF16, run_of(128)), o => store_cell(o, f_const(BF16, c)))`
+各记一次 `c = 0.1` 与 `c = round_bf16(0.1)`（F16、F32 同），分别 `render` 与 `encode`，比较文本与字节。结果：
+
+| 格式 | 渲染的常量行（`c = 0.1`） | 渲染的常量行（`c` 已舍入） | 文本相等 | 字节码相等 |
+|---|---|---|---|---|
+| bf16 | `constant <bf16: 0.1>` | `constant <bf16: 0.10009765625>` | 否 | **是** |
+| f16 | `constant <f16: 0.1>` | `constant <f16: 0.0999755859375>` | 否 | **是** |
+| f32 | `constant <f32: 0.1>` | `constant <f32: 0.10000000149011612>` | 否 | **是** |
+
+读法：
+1. **记录的是原始 f64。** `t_constf(dtype, shape, value: Float)` 把字面量原样放进 `ConstF`，`lower` 的 `ConstFloat` 与 `render.dawn:357` 的
+   `${value}` 都不舍入；`render` 因此把 `0.1` 印在 `bf16` 常量上。
+2. **舍入发生在字节码写出处。** `bytecode.dawn` 的 `float_payload`/`float_bits` 对 `f32`、`bf16`、`f16` 先过 `narrow.round_*` 再写位型，
+   所以对已舍入的值再舍入是恒等（舍入幂等），字节逐位相同。tileiras 看到的是字节码，因此**装配结果不依赖这次改动**。
+3. **tileref 不在这条路上。** `packages/tileref` 的参考实现是宿主函数（`List[Float]` 通道，用 `round_to` 按缓冲格式舍入），不解释 `ConstF`；
+   全仓只有 `lower`、`dev`/`prog` 的记录处理器和 `render`/`bytecode` 读 `ConstF`。所以 U4 不碰 tileref。
+4. **文本 golden 零变化。** 199 个 `.mlir` 里窄格式浮点常量一共 7 行（`f32: 0.0` 4 行、`f16: 0.0` 2 行、`f32: -Infinity` 1 行），都是格式可精确表示的值，
+   `0.1` 这一类不可表示的字面量在 golden 里没有。所以 U4 的「逐字节不变，除非量出舍入位置不同」判词的条件**不成立**：位置是不同的（文本里），但被覆盖的 golden 里没有受影响的行。
+5. **`lit` 不适用。** `lit(v)` 记录时没有格式（`""`），格式由它遇到的逐元素运算在 `widen` 时给出；`impl FromFloat[Tile[D]]` 的 `from_float` 也是 `lit(x)`。
+   调用点没有 `D` 值可舍入，U4 不动它（不做 5）。
+
+结论：设计的前提（常量带宿主值类型、舍入位置可见）成立，且比预想便宜：字节码与全部 golden 不变，只有渲染文本里不可表示的字面量会改印成已舍入的值，那正是设备持有的值。
+
+`full` 取回 `Float` 的缺口，设计原文说「复用 U3 的编码 trait」。实测更窄：`DeviceBits` 给的是位型而不是值，
+`to_bits` 之后还要按格式名解码；`Narrow::to_f64` 只有 `BF16 F16 F32` 有。所以落地时给 `FloatDtype` 加一个方法
+`host_float(v: D) -> Float`：前三个用 `to_f64`，`TF32 F8E4M3FN F8E5M2` 用 `DeviceBits` 的 `to_bits` 接各自的 `*_of_bits`，`Float` 是恒等。
+`FloatDtype` 的七个格式正是 `full` 与 `f_const` 能记录的格式，不新增 trait，也不动 `std/dtype`。
+
+### 7.2 U4b：刀表（已落地）
 
 | 刀 | 内容 | 破坏 | 判词 | 负控 |
 |---|---|---|---|---|
-| U4a | 量：`f_const`/`full` 当前对 `BF16 F16 F32` 的 0.1 记录的是什么；设计稿 `docs/` 一篇（可并入 U3a 的稿） | 否 | 裁决 | — |
-| U4b | tileir 0.13.0：`full`/`f_const`/`lit` 的值形参收 `D`；迁移 `scripts/tile-golden/kernels.dawn` 与 `tile-gpu-diff` 用到 `f_const(格式, 字面量)` 的约 183 处（字面量 `0.5` 按期望类型折叠成 `D`，多数写法不变） | 是（tileir，次版本） | tile golden 逐字节不变，除非 U4a 量出舍入位置不同（若变，逐个 golden 声明）；assemble | 把 `full` 的取值回 `Float` 路径换成不舍入，`BF16` 的 0.1 golden 变红 |
+| U4b | tileir 0.13.0：`f_const`、`full` 的值形参收 `D`，`f_const` 加 `FloatDtype` 界；`FloatDtype` 加 `host_float`；迁移：全仓只有 `kernels.dawn` 一处（`full(.., f32(-INFINITY))`），其余 `f_const` 都是 `F64`，字面量按期望类型折叠成 `Float`，写法不变 | 是（tileir，次版本） | 199 个 golden 逐字节不变；`dawn test packages/tileir` 新增两条记录值测试；tile-golden 的 assemble | 把 `FloatDtype[BF16]` 的 `host_float` 改成多加 1.0，记录值测试红；把 `f_const` 改回记录字面量，同一测试红 |
+
+## 7.3 不做的
+
+- `lit` 收 `D`：见 7.1 第 5 点，调用点没有格式。
+- 给 `tileref` 加常量解释：见 7.1 第 3 点。
 
 ## 8. 开放问题（需要裁决）
 
