@@ -178,11 +178,18 @@ def named(c, text, lines):
     return None
 
 
+def site_kept(kept, mod, site):
+    """Whether the C kept the function a site belongs to. The key is the impl
+    (`origin`), not the method name: impls of one trait share a method name and
+    a mangled symbol, and C keeps only the ones the program reaches."""
+    return (mod, site["origin"]) in kept
+
+
 def check_map(name, m, lines, sites, split_dir):
     """The rules other than `same`, on one map and the C it describes; problems found."""
     problems = []
     fns = sorted(m["fns"], key=lambda f: f["first"])
-    kept = {(f["module"], f["symbol"]) for f in fns}
+    kept = {(f["module"], f["origin"]) for f in fns}
     by_site = {}
     for c in m["calls"]:
         where = f"{name}: {c['what']} at {c['module']} {c['lo']}..{c['hi']}"
@@ -226,7 +233,7 @@ def check_map(name, m, lines, sites, split_dir):
     # paired: every site of a kept function is a row
     for mod, rows in sites.items():
         for s in rows:
-            if (mod, mangle(mod, s["fn"])) not in kept:
+            if not site_kept(kept, mod, s):
                 continue
             STATS["kept sites"] += 1
             if (mod, s["lo"], s["hi"], s["nlo"]) not in by_site:
@@ -348,6 +355,13 @@ def self_test():
         for b_ in bad:
             print("FAIL: " + b_)
         sys.exit(1)
+    # two impls of one method name, one kept by C: the other's site is not a kept one
+    kept = {("std/narrow", "I10:DeviceBits n3:F32;Nm7:to_bits")}
+    f32 = {"fn": "to_bits", "origin": "I10:DeviceBits n3:F32;Nm7:to_bits"}
+    bf16 = {"fn": "to_bits", "origin": "I10:DeviceBits n4:BF16;Nm7:to_bits"}
+    assert site_kept(kept, "std/narrow", f32), "a kept impl's site is a kept site"
+    assert not site_kept(kept, "std/narrow", bf16), "a pruned impl's site shares the method name only"
+    print("OK: self-test pruned impl of a kept method name")
     # the symbol spelling, against two symbols the emitter wrote
     assert mangle("dawn$pkg$tileir/dev", "load_cell") == "dawn_dawn_3pkg_3tileir_2dev__load_1cell"
     assert mangle("std/io", "println") == "dawn_std_2io__println"
