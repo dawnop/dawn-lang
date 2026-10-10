@@ -97,6 +97,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
 | [control-freight-design.md](control-freight-design.md) | current | #71：控制运行时与效果证据跟随已有的函数可达性遍历，未使用的声明不增加类文件。 |
 | [slab-residency-design.md](slab-residency-design.md) | **current** | #10 的 measurement-first 调研与落地：把 lexer 小活集的 RSS 拆成 eager 64 KiB layout、空 current、每类 empty cache、rounding 与 `madvise` 五份；以 lexer/compiler/持久红黑树矩阵裁定 fresh slab 按 32 KiB 增量 materialize，保留 hot path、empty cache 与退役策略。 |
+| [slab-decay-design.md](slab-decay-design.md) | current | Koka 差距 R2：empty slab 缓存从「每 class 固定留 4 块、超出立刻 `madvise`」改为按区间最小值衰减（每 1 s 清扫一次，释放区间内从未被用到的富余，下限仍是 4 块）；binarytrees 缺页 595,164 → 24,743、墙钟 −39%、峰值 RSS 不变；爆发之后的归还、快路径代价、小活集静默 RSS 与未解决项（完全静默进程不还）。 |
 | [native-loop-control-design.md](native-loop-control-design.md) | current | native RC 的 `unloop` 只拆 match 一次性循环，保留仍被源码 `break`/`continue` 指向的循环与 C 标签。 |
 | [rc-operand-unwind-design.md](rc-operand-unwind-design.md) | current | #68：后续操作数提前返回时释放先前提升的引用，保留自引用赋值的最后使用转移。#467：为顺序提前求值的 owned 操作数在 C 里放进 `dawn_own` 槽，raise 或丢弃 continuation 时由 unwind 释放。#482：构造器、元组的会 raise 的实参在分配之前求值，不再泄漏半成品对象。 |
 | [native-operand-snapshot-design.md](native-operand-snapshot-design.md) | current | #84 的操作数值快照：后续赋值不能改变前置值，借用引用沿用 RC 临时绑定清理。 |
