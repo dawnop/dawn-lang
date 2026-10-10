@@ -517,6 +517,12 @@ todo、flags 三个演示，视图很小，省下的一次 `view` 在微秒级�
 发出时才送回 worker 的 `supply`。这与 §11 的「一次只发一回合」同一条规矩，门禁里有变异体（`supply-jumps-the-queue`、
 `worker-supplies-itself`）钉着。同步宿主 `app.mjs` 没有队列，取完直接 supply。
 
+**取回的东西进哪里（tea_dom 0.5.0，2026-10-11）。** `supplied` 只能造一条消息，消息里带的数据只能进模型，而模型每回合过线。
+站点搜索取回的是几十 KB 的只读文本，进模型就是每键搬一遍。所以 `turn_with_state`、`turn_shown`、`serve_with_state` 再多一个
+可选的 `absorbed: fn(S, tag, Result[String, String]) -> S`：`supply` 回合里它先于消息折叠运行，结果就是本回合与之后 `update`、`view`
+收到的保留状态（回复里的第一个分量因此在 supply 后也可能是 `Some`）。应用自己的消息仍然换不了保留状态，只有宿主对它所发请求的回答能。
+这与 `init` 的 flags 是同一类东西（只读、启动后才到），不是第二个状态通道。回合 panic 则什么也不提交，旧状态留着。线上没有任何改动。
+
 **限制。** 一回合的 `Fetch` 与 `SendMsg` 共用 `CMD_FOLD_LIMIT`（64）。跨回合的循环（supply 的回合又命令同一个 fetch）
 由应用负责，桥不限；`init` 重启不取消在飞的 fetch，其结果会进到新会话，应用要容忍不认识的 `tag`。
 
