@@ -21,7 +21,7 @@ use check/cx.{ModExports, Cx, cx_new}
 use check/checker.{check_module, exports_of, exported_impl}
 use check/identity
 use check/identity.{Minted, EffectDecl}
-use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add}
+use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add, ct_world_empty}
 use check/jsig.{Jsig, jsig_refused}
 use driver/fsmem
 use std/memfs
@@ -381,8 +381,38 @@ pub(pkg) fn std_dir_target(std: StdCtx, target: String) -> Option[LoadResult] !F
 pub(pkg) fn load_target(std: StdCtx, target: String) -> LoadResult !Fs !Proc !Env !io =
   match std_dir_target(std, target) {
     Some(refusal) -> refusal
-    None -> if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+    None -> load_target_unstd(target)
   }
+
+## `load_target` for a caller with no std in hand, which is right whenever the
+## std is the embedded copy: `std_dir_target` has nothing to refuse then, since
+## no directory is the bundled library.
+pub(pkg) fn load_target_unstd(target: String) -> LoadResult !Fs !Proc !Env !io =
+  if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+
+## What analysis would report for `loaded`, when it can be said without std:
+## every module failed to parse, so none is checked and the diagnostics are the
+## loader's plus each module's parse errors. `None` as soon as one module
+## parsed, because checking it needs std; the caller then loads std and runs
+## `analyze_program`, which gives the same list for the modules that failed.
+##
+## Valid for the embedded std only. A std directory makes `std_identity` rename
+## the modules that are std's own files, and which those are is a fact about
+## the directory.
+pub(pkg) fn syntax_failure_diags(loaded: LoadResult) -> Option[List[LocDiag]] = {
+  var diags = loaded.diags
+  var spans: Map[String, identity.DeclSpans] = map.empty()
+  for mf in loaded.modules {
+    if len(mf.pdiags) == 0 {
+      let none: Option[List[LocDiag]] = None
+      return none
+    }
+    for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    spans = map.insert(spans, mf.mod_path, identity.declaration_spans(mf.m))
+  }
+  Some(rendered_diags(Program { modules: [], diags: diags, decl_spans: spans,
+    ct_world: ct_world_empty() }))
+}
 
 ## Canonicalize a package module's `use` paths to the name-qualified spelling
 ## (`use types` → `use web/types`; an aliased dep gains the dep's real name),
@@ -1529,6 +1559,32 @@ test "a two-module project analyzes end to end" {
     # jsig_refused: a project with no `use java` analyzes without any oracle
     let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
     assert len(prog.diags) == 0
+  })
+}
+
+test "a program that does not parse is answered without std, with the words analysis gives it" {
+  in_mem(() => {
+    let root = "/tmp/dawn-selfhost-analyze/syntaxonly"
+    mkdirs("${root}/src")
+    put("${root}/src/util.dawn", "pub fn f() -> Int = (\n")
+    put("${root}/src/main.dawn", "use util\npub fn main() -> Unit = (\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let loaded = load_target_unstd(root)
+    assert len(loaded.modules) == 2
+    let fast = match syntax_failure_diags(loaded) {
+      Some(ds) -> ds
+      None -> panic("both modules fail to parse, std is not needed")
+    }
+    assert len(fast) > 0
+    let full = rendered_diags(analyze_program(loaded, std, ct_default(), jsig_refused()))
+    assert fast == full
+    # one module that parses is one that needs std
+    put("${root}/src/util.dawn", "pub fn f() -> Int = 1\n")
+    let mixed = load_target_unstd(root)
+    assert syntax_failure_diags(mixed) == None
   })
 }
 
