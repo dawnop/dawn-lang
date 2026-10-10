@@ -29,7 +29,7 @@ use check/types.{
 use check/tast.{TFun, TModule}
 use check/cx.{ModExports, cx_new, Cx}
 use check/checker.{check_module, exports_of}
-use check/identity.{Minted}
+use check/identity.{Minted, Named, TestDecl}
 use ir/interp.{
   eval_comptime, eval_comptime_in, note_direct_fn, note_trait_fn, CtOut, ct_default, CtWorld,
   ConstScope, ct_world_empty, ct_world_add
@@ -387,7 +387,25 @@ pub fn std_choice_text(choice: Option[String]) -> String =
 
 ## Load a chosen std: the directory, or with `None` the embedded copy without
 ## asking any directory at all. What `std_choice` answered goes straight here.
-pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
+pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
+  load_chosen_std_with(chosen, false)
+
+## `load_chosen_std` for a command that never runs std's own tests (`check`,
+## `emitc`, `build`, `run`, a program's `test`): the embedded copy's `test`
+## bodies are not checked, nor are the two reports that only find mistakes in
+## it, which together are 22% of what every cold start spends on std
+## (docs/check-cold-start-design.md). A directory is still checked in full,
+## because whoever names one may be editing it and `dawn check` is how they
+## find the broken test; so is anything that reads std's tests back out of
+## `StdCtx.mods` (`test --stdlib`, the doc generator, the language server).
+pub(pkg) fn load_chosen_std_lean(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
+  load_chosen_std_with(chosen, true)
+
+fn load_chosen_std_with(
+  chosen: Option[String],
+  lean: Bool
+) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
+  let trusted = lean && chosen == None
   # never read when the embedded copy answers below: every use is behind
   # `idx_from_dir`
   let dir = match chosen {
@@ -478,6 +496,7 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
     cx = Cx {
       ..cx,
       is_std_module: true,
+      std_trusted: trusted,
       line_starts: lexer.line_starts_of(text),
       identities: interned,
       impl_table: impls
@@ -663,6 +682,87 @@ test "the embedded std matches std/ on disk" {
       }
     }
   })
+}
+
+test "a lean load of the embedded std differs from the full one only in its tests" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let none: Option[String] = None
+    let full = match load_chosen_std(none) {
+      Ok(sc) -> sc
+      Err(e) -> panic("full: ${std_load_error_text(e)}")
+    }
+    let lean = match load_chosen_std_lean(none) {
+      Ok(sc) -> sc
+      Err(e) -> panic("lean: ${std_load_error_text(e)}")
+    }
+    assert len(lean.mods) == len(full.mods)
+    var full_tests = 0
+    var lean_tests = 0
+    var i = 0
+    while i < len(full.mods) {
+      let (fp, _, ftm, fct) = full.mods[i]
+      let (lp, _, ltm, lct) = lean.mods[i]
+      assert lp == fp
+      assert ltm.fns == ftm.fns
+      assert ltm.consts == ftm.consts
+      # every folded constant agrees; NAN is the one that cannot say so, as
+      # it is not equal to itself
+      assert map.len(lct.consts) == map.len(fct.consts)
+      for k in map.keys(fct.consts) {
+        if k != "NAN" { assert map.get(lct.consts, k) == map.get(fct.consts, k) }
+      }
+      full_tests = full_tests + len(ftm.tests)
+      lean_tests = lean_tests + len(ltm.tests)
+      i = i + 1
+    }
+    assert full_tests > 0
+    assert lean_tests == 0
+    # what a program is checked against is the same
+    assert lean.adts == full.adts
+    assert lean.impls == full.impls
+    # the identities a test block's own check mints are the only ones missing
+    for k in map.keys(full.identities) {
+      let m = map.get(full.identities, k).expect("minted")
+      match map.get(lean.identities, k) {
+        Some(lm) -> { assert lm == m }
+        None ->
+          match m.path[0] {
+            Named(TestDecl, _) -> ()
+            _ -> { assert false }
+          }
+      }
+    }
+    for k in map.keys(lean.identities) { assert map.has(full.identities, k) }
+    assert lean.srcs == full.srcs
+    assert lean.std_fns == full.std_fns
+    assert lean.moved == full.moved
+  }))
+}
+
+test "a std directory is loaded in full whichever way it is asked for" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let dir: Option[String] = Some("std")
+    let full = match load_chosen_std(dir) {
+      Ok(sc) -> sc
+      Err(e) -> panic("full: ${std_load_error_text(e)}")
+    }
+    let lean = match load_chosen_std_lean(dir) {
+      Ok(sc) -> sc
+      Err(e) -> panic("lean: ${std_load_error_text(e)}")
+    }
+    var full_tests = 0
+    var lean_tests = 0
+    for m in full.mods {
+      let (_, _, tm, _) = m
+      full_tests = full_tests + len(tm.tests)
+    }
+    for m in lean.mods {
+      let (_, _, tm, _) = m
+      lean_tests = lean_tests + len(tm.tests)
+    }
+    assert full_tests > 0
+    assert lean_tests == full_tests
+  }))
 }
 
 test "the loader's id counter opens past every prelude id" {
