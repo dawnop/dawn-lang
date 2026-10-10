@@ -104,7 +104,7 @@ K0 的结论（native）：
 | K3 | 整数族 + 骨架生成函数 + 删 `bytes_from_array`（6 处）+ 合约 `scripts/bytes-pack-contract`（两后端同一 `.expect`） | 是 | 字节序写反（非对称值）；宽度错一档；符号扩展写成零扩展（`0x80`）；截断改饱和（`300`） |
 | K4（已实现，见 §10） | 浮点族 + std/bytes `Endian` 与公开面 | 否 | JVM 换 `doubleToLongBits`（规范化 NaN），载荷用例红；native 经 `double` 算术而非 `memcpy`，同样红 |
 | K5（已实现，见 §11） | GPU 重写（与 U3c 合并或紧随）：删 `gpu_*_host` 与桩、镜像，11 对收成位型 + `pack_ints` | 是 | `unpack_i32` 符号扩展改零扩展，`dtype_diff` 红；f64 改规范化 NaN，红 |
-| K6 | `Buf.put_bytes` 非对齐路径用 `bytes_unpack_int(width=1)` 批量进尾部 | 否 | 非对齐拷贝错位一字节，合约红 |
+| K6（已实现，见 §12） | `Buf.put_bytes` 非对齐路径用 `bytes_unpack_int(width=1)` 批量进尾部 | 否 | 非对齐拷贝错位一字节，合约红 |
 | K7（条件） | 标量 `bytes_get_int`/`bytes_get_float`，改 sha256 `word`、tileir `put_le`、binfo | 否 | 大端写成小端，sha2 红 |
 
 K2 与 K3 可并行。破坏性刀（K3、K5）用 `Emit-Change(<label>)` 声明，label 逐字取自 `scripts/emit-labels.txt`。门禁覆盖用 `scripts/gate-map/gatemap.py` 查。本方案不改 workflows；`bytes-pack-contract` 若挂进 CI 须按 Gate-Budget 声明。
@@ -163,3 +163,8 @@ K2 与 K3 可并行。破坏性刀（K3、K5）用 `Emit-Change(<label>)` 声明
 - **新增测试**：`std/gpu` 一条，经名字分派的 `encode_floats`/`decode_floats` 验 f64 NaN 载荷与符号（含逐字节十六进制）和 `i32`/`i16`/`i8` 负数往返；此前只有经 `DeviceBits` 的 `copy_*` 路径有 NaN 测试。
 - **负控**（`./bin/dawn test --stdlib`，均已还原）：`decoder` 的 `i32` 臂去掉 `wrap_i32`，2 项红（`an i32 buffer round-trips every value exactly, low byte first` 与新测试的 i32 断言）；`encoder` 的 `f64` 臂对 NaN 改成规范 NaN，新测试的十六进制断言红。设备侧 `dtype_diff` 的 i16/i64/tf32 经同一条 `encode_floats`/`decode_floats`，由 tile-gpu-diff 账本覆盖。
 - 提交哈希见合入后的 `git log`。
+
+## 12. K6 落地记录
+
+- **与 §5、§6 的偏差：「非对齐路径」不是大块拷贝的瓶颈。** 开工时核对 `origin/main`（9359c1a5）：`put_bytes` 在尾部为空且剩余不少于一块时整块 `bytes_slice`，这条快路径与对齐无关，只看「尾部是否空」。所以一次 N 字节的大 put，不管起点对不对齐，逐字节路径最多走两段：把当前尾部补满（少于 4096 字节），以及末尾不足一块的余数（少于 4096 字节）。一次 32 MiB 的非对齐 put 逐字节部分有界，不随 N 增长。真正吃亏的是**很多次中小 put**（解压器、分帧层的典型形态）：每次调用都落在非对齐上，每个字节一次带检查的 `bytes_at` 加一次 `array_push`。所以 K6 的收益对象是「次数多的小 put」，度量也改按这个形态做。
+- 实现：非快路径里一次取 `min(剩余, 尾部余量)` 个字节，`bytes_slice` 后经 `bytes_unpack_int(width=1, signed=false, little=true)` 得到 `Array[Int]`，尾部为空时直接把它当尾部，否则 `array_extend`；尾部满 4096 仍 `bytes_pack_int` 成块。只改 `std/bytes.dawn`，没有契约表、镜像、运行时改动。
