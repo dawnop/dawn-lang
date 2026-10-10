@@ -77,6 +77,13 @@ pub fn put(b: Buf, byte: Int) -> Buf = {
 }
 
 ## Append all of `src`.
+##
+## A whole chunk that starts on a chunk boundary is sliced, unboxed. Anything
+## else goes into the tail, and it goes in as one `bytes_unpack_int` of as many
+## bytes as the tail has room for, then one `array_extend`, not a push per byte:
+## a put that starts mid-chunk used to cost a bounds-checked `bytes_at` and an
+## `array_push` for each of its bytes, and the many small puts a decompressor or
+## a framing layer makes are all of that kind.
 pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
   let r: BufRep = b
   var chunks = r.chunks
@@ -84,13 +91,16 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
   var i = 0
   let n = bytes_len(src)
   while i < n {
-    if array_len(tail) == 0 && n - i >= CHUNK {
+    let have = array_len(tail)
+    if have == 0 && n - i >= CHUNK {
       # on a chunk boundary with a whole chunk to go: slice it, unboxed
       chunks = array_push(chunks, bytes_slice(src, i, i + CHUNK))
       i = i + CHUNK
     } else {
-      tail = array_push(tail, bytes_at(src, i))
-      i = i + 1
+      let take = if n - i < CHUNK - have { n - i } else { CHUNK - have }
+      let part = bytes_unpack_int(bytes_slice(src, i, i + take), 1, false, true)
+      tail = if have == 0 { part } else { array_extend(tail, part) }
+      i = i + take
       if array_len(tail) == CHUNK {
         chunks = array_push(chunks, bytes_pack_int(tail, 1, true))
         tail = array_new()
@@ -750,6 +760,51 @@ test "put_bytes past a chunk is put byte by byte, wherever it starts" {
     assert buf_at(fast, lead + CHUNK + 7) == at(src, CHUNK + 7)
     # the head is still what it was
     assert size(head) == lead
+  }
+}
+
+# `put` one byte at a time: the answer `put_bytes` has to agree with
+fn put_each(head: Buf, src: Bytes) -> Buf = {
+  var slow = head
+  var i = 0
+  while i < len(src) {
+    slow = put(slow, at(src, i))
+    i = i + 1
+  }
+  slow
+}
+
+test "put_bytes agrees with put at every alignment and length edge" {
+  # leads cover every offset mod 8 and the last eight before a chunk closes, so
+  # the tail fills exactly, one short, and one over; lengths straddle 0, a word,
+  # and a chunk
+  let leads = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, CHUNK - 8, CHUNK - 7, CHUNK - 2, CHUNK - 1]
+  let lens = [0, 1, 7, 8, 9, CHUNK - 1, CHUNK, CHUNK + 1]
+  for lead in leads {
+    let head = buf_of_nth(0, lead)
+    for n in lens {
+      let src = freeze(buf_of_nth(lead, lead + n))
+      let fast = put_bytes(head, src)
+      assert size(fast) == lead + n
+      assert freeze(fast) == freeze(put_each(head, src))
+      # the head is still what it was
+      assert size(head) == lead
+      assert freeze(head) == freeze(buf_of_nth(0, lead))
+    }
+  }
+}
+
+test "put_bytes in small unaligned pieces builds the same bytes as one put" {
+  let src = freeze(buf_of_nth(0, 3 * CHUNK + 11))
+  for step in [1, 3, 7, 8, 9, 100, CHUNK - 1, CHUNK + 1] {
+    var b = buf()
+    var i = 0
+    while i < len(src) {
+      b = put_bytes(b, slice(src, i, i + step))
+      i = i + step
+    }
+    assert freeze(b) == src
+    assert buf_at(b, CHUNK + 5) == at(src, CHUNK + 5)
   }
 }
 

@@ -168,3 +168,16 @@ K2 与 K3 可并行。破坏性刀（K3、K5）用 `Emit-Change(<label>)` 声明
 
 - **与 §5、§6 的偏差：「非对齐路径」不是大块拷贝的瓶颈。** 开工时核对 `origin/main`（9359c1a5）：`put_bytes` 在尾部为空且剩余不少于一块时整块 `bytes_slice`，这条快路径与对齐无关，只看「尾部是否空」。所以一次 N 字节的大 put，不管起点对不对齐，逐字节路径最多走两段：把当前尾部补满（少于 4096 字节），以及末尾不足一块的余数（少于 4096 字节）。一次 32 MiB 的非对齐 put 逐字节部分有界，不随 N 增长。真正吃亏的是**很多次中小 put**（解压器、分帧层的典型形态）：每次调用都落在非对齐上，每个字节一次带检查的 `bytes_at` 加一次 `array_push`。所以 K6 的收益对象是「次数多的小 put」，度量也改按这个形态做。
 - 实现：非快路径里一次取 `min(剩余, 尾部余量)` 个字节，`bytes_slice` 后经 `bytes_unpack_int(width=1, signed=false, little=true)` 得到 `Array[Int]`，尾部为空时直接把它当尾部，否则 `array_extend`；尾部满 4096 仍 `bytes_pack_int` 成块。只改 `std/bytes.dawn`，没有契约表、镜像、运行时改动。
+- 实测（参考机，7 轮取最好；向一个 `Buf` 追加，首个 put 先放 1 字节使其后每次都非对齐；JVM 用 `dawn run`，native 为 clang-20 -O2）：
+
+| 形态 | JVM 前 | JVM 后 | native 前 | native 后 |
+|---|---|---|---|---|
+| 7 B x 1M 次（7 MB） | 61.4 ms | 37.3 ms | 148.2 ms | 132.2 ms |
+| 100 B x 100k 次（10 MB） | 90.0 ms | 38.6 ms | 189.9 ms | 121.9 ms |
+| 1000 B x 10k 次（10 MB） | 91.0 ms | 36.6 ms | 189.4 ms | 96.5 ms |
+| 4 MiB x 8 次（32 MiB，大块） | 2.1 ms | 1.7 ms | 12.3 ms | 11.5 ms |
+
+  大块形态几乎不变，正符合上面的偏差判断；中等大小的 put 收益最大（JVM 约 2.4 倍，native 1.6 到 2 倍）。7 字节一档 native 收益最小，因为每次调用要新建一个小数组并走 `array_extend`，固定开销与逐字节相当。
+- 测试（`std/bytes`）：新增两条。其一对 14 个起点（偏移 0 到 9 与块尾前 8 个位置，覆盖模 8 的每个余数以及尾部恰满、差一、多一）与 8 个长度（0、1、7、8、9、4095、4096、4097）两两组合，逐字节 `put` 的结果必须与 `put_bytes` 逐字节一致，并断言原 `Buf` 不变；其二把一段数据按 1、3、7、8、9、100、4095、4097 的步长零碎追加，必须等于原数据。
+- **负控**（`./bin/dawn test --stdlib`，已还原）：非对齐拷贝的切片整体后移一字节（`bytes_slice(src, i + 1, i + 1 + take)`），5 项红：两条新测试、原有 `put_bytes past a chunk is put byte by byte`、`a Buf appends, reads back, and truncates what will not fit in a byte`（`put_bytes(buf(), utf8("AB"))` 得不到 `4142`）、`decode_latin1` 一条；另有 `std/gpu` 的两条假设备测试因 `Buf` 内容错位而红。设计稿写的「合约红」在这里落在 std 的 inline 测试，不在 `bytes-pack-contract`：后者守的是原语，不经过 `Buf`。
+- 提交哈希见合入后的 `git log`。
