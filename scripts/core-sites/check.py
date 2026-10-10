@@ -124,14 +124,20 @@ def calls_under(n: Node, out: list) -> list:
     return out
 
 
-# Calls the author writes without an `Apply`: a staged loop is spelled `for`, and
-# an operator on a library type is the call of the trait's one method. Each
+# Calls the author writes without an `Apply`: a staged loop is spelled `for`,
+# an operator on a library type is the call of the trait's one method, and a
+# numeric literal at such a type is a call of its FromInt or FromFloat. Each
 # pairs with its own parser node kind, and only through the callee it lowers to,
 # so a site named for anything else on such a node is still "no call".
 SPELLED = {
     "For": {"impl staged_for"},
     "Binary": {"impl add", "impl sub", "impl mul", "impl div", "impl rem"},
     "Unary": {"impl neg"},
+    # a literal at a type the module cannot see through is its FromFloat or
+    # FromInt impl applied to the value: `impl` when the type is known, `method`
+    # when the literal is under a `[T: FromFloat]` bound
+    "Float": {"impl from_float", "method from_float"},
+    "Int": {"impl from_int", "method from_int"},
 }
 
 
@@ -150,6 +156,8 @@ def callee(n: Node):
         return "for", n.lo
     if n.kind == "Binary":
         return n.text.split(" ")[1], int(re.search(r" op@(\d+)\.\.(\d+)", n.text).group(1))
+    if n.kind in ("Float", "Int"):
+        return "from_" + n.kind.lower(), n.lo  # a literal at a library type
     if n.kind == "Unary":
         return n.text.split(" ")[1], n.lo  # the `-` starts the expression
     if n.kind == "MethodCall":

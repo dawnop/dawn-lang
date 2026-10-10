@@ -12,6 +12,10 @@
 # `(() => add(2))()` is written, so it has a site, while the closure call a
 # `with handle` makes of the rest of its block is the checker's and has none:
 # the two have the same shape, and only `tast.NO_NAME` tells them apart.
+# A literal at a type the module cannot see through (`0.5` under
+# `[T: FromFloat]`, `7` under `[T: FromInt]`) lowers to a `from_float` or
+# `from_int` call that has a site though the author wrote no call; the checker
+# pairs it with the parser's Float or Int node.
 
 use std/list
 use std/str
@@ -33,6 +37,10 @@ fn depth(n: Int) -> Int = if n == 0 { 0 } else { 1 + depth(n - 1) }
 
 fn make(k: Int) -> fn(Int) -> Int = v => v + k
 
+fn half[T: FromFloat]() -> T !T.FromFloat = 0.5
+
+fn seven[T: FromInt]() -> T !T.FromInt = 7
+
 fn asked(x: Int) -> Int !Ask = ask(x) + ask(x + 1)
 
 pub fn main() -> Unit !io = {
@@ -48,6 +56,8 @@ pub fn main() -> Unit !io = {
   let z = (() => add(2))()
   with handle Ask { ask(n) => n * 10 }
   let a = asked(1)
+  let w: Float = half()
+  let u: Int = seven()
   println(to_string(twice(g, add(1, b: 2)) + k + s + len(xs) + count(3, 0) + depth(2)))
-  println("${m} ${j} ${t} ${z} ${a} ${o.unwrap_or(0)} ${xs[0] == 2}")
+  println("${m} ${j} ${t} ${z} ${a} ${o.unwrap_or(0)} ${xs[0] == 2} ${w} ${u}")
 }
