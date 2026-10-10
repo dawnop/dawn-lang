@@ -22,7 +22,7 @@ use std/str
 use std/list
 use std/map
 use std/set
-use front/ast.{Module}
+use front/ast.{Module, module_uses}
 use check/types.{
   Sig, Adts, Impls, first_minted_id, adt_of, TyList,
   OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
@@ -392,7 +392,7 @@ pub fn std_choice_text(choice: Option[String]) -> String =
 ## Load a chosen std: the directory, or with `None` the embedded copy without
 ## asking any directory at all. What `std_choice` answered goes straight here.
 pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
-  load_chosen_std_with(chosen, false)
+  load_chosen_std_with(chosen, false, None)
 
 ## `load_chosen_std` for a command that never runs std's own tests (`check`,
 ## `emitc`, `build`, `run`, a program's `test`): the embedded copy's `test`
@@ -403,13 +403,59 @@ pub(pkg) fn load_chosen_std(chosen: Option[String]) -> Result[StdCtx, StdLoadErr
 ## find the broken test; so is anything that reads std's tests back out of
 ## `StdCtx.mods` (`test --stdlib`, the doc generator, the language server).
 pub(pkg) fn load_chosen_std_lean(chosen: Option[String]) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
-  load_chosen_std_with(chosen, true)
+  load_chosen_std_with(chosen, true, None)
 
-## The std modules a pruned load keeps, `std/..` paths, sorted.
+## `load_chosen_std_lean` for a program whose module graph is already loaded:
+## the embedded copy keeps its base modules (`std_base_modules`) and the std
+## modules `imports` names with everything those import, and leaves out the
+## rest (docs/check-std-prune-design.md). `imports` is the program's `use std/..`
+## paths from `driver/analyze.std_imports`; `None`, a directory, and an import
+## naming no embedded module all load in full, which is what the full load did
+## for them before this existed.
+pub(pkg) fn load_chosen_std_pruned(
+  chosen: Option[String],
+  imports: Option[Set[String]]
+) -> Result[StdCtx, StdLoadError] !Fs !Env !io =
+  load_chosen_std_with(chosen, true, imports)
+
+## The embedded copy's module paths (`std/list`, ...), in modules.txt order:
+## what an import has to be in to be a std module a pruned load could add.
+pub(pkg) fn embedded_module_paths() -> List[String] = {
+  var out: List[String] = []
+  match embedded_index() {
+    Ok(pair) -> {
+      let (t, _) = pair
+      for n in index_names(t) { out = out ++ ["std/${n}"] }
+    }
+    Err(_) -> ()
+  }
+  out
+}
+
+## `StdCtx.moved` for the whole embedded std, from `stdsrc.moved_rows`: one
+## `name<TAB>module` row per exported fn, in modules.txt order, the later row
+## winning as it does in the loader's own insertion. The rows come from the
+## generator (a top-level `pub` / `pub(pkg)` fn is an export), and the test
+## "a pruned load answers a program the way a full one does" holds the table
+## equal to what a full load builds, so a std edit the generator misreads fails
+## there rather than in a hint.
+fn moved_table() -> Map[String, String] = {
+  var out: Map[String, String] = map.empty()
+  for row in str.split(stdsrc.moved_rows(), "\n") {
+    let cols = str.split(row, "\t")
+    if len(cols) == 2 && not is_prelude(cols[0]) {
+      out = map.insert(out, cols[0], "use std/" ++ cols[1] ++ ", then " ++ cols[1] ++ "." ++
+          cols[0] ++ "(...)")
+    }
+  }
+  out
+}
+
+## The std modules every pruned load keeps, `std/..` paths, sorted.
 ##
 ## Not a list anyone maintains: each source of "the compiler needs this module
 ## whether or not the program says `use`" is read from the place that already
-## states it, and the closure over `use` edges is taken by the loader.
+## states it.
 ##
 ##   - the owner of a builtin type with no declaration site (`Char`, `Loc`):
 ##     `types.builtin_type_inventory`'s opaque leaves
@@ -445,7 +491,8 @@ pub(pkg) fn std_base_modules() -> List[String] = {
 
 fn load_chosen_std_with(
   chosen: Option[String],
-  lean: Bool
+  lean: Bool,
+  imports: Option[Set[String]]
 ) -> Result[StdCtx, StdLoadError] !Fs !Env !io = {
   let trusted = lean && chosen == None
   # never read when the embedded copy answers below: every use is behind
@@ -495,9 +542,43 @@ fn load_chosen_std_with(
   if len(missing) > 0 {
     return Err(StdLoadError { origin: origin, declared: declared, why: StdModulesMissing(missing) })
   }
+  # Which modules this load keeps. Everything unless the embedded copy was
+  # asked to prune for a program: then the base modules and the program's
+  # imports, closed over the `use` edges of the modules themselves. Modules
+  # are in dependency order, so one pass from the last to the first sees every
+  # dependent before the module it needs; each kept module is parsed there and
+  # the parse is what the loop below checks.
+  var parsed: Map[String, (Module, List[Diag])] = map.empty()
+  var pruned = false
+  var keep: Set[String] = set.empty()
+  match imports {
+    Some(w) -> if trusted {
+      var need: Set[String] = set.empty()
+      for b in std_base_modules() { need = set.insert(need, b) }
+      for p in set.to_list(w) { need = set.insert(need, p) }
+      var i = len(texts) - 1
+      while i >= 0 {
+        let (n, text) = texts[i]
+        if set.has(need, "std/${n}") {
+          let pm = parser.parse_module(text)
+          parsed = map.insert(parsed, n, pm)
+          let (m, _) = pm
+          for u in module_uses(m) {
+            if str.starts_with(u.path, "std/") { need = set.insert(need, u.path) }
+          }
+        }
+        i = i - 1
+      }
+      keep = need
+      pruned = true
+    }
+    None -> ()
+  }
   var exports: Map[String, ModExports] = map.empty()
   var std_fns: Map[String, Sig] = map.empty()
-  var moved: Map[String, String] = map.empty()
+  # a pruned load cannot build this from the modules it left out, so it reads
+  # the table the generator wrote for all of them
+  var moved: Map[String, String] = if pruned { moved_table() } else { map.empty() }
   var fn_decls: Map[String, TFun] = map.empty()
   var by_owner: Map[String, Map[String, TFun]] = map.empty()
   var impl_fns: Map[(Int, String, String), (String, TFun)] = map.empty()
@@ -518,13 +599,17 @@ fn load_chosen_std_with(
   for entry in texts {
     let (n, text) = entry
     let mod_path = "std/${n}"
+    if pruned && not set.has(keep, mod_path) { continue }
     # only a std the directory answered for has files: an embedded one has
     # none, and claiming `<dir>/<n>.dawn` for it would hand std identity to
     # whatever happens to sit at that path
     if idx_from_dir {
       dir_modules = map.insert(dir_modules, canon_identity(dir ++ "/" ++ n ++ ".dawn"), mod_path)
     }
-    let (m, pdiags) = parser.parse_module(text)
+    let (m, pdiags) = match map.get(parsed, n) {
+      Some(pm) -> pm
+      None -> parser.parse_module(text)
+    }
     if len(pdiags) > 0 {
       return Err(StdLoadError {
         origin: origin, declared: declared, why: StdModuleParse(mod_path, pdiags[0].msg)
@@ -580,7 +665,7 @@ fn load_chosen_std_with(
           std_fns = map.insert(std_fns, fname,
             map.get(exp.fns, fname).expect("prelude fn"))
         }
-      } else {
+      } else if not pruned {
         moved = map.insert(moved, fname, "use " ++ mod_path ++ ", then " ++ n ++ "." ++
             fname ++ "(...)")
       }
@@ -864,6 +949,68 @@ test "no std module outside the base can be met without importing it" {
   }))
 }
 
+test "a pruned load answers a program the way a full one does" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let none: Option[String] = None
+    let full = match load_chosen_std_lean(none) {
+      Ok(sc) -> sc
+      Err(e) -> panic("full: ${std_load_error_text(e)}")
+    }
+    let wants: List[List[String]] = [[], ["std/gpu"], ["std/int/u8"], ["std/reactor", "std/float"]]
+    for w in wants {
+      let pruned = match load_chosen_std_pruned(none, Some(set.from(w))) {
+        Ok(sc) -> sc
+        Err(e) -> panic("pruned: ${std_load_error_text(e)}")
+      }
+      # exactly the base, the imports, and what they import
+      var loaded: Set[String] = set.empty()
+      for sm in pruned.mods {
+        let (mp, _, _, _) = sm
+        loaded = set.insert(loaded, mp)
+      }
+      for b in std_base_modules() { assert set.has(loaded, b) }
+      for p in w { assert set.has(loaded, p) }
+      assert set.has(loaded, "std/cursor")
+      if len(w) == 0 { assert set.len(loaded) == 12 }
+      # a module that is loaded is the same module
+      var i = 0
+      while i < len(pruned.mods) {
+        let (pp, _, ptm, _) = pruned.mods[i]
+        var found = false
+        for fm in full.mods {
+          let (fp, _, ftm, _) = fm
+          if fp == pp {
+            found = true
+            assert ptm.fns == ftm.fns
+            assert ptm.consts == ftm.consts
+          }
+        }
+        assert found
+        i = i + 1
+      }
+      # what every program is checked against
+      assert pruned.std_fns == full.std_fns
+      assert pruned.moved == full.moved
+      for k in map.keys(pruned.exports) {
+        assert map.get(pruned.exports, k) == map.get(full.exports, k)
+      }
+      for k in map.keys(pruned.impls) { assert map.get(pruned.impls, k) == map.get(full.impls, k) }
+      for k in map.keys(pruned.identities) {
+        assert map.get(pruned.identities, k) == map.get(full.identities, k)
+      }
+      # an impl left out belongs to a module left out
+      for k in map.keys(full.impls) {
+        if not map.has(pruned.impls, k) {
+          match map.get(full.impls, k).expect("impl").owner {
+            Some(o) -> { assert not set.has(loaded, o) }
+            None -> { assert false }
+          }
+        }
+      }
+    }
+  }))
+}
+
 test "a std directory is loaded in full whichever way it is asked for" {
   io.with_fs_real(() => io.with_env_real(() => {
     let dir: Option[String] = Some("std")
@@ -887,6 +1034,12 @@ test "a std directory is loaded in full whichever way it is asked for" {
     }
     assert full_tests > 0
     assert lean_tests == full_tests
+    # and a directory is never cut to a program's imports
+    let pruned = match load_chosen_std_pruned(dir, Some(set.empty())) {
+      Ok(sc) -> sc
+      Err(e) -> panic("pruned: ${std_load_error_text(e)}")
+    }
+    assert len(pruned.mods) == len(full.mods)
   }))
 }
 
