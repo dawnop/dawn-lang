@@ -45,7 +45,7 @@ use check/tast.{
 }
 use check/types.{
   Ty, TyAdt, TyFn, TyOpaque, RESULT_ID, TyList, TyMap, TySet, TyString, TyBool, Sig, Sym, CtorI,
-  STAGED_VAR_ID, STAGED_ITER_ID, is_lit_trait, impl_at,
+  STAGED_VAR_ID, STAGED_ITER_ID, is_lit_trait, impl_at, TyVar, EQ_ID, ORD_ID,
   ty_show, sig_render, ctor_render, trait_of, adt_of, arg_slots, SlotAt,
   builtin_type_at, builtin_type_hard_reserved, builtin_type_render
 }
@@ -2920,7 +2920,7 @@ fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
   let (args, via, site) = match t {
     XBinary(_, tl, tr2, wit, _, _, _, _, _) -> {
       let (v, st) = match wit {
-        Some(w) -> operator_via(qc, w, None, tex_ty(tl))
+        Some(w) -> operator_via(qc, w, comparison_trait(op), tex_ty(tl), olo)
         None -> ("(primitive)", no_site())
       }
       ([tl, tr2], v, st)
@@ -2929,8 +2929,8 @@ fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
     XCallFn(_, _, xs, wits, _, Some(tid), _, _, _, _) -> {
       if len(xs) == 0 { return q }
       let (v, st) = match get(wits, 0) {
-        Some(w) -> operator_via(qc, w, Some(tid), tex_ty(xs[0]))
-        None -> operator_via(qc, WConcrete(tid, tex_ty(xs[0])), None, tex_ty(xs[0]))
+        Some(w) -> operator_via(qc, w, Some(tid), tex_ty(xs[0]), olo)
+        None -> operator_via(qc, WConcrete(tid, tex_ty(xs[0])), None, tex_ty(xs[0]), olo)
       }
       (xs, v, st)
     }
@@ -2944,16 +2944,77 @@ fn offer_operator(qc: QCx, q: Q, t: TExpr, olo: Int, ohi: Int) -> Q = {
   })
 }
 
-fn operator_via(qc: QCx, w: WitRef, tid0: Option[Int], left: Ty) -> (String, Site) =
+## The trait behind a comparison operator, for the one form where the
+## witness alone does not say it: a bound's `WForward` carries a dictionary
+## symbol, not a trait (arithmetic operators are calls, which name theirs).
+fn comparison_trait(op: String) -> Option[Int] =
+  if op == "==" || op == "!=" {
+    Some(EQ_ID)
+  } else if op == "<" || op == ">" || op == "<=" || op == ">=" {
+    Some(ORD_ID)
+  } else {
+    None
+  }
+
+fn operator_via(qc: QCx, w: WitRef, tid0: Option[Int], left: Ty, at: Int) -> (String, Site) =
   match w {
     WConcrete(tid, subj) -> via_impl(qc, tid, subj)
     WApply(tid, subj, _) -> via_impl(qc, tid, subj)
     WForward(_) ->
       match tid0 {
-        Some(tid) -> ("via bound " ++ trait_of(qc.entry.cx.traits, tid).name ++ "[" ++ show_ty(qc, left) ++ "]", no_site())
+        Some(tid) -> ("via bound " ++ trait_of(qc.entry.cx.traits, tid).name ++ "[" ++ show_ty(qc, left) ++ "]",
+          site_of_bound(qc, tid, left, at))
         None -> ("via a trait bound", no_site())
       }
   }
+
+## Where the bound behind an operator is written: the `Add` of `[T: Add]` on
+## the function (or impl) that holds the operator at `at`. The operator trait
+## is a prelude one with no declaration a reader could open, so the bound is
+## the nearest place that says why `a + b` is allowed here. Always this
+## module's own text: a bound is only ever written around the code it covers.
+fn site_of_bound(qc: QCx, tid: Int, left: Ty, at: Int) -> Site = {
+  let tname = match left {
+    TyVar(n, _) -> n
+    _ -> return no_site()
+  }
+  let tr = trait_of(qc.entry.cx.traits, tid).name
+  let h = match holder_by_class(qc, qc.entry.class_name) {
+    Some(x) -> x
+    None -> return no_site()
+  }
+  for d in h.m.decls {
+    match d {
+      DFn(f) ->
+        if f.lo <= at && at < f.hi {
+          return bound_site([f.tparams], tname, tr)
+        }
+      DImpl(tps, _, _, _, _, methods, _, _, _, _) -> {
+        for f in methods {
+          if f.lo <= at && at < f.hi {
+            return bound_site([f.tparams, tps], tname, tr)
+          }
+        }
+      }
+      _ -> ()
+    }
+  }
+  no_site()
+}
+
+## The first `tr` bound on `tname` among the parameter lists, innermost first.
+fn bound_site(lists: List[List[TypeParamDecl]], tname: String, tr: String) -> Site = {
+  for tps in lists {
+    for tp in tps {
+      if tp.name == tname {
+        for b in tp.bounds {
+          if b.name == tr { return Site { ..no_site(), def: Some((b.lo, b.hi)) } }
+        }
+      }
+    }
+  }
+  no_site()
+}
 
 ## A type of the language's own (`Int`, `Bool`, `List`, ...) has no impl
 ## written anywhere a reader could open: its operator is the primitive one.

@@ -4815,6 +4815,95 @@ test "an operator answers with the impl that carries it out, or the primitive" {
   }))
 }
 
+fn operator_target_probe_text() -> String =
+  join([
+    "type V = { n: Int }",
+    "",
+    "impl Neg[V] {",
+    "  fn neg(a: V) -> V = V { n: 0 - a.n }",
+    "}",
+    "",
+    "impl Eq[V] {",
+    "  fn eq(a: V, b: V) -> Bool = a.n == b.n",
+    "}",
+    "",
+    "impl Ord[V] {",
+    "  fn cmp(a: V, b: V) -> Int = a.n - b.n",
+    "}",
+    "",
+    "fn total[T: Add](a: T, b: T) -> T = a + b",
+    "",
+    "fn flip[T: Add + Neg](a: T) -> T = -a",
+    "",
+    "fn less[T: Ord](a: T, b: T) -> Bool = a < b",
+    "",
+    "fn same[T: Eq](a: T, b: T) -> Bool = a == b",
+    "",
+    "fn vneg(v: V) -> V = -v",
+    "",
+    "fn vless(a: V, b: V) -> Bool = a <= b",
+    "",
+    "fn vsame(a: V, b: V) -> Bool = a != b",
+    "",
+    "fn prim(a: Int, b: Int) -> Bool = not (a == b)",
+    ""
+  ], "\n")
+
+test "an operator under a bound jumps to the bound, one over a type of its own to the impl method" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(std)
+    let text = operator_target_probe_text()
+    let d = def_probe_doc_named(st, "operator_targets.dawn", text)
+    # under a bound: the bound in the signature, in this buffer
+    let add = def_probe_at(st, d, text, "a + b", 2)
+    assert add.hover == "T\n+ via bound Add[T]: fn(T, T) -> T"
+    let (lo, hi) = def_probe_span(add, "the Add bound")
+    assert str.slice(text, lo, hi) == "Add"
+    assert lo == probe_offset(text, "T: Add](a", 3)
+    # the second bound of a list, for a unary operator
+    let ng = def_probe_at(st, d, text, "-a", 0)
+    assert ng.hover == "T\n- via bound Neg[T]: fn(T) -> T"
+    let (nlo, nhi) = def_probe_span(ng, "the Neg bound")
+    assert str.slice(text, nlo, nhi) == "Neg"
+    assert nlo == probe_offset(text, "Add + Neg", 6)
+    # comparisons name their trait too
+    let lt = def_probe_at(st, d, text, "a < b", 2)
+    assert lt.hover == "Bool\n< via bound Ord[T]: fn(T, T) -> Bool"
+    let (llo, lhi) = def_probe_span(lt, "the Ord bound")
+    assert str.slice(text, llo, lhi) == "Ord"
+    assert llo == probe_offset(text, "T: Ord", 3)
+    let eq = def_probe_at(st, d, text, "a == b", 2)
+    assert eq.hover == "Bool\n== via bound Eq[T]: fn(T, T) -> Bool"
+    let (elo, ehi) = def_probe_span(eq, "the Eq bound")
+    assert elo == probe_offset(text, "T: Eq", 3)
+    assert ehi - elo == 2
+    # over a type of its own: the impl's method, whichever trait carries it
+    let vn = def_probe_at(st, d, text, "-v", 0)
+    assert vn.hover == "V\n- via impl Neg[V]: fn(V) -> V"
+    let (vlo, _) = def_probe_span(vn, "the Neg impl")
+    assert vlo == probe_offset(text, "fn neg", 3)
+    let vl = def_probe_at(st, d, text, "a <= b", 2)
+    assert vl.hover == "Bool\n<= via impl Ord[V]: fn(V, V) -> Bool"
+    let (olo, _) = def_probe_span(vl, "the Ord impl")
+    assert olo == probe_offset(text, "fn cmp", 3)
+    let vs = def_probe_at(st, d, text, "a != b", 2)
+    assert vs.hover == "Bool\n!= via impl Eq[V]: fn(V, V) -> Bool"
+    let (slo, _) = def_probe_span(vs, "the Eq impl")
+    assert slo == probe_offset(text, "fn eq", 3)
+    # a primitive has nothing to open
+    let pr = def_probe_at(st, d, text, "a == b)", 2)
+    assert pr.hover == "Bool\n== (primitive): fn(Int, Int) -> Bool"
+    assert pr.def == None
+    let nt = def_probe_at(st, d, text, "not (", 0)
+    assert nt.hover == "Bool\nnot (primitive): fn(Bool) -> Bool"
+    assert nt.def == None
+  }))
+}
+
 # ---- literals on hover (docs/lsp-hover-design.md §4) ----
 
 fn literal_probe_text() -> String =
