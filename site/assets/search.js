@@ -38,19 +38,21 @@
 // read a string inside a program.
 //
 // The documents' text is a second index (search-body-<lang>.json, named by
-// `data-search-body` on the panel's host), about seventy kilobytes gzipped, and
-// it is lazier still: it is fetched the first time the field holds a query,
+// `data-search-body` on the panel's host), a manifest of about five kilobytes
+// gzipped, and it is lazier still: it is fetched the first time the field holds a query,
 // not when the panel opens. Not on an idle timer after opening either,
 // because a reader who opens the panel to pick a recent search or a
 // suggestion, or to close it again, never needs the text, and the first
 // characters of a query are answered from the titles while the index is on
-// its way. Once it is here and says it is format 2, the guest is started
+// its way. Once it is here and says it is format 3, the guest is started
 // again with it in the flags (see restart below for why that and not a
 // message); a fetch that fails or an asset of another format leaves the
-// panel searching titles, which its foot says. The index holds no text: what
-// a row shows is a small file per section that the guest asks the worker to
-// fetch (tea_core's `Fetch`) for the rows on screen, so nothing about those
-// fetches passes through this script.
+// panel searching titles, which its foot says. The manifest holds neither
+// words nor text: the words are in chunks, a few kilobytes each, that the
+// guest asks the worker to fetch (tea_core's `Fetch`) for the words of a query,
+// and what a row shows is a small file per section that it asks for the same
+// way for the rows on screen, so nothing about those fetches passes through
+// this script.
 //
 // Two pieces of state outlive one opening of the panel, and both are the
 // page's because the guest can reach neither. A page loaded with `?q=` opens
@@ -113,7 +115,7 @@
   var app = null; // { host, dispatch, init }
   var goNewTab = false; // whether the last key the panel heard asked for a new tab
   var index = null; // the index text, kept to build flags again on reopen
-  var body = null; // the body index text, once fetched and found to be format 2
+  var body = null; // the body manifest text, once fetched and found to be format 3
   var bodyAsked = false; // so the body index is fetched once per page
   var guestHasBody = false; // whether the running guest was started with it
 
@@ -369,7 +371,7 @@
     restart(f ? f.value : '').then(follow);
   }
 
-  // Fetch the body index, once. Anything short of a format 2 asset leaves
+  // Fetch the body manifest, once. Anything short of a format 3 asset leaves
   // `body` empty and the guest as it is.
   function wantBody() {
     if (bodyAsked) return;
@@ -381,7 +383,7 @@
       .then(function (text) {
         if (!text) return;
         var v = JSON.parse(text);
-        if (!Array.isArray(v) || v[0] !== 2) return;
+        if (!Array.isArray(v) || v[0] !== 3) return;
         body = text;
         if (mounted) mounted.then(takeBody);
       })
