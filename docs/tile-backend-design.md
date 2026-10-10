@@ -770,7 +770,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
   写入器与渲染器一行没改。`float_to_int_sat` 是带 13.4 `saturating` 修饰的 `ftoi`（flags 字 bit 0）。
   `float_to_float_zero` / `_down` / `_up` / `_away` 是 `ftof` 的其余四种 IEEE 舍入，哪一对格式收哪几种由
   `prog.ftof_modes` 照 13.4 的 `Ops.td` 表裁决，记录时就拒。`atomic_rmw(..., "xchg", ...)` 第一次有了客户 kernel。
-  **仍然没有**：13.4 的其余三条 opcode（T19）、`inbounds` 写 true（T18）、`ptr_attr`（不做）。
+  **仍然没有**：13.4 的其余三条 opcode（T19）、`ptr_attr`（不做）。`inbounds` 写 true 在刀 T18 落地（§6.32）。
 - **标准库默认参数刀 K2 起的写法**（上面 T4 / T15 / T17 两段是当时的公开面，原样保留）：属性变体的后缀名全部删除，
   改为带方言默认值、放在位置参数与 body 之后的具名形参：`addf(F32, s, a, b, rounding: Down)`（`sub` / `mul` / `div`
   同形，另有 `ftz: Bool = false`）、`maxf(.., propagate_nan: true)`、`add_i(.., overflow: NoSignedWrap)`、
@@ -3852,12 +3852,13 @@ Python 写入器是独立的第二意见，四处在同一版本、同一形状�
 **七、`inbounds` 不进 attrs.txt（裁决）。** 它是 DenseBoolArrayAttr：值是逐维的一串布尔，不是枚举的
 一个取值，也不是 UnitAttr 的一个 flag 位，`attrs.txt` 的八列放不下它，硬放就要发明新形状。所以它记在
 `features.txt` 的 `load_view_tko` / `store_view_tko` 两行：证据加 `writer:inbounds` 与
-`mutant:view-inbounds-unwritten`。写 true 是 T18 的事，那时再看要不要给它开行。写 true 的代价量过：
+`mutant:view-inbounds-unwritten`。写 true 是 T18 的事，那时再看要不要给它开行（T18 不开行，§6.32）。写 true 的代价量过：
 把 `inbounds` 全写 true，13 个 view kernel 里 2 个（只有 `atomic_red_view_tko` 的）字节不变，
 `view_conv1d` / `view_token_embed` / `view_gather_pad` 三个收下且 cubin 变，其余八个在 sm_86 上
 一律 `rc=5 error: failed to compile Tile IR program`。这八个的形状都不能被 tile 整除（「承诺在界内」
 是假话），方言说违约是 UB，汇编器实际上在编译期就失败，而且报文不点名。所以 T18 的负控是「不能整除
-也写 true → 汇编器拒」，但它的判词只能是这一句不点名的话。
+也写 true → 汇编器拒」，但它的判词只能是这一句不点名的话。**（这一段的归因后来被 T18 推翻：那八个 kernel 失败
+的原因是它们的读视图带 padding 值，不是形状不能被整除；见 §6.32。）**
 
 **八、三本账换钉 v13.4.0。** `features.txt` 105 行（0x00 到 0x7A），新增五行 `insert` 0x76、
 `gdc_launch_dependents_tko` 0x77、`gdc_wait_tko` 0x78、`fpowi` 0x79、`memory_fence_alias_tko` 0x7A，
@@ -3926,8 +3927,9 @@ U1 一轮 1008 s，U2 一轮见下行台账提交。
 
 **三、`insert` 的下标越界不是判词。** verifier 只在下标是常量时检查范围，而且只**警告**
 （`warning: insert index 0 value 2 may be out of bounds (max valid index: 1)`），随后汇编失败、退出 5、
-报文是不点名的 `failed to compile Tile IR program`（把 `insert_tile` 的一个下标改成 2 量的）。与 T18
-记的「不能整除也写 `inbounds` true」是同一种拒绝：未定义行为被拒，而不是一条规则被引用。所以层 1
+报文是不点名的 `failed to compile Tile IR program`（把 `insert_tile` 的一个下标改成 2 量的）。这是一种
+未定义行为被拒、而不是一条规则被引用的拒绝。（T18 原先把 `inbounds` 写 true 的拒绝也归在这一类，量过以后不是：
+它是 padding 值的拒绝，§6.32。）所以层 1
 的「下标错」变异体取**秩**（少写一个下标），不取越界。
 
 **四、变异体与负控。** 层 1 四条（`scripts/tile-golden`），判词都是 13.4.92 原文：
@@ -4847,7 +4849,8 @@ pub fn store[D](p: Param[D], base: Idx, shape: List[Int], v: Tile[D], strides: O
 所以 `cell` 的 +66%（本轮 +104%）= 占用率减半 + 写不合并；`cellw16`（即 `view+a`）的 +45%（本轮 +77%）= 只剩占用率。
 
 `inbounds` 全 true 在两个 matmul 形状上都与不加持平（`view+ib` 对 `view`、`view+a+ib` 对 `view+a`），只省掉几条
-谓词计算；它不改变写宽，也不改变共享内存预算，而且是一个 `tileiras` 不检查的承诺，不值得在本批引入（仍是 T18 的事）。
+谓词计算；它不改变写宽，也不改变共享内存预算，而且是一个 `tileiras` 不检查的承诺，不值得在本批引入（后来 T18 把写 true 的路径做成可选的 `inbounds:` 具名形参，
+没有给任何内置读写默认打开，§6.32）。
 带尾 mask 的指针写（`ptrm`）在四个形状上都不慢（≤ +1.5%）：mask 的代价在这里可以忽略。
 
 **形状依赖。** 结论随形状变的只有占用率那一项：它取决于 `tileiras` 对具体 kernel 的共享内存预算，128×128 的
@@ -5466,6 +5469,83 @@ bf16 步长的 1/350，会把任何一次这样的分歧都叫作错误答案。
 - 其余 kernel 里的 7 处 `broadcast(f_const(..))` 与 40 处 `float_to_float(..)` 不迁：字节不变，迁移只为读者；协调者
   只裁了 `[1, 0]` 转置全迁，这两类留给碰到它们的提交。
 
+### 6.32 `inbounds` 写 true：tileir 0.14.0（刀 T18）
+
+13.4 的 `load_view_tko` / `store_view_tko` 多了必需的 `inbounds`（§6.18 第七条，U2 一直写全 false）。T18 让 kernel
+能写 true。破坏性，0.14.0：效果操作 `t_load_view` / `t_store_view` 末尾多一个 `inbounds: List[Bool]`。
+
+**一、公开面。** `load_view(v, indices, inbounds: [..])` 与 `store_view(v, indices, t, inbounds: [..])`，每个下标一个
+`Bool`：某维为 true，是承诺这次访问碰到的 tile 在该维上没有被张量的边切开，汇编器可以不再处理越界。缺省 `[]` 什么也不承诺，
+写出来的字节与 U2 的逐字相同（199 个既有 golden 的 `.mlir` 与 `.tilebc` 两后端一字未动）。长度不是 0 也不是下标个数，降低时
+按名拒绝。`load_cell` / `store_cell` / `store_sub` 与聚散的 `load_gather` / `store_gather` 传 `[]`：格子视图的边是 kernel 作者没有
+写出来的，聚散视图的行下标是运行期的 tile，两处都没有一个可以写 true 的静态事实。降低把 `[]` 展成逐维 false，所以写入器
+只有一种写法；`Instr.LoadViewTile` / `StoreViewTile` 末尾多一个字段。文本渲染在 token 之后打印 ` inbounds=[true, false]`，
+没有 true 时什么也不打印，与方言的打印器一致（`tileirdisasm` 反汇编 `view_inbounds` 得到
+`token = %0 inbounds = [true, true]`，省略的是全 false；渲染器沿用自己一贯的 `token=%0` 写法）。
+
+**二、推翻 §6.18 第七条的归因。** U2 量到：把 `inbounds` 全写 true，13 个 view kernel 里 8 个在 sm_80 到 sm_120 上都
+`rc=5 error: failed to compile Tile IR program`，当时的读法是这八个的形状不能被 tile 整除，所以「承诺在界内」是假话。T18
+把两个因素拆开量（f64，[32, 32] 的 tile，sm_86，tileiras 13.4.92）：
+
+| 读视图的 padding | 形状 | load 的 `inbounds` | store 的 `inbounds` | 结果 |
+|------------------|------|--------------------|---------------------|------|
+| 无 | [128, 64]，整除 | `[true, true]` | `[true, true]` | 收 |
+| 无 | [100, 64]，行不整除 | `[true, true]` | `[true, true]` | **收** |
+| 无 | [100, 64] | `[false, true]` | `[false, true]` | 收 |
+| `zero` | [128, 64]，整除 | `[true, true]` | `[true, true]` | **拒**（不点名） |
+| `neg_inf`、`nan` | [128, 64] | `[true, true]` | `[true, true]` | 拒（不点名） |
+| `zero` | [100, 64] | `[false, true]` 或 `[true, false]` | `[false, true]` | 拒（不点名） |
+| `zero` | [128, 64] | `[]` | `[true, true]` | 收 |
+
+所以拒绝的原因是**带 padding 值的 load 承诺了任何一维**，与形状无关，整除的形状也拒；不带 padding 的 load 在不整除的形状上
+写 true 汇编器照收（那是承诺假话，运行期未定义，T18 没有让设备去定义它）；store 没有 padding，哪里都收。U2 那八个 kernel
+的读视图全带 padding，所以那一次的归因错了，对的是 padding。研究报告里「能整除形状上 true 收、不能整除的写 true 汇编器拒」这条
+判据因此不成立，T18 的负控换成下面的两条。
+
+**三、降低按名拒绝。** 汇编器的拒绝对每一个这样的程序都成立，不依赖 UB，所以它是一条可以被引用的规则，不同于 §6.19 第三条
+的越界下标。`lower.refuse_promise_over_padding`：load 在分区或步长视图上带 padding 值又承诺了任何一维，降低时报
+`load_view promises inbounds over a view with padding `zero`; tileiras refuses that with no message, ...`。没有 padding 的视图、
+任何 store、以及全 false 的 load 不受影响。聚散视图不在此列（不走 `inbounds:`）。
+
+**四、golden 与负控。** 三个 kernel，都是 [32, 32] 的 tile 拷一个 f64 矩阵：`view_inbounds`（[128, 64]，两次访问都 `[true, true]`）、
+`view_inbounds_off`（同一份拷贝不承诺）、`view_inbounds_dim`（[100, 64]，行不整除，只承诺列 `[false, true]`，最后一排 tile 的
+store 被掩掉）。三个都不带 padding（理由见二）。`run.sh` 加两条检查与两条变异体：
+
+- `view_inbounds` 的 assemble 之后再汇编 `view_inbounds_off`，要求两份 cubin 的 `.text.*` 内容不同（符号名不同所以整份 cubin 必然不同，
+  比的是代码）。实测代码段 768 字节对 1024 字节（48 条对 64 条 SASS），整份 cubin 6624 对 6880 字节。承诺到达了代码。
+- 层 1 变异体 `view-inbounds-all-true`：写入器把数组全写 true，同长，`view_transpose` 的读视图带 `zero`，tileiras 拒，原话是
+  不点名的 `failed to compile Tile IR program`。这条取代研究报告里「不能整除也写 true」那条。
+- 变异体 `view-inbounds-promise-dropped`：写入器把数组全写 false。字节与 `view_inbounds.tilebc` 同长而不同，tileiras 收下，cubin 的代码段
+  与 `view_inbounds_off` 的逐字节相同。这是唯一一条只有汇编器的输出才看得见的主张，所以它的判词不是 tileiras 的拒绝，而是「代码等于不承诺的
+  那一份」。
+- `view-inbounds-unwritten` 的锚点随 `inbounds` 函数改写而改，判词（Func 段少 6 字节、`operand index 16 out of bounds`）不变。
+
+**五、层 2。** `view_diff` 后面加三个 case，同一份宿主参考（输入原样拷出）：设备上三个 kernel 都逐位等于输入。承诺能被汇编器兑现时
+它改的是代码而不是答案，这就是层 2 能说的全部；承诺一个被边切开的 tile 是 UB，不让设备去定义。
+本机全量一轮（sm_86，tileiras 13.4.92，2160 s）三个 case 全 `identical:exact`，`view_diff` 的总计由 6 个 exact 变成 9 个，`view_inbounds_dim`
+的 6400 个格子里被掩掉的那一排也等于输入。台账那一行的 `inputs=` 是 `840f59e38083`，`commit` 字段 `09356eadfc22`，结果 `pass`（本机 sm_86；sm_90 / sm_100 两份由集群所有者重录，本刀没动）。
+
+**六、三本账与 `ptr_attr.none`。** `features.txt` 的两行 view 读写加 `golden:view_inbounds` 与对应变异体，层数仍是 3；`inbounds`
+不进 `attrs.txt`（§6.18 第七条的裁决不变：它是逐维的一串布尔，八列放不下）。`check.py` 的已落地刀集合加 T18。`ptr_attr.none` 一直挂在
+T18 名下，而这一刀把它定为不做（本仓从不写这个可选参数，写入时没有任何答案可比），ledger 没有「不做」这个状态，所以把它改挂一个
+还没有人领的刀号 T21 并保持 `unimplemented`；check.py 自测里原来锚在它身上的两条阴性对照随之改成 T21。
+
+**七、CI 墙钟。** 三个 kernel、两条变异体，按 `tile.yml` 现行的慢型 runner 单价（kernel 13 s、-O0 变异体 31 s）是 101 s 的工作，八片均摊
+约 13 s 一片；八个分片的规划值各比模型高一成（约 75 s），没有重述。路径总量不动，没有 `Gate-Budget` 行。八个分片的步骤名里
+的 `199 kernels and eighty-two mutants` 改成 `202` 与 `eighty-four`（名字不在 `steps.lock.json` 记的 `run:` 文本里，`check` 照绿）。
+本机不分片全量一轮（286 项，同时机器上还有别的工作）墙钟 4889 s 全绿；这一轮没有逐项计时（没设 `ITEM_TIMES`），所以新项按上面的单价记账，不是实测。
+
+**不做的（理由）：**
+
+- 内置读写（`load_cell` 等）默认打开 `inbounds`：量过（§6.25 的 matmul 对照）全 true 与不加持平，只省几条谓词；且格子视图的边不是 kernel
+  作者写出来的，替他承诺等于替他说假话。
+- 让 `lowering` 检查静态形状是否整除再决定拒不拒：不带 padding 的 load 在不整除的形状上承诺，只要这个 kernel 不访问最后那一排就是真话，
+  静态不可判；汇编器收它，我们也收，承诺归调用者。
+- `inbounds` 进 `attrs.txt` 的两行：理由在 §6.18 第七条。
+- 聚散视图的 `inbounds:`：行下标是运行期 tile，没有静态边可承诺；API 不开，等第一个真需要的。
+- 层 2 变异体：承诺能兑现时答案不变，没有一条答案会变红的改法；该红的在层 1（`all-true`）与代码比对（`promise-dropped`）里。
+- `ptr_attr.none`：见六。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
@@ -5525,6 +5605,7 @@ bf16 步长的 1/350，会把任何一次这样的分歧都叫作错误答案。
 | **U2 字节码 13.4**（已落地，升钉第二刀，§6.11 的翻版） | 「写 13.4 改了哪些字节、没改哪些，是量出来的：正向段账 185/185、把 minor 改回 3 逐字节复现 185/185、13.4 字节与 13.3 字节过 13.4.92 的 cubin 185/185 相同」 | `bytecode.dawn`：`BYTECODE_MINOR` 4，`ptr_has_flags` / `ftoi_has_flags` / `view_has_inbounds` 三个谓词，`num_ty` 写 varint，`OP_FPOWF`；`render.dawn` 拼 `fpowf`；185 个 `.tilebc` 与 `mathops.mlir` 重录；三本账换钉 v13.4.0（105 / 24 / 53 行）与 `check.py`；`tile.yml` 六条预算行 914 → 928 s | 不分片全量 256 项 2912 s 绿；`check.py --self-test` 绿；本机台账重录 | 新变异体四条：`ptr-flags-unwritten`、`ftoi-flags-unwritten`、`view-inbounds-unwritten`、`header-minor-still-3`（vadd 上它被收下，所以落在 view_transpose）；既有两条换锚：`partition-view-padding-inline-flag-at-13-3` 在 13.4 上 `stayed green`、`tensor-view-tag-as-ptr` 锚失配，改后绿 | 1.5 |
 | **T16 `insert` 0x76 与 `fpowi` 0x79**（已落地，13.4 覆盖刀的第一把，§6.19） | 「13.4 新加的两条操作码在本机 3080 上与一份独立写的宿主参考逐位相同：`insert` 把子 tile 放回原处答的是原 tile、放到别处答的是换了那一格的原 tile；`fpowi` 的答案是右到左二进制幂再取倒数这串乘法，而不是正确舍入的幂，这一点是量出来的而不是假定的」（今天写不出：两条操作码写入器一个字节也发不出去，`fpowi` 的设备语义只有 `Ops.td` 的一行数学式） | `bytecode.dawn`：`OP_INSERT` / `OP_FPOWI` 与两条编码臂（`insert` 是 `extract` 的记录多一个操作数，`fpowi` 两个操作数、零 flags）；`lower.dawn`：`InsertTile` / `FloatPowI`；`prog.dawn`：`Insert` / `PowI` 与 `check_insert` / `check_powi`（i64 指数拒）；`dev.dawn`：`t_insert` / `t_powi`，公开面 `insert` / `powi`；`render.dawn` 两条拼法（与 `tileirdisasm` 逐字相同）；`packages/tileref`：`ref_fpowi`、`insert_tile_ref`、`powi_sweep_ref`；kernel 两个（`insert_tile` / `powi_sweep`）并进 `shape_diff`（5 → 7）；`features.txt` 两行改 `implemented`、层 3，`check.py` 的 `LANDED_KNIVES` 加 T16；`tile.yml` 六条预算行 928 → 945 s | 层 0/1 两个新 golden、`FUNC GLOBAL` 两个，`tileiras` 一次通过（sm_86）；层 2 本机两个都是 `identical:exact`，`powi_sweep` 的语料负指数 231 条、大于 127 的指数 40 条，两个计数由 `run.sh` 钉在零以上；不分片全量 262 项 3134 s 绿；`check.py --self-test` 绿 | 层 1 四条：`fpowi-exponent-as-float`、`fpowi-as-fpowf`、`insert-source-and-destination-swapped`、`insert-index-dropped`（越界下标不取，因为它只得到一句不点名的 `failed to compile`）；层 2 一条 `insert-indices-reversed`（只有 `insert_tile` 红），`extract-indices-reversed` 的红集加上 `insert_tile`；宿主自轴负控两条（`ref_fpowi` 先取倒数、i8 那一半按无符号读），各自只有 `powi_sweep` 红 | 2（实报 1） |
 | **T17 `loop` 内 `return`、`ftoi` 饱和、`ftof` 舍入表与 `rmw.xchg`**（已落地，13.4 覆盖刀的第二把，§6.20） | 「13.4 给旧操作码的三处新形状在本机 3080 上各有一个与独立宿主参考逐位相同的 kernel：block 在循环中途结束整个 kernel，第几轮、走哪个出口由设备自己的 store 说出来；`saturating` 改变的是哪几格，是量出来的（本机只有 NaN 格）；`ftof` 每一对格式收哪几种舍入，是 360 格逐格问过汇编器的；而 `xchg` 这个从 13.1 起就能拼、一直没有 kernel 要的模式有了第一个客户」（今天写不出：`return` 只能在 entry 与 `if` 里，`ftoi` 的 flags 字恒为 0，`ftof` 只写得出默认模式，`rmw.xchg` 是三本账里最后一行 `deferred`） | **零新 opcode**。`dev.dawn`：`t_return_if` 与 `d_return_if`、`float_to_int_sat`、`float_to_float_zero` / `_down` / `_up` / `_away`；`prog.dawn`：`Return` 与 `return_passes`（`for` / 归约 / 扫描里拒），`ftof_mode` / `ftof_modes` / `check_ftof`（13.4 的表）；`lower.dawn`：`Return` 降成 `Ret`，`yielded` 认 `Ret`；`bytecode.dawn`：`ROUND_NEAREST_AWAY`、`FTOI_FLAG_SATURATING`、`ftoi_flag_word`、`ftof_rounding_of`；`render.dawn` 两处拼法。`std/narrow`：`round_binary_away`、`round_tf32_away`（内联测试）；`packages/tileref`：`loop_return_ref`、`attr_sat_ref`、`attr_ftof_ref`、`attr_xchg_ref`。kernel 四个：`loop_return` 进 `loop_diff`（4 → 5），`attr_sat` / `attr_ftof` / `attr_xchg` 进 `attr_diff`（8 → 11）。三本账：`return` / `ftof` 升层 3，三个属性取值改 `implemented`，`rounding.zero` 升层 3，`no-client-kernel` 退休；`tile.yml` 分到第七片 | 层 0/1 四个新 golden、`FUNC GLOBAL` 四个，`tileiras` 一次通过（sm_86）；层 2 本机五个 loop kernel、十一个属性 kernel 全 `identical:exact`（`attr_approx` 照旧容差），`loop_return` 的出口 `74r,100b,1r,100r` 与语料自数逐字相同，十个新 probe 计数都钉在零以上；`ftof` 表 360 / 360 与 verifier 一致；`check.py --self-test` 绿；不分片全量 268 项 3356 s 绿，`tile.yml` 分到七片，规划值 945 → 826 s，path-total 6580 → 6692 s | 层 1 两条：`loop-return-as-break`（零操作数 `break` 与携带三个值的 loop 类型不符）、`ftof-zero-as-nearest-away`（f64 到 f32 不收 `nearest_away`）。层 2 四条：`loop-return-dropped`（只有 `loop_return` 红）、`ftoi-saturating-bit-dropped`（`attr_sat` 的 NaN 格红，`nan_zero=0`）、`ftof-away-as-nearest-even`（`attr_ftof` 红，`tf32_away=0`）、`rmw-xchg-as-add`（`attr_xchg` 红）。`loop-break-condition-inverted` 的红集加上 `loop_return` | 2（实报 1） |
+| **T18 `inbounds` 写 true**（已落地，13.4 覆盖刀的第三把，§6.32） | 「`load_view_tko` / `store_view_tko` 的 `inbounds` 数组能由 kernel 写成 true：承诺兑现时它改的是代码（768 字节对 1024 字节）而不是答案，设备上三份拷贝与输入逐位相同；承诺不兑现的唯一一类汇编器可判的情形是带 padding 值的 load，它被降低按名拒绝，而 U2 当年把这条拒绝归因给形状不整除，量过是错的」（今天写不出：两个 view 访问函数没有 `inbounds`，字节恒为全 false） | **零新 opcode**。`dev.dawn`：`t_load_view` / `t_store_view` 末尾加 `inbounds: List[Bool]`（破坏性，tileir 0.14.0），`load_view` / `store_view` 加具名形参 `inbounds`；`prog.dawn`：`LoadView` / `StoreView` 带数组；`lower.dawn`：`inbounds_of`（`[]` 展成逐维 false，长度不符按名拒）、`refuse_promise_over_padding`；`bytecode.dawn`：`inbounds` 写 1 / 0 字节；`render.dawn`：` inbounds=[..]`。kernel 三个：`view_inbounds` / `view_inbounds_off` / `view_inbounds_dim`，`view_diff` 4 + 5 个 case 加三个（6 → 9）。三本账：两行 view 读写加 `golden:view_inbounds` 与变异体，`ptr_attr.none` 改挂 T21（不做），`check.py` 的已落地集合加 T18 | 层 0/1 三个新 golden，`tileiras` 一次通过（sm_86）；`view_inbounds` 与 `view_inbounds_off` 的代码段不同（768 对 1024 字节）；层 2 三个 case 全 `identical:exact`；`check.py --self-test` 绿 | 层 1 两条：`view-inbounds-all-true`（带 padding 的读视图承诺，tileiras 不点名拒）、`view-inbounds-promise-dropped`（字节不同、tileiras 收、代码等于不承诺的那份）；`view-inbounds-unwritten` 锚点随函数改写 | 1 |
 | **C1 + D-1 记录期形状检查与块内 fork 不相交**（已落地，cuTile 借鉴第一刀，§6.21） | 「一个逐元素操作的操作数形状与它声明的不符，在记录期就被拒，消息带 kernel 名、操作序号与操作名；`d_fork2` 的两支写同一元素也在记录期被拒」 | `packages/tileir/src/prog.dawn` 的记录 handler（句柄表、逐元素检查、`t_tok_join` 的 fork 检查） | 191 个 golden 逐字节不动；包测试五项新增 | 四条：去格式比较、去形状比较、去 fork 检查、消息去序号 | 1 |
 | **C1′ view 补行、`t_shape_of`、mma 的 K**（已落地，§6.22） | 「经 view 读出的值的形状不符在记录期被拒；任何有行的句柄都能问出它的格式与形状；mma 两个操作数的 K 不一致在记录期被拒」 | `packages/tileir/src/prog.dawn`（`Held.what`、view 与 `load_view` 的行、`t_shape_of` 臂、`check_k`）、`dev.dawn`（`Dev` 加一条、三个测试 handler 各一臂）、`tileir` 0.4.0 | 191 个 golden 逐字节不动；包测试三项新增 | 四条：`load_view` 不记行、`t_shape_of` 不拒、去 K 检查、view 当 tile | 0.5 |
 | **C2 + D-3 + D-5 参数标记：角色与几何、`trace1`…`trace5`、类型化入口**（已落地，§6.24） | 「一个 kernel 的参数格式只写一次，写错是编译错误；写进 In 参数在记录期被拒；Out 格子推出网格，两个 Out 切出两个网格、In 跟随的轴块数不符在记录期被拒；发射时 Out/Shared 与别的参数同一缓冲、网格与格子不符、张量短于格子都在问设备之前被拒」 | `packages/tileir/src/prog.dawn`（`Cells`、`Arg`、`trace1`…`trace5`、记录 handler 的角色与 `aims`）、`std/gpu.dawn`（`EntryArg`、`Entry1`…`Entry5`、`entry_grid`、`launch_entry1`…`launch_entry5`）、`tileir` 0.5.1 | 192 个 golden 逐字节不动；sm_86 台账各档计数不变；包测试六项、std 测试两项新增；补测 tile 1024 > extent 1000 在 sm_86 上成立 | 十四条：tileir 四个、std/gpu 六个变异体，类型层四条编译错误 | 1 |
