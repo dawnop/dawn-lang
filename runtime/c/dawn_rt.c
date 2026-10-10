@@ -5653,3 +5653,21 @@ dawn_adt *dawn_gpu_sync_host(void) { return dawn_gpu_refuse_wasi("gpu_sync_host"
 dawn_unit dawn_gpu_close_host(void) { return DAWN_UNIT; }
 #endif
 /* === DAWN_RT_GPU_END === */
+
+#ifdef DAWN_OWN_CHECK
+/* The check behind DAWN_RETURN (dawn_rt.h): a function is returning
+ * normally, so none of its owned slots may still hold a reference. One that
+ * does is a release the RC pass should have placed and the cleanup used to
+ * paper over; with the scan disarmed it would be a leak, so say so. */
+void dawn_own_leftover(void *frame) {
+  void **s = (void **)frame;
+  int64_t n = (int64_t)(intptr_t)s[0];
+  for (int64_t i = 1; i <= n; i++) {
+    if (s[i] != NULL) {
+      fprintf(stderr, "dawn: a function returned with owned slot %lld still set\n",
+              (long long)i);
+      abort();
+    }
+  }
+}
+#endif
