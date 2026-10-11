@@ -38,7 +38,7 @@ Bool 立即数      = (void*)(((uintptr_t)b << 1) | 1)       总放得下，不�
 
 ### 3.2 wasm32
 
-站点 Demo 与全站搜索的 wasm 由 `site/build.sh` 用 `DAWN_WASM_CC`（clang-20，`--target=wasm32-wasi`）把发射的 C 和同一份 `runtime/c/dawn_rt.c` 编成 reactor。**选择：不关闭，用同一份代码，立即数位数由 `sizeof(void*)` 推出（wasm32 上 31 位）。** 装不下的值走堆盒子，这一条回落路径在 64 位主机上也被边界测试覆盖（`2^62` 附近），wasm32 只是把边界挪到 `2^30`，代码路径相同。`scripts/wasm-contract` 与 `scripts/wasm-dom-contract`（`DAWN_WASM_CC=clang-20`）是这条选择的回归，见 §六。
+站点 Demo 与全站搜索的 wasm 由 `site/build.sh` 用 `DAWN_WASM_CC`（clang-20，`--target=wasm32-wasi`）把发射的 C 和同一份 `runtime/c/dawn_rt.c` 编成 reactor。**选择：不关闭，用同一份代码，立即数位数由 `sizeof(void*)` 推出（wasm32 上 31 位，范围 `[-2^30, 2^30)`）。** 装不下的值走堆盒子，这条回落路径在 64 位主机上也被覆盖：`imm-contract` 用 `-DDAWN_IMM_BITS=31` 的构建把同一批用例再跑一遍（该宏只允许测试构建缩小范围），`imm.dawn` 的 native 转写在这个构建里也与 JVM 一致。真正的 wasm32 由 `scripts/wasm-contract` 覆盖：`imm.dawn` 的 wasm 转写与 native 逐字节相等，`rc-balance` 为 0。
 
 ### 3.3 发射
 
@@ -49,28 +49,32 @@ Bool 立即数      = (void*)(((uintptr_t)b << 1) | 1)       总放得下，不�
 
 ## 四、标记检查点清单与变异体矩阵
 
-下表列全「读 header 或读盒子」的点。**每一行都有一个变异体：在那一处去掉标记判断（或还原成盒子直读）。**变异体的跑法与红的证据见 §六。基线行号取自 edea789b。
+下表列全「读 header 或读盒子」的点。**每一行都有一个变异体：在那一处去掉标记判断（或还原成盒子直读）。**变异体的定义在 `scripts/imm-contract/mutate.py`，期望变红的用例在 `scripts/imm-contract/matrix.txt`，由 `scripts/imm-contract/run.sh` 跑（CI 里的 `Immediates contract` 步骤）。基线行号取自 edea789b。
 
-| # | 点 | 文件 | 今天读什么 | 标记值上的行为 |
-|---|---|---|---|---|
-| P1 | `dawn_dup`（外联） | `dawn_rt.c` | `h->rc` | 原样返回，不写 |
-| P2 | `dawn_dup`（内联，`DAWN_RT_INLINE_RC`） | `dawn_rt.h` | `h->rc` | 同上 |
-| P3 | `dawn_drop` 的入口与快路径（外联；内联构建里是 `dawn_drop_slow`） | `dawn_rt.c` | `h0->rc` | 直接返回 |
-| P4 | `dawn_drop`（内联） | `dawn_rt.h` | `h->rc` | 直接返回 |
-| P5 | `dawn_ws_push`（`drop` 工作表与 `dawn_immortal` 共用；覆盖 ADT 字段、闭包捕获、数组缓冲的每个子节点） | `dawn_rt.c` | 之后弹出时读 `h->rc`、`h->kind` | 不入表 |
-| P6 | `dawn_is_unique` | `dawn_rt.c` | `rc == 1` | 答 false |
-| P7 | `dawn_ev_is_node` | `dawn_rt.c` | `kind` | 答 false |
-| P8 | `dawn_discard` | `dawn_rt.c` | `kind` | 走「不是 continuation」的 panic，不解引用 |
-| P9 | `dawn_peek_int` / `dawn_unbox_int` | `dawn_rt.h` | `((dawn_box*)b)->val.i` | 移位读值 |
-| P10 | `dawn_peek_bool` / `dawn_unbox_bool` | `dawn_rt.h` | `->val.b` | 移位读值 |
-| P11 | `dawn_box_int` 的放得下判断 | `dawn_rt.h` | 无 | 决定立即数还是堆盒子，错了会截断 |
-| P12 | `dawn_from_code_points` | `dawn_rt.c` | `->val.i` | `dawn_peek_int` |
-| P13 | `bytes` 打包循环 | `dawn_rt.c` | `->val.i` | `dawn_peek_int` |
-| P14 | GPU launch 参数 | `dawn_rt.c` | `->val.i` | `dawn_peek_int` |
-| P15 | emitc 的 `unbox_expr` | `emitc.dawn` | 发射 `((dawn_box*)(v))->val.i` | 发射 `dawn_peek_int(v)` |
-| P16 | LSAN/账本宏 `DAWN_LEDGER_*` | `dawn_rt.c` | 计数 | 立即数不经过，计数平衡 |
+红的读法：这些变异体不产生错误答案，而是对 `(void *)3` 解引用，所以多数红是 SIGSEGV 或 ASan 报告，而不是断言失败。`run.sh` 以退出状态为准，每个变异体在 plain、ASan 两个构建里都必须红（内联点用 inline、inline+ASan），并先要求未变异的运行时在 plain、inline、ASan、inline+ASan、`DAWN_IMM_BITS=31` 五个构建里全绿。
 
-不用改、但清单里点名核对过的：`dawn_adt_reset_masked` 的 `a->h.rc` 读的是**有类型的 ADT 指针**（不是擦除槽），调用方是 `match` 的 scrutinee，永远不是标记值；`dawn_own_leftover` 与 `dawn_own_drop` 只比较 NULL 与调用 `dawn_drop`；哈希与相等走字典里的类型化函数（适配器先 `unbox_own_expr` 再比较），不看 `kind`；`dawn_array_*` 与 `dawn_cell_*` 对元素只做 `dawn_dup`、`dawn_drop` 和搬运。
+| # | 点 | 文件 | 今天读什么 | 变异体（去掉什么） | 变红的用例 |
+|---|---|---|---|---|---|
+| P1 | `dawn_dup`（外联） | `dawn_rt.c` | `h->rc` | `dup-ignores-imm` | `dup_imm` |
+| P2 | `dawn_dup`（内联，`DAWN_RT_INLINE_RC`） | `dawn_rt.h` | `h->rc` | `inline-dup-ignores-imm` | `dup_imm`（inline 构建） |
+| P3 | `dawn_drop` 的入口（外联；内联构建里是 `dawn_drop_slow`） | `dawn_rt.c` | `h0->rc` | `drop-ignores-imm` | `drop_imm`（plain）、`drop_slow_imm`（inline） |
+| P4 | `dawn_drop`（内联） | `dawn_rt.h` | `h->rc` | `inline-drop-ignores-imm` | `drop_imm`（inline） |
+| P5 | `dawn_ws_push`（drop 工作表与 `dawn_immortal` 共用；ADT 字段、闭包捕获、数组缓冲的每个子节点都经过它） | `dawn_rt.c` | 弹出时读 `h->rc`、`h->kind` | `ws-push-ignores-imm` | `drop_walks_adt_fields`、`drop_walks_closure_caps`、`drop_walks_array_buffer`、`immortal_walk` |
+| P6 | `dawn_is_unique` | `dawn_rt.c` | `rc == 1` | `is-unique-ignores-imm` | `is_unique_imm` |
+| P7 | `dawn_ev_is_node`（`dawn_ev_get`、`dawn_ev_append`） | `dawn_rt.c` | `kind` | `ev-node-ignores-imm` | `ev_get_imm`、`ev_append_imm` |
+| P8 | `dawn_discard` | `dawn_rt.c` | `kind` | `discard-ignores-imm` | `discard_imm` |
+| P9 | `dawn_peek_int` / `dawn_unbox_int` | `dawn_rt.h` | `((dawn_box*)b)->val.i` | `peek-int-reads-the-box`、`unbox-int-reads-the-box` | `box_boundaries`、`array_of_ints`、`unbox_int_owning` |
+| P10 | `dawn_peek_bool` / `dawn_unbox_bool` | `dawn_rt.h` | `->val.b` | `peek-bool-reads-the-box` | `bool_box` |
+| P11 | `dawn_box_int` 的放得下判断 | `dawn_rt.h` | 无 | `box-int-always-tags`、`box-int-range-off-by-one` | `box_boundaries`、`box_range_edges` |
+| P12 | `dawn_from_code_points` | `dawn_rt.c` | `->val.i` | `from-code-points-reads-the-box` | `from_code_points_imm` |
+| P13 | `dawn_bytes_pack_int` 的循环 | `dawn_rt.c` | `->val.i` | `bytes-pack-reads-the-box` | `bytes_pack_imm` |
+| P14 | GPU launch 参数（`dawn_gpu_launch_host`，在 `DAWN_RT_GPU` 段内） | `dawn_rt.c` | `->val.i` | `gpu-launch-reads-the-box` | `gpu_launch_args_imm`（驱动表换成假函数，不需要设备） |
+| P15 | emitc 的 `unbox_expr` | `emitc.dawn` | 发射 `((dawn_box*)(v))->val.i` | 对发射的 C 做文本变异 `emit-reads-the-box`；对 `emitc.dawn` 本身还原成直读 | `imm.dawn` 的 native 转写（plain、ASan）；`emitc.dawn` 的单测 `a slot member and the ref classification agree about every repr` |
+| P16 | 账本 `DAWN_LEDGER_BIRTH/DEATH`（只在 wasi 构建里计数） | `dawn_rt.c` | 计数 | wasm-contract 的 `immledger`：立即数的 drop 也进账本 | `imm.dawn` 的 `rc-balance`（-66），见 §六 |
+
+P14 的那一行是本改动里**唯一**落在 `DAWN_RT_GPU_BEGIN/END` 之间的文本（此外两处 `dawn_box_int(...)` 调用在该段内，文本未变），所以 `scripts/tile-gpu-diff/inputs.py` 的摘要从 `1b1f4ab1d5a4` 变成 `400a14b86a28`，tile 台账需要在设备上重录。它在一个单独的提交里（`Read the GPU launch arguments through a tag-aware Int read`），放在改 `dawn_box_int` 的提交之前，所以每个提交都能编译、单独看都不会在 GPU 启动路径上读立即数。
+
+不用改、但清单里点名核对过的：`dawn_adt_reset_masked` 的 `a->h.rc` 读的是**有类型的 ADT 指针**（`match` 的 scrutinee），不是擦除槽，永远不是标记值；`dawn_own_leftover` 与 `dawn_own_drop` 只比较 NULL 与调用 `dawn_drop`；哈希与相等走字典里的类型化函数（适配器先 `unbox_own_expr` 再比较），不看 `kind`；`dawn_array_*` 与 `dawn_cell_*` 对元素只做 `dawn_dup`、`dawn_drop` 和搬运；`dawn_ok(dawn_box_int(...))` 一类的运行时自造盒子经同一个内联函数。
 
 ## 五、边界测试
 
@@ -78,18 +82,51 @@ Bool 立即数      = (void*)(((uintptr_t)b << 1) | 1)       总放得下，不�
 - 回绕：`2^62 - 1` 加 1、`-2^62` 减 1、`INT64_MAX + 1`、`INT64_MIN - 1`，运算在具体类型的 `i64` 上做，结果跨过边界后再装箱。
 - 存放：闭包捕获与返回、cell（`var` 与 `dawn_cell_set`）、效果操作的参数与返回、`List`、`Option`、`Map`、`Array` 元素、元组，写进去再读回，值与分配计数（堆盒子数量）一致。
 - Bool：作为类型变量实参、闭包返回、`Option[Bool]`、`Array[Bool]`。
-- dup/drop 对立即数的空操作：在 `rc-contract` 里直接断言，立即数 dup 后仍是同一个字，drop 不崩溃、不进账本。
+- dup/drop 对立即数的空操作：`imm-contract` 里直接断言，立即数 dup 后仍是同一个字，drop 不崩溃，`is_unique` 答 false。
+- 这些用例在 plain、inline-RC、ASan（开泄漏检测）和 `DAWN_IMM_BITS=31` 四个构建里都跑；`imm.dawn` 把上面除 C 层的几类存放位置放进一个 Dawn 程序，在 native（四个构建）、wasm32 和 JVM 三处转写必须逐字节相同。
 
 ## 六、测量与验收
 
-（实现落地后在本节填写：变异体矩阵的红的证据、交错最短 5 次的墙钟表、callgrind 指令数、cc 时间与门禁。）
+### 6.1 方法
+
+基准程序是 `agent-handoff/bench-koka-20261011/dawn/` 的同一批。新二进制是本分支编译器发射的 C 加本分支运行时；旧二进制是**同一份发射 C** 把 `dawn_peek_int(x)`/`dawn_peek_bool(x)` 还原成基线 edea789b 的发射形态（直读盒子）后，与 edea789b 的运行时一起编译。两者除这一处与运行时外逐字节相同。clang-20 `-O2`，仓库的 `cc-units.sh` 同一行 flag，不带 `-DDAWN_RT_INLINE_RC`。每格新旧交错取最短 5 次（标注者取 9 或 11 次），机器上有其他写者，1 分钟负载 3 到 9，绝对值约 ±5% 噪声；输出的 md5 新旧一致。
+
+### 6.2 墙钟
+
+| 基准 | 旧 | 新 | 新/旧 | 备注 |
+|---|---|---|---|---|
+| counter（1 亿次） | 3.240 s | 1.643 s | **0.507** | 之前一轮 3.398 → 1.721（0.506） |
+| gen-sum（20000） | 0.940 s | 0.939 s | 0.999 | |
+| nqueens-cons | 0.866 s | 0.763 s | 0.880 | 峰值 RSS 238 → 193 MB |
+| nqueens-pvec | 3.546 s | 3.378 s | 0.952 | 峰值 RSS 555 → 497 MB；另一轮（9 次）0.928 |
+| rbtree-ck-pvec | 5.843 s | 5.911 s | 1.012 | |
+| deriv | 2.161 s | 2.267 s | 1.049 | 11 次重测 2.173 → 2.258（1.039）；9 次那轮 1.007。噪声边缘，未解释 |
+| rbtree | 2.249 s | 2.261 s | 1.005 | |
+| binarytrees（19） | 1.433 s | 1.437 s | 1.003 | |
+| cfold | 0.272 s | 0.274 s | 1.010 | |
+| native `dawnc emitc nmain.dawn` | 9.301 s | 8.822 s | 0.948 | 同一份编译器 C，旧版还原直读并配基线运行时 |
+| native `dawnc check`（空程序） | 0.157 s | 0.144 s | 0.917 | 同上 |
+
+结论与调研一致：收益集中在效果、闭包与 cell 的擦除 ABI（counter 2 倍），容器基准持平，原生编译器自己的负载快约 5%。
+
+**一个被测量推翻的写法。** 第一版把检查写成 `p == NULL || dawn_is_imm(p)`，编译器生成两个分支；rbtree 与 binarytrees 这类从不装箱 Int 的程序因此慢 4%（rbtree 2.243 → 2.344 s，binarytrees 1.437 → 1.491 s，9 次最短）。改成 `(p == NULL) | dawn_is_imm(p)` 一个分支后同两个程序为 2.251 s 与 1.442 s，即上表的持平。头文件里 `dawn_is_imm` 旁记着这条。
+
+### 6.3 变异体矩阵
+
+`scripts/imm-contract/run.sh` 在最终树上：16 个运行时变异体加 1 个发射 C 变异体，每个都在 plain 与 ASan 构建里按 §四 的表变红（内联点在 inline 与 inline+ASan 里），未变异的运行时在五个构建里 23 个用例全绿，`imm.dawn` 的 28 行转写在 plain、inline、ASan、31 位四个构建里与 JVM 一致。P15 对 `emitc.dawn` 本身的变异（`RInt64` 臂还原成直读）使 `dawn test selfhost/src/c/emitc.dawn` 报 `1 of 93 test(s) failed`。
+
+### 6.4 门禁
+
+最终树上通过：`dawn test selfhost`（1077）、`native-fixpoint.sh`（B == C）、`spike-native/run.sh`、`rc-contract`（plain、ASan、小栈、inline、变异体）、`adt-reuse`、`frame`、`rc-view`、`rc-mode`、`map-reuse`、`ctl-live`、`imm-contract`、`wasm-contract`、`wasm-dom-contract`、`selfhost-prev-diff.sh`（所有 emit label 与 v0.86.0 一致；没有任何 label 覆盖 native C，所以无 `Emit-Change` 可声明）、`selfhost-run-diff.sh`、`mutation-anchor-preflight`（含 test）、`anchor-guard`（含 selftest）、`steps_lock.py check`、`doc-check`、`fmt --check`。
 
 ## 七、刀序
 
 1. 本文。
-2. 运行时认标记（P1 到 P14、P16）与契约、变异体；重生成 `rtsrc.dawn`。
-3. 发射：`box_call`、`unbox_expr`、`unbox_own_expr` 改用立即数，附 `Emit-Change` 声明与 emitc 单测。
-4. 测量与回填本文 §六。
+2. GPU launch 的参数读 `dawn_peek_int`（唯一动 GPU 段的提交，摘要移动）。
+3. 运行时与发射一起认标记：`dawn_box_int` 返回立即数的同一提交里 `unbox_expr` 改发 `dawn_peek_*`（分开会让中间提交产出读立即数的 C），带 `imm-contract`、CI 步骤和 `rtsrc.dawn` 重生成。
+4. wasm-contract 跑 `imm.dawn` 并加账本变异体。
+5. 把立即数测试与 NULL 测试并成一个分支（§六 6.2 的 4% 回退）。
+6. 测量回填本文。
 
 ## 八、不做的（理由）
 
