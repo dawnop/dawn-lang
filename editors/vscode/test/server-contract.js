@@ -7,6 +7,10 @@
 // The last check joins the server to the extension: serverInfo is built in
 // selfhost/src/lsp/server.dawn, and if its name ever stops being "dawn" every
 // user gets the stale-server warning, which no other test would notice.
+// The inlay hint settings are joined the same way: each key must be one
+// `inlay_opts_of` reads, and its default in package.json must be the
+// server's `default_inlay_opts`, or the setting would show a default the
+// server does not have.
 
 "use strict";
 
@@ -99,5 +103,44 @@ const serverSrc = fs.readFileSync(path.join(ROOT, "selfhost/src/lsp/server.dawn"
 const m = serverSrc.match(/fn server_info\(\) -> Json =\s*\n\s*jobj\(\[\("name", JStr\("([^"]*)"\)\)/);
 assert.ok(m, "server_info() not found in selfhost/src/lsp/server.dawn");
 assert.equal(s.serverInfoProblem({ name: m[1], version: s.MIN_SERVER_VERSION }), null);
+
+// initializationOptions: booleans pass through, anything else is left out
+const all = (v) => s.initializationOptions(() => v);
+assert.deepEqual(all(true), {
+  inlayHints: { propagatedErrors: true, declarationEffects: true, patternTypes: true },
+});
+assert.deepEqual(all(false), {
+  inlayHints: { propagatedErrors: false, declarationEffects: false, patternTypes: false },
+});
+assert.deepEqual(all("yes"), { inlayHints: {} });
+assert.deepEqual(s.initializationOptions((_, dflt) => dflt), {
+  inlayHints: { propagatedErrors: false, declarationEffects: true, patternTypes: true },
+});
+
+// The server's half of the inlay hint settings.
+const inlaySrc = fs.readFileSync(path.join(ROOT, "selfhost/src/lsp/lspinlay.dawn"), "utf8");
+const optsOf = serverSrc.match(/fn inlay_opts_of\(params: Json\) -> InlayOpts = \{([\s\S]*?)\n\}/);
+assert.ok(optsOf, "inlay_opts_of not found in selfhost/src/lsp/server.dawn");
+const dflts = inlaySrc.match(/fn default_inlay_opts\(\) -> InlayOpts =\s*InlayOpts \{([\s\S]*?)\}/);
+assert.ok(dflts, "default_inlay_opts not found in selfhost/src/lsp/lspinlay.dawn");
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf8"));
+const props = manifest.contributes.configuration.properties;
+for (const { key, default: dflt } of s.INLAY_HINT_SETTINGS) {
+  const read = optsOf[1].match(new RegExp(`(\\w+): json_flag\\(j, "${key}", d\\.\\1\\)`));
+  assert.ok(read, `the server does not read inlayHints.${key}`);
+  const field = dflts[1].match(new RegExp(`\\b${read[1]}: (true|false)`));
+  assert.ok(field, `default_inlay_opts has no ${read[1]}`);
+  assert.equal(dflt, field[1] === "true", `default of ${key}`);
+  const prop = props[`dawn.inlayHints.${key}`];
+  assert.ok(prop, `package.json does not declare dawn.inlayHints.${key}`);
+  assert.equal(prop.type, "boolean");
+  assert.equal(prop.default, dflt, `package.json default of dawn.inlayHints.${key}`);
+}
+const declared = Object.keys(props).filter((k) => k.startsWith("dawn.inlayHints."));
+assert.deepEqual(
+  declared.sort(),
+  s.INLAY_HINT_SETTINGS.map((x) => `dawn.inlayHints.${x.key}`).sort(),
+  "package.json declares an inlay hint setting the extension does not pass",
+);
 
 console.log("server contract: ok");

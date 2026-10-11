@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5
+
+- Three inlay hint settings, passed to the server as
+  `initializationOptions.inlayHints` with the server's own defaults:
+  `dawn.inlayHints.propagatedErrors` (the error type a `?` propagates; off),
+  `dawn.inlayHints.declarationEffects` (the `!io` inferred for a private
+  function that writes neither a return type nor effects; on) and
+  `dawn.inlayHints.patternTypes` (the types of `for` and `match` bindings; on).
+  The server reads these only at `initialize`, so changing one restarts it.
+  A `dawn` that predates a hint ignores its setting.
+
 ## 0.1.4
 
 - The output channel (Dawn Language Server) now says which server is running:

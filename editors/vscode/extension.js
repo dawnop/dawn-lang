@@ -15,6 +15,11 @@
 // broken compiler otherwise (server.js has the case that prompted this). A
 // change to `dawn.lspPath` restarts the client, so the setting no longer
 // waits for a window reload.
+//
+// The inlay hint settings (`dawn.inlayHints.*`) travel as
+// `initializationOptions`, which the server reads once at `initialize`; it
+// has no `workspace/configuration` path. So a change to one of them restarts
+// the client too, the same way `dawn.lspPath` does.
 const os = require('os');
 const fs = require('fs');
 const vscode = require('vscode');
@@ -87,6 +92,8 @@ async function startClient(manifests) {
       documentSelector: [{ scheme: 'file', language: 'dawn' }],
       synchronize: { fileEvents: manifests },
       outputChannel: output,
+      initializationOptions: server.initializationOptions((key, dflt) =>
+        vscode.workspace.getConfiguration('dawn.inlayHints').get(key, dflt)),
     },
   );
   client = c;
@@ -99,13 +106,13 @@ async function startClient(manifests) {
   reportServer(c, resolved);
 }
 
-async function restartClient(manifests) {
+async function restartClient(manifests, why) {
   const old = client;
   client = undefined;
   if (old) {
     try { await old.stop(); } catch (_) { /* already gone */ }
   }
-  log('dawn.lspPath changed; restarting the server');
+  log(`${why} changed; restarting the server`);
   await startClient(manifests);
 }
 
@@ -117,7 +124,11 @@ function activate(context) {
   context.subscriptions.push(manifests);
 
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
-    if (e.affectsConfiguration('dawn.lspPath')) restartClient(manifests);
+    if (e.affectsConfiguration('dawn.lspPath')) {
+      restartClient(manifests, 'dawn.lspPath');
+    } else if (e.affectsConfiguration('dawn.inlayHints')) {
+      restartClient(manifests, 'dawn.inlayHints');
+    }
   }));
 
   startClient(manifests);
