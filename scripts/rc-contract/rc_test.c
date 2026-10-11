@@ -1297,6 +1297,99 @@ static void test_adt_reset_null(void) {
   check(dawn_adt_reset(NULL) == NULL, "a reset of nothing gives nothing");
 }
 
+/* Field stealing (docs/perceus-reuse-design.md 10). The caller read field 0 out
+ * of the node without a count; the reset is told so. Field 0's child `a` and
+ * field 1's child `b` are each also held twice by the test (`a`, `a2`; `b`,
+ * `b2`), so a release that should not happen is a count and not a fault. */
+static dawn_adt *steal_node(dawn_box *a, dawn_box *b) {
+  dawn_adt *n = dawn_adt_new(0, 3, UINT64_C(3));
+  n->fields[0].p = dawn_dup(a);
+  n->fields[1].p = dawn_dup(b);
+  n->fields[2].i = 42;
+  return n;
+}
+
+/* Alone: the stolen reference stays with the caller, the other is released.
+ * The caller's drop of what it took is the only release of the stolen child. */
+static void test_adt_reset_steal_unique(void) {
+  dawn_box *a = dawn_box_int(11);
+  dawn_box *a2 = (dawn_box *)dawn_dup(a);
+  dawn_box *b = dawn_box_int(12);
+  dawn_box *b2 = (dawn_box *)dawn_dup(b);
+  int f0 = failures;
+  dawn_adt *n = steal_node(a, b);
+  void *got = n->fields[0].p;
+  check(a->h.rc == 3 && b->h.rc == 3, "the node and the test hold both children");
+  uint64_t unique0 = dawn_adt_steal_unique;
+  dawn_adt *tok = dawn_adt_reset_steal(n, UINT64_C(1));
+  check(tok == n, "a unique node is its own token");
+  check(a->h.rc == 3, "the stolen child was not released");
+  check(dawn_adt_steal_unique == unique0 + 1, "and the steal is counted");
+  if (failures != f0) {
+    return; /* leak on purpose: the drops below would free what is already gone */
+  }
+  dawn_drop(got);
+  check(a->h.rc == 2, "the caller's drop of what it took is the one release");
+  drop_token(tok);
+  check(a->h.rc == 2, "dropping the token releases nothing more");
+  dawn_drop(a2);
+  dawn_drop(a);
+  dawn_drop(b2);
+  dawn_drop(b);
+}
+
+/* The field nobody took is still released by the reset, once: this is what
+ * keeps a stolen-from node from leaking the half the new node does not use. */
+static void test_adt_reset_steal_releases_the_rest(void) {
+  /* the stolen field is an immortal singleton, so a mutant that releases it
+   * as well changes no count and frees nothing it should not */
+  dawn_box *b = dawn_box_int(16);
+  dawn_box *b2 = (dawn_box *)dawn_dup(b);
+  dawn_adt *n = dawn_adt_new(0, 3, UINT64_C(3));
+  n->fields[0].p = dawn_adt0(2);
+  n->fields[1].p = dawn_dup(b);
+  n->fields[2].i = 42;
+  check(b->h.rc == 3, "the node and the test hold the other child");
+  dawn_adt *tok = dawn_adt_reset_steal(n, UINT64_C(1));
+  check(tok == n, "a unique node is its own token");
+  check(b->h.rc == 2, "the child nobody took was released, once");
+  drop_token(tok);
+  check(b->h.rc == 2, "and dropping the token releases it no more");
+  dawn_drop(b2);
+  dawn_drop(b);
+}
+
+/* Shared: the node stays alive for its other holder, so what the caller moved
+ * out of it is a loan until the reset counts it. */
+static void test_adt_reset_steal_shared(void) {
+  dawn_box *a = dawn_box_int(13);
+  dawn_box *a2 = (dawn_box *)dawn_dup(a);
+  dawn_box *b = dawn_box_int(14);
+  dawn_box *b2 = (dawn_box *)dawn_dup(b);
+  dawn_adt *n = steal_node(a, b);
+  dawn_adt *hold = (dawn_adt *)dawn_dup(n);
+  int f0 = failures;
+  void *got = n->fields[0].p;
+  uint64_t shared0 = dawn_adt_steal_shared;
+  dawn_adt *tok = dawn_adt_reset_steal(n, UINT64_C(1));
+  check(tok == NULL, "a shared node gives no token");
+  check(hold->h.rc == 1, "the reset gave up its own reference to the node");
+  check(a->h.rc == 4, "the stolen child gained the count the caller skipped");
+  check(b->h.rc == 3, "the other child is still the node's");
+  check(dawn_adt_steal_shared == shared0 + 1, "and the shared path is counted");
+  if (failures != f0) {
+    return;
+  }
+  dawn_drop(got);
+  check(a->h.rc == 3, "the caller's drop gives that count back");
+  dawn_drop(hold);
+  check(a->h.rc == 2 && b->h.rc == 2, "the last holder of the node releases its own");
+  dawn_drop(a2);
+  dawn_drop(a);
+  dawn_drop(b2);
+  dawn_drop(b);
+}
+
 /* Reset is typed by the compiler and checked here: a value that is not a
  * constructed node (a string reached through an erased position) is dropped,
  * not rewritten. The string is eight bytes long so that, read as a node, its
@@ -1385,6 +1478,9 @@ static const rc_case rc_cases[] = {
     {"adt_reset_immortal", test_adt_reset_immortal, 0},
     {"adt_reset_leak_mode", test_adt_reset_leak_mode, 0},
     {"adt_reset_declines_wide", test_adt_reset_declines_wide, 0},
+    {"adt_reset_steal_unique", test_adt_reset_steal_unique, 0},
+    {"adt_reset_steal_releases_the_rest", test_adt_reset_steal_releases_the_rest, 0},
+    {"adt_reset_steal_shared", test_adt_reset_steal_shared, 0},
     {"adt_reset_null", test_adt_reset_null, 0},
     {"adt_reset_kind", test_adt_reset_kind, 0},
     {"adt_reuse_mismatch", test_adt_reuse_mismatch, 0},

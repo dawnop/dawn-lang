@@ -487,6 +487,35 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
 """,
         """""",
     ),
+    # The reset releases the fields the caller moved out as well. The caller
+    # releases them again when it is done: a double free of every stolen child.
+    "steal-releases-stolen": (
+        "dawn_rt.c",
+        """    mask &= ~stolen;
+""",
+        """""",
+    ),
+    # A reset that was told of a steal releases nothing at all: the children
+    # the new node does not take are never given back.
+    "steal-releases-nothing-else": (
+        "dawn_rt.c",
+        """    mask &= ~stolen;
+""",
+        """    if (stolen != 0) { mask = 0; }
+""",
+    ),
+    # A shared node's stolen fields are handed over without the count the
+    # caller's read skipped.
+    "steal-shared-forgets-the-count": (
+        "dawn_rt.c",
+        """        dawn_dup(a->fields[i].p);
+      }
+    }
+    dawn_adt_steal_shared++;""",
+        """      }
+    }
+    dawn_adt_steal_shared++;""",
+    ),
     # An unassigned slot is answered with a token made of nothing. The mutant
     # does not drop the guard (the read of the header would fault, and a
     # `counted` build cannot hold a fault) but keeps its place and lies in it.

@@ -800,6 +800,9 @@ static void dawn_rc_stats_dump(void) {
           (unsigned long long)dawn_adt0_missed,
           (unsigned long long)dawn_adt_reuse_taken,
           (unsigned long long)dawn_adt_reuse_missed);
+  fprintf(stderr, "rc-stats: adt steal unique %llu, shared %llu\n",
+          (unsigned long long)dawn_adt_steal_unique,
+          (unsigned long long)dawn_adt_steal_shared);
 #ifdef DAWN_RC_CONTRACT
   fprintf(stderr, "rc-contract: adt allocs %llu\n", (unsigned long long)dawn_adt_allocs);
 #endif
@@ -1060,6 +1063,8 @@ dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask) 
  * counts a token of the wrong field count as a miss. */
 uint64_t dawn_adt_reuse_taken = 0;
 uint64_t dawn_adt_reuse_missed = 0;
+uint64_t dawn_adt_steal_unique = 0;
+uint64_t dawn_adt_steal_shared = 0;
 
 #ifdef DAWN_REUSE_POISON
 /* Test builds only. Every slot of a reset node is overwritten with a word no
@@ -1070,7 +1075,26 @@ uint64_t dawn_adt_reuse_missed = 0;
 #define DAWN_REUSE_POISON_WORD ((void *)UINT64_C(0xdeaddeaddeaddead))
 #endif
 
-dawn_adt *dawn_adt_reset(dawn_adt *a) {
+static bool dawn_mask_bit(const dawn_mask *m, int32_t n, int32_t i);
+
+/* One body for both entry points, so a refusal added to one cannot be missing
+ * from the other. `stolen` is the set of pointer fields (bit i is field i) the
+ * caller read out WITHOUT a count just before the call
+ * (docs/perceus-reuse-design.md 10), which is the dup the generated code used
+ * to make and the release of the same field that this function used to make,
+ * both gone: when the node is unique those references already belong to the
+ * caller, so they are the one set of fields the release below skips. Every
+ * other pointer field is released as it always was, and the mask is cleared
+ * first for the same reason.
+ *
+ * When the node is not unique the caller's read was a loan from a node that
+ * stays alive, so it takes the count it skipped: the stolen fields are dup'd
+ * (a slot the mask does not call a pointer was never counted by the dup this
+ * replaces either) and the node is dropped like any other, answering NULL.
+ * With nothing stolen that path is the plain drop it always was. Nothing in
+ * either path calls out but `dawn_drop` and `dawn_dup`, which do not panic, so
+ * no unwind can see a reference both in a caller's slot and in the node. */
+static inline dawn_adt *dawn_adt_reset_masked(dawn_adt *a, uint64_t stolen) {
   if (a == NULL) {
     /* a slot that was declared but never assigned on this path; the plain
      * drop of the same slot is a no-op too */
@@ -1079,6 +1103,7 @@ dawn_adt *dawn_adt_reset(dawn_adt *a) {
   if (!dawn_rc_leak && a->h.rc == 1 && a->h.kind == DAWN_K_ADT && a->nfields <= 64) {
     uint64_t mask = a->ptrmask.narrow;
     a->ptrmask.narrow = 0;
+    mask &= ~stolen;
     for (int32_t i = 0; i < a->nfields; i++) {
       if (((mask >> (unsigned)i) & UINT64_C(1)) != 0) {
         dawn_drop(a->fields[i].p);
@@ -1087,10 +1112,25 @@ dawn_adt *dawn_adt_reset(dawn_adt *a) {
       a->fields[i].p = DAWN_REUSE_POISON_WORD;
 #endif
     }
+    if (stolen != 0) { dawn_adt_steal_unique++; }
     return a;
+  }
+  if (stolen != 0) {
+    for (int32_t i = 0; i < a->nfields && i < 64; i++) {
+      if (((stolen >> (unsigned)i) & UINT64_C(1)) != 0 && dawn_mask_bit(&a->ptrmask, a->nfields, i)) {
+        dawn_dup(a->fields[i].p);
+      }
+    }
+    dawn_adt_steal_shared++;
   }
   dawn_drop(a);
   return NULL;
+}
+
+dawn_adt *dawn_adt_reset(dawn_adt *a) { return dawn_adt_reset_masked(a, 0); }
+
+dawn_adt *dawn_adt_reset_steal(dawn_adt *a, uint64_t stolen) {
+  return dawn_adt_reset_masked(a, stolen);
 }
 
 dawn_adt *dawn_adt_reuse(dawn_adt *tok, int32_t tag, int32_t nfields, uint64_t mask) {
