@@ -1133,6 +1133,20 @@ references、documentHighlight 与 rename 读的是同一份 walk（lsp-referenc
   两者 AST 上都有，查的是 checker 自己填的名字表，回写多一个 typed 节点却不多一条信息，还要动 Core 降级与两个后端。
 - **inlay 给臂加效果行**：A4 报告把「handler 臂不给效果行」定为设计，这条不改。
 
+### H1.5 补测：限定名、他模块效果、文档、未匹配的臂名与 references（current）
+
+H1.1 的实现在派这条补测之前就已完整，这里没有改 `lspq`，只补了 H1.3 没覆盖的几种形状。
+`lsp/server` 新增一条测试（`a handler arm answers for qualified and imported effects, ...`），实测结果：
+
+- 限定名 `with handle armprobe.Probe { probe_at(n) => n }`（效果在另一个 std 模块）：臂头 hover 与调用点 `armprobe.probe_at(1)`
+  逐字相同，末尾带操作声明上方的 `##` 文档；definition 的 `def_path` 是那个模块的文件，在其原文里切出来是 `probe_at`。
+- 本模块效果的操作带 `##` 文档时，臂头 hover 为 `fn count() -> Int !Local` 加分隔线和文档。
+- 臂名与效果的任何操作都不匹配（`nope() => 1`）：不崩溃，hover 里没有 `fn nope`，definition 为空；该臂的诊断由 checker 报，不归 LSP。
+- references：在臂头上请求（含声明），回包依次是操作声明、臂头、调用点，臂头自然在内，不需要额外机制。
+- 泛型效果：spec §6.5 写明效果与操作都不带类型参数（`effect Yield[T]` 当前不支持），没有可测的形状，本条不测。
+
+lsp-diff 会话与回包没有变化（`lspq` 未动），所以没有 `Emit-Change`。
+
 ## O1. 运算符悬停：走哪个 impl，或是原语
 
 #566 以后 `+ - * / %` 与一元 `-` 在带 head 的类型上走 prelude trait，typed 树里是 `XCallFn(.., Some(trait_id))`；
