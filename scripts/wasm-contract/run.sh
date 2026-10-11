@@ -107,12 +107,14 @@ wasm_c_build() { # <out.wasm> <main.c> <dawn_rt.c> <shim.o> <include-dir> <tag.o
 
 # ---- both targets, one oracle: the native run's bytes ----------------------
 # Every wasm run also reports the leak ledger; zero is the only green.
-for prog in hello stress failure; do
-  "$DAWNC" build "$here/$prog.dawn" -o "$work/$prog.native" 2>"$work/$prog.cc-err" ||
+for prog in hello stress failure imm; do
+  src="$here/$prog.dawn"
+  [ "$prog" != imm ] || src="$root/scripts/imm-contract/imm.dawn"
+  "$DAWNC" build "$src" -o "$work/$prog.native" 2>"$work/$prog.cc-err" ||
     { echo "FAIL: native build of $prog broke:" >&2; cat "$work/$prog.cc-err" >&2; exit 1; }
   "$work/$prog.native" >"$work/$prog.native.out"
 
-  "$DAWNC" build --target wasm "$here/$prog.dawn" -o "$work/$prog.wasm" 2>"$work/$prog.wasm-err" ||
+  "$DAWNC" build --target wasm "$src" -o "$work/$prog.wasm" 2>"$work/$prog.wasm-err" ||
     { echo "FAIL: wasm build of $prog broke:" >&2; cat "$work/$prog.wasm-err" >&2; exit 1; }
   DAWN_RC_BALANCE=1 node --no-warnings "$here/runwasi.mjs" "$work/$prog.wasm" \
     >"$work/$prog.wasm.out" 2>"$work/$prog.wasm.err"
@@ -196,9 +198,9 @@ fi
 # held against the same three checks the ordinary leg uses (stdout bytes,
 # exit code, rc-balance). A mutant that passes all three means the contract
 # has no teeth and this script must say so.
-run_mutant() { # <name> <maimed dawn_rt.c>
-  local name="$1" rt="$2" mrc
-  wasm_c_build "$work/$name.wasm" "$work/failure.c" "$rt" \
+run_mutant() { # <name> <maimed dawn_rt.c> [program, default failure]
+  local name="$1" rt="$2" prog="${3:-failure}" mrc
+  wasm_c_build "$work/$name.wasm" "$work/$prog.c" "$rt" \
     "$work/eh.o" "$root/runtime/c" "$work/tag.o" 2>"$work/$name.cc-err" ||
     { echo "FAIL: mutant $name did not even compile:" >&2
       head -5 "$work/$name.cc-err" >&2; fail=1; return; }
@@ -207,7 +209,7 @@ run_mutant() { # <name> <maimed dawn_rt.c>
     >"$work/$name.out" 2>"$work/$name.err"
   mrc=$?
   set -e
-  if [ "$mrc" = 0 ] && cmp -s "$work/failure.native.out" "$work/$name.out" &&
+  if [ "$mrc" = 0 ] && cmp -s "$work/$prog.native.out" "$work/$name.out" &&
     grep -q '^rc-balance: 0$' "$work/$name.err"; then
     echo "FAIL: mutant $name passed every check -- the failure contract is toothless" >&2
     fail=1
@@ -241,5 +243,21 @@ else
   run_mutant nomatch "$work/dawn_rt_nomatch.c"
 fi
 
+# Mutant C: the ledger accounts for a tagged immediate (docs/native-immediates-design.md,
+# P16). An immediate is not an object: it is never born into the ledger, so a
+# drop of one that dies in it drives the balance negative. imm.dawn holds Ints
+# and Bools in every erased position (31-bit immediates on wasm32), so
+# rc-balance is the check that must catch it; failure.dawn drops none.
+"$root/bin/dawn" __emitc "$root/scripts/imm-contract/imm.dawn" -o "$work/imm.c"
+cp "$root/scripts/imm-contract/imm.expect" "$work/imm.native.out"
+sed 's/  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {/  if (dawn_is_imm(p)) { DAWN_LEDGER_DEATH(); }\n  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {/' \
+  "$root/runtime/c/dawn_rt.c" >"$work/dawn_rt_immledger.c"
+if cmp -s "$root/runtime/c/dawn_rt.c" "$work/dawn_rt_immledger.c"; then
+  echo "FAIL: mutant C is stale -- the drop's immediate guard moved" >&2
+  fail=1
+else
+  run_mutant immledger "$work/dawn_rt_immledger.c" imm
+fi
+
 if [ "$fail" != 0 ]; then exit 1; fi
-echo "wasm contract ok (hello, stress, failure, failure_uncaught, 4 negative controls)"
+echo "wasm contract ok (hello, stress, failure, imm, failure_uncaught, 5 negative controls)"
