@@ -432,6 +432,10 @@ typedef struct {
 
 /* Is this word an immediate (and so not a pointer, and not NULL)? */
 static inline bool dawn_is_imm(const void *p) { return ((uintptr_t)p & 1u) != 0; }
+/* Where it sits next to a NULL test the two are joined with `|`, not `||`:
+ * "no header here" is one branch on a value that is NULL or odd, where `||`
+ * makes two and costs an allocation-heavy program 4% (rbtree, binarytrees:
+ * 2.344 s against 2.243 s without the test; 2.251 s with the bitwise form). */
 
 /* The immediate range for this target: W-1 value bits, W = pointer width. */
 #ifndef DAWN_IMM_BITS /* a test build may narrow it: scripts/imm-contract */
@@ -538,7 +542,7 @@ extern bool dawn_rc_leak; /* --rc=leak: drop becomes a no-op (plan 6 R3) */
 
 #ifdef DAWN_RT_INLINE_RC
 static inline void *dawn_dup(void *p) {
-  if (p != NULL && !dawn_is_imm(p)) {
+  if (!((p == NULL) | dawn_is_imm(p))) {
     dawn_hdr *h = (dawn_hdr *)p;
     if (h->rc != DAWN_IMMORTAL) {
       h->rc++;
@@ -550,7 +554,7 @@ static inline void *dawn_dup(void *p) {
 void dawn_drop_slow(void *p);
 
 static inline void dawn_drop(void *p) {
-  if (p == NULL || dawn_is_imm(p) || dawn_rc_leak) {
+  if ((p == NULL) | dawn_is_imm(p) | dawn_rc_leak) {
     return;
   }
   dawn_hdr *h = (dawn_hdr *)p;
