@@ -70,8 +70,6 @@ CUT_AT = "# Trace `name` twice and answer the record, or panic if the two runs d
 EDITS = [
     ("use tileir/prog.{TileProg, ",
      "use tileir/prog.{TileProg, trace_calls, op_count, erase, ", 1),
-    ("use tileir/render.{render}\n",
-     "use tileir/render.{render, line_map}\n", 1),
     ("use tileir/bytecode.{encode, bytecode_version}\n", "", 1),
     ("use std/io.{with_fs_real, write_bytes}\n", "", 1),
 ]
@@ -111,7 +109,17 @@ def fail(msg: str) -> None:
 
 # ---- the run: tileir's tree of calls and the lines each wrote ----
 
+RENDER_IMPORT = re.compile(r"^use tileir/render\.\{([^}]*)\}\n", re.M)
+
+
 def harness_source(src: str) -> str:
+    # The render import grows when kernels.dawn starts using another name from
+    # the module (text_debug, knife T14b), so it is matched as a list and
+    # `line_map` appended, not as one spelling. Absent or repeated still fails.
+    found = RENDER_IMPORT.findall(src)
+    if len(found) != 1:
+        fail(f"kernels.dawn has {len(found)} 'use tileir/render.{{...}}' lines, expected 1")
+    src = RENDER_IMPORT.sub(lambda m: "use tileir/render.{" + m.group(1) + ", line_map}\n", src, count=1)
     for old, new, times in EDITS:
         if src.count(old) != times:
             fail(f"kernels.dawn has {src.count(old)} of {old.strip()!r}, expected {times}")
