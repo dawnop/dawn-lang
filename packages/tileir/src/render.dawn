@@ -796,6 +796,7 @@ pub fn render(prog: TileProg) -> String = render_kernel(lower(prog))
 # program's, and the value names are the table's numbers.
 
 fn two_loads_one_param() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "twice",
   params: [ByPtr("f64")],
@@ -833,6 +834,7 @@ test "the token chain in the text is the program's: make_token feeds the first l
 
 test "an atomic spells its ordering, its scope and (for the rmw) its mode, and answers a value and a token" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "atomics",
     params: [ByPtr("i32"), ByPtr("i32")],
@@ -863,20 +865,21 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {
-  let p = TileProg { hints: [], name: "k", params: [ByPtr("f32"), ByPtr("f64")], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { producer: None, hints: [], name: "k", params: [ByPtr("f32"), ByPtr("f64")], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
   assert str.ends_with(text, "    return\n  }\n}\n")
 }
 
 test "K4.1: a by-value parameter is a rank-0 tile of its format in the entry signature, beside the pointers" {
-  let p = TileProg { hints: [], name: "k", params: [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { producer: None, hints: [], name: "k", params: [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<i32>, %arg2: tile<f64>) {\n")
 }
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "axes",
     params: [ByPtr("f64")],
@@ -900,6 +903,7 @@ test "rendering the same program twice gives the same text" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "sum",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -940,6 +944,7 @@ test "a loop is its header with the carried values, a body two columns in, and a
 }
 
 fn spin_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "spin",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -973,6 +978,7 @@ test "a loop is its header with the carried values, an if that breaks, and the c
 
 test "an early return inside a loop is an if around the dialect's bare return, and the conversions print the modifier and the mode" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "t17",
     params: [ByPtr("f64"), ByPtr("i32")],
@@ -1007,6 +1013,7 @@ test "an early return inside a loop is an if around the dialect's bare return, a
 }
 
 fn total_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "total",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1038,6 +1045,7 @@ test "a reduction is its header with the dimension, the identities and the regio
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "branch",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1072,6 +1080,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   # such field at all before bytecode 13.3; exp2 and rsqrt take
   # flush_to_zero, which is never set here
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "m",
     params: [ByPtr("f64")],
@@ -1106,6 +1115,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
 test "assert, assume and print_tko spell the dialect's own assembly, predicate prefix dropped and format string escaped" {
   let none: Option[Int] = None
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "dbg",
     params: [ByPtr("i32"), ByPtr("i32")],
@@ -1147,6 +1157,7 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
 
 test "the fence prints its token bare and the gdc signals print it as the optional clause, with the result type stated" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "fences",
     params: [],
@@ -1181,6 +1192,7 @@ test "index arithmetic spells as scalar i32 constant, addi and muli" {
 
 test "the shape operations spell the dialect's own assembly: brackets on extract, `dim =` on cat, a bare list on permute" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "shapes",
     params: [ByPtr("f64"), ByPtr("f64")],
@@ -1212,6 +1224,7 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
 
 test "insert names its subtile, its destination in brackets and both types, and fpowi both formats" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "t16",
     params: [ByPtr("f64"), ByPtr("i32"), ByPtr("f64")],
@@ -1244,6 +1257,7 @@ test "insert names its subtile, its destination in brackets and both types, and 
 
 test "the pointer surface spells the ladder a body built, its three conversions and a load through it" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "ptrs",
     params: [ByPtr("f64"), ByPtr("i32")],
@@ -1277,6 +1291,7 @@ test "the pointer surface spells the ladder a body built, its three conversions 
 
 test "a fork issues two stores from one token and joins them before the load that follows" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "fork",
     params: [ByPtr("f64"), ByPtr("f64")],
@@ -1300,6 +1315,7 @@ test "a fork issues two stores from one token and joins them before the load tha
 }
 
 fn globals_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "g",
   params: [ByPtr("f64")],

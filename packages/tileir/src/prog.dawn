@@ -289,12 +289,20 @@ pub fn kparam_dtype(k: KParam) -> String = match k {
 ## operation because that is where the dialect puts it: `optimization_hints`
 ## is an argument of `entry`, written in the function TABLE and not in the
 ## body (BytecodeWriter.cpp's `writeFunctionTableSection`).
+##
+## `producer` is the string of the bytecode's Producer section (knife T14a,
+## docs/tile-backend-design.md 6.35). `None` for every recorded kernel: the
+## recording handler never sets it, a caller who wants the section builds
+## `TileProg { ..p, producer: Some(s) }`. The text renderer does not print
+## it, because the MLIR text has no place for it; only the bytes and
+## `tileirdisasm` show it, and the device never does.
 pub type TileProg = {
   name: String,
   params: List[KParam],
   globals: List[Global],
   ops: List[TileOp],
   hints: Hints,
+  producer: Option[String],
 } derive Show
 
 fn refuse(name: String, what: String) -> Never =
@@ -4262,7 +4270,7 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
     if len(marks) != 0 { refuse(name, "the body ended with ${len(marks)} call or body mark(s) still open") } else { () }
     (globals, ops, calls)
   }
-  (TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints }, calls)
+  (TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints, producer: None }, calls)
 }
 
 ## The handles an operation defines in the region it sits in, in definition

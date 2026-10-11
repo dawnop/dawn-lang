@@ -329,6 +329,7 @@ pub type Kernel = {
   globals: List[Global],
   body: List[Instr],
   hints: Hints,
+  producer: Option[String],
 } derive Show
 
 ## The scalar `tile<i32>`.
@@ -1575,7 +1576,7 @@ pub fn lower_spans(prog: TileProg) -> (Kernel, List[Owner]) = {
   for op in prog.ops {
     l = lower_op(l, op)
   }
-  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints }, l.owners)
+  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints, producer: prog.producer }, l.owners)
 }
 
 ## The values an instruction defines, in definition order.
@@ -1671,6 +1672,7 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
 # shared, the token chain is carried, and a dangling handle is refused.
 
 fn two_loads_one_param() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "twice",
   params: [ByPtr("f64")],
@@ -1715,6 +1717,7 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
 # through the same tile: no `base`, no strides, one index tile serving two
 # memory operations.
 fn gather_then_scatter() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "indexed",
   params: [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
@@ -1783,6 +1786,7 @@ test "the ladder reads the entry parameter as an argument, not as a value" {
 
 test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parameter itself, and it has no owner row" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "scalar",
     params: [ByValue("i32")],
@@ -1805,6 +1809,7 @@ test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parame
 
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
+    producer: None,
     hints: [],
     name: "axes",
     params: [ByPtr("f64")],
@@ -1823,6 +1828,7 @@ test "lowering the same program twice gives the same table" {
 
 # The sum kernel as prog.dawn's test records it: four chunks of 128.
 fn sum_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "sum",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1854,6 +1860,7 @@ fn sum_prog() -> TileProg = TileProg {
 # The loop knife T5 added, in the table's own vocabulary: a `Loop` with no
 # bounds whose body ends in the exit `if` and a `continue`.
 fn spin_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "spin",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1957,6 +1964,7 @@ test "after a loop the store consumes the loop's results, not values from inside
 # The reduction kernel prog.dawn records: a block-wide sum, spread back to
 # one lane and stored at element 0.
 fn total_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "total",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2016,6 +2024,7 @@ test "spread lowers to a reshape to one lane and a broadcast to the width" {
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "branch",
   params: [ByPtr("f64"), ByPtr("f64")],

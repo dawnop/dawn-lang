@@ -5021,10 +5021,19 @@ fn dt_cells() -> Cells = cells([DT_N], [DT_TILE])
 
 fn dt_out(segs: Int, rows: Int) -> Cells = seg_out(segs, rows, DT_N, DT_TILE)
 
+# The string the Producer section of `vadd_producer` carries (knife T14a).
+# run.sh holds the first line `tileirdisasm` prints to `// Producer: ` and
+# this, so the two are written down in one place each and compared there.
+const PRODUCER: String = "dawn-tileir"
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" -> {
     let (p, _e) = trace3("vadd", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
     p
+  }
+  "vadd_producer" -> {
+    let (p, _e) = trace3("vadd_producer", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
+    TileProg { ..p, producer: Some(PRODUCER) }
   }
   "vadd_f32" -> {
     let (p, _e) = trace3("vadd_f32", In(F32, run_of(64)), In(F32, run_of(64)), Out(F32, run_of(64)), vadd_f32)
@@ -6096,6 +6105,15 @@ pub fn main() -> Unit !io = match args() {
   ["--bytecode-version"] -> println(bytecode_version())
   ["out_along_twice"] -> print(render(out_along_twice()))
   [name] -> print(render(trace_twice(name)))
+  [name, "--bytecode-bare", path] -> {
+    # The same program without its Producer section: what the cubin of a
+    # program with one is held against (run.sh, knife T14a).
+    let bytes = encode(TileProg { ..trace_twice(name), producer: None })
+    match with_fs_real(() => write_bytes(path, bytes)) {
+      Ok(_) -> ()
+      Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
+    }
+  }
   [name, "--bytecode", path] -> {
     let bytes = encode(trace_twice(name))
     match with_fs_real(() => write_bytes(path, bytes)) {
@@ -6103,7 +6121,7 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
+  _ -> panic("usage: kernels <vadd|vadd_producer|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
       ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
       ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
       ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"

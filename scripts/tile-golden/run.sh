@@ -444,6 +444,19 @@
 #                            the writer puts a type tag down as a byte and not
 #                            a varint -> the two-byte tag 130 is mangled and
 #                            the reader loses its place in the function
+#     producer-index-off-by-one
+#                            the writer points the Producer section one string
+#                            early -> vadd_producer's text is untouched, its
+#                            bytes are the same length and differ, tileiras
+#                            still assembles them (it is a valid program), and
+#                            the first line tileirdisasm prints is the entry
+#                            name where the producer was
+#     producer-under-13-2-header
+#                            the pinned minor is 2, under which the Producer
+#                            section does not exist -> the writer REFUSES
+#                            vadd_producer (non-zero exit, the refusal on
+#                            stderr, no file) on both backends, and still
+#                            encodes vadd, which carries no producer
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time, so splitting by kind would
@@ -531,7 +544,8 @@ kernels=(
   view_inbounds view_inbounds_off view_inbounds_dim
   flash_attn idx_softmax carry_extent flash_attn_bf16
   scalar_scale scalar_len scalar_loop scalar_wide
-  dtype_e5m3 mmaf_scaled_e5m3)
+  dtype_e5m3 mmaf_scaled_e5m3
+  vadd_producer)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -656,6 +670,8 @@ mutants=(
   gdc-operand-count-written
   e5m3-tag-as-e8m0
   type-tag-written-as-one-byte
+  producer-index-off-by-one
+  producer-under-13-2-header
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -967,6 +983,23 @@ assemble() { # tilebc, out, gpu-name
   ! grep -q '^error:' "$2.log"
 }
 
+# `tileirdisasm` ships beside `tileiras` in the pinned wheel (13.4 on) and
+# prints the module as text; the Producer section is its first line. A tree
+# of just tileiras, ptxas and libnvvm (toolchain.txt) has none, and then the
+# producer items cannot be judged, which is a failure and not a skip.
+need_disasm() {
+  disasm="$(dirname "$tileiras")/tileirdisasm"
+  [ -x "$disasm" ] || fail "no tileirdisasm beside $tileiras; the Producer section is judged by its first line"
+}
+
+disasm_first_line() { # tilebc
+  "$disasm" "$1" 2>&1 | sed -n 1p
+}
+
+# The producer string vadd_producer carries: kernels.dawn's PRODUCER.
+producer_want="$(sed -n 's/^const PRODUCER: String = "\(.*\)"$/\1/p' "$here/kernels.dawn")"
+[ -n "$producer_want" ] || fail "kernels.dawn has no PRODUCER constant"
+
 # ---------------------------------------------------------------- trace + golden
 
 project "$work/clean" "$root/packages/tileir"
@@ -1029,6 +1062,26 @@ for k in "${kernels[@]}"; do
       [ "$(cubin_text "$work/$k.cubin")" != "$(cubin_text "$work/view_inbounds_off.cubin")" ] ||
         fail "view_inbounds: the promised copy and the unpromised one assemble to the same code, so the promise reaches nothing"
       echo "PASS  inbounds: view_inbounds and view_inbounds_off assemble to different code at $arch"
+    fi
+    if [ "$k" = vadd_producer ]; then
+      # The Producer section (knife T14a): the one place it shows is
+      # tileirdisasm's first line, and the device never sees it, so the
+      # cubin is the one the same program makes without the section.
+      need_disasm
+      got="$(disasm_first_line "$bc_golden")"
+      [ "$got" = "// Producer: $producer_want" ] ||
+        fail "vadd_producer: tileirdisasm's first line is '$got', expected '// Producer: $producer_want'"
+      run_jvm "$work/clean" "$work/$k.bare.out" "$k" --bytecode-bare "$work/$k.bare.tilebc" ||
+        { cat "$work/$k.bare.out.err" >&2; fail "$k did not encode without its producer"; }
+      got="$(disasm_first_line "$work/$k.bare.tilebc")"
+      case "$got" in
+        "// Producer:"*) fail "vadd_producer: the program without a producer still disassembles with '$got'" ;;
+      esac
+      assemble "$work/$k.bare.tilebc" "$work/$k.bare.cubin" "$arch" ||
+        { cat "$work/$k.bare.cubin.log" >&2; fail "$k: tileiras refused the copy without a producer"; }
+      cmp -s "$work/$k.cubin" "$work/$k.bare.cubin" ||
+        fail "vadd_producer: the cubin differs from the one the same program makes without the Producer section"
+      echo "PASS  producer: tileirdisasm opens with '// Producer: $producer_want'; the cubin is byte for byte the one without the section"
     fi
     if [ "$k" = global_syms ]; then
       check_global_syms_symbols "$work/$k.cubin"
@@ -2680,6 +2733,72 @@ if run_item type-tag-written-as-one-byte; then
   mutant_project type-tag-written-as-one-byte bytecode.dawn
   writer_mutant_checks type-tag-written-as-one-byte dtype_e5m3 file-shorter \
     "failed to get result type 0 for FToFOp"
+fi
+
+# 57. The Producer section points one string early. vadd interns only its
+#     entry name before the producer, so the section names string 0, the
+#     kernel's own name, and not "dawn-tileir". Nothing is malformed: the file
+#     is the same length, tileiras assembles it, and the one place the section
+#     is visible, tileirdisasm's first line, now says `// Producer:
+#     vadd_producer`. Only that line sees it; the text and the cubin do not.
+if run_item producer-index-off-by-one; then
+  mutant_project producer-index-off-by-one bytecode.dawn
+  mutant_run producer-index-off-by-one vadd_producer
+  mutant_run_bytecode producer-index-off-by-one vadd_producer
+  golden_size=$(wc -c < "$here/vadd_producer.tilebc")
+  for backend in jvm native; do
+    out="$work/m-producer-index-off-by-one.vadd_producer.$backend"
+    if [ "$(cat "$out.rc")" != 0 ] || ! cmp -s "$here/vadd_producer.mlir" "$out"; then
+      cat "$out.err" >&2
+      fail "producer-index-off-by-one: the renderer was not edited, so vadd_producer.mlir should still match on $backend"
+    fi
+    out="$work/m-producer-index-off-by-one.vadd_producer.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$work/m-producer-index-off-by-one.vadd_producer.$backend.out.err" >&2; fail "producer-index-off-by-one: vadd_producer did not encode on $backend"; }
+    cmp -s "$here/vadd_producer.tilebc" "$out" && fail "producer-index-off-by-one mutant stayed green on $backend: vadd_producer.tilebc still matches"
+    [ "$(wc -c < "$out")" = "$golden_size" ] ||
+      fail "producer-index-off-by-one: vadd_producer.tilebc is $golden_size bytes and the mutant's is $(wc -c < "$out") on $backend; expected the same size"
+  done
+  cmp -s "$work/m-producer-index-off-by-one.vadd_producer.jvm.tilebc" "$work/m-producer-index-off-by-one.vadd_producer.native.tilebc" ||
+    fail "producer-index-off-by-one: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    need_disasm
+    assemble "$work/m-producer-index-off-by-one.vadd_producer.jvm.tilebc" "$work/m-producer-index-off-by-one.cubin" "$(kernel_arch vadd_producer)" ||
+      { cat "$work/m-producer-index-off-by-one.cubin.log" >&2; fail "producer-index-off-by-one: tileiras should take the mutant's bytes (the section is well formed)"; }
+    got="$(disasm_first_line "$work/m-producer-index-off-by-one.vadd_producer.jvm.tilebc")"
+    [ "$got" != "// Producer: $producer_want" ] ||
+      fail "producer-index-off-by-one mutant stayed green: tileirdisasm still opens with '$got'"
+    [ "$got" = "// Producer: vadd_producer" ] ||
+      fail "producer-index-off-by-one: tileirdisasm opens with '$got', expected '// Producer: vadd_producer' (string 0)"
+    echo "PASS  mutant: producer-index-off-by-one (vadd_producer.mlir untouched, .tilebc red on both backends; tileirdisasm: $got)"
+  else
+    echo "PASS  mutant: producer-index-off-by-one (vadd_producer.mlir untouched, .tilebc red on both backends)"
+    echo "SKIP  mutant: producer-index-off-by-one not handed to tileirdisasm (--without-tileiras)"
+  fi
+fi
+
+# 58. The pinned minor is 2 and the program carries a producer. The C++
+#     writer would skip the section without a word; this one refuses, so a
+#     caller never believes a Producer went into a file whose header cannot
+#     hold it. The refusal is at encode time (non-zero exit, the message on
+#     stderr, no file written) on both backends. `vadd`, which carries no
+#     producer, still encodes under the same header: the refusal is about
+#     the section and not about the version.
+if run_item producer-under-13-2-header; then
+  mutant_project producer-under-13-2-header bytecode.dawn
+  mutant_run_bytecode producer-under-13-2-header vadd_producer
+  mutant_run_bytecode producer-under-13-2-header vadd
+  refusal='a Producer section needs bytecode 13.3 or later'
+  for backend in jvm native; do
+    out="$work/m-producer-under-13-2-header.vadd_producer.$backend.tilebc"
+    [ "$(cat "$out.rc")" != 0 ] || fail "producer-under-13-2-header mutant stayed green on $backend: vadd_producer encoded under a 13.2 header"
+    grep -Fq "$refusal" "$work/m-producer-under-13-2-header.vadd_producer.$backend.out.err" ||
+      { cat "$work/m-producer-under-13-2-header.vadd_producer.$backend.out.err" >&2; fail "producer-under-13-2-header: vadd_producer failed on $backend for something other than the Producer refusal"; }
+    [ ! -e "$out" ] || fail "producer-under-13-2-header: the refused vadd_producer left a file behind on $backend"
+    ctrl="$work/m-producer-under-13-2-header.vadd.$backend.tilebc"
+    [ "$(cat "$ctrl.rc")" = 0 ] && [ -s "$ctrl" ] ||
+      { cat "$work/m-producer-under-13-2-header.vadd.$backend.out.err" >&2; fail "producer-under-13-2-header: vadd (no producer) should still encode on $backend"; }
+  done
+  echo "PASS  mutant: producer-under-13-2-header (vadd_producer refused at encode time on both backends; vadd untouched)"
 fi
 
 _item_tick ""

@@ -907,7 +907,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 - `cuda-tile-translate` 仍不在 pip、未构建。刀 3 不再需要它做 round-trip：`tileiras` 内含
   `cuda-tile` 的 bytecode reader 与 MLIR verifier，拒绝时给出字节偏移与 op 名（§6.2 的变异体
   报文），比一个只会打印文本的翻译器说得更多。CUDA 13.4 的 tileiras wheel 自带 `tileirdisasm`
-  （cuTile.jl 已接）；刀 U1 / U2 升钉之后它就在钉住的工具链里，接进 run.sh 做文本对拍是 T14 的事（§6.18）。
+  （cuTile.jl 已接）；刀 U1 / U2 升钉之后它就在钉住的工具链里，T14a 已经把它接进 run.sh 读 Producer 首行（§6.35），整份文本对拍是 T14c 的事（§6.18）。
 
 ### 6.2 三层门
 
@@ -5681,6 +5681,50 @@ kernel、89 个变异体），tile.yml 的八个步骤名同步，`run:` 文本�
 - 块大小 32：verifier 同样收，`mmaf_scaled_e5m3` 只钉了 16；多一个块大小是同一条规则的另一个取值，不是另一种形状。
 - `f8E5M3FNU` 作 `mmaf_scaled` 的 f8 操作数：verifier 不收（第一行规则：e5m3 缩放要求 f4E2M1FN 操作数），也没有变异体要它。
 - `dtype_e5m3` 读字节：没有缓冲就没有「读一个八位模式」的入口，所以没有 e8m0 那种「每个八位模式是什么值」的段。
+
+### 6.35 Producer 段：只有反汇编看得见的一个字符串（刀 T14a，tileir 0.16.0）
+
+字节码 13.3 起有第 7 号段，Producer：记「谁写了这个文件」。这一刀让 `bytecode.dawn` 在程序带 `producer` 时写它。破坏性，0.16.0：
+`TileProg` 与降低后的 `Kernel` 各多一个字段 `producer: Option[String]`，包外写记录字面量的地方要补 `producer: None`；没有新的 `Dev` 操作，
+既有 205 个 golden 的 `.mlir` 与 `.tilebc` 在两个后端上一个字节没动（`None` 不写段，字符串表也不多一项）。
+
+**一、字节形状（`tileirdisasm` 13.4.92 实测，调研报告 4.2 先量过一遍）。** 段 id 7、不对齐、长度 1、内容是字符串表里那一项的下标（一个 varint）。
+段排在字符串段之后、结束字节之前；字符串在写完函数体、全局和 hints 之后才入表，所以有没有 Producer 不会移动别的字符串的下标。
+`vadd_producer.tilebc` 的尾部是 `…dawn-tileir` `07 01 01` `00`。
+
+**二、公开面。** 记录 handler 从不设它；要的人写 `TileProg { ..p, producer: Some(s) }`。文本渲染器不印它，因为 MLIR 文本没有地方放；
+能看见它的只有字节和 `tileirdisasm`，设备看不见：`tileirdisasm` 的首行是 `// Producer: <串>`，而 cubin 与不带这一段的同一个程序编出来的
+**逐字节相同**（run.sh 当场再编一份不带段的字节来比，不是拿报告里的话当证据）。
+
+**三、13.3 以前显式拒绝。** 上游的写入器在头部版本低于 13.3 时静默不写这一段。本仓不学：调用者设了 `producer`，就是相信它进了文件，
+静默丢掉等于答错。所以 `producer_ok(major, minor)` 为假时 `encode_kernel` 直接 panic，话是 `a Producer section needs bytecode 13.3 or later`。
+钉着的头是 13.4，这条分支今天只有变异体能走到。
+
+**四、golden 与变异体。** 一个 kernel：`vadd_producer`，就是 `vadd` 换个名字再带上 `producer: Some("dawn-tileir")`（串写在 `kernels.dawn` 的
+`PRODUCER`，run.sh 从那里读，不抄第二份）。run.sh 的 `vadd_producer` 一项在通常的文本、字节、汇编之外多做三件事：`tileirdisasm` 首行等于
+`// Producer: dawn-tileir`；不带段的字节（`kernels vadd_producer --bytecode-bare`）反汇编首行**不是**以 `// Producer:` 开头；两份 cubin `cmp` 相同。
+`tileirdisasm` 在 `tileiras` 旁边（13.4 的 wheel 自带），只有三个文件的精简树没有它，那时这一项是失败而不是跳过。
+
+| 变异体 | 改哪 | 怎么红 |
+|--------|------|--------|
+| `producer-index-off-by-one` | 段内容写 `pi - 1` | 文本不动，字节同长而不同；`tileiras` **照样收**（指向的是另一个合法字符串，这里是 0 号项即 kernel 名）；`tileirdisasm` 首行变成 `// Producer: vadd_producer`。只有那一行看得见 |
+| `producer-under-13-2-header` | `BYTECODE_MINOR` 钉成 2 | `vadd_producer` 在两个后端上都在编码时被拒（非零退出、话在 stderr、不留文件）；同一个头下的 `vadd` 照常编出来，所以拒的是段而不是版本 |
+
+两条都在本机各跑一遍：第一条的首行从 `// Producer: dawn-tileir` 变成 `// Producer: vadd_producer`；第二条两个后端都拒。另做了一次反向的负控：
+把写入器里的 `producer_ok` 检查改成 `if false`，`producer-under-13-2-header` 立刻变成 `mutant stayed green on jvm: vadd_producer encoded under a 13.2 header`，
+所以这条变异体确实在守那一句拒绝。
+
+**五、台账。** `features.txt` 与 `types.txt` 没有节的行（`sections` 只有注释），没有行要改，注释改成「Producer 由 T14a 写，Debug 仍等 T14b」；
+`check.py` 的 `LANDED_KNIVES` 加 `T14a`。矩阵 294 项长到 297（206 个 kernel、91 个变异体），tile.yml 的八个步骤名同步，`run:` 文本没动。
+tile 输入摘要因此变了：**sm_86 / sm_90 / sm_100 三份台账等 int 立即数那一支合入后一并重录，本刀没有录**。
+
+**不做的（理由）：**
+
+- 让记录 handler 或 `trace_kernel` 默认设 Producer：设了就要动 205 个 golden 的字节，而这一段对设备毫无作用；要的人显式写。
+- 把版本号放进串：串一变就是动 golden，版本在 `Producer` 里也没人读。`dawn-tileir` 够了。
+- 在 `.mlir` 里印它：MLIR 文本没有这个位置，印了就是发明一个方言没有的写法。
+- Debug 段（DIFile / DICompileUnit / DILoc）：T14b。
+- 整个 golden 的反汇编文本对拍：T14c，需要先定「谁迁就谁」（调研报告 4.4）。
 
 ## 7. 刀序
 
