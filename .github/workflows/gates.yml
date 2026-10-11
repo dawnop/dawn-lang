@@ -377,7 +377,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19693s (the most this file's `3x` claims may add up to)
+# push-total: 19763s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2333,8 +2333,12 @@ jobs:
     # 2026-10-08, later: the ADT reuse contract adds a planning 50s (47s
     # measured on 16 cores, five private compilers built side by side), so the
     # claim goes from 695s to 745s and the timeout to 3x that.
-    # budget: 3x 745s worst observed plus a tenth (run 37765371280) and the reuse contract's planning 50s
-    timeout-minutes: 38
+    # 2026-10-11: the Immediates contract joins this job. Measured locally
+    # 67s wall, 40s user + 9s system, at load average 4 to 7 (16 runtime
+    # mutants in four builds each, plus the emitter mutant), so the claim goes
+    # from 745s to 815s and the timeout to 41 minutes.
+    # budget: 3x 815s worst observed plus a tenth (run 37765371280), the reuse contract's planning 50s and the immediates contract's 70s
+    timeout-minutes: 41
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2392,6 +2396,16 @@ jobs:
       # poisoning off six probe processes and two mutants of its own.
       - name: RC contract
         run: ./scripts/rc-contract/run.sh
+
+      # The tagged immediates (docs/native-immediates-design.md): an erased Int
+      # or Bool is a word with its low bit set that points at nothing, and every
+      # runtime point that reads a header or a box has to ask first. A point
+      # that forgets segfaults on a program holding an immediate and on no
+      # other, so no corpus can show it; this builds the runtime once per point
+      # with that point's question removed and requires the case that owns it
+      # to go red, in plain, inline-RC, AddressSanitizer and 31-bit builds.
+      - name: Immediates contract
+        run: ./scripts/imm-contract/run.sh
 
       # The other memory oracle, and the one AddressSanitizer cannot be.
       # A continuation nobody resumes is a parked carrier thread, whose stack

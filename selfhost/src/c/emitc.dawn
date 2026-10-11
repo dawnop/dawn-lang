@@ -533,15 +533,24 @@ fn c_zero(t: Ty) -> String =
   }
 
 ## An erased slot read back at a concrete type. A reference is already a
-## pointer and only needs the C type; anything else was boxed, so the slot has
-## to be dereferenced. `CUnbox` is the usual way here, and the three
+## pointer and only needs the C type. An Int or a Bool was boxed into a tagged
+## immediate or, for an Int outside the immediate range, a heap box, so the
+## read goes through `dawn_peek_int` / `dawn_peek_bool`, which ask the tag: a
+## direct `->val` read of an immediate is a read through `(void*)3`
+## (docs/native-immediates-design.md 3.3). Float and Unit still ride in a heap
+## box and are dereferenced. `CUnbox` is the usual way here, and the three
 ## intrinsics that read an erased position without one -- `expect`,
 ## `unwrap_or`, `cast` -- take the same path rather than each writing a cast.
 fn unbox_expr(v: String, to: Ty) -> String =
   if is_ref_ty(to) {
     "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
   } else {
-    "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
+    match c_repr(to) {
+      RInt64 -> "dawn_peek_int(" ++ v ++ ")"
+      RBoolean -> "dawn_peek_bool(" ++ v ++ ")"
+      RFloat64 | RUnitV | RString | RAdtPtr | RCloPtr | ROpaque ->
+        "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
+    }
   }
 
 ## The owning read for the erased call boundary. A dynamic call is erased in
@@ -3187,6 +3196,18 @@ test "a slot member and the ref classification agree about every repr" {
   assert slot_of(TyString) == "p"
   assert c_type(TyString) == "dawn_str*"
   assert box_call("x", TyString) == "((void*)(x))"
+
+  # An erased Int or Bool is a tagged immediate, so its borrowing read asks the
+  # tag (dawn_peek_*) and never dereferences; Float and Unit are still boxes.
+  assert unbox_expr("v", TyInt) == "dawn_peek_int(v)"
+  assert unbox_expr("v", TyBool) == "dawn_peek_bool(v)"
+  assert unbox_expr("v", TyFloat) == "(((dawn_box*)(v))->val.f)"
+  assert unbox_expr("v", TyUnit) == "(((dawn_box*)(v))->val.u)"
+  assert unbox_expr("v", TyString) == "((dawn_str*)(v))"
+  assert unbox_own_expr("v", TyInt) == "dawn_unbox_int(v)"
+  assert unbox_own_expr("v", TyBool) == "dawn_unbox_bool(v)"
+  assert box_call("x", TyInt) == "dawn_box_int(x)"
+  assert box_call("x", TyBool) == "dawn_box_bool(x)"
 
   # This is the joint the RC pass hangs on. `is_ref_ty` lives in types.dawn
   # because Core cannot see a backend; `slot_of` lives here because a union

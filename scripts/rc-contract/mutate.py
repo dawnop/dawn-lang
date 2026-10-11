@@ -527,7 +527,7 @@ static bool dawn_dict_same(const dawn_dict_entry *e, const dawn_dict *tmpl,
     return NULL;
   }""",
         """  if (a == NULL) {
-    return (dawn_adt *)dawn_box_int(0);
+    return (dawn_adt *)dawn_box_int_heap(0);
   }""",
     ),
     # The kind test is gone: whatever sits behind the pointer is rewritten as a

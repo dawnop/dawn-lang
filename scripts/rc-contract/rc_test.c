@@ -53,7 +53,7 @@ static void test_counts(void) {
 /* A child held by two parents is freed once, with the second parent, and not
  * before -- the case a naive drop gets wrong in whichever direction it errs. */
 static void test_sharing(void) {
-  dawn_box *child = dawn_box_int(7);
+  dawn_box *child = dawn_box_int_heap(7);
   dawn_adt *p1 = dawn_adt_new(0, 1, MASK1);
   p1->fields[0].p = child;
   dawn_adt *p2 = dawn_adt_new(0, 1, MASK1);
@@ -81,7 +81,7 @@ static void test_mask_skips_scalars(void) {
 static void test_array(void) {
   dawn_array *xs = dawn_array_new();
   for (int i = 0; i < 1000; i++) {
-    dawn_box *elem = dawn_box_int(i);
+    dawn_box *elem = dawn_box_int_heap(i);
     dawn_array *next = dawn_array_push(xs, elem);
     dawn_drop(elem);
     dawn_drop(xs);
@@ -99,7 +99,7 @@ static void test_array(void) {
 static void test_array_with(void) {
   dawn_array *xs = dawn_array_new();
   for (int i = 0; i < 8; i++) {
-    dawn_box *e = dawn_box_int(i);
+    dawn_box *e = dawn_box_int_heap(i);
     dawn_array *n = dawn_array_push(xs, e);
     dawn_drop(e);
     dawn_drop(xs);
@@ -109,7 +109,7 @@ static void test_array_with(void) {
   uint64_t copied0 = dawn_array_with_copied;
 
   /* shared: the caller keeps xs, so it dups both arguments in */
-  dawn_box *replacement = dawn_box_int(99);
+  dawn_box *replacement = dawn_box_int_heap(99);
   dawn_array *ys = dawn_array_with(dawn_dup(xs), 3, dawn_dup(replacement));
   check(dawn_array_with_copied == copied0 + 1, "a shared array is copied");
   check(((dawn_box *)dawn_array_get(xs, 3))->val.i == 3, "the base is unchanged");
@@ -133,7 +133,7 @@ static void test_array_with(void) {
 static void test_array_steal(void) {
   dawn_array *xs = dawn_array_new();
   for (int i = 0; i < 8; i++) {
-    dawn_box *e = dawn_box_int(i);
+    dawn_box *e = dawn_box_int_heap(i);
     dawn_array *n = dawn_array_push(xs, e);
     dawn_drop(e);
     dawn_drop(xs);
@@ -175,7 +175,7 @@ static void test_array_steal(void) {
 static dawn_array *ints(int base, int n) {
   dawn_array *xs = dawn_array_new();
   for (int i = 0; i < n; i++) {
-    dawn_box *e = dawn_box_int(base + i);
+    dawn_box *e = dawn_box_int_heap(base + i);
     dawn_array *next = dawn_array_push(xs, e);
     dawn_drop(e);
     dawn_drop(xs);
@@ -293,7 +293,7 @@ static void test_array_slice(void) {
   check(dawn_array_len(edge) == 0 && dawn_array_len(none) == 0, "empty ranges are empty");
 
   /* pushing onto a slice must not write into the source's buffer */
-  dawn_box *extra = dawn_box_int(99);
+  dawn_box *extra = dawn_box_int_heap(99);
   dawn_array *grown = dawn_array_push(mid, extra);
   dawn_drop(extra);
   check(array_reads(xs, 0, 6) && array_reads(mid, 2, 3) && dawn_array_len(grown) == 4,
@@ -422,13 +422,13 @@ static void test_i64buf(void) {
  * and this is the assertion that says so; the leak that mutant also causes is
  * invisible here, since a `counted` mutant is built without the sanitizer. */
 static void test_cell_set_releases_the_old_value(void) {
-  dawn_box *first = dawn_box_int(11);
+  dawn_box *first = dawn_box_int_heap(11);
   dawn_box *held = (dawn_box *)dawn_dup(first);
   void *c = dawn_cell_new(first);
   check(held->h.rc == 2, "cell_new keeps the reference it was handed");
   check(dawn_cell_get(c) == first, "and the slot holds it");
 
-  dawn_cell_set(c, dawn_box_int(22));
+  dawn_cell_set(c, dawn_box_int_heap(22));
   check(held->h.rc == 1, "cell_set released the value it displaced");
   check(dawn_is_unique(held), "so the second holder now has the last reference");
   check(held->val.i == 11, "and the displaced value is still readable from it");
@@ -443,7 +443,7 @@ static void test_cell_set_releases_the_old_value(void) {
  * re-taken, and a take that dup'd instead would forfeit the in-place reuse
  * the primitive exists for. */
 static void test_cell_take_empties_and_transfers(void) {
-  dawn_box *v = dawn_box_int(33);
+  dawn_box *v = dawn_box_int_heap(33);
   void *c = dawn_cell_new(v);
   dawn_adt *cell = (dawn_adt *)c;
   int32_t rc0 = v->h.rc;
@@ -457,7 +457,7 @@ static void test_cell_take_empties_and_transfers(void) {
   /* the caller's obligation, and the shape the emitter always writes: store
    * into the emptied slot before anything reads it again. The store's own
    * release finds NULL, which `dawn_drop` returns on. */
-  dawn_cell_set(c, dawn_box_int(44));
+  dawn_cell_set(c, dawn_box_int_heap(44));
   check(((dawn_box *)dawn_cell_get(c))->val.i == 44, "the write-back restores the slot");
 
   dawn_drop(taken);
@@ -469,7 +469,7 @@ static void test_cell_take_empties_and_transfers(void) {
  * because a get that transferred would leave the second read looking at an
  * emptied slot rather than at the value. */
 static void test_cell_get_does_not_transfer(void) {
-  dawn_box *v = dawn_box_int(55);
+  dawn_box *v = dawn_box_int_heap(55);
   void *c = dawn_cell_new(v);
   int32_t rc0 = v->h.rc;
 
@@ -657,7 +657,7 @@ void *dawn_rc_test_immortal_root;
 static void test_immortal_graph(void) {
   dawn_array *xs = dawn_array_new();
   for (int i = 0; i < 8; i++) {
-    dawn_box *e = dawn_box_int(i);
+    dawn_box *e = dawn_box_int_heap(i);
     dawn_array *n = dawn_array_push(xs, e);
     dawn_drop(e);
     dawn_drop(xs);
@@ -693,7 +693,7 @@ static void test_immortal_graph(void) {
    * changes underneath the program, and nothing before this line notices. */
   uint64_t inplace0 = dawn_array_with_inplace;
   uint64_t copied0 = dawn_array_with_copied;
-  dawn_box *replacement = dawn_box_int(99);
+  dawn_box *replacement = dawn_box_int_heap(99);
   dawn_array *ys = dawn_array_with(xs, 3, replacement);
   check(dawn_array_with_copied == copied0 + 1, "a rebuild copies an immortal array");
   check(dawn_array_with_inplace == inplace0, "it does not write one in place");
@@ -1172,7 +1172,7 @@ static dawn_adt *reset_node(dawn_box *child) {
 /* A node somebody else also holds is not ours to write into: reset answers
  * NULL, drops our reference and touches nothing else. */
 static void test_adt_reset_shared(void) {
-  dawn_box *child = dawn_box_int(1);
+  dawn_box *child = dawn_box_int_heap(1);
   dawn_adt *a = reset_node(child);
   dawn_adt *hold = (dawn_adt *)dawn_dup(a);
   dawn_adt *tok = dawn_adt_reset(a);
@@ -1190,7 +1190,7 @@ static void test_adt_reset_shared(void) {
 /* Alone, the node is handed back as the token and its children are released:
  * the reference the field held is gone, the one the test kept is not. */
 static void test_adt_reset_releases_fields(void) {
-  dawn_box *child = dawn_box_int(2);
+  dawn_box *child = dawn_box_int_heap(2);
   dawn_adt *a = reset_node(child);
   check(child->h.rc == 2, "the node holds a reference to its child");
   dawn_adt *tok = dawn_adt_reset(a);
@@ -1205,7 +1205,7 @@ static void test_adt_reset_releases_fields(void) {
  * that holds it relies on. A second holder of the child makes a double
  * release a count and not a crash. */
 static void test_adt_reset_token_is_a_shell(void) {
-  dawn_box *child = dawn_box_int(3);
+  dawn_box *child = dawn_box_int_heap(3);
   dawn_box *other = (dawn_box *)dawn_dup(child);
   dawn_adt *a = reset_node(child);
   dawn_adt *tok = dawn_adt_reset(a);
@@ -1225,7 +1225,7 @@ static void test_adt_reset_token_is_a_shell(void) {
 /* `reuse` turns a token into the next node in place: same block, new tag and
  * mask, one reference. With no token it allocates, and both are counted. */
 static void test_adt_reuse_rewrites(void) {
-  dawn_box *child = dawn_box_int(4);
+  dawn_box *child = dawn_box_int_heap(4);
   dawn_box *other = (dawn_box *)dawn_dup(child);
   dawn_adt *a = reset_node(child);
   dawn_adt *tok = dawn_adt_reset(a);
@@ -1264,7 +1264,7 @@ static void test_adt_reset_immortal(void) {
 /* Under --rc=leak counts only grow, so rc == 1 does not prove the node is
  * alone; reset must take the plain-drop path, which there does nothing. */
 static void test_adt_reset_leak_mode(void) {
-  dawn_box *child = dawn_box_int(5);
+  dawn_box *child = dawn_box_int_heap(5);
   dawn_adt *a = reset_node(child);
   dawn_rc_leak = true;
   dawn_adt *tok = dawn_adt_reset(a);
@@ -1279,7 +1279,7 @@ static void test_adt_reset_leak_mode(void) {
  * take part, and the plain drop releases their children. */
 static void test_adt_reset_declines_wide(void) {
   static const uint64_t wide_mask[2] = {UINT64_C(1), UINT64_C(0)};
-  dawn_box *child = dawn_box_int(6);
+  dawn_box *child = dawn_box_int_heap(6);
   dawn_adt *a = dawn_adt_new_wide(0, 65, wide_mask);
   for (int i = 0; i < 65; i++) {
     a->fields[i].p = NULL;
@@ -1312,9 +1312,9 @@ static dawn_adt *steal_node(dawn_box *a, dawn_box *b) {
 /* Alone: the stolen reference stays with the caller, the other is released.
  * The caller's drop of what it took is the only release of the stolen child. */
 static void test_adt_reset_steal_unique(void) {
-  dawn_box *a = dawn_box_int(11);
+  dawn_box *a = dawn_box_int_heap(11);
   dawn_box *a2 = (dawn_box *)dawn_dup(a);
-  dawn_box *b = dawn_box_int(12);
+  dawn_box *b = dawn_box_int_heap(12);
   dawn_box *b2 = (dawn_box *)dawn_dup(b);
   int f0 = failures;
   dawn_adt *n = steal_node(a, b);
@@ -1343,7 +1343,7 @@ static void test_adt_reset_steal_unique(void) {
 static void test_adt_reset_steal_releases_the_rest(void) {
   /* the stolen field is an immortal singleton, so a mutant that releases it
    * as well changes no count and frees nothing it should not */
-  dawn_box *b = dawn_box_int(16);
+  dawn_box *b = dawn_box_int_heap(16);
   dawn_box *b2 = (dawn_box *)dawn_dup(b);
   dawn_adt *n = dawn_adt_new(0, 3, UINT64_C(3));
   n->fields[0].p = dawn_adt0(2);
@@ -1362,9 +1362,9 @@ static void test_adt_reset_steal_releases_the_rest(void) {
 /* Shared: the node stays alive for its other holder, so what the caller moved
  * out of it is a loan until the reset counts it. */
 static void test_adt_reset_steal_shared(void) {
-  dawn_box *a = dawn_box_int(13);
+  dawn_box *a = dawn_box_int_heap(13);
   dawn_box *a2 = (dawn_box *)dawn_dup(a);
-  dawn_box *b = dawn_box_int(14);
+  dawn_box *b = dawn_box_int_heap(14);
   dawn_box *b2 = (dawn_box *)dawn_dup(b);
   dawn_adt *n = steal_node(a, b);
   dawn_adt *hold = (dawn_adt *)dawn_dup(n);
@@ -1405,7 +1405,7 @@ static void test_adt_reset_kind(void) {
  * constructors of several widths can hand a token to the wrong one. The
  * block is the wrong size; it goes back and the build allocates. */
 static void test_adt_reuse_mismatch(void) {
-  dawn_box *child = dawn_box_int(9);
+  dawn_box *child = dawn_box_int_heap(9);
   dawn_adt *a = reset_node(child);
   dawn_adt *tok = dawn_adt_reset(a);
   tok->ptrmask.narrow = 0; /* the shell case's business; see drop_token */
@@ -1423,7 +1423,7 @@ static void test_adt_reuse_mismatch(void) {
  * are then a word no valid value is, so a field read that should have come
  * before the reset cannot go unnoticed. */
 static void test_adt_reset_poisons(void) {
-  dawn_box *child = dawn_box_int(7);
+  dawn_box *child = dawn_box_int_heap(7);
   dawn_adt *a = reset_node(child);
   dawn_adt *tok = dawn_adt_reset(a);
 #ifdef DAWN_REUSE_POISON
@@ -1442,7 +1442,7 @@ static void test_adt_reset_poisons(void) {
 static void test_leak_mode(void) {
   dawn_rc_leak = true;
   dawn_adt *a = dawn_adt_new(0, 1, MASK1);
-  a->fields[0].p = dawn_box_int(1);
+  a->fields[0].p = dawn_box_int_heap(1);
   dawn_drop(a);
   check(a->h.rc == 1, "leak mode leaves the count alone");
   check(dawn_is_unique(a), "and the value is still live");

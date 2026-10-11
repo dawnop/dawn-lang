@@ -139,8 +139,9 @@ dawn_str *dawn_str_copy(const char *p, int64_t n);
  * positions native (llvm-backend-research.md 5.3); this union is what a
  * boxed slot looks like, and what an ADT field is stored in. One word since
  * strings became references -- the inline `dawn_str` was what held it at
- * two. Uniform for now -- tagged pointers for small ints are a later
- * optimisation. */
+ * two. An erased Int or Bool is not boxed on the heap: it is a tagged
+ * immediate in the same word (docs/native-immediates-design.md), see
+ * `dawn_box_int` below. */
 typedef union dawn_slot {
   int64_t i;
   double f;
@@ -402,23 +403,64 @@ typedef struct dawn_dict {
  * arguments so a call site emits one expression. */
 dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...);
 
-/* boxing: a type-variable slot holds a pointer to one of these. The header
- * has to sit at offset 0 like every other heap object's -- a header behind
- * the pointer would leave adts and boxes with theirs in different places, and
- * a uniform drop cannot have that. So `unbox_expr` reads `->val`, and the old
- * cast straight to `dawn_slot*` is gone. */
+/* boxing: a type-variable slot holds one of three things. NULL; a pointer to
+ * an object with a header; or an immediate, a value whose lowest bit is 1
+ * and which points at nothing (docs/native-immediates-design.md).
+ *
+ * The immediate carries an Int or a Bool in the bits above the tag. An Int
+ * that does not fit (outside [-2^(W-2), 2^(W-2)) for a W-bit pointer, so 63
+ * bits here and 31 on wasm32) still gets the heap box below, so Int stays 64
+ * bits wide and wrapping: the box is a fallback, not a second type, and one
+ * program can hold both forms in one container. Heap objects are at least
+ * 8-aligned (every one holds an int64_t or a pointer), which is the whole
+ * reason bit 0 is free to say "not a pointer".
+ *
+ * That makes `void*` in an erased position a thing that must NOT be
+ * dereferenced without asking. Every point in the runtime that reads a
+ * header (dup, drop, the drop work list, is_unique, the two `kind` checks)
+ * and every point that reads a box (`dawn_peek_int`, the bulk readers)
+ * asks first; the list is the table in the design doc, section 4, and each
+ * row has a mutant in scripts/imm-contract that removes the question.
+ *
+ * The header has to sit at offset 0 of the heap box like every other heap
+ * object's, so a uniform drop can find it. Float and Unit keep this box:
+ * a Float needs all 64 bits, and Unit is one immortal object. */
 typedef struct {
   dawn_hdr h;
   dawn_slot val;
 } dawn_box;
 
-/* An erased word is NULL, a pointer to a headed object, or (once Int and Bool
- * stop being boxed, docs/native-immediates-design.md) an immediate whose lowest
- * bit is 1 and which points at nothing. `dawn_peek_int` is the borrowing read
- * of an erased Int that already knows both forms; a reader that dereferences
- * `->val.i` directly is wrong for the second. */
+/* Is this word an immediate (and so not a pointer, and not NULL)? */
 static inline bool dawn_is_imm(const void *p) { return ((uintptr_t)p & 1u) != 0; }
 
+/* The immediate range for this target: W-1 value bits, W = pointer width. */
+#ifndef DAWN_IMM_BITS /* a test build may narrow it: scripts/imm-contract */
+#define DAWN_IMM_BITS ((int)(sizeof(void *) * 8 - 1))
+#endif
+#define DAWN_IMM_MAX ((INT64_C(1) << (DAWN_IMM_BITS - 1)) - 1)
+#define DAWN_IMM_MIN (-(INT64_C(1) << (DAWN_IMM_BITS - 1)))
+
+/* The always-heap Int box: the fallback `dawn_box_int` reaches for a value
+ * outside the immediate range, and what the contract tests use when they
+ * want an object with a count. */
+dawn_box *dawn_box_int_heap(int64_t v);
+dawn_box *dawn_box_float(double v);
+dawn_box *dawn_box_unit(dawn_unit v);
+
+/* Erased Int: an immediate when it fits, else a heap box. The range test is
+ * one unsigned compare (bias by 2^(W-2), then below 2^(W-1)). */
+static inline void *dawn_box_int(int64_t v) {
+  if ((uint64_t)v - (uint64_t)DAWN_IMM_MIN < (UINT64_C(1) << DAWN_IMM_BITS)) {
+    return (void *)(((uintptr_t)(uint64_t)v << 1) | 1u);
+  }
+  return dawn_box_int_heap(v);
+}
+
+/* Erased Bool: always an immediate. There is no heap Bool box (no producer
+ * declared), so the reader never has to ask. */
+static inline void *dawn_box_bool(bool v) { return (void *)(((uintptr_t)v << 1) | 1u); }
+
+/* Borrowing reads: the value, no release. `dawn_peek_int` asks the tag. */
 static inline int64_t dawn_peek_int(const void *b) {
   if (dawn_is_imm(b)) {
     return (int64_t)((intptr_t)b >> 1);
@@ -426,10 +468,8 @@ static inline int64_t dawn_peek_int(const void *b) {
   return ((const dawn_box *)b)->val.i;
 }
 
-dawn_box *dawn_box_int(int64_t v);
-dawn_box *dawn_box_float(double v);
-dawn_box *dawn_box_bool(bool v);
-dawn_box *dawn_box_unit(dawn_unit v);
+static inline bool dawn_peek_bool(const void *b) { return ((uintptr_t)b >> 1) & 1u; }
+
 /* No box for strings: a string IS a reference now, and an erased slot holds
  * the `dawn_str*` the way it holds any other pointer. */
 
@@ -455,9 +495,8 @@ extern dawn_box dawn_unit_box_obj;
  * call boundary only (dynamic call results and adapter parameters), where the
  * box is a wire format the RC pass never sees. A slot read the pass CAN see
  * (`CUnbox` of a field it borrowed) must not use these. */
-int64_t dawn_unbox_int(void *b);
+int64_t dawn_unbox_int_heap(void *b);
 double dawn_unbox_float(void *b);
-bool dawn_unbox_bool(void *b);
 dawn_unit dawn_unbox_unit(void *b);
 
 /* ---- reference counting -------------------------------------------------
@@ -487,9 +526,9 @@ dawn_unit dawn_unbox_unit(void *b);
  *
  * The semantics are the ones the out-of-line bodies always had:
  *
- *   dup:  NULL passes through, an immortal header is left unwritten, else
- *         rc++.
- *   drop: NULL and --rc=leak are no-ops; rc > 1 decrements (an immortal
+ *   dup:  NULL and an immediate pass through, an immortal header is left
+ *         unwritten, else rc++.
+ *   drop: NULL, an immediate and --rc=leak are no-ops; rc > 1 decrements (an immortal
  *         header reads as a large rc and is left unwritten) and returns;
  *         rc <= 1 is the walk, which also owns the misuse diagnostic and the
  *         release.
@@ -499,7 +538,7 @@ extern bool dawn_rc_leak; /* --rc=leak: drop becomes a no-op (plan 6 R3) */
 
 #ifdef DAWN_RT_INLINE_RC
 static inline void *dawn_dup(void *p) {
-  if (p != NULL) {
+  if (p != NULL && !dawn_is_imm(p)) {
     dawn_hdr *h = (dawn_hdr *)p;
     if (h->rc != DAWN_IMMORTAL) {
       h->rc++;
@@ -511,7 +550,7 @@ static inline void *dawn_dup(void *p) {
 void dawn_drop_slow(void *p);
 
 static inline void dawn_drop(void *p) {
-  if (p == NULL || dawn_rc_leak) {
+  if (p == NULL || dawn_is_imm(p) || dawn_rc_leak) {
     return;
   }
   dawn_hdr *h = (dawn_hdr *)p;
@@ -528,6 +567,18 @@ void *dawn_dup(void *p);
 void dawn_drop(void *p);
 #endif
 bool dawn_is_unique(const void *p);
+
+/* The owning reads of an erased Int and Bool. An immediate has nothing to
+ * release, so that arm is a shift and no call; a heap box is read and
+ * dropped by the out-of-line half. */
+static inline int64_t dawn_unbox_int(void *b) {
+  if (dawn_is_imm(b)) {
+    return (int64_t)((intptr_t)b >> 1);
+  }
+  return dawn_unbox_int_heap(b);
+}
+
+static inline bool dawn_unbox_bool(void *b) { return dawn_peek_bool(b); }
 
 /* ---- the small-object allocator -----------------------------------------
  *

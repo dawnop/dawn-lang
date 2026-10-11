@@ -31,6 +31,7 @@ ADAPTERS = {
     "jvm-map": (".",),
     "core-sites": (".",),
     "ctl-live-contract": ("runtime/c",),
+    "imm-contract": ("runtime/c",),
     "delete-contract": (".",),
     "dict-owner-contract": (".",),
     "dependency-heap-contract": ("selfhost/src/main.dawn",),

@@ -1,0 +1,71 @@
+# The roster of imm_test.c, in the order it runs, and the mutants that must
+# turn each point red. `red <mutant> <build> <case>`: under that mutant, in
+# that build (and in its AddressSanitizer twin), the case must not pass. A
+# case that is red under a mutant for any reason counts -- exit status, signal,
+# sanitizer report -- because most of the reds are a read through `(void *)3`.
+#
+# The mutants are the table in docs/native-immediates-design.md, section 4;
+# the point numbers (P1..P13) are that table's.
+
+assert	box_boundaries
+assert	unbox_int_owning
+assert	box_range_edges
+assert	wrapping_results
+assert	bool_box
+assert	float_and_unit_unchanged
+assert	dup_imm
+assert	drop_imm
+assert	drop_slow_imm
+assert	is_unique_imm
+assert	drop_walks_adt_fields
+assert	drop_walks_closure_caps
+assert	drop_walks_array_buffer
+assert	immortal_walk
+assert	reset_and_steal_imm
+assert	array_of_ints
+assert	cell_of_ints
+assert	option_of_ints
+assert	ev_get_imm
+assert	ev_append_imm
+assert	discard_imm
+assert	from_code_points_imm
+assert	bytes_pack_imm
+assert	gpu_launch_args_imm
+
+# P1
+red	dup-ignores-imm	plain	dup_imm
+# P2
+red	inline-dup-ignores-imm	inline	dup_imm
+# P3: a plain build reaches the function through dawn_drop, an inline one
+# only through a direct call of the cold half.
+red	drop-ignores-imm	plain	drop_imm
+red	drop-ignores-imm	inline	drop_slow_imm
+# P4
+red	inline-drop-ignores-imm	inline	drop_imm
+# P5: the one push serves every container the walk visits.
+red	ws-push-ignores-imm	plain	drop_walks_adt_fields
+red	ws-push-ignores-imm	plain	drop_walks_closure_caps
+red	ws-push-ignores-imm	plain	drop_walks_array_buffer
+red	ws-push-ignores-imm	plain	immortal_walk
+# P6
+red	is-unique-ignores-imm	plain	is_unique_imm
+# P7
+red	ev-node-ignores-imm	plain	ev_get_imm
+red	ev-node-ignores-imm	plain	ev_append_imm
+# P8
+red	discard-ignores-imm	plain	discard_imm
+# P9
+red	peek-int-reads-the-box	plain	box_boundaries
+red	peek-int-reads-the-box	plain	array_of_ints
+red	unbox-int-reads-the-box	plain	unbox_int_owning
+# P10
+red	peek-bool-reads-the-box	plain	bool_box
+# P11
+red	box-int-always-tags	plain	box_boundaries
+red	box-int-range-off-by-one	plain	box_range_edges
+# P12
+red	from-code-points-reads-the-box	plain	from_code_points_imm
+# P13
+red	bytes-pack-reads-the-box	plain	bytes_pack_imm
+# P14: the GPU launch (no device in the test: the driver table is faked)
+red	gpu-launch-reads-the-box	plain	gpu_launch_args_imm
