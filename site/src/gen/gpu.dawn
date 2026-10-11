@@ -1792,9 +1792,14 @@ test "the coverage cards carry their counts, their bars and the rows not impleme
     let p = gpu_page(plain_assets(), "gpu.js", En, f, [])
     for t in f.tables {
       let n = count_of(t, "implemented")
-      assert str.contains(p, """<div class="gpu-fig" data-count="${n}" tabindex="0"><strong><b>${n}</b><small>/${t.total}</small></strong>""")
+      let missing = filter(f.rows, r => r.table == t.name && r.status != "implemented")
+      # a table with every row implemented (types, since knife T20) shows no
+      # "/total" and offers no list to point at
+      let of = if n == t.total { "" } else { "<small>/${t.total}</small>" }
+      let focus = if len(missing) == 0 { "" } else { ` tabindex="0"` }
+      assert str.contains(p, """<div class="gpu-fig" data-count="${n}"${focus}><strong><b>${n}</b>${of}</strong>""")
       assert str.contains(p, "--p:${percent(n, t.total)}")
-      for r in filter(f.rows, r => r.table == t.name && r.status != "implemented") {
+      for r in missing {
         assert str.contains(p, "<li><code>${escape_html(r.name)}</code>")
       }
     }
