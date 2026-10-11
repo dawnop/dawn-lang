@@ -468,6 +468,7 @@ fn float_semantics(dtype: String) -> (Int, Int, Int) = match dtype {
   "f8E5M2" -> (3, 15, -14)
   "f8E8M0FNU" -> (1, 127, -127)
   "f4E2M1FN" -> (2, 2, 0)
+  "f8E5M3FNU" -> (4, 16, -14)
   _ -> panic("tileir: `${dtype}` is not a float format")
 }
 
@@ -505,7 +506,7 @@ fn strict_widening(from: String, to: String) -> Bool = {
 pub fn ftof_modes(from: String, to: String) -> List[String] =
   if to == "f8E8M0FNU" {
     ["zero", "positive_inf"]
-  } else if to == "f8E4M3FN" || to == "f8E5M2" || to == "f4E2M1FN" {
+  } else if to == "f8E4M3FN" || to == "f8E5M2" || to == "f4E2M1FN" || to == "f8E5M3FNU" {
     ["nearest_even"]
   } else if strict_widening(from, to) {
     ["nearest_even", "zero", "negative_inf", "positive_inf", "nearest_away"]
@@ -550,6 +551,7 @@ fn dtype_bits(name: String) -> Int = match name {
   "f8E4M3FN" -> 8
   "f8E5M2" -> 8
   "f8E8M0FNU" -> 8
+  "f8E5M3FNU" -> 8
   "i16" -> 16
   "f16" -> 16
   "bf16" -> 16
@@ -4673,6 +4675,13 @@ test "ftof's rounding modes follow bytecode 13.4's table pair by pair" {
   assert len(ftof_modes("f16", "tf32")) == 5
   assert ftof_modes("f16", "bf16") == ["nearest_even", "zero"]
   assert ftof_modes("f8E8M0FNU", "f32") == ["nearest_even", "zero"]
+  # f8E5M3FNU (13.4) is a target under 16 bits, so it takes nearest_even
+  # only; as a source it widens to f32 and f64 exactly (five modes) and
+  # narrows to f16, whose largest exponent (15) is below its own (16)
+  assert ftof_modes("f64", "f8E5M3FNU") == ["nearest_even"]
+  assert ftof_modes("f8E4M3FN", "f8E5M3FNU") == ["nearest_even"]
+  assert len(ftof_modes("f8E5M3FNU", "f32")) == 5
+  assert ftof_modes("f8E5M3FNU", "f16") == ["nearest_even", "zero"]
   assert len(ftof_modes("f8E8M0FNU", "f64")) == 5
   # the spellings name their modes, and the plain one keeps its default
   assert ftof_mode("ftof", "f32") == "nearest_even"

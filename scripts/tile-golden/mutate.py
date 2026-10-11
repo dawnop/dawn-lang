@@ -512,6 +512,16 @@ MUTATIONS = {
         'emit_ref(emit(emit_op(w0, code, Token), GDC_FLAG_TOKEN), tok_in)',
         'emit_ref(emit(emit(emit_op(w0, code, Token), GDC_FLAG_TOKEN), 1), tok_in)',
     ),),
+    "e5m3-tag-as-e8m0": ((
+        BYTECODE,
+        '  "f8E5M3FNU" -> 130',
+        '  "f8E5M3FNU" -> 18',
+    ),),
+    "type-tag-written-as-one-byte": ((
+        BYTECODE,
+        'fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(put_varint(bytes.buf(), num_tag(name))))',
+        'fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(bytes.put(bytes.buf(), num_tag(name))))',
+    ),),
 }
 
 

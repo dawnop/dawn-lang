@@ -436,6 +436,14 @@
 #                            bytes longer (one per signal), and tileiras
 #                            refuses it the way it refuses the mutant above,
 #                            one byte later
+#     e5m3-tag-as-e8m0       the writer gives `f8E5M3FNU` the tag of
+#                            `f8E8M0FNU` -> dtype_e5m3 is four bytes shorter
+#                            and the first `ftof` is refused by its rounding
+#                            mode
+#     type-tag-written-as-one-byte
+#                            the writer puts a type tag down as a byte and not
+#                            a varint -> the two-byte tag 130 is mangled and
+#                            the reader loses its place in the function
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time, so splitting by kind would
@@ -522,7 +530,8 @@ kernels=(
   insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg token_fences
   view_inbounds view_inbounds_off view_inbounds_dim
   flash_attn idx_softmax carry_extent flash_attn_bf16
-  scalar_scale scalar_len scalar_loop scalar_wide)
+  scalar_scale scalar_len scalar_loop scalar_wide
+  dtype_e5m3 mmaf_scaled_e5m3)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -645,6 +654,8 @@ mutants=(
   fence-written-as-gdc-wait
   gdc-token-flag-unwritten
   gdc-operand-count-written
+  e5m3-tag-as-e8m0
+  type-tag-written-as-one-byte
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -936,6 +947,7 @@ check_global_syms_symbols() { # cubin
 kernel_arch() { # kernel
   case "$1" in
     dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
+    dtype_e5m3|mmaf_scaled_e5m3) echo sm_107 ;;
     view_atomic_bf16) echo sm_89 ;;
     *) echo "$gpu_name" ;;
   esac
@@ -2641,6 +2653,33 @@ if run_item gdc-operand-count-written; then
   mutant_project gdc-operand-count-written bytecode.dawn
   writer_mutant_checks gdc-operand-count-written token_fences func-two-long \
     "error at offset 20: failed to get result type 0 for AddFOp"
+fi
+
+# 55. The writer's type table gives `f8E5M3FNU` the `f8E8M0FNU` tag: the other
+#     scale format, one byte wide where this one is two on the wire (130 is a
+#     varint of 82 01), so the types shrink and dtype_e5m3.tilebc is four
+#     bytes shorter (251 to 247, measured). The reader takes the tile
+#     for an exponent-only one and refuses the first `ftof` by the rounding
+#     mode, since `nearest_even` is the one thing that format does not take.
+#     Only dtype_e5m3 is red: `mmaf_scaled`'s verifier takes an e8m0 scale
+#     beside f4E2M1FN operands (Ops.td's first row), so that kernel's mutant
+#     bytes are a different valid program. Assembled for sm_107 (kernel_arch).
+if run_item e5m3-tag-as-e8m0; then
+  mutant_project e5m3-tag-as-e8m0 bytecode.dawn
+  writer_mutant_checks e5m3-tag-as-e8m0 dtype_e5m3 file-shorter \
+    "invalid rounding mode specified for conversion to f8E8M0FNU. Only 'zero' and 'positive_inf' are supported"
+fi
+
+# 56. The writer puts a type tag down as one byte again. Every tag but
+#     `f8E5M3FNU`'s is below 128, where a varint and a byte are the same
+#     thing, so no earlier golden could tell the two writers apart; 130 is
+#     82 01 as a varint and a lone 82 as a byte. The file is four bytes
+#     shorter (251 to 247, measured) and the reader loses its place before
+#     it gets to the function's first result type.
+if run_item type-tag-written-as-one-byte; then
+  mutant_project type-tag-written-as-one-byte bytecode.dawn
+  writer_mutant_checks type-tag-written-as-one-byte dtype_e5m3 file-shorter \
+    "failed to get result type 0 for FToFOp"
 fi
 
 _item_tick ""
