@@ -21,8 +21,8 @@ use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Paddi
   Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
   load_cell, store_cell, tail_mask, for_arch, hint_latency, tensor_view, partition_view, load_view, store_view }
-use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, TokenOnly, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt}
-use lower.{kparam_ty, Kernel, Instr, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, TokenOnly, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, DebugInfo}
+use lower.{kparam_ty, Kernel, Instr, instr_count, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 fn elem(e: Elem) -> String = match e {
   Num(name) -> name
@@ -648,6 +648,56 @@ fn kernel_lines(k: Kernel, owners: List[Owner]) -> (List[String], List[Int]) = {
   (text, own)
 }
 
+# How many text lines `i` takes: one, or for a region its header, its
+# bodies and its closing brace (an `if` has the `} else {` between them as
+# well). The same layout `lines` prints.
+fn text_height(i: Instr) -> Int = match i {
+  ForLoop(_res, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, body) -> 2 + body_height(body)
+  WhileLoop(_res, _tys, _inits, _carried, body) -> 2 + body_height(body)
+  ReduceTile(_res, _tys, _dim, _identities, _operands, _operand_tys, _args, body) -> 2 + body_height(body)
+  ScanTile(_res, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, body) -> 2 + body_height(body)
+  IfElse(_res, _tys, _cond, _cond_ty, on_true, on_false) -> 3 + body_height(on_true) + body_height(on_false)
+  _ -> 1
+}
+
+fn body_height(body: List[Instr]) -> Int = list.fold(body, 0, (n, i) => n + text_height(i))
+
+# The `(line, col)` of each instruction of `body` in the text, preorder (the
+# instruction, then what is inside it), when the first of them is on `line`
+# and `col` columns in. A region's second body starts after the first one's
+# lines and the `} else {` line.
+fn positions(body: List[Instr], line: Int, col: Int) -> List[(Int, Int)] = {
+  var at = line
+  var out: List[(Int, Int)] = []
+  for i in body {
+    let inside: List[(Int, Int)] = match i {
+      ForLoop(_res, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, b) -> positions(b, at + 1, col + 2)
+      WhileLoop(_res, _tys, _inits, _carried, b) -> positions(b, at + 1, col + 2)
+      ReduceTile(_res, _tys, _dim, _identities, _operands, _operand_tys, _args, b) -> positions(b, at + 1, col + 2)
+      ScanTile(_res, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, b) -> positions(b, at + 1, col + 2)
+      IfElse(_res, _tys, _cond, _cond_ty, on_true, on_false) ->
+        positions(on_true, at + 1, col + 2) ++ positions(on_false, at + 2 + body_height(on_true), col + 2)
+      _ -> []
+    }
+    out = out ++ [(at, col)] ++ inside
+    at = at + text_height(i)
+  }
+  out
+}
+
+## The Debug section for `prog` whose locations are its own `.mlir` text
+## (`render(prog)` saved as `dir/file`): each instruction at the line and the
+## column its text starts at, the kernel at its `entry` line. This is what
+## MLIR itself records for an operation parsed from that file, and it needs
+## no source the recording handler cannot see. A caller that knows a better
+## source (a Dawn line from a call map) builds `DebugInfo` itself.
+pub fn text_debug(prog: TileProg, dir: String, file: String) -> DebugInfo = {
+  let k = lower(prog)
+  # the module line, the globals, then the entry line, then the body
+  let entry = 2 + len(k.globals)
+  DebugInfo { dir: dir, file: file, line: entry, col: 3, locs: positions(k.body, entry + 1, 5) }
+}
+
 ## The lines of `render(prog)` one call the kernel made is answerable for,
 ## its children's left out: its globals' lines and the lines of the
 ## operations it issued itself, each a 1-based half-open range, in text
@@ -797,6 +847,7 @@ pub fn render(prog: TileProg) -> String = render_kernel(lower(prog))
 
 fn two_loads_one_param() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "twice",
   params: [ByPtr("f64")],
@@ -835,6 +886,7 @@ test "the token chain in the text is the program's: make_token feeds the first l
 test "an atomic spells its ordering, its scope and (for the rmw) its mode, and answers a value and a token" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "atomics",
     params: [ByPtr("i32"), ByPtr("i32")],
@@ -865,14 +917,14 @@ test "an atomic spells its ordering, its scope and (for the rmw) its mode, and a
 }
 
 test "the entry signature lists every parameter as a scalar pointer tile of its format" {
-  let p = TileProg { producer: None, hints: [], name: "k", params: [ByPtr("f32"), ByPtr("f64")], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { producer: None, debug: None, hints: [], name: "k", params: [ByPtr("f32"), ByPtr("f64")], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<ptr<f64>>) {\n")
   assert str.ends_with(text, "    return\n  }\n}\n")
 }
 
 test "K4.1: a by-value parameter is a rank-0 tile of its format in the entry signature, beside the pointers" {
-  let p = TileProg { producer: None, hints: [], name: "k", params: [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals: [], ops: [MakeToken(0)] }
+  let p = TileProg { producer: None, debug: None, hints: [], name: "k", params: [ByPtr("f32"), ByValue("i32"), ByValue("f64")], globals: [], ops: [MakeToken(0)] }
   let text = render(p)
   assert str.starts_with(text, "cuda_tile.module @m {\n  entry @k(%arg0: tile<ptr<f32>>, %arg1: tile<i32>, %arg2: tile<f64>) {\n")
 }
@@ -880,6 +932,7 @@ test "K4.1: a by-value parameter is a rank-0 tile of its format in the entry sig
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "axes",
     params: [ByPtr("f64")],
@@ -904,6 +957,7 @@ test "rendering the same program twice gives the same text" {
 
 fn sum_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "sum",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -945,6 +999,7 @@ test "a loop is its header with the carried values, a body two columns in, and a
 
 fn spin_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "spin",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -979,6 +1034,7 @@ test "a loop is its header with the carried values, an if that breaks, and the c
 test "an early return inside a loop is an if around the dialect's bare return, and the conversions print the modifier and the mode" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "t17",
     params: [ByPtr("f64"), ByPtr("i32")],
@@ -1014,6 +1070,7 @@ test "an early return inside a loop is an if around the dialect's bare return, a
 
 fn total_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "total",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1046,6 +1103,7 @@ test "a reduction is its header with the dimension, the identities and the regio
 
 fn branch_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "branch",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1081,6 +1139,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   # flush_to_zero, which is never set here
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "m",
     params: [ByPtr("f64")],
@@ -1116,6 +1175,7 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
   let none: Option[Int] = None
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "dbg",
     params: [ByPtr("i32"), ByPtr("i32")],
@@ -1158,6 +1218,7 @@ test "assert, assume and print_tko spell the dialect's own assembly, predicate p
 test "the fence prints its token bare and the gdc signals print it as the optional clause, with the result type stated" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "fences",
     params: [],
@@ -1193,6 +1254,7 @@ test "index arithmetic spells as scalar i32 constant, addi and muli" {
 test "the shape operations spell the dialect's own assembly: brackets on extract, `dim =` on cat, a bare list on permute" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "shapes",
     params: [ByPtr("f64"), ByPtr("f64")],
@@ -1225,6 +1287,7 @@ test "the shape operations spell the dialect's own assembly: brackets on extract
 test "insert names its subtile, its destination in brackets and both types, and fpowi both formats" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "t16",
     params: [ByPtr("f64"), ByPtr("i32"), ByPtr("f64")],
@@ -1258,6 +1321,7 @@ test "insert names its subtile, its destination in brackets and both types, and 
 test "the pointer surface spells the ladder a body built, its three conversions and a load through it" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "ptrs",
     params: [ByPtr("f64"), ByPtr("i32")],
@@ -1292,6 +1356,7 @@ test "the pointer surface spells the ladder a body built, its three conversions 
 test "a fork issues two stores from one token and joins them before the load that follows" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "fork",
     params: [ByPtr("f64"), ByPtr("f64")],
@@ -1316,6 +1381,7 @@ test "a fork issues two stores from one token and joins them before the load tha
 
 fn globals_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "g",
   params: [ByPtr("f64")],
@@ -1845,4 +1911,43 @@ test "knife T18: a promise of the wrong length, and one over a padded view, are 
   # no promise over a padded view is the usual load; and a store has no padding to refuse
   assert promised_refusal(PadZero, [], [true, true]) == "accepted"
   assert promised_refusal(PadZero, [false, false], []) == "accepted"
+}
+
+# ---- the Debug section's locations (knife T14b)
+
+# The text lines of `p`, 1-based as the locations count them.
+fn text_lines(p: TileProg) -> List[String] = str.split(render(p), "\n")
+
+# Each location of `text_debug` must point at a line that is an instruction
+# (not a brace) and at the column its first character is on; the count is the
+# lowered kernel's. The first location is the `entry` line's own.
+fn locations_hold(p: TileProg) -> Bool = {
+  let d = text_debug(p, "dir", "k.mlir")
+  let lines = text_lines(p)
+  let k = lower(p)
+  let entry_ok = str.starts_with(lines[d.line - 1], "  entry @")
+  let each = list.fold(d.locs, true, (ok, lc) => {
+    let (line, col) = lc
+    let text = lines[line - 1]
+    let rest = str.trim_start(text)
+    ok && col == str.len(text) - str.len(rest) + 1 && rest != "}" && rest != "} else {" && rest != ""
+  })
+  entry_ok && each && len(d.locs) == instr_count(k.body)
+}
+
+test "text_debug puts every instruction at the line and column of its text, regions and an else included" {
+  assert locations_hold(sum_prog())
+  assert locations_hold(spin_prog())
+  assert locations_hold(total_prog())
+  assert locations_hold(branch_prog())
+}
+
+test "text_debug for a flat kernel is its lines in order, one per instruction, the return last" {
+  let d = text_debug(two_loads_one_param(), "dir", "k.mlir")
+  assert d.line == 2
+  assert d.col == 3
+  assert d.locs[0] == (3, 5)
+  let lines = text_lines(two_loads_one_param())
+  assert d.locs[len(d.locs) - 1] == (len(lines) - 3, 5)
+  assert lines[len(lines) - 4] == "    return"
 }

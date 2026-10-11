@@ -36,7 +36,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   blocks_of }
 use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
   Whole, FREE_AXIS, Scalar }
-use tileir/render.{render}
+use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
 
 # f64 vector add over 128-wide tiles: the first milestone's kernel
@@ -5026,6 +5026,11 @@ fn dt_out(segs: Int, rows: Int) -> Cells = seg_out(segs, rows, DT_N, DT_TILE)
 # this, so the two are written down in one place each and compared there.
 const PRODUCER: String = "dawn-tileir"
 
+# The directory the Debug section of `vadd_debug` and `foldif_debug` names for
+# their file (knife T14b). The file is the kernel's own .mlir golden, and the
+# locations are lines and columns in it; run.sh reads this constant too.
+const DEBUG_DIR: String = "tile-golden"
+
 fn trace(name: String) -> TileProg = match name {
   "vadd" -> {
     let (p, _e) = trace3("vadd", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
@@ -5034,6 +5039,16 @@ fn trace(name: String) -> TileProg = match name {
   "vadd_producer" -> {
     let (p, _e) = trace3("vadd_producer", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
     TileProg { ..p, producer: Some(PRODUCER) }
+  }
+  "vadd_debug" -> {
+    let (p, _e) = trace3("vadd_debug", In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), vadd)
+    TileProg { ..p, debug: Some(text_debug(p, DEBUG_DIR, "vadd_debug.mlir")) }
+  }
+  "foldif_debug" -> {
+    let (p, _e) = trace2("foldif_debug",
+      In(F64, cells([FOLD_CHUNKS * FOLD_BLOCKS * FOLD_TILE], [FOLD_TILE], along: [FREE_AXIS])),
+      Out(F64, run_of(FOLD_TILE)), (x, o) => foldif(x, o, FOLD_CHUNKS))
+    TileProg { ..p, debug: Some(text_debug(p, DEBUG_DIR, "foldif_debug.mlir")) }
   }
   "vadd_f32" -> {
     let (p, _e) = trace3("vadd_f32", In(F32, run_of(64)), In(F32, run_of(64)), Out(F32, run_of(64)), vadd_f32)
@@ -6106,9 +6121,10 @@ pub fn main() -> Unit !io = match args() {
   ["out_along_twice"] -> print(render(out_along_twice()))
   [name] -> print(render(trace_twice(name)))
   [name, "--bytecode-bare", path] -> {
-    # The same program without its Producer section: what the cubin of a
-    # program with one is held against (run.sh, knife T14a).
-    let bytes = encode(TileProg { ..trace_twice(name), producer: None })
+    # The same program without its Producer and Debug sections: what the
+    # cubin of a program with them is held against (run.sh, knife T14a and
+    # T14b).
+    let bytes = encode(TileProg { ..trace_twice(name), producer: None, debug: None })
     match with_fs_real(() => write_bytes(path, bytes)) {
       Ok(_) -> ()
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
@@ -6121,7 +6137,7 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_producer|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
+  _ -> panic("usage: kernels <vadd|vadd_producer|vadd_debug|foldif_debug|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
       ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
       ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
       ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"

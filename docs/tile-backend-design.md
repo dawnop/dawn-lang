@@ -178,7 +178,7 @@ leetgpu 题」，`features.txt` 说的是「这个后端实现了 Tile IR 的哪
 | T10 | 13.3 其余：`alloca` `mmaf_scaled` | 2 |
 | T15 | `OptimizationHints`（属性标签 11 加 Dictionary 10） | 0 |
 
-T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起（裁决 2 已于 2026-09-06 撤销；裁决 4 的前提随刀 U1 / U2 升钉 13.4 成立，2026-10-02 解封，T14 另派）。
+T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起（裁决 2 已于 2026-09-06 撤销；裁决 4 的前提随刀 U1 / U2 升钉 13.4 成立，2026-10-02 解封，T14 另派；T14a 的 Producer 段见 §6.35，T14b 的 Debug 段见 §6.36）。
 leetgpu 刀 21 照常收尾，之后不再派 leetgpu 刀，剩余题目只作副产品记录。
 
 **版本墙（T8）比想象的便宜，这条预研独立复核过，刀 T8 落地时又逐处重量了一遍。**
@@ -5725,6 +5725,60 @@ tile 输入摘要因此变了：**sm_86 / sm_90 / sm_100 三份台账等 int 立
 - 在 `.mlir` 里印它：MLIR 文本没有这个位置，印了就是发明一个方言没有的写法。
 - Debug 段（DIFile / DICompileUnit / DILoc）：T14b。
 - 整个 golden 的反汇编文本对拍：T14c，需要先定「谁迁就谁」（调研报告 4.4）。
+
+### 6.36 Debug 段：每条指令一个位置，设备在默认 -O3 下看不见（刀 T14b，tileir 0.17.0）
+
+字节码第 3 号段，Debug：DIFile、DICompileUnit、DISubprogram、DILoc 四种属性，外加每个函数、每条指令各指一个属性的索引表。这一刀让
+`bytecode.dawn` 在程序带 `debug` 时写它。破坏性，0.17.0：`TileProg` 与降低后的 `Kernel` 各再多一个字段 `debug: Option[DebugInfo]`，包外写记录字面量的地方
+补 `debug: None`；没有新的 `Dev` 操作，既有 205 个 golden 在两个后端上一个字节没动（`None` 不写段，函数记录的位置索引仍是 0）。
+
+**一、字节形状（cuTile Python 1.6.0 的 `_write_debug_info_section` 给出布局，`tileirdisasm` 13.4.92 读回来核对）。** 段 id 3、对齐 8，内容依次是：
+函数个数（一个 varint）、补齐到 4、每个函数一个 u32（它的条目在索引数组里从哪里开始，这里是 0）、索引条目总数（varint）、补齐到 8、每条一个 u64
+属性 id、最后是属性表（个数、补齐到 4、每个属性一个 u32 偏移、属性本体）。属性 id 从 1 起，0 是「未知」；相同的属性是同一个 id。四种属性是一个标签字节加若干 varint：
+`DIFile`（文件名串、目录串）、`DICompileUnit`（文件）、`DISubprogram`（文件、行、名、链接名、编译单元、作用域行）、`DILoc`（作用域、文件名串、行、列）。
+一个函数的条目是它自己的位置在先，随后每条指令一个，顺序就是字节码列出操作的先序（区域先于其体，体的终结在体末，结尾的 `return` 最后）。函数记录里的位置索引写 1（它在本段里的序号，
+从 1 数），没有 Debug 段时仍写 0。段排在常量段之后、类型段之前，字符串在 hints 之后、Producer 之前入表，所以没有 `debug` 的程序每个下标都不变。
+
+**二、位置从哪里来。** 调研报告说「Dawn 源码位置是自然之选」，落刀时发现语言里没有任何东西能在运行时读出一个调用点的源码位置：`trace_kernel` 记录时调用的是闭包，
+站点的调用地图（§6.23）靠 `dawn parse` 的静态 span 配对出来，包里拿不到。所以位置不能由记录 handler 凭空产生，只能由调用者给。两个选项：
+(a) `DebugInfo.locs` 由调用者逐指令给出（站点有 `line_map` 与 `dawn parse` 之后，可以把指令对到 Dawn 源码行）；
+(b) 包提供一个不需要任何外部信息的默认：`render.text_debug(prog, dir, file)`，位置就是这个程序**自己的 `.mlir` 文本**（`render(prog)` 存成 `dir/file`）里每条指令所在的行与列，
+入口指向 `entry` 那一行、第 3 列。(b) 恰好是 MLIR 自己解析一个 `.mlir` 文件时给每个操作记下的位置，所以 `tileirdisasm -g` 的表可以拿**golden 文本本身**当独立答案：第 n 个位置必须是
+第 n 条指令的起点。这一刀两个都开放，golden 用 (b)，因为它是目前唯一有独立判词的那个；(a) 是同一个字段的另一种填法，包不替调用者决定。`locs` 的长度必须等于降低后指令的个数
+（`lower.instr_count`），不等就 panic 并写出两个数：一张与指令对不上的位置表比没有更糟。
+
+**三、公开面。** `DebugInfo = { dir, file, line, col, locs }`，`line` 与 `col` 是 kernel 自己的位置（DISubprogram 的行、函数的 DILoc）。记录 handler 从不设它，文本渲染器不印它；
+要的人写 `TileProg { ..p, debug: Some(d) }`。
+
+**四、两个 kernel 与三句判词。** `vadd_debug`（就是 `vadd` 换名字再带上 `text_debug`）与 `foldif_debug`（`foldif` 换名字；它有 `for`、`if` / `else`、`continue` 与 `yield`，
+区域嵌套与 `} else {` 那一行就在里面）。`run.sh` 对这两项在通常的文本、字节、汇编之外多做：
+
+1. `tileirdisasm -g` 的输出与存下来的 `<kernel>.disasm` **逐字相同**；并且 `debug-check.py locs` 用 golden 的 `.mlir` 重新算一遍期望（第 n 个位置 = 第 n 条非括号行的行与列，函数的 = `entry` 行 `:3`）
+   与反汇编里的 `di_loc` 表比。第二条不是第一条的复读：golden 文件被错误地重录时，第一条跟着错，第二条不会。
+2. 默认 `-O3` 的 cubin 与同一程序**不带 Debug 段**（`kernels <名> --bytecode-bare`）编出来的**逐字节相同**，不带段的反汇编里也没有 `di_loc`。设备看不见这一段。
+3. `tileiras --lineinfo` 的 cubin 里 `.debug_line` 读得回行号：`debug-check.py lines` 自己解码 DWARF 行程序（不用 `readelf`，各版本 binutils 的排版不一样；`tileiras` 写的是 DWARF 2，只实现它用到的操作码，
+   遇到别的就报错而不是跳过），得到的行号排序去重后与 `<kernel>.lines` 相同，并且每个都是 golden 文本里某条指令（或 `entry`）的行。`vadd_debug` 是 8 个不同的行
+   （2 6 10 11 15 16 20 21），`foldif_debug` 15 个。对照：同一程序不带 Debug 段，`--lineinfo` 的 cubin 与普通 cubin 逐字节相同；带 Debug 段，`--lineinfo` 的 cubin 与普通 cubin 不同。
+
+`-g` 本身要配 `-O0`（`optimized debugging is currently not supported`，调研报告 4.3 量过），而 `-O0` 改变代码，所以不拿它做判词。台账层：层 1 加具名豁免 `debug-info-not-arithmetic`（裁决 1 已把 Debug 段列在做不到层 3 的名单里）。
+
+| 变异体 | 改哪 | 怎么红 |
+|--------|------|--------|
+| `debug-line-off-by-one` | `text_debug` 里每条指令的行加 1 | `vadd_debug.mlir` 不动，`.tilebc` 在两个后端上都变；`tileiras` 照样收；`tileirdisasm -g` 的表变了，`debug-check.py` 报 `location 1 is (4, 5) in the disassembly and (3, 5) in vadd_debug.mlir; 20 locations against 20`；`--lineinfo` 的 cubin 与 `.debug_line` 的行集都变；**默认 -O3 的 cubin 与 golden 的逐字节相同**（调研报告的两句话都复现） |
+| `debug-count-short` | 索引条目总数写少一个 | 文本不动，字节同长；`tileiras` 与 `tileirdisasm` **都拒**，报文逐字：`error: error at offset 1: failed to read file attribute when parsing DICompileUnitAttr`（报文说的是读 DICompileUnit 的文件属性失败，没有说计数不对：少一个条目之后读者的游标落在别处，两个读者是同一句） |
+
+两条都在本机各跑一遍。
+
+**五、台账。** `features.txt` 与 `types.txt` 没有节的行，没有行要改，`features.txt` 的 `sections` 注释改成「Producer 由 T14a 写，Debug 由 T14b 写」；`check.py` 的 `LANDED_KNIVES` 加 `T14b`。
+矩阵 297 项长到 301（208 个 kernel、93 个变异体），tile.yml 的八个步骤名同步。tile 输入摘要因此变了：sm_86 台账在本刀末尾重录一行；sm_90 与 sm_100 不在本刀录。
+
+**不做的（理由）：**
+
+- 让记录 handler 默认设 `debug`：设了就要动 205 个 golden 的字节，而这一段对设备毫无作用；要的人显式写。
+- 在包里发明 Dawn 源码位置：运行时读不到，硬编一个行号等于伪造；位置由调用者给，`text_debug` 只给自己能证明的那一种。
+- 多函数、DILexicalBlock 与 CallSite：Tile IR 的 kernel 一个入口，包里没有内联函数，没有地方产生它们。写入器的布局为函数个数留了位，但这里恒为一。
+- `-O0 -g` 的判词：改变代码，而且报告量过 `-g` 在 `-O3` 下被拒；`--lineinfo` 是不改代码的那一条路。
+- 把 `.disasm` 的全文对拍扩到全部 golden：T14c（调研报告 4.4）。
 
 ## 7. 刀序
 

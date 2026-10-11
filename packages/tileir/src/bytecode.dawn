@@ -65,7 +65,8 @@
 # reaches nothing here: the 13.4 i1 constant and function-flag rules (this
 # writer already bit-packs i1 and sets only the kernel and hints bits). The
 # Producer section (13.3+) is written when a program carries a `producer`
-# and refused under an older header (knife T14a).
+# and refused under an older header (knife T14a); the Debug section (every
+# version) is written when it carries `debug` (knife T14b).
 use std/bytes
 use std/list
 use std/map
@@ -73,8 +74,8 @@ use std/narrow
 use std/str
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding,
   PadZero, PadNegZero, PadNan, PadPosInf, PadNegInf, DYN_DIM }
-use prog.{TileProg, ByPtr, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert}
-use lower.{kparam_ty, Kernel, Instr, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
+use prog.{TileProg, ByPtr, ftof_mode, Global, GetGlobal, MakeToken, BlockId, Load, Store, ConstF, ConstI, Lanes, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, Alloca, MmaFScaled, Convert, DebugInfo}
+use lower.{kparam_ty, Kernel, Instr, instr_count, Ty, Elem, Ref, lower, defines, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, tensor_view_of, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
 ## The bytecode version written into the header (tile-backend-design 6.3).
 ## The three numbers that must move together are this one, the `tileiras` pin
@@ -915,6 +916,7 @@ const SEC_FUNC: Int = 2
 const SEC_CONSTANT: Int = 4
 const SEC_TYPE: Int = 5
 const SEC_GLOBAL: Int = 6
+const SEC_DEBUG: Int = 3
 const SEC_PRODUCER: Int = 7
 
 const PAD_BYTE: Int = 0xCB
@@ -2077,6 +2079,54 @@ fn inbounds(w: W, flags: List[Bool]) -> W =
 # `producer` asked for something the file could not carry (knife T14a).
 fn producer_ok(major: Int, minor: Int) -> Bool = major > 13 || (major == 13 && minor >= 3)
 
+# ---- the Debug section (id 3, knife T14b)
+#
+# Layout, from cuTile Python 1.6.0's `_write_debug_info_section` and read back
+# with tileirdisasm 13.4.92 (docs/tile-backend-design.md 6.36): the number of
+# functions (one), padding to 4, one u32 per function giving where its
+# entries start in the index array (0), the number of index entries as a
+# varint, padding to 8, one u64 per entry giving an attribute id, then the
+# attribute table (a count, padding to 4, one u32 offset per attribute, the
+# attributes). The first entry of a function is its own location and each
+# instruction adds one, in the order the bytecode lists the operations. Id 0
+# is "unknown"; the table starts at 1.
+const DI_COMPILE_UNIT: Int = 1
+const DI_FILE: Int = 2
+const DI_LOC: Int = 4
+const DI_SUBPROGRAM: Int = 5
+
+# One attribute: its tag byte, then each field as a varint. An id is the
+# attribute's place in the table plus one, and a repeated attribute is one id.
+fn dattr(t: Table, tag: Int, fields: List[Int]) -> (Table, Int) = {
+  let (t1, i) = intern(t, bytes.freeze(list.fold(fields, bytes.put(bytes.buf(), tag), (b, f) => put_varint(b, f))))
+  (t1, i + 1)
+}
+
+# The section's content, and the writer with the strings it names interned.
+fn debug_section(w0: W, d: DebugInfo, name: String, n_instr: Int) -> (W, Bytes) = {
+  if len(d.locs) != n_instr {
+    panic("tileir: kernel `${name}`: the debug info has ${len(d.locs)} locations and the kernel has ${n_instr} instructions; it needs one each")
+  } else {
+    let (w1, s_file) = str_of(w0, d.file)
+    let (w2, s_dir) = str_of(w1, d.dir)
+    let (w3, s_name) = str_of(w2, name)
+    let (t1, file) = dattr(table(), DI_FILE, [s_file, s_dir])
+    let (t2, unit) = dattr(t1, DI_COMPILE_UNIT, [file])
+    let (t3, sub) = dattr(t2, DI_SUBPROGRAM, [file, d.line, s_name, s_name, unit, d.line])
+    let (t4, own) = dattr(t3, DI_LOC, [sub, s_file, d.line, d.col])
+    let (t5, ids) = list.fold(d.locs, (t4, [own]), (acc, lc) => {
+      let (t, xs) = acc
+      let (line, col) = lc
+      let (t6, id) = dattr(t, DI_LOC, [sub, s_file, line, col])
+      (t6, xs ++ [id])
+    })
+    let b0 = pad_to(put_varint(bytes.buf(), 1), 4)
+    let b1 = put_varint(put_le(b0, 0, 4), len(ids))
+    let b2 = list.fold(ids, pad_to(b1, 8), (b, id) => put_le(b, id, 8))
+    (w3, bytes.freeze(bytes.put_bytes(b2, table_section(t5.items, 4))))
+  }
+}
+
 # The pinned version is at least `major.minor`.
 fn at_least(major: Int, minor: Int) -> Bool =
   BYTECODE_MAJOR > major || (BYTECODE_MAJOR == major && BYTECODE_MINOR >= minor)
@@ -2206,7 +2256,8 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
   let (w4, globals) = global_section(w, k.globals)
   w = w4
   # One function: its name index, its signature index, the entry flag byte,
-  # the location index (0, the unknown location), then `optimization_hints`
+  # the location index (0, the unknown location, or 1 when the Debug section
+  # is written: the function's place in that section), then `optimization_hints`
   # when the flag says so, then the body's length and the body. The hints
   # intern LAST, after the globals, for the same reason the globals intern
   # after the body: an index nobody else needs is the cheapest one to give
@@ -2219,13 +2270,27 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
   # program it can express.
   let flag = FLAG_KERNEL | (if len(k.hints) == 0 { 0 } else { FLAG_HAS_HINTS })
   let fhead = bytes.put(put_varint(put_varint(put_varint(bytes.buf(), 1), name), sig), flag)
+  let loc_index = match k.debug {
+    None -> 0
+    Some(_d) -> 1
+  }
   let (w5, fhead1) = if len(k.hints) == 0 {
-    (w, put_varint(fhead, 0))
+    (w, put_varint(fhead, loc_index))
   } else {
-    put_hints(w, put_varint(put_varint(fhead, 0), ATTR_OPTIMIZATION_HINTS), k.hints)
+    put_hints(w, put_varint(put_varint(fhead, loc_index), ATTR_OPTIMIZATION_HINTS), k.hints)
   }
   w = w5
   let func = bytes.freeze(bytes.put_bytes(put_varint(fhead1, bytes.len(body)), body))
+  # The debug strings intern after the hints and before the producer, for the
+  # same reason: a program without them keeps every index it ever had.
+  let (w5d, debug) = match k.debug {
+    None -> (w, None)
+    Some(d) -> {
+      let (wd, c) = debug_section(w, d, k.name, instr_count(k.body))
+      (wd, Some(c))
+    }
+  }
+  w = w5d
   # The producer interns after everything else, like the hints, so a program
   # without one keeps every index it ever had. The section's content is the
   # one varint: the producer's String section index (id 7, length 1, measured
@@ -2247,7 +2312,11 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
   let s0 = if len(k.globals) == 0 { h } else { section(h, SEC_GLOBAL, globals, 1) }
   let s1 = section(s0, SEC_FUNC, func, 8)
   let s2 = if len(w.consts.items) == 0 { s1 } else { section(s1, SEC_CONSTANT, table_section(w.consts.items, 8), 8) }
-  let s3 = section(s2, SEC_TYPE, table_section(w.types.items, 4), 4)
+  let s2d = match debug {
+    None -> s2
+    Some(c) -> section(s2, SEC_DEBUG, c, 8)
+  }
+  let s3 = section(s2d, SEC_TYPE, table_section(w.types.items, 4), 4)
   let s4 = section(s3, SEC_STRING, table_section(w.strs.items, 4), 4)
   let s5 = match producer {
     None -> s4
@@ -2359,6 +2428,7 @@ test "f8E5M3FNU is tag 130, which is a two-byte varint, and the tile type that h
 
 fn vadd() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "vadd",
   params: [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
@@ -2398,6 +2468,7 @@ test "encoding the same program twice gives the same bytes" {
 
 fn sum_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "sum",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2471,6 +2542,7 @@ test "a for is its opcode, result count and types, the flags, the operand count 
 
 fn spin_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "spin",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2582,6 +2654,7 @@ test "a hint dictionary is a count, then per architecture a string index, the Di
 
 fn total_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "total",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2627,6 +2700,7 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 
 fn branch_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "branch",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2864,6 +2938,7 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 
 fn shapes_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "shapes",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2886,6 +2961,7 @@ fn shapes_prog() -> TileProg = TileProg {
 
 fn ptrs_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "ptrs",
   params: [ByPtr("f64"), ByPtr("i32")],
@@ -2909,6 +2985,7 @@ fn ptrs_prog() -> TileProg = TileProg {
 
 fn fork_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "fork",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -3117,6 +3194,7 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
 
 fn globals_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "g",
   params: [ByPtr("f64")],
@@ -3129,6 +3207,7 @@ fn globals_prog() -> TileProg = TileProg {
 
 fn private_globals_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "g",
   params: [ByPtr("f64")],
@@ -3445,6 +3524,7 @@ test "the two varints the record grew at 13.3 carry the visibility and the const
 
 fn alloca_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "a",
   params: [ByPtr("f64")],
@@ -3478,6 +3558,7 @@ test "alloca writes its opcode, its result type, a flags word and its two counts
 
 fn mmaf_scaled_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "s",
   params: [ByPtr("f64")],
@@ -3533,4 +3614,27 @@ test "get_global writes its opcode, its result type and the symbol's string inde
   # asked for: the reshape and the broadcast after it are what widens it
   assert str.contains(whole, hex(varint(OP_RESHAPE)))
   assert str.contains(whole, hex(varint(OP_BROADCAST)))
+}
+
+test "the Debug section is a function count, an offset, the entry count, one u64 id per entry and the attribute table" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let d = DebugInfo { dir: "d", file: "f", line: 3, col: 4, locs: [(5, 6), (7, 8)] }
+  let (w, content) = debug_section(w0, d, "k", 2)
+  # strings: the file is 0, the directory 1, the kernel name 2
+  assert len(w.strs.items) == 3
+  let ids = "0400000000000000" ++ "0500000000000000" ++ "0600000000000000"
+  # the attributes, ids from 1: DIFile f in d, DICompileUnit, DISubprogram
+  # (file, line, name, linkage name, unit, scope line), then the function's own
+  # DILoc and the two instructions'
+  let attrs = "020001" ++ "0101" ++ "05010302020203" ++ "0403000304" ++ "0403000506" ++ "0403000708"
+  # count 6, padded to 4, six u32 offsets (3, 2, 7, 5, 5, 5 bytes long)
+  let table = "06cbcbcb" ++ "00000000" ++ "03000000" ++ "05000000" ++ "0c000000" ++ "11000000" ++ "16000000"
+  assert hex(content) == "01cbcbcb" ++ "00000000" ++ "03" ++ "cbcbcbcbcbcbcb" ++ ids ++ table ++ attrs
+}
+
+test "the same location is one attribute: two instructions at one place share an id" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let d = DebugInfo { dir: "d", file: "f", line: 3, col: 4, locs: [(5, 6), (5, 6)] }
+  let (_w, content) = debug_section(w0, d, "k", 2)
+  assert str.contains(hex(content), "0400000000000000" ++ "0500000000000000" ++ "0500000000000000")
 }

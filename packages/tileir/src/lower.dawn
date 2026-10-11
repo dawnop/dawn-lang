@@ -50,7 +50,7 @@ use std/list
 use std/map
 use std/str
 use dev.{RedId, IdF, AssumePred, DivBy, Hints, Padding, NoPadding, padding_present, padding_name}
-use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, TokenOnly, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf}
+use prog.{TileOp, TileProg, KParam, ByPtr, ByValue, ScalarArg, Global, Alloca, MmaFScaled, Assert, Assume, Print, TokenOnly, MakeToken, BlockId, Load, Store, Gather, Scatter, AtomicRMW, AtomicCAS, ConstF, ConstI, Iota, Lanes, UnaryF, BinaryF, Fma, MmaF, MmaI, CmpF, CmpI, UnaryI, BinaryI, Convert, Repack, Select, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Return, Continue, Spread, Reduce, Scan, If, Yield, Extract, Insert, PowI, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, StoreAt, GetGlobal, TensorViewOf, PartitionViewOf, LoadView, StoreView, CellViewOf, ReshapeOf, BroadcastOf, DebugInfo}
 
 ## The element type of a tile: a number format by its Tile IR name (`i32`,
 ## `f32`, `f64`), or a pointer to one.
@@ -330,6 +330,7 @@ pub type Kernel = {
   body: List[Instr],
   hints: Hints,
   producer: Option[String],
+  debug: Option[DebugInfo],
 } derive Show
 
 ## The scalar `tile<i32>`.
@@ -1576,7 +1577,22 @@ pub fn lower_spans(prog: TileProg) -> (Kernel, List[Owner]) = {
   for op in prog.ops {
     l = lower_op(l, op)
   }
-  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints, producer: prog.producer }, l.owners)
+  (Kernel { name: prog.name, params: prog.params, globals: prog.globals, body: l.body ++ [Ret], hints: prog.hints, producer: prog.producer, debug: prog.debug }, l.owners)
+}
+
+## How many instructions `body` is, a region's own body counted: the number
+## of operations the bytecode lists for it, one each (knife T14b). A region
+## counts as one and then what is inside it; its terminator is an
+## instruction of its body, so it is counted there.
+pub fn instr_count(body: List[Instr]) -> Int = list.fold(body, 0, (n, i) => n + 1 + inner_count(i))
+
+fn inner_count(i: Instr) -> Int = match i {
+  ForLoop(_res, _tys, _iv, _lower, _upper, _step, _unsigned, _inits, _carried, body) -> instr_count(body)
+  WhileLoop(_res, _tys, _inits, _carried, body) -> instr_count(body)
+  ReduceTile(_res, _tys, _dim, _identities, _operands, _operand_tys, _args, body) -> instr_count(body)
+  ScanTile(_res, _tys, _dim, _reverse, _identities, _operands, _operand_tys, _args, body) -> instr_count(body)
+  IfElse(_res, _tys, _cond, _cond_ty, on_true, on_false) -> instr_count(on_true) + instr_count(on_false)
+  _ -> 0
 }
 
 ## The values an instruction defines, in definition order.
@@ -1673,6 +1689,7 @@ pub fn defines_inside(body: List[Instr]) -> List[Int] = {
 
 fn two_loads_one_param() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "twice",
   params: [ByPtr("f64")],
@@ -1718,6 +1735,7 @@ test "the pointer ladder for one parameter at one index is emitted once, not onc
 # memory operations.
 fn gather_then_scatter() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "indexed",
   params: [ByPtr("i32"), ByPtr("f64"), ByPtr("f64")],
@@ -1787,6 +1805,7 @@ test "the ladder reads the entry parameter as an argument, not as a value" {
 test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parameter itself, and it has no owner row" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "scalar",
     params: [ByValue("i32")],
@@ -1810,6 +1829,7 @@ test "K4.1: a ScalarArg lowers to no instruction: its handle is the entry parame
 test "block ids along the three axes bind the matching result of one get_tile_block_id" {
   let p = TileProg {
     producer: None,
+    debug: None,
     hints: [],
     name: "axes",
     params: [ByPtr("f64")],
@@ -1829,6 +1849,7 @@ test "lowering the same program twice gives the same table" {
 # The sum kernel as prog.dawn's test records it: four chunks of 128.
 fn sum_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "sum",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1861,6 +1882,7 @@ fn sum_prog() -> TileProg = TileProg {
 # bounds whose body ends in the exit `if` and a `continue`.
 fn spin_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "spin",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -1965,6 +1987,7 @@ test "after a loop the store consumes the loop's results, not values from inside
 # one lane and stored at element 0.
 fn total_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "total",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2025,6 +2048,7 @@ test "spread lowers to a reshape to one lane and a broadcast to the width" {
 
 fn branch_prog() -> TileProg = TileProg {
   producer: None,
+  debug: None,
   hints: [],
   name: "branch",
   params: [ByPtr("f64"), ByPtr("f64")],

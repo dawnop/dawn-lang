@@ -527,6 +527,16 @@ MUTATIONS = {
         'Some(bytes.freeze(put_varint(bytes.buf(), pi)))',
         'Some(bytes.freeze(put_varint(bytes.buf(), pi - 1)))',
     ),),
+    "debug-line-off-by-one": ((
+        RENDER,
+        '    out = out ++ [(at, col)] ++ inside',
+        '    out = out ++ [(at + 1, col)] ++ inside',
+    ),),
+    "debug-count-short": ((
+        BYTECODE,
+        'let b1 = put_varint(put_le(b0, 0, 4), len(ids))',
+        'let b1 = put_varint(put_le(b0, 0, 4), len(ids) - 1)',
+    ),),
     "producer-under-13-2-header": ((
         BYTECODE,
         'pub const BYTECODE_MINOR: Int = 4',

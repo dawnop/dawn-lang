@@ -1,0 +1,106 @@
+entry @foldif_debug(%arg0: tile<ptr<f64>>, %arg1: tile<ptr<f64>>) {
+  %0 = make_token : token loc(#loc34)
+  %blockId_x, %blockId_y, %blockId_z = get_tile_block_id : tile<i32> loc(#loc35)
+  %cst_4_i32 = constant <i32: 4> : tile<i32> loc(#loc36)
+  %1 = muli %blockId_x, %cst_4_i32 : tile<i32> loc(#loc37)
+  %cst_1_i32 = constant <i32: 1> : tile<i32> loc(#loc38)
+  %assume = assume div_by<16>, %arg0 : tile<ptr<f64>> loc(#loc39)
+  %tview = make_tensor_view %assume, shape = [1024], strides = [1] : tensor_view<1024xf64, strides=[1]> loc(#loc40)
+  %pview = make_partition_view %tview : partition_view<tile=(128), padding_value = zero, tensor_view<1024xf64, strides=[1]>> loc(#loc41)
+  %tile, %result_token = load_view_tko weak %pview[%1] token = %0 : partition_view<tile=(128), padding_value = zero, tensor_view<1024xf64, strides=[1]>>, tile<i32> -> tile<128xf64>, token loc(#loc42)
+  %2 = addi %1, %cst_1_i32 : tile<i32> loc(#loc43)
+  %3 = addi %1, %cst_4_i32 : tile<i32> loc(#loc44)
+  %for:4 = for %loopIdx in (%2 to %3, step %cst_1_i32) : tile<i32> iter_values(%iterArg0 = %tile, %iterArg1 = %tile, %iterArg2 = %tile, %iterArg3 = %result_token) -> (tile<128xf64>, tile<128xf64>, tile<128xf64>, token) {
+    %tile_6, %result_token_7 = load_view_tko weak %pview[%loopIdx] token = %iterArg3 : partition_view<tile=(128), padding_value = zero, tensor_view<1024xf64, strides=[1]>>, tile<i32> -> tile<128xf64>, token loc(#loc46)
+    %8 = addf %iterArg0, %tile_6  : tile<128xf64> loc(#loc47)
+    %9 = maxf %iterArg1, %tile_6 : tile<128xf64> loc(#loc48)
+    %10 = minf %iterArg2, %tile_6 : tile<128xf64> loc(#loc49)
+    continue %8, %9, %10, %result_token_7 : tile<128xf64>, tile<128xf64>, tile<128xf64>, token loc(#loc50)
+  } loc(#loc45)
+  %cst_0_i32 = constant <i32: 0> : tile<i32> loc(#loc51)
+  %4 = cmpi equal %blockId_x, %cst_0_i32, signed : tile<i32> -> tile<i1> loc(#loc52)
+  %5 = if %4 -> (tile<128xf64>) {
+    yield %for#0 : tile<128xf64> loc(#loc54)
+  } else {
+    %8 = subf %for#1, %for#2  : tile<128xf64> loc(#loc55)
+    yield %8 : tile<128xf64> loc(#loc56)
+  } loc(#loc53)
+  %gridSize_x, %gridSize_y, %gridSize_z = get_num_tile_blocks : tile<i32> loc(#loc57)
+  %cst_128_i32 = constant <i32: 128> : tile<i32> loc(#loc58)
+  %6 = muli %gridSize_x, %cst_128_i32 : tile<i32> loc(#loc59)
+  %assume_0 = assume div_by<16>, %arg1 : tile<ptr<f64>> loc(#loc60)
+  %tview_1 = make_tensor_view %assume_0, shape = [%6], strides = [1] : tile<i32> -> tensor_view<?xf64, strides=[1]> loc(#loc61)
+  %pview_2 = make_partition_view %tview_1 : partition_view<tile=(128), padding_value = zero, tensor_view<?xf64, strides=[1]>> loc(#loc62)
+  %blockId_x_3, %blockId_y_4, %blockId_z_5 = get_tile_block_id : tile<i32> loc(#loc63)
+  %7 = store_view_tko weak %5, %pview_2[%blockId_x_3] token = %for#3 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<?xf64, strides=[1]>>, tile<i32> -> token loc(#loc64)
+  return loc(#loc65)
+} loc(#loc33)
+#di_file = #cuda_tile.di_file<"foldif_debug.mlir" in "tile-golden">
+#loc = loc("foldif_debug.mlir":2:3)
+#loc1 = loc("foldif_debug.mlir":3:5)
+#loc2 = loc("foldif_debug.mlir":4:5)
+#loc3 = loc("foldif_debug.mlir":5:5)
+#loc4 = loc("foldif_debug.mlir":6:5)
+#loc5 = loc("foldif_debug.mlir":7:5)
+#loc6 = loc("foldif_debug.mlir":8:5)
+#loc7 = loc("foldif_debug.mlir":9:5)
+#loc8 = loc("foldif_debug.mlir":10:5)
+#loc9 = loc("foldif_debug.mlir":11:5)
+#loc10 = loc("foldif_debug.mlir":12:5)
+#loc11 = loc("foldif_debug.mlir":13:5)
+#loc12 = loc("foldif_debug.mlir":14:5)
+#loc13 = loc("foldif_debug.mlir":15:7)
+#loc14 = loc("foldif_debug.mlir":16:7)
+#loc15 = loc("foldif_debug.mlir":17:7)
+#loc16 = loc("foldif_debug.mlir":18:7)
+#loc17 = loc("foldif_debug.mlir":19:7)
+#loc18 = loc("foldif_debug.mlir":21:5)
+#loc19 = loc("foldif_debug.mlir":22:5)
+#loc20 = loc("foldif_debug.mlir":23:5)
+#loc21 = loc("foldif_debug.mlir":24:7)
+#loc22 = loc("foldif_debug.mlir":26:7)
+#loc23 = loc("foldif_debug.mlir":27:7)
+#loc24 = loc("foldif_debug.mlir":29:5)
+#loc25 = loc("foldif_debug.mlir":30:5)
+#loc26 = loc("foldif_debug.mlir":31:5)
+#loc27 = loc("foldif_debug.mlir":32:5)
+#loc28 = loc("foldif_debug.mlir":33:5)
+#loc29 = loc("foldif_debug.mlir":34:5)
+#loc30 = loc("foldif_debug.mlir":35:5)
+#loc31 = loc("foldif_debug.mlir":36:5)
+#loc32 = loc("foldif_debug.mlir":37:5)
+#di_compile_unit = #cuda_tile.di_compile_unit<file = #di_file>
+#di_subprogram = #cuda_tile.di_subprogram<file = #di_file, line = 2, name = "foldif_debug", linkageName = "foldif_debug", compileUnit = #di_compile_unit, scopeLine = 2>
+#loc33 = #cuda_tile.di_loc<#loc in #di_subprogram>
+#loc34 = #cuda_tile.di_loc<#loc1 in #di_subprogram>
+#loc35 = #cuda_tile.di_loc<#loc2 in #di_subprogram>
+#loc36 = #cuda_tile.di_loc<#loc3 in #di_subprogram>
+#loc37 = #cuda_tile.di_loc<#loc4 in #di_subprogram>
+#loc38 = #cuda_tile.di_loc<#loc5 in #di_subprogram>
+#loc39 = #cuda_tile.di_loc<#loc6 in #di_subprogram>
+#loc40 = #cuda_tile.di_loc<#loc7 in #di_subprogram>
+#loc41 = #cuda_tile.di_loc<#loc8 in #di_subprogram>
+#loc42 = #cuda_tile.di_loc<#loc9 in #di_subprogram>
+#loc43 = #cuda_tile.di_loc<#loc10 in #di_subprogram>
+#loc44 = #cuda_tile.di_loc<#loc11 in #di_subprogram>
+#loc45 = #cuda_tile.di_loc<#loc12 in #di_subprogram>
+#loc46 = #cuda_tile.di_loc<#loc13 in #di_subprogram>
+#loc47 = #cuda_tile.di_loc<#loc14 in #di_subprogram>
+#loc48 = #cuda_tile.di_loc<#loc15 in #di_subprogram>
+#loc49 = #cuda_tile.di_loc<#loc16 in #di_subprogram>
+#loc50 = #cuda_tile.di_loc<#loc17 in #di_subprogram>
+#loc51 = #cuda_tile.di_loc<#loc18 in #di_subprogram>
+#loc52 = #cuda_tile.di_loc<#loc19 in #di_subprogram>
+#loc53 = #cuda_tile.di_loc<#loc20 in #di_subprogram>
+#loc54 = #cuda_tile.di_loc<#loc21 in #di_subprogram>
+#loc55 = #cuda_tile.di_loc<#loc22 in #di_subprogram>
+#loc56 = #cuda_tile.di_loc<#loc23 in #di_subprogram>
+#loc57 = #cuda_tile.di_loc<#loc24 in #di_subprogram>
+#loc58 = #cuda_tile.di_loc<#loc25 in #di_subprogram>
+#loc59 = #cuda_tile.di_loc<#loc26 in #di_subprogram>
+#loc60 = #cuda_tile.di_loc<#loc27 in #di_subprogram>
+#loc61 = #cuda_tile.di_loc<#loc28 in #di_subprogram>
+#loc62 = #cuda_tile.di_loc<#loc29 in #di_subprogram>
+#loc63 = #cuda_tile.di_loc<#loc30 in #di_subprogram>
+#loc64 = #cuda_tile.di_loc<#loc31 in #di_subprogram>
+#loc65 = #cuda_tile.di_loc<#loc32 in #di_subprogram>
