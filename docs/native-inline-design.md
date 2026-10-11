@@ -1,6 +1,6 @@
 # native 运行时小函数内联与 -flto 评估
 
-> 状态：**current**。刀 1（native 性能线）：整数除模内联已落地，RC 快路径做成开关（默认关），`-flto` 默认开的评估结论是不开。2026-10-06。
+> 状态：**current**。刀 1（native 性能线）：整数除模内联已落地，RC 快路径做成开关；2026-10-11 裁决改为用户构建与发布构建默认开（§十），CI 测试构建仍关；`-flto` 默认开的评估结论是不开。
 > 依据：`agent-handoff/research-value-repr-report-20261006.md`（标量版 option_s 非 LTO 下慢 5 倍，根因是 `dawn_imod` 在 `dawn_rt.c` 里不能内联）；
 > 裁决 ffi-llvm 4.a（RC 快路径进头文件，或 `-flto`；要报 CI 墙钟）；[c-tu-split-design.md](c-tu-split-design.md) §4.5、§九（LTO 留待 4.a 实测）。
 
@@ -9,7 +9,7 @@
 1. **`dawn_idiv`/`dawn_imod` 改成 `dawn_rt.h` 里的 `static inline`，无条件，零成本。** 标量循环（不分配）非 LTO 下追平 LTO：
    option_s 0.755 → 0.147 s（5.1 倍），update_s 0.227 → 0.084 s，pair_s 0.259 → 0.118 s。
    编出的 C 文本一字不变，只是运行时头多了内联定义；nmain 闭包的 cc 时间与产物大小实测无变化（产物 +8 字节，cc user 77.8 对 78.2 s）。
-2. **RC 快路径（`dawn_dup`、递减型 `dawn_drop`）做成 `-DDAWN_RT_INLINE_RC` 开关，默认关。** 开了以后运行快，但 cc 代价很大：
+2. **RC 快路径（`dawn_dup`、递减型 `dawn_drop`）做成 `-DDAWN_RT_INLINE_RC` 开关，刀 1 落地时默认关（10-11 起用户构建与发布构建默认开，见 §十）。** 开了以后运行快，但 cc 代价很大：
    整个 native 编译器（nmain，4,460 个函数）cc CPU +83%，代码 +30%。收益与代价都在下面几节，是否对用户构建默认打开交给裁决（§七）。
 3. **`-flto` 不做默认。** 完整 LTO 在 nmain 上 16 核墙钟 5.4 → 45.2 s，4 核 11.1 → 48.4 s；ThinLTO 4 核 11.1 → 29.1 s，而且产物字节随目标文件路径变。
    运行只快 11%，而 RC 快路径内联单独就快 21%。小程序上 LTO 多花 20% 到 40% 的 cc 时间。
@@ -123,7 +123,7 @@ push-total 按 3 倍计约 +250 s，**需要 `Gate-Budget(push-total)` 声明**�
 
 ## 七、待裁决
 
-1. **用户构建（`dawn build`、`dawn run`）是否默认开 `-DDAWN_RT_INLINE_RC`。** 小程序 cc +14% 到 +30%（shapes、json、site），
+1. （已裁，§十：默认开）**用户构建（`dawn build`、`dawn run`）是否默认开 `-DDAWN_RT_INLINE_RC`。** 小程序 cc +14% 到 +30%（shapes、json、site），
    运行在 drop 递减型负载上快 7% 到 37%，在对象即生即死的负载上不快、最多慢约 17%。收益不是单向的，我的倾向是**先不默认**，
    等 Perceus reuse（ADT 复用）落地后再测一次：reuse 会把「即生即死」那一类负载改成就地更新，那时 inl 的拖累会消失。
    若裁决为开：改点是 `nmain.dawn` 的 cc 行加一个 `-D`，`dawn test` 与自举构建保持关（它们走另一条路径），需要同步改 nmain 里四处 argv 断言。
@@ -145,3 +145,58 @@ push-total 按 3 倍计约 +250 s，**需要 `Gate-Budget(push-total)` 声明**�
 ## 九、落地记录
 
 见提交 `Inline the small integer division helpers of the C runtime` 与随后的评估记录提交。
+
+## 十、RC 快路径默认开（2026-10-11 裁决，选项 B）
+
+依据：`agent-handoff/research-inline-rc-default-20261011.md`（立即数 #698 落地后在 b8057938 上重测）与裁决 `ruling-inline-rc-default-20261011.md`。
+它取代 §一第 2 条与 §七第 1 条的「默认关、待裁」：10-06 和 10-09 两次都因 reuse 与立即数未落地而继续关，这次条件齐了。
+
+**裁决。**
+
+1. `dawn build`、`dawn run`（`nmain.dawn` 的 native 行）与 release-native 默认带 `-DDAWN_RT_INLINE_RC`。
+2. CI 的测试构建（`scripts/cc-units.sh` 默认、`dawn test`）保持关：push-total 余量为 0，全局开每次 push 多约 60 s，换来的只是测试跑得快一点。
+3. 发布配置必须有门：nightly 的 `native-inline-rc` 在内联下跑 `native-fixpoint.sh` 与 `native-asan-tests.sh`。
+4. 只留一个关闭开关：环境变量 `DAWN_NO_INLINE_RC`（非空即关）。`dawnc` 读它，`release-native.sh` 读同一个。没有别名，没有第二个旗标。
+5. wasm 行不加（收益只在 x86-64 原生代码上量过，wasm 看重的是模块体积）。
+
+**实测（立即数之后，clang-18，同一份发射的 C，def 与 inl 交错，墙钟，输出逐字一致）。**
+
+| 基准 | def best | inl best | Δ best | Δ 中位数 |
+|---|---|---|---|---|
+| counter | 1.769 | 0.748 | -57.7% | -57.6% |
+| rbtree | 2.349 | 1.870 | -20.4% | -22.8% |
+| nqueens-pvec | 3.508 | 2.877 | -18.0% | -11.5% |
+| deriv | 2.262 | 1.991 | -12.0% | -11.9% |
+| 自编译 `emitc nmain.dawn` | 9.56 | 8.49 | -11.2% | -11.0% |
+
+其余 koka 批基准持平（±5%），没有稳定变慢的。10-09 那批落码前置补测（7 轮交错，本机负载 5 到 6，只信比例）：
+
+| 基准 | def best / 中位 | inl best / 中位 | Δ best | Δ 中位数 |
+|---|---|---|---|---|
+| nbody 3000000 | 4.644 / 4.726 | 3.914 / 4.276 | -15.7% | -9.5% |
+| pair 200000000 | 2.193 / 2.242 | 2.128 / 2.175 | -3.0% | -3.0% |
+| update 50000000 | 1.118 / 1.152 | 0.897 / 1.003 | -19.8% | -12.9% |
+
+10-09 时 update +13%、nbody +3.6%、pair +2.2% 的变慢在立即数之后消失（三项都变快），没有超过 5% 的回退，前置通过。
+
+**代价。** C 编译 CPU 约 +80%（nmain 4 个交错对：user 约 76 -> 137 s），产物 +25% 到 +28%（nmain 9.1 -> 11.7 MB）；
+hello 级小程序只 +10%，因为大头是编运行时。这笔账落在一次性构建上。
+
+**正确性前置。** 内联配置（CC 包装带 `-DDAWN_RT_INLINE_RC`）下：`native-fixpoint.sh` OK（B == C，manifest A == B == C，standalone smoke OK，62 s）；
+`native-asan-tests.sh` OK（11 个单元，1 个按原因排除，7 分 41 s）。
+
+**CI 墙钟（本机 4 核口径，`CC_JOBS=4`，clang-18）。** `release-native.sh`（prev-diff-native 里编 A、B 两个静态候选）43.5 s -> 60.9 s（+17 s，user CPU 124 -> 194 s；同组另一对 61.4 / 61.0 s 撞上外部负载，不采）。
+`native-cli-diff.sh`（用 release-native 的二进制，其中的 `dawnc run` 程序现在也内联）关 167.5 s 与 171.9 s，开 167.8 s，噪声内无变化（另有一次开的运行 200.4 s 且退出 1，同输入同配置重跑通过，未复现，当时本机正在跑别的重活）。
+所以 push-total 只多 prev-diff-native 的 17 s：`Gate-Budget(push-total): 19763s -> 19780s`。研究报告估的 +25 s 是按 nmain 的 4 核单次增量外推，实测更小。
+`cc-units.sh` 的其余调用点（native-fixpoint、native-selfhost-tests、wasm-target 等）不加 `--inline-rc`，墙钟不变。
+
+**别的语言。** Koka（`kk_block_dup/drop` 是 `static inline`）、Lean 4（`lean_inc_ref`/`lean_dec_ref`）、Nim ARC（`nimIncRef`/`nimDecRefIsLast`）都内联快路径、冷路径走函数；Swift 不内联、靠优化器删成对的 retain/release。
+我们的形状与前三者相同。
+
+**不做的（理由）。**
+
+- **全局默认开（选项 A，含 `cc-units.sh`）**：CI 墙钟。余量为 0，每次 push 多约 60 s，换来的只是测试跑得快一点。
+- **选择性内联热点**（只对已知常见形状内联，把 +80% 的 cc CPU 压下去）：登记为后续刀，等有 profile 依据再做；现在没有依据说哪些站点值得内联。
+- **兼容开关**：不为旧行为留环境变量别名；关闭只有 `DAWN_NO_INLINE_RC` 一个。
+- **wasm 行内联**：见上第 5 条。
+- **`dawn test` 内联**：测试二进制只跑一次就扔，只付代价不收益。

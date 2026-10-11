@@ -27,7 +27,13 @@
 #     compile is not the last one started. Without LTO the objects, and so the
 #     binary, do not depend on it or on the job count (design §4.4).
 #
-#   scripts/cc-units.sh [--static] -o OUT UNITS_DIR [EXTRA.c ...]
+# The reference-count fast paths are not inlined unless asked (--inline-rc =
+# -DDAWN_RT_INLINE_RC). Every CI job that builds the compiler goes through this
+# script, and the define costs the C compiler about 80% more CPU for a binary
+# that is only run to be tested (docs/native-inline-design.md section 10);
+# release-native.sh, whose binary users run, passes it.
+#
+#   scripts/cc-units.sh [--static] [--inline-rc] -o OUT UNITS_DIR [EXTRA.c ...]
 #
 # UNITS_DIR holds dawn_prog.h and tu*.c, or a single main.c for a text with
 # no unit markers. CC picks the compiler (default cc), CC_JOBS the number of
@@ -36,16 +42,18 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 
 static=()
+inline=()
 out=
 while [ $# -gt 0 ]; do
   case $1 in
     --static) static=(-static); shift ;;
+    --inline-rc) inline=(-DDAWN_RT_INLINE_RC); shift ;;
     -o) out=$2; shift 2 ;;
     *) break ;;
   esac
 done
 if [ -z "$out" ] || [ $# -lt 1 ]; then
-  echo "usage: $0 [--static] -o OUT UNITS_DIR [EXTRA.c ...]" >&2
+  echo "usage: $0 [--static] [--inline-rc] -o OUT UNITS_DIR [EXTRA.c ...]" >&2
   exit 2
 fi
 units=$1
@@ -53,7 +61,7 @@ shift
 
 cc_bin="${CC:-cc}"
 jobs="${CC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
-ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c")
+ccflags=(-std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread "${inline[@]+"${inline[@]}"}" -I "$root/runtime/c")
 
 srcs=()
 while IFS= read -r f; do srcs+=("$f"); done < <(find "$units" -maxdepth 1 -name 'tu*.c' | LC_ALL=C sort)
