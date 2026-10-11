@@ -51,7 +51,7 @@ observed="$work/observed.txt"
 # The runs, in the order expected.txt has their stdout. Every run is a
 # separate process so each counter line belongs to one workload.
 runs=("update 10000" "update 20000" "tree 2000 2" "tree 2000 12" "list 2000 2" "list 2000 12"
-      "shared" "ask 200" "boom 200" "loopy")
+      "shared" "ask 200" "boom 200" "loopy" "steal")
 
 # stat <err-file> <field>: taken, missed or allocs of one run.
 stat() {
@@ -59,6 +59,8 @@ stat() {
     taken) sed -n 's/^rc-stats:.*adt reuse taken \([0-9]*\), missed [0-9]*$/\1/p' "$1" ;;
     missed) sed -n 's/^rc-stats:.*adt reuse taken [0-9]*, missed \([0-9]*\)$/\1/p' "$1" ;;
     allocs) sed -n 's/^rc-contract: adt allocs \([0-9]*\)$/\1/p' "$1" ;;
+    steal_unique) sed -n 's/^rc-stats: adt steal unique \([0-9]*\), shared [0-9]*$/\1/p' "$1" ;;
+    steal_shared) sed -n 's/^rc-stats: adt steal unique [0-9]*, shared \([0-9]*\)$/\1/p' "$1" ;;
   esac
 }
 
@@ -140,14 +142,23 @@ run '$a': exit $rc: $(grep -m1 -E 'ERROR|SUMMARY' "$dir/err$i.txt" || true)"
   else
     red_or_fail ask_reuse "reuses ${t1:-?} of 200"
   fi
+  # Stealing must actually run on both paths, or the steal case's answers say
+  # nothing about either: the unique tree and the shared one each take it.
+  t1=$(stat "$dir/err11.txt" steal_unique); t2=$(stat "$dir/err11.txt" steal_shared)
+  if [ -n "$t1$t2" ] && [ "$t1" -gt 0 ] && [ "$t2" -gt 0 ]; then
+    echo "     steal_paths  ok    $t1 unique, $t2 shared"
+  else
+    red_or_fail steal_paths "unique ${t1:-?}, shared ${t2:-?}"
+  fi
 }
 
 # The rosters the matrix names have to be the ones checked here.
 awk -F '\t' '$1 == "assert" { print $2 }' "$here/matrix.txt" > "$work/roster.txt"
-printf 'emits\nfinished\nanswers\nupdate_zero_alloc\ntree_reuse_rate\nlist_reuse_rate\nask_reuse\n' > "$work/ran.txt"
+printf 'emits\nfinished\nanswers\nupdate_zero_alloc\ntree_reuse_rate\nlist_reuse_rate\nask_reuse\nsteal_paths\n' > "$work/ran.txt"
 diff -u "$work/roster.txt" "$work/ran.txt" ||
   fail "matrix.txt names a different assertion roster than run.sh checks"
-mutations=(pairing-off reuse-leaks-the-token reset-keeps-the-slot reuse-across-loops)
+mutations=(pairing-off reuse-leaks-the-token reset-keeps-the-slot reuse-across-loops
+           steal-mask-dropped steal-mask-all)
 awk -F '\t' '$1 == "role" && $3 == "counted" { print $2 }' "$here/matrix.txt" > "$work/mutants.txt"
 printf '%s\n' "${mutations[@]}" > "$work/mutants.ran.txt"
 diff -u "$work/mutants.txt" "$work/mutants.ran.txt" ||
@@ -192,13 +203,14 @@ for m in "${mutations[@]}"; do
   fi
 done
 
-m=reset-ignores-sharing
-echo "  $m"
-mkdir -p "$work/$m/rt"
-cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/$m/rt/"
-python3 "$root/scripts/rc-contract/mutate.py" "$m" "$work/$m/rt"
-cmp -s "$root/runtime/c/dawn_rt.c" "$work/$m/rt/dawn_rt.c" && fail "$m changed nothing"
-judge "$m" "$root/bin/dawn" "$work/$m/rt" "$work/$m/out"
+for m in reset-ignores-sharing steal-releases-stolen steal-shared-forgets-the-count; do
+  echo "  $m"
+  mkdir -p "$work/$m/rt"
+  cp "$root/runtime/c/dawn_rt.c" "$root/runtime/c/dawn_rt.h" "$work/$m/rt/"
+  python3 "$root/scripts/rc-contract/mutate.py" "$m" "$work/$m/rt"
+  cmp -s "$root/runtime/c/dawn_rt.c" "$work/$m/rt/dawn_rt.c" && fail "$m changed nothing"
+  judge "$m" "$root/bin/dawn" "$work/$m/rt" "$work/$m/out"
+done
 
 awk -F '\t' '$1 == "red" { print }' "$here/matrix.txt" | LC_ALL=C sort > "$work/expected.txt"
 LC_ALL=C sort -o "$observed" "$observed"

@@ -36,7 +36,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, CReset, CReuse, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
+  CContinue, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
   CMode, COwned, mode_owned, mode_key, callee_mode_key,
@@ -297,8 +297,8 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
         None -> acc
         Some(x) -> fv_expr(x, acc)
       },
-    CDup(inner, _) -> fv_expr(inner, acc)
-    CReset(inner, _) -> fv_expr(inner, acc)
+    CDup(inner, _) | CSteal(inner, _) -> fv_expr(inner, acc)
+    CReset(inner, _, _) -> fv_expr(inner, acc)
     CReuse(tok, ctor, _) -> fv_expr(ctor, fv_expr(tok, acc))
     # a continue is a read of every binding its next iteration touches; the
     # pin stands in for all of them at once
@@ -455,8 +455,8 @@ fn falls_through(e: CExpr) -> Bool = {
     CTagOf(t, _) -> falls_through(t)
     CBox(x, _) -> falls_through(x)
     CUnbox(x, _) -> falls_through(x)
-    CDup(x, _) -> falls_through(x)
-    CReset(x, _) -> falls_through(x)
+    CDup(x, _) | CSteal(x, _) -> falls_through(x)
+    CReset(x, _, _) -> falls_through(x)
     CReuse(t, c, _) -> falls_through(t) && falls_through(c)
     CUnary(_, x, _) -> falls_through(x)
     CBinary(op, l, r, _) ->
@@ -557,8 +557,8 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
         None -> false
         Some(x) -> jumps(x, lid, brk, cont)
       },
-    CDup(x, _) -> jumps(x, lid, brk, cont)
-    CReset(x, _) -> jumps(x, lid, brk, cont)
+    CDup(x, _) | CSteal(x, _) -> jumps(x, lid, brk, cont)
+    CReset(x, _, _) -> jumps(x, lid, brk, cont)
     CReuse(t, c, _) -> jumps(t, lid, brk, cont) || jumps(c, lid, brk, cont)
     # The rest, enumerated for fv_expr's reason: a node added later must come
     # back here as a compile error. A jump wrongly reported absent is an
@@ -667,8 +667,8 @@ fn leaves(e: CExpr, inner: List[Int]) -> Bool =
       }
     }
     CListLit(es, _) -> leaves_list(es, inner)
-    CDup(x, _) -> leaves(x, inner)
-    CReset(x, _) -> leaves(x, inner)
+    CDup(x, _) | CSteal(x, _) -> leaves(x, inner)
+    CReset(x, _, _) -> leaves(x, inner)
     CReuse(t, c, _) -> leaves(t, inner) || leaves(c, inner)
     # The rest, enumerated for fv_expr's reason: a jump wrongly reported
     # absent is an earlier operand left out of the unwind (#506, #507).
@@ -1450,8 +1450,12 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
       let (st1, x1) = lift_spread_expr(st, inner)
       (st1, CDup(x1, ty))
     }
+    CSteal(inner, ty) -> {
+      let (st1, x1) = lift_spread_expr(st, inner)
+      (st1, CSteal(x1, ty))
+    }
     # this pass makes both; nothing it lifts from holds one yet
-    CReset(_, _) -> (st, e)
+    CReset(_, _, _) -> (st, e)
     CReuse(_, _, _) -> (st, e)
     # Foreign calls cannot reach the native emitter. Leaving one opaque is
     # conservative: if it is the base's only remaining use, liveness keeps
@@ -1522,8 +1526,8 @@ fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
       assigns_spread_stmts(stmts, sym) || assigns_spread_opt(tail, sym)
     CListLit(elems, _) -> assigns_spread_list(elems, sym)
     CReturn(value) -> assigns_spread_opt(value, sym)
-    CDup(inner, _) -> assigns_spread_expr(inner, sym)
-    CReset(inner, _) -> assigns_spread_expr(inner, sym)
+    CDup(inner, _) | CSteal(inner, _) -> assigns_spread_expr(inner, sym)
+    CReset(inner, _, _) -> assigns_spread_expr(inner, sym)
     CReuse(tok, ctor, _) -> assigns_spread_expr(tok, sym) || assigns_spread_expr(ctor, sym)
     CForeign(j, _, _) -> {
       let in_target = match j.target {
@@ -1967,9 +1971,9 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     CDictApply(_, _, _) -> (st, e)
     CDictArg(_, _, _, _, _) -> (st, e)
     # this pass is what puts CDup in; nothing it is handed holds one yet
-    CDup(_, _) -> (st, e)
+    CDup(_, _) | CSteal(_, _) -> (st, e)
     # nor of these, which only this pass writes
-    CReset(_, _) -> (st, e)
+    CReset(_, _, _) -> (st, e)
     CReuse(_, _, _) -> (st, e)
   }
 }
@@ -2022,7 +2026,7 @@ fn sweep(st: RSt, after: Set[Int], ctors: Map[Int, Int]) -> (RSt, List[CStmt]) =
         let (st2, tok) = fresh(st1)
         st1 = bind(RSt { ..st2, toks: map.insert(st2.toks, tok, aid) }, tok)
         want = map.insert(want, aid, map.get(want, aid).unwrap_or(0) - 1)
-        out = out ++ [CSLet(tok, ty, CReset(CLocal(sym, ty), ty))]
+        out = out ++ [CSLet(tok, ty, CReset(CLocal(sym, ty), [], ty))]
       }
       None -> { out = out ++ [CSDrop(sym)] }
     }
@@ -2188,7 +2192,83 @@ fn rw_stmts(st: RSt, stmts0: List[CStmt], base: Set[Int], tail: Option[CExpr]) -
     out = out ++ ss ++ ds
     j = j + 1
   }
-  (st1, out)
+  (st1, steal_fields(out))
+}
+
+## A read that cannot panic, call, or give a reference up: the only statements
+## a stolen field may be held across before its reset.
+fn steal_pure(e: CExpr) -> Bool =
+  match e {
+    CLocal(_, _) -> true
+    CField(t, _, _, _, _) -> steal_pure(t)
+    CDup(x, _) -> steal_pure(x)
+    CSteal(x, _) -> steal_pure(x)
+    CTagOf(x, _) -> steal_pure(x)
+    CIsCtor(x, _, _) -> steal_pure(x)
+    _ -> false
+  }
+
+## Field stealing (docs/perceus-reuse-design.md 10). A reset keeps the block and
+## releases its children; the constructor that takes the token then needs some
+## of those same children, which the match counted with a `dup` just before the
+## reset. The dup and the release cancel, so the dup becomes a `CSteal` and the
+## reset is told to skip the release. What is moved is a reference the node
+## held, so the reset must know which: when the node turns out to be shared it
+## counts the stolen ones itself, and the binding owns its reference on every
+## path.
+##
+## The window is the straight run of pure reads directly above the reset. A
+## call there could panic with a stolen reference both in a slot (the unwind
+## releases it) and still in the node (the unwind releases the node and its
+## children); a release there could free a stolen child while a later read
+## still goes through the node. Both end the run, so the pair never straddles
+## either. One dup per field: a second binding of the same field keeps its dup.
+fn steal_fields(stmts: List[CStmt]) -> List[CStmt] = {
+  var cur = stmts
+  var r = 0
+  while r < len(cur) {
+    match cur[r] {
+      CSLet(tok, tty, CReset(CLocal(s, sty), stolen0, rty)) -> {
+        var idxs: List[Int] = stolen0
+        var at: List[Int] = []
+        var i = r - 1
+        while i >= 0 {
+          match cur[i] {
+            CSLet(_, _, CDup(CField(CLocal(t, _), _, _, idx, _), _)) -> {
+              if t == s && idx < 64 && not list.contains(idxs, idx) {
+                idxs = idxs ++ [idx]
+                at = at ++ [i]
+              }
+            }
+            CSLet(_, _, init) -> if not steal_pure(init) { i = -1 }
+            _ -> { i = -1 }
+          }
+          i = i - 1
+        }
+        if len(at) > 0 {
+          var next: List[CStmt] = []
+          var k = 0
+          for st in cur {
+            if k == r {
+              next = next ++ [CSLet(tok, tty, CReset(CLocal(s, sty), list.sort(idxs), rty))]
+            } else if list.contains(at, k) {
+              next = next ++ [match st {
+                CSLet(x, xty, CDup(inner, dty)) -> CSLet(x, xty, CSteal(inner, dty))
+                _ -> st
+              }]
+            } else {
+              next = next ++ [st]
+            }
+            k = k + 1
+          }
+          cur = next
+        }
+      }
+      _ -> ()
+    }
+    r = r + 1
+  }
+  cur
 }
 
 fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
@@ -2544,6 +2624,66 @@ fn chk_expr(c: Chk, e: CExpr, k: Bool) -> Chk = {
   if cex_ty(e) == TyNever { Chk { ..c1, gone: true } } else { c1 }
 }
 
+## The invariant field stealing leans on, checked on the output of the pass
+## and not trusted from it: every `CSteal` of a node's field is followed, with
+## nothing but pure reads between, by the reset of that node, and that reset
+## names exactly the fields stolen. A steal with no such reset moves a
+## reference the node still releases (a double free); a name with no steal
+## leaves a reference nobody releases (a leak).
+fn steal_check(c: Chk, stmts: List[CStmt]) -> Chk = {
+  var c1 = c
+  var i = 0
+  while i < len(stmts) {
+    match stmts[i] {
+      CSLet(_, _, CSteal(CField(CLocal(s, _), _, _, idx, _), _)) -> {
+        var j = i + 1
+        var found = false
+        while j < len(stmts) {
+          match stmts[j] {
+            CSLet(_, _, CReset(CLocal(s2, _), names, _)) -> {
+              if s2 == s {
+                found = true
+                if not list.contains(names, idx) {
+                  c1 = chk_err(c1, "field " ++ to_string(idx) ++ " of " ++ to_string(s) ++ " was stolen but its reset does not name it")
+                }
+              }
+              j = len(stmts)
+            }
+            CSLet(_, _, init) -> if not steal_pure(init) { j = len(stmts) }
+            _ -> { j = len(stmts) }
+          }
+          j = j + 1
+        }
+        if not found {
+          c1 = chk_err(c1, "field " ++ to_string(idx) ++ " of " ++ to_string(s) ++ " was stolen with no reset to follow")
+        }
+      }
+      CSLet(_, _, CReset(CLocal(s, _), names, _)) -> {
+        for idx in names {
+          var seen = false
+          var j = i - 1
+          while j >= 0 {
+            match stmts[j] {
+              CSLet(_, _, CSteal(CField(CLocal(s2, _), _, _, idx2, _), _)) -> {
+                if s2 == s && idx2 == idx { seen = true }
+              }
+              CSLet(_, _, init) -> if not steal_pure(init) { j = 0 }
+              _ -> { j = 0 }
+            }
+            j = j - 1
+          }
+          if not seen {
+            c1 = chk_err(c1, "the reset of " ++ to_string(s) ++ " names field " ++ to_string(idx) ++ " but no steal precedes it")
+          }
+        }
+      }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  c1
+}
+
 fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
   match e {
     CLocal(sym, _) ->
@@ -2554,7 +2694,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
       },
 
     CBlock(stmts, tail, _) -> {
-      var c1 = c
+      var c1 = steal_check(c, stmts)
       # A statement that always jumps ends the block: what lowering wrote after
       # it is unreachable, and so are the drops this pass put there. Walking on
       # would read those as a second release of something already gone.
@@ -2620,14 +2760,14 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
 
     CBreak(_) -> Chk { ..c, gone: true }
     CContinue(_) -> Chk { ..c, gone: true }
-    CDup(inner, _) -> chk_expr(c, inner, false)
+    CDup(inner, _) | CSteal(inner, _) -> chk_expr(c, inner, false)
     # a reset consumes its binding; a reuse builds the constructor as usual
     # and consumes its token last. That is the order the emitter runs in
     # (emit_alloc evaluates the fields, then takes the token) and the order
     # `rw` rewrote in: a field that returns, breaks or continues releases the
     # still-held token on its way out, which only balances if the token is
     # still held while the fields are walked (#632)
-    CReset(inner, _) -> chk_expr(c, inner, true)
+    CReset(inner, _, _) -> chk_expr(c, inner, true)
     CReuse(tok, ctor, _) -> chk_expr(chk_walk(c, ctor, k), tok, true)
     CField(t, _, _, _, _) -> chk_expr(c, t, false)
     CTupleGet(t, _, _) -> chk_expr(c, t, false)
@@ -3185,7 +3325,7 @@ test "a record update releases its spread owner before an updated field runs" {
       # call can run. Deleting the scheduling inserts this drop after `g`.
       # (a reset: the rebuilt record is the same type, so the block is kept)
       match ss[3] {
-        CSLet(_, _, CReset(CLocal(2, _), _)) -> ()
+        CSLet(_, _, CReset(CLocal(2, _), _, _)) -> ()
         _ -> panic("expected the spread owner released before the update")
       }
       match tail {
@@ -3229,16 +3369,18 @@ test "a record bound after an earlier statement is released before its update" {
     CBlock(ss, tail, _) -> {
       # Both field owners are inserted immediately after `loaded`, before the
       # statement that used to separate its binding from the tail constructor.
+      # Both are moved out of the record rather than counted: the reset that
+      # follows is the record's last use and names them.
       match ss[2] {
-        CSLet(_, _, CDup(CField(CLocal(2, _), _, _, 0, _), _)) -> ()
+        CSLet(_, _, CSteal(CField(CLocal(2, _), _, _, 0, _), _)) -> ()
         _ -> panic("expected the first field lifted after the record binding")
       }
       match ss[3] {
-        CSLet(_, _, CDup(CField(CLocal(2, _), _, _, 1, _), _)) -> ()
+        CSLet(_, _, CSteal(CField(CLocal(2, _), _, _, 1, _), _)) -> ()
         _ -> panic("expected the updated field lifted after the record binding")
       }
       match ss[4] {
-        CSLet(_, _, CReset(CLocal(2, _), _)) -> ()
+        CSLet(_, _, CReset(CLocal(2, _), [0, 1], _)) -> ()
         _ -> panic("expected the earlier record binding released before the update")
       }
       match ss[5] {
@@ -3816,7 +3958,7 @@ type Reuses = { resets: Int, reuses: Int }
 
 fn t_reuse_counts(m: CModule) -> Reuses = {
   let count = (a: Reuses, e: CExpr) => match e {
-    CReset(_, _) -> Reuses { ..a, resets: a.resets + 1 }
+    CReset(_, _, _) -> Reuses { ..a, resets: a.resets + 1 }
     CReuse(_, _, _) -> Reuses { ..a, reuses: a.reuses + 1 }
     _ -> a
   }
@@ -3831,6 +3973,74 @@ fn t_rec_fn(tail: CExpr, extra: List[CStmt]) -> CModule = {
   rc_module(one_fn([p], rec, CBlock([read] ++ extra, Some(tail), rec)), owned_modes())
 }
 
+fn steal_rec() -> Ty = TyAdt(7, [])
+
+fn steal_dup(sym: Int, owner: Int, idx: Int) -> CStmt =
+  CSLet(sym, TyList(TyInt), CDup(CField(CLocal(owner, steal_rec()), 7, 0, idx, TyList(TyInt)), TyList(TyInt)))
+
+fn steal_reset(tok: Int, owner: Int) -> CStmt =
+  CSLet(tok, steal_rec(), CReset(CLocal(owner, steal_rec()), [], steal_rec()))
+
+fn steal_names(ss: List[CStmt]) -> List[List[Int]] = {
+  var out: List[List[Int]] = []
+  for s in ss {
+    match s {
+      CSLet(_, _, CReset(_, names, _)) -> { out = out ++ [names] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+fn steal_count(ss: List[CStmt]) -> Int = {
+  var n = 0
+  for s in ss {
+    match s {
+      CSLet(_, _, CSteal(_, _)) -> { n = n + 1 }
+      _ -> ()
+    }
+  }
+  n
+}
+
+test "a counted read of the reset node's field becomes a steal, once per field" {
+  let out = steal_fields([steal_dup(10, 2, 0), steal_dup(11, 2, 0), steal_dup(12, 2, 3), steal_reset(13, 2)])
+  assert steal_names(out) == [[0, 3]]
+  assert steal_count(out) == 2
+  # the second read of field 0 keeps its count
+  match out[0] {
+    CSLet(_, _, CSteal(_, _)) -> panic("the earlier of two reads of one field must keep its dup")
+    _ -> ()
+  }
+}
+
+test "a call between the read and the reset ends the window" {
+  let call = CSLet(20, TyInt, CCall(CDirect("m", "f"), [], TyInt, CNoSite))
+  let out = steal_fields([steal_dup(10, 2, 0), call, steal_dup(11, 2, 1), steal_reset(13, 2)])
+  assert steal_names(out) == [[1]]
+  assert steal_count(out) == 1
+}
+
+test "a release between the read and the reset ends the window" {
+  let out = steal_fields([steal_dup(10, 2, 0), CSDrop(5), steal_dup(11, 2, 1), steal_reset(13, 2)])
+  assert steal_names(out) == [[1]]
+}
+
+test "a read of another node's field is not stolen" {
+  let out = steal_fields([steal_dup(10, 3, 0), steal_reset(13, 2)])
+  assert steal_names(out) == [[]]
+  assert steal_count(out) == 0
+}
+
+test "the checker refuses a steal with no reset and a reset that names a field nobody stole" {
+  let bare = CSLet(10, TyList(TyInt), CSteal(CField(CLocal(2, steal_rec()), 7, 0, 0, TyList(TyInt)), TyList(TyInt)))
+  let c0 = Chk { live: set.empty(), gone: false, errs: [], modes: map.empty(), views: set.empty() }
+  assert len(steal_check(c0, [bare]).errs) == 1
+  let lying = CSLet(13, steal_rec(), CReset(CLocal(2, steal_rec()), [1], steal_rec()))
+  assert len(steal_check(c0, [lying]).errs) == 1
+  assert len(steal_check(c0, steal_fields([steal_dup(10, 2, 1), steal_reset(13, 2)])).errs) == 0
+}
+
 test "a node released before a constructor of its type is reset and handed on" {
   let rec = TyAdt(7, [])
   let m = t_rec_fn(CCtor(7, 0, [CLocal(2, TyInt)], rec), [CSDiscard(CInt(0))])
@@ -3838,7 +4048,7 @@ test "a node released before a constructor of its type is reset and handed on" {
   assert t_reuse_counts(m) == Reuses { resets: 1, reuses: 1 }
   # the reset sits where the drop would have, right after the read
   match t_stmts(m)[1] {
-    CSLet(_, _, CReset(CLocal(1, _), _)) -> ()
+    CSLet(_, _, CReset(CLocal(1, _), _, _)) -> ()
     _ -> panic("expected the release to be a reset")
   }
 }
