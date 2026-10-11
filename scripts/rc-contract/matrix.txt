@@ -59,6 +59,9 @@ assert	adt_reuse_rewrites
 assert	adt_reset_immortal
 assert	adt_reset_leak_mode
 assert	adt_reset_declines_wide
+assert	adt_reset_steal_unique
+assert	adt_reset_steal_releases_the_rest
+assert	adt_reset_steal_shared
 assert	adt_reset_null
 assert	adt_reset_kind
 assert	adt_reuse_mismatch
@@ -293,6 +296,8 @@ owner	reset-ignores-sharing	adt_reset_shared
 red	reset-ignores-sharing	adt_reset_shared
 # The singleton is shared too, so it is caught here as well.
 red	reset-ignores-sharing	adt_reset_immortal
+# and the shared steal, which reaches the same check.
+red	reset-ignores-sharing	adt_reset_steal_shared
 
 # The token keeps its mask: a second release of every child.
 role	reset-keeps-the-mask	counted
@@ -306,6 +311,8 @@ red	reset-keeps-the-children	adt_reset_releases_fields
 # The two cases that read the child's count after a reset see the extra one.
 red	reset-keeps-the-children	adt_reset_token_is_a_shell
 red	reset-keeps-the-children	adt_reuse_rewrites
+# and the steal case that reads the other child's count.
+red	reset-keeps-the-children	adt_reset_steal_releases_the_rest
 
 # The reused node keeps the previous node's mask.
 role	reuse-keeps-the-old-mask	counted
@@ -321,6 +328,24 @@ red	reset-takes-immortal	adt_reset_immortal
 role	reset-ignores-leak-mode	counted
 owner	reset-ignores-leak-mode	adt_reset_leak_mode
 red	reset-ignores-leak-mode	adt_reset_leak_mode
+
+# The reset releases the field the caller moved out, which the caller then
+# releases a second time.
+role	steal-releases-stolen	counted
+owner	steal-releases-stolen	adt_reset_steal_unique
+red	steal-releases-stolen	adt_reset_steal_unique
+
+# The reset releases nothing when something was stolen: the fields the new
+# node does not take are never given back.
+role	steal-releases-nothing-else	counted
+owner	steal-releases-nothing-else	adt_reset_steal_releases_the_rest
+red	steal-releases-nothing-else	adt_reset_steal_releases_the_rest
+
+# A shared node's stolen fields are not counted before it is dropped: the
+# caller holds a reference nobody gave it.
+role	steal-shared-forgets-the-count	counted
+owner	steal-shared-forgets-the-count	adt_reset_steal_shared
+red	steal-shared-forgets-the-count	adt_reset_steal_shared
 
 # A wide node's mask is a pointer.
 role	reset-takes-wide	counted

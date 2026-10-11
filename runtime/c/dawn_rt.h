@@ -183,6 +183,12 @@ dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask);
  * intrinsic, so the marks live in prose like `dawn_array_push_own`'s. */
 dawn_adt *dawn_adt_reset(dawn_adt *a);
 dawn_adt *dawn_adt_reuse(dawn_adt *tok, int32_t tag, int32_t nfields, uint64_t mask);
+/* `reset` after the caller moved the pointer fields in the `stolen` bit set
+ * out of `a` uncounted (docs/perceus-reuse-design.md 10): a unique node skips
+ * releasing them, a shared one counts them before it is dropped. */
+dawn_adt *dawn_adt_reset_steal(dawn_adt *a, uint64_t stolen);
+extern uint64_t dawn_adt_steal_unique;
+extern uint64_t dawn_adt_steal_shared;
 extern uint64_t dawn_adt_reuse_taken;
 extern uint64_t dawn_adt_reuse_missed;
 #ifdef DAWN_RC_CONTRACT
