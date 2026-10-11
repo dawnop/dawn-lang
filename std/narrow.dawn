@@ -214,6 +214,25 @@ impl HasDtype[F4E2M1FN] {
   fn dtype_of() -> Dtype[F4E2M1FN] = F4E2M1FN
 }
 
+## An unsigned fp8 value with five exponent bits and three significand bits
+## (bytecode 13.4's `f8E5M3FNU`): the scale format of `mma_scaled` over
+## `f4E2M1FN` operands on sm_107. It is a TILE format only, like
+## [`F4E2M1FN`] and for a different reason: it has a name and a type tag and
+## no host value. There is no `round_` function and no `FromFloat` because
+## what `ftof` does at its edges (a negative input, the saturation above the
+## largest finite value, NaN) is a device behaviour, and only sm_107 has the
+## device; nobody here has measured it. The value set is LLVM's
+## `Float8E5M3FNU`: bias 15, subnormals down to 2^-17, the largest finite
+## value 1.75 * 2^16, and the all-ones octet is the only NaN.
+pub opaque type F8E5M3FNU = Float
+
+## The `f8E5M3FNU` device format, the witness of [`F8E5M3FNU`].
+pub const F8E5M3FNU: Dtype[F8E5M3FNU] = dtype_from_name("f8E5M3FNU")
+
+impl HasDtype[F8E5M3FNU] {
+  fn dtype_of() -> Dtype[F8E5M3FNU] = F8E5M3FNU
+}
+
 # ---- rounding ----
 
 ## How a value between two neighbours of a format picks one: the five
@@ -1821,6 +1840,7 @@ test "every narrow format is a device format, named as the dialect names it, by 
   assert dtype_name(F8E5M2) == "f8E5M2"
   assert dtype_name(F8E8M0FNU) == "f8E8M0FNU"
   assert dtype_name(F4E2M1FN) == "f4E2M1FN"
+  assert dtype_name(F8E5M3FNU) == "f8E5M3FNU"
   let by_type: Dtype[F16] = dtype_of()
   assert dtype_name(by_type) == "f16"
   let again: Dtype[BF16] = dtype_of()
