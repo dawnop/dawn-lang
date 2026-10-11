@@ -3966,22 +3966,22 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 - `Tensor[D]` 是不透明类型，表示是（句柄，元素数）；`D` 是格式的值类型，`Tensor[Float]` 与
   `Tensor[BF16]` 是两个类型，传错格式是类型错误而不是 launch 失败。句柄是 handler 签发的
   不透明整数，程序从不编造它。
-- 格式有 15 个，每个是一个值类型加一个同名的见证常量 `Dtype[T]`（`use std/narrow.{BF16}` 同时带来类型与见证；
+- 格式有 16 个，每个是一个值类型加一个同名的见证常量 `Dtype[T]`（`use std/narrow.{BF16}` 同时带来类型与见证；
   `alloc(BF16, n)`、`Tensor[BF16]`），只有它们有 `HasDtype`：`Float`（见证 `F64`）、`Int`（`I64`）、`Bool`（`I1`，只是 tile 格式）
-  在 `std/dtype`；`BF16`、`F16`、`F32`、`TF32`、`F8E4M3FN`、`F8E5M2`、`F8E8M0FNU`、`F4E2M1FN` 在 `std/narrow`（后五个只作存储，没有算术）；
+  在 `std/dtype`；`BF16`、`F16`、`F32`、`TF32`、`F8E4M3FN`、`F8E5M2`、`F8E8M0FNU`、`F4E2M1FN`、`F8E5M3FNU` 在 `std/narrow`（后六个只作存储，没有算术）；
   `I8`、`I16`、`I32`、`U8` 在 `std/int/*`；`I4` 在 `std/gpu`。`U16`、`U32`、`U64` 没有（方言没有无符号整数 tile 类型），
   所以 `Tensor[U32]` 在 `alloc` 处是类型错误。
 - 类型位置写值类型，值位置写格式名。对 `std/narrow` 与定宽整数两者同名（`Tile[BF16]`、
   `alloc(BF16, n)`）；对三个内建类型分别是 `Float`/`F64`、`Int`/`I64`、`Bool`/`I1`。
 - 能分配成缓冲的格式恰好是 `element_bytes` 认识的 12 个：`f64`、`i64`、`i32`、`tf32`、`bf16`、
   `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
-  `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN` 只是 tile
+  `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN`、`F8E5M3FNU` 只是 tile
   的格式，没有这种缓冲。
 - 值以 `List[T]` 进出，`T` 是张量的元素类型：`copy_from_host(t: Tensor[T], xs: List[T])` 与
   `copy_to_host(t: Tensor[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`copy_from_host` 把每个元素
   写成格式的位型（小端），上传时不舍入（值在 `T` 里已经是格式的值：`BF16` 就是 bfloat16，`Int`
   整个过去）；`copy_to_host` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 NaN 的
-  载荷也在内。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN` 有格式没有缓冲，
+  载荷也在内。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN`、`F8E5M3FNU` 有格式没有缓冲，
   上传 `Tensor[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_copy_from_host(handle, data: Bytes)`、
   `gpu_copy_to_host(handle) -> Result[Bytes, _]`），第 `i` 个元素占 `[i * w, (i + 1) * w)` 字节，`w` 是格式的宽度，
   小端。`encode_floats(dtype, xs: List[Float])` 与 `decode_floats(dtype, bytes)` 是同一编码按格式名对 `Float` 的视图，

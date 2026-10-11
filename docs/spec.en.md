@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ f2bd7af80364df5a -->
+<!-- doc-check: translation-of docs/spec.md @ e4af2afa328a99de -->
 
 # Dawn Language Specification
 
@@ -5054,11 +5054,11 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   format's value type, so `Tensor[Float]` and `Tensor[BF16]` are two types and passing the wrong format
   is a type error rather than a launch failure. A handle is an opaque integer issued by the
   handler, and a program never invents one.
-- There are 15 formats, each a value type plus a witness constant of the same name, a
+- There are 16 formats, each a value type plus a witness constant of the same name, a
   `Dtype[T]` (`use std/narrow.{BF16}` brings in the type and the witness; `alloc(BF16, n)`,
   `Tensor[BF16]`), and only they implement `HasDtype`: `Float` (witness `F64`), `Int` (`I64`)
   and `Bool` (`I1`, a tile format only) in `std/dtype`; `BF16`, `F16`, `F32`, `TF32`, `F8E4M3FN`,
-  `F8E5M2`, `F8E8M0FNU` and `F4E2M1FN` in `std/narrow` (the last five are storage-only, with no
+  `F8E5M2`, `F8E8M0FNU`, `F4E2M1FN` and `F8E5M3FNU` in `std/narrow` (the last six are storage-only, with no
   arithmetic); `I8`, `I16`, `I32` and `U8` in `std/int/*`; `I4` in `std/gpu`. `U16`, `U32` and
   `U64` have none (the dialect has no unsigned integer tile types), so a `Tensor[U32]` is a type
   error at `alloc`.
@@ -5068,15 +5068,15 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 - The formats a buffer can be allocated in are exactly the 12 `element_bytes` knows: `f64`,
   `i64`, `i32`, `tf32`, `bf16`, `f16`, `i16`, `i8`, `u8`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`.
   Both handlers answer `gpu.unsupported_dtype` for the rest, `F32` included: it can be written
-  in a type but not allocated. `I4` and `F4E2M1FN` are tile formats only, and no buffer of
-  either exists.
+  in a type but not allocated. `I4`, `F4E2M1FN` and `F8E5M3FNU` are tile formats only, and no buffer of
+  any of them exists.
 - Values go in and out as `List[T]`, where `T` is the tensor's element type:
   `copy_from_host(t: Tensor[T], xs: List[T])` and `copy_to_host(t: Tensor[T]) -> Result[List[T], _]` need
   `T: HasDtype + DeviceBits`. `copy_from_host` writes each element as the format's bit pattern,
   little-endian, and nothing is rounded on the way in (the value is already the format's: a
   `BF16` is a bfloat16, and an `Int` crosses whole); `copy_to_host` answers exactly what the buffer
   holds. That makes every format lossless, an `i64` beyond ±2^53 and a NaN's payload included.
-  `DeviceBits` is implemented by the formats a buffer can hold; `Bool`, `I4` and `F4E2M1FN` have
+  `DeviceBits` is implemented by the formats a buffer can hold; `Bool`, `I4`, `F4E2M1FN` and `F8E5M3FNU` have
   a format and no buffer, so uploading a `Tensor[Bool]` is a type error. On the effect, the
   data crosses as `Bytes` (`gpu_copy_from_host(handle, data: Bytes)`, `gpu_copy_to_host(handle) ->
   Result[Bytes, _]`), element `i` in bytes `[i * w, (i + 1) * w)` for the format's width `w`,
