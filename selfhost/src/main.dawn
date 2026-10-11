@@ -17,6 +17,7 @@
 use std/io
 use std/io.{Fs, Proc, Env, Exit, Console}
 use std/str
+use std/list
 use std/bytes
 use std/map
 use front/ast.{Decl}
@@ -806,9 +807,21 @@ fn host_classpath() -> String !io =
 ## supports, and a program that never suspends never loads a class that names
 ## the package. Making it conditional would mean deciding here what the emitter
 ## decided, from an argv rather than from the program.
+##
+## `-XX:-UsePerfData` because HotSpot's perf-data file is
+## `/tmp/hsperfdata_<user>/<pid>`, and when two JVMs collide on a pid (pid
+## namespaces, containers, many runs side by side) the loser prints
+## `[warning][perf,memops] Cannot use file ... because it is locked by another
+## process` on *stdout*, into the program's own output. A program's transcript
+## must be its own, and nothing here reads the perf counters. Unlike the flags
+## above it is not mirrored in bin/dawn, which only runs the compiler.
 fn child_java_cmd() -> List[String] !io =
-  [host_java(), "-Xss512m", own_xmx(), "-XX:+UseSerialGC",
+  [host_java(), "-Xss512m", own_xmx(), "-XX:+UseSerialGC", "-XX:-UsePerfData",
     "--add-exports", "java.base/jdk.internal.vm=ALL-UNNAMED"]
+
+test "every JVM the driver spawns runs without HotSpot perf data" {
+  assert list.contains(child_java_cmd(), "-XX:-UsePerfData")
+}
 
 ## This JVM's `-Xmx` as it was written on its own command line. A JVM started
 ## without one has no ceiling to state, so the fallback is `maxMemory()`: it is
