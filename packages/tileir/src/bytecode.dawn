@@ -61,11 +61,11 @@
 # tensor_view types (`ptr_has_flags`), `ftoi`'s flags varint
 # (`ftoi_has_flags`) and the view load's and store's required `inbounds`
 # array (`view_has_inbounds`). Everything else this package emits is the
-# same byte for byte at 13.1 to 13.4. Two more branches of the C++ writer
-# reach nothing here: the Producer section (13.3+, written only when the
-# module carries a `producer` attribute, and this writer sets none) and the
-# 13.4 i1 constant and function-flag rules (this writer already bit-packs
-# i1 and sets only the kernel and hints bits).
+# same byte for byte at 13.1 to 13.4. One more branch of the C++ writer
+# reaches nothing here: the 13.4 i1 constant and function-flag rules (this
+# writer already bit-packs i1 and sets only the kernel and hints bits). The
+# Producer section (13.3+) is written when a program carries a `producer`
+# and refused under an older header (knife T14a).
 use std/bytes
 use std/list
 use std/map
@@ -915,6 +915,7 @@ const SEC_FUNC: Int = 2
 const SEC_CONSTANT: Int = 4
 const SEC_TYPE: Int = 5
 const SEC_GLOBAL: Int = 6
+const SEC_PRODUCER: Int = 7
 
 const PAD_BYTE: Int = 0xCB
 const FLAG_KERNEL: Int = 0x02
@@ -2071,6 +2072,11 @@ fn inbounds(w: W, flags: List[Bool]) -> W =
     w
   }
 
+# The Producer section exists from 13.3 on. The C++ writer SKIPS it silently
+# under an older header; this writer refuses, because a caller who set
+# `producer` asked for something the file could not carry (knife T14a).
+fn producer_ok(major: Int, minor: Int) -> Bool = major > 13 || (major == 13 && minor >= 3)
+
 # The pinned version is at least `major.minor`.
 fn at_least(major: Int, minor: Int) -> Bool =
   BYTECODE_MAJOR > major || (BYTECODE_MAJOR == major && BYTECODE_MINOR >= minor)
@@ -2220,6 +2226,22 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
   }
   w = w5
   let func = bytes.freeze(bytes.put_bytes(put_varint(fhead1, bytes.len(body)), body))
+  # The producer interns after everything else, like the hints, so a program
+  # without one keeps every index it ever had. The section's content is the
+  # one varint: the producer's String section index (id 7, length 1, measured
+  # against tileirdisasm 13.4.92 in docs/tile-backend-design.md 6.35).
+  let (w6, producer) = match k.producer {
+    None -> (w, None)
+    Some(s) -> {
+      if not producer_ok(BYTECODE_MAJOR, BYTECODE_MINOR) {
+        panic("tileir: kernel `${k.name}`: a Producer section needs bytecode 13.3 or later, and this writer's header is ${bytecode_version()}")
+      } else {
+        let (w7, pi) = str_of(w, s)
+        (w7, Some(bytes.freeze(put_varint(bytes.buf(), pi))))
+      }
+    }
+  }
+  w = w6
 
   let h = put_le(bytes.put(bytes.put(magic(), BYTECODE_MAJOR), BYTECODE_MINOR), 0, 2)
   let s0 = if len(k.globals) == 0 { h } else { section(h, SEC_GLOBAL, globals, 1) }
@@ -2227,7 +2249,11 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
   let s2 = if len(w.consts.items) == 0 { s1 } else { section(s1, SEC_CONSTANT, table_section(w.consts.items, 8), 8) }
   let s3 = section(s2, SEC_TYPE, table_section(w.types.items, 4), 4)
   let s4 = section(s3, SEC_STRING, table_section(w.strs.items, 4), 4)
-  bytes.freeze(bytes.put(s4, 0))
+  let s5 = match producer {
+    None -> s4
+    Some(c) -> section(s4, SEC_PRODUCER, c, 1)
+  }
+  bytes.freeze(bytes.put(s5, 0))
 }
 
 ## `prog` lowered and encoded.
@@ -2332,6 +2358,7 @@ test "f8E5M3FNU is tag 130, which is a two-byte varint, and the tile type that h
 }
 
 fn vadd() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "vadd",
   params: [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
@@ -2370,6 +2397,7 @@ test "encoding the same program twice gives the same bytes" {
 }
 
 fn sum_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "sum",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2442,6 +2470,7 @@ test "a for is its opcode, result count and types, the flags, the operand count 
 }
 
 fn spin_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "spin",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2552,6 +2581,7 @@ test "a hint dictionary is a count, then per architecture a string index, the Di
 }
 
 fn total_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "total",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2596,6 +2626,7 @@ test "a reduce is its opcode, result count and types, dim, the identities array,
 }
 
 fn branch_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "branch",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2832,6 +2863,7 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
 # ANSWER and not a type error), and the pointer surface.
 
 fn shapes_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "shapes",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -2853,6 +2885,7 @@ fn shapes_prog() -> TileProg = TileProg {
 }
 
 fn ptrs_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "ptrs",
   params: [ByPtr("f64"), ByPtr("i32")],
@@ -2875,6 +2908,7 @@ fn ptrs_prog() -> TileProg = TileProg {
 }
 
 fn fork_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "fork",
   params: [ByPtr("f64"), ByPtr("f64")],
@@ -3082,6 +3116,7 @@ test "join_tokens takes the tokens of two stores and the load after it takes the
 }
 
 fn globals_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "g",
   params: [ByPtr("f64")],
@@ -3093,6 +3128,7 @@ fn globals_prog() -> TileProg = TileProg {
 }
 
 fn private_globals_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "g",
   params: [ByPtr("f64")],
@@ -3408,6 +3444,7 @@ test "the two varints the record grew at 13.3 carry the visibility and the const
 }
 
 fn alloca_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "a",
   params: [ByPtr("f64")],
@@ -3440,6 +3477,7 @@ test "alloca writes its opcode, its result type, a flags word and its two counts
 }
 
 fn mmaf_scaled_prog() -> TileProg = TileProg {
+  producer: None,
   hints: [],
   name: "s",
   params: [ByPtr("f64")],

@@ -522,6 +522,16 @@ MUTATIONS = {
         'fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(put_varint(bytes.buf(), num_tag(name))))',
         'fn num_ty(w: W, name: String) -> (W, Int) = ty_of(w, bytes.freeze(bytes.put(bytes.buf(), num_tag(name))))',
     ),),
+    "producer-index-off-by-one": ((
+        BYTECODE,
+        'Some(bytes.freeze(put_varint(bytes.buf(), pi)))',
+        'Some(bytes.freeze(put_varint(bytes.buf(), pi - 1)))',
+    ),),
+    "producer-under-13-2-header": ((
+        BYTECODE,
+        'pub const BYTECODE_MINOR: Int = 4',
+        'pub const BYTECODE_MINOR: Int = 2',
+    ),),
 }
 
 

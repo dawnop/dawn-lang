@@ -7,6 +7,28 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.16.0 (2026-10-11)
+
+Breaking, in one place (`docs/tile-backend-design.md` section 6.35, knife
+T14a). `TileProg` and the lowered `Kernel` gain a field, `producer:
+Option[String]`, so a record literal written outside the package must name it
+(`producer: None` keeps everything it did). No `Dev` operation was added and
+the 205 existing `.mlir` and `.tilebc` goldens are unchanged on both backends.
+
+- `encode` writes the bytecode's Producer section (id 7, 13.3 and later) when
+  `producer` is `Some(s)`: the string joins the String section and the
+  section's one varint is its index. The recording handler never sets it; a
+  caller builds `TileProg { ..p, producer: Some(s) }`. The text renderer does
+  not print it, and the device never sees it: `tileirdisasm` opens with
+  `// Producer: <s>` and the cubin is byte for byte the one without the
+  section.
+- Asked for under a header older than 13.3, the writer refuses with a panic.
+  The C++ writer drops the section without a word below 13.3; this one does
+  not, because a caller who set a producer believed it was in the file.
+- One kernel (`vadd_producer`) and two layer 1 mutants in `scripts/tile-golden`
+  (`producer-index-off-by-one`, `producer-under-13-2-header`), and a
+  `tileirdisasm` first-line check in `run.sh`.
+
 ## 0.15.1 (2026-10-11)
 
 Additive (`docs/tile-backend-design.md` section 6.34, knife T20). The 203
