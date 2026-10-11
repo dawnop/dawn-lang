@@ -688,7 +688,7 @@ tool19_validate() {
   # both static.
   # shellcheck disable=SC2016 # literal source in the guarded script
   build_count="$(grep -F -c 'scripts/cc-units.sh ' "$script_file")"
-  static_line_count="$(grep -F -c -- 'scripts/cc-units.sh --static -o' "$script_file")"
+  static_line_count="$(grep -F -c -- 'scripts/cc-units.sh --static ' "$script_file")"
   if [ "$build_count" -ne 2 ] || [ "$static_line_count" -ne 2 ]; then
     echo "release-native.sh must contain exactly two identical static builds" >&2
     errors=1
@@ -713,8 +713,9 @@ tool19_validate() {
 
   # shellcheck disable=SC2016 # literal source in the guarded script
   for line in \
-    'scripts/cc-units.sh --static -o "$CANDIDATE_A" "$WORK/units" "$WORK/build_info.c"' \
-    'scripts/cc-units.sh --static -o "$CANDIDATE_B" "$WORK/units" "$WORK/build_info.c"' \
+    'scripts/cc-units.sh --static "${INLINE_RC[@]+"${INLINE_RC[@]}"}" -o "$CANDIDATE_A" "$WORK/units" "$WORK/build_info.c"' \
+    'scripts/cc-units.sh --static "${INLINE_RC[@]+"${INLINE_RC[@]}"}" -o "$CANDIDATE_B" "$WORK/units" "$WORK/build_info.c"' \
+    'INLINE_RC=(--inline-rc)' \
     'if ! command -v readelf >/dev/null 2>&1; then' \
     'if ! elf_header=$(LC_ALL=C readelf -h "$candidate" 2>&1); then' \
     'if ! program_headers=$(LC_ALL=C readelf -l "$candidate" 2>&1); then' \
@@ -780,7 +781,7 @@ tool19_expect_reject() {
 }
 
 # shellcheck disable=SC2016 # mutate literal source in the guarded script
-sed 's/cc-units.sh --static -o/cc-units.sh -o/' \
+sed 's/cc-units.sh --static /cc-units.sh /' \
   "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-static.sh"
 tool19_expect_reject "removing -static" "$tool19_dir/native.no-static.sh"
 
@@ -790,6 +791,12 @@ sed 's/ "\${static\[@\]}" -o / -o /' \
   "$root/scripts/cc-units.sh" > "$tool19_dir/units.no-static.sh"
 tool19_expect_reject "a build script that drops -static at the link" \
   "$tool19_dir/native.base.sh" "$tool19_dir/units.no-static.sh"
+
+# the shipped compiler is built with the inline fast paths (docs/native-inline-design.md section 10)
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed 's/^INLINE_RC=(--inline-rc)$/INLINE_RC=()/' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-inline.sh"
+tool19_expect_reject "building the release without --inline-rc" "$tool19_dir/native.no-inline.sh"
 
 # shellcheck disable=SC2016 # mutate literal source in the guarded script
 sed 's/ "\$WORK\/units" "\$WORK\/build_info.c"$/ "$WORK\/units"/' \

@@ -546,7 +546,8 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String) -> Unit !Fs !Proc !Env !Exit !Console !io = cc_build_for(ctext, "", out, false, false)
+fn cc_build(ctext: String, out: String, inline_rc: Bool) -> Unit !Fs !Proc !Env !Exit !Console !io =
+  cc_build_for(ctext, "", out, false, false, inline_rc)
 
 ## The reactor's only export, appended to the emitted C.
 ##
@@ -641,14 +642,30 @@ fn cc_command(wasm: Bool) -> String !Env =
     }
   }
 
+## Whether a native build inlines the reference-count fast paths.
+##
+## On by default for the programs a user builds and runs (`build`, `run`): the
+## inline `dawn_dup` and `dawn_drop` in dawn_rt.h run recursive-drop programs
+## 5% to 58% faster and cost the C compiler about 80% more CPU, a price paid
+## once per build (docs/native-inline-design.md section 10). `dawnc test` never
+## asks: a test build is thrown away after one run, so only the price is paid.
+## The one switch is DAWN_NO_INLINE_RC, any non-empty value; it is not also a
+## flag, because a flag would need a second spelling in every subcommand.
+fn inline_rc_enabled() -> Bool !Env =
+  match io.getenv("DAWN_NO_INLINE_RC") {
+    Some(v) -> v == ""
+    None -> true
+  }
+
 fn cc_build_for(
   ctext: String,
   info: String,
   out: String,
   wasm: Bool,
-  reactor: Bool
+  reactor: Bool,
+  inline_rc: Bool
 ) -> Unit !Fs !Proc !Env !Exit !Console !io =
-  cc_build_with(cc_command(wasm), ctext, info, out, wasm, reactor)
+  cc_build_with(cc_command(wasm), ctext, info, out, wasm, reactor, inline_rc)
 
 ## Stage the C sources and drive `cc` over them.
 ##
@@ -667,7 +684,8 @@ fn cc_build_with(
   info: String,
   out: String,
   wasm: Bool,
-  reactor: Bool
+  reactor: Bool,
+  inline_rc: Bool
 ) -> Unit !Fs !Proc !Exit !Console !io = {
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
@@ -799,8 +817,12 @@ fn cc_build_with(
       "${work}/dawn_rt_wasi_eh.o", "${work}/dawn_rt_wasi_tag.o", "-lm"
     ]
   } else {
+    # The wasm row never inlines: the saving was measured on x86-64 native
+    # code only, and the module's size is what a wasm build is read for.
+    let rc: List[String] = if inline_rc { ["-DDAWN_RT_INLINE_RC"] } else { [] }
     [
-      cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread",
+      cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"
+    ] ++ rc ++ [
       "-Wno-parentheses-equality", "-I", work,
       "-o", out
     ] ++ sources ++ ["${work}/dawn_rt.c"] ++ info_files ++ ["-lm"]
@@ -945,7 +967,7 @@ fn cmd_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     out0
   }
   let (text, unit, _) = emitted_with(std_flag, target, opts, true, false)
-  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor)
+  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor, inline_rc_enabled())
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
@@ -960,7 +982,8 @@ fn build_and_exec(
   dir_prefix: String,
   bin_name: String,
   what: String,
-  program_args: List[String]
+  program_args: List[String],
+  inline_rc: Bool
 ) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
@@ -970,7 +993,7 @@ fn build_and_exec(
     }
   }
   let bin = work ++ "/" ++ bin_name
-  cc_build(ctext, bin)
+  cc_build(ctext, bin, inline_rc)
   # The scratch tree goes before the exit, not after it: `io.exit` has no stack
   # to unwind, so a release placed on the way out is a release that never runs.
   # A build that failed keeps its directory -- `cc_build` reports and exits from
@@ -995,7 +1018,8 @@ fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "dawnc-run",
     "program",
     "program",
-    run.program_args
+    run.program_args,
+    inline_rc_enabled()
   )
 }
 
@@ -1221,7 +1245,7 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       ""
     }
   }
-  build_and_exec(ctext, "dawnc-test", "tests", "tests", [])
+  build_and_exec(ctext, "dawnc-test", "tests", "tests", [], false)
 }
 
 ## `dawnc version`, and `dawnc version -m <project-dir | binary>...`: the JVM
@@ -1548,7 +1572,7 @@ test "the native build is one command line, and this is every flag in it" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false))
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, false))
       }
     )
     # no probe: nothing here is cross-compiled, so nothing is asked
@@ -1590,6 +1614,49 @@ test "the native build is one command line, and this is every flag in it" {
   })
 }
 
+test "an inline-RC native build adds exactly one define, right after -pthread" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-inline-")
+    with d <- bracket(dir, scrub)
+    let out = "${d}/prog"
+    let (_, log) = procmem.with_proc_table(
+      [procmem.exited(0)],
+      () => {
+        with handle Exit {
+          exit_now(c) resume k => panic("cc_build_with exited with ${c}")
+        }
+        io.with_console_real(() =>
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, true))
+      }
+    )
+    let argv = procmem.call_argv(log, 0)
+    # the plain native row, one longer
+    assert len(argv) == 16
+    assert argv[6] == "-pthread"
+    assert argv[7] == "-DDAWN_RT_INLINE_RC"
+    assert argv[8] == "-Wno-parentheses-equality"
+    assert argv[9] == "-I"
+  })
+}
+
+test "the inline-RC switch is on unless DAWN_NO_INLINE_RC is set and non-empty" {
+  let (on, log) = envmem.with_env_table(envmem.TABLE_CWD, [], () => inline_rc_enabled())
+  assert on
+  assert envmem.asked_names(log) == ["DAWN_NO_INLINE_RC"]
+  let (off, _) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("DAWN_NO_INLINE_RC", "1")],
+    () => inline_rc_enabled()
+  )
+  assert not off
+  let (empty, _) = envmem.with_env_table(
+    envmem.TABLE_CWD,
+    [("DAWN_NO_INLINE_RC", "")],
+    () => inline_rc_enabled()
+  )
+  assert empty
+}
+
 test "a build with a manifest links one more C file, after the runtime" {
   io.with_fs_real(() => {
     let dir = scratch("dawn-cc-info-")
@@ -1603,7 +1670,7 @@ test "a build with a manifest links one more C file, after the runtime" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-cc", "int main(void) { return 0; }\n", unit, out, false, false))
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", unit, out, false, false, false))
       }
     )
     let argv = procmem.call_argv(log, 0)
@@ -1630,7 +1697,7 @@ test "a text cut into units compiles every unit in the one command, in order" {
         with handle Exit {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
-        io.with_console_real(() => cc_build_with("fake-cc", text, "", out, false, false))
+        io.with_console_real(() => cc_build_with("fake-cc", text, "", out, false, false, false))
       }
     )
     # one process still: the units are separate inputs to one cc, not a
@@ -1679,7 +1746,7 @@ test "the wasm build is four command lines, and these are every flag in them" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, false))
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, false, false))
       }
     )
     # the probe, the C++ shim, the exception tag, the compile-and-link
@@ -1777,7 +1844,7 @@ test "a reactor build is the same link plus one flag" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, true))
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, true, false))
       }
     )
     assert len(log) == 4

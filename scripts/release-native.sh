@@ -122,8 +122,16 @@ fi
 # Each candidate compiles the units afresh, in parallel (scripts/cc-units.sh),
 # and links them in a fixed order; the two builds share nothing, objects
 # included, so the comparison below still says what it said for one cc line.
-scripts/cc-units.sh --static -o "$CANDIDATE_A" "$WORK/units" "$WORK/build_info.c"
-scripts/cc-units.sh --static -o "$CANDIDATE_B" "$WORK/units" "$WORK/build_info.c"
+#
+# The shipped compiler inlines the reference-count fast paths, as the programs
+# it builds do (docs/native-inline-design.md section 10): it compiles itself
+# 11% faster, for about 80% more C compiler CPU once per release. DAWN_NO_INLINE_RC
+# is the one switch, the same one dawnc reads; CI's test builds never get
+# --inline-rc, so the nightly "inline-rc" gate is what proves this configuration.
+INLINE_RC=(--inline-rc)
+if [ -n "${DAWN_NO_INLINE_RC:-}" ]; then INLINE_RC=(); fi
+scripts/cc-units.sh --static "${INLINE_RC[@]+"${INLINE_RC[@]}"}" -o "$CANDIDATE_A" "$WORK/units" "$WORK/build_info.c"
+scripts/cc-units.sh --static "${INLINE_RC[@]+"${INLINE_RC[@]}"}" -o "$CANDIDATE_B" "$WORK/units" "$WORK/build_info.c"
 
 for candidate in "$CANDIDATE_A" "$CANDIDATE_B"; do
   if [ ! -s "$candidate" ] || [ ! -x "$candidate" ]; then

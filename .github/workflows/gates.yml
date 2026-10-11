@@ -377,7 +377,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19763s (the most this file's `3x` claims may add up to)
+# push-total: 19780s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3428,8 +3428,15 @@ jobs:
     # that is not shared with a dozen other builds is estimated at 50 to 60s
     # of it. Planning value: 585 + 60 = 645s, restated from the first
     # observations. The push total moves by the same 60s.
-    # budget: 3x 645s planning value (585s worst observed plus 60s for std-prune-diff)
-    timeout-minutes: 33
+    # 2026-10-11: release-native.sh builds both candidates with the inline
+    # reference-count fast paths (docs/native-inline-design.md section 10).
+    # Measured with CC_JOBS=4 and the pinned clang 18: the script took 43.5s
+    # without and 60.9s with (+17s; user CPU 124s -> 194s); native-cli-diff.sh,
+    # whose `dawnc run` programs now inline too, 167.5s/171.9s without and
+    # 167.8s with, no change beyond noise. Planning value: 645 + 17 = 662s,
+    # restated from the first observations. The push total moves by 17s.
+    # budget: 3x 662s planning value (585s worst observed, 60s for std-prune-diff, 17s for inline RC)
+    timeout-minutes: 34
     steps:
       - uses: actions/checkout@v4
         with:
