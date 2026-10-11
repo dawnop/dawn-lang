@@ -250,7 +250,7 @@ fi
 # rc-balance is the check that must catch it; failure.dawn drops none.
 "$root/bin/dawn" __emitc "$root/scripts/imm-contract/imm.dawn" -o "$work/imm.c"
 cp "$root/scripts/imm-contract/imm.expect" "$work/imm.native.out"
-sed 's/  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {/  if (dawn_is_imm(p)) { DAWN_LEDGER_DEATH(); }\n  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {/' \
+sed 's/  if (dawn_rc_leak | (p == NULL) | dawn_is_imm(p)) {/  if (dawn_is_imm(p)) { DAWN_LEDGER_DEATH(); }\n  if (dawn_rc_leak | (p == NULL) | dawn_is_imm(p)) {/' \
   "$root/runtime/c/dawn_rt.c" >"$work/dawn_rt_immledger.c"
 if cmp -s "$root/runtime/c/dawn_rt.c" "$work/dawn_rt_immledger.c"; then
   echo "FAIL: mutant C is stale -- the drop's immediate guard moved" >&2

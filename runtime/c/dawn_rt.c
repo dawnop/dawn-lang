@@ -1354,7 +1354,7 @@ bool dawn_rc_leak = false;
 
 #ifndef DAWN_RT_INLINE_RC
 void *dawn_dup(void *p) {
-  if (p == NULL || dawn_is_imm(p)) {
+  if ((p == NULL) | dawn_is_imm(p)) {
     return p;
   }
   dawn_hdr *h = (dawn_hdr *)p;
@@ -1398,7 +1398,7 @@ static void dawn_ws_init(dawn_ws *s) {
 }
 
 static void dawn_ws_push(dawn_ws *s, void *p) {
-  if (p == NULL || dawn_is_imm(p)) {
+  if ((p == NULL) | dawn_is_imm(p)) {
     return;
   }
   if (s->len == s->cap) {
@@ -1496,7 +1496,7 @@ void dawn_drop_slow(void *p) {
 #else
 void dawn_drop(void *p) {
 #endif
-  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {
+  if (dawn_rc_leak | (p == NULL) | dawn_is_imm(p)) {
     return;
   }
   /* Fast path: on scan-shaped code nearly every drop is decrement-only (the

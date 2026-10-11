@@ -23,7 +23,7 @@ MUTATIONS = {
     "dup-ignores-imm": (
         "dawn_rt.c",
         """void *dawn_dup(void *p) {
-  if (p == NULL || dawn_is_imm(p)) {""",
+  if ((p == NULL) | dawn_is_imm(p)) {""",
         """void *dawn_dup(void *p) {
   if (p == NULL) {""",
     ),
@@ -31,7 +31,7 @@ MUTATIONS = {
     "inline-dup-ignores-imm": (
         "dawn_rt.h",
         """static inline void *dawn_dup(void *p) {
-  if (p != NULL && !dawn_is_imm(p)) {""",
+  if (!((p == NULL) | dawn_is_imm(p))) {""",
         """static inline void *dawn_dup(void *p) {
   if (p != NULL) {""",
     ),
@@ -39,7 +39,7 @@ MUTATIONS = {
     # half `dawn_drop_slow` in an inline one) reads the header of a tag.
     "drop-ignores-imm": (
         "dawn_rt.c",
-        """  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {
+        """  if (dawn_rc_leak | (p == NULL) | dawn_is_imm(p)) {
     return;
   }
   /* Fast path""",
@@ -51,7 +51,7 @@ MUTATIONS = {
     # P4: the inline drop front.
     "inline-drop-ignores-imm": (
         "dawn_rt.h",
-        """  if (p == NULL || dawn_is_imm(p) || dawn_rc_leak) {""",
+        """  if ((p == NULL) | dawn_is_imm(p) | dawn_rc_leak) {""",
         """  if (p == NULL || dawn_rc_leak) {""",
     ),
     # P5: an immediate child is queued on the drop work list, and read as a
@@ -59,7 +59,7 @@ MUTATIONS = {
     "ws-push-ignores-imm": (
         "dawn_rt.c",
         """static void dawn_ws_push(dawn_ws *s, void *p) {
-  if (p == NULL || dawn_is_imm(p)) {""",
+  if ((p == NULL) | dawn_is_imm(p)) {""",
         """static void dawn_ws_push(dawn_ws *s, void *p) {
   if (p == NULL) {""",
     ),
