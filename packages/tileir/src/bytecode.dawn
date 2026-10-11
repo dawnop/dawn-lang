@@ -940,6 +940,7 @@ fn num_tag(name: String) -> Int = match name {
   "f8E5M2" -> 11
   "f8E8M0FNU" -> 18
   "f4E2M1FN" -> 19
+  "f8E5M3FNU" -> 130
   "i4" -> 22
   _ -> panic("tileir: `${name}` has no Tile IR type tag")
 }
@@ -2316,6 +2317,18 @@ test "a tile type names its element type first, so the element's index is lower"
   assert ti == 2
   assert ptr_has_flags()
   assert list.map(w1.types.items, hex) == ["09", "0c0000", "0d01018000000000000000"]
+}
+
+test "f8E5M3FNU is tag 130, which is a two-byte varint, and the tile type that holds it follows it" {
+  assert num_tag("f8E5M3FNU") == 130
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.empty(), nvals: 0 }
+  let (w1, ti) = ty(w0, Tile([128], Num("f8E5M3FNU")))
+  # the element type (tag 130 = 0x82 0x01), then the tile naming it
+  assert ti == 1
+  assert list.map(w1.types.items, hex)[0] == "8201"
+  # every older tag is one byte, and the varint writes the same byte
+  let (w2, _ti2) = ty(w0, Tile([128], Num("f8E8M0FNU")))
+  assert list.map(w2.types.items, hex)[0] == "12"
 }
 
 fn vadd() -> TileProg = TileProg {

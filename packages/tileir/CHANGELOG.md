@@ -7,6 +7,25 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.15.1 (2026-10-11)
+
+Additive (`docs/tile-backend-design.md` section 6.34, knife T20). The 203
+existing `.mlir` and `.tilebc` goldens are unchanged on both backends, and no
+`Dev` operation was added.
+
+- `F8E5M3FNU` (`std/narrow`, bytecode 13.4's `f8E5M3FNU`, type tag 130) is a
+  tile format: `float_to_float(x, F8E5M3FNU)` converts into and out of it
+  under `nearest_even`, and it is a scale format of `mma_scaled` over
+  `F4E2M1FN` operands. The writer puts a type tag down as a varint, which
+  matters for the first time here: 130 is two bytes.
+- It has no host value. `std/narrow` has no rounding function for it and
+  `std/gpu` has no buffer of it, because what `ftof` does at the format's
+  edges is a device behaviour and only sm_107 takes the type.
+- `tileiras` 13.4.92 takes the type at `--gpu-name sm_107` and refuses it at
+  every other architecture tried (sm_80 to sm_121). Two kernels in `scripts/tile-golden`
+  (`dtype_e5m3`, `mmaf_scaled_e5m3`) are assembled for sm_107 and run on no
+  device, and two layer 1 mutants.
+
 ## 0.15.0 (2026-10-11)
 
 Breaking: the last three opcodes bytecode 13.4 added
