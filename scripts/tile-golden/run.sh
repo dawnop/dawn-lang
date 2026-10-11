@@ -457,6 +457,15 @@
 #                            vadd_producer (non-zero exit, the refusal on
 #                            stderr, no file) on both backends, and still
 #                            encodes vadd, which carries no producer
+#     debug-line-off-by-one  every instruction's line in the Debug section moves
+#                            down one -> vadd_debug's text is untouched, its
+#                            bytes differ, tileiras assembles them, the
+#                            tileirdisasm -g table and the --lineinfo
+#                            .debug_line both move, and the default -O3 cubin
+#                            is byte for byte the golden's
+#     debug-count-short      the Debug section states one index entry too few
+#                            -> same size, and tileiras and tileirdisasm both
+#                            refuse the file
 #
 # Sharding: the work items are the kernels and the mutants in one list, which
 # matrix.txt records. Both halves cost real time, so splitting by kind would
@@ -545,7 +554,7 @@ kernels=(
   flash_attn idx_softmax carry_extent flash_attn_bf16
   scalar_scale scalar_len scalar_loop scalar_wide
   dtype_e5m3 mmaf_scaled_e5m3
-  vadd_producer)
+  vadd_producer vadd_debug foldif_debug)
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -672,6 +681,8 @@ mutants=(
   type-tag-written-as-one-byte
   producer-index-off-by-one
   producer-under-13-2-header
+  debug-line-off-by-one
+  debug-count-short
 )
 items=("${kernels[@]}" "${mutants[@]}")
 
@@ -992,6 +1003,13 @@ need_disasm() {
   [ -x "$disasm" ] || fail "no tileirdisasm beside $tileiras; the Producer section is judged by its first line"
 }
 
+# The same assembly with `--lineinfo`: the Debug section's locations reach the
+# cubin's .debug_line. (`-g` needs -O0 and changes the code; this does not.)
+assemble_lineinfo() { # tilebc, out, gpu-name
+  "$tileiras" --gpu-name "$3" --lineinfo -o "$2" "$1" > "$2.log" 2>&1 || return 1
+  ! grep -q '^error:' "$2.log"
+}
+
 disasm_first_line() { # tilebc
   "$disasm" "$1" 2>&1 | sed -n 1p
 }
@@ -1082,6 +1100,47 @@ for k in "${kernels[@]}"; do
       cmp -s "$work/$k.cubin" "$work/$k.bare.cubin" ||
         fail "vadd_producer: the cubin differs from the one the same program makes without the Producer section"
       echo "PASS  producer: tileirdisasm opens with '// Producer: $producer_want'; the cubin is byte for byte the one without the section"
+    fi
+    if [ "$k" = vadd_debug ] || [ "$k" = foldif_debug ]; then
+      # The Debug section (knife T14b), judged three ways. (1) tileirdisasm -g
+      # prints the location table, and it must equal the stored copy word for
+      # word AND the table debug-check.py derives from the golden's own text
+      # (the n-th instruction at the line and column it starts at). (2) The
+      # default -O3 cubin is the one the same program makes without the
+      # section: the device never sees it. (3) With --lineinfo the cubin's
+      # .debug_line reads back the lines, which are the golden's, and the same
+      # program without the section writes none.
+      need_disasm
+      "$disasm" -g "$bc_golden" > "$work/$k.disasm" 2>&1 || fail "$k: tileirdisasm -g refused $k.tilebc"
+      if [ "$mode" = record ]; then cp "$work/$k.disasm" "$here/$k.disasm"; fi
+      [ -f "$here/$k.disasm" ] || fail "$k has no disassembly golden at $here/$k.disasm; run --record"
+      cmp -s "$here/$k.disasm" "$work/$k.disasm" ||
+        { diff -u "$here/$k.disasm" "$work/$k.disasm" >&2 || true; fail "$k: tileirdisasm -g differs from $k.disasm"; }
+      python3 "$here/debug-check.py" locs "$golden" "$work/$k.disasm" > "$work/$k.locs.out" 2>&1 ||
+        { cat "$work/$k.locs.out" >&2; fail "$k: the location table is not the golden text's"; }
+      run_jvm "$work/clean" "$work/$k.bare.out" "$k" --bytecode-bare "$work/$k.bare.tilebc" ||
+        { cat "$work/$k.bare.out.err" >&2; fail "$k did not encode without its Debug section"; }
+      "$disasm" -g "$work/$k.bare.tilebc" > "$work/$k.bare.disasm" 2>&1 || fail "$k: tileirdisasm refused the copy without a Debug section"
+      ! grep -q 'di_loc\|di_file' "$work/$k.bare.disasm" || fail "$k: the program without a Debug section still disassembles with locations"
+      assemble "$work/$k.bare.tilebc" "$work/$k.bare.cubin" "$arch" ||
+        { cat "$work/$k.bare.cubin.log" >&2; fail "$k: tileiras refused the copy without a Debug section"; }
+      cmp -s "$work/$k.cubin" "$work/$k.bare.cubin" ||
+        fail "$k: the -O3 cubin differs from the one the same program makes without the Debug section"
+      assemble_lineinfo "$bc_golden" "$work/$k.li.cubin" "$arch" ||
+        { cat "$work/$k.li.cubin.log" >&2; fail "$k: tileiras --lineinfo refused $k.tilebc"; }
+      python3 "$here/debug-check.py" lines "$work/$k.li.cubin" "$golden" > "$work/$k.lines" 2> "$work/$k.lines.err" ||
+        { cat "$work/$k.lines.err" >&2; fail "$k: .debug_line does not read back the golden's lines"; }
+      [ -s "$work/$k.lines" ] || fail "$k: --lineinfo wrote no .debug_line rows"
+      if [ "$mode" = record ]; then cp "$work/$k.lines" "$here/$k.lines"; fi
+      [ -f "$here/$k.lines" ] || fail "$k has no line golden at $here/$k.lines; run --record"
+      cmp -s "$here/$k.lines" "$work/$k.lines" ||
+        { diff -u "$here/$k.lines" "$work/$k.lines" >&2 || true; fail "$k: .debug_line lines differ from $k.lines"; }
+      cmp -s "$work/$k.li.cubin" "$work/$k.cubin" && fail "$k: --lineinfo made no difference to the cubin, so the locations reach nothing"
+      assemble_lineinfo "$work/$k.bare.tilebc" "$work/$k.bare.li.cubin" "$arch" ||
+        { cat "$work/$k.bare.li.cubin.log" >&2; fail "$k: tileiras --lineinfo refused the copy without a Debug section"; }
+      cmp -s "$work/$k.bare.li.cubin" "$work/$k.bare.cubin" ||
+        fail "$k: --lineinfo changes the cubin of the program that has no Debug section"
+      echo "PASS  debug: $k tileirdisasm -g matches $k.disasm and the golden's text ($(wc -l < "$work/$k.lines") distinct lines in .debug_line); the -O3 cubin is byte for byte the one without the section"
     fi
     if [ "$k" = global_syms ]; then
       check_global_syms_symbols "$work/$k.cubin"
@@ -2799,6 +2858,94 @@ if run_item producer-under-13-2-header; then
       { cat "$work/m-producer-under-13-2-header.vadd.$backend.out.err" >&2; fail "producer-under-13-2-header: vadd (no producer) should still encode on $backend"; }
   done
   echo "PASS  mutant: producer-under-13-2-header (vadd_producer refused at encode time on both backends; vadd untouched)"
+fi
+
+# 59. Every instruction's line moves down by one. The text is untouched (the
+#     renderer is not edited; vadd_debug.mlir still matches), the bytes differ
+#     by the lines inside the Debug section and tileiras assembles them. The
+#     three statements the section makes break one each: tileirdisasm -g
+#     prints the shifted table (and debug-check.py, which reads the golden's
+#     text, names the first instruction that is not where it starts);
+#     --lineinfo's .debug_line reads back other lines; and the default -O3
+#     cubin, which never carries a location, is byte for byte the golden's.
+if run_item debug-line-off-by-one; then
+  mutant_project debug-line-off-by-one render.dawn
+  mutant_run debug-line-off-by-one vadd_debug
+  mutant_run_bytecode debug-line-off-by-one vadd_debug
+  for backend in jvm native; do
+    out="$work/m-debug-line-off-by-one.vadd_debug.$backend"
+    if [ "$(cat "$out.rc")" != 0 ] || ! cmp -s "$here/vadd_debug.mlir" "$out"; then
+      cat "$out.err" >&2
+      fail "debug-line-off-by-one: the renderer was not edited, so vadd_debug.mlir should still match on $backend"
+    fi
+    out="$work/m-debug-line-off-by-one.vadd_debug.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$work/m-debug-line-off-by-one.vadd_debug.$backend.out.err" >&2; fail "debug-line-off-by-one: vadd_debug did not encode on $backend"; }
+    cmp -s "$here/vadd_debug.tilebc" "$out" && fail "debug-line-off-by-one mutant stayed green on $backend: vadd_debug.tilebc still matches"
+  done
+  cmp -s "$work/m-debug-line-off-by-one.vadd_debug.jvm.tilebc" "$work/m-debug-line-off-by-one.vadd_debug.native.tilebc" ||
+    fail "debug-line-off-by-one: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    need_disasm
+    mbc="$work/m-debug-line-off-by-one.vadd_debug.jvm.tilebc"
+    arch="$(kernel_arch vadd_debug)"
+    "$disasm" -g "$mbc" > "$work/m-dlo.disasm" 2>&1 || fail "debug-line-off-by-one: tileirdisasm refused the mutant's bytes (they are well formed)"
+    cmp -s "$here/vadd_debug.disasm" "$work/m-dlo.disasm" && fail "debug-line-off-by-one mutant stayed green: tileirdisasm -g still prints vadd_debug.disasm"
+    python3 "$here/debug-check.py" locs "$here/vadd_debug.mlir" "$work/m-dlo.disasm" > "$work/m-dlo.locs" 2>&1 &&
+      fail "debug-line-off-by-one mutant stayed green: the table still matches the golden's text"
+    first="$(sed -n 1p "$work/m-dlo.locs")"
+    assemble "$mbc" "$work/m-dlo.cubin" "$arch" ||
+      { cat "$work/m-dlo.cubin.log" >&2; fail "debug-line-off-by-one: tileiras should take the mutant's bytes"; }
+    assemble "$here/vadd_debug.tilebc" "$work/m-dlo.golden.cubin" "$arch" ||
+      { cat "$work/m-dlo.golden.cubin.log" >&2; fail "debug-line-off-by-one: tileiras refused vadd_debug.tilebc"; }
+    cmp -s "$work/m-dlo.cubin" "$work/m-dlo.golden.cubin" ||
+      fail "debug-line-off-by-one: the -O3 cubin moved with the lines; the Debug section must not reach it"
+    assemble_lineinfo "$mbc" "$work/m-dlo.li.cubin" "$arch" ||
+      { cat "$work/m-dlo.li.cubin.log" >&2; fail "debug-line-off-by-one: tileiras --lineinfo should take the mutant's bytes"; }
+    assemble_lineinfo "$here/vadd_debug.tilebc" "$work/m-dlo.golden.li.cubin" "$arch" ||
+      { cat "$work/m-dlo.golden.li.cubin.log" >&2; fail "debug-line-off-by-one: tileiras --lineinfo refused vadd_debug.tilebc"; }
+    cmp -s "$work/m-dlo.li.cubin" "$work/m-dlo.golden.li.cubin" &&
+      fail "debug-line-off-by-one mutant stayed green: the --lineinfo cubin is the golden's"
+    python3 "$here/debug-check.py" lines "$work/m-dlo.li.cubin" > "$work/m-dlo.lines" 2>/dev/null || true
+    cmp -s "$here/vadd_debug.lines" "$work/m-dlo.lines" &&
+      fail "debug-line-off-by-one mutant stayed green: .debug_line reads back vadd_debug.lines"
+    echo "PASS  mutant: debug-line-off-by-one (vadd_debug.mlir untouched, .tilebc red on both backends; $first; --lineinfo cubin and .debug_line move, the -O3 cubin does not)"
+  else
+    echo "PASS  mutant: debug-line-off-by-one (vadd_debug.mlir untouched, .tilebc red on both backends)"
+    echo "SKIP  mutant: debug-line-off-by-one not handed to tileirdisasm (--without-tileiras)"
+  fi
+fi
+
+# 60. The Debug section states one index entry too few. Nothing else is
+#     touched, so the text and the entry table are as before and only a
+#     reader that checks the count against the table notices. `tileiras` and
+#     `tileirdisasm` are both required to refuse the file, on stderr, and the
+#     refusal is printed with the PASS line (run.sh does not pin its wording:
+#     the message is the reader's, not ours).
+if run_item debug-count-short; then
+  mutant_project debug-count-short bytecode.dawn
+  mutant_run_bytecode debug-count-short vadd_debug
+  for backend in jvm native; do
+    out="$work/m-debug-count-short.vadd_debug.$backend.tilebc"
+    [ "$(cat "$out.rc")" = 0 ] || { cat "$work/m-debug-count-short.vadd_debug.$backend.out.err" >&2; fail "debug-count-short: vadd_debug did not encode on $backend"; }
+    cmp -s "$here/vadd_debug.tilebc" "$out" && fail "debug-count-short mutant stayed green on $backend: vadd_debug.tilebc still matches"
+  done
+  cmp -s "$work/m-debug-count-short.vadd_debug.jvm.tilebc" "$work/m-debug-count-short.vadd_debug.native.tilebc" ||
+    fail "debug-count-short: the two backends disagree on the mutant's bytes"
+  if [ -n "$tileiras" ]; then
+    need_disasm
+    mbc="$work/m-debug-count-short.vadd_debug.jvm.tilebc"
+    if assemble "$mbc" "$work/m-dcs.cubin" "$(kernel_arch vadd_debug)"; then
+      fail "debug-count-short mutant stayed green: tileiras assembled a Debug section whose count is one short"
+    fi
+    refusal="$(sed -n 1p "$work/m-dcs.cubin.log")"
+    if "$disasm" -g "$mbc" > "$work/m-dcs.disasm" 2>&1; then
+      fail "debug-count-short mutant stayed green: tileirdisasm printed a Debug section whose count is one short"
+    fi
+    echo "PASS  mutant: debug-count-short (tileiras refuses: '$refusal'; tileirdisasm refuses: '$(sed -n 1p "$work/m-dcs.disasm")')"
+  else
+    echo "PASS  mutant: debug-count-short (.tilebc red on both backends)"
+    echo "SKIP  mutant: debug-count-short not handed to tileiras (--without-tileiras)"
+  fi
 fi
 
 _item_tick ""

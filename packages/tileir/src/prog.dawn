@@ -296,6 +296,11 @@ pub fn kparam_dtype(k: KParam) -> String = match k {
 ## `TileProg { ..p, producer: Some(s) }`. The text renderer does not print
 ## it, because the MLIR text has no place for it; only the bytes and
 ## `tileirdisasm` show it, and the device never does.
+##
+## `debug` is the bytecode's Debug section (knife T14b, docs 6.36): `None`
+## for every recorded kernel, written only for a caller who builds
+## `TileProg { ..p, debug: Some(d) }`. The text renderer does not print it
+## either.
 pub type TileProg = {
   name: String,
   params: List[KParam],
@@ -303,6 +308,31 @@ pub type TileProg = {
   ops: List[TileOp],
   hints: Hints,
   producer: Option[String],
+  debug: Option[DebugInfo],
+} derive Show
+
+## Where a kernel's instructions came from, for the Debug section (knife
+## T14b). `dir` and `file` are the DIFile (the file's directory and its base
+## name); `line` and `col` are where the kernel itself starts, the
+## DISubprogram's line and the function's own location; `locs` is one
+## `(line, col)` per instruction of the LOWERED kernel, in the order the
+## bytecode lists them (a region's instruction before the ones in its body,
+## a body's terminator last, the closing `return` the last of all), each a
+## 1-based position in `file`. The count is checked when the program is
+## encoded: a list that is not one per instruction is refused, because a
+## location table that lines up with nothing is worse than none.
+##
+## The recording handler cannot know a Dawn source position (nothing in the
+## language reads one at run time), so the positions come from the caller:
+## `render.text_debug` gives the position of each instruction's line in the
+## program's own `.mlir` text, and a caller with better knowledge (a Dawn
+## source line from a call map) builds the list itself.
+pub type DebugInfo = {
+  dir: String,
+  file: String,
+  line: Int,
+  col: Int,
+  locs: List[(Int, Int)],
 } derive Show
 
 fn refuse(name: String, what: String) -> Never =
@@ -4270,7 +4300,7 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
     if len(marks) != 0 { refuse(name, "the body ended with ${len(marks)} call or body mark(s) still open") } else { () }
     (globals, ops, calls)
   }
-  (TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints, producer: None }, calls)
+  (TileProg { name: name, params: params, globals: globals, ops: [MakeToken(0)] ++ ops, hints: hints, producer: None, debug: None }, calls)
 }
 
 ## The handles an operation defines in the region it sits in, in definition

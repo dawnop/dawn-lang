@@ -7,6 +7,35 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.17.0 (2026-10-11)
+
+Breaking, in one place (`docs/tile-backend-design.md` section 6.36, knife
+T14b). `TileProg` and the lowered `Kernel` gain a second field, `debug:
+Option[DebugInfo]`, so a record literal written outside the package must name
+it (`debug: None` keeps everything it did). No `Dev` operation was added and
+the 205 existing `.mlir` and `.tilebc` goldens are unchanged on both backends.
+
+- `encode` writes the bytecode's Debug section (id 3) when `debug` is
+  `Some(d)`: a DIFile, a DICompileUnit, a DISubprogram, the function's own
+  DILoc and one DILoc per instruction, and the function record's location
+  index becomes 1. `DebugInfo` is `{ dir, file, line, col, locs }` with one
+  `(line, col)` in `locs` per instruction of the lowered kernel, in the order
+  the bytecode lists them. A list of any other length is refused with a panic
+  that names both counts. The recording handler never sets `debug`, the text
+  renderer does not print it, and the default `-O3` cubin is byte for byte the
+  one without the section; with `tileiras --lineinfo` the locations reach the
+  cubin's `.debug_line`.
+- `render.text_debug(prog, dir, file)` builds a `DebugInfo` whose locations are
+  the lines and columns of `prog`'s own `.mlir` text saved as `dir/file`.
+  There is no way to read a Dawn source position at run time, so a caller
+  with a better source (a line from a call map) builds the record itself.
+- `lower.instr_count(body)` is the number of instructions a body is, regions
+  included.
+- Two kernels (`vadd_debug`, `foldif_debug`), two layer 1 mutants
+  (`debug-line-off-by-one`, `debug-count-short`), and `debug-check.py` in
+  `scripts/tile-golden`, which reads the `tileirdisasm -g` table and the
+  cubin's `.debug_line` against the golden's text.
+
 ## 0.16.0 (2026-10-11)
 
 Breaking, in one place (`docs/tile-backend-design.md` section 6.35, knife
