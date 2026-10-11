@@ -412,6 +412,20 @@ typedef struct {
   dawn_slot val;
 } dawn_box;
 
+/* An erased word is NULL, a pointer to a headed object, or (once Int and Bool
+ * stop being boxed, docs/native-immediates-design.md) an immediate whose lowest
+ * bit is 1 and which points at nothing. `dawn_peek_int` is the borrowing read
+ * of an erased Int that already knows both forms; a reader that dereferences
+ * `->val.i` directly is wrong for the second. */
+static inline bool dawn_is_imm(const void *p) { return ((uintptr_t)p & 1u) != 0; }
+
+static inline int64_t dawn_peek_int(const void *b) {
+  if (dawn_is_imm(b)) {
+    return (int64_t)((intptr_t)b >> 1);
+  }
+  return ((const dawn_box *)b)->val.i;
+}
+
 dawn_box *dawn_box_int(int64_t v);
 dawn_box *dawn_box_float(double v);
 dawn_box *dawn_box_bool(bool v);

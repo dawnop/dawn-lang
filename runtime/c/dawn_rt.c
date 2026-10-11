@@ -5578,7 +5578,7 @@ dawn_adt *dawn_gpu_launch_host(int64_t module, dawn_str *kernel, int64_t gx, int
     (dawn_cu_deviceptr *)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(dawn_cu_deviceptr));
   void **params = (void **)dawn_alloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
   for (int64_t i = 0; i < n; i++) {
-    ptrs[i] = (dawn_cu_deviceptr)((dawn_box *)dawn_array_get(args, i))->val.i; /* borrowed */
+    ptrs[i] = (dawn_cu_deviceptr)dawn_peek_int(dawn_array_get(args, i)); /* borrowed */
     params[i] = &ptrs[i];
   }
   r = dawn_gpu.launch_kernel(fn, (unsigned int)gx, (unsigned int)gy, (unsigned int)gz, 1, 1, 1, 0,
