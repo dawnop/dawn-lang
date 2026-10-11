@@ -4364,13 +4364,147 @@ test "constructor arguments evaluate in written order" {
   assert pm.sym == 7 && pm.ty == TyInt
 }
 
+test "a tuple literal scrutinee is matched by component unless an arm needs the tuple" {
+  let initial = LSt {
+    next_sym: 100, next_loop: 0, owner: "tuple_scrutinee", cur_loop: -1,
+    ret_ty: TyUnit, syms: map.empty(), lifted: [], next_lam: 0,
+    traits: prelude_traits(), impls: map.empty(), adts: prelude_adts(),
+    prog_fns: map.empty(), intrs: intrinsics(), dicts: [], dict_env: map.empty(),
+    self_ctx: None, tail: false, self_tail: false, ev_env: [], ev_own: None,
+    base: -1,
+    origin: "",
+    ct_inline: false
+  }
+  let tt = TyTuple([TyInt, TyInt])
+  let lit = XTupleLit([XInt(1, 0, 0), XInt(2, 0, 0)], 0, 0, tt)
+  let body = XInt(0, 0, 0)
+  let arm = (p: TPat) => TArm { pat: p, guard: None, body: body }
+  let pair = TPTuple([TPBind(10, "a"), TPLit(LInt(2))])
+
+  # every arm a tuple pattern or a wildcard: two component locals, in the
+  # written order, and no tuple anywhere in the head of the block
+  let (_, split) = lower_match(initial, lit, [arm(pair), arm(TPWild)], TyInt, false)
+  match split {
+    CBlock(stmts, _, _) -> {
+      match stmts[0] {
+        CSLet(_, t0, CInt(1)) -> { assert t0 == TyInt }
+        _ -> { assert false }
+      }
+      match stmts[1] {
+        CSLet(_, t1, CInt(2)) -> { assert t1 == TyInt }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+
+  # an arm that binds the whole tuple, or any other top-level pattern, still
+  # sees the tuple itself
+  for whole in [TPBind(11, "t"), TPOr([pair, TPWild]), TPTuple([TPWild])] {
+    let (_, kept) = lower_match(initial, lit, [arm(pair), arm(whole)], TyInt, false)
+    match kept {
+      CBlock(stmts, _, _) ->
+        match stmts[0] {
+          CSLet(_, t0, CTuple(_, _)) -> { assert t0 == tt }
+          _ -> { assert false }
+        }
+      _ -> { assert false }
+    }
+  }
+}
+
+## The components of a tuple-literal scrutinee that no arm needs whole, or
+## `[]` when the match must build the tuple. Every arm has to be a tuple
+## pattern of the literal's width or a wildcard: a top-level bind, an or-pattern
+## or a literal pattern could name or compare the tuple itself. Width zero
+## and one are left alone, since `()` is not a tuple here.
+fn tuple_scrut_parts(scrut: TExpr, sty: Ty, arms: List[TArm]) -> List[TExpr] =
+  match scrut {
+    XTupleLit(elems, _, _, _) -> {
+      let n = len(elems)
+      let width_ok = match sty {
+        TyTuple(xs) -> len(xs) == n
+        _ -> false
+      }
+      if n < 2 || not width_ok { return [] }
+      for arm in arms {
+        match arm.pat {
+          TPWild -> ()
+          TPTuple(subs) -> if len(subs) != n { return [] }
+          _ -> { return [] }
+        }
+      }
+      elems
+    }
+    _ -> []
+  }
+
+## One arm of a split tuple match: the arm's component patterns tested against
+## the component locals, left to right, exactly the conjunction
+## `pat_test_slots` builds for a `TPTuple` over `CTupleGet`s.
+fn tuple_arm_test(
+  st: LSt,
+  comps: List[CExpr],
+  cts: List[Ty],
+  p: TPat
+) -> (LSt, List[CStmt], CExpr, List[CStmt]) =
+  match p {
+    TPTuple(subs) -> {
+      var st1 = st
+      var setup: List[CStmt] = []
+      var cond: CExpr = CBool(true)
+      var binds: List[CStmt] = []
+      var i = 0
+      for sub in subs {
+        let (st2, su, c, bs) = pat_test(st1, comps[i], sub, cts[i])
+        st1 = st2
+        setup = setup ++ su
+        cond = and_of(cond, c)
+        binds = binds ++ bs
+        i = i + 1
+      }
+      (st1, setup, cond, binds)
+    }
+    _ -> (st, [], CBool(true), [])
+  }
+
 ## `match` becomes a once-loop: each arm is a guarded test that assigns the
 ## result and breaks. The loop exists so a failed guard falls through to the
 ## next arm without duplicating its test, which is exactly what the JVM
 ## emitter achieved with a `next_arm` label.
 fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LSt, CExpr) = {
   let sty = tex_ty(scrut)
-  let (st1, sv) = lower_expr(st, scrut)
+  let parts = tuple_scrut_parts(scrut, sty, arms)
+  let split = len(parts) > 0
+  var st1 = st
+  var heads: List[CStmt] = []
+  var comps: List[CExpr] = []
+  var cts: List[Ty] = []
+  var sv: CExpr = CBool(true)
+  if split {
+    # `match (a, b)`: bind each component once, in written order, and let
+    # every arm test the components in place. No tuple is built.
+    let ets = match sty {
+      TyTuple(xs) -> xs
+      _ -> []
+    }
+    let (stp, vs) = lower_all(st, parts)
+    st1 = stp
+    var i = 0
+    for v in vs {
+      let (stq, csym) = fresh_sym(st1)
+      st1 = stq
+      heads = heads ++ [CSLet(csym, ets[i], v)]
+      comps = comps ++ [CLocal(csym, ets[i])]
+      cts = cts ++ [ets[i]]
+      i = i + 1
+    }
+  } else {
+    let (stw, w) = lower_expr(st, scrut)
+    st1 = stw
+    sv = w
+    heads = []
+  }
   let (st2, ssym) = fresh_sym(st1)
   let (st3, rsym) = fresh_sym(st2)
   let (st4, lid) = fresh_loop(st3)
@@ -4380,7 +4514,8 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
   var st5 = st4
   var body: List[CStmt] = []
   for arm in arms {
-    let (st6, setup, cond, binds) = pat_test(st5, subj, arm.pat, sty)
+    let (st6, setup, cond, binds) =
+      if split { tuple_arm_test(st5, comps, cts, arm.pat) } else { pat_test(st5, subj, arm.pat, sty) }
     st5 = st6
     let (st7, armb) = lower_expr(LSt { ..st5, tail: tl }, arm.body)
     st5 = st7
@@ -4403,7 +4538,7 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
   }
   body = body ++ [CSDiscard(CIntrinsic("panic", [CStr("unreachable match")], TyNever, CNoSite))]
 
-  var stmts: List[CStmt] = [CSLet(ssym, sty, sv)]
+  var stmts: List[CStmt] = if split { heads } else { [CSLet(ssym, sty, sv)] }
   if produces {
     stmts = stmts ++ [CSLet(rsym, ty, zero_of(ty))]
   }
