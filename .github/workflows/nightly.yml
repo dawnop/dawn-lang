@@ -409,6 +409,84 @@ jobs:
           } > issue.md
           scripts/nightly-issue.sh "nightly: native sanitizer run is red" issue.md
 
+  # The configuration users run: the native compiler release-native.sh ships and
+  # the programs `dawnc build` and `dawnc run` make are compiled with
+  # -DDAWN_RT_INLINE_RC (docs/native-inline-design.md section 10), and CI's own
+  # test builds are not (scripts/cc-units.sh adds the define only on request).
+  # So the release's configuration has no push gate, and this job is its gate:
+  # the self-build fixed point and the sanitizer run of std and the packages,
+  # both with the define on. The wrapper puts it on the one cc line every
+  # script reads from CC, which is how the 2026-10-11 prerequisite runs were
+  # made. Nightly rather than push: push-total has no room, and the inline
+  # path changes with dawn_rt.h and the emitted dup/drop sites, not with most
+  # commits. Measured 2026-10-11 on one 16-core machine at load 5: the fixed
+  # point 62s, the sanitizer run 461s; the timeout is a runaway stop.
+  native-inline-rc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read    # the checkout
+      issues: write     # the report when the run is red
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the pinned C compiler with inline reference counting
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="$RUNNER_TEMP/cc-inline-rc"
+          printf '#!/bin/sh\nexec %s -DDAWN_RT_INLINE_RC "$@"\n' "$CC" > "$wrapper"
+          chmod +x "$wrapper"
+          echo "CC=$wrapper" >>"$GITHUB_ENV"
+
+      - name: native fixed point, inline reference counting
+        id: fixpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/native-fixpoint.sh > fixpoint.txt 2>&1 || status=$?
+          cat fixpoint.txt
+          exit "${status:-0}"
+
+      - name: std and package tests, native, under ASan and UBSan, inline reference counting
+        id: asan
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/native-asan-tests.sh > asan.txt 2>&1 || status=$?
+          cat asan.txt
+          exit "${status:-0}"
+
+      - name: report a red inline-RC run as an issue
+        if: failure() && (steps.fixpoint.outcome == 'failure' || steps.asan.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly run of the native fixed point and the native ASan/UBSan"
+            echo "tests with -DDAWN_RT_INLINE_RC (scripts/native-fixpoint.sh,"
+            echo "scripts/native-asan-tests.sh) is red. This is the configuration"
+            echo "release-native.sh ships and dawnc build/run default to."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Failing lines:"
+            echo
+            echo '```'
+            cat fixpoint.txt asan.txt 2>/dev/null |
+              grep -E '^(FAIL|==|SUMMARY)|ERROR: |runtime error:' | sed -n '1,60p' ||
+              echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: inline-RC native run is red" issue.md
+
   # Structural properties of `dawn fmt` (research-bug-rate-report 7.2, cut 1;
   # scripts/fmt-properties/run.py's header has the properties and why each).
   # `fmt --check` and the fmt differential only ask whether the output is a
