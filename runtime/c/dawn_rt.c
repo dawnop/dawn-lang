@@ -1297,7 +1297,7 @@ static dawn_box *dawn_box_new(void) {
   return b;
 }
 
-dawn_box *dawn_box_int(int64_t v) {
+dawn_box *dawn_box_int_heap(int64_t v) {
   dawn_box *s = dawn_box_new();
   s->val.i = v;
   return s;
@@ -1306,12 +1306,6 @@ dawn_box *dawn_box_int(int64_t v) {
 dawn_box *dawn_box_float(double v) {
   dawn_box *s = dawn_box_new();
   s->val.f = v;
-  return s;
-}
-
-dawn_box *dawn_box_bool(bool v) {
-  dawn_box *s = dawn_box_new();
-  s->val.b = v;
   return s;
 }
 
@@ -1335,7 +1329,7 @@ dawn_box *dawn_box_unit(dawn_unit v) {
  * to the RC pass (it sees a call typed Int, not the void* underneath), so the
  * reader is the only party who can free it. Slot reads the pass CAN see
  * (CUnbox of an ADT field) borrow instead and must not come through here. */
-int64_t dawn_unbox_int(void *b) {
+int64_t dawn_unbox_int_heap(void *b) {
   int64_t v = ((dawn_box *)b)->val.i;
   dawn_drop(b);
   return v;
@@ -1343,12 +1337,6 @@ int64_t dawn_unbox_int(void *b) {
 
 double dawn_unbox_float(void *b) {
   double v = ((dawn_box *)b)->val.f;
-  dawn_drop(b);
-  return v;
-}
-
-bool dawn_unbox_bool(void *b) {
-  bool v = ((dawn_box *)b)->val.b;
   dawn_drop(b);
   return v;
 }
@@ -1366,7 +1354,7 @@ bool dawn_rc_leak = false;
 
 #ifndef DAWN_RT_INLINE_RC
 void *dawn_dup(void *p) {
-  if (p == NULL) {
+  if (p == NULL || dawn_is_imm(p)) {
     return p;
   }
   dawn_hdr *h = (dawn_hdr *)p;
@@ -1378,7 +1366,7 @@ void *dawn_dup(void *p) {
 #endif
 
 bool dawn_is_unique(const void *p) {
-  return p != NULL && ((const dawn_hdr *)p)->rc == 1;
+  return p != NULL && !dawn_is_imm(p) && ((const dawn_hdr *)p)->rc == 1;
 }
 
 /* Bit i of a field mask. Narrow masks live in the object; wider ones point at
@@ -1410,7 +1398,7 @@ static void dawn_ws_init(dawn_ws *s) {
 }
 
 static void dawn_ws_push(dawn_ws *s, void *p) {
-  if (p == NULL) {
+  if (p == NULL || dawn_is_imm(p)) {
     return;
   }
   if (s->len == s->cap) {
@@ -1508,7 +1496,7 @@ void dawn_drop_slow(void *p) {
 #else
 void dawn_drop(void *p) {
 #endif
-  if (dawn_rc_leak || p == NULL) {
+  if (dawn_rc_leak || p == NULL || dawn_is_imm(p)) {
     return;
   }
   /* Fast path: on scan-shaped code nearly every drop is decrement-only (the
@@ -1911,7 +1899,7 @@ int64_t dawn_int_of_float(double v) {
  * a cheap check that cannot go wrong is worth more than an argument that it
  * never has to. */
 static bool dawn_ev_is_node(const void *p) {
-  if (p == NULL || ((const dawn_hdr *)p)->kind != DAWN_K_ADT) {
+  if (p == NULL || dawn_is_imm(p) || ((const dawn_hdr *)p)->kind != DAWN_K_ADT) {
     return false;
   }
   const dawn_adt *node = (const dawn_adt *)p;
@@ -3407,7 +3395,7 @@ dawn_unit dawn_discard(void *kv, void *ev) {
   dawn_ctl *f;
   dawn_carrier *c;
   (void)ev;
-  if (kv == NULL || ((dawn_hdr *)kv)->kind != DAWN_K_CLO ||
+  if (kv == NULL || dawn_is_imm(kv) || ((dawn_hdr *)kv)->kind != DAWN_K_CLO ||
       ((dawn_clo *)kv)->fn != (void *)dawn_ctl_k_apply) {
     dawn_panic(DAWN_LIT("dawn: `discard` expects a continuation"));
   }
@@ -4149,7 +4137,7 @@ dawn_str *dawn_from_code_points(dawn_array *cps) {
   char *buf = dawn_str_data(r);
   int64_t at = 0;
   for (int64_t i = 0; i < n; i++) {
-    int64_t cp = ((dawn_box *)dawn_array_get(cps, i))->val.i;
+    int64_t cp = dawn_peek_int(dawn_array_get(cps, i));
     if (cp < 0 || cp > 0x10FFFF) {
       dawn_panic(DAWN_LIT("from_code_points: not a valid code point"));
     }
@@ -4355,7 +4343,7 @@ dawn_bytes *dawn_bytes_pack_int(const dawn_array *a, int64_t width, bool little)
   void **slots = a->buf->data;
 #define DAWN_PACK_LOOP(W)                                                  \
   for (int64_t i = 0; i < n; i++) {                                        \
-    dawn_put_int(buf + i * (W), (uint64_t)((dawn_box *)slots[i])->val.i,   \
+    dawn_put_int(buf + i * (W), (uint64_t)dawn_peek_int(slots[i]),           \
                  (W), little);                                             \
   }
   switch (width) {

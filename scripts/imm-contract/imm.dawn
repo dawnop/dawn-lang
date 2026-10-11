@@ -1,0 +1,96 @@
+# The program the immediates contract compiles to C (docs/native-immediates-design.md
+# 5). It puts Ints and Bools into every erased position the native backend has
+# -- a type variable, a closure's capture, argument and result, a mutable cell,
+# an effect operation's argument and result, a generic container -- at the
+# values where the tagged-immediate scheme changes form: the edges of 63 bits
+# (2^62), the edges of wasm32's 31 bits (2^30), the extremes of Int, and
+# results that wrap across them. The JVM backend is the oracle: imm.expect is
+# its transcript, and the native binary has to print the same bytes.
+effect Tick {
+  fn tick(i: Int) -> Int
+  fn flag(b: Bool) -> Bool
+}
+
+effect Switch {
+  fn flip() -> Unit
+  fn read() -> Bool
+}
+
+fn id[T](x: T) -> T = x
+
+fn pair[T](x: T, y: T) -> (T, T) = (x, y)
+
+fn apply[T](f: fn(T) -> T, x: T) -> T = f(x)
+
+fn probes() -> List[Int] = {
+  let p62 = 4611686018427387904
+  let p30 = 1073741824
+  let max = 9223372036854775807
+  let min = -9223372036854775807 - 1
+  [0, 1, -1, p30 - 1, p30, -p30, -p30 - 1, p62 - 1, p62, -p62, -p62 - 1,
+   max, min, max + 1, min - 1, (p62 - 1) + 1, -p62 - 1, max * 2, min * 2]
+}
+
+fn through_generics() -> Unit !io = {
+  for v in probes() {
+    let (a, b) = pair(v, id(v))
+    println("generic ${v} ${a == b} ${id(a) + 0} ${apply(x => x + 1, v)}")
+  }
+}
+
+fn through_containers() -> Unit !io = {
+  let xs = probes()
+  let o: Option[Int] = xs.get(7)
+  println("option ${o.unwrap_or(0)} ${len(xs)}")
+  var total = 0
+  for v in xs { total = total + v }
+  println("sum ${total}")
+  let bs: List[Bool] = [true, false, true]
+  let flipped = bs.map(b => not b)
+  println("bools ${flipped} ${id(true)} ${id(false)}")
+  let nested: List[(Int, Bool)] = xs.map(v => (v, v > 0))
+  println("tuples ${nested.get(8).unwrap_or((0, false))} ${nested.get(9).unwrap_or((0, false))}")
+}
+
+fn through_closures() -> Unit !io = {
+  let p62 = 4611686018427387904
+  let captured = p62
+  let f = (d: Int) => captured + d
+  println("closure ${f(-1)} ${f(0)} ${f(1)} ${f(captured)}")
+  let compose = (g: fn(Int) -> Int) => (x: Int) => g(g(x))
+  println("compose ${compose(f)(0)} ${compose(f)(captured)}")
+}
+
+fn use_ticks() -> Int !Tick = {
+  let a = tick(4611686018427387903)
+  let b = tick(a)
+  let c = tick(-4611686018427387904)
+  let d = tick(c)
+  if flag(false) { a + b + c + d } else { 0 }
+}
+
+fn through_effects() -> Unit !io = {
+  with handle Tick {
+    var n: Int = 4611686018427387900
+    tick(i) => { n = n + 1
+      i + n }
+    flag(b) => not b
+  }
+  with handle Switch {
+    var on: Bool = false
+    flip() => { on = not on }
+    read() => on
+  }
+  flip()
+  println("switch ${read()}")
+  flip()
+  println("switch ${read()}")
+  println("effect ${use_ticks()}")
+}
+
+pub fn main() -> Unit !io = {
+  through_generics()
+  through_containers()
+  through_closures()
+  through_effects()
+}

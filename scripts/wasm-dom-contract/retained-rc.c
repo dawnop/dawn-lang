@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   if (dawn_reactor_state_has()) return 3;
 
   /* set borrows and roots its own reference; get returns another owned one. */
-  dawn_box *first = dawn_box_int(11);
+  dawn_box *first = dawn_box_int_heap(11);
   dawn_box *held = (dawn_box *)dawn_dup(first);
   dawn_reactor_state_set(first);
   dawn_drop(first);
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
   dawn_drop(seen);
 
   /* Replacing releases exactly the slot's old reference. */
-  dawn_box *second = dawn_box_int(22);
+  dawn_box *second = dawn_box_int_heap(22);
   dawn_reactor_state_set(second);
   dawn_drop(second);
   if (!dawn_is_unique(held) || held->val.i != 11) return 5;
@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
 
   /* The retained parent owns one child reference; the exit probe owns the
    * other. Cleanup must drop the parent first, leaving that probe unique. */
-  exit_child = dawn_box_int(77);
+  exit_child = dawn_box_int_heap(77);
   dawn_adt *parent = dawn_adt_new(0, 1, UINT64_C(1));
   parent->fields[0].p = dawn_dup(exit_child);
   dawn_reactor_state_set(parent);
