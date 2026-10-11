@@ -1,6 +1,6 @@
 # Perceus 复用：ADT/记录的 reset/reuse，与借用的模式绑定
 
-> 状态：**current**（已裁决：七个开放问题于 2026-10-07 全部按推荐裁决，见 `agent-handoff/ruling-perceus-reuse-20261007.md` 与 §7.2；PR-A、PR-B、PR-C 已实现，见 §十）。native 性能线刀 3。2026-10-07，基线 `origin/main` = 7d06b29c。
+> 状态：**current**（已裁决：七个开放问题于 2026-10-07 全部按推荐裁决，见 `agent-handoff/ruling-perceus-reuse-20261007.md` 与 §7.2；PR-A、PR-B、PR-C 已实现，见 §十；字段偷取已实现，见 §十一）。native 性能线刀 3。2026-10-07，基线 `origin/main` = 7d06b29c。
 > 依据：`agent-handoff/research-value-repr-report-20261006.md`（update 链每步 5 次分配、复用 0，tree 的 `incr` 每节点一次分配；小对象一整圈约 4.5 到 5 ns）；
 > `agent-handoff/native-iter-report-20261007.md` 与 PR #594（分支 `perf/native-iter-rc`，b11342f3，`docs/native-iter-rc-design.md`）：刀 2 把每次元素访问的 dup 从 10.97 降到 5.97，
 > 剩下的主体是 `std/pvec.leaf_for` 每层 3 次 dup，需要借用的模式绑定或 dup/drop 融合，且与早 drop、复用必须一起设计；
@@ -385,7 +385,7 @@ PR-A 是 #604，PR-B 是 #608。PR-C 的提交：K3.3 `8d01885b`（运行时）�
 - 没有新增语句节点。`CReset(inner, ty)` 与 `CReuse(tok, ctor, ty)` 是两个只在 rc 之后存在的表达式，包着 `CDup` 那样的壳；令牌是一个普通的计数局部，`let tok = reset(s)`。所以 `rc_check` 只多两个臂、没有新规则：令牌在每条路径上恰好被一次构造器转移或一次作用域退出释放，这就是已有的账本规则。`sweep` 只需要不碰令牌。
 - 配对按 ADT 类型而不是按字段数：`sweep` 看到后缀（同一块里剩下的语句加尾表达式）里有同一 ADT 的构造器，且字段数在 1 到 64 之间，就把那次释放换成 reset。每块按「后缀里的构造器数减去已持有的令牌数」限量。构造器从最近的同类型令牌取，取之前要过 `transferable`，所以令牌不会被花在它所在的循环之外，也不会花在短路右侧。同类型但字段数不同的构造器（一个类型的几个构造器宽度不同）由运行时兜底：`dawn_adt_reuse` 遇到宽度不符的令牌就放回并新分配，记为未命中。
 - 以 `null_ref` 占位开头的绑定不作候选。`std/pvec.push_tail` 的 match 结果槽在 reset 时是 NULL，第一版崩在这里；运行时也对 NULL 和非 ADT kind 做了兜底，各有断言与变异体。
-- 偷字段的快路径展开（§4.2 的 `if (rc == 1) { 偷 } else { dup+drop }`）**没有做**。简单 reset 先释放子节点再交回壳，省的是 malloc/free 与槽的重写，不省子节点的 dup 与随后递减。验收（update 零分配、tree 复用率）不需要它；是否做它看下面的墙钟剩余。
+- 偷字段的快路径展开（§4.2 的 `if (rc == 1) { 偷 } else { dup+drop }`）PR-C **没有做**。简单 reset 先释放子节点再交回壳，省的是 malloc/free 与槽的重写，不省子节点的 dup 与随后递减。验收（update 零分配、tree 复用率）不需要它。后来做了，见 §十一。
 - K3.5 的「reset 候选并入借用推断」不需要新代码：`infer.proj_demands` 早就有「函数里构造了某 ADT，则对该 ADT 参数的投影要求 owned」这一条（重建形状规则），它与 reset 候选判据重合。验收已经由现有契约覆盖：`rc-mode-contract` 的 `tree_sum` 里 `sum` 借用、`incr` 的参数 owned；`map-reuse-contract` 与 `array-contract` 的比例没有降。
 - 元组与擦除位置的令牌（K3.6）没有做。
 
@@ -402,3 +402,122 @@ PR-A 是 #604，PR-B 是 #608。PR-C 的提交：K3.3 `8d01885b`（运行时）�
 墙钟（交错 7 次取中位数，机器负载 11 到 13，所以只看量级）：nbody −3.0%，pair −4.6%，option −10.4%，listf −2.7%，update −65.0%，tree −45.9%。自举负载 `dawnc emitc nmain.dawn`：23.6 s → 22.7 s（−3.9%，在噪声内；自编译里复用 5020 万次命中、1992 万次未命中）。原生编译器的 cc 构建时间 13.4 s → 13.1 s，不变。
 
 契约的墙钟：`adt-reuse-contract` 本机 16 核 47 s，接在 contracts-2 的 RC view contract 之后。
+
+## 十一、字段偷取（R1b）
+
+> 状态：**current**。2026-10-11，基线 `origin/main` = d3e000a5。提交：运行时 `ef400ee3`，编译器与契约 `dfb66cbb`。
+> 依据：`agent-handoff/research-koka-gap-20261011.md` §3.1 与 §4.2（红黑树消融：偷字段单项 −33%，单层字段，下界）。
+
+### 11.1 问题
+
+§十 的简单 reset 先释放节点的全部指针字段，再把壳交给构造器。而匹配刚把构造器要带走的那几个字段 `dup` 过（`dawn_dup`），
+所以每个被复用的唯一节点，对每个带走的字段付一次 `dawn_dup` 调用加一次 `dawn_drop` 调用，两者的净效果是零。
+rbtree 的 `ins` 里一个节点带走左右两个子树，所以一次插入沿路径每层 4 次外部调用白付。Koka 的 drop 特化在节点唯一时直接取字段，不 dup 也不 drop（调研报告 §4.2）。
+
+### 11.2 做法
+
+**Core。** 两处改动，都只在 rc 之后存在，JVM 看不到：
+
+- 新表达式 `CSteal(inner, ty)`，`inner` 是被 reset 节点的 `CField`。它站在原来 `CDup` 同一个投影的位置，语义是「读出该字段，引用随之转给绑定者，不计数」。
+- `CReset(inner, stolen, ty)` 多一个字段 `stolen`：被偷的字段下标。
+
+**配对。** `rc.dawn` 的 `steal_fields` 在每个块的重写结果上做一遍后处理：对每个 `let tok = reset(s)`，向上扫一段「纯读」语句，
+把其中形如 `let x = dup(s.fN)` 的 `CDup` 换成 `CSteal`，并把 N 记进 reset 的 `stolen`。规则：
+
+- **窗口**只含纯读：对 `s` 的字段投影、标量读、`CDup`/`CSteal` 自己、`CTagOf`/`CIsCtor`。遇到调用、`CSDrop`、别的 reset 或任何其他语句就停。
+  调用会 panic：被偷的引用此刻既在栈帧槽里（展开时释放）又还在节点里（展开时随节点释放），两次释放。`CSDrop` 会释放一个被偷的子节点，而窗口里之后对 `s` 的读还经过节点去取它。
+- 每个字段只偷一次：同一字段的第二个绑定保留它的 `dup`（唯一时那一份引用转给第一个绑定，另一份是真增量）。
+- 只偷 `s` 的直接字段，且下标小于 64。嵌套投影（`s.f1.f4`）不动，见 11.6。
+- `rc_check` 的 `steal_check` 在每个块上独立验证：每个 `CSteal` 之后窗口内必须有对应 reset 且其 `stolen` 含该下标；reset 里列出的下标必须有对应 `CSteal`。
+  前者违反是双重释放，后者是泄漏。pass 与检查器各写一份，没有共用实现。
+
+**运行时。** `dawn_adt_reset_steal(a, stolen)`（`dawn_rt.c`）与 `dawn_adt_reset` 是同一个 `static inline` 体 `dawn_adt_reset_masked`，一个传 0：
+
+- 唯一（`rc == 1`、非 leak 模式、ADT、字段不超过 64）：先清 `ptrmask` 再释放 `mask & ~stolen` 里的字段，返回壳。清掩码在先的理由同 §4.2：令牌是合法的无指针字段节点，
+  reset 与 reuse 之间 panic 被接住时帧清理释放它只释放壳。被偷的字段此刻只在调用者的槽里，清理释放一次。
+- 其余路径（共享、leak 模式、不可变单例、宽节点）：对 `stolen` 中且 `ptrmask` 标记为指针的字段补 `dawn_dup`，再 `dawn_drop(a)`，返回 NULL。
+  这一条是偷字段之前调用者 `dup` 加 `reset` 的逐字段等价物，调用者的绑定在所有路径上都拥有自己的一份引用。
+- 两条路径都只调 `dawn_drop` 与 `dawn_dup`，二者不 panic，所以不存在「一份引用同时在槽里和节点里」的展开瞬间。
+- 计数：`DAWN_RC_STATS` 多一行 `rc-stats: adt steal unique N, shared M`，契约靠它确认两条路径都跑到了。
+
+**发射。** `CSteal` 发射成对字段读取的类型转换，不调用 `dawn_dup`；`CReset` 有 `stolen` 时发射 `dawn_adt_reset_steal(v, UINT64_C(0x...))`。
+
+**JVM 后端不受影响。** JVM 没有 RC，`rc.dawn` 这一遍本来只在 C 路径上跑；`CSteal` 与新 `CReset` 在 `emit.dawn`/`operand.dawn` 里与 `CDup`/`CReset` 一样 panic（到不了）。
+prev-diff 的 12 个标签无字节差异。
+
+### 11.3 实测
+
+交互式 5 次取最短，同一份源码分别由 `origin/main` 与本分支的编译器与运行时编出，机器负载 3 到 5（别的写者在跑，绝对值约 ±30%，只看比值）。
+
+| 基准 | 之前（s） | 之后（s） | 比值 | 唯一偷取次数 |
+|---|---|---|---|---|
+| rbtree（420 万） | 2.769 | 2.243 | 0.810 | 约 3670 万/100 万插入 |
+| cfold | 0.326 | 0.273 | 0.838 | 1048 万 |
+| binarytrees（19） | 1.508 | 1.438 | 0.954 | 0（噪声，无 reset） |
+| rbtree-ck（cons） | 6.468 | 6.357 | 0.983 | |
+| deriv | 2.166 | 2.130 | 0.984 | 0 唯一，464 万共享（宽度不符的令牌不命中，见下） |
+| nqueens（cons） | 0.861 | 0.867 | 1.007 | |
+| 原生 `dawnc emitc nmain.dawn` | 9.351 | 9.360 | 1.001 | 2600 万唯一，1966 万共享 |
+
+rbtree 的静态发射：`dawn_dup` 调用点 55 → 36，reset 12 处全部带偷取。
+
+**与调研的 −33% 不是同一个数。** 调研的 rt4 变体是 5.911 s 到 3.933 s（0.67），在同一次测量里别的变体也有；这里是 2.769 s 到 2.243 s（0.81），两处基线的机器负载与程序规模不同，
+所以不能直接比。已知的差异是：本刀只偷 `s` 的直接字段，rbtree 剩下的 36 个 `dup` 调用点都是嵌套投影（`balance_*` 里的 `s.f1.f1`），见 11.6；`Color` 是堆上单例指针，
+读它仍要走 `dawn_drop`。这两项各占多少没有逐项量化。−19% 是这一刀单独的数，不是调研数的复现。
+
+**自编译负载不变。** 原生 `dawnc` 的 2600 万次唯一偷取每次省两次外部调用，约占那 9.35 s 的 1% 量级，在噪声里。同时 1966 万次是共享路径：检查器沿共享的 AST 走，
+被偷取的 reset 里四成以上（1966 万对 2600 万）撞上共享节点。共享路径的成本与偷取之前相同（补 dup 再 drop），没有回退。
+
+**deriv 不受益。** deriv 的复用 0 次命中、2375 万次未命中（`Val` 1 字段对 `Add` 2 字段，令牌宽度不符），唯一路径的偷取为 0。偷取只在 reset 拿到唯一节点时省事；这条要配令牌的 size class 匹配（调研 4.2 b），不在本刀。
+
+### 11.4 安全论证与契约
+
+要证的是三件事：被偷的字段恰好释放一次（由调用者的绑定），没被偷的指针字段恰好释放一次（由 reset），共享时两者的引用计数都对。
+
+- **panic 在 reset 与 reuse 之间**：被偷的字段在调用者的槽里，令牌是无指针字段的壳，展开各释放一次。契约里 `steal_boom` 是 `Node(l, panic, r)`，`l`、`r` 都被偷，panic 被 `catch_panic` 接住，ASan 与 LSan 绿。
+- **panic 在偷与 reset 之间**：窗口里没有可 panic 的语句（编译期保证，`steal_check` 验证）。
+- **复用失败（令牌宽度不符或 NULL）**：`dawn_adt_reuse` 释放令牌（只有壳）并新分配，被偷的字段已经在调用者手里，不受影响。
+- **非唯一路径**：补 dup 再 drop，见上。`shared` 工作负载里同一棵树被 `incr`/`prune`/`swap`/`twice` 各用一次，答案与不偷取的 JVM 后端逐字节一致。
+- **同一字段两个绑定**：一份转移、一份真 dup，`twice` 用例覆盖。
+- **某字段在窗口之后又被读**：被偷字段的绑定在窗口内不会被释放（`CSDrop` 终止窗口），所以经过节点读它安全。
+
+契约新增：
+
+| 契约 | 新增 |
+|---|---|
+| `rc-contract` | `adt_reset_steal_unique`、`adt_reset_steal_releases_the_rest`、`adt_reset_steal_shared`（用子节点的引用计数当观测口） |
+| `adt-reuse-contract` | `steal` 工作负载与 `steal_paths` 断言（唯一与共享两条路径都必须出现） |
+
+变异体与结果（全部先红后写入 matrix）：
+
+| 变异体 | 做了什么 | 谁红 |
+|---|---|---|
+| `steal-releases-stolen`（运行时） | reset 把被偷字段也释放，调用者再释放一次 | rc-contract `adt_reset_steal_unique`；adt-reuse `finished`：AddressSanitizer heap-use-after-free（`dawn_drop`），另有 answers 与三个比率 |
+| `steal-releases-nothing-else`（运行时） | 有偷取时 reset 什么都不释放 | rc-contract `adt_reset_steal_releases_the_rest`（泄漏，计数口可见） |
+| `steal-shared-forgets-the-count`（运行时） | 共享路径不补 dup | rc-contract `adt_reset_steal_shared`；adt-reuse `finished`：heap-use-after-free，及 answers |
+| `steal-mask-dropped`（编译器） | 发射器忘记 `stolen`，发普通 reset，而 `CSteal` 已不 dup | adt-reuse `finished`：heap-use-after-free（双重释放），及 answers 与三个比率 |
+| `steal-mask-all`（编译器） | 发射器把所有字段都当被偷 | adt-reuse `finished`：LeakSanitizer。答案与比率全绿，只有泄漏检测看得见 |
+
+另有 rc.dawn 的内联测试：每字段只偷一次、调用与 `CSDrop` 终止窗口、别的节点的字段不偷、`steal_check` 拒绝悬空的偷取与虚报的下标。
+
+### 11.5 门禁
+
+`dawn test selfhost` 1075 项；`native-fixpoint.sh` B==C；`spike-native/run.sh`；`rc-contract`（含 ASan 腿与全部变异体）；`adt-reuse`、`frame`、`rc-view`、`rc-mode`、`map-reuse`、`ctl-live` 契约；
+`selfhost-prev-diff.sh`（12 标签无差）；`mutation-anchor-preflight`（627 处）及其自测；`anchor-guard` 及自测；`steps_lock.py check`；`c-map/check.py`；`core-lint-contract`。
+没有 `Emit-Change` 声明：`scripts/emit-labels.txt` 里没有覆盖原生 C 输出的标签，prev-diff 的 JVM 发射对该改动字节相同。
+
+### 11.6 没做的与遗留
+
+- **嵌套字段的偷取**：`balance_*` 的模式里节点的子节点是另一个被匹配的节点，它自己死了而没有被复用，所以它的子节点（孙）的 `dup` 仍在。
+  要偷到孙需要把子节点也 reset（让它的壳被复用，或至少让它的字段被偷），那是「内层 reset」，要重做配对（令牌按最近同类型取）。rbtree 剩余 36 个 `dup` 调用点是它。
+- **令牌按 size class 匹配、而不是按字段数**（deriv 的 2370 万次未命中，调研 4.2 b）：独立的一刀，不碰偷取。
+- **只写改动的字段**（调研 4.2 c）：复用重写全部字段；需要 reuse 知道哪些字段没变。
+- **`dawn_adt_reset_steal` 与 `dawn_adt_reuse` 内联进调用方**：它们是 `dawn_rt.c` 里的外部调用，默认不内联；`-DDAWN_RT_INLINE_RC` 的裁决（ffi-llvm 4.a）不在本刀。
+
+### 11.7 不做的（理由）
+
+- **把窗口放宽到包含可 panic 的调用。** 理由：要做就必须让展开路径知道哪些槽里的引用其实还在节点里（需要在偷与 reset 之间给槽打标记，或者让清理对被偷的槽跳过），代价是每帧清理多一个判断，而 `DAWN_OWN_FRAME` 的清理开销本来就是调研里的最大头（4.1）。窗口里没有调用时这一问题不存在。
+- **跨 `if` 复制偷取序列（Lean `ExpandResetReuse` 式的 `if unique { 偷 } else { dup+drop }` 展开成两份代码）。** 理由：运行时一个 `rc == 1` 分支的成本与那两份代码里的唯一性判断相同，而展开会让每个 reset 的代码体积翻倍（§4.2 已记 Lean 移植到 LCNF 的理由正是避免指数膨胀）。共享路径的补 dup 放在运行时里，调用点代码不变。
+- **偷标量或枚举字段。** 理由：标量没有计数；枚举（`Color`）是静态单例，`dup`/`drop` 在不可变路径上是空操作，偷不省什么。
+- **JVM 侧任何改动。** 理由：JVM 没有 RC，`CSteal` 与新 `CReset` 字段到不了它（`emit.dawn` 与 `operand.dawn` 里 panic）。
+- **为 `deriv` 的宽度不符造一个别的补救。** 理由：根因是令牌匹配按字段数，应该在配对一侧修（11.6），不是在偷取里绕。
