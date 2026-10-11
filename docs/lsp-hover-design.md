@@ -435,6 +435,10 @@ std 走 `StdCtx.srcs` 而不是调研建议的 `std_file_of` 读文件：`srcs` 
 `client/registerCapability` 之外从不向客户端发请求，也不处理客户端的回包（`is_response` 一律丢掉）；为一组
 四个布尔值加一条请求-回包通路，代价与收益不成比例。重开条件：有人需要不重启编辑器就切换开关。
 VS Code 扩展不改：四个默认值就是扩展想要的，`vscode-languageclient` 原生支持 inlay。
+扩展 0.1.5 起把 `propagatedErrors`、`declarationEffects`、`patternTypes` 三个键开成设置
+`dawn.inlayHints.<键>`（默认值与 `default_inlay_opts` 相同，`editors/vscode/test/server-contract.js`
+对照服务端源码核对键名与默认值），经 `initializationOptions.inlayHints` 传过去。服务端仍只在 `initialize`
+读一次，所以扩展在这几个设置变化时重启客户端，而不是给服务端加 `workspace/configuration`。
 
 ### A4.4 分层
 

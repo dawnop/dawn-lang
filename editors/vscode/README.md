@@ -42,6 +42,15 @@ here, with the caveat that it is the C backend and refuses `use java`.
 | Setting | Default | What it is |
 |---|---|---|
 | `dawn.lspPath` | `dawn` | The Dawn CLI to run the language server from. `~`, `${userHome}` and `${workspaceFolder}` are expanded; a relative path is taken from the first workspace folder; a change restarts the server. |
+| `dawn.inlayHints.propagatedErrors` | `false` | Show the error type a `?` on a `Result` propagates, after the `?`. |
+| `dawn.inlayHints.declarationEffects` | `true` | Show the `!io` the checker infers for a private function that writes neither a return type nor effects. |
+| `dawn.inlayHints.patternTypes` | `true` | Show the types of the names a `for` pattern or a `match` arm binds. |
+
+The three inlay hint settings go to the server as `initializationOptions`,
+which it reads only when it starts, so changing one restarts the server. The
+other inlay hints (types on `let` and lambda parameters, effects on calls,
+left-out default arguments, parameter names) keep the server's defaults and
+have no setting yet.
 
 ## Building it yourself
 

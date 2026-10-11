@@ -134,8 +134,36 @@ function serverInfoProblem(info, min) {
   return null;
 }
 
+// The inlay hint switches the extension exposes, as `dawn.inlayHints.<key>`,
+// with the server's own defaults (`default_inlay_opts` in
+// selfhost/src/lsp/lspinlay.dawn). The server reads them from
+// `initializationOptions.inlayHints` once, at `initialize`, and has no
+// `workspace/configuration` path, so a change means a restart; the keys are
+// the server's spelling, so the settings map onto them without renaming.
+// test/server-contract.js holds both the names and the defaults to the server.
+const INLAY_HINT_SETTINGS = [
+  { key: "propagatedErrors", default: false },
+  { key: "declarationEffects", default: true },
+  { key: "patternTypes", default: true },
+];
+
+// `initializationOptions` for the server from a settings getter
+// (`(key, dflt) => value`, keys relative to `dawn.inlayHints`). A value that
+// is not a boolean is left out, so the server falls back to its default, as
+// it does for a key that is missing.
+function initializationOptions(get) {
+  const inlayHints = {};
+  for (const s of INLAY_HINT_SETTINGS) {
+    const v = get(s.key, s.default);
+    if (typeof v === "boolean") inlayHints[s.key] = v;
+  }
+  return { inlayHints };
+}
+
 module.exports = {
   MIN_SERVER_VERSION,
+  INLAY_HINT_SETTINGS,
+  initializationOptions,
   expandCommand,
   findExecutable,
   settingSource,
