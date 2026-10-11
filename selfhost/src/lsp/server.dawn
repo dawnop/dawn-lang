@@ -4514,6 +4514,77 @@ test "a handler arm's operation name answers as the operation it implements" {
   }))
 }
 
+test "a handler arm answers for qualified and imported effects, with the operation's doc, and for no operation when the name matches none" {
+  io.with_fs_real(() => no_host(() => {
+    let root = "/tmp/dawn-selfhost-lsp-def/armstd"
+    let _ = io.mkdirs(root)
+    def_probe_put("${root}/modules.txt", "armprobe\n")
+    def_probe_put("${root}/armprobe.dawn", join([
+      "## Reads the next probe value.",
+      "pub effect Probe {",
+      "  ## Asks for the value at `n`.",
+      "  fn probe_at(n: Int) -> Int",
+      "}",
+      ""
+    ], "\n"))
+    let pstd = match load_std(root) {
+      Ok(sc) -> sc
+      Err(e) -> panic("probe std: ${std_load_error_text(e)}")
+    }
+    let st = def_probe_state(pstd)
+    let text = join([
+      "use std/armprobe",
+      "",
+      "effect Local {",
+      "  ## Counts local things.",
+      "  fn count() -> Int",
+      "}",
+      "",
+      "fn f() -> Int = {",
+      "  with handle armprobe.Probe { probe_at(n) => n }",
+      "  with handle Local { count() => 1 }",
+      "  with handle Local { nope() => 1 }",
+      "  armprobe.probe_at(1) + count()",
+      "}",
+      ""
+    ], "\n")
+    let d = def_probe_doc_named(st, "armuser.dawn", text)
+    let file = canon_identity("${root}/armprobe.dawn")
+
+    # a qualified effect of another module: the call site's answer, the
+    # operation's own doc, and a jump into that module's file
+    let call = hover_probe_at(st, d, text, "probe_at(1)", 0)
+    assert hover_probe_at(st, d, text, "probe_at(n) =>", 0) == call
+    assert str.ends_with(call, "\n```\n\n---\n\nAsks for the value at `n`.")
+    let q = def_probe_at(st, d, text, "probe_at(n) =>", 0)
+    assert q.def_path == Some(file)
+    let (qlo, qhi) = def_probe_span(q, "the arm of a qualified effect")
+    let src = match io.read_file(file) {
+      Ok(s) -> s
+      Err(e) -> panic("armprobe: ${e.message}")
+    }
+    assert str.slice(src, qlo, qhi) == "probe_at"
+
+    # an effect of this module carries its operation's doc as well
+    assert hover_probe_at(st, d, text, "count() =>", 0) ==
+      "```dawn\nfn count() -> Int !Local\n```\n\n---\n\nCounts local things."
+
+    # references count the arm head with the declaration and the call sites
+    let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
+    let decl = probe_offset(text, "count() -> Int", 0)
+    let arm_head = probe_offset(text, "count() => 1", 0)
+    let use_site = probe_offset(text, "count()\n}", 0)
+    assert map(occurrences(qc, arm_head, true), o => o.lo) == [decl, arm_head, use_site]
+
+    # a name that is no operation of the effect: no hover of an operation and
+    # no jump, and the request does not fail
+    let none = def_probe_at(st, d, text, "nope() =>", 0)
+    assert none.def == None
+    assert not str.contains(none.hover, "fn nope")
+  }))
+}
+
 # ---- comptime values on hover (docs/lsp-hover-design.md §3) ----
 
 fn value_probe_text() -> String =
