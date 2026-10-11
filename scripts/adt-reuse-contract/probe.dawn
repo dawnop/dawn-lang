@@ -11,6 +11,9 @@
 #                     so the build is suspended between the reset and the reuse
 #   boom N            `incr` that panics between the reset and the reuse, caught
 #   loopy             a node dead before a loop whose body builds nodes of its type
+#   steal             field stealing (docs/perceus-reuse-design.md 10) on a unique tree and on a
+#                     shared one: a field the new node drops, fields that swap sides, a field
+#                     used twice, and a panic caught while stolen fields are held in slots
 #
 # Every run prints one line on stdout, and the run script compares it with the
 # line it expects, so a reuse that changed an answer cannot hide behind a rate.
@@ -97,6 +100,34 @@ fn loopy(t: T, n: Int) -> Int =
     }
   }
 
+# The left subtree is not carried over: the reset has to release it, and only it.
+fn prune(t: T) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(_, v, r) -> Node(Leaf, v + 1, r)
+  }
+
+# Both subtrees are carried over, on opposite sides.
+fn swap(t: T) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(r, v + 1, l)
+  }
+
+# `l` goes into two nodes: one reference is moved, the other is counted.
+fn twice(t: T) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(l, v, Node(l, v + 1, r))
+  }
+
+# Stolen `l` and `r` sit in the frame's slots while the call in the middle panics.
+fn steal_boom(t: T, at: Int) -> T =
+  match t {
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(l, if v == at { panic("steal boom at ${to_string(v)}") } else { v }, r)
+  }
+
 fn int_arg(i: Int, d: Int) -> Int !io = match args().get(i) {
   Some(s) -> parse_int(s).unwrap_or(d)
   None -> d
@@ -157,6 +188,23 @@ fn run_boom(n: Int) -> Unit !io = {
   io.println("boom after ${sum(u2)}")
 }
 
+fn run_steal() -> Unit !io = {
+  # unique: every node on the path is reset with its fields moved
+  let u = twice(swap(prune(build(0, 50))))
+  # shared: `old` stays alive, so each reset finds rc > 1 and counts what it moved
+  let old = build(0, 50)
+  let p = prune(old)
+  let w = swap(old)
+  let x = twice(old)
+  io.println("steal ${sum(u)} ${sum(old)} ${sum(p)} ${sum(w)} ${sum(x)}")
+  let t = build(0, 50)
+  match catch_panic(() => steal_boom(t, 25)) {
+    Ok(y) -> io.println("steal survived ${sum(y)}")
+    Err(e) -> io.println("steal caught ${e.message}")
+  }
+  io.println("steal after ${sum(swap(build(0, 50)))}")
+}
+
 fn run_loopy() -> Unit !io = io.println("loopy ${loopy(build(0, 10), 100)}")
 
 pub fn main() -> Unit !io = {
@@ -168,6 +216,7 @@ pub fn main() -> Unit !io = {
     Some("ask") -> run_ask(int_arg(1, 100))
     Some("boom") -> run_boom(int_arg(1, 100))
     Some("loopy") -> run_loopy()
-    _ -> io.println("usage: probe update|tree|list|shared|ask|boom|loopy")
+    Some("steal") -> run_steal()
+    _ -> io.println("usage: probe update|tree|list|shared|ask|boom|loopy|steal")
   }
 }

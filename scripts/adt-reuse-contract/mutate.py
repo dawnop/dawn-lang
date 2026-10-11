@@ -14,8 +14,15 @@ Each mutation takes away one thing that makes reset/reuse correct or useful
                         the frame still releases a node the reset consumed.
   reuse-across-loops    a token made outside a loop may be spent inside it,
                         which the oracle's loop rule refuses.
+  steal-mask-dropped    the emitter forgets which fields were stolen and emits
+                        the plain reset, so the node releases the references the
+                        constructor now owns: a double free.
+  steal-mask-all        the emitter names every field as stolen, so the reset
+                        releases none of the ones the constructor did not take:
+                        a leak.
 
-`reset-ignores-sharing` is a runtime mutation and lives in
+`reset-ignores-sharing`, `steal-releases-stolen` and
+`steal-shared-forgets-the-count` are runtime mutations and live in
 scripts/rc-contract/mutate.py, which run.sh applies to a copy of runtime/c.
 
 The registry shape is the one mutation-anchor-preflight.py discovers.
@@ -37,15 +44,27 @@ MUTATIONS = {
     ),),
     "reset-keeps-the-slot": ((
         "selfhost/src/c/emitc.dawn",
-        """    CReset(inner, _) -> {
+        """    CReset(inner, stolen, _) -> {
       let (st1, v) = emit_expr(st, inner, true)""",
-        """    CReset(inner, _) -> {
+        """    CReset(inner, stolen, _) -> {
       let (st1, v) = emit_expr(st, inner, false)""",
     ),),
     "reuse-across-loops": ((
         "selfhost/src/c/rc.dawn",
         "Some(aid) -> if aid == adt && transferable(st, sym, after) { return Some(sym) }",
         "Some(aid) -> if aid == adt { return Some(sym) }",
+    ),),
+    "steal-mask-dropped": ((
+        "selfhost/src/c/emitc.dawn",
+        """      if len(stolen) == 0 {
+        (st1, "dawn_adt_reset(" ++ v ++ ")")""",
+        """      if true {
+        (st1, "dawn_adt_reset(" ++ v ++ ")")""",
+    ),),
+    "steal-mask-all": ((
+        "selfhost/src/c/emitc.dawn",
+        "bits = bits ++ [list.contains(stolen, i)]",
+        "bits = bits ++ [true]",
     ),),
 }
 

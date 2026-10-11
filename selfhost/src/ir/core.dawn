@@ -227,6 +227,13 @@ pub type CExpr =
 # a projection, and there is no symbol to name until after the let. Built only
 # by `rc.dawn` (docs/perceus-design.md 5).
   | CDup(inner: CExpr, ty: Ty)
+# A reference moved out of a node that a `CReset` in the same block is about to
+# keep: `inner` is a `CField` of that node, read without counting, and the
+# result is owned by whatever binds it (docs/perceus-reuse-design.md 10). It
+# stands where `CDup` of the same projection stood. The reset names the stolen
+# indices; when the node is not unique it dups them itself, so the binding is
+# owned on every path. Built only by `rc.dawn`, C-only.
+  | CSteal(inner: CExpr, ty: Ty)
 # Reset and reuse of a constructed node (docs/perceus-reuse-design.md 4.2),
 # both built only by `rc.dawn` and both C-only. `CReset` CONSUMES `inner` (a
 # local, already dead after this point) and answers a token: the same block
@@ -236,7 +243,7 @@ pub type CExpr =
 # and `CReuse` is its one consuming use: the constructor `ctor` built into the
 # token's block instead of a fresh allocation. Neither node needs a case in
 # the JVM, which never sees one.
-  | CReset(inner: CExpr, ty: Ty)
+  | CReset(inner: CExpr, stolen: List[Int], ty: Ty)
   | CReuse(tok: CExpr, ctor: CExpr, ty: Ty)
 
 ## One field of a CUpdate. The declared type rides on the node for the same
@@ -717,7 +724,8 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CContinue(_) -> TyNever
     CForeign(_, ty, _) -> ty
     CDup(_, ty) -> ty
-    CReset(_, ty) -> ty
+    CSteal(_, ty) -> ty
+    CReset(_, _, ty) -> ty
     CReuse(_, _, ty) -> ty
   }
 

@@ -16,6 +16,7 @@ assert	update_zero_alloc
 assert	tree_reuse_rate
 assert	list_reuse_rate
 assert	ask_reuse
+assert	steal_paths
 
 
 role	pairing-off	counted
@@ -24,6 +25,7 @@ red	pairing-off	update_zero_alloc
 red	pairing-off	tree_reuse_rate
 red	pairing-off	list_reuse_rate
 red	pairing-off	ask_reuse
+red	pairing-off	steal_paths
 
 role	reuse-leaks-the-token	counted
 owner	reuse-leaks-the-token	finished
@@ -36,6 +38,7 @@ role	reset-keeps-the-slot	counted
 owner	reset-keeps-the-slot	finished
 red	reset-keeps-the-slot	finished
 red	reset-keeps-the-slot	answers
+red	reset-keeps-the-slot	steal_paths
 
 role	reuse-across-loops	counted
 owner	reuse-across-loops	emits
@@ -44,3 +47,39 @@ red	reuse-across-loops	emits
 role	reset-ignores-sharing	runtime
 owner	reset-ignores-sharing	answers
 red	reset-ignores-sharing	answers
+red	reset-ignores-sharing	steal_paths
+
+# The emitter forgets which fields were stolen: the node releases references
+# the constructor now owns.
+role	steal-mask-dropped	counted
+owner	steal-mask-dropped	finished
+red	steal-mask-dropped	finished
+red	steal-mask-dropped	answers
+red	steal-mask-dropped	tree_reuse_rate
+red	steal-mask-dropped	list_reuse_rate
+red	steal-mask-dropped	ask_reuse
+red	steal-mask-dropped	steal_paths
+
+# The emitter names every field as stolen: the fields the new node does not
+# take are never released. A leak, so only the leak sanitizer sees it; every
+# answer and every rate is unchanged.
+role	steal-mask-all	counted
+owner	steal-mask-all	finished
+red	steal-mask-all	finished
+
+# The runtime also releases the fields the caller took.
+role	steal-releases-stolen	runtime
+owner	steal-releases-stolen	finished
+red	steal-releases-stolen	finished
+red	steal-releases-stolen	answers
+red	steal-releases-stolen	tree_reuse_rate
+red	steal-releases-stolen	list_reuse_rate
+red	steal-releases-stolen	ask_reuse
+red	steal-releases-stolen	steal_paths
+
+# A shared node's stolen fields are not counted before the node is dropped.
+role	steal-shared-forgets-the-count	runtime
+owner	steal-shared-forgets-the-count	finished
+red	steal-shared-forgets-the-count	finished
+red	steal-shared-forgets-the-count	answers
+red	steal-shared-forgets-the-count	steal_paths

@@ -46,7 +46,7 @@ use ir/core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
-  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup, CReset, CReuse, CUpdate,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup, CSteal, CReset, CReuse, CUpdate,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CConstRef, CComptime,
@@ -1010,9 +1010,25 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
     }
     # the binding is consumed (k = true: a transfer out of its slot), and what
     # comes back is the token or NULL, owned by whatever it is bound to next
-    CReset(inner, _) -> {
+    CReset(inner, stolen, _) -> {
       let (st1, v) = emit_expr(st, inner, true)
-      (st1, "dawn_adt_reset(" ++ v ++ ")")
+      if len(stolen) == 0 {
+        (st1, "dawn_adt_reset(" ++ v ++ ")")
+      } else {
+        var bits: List[Bool] = []
+        var i = 0
+        while i < 64 {
+          bits = bits ++ [list.contains(stolen, i)]
+          i = i + 1
+        }
+        (st1, "dawn_adt_reset_steal(" ++ v ++ ", " ++ mask_words(bits)[0] ++ ")")
+      }
+    }
+    # The reference the node holds, moved out as it stands: the dup is gone and
+    # the reset that follows is told which fields left (see `steal_fields`).
+    CSteal(inner, ty) -> {
+      let (st1, v) = emit_expr(st, inner, false)
+      (st1, "((" ++ c_type(ty) ++ ")" ++ v ++ ")")
     }
     CUnbox(inner, to) -> {
       let (st1, v) = emit_expr(st, inner, k && is_ref_ty(to))
@@ -1652,7 +1668,7 @@ fn inline_raises(e: CExpr) -> Bool =
     CUnary(_, x, _) -> inline_raises(x)
     CBox(x, _) -> inline_raises(x)
     CUnbox(x, _) -> inline_raises(x)
-    CDup(x, _) -> inline_raises(x)
+    CDup(x, _) | CSteal(x, _) -> inline_raises(x)
     CField(x, _, _, _, _) -> inline_raises(x)
     CTupleGet(x, _, _) -> inline_raises(x)
     CIsCtor(x, _, _) -> inline_raises(x)
@@ -2023,7 +2039,7 @@ fn result_tag(ctor: String) -> Int = {
 fn erased_from(e: CExpr) -> Ty =
   match e {
     CBox(_, from) -> from
-    CDup(inner, _) -> erased_from(inner)
+    CDup(inner, _) | CSteal(inner, _) -> erased_from(inner)
     _ -> cex_ty(e)
   }
 
