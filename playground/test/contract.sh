@@ -61,7 +61,12 @@ if [ "$(nat_count 'proxy_pass http://unix:/run/dawn-play/http.sock:/')" != 4 ] |
     [ "$(nat_count 'client_body_timeout 10s')" != 3 ]; then
   echo "FAIL: nginx-switch.sh native does not retarget exactly the four runner locations"; exit 1
 fi
-echo "  ok  canary check self-test; nginx variant generator"
+# Every runner route keeps the CORS headers production sends (the site is on
+# another origin), in both variants; the self-test proves the check goes red.
+python3 -I -B deploy/nginx-cors-check.py --self-test >/dev/null || { echo "FAIL: nginx-cors-check.py self-test"; exit 1; }
+python3 -I -B deploy/nginx-cors-check.py deploy/nginx-play.conf || { echo "FAIL: nginx-play.conf CORS"; exit 1; }
+printf '%s\n' "$nat_conf" | python3 -I -B deploy/nginx-cors-check.py - || { echo "FAIL: nginx-switch.sh native CORS"; exit 1; }
+echo "  ok  canary check self-test; nginx variant generator; nginx CORS on every runner route"
 
 # Both layouts: macOS bundles the JDK under Contents/Home, Linux tarballs put
 # bin/ at the top level. Same probe as bin/dawn.
