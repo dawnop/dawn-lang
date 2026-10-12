@@ -7,25 +7,26 @@
 # for the JVM and for native; the clock-based checks the Array contract needs
 # have no counterpart, because nothing about a buffer is unobservable.
 use std/mem
+use std/mem.{Mem}
 
-fn int_text(f: fn() -> Int) -> String =
+fn int_text[!e](f: fn() -> Int !e) -> String !e =
   match catch_panic(f) {
     Ok(v) -> "no panic (${v})"
     Err(e) -> e.message
   }
 
-fn unit_text(f: fn() -> Unit) -> String =
+fn unit_text[!e](f: fn() -> Unit !e) -> String !e =
   match catch_panic(f) {
     Ok(_) -> "no panic"
     Err(e) -> e.message
   }
 
 ## The elements as one line, so a value test is one `println`.
-fn show(b: I64Buf) -> String = "${mem.to_list(b)}"
+fn show(b: I64Buf) -> String !Mem = "${mem.to_list(b)}"
 
 ## A zeroed buffer reads back as zeros everywhere: native has to clear what
 ## malloc does not, and the check has to look at every slot.
-fn zero_line() -> String = {
+fn zero_line() -> String !Mem = {
   let z = mem.new(1000)
   var nonzero = 0
   var i = 0
@@ -36,7 +37,7 @@ fn zero_line() -> String = {
   "len=${mem.len(z)} nonzero=${nonzero} empty=${mem.len(mem.new(0))}"
 }
 
-fn extremes_line() -> String = {
+fn extremes_line() -> String !Mem = {
   let b = mem.new(3)
   mem.set(b, 0, 9223372036854775807)
   mem.set(b, 1, -9223372036854775808)
@@ -47,7 +48,7 @@ fn extremes_line() -> String = {
 ## The index panics. 2^32 + 5 is the aliasing probe: truncated to 32 bits it is
 ## 5, a real slot of the 8-element buffer, so a check made after the
 ## truncation reads slot 5 instead of panicking.
-fn index_lines() -> List[String] = {
+fn index_lines() -> List[String] !Mem = {
   let b = mem.new(8)
   [
     int_text(() => mem.at(b, 8)),
@@ -64,7 +65,7 @@ fn index_lines() -> List[String] = {
   ]
 }
 
-fn new_lines() -> List[String] = [
+fn new_lines() -> List[String] !Mem = [
   int_text(() => mem.len(mem.new(-1))),
   int_text(() => mem.len(mem.new(-9223372036854775808))),
   int_text(() => mem.len(mem.new(2147483640))),
@@ -72,7 +73,7 @@ fn new_lines() -> List[String] = [
   int_text(() => mem.len(mem.new(9223372036854775807)))
 ]
 
-fn fill_lines() -> List[String] = {
+fn fill_lines() -> List[String] !Mem = {
   let b = mem.from_list([1, 2, 3, 4, 5])
   mem.fill(b, 1, 4, 0)
   let first = show(b)
@@ -93,7 +94,7 @@ fn fill_lines() -> List[String] = {
 
 ## memmove semantics and every refused range. The overlapping runs are the
 ## ones a forward element-by-element copy gets wrong.
-fn copy_lines() -> List[String] = {
+fn copy_lines() -> List[String] !Mem = {
   let src = mem.from_list([10, 11, 12, 13, 14, 15])
   let dst = mem.new(6)
   mem.copy_from(dst, 1, src, 2, 3)
@@ -123,7 +124,7 @@ fn copy_lines() -> List[String] = {
   ]
 }
 
-fn clone_line() -> String = {
+fn clone_line() -> String !Mem = {
   let a = mem.from_list([3, -1, 4, 1, 5])
   let c = mem.clone(a)
   mem.set(c, 0, 100)
@@ -133,7 +134,7 @@ fn clone_line() -> String = {
 
 ## Primes below 1000 by a sieve in one buffer: reads and writes interleaved in
 ## loops, the shape the buffer exists for.
-fn sieve_line() -> String = {
+fn sieve_line() -> String !Mem = {
   let n = 1000
   let b = mem.new(n)
   mem.fill(b, 2, n, 1)
@@ -164,7 +165,7 @@ fn sieve_line() -> String = {
 ## A 64-bit congruential generator written into a buffer, then folded with a
 ## multiplier. Both steps wrap, so the line is the same only if the two
 ## backends wrap alike and every store and load keeps all 64 bits.
-fn lcg_line() -> String = {
+fn lcg_line() -> String !Mem = {
   let n = 4096
   let b = mem.new(n)
   var s = 12345
@@ -185,7 +186,7 @@ fn lcg_line() -> String = {
 
 ## Shifting a window the way a sliding-window decoder does: overlap copies in
 ## a loop, each one moving the whole window by one place.
-fn window_line() -> String = {
+fn window_line() -> String !Mem = {
   let n = 64
   let w = mem.new(n)
   var i = 0
@@ -197,7 +198,7 @@ fn window_line() -> String = {
   "${show(w)}"
 }
 
-fn big_line() -> String = {
+fn big_line() -> String !Mem = {
   let n = 1048576
   let b = mem.new(n)
   mem.fill(b, 0, n, 3)
@@ -217,13 +218,13 @@ ctl effect Ask {
   fn ask() -> Int
 }
 
-fn ask_body() -> Int !Ask = {
+fn ask_body() -> Int !Ask !Mem = {
   let b = mem.from_list([1, 2, 3])
   let n = ask()
   mem.at(b, 0) + n
 }
 
-fn dropped_line() -> String = {
+fn dropped_line() -> String !Mem = {
   let r = {
     with handle Ask { ask() resume k => 41 }
     ask_body()
@@ -232,16 +233,16 @@ fn dropped_line() -> String = {
 }
 
 pub fn main() -> Unit !io = {
-  println("zero     ${zero_line()}")
-  println("extremes ${extremes_line()}")
-  for line in index_lines() { println("index    ${line}") }
-  for line in new_lines() { println("new      ${line}") }
-  for line in fill_lines() { println("fill     ${line}") }
-  for line in copy_lines() { println("copy     ${line}") }
-  println("clone    ${clone_line()}")
-  println("sieve    ${sieve_line()}")
-  println("lcg      ${lcg_line()}")
-  println("window   ${window_line()}")
-  println("big      ${big_line()}")
-  println("dropped  ${dropped_line()}")
+  println("zero     ${mem.with_mem(() => zero_line())}")
+  println("extremes ${mem.with_mem(() => extremes_line())}")
+  for line in mem.with_mem(() => index_lines()) { println("index    ${line}") }
+  for line in mem.with_mem(() => new_lines()) { println("new      ${line}") }
+  for line in mem.with_mem(() => fill_lines()) { println("fill     ${line}") }
+  for line in mem.with_mem(() => copy_lines()) { println("copy     ${line}") }
+  println("clone    ${mem.with_mem(() => clone_line())}")
+  println("sieve    ${mem.with_mem(() => sieve_line())}")
+  println("lcg      ${mem.with_mem(() => lcg_line())}")
+  println("window   ${mem.with_mem(() => window_line())}")
+  println("big      ${mem.with_mem(() => big_line())}")
+  println("dropped  ${mem.with_mem(() => dropped_line())}")
 }
