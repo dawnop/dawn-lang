@@ -495,6 +495,20 @@ pub fn copy_to_host[T: HasDtype + DeviceBits](t: Tensor[T]) -> Result[List[T], F
 ## Release `t`. Its handle answers nothing afterwards.
 pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handle_of(t))
 
+# CUDA's launch limits: 2^31-1 blocks on x, 65535 on y and z. Checked here,
+# above the effect, so the real backend and the fake device refuse the same
+# grid with the same words instead of the driver's CUDA_ERROR_INVALID_VALUE.
+fn grid_limit_problem(gx: Int, gy: Int, gz: Int) -> Option[String] =
+  if gx > 2147483647 {
+    Some("axis 0 of the grid has ${gx} blocks, at most 2147483647 are allowed")
+  } else if gy > 65535 {
+    Some("axis 1 of the grid has ${gy} blocks, at most 65535 are allowed")
+  } else if gz > 65535 {
+    Some("axis 2 of the grid has ${gz} blocks, at most 65535 are allowed")
+  } else {
+    None
+  }
+
 # The two extra axes come after `args` rather than next to `grid` because a
 # parameter with a default goes after every parameter without one: put
 # before `args`, they would have to be named at every one-dimensional call
@@ -506,15 +520,20 @@ pub fn free[D](t: Tensor[D]) -> Result[Unit, ForeignError] !Gpu = gpu_free(handl
 ## axes with `block_id(0)` / `block_id(1)` / `block_id(2)`; a one-dimensional
 ## launch leaves `gy` and `gz` at 1, so a kernel that only reads
 ## `block_id(0)` sees the grid it always did.
-## `Err(kind: "gpu.bad_grid")` for an axis below one, before any handler is
-## asked; a name no handler knows is the handler's refusal
+## `Err(kind: "gpu.bad_grid")` for an axis below one, or above what a launch
+## can have (2147483647 blocks on axis 0, 65535 on axes 1 and 2, CUDA's
+## limits), before any handler is asked, so every handler refuses the same
+## grid with the same words; a name no handler knows is the handler's refusal
 ## (`gpu.no_kernel` from the fake device).
 pub fn launch(kernel: String, grid: Int, args: List[LaunchArg], gy: Int = 1, gz: Int = 1) -> Result[Unit, ForeignError] !Gpu =
   if grid < 1 || gy < 1 || gz < 1 {
     Err(refuse("gpu.bad_grid",
       "gpu.launch: a grid has at least one block along each axis, got (${grid}, ${gy}, ${gz})"))
   } else {
-    gpu_launch(kernel, grid, gy, gz, args)
+    match grid_limit_problem(grid, gy, gz) {
+      Some(m) -> Err(refuse("gpu.bad_grid", "gpu.launch: ${m}"))
+      None -> gpu_launch(kernel, grid, gy, gz, args)
+    }
   }
 
 # ---- typed entries ----
@@ -2006,6 +2025,33 @@ test "launch hands the handler a grid whose second and third axes default to one
     "test.grid: 4 1 3",
     "test.grid: 4 5 6",
     "gpu.bad_grid: gpu.launch: a grid has at least one block along each axis, got (4, 0, 1)"
+  ]
+}
+
+# Each axis exactly at its limit and one past it. "nope" is no kernel, so a
+# grid the limit lets through reaches the fake device and is refused there
+# (`gpu.no_kernel`); a grid past the limit is refused before the device.
+fn limit_launches() -> List[String] !Gpu =
+  list.map([
+    launch("nope", 2147483647, []),
+    launch("nope", 2147483648, []),
+    launch("nope", 1, [], gy: 65535),
+    launch("nope", 1, [], gy: 65536),
+    launch("nope", 1, [], gz: 65535),
+    launch("nope", 1, [], gz: 65536)
+  ], r => match r {
+    Ok(_) -> "ok"
+    Err(e) -> "${e.kind}: ${e.message}"
+  })
+
+test "launch refuses a grid past CUDA's axis limits above the effect, and the fake device sees the same words" {
+  assert with_gpu_fake(reference_kernels(), limit_launches) == [
+    "gpu.no_kernel: fake device: no kernel named `nope`",
+    "gpu.bad_grid: gpu.launch: axis 0 of the grid has 2147483648 blocks, at most 2147483647 are allowed",
+    "gpu.no_kernel: fake device: no kernel named `nope`",
+    "gpu.bad_grid: gpu.launch: axis 1 of the grid has 65536 blocks, at most 65535 are allowed",
+    "gpu.no_kernel: fake device: no kernel named `nope`",
+    "gpu.bad_grid: gpu.launch: axis 2 of the grid has 65536 blocks, at most 65535 are allowed"
   ]
 }
 
