@@ -28,7 +28,7 @@ import type { EditorView } from '@codemirror/view'
 const KEYWORDS = new Set([
   'fn', 'let', 'var', 'type', 'const', 'use', 'java', 'pub', 'match', 'if',
   'else', 'for', 'in', 'while', 'return', 'comptime', 'test', 'assert', 'not', 'derive',
-  'trait', 'impl', 'effect',
+  'trait', 'impl', 'effect', 'alias', 'break', 'continue',
 ])
 
 // Custom tags for the two classes the standard set doesn't cover cleanly: the
