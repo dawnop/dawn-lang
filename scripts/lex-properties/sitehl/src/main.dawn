@@ -1,0 +1,26 @@
+# Print the site's highlighting of each file named on the command line, one
+# line per file: the path, a tab, then the HTML with backslash, newline and
+# CR escaped. scripts/lex-properties/run.py reads it back into classes.
+#
+# Why a project of its own rather than a mode of the site generator: the site's
+# main builds the whole site and takes no arguments, and the property check
+# should call exactly the function the pages call (`highlight_dawn`), not a
+# copy, so it depends on the site as a path package.
+
+use site/hl/dawn.{highlight_dawn}
+use std/io.{read_file, with_fs_real}
+use std/str.{replace}
+
+fn esc(s: String) -> String =
+  replace(replace(replace(s, "\\", "\\\\"), "\n", "\\n"), "\r", "\\r")
+
+pub fn main() -> Unit !io = {
+  with_fs_real(() => {
+    for path in args() {
+      match read_file(path) {
+        Ok(text) -> println(path ++ "\t" ++ esc(highlight_dawn(text)))
+        Err(_) -> println(path ++ "\t!unreadable")
+      }
+    }
+  })
+}
