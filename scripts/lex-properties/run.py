@@ -88,13 +88,6 @@ def hard_keyword(t):
 
 # Findings of the first run, filed and pinned: `<property> <rule> <subject> <where>`.
 KNOWN_KEYS = """
-# #707: `alias` is not in the site's keyword list; `alias`, `break` and
-# `continue` are not in the editor's.
-b keyword editor alias
-b keyword editor break
-b keyword editor continue
-b keyword site alias
-
 # #708: the editor's tokenizer misreads `\\u{...}` and non-BMP char literals,
 # and colours a `$` not followed by `{` as an interpolation.
 b region editor compiler-plan/src/buildinfo.dawn
