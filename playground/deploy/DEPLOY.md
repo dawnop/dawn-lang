@@ -133,7 +133,17 @@ by hand, with the server reachable.
    `$play_cors` map from the snippet's header in `http { … }`; the REST
    locations then answer preflight and add `Access-Control-Allow-Origin` (with
    `always`, so 413/429 carry it) for that one origin only. `/api/lsp` gets no
-   CORS headers, the gateway checks `Origin` itself.
+   CORS headers, the gateway checks `Origin` itself. Observed on the live
+   host (2026-10-12), and what the snippet reproduces: preflight on
+   `/api/run`, `/api/check`, `/api/compile` and `/api/health` answers 204 with
+   `Access-Control-Allow-Origin` (the site origin), `-Allow-Methods: POST, GET,
+   OPTIONS`, `-Allow-Headers: Content-Type`, `-Max-Age: 600` and
+   `Vary: Origin`; the actual requests carry `Access-Control-Allow-Origin` and
+   `Vary: Origin`, on 400s too. Any other origin gets the same replies minus
+   `Access-Control-Allow-Origin`, which the browser then refuses.
+   `deploy/nginx-cors-check.py` (run by `test/contract.sh`) fails when a
+   runner location loses any of these headers or a runner route has no
+   location.
    `/api/lsp` must preserve the browser's
    `Origin` and `Sec-WebSocket-Protocol: dawn-lsp-v1` headers and rewrite to the
    gateway's loopback-only `/lsp` route, as the shipped snippet does.
