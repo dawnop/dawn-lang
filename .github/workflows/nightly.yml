@@ -616,6 +616,80 @@ jobs:
           } > issue.md
           scripts/nightly-issue.sh "nightly: diagnostic recovery properties are red" issue.md
 
+  # The lexer's dump as a round trip, and the two highlighters held against
+  # it (research-bug-rate-report 7.2, cut 3; scripts/lex-properties/run.py's
+  # header has the properties and why each). The string, comment and
+  # interpolation rules are written four times (lexer, site highlighter,
+  # Playground tokenizer, Playground lexContext) and #83 was two of them
+  # disagreeing; this compares every tracked file. Known findings are pinned
+  # with their issues (#707, #708, #709), so red means a new file or word, or
+  # a pin that went stale. Nightly rather than push: push-total had no room on
+  # 2026-10-04, and the copies drift when nobody edits them, not in a change.
+  # Measured 2026-10-12 on four pinned cores: 19-21s and 1.1 GB peak for 1,044
+  # inputs, 3,354 interpolations lexed on their own and 49,776 lexContext
+  # samples; npm ci and the toolchain action add what they add to every job,
+  # and 15 minutes is a runaway stop. Red opens one issue; its verdict line is
+  # the set of property:rule:subject keys.
+  lex-properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read    # the checkout
+      issues: write     # the report when the run is red
+    steps:
+      - uses: actions/checkout@v4
+
+      # the Playground editor's own module is one of the subjects, bundled
+      # with its own esbuild
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: site/play-ui/package-lock.json
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: the editor's dependencies
+        run: npm ci --prefix site/play-ui
+
+      - name: the judges hold on their own inputs
+        run: python3 scripts/lex-properties/run.py --self-test
+
+      - name: lexer round trip and highlighters, every tracked file
+        id: props
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/lex-properties/run.py --jobs 4 > props.txt 2>&1 || status=$?
+          cat props.txt
+          exit "${status:-0}"
+
+      - name: report a red property run as an issue
+        if: failure() && steps.props.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "The nightly lexer properties (scripts/lex-properties/run.py) are red."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Each finding is a place where the lexer's dump is not a round trip of"
+            echo "the source, or where the site highlighter, the Playground tokenizer or"
+            echo "lexContext reads a file differently from the lexer. \`new:\` lines are"
+            echo "the keys no pin in KNOWN_KEYS covers; a stale pin is a fixed finding."
+            echo
+            echo "<!-- verdict: $(sed -n 's/^verdict: //p' props.txt | tail -1) -->"
+            echo
+            echo '```'
+            grep -v '^verdict: ' props.txt 2>/dev/null | tail -60 || echo "(no output was captured)"
+            echo '```'
+          } > issue.md
+          scripts/nightly-issue.sh "nightly: lexer properties are red" issue.md
+
   # Ruling 9(c). The corpus above is dawnop-site at a pinned commit, and a pin
   # nothing advances answers an older question every week: it sat at a72bfc9
   # (v0.59.0) through three `.dawn-version` bumps over there. The rule is
