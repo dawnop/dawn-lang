@@ -110,6 +110,9 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
   BufRep { chunks: chunks, tail: tail }
 }
 
+# Kept for the toolchain only: the seed compiler builds the toolchain with its
+# own std, which has no `Len` impl for this type, so the toolchain still calls
+# this function. It is deleted in the next change, once the seed has moved.
 ## How many bytes have been written.
 ##
 ## `size` and not [`len`]: a named exception to one-concept-one-name, because
@@ -118,6 +121,12 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
 pub fn size(b: Buf) -> Int = {
   let r: BufRep = b
   (array_len(r.chunks) << CHUNK_BITS) + array_len(r.tail)
+}
+
+# The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
+# Buf impl, how many bytes have been written.
+impl Len[Buf] {
+  fn len(b: Buf) -> Int = size(b)
 }
 
 ## The byte at `i`, as 0..255. Out of range panics, exactly as `at(b: Bytes, i)`
@@ -270,8 +279,17 @@ fn utf8_seq(b: Bytes, i: Int, n: Int, width: Int, lo: Int, hi: Int) -> Int = {
 ## `b` decoded as ISO-8859-1: one code point per byte, 0..255.
 pub fn decode_latin1(b: Bytes) -> String = bytes_decode_latin1(b)
 
+# Kept for the toolchain only: the seed compiler builds the toolchain with its
+# own std, which has no `Len` impl for this type, so the toolchain still calls
+# this function. It is deleted in the next change, once the seed has moved.
 ## Number of bytes in `b`.
 pub fn len(b: Bytes) -> Int = bytes_len(b)
+
+# The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
+# Bytes impl, the number of bytes.
+impl Len[Bytes] {
+  fn len(b: Bytes) -> Int = bytes_len(b)
+}
 
 ## Whether `b` has no bytes. The same question `str.is_empty` answers, in the
 ## same words (CONTRIBUTING §naming).

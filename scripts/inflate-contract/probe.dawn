@@ -75,11 +75,11 @@ fn java_bomb(mb: Int) -> Bytes !io = {
 ## this leg exists and why it is run where it is run.
 fn bomb_case(mb: Int) -> Unit !io = {
   let bomb = java_bomb(mb)
-  io.println("bomb: " ++ to_string(bytes.len(bomb)) ++ " compressed bytes, " ++
+  io.println("bomb: " ++ to_string(len(bomb)) ++ " compressed bytes, " ++
       to_string(mb) ++ "MB expanded")
   match deflate.inflate(bomb, cap: Some(1024)) {
     Ok(o) -> {
-      io.println("the bomb was decompressed to " ++ to_string(bytes.len(o)) ++ " bytes")
+      io.println("the bomb was decompressed to " ++ to_string(len(o)) ++ " bytes")
       io.println("mismatches 1")
     }
     Err(e) -> {
@@ -111,7 +111,7 @@ fn bomb_default_case(mb: Int) -> Unit !io = {
   b = bytes.put_bytes(b, small)
   b = bytes.put_bytes(b, gz)
   let pair = bytes.freeze(b)
-  io.println("bomb: " ++ to_string(bytes.len(raw)) ++ " compressed bytes, " ++
+  io.println("bomb: " ++ to_string(len(raw)) ++ " compressed bytes, " ++
       to_string(mb) ++ "MB expanded, default cap " ++ to_string(deflate.DEFAULT_CAP))
   # The limits are spelled from the constant, so moving the default (3.1.0
   # took it from 16 to 64 MiB) leaves this leg about the default, not a number.
@@ -129,7 +129,7 @@ fn bomb_default_case(mb: Int) -> Unit !io = {
 fn default_refused(label: String, r: Result[Bytes, String], note: String, head: String) -> Int !io =
   match r {
     Ok(o) -> {
-      io.println(label ++ ": the bomb was decompressed to " ++ to_string(bytes.len(o)) ++ " bytes")
+      io.println(label ++ ": the bomb was decompressed to " ++ to_string(len(o)) ++ " bytes")
       1
     }
     Err(e) -> default_message(label, e, note, head)
@@ -230,8 +230,8 @@ fn java_zip(names: List[String], datas: List[String], method: Int) -> Bytes !io 
     if method == 0 {
       let c = CRC32.new()
       let _ = c.update(body)
-      let _ = e.setSize(bytes.len(body))
-      let _ = e.setCompressedSize(bytes.len(body))
+      let _ = e.setSize(len(body))
+      let _ = e.setCompressedSize(len(body))
       let _ = e.setCrc(c.getValue())
     }
     let _ = zos.putNextEntry(e)
@@ -282,7 +282,7 @@ fn check_zip(label: String, names: List[String], datas: List[String], method: In
 fn flip(b: Bytes, at: Int) -> Bytes = {
   var buf = bytes.buf()
   var k = 0
-  while k < bytes.len(b) {
+  while k < len(b) {
     buf = bytes.put(buf, if k == at { bytes.at(b, k) ^ 0xFF } else { bytes.at(b, k) })
     k = k + 1
   }
@@ -296,7 +296,7 @@ fn check_corruption() -> Int !io = {
   let good = java_zip([name], [rep("x", 200)], 0)
   # the first local header is at 0, so the first entry's data starts just past
   # its 30-byte header and its name
-  let broken = flip(good, 30 + str.len(name) + 100)
+  let broken = flip(good, 30 + len(name) + 100)
   match zip.entries(broken) {
     Ok(_) -> {
       io.println("a corrupted stored entry was accepted")
@@ -318,7 +318,7 @@ fn check_corruption() -> Int !io = {
 fn cd_offsets(b: Bytes) -> List[Int] = {
   var out: List[Int] = []
   var i = 0
-  while i + 4 <= bytes.len(b) {
+  while i + 4 <= len(b) {
     let sig = bytes.at(b, i) == 0x50 && bytes.at(b, i + 1) == 0x4B &&
       bytes.at(b, i + 2) == 1 && bytes.at(b, i + 3) == 2
     if sig { out = out ++ [i] }
@@ -361,11 +361,11 @@ fn check_truncated_deflate() -> Int !io = {
   var bad = 0
   for lvl in [1, 6, 9] {
     let raw = java_deflate(bytes.utf8(rep("abcabcabc", 200)), lvl)
-    let cut = bytes.slice(raw, 0, bytes.len(raw) - 1)
+    let cut = bytes.slice(raw, 0, len(raw) - 1)
     match deflate.inflate(cut) {
       Ok(o) -> {
         io.println("a truncated level " ++ to_string(lvl) ++ " stream was accepted (" ++
-            to_string(bytes.len(o)) ++ " bytes)")
+            to_string(len(o)) ++ " bytes)")
         bad = bad + 1
       }
       Err(_) -> ()
@@ -378,7 +378,7 @@ fn check_truncated_deflate() -> Int !io = {
 ## exact -- one byte under the true size is refused, the true size is not.
 fn check_bounded(src: Bytes) -> Int !io = {
   let raw = java_deflate(src, 9)
-  let n = bytes.len(src)
+  let n = len(src)
   var bad = 0
   match deflate.inflate(raw, cap: Some(n)) {
     Ok(o) ->
@@ -414,13 +414,13 @@ fn check_bounded(src: Bytes) -> Int !io = {
 fn empty_blocks_case(dynamic: Bool, n: Int) -> Unit !io = {
   let src = empty_stream(n, dynamic)
   io.println("empty blocks: " ++ to_string(n) ++ (if dynamic { " dynamic" } else { " fixed" }) ++
-      ", " ++ to_string(bytes.len(src)) ++ " compressed bytes")
+      ", " ++ to_string(len(src)) ++ " compressed bytes")
   match deflate.inflate(src) {
     Ok(o) ->
-      if bytes.len(o) == 0 {
+      if len(o) == 0 {
         io.println("mismatches 0")
       } else {
-        io.println("empty blocks decoded to " ++ to_string(bytes.len(o)) ++ " bytes")
+        io.println("empty blocks decoded to " ++ to_string(len(o)) ++ " bytes")
         io.println("mismatches 1")
       }
     Err(e) -> {
@@ -516,11 +516,11 @@ fn differential() -> Unit !Fs !io = {
     match gzip.gunzip(gz) {
       Ok(out) ->
         if out != src {
-          io.println("gunzip mismatch at len " ++ to_string(bytes.len(src)))
+          io.println("gunzip mismatch at len " ++ to_string(len(src)))
           bad = bad + 1
         }
       Err(e) -> {
-        io.println("gunzip failed at len " ++ to_string(bytes.len(src)) ++ ": " ++ e)
+        io.println("gunzip failed at len " ++ to_string(len(src)) ++ ": " ++ e)
         bad = bad + 1
       }
     }
@@ -529,12 +529,12 @@ fn differential() -> Unit !Fs !io = {
       match deflate.inflate(raw) {
         Ok(out) ->
           if out != src {
-            io.println("inflate mismatch len " ++ to_string(bytes.len(src)) ++
+            io.println("inflate mismatch len " ++ to_string(len(src)) ++
                 " level " ++ to_string(lvl))
             bad = bad + 1
           }
         Err(e) -> {
-          io.println("inflate failed len " ++ to_string(bytes.len(src)) ++ " level " ++
+          io.println("inflate failed len " ++ to_string(len(src)) ++ " level " ++
               to_string(lvl) ++ ": " ++ e)
           bad = bad + 1
         }
@@ -548,7 +548,7 @@ fn differential() -> Unit !Fs !io = {
     let want = CRC32.new()
     let _ = want.update(b)
     if crc32.sum(b) != want.getValue() {
-      io.println("crc32 differs at len " ++ to_string(bytes.len(b)))
+      io.println("crc32 differs at len " ++ to_string(len(b)))
       bad = bad + 1
     }
   }
