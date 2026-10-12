@@ -59,7 +59,7 @@ use check/types.{
   ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty, ty_loc,
   AdtI, CtorI, FieldI, EffectI, TraitI, ImplI, Sym, Sig,
-  ty_show, ctor_render, fn_return_show, eff_ctl_labels, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
+  ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
   no_eparam_names, fn_max_params,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -7143,6 +7143,17 @@ fn declare_cells(cx: Cx, cells: List[HandlerCell], hid: Int) -> (Cx, List[TStmt]
   for c in cells {
     let (cxa, t) = resolve_type(cx1, c.ann)
     cx1 = cxa
+    # R3 of docs/mem-buffer-design.md 4.2: a cell outlives the code that wrote
+    # it, so a buffer kept in one could be read after its scope returned
+    match buffer_reach(cx1.adts, cx1.effect_infos, t) {
+      Some(path) -> {
+        cx1 = cerr_h(cx1, "the state variable `" ++ c.name ++ "` cannot hold a buffer: " ++ path ++
+            ", in the type `" ++ ty_show(cx1.adts, t) ++ "`", c.nlo, c.nhi,
+          "a buffer is private to its `with_mem` scope; keep Ints in the cell and " ++
+            "the buffer in a local")
+      }
+      None -> ()
+    }
     let (cxb, it, ix) = check_expr(cx1, c.init, Some(t))
     cx1 = cxb
     # the same sentence a `let` with an annotation gets, deliberately: a cell's
@@ -7490,6 +7501,12 @@ fn check_handle(
     }
   }
   let info = effect_of(cx1, eid)
+  # R2 of docs/mem-buffer-design.md 4.2: `with_mem` is the only place an
+  # allocation is answered, and it lives in the module that declares `Mem`
+  if is_mem_effect(info) && cx1.owner_class != info.owner {
+    cx1 = cerr_h(cx1, "only `std/mem` may install a handler for `Mem`", nlo, nhi,
+      "`with_mem` answers it; open a scope with `with_mem(() => ...)` instead")
+  }
   let rec = adt_of(cx1.adts, eid).ctors[0]
   # one arm per declared operation: no fewer, no more, none unknown
   var chosen: List[Option[HandlerArm]] = []
@@ -9673,6 +9690,22 @@ test "dbg renders through Show, and says so when there is none" {
 ## top-level / std / builtin signature with two-round argument inference,
 ## trait witnesses and effect instantiation. `resolved_sig` bypasses locals
 ## (module-qualified calls); `pre0` is a pre-typed UFCS receiver at args[0].
+## R1 of the `Mem` scope (docs/mem-buffer-design.md 4.2): what `with_mem`
+## returns cannot reach a buffer. The scope is what makes the call pure, and a
+## buffer that outlived it could be written by code that is not under `Mem`.
+## The walk is `buffer_reach`, which goes through tuples, type arguments and
+## the fields of user types, and counts a function type whose row carries `Mem`
+## because such a value still holds a buffer.
+fn refuse_buffer_result(cx: Cx, ret: Ty, lo: Int, hi: Int) -> Cx =
+  match buffer_reach(cx.adts, cx.effect_infos, ret) {
+    None -> cx
+    Some(path) ->
+      cerr_h(cx, "the result of `with_mem` cannot mention a buffer: " ++ path ++
+          ", in the type `" ++ ty_show(cx.adts, ret) ++ "`", lo, hi,
+        "a buffer is private to its `with_mem` scope; copy what is needed out " ++
+          "(`to_list`, or an `Int` read) and return that")
+  }
+
 fn check_call(
   cx: Cx,
   callee: String,
@@ -9930,6 +9963,11 @@ fn check_call(
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
   let ret = reduce_instantiated(cx1, subst(s.ret, m, em), m)
+  # R1 of docs/mem-buffer-design.md 4.2: the result of `with_mem` is read after
+  # inference, when `T` is whatever the body and the expectation made it
+  if s.name == "with_mem" && s.owner == Some("std/mem") {
+    cx1 = refuse_buffer_result(cx1, ret, clo, chi)
+  }
   let (arranged_cx, arg_lets, txs2) =
     arrange_call_args(cx, cx1, s, callee, args0, slot_of, tx_slots, m, em, wits, not args_broken, lo, hi)
   cx1 = arranged_cx
@@ -11795,6 +11833,13 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
 fn sam_snapshot(cx: Cx, i: Int, te: Eff, lo: Int, hi: Int) -> (Cx, (Int, TExpr)) = {
   let ctl = eff_ctl_labels(cx.effect_infos, te)
   var cx0 = cx
+  # R4 of docs/mem-buffer-design.md 4.2: Java may run the value on any thread
+  # at any time, long after the scope that made its buffer has returned
+  if eff_names_mem(cx.effect_infos, te) {
+    cx0 = cerr_h(cx0, "a function value whose row names `Mem` cannot cross to Java", lo, hi,
+      "Java can call it from any thread after the `with_mem` scope has returned; " ++
+        "do the buffer work in Dawn and pass the result across")
+  }
   if len(ctl) > 0 {
     cx0 = cerr_h(cx0, "a function value whose row names the `ctl` effect `" ++ ctl[0] ++
         "` cannot cross to Java", lo, hi,

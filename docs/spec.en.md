@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e4af2afa328a99de -->
+<!-- doc-check: translation-of docs/spec.md @ 32eb5affb454ef42 -->
 
 # Dawn Language Specification
 
@@ -4260,8 +4260,14 @@ two together; one module too many or too few fails it):
 - `std/set`: `Set`
 - `std/hamt`: internal module, the representation of `Map`/`Set`
 - `std/pvec`: internal module, the representation of `List`
-- `std/mem`: flat, mutable buffers of 64-bit integers, `I64Buf` (design in
-  [`mem-buffer-design.md`](mem-buffer-design.md))
+- `std/mem`: flat, mutable buffers of 64-bit integers, `I64Buf`, with their scope
+  effect `Mem` and `with_mem` (design in [`mem-buffer-design.md`](mem-buffer-design.md)).
+  A buffer exists only inside `with_mem`: a function that reads or writes one carries
+  `!Mem`, and the checker refuses four kinds of escape by the identity of `std/mem`'s
+  `Mem` (the result type of `with_mem` may not contain a buffer or a function type
+  whose row carries `Mem`; only `std/mem` may install a handler for `Mem`; an effect
+  operation's signature and a handler's `var` may not contain a buffer; a function
+  value carrying `Mem` may not cross a `use java` call)
 - `std/gpu`: the host side of a GPU, the `Gpu` effect and tensors (§12.6)
 - `std/memfs`: an in-memory `Fs` handler for tests; the rest of this specification does
   not discuss it, and its design is in [`fs-real-path-design.md`](fs-real-path-design.md)

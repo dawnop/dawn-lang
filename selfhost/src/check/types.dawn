@@ -1742,6 +1742,105 @@ pub fn eff_ctl_labels(effs: Effects, e: Eff) -> List[String] = {
   sort(out)
 }
 
+# ---- the escape rules of a Mem scope (docs/mem-buffer-design.md 4.2) ----
+#
+# Four checks name one effect, and they name it by identity rather than by a
+# marker on the declaration (design 10, ruling 1): the effect `Mem` that
+# `std/mem` declares. The name alone would let a user effect called `Mem` stand
+# in for it; the declaring module is what makes it this one. The checker is the
+# only reader, so these are plain functions over the tables it already has.
+
+## Is this the effect `std/mem` declares as `Mem`?
+pub fn is_mem_effect(i: EffectI) -> Bool = i.name == "Mem" && i.owner == Some("std/mem")
+
+## Does this row carry the label of `std/mem`'s `Mem`?
+pub fn eff_names_mem(effs: Effects, e: Eff) -> Bool = {
+  for l in eff_labels(e) {
+    let (lid, _) = l
+    match map.get(effs, lid) {
+      Some(i) -> if is_mem_effect(i) { return true }
+      None -> ()
+    }
+  }
+  false
+}
+
+## Where a buffer can be reached from a value of type `t`: a short chain of the
+## places the walk went through, ending in what it found, or None when it
+## reaches none. A buffer is `I64Buf` itself, or a function whose row carries
+## `Mem` (it closes over one, or writes one it is handed). The walk goes
+## through tuples, collections, type arguments and the fields of user types
+## with the arguments substituted, and `seen` keeps a recursive type from
+## being walked twice.
+pub fn buffer_reach(adts: Adts, effs: Effects, t: Ty) -> Option[String] =
+  buffer_reach_in(adts, effs, t, [])
+
+fn reach_step(what: String, inner: Option[String]) -> Option[String] =
+  match inner {
+    Some(rest) -> Some(what ++ ", then " ++ rest)
+    None -> None
+  }
+
+fn reach_first(adts: Adts, effs: Effects, ts: List[Ty], what: String, seen: List[Int]) -> Option[String] = {
+  for t in ts {
+    match reach_step(what, buffer_reach_in(adts, effs, t, seen)) {
+      Some(r) -> return Some(r)
+      None -> ()
+    }
+  }
+  None
+}
+
+fn buffer_reach_in(adts: Adts, effs: Effects, t: Ty, seen: List[Int]) -> Option[String] =
+  match t {
+    TyI64Buf -> Some("an `I64Buf`")
+    TyList(e) -> reach_first(adts, effs, [e], "the element type of a list", seen)
+    TySet(e) -> reach_first(adts, effs, [e], "the element type of a set", seen)
+    TyArray(e) -> reach_first(adts, effs, [e], "the element type of an array", seen)
+    TyMap(k, v) -> reach_first(adts, effs, [k, v], "a map's key or value type", seen)
+    TyTuple(es) -> reach_first(adts, effs, es, "a tuple element", seen)
+    TyOpaque(_, name, _, args, tgt) ->
+      reach_first(adts, effs, args ++ [tgt], "the opaque type `" ++ name ++ "`", seen)
+    TyFn(ps, r, e) ->
+      if eff_names_mem(effs, e) {
+        Some("a function type whose row carries `Mem`")
+      } else {
+        reach_first(adts, effs, ps ++ [r], "a function type", seen)
+      }
+    TyAdt(id, args) ->
+      if list.contains(seen, id) {
+        None
+      } else {
+        match map.get(adts, id) {
+          None -> None
+          Some(a) -> {
+            var m: Map[Int, Ty] = map.empty()
+            var k = 0
+            for tp in a.tparams {
+              match tp {
+                TyVar(_, vid) -> if k < len(args) { m = map.insert(m, vid, args[k]) }
+                _ -> ()
+              }
+              k = k + 1
+            }
+            let em: Map[Int, Eff] = map.empty()
+            for c in a.ctors {
+              for f in c.fields {
+                let fty = subst(f.ty, m, em)
+                let place = "field `" ++ f.name ++ "` of `" ++ a.name ++ "`"
+                match reach_step(place, buffer_reach_in(adts, effs, fty, seen ++ [id])) {
+                  Some(r) -> return Some(r)
+                  None -> ()
+                }
+              }
+            }
+            None
+          }
+        }
+      }
+    _ -> None
+  }
+
 ## The name of the evidence record an effect declaration synthesises. It is
 ## unspellable on purpose -- `$` is not an identifier character -- so it shares
 ## the ADT namespace with user types without ever colliding with one.

@@ -170,8 +170,9 @@ be resumed is abandoned with `discard`.
 
 Both are specified, implemented on both backends and held by the differential
 corpus, and **the tier's internal consumers are in this repository**: `std/io` declares
-`Fs`, `Proc`, `Env`, `Exit` and `Console`, `std/gpu` declares `Gpu`, each with
-production's handler beside it and a fake for tests. `doc-check.py` keeps that list
+`Fs`, `Proc`, `Env`, `Exit` and `Console`, `std/gpu` declares `Gpu`, and `std/mem`
+declares `Mem`, each with production's handler beside it and, except `Mem`, a fake for
+tests. `doc-check.py` keeps that list
 (`NAMED_EFFECT_EXPECTED`) and reds this paragraph if a declaration appears elsewhere
 under `std/` or `selfhost/src/`. The compiler runs on the tier itself: its `main` is
 wrapped in `Fs` and `Exit` handlers, and the driver's analysis tests run that code over
