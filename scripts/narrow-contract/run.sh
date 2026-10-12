@@ -24,12 +24,21 @@
 #                decoration; a mutant red on one backend only means the two
 #                do not compile the same rule.
 #
-# The three rules and their owners (the section each must redden; the other
+# The rules and their owners (the section each must redden; the other
 # sections it happens to move are printed, not required):
 #
 #   ties-away          ties to even -> ties away from zero     bf16 round ties
 #   no-subnormal-clamp the quantum is never clamped to emin    bf16 round subnormal
 #   emax-off-by-one    bf16's emax is 128 instead of 127       bf16 round overflow
+#   away-ties-down     NearestAway breaks a tie toward zero    bf16 mode NearestAway
+#   directed-swap      Down and Up trade places (#378)         bf16 mode Down
+#   up-extra-ulp       Up steps an exact value up a quantum    f32 mode Up
+#   down-ignores-sign  Down steps every inexact magnitude up   f32 mode Down
+#
+# The last four live in round_binary's `mode` match, which round_bf16 never
+# reaches (it takes the default); the `mode` sections are the only ones that
+# can see them, and directed-swap stayed green on all 27 sections the corpus
+# had before them (#378).
 #
 # `--std` points a compile at the edited copy, as scripts/atomic-write-contract
 # does for std/io. The anchors live in mutate.py, where
@@ -53,7 +62,8 @@ program="$root/scripts/spike-native/narrow_round.dawn"
 expect="$root/scripts/spike-native/narrow_round.expect"
 cc_bin="${CC:-cc}"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# a failure while mutants are still running stops them before their files go
+trap 'kill ${pids[*]:-} 2> /dev/null || true; wait 2> /dev/null || true; rm -rf "$work"' EXIT
 
 fail() {
   echo "FAIL: $*" >&2
@@ -149,17 +159,62 @@ mutant() { # name, owner
   expect_red "$name" "$owner" "$work/$name.jvm" "$work/$name.native"
 }
 
+# The mutants are independent (each has its own std copy and output files),
+# and each costs a JVM run and a native build of the whole corpus, the C
+# compile of which is one single-threaded cc over ~100k lines. So they run
+# side by side, at most NARROW_JOBS at a time (default 3), each into a log of
+# its own; the logs are printed and judged in the order the mutants are
+# listed, so the output reads the same as a sequential run.
+jobs_max="${NARROW_JOBS:-3}"
+queue=()
+pids=()
+
+reap_oldest() {
+  local name="${queue[0]}" pid="${pids[0]}"
+  queue=("${queue[@]:1}")
+  pids=("${pids[@]:1}")
+  local rc=0
+  wait "$pid" || rc=$?
+  cat "$work/$name.log"
+  [ "$rc" -eq 0 ] || fail "$name mutant: see above"
+}
+
+spawn() { # name, owner
+  while [ "${#pids[@]}" -ge "$jobs_max" ]; do reap_oldest; done
+  ( mutant "$1" "$2" ) > "$work/$1.log" 2>&1 &
+  queue+=("$1")
+  pids+=("$!")
+}
+
 # 1. Ties away from zero instead of to even. A midpoint with an even
 #    significand below it now goes up.
-mutant ties-away "bf16 round ties"
+spawn ties-away "bf16 round ties"
 
 # 2. No subnormal clamp: below emin the quantum keeps shrinking with the
 #    exponent, so a tiny value keeps all p bits instead of landing on the
 #    grid.
-mutant no-subnormal-clamp "bf16 round subnormal"
+spawn no-subnormal-clamp "bf16 round subnormal"
 
 # 3. The overflow threshold one binade too high: a value that should round
 #    to infinity rounds to 2^128 instead.
-mutant emax-off-by-one "bf16 round overflow"
+spawn emax-off-by-one "bf16 round overflow"
+
+# 4. NearestAway takes the smaller magnitude on a tie: the tie cells of the
+#    mode section, and nothing else, disagree.
+spawn away-ties-down "bf16 mode NearestAway"
+
+# 5. Down and Up swapped, both the step and the overflow saturation (#378).
+#    Every inexact cell of either sign moves, and so do the overflow cells.
+spawn directed-swap "bf16 mode Down"
+
+# 6. Up steps a positive value that is already on the grid: the on-grid
+#    cells of the mode section, through round_f32's `mode` argument.
+spawn up-extra-ulp "f32 mode Up"
+
+# 7. Down ignores the sign and rounds a positive inexact value away from
+#    zero, the way it must round a negative one.
+spawn down-ignores-sign "f32 mode Down"
+
+while [ "${#pids[@]}" -gt 0 ]; do reap_oldest; done
 
 echo "narrow contract ok"

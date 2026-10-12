@@ -68,9 +68,24 @@ For each format, in the sections the program prints:
                 time: the left of each row is what the compiler's
                 interpreter computed and the right the oracle
 
-A negative control for each of the three rules lives in run.sh (ties to
-even, the subnormal clamp, the overflow threshold); each has an owning
-section here.
+And, for bf16, binary32 and TensorFloat-32, one section per mode
+of `Rounding`:
+
+    mode M      the same input list for all five modes of a format: the
+                specials, values on the grid and one Float ulp either side
+                (both signs, from 1 through the subnormals to the largest
+                finite value), ties (even below, even above, subnormal, at the
+                normal boundary and below the top), quarter-way points, the
+                overflow cells, Float's subnormals, and random values. The
+                oracle is round_mode, a second formulation from IEEE 754
+                section 4.3 over signed floor and ceiling; its NearestEven is
+                asserted equal to round_frac's on every input, and
+                check_directed asserts every pair of modes disagrees on some
+                cell and the overflow cells answer what section 7.4 says.
+
+A negative control for each rule lives in run.sh (ties to even, the
+subnormal clamp, the overflow threshold, and four in the mode match); each
+has an owning section here.
 """
 
 import math
@@ -86,6 +101,13 @@ EXPECT = ROOT / "scripts" / "spike-native" / "narrow_round.expect"
 
 SEED = 20260902
 INF = float("inf")
+# (name, p, emin, emax, call): the formats whose mode sections the corpus
+# prints, and the call that rounds `x` at one of them in mode `m`
+DIRECTED_FORMATS = [
+    ("bf16", 8, -126, 127, "narrow.round_binary(x, 8, -126, 127, mode: narrow.{m})"),
+    ("f32", 24, -126, 127, "narrow.round_f32(x, mode: narrow.{m})"),
+    ("tf32", 11, -126, 127, "narrow.round_tf32(x, mode: narrow.{m})"),
+]
 OPERATORS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
 NAN = float("nan")
 
@@ -228,6 +250,72 @@ def sqrt_oracle(a: float, p: int, emin: int, emax: int) -> float:
     if a < 0:
         return NAN
     return sqrt_frac(Fraction(a), p, emin, emax)
+
+
+MODES = ["NearestEven", "NearestAway", "TowardZero", "Down", "Up"]
+
+
+def round_mode(x: float, mode: str, p: int, emin: int, emax: int) -> float:
+    """round_binary(x, p, emin, emax, mode) from IEEE 754 section 4.3.
+
+    A second formulation, not round_frac with a flag: round_frac works on the
+    magnitude and adds the sign back, which is exactly the shape a sign bug in
+    a directed mode hides behind. Here the two candidates are the signed grid
+    points either side of x (floor and ceiling toward the infinities), every
+    mode picks one of them by its own sentence of the standard, and overflow
+    is decided on the signed result with the rule the standard gives each
+    mode (section 7.4): the nearest modes overflow to the infinity of the
+    sign; roundTowardZero answers the largest finite magnitude; Down carries
+    a negative value to -inf and a positive one to +max; Up the reverse.
+    """
+    if math.isnan(x) or math.isinf(x) or x == 0.0:
+        return x
+    v = Fraction(x)
+    mag = abs(v)
+    # e = floor(log2 |v|), from the bit lengths, corrected by one comparison
+    e = mag.numerator.bit_length() - mag.denominator.bit_length()
+    if Fraction(2) ** e > mag:
+        e -= 1
+    assert Fraction(2) ** e <= mag < Fraction(2) ** (e + 1)
+    q = Fraction(2) ** (max(e, emin) - p + 1)
+    k = math.floor(v / q)
+    lo, hi = k * q, (k if k * q == v else k + 1) * q
+    if mode == "Down":
+        r = lo
+    elif mode == "Up":
+        r = hi
+    elif mode == "TowardZero":
+        r = lo if v > 0 else hi
+    else:
+        below, above = v - lo, hi - v
+        if below < above:
+            r = lo
+        elif above < below:
+            r = hi
+        elif mode == "NearestEven":
+            # a tie: lo and hi are adjacent multiples of q, one of them even
+            r = lo if (lo / q) % 2 == 0 else hi
+        else:
+            # NearestAway: the one of larger magnitude
+            r = hi if v > 0 else lo
+    top = (2 - Fraction(2) ** (1 - p)) * Fraction(2) ** emax
+    if abs(r) > top:
+        to_inf = {
+            "NearestEven": True,
+            "NearestAway": True,
+            "TowardZero": False,
+            "Down": v < 0,
+            "Up": v > 0,
+        }[mode]
+        if to_inf:
+            return INF if v > 0 else -INF
+        return float(top) if v > 0 else -float(top)
+    if r == 0:
+        # an inexact result that rounds to zero keeps the sign of x
+        return -0.0 if v < 0 else 0.0
+    out = float(r)
+    assert Fraction(out) == r, "a format value must be a Float"
+    return out
 
 
 # ---------------------------------------------------------------- inputs
@@ -407,6 +495,89 @@ def rem_cases(rng: random.Random, p: int, emin: int, emax: int) -> list:
     return [(a, b, op_oracle("rem", a, b, p, emin, emax)) for a, b in pairs]
 
 
+def same_bits(a: float, b: float) -> bool:
+    return struct.pack("d", a) == struct.pack("d", b) or (math.isnan(a) and math.isnan(b))
+
+
+def check_directed(name: str, p: int, emin: int, emax: int, xs: list, answers: dict) -> None:
+    """What the mode sections must be able to tell apart, asserted on the
+    oracle so that a later edit to the inputs cannot quietly drop it.
+
+    - round_mode's NearestEven is round_float on every input: two
+      formulations of the same rule, each the other's check.
+    - every pair of modes disagrees somewhere, so a mode answering another's
+      question reddens both sections; NearestEven and NearestAway on a tie
+      cell, which is the only place they can.
+    - the overflow cells of section 7.4, both signs.
+    - every answer lies on the bracket of its input: no mode moves more than
+      to a neighbour.
+    """
+    for x, want in zip(xs, answers["NearestEven"]):
+        assert same_bits(want, round_float(x, p, emin, emax)), (name, x)
+    for i, a in enumerate(MODES):
+        for b in MODES[i + 1 :]:
+            assert any(not same_bits(u, v) for u, v in zip(answers[a], answers[b])), (name, a, b)
+    top = max_finite(p, emax)
+    over = top * 2
+    for x, m, want in [(over, "TowardZero", top), (over, "Down", top), (over, "Up", INF),
+                       (-over, "TowardZero", -top), (-over, "Down", -INF), (-over, "Up", -top),
+                       (over, "NearestEven", INF), (-over, "NearestAway", -INF)]:
+        assert same_bits(answers[m][xs.index(x)], want), (name, x, m)
+    for k, x in enumerate(xs):
+        if math.isfinite(x) and abs(x) <= top:
+            down, up = answers["Down"][k], answers["Up"][k]
+            assert down <= x <= up, (name, x)
+            assert all(same_bits(answers[m][k], down) or same_bits(answers[m][k], up) for m in MODES), (name, x)
+
+
+def directed_cases(rng: random.Random, p: int, emin: int, emax: int) -> list:
+    """One input list per format, shared by its five mode sections, so that
+    the sections differ only in the mode and a mode answering another's
+    question disagrees on the cells where the two modes do."""
+    tiny = min_subnormal(p, emin)
+    normal_min = float(Fraction(2) ** emin)
+    top = max_finite(p, emax)
+    ulp1 = float(Fraction(2) ** (1 - p))
+    ulp_top = float(Fraction(2) ** (emax - p + 1))
+    on_grid = [1.0, 1.0 + ulp1, 1.5, 3.0, tiny, 3 * tiny, normal_min, normal_min - tiny, top]
+    xs = [NAN, INF, -INF, 0.0, -0.0]
+    for g in on_grid:
+        # the value itself (every mode answers it), and one Float ulp either
+        # side (every mode answers one of its two neighbours)
+        xs += [g, -g, next_up(g), -next_up(g), next_down(g), -next_down(g)]
+    # ties: even below, even above, in the subnormal range (tiny / 2 between
+    # zero and tiny; 3 tiny / 2 between tiny and 2 tiny), and the one between
+    # the largest subnormal and the smallest normal
+    ties = [1.0 + ulp1 / 2, 1.0 + 3 * ulp1 / 2, tiny / 2, 3 * tiny / 2, 5 * tiny / 2,
+            normal_min - tiny / 2, top - ulp_top / 2]
+    # off-centre, a quarter of the way either side
+    offs = [1.0 + ulp1 / 4, 1.0 + 3 * ulp1 / 4, tiny * 0.3, tiny * 0.7, tiny * 1.3]
+    # overflow: just past the largest finite value, its midpoint with the
+    # next binade, far past it, and Float's own extremes
+    over = [top + ulp_top / 4, top + ulp_top / 2, top * 1.5, top * 2,
+            float(Fraction(2) ** (emax + 1)), 1.7976931348623157e308, 1e300]
+    # Float's subnormals, far below every grid here
+    under = [5e-324, 1e-310]
+    for x in ties + offs + over + under:
+        xs += [x, -x]
+    for _ in range(24):
+        # a random format value plus a random part of its quantum, anywhere
+        # from the subnormal range to the top binade, of either sign
+        e = rng.randint(emin - 4, emax)
+        if e < emin:
+            g, q = float(rng.randint(1, 2 ** (p - 1) - 1) * Fraction(tiny)), tiny
+        else:
+            g, q = random_format_value(rng, p, emin, emax, e, e), float(Fraction(2) ** (e - p + 1))
+        x = g + q * rng.choice([0.25, 0.5, 0.75, rng.random()])
+        xs.append(x if rng.random() < 0.5 else -x)
+    for _ in range(16):
+        # random 64-bit patterns, the finite ones
+        x = struct.unpack("d", struct.pack("Q", rng.getrandbits(64)))[0]
+        if math.isfinite(x):
+            xs.append(x)
+    return xs
+
+
 # ---------------------------------------------------------------- Dawn text
 
 
@@ -466,7 +637,7 @@ def generate() -> tuple:
         "#",
         "# std/narrow against an exact rational oracle: every input and every",
         "# expected answer below was computed with fractions.Fraction from the",
-        "# definition of round-to-nearest-even, and the two backends must both",
+        "# definition of each rounding mode, and the two backends must both",
         "# reproduce them bit for bit. The sections and what each holds are",
         "# described at the top of the generator; narrow_round.expect says every",
         "# section disagrees on nothing.",
@@ -587,6 +758,25 @@ def generate() -> tuple:
         label = f"{name} literal"
         main.append(f'  bad = bad + check1("{label}", x => x, {name}_literal())')
         expect.append(f"{label}: {n} cases, 0 bad")
+    # the five modes, from an exact oracle of their own (round_mode) and a
+    # generator of their own, so the sections above keep their cases. bf16
+    # goes through round_binary, which is where the mode lives (round_bf16
+    # takes none); binary32 and TensorFloat-32 through the two public
+    # rounders that take a mode, which is what says each passes it on.
+    # binary16 would be round_binary again at other parameters: every build
+    # of the corpus pays for its cases, and no rule is only visible there.
+    rng_dir = random.Random(SEED + 2)
+    for name, p, emin, emax, call in DIRECTED_FORMATS:
+        xs = directed_cases(rng_dir, p, emin, emax)
+        answers = {m: [round_mode(x, m, p, emin, emax) for x in xs] for m in MODES}
+        check_directed(name, p, emin, emax, xs, answers)
+        for m in MODES:
+            rows = list(zip(xs, answers[m]))
+            text, n = table_fns(f"{name}_mode_{m.lower()}", "(Float, Float)", rows, r1)
+            out.append(text)
+            label = f"{name} mode {m}"
+            main.append(f'  bad = bad + check1("{label}", x => {call.format(m=m)}, {name}_mode_{m.lower()}())')
+            expect.append(f"{label}: {n} cases, 0 bad")
     main.append('  println("total: ${bad} bad")')
     main.append("}")
     expect.append("total: 0 bad")
