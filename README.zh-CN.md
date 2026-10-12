@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 8290df979db7a800 -->
+<!-- doc-check: translation-of README.md @ aace2e6e01a84914 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -154,8 +154,8 @@ pub fn main() -> Unit !io = {
 对它调 `discard` 丢弃。
 
 两种形状都有规范、两个后端都实现了、对拍语料也盯着，而且**这一档的内部使用者就在本仓**：
-`std/io` 声明了 `Fs`、`Proc`、`Env`、`Exit` 与 `Console`，`std/gpu` 声明了 `Gpu`，每条声明
-旁边就是生产装的 handler，测试里另有假实现。`doc-check.py` 持有这份清单
+`std/io` 声明了 `Fs`、`Proc`、`Env`、`Exit` 与 `Console`，`std/gpu` 声明了 `Gpu`，`std/mem`
+声明了 `Mem`，每条声明旁边就是生产装的 handler，除 `Mem` 外测试里另有假实现。`doc-check.py` 持有这份清单
 （`NAMED_EFFECT_EXPECTED`），`std/` 或 `selfhost/src/` 下别处冒出声明，它就把这一段判红。
 编译器自己也跑在这一档上：它的 `main` 被 `Fs` 与 `Exit` 的 handler 包着，driver 的分析测试
 则把同一份代码跑在一棵内存里的文件树上（`selfhost/src/driver/fsmem.dawn`）。

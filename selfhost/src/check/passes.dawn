@@ -43,7 +43,7 @@ use check/types.{
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, opaque_inherits, eq_scalars, hash_scalars, ord_scalars, Head, head_of, impl_at,
   derivable_traits, derivable_named, derivable_names, adt_derives,
-  has_impl_at, insert_impl, type_args_of, sub_goals
+  has_impl_at, insert_impl, type_args_of, sub_goals, buffer_reach
 }
 
 use check/identity
@@ -1301,6 +1301,23 @@ pub(pkg) fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       }
       let (cxb, ret) = resolve_return_type(cx1, op.ret)
       cx1 = Cx { ..cxb, current_tparams: saved_tp, current_eff_vars: saved_ev }
+      # R3 of docs/mem-buffer-design.md 4.2: an operation's arguments and result
+      # travel to the arm, which runs where the handler was installed and not
+      # where the buffer's scope is, so a buffer in a signature can be kept
+      # (`Mem` itself returns one from `mem_alloc`: it is the answer to the
+      # allocation, which is the one place a buffer is handed over)
+      let no_tys: List[Ty] = []
+      for pty in (if cx1.owner_class == Some("std/mem") { no_tys } else { ptys ++ [ret] }) {
+        match buffer_reach(cx1.adts, cx1.effect_infos, pty) {
+          Some(path) -> {
+            cx1 = cerr_h(cx1, "effect operation `" ++ op.name ++ "` cannot mention a buffer: " ++ path ++
+                ", in the type `" ++ ty_show(cx1.adts, pty) ++ "`", op.nlo, op.nhi,
+              "a handler answers where it was installed, outside the buffer's " ++
+                "`with_mem` scope; pass Ints through the operation")
+          }
+          None -> ()
+        }
+      }
       # the arm is a closure the caller reaches through evidence, so what the
       # arm's body does is recorded where the handler is installed, never here
       #

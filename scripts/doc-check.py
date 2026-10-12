@@ -2031,7 +2031,7 @@ pub fn main() -> Unit !io = infers_io()
 # counts declarations against a list.
 NAMED_EFFECT_ROOTS = ("std", "selfhost/src")
 NAMED_EFFECT_DECL = re.compile(r"(?m)^(?:pub\s+)?(?:ctl\s+)?effect\s+[A-Za-z_]")
-NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn")
+NAMED_EFFECT_EXPECTED = ("std/gpu.dawn", "std/io.dawn", "std/mem.dawn")
 #
 # The front page carried the same paragraph until 2026-10-02, when its effects
 # card shrank to one sentence that names no consumer at all
