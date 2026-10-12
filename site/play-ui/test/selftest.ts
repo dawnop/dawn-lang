@@ -119,6 +119,19 @@ expect('only the name after fn is a definition', tokenClasses('pub fn go() -> Un
 ])
 callBrackets('nested character and raw braces', '"${foo(\'}\', `}`)}"')
 callBrackets('blank line in triple string', '"""$name\n\nend"""')
+// A char literal is one code point or one escape (`\u{...}` through its `}`),
+// and only `${` opens an interpolation (#708).
+callBrackets('unicode escape char', "'\\u{0000}'")
+callBrackets('non-BMP char', "'\u{1F600}'")
+callBrackets('escaped quote char', "'\\''")
+callBrackets('trailing dollar', '"impl$"')
+callBrackets('lone dollar', '"$"')
+callBrackets('dollar digit', '"$5"')
+callBrackets('dollar in escaped quotes', '"\\"$1\\""')
+expect('lone dollar is plain string text', tokenClasses('"$"'), [['"$"', 'tok-string']])
+expect('dollar brace is an interpolation', tokenClasses('"${x}"'), [
+  ['"', 'tok-string'], ['${', 'tok-interp'], ['x', 'tok-variableName'], ['}', 'tok-interp'], ['"', 'tok-string'],
+])
 
 // ---- diagnostics parser, fed real compiler output (strip_dir applied) ----
 const report = `error: main must be pub

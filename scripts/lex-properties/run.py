@@ -88,45 +88,6 @@ def hard_keyword(t):
 
 # Findings of the first run, filed and pinned: `<property> <rule> <subject> <where>`.
 KNOWN_KEYS = """
-# #708: the editor's tokenizer misreads `\\u{...}` and non-BMP char literals,
-# and colours a `$` not followed by `{` as an interpolation.
-b region editor compiler-plan/src/buildinfo.dawn
-b region editor compiler-plan/src/pkgfetch.dawn
-b region editor examples/text/chars.dawn
-b region editor packages/json/src/render.dawn
-b region editor packages/web/src/types.dawn
-b region editor packages/xmap/src/panes.dawn
-b region editor playground/src/play/exec.dawn
-b region editor playground/src/play/gate.dawn
-b region editor scripts/grammar-corpus/accept/dollar_literals.dawn
-b region editor scripts/spike-native/display_layers.dawn
-b region editor scripts/spike-native/list_dir.dawn
-b region editor scripts/spike-native/str_order.dawn
-b region editor scripts/spike-native/strings.dawn
-b region editor selfhost/src/c/binfo.dawn
-b region editor selfhost/src/c/emitc.dawn
-b region editor selfhost/src/check/checker.dawn
-b region editor selfhost/src/check/types.dawn
-b region editor selfhost/src/driver/analyze.dawn
-b region editor selfhost/src/front/lexer.dawn
-b region editor selfhost/src/ir/core.dawn
-b region editor selfhost/src/ir/interp.dawn
-b region editor selfhost/src/ir/interp_test.dawn
-b region editor selfhost/src/ir/lower.dawn
-b region editor selfhost/src/jvm/codegen.dawn
-b region editor selfhost/src/jvm/jreflect.dawn
-b region editor selfhost/src/jvm/rtclasses.dawn
-b region editor selfhost/src/lsp/lspc.dawn
-b region editor selfhost/src/lsp/lspv.dawn
-b region editor selfhost/src/lsp/server.dawn
-b region editor selfhost/src/pkg/vendor.dawn
-b region editor site/src/gen/assets.dawn
-b region editor site/src/gen/screens.dawn
-b region editor site/src/html/page.dawn
-b region editor site/src/md/text.dawn
-b region editor std/char.dawn
-b region editor std/str.dawn
-
 # #709: lexContext does not track strings or braces inside `${...}`, and takes
 # `\\$name` for an interpolation.
 b context lexContext packages/xmap/src/javap.dawn

@@ -54,9 +54,33 @@ function isIdentChar(ch: string) {
   return /[A-Za-z0-9_]/.test(ch)
 }
 
+// Where a char literal starting at the quote `at` ends, read as `lex_char` in
+// selfhost/src/front/lexer.dawn does: one code point (a surrogate pair is one),
+// or one escape, `\u{...}` taking its hex digits through the `}`. A closing
+// quote is taken when present; a literal never runs past the end of its line.
+function charEnd(text: string, at: number): number {
+  let i = at + 1
+  if (i >= text.length || text[i] === '\n') return i
+  if (text[i] === '\\') {
+    if (text[i + 1] === 'u' && text[i + 2] === '{') {
+      let j = i + 3
+      while (j < text.length && text[j] !== '}' && text[j] !== '\n') j++
+      i = text[j] === '}' ? j + 1 : j
+    } else {
+      i += 1
+      if (i < text.length && text[i] !== '\n') i += text.codePointAt(i)! > 0xffff ? 2 : 1
+    }
+  } else {
+    i += text.codePointAt(i)! > 0xffff ? 2 : 1
+  }
+  return text[i] === "'" ? i + 1 : i
+}
+
 // Scan the body of a string with the given closer, honoring escapes (except raw
-// backtick strings) and stopping at `$` so the caller can tag interpolation.
-// Returns true if the closing delimiter was consumed.
+// backtick strings) and stopping at `${` so the caller can tag interpolation.
+// A `$` not followed by `{` is text, as in the lexer (`$name` is an error
+// there, not an interpolation). Returns true if the closing delimiter was
+// consumed.
 function scanStringBody(stream: any, closer: string, raw: boolean): boolean {
   while (!stream.eol()) {
     const ch = stream.peek()
@@ -65,7 +89,7 @@ function scanStringBody(stream: any, closer: string, raw: boolean): boolean {
       stream.next()
       continue
     }
-    if (!raw && ch === '$') return false // hand back to interpolation handling
+    if (!raw && ch === '$' && stream.string[stream.pos + 1] === '{') return false // hand back to interpolation handling
     if (stream.match(closer)) return true
     stream.next()
   }
@@ -89,10 +113,10 @@ const dawnMode = StreamLanguage.define<State>({
     }
     if (context?.kind === 'string') {
       const raw = context.closer === '`'
-      if (!raw && stream.peek() === '$') {
+      if (!raw && stream.peek() === '$' && stream.string[stream.pos + 1] === '{') {
         stream.next()
-        if (stream.eat('{')) state.contexts.push({ kind: 'interp', depth: 1 })
-        else while (isIdentChar(stream.peek() ?? '')) stream.next()
+        stream.next()
+        state.contexts.push({ kind: 'interp', depth: 1 })
         return 'interp'
       }
       if (scanStringBody(stream, context.closer, raw)) state.contexts.pop()
@@ -142,12 +166,9 @@ const dawnMode = StreamLanguage.define<State>({
       return 'string'
     }
 
-    // char literal: 'a', '\n', '\\'
+    // char literal: 'a', '\n', '\\', '\u{1F600}', a non-BMP character
     if (ch === "'") {
-      stream.next()
-      if (stream.peek() === '\\') stream.next()
-      stream.next()
-      stream.eat("'")
+      stream.pos = charEnd(stream.string, stream.pos)
       return 'string'
     }
 
@@ -240,11 +261,7 @@ export function lexContext(text: string, pos: number): 'code' | 'comment' | 'str
         kind = 'raw'
         i++
       } else if (ch === "'") {
-        // char literal: 'a' or '\n'
-        i++
-        if (text[i] === '\\') i++
-        i++
-        if (text[i] === "'") i++
+        i = charEnd(text, i)
       } else {
         i++
       }
