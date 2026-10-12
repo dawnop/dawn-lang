@@ -55,6 +55,44 @@ MUTATIONS = {
         "pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 127)",
         "pub fn round_bf16(x: Float) -> Float = round_binary(x, 8, -126, 128)",
     ),),
+    # `NearestAway` breaks a tie toward zero: only a tie cell can see it.
+    "away-ties-down": ((
+        NARROW,
+        "NearestAway -> r >= 0.5",
+        "NearestAway -> r > 0.5",
+    ),),
+    # The issue #378 control: `Down` and `Up` trade places, in which way the
+    # magnitude steps and in which sign saturates on overflow.
+    "directed-swap": (
+        (
+            NARROW,
+            """        Down -> neg && r > 0.0
+        Up -> not neg && r > 0.0""",
+            """        Down -> not neg && r > 0.0
+        Up -> neg && r > 0.0""",
+        ),
+        (
+            NARROW,
+            """        Down -> not neg
+        Up -> neg""",
+            """        Down -> neg
+        Up -> not neg""",
+        ),
+    ),
+    # `Up` steps a positive value one quantum up even when nothing was cut
+    # off, so a value already on the grid moves to its successor.
+    "up-extra-ulp": ((
+        NARROW,
+        "Up -> not neg && r > 0.0",
+        "Up -> not neg && r >= 0.0",
+    ),),
+    # `Down` forgets the sign: it steps every inexact magnitude up, which is
+    # away from zero, right for a negative value and wrong for a positive one.
+    "down-ignores-sign": ((
+        NARROW,
+        "Down -> neg && r > 0.0",
+        "Down -> r > 0.0",
+    ),),
 }
 
 

@@ -377,7 +377,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19780s (the most this file's `3x` claims may add up to)
+# push-total: 19830s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1695,8 +1695,12 @@ jobs:
     # job's current steps in the 150 main runs of 10-03T11:15Z .. 10-07T10:20Z
     # (run 37597309193). Restated to that plus a tenth, rounded up to 5s, 520s,
     # and the timeout to 3x that.
-    # budget: 3x 520s worst observed plus a tenth (run 37597309193)
-    timeout-minutes: 26
+    # 2026-10-12 (#378): the narrow contract gained fifteen mode sections and
+    # four mutants, 56s -> 91s locally (two mutants at a time); scaled to the
+    # step's 70s on CI that is +44s, +50s with a tenth: 570s, and the timeout
+    # to 3x that. Restate at the job's own worst once main runs of it exist.
+    # budget: 3x 570s worst observed plus a tenth (run 37597309193 + #378 estimate)
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@v4
 
@@ -1725,10 +1729,13 @@ jobs:
       # scripts/narrow-contract is the outside opinion, and the corpus is its
       # output written down as literals. The step checks the corpus is what
       # the generator generates, runs it on both backends, and then removes
-      # each of the three rounding rules in turn (ties to even, the subnormal
-      # clamp, the overflow threshold) from a copy of std and requires the
-      # section that owns the rule to go red on both backends. 27s locally.
-      - name: narrow float contract (exact oracle, both backends, three mutants)
+      # each of seven rounding rules in turn (ties to even, the subnormal
+      # clamp, the overflow threshold, and four in the `Rounding` mode match,
+      # among them the Down/Up swap of #378) from a copy of std and requires
+      # the section that owns the rule to go red on both backends. The
+      # mutants run three at a time. 56s locally before the mode sections,
+      # 91s after (two at a time, NARROW_JOBS=2, 2026-10-12).
+      - name: narrow float contract (exact oracle, both backends, seven mutants)
         run: ./scripts/narrow-contract/run.sh
 
       # source packages (packages/, docs/package-design.md 项目 B): every
