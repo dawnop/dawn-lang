@@ -34,7 +34,6 @@ use std/char
 use std/io
 use std/list
 use std/bytes
-use std/str
 use std/raw
 
 fn of(vals: List[Int]) -> Bytes = {
@@ -48,7 +47,7 @@ fn of(vals: List[Int]) -> Bytes = {
 ## A decoded string as something a diff can read: its code-point count and the
 ## UTF-8 of the result. Printing the string itself would put a lone U+FFFD
 ## through a terminal and a diff on the way to being compared.
-fn seen(s: String) -> String = to_string(str.len(s)) ++ " " ++ bytes.to_hex(bytes.utf8(s))
+fn seen(s: String) -> String = to_string(len(s)) ++ " " ++ bytes.to_hex(bytes.utf8(s))
 
 ## What `bytes.decode_utf8_checked` answered, in one line.
 fn checked(b: Bytes) -> String =
@@ -68,7 +67,7 @@ fn checked(b: Bytes) -> String =
 fn lossy_prefix(b: Bytes) -> Int = {
   var valid = 0
   var k = 0
-  while k <= bytes.len(b) {
+  while k <= len(b) {
     let p = bytes.slice(b, 0, k)
     if bytes.utf8(bytes.decode_utf8_lossy(p)) == p { valid = k }
     k = k + 1
@@ -82,8 +81,8 @@ fn lossy_prefix(b: Bytes) -> Int = {
 fn disagreement(b: Bytes) -> Int = {
   let valid = lossy_prefix(b)
   let ok = match bytes.decode_utf8_checked(b) {
-    Ok(s) -> valid == bytes.len(b) && s == bytes.decode_utf8_lossy(b)
-    Err(e) -> valid < bytes.len(b) && e.offset == valid
+    Ok(s) -> valid == len(b) && s == bytes.decode_utf8_lossy(b)
+    Err(e) -> valid < len(b) && e.offset == valid
   }
   if ok { 0 } else { 1 }
 }
@@ -103,13 +102,13 @@ pub fn main() -> Unit !io = {
 
   io.println("-- latin1 is one code point per byte, over the whole range --")
   var all = raw.decode_latin1(of(range(0, 256)))
-  io.println("${str.len(all)} ${list.map(code_points(all), c => char.code(c)) == range(0, 256)}")
+  io.println("${len(all)} ${list.map(code_points(all), c => char.code(c)) == range(0, 256)}")
   io.println(seen(raw.decode_latin1(of([0x00, 0x41, 0x7F, 0x80, 0xA9, 0xFF]))))
 
   io.println("-- the same bytes, two domains: the function name decides --")
   var pound = of([0xC2, 0xA3])
   io.println("${raw.decode_utf8_lossy(pound)} ${raw.decode_latin1(pound)}")
-  io.println("${str.len(raw.decode_utf8_lossy(pound))} ${str.len(raw.decode_latin1(pound))}")
+  io.println("${len(raw.decode_utf8_lossy(pound))} ${len(raw.decode_latin1(pound))}")
 
   io.println("-- malformed UTF-8 is replaced, not refused --")
   io.println("lone continuation " ++ seen(raw.decode_utf8_lossy(of([0x80]))))
@@ -183,11 +182,11 @@ pub fn main() -> Unit !io = {
     i = i + 1
   }
   var p = 0
-  while p < bytes.len(alpha) {
+  while p < len(alpha) {
     var q = 0
-    while q < bytes.len(alpha) {
+    while q < len(alpha) {
       var r = 0
-      while r < bytes.len(alpha) {
+      while r < len(alpha) {
         let three = of([bytes.at(alpha, p), bytes.at(alpha, q), bytes.at(alpha, r)])
         swept = swept + 1
         refused = refused + refusal(three)

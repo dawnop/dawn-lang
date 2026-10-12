@@ -42,7 +42,7 @@ fn stored_member(
 ) -> Bytes = {
   var out = fixed_header(flags)
   if flags & FEXTRA != 0 {
-    let n = bytes.len(extra)
+    let n = len(extra)
     out = values(out, [n, n >>> 8])
     out = bytes.put_bytes(out, extra)
   }
@@ -59,7 +59,7 @@ fn stored_member(
     out = values(out, [hcrc, hcrc >>> 8])
   }
 
-  let n = bytes.len(data)
+  let n = len(data)
   let inverse = ~n & 0xFFFF
   out = values(out, [1, n, n >>> 8, inverse, inverse >>> 8])
   out = bytes.put_bytes(out, data)
@@ -80,7 +80,7 @@ fn concat(parts: List[Bytes]) -> Bytes = {
 fn flip_mask(b: Bytes, i: Int, mask: Int) -> Bytes = {
   var out = bytes.buf()
   var k = 0
-  while k < bytes.len(b) {
+  while k < len(b) {
     out = bytes.put(out, if k == i { bytes.at(b, k) ^ mask } else { bytes.at(b, k) })
     k = k + 1
   }
@@ -142,11 +142,11 @@ pub fn check() -> Int !io = {
     bytes.utf8("name.txt"), bytes.utf8("comment"))
   bad = bad + expect_bytes("all optional fields", gzip.gunzip(optional), bytes.utf8("ok"))
 
-  let second_at = bytes.len(first)
+  let second_at = len(first)
   bad = bad + expect_error("bad CRC in second member",
-    gzip.gunzip(flip(pair, second_at + bytes.len(second) - 8)), "checksum mismatch")
+    gzip.gunzip(flip(pair, second_at + len(second) - 8)), "checksum mismatch")
   bad = bad + expect_error("bad ISIZE in second member",
-    gzip.gunzip(flip(pair, second_at + bytes.len(second) - 1)), "member says")
+    gzip.gunzip(flip(pair, second_at + len(second) - 1)), "member says")
   bad = bad + expect_error("bad header in second member", gzip.gunzip(flip(pair, second_at)),
     "bad magic")
 
