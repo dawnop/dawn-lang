@@ -104,3 +104,26 @@ if [ "$refs" != "0" ]; then
   exit 1
 fi
 echo "PASS  at, set and len compile inline"
+
+# ---- Core keeps the order of reads and writes ---------------------------------
+# A `Mem` call is not a pure call. Core has no dead-code or common-subexpression
+# pass today; if one arrives it must leave order.dawn's four calls alone: two
+# reads of one slot with a write between them, and a read nobody uses.
+java -Xss512m -jar "$jar" __lower --dump "$work/core" "$here/order.dawn" > /dev/null
+python3 - "$work/core/order.core" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+body = text.split("fn order.order", 1)[1].split("\nfn ", 1)[0]
+calls = re.findall(r"call direct std/mem\.(\w+)", body)
+want = ["at", "set", "at", "at"]
+if calls != want:
+    print(f"FAIL: Core for order.dawn calls {calls}, want {want}", file=sys.stderr)
+    print("      a read or a write was merged, moved or dropped (docs/mem-buffer-design.md 9, K3)", file=sys.stderr)
+    sys.exit(1)
+PY
+got="$(java -Xss512m -jar "$jar" run "$here/order.dawn")"
+if [ "$got" != "7" ]; then
+  echo "FAIL: order.dawn printed '$got', want 7 (first read 0, second read 7)" >&2
+  exit 1
+fi
+echo "PASS  Core keeps reads and writes in order"
