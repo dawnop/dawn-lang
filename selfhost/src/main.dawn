@@ -487,12 +487,13 @@ fn collect_program_full(
   for pr in map.entries(impl_table) {
     let (_k, imp) = pr
     if len(imp.tparams) == 0 { continue }
-    # `Len` at a List binds nothing and is the `len` primitive at every call
-    # lowering can see; a dictionary of it exists only to be handed to a
-    # function with a `[C: Len]` bound, and the bound scan above asks for the
-    # interface then. Asked for here unconditionally it would put one more
-    # class in every program, for the one trait whose std impl is always there.
-    if lower.is_len_primitive(imp.trait_id, imp.subject) && no_bounds(imp.constraints) { continue }
+    # A `Len` impl that binds nothing (List, Map and Set in std) is called
+    # directly at every call lowering can see; a dictionary of it exists only
+    # to be handed to a function with a `[C: Len]` bound, and the bound scan
+    # above asks for the interface then. Asked for here unconditionally it
+    # would put one more class in every program, for a trait whose std impls
+    # are always there.
+    if lower.is_len_trait(imp.trait_id) && no_bounds(imp.constraints) { continue }
     wants = want_iface(wants, imp.trait_id)
     for cs in imp.constraints {
       for b in cs {
