@@ -388,6 +388,54 @@ panic 被接住时缓冲活着；闭包捕获了缓冲后被丢弃。第三个�
 | N9 | `use java` 的 `Thread.new(\|\| at(b, 0))` | R4 |
 | N10 | 作用域外直接 `new(4)` | 「没人应答」的既有诊断 |
 
+### 9.2 K3 落地记录（2026-10-12）
+
+基线 `origin/main` = 64298c6b 之上，分支 `lang/mem-k3`，三个提交：先效果（`std/mem` 声明 `Mem` 与 `with_mem`，十一个夹具在**没有任何规则**时录成黄金），
+再规则（R1 到 R4，同一批夹具的黄金按预期变红），最后 Core 保序门与本记录。
+
+**做了什么。**
+
+- `std/mem`：`pub effect Mem { fn mem_alloc(n: Int) -> I64Buf }`；`with_mem` 的 handler 臂是 `i64buf_new(n)`；`new` 经 `mem_alloc` 走，`clone`/`from_list` 经 `new`；
+  `at`/`set`/`fill`/`copy_from`/`copy_within`/`clone`/`from_list`/`to_list` 带 `!Mem`，`len` 纯。测试与 `scripts/mem-contract/probe.dawn` 全部包进 `with_mem`，
+  探针输出对 K2 逐字节不变（JVM、native、ASan 三腿）。
+- 规则落点（`check/types.dawn` 里 `is_mem_effect`/`eff_names_mem`/`buffer_reach`，调用点在 `checker.dawn` 与 `passes.dawn`）：按效果身份认，即 `std/mem` 里名为 `Mem` 的那一个，不看名字本身。
+  R1 在 `check_call` 里 `ret` 算定之后（`s.name == "with_mem"` 且 `s.owner == Some("std/mem")`）；`buffer_reach` 穿过元组、列表/集合/映射/数组、不透明类型、
+  用户 ADT 字段（带类型实参代换、带环保护）与函数类型的参数和结果，函数类型的行里有 `Mem` 也算。R2 在 `check_handle`，装 `Mem` 的 handler 的模块必须就是声明它的模块。
+  R3 两处：`passes.dawn` 的效果操作签名（参数和结果；`std/mem` 自己的 `mem_alloc` 豁免，它就是分配的应答）与 `declare_cells` 的 `var` 类型。
+  R4 在 `sam_snapshot`：带 `Mem` 标签的函数值过 SAM 转换点时拒绝；缓冲作 Java 实参本来就过不了重载解析（`I64Buf` 不是可编组类型），N9 的第二个函数把这一半钉住。
+- `Mem` 在 `const` 与 comptime：已被既有机制拒绝（`i64buf_new` 是 comptime 拒绝名单上的原语），`mem_comptime` 夹具钉住两条路径的措辞。
+- Core 保序：`scripts/mem-contract/order.dawn` 加 `run.sh` 第五步，`__lower --dump` 之后检查 `order` 函数里 `std/mem.at/set/at/at` 四次调用按序都在，再运行得 7。
+  Core 仍无 DCE/CSE，所以这一步今天是对「现状」的钉子，将来有人加这两个 pass 时它先红。
+
+**负控（先红后绿）。** 夹具 N1 到 N10 在第一个提交时录黄金：N1 到 N9 全部**编过**（N9 的 Java 参数那半本来就被重载解析拒绝，N10 报既有的未处理效果诊断），
+即「规则关掉时夹具必须编过」；第二个提交后 N1 到 N5 各出 R1，N6 出 R2，N7 与 N8 出 R3，N9 的线程那半出 R4。`mem_ok_scopes` 在两个提交里黄金都是空的，钉住 §4.3 的允许形态。
+N7 与 N8 与设计稿的表有一点不同：设计稿把「操作签名」与「`var` 存句柄」写在同一个夹具里，这里拆成两个文件，这样每条诊断只有一个出处。
+
+**与设计稿的偏差和发现。**
+
+1. **R2 的理由已过时，规则本身照写。** §4.2 说闭包的行在创建点结算，所以用户 handler 会让带缓冲的闭包变「纯」而绕过 R1。但那是 effects-design §4.6 的旧语义，
+   V1′ 之后函数值保留完整的行，只有调用点的 `with handle` 减标签（effects-design 开头的 2026-08-24 补记）。实测（`mem_n06_user_handler` 的第二个函数）：用户 handler 之下的闭包行里仍有 `Mem`，
+   R1 自己就会拒；R2 现在是「分配只有一个应答者」的约束，不再是堵一个真实的洞。需要的话该段理由应改写。
+2. **R1 只看 `with_mem` 的调用点，用户包一层泛型就看不见。** `fn scope[T](f: fn() -> T !Mem) -> T = with_mem(f)` 的结果是类型变量 `T`，R1 在那里放行；
+   调用 `scope(() => mem.new(4))` 时调用点不是 `with_mem`，缓冲就出来了。这与设计稿的写法一致（「在每个 `with_mem` 调用点」），没有改；若要堵，
+   办法是对 `T` 含刚性类型变量的 `with_mem` 调用也拒绝，或把规则挂到「行里消掉 `Mem` 的任何调用点」。留给后续裁决，不在 K3 里擅自改。
+3. **bcrypt 带 `Mem` 证据参数：native 越过 10% 线，JVM 没有。** 把 K0 的 bcrypt 改成句柄参数版（K2 版无标签，K3 版每个辅助函数 `!Mem`、`with_mem` 包住一次 `hash_with_salt`），
+   同机同轮交错三轮，每轮 12 次取后 8 次中位数，cost 12 `checkpw`，秒：
+
+   | | K2（无证据） | K3（`Mem` 证据） | 比值 |
+   |---|---|---|---|
+   | JVM | 0.1777、0.1788、0.1786 | 0.1777、0.1778、0.1786 | 1.00 |
+   | native，cc -O2 | 0.1428、0.1426、0.1422 | 1.1159、1.1173、1.1247 | 约 7.8 |
+
+   native 的原因看生成的 C 就清楚：证据是 owned 参数（Core 里 `ev v1 : ev$Mem owned`），每次 `at`/`set`/`get` 调用前 `dawn_dup(dawn_own[1])`，每个带证据的函数都开一个 `DAWN_OWN_FRAME`，
+   热循环里每次访问多一次引用计数和一次帧登记，`static inline` 的 `at`/`set` 省下的东西被这一层吃回去还多。按 §10 问题 2 的明文，这就是触发「零操作标记效果」备用方案的情形
+   （任一后端越线即触发）；K3 不实现它（要改解析器与新增一类消解形式，比 R1 到 R4 大），也没有借此改动 Core 或降级。`std` 里没有任何使用者，所以这个回退今天没有受害者；
+   K4 迁移 bcrypt 之前必须先把这条解决。备选里还有一条设计稿没写的更小的路：让证据形参在 C 后端按借用传递（`c/infer` 的借用推断今天不覆盖 `ev` 形参），那只治 dup/drop，
+   帧登记是否一并消失**未量**。
+
+**没覆盖的。** `Mem` 与 `ctl` 效果的相互作用（挂起的续延持有句柄）只由 mem-contract 的 `dropped_line` 在运行时覆盖，没有对应的检查器夹具；
+`F64Buf` 仍是 K5。
+
 ## 10. 待裁问题与裁决
 
 2026-10-09 协调者对本文七个待裁问题逐条裁决如下。已裁的写进正文，延后的写明重开条件。

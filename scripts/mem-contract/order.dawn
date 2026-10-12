@@ -1,0 +1,22 @@
+# Order probe for the Core pass (docs/mem-buffer-design.md 9, K3).
+#
+# Core does no dead-code elimination and no common-subexpression elimination
+# today, and a `Mem` read or write is not a pure call, so it must not be folded
+# or shared if either pass ever arrives. This program has the three shapes such
+# a pass would break: two reads of one slot with a write between them (the
+# second must not become the first), a read whose result is never used (it can
+# still panic, so it is not dead), and a write whose result is a Unit nobody
+# looks at. run.sh lowers it and checks the calls in `order` survive, in this
+# order, in the Core dump; it also runs it and checks the answer.
+use std/mem
+use std/mem.{Mem}
+
+fn order(b: I64Buf) -> Int !Mem = {
+  let first = mem.at(b, 0)
+  mem.set(b, 0, 7)
+  let second = mem.at(b, 0)
+  let _unused = mem.at(b, 1)
+  first * 10 + second
+}
+
+pub fn main() -> Unit !io = println("${mem.with_mem(() => order(mem.new(2)))}")
