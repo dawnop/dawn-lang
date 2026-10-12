@@ -1,0 +1,51 @@
+# checker.dawn: what R1 to R4 must leave alone (design 4.3). The golden is
+# empty on purpose; a rule that grew too wide shows up here first.
+use std/mem
+use std/mem.{Mem}
+
+type Box = { b: I64Buf }
+
+# a helper takes the buffer and says it uses `Mem`
+fn bump(b: I64Buf, i: Int) -> Unit !Mem = mem.set(b, i, mem.at(b, i) + 1)
+
+# lists and records hold buffers inside the scope
+pub fn inside() -> Int = mem.with_mem(() => {
+  let bufs = [mem.new(2), mem.new(3)]
+  let bx = Box { b: mem.new(1) }
+  bump(bufs[0], 1)
+  bump(bx.b, 0)
+  mem.at(bufs[0], 1) + mem.at(bx.b, 0) + mem.len(bufs[1])
+})
+
+# the inner scope reads and writes the outer one's buffer
+pub fn nested() -> Int = mem.with_mem(() => {
+  let outer = mem.new(2)
+  let r = mem.with_mem(() => {
+    let inner = mem.new(2)
+    mem.set(outer, 0, 5)
+    mem.copy_from(inner, 0, outer, 0, 2)
+    mem.at(inner, 0)
+  })
+  r + mem.at(outer, 0)
+})
+
+# a list of Int, and an Int, are fine results
+pub fn as_list() -> List[Int] = mem.with_mem(() => mem.to_list(mem.from_list([1, 2, 3])))
+
+# a function that does not mention Mem in its row may be returned
+pub fn plain_fn() -> fn(Int) -> Int = mem.with_mem(() => (x: Int) => x + 1)
+
+# the scope is pure, so a pure function can hold it
+pub fn pure_caller() -> Int = inside() + nested()
+
+# a handler for some other effect inside the scope
+effect Tick {
+  fn tick() -> Int
+}
+
+pub fn with_other() -> Int = mem.with_mem(() => {
+  with handle Tick { tick() => 3 }
+  let b = mem.new(1)
+  mem.set(b, 0, tick())
+  mem.at(b, 0)
+})
