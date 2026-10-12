@@ -88,27 +88,6 @@ def hard_keyword(t):
 
 # Findings of the first run, filed and pinned: `<property> <rule> <subject> <where>`.
 KNOWN_KEYS = """
-# #709: lexContext does not track strings or braces inside `${...}`, and takes
-# `\\$name` for an interpolation.
-b context lexContext packages/xmap/src/javap.dawn
-b context lexContext scripts/dict-owner-contract/eq_string.dawn
-b context lexContext scripts/example-main-contract/fixtures/literals.dawn
-b context lexContext scripts/grammar-corpus/accept/dollar_literals.dawn
-b context lexContext scripts/grammar-corpus/accept/string_interp.dawn
-b context lexContext scripts/pipe-contract/cases/order.dawn
-b context lexContext scripts/pipe-contract/cases/qualified.dawn
-b context lexContext scripts/spike-native/apply_postfix.dawn
-b context lexContext scripts/spike-native/bounded_value_effvar.dawn
-b context lexContext scripts/spike-native/bounded_value_trait.dawn
-b context lexContext scripts/spike-native/const_fold.dawn
-b context lexContext scripts/spike-native/erased/src/main.dawn
-b context lexContext scripts/spike-native/fn_value_bounds.dawn
-b context lexContext scripts/spike-native/list_elems.dawn
-b context lexContext scripts/spike-native/pipe_general.dawn
-b context lexContext scripts/spike-native/rc_reuse_early_exit.dawn
-b context lexContext scripts/tile-gpu-diff/scalar_diff.dawn
-b context lexContext site/play-ui/samples/records.dawn
-b context lexContext site/src/gen/gpu.dawn
 """
 
 # ---------------------------------------------------------------- toolchain

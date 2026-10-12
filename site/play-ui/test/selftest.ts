@@ -6,6 +6,7 @@ import {
   dawnCompletions,
   dawnHighlight,
   importEdit,
+  lexContext,
   loadBuiltins,
   staticCompletionLabels,
   staticCompletions,
@@ -240,8 +241,18 @@ expect('own fn completes', local!.options.some((o) => o.label === 'my_helper' &&
 const ctor = completeAt('type Shape =\n  | Circle(r: Float)\n  | Square(s: Float)\npub fn main() -> Unit !io = { let x = Ci‸ }')
 expect('ADT ctor completes', ctor!.options.some((o) => o.label === 'Circle'), true)
 expect('uppercase filters lowercase', ctor!.options.every((o) => /^[A-Z]/.test(o.label)), true)
-const interp = completeAt('pub fn main() -> Unit !io = { let name = "x"\n  println("hi $na‸") }')
-expect('interp still completes', interp !== null, true)
+expect('dollar name is string text: none',
+  completeAt('pub fn main() -> Unit !io = { let name = "x"\n  println("hi $na‸") }'), null)
+// lexContext follows the interpolation stack (#709)
+const ctxAt = (doc: string, marker = '‸') => lexContext(doc.replace(marker, ''), doc.indexOf(marker))
+expect('string inside interpolation keeps the outer string open',
+  [ctxAt('"${f("a")} ta‸il"'), ctxAt('"${f("a")} tail"‸')], ['string', 'code'])
+expect('inside a nested string in an interpolation', ctxAt('"${f("a‸")}"'), 'string')
+expect('code brace inside interpolation does not end it',
+  [ctxAt('"${ Box { v: 1 }, ‸'), ctxAt('"${ Box { v: 1 } }‸ tail"')], ['interp', 'string'])
+expect('escaped dollar is text', ctxAt('"\\$args‸"'), 'string')
+expect('cursor between dollar and brace is still string', ctxAt('"$‸{x}"'), 'string')
+expect('after dollar brace is interpolation code', ctxAt('"${‸x}"'), 'interp')
 const interpBrace = completeAt('pub fn main() -> Unit !io = println("v=${to_st‸")')
 expect('brace interp completes', interpBrace!.options.some((o) => o.label === 'to_string'), true)
 const ty = completeAt('fn f(s: Str‸')

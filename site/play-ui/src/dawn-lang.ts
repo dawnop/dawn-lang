@@ -240,60 +240,63 @@ const TYPES = ['Int', 'Float', 'Bool', 'String', 'Unit', 'List', 'Map', 'Set', '
 
 // Where the cursor sits lexically. The editor's syntax tree can lag a few
 // keystrokes behind fast typing, so this re-scans the buffer up to the cursor
-// with the same string/comment rules as the tokenizer — cheap at playground
-// sizes and always current.
+// with the same rules as the tokenizer, an interpolation stack included:
+// code inside `${...}` is code, a string or a brace there nests, and only a
+// code `}` returns to the enclosing string. Cheap at playground sizes and
+// always current. `interp` is the cursor in an interpolation's code.
 export function lexContext(text: string, pos: number): 'code' | 'comment' | 'string' | 'interp' {
-  let kind: 'code' | 'comment' | 'dq' | 'triple' | 'raw' = 'code'
+  const stack: Context[] = []
+  let comment = false
   let i = 0
   while (i < pos) {
     const ch = text[i]
-    if (kind === 'code') {
-      if (text.startsWith('"""', i)) {
-        kind = 'triple'
-        i += 3
-      } else if (ch === '#') {
-        kind = 'comment'
+    const top = stack[stack.length - 1]
+    if (comment) {
+      if (ch === '\n') comment = false
+      i++
+    } else if (top?.kind === 'string') {
+      if (top.closer === '`') {
+        // raw backtick: no escapes, no interpolation
+        if (ch === '`') stack.pop()
         i++
-      } else if (ch === '"') {
-        kind = 'dq'
-        i++
-      } else if (ch === '`') {
-        kind = 'raw'
-        i++
-      } else if (ch === "'") {
-        i = charEnd(text, i)
+      } else if (ch === '\n' && top.closer === '"') {
+        stack.pop() // double-quote strings don't span lines; the newline is code
+      } else if (ch === '\\') {
+        i += 2
+      } else if (ch === '$' && text[i + 1] === '{') {
+        // a cursor between the `$` and the `{` is still in the string
+        if (i + 2 > pos) break
+        stack.push({ kind: 'interp', depth: 1 })
+        i += 2
+      } else if (text.startsWith(top.closer, i)) {
+        stack.pop()
+        i += top.closer.length
       } else {
         i++
       }
-    } else if (kind === 'comment') {
-      if (ch === '\n') kind = 'code'
+    } else if (text.startsWith('"""', i)) {
+      stack.push({ kind: 'string', closer: '"""' })
+      i += 3
+    } else if (ch === '#') {
+      comment = true
       i++
-    } else if (kind === 'dq') {
-      if (ch === '\\') i += 2
-      else {
-        if (ch === '"' || ch === '\n') kind = 'code' // double-quote strings don't span lines
-        i++
-      }
-    } else if (kind === 'triple') {
-      if (ch === '\\') i += 2
-      else if (text.startsWith('"""', i)) {
-        kind = 'code'
-        i += 3
-      } else i++
+    } else if (ch === '"' || ch === '`') {
+      stack.push({ kind: 'string', closer: ch })
+      i++
+    } else if (ch === "'") {
+      i = charEnd(text, i)
     } else {
-      // raw backtick: no escapes, no interpolation
-      if (ch === '`') kind = 'code'
+      if (top?.kind === 'interp') {
+        if (ch === '{') top.depth++
+        else if (ch === '}' && --top.depth === 0) stack.pop()
+      }
       i++
     }
   }
-  if (kind === 'comment') return 'comment'
-  if (kind === 'raw') return 'string'
-  if (kind === 'dq' || kind === 'triple') {
-    // a `$name` or `${expr}` being typed completes like code
-    if (/\$[A-Za-z_]\w*$|\$\{[^}"]*$/.test(text.slice(Math.max(0, pos - 200), pos))) return 'interp'
-    return 'string'
-  }
-  return 'code'
+  if (comment) return 'comment'
+  const top = stack[stack.length - 1]
+  if (top?.kind === 'string') return 'string'
+  return top?.kind === 'interp' ? 'interp' : 'code'
 }
 
 // Names declared in the buffer itself (the user's own functions, bindings,
