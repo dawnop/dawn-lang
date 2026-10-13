@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 96e126b493d05dca -->
+<!-- doc-check: translation-of docs/spec.md @ 23f9096be9acca69 -->
 
 # Dawn Language Specification
 
@@ -4264,8 +4264,8 @@ two together; one module too many or too few fails it):
   effect `Mem` and `with_mem` (design in [`mem-buffer-design.md`](mem-buffer-design.md)).
   A buffer exists only inside `with_mem`: a function that reads or writes one carries
   `!Mem`, and the checker refuses four kinds of escape by the identity of `std/mem`'s
-  `Mem` (the result type of `with_mem` may not contain a buffer or a function type
-  whose row carries `Mem`; only `std/mem` may install a handler for `Mem`; an effect
+  `Mem` (the result type of `with_mem` may not contain a buffer, a function type
+  whose row carries `Mem`, or any type variable; only `std/mem` may install a handler for `Mem`; an effect
   operation's signature and a handler's `var` may not contain a buffer; a function
   value carrying `Mem` may not cross a `use java` call)
 - `std/gpu`: the host side of a GPU, the `Gpu` effect and device buffers (§12.6)
