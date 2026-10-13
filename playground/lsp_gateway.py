@@ -854,6 +854,35 @@ def resolved_item_value(result: Any) -> Any:
     return safe
 
 
+MAX_REFERENCES = 1_000
+
+
+def references_value(result: Any) -> Any:
+    """A references reply as the browser may read it (docs/play-lsp-client-design.md,
+    cut 4): the locations inside the Playground buffer, rebuilt to a URI and a
+    range, at most MAX_REFERENCES of them. A location in any other document is
+    dropped, as for definition, and extra fields never cross."""
+    if result is None:
+        return None
+    if not isinstance(result, list):
+        raise ChildProtocolError("references result is not a list")
+    safe = []
+    for location in result:
+        if not isinstance(location, dict) or location.get("uri") != DOCUMENT_URI:
+            continue
+        span = location.get("range")
+        if not isinstance(span, dict):
+            raise ChildProtocolError("references location has no range")
+        try:
+            rebuilt = {"start": position_value(span.get("start")), "end": position_value(span.get("end"))}
+        except GatewayError as exc:
+            raise ChildProtocolError("references range is malformed") from exc
+        safe.append({"uri": DOCUMENT_URI, "range": rebuilt})
+        if len(safe) == MAX_REFERENCES:
+            break
+    return safe
+
+
 MAX_SIGNATURES = 4
 MAX_SIGNATURE_LABEL = 2_048
 MAX_SIGNATURE_PARAMETERS = 64
@@ -964,6 +993,7 @@ CLIENT_METHODS = frozenset({
     "textDocument/hover",
     "textDocument/definition",
     "textDocument/signatureHelp",
+    "textDocument/references",
     "textDocument/inlayHint",
     "completionItem/resolve",
 })
@@ -1168,6 +1198,33 @@ class ClientProtocol:
                 }
             )
 
+        # References add the one flag the server reads (docs/play-lsp-client-design.md,
+        # cut 4); a missing `context` means no declaration, as the server reads it.
+        if method == "textDocument/references":
+            if len(self.pending) >= HARD_PENDING_REQUESTS:
+                raise GatewayError(1008, "too many pending LSP requests")
+            request_id = self._request_id(message)
+            params = require_params(message)
+            require_document(params)
+            position = require_position(params)
+            context = params.get("context")
+            include = context.get("includeDeclaration", False) if isinstance(context, dict) else False
+            if not isinstance(include, bool):
+                raise GatewayError(1008, "includeDeclaration must be a boolean")
+            self.pending[request_id] = method
+            return compact_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": {
+                        "textDocument": {"uri": DOCUMENT_URI},
+                        "position": position,
+                        "context": {"includeDeclaration": include},
+                    },
+                }
+            )
+
         # Inlay hints name a range rather than a position; the editor asks for
         # what is on screen after a scroll or an edit settles
         # (docs/lsp-hover-design.md §A4).
@@ -1316,6 +1373,7 @@ class ClientProtocol:
                 "hoverProvider": True,
                 "definitionProvider": True,
                 "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
+                "referencesProvider": True,
                 "inlayHintProvider": True,
             }
             self.semantic_legend = semantic_legend_value(
@@ -1346,6 +1404,8 @@ class ClientProtocol:
                 if isinstance(location, dict) and location.get("uri") == DOCUMENT_URI:
                     safe.append(location)
             message = {**message, "result": safe}
+        if method == "textDocument/references" and "result" in message:
+            message = {**message, "result": references_value(message["result"])}
         if method == "textDocument/signatureHelp" and "result" in message:
             message = {**message, "result": signature_help_value(message["result"])}
         if method == "completionItem/resolve" and "result" in message:

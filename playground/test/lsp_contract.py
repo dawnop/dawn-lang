@@ -219,6 +219,7 @@ def initialize(ws, request_id=1):
         "hoverProvider",
         "definitionProvider",
         "signatureHelpProvider",
+        "referencesProvider",
         "inlayHintProvider",
         "semanticTokensProvider",
     }, response
@@ -339,6 +340,10 @@ def diagnostics_params_contract():
     signature_help_contract(load_gateway())
     signature_help_negative_controls()
     ok("signature help: position request rebuilt, reply cut to bounded signatures and offsets")
+
+    references_contract(load_gateway())
+    references_negative_controls()
+    ok("references: request rebuilt, reply confined to the buffer and bounded")
 
     unknown_method_contract(load_gateway())
     unknown_method_negative_controls()
@@ -516,6 +521,118 @@ def signature_help_negative_controls():
         expect_contract_red(label, lambda: run(mutant))
 
 
+def references_roundtrip(gateway, protocol, params, result, request_id=50):
+    sent = json.loads(protocol.from_client(json.dumps(
+        rpc(request_id, "textDocument/references", params)).encode()))
+    reply = protocol.from_child(json.dumps(
+        {"jsonrpc": "2.0", "id": request_id, "result": result}).encode())
+    return sent, json.loads(reply)["result"]
+
+
+def references_contract(gateway):
+    """textDocument/references (docs/play-lsp-client-design.md, cut 4): the
+    request is rebuilt to the buffer, a position and the declaration flag, and
+    the reply keeps only this buffer's locations, rebuilt, up to a bound."""
+    protocol, capabilities = open_protocol(gateway, {}, "let x = 1")
+    assert capabilities.get("referencesProvider") is True, capabilities
+    here = {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}}
+    sent, got = references_roundtrip(gateway, protocol, {
+        "textDocument": {"uri": URI},
+        "position": {"line": 0, "character": 4, "extra": 1},
+        "context": {"includeDeclaration": True, "extra": "/tmp/x"},
+        "extra": "/tmp/x",
+    }, [
+        {"uri": URI, "range": here, "private": "/tmp/x"},
+        {"uri": "file:///etc/passwd", "range": here},
+        {"uri": URI, "range": {**here, "extra": 1}},
+    ])
+    assert sent["params"] == {
+        "textDocument": {"uri": URI},
+        "position": {"line": 0, "character": 4},
+        "context": {"includeDeclaration": True},
+    }, ("REFERENCES_REQUEST_NOT_REBUILT", sent)
+    assert got == [{"uri": URI, "range": here}, {"uri": URI, "range": here}], (
+        "REFERENCES_REPLY_NOT_CONFINED", got)
+
+    # a missing context means no declaration; null passes
+    sent, got = references_roundtrip(gateway, protocol, {
+        "textDocument": {"uri": URI}, "position": {"line": 0, "character": 4},
+    }, None, 51)
+    assert sent["params"]["context"] == {"includeDeclaration": False} and got is None, (sent, got)
+
+    # more locations than the bound are cut, not an error
+    many = [{"uri": URI, "range": here}] * (gateway.MAX_REFERENCES + 5)
+    _, got = references_roundtrip(gateway, protocol, {
+        "textDocument": {"uri": URI}, "position": {"line": 0, "character": 4},
+    }, many, 52)
+    assert len(got) == gateway.MAX_REFERENCES, ("REFERENCES_UNBOUNDED", len(got))
+
+    # another document, a non-boolean flag or a bad position never reach the child
+    for bad in (
+        {"textDocument": {"uri": "file:///etc/passwd"}, "position": {"line": 0, "character": 0}},
+        {"textDocument": {"uri": URI}, "position": {"line": 0, "character": 0},
+         "context": {"includeDeclaration": "yes"}},
+        {"textDocument": {"uri": URI}, "position": {"line": -1, "character": 0}},
+    ):
+        try:
+            protocol.from_client(json.dumps(rpc(53, "textDocument/references", bad)).encode())
+        except gateway.GatewayError:
+            pass
+        else:
+            raise AssertionError(("REFERENCES_REQUEST_CROSSED", bad))
+
+    # a reply that is not a list, or a location without a sound range, is a
+    # child protocol error
+    for bad_reply in ({"uri": URI}, [{"uri": URI}], [{"uri": URI, "range": {"start": 1, "end": 2}}]):
+        try:
+            references_roundtrip(gateway, protocol, {
+                "textDocument": {"uri": URI}, "position": {"line": 0, "character": 4},
+            }, bad_reply, 54)
+        except gateway.ChildProtocolError:
+            pass
+        else:
+            raise AssertionError(("REFERENCES_REPLY_CROSSED", bad_reply))
+
+
+def references_negative_controls():
+    """Each mutant breaks one rule above, and the contract has to notice."""
+    source = read_text(GATEWAY)
+    mutants = {
+        # the reply forwarded as the child sent it
+        "reply not confined": mutate_once(
+            source,
+            '        if method == "textDocument/references" and "result" in message:\n'
+            '            message = {**message, "result": references_value(message["result"])}\n',
+            '',
+        ),
+        # locations in other documents kept
+        "other documents kept": mutate_once(
+            source,
+            'if not isinstance(location, dict) or location.get("uri") != DOCUMENT_URI:',
+            'if not isinstance(location, dict):',
+        ),
+        "no bound": mutate_once(
+            source, "        if len(safe) == MAX_REFERENCES:\n            break\n", ""),
+        # the flag taken without checking its type
+        "flag unchecked": mutate_once(
+            source,
+            '            if not isinstance(include, bool):\n'
+            '                raise GatewayError(1008, "includeDeclaration must be a boolean")\n',
+            '',
+        ),
+    }
+
+    def run(mutant):
+        gateway = load_gateway(mutant)
+        try:
+            references_contract(gateway)
+        except (gateway.ChildProtocolError, gateway.GatewayError) as error:
+            raise AssertionError(str(error)) from error
+
+    for label, mutant in mutants.items():
+        expect_contract_red(label, lambda: run(mutant))
+
+
 def unknown_method_contract(gateway):
     """Methods the gateway does not offer (LSP 3.17 "$ Notifications and
     Requests", JSON-RPC 2.0 §5.1), in every lifecycle state: notifications
@@ -531,7 +648,7 @@ def unknown_method_contract(gateway):
     requests = (
         (7, "workspace/symbol", {"query": ""}),
         ("unknown-8", "$/unknownRequest", {}),
-        (9, "textDocument/references", {}),
+        (9, "textDocument/documentHighlight", {}),
     )
     fresh = gateway.ClientProtocol(source_bytes=65_536)
     opened, _ = open_protocol(gateway, {}, "x")
@@ -1557,6 +1674,18 @@ def main():
                 "activeSignature": 0,
                 "activeParameter": 1,
             }, signature
+            # references: the flag and position reach the child, and only this
+            # buffer's locations come back, rebuilt
+            ws.send_json(rpc(9, "textDocument/references", {
+                **position_params(), "context": {"includeDeclaration": True, "extra": 1},
+            }))
+            references = ws.recv_json()["result"]
+            spot = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+            assert references == [
+                {"uri": URI, "range": spot},
+                {"uri": URI, "range": {"start": {"line": 0, "character": 2},
+                                       "end": {"line": 0, "character": 4}}},
+            ], references
 
             ws.send_frame(9, b"contract-ping")
             fin, opcode, payload = ws.recv_frame()
@@ -1936,7 +2065,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("29 passed, 0 failed")
+    print("30 passed, 0 failed")
 
 
 if __name__ == "__main__":

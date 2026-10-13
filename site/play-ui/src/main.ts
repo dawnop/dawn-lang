@@ -22,6 +22,7 @@ import {
   lspDefinition,
   lspHover,
   lspInlayHints,
+  lspReferences,
   lspSemanticTokens,
   lspSignatureHelp,
   prefetchWhenOffline,
@@ -289,6 +290,7 @@ function mount(root: HTMLElement) {
         lspSemanticTokens(lsp),
         lspDefinition(lsp),
         lspSignatureHelp(lsp),
+        lspReferences(lsp),
         errorLens,
         callMarks({
           pick: (id) => pane.pick(id),

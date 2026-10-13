@@ -26,6 +26,8 @@ import {
   hoverTooltip,
   type HoverTooltipSource,
   keymap,
+  type Panel,
+  showPanel,
   showTooltip,
   type Tooltip,
   ViewPlugin,
@@ -707,6 +709,16 @@ export class DawnLspClient {
       return value.filter((item) => asRecord(item)) as (LspLocation | LspLocationLink)[]
     }
     return asRecord(value) ? [value as LspLocation | LspLocationLink] : []
+  }
+
+  /** Every use of the name at the offset, declaration included. */
+  async references(offset: number, timeoutMs = 1500): Promise<LspLocation[]> {
+    const value = await this.queryWith('textDocument/references', (text) => ({
+      textDocument: { uri: DAWN_LSP_URI },
+      position: offsetToLspPosition(text, offset),
+      context: { includeDeclaration: true },
+    }), timeoutMs)
+    return Array.isArray(value) ? value.filter((item) => asRecord(item)) as LspLocation[] : []
   }
 
   /** The signature of the call open at the offset, or null outside any call. */
@@ -1416,6 +1428,113 @@ export function lspDefinition(client: DawnLspClient): Extension {
       return true
     },
   })
+}
+
+/**
+ * References (docs/play-lsp-client-design.md, cut 4): every use of the name
+ * under the cursor in this buffer, listed in a panel under the editor. Like
+ * hover it asks about the text on screen, so the library's reference panel
+ * (which asks about the text the server last saw) is not used.
+ */
+export interface ReferenceRow {
+  from: number
+  to: number
+  line: number
+  column: number
+  snippet: string
+}
+
+const MAX_REFERENCE_ROWS = 500
+const MAX_SNIPPET = 120
+
+/** Locations of this buffer as panel rows, in document order, each once. */
+export function referenceRows(text: string, locations: readonly LspLocation[]): ReferenceRow[] {
+  const seen = new Set<number>()
+  const rows: ReferenceRow[] = []
+  for (const location of locations) {
+    const range = localLocation(location)
+    if (range == null || range.uri !== DAWN_LSP_URI) continue
+    const from = lspPositionToOffset(text, range.range.start)
+    const to = Math.max(from, lspPositionToOffset(text, range.range.end))
+    if (seen.has(from)) continue
+    seen.add(from)
+    const position = offsetToLspPosition(text, from)
+    const lineStart = from - position.character
+    const newline = text.indexOf('\n', from)
+    const line = text.slice(lineStart, newline < 0 ? text.length : newline).trim()
+    rows.push({
+      from,
+      to,
+      line: position.line + 1,
+      column: position.character + 1,
+      snippet: line.length > MAX_SNIPPET ? line.slice(0, MAX_SNIPPET) + '…' : line,
+    })
+  }
+  return rows.sort((a, b) => a.from - b.from).slice(0, MAX_REFERENCE_ROWS)
+}
+
+const setReferences = StateEffect.define<readonly ReferenceRow[] | null>()
+
+const referencesField = StateField.define<readonly ReferenceRow[] | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects) if (effect.is(setReferences)) return effect.value
+    // the rows name offsets of the text they were asked about
+    return value != null && tr.docChanged ? null : value
+  },
+  provide: (field) => showPanel.from(field, (rows): ((view: EditorView) => Panel) | null => rows == null ? null : (view) => {
+    const dom = document.createElement('div')
+    dom.className = 'dp-references'
+    const title = document.createElement('div')
+    title.className = 'dp-references-title'
+    title.textContent = rows.length === 0 ? 'No references' : `${rows.length} reference${rows.length === 1 ? '' : 's'}`
+    dom.appendChild(title)
+    const list = document.createElement('ul')
+    for (const row of rows) {
+      const item = document.createElement('li')
+      const where = document.createElement('span')
+      where.className = 'dp-references-where'
+      where.textContent = `${row.line}:${row.column}`
+      const code = document.createElement('code')
+      code.textContent = row.snippet
+      item.append(where, code)
+      item.addEventListener('mousedown', (event) => {
+        event.preventDefault()
+        view.dispatch({ selection: { anchor: row.from, head: row.to }, scrollIntoView: true })
+        view.focus()
+      })
+      list.appendChild(item)
+    }
+    dom.appendChild(list)
+    return { dom, top: false }
+  }),
+})
+
+export function findLspReferences(client: DawnLspClient, view: EditorView): boolean {
+  if (!client.isReady()) return true
+  const snapshot = view.state.doc.toString()
+  client.references(view.state.selection.main.head, 1500).then((locations) => {
+    if (view.state.doc.toString() !== snapshot) return
+    view.dispatch({ effects: setReferences.of(referenceRows(snapshot, locations)) })
+  }, () => { /* stale or unavailable: leave the editor as it is */ })
+  return true
+}
+
+export function lspReferences(client: DawnLspClient): Extension {
+  return [
+    referencesField,
+    keymap.of([
+      { key: 'Shift-F12', run: (view) => findLspReferences(client, view) },
+      {
+        key: 'Escape',
+        run: (view) => {
+          if (view.state.field(referencesField, false) == null) return false
+          view.dispatch({ effects: setReferences.of(null) })
+          return true
+        },
+      },
+    ]),
+  ]
 }
 
 /**

@@ -40,6 +40,7 @@ import {
   lspWebSocketUrl,
   mergeCompletionResults,
   prefetchWhenOffline,
+  referenceRows,
   offsetToLspPosition,
   semanticClass,
   semanticDecorations,
@@ -724,6 +725,38 @@ expect('out-of-order older definition is rejected', await oldDefinition, 'reject
   expect('typing ( or , opens signature help', [typed('(', 'input.type'), typed(',', 'input.type')], [true, true])
   expect('other typing and non-input changes do not',
     [typed('x', 'input.type'), typed('(', 'undo'), typed('(', 'input.paste')], [false, false, false])
+}
+
+// ---- references (docs/play-lsp-client-design.md, cut 4) ----
+{
+  const refs = client.references(3)
+  await tick()
+  const request = socket.sent.at(-1)!
+  expect('references ask for a position of the diagnosed snapshot, declaration included', [request.method, request.params], [
+    'textDocument/references',
+    {
+      textDocument: { uri: DAWN_LSP_URI },
+      position: { line: 0, character: 3 },
+      context: { includeDeclaration: true },
+    },
+  ])
+  const at = (line: number, from: number, to: number) => ({
+    uri: DAWN_LSP_URI, range: { start: { line, character: from }, end: { line, character: to } },
+  })
+  socket.receive({ id: request.id, result: [at(0, 0, 1), 'bad', at(0, 0, 1)] })
+  expect('references drop what is not a location', (await refs).length, 2)
+
+  const text = 'let x = 1\n  x + x\n'
+  expect('reference rows are sorted, deduplicated and carry line, column and the trimmed line',
+    referenceRows(text, [at(1, 6, 7), at(0, 4, 5), at(1, 2, 3), at(0, 4, 5),
+      { uri: 'file:///etc/passwd', range: at(0, 0, 1).range }]),
+    [
+      { from: 4, to: 5, line: 1, column: 5, snippet: 'let x = 1' },
+      { from: 12, to: 13, line: 2, column: 3, snippet: 'x + x' },
+      { from: 16, to: 17, line: 2, column: 7, snippet: 'x + x' },
+    ])
+  expect('a long line is cut in the row', referenceRows('x' + ' y'.repeat(100), [at(0, 0, 1)])[0].snippet.length, 121)
+  expect('no locations, no rows', referenceRows(text, []), [])
 }
 
 const inlay = client.inlayHints(0, 6)
