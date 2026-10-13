@@ -274,7 +274,7 @@ fn shapes_text() -> String =
 ## so every list below ends with the output buffer's initial contents.
 alias Buf = (String, List[Float])
 
-## Three buffers, one launch, one answer back, with `Tensor[Float]` carrying
+## Three buffers, one launch, one answer back, with `DeviceBuffer[Float]` carrying
 ## the format in its type. Which device this is, is the handler's business;
 ## `run` names only `!Gpu`.
 fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
@@ -299,7 +299,7 @@ fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !G
 fn blocks(n: Int) -> Int = (n + WIDTH - 1) / WIDTH
 
 # Allocate and fill one buffer per pair, in order, over the raw operations
-# rather than over `Tensor[D]`, because one launch here takes buffers of two
+# rather than over `DeviceBuffer[D]`, because one launch here takes buffers of two
 # formats and a list cannot hold two types.
 fn alloc_upload(bufs: List[Buf]) -> Result[List[Int], ForeignError] !Gpu = {
   var hs: List[Int] = []
@@ -436,7 +436,7 @@ fn shown(r: Result[List[Float], ForeignError]) -> String = match r {
 
 ## Knife TG: the two globals `table` declares, as the HOST sees them. This
 ## is the one operation of `Gpu` that names something inside a module rather
-## than a buffer the program allocated: `module_global` answers a tensor
+## than a buffer the program allocated: `module_global` answers a buffer
 ## over the global's own storage, so the host can read the table the module
 ## was born with, write it, and have the next launch read the write. On a
 ## real device it is the CUDA driver's `cuModuleGetGlobal`; here it is

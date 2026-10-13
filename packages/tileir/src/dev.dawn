@@ -10,14 +10,14 @@
 # the operations traffic in SSA handles (`Int`), dtype names (`String`) and
 # operation names (`String`), and the functions below add the phantom-typed
 # `Tile[D]` / `Param[D]` and are the only surface a kernel body uses. The
-# formats are std's value types: a `Param[Float]` and a `Tensor[Float]` agree
+# formats are std's value types: a `Param[Float]` and a `DeviceBuffer[Float]` agree
 # on what "f64" means because both are indexed by the host type, and the
 # format is named at a call by the witness spelled like the type
 # (`param(F64, 0)`, `f_const(BF16, 0.5)`): `F64`, `I64` and `I1` come from
 # std/dtype, `BF16`, `F16`, `F32` and the other float formats from std/narrow,
 # `I8`, `I16`, `I32` and `U8` from std/int. `Tile[Bool]` is a mask, a tile
 # element format that is not a buffer format: `element_bytes` does not know
-# it and a `Tensor[Bool]` cannot be allocated.
+# it and a `DeviceBuffer[Bool]` cannot be allocated.
 #
 # One effect operation per shape rather than per operation: `t_binaryf` takes
 # the operation's name, so adding `subf` is a name in a list rather than a
@@ -2257,7 +2257,7 @@ pub fn to[A, B](a: Tile[A], fmt: Dtype[B]) -> Tile[B] !Dev = called("to", () => 
 
 ## The i32 tile holding each lane of the `i8` tile `a` widened UNSIGNED, so
 ## an octet reads as a value in [0, 255]. This is how a kernel over a
-## `Tensor[U8]` gets at its pixels: the dialect has no `u8` tile type, and
+## `DeviceBuffer[U8]` gets at its pixels: the dialect has no `u8` tile type, and
 ## the signedness of the widening is where the format's reading lives
 ## (std/gpu's `U8` says the same thing from the host's side).
 pub fn ext_u8(a: Tile[I8]) -> Tile[I32] !Dev = called("ext_u8", () => convert_to("exti", "i32", a))

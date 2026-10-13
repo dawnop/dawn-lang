@@ -1627,10 +1627,10 @@ and whose `kernels` maps each name to its compiled module. That handler needs th
 backend (on the JVM every operation answers `gpu.unsupported_backend`) and a machine with
 an NVIDIA driver.
 
-`copy_from_host` and `copy_to_host` move values of the tensor's element type, not Floats under every
-format: a `Tensor[Float]` takes a `List[Float]`, a `Tensor[Int]` takes `Int`s and keeps every bit
-of them (an i64 beyond 2^53 included), and a `Tensor[BF16]` takes `BF16` values, so nothing is
-rounded on the way in. A format with no buffer cannot be moved: uploading a `Tensor[Bool]` is a
+`copy_from_host` and `copy_to_host` move values of the buffer's element type, not Floats under every
+format: a `DeviceBuffer[Float]` takes a `List[Float]`, a `DeviceBuffer[Int]` takes `Int`s and keeps every bit
+of them (an i64 beyond 2^53 included), and a `DeviceBuffer[BF16]` takes `BF16` values, so nothing is
+rounded on the way in. A format with no buffer cannot be moved: uploading a `DeviceBuffer[Bool]` is a
 type error, not a refusal at run time.
 
 The kernels are Dawn as well, written against `packages/tileir`: its `Dev` effect records
@@ -1763,12 +1763,12 @@ pointer's alignment that the assembler may use.
 `!Dev` is the body's only effect, so no host memory is in reach and there is no number to
 look at: a kernel can do exactly what `Dev` offers. `Param[Float]` is a parameter whose
 elements are in the `F64` format (the type is `Float`, the witness `F64` from `std/dtype`), the same
-format a host buffer carries, so a `Tensor[F32]` passed where this kernel takes `Float` is a type error.
+format a host buffer carries, so a `DeviceBuffer[F32]` passed where this kernel takes `Float` is a type error.
 
 ### Cells: where the shape lives
 
 The body of `vadd` names no length, no tile width and no offset. Those belong to the
-markers. `cells([1000], [128])` cuts a 1000-element tensor into cells of 128: eight cells,
+markers. `cells([1000], [128])` cuts a 1000-element buffer into cells of 128: eight cells,
 and the last one has 24 lanes past the end. `In` and `Out` say what the kernel does with
 each argument, and the cells of the `Out` are the launch grid: eight blocks, block `i`
 reading and writing cell `i`. A lane past the extent reads the marker's padding (zero
@@ -1813,7 +1813,7 @@ refused: gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 0 (In) hold
 ```
 
 `trace3` answers the record and an entry, and `launch_entry3` takes that entry and three
-tensors whose formats the entry's type fixes. Before any handler is asked, it holds the
+buffers whose formats the entry's type fixes. Before any handler is asked, it holds the
 buffers against the cells: a 999-element buffer does not reach the end of a 1000-element
 extent. It also refuses a grid that disagrees with the cells, and an `Out` that shares its
 buffer with another argument. An extent of `DYN_DIM` leaves the number of cells to the

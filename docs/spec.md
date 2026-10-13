@@ -3380,7 +3380,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   [`mem-buffer-design.md`](mem-buffer-design.md)）。缓冲只存在于 `with_mem` 之内：读写缓冲的函数带 `!Mem`，
   检查器按 `std/mem` 的 `Mem` 这个效果拒绝四类逃逸（`with_mem` 的结果类型不得含缓冲或带 `Mem` 的函数类型；
   只有 `std/mem` 能为 `Mem` 装 handler；效果操作的签名与 handler 的 `var` 不得含缓冲；带 `Mem` 的函数值不得越过 `use java`）
-- `std/gpu`：GPU 的宿主层，`Gpu` 效果与张量（§12.6）
+- `std/gpu`：GPU 的宿主层，`Gpu` 效果与设备缓冲（§12.6）
 - `std/memfs`：内存中的 `Fs` handler，供测试用；本规范别处不再讲它，设计见
   [`fs-real-path-design.md`](fs-real-path-design.md)
 
@@ -3875,7 +3875,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 设备后端**不是**编译器的第三个后端。两个驱动都不认识 kernel、Tile IR 或 GPU，也不调用任何
 设备工具链。它是两层库：
 
-- 宿主层 `std/gpu`（随 std 捆绑）：`Gpu` 效果、`Tensor[D]`、两个 handler；元素格式在 `std/dtype`（`Dtype[T]`）与各值类型的模块里。
+- 宿主层 `std/gpu`（随 std 捆绑）：`Gpu` 效果、`DeviceBuffer[D]`、两个 handler；元素格式在 `std/dtype`（`Dtype[T]`）与各值类型的模块里。
 - 设备层 `packages/tileir`（源码包，经 `[deps]` 引入，不在 std 里）：`Dev` 效果、记录
   handler、`TileProg`、Tile IR 文本渲染器与字节码写入器。kernel 的宿主参考实现在
   `packages/tileref`。
@@ -3918,7 +3918,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
   `gpu.no_kernel`。语言不检查这个名字与 `trace_kernel` 用的名字一致，也不检查 `args` 的个数与
   格式与入口签名一致：那是程序的责任。
 - `launch` 返回不等于 kernel 已经跑完。`sync` 之后的 `copy_to_host` 才保证看到此前各次 launch 的写入。
-- `module_global(d, kernel, name)` 答一个覆盖该 kernel 所在模块中一个导出全局的 `Tensor[D]`，
+- `module_global(d, kernel, name)` 答一个覆盖该 kernel 所在模块中一个导出全局的 `DeviceBuffer[D]`，
   与模块共享存储；同一符号查两次答同一个句柄；对它 `free` 被接受且什么也不做。
 
 **两个 handler**：
@@ -3966,26 +3966,26 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 
 **跨界的类型**：宿主与设备之间只过缓冲。
 
-- `Tensor[D]` 是不透明类型，表示是（句柄，元素数）；`D` 是格式的值类型，`Tensor[Float]` 与
-  `Tensor[BF16]` 是两个类型，传错格式是类型错误而不是 launch 失败。句柄是 handler 签发的
+- `DeviceBuffer[D]` 是不透明类型，表示是（句柄，元素数）；`D` 是格式的值类型，`DeviceBuffer[Float]` 与
+  `DeviceBuffer[BF16]` 是两个类型，传错格式是类型错误而不是 launch 失败。句柄是 handler 签发的
   不透明整数，程序从不编造它。
 - 格式有 16 个，每个是一个值类型加一个同名的见证常量 `Dtype[T]`（`use std/narrow.{BF16}` 同时带来类型与见证；
-  `alloc(BF16, n)`、`Tensor[BF16]`），只有它们有 `HasDtype`：`Float`（见证 `F64`）、`Int`（`I64`）、`Bool`（`I1`，只是 tile 格式）
+  `alloc(BF16, n)`、`DeviceBuffer[BF16]`），只有它们有 `HasDtype`：`Float`（见证 `F64`）、`Int`（`I64`）、`Bool`（`I1`，只是 tile 格式）
   在 `std/dtype`；`BF16`、`F16`、`F32`、`TF32`、`F8E4M3FN`、`F8E5M2`、`F8E8M0FNU`、`F4E2M1FN`、`F8E5M3FNU` 在 `std/narrow`（后六个只作存储，没有算术）；
   `I8`、`I16`、`I32`、`U8` 在 `std/int/*`；`I4` 在 `std/gpu`。`U16`、`U32`、`U64` 没有（方言没有无符号整数 tile 类型），
-  所以 `Tensor[U32]` 在 `alloc` 处是类型错误。
+  所以 `DeviceBuffer[U32]` 在 `alloc` 处是类型错误。
 - 类型位置写值类型，值位置写格式名。对 `std/narrow` 与定宽整数两者同名（`Tile[BF16]`、
   `alloc(BF16, n)`）；对三个内建类型分别是 `Float`/`F64`、`Int`/`I64`、`Bool`/`I1`。
 - 能分配成缓冲的格式恰好是 `element_bytes` 认识的 12 个：`f64`、`i64`、`i32`、`tf32`、`bf16`、
   `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
   `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN`、`F8E5M3FNU` 只是 tile
   的格式，没有这种缓冲。
-- 值以 `List[T]` 进出，`T` 是张量的元素类型：`copy_from_host(t: Tensor[T], xs: List[T])` 与
-  `copy_to_host(t: Tensor[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`copy_from_host` 把每个元素
+- 值以 `List[T]` 进出，`T` 是缓冲的元素类型：`copy_from_host(b: DeviceBuffer[T], xs: List[T])` 与
+  `copy_to_host(b: DeviceBuffer[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`copy_from_host` 把每个元素
   写成格式的位型（小端），上传时不舍入（值在 `T` 里已经是格式的值：`BF16` 就是 bfloat16，`Int`
   整个过去）；`copy_to_host` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 NaN 的
   载荷也在内。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN`、`F8E5M3FNU` 有格式没有缓冲，
-  上传 `Tensor[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_copy_from_host(handle, data: Bytes)`、
+  上传 `DeviceBuffer[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_copy_from_host(handle, data: Bytes)`、
   `gpu_copy_to_host(handle) -> Result[Bytes, _]`），第 `i` 个元素占 `[i * w, (i + 1) * w)` 字节，`w` 是格式的宽度，
   小端。`encode_floats(dtype, xs: List[Float])` 与 `decode_floats(dtype, bytes)` 是同一编码按格式名对 `Float` 的视图，
   给缓冲没有共同元素类型的程序用；超出 ±2^53 的 `i64` 过不了它们。
