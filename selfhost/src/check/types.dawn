@@ -1412,6 +1412,15 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     _ -> ty_map_children(t, x => subst(x, m, em))
   }
 
+## Does `t` mention any type variable at all? Used where the answer must hold
+## for every instantiation a caller might pick (R1 of the `Mem` scope): a
+## variable in a result is a type this code does not get to see.
+pub fn ty_has_any_var(t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> true
+    _ -> ty_any_child(t, x => ty_has_any_var(x))
+  }
+
 ## Does `t` mention the type variable `id`? The question `subst` answers by
 ## doing; asking it separately is what lets a caller tell "this parameter could
 ## have been learned from here" from "it could not".
@@ -4798,6 +4807,24 @@ test "mentioning a type variable reaches every position substitution does" {
   assert not ty_mentions_var(TyFn([u], u, EPure), 5)
   assert not ty_mentions_var(TyTuple([TyBool, u]), 5)
   assert not ty_mentions_var(TyString, 5)
+}
+
+test "any-variable reaches every position and says no to a closed type" {
+  let t = TyVar("T", 5)
+  assert ty_has_any_var(t)
+  assert ty_has_any_var(TyList(t))
+  assert ty_has_any_var(TyMap(TyInt, TySet(t)))
+  assert ty_has_any_var(opt_ty(t))
+  assert ty_has_any_var(TyFn([TyInt], t, EPure))
+  assert ty_has_any_var(TyFn([t], TyInt, EPure))
+  assert ty_has_any_var(TyTuple([TyInt, t]))
+  assert ty_has_any_var(TyOpaque(0, "N", "m", [], TyList(t)))
+  # a walk that answered `true` everywhere would pass the block above
+  assert not ty_has_any_var(TyInt)
+  assert not ty_has_any_var(TyList(TyInt))
+  assert not ty_has_any_var(TyTuple([TyInt, TyBool]))
+  assert not ty_has_any_var(TyFn([TyInt], TyString, EPure))
+  assert not ty_has_any_var(TyI64Buf)
 }
 
 ## The wall's own test. Six walks used to spell the variant list out apiece, so
