@@ -26,7 +26,7 @@ use front/ast.{Module, module_uses}
 use check/types.{
   Sig, Adts, Impls, first_minted_id, adt_of, TyList,
   OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
-  TyOpaque, TyAdt, ty_show, Head, HInt, HFloat, HBool, HString, HBytes, HUnit, HList, HMap, HSet, HArray,
+  TyOpaque, TyAdt, ty_show, Head, HInt, HFloat, HBool, HString, HBytes, HI64Buf, HUnit, HList, HMap, HSet, HArray,
   builtin_type_inventory, BtLeaf, internal_std_modules
 }
 use check/passes.{head_owner}
@@ -477,7 +477,7 @@ pub(pkg) fn std_base_modules() -> List[String] = {
       _ -> ()
     }
   }
-  let heads: List[Head] = [HInt, HFloat, HBool, HString, HBytes, HUnit, HList, HMap, HSet, HArray]
+  let heads: List[Head] = [HInt, HFloat, HBool, HString, HBytes, HI64Buf, HUnit, HList, HMap, HSet, HArray]
   for h in heads {
     match head_owner(h) {
       Some(o) -> { out = set.insert(out, o) }
@@ -922,7 +922,7 @@ test "the base modules are the ones the compiler names" {
   # the compiler needs unconditionally has to change it too
   assert std_base_modules() ==
     ["std/bytes", "std/char", "std/fmt", "std/hamt", "std/io", "std/list", "std/loc",
-      "std/map", "std/pvec", "std/set", "std/str"]
+      "std/map", "std/mem", "std/pvec", "std/set", "std/str"]
 }
 
 test "no std module outside the base can be met without importing it" {
@@ -971,7 +971,7 @@ test "a pruned load answers a program the way a full one does" {
       for b in std_base_modules() { assert set.has(loaded, b) }
       for p in w { assert set.has(loaded, p) }
       assert set.has(loaded, "std/cursor")
-      if len(w) == 0 { assert set.len(loaded) == 12 }
+      if len(w) == 0 { assert set.len(loaded) == 13 }
       # a module that is loaded is the same module
       var i = 0
       while i < len(pruned.mods) {

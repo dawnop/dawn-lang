@@ -103,7 +103,7 @@ pub fn with_mem[T, !e](body: fn() -> T !Mem !e) -> T !e = {
 
 ```dawn
 pub fn new(n: Int) -> I64Buf !Mem                          # zero-filled, n >= 0
-pub fn len(b: I64Buf) -> Int                               # pure: the length never changes
+impl Len[I64Buf]                                           # len(b): pure, the length never changes
 pub fn at(b: I64Buf, i: Int) -> Int !Mem                   # position assertion, panics out of range
 pub fn set(b: I64Buf, i: Int, v: Int) -> Unit !Mem         # position assertion, panics out of range
 pub fn fill(b: I64Buf, from: Int, to: Int, v: Int) -> Unit !Mem   # writes: out-of-range panics, never clamps
@@ -268,7 +268,7 @@ pub fn from_bytes(bs: Bytes, width: Int, signed: Bool, order: Endian = Little) -
   `push_own` 的分配，一次预分配填满只要 8.4 ms。缓冲端点天然是「一次分配、一次填满」，预期拆包落在 memcpy 量级；**缓冲端点的实测数未量，K5 去量**。
 - 这不依赖批量线先落地：`to_bytes`/`from_bytes` 在 K5 才做，K5 排在批量线 K3/K4 之后或与其合并。在此之前，`from_list`/`to_list` 用 Dawn 循环实现，
   对 bcrypt（1042 个字，一次）不是瓶颈，其余场景**未量**。
-- `F64Buf`（`double[]` / `double*`）同形，位保真，K5 做。落在同一模块 `std/mem`，函数名带 `f64_` 前缀（待裁问题 3，已裁）：`f64_new`、`f64_len`、`f64_at`、`f64_set`、`f64_fill`、`f64_copy_from`、`f64_copy_within`、`f64_clone`、`f64_from_list`、`f64_to_list`；`Mem` 效果与 `with_mem` 共用。
+- `F64Buf`（`double[]` / `double*`）同形，位保真，K5 做。落在同一模块 `std/mem`，函数名带 `f64_` 前缀（待裁问题 3，已裁）：`f64_new`、`f64_at`、`f64_set`、`f64_fill`、`f64_copy_from`、`f64_copy_within`、`f64_clone`、`f64_from_list`、`f64_to_list`；长度不另起 `f64_len`，`F64Buf` 与 `I64Buf` 各给一个 `impl Len`（Len 裁决 K5，修订上面待裁问题 3 的命名）；`Mem` 效果与 `with_mem` 共用。
 
 ## 8. bcrypt 迁移草图（K4，只示意）
 

@@ -30,12 +30,12 @@ std 共 645,979 字节，其中 `gpu`、`narrow`、`int/*`、`memfs`、`mem`、`
 | 来源 | 读哪里 | 得到 |
 |---|---|---|
 | 没有声明点的内建类型的属主 | `types.builtin_type_inventory()` 里 `BtLeaf(TyOpaque(.., owner, ..))` | `std/char`、`std/loc` |
-| 为孤儿规则认领内建头的模块 | `passes.head_owner` 对各 `Head` | `std/list`、`std/map`、`std/set`、`std/str`、`std/bytes` |
+| 为孤儿规则认领内建头的模块 | `passes.head_owner` 对各 `Head` | `std/list`、`std/map`、`std/set`、`std/str`、`std/bytes`、`std/mem`（`impl Len[I64Buf]`） |
 | prelude 名字的属主 | `stdlib.prelude_owner` 对 `prelude_names()` | `std/io`、`std/list`、`std/fmt` |
 | lowering 不论程序导入什么都会调进去的表示模块 | `types.internal_std_modules()` | `std/hamt`、`std/pvec`（`lower` 的 `hamt_sig` 找不到会 panic，`emitc` 的 list 原语同理） |
 
-闭包：这些模块自己的 `use std/..`（`str`→`cursor`、`bytes`→`char`、`loc`/`fmt`→..）。结果是 12 个模块：
-`bytes char cursor fmt hamt io list loc map pvec set str`。`stdlib.std_base_modules` 取前四类，
+闭包：这些模块自己的 `use std/..`（`str`→`cursor`、`bytes`→`char`、`loc`/`fmt`→..）。结果是 13 个模块：
+`bytes char cursor fmt hamt io list loc map mem pvec set str`。`stdlib.std_base_modules` 取前四类，
 一个内联测试把结果与上面这行钉在一起，改了「编译器无条件需要什么」就必须改这里。
 
 **其余模块**：当且仅当模块图导入它（传递地）。模块图指加载器已经读进来的全部模块的 `use std/..`，
@@ -99,7 +99,7 @@ native，每项 15 次交错取最小值；机器 16 核，**load average 12 至
 最后一行是差分门里的速度对照，同一个二进制、同一个 load 下的直接比：裁剪后 std 加载只剩全量的
 36%。调研预期的「空程序约 0.16 s」（扣掉 dcap 之后）在 load 12 至 15 下对不上号：前后两栏都没扣
 launcher，且基座比调研的 10 个多了 `hamt`、`pvec`（`lower` 无条件引用，`emitc` 的 list 原语同理）
-和 `cursor`（`str` 的依赖）。空程序加载 12 个模块，共 27 个。没有 perf，不再往下拆。
+和 `cursor`（`str` 的依赖）。空程序加载 12 个模块，共 27 个（`std/mem` 因 `impl Len[I64Buf]` 进基座后是 13 个）。没有 perf，不再往下拆。
 
 差分门（`scripts/std-prune-diff.sh`）：241 个单元（检查器语料 190、examples、Playground 样例 11、
 `packages/*`）的 `check` 输出，与其中 48 个能通过检查的程序的 `emitc` 输出，裁剪与全量逐字节相同。
