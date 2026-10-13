@@ -26,9 +26,9 @@ MUTATIONS = {
     # Only the first member is read.
     "member-loop": ((GZIP, "while cursor < n {", "if cursor < n {"),),
     # The trailer is taken from the end of the input, not of this member.
-    "final-trailer": ((GZIP, "let trailer = deflate_end", "let trailer = bytes.len(src) - 8"),),
+    "final-trailer": ((GZIP, "let trailer = deflate_end", "let trailer = len(src) - 8"),),
     # The output cap is not shared across members.
-    "aggregate-cap": ((GZIP, "Some(lim - bytes.size(out))", "Some(lim)"),),
+    "aggregate-cap": ((GZIP, "Some(lim - len(out))", "Some(lim)"),),
     # Reserved header flags are accepted.
     "reserved-flags": ((GZIP, "if flags & RESERVED != 0 {", "if false {"),),
     # A bad header CRC is accepted.

@@ -1141,7 +1141,7 @@ fn put_dim(b: bytes.Buf, d: Int) -> bytes.Buf =
   if d == DYN_DIM { bytes.put(put_le(b, 0, 7), 0x80) } else { put_le(b, d, 8) }
 
 fn pad_to(b: bytes.Buf, align: Int) -> bytes.Buf =
-  if bytes.size(b) % align == 0 { b } else { pad_to(bytes.put(b, PAD_BYTE), align) }
+  if len(b) % align == 0 { b } else { pad_to(bytes.put(b, PAD_BYTE), align) }
 
 fn varint(x: Int) -> Bytes = bytes.freeze(put_varint(bytes.buf(), x))
 
@@ -1332,7 +1332,7 @@ fn func_ty(w: W, ins: List[Int], outs: List[Int]) -> (W, Int) = {
 }
 
 fn const_of(w: W, raw: Bytes) -> (W, Int) = {
-  let (t, i) = intern(w.consts, bytes.freeze(bytes.put_bytes(put_varint(bytes.buf(), bytes.len(raw)), raw)))
+  let (t, i) = intern(w.consts, bytes.freeze(bytes.put_bytes(put_varint(bytes.buf(), len(raw)), raw)))
   (W { ..w, consts: t }, i)
 }
 
@@ -2139,7 +2139,7 @@ fn instr(w: W, i: Instr) -> W = number_all(encode_instr(w, i), defines(i))
 # ---- the file
 
 fn section(out: bytes.Buf, id: Int, content: Bytes, align: Int) -> bytes.Buf = {
-  let o1 = put_varint(bytes.put(out, if align > 1 { id | 0x80 } else { id }), bytes.len(content))
+  let o1 = put_varint(bytes.put(out, if align > 1 { id | 0x80 } else { id }), len(content))
   let o2 = if align > 1 { pad_to(put_varint(o1, align), align) } else { o1 }
   bytes.put_bytes(o2, content)
 }
@@ -2227,7 +2227,7 @@ fn table_section(items: List[Bytes], width: Int) -> Bytes = {
   let b0 = pad_to(put_varint(bytes.buf(), len(items)), width)
   let (b1, _end) = list.fold(items, (b0, 0), (acc, it) => {
     let (b, off) = acc
-    (put_le(b, off, width), off + bytes.len(it))
+    (put_le(b, off, width), off + len(it))
   })
   bytes.freeze(list.fold(items, b1, (b, it) => bytes.put_bytes(b, it)))
 }
@@ -2280,7 +2280,7 @@ pub fn encode_kernel(k: Kernel) -> Bytes = {
     put_hints(w, put_varint(put_varint(fhead, loc_index), ATTR_OPTIMIZATION_HINTS), k.hints)
   }
   w = w5
-  let func = bytes.freeze(bytes.put_bytes(put_varint(fhead1, bytes.len(body)), body))
+  let func = bytes.freeze(bytes.put_bytes(put_varint(fhead1, len(body)), body))
   # The debug strings intern after the hints and before the producer, for the
   # same reason: a program without them keeps every index it ever had.
   let (w5d, debug) = match k.debug {
@@ -2448,7 +2448,7 @@ fn vadd() -> TileProg = TileProg {
 test "the file opens with the magic and the version constants, and closes with the end section" {
   let b = encode(vadd())
   assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d04" ++ "0000"
-  assert bytes.at(b, bytes.len(b) - 1) == 0
+  assert bytes.at(b, len(b) - 1) == 0
   assert bytecode_version() == "13.4"
 }
 
@@ -2928,7 +2928,7 @@ test "encoding a loop twice gives the same bytes, and the file still opens and c
   let b = encode(sum_prog())
   assert b == encode(sum_prog())
   assert hex(bytes.slice(b, 0, 12)) == "7f54696c65495200" ++ "0d04" ++ "0000"
-  assert bytes.at(b, bytes.len(b) - 1) == 0
+  assert bytes.at(b, len(b) - 1) == 0
   assert str.ends_with(hex(b), hex(bytes.utf8("sum")) ++ "00")
 }
 

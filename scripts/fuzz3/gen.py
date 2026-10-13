@@ -262,7 +262,7 @@ class CaseGen:
             if k < 0.74:
                 return f"len({e(LINT)})"
             if k < 0.80:
-                return f"str.len({e(STR)})"
+                return f"len({e(STR)})"
             if k < 0.86:
                 return f"{self.fn_value(ctx, d)}({e(INT)})"
             if k < 0.92:
@@ -621,7 +621,7 @@ use std/list
 use std/str
 
 # every import is used at least once, whatever the cases draw
-fn fuzz_imports() -> Int = str.len("") + len(list.reverse([1]))
+fn fuzz_imports() -> Int = len(str.trim("")) + len(list.reverse([1]))
 """
 
 

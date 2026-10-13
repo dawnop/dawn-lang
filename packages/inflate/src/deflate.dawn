@@ -61,7 +61,7 @@ fn take(b: Bits, n: Int) -> (Int, Bits) = {
   var i = 0
   while i < n {
     var byte = 0
-    if st.pos < bytes.len(st.src) {
+    if st.pos < len(st.src) {
       byte = bytes.at(st.src, st.pos)
     } else {
       st = Bits { ..st, over: true }
@@ -80,7 +80,7 @@ fn take(b: Bits, n: Int) -> (Int, Bits) = {
 ## Discard the rest of the current byte (a stored block starts byte-aligned).
 fn align(b: Bits) -> Bits = if b.bit == 0 { b } else { Bits { ..b, pos: b.pos + 1, bit: 0 } }
 
-fn past_end(b: Bits) -> Bool = b.pos >= bytes.len(b.src)
+fn past_end(b: Bits) -> Bool = b.pos >= len(b.src)
 
 ## A canonical Huffman table: how many codes have each length, and the symbols
 ## in canonical order. This is exactly the pair RFC 1951 3.2.2 constructs.
@@ -225,7 +225,7 @@ fn limit_of(cap: Option[Int]) -> Result[Int, String] =
       if n < 0 { Err("deflate: a negative output limit (" ++ to_string(n) ++ ")") } else { Ok(n) }
   }
 
-fn over_limit(out: Buf, add: Int, lim: Int) -> Bool = lim >= 0 && bytes.size(out) + add > lim
+fn over_limit(out: Buf, add: Int, lim: Int) -> Bool = lim >= 0 && len(out) + add > lim
 
 ## The refusal names how much output existed when it fired. That number is the
 ## whole difference between this ceiling and the one it replaces: checked
@@ -234,7 +234,7 @@ fn over_limit(out: Buf, add: Int, lim: Int) -> Bool = lim >= 0 && bytes.size(out
 ## that refuse the same streams are told apart by nothing else.
 fn too_big(out: Buf, lim: Int) -> String =
   with_default_hint("deflate: the output exceeds the " ++ to_string(lim) ++
-      " byte limit (stopped at " ++ to_string(bytes.size(out)) ++ " bytes)", lim)
+      " byte limit (stopped at " ++ to_string(len(out)) ++ " bytes)", lim)
 
 ## What a refusal by the default ceiling adds: the caller never chose the
 ## number, so the message names it and both ways out. A legitimately large
@@ -278,7 +278,7 @@ pub fn inflate(src: Bytes, cap: Option[Int] = Some(DEFAULT_CAP)) -> Result[Bytes
 ##
 ## `cap` limits the output of this call alone, `DEFAULT_CAP` unless given.
 pub fn inflate_from(src: Bytes, from: Int = 0, cap: Option[Int] = Some(DEFAULT_CAP)) -> Result[(Bytes, Int), String] = {
-  if from < 0 || from > bytes.len(src) {
+  if from < 0 || from > len(src) {
     return Err("deflate: start offset " ++ to_string(from) ++ " is out of range")
   }
   let lim = match limit_of(cap) {
@@ -367,7 +367,7 @@ fn stored(out0: Buf, b: Bits, lim: Int) -> Result[(Buf, Bits), String] = {
   var out = out0
   var i = 0
   while i < n {
-    if st.pos >= bytes.len(st.src) { return Err("deflate: stored block runs past the end") }
+    if st.pos >= len(st.src) { return Err("deflate: stored block runs past the end") }
     out = bytes.put(out, bytes.at(st.src, st.pos))
     st = Bits { ..st, pos: st.pos + 1 }
     i = i + 1
@@ -486,7 +486,7 @@ fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff, cs: Codes, lim: Int) -> Resu
       let (de, s2) = take(st, dextra[dsym])
       st = s2
       let distance = dbase[dsym] + de
-      if distance > bytes.size(out) { return Err("deflate: a back-reference before the start") }
+      if distance > len(out) { return Err("deflate: a back-reference before the start") }
       # the whole run is refused before the first byte of it lands: this is the
       # loop a compression bomb is made of
       if over_limit(out, length, lim) { return Err(too_big(out, lim)) }
@@ -494,7 +494,7 @@ fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff, cs: Codes, lim: Int) -> Resu
       # so it has to be byte by byte and not a block move
       var k = 0
       while k < length {
-        out = bytes.put(out, bytes.buf_at(out, bytes.size(out) - distance))
+        out = bytes.put(out, bytes.buf_at(out, len(out) - distance))
         k = k + 1
       }
     }
@@ -719,7 +719,7 @@ test "empty blocks decode to nothing, fixed and dynamic, one or many" {
   # a final block is still required: drop the last byte and the stream ends
   # inside a non-final block
   let fx = empty_blocks(2000, false)
-  match inflate(bytes.slice(fx, 0, bytes.len(fx) - 2)) {
+  match inflate(bytes.slice(fx, 0, len(fx) - 2)) {
     Err(e) -> { assert str.contains(e, "truncated") }
     Ok(_) -> { assert false }
   }

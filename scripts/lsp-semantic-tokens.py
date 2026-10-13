@@ -85,12 +85,12 @@ fn norm(p: Point) -> Int = {
 
 fn run() -> Int = {
   let e = Add(Var("x"), Num(v: 3))
-  with handle Env { lookup(n) => str.len(n) }
+  with handle Env { lookup(n) => len(str.trim(n)) }
   fn local_eval() -> Int !Env = lookup("z")
   let first = eval(e) + local_eval() + [1].map(k => k + 1).len()
   let wide = "\U0001F388\U0001F388" ++ str.repeat(SEP, 2)
   let p = shift(Point { x: first, y: 2, label: wide }, 3, dy: 5)
-  norm(p) + str.len(labelled(7, "n"))
+  norm(p) + len(str.trim(labelled(7, "n")))
 }
 
 const SEP: String = "n"
@@ -242,7 +242,7 @@ SINGLE_TOKENS = [
     ('lookup', 'method', ''),
     ('n', 'parameter', 'declaration'),
     ('str', 'namespace', 'defaultLibrary'),
-    ('len', 'function', 'defaultLibrary'),
+    ('trim', 'function', 'defaultLibrary'),
     ('n', 'parameter', ''),
     ('local_eval', 'function', 'declaration'),
     ('Env', 'interface', ''),
@@ -270,7 +270,7 @@ SINGLE_TOKENS = [
     ('norm', 'function', ''),
     ('p', 'variable', ''),
     ('str', 'namespace', 'defaultLibrary'),
-    ('len', 'function', 'defaultLibrary'),
+    ('trim', 'function', 'defaultLibrary'),
     ('labelled', 'function', ''),
     ('SEP', 'variable', 'declaration+readonly'),
     ('main', 'function', 'declaration'),

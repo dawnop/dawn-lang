@@ -76,7 +76,7 @@ pub(pkg) fn value_source(adts: Adts, t: Ty, v: CValue, width: Int) -> Option[Str
     VCursor(_, _) -> None
     _ -> {
       let full = render(adts, t, v, width + 1)
-      if str.len(full) > width { None } else { Some(full) }
+      if len(full) > width { None } else { Some(full) }
     }
   }
 
@@ -91,7 +91,7 @@ pub(pkg) fn value_echoes(adts: Adts, t: Ty, v: CValue, src: String) -> Bool =
     VClosure(_, _, _) -> false
     VDict(_, _) -> false
     VCursor(_, _) -> false
-    _ -> squeezed(render(adts, t, v, str.len(src) + 1)) == squeezed(src)
+    _ -> squeezed(render(adts, t, v, len(src) + 1)) == squeezed(src)
   }
 
 fn squeezed(s: String) -> String =
@@ -104,7 +104,7 @@ fn suffix(t: Ty, v: CValue, cut: Bool) -> String =
       if cut { "  (" ++ to_string(len(es)) ++ (if len(es) == 1 { " element)" } else { " elements)" }) }
       else { "" }
     VStr(s) ->
-      if cut { "  (" ++ to_string(str.len(s)) ++ " code points)" } else { "" }
+      if cut { "  (" ++ to_string(len(s)) ++ " code points)" } else { "" }
     _ -> ""
   }
 
@@ -167,9 +167,9 @@ fn seq(adts: Adts, rest: Ty, tys: List[Ty], es: List[CValue], room: Int) -> Stri
   var out = ""
   var i = 0
   for e in es {
-    if str.len(out) > room { return out ++ ", …" }
+    if len(out) > room { return out ++ ", …" }
     let et = if i < len(tys) { tys[i] } else { rest }
-    let part = render(adts, et, e, room - str.len(out))
+    let part = render(adts, et, e, room - len(out))
     out = if i == 0 { part } else { out ++ ", " ++ part }
     i = i + 1
   }
@@ -204,10 +204,10 @@ fn adt_text(adts: Adts, t: Ty, aid: Int, ci: Int, fs: List[CValue], room: Int) -
     var out = ""
     var i = 0
     for f in fs {
-      if str.len(out) > room { return c.name ++ " { " ++ out ++ ", … }" }
+      if len(out) > room { return c.name ++ " { " ++ out ++ ", … }" }
       let fname = if i < len(c.fields) { c.fields[i].name } else { "_" }
       let et = if i < len(tys) { tys[i] } else { TyError }
-      let part = fname ++ ": " ++ render(adts, et, f, room - str.len(out))
+      let part = fname ++ ": " ++ render(adts, et, f, room - len(out))
       out = if i == 0 { part } else { out ++ ", " ++ part }
       i = i + 1
     }
@@ -550,7 +550,7 @@ test "a long value is cut, closed, and says how long it was" {
   }
   let lt = show(TyList(TyFloat), VList(xs))
   assert str.ends_with(lt, "…]  (360 elements)")
-  assert str.len(lt) == VALUE_SHOWN + str.len("  (360 elements)")
+  assert len(lt) == VALUE_SHOWN + len("  (360 elements)")
   let st = show(TyString, VStr(str.repeat("ab", 100)))
   assert str.ends_with(st, "…\"  (200 code points)")
   assert str.starts_with(st, "\"abab")
@@ -644,5 +644,5 @@ test "a String literal shows its code points and UTF-8 bytes" {
   let long = string_literal_text(str.repeat("ab", 100))
   assert str.starts_with(long, "\"abab")
   assert str.ends_with(long, "…\"  (200 code points, 200 UTF-8 bytes)")
-  assert str.len(long) == VALUE_SHOWN + str.len("  (200 code points, 200 UTF-8 bytes)")
+  assert len(long) == VALUE_SHOWN + len("  (200 code points, 200 UTF-8 bytes)")
 }

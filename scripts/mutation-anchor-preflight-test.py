@@ -598,8 +598,8 @@ class PreflightTests(unittest.TestCase):
                                           '    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" } ,\n')
         self.assert_registry_drift_is_red("bootstrap-input-manifest-contract",
                                           "persist-internal-absolute", source,
-                                          '        ("R", str.drop(input.path, str.len(prefix)))\n',
-                                          '        ("R", str.drop(input.path, str.len(prefix) ))\n')
+                                          '        ("R", str.drop(input.path, len(prefix)))\n',
+                                          '        ("R", str.drop(input.path, len(prefix) ))\n')
         self.assert_stale_mutator_is_red("bootstrap-input-manifest-contract",
                                          "drop-package-manifest",
                                          'SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },')

@@ -78,7 +78,7 @@ fn shift(p: Point, dx: Int, dy: Int = 0) -> Point = Point { ..p, x: p.x + dx, y:
 
 fn px(p: Point) -> Int =
   match p {
-    Point { x: first, y, label } -> first + y + str.len(label)
+    Point { x: first, y, label } -> first + y + len(str.trim(label))
   }
 
 fn norm(p: Point) -> Int = {
@@ -89,11 +89,11 @@ fn norm(p: Point) -> Int = {
 
 fn run() -> Int = {
   let e = Add(Var("x"), Num(v: 3))
-  with handle Env { lookup(n) => str.len(n) }
+  with handle Env { lookup(n) => len(str.trim(n)) }
   fn local_eval() -> Int !Env = lookup("z")
   let first = eval(e) + local_eval() + apply_env(k => k + lookup("w"), 1)
   let p = shift(Point { x: first, y: 2, label: "p" }, 3, dy: 5)
-  norm(p) + px(p) + str.len(labelled(7, "n"))
+  norm(p) + px(p) + len(str.trim(labelled(7, "n")))
 }
 
 pub fn main() -> Unit !io = {
@@ -167,7 +167,7 @@ SINGLE_DEFS = [
     ("named argument", "dy: 5", 0, "", "dy: Int = 0", 0),
     ("var declaration", "var acc", 4, "", "var acc", 0),
     ("let declaration", "let first", 4, "", "let first", 0),
-    ("module alias segment", "str.len(n)", 0, "std/str.dawn", "<module>", 0),
+    ("module alias segment", "str.trim(n)", 0, "std/str.dawn", "<module>", 0),
 ]
 
 PROJECT_DEFS = [
@@ -198,7 +198,7 @@ SINGLE_HOVERS = [
     ("punned record pattern field", "y, label }", 0, "y: Int"),
     ("var use", "acc > LIMIT", 0, "var acc: Int"),
     ("const use", "> LIMIT", 2, "const LIMIT: Int = 1024  (0x400)"),
-    ("qualified std call", "str.len(n)", 4, "fn len(s: String) -> Int"),
+    ("qualified std call", "str.trim(n)", 4, "fn trim(s: String) -> String"),
     ("default parameter", "dy: Int = 0", 0, "dy: Int"),
     ("handler arm parameter", "lookup(n) =>", 7, "n: String"),
 ]

@@ -69,7 +69,7 @@ What the harness pins **today**:
 |---------------------|-------------|-------------|-------------------|
 | std/cursor:done:2:0 | assertion ✓ | assertion ✓ | green ✓           |
 | std/cursor:next:2:0 | assertion ✓ | assertion ✓ | green ✓           |
-| std/str:len:1:0     | assertion ✓ | assertion ✓ | known-red: refusal|
+| std/str:count:3:0   | assertion ✓ | assertion ✓ | known-red: refusal|
 | std/pvec:index:2:0  | assertion ✓ | assertion ✓ | green ✓           |
 | std/list:reverse:1:0| assertion ✓ | assertion ✓ | known-red: refusal|
 | std/list:take:2:0   | assertion ✓ | assertion ✓ | known-red: refusal|

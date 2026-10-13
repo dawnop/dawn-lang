@@ -157,7 +157,7 @@ pub fn tree_hash(root: String) -> Result[String, String] !Fs = {
     }
     digest = sha256.update(digest, bytes.utf8(rel))
     digest = sha256.update(digest, zero_byte())
-    digest = sha256.update(digest, bytes.utf8(to_string(bytes.len(content))))
+    digest = sha256.update(digest, bytes.utf8(to_string(len(content))))
     digest = sha256.update(digest, zero_byte())
     digest = sha256.update(digest, content)
   }
@@ -241,8 +241,8 @@ fn http_get(url: String) -> Result[Bytes, String] !Fs !Proc = {
     Ok(0) ->
       match read_bytes(body) {
         Ok(b) ->
-          if bytes.len(b) > MAX_ARCHIVE_BYTES {
-            Err(too_big("downloaded " ++ url, bytes.len(b), MAX_ARCHIVE_BYTES))
+          if len(b) > MAX_ARCHIVE_BYTES {
+            Err(too_big("downloaded " ++ url, len(b), MAX_ARCHIVE_BYTES))
           } else {
             Ok(b)
           }
@@ -360,7 +360,7 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
         Ok(d) -> d
         Err(e) -> return Err(e)
       }
-      total = total + bytes.len(data)
+      total = total + len(data)
       match write_file_bytes(out, data) {
         Ok(_) -> ()
         Err(e) -> return Err(e)
@@ -410,7 +410,7 @@ fn block_all_zero(b: Bytes, off: Int) -> Bool = {
 
 ## pax extended header records are "<len> key=value\n"; the path override wins.
 fn pax_path(recs: String) -> Option[String] = {
-  let n = str.len(recs)
+  let n = len(recs)
   var out: Option[String] = None
   var i = 0
   while i < n {
@@ -447,7 +447,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
   var any = false
   var off = 0
   var pending: Option[String] = None
-  while off + 512 <= bytes.len(raw) {
+  while off + 512 <= len(raw) {
     if block_all_zero(raw, off) { break }
     let size = match tar_octal(raw, off + 124, 12) {
       Ok(n) -> n
@@ -463,7 +463,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
     }
     pending = None
     let data_start = off + 512
-    if data_start + size > bytes.len(raw) { return Err("truncated tar archive") }
+    if data_start + size > len(raw) { return Err("truncated tar archive") }
     let padded = size + (512 - size % 512) % 512
     # type bytes: 'L' 76, 'x' 120, 'g' 103, '5' 53, '0' 48, NUL 0, '7' 55, links 49/50
     if tchar == 76 {
@@ -511,7 +511,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !Fs !Env = {
 }
 
 fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !Fs !Env =
-  if bytes.len(bs) >= 2 && bytes.at(bs, 0) == 31 && bytes.at(bs, 1) == 139 {
+  if len(bs) >= 2 && bytes.at(bs, 0) == 31 && bytes.at(bs, 1) == 139 {
     untar(bs, dest)
   } else {
     unzip(bs, dest)
@@ -743,7 +743,7 @@ fn oct(n: Int, digits: Int) -> String = {
 }
 
 ## `s` in a fixed-width tar header field, NUL-padded.
-fn field(s: String, width: Int) -> String = s ++ str.repeat(NUL, width - str.len(s))
+fn field(s: String, width: Int) -> String = s ++ str.repeat(NUL, width - len(s))
 
 ## The 512-byte ustar header for one entry, checksum included.
 ##
@@ -760,7 +760,7 @@ fn tar_header(name: String, size: Int, typeflag: String) -> Bytes = {
   let blank = bytes.utf8(head ++ str.repeat(" ", 8) ++ tail)
   var sum = 0
   var i = 0
-  while i < bytes.len(blank) {
+  while i < len(blank) {
     sum = sum + bytes.at(blank, i)
     i = i + 1
   }
@@ -774,7 +774,7 @@ fn tar_of(entries: List[(String, String)]) -> Bytes = {
   for e in entries {
     let (name, content) = e
     let data = bytes.utf8(content)
-    let n = bytes.len(data)
+    let n = len(data)
     out = bytes.put_bytes(out, tar_header(name, n, "0"))
     out = bytes.put_bytes(out, data)
     var pad = (512 - n % 512) % 512
@@ -795,7 +795,7 @@ fn tar_of(entries: List[(String, String)]) -> Bytes = {
 ## compressed because a writer is not what is under test: the reader is, and it
 ## reaches the same `gunzip` either way.
 fn gzip_of(raw: Bytes) -> Bytes = {
-  let n = bytes.len(raw)
+  let n = len(raw)
   if n > 65535 { panic("gzip_of: a fixture this large needs more than one stored block") }
   var out = bytes.buf()
   for h in [0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0, 0xFF] { out = bytes.put(out, h) }

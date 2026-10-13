@@ -289,7 +289,6 @@ EOF
 
 cat > "$OUT/proj/src/defaults.dawn" <<'EOF'
 use std/cursor
-use std/str
 use dflt as df
 use util.{pad_to}
 
@@ -308,7 +307,7 @@ pub fn run(s: String) -> Int = {
   let e = df.span()
   let f = df.span(hi: 3)
   let g = cursor.find(s, "a")
-  str.len(a ++ b ++ c ++ d) + e + f + (if g == None { 0 } else { 1 })
+  len(a ++ b ++ c ++ d) + e + f + (if g == None { 0 } else { 1 })
 }
 EOF
 
@@ -323,7 +322,6 @@ pub fn gap(n: Int, w: Int = 2 * BASE) -> Int = n + w
 EOF
 
 cat > "$OUT/proj/src/dvalues.dawn" <<'EOF'
-use std/str
 use dvdep as dv
 
 const GAP: Int = 4
@@ -339,11 +337,11 @@ pub fn run(s: String) -> Int = {
   let b = sep(s, wide: 2)
   let c = span()
   let d = span(lo: 5)
-  let e = span(lo: str.len(s))
+  let e = span(lo: len(s))
   let f = slow(1)
   let g = listed(1)
-  let h = dv.gap(s |> str.len)
-  str.len(a ++ b) + c + d + e + f + g + h
+  let h = dv.gap(s |> len)
+  len(a ++ b) + c + d + e + f + g + h
 }
 EOF
 

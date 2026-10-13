@@ -228,7 +228,7 @@ pub fn uri_to_path(uri: String) -> Option[String] = {
   if not str.starts_with(rest, "/") {
     let cut = match str.index_of(rest, "/") {
       Some(i) -> i
-      None -> str.len(rest)
+      None -> len(rest)
     }
     let authority = str.take(rest, cut)
     if authority != "" && str.to_lower(authority) != "localhost" { return None }
@@ -461,7 +461,7 @@ type WorkspaceIdentity = {
 ## Length-prefixed components make the canonical path pair injective without
 ## assuming that any ordinary path character is unavailable as a separator.
 fn workspace_key_part(value: String) -> String =
-  to_string(str.len(value)) ++ ":" ++ value
+  to_string(len(value)) ++ ":" ++ value
 
 ## Both halves are identities (`canon_identity`), so a file an editor opens
 ## through a link and one it opens through the real path are members of one
@@ -1113,7 +1113,7 @@ fn parse_content_length_value(raw: String) -> Option[Int] = {
 ## Parse the completed header block. Duplicate Content-Length fields agree by
 ## value, not spelling; any invalid occurrence poisons the whole frame.
 fn parse_content_length(header: String) -> Option[Int] = {
-  if str.len(header) > HEADER_MAX_BYTES || not str.ends_with(header, "\r\n\r\n") {
+  if len(header) > HEADER_MAX_BYTES || not str.ends_with(header, "\r\n\r\n") {
     return None
   }
   var found: Option[Int] = None
@@ -1143,8 +1143,8 @@ fn parse_content_length(header: String) -> Option[Int] = {
 
 test "Content-Length accepts exact wire bounds and ASCII spelling variants" {
   let suffix = "\r\nContent-Length: 0\r\n\r\n"
-  let exact = "X:" ++ str.repeat("a", HEADER_MAX_BYTES - 2 - str.len(suffix)) ++ suffix
-  assert str.len(exact) == HEADER_MAX_BYTES
+  let exact = "X:" ++ str.repeat("a", HEADER_MAX_BYTES - 2 - len(suffix)) ++ suffix
+  assert len(exact) == HEADER_MAX_BYTES
   assert parse_content_length(exact) == Some(0)
   assert parse_content_length("X:a${exact}") == None
 
@@ -1231,7 +1231,7 @@ fn read_message() -> Frame !io = {
   var state = 0
   while state < 4 {
     let one = io.read_stdin(1)
-    if bytes.len(one) == 0 {
+    if len(one) == 0 {
       return if len(header) == 0 { Eof } else { Fatal }
     } else {
       let b = bytes.at(one, 0)
@@ -1262,7 +1262,7 @@ fn read_message() -> Frame !io = {
   # The cap was checked by the pure parser before this call. Neither JVM's
   # L2I nor native's allocation can therefore observe an unbounded value.
   let body = io.read_stdin(clen)
-  if bytes.len(body) < clen { return Fatal }
+  if len(body) < clen { return Fatal }
   # Exactly clen bytes were consumed, so a Malformed body still leaves the
   # next frame starting where it should.
   decode_body(body)
@@ -1270,7 +1270,7 @@ fn read_message() -> Frame !io = {
 
 fn send(j: Json) -> Unit !io = {
   let payload = render(j)
-  let n = bytes.len(bytes.utf8(payload))
+  let n = len(bytes.utf8(payload))
   print("Content-Length: " ++ to_string(n) ++ crlf() ++ crlf() ++ payload)
 }
 
@@ -2259,7 +2259,7 @@ fn manifest_path_of(uri: String) -> Option[String] !Fs !Env =
     Some(path) -> {
       let target = canon(path)
       if str.ends_with(target, "/dawn.toml") || str.ends_with(target, "/dawn.lock") {
-        let name = str.drop(target, str.len(parent_dir(target)))
+        let name = str.drop(target, len(parent_dir(target)))
         Some(canon_identity(parent_dir(target)) ++ name)
       } else {
         None
@@ -4315,10 +4315,10 @@ test "a type and a constant spelled alike are told apart by position" {
     assert as_value.def_path == Some(dec)
     let (tlo, thi) = def_probe_span(as_type, "the type")
     assert str.slice(src, tlo, thi) == "W8"
-    assert tlo == str.len("pub opaque type ")
+    assert tlo == len("pub opaque type ")
     let (vlo, vhi) = def_probe_span(as_value, "the constant")
     assert str.slice(src, vlo, vhi) == "W8"
-    assert vlo == str.len("pub opaque type W8 = Int\n\npub const ")
+    assert vlo == len("pub opaque type W8 = Int\n\npub const ")
   }))
 }
 
@@ -5091,7 +5091,7 @@ test "a collection reports the names definition resolves, at the same sites" {
     let d = def_probe_doc_named(st, "collect.dawn", text)
     let analysis = analysis_of(st, d).expect("the probe buffer has an analysis")
     let qc = doc_qcx(st, d, analysis).expect("the probe buffer has a QCx")
-    let rs = resolutions(qc, 0, str.len(text))
+    let rs = resolutions(qc, 0, len(text))
     var starts: List[Int] = []
     for r in rs {
       starts = starts ++ [r.lo]
@@ -5688,7 +5688,7 @@ fn dot_reply(st0: LspState, params: String, stmt: String) -> Json !Fs !Proc !Env
   ], "\n")
   let d = def_probe_doc_named(st0, "dotprobe.dawn", text)
   let st = LspState { ..st0, docs: map.insert(st0.docs, d.uri, d) }
-  handle_completion(st, d7_params(d, "\n  ${stmt}", str.len(stmt) + 3))
+  handle_completion(st, d7_params(d, "\n  ${stmt}", len(stmt) + 3))
 }
 
 ## The labels, in the order a client sorts them.
@@ -6099,7 +6099,7 @@ fn inlay_probe(st: LspState, d: Doc, l0: Int, c0: Int, l1: Int, c1: Int) -> List
       row = row ++ str.slice(src, at, ch) ++ shown
       at = ch
     }
-    out = out ++ [str.trim(row ++ str.slice(src, at, str.len(src)))]
+    out = out ++ [str.trim(row ++ str.slice(src, at, len(src)))]
   }
   out
 }
@@ -6367,7 +6367,7 @@ fn defaults_probe_text() -> String =
     "  let l = zero(1, m: 2)",
     "  let m = site(1) + Some(2).expect(\"two\")",
     "  let n = both(1)",
-    "  str.len(a ++ c ++ e ++ f ++ h) + b + d + i + j + str.len(k) + l + m + n + (if g == None { 0 } else { 1 })",
+    "  len(a ++ c ++ e ++ f ++ h) + b + d + i + j + len(k) + l + m + n + (if g == None { 0 } else { 1 })",
     "}",
     ""
   ], "\n")
@@ -6505,11 +6505,11 @@ fn values_probe_text() -> String =
     "  let b = sep(s, wide: 2)",
     "  let c = span()",
     "  let d = span(lo: 5)",
-    "  let e = span(lo: str.len(s))",
+    "  let e = span(lo: len(s))",
     "  let f = slow(1)",
     "  let g = listed(1)",
     "  let h = s.sep(gap: 1)",
-    "  str.len(a ++ b ++ h) + c + d + e + f + g",
+    "  len(a ++ b ++ h) + c + d + e + f + g",
     "}",
     ""
   ], "\n")
@@ -6529,7 +6529,7 @@ test "inlay hints: a left-out default shows its value where it folds, else its t
     assert list.contains(got, "let c = span(«lo: 1, hi: 10»)")
     assert list.contains(got, "let d = span(lo: 5«, hi: 14»)")
     # ... and is refused when that value is an outer local's: the text
-    assert list.contains(got, "let e = span(lo: str.len(s)«, hi: lo + 9»)")
+    assert list.contains(got, "let e = span(lo: len(s)«, hi: lo + 9»)")
     # past the depth budget the fold is refused: the text
     assert list.contains(got, "let f = slow(1«, k: spin(5000)»)")
     # a value that repeats its text, and one too long to show: the text
