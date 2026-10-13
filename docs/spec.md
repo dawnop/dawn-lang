@@ -3378,7 +3378,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - `std/pvec`：内部模块，`List` 的表示
 - `std/mem`：平铺的可变 64 位整数缓冲 `I64Buf`，与它的作用域效果 `Mem` 和 `with_mem`（设计见
   [`mem-buffer-design.md`](mem-buffer-design.md)）。缓冲只存在于 `with_mem` 之内：读写缓冲的函数带 `!Mem`，
-  检查器按 `std/mem` 的 `Mem` 这个效果拒绝四类逃逸（`with_mem` 的结果类型不得含缓冲或带 `Mem` 的函数类型；
+  检查器按 `std/mem` 的 `Mem` 这个效果拒绝四类逃逸（`with_mem` 的结果类型不得含缓冲、带 `Mem` 的函数类型或任何类型变量；
   只有 `std/mem` 能为 `Mem` 装 handler；效果操作的签名与 handler 的 `var` 不得含缓冲；带 `Mem` 的函数值不得越过 `use java`）
 - `std/gpu`：GPU 的宿主层，`Gpu` 效果与设备缓冲（§12.6）
 - `std/memfs`：内存中的 `Fs` handler，供测试用；本规范别处不再讲它，设计见
