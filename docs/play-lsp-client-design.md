@@ -1,6 +1,6 @@
 # Playground 接 `@codemirror/lsp-client`：分刀与内置补全表懒加载
 
-> 状态：**current**。刀 1（本文 §3，内置补全表懒加载）与刀 2（§4，会话核心 + sanitizeHTML）已落地；刀 3 起未动。
+> 状态：**current**。刀 1（本文 §3，内置补全表懒加载）、刀 2（§4，会话核心 + sanitizeHTML）与刀 3（§5，signatureHelp 放行，PR #728）已落地；刀 4 起未动。
 > 依据：内部裁决「Playground 编辑器不换 Monaco」（2026-10-04）第 3 条 b、c，
 > 与其后的 `@codemirror/lsp-client` 调研（2026-10-05，下称「调研」）。
 
@@ -21,7 +21,7 @@ signature help 浮层、references 面板、rename 对话框三块白送的 UI�
 |---|---|---|
 | 1（本刀） | 内置补全表只在 LSP 不可用时动态 `import()` | 首屏 `playground.js` gzip 实测下降，数字写进提交信息；LSP 未连上、断线、请求失败时补全仍给出 builtin（`println`、`str.trim`），且有负控证明表被删掉时测试会红；LSP 在线时不拉表；站点生成器把分出的 chunk 指纹化并改写 import，拼写变了就停构建 |
 | 2（已落地，§4） | 换会话核心：`LSPClient` + 自写可重连 Transport；hover、definition、诊断迁过去；补全源、inlay、semantic tokens 改挂 `LSPPlugin`；同刀配 `sanitizeHTML` | `selftest.ts` 与 `lsp_contract.py` 的假子进程先对拍再切；合约（落在前端自测，见 §4.3）里放 `## <img src=x onerror=...>` 变异负控，消毒删掉时必须红；首屏净增量不超过本刀省下的量；网关零改动 |
-| 3 | signatureHelp 放行（网关白名单与宣告） | 回包字段白名单与长度上限；`playground/test/contract.sh` 增一项 |
+| 3（已落地，§5，PR #728） | signatureHelp 放行（网关白名单与宣告） | 回包字段白名单与长度上限；`playground/test/contract.sh` 增一项 |
 | 4 | references 放行 | 回包只留本 buffer 位置（照 definition）；同刀改写 `docs/lsp-references-design.md` 里「Playground 不转发 references」那条旧结论 |
 | 5 | rename 放行 | `WorkspaceEdit` 的 `changes` 与 `documentChanges` 两种形状都过滤到本 buffer；lsp-client 不发 prepareRename，网关不放 |
 
@@ -175,7 +175,44 @@ hover 的版式（间距、暗色）与移动端行为要人在页面上看一�
 刀 1 省下 18,387，所以刀 2 后首屏仍比刀 1 之前少约 1.0 KiB（gzip -6）。增量里 `marked` 约 11.5 KiB（调研 §2），
 `sanitize.ts` 本身不到 1 KiB。`playground-builtins.js` 与 `playground.css`（+0.5 KiB raw）之外不动。
 
-## 5. 不做的（理由）
+## 5. 刀 3：signatureHelp 放行
+
+### 5.1 网关
+
+`playground/lsp_gateway.py` 把 `textDocument/signatureHelp` 加进白名单，与 hover、definition 同一个分支：请求按字段重建，
+只剩 Playground 那一个文档和一个位置，客户端多带的 `context` 与别的键不过网关。`initialize` 回包宣告
+`signatureHelpProvider: {triggerCharacters: ["(", ","]}`，与服务端自己的宣告一致。
+
+回包经 `signature_help_value` 重建，只留浏览器要读的字段：
+
+- 至多 4 条 signature（服务端今天只给 1 条）；每条留 `label`（非空，≤ 2048 字符）、`parameters`、markdown 或纯文本的 `documentation`（≤ 16384 字符）。
+  服务端以后加的 `command`、逐参数 `documentation` 之类一概不过。
+- `parameters[i].label` 只收 `[start, end)` 偏移对：两个非负 int32，`start ≤ end`，且 `end` 不超过 label 的 UTF-16 长度。
+  偏移按 UTF-16 单位数（和 JavaScript 字符串下标一致），所以一个星面字符占两格。字符串形式的参数 label 不收：
+  服务端本来就只发偏移（`handle_signature_help` 的注释写了理由），浏览器不必再做子串查找。
+- `activeSignature`、`activeParameter` 只收非负 int32。
+- **超长的不杀会话**：label 或文档超过上限时，该 signature 或该文档被丢掉（没有签名剩下就回 `null`），不当作子进程协议错误。
+  结构不对（偏移越界、字段类型错）才是 `ChildProtocolError`，与 semantic tokens、completion resolve 的回包校验一致。
+
+### 5.2 客户端
+
+没有用 `@codemirror/lsp-client` 自带的 `signatureHelp()`：它经 `LSPClient.request` 直接发请求，问的是服务端**上次收到**的文本，
+而 Playground 的核心保证「每个回包都对着屏幕上的那一版文本」（`DawnLspClient.queryWith`，见 §4.1）。所以 `DawnLspClient.signatureHelp(offset)`
+走与 hover 相同的 `query`，`lspSignatureHelp` 是手写的一个 `StateField` + `showTooltip`（约 100 行，gzip 净增约 0.7 KiB）：
+
+- 输入 `(` 或 `,`（`input.type` 事件）时发请求；打开之后每次改文本或移动光标都再问一次，让高亮的参数跟着光标走；
+  服务端回 `null`（光标出了调用）或 Esc 就关。`Mod-Shift-Space` 手动触发（和库的键位一致）。
+- 浮层是 `.dp-hover` 的样式：签名里当前参数加粗加下划线，函数整体文档经 hover 同一个 `docElement`（`sanitizeHTML` 之后的 Markdown）。
+- `initialize` 的客户端能力里声明 `labelOffsetSupport`；网关自己重建 `initialize`，这只对直连其它服务端有意义。
+
+### 5.3 测试
+
+- `playground/test/lsp_contract.py` 增一项（`lsp-contract.sh` 由 28 项增到 29 项）：请求重建、回包白名单、超长丢弃、UTF-16 偏移、
+  结构错误是协议错误；会话级用例里再走一遍真 WebSocket。变异体四个，各自单独改网关源码后合约必须红：回包不过滤、label 不设上限、偏移不查界、偏移按码点数。
+- `site/play-ui/test/selftest.ts`：请求形状（对着已诊断的那版文本）、回包解析（越界偏移丢弃、字符串 label 丢弃、字符串文档）、活动参数切分、
+  `(` 与 `,` 才触发。变异体：偏移上界检查、`start ≤ end` 检查、活动参数切分各删一次，selftest 全部变红。
+
+## 6. 不做的（理由）
 
 - **不换 Monaco、VS Code Web**：首屏 gzip Monaco 仅编辑器 712 KiB、带可用功能 1.0 MiB，
   monaco-languageclient 2.3 到 3.0 MiB，VS Code Web 不少于 3.9 MiB；Monaco 官方不支持触屏（裁决 2026-10-04 第 1 条）。

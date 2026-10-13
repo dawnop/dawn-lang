@@ -17,7 +17,7 @@ import type {
 } from '@codemirror/autocomplete'
 import type { Diagnostic } from '@codemirror/lint'
 import { LSPClient, LSPPlugin, Workspace, type Transport, type WorkspaceFile } from '@codemirror/lsp-client'
-import { ChangeSet, type Extension, type Range, Text } from '@codemirror/state'
+import { ChangeSet, type Extension, type Range, StateEffect, StateField, Text } from '@codemirror/state'
 import {
   closeHoverTooltip,
   Decoration,
@@ -25,6 +25,8 @@ import {
   EditorView,
   hoverTooltip,
   type HoverTooltipSource,
+  keymap,
+  showTooltip,
   type Tooltip,
   ViewPlugin,
   type ViewUpdate,
@@ -419,6 +421,13 @@ const CLIENT_CAPABILITIES = {
       formats: ['relative'],
     },
     completion: { completionItem: { resolveSupport: { properties: ['documentation'] } } },
+    signatureHelp: {
+      dynamicRegistration: false,
+      signatureInformation: {
+        documentationFormat: ['markdown'],
+        parameterInformation: { labelOffsetSupport: true },
+      },
+    },
   },
 }
 
@@ -698,6 +707,11 @@ export class DawnLspClient {
       return value.filter((item) => asRecord(item)) as (LspLocation | LspLocationLink)[]
     }
     return asRecord(value) ? [value as LspLocation | LspLocationLink] : []
+  }
+
+  /** The signature of the call open at the offset, or null outside any call. */
+  async signatureHelp(offset: number, timeoutMs = 1000): Promise<SignatureHelp | null> {
+    return signatureHelpOf(await this.query('textDocument/signatureHelp', offset, timeoutMs))
   }
 
   /** The hints between two offsets of the current text, both ends included. */
@@ -1402,6 +1416,133 @@ export function lspDefinition(client: DawnLspClient): Extension {
       return true
     },
   })
+}
+
+/**
+ * Signature help (docs/play-lsp-client-design.md, cut 3): the one signature of
+ * the call open at the cursor, with the parameter being typed marked. It is
+ * asked for through `DawnLspClient`, like hover, so the answer is always about
+ * the text on screen; the library's own signature help would ask the server
+ * about whatever text it last saw.
+ */
+export interface SignatureHelp {
+  label: string
+  /** [start, end) of each parameter inside `label`, in UTF-16 units. */
+  parameters: [number, number][]
+  active: number | null
+  doc: string
+}
+
+export function signatureHelpOf(value: unknown): SignatureHelp | null {
+  const help = asRecord(value)
+  const signatures = help?.signatures
+  if (!Array.isArray(signatures)) return null
+  const signature = asRecord(signatures[0])
+  if (typeof signature?.label !== 'string' || !signature.label) return null
+  const label = signature.label
+  const parameters: [number, number][] = []
+  for (const entry of Array.isArray(signature.parameters) ? signature.parameters : []) {
+    const span = asRecord(entry)?.label
+    if (!Array.isArray(span) || span.length !== 2) continue
+    const [start, end] = span
+    if (Number.isInteger(start) && Number.isInteger(end) && start >= 0 && start <= end && end <= label.length) {
+      parameters.push([start, end])
+    }
+  }
+  const active = [signature.activeParameter, help?.activeParameter]
+    .find((n) => Number.isInteger(n) && n >= 0)
+  return { label, parameters, active: active ?? null, doc: markupValue(signature.documentation) }
+}
+
+/** The label cut into the text before, inside and after the active parameter. */
+export function signatureParts(help: SignatureHelp): [string, string, string] {
+  const span = help.active != null ? help.parameters[help.active] : undefined
+  return span == null
+    ? [help.label, '', '']
+    : [help.label.slice(0, span[0]), help.label.slice(span[0], span[1]), help.label.slice(span[1])]
+}
+
+const setSignature = StateEffect.define<{ pos: number; help: SignatureHelp } | null>()
+
+const signatureField = StateField.define<{ pos: number; help: SignatureHelp } | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects) if (effect.is(setSignature)) return effect.value
+    return value
+  },
+  provide: (field) => showTooltip.from(field, (value): Tooltip | null => value == null ? null : {
+    pos: value.pos,
+    above: true,
+    create: (view) => {
+      const dom = document.createElement('div')
+      dom.className = 'dp-hover dp-signature'
+      const code = document.createElement('div')
+      code.className = 'dp-hover-code'
+      const [before, active, after] = signatureParts(value.help)
+      code.appendChild(document.createTextNode(before))
+      if (active) {
+        const mark = document.createElement('strong')
+        mark.className = 'dp-signature-active'
+        mark.textContent = active
+        code.appendChild(mark)
+      }
+      code.appendChild(document.createTextNode(after))
+      dom.appendChild(code)
+      if (value.help.doc) dom.appendChild(docElement(view, value.help.doc, 'dp-hover-doc'))
+      return { dom }
+    },
+  }),
+})
+
+/** Typing `(` or `,` opens signature help, as the server's trigger characters say. */
+export function typedSignatureTrigger(update: ViewUpdate): boolean {
+  if (!update.docChanged) return false
+  return update.transactions.some((tr) => {
+    if (!tr.isUserEvent('input.type')) return false
+    let typed = false
+    tr.changes.iterChanges((_a, _b, _c, _d, inserted) => {
+      if (/[(,]/.test(inserted.toString())) typed = true
+    })
+    return typed
+  })
+}
+
+export function lspSignatureHelp(client: DawnLspClient): Extension {
+  const ask = (view: EditorView): void => {
+    if (!client.isReady()) return
+    const snapshot = view.state.doc.toString()
+    const pos = view.state.selection.main.head
+    client.signatureHelp(pos, 1000).then((help) => {
+      if (view.state.doc.toString() !== snapshot || view.state.selection.main.head !== pos) return
+      view.dispatch({ effects: setSignature.of(help == null ? null : { pos, help }) })
+    }, () => { /* stale or unavailable: keep what is shown until the next edit */ })
+  }
+  const open = (view: EditorView): boolean => view.state.field(signatureField, false) != null
+  const follow = ViewPlugin.fromClass(class {
+    update(update: ViewUpdate): void {
+      if (typedSignatureTrigger(update)
+        || (open(update.view) && (update.docChanged || update.selectionSet))) {
+        // after the update has settled: a dispatch inside update() is refused
+        const view = update.view
+        queueMicrotask(() => ask(view))
+      }
+    }
+  })
+  return [
+    signatureField,
+    follow,
+    keymap.of([
+      { key: 'Mod-Shift-Space', run: (view) => (ask(view), true) },
+      {
+        key: 'Escape',
+        run: (view) => {
+          if (!open(view)) return false
+          view.dispatch({ effects: setSignature.of(null) })
+          return true
+        },
+      },
+    ]),
+  ]
 }
 
 /**

@@ -185,6 +185,23 @@ def main():
                     "command": {"title": "x", "command": "rm"},
                 },
             })
+        elif method == "textDocument/signatureHelp":
+            # one signature with a doc, and fields the gateway must not pass on
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "signatures": [{
+                        "label": "fn f(a: Int, b: Int) -> Int",
+                        "parameters": [{"label": [5, 11], "documentation": "x"}, {"label": [13, 19]}],
+                        "documentation": {"kind": "markdown", "value": "Adds `a` and `b`."},
+                        "command": {"title": "x", "command": "rm"},
+                    }],
+                    "activeSignature": 0,
+                    "activeParameter": 1,
+                    "private": "/tmp/should-not-cross",
+                },
+            })
         elif method == "textDocument/definition":
             send({
                 "jsonrpc": "2.0",

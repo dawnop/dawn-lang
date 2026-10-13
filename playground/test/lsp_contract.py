@@ -218,9 +218,11 @@ def initialize(ws, request_id=1):
         "completionProvider",
         "hoverProvider",
         "definitionProvider",
+        "signatureHelpProvider",
         "inlayHintProvider",
         "semanticTokensProvider",
     }, response
+    assert capabilities["signatureHelpProvider"] == {"triggerCharacters": ["(", ","]}, response
     assert capabilities["completionProvider"].get("resolveProvider") is True, response
     assert capabilities["semanticTokensProvider"] == {
         "legend": FAKE_SEMANTIC_LEGEND, "range": True, "full": False,
@@ -334,6 +336,10 @@ def diagnostics_params_contract():
     semantic_tokens_negative_controls()
     ok("semantic tokens: the child's legend, range only, cut to the message cap")
 
+    signature_help_contract(load_gateway())
+    signature_help_negative_controls()
+    ok("signature help: position request rebuilt, reply cut to bounded signatures and offsets")
+
     unknown_method_contract(load_gateway())
     unknown_method_negative_controls()
     ok("methods the gateway does not offer: notifications dropped, requests -32601")
@@ -390,6 +396,124 @@ def assert_method_not_found(gateway, protocol, message):
     }, ("GATEWAY_UNKNOWN_REQUEST_NOT_METHOD_NOT_FOUND", message.get("method"), reply.body)
     # nothing is owed by the child, so nothing waits for it
     assert protocol.pending == pending, ("GATEWAY_UNKNOWN_REQUEST_LEFT_PENDING", protocol.pending)
+
+
+def signature_reply(gateway, protocol, result, request_id=40):
+    """One signatureHelp round trip through a ClientProtocol: the request as the
+    child gets it, and the reply as the browser gets it."""
+    sent = json.loads(protocol.from_client(json.dumps(rpc(request_id, "textDocument/signatureHelp", {
+        "textDocument": {"uri": URI},
+        "position": {"line": 0, "character": 2},
+        "context": {"triggerKind": 1, "extra": "/tmp/x"},
+        "extra": "/tmp/x",
+    })).encode()))
+    reply = protocol.from_child(json.dumps(
+        {"jsonrpc": "2.0", "id": request_id, "result": result}).encode())
+    return sent, json.loads(reply)["result"]
+
+
+def signature_help_contract(gateway):
+    """textDocument/signatureHelp (docs/play-lsp-client-design.md, cut 3): the
+    request is rebuilt to the document and a position, and the reply is cut to
+    bounded signatures whose parameter labels are offsets inside the label."""
+    protocol, capabilities = open_protocol(gateway, {}, "f(1, 2)")
+    assert capabilities.get("signatureHelpProvider") == {"triggerCharacters": ["(", ","]}, capabilities
+
+    label = "fn f(a: Int, b: Int) -> Int"
+    good = {
+        "signatures": [{
+            "label": label,
+            "parameters": [{"label": [5, 11], "documentation": "x"}, {"label": [13, 19]}],
+            "documentation": {"kind": "markdown", "value": "Adds."},
+            "command": {"command": "rm"},
+        }],
+        "activeSignature": 0,
+        "activeParameter": 1,
+        "private": "/tmp/x",
+    }
+    sent, got = signature_reply(gateway, protocol, good)
+    assert sent["params"] == {
+        "textDocument": {"uri": URI}, "position": {"line": 0, "character": 2},
+    }, ("SIGNATURE_REQUEST_NOT_REBUILT", sent)
+    assert got == {
+        "signatures": [{
+            "label": label,
+            "parameters": [{"label": [5, 11]}, {"label": [13, 19]}],
+            "documentation": {"kind": "markdown", "value": "Adds."},
+        }],
+        "activeSignature": 0,
+        "activeParameter": 1,
+    }, ("SIGNATURE_REPLY_NOT_WHITELISTED", got)
+
+    # null passes; a signature over the label bound is left out (reply null)
+    assert signature_reply(gateway, protocol, None, 41)[1] is None
+    assert signature_reply(gateway, protocol, {
+        "signatures": [{"label": "x" * 2_049, "parameters": []}],
+    }, 42)[1] is None, "SIGNATURE_LABEL_UNBOUNDED"
+
+    # a doc over its bound is dropped, the signature kept
+    _, got = signature_reply(gateway, protocol, {"signatures": [{
+        "label": label, "parameters": [],
+        "documentation": {"kind": "markdown", "value": "d" * 16_385},
+    }]}, 43)
+    assert got["signatures"] == [{"label": label, "parameters": []}], ("SIGNATURE_DOC_UNBOUNDED", got)
+
+    # offsets count UTF-16 units: an astral character is two of them, so the
+    # label below is 12 code points and 13 units
+    wide = "fn f(\U0001d54f: Int)"
+    _, got = signature_reply(gateway, protocol, {
+        "signatures": [{"label": wide, "parameters": [{"label": [5, 13]}]}],
+    }, 45)
+    assert got["signatures"][0]["parameters"] == [{"label": [5, 13]}], got
+
+    # an offset pair outside its label, a string label, or a bad active index
+    # is a child protocol error
+    for bad in (
+        {"signatures": [{"label": label, "parameters": [{"label": [5, 99]}]}]},
+        {"signatures": [{"label": label, "parameters": [{"label": [9, 5]}]}]},
+        {"signatures": [{"label": label, "parameters": [{"label": "a: Int"}]}]},
+        {"signatures": [{"label": wide, "parameters": [{"label": [5, 14]}]}]},
+        {"signatures": [{"label": label, "parameters": []}], "activeParameter": -1},
+        {"signatures": [{"label": label, "parameters": []}], "activeParameter": True},
+        {"signatures": "fn f()"},
+        [],
+    ):
+        try:
+            signature_reply(gateway, protocol, bad, 44)
+        except gateway.ChildProtocolError:
+            pass
+        else:
+            raise AssertionError(("SIGNATURE_REPLY_CROSSED", bad))
+
+
+def signature_help_negative_controls():
+    """Each mutant breaks one rule above, and the contract has to notice."""
+    source = read_text(GATEWAY)
+    mutants = {
+        # the reply forwarded as the child sent it
+        "reply not whitelisted": mutate_once(
+            source,
+            '        if method == "textDocument/signatureHelp" and "result" in message:\n'
+            '            message = {**message, "result": signature_help_value(message["result"])}\n',
+            '',
+        ),
+        "label unbounded": mutate_once(
+            source, "if not label or len(label) > MAX_SIGNATURE_LABEL:", "if not label:"),
+        "offsets unchecked": mutate_once(source, "                or span[1] > units\n", ""),
+        # offsets counted in code points
+        "code point offsets": mutate_once(
+            source, "        units = utf16_length(label)\n", "        units = len(label)\n"),
+    }
+    def run(mutant):
+        gateway = load_gateway(mutant)
+        try:
+            signature_help_contract(gateway)
+        except gateway.ChildProtocolError as error:
+            # a mutant that refuses what the contract needs answered is red too
+            raise AssertionError(str(error)) from error
+
+    for label, mutant in mutants.items():
+        expect_contract_red(label, lambda: run(mutant))
 
 
 def unknown_method_contract(gateway):
@@ -1420,6 +1544,19 @@ def main():
             }))
             tokens = ws.recv_json()["result"]
             assert tokens == {"data": [0, 4, 3, 0, 1]}, tokens
+            # signature help: a position request, and a reply cut to the
+            # signature, its parameter offsets and its doc
+            ws.send_json(rpc(8, "textDocument/signatureHelp", position_params()))
+            signature = ws.recv_json()["result"]
+            assert signature == {
+                "signatures": [{
+                    "label": "fn f(a: Int, b: Int) -> Int",
+                    "parameters": [{"label": [5, 11]}, {"label": [13, 19]}],
+                    "documentation": {"kind": "markdown", "value": "Adds `a` and `b`."},
+                }],
+                "activeSignature": 0,
+                "activeParameter": 1,
+            }, signature
 
             ws.send_frame(9, b"contract-ping")
             fin, opcode, payload = ws.recv_frame()
@@ -1799,7 +1936,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("28 passed, 0 failed")
+    print("29 passed, 0 failed")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,9 @@ import {
   semanticClass,
   semanticDecorations,
   semanticLegendOf,
+  signatureHelpOf,
+  signatureParts,
+  typedSignatureTrigger,
   type LspSocket,
   type LspInlayHint,
 } from '../src/lsp'
@@ -675,6 +678,53 @@ socket.receive({ id: currentDefinitionRequest.id, result: [] })
 expect('latest same-buffer definition resolves', await currentDefinition, [])
 socket.receive({ id: oldDefinitionRequest.id, result: [] })
 expect('out-of-order older definition is rejected', await oldDefinition, 'rejected')
+
+// ---- signature help (docs/play-lsp-client-design.md, cut 3) ----
+{
+  const sig = client.signatureHelp(3)
+  await tick()
+  const request = socket.sent.at(-1)!
+  expect('signature help asks for a position of the diagnosed snapshot', [request.method, request.params], [
+    'textDocument/signatureHelp',
+    { textDocument: { uri: DAWN_LSP_URI }, position: { line: 0, character: 3 } },
+  ])
+  socket.receive({ id: request.id, result: {
+    signatures: [{
+      label: 'fn f(a: Int, b: Int) -> Int',
+      parameters: [{ label: [5, 11] }, { label: [13, 19] }, { label: [13, 99] }, { label: [9, 5] }, { label: 'b' }],
+      documentation: { kind: 'markdown', value: 'Adds.' },
+    }],
+    activeSignature: 0,
+    activeParameter: 1,
+  } })
+  const help = await sig
+  expect('signature help keeps the label, in-range offsets, active index and doc', help, {
+    label: 'fn f(a: Int, b: Int) -> Int',
+    parameters: [[5, 11], [13, 19]],
+    active: 1,
+    doc: 'Adds.',
+  })
+  expect('the active parameter is cut out of the label', signatureParts(help!),
+    ['fn f(a: Int, ', 'b: Int', ') -> Int'])
+  expect('no active index shows the label whole', signatureParts({ ...help!, active: null }),
+    ['fn f(a: Int, b: Int) -> Int', '', ''])
+  expect('an active index past the parameters shows the label whole',
+    signatureParts({ ...help!, active: 5 }), ['fn f(a: Int, b: Int) -> Int', '', ''])
+  expect('a null or malformed reply is no signature help',
+    [signatureHelpOf(null), signatureHelpOf({}), signatureHelpOf({ signatures: [] }),
+      signatureHelpOf({ signatures: [{ label: '' }] }), signatureHelpOf({ signatures: [{ label: 7 }] })],
+    [null, null, null, null, null])
+  expect('a bare-string doc is read', signatureHelpOf({ signatures: [{ label: 'f()', documentation: 'x' }] })?.doc, 'x')
+
+  const typed = (insert: string, userEvent: string) => {
+    const state = EditorState.create({ doc: 'f' })
+    const tr = state.update({ changes: { from: 1, insert }, userEvent })
+    return typedSignatureTrigger({ docChanged: true, transactions: [tr] } as never)
+  }
+  expect('typing ( or , opens signature help', [typed('(', 'input.type'), typed(',', 'input.type')], [true, true])
+  expect('other typing and non-input changes do not',
+    [typed('x', 'input.type'), typed('(', 'undo'), typed('(', 'input.paste')], [false, false, false])
+}
 
 const inlay = client.inlayHints(0, 6)
 await tick()
