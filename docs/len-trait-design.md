@@ -129,4 +129,19 @@ K2 的目标：这 18 条在同一次提交里全绿，且没有任何一条靠�
 7. **镜像**：`selfhost/builtins.dawn`（`len` 改为 std 内部的 `list_len`）、builtin-decl-contract 的一个变异体不再用公开 `len`（改用 `get`，名字 `p9-drop-get-s-flag`）、doc-check 的清单自检改用 `range`、checker-corpus 的 `self_recursion` 用例去掉本地 `trait Len` 与孤儿 List impl 并重录三份 golden（`calls`/`pipe` 的签名行变成 `fn len[T: Len](x: T) -> Int`）。
 8. **与 Bulk K4 的对账**：main 已到 b262fbd7（builtin 计数 125），`lower` 的分组计数断言的唯一冲突按 125 + `lowered` 23 / `internal` 23 合并。
 
-仍未做（K3 起）：String / Bytes / Buf / Map / Set 的 impl 与限定调用迁移；CONTRIBUTING §7 的两条例外；`std/str` 三个绕行函数。
+仍未做（K3 起）：见下文第 8 节，K3a / K3b 已把它们做完。
+
+## 8. K3a / K3b 实施记录（2026-10-13）
+
+K3 分两刀，因为种子（上一个 release）自带的 std 没有 String / Bytes / Buf / Map / Set 的 `Len` impl，工具链用种子编译，所以第一刀只能加 impl、迁种子编不到的调用方，旧函数原样留着。
+
+- **K3a**（`9328e225`）：五个 impl，std 测试与脚本里的 165 处限定调用迁移；`Emit-Change(lsp)`。
+- **K3b**（种子推进到 v0.88.0 之后；提交 `6d92e055`、`58cfd3b2`、`71d0b8fa`）：
+  1. **迁移**：80 个 `.dawn` 文件里 329 处限定调用（`str.len` / `bytes.len` / `bytes.size` / `map.len` / `set.len`）改成 `len(x)`。按目录：`selfhost/src` 139（35 个文件）、`packages` 72（18）、`playground` 33（7）、`site` 26（8）、`compiler-plan` 23（5）、`examples` 16（2）、`std` 16（3）、两份 ownership 合约 4（`rc-view-contract` 3、`rc-mode-contract` 1）。只被这些调用用到的整模块 `use std/str`、`use std/bytes` 随之因 unused import 报错而删（4 处，另有 `site/play-ui/samples/chars.dawn` 与一个文档测试里的内嵌程序）。内嵌 Dawn 程序与按源码文本锚定的脚本一并改：`fuzz3/gen.py`、四个 `mutate.py`、`mutation-anchor-preflight-test.py`、`native-cli-diff.sh`、`selfhost-lsp-diff.sh`、`playground/test/contract.sh`。四个 LSP 脚本拿 `str.len` 当「限定的 std 调用」样例，改用 `str.trim`（hover 期望 `fn trim(s: String) -> String`）。
+  2. **删除**：`str.len`、`bytes.len`、`bytes.size`、`map.len`、`set.len` 五个模块级函数；`Buf` 的 `size` 体并进 impl，`bytes.dawn` 里 8 处 `size(` 测试调用改 `len(`。`bytes.buf_at` 的文档注释改成「唯一的具名例外」。
+  3. **`std/str` 绕行函数**：`pad_fill` 与 `rev_cps` **仍在**。它们不是因为 `len` 被 `str.len` 遮蔽才存在，而是因为 `std/str` 在 `modules.txt` 里排在 `std/list` 之前：模块里既没有 `Len[List]`，也没有 `map`。试过改成 `map(range(0, n), …)`，先报 `undefined function: map`，改掉后报 `no impl of Len for List[Char]`。保留递归版，在函数上方写明原因。
+  4. **文档**：CONTRIBUTING §7 先英后中，两条例外只剩 `bytes.buf_at`，并说明 `len` 是预置 trait；spec（中、英）、教程（英、中）里的 `str.len` / `bytes.len` / `bytes.size` 同步。
+  5. **声明的输出变化**：`emit selfhost`、`emit site`、`emit playground`、`emit packages/web`、`emit packages/json`（调用点从模块函数改走 impl），`doc --builtins`（std 文档面少了 `str.len`），`lsp`（`std/str` 的定义行上移 5 行，补全不再列模块级 `len`）。其余 prev-diff 标签（`examples/*` 五项）逐字节相同。
+  6. **门禁样例跟着动**（集群全套第一轮的四个红，原因都在这一刀里）：`lsp-semantic-tokens` 的期望 token 序列（`len(str.trim(n))` 里 `len` 是 trait 调用，没有 token，只剩 `str`、`trim`）；`lsp-rename` 的「std 函数」样例换成 `str.index_of`（再加一处裸 `len` 调用会改变「builtin 遮蔽」那条的报错）；`builtin-decl-contract` 的 P9 变异体原先拿 `std/bytes.len` 当「与 builtin 同名的 std 函数」，该函数没了，改拿 `std/map.get`（变异体名 `p9-flag-std-map-get`）；`rc-mode-contract` 的站点 `std/str:len:1:0` 随之消失，且 impl 方法在 Core 里名为 `len`、调用点却按 `impl$17$String$len` 查表，两侧对不上，所以站点改到 `std/str:count:3:0`（`len` 的 impl 把参数交给它，借用翻转同样被拒）。`docs` 门的 `site/build.sh` 在集群上停在 play-ui 的 npm 步骤，与本刀无关（本机 `site/build.sh` 通过）。
+  7. **tile 台账**：`packages/tileir` 与 `std/gpu` 动了，本机 sm_86 台账按规矩重录，记录在 `71d0b8fa`。
+  8. **本机门禁**：`dawn test selfhost` 1080 项全绿、`dawn test compiler-plan` 95 项全绿、`dawn test --stdlib` 241 项全绿；`fmt --check`、`doc-check.py`、`mutation-anchor-preflight`（656 处锚点）、`anchor-guard`、checker-corpus（202 例）、`selfhost-fmt-diff` 全过；prev-diff 约 69 s、run-diff 约 118 s。
