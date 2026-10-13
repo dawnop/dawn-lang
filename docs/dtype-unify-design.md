@@ -144,7 +144,7 @@ native 的 `gpu_upload_host`/`gpu_download_host` 在 `selfhost/src/check/types.d
 
 - 「值以 `List[Float]` 进出，每种格式都是如此……对 `i64` 只在 ±2^53 之内精确」整条改写为：值以 `List[T]` 进出，`T` 是张量的元素类型；
   `copy_from_host` 把每个值编码成格式的位型（宽整数不再经 `Float`），`copy_to_host` 精确答出；`i64` 的精确性债从此关闭。
-- 「`copy_from_host` 的数据长度不等于 `size(t)`」的 `gpu.length_mismatch` 不变；`copy_from_host` 的舍入（`round_to`）一句改为「值在 `T` 里已经是该格式的值，`copy_from_host` 不再舍入」（`FromFloat`/`FromInt` 在构造时已舍入或范围检查）。
+- 「`copy_from_host` 的数据长度不等于 `len(t)`」的 `gpu.length_mismatch` 不变；`copy_from_host` 的舍入（`round_to`）一句改为「值在 `T` 里已经是该格式的值，`copy_from_host` 不再舍入」（`FromFloat`/`FromInt` 在构造时已舍入或范围检查）。
 - 假设备「按缓冲格式舍入」一句同步。
 
 本文不提前改 spec：规范文本在 U3 落地前动，会让规范领先实现。
