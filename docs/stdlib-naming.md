@@ -109,7 +109,7 @@ xs |> filter(x => x > 0)    # 选择性引入的短名进管道，零摩擦
 ### 判据
 
 1. **接收者按类型取惯用名，不统一成一个词**：`List` 是 `xs`，`String` 与 `Set` 是 `s`，
-   `Bytes`/`Buf` 是 `b`，`Map` 是 `m`，`Char` 是 `c`，`Tensor` 是 `t`。类型未知的 trait
+   `Bytes`/`Buf` 是 `b`，`Map` 是 `m`，`Char` 是 `c`，`DeviceBuffer` 是 `b`。类型未知的 trait
    接收者，容器类用 `it`（`Iter`、`Index`），值类用 `x`（`Hash`/`Show`/`Display`），
    对称二元用 `a, b`（`Ord`/`Eq`/`Narrow`）。接收者在点调用里本来不可具名
    （`x.f(xs: y)` 报 given twice），统一它要动 170 多个槽位，只换来形式上的整齐。

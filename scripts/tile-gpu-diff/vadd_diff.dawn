@@ -36,7 +36,7 @@
 use std/io
 use std/io.{Exit, with_fs_real}
 use std/gpu
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, reference_kernels, alloc, free,
+use std/gpu.{Gpu, DeviceBuffer, with_gpu_fake, with_gpu_real, reference_kernels, alloc, free,
   launch, buffer_arg, erase, sync }
 use std/dtype.{Dtype, F64, dtype_name}
 use std/narrow.{BF16}
@@ -79,7 +79,7 @@ fn blank() -> Trace =
     note: ""
   }
 
-fn release[D](ts: List[Tensor[D]]) -> Unit !Gpu = {
+fn release[D](ts: List[DeviceBuffer[D]]) -> Unit !Gpu = {
   for t in ts {
     let _ = free(t)
   }
@@ -93,13 +93,13 @@ fn held[D](d: Dtype[D], xs: List[Float]) -> List[Float] = {
 
 ## The whole vadd of format `d` through `kernel`, one stage at a time,
 ## stopping at the first refusal and saying which stage it was.
-# The Float view of a tensor by its format's name: the corpus holds Floats
+# The Float view of a buffer by its format's name: the corpus holds Floats
 # off the format's grid on purpose (bf16 rounds them on the way in), which
 # a typed `copy_from_host` of a `BF16` cannot say.
-fn put[D](d: Dtype[D], t: Tensor[D], xs: List[Float]) -> Result[Unit, ForeignError] !Gpu =
+fn put[D](d: Dtype[D], t: DeviceBuffer[D], xs: List[Float]) -> Result[Unit, ForeignError] !Gpu =
   gpu.gpu_copy_from_host(gpu.handle_of(t), gpu.encode_floats(dtype_name(d), xs))
 
-fn get[D](d: Dtype[D], t: Tensor[D]) -> Result[List[Float], ForeignError] !Gpu =
+fn get[D](d: Dtype[D], t: DeviceBuffer[D]) -> Result[List[Float], ForeignError] !Gpu =
   match gpu.gpu_copy_to_host(gpu.handle_of(t)) {
     Ok(raw) -> Ok(gpu.decode_floats(dtype_name(d), raw))
     Err(e) -> Err(e)

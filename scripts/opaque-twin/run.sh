@@ -49,9 +49,9 @@
 #
 # ## The third verdict: a phantom parameter
 #
-# `opaque type Tensor[D] = (Int, Int)` has a parameter its target drops. spec
+# `opaque type DeviceBuffer[D] = (Int, Int)` has a parameter its target drops. spec
 # 2.7 says the instances are still distinct types, and the way that shows is
-# the one place the twin cannot follow: `fn handle_of[D](t: Tensor[D])` binds
+# the one place the twin cannot follow: `fn handle_of[D](t: DeviceBuffer[D])` binds
 # `D` from the argument on the opaque side, while on the alias side the
 # argument is a bare `(Int, Int)` and `D` has nothing to bind from, so every
 # call is refused with "cannot infer type parameter(s)". That is spec 2.7's

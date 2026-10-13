@@ -1,5 +1,7 @@
 # prelude `Len` trait：std 范围统一的 `len`（K1，设计稿）
 
+> 改名说明（2026-10-12）：文中的 `Tensor[D]`（`std/gpu` 的宿主缓冲类型）今天叫 `DeviceBuffer[D]`；本文按当时的名字写成，不逐处改动。
+
 > 状态：**proposed**。K2 已实现（本地分支 `std/len-k2`，未推送）；§7 记实施与实测。2026-10-10 写成。基线 `origin/main` = a8c53f6e。
 > 动码前的**调研与方案**，不是设计定稿。
 > 调研报告与裁决（维护者工作区）：`research-std-len-20261009.md`、`ruling-std-len-20261009.md`，含全部 `file:line` 与外部出处，本文只留结论。裁决：采方案 (b)，prelude 加 `Len` trait。

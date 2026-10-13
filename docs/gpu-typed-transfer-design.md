@@ -1,5 +1,7 @@
 # GPU 宿主传输类型化：`upload`/`download` 的编码、线格式与刀序（U3a）
 
+> 改名说明（2026-10-12）：文中的 `Tensor[D]`（`std/gpu` 的宿主缓冲类型）今天叫 `DeviceBuffer[D]`；本文按当时的名字写成，不逐处改动。
+
 > 状态：**current**。2026-10-08 写成，U3b1（e5b3c847）、U3c（63e65a9e）已落地，U3d 并入 bulk-array-bytes-design（K5，448d0c01）；`upload`/`download` 在代码里最终命名为 `copy_from_host`/`copy_to_host`。基线 `origin/main` = c7c81203，种子 v0.85.0，`packages/tileir` 0.12.0。
 > 这是 `dtype-unify-design.md`（PR #634，分支 `gpu/dtype-u0`，尚未合入 main，所以这里不做链接）§6 的 U3a：把那篇留下的 U3 开放问题 1、2、4 答完，并给出 U3b 起的刀序。
 > 调研报告：维护者工作区 `research-gpu-typed-transfer-20261008.md`（含网页出处）；格式统一的前置调研是

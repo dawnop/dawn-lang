@@ -2386,7 +2386,7 @@ i64_inside="$(printf '%s\n' "$i64_shape" | tr ' ' '\n' | sed -n 's/^products_ins
   fail "the i64 corpus has $i64_inside of $i64_lanes products inside 2^52; past that the List[Float] channel is not exact: $i64_shape"
 echo "PASS  corpus: every i64 product is inside 2^52, so the host channel is exact ($i64_inside of $i64_lanes)"
 
-# The same kernel past that edge, through the typed Tensor[Int] transfer
+# The same kernel past that edge, through the typed DeviceBuffer[Int] transfer
 # (std/gpu 'upload'), against tileref's Int twin. Each field is a claim: lanes
 # beyond 2^53, lanes whose Int is not a Float at all (the Float channel would
 # have rounded them), and products that wrapped at 2^64 (the device wraps).

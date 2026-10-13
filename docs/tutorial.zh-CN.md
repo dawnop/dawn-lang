@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ c9f39d764978e41b -->
+<!-- doc-check: translation-of docs/tutorial.md @ 55b08fa4be884d22 -->
 
 # Dawn 教程
 
@@ -1517,9 +1517,9 @@ refused: gpu.no_kernel
 驱动应答同样的操作，`kernels` 把每个名字映到编译好的模块。这个 handler 需要 C 后端
 （在 JVM 上每个操作都答 `gpu.unsupported_backend`），还需要一台装了 NVIDIA 驱动的机器。
 
-`copy_from_host` 与 `copy_to_host` 搬的是张量元素类型的值，不是每种格式都过一遍 Float：`Tensor[Float]` 收
-`List[Float]`，`Tensor[Int]` 收 `Int` 且每一位都保留（超出 2^53 的 i64 也在内），`Tensor[BF16]` 收 `BF16`
-值，所以上传时什么也不舍入。没有缓冲的格式搬不了：上传 `Tensor[Bool]` 是类型错误，不是运行期拒绝。
+`copy_from_host` 与 `copy_to_host` 搬的是缓冲元素类型的值，不是每种格式都过一遍 Float：`DeviceBuffer[Float]` 收
+`List[Float]`，`DeviceBuffer[Int]` 收 `Int` 且每一位都保留（超出 2^53 的 i64 也在内），`DeviceBuffer[BF16]` 收 `BF16`
+值，所以上传时什么也不舍入。没有缓冲的格式搬不了：上传 `DeviceBuffer[Bool]` 是类型错误，不是运行期拒绝。
 
 kernel 本身也是 Dawn，对着 `packages/tileir` 写：它的 `Dev` 效果把 kernel 执行的操作记录
 下来，记录再编码成 NVIDIA 的 Tile IR 字节码，由 `tileiras` 汇编成 `with_gpu_real` 装载的
@@ -1644,12 +1644,12 @@ cuda_tile.module @m {
 
 `!Dev` 是函数体唯一的效果，所以够不到宿主内存，也没有数可看：kernel 能做的恰好就是 `Dev`
 提供的那些。`Param[Float]` 是元素格式为 `F64`（类型是 `Float`，见证是 `std/dtype` 的 `F64`）的参数，和宿主缓冲区带的是同一个
-格式，所以在这个 kernel 要 `Float` 的位置传 `Tensor[F32]` 是类型错误。
+格式，所以在这个 kernel 要 `Float` 的位置传 `DeviceBuffer[F32]` 是类型错误。
 
 ### 格子：形状写在哪里
 
 `vadd` 的函数体里没有长度，没有 tile 宽度，也没有偏移。这些属于标记。`cells([1000], [128])`
-把 1000 个元素的张量切成每格 128：八格，最后一格有 24 个 lane 越过了末尾。`In` 和 `Out` 说明
+把 1000 个元素的缓冲切成每格 128：八格，最后一格有 24 个 lane 越过了末尾。`In` 和 `Out` 说明
 kernel 对每个参数做什么，而 `Out` 的格子就是启动网格：八个块，块 `i` 读写第 `i` 格。越过
 extent 的 lane 读到的是标记的填充值（标记不另说就是零），而且不写回，所以尾巴不需要 mask。
 
@@ -1691,7 +1691,7 @@ pub fn main() -> Unit !io = {
 refused: gpu.short_tensor: gpu.launch_entry: kernel `vadd`: argument 0 (In) holds 999 element(s) and its cells reach 1000
 ```
 
-`trace3` 答回记录和一个入口，`launch_entry3` 接这个入口和三个张量，张量的格式由入口的类型
+`trace3` 答回记录和一个入口，`launch_entry3` 接这个入口和三个缓冲，缓冲的格式由入口的类型
 定死。在问任何 handler 之前，它先拿缓冲区对照格子：999 个元素的缓冲区够不到 1000 个元素的
 extent 的末尾。它还拒绝和格子不一致的网格，以及和别的参数共用缓冲区的 `Out`。extent 写成
 `DYN_DIM` 时，格子数交给启动来定，比如 `launch_entry3(entry, buffer_arg(a), buffer_arg(b), buffer_arg(out), grid: [8])`，这时缓冲区

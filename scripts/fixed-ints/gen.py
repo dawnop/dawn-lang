@@ -35,7 +35,7 @@ SPIKE = ROOT / "scripts" / "spike-native"
 
 # The types with a device format, and the name the tile dialect gives it. U16,
 # U32 and U64 have none: the dialect has no unsigned integer types, so a
-# `Tensor[U32]` should be a type error and not a guess (std/dtype's header).
+# `DeviceBuffer[U32]` should be a type error and not a guess (std/dtype's header).
 DTYPES = {"I8": "i8", "I16": "i16", "I32": "i32", "U8": "u8"}
 
 TYPES = [

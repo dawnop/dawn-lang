@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 1d7c39cc7f9ca58d -->
+<!-- doc-check: translation-of docs/spec.md @ 6fb4152f9c25f7f7 -->
 
 # Dawn Language Specification
 
@@ -4268,7 +4268,7 @@ two together; one module too many or too few fails it):
   whose row carries `Mem`; only `std/mem` may install a handler for `Mem`; an effect
   operation's signature and a handler's `var` may not contain a buffer; a function
   value carrying `Mem` may not cross a `use java` call)
-- `std/gpu`: the host side of a GPU, the `Gpu` effect and tensors (§12.6)
+- `std/gpu`: the host side of a GPU, the `Gpu` effect and device buffers (§12.6)
 - `std/memfs`: an in-memory `Fs` handler for tests; the rest of this specification does
   not discuss it, and its design is in [`fs-real-path-design.md`](fs-real-path-design.md)
 
@@ -4929,7 +4929,7 @@ The device backend is **not** a third backend of the compiler. Neither driver kn
 kernel, Tile IR or a GPU is, and neither calls any device toolchain. It is two layers of
 library:
 
-- The host layer, `std/gpu` (bundled with std): the `Gpu` effect, `Tensor[D]` and the two
+- The host layer, `std/gpu` (bundled with std): the `Gpu` effect, `DeviceBuffer[D]` and the two
   handlers; the element formats are in `std/dtype` (`Dtype[T]`) and in each value type's module.
 - The device layer, `packages/tileir` (a source package brought in through `[deps]`, not part
   of std): the `Dev` effect, the recording handler, `TileProg`, the Tile IR text renderer and
@@ -4992,7 +4992,7 @@ program uses the typed functions over them: `alloc`, `copy_from_host`, `copy_to_
   program's responsibility.
 - `launch` returning is not the kernel having run. Only a `copy_to_host` after `sync` is
   guaranteed to see the writes of the launches before it.
-- `module_global(d, kernel, name)` answers a `Tensor[D]` over one exported global of the
+- `module_global(d, kernel, name)` answers a `DeviceBuffer[D]` over one exported global of the
   module that defines the kernel, sharing the module's storage; two lookups of one symbol
   answer the same handle, and `free` on it is accepted and does nothing.
 
@@ -5056,17 +5056,17 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 
 **Types that cross the boundary**: only buffers cross between host and device.
 
-- `Tensor[D]` is an opaque type whose representation is (handle, element count); `D` is a
-  format's value type, so `Tensor[Float]` and `Tensor[BF16]` are two types and passing the wrong format
+- `DeviceBuffer[D]` is an opaque type whose representation is (handle, element count); `D` is a
+  format's value type, so `DeviceBuffer[Float]` and `DeviceBuffer[BF16]` are two types and passing the wrong format
   is a type error rather than a launch failure. A handle is an opaque integer issued by the
   handler, and a program never invents one.
 - There are 16 formats, each a value type plus a witness constant of the same name, a
   `Dtype[T]` (`use std/narrow.{BF16}` brings in the type and the witness; `alloc(BF16, n)`,
-  `Tensor[BF16]`), and only they implement `HasDtype`: `Float` (witness `F64`), `Int` (`I64`)
+  `DeviceBuffer[BF16]`), and only they implement `HasDtype`: `Float` (witness `F64`), `Int` (`I64`)
   and `Bool` (`I1`, a tile format only) in `std/dtype`; `BF16`, `F16`, `F32`, `TF32`, `F8E4M3FN`,
   `F8E5M2`, `F8E8M0FNU`, `F4E2M1FN` and `F8E5M3FNU` in `std/narrow` (the last six are storage-only, with no
   arithmetic); `I8`, `I16`, `I32` and `U8` in `std/int/*`; `I4` in `std/gpu`. `U16`, `U32` and
-  `U64` have none (the dialect has no unsigned integer tile types), so a `Tensor[U32]` is a type
+  `U64` have none (the dialect has no unsigned integer tile types), so a `DeviceBuffer[U32]` is a type
   error at `alloc`.
 - In type position write the value type; in value position write the format's name. For
   `std/narrow` and the fixed-width integers the two are spelled alike (`Tile[BF16]`,
@@ -5076,14 +5076,14 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   Both handlers answer `gpu.unsupported_dtype` for the rest, `F32` included: it can be written
   in a type but not allocated. `I4`, `F4E2M1FN` and `F8E5M3FNU` are tile formats only, and no buffer of
   any of them exists.
-- Values go in and out as `List[T]`, where `T` is the tensor's element type:
-  `copy_from_host(t: Tensor[T], xs: List[T])` and `copy_to_host(t: Tensor[T]) -> Result[List[T], _]` need
+- Values go in and out as `List[T]`, where `T` is the buffer's element type:
+  `copy_from_host(b: DeviceBuffer[T], xs: List[T])` and `copy_to_host(b: DeviceBuffer[T]) -> Result[List[T], _]` need
   `T: HasDtype + DeviceBits`. `copy_from_host` writes each element as the format's bit pattern,
   little-endian, and nothing is rounded on the way in (the value is already the format's: a
   `BF16` is a bfloat16, and an `Int` crosses whole); `copy_to_host` answers exactly what the buffer
   holds. That makes every format lossless, an `i64` beyond ±2^53 and a NaN's payload included.
   `DeviceBits` is implemented by the formats a buffer can hold; `Bool`, `I4`, `F4E2M1FN` and `F8E5M3FNU` have
-  a format and no buffer, so uploading a `Tensor[Bool]` is a type error. On the effect, the
+  a format and no buffer, so uploading a `DeviceBuffer[Bool]` is a type error. On the effect, the
   data crosses as `Bytes` (`gpu_copy_from_host(handle, data: Bytes)`, `gpu_copy_to_host(handle) ->
   Result[Bytes, _]`), element `i` in bytes `[i * w, (i + 1) * w)` for the format's width `w`,
   little-endian. `encode_floats(dtype, xs: List[Float])` and `decode_floats(dtype, bytes)` are the same

@@ -33,7 +33,7 @@
 # has pinned neither (std/gpu's relu_ref says so as well).
 use std/io
 use std/io.{Exit, with_fs_real}
-use std/gpu.{Gpu, Tensor, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, copy_from_host, copy_to_host, free,
+use std/gpu.{Gpu, DeviceBuffer, with_gpu_fake, with_gpu_real, WideRefFn, last_out, alloc, copy_from_host, copy_to_host, free,
   launch, buffer_arg, erase, sync }
 use std/dtype.{F64}
 use tileref/ref.{masked_vadd_ref, masked_copy_ref, relu_ref, leaky_relu_ref, clip_ref}
@@ -91,14 +91,14 @@ fn blank() -> Trace =
     note: ""
   }
 
-fn release(ts: List[Tensor[Float]]) -> Unit !Gpu = {
+fn release(ts: List[DeviceBuffer[Float]]) -> Unit !Gpu = {
   for t in ts {
     let _ = free(t)
   }
 }
 
 # `count` buffers of `size` f64 elements, or the first refusal.
-fn alloc_many(count: Int, size: Int, acc: List[Tensor[Float]]) -> Result[List[Tensor[Float]], ForeignError] !Gpu =
+fn alloc_many(count: Int, size: Int, acc: List[DeviceBuffer[Float]]) -> Result[List[DeviceBuffer[Float]], ForeignError] !Gpu =
   if count == 0 {
     Ok(acc)
   } else {
@@ -109,7 +109,7 @@ fn alloc_many(count: Int, size: Int, acc: List[Tensor[Float]]) -> Result[List[Te
   }
 
 # The contents of every buffer uploaded in order, or the first refusal.
-fn upload_all(ts: List[Tensor[Float]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
+fn upload_all(ts: List[DeviceBuffer[Float]], data: List[List[Float]], i: Int) -> Result[Unit, ForeignError] !Gpu =
   if i >= len(ts) {
     Ok(())
   } else {

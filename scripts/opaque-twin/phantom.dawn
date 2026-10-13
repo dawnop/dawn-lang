@@ -1,5 +1,5 @@
-# A phantom parameter, the shape std/gpu's `Tensor[D]` has: `D` appears
-# nowhere in the target, so `Tensor[F64]` and `Tensor[F32]` are two types over
+# A phantom parameter, the shape std/gpu's `DeviceBuffer[D]` has: `D` appears
+# nowhere in the target, so `DeviceBuffer[F64]` and `DeviceBuffer[F32]` are two types over
 # one `(Int, Int)` (spec 2.7). Declared here rather than imported because the
 # gate's substitution runs over this file, and what it must flip is the
 # declaration itself.
@@ -8,12 +8,12 @@
 # things are pinned in one run on the opaque side, against the tuple:
 #
 #   * identity is the target's: `==` and hashing (a Map key) of a
-#     `Tensor[F64]` are those of the `(Int, Int)` under it, and two tensors of
+#     `DeviceBuffer[F64]` are those of the `(Int, Int)` under it, and two tensors of
 #     the same format with the same handle are one key;
 #   * the parameter is bound from the argument: `handle_of(a)` needs no
 #     annotation.
 #
-# The second is the one the alias twin cannot do. With `alias Tensor[D]` the
+# The second is the one the alias twin cannot do. With `alias DeviceBuffer[D]` the
 # argument is a bare tuple and `D` has nothing to bind from, so every such
 # call is refused with "cannot infer type parameter(s)" and nothing else --
 # which is what the declaration below claims.
@@ -24,21 +24,21 @@ use std/map
 type F64 = F64
 type F32 = F32
 
-opaque type Tensor[D] = (Int, Int)
+opaque type DeviceBuffer[D] = (Int, Int)
 
-fn handle_of[D](t: Tensor[D]) -> Int = {
+fn handle_of[D](t: DeviceBuffer[D]) -> Int = {
   let p: (Int, Int) = t
   let (h, _n) = p
   h
 }
 
 fn same(what: String, a: String, b: String) -> Unit =
-  if a != b { panic("Tensor disagrees with its tuple about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
+  if a != b { panic("DeviceBuffer disagrees with its tuple about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
 
 pub fn main() -> Unit !io = {
-  let a: Tensor[F64] = (1, 4)
-  let b: Tensor[F64] = (1, 4)
-  let c: Tensor[F64] = (2, 4)
+  let a: DeviceBuffer[F64] = (1, 4)
+  let b: DeviceBuffer[F64] = (1, 4)
+  let c: DeviceBuffer[F64] = (2, 4)
   let raw: (Int, Int) = (1, 4)
   let other: (Int, Int) = (2, 4)
 
@@ -47,7 +47,7 @@ pub fn main() -> Unit !io = {
   # no rendering claim: since 2026-09-24 an opaque type inherits no `Show` from
   # its target (spec 2.7), so a handle is not printable at all
 
-  let m: Map[Tensor[F64], Int] = map.from([(a, 1), (c, 2)])
+  let m: Map[DeviceBuffer[F64], Int] = map.from([(a, 1), (c, 2)])
   let n: Map[(Int, Int), Int] = map.from([(raw, 1), (other, 2)])
   same("hash lookup", to_string(map.get(m, b)), to_string(map.get(n, raw)))
   same("distinct keys", to_string(len(m)), to_string(len(n)))

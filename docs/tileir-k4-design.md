@@ -1,5 +1,7 @@
 # tileir K4 设计：kernel 的运行期标量参数
 
+> 改名说明（2026-10-12）：文中的 `Tensor[D]`（`std/gpu` 的宿主缓冲类型）今天叫 `DeviceBuffer[D]`；本文按当时的名字写成，不逐处改动。
+
 > 状态：**proposed**（七个开放问题已于 2026-10-07 裁决，见 §7 与 ruling-k4-design-20261007；整篇仍待评审）。2026-10-07 写成，基线 `origin/main` = 731db7f3，`packages/tileir` 0.10.0。
 > 依据：维护者工作区的 ruling-generic-kernel-20261006（K4 在刀序第 3 条，独立可并行，碰 `std/gpu` 与 Core golden）与
 > ruling-drange-step-20261006（`Step[B] { Unit, By(B) }`，设备步长是 K4 之后的主线写法）。
