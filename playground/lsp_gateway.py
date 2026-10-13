@@ -854,6 +854,81 @@ def resolved_item_value(result: Any) -> Any:
     return safe
 
 
+MAX_SIGNATURES = 4
+MAX_SIGNATURE_LABEL = 2_048
+MAX_SIGNATURE_PARAMETERS = 64
+MAX_SIGNATURE_DOC = 16_384
+
+
+def signature_int(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 2_147_483_647
+    )
+
+
+def signature_help_value(result: Any) -> Any:
+    """A signature help reply as the browser may read it (docs/play-lsp-client-design.md,
+    cut 3): at most a few signatures, each a bounded `label`, parameter labels
+    given as [start, end) offsets inside it, and a markdown or plain-text
+    `documentation`. Everything else the server adds is not part of the
+    Playground's surface. A signature over a bound is left out rather than
+    ending the session; a reply with none left is null."""
+    if result is None:
+        return None
+    if not isinstance(result, dict) or not isinstance(result.get("signatures"), list):
+        raise ChildProtocolError("signature help result is not an object with signatures")
+    signatures = []
+    for entry in result["signatures"][:MAX_SIGNATURES]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("label"), str):
+            raise ChildProtocolError("signature help signature is malformed")
+        label = entry["label"]
+        if not label or len(label) > MAX_SIGNATURE_LABEL:
+            continue
+        units = utf16_length(label)
+        parameters = []
+        raw = entry.get("parameters", [])
+        if not isinstance(raw, list):
+            raise ChildProtocolError("signature help parameters is not a list")
+        for parameter in raw[:MAX_SIGNATURE_PARAMETERS]:
+            span = parameter.get("label") if isinstance(parameter, dict) else None
+            if (
+                not isinstance(span, list)
+                or len(span) != 2
+                or not all(signature_int(n) for n in span)
+                or span[0] > span[1]
+                or span[1] > units
+            ):
+                raise ChildProtocolError("signature help parameter label is not an offset pair")
+            parameters.append({"label": [span[0], span[1]]})
+        safe: dict[str, Any] = {"label": label, "parameters": parameters}
+        documentation = entry.get("documentation")
+        if isinstance(documentation, dict):
+            if (
+                documentation.get("kind") in {"markdown", "plaintext"}
+                and isinstance(documentation.get("value"), str)
+                and len(documentation["value"]) <= MAX_SIGNATURE_DOC
+            ):
+                safe["documentation"] = {
+                    "kind": documentation["kind"],
+                    "value": documentation["value"],
+                }
+        elif isinstance(documentation, str) and len(documentation) <= MAX_SIGNATURE_DOC:
+            safe["documentation"] = documentation
+        signatures.append(safe)
+    if not signatures:
+        return None
+    out: dict[str, Any] = {"signatures": signatures}
+    for key in ("activeSignature", "activeParameter"):
+        value = result.get(key)
+        if value is not None:
+            if not signature_int(value):
+                raise ChildProtocolError(f"signature help {key} is not a non-negative integer")
+            out[key] = value
+    return out
+
+
 def position_value(position: Any) -> dict[str, int]:
     if not isinstance(position, dict):
         raise GatewayError(1008, "position must be an object")
@@ -888,6 +963,7 @@ CLIENT_METHODS = frozenset({
     "textDocument/completion",
     "textDocument/hover",
     "textDocument/definition",
+    "textDocument/signatureHelp",
     "textDocument/inlayHint",
     "completionItem/resolve",
 })
@@ -1071,6 +1147,7 @@ class ClientProtocol:
             "textDocument/completion",
             "textDocument/hover",
             "textDocument/definition",
+            "textDocument/signatureHelp",
         }:
             if len(self.pending) >= HARD_PENDING_REQUESTS:
                 raise GatewayError(1008, "too many pending LSP requests")
@@ -1238,6 +1315,7 @@ class ClientProtocol:
                 },
                 "hoverProvider": True,
                 "definitionProvider": True,
+                "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
                 "inlayHintProvider": True,
             }
             self.semantic_legend = semantic_legend_value(
@@ -1268,6 +1346,8 @@ class ClientProtocol:
                 if isinstance(location, dict) and location.get("uri") == DOCUMENT_URI:
                     safe.append(location)
             message = {**message, "result": safe}
+        if method == "textDocument/signatureHelp" and "result" in message:
+            message = {**message, "result": signature_help_value(message["result"])}
         if method == "completionItem/resolve" and "result" in message:
             message = {**message, "result": resolved_item_value(message["result"])}
         if method == "textDocument/semanticTokens/range" and "result" in message:

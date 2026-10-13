@@ -23,6 +23,7 @@ import {
   lspHover,
   lspInlayHints,
   lspSemanticTokens,
+  lspSignatureHelp,
   prefetchWhenOffline,
 } from './lsp'
 import { callMarks, pickCall, rangesOf, setCalls } from './call-marks'
@@ -287,6 +288,7 @@ function mount(root: HTMLElement) {
         lspInlayHints(lsp),
         lspSemanticTokens(lsp),
         lspDefinition(lsp),
+        lspSignatureHelp(lsp),
         errorLens,
         callMarks({
           pick: (id) => pane.pick(id),
