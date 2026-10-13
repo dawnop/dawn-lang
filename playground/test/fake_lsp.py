@@ -185,6 +185,23 @@ def main():
                     "command": {"title": "x", "command": "rm"},
                 },
             })
+        elif method == "textDocument/references":
+            # echoes the flag it was given in the second location, one location
+            # in another document, and a field the gateway drops
+            flag = message.get("params", {}).get("context", {}).get("includeDeclaration")
+            spot = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": [
+                    {"uri": DOCUMENT_URI, "range": spot, "private": "/tmp/should-not-cross"},
+                    {"uri": "file:///etc/passwd", "range": spot},
+                    {"uri": DOCUMENT_URI, "range": {
+                        "start": {"line": 0, "character": 2 if flag else 3},
+                        "end": {"line": 0, "character": 4},
+                    }},
+                ],
+            })
         elif method == "textDocument/signatureHelp":
             # one signature with a doc, and fields the gateway must not pass on
             send({

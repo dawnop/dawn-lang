@@ -496,8 +496,10 @@ pub(pkg) type ModRefs = { path: String, text: String, refs: List[Ref], read: Map
 ### R2.4 与 R1 相同的部分
 
 `includeDeclaration`：照 R1，声明处只在为真时给出，缺 `context` 按假；声明在别的模块时，「声明处」由那个模块自己的条目判定（它在那里 `def_path` 为空）。
-Playground：网关的白名单里没有 references 与 documentHighlight（`playground/lsp_gateway.py`），与 R1 同样不转发；Playground 的文档是 `untitled:` 缓冲区，
-在服务端本来就是 standalone，R2 也不会改变它的回答。
+Playground：**旧结论（网关不转发 references，与 R1 同样）已于 Playground 客户端分刀的刀 4 改写**（PR #729，见 [play-lsp-client-design.md](play-lsp-client-design.md) §6）：
+网关现在放行 `textDocument/references`，请求重建为本缓冲区的一个位置加 `includeDeclaration`，回包只留 `untitled:` 缓冲区自己的位置（照 definition）、至多 1000 条。
+documentHighlight 仍不转发。Playground 的文档是 `untitled:` 缓冲区，在服务端本来就是 standalone，所以 R2 的工作区引用程序在这里不起作用：
+回答与 R1 的单文件 references 相同，网关的过滤只是第二道保险，不是靠它挡住别的文件。
 
 ### R2.5 行为变化与 Emit-Change
 
