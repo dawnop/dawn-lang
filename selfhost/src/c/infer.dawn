@@ -583,6 +583,20 @@ fn seed(ms: List[CModule], pin: Set[(String, String)]) -> Map[(String, String), 
           }
           pi = pi + 1
         }
+        # The row continues past the parameters in the order call sites pass
+        # them (lower: `vs ++ ds ++ es`). A dictionary is not a ledger entry,
+        # so its slot is owned; an evidence parameter is a reference like any
+        # other and starts borrowed, so a `!Mem` kernel does not dup and drop
+        # its handler evidence around every `mem.at`.
+        for _d in f.dicts { row = row ++ [COwned] }
+        for e in f.evs {
+          if eligible(e) {
+            row = row ++ [CBorrowed]
+            any = true
+          } else {
+            row = row ++ [COwned]
+          }
+        }
         if any { table = map.insert(table, key, row) }
       }
     }
@@ -669,6 +683,21 @@ pub fn infer_modes_forced(
               }
               i = i + 1
             }
+            for _d in f.dicts {
+              row2 = row2 ++ [row[i]]
+              i = i + 1
+            }
+            for p in f.evs {
+              let keep = row[i]
+              if not mode_owned(keep) && set.has(dm.owned, p.sym) &&
+                not set.has(fixed, (k_owner, k_name, i)) {
+                row2 = row2 ++ [COwned]
+                diff = true
+              } else {
+                row2 = row2 ++ [keep]
+              }
+              i = i + 1
+            }
             if diff {
               table = map.insert(table, key, row2)
               changed = true
@@ -714,7 +743,14 @@ pub fn stamp_modes(m: CModule, modes: Map[(String, String), List[CMode]]) -> CMo
               params = params ++ [CParam { ..p, mode: mo }]
               i = i + 1
             }
-            fns = fns ++ [CFun { ..f, params: params }]
+            var evs: List[CParam] = []
+            var j = len(f.params) + len(f.dicts)
+            for e in f.evs {
+              let mo = if j < len(row) { row[j] } else { COwned }
+              evs = evs ++ [CParam { ..e, mode: mo }]
+              j = j + 1
+            }
+            fns = fns ++ [CFun { ..f, params: params, evs: evs }]
           }
         }
     }

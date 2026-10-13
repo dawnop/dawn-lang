@@ -960,10 +960,10 @@ fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], L
 ## is keyed by the name a call site can see (`core.callee_mode_key`), and a
 ## dynamic target, a dictionary method or a default symbol stays all-owned
 ## (see core.CMode). A
-## table row covers the callee's declared parameters; argument positions
-## past it (forwarded dictionaries, evidence atoms) are owned -- a
-## dictionary is not counted anyway and evidence is an ordinary counted
-## record the callee releases.
+## table row covers the callee's declared parameters, then its dictionaries
+## (always owned slots, and not counted anyway), then its evidence
+## parameters, which are ordinary counted records and borrow like any other
+## reference (`infer.seed`). Positions past the row are owned.
 ##
 ## Takes the table rather than the pass state because it has two readers
 ## with one question: the rewrite classifies call arguments with it, and
@@ -2566,6 +2566,14 @@ fn mode_mismatch(m: CModule, modes: Map[(String, String), List[CMode]]) -> List[
                 " in the table"]
           }
           i = i + 1
+        }
+        var j = len(f.params) + len(f.dicts)
+        for p in f.evs {
+          let table_owned = if j < len(row) { mode_owned(row[j]) } else { true }
+          if table_owned != mode_owned(p.mode) {
+            errs = errs ++ [f.name ++ ": evidence " ++ to_string(j) ++ " disagrees with the table"]
+          }
+          j = j + 1
         }
       }
     }

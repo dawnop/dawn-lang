@@ -56,7 +56,7 @@ unmutated compiler.
 
 ## The matrix
 
-Seven sites (roster.txt), three shapes each, plus per-program clean controls.
+Ten sites (roster.txt), three shapes each, plus per-program clean controls.
 Since the inference landed (knife 2), a flip means TOGGLE: the single-sided
 shapes toggle one half of what the inference decided, and `both` re-runs
 the whole fixpoint with the position forced the other way — a coherent
@@ -74,6 +74,9 @@ What the harness pins **today**:
 | std/list:reverse:1:0| assertion ✓ | assertion ✓ | known-red: refusal|
 | std/list:take:2:0   | assertion ✓ | assertion ✓ | known-red: refusal|
 | std/pvec:push:2:0   | assertion ✓ | assertion ✓ | known-red: refusal|
+| ev_scan:scan:4:3    | assertion ✓ | assertion ✓ | green ✓           |
+| ev_scan:bump:2:1    | assertion ✓ | assertion ✓ | green ✓           |
+| ev_scan:nested:2:1  | assertion ✓ | assertion ✓ | known-red: refusal|
 
 "assertion" is the compile-time panic `rc: mode contract disagrees in ...`,
 which names the function, the position and both halves' answers. A mutant
@@ -83,10 +86,18 @@ exit. A mutant that sails through everything fails the run by name.
 
 The coherent flip (both) must be green end to end — same bytes, clean
 sanitizers — except where a machine refuses it for a reason worth pinning,
-and those reasons are the ratchet entries in known-red.txt: the four refusals are
+and those reasons are the ratchet entries in known-red.txt: the five refusals are
 `rc.rw`'s borrowed-consume panic holding the zero-new-dup contract against
 a forced borrow of a parameter whose body consumes it (the inference had
 said owned; the toggle demands the opposite; the refusal is the answer).
+
+The three `ev_scan` sites are effect evidence. The table row of a function is
+its parameters, then its dictionaries, then its evidence parameters, in the
+order call sites pass them, so a flip index past the parameters addresses the
+evidence (`cdriver.flip_callee` knows that range). `scan` and `bump` borrow
+their evidence; `nested` is the control that evidence which is captured by a
+closure or handed to a function value is owned, and the toggle that forces a
+borrow onto it is refused by the same borrowed-consume panic.
 
 ## What stands behind the assertion
 
