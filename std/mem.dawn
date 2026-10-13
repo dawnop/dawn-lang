@@ -34,7 +34,8 @@
 #
 # `F64Buf` joins this module in K5 with an `f64_` prefix on its functions: Dawn
 # has no overloading and `I64Buf` took the short names first, the way `Bytes`
-# did over `Buf` in std/bytes.
+# did over `Buf` in std/bytes. The length is the exception: both buffers get an
+# `impl Len`, so there is no `f64_len`.
 
 ## The one operation of `Mem`: a fresh buffer. The handler in [`with_mem`]
 ## answers it; nothing else may install one.
@@ -54,8 +55,12 @@ pub fn with_mem[T, !e](body: fn() -> T !Mem !e) -> T !e = {
 ## A buffer of `n` zeros. Panics when `n` is negative or above the limit.
 pub fn new(n: Int) -> I64Buf !Mem = mem_alloc(n)
 
-## The number of elements. It never changes after `new`.
-pub fn len(b: I64Buf) -> Int = i64buf_len(b)
+# The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
+# I64Buf impl, the number of elements. It never changes after `new`, so it stays
+# pure while `at` and `set` carry `!Mem`.
+impl Len[I64Buf] {
+  fn len(b: I64Buf) -> Int = i64buf_len(b)
+}
 
 ## The element at `i`. Panics when `i` is outside `[0, len(b))`.
 pub fn at(b: I64Buf, i: Int) -> Int !Mem = i64buf_at(b, i)
