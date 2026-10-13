@@ -327,11 +327,15 @@ pub fn handle_of[D](t: Tensor[D]) -> Int = {
   h
 }
 
-## The number of elements `t` was allocated with.
-pub fn size[D](t: Tensor[D]) -> Int = {
-  let p: (Int, Int) = t
-  let (_h, n) = p
-  n
+# The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
+# Tensor impl, the number of elements `t` was allocated with. An impl and not a
+# module-level `len`, which would shadow the prelude's for every List in this file.
+impl[D] Len[Tensor[D]] {
+  fn len(t: Tensor[D]) -> Int = {
+    let p: (Int, Int) = t
+    let (_h, n) = p
+    n
+  }
 }
 
 # ---- launch arguments ----
@@ -390,7 +394,7 @@ pub opaque type Launch[A] = (LaunchArg, Int)
 ## `t` as an argument of a launch: the handle, and the element count a
 ## typed launch holds the entry's cells to.
 pub fn buffer_arg[A](t: Tensor[A]) -> Launch[A] = {
-  let l: Launch[A] = (Buffer(handle_of(t)), size(t))
+  let l: Launch[A] = (Buffer(handle_of(t)), len(t))
   l
 }
 
@@ -463,9 +467,9 @@ pub fn alloc[D](d: Dtype[D], len: Int) -> Result[Tensor[D], ForeignError] !Gpu =
 ## `T` with both a format and a pattern can be moved; `Bool`, `I4` and
 ## `F4E2M1FN` have a format and no buffer, so moving one is a type error.
 ## `Err(kind: "gpu.length_mismatch")` when `data` does not have exactly
-## `size(t)` elements, before any handler is asked.
+## `len(t)` elements, before any handler is asked.
 pub fn copy_from_host[T: HasDtype + DeviceBits](t: Tensor[T], data: List[T]) -> Result[Unit, ForeignError] !Gpu = {
-  let n = size(t)
+  let n = len(t)
   let d: Dtype[T] = dtype_of()
   if len(data) != n {
     Err(refuse("gpu.length_mismatch",
@@ -478,7 +482,7 @@ pub fn copy_from_host[T: HasDtype + DeviceBits](t: Tensor[T], data: List[T]) -> 
   }
 }
 
-## The contents of `t`, `size(t)` elements, decoded from the tensor's format
+## The contents of `t`, `len(t)` elements, decoded from the tensor's format
 ## ([`DeviceBits`]). Exact for every value the format holds, an i64 past 2^53
 ## included.
 pub fn copy_to_host[T: HasDtype + DeviceBits](t: Tensor[T]) -> Result[List[T], ForeignError] !Gpu = {
@@ -2095,7 +2099,7 @@ fn use_after_free() -> (Int, Int, String, String) !Gpu = {
       let after = kind_of(copy_to_host(ta))
       let twice = kind_of(free(ta))
       let still = kind_of(copy_to_host(tb))
-      (handle_of(ta), size(tb), freed ++ "/" ++ after ++ "/" ++ twice, still)
+      (handle_of(ta), len(tb), freed ++ "/" ++ after ++ "/" ++ twice, still)
     }
     _ -> (0, 0, "alloc failed", "alloc failed")
   }
@@ -2130,7 +2134,7 @@ fn syms_globals() -> Map[String, List[(String, String, List[Float])]] = {
 
 fn look(kernel: String, name: String) -> String !Gpu =
   match module_global(F64, kernel, name) {
-    Ok(t) -> "ok:${size(t)}"
+    Ok(t) -> "ok:${len(t)}"
     Err(e) -> e.kind
   }
 
@@ -2193,7 +2197,7 @@ test "the fake device's reference is handed the tables the caller installed it w
 }
 
 fn global_as_bf16() -> String !Gpu = match module_global(BF16, "k", "shown") {
-  Ok(t) -> "ok:${size(t)}"
+  Ok(t) -> "ok:${len(t)}"
   Err(e) -> e.kind
 }
 

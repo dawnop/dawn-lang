@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 32eb5affb454ef42 -->
+<!-- doc-check: translation-of docs/spec.md @ 1d7c39cc7f9ca58d -->
 
 # Dawn Language Specification
 
@@ -4978,7 +4978,7 @@ program uses the typed functions over them: `alloc`, `copy_from_host`, `copy_to_
 
 - Every operation answers `Result[_, ForeignError]`. Above the operations std mints three
   refusals of its own, byte-identical under every handler: `gpu.bad_length` (`alloc`'s length
-  below 1), `gpu.length_mismatch` (`copy_from_host`'s data length is not `size(t)`) and
+  below 1), `gpu.length_mismatch` (`copy_from_host`'s data length is not `len(t)`) and
   `gpu.bad_grid` (an axis of the grid below 1). All three are minted before any handler is
   asked. Every other answer is the raw outcome of the device the handler stands for: the
   seam sits below the error surface.

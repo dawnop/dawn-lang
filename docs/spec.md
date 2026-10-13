@@ -3910,7 +3910,7 @@ panic 在两个目标上都退出 1；`scripts/wasm-dom-contract/run.sh` 把 rea
 
 - 每个操作答 `Result[_, ForeignError]`。std 在操作之上自己发三种拒绝，在每个 handler 下字节相同：
   `gpu.bad_length`（`alloc` 的长度小于 1）、`gpu.length_mismatch`（`copy_from_host` 的数据长度不等于
-  `size(t)`）、`gpu.bad_grid`（grid 某一轴小于 1）。这三种都在问 handler 之前发出。其余答复是
+  `len(t)`）、`gpu.bad_grid`（grid 某一轴小于 1）。这三种都在问 handler 之前发出。其余答复是
   handler 所代表的设备的原样结果：接缝在错误面之下。
 - **`launch` 以字符串点名 kernel**：`launch(kernel, grid, args, gy: Int = 1, gz: Int = 1)`，
   `grid`、`gy`、`gz` 是 grid 的三根轴，计 tile block 的个数；`args` 是 `LaunchArg` 的列表，按入口参数的顺序：`erase(buffer_arg(t))` 是缓冲，`erase(scalar_arg(v))` 是按值传的标量（`i32`、`i64`、`f32`、`f64`）。
