@@ -59,7 +59,7 @@ use check/types.{
   ev_label_name, ev_assoc_name, ev_var_name,
   EV_PACK_ID, ev_pack_ty, ty_loc,
   AdtI, CtorI, FieldI, EffectI, TraitI, ImplI, Sym, Sig,
-  ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
+  ty_show, ctor_render, fn_return_show, eff_ctl_labels, buffer_reach, ty_has_any_var, is_mem_effect, eff_names_mem, adt_of, trait_of, sig_render, subst, subst_eff, eff_show,
   assoc_effect_advice,
   no_eparam_names, fn_max_params,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -4391,6 +4391,14 @@ pub(pkg) fn check_fn_value(
   let inst = reduce_instantiated(cx, subst(declared, m, em), m)
   if nbounds > 0 {
     return eta_bounded_fn_value(cx, name, f, m, em, inst, lo, hi)
+  }
+  # R1 also covers `with_mem` named as a value: a call through it later is
+  # a dynamic call whose callee the rule can no longer see
+  if f.name == "with_mem" && f.owner == Some("std/mem") {
+    match inst {
+      TyFn(_, vret, _) -> { cx = refuse_buffer_result(cx, vret, lo, hi) }
+      _ -> ()
+    }
   }
   (cx, inst, node(inst))
 }
@@ -9695,10 +9703,20 @@ test "dbg renders through Show, and says so when there is none" {
 ## buffer that outlived it could be written by code that is not under `Mem`.
 ## The walk is `buffer_reach`, which goes through tuples, type arguments and
 ## the fields of user types, and counts a function type whose row carries `Mem`
-## because such a value still holds a buffer.
+## because such a value still holds a buffer. A type variable in the result is
+## refused too: the walk cannot see through it, and a caller of a generic
+## wrapper could pick a buffer for it (that call is the wrapper's, not
+## `with_mem`'s, so the rule would never see the instantiation).
 fn refuse_buffer_result(cx: Cx, ret: Ty, lo: Int, hi: Int) -> Cx =
   match buffer_reach(cx.adts, cx.effect_infos, ret) {
-    None -> cx
+    None ->
+      # A type variable is a type some caller picks later, and that caller may
+      # pick a buffer; a generic wrapper around `with_mem` would let it out.
+      if ty_has_any_var(ret) {
+        cerr_h(cx, "the result of `with_mem` mentions a type variable, which a caller could instantiate with a buffer, in the type `" ++
+            ty_show(cx.adts, ret) ++ "`", lo, hi,
+          "a generic wrapper around `with_mem` would let a buffer out of its scope; give the result a concrete type")
+      } else { cx }
     Some(path) ->
       cerr_h(cx, "the result of `with_mem` cannot mention a buffer: " ++ path ++
           ", in the type `" ++ ty_show(cx.adts, ret) ++ "`", lo, hi,
