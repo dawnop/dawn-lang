@@ -127,3 +127,73 @@ if [ "$got" != "7" ]; then
   exit 1
 fi
 echo "PASS  Core keeps reads and writes in order"
+
+# ---- effect evidence is passed by borrow ---------------------------------------
+# Every `!Mem` function takes the handler's evidence as a hidden parameter. If
+# the native backend passes it owned, each `mem.at` costs a dup, an own-frame
+# and a drop, all out-of-line runtime calls: 6.3x a version without evidence on
+# a bcrypt-shaped kernel (docs/mem-buffer-design.md 10, 2). The output stays
+# right, so this reads the C. A borrowed parameter is spelled `v<N>` in a
+# definition's header and an owned one `p<N>`; the evidence is the last
+# parameter, and it must be borrowed, never named by a dup, a drop or an
+# own-slot store. The buffer accessors and the Feistel helper, which have no
+# reason to count anything, must have no counting at all. (The tail-recursive
+# drivers do hold their buffer owned, for the self-jump's sake, and that is
+# not what is pinned here.)
+borrow_check() {
+  python3 - "$1" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+want = [("dawn_std_2mem__at", True), ("dawn_std_2mem__set", True),
+        ("dawn_kernel__feistel", True), ("dawn_kernel__rounds", False),
+        ("dawn_kernel__schedule", False), ("dawn_kernel__init", False)]
+bad = 0
+for name, bare in want:
+    m = re.search(r"^[^\n]*\b" + name + r"\(([^\n)]*)\) \{\n(.*?)^\}", text, re.S | re.M)
+    if not m:
+        print(f"FAIL: no definition of {name} in the emitted C", file=sys.stderr)
+        bad = 1
+        continue
+    last = m.group(1).split(",")[-1].split()[-1]
+    body = m.group(2)
+    if not re.fullmatch(r"v\d+", last):
+        print(f"FAIL: {name} takes its evidence as `{last}`: owned, not borrowed", file=sys.stderr)
+        bad = 1
+        continue
+    if bare:
+        hits = re.findall(r"dawn_dup|dawn_drop|DAWN_OWN_FRAME|dawn_own\[", body)
+    else:
+        hits = re.findall(r"dawn_(?:dup|drop|take)\([(\w*&\s]*\b" + last + r"\b|dawn_own\[\d+\] = [(\w*&\s]*\b" + last + r"\s*;", body)
+    if hits:
+        print(f"FAIL: {name} counts its evidence `{last}` ({len(hits)} operations)", file=sys.stderr)
+        bad = 1
+sys.exit(bad)
+PY
+}
+
+java -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel.c"
+borrow_check "$work/kernel.c"
+"$cc_bin" "${cflags[@]}" -O2 -o "$work/kernel_native" "$work/kernel.c" "$root/runtime/c/dawn_rt.c" -lm
+want_k="$(java -Xss512m -jar "$jar" run "$here/kernel.dawn")"
+got_k="$("$work/kernel_native")"
+if [ "$got_k" != "$want_k" ]; then
+  echo "FAIL: the native kernel printed '$got_k', the JVM '$want_k'" >&2
+  exit 1
+fi
+echo "PASS  Mem evidence is borrowed in the generated C"
+
+# The negative control: force the kernel's own evidence parameter owned (the
+# coherent flip of rc-mode-contract, `both`) and the same check has to go red,
+# or a regex that stopped matching would pass this section for ever.
+DAWN_RC_MODE_FLIPS="kernel:feistel:3:2=both" \
+  java -Xss512m -jar "$jar" __emitc "$here/kernel.dawn" -o "$work/kernel_owned.c"
+if borrow_check "$work/kernel_owned.c" 2> "$work/borrow_neg.err"; then
+  echo "FAIL: the evidence-borrow check passed on C that passes the evidence owned" >&2
+  exit 1
+fi
+if ! grep -q 'dawn_kernel__feistel' "$work/borrow_neg.err"; then
+  cat "$work/borrow_neg.err" >&2
+  echo "FAIL: the negative control went red, but not on the flipped function" >&2
+  exit 1
+fi
+echo "PASS  the evidence-borrow check goes red on owned evidence"

@@ -1,0 +1,55 @@
+# A bcrypt-shaped kernel for `run.sh`'s evidence-borrow check: every helper is
+# `!Mem`, so each takes the Mem handler's evidence as a hidden parameter, and
+# the hot loop reads and writes one buffer a few hundred thousand times. The
+# helpers only forward that evidence, so the native backend must pass it by
+# borrow (c/infer.seed): a dup and a drop of it around each `mem.at` is the 6x
+# slowdown docs/mem-buffer-design.md 10 (2) records. Same shape as the Feistel
+# rounds of Blowfish, 16 rounds and four S-box reads per round.
+use std/mem
+use std/mem.{Mem}
+const S0: Int = 18
+const S1: Int = 274
+const S2: Int = 530
+const S3: Int = 786
+
+fn feistel(s: I64Buf, x: Int) -> Int !Mem = {
+  let a = mem.at(s, S0 + ((x >>> 24) & 0xFF))
+  let b = mem.at(s, S1 + ((x >>> 16) & 0xFF))
+  let c = mem.at(s, S2 + ((x >>> 8) & 0xFF))
+  let d = mem.at(s, S3 + (x & 0xFF))
+  (((a + b) ^ c) + d) & 0xFFFFFFFF
+}
+
+fn rounds(s: I64Buf, l: Int, r: Int, i: Int) -> Int !Mem =
+  if i == 16 {
+    ((r ^ mem.at(s, 17)) << 32) | (l ^ mem.at(s, 16))
+  } else {
+    let l2 = l ^ mem.at(s, i)
+    let r2 = r ^ feistel(s, l2)
+    rounds(s, r2, l2, i + 1)
+  }
+
+fn schedule(s: I64Buf, l: Int, r: Int, k: Int, n: Int) -> Int !Mem =
+  if k == n { l ^ r } else {
+    let p = rounds(s, l, r, 0)
+    let nl = p >>> 32
+    let nr = p & 0xFFFFFFFF
+    mem.set(s, k % 1042, nl)
+    mem.set(s, (k + 1) % 1042, nr)
+    schedule(s, nl, nr, k + 1, n)
+  }
+
+fn init(s: I64Buf, i: Int) -> Unit !Mem =
+  if i == 1042 { () } else {
+    mem.set(s, i, (i * 2654435761 + 12345) & 0xFFFFFFFF)
+    init(s, i + 1)
+  }
+
+pub fn main() -> Unit !io = {
+  let r = mem.with_mem(() => {
+    let s = mem.new(1042)
+    init(s, 0)
+    schedule(s, 1, 2, 0, 20000)
+  })
+  println("${r}")
+}

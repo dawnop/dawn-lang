@@ -1,0 +1,38 @@
+# Effect evidence is a reference parameter like any other, and the inference
+# borrows it (c/infer.seed): `scan` and `bump` only forward it to operations
+# and to each other, so neither dups, owns nor releases it -- the row below
+# is the one `std/mem` kernels ride on (docs/mem-buffer-design.md 10, 2).
+# The rest are the control that the borrow stops where it must. `twice` calls
+# a function value, which takes its evidence all-owned; `delay`, `stash` and
+# the lambdas capture the evidence into a closure that outlives the call;
+# `nested` hands its evidence to `twice`, so it is owned by demand, not
+# by shape. All of those stay owned, and `main` installs the handler, so the
+# value they borrow from is built, counted and released by a caller.
+effect Tick {
+  fn tick(n: Int) -> Int
+}
+
+type Boxed = { run: fn() -> Int !Tick }
+
+fn bump(i: Int) -> Int !Tick = tick(i) + 1
+
+fn scan(n: Int, i: Int, acc: Int) -> Int !Tick =
+  if i == n { acc } else { scan(n, i + 1, acc + bump(i)) }
+
+fn delay(n: Int) -> fn() -> Int !Tick = () => tick(n)
+
+fn stash(n: Int) -> Boxed = Boxed { run: () => bump(n) }
+
+fn twice(f: fn() -> Int !Tick) -> Int !Tick = f() + f()
+
+fn nested(n: Int) -> Int !Tick = {
+  let g = delay(n)
+  twice(g) + twice(() => bump(n))
+}
+
+pub fn main() -> Unit !io = {
+  with handle Tick { tick(n) => n * 2 }
+  let s = scan(100, 0, 0)
+  let b = stash(7)
+  println("${s + b.run() + nested(5)}")
+}

@@ -284,6 +284,7 @@ fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
   var fns: List[CFun] = []
   for f in m.fns {
     var params = f.params
+    var evs = f.evs
     for fl in flips {
       if fl.callee_side && fl.owner == f.owner && fl.name == f.name {
         var out: List[CParam] = []
@@ -297,9 +298,22 @@ fn flip_callee(m: CModule, flips: List[ModeFlip]) -> CModule = {
           i = i + 1
         }
         params = out
+        # evidence positions follow the dictionaries in the table row, the
+        # order call sites pass them in
+        var eout: List[CParam] = []
+        var j = len(f.params) + len(f.dicts)
+        for e in evs {
+          if j == fl.idx {
+            eout = eout ++ [CParam { ..e, mode: toggled(e.mode) }]
+          } else {
+            eout = eout ++ [e]
+          }
+          j = j + 1
+        }
+        evs = eout
       }
     }
-    fns = fns ++ [CFun { ..f, params: params }]
+    fns = fns ++ [CFun { ..f, params: params, evs: evs }]
   }
   CModule { ..m, fns: fns }
 }
