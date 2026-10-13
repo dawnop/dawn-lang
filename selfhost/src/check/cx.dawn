@@ -244,6 +244,11 @@ pub(pkg) type Cx = {
   module_fn_sigs: Map[(String, String), Sig],
   # frame-triage: module scope: imports are visible in every body
   imported_names: Map[String, String],
+  # module path → exports, for each module imported selectively (`use m.{...}`).
+  # Only the undefined-call hint reads it (#528): `imported_names` knows which
+  # names were taken, not what else the module offers.
+  # frame-triage: module scope: imports are visible in every body
+  selective_exports: Map[String, ModExports],
   # local name → declared name, for each selective-import entry written
   # `Name as Local` (spec §10.2). A function's signature already carries its
   # declared name; this is what the constant lookup after checking
@@ -514,6 +519,7 @@ pub(pkg) fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx 
     module_aliases: map.empty(),
     module_fn_sigs: map.empty(),
     imported_names: map.empty(),
+    selective_exports: map.empty(),
     import_renames: map.empty(),
     effects: map.empty(),
     effect_infos: map.empty(),

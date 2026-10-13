@@ -6792,6 +6792,25 @@ fn alias_export_hint(cx: Cx, name: String, dot: Bool) -> Option[String] = {
       join(quals, " or ") ++ ", or add " ++ join(uses, " or ") ++ " " ++ how)
 }
 
+## The selective-import counterpart of `alias_export_hint` (#528): `use m.{a}`
+## leaves `sub` out of the list while `m` exports it, so the fix is one more
+## entry in that list, not a std module. Asked after the alias hint; modules in
+## import order (the insertion order of `selective_exports`).
+fn selective_export_hint(cx: Cx, name: String) -> Option[String] = {
+  var adds: List[String] = []
+  for path in map.keys(cx.selective_exports) {
+    match map.get(cx.selective_exports, path) {
+      Some(exp) -> if map.has(exp.fns, name) {
+        adds = adds ++ ["`" ++ name ++ "` to the `use " ++ exp.mod_path ++ ".{...}` list"]
+      }
+      None -> ()
+    }
+  }
+  if len(adds) == 0 { return None }
+  Some("`" ++ name ++ "` is not imported, but a module you import selectively exports it: add " ++
+      join(adds, " or "))
+}
+
 ## A variable read: a local (with capture bookkeeping), else a top-level fn or
 ## builtin used as a value, else undefined.
 ## `f[T]` where `f` is a generic function or builtin (not a local) and `T` is a
@@ -9771,7 +9790,10 @@ fn check_call(
       let pool = fn_pool(cxa)
       let hint = match alias_export_hint(cxa, callee, pre0 != None) {
         Some(h) -> Some(h)
-        None -> moved_or_suggest(cxa, callee, pool)
+        None -> match selective_export_hint(cxa, callee) {
+          Some(h) -> Some(h)
+          None -> moved_or_suggest(cxa, callee, pool)
+        }
       }
       return (cerr_o(cxa, "undefined function: ${callee}", clo, chi, hint),
         TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
