@@ -708,7 +708,7 @@ pub fn main() -> Unit !io = {
   println(to_string(map.keys(m)))
 
   let s = set.from([3, 1, 2, 1, 3])
-  println(to_string(set.len(s)))
+  println(to_string(len(s)))
   println(to_string(set.has(s, 2)))
 }
 ```
@@ -746,7 +746,7 @@ fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
 pub fn main() -> Unit !io = {
   println(to_string(is_digit('7')))
   println(to_string(char.code('a')))
-  println(to_string(str.len("héllo 🙂")))
+  println(to_string(len("héllo 🙂")))
   println(str.slice("世界你好", 0, 2))
   println(from_code_points(['h', 'i']))
 }
@@ -760,7 +760,7 @@ hi
 ```
 
 `code_points`/`from_code_points` go back and forth between a string and a `List[Char]`
-(supplementary-plane emoji included), `str.len` counts code points, `str.slice` slices
+(supplementary-plane emoji included), `len` counts code points, `str.slice` slices
 by code-point index, `str.at` takes one `Char`, and `str.from_char` turns one `Char`
 into a string. `"${c}"` is that same one-character string: `std/char` writes an
 `impl Display[Char]`, and `Display` is the top-level rendering. `Show`, the nested one,

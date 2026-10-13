@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 55b08fa4be884d22 -->
+<!-- doc-check: translation-of docs/tutorial.md @ a4c4eafb1d5d0346 -->
 
 # Dawn 教程
 
@@ -665,7 +665,7 @@ pub fn main() -> Unit !io = {
   println(to_string(map.keys(m)))
 
   let s = set.from([3, 1, 2, 1, 3])
-  println(to_string(set.len(s)))
+  println(to_string(len(s)))
   println(to_string(set.has(s, 2)))
 }
 ```
@@ -700,7 +700,7 @@ fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
 pub fn main() -> Unit !io = {
   println(to_string(is_digit('7')))
   println(to_string(char.code('a')))
-  println(to_string(str.len("héllo 🙂")))
+  println(to_string(len("héllo 🙂")))
   println(str.slice("世界你好", 0, 2))
   println(from_code_points(['h', 'i']))
 }
@@ -714,7 +714,7 @@ hi
 ```
 
 `code_points`/`from_code_points` 在字符串与 `List[Char]` 间往返（含增补平面的
-emoji），`str.len` 数码点，`str.slice` 按码点下标切片，`str.at` 取一个 `Char`，
+emoji），`len` 数码点，`str.slice` 按码点下标切片，`str.at` 取一个 `Char`，
 `str.from_char` 把一个 `Char` 变成字符串。`"${c}"` 就是同一个单字符字符串：`std/char`
 写了 `impl Display[Char]`，而 `Display` 是顶层渲染那一层。嵌套那一层的 `Show` 仍是目标
 类型的那一份，所以列表里的 `Char` 仍打印成码点数字。

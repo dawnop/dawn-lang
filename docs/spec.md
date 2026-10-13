@@ -210,7 +210,7 @@ impl 纯时，编译器在编译期求出字面量的值（与 `comptime` 同一
 单引号内是单个码点：转义与字符串相同（`\n \t \r \\ \u{...}`）另加 `\'`；
 空字面量、含多个码点、或 `\u{...}` 不是标量值 → 词法错误。
 按码点处理字符串的函数见 §11（`code_points -> List[Char]`/`from_code_points`/
-`str.len`/`str.slice`/`str.at`）。
+`len`/`str.slice`/`str.at`）。
 **注意**：运行期存储是 `java.lang.String`（UTF-16 码元下标），故「按码点下标随机访问」需要
 O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。**逐字符遍历请用
 §11 的游标（`std/cursor`）**，它每步恒定开销；下标版留给单次调用。
@@ -964,7 +964,7 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   - **`Ord[String]` 是码点序**：逐码点比较，首个不同的码点定大小，前缀相同时短者小。
     UTF-8 的字节序与码点序等价（编码的设计属性）；哈希的货币仍是 UTF-16 码元
     （见下文哈希叶子），**有意不跟走**——哈希只须与 `==` 一致，不必与序同货币。
-    语言其余各处（`str.len`/`slice`/`chars`/`code_points`/游标）本就以码点为货币，
+    语言其余各处（`len`/`slice`/`chars`/`code_points`/游标）本就以码点为货币，
     序是最后一处对齐的（2026-07-31，此前是 UTF-16 码元序，只在增补平面字符上可观测）。
 
   `derive Ord` 生成字段字典序比较
@@ -2945,7 +2945,7 @@ fn slurp(p: String) -> String !io = {
 `utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode_utf8_lossy(b) -> String` /
 `decode_latin1(b) -> String`（解码，见 §11）、
 `decode_utf8_checked(b) -> Result[String, Utf8Error]`（严格解码，见 §11）、
-`bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
+`len(b)`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from = 0) -> Option[Int]`。
 `index_of` 把负的 `from` 钳到 0；非空 `needle` 从该字节下标起找首次完整命中。
 空 `needle` 在合法位置 `[0, len(b)]` 命中（所以 `from == len(b)` 返回 `Some(len(b))`），
@@ -3393,7 +3393,7 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 普通的 Dawn 源码而非某个后端的宿主方法，不是因为它是一层 API。）
 `use std/x` 命中编译器 jar 内的资源而非磁盘（磁盘上 `src/std/` 路径**保留**，落文件报错）；
 之后与普通模块引入完全一致——限定访问 `map.insert(m, k, v)`、选择性引入
-`use std/list.{find}`（§10.2/§10.3）。同名短名跨模块共存（`str.len` / `bytes.len`），
+`use std/list.{find}`（§10.2/§10.3）。同名短名跨模块共存（`str.at` / `bytes.at`），
 由限定或选择性引入消歧。
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
@@ -3475,7 +3475,7 @@ EBNF（`f("1.5d")` 答 `Some(1.5)`），`parse_int` 取作函数值则编译期 
 而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，表在 `selfhost/src/embed/unicode_class.dawn`。
 
 **字符即码点。** `code_points(s) -> List[Char]` 拆成字符（增补平面的代理对合并为一个码点）、
-`from_code_points(cs: List[Char])` 由字符组装；`str.len` 是码点数，`str.at` 回一个
+`from_code_points(cs: List[Char])` 由字符组装；`len(s)` 是码点数，`str.at` 回一个
 **`Char`**，回 `List[String]` 的是 `str.chars`。字符串的下标一律是码点下标，不是
 UTF-16 码元。`char_is_letter`/`_digit`/`_alnum`/`_upper`/`_lower`/`_space` 收 `Char`，
 `std/char` 的 `is_*` 是它们的公开拼法。
@@ -3514,8 +3514,8 @@ RFC 4648 section 4 的标准字母表，`Url*` 用 section 5 的 url/文件名�
 字符串。
 
 **命名族。** 长度只有 `len` 一个名字，判空只有 `is_empty` 一个名字——`str`/`list`/`map`/
-`set`/`bytes` 五处同拼写。**唯一具名例外是 `bytes.size(b: Buf)`**：`bytes.len` 已经是成品
-`Bytes` 的长度，而语言无重载，故写入游标只能另取一名（判据与例外见 CONTRIBUTING「命名族」）。
+`set`/`bytes` 五处同拼写。**唯一具名例外是 `bytes.buf_at(b: Buf, i)`**：`bytes.at` 已经是成品
+`Bytes` 的取字节，而语言无重载，故写入游标只能另取一名（判据与例外见 CONTRIBUTING「命名族」）。
 返回位置的搜索一律回 `Option`，**不发 `-1`**（`str.index_of`、`list.index_of` 同一货币）。
 
 **排序与极值。** `sort` 族要求元素/键类型具 `Ord`（§3.5），全部**稳定**、平局取第一个。

@@ -191,11 +191,12 @@ test** that cleanup left behind. It is not a historical record: check a new
 `pub` name in `std` or in a package against it.
 
 - **One concept, one name.** Length is `len`, emptiness is `is_empty`, and
-  `str`/`list`/`map`/`set`/`bytes` spell both identically. There are exactly two
-  named exceptions, both on `Buf` and both for the same reason (Dawn has no
-  overloading, and the `Bytes` side got the right name first):
-  `bytes.size(b: Buf)` yields to `bytes.len(b: Bytes)`, and
-  `bytes.buf_at(b: Buf, i)` yields to `bytes.at(b: Bytes, i)`. An exception
+  `str`/`list`/`map`/`set`/`bytes` spell both identically. `len` is the
+  prelude's `Len` trait, so one spelling covers every container, `Buf`
+  included, and a type outside `std` gets it by writing an impl. There is
+  exactly one named exception, on `Buf`, because Dawn has no overloading and the
+  `Bytes` side got the right name first: `bytes.buf_at(b: Buf, i)` yields to
+  `bytes.at(b: Bytes, i)`. An exception
   **says why in the code**, or the next person copies it as a convention. Which
   side yields is part of the test too: **moving the right name out of the way to
   make room for the wrong one is backwards**. `bytes.at` is already correctly
