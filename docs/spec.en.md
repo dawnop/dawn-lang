@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 6fb4152f9c25f7f7 -->
+<!-- doc-check: translation-of docs/spec.md @ 96e126b493d05dca -->
 
 # Dawn Language Specification
 
@@ -264,7 +264,7 @@ point, `char.of(n) -> Option[Char]` builds a character from a code point (`None`
 scalar value). Inside single quotes is a single code point: the escapes are the same as in strings
 (`\n \t \r \\ \u{...}`) plus `\'`; an empty literal, more than one code point, or a `\u{...}` that
 is not a scalar value → lexical error. For the functions that handle strings by code point see §11
-(`code_points -> List[Char]`/`from_code_points`/`str.len`/`str.slice`/`str.at`).
+(`code_points -> List[Char]`/`from_code_points`/`len`/`str.slice`/`str.at`).
 **Note**: the runtime storage is `java.lang.String` (indexed by UTF-16 code units), so "random
 access by code point index" needs an O(n) conversion — for the measurements and the design
 trade-off see the appendix of [`seq6-research.md`](seq6-research.md). **For character-by-character
@@ -1227,7 +1227,7 @@ fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
     byte order is equivalent to code point order (a design property of the encoding); the
     currency of hashing is still UTF-16 code units (see the hash leaves below), and it
     **deliberately does not follow** — a hash only has to agree with `==`, it does not have to
-    share a currency with the order. Everywhere else in the language (`str.len`/`slice`/`chars`/
+    share a currency with the order. Everywhere else in the language (`len`/`slice`/`chars`/
     `code_points`/cursors) the currency was already code points; the order was the last place to
     be aligned (2026-07-31; before that it was UTF-16 code unit order, observable only on
     supplementary plane characters).
@@ -3692,7 +3692,7 @@ fn slurp(p: String) -> String !io = {
 functions (§11, the "bytes" group): `utf8(s) -> Bytes` (the UTF-8 bytes of a string),
 `decode_utf8_lossy(b) -> String` / `decode_latin1(b) -> String` (decoding, see §11),
 `decode_utf8_checked(b) -> Result[String, Utf8Error]` (strict decoding, see §11),
-`bytes.len`, `bytes.at(b, i) -> Int` (0..255, out of range panics),
+`len(b)`, `bytes.at(b, i) -> Int` (0..255, out of range panics),
 `bytes.slice(b, start, end)` (`[start,end)`, subscripts clamped into range),
 `bytes.index_of(b, needle, from = 0) -> Option[Int]`. `index_of` clamps a negative `from`
 to zero; a non-empty `needle` is searched from that byte offset for its first complete
@@ -4287,7 +4287,7 @@ host method, not because it is an API layer.)
 `src/std/` path on disk is **reserved**; putting a file there is an error); after that it
 behaves exactly like an ordinary module import — qualified access `map.insert(m, k, v)`,
 selective import `use std/list.{find}` (§10.2/§10.3). The same short name can coexist
-across modules (`str.len` / `bytes.len`), disambiguated by qualification or by selective
+across modules (`str.at` / `bytes.at`), disambiguated by qualification or by selective
 import.
 
 The **prelude** is the high-traffic core of that, implicitly available without a `use`: the
@@ -4398,7 +4398,7 @@ works the same way; its table is `selfhost/src/embed/unicode_class.dawn`.
 
 **A character is a code point.** `code_points(s) -> List[Char]` splits into characters (a
 supplementary-plane surrogate pair merges into a single code point) and
-`from_code_points(cs: List[Char])` assembles from characters; `str.len` is the code point
+`from_code_points(cs: List[Char])` assembles from characters; `len(s)` is the code point
 count, `str.at` returns a **`Char`**, and the one that returns `List[String]` is
 `str.chars`. Indexing into a string is always by code point index, never by UTF-16 code
 unit. `char_is_letter`/`_digit`/`_alnum`/`_upper`/`_lower`/`_space` take a `Char`, and
@@ -4450,7 +4450,7 @@ latin-1 string.
 
 **Naming families.** Length has exactly one name, `len`, and emptiness exactly one name,
 `is_empty` — the same spelling in all five of `str`/`list`/`map`/`set`/`bytes`. **The one
-named exception is `bytes.size(b: Buf)`**: `bytes.len` is already the length of a finished
+named exception is `bytes.buf_at(b: Buf, i)`**: `bytes.at` is already the byte lookup of a finished
 `Bytes`, and the language has no overloading, so the write cursor had no choice but to take
 another name (the criteria and the exceptions are under "naming families" in CONTRIBUTING).
 A search that returns a position always returns an `Option` and **never emits `-1`**

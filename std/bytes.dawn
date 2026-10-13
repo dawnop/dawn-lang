@@ -110,32 +110,23 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
   BufRep { chunks: chunks, tail: tail }
 }
 
-# Kept for the toolchain only: the seed compiler builds the toolchain with its
-# own std, which has no `Len` impl for this type, so the toolchain still calls
-# this function. It is deleted in the next change, once the seed has moved.
-## How many bytes have been written.
-##
-## `size` and not [`len`]: a named exception to one-concept-one-name, because
-## `len(b: Bytes)` above already holds that name and Dawn has no overloading
-## (CONTRIBUTING §naming; history in `docs/stdlib-naming.md`).
-pub fn size(b: Buf) -> Int = {
-  let r: BufRep = b
-  (array_len(r.chunks) << CHUNK_BITS) + array_len(r.tail)
-}
-
 # The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
 # Buf impl, how many bytes have been written.
 impl Len[Buf] {
-  fn len(b: Buf) -> Int = size(b)
+  fn len(b: Buf) -> Int = {
+    let r: BufRep = b
+    (array_len(r.chunks) << CHUNK_BITS) + array_len(r.tail)
+  }
 }
 
 ## The byte at `i`, as 0..255. Out of range panics, exactly as `at(b: Bytes, i)`
 ## does — it is the same question asked of the half-built buffer.
 ##
-## `buf_at` and not [`at`] for the reason [`size`] is not [`len`], and not `get`
-## because `get` is criterion 2's word and this asserts (spec §4.8). The second
-## named exception to one-concept-one-name (CONTRIBUTING §naming; history and
-## the rejected alternative in `docs/stdlib-naming.md`).
+## `buf_at` and not [`at`] because `at(b: Bytes, i)` already holds that name and
+## Dawn has no overloading, and not `get` because `get` is criterion 2's word
+## and this asserts (spec §4.8). The one named exception to
+## one-concept-one-name (CONTRIBUTING §naming; history and the rejected
+## alternative in `docs/stdlib-naming.md`).
 pub fn buf_at(b: Buf, i: Int) -> Int = {
   let r: BufRep = b
   let done = array_len(r.chunks) << CHUNK_BITS
@@ -278,12 +269,6 @@ fn utf8_seq(b: Bytes, i: Int, n: Int, width: Int, lo: Int, hi: Int) -> Int = {
 
 ## `b` decoded as ISO-8859-1: one code point per byte, 0..255.
 pub fn decode_latin1(b: Bytes) -> String = bytes_decode_latin1(b)
-
-# Kept for the toolchain only: the seed compiler builds the toolchain with its
-# own std, which has no `Len` impl for this type, so the toolchain still calls
-# this function. It is deleted in the next change, once the seed has moved.
-## Number of bytes in `b`.
-pub fn len(b: Bytes) -> Int = bytes_len(b)
 
 # The prelude's `len` is the `Len` trait (docs/len-trait-design.md); this is its
 # Bytes impl, the number of bytes.
@@ -665,11 +650,11 @@ impl Iter[Bytes] {
 # about whether either is Base64; these say it is.
 
 test "a Buf appends, reads back, and truncates what will not fit in a byte" {
-  assert size(buf()) == 0
+  assert len(buf()) == 0
   assert to_hex(freeze(buf())) == ""
   assert is_empty(freeze(buf()))
   let b = put(put(put(buf(), 0x00), 0x41), 0xFF)
-  assert size(b) == 3
+  assert len(b) == 3
   assert buf_at(b, 0) == 0x00
   assert buf_at(b, 1) == 0x41
   assert buf_at(b, 2) == 0xFF
@@ -720,7 +705,7 @@ fn buf_of_nth(from: Int, to: Int) -> Buf = {
 test "a Buf past one chunk reads back and freezes every byte where it was put" {
   let n = 3 * CHUNK + 5
   let b = buf_of_nth(0, n)
-  assert size(b) == n
+  assert len(b) == n
   let f = freeze(b)
   assert len(f) == n
   var i = 0
@@ -737,7 +722,7 @@ test "a Buf past one chunk reads back and freezes every byte where it was put" {
   }
   # exactly whole chunks: an empty tail after them
   let w = buf_of_nth(0, 2 * CHUNK)
-  assert size(w) == 2 * CHUNK
+  assert len(w) == 2 * CHUNK
   assert freeze(w) == slice(f, 0, 2 * CHUNK)
   assert buf_at(w, 2 * CHUNK - 1) == nth_byte(2 * CHUNK - 1)
 }
@@ -748,12 +733,12 @@ test "an older Buf that keeps writing leaves the newer one alone, across a chunk
   let x = put(a, 1)
   let y = put(a, 2)
   let z = put(put(x, 3), 4)
-  assert size(a) == CHUNK - 1
+  assert len(a) == CHUNK - 1
   assert buf_at(x, CHUNK - 1) == 1
   assert buf_at(y, CHUNK - 1) == 2
   assert at(freeze(y), CHUNK - 1) == 2
   assert at(freeze(x), CHUNK - 1) == 1
-  assert size(z) == CHUNK + 2
+  assert len(z) == CHUNK + 2
   assert at(freeze(z), CHUNK) == 3
   # writing on from `x` again after `z` did: a copy, and `z` keeps its bytes
   let x2 = put(x, 9)
@@ -773,11 +758,11 @@ test "put_bytes past a chunk is put byte by byte, wherever it starts" {
       i = i + 1
     }
     let fast = put_bytes(head, src)
-    assert size(fast) == lead + len(src)
+    assert len(fast) == lead + len(src)
     assert freeze(fast) == freeze(slow)
     assert buf_at(fast, lead + CHUNK + 7) == at(src, CHUNK + 7)
     # the head is still what it was
-    assert size(head) == lead
+    assert len(head) == lead
   }
 }
 
@@ -803,10 +788,10 @@ test "put_bytes agrees with put at every alignment and length edge" {
     for n in lens {
       let src = freeze(buf_of_nth(lead, lead + n))
       let fast = put_bytes(head, src)
-      assert size(fast) == lead + n
+      assert len(fast) == lead + n
       assert freeze(fast) == freeze(put_each(head, src))
       # the head is still what it was
-      assert size(head) == lead
+      assert len(head) == lead
       assert freeze(head) == freeze(buf_of_nth(0, lead))
     }
   }

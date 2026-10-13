@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of CONTRIBUTING.md @ 7a27c6ae6a32a1d2 -->
+<!-- doc-check: translation-of CONTRIBUTING.md @ c29baf95208b3c38 -->
 
 # 怎么在这个仓库里做事
 
@@ -144,9 +144,10 @@ tag 指向的 commit 上绿过，上面那句「等 main CI 通过」买的就�
 新加一个 std 或包的 pub 名字时对着看，不是历史记录。
 
 - **一个概念一个名字。** 长度是 `len`，判空是 `is_empty`，`str`/`list`/`map`/`set`/`bytes`
-  五处逐字相同。具名例外只有两个，都出在 `Buf` 上、都是同一个原因（Dawn 无重载，
-  而 `Bytes` 那一侧先占住了对的名字）：`bytes.size(b: Buf)` 让开 `bytes.len(b: Bytes)`，
-  `bytes.buf_at(b: Buf, i)` 让开 `bytes.at(b: Bytes, i)`。例外要**在代码里写明为什么**，
+  五处逐字相同。`len` 是预置的 `Len` trait，所以一种拼写盖住所有容器（包括 `Buf`），
+  std 之外的类型写一个 impl 就能用。具名例外只有一个，出在 `Buf` 上（Dawn 无重载，
+  而 `Bytes` 那一侧先占住了对的名字）：`bytes.buf_at(b: Buf, i)` 让开
+  `bytes.at(b: Bytes, i)`。例外要**在代码里写明为什么**，
   否则下一个人会照抄成惯例。让路的方向也是判据的一部分：**把对的名字挪走给错的名字腾地方
   是反的**——`bytes.at` 按下面的三判据已经叫对了，所以改名的是 `Buf` 那一侧。
 - **名字要说出越界时会发生什么（spec §4.8 三判据）。** 这是 v0.54.0/v0.55.0 那批改名的
