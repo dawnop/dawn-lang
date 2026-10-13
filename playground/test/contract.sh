@@ -331,7 +331,7 @@ use java "java.lang.System"
 pub fn main() -> Unit !io = {
   println("before the swap")
   let jar = System.getProperty("java.class.path").expect("cp")
-  let here = str.take(jar, str.len(jar) - str.len("/prog.jar"))
+  let here = str.take(jar, len(jar) - len("/prog.jar"))
   let cmd = "for f; do [ -e \"\$f\" ] && { @CMD@; }; done; true"
   ProcessBuilder.new(["sh", "-c", cmd, "sh", here ++ "/run.txt", here ++ "/../run.txt"]).start().expect("sh").waitFor()
   println("after the swap")

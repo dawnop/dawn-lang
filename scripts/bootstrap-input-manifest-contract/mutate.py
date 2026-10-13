@@ -31,7 +31,7 @@ elif mutation == "drop-package-manifest":
 '''
 elif mutation == "persist-internal-absolute":
     old = '''      if str.starts_with(input.path, prefix) {
-        ("R", str.drop(input.path, str.len(prefix)))
+        ("R", str.drop(input.path, len(prefix)))
       } else {
         ("A", input.path)
       }

@@ -57,7 +57,7 @@ pub const WASM_SECTION: String = "dawn.build-info"
 ## line one C string literal of the `__asm__` statement.
 fn byte_lines(text: String) -> List[String] = {
   let b = bytes.utf8(text)
-  let n = bytes.len(b)
+  let n = len(b)
   var lines: List[String] = []
   var i = 0
   while i < n {
@@ -134,7 +134,7 @@ pub fn container_of(data: Bytes) -> Container =
   }
 
 fn starts(data: Bytes, magic: List[Int]) -> Bool = {
-  if bytes.len(data) < len(magic) { return false }
+  if len(data) < len(magic) { return false }
   var i = 0
   while i < len(magic) {
     if bytes.at(data, i) != magic[i] { return false }
@@ -201,7 +201,7 @@ pub fn listing(path: String, data: Bytes) -> Result[String, String] =
 ## end. Every read below goes through here, so a truncated or lying header is
 ## an error and never an out-of-range panic.
 fn le(data: Bytes, at: Int, width: Int) -> Option[Int] = {
-  if at < 0 || at + width > bytes.len(data) { return None }
+  if at < 0 || at + width > len(data) { return None }
   var v = 0
   var i = width - 1
   while i >= 0 {
@@ -213,7 +213,7 @@ fn le(data: Bytes, at: Int, width: Int) -> Option[Int] = {
 
 ## The NUL-terminated name at `at`, or `None` when it runs off the end.
 fn c_name(data: Bytes, at: Int) -> Option[String] = {
-  let n = bytes.len(data)
+  let n = len(data)
   if at < 0 || at >= n { return None }
   var end = at
   while end < n && bytes.at(data, end) != 0 { end = end + 1 }
@@ -227,7 +227,7 @@ fn c_name(data: Bytes, at: Int) -> Option[String] = {
 ## size, and such a file reads as cut short rather than as wrong.
 fn elf_section(data: Bytes, name: String) -> Result[Option[Bytes], String] = {
   let short: Result[Option[Bytes], String] = Err("the ELF file is cut short or its section table is damaged")
-  if bytes.len(data) < 6 { return short }
+  if len(data) < 6 { return short }
   if bytes.at(data, 5) != 1 { return Err("only little-endian ELF files are read") }
   let wide = match bytes.at(data, 4) {
     1 -> false
@@ -265,7 +265,7 @@ fn elf_section(data: Bytes, name: String) -> Result[Option[Bytes], String] = {
               None -> return short
               Some(nm) ->
                 if nm == name {
-                  if o + s > bytes.len(data) { return short }
+                  if o + s > len(data) { return short }
                   return Ok(Some(bytes.slice(data, o, o + s)))
                 }
             }
@@ -284,7 +284,7 @@ fn leb_u32(data: Bytes, at: Int) -> Option[(Int, Int)] = {
   var v = 0
   var scale = 1
   var i = at
-  while i < bytes.len(data) && i < at + 5 {
+  while i < len(data) && i < at + 5 {
     let b = bytes.at(data, i)
     v = v + (b % 128) * scale
     scale = scale * 128
@@ -299,7 +299,7 @@ fn leb_u32(data: Bytes, at: Int) -> Option[(Int, Int)] = {
 ## section (id 0) begins its payload with its name.
 fn wasm_custom_section(data: Bytes, name: String) -> Result[Option[Bytes], String] = {
   let short: Result[Option[Bytes], String] = Err("the wasm module is cut short or a section size is damaged")
-  let n = bytes.len(data)
+  let n = len(data)
   var i = 8
   if n < i { return short }
   while i < n {
@@ -330,7 +330,7 @@ fn wasm_custom_section(data: Bytes, name: String) -> Result[Option[Bytes], Strin
 
 fn nul() -> String = str.from_char('\u{0000}')
 
-fn blen(s: String) -> Int = bytes.len(bytes.utf8(s))
+fn blen(s: String) -> Int = len(bytes.utf8(s))
 
 ## A minimal little-endian ELF64 file: the header, then one section header per
 ## `(name, contents)` after a null one and a name table, contents laid out
@@ -417,7 +417,7 @@ test "a manifest section reads back out of an ELF file, and its absence is not a
   # a name that only starts like ours is not ours
   assert read_manifest(tiny_elf([(ELF_SECTION ++ "x", text)])) == Ok(None)
   # cut short anywhere: an error, never a panic
-  for cut in [3, 20, 70, bytes.len(with) - 2] {
+  for cut in [3, 20, 70, len(with) - 2] {
     match read_manifest(bytes.slice(with, 0, cut)) {
       Err(_) -> ()
       Ok(_) -> panic("an ELF file cut at ${cut} read as whole")
@@ -430,7 +430,7 @@ test "a manifest custom section reads back out of a wasm module" {
   assert read_manifest(tiny_wasm([("name", "x"), (WASM_SECTION, text)])) == Ok(Some(text))
   assert read_manifest(tiny_wasm([("producers", "clang")])) == Ok(None)
   let m = tiny_wasm([(WASM_SECTION, text)])
-  match read_manifest(bytes.slice(m, 0, bytes.len(m) - 1)) {
+  match read_manifest(bytes.slice(m, 0, len(m) - 1)) {
     Err(_) -> ()
     Ok(_) -> panic("a wasm module cut short read as whole")
   }

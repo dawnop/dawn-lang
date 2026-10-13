@@ -95,7 +95,7 @@ fn shadow(n: Int) -> Int = {
 fn asked() -> Int !Env = lookup("a") + lookup("b")
 
 fn run() -> Int = {
-  with handle Env { lookup(k) => str.len(k) }
+  with handle Env { lookup(k) => len(str.trim(k)) }
   let total = asked() + eval(Add(Num(1), Num(v: 2)))
   var acc = 0
   acc = acc + total

@@ -1423,7 +1423,7 @@ fn visit_written_type(qc: QCx, q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -
   var q = q0
   match tref {
     TNamed(name, args, eargs, lo, hi) -> {
-      let nhi = lo + str.len(name)
+      let nhi = lo + len(name)
       match builtin_type_at(name) {
         Some(info) ->
           if builtin_type_hard_reserved(info) {
@@ -1446,7 +1446,7 @@ fn visit_written_type(qc: QCx, q0: Q, tref: TypeRef, type_use: WrittenTypeUse) -
     }
     # `C.Item`: the subject is a type parameter in scope, and a rename of it
     # rewrites the projection too
-    TAssoc(subject, _, lo, _) -> { q = offer_type_name(qc, q, subject, lo, lo + str.len(subject)) }
+    TAssoc(subject, _, lo, _) -> { q = offer_type_name(qc, q, subject, lo, lo + len(subject)) }
     TTuple(elems, _, _) -> {
       for elem in elems { q = visit_written_type(qc, q, elem, WtStorage) }
     }
@@ -1512,9 +1512,9 @@ fn offer_type_name(qc: QCx, q: Q, name: String, lo: Int, hi: Int) -> Q = {
 
 ## `m.T`: the alias at its own span, then the type the exporter names `T`.
 fn offer_qual_type(qc: QCx, q0: Q, qual: String, name: String, lo: Int) -> Q = {
-  let q = offer_module_alias(qc, q0, qual, lo, lo + str.len(qual))
-  let nlo = member_start(qc.cps, lo + str.len(qual))
-  let nhi = nlo + str.len(name)
+  let q = offer_module_alias(qc, q0, qual, lo, lo + len(qual))
+  let nlo = member_start(qc.cps, lo + len(qual))
+  let nhi = nlo + len(name)
   if not spelled(qc, nlo, nhi, name) { return q }
   match map.get(qc.entry.cx.module_exports, qual) {
     Some(exp) -> {
@@ -1616,7 +1616,7 @@ fn visit_tparams(qc: QCx, q0: Q, tparams: List[TypeParamDecl]) -> (Q, List[TpBin
   var q = q0
   var out: List[TpBinder] = []
   for tp in tparams {
-    let b = TpBinder { name: tp.name, lo: tp.lo, hi: tp.lo + str.len(tp.name) }
+    let b = TpBinder { name: tp.name, lo: tp.lo, hi: tp.lo + len(tp.name) }
     if spelled(qc, b.lo, b.hi, b.name) {
       out = out ++ [b]
       q = offer(q, b.lo, b.hi, "type parameter " ++ b.name, Some((b.lo, b.hi)), None)
@@ -1782,7 +1782,7 @@ fn offer_effect_atom(qc: QCx, q0: Q, atom: String, lo: Int, hi: Int) -> Q = {
   let (q, nlo) = match str.split_once(atom, ".") {
     Some(pr) -> {
       let (m, _) = pr
-      (offer_module_alias(qc, q0, m, lo, lo + str.len(m)), lo + str.len(m) + 1)
+      (offer_module_alias(qc, q0, m, lo, lo + len(m)), lo + len(m) + 1)
     }
     None -> (q0, lo)
   }
@@ -1872,7 +1872,7 @@ fn offer_arg_names(qc: QCx, q0: Q, sg: Option[Sig], args: List[Arg]) -> Q = {
                 Some(t) -> show_ty(qc, t)
                 None -> "?"
               }
-              q = offer_at(q, a.lo, a.lo + str.len(n), n ++ ": " ++ ty, site_of_param(qc, s, i))
+              q = offer_at(q, a.lo, a.lo + len(n), n ++ ": " ++ ty, site_of_param(qc, s, i))
             }
             None -> ()
           }
@@ -1977,9 +1977,9 @@ fn offer_field_names(qc: QCx, q0: Q, aid: Int, ci: Int, args: List[Arg]) -> Q = 
         match field_index(c, n) {
           Some(fi) ->
             if e_lo(arg.e) != arg.lo {
-              q = offer_ctor_field(qc, q, aid, ci, fi, arg.lo, arg.lo + str.len(n))
+              q = offer_ctor_field(qc, q, aid, ci, fi, arg.lo, arg.lo + len(n))
             } else {
-              q = collect_pun(qc, q, aid, ci, fi, arg.lo, arg.lo + str.len(n))
+              q = collect_pun(qc, q, aid, ci, fi, arg.lo, arg.lo + len(n))
             }
           None -> ()
         }
@@ -2364,7 +2364,7 @@ fn offer_params(qc: QCx, q0: Q, params: List[Param], tf: Option[TFun]) -> Q = {
 ## module's own top-level declarations (`check/decltests`), and for `T.Ctor`
 ## the constructor as well, at its segment.
 fn offer_example(qc: QCx, q0: Q, of: ExampleOf, nlo: Int) -> Q = {
-  let nhi = nlo + str.len(of.name)
+  let nhi = nlo + len(of.name)
   if not spelled(qc, nlo, nhi, of.name) { return q0 }
   var q = q0
   for d in qc.entry.m.decls {
@@ -2389,7 +2389,7 @@ fn offer_example(qc: QCx, q0: Q, of: ExampleOf, nlo: Int) -> Q = {
         match of.ctor {
           Some(cn) -> {
             let clo = member_start(qc.cps, nhi)
-            let chi = clo + str.len(cn)
+            let chi = clo + len(cn)
             if spelled(qc, clo, chi, cn) {
               for c in t.ctors {
                 if c.name == cn { q = offer_at(q, clo, chi, c.name, here(c.nlo, c.nhi, c.lo)) }
@@ -3878,11 +3878,11 @@ fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
     PQual(qual, _, args, _, nlo, nhi, lo, _) -> {
-      q = offer_module_alias(qc, q, qual, lo, lo + str.len(qual))
+      q = offer_module_alias(qc, q, qual, lo, lo + len(qual))
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
     PQualRecord(qual, _, args, _, nlo, nhi, lo, _) -> {
-      q = offer_module_alias(qc, q, qual, lo, lo + str.len(qual))
+      q = offer_module_alias(qc, q, qual, lo, lo + len(qual))
       q = visit_ctor_pat(qc, q, args, nlo, nhi, tp)
     }
     PTuple(elems, _, _) -> {
@@ -4036,7 +4036,7 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
       match ts {
         Some(TSLet(Some(sid), _, _, _, _)) ->
           match let_name_end(qc.cps, lo, name) {
-            Some(at) -> { q = offer_binding(qc, q, sid, at - str.len(name), at) }
+            Some(at) -> { q = offer_binding(qc, q, sid, at - len(name), at) }
             None -> ()
           }
         _ -> ()

@@ -98,7 +98,7 @@ MUTATIONS = {
     ],
     # `C.Item` names nothing
     'projection-subject-skipped': [
-        (LSPQ, '    TAssoc(subject, _, lo, _) -> { q = offer_type_name(qc, q, subject, lo, lo + str.len(subject)) }\n',
+        (LSPQ, '    TAssoc(subject, _, lo, _) -> { q = offer_type_name(qc, q, subject, lo, lo + len(subject)) }\n',
          '    TAssoc(_, _, _, _) -> ()\n'),
     ],
     # `effect E = !Ask` names nothing
@@ -118,8 +118,8 @@ MUTATIONS = {
     ],
     # a qualified type's member is found by counting one dot past its module
     'qualified-member-by-length': [
-        (LSPQ, '  let nlo = member_start(qc.cps, lo + str.len(qual))\n',
-         '  let nlo = lo + str.len(qual) + 1\n'),
+        (LSPQ, '  let nlo = member_start(qc.cps, lo + len(qual))\n',
+         '  let nlo = lo + len(qual) + 1\n'),
     ],
     # a comment in a type's parameter list is read for binders
     'binders-read-comments': [

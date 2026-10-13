@@ -140,7 +140,7 @@ type ESt = {
 ##
 ## A cursor names its string by number (`VCursor.text`) and indexes that
 ## string's code points, so a step is a list read rather than a decode of the
-## whole string: the cursor arms used to call `code_points(s)` or `str.len(s)`
+## whole string: the cursor arms used to call `code_points(s)` or `len(s)`
 ## on every step, which made a walk over a string quadratic while the fuel
 ## counted it as linear (20,000 characters took 20 s to `str.index_of`).
 ##
@@ -553,7 +553,7 @@ fn text_id(st: ESt, env: Env, s: String) -> Result[(ESt, Int), (ESt, Env, Ctl)] 
   match map.get(t.ids, s) {
     Some(id) -> Ok((ESt { ..st, texts: Texts { ..t, last: id } }, id))
     None -> {
-      let (st1, _, _) = burn_n(st, env, str.len(s))?
+      let (st1, _, _) = burn_n(st, env, len(s))?
       let id = len(t.strs)
       let texts = Texts {
         ids: map.insert(t.ids, s, id),
@@ -1605,7 +1605,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # for every String field
   } else if name == "quote" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    let (st1, _, _) = burn_n(st, env, len(s))?
     Ok((st1, env, VStr(quote_str(s))))
   } else if name == "len" {
     Ok((st, env, VInt(len(as_list(args[0])))))
@@ -1668,7 +1668,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     var size = 0
     for x in as_list(args[0]) {
       let p = as_str(x)
-      size = size + str.len(p) + (if len(parts) > 0 { str.len(sep) } else { 0 })
+      size = size + len(p) + (if len(parts) > 0 { len(sep) } else { 0 })
       parts = parts ++ [p]
     }
     let (st1, _, _) = burn_n(st, env, size)?
@@ -1747,7 +1747,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # intrinsics is what asked the question.
   } else if name == "code_points" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    let (st1, _, _) = burn_n(st, env, len(s))?
     var out: List[CValue] = []
     for cp in code_points(s) { out = out ++ [VInt(char.code(cp))] }
     Ok((st1, env, VList(out)))
@@ -1771,11 +1771,11 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     Ok((st, env, VBool(char_is_space(as_char(args[0])))))
   } else if name == "str_lower" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    let (st1, _, _) = burn_n(st, env, len(s))?
     Ok((st1, env, VStr(str.to_lower(s))))
   } else if name == "str_upper" {
     let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, str.len(s))?
+    let (st1, _, _) = burn_n(st, env, len(s))?
     Ok((st1, env, VStr(str.to_upper(s))))
   } else if name == "float_of_decimal" {
     # std/fmt.atod's raw conversion, reached through the program's own std
@@ -2256,7 +2256,7 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
         match rv {
           VStr(b) -> {
             # a String concat copies both sides, so it pays for the result
-            let (st3, _, _) = burn_n(st2, env2, str.len(a) + str.len(b))?
+            let (st3, _, _) = burn_n(st2, env2, len(a) + len(b))?
             return Ok((st3, env2, VStr(a ++ b)))
           }
           _ -> ()
@@ -2961,7 +2961,7 @@ fn module_icx(
   # makes that key unique program-wide. Neither is merged here, which would
   # cost every module a walk over every module before it.
   var prog_fns = world.sigs
-  if map.len(prog_fns) == 0 {
+  if len(prog_fns) == 0 {
     # a run with no world (std's own tests, the interpreter's) names its
     # tables directly
     prog_fns = program_sigs(std_owners, tm, owner)

@@ -124,7 +124,7 @@ pub fn main() -> Unit !io = {
   let d = 2.scale()
   let p = geo.origin(a)
   let q = geo.shift(p, 1)
-  println("${a + b + c + d + head(p) + area(q) + asked() + triple(1) + str.len("x") + count_of([]) + helper(1)}")
+  println("${a + b + c + d + head(p) + area(q) + asked() + triple(1) + unwrap_or(str.index_of("xy", "y"), 0) + count_of([]) + helper(1)}")
 }
 """
 
@@ -355,8 +355,8 @@ CASES = [
     ("[deps]: a dependency's function", "main.dawn", "triple(1)", 0, None,
      "error: `triple` is declared outside this project's sources (in std, a builtin or a dependency); "
      "rename only changes the project's own declarations"),
-    ("std: a std function", "main.dawn", "str.len", 4, None,
-     "error: `len` is declared outside this project's sources (in std, a builtin or a dependency); "
+    ("std: a std function", "main.dawn", "str.index_of", 4, None,
+     "error: `index_of` is declared outside this project's sources (in std, a builtin or a dependency); "
      "rename only changes the project's own declarations"),
     ("builtin: no declaration in the project", "main.dawn", "len([n", 0, None,
      "error: this name is not declared in this project's sources"),

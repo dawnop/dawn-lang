@@ -68,7 +68,7 @@ const ZIP64_MARK16: Int = 0xFFFF
 const MAX_COMMENT: Int = 65535
 
 fn in_range(b: Bytes, off: Int, n: Int) -> Bool = {
-  let total = bytes.len(b)
+  let total = len(b)
   off >= 0 && off <= total && n >= 0 && n <= total - off
 }
 
@@ -84,7 +84,7 @@ fn u64(b: Bytes, i: Int) -> Int = u32(b, i) | (u32(b, i + 4) << 32)
 ## would stop at the first accident. The comment length has to account for
 ## exactly the rest of the file, which rejects the accidents that remain.
 fn find_eocd(b: Bytes) -> Result[Int, String] = {
-  let n = bytes.len(b)
+  let n = len(b)
   if n < 22 { return Err("zip: too short to be an archive") }
   let floor = if n - 22 - MAX_COMMENT > 0 { n - 22 - MAX_COMMENT } else { 0 }
   var i = n - 22
@@ -340,8 +340,8 @@ pub fn read(src: Bytes, m: Meta, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -
     return Err("zip: compression method " ++ to_string(m.method) ++
         " is not supported (" ++ m.name ++ ")")
   }
-  if bytes.len(out) != m.size {
-    return Err("zip: " ++ m.name ++ " unpacked to " ++ to_string(bytes.len(out)) ++
+  if len(out) != m.size {
+    return Err("zip: " ++ m.name ++ " unpacked to " ++ to_string(len(out)) ++
         " bytes, the directory says " ++ to_string(m.size))
   }
   if crc32.sum(out) != m.crc { return Err("zip: checksum mismatch for " ++ m.name) }
@@ -389,7 +389,7 @@ pub fn entries(src: Bytes, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -> Resu
       Ok(d) -> d
       Err(e) -> return Err(with_default_hint(e, lim))
     }
-    total = total + bytes.len(data)
+    total = total + len(data)
     out = out ++ [Entry { name: m.name, is_dir: m.is_dir, data: data }]
   }
   Ok(out)
@@ -400,7 +400,7 @@ test "overflowing zip64 metadata is refused instead of wrapping into range" {
   # fixed fields (including zero-length name and extra fields).
   var raw = bytes.buf()
   for x in [0x50, 0x4B, 0x03, 0x04] { raw = bytes.put(raw, x) }
-  while bytes.size(raw) < 30 { raw = bytes.put(raw, 0) }
+  while len(raw) < 30 { raw = bytes.put(raw, 0) }
   let src = bytes.freeze(raw)
   let max = 9223372036854775807
 
@@ -443,7 +443,7 @@ test "stored entries honor the output ceiling before their bytes are copied" {
   # A minimal local header followed by one stored byte.
   var raw = bytes.buf()
   for x in [0x50, 0x4B, 0x03, 0x04] { raw = bytes.put(raw, x) }
-  while bytes.size(raw) < 30 { raw = bytes.put(raw, 0) }
+  while len(raw) < 30 { raw = bytes.put(raw, 0) }
   raw = bytes.put(raw, 120)
   let src = bytes.freeze(raw)
   let payload = bytes.utf8("x")
@@ -499,7 +499,7 @@ fn le(b0: Buf, v: Int, n: Int) -> Buf = {
 ## overlap a "better zip bomb" is made of, at a size a test can afford.
 fn overlapping(data: Bytes, names: List[String]) -> Bytes = {
   let crc = crc32.sum(data)
-  let n = bytes.len(data)
+  let n = len(data)
   var b = le(bytes.buf(), LOCAL_SIG, 4)
   b = le(b, 20, 2)
   b = le(b, 0, 2)
@@ -510,7 +510,7 @@ fn overlapping(data: Bytes, names: List[String]) -> Bytes = {
   b = le(b, n, 4)
   b = le(b, 0, 4)
   b = bytes.put_bytes(b, data)
-  let cd = bytes.size(b)
+  let cd = len(b)
   for name in names {
     let nb = bytes.utf8(name)
     b = le(b, CD_SIG, 4)
@@ -522,7 +522,7 @@ fn overlapping(data: Bytes, names: List[String]) -> Bytes = {
     b = le(b, crc, 4)
     b = le(b, n, 4)
     b = le(b, n, 4)
-    b = le(b, bytes.len(nb), 2)
+    b = le(b, len(nb), 2)
     b = le(b, 0, 2)
     b = le(b, 0, 2)
     b = le(b, 0, 2)
@@ -531,7 +531,7 @@ fn overlapping(data: Bytes, names: List[String]) -> Bytes = {
     b = le(b, 0, 4)
     b = bytes.put_bytes(b, nb)
   }
-  let cd_size = bytes.size(b) - cd
+  let cd_size = len(b) - cd
   b = le(b, EOCD_SIG, 4)
   b = le(b, 0, 4)
   b = le(b, len(names), 2)

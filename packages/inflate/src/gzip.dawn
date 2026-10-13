@@ -35,16 +35,16 @@ fn le32(b: Bytes, i: Int) -> Int =
   (bytes.at(b, i + 3) << 24)
 
 fn room(b: Bytes, from: Int, n: Int) -> Bool =
-  from >= 0 && from <= bytes.len(b) && n >= 0 && n <= bytes.len(b) - from
+  from >= 0 && from <= len(b) && n >= 0 && n <= len(b) - from
 
 ## Skip one of gzip's NUL-terminated optional fields without fabricating the
 ## terminator at EOF.
 fn skip_cstr(b: Bytes, from: Int, label: String) -> Result[Int, String] = {
   var i = from
-  while i < bytes.len(b) && bytes.at(b, i) != 0 {
+  while i < len(b) && bytes.at(b, i) != 0 {
     i = i + 1
   }
-  if i >= bytes.len(b) {
+  if i >= len(b) {
     Err("gzip: truncated " ++ label ++ " (missing NUL terminator)")
   } else {
     Ok(i + 1)
@@ -113,8 +113,8 @@ fn member(src: Bytes, start: Int, cap: Option[Int]) -> Result[Member, String] = 
   let want_crc = le32(src, trailer)
   if crc32.sum(out) != want_crc { return Err("gzip: checksum mismatch") }
   let want_size = le32(src, trailer + 4)
-  if bytes.len(out) & MASK32 != want_size & MASK32 {
-    return Err("gzip: decompressed " ++ to_string(bytes.len(out)) ++
+  if len(out) & MASK32 != want_size & MASK32 {
+    return Err("gzip: decompressed " ++ to_string(len(out)) ++
         " bytes, the member says " ++ to_string(want_size))
   }
   Ok(Member { out: out, next: trailer + 8 })
@@ -128,7 +128,7 @@ fn limit_of(cap: Option[Int]) -> Result[Int, String] =
   }
 
 fn remaining_limit(lim: Int, out: Buf) -> Option[Int] =
-  if lim < 0 { None } else { Some(lim - bytes.size(out)) }
+  if lim < 0 { None } else { Some(lim - len(out)) }
 
 ## A refusal by the aggregate default ceiling names the default and the ways
 ## out, as deflate's own refusals do. The first member is decoded against the
@@ -153,7 +153,7 @@ fn with_default_hint(e: String, lim: Int) -> String =
 ## `deflate.DEFAULT_CAP` unless given; `None` is no ceiling. Each member
 ## receives only the remaining budget, so concatenation cannot reset the limit.
 pub fn gunzip(src: Bytes, cap: Option[Int] = Some(deflate.DEFAULT_CAP)) -> Result[Bytes, String] = {
-  let n = bytes.len(src)
+  let n = len(src)
   if n == 0 { return Err("gzip: too short to be an archive") }
   let lim = match limit_of(cap) {
     Ok(v) -> v

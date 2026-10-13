@@ -132,7 +132,7 @@ fn read_body(fmt: ErrorFormat, ex: HttpExchange, limit: Option[Int]) -> Result[B
         Err(http_error(413, fmt.body_too_large(n)))
       } else {
         let raw = stream.readNBytes(n + 1)!
-        if bytes.len(raw) > n {
+        if len(raw) > n {
           Err(http_error(413, fmt.body_too_large(n)))
         } else {
           Ok(raw)
@@ -165,8 +165,8 @@ fn body_length(status: Int, body: ResponseBody) -> Int =
   } else {
     match body {
       Empty -> -1
-      Text(s) -> exact_length(bytes.len(bytes.utf8(s)))
-      Binary(b) -> exact_length(bytes.len(b))
+      Text(s) -> exact_length(len(bytes.utf8(s)))
+      Binary(b) -> exact_length(len(b))
       Stream(_, Some(n)) -> exact_length(n)
       Stream(_, None) -> 0
     }
@@ -660,7 +660,7 @@ fn copy_bounded(fmt: ErrorFormat, stream: InputStream, out: FileOutputStream, li
   var more = true
   while more {
     let chunk = stream.readNBytes(SPILL_CHUNK)!
-    let k = bytes.len(chunk)
+    let k = len(chunk)
     if k == 0 {
       more = false
     } else {
@@ -1291,7 +1291,7 @@ test "204 sends no body, no Content-Length, no chunked framing" {
   assert r.getResponseCode() == 204
   assert r.getHeaderField("Content-Length") == None
   assert r.getHeaderField("Transfer-encoding") == None
-  assert bytes.len(r.getInputStream()!.readAllBytes()!) == 0
+  assert len(r.getInputStream()!.readAllBytes()!) == 0
   srv.stop(0)
 }
 
@@ -1322,7 +1322,7 @@ test "HEAD is served by the GET route: status and length, but no body bytes" {
   # the length the GET would have had...
   assert h.getHeaderField("Content-Length") == Some("5")
   # ...but none of its body
-  assert bytes.len(h.getInputStream()!.readAllBytes()!) == 0
+  assert len(h.getInputStream()!.readAllBytes()!) == 0
   # the GET itself is unaffected
   let g = test_connect("GET", base ++ "/hello")
   assert g.getInputStream()!.readAllBytes()! == bytes.utf8("hello")
@@ -1344,7 +1344,7 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   # upstream: serves the payload
   let up = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   up.createContext("/", ex => {
-    ex.sendResponseHeaders(200, bytes.len(payload))
+    ex.sendResponseHeaders(200, len(payload))
     let os = ex.getResponseBody()!
     os.write(payload)
     os.close()
@@ -1360,7 +1360,7 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   dn.start()
   let (st, got) = test_fetch_bytes("http://127.0.0.1:${dn.getAddress()!.getPort()}/")
   assert st == 200
-  assert bytes.len(got) == 12000
+  assert len(got) == 12000
   assert got == payload
   up.stop(0)
   dn.stop(0)
@@ -1382,7 +1382,7 @@ test "pumping a streaming body tells EOF, a failed transfer and a panic apart" {
     TransferFailed(m) -> { assert m != "" }
     _ -> { assert false }
   }
-  assert bytes.len(sink2.toByteArray().expect("bytes")) == 0
+  assert len(sink2.toByteArray().expect("bytes")) == 0
 
   # a bug in this program: not a java.lang.Exception, so it goes straight past
   # the inner catch_fault to the outer catch_panic (spec §9.8) with its message,
@@ -1771,7 +1771,7 @@ fn file_exists(path: String) -> Bool !io = File.new(path).exists()
 fn post_bytes(port: Int, path: String, body: Bytes) -> String !io = {
   let s = Socket.new("127.0.0.1", port)
   let out = s.getOutputStream()!
-  out.write(bytes.utf8("POST " ++ path ++ " HTTP/1.1\r\nHost: t\r\nContent-Length: ${to_string(bytes.len(body))}\r\nConnection: close\r\n\r\n"))
+  out.write(bytes.utf8("POST " ++ path ++ " HTTP/1.1\r\nHost: t\r\nContent-Length: ${to_string(len(body))}\r\nConnection: close\r\n\r\n"))
   out.write(body)
   out.flush()
   let resp = bytes.decode_utf8_lossy(s.getInputStream()!.readAllBytes()!)
@@ -1861,7 +1861,7 @@ fn new_since(before: List[String], after: List[String]) -> List[String] =
 # Test-only: a request whose body goes out chunked, with no Content-Length, so
 # the server cannot refuse it on the declared length and has to count.
 fn send_chunked(port: Int, method: String, path: String, extra: String, body: String) -> String !io = {
-  let n = bytes.len(bytes.utf8(body))
+  let n = len(bytes.utf8(body))
   raw_http(port,
     method ++ " " ++ path ++ " HTTP/1.1\r\nHost: t\r\n" ++ extra ++
       "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ++
@@ -1872,7 +1872,7 @@ fn send_chunked(port: Int, method: String, path: String, extra: String, body: St
 fn send_sized(port: Int, method: String, path: String, extra: String, body: String) -> String !io =
   raw_http(port,
     method ++ " " ++ path ++ " HTTP/1.1\r\nHost: t\r\n" ++ extra ++
-      "Content-Length: ${to_string(bytes.len(bytes.utf8(body)))}\r\nConnection: close\r\n\r\n" ++ body)
+      "Content-Length: ${to_string(len(bytes.utf8(body)))}\r\nConnection: close\r\n\r\n" ++ body)
 
 # A stream-body handler that reports how much landed on disk.
 fn spilled_size(req: Request) -> Result[Response, HttpError] !io =

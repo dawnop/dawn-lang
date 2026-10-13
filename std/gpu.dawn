@@ -1291,9 +1291,9 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
     gpu_copy_from_host(handle, data) => match map.get(store, handle) {
       Some(b) -> {
         let (dt, old) = b
-        if bytes.len(data) != bytes.len(old) {
+        if len(data) != len(old) {
           Err(refuse("gpu.length_mismatch",
-            "fake device: buffer ${handle} holds ${bytes.len(old)} byte(s), the upload has ${bytes.len(data)}"))
+            "fake device: buffer ${handle} holds ${len(old)} byte(s), the upload has ${len(data)}"))
         } else {
           store = map.insert(store, handle, (dt, data))
           Ok(())
@@ -1374,7 +1374,7 @@ pub fn with_gpu_fake[T](kernels: Map[String, (Int, WideRefFn)], body: fn() -> T 
             if dt != dtype {
               Err(bad_global_dtype("fake device", kernel, name, dt, dtype))
             } else {
-              Ok((h, bytes.len(raw) / unwrap_or(element_bytes(dt), 1)))
+              Ok((h, len(raw) / unwrap_or(element_bytes(dt), 1)))
             }
           }
           None -> Err(no_such_buffer("fake device", h))
@@ -1541,9 +1541,9 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
       Some(b) -> {
         let (p, n, dt) = b
         let nbytes = n * unwrap_or(element_bytes(dt), 1)
-        if bytes.len(data) != nbytes {
+        if len(data) != nbytes {
           Err(refuse("gpu.length_mismatch",
-            "real device: buffer ${handle} holds ${nbytes} byte(s), the upload has ${bytes.len(data)}"))
+            "real device: buffer ${handle} holds ${nbytes} byte(s), the upload has ${len(data)}"))
         } else {
           gpu_memcpy_htod_host(p, data)
         }
@@ -1862,7 +1862,7 @@ test "an i32 buffer round-trips every value exactly, low byte first" {
   assert bytes.to_hex(encode_floats("i32", [0.0 - 1.0])) == "ffffffff"
   assert bytes.to_hex(encode_floats("i32", [0.0 - 2147483648.0])) == "00000080"
   assert bytes.to_hex(encode_floats("i32", [2147483647.0])) == "ffffff7f"
-  assert bytes.len(encode_floats("i32", [1.0, 2.0, 3.0])) == 12
+  assert len(encode_floats("i32", [1.0, 2.0, 3.0])) == 12
   # the List[Float] channel is LOSSLESS here: 53 significand bits cover the
   # whole i32 range, so every extreme comes back as itself
   let xs = [0.0, 1.0, 0.0 - 1.0, 2147483647.0, 0.0 - 2147483648.0, 123456789.0, 0.0 - 987654321.0]
@@ -1885,7 +1885,7 @@ test "packing rounds every value to bf16 and lays the pattern down low byte firs
   assert to_string(back) == to_string(list.map(xs, x => narrow.round_bf16(x)))
   assert 1.0 / back[4] == 0.0 - inf
   assert back[3] == inf
-  assert bytes.len(encode_floats("bf16", xs)) == 14
+  assert len(encode_floats("bf16", xs)) == 14
   assert decode_floats("bf16", bytes.utf8("")) == []
 }
 
@@ -2261,7 +2261,7 @@ test "an f16 buffer holds the nearest binary16 of what was uploaded, low byte fi
   assert to_string(back) == to_string(list.map(xs, x => narrow.round_f16(x)))
   assert 1.0 / back[4] == 0.0 - inf
   assert back[3] == inf
-  assert bytes.len(encode_floats("f16", xs)) == 14
+  assert len(encode_floats("f16", xs)) == 14
   assert decode_floats("f16", bytes.utf8("")) == []
   # and it is NOT bf16's: the two formats disagree on every value whose
   # significand needs more than eight bits
@@ -2282,7 +2282,7 @@ test "an i8 and a u8 buffer hold the same octet and read it two ways" {
   assert round_to("u8", 0.0 - 56.0) == 200.0
   assert wrap_i8(200) == 0 - 56
   assert wrap_u8(0 - 56) == 200
-  assert bytes.len(encode_floats("i8", [1.0, 2.0, 3.0])) == 3
+  assert len(encode_floats("i8", [1.0, 2.0, 3.0])) == 3
 }
 
 test "encode_floats and decode_floats are the round trip of every format the handlers move" {
@@ -2291,11 +2291,11 @@ test "encode_floats and decode_floats are the round trip of every format the han
   # values and it says so with a NaN, which is never equal to anything
   for dt in ["f64", "bf16", "f16", "tf32", "i32", "i16", "i64", "i8", "u8", "f8E4M3FN", "f8E5M2"] {
     assert decode_floats(dt, encode_floats(dt, xs)) == xs
-    assert bytes.len(encode_floats(dt, xs)) == 4 * unwrap_or(element_bytes(dt), 0)
+    assert len(encode_floats(dt, xs)) == 4 * unwrap_or(element_bytes(dt), 0)
   }
   let powers = [0.25, 1.0, 2.0, 1024.0]
   assert decode_floats("f8E8M0FNU", encode_floats("f8E8M0FNU", powers)) == powers
-  assert bytes.len(encode_floats("f8E8M0FNU", powers)) == 4
+  assert len(encode_floats("f8E8M0FNU", powers)) == 4
 }
 
 test "the formats knife T3 added hold what memory of them holds, low byte first" {
@@ -2321,7 +2321,7 @@ test "the formats knife T3 added hold what memory of them holds, low byte first"
   assert decode_floats("f8E4M3FN", encode_floats("f8E4M3FN", [1.0 + 1.0 / 32.0])) == [1.0]
   assert decode_floats("f8E5M2", encode_floats("f8E5M2", [1.0 + 1.0 / 32.0])) == [1.0]
   assert decode_floats("f8E8M0FNU", encode_floats("f8E8M0FNU", [1.99])) == [1.0]
-  assert bytes.len(encode_floats("f8E4M3FN", [1.0, 2.0, 3.0])) == 3
+  assert len(encode_floats("f8E4M3FN", [1.0, 2.0, 3.0])) == 3
   # what a value outside a format answers: BOTH SATURATE at the largest
   # finite value, although only one of them has an infinity to overflow to.
   # Knife TA measured it on a B200 rather than reasoning about it, and the

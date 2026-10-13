@@ -121,7 +121,7 @@ builtin can appear (a hand-written group or `internal`), is a failure only
 the output shows. The field is on builtins alone -- a std function's
 foldability is a property of its body, not of this table -- so an entry that
 is no builtin and carries it is red too, including a std module's function
-that shares a builtin's name (`std/bytes.len` and `len`).
+that shares a builtin's name (`std/map.get` and `get`).
 
 ## The owned-argument positions, and why they are three places (#212)
 
@@ -1274,10 +1274,11 @@ def mutate_p9_drop_get_s_flag(mirror, dump, interp, lower, header, export):
 
 
 def mutate_p9_flag_std_bytes_len(mirror, dump, interp, lower, header, export):
-    """`std/bytes.len` is a Dawn function whose name a builtin carried until the
-    `Len` trait took it. A flag keyed on the name alone would put it there;
-    P9 keys on where the entry sits."""
-    return mirror, dump, interp, lower, header, _flip_export(export, "std/bytes", "len", "ok")
+    """`std/map.get` is a Dawn function that shares its name with the `get`
+    builtin (it was `std/bytes.len` and `len` until the `Len` trait took that
+    name). A flag keyed on the name alone would put it there; P9 keys on where
+    the entry sits."""
+    return mirror, dump, interp, lower, header, _flip_export(export, "std/map", "get", "ok")
 
 
 MUTANTS = [
@@ -1299,7 +1300,7 @@ MUTANTS = [
     ("m3-owned-names-no-intrinsic", mutate_m3_owned_names_no_intrinsic, "M3"),
     ("p9-flip-bytes_utf8-in-the-export", mutate_p9_flip_bytes_utf8, "P9"),
     ("p9-drop-get-s-flag", mutate_p9_drop_get_s_flag, "P9"),
-    ("p9-flag-std-bytes-len", mutate_p9_flag_std_bytes_len, "P9"),
+    ("p9-flag-std-map-get", mutate_p9_flag_std_bytes_len, "P9"),
 ]
 
 

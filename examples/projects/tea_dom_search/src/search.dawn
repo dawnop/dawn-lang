@@ -516,7 +516,7 @@ fn trim_dots(w: String, both: Bool) -> String = {
     s = str.drop(s, 1)
   }
   while both && str.ends_with(s, ".") {
-    s = str.take(s, str.len(s) - 1)
+    s = str.take(s, len(s) - 1)
   }
   s
 }
@@ -850,7 +850,7 @@ pub fn body_query(q: String) -> List[BodyTerm] = {
   let low = str.to_lower(str.trim(q))
   let tail = last_run(low)
   list.map(list.unique(body_terms(low)), w =>
-      BodyTerm { word: w, prefix: tail != "" && str.ends_with(tail, w) && not han_word(w) && str.len(w) >= 2 })
+      BodyTerm { word: w, prefix: tail != "" && str.ends_with(tail, w) && not han_word(w) && len(w) >= 2 })
 }
 
 fn han_word(w: String) -> Bool = list.any(code_points(w), c => is_han(c))
@@ -1303,7 +1303,7 @@ fn shown_para(state: State, h: BodyHit, ts: List[Term]) -> Int = {
 fn density(text: String, ts: List[Term]) -> Int = {
   let low = str.to_lower(text)
   let found = list.fold(ts, 0, (acc, t) => acc + low.places(t).len())
-  found * 1000 / (str.len(low) + 1)
+  found * 1000 / (len(low) + 1)
 }
 
 # ---- what a row shows of a paragraph ---------------------------------------
@@ -1790,7 +1790,7 @@ type Pool = { known: Bool, words: Map[String, Int] }
 
 fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
   let first = str.take(w, 1)
-  let n = str.len(w)
+  let n = len(w)
   var known = false
   var out: Map[String, Int] = map.empty()
   for k in state.keys {
@@ -1800,7 +1800,7 @@ fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
           if x == w || (last && str.starts_with(x, w)) {
             known = true
           }
-          let xn = str.len(x)
+          let xn = len(x)
           if xn - n <= limit && n - xn <= limit {
             out = map.insert(out, x, map.get(out, x).unwrap_or(0) + 1)
           }
@@ -1821,7 +1821,7 @@ fn bucket(state: State, w: String, last: Bool, limit: Int) -> Pool = {
           let lo = lower_bound(c.terms, first)
           for i in range(lo, past_prefix(c.terms, first, lo)) {
             let x = c.terms[i]
-            let xn = str.len(x)
+            let xn = len(x)
             if xn - n <= limit && n - xn <= limit {
               out = map.insert(out, x, map.get(out, x).unwrap_or(0) + len(c.posts[i]))
             }
@@ -1852,7 +1852,7 @@ fn title_has(state: State, w: String, last: Bool) -> Bool =
 ## the first letter's. Asked in that order, one step at a time, so that a
 ## correctly spelled word costs the first step only.
 fn reach_need(state: State, w: String, last: Bool) -> List[Int] = {
-  let limit = str.len(w).allowed()
+  let limit = len(w).allowed()
   let ascii = list.all(code_points(w), c => char.code(c) < 128)
   match state.body {
     None -> []
@@ -1885,7 +1885,7 @@ pub fn near_words(state: State, w: String, last: Bool) -> List[Near] = reach(sta
 type Reach = { dead: Bool, near: List[Near] }
 
 fn reach(state: State, w: String, last: Bool) -> Reach = {
-  let limit = str.len(w).allowed()
+  let limit = len(w).allowed()
   let ascii = list.all(code_points(w), c => char.code(c) < 128)
   if limit == 0 || not ascii {
     Reach { dead: false, near: [] }
@@ -2257,10 +2257,10 @@ fn marked_runs(note: String, ts: List[Term]) -> List[Node[Msg]] = {
 ## unmarked rather than marked in the wrong place.
 pub fn marked(s: String, ts: List[Term]) -> List[Node[Msg]] = {
   let low = str.to_lower(s)
-  let n = str.len(s)
+  let n = len(s)
   if s == "" {
     []
-  } else if len(ts) == 0 || str.len(low) != n {
+  } else if len(ts) == 0 || len(low) != n {
     [text(s)]
   } else {
     var spans: List[(Int, Int)] = []
@@ -2312,7 +2312,7 @@ fn plain_then_mark(s: String, pos: Int, a: Int, b: Int) -> List[Node[Msg]] = {
 ## Where `t` is found in `low`, as code-point spans.
 fn places(low: String, t: Term) -> List[(Int, Int)] = {
   let w = t.word
-  let wl = str.len(w)
+  let wl = len(w)
   var out: List[(Int, Int)] = []
   var from = 0
   var go = wl > 0
@@ -2321,7 +2321,7 @@ fn places(low: String, t: Term) -> List[(Int, Int)] = {
       Some(i) -> {
         let p = from + i
         let starts = p == 0 || char.code(str.at(low, p - 1)).kind_of() != 3
-        let ends = t.fit != Whole || p + wl >= str.len(low) || char.code(str.at(low, p + wl))
+        let ends = t.fit != Whole || p + wl >= len(low) || char.code(str.at(low, p + wl))
           .kind_of() != 3
         if t.fit == Within || (starts && ends) {
           out = out ++ [(p, p + wl)]
@@ -4754,7 +4754,7 @@ test "a prefix spanning chunks finds what a scan of all the words finds" {
       var prefixes: List[String] = []
       for w in all_terms {
         for n in [2, 3] {
-          if str.len(w) >= n && not list.contains(prefixes, str.take(w, n)) {
+          if len(w) >= n && not list.contains(prefixes, str.take(w, n)) {
             prefixes = prefixes ++ [str.take(w, n)]
           }
         }
@@ -5095,7 +5095,7 @@ test "the first-letter bucket misses no word that a walk of the whole index find
   }
   let every_word = list.unique(vocab)
   for w in ["arns", "wiht", "thet", "hendl", "handel", "efects", "stae", "remve", "spilt"] {
-    let limit = str.len(w).allowed()
+    let limit = len(w).allowed()
     let walked = list.filter(every_word, x => str.starts_with(x, str.take(w, 1)) && x != w && distance(w, x, limit) <= limit)
       .sort_by((a, b) => order(a, b))
     let bucketed = list.map(near_words(state, w, false), x => x.word).sort_by((a, b) => order(a, b))

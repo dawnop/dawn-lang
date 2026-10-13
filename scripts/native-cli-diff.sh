@@ -319,13 +319,11 @@ fi
 echo "== run argv boundary, JVM and native vs absolute contracts =="
 RUN_ARGV="$OUT/run_argv.dawn"
 cat > "$RUN_ARGV" <<'EOF'
-use std/str
-
 pub fn main() -> Unit !io = {
   println("argc=" ++ to_string(len(args())))
   var i = 0
   for arg in args() {
-    println(to_string(i) ++ "|" ++ to_string(str.len(arg)) ++ "|" ++ arg)
+    println(to_string(i) ++ "|" ++ to_string(len(arg)) ++ "|" ++ arg)
     i = i + 1
   }
 }
