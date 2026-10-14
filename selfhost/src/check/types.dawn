@@ -3536,6 +3536,36 @@ fn keyed2(s: Sig, kk: Ty, vv: Ty) -> Sig =
 fn keyed1(s: Sig, tt: Ty) -> Sig =
   Sig { ..s, tparams: [tt], constraints: [[EQ_ID, HASH_ID]] }
 
+## The flat buffer families behind std/mem, apart from `builtins` so that
+## function stays under the JIT's size limit (scripts/method-size-gate.py).
+fn buffer_sigs() -> List[Sig] = [
+  # The flat 64-bit buffer family (docs/mem-buffer-design.md 6.4). Every
+  # access is a bounds-checked panic, never a sentinel: std/mem is a thin
+  # wrapper over these six, and the range writes panic rather than clamp.
+  bsig("i64buf_new", [TyInt], ["n"], TyI64Buf),
+  bsig("i64buf_len", [TyI64Buf], ["b"], TyInt),
+  bsig("i64buf_at", [TyI64Buf, TyInt], ["b", "i"], TyInt),
+  bsig("i64buf_set", [TyI64Buf, TyInt, TyInt], ["b", "i", "v"], TyUnit),
+  bsig("i64buf_fill", [TyI64Buf, TyInt, TyInt, TyInt], ["b", "from", "to", "v"], TyUnit),
+  bsig("i64buf_copy_from", [TyI64Buf, TyInt, TyI64Buf, TyInt, TyInt],
+    ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
+  # The buffer endpoints of the bulk pack family (mem-buffer-design.md 7):
+  # `bytes_pack_int` and friends with a flat buffer where the boxed Array was.
+  bsig("i64buf_pack", [TyI64Buf, TyInt, TyBool], ["b", "width", "little"], TyBytes),
+  bsig("i64buf_unpack", [TyBytes, TyInt, TyBool, TyBool], ["b", "width", "signed", "little"],
+    TyI64Buf),
+  # The same six for doubles, bits kept (NaN payloads, -0.0).
+  bsig("f64buf_new", [TyInt], ["n"], TyF64Buf),
+  bsig("f64buf_len", [TyF64Buf], ["b"], TyInt),
+  bsig("f64buf_at", [TyF64Buf, TyInt], ["b", "i"], TyFloat),
+  bsig("f64buf_set", [TyF64Buf, TyInt, TyFloat], ["b", "i", "v"], TyUnit),
+  bsig("f64buf_fill", [TyF64Buf, TyInt, TyInt, TyFloat], ["b", "from", "to", "v"], TyUnit),
+  bsig("f64buf_copy_from", [TyF64Buf, TyInt, TyF64Buf, TyInt, TyInt],
+    ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
+  bsig("f64buf_pack", [TyF64Buf, TyInt, TyBool], ["b", "width", "little"], TyBytes),
+  bsig("f64buf_unpack", [TyBytes, TyInt, TyBool], ["b", "width", "little"], TyF64Buf)
+]
+
 ## The builtin function table (port of Types.kt BUILTINS, same order).
 pub fn builtins() -> Map[String, Sig] = {
   let t = TyVar("T", -1)
@@ -3665,33 +3695,9 @@ pub fn builtins() -> Map[String, Sig] = {
     # length panics on the way back. The contract is scripts/bytes-pack-contract.
     bsig("bytes_pack_float", [TyArray(TyFloat), TyInt, TyBool], ["a", "width", "little"], TyBytes),
     bsig("bytes_unpack_float", [TyBytes, TyInt, TyBool], ["b", "width", "little"],
-      TyArray(TyFloat)),
-    # The flat 64-bit buffer family (docs/mem-buffer-design.md 6.4). Every
-    # access is a bounds-checked panic, never a sentinel: std/mem is a thin
-    # wrapper over these six, and the range writes panic rather than clamp.
-    bsig("i64buf_new", [TyInt], ["n"], TyI64Buf),
-    bsig("i64buf_len", [TyI64Buf], ["b"], TyInt),
-    bsig("i64buf_at", [TyI64Buf, TyInt], ["b", "i"], TyInt),
-    bsig("i64buf_set", [TyI64Buf, TyInt, TyInt], ["b", "i", "v"], TyUnit),
-    bsig("i64buf_fill", [TyI64Buf, TyInt, TyInt, TyInt], ["b", "from", "to", "v"], TyUnit),
-    bsig("i64buf_copy_from", [TyI64Buf, TyInt, TyI64Buf, TyInt, TyInt],
-      ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
-    # The buffer endpoints of the bulk pack family (mem-buffer-design.md 7):
-    # `bytes_pack_int` and friends with a flat buffer where the boxed Array was.
-    bsig("i64buf_pack", [TyI64Buf, TyInt, TyBool], ["b", "width", "little"], TyBytes),
-    bsig("i64buf_unpack", [TyBytes, TyInt, TyBool, TyBool], ["b", "width", "signed", "little"],
-      TyI64Buf),
-    # The same six for doubles, bits kept (NaN payloads, -0.0).
-    bsig("f64buf_new", [TyInt], ["n"], TyF64Buf),
-    bsig("f64buf_len", [TyF64Buf], ["b"], TyInt),
-    bsig("f64buf_at", [TyF64Buf, TyInt], ["b", "i"], TyFloat),
-    bsig("f64buf_set", [TyF64Buf, TyInt, TyFloat], ["b", "i", "v"], TyUnit),
-    bsig("f64buf_fill", [TyF64Buf, TyInt, TyInt, TyFloat], ["b", "from", "to", "v"], TyUnit),
-    bsig("f64buf_copy_from", [TyF64Buf, TyInt, TyF64Buf, TyInt, TyInt],
-      ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
-    bsig("f64buf_pack", [TyF64Buf, TyInt, TyBool], ["b", "width", "little"], TyBytes),
-    bsig("f64buf_unpack", [TyBytes, TyInt, TyBool], ["b", "width", "little"], TyF64Buf)
+      TyArray(TyFloat))
   ]
+  sigs = sigs ++ buffer_sigs()
   sigs = sigs ++ [
     # The argv supplied when this program starts. It is process input and is
     # visible from every module, not state belonging to the entry module or a
