@@ -593,7 +593,7 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
 
 | 情形 | 消息要点 | 理由 |
 |---|---|---|
-| 没有分析、`untitled:` 缓冲区 | rename works in the files of a project | standalone 没有工作区、没有 source root，改名的边界无从谈起 |
+| 没有分析的文档；有文件名但不属于任何工程的 standalone 缓冲区 | this document has no analysis / rename works in the files of a project | 没有分析就没有可读的名字；磁盘上的松散文件没有工作区与 source root，边界仍然无从谈起 |
 | 光标处没有名字，或没有声明（字面量、内建 `len`） | no name here / not declared in this project's sources | 同 definition：无处可跳就无处可改 |
 | 声明在 std、内建 prelude、`[deps]` 包 | declared outside this project's sources | 声明模块的 `package_of` 不是 `PkgRoot`，或文件不在 source root 下（`path_in_root`）；裁决第 4 条 |
 | 模块名（`use geo`、限定访问的 `geo.`） | a module is renamed by moving its file | 模块改名是移文件，裁决第 5 条不做 |
@@ -657,11 +657,26 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
 
 服务端不应用编辑、不改磁盘，客户端应用后会照常发 `didChange`，没打开的文件客户端会自己打开或改盘；之后的分析从那里接着走。
 
+#### R3.1a `untitled:` 缓冲区：边界就是缓冲区本身
+
+此前 `untitled:` 缓冲区与松散文件一起被第一行拒绝。裁决改为：**有分析的 `untitled:` 缓冲区可以改名，边界是缓冲区本身，编辑只落在这个缓冲区。**
+理由：这样的缓冲区能独立解析、检查（Playground 的缓冲区就是），其中的引用本来就是完整的（R1，Playground 的 references 已在 PR #729 放行）；
+声明在 std 或 `[deps]` 包里的名字已被「声明不在本工程源码」那一行拒绝（standalone 里除缓冲区自己以外的声明都落在这一行），所以缓冲区之外不可能有需要改的编辑。
+没有分析的文档照旧拒绝；有文件名但不属于任何工程的松散文件也照旧拒绝（它的兄弟文件在磁盘上，缓冲区不是边界）。
+
+实现是 `local_rename_start` / `local_rename`（`lsp/server.dawn`），与工程内的路径共用 R3.2 到 R3.4 的全部检查（大小写类、`as` 名字、`main`、改前有错、改后新错、改后解析漂移、文档链接），
+区别只有两处：不建 references 程序，只读缓冲区自己的 `mod_refs`；改后的程序用缓冲区的 standalone 分析重算。`prepareRename` 走同一个入口，与 rename 的判断一致。
+
+别的服务器的做法：本次用 WebSearch 查 pyright、rust-analyzer、gopls、typescript-language-server 在无工作区的单文件上 rename 的行为，没有找到把这件事写明的文档
+（只见到 rust-analyzer 对不在工程里的文件的说明 <https://git.bendn.org/rust-analyzer/plain/docs/book/src/non_cargo_based_projects.md>，
+与 gopls 的 standalone 文件说明 <https://golang.org/issue/41567>，二者都只讲分析，不讲 rename），
+所以这一刀的依据是上面的推理，不是别家的先例；这一点如实记下，不当作调研结论。
+
 ### R3.5 Playground
 
 网关转发 `textDocument/rename`（Playground 客户端分刀的刀 5，PR #731，见 [play-lsp-client-design.md](play-lsp-client-design.md) §7），不转发 prepareRename：
-回包重建为只含本缓冲区编辑的 `changes`、至多 1000 条。但 Playground 的文档是 `untitled:` 缓冲区，在服务端是 standalone，
-R3.1 第一行照旧拒绝，所以 Playground 上的 rename 今天得到的是那条拒绝原因；转发只是把通路铺好。
+回包重建为只含本缓冲区编辑的 `changes`、至多 1000 条。Playground 的文档是 `untitled:` 缓冲区，在服务端是 standalone；
+PR #731 时 R3.1 第一行还拒绝它，Playground 上的 rename 得到的是拒绝原因。R3.1a 之后它是缓冲区内的真改名。
 
 ### R3.6 selfhost 抽样与格式触发率
 
@@ -743,7 +758,7 @@ push-total 16,794 → 16,920 s（+126 s）。`steps.lock.json` 已重录。
 
 - **delta、模块改名、跨包 rename、rename 时重排格式、gopls 式默认关、rust-analyzer 式先文本搜索、codeLens**：裁决第 5 条，理由见调研 §5.2。
 - **简写收回**：改名后两半重新同名（`{ x: y }` 把 `y` 改成 `x`）时可以收回成 `{ x }`。收回是格式上的选择，与「不重排格式」同一个理由；`{ x: x }` 照样合法。
-- **standalone 缓冲区里改名**：没有 source root，「只改本工程源码」无从判断；Playground 不转发。
+- **松散文件（有文件名、不属于任何工程）里改名**：没有 source root，「只改本工程源码」无从判断。`untitled:` 缓冲区不在此列，见 R3.1a。
 - **有错的模块里改名**：R3.1。解析不全时引用集合会漏，漏改比拒绝更糟。
 - **改名导入的局部名在别的模块的连锁**：`as` 的局部名只在本模块可见，不存在连锁。
 - **上下文关键字的提示**：调研建议放行但在 prepareRename 的消息里提示。prepareRename 不知道新名字，提示只能是泛泛的一句；真出问题时第 15 条会拒绝，并带编译器的原文。
