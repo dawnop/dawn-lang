@@ -207,6 +207,20 @@ export class Wasi {
         return ERRNO_SUCCESS;
       },
 
+      // The bytes behind std/io's `Random` (docs/random-effect-design.md):
+      // wasi-libc's getrandom lands here. `crypto.getRandomValues` refuses
+      // more than 65536 bytes in one call, so a larger buffer is filled in
+      // pieces. Without this function a module that asks for random bytes
+      // would get NOSYS, and its runtime faults rather than invent a byte.
+      random_get: (bufPtr, bufLen) => {
+        const mem = this.#bytes();
+        for (let off = 0; off < bufLen; off += 65536) {
+          const n = Math.min(65536, bufLen - off);
+          crypto.getRandomValues(mem.subarray(bufPtr + off, bufPtr + off + n));
+        }
+        return ERRNO_SUCCESS;
+      },
+
       // A reactor that calls this has aborted: there is no way back into a
       // module whose libc has torn itself down, so the exception unwinds out
       // through the guest frames and the caller decides what to tell the

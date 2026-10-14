@@ -4017,6 +4017,14 @@ pub fn builtins() -> Map[String, Sig] = {
     # when the host's time is adjusted. std/io keeps them apart by type as well.
     eff1(bsig("io_clock_wall_ns", [], [], TyInt), EIo),
     eff1(bsig("io_clock_mono_ns", [], [], TyInt), EIo),
+    # `n` bytes from the host's CSPRNG (docs/random-effect-design.md):
+    # `SecureRandom.nextBytes` on the JVM, `getrandom(2)` on native and wasi,
+    # with /dev/urandom only where the call is missing. A negative `n` is a
+    # panic; a host with no entropy source is a fault, never an invented
+    # byte. std/io's `Random` effect is the one face a program sees, so a
+    # test can answer it, and comptime refuses it: a secret read at compile
+    # time would be baked into the artifact.
+    eff1(bsig("io_random_bytes", [TyInt], ["n"], TyBytes), EIo),
     # Spawn `argv[0]` (found on PATH), wait, and answer its exit status.
     #
     # Both streams go to files rather than back through a pipe, and that is
@@ -4272,7 +4280,8 @@ pub fn intrinsics() -> Map[String, Intr] = {
   let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
     "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "real_path",
-    "read_stdin", "stdin_ready", "clock_wall_ns", "clock_mono_ns"]
+    "read_stdin", "stdin_ready", "clock_wall_ns", "clock_mono_ns",
+    "random_bytes"]
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_${op}", RtIo)
   }
@@ -4533,6 +4542,19 @@ test "the two clocks are std-only io primitives answering a bare Int" {
     # no argument and no box: a reading is one 64-bit Int on every backend
     assert sig_render(adts, traits, map.get(bs, n).expect(n)) == "fn " ++ n ++ "() -> Int !io"
   }
+}
+
+test "the random primitive is a std-only io primitive answering Bytes" {
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  let i = intr_at("io_random_bytes").expect("io_random_bytes")
+  # std/io's `with_random_real` is the one caller; a program asks `Random`
+  assert i.internal
+  assert not i.erased
+  assert i.rt == Some(RtIo)
+  assert sig_render(adts, traits, map.get(bs, "io_random_bytes").expect("io_random_bytes")) ==
+    "fn io_random_bytes(n: Int) -> Bytes !io"
 }
 
 test "the reactor root primitive is std-only, erased, and io" {
@@ -5158,7 +5180,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 137
+  assert map_size2(bs) == 138
 }
 
 test "the reclaim's failure is a value, under the one name left" {
