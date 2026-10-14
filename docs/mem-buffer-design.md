@@ -279,10 +279,10 @@ pub fn from_bytes(bs: Bytes, width: Int, signed: Bool, order: Endian = Little) -
 - **实现**：`width = 8` 时 JVM 用 `ByteBuffer.asLongBuffer`，native 小端用 `memcpy`（端序不同用逐字交换）；其余宽度是一个运行时循环。
   与批量线的循环骨架生成函数共用一份骨架（批量线 §4），不另写。
 - **相对批量线 A+ 的收益是预期，不是实测**：批量线 K0 量到 native 打包本身只要约 1.5 ms（读箱不是瓶颈），拆包的 29 ms 里约七成是每元素
-  `push_own` 的分配，一次预分配填满只要 8.4 ms。缓冲端点天然是「一次分配、一次填满」，预期拆包落在 memcpy 量级；**缓冲端点的实测数未量，K5 去量**。
+  `push_own` 的分配，一次预分配填满只要 8.4 ms。缓冲端点天然是「一次分配、一次填满」，预期拆包落在 memcpy 量级；**缓冲端点的实测数在 K5 补记，见 §9.3**。
 - 这不依赖批量线先落地：`to_bytes`/`from_bytes` 在 K5 才做，K5 排在批量线 K3/K4 之后或与其合并。在此之前，`from_list`/`to_list` 用 Dawn 循环实现，
   对 bcrypt（1042 个字，一次）不是瓶颈，其余场景**未量**。
-- `F64Buf`（`double[]` / `double*`）同形，位保真，K5 做。落在同一模块 `std/mem`，函数名带 `f64_` 前缀（待裁问题 3，已裁）：`f64_new`、`f64_at`、`f64_set`、`f64_fill`、`f64_copy_from`、`f64_copy_within`、`f64_clone`、`f64_from_list`、`f64_to_list`；长度不另起 `f64_len`，`F64Buf` 与 `I64Buf` 各给一个 `impl Len`（Len 裁决 K5，修订上面待裁问题 3 的命名）；`Mem` 效果与 `with_mem` 共用。
+- `F64Buf`（`double[]` / `double*`）同形，位保真，K5 已做（§9.3）。缓冲端点对 `F64Buf` 是 `f64_to_bytes(b, width, order)` / `f64_from_bytes(bs, width, order)`，宽度取 4 或 8，没有 `signed`。落在同一模块 `std/mem`，函数名带 `f64_` 前缀（待裁问题 3，已裁）：`f64_new`、`f64_at`、`f64_set`、`f64_fill`、`f64_copy_from`、`f64_copy_within`、`f64_clone`、`f64_from_list`、`f64_to_list`；长度不另起 `f64_len`，`F64Buf` 与 `I64Buf` 各给一个 `impl Len`（Len 裁决 K5，修订上面待裁问题 3 的命名）；`Mem` 效果与 `with_mem` 共用。
 
 ## 8. bcrypt 迁移草图（K4，已落地，下为原示意稿）
 
@@ -338,7 +338,7 @@ pub fn hash_raw(password: Bytes, salt: Bytes, cost: Int) -> List[Int] =
 | K2 | 两后端运行时：`RtMem` 六个原语；`I64Buf` 内置类型；`static inline` 头文件版 `at`/`set`；契约门 `scripts/mem-contract`；`std/mem` 里**只含**原语的薄包装（暂无 `Mem` 效果，辅助函数先不带标签） | 合约 `.expect` 两后端逐字一致（§5 全表加 `2^32+5` 别名）；ASan 门三用例绿；`intrinsic-parity`、`builtin-type-contract` 绿；**重量 K0 的 bcrypt（句柄参数版、显式长整比较）：JVM <= 1.5 倍 jBCrypt（<= 0.27 s），native <= 1.2 倍（<= 0.23 s）**，同机、稳态、三次取中位；`Array`/pvec 与 emit 语料零差异（新增 `RtMem` 若令 emit 产物字节变化，按 `scripts/emit-labels.txt` 逐字 label 声明） | 越界比较写成 `>` 而非 `>=`；JVM 漏掉先比后截断（`2^32+5` 用例红）；`copy_from` 同缓冲重叠按正向逐元素拷贝（重叠用例红）；native `new` 不清零（零值用例红） |
 | K3 | 检查器：`Mem` 效果、`with_mem`、R1 到 R4、`Mem` 在 `const`/comptime 的拒绝；`std/mem` 带上 `!Mem`；Core 保序测试 | **句柄逃逸的变异体负控全红**（下一行）；正例（§4.3）全绿；bcrypt 再量一次，这次**含 `Mem` 证据参数**，JVM <= 1.5 倍、native <= 1.2 倍；**同机同轮对比 K2（无证据）：慢出 10% 以上就触发零操作标记效果备用方案（§10 问题 2）**，两后端各判一次；Core 保序：夹在两次 `at` 之间的 `set` 不被消除，两次 `at` 不被合并（golden）；`Array`/pvec/emit 语料零差异 | R1：关掉规则后，下表 N1 到 N5 各自**必须**编过，开着必须红；R2：N6；R3：N7、N8；R4：N9；加 N10 作用域外调 `at`（「没人应答」，内置规则） |
 | K4 | dawnop-site 迁移 bcrypt（须先发 release、bump `.dawn-version`）；评估 sha2 的 W 表与 H 状态 | 41 个 hash 与 6 个测试逐字节一致；native 同 hash；JVM cost 12 <= 0.27 s（<= 1.5 倍），native <= 0.23 s（<= 1.2 倍）；sha2 只评估不承诺（目标越过 25 到 30 MB/s，现状出处在调研报告 §1）；**已达成**：JVM 0.162 s、native 0.142 s，41 个 hash 与 6 个测试一致，sha2 实测 JVM 约 59 MB/s、native 约 128 MB/s 故不改（§8，K4 报告 2026-10-14） | 把 `from_list(INIT)` 改成共享同一个缓冲跨调用（须被 R1 拒绝，或被测试发现两次调用互相污染） |
-| K5 | `F64Buf`；`to_bytes`/`from_bytes` 与批量线原语的缓冲端点 | 1M 元素缓冲与 `Bytes` 往返：位保真（`0x7FF8000000000001`、`-0.0` 往返，两后端逐字节一致）；端到端耗时 <= 批量线同尺寸 `List` 路径（批量线通过线 1.5 倍 `List` 拷贝），实测数在本刀补记 | 字节序写反；宽度错一档；符号扩展写成零扩展 |
+| K5 | `F64Buf`；`to_bytes`/`from_bytes` 与批量线原语的缓冲端点 | 1M 元素缓冲与 `Bytes` 往返：位保真（`0x7FF8000000000001`、`-0.0` 往返，两后端逐字节一致）；端到端耗时 <= 批量线同尺寸 `List` 路径（批量线通过线 1.5 倍 `List` 拷贝），实测数在本刀补记；**已达成**（PR #737，§9.3） | 字节序写反；宽度错一档；符号扩展写成零扩展（**已验：JVM 与 native 各三个，全红**，§9.3） |
 | K6 | 可选：JVM 静态唯一性分析（裁决第 5 条） | 仅在出现按位置更新 `List` 的实测需求时再评 | |
 
 ### 9.1 K2 落地记录（2026-10-09）
@@ -464,6 +464,69 @@ N7 与 N8 与设计稿的表有一点不同：设计稿把「操作签名」与�
 **没覆盖的。** `Mem` 与 `ctl` 效果的相互作用（挂起的续延持有句柄）只由 mem-contract 的 `dropped_line` 在运行时覆盖，没有对应的检查器夹具；
 `F64Buf` 仍是 K5。
 
+### 9.3 K5 落地记录（2026-10-14，PR #737）
+
+两刀两个提交，一个 PR。基线 `origin/main` = 6376f3c8。
+
+1. **刀 1：`F64Buf`。** 内置类型 `F64Buf`（`TyF64Buf`、头 `HF64Buf`、JVM `double[]`、native `dawn_f64buf *`），六个 std-only 原语
+   `f64buf_new/len/at/set/fill/copy_from`（经 `RtMem`，comptime 一律拒绝），`std/mem` 的 `f64_new`、`f64_at`、`f64_set`、`f64_fill`、`f64_copy_from`、`f64_copy_within`、
+   `f64_clone`、`f64_from_list`、`f64_to_list` 与 `impl Len[F64Buf]`。元素按 `double` 存取，不经算术，NaN 载荷与 `-0.0` 的位原样保留。
+   panic 措辞是 I64Buf 的、类型名换成 `F64Buf`，两后端逐字一致。
+2. **与 §7 的偏差：`Mem` 效果多了第二个操作 `mem_alloc_f64`。** 设计稿把 `mem_alloc` 写成 `Mem` 唯一的操作。`F64Buf` 若不走 `with_mem` 的 handler，
+   就绕过了 R1 到 R4 全部规则，所以 `with_mem` 的 handler 现在答两个操作，用户 handler 因此必须也答两个（`mem_n06_user_handler` 用例随之改写）。
+3. **JVM 实现：一份生成器两个家族。** `gen_mem_class` 里的六个原语改为 `gen_buf_ops(cw, kind)`，`BufKind` 只记名字、数组描述符与搬一个元素的操作码；
+   检查逻辑只写一遍，`I64Buf` 与 `F64Buf` 不会各自漂移。
+4. **刀 2：缓冲端点。** `to_bytes(b, width, order = Little)` / `from_bytes(bs, width, signed, order = Little)`（`I64Buf`），
+   `f64_to_bytes(b, width, order = Little)` / `f64_from_bytes(bs, width, order = Little)`（`F64Buf`），四个 std-only 原语 `i64buf_pack`、`i64buf_unpack`、
+   `f64buf_pack`、`f64buf_unpack`。**字节序依据：** 设计稿 §7 写明语义原样沿用批量线 §3，所以沿用 `Endian`，原语层与 `bytes_pack_int` 一样以 `little: Bool` 收
+   （builtin 签名不能名用户类型），`Endian` 到 `Bool` 在 `std/mem` 里一处转换。宽度、环绕、符号扩展与两种 panic 措辞（`bytes.pack: width W is not ...`、
+   `bytes.unpack: length L is not a multiple of W`）与批量线逐字相同，没有另造一套。JVM 沿用 `ByteBuffer` 设好字节序再逐元素读写，复用批量线的
+   `int_width`、`float_width`、`unpack_count`；native 在宽度 8 且字节序等于本机时是一次 `memcpy`，其余走批量线的 `dawn_put_int`/`dawn_get_int`。
+   结果一次分配、一次填满。
+5. **验证。** `scripts/mem-contract` 扩到 `F64Buf`（值、位、panic、重叠拷贝）与端点：整数样本（宽度与符号边缘共 14 个值）在四种宽度、两种字节序下的
+   24 行（`to_bytes` 十六进制与 `from_bytes` 数值）由独立的 Python 模型逐行核对，不是录自任何后端；`1M` 元素往返用 64 位线性同余生成的位型（`F64Buf` 侧含各种 NaN 载荷、次正规数、无穷），
+   宽度 8 往返零差，宽度 4 的有符号与无符号和也由 Python 复算一致。同一份 `expected.txt` 由 JVM、native、ASan/LSan/UBSan 三路逐字节通过。
+   `0x7FF8000000000001` 与 `-0.0` 的往返在 `expected.txt` 里按位核对。`scripts/rc-contract` 新增 `f64buf` 断言。
+   **负控（各一个，手工施加，均已还原）：**
+
+   | 变异体 | JVM 运行时 | C 运行时 |
+   |---|---|---|
+   | 字节序写反（打包时翻转 `little`，C 另翻转 `memcpy` 快路径条件） | 红，探针与 `expected.txt` 不符 | 红，同上 |
+   | 宽度错一档（4 字节分支只写 2 字节） | 红 | 红 |
+   | 符号扩展写成零扩展 | 红 | 红 |
+
+6. **实测（1M 元素，七轮取中位，三个进程再取中位，参考机有其它任务；基准程序在临时目录，未入库）。**
+   基线是同程序里 `list.map` 恒等拷贝一遍（批量线的口径）。
+
+   | 项 | JVM | native（`cc` 13.3 `-O2`） | 通过线（1.5 倍 `List` 拷贝） |
+   |---|---|---|---|
+   | `List` 拷贝基线，Int | 33.2 ms | 56.2 ms | |
+   | `List` 拷贝基线，Float | 26.5 ms | 41.7 ms | |
+   | `pack_ints` + `unpack_ints`（`List` 路径） | 10.7 ms | 55.3 ms | |
+   | `pack_floats` + `unpack_floats`（`List` 路径） | 6.5 ms | 37.0 ms | |
+   | `to_bytes` + `from_bytes`（`I64Buf`，缓冲到缓冲） | 1.3 ms | 0.84 ms | <= 50 / 84 ms，过 |
+   | `f64_to_bytes` + `f64_from_bytes`（`F64Buf`） | 1.3 ms | 3.3 ms | <= 40 / 63 ms，过 |
+   | `List` 到缓冲到 `Bytes` 到缓冲到 `List`，Int（含 `from_list`/`to_list`） | 25.5 ms | 69.6 ms | <= 50 / 84 ms，过 |
+   | 同上，Float | 14.2 ms | 53.6 ms | <= 40 / 63 ms，过 |
+
+   缓冲到缓冲的往返比 `List` 路径快一个数量级以上（native 约 66 倍，JVM 约 8 倍），与 §7 的预期一致：预期「拆包落在 memcpy 量级」成立。
+   **含 `List` 转换的端到端**在 native 上反而比纯 `List` 路径慢（69.6 对 55.3 ms，约 1.26 倍）：多出来的是 `from_list`/`to_list` 两个 Dawn 循环（见第 7 条）。
+   JVM 各轮抖动大（`List` 路径吃 GC，单轮可差数倍），只当量级；native 三次之间差不到 3%。
+   `f64` 的 native 往返（3.3 ms）比 `i64`（0.84 ms）慢约四倍，两条路径的代码形状相同，原因未查（页错误或分配器复用是猜测），未影响通过线。
+7. **待裁问题 7 的数字（`from_list`/`to_list` 的 Dawn 循环对批量线，不改实现，待协调者裁）。** 「批量线实现」指
+   `to_list(b) = bytes.unpack_ints(to_bytes(b, 8), 8, true)`、`from_list(xs) = from_bytes(bytes.pack_ints(xs, 8), 8, true)`，即用现成的批量原语绕一圈：
+
+   | 项 | JVM 循环 | JVM 批量 | native 循环 | native 批量 |
+   |---|---|---|---|---|
+   | `from_list`（1M Int） | 3.3 ms | 3.8 ms | 31.2 ms | 24.7 ms |
+   | `to_list`（1M Int） | 20.2 ms | 7.1 ms | 38.2 ms | 27.1 ms |
+
+   建议：`to_list` 改走批量路径（JVM 约 2.9 倍，native 约 1.4 倍，实现是一行）；`from_list` 不改（JVM 持平略慢，native 快 21% 但多一份 8 MB 中间 `Bytes`，
+   且批量线的 `List` 到 `Array` 那一步本身就是逐元素的）。更彻底的做法是直接加 `i64buf_from_array`/`i64buf_to_array` 两个原语（预分配、一遍填满，
+   K0 量到的 8.4 ms 对 29 ms 就是这个差），但那是新原语，不在 K5 范围，要不要做请裁。bcrypt 的 `from_list` 只调一次、1042 个字，这些都不影响它。
+8. **输出变化。** 每个程序的 jar 都带 `dawn/rt/Mem`，它多了方法，所以 prev-diff 的 10 个 `emit *` 标签全变；另有 `doc --builtins` 与 `lsp`；
+   fmt 零差。两个提交的信息里逐标签声明了 `Emit-Change(...)`。
+
 ## 10. 待裁问题与裁决
 
 2026-10-09 协调者对本文七个待裁问题逐条裁决如下。已裁的写进正文，延后的写明重开条件。
@@ -502,7 +565,7 @@ N7 与 N8 与设计稿的表有一点不同：设计稿把「操作签名」与�
 5. **名字：已裁。** `with_mem` 不变。图形学行话 `blit` 废弃，区间拷贝取 Rust/Java 先例：`copy_from(dst, dst_at, src, src_at, n)`（目的在前，Rust `copy_from_slice` 同序）与 `copy_within(b, from, to_at, n)`；
    整份复制叫 `clone`，不叫 `copy`，使「写进已有缓冲」（`copy_*`）与「产出新缓冲」（`clone`）两簇不会混淆。理由见 §3.2。
 6. **`MAX_LEN = 2^31 - 9`：已裁，两后端取同值，通过。** 取同值换取行为一致，代价是 native 拿不到 2^31 以上的缓冲，没有调用点要它。
-7. **`from_list`/`to_list` 是否在 K5 改走批量线的 `array_extend`/`pvec.to_array`：延后到 K5。** 现在 Dawn 循环够 bcrypt（1042 个字，一次）用，没有实测理由先动；K5 量完再定。
+7. **`from_list`/`to_list` 是否在 K5 改走批量线的 `array_extend`/`pvec.to_array`：延后到 K5。** 现在 Dawn 循环够 bcrypt（1042 个字，一次）用，没有实测理由先动；K5 量完再定。**K5 已量（PR #737，§9.3 第 6 条）**：数字与建议在那里，实现未改，待协调者裁。
 
 8. **R1 的泛型缺口：已裁，方案 A（2026-10-13）。** 结果类型含类型变量即拒，不靠枚举入口。落地记录见 §9.2 第 2 条（92c257d5）。
    方案 C（自动 trait `Unscoped`）的触发条件同问题 1：第二个客户（预期 `Gpu` 设备句柄）出现时另写设计稿。
