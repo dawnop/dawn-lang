@@ -180,7 +180,7 @@ leetgpu 题」，`features.txt` 说的是「这个后端实现了 Tile IR 的哪
 | T10 | 13.3 其余：`alloca` `mmaf_scaled` | 2 |
 | T15 | `OptimizationHints`（属性标签 11 加 Dictionary 10） | 0 |
 
-T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起（裁决 2 已于 2026-09-06 撤销；裁决 4 的前提随刀 U1 / U2 升钉 13.4 成立，2026-10-02 解封，T14 另派；T14a 的 Producer 段见 §6.35，T14b 的 Debug 段见 §6.36）。
+T11 到 T13（view 族）按裁决 2 挂起，T14（Debug 段与 Producer 段）按裁决 4 挂起（裁决 2 已于 2026-09-06 撤销；裁决 4 的前提随刀 U1 / U2 升钉 13.4 成立，2026-10-02 解封，T14 另派；T14a 的 Producer 段见 §6.35，T14b 的 Debug 段见 §6.36，T14c 的反汇编全文对拍见 §6.37）。
 leetgpu 刀 21 照常收尾，之后不再派 leetgpu 刀，剩余题目只作副产品记录。
 
 **版本墙（T8）比想象的便宜，这条预研独立复核过，刀 T8 落地时又逐处重量了一遍。**
@@ -909,7 +909,7 @@ pub fn d_for2[A, B](lower: Idx, upper: Idx, step: Idx, a: Tile[A], b: Tile[B],
 - `cuda-tile-translate` 仍不在 pip、未构建。刀 3 不再需要它做 round-trip：`tileiras` 内含
   `cuda-tile` 的 bytecode reader 与 MLIR verifier，拒绝时给出字节偏移与 op 名（§6.2 的变异体
   报文），比一个只会打印文本的翻译器说得更多。CUDA 13.4 的 tileiras wheel 自带 `tileirdisasm`
-  （cuTile.jl 已接）；刀 U1 / U2 升钉之后它就在钉住的工具链里，T14a 已经把它接进 run.sh 读 Producer 首行（§6.35），整份文本对拍是 T14c 的事（§6.18）。
+  （cuTile.jl 已接）；刀 U1 / U2 升钉之后它就在钉住的工具链里，T14a 已经把它接进 run.sh 读 Producer 首行（§6.35），整份文本对拍是 T14c 的事，已在 §6.37 落地。
 
 ### 6.2 三层门
 
@@ -5781,6 +5781,92 @@ tile 输入摘要因此变了：**sm_86 / sm_90 / sm_100 三份台账等 int 立
 - 多函数、DILexicalBlock 与 CallSite：Tile IR 的 kernel 一个入口，包里没有内联函数，没有地方产生它们。写入器的布局为函数个数留了位，但这里恒为一。
 - `-O0 -g` 的判词：改变代码，而且报告量过 `-g` 在 `-O3` 下被拒；`--lineinfo` 是不改代码的那一条路。
 - 把 `.disasm` 的全文对拍扩到全部 golden：T14c（调研报告 4.4）。
+
+### 6.37 反汇编全文对拍：规范化后比较（刀 T14c，无包改动）
+
+T14a、T14b 之后，`tileirdisasm` 在 run.sh 里只读了三个东西（Producer 首行、两个 `-g` 表）。这一刀把它扩到全部 208 个 golden：`tileirdisasm` 读回 `<kernel>.tilebc` 得到的文本，
+必须就是 `<kernel>.mlir`。这是目前唯一一条说「文本与字节是同一个程序」的判词：文本 golden 只说文本没变，字节 golden 只说字节没变，两条各自被错误地重录之后都仍然绿。
+不改任何包，不动任何 golden，两个后端的字节都与之前相同。
+
+**一、为什么要规范化，以及为什么选这一条路。** 两边是两台不同的打印机：`.mlir` 是本仓渲染器，拼写跟 `cuda-tile-translate`；反汇编是 NVIDIA 闭源工具链里的另一台，按算子语义给值起名、
+省略默认属性、把全局初值印成十六进制 blob。逐字比，208 个里一个都相等（SSA 名字一项就让每一行都不同）。三条路：
+
+- (A) 渲染器迁就反汇编：不选。差异的大头是命名，要在渲染器里新写一套「按算子起名加去重后缀」的逻辑；不动命名的那几类也要改约 1900 行、203 个 kernel 的 `.mlir`；Debug 段的位置表指向 `.mlir` 的行列（§6.36），
+  `.mlir` 一动，`vadd_debug` 与 `foldif_debug` 的字节与 `.disasm` 全部重录。更根本的是它把反汇编器的怪癖（省略属性后留下的双空格、`fnv8E5M3FNU` 的拼写）变成我们的格式，
+  下次升 `tileirdisasm`，golden 跟着它变。
+- (B) 每个 kernel 另存一份 `.disasm`：不选。它只证明「`tileirdisasm` 对这些字节的输出没变」，而字节没变已由 `.tilebc` 逐字节门保证；文本与字节是否同义，它一个字也没有说。每次升 `tileirdisasm` 要重录 208 个文件。
+- (C) 两边过同一个规范化器再比：选。判词是「语义同一」而不是「拼写同一」。代价是规则表本身必须被守住，下面第三节说怎么守。
+
+**二、规则表（`scripts/tile-golden/disasm-norm.py`，封闭，20 条）。** 一类差异一条具名规则；「侧」是规则作用的那一侧（M 是 `.mlir`，D 是反汇编）；「kernel 数」是去掉这条规则后会红的 kernel 数（208 个里的实测）。
+
+| 规则 | 侧 | kernel 数 | 吃掉的差异 |
+|------|----|-----------|------------|
+| `module-wrapper` | M | 208 | `cuda_tile.module @m { ... }` 外壳（反汇编只印 `entry`）；首行不是它或末行不是 `}` 就报错 |
+| `indent` | 两侧 | 208 | 行首缩进（M 两层，D 一层）；区域结构由花括号表达，缩进不带信息 |
+| `producer-comment` | D | 1 | 首行 `// Producer: ...`（T14a 已单独判过；`.mlir` 没地方放） |
+| `region-params-own-line` | D | 54 | `reduce` / `scan` 的区域参数 `(%a: t, ...) {` 被印在单独一行，并入上一行 |
+| `space-runs` | 两侧 | 133 | 连续空格压成一个并去掉行尾空格（省略默认属性后留下的双空格、`global  @x`）；字符串字面量内部不动 |
+| `tensor-view-strides-comma` | M | 85 | 类型里 `strides=[32, 1]` 与 `strides=[32,1]` |
+| `view-token-equals-space` | M | 187 | view 类操作（`load_view_tko`、`store_view_tko`、`atomic_red_view_tko`）的 `token=%x` 与 `token = %x`；指针类的两边都不带空格，不动 |
+| `hints-equals-space` | M | 1 | 操作上的 `optimization_hints=<` 与 `optimization_hints = <`；`entry` 行的两边一致，不动 |
+| `inbounds-equals-space` | M | 2 | `inbounds=[` 与 `inbounds = [` |
+| `default-rounding` | M | 133 | 默认舍入属性不印：`addf` / `subf` / `mulf` / `divf` / `sqrt` / `fma` / `itof` / `ftof` 的 `rounding<nearest_even>`，`ftoi` 的 `rounding<nearest_int_to_zero>`；别的模式一律保留 |
+| `identity-dim-map` | M | 187 | `partition_view` 的恒等 `dim_map=[0]` / `[0, 1]` 不印；非恒等保留 |
+| `fp8-e5m3-spelling` | D | 2 | 反汇编把 `f8E5M3FNU` 印成 `fnv8E5M3FNU`（13.4.92 的拼写；上游方言的名字是前者，规则只改这一个词，别的 fp8 拼写不动） |
+| `loop-result-parens` | M | 4 | `loop ... -> (tys) {` 与 `-> tys {`；`for` 两边都带括号，不动 |
+| `for-unsigned-position` | D | 1 | `for unsigned %i in (...) :` 与 `for %i in (...) unsigned :` |
+| `empty-else-yield` | M | 4 | 只含一个无操作数 `yield` 的 `else` 体，反汇编印成空体 |
+| `string-escape` | 两侧 | 1 | 字符串字面量的转义：`\n` 与 `\0A`；两侧解码成字节再统一写成 `\XX` |
+| `i1-literal` | M | 18 | `<i1: 0>` 与 `<i1: false>` |
+| `float-literal` | 两侧 | 119 | 浮点常量与 `identities` 按**位模式**比较（该类型自己的宽度）：`1.0` 与 `1.000000e+00`、`-Infinity` 与 `0xFFF0000000000000`（f32 为 `0xFF800000`）、Java 的 `-2.147483649E9` 与 `-2147483649.0`、17 位 `0.3275911` 与 `0.32759110000000002`；`identities` 里有限 f64 的 `: f64` 反汇编不印，类型取对应操作数的元素类型 |
+| `global-initializer` | 两侧 | 4 | 全局初值：M 的列表、D 的十六进制 blob、全零的 splat 简写，都展开成逐元素的位模式；长度必须等于 tile 的元素数 |
+| `ssa-alpha` | 两侧 | 208 | 按定义顺序重命名所有值（`%v0`、`%v1`...）：行首结果、`for` 归纳变量、`iter_values` 绑定、区域参数都是定义；`%for:2` 展开成两个结果，`%for#1` 取第二个；字符串内的 `%d` 不动；使用在读到的时刻按环境解析，所以反汇编在兄弟区域里重用同一个名字（`%7`、`%cst_1_i32_8`）得到的是新值；使用先于定义、或 `#i` 越过结果数，都报错 |
+
+没有「忽略这一行」「前缀匹配」「忽略操作数」。规范化后两边仍有一行不同，或任何一步遇到规则表没见过的东西（未知转义、blob 长度不符、使用先于定义），run.sh 就红并打印规范化后的 `diff -u`：
+登记新规则是一个决定，不是一次顺手的放宽。
+
+**三、规则表怎么不退化成不会红的门。** `disasm-norm.py selftest` 对每条规则做两件事，对着真的 `tileirdisasm`：
+
+1. **规则是活的**：拿一个用到它的 kernel，单独去掉这条规则，该 kernel 必须变红（否则规则是死的，表里多一条没人守的放宽）。
+2. **反例仍红**：对同一个 kernel 的一侧做一处**语义改动，藏在该规则的类别里**，规范化后仍必须不等。20 条各一个，另有四个补充反例。
+
+| 规则 | 反例（改的是哪一侧的什么） |
+|------|----------------------------|
+| `default-rounding` | `rounding<nearest_even>` 改成 `rounding<zero>`；`ftoi` 的 `nearest_int_to_zero` 改成 `nearest_even` |
+| `identity-dim-map` | 恒等 `dim_map=[0, 1]` 改成 `[1, 0]`（规则只吃恒等） |
+| `float-literal` | 17 位 `0.32759110000000002` 的第 7 位改掉（D 侧）；f32 的 `-Infinity` 改成 `Infinity`；改成 `-3.4028234663852886E38`（f32 最小有限值，不是无穷） |
+| `global-initializer` | D 的 blob 第一个元素 `1.0` 的字节（`...F03F`）改成 `...F13F`；M 列表的第一个 `1.0` 改 `1.5` |
+| `ssa-alpha` | 一个操作数换成另一个值（`addf %12, %17` 变 `addf %12, %12`） |
+| `i1-literal` | `<i1: 0>` 改 `<i1: 1>` |
+| `tensor-view-strides-comma` | `strides=[a, b]` 改 `strides=[b,a]` |
+| `fp8-e5m3-spelling` | D 的 `fnv8E5M3FNU` 改成 `fnv8E4M3FN` |
+| `loop-result-parens` | 括号里一个类型改成另一个 |
+| `for-unsigned-position` | D 去掉 `unsigned` |
+| `empty-else-yield` | `else` 体里多一个 `yield` |
+| `region-params-own-line` | 区域参数的一个类型改掉 |
+| `view-token-equals-space`、`hints-equals-space`、`inbounds-equals-space` | token 操作数换一个值、`latency = 4` 改 5、`inbounds=[false, true]` 改 `[true, false]` |
+| `module-wrapper`、`indent`、`producer-comment`、`space-runs`、`string-escape` | 改函数名；把 `return` 挪到 `}` 之后；多一行 `// Producer:`；字符串里 `max` 前多一个空格；字符串内容改一个词 |
+
+`selftest` 在 `vadd` 那一项里跑（一次，纯文本加 `tileirdisasm`，0.1 秒）。规则越宽，反例越难红；一条规则的反例红不了，就说明它吃多了。
+
+**四、run.sh 的接线。** 每个 kernel 在 `assemble` 之后多一步 `disasm`：`tileirdisasm <k>.tilebc` 的输出（stderr 必须为空）与 `<k>.mlir` 过 `disasm-norm.py compare`，红就带 diff。
+`--without-tileiras` 时跳过（反汇编器和汇编器在同一个 wheel 里）。208 个 kernel 全部在这一步分片到各自的 shard，矩阵不变（301 项），tile.yml 一个步骤没动，所以 steps lock 不用重录。
+`tileirdisasm` 的 `-g` 版与 `.disasm` 两份仍然只在 `vadd_debug` / `foldif_debug`，T14b 的判词不变。
+
+**五、实测。** 规则表补齐之前的调研在 208 个 golden 上得到 202 个相等，剩 6 个都是规范化器自己的缺陷（17 位浮点、f32 的十六进制无穷、`for unsigned` 的定义位置、`identities` 的空格），
+没有一个是语义差异。落码之后 **208 / 208 相等，0 条语义差异**。CI 墙钟：每个 kernel 一次 `tileirdisasm`（约 2 毫秒）加一次 Python 进程（约 35 毫秒，其中规范化不到 2 毫秒），本机 208 个共 7.7 秒（跑着整套 tile-golden 的机器上量的，空闲时更低），
+八个 shard 均分约每片 1 秒；`selftest` 0.1 秒。落在 3x 声明的取整里，不碰 shard 的声明值，也不需要 `Gate-Budget` 行。
+
+**六、台账。** tile 输入摘要变了（`scripts/tile-golden` 在摘要里），sm_86 台账重录一行；sm_90 与 sm_100 不在本刀录。
+
+**不做的（理由）：**
+
+- (A) 渲染器照抄反汇编：约 1900 行、203 个 kernel 的 `.mlir` 改动，命名逻辑要新写，Debug 段相关 golden 全部重录，并把反汇编器的怪癖变成我们的规范（见第一节）。
+- (B) 每个 kernel 另存 `.disasm`：与 `.tilebc` 逐字节门重复，只证明字节没变，不证明文本与字节一致；每次升 `tileirdisasm` 要重录 208 个文件（见第一节）。
+- 在规范化里做模糊匹配、跳行或忽略操作数：那样规则表就不封闭，门也就不会红了。
+- 在渲染器里把浮点改成 17 位有效数字：`0.3275911` 与 `0.32759110000000002` 是同一个 f64，差异在两个打印机的 shortest-round-trip 习惯，不是精度丢失；按位模式比较就够了。
+- `-g` 版全文对拍：`-g` 的判词仍是 T14b 的位置表；`-g` 版多出的 `loc(#locN)` 与尾部属性表不是 `.mlir` 里的东西。
+- 用 `cuda-tile-opt` / `cuda-tile-translate` 当规范打印机（cuda-tile 的 round-trip 测试就是这么做的）：本机和 CI 都没有这两个二进制，也不在钉住的工具链里。
 
 ## 7. 刀序
 
