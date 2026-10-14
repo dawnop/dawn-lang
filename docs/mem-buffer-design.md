@@ -37,6 +37,8 @@
 | 同上：JVM 平铺 i64 缓冲 0.198 到 0.206 s（约 1.05 倍 jBCrypt） | K0 实测，同上 |
 | 同上：JVM 当前的纯 Dawn 追加式实现约 2.4 s（约 12 倍） | K0 实测，同上 |
 | 同上：native 平铺缓冲，clang-20 -O2、无 LTO：0.317 到 0.32 s（约 1.7 倍）；同一份代码加 `-flto`：0.19 到 0.20 s（约 1.0 倍） | K0 实测，同上 |
+| K4 迁移后 bcrypt cost 12 `checkpw`，JVM：0.162 s；同机 jBCrypt 0.160 s（5 次稳态）；迁移前旧 List 版约 1.9 s | K4 报告（2026-10-14，dawnop-site 迁移分支），同机、稳态、三次启动取尾部中位；临时 bench（8 次连续 `checkpw` 取后段），未入库 |
+| 同上：native 0.142 s | K4 报告（2026-10-14，dawnop-site 迁移分支），方法同上；dawnc 取 v0.89.0 release 资产并校验 sha256 |
 | K0 JVM 形态：`Int` 是 `long`，`get`/`set` 是 `(J)J` 静态方法，C2 全内联，无装箱 | K0 实测，同上 |
 | K0 native 慢的原因：`get`/`set` 住在 `dawn_rt.c`，每次访问是一次跨翻译单元调用加双重界检查 | K0 实测，同上 |
 | Core IR 没有死码消除未使用的 `set`、没有对 `get` 做公共子表达式消除，测试通过 | K0 实测，同上 |
@@ -282,7 +284,7 @@ pub fn from_bytes(bs: Bytes, width: Int, signed: Bool, order: Endian = Little) -
   对 bcrypt（1042 个字，一次）不是瓶颈，其余场景**未量**。
 - `F64Buf`（`double[]` / `double*`）同形，位保真，K5 做。落在同一模块 `std/mem`，函数名带 `f64_` 前缀（待裁问题 3，已裁）：`f64_new`、`f64_at`、`f64_set`、`f64_fill`、`f64_copy_from`、`f64_copy_within`、`f64_clone`、`f64_from_list`、`f64_to_list`；长度不另起 `f64_len`，`F64Buf` 与 `I64Buf` 各给一个 `impl Len`（Len 裁决 K5，修订上面待裁问题 3 的命名）；`Mem` 效果与 `with_mem` 共用。
 
-## 8. bcrypt 迁移草图（K4，只示意）
+## 8. bcrypt 迁移草图（K4，已落地，下为原示意稿）
 
 ```dawn
 use std/mem
@@ -318,6 +320,15 @@ pub fn hash_raw(password: Bytes, salt: Bytes, cost: Int) -> List[Int] =
 `digest` 在作用域内 `to_list`，出口只有 `List[Int]`；`hash_raw` 对外是纯函数，可折叠可消重。迁移改的是 dawnop-site 一个文件，
 现有 41 个 hash 与 6 个测试不变。**迁移须先发 dawn-lang release 并 bump `.dawn-version`**（裁决 K4 备注）。
 
+**K4 落地结果**（出处：K4 报告，2026-10-14；dawnop-site PR #5，已合并为该仓 main 的 31f185de，哈希稳定）：
+
+- 做法照本节：`hash_raw` 内 `with_mem(...)`，辅助函数显式收句柄并带 `!Mem`，`rewrite` 内联 16 轮。
+- 性能（同机、稳态、三次启动取尾部中位，cost 12 `checkpw`）：JVM 0.162 s，同机 jBCrypt 0.160 s，native 0.142 s；均在 K4 门限内（JVM 0.27 s，native 0.23 s）。
+- 41 个 hash 与 6 个原测试逐字节一致，native 给出同样的 hash。
+- emit 转储（`dawnc emitc`）：`feistel`/`encipher`/`rewrite` 对句柄只有借用，16 轮热循环里没有 `dawn_dup`/`dawn_drop`。
+- 变异体负控：把 `from_list(INIT)` 提出 `with_mem` 外共享，R1 拒绝（`the result of with_mem cannot mention a buffer`）。
+- sha2 只评估、未改：现状没有 W 表（消息调度用 16 个局部变量滑窗），H 状态是 8 元素 `List`；实测（16 MB，1 MB 一次 update，稳态）JVM 约 59 MB/s，native 约 128 MB/s，已高于 25 到 30 MB/s 的目标，故不动。
+
 ## 9. 刀序与验收
 
 每刀一个 PR、一个主题、每刀一个提交。门禁覆盖用 `scripts/gate-map/gatemap.py` 查，不推导。
@@ -326,7 +337,7 @@ pub fn hash_raw(password: Bytes, salt: Bytes, cost: Int) -> List[Int] =
 |---|---|---|---|
 | K2 | 两后端运行时：`RtMem` 六个原语；`I64Buf` 内置类型；`static inline` 头文件版 `at`/`set`；契约门 `scripts/mem-contract`；`std/mem` 里**只含**原语的薄包装（暂无 `Mem` 效果，辅助函数先不带标签） | 合约 `.expect` 两后端逐字一致（§5 全表加 `2^32+5` 别名）；ASan 门三用例绿；`intrinsic-parity`、`builtin-type-contract` 绿；**重量 K0 的 bcrypt（句柄参数版、显式长整比较）：JVM <= 1.5 倍 jBCrypt（<= 0.27 s），native <= 1.2 倍（<= 0.23 s）**，同机、稳态、三次取中位；`Array`/pvec 与 emit 语料零差异（新增 `RtMem` 若令 emit 产物字节变化，按 `scripts/emit-labels.txt` 逐字 label 声明） | 越界比较写成 `>` 而非 `>=`；JVM 漏掉先比后截断（`2^32+5` 用例红）；`copy_from` 同缓冲重叠按正向逐元素拷贝（重叠用例红）；native `new` 不清零（零值用例红） |
 | K3 | 检查器：`Mem` 效果、`with_mem`、R1 到 R4、`Mem` 在 `const`/comptime 的拒绝；`std/mem` 带上 `!Mem`；Core 保序测试 | **句柄逃逸的变异体负控全红**（下一行）；正例（§4.3）全绿；bcrypt 再量一次，这次**含 `Mem` 证据参数**，JVM <= 1.5 倍、native <= 1.2 倍；**同机同轮对比 K2（无证据）：慢出 10% 以上就触发零操作标记效果备用方案（§10 问题 2）**，两后端各判一次；Core 保序：夹在两次 `at` 之间的 `set` 不被消除，两次 `at` 不被合并（golden）；`Array`/pvec/emit 语料零差异 | R1：关掉规则后，下表 N1 到 N5 各自**必须**编过，开着必须红；R2：N6；R3：N7、N8；R4：N9；加 N10 作用域外调 `at`（「没人应答」，内置规则） |
-| K4 | dawnop-site 迁移 bcrypt（须先发 release、bump `.dawn-version`）；评估 sha2 的 W 表与 H 状态 | 41 个 hash 与 6 个测试逐字节一致；native 同 hash；JVM cost 12 <= 0.27 s（<= 1.5 倍），native <= 0.23 s（<= 1.2 倍）；sha2 只评估不承诺（目标越过 25 到 30 MB/s，现状出处在调研报告 §1） | 把 `from_list(INIT)` 改成共享同一个缓冲跨调用（须被 R1 拒绝，或被测试发现两次调用互相污染） |
+| K4 | dawnop-site 迁移 bcrypt（须先发 release、bump `.dawn-version`）；评估 sha2 的 W 表与 H 状态 | 41 个 hash 与 6 个测试逐字节一致；native 同 hash；JVM cost 12 <= 0.27 s（<= 1.5 倍），native <= 0.23 s（<= 1.2 倍）；sha2 只评估不承诺（目标越过 25 到 30 MB/s，现状出处在调研报告 §1）；**已达成**：JVM 0.162 s、native 0.142 s，41 个 hash 与 6 个测试一致，sha2 实测 JVM 约 59 MB/s、native 约 128 MB/s 故不改（§8，K4 报告 2026-10-14） | 把 `from_list(INIT)` 改成共享同一个缓冲跨调用（须被 R1 拒绝，或被测试发现两次调用互相污染） |
 | K5 | `F64Buf`；`to_bytes`/`from_bytes` 与批量线原语的缓冲端点 | 1M 元素缓冲与 `Bytes` 往返：位保真（`0x7FF8000000000001`、`-0.0` 往返，两后端逐字节一致）；端到端耗时 <= 批量线同尺寸 `List` 路径（批量线通过线 1.5 倍 `List` 拷贝），实测数在本刀补记 | 字节序写反；宽度错一档；符号扩展写成零扩展 |
 | K6 | 可选：JVM 静态唯一性分析（裁决第 5 条） | 仅在出现按位置更新 `List` 的实测需求时再评 | |
 
