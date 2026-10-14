@@ -746,7 +746,66 @@ def project_of(label):
         return "disk"
     if label.startswith("coverage"):
         return "coverage"
+    if label.startswith("untitled"):
+        return "untitled"
     return "main"
+
+
+UNTITLED = """use std/list
+
+fn helper(n: Int) -> Int = n + 1
+
+pub fn main() -> Unit !io = {
+  let xs = list.reverse([1, 2, 3])
+  if helper(xs[0]) > 0 { println("ok") }
+}
+"""
+
+
+def untitled_project(server, env, dump):
+    """A buffer with no file behind it (the Playground's) is its own rename
+    boundary (docs/lsp-references-design.md R3.1): a local function is renamed
+    across its uses inside the buffer, a std name is refused."""
+    uri = "untitled:rename"
+    work = tempfile.mkdtemp(prefix="lsp-rename-untitled.")
+    try:
+        s = Session(server, work, env)
+        try:
+            s.notify("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": "dawn", "version": 1, "text": UNTITLED}})
+
+            def rename(needle, delta, new):
+                params = {"textDocument": {"uri": uri}, "position": position(UNTITLED, needle, delta)}
+                if new is None:
+                    return s.request("textDocument/prepareRename", params)
+                params["newName"] = new
+                return s.request("textDocument/rename", params)
+
+            reply = rename("helper(xs", 1, "bump")
+            edits = (reply or {}).get("changes", {}).get(uri) if isinstance(reply, dict) else None
+            label = "untitled: a local function is renamed across its uses in the buffer"
+            if edits is not None and len(edits) == 2 and all(e["newText"] == "bump" for e in edits):
+                ok(label)
+            else:
+                bad(label, "got %r" % (reply,))
+            reply = rename("helper(xs", 1, None)
+            label = "untitled: prepareRename answers the name's spelling"
+            if isinstance(reply, dict) and reply.get("placeholder") == "helper":
+                ok(label)
+            else:
+                bad(label, "got %r" % (reply,))
+            for new in ("flip", None):
+                reply = rename("list.reverse", 6, new)
+                label = "untitled: a std name is refused (%s)" % ("rename" if new else "prepareRename")
+                msg = reply.get("error", "") if isinstance(reply, dict) else ""
+                if "declared outside this project's sources" in msg:
+                    ok(label)
+                else:
+                    bad(label, "got %r" % (reply,))
+        finally:
+            s.close()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def contract(server, env, dump=False, applied=True, only=None):
@@ -760,6 +819,8 @@ def contract(server, env, dump=False, applied=True, only=None):
         defaults_project(server, env, dump, dawn, applied)
     if only in (None, "coverage"):
         coverage_project(server, env, dump, dawn, applied)
+    if only in (None, "untitled"):
+        untitled_project(server, env, dump)
     if only in (None, "disk"):
         disk_project(server, env, dump, dawn, applied, True)
         disk_project(server, env, dump, dawn, applied, False)
@@ -794,6 +855,7 @@ MUTANTS = [
     ('trait-default-params-skipped', 'coverage: a parameter of a trait\'s default method'),
     ('qualified-member-by-length', 'coverage: a qualified type with a blank after the dot'),
     ('binders-read-comments', 'coverage: a comment in a parameter list is no binder'),
+    ('untitled-outside-renamed', 'untitled: a std name is refused (rename)'),
     ('link-owner-skipped', 'coverage: the owner of a doc link\'s member'),
     ('fences-by-prefix', 'coverage: a test\'s title and a link inside a fence'),
 ]

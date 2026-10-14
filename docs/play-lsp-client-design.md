@@ -267,9 +267,9 @@ hover 的版式（间距、暗色）与移动端行为要人在页面上看一�
 `renameChanges` 把编辑转成 CodeMirror 的 changes，**一次 `dispatch`**，所以一次撤销就整体还原；编辑重叠、区间反向、为空或超过 1000 条时什么也不应用。
 服务端拒绝时（`RequestFailed`）把原因显示在输入框旁，输入框不关；回包到达前文本已变则丢弃。
 
-**已知的限制**：真服务端对 `untitled:` 缓冲区的 rename 一律拒绝（`docs/lsp-references-design.md` §R3.1 第一行：standalone 没有工作区，改名的边界无从谈起），
-所以今天 Playground 上按 F2 得到的是那条拒绝原因，而不是改名。网关与客户端两头已经按完整的 `WorkspaceEdit` 写好并有合约守着；
-让它真能改名需要服务端对单文件缓冲区开放 rename，那是服务端的另一刀，不在本刀。
+**服务端的配合**：落地时（PR #731）真服务端对 `untitled:` 缓冲区的 rename 一律拒绝，Playground 上按 F2 得到的是那条拒绝原因。
+随后服务端改为：有分析的 `untitled:` 缓冲区以缓冲区本身为改名边界（`docs/lsp-references-design.md` §R3.1a），所以 F2 现在真能改名；
+std 里的名字照旧被拒绝，回包仍只含本缓冲区的编辑，网关与客户端不需要改。
 
 ### 7.3 测试
 

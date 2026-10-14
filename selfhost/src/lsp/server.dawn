@@ -3132,17 +3132,203 @@ fn keep_world_of(st: LspState, lookup: String, ws: Workspace, world: RefsWorld) 
 ## `st` keeping the references program (and index) a rename read.
 fn keep_world(st: LspState, rs: RenameStart, world: RefsWorld) -> LspState = keep_world_of(st, rs.lookup, rs.ws, world)
 
+## What a rename in an `untitled:` buffer starts from (§R3.1): the buffer is
+## the whole rename boundary, so there is no workspace, program index or source
+## root, only the buffer's own analysis.
+type LocalRename = {
+  analysis: Analysis,
+  entry: CheckedMod,
+  qc: QCx,
+  target: Key,
+  old: String,
+  lo: Int,
+  hi: Int,
+  as_name: Bool
+}
+
+## Is `d` an editor buffer with no file behind it, `untitled:`?
+fn is_untitled(d: Doc) -> Bool = str.starts_with(d.uri, "untitled:")
+
+## The rename at `offset` of the standalone buffer `d`, or why there is none.
+## The same refusals as `rename_start`, except that the boundary is the buffer:
+## a declaration anywhere else (std, a builtin) is outside it.
+fn local_rename_start(st: LspState, d: Doc, analysis: Analysis, offset: Int) -> Result[LocalRename, String] !Fs !Env = {
+  let prog = analysis.prog
+  let entry = match list.find(prog.modules, cm => cm.mod_path == analysis.entry) {
+    Some(e) -> e
+    None -> return Err("this document has no analysis to rename in")
+  }
+  let qc = module_qcx(st, prog, program_exports(st, prog), entry, d.view.cps)
+  let t = match find_target(qc, offset) {
+    Some(t) -> t
+    None -> return Err("there is no name here to rename")
+  }
+  let def = match t.def {
+    Some(sp) -> sp
+    None -> return Err("this name is not declared in this project's sources")
+  }
+  let here = match list.find(occurrences(qc, offset, true), o => o.lo <= offset && offset <= o.hi) {
+    Some(o) -> o
+    None -> return Err("there is no name here to rename")
+  }
+  let old = slice_cps(d.view.cps, here.lo, here.hi)
+  if name_class(old) == Err("`${old}` is not a name") { return Err("there is no name here to rename") }
+  let (dlo, dhi) = def
+  let own_decl = match t.def_path {
+    None -> true
+    Some(p) -> p == entry.path
+  }
+  if dlo == 0 && dhi == 0 && t.def_path != None {
+    return Err("`${old}` names a module; a module is renamed by moving its file")
+  }
+  let declared: Option[String] = if own_decl { Some(slice_cps(d.view.cps, dlo, dhi)) } else { None }
+  let as_name = declared != Some(old) && import_alias(entry.m, old)
+  if not as_name {
+    if not own_decl {
+      return Err("`${old}` is declared outside this project's sources (in std, a builtin or a dependency); rename only changes the project's own declarations")
+    }
+    if is_main(entry.m, def) { return Err("`main` is the program's entry point and keeps its name") }
+  }
+  if len(prog.diags) > 0 {
+    return Err("`${entry.mod_path}` has errors; rename reads every name, so fix them first")
+  }
+  let tpath = if own_decl { d.uri } else { t.def_path.expect("a declaration path") }
+  Ok(LocalRename {
+    analysis: analysis, entry: entry, qc: qc, target: Key { path: tpath, def: def },
+    old: old, lo: here.lo, hi: here.hi, as_name: as_name
+  })
+}
+
+## `textDocument/rename` in an `untitled:` buffer: every spelling of the name
+## in the buffer, its doc links included, refused as `handle_rename` refuses
+## (§R3.3) when the edited buffer has an error or a name that resolves
+## elsewhere than it did.
+fn local_rename(st: LspState, d: Doc, lr: LocalRename, new: String) -> Result[Json, String] !Fs !Env !io = {
+  match check_new_name(lr.old, new) {
+    Ok(_) -> ()
+    Err(why) -> return Err(why)
+  }
+  let none: Map[String, Json] = map.empty()
+  if new == lr.old { return Ok(jobj([("changes", JObj(none))])) }
+  let prog = lr.analysis.prog
+  let id = d.uri
+  var ident: Map[String, String] = map.empty()
+  ident = map.insert(ident, lr.entry.path, id)
+  var texts: Map[String, String] = map.empty()
+  texts = map.insert(texts, id, d.text)
+  var mods: Map[String, Module] = map.empty()
+  for tr in st.std.srcs {
+    let (mp, _, m) = tr
+    mods = map.insert(mods, mp, m)
+  }
+  for cm in prog.modules { mods = map.insert(mods, cm.mod_path, cm.m) }
+  let mr = mod_refs(lr.qc, id, d.text, ident, texts)
+  let cs = d.view.cps
+  let (tlo, thi) = lr.target.def
+  var edits: List[Edit] = []
+  for r in refs_to(mr, lr.target.path, (tlo, thi), true) {
+    if slice_cps(cs, r.lo, r.hi) == lr.old { edits = edits ++ [name_edit(id, r.lo, r.hi, r.pun, lr.old, new)] }
+  }
+  edits = edits ++ link_name_edits(prog, mods, lr.entry, id, d.text, cs, lr.old, new, ident, lr.target.path, tlo)
+  let one = ordered(edits)
+  let text2 = apply_edits(d.text, one)
+  let source_path = match d.path {
+    Some(p) -> p
+    None -> "<lsp>"
+  }
+  let after = standalone_analysis(st, source_path, text2)
+  var shown = ""
+  for ld in rendered_diags(after) {
+    if shown == "" {
+      let (line, ch) = lsp_position(view_of(text2), line_starts_of(text2), ld.d.lo)
+      shown = "${id}:${line + 1}:${ch + 1}: ${ld.d.msg}"
+    }
+  }
+  if shown != "" { return Err("renaming `${lr.old}` to `${new}` breaks the program: ${shown}") }
+  let by_path = map.insert(map.empty(), id, one)
+  let after_env = program_exports(st, after)
+  match list.find(after.modules, cm => cm.mod_path == lr.analysis.entry) {
+    Some(cm) -> {
+      let mr2 = mod_refs(module_qcx(st, after, after_env, cm, code_points(text2)), id, text2, ident, map.insert(texts, id, text2))
+      match changed_name(id, mr.refs, mr2.refs, edit_index(by_path), lr.target) {
+        Some(at) -> {
+          let (line, ch) = lsp_position(view_of(text2), line_starts_of(text2), at)
+          return Err("renaming `${lr.old}` to `${new}` would change what the name at ${id}:${line + 1}:${ch + 1} refers to")
+        }
+        None -> ()
+      }
+    }
+    None -> return Err("renaming `${lr.old}` to `${new}` breaks the program")
+  }
+  let changes = map.insert(none, d.uri, JArr(map(one, e => jobj([("range", jrange(d.view, d.ls, e.lo, e.hi)), ("newText", JStr(e.text))]))))
+  Ok(jobj([("changes", JObj(changes))]))
+}
+
 ## `textDocument/prepareRename`: the name's range and its spelling, or why
 ## the name at the position cannot be renamed.
 fn handle_prepare_rename(st: LspState, params: Json) -> (Result[Json, String], LspState) !Fs !Env !io =
   match doc_of(st, params) {
     Some(d) ->
-      match rename_start(st, d, pos_offset(d, params)) {
-        (Ok(rs), st1) -> (Ok(jobj([("range", jrange(d.view, d.ls, rs.lo, rs.hi)), ("placeholder", JStr(rs.old))])), st1)
-        (Err(why), st1) -> (Err(why), st1)
+      match local_analysis(st, d) {
+        Some(a) ->
+          match local_rename_start(st, d, a, pos_offset(d, params)) {
+            Ok(lr) -> (Ok(jobj([("range", jrange(d.view, d.ls, lr.lo, lr.hi)), ("placeholder", JStr(lr.old))])), st)
+            Err(why) -> (Err(why), st)
+          }
+        None -> prepare_in_project(st, d, params)
       }
     None -> (Err("this document is not open"), st)
   }
+
+fn prepare_in_project(st: LspState, d: Doc, params: Json) -> (Result[Json, String], LspState) !Fs !Env !io =
+  match rename_start(st, d, pos_offset(d, params)) {
+    (Ok(rs), st1) -> (Ok(jobj([("range", jrange(d.view, d.ls, rs.lo, rs.hi)), ("placeholder", JStr(rs.old))])), st1)
+    (Err(why), st1) -> (Err(why), st1)
+  }
+
+## The analysis of an `untitled:` buffer, which is renamed within itself
+## (§R3.1); None for every other document.
+fn local_analysis(st: LspState, d: Doc) -> Option[Analysis] =
+  if is_untitled(d) {
+    match analysis_of(st, d) {
+      Some(a) -> if a.workspace_key == None { Some(a) } else { None }
+      None -> None
+    }
+  } else {
+    None
+  }
+
+## The doc-link segments of `cm` that spell `old` and, cut after the segment,
+## resolve to the declaration at `tlo` of the file `tpath`: the member
+## (`Point.x`, `geo.scale`) and the owner (`Point.x` when `Point` is renamed).
+fn link_name_edits(
+  prog: Program, mods: Map[String, Module], cm: CheckedMod, id: String, text: String, cs: List[Char],
+  old: String, new: String, ident: Map[String, String], tpath: String, tlo: Int
+) -> List[Edit] = {
+  var edits: List[Edit] = []
+  if str.contains(text, "[`") && str.contains(text, old) {
+    let sc = LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }
+    for sp in doc_link_spans(text) {
+      let (lo, _, ltext) = sp
+      for seg in link_segments(lo, ltext) {
+        let (alo, ahi, prefix) = seg
+        if slice_cps(cs, alo, ahi) != old { continue }
+        match resolve_link(sc, mods, prefix) {
+          Ok(lt) ->
+            match list.find(prog.modules, m2 => m2.mod_path == lt.module) {
+              Some(m2) ->
+                if map.get(ident, m2.path) == Some(tpath) && lt.nlo == tlo {
+                  edits = edits ++ [name_edit(id, alo, ahi, NotPun, old, new)]
+                }
+              None -> ()
+            }
+          Err(_) -> ()
+        }
+      }
+    }
+  }
+  edits
+}
 
 ## `textDocument/rename`: a `WorkspaceEdit` renaming the name at the position
 ## everywhere it is spelled in the project's sources, its doc links included,
@@ -3155,6 +3341,14 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
     None -> return (Err("this document is not open"), st)
   }
   let new = ostr(params, "newName")
+  match local_analysis(st, d) {
+    Some(a) ->
+      return match local_rename_start(st, d, a, pos_offset(d, params)) {
+        Ok(lr) -> (local_rename(st, d, lr, new), st)
+        Err(why) -> (Err(why), st)
+      }
+    None -> ()
+  }
   let rs = match rename_start(st, d, pos_offset(d, params)) {
     (Ok(r), _) -> r
     (Err(why), st1) -> return (Err(why), st1)
@@ -3203,31 +3397,7 @@ fn handle_rename(st: LspState, params: Json) -> (Result[Json, String], LspState)
       # a name a `use .. as` bound keeps its own spelling
       if slice_cps(cs, r.lo, r.hi) == rs.old { edits = edits ++ [name_edit(id, r.lo, r.hi, r.pun, rs.old, new)] }
     }
-    # a link spelling the old name as one of its segments: the segment is
-    # renamed when the link cut after it resolves to the declaration, which
-    # covers the member (`Point.x`, `geo.scale`) and the owner (`Point.x`
-    # when `Point` is renamed)
-    if str.contains(text, "[`") && str.contains(text, rs.old) {
-      let sc = LinkScope { path: cm.mod_path, m: cm.m, cx: cm.cx }
-      for sp in doc_link_spans(text) {
-        let (lo, _, ltext) = sp
-        for seg in link_segments(lo, ltext) {
-          let (alo, ahi, prefix) = seg
-          if slice_cps(cs, alo, ahi) != rs.old { continue }
-          match resolve_link(sc, mods, prefix) {
-            Ok(lt) ->
-              match list.find(prog.modules, m2 => m2.mod_path == lt.module) {
-                Some(m2) ->
-                  if map.get(rs.ident, m2.path) == Some(rs.target.path) && lt.nlo == tlo {
-                    edits = edits ++ [name_edit(id, alo, ahi, NotPun, rs.old, new)]
-                  }
-                None -> ()
-              }
-            Err(_) -> ()
-          }
-        }
-      }
-    }
+    edits = edits ++ link_name_edits(prog, mods, cm, id, text, cs, rs.old, new, rs.ident, rs.target.path, tlo)
   }
   let world = RefsWorld { ..rs.world, refs: index }
   let st1 = keep_world(st, rs, world)
@@ -6601,5 +6771,108 @@ test "inlay hints: a call in error gets no default hint" {
     # parameter given twice, which it still types as a call to `pad` with the
     # argument in error -- and whose `fill` is left out all the same
     assert defaults_probe(st, d) == []
+  }))
+}
+
+fn untitled_state(std: StdCtx, uri: String, text: String) -> (LspState, Doc) !Fs !Env !io = {
+  let st0 = def_probe_state(std)
+  let no_modules: Option[Map[String, String]] = None
+  let no_path: Option[String] = None
+  let d = standalone_doc(st0, uri, no_path, no_path, text, 0, no_modules)
+  (LspState { ..st0, docs: map.insert(st0.docs, uri, d) }, d)
+}
+
+fn rename_params(d: Doc, needle: String, skip: Int, new: String) -> Json = {
+  let off = match str.index_of(d.text, needle) {
+    Some(i) -> i + skip
+    None -> panic("probe text has no ${needle}")
+  }
+  let (line, ch) = lsp_position(d.view, d.ls, off)
+  jobj([
+    ("textDocument", jobj([("uri", JStr(d.uri))])),
+    ("position", jpos(line, ch)),
+    ("newName", JStr(new))
+  ])
+}
+
+test "rename in an untitled buffer edits every use inside the buffer (§R3.1)" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let (st, d) = untitled_state(std, "untitled:rename-ok", def_probe_text())
+    # from a use, and from the declaration: the same three spellings
+    for needle in ["helper(xs", "helper(n"] {
+      let p = rename_params(d, needle, 1, "bump")
+      match handle_rename(st, p) {
+        (Ok(r), _) -> {
+          let edits = match oget(get_or_null(r, "changes"), "untitled:rename-ok") {
+            Some(JArr(es)) -> es
+            _ -> panic("no edits for the buffer")
+          }
+          assert len(edits) == 2
+          for e in edits { assert ostr(e, "newText") == "bump" }
+        }
+        (Err(why), _) -> panic("an untitled buffer rename was refused: ${why}")
+      }
+    }
+    match handle_prepare_rename(st, rename_params(d, "helper(xs", 1, "bump")) {
+      (Ok(r), _) -> { assert ostr(r, "placeholder") == "helper" }
+      (Err(why), _) -> panic("prepareRename refused: ${why}")
+    }
+  }))
+}
+
+test "rename in an untitled buffer refuses a std name and a buffer with errors (§R3.1)" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let (st, d) = untitled_state(std, "untitled:rename-std", def_probe_text())
+    match handle_rename(st, rename_params(d, "list.reverse", 6, "flip")) {
+      (Err(why), _) -> { assert str.contains(why, "declared outside this project's sources") }
+      (Ok(_), _) -> panic("a std name was renamed")
+    }
+    match handle_prepare_rename(st, rename_params(d, "list.reverse", 6, "flip")) {
+      (Err(why), _) -> { assert str.contains(why, "declared outside this project's sources") }
+      (Ok(_), _) -> panic("prepareRename offered a std name")
+    }
+    # a new name another declaration already answers to is refused, not merged
+    match handle_rename(st, rename_params(d, "helper(xs", 1, "main")) {
+      (Err(_), _) -> ()
+      (Ok(_), _) -> panic("a rename onto an existing name was accepted")
+    }
+    let (st2, d2) = untitled_state(std, "untitled:rename-broken", "fn helper(n: Int) -> Int = n + nope\nfn main() -> Unit !io = println(\"x\") + helper(1)\n")
+    match handle_rename(st2, rename_params(d2, "helper(1", 0, "bump")) {
+      (Err(why), _) -> { assert str.contains(why, "has errors") }
+      (Ok(_), _) -> panic("a buffer with errors was renamed")
+    }
+  }))
+}
+
+test "rename is refused in a document with no analysis (§R3.1)" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let (st, d) = untitled_state(std, "untitled:rename-none", def_probe_text())
+    # a document the server never opened has nothing to rename in
+    let p = rename_params(d, "helper(xs", 1, "bump")
+    let st2 = LspState { ..st, docs: map.empty() }
+    match handle_rename(st2, p) {
+      (Err(why), _) -> { assert why == "this document is not open" }
+      (Ok(_), _) -> panic("an unopened document was renamed")
+    }
+    # a file buffer outside any project keeps the project-only refusal
+    let no_modules: Option[Map[String, String]] = None
+    let f = standalone_doc(st, "file:///tmp/x/loose.dawn", Some("/tmp/x/loose.dawn"), Some("/tmp/x/loose.dawn"), d.text, 0, no_modules)
+    let st3 = LspState { ..st, docs: map.insert(st.docs, f.uri, f) }
+    match handle_rename(st3, rename_params(f, "helper(xs", 1, "bump")) {
+      (Err(why), _) -> { assert str.contains(why, "rename works in the files of a project") }
+      (Ok(_), _) -> panic("a loose file was renamed")
+    }
   }))
 }

@@ -49,8 +49,13 @@ MUTATIONS = {
     ],
     # doc links keep the old name, and `dawn doc` fails on them
     'doc-links-skipped': [
-        (SERVER, '    if str.contains(text, "[`") && str.contains(text, rs.old) {\n',
-         '    if false && str.contains(text, rs.old) {\n'),
+        (SERVER, '  if str.contains(text, "[`") && str.contains(text, old) {\n',
+         '  if false && str.contains(text, old) {\n'),
+    ],
+    # a buffer's rename is let past the check that its declaration is in the buffer
+    'untitled-outside-renamed': [
+        (SERVER, '    if not own_decl {\n      return Err("`${old}` is declared outside',
+         '    if not own_decl && false {\n      return Err("`${old}` is declared outside'),
     ],
     # a [deps] package's declaration is renamed like the project's own
     'dependencies-renamed': [
@@ -128,8 +133,8 @@ MUTATIONS = {
     ],
     # only a doc link's last segment is renamed, never its owner
     'link-owner-skipped': [
-        (SERVER, '          if slice_cps(cs, alo, ahi) != rs.old { continue }\n',
-         '          if slice_cps(cs, alo, ahi) != rs.old || prefix != ltext { continue }\n'),
+        (SERVER, '        if slice_cps(cs, alo, ahi) != old { continue }\n',
+         '        if slice_cps(cs, alo, ahi) != old || prefix != ltext { continue }\n'),
     ],
     # any fence closes any fence, so the inner one ends the outer
     'fences-by-prefix': [
