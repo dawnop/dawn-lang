@@ -2,7 +2,8 @@
 
 > 状态：current。本线的总纲：分组裁决、刀序与每刀的回填位置。K0（签名渲染默认表达式、
 > LSP `textDocument/signatureHelp`）、K1（`std/narrow` 的 `Rounding`）与 K2（tileir Dev 属性族与
-> `trace_kernel` 的 `hints`）已落地；K6（B1，默认值看得见前面的形参）的语言设计在 §8；其余各刀落地时回填 §7「状态」并在这里改写被
+> `trace_kernel` 的 `hints`）已落地；K5、K6（B1，默认值看得见前面的形参，语言设计在 §8）与
+> K7–K18（并成一刀，PR #475）也已落地，K0–K19 整条线收官；若再有新刀，落地时回填 §7「状态」并在这里改写被
 > 事实推翻的前提。调研依据是 2026-10-02 的只读调研报告（仓外协作档，结论摘在 §2），
 > 默认参数本身的语义见 [spec.md](spec.md) 3.1 节与 [named-args-design.md](named-args-design.md)。
 
@@ -248,7 +249,7 @@ T17（`ftoi` saturating、`ftof` nearest_away）实际先于 K2 落地，用的�
 | K4 | 已落地（web 6.0，见 §7.5） | `1419b700`（main 上的哈希，PR #398） |
 | K5 | 已落地（见 §7.6） | `399577e0`（main 上的哈希，PR #402） |
 | K6 | 已落地（B1，见 §8；同刀只落 `cursor.find`，见 §7.7） | `842ac8b5`（main 上的哈希，PR #412） |
-| K7–K18 | 未开工 | |
+| K7–K18 | 已落地（并成一刀，不是十二刀；走指针路 `strides: Option[List[Int]] = None`，golden 192 个逐字节不变） | `99b137b6`（main 上的哈希，PR #475，10-04 合入） |
 | K19 | 已落地（一刀，不分步；lexer 留一个过渡函数，见 §7.4） | `04f65114`（main 上的哈希；分支上原为 `25ff1f19`） |
 
 ### 7.1 K1 落地记录
