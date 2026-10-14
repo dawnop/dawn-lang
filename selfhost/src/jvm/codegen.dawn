@@ -13,7 +13,7 @@ use std/str
 use std/map
 use check/types.{
   EPure, EIo, EffVar, prelude_adts, opt_ty, peel_opaque,
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyUnit, TyNever,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyI64Buf, TyF64Buf, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, fn_arity
 }
@@ -54,6 +54,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     TyBytes -> "[B"
     # a flat long[]: the same family as Bytes' byte[] (docs/mem-buffer-design.md 6.3)
     TyI64Buf -> "[J"
+    TyF64Buf -> "[D"
     TyUnit -> "L" ++ UNIT_CLASS ++ ";"
     # `V` is legal as a return descriptor and nowhere else, which is exactly
     # where the bottom types can appear: an expression that does not return
@@ -123,6 +124,7 @@ pub fn jvm_repr(t: Ty) -> JvmRepr =
     TyString -> RRef
     TyBytes -> RRef
     TyI64Buf -> RRef
+    TyF64Buf -> RRef
     TyVar(_, _) | TyAssoc(_, _, _) -> RRef
     TyAdt(_, _) -> RRef
     TyList(_) -> RRef
@@ -425,7 +427,7 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
     TyString | TyVar(_, _) | TyAssoc(_, _, _) | TyAdt(_, _) | TyJava(_, _) -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
-    TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyI64Buf | TyTuple(_) | TyFn(_, _, _) -> {
+    TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyI64Buf | TyF64Buf | TyTuple(_) | TyFn(_, _, _) -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
     # Still unreachable from either caller: `Hash[Unit]` is refused, and a
@@ -863,6 +865,7 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     # not writable as an impl subject in source; the prelude Eq/Hash cover them
     TyBytes -> "Bytes"
     TyI64Buf -> "I64Buf"
+    TyF64Buf -> "F64Buf"
     TyAdt(aid, _) -> adt_of(adts, aid).name
     # the builtin containers, once std writes conditional impls for them.
     # Arguments are dropped on purpose: the name identifies the *impl*, and
@@ -905,6 +908,7 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
     TyI64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[J") }
+    TyF64Buf -> { m.visitTypeInsn(OP_CHECKCAST, "[D") }
     TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }

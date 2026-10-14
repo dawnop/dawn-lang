@@ -1471,6 +1471,7 @@ void dawn_immortal(void *p) {
       case DAWN_K_BYTES:
       case DAWN_K_STR:
       case DAWN_K_I64BUF:
+      case DAWN_K_F64BUF:
         break; /* no counted children */
       default:
         fprintf(stderr, "dawn: immortal of an unheaded pointer (kind %d)\n", h->kind);
@@ -1573,7 +1574,8 @@ void dawn_drop(void *p) {
       case DAWN_K_STR:
         break; /* one block: the bytes sit right after the header */
       case DAWN_K_I64BUF:
-        break; /* one block, and the elements are plain integers */
+      case DAWN_K_F64BUF:
+        break; /* one block, and the elements are plain numbers */
 #ifndef __wasi__
       case DAWN_K_CTL:
         /* Not pushed onto the work list like every other child: the frames
@@ -4273,6 +4275,67 @@ dawn_unit dawn_i64buf_copy_from(dawn_i64buf *dst, int64_t dst_at, const dawn_i64
                       (long long)src->len);
   }
   memmove(dst->data + dst_at, src->data + src_at, (size_t)n * sizeof(int64_t));
+  return DAWN_UNIT;
+}
+
+/* ---- F64Buf (see dawn_rt.h) ----
+ *
+ * I64Buf's twin over doubles, with the same wording under the name `F64Buf`
+ * (jvm/rtclasses.dawn builds both families from one generator). Elements are
+ * stored and read as doubles and never go through arithmetic or a conversion,
+ * so the bits survive. */
+static void dawn_f64buf_panic(const char *fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
+static void dawn_f64buf_panic(const char *fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  dawn_panic(dawn_str_lit(buf, n));
+  __builtin_unreachable(); /* a panic unwinds; it never returns here */
+}
+
+void dawn_f64buf_oob(int64_t i, int64_t len) {
+  dawn_f64buf_panic("F64Buf index %lld out of bounds for length %lld", (long long)i, (long long)len);
+  __builtin_unreachable(); /* a panic unwinds; it never returns here */
+}
+
+/* Zero-filled by `calloc`; all-zero bits are +0.0. */
+dawn_f64buf *dawn_f64buf_new(int64_t n) {
+  if (n < 0) {
+    dawn_f64buf_panic("F64Buf.new: negative length %lld", (long long)n);
+  }
+  if (n > DAWN_I64BUF_MAX_LEN) {
+    dawn_f64buf_panic("F64Buf.new: length %lld is too large", (long long)n);
+  }
+  dawn_f64buf *b = (dawn_f64buf *)calloc(1, sizeof(dawn_f64buf) + (size_t)n * sizeof(double));
+  if (b == NULL) {
+    fputs("dawn: out of memory\n", stderr);
+    exit(1);
+  }
+  dawn_hdr_init(&b->h, DAWN_K_F64BUF);
+  b->len = n;
+  return b;
+}
+
+dawn_unit dawn_f64buf_fill(dawn_f64buf *b, int64_t from, int64_t to, double v) {
+  if (from < 0 || to > b->len || from > to) {
+    dawn_f64buf_panic("F64Buf.fill: range [%lld, %lld) out of bounds for length %lld", (long long)from,
+                      (long long)to, (long long)b->len);
+  }
+  for (int64_t k = from; k < to; k++) b->data[k] = v;
+  return DAWN_UNIT;
+}
+
+dawn_unit dawn_f64buf_copy_from(dawn_f64buf *dst, int64_t dst_at, const dawn_f64buf *src,
+                                int64_t src_at, int64_t n) {
+  if (n < 0 || dst_at < 0 || src_at < 0 || dst_at > dst->len - n || src_at > src->len - n) {
+    dawn_f64buf_panic("F64Buf.copy_from: range out of bounds (dst_at %lld, src_at %lld, "
+                      "n %lld) for dst length %lld and src length %lld",
+                      (long long)dst_at, (long long)src_at, (long long)n, (long long)dst->len,
+                      (long long)src->len);
+  }
+  memmove(dst->data + dst_at, src->data + src_at, (size_t)n * sizeof(double));
   return DAWN_UNIT;
 }
 

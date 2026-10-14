@@ -64,6 +64,7 @@ enum {
   DAWN_K_BYTES,
   DAWN_K_STR,
   DAWN_K_I64BUF,
+  DAWN_K_F64BUF,
   /* One activation of a control handler (see "one-shot resumption" in
    * dawn_rt.c). It is in the ledger because the continuation a control arm
    * receives is an ordinary Dawn function value that captures it, so the
@@ -1200,6 +1201,44 @@ static inline dawn_unit dawn_i64buf_set(dawn_i64buf *b, int64_t i, int64_t v) {
   b->data[i] = v;
   return DAWN_UNIT;
 }
+
+/* ---- F64Buf: the same buffer of doubles ----
+ *
+ * Everything above holds with `double` for `int64_t`. The elements are moved
+ * as doubles and never through arithmetic, so a NaN keeps its payload and sign
+ * and `-0.0` stays `-0.0`. */
+typedef struct {
+  dawn_hdr h;
+  int64_t len;
+  double data[];
+} dawn_f64buf;
+
+dawn_f64buf *dawn_f64buf_new(int64_t n);
+void dawn_f64buf_oob(int64_t i, int64_t len) __attribute__((noreturn, cold, noinline));
+dawn_unit dawn_f64buf_fill(dawn_f64buf *b, int64_t from, int64_t to, double v);
+dawn_unit dawn_f64buf_copy_from(dawn_f64buf *dst, int64_t dst_at, const dawn_f64buf *src,
+                                int64_t src_at, int64_t n);
+static inline int64_t dawn_f64buf_len(const dawn_f64buf *b) { return b->len; }
+
+#define DAWN_F64BUF_CHECK(b, i)                                         \
+  do {                                                                  \
+    if ((b)->len < 0) __builtin_unreachable();                          \
+    if (__builtin_expect((uint64_t)(i) >= (uint64_t)(b)->len, 0)) {     \
+      dawn_f64buf_oob((i), (b)->len);                                   \
+    }                                                                   \
+  } while (0)
+
+static inline double dawn_f64buf_at(const dawn_f64buf *b, int64_t i) {
+  DAWN_F64BUF_CHECK(b, i);
+  return b->data[i];
+}
+
+static inline dawn_unit dawn_f64buf_set(dawn_f64buf *b, int64_t i, double v) {
+  DAWN_F64BUF_CHECK(b, i);
+  b->data[i] = v;
+  return DAWN_UNIT;
+}
+
 /* The two decodings the language promises, one function each rather than one
  * taking a charset name: the function name is the domain, both charsets read
  * every byte string, and so neither answers an Option. Malformed UTF-8 is
