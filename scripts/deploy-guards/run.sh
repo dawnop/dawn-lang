@@ -66,18 +66,19 @@ ok() { echo "PASS  $1"; }
 bad() { echo "FAIL: $1" >&2; fail=1; }
 
 # --- a throwaway checkout ---------------------------------------------------
-# mkrepo <site|play>: sets R. $MUT, if set, is "from=>to" applied once.
+# mkrepo <site|play|backup>: sets R. $MUT, if set, is "from=>to" applied once.
 n=0
 mkrepo() {
   n=$((n + 1))
   R="$work/r$n"
   mkdir -p "$R/site" "$R/scripts" "$R/bin" "$R/selfhost/src" "$R/playground/deploy"
-  cp "$root/scripts/repo.env" "$R/scripts/"
+  cp "$root/scripts/repo.env" "$root/scripts/deploy-backup.sh" "$R/scripts/"
   cp "$root/site/redeploy.sh" "$R/site/redeploy.sh"
   cp "$root/playground/deploy/redeploy.sh" "$R/playground/deploy/redeploy.sh"
   if [ -n "${MUT:-}" ]; then
     local f="$R/site/redeploy.sh"
     [ "$1" = play ] && f="$R/playground/deploy/redeploy.sh"
+    [ "$1" = backup ] && f="$R/scripts/deploy-backup.sh"
     local from="${MUT%%=>*}" to="${MUT#*=>}" body new
     body="$(cat "$f"; printf x)"; body="${body%x}"
     new="${body/"$from"/"$to"}"
@@ -92,6 +93,9 @@ mkrepo() {
   cat >"$R/site/build.sh" <<'SH'
 #!/bin/sh
 # Stub generator. BUILD_MODE picks what it leaves behind.
+# The pause keeps the files newer than the deploy's stamp even on a clock that
+# ticks coarsely (a build that finishes in the stamp's own tick is not newer).
+sleep 0.05
 echo build >>"$STUB_LOG"
 echo "$DAWN_WASM_CC" >"$STUB_LOG.cc"
 mkdir -p site/build/tea site/dist/assets site/dist/zh
@@ -238,6 +242,107 @@ c_p_route_native_off() { # the line is printed without a canary too
   shipped && grep -q 'to the native runner' "$OUT"
 }
 
+# --- the rollback copy -------------------------------------------------------
+# The deploy side: the copy is asked for on the server before the first rsync,
+# a refusal stops the deploy, and DAWN_DEPLOY_NO_BACKUP=1 skips it. The ssh
+# shim only logs, so what these see is the call; the copy itself is run for
+# real against scratch directories further down.
+BKCALL='^ssh .*bash -s -- '
+backup_before_rsync() { # $1 = the backup call must name this tag
+  local b r
+  b="$(grep -nE -- "$BKCALL.* $1 " "$LOG" | head -1 | cut -d: -f1)"
+  r="$(grep -n '^rsync' "$LOG" | head -1 | cut -d: -f1)"
+  [ -n "$b" ] && [ -n "$r" ] && [ "$b" -lt "$r" ]
+}
+c_p_backup_first()  { mkrepo play; GOODNATIVE; deploy play; shipped && backup_before_rsync runner; }
+c_p_backup_closed() { mkrepo play; GOODNATIVE; deploy play SSH_FAIL='bash -s --'; refused 'could not make a rollback copy' '^rsync'; }
+c_p_backup_escape() {
+  mkrepo play; GOODNATIVE; deploy play DAWN_DEPLOY_NO_BACKUP=1 SSH_FAIL='bash -s --'
+  shipped && ! grep -q 'bash -s --' "$LOG" && grep -q 'deploying without a rollback copy' "$ERR"
+}
+c_s_backup_first()  { mkrepo site; deploy site; shipped && backup_before_rsync site; }
+c_s_backup_closed() { mkrepo site; deploy site SSH_FAIL='bash -s --'; refused 'could not make a rollback copy' '^rsync'; }
+c_s_backup_escape() {
+  mkrepo site; deploy site DAWN_DEPLOY_NO_BACKUP=1 SSH_FAIL='bash -s --'
+  shipped && ! grep -q 'bash -s --' "$LOG" && grep -q 'deploying without a rollback copy' "$ERR"
+}
+# The site's live version is read from a marker the deploy ships in the tree.
+c_s_backup_marker() { mkrepo site; deploy site; shipped && [ "$(cat "$R/site/dist/.dawn-version")" = 9.9.9 ]; }
+
+# The copy itself. bk <tag> <version-spec> <src>...: runs the real script on
+# scratch directories $B (backups) and $S (the live tree).
+B="$work/bk"; S="$work/live"
+bk_setup() {
+  rm -rf -- "${B:?}" "${S:?}"
+  mkdir -p "$B" "$S/bin" "$S/playground" "$S/dist"
+  printf '#!/bin/sh\necho "dawnc ${LIVE_VER:-1.2.3} (native) b1:0123456789ab"\n' >"$S/bin/dawnc"
+  chmod +x "$S/bin/dawnc"
+  echo src >"$S/playground/main.dawn"
+  echo page >"$S/dist/index.html"
+}
+bk() {
+  local tag="$1" spec="$2"; shift 2
+  env -i PATH="${BK_PATH:-/usr/bin:/bin}" HOME="$work/home" LIVE_VER="${LIVE_VER:-}" \
+    DEPLOY_BACKUP_STAMP="${STAMP:-}" bash "$R/scripts/deploy-backup.sh" "$B" "$S" "$tag" "$spec" "$@" \
+    >"$OUT" 2>"$ERR"
+  RC=$?
+}
+bk_dirs() { (cd "$B" && ls -A | sort); }
+c_b_keeps() {
+  mkrepo backup; bk_setup
+  STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" bin playground missing_dir
+  [ "$RC" -eq 0 ] && [ "$(bk_dirs)" = ".prev-1.2.3-20260101T000001Z-runner" ] &&
+    [ -x "$B/.prev-1.2.3-20260101T000001Z-runner/bin/dawnc" ] &&
+    [ "$(cat "$B/.prev-1.2.3-20260101T000001Z-runner/playground/main.dawn")" = src ]
+}
+c_b_site_file() {
+  mkrepo backup; bk_setup; echo 0.88.0 >"$S/dist/.dawn-version"
+  STAMP=20260101T000001Z bk site "file:$S/dist/.dawn-version" dist
+  [ "$RC" -eq 0 ] && [ -f "$B/.prev-0.88.0-20260101T000001Z-site/dist/index.html" ]
+}
+c_b_unknown() {
+  mkrepo backup; bk_setup; rm "$S/bin/dawnc"
+  STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" playground
+  [ "$RC" -eq 0 ] && [ -d "$B/.prev-unknown-20260101T000001Z-runner" ] || return 1
+  bk_setup; LIVE_VER='../../evil' STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" playground
+  [ "$RC" -eq 0 ] && [ -d "$B/.prev-unknown-20260101T000001Z-runner" ]
+}
+# Five backups with versions chosen so that sorting the whole name (0.10 before
+# 0.8) would drop the wrong ones; the newest three by stamp must remain, and
+# the other tag, an old hand-made name and a stray file must not be touched.
+c_b_rotate() {
+  mkrepo backup; bk_setup
+  mkdir "$B/.prev-088-runner" "$B/.prev-0.1.0-20250101T000000Z-site" "$B/.prev-0.1.0-20250101T000000Z-runner.partial"
+  : >"$B/keepme"
+  local i=0 v
+  for v in 0.9.0 0.10.0 0.11.0 0.12.0 0.8.0; do
+    i=$((i + 1))
+    LIVE_VER=$v STAMP="2026010${i}T000000Z" bk runner "cmd:$S/bin/dawnc" playground || return 1
+    [ "$RC" -eq 0 ] || return 1
+  done
+  [ "$(bk_dirs)" = ".prev-0.1.0-20250101T000000Z-runner.partial
+.prev-0.1.0-20250101T000000Z-site
+.prev-0.11.0-20260103T000000Z-runner
+.prev-0.12.0-20260104T000000Z-runner
+.prev-0.8.0-20260105T000000Z-runner
+.prev-088-runner
+keepme" ]
+}
+c_b_rotate_order() { c_b_rotate; } # same run; its mutant breaks the sort key
+c_b_fail_closed() {
+  mkrepo backup; bk_setup
+  STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" playground || true
+  mkdir "$work/cpfail"; printf '#!/bin/sh\nexit 1\n' >"$work/cpfail/cp"; chmod +x "$work/cpfail/cp"
+  BK_PATH="$work/cpfail:/usr/bin:/bin" STAMP=20260102T000001Z bk runner "cmd:$S/bin/dawnc" playground
+  [ "$RC" -ne 0 ] && grep -q 'nothing was deployed' "$ERR" &&
+    [ "$(bk_dirs)" = ".prev-1.2.3-20260101T000001Z-runner" ]
+}
+c_b_bad_source() {
+  mkrepo backup; bk_setup
+  bk runner "cmd:$S/bin/dawnc" ../etc
+  [ "$RC" -eq 2 ] && [ -z "$(bk_dirs)" ]
+}
+
 # What each mutant removes, as "from=>to". "-" = a control: nothing to remove.
 mutant_for() {
   case "$1" in
@@ -265,6 +370,35 @@ mutant_for() {
     # the old hard-coded claim: native and unknown must then fail
     c_p_route_jvm|c_p_route_native|c_p_route_unknown|c_p_route_odd|c_p_route_native_off)
       echo 'echo "$ROUTING_LINE"=>echo "nginx still routes to the JVM runner."' ;;
+    c_p_backup_first|c_s_backup_first)
+      echo 'if ! ssh "$HOST" bash -s --=>if ! true "$HOST" bash -s --' ;;
+    c_p_backup_closed)
+      printf '%s\n' 'exit 1
+  fi
+fi
+
+echo "=== syncing=>:
+  fi
+fi
+
+echo "=== syncing' ;;
+    c_s_backup_closed)
+      printf '%s\n' 'exit 1
+  fi
+fi
+sed -n=>:
+  fi
+fi
+sed -n' ;;
+    c_p_backup_escape|c_s_backup_escape) echo 'if [ "${DAWN_DEPLOY_NO_BACKUP:-}" = 1 ]; then=>if false; then' ;;
+    c_s_backup_marker) echo '>site/dist/.dawn-version=>>/dev/null' ;;
+    c_b_keeps) echo 'mv -- "$partial" "$dest" || fail_partial=>: || fail_partial' ;;
+    c_b_site_file) echo 'version=$(head -n 1 "$f"=>version=$(echo unknown' ;;
+    c_b_unknown) echo "if ! printf '%s' \"\$version\" | grep -Eq '^[0-9A-Za-z]=>if false; then : | grep -Eq '^[0-9A-Za-z]" ;;
+    c_b_rotate) echo 'if [ "$total" -gt "$keep" ]; then=>if false; then' ;;
+    c_b_rotate_order) echo "printf '%s %s\\n' \"\$ts\" \"\$n\"=>printf '%s %s\\n' \"\$n\" \"\$n\"" ;;
+    c_b_fail_closed) echo '"${present[@]}" "$partial/") || fail_partial=>"${present[@]}" "$partial/") || true' ;;
+    c_b_bad_source) echo "''|/*|*..*) echo=>__never__) echo" ;;
     *) echo - ;;
   esac
 }

@@ -119,8 +119,30 @@ for page in site/dist/playground.html site/dist/zh/playground.html; do
   fi
 done
 
+# Rollback point, as in playground/deploy/redeploy.sh: the live site tree is
+# copied to $BACKUP_DIR/.prev-<live version>-<UTC stamp>-site, newest 3 kept
+# (scripts/deploy-backup.sh). The live version is read from the marker this
+# script ships in the tree (.dawn-version, written below), so the first deploy
+# after the marker was introduced is labelled `unknown`. Fails closed;
+# DAWN_DEPLOY_NO_BACKUP=1 skips it. DEPLOY.md, "Rollback", says how to restore.
+SITE_BASE=/var/www/dawnlang
+BACKUP_DIR="${DAWN_BACKUP_DIR:-/opt/dawn}"
+if [ "${DAWN_DEPLOY_NO_BACKUP:-}" = 1 ]; then
+  echo "warning: DAWN_DEPLOY_NO_BACKUP=1, deploying without a rollback copy" >&2
+else
+  echo "=== keeping a rollback copy on $HOST ==="
+  # shellcheck disable=SC2029
+  if ! ssh "$HOST" bash -s -- "$BACKUP_DIR" "$SITE_BASE" site "file:$SITE_BASE/dist/.dawn-version" \
+      dist <scripts/deploy-backup.sh; then
+    echo "error: could not make a rollback copy; nothing was deployed." >&2
+    echo "  Free some space, or set DAWN_DEPLOY_NO_BACKUP=1 to deploy without one." >&2
+    exit 1
+  fi
+fi
+sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' selfhost/src/version.dawn >site/dist/.dawn-version
+
 echo "=== deploying to ${site_origin#https://} ==="
-rsync -avz --delete site/dist/ "$HOST:/var/www/dawnlang/dist/"
+rsync -avz --delete site/dist/ "$HOST:$SITE_BASE/dist/"
 
 # The pages sit behind a CDN that caches HTML for ten minutes
 # (docs/site-cdn-design.md), so without a purge a deploy is invisible for up

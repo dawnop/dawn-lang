@@ -283,7 +283,48 @@ Watch while canarying: `journalctl -u 'dawn-play-native@*'` (one access line per
 request on stderr, and the `429` waits of the flock gate) and
 `systemctl status dawn-play-native.socket`.
 
-## Rollback
+## Rollback copies and restoring one
+
+Both `playground/deploy/redeploy.sh` and `site/redeploy.sh` keep a rollback
+copy on the server before they replace anything (`scripts/deploy-backup.sh`,
+run over ssh). The copies sit in `/opt/dawn` (`DAWN_BACKUP_DIR` overrides it
+for the site script) and are named
+`.prev-<live version>-<UTC stamp>-<runner|site>`, for example
+`.prev-0.88.0-20261014T101500Z-runner`. The version is read from the live
+artifact (`bin/dawnc version`, or the `.dawn-version` marker in the site
+tree) and is `unknown` when it cannot be read. The newest 3 of each kind are
+kept; older ones are removed by exact name, nothing else is touched.
+
+The copy fails closed: if it cannot be made (no room, a copy error), the
+deploy stops before the first rsync and nothing on the server has changed.
+`DAWN_DEPLOY_NO_BACKUP=1` skips it and prints a warning; use it only when the
+disk cannot hold a copy, and take one by hand if you can.
+
+The runner copy holds `bin`, `build`, `playground`, `packages`, `scripts` and
+`site` as they were under `/opt/dawn`; the site copy holds `dist`. To restore
+the runner side, pick the copy and put it back with rsync, then restart:
+
+```sh
+ls -d /opt/dawn/.prev-*-runner
+B=/opt/dawn/.prev-0.88.0-20261014T101500Z-runner
+for d in bin build playground packages scripts site; do
+  [ -d "$B/$d" ] && rsync -a --delete "$B/$d/" "/opt/dawn/$d/"
+done
+sudo systemctl restart dawn-play dawn-play-lsp
+```
+
+The `--delete` makes each directory exactly what it was. Check the result
+with `curl http://127.0.0.1:8087/health`. If the native canary was installed,
+restart `dawn-play-native.socket` too. To restore the site:
+
+```sh
+rsync -a --delete /opt/dawn/.prev-0.88.0-20261014T101500Z-site/dist/ /var/www/dawnlang/dist/
+```
+
+and then refresh the CDN page cache the way `site/redeploy.sh` does, or wait
+ten minutes for it to expire.
+
+## Rollback without a copy
 
 ```sh
 systemctl disable --now dawn-play dawn-play-lsp
