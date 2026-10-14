@@ -1425,6 +1425,79 @@ fn next_code_token(toks: List[Token], at: Int) -> Int = {
   i
 }
 
+# One level of `interp_code_start`'s scan: 2 = a `"` string, 3 = a `"""`
+# string, 4 = the code of a `${...}` (`start` is its first code point,
+# `depth` the braces opened inside it).
+type Frame = { kind: Int, start: Int, depth: Int }
+
+## Where the code of the innermost `${` still open at `pos` begins, or None
+## when the cursor is not inside an interpolation. Strings, raw strings and
+## char literals are stepped over whole, so a `${` or a quote inside them
+## opens nothing; a comment is only a comment outside any string.
+fn interp_code_start(cps: List[Char], pos: Int) -> Option[Int] = {
+  let n = len(cps)
+  var stack: List[Frame] = []
+  var i = 0
+  while i < n && i < pos {
+    let ch = cps[i]
+    let top = if len(stack) > 0 { stack[len(stack) - 1].kind } else { 0 }
+    if top == 2 || top == 3 {
+      if ch == '\\' {
+        i = i + 2
+      } else if ch == '$' && i + 1 < n && cps[i + 1] == '{' {
+        stack = stack ++ [Frame { kind: 4, start: i + 2, depth: 0 }]
+        i = i + 2
+      } else if top == 3 && ch == '"' && i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
+        stack = list.take(stack, len(stack) - 1)
+        i = i + 3
+      } else if top == 2 && (ch == '"' || ch == '\n') {
+        stack = list.take(stack, len(stack) - 1)
+        i = i + 1
+      } else {
+        i = i + 1
+      }
+    } else if ch == '"' {
+      if i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
+        stack = stack ++ [Frame { kind: 3, start: i, depth: 0 }]
+        i = i + 3
+      } else {
+        stack = stack ++ [Frame { kind: 2, start: i, depth: 0 }]
+        i = i + 1
+      }
+    } else if ch == '#' && len(stack) == 0 {
+      while i < n && cps[i] != '\n' { i = i + 1 }
+    } else if ch == '`' {
+      i = i + 1
+      while i < n && cps[i] != '`' { i = i + 1 }
+      i = i + 1
+    } else if ch == '\'' {
+      i = i + 1
+      if i < n && cps[i] == '\\' { i = i + 1 }
+      i = i + 1
+      if i < n && cps[i] == '\'' { i = i + 1 }
+    } else if top == 4 && ch == '{' {
+      let f = stack[len(stack) - 1]
+      stack = list.take(stack, len(stack) - 1) ++ [Frame { ..f, depth: f.depth + 1 }]
+      i = i + 1
+    } else if top == 4 && ch == '}' {
+      let f = stack[len(stack) - 1]
+      stack = if f.depth == 0 {
+        list.take(stack, len(stack) - 1)
+      } else {
+        list.take(stack, len(stack) - 1) ++ [Frame { ..f, depth: f.depth - 1 }]
+      }
+      i = i + 1
+    } else {
+      i = i + 1
+    }
+  }
+  if len(stack) > 0 && stack[len(stack) - 1].kind == 4 {
+    Some(stack[len(stack) - 1].start)
+  } else {
+    None
+  }
+}
+
 ## The innermost call whose `(` is open at `offset`, seen through any list
 ## literal in between (`f([1, |` is still `f`'s first argument). A brace in
 ## between ends the search: a block or a lambda body is somewhere else, and
@@ -1444,6 +1517,18 @@ pub(pkg) fn call_at(text: String, offset: Int) -> Option[CallAt] = {
   }
   let ctx = lex_ctx(v, pos)
   if ctx == 1 || ctx == 2 { return None }
+  # a string is one token, so the scan below never sees inside its `${...}`:
+  # the call open there is found in the interpolation's own code, whose text
+  # is cut out and searched the same way (a string nested in it recurses)
+  match interp_code_start(v.cps, pos) {
+    Some(start) -> {
+      return match call_at(from_code_points(slice_cps(v.cps, start, pos)), pos - start) {
+        Some(c) -> Some(CallAt { ..c, name_lo: c.name_lo + start, name_hi: c.name_hi + start })
+        None -> None
+      }
+    }
+    None -> ()
+  }
   let (toks, _) = lex(text)
   var stack: List[Open] = []
   var i = 0
@@ -1674,6 +1759,15 @@ test "signature help finds the open call and the argument under the cursor" {
   assert show("let x = f(\"a, ") == "-"
   assert show("let x = f(() => { g(1) ") == "-"
   assert show("let x = f(1)") == "-"
+  # inside a string's `${...}` the call is the one open there, not the string's
+  assert show(`println("${f(`) == "f 0"
+  assert show(`println("${f(g(1), `) == "f 1"
+  assert show(`println("a ${f(g(1, `) == "g 1"
+  assert show(`println("${f("x${g(`) == "g 0"
+  assert show(`println("${xs.map(`) == "xs.map 0"
+  # a closed interpolation, or none, leaves the string's own call
+  assert show(`println("${f(1)} and `) == "-"
+  assert show(`println("${f(1)}", `) == "println 1"
 }
 
 ## The buffer `text` after the `use` edit for `path`.
