@@ -1,6 +1,6 @@
 # Playground 接 `@codemirror/lsp-client`：分刀与内置补全表懒加载
 
-> 状态：**current**。刀 1（本文 §3，内置补全表懒加载）、刀 2（§4，会话核心 + sanitizeHTML）刀 3（§5，signatureHelp 放行，PR #728）与刀 4（§6，references 放行，PR #729）已落地；刀 5 未动。
+> 状态：**current**。刀 1（本文 §3，内置补全表懒加载）、刀 2（§4，会话核心 + sanitizeHTML）刀 3（§5，signatureHelp 放行，PR #728）刀 4（§6，references 放行，PR #729）与刀 5（§7，rename 放行，PR #731）已落地；五刀全部完成。
 > 依据：内部裁决「Playground 编辑器不换 Monaco」（2026-10-04）第 3 条 b、c，
 > 与其后的 `@codemirror/lsp-client` 调研（2026-10-05，下称「调研」）。
 
@@ -23,7 +23,7 @@ signature help 浮层、references 面板、rename 对话框三块白送的 UI�
 | 2（已落地，§4） | 换会话核心：`LSPClient` + 自写可重连 Transport；hover、definition、诊断迁过去；补全源、inlay、semantic tokens 改挂 `LSPPlugin`；同刀配 `sanitizeHTML` | `selftest.ts` 与 `lsp_contract.py` 的假子进程先对拍再切；合约（落在前端自测，见 §4.3）里放 `## <img src=x onerror=...>` 变异负控，消毒删掉时必须红；首屏净增量不超过本刀省下的量；网关零改动 |
 | 3（已落地，§5，PR #728） | signatureHelp 放行（网关白名单与宣告） | 回包字段白名单与长度上限；`playground/test/contract.sh` 增一项 |
 | 4（已落地，§6，PR #729） | references 放行 | 回包只留本 buffer 位置（照 definition）；同刀改写 `docs/lsp-references-design.md` 里「Playground 不转发 references」那条旧结论 |
-| 5 | rename 放行 | `WorkspaceEdit` 的 `changes` 与 `documentChanges` 两种形状都过滤到本 buffer；lsp-client 不发 prepareRename，网关不放 |
+| 5（已落地，§7，PR #731） | rename 放行 | `WorkspaceEdit` 的 `changes` 与 `documentChanges` 两种形状都过滤到本 buffer；lsp-client 不发 prepareRename，网关不放 |
 
 formatting 不在刀序里：它改用户缓冲区，Playground 上价值低（调研 §7 第 6 条）。
 
@@ -245,7 +245,40 @@ hover 的版式（间距、暗色）与移动端行为要人在页面上看一�
   原来拿 `textDocument/references` 当「网关不提供的方法」的未知方法用例，改用 `textDocument/documentHighlight`。
 - `selftest.ts`：请求形状、非位置项丢弃、行排序/去重/行内容裁剪/别的文档丢弃；四个变异体（不查 uri、不去重、不排序、标志写假）各让 selftest 变红。
 
-## 7. 不做的（理由）
+## 7. 刀 5：rename 放行
+
+### 7.1 网关
+
+`textDocument/rename` 进白名单，`prepareRename` 不放（刀序已定：Playground 的输入框直接取光标下的词当初值，不需要服务端先回区间）。
+请求重建为 Playground 的文档、一个位置和 `newName`（非空字符串，≤ 256 字符；别的类型关会话，同其它字段校验）。`initialize` 宣告 `renameProvider: true`。
+
+回包经 `rename_value` 重建，两种 `WorkspaceEdit` 形状都认，出口只有一种：
+
+- `documentChanges` 里 `textDocument.uri` 不是 Playground 文档的条目丢弃，文件操作（create/rename/delete，没有 `textDocument`）一并丢弃；
+  没有 `documentChanges` 时读 `changes[Playground URI]`，别的 URI 丢弃。出口统一为 `{changes: {<Playground URI>: [{range, newText}]}}`，
+  `annotationId`、`changeAnnotations` 之类的字段不过。
+- 每条编辑重建成范围（两个合法位置）加 `newText`（≤ 256 字符）；结构不对是 `ChildProtocolError`。
+- 至多 1000 条。**超出的不截**：截掉一部分的改名会把程序改坏，所以整个回包换成 `-32803` 的错误回复，客户端什么也不应用。
+
+### 7.2 客户端
+
+`DawnLspClient.rename(offset, newName)` 走 `queryWith`（理由同刀 3、4：问的必须是屏幕上那一版文本）。`lspRename` 是手写的一个 `StateField` + `showPanel`
+（编辑器上方的一行输入框，gzip 净增约 0.56 KiB）：`F2` 打开，初值是光标下的词，Enter 提交，Esc 关闭。
+`renameChanges` 把编辑转成 CodeMirror 的 changes，**一次 `dispatch`**，所以一次撤销就整体还原；编辑重叠、区间反向、为空或超过 1000 条时什么也不应用。
+服务端拒绝时（`RequestFailed`）把原因显示在输入框旁，输入框不关；回包到达前文本已变则丢弃。
+
+**已知的限制**：真服务端对 `untitled:` 缓冲区的 rename 一律拒绝（`docs/lsp-references-design.md` §R3.1 第一行：standalone 没有工作区，改名的边界无从谈起），
+所以今天 Playground 上按 F2 得到的是那条拒绝原因，而不是改名。网关与客户端两头已经按完整的 `WorkspaceEdit` 写好并有合约守着；
+让它真能改名需要服务端对单文件缓冲区开放 rename，那是服务端的另一刀，不在本刀。
+
+### 7.3 测试
+
+- `lsp_contract.py` 再增一项（30 到 31 项）：请求重建、`documentChanges` 与 `changes` 两种形状都只留本缓冲区并重建、`null` 通过、超过 1000 条是错误回复而非截断、
+  别的文档/空名字/非字符串名字/超长名字/负位置进不去子进程、回包结构错是协议错误；会话级用例走真 WebSocket，假子进程把新名字回显在编辑里。
+  五个变异体各自单独改网关源码后合约必须红：回包不重建、`changes` 里别的 URI 不丢、`documentChanges` 里别的文档不丢、不设上限、新名字不查。
+- `selftest.ts`：请求形状、非编辑项丢弃、拒绝原因原样透出、编辑排序；重叠、区间反向、空、超限都不应用。变异体五个（反向检查、重叠检查、上限检查、排序、非编辑项过滤）各让 selftest 变红。
+
+## 8. 不做的（理由）
 
 - **不换 Monaco、VS Code Web**：首屏 gzip Monaco 仅编辑器 712 KiB、带可用功能 1.0 MiB，
   monaco-languageclient 2.3 到 3.0 MiB，VS Code Web 不少于 3.9 MiB；Monaco 官方不支持触屏（裁决 2026-10-04 第 1 条）。
@@ -258,5 +291,6 @@ hover 的版式（间距、暗色）与移动端行为要人在页面上看一�
 - **LSP 在线时不为补回未导入的模块限定名而拉表**：那会让表在每次页面加载后都被下载，裁决 3c 就不成立了。
   需要它的读者写一行 `use` 即可得到服务端的成员补全（§3.4）。（2026-10-05 起不用写：服务端自己给，附 `use` 编辑，见 [lsp-auto-import-design.md](lsp-auto-import-design.md)。）
 - **不在空闲时预取表**：理由同上；只在 `fallback` 时预取。
+- **不放行 prepareRename**：输入框的初值取光标下的词，服务端的拒绝在 rename 回复里就能拿到，多一次往返没有收益。
 - **不放行 documentHighlight、declaration、typeDefinition、implementation**：lsp-client 不默认发前者，
   服务端未实现后三者（调研 §8）。
