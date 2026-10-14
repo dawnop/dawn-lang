@@ -1072,6 +1072,25 @@ for k in "${kernels[@]}"; do
     fi
     has_global_func "$work/$k.cubin" "$k" || fail "$k: the cubin has no GLOBAL FUNC named $k"
     echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, FUNC GLOBAL $k, tileiras V$want_tileiras, $arch)"
+    # The disassembly (knife T14c): tileirdisasm reads the bytes back into
+    # text, and that text must be this kernel's .mlir after both go through
+    # disasm-norm.py's closed rule table. This is the one check that says the
+    # .mlir and the .tilebc are the same program, which the byte golden (the
+    # bytes did not change) and the text golden (the text did not change) do
+    # not. A difference no rule accounts for fails here with a diff.
+    need_disasm
+    "$disasm" "$bc_golden" > "$work/$k.dis.txt" 2> "$work/$k.dis.err" || { cat "$work/$k.dis.err" >&2; fail "$k: tileirdisasm refused $k.tilebc"; }
+    [ ! -s "$work/$k.dis.err" ] || { cat "$work/$k.dis.err" >&2; fail "$k: tileirdisasm wrote to stderr"; }
+    python3 -I "$here/disasm-norm.py" compare "$golden" "$work/$k.dis.txt" ||
+      fail "$k: $k.mlir and tileirdisasm's reading of $k.tilebc differ after normalization (the diff is above)"
+    echo "PASS  disasm: $k.mlir is what tileirdisasm reads back from $k.tilebc (normalized, $(wc -l < "$work/$k.dis.txt") lines)"
+    if [ "$k" = vadd ]; then
+      # The normalizer's own gate: every rule is live and every counterexample
+      # (a semantic edit hidden in a rule's category) stays red.
+      python3 -I "$here/disasm-norm.py" selftest "$here" "$disasm" > "$work/disasm-norm.selftest" 2>&1 ||
+        { cat "$work/disasm-norm.selftest" >&2; fail "disasm-norm.py selftest failed"; }
+      echo "PASS  disasm-norm: $(grep -c '^PASS' "$work/disasm-norm.selftest") checks, every rule live and every counterexample red"
+    fi
     if [ "$k" = view_inbounds ]; then
       # The promise reaches the code: the same copy with no promise is
       # another program (knife T18). Its name differs, so compare the code.
