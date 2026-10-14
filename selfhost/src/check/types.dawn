@@ -3676,6 +3676,11 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("i64buf_fill", [TyI64Buf, TyInt, TyInt, TyInt], ["b", "from", "to", "v"], TyUnit),
     bsig("i64buf_copy_from", [TyI64Buf, TyInt, TyI64Buf, TyInt, TyInt],
       ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
+    # The buffer endpoints of the bulk pack family (mem-buffer-design.md 7):
+    # `bytes_pack_int` and friends with a flat buffer where the boxed Array was.
+    bsig("i64buf_pack", [TyI64Buf, TyInt, TyBool], ["b", "width", "little"], TyBytes),
+    bsig("i64buf_unpack", [TyBytes, TyInt, TyBool, TyBool], ["b", "width", "signed", "little"],
+      TyI64Buf),
     # The same six for doubles, bits kept (NaN payloads, -0.0).
     bsig("f64buf_new", [TyInt], ["n"], TyF64Buf),
     bsig("f64buf_len", [TyF64Buf], ["b"], TyInt),
@@ -3683,7 +3688,9 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("f64buf_set", [TyF64Buf, TyInt, TyFloat], ["b", "i", "v"], TyUnit),
     bsig("f64buf_fill", [TyF64Buf, TyInt, TyInt, TyFloat], ["b", "from", "to", "v"], TyUnit),
     bsig("f64buf_copy_from", [TyF64Buf, TyInt, TyF64Buf, TyInt, TyInt],
-      ["dst", "dst_at", "src", "src_at", "n"], TyUnit)
+      ["dst", "dst_at", "src", "src_at", "n"], TyUnit),
+    bsig("f64buf_pack", [TyF64Buf, TyInt, TyBool], ["b", "width", "little"], TyBytes),
+    bsig("f64buf_unpack", [TyBytes, TyInt, TyBool], ["b", "width", "little"], TyF64Buf)
   ]
   sigs = sigs ++ [
     # The argv supplied when this program starts. It is process input and is
@@ -4250,7 +4257,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   # The flat buffer primitives are std-only like the byte ones: std/mem owns
   # the surface, and its names (`at`, `set`) are not the primitives' (`i64buf_at`).
-  for op in ["new", "len", "at", "set", "fill", "copy_from"] {
+  for op in ["new", "len", "at", "set", "fill", "copy_from", "pack", "unpack"] {
     rt_of = map.insert(rt_of, "i64buf_${op}", RtMem)
     internal = set.insert(internal, "i64buf_${op}")
     rt_of = map.insert(rt_of, "f64buf_${op}", RtMem)
@@ -5145,7 +5152,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 133
+  assert map_size2(bs) == 137
 }
 
 test "the reclaim's failure is a value, under the one name left" {

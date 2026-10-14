@@ -1202,6 +1202,14 @@ static inline dawn_unit dawn_i64buf_set(dawn_i64buf *b, int64_t i, int64_t v) {
   return DAWN_UNIT;
 }
 
+/* The buffer endpoints of the bulk pack family (docs/mem-buffer-design.md 7):
+ * `dawn_bytes_pack_int` and `dawn_bytes_unpack_int` with a flat buffer where
+ * the boxed array was. `width` is 1, 2, 4 or 8; pack keeps the low `8*width`
+ * bits, unpack sign-extends when `is_signed`, and a length that is not a
+ * multiple of `width` panics. */
+dawn_bytes *dawn_i64buf_pack(const dawn_i64buf *b, int64_t width, bool little);
+dawn_i64buf *dawn_i64buf_unpack(const dawn_bytes *bs, int64_t width, bool is_signed, bool little);
+
 /* ---- F64Buf: the same buffer of doubles ----
  *
  * Everything above holds with `double` for `int64_t`. The elements are moved
@@ -1218,6 +1226,11 @@ void dawn_f64buf_oob(int64_t i, int64_t len) __attribute__((noreturn, cold, noin
 dawn_unit dawn_f64buf_fill(dawn_f64buf *b, int64_t from, int64_t to, double v);
 dawn_unit dawn_f64buf_copy_from(dawn_f64buf *dst, int64_t dst_at, const dawn_f64buf *src,
                                 int64_t src_at, int64_t n);
+/* Width 8 is bit-exact; width 4 rounds to nearest even on the way out and
+ * widens exactly on the way back, and a NaN's payload is not promised there. */
+dawn_bytes *dawn_f64buf_pack(const dawn_f64buf *b, int64_t width, bool little);
+dawn_f64buf *dawn_f64buf_unpack(const dawn_bytes *bs, int64_t width, bool little);
+
 static inline int64_t dawn_f64buf_len(const dawn_f64buf *b) { return b->len; }
 
 #define DAWN_F64BUF_CHECK(b, i)                                         \
@@ -1238,7 +1251,6 @@ static inline dawn_unit dawn_f64buf_set(dawn_f64buf *b, int64_t i, double v) {
   b->data[i] = v;
   return DAWN_UNIT;
 }
-
 /* The two decodings the language promises, one function each rather than one
  * taking a charset name: the function name is the domain, both charsets read
  * every byte string, and so neither answers an Option. Malformed UTF-8 is

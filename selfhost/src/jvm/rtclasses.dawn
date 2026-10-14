@@ -924,6 +924,10 @@ pub fn gen_mem_class(supers: List[String]) -> Bytes !io = {
   Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, MEM_CLASS, obj())
   gen_buf_ops(cw, i64_kind())
   gen_buf_ops(cw, f64_kind())
+  gen_buf_pack_int(cw)
+  gen_buf_unpack_int(cw)
+  gen_buf_pack_float(cw)
+  gen_buf_unpack_float(cw)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
@@ -1111,6 +1115,223 @@ fn gen_buf_ops(cw: ClassWriter, k: BufKind) -> Unit !io = {
   cv.visitMethodInsn(OP_INVOKESTATIC, MEM_CLASS, buf_panic_name(k, "copy"), "(JJJJJ)" ++ pd, false)
   cv.visitInsn(OP_ATHROW)
   close_mv(cv)
+}
+
+## The buffer endpoints of the pack family (docs/mem-buffer-design.md 7). These
+## are `bytes_pack_int` and its three siblings with the flat array read or
+## written directly where the boxed `Array` was, so the loop skeleton, the
+## `ByteBuffer` doing the byte work and the width and length panics are the
+## same ones (`int_width`, `float_width`, `unpack_count` in dawn/rt/Bytes).
+
+## i64buf_pack(b, width, little) -> byte[]. Locals: 0 b, 1-2 width, 3 little,
+## 4 w, 5 n, 6 out, 7 bb, 8 i.
+fn gen_buf_pack_int(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "i64buf_pack", "([JJZ)[B")
+  let end = Label.new()
+  m.visitVarInsn(OP_LLOAD, 1)
+  m.visitLdcInsn("bytes.pack: ")
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "int_width", "(JLjava/lang/String;)I", false)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 5)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_IMUL)
+  m.visitIntInsn(OP_NEWARRAY, T_BYTE)
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;",
+    false)
+  bb_set_order(m, 3)
+  m.visitVarInsn(OP_ASTORE, 7)
+  for w in [1, 2, 4, 8] {
+    let next = width_arm_open(m, 4, w)
+    let ls = loop_open(m, 8, 5)
+    m.visitVarInsn(OP_ALOAD, 7)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitVarInsn(OP_ILOAD, 8)
+    m.visitInsn(OP_LALOAD)
+    # the low 8*w bits, by the narrowing the store wants; a wider element wraps
+    if w == 1 {
+      m.visitInsn(OP_L2I)
+      m.visitInsn(OP_I2B)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "put", "(B)Ljava/nio/ByteBuffer;",
+        false)
+    } else if w == 2 {
+      m.visitInsn(OP_L2I)
+      m.visitInsn(OP_I2S)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putShort",
+        "(S)Ljava/nio/ByteBuffer;", false)
+    } else if w == 4 {
+      m.visitInsn(OP_L2I)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putInt",
+        "(I)Ljava/nio/ByteBuffer;", false)
+    } else {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putLong",
+        "(J)Ljava/nio/ByteBuffer;", false)
+    }
+    m.visitInsn(OP_POP)
+    loop_close(m, 8, ls)
+    width_arm_close(m, next, end)
+  }
+  m.visitLabel(end)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## i64buf_unpack(b, width, signed, little) -> long[]. Locals: 0 b, 1-2 width,
+## 3 signed, 4 little, 5 w, 6 n, 7 out, 8 bb, 9 i.
+fn gen_buf_unpack_int(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "i64buf_unpack", "([BJZZ)[J")
+  let end = Label.new()
+  m.visitVarInsn(OP_LLOAD, 1)
+  m.visitLdcInsn("bytes.unpack: ")
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "int_width", "(JLjava/lang/String;)I", false)
+  m.visitVarInsn(OP_ISTORE, 5)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "unpack_count", "([BI)I", false)
+  m.visitVarInsn(OP_ISTORE, 6)
+  m.visitVarInsn(OP_ILOAD, 6)
+  m.visitIntInsn(OP_NEWARRAY, T_LONG)
+  m.visitVarInsn(OP_ASTORE, 7)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;",
+    false)
+  bb_set_order(m, 4)
+  m.visitVarInsn(OP_ASTORE, 8)
+  for w in [1, 2, 4, 8] {
+    let next = width_arm_open(m, 5, w)
+    let ls = loop_open(m, 9, 6)
+    m.visitVarInsn(OP_ALOAD, 7)
+    m.visitVarInsn(OP_ILOAD, 9)
+    m.visitVarInsn(OP_ALOAD, 8)
+    if w == 8 {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J", false)
+    } else {
+      let (getter, gd, unsigned_cls, unsigned_m, unsigned_d) =
+        if w == 1 { ("get", "()B", "java/lang/Byte", "toUnsignedInt", "(B)I") }
+        else if w == 2 { ("getShort", "()S", "java/lang/Short", "toUnsignedInt", "(S)I") }
+        else { ("getInt", "()I", "java/lang/Integer", "toUnsignedLong", "(I)J") }
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", getter, gd, false)
+      let uns = Label.new()
+      let join = Label.new()
+      m.visitVarInsn(OP_ILOAD, 3)
+      m.visitJumpInsn(OP_IFEQ, uns)
+      # signed: the narrow value widens with its sign
+      m.visitInsn(OP_I2L)
+      m.visitJumpInsn(OP_GOTO, join)
+      m.visitLabel(uns)
+      m.visitMethodInsn(OP_INVOKESTATIC, unsigned_cls, unsigned_m, unsigned_d, false)
+      if w != 4 { m.visitInsn(OP_I2L) }
+      m.visitLabel(join)
+    }
+    m.visitInsn(OP_LASTORE)
+    loop_close(m, 9, ls)
+    width_arm_close(m, next, end)
+  }
+  m.visitLabel(end)
+  m.visitVarInsn(OP_ALOAD, 7)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## f64buf_pack(b, width, little) -> byte[]. Width 8 writes the double's raw
+## bits and width 4 narrows with D2F, as `bytes_pack_float` does. Locals: 0 b,
+## 1-2 width, 3 little, 4 w, 5 n, 6 out, 7 bb, 8 i.
+fn gen_buf_pack_float(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "f64buf_pack", "([DJZ)[B")
+  let end = Label.new()
+  m.visitVarInsn(OP_LLOAD, 1)
+  m.visitLdcInsn("bytes.pack: ")
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "float_width", "(JLjava/lang/String;)I", false)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 5)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_IMUL)
+  m.visitIntInsn(OP_NEWARRAY, T_BYTE)
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;",
+    false)
+  bb_set_order(m, 3)
+  m.visitVarInsn(OP_ASTORE, 7)
+  for w in [4, 8] {
+    let next = width_arm_open(m, 4, w)
+    let ls = loop_open(m, 8, 5)
+    m.visitVarInsn(OP_ALOAD, 7)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitVarInsn(OP_ILOAD, 8)
+    m.visitInsn(OP_DALOAD)
+    if w == 4 {
+      m.visitInsn(OP_D2F)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Float", "floatToRawIntBits", "(F)I", false)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putInt",
+        "(I)Ljava/nio/ByteBuffer;", false)
+    } else {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "doubleToRawLongBits", "(D)J", false)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "putLong",
+        "(J)Ljava/nio/ByteBuffer;", false)
+    }
+    m.visitInsn(OP_POP)
+    loop_close(m, 8, ls)
+    width_arm_close(m, next, end)
+  }
+  m.visitLabel(end)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## f64buf_unpack(b, width, little) -> double[]. Width 8 reads raw bits back with
+## `longBitsToDouble`; width 4 reads a float and widens it with F2D. Locals: 0 b,
+## 1-2 width, 3 little, 4 w, 5 n, 6 out, 7 bb, 8 i.
+fn gen_buf_unpack_float(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "f64buf_unpack", "([BJZ)[D")
+  let end = Label.new()
+  m.visitVarInsn(OP_LLOAD, 1)
+  m.visitLdcInsn("bytes.unpack: ")
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "float_width", "(JLjava/lang/String;)I", false)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "unpack_count", "([BI)I", false)
+  m.visitVarInsn(OP_ISTORE, 5)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitIntInsn(OP_NEWARRAY, T_DOUBLE)
+  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/nio/ByteBuffer", "wrap", "([B)Ljava/nio/ByteBuffer;",
+    false)
+  bb_set_order(m, 3)
+  m.visitVarInsn(OP_ASTORE, 7)
+  for w in [4, 8] {
+    let next = width_arm_open(m, 4, w)
+    let ls = loop_open(m, 8, 5)
+    m.visitVarInsn(OP_ALOAD, 6)
+    m.visitVarInsn(OP_ILOAD, 8)
+    m.visitVarInsn(OP_ALOAD, 7)
+    if w == 4 {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "getInt", "()I", false)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Float", "intBitsToFloat", "(I)F", false)
+      m.visitInsn(OP_F2D)
+    } else {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/nio/ByteBuffer", "getLong", "()J", false)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "longBitsToDouble", "(J)D", false)
+    }
+    m.visitInsn(OP_DASTORE)
+    loop_close(m, 8, ls)
+    width_arm_close(m, next, end)
+  }
+  m.visitLabel(end)
+  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
 }
 
 ## One of the two narrowed decoders: `new String(b, StandardCharsets.<field>)`.

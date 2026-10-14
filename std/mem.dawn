@@ -39,6 +39,13 @@
 # buffers get an `impl Len`, so there is no `f64_len`. An element is stored and
 # read as the double itself and never goes through arithmetic, so a NaN keeps its
 # payload and `-0.0` stays `-0.0`.
+#
+# `to_bytes` and `from_bytes` are the buffer endpoints of the pack family in
+# std/bytes: the same widths, wrapping, sign extension and panics, with a flat
+# buffer where the `List` was. They allocate the result once and fill it once.
+
+use std/bytes
+use std/bytes.{Endian, Little, Big}
 
 ## The operations of `Mem`: a fresh buffer of either kind. The handler in [`with_mem`]
 ## answers it; nothing else may install one.
@@ -125,6 +132,24 @@ pub fn to_list(b: I64Buf) -> List[Int] !Mem = {
   array_to_list(a)
 }
 
+## Each element of `b` as `width` bytes, which must be 1, 2, 4 or 8. An element
+## keeps its low `8 * width` bits, so the result of `pack_ints` on the same
+## elements, byte for byte. Any other width panics.
+pub fn to_bytes(b: I64Buf, width: Int, order: Endian = Little) -> Bytes !Mem =
+  i64buf_pack(b, width, is_little(order))
+
+## The bytes of `bs` as a buffer of `width`-byte integers, `signed` choosing
+## sign or zero extension; the inverse of [`to_bytes`]. Panics on a width other
+## than 1, 2, 4 or 8, and on a length that is not a multiple of `width`.
+pub fn from_bytes(bs: Bytes, width: Int, signed: Bool, order: Endian = Little) -> I64Buf !Mem = {
+  i64buf_unpack(bs, width, signed, is_little(order))
+}
+
+fn is_little(order: Endian) -> Bool = match order {
+  Little -> true
+  Big -> false
+}
+
 # ---- F64Buf ----
 
 ## A buffer of `n` zeros (`+0.0`). Panics when `n` is negative or above the limit.
@@ -186,6 +211,18 @@ pub fn f64_to_list(b: F64Buf) -> List[Float] !Mem = {
   }
   array_to_list(a)
 }
+
+## Each element of `b` as `width` bytes, which must be 4 or 8, as `pack_floats`
+## does: width 8 keeps the bits (a NaN's payload and sign, `-0.0`), width 4
+## rounds to the nearest float. Any other width panics.
+pub fn f64_to_bytes(b: F64Buf, width: Int, order: Endian = Little) -> Bytes !Mem =
+  f64buf_pack(b, width, is_little(order))
+
+## The bytes of `bs` as a buffer of doubles read from `width`-byte floats (4 or
+## 8); the inverse of [`f64_to_bytes`]. Panics on another width and on a length
+## that is not a multiple of `width`.
+pub fn f64_from_bytes(bs: Bytes, width: Int, order: Endian = Little) -> F64Buf !Mem =
+  f64buf_unpack(bs, width, is_little(order))
 
 # ---- tests ----
 #
@@ -377,7 +414,7 @@ test "two names for one buffer see each other's writes" {
   })
 }
 
-# ---- F64Buf tests ----
+# ---- F64Buf and the buffer endpoints ----
 
 const NAN_PAYLOAD: Int = 0x7FF8000000000001
 const NEG_ZERO_BITS: Int = -9223372036854775808
@@ -448,6 +485,67 @@ test "f64_clone is a buffer of its own, and the list conversions keep the bits" 
       for i in 0..n { xs = xs ++ [float_of_bits(i * 7919 + 4607182418800017408)] }
       assert f64_to_list(f64_from_list(xs)) == xs
     }
+  })
+}
+
+test "to_bytes and from_bytes are pack_ints and unpack_ints on a flat buffer" {
+  with_mem(() => {
+    let xs = [0, 1, -1, 255, 256, -129, 65535, 2147483647, -2147483648, 4294967295,
+      9223372036854775807, -9223372036854775808, 300, 0x0102030405060708]
+    let b = from_list(xs)
+    for w in [1, 2, 4, 8] {
+      for o in [Little, Big] {
+        assert to_bytes(b, w, o) == bytes.pack_ints(xs, w, o)
+        for sg in [true, false] {
+          assert to_list(from_bytes(to_bytes(b, w, o), w, sg, o)) ==
+            bytes.unpack_ints(bytes.pack_ints(xs, w, o), w, sg, o)
+        }
+      }
+    }
+    assert bytes.to_hex(to_bytes(from_list([0x0102, 0x0304]), 2)) == "02010403"
+    assert bytes.to_hex(to_bytes(from_list([0x0102, 0x0304]), 2, Big)) == "01020304"
+    assert bytes.to_hex(to_bytes(from_list([-1, 300]), 1)) == "ff2c"
+    # sign extension against zero extension
+    let raw = bytes.from_hex("80ff").expect("hex")
+    assert to_list(from_bytes(raw, 1, true)) == [-128, -1]
+    assert to_list(from_bytes(raw, 1, false)) == [128, 255]
+    assert to_list(from_bytes(raw, 2, true, Big)) == [-32513]
+    assert to_list(from_bytes(raw, 2, false, Big)) == [33023]
+    assert len(from_bytes(bytes.from_hex("").expect("hex"), 4, true)) == 0
+    assert len(to_bytes(new(0), 8)) == 0
+  })
+}
+
+test "the integer endpoints refuse a bad width and a ragged length with the pack wording" {
+  with_mem(() => {
+    assert panic_text(() => len(to_bytes(from_list([1]), 3))) ==
+      "bytes.pack: width 3 is not 1, 2, 4 or 8"
+    assert panic_text(() => len(from_bytes(bytes.from_hex("0102").expect("hex"), 0, true))) ==
+      "bytes.unpack: width 0 is not 1, 2, 4 or 8"
+    assert panic_text(() => len(from_bytes(bytes.from_hex("010203").expect("hex"), 2, true))) ==
+      "bytes.unpack: length 3 is not a multiple of 2"
+  })
+}
+
+test "f64_to_bytes and f64_from_bytes keep the bits at width 8 and round at width 4" {
+  with_mem(() => {
+    let nan = float_of_bits(NAN_PAYLOAD)
+    let xs = [1.5, -0.0, nan, 0.1, -3.25e200]
+    let b = f64_from_list(xs)
+    for o in [Little, Big] {
+      assert f64_to_bytes(b, 8, o) == bytes.pack_floats(xs, 8, o)
+      let back = f64_to_list(f64_from_bytes(f64_to_bytes(b, 8, o), 8, o))
+      for i in 0..5 { assert float_to_bits(back[i]) == float_to_bits(xs[i]) }
+    }
+    assert bytes.to_hex(f64_to_bytes(f64_from_list([1.5]), 8)) == "000000000000f83f"
+    assert bytes.to_hex(f64_to_bytes(f64_from_list([1.5]), 8, Big)) == "3ff8000000000000"
+    assert bytes.to_hex(f64_to_bytes(f64_from_list([1.5]), 4, Big)) == "3fc00000"
+    assert bytes.to_hex(f64_to_bytes(f64_from_list([-0.0]), 8, Big)) == "8000000000000000"
+    assert f64_to_bytes(b, 4) == bytes.pack_floats(xs, 4)
+    assert f64_to_list(f64_from_bytes(bytes.from_hex("3fc00000").expect("hex"), 4, Big)) == [1.5]
+    assert panic_text(() => len(f64_to_bytes(b, 2))) == "bytes.pack: width 2 is not 4 or 8"
+    assert panic_text(() => len(f64_from_bytes(bytes.from_hex("0102030405").expect("hex"), 4))) ==
+      "bytes.unpack: length 5 is not a multiple of 4"
   })
 }
 
