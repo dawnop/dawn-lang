@@ -4528,6 +4528,142 @@ dawn_array *dawn_bytes_unpack_float(const dawn_bytes *b, int64_t width, bool lit
   return dawn_array_of(nb, n);
 }
 
+/* ---- Buffer endpoints: I64Buf / F64Buf <-> bytes (docs/mem-buffer-design.md 7) ----
+ *
+ * The same loops as the Array family above with the flat elements read
+ * directly, so there is no box to open on the way in and none to allocate on
+ * the way out. The panic sentences are the Array family's, word for word: the
+ * semantics are the batch line's, not a second set. A little-endian host
+ * writing width 8 little is the identity on the bytes, and that case is one
+ * `memcpy`. */
+static bool dawn_host_is_little(void) {
+  const uint16_t one = 1;
+  unsigned char c;
+  memcpy(&c, &one, 1);
+  return c == 1;
+}
+
+static void dawn_bytes_panic_ragged(int64_t len, int64_t width) {
+  char msg[96];
+  int m = snprintf(msg, sizeof msg, "bytes.unpack: length %lld is not a multiple of %lld",
+                   (long long)len, (long long)width);
+  dawn_panic(dawn_str_lit(msg, m));
+}
+
+dawn_bytes *dawn_i64buf_pack(const dawn_i64buf *b, int64_t width, bool little) {
+  if (width != 1 && width != 2 && width != 4 && width != 8) {
+    dawn_bytes_panic_width("pack", width);
+  }
+  int64_t n = b->len;
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(n * width) + 1);
+  if (width == 8 && little == dawn_host_is_little()) {
+    if (n > 0) memcpy(buf, b->data, (size_t)n * 8);
+    return dawn_bytes_of(buf, n * 8);
+  }
+#define DAWN_PACK_LOOP(W)                                                  \
+  for (int64_t i = 0; i < n; i++) {                                        \
+    dawn_put_int(buf + i * (W), (uint64_t)b->data[i], (W), little);        \
+  }
+  switch (width) {
+    case 1: DAWN_PACK_LOOP(1) break;
+    case 2: DAWN_PACK_LOOP(2) break;
+    case 4: DAWN_PACK_LOOP(4) break;
+    default: DAWN_PACK_LOOP(8) break;
+  }
+#undef DAWN_PACK_LOOP
+  return dawn_bytes_of(buf, n * width);
+}
+
+dawn_i64buf *dawn_i64buf_unpack(const dawn_bytes *bs, int64_t width, bool is_signed, bool little) {
+  if (width != 1 && width != 2 && width != 4 && width != 8) {
+    dawn_bytes_panic_width("unpack", width);
+  }
+  if (bs->len % width != 0) {
+    dawn_bytes_panic_ragged(bs->len, width);
+  }
+  int64_t n = bs->len / width;
+  dawn_i64buf *out = dawn_i64buf_new(n);
+  const unsigned char *p = bs->p;
+  if (width == 8 && little == dawn_host_is_little()) {
+    if (n > 0) memcpy(out->data, p, (size_t)n * 8);
+    return out;
+  }
+#define DAWN_UNPACK_LOOP(W)                                                \
+  for (int64_t i = 0; i < n; i++) {                                        \
+    uint64_t v = dawn_get_int(p + i * (W), (W), little);                   \
+    if (is_signed && (W) < 8) {                                            \
+      uint64_t m = (uint64_t)1 << (8 * (W)-1);                             \
+      v = (v ^ m) - m;                                                     \
+    }                                                                      \
+    out->data[i] = (int64_t)v;                                             \
+  }
+  switch (width) {
+    case 1: DAWN_UNPACK_LOOP(1) break;
+    case 2: DAWN_UNPACK_LOOP(2) break;
+    case 4: DAWN_UNPACK_LOOP(4) break;
+    default: DAWN_UNPACK_LOOP(8) break;
+  }
+#undef DAWN_UNPACK_LOOP
+  return out;
+}
+
+dawn_bytes *dawn_f64buf_pack(const dawn_f64buf *b, int64_t width, bool little) {
+  if (width != 4 && width != 8) {
+    dawn_bytes_panic_float_width("pack", width);
+  }
+  int64_t n = b->len;
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(n * width) + 1);
+  if (width == 8) {
+    if (little == dawn_host_is_little()) {
+      if (n > 0) memcpy(buf, b->data, (size_t)n * 8);
+    } else {
+      for (int64_t i = 0; i < n; i++) {
+        uint64_t bits;
+        memcpy(&bits, &b->data[i], sizeof bits);
+        dawn_put_int(buf + i * 8, bits, 8, little);
+      }
+    }
+  } else {
+    for (int64_t i = 0; i < n; i++) {
+      float f = (float)b->data[i];
+      uint32_t bits;
+      memcpy(&bits, &f, sizeof bits);
+      dawn_put_int(buf + i * 4, bits, 4, little);
+    }
+  }
+  return dawn_bytes_of(buf, n * width);
+}
+
+dawn_f64buf *dawn_f64buf_unpack(const dawn_bytes *bs, int64_t width, bool little) {
+  if (width != 4 && width != 8) {
+    dawn_bytes_panic_float_width("unpack", width);
+  }
+  if (bs->len % width != 0) {
+    dawn_bytes_panic_ragged(bs->len, width);
+  }
+  int64_t n = bs->len / width;
+  dawn_f64buf *out = dawn_f64buf_new(n);
+  const unsigned char *p = bs->p;
+  if (width == 8) {
+    if (little == dawn_host_is_little()) {
+      if (n > 0) memcpy(out->data, p, (size_t)n * 8);
+    } else {
+      for (int64_t i = 0; i < n; i++) {
+        uint64_t bits = dawn_get_int(p + i * 8, 8, little);
+        memcpy(&out->data[i], &bits, sizeof bits);
+      }
+    }
+  } else {
+    for (int64_t i = 0; i < n; i++) {
+      uint32_t bits = (uint32_t)dawn_get_int(p + i * 4, 4, little);
+      float f;
+      memcpy(&f, &bits, sizeof f);
+      out->data[i] = (double)f;
+    }
+  }
+  return out;
+}
+
 /* Malformed input is replaced, not refused -- what `new String(bytes,
  * charset)` does. One U+FFFD per malformed sequence, not per byte: how many
  * bytes a replacement stands for is `dawn_utf8_step`'s answer, and it is the

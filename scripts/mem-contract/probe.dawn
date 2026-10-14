@@ -8,6 +8,8 @@
 # have no counterpart, because nothing about a buffer is unobservable.
 use std/mem
 use std/mem.{Mem}
+use std/bytes
+use std/bytes.{Big, Little}
 use std/dtype.{to_bits, from_bits}
 
 fn int_text[!e](f: fn() -> Int !e) -> String !e =
@@ -222,6 +224,9 @@ fn float_text[!e](f: fn() -> Float !e) -> String !e =
     Err(e) -> e.message
   }
 
+fn f64_hex(b: F64Buf, width: Int, order: bytes.Endian) -> String !Mem =
+  bytes.to_hex(mem.f64_to_bytes(b, width, order))
+
 fn f64_bits(b: F64Buf) -> String !Mem = {
   var out: List[Int] = []
   for x in mem.f64_to_list(b) { out = out ++ [to_bits(x)] }
@@ -283,6 +288,108 @@ fn f64_overlap_line() -> String !Mem = {
   "${mem.f64_to_list(up)} ${mem.f64_to_list(down)} ${mem.f64_to_list(f)}"
 }
 
+# ---- the buffer endpoints ----
+
+const SAMPLE: List[Int] = [0, 1, -1, 255, 256, -129, 65535, 2147483647, -2147483648, 4294967295,
+  9223372036854775807, -9223372036854775808, 300, 72623859790382856]
+
+fn endpoint_lines() -> List[String] !Mem = {
+  let b = mem.from_list(SAMPLE)
+  var out: List[String] = []
+  for w in [1, 2, 4, 8] {
+    out = out ++ ["to_bytes ${w} little ${bytes.to_hex(mem.to_bytes(b, w))}"]
+    out = out ++ ["to_bytes ${w} big ${bytes.to_hex(mem.to_bytes(b, w, Big))}"]
+    let le = mem.to_bytes(b, w)
+    let be = mem.to_bytes(b, w, Big)
+    out = out ++ ["from_bytes ${w} signed little ${show(mem.from_bytes(le, w, true))}"]
+    out = out ++ ["from_bytes ${w} unsigned little ${show(mem.from_bytes(le, w, false))}"]
+    out = out ++ ["from_bytes ${w} signed big ${show(mem.from_bytes(be, w, true, Big))}"]
+    out = out ++ ["from_bytes ${w} unsigned big ${show(mem.from_bytes(be, w, false, Big))}"]
+  }
+  out
+}
+
+fn endpoint_panic_lines() -> List[String] !Mem = {
+  let b = mem.from_list([1, 2])
+  let f = mem.f64_from_list([1.0, 2.0])
+  let odd = bytes.from_hex("0102030405").expect("hex")
+  [
+    int_text(() => len(mem.to_bytes(b, 3))),
+    int_text(() => len(mem.from_bytes(odd, 0, true))),
+    int_text(() => len(mem.from_bytes(odd, 2, true))),
+    int_text(() => len(mem.f64_to_bytes(f, 2))),
+    int_text(() => len(mem.f64_from_bytes(odd, 8))),
+    int_text(() => len(mem.f64_from_bytes(odd, 4)))
+  ]
+}
+
+fn f64_endpoint_lines() -> List[String] !Mem = {
+  let nan: Float = from_bits(NAN_BITS)
+  let b = mem.f64_from_list([1.5, -0.0, nan, 0.1, -3.25e200])
+  var out: List[String] = []
+  for w in [4, 8] {
+    out = out ++ ["f64_to_bytes ${w} little ${f64_hex(b, w, Little)}"]
+    out = out ++ ["f64_to_bytes ${w} big ${f64_hex(b, w, Big)}"]
+  }
+  let wide = mem.f64_to_bytes(b, 8, Big)
+  out = out ++ ["f64_from_bytes 8 big ${f64_bits(mem.f64_from_bytes(wide, 8, Big))}"]
+  let le = mem.f64_to_bytes(b, 8)
+  out = out ++ ["f64_from_bytes 8 little ${f64_bits(mem.f64_from_bytes(le, 8))}"]
+  let narrow = mem.f64_to_bytes(mem.f64_from_list([1.5, -0.0, 0.1]), 4, Big)
+  out = out ++ ["f64_from_bytes 4 big ${f64_bits(mem.f64_from_bytes(narrow, 4, Big))}"]
+  out
+}
+
+## 1M elements out to bytes and back, both buffer kinds, at every width that
+## keeps the value. The values come from a 64-bit generator, so every byte of
+## every element is exercised, and an F64Buf element is a bit pattern taken as
+## it comes (NaNs of every payload, subnormals, infinities included).
+fn million_lines() -> List[String] !Mem = {
+  let n = 1048576
+  let b = mem.new(n)
+  let f = mem.f64_new(n)
+  var s = 987654321
+  var i = 0
+  while i < n {
+    s = s * 6364136223846793005 + 1442695040888963407
+    mem.set(b, i, s)
+    mem.f64_set(f, i, from_bits(s))
+    i = i + 1
+  }
+  mem.set(b, 0, -9223372036854775808)
+  mem.f64_set(f, 0, from_bits(NAN_BITS))
+  mem.f64_set(f, 1, -0.0)
+  let bb = mem.to_bytes(b, 8)
+  let fb = mem.f64_to_bytes(f, 8, Big)
+  let b2 = mem.from_bytes(bb, 8, true)
+  let f2 = mem.f64_from_bytes(fb, 8, Big)
+  var diff_i = 0
+  var diff_f = 0
+  var h = 0
+  var k = 0
+  while k < n {
+    if mem.at(b, k) != mem.at(b2, k) { diff_i = diff_i + 1 }
+    if to_bits(mem.f64_at(f, k)) != to_bits(mem.f64_at(f2, k)) { diff_f = diff_f + 1 }
+    h = h * 31 + mem.at(b2, k)
+    k = k + 1
+  }
+  let w4 = mem.from_bytes(mem.to_bytes(b, 4), 4, true)
+  let w4u = mem.from_bytes(mem.to_bytes(b, 4), 4, false)
+  var sum4 = 0
+  var sum4u = 0
+  var j = 0
+  while j < n {
+    sum4 = sum4 + mem.at(w4, j)
+    sum4u = sum4u + mem.at(w4u, j)
+    j = j + 1
+  }
+  [
+    "int bytes=${len(bb)} diff=${diff_i} h=${h}",
+    "float bytes=${len(fb)} diff=${diff_f} first=${to_bits(mem.f64_at(f2, 0))} second=${to_bits(mem.f64_at(f2, 1))}",
+    "width4 signed=${sum4} unsigned=${sum4u}"
+  ]
+}
+
 ## A `ctl` effect so an arm can drop a continuation that holds a buffer: the
 ## release case std/mem cannot test itself. The sanitized leg turns a leak here
 ## into a failure; the value is checked on every leg.
@@ -320,5 +427,9 @@ pub fn main() -> Unit !io = {
   println("f64bits  ${mem.with_mem(() => f64_bits_line())}")
   for line in mem.with_mem(() => f64_panic_lines()) { println("f64panic ${line}") }
   println("f64move  ${mem.with_mem(() => f64_overlap_line())}")
+  for line in mem.with_mem(() => endpoint_lines()) { println("bytes    ${line}") }
+  for line in mem.with_mem(() => endpoint_panic_lines()) { println("bytespan ${line}") }
+  for line in mem.with_mem(() => f64_endpoint_lines()) { println("bytes    ${line}") }
+  for line in mem.with_mem(() => million_lines()) { println("million  ${line}") }
   println("dropped  ${mem.with_mem(() => dropped_line())}")
 }
