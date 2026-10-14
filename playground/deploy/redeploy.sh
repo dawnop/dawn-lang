@@ -156,6 +156,26 @@ if ! ssh "$HOST" "'$PLAY_JDK_REMOTE/bin/java' -version 2>&1 | grep -q 'version \
   exit 1
 fi
 
+# Rollback point. Before anything on the server is replaced, the live runner
+# side (launcher, jar, runner sources, packages, scripts, samples) is copied to
+# $REMOTE/.prev-<live version>-<UTC stamp>-runner and the newest 3 are kept
+# (scripts/deploy-backup.sh, which has the reasons). It fails closed: if the
+# copy cannot be made the deploy stops here, before the first rsync.
+# DAWN_DEPLOY_NO_BACKUP=1 skips it, for a disk that cannot hold a copy.
+# DEPLOY.md, "Rollback", says how to restore one.
+if [ "${DAWN_DEPLOY_NO_BACKUP:-}" = 1 ]; then
+  echo "warning: DAWN_DEPLOY_NO_BACKUP=1, deploying without a rollback copy" >&2
+else
+  echo "=== keeping a rollback copy on $HOST ==="
+  # shellcheck disable=SC2029
+  if ! ssh "$HOST" bash -s -- "$REMOTE" "$REMOTE" runner "cmd:$REMOTE/bin/dawnc" \
+      bin build playground packages scripts site <scripts/deploy-backup.sh; then
+    echo "error: could not make a rollback copy; nothing was deployed." >&2
+    echo "  Free some space, or set DAWN_DEPLOY_NO_BACKUP=1 to deploy without one." >&2
+    exit 1
+  fi
+fi
+
 echo "=== syncing to $HOST:$REMOTE ==="
 # the launcher + the standalone jar it runs (bin/dawn's deployed form needs
 # only build/dawn-selfhost.jar next to it — no seed fetch on the server)
