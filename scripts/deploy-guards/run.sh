@@ -373,15 +373,11 @@ mutant_for() {
     c_p_backup_first|c_s_backup_first)
       echo 'if ! ssh "$HOST" bash -s --=>if ! true "$HOST" bash -s --' ;;
     c_p_backup_closed)
-      printf '%s\n' 'exit 1
+      printf '%s\n' '    backup_failed
   fi
-fi
-
-echo "=== syncing=>:
+fi=>    :
   fi
-fi
-
-echo "=== syncing' ;;
+fi' ;;
     c_s_backup_closed)
       printf '%s\n' 'exit 1
   fi
