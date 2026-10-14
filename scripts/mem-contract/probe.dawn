@@ -1,4 +1,4 @@
-# The I64Buf contract probe: one user program, run on both backends, whose
+# The I64Buf and F64Buf contract probe: one user program, run on both backends, whose
 # output has to equal expected.txt line for line. Every panic is printed as its
 # message, because the message is a value once `catch_panic` hands it back and
 # the two backends must not disagree on it.
@@ -8,6 +8,7 @@
 # have no counterpart, because nothing about a buffer is unobservable.
 use std/mem
 use std/mem.{Mem}
+use std/dtype.{to_bits, from_bits}
 
 fn int_text[!e](f: fn() -> Int !e) -> String !e =
   match catch_panic(f) {
@@ -211,6 +212,77 @@ fn big_line() -> String !Mem = {
   "sum=${sum}"
 }
 
+# ---- F64Buf ----
+
+const NAN_BITS: Int = 0x7FF8000000000001
+
+fn float_text[!e](f: fn() -> Float !e) -> String !e =
+  match catch_panic(f) {
+    Ok(v) -> "no panic (${to_bits(v)})"
+    Err(e) -> e.message
+  }
+
+fn f64_bits(b: F64Buf) -> String !Mem = {
+  var out: List[Int] = []
+  for x in mem.f64_to_list(b) { out = out ++ [to_bits(x)] }
+  "${out}"
+}
+
+fn f64_zero_line() -> String !Mem = {
+  let z = mem.f64_new(1000)
+  var nonzero = 0
+  var i = 0
+  while i < 1000 {
+    if to_bits(mem.f64_at(z, i)) != 0 { nonzero = nonzero + 1 }
+    i = i + 1
+  }
+  "len=${len(z)} nonzero=${nonzero} empty=${len(mem.f64_new(0))}"
+}
+
+## The bits that arithmetic would lose: -0.0, a NaN with a payload and a sign,
+## the infinities, the smallest subnormal.
+fn f64_bits_line() -> String !Mem = {
+  let b = mem.f64_new(6)
+  mem.f64_set(b, 0, -0.0)
+  let nan: Float = from_bits(NAN_BITS)
+  mem.f64_set(b, 1, nan)
+  mem.f64_set(b, 2, from_bits(-2251799813685247))
+  mem.f64_set(b, 3, from_bits(9218868437227405312))
+  mem.f64_set(b, 4, from_bits(-4503599627370496))
+  mem.f64_set(b, 5, from_bits(1))
+  let first = f64_bits(b)
+  let c = mem.f64_clone(b)
+  mem.f64_copy_within(c, 0, 3, 3)
+  "${first} ${f64_bits(c)} ${f64_bits(mem.f64_from_list(mem.f64_to_list(b)))}"
+}
+
+fn f64_panic_lines() -> List[String] !Mem = {
+  let b = mem.f64_new(8)
+  let a = mem.f64_new(4)
+  let c = mem.f64_new(3)
+  [
+    float_text(() => mem.f64_at(b, 8)),
+    float_text(() => mem.f64_at(b, 4294967301)),
+    unit_text(() => mem.f64_set(b, -1, 1.0)),
+    int_text(() => len(mem.f64_new(-1))),
+    int_text(() => len(mem.f64_new(2147483640))),
+    unit_text(() => mem.f64_fill(b, 0, 9, 0.0)),
+    unit_text(() => mem.f64_copy_from(a, 3, c, 0, 2)),
+    unit_text(() => mem.f64_copy_within(a, 3, 0, 2)),
+    "after ${f64_bits(a)}"
+  ]
+}
+
+fn f64_overlap_line() -> String !Mem = {
+  let up = mem.f64_from_list([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+  mem.f64_copy_within(up, 0, 2, 4)
+  let down = mem.f64_from_list([0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+  mem.f64_copy_within(down, 2, 0, 4)
+  let f = mem.f64_from_list([1.0, 2.0, 3.0, 4.0, 5.0])
+  mem.f64_fill(f, 1, 4, 0.5)
+  "${mem.f64_to_list(up)} ${mem.f64_to_list(down)} ${mem.f64_to_list(f)}"
+}
+
 ## A `ctl` effect so an arm can drop a continuation that holds a buffer: the
 ## release case std/mem cannot test itself. The sanitized leg turns a leak here
 ## into a failure; the value is checked on every leg.
@@ -244,5 +316,9 @@ pub fn main() -> Unit !io = {
   println("lcg      ${mem.with_mem(() => lcg_line())}")
   println("window   ${mem.with_mem(() => window_line())}")
   println("big      ${mem.with_mem(() => big_line())}")
+  println("f64zero  ${mem.with_mem(() => f64_zero_line())}")
+  println("f64bits  ${mem.with_mem(() => f64_bits_line())}")
+  for line in mem.with_mem(() => f64_panic_lines()) { println("f64panic ${line}") }
+  println("f64move  ${mem.with_mem(() => f64_overlap_line())}")
   println("dropped  ${mem.with_mem(() => dropped_line())}")
 }

@@ -405,6 +405,40 @@ static void test_i64buf(void) {
   dawn_drop(b);
 }
 
+/* An `F64Buf` is the same counted leaf over doubles, and its one claim beyond
+ * I64Buf's is that no primitive touches the bits: a NaN payload and `-0.0`
+ * come out as they went in, through `set`, `fill` and a copy. */
+static void test_f64buf(void) {
+  dawn_f64buf *b = dawn_f64buf_new(4);
+  check(b->h.rc == 1 && dawn_f64buf_len(b) == 4, "a new buffer is owned once and has its length");
+  uint64_t zero_bits = 1;
+  memcpy(&zero_bits, &b->data[3], sizeof zero_bits);
+  check(zero_bits == 0, "a new buffer is zero-filled");
+
+  const uint64_t nan_bits = UINT64_C(0x7FF8000000000001);
+  double nan;
+  memcpy(&nan, &nan_bits, sizeof nan);
+  dawn_f64buf_set(b, 0, nan);
+  dawn_f64buf_set(b, 1, -0.0);
+  dawn_f64buf_copy_from(b, 2, b, 0, 2);
+  uint64_t got0, got1, got2, got3;
+  memcpy(&got0, &b->data[0], 8);
+  memcpy(&got1, &b->data[1], 8);
+  memcpy(&got2, &b->data[2], 8);
+  memcpy(&got3, &b->data[3], 8);
+  check(got0 == nan_bits && got1 == UINT64_C(0x8000000000000000) && got2 == nan_bits &&
+            got3 == UINT64_C(0x8000000000000000),
+        "set and a copy keep a NaN payload and the sign of zero");
+  dawn_f64buf_fill(b, 0, 4, 2.5);
+  check(dawn_f64buf_at(b, 0) == 2.5 && dawn_f64buf_at(b, 3) == 2.5, "fill writes what at reads");
+  check(b->h.rc == 1, "no primitive moves the count");
+  dawn_f64buf *d = dawn_dup(b);
+  check(d == b && b->h.rc == 2, "a second holder is a count");
+  dawn_drop(d);
+  check(b->h.rc == 1, "and giving it up is one back");
+  dawn_drop(b);
+}
+
 /* ---- a handler's state cells (docs/handler-state-design.md) --------------
  *
  * The only overwritable slot in the runtime, so the only place a superseded
@@ -1471,6 +1505,7 @@ static const rc_case rc_cases[] = {
     {"array_extend", test_array_extend, 0},
     {"array_slice", test_array_slice, 0},
     {"i64buf", test_i64buf, 0},
+    {"f64buf", test_f64buf, 0},
     {"adt_reset_shared", test_adt_reset_shared, 0},
     {"adt_reset_releases_fields", test_adt_reset_releases_fields, 0},
     {"adt_reset_token_is_a_shell", test_adt_reset_token_is_a_shell, 0},

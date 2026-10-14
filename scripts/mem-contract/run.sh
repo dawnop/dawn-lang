@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract test for the `I64Buf` primitives (docs/mem-buffer-design.md 5, 6).
+# Contract test for the `I64Buf` and `F64Buf` primitives and their byte endpoints (docs/mem-buffer-design.md 5, 6).
 #
 #   ./scripts/mem-contract/run.sh
 #
@@ -95,10 +95,10 @@ echo "PASS  native under ASan, LeakSanitizer and UBSan"
 
 # ---- the hot path stays inline ----------------------------------------------
 "$cc_bin" "${cflags[@]}" -O2 -S -o "$work/probe.s" "$work/probe.c"
-refs="$(grep -c 'dawn_i64buf_\(at\|set\|len\)' "$work/probe.s" || true)"
+refs="$(grep -c 'dawn_\(i64\|f64\)buf_\(at\|set\|len\)' "$work/probe.s" || true)"
 if [ "$refs" != "0" ]; then
-  grep 'dawn_i64buf_\(at\|set\|len\)' "$work/probe.s" | head -5 >&2
-  echo "FAIL: dawn_i64buf_at/set/len left a symbol behind in the probe's assembly ($refs lines)." >&2
+  grep 'dawn_\(i64\|f64\)buf_\(at\|set\|len\)' "$work/probe.s" | head -5 >&2
+  echo "FAIL: dawn_i64buf_at/set/len or the f64buf twin left a symbol behind in the probe's assembly ($refs lines)." >&2
   echo "      They are static inline in dawn_rt.h so a buffer loop pays no call per access;" >&2
   echo "      out of line they cost 1.7x on bcrypt (docs/mem-buffer-design.md 6.1)." >&2
   exit 1
