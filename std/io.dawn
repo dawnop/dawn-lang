@@ -1,7 +1,8 @@
-## The outside world: console, files, environment, clocks and subprocesses.
-## The file system is the named effect [`Fs`], running another program is
-## [`Proc`], the process environment is [`Env`] and the host's two clocks are
-## [`Clock`], each with a production handler `with_*_real`. The console and
+## The outside world: console, files, environment, clocks, random bytes and
+## subprocesses. The file system is the named effect [`Fs`], running another
+## program is [`Proc`], the process environment is [`Env`], the host's two
+## clocks are [`Clock`] and unpredictable bytes are [`Random`], each with a
+## production handler `with_*_real`. The console and
 ## ending the process are `!io` today; the effects that will carry them,
 ## [`Console`] and [`Exit`], are declared below and their consumers are a
 ## release away. Everything that can fail answers
@@ -908,6 +909,48 @@ pub fn elapsed_ns(start: Instant, stop: Instant) -> Int = {
 ## that wants the time calls [`now`].
 pub fn instant_at_ns(ns: Int) -> Instant = ns
 
+# ---- random bytes as a named effect ----
+#
+# Unpredictable bytes from the host, as one operation
+# (docs/random-effect-design.md). Like `Clock` it relabels nothing: the public
+# face names `!Random` from the start.
+#
+# One operation, and the set is meant to be final, for the reason `Clock`'s
+# is: every declared operation has exactly one arm in a handler (spec §6.5),
+# so one added later breaks every handler written against this one. Integers,
+# ranges and floats are derived from bytes in plain Dawn (rejection sampling),
+# so they need no operation. A UUID or a session token is a few lines over
+# `random_bytes` and lives with its consumer, not here.
+#
+# The name is `Random`, not `Entropy`: a program wants "random", and where the
+# bytes come from is the handler's business. The production handler answers
+# with the host's CSPRNG; a test answers with whatever bytes it likes.
+#
+# A host that cannot supply entropy is a fault, not a `Result`: a caller that
+# ignores an error path ends up with a predictable token, and Go made
+# `crypto/rand` fatal on failure for exactly that reason (1.24).
+
+## Unpredictable bytes. `random_bytes(n)` is exactly `n` of them: empty for 0,
+## and a panic for a negative `n`, which is the caller's bug. The prefix is the
+## one the other effects' operations carry (spec §6.5).
+##
+## The production handler [`with_random_real`] answers from the host's
+## cryptographically secure generator, so the bytes are suitable for tokens and
+## keys. This is not a seedable PRNG.
+pub effect Random {
+  fn random_bytes(n: Int) -> Bytes
+}
+
+## Run `body` against the host's secure random source. Each call to
+## `random_bytes` is one request to the host, so a caller that wants a lot of
+## bytes asks once for all of them.
+pub fn with_random_real[T, !e](body: fn() -> T !Random !e) -> T !io = {
+  with handle Random {
+    random_bytes(n) => io_random_bytes(n)
+  }
+  body()
+}
+
 # What these blocks may and may not assert is decided by one fact: `kind` is
 # whatever the backend called the failure. On the JVM a missing file is
 # `java.nio.file.NoSuchFileException`; a second backend has no reason to spell
@@ -1696,7 +1739,67 @@ test "elapsed_ns is a subtraction that floors at zero" {
   assert elapsed_ns(instant_at_ns(top), instant_at_ns(top + 1)) == 1
 }
 
-test "the six real wrappers nest, and the order is the body rows' doing" {
+test "with_random_real answers the right number of bytes from the host" {
+  with_random_real(() => {
+    assert bytes_len(random_bytes(0)) == 0
+    assert bytes_len(random_bytes(1)) == 1
+    assert bytes_len(random_bytes(16)) == 16
+    assert bytes_len(random_bytes(100_000)) == 100_000
+  })
+}
+
+test "two reads of the real source differ, and are not all one byte" {
+  with_random_real(() => {
+    # 16 equal bytes by chance is 2^-128, so these are assertions and not
+    # a flaky hope. A source answering zeros, or the same block twice, fails.
+    let a = random_bytes(16)
+    let b = random_bytes(16)
+    assert a != b
+    let big = random_bytes(4096)
+    var zeros = 0
+    var first_again = 0
+    for i in range(0, bytes_len(big)) {
+      if bytes_at(big, i) == 0 { zeros = zeros + 1 }
+      if bytes_at(big, i) == bytes_at(big, 0) { first_again = first_again + 1 }
+    }
+    # about 16 of 4096 bytes are zero; a source answering zeros gets 4096, and
+    # one repeating a single byte gets 4096 matches of the first
+    assert zeros < 100
+    assert first_again < 100
+  })
+}
+
+test "a negative count is a panic and the real source stays usable after it" {
+  with_random_real(() => {
+    match catch_panic(() => bytes_len(random_bytes(-1))) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e.message, "must not be negative") }
+    }
+    assert bytes_len(random_bytes(3)) == 3
+  })
+}
+
+test "a handler over a table answers Random without a host" {
+  # What the fake is for: the bytes are whatever the test says. This one walks
+  # along the alphabet, so the second read continues where the first stopped.
+  with handle Random {
+    var next: Int = 0
+    random_bytes(n) => {
+      let out = bytes_slice(bytes_utf8("abcdefghijklmnopqrstuvwxyz"), next, next + n)
+      next = next + n
+      out
+    }
+  }
+  let a = random_bytes(3)
+  assert bytes_len(a) == 3
+  assert bytes_at(a, 0) == 97
+  assert bytes_at(a, 2) == 99
+  let b = random_bytes(2)
+  assert bytes_at(b, 0) == 100
+  assert bytes_len(random_bytes(0)) == 0
+}
+
+test "the seven real wrappers nest, and the order is the body rows' doing" {
   # The nesting is an assertion, not a setting. `with_fs_real`'s body row is
   # closed, so it can only be the outer one; the other five take `!e`, so each
   # can sit anywhere inside. Spell `with_exit_real`'s, `with_console_real`'s or
@@ -1705,8 +1808,8 @@ test "the six real wrappers nest, and the order is the body rows' doing" {
   # test above says it does for `Env`. `with_clock_real` is innermost here and
   # could be anywhere inside the first.
   with_fs_real(() => with_proc_real(() => with_env_real(() => with_exit_real(() =>
-      with_console_real(() => with_clock_real(() => {
-        # five of the six effects are exercised here; the sixth is `Exit`, and
+      with_console_real(() => with_clock_real(() => with_random_real(() => {
+        # six of the seven effects are exercised here; the seventh is `Exit`, and
         # calling `exit_now` under its real handler would end the test run,
         # which is the whole reason the test above installs an arm of its own.
         let start = now()
@@ -1716,6 +1819,7 @@ test "the six real wrappers nest, and the order is the body rows' doing" {
         assert proc_run(["sh", "-c", "exit 0"], "", "") == Ok(0)
         # a child process ran in between, so the monotonic clock has moved
         assert elapsed_ns(start, now()) > 0
-        console_println("std/io: all six real handlers are installed")
-      }))))))
+        assert bytes_len(random_bytes(4)) == 4
+        console_println("std/io: all seven real handlers are installed")
+      })))))))
 }

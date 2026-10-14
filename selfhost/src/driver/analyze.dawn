@@ -1809,6 +1809,28 @@ test "comptime refuses to read either clock, and says which effect it met" {
   })
 }
 
+test "comptime refuses to draw random bytes, and says which effect it met" {
+  in_mem(() => {
+    # A secret drawn at compile time would be baked into the artifact
+    # (docs/random-effect-design.md). The checker is the wall a user meets:
+    # `random_bytes` is `!Random` and a `const` must be pure. The
+    # interpreter's refusal of `io_random_bytes` is the second wall, held by
+    # the comptime coverage test in ir/interp.
+    let root = "/tmp/dawn-selfhost-analyze/comptime-random"
+    mkdirs("${root}/src")
+    put("${root}/src/main.dawn", "use std/io\nuse std/bytes\n" ++
+        "const SECRET: Int = bytes.at(io.random_bytes(16), 0)\n" ++
+        "pub fn main() -> Unit !io = println(to_string(SECRET))\n")
+    let std = match load_std(std_dir()) {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+    assert len(prog.diags) == 1
+    assert prog.diags[0].d.msg == "const initializers must be pure, but `random_bytes` is !Random"
+  })
+}
+
 test "comptime refuses a cursor used on another string and still walks one string" {
   in_mem(() => {
     # spec 11 leaves a cursor from one string used on another undefined, and
