@@ -120,17 +120,10 @@ pub fn from_list(xs: List[Int]) -> I64Buf !Mem = {
   b
 }
 
-## The elements of `b`, in order, as a list.
-pub fn to_list(b: I64Buf) -> List[Int] !Mem = {
-  let n = i64buf_len(b)
-  var a: Array[Int] = array_new()
-  var i = 0
-  while i < n {
-    a = array_push(a, i64buf_at(b, i))
-    i = i + 1
-  }
-  array_to_list(a)
-}
+## The elements of `b`, in order, as a list. It goes through the bulk byte
+## path at width 8, which measures faster than a per-element loop on both backends.
+pub fn to_list(b: I64Buf) -> List[Int] !Mem =
+  bytes.unpack_ints(to_bytes(b, 8), 8, true)
 
 ## Each element of `b` as `width` bytes, which must be 1, 2, 4 or 8. An element
 ## keeps its low `8 * width` bits, so the result of `pack_ints` on the same
@@ -201,16 +194,8 @@ pub fn f64_from_list(xs: List[Float]) -> F64Buf !Mem = {
 }
 
 ## The elements of `b`, in order, as a list.
-pub fn f64_to_list(b: F64Buf) -> List[Float] !Mem = {
-  let n = f64buf_len(b)
-  var a: Array[Float] = array_new()
-  var i = 0
-  while i < n {
-    a = array_push(a, f64buf_at(b, i))
-    i = i + 1
-  }
-  array_to_list(a)
-}
+pub fn f64_to_list(b: F64Buf) -> List[Float] !Mem =
+  bytes.unpack_floats(f64_to_bytes(b, 8), 8)
 
 ## Each element of `b` as `width` bytes, which must be 4 or 8, as `pack_floats`
 ## does: width 8 keeps the bits (a NaN's payload and sign, `-0.0`), width 4
