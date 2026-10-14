@@ -512,7 +512,7 @@ N7 与 N8 与设计稿的表有一点不同：设计稿把「操作签名」与�
    缓冲到缓冲的往返比 `List` 路径快一个数量级以上（native 约 66 倍，JVM 约 8 倍），与 §7 的预期一致：预期「拆包落在 memcpy 量级」成立。
    **含 `List` 转换的端到端**在 native 上反而比纯 `List` 路径慢（69.6 对 55.3 ms，约 1.26 倍）：多出来的是 `from_list`/`to_list` 两个 Dawn 循环（见第 7 条）。
    JVM 各轮抖动大（`List` 路径吃 GC，单轮可差数倍），只当量级；native 三次之间差不到 3%。
-   `f64` 的 native 往返（3.3 ms）比 `i64`（0.84 ms）慢约四倍，两条路径的代码形状相同，原因未查（页错误或分配器复用是猜测），未影响通过线。
+   `f64` 的 native 往返（3.3 ms）比 `i64`（0.84 ms）慢约四倍：**已查（Q7 跟进，Q7 跟进），与类型无关。** 把两个往返的先后顺序对调，慢的跟着位置走（同一组里排第二的操作约 2 到 4 倍慢，不论 `I64Buf` 还是 `F64Buf`；`f64_from_bytes` 与 `from_bytes` 的 C 代码逐行同形，`f64buf_new` 与 `i64buf_new` 同为 `calloc`）。把 `calloc` 换成 `malloc`、调 `MALLOC_TOP_PAD_`/`MALLOC_TRIM_THRESHOLD_`/`MALLOC_MMAP_THRESHOLD_` 都不改变这个差，缺页总数也不变，所以不是 glibc 的归还策略。没有 `F64Buf` 特有的缺陷，也没有小修法，不改实现。
 7. **待裁问题 7 的数字（`from_list`/`to_list` 的 Dawn 循环对批量线，不改实现，待协调者裁）。** 「批量线实现」指
    `to_list(b) = bytes.unpack_ints(to_bytes(b, 8), 8, true)`、`from_list(xs) = from_bytes(bytes.pack_ints(xs, 8), 8, true)`，即用现成的批量原语绕一圈：
 
@@ -565,7 +565,7 @@ N7 与 N8 与设计稿的表有一点不同：设计稿把「操作签名」与�
 5. **名字：已裁。** `with_mem` 不变。图形学行话 `blit` 废弃，区间拷贝取 Rust/Java 先例：`copy_from(dst, dst_at, src, src_at, n)`（目的在前，Rust `copy_from_slice` 同序）与 `copy_within(b, from, to_at, n)`；
    整份复制叫 `clone`，不叫 `copy`，使「写进已有缓冲」（`copy_*`）与「产出新缓冲」（`clone`）两簇不会混淆。理由见 §3.2。
 6. **`MAX_LEN = 2^31 - 9`：已裁，两后端取同值，通过。** 取同值换取行为一致，代价是 native 拿不到 2^31 以上的缓冲，没有调用点要它。
-7. **`from_list`/`to_list` 是否在 K5 改走批量线的 `array_extend`/`pvec.to_array`：延后到 K5。** 现在 Dawn 循环够 bcrypt（1042 个字，一次）用，没有实测理由先动；K5 量完再定。**K5 已量（PR #737，§9.3 第 6 条）**：数字与建议在那里，实现未改，待协调者裁。
+7. **`from_list`/`to_list` 是否在 K5 改走批量线的 `array_extend`/`pvec.to_array`：延后到 K5。** 现在 Dawn 循环够 bcrypt（1042 个字，一次）用，没有实测理由先动；K5 量完再定。**K5 已量（PR #737，§9.3 第 6 条），已裁（2026-10-14）：`to_list` 与 `f64_to_list` 改走批量线，`from_list` 不改。** `to_list(b) = bytes.unpack_ints(to_bytes(b, 8), 8, true)`，`f64_to_list` 同形用 `unpack_floats`；两后端结果逐字节不变（`scripts/mem-contract` 的 `to_bits` 行含 `-0.0` 与 NaN 载荷，期望文件未动）。1M 元素复测（同一份 jar 或二进制里对着旧循环，JVM 五个进程的中位数，native 三个进程）：`to_list` JVM 约 21 对 6.3 ms，native 37.2 对 24.2 ms；`f64_to_list` JVM 约 19 对 4 到 12 ms（受 GC 抖动，安静时 3.7 ms），native 26.3 对 18.1 ms。`from_list` 的数字不支持改（JVM 批量反而更慢，native 只省 6 ms 且多一份 8 MB 中间 `Bytes`），保持循环。
 
 8. **R1 的泛型缺口：已裁，方案 A（2026-10-13）。** 结果类型含类型变量即拒，不靠枚举入口。落地记录见 §9.2 第 2 条（92c257d5）。
    方案 C（自动 trait `Unscoped`）的触发条件同问题 1：第二个客户（预期 `Gpu` 设备句柄）出现时另写设计稿。
@@ -591,6 +591,7 @@ N7 与 N8 与设计稿的表有一点不同：设计稿把「操作签名」与�
 12. **不做 `get(b, i) -> Option[Int]`**：没有调用点把越界当正常分支；判据二的名字留给将来真的需要时。
 13. **不做 comptime 里的缓冲**：解释器没有 `Array`，缓冲同状态（§4.2）。
 14. **不开 LTO**（§6.1）：除非 K2 梯子走到第 (3) 步并附墙钟声明。
+15. **暂不加专用的 `i64buf_from_array`/`i64buf_to_array`（及 f64 版）原语**（问题 7 的裁决）：它更干净（预分配、一遍填满），但超出 K5，且没有真实调用点的吞吐需求；等有了再做。
 13. **现在不做自动 trait `Unscoped`（方案 C），也不做签名上的作用域标记（方案 B）。** C 让 `with_mem` 声明 `T: Unscoped`，具体的 `T` 由 `buffer_reach` 判定，
     刚性的 `T` 必须自己声明同一约束，泛型包装于是可写；它是新的语言特性，只有一个客户时抽象的形状没有第二个例子可对，所以等 `Gpu` 成为第二个客户再另写设计稿，
     届时取代 R1 的保守拒。B 是手写的 rank-2 近似，跨模块导出、LSP、文档都要认，面大且仍是特判。把规则挂到「行里消掉 `Mem` 的任何调用点」（D）也不做：
