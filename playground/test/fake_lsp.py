@@ -202,6 +202,24 @@ def main():
                     }},
                 ],
             })
+        elif method == "textDocument/rename":
+            # edits for the buffer echoing the new name, edits for another
+            # document, a file operation, and a field the gateway drops
+            name = message.get("params", {}).get("newName")
+            spot = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+            send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "documentChanges": [
+                        {"textDocument": {"uri": DOCUMENT_URI, "version": 1},
+                         "edits": [{"range": spot, "newText": name, "annotationId": "x"}]},
+                        {"textDocument": {"uri": "file:///etc/passwd", "version": 1},
+                         "edits": [{"range": spot, "newText": "pwned"}]},
+                        {"kind": "delete", "uri": "file:///etc/passwd"},
+                    ],
+                },
+            })
         elif method == "textDocument/signatureHelp":
             # one signature with a doc, and fields the gateway must not pass on
             send({

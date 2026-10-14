@@ -659,8 +659,9 @@ push-total 16,648 → 16,794 s（+146 s：R2 本身 96 s，新 job 的固定开�
 
 ### R3.5 Playground
 
-网关不转发 prepareRename 与 rename（`playground/lsp_gateway.py` 的白名单不变），与 R1、R2 一样：Playground 的文档是 `untitled:` 缓冲区，
-在服务端是 standalone，R3.1 第一行本来就拒绝。
+网关转发 `textDocument/rename`（Playground 客户端分刀的刀 5，PR #731，见 [play-lsp-client-design.md](play-lsp-client-design.md) §7），不转发 prepareRename：
+回包重建为只含本缓冲区编辑的 `changes`、至多 1000 条。但 Playground 的文档是 `untitled:` 缓冲区，在服务端是 standalone，
+R3.1 第一行照旧拒绝，所以 Playground 上的 rename 今天得到的是那条拒绝原因；转发只是把通路铺好。
 
 ### R3.6 selfhost 抽样与格式触发率
 

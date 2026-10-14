@@ -134,6 +134,11 @@ interface LspLocation {
   range: LspRange
 }
 
+export interface LspTextEdit {
+  range: LspRange
+  newText: string
+}
+
 interface LspLocationLink {
   targetUri: string
   targetSelectionRange?: LspRange
@@ -719,6 +724,21 @@ export class DawnLspClient {
       context: { includeDeclaration: true },
     }), timeoutMs)
     return Array.isArray(value) ? value.filter((item) => asRecord(item)) as LspLocation[] : []
+  }
+
+  /**
+   * The edits that rename the name at the offset, or null when the server has
+   * none; a refusal (the server's reason) rejects. Asked about the text on screen.
+   */
+  async rename(offset: number, newName: string, timeoutMs = 4000): Promise<LspTextEdit[] | null> {
+    const value = await this.queryWith('textDocument/rename', (text) => ({
+      textDocument: { uri: DAWN_LSP_URI },
+      position: offsetToLspPosition(text, offset),
+      newName,
+    }), timeoutMs)
+    const changes = asRecord(value)?.changes
+    const edits = asRecord(changes)?.[DAWN_LSP_URI]
+    return Array.isArray(edits) ? edits.filter((edit) => asRecord(edit)) as LspTextEdit[] : null
   }
 
   /** The signature of the call open at the offset, or null outside any call. */
@@ -1534,6 +1554,120 @@ export function lspReferences(client: DawnLspClient): Extension {
         },
       },
     ]),
+  ]
+}
+
+/**
+ * Rename (docs/play-lsp-client-design.md, cut 5): F2 asks for a new name for the
+ * word under the cursor and applies the server's edits to this buffer as one
+ * transaction, so one undo takes the whole rename back. Edits that overlap,
+ * leave the text, or number more than MAX_RENAME_EDITS apply nothing.
+ */
+export const MAX_RENAME_EDITS = 1000
+
+export interface TextChange {
+  from: number
+  to: number
+  insert: string
+}
+
+/** The edits as CodeMirror changes against `text`, or null when they cannot all apply. */
+export function renameChanges(text: string, edits: readonly LspTextEdit[]): TextChange[] | null {
+  if (edits.length === 0 || edits.length > MAX_RENAME_EDITS) return null
+  const changes: TextChange[] = []
+  for (const edit of edits) {
+    if (!asRecord(edit.range) || typeof edit.newText !== 'string') return null
+    const from = lspPositionToOffset(text, edit.range.start)
+    const to = lspPositionToOffset(text, edit.range.end)
+    if (to < from) return null
+    changes.push({ from, to, insert: edit.newText })
+  }
+  changes.sort((a, b) => a.from - b.from || a.to - b.to)
+  for (let i = 1; i < changes.length; i++) if (changes[i].from < changes[i - 1].to) return null
+  return changes
+}
+
+interface RenameState {
+  status: string
+}
+
+const openRename = StateEffect.define<RenameState | null>()
+
+const renameField = StateField.define<RenameState | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects) if (effect.is(openRename)) return effect.value
+    return value
+  },
+  provide: (field) => showPanel.from(field, (state) => state == null ? null : renamePanel),
+})
+
+let renameSubmit: ((view: EditorView, name: string) => void) | null = null
+
+function renamePanel(view: EditorView): Panel {
+  const dom = document.createElement('div')
+  dom.className = 'dp-rename'
+  const label = document.createElement('label')
+  label.textContent = 'Rename to'
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.spellcheck = false
+  input.value = renameSeed.get(view) ?? ''
+  const status = document.createElement('span')
+  status.className = 'dp-rename-status'
+  label.appendChild(input)
+  dom.append(label, status)
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      const name = input.value.trim()
+      if (name !== '' && renameSubmit != null) renameSubmit(view, name)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      view.dispatch({ effects: openRename.of(null) })
+      view.focus()
+    }
+  })
+  return {
+    dom,
+    top: true,
+    mount: () => { input.focus(); input.select() },
+    update: (update) => {
+      status.textContent = update.state.field(renameField, false)?.status ?? ''
+    },
+  }
+}
+
+const renameSeed = new WeakMap<EditorView, string>()
+
+export function lspRename(client: DawnLspClient): Extension {
+  renameSubmit = (view, name) => {
+    const snapshot = view.state.doc.toString()
+    const offset = view.state.selection.main.head
+    const fail = (status: string) => view.dispatch({ effects: openRename.of({ status }) })
+    client.rename(offset, name).then((edits) => {
+      if (view.state.doc.toString() !== snapshot) return
+      const changes = edits == null ? null : renameChanges(snapshot, edits)
+      if (changes == null) return fail('Nothing to rename here')
+      view.dispatch({ changes, effects: openRename.of(null), userEvent: 'input.rename' })
+      view.focus()
+    }, (reason) => {
+      if (view.state.doc.toString() !== snapshot) return
+      fail(reason instanceof Error ? reason.message : 'Rename failed')
+    })
+  }
+  return [
+    renameField,
+    keymap.of([{
+      key: 'F2',
+      run: (view) => {
+        if (!client.isReady()) return true
+        const word = view.state.wordAt(view.state.selection.main.head)
+        renameSeed.set(view, word == null ? '' : view.state.sliceDoc(word.from, word.to))
+        view.dispatch({ effects: openRename.of({ status: '' }) })
+        return true
+      },
+    }]),
   ]
 }
 

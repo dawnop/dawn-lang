@@ -41,6 +41,7 @@ import {
   mergeCompletionResults,
   prefetchWhenOffline,
   referenceRows,
+  renameChanges,
   offsetToLspPosition,
   semanticClass,
   semanticDecorations,
@@ -757,6 +758,39 @@ expect('out-of-order older definition is rejected', await oldDefinition, 'reject
     ])
   expect('a long line is cut in the row', referenceRows('x' + ' y'.repeat(100), [at(0, 0, 1)])[0].snippet.length, 121)
   expect('no locations, no rows', referenceRows(text, []), [])
+}
+
+// ---- rename (docs/play-lsp-client-design.md, cut 5) ----
+{
+  const renamed = client.rename(4, 'y')
+  await tick()
+  const request = socket.sent.at(-1)!
+  expect('rename asks for a position of the diagnosed snapshot and the new name', [request.method, request.params], [
+    'textDocument/rename',
+    { textDocument: { uri: DAWN_LSP_URI }, position: { line: 0, character: 4 }, newName: 'y' },
+  ])
+  const edit = (line: number, from: number, to: number, newText: string) => ({
+    range: { start: { line, character: from }, end: { line, character: to } }, newText,
+  })
+  socket.receive({ id: request.id, result: { changes: { [DAWN_LSP_URI]: [edit(0, 4, 5, 'y'), 'bad'] } } })
+  expect('rename keeps the edits of the buffer and drops what is not an edit', (await renamed)?.length, 1)
+
+  const refused = client.rename(4, 'y')
+  await tick()
+  socket.receive({ id: socket.sent.at(-1)!.id, error: { code: -32803, message: 'declared outside this project' } })
+  expect('a refusal rejects with the server reason', await refused.then(() => 'resolved', (e: Error) => e.message),
+    'declared outside this project')
+
+  const text = 'let x = 1\n  x + x\n'
+  expect('rename edits become sorted changes', renameChanges(text, [edit(1, 6, 7, 'yy'), edit(0, 4, 5, 'yy'), edit(1, 2, 3, 'yy')]), [
+    { from: 4, to: 5, insert: 'yy' },
+    { from: 12, to: 13, insert: 'yy' },
+    { from: 16, to: 17, insert: 'yy' },
+  ])
+  expect('overlapping edits apply nothing', renameChanges(text, [edit(0, 4, 6, 'a'), edit(0, 5, 7, 'b')]), null)
+  expect('a reversed range applies nothing', renameChanges(text, [edit(0, 5, 4, 'a')]), null)
+  expect('no edits apply nothing', renameChanges(text, []), null)
+  expect('too many edits apply nothing', renameChanges(text, Array.from({ length: 1001 }, () => edit(0, 0, 0, 'a'))), null)
 }
 
 const inlay = client.inlayHints(0, 6)

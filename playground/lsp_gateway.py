@@ -883,6 +883,73 @@ def references_value(result: Any) -> Any:
     return safe
 
 
+MAX_RENAME_EDITS = 1_000
+MAX_RENAME_NAME = 256
+MAX_RENAME_TEXT = 256
+
+
+def rename_edit_value(edit: Any) -> dict[str, Any]:
+    if not isinstance(edit, dict):
+        raise ChildProtocolError("rename edit is not an object")
+    span = edit.get("range")
+    text = edit.get("newText")
+    if not isinstance(span, dict) or not isinstance(text, str):
+        raise ChildProtocolError("rename edit has no range or text")
+    if len(text) > MAX_RENAME_TEXT:
+        raise ChildProtocolError("rename edit text is too long")
+    try:
+        rebuilt = {"start": position_value(span.get("start")), "end": position_value(span.get("end"))}
+    except GatewayError as exc:
+        raise ChildProtocolError("rename range is malformed") from exc
+    return {"range": rebuilt, "newText": text}
+
+
+def rename_value(result: Any, request_id: Any) -> dict[str, Any]:
+    """A rename reply as the browser may read it (docs/play-lsp-client-design.md,
+    cut 5): a WorkspaceEdit in either shape (`changes` or `documentChanges`)
+    reduced to the edits of the Playground buffer, rebuilt as a range and a
+    text under `changes`. Edits for any other document and file operations are
+    dropped. A rename with more than MAX_RENAME_EDITS edits is answered with an
+    error rather than cut: half a rename would break the program."""
+    if result is None:
+        return {"jsonrpc": "2.0", "id": request_id, "result": None}
+    if not isinstance(result, dict):
+        raise ChildProtocolError("rename result is not an object")
+    raw: list[Any] = []
+    document_changes = result.get("documentChanges")
+    changes = result.get("changes")
+    if isinstance(document_changes, list):
+        for entry in document_changes:
+            if not isinstance(entry, dict):
+                raise ChildProtocolError("rename document change is not an object")
+            document = entry.get("textDocument")
+            if not isinstance(document, dict) or document.get("uri") != DOCUMENT_URI:
+                continue
+            edits = entry.get("edits")
+            if not isinstance(edits, list):
+                raise ChildProtocolError("rename edits are not a list")
+            raw.extend(edits)
+    elif isinstance(changes, dict):
+        edits = changes.get(DOCUMENT_URI)
+        if edits is not None:
+            if not isinstance(edits, list):
+                raise ChildProtocolError("rename edits are not a list")
+            raw.extend(edits)
+    elif document_changes is not None or changes is not None:
+        raise ChildProtocolError("rename result has no edits")
+    if len(raw) > MAX_RENAME_EDITS:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32803, "message": "rename would make too many edits for the Playground"},
+        }
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {"changes": {DOCUMENT_URI: [rename_edit_value(edit) for edit in raw]}},
+    }
+
+
 MAX_SIGNATURES = 4
 MAX_SIGNATURE_LABEL = 2_048
 MAX_SIGNATURE_PARAMETERS = 64
@@ -994,6 +1061,7 @@ CLIENT_METHODS = frozenset({
     "textDocument/definition",
     "textDocument/signatureHelp",
     "textDocument/references",
+    "textDocument/rename",
     "textDocument/inlayHint",
     "completionItem/resolve",
 })
@@ -1225,6 +1293,32 @@ class ClientProtocol:
                 }
             )
 
+        # Rename adds the new name (docs/play-lsp-client-design.md, cut 5).
+        # prepareRename is not offered: the editor takes the word under the cursor.
+        if method == "textDocument/rename":
+            if len(self.pending) >= HARD_PENDING_REQUESTS:
+                raise GatewayError(1008, "too many pending LSP requests")
+            request_id = self._request_id(message)
+            params = require_params(message)
+            require_document(params)
+            position = require_position(params)
+            new_name = params.get("newName")
+            if not isinstance(new_name, str) or not 0 < len(new_name) <= MAX_RENAME_NAME:
+                raise GatewayError(1008, "newName must be a short non-empty string")
+            self.pending[request_id] = method
+            return compact_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": {
+                        "textDocument": {"uri": DOCUMENT_URI},
+                        "position": position,
+                        "newName": new_name,
+                    },
+                }
+            )
+
         # Inlay hints name a range rather than a position; the editor asks for
         # what is on screen after a scroll or an edit settles
         # (docs/lsp-hover-design.md §A4).
@@ -1374,6 +1468,7 @@ class ClientProtocol:
                 "definitionProvider": True,
                 "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
                 "referencesProvider": True,
+                "renameProvider": True,
                 "inlayHintProvider": True,
             }
             self.semantic_legend = semantic_legend_value(
@@ -1406,6 +1501,8 @@ class ClientProtocol:
             message = {**message, "result": safe}
         if method == "textDocument/references" and "result" in message:
             message = {**message, "result": references_value(message["result"])}
+        if method == "textDocument/rename" and "result" in message:
+            message = rename_value(message["result"], response_id)
         if method == "textDocument/signatureHelp" and "result" in message:
             message = {**message, "result": signature_help_value(message["result"])}
         if method == "completionItem/resolve" and "result" in message:

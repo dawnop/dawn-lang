@@ -220,6 +220,7 @@ def initialize(ws, request_id=1):
         "definitionProvider",
         "signatureHelpProvider",
         "referencesProvider",
+        "renameProvider",
         "inlayHintProvider",
         "semanticTokensProvider",
     }, response
@@ -344,6 +345,10 @@ def diagnostics_params_contract():
     references_contract(load_gateway())
     references_negative_controls()
     ok("references: request rebuilt, reply confined to the buffer and bounded")
+
+    rename_contract(load_gateway())
+    rename_negative_controls()
+    ok("rename: request rebuilt, edits confined to the buffer and bounded")
 
     unknown_method_contract(load_gateway())
     unknown_method_negative_controls()
@@ -627,6 +632,127 @@ def references_negative_controls():
         try:
             references_contract(gateway)
         except (gateway.ChildProtocolError, gateway.GatewayError) as error:
+            raise AssertionError(str(error)) from error
+
+    for label, mutant in mutants.items():
+        expect_contract_red(label, lambda: run(mutant))
+
+
+def rename_roundtrip(protocol, params, result, request_id=60):
+    sent = json.loads(protocol.from_client(json.dumps(
+        rpc(request_id, "textDocument/rename", params)).encode()))
+    return sent, json.loads(protocol.from_child(json.dumps(
+        {"jsonrpc": "2.0", "id": request_id, "result": result}).encode()))
+
+
+def rename_contract(gateway):
+    """textDocument/rename (docs/play-lsp-client-design.md, cut 5): the request
+    is rebuilt to the buffer, a position and the new name; the reply keeps the
+    edits of this buffer from either WorkspaceEdit shape, rebuilt under
+    `changes`, and a rename too large to apply whole is an error, not a cut."""
+    protocol, capabilities = open_protocol(gateway, {}, "let x = 1")
+    assert capabilities.get("renameProvider") is True, capabilities
+    here = {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}}
+    ask = {
+        "textDocument": {"uri": URI},
+        "position": {"line": 0, "character": 4, "extra": 1},
+        "newName": "y",
+        "extra": "/tmp/x",
+    }
+    want = {"result": {"changes": {URI: [{"range": here, "newText": "y"}]}}}
+    sent, reply = rename_roundtrip(protocol, ask, {
+        "documentChanges": [
+            {"textDocument": {"uri": URI, "version": 1},
+             "edits": [{"range": here, "newText": "y", "annotationId": "/tmp/x"}]},
+            {"textDocument": {"uri": "file:///etc/passwd"},
+             "edits": [{"range": here, "newText": "pwned"}]},
+            {"kind": "delete", "uri": "file:///etc/passwd"},
+        ],
+    })
+    assert sent["params"] == {
+        "textDocument": {"uri": URI},
+        "position": {"line": 0, "character": 4},
+        "newName": "y",
+    }, ("RENAME_REQUEST_NOT_REBUILT", sent)
+    assert reply["result"] == want["result"], ("RENAME_DOCUMENT_CHANGES_NOT_CONFINED", reply)
+
+    _, reply = rename_roundtrip(protocol, ask, {"changes": {
+        URI: [{"range": here, "newText": "y", "extra": 1}],
+        "file:///etc/passwd": [{"range": here, "newText": "pwned"}],
+    }}, 61)
+    assert reply["result"] == want["result"], ("RENAME_CHANGES_NOT_CONFINED", reply)
+
+    _, reply = rename_roundtrip(protocol, ask, None, 62)
+    assert reply["result"] is None, reply
+
+    # more edits than the bound is an error reply, never a partial rename
+    many = {"changes": {URI: [{"range": here, "newText": "y"}] * (gateway.MAX_RENAME_EDITS + 1)}}
+    _, reply = rename_roundtrip(protocol, ask, many, 63)
+    assert "result" not in reply and reply["error"]["code"] == -32803, ("RENAME_UNBOUNDED", reply)
+
+    # another document, a bad name or a bad position never reach the child
+    ok_params = {"textDocument": {"uri": URI}, "position": {"line": 0, "character": 0}, "newName": "y"}
+    for bad in (
+        {**ok_params, "textDocument": {"uri": "file:///etc/passwd"}},
+        {**ok_params, "newName": ""},
+        {**ok_params, "newName": 7},
+        {**ok_params, "newName": "n" * (gateway.MAX_RENAME_NAME + 1)},
+        {**ok_params, "position": {"line": -1, "character": 0}},
+    ):
+        try:
+            protocol.from_client(json.dumps(rpc(64, "textDocument/rename", bad)).encode())
+        except gateway.GatewayError:
+            pass
+        else:
+            raise AssertionError(("RENAME_REQUEST_CROSSED", bad))
+
+    # a reply that is not a WorkspaceEdit, or an edit without a sound range, is
+    # a child protocol error
+    for bad_reply in (
+        [1], {"changes": [1]}, {"changes": {URI: {"a": 1}}},
+        {"changes": {URI: [{"range": {"start": 1, "end": 2}, "newText": "y"}]}},
+        {"changes": {URI: [{"range": here, "newText": 5}]}},
+        {"changes": {URI: [{"range": here, "newText": "n" * (gateway.MAX_RENAME_TEXT + 1)}]}},
+    ):
+        try:
+            rename_roundtrip(protocol, ask, bad_reply, 65)
+        except gateway.ChildProtocolError:
+            pass
+        else:
+            raise AssertionError(("RENAME_REPLY_CROSSED", bad_reply))
+
+
+def rename_negative_controls():
+    """Each mutant breaks one rule above, and the contract has to notice."""
+    source = read_text(GATEWAY)
+    mutants = {
+        "reply not rebuilt": mutate_once(
+            source,
+            '        if method == "textDocument/rename" and "result" in message:\n'
+            '            message = rename_value(message["result"], response_id)\n',
+            '',
+        ),
+        "other documents kept (changes)": mutate_once(
+            source, "edits = changes.get(DOCUMENT_URI)", "edits = [e for v in changes.values() for e in v]"),
+        "other documents kept (documentChanges)": mutate_once(
+            source,
+            'if not isinstance(document, dict) or document.get("uri") != DOCUMENT_URI:\n                continue',
+            'if not isinstance(document, dict):\n                continue',
+        ),
+        "no bound": mutate_once(source, "    if len(raw) > MAX_RENAME_EDITS:", "    if False:"),
+        "new name unchecked": mutate_once(
+            source,
+            '            if not isinstance(new_name, str) or not 0 < len(new_name) <= MAX_RENAME_NAME:\n'
+            '                raise GatewayError(1008, "newName must be a short non-empty string")\n',
+            '',
+        ),
+    }
+
+    def run(mutant):
+        gateway = load_gateway(mutant)
+        try:
+            rename_contract(gateway)
+        except (gateway.ChildProtocolError, gateway.GatewayError, KeyError, TypeError) as error:
             raise AssertionError(str(error)) from error
 
     for label, mutant in mutants.items():
@@ -1687,6 +1813,15 @@ def main():
                                        "end": {"line": 0, "character": 4}}},
             ], references
 
+            # rename: the name reaches the child and only this buffer's edits
+            # come back, under `changes`
+            ws.send_json(rpc(10, "textDocument/rename", {**position_params(), "newName": "renamed"}))
+            renamed = ws.recv_json()["result"]
+            assert renamed == {"changes": {URI: [{
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                "newText": "renamed",
+            }]}}, renamed
+
             ws.send_frame(9, b"contract-ping")
             fin, opcode, payload = ws.recv_frame()
             assert fin and opcode == 10 and payload == b"contract-ping"
@@ -2065,7 +2200,7 @@ def main():
         assert "child-stderr bytes=" in gateway_log, gateway_log
         ok("child stderr contents are not logged")
     print("----")
-    print("30 passed, 0 failed")
+    print("31 passed, 0 failed")
 
 
 if __name__ == "__main__":
