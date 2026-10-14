@@ -19,6 +19,12 @@ A fetched resource can join the retained state.
 
 No wire change; JS hosts are untouched.
 
+Changed since, without a version change:
+
+- 2026-10-14: the browser WASI shim (`js/wasi.mjs`) answers `random_get`, so a
+  reactor that reads std/io's `Random` gets bytes from `crypto.getRandomValues`
+  instead of a stub.
+
 ## 0.4.0 (2026-10-10)
 
 The host side of tea_core 0.2.0's `Fetch` command.

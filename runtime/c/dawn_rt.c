@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -5347,6 +5348,65 @@ int64_t dawn_io_clock_mono_ns(void) {
     dawn_fault(DAWN_LIT("io_clock_mono_ns: the host has no monotonic clock"));
   }
   return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+}
+
+/* `n` bytes from the host's CSPRNG (docs/random-effect-design.md).
+ *
+ * getrandom(2) with no flags: it blocks until the pool is initialised, which
+ * /dev/urandom does not promise early in boot. Only ENOSYS (a kernel or a
+ * sandbox without the call) falls back to reading /dev/urandom; every other
+ * failure is a fault, never an invented byte and never a Result, because an
+ * error path the caller ignores is how a predictable all-zero token happens
+ * (Go 1.24 made crypto/rand fatal for that reason). A short read and EINTR
+ * are retried, which is also what makes a request larger than one call's
+ * limit (2^25 - 1 bytes on Linux) come out whole. wasi-libc implements getrandom over the preview1 `random_get`, so the same
+ * code serves wasm32-wasi. A negative `n` is the caller's bug: a panic. */
+static bool dawn_urandom_fill(unsigned char *p, size_t n) {
+  int fd = open("/dev/urandom", O_RDONLY);
+  if (fd < 0) return false;
+  size_t got = 0;
+  while (got < n) {
+    ssize_t step = read(fd, p + got, n - got);
+    if (step < 0) {
+      if (errno == EINTR) continue;
+      close(fd);
+      return false;
+    }
+    if (step == 0) {
+      close(fd);
+      return false;
+    }
+    got += (size_t)step;
+  }
+  close(fd);
+  return true;
+}
+
+dawn_bytes *dawn_io_random_bytes(int64_t n) {
+  if (n < 0) dawn_panic(DAWN_LIT("random_bytes: n must not be negative"));
+  /* an owned buffer even when empty: drop frees `p` */
+  unsigned char *buf = (unsigned char *)dawn_alloc(n > 0 ? (size_t)n : 1);
+  size_t got = 0;
+  size_t want = (size_t)n;
+  bool via_file = false;
+  while (got < want) {
+    ssize_t step = getrandom(buf + got, want - got, 0);
+    if (step < 0) {
+      if (errno == EINTR) continue;
+      if (errno == ENOSYS) {
+        via_file = true;
+        break;
+      }
+      free(buf);
+      dawn_fault(DAWN_LIT("io_random_bytes: the host has no entropy source"));
+    }
+    got += (size_t)step;
+  }
+  if (via_file && !dawn_urandom_fill(buf + got, want - got)) {
+    free(buf);
+    dawn_fault(DAWN_LIT("io_random_bytes: the host has no entropy source"));
+  }
+  return dawn_bytes_of(buf, n);
 }
 
 #ifdef __wasi__

@@ -932,6 +932,8 @@ dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
 bool dawn_io_stdin_ready(int64_t timeout_ms);
 int64_t dawn_io_clock_wall_ns(void); /* CLOCK_REALTIME, ns since the epoch */
 int64_t dawn_io_clock_mono_ns(void); /* CLOCK_MONOTONIC, as nanoTime reads */
+/* n bytes of getrandom(2), /dev/urandom only on ENOSYS; n < 0 panics, no source faults */
+dawn_bytes *dawn_io_random_bytes(int64_t n);
 /* argv holds boxed dawn_str and is CONSUMED (an emitter crossing temp, like
  * `from_code_points`); an empty path inherits this process's stream */
 int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path);
