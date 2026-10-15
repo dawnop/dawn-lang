@@ -73,8 +73,13 @@ paths no gate watches) is a ratchet checked in both directions.
      From: the `run:` commands in .github/workflows/*.yml, followed through
      the scripts those scripts run: from a shell script, any script in the
      tree, resolved also against the directory it moves to by its own
-     location (`cd "$(dirname "$0")/.."`); from Python or JavaScript, which
-     the shell reader also reads prose in, only scripts under scripts/.
+     location (`cd "$(dirname "$0")/.."`); from JavaScript, which the shell
+     reader also reads prose in, only scripts under scripts/. A Python script
+     is parsed instead (#521): what it starts is the literals handed to
+     `subprocess.*`, `os.system`, `os.exec*`, a loader such as `runpy.run_path`
+     (through one variable), and a shell string carrying a `$`; a docstring,
+     a comment and a message are not read. Its launches are bounded to
+     scripts/ as well.
   B  A gate's script names a path, so that path is coarse for it. Read from
      the scripts rule A says the gate runs or imports, not from every file
      beside them, and never for the harness's own directory, which rule A
@@ -83,7 +88,9 @@ paths no gate watches) is a ratchet checked in both directions.
      the manifest and src, not every harness beside them. Slash-bearing
      tokens, shell globs, and for Python gates the `ROOT / "a" / "b"` and
      `os.path.join(ROOT, "a", "b")` joins and `.glob()` patterns that a
-     regular expression cannot tell from division.
+     regular expression cannot tell from division. The tokens of a Python
+     script come from the string constants of its statements, without the
+     docstrings, comments and messages (`python_code_lines`).
      For JavaScript gates the `join(ROOT, "a", "b")` and
      `resolve(__dirname, "..")` calls, which are the same statement in the
      only other language a gate here is written in, under whichever name the
@@ -996,6 +1003,208 @@ JS_SUFFIXES = (".js", ".mjs", ".cjs")
 SCRIPT_SUFFIXES = (".sh", ".py") + JS_SUFFIXES
 
 
+# Calls whose string arguments are text for a reader, not a path or a command.
+# A message that says "see scripts/doc-check.py" names the script the way a
+# comment does, and read as an edge it makes every gate that runs the message's
+# author look as if it ran doc-check.
+_PROSE_CALLS = frozenset((
+    "print", "write", "writelines", "warn", "warning", "warnings", "debug",
+    "info", "error", "critical", "exception", "log", "fatal", "exit",
+    "ArgumentParser", "add_argument_group", "add_subparsers", "add_parser",
+))
+# argparse keywords that are help text, wherever the call is spelled.
+_PROSE_KEYWORDS = frozenset(("help", "description", "epilog", "usage", "prog"))
+
+
+@lru_cache(maxsize=256)
+def python_code_lines(text):
+    """The string literals a Python script uses as values, one line per
+    statement, or () when the text does not parse.
+
+    The shell reader takes a path in a docstring or in a trailing comment for
+    a command (`scripts/doc-check.py` in the docstring of play-live-check.py
+    made the playground contract look as if it ran doc-check, #521), and
+    nothing that reads text can tell the two apart. Parsed instead. What a
+    script says about itself is dropped: a docstring or any bare string
+    statement, a `raise` or `assert` message, and the text handed to `print`,
+    `logging`, `warnings` and argparse's `help=`/`description=`. Every other
+    string constant is a value the program computes with, whether it is
+    handed straight to `subprocess.run`, built into a path, put in a table
+    that is looped over, or bound to a name first. Narrowing it to the
+    process and path calls alone was tried and measured: it dropped 5,905
+    mappings, almost all of them tables such as doc-check.py's list of the
+    directories it counts, which the gate really does read.
+
+    A statement's literals are joined on one line so a reader that wants the
+    toolchain next to the target it is handed (`bin/dawn test selfhost`) still
+    sees the two together. A compound statement contributes its header only;
+    the statements in its body contribute their own lines.
+    """
+    import ast
+
+    tree_ast = _py_parse(text)
+    if tree_ast is None:
+        return ()
+
+    def prose_call(node):
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else (
+            func.id if isinstance(func, ast.Name) else ""
+        )
+        return name in _PROSE_CALLS
+
+    def literals(node, out):
+        if isinstance(node, ast.stmt) and not out_root[0] is node:
+            return  # a nested statement is its own line
+        if isinstance(node, ast.Call):
+            if prose_call(node):
+                return
+            for arg in node.args:
+                literals(arg, out)
+            literals(node.func, out)
+            for kw in node.keywords:
+                if kw.arg not in _PROSE_KEYWORDS:
+                    literals(kw.value, out)
+            return
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                out.append(node.value)
+            return
+        for child in ast.iter_child_nodes(node):
+            literals(child, out)
+
+    out_root = [None]
+    lines = []
+    for stmt in ast.walk(tree_ast):
+        if not isinstance(stmt, ast.stmt):
+            continue
+        if isinstance(stmt, ast.Raise):
+            continue  # its text is a message
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue  # a docstring or any bare string
+        out = []
+        out_root[0] = stmt
+        for field, value in ast.iter_fields(stmt):
+            if field in ("body", "orelse", "finalbody", "handlers", "cases", "msg"):
+                continue
+            for node in value if isinstance(value, list) else [value]:
+                if isinstance(node, ast.AST):
+                    if isinstance(node, ast.stmt):
+                        continue
+                    literals(node, out)
+        if out:
+            lines.append(tuple(out))
+    return tuple(lines)
+
+
+def python_command_text(text):
+    """`python_code_lines` as text for the path readers: one line per
+    statement, its literals joined by spaces."""
+    return "\n".join(" ".join(line) for line in python_code_lines(text))
+
+
+_LOADERS = ("spec_from_file_location", "run_path")
+_PROCESS_MODULE_CALLS = {
+    "subprocess": None,  # every attribute: run, Popen, check_output, ...
+    "os": ("system", "popen", "execv", "execve", "execl", "execle", "execlp",
+           "execlpe", "execvp", "execvpe", "spawnv", "spawnve", "spawnl",
+           "spawnle", "spawnlp", "spawnlpe", "spawnvp", "spawnvpe",
+           "posix_spawn", "posix_spawnp"),
+}
+
+
+@lru_cache(maxsize=256)
+def python_process_literals(text):
+    """The string literals handed to a call that starts a process
+    (`subprocess.*`, `os.system`, `os.exec*`, `os.spawn*`, and those names
+    imported bare) or loads a file to execute it (`spec_from_file_location`,
+    `runpy.run_path`), with one hop through a variable the call is given
+    (`cmd = ["bash", "scripts/x.sh"]; subprocess.run(cmd)`), or () when the
+    text does not parse. An element of an argv list is a path to the script
+    being started, which is not true of a literal that merely sits in a
+    table: mutation-anchor-preflight.py lists forty mutate.py files to read
+    and starts none of them."""
+    import ast
+
+    tree_ast = _py_parse(text)
+    if tree_ast is None:
+        return ()
+    bare = set()
+    for node in ast.walk(tree_ast):
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            allowed = _PROCESS_MODULE_CALLS.get(node.module or "", ())
+            for alias in node.names:
+                if allowed is None or alias.name in allowed:
+                    bare.add(alias.asname or alias.name)
+
+    def strings(node):
+        return [
+            sub.value for sub in ast.walk(node)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+        ]
+
+    assigned = {}
+    for node in ast.walk(tree_ast):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = [t for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target]
+        if targets and getattr(node, "value", None) is not None:
+            for t in targets:
+                assigned.setdefault(t.id, []).extend(strings(node.value))
+
+    def starts_process(func):
+        # A loader that executes a file is a launch too: list-elems-contract's
+        # matrix.py runs pipe-contract/matrix.py through importlib.
+        if isinstance(func, ast.Name) and func.id in _LOADERS:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in _LOADERS:
+            return True
+        if isinstance(func, ast.Name):
+            return func.id in bare
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            if func.value.id in _PROCESS_MODULE_CALLS:
+                allowed = _PROCESS_MODULE_CALLS[func.value.id]
+                return allowed is None or func.attr in allowed
+        return False
+
+    found = []
+    for node in ast.walk(tree_ast):
+        if not (isinstance(node, ast.Call) and starts_process(node.func)):
+            continue
+        for arg in list(node.args) + [k.value for k in node.keywords]:
+            found += strings(arg)
+            for sub in ast.walk(arg):
+                if isinstance(sub, ast.Name):
+                    found += assigned.get(sub.id, [])
+    return tuple(found)
+
+
+def python_executed_scripts(text, tree):
+    """Scripts a Python script starts, read from its syntax: the literals
+    handed to a process-starting call. One can be a whole command line
+    (`os.system("bash scripts/x.sh")`) or one element of an argv list, so it is
+    read as a command and as a path. A literal anywhere else is not a start:
+    the old reader took a lone path in a table, a message or a docstring for a
+    command because a path is the first word of its own line."""
+    found = set()
+    for line in python_code_lines(text):
+        for lit in line:
+            # A shell program carried in a string (`. "$ROOT/scripts/
+            # seedjar.sh"; seed_jar`) is handed to `sh -c` through whatever
+            # wrapper the script has, so the call is not always visible. A
+            # `$` is what separates it from a path or a message.
+            if "$" in lit:
+                found |= executed_scripts(lit, tree)
+    for lit in python_process_literals(text):
+        found |= executed_scripts(lit, tree)
+        lit = lit.strip()
+        if "\n" not in lit:
+            found |= {p for p in resolve(lit, tree) if is_script(p, tree)}
+    return found
+
+
 def is_script(path, tree):
     return path in tree.fileset and Path(path).suffix in SCRIPT_SUFFIXES
 
@@ -1279,9 +1488,9 @@ def gate_scripts(gate, tree, transitive=True):
     gate that lived past that edge: playground/test/contract.sh runs
     lsp-contract.sh, which runs lsp_contract.py, which drives the gateway, and
     none of the three was any gate's code. A shell script is now followed
-    wherever it points; Python and JavaScript, read here with the shell
-    reader, keep the scripts/ bound, because that reader takes a docstring
-    naming a script for a command.
+    wherever it points; Python (parsed, so a docstring is not a command,
+    #521) and JavaScript (read here with the shell reader, which takes prose
+    for commands) keep the scripts/ bound.
     """
     direct = set()
     for command in gate.commands:
@@ -1299,12 +1508,18 @@ def gate_scripts(gate, tree, transitive=True):
             continue
         body = strip_comments(tree.read(script))
         cwd = shell_cwd(script, body)
-        found = executed_scripts(body, tree, cwd)
+        if Path(script).suffix == ".py":
+            # Read from the syntax tree, never as prose: a docstring that
+            # names a script is not a command (#521).
+            found = python_executed_scripts(tree.read(script), tree)
+        else:
+            found = executed_scripts(body, tree, cwd)
         if Path(script).suffix != ".sh":
             # Only a shell script is read in its own language here. Over
-            # Python and JavaScript the shell reader also takes prose for
-            # commands, so what it finds there is followed under scripts/
-            # alone, as it always was.
+            # JavaScript the shell reader also takes prose for commands, so
+            # what it finds there is followed under scripts/ alone, as it
+            # always was. Python keeps the same bound: lifting it would add
+            # edges rather than remove false ones.
             found = {s for s in found if s.startswith("scripts/")}
         frontier |= found
     return scripts
@@ -1741,7 +1956,7 @@ class _PyModule:
                     called = isinstance(parent, ast.Call) and isinstance(
                         parent.func, ast.Attribute
                     ) and parent.func.attr in ("with_name", "with_suffix", "joinpath", "join")
-                    if not joined and not called:
+                    if not joined and not called and not isinstance(parent, ast.Expr):
                         self._literal(node.value, line, reads, whole, tree)
                     continue
                 if id(node) in self.syspath_nodes:
@@ -2186,7 +2401,12 @@ class Map:
                     self.add(path, Observation("exact", gate.id, why, gate.tag_only))
                 # B: whatever that code names.
                 body = "".join(
-                    strip_comments(tree.read(c)) + "\n"
+                    (
+                        python_command_text(tree.read(c))
+                        if Path(c).suffix == ".py"
+                        else strip_comments(tree.read(c))
+                    )
+                    + "\n"
                     for c in sorted(code)
                     if c not in UNSCRAPED and Path(c).suffix in SCRIPT_SUFFIXES
                 )
@@ -5121,6 +5341,46 @@ def selftest_content_caches():
     return failures
 
 
+def selftest_python_reader():
+    """A Python script's docstrings, comments and messages name paths without
+    using them (#521); its calls and tables do."""
+    failures = []
+    tree = Tree(ROOT, files=["scripts/a.sh", "scripts/b.sh", "scripts/c.sh",
+                             "scripts/d.sh", "docs/x.md", "docs/y.md"])
+    prose = (
+        '"""Runs scripts/a.sh and reads docs/x.md."""\n'
+        "# see scripts/b.sh and docs/x.md\n"
+        'print("run scripts/c.sh, then docs/x.md")\n'
+        'raise SystemExit("scripts/d.sh is gone")\n'
+        "x = 1  # scripts/a.sh\n"
+    )
+    if python_executed_scripts(prose, tree):
+        failures.append("a path in a docstring, comment or message read as a launch")
+    if "docs/x.md" in path_tokens(python_command_text(prose), tree):
+        failures.append("a path in a docstring, comment or message read as an input")
+    launches = (
+        "import subprocess, os\n"
+        'subprocess.run(["bash", "scripts/a.sh"])\n'
+        'cmd = ["bash", "scripts/b.sh"]\n'
+        "subprocess.check_call(cmd)\n"
+        'os.system("bash scripts/c.sh")\n'
+        "TABLE = (\"docs/y.md\",)\n"
+        'SNIPPET = ". \\"$ROOT/scripts/d.sh\\"; run"\n'
+    )
+    if python_executed_scripts(launches, tree) != {
+        "scripts/a.sh", "scripts/b.sh", "scripts/c.sh", "scripts/d.sh",
+    }:
+        failures.append("a process call, a variable handed to one or a shell "
+                        "string was not read as a launch")
+    if "docs/y.md" not in path_tokens(python_command_text(launches), tree):
+        failures.append("a path in a table was not read as an input")
+    for failure in failures:
+        print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
+    if not failures:
+        print("  python reader: docstrings, comments and messages are not edges; calls and tables are")
+    return failures
+
+
 def selftest_example_dependencies():
     """A new example must bring its deps into the map without editing a list.
 
@@ -5295,7 +5555,8 @@ def selftest_harness_reader():
 def selftest(record_path=None, record_mode=False):
     record_path = record_path or (HERE / "mutants.txt")
     failures = (selftest_matrix() + selftest_content_caches()
-                + selftest_example_dependencies() + selftest_harness_reader())
+                + selftest_example_dependencies() + selftest_harness_reader()
+                + selftest_python_reader())
     if failures:
         return 1
 

@@ -131,8 +131,12 @@ relative to the directory it `cd`s to by its own location; before 2026-10-05
 the closure stopped at `scripts/`, and `playground/test/contract.sh` ran
 `lsp-contract.sh` and `lsp_contract.py` without either, or the gateway they
 drive, being any gate's input (fixture `427a813e`). Python and JavaScript
-bodies are still followed only into `scripts/`, because the shell command
-reader takes a docstring that names a script for a command.
+bodies are still followed only into `scripts/`. A Python body is parsed
+rather than read as text (#521): a docstring, a comment or a message that
+names a script is not a command, and only the literals handed to a process
+call, a loader or a `$` shell string start one (fixture `462df137`). The
+JavaScript body is still read by the shell command reader, which takes a
+docstring that names a script for a command.
 
 ## Changing it
 
