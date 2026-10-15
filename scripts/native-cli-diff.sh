@@ -902,6 +902,15 @@ fi
 # Two tests report, the third does not return, both backends get SIGKILLed.
 # What is on stdout at that point is the whole answer: `dawn_io_println`
 # flushes per line (the fix leg 5 forced), so it is the two PASS lines.
+# The third test's expected value must be one the loop's result can reach.
+# `spin` only ever returns a value in [0, 1000003), which an optimizer can
+# prove from the `%` and the non-negative operands alone; with an expected
+# value outside that range (it used to be -1) gcc 13 at -O2 decides the
+# assertion always fails, drops the side-effect-free loop as dead, and the
+# test "finishes" at once on a developer machine while clang 18 (the pinned
+# CI compiler) keeps running it. That is a legal optimization of a finite
+# loop, not a termination assumption, so the fixture has to be one that
+# cannot be refuted without running it.
 echo "== test, the report is flushed as it goes =="
 cat > "$OUT/hang.dawn" <<'EOF'
 fn spin(n: Int) -> Int = {
@@ -923,7 +932,7 @@ test "two reports before the hang" {
 }
 
 test "three never finishes" {
-  assert spin(1000000000000000) == -1
+  assert spin(1000000000000000) == 12345
 }
 EOF
 # Read the pipe while the runner is still alive rather than after a fixed
