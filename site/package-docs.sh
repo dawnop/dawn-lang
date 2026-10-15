@@ -28,17 +28,31 @@ set -euo pipefail
 export DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g -XX:+UseSerialGC} -XX:-UsePerfData"
 out="${1:?usage: site/package-docs.sh <out-dir>}"
 mkdir -p "$out"
+
+# Warm the toolchain once, serially, before the parallel section. In a fresh
+# checkout bin/dawn first fetches the pinned seed into .dawn/seeds and rebuilds
+# build/dawn-selfhost.jar. Four launchers starting together all see "no jar",
+# all fill the same cache (one reads seed.jar.tmp while another is still
+# writing it: "SHA-256 input is not a regular non-symbolic-link file", "cannot
+# resolve bootstrap seed") and the losers leave an empty <pkg>.json behind. The
+# xargs status and the check below do catch that, so it was a flaky failure and
+# not a silent bad document; the warm-up is what stops it happening.
+./bin/dawn --version > /dev/null
 for pkg in packages/*/; do
   pkg="${pkg%/}"
   if [ -f "$pkg/dawn.toml" ]; then printf '%s\0' "${pkg#packages/}"; fi
 done | xargs -0 -P 4 -I{} sh -c './bin/dawn doc "packages/$1" > "$2/$1.json"' sh {} "$out"
 
-# A document that is not JSON stops here, naming the file and what it starts
+# A document that is empty or not JSON stops here, naming the file and what it starts
 # with. `dawn doc` writes the document to stdout, so anything else the JVM or
 # the launcher prints there (a log line, a rebuild notice) lands in the file
 # and would otherwise surface much later as an offset in a parser's error from
 # gen/packages.dawn, with nothing to say whose output it was.
 for f in "$out"/*.json; do
+  if [ ! -s "$f" ]; then
+    echo "site/package-docs.sh: $f is empty" >&2
+    exit 1
+  fi
   if [ "$(head -c 1 "$f")" != "{" ]; then
     echo "site/package-docs.sh: $f does not start with '{', it starts with: $(head -c 200 "$f" | head -n 3)" >&2
     exit 1
