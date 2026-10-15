@@ -1056,15 +1056,18 @@ static void test_slab_bound_is_honoured(void) {
 static void test_slab_returns_before_blocking(void) {
   size_t node = sizeof(dawn_adt) + sizeof(dawn_slot);
   long count = (long)((64 * 1024 * 1024) / node);
-  long shadow_kib = 0;
 #if DAWN_ASAN
   size_t block = ((node + DAWN_SLAB_GRAIN - 1) / DAWN_SLAB_GRAIN) * DAWN_SLAB_GRAIN;
   size_t carved = ((size_t)count * block + 65535u) / 65536u * 65536u;
-  shadow_kib = (long)(carved / 8 / 1024);
+  uint64_t slabs = carved / 65536u;
+  uint64_t unused_live = 0, unused_cached = 0, retired0 = 0;
 #endif
   /* Start from a cache of the floor's size, whatever earlier cases left in
    * it, so that the burst below has to fault fresh pages. */
   dawn_slab_before_block();
+#if DAWN_ASAN
+  dawn_slab_stats(&unused_live, &unused_cached, &retired0);
+#endif
   long base = rss_kib();
   dawn_adt *head = NULL;
   for (long i = 0; i < count; i++) {
@@ -1113,8 +1116,24 @@ static void test_slab_returns_before_blocking(void) {
   waitpid(kid, NULL, 0);
   long blocked = atol(line);
   check(blocked > 0, "the child reported the resident set");
-  check(blocked - base < 8 * 1024 + shadow_kib,
+#if DAWN_ASAN
+  /* Sanitized: the resident set is not an oracle here (issue 541). The shadow
+   * pages the hand poisoning writes stay resident and how many were already
+   * touched depends on the machine, so no RSS bound is both exact and stable.
+   * The retirement count says the same thing without the noise: the burst's
+   * slabs, all but the DAWN_SLAB_KEEP the decay keeps plus the one still
+   * carved from, must have been madvised by the time the blocking read
+   * returned. A runtime that releases nothing before blocking leaves the
+   * count at zero. */
+  uint64_t retired1 = 0;
+  dawn_slab_stats(&unused_live, &unused_cached, &retired1);
+  (void)base;
+  check(retired1 - retired0 + DAWN_SLAB_KEEP + 1 >= slabs,
         "and the burst was already back while the parent was blocked");
+#else
+  check(blocked - base < 8 * 1024,
+        "and the burst was already back while the parent was blocked");
+#endif
 }
 
 /* The other half of the policy: a burst that was just freed is not given back
