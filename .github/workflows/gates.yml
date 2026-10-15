@@ -1004,10 +1004,16 @@ jobs:
       # here: its signing half calls ssh-keygen, which exits 255 under a uid
       # with no passwd entry, and that is how the external runner executes
       # every job (docs/gates-external-design.md, non-root execution).
+      # The external runner's input pack pins site/play-ui/package-lock.json by
+      # sha256; a lockfile edit that leaves the pin behind (issue #723) cannot
+      # build a pack. Two hashes of one file: milliseconds, so the claim above
+      # is not restated.
       - name: the external evidence readers keep their refusals
         run: |
           python3 scripts/gates-external/release_evidence.py --selftest
           python3 scripts/gates-external/publish.py --selftest-rerun-ci
+          python3 scripts/gates-external/inputs.py lockcheck
+          python3 scripts/gates-external/inputs.py lockcheck --selftest
 
       # Issue #167: a reshard moves run steps between the shards of one job
       # family, and "no gate was dropped" was a claim nothing checked. This

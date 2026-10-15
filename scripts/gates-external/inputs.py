@@ -81,6 +81,9 @@ Subcommands:
     install --prefix P      extract toolchains from inputs/downloads (a shipped
                             pack) and verify
     verify  --prefix P [--repo R] [--seed-tag TAG]
+    lockcheck [--repo R] [--selftest]
+                            no prefix: the repository's lockfiles hash to what
+                            the lock pins (tree-policy runs this on every push)
     conda-unpack ...        internal: what build and install run under the
                             prefix's python to unpack the compiler
 """
@@ -151,15 +154,15 @@ def tree_digest(root, relocated=None):
     return digest.hexdigest(), total, files
 
 
-def seed_tree_sha(root):
+def seed_tree_sha(seeds_dir):
     """seedjar.sh's seed_tree_sha: files sorted by `./path`, each contributing
     `<bytes> ./<path>\\n` then its content, the whole through SHA-256."""
-    root = Path(root)
-    names = sorted(("./" + p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()),
+    seeds_dir = Path(seeds_dir)
+    names = sorted(("./" + p.relative_to(seeds_dir).as_posix() for p in seeds_dir.rglob("*") if p.is_file()),
                    key=lambda s: s.encode())
     digest = hashlib.sha256()
     for name in names:
-        data = (root / name[2:]).read_bytes()
+        data = (seeds_dir / name[2:]).read_bytes()
         digest.update(f"{len(data)} {name}\n".encode())
         digest.update(data)
     return digest.hexdigest()
@@ -794,6 +797,55 @@ def verify(args):
     return 0 if not bad else 1
 
 
+def lockcheck(args):
+    """Each pinned lockfile in the repository hashes to its lock entry.
+
+    A lockfile edit that leaves inputs.lock.json behind is found today only
+    when someone builds a pack (build_npm_cache refuses it), which is after
+    the external gates have been asking for a pack that cannot be built. This
+    is the same comparison with the same sha256_file, run without a prefix.
+    """
+    if getattr(args, "selftest", False):
+        return lockcheck_selftest()
+    repo = Path(args.repo)
+    lock = prefix_mod.load_lock()
+    problems = lockcheck_problems(repo, lock)
+    for line in problems:
+        print(f"FAIL {line}")
+    print(f"inputs lockcheck: {'green' if not problems else f'RED, {len(problems)} item(s)'}")
+    return 0 if not problems else 1
+
+
+def lockcheck_problems(repo, lock):
+    problems = []
+    for entry in lock.get("npm_caches", []):
+        got = sha256_file(repo / entry["lockfile"])
+        if got != entry["lockfile_sha256"]:
+            problems.append(
+                f"{entry['lockfile']} has sha256 {got}, scripts/gates-external/inputs.lock.json "
+                f"pins {entry['lockfile_sha256']} for {entry['name']}. Re-pin it: set "
+                f"lockfile_sha256 of {entry['name']} to {got}, then rebuild the pack "
+                f"(inputs.py build) so its npm cache is filled from the new lockfile")
+    return problems
+
+
+def lockcheck_selftest():
+    """The red control: a lock whose digest is one nibble off must be refused."""
+    repo = HERE.parents[1]
+    lock = prefix_mod.load_lock()
+    if not lock.get("npm_caches"):
+        print("inputs lockcheck selftest: RED, the lock has no npm_caches entry to test")
+        return 1
+    bad = json.loads(json.dumps(lock))
+    digest = bad["npm_caches"][0]["lockfile_sha256"]
+    bad["npm_caches"][0]["lockfile_sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
+    if not lockcheck_problems(repo, bad):
+        print("inputs lockcheck selftest: RED, a wrong digest was accepted")
+        return 1
+    print("inputs lockcheck selftest: green")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -809,6 +861,9 @@ def main():
     p.add_argument("--prefix", required=True)
     p.add_argument("--repo")
     p.add_argument("--seed-tag", help="the seed the commit under test pins; red without it")
+    p = sub.add_parser("lockcheck")
+    p.add_argument("--repo", default=str(HERE.parents[1]))
+    p.add_argument("--selftest", action="store_true")
     # internal: what extract_conda runs under the prefix's python
     p = sub.add_parser("conda-unpack")
     p.add_argument("--wheel-dir", required=True)
@@ -817,7 +872,7 @@ def main():
                    help="a file whose binary placeholder stays as shipped")
     p.add_argument("archives", nargs="+")
     args = parser.parse_args()
-    return {"build": build, "install": install, "verify": verify,
+    return {"build": build, "install": install, "verify": verify, "lockcheck": lockcheck,
             "conda-unpack": conda_unpack}[args.cmd](args)
 
 
