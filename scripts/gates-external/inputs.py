@@ -95,6 +95,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -515,12 +516,16 @@ def build(args):
     jar = seed_dir / "seed.jar"
     if not jar.exists() or sha256_file(jar) != jar_want:
         shutil.copy2(seed_cache / tag / "seed.jar", jar)
+    # copy2 keeps the source's mode, and the seed cache writes 0600; an
+    # existing jar copied that way earlier gets the same repair
+    make_world_readable(jar)
     if sha256_file(jar) != jar_want:
         raise SystemExit(f"inputs: the {tag} seed jar does not match scripts/seed-checksums.txt")
     std_dir = prefix / "inputs" / "std-seeds" / tag
     if not std_dir.exists() or seed_tree_sha(std_dir) != std_want:
         shutil.rmtree(std_dir, ignore_errors=True)
         shutil.copytree(seed_cache / f"std-{tag}", std_dir)
+    make_world_readable(std_dir)
     if seed_tree_sha(std_dir) != std_want:
         raise SystemExit(f"inputs: the {tag} std does not match scripts/seed-std-checksums.txt")
     items.append({"name": "seed", "version": tag, "kind": "seed",
@@ -557,6 +562,43 @@ def build(args):
     for row in items + [row for rows in extra.values() for row in rows]:
         print(f"  {row['kind']:10} {row['name']:9} {row['version']:20} {mib(row['bytes']):>11}  {row['path']}")
     return verify(argparse.Namespace(prefix=str(prefix), repo=str(repo)))
+
+
+def make_world_readable(path):
+    """Add the other-read bit to a file, and other-read and -search to a
+    directory tree. Only bits are added: the executable bit is part of the
+    tree digest and stays as it was, and the digest ignores the rest."""
+    path = Path(path)
+    for p in [path, *(path.rglob("*") if path.is_dir() and not path.is_symlink() else [])]:
+        if p.is_symlink():
+            continue
+        mode = p.stat().st_mode
+        want = mode | (0o005 if p.is_dir() else 0o004)
+        if want != mode:
+            p.chmod(want)
+
+
+def unreadable_by_others(path, limit=3):
+    """Entries under `path` that a job running as another uid cannot read:
+    files without other-read, directories without other-read and -search.
+    Returns up to `limit` of them, as paths relative to `path`'s parent."""
+    path = Path(path)
+    found = []
+    if path.is_symlink():
+        return found
+    walk = os.walk(path) if path.is_dir() else [(str(path.parent), [], [path.name])]
+    for dirpath, dirnames, filenames in walk:
+        names = ([Path(dirpath)] if path.is_dir() else []) + \
+                [Path(dirpath, n) for n in dirnames + filenames]
+        for name in names:
+            if name.is_symlink():
+                continue
+            need = 0o005 if name.is_dir() else 0o004
+            if name.stat().st_mode & need != need:
+                found.append(name.relative_to(path.parent).as_posix())
+                if len(found) >= limit:
+                    return found
+    return found
 
 
 def conda_rows(manifest):
@@ -762,6 +804,14 @@ def verify(args):
                 problems.append(f"{row['lockfile']} in the repository is not the pinned lockfile")
         if row["kind"] == "download" and row["name"] not in lock:
             problems.append("not in inputs.lock.json")
+        # The pack can be read by a job running as another uid. A source file
+        # that was 0600 (say, copied from a private cache) keeps that mode, the
+        # digest above still matches, and the job fails with EACCES.
+        if path.exists():
+            closed = unreadable_by_others(path)
+            if closed:
+                problems.append(f"not readable by other users, e.g. {', '.join(closed)} "
+                                f"(fix: chmod -R o+rX {path})")
         status = "ok  " if not problems else "FAIL"
         print(f"{status} {row['kind']:10} {row['name']:9} {row['version']:20} "
               f"{mib(row['bytes']):>11}  {row['path']}{'  ' + '; '.join(problems) if problems else ''}")
@@ -842,6 +892,18 @@ def lockcheck_selftest():
     if not lockcheck_problems(repo, bad):
         print("inputs lockcheck selftest: RED, a wrong digest was accepted")
         return 1
+    # the mode control: a 0600 file must be reported, and repaired by make_world_readable
+    with tempfile.TemporaryDirectory() as tmp:
+        jar = Path(tmp) / "seed.jar"
+        jar.write_bytes(b"x")
+        jar.chmod(0o600)
+        if not unreadable_by_others(jar):
+            print("inputs lockcheck selftest: RED, a 0600 file was accepted as readable")
+            return 1
+        make_world_readable(jar)
+        if unreadable_by_others(jar):
+            print("inputs lockcheck selftest: RED, make_world_readable left a file closed")
+            return 1
     print("inputs lockcheck selftest: green")
     return 0
 
