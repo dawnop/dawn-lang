@@ -120,7 +120,7 @@ handler。Dawn 的假 handler 就是这一路，所以熵做成效果而不是�
   `n == 0` 回空、`n < 0` panic；七个生产 wrapper 嵌套。
 - 变异体负控：把真源换成全零、把长度少一，两个都必须使上面的测试变红。
 - `selfhost-prev-diff.sh`：`doc --builtins` 的清单多一条 `io_random_bytes`，`emit` 各标签因
-  `dawn/rt/Io` 多一个方法而变，都按 Emit-Change 声明。
+  `dawn/rt/Io` 多一个方法而变，都按 Emit-Change 声明；`std/io` 头部注释多一行，`lsp` 里指向其中定义的位置下移一行，同样声明。
 - `scripts/wasm-contract/run.sh`：wasi 的 `getentropy` 能编、能链。
 
 ## 不做的（理由）
