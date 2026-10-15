@@ -70,10 +70,11 @@ fatal，不再返回 error，原因是被调用方忽略的 error 路径造出�
   （`EINTR` 除外，重试）直接 `dawn_fault`。仓库此前没有任何 `getrandom`/`urandom` 引用，
   这是新依赖。native 后端按 Linux 推进（`native-backend-plan.md` 的平台假设），不写 macOS/BSD 的
   `getentropy` 分块。
-- **wasm32-wasi**：同一个翻译单元，wasi-libc 的 `getrandom` 落到 preview1 `random_get`，C 侧
-  不需要 `#ifdef`。CLI 侧的 wasm 契约跑在 Node 的 `node:wasi` 上，它实现了 `random_get`。
+- **wasm32-wasi**：同一个翻译单元，wasi-libc 没有 `getrandom`（它的 `sys/random.h` 只在
+  `__wasilibc_unmodified_upstream` 下声明），只有 `getentropy`，落到 preview1 `random_get`，单次
+  最多 256 字节，所以 C 侧有一处 `#ifdef __wasi__`，循环分块。CLI 侧的 wasm 契约跑在 Node 的 `node:wasi` 上，它实现了 `random_get`。
   要补的是 tea-dom 的手写浏览器垫片 `packages/tea-dom/js/wasi.mjs`：它按模块自己的 import
-  表构造 import 对象，缺的函数答 `NOSYS`，那样 `getrandom` 失败、`dawn_fault`。补上之后
+  表构造 import 对象，缺的函数答 `NOSYS`，那样 `getentropy` 失败、`dawn_fault`。补上之后
   `random_get` 答 `crypto.getRandomValues`，该 API 单次上限 65536 字节，所以垫片分块。
   可达性已核实：原语走的就是同一份 C 运行时，不存在 wasm 侧编译期拒绝的必要。
 
@@ -118,7 +119,7 @@ handler。Dawn 的假 handler 就是这一路，所以熵做成效果而不是�
   确定字节；真 handler 下长度对、两次读数不同（16 字节相同的概率 2^-128，可以断言）、
   `n == 0` 回空、`n < 0` panic；七个生产 wrapper 嵌套。
 - 变异体负控：把真源换成全零、把长度少一，两个都必须使上面的测试变红。
-- `scripts/wasm-contract/run.sh`：wasi 的 `getrandom` 能编、能链。
+- `scripts/wasm-contract/run.sh`：wasi 的 `getentropy` 能编、能链。
 
 ## 不做的（理由）
 

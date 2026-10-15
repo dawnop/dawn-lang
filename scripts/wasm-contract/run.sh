@@ -107,7 +107,7 @@ wasm_c_build() { # <out.wasm> <main.c> <dawn_rt.c> <shim.o> <include-dir> <tag.o
 
 # ---- both targets, one oracle: the native run's bytes ----------------------
 # Every wasm run also reports the leak ledger; zero is the only green.
-for prog in hello stress failure imm; do
+for prog in hello stress failure imm random; do
   src="$here/$prog.dawn"
   [ "$prog" != imm ] || src="$root/scripts/imm-contract/imm.dawn"
   "$DAWNC" build "$src" -o "$work/$prog.native" 2>"$work/$prog.cc-err" ||
