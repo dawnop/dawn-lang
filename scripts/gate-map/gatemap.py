@@ -873,6 +873,113 @@ def python_inputs(text, tree):
     return found
 
 
+def _py_repo_root_names(tree_ast):
+    """The ids of the `Name` nodes that statically denote the repository root.
+
+    A bare name denotes the repository when it ends in "root" AND resolves to an
+    assignment from `__file__` (or from another such name): `ROOT =
+    Path(__file__).resolve().parents[2]`, `ROOT = HERE.parent.parent`. The
+    spelling alone proved too weak (#752): `seed_tree_sha(root)` in
+    scripts/gates-external/inputs.py takes a directory *argument* called
+    root, `root.rglob("*")` was read as a walk of the whole repository, and
+    every file in it looked watched by that gate. A parameter, or a local bound
+    to anything but a `__file__`-derived value, shadows the module's ROOT and
+    is a variable directory, not a declared input.
+    """
+    import ast
+
+    opaque = ast.Constant(None)
+
+    def derived_in(assigns, outer):
+        """Names bound in one scope to a `__file__`-derived value."""
+        good = set()
+        changed = True
+        while changed:
+            changed = False
+            for name, values in assigns.items():
+                if name in good:
+                    continue
+                for v in values:
+                    names = {n.id for n in ast.walk(v) if isinstance(n, ast.Name)}
+                    if "__file__" in names or any(
+                        n in good or (n in outer and n not in assigns) for n in names
+                    ):
+                        good.add(name)
+                        changed = True
+                        break
+        return good
+
+    def scope_bindings(body_nodes):
+        """name -> values bound in this scope (an opaque constant for binds
+        that carry no value), not descending into nested scopes."""
+        assigns = {}
+
+        def bind_all(target):
+            for e in ast.walk(target):
+                if isinstance(e, ast.Name):
+                    assigns.setdefault(e.id, []).append(opaque)
+
+        stack = list(body_nodes)
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        assigns.setdefault(t.id, []).append(n.value)
+                    else:
+                        bind_all(t)
+            elif isinstance(n, (ast.AnnAssign, ast.AugAssign)):
+                if isinstance(n.target, ast.Name):
+                    assigns.setdefault(n.target.id, []).append(n.value or opaque)
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+                bind_all(n.target)
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for item in n.items:
+                    if item.optional_vars is not None:
+                        bind_all(item.optional_vars)
+            elif isinstance(n, ast.NamedExpr):
+                bind_all(n.target)
+            stack.extend(ast.iter_child_nodes(n))
+        return assigns
+
+    roots = set()
+
+    def visit(body_nodes, params, outer_good):
+        assigns = scope_bindings(body_nodes)
+        for p in params:
+            assigns[p] = [opaque]
+        good = derived_in(assigns, outer_good)
+        # A name this scope binds shadows the outer one; a name it does not
+        # bind falls through to the enclosing scope's verdict.
+        visible = {n for n in outer_good if n not in assigns} | good
+        stack = list(body_nodes)
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                a = n.args
+                ps = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+                ps += [x.arg for x in (a.vararg, a.kwarg) if x]
+                stack.extend(n.decorator_list + a.defaults + [d for d in a.kw_defaults if d])
+                visit(n.body, ps, visible)
+                continue
+            if isinstance(n, ast.ClassDef):
+                visit(n.body, [], visible)
+                continue
+            if isinstance(n, ast.Lambda):
+                a = n.args
+                ps = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs]
+                visit([ast.Expr(n.body)], ps, visible)
+                continue
+            if isinstance(n, ast.Name) and n.id.lower().endswith("root") and n.id in visible:
+                roots.add(id(n))
+            stack.extend(ast.iter_child_nodes(n))
+
+    visit(tree_ast.body, [], set())
+    return roots
+
+
 @lru_cache(maxsize=256)
 def python_input_patterns(text):
     """Parse once per script body; resolve paths against each Tree separately.
@@ -886,6 +993,8 @@ def python_input_patterns(text):
         tree_ast = ast.parse(text)
     except SyntaxError:
         return ()
+
+    repo_roots = _py_repo_root_names(tree_ast)
 
     def joined(node):
         """`ROOT / "a" / "b"` -> "a/b"; a bare ROOT-like name -> "".
@@ -975,6 +1084,14 @@ def python_input_patterns(text):
             # declared input, and reading it as one put every .dawn file in the
             # repository under the documentation job.
             if base is None or not base[1] or not node.args:
+                continue
+            # A glob straight off a bare root-like name claims the whole
+            # repository, so the name has to resolve statically to it. A
+            # function's `root` parameter does not (#752: `seed_tree_sha(
+            # root)` walks whatever directory it is handed). The same
+            # parameter joined to a constant segment, `root / "docs"`, still
+            # declares that subtree, which check-gate-budgets.py relies on.
+            if not base[0] and id(node.func.value) not in repo_roots:
                 continue
             arg = node.args[0]
             if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
@@ -5374,10 +5491,102 @@ def selftest_python_reader():
                         "string was not read as a launch")
     if "docs/y.md" not in path_tokens(python_command_text(launches), tree):
         failures.append("a path in a table was not read as an input")
+    globs = Tree(ROOT, files=["docs/a.md", "docs/sub/b.md", "tools/c.py", "top.md"])
+    walks = {
+        "module ROOT": (
+            "from pathlib import Path\n"
+            "ROOT = Path(__file__).resolve().parents[1]\n"
+            'files = list(ROOT.rglob("*.md"))\n',
+            {"docs/a.md", "docs/sub/b.md", "top.md"},
+        ),
+        "ROOT derived from HERE": (
+            "from pathlib import Path\n"
+            "HERE = Path(__file__).resolve().parent\n"
+            "ROOT = HERE.parent\n"
+            'files = list(ROOT.rglob("*.md"))\n',
+            {"docs/a.md", "docs/sub/b.md", "top.md"},
+        ),
+        "root parameter walked bare": (
+            "def digest(root):\n"
+            '    return [p for p in root.rglob("*") if p.is_file()]\n',
+            set(),
+        ),
+        "root local bound to an argument": (
+            "def digest(arg):\n"
+            "    root = Path(arg)\n"
+            '    return list(root.rglob("*.md"))\n',
+            set(),
+        ),
+        "root parameter shadows module ROOT": (
+            "ROOT = Path(__file__).resolve().parents[1]\n"
+            "def digest(root):\n"
+            '    return list(root.rglob("*.md"))\n',
+            set(),
+        ),
+        "root parameter joined to a constant subtree": (
+            "def digest(root):\n"
+            '    return list((root / "docs").rglob("*.md"))\n',
+            {"docs", "docs/a.md", "docs/sub/b.md"},
+        ),
+    }
+    for label, (script, want) in walks.items():
+        if python_inputs(script, globs) != want:
+            failures.append(
+                f"python reader, {label}: read {sorted(python_inputs(script, globs))}, "
+                f"wanted {sorted(want)}"
+            )
     for failure in failures:
         print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
     if not failures:
         print("  python reader: docstrings, comments and messages are not edges; calls and tables are")
+    return failures
+
+
+def selftest_record_unseen():
+    """--record-unseen may not delete a written reason without being told to."""
+    import contextlib
+    import io
+
+    failures = []
+
+    class FakeMap:
+        by_path = {}
+        unread = frozenset()
+
+        def __init__(self, computed):
+            self._computed = list(computed)
+
+        def unseen(self):
+            return self._computed
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "unseen.txt"
+        original = (
+            UNSEEN_HEADER + "\n"
+            "a.txt  no-gate: first reason.\n"
+            "b.txt  no-gate: second reason.\n"
+        )
+        path.write_text(original, encoding="utf-8")
+        quiet = io.StringIO()
+        with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+            code = record_unseen(FakeMap(["a.txt"]), path)
+        if code == 0 or path.read_text(encoding="utf-8") != original:
+            failures.append("record-unseen dropped a line with a reason without --force")
+        with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+            code = record_unseen(FakeMap(["a.txt"]), path, force=True)
+        text = path.read_text(encoding="utf-8")
+        if code != 0 or "b.txt" in text or "first reason." not in text:
+            failures.append("record-unseen --force did not drop exactly the closed line")
+        path.write_text(original, encoding="utf-8")
+        with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+            code = record_unseen(FakeMap(["a.txt", "b.txt", "c.txt"]), path)
+        text = path.read_text(encoding="utf-8")
+        if code != 0 or "second reason." not in text or "c.txt" not in text:
+            failures.append("record-unseen refused or lost a reason when only adding a line")
+    for failure in failures:
+        print(f"SELFTEST FAIL: {failure}", file=sys.stderr)
+    if not failures:
+        print("  record-unseen: a written reason is not deleted without --force")
     return failures
 
 
@@ -5556,7 +5765,7 @@ def selftest(record_path=None, record_mode=False):
     record_path = record_path or (HERE / "mutants.txt")
     failures = (selftest_matrix() + selftest_content_caches()
                 + selftest_example_dependencies() + selftest_harness_reader()
-                + selftest_python_reader())
+                + selftest_python_reader() + selftest_record_unseen())
     if failures:
         return 1
 
@@ -5626,10 +5835,40 @@ UNSEEN_HEADER = """\
 NEEDS_A_REASON = "TODO, say why nothing watches this and delete this word"
 
 
-def record_unseen(gm, path):
+def unseen_losses(entries, computed):
+    """The lines a rewrite would delete that a person wrote a reason on.
+
+    A path leaves the record for one honest reason: a gate now watches it. But
+    the same thing happens when the map goes wrong and sees a whole directory
+    as watched (#752: a function parameter called `root` read as the
+    repository), and then the rewrite deletes every line, reasons and all,
+    with a summary that reads like success. The reasons are the one part of
+    this file a program cannot regenerate, so losing one needs a decision.
+    """
+    kept = set(computed)
+    return [
+        p for p, (_, why) in entries.items()
+        if p not in kept and why and why != NEEDS_A_REASON
+    ]
+
+
+def record_unseen(gm, path, force=False):
     """Rewrite the path list, keeping every reason already written."""
     entries, _ = parse_unseen(path.read_text(encoding="utf-8") if path.exists() else "")
     computed = gm.unseen()
+    lost = unseen_losses(entries, computed)
+    if lost and not force:
+        print(
+            f"gatemap: refusing to rewrite {path.name}: it would delete "
+            f"{len(lost)} line(s) that carry a written reason, and nothing "
+            f"has been written. If the map is right, those paths are watched "
+            f"now; if one gate suddenly watches many of them, suspect the "
+            f"reader, not the tree. Pass --force to delete them anyway.",
+            file=sys.stderr,
+        )
+        for rel in lost:
+            print(f"  would drop: {rel}", file=sys.stderr)
+        return 1
     width = max((len(p) for p in computed), default=0) + 2
     lines = []
     for rel in computed:
@@ -5638,7 +5877,8 @@ def record_unseen(gm, path):
         lines.append(f"{rel.ljust(width)}{kind}: {why}")
     path.write_text(UNSEEN_HEADER + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
     fresh = [p for p in computed if p not in entries]
-    print(f"recorded {len(computed)} unwatched path(s), {len(fresh)} new")
+    print(f"recorded {len(computed)} unwatched path(s), {len(fresh)} new, "
+          f"{len(lost)} dropped")
     for rel in fresh:
         print(f"  needs a reason: {rel}")
     return 0
@@ -5677,6 +5917,8 @@ def main(argv=None):
     ap.add_argument("--unseen", action="store_true",
                     help="print every path no gate watches")
     ap.add_argument("--record-unseen", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="with --record-unseen: also delete lines that carry a reason")
     ap.add_argument("--record-mutants", action="store_true",
                     help="rewrite the red sets in mutants.txt; owners stay a "
                          "hand edit")
@@ -5716,7 +5958,7 @@ def main(argv=None):
     gm = Map(Tree(ROOT))
 
     if args.record_unseen:
-        return record_unseen(gm, HERE / "unseen.txt")
+        return record_unseen(gm, HERE / "unseen.txt", force=args.force)
 
     if args.labels:
         print_labels(gm)
