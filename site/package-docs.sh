@@ -14,6 +14,18 @@
 #
 #   site/package-docs.sh <out-dir>     (run from the repository root)
 set -euo pipefail
+
+# HotSpot writes its perf-data file (hsperfdata_<user>/<pid>) under /tmp. When
+# four JVMs start at once and that directory is contended or full, the JVM
+# prints a "warning: ..." line about the shared memory file, and HotSpot prints
+# such warnings to STDOUT, not stderr. `dawn doc` writes its document to
+# stdout too, so the warning landed at the top of <pkg>.json (main went red
+# once on 10-12, a rerun was green). The driver already starts every child JVM
+# with -XX:-UsePerfData; the launcher's own JVM is the one left, so give it the
+# flag here, for this script only. Not JAVA_TOOL_OPTIONS: that makes every JVM
+# print "Picked up ..." on stderr. The value is the launcher's default list
+# (bin/dawn DAWN_JVM_OPTS) plus the flag, and a caller's own override is kept.
+export DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g -XX:+UseSerialGC} -XX:-UsePerfData"
 out="${1:?usage: site/package-docs.sh <out-dir>}"
 mkdir -p "$out"
 for pkg in packages/*/; do
