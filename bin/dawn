@@ -990,7 +990,20 @@ build_generation() {
   fi
 }
 
+# Serialise rebuilds. Without this, N launchers on a cold checkout each run
+# the two-stage selfhost build (N JVMs at -Xmx2g) and race to promote their
+# jars; the staging directories are private so the result is still correct,
+# but it is N times the work. The lock is a mkdir directory (seedjar.sh
+# seed_lock_acquire) because macOS has no flock. A launcher that waited
+# re-validates under the lock and finds the winner's generation already there.
+BUILD_LOCK="$ROOT/build/.dawn-selfhost.lock"
+BUILD_LOCK_HELD=
+
 cleanup_attempt() {
+  if [ -n "${BUILD_LOCK_HELD:-}" ]; then
+    seed_lock_release "$BUILD_LOCK"
+    BUILD_LOCK_HELD=
+  fi
   if [ -n "${TXN:-}" ]; then
     rm -rf "$TXN"
     TXN=
@@ -1028,9 +1041,25 @@ while [ "$launcher_attempt" -le 2 ]; do
     exit 1
   fi
   if [ "$cache_status" -ne 0 ]; then
-    if ! build_generation; then
+    if ! seed_lock_acquire "$BUILD_LOCK"; then
       exit 1
     fi
+    BUILD_LOCK_HELD=1
+    # another launcher may have rebuilt while this one waited
+    cache_status=0
+    if validate_cache_full; then
+      cache_status=0
+    else
+      cache_status=$?
+    fi
+    if [ "$cache_status" -eq 2 ]; then
+      exit 1
+    fi
+    if [ "$cache_status" -ne 0 ] && ! build_generation; then
+      exit 1
+    fi
+    seed_lock_release "$BUILD_LOCK"
+    BUILD_LOCK_HELD=
     cache_status=0
     if validate_cache_full; then
       cache_status=0

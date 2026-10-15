@@ -28,17 +28,7 @@ printf '%s\t%s\t%s\t%s\n' "$role" "$command_name" "$output" "$jar" >> "$FAKE_JAV
 if [[ $command_name == build ]]; then
   [[ $output != - ]]
   if [[ $role == seed ]]; then
-    if [[ -n ${FAKE_BUILD_BARRIER:-} ]]; then
-      mkdir -p "$FAKE_BUILD_BARRIER"
-      transaction=$(basename "$(dirname "$output")")
-      : > "$FAKE_BUILD_BARRIER/$transaction.$PPID"
-      for _ in $(seq 1 250); do
-        count=$(find "$FAKE_BUILD_BARRIER" -type f | wc -l)
-        [[ $count -ge 2 ]] && break
-        sleep 0.02
-      done
-      [[ $(find "$FAKE_BUILD_BARRIER" -type f | wc -l) -ge 2 ]]
-    fi
+    [[ -z ${FAKE_BUILD_DELAY:-} ]] || sleep "$FAKE_BUILD_DELAY"
     printf 'stage1\n' > "$output"
   elif [[ $role == stage1 ]]; then
     printf 'candidate\n' > "$output"

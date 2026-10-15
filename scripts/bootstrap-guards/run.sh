@@ -214,6 +214,123 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Cold-cache concurrency: N launchers on a fresh checkout fill the seed cache
+# once, not N times over each other.
+#
+# A fresh worktree has no .dawn/seeds, and the first thing a script that fans
+# out `bin/dawn` does is start several at once. With a fixed seed.jar.tmp one
+# reads while another writes ("SHA-256 input is not a regular non-symbolic-link
+# file", "cannot resolve bootstrap seed"; four parallel `dawn doc` runs, three
+# of them left an empty JSON). No JVM and no network here: curl is a PATH shim
+# that writes the jar slowly, which is what widens the race window, and the
+# std comes from a throwaway git repo.
+# ---------------------------------------------------------------------------
+croot="$work/coldroot"
+mkdir -p "$croot/scripts" "$croot/std" "$work/shim"
+cp "$root/scripts/seedjar.sh" "$croot/scripts/"
+printf 'v9.9.9\n' > "$croot/scripts/seed-release.txt"
+printf 'str\n' > "$croot/std/modules.txt"
+printf 'pub fn f() -> Int = 1\n' > "$croot/std/str.dawn"
+printf 'the cold seed jar\n' > "$work/cold-seed.jar"
+cold_want=$(file_sha256 "$work/cold-seed.jar")
+printf '%s  v9.9.9\n' "$cold_want" > "$croot/scripts/seed-checksums.txt"
+cold_std_want=$(
+  ROOT="$croot"
+  export ROOT
+  # shellcheck disable=SC1091
+  . "$croot/scripts/seedjar.sh"
+  seed_tree_sha "$croot/std"
+)
+printf '%s  v9.9.9\n' "$cold_std_want" > "$croot/scripts/seed-std-checksums.txt"
+(
+  cd "$croot" &&
+    git init -q . &&
+    git add . &&
+    git -c user.name=t -c user.email=t@example.invalid commit -qm fixture &&
+    git tag v9.9.9
+) > /dev/null 2>&1
+cat > "$work/shim/curl" <<SHIM
+#!/bin/sh
+# slow, counted stand-in for the release download
+out=
+while [ \$# -gt 0 ]; do
+  case \$1 in -o) out=\$2; shift ;; esac
+  shift
+done
+echo x >> "$work/curl.count"
+head -c 8 "$work/cold-seed.jar" > "\$out"
+sleep 2
+tail -c +9 "$work/cold-seed.jar" >> "\$out"
+SHIM
+chmod +x "$work/shim/curl"
+# git archive is instant on a fixture, which hides the std race; slow it down
+real_git=$(command -v git)
+cat > "$work/shim/git" <<SHIM
+#!/bin/sh
+case "\$*" in *" archive "*) sleep 1 ;; esac
+exec "$real_git" "\$@"
+SHIM
+chmod +x "$work/shim/git"
+
+cold_fan() { # $1 = seed_jar | seed_std_dir; 8 at once -> $work/cold.N.out, $work/cold.fail
+  : > "$work/cold.fail"
+  for n in 1 2 3 4 5 6 7 8; do
+    (
+      ROOT="$croot"
+      DAWN_GITHUB_REPO=example/none
+      PATH="$work/shim:$PATH"
+      export ROOT DAWN_GITHUB_REPO PATH
+      # shellcheck disable=SC1091
+      . "$croot/scripts/seedjar.sh"
+      "$1" > "$work/cold.$n.out" 2> "$work/cold.$n.err" || echo "$n" >> "$work/cold.fail"
+    ) &
+  done
+  wait
+}
+
+rm -f "$work/curl.count"
+cold_fan seed_jar
+cold_ok=1
+for n in 1 2 3 4 5 6 7 8; do
+  [ "$(cat "$work/cold.$n.out")" = "$croot/.dawn/seeds/v9.9.9/seed.jar" ] || cold_ok=0
+done
+if [ ! -s "$work/cold.fail" ] && [ "$cold_ok" = 1 ] &&
+  [ "$(wc -l < "$work/curl.count")" -eq 1 ] &&
+  [ "$(find "$croot/.dawn/seeds/v9.9.9" -type f | wc -l)" -eq 1 ]; then
+  ok "eight concurrent cold launchers share one seed download and leave no temp files"
+else
+  bad "concurrent cold seed fetches raced (failed: $(tr '\n' ' ' < "$work/cold.fail"), downloads: $(wc -l < "$work/curl.count" 2>/dev/null))"
+  cat "$work"/cold.*.err >&2
+fi
+
+cold_fan seed_std_dir
+cold_ok=1
+for n in 1 2 3 4 5 6 7 8; do
+  [ "$(cat "$work/cold.$n.out")" = "$croot/.dawn/seeds/std-v9.9.9" ] || cold_ok=0
+done
+if [ ! -s "$work/cold.fail" ] && [ "$cold_ok" = 1 ] &&
+  [ -z "$(ls "$croot/.dawn/seeds" | grep -v -E '^(v9.9.9|std-v9.9.9)$')" ]; then
+  ok "eight concurrent cold launchers extract the seed std once and leave no staging directories"
+else
+  bad "concurrent cold seed std extraction raced (failed: $(tr '\n' ' ' < "$work/cold.fail"))"
+  cat "$work"/cold.*.err >&2
+fi
+
+# A lock whose holder died must not wedge every later launcher.
+rm -rf "$croot/.dawn/seeds/v9.9.9"
+mkdir "$croot/.dawn/seeds/v9.9.9.lock"
+dead_pid=$(sh -c 'echo $$')
+printf '%s\n' "$dead_pid" > "$croot/.dawn/seeds/v9.9.9.lock/pid"
+rm -f "$work/curl.count"
+cold_fan seed_jar
+if [ ! -s "$work/cold.fail" ] && [ ! -e "$croot/.dawn/seeds/v9.9.9.lock" ]; then
+  ok "a lock left by a dead launcher is taken over and released"
+else
+  bad "a stale seed lock wedged the launchers"
+  cat "$work"/cold.*.err >&2
+fi
+
+# ---------------------------------------------------------------------------
 # TOOL-17: release and fixed-point gates share one build recipe, and release
 # compares that recipe's output across both supported JDKs before publishing.
 #
