@@ -138,6 +138,92 @@ seed_release_base() {
   echo "https://github.com/$_sr_repo/releases/download"
 }
 
+## Cold-cache concurrency. Several launchers starting at once on a fresh
+## checkout all find the seed cache empty and all fill it; with fixed temp
+## names one reads seed.jar.tmp while another still writes it (the first
+## symptom was "SHA-256 input is not a regular non-symbolic-link file" and
+## "cannot resolve bootstrap seed" out of four parallel `dawn doc` runs).
+## Two rules fix it: every writer stages under a name of its own (mktemp in the
+## destination directory, so the final rename never crosses a filesystem), and
+## the fetch is serialised by a lock directory, so the download happens once
+## and the others wait for the published file instead of racing it.
+##
+## mkdir as the lock rather than flock(1): macOS ships no flock, mkdir is
+## atomic everywhere, and the one thing flock buys -- the kernel dropping the
+## lock when its holder dies -- is replaced by a pid file: a lock whose
+## holder is gone is taken over. The holder is a pid on this host, which is
+## the only place two launchers can share a checkout.
+seed_lock_acquire() {
+  _sl_dir=$1
+  _sl_done=${2:-}
+  _sl_deadline=$(($(date +%s) + ${DAWN_LOCK_TIMEOUT:-900}))
+  while ! mkdir "$_sl_dir" 2>/dev/null; do
+    # a waiter that sees the holder's result stops waiting: queueing every
+    # waiter through the lock just to find the work done costs a poll tick each
+    if [ -n "$_sl_done" ] && [ -f "$_sl_done" ]; then
+      return 2
+    fi
+    _sl_pid=$(cat "$_sl_dir/pid" 2>/dev/null || true)
+    if [ -n "$_sl_pid" ] && ! kill -0 "$_sl_pid" 2>/dev/null; then
+      # holder is gone; two takers may both get here, but only one mkdir wins
+      rm -f "$_sl_dir/pid"
+      rmdir "$_sl_dir" 2>/dev/null || true
+      continue
+    fi
+    if [ "$(date +%s)" -ge "$_sl_deadline" ]; then
+      echo "error: timed out waiting for $_sl_dir" >&2
+      echo "  if no other dawn is running, remove that directory and retry" >&2
+      return 1
+    fi
+    # fractional sleep is not POSIX but GNU and macOS both have it
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  echo "$$" > "$_sl_dir/pid"
+}
+
+seed_lock_release() {
+  rm -f "$1/pid"
+  rmdir "$1" 2>/dev/null || true
+}
+
+## Run "$@" holding the lock directory $1, unless the file $2 appears first
+## (the result being waited for), in which case there is nothing left to do.
+## A subshell, so that the `exit 1` the verify helpers use on a bad seed still
+## releases the lock (the trap) and surfaces as a nonzero status for the caller.
+seed_locked() {
+  _sk_lock=$1
+  _sk_done=$2
+  shift 2
+  (
+    _sk_rc=0
+    seed_lock_acquire "$_sk_lock" "$_sk_done" || _sk_rc=$?
+    [ "$_sk_rc" -eq 2 ] && exit 0
+    [ "$_sk_rc" -eq 0 ] || exit 1
+    trap 'seed_lock_release "$_sk_lock"' 0
+    trap 'exit 1' 1 2 15
+    "$@"
+  )
+}
+
+## Download, verify and publish the seed jar; run under the cache lock.
+seed_jar_fetch() {
+  [ -f "$1/seed.jar" ] && return 0
+  mkdir -p "$1"
+  echo "fetching $2 seed jar..." >&2
+  _sf_tmp=$(mktemp "$1/seed.jar.XXXXXX") || return 1
+  if ! curl -fsSL -o "$_sf_tmp" "$(seed_release_base)/$2/dawn-selfhost.jar"; then
+    rm -f "$_sf_tmp"
+    return 1
+  fi
+  # verified before it is promoted to the cache, so a bad download cannot
+  # become the copy every later run trusts
+  if ! (seed_verify "$_sf_tmp" "$2"); then
+    rm -f "$_sf_tmp"
+    return 1
+  fi
+  mv "$_sf_tmp" "$1/seed.jar"
+}
+
 seed_jar() {
   # An explicitly pointed-at jar is the debugging escape hatch: it is not the
   # pinned release, so there is nothing to check it against. Say so rather than
@@ -151,17 +237,12 @@ seed_jar() {
   _sj_cache=${DAWN_SEED_CACHE:-$ROOT/.dawn/seeds}/$_sj_tag
   if [ ! -f "$_sj_cache/seed.jar" ]; then
     mkdir -p "$_sj_cache"
-    echo "fetching $_sj_tag seed jar..." >&2
-    curl -fsSL -o "$_sj_cache/seed.jar.tmp" \
-      "$(seed_release_base)/$_sj_tag/dawn-selfhost.jar"
-    # verified before it is promoted to the cache, so a bad download cannot
-    # become the copy every later run trusts
-    seed_verify "$_sj_cache/seed.jar.tmp" "$_sj_tag"
-    mv "$_sj_cache/seed.jar.tmp" "$_sj_cache/seed.jar"
-  else
-    # and again on every cache hit — the cache is a mutable directory on disk
-    seed_verify "$_sj_cache/seed.jar" "$_sj_tag"
+    seed_locked "$_sj_cache.lock" "$_sj_cache/seed.jar" seed_jar_fetch "$_sj_cache" "$_sj_tag" || exit 1
   fi
+  # verified on every use, including the run that just fetched it: the
+  # cache is a mutable directory on disk, and a waiter that did not download
+  # has not checked anything yet
+  seed_verify "$_sj_cache/seed.jar" "$_sj_tag"
   echo "$_sj_cache/seed.jar"
 }
 
@@ -209,6 +290,36 @@ seed_std_verify() {
   fi
 }
 
+## Extract and publish the seed's std; run under the cache lock. Staged in a
+## directory of its own and renamed into place only once verified, so no
+## reader ever sees a half-written tree.
+seed_std_extract() {
+  [ -f "$1/modules.txt" ] && return 0
+  # A fresh CI checkout is shallow and tagless (actions/checkout defaults:
+  # depth 1, no tags), so the seed's tag is usually absent there. Fetch just
+  # that tag before asking archive for it; offline with the tag already
+  # present never reaches the fetch.
+  git -C "$ROOT" rev-parse -q --verify "refs/tags/$2" > /dev/null ||
+    git -C "$ROOT" fetch -q --depth 1 origin tag "$2" || true
+  _se_stage=$(mktemp -d "$1.XXXXXX") || return 1
+  if ! git -C "$ROOT" archive "$2" std | tar -x -C "$_se_stage"; then
+    echo "error: cannot extract std/ from tag $2 (the seed's released std)" >&2
+    echo "  the tag is not in this clone, and fetching it from origin failed" >&2
+    rm -rf "$_se_stage"
+    return 1
+  fi
+  # verified while it is still staged, so a bad extract never becomes the
+  # copy every later run trusts: the jar's rule, applied to its other half
+  if ! (seed_std_verify "$_se_stage/std" "$2"); then
+    rm -rf "$_se_stage"
+    return 1
+  fi
+  # a directory without modules.txt is debris from an older interrupted run
+  rm -rf "$1"
+  mv "$_se_stage/std" "$1"
+  rmdir "$_se_stage"
+}
+
 ## The std the pinned seed released with, extracted from its git tag and
 ## cached beside the jar. The seed pairs with the std it shipped: since #44
 ## knife 2 the repo's std may use prelude machinery (the Iter trait) that is
@@ -219,29 +330,11 @@ seed_std_dir() {
   _ss_tag=$(tr -d ' \n' < "$ROOT/scripts/seed-release.txt")
   _ss_dir=${DAWN_SEED_CACHE:-$ROOT/.dawn/seeds}/std-$_ss_tag
   if [ ! -f "$_ss_dir/modules.txt" ]; then
-    # A fresh CI checkout is shallow and tagless (actions/checkout defaults:
-    # depth 1, no tags), so the seed's tag is usually absent there. Fetch just
-    # that tag before asking archive for it; offline with the tag already
-    # present never reaches the fetch.
-    git -C "$ROOT" rev-parse -q --verify "refs/tags/$_ss_tag" > /dev/null ||
-      git -C "$ROOT" fetch -q --depth 1 origin tag "$_ss_tag" || true
-    rm -rf "$_ss_dir.tmp"
-    mkdir -p "$_ss_dir.tmp"
-    git -C "$ROOT" archive "$_ss_tag" std | tar -x -C "$_ss_dir.tmp" || {
-      echo "error: cannot extract std/ from tag $_ss_tag (the seed's released std)" >&2
-      echo "  the tag is not in this clone, and fetching it from origin failed" >&2
-      exit 1
-    }
-    # verified while it is still staged, so a bad extract never becomes the
-    # copy every later run trusts — the jar's rule, applied to its other half
-    seed_std_verify "$_ss_dir.tmp/std" "$_ss_tag"
-    rm -rf "$_ss_dir"
-    mv "$_ss_dir.tmp/std" "$_ss_dir"
-    rm -rf "$_ss_dir.tmp"
-  else
-    # and again on every cache hit — the cache is a mutable directory on disk
-    seed_std_verify "$_ss_dir" "$_ss_tag"
+    mkdir -p "$(dirname "$_ss_dir")"
+    seed_locked "$_ss_dir.lock" "$_ss_dir/modules.txt" seed_std_extract "$_ss_dir" "$_ss_tag" || exit 1
   fi
+  # and on every use: the cache is a mutable directory on disk
+  seed_std_verify "$_ss_dir" "$_ss_tag"
   echo "$_ss_dir"
 }
 

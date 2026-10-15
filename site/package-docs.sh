@@ -29,14 +29,13 @@ export DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g -XX:+UseSerialGC} -XX:-Us
 out="${1:?usage: site/package-docs.sh <out-dir>}"
 mkdir -p "$out"
 
-# Warm the toolchain once, serially, before the parallel section. In a fresh
-# checkout bin/dawn first fetches the pinned seed into .dawn/seeds and rebuilds
-# build/dawn-selfhost.jar. Four launchers starting together all see "no jar",
-# all fill the same cache (one reads seed.jar.tmp while another is still
-# writing it: "SHA-256 input is not a regular non-symbolic-link file", "cannot
-# resolve bootstrap seed") and the losers leave an empty <pkg>.json behind. The
-# xargs status and the check below do catch that, so it was a flaky failure and
-# not a silent bad document; the warm-up is what stops it happening.
+# Warm the toolchain once, serially, before the parallel section. The launcher
+# itself is safe to start concurrently on a cold checkout (the seed cache and the
+# rebuild are lock-serialised in bin/dawn and scripts/seedjar.sh), but without
+# this the four launchers below would all sit behind that one lock and the first
+# `dawn doc` would absorb the whole toolchain build. Kept as a latency choice and
+# a second line of defence, not as the fix: it used to be the only thing keeping
+# four racing launchers from leaving an empty <pkg>.json behind.
 ./bin/dawn --version > /dev/null
 for pkg in packages/*/; do
   pkg="${pkg%/}"

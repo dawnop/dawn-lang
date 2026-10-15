@@ -31,6 +31,10 @@ make_root() {
     "$target/.fake/java-home/bin" "$target/.fake/seed-std"
   cp "$launcher" "$target/bin/dawn"
   cp "$fixtures/seedjar.sh" "$target/scripts/seedjar.sh"
+  # the fixture stubs the seed resolver but not the lock the launcher takes
+  # around a rebuild: borrow the real functions so they cannot drift
+  sed -n '/^seed_lock_acquire() {/,/^}/p;/^seed_lock_release() {/,/^}/p' \
+    "$repo/scripts/seedjar.sh" >> "$target/scripts/seedjar.sh"
   cp "$fixtures/fake-java.sh" "$target/.fake/java-home/bin/java"
   cp "$fixtures/source-inputs.manifest" "$target/.fake/manifest.pre"
   grep -v 'packages/transitive' "$fixtures/source-inputs.manifest" \
@@ -76,8 +80,8 @@ invoke() {
     if [[ -n ${TEST_PRINT_STAMP:-} ]]; then
       export DAWN_PRINT_STAMP=1
     fi
-    if [[ -n ${TEST_BUILD_BARRIER:-} ]]; then
-      export FAKE_BUILD_BARRIER=$TEST_BUILD_BARRIER
+    if [[ -n ${TEST_BUILD_DELAY:-} ]]; then
+      export FAKE_BUILD_DELAY=$TEST_BUILD_DELAY
     fi
     if [[ -n ${TEST_MUTATE_SOURCE:-} ]]; then
       export FAKE_MUTATE_SOURCE_ON_FINAL=$TEST_MUTATE_SOURCE
@@ -502,13 +506,17 @@ else
   pass "jar-before-marker crash is detected and recovered"
 fi
 
+# Two launchers on a cold root while the first is still building. The build
+# lock makes the second wait, re-validate and find the first one's generation,
+# so there is exactly one two-stage build (before the lock there were two, in
+# private staging directories, each racing to promote). The delay keeps the
+# first builder inside the build long enough for the second to reach the lock.
 run_concurrent() {
-  local target=$1 log=$2 barrier=$1/.fake/barrier
-  rm -rf "$barrier"
+  local target=$1 log=$2
   : > "$log"
-  TEST_BUILD_BARRIER=$barrier invoke "$target" "$log" --version > "$work/concurrent-1.out" 2> "$work/concurrent-1.err" &
+  TEST_BUILD_DELAY=1 invoke "$target" "$log" --version > "$work/concurrent-1.out" 2> "$work/concurrent-1.err" &
   local first=$!
-  TEST_BUILD_BARRIER=$barrier invoke "$target" "$log" --version > "$work/concurrent-2.out" 2> "$work/concurrent-2.err" &
+  TEST_BUILD_DELAY=1 invoke "$target" "$log" --version > "$work/concurrent-2.out" 2> "$work/concurrent-2.err" &
   local second=$!
   local first_status=0 second_status=0
   wait "$first" || first_status=$?
@@ -519,16 +527,12 @@ run_concurrent() {
 concurrent=$(make_root concurrent)
 concurrent_log=$work/concurrent.java.log
 if ! run_concurrent "$concurrent" "$concurrent_log"; then
-  bad "two synchronized builders did not converge"
+  bad "two concurrent cold launchers did not both succeed"
+elif [[ $(seed_builds "$concurrent_log") -ne 1 ]] || ! valid_stamp "$concurrent" ||
+    [[ -e $concurrent/build/.dawn-selfhost.lock ]]; then
+  bad "concurrent cold launchers built more than once or left the lock or an invalid generation"
 else
-  awk -F '\t' '$1 == "seed" && $2 == "build" { print $3 }' "$concurrent_log" | \
-    sed 's#/[^/]*$##' | LC_ALL=C sort -u > "$work/concurrent.transactions"
-  if [[ $(wc -l < "$work/concurrent.transactions" | tr -d '[:space:]') -ne 2 ]] ||
-      ! valid_stamp "$concurrent"; then
-    bad "concurrent builders shared staging or left an invalid generation"
-  else
-    pass "concurrent builders use unique staging and converge"
-  fi
+  pass "concurrent cold launchers serialize on the build lock and build once"
 fi
 
 make_rm_swap_path() {
