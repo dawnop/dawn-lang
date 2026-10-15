@@ -354,6 +354,13 @@ name: gates
 # main runs of 10-04 .. 10-08) found native-diff-2 (573s), contracts-1 (489s)
 # and contracts-2 (629s) over their claims, and each was restated to its
 # worst plus a tenth (+240s).
+# On 2026-10-15 it went up to 20,258s: the nightly audit of issue #274 (run
+# 38712561279, replayed locally over the seven days to 10-15) found
+# classfile-never-mutants, incremental-memo-1, contracts-2 and
+# prev-diff-native under runs of their current steps, and each was restated
+# to its worst plus one deviation, rounded up to 5s, with contracts-2 held at
+# the 950s pole (+428s). builtin-type-3-3 (989s), incremental-memo-2 (997s)
+# and dependency-heap-contract (184s) were left as outliers.
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -377,7 +384,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 19830s (the most this file's `3x` claims may add up to)
+# push-total: 20258s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1480,8 +1487,12 @@ jobs:
     # whose steps digest is this job's (gate-observations --since
     # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
     # 5s, 405s (626s before), and the timeout to 3x that.
-    # budget: 3x 405s worst observed plus a tenth (run 36670880544)
-    timeout-minutes: 21
+    # 2026-10-15, issue #274: 410s worst (run 38555664213) over 89 runs of
+    # this job's steps in the seven days to 10-15, one deviation 52s. Restated
+    # to worst plus the deviation, rounded up to 5s, 465s (405s before), and
+    # the timeout to 3x that.
+    # budget: 3x 465s worst observed plus one deviation (run 38555664213)
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -1964,8 +1975,12 @@ jobs:
     # note above incremental-memo-1). Claim from the last 15 successful push
     # runs of ci.yml: the sum of each step's worst time, module-memo shard 0 (397s) and shard 1 (294s),
     # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
-    # budget: 3x 820s sum of per-step worst observed plus a tenth
-    timeout-minutes: 41
+    # 2026-10-15, issue #274: 824s worst (run 38560439143) over 84 runs of this
+    # job's steps in the seven days to 10-15, one deviation 104s. Restated to
+    # worst plus the deviation, rounded up to 5s, 930s (820s before), and the
+    # timeout to 3x that.
+    # budget: 3x 930s worst observed plus one deviation (run 38560439143)
+    timeout-minutes: 47
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2344,8 +2359,15 @@ jobs:
     # 67s wall, 40s user + 9s system, at load average 4 to 7 (16 runtime
     # mutants in four builds each, plus the emitter mutant), so the claim goes
     # from 745s to 815s and the timeout to 41 minutes.
-    # budget: 3x 815s worst observed plus a tenth (run 37765371280), the reuse contract's planning 50s and the immediates contract's 70s
-    timeout-minutes: 41
+    # 2026-10-15, issue #274: 934s worst (run 38622191193) over 42 runs of this
+    # job's steps in the seven days to 10-15, one deviation 127s; the last six
+    # runs of 10-14 and 10-15 sit at 906s to 934s. Worst plus the deviation
+    # (1061s) is over the 950s run pole, which the checker refuses, so the claim
+    # stops at the pole (815s before), 16s over the worst run, and the timeout is
+    # 3x that. The job is at the pole: its next growth needs a split, not a
+    # restatement.
+    # budget: 3x 950s worst observed (run 38622191193), held at the run pole
+    timeout-minutes: 48
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -3442,8 +3464,17 @@ jobs:
     # whose `dawnc run` programs now inline too, 167.5s/171.9s without and
     # 167.8s with, no change beyond noise. Planning value: 645 + 17 = 662s,
     # restated from the first observations. The push total moves by 17s.
-    # budget: 3x 662s planning value (585s worst observed, 60s for std-prune-diff, 17s for inline RC)
-    timeout-minutes: 34
+    # 2026-10-15, issue #274: 685s worst (run 38634588917) over 51 runs of this
+    # job's steps in the seven days to 10-15, one deviation 98s. Restated to
+    # worst plus the deviation, rounded up to 5s, 785s (662s before), and the
+    # timeout to 3x that. The runs are bimodal (about 480s and about 630s), which
+    # is what inflates the deviation. The step that moved the job is
+    # std-prune-diff (steps digest change at c0c0c7b3, 10-10T22:53Z), not the
+    # inline reference counting of c2b6aa23: the 682s run (38097489191) is 10
+    # hours older than it, and the 600s-and-over runs have a median of 607s
+    # before it and 634s after (+27s, against the +17s it measured).
+    # budget: 3x 785s worst observed plus one deviation (run 38634588917)
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
