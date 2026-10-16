@@ -39,7 +39,7 @@ use front/ast.{
   Decl, DFn, DImpl, DTrait, DTest, FnDecl, TraitMethod, TypeRef, TNamed, TQual, EUnit, VisPub
 }
 use jvm/codegen.{
-  class_bytes, class_bytes_from, MethodSite, no_sites,
+  class_bytes, class_bytes_from, check_arg_slots, MethodSite, no_sites,
   desc_of, method_desc, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
   is_bottom, load_slot, hash_of, dict_class, gen_adt, parameterised_scaffold,
   dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name, impl_symbol, wide_ctor
@@ -614,6 +614,10 @@ fn impl_static_name(trait_name: String, subject: String, m: String) -> String =
 
 fn default_method_name(trait_name: String, m: String) -> String =
   "dawn\$default\$" ++ trait_name ++ "\$" ++ m
+
+## The site-table key of a trait declaration itself, for the one thing emitted
+## under no method name of its own: the interface its methods are declared on.
+fn trait_site_key(trait_name: String) -> String = "dawn\$trait\$" ++ trait_name
 
 fn test_method_name(idx: Int) -> String = "dawn\$test\$${to_string(idx)}"
 
@@ -1472,6 +1476,32 @@ fn gen_fn(
   g0
 }
 
+## Refuse a function, or a body lifted out of it, whose descriptor needs more
+## argument slots than a JVM method can take. Asks `gen_fn`'s own question
+## (`kept`) and reads the descriptor it is about to write under, so the check
+## and the class agree by construction. Runs before the body is generated: the
+## error is the same, but nothing is emitted for a method that cannot load.
+fn check_fn_slots(
+  gx: GenCtx,
+  g: Gen,
+  src: String,
+  sites: Map[String, MethodSite],
+  cf: CFun,
+  lifts: List[CFun],
+  name: String,
+  desc: String
+) -> Unit !Fs !Exit !Console !io = {
+  if kept(gx, cf) {
+    check_arg_slots(gx.class_name, "`" ++ cf.name ++ "`", name, desc, false, src, sites)
+  }
+  for lf in lifts {
+    if kept(gx, lf) {
+      check_arg_slots(gx.class_name, "a closure in `" ++ cf.name ++ "`", lf.name,
+        lifted_desc(gx, g, lf.name), false, src, sites)
+    }
+  }
+}
+
 ## Is this body one the emitted class has to carry? Everything is, unless a
 ## reachability walk said otherwise (GenCtx.live).
 fn kept(gx: GenCtx, f: CFun) -> Bool =
@@ -1803,7 +1833,8 @@ fn decl_sites(src: String, decls: List[Decl]) -> Map[String, MethodSite] = {
           None -> ()
         }
       }
-      DTrait(trait_name, _tp, _tplo, _tphi, methods, _assoc, _effa, _pub, _lo, _hi, _nlo, _nhi) -> {
+      DTrait(trait_name, _tp, _tplo, _tphi, methods, _assoc, _effa, _pub, _lo, _hi, nlo, nhi) -> {
+        out = map.insert(out, trait_site_key(trait_name), site_at(src, nlo, nhi))
         for m in methods {
           match m.body {
             Some(_) -> {
@@ -2077,6 +2108,7 @@ fn emit_module_with(
   mapping: Bool
 ) -> (List[(String, Bytes)], List[JRow], List[JFn]) !Fs !Exit !Console !io = {
   var out: List[(String, Bytes)] = []
+  var sites = decl_sites(src, decls)
   for aid in own_adt_ids {
     let a = adt_of(adts, aid)
     # Effect records have an unspellable compiler-reserved name. Ordinary
@@ -2094,6 +2126,11 @@ fn emit_module_with(
   }
   for tid in own_trait_ids {
     let tr = trait_of(traits, tid)
+    for entry in tr.methods {
+      let (mn, ms) = entry
+      check_arg_slots(class_name, "`" ++ tr.name ++ "." ++ mn ++ "`", trait_site_key(tr.name),
+        trait_iface_desc(adts, ms.sig), true, src, sites)
+    }
     out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
   }
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
@@ -2149,7 +2186,6 @@ fn emit_module_with(
     let (_cf, lifts) = pr
     g = note_lifts(gx, g, lifts)
   }
-  var sites = decl_sites(src, decls)
   var has_main = false
   var declared: List[String] = []
   for f in tm.fns { declared = declared ++ [f.name] }
@@ -2170,6 +2206,7 @@ fn emit_module_with(
         let mname = impl_method_name(gx, gx.class_name, tr, subject, f.name)
         sites = alias_site(sites, impl_static_name(tr.name, subject_name(gx.adts, subject), f.name), mname)
         sites = note_lift_sites(sites, mname, lifts)
+        check_fn_slots(gx, g, src, sites, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
         g = gen_fn(gx, g, cw, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
       }
       None ->
@@ -2178,6 +2215,7 @@ fn emit_module_with(
             let tr = trait_of(traits, tid)
             let mname = default_method_name(tr.name, f.name)
             sites = note_lift_sites(sites, mname, lifts)
+            check_fn_slots(gx, g, src, sites, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
             g = gen_fn(gx, g, cw, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
           }
           None -> {
@@ -2185,6 +2223,7 @@ fn emit_module_with(
             # elsewhere is an ordinary function (spec §10.5)
             if f.name == "main" && kept(gx, cf) && gx.class_name == gx.args_owner { has_main = true }
             sites = note_lift_sites(sites, f.name, lifts)
+            check_fn_slots(gx, g, src, sites, cf, lifts, f.name, fn_desc_with_dicts(gx, f.sig))
             g = gen_fn(gx, g, cw, cf, lifts, f.name, fn_desc_with_dicts(gx, f.sig))
           }
         }
@@ -2195,6 +2234,7 @@ fn emit_module_with(
   for pr in lm.tests {
     let (cf, lifts) = pr
     sites = note_lift_sites(sites, test_method_name(ti), lifts)
+    check_fn_slots(gx, g, src, sites, cf, lifts, test_method_name(ti), "()${desc_of(gx.adts, TyUnit)}")
     g = gen_test(gx, g, cw, cf, lifts, ti)
     g = drain_lambdas(g, cw)
     ti = ti + 1
@@ -2218,6 +2258,11 @@ fn emit_module_with(
   # rather than as they are met, because each is a whole class file and the
   # module's own writer is open until the line above.
   for b in g.closures {
+    # the constructor takes the captures and is an instance method
+    if len(b.cap_tys) > 0 {
+      check_arg_slots(class_name, "the constructor of closure `" ++ b.target ++ "`", b.target,
+        captures_ctor_desc(adts, b.cap_tys), true, src, sites)
+    }
     out = out ++ [gen_closure_class(gx, supers, g, b)]
   }
   for s in g.sam_classes {
@@ -2515,10 +2560,16 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
     let (g2, _) = gen_cexpr(gx, g1, c, false)
     g1 = g2
   }
-  var caps_desc = ""
-  for ct in cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
-  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ caps_desc ++ ")V", false)
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", captures_ctor_desc(gx.adts, cap_tys), false)
   g1
+}
+
+## The constructor of a closure class: one parameter per capture. Spelled once
+## because the `new` site, the class that defines it and the slot check all read it.
+fn captures_ctor_desc(adts: Adts, cap_tys: List[Ty]) -> String = {
+  var caps_desc = ""
+  for ct in cap_tys { caps_desc = caps_desc ++ desc_of(adts, ct) }
+  "(" ++ caps_desc ++ ")V"
 }
 
 ## One closure class: the captures in fields, and an erased `apply` that
@@ -2530,8 +2581,6 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
 fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !Fs !Exit !Console !io = {
   let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
-  var caps_desc = ""
-  for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
   if len(b.cap_tys) == 0 {
     singleton_scaffold(cw, b.cls, b.iface)
   } else {
@@ -2541,7 +2590,7 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
       i = i + 1
     }
     let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>",
-      "(" ++ caps_desc ++ ")V").expect("mv")
+      captures_ctor_desc(gx.adts, b.cap_tys)).expect("mv")
     init.visitCode()
     init.visitVarInsn(OP_ALOAD, 0)
     init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)

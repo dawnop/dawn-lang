@@ -386,6 +386,105 @@ fn flat_text(head: String, path: String, hint: String) -> String = {
   out ++ "  = hint: " ++ hint ++ "\n"
 }
 
+## The most argument slots one JVM method can take, receiver included
+## (JVMS 4.3.3). A long and a double take two each, everything else one.
+pub const JVM_SLOT_LIMIT: Int = 255
+
+## How many argument slots a method descriptor's parameter list takes.
+pub fn desc_arg_slots(desc: String) -> Int = {
+  let params = match str.index_of(desc, ")") {
+    Some(i) -> str.take(desc, i)
+    None -> desc
+  }
+  var n = 0
+  var in_class = false
+  var in_array = false
+  for c in str.chars(params) {
+    if in_class {
+      if c == ";" { in_class = false }
+    } else if c == "(" {
+      ()
+    } else if c == "[" {
+      in_array = true
+    } else if c == "L" {
+      in_class = true
+      n = n + 1
+      in_array = false
+    } else if in_array {
+      # an array of anything is one reference, whatever its element
+      n = n + 1
+      in_array = false
+    } else if c == "J" || c == "D" {
+      n = n + 2
+    } else {
+      n = n + 1
+    }
+  }
+  n
+}
+
+## Refuse a method the class file format cannot hold: ASM writes any
+## descriptor, and the JVM then rejects the whole class at load time with
+## `ClassFormatError: Too many arguments in method signature`, long after
+## `dawn build` printed `wrote ...jar`. The checker cannot see this limit
+## because the final shape of a method is only known here: hidden dictionary
+## and evidence parameters, a closure's captures and a receiver all count, and
+## an Int or Float counts twice.
+##
+## `descriptor` is the one the method is written under, so this reads the same
+## string the class will hold. `shown` is how the message names the method;
+## `key` is the name the site table knows it by. Exits like `class_bytes_from`:
+## the input was accepted by every earlier phase and the limit belongs to the
+## target.
+pub fn check_arg_slots(
+  cls: String,
+  shown: String,
+  key: String,
+  descriptor: String,
+  receiver: Bool,
+  src: String,
+  sites: Map[String, MethodSite]
+) -> Unit !Fs !Exit !Console !io = {
+  let n = desc_arg_slots(descriptor) + (if receiver { 1 } else { 0 })
+  if n <= JVM_SLOT_LIMIT { return () }
+  let head = shown ++ " takes " ++ to_string(n) ++ " JVM argument slots, but a method can " ++
+    "take at most " ++ to_string(JVM_SLOT_LIMIT)
+  let (path, lo, hi, lifted) = match map.get(sites, key) {
+    Some(st) -> (st.path, st.nlo, st.nhi, st.lifted)
+    None -> (src, 0, 0, false)
+  }
+  let hint = slot_hint(lifted)
+  let located = lo > 0 || hi > 0
+  let text = match io.read_file(path) {
+    Ok(t) -> if located { render(path, t, mk_diag(head, lo, hi, hint)) } else { flat_text(head, path, hint) }
+    Err(_) -> flat_text(head, path, hint)
+  }
+  console_eprint(text)
+  let _ = io.exit(1)
+  panic("io.exit returned")
+}
+
+fn slot_hint(lifted: Bool) -> String = {
+  let counting = "an Int or Float takes two slots, and a receiver, a type-class dictionary and an " ++
+    "effect evidence record take one each"
+  if lifted {
+    "this is a closure lifted out of the declaration marked here, and the variables it captures " ++
+      "are parameters of it (" ++ counting ++ "); capture fewer variables, or group them in a record"
+  } else {
+    counting ++ "; group parameters in a record"
+  }
+}
+
+test "argument slots are counted from the descriptor" {
+  assert desc_arg_slots("()V") == 0
+  assert desc_arg_slots("(JD)V") == 4
+  assert desc_arg_slots("(ZLjava/lang/String;J)Ljava/lang/Object;") == 4
+  # an array is one reference whatever its element, and its element's width
+  # does not leak out: a `long[]` is not a long
+  assert desc_arg_slots("([J[[DJ[Ljava/lang/Object;)V") == 5
+  assert desc_arg_slots("(Ldawn/rt/Tuple2;I)J") == 2
+}
+
 test "a size failure is placed at the declaration it came from" {
   # ASM names the class and the method; the class is this class, so what is
   # left is the method name, and that is what the table is keyed by

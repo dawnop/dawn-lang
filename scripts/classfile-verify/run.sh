@@ -473,9 +473,50 @@ scripts/constpool-scan.py "$work/emit"
 
 }
 
+# A method that needs more than 255 argument slots is a class the JVM will not
+# load, and `dawn build` used to print `wrote ...jar` for it. Each refused case
+# is the 256-slot twin of an accepted 255-slot one (slot_cases.py), so the
+# refusal is checked from both sides: it fires where it should, and nowhere
+# near it. A refused build must fail, write no jar, and point at the line of the
+# declaration it came from.
+run_slot_limit() {
+  local cases="$work/slot-cases"
+  python3 scripts/classfile-verify/slot_cases.py "$cases"
+  ./bin/dawn run "$cases/accept.dawn" > "$cases/accept.out" 2> "$cases/accept.err" || {
+    cat "$cases/accept.err" >&2
+    echo "FAIL: a method at exactly 255 argument slots must still compile and run" >&2
+    exit 1
+  }
+  if ! cmp -s "$cases/accept.out" "$cases/accept.expect"; then
+    diff "$cases/accept.expect" "$cases/accept.out" >&2 || true
+    echo "FAIL: the 255-slot programs printed something else" >&2
+    exit 1
+  fi
+  local name line
+  while read -r name line; do
+    local src="$cases/refused/$name.dawn" jar="$cases/refused/$name.jar"
+    if ./bin/dawn build "$src" -o "$jar" > "$cases/$name.out" 2> "$cases/$name.err"; then
+      echo "FAIL: slot case $name (256 slots) built a jar" >&2
+      exit 1
+    fi
+    if [ -e "$jar" ]; then
+      echo "FAIL: slot case $name was refused but left a jar behind" >&2
+      exit 1
+    fi
+    if ! grep -q 'JVM argument slots, but a method can take at most 255' "$cases/$name.err" ||
+        ! grep -Eq -- "--> .*$name\\.dawn:$line:" "$cases/$name.err"; then
+      cat "$cases/$name.err" >&2
+      echo "FAIL: slot case $name was not refused with a message at line $line" >&2
+      exit 1
+    fi
+  done < "$cases/refused.txt"
+  echo "OK: the JVM argument-slot limit -- 255 slots build and run, 256 are refused at their declaration"
+}
+
 if [ "$mode" != verify ]; then
   run_never_mutants
 fi
 if [ "$mode" != never ]; then
   run_corpus_checks
+  run_slot_limit
 fi
