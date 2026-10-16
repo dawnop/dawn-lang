@@ -3683,7 +3683,14 @@ uint64_t dawn_array_with_copied = 0;
  * version whose slots these are too. */
 dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) {
   if (i < 0 || i >= (int64_t)a->len) {
-    dawn_array_bounds_panic(i, (int64_t)a->len);
+    /* Both arguments are owned (DAWN_CONSUMES), and a panic is a failure
+     * `catch_panic` can resume from: the caller's frame no longer holds them,
+     * so they are released here or nobody does. The length is read first,
+     * since the drop may free the array. */
+    int64_t len = (int64_t)a->len;
+    dawn_drop(a);
+    dawn_drop(x);
+    dawn_array_bounds_panic(i, len);
   }
   if (!dawn_rc_leak && dawn_is_unique(a) && dawn_is_unique(a->buf)) {
     dawn_array_with_inplace++;
