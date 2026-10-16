@@ -200,8 +200,10 @@ list here, because a divergence is a red build:
 The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1). Its
 scope is the programs both backends can compile: the C backend refuses `use java`,
 so a program with Java interop in it has one answer rather than two and is outside
-the comparison, while every entry under `scripts/spike-native/` is inside that
-intersection by construction ([The toolchain](#the-toolchain)).
+the comparison. Every entry under `scripts/spike-native/` is inside that intersection
+by construction, except the few marked `.jvm-only`, whose subject is the Java
+boundary itself: for those the harness checks that the C backend rejects them
+instead ([The toolchain](#the-toolchain)).
 
 The same idea reaches the GPU. A kernel written for the **cuTile device backend** is
 compared against a handwritten host reference on real hardware by
@@ -246,14 +248,16 @@ language carries its own:
 
 Single-parameter, nominal typeclasses with dictionary passing. Conditional impls
 (`impl[T: Eq] Eq[List[T]]`) and associated types (`type Item`, with `C.Item`
-projections reduced at instantiation) are both in. Five of the seven built-in traits
-carry syntax on their back: `Eq`→`==`, `Ord`→`<`, `Show`→`${...}`, `Iter`→`for..in`,
-`Index`→`[]` — write an impl for your type and the syntax works. There is no
+projections reduced at instantiation) are both in. Many of the prelude traits carry
+syntax on their back: `Eq`→`==`, `Ord`→`<`, `Show`→`${...}`, `Iter`→`for..in`,
+`Index`→`[]`, and `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`→`+ - * / %` and unary `-` —
+write an impl for your type and the syntax works. (`dawn doc --stdlib` prints the
+full list; this page does not count it.) There is no
 monomorphization: **a call site at a concrete type does not go through a dictionary,
 it is a direct static call**; dictionaries appear only at generic boundaries.
 
 `Map`/`Set` are 32-way HAMTs and the persistent `List` is a pvec, all written in pure
-Dawn under `std/`. The only collection primitives a backend owes are five `Array`
+Dawn under `std/`. The only collection primitives a backend owes are a handful of `Array`
 operations and a `popcount` — so a new backend gets every container for free.
 ([docs/spec.md](docs/spec.md) §3.5, §4.8; [docs/trait.md](docs/trait.md); gates
 `hamt-contract`/`pvec-contract`/`array-contract`.)
@@ -271,8 +275,8 @@ and **an undeclared byte difference is red**. ([docs/bootstrap.md](docs/bootstra
 
 No null, no inheritance, no macros (for compile-time computation write
 `comptime { ... }` and the result is burned into the constant pool), no async, no
-**user-defined** operators (the operator set is fixed; four of them dispatch to your
-types through the traits above), no mutable references. The reasoning is in
+**user-defined** operators (the operator set is fixed; the comparison, indexing,
+iteration and arithmetic operators dispatch to your types through the traits above), no mutable references. The reasoning is in
 [docs/design.md](docs/design.md).
 
 **"No exceptions" needs stating precisely**: Dawn has no `throw`/`catch`, and every

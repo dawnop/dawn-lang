@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ aace2e6e01a84914 -->
+<!-- doc-check: translation-of README.md @ 0a0a172ad41283e1 -->
 
 <p align="center">
   <a href="https://dawn-lang.dawnop.com">
@@ -176,8 +176,9 @@ pub fn main() -> Unit !io = {
   JVM 发的 C == native 自己发的 C == 再发一次的 C。
 
 规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。它的**适用范围**是两个后端都能编的
-那些程序：C 后端拒绝 `use java`，所以带 Java 互操作的程序只有一个答案、不在对拍之内，而
-`scripts/spike-native/` 下的每个语料入口按构造都在这个交集里（[工具链](#工具链)）。
+那些程序：C 后端拒绝 `use java`，所以带 Java 互操作的程序只有一个答案、不在对拍之内。
+`scripts/spike-native/` 下的每个语料入口按构造都在这个交集里，只有少数标了 `.jvm-only` 的除外：
+它们的主题就是 Java 边界本身，对拍脚本改为检查 C 后端会拒绝它们（[工具链](#工具链)）。
 
 同一条思路一直伸到 GPU 上。**cuTile 设备后端**上的 kernel 要在真硬件上与手写的宿主参考实现
 对拍，`scripts/tile-gpu-diff` 跑这件事并把判词追加进台账；台账末行盖不住的 tile 路径改动，
@@ -210,12 +211,14 @@ JVM 上真设备的 launch 一律被拒。
 ### 五、trait 有条件 impl 和关联类型，集合是 Dawn 写的
 
 单参数、名义式的 typeclass，字典传递。条件 impl（`impl[T: Eq] Eq[List[T]]`）与关联类型
-（`type Item`，`C.Item` 投影随实例化归约）都在；七个预置 trait 里有五个背着语法：
-`Eq`→`==`、`Ord`→`<`、`Show`→`${...}`、`Iter`→`for..in`、`Index`→`[]`，用户类型写个 impl 就能用。
+（`type Item`，`C.Item` 投影随实例化归约）都在；不少预置 trait 背着语法：
+`Eq`→`==`、`Ord`→`<`、`Show`→`${...}`、`Iter`→`for..in`、`Index`→`[]`，
+以及 `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg`→`+ - * / %` 与一元 `-`，用户类型写个 impl 就能用。
+（完整清单以 `dawn doc --stdlib` 的输出为准，这里不再数。）
 没有单态化——**具体类型的调用点不走字典，直接静态调用**，字典只在泛型边界出现。
 
 `Map`/`Set` 是 32 路 HAMT、持久 `List` 是 pvec，都在 `std/` 里用纯 Dawn 写。后端要实现的
-集合原语只有 `Array` 的五个操作加一个 `popcount`——所以新后端把全部容器白拿。
+集合原语只有少数几个 `Array` 操作加一个 `popcount`——所以新后端把全部容器白拿。
 （[docs/spec.md](docs/spec.md) §3.5、§4.8；[docs/trait.md](docs/trait.md)；
 门禁 `hamt-contract`/`pvec-contract`/`array-contract`。）
 
@@ -229,7 +232,7 @@ JVM 上真设备的 launch 一律被拒。
 ## 同样重要的是没有什么
 
 没有 null、没有继承、没有宏（要编译期计算就写 `comptime { ... }`，结果烧进常量池）、
-没有 async、没有**用户自定义**运算符（运算符集固定，其中四个经上面那些 trait 分派到你的
+没有 async、没有**用户自定义**运算符（运算符集固定，其中比较、下标、迭代与算术运算符经上面那些 trait 分派到你的
 类型）、没有可变引用。理由见 [docs/design.md](docs/design.md)。
 
 **「没有异常」要说准**：Dawn 没有 `throw`/`catch`，可恢复失败一律走 `Result` + `?`。
