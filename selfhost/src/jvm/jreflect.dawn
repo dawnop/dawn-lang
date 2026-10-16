@@ -585,11 +585,23 @@ fn method_of(jc: JCache, m: Method) -> JMethod !io = {
   }
 }
 
-## Every public method of `fqcn`, bridges and synthetics already dropped
-## (the Kotlin checker filters them at every use site).
+## Every public method of `fqcn`, with the compiler-made duplicates dropped.
+##
+## A bridge is javac's second entry point for a method that already exists, and
+## listing both makes every call ambiguous, so bridges that merely repeat a real
+## method go: the covariant one (same parameters, wider return) and the generic
+## one (`compareTo(Object)` over `compareTo(String)`: the same arity, each real
+## parameter assignable to the bridge's erased one).
+##
+## A *public bridge nothing else stands behind* stays. javac writes one into a
+## public class that inherits a public method from a package-private parent
+## (`StringBuilder.length()` over `AbstractStringBuilder.length()`), and
+## `getMethods` then lists only the bridge: dropping it dropped the API
+## (spec 9.1). Synthetic non-bridge members are always dropped.
 fn methods_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> List[JMethod] !io = {
   let arr = methods_array(jc, loader, fqcn)
-  var out: List[JMethod] = []
+  var real: List[JMethod] = []
+  var bridges: List[JMethod] = []
   let n = Array.getLength(arr)
   var i = 0
   while i < n {
@@ -598,10 +610,40 @@ fn methods_of_with(jc: JCache, loader: ClassLoader, fqcn: String) -> List[JMetho
       Ok(v) -> v
       Err(e) -> panic("jreflect.methods_of: not a Method: ${e.message}")
     }
-    if not m.isBridge() && not m.isSynthetic() { out = out ++ [method_of(jc, m)] }
+    if not m.isSynthetic() && not m.isBridge() {
+      real = real ++ [method_of(jc, m)]
+    } else if m.isBridge() {
+      bridges = bridges ++ [method_of(jc, m)]
+    }
     i = i + 1
   }
+  var out = real
+  var kept: Set[String] = set.empty()
+  for b in bridges {
+    if not set.has(kept, sig_key(b)) && not stood_behind(jc, loader, b, real) {
+      kept = set.insert(kept, sig_key(b))
+      out = out ++ [b]
+    }
+  }
   out
+}
+
+## Does a real (non-bridge) method of the same name cover this bridge: the same
+## arity, and every parameter equal to the bridge's or assignable to it?
+fn stood_behind(jc: JCache, loader: ClassLoader, b: JMethod, real: List[JMethod]) -> Bool !io = {
+  for r in real {
+    if r.name == b.name && len(r.param_cls) == len(b.param_cls) && r.is_static == b.is_static {
+      var covers = true
+      var k = 0
+      for bp in b.param_cls {
+        let rp = r.param_cls[k]
+        if rp != bp && not is_assignable_with(jc, loader, bp, rp) { covers = false }
+        k = k + 1
+      }
+      if covers { return true }
+    }
+  }
+  false
 }
 
 pub fn methods_of(fqcn: String) -> List[JMethod] !io =
@@ -817,6 +859,39 @@ test "methods carry their shapes" {
     }
   }
   assert found
+}
+
+test "a public bridge with no real method behind it is kept" {
+  # javac's accessibility bridge: AbstractStringBuilder is package-private, so
+  # StringBuilder.length() is the only public entry point there is
+  var lengths = 0
+  for m in methods_of("java.lang.StringBuilder") {
+    if m.name == "length" && m.param_cls == [] {
+      lengths = lengths + 1
+      assert m.ret_cls == "int"
+      assert m.decl_cls == "java.lang.StringBuilder"
+    }
+  }
+  assert lengths == 1
+}
+
+test "covariant and generic bridges are still folded into the real method" {
+  # covariant: append(String) is declared to return StringBuilder, and the
+  # AbstractStringBuilder-returning bridge with the same parameters is gone
+  var appends = 0
+  for m in methods_of("java.lang.StringBuilder") {
+    if m.name == "append" && m.param_cls == ["java.lang.String"] {
+      appends = appends + 1
+      assert m.ret_cls == "java.lang.StringBuilder"
+    }
+  }
+  assert appends == 1
+  # generic: String.compareTo(Object) is the erased bridge of compareTo(String)
+  var compares: List[List[String]] = []
+  for m in methods_of("java.lang.String") {
+    if m.name == "compareTo" { compares = compares ++ [m.param_cls] }
+  }
+  assert compares == [["java.lang.String"]]
 }
 
 test "static fields carry their shapes" {
