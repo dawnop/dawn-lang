@@ -29,6 +29,7 @@ ADAPTERS = {
     "core-lint-contract": (".",),
     "c-map": (".",),
     "jvm-map": (".",),
+    "loader-listdir-contract": (".",),
     "core-sites": (".",),
     "ctl-live-contract": ("runtime/c",),
     "imm-contract": ("runtime/c",),

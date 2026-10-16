@@ -425,6 +425,13 @@ class PreflightTests(unittest.TestCase):
                                           "        let child = array_steal(kids, pos) \n")
         self.assert_stale_registry_is_red("map-reuse-contract", "get-hamt-child-again", 0)
 
+    def test_loader_listdir_anchor_drift_is_caught(self):
+        # #759: the two silences the loader used to have, put back one at a time.
+        self.assert_registry_drift_is_red("loader-listdir-contract", "walk-silent",
+                                          "selfhost/src/driver/analyze.dawn",
+                                          "    Err(e) -> { unlisted = [(dir, e.message)] }",
+                                          "    Err(e) -> { unlisted = [(dir, e.message)]  }")
+
     def test_atomic_write_anchor_drift_is_caught(self):
         # #254: these anchors were arguments to run.sh's patch_std helper and
         # two heredocs, checked only when the contract ran. Three subjects:

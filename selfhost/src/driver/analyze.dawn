@@ -78,7 +78,11 @@ pub type LoadResult = { modules: List[LoadedModule], diags: List[LocDiag] }
 ## canonical reverse index used by completion.
 pub type ModuleIndex = {
   project_files: List[String],
-  by_use: Map[String, String]
+  by_use: Map[String, String],
+  # One diagnostic per directory of the project's own source tree that the
+  # walk could not list, so the files in it are missing from `project_files`.
+  # A load adopts these (`load_entries_reusing`); see `walk_tree`.
+  walk_diags: List[LocDiag]
 }
 
 ## Compiler-side source planning: the Java-neutral planner result plus the
@@ -196,39 +200,69 @@ pub fn project_module_path(plan: ProjectPlan, file: String) -> Option[String] !F
 ## project; a tree that wants one names it as a path dependency, which is
 ## resolved on purpose rather than found by walking. A link to a file is still
 ## a file here: nothing about it can loop.
-fn walk_dawn(dir: String) -> List[String] !Fs = walk_sources(dir, false)
+fn walk_dawn(dir: String) -> List[String] !Fs = walk_tree(dir).files
 
 ## The project's source files as the tree holds them now, walked the way
 ## `project_plan` walked them. `plan.modules.project_files` is that walk at
 ## planning time; a language server that outlives a file created or deleted
-## since asks again rather than trust it.
+## since asks again rather than trust it. A directory that cannot be listed
+## contributes nothing here; the diagnostic that says so is the plan's
+## (`walk_diags`), which the server publishes on every load.
 pub fn project_files_now(plan: ProjectPlan) -> List[String] !Fs = walk_dawn(plan.source.source_root)
 
 ## The same walk for `dawn fmt <dir>`, in both drivers (#302). It used to be a
 ## copy in main.dawn and another in nmain.dawn that followed every link, so
 ## `src/loop -> .` sent the formatter down the same exponential tree #297
 ## took out of the loader. One walk keeps the link rule from drifting between
-## the three. The one difference is a directory that cannot be listed: the
-## loader skips it, while the formatter stops with "cannot list", because a
-## `fmt --check` that silently skipped part of the tree would pass it.
-pub fn dawn_files_under(dir: String) -> List[String] !Fs = walk_sources(dir, true)
-
-fn walk_sources(dir: String, strict: Bool) -> List[String] !Fs = {
-  var out: List[String] = []
-  let names = match io.list_dir(dir) {
-    Ok(ns) -> ns
-    Err(e) -> if strict { panic("cannot list " ++ dir ++ ": " ++ e.message) } else { return [] }
+## the three. A directory that cannot be listed stops the formatter with
+## "cannot list": a `fmt --check` that silently skipped part of the tree would
+## pass it. The loader reports the same directories as diagnostics instead
+## (#759), so the two differ only in how they say it, not in whether they do.
+pub fn dawn_files_under(dir: String) -> List[String] !Fs = {
+  let w = walk_tree(dir)
+  if len(w.unlisted) > 0 {
+    let (d, msg) = w.unlisted[0]
+    panic("cannot list " ++ d ++ ": " ++ msg)
   }
-  for n in names {
-    let p = dir ++ "/" ++ n
-    if io.is_dir(p) {
-      if not io.is_symlink(p) { out = out ++ walk_sources(p, strict) }
-    } else if str.ends_with(n, ".dawn") {
-      out = out ++ [p]
+  w.files
+}
+
+## What one walk found: the `.dawn` files, sorted, and every directory it could
+## not list with the host's reason, in walk order. The second list is the
+## point. This walk used to `return []` for such a directory, which is
+## indistinguishable from an empty one, so `check` and `test` passed without
+## having looked at the files there and `doc` left their modules out, while
+## spec §10.5 says a project check covers every module under `src`.
+type Walk = { files: List[String], unlisted: List[(String, String)] }
+
+fn walk_tree(dir: String) -> Walk !Fs = {
+  var files: List[String] = []
+  var unlisted: List[(String, String)] = []
+  match io.list_dir(dir) {
+    Err(e) -> { unlisted = [(dir, e.message)] }
+    Ok(names) -> {
+      for n in names {
+        let p = dir ++ "/" ++ n
+        if io.is_dir(p) {
+          if not io.is_symlink(p) {
+            let sub = walk_tree(p)
+            files = files ++ sub.files
+            unlisted = unlisted ++ sub.unlisted
+          }
+        } else if str.ends_with(n, ".dawn") {
+          files = files ++ [p]
+        }
+      }
     }
   }
-  sort(out)
+  Walk { files: sort(files), unlisted: unlisted }
 }
+
+## The loader's diagnostic for a directory `walk_tree` could not list.
+fn unlisted_diag(d: String, msg: String) -> LocDiag =
+  synthetic(d, "cannot list source directory: " ++ msg,
+    "the modules under it were not loaded, so this project was not checked in " ++
+      "full; make the directory readable or remove it")
 
 fn synthetic(path: String, msg: String, hint: String) -> LocDiag =
   LocDiag { path: path, d: mk_diag(msg, 0, 0, hint) }
@@ -586,7 +620,33 @@ pub(pkg) fn load_entries_reusing(
   entries: List[String],
   over: Map[String, String],
   previous: ParseMemo
-) -> ReusingLoad !Fs !Env !io = load_source_entries(plan.source, entries, over, previous)
+) -> ReusingLoad !Fs !Env !io = {
+  let read = load_source_entries(plan.source, entries, over, previous)
+  let loaded = LoadResult { ..read.loaded, diags: walk_diags_of(plan) ++ read.loaded.diags }
+  ReusingLoad { ..read, loaded: loaded }
+}
+
+## What the plan's walk could not list, for a project directory. A single
+## file names its own closure and never depended on the walk, so a sibling
+## directory it cannot list is none of its business; `dawn check file.dawn`
+## inside a project does not look at the rest of it (spec §10.1).
+fn walk_diags_of(plan: ProjectPlan) -> List[LocDiag] =
+  match plan.source.target {
+    source.ProjectDirectory(_) -> plan.modules.walk_diags
+    source.SourceFile(_) -> []
+  }
+
+## The same diagnostics for the language server, whose plan is always for the
+## file it was opened on. Inside a project with a manifest its workspace is the
+## whole project (`project_seeds` loads every module under `src`), so a
+## directory the walk could not list is modules missing from that workspace,
+## and the server says so rather than present what it has as the whole.
+pub fn workspace_walk_diags(plan: ProjectPlan) -> List[LocDiag] !Fs !Env =
+  if io.exists(canon(plan.source.project) ++ "/dawn.toml") {
+    plan.modules.walk_diags
+  } else {
+    []
+  }
 
 ## The load itself, which needs the captured source plan and nothing of the
 ## module index `project_plan` derives from it.
@@ -689,7 +749,13 @@ fn resolve(
           order = order ++ [mod_path]
           queue = queue ++ [mod_path]
         }
-        Err(_) -> ()
+        # A file that was listed and cannot be read (it vanished after the
+        # plan, or its mode forbids it) is a missing module, not an absent
+        # one: the entries are files the walk or the editor named.
+        Err(e) -> {
+          diags = diags ++ [synthetic(f, "cannot read source file: " ++ e.message,
+            "the module in it was not loaded, so this project was not checked in full")]
+        }
       }
     }
   }
@@ -1343,7 +1409,10 @@ fn index_files(
 ## root reuse the same walk while still receiving each consumer alias prefix.
 pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env = {
   let source_plan = source.source_plan(target)
-  let project_files = walk_dawn(source_plan.source_root)
+  let walked = walk_tree(source_plan.source_root)
+  let project_files = walked.files
+  var walk_diags: List[LocDiag] = []
+  for (d, msg) in walked.unlisted { walk_diags = walk_diags ++ [unlisted_diag(d, msg)] }
   var by_use: Map[String, String] = map.empty()
   by_use = index_files(by_use, source_plan.source_root, "", project_files)
   var dependency_files: Map[String, List[String]] = map.empty()
@@ -1352,16 +1421,24 @@ pub fn project_plan(target: source.SourceTarget) -> ProjectPlan !Fs !Proc !Env =
     let files = match map.get(dependency_files, pkg.root) {
       Some(cached) -> cached
       None -> {
-        let walked = walk_dawn(pkg.root)
-        dependency_files = map.insert(dependency_files, pkg.root, walked)
-        walked
+        # A dependency's own unlistable directories are not reported: only
+        # this index (completion) reads its walk, and a module the program
+        # `use`s is read by name when it is loaded, where a failure is a
+        # diagnostic of its own.
+        let walked_dep = walk_dawn(pkg.root)
+        dependency_files = map.insert(dependency_files, pkg.root, walked_dep)
+        walked_dep
       }
     }
     by_use = index_files(by_use, pkg.root, "${dep_alias}/", files)
   }
   ProjectPlan {
     source: source_plan,
-    modules: ModuleIndex { project_files: project_files, by_use: by_use }
+    modules: ModuleIndex {
+      project_files: project_files,
+      by_use: by_use,
+      walk_diags: walk_diags
+    }
   }
 }
 
@@ -2871,6 +2948,61 @@ test "the source walk visits a link to a directory but does not descend (#297, #
     assert list.sort(map.keys(plan.modules.by_use)) == ["alias", "main", "sub/util"]
     pkgfetch.delete_tree(root)
     assert not io.exists(root)
+  }))
+}
+
+test "a listed file that vanishes before the load is a diagnostic, not a skipped module (#759)" {
+  io.with_fs_real(() => io.with_proc_real(() => {
+    let (root, proj) = linked_tree()
+    let (loaded, _) = envmem.with_env_table(root, [], () => {
+      let plan = project_plan(source.ProjectDirectory(proj))
+      # planned with `sub/util.dawn` in it, loaded without
+      pkgfetch.delete_tree("${proj}/src/sub")
+      load_planned(plan)
+    })
+    var named = false
+    for ld in loaded.diags {
+      if ld.path == "${proj}/src/sub/util.dawn" && str.starts_with(ld.d.msg, "cannot read source file") {
+        named = true
+      }
+    }
+    assert named
+    pkgfetch.delete_tree(root)
+  }))
+}
+
+test "a directory the plan's walk could not list reaches the load as a diagnostic (#759)" {
+  io.with_fs_real(() => io.with_proc_real(() => {
+    let (root, proj) = linked_tree()
+    let (loaded, _) = envmem.with_env_table(root, [], () => {
+      let plan = project_plan(source.ProjectDirectory(proj))
+      let walked = ModuleIndex {
+        ..plan.modules,
+        walk_diags: [unlisted_diag("${proj}/src/hidden", "denied")]
+      }
+      load_planned(ProjectPlan { ..plan, modules: walked })
+    })
+    var named = false
+    for ld in loaded.diags {
+      if ld.path == "${proj}/src/hidden" && str.starts_with(ld.d.msg, "cannot list source directory") {
+        named = true
+      }
+    }
+    assert named
+    # a single file never depended on the walk, so the same plan data is
+    # not held against it
+    let (file_loaded, _) = envmem.with_env_table(root, [], () => {
+      let plan = project_plan(source.SourceFile("${proj}/src/main.dawn"))
+      let walked = ModuleIndex {
+        ..plan.modules,
+        walk_diags: [unlisted_diag("${proj}/src/hidden", "denied")]
+      }
+      load_planned(ProjectPlan { ..plan, modules: walked })
+    })
+    for ld in file_loaded.diags {
+      assert ld.path != "${proj}/src/hidden"
+    }
+    pkgfetch.delete_tree(root)
   }))
 }
 

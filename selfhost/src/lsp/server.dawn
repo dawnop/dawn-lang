@@ -22,7 +22,7 @@ use driver/analyze.{
   Program, ProjectPlan, LocDiag, CheckedMod,
   rendered_diags,
   analyze_standalone, standalone_entry, project_plan,
-  project_module_path, project_files_now,
+  project_module_path, project_files_now, workspace_walk_diags,
   ParseMemo, no_parses, load_entries_reusing, use_candidates
 }
 use compiler_plan/source
@@ -1526,6 +1526,21 @@ fn add_loc_diag(
   out
 }
 
+## The diagnostics for directories the workspace's walk could not list, added to
+## what the program published (#759). They are not the program's: the walk is
+## not part of an analysis, and a keystroke does not repeat it. They are the
+## plan's, so they stand until the workspace is planned again. The server keeps
+## the partial program either way; this is what stops it passing for the whole.
+fn with_walk_diags(
+  st: LspState,
+  ws: Workspace,
+  out0: Map[String, List[Json]]
+) -> Map[String, List[Json]] !Fs !Env = {
+  var out = out0
+  for ld in workspace_walk_diags(ws.plan) { out = add_loc_diag(st, ws.path_by_uri, out, ld) }
+  out
+}
+
 fn diagnostics_of_program(
   st: LspState,
   path_by_uri: Map[String, String],
@@ -1798,7 +1813,7 @@ fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
         analysis_stats: Some(update.stats),
         parses: retained_parses(st, reusing.parses),
         entry_by_uri: entry_by_uri,
-        diag_by_uri: diagnostics_of_program(st, ws0.path_by_uri, prog),
+        diag_by_uri: with_walk_diags(st, ws0, diagnostics_of_program(st, ws0.path_by_uri, prog)),
         # the references program is brought up to date by the next request
         # that reads it, not here: this is the path every keystroke takes
         world: match ws0.world {
