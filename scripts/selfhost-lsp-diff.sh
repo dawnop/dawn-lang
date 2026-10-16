@@ -4,7 +4,7 @@
 # open/change/close, hover, definition, completion and its resolve (std names not yet imported among them), symbols, signature help,
 # constant and comptime values on hover, literals on hover, `##` doc comments
 # on hover and on `use` lines, inlay hints (left-out defaults among them, with their folded values), semantic tokens (full and a range), references (in one file and across files), rename (prepared and applied across files) and document highlights, handler arms' operation names, folded values of closed pure
-# expressions on hover, formatting over a two-module project + a standalone buffer) runs
+# expressions on hover, ranges in a for head, formatting over a two-module project + a standalone buffer) runs
 # against both toolchains and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 #
@@ -140,6 +140,48 @@ pub fn chars() -> List[Char] = ['é', '\n', '\u{1F600}']
 pub fn floats() -> List[Float] = [1.5, 1.1]
 
 pub fn strings() -> List[String] = ["héllo\n", "n = ${MASK}"]
+EOF
+
+# Ranges in a for head (docs/lsp-hover-design.md §R1): the `..` and the gap
+# around it name the loop, a bound keeps its own answer, a count is claimed
+# only when both bounds are known (literals, a signed one, a constant), and a
+# range inside a staged `for` body is still a host loop.
+cat > "$OUT/proj/src/ranges.dawn" <<'EOF'
+const N: Int = 5
+
+type Val = { name: String }
+type Slot = { tag: String }
+type Span = { n: Int }
+
+fn span(n: Int) -> Span = Span { n: n }
+
+impl StagedIter[Span] {
+  type Item = Val
+  effect StagedIter = !io
+  fn staged_for(r: Span, body: fn(Val) -> Unit !io) -> Unit !io = body(Val { name: "i" })
+}
+
+impl StagedVar[Val] {
+  type Cell = Slot
+  effect StagedVar = !io
+  fn var_open(v: Val) -> Slot !io = Slot { tag: v.name }
+  fn var_get(c: Slot) -> Val !io = Val { name: c.tag }
+  fn var_set(c: Slot, v: Val) -> Unit !io = ()
+}
+
+pub fn loops(xs: List[Int]) -> Unit !io = {
+  for a in 1..7 { println("${a}") }
+  for b in 0..len(xs) { println("${b}") }
+  for c in 9..3 { println("${c}") }
+  for d in 2..N { println("${d}") }
+  for e in 4..5 { println("${e}") }
+  for f in -3..3 { println("${f}") }
+  var acc = Val { name: "a" }
+  for v in span(4) {
+    for g in 2..6 { println("${g}") }
+    acc = v
+  }
+}
 EOF
 
 # A std opaque type written in a signature: hover names it, and definition
@@ -638,6 +680,30 @@ for needle, occ, delta in [
 ]:
     req("textDocument/hover", at(lits_uri, lits_text, needle, occ, delta))
 note("textDocument/didClose", tdoc(lits_uri))
+
+# ranges in a for head
+rng_path = f"{out_dir}/proj/src/ranges.dawn"
+rng_uri = "file://" + rng_path
+rng_text = open(rng_path).read()
+note("textDocument/didOpen", {"textDocument": {
+    "uri": rng_uri, "languageId": "dawn", "version": 1, "text": rng_text}})
+for needle, occ, delta in [
+    ("1..7", 1, 1),             # the `..`: the range, with its count
+    ("1..7", 1, 2),
+    ("1..7", 1, 0),             # a bound: an Int, as before
+    ("1..7", 1, 3),
+    ("0..len(xs)", 1, 1),       # a non-constant bound: no count
+    ("0..len(xs)", 1, 4),       # inside the call: the call keeps its answer
+    ("9..3", 1, 1),             # start past the end: no iterations
+    ("2..N", 1, 1),             # a constant bound: counted
+    ("2..N", 1, 3),             # the constant keeps its own answer
+    ("4..5", 1, 1),             # one iteration
+    ("-3..3", 1, 2),            # a signed bound
+    ("2..6", 1, 1),             # inside a staged for's body
+    ("span(4) {", 1, 1),        # a staged head is no range
+]:
+    req("textDocument/hover", at(rng_uri, rng_text, needle, occ, delta))
+note("textDocument/didClose", tdoc(rng_uri))
 
 # a std opaque type: hover, then definition into std's file
 stdt_path = f"{out_dir}/proj/src/stdtype.dawn"

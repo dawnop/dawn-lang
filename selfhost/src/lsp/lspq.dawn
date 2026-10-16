@@ -38,7 +38,7 @@ use check/tast.{
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XUnit,
   TListElem, TLEExpr, TLESpread, TLEIf, TModule, TConst,
-  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XFloat, WitRef, WForward, WConcrete, WApply,
+  XInt, UNeg, XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XFloat, WitRef, WForward, WConcrete, WApply,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   x_lo, x_hi, tex_ty
@@ -55,6 +55,7 @@ use check/tast_positions
 use driver/analyze.{Program, CheckedMod}
 use driver/stdlib.{StdCtx, std_file_of}
 use ir/interp.{CtOut}
+use ir/core.{VInt}
 use front/lexer.{slice_cps}
 use lsp/lspv.{
   value_text, int_literal_text, char_literal_text, float_literal_text, string_literal_text
@@ -2872,6 +2873,67 @@ fn literal_string(parts: List[StrPart]) -> Option[String] = {
   Some(out)
 }
 
+# ---- ranges in a for head (docs/lsp-hover-design.md §R1) ----
+
+## The Int a typed endpoint is known to be at check time: a literal, a signed
+## one, or a constant whose folded value `analyze` already holds (the A1 table,
+## `value_home`). Anything else is `None`, and the range then names no count.
+fn known_int(qc: QCx, t: TExpr) -> Option[Int] =
+  match t {
+    XInt(v, _, _) -> Some(v)
+    XConstRef(owner, cname, _, _, _) ->
+      match value_home(qc, const_owner(qc, owner, cname)) {
+        Some(h) ->
+          match map.get(h.ct.consts, cname) {
+            Some(VInt(n)) -> Some(n)
+            _ -> None
+          }
+        None -> None
+      }
+    XUnary(UNeg, inner, _, _, _) ->
+      match known_int(qc, inner) {
+        Some(n) -> if n > 0 - 9223372036854775807 { Some(0 - n) } else { None }
+        None -> None
+      }
+    _ -> None
+  }
+
+## `a..b` is not an expression (spec §4.7), so no typed node carries its text.
+## It is told from the loop's own bounds: the written source, `Int`, the open
+## end, and, when both bounds are known, how many times the body runs.
+fn range_text(qc: QCx, from: Expr, to: Expr, tfrom: TExpr, tto: TExpr) -> String = {
+  let src = spelling(qc, e_lo(from), e_hi(to))
+  let head = if src == "" || str.contains(src, "\n") { "range" } else { "range " ++ src }
+  let base = head ++ ": Int, end-exclusive"
+  match (known_int(qc, tfrom), known_int(qc, tto)) {
+    (Some(a), Some(b)) -> {
+      let n = if b <= a { 0 } else { b - a }
+      # b - a wrapped: the count does not fit an Int, so none is claimed
+      if n < 0 {
+        base
+      } else if n == 1 {
+        base ++ " (1 iteration)"
+      } else {
+        base ++ " (${n} iterations)"
+      }
+    }
+    _ -> base
+  }
+}
+
+## Over the whole `a..b`, so the `..` and any gap around it answer; each bound
+## is a smaller span and keeps its own answer. Needs the typed loop for the
+## bounds' values.
+fn offer_range(qc: QCx, q: Q, from: Expr, to: Expr, tfrom: TExpr, tto: TExpr) -> Q = {
+  let lo = e_lo(from)
+  let hi = e_hi(to)
+  if live(q, lo, hi) {
+    offer(q, lo, hi, range_text(qc, from, to, tfrom, tto), None, None)
+  } else {
+    q
+  }
+}
+
 # ---- operators (docs/lsp-hover-design.md §O1) ----
 
 fn head_name_of(qc: QCx, t: Ty) -> Option[String] =
@@ -4194,7 +4256,13 @@ fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
           q = hint_pattern_binders(qc, q, tpat)
           q = walk_e(qc, q, from, Some(tfrom))
           match to {
-            Some(e) -> { q = walk_e(qc, q, e, tto) }
+            Some(e) -> {
+              match tto {
+                Some(tt) -> { q = offer_range(qc, q, from, e, tfrom, tt) }
+                None -> ()
+              }
+              q = walk_e(qc, q, e, tto)
+            }
             None -> ()
           }
           q = walk_e(qc, q, body, Some(tbody))
