@@ -48,7 +48,7 @@ use check/tast.{
 use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
-  Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes,
+  Eff, EPure, EIo, EffVar, EUnion, ELabeled, EffAssoc, eff_union, lub_eff, eff_subsumes, ty_eff_vars,
   eff_suffix, eff_base, eff_labels, eff_vars, eff_with_labels, eff_assocs,
   cont_row,
   eff_map_assocs,
@@ -670,15 +670,17 @@ fn sees_through(cx: Cx, owner: String) -> Bool =
 ## assignment with the same declared type (those come here). One judgement, so
 ## the doors cannot answer differently again.
 ##
-## Parameters stay strict equality. Unification recurses there because it is
-## binding inference variables; here there are none to bind, and a function's
-## parameters are the one position where being lenient is unsound.
+## Parameters are contravariant (#757): a function accepting more may stand
+## where one accepting less is wanted, never the reverse. That is what keeps an
+## effectful callback from reaching a parameter that was declared pure; it used
+## to be strict equality here while `unify_into` was covariant, so the two
+## doors disagreed.
 pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
   if t == target || is_errorish(t) || target == TyError { return true }
   match t {
     TyFn(ps, r, e) ->
       match target {
-        TyFn(tps, tr, te) -> ps == tps && assignable(cx, r, tr) && eff_carries(te, e)
+        TyFn(tps, tr, te) -> params_contra(cx, tps, ps) && assignable(cx, r, tr) && eff_carries(te, e)
         _ -> false
       }
     TyOpaque(_, _, ow, _, tgt) ->
@@ -690,6 +692,16 @@ pub(pkg) fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
         _ -> false
       }
   }
+}
+
+fn params_contra(cx: Cx, want: List[Ty], have: List[Ty]) -> Bool = {
+  if len(want) != len(have) { return false }
+  var i = 0
+  for w in want {
+    if not assignable(cx, w, have[i]) { return false }
+    i = i + 1
+  }
+  true
 }
 
 ## Unify branch types (Never and TyError are absorbed); errors mention `what`.
@@ -837,6 +849,24 @@ pub(pkg) fn unify_into(
   actual: Ty,
   m: Map[Int, Ty],
   em: Map[Int, Eff]
+) -> (Map[Int, Ty], Map[Int, Eff], Bool) = unify_dir(cx, declared, actual, m, em, false)
+
+## `unify_into` with the direction explicit. `flip` is true while the walk is
+## inside an odd number of function-parameter positions: there the value flows
+## from the declared side into the actual one, so a function type's effect row
+## is judged the other way round (the actual's row must cover the declared's).
+## Types still unify structurally in both modes; only row containment flips.
+## Before this existed the parameter loop below recursed with the covariant
+## row rule, so `fn(fn() -> Unit) -> Unit` unified with an expected
+## `fn(fn() -> Unit !io) -> Unit` (#757) and a pure function received an
+## effectful callback. See docs/spec.md section 6.2 (effect variance).
+fn unify_dir(
+  cx: Cx,
+  declared: Ty,
+  actual: Ty,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff],
+  flip: Bool
 ) -> (Map[Int, Ty], Map[Int, Eff], Bool) = {
   if is_errorish(actual) { return (m, em, true) }
   # An opaque type IS its target inside the declaring module -- in argument
@@ -853,7 +883,7 @@ pub(pkg) fn unify_into(
         # an `Option[Cursor]`, not an `Option[Int]`. Seeing through a type is
         # not the same as forgetting it
         TyVar(_, _) -> ()
-        _ -> if sees_through(cx, aow) { return unify_into(cx, declared, atgt, m, em) }
+        _ -> if sees_through(cx, aow) { return unify_dir(cx, declared, atgt, m, em, flip) }
       }
     _ -> ()
   }
@@ -875,7 +905,7 @@ pub(pkg) fn unify_into(
             match bound {
               TyOpaque(_, _, ow, _, tgt) ->
                 if sees_through(cx, ow) {
-                  unify_into(cx, tgt, actual, m, em)
+                  unify_dir(cx, tgt, actual, m, em, flip)
                 } else {
                   (m, em, false)
                 }
@@ -890,7 +920,7 @@ pub(pkg) fn unify_into(
       let d2 = reduce_ty_effs(cx, reduce_assoc(cx, subst(declared, m, em)), m)
       match d2 {
         TyAssoc(_, _, _) -> (m, em, d2 == actual)
-        _ -> unify_into(cx, d2, actual, m, em)
+        _ -> unify_dir(cx, d2, actual, m, em, flip)
       }
     }
     TyAdt(aid, dargs) ->
@@ -904,7 +934,7 @@ pub(pkg) fn unify_into(
           for d in dargs {
             match get(aargs, i) {
               Some(a) -> {
-                let (m2, em2, ok2) = unify_into(cx, d, a, m1, em1)
+                let (m2, em2, ok2) = unify_dir(cx, d, a, m1, em1, flip)
                 m1 = m2
                 em1 = em2
                 if not ok2 { ok = false }
@@ -919,26 +949,26 @@ pub(pkg) fn unify_into(
       }
     TyList(d) ->
       match actual {
-        TyList(a) -> unify_into(cx, d, a, m, em)
+        TyList(a) -> unify_dir(cx, d, a, m, em, flip)
         _ -> (m, em, false)
       }
     TyMap(dk, dv) ->
       match actual {
         TyMap(ak, av) -> {
-          let (m1, em1, ok1) = unify_into(cx, dk, ak, m, em)
-          let (m2, em2, ok2) = unify_into(cx, dv, av, m1, em1)
+          let (m1, em1, ok1) = unify_dir(cx, dk, ak, m, em, flip)
+          let (m2, em2, ok2) = unify_dir(cx, dv, av, m1, em1, flip)
           (m2, em2, ok1 && ok2)
         }
         _ -> (m, em, false)
       }
     TySet(d) ->
       match actual {
-        TySet(a) -> unify_into(cx, d, a, m, em)
+        TySet(a) -> unify_dir(cx, d, a, m, em, flip)
         _ -> (m, em, false)
       }
     TyArray(d) ->
       match actual {
-        TyArray(a) -> unify_into(cx, d, a, m, em)
+        TyArray(a) -> unify_dir(cx, d, a, m, em, flip)
         _ -> (m, em, false)
       }
     # `opaque type N[..] = T` is a type constructor, and matching one against
@@ -955,7 +985,7 @@ pub(pkg) fn unify_into(
           var ok = true
           var i = 0
           for d in dargs {
-            let (m2, em2, ok2) = unify_into(cx, d, aargs[i], m1, em1)
+            let (m2, em2, ok2) = unify_dir(cx, d, aargs[i], m1, em1, flip)
             m1 = m2
             em1 = em2
             if not ok2 { ok = false }
@@ -963,7 +993,7 @@ pub(pkg) fn unify_into(
           }
           (m1, em1, ok)
         }
-        _ -> if sees_through(cx, dow) { unify_into(cx, dtgt, actual, m, em) } else { (m, em, false) }
+        _ -> if sees_through(cx, dow) { unify_dir(cx, dtgt, actual, m, em, flip) } else { (m, em, false) }
       }
     TyTuple(delems) ->
       match actual {
@@ -974,7 +1004,7 @@ pub(pkg) fn unify_into(
           var ok = true
           var i = 0
           for d in delems {
-            let (m2, em2, ok2) = unify_into(cx, d, aelems[i], m1, em1)
+            let (m2, em2, ok2) = unify_dir(cx, d, aelems[i], m1, em1, flip)
             m1 = m2
             em1 = em2
             if not ok2 { ok = false }
@@ -993,14 +1023,18 @@ pub(pkg) fn unify_into(
           var ok = true
           var i = 0
           for d in dps {
-            let (m2, em2, ok2) = unify_into(cx, d, aps[i], m1, em1)
+            let (m2, em2, ok2) = unify_dir(cx, d, aps[i], m1, em1, not flip)
             m1 = m2
             em1 = em2
             if not ok2 { ok = false }
             i = i + 1
           }
-          let (m3, em3, ok3) = unify_into(cx, dr, ar, m1, em1)
-          let (em4, ok4) = unify_eff(cx, de, ae, m1, em3)
+          let (m3, em3, ok3) = unify_dir(cx, dr, ar, m1, em1, flip)
+          let (em4, ok4) = if flip {
+            unify_eff_contra(cx, de, ae, m1, em3)
+          } else {
+            unify_eff(cx, de, ae, m1, em3)
+          }
           (m3, em4, ok && ok3 && ok4)
         }
         _ -> (m, em, false)
@@ -1008,6 +1042,26 @@ pub(pkg) fn unify_into(
     _ -> (m, em, declared == actual)
   }
 }
+
+## `unify_eff` for a row in a contravariant position: the declared row flows
+## into the actual one, so the actual must cover it. A declared variable that
+## nothing has bound yet binds to the actual row (the widest the slot allows);
+## one already bound, or any other row, is compared after substitution.
+fn unify_eff_contra(
+  cx: Cx,
+  declared: Eff,
+  actual: Eff,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff]
+) -> (Map[Int, Eff], Bool) =
+  match declared {
+    EffVar(_, id) ->
+      match map.get(em, id) {
+        None -> (map.insert(em, id, actual), true)
+        Some(prev) -> (em, eff_carries(actual, prev))
+      }
+    _ -> (em, eff_carries(actual, reduce_eff(cx, subst_eff(declared, em), m)))
+  }
 
 ## Effect side of unification: pure ⊑ io; declared variables accumulate a lub.
 ##
@@ -10365,7 +10419,49 @@ fn infer_call_args(
     at_slots = put_slot(at_slots, k, Some(at))
     tx_slots = put_slot(tx_slots, k, Some(ax))
   }
-  (cx1, m, em, at_slots, tx_slots)
+  (recheck_effect_args(cx1, start, s, args, pidx, m, em, at_slots), m, em, at_slots, tx_slots)
+}
+
+## Re-ask every argument against the substitution the whole call settled on.
+## Arguments are unified one at a time, and an effect variable met in a
+## parameter position of a parameter type (a contravariant place, #757) binds to
+## the row the argument has at that moment; a later argument may then raise the
+## same variable (`ap(run_pure, loud)` with `g: fn(fn() -> Int !e) -> Int !e`,
+## `f: fn() -> Int !e`) and the earlier verdict goes stale. Only a call that
+## reported nothing so far is re-asked, so no argument is reported twice, and
+## only a parameter mentioning an effect variable can have changed its answer.
+fn recheck_effect_args(
+  cx: Cx,
+  start: Cx,
+  s: Sig,
+  args: List[Expr],
+  pidx: List[Int],
+  m: Map[Int, Ty],
+  em: Map[Int, Eff],
+  at_slots: List[Option[Ty]]
+) -> Cx = {
+  if len(cx.diags) != len(start.diags) { return cx }
+  var cx1 = cx
+  var i = 0
+  for a in args {
+    match at_slots[i] {
+      None -> ()
+      Some(at) -> {
+        let pt = if pidx[i] >= 0 { s.param_tys[pidx[i]] } else { TyError }
+        if len(ty_eff_vars(pt)) > 0 {
+          let want = as_unified(cx1, pt, m, em)
+          let (_, _, ok) = unify_into(cx1, want, at, m, em)
+          if not ok {
+            cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
+                ty_show(cx1.adts, want) ++ ", got " ++ ty_show(cx1.adts, at),
+              e_lo(a), e_hi(a), "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+          }
+        }
+      }
+    }
+    i = i + 1
+  }
+  cx1
 }
 
 ## A literal argument whose parameter still names a type parameter nothing
@@ -17949,4 +18045,93 @@ test "`?` inside a `with` region propagates out of the function" {
   let (cx1, _) = check_module(test_cx(), m, env)
   if len(cx1.diags) > 0 { println("UNEXPECTED: ${cx1.diags[0].msg}") }
   assert len(cx1.diags) == 0
+}
+
+# ---- effect variance (#757) ----
+
+fn variance_prelude() -> String =
+  "fn run_pure(f: fn() -> Int) -> Int = f()\n" ++
+  "fn run_io(f: fn() -> Int !io) -> Int !io = f()\n" ++
+  "fn loud() -> Int !io = 1\n" ++
+  "fn quiet() -> Int = 1\n" ++
+  "fn inv(g: fn(fn() -> Int !io) -> Int !io, f: fn() -> Int !io) -> Int !io = g(f)\n" ++
+  "fn inv_wide(g: fn(fn() -> Int) -> Int !io, f: fn() -> Int) -> Int !io = g(f)\n"
+
+fn variance_diags(body: String) -> Int !io = len(eff_check(variance_prelude() ++ body).diags)
+
+test "an effectful callback cannot reach a pure parameter through a call argument" {
+  # the issue's program, reduced: run_pure takes a pure callback, invoke wants
+  # a function that takes an !io one
+  assert variance_diags("fn t() -> Int !io = inv(run_pure, loud)\n") == 1
+  # neighbour: a function that takes the !io callback is fine
+  assert variance_diags("fn t() -> Int !io = inv(run_io, loud)\n") == 0
+  # neighbour: contravariant widening is allowed, a function that takes the
+  # wider (!io) callback stands where one taking only pure callbacks is wanted
+  assert variance_diags("fn t() -> Int !io = inv_wide(run_io, quiet)\n") == 0
+  # a pure callback into an !io slot is covariant and still fine
+  assert variance_diags("fn t() -> Int !io = inv(run_io, quiet)\n") == 0
+}
+
+test "the same refusal holds at a let, a return and an assignment" {
+  assert variance_diags(
+    "fn t() -> Int !io = {\n  let g: fn(fn() -> Int !io) -> Int !io = run_pure\n  g(loud)\n}\n") == 1
+  assert variance_diags(
+    "fn t() -> Int !io = {\n  let g: fn(fn() -> Int) -> Int !io = run_io\n  g(quiet)\n}\n") == 0
+  assert variance_diags(
+    "fn t() -> fn(fn() -> Int !io) -> Int !io = run_pure\n") == 1
+  assert variance_diags(
+    "fn t() -> fn(fn() -> Int) -> Int !io = run_io\n") == 0
+  assert variance_diags(
+    "fn t() -> Int !io = {\n  var g: fn(fn() -> Int !io) -> Int !io = run_io\n  g = run_pure\n  g(loud)\n}\n") == 1
+  assert variance_diags(
+    "fn t() -> Int !io = {\n  var g: fn(fn() -> Int) -> Int !io = run_pure\n  g = run_io\n  g(quiet)\n}\n") == 0
+}
+
+test "the variance flips again at each level of nesting" {
+  # two levels: the consumer's consumer. The expected h hands its argument a
+  # function that receives a pure callback; the actual one hands over a
+  # function that receives an !io callback, which the caller cannot honour.
+  let two = "fn inv2(h: fn(fn(fn() -> Int) -> Int) -> Int) -> Int = h(run_pure)\n"
+  assert variance_diags(two ++
+      "fn use_io(k: fn(fn() -> Int !io) -> Int) -> Int = 1\n" ++
+      "fn t() -> Int = inv2(use_io)\n") == 1
+  # the neighbour where the inner consumer asks for less
+  assert variance_diags(two ++
+      "fn use_pure(k: fn(fn() -> Int) -> Int) -> Int = 1\n" ++
+      "fn t() -> Int = inv2(use_pure)\n") == 0
+}
+
+test "a callback that returns a callback follows the position it sits in" {
+  let ret = "fn takes_mk(g: fn(fn() -> fn() -> Int) -> Int) -> Int = 1\n" ++
+    "fn takes_mk_io(g: fn(fn() -> fn() -> Int !io) -> Int) -> Int = 1\n" ++
+    "fn want_io(h: fn(fn(fn() -> fn() -> Int !io) -> Int) -> Int) -> Int = 1\n" ++
+    "fn want_pure(h: fn(fn(fn() -> fn() -> Int) -> Int) -> Int) -> Int = 1\n"
+  assert variance_diags(ret ++ "fn t() -> Int = want_io(takes_mk_io)\n") == 0
+  # a consumer of !io-returning thunks is not a consumer of pure-returning ones
+  assert variance_diags(ret ++ "fn t() -> Int = want_pure(takes_mk_io)\n") == 1
+  # the neighbour where the consumer asks for less
+  assert variance_diags(ret ++ "fn t() -> Int = want_io(takes_mk)\n") == 0
+}
+
+test "inferred and generic types obey the same rule" {
+  # an unannotated lambda takes its parameter type from the expected type
+  assert variance_diags("fn t() -> Int !io = inv(f => f(), loud)\n") == 0
+  # an annotated pure parameter does not
+  assert variance_diags("fn t() -> Int !io = inv((f: fn() -> Int) => f(), loud)\n") == 1
+  # a type parameter binds to the first callback it meets
+  assert variance_diags(
+    "fn on[T](g: fn(T) -> Int !io, x: T) -> Int !io = g(x)\nfn t() -> Int !io = on(run_pure, loud)\n") == 1
+  assert variance_diags(
+    "fn on[T](g: fn(T) -> Int !io, x: T) -> Int !io = g(x)\nfn t() -> Int !io = on(run_io, loud)\n") == 0
+}
+
+test "an effect variable still forwards, in either argument order" {
+  let ap = "fn ap(g: fn(fn() -> Int !e) -> Int !e, f: fn() -> Int !e) -> Int !e = g(f)\n" ++
+    "fn ap2(f: fn() -> Int !e, g: fn(fn() -> Int !e) -> Int !e) -> Int !e = g(f)\n"
+  assert variance_diags(ap ++ "fn t() -> Int !io = ap(run_io, loud)\n") == 0
+  assert variance_diags(ap ++ "fn t() -> Int = ap(run_pure, quiet)\n") == 0
+  assert variance_diags(ap ++ "fn t() -> Int !io = ap2(loud, run_io)\n") == 0
+  # the variable settles at !io through f, and run_pure cannot take that
+  assert variance_diags(ap ++ "fn t() -> Int !io = ap(run_pure, loud)\n") == 1
+  assert variance_diags(ap ++ "fn t() -> Int !io = ap2(loud, run_pure)\n") == 1
 }
