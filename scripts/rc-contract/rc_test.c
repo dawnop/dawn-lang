@@ -124,6 +124,48 @@ static void test_array_with(void) {
   dawn_drop(zs);
 }
 
+/* `array_with` consumes both arguments, and that has to hold on the panic
+ * path too: an out-of-bounds index raises, `catch_panic` resumes, and the
+ * references handed in are not in any frame that will release them. The
+ * subject and the element are owned by the test, each lent to the call as a
+ * dup, so after the catch the only count left on either must be the test's
+ * own. A path that raised without dropping leaves both at 2 (and, in the
+ * sanitized run, a leaked array, buffer and element per call). */
+static dawn_array *with_oob_subject;
+static dawn_box *with_oob_elem;
+
+static void *with_out_of_bounds(dawn_clo *f) {
+  (void)f;
+  return dawn_array_with(dawn_dup(with_oob_subject), 99, dawn_dup(with_oob_elem));
+}
+
+static void test_array_with_oob_releases_arguments(void) {
+  dawn_array *xs = dawn_array_new();
+  for (int i = 0; i < 4; i++) {
+    dawn_box *e = dawn_box_int_heap(i);
+    dawn_array *n = dawn_array_push(xs, e);
+    dawn_drop(e);
+    dawn_drop(xs);
+    xs = n;
+  }
+  with_oob_subject = xs;
+  with_oob_elem = dawn_box_int_heap(7);
+  dawn_clo *c = dawn_clo_new((void *)with_out_of_bounds, 0, 0);
+  for (int k = 0; k < 3; k++) {
+    dawn_adt *r = dawn_catch_panic(c, NULL);
+    check(r->tag == DAWN_TAG_ERR, "an out-of-bounds with raises a panic");
+    dawn_drop(r);
+  }
+  check(xs->h.rc == 1, "the array handed to a panicking with is released");
+  check(with_oob_elem->h.rc == 1, "and so is the element");
+  check(((dawn_box *)dawn_array_get(xs, 3))->val.i == 3, "the subject is intact");
+  dawn_drop(c);
+  dawn_drop(with_oob_elem);
+  dawn_drop(xs);
+  with_oob_subject = NULL;
+  with_oob_elem = NULL;
+}
+
 /* `array_steal` borrows the array and answers an owned slot reference. Alone
  * it transfers the slot's own reference out -- slot NULL, the child's count
  * untouched -- and shared it dups, leaving the slot's reference in place so
@@ -1509,6 +1551,7 @@ static const rc_case rc_cases[] = {
     {"mask_skips_scalars", test_mask_skips_scalars, 0},
     {"array", test_array, 0},
     {"array_with", test_array_with, 0},
+    {"array_with_oob_releases_arguments", test_array_with_oob_releases_arguments, 0},
     {"array_steal", test_array_steal, 0},
     {"array_extend", test_array_extend, 0},
     {"array_slice", test_array_slice, 0},
