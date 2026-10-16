@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 23f9096be9acca69 -->
+<!-- doc-check: translation-of docs/spec.md @ a912735fab253ebc -->
 
 # Dawn Language Specification
 
@@ -2344,6 +2344,19 @@ outside effect position, and is refused everywhere inside one (§6.3).
    the row leaves out is an error; a local `fn` cannot introduce a new effect variable (it cannot
    declare type parameters either). Before v0.78.0 a local `fn`'s row could only be `!io` or pure
    (SPC-19).
+9. **A function type's effect row: contravariant at parameter positions, covariant at the return**
+   (#757). `A` may stand where `B` is wanted exactly when each of `A`'s parameter types accepts the
+   corresponding parameter value of `B` (parameters are contravariant), `A`'s return type may stand
+   for `B`'s, and `A`'s row is covered by `B`'s (return and row are covariant). On effects this means a
+   function type nested in a parameter position has its row compared in the opposite direction to the
+   outer one. For example `fn(fn() -> Unit) -> Unit` may not stand for `fn(fn() -> Unit !io) -> Unit`,
+   because callers of the latter will hand over an `!io` callback while the former promises to receive
+   only pure ones; the reverse, `fn(fn() -> Unit !io) -> Unit` for `fn(fn() -> Unit) -> Unit`, is allowed
+   (it accepts more). Each odd level of parameter nesting flips the direction and each even level flips it
+   back; type arguments of containers follow the position they sit in. Assignment, return, call arguments
+   and generic instantiation use the same judgement. Effect variables are unaffected: an unbound variable
+   in a parameter position binds to the argument's row, and a bound one is compared in the direction
+   above.
 
 ### 6.3 Effect polymorphism
 
