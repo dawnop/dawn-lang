@@ -100,7 +100,7 @@ MUTATIONS = {
     ),),
     "omit-impl-bottom": call_bottom(
         """      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, tr.name, subject, method), d, false)"""),
+        impl_method_name(gx, owner, tr, subject, method), d, false)"""),
     "omit-default-bottom": call_bottom(
         """      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
         default_method_name(tr.name, method), d, false)"""),

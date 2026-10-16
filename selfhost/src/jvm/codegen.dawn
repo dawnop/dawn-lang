@@ -225,6 +225,30 @@ test "an impl is named by its head" {
   assert subject_key(TyString) == "String"
 }
 
+test "an impl static is qualified by module when the module is not its class" {
+  let adts = prelude_adts()
+  # declared by the class that holds the impl: the short spelling, unchanged
+  assert impl_symbol(adts, "main", Some("main"), "Render", TyInt, "render") ==
+    "dawn\$impl\$Render\$Int\$render"
+  # the prelude has no owner and stays bare from any class
+  assert impl_symbol(adts, "main", None, "Eq", TyInt, "eq") == "dawn\$impl\$Eq\$Int\$eq"
+  # two traits of one short name from different modules are two statics
+  let a = impl_symbol(adts, "main", Some("a"), "Render", TyInt, "render")
+  let b = impl_symbol(adts, "main", Some("b"), "Render", TyInt, "render")
+  assert a == "dawn\$impl\$a\$Render\$Int\$render"
+  assert a != b
+  # a nested module is flattened with the same `$` the dictionary classes use
+  assert impl_symbol(adts, "main", Some("std/x"), "Render", TyInt, "render") ==
+    "dawn\$impl\$std\$x\$Render\$Int\$render"
+  # and a type another module declared carries that module too
+  let t = TyOpaque(9, "Tag", "c", [], TyInt)
+  let u = TyOpaque(10, "Tag", "d", [], TyInt)
+  assert impl_symbol(adts, "a", Some("a"), "Render", t, "render") !=
+    impl_symbol(adts, "a", Some("a"), "Render", u, "render")
+  assert impl_symbol(adts, "c", Some("a"), "Render", t, "render") ==
+    "dawn\$impl\$a\$Render\$Tag\$render"
+}
+
 test "the ASM interop spike: a class assembles through the shared writer" {
   # the spike just proves Dawn can drive a ClassWriter through the static
   # null adapters + MethodVisitor end to end
@@ -578,9 +602,11 @@ fn gen_hash_code_method(cw: ClassWriter, adts: Adts, sub: String, ci: CtorI) -> 
   ()
 }
 
-## The static an `impl` compiles to (mirrors emit.impl_method_name).
-fn impl_static_name(adts: Adts, trait_name: String, subject: Ty, m: String) -> String =
-  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_name(adts, subject) ++ "\$" ++ m
+## The static an `impl` compiles to, for a prelude trait (`Eq`, `Hash`: no
+## owning module, so nothing to qualify). `here` is the module class that holds
+## the impl, which is where the static lives.
+fn impl_static_name(adts: Adts, here: String, trait_name: String, subject: Ty, m: String) -> String =
+  impl_symbol(adts, here, None, trait_name, subject, m)
 
 ## equals(Object) delegating to `impl Eq`: a non-instance is never equal, so
 ## the type test still runs first and the impl only ever sees its own type.
@@ -601,7 +627,7 @@ fn gen_forwarding_equals(
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, adt_id_of(subject))))
   let d = desc_of(adts, subject)
-  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, "Eq", subject, "eq"),
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, owner, "Eq", subject, "eq"),
     "(" ++ d ++ d ++ ")Z", false)
   m.visitInsn(OP_IRETURN)
   m.visitLabel(no)
@@ -622,7 +648,7 @@ fn gen_forwarding_hash_code(
   let m = Asm.methodOn(cw, ACC_PUBLIC, "hashCode", "()I").expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, "Hash", subject, "hash"),
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, owner, "Hash", subject, "hash"),
     "(" ++ desc_of(adts, subject) ++ ")J", false)
   m.visitInsn(OP_L2I)
   m.visitInsn(OP_IRETURN)
@@ -879,6 +905,52 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     TyOpaque(_, name, _, _, _) -> name
     _ -> panic("invalid impl subject")
   }
+
+## A name as seen from the module class `here`: bare when `here` declares it,
+## otherwise led by its owning module (slash flattened to `$`, a character no
+## source name holds, so the two shapes cannot meet). A type or trait declared
+## nowhere in particular (the prelude) has no owner and stays bare.
+##
+## Relative to `here` and not always qualified because the static an impl
+## compiles to lives in the impl's own class: two names can only collide there,
+## and within one class "declared here" plus "declared in module M" tells every
+## pair apart. It also keeps every symbol of the ordinary case -- a local trait
+## or type -- byte-identical to what it was.
+pub fn owner_qualified(here: String, owner: Option[String], name: String) -> String =
+  match owner {
+    Some(o) -> if o == here { name } else { join(str.split(o, "/"), "\$") ++ "\$" ++ name }
+    None -> name
+  }
+
+## `subject_name`, but a type another module declared carries that module, so
+## `a.Item` and `b.Item` implementing one trait in one class stay two statics.
+pub fn subject_ref(adts: Adts, here: String, t: Ty) -> String =
+  match t {
+    TyAdt(aid, _) -> {
+      let a = adt_of(adts, aid)
+      owner_qualified(here, a.owner, a.name)
+    }
+    TyOpaque(_, name, owner, _, _) -> owner_qualified(here, Some(owner), name)
+    _ -> subject_name(adts, t)
+  }
+
+## THE name of the static an `impl` method compiles to: dawn$impl$<Trait>$<Subject>$<m>,
+## with trait and subject qualified as above. Its definition, its direct calls,
+## the dictionary bridges (which call through a direct call) and the
+## Eq/Hash forwarders in a record's class all spell it through this one
+## function, so none of them can fall behind the others. The site table
+## (emit.decl_sites) reads a declaration's *written* names and so keeps the
+## short form; emit registers the qualified name against it.
+pub fn impl_symbol(
+  adts: Adts,
+  here: String,
+  trait_owner: Option[String],
+  trait_name: String,
+  subject: Ty,
+  m: String
+) -> String =
+  "dawn\$impl\$" ++ owner_qualified(here, trait_owner, trait_name) ++ "\$"
+  ++ subject_ref(adts, here, subject) ++ "\$" ++ m
 
 ## The class of one Core dictionary, named from the key its CDictDef carries.
 ##

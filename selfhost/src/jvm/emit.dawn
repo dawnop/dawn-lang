@@ -42,7 +42,7 @@ use jvm/codegen.{
   class_bytes, class_bytes_from, MethodSite, no_sites,
   desc_of, method_desc, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
   is_bottom, load_slot, hash_of, dict_class, gen_adt, parameterised_scaffold,
-  dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name, wide_ctor
+  dict_arg_field, dict_ctor_desc, EqOverride, singleton_scaffold, subject_name, impl_symbol, wide_ctor
 }
 use jvm/rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, close_mv,
@@ -600,9 +600,11 @@ fn trait_iface_desc(adts: Adts, s: Sig) -> String = {
 
 fn trait_method_desc(gx: GenCtx, s: Sig) -> String = trait_iface_desc(gx.adts, s)
 
-## impl method static name: dawn$impl$<Trait>$<Subject>$<m>.
-fn impl_method_name(gx: GenCtx, trait_name: String, subject: Ty, m: String) -> String =
-  impl_static_name(trait_name, subject_name(gx.adts, subject), m)
+## impl method static name (codegen.impl_symbol). `here` is the module class
+## that holds the impl: this class on the definition side, the callee's owner at
+## a call site.
+fn impl_method_name(gx: GenCtx, here: String, tr: TraitI, subject: Ty, m: String) -> String =
+  impl_symbol(gx.adts, here, tr.owner, tr.name, subject, m)
 
 ## The same, over names rather than types: the site table (`decl_sites`) reads
 ## an impl's subject off the source text, where it is a name already, and has
@@ -1819,6 +1821,19 @@ fn decl_sites(src: String, decls: List[Decl]) -> Map[String, MethodSite] = {
   out
 }
 
+## Register the declaration found under `written` (the names as the source
+## spells them) under `emitted` too, when the two differ: a qualified impl name
+## has no source spelling to be found by.
+fn alias_site(sites: Map[String, MethodSite], written: String, emitted: String) -> Map[String, MethodSite] =
+  if written == emitted {
+    sites
+  } else {
+    match map.get(sites, written) {
+      Some(s) -> map.insert(sites, emitted, s)
+      None -> sites
+    }
+  }
+
 ## Give every body hoisted out of `owner` the declaration `owner` came from.
 ##
 ## A lifted lambda has no declaration of its own -- lowering named it
@@ -2147,7 +2162,8 @@ fn emit_module_with(
       Some(pair) -> {
         let (tid, subject) = pair
         let tr = trait_of(traits, tid)
-        let mname = impl_method_name(gx, tr.name, subject, f.name)
+        let mname = impl_method_name(gx, gx.class_name, tr, subject, f.name)
+        sites = alias_site(sites, impl_static_name(tr.name, subject_name(gx.adts, subject), f.name), mname)
         sites = note_lift_sites(sites, mname, lifts)
         g = gen_fn(gx, g, cw, cf, lifts, mname, fn_desc_with_dicts(gx, f.sig))
       }
@@ -2374,7 +2390,7 @@ fn gen_ccall(
       let d = method_desc(gx.adts, ptys, psig.ret)
       visit_at(g1.mv, at)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(gx, tr.name, subject, method), d, false)
+        impl_method_name(gx, owner, tr, subject, method), d, false)
       finish_call(g1, ty, call_result_of_desc(d))
     }
     CDefault(owner, tid, method) -> {

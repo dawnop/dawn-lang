@@ -1,0 +1,44 @@
+# Two traits that share a short name and two types that share a short name,
+# every pair implemented in this one module. The JVM backend named the static an
+# impl compiles to after the *short* trait and subject names, so both Render
+# impls of Item were `dawn$impl$Render$Item$render` and the class could not be
+# loaded; the native backend names it from ids and never had the problem.
+#
+# Each trait is called once directly and once through a dictionary (a bound
+# generic function), and each same-named subject goes through the same two
+# routes.
+
+use a
+use b
+use c
+use d
+use a.{Render as First}
+use b.{Render as Second}
+
+type Item = { value: Int }
+
+impl First[Item] {
+  fn render(x: Item) -> String = "first ${x.value}"
+}
+
+impl Second[Item] {
+  fn render(x: Item) -> String = "second ${x.value}"
+}
+
+fn via_first[T: First](x: T) -> String = a.render(x)
+
+fn via_second[T: Second](x: T) -> String = b.render(x)
+
+pub fn main() -> Unit !io = {
+  let item = Item { value: 1 }
+  println(a.render(item))
+  println(b.render(item))
+  println(via_first(item))
+  println(via_second(item))
+  let ct = c.make(2)
+  let dt = d.make(3)
+  println(a.render(ct))
+  println(a.render(dt))
+  println(via_first(ct))
+  println(via_first(dt))
+}
