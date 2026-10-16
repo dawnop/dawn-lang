@@ -714,6 +714,14 @@ fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io 
   }
 }
 
+## Is a field of this declared type carried as `Object`? That is the question
+## "does the constructor expect a boxed value here", and the descriptor is the
+## one place that already answers it: a bare type variable, a projection over
+## one, an opaque type whose target is one (`Id[T]`), or a field declared as
+## `java.lang.Object`. Testing for `TyVar` alone missed every case but the first
+## and pushed a raw long where the constructor wanted an Object (VerifyError).
+fn erased_slot(adts: Adts, t: Ty) -> Bool = desc_of(adts, t) == "Ljava/lang/Object;"
+
 ## Emit bytecode that rebuilds a comptime value (boxed = erased position).
 fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit !io = {
   match v {
@@ -774,10 +782,7 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
         if wide { m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "()V", false) }
         var i = 0
         for f in fields {
-          let boxed2 = match ci.fields[i].ty {
-            TyVar(_, _) -> true
-            _ -> false
-          }
+          let boxed2 = erased_slot(gx.adts, ci.fields[i].ty)
           if wide { m.visitInsn(OP_DUP) }
           construct_value(gx, m, f, boxed2)
           if wide {

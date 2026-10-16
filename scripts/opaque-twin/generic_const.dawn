@@ -1,0 +1,56 @@
+# A `const` or `comptime` value is rebuilt in bytecode, and a record field whose
+# declared type is erased to Object (`Id[T]`, a bare `T`, an opaque type over
+# either) must receive a *boxed* value. The decision used to test for a bare
+# type variable only, so an opaque wrapper over one pushed a raw long into a
+# constructor that wanted an Object: `check` said ok and `run` died with a
+# VerifyError in <clinit>. Whether a slot is erased is a question about the
+# representation, and the opaque side of the twin is the only one that asks it
+# through a wrapper, which is why this case lives here.
+#
+# `Plain` is the control: a non-generic primitive field is carried unboxed and
+# must stay that way (boxing it would be the opposite VerifyError).
+#
+# Rendering goes through the target explicitly: an opaque type inherits no
+# `Show` (spec 2.7), so the values are read back with a plain annotation.
+
+opaque type Id[T] = T
+opaque type Outer[T] = Id[T]
+
+type Wrap[T] = { value: Id[T] }
+type Deep[T] = { value: Outer[T], tag: Int }
+type Both[T] = { bare: T, wrapped: Id[T] }
+type Plain = { n: Int, x: Float, b: Bool }
+type Pick[T] = Has(v: Id[T]) | Nothing
+
+const WI: Wrap[Int] = Wrap { value: 42 }
+const WF: Wrap[Float] = Wrap { value: 2.5 }
+const WB: Wrap[Bool] = Wrap { value: true }
+const DEEP: Deep[Int] = Deep { value: 7, tag: 9 }
+const BOTH: Both[Int] = Both { bare: 3, wrapped: 4 }
+const PLAIN: Plain = Plain { n: 5, x: 1.5, b: false }
+const PICK: Pick[Int] = Has(11)
+const NESTED: List[Wrap[Int]] = [Wrap { value: 1 }, Wrap { value: 2 }]
+const CT: Wrap[Int] = comptime { Wrap { value: 40 + 2 } }
+
+pub fn main() -> Unit !io = {
+  let a: Int = WI.value
+  let b: Float = WF.value
+  let c: Bool = WB.value
+  let d: Int = DEEP.value
+  let e1: Int = BOTH.bare
+  let e2: Int = BOTH.wrapped
+  let e = e1 + e2
+  println("${a} ${b} ${c} ${d} ${DEEP.tag} ${e}")
+  println("${PLAIN.n} ${PLAIN.x} ${PLAIN.b}")
+  match PICK {
+    Has(v) -> {
+      let n: Int = v
+      println("${n}")
+    }
+    Nothing -> println("nothing")
+  }
+  let first: Int = NESTED[0].value
+  let second: Int = NESTED[1].value
+  let ct: Int = CT.value
+  println("${first} ${second} ${ct}")
+}
