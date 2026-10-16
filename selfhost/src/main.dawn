@@ -39,6 +39,7 @@ use driver/analyze.{
   std_imports, union_imports
 }
 use driver/clifail.{fail_compile, fail_planner}
+use driver/fmtwrite
 use compiler_plan/source
 use compiler_plan/buildinfo
 use pkg/vendor
@@ -1962,7 +1963,7 @@ fn run_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ##
 ## The lexer refusal is per file: the rest of the batch still formats, and the
 ## diagnostics for every refused file are rendered together at the end.
-fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
+fn run_fmt(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
   var check = false
   var paths: List[String] = []
   for a in rest {
@@ -1996,7 +1997,9 @@ fn run_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
                 console_println(f)
                 unformatted = unformatted + 1
               } else {
-                match io.write_file(f, formatted) {
+                # Atomic: a failed write leaves the original untouched. A symlink
+                # is written through to its target; see driver/fmtwrite.dawn.
+                match fmtwrite.write_formatted(f, formatted) {
                   Ok(_) -> console_println("formatted ${f}")
                   Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
                 }

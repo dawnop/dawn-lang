@@ -443,6 +443,10 @@ class PreflightTests(unittest.TestCase):
         self.assert_registry_drift_is_red("atomic-write-contract", "add-plain-write",
                                           "selfhost/src/pkg/add.dawn", "io.atomic_write_file(",
                                           "io.atomic_write_file (")
+        self.assert_registry_drift_is_red("atomic-write-contract", "fmt-plain-write",
+                                          "selfhost/src/driver/fmtwrite.dawn",
+                                          "    io.atomic_write_file(path, text)",
+                                          "    io.atomic_write_file (path, text)")
         self.assert_stale_registry_is_red("atomic-write-contract", "follow-symlink", 0)
 
     def test_wasm_dom_retained_anchor_drift_is_caught(self):

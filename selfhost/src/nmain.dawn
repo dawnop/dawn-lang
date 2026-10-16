@@ -46,6 +46,7 @@ use driver/analyze.{
   own_module_paths
 }
 use driver/clifail.{fail_compile, fail_planner}
+use driver/fmtwrite
 use check/identity
 use check/tast.{TModule}
 use c/cdriver
@@ -1028,7 +1029,7 @@ fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ## file the lexer cannot read whole) are documented at `main.dawn`'s `run_fmt`;
 ## the two drivers' output is compared byte for byte by
 ## `scripts/native-cli-diff.sh`, so they refuse in the same words.
-fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
+fn cmd_fmt(rest: List[String]) -> Unit !Fs !Env !Exit !Console !io = {
   var check = false
   var paths: List[String] = []
   for a in rest {
@@ -1062,7 +1063,9 @@ fn cmd_fmt(rest: List[String]) -> Unit !Fs !Exit !Console !io = {
                 console_println(f)
                 unformatted = unformatted + 1
               } else {
-                match io.write_file(f, formatted) {
+                # Atomic: a failed write leaves the original untouched. A symlink
+                # is written through to its target; see driver/fmtwrite.dawn.
+                match fmtwrite.write_formatted(f, formatted) {
                   Ok(_) -> console_println("formatted ${f}")
                   Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
                 }

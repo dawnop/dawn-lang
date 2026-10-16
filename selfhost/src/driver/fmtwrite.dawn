@@ -1,0 +1,46 @@
+# How `dawn fmt` puts formatted text back, shared by both CLI drivers.
+#
+# `main` (JVM) and `nmain` (native) used to call `io.write_file` on the source
+# file, which truncates it first. A write that fails partway (disk full, quota,
+# a file size limit) left the original cut off in the middle of a declaration,
+# and the edits that were not yet committed were gone (issue #758). The
+# primitive that does not have that property already existed in `std/io`:
+# `atomic_write_file` stages the new text in the same directory, reads it back,
+# and renames it over the destination only when all of that worked.
+#
+# One copy, not two. The drivers keep their argument handling doubled on
+# purpose so a differential can compare them, but the way a file is replaced is
+# not plumbing a differential can judge: both sides doing it wrong the same
+# way is exactly the case it cannot see. The call-site contract in
+# `scripts/atomic-write-contract/` injects a write failure at this call and
+# runs it through both drivers.
+#
+# Link policy, decided here and not left to what `atomic_write_file` happens to
+# do. Before, `dawn fmt link.dawn` wrote through the link: the target changed
+# and the link stayed. `atomic_write_file` refuses a symbolic link destination
+# outright, which for a formatter would turn a working command into an error.
+# So a link is resolved with `io.real_path` and the *target* is replaced; the
+# link itself is never touched. A hard-linked file is different: renaming over
+# one directory entry detaches it, so the other names keep the old bytes. That
+# is a change from the in-place write, taken on purpose: writing through the
+# shared inode is the non-atomic overwrite this module exists to stop doing,
+# and a formatter that cannot be trusted with a half-written file is worse than
+# one that splits a hard link.
+
+use std/io
+use std/io.{Fs, Env}
+use std/str
+
+## Replace `path` with `text` atomically, following a symbolic link to its
+## target. On any failure the file holds what it held and no staging file is
+## left in its directory.
+pub(pkg) fn write_formatted(path: String, text: String) -> Result[Unit, ForeignError] !Fs !Env =
+  if io.is_symlink(path) {
+    let abs = if str.starts_with(path, "/") { path } else { io.cwd() ++ "/" ++ path }
+    match io.real_path(abs) {
+      Ok(target) -> io.atomic_write_file(target, text)
+      Err(e) -> Err(e)
+    }
+  } else {
+    io.atomic_write_file(path, text)
+  }
