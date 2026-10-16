@@ -562,6 +562,7 @@ cs_build() { # name: baseline, or a registered call-site mutation
 }
 
 cs_build baseline
+CS_JAR_BASELINE="$CS_JAR"
 cs_probe "$CS_JAR" "$work/callsites.out"
 cmp -s "$here/callsites-expected.txt" "$work/callsites.out" || {
   diff -u "$here/callsites-expected.txt" "$work/callsites.out" >&2 || true
@@ -599,4 +600,177 @@ cs_probe "$CS_JAR" "$work/callsites-m-lock.out"
 cs_expect_red "dawn lock back to io.write_file" "$work/callsites-m-lock.out" \
   'lock readonly lockfile = old' 'add '
 
-echo "OK: atomic-write contract, six injections, eight primitive mutants and two call-site mutants"
+# ---------------------------------------------------------- dawn fmt call site
+#
+# TOOL-13 covered `dawn add` and `dawn lock`; #758 was the third writer. `dawn
+# fmt` used to hand the formatted text to `io.write_file`, which truncates the
+# file before writing, so a write that failed partway left the source cut off
+# mid-declaration. The failure is forced the way a full disk or a quota would
+# force it, with a file size limit on the child process alone (RLIMIT_FSIZE,
+# and SIGXFSZ ignored so the write returns EFBIG rather than killing the
+# process; an ignored signal survives exec, which is how the native binary
+# gets the same treatment). The fixture is bigger than the limit, so the
+# staging write fails; a plain overwrite would have run into the same limit
+# and left 1024 bytes of the original behind.
+#
+# The same probe runs on both drivers, because they share the helper but not
+# the argument handling, and "both sides wrong the same way" is the case a
+# differential between them cannot see. Mutants are built on the JVM driver
+# only: the helper is one source file, and a native build of the compiler is
+# the slow part of this section.
+
+fmt_dir="$work/fmt"
+mkdir -p "$fmt_dir"
+
+fmt_fixture() { # dir -- an unformatted file bigger than the 1024-byte limit
+  local d="$1"
+  rm -rf "$d"
+  mkdir -p "$d"
+  python3 - "$d/target.dawn" <<'PY'
+import sys
+
+with open(sys.argv[1], "w") as f:
+    for i in range(200):
+        f.write("fn   t%d()   ->   Int   =   %d\n" % (i, i))
+PY
+  chmod 640 "$d/target.dawn"
+  cp "$d/target.dawn" "$d.ref"
+}
+
+# Run a command with a file size limit and SIGXFSZ ignored, in the child only.
+fmt_limited() { # limit-bytes, command...
+  local limit="$1"
+  shift
+  python3 -I - "$limit" "$@" <<'PY'
+import os
+import resource
+import signal
+import sys
+
+limit = int(sys.argv[1])
+cmd = sys.argv[2:]
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+os.execvp(cmd[0], cmd)
+PY
+}
+
+fmt_entries() { # dir
+  ( cd "$1" && find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | paste -sd, - )
+}
+
+# fmt_probe <out> <command...>: the driver is whatever follows, "fmt" is added.
+fmt_probe() {
+  local out="$1"
+  shift
+  local d r
+  : > "$out"
+
+  d="$fmt_dir/fail"
+  fmt_fixture "$d"
+  if ( cd "$d" && fmt_limited 1024 "$@" fmt target.dawn ) > "$fmt_dir/last.out" 2> "$fmt_dir/last.err"; then
+    r=ok
+  else
+    r=err
+  fi
+  {
+    echo "failed write result = $r"
+    echo "failed write bytes = $(cmp -s "$d/target.dawn" "$d.ref" && echo unchanged || echo changed)"
+    echo "failed write mode = $(stat -c '%a' "$d/target.dawn")"
+    echo "failed write entries = $(fmt_entries "$d")"
+  } >> "$out"
+
+  d="$fmt_dir/ok"
+  fmt_fixture "$d"
+  if ( cd "$d" && "$@" fmt target.dawn ) > "$fmt_dir/last.out" 2> "$fmt_dir/last.err"; then
+    r=ok
+  else
+    r=err
+  fi
+  {
+    echo "formatted write result = $r"
+    echo "formatted write bytes = $(cmp -s "$d/target.dawn" "$d.ref" && echo unchanged || echo changed)"
+    echo "formatted write mode = $(stat -c '%a' "$d/target.dawn")"
+    echo "formatted write entries = $(fmt_entries "$d")"
+    echo "formatted write is formatted = $(
+      ( cd "$d" && "$@" fmt --check target.dawn > /dev/null 2>&1 ) && echo true || echo false)"
+  } >> "$out"
+
+  # A link is written through: the target changes, the link stays a link.
+  d="$fmt_dir/link"
+  fmt_fixture "$d"
+  mkdir "$d/sub"
+  mv "$d/target.dawn" "$d/sub/real.dawn"
+  ln -s sub/real.dawn "$d/link.dawn"
+  if ( cd "$d" && "$@" fmt link.dawn ) > "$fmt_dir/last.out" 2> "$fmt_dir/last.err"; then
+    r=ok
+  else
+    r=err
+  fi
+  {
+    echo "symlink result = $r"
+    echo "symlink still link = $([ -L "$d/link.dawn" ] && echo true || echo false)"
+    echo "symlink target is formatted = $(
+      ( cd "$d" && "$@" fmt --check sub/real.dawn > /dev/null 2>&1 ) && echo true || echo false)"
+    echo "symlink target mode = $(stat -c '%a' "$d/sub/real.dawn")"
+    echo "symlink entries = $(fmt_entries "$d") / $(fmt_entries "$d/sub")"
+  } >> "$out"
+}
+
+fmt_build_native() { # outbin -- the native driver, from the checkout
+  local out="$1"
+  "$root/bin/dawn" __emitc "$root/selfhost/src/nmain.dawn" --split "$out.units" \
+    > "$out.emit" 2>&1 || { cat "$out.emit" >&2; fail "native driver emit failed"; }
+  "$root/scripts/cc-units.sh" -o "$out" "$out.units" > "$out.cc" 2>&1 ||
+    { cat "$out.cc" >&2; fail "native driver compile failed"; }
+}
+
+fmt_jvm_driver() { # jar -- the command line prefix for a private JVM compiler
+  FMT_DRIVER=(env "DAWN_SELFHOST_CP=" "$JAVA_BIN" -Xss512m -Xmx2g -jar "$1")
+}
+
+fmt_expect_baseline() { # label, out
+  cmp -s "$here/fmt-callsites-expected.txt" "$2" || {
+    diff -u "$here/fmt-callsites-expected.txt" "$2" >&2 || true
+    fail "$1: dawn fmt does not behave as the contract says"
+  }
+  echo "PASS  call site: dawn fmt ($1) fails without touching the file, writes through links"
+}
+
+fmt_jvm_driver "$CS_JAR_BASELINE"
+fmt_probe "$work/fmt-jvm.out" "${FMT_DRIVER[@]}"
+fmt_expect_baseline "JVM driver" "$work/fmt-jvm.out"
+
+fmt_build_native "$work/dawnc-fmt"
+fmt_probe "$work/fmt-native.out" "$work/dawnc-fmt"
+fmt_expect_baseline "native driver" "$work/fmt-native.out"
+
+# Each fmt mutant owns the lines named, and leaves the others alone.
+fmt_expect_red() { # label, out, owned-prefix, untouched-prefix
+  if cmp -s "$here/fmt-callsites-expected.txt" "$2"; then
+    fail "$1 mutant stayed green"
+  fi
+  if ! diff <(grep "^$3" "$here/fmt-callsites-expected.txt") <(grep "^$3" "$2") > /dev/null; then
+    :
+  else
+    diff -u "$here/fmt-callsites-expected.txt" "$2" >&2 || true
+    fail "$1 mutant did not move its owning '$3' lines"
+  fi
+  if ! diff <(grep "^$4" "$here/fmt-callsites-expected.txt") <(grep "^$4" "$2") > /dev/null; then
+    diff -u "$here/fmt-callsites-expected.txt" "$2" >&2 || true
+    fail "$1 mutant also moved the '$4' lines, so the assertion above is not owned"
+  fi
+  echo "PASS  mutant: $1 (the '$3' lines turned red; the '$4' lines did not move)"
+}
+
+cs_build fmt-plain-write
+fmt_jvm_driver "$CS_JAR"
+fmt_probe "$work/fmt-m-plain.out" "${FMT_DRIVER[@]}"
+fmt_expect_red "dawn fmt back to io.write_file" "$work/fmt-m-plain.out" 'failed write ' 'formatted write '
+
+cs_build fmt-no-link-resolve
+fmt_jvm_driver "$CS_JAR"
+fmt_probe "$work/fmt-m-link.out" "${FMT_DRIVER[@]}"
+fmt_expect_red "dawn fmt hands a link to the atomic writer" "$work/fmt-m-link.out" 'symlink ' 'failed write '
+
+echo "OK: atomic-write contract, six injections, eight primitive mutants, two call-site mutants and the dawn fmt call site (both drivers, two mutants)"

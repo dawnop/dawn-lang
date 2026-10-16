@@ -7,7 +7,7 @@ The anchors used to be arguments to run.sh's `patch_std` shell helper, one
 close-injection heredoc and one call-site heredoc, each refusing a non-unique
 match. That made them self-once: correct, but checked only when this contract
 ran, which builds three private compilers and a dozen probes first. They quote
-std/io.dawn, runtime/c/dawn_rt.c, pkg/add.dawn and pkg/pkgcmd.dawn. Declared here,
+std/io.dawn, runtime/c/dawn_rt.c, pkg/add.dawn, pkg/pkgcmd.dawn and driver/fmtwrite.dawn. Declared here,
 in the registry shape mutation-anchor-preflight.py already discovers, the same
 anchors have two consumers: run.sh applies one mutation per private tree, and
 the preflight proves every one of them exactly-once before any build (#254).
@@ -37,6 +37,7 @@ STAGING_FAILED = '''      Err(e) -> Err(ForeignError {
           ++ parent_dir(path),
         cause: Some(e.kind ++ ": " ++ e.message)
       })'''
+FMTWRITE = "selfhost/src/driver/fmtwrite.dawn"
 ATOMIC_CALL = ("io.atomic_write_file(", "io.write_file(")
 
 MUTATIONS = {
@@ -96,6 +97,14 @@ MUTATIONS = {
     # Call sites: one compiler writer put back to a plain overwrite.
     "add-plain-write": (("selfhost/src/pkg/add.dawn", *ATOMIC_CALL),),
     "lock-plain-write": (("selfhost/src/pkg/pkgcmd.dawn", *ATOMIC_CALL),),
+    # `dawn fmt`'s call site (driver/fmtwrite.dawn, shared by both drivers).
+    "fmt-plain-write": (
+        (FMTWRITE, "    io.atomic_write_file(path, text)", "    io.write_file(path, text)"),
+        (FMTWRITE, "Ok(target) -> io.atomic_write_file(target, text)",
+         "Ok(target) -> io.write_file(target, text)"),
+    ),
+    # Hand a symbolic link straight to the atomic writer, which refuses it.
+    "fmt-no-link-resolve": ((FMTWRITE, "if io.is_symlink(path) {", "if false {"),),
 }
 
 
