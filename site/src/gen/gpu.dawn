@@ -1060,7 +1060,7 @@ fn map_facts(c: Copy, mu: fn(String) -> String, kf: KernelFacts) -> String = {
 ## the two listings are the whole of it, and they are complete. Unlike the
 ## explorer's figure it has no tabs: both listings are always in view, so
 ## explorer.js speaks of the first (`data-label`).
-fn map_figure(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
+fn map_figure(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, f: Facts) -> String = {
   let m = f.flash
   let p = (k: String) => escape_html(plain(c, k))
   let last = m.first + len(m.src) - 1
@@ -1072,9 +1072,10 @@ fn map_figure(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
   let owners = ir_owners(m)
   let results = ir_results(m)
   let src = join(map(range(m.first, last + 1), l => """<span class="xl" id="kl-${l}"><i>${l}</i>${dawn_line(m, l)}</span>"""), "")
+  let play_link = """<a class="xp-open" href="${root}/${lang_path(lang, "playground.html")}?sample=${m.name}&amp;view=tile">${line(c, "kernel-open", mu)}</a>"""
   let ir = join(map(range(1, len(m.ir) + 1), n => ir_row(m, n, owners[n - 1], list.contains(results, n))), "")
   """<figure class="xp xp-flash" style="--kmn: ${widest}" data-w-line="${p("word-line")}" data-w-lines="${p("word-lines")}" data-w-none="${p("word-none")}">
-<figcaption class="xp-cap"><span class="xp-name"><code>${escape_html(m.name)}</code></span><span class="xp-kind">${line(c, "kernel-kind", mu)}</span>${map_facts(c, mu, kernel_facts(f, m))}</figcaption>
+<figcaption class="xp-cap"><span class="xp-name"><code>${escape_html(m.name)}</code></span><span class="xp-kind">${line(c, "kernel-kind", mu)}</span>${play_link}${map_facts(c, mu, kernel_facts(f, m))}</figcaption>
 <div class="xp-grid">
 <div class="xp-src">
 <p class="xp-head"><span>${line(c, "kernel-left", mu)}</span><span class="xp-shown">${src_link}</span></p>
@@ -1285,7 +1286,7 @@ fn gpu_page_with(a: Assets, js: String, ex_js: String, lang: Lang, f: Facts, doc
   let main = `<main class="wrap page gpu-page">` ++ "\n"
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
     ++ prose(c, mu, "api") ++ "\n" ++ api_section(c, mu, root, lang, f) ++ "\n"
-    ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, f) ++ "\n"
+    ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, root, lang, f) ++ "\n"
     ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
     ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu, f) ++ "\n"
     ++ prose(c, mu, "ledgers") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"
@@ -1771,6 +1772,12 @@ test "the page draws one kernel and nothing a script has to finish" {
       # the explorer's script runs the figure, ahead of the page's own
       assert str.contains(p, "/assets/explorer.js\" defer></script>")
     }
+    # the link to the Playground is a plain anchor, so it works with no
+    # script, and it opens the sidebar's sample on the Tile IR tab
+    let en = gpu_page(plain_assets(), "gpu.js", En, f, [])
+    let zh = gpu_page(plain_assets(), "gpu.js", Zh, f, [])
+    assert str.contains(en, `<a class="xp-open" href="./playground.html?sample=flash_attn&amp;view=tile">Open in Playground</a>`)
+    assert str.contains(zh, `<a class="xp-open" href="../zh/playground.html?sample=flash_attn&amp;view=tile">在 Playground 中打开</a>`)
   })
 }
 
