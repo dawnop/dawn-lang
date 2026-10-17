@@ -61,6 +61,7 @@ by hand, with the server reachable.
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
    /opt/dawn/packages/                       # path-deps the runner imports (rsynced)
+   /opt/dawn/playground/lsp-tile/            # project a tileir program is opened in by the LSP bridge (rsynced; deps are ../../packages)
    /opt/dawn/site/play-ui/samples/           # starter samples, read by lsp-measure (rsynced)
    /opt/dawn/scripts/repo.env                # the site origin the LSP gateway accepts (rsynced)
    /opt/dawn/scripts/repo_env.py             # its Python reader (rsynced)

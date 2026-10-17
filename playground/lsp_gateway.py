@@ -48,6 +48,19 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 SUBPROTOCOL = "dawn-lsp-v1"
 DOCUMENT_URI = "untitled:dawn-playground/prog.dawn"
 
+# A program that imports tileir needs the runner's fixed project to resolve
+# `use tileir/` (playground/src/play/exec.dawn stages it the same way for /run).
+# The browser's one URI never changes; what the child is told does: such a
+# buffer is opened as `src/main.dawn` of playground/lsp-tile, a project whose
+# manifest names exactly the two packages the runner's does, and every other
+# buffer stays the untitled one. The test is the runner's and the page's
+# (play/contract.dawn `wants_tileir`, compile-state.ts `wantsTileir`).
+TILE_MARKER = "use tileir/"
+
+
+def wants_tileir(text: str) -> bool:
+    return TILE_MARKER in text
+
 HARD_MAX_SESSIONS = 2
 HARD_SOURCE_BYTES = 65_536
 HARD_MESSAGE_BYTES = 262_144
@@ -148,6 +161,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
     raise SystemExit(f"{name} must be 0 or 1, got {raw!r}")
 
 
+def _tile_uri() -> str:
+    """The file URI of the tileir project's main file: PLAY_LSP_TILE_MAIN
+    (empty: none, the untitled buffer for every program), or
+    playground/lsp-tile/src/main.dawn beside this file when it is there."""
+    raw = os.environ.get("PLAY_LSP_TILE_MAIN")
+    if raw == "":
+        return ""
+    path = Path(raw) if raw else Path(__file__).resolve().parent / "lsp-tile" / "src" / "main.dawn"
+    if not path.is_absolute() or not path.is_file() or not (path.parent.parent / "dawn.toml").is_file():
+        if raw:
+            raise SystemExit("PLAY_LSP_TILE_MAIN must be an absolute file inside a project with a dawn.toml")
+        return ""
+    return path.as_uri()
+
+
 @dataclass(frozen=True)
 class Config:
     host: str
@@ -165,6 +193,10 @@ class Config:
     unsafe_local: bool
     child_argv: tuple[str, ...]
     sandbox_script: str
+    # The file URI of the tileir project's `src/main.dawn`, or "" when this
+    # deploy has no such project (a tileir buffer is then the untitled one, as
+    # before).
+    tile_uri: str = ""
 
     @staticmethod
     def from_env() -> "Config":
@@ -262,6 +294,7 @@ class Config:
             unsafe_local=unsafe,
             child_argv=child_argv,
             sandbox_script=sandbox_script,
+            tile_uri=_tile_uri(),
         )
 
 
@@ -1080,8 +1113,18 @@ class ClientReply:
 class ClientProtocol:
     """Validate and narrow one browser's LSP view to one scratch buffer."""
 
-    def __init__(self, source_bytes: int, message_bytes: int = HARD_MESSAGE_BYTES) -> None:
+    def __init__(
+        self,
+        source_bytes: int,
+        message_bytes: int = HARD_MESSAGE_BYTES,
+        tile_uri: str = "",
+    ) -> None:
         self.source_bytes = source_bytes
+        # which document the child holds: the browser's untitled buffer, or the
+        # tileir project's main file (see TILE_MARKER)
+        self.tile_uri = tile_uri
+        self.in_project = False
+        self.sync: str | None = None
         self.range_budget = semantic_range_budget(message_bytes)
         self.text = ""
         self.semantic_legend: dict[str, list[str]] | None = None
@@ -1129,9 +1172,71 @@ class ClientProtocol:
             raise GatewayError(1009, "Dawn source is too large")
         return value
 
-    def from_client(self, body: bytes) -> bytes | ClientReply | None:
-        """The narrowed body for the child; or a ClientReply the gateway
-        answers itself; or None for a notification it drops."""
+    def child_uri(self) -> str:
+        return self.tile_uri if self.in_project else DOCUMENT_URI
+
+    def _project_wanted(self) -> bool:
+        return bool(self.tile_uri) and wants_tileir(self.text)
+
+    def _retarget(self, value: Any, source: str, target: str) -> Any:
+        """`value` with every `uri` field that is `source` made `target`, and
+        the same for the keys of a rename's `changes`. Only those fields: the
+        buffer's text may contain any string at all."""
+        if isinstance(value, list):
+            return [self._retarget(item, source, target) for item in value]
+        if not isinstance(value, dict):
+            return value
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "changes" and isinstance(item, dict):
+                out[key] = {
+                    (target if k == source else k): self._retarget(v, source, target)
+                    for k, v in item.items()
+                }
+            elif key == "uri" and item == source:
+                out[key] = target
+            else:
+                out[key] = self._retarget(item, source, target)
+        return out
+
+    def from_client(self, body: bytes) -> bytes | list[bytes] | ClientReply | None:
+        """What the child is sent (one message, or the close and open of a
+        buffer that changed kind), a ClientReply the gateway answers itself,
+        or None for a notification it drops."""
+        out = self._from_client(body)
+        sync, self.sync = self.sync, None
+        if not isinstance(out, bytes):
+            return out
+        wanted = self._project_wanted()
+        if sync == "open":
+            self.in_project = wanted
+        elif sync == "change" and wanted != self.in_project:
+            old = self.child_uri()
+            self.in_project = wanted
+            return [
+                compact_json({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didClose",
+                    "params": {"textDocument": {"uri": old}},
+                }),
+                compact_json({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": self.child_uri(),
+                            "languageId": "dawn",
+                            "version": self.version,
+                            "text": self.text,
+                        }
+                    },
+                }),
+            ]
+        if not self.in_project:
+            return out
+        return compact_json(self._retarget(json.loads(out), DOCUMENT_URI, self.tile_uri))
+
+    def _from_client(self, body: bytes) -> bytes | ClientReply | None:
         message = parse_json(body, client=True)
         method = message.get("method")
         if not isinstance(method, str):
@@ -1187,6 +1292,7 @@ class ClientProtocol:
             self.version = version
             self.text = text
             self.state = "open"
+            self.sync = "open"
             return compact_json(
                 {
                     "jsonrpc": "2.0",
@@ -1230,6 +1336,7 @@ class ClientProtocol:
             text = self._source(changes[0].get("text"))
             self.version = version
             self.text = text
+            self.sync = "change"
             return compact_json(
                 {
                     "jsonrpc": "2.0",
@@ -1384,8 +1491,31 @@ class ClientProtocol:
         # CLIENT_METHODS grew without a branch, which must not forward.
         raise GatewayError(1008, "method is not allowed")
 
-    def from_child(self, body: bytes) -> bytes:
+    def from_child(self, body: bytes) -> bytes | None:
         message = parse_json(body, client=False)
+        if "method" in message and self.tile_uri:
+            # The other document of the two the child may hold: one the buffer
+            # has just stopped being. Whatever it still publishes is late, not
+            # an escape, and the browser never knew that URI.
+            stale = DOCUMENT_URI if self.in_project else self.tile_uri
+            params = message.get("params")
+            if (
+                message.get("method") == "textDocument/publishDiagnostics"
+                and isinstance(params, dict)
+                and params.get("uri") == stale
+            ):
+                return None
+        if self.in_project:
+            message = self._retarget(message, self.tile_uri, DOCUMENT_URI)
+            params = message.get("params")
+            if (
+                message.get("method") == "textDocument/publishDiagnostics"
+                and isinstance(params, dict)
+                and params.get("uri") != DOCUMENT_URI
+            ):
+                # a project is a workspace: it may publish for the files of
+                # its packages too, which the browser has no buffer for
+                return None
         if "method" in message:
             if message.get("method") != "textDocument/publishDiagnostics":
                 raise ChildProtocolError("child emitted an unexpected notification/request")
@@ -1558,7 +1688,7 @@ class Session:
         self.id = session_id
         self.config = config
         self.ws = ws
-        self.protocol = ClientProtocol(config.source_bytes, config.message_bytes)
+        self.protocol = ClientProtocol(config.source_bytes, config.message_bytes, config.tile_uri)
         self.proc: asyncio.subprocess.Process | None = None
         self.started = time.monotonic()
         self.message_count = 0
@@ -1613,7 +1743,8 @@ class Session:
             if isinstance(narrowed, ClientReply):
                 await self.ws.send_text(narrowed.body)
                 continue
-            self.proc.stdin.write(lsp_frame(narrowed))
+            for part in narrowed if isinstance(narrowed, list) else [narrowed]:
+                self.proc.stdin.write(lsp_frame(part))
             try:
                 await asyncio.wait_for(
                     self.proc.stdin.drain(), timeout=HARD_IO_SECONDS
@@ -1629,7 +1760,8 @@ class Session:
             except EOFError:
                 raise ChildProtocolError("child closed stdout")
             narrowed = self.protocol.from_child(body)
-            await self.ws.send_text(narrowed)
+            if narrowed is not None:
+                await self.ws.send_text(narrowed)
 
     async def drain_stderr(self) -> None:
         assert self.proc is not None and self.proc.stderr is not None
