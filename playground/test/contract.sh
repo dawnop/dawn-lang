@@ -408,8 +408,10 @@ open(f"{out}/broken.dawn", "w").write('pub fn main() -> Unit !io = println(nope)
 # manifest does not name
 tile = open(f"{root}/playground/test/tile_vadd.dawn", encoding="utf-8").read()
 open(f"{out}/tile.dawn", "w", encoding="utf-8").write(tile)
-for name in ("tile_attn", "tile_hostif", "tile_broken"):
+for name in ("tile_hostif", "tile_broken"):
     open(f"{out}/{name}.dawn", "w", encoding="utf-8").write(open(f"{root}/playground/test/{name}.dawn", encoding="utf-8").read())
+# the flash attention starter: the Playground's own sample, not a copy of it
+open(f"{out}/tile_attn.dawn", "w", encoding="utf-8").write(open(f"{root}/site/play-ui/samples/flash_attn.dawn", encoding="utf-8").read())
 open(f"{out}/tile_smuggle.dawn", "w", encoding="utf-8").write("use json/value.{Json}\npub fn smuggled(j: Json) -> Json = j\n" + tile)
 PY
 compile_body() { # program file, target
@@ -487,13 +489,55 @@ tile_ccheck() { # name, program file, extra request fields (JSON object), assert
 }
 tile_ccheck "compile: a tileir program's pane is the text dawn run prints, and its calls are paired with the source" "$CASES/tile.dawn" '{}' \
   'len(expected)>200 and d["ok"] is True and d["phase"]=="compile-view" and d["target"]=="tile" and d["cached"] is False and d["pane"]["kind"]=="tile" and "\n".join(d["pane"]["text"])+"\n"==expected and d["pane"]["shown"]==len(d["pane"]["text"]) and d["pane"]["truncated"] is False and "unmapped" not in d and [c["name"] for c in d["calls"]]==["store_cell","add","load_cell","load_cell"] and [c["parent"] for c in d["calls"]]==[-1,0,1,1] and len(d["pane"]["outs"])==4 and all(o["lines"] for o in d["pane"]["outs"]) and d["gaps"]["count"]==0 and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and "explore_probe" not in raw and "@@tile" not in raw'
+TILE_EXPECTED="$CASES/tile.expected"
+ATTN_GOLDEN="$ROOT/scripts/tile-golden/flash_attn.mlir"
+export TILE_EXPECTED ATTN_GOLDEN
+ATTN_FIRST=$(grep -n '^fn flash_attn(' "$CASES/tile_attn.dawn" | cut -d: -f1)
+export ATTN_FIRST
 tile_ccheck "compile: a kernel with a loop and carried variables is paired call by call" "$CASES/tile_attn.dawn" '{}' \
-  'd["ok"] is True and "unmapped" not in d and d["calls_total"]==25 and d["gaps"]["count"]==0 and any(c["name"]=="d_range" for c in d["calls"]) and any(c["parent"]>=0 and d["calls"][c["parent"]]["name"]=="d_range" for c in d["calls"]) and len(d["pane"]["outs"])==25 and d["src"]["first"]==14'
+  'd["ok"] is True and "unmapped" not in d and d["calls_total"]==25 and d["gaps"]["count"]==0 and any(c["name"]=="d_range" for c in d["calls"]) and any(c["parent"]>=0 and d["calls"][c["parent"]]["name"]=="d_range" for c in d["calls"]) and len(d["pane"]["outs"])==25 and d["pane"]["text"][1].lstrip().startswith("entry @flash_attn") and d["src"]["first"]==int(os.environ["ATTN_FIRST"])'
 tile_ccheck "compile: a kernel the pairing cannot follow keeps its plain pane and says why" "$CASES/tile_hostif.dawn" '{}' \
   'd["ok"] is True and d["phase"]=="compile-view" and "calls" not in d and "host control flow" in d["unmapped"] and d["pane"]["kind"]=="tile" and any("cuda_tile.module" in l for l in d["pane"]["text"]) and "@@tile" not in raw'
 tile_ccheck "compile: a tileir program with a compile error answers a diagnostic, not a pane" "$CASES/tile_broken.dawn" '{}' \
   'd["ok"] is False and d["phase"]=="compile" and "nope" in d["output"] and "pane" not in d and "@@tile" not in raw and "explore_probe" not in raw'
-tile_ccheck "compile: a dependency the visitor supplies is not honoured, so another package does not resolve" "$CASES/tile_smuggle.dawn" "{\"dawn_toml\": \"schema = 1\\nname = \\\"x\\\"\\nversion = \\\"0.0.0\\\"\\n[deps]\\ntileir = \\\"$ROOT/packages/tileir\\\"\\njson = \\\"$ROOT/packages/json\\\"\\n\"}" \
+SMUGGLE="{\"dawn_toml\": \"schema = 1\\nname = \\\"x\\\"\\nversion = \\\"0.0.0\\\"\\n[deps]\\ntileir = \\\"$ROOT/packages/tileir\\\"\\njson = \\\"$ROOT/packages/json\\\"\\n\"}"
+tile_ccheck "compile: a dependency the visitor supplies is not honoured, so another package does not resolve" "$CASES/tile_smuggle.dawn" "$SMUGGLE" \
+  'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"] and "pane" not in d'
+
+# ---- a tileir program is a project on every route, not only the Tile IR view.
+#
+# /run, /check and the C and JVM views stage a program that imports tileir the
+# way the Tile IR view does (src/main.dawn and the runner's own dawn.toml), so
+# `use tileir/` resolves wherever the program is sent; every other program is
+# the single file it was. The expected text is what `dawn run` prints for the
+# same program as a project, and for the flash attention starter the golden the
+# kernel is pinned to.
+run_data() { # program file, extra request fields (JSON object)
+  python3 -c 'import json,sys; d={"code": open(sys.argv[1], encoding="utf-8").read()}; d.update(json.loads(sys.argv[2])); print(json.dumps(d))' "$1" "$2"
+}
+check "run: a tileir program runs and prints its Tile IR" "$(run_data "$CASES/tile.dawn" '{}')" \
+  'd["ok"] is True and d["phase"]=="run" and d["exit"]==0 and d["truncated"] is False and d["output"]==open(os.environ["TILE_EXPECTED"], encoding="utf-8").read() and len(d["output"])>200 and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw'
+check "run: the flash attention starter prints the golden it is pinned to" "$(run_data "$CASES/tile_attn.dawn" '{}')" \
+  'd["ok"] is True and d["phase"]=="run" and d["exit"]==0 and d["output"]==open(os.environ["ATTN_GOLDEN"], encoding="utf-8").read()'
+check "run: a tileir program with a compile error answers a diagnostic" "$(run_data "$CASES/tile_broken.dawn" '{}')" \
+  'd["ok"] is False and d["phase"]=="compile" and "nope" in d["output"] and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw'
+check "run: a dependency the visitor supplies is not honoured, so another package does not resolve" \
+  "$(run_data "$CASES/tile_smuggle.dawn" "$SMUGGLE")" \
+  'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"]'
+check "check: a tileir program has no diagnostics" "$(run_data "$CASES/tile.dawn" '{}')" \
+  'd["ok"] is True and d["phase"]=="check"' check
+check "run: a program that does not import tileir is still the single file it was" \
+  '{"code":"pub fn main() -> Unit !io = println(nope)"}' \
+  'not d["ok"] and d["phase"]=="compile" and "prog.dawn" in d["output"] and "src/main.dawn" not in d["output"]'
+ccheck "compile: the C text of a tileir program is its own module's, no gap, its calls placed in it" "$CASES/tile.dawn" c \
+  "$SOUND"' and d["target"]=="c" and d["cached"] is False and d["pane"]["kind"]=="c" and d["calls_total"]>=4 and d["pane"]["total"]>1000 and d["pane"]["shown"]<200 and any("main__vadd" in l for l in d["pane"]["text"])'
+ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
+  "$SOUND"' and d["target"]=="jvm" and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["calls_total"]>=4 and any("invokestatic" in l for l in d["pane"]["text"])'
+ccheck "compile: the flash attention starter has a C text and a JVM listing" "$CASES/tile_attn.dawn" c \
+  'd["ok"] is True and d["phase"]=="compile-view" and d["pane"]["kind"]=="c" and d["calls_total"]>=20 and d["pane"]["shown"]>100'
+ccheck "compile: the other half of it is kept" "$CASES/tile_attn.dawn" jvm \
+  'd["ok"] is True and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"
+ccheck "compile: a dependency the visitor supplies is not honoured by the C view either" "$CASES/tile_smuggle.dawn" c \
   'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"] and "pane" not in d'
 
 # The two limits. 1,500 functions list to more than 256 KB; 2,500 calls are
