@@ -18,6 +18,7 @@ import {
   notesOf,
   TILE_NEEDS,
   TARGETS,
+  sampleOfSearch,
   targetOfSearch,
   tileNotes,
   wantsTileir,
@@ -231,6 +232,10 @@ export function compileViewTests(expect: Expect): number {
   t('the tab goes in the query and the program stays in the hash', withView('https://x.test/play.html#bGV0', 'jvm'), 'https://x.test/play.html?view=jvm#bGV0')
   t('closing removes only view', withView('https://x.test/play.html?a=1&view=c#bGV0', null), 'https://x.test/play.html?a=1#bGV0')
   t('switching tabs replaces it', withView('https://x.test/play.html?view=c#h', 'jvm'), 'https://x.test/play.html?view=jvm#h')
+
+  const FILES = ['hello.dawn', 'flash_attn.dawn', 'comptime.dawn']
+  t('sample names a sidebar file, without its extension', [sampleOfSearch('?sample=hello', FILES), sampleOfSearch('?sample=flash_attn&view=tile', FILES), sampleOfSearch('?view=tile&sample=comptime', FILES)], [0, 1, 2])
+  t('no sample, or a name the sidebar does not hold, is none', [sampleOfSearch('', FILES), sampleOfSearch('?sample=', FILES), sampleOfSearch('?sample=nope', FILES), sampleOfSearch('?sample=hello.dawn', FILES), sampleOfSearch('?sample=Hello', FILES), sampleOfSearch('?sample=../hello', FILES)], [null, null, null, null, null, null])
 
   // ---- the stylesheets ----
   // The pane is drawn with the static explorer's classes, whose rules are the
