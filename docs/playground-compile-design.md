@@ -530,8 +530,14 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 - **大小与耗时（本机 WSL2，冷请求）：** 源码 1,818 B（64 KiB 上限的 2.8%）；`/run` 输出 4,737 B，`/run` 墙钟 2.77 s（其中运行 143 ms，其余是编译 `tileir`），对比 hello 1.4 s；
   `/check` 2.55 s（hello 1.37 s）；tile 窗格 3.10 s，响应 8.6 KB；C 窗格 6.2 s、响应 41 KB，JVM 窗格同一次编译、响应 109 KB；
   plain 起步程序的 C 窗格是 3.1 s。都在 30 s 编译预算内（C 窗格的 6.2 s 是两个编译器各编一遍 `tileir`，约为普通程序的两倍）。
-- **编辑器里的红线：** 编辑器的实时诊断由 LSP 会话负责，它的文档是无项目的 `untitled:` 文件，解析不了 `tileir/`，所以 tileir 程序在编辑器里可能出现未解析模块的红线，
-  而 Run 与各窗格是对的。这不是这一刀引入的（任何手写的 tileir 程序都一样），也没有在这一刀里解决，见下。
+- **编辑器里的红线（已在 K7 的后续一刀解决）：** 编辑器的实时诊断由 LSP 会话负责，它的文档是无项目的 `untitled:` 文件，解析不了 `tileir/`。
+  真实 `dawn lsp` 实测（浏览器自己的 URI 加 flash attention 样例）：36 条诊断（`unknown effect Dev`、`unknown type: Param`、`undefined function: load_cell` 等），悬停在 `load_cell` 上答 `?`。
+  做法在网关而不在服务器：`playground/lsp_gateway.py` 对含 `use tileir/` 的缓冲区，把给子进程的文档换成 `playground/lsp-tile/src/main.dawn`
+  （`file://` URI；`lsp-tile/dawn.toml` 的依赖只有 `../../packages/tileir` 与 `tileref`，与 runner 的清单同两项），其余缓冲区仍是原来的 `untitled:`；浏览器看到的 URI 始终不变。
+  缓冲区在含与不含 `use tileir/` 之间切换时，网关发 `didClose` 旧文档和 `didOpen` 新文档（同文本同版本），旧文档迟到的诊断丢弃；
+  项目形态下子进程为包文件发的诊断也丢弃（浏览器没有那些缓冲区）。访客仍不能提供依赖：清单是仓库里的固定文件，程序里写 `use json/...` 照旧解析失败。
+  选网关而不是给服务器加旗标：不碰编译器（不等发版、不动 lsp-diff 的输出），切换逻辑与已有的 URI 窄化在同一处；代价是子进程要读到一个项目目录，部署时 `redeploy.sh` 与 `packages/` 一起同步它。
+  实测：同一样例 0 条诊断，悬停答 `fn load_cell[D](p: Param[D]) -> Tile[D] !Dev` 及其文档；`lsp-contract.sh` 新增 `lsp_tileir_contract.py`（真服务器，约 10 s）。
 
 **测试。** `playground/test/contract.sh` 新增 11 项：`/run` 跑 tileir 程序且输出与同一项目的 `dawn run` 逐字节相同、`/run` 跑样例且输出等于它钉住的 golden、
 tileir 程序的编译错误给诊断、夹带的依赖在 `/run` 与 C 视图上不被采纳、`/check` 通过、不含 `use tileir/` 的程序仍是单文件（诊断仍称 `prog.dawn`）、
@@ -542,13 +548,13 @@ vadd 的 C 与 JVM 窗格（`SOUND`：无缺口、窗格只含用户模块）、
 
 **不做的（理由）。**
 - **无条件全走项目：** 见上，输出文案全变、单文件快路径要重验，换不来任何东西。
-- **让 LSP 解析 tileir：** 要给 LSP 会话一个带清单的项目根（`rootUri` 与暂存目录的生命周期），是网关与 `dawnc lsp` 的改动，不是暂存形态的改动；单列。
-  样例在编辑器里的红线是已知现状；若要消掉，最小的做法是网关对含 `use tileir/` 的文档在隐藏的项目目录里开会话。
+- **在服务器（`dawnc lsp`）里加「无标题缓冲区的项目」旗标：** 要动 `lsp/server.dawn` 的文档生命周期（单文件与工作区两种文档之间的切换），要等发版，且改变 lsp-diff 的覆盖面；网关已经为每个缓冲区决定「子进程看到哪个 URI」，同一处决定够了（见上）。
+- **让编辑器的跳转定义进入 tileir 包的源文件：** 网关一次只暴露一个缓冲区，指向包文件的位置被丢弃，与现在对标准库的做法一致。
 - **修中缀运算符的缺口：** 属 xmap 与两个编译器侧表，见上；样例因此不进 `scripts/xmap-samples` 的「无缺口」门。
 - **把 `VIEW_RAW_LIMIT` 调大或让编译器只出用户模块的 C：** tileir 程序的 C 已占 6.0 MB / 8 MiB；一个用到更多 `tileir` 的程序可能越线并答 422「the C text is too large」。
   这是真风险但还没有程序越线，调限额要同时看内存与 `read_capped_to` 的读入成本，等有越线的程序再裁。
 - **把样例做成多文件或分页：** 一个 kernel 加 `main` 不到 2 KB，没有理由。
-- **为 `/run` 开放访客提供依赖：** 清单永远是 runner 的，这是 K5 的安全前提，没有松动。
+- **为 `/run` 或语言服务开放访客提供依赖：** 清单永远是 runner 的，这是 K5 的安全前提，没有松动。
 
 ## 八、已裁决（2026-10-07，协调者）
 
