@@ -26,6 +26,7 @@ import traits from '../samples/traits.dawn?raw'
 import effects from '../samples/effects.dawn?raw'
 import barriers from '../samples/barriers.dawn?raw'
 import comptime from '../samples/comptime.dawn?raw'
+import flash_attn from '../samples/flash_attn.dawn?raw'
 
 export interface Sample {
   label: string
@@ -48,4 +49,5 @@ export const SAMPLES: Sample[] = [
   { label: 'effects', file: 'effects.dawn', code: effects },
   { label: 'Result + bracket', file: 'barriers.dawn', code: barriers },
   { label: 'comptime', file: 'comptime.dawn', code: comptime },
+  { label: 'flash attention (Tile IR)', file: 'flash_attn.dawn', code: flash_attn },
 ]
