@@ -268,14 +268,23 @@ fn is_editor_payload(frag: String) -> Bool =
 fn is_external(u: String) -> Bool =
   str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "mailto:")
 
-## The path half of an href, i.e. everything before the `#`. Empty when the
-## href is a bare fragment, which names the page it is written on.
-fn path_of(href: String) -> String =
-  match str.split(href, "#") {
+## The path half of an href, i.e. everything before the `#` and the `?`. Empty
+## when the href is a bare fragment, which names the page it is written on. A
+## query names no file (gpu.html's link to the Playground carries one, to pick
+## a sample), so it is dropped like the fragment.
+fn path_of(href: String) -> String = {
+  let before_frag =
+    match str.split(href, "#") {
+      [path] -> path
+      [path, _] -> path
+      _ -> href
+    }
+  match str.split(before_frag, "?") {
     [path] -> path
     [path, _] -> path
-    _ -> href
+    _ -> before_frag
   }
+}
 
 ## The fragment half, without the `#`. Empty when there is none.
 fn frag_of(href: String) -> String =
@@ -766,6 +775,9 @@ test "an href splits into path and fragment" {
   assert path_of("../spec.html#s9-5-1") == "../spec.html"
   assert frag_of("../spec.html#s9-5-1") == "s9-5-1"
   assert path_of("spec.html") == "spec.html"
+  assert path_of("playground.html?sample=flash_attn&amp;view=tile") == "playground.html"
+  assert path_of("../zh/playground.html?view=tile#bGV0") == "../zh/playground.html"
+  assert resolve("", "./playground.html?sample=a&view=tile") == "playground.html"
   assert frag_of("spec.html") == ""
 }
 

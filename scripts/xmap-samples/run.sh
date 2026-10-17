@@ -11,13 +11,10 @@
 # in a compiler's table for the code somebody has: the eleven programs a visitor
 # starts from (site/play-ui/samples). So they are held to a mapping with none:
 # `explore_strict` refuses a program with a gap, and a gap here is a defect of
-# a compiler's side table to file, not a state to live with. (The two programs
-# the explorer page shows are held the same way by every site build, whose
-# generator maps them strictly.)
-#
+# a compiler's side table to file, not a state to live with. #
 # What it runs, in order:
 #
-#   1. site/explorer/record.py asks each compiler for its account of the 11
+#   1. scripts/xmap-samples/record.py asks each compiler for its account of the 11
 #      samples, and scripts/xmap-samples pairs each with the package, strictly.
 #   2. the controls. A check that has only ever been green has not been shown
 #      to see anything. Each one below changes a thing the gate rests on and
@@ -58,7 +55,7 @@ check_run() {
 }
 
 echo "== recording the Playground's starter programs =="
-python3 site/explorer/record.py --samples "$W/raw"
+python3 scripts/xmap-samples/record.py --samples "$W/raw"
 
 echo "== every program maps with no gap =="
 check_run scripts/xmap-samples "$W/raw" "$W/mod" --strict >"$W/mod.log" ||

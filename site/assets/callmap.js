@@ -1,6 +1,8 @@
-/* The explorer page's script (gen/explorer.dawn links it, deferred): picking a
-   call and following it from the source into every listing and back, the
-   tabs, and the keyboard.
+/* The call map's script (gen/gpu.dawn links it, deferred): picking a call and
+   following it from the source into every listing and back, the tabs, and
+   the keyboard. It once ran the explorer page too (retired 2026-10-17); it
+   keeps its code for figures with several listings, which the Playground's
+   compile view draws with the same stylesheet rules (play-ui/src/explorer-core.ts).
 
    The page is complete without it. The source and the three listings are all
    in the markup, one under another, and every line already says which calls
@@ -36,7 +38,7 @@
   function has(list, x) { return list.indexOf(x) >= 0; }
   function words(s) { return s ? s.split(" ") : []; }
 
-  function explorer(fig) {
+  function wire(fig) {
     var parent = {};
     var calls = {};
     each(fig, ".xc", function (c) {
@@ -228,5 +230,5 @@
     each(fig, ".xp-note", function (n) { n.hidden = false; });
   }
 
-  each(document, ".xp", explorer);
+  each(document, ".xp", wire);
 })();

@@ -4,9 +4,8 @@
    The page is complete without it. The call map is a source and the Tile IR
    beside it, every line already marked with the call that wrote it; picking
    a call, the tab order and the arrow keys in a listing are
-   site/assets/explorer.js's, the script the explorer page runs, which this
-   page loads too (the map is that page's figure with two listings in view
-   and no tabs). This file only adds what is the GPU page's own.
+   site/assets/callmap.js's, which this page loads too (the map is a figure
+   with two listings in view and no tabs). This file only adds what is the GPU page's own.
 
    The keepdims card links two lines of the source (`#kl-<line>`, `data-pick`
    the call). Without a script the link is a jump to the line; with it the
@@ -34,7 +33,7 @@
         if (!line) return;
         ev.preventDefault();
         if (line.scrollIntoView) line.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
-        /* explorer.js picks on a click, and a click on a picked name lets go */
+        /* callmap.js picks on a click, and a click on a picked name lets go */
         if (name.getAttribute("aria-pressed") !== "true") name.click();
         if (window.history && history.replaceState) history.replaceState(null, "", a.getAttribute("href"));
       });

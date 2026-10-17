@@ -238,7 +238,7 @@ export function compileViewTests(expect: Expect): number {
   t('no sample, or a name the sidebar does not hold, is none', [sampleOfSearch('', FILES), sampleOfSearch('?sample=', FILES), sampleOfSearch('?sample=nope', FILES), sampleOfSearch('?sample=hello.dawn', FILES), sampleOfSearch('?sample=Hello', FILES), sampleOfSearch('?sample=../hello', FILES)], [null, null, null, null, null, null])
 
   // ---- the stylesheets ----
-  // The pane is drawn with the static explorer's classes, whose rules are the
+  // The pane is drawn with the `xp` classes, whose rules are the
   // site's. If style.css stops saying how they look, the pane would keep
   // working and quietly stop being drawn: say so here.
   const site = readFileSync(new URL('../../assets/style.css', import.meta.url), 'utf8')
