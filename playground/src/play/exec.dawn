@@ -40,7 +40,7 @@ use std/str
 use std/bytes
 use std/io
 use std/io.{Fs, with_fs_real, with_proc_real, with_clock_real, with_env_real, Instant, now, now_wall_ns, elapsed_ns}
-use play/contract.{Outcome, Compiled, CompileError, Timeout}
+use play/contract.{Outcome, Compiled, CompileError, Timeout, wants_tileir}
 use play/tilemap.{plan, Plan, dev_names, probe_source, read_recording, tile_map}
 use play/config.{dawn_bin, native_bin, java_bin, javap_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root, packages_root}
 
@@ -337,13 +337,31 @@ fn fresh_dir() -> String !io = {
 # panic, and a JVM Error (bracket catches Throwable on the JVM). Without it, a
 # failure between staging and cleanup left the directory, and whatever the
 # child had written into it, on disk for good.
-fn with_request(code: String, body: fn(String, String) -> Outcome !io) -> Outcome !Fs !io =
+fn with_request(code: String, body: fn(String, String, String) -> Outcome !io) -> Outcome !Fs !io =
   with_staged(code, msg => CompileError(msg), body)
 
 # [`with_request`] for a body of any result type: `unstaged` says what the
 # request answers when the source cannot be written into the box.
-fn with_staged[T](code: String, unstaged: fn(String) -> T, body: fn(String, String) -> T !io) -> T !Fs !io =
-  with_files([("prog.dawn", code)], unstaged, body)
+#
+# A program is staged in one of two forms, decided by its text alone
+# (`wants_tileir`): the single file `prog.dawn`, or the project of the Tile IR
+# section below, `src/main.dawn` with the runner's own `dawn.toml`. The third
+# argument the body gets is what the compilers are handed, the file or the
+# project directory, so no phase has to know which form it is in. Only a
+# program that imports tileir is a project; every other program is the single
+# file it always was.
+fn with_staged[T](code: String, unstaged: fn(String) -> T, body: fn(String, String, String) -> T !io) -> T !Fs !io =
+  with_files(staged_files(code), unstaged, (dir, box) => body(dir, box, staged_input(code, box)))
+
+fn staged_files(code: String) -> List[(String, String)] !io =
+  if wants_tileir(code) {
+    [("src/main.dawn", code), ("dawn.toml", tile_manifest(packages_root()))]
+  } else {
+    [("prog.dawn", code)]
+  }
+
+fn staged_input(code: String, box: String) -> String =
+  if wants_tileir(code) { box } else { "${box}/prog.dawn" }
 
 # [`with_staged`] for a program of several files, named relative to the box
 # (a project is `dawn.toml` and `src/main.dawn`).
@@ -386,8 +404,8 @@ fn write_all(box: String, files: List[(String, String)]) -> Result[Unit, String]
 # The budget is `compile_timeout_secs()` — separate from the run budget, since
 # a cold compiler is legitimately slower than the program it produces. The
 # diagnostics are capped like the run output: comptime can print too.
-fn compile_phase(dir: String, box: String) -> Result[Int, String] !io =
-  compile_input(dir, box, "${box}/prog.dawn")
+fn compile_phase(dir: String, box: String, input: String) -> Result[Int, String] !io =
+  compile_input(dir, box, input)
 
 # [`compile_phase`] for an input of the caller's choosing: the staged file, or
 # the box itself when it holds a project.
@@ -420,12 +438,12 @@ fn compile_with(dir: String, box: String, argv: List[String]) -> Result[Int, Str
 ## `native` is whether the runner may use the native `dawnc` (see
 ## [`native_ready`]); the answer is the same either way, only the cost differs.
 pub fn check(code: String, native: Bool) -> Outcome !io =
-  with_fs_real(() => with_request(code, (dir, box) => check_staged(dir, box, native)))
+  with_fs_real(() => with_request(code, (dir, box, input) => check_staged(dir, box, input, native && not wants_tileir(code))))
 
 pub fn execute(code: String) -> Outcome !io = with_fs_real(() => with_request(code, execute_staged))
 
-fn check_staged(dir: String, box: String, native: Bool) -> Outcome !io =
-  match check_phase(dir, box, native) {
+fn check_staged(dir: String, box: String, input: String, native: Bool) -> Outcome !io =
+  match check_phase(dir, box, input, native) {
     Err(diags) -> CompileError(diags)
     Ok(ms) -> Compiled("", 0, false, ms)
   }
@@ -449,18 +467,18 @@ fn native_declined(diags: String) -> Bool = str.trim(diags) == "" || str.contain
 # `dawn build` as the answer for a program `dawnc` declines, so what the
 # editor shows does not depend on which compiler looked first. A timeout is
 # not a refusal and is not retried: the budget is spent.
-fn check_phase(dir: String, box: String, native: Bool) -> Result[Int, String] !io =
+fn check_phase(dir: String, box: String, input: String, native: Bool) -> Result[Int, String] !io =
   if not native {
-    compile_phase(dir, box)
+    compile_phase(dir, box, input)
   } else {
-    match compile_with(dir, box, [native_bin(), "check", "${box}/prog.dawn"]) {
+    match compile_with(dir, box, [native_bin(), "check", input]) {
       Ok(ms) -> Ok(ms)
-      Err(diags) -> if native_declined(diags) { compile_phase(dir, box) } else { Err(diags) }
+      Err(diags) -> if native_declined(diags) { compile_phase(dir, box, input) } else { Err(diags) }
     }
   }
 
-fn execute_staged(dir: String, box: String) -> Outcome !io =
-  match compile_phase(dir, box) {
+fn execute_staged(dir: String, box: String, input: String) -> Outcome !io =
+  match compile_phase(dir, box, input) {
     Err(diags) -> CompileError(diags)
     Ok(_) -> run_phase(dir, box)
   }
@@ -595,14 +613,13 @@ fn raw_file(path: String, what: String, scratch: String) -> Result[String, ViewR
 # under one permit, four under two. Measured on the dev box, sequential is
 # 3.6 to 4.0 s cold against 2.0 to 2.2 s side by side; the second tab of a
 # program is a cache hit either way, which is where the repeat cost goes.
-fn view_staged(dir: String, box: String, native: Bool) -> ViewRaw !io = {
+fn view_staged(dir: String, box: String, prog: String, native: Bool, project: Bool) -> ViewRaw !io = {
   let started = tick()
-  let prog = "${box}/prog.dawn"
   match emitc_unit(dir, box, prog, native, started) {
     Some(fail) -> fail
     None -> match emit_unit(dir, box, "emit", [dawn_bin(), "__emit", prog, "-o", "${box}/classes", "--map", "${box}/jvm.dawnmap"], started) {
       Some(fail) -> fail
-      None -> list_and_gather(dir, box, started)
+      None -> list_and_gather(dir, box, started, if project { "main" } else { "prog" })
     }
   }
 }
@@ -637,9 +654,10 @@ fn diagnostics(dir: String, box: String, name: String) -> String !io = {
 }
 
 # javap names the class by a path the runner chose: the module of a single
-# file is its stem, and the file is always prog.dawn.
-fn list_and_gather(dir: String, box: String, started: Instant) -> ViewRaw !io = {
-  let argv = [javap_bin(), "-J-Xmx128m", "-J-Dstdout.encoding=UTF-8", "-c", "-p", "-s", "${box}/classes/prog.class"]
+# file is its stem, and the file is always prog.dawn; the module of a project
+# is `main`.
+fn list_and_gather(dir: String, box: String, started: Instant, module: String) -> ViewRaw !io = {
+  let argv = [javap_bin(), "-J-Xmx128m", "-J-Dstdout.encoding=UTF-8", "-c", "-p", "-s", "${box}/classes/${module}.class"]
   match await_unit(dir, box, "javap", argv, budget_left(started)) {
     None -> RawBroken("the listing tool timed out")
     Some(code) ->
@@ -676,7 +694,7 @@ fn gather(dir: String, box: String, started: Instant) -> ViewRaw !io =
 ## the program is never run, though `comptime` still runs inside the compiler,
 ## which is why the compilers are sandboxed like /check's.
 pub fn view_raw(code: String, native: Bool) -> ViewRaw !io =
-  with_fs_real(() => with_staged(code, msg => RawFail(CompileError(msg)), (dir, box) => view_staged(dir, box, native)))
+  with_fs_real(() => with_staged(code, msg => RawFail(CompileError(msg)), (dir, box, input) => view_staged(dir, box, input, native && not wants_tileir(code), wants_tileir(code))))
 
 # ---- the Tile IR view (POST /compile with target "tile") ----
 #
@@ -706,6 +724,20 @@ pub fn view_raw(code: String, native: Bool) -> ViewRaw !io =
 pub fn tile_manifest(packages: String) -> String =
   "schema = 1\nname = \"tile\"\nversion = \"0.0.0\"\n\n[deps]\ntileir = \"${packages}/tileir\"\ntileref = \"${packages}/tileref\"\n"
 
+fn file_names(files: List[(String, String)]) -> List[String] = map(files, f => {
+  let (name, _) = f
+  name
+})
+
+test "only a program that imports tileir is staged as a project" {
+  let plain = staged_files("pub fn main() -> Unit !io = println(\"hi\")")
+  assert file_names(plain) == ["prog.dawn"]
+  assert staged_input("x", "/b") == "/b/prog.dawn"
+  let tile = staged_files("use tileir/dev.{Dev}\n")
+  assert file_names(tile) == ["src/main.dawn", "dawn.toml"]
+  assert staged_input("use tileir/dev.{Dev}\n", "/b") == "/b"
+}
+
 test "the manifest names exactly two dependencies, both under the packages directory" {
   let m = tile_manifest("/opt/dawn/packages")
   assert str.contains(m, "tileir = \"/opt/dawn/packages/tileir\"\n")
@@ -719,13 +751,6 @@ test "the manifest names exactly two dependencies, both under the packages direc
 pub fn tile_ready() -> Bool !io = {
   let root = packages_root()
   with_fs_real(() => io.exists("${root}/tileir/dawn.toml") && io.exists("${root}/tileref/dawn.toml"))
-}
-
-## Run `code` as the `src/main.dawn` of a Tile IR project and answer what /run
-## answers: the diagnostics, the program's output and exit status, or a timeout.
-pub fn tile_run(code: String) -> Outcome !io = {
-  let files = [("src/main.dawn", code), ("dawn.toml", tile_manifest(packages_root()))]
-  with_fs_real(() => with_files(files, msg => CompileError(msg), tile_staged))
 }
 
 ## What the Tile IR view's job came to. `TileMapped` is the visitor's kernel
@@ -759,7 +784,7 @@ pub fn tile_job(code: String) -> TileRaw !io =
   match tile_try(code) {
     TriedMapped(map, golden, ms) -> TileMapped(map, golden, ms)
     TriedSettled(outcome) -> TilePlain(outcome, "")
-    TriedNot(why) -> TilePlain(tile_run(code), why)
+    TriedNot(why) -> TilePlain(execute(code), why)
   }
 
 fn tile_try(code: String) -> Tried !io =
@@ -837,12 +862,6 @@ fn tile_probe(dir: String, box: String, code: String, p: Plan) -> Tried !io =
 
 # A program's output without the lines the probe added.
 fn unmarked(out: String) -> String = join(filter(str.split(out, "\n"), l => not str.starts_with(l, "@@tile ")), "\n")
-
-fn tile_staged(dir: String, box: String) -> Outcome !io =
-  match compile_input(dir, box, box) {
-    Err(diags) -> CompileError(diags)
-    Ok(_) -> run_phase(dir, box)
-  }
 
 # Phase 2: run the compiled jar under a wall-clock limit.
 fn run_phase(dir: String, box: String) -> Outcome !io = {
@@ -1053,7 +1072,7 @@ test "shown strips the box before the request directory, then marks a cut" {
 # Test-only: a request body that fails after the box exists, naming its
 # request directory so the test can look for it afterwards. The `|` ends the
 # name; the panic appends its call site after it.
-fn fails_in(dir: String, box: String) -> Outcome !io = panic(dir ++ "|")
+fn fails_in(dir: String, box: String, _input: String) -> Outcome !io = panic(dir ++ "|")
 
 test "with_request removes the request directory when the body fails" {
   let failed: Result[Outcome, ForeignError] = catch_panic(() => with_fs_real(() => with_request("x", fails_in)))

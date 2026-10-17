@@ -38,7 +38,7 @@ use xmap/xmap.{Spec, Raw, Built, Pane, explore}
 use xmap/table.{Call, parse_tile_map, table_from_tile, check_table}
 use xmap/panes.{Out, tile_pane}
 use xmap/source.{at, src_of}
-use play/contract.{Outcome, Compiled, CompileError, Timeout, render_check, render_error}
+use play/contract.{Outcome, Compiled, CompileError, Timeout, render_check, render_error, wants_tileir}
 use play/exec.{ViewRaw, ViewParts, RawOk, RawFail, RawTimedOut, RawBroken, RawTooLarge}
 
 ## The most bytes of text one pane's answer carries.
@@ -59,15 +59,31 @@ pub type Viewed =
   | Mapped(c: String, jvm: String, gaps: Int)
   | Done(status: Int, body: String, keep: Bool)
 
-## The key an answer is kept under: the toolchains that wrote it and the
-## program, hashed, so that a different compiler or a different `javap` is a
+## The key an answer is kept under: the toolchains that wrote it, the form the
+## program was compiled in (a single file or the Tile IR project, which print
+## different modules and paths for the same text) and the program, hashed, so
+## that a different compiler, a different `javap` or a different form is a
 ## different key and not a stale hit. The target is added by the caller.
 pub fn cache_key(toolchain: String, code: String) -> String =
-  sha256.hex(bytes.utf8("${toolchain}\n${code}"))
+  sha256.hex(bytes.utf8("${toolchain}\n${if wants_tileir(code) { "project" } else { "file" }}\n${code}"))
+
+test "the same text in the two forms would be two keys, and a form is a function of the text" {
+  assert cache_key("t", "use tileir/dev.{Dev}") == cache_key("t", "use tileir/dev.{Dev}")
+  assert cache_key("t", "a") != cache_key("t", "b")
+  assert cache_key("t", "a") != cache_key("u", "a")
+}
 
 # The module of a single file is its stem, and the runner stages every program
-# as prog.dawn.
-fn spec() -> Spec = Spec { name: "prog", path: "prog.dawn", fn_name: "", module: "prog", kernel: false }
+# as prog.dawn; a program that imports tileir is a project (play/exec.dawn), so
+# its module is `main` and its file `src/main.dawn`. The pairing keeps only the
+# program's own module, which is why the packages it pulls in, tileir's whole
+# implementation among them, are in the compilers' output and not in the panes.
+fn spec(code: String) -> Spec =
+  if wants_tileir(code) {
+    Spec { name: "main", path: "src/main.dawn", fn_name: "", module: "main", kernel: false }
+  } else {
+    Spec { name: "prog", path: "prog.dawn", fn_name: "", module: "prog", kernel: false }
+  }
 
 fn num(n: Int) -> Json = JInt(n)
 
@@ -186,7 +202,7 @@ pub fn build_view(code: String, raw: ViewRaw) -> Viewed =
   }
 
 fn mapped(code: String, p: ViewParts) -> Viewed =
-  match explore(spec(), Raw { source: code, ctext: p.ctext, cmap: p.cmap, jmap: p.jmap, javap: p.javap, tile_map: "", golden: "" }) {
+  match explore(spec(code), Raw { source: code, ctext: p.ctext, cmap: p.cmap, jmap: p.jmap, javap: p.javap, tile_map: "", golden: "" }) {
     Err(e) -> Done(500, render_error("the compile view failed: ${e}"), false)
     Ok(b) -> Mapped(rest_of(b, "c"), rest_of(b, "jvm"), len(b.gaps))
   }
