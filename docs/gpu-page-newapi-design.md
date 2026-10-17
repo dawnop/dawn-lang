@@ -159,3 +159,10 @@ Tile IR 的约 340 px，所以每行折成一行后类型尾巴全被切掉；62
 - 性能数字：见五。
 - 页上写 `Shared` / `Out` 的计数：见三。
 - 另立 GPU 站或拆出 tileir 子页：既有裁决，GPU 页在主站；完整 API 已有 `packages/tileir.html`。
+
+## 九、Playground 链接（2026-10-17）
+
+explorer 页撤销后（`docs/explorer-page-design.md` 文末），图的标题行有一条「Open in Playground」（中文「在
+Playground 中打开」），指向 `playground.html?sample=flash_attn&view=tile`：侧栏的同一个样例，Tile IR 标签打开。它是
+普通锚点，无脚本也能用，不占代码区；第八节里提到的 `explorer.html` 与 `explorer.js` 现在分别是已撤的页面和改名后的
+`callmap.js`。

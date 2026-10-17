@@ -1,6 +1,7 @@
 # 三后端对照页（Explorer）：源码在左，产物在右
 
-> 状态：**proposed**（2026-10-07 起草，同日实现于分支 `feat/explorer-page`，待合入）。这是
+> 状态：**historical**（2026-10-17 撤销，见文末「撤销」一节）。2026-10-07 起草并实现的静态页 `explorer.html`
+> 已从站点撤掉；下文是它当时的设计，读作历史。这是
 > `docs/source-span-map-design.md` 的 M7。依赖：M1（GPU 页的 Tile IR 调用对照，
 > `site/gpu-map/flash_attn.map`）、M2（Core 调用节点的 site）、M3（`__emitc --map`，第十二节）、
 > M4（`__emit --map`，第十三节）。不依赖 M5、M6。
@@ -190,6 +191,8 @@ record.py（`python3 site/explorer/record.py`，站点 `build.sh` 里跑）：
 
 ## 十一、不做的（理由）
 
+（以下是 2026-10-07 当时的取舍。）
+
 - **为了页面默认开 `#line` / LNT / `di_loc`**：裁决已否；侧表按需生成，默认产物字节不动。
 - **把 `.c.txt` 与 `.xmap` 提交入库**：见第三节，会让每次改编译器都要重录页面快照。
 - **整份 C 与整份 javap 都放上页面**：七千到十五万行，几乎全是别人的代码；放了也只是滚动条。
@@ -201,3 +204,38 @@ record.py（`python3 site/explorer/record.py`，站点 `build.sh` 里跑）：
   导航已是九项，且每项都有测试钉着。
 - **JVM 栏用 ASM Textifier 或自己写反汇编**：第十三节 13.6 已论证，读取方跑 `javap -c -p -s`，
   编译器不写列表。
+
+## 撤销（2026-10-17）
+
+**理由。** 用户的话：「explorer 页面可以重整，或者直接去掉，反正已经有 playground 了。」Playground 的 C、JVM、
+Tile IR 三个标签（`docs/playground-compile-design.md`）用同一个包（`packages/xmap`）做同一种配对，还能对读者
+自己写的代码起作用；静态页只对两个固定程序起作用，却要另外维护一份生成器、两份文案、一份建站时的记录脚本和一张
+译本登记。两套东西做同一件事，留下较弱的那套没有额外的读者。裁决是整页撤掉，不留跳转页：没有外部消费者，旧地址
+`explorer.html` 与 `zh/explorer.html` 现在是 404，这是接受的结果。
+
+**删了什么。**
+
+- `site/src/gen/explorer.dawn`（生成器及其测试）、`site/pages/explorer.md` 与 `explorer.zh.md`、
+  `site/explorer/attend.dawn`（只给本页用的宿主程序），`site/src/main.dawn` 里的两行调用，
+  `scripts/doc-check.py` 里的译本登记。
+- 建站时的记录：`site/build.sh` 里的 `record.py` 一步，`scripts/site-dist-diff.sh` 里写快照的那一步。
+  `site/build/explorer/` 不再生成。
+- `site/dawn.toml` 对 `packages/xmap` 的依赖：站点不再配对任何东西。
+
+**留了什么，以及为什么。**
+
+- `site/assets/callmap.js`（原 `explorer.js`）：GPU 页的 flash attention 图用它做点选。页面没有了，名字不该再说
+  「explorer」，所以改名；牵连只有 `gen/gpu.dawn` 与几处注释，一次改完。
+- 样式表里的 `xp` 规则：GPU 页的图用，Playground 的编译视图也靠它画窗格（`compile-selftest.ts` 钉着这些选择器）。
+  类名不改：改它要同时动 TypeScript、CSS、生成器与测试，换来的只是名字更中性。
+- `site/play-ui/src/explorer-core.ts`：Playground 编译视图的核心，侧栏也叫 explorer，三处导入。不改名，同上理由。
+- 记录编译器侧表的脚本：`site/explorer/record.py` 移到 `scripts/xmap-samples/record.py`，只留 `--samples`，
+  给「Playground 的 11 个起手程序零缺口」一项门禁用（`scripts/xmap-samples/run.sh`，CI 里照跑）。
+  两个固定程序与 Tile IR 那一半随页面删掉。
+- `packages/xmap`：Playground 还在用，只改了几处注释里对静态页的说法。
+
+**换来的。** GPU 页 flash attention 图的标题行有了「Open in Playground」（中文「在 Playground 中打开」），
+打开的是侧栏的同一个 `flash_attn` 样例，Tile IR 标签直接开着：`playground.html?sample=flash_attn&view=tile`。
+Playground 为此认 `?sample=<文件名去掉扩展名>`（只认侧栏已有的名字，未知名字忽略，hash 里的程序优先，
+命名的样例优先于浏览器里存的草稿）。每次建站少跑一轮 C、JVM 与 `javap`（本文第八节记的 17 至 20 s 墙钟）。
+链接检查器顺带学会了忽略 href 里的查询串。
