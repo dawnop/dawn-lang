@@ -125,7 +125,11 @@ One kernel, line by line
 
 ## kernel-body
 
-A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. The same function beside the C and the JVM bytecode it compiles to is on [the explorer page](explorer.html).
+A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. In the Playground the same function can also be read beside the C and the JVM bytecode it compiles to.
+
+## kernel-open
+
+Open in Playground
 
 ## kernel-kind
 

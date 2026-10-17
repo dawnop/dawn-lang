@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 9eaf69056d3c0bba -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 6a2b105c12e569d7 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -120,7 +120,11 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 
 ## kernel-body
 
-一个融合注意力 kernel（也就是上面那两行行统计的出处），和它的调用写出的 Tile IR 并排放着。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表；调用名和它写出的行是同一种颜色。同一个函数连同它编出来的 C 与 JVM 字节码，在[对照页](zh/explorer.html)上。
+一个融合注意力 kernel（也就是上面那两行行统计的出处），和它的调用写出的 Tile IR 并排放着。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表；调用名和它写出的行是同一种颜色。在 Playground 里还能把同一个函数和它编出来的 C 与 JVM 字节码并排看。
+
+## kernel-open
+
+在 Playground 中打开
 
 ## kernel-kind
 
