@@ -1,6 +1,6 @@
 # Playground 在线编译：改过的代码也能对照 C / JVM / Tile IR
 
-> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）K4（反代与部署说明）、K5（Tile IR 文本）与 K6（Tile IR 逐调用对照）已实现，见第七节）。这是 `docs/explorer-page-design.md`
+> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）K4（反代与部署说明）、K5（Tile IR 文本）与 K6（Tile IR 逐调用对照）与 K7（tileir 程序在每条路由上可解析、flash attention 样例）已实现，见第七节）。这是 `docs/explorer-page-design.md`
 > 第九节留的「下一步」：把 `--map` 接到 Playground，让浏览器里现改的代码也能和产物对照，形态向
 > Compiler Explorer 看齐。依赖：M3/M4（`__emitc --map`、`__emit --map`，`docs/source-span-map-design.md`
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
@@ -433,7 +433,7 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 - **负控（先绿后红再还原）：** 让 runner 读请求里的 `dawn_toml` 作清单，夹带用例红（答出了窗格）；还原后 42 项全绿。
 - **延迟（本机 WSL2，负载不低，量级）：** 冷 tile 请求响应里的 `ms` 为 2.6 s（沙箱外、unsafe-local，含编译 `tileir` 与运行）；同一项目 `dawn run` 为 2.5 s。目标 4.5 s 以内，本机达标；沙箱单元的额外开销（约 0.1 s 一个）与生产机未测。
 - **bundle（gzip -9）：** `playground.js` 135,735 -> 136,384 B（+649 B；未压缩 416.92 -> 419.35 kB），`playground.css` 不变（2,800 B）。
-- **没做的：** 不加 Tile IR 的样例（`doc-check` 的样例检查以单文件运行 `site/play-ui/samples`，`use tileir/` 在那里解析不了，而 `/run` 也一样）；
+- **没做的：** 不加 Tile IR 的样例（`doc-check` 的样例检查以单文件运行 `site/play-ui/samples`，`use tileir/` 在那里解析不了，而 `/run` 也一样；K7 两头都补上了）；
   不做逐调用对照（K6）；`/compile` 的限流区与权限的共用仍归 K4。
 
 **K6：Tile IR 逐调用对照（T2）。** 第 4.3 节与第八节第 4 条留的那一刀。K5 之后 Tile IR 窗格已经能在线编译、显示用户改过的 kernel；
@@ -487,6 +487,68 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 - **同一请求里 C、JVM、Tile IR 三栏共表：** C / JVM 的表来自两个编译器的侧表，Tile 的表来自记录；三者调用集合不同（`explorer-page-design.md` 第三节），在线版先让 Tile 栏自成一表，三栏联动留给有需要时。
 - **多个 kernel（多处 `traceN`）：** 一个窗格只放一份 Tile IR，多于一处时选哪个是产品决定，现在降级并说原因。
 - **给 `selftest.ts` 接 CI：** 沿用 K3 记下的缺口，需要裁决（要改 `steps.lock.json`、开观测窗口），本刀没有改任何工作流，因此 CI 墙钟无变化。
+
+**K7：tileir 程序在每条路由上都能解析，侧栏加 flash attention 样例（2026-10-17）。** K5 只让 `target:"tile"` 走项目，
+其余路由仍把程序当单文件 `prog.dawn` 编，于是同一份 tileir 程序在 `/run`、`/check` 与 C、JVM 窗格都报 `cannot find module tileir/dev`
+（2026-10-17 线上实测，只有 tile 窗格正常）。这一刀把「是不是项目」收成一个只看源码文本的判断，并补上当初因此没加的样例。
+
+**做法。** 程序含 `use tileir/`（`play/contract.dawn` 的 `wants_tileir`，服务端与页面共用的同一个判断）就按 K5 的同一份生成清单暂存为项目：
+`box/src/main.dawn` 加 runner 自己写的 `box/dawn.toml`（`tile_manifest`，两个固定路径依赖）；其余程序一字节不变，仍是 `box/prog.dawn`。
+`exec.dawn` 里暂存与「编译器拿到的输入」成对出现（单文件时是文件，项目时是目录），`/run`、`/check`、C 与 JVM 视图以及 tile 视图的回退运行都走这一处，
+`tile_run` 与 `tile_staged` 因此删掉，回退运行直接是 `execute`。访客仍然不能提供清单：请求里多带 `dawn_toml` 字段被忽略，`use json/...` 照旧解析失败（合约里钉在 `/run` 与 C 视图两条路由上）。
+- **缓存键区分形态：** `cache_key` 在工具链与代码之间加入形态（`file` 或 `project`）再取哈希。形态本来就是代码文本的函数，同一段文本不会同时有两种形态；
+  写进键里是为了不靠这一点：以后若形态的判断变了，旧答案是另一个键，而不是串到新形态上。
+- **配对：** 项目的模块叫 `main`、文件是 `src/main.dawn`，`view.dawn` 的 `spec` 按形态给 xmap 对应的 `Spec`；JVM 列表的类改成 `main.class`。
+- **native `dawnc`：** 项目形态不走 `dawnc check` / `dawnc emitc`（`/check` 与 C 视图直接用 JVM 编译器），因为 `dawnc` 对 `[deps]` 项目的支持未被验证，
+  而 tileir 程序要用的恰是 `tileir` 的整份实现；每个请求少一次可能的回落，换来一个确定的路径。
+
+**评估：无条件全走项目（不采用）。** 墙钟上它几乎免费：本机 `dawn run` 三次，普通 hello 单文件 1.53 / 1.51 / 1.46 s，放进带 tileir 依赖的项目 1.47 / 1.57 / 1.54 s，输出相同（事先的实测是 1.55 / 1.52 对 1.56 / 1.50 s），因为依赖按 `use` 加载，不用就不读。
+不采用的理由在别处：
+1. 全部既有输出会变：诊断与 panic 里的 `prog.dawn:行:列` 变成 `src/main.dawn:行:列`（`contract.sh` 里期望 `prog.dawn` 的断言、`scripts/play-live-check.py` 的 `playground_expected` 重写、站点上所有展示这些文案的样例）；
+2. 每个请求多写一个文件和一份清单，`dawnc` 的单文件路径（`/check` 与 C 视图的 native 路径）要么作废要么对 `[deps]` 项目重新验证；
+3. 沙箱面其实不变，所以这条不是理由，但也说明它没有换来任何东西：普通程序不需要依赖。
+按文本判断的代价只有一个：含 `use tileir/` 的注释也走项目形态。这与 K5 对标签的判断相同（「礼貌，不是安全边界」），多花的只是一份清单。
+
+**C 与 JVM 窗格里 tileir 程序显示什么（实测，flash attention 样例）。**
+- 编译器输出里确实有 `tileir` 包的整份实现：`__emitc` 的 C 文本 88,619 行、6.0 MB（`VIEW_RAW_LIMIT` 是 8 MiB，余量约 25%）。
+  但窗格只送用户自己的模块（3.2 节早已如此）：C 窗格 601 行，JVM 窗格 1,879 行（含用户模块里为泛型分派生成的 `bridge$` 方法），逐调用配对可用。
+  vadd 同理：C 窗格 88 行、8 个调用、`gaps.count == 0`。
+- flash attention 的 C 与 JVM 窗格有 24 个调用与 8 条缺口：缺口都是张量上的中缀运算符（`a * b`、`s - m`）被两个编译器的侧表记成调用，
+  名字的跨度落在运算符上，不是标识符（`the call at 27:26 has its name at 27:68, which is no identifier`），xmap 因此不为它们画线。
+  这是侧表与 xmap 之间既有的缺口，与暂存形态无关；Tile IR 窗格不受影响（25 个调用，0 缺口，因为配对来自 `tileir` 的记录）。
+  其余 24 个调用正常点选。建议单列修：让编译器侧表给运算符调用一个运算符名的跨度，或让 xmap 把运算符调用当作无名调用跳过，二者都不属于这一刀。
+- 因此不需要「只送某些函数」之类的新机制；没有做的是下面「不做的」里的那几条。
+
+**样例。** `site/play-ui/samples/flash_attn.dawn` 是 `scripts/tile-golden/kernels.dawn` 的 `flash_attn`，与站点 GPU 页、explorer 页展示的同一个 kernel，
+外加把它录下来所需的几行 `main`（原 `playground/test/tile_attn.dawn`，该文件因此删除：同一份内容不留两份）。
+- **钉住的方式（机器对账，不是约定）：** `scripts/doc-check.py` 的 `PINNED_SAMPLES` 声明样例、原件与 golden；检查三件事：
+  (1) 样例里的 `fn flash_attn` 与原件逐字相同；(2) 样例里每一行 `const` 都是原件里的一行；(3) 样例的 `.out` 与 `scripts/tile-golden/flash_attn.mlir` 逐字节相同。
+  再加上既有的「运行并比对 `.out`」。golden 本身由 `scripts/tile-golden` 两后端逐字节钉住，所以 kernel 一动，golden 红或样例红，二者必有其一。
+- **doc-check 的样例检查：** 含 `use tileir/` 的样例改按项目运行（`src/main.dawn` 加与 runner 同样两条路径依赖的清单），`.out` 照旧逐字节比对。
+- **其他遍历样例目录的门：** `scripts/xmap-samples`（经 `site/explorer/record.py --samples`）只处理单文件样例，仍是 11 个、无缺口，tileir 样例由 `contract.sh` 的 `/compile` 用例与 doc-check 持有；
+  `scripts/std-prune-diff.sh` 把它当又一个单元比较裁剪前后的诊断，无需改；`scripts/play-live-check.py` 部署后会拿线上 `/run` 的输出与 `.out` 比，天然覆盖新路径（所以按 DEPLOY 的次序，runner 先于站点）。
+- **大小与耗时（本机 WSL2，冷请求）：** 源码 1,818 B（64 KiB 上限的 2.8%）；`/run` 输出 4,737 B，`/run` 墙钟 2.77 s（其中运行 143 ms，其余是编译 `tileir`），对比 hello 1.4 s；
+  `/check` 2.55 s（hello 1.37 s）；tile 窗格 3.10 s，响应 8.6 KB；C 窗格 6.2 s、响应 41 KB，JVM 窗格同一次编译、响应 109 KB；
+  plain 起步程序的 C 窗格是 3.1 s。都在 30 s 编译预算内（C 窗格的 6.2 s 是两个编译器各编一遍 `tileir`，约为普通程序的两倍）。
+- **编辑器里的红线：** 编辑器的实时诊断由 LSP 会话负责，它的文档是无项目的 `untitled:` 文件，解析不了 `tileir/`，所以 tileir 程序在编辑器里可能出现未解析模块的红线，
+  而 Run 与各窗格是对的。这不是这一刀引入的（任何手写的 tileir 程序都一样），也没有在这一刀里解决，见下。
+
+**测试。** `playground/test/contract.sh` 新增 11 项：`/run` 跑 tileir 程序且输出与同一项目的 `dawn run` 逐字节相同、`/run` 跑样例且输出等于它钉住的 golden、
+tileir 程序的编译错误给诊断、夹带的依赖在 `/run` 与 C 视图上不被采纳、`/check` 通过、不含 `use tileir/` 的程序仍是单文件（诊断仍称 `prog.dawn`）、
+vadd 的 C 与 JVM 窗格（`SOUND`：无缺口、窗格只含用户模块）、样例的 C 与 JVM 窗格；既有的 flash attention 配对用例改为读样例本身，并核对 `src.first` 是样例里 `fn flash_attn` 的行。
+先红后绿：新用例在旧的 `exec.dawn` 与 `view.dawn` 上 7 项红（`/run` 跑 tileir 程序、`/run` 跑样例、`/check`、vadd 的 C 与 JVM、样例的 C 与 JVM）；其余 4 项是本来就该被拒或本来就不变的情形，旧代码也过。
+`dawn test playground` 加 1 个暂存形态的单测与 1 个缓存键的单测。doc-check 的负控：清单里去掉 tileir 依赖则样例红（`cannot find module`）；把 kernel 里 `exp(s - m_new)` 改成 `exp(s + m_new)` 则样例红两次（输出与原件不同、`fn flash_attn` 与原件不同）；
+把 `FA_BQ` 改成 16 则红（常量行不在原件里）。
+
+**不做的（理由）。**
+- **无条件全走项目：** 见上，输出文案全变、单文件快路径要重验，换不来任何东西。
+- **让 LSP 解析 tileir：** 要给 LSP 会话一个带清单的项目根（`rootUri` 与暂存目录的生命周期），是网关与 `dawnc lsp` 的改动，不是暂存形态的改动；单列。
+  样例在编辑器里的红线是已知现状；若要消掉，最小的做法是网关对含 `use tileir/` 的文档在隐藏的项目目录里开会话。
+- **修中缀运算符的缺口：** 属 xmap 与两个编译器侧表，见上；样例因此不进 `scripts/xmap-samples` 的「无缺口」门。
+- **把 `VIEW_RAW_LIMIT` 调大或让编译器只出用户模块的 C：** tileir 程序的 C 已占 6.0 MB / 8 MiB；一个用到更多 `tileir` 的程序可能越线并答 422「the C text is too large」。
+  这是真风险但还没有程序越线，调限额要同时看内存与 `read_capped_to` 的读入成本，等有越线的程序再裁。
+- **把样例做成多文件或分页：** 一个 kernel 加 `main` 不到 2 KB，没有理由。
+- **为 `/run` 开放访客提供依赖：** 清单永远是 runner 的，这是 K5 的安全前提，没有松动。
 
 ## 八、已裁决（2026-10-07，协调者）
 
