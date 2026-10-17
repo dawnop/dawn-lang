@@ -7,7 +7,7 @@ use xmap/xmap
 
 let built = xmap.explore(spec, raw)           # Result[Built, String], gaps inside
 let strict = xmap.explore_strict(spec, raw)   # the first gap as the error
-let text = xmap.to_xmap(b)                    # the `.xmap` rows the explorer page reads
+let text = xmap.to_xmap(b)                    # the `.xmap` rows the Playground's compile view reads
 ```
 
 `spec` names the program (`Spec`) and `raw` is what the compilers printed

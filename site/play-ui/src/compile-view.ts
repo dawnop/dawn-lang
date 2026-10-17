@@ -12,7 +12,7 @@
 // What is decided here and what is not. Which lines a call owns, who a clicked
 // line belongs to and where the keys go are explorer-core.ts's, tested without
 // a DOM; compile-state.ts decides what each answer means. This file only
-// draws those answers (the same classes as the static explorer, so the site's
+// draws those answers (the `xp` classes the site's call-map figure also uses, so the site's
 // stylesheet paints them) and runs the request: the 1.5 s idle recompile that
 // is cancelled by the next keystroke (ruling 3), one request per visible tab
 // (the service keeps the other half of the build), and an answer that is kept,
@@ -479,7 +479,7 @@ export class ComparePane {
   }
 
   // A C line cut where the picked-call columns begin and end, each piece
-  // inside the calls whose columns hold it (gen/explorer.dawn c_html).
+  // inside the calls whose columns hold it (it was gen/explorer.dawn's c_html).
   private cPieces(line: HTMLElement, text: string, n: number, m: Model) {
     const marks: [number, number, number][] = []
     for (const o of m.view.pane.outs) for (const [l, a, z] of o.marks) if (l === n) marks.push([o.call, a, z])

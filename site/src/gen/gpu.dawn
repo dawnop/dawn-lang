@@ -25,9 +25,10 @@
 # Why the kernel section is a call map, and why it is `flash_attn`. Two code
 # windows side by side showed that a kernel becomes IR but not which call
 # became which lines; the map pairs them, a call's name in the source and the
-# Tile IR lines it wrote in the same colour. It is the explorer page's figure
-# (the same markup, stylesheet rules and script, with two listings in view and
-# no tabs) and not a layout of its own: an earlier one put the Tile IR on the
+# Tile IR lines it wrote in the same colour. It is a figure of the
+# `xp` family (markup and stylesheet rules shared with the Playground's compile
+# view, and callmap.js), with two listings in view and no tabs, and not a
+# layout of its own: an earlier one put the Tile IR on the
 # source's own rows, folded, which left the Tile IR a narrow column and
 # cut every line of it at the column's edge. The pairing is never
 # written here: packages/tileir's side table says which call wrote which line
@@ -56,7 +57,7 @@
 # the rows that are not implemented, and real Tile IR drifts behind the head.
 # Each is the markup's final state without gpu.js or under reduced motion; the
 # script only starts it from nothing. The call map and the gates do not move
-# at all. The map's lines are all in the markup and a pick is explorer.js's;
+# at all. The map's lines are all in the markup and a pick is callmap.js's;
 # gpu.js only brings the keepdims card's two links to their line.
 #
 # The words are site/pages/gpu.md and its translation gpu.zh.md, in
@@ -880,11 +881,11 @@ fn call_place(c: MCall) -> String = "${c.from.line}:${c.from.col}–${c.to.line}
 
 ## One Dawn line of the map, cut where the calls on it start, end and name
 ## themselves, each piece highlighted on its own. A call's name is wrapped as
-## the thing explorer.js lets a reader pick (`data-c` its row, `data-p` its
+## the thing callmap.js lets a reader pick (`data-c` its row, `data-p` its
 ## parent's, `data-s` its place, a colour class of its own); every piece
 ## inside a call's span says which rows it is inside (`data-k`), so a picked
-## call's whole span can be underlined. This is gen/explorer's `src_line`
-## with the colour class added; the stylesheet gives that class a meaning only
+## call's whole span can be underlined. This is the plain figure's
+## line (no colour class); the stylesheet gives that class a meaning only
 ## inside this page's figure.
 pub fn dawn_line(m: KernelMap, l: Int) -> String = {
   let text = m.src[l - m.first]
@@ -1001,8 +1002,8 @@ pub fn ir_results(m: KernelMap) -> List[Int] = {
 
 ## One line of the Tile IR pane: its number, its text, the call that wrote it
 ## (`data-o`, which is what a click on it picks; a line of the head or the
-## tail has none) and that call's name as a tooltip. Same shape as
-## gen/explorer's `pane_line`, with the colour.
+## tail has none) and that call's name as a tooltip. The same
+## shape as a plain figure's pane line, with the colour.
 fn ir_row(m: KernelMap, n: Int, owner: Int, result: Bool) -> String = {
   let cls = (if owner >= 0 { "xl ${hue_of(owner)}" } else { "xl" }) ++ if result { " res" } else { "" }
   let o =
@@ -1050,16 +1051,16 @@ fn map_facts(c: Copy, mu: fn(String) -> String, kf: KernelFacts) -> String = {
     }), "") ++ "</p>"
 }
 
-## The kernel section's figure, built on the explorer page's (`xp`, laid out
-## and run by the same stylesheet rules and explorer.js): the kernel's name
+## The kernel section's figure (`xp`, laid out by the stylesheet rules the
+## Playground's compile view shares and run by callmap.js): the kernel's name
 ## and facts, the Dawn source beside the Tile IR it recorded, each in a box of
 ## its own that scrolls, and under the source (which is the shorter of the
 ## two, so the words take no width from either) the status line and the one
 ## sentence about picking a call, which stays `hidden` until a script is there
 ## to make picking work. With no script
-## the two listings are the whole of it, and they are complete. Unlike the
-## explorer's figure it has no tabs: both listings are always in view, so
-## explorer.js speaks of the first (`data-label`).
+## the two listings are the whole of it, and they are complete. It has no
+## tabs: both listings are always in view, so callmap.js speaks of the first
+## (`data-label`).
 fn map_figure(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, f: Facts) -> String = {
   let m = f.flash
   let p = (k: String) => escape_html(plain(c, k))
@@ -1260,11 +1261,11 @@ fn prose(c: Copy, mu: fn(String) -> String, id: String) -> String = {
 ## and carries both hreflang alternates. The trail is the nav's own GPU item,
 ## as on the other pages the nav lists, so the two cannot name it apart.
 fn gpu_page(a: Assets, js: String, lang: Lang, f: Facts, docs: List[String]) -> String !Fs = {
-  gpu_page_with(a, js, "explorer.js", lang, f, docs)
+  gpu_page_with(a, js, "callmap.js", lang, f, docs)
 }
 
-## The page with the explorer's script under its own name: the call map is the
-## explorer's figure, so it runs the explorer's script.
+## The page with the call map's script under its own name (the fingerprinted
+## one, or the plain one in tests).
 fn gpu_page_with(a: Assets, js: String, ex_js: String, lang: Lang, f: Facts, docs: List[String]) -> String !Fs = {
   let root =
     match lang {
@@ -1304,14 +1305,13 @@ pub fn gen_gpu(out: String, a: Assets, lang: Lang) -> Unit !Fs !io = {
   let f = load_facts()
   let js_text = bytes.utf8(str.trim(must_read("site/assets/gpu.js")) ++ "\n")
   let js = fingerprint("gpu.js", js_text)
-  # the explorer's script, which gen/explorer writes the same bytes of under
-  # the same name
-  let ex_text = bytes.utf8(str.trim(must_read("site/assets/explorer.js")) ++ "\n")
-  let ex_js = fingerprint("explorer.js", ex_text)
+  # the call map's script
+  let ex_text = bytes.utf8(str.trim(must_read("site/assets/callmap.js")) ++ "\n")
+  let ex_js = fingerprint("callmap.js", ex_text)
   let dst =
     match lang {
       En -> {
-        for w in [(js, js_text), ("gpu.js", js_text), (ex_js, ex_text), ("explorer.js", ex_text)] {
+        for w in [(js, js_text), ("gpu.js", js_text), (ex_js, ex_text), ("callmap.js", ex_text)] {
           let (name, text) = w
           match io.write_bytes("${out}/assets/${name}", text) {
             Ok(_) -> ()
@@ -1769,8 +1769,8 @@ test "the page draws one kernel and nothing a script has to finish" {
       assert not str.contains(p, "xp-tab")
       assert str.contains(p, `<p class="xp-note" hidden>`)
       assert len(str.split(p, `<figure class="xp xp-flash" `)) == 2
-      # the explorer's script runs the figure, ahead of the page's own
-      assert str.contains(p, "/assets/explorer.js\" defer></script>")
+      # the call map's script runs the figure, ahead of the page's own
+      assert str.contains(p, "/assets/callmap.js\" defer></script>")
     }
     # the link to the Playground is a plain anchor, so it works with no
     # script, and it opens the sidebar's sample on the Tile IR tab
