@@ -12,6 +12,10 @@
    instruction that implements it is bold. Picking a line of a listing picks
    the innermost call that owns it. Nothing moves and nothing is filled.
 
+   A figure may have no tabs: its listings are then all shown at once (the GPU
+   page's call map is a source and one listing side by side), a pick scrolls
+   the first listing and the status line speaks of it by its `data-label`.
+
    Tabs are the ARIA tabs pattern with automatic activation: a tab shows its
    listing and keeps what is picked, so the same call can be followed from
    one backend to the next. Without this script every listing is shown.
@@ -55,9 +59,13 @@
       return false;
     }
 
+    /* the listing the status line speaks of and a pick scrolls to: the
+       selected tab's, or with no tabs (a figure whose listings all stand in
+       view, as the GPU page's) the first one */
     function active() {
       for (var i = 0; i < tabs.length; i++) if (tabs[i].getAttribute("aria-selected") === "true") return tabs[i].getAttribute("data-kind");
-      return null;
+      var kinds = Object.keys(panes);
+      return tabs.length || !kinds.length ? null : kinds[0];
     }
 
     /* a pane's own scroll, never the page's */
@@ -92,6 +100,7 @@
       if (pane) each(pane, ".xl.xp-hit", function (l) { ns.push(+l.getAttribute("data-n")); });
       var label = "";
       tabs.forEach(function (t) { if (t.getAttribute("data-kind") === kind) label = t.textContent; });
+      if (!label && pane) label = pane.getAttribute("data-label") || "";
       var where = ns.length
         ? label + " " + (ns.length > 1 ? fig.getAttribute("data-w-lines") : fig.getAttribute("data-w-line")) + " " + runs(ns)
         : label + ": " + fig.getAttribute("data-w-none");
