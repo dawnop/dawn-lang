@@ -1,30 +1,20 @@
-/* The cuTile page's script (gen/gpu.dawn links it, deferred): picking a call
-   on the call map, and the coverage cards' count-up.
+/* The cuTile page's script (gen/gpu.dawn links it, deferred): the keepdims
+   card's two links into the call map, and the coverage cards' count-up.
 
-   The page is complete without it. Every row of flash_attn already has the
-   Tile IR its calls wrote beside it, folded to its key line in a native
-   <details> that opens and closes with no script, and every card is at its
-   final number; this only lets a reader point at one call. Clicking a call's name marks
-   its whole span in the source and the Tile IR lines it wrote itself; a
-   region call (a loop, a scan) marks its header, terminator and brace, and
-   the lines its body's calls wrote more faintly. Clicking it again, or
-   pressing Escape, lets go; clicking a line of Tile IR picks the call that
-   wrote it. Nothing moves and nothing is filled: an underline and an edge.
+   The page is complete without it. The call map is a source and the Tile IR
+   beside it, every line already marked with the call that wrote it; picking
+   a call, the tab order and the arrow keys in a listing are
+   site/assets/explorer.js's, the script the explorer page runs, which this
+   page loads too (the map is that page's figure with two listings in view
+   and no tabs). This file only adds what is the GPU page's own.
 
-   Folding is the browser's: a click on a row toggles its <details>. This
-   keeps a click that picks from also toggling (a call's name, a line of an
-   open row's Tile IR, a drag that selected text), opens the rows a picked
-   call wrote into so its lines can be seen, opens a row the page jumps to,
-   and mirrors each summary's state into aria-expanded.
+   The keepdims card links two lines of the source (`#kl-<line>`, `data-pick`
+   the call). Without a script the link is a jump to the line; with it the
+   line is brought to the middle and the call picked, as a click on its name
+   would, so the lines it wrote show in the Tile IR beside it.
 
-   The keepdims card above the map links two of its rows (`#kl-<line>`,
-   `data-pick` the call). Without this the link is a jump to the row; with
-   it the row is brought to the middle and its call picked, as a click on
-   the call's name would.
-
-   It carries no words: the one sentence about clicking is in the markup,
-   `hidden` until this shows it. With reduced motion the cards are their end
-   state, as home.js does it. */
+   It carries no words. With reduced motion the cards are their end state, as
+   home.js does it. */
 (function () {
   "use strict";
   var theme = window.dawnTheme;
@@ -32,110 +22,23 @@
 
   function each(root, sel, f) { Array.prototype.forEach.call(root.querySelectorAll(sel), f); }
 
-  /* ---- the call map ---- */
+  /* ---- the keepdims card's links ---- */
 
-  function callMap() {
-    var map = document.querySelector(".km");
-    if (!map) return;
-    var parent = {};
-    each(map, ".km-c", function (c) { parent[c.getAttribute("data-c")] = c.getAttribute("data-p"); });
-    /* whether call `k` is `id` or inside it, by the recording's tree */
-    function under(k, id) {
-      for (var n = 0; k !== null && k !== undefined && n < 64; n++) {
-        if (k === id) return true;
-        k = parent[k];
-      }
-      return false;
-    }
-    var picked = null;
-    function open(row) {
-      var d = row && row.querySelector("details.km-f");
-      if (d && !d.open) d.open = true;
-    }
-    function sync(d) {
-      var s = d.querySelector("summary");
-      if (s) s.setAttribute("aria-expanded", d.open ? "true" : "false");
-    }
-    each(map, "details.km-f", function (d) {
-      sync(d);
-      d.addEventListener("toggle", function () { sync(d); });
-    });
-    function clear() {
-      each(map, ".km-on", function (e) { e.classList.remove("km-on"); });
-      each(map, ".km-hit, .km-in", function (e) { e.classList.remove("km-hit", "km-in"); });
-      each(map, '.km-c[aria-pressed="true"]', function (e) { e.setAttribute("aria-pressed", "false"); });
-      picked = null;
-    }
-    function pick(id, quiet) {
-      var again = picked === id;
-      clear();
-      if (again || id === null) return;
-      picked = id;
-      each(map, ".km-c[data-c=\"" + id + "\"]", function (e) { e.setAttribute("aria-pressed", "true"); });
-      each(map, "[data-k]", function (e) {
-        if (e.getAttribute("data-k").split(" ").indexOf(id) >= 0) e.classList.add("km-on");
-      });
-      var first = null;
-      each(map, ".km-ir .km-l[data-o]", function (e) {
-        var o = e.getAttribute("data-o");
-        if (o === id) {
-          e.classList.add("km-hit");
-          open(e.closest(".km-row"));
-          if (!first) first = e;
-        } else if (+o >= 0 && under(o, id)) {
-          e.classList.add("km-in");
-        }
-      });
-      if (!quiet && first && first.scrollIntoView) first.scrollIntoView({ block: "nearest", behavior: still ? "auto" : "smooth" });
-    }
-    each(map, ".km-c", function (c) {
-      c.setAttribute("role", "button");
-      c.setAttribute("tabindex", "0");
-      c.setAttribute("aria-pressed", "false");
-    });
-    map.addEventListener("click", function (ev) {
-      var sel = window.getSelection && window.getSelection();
-      var inSummary = ev.target.closest("summary");
-      if (inSummary && sel && !sel.isCollapsed && map.contains(sel.anchorNode)) { ev.preventDefault(); return; }
-      var c = ev.target.closest(".km-c");
-      if (c) {
-        ev.preventDefault();
-        open(c.closest(".km-row"));
-        pick(c.getAttribute("data-c"));
-        return;
-      }
-      var l = ev.target.closest(".km-ir .km-l[data-o]");
-      var d = l && l.closest("details.km-f");
-      if (d && !d.open) return;
-      if (l && +l.getAttribute("data-o") >= 0) { ev.preventDefault(); pick(l.getAttribute("data-o")); }
-    });
-    map.addEventListener("keydown", function (ev) {
-      var c = ev.target.closest && ev.target.closest(".km-c");
-      if (c && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); open(c.closest(".km-row")); pick(c.getAttribute("data-c")); }
-      else if (ev.key === "Escape") clear();
-    });
+  function links() {
     each(document, "a[data-pick]", function (a) {
       a.addEventListener("click", function (ev) {
         var id = a.getAttribute("data-pick");
-        var name = map.querySelector(".km-c[data-c=\"" + id + "\"]");
-        var row = name && name.closest(".km-row");
-        if (!row) return;
+        var map = document.querySelector(".xp-flash");
+        var name = map && map.querySelector('.xc[data-c="' + id + '"]');
+        var line = name && name.closest(".xl");
+        if (!line) return;
         ev.preventDefault();
-        open(row);
-        if (row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
-        if (picked !== id) pick(id, true);
+        if (line.scrollIntoView) line.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+        /* explorer.js picks on a click, and a click on a picked name lets go */
+        if (name.getAttribute("aria-pressed") !== "true") name.click();
         if (window.history && history.replaceState) history.replaceState(null, "", a.getAttribute("href"));
       });
     });
-    /* a row reached by its address (`#kl-<line>`), on load or later */
-    function toHash() {
-      var h = location.hash;
-      if (h && /^#kl-\d+$/.test(h)) open(document.getElementById(h.slice(1)));
-    }
-    toHash();
-    window.addEventListener("hashchange", toHash);
-    map.classList.add("km-live");
-    each(map, ".km-note", function (n) { n.hidden = false; });
   }
 
   /* ---- the coverage cards ---- */
@@ -171,7 +74,7 @@
     Array.prototype.forEach.call(figs, function (f) { io.observe(f); });
   }
 
-  function start() { callMap(); cards(); }
+  function start() { links(); cards(); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();

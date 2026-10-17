@@ -125,7 +125,7 @@ One kernel, line by line
 
 ## kernel-body
 
-Every line of one kernel, a fused attention and the source of the row statistics above, sits beside the Tile IR its calls wrote, each run under the call that wrote it. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table. In each run the bold line is the operation the call is for; the lines above it are addressing the lowering added. Each row starts folded to one of those bold lines, the one its outermost call wrote; click a row to open the rest. The same function beside the C and the JVM bytecode it compiles to is on [the explorer page](explorer.html).
+A fused attention, the source of the row statistics above, beside the Tile IR its calls wrote. The pairing comes from the recording and from Dawn's own parser, never from a hand-written table; the colour on a call's name and on the lines it wrote is the same. The same function beside the C and the JVM bytecode it compiles to is on [the explorer page](explorer.html).
 
 ## kernel-kind
 
@@ -135,17 +135,25 @@ one loop, two reductions inside it
 
 Dawn source
 
-## kernel-call
-
-call
-
 ## kernel-right
 
 the Tile IR it recorded
 
 ## kernel-note
 
-Click a call's name to mark its whole span and the Tile IR it wrote. A loop marks its own header, terminator and brace, and more faintly the lines its body's calls wrote. Click a line of Tile IR to find its call.
+Click a call's name to mark its span and the Tile IR it wrote. Click a line of Tile IR to find its call. Escape lets go.
+
+## word-line
+
+line
+
+## word-lines
+
+lines
+
+## word-none
+
+no lines of its own
 
 ## fact-calls
 

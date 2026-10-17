@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ bc32d81ccaaba1a8 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 9eaf69056d3c0bba -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -120,7 +120,7 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 
 ## kernel-body
 
-一个融合注意力 kernel（也就是上面那两行行统计的出处）的每一行，都摆在它的调用写出的 Tile IR 旁边，每一段挂在写出它的那个调用名下。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表。每段里加粗的那一行是这个调用真正要做的操作，它上面的几行是 lowering 补上的寻址。每一行起初是折叠的，只露出最外层调用的那一行加粗行；点一下这一行，其余的就展开。同一个函数连同它编出来的 C 与 JVM 字节码，在[对照页](zh/explorer.html)上。
+一个融合注意力 kernel（也就是上面那两行行统计的出处），和它的调用写出的 Tile IR 并排放着。配对来自记录本身和 Dawn 自己的解析器，不来自手写的对照表；调用名和它写出的行是同一种颜色。同一个函数连同它编出来的 C 与 JVM 字节码，在[对照页](zh/explorer.html)上。
 
 ## kernel-kind
 
@@ -130,17 +130,25 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 
 Dawn 源码
 
-## kernel-call
-
-调用
-
 ## kernel-right
 
 它记录下的 Tile IR
 
 ## kernel-note
 
-点一个调用名，会标出它的整段源码和它写出的 Tile IR。循环只标出自己的头、终结和括号，体内调用写出的行用更淡的边线标出。点一行 Tile IR，可以找到写出它的调用。
+点一个调用名，会标出它的整段源码和它写出的 Tile IR。点一行 Tile IR，可以找到写出它的调用。Escape 取消。
+
+## word-line
+
+行
+
+## word-lines
+
+行
+
+## word-none
+
+没有自己的行
 
 ## fact-calls
 
