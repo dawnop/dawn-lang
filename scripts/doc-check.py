@@ -681,6 +681,81 @@ def run_example(cmd: list[str], **kw):
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
+# A Playground sample that imports tileir cannot be one file: `use tileir/` only
+# resolves in a project whose [deps] names the package, and that is what the
+# Playground runner stages for such a program too (playground/src/play/exec.dawn,
+# `tile_manifest`). So the check runs it the same way, as `src/main.dawn` of a
+# project with the same two path dependencies.
+TILEIR_USE = "use tileir/"
+
+# Samples that are a kernel the repository already pins elsewhere: the sample's
+# name, the file its kernel is copied from, the golden its output must equal
+# and the kernel's name. A sample of this kind is held to the original twice:
+# its `const` lines and its kernel function are the same text as the original's,
+# and what it prints is the golden, byte for byte. The golden is itself pinned
+# (scripts/tile-golden), so a kernel that moves takes the sample red with it
+# instead of leaving a copy nobody looks at.
+PINNED_SAMPLES = {
+    "flash_attn": (
+        "scripts/tile-golden/kernels.dawn",
+        "scripts/tile-golden/flash_attn.mlir",
+        "flash_attn",
+    ),
+}
+
+
+def tileir_manifest() -> str:
+    return ('schema = 1\nname = "sample"\nversion = "0.0.0"\n\n[deps]\n'
+            f'tileir = "{ROOT / "packages" / "tileir"}"\n'
+            f'tileref = "{ROOT / "packages" / "tileref"}"\n')
+
+
+def kernel_text(text: str, name: str) -> str:
+    """`fn <name>(` up to the first line that is a lone closing brace."""
+    out: list[str] = []
+    on = False
+    for line in text.splitlines():
+        if not on and line.startswith(f"fn {name}("):
+            on = True
+        if on:
+            out.append(line)
+            if line == "}":
+                return "\n".join(out)
+    return ""
+
+
+def check_pinned_sample(stem: str, sample: pathlib.Path, out: pathlib.Path) -> list[str]:
+    original, golden, kernel = PINNED_SAMPLES[stem]
+    rel = sample.relative_to(ROOT)
+    bad: list[str] = []
+    orig = (ROOT / original).read_text(encoding="utf-8")
+    text = sample.read_text(encoding="utf-8")
+    want = kernel_text(orig, kernel)
+    if not want:
+        bad.append(f"{rel}: {original} has no `fn {kernel}(` to hold the sample to")
+    elif want not in text:
+        bad.append(f"{rel}: its `fn {kernel}` is not the text of the one in "
+                   f"{original}; the sample is a copy that must not drift")
+    original_lines = set(orig.splitlines())
+    for line in text.splitlines():
+        if line.startswith("const ") and line not in original_lines:
+            bad.append(f"{rel}: `{line}` is not a line of {original}")
+    if out.read_bytes() != (ROOT / golden).read_bytes():
+        bad.append(f"{out.relative_to(ROOT)}: is not {golden}, which is what "
+                   f"the kernel is pinned to print")
+    return bad
+
+
+def run_tileir_sample(src: pathlib.Path):
+    """`dawn run` of a sample that imports tileir, as the project it needs."""
+    with tempfile.TemporaryDirectory(prefix="doc-check-sample-") as tmp:
+        (pathlib.Path(tmp) / "src").mkdir()
+        (pathlib.Path(tmp) / "src" / "main.dawn").write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8")
+        (pathlib.Path(tmp) / "dawn.toml").write_text(tileir_manifest(), encoding="utf-8")
+        return run_example([str(DAWN), "run", tmp], cwd=ROOT)
+
+
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.M)
 # Every fenced block, in order, not just the dawn ones: the tutorial's contract
@@ -4806,7 +4881,10 @@ def check_site_pages() -> tuple[list[str], int]:
                 bad.append(f"{rel}: no {expected_file.name} beside it (a program "
                            f"the website ships records the output it prints)")
                 continue
-            r = run_example([str(DAWN), "run", str(src)], cwd=ROOT)
+            if (named == src and TILEIR_USE in src.read_text(encoding="utf-8")):
+                r = run_tileir_sample(src)
+            else:
+                r = run_example([str(DAWN), "run", str(src)], cwd=ROOT)
             if r is None:
                 bad.append(f"{rel}: did not finish within {EXAMPLE_TIMEOUT}s "
                            f"(a program the website ships must terminate)")
@@ -4821,6 +4899,8 @@ def check_site_pages() -> tuple[list[str], int]:
                 bad.append(f"{rel}: printed {r.stdout!r}, but "
                            f"{expected_file.relative_to(ROOT)} (which the site "
                            f"shows) says {expected!r}")
+            if named == src and named.parent == SITE_PROGRAMS[1] and named.stem in PINNED_SAMPLES:
+                bad += check_pinned_sample(named.stem, named, expected_file)
     return bad, seen
 
 

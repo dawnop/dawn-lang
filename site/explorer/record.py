@@ -68,9 +68,19 @@ PROGRAMS = [
 # The Playground's starter programs (site/play-ui/samples): not on the page,
 # but the corpus the online compile view (docs/playground-compile-design.md)
 # has to map with no gap.
+#
+# Only the programs that are one file. A sample that imports tileir is a project
+# on the Playground (playground/src/play/exec.dawn stages it with a manifest
+# naming the package), so it cannot be handed to a compiler as a single file
+# here; and its mapping is not gap-free, because the compilers' side tables
+# name an infix operator on tiles (`a * b`) by a span that is no identifier.
+# The cases that hold such a sample are playground/test/contract.sh's (its
+# /compile cases on the flash attention starter) and doc-check's (run, output
+# and the pin to scripts/tile-golden).
 SAMPLES = [
     {"name": p.stem, "source": f"site/play-ui/samples/{p.name}", "fn": None, "kernel": False}
     for p in sorted((ROOT / "site" / "play-ui" / "samples").glob("*.dawn"))
+    if "use tileir/" not in p.read_text(encoding="utf-8")
 ]
 
 
