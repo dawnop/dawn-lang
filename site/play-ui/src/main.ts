@@ -30,7 +30,7 @@ import {
 } from './lsp'
 import { callMarks, pickCall, rangesOf, setCalls } from './call-marks'
 import { ComparePane } from './compile-view'
-import { targetOfSearch, withView, type Target } from './compile-state'
+import { sampleOfSearch, targetOfSearch, withView, type Target } from './compile-state'
 import { playEndpoints } from './endpoints'
 import { SAMPLES } from './samples'
 import './playground.css'
@@ -228,7 +228,16 @@ function mount(root: HTMLElement) {
   // browser left behind; otherwise the first sample. `scratch` is what an
   // unnamed file (current = -1) counts as clean against.
   const fromHash = location.hash.length > 1 ? decodeShare(location.hash.slice(1)) : null
-  const draft = fromHash == null ? loadDraft() : null
+  // `?sample=<name>` opens that sidebar sample; a hash is a program and wins
+  // over it, and it wins over the draft, since the link names what to show.
+  const named =
+    fromHash == null
+      ? sampleOfSearch(
+          location.search,
+          SAMPLES.map((s) => s.file),
+        )
+      : null
+  const draft = fromHash == null && named == null ? loadDraft() : null
   let current = 0
   let scratch = ''
   let initialCode = SAMPLES[0].code
@@ -236,6 +245,9 @@ function mount(root: HTMLElement) {
     current = -1
     scratch = fromHash
     initialCode = fromHash
+  } else if (named != null) {
+    current = named
+    initialCode = SAMPLES[named].code
   } else if (draft) {
     current = draft.file >= 0 && draft.file < SAMPLES.length ? draft.file : -1
     scratch = draft.base

@@ -36,6 +36,18 @@ export function targetOfSearch(search: string): Target | null {
   return v === 'c' || v === 'jvm' || v === 'tile' ? v : null
 }
 
+// `?sample=flash_attn` as the index of the sidebar sample whose file is
+// `flash_attn.dawn` in `files`; a missing key, an empty value and a name the
+// sidebar does not hold are all "no sample", so a stale or mistyped link opens
+// the Playground as if it had no query. Matching is exact and the extension
+// is not part of the name.
+export function sampleOfSearch(search: string, files: string[]): number | null {
+  const v = new URLSearchParams(search).get('sample')
+  if (v == null || v === '') return null
+  const i = files.indexOf(`${v}.dawn`)
+  return i >= 0 ? i : null
+}
+
 // `href` with `view` set, or removed for null; the hash and every other
 // parameter stay as they were.
 export function withView(href: string, target: Target | null): string {
