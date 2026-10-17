@@ -12,6 +12,11 @@ PYTHONDONTWRITEBYTECODE=1 \
   PLAY_LSP_CONTRACT_OMIT_FAKE_VERSION=0 \
   python3 -B playground/test/lsp_contract.py
 
+# The same gateway in front of the real language server (`bin/dawn lsp`): a
+# program that imports tileir resolves it, as /run does. The fake child above
+# cannot say whether an import resolves.
+PYTHONDONTWRITEBYTECODE=1 python3 -B playground/test/lsp_tileir_contract.py
+
 negative="$(mktemp "${TMPDIR:-/tmp}/dawn-lsp-version-negative.XXXXXX")"
 trap 'rm -f "$negative"' EXIT HUP INT TERM
 if PYTHONDONTWRITEBYTECODE=1 \
