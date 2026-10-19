@@ -23,6 +23,20 @@
 # against the source of truth, not against a count the shards report about
 # themselves -- a shard cannot vouch for its own completeness.
 #
+# Round robin assumes the items cost about the same, or at least that the
+# dear ones are spread through the matrix. Where that stops being good enough
+# a harness can be dealt by measured cost instead: `--plan <file>` names, for
+# each item, the shard that runs it (scripts/mutant-coverage/deal.py writes
+# such a file from per-item timings by longest-first greedy packing). The plan
+# only moves items between shards; the coverage record and check.py's union
+# are the same either way, so a plan that dropped an item would be refused
+# there exactly as a wrong `--shard` is. An item the matrix has and the plan
+# does not (a kernel added since the deal) falls back to its round-robin
+# shard, and the run says how many did, so a stale plan costs balance and
+# never coverage. A plan for another harness or another shard count, a shard
+# index out of range, a name the matrix does not carry, or a name dealt twice
+# is refused before anything runs.
+#
 # The output lands in $MUTANT_COVERAGE_DIR (one file per harness, shard index
 # in the name) rather than a single $MUTANT_COVERAGE_OUT path, because one CI
 # job here runs up to three harnesses in one process chain
@@ -34,8 +48,11 @@ shard_total=1
 shard_ran=0
 shard_harness=""
 shard_coverage_file=""
+shard_plan=""
+shard_plan_names=()
+declare -gA shard_plan_of=()
 
-# Consume `--shard I/N` from the caller's arguments; anything else is left in
+# Consume `--shard I/N` (and `--plan <file>`) from the caller's arguments; anything else is left in
 # the global `shard_rest` for the caller to handle.
 #
 # Deliberately not `mapfile -t rest < <(shard_parse "$@")`: process
@@ -58,6 +75,18 @@ shard_parse() {
       --shard=*)
         spec="${1#--shard=}"
         shift
+        ;;
+      --plan)
+        shift
+        [[ $# -gt 0 ]] || { printf 'FAIL  --plan needs a file\n' >&2; exit 2; }
+        shard_plan="$1"
+        shift
+        continue
+        ;;
+      --plan=*)
+        shard_plan="${1#--plan=}"
+        shift
+        continue
         ;;
       *)
         shard_rest+=("$1")
@@ -89,6 +118,7 @@ shard_begin() {
   shard_harness="$1"
   shard_ran=0
   shard_coverage_file=""
+  [[ -z "$shard_plan" ]] || shard_load_plan
   [[ -n "${MUTANT_COVERAGE_DIR:-}" ]] || return 0
   mkdir -p "$MUTANT_COVERAGE_DIR"
   shard_coverage_file="$MUTANT_COVERAGE_DIR/$shard_harness-$shard_index-of-$shard_total.coverage"
@@ -98,9 +128,67 @@ shard_begin() {
   } > "$shard_coverage_file"
 }
 
+# Read `--plan` for the harness shard_begin named. The matrix is read here,
+# from scripts/<harness>/matrix.txt beside this file, because the runners call
+# shard_skips with a position and the plan is keyed by name. Plan lines are
+# `harness=<name>`, `shards=<N>` and `<item> <shard> [<seconds>]`; the seconds
+# are deal.py's input and are not read here.
+shard_plan_fail() {
+  printf 'FAIL  --plan %s: %s\n' "$shard_plan" "$1" >&2
+  exit 2
+}
+shard_load_plan() {
+  local matrix name index rest plan_harness="" plan_shards="" fallback=0 i
+  matrix="$(dirname "${BASH_SOURCE[0]}")/../$shard_harness/matrix.txt"
+  [[ -f "$shard_plan" ]] || shard_plan_fail "no such file"
+  [[ -f "$matrix" ]] || shard_plan_fail "harness $shard_harness has no matrix.txt"
+  mapfile -t shard_plan_names < <(grep -v '^#' "$matrix" | grep -v '^[[:space:]]*$')
+  declare -A in_matrix=()
+  for name in "${shard_plan_names[@]}"; do in_matrix[$name]=1; done
+  shard_plan_of=()
+  while read -r name index rest; do
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    case "$name" in
+      harness=*) plan_harness="${name#harness=}"; continue ;;
+      shards=*) plan_shards="${name#shards=}"; continue ;;
+    esac
+    [[ "$index" =~ ^[0-9]+$ ]] || shard_plan_fail "$name has no shard index"
+    [[ -n "${in_matrix[$name]:-}" ]] || shard_plan_fail "$name is not in $shard_harness's matrix"
+    [[ -z "${shard_plan_of[$name]:-}" ]] || shard_plan_fail "$name is dealt twice"
+    shard_plan_of[$name]="$index"
+  done < "$shard_plan"
+  [[ "$plan_harness" == "$shard_harness" ]] ||
+    shard_plan_fail "it is a plan for harness '${plan_harness}', not $shard_harness"
+  [[ "$plan_shards" == "$shard_total" ]] ||
+    shard_plan_fail "it deals ${plan_shards:-no} shards, this run is one of $shard_total"
+  for name in "${!shard_plan_of[@]}"; do
+    index="${shard_plan_of[$name]}"
+    (( index >= 1 && index <= shard_total )) ||
+      shard_plan_fail "$name is dealt to shard $index of $shard_total"
+  done
+  for i in "${!shard_plan_names[@]}"; do
+    [[ -n "${shard_plan_of[${shard_plan_names[$i]}]:-}" ]] || fallback=$(( fallback + 1 ))
+  done
+  if (( fallback > 0 )); then
+    printf 'NOTE  %s: %s item(s) are not in %s and run on their round-robin shard; re-deal with scripts/mutant-coverage/deal.py\n' \
+      "$shard_harness" "$fallback" "$shard_plan"
+  fi
+}
+
 # True when this shard should skip the mutant at 0-based matrix position `$1`.
 shard_skips() {
-  (( shard_total > 1 )) && (( $1 % shard_total != shard_index - 1 ))
+  (( shard_total > 1 )) || return 1
+  if [[ -n "$shard_plan" ]]; then
+    local name want
+    (( ${#shard_plan_names[@]} > 0 )) ||
+      shard_plan_fail "shard_skips ran before shard_begin read the plan"
+    name="${shard_plan_names[$1]:-}"
+    [[ -n "$name" ]] || shard_plan_fail "position $1 is past the end of the matrix"
+    want="${shard_plan_of[$name]:-$(( $1 % shard_total + 1 ))}"
+    (( want != shard_index ))
+    return
+  fi
+  (( $1 % shard_total != shard_index - 1 ))
 }
 
 # Record a mutant this shard is about to run. Called after the skip check, so
