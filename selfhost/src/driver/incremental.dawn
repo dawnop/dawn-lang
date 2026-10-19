@@ -26,6 +26,13 @@
 # changed one module's exports re-checked every module after it, importer or
 # not.
 #
+# Since 2026-10-19 a selective `use p.{a, b}` reads less than p's whole
+# surface: the id tables p grafted and the entries filed under the names it
+# lists. When p is checked again and its surface changes, such a step still
+# holds if it reported nothing and those parts are as they were (`named_hold`,
+# docs/lsp-module-memo-design.md §十二). A whole-module `use p` walks the whole
+# surface and is judged by it as before.
+#
 # Comptime reads past all three: a const may run another module's body, and
 # that body another's, none of it visible in an export surface. The
 # interpreter records which modules it read (`CtOut.reads`), and a step is
@@ -38,11 +45,12 @@ use driver/analyze.{
   initial_carry, analyze_module_step, world_after
 }
 use driver/stdlib.{StdCtx, std_module_of}
-use check/cx.{ModExports, Cx}
+use check/cx.{ModExports, Cx, exports_seen_by, package_of}
 use check/identity.{Minted}
 use check/types.{Impls}
 use check/jsig.{Jsig}
 use front/ast.{Module, module_uses}
+use std/list
 use std/set
 use std/str
 use ir/interp.{CtOpts}
@@ -51,6 +59,11 @@ use ir/interp.{CtOpts}
 ## the owner's baseline (the bundled library), or from the step of a module
 ## analyzed before it in the same analysis.
 type Found = NotFound | InBaseline | InStep
+
+## One `use` of a step: the path it named, where it found that surface, and
+## for a selective `use` the exporter's names it listed (None: a whole-module
+## `use`, which reads the whole surface).
+type Read = { path: String, found: Found, names: Option[List[String]] }
 
 ## One module's step as the previous analysis made it, with what it read:
 ## the input, the std identity its path had, the surface each of its `use`
@@ -62,7 +75,7 @@ type Entry = {
   raw: LoadedModule,
   std_identity: Option[String],
   pred: Option[String],
-  reads: List[(String, Found)],
+  reads: List[Read],
   # the bundled module names the carry held, recorded only when a `use` of a
   # std path found nothing: the checker then lists them in its diagnostic,
   # the one place a step reads the carry's key set rather than a surface
@@ -178,8 +191,8 @@ fn std_names_of(exports: Map[String, ModExports]) -> List[String] = {
 ## What `check/passes.pass_imports` will read of `exports` for a module with
 ## this syntax: the surface each `use` names, and where it is found. `seen`
 ## holds the modules this analysis has already placed in the carry.
-fn reads_of(m: Module, exports: Map[String, ModExports], seen: Set[String]) -> (List[(String, Found)], Option[List[String]]) = {
-  var reads: List[(String, Found)] = []
+fn reads_of(m: Module, exports: Map[String, ModExports], seen: Set[String]) -> (List[Read], Option[List[String]]) = {
+  var reads: List[Read] = []
   var lists_std = false
   for u in module_uses(m) {
     let found = if set.has(seen, u.path) {
@@ -191,21 +204,98 @@ fn reads_of(m: Module, exports: Map[String, ModExports], seen: Set[String]) -> (
       NotFound -> if len(u.segs) > 0 && u.segs[0] == "std" { lists_std = true }
       _ -> ()
     }
-    reads = reads ++ [(u.path, found)]
+    let names = match u.selective {
+      Some(entries) -> {
+        var out: List[String] = []
+        for n in entries { out = out ++ [n.name] }
+        Some(out)
+      }
+      None -> None
+    }
+    reads = reads ++ [Read { path: u.path, found: found, names: names }]
   }
   (reads, if lists_std { Some(std_names_of(exports)) } else { None })
+}
+
+## The parts of two surfaces of one module that every selective importer
+## reads whatever it names: who the module is, its package (the package
+## boundary filters by it), and the id tables an importer grafts into its own,
+## whole and in order. A type's constructors and an effect's operations are
+## looked up in the grafted tables, and so is everything a program uses
+## without naming it: the traits an operator, a method call or a derive goes
+## through and the types a signature mentions.
+fn same_named_base(a: ModExports, b: ModExports) -> Bool =
+  a.mod_path == b.mod_path && a.class_name == b.class_name && a.src_path == b.src_path &&
+  a.package == b.package &&
+  map.keys(a.adt_infos) == map.keys(b.adt_infos) && same_rows(a.adt_infos, b.adt_infos) &&
+  map.keys(a.trait_infos) == map.keys(b.trait_infos) && same_rows(a.trait_infos, b.trait_infos) &&
+  map.keys(a.effect_infos) == map.keys(b.effect_infos) && same_rows(a.effect_infos, b.effect_infos)
+
+## What `check/passes.inject_selective` reads of a surface for one name: its
+## entry in every name table, and whether the package boundary takes it away.
+fn same_entry(a: ModExports, b: ModExports, n: String) -> Bool =
+  map.get(a.fns, n) == map.get(b.fns, n) &&
+  map.get(a.types_by_name, n) == map.get(b.types_by_name, n) &&
+  map.get(a.aliases, n) == map.get(b.aliases, n) &&
+  map.get(a.alias_resolved, n) == map.get(b.alias_resolved, n) &&
+  map.get(a.ctors, n) == map.get(b.ctors, n) &&
+  map.get(a.consts, n) == map.get(b.consts, n) &&
+  map.get(a.traits_by_name, n) == map.get(b.traits_by_name, n) &&
+  map.get(a.effects, n) == map.get(b.effects, n) &&
+  list.contains(a.pkg_only, n) == list.contains(b.pkg_only, n)
+
+## Whether a selective `use` that listed `names` reads the same of `now` as
+## of `before`, two surfaces of one module whose `same_named_base` holds. An
+## imported effect brings its operations, bound from `fns` under their own
+## names, so those names are read too; the operation list itself is in the
+## grafted effect table, equal on both sides.
+fn same_named(before: ModExports, now: ModExports, names: List[String]) -> Bool = {
+  for n in names {
+    if not same_entry(before, now, n) { return false }
+    match map.get(now.effects, n) {
+      Some(eid) -> match map.get(now.effect_infos, eid) {
+        Some(info) -> {
+          for op in info.ops {
+            if not same_entry(before, now, op) { return false }
+          }
+        }
+        None -> ()
+      }
+      None -> ()
+    }
+  }
+  true
+}
+
+## Whether a selective read of a `fresh` surface still holds: the step
+## reported nothing (a diagnostic's hints walk the whole surface), the surface
+## changed in nothing every importer reads (`named_base` holds the previous
+## one exactly then) and not in the names this `use` listed. The previous
+## surface is the one the step read, or agrees with it in these same parts,
+## since each analysis that kept the step checked them against the one before.
+fn named_hold(e: Entry, r: Read, exports: Map[String, ModExports], named_base: Map[String, ModExports]) -> Bool = {
+  if len(e.step.diags) > 0 { return false }
+  match (r.names, map.get(named_base, r.path), map.get(exports, r.path)) {
+    (Some(names), Some(before), Some(now)) -> same_named(before, now, names)
+    _ -> false
+  }
 }
 
 ## Whether every surface `e` read is the one it would read now. A surface
 ## found in a step is the same when that module is placed again in this
 ## analysis and its surface is not `fresh`: either its step was reused, or it
 ## was checked again and came out equal to the previous analysis's, in which
-## case the previous object is what the carry holds. Nothing is compared here.
-fn reads_hold(e: Entry, exports: Map[String, ModExports], seen: Set[String], fresh: Set[String]) -> Bool = {
+## case the previous object is what the carry holds. Nothing is compared here
+## but the names of a selective read of a surface that is `fresh`.
+fn reads_hold(
+  e: Entry, exports: Map[String, ModExports], seen: Set[String], fresh: Set[String],
+  named_base: Map[String, ModExports]
+) -> Bool = {
   for r in e.reads {
-    let (path, found) = r
-    let holds = match found {
-      InStep -> set.has(seen, path) && not set.has(fresh, path)
+    let path = r.path
+    let holds = match r.found {
+      InStep -> set.has(seen, path) &&
+        (not set.has(fresh, path) || named_hold(e, r, exports, named_base))
       InBaseline -> not set.has(seen, path) && map.has(exports, path)
       NotFound -> not map.has(exports, path)
     }
@@ -257,6 +347,28 @@ fn minted_by(e: Entry) -> List[(Int, Minted)] =
     }
   }
 
+## A reused step's context with each surface a selective `use` stored put
+## back to the one the cold step stores. A surface that is not `fresh` is the
+## very one the step read; one that is was let through by `named_hold`, and
+## only a diagnostic reads the stored copy, but it is part of the context.
+## Replacing a key keeps its place in the table's order.
+fn current_selective(cx: Cx, e: Entry, carry: AnalysisCarry, fresh: Set[String]) -> Cx = {
+  var stored = cx.selective_exports
+  var changed = false
+  for r in e.reads {
+    if r.names != None && set.has(fresh, r.path) && map.has(stored, r.path) {
+      match map.get(carry.exports, r.path) {
+        Some(now) -> {
+          stored = map.insert(stored, r.path, exports_seen_by(now, package_of(cx)))
+          changed = true
+        }
+        None -> ()
+      }
+    }
+  }
+  if changed { Cx { ..cx, selective_exports: stored } } else { cx }
+}
+
 ## A reused step's contribution to the carry, as the cold path would leave it.
 type Kept = { identities: Map[Int, Minted], minted: Option[List[(Int, Minted)]] }
 
@@ -273,11 +385,11 @@ type Kept = { identities: Map[Int, Minted], minted: Option[List[(Int, Minted)]] 
 ## be a collision the current table no longer produces.
 fn kept(
   e: Entry, raw: LoadedModule, identity: Option[String], carry: AnalysisCarry,
-  seen: Set[String], fresh: Set[String], rechecked: Set[String], baseline: AnalysisCarry,
-  impls_is: Option[Option[String]], ids_is: Option[Option[String]]
+  seen: Set[String], fresh: Set[String], named_base: Map[String, ModExports],
+  rechecked: Set[String], baseline: AnalysisCarry, impls_is: Option[Option[String]], ids_is: Option[Option[String]]
 ) -> Option[Kept] = {
   if not (same_input(raw, e.raw) && identity == e.std_identity) { return None }
-  if not reads_hold(e, carry.exports, seen, fresh) { return None }
+  if not reads_hold(e, carry.exports, seen, fresh, named_base) { return None }
   if not comptime_reads_hold(e, seen, rechecked, baseline) { return None }
   if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }
   if ids_is == Some(e.pred) { return Some(Kept { identities: e.step.after.identities, minted: e.minted }) }
@@ -309,6 +421,10 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
   # one the previous analysis gave them.
   var seen: Set[String] = set.empty()
   var fresh: Set[String] = set.empty()
+  # of the `fresh` surfaces, the previous analysis's, filed when the new one
+  # differs from it only in its name tables: what a selective read of it is
+  # judged against (`named_hold`)
+  var named_base: Map[String, ModExports] = map.empty()
   # the modules this analysis ran again rather than reused, by path: their
   # bodies and constants may differ from the previous analysis's
   var rechecked: Set[String] = set.empty()
@@ -328,7 +444,8 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
     let previous = map.get(session.memo, raw.mod_path)
     let reuse: Option[(Entry, Kept)] = match previous {
       Some(e) ->
-        match kept(e, raw, identity, carry, seen, fresh, rechecked, session.baseline, impls_is, ids_is) {
+        match kept(e, raw, identity, carry, seen, fresh, named_base, rechecked, session.baseline,
+          impls_is, ids_is) {
           Some(k) -> Some((e, k))
           None -> None
         }
@@ -351,9 +468,8 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
             identity != None) }
         # the cold step's context ends on the table the carry now holds
         let cx: Cx = e.step.checked.cx
-        let checked_mod = if ids_is == Some(e.pred) { e.step.checked } else {
-          CheckedMod { ..e.step.checked, cx: Cx { ..cx, identities: k.identities } }
-        }
+        let ids_cx = if ids_is == Some(e.pred) { cx } else { Cx { ..cx, identities: k.identities } }
+        let checked_mod = CheckedMod { ..e.step.checked, cx: current_selective(ids_cx, e, carry, fresh) }
         ids_is = if ids_is == Some(e.pred) { Some(Some(raw.mod_path)) } else { None }
         impls_is = Some(Some(raw.mod_path))
         Entry { ..e, pred: pred, impls_in: impls_in, ids_in: ids_in, minted: k.minted,
@@ -395,7 +511,18 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
           }
           None -> ()
         }
-        if not same_own { fresh = set.insert(fresh, path) }
+        if not same_own {
+          fresh = set.insert(fresh, path)
+          match previous {
+            Some(e) -> match map.get(e.step.after.exports, path) {
+              Some(before) -> if same_named_base(own, before) {
+                named_base = map.insert(named_base, path, before)
+              }
+              None -> ()
+            }
+            None -> ()
+          }
+        }
         rechecked = set.insert(rechecked, path)
         impls_is = next_impls
         ids_is = next_ids
