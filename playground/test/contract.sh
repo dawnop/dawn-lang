@@ -533,10 +533,15 @@ ccheck "compile: the C text of a tileir program is its own module's, no gap, its
   "$SOUND"' and d["target"]=="c" and d["cached"] is False and d["pane"]["kind"]=="c" and d["calls_total"]>=4 and d["pane"]["total"]>1000 and d["pane"]["shown"]<200 and any("main__vadd" in l for l in d["pane"]["text"])'
 ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
   "$SOUND"' and d["target"]=="jvm" and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["calls_total"]>=4 and any("invokestatic" in l for l in d["pane"]["text"])'
-ccheck "compile: the flash attention starter has a C text and a JVM listing" "$CASES/tile_attn.dawn" c \
-  'd["ok"] is True and d["phase"]=="compile-view" and d["pane"]["kind"]=="c" and d["calls_total"]>=20 and d["pane"]["shown"]>100'
-ccheck "compile: the other half of it is kept" "$CASES/tile_attn.dawn" jvm \
-  'd["ok"] is True and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"
+# Its kernel is written with operators on tiles (`a * b` is a call of `Mul`'s
+# impl, its name the `*`) and a literal where a tile is expected (`0.0`, a
+# call of `from_float`): each of them is a call of the table with no gap. The
+# C text is read with every line outside the program's own functions empty, so
+# its line count is still the whole text's (docs/playground-compile-design.md K8).
+ccheck "compile: the flash attention starter's C text pairs its operators, no gap" "$CASES/tile_attn.dawn" c \
+  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==32 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])==7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
+ccheck "compile: the other half of it is kept, and pairs the same calls" "$CASES/tile_attn.dawn" jvm \
+  "$SOUND"' and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["calls"]==prev["calls"]'
 ccheck "compile: a dependency the visitor supplies is not honoured by the C view either" "$CASES/tile_smuggle.dawn" c \
   'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"] and "pane" not in d'
 

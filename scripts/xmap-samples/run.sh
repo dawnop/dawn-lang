@@ -8,13 +8,14 @@
 # visitor's code with the C and bytecode it compiles to using packages/xmap,
 # and drops the lines of any call a compiler's side table has no place for.
 # That is the right thing for code nobody has checked, and it hides a defect
-# in a compiler's table for the code somebody has: the eleven programs a visitor
-# starts from (site/play-ui/samples). So they are held to a mapping with none:
+# in a compiler's table for the code somebody has: the programs a visitor
+# starts from (site/play-ui/samples, all of them, the tileir one recorded as
+# the project the Playground stages it as). So they are held to a mapping with none:
 # `explore_strict` refuses a program with a gap, and a gap here is a defect of
 # a compiler's side table to file, not a state to live with. #
 # What it runs, in order:
 #
-#   1. scripts/xmap-samples/record.py asks each compiler for its account of the 11
+#   1. scripts/xmap-samples/record.py asks each compiler for its account of the
 #      samples, and scripts/xmap-samples pairs each with the package, strictly.
 #   2. the controls. A check that has only ever been green has not been shown
 #      to see anything. Each one below changes a thing the gate rests on and
@@ -24,7 +25,10 @@
 #      being refused), and three defects are put into real maps (a call that
 #      moved one place, a pc range outside its method, a name that is not at
 #      its span) and must each be refused by the package in the words that name
-#      the fault.
+#      the fault. And the package forgets how an operator on tiles is named
+#      (`a * b` is `impl mul`, its name at the `*`): the flash attention sample
+#      must then be refused, so the tileir sample is shown to be what holds
+#      that half of the package (docs/playground-compile-design.md K8).
 #
 # When this replaced record.py's own Python pairing, the package and the
 # script were compared on the same raw material, byte for byte, for the 11
@@ -62,7 +66,8 @@ check_run scripts/xmap-samples "$W/raw" "$W/mod" --strict >"$W/mod.log" ||
   { cat "$W/mod.log" >&2; fail "the package refuses a program (a gap, or an unreadable map)"; }
 grep -q '^gaps .* [1-9]' "$W/mod.log" && fail "a program has gaps"
 N="$(grep -c '^gaps .* 0$' "$W/mod.log")"
-[ "$N" = 11 ] || fail "expected 11 programs with no gap, got $N"
+WANT="$(find site/play-ui/samples -maxdepth 1 -name '*.dawn' | wc -l | tr -d ' ')"
+[ "$N" = "$WANT" ] || fail "expected $WANT programs with no gap, got $N"
 echo "ok: $N programs, no gap"
 
 [ "$CONTROLS" = 0 ] && { echo "OK: every program maps with no gap (controls skipped)"; exit 0; }
@@ -149,6 +154,22 @@ check_run scripts/xmap-samples "$W/whole" "$W/out-whole" --strict >/dev/null 2>&
 expect_refused moved "and not in the other"
 expect_refused pc "are outside its method's code"
 expect_refused renamed "which is no identifier"
+
+# the package no longer names an operator or a literal the maps record as a
+# call: the tileir sample, whose kernel is written with them, is refused (the
+# same sample under the checked-in package passed above, among all of them)
+[ -d "$W/raw/flash_attn" ] || fail "the flash attention sample was not recorded"
+mutated noop table.dawn \
+  'let named: Option[(String, Int)] = if cw != "" && cw == what_of(j_what(j, module, k)) { unspelled_name(src, lo, hi, nlo, cw) } else { None }' \
+  'let named: Option[(String, Int)] = None'
+mkdir -p "$W/attn"
+printf 'flash_attn\n' >"$W/attn/programs.txt"
+cp -R "$W/raw/flash_attn" "$W/attn/flash_attn"
+if check_run "$W/noop/cli" "$W/attn" "$W/out-noop" --strict >"$W/noop.log" 2>&1; then
+  fail "control: a package that does not name an operator call still maps the flash attention sample"
+fi
+grep -q "which is no identifier" "$W/noop.log" || { cat "$W/noop.log" >&2; fail "control: refused, but not in the words 'which is no identifier'"; }
+echo "ok: a package that does not name an operator call refuses the flash attention sample"
 
 # the package's strict entry stops refusing
 mutated lax xmap.dawn \
