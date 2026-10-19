@@ -1040,12 +1040,18 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
 ## `idle` assertion measures exactly that, and its `debounce` assertion
 ## measures the coalescing this number buys.
 ##
-## 150 ms is the design's placeholder and has no measurement behind it yet
-## (docs/audit/lsp-robustness-design.md §六 step 4 is the job of finding one:
-## time `didChange` → published diagnostics while typing into selfhost's own
-## 31k lines). It is stated here rather than inlined so that step has one place
-## to land.
-const DEBOUNCE_MS: Int = 150
+## 50 ms, measured (docs/audit/lsp-robustness-design.md §六 step 4). The
+## clients that matter already coalesce: VS Code's language client holds a
+## full-sync change for 250 ms and its codeAction requests flush the server
+## anyway, so analysis counts were the same at 0, 150 and 400 ms; the
+## Playground keeps one sync in flight, so the window is pure latency on every
+## round trip (152 ms after typing stops at 150, 52 ms at 50). Nor did 150
+## wait for a typist to stop: 57% of 255k sampled keystroke intervals (Dhakal
+## et al., CHI 2018) are longer than 150 ms. The cost falls on a client that
+## sends every keystroke: modelled on lsp/lspc, about 24% more server time per
+## key at 50 than at 150. scripts/lsp-liveness.py's keystroke gap has to stay
+## between 20 ms and this window.
+const DEBOUNCE_MS: Int = 50
 
 ## Run the analysis a document sync deferred, if there is one.
 fn flush(st: LspState, pending: Option[(String, String, Int)]) -> LspState !Fs !Proc !Env !Console !io =

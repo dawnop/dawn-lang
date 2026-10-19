@@ -111,6 +111,7 @@ URI 解码是**基础设施**，正确性早有定义、JDK 早有实现。
 连续按键期间只有最后一次会被分析。
 
 `N` 取多少：暂定 150ms，**没有实测出处，落地时要测**（CONTRIBUTING §二）。
+（2026-10-19 已测，改为 50 ms，见 §七 末条。）
 测法：记录 `didChange` 到诊断发布的墙钟时间，在 selfhost 自身（31k 行）上连续输入。
 
 ### 2.2.1 就绪原语：实测真值表与裁决
@@ -460,7 +461,7 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 | 2c ✅ | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io` | **已完成**（2026-08-05）。落地点的实际清单与逐点变异体见 §2.2.1 末；9 处里 1 处是错的、另有 4 处漏记。`intrinsic-parity.py` 不覆盖它 |
 | 2d ✅ | `selfhost/src/lsp/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | **已完成**（2026-08-05）。`lsp-liveness.py` 增两条断言（`debounce` / `freshness`），各有自己的变异体；两个后端的 lsp 转录仍与 v0.50.0 **逐字节相同**。见 §2.2.4 |
 | 3 | `selfhost/src/lsp/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
-| 4 | 实测 debounce 窗口，把 150ms 换成有出处的数字 | 记录 harness 与数据 |
+| 4 ✅ | 实测 debounce 窗口，把 150ms 换成有出处的数字 | **已完成**（2026-10-19）：50 ms，出处与代价见 §七 末条 |
 
 无破坏性变更（LSP 是工具，不是语言表面）。2b/2c 动的是运行时契约与 intrinsic 表，
 但只加不改：`io_read_stdin` 的**可观察**语义（恰好 n 字节，短读即 EOF）不变，
@@ -507,3 +508,24 @@ C 后端的 `io_read_stdin` 得先从 stdio 换成 `read(2)`。本轮不写任�
 并在两个后端上答出同一张真值表；`lsp.dawn` 的读循环 debounce 了。**LSP-04 至此关账。**
 LSP-01 的落地形态与本文原方案相反：不换 JDK，而是把手写 decoder 改成校验的。
 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7——其「换 JDK」处方已作废。
+
+**2026-10-19 step 4 落地：`DEBOUNCE_MS` 150 → 50**。依据是一轮本机实测（VS Code 与
+Playground 两种客户端各跑一遍，服务端 `-Xss512m -Xmx2g -XX:+UseSerialGC`）加两份按键
+节奏出处：
+
+- VS Code 的 `vscode-languageclient` 在 Full sync 下自带 250 ms 尾随合并，光标停下后
+  的 codeAction 又会强制服务端立刻分析；D=0/150/400 三档的分析次数相同（16/16/16、
+  19/19/19、34/34/34），服务端窗口在它下面被绕过。
+- Playground 同一时刻只有一个 sync 在途，窗口是每次往返的纯延迟：停手到诊断
+  D=150 时 152 ms，D=50 时 52 ms，分析次数不变（约 81 次）。
+- 150 ms 也等不到停手：从 Dhakal 等（CHI 2018，136M 按键）随机抽 356 人、25.5 万个
+  键间隔，57% 超过 150 ms；Thomas 等（ACE 2005）测得 IDE 里改代码的字母连击中位数
+  174 ms、块边界 474 ms。
+- 代价只落在逐键发送、自己不合并的客户端上：以 `lsp/lspc` 为模型、中速打字者、
+  每档 200 个种子，150 → 50 让每键服务端忙碌 148 → 183 ms（+24%），停手到诊断的
+  中位数 334 → 272 ms。
+
+`scripts/lsp-liveness.py` 的 `KEYSTROKE_GAP_S` 同刀 0.06 → 0.03：它必须夹在 §2.2.3 的
+20 ms 下限与窗口之间，60 ms 已越过 50 ms 窗口。诊断延迟的大头不在防抖：解析失败态
+的崩溃（#788）与重渲染（#789 R1）同一 PR 修掉；非 sync 消息强制分析过期态（#790）
+另案。不做自适应防抖（clangd 式）：没有取消机制前，自适应只是在错的地方调参。
