@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Apply one mutation of the LSP semantic-tokens contract to a copy of the tree.
 
-Each mutation breaks one decision of selfhost/src/lsp/lsptok.dawn or of the
-server arm that encodes its tokens, and scripts/lsp-semantic-tokens.py
+Each mutation breaks one decision of selfhost/src/lsp/lsptok.dawn, of the
+server arm that encodes its tokens, or of the query context they read, and scripts/lsp-semantic-tokens.py
 requires the mutant to compile and turn its owning case red. The registry
 lives here, not in that script, so that scripts/mutation-anchor-preflight.py
 proves every anchor matches exactly once before any compiler is built; an
@@ -29,6 +29,11 @@ MUTATIONS = {
     'range-unclipped': (LSPTOK,
         'fn in_range(r: Resolution, lo: Int, hi: Int) -> Bool = r.lo >= lo && r.lo < hi\n',
         'fn in_range(r: Resolution, lo: Int, hi: Int) -> Bool = r.lo >= 0 || lo + hi >= 0\n'),
+    # a query context built on an unchecked entry's own tables, which hold
+    # none of the types its `use` lines name (#788)
+    'no-import-graft': (SERVER,
+        '    entry: with_import_tables(e, seen),\n',
+        '    entry: e,\n'),
     # columns counted in UTF-8 bytes from the line start instead of UTF-16 units
     'columns-in-bytes': (SERVER,
         '                let (line, col) = lsp_position(d.view, d.ls, t.lo)\n'
