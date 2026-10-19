@@ -54,14 +54,17 @@ use front/ast.{
 }
 
 ## 1-based line number of code-point offset `off` (count of line starts <= off).
+## The starts ascend, so the count is an upper bound found by halving rather
+## than a walk from the top: `doc_of`, `member_doc_of` and `decl_lines` ask
+## once per declaration, and a walk made that declarations x lines.
 fn line_of(starts: List[Int], off: Int) -> Int = {
-  var n = 0
-  var i = 0
-  while i < len(starts) && starts[i] <= off {
-    n = n + 1
-    i = i + 1
+  var lo = 0
+  var hi = len(starts)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if starts[mid] <= off { lo = mid + 1 } else { hi = mid }
   }
-  n
+  lo
 }
 
 pub type DocSrc = { starts: List[Int], by_line: Map[Int, Token] }
@@ -516,6 +519,19 @@ test "the sweep files each line-opening comment under the line line_of gives it"
   for c in comments {
     let filed = map.get(ds.by_line, line_of(ds.starts, c.hi))
     if c.text == "# two" { assert filed == None } else { assert filed == Some(c) }
+  }
+}
+
+test "line_of counts the starts at or before an offset, at every offset" {
+  let tables = [[], [0], [0, 1], [0, 1, 2, 3], [0, 5, 6, 20]]
+  for t in tables {
+    var off = -2
+    while off < 24 {
+      var n = 0
+      while n < len(t) && t[n] <= off { n = n + 1 }
+      assert line_of(t, off) == n
+      off = off + 1
+    }
   }
 }
 
