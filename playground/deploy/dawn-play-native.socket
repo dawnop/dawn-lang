@@ -1,12 +1,13 @@
-# Socket for the native runner canary (docs/playground-native-runner-design.md,
-# K4). systemd accepts every connection itself (Accept=yes) and starts one
+# Socket for the Playground runner (docs/playground-native-runner-design.md).
+# systemd accepts every connection itself (Accept=yes) and starts one
 # dawn-play-native@.service instance per connection, with the connection as the
 # instance's stdin and stdout; nothing is resident between requests.
 #
-# The JVM runner (dawn-play.service on 127.0.0.1:8087) stays the primary. This
-# socket takes no traffic until nginx is pointed at it on purpose
-# (playground/deploy/nginx-switch.sh native); until then only the canary check
-# in redeploy.sh talks to it.
+# nginx sends /api/run, /api/check, /api/compile and /api/health here
+# (nginx-play.conf). It was the canary beside the JVM runner from K4 and has
+# carried all traffic since 2026-10-09; the JVM runner was removed in K5. The
+# name stayed: renaming a socket unit that serves traffic is an outage window
+# for no gain.
 #
 # The socket lives in /run/dawn-play, which this unit makes (root-owned, 0755).
 # It is NOT the service's RuntimeDirectory: a RuntimeDirectory is removed when
@@ -14,7 +15,7 @@
 # service that stops, so the socket would be deleted under the next client.
 # The flock slots have a RuntimeDirectory of their own (dawn-play-native@.service).
 [Unit]
-Description=dawn-play native runner socket (canary)
+Description=dawn-play runner socket
 
 [Socket]
 ListenStream=/run/dawn-play/http.sock

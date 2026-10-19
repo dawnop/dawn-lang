@@ -1,20 +1,24 @@
 #!/bin/sh
 # Contract test for dawn-play: boots the runner in local (direct) mode, drives
-# /run through every branch, checks the JSON responses, then shuts it down.
-# Requires: a built dawn.jar, a JDK, python3 (for JSON assertions), curl.
+# /run, /check and /compile through every branch, checks the JSON responses
+# and the access log, then shuts it down.
+# Requires: a built dawn.jar, a JDK, a C compiler (CC, default cc), python3
+# (for JSON assertions and the socket), curl.
 #
-# Two ways to boot the runner, one set of cases (K4 of
-# docs/playground-native-runner-design.md). The default is the long-lived JVM
-# server, `dawn run playground`, on a TCP port. PLAY_TEST_MODE=native boots the
-# process-per-request binary instead: `systemd-socket-activate -a --inetd
-# $PLAY_TEST_NATIVE_BIN serve` on a unix socket, so every request is a fresh
-# process exactly as under dawn-play-native.socket, and curl reaches it with
-# --unix-socket. Build the binary with
-# `dawnc build playground/native -o dawn-play-linux-x86_64` (what
-# PLAY_TEST_NATIVE_BIN defaults to, in the repository root). The cases that are
-# about the JVM server itself (its startup sweep, its answer cache, the second
-# JVM runner the dawnc comparison needs) are skipped in native mode and say so;
-# every other case, the response bytes included, is the same.
+# The runner is the process-per-request binary, exactly as under
+# dawn-play-native.socket: test/inetd.py accepts on a unix socket and starts
+# `<binary> serve` per connection with the connection as stdin and stdout, so
+# every request is a fresh process, and curl reaches it with
+# --abstract-unix-socket.
+# (`systemd-socket-activate -a --inetd` does the same, but is not on every
+# machine this runs on.) The binary is built here from this tree with the JVM
+# toolchain (`dawn __emitc playground` and scripts/cc-units.sh), so the test
+# needs no native `dawnc`; PLAY_TEST_NATIVE_BIN names one built elsewhere
+# (`dawnc build playground -o dawn-play-linux-x86_64`, what a deploy ships).
+# Until K5 (docs/playground-native-runner-design.md) the default was the
+# long-lived JVM server on a TCP port and this was a second mode; that server
+# is gone, and with it the cases that were about it (its startup sweep and
+# its answer cache).
 set -e
 cd "$(dirname "$0")/.."
 ROOT=$(cd .. && pwd)
@@ -45,28 +49,25 @@ wrap_refuses 2 stop "$ID" extra
 wrap_refuses 3 run "$ID" /etc true
 echo "  ok  the run wrapper takes only run/stop with a unit id"
 
-# The K4 deploy pieces that run without a server. The canary check's pure parts
-# (percentile, the 2x gate, the normalization of the two fields that differ by
-# design); the nginx variant generator: `jvm` is the live file byte for byte,
-# `native` changes only the upstream of the four runner locations and leaves
-# the WebSocket gateway's alone.
+# The deploy pieces that run without a server. The canary check's pure parts
+# (percentile, the latency gate, the normalization of the timing field, the
+# expectations it holds a candidate runner to); the nginx snippet: the four
+# runner locations go to the runner's unix socket, the three POSTs cut a slow
+# body at 10 s (the runner process blocks reading a declared body), nothing
+# goes to the JVM runner's old port, and the WebSocket gateway keeps its own.
 python3 -I -B deploy/canary-check.py --self-test >/dev/null || { echo "FAIL: canary-check.py self-test"; exit 1; }
-sh -n deploy/nginx-switch.sh
-sh deploy/nginx-switch.sh jvm | cmp -s - deploy/nginx-play.conf || { echo "FAIL: nginx-switch.sh jvm is not nginx-play.conf"; exit 1; }
-nat_conf=$(sh deploy/nginx-switch.sh native)
-nat_count() { printf '%s\n' "$nat_conf" | grep -c "$1"; }
-if [ "$(nat_count 'proxy_pass http://unix:/run/dawn-play/http.sock:/')" != 4 ] ||
-    [ "$(nat_count 'proxy_pass http://127.0.0.1:8087')" != 0 ] ||
-    [ "$(nat_count 'proxy_pass http://127.0.0.1:8088/lsp')" != 1 ] ||
-    [ "$(nat_count 'client_body_timeout 10s')" != 3 ]; then
-  echo "FAIL: nginx-switch.sh native does not retarget exactly the four runner locations"; exit 1
+conf_count() { grep -c "$1" deploy/nginx-play.conf; }
+if [ "$(conf_count 'proxy_pass http://unix:/run/dawn-play/http.sock:/')" != 4 ] ||
+    [ "$(conf_count '127.0.0.1:8087')" != 0 ] ||
+    [ "$(conf_count 'proxy_pass http://127.0.0.1:8088/lsp')" != 1 ] ||
+    [ "$(conf_count 'client_body_timeout 10s')" != 3 ]; then
+  echo "FAIL: nginx-play.conf does not send exactly the four runner locations to the runner's socket"; exit 1
 fi
 # Every runner route keeps the CORS headers production sends (the site is on
-# another origin), in both variants; the self-test proves the check goes red.
+# another origin); the self-test proves the check goes red.
 python3 -I -B deploy/nginx-cors-check.py --self-test >/dev/null || { echo "FAIL: nginx-cors-check.py self-test"; exit 1; }
 python3 -I -B deploy/nginx-cors-check.py deploy/nginx-play.conf || { echo "FAIL: nginx-play.conf CORS"; exit 1; }
-printf '%s\n' "$nat_conf" | python3 -I -B deploy/nginx-cors-check.py - || { echo "FAIL: nginx-switch.sh native CORS"; exit 1; }
-echo "  ok  canary check self-test; nginx variant generator; nginx CORS on every runner route"
+echo "  ok  canary check self-test; nginx routes the runner to its socket; nginx CORS on every runner route"
 
 # Both layouts: macOS bundles the JDK under Contents/Home, Linux tarballs put
 # bin/ at the top level. Same probe as bin/dawn.
@@ -89,14 +90,8 @@ export PLAY_COMPILE_TIMEOUT=60
 # fail-closed since the audit). There is no systemd-run wrapper on a dev box or
 # in CI, so this harness is exactly the caller that has to say so.
 export PLAY_UNSAFE_LOCAL=1
-MODE=${PLAY_TEST_MODE:-jvm}
-case "$MODE" in jvm|native) ;; *) echo "FAIL: PLAY_TEST_MODE must be jvm or native, not '$MODE'"; exit 1 ;; esac
-# What a repeated /compile of one program reports: the JVM server keeps its
-# answers, the native runner has no cache (ruling 4 of the K4 design).
-CACHED_HIT=True
-[ "$MODE" = native ] && CACHED_HIT=False
 # The native compiler /check and the C view prefer (play/exec.native_ready).
-# The runner only uses one of the release `dawn` is, so the case below skips
+# The runner only uses one of the release `dawn` is, so the cases below skip
 # unless PLAY_TEST_DAWNC (default: ./dawnc-linux-x86_64, what
 # scripts/release-native.sh writes) says the same version. It runs behind a
 # wrapper that logs the subcommand each call was made with, which is how the
@@ -106,11 +101,7 @@ NATIVE_DIR=""
 want_ver=$("$DAWN_BIN" --version 2>/dev/null | sed -n 's/^dawn \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
 have_ver=""
 [ -x "$DAWNC_REAL" ] && have_ver=$("$DAWNC_REAL" --version 2>/dev/null | sed -n 's/^dawnc \([0-9][0-9.]*\) .*/\1/p' | tail -n 1)
-if [ "$MODE" = native ]; then
-  # The call-logging wrapper and the comparison it feeds need a JVM runner
-  # beside the native one; this mode hands dawnc over as it is.
-  export DAWNC_BIN="$DAWNC_REAL"
-elif [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
+if [ -n "$want_ver" ] && [ "$want_ver" = "$have_ver" ]; then
   NATIVE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-native.XXXXXX")
   NATLOG="$NATIVE_DIR/calls"
   : >"$NATLOG"
@@ -122,101 +113,70 @@ else
   export DAWNC_BIN=/nonexistent/dawnc
 fi
 # The work root is this run's own, so the run-output case below can name the
-# exact directory that must not reach a response (dawn-lang #401).
+# exact directory that must not reach a response (dawn-lang #401). The socket
+# is named after it in the abstract namespace: a fresh name, so no other copy
+# of this test (another checkout, an external gate run) can be listening on
+# it, and no path, because a socket path is limited to 107 bytes and a gate
+# runner's TMPDIR alone can be longer (it was, on the first external run).
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-work.XXXXXX")
 export PLAY_WORK_ROOT="$WORK"
-# The port is asked of the kernel, not fixed: two copies of this test on one
-# machine (another checkout, an external gate run) would otherwise race for it,
-# and a fixed low port also collides with WSL2's WinNAT reservations (the bind
-# fails with "Address already in use" against a port `ss` shows as free).
-# Binding 127.0.0.1:0 is the same address the runner listens on, so a port the
-# kernel hands out here is one the runner can take. The window between this
-# probe closing and the runner binding is not closed; the stale-server check
-# below turns a lost race into a red run, never a green one against someone
-# else's server. PLAY_TEST_PORT still pins it explicitly.
-if [ -n "${PLAY_TEST_PORT:-}" ]; then
-  PORT=$PLAY_TEST_PORT
-else
-  PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
-fi
-export PLAY_PORT=$PORT
-echo "port: $PORT"
-
-# A stale server on the port would answer every check while the fresh one
-# dies on bind — fail fast instead of green-lighting an orphan.
-if [ "$MODE" = jvm ] && curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-  echo "FAIL: something already listens on $PORT (stale server?)"; exit 1
-fi
-
-# Leftovers from an earlier runner: one the startup sweep can remove, and one
-# it cannot (a read-only directory with a file in it, the shape the sandbox's
-# transient uid left in box/classes). The sweep must take the first, keep the
-# second, and say so in the log instead of ignoring it.
-mkdir -p "$WORK/dawn-play-stale-ok/box/classes" "$WORK/dawn-play-stale-locked/box/classes"
-: >"$WORK/dawn-play-stale-ok/box/classes/A.class"
-: >"$WORK/dawn-play-stale-locked/box/classes/A.class"
-chmod 0555 "$WORK/dawn-play-stale-locked/box/classes"
+SOCK="dawn-play-test-$$-${WORK##*.}"
 LOG=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test.XXXXXX")
+# Guards keep a failed kill from turning into the script's exit status (dash:
+# set -e applies inside an EXIT trap). The log is kept on failure only.
+# `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
+trap 'kill -TERM "-$SRV" 2>/dev/null || true; rm -rf "${WORK:?}" "${WORK:?}.cases" "${WORK:?}.bin"; rm -f "${WORK:?}.canary"; { [ -z "$NATIVE_DIR" ] || rm -rf "$NATIVE_DIR"; }; { [ -z "${SRV2:-}" ] || kill -TERM "-$SRV2" 2>/dev/null || true; }; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+if [ -n "${PLAY_TEST_NATIVE_BIN:-}" ]; then
+  NATIVE_BIN=$PLAY_TEST_NATIVE_BIN
+  [ -x "$NATIVE_BIN" ] || { echo "FAIL: PLAY_TEST_NATIVE_BIN=$NATIVE_BIN is not an executable"; exit 1; }
+else
+  # The runner of this tree, built the way the toolchain builds any native
+  # program without dawnc: the C text, then the shared compile and link.
+  mkdir -p "$WORK.bin/c"
+  "$DAWN_BIN" __emitc "$ROOT/playground" -o "$WORK.bin/c/main.c" >"$WORK.bin/build.log" 2>&1 &&
+    "$ROOT/scripts/cc-units.sh" -o "$WORK.bin/dawn-play" "$WORK.bin/c" >>"$WORK.bin/build.log" 2>&1 ||
+    { echo "FAIL: cannot build the runner"; tail -n 20 "$WORK.bin/build.log"; exit 1; }
+  NATIVE_BIN="$WORK.bin/dawn-play"
+fi
+echo "runner: $NATIVE_BIN"
+
+# A deploy writes this from the tree it ships (redeploy.sh); /health then
+# answers without a child, as in production.
+PLAY_TOOLCHAIN_ID=$("$DAWN_BIN" --version 2>/dev/null | tail -n 1 | sed -e 's/^dawn //' -e 's/ (selfhost)//')
+export PLAY_TOOLCHAIN_ID
 # The runner starts in a session (and so a process group) of its own, whose id
-# is its pid: `dawn run` executes the program in a child JVM that outlives its
-# parent, and killing the group reaches that child without looking anyone up
-# by port. The old cleanup ran `fuser -k` on the port, which on a shared
-# machine kills whatever else holds it. python3 does the setsid because it is
-# already required here and, unlike setsid(1), exists on macOS.
+# is its pid, so the cleanup reaches every request process it started without
+# looking anyone up. python3 does the setsid because it is already required
+# here and, unlike setsid(1), exists on macOS.
 #
 # It also starts in the POSIX locale with no LANG, which is the environment a
 # systemd unit gives the compilers it starts: file names are then ASCII to the
 # JVM, and the /compile cases with non-ASCII names only pass because the
 # runner asks for a UTF-8 locale on those commands (play/exec.utf8_env).
-if [ "$MODE" = native ]; then
-  NATIVE_BIN=${PLAY_TEST_NATIVE_BIN:-$ROOT/dawn-play-linux-x86_64}
-  [ -x "$NATIVE_BIN" ] || { echo "FAIL: no native runner at $NATIVE_BIN (dawnc build playground/native -o $NATIVE_BIN)"; exit 1; }
-  command -v systemd-socket-activate >/dev/null || { echo "FAIL: native mode needs systemd-socket-activate"; exit 1; }
-  SOCK="$WORK.sock"
-  # A deploy writes this from the tree it ships (redeploy.sh); /health then
-  # answers without a child, as in production.
-  PLAY_TOOLCHAIN_ID=$("$DAWN_BIN" --version 2>/dev/null | tail -n 1 | sed -e 's/^dawn //' -e 's/ (selfhost)//')
-  export PLAY_TOOLCHAIN_ID
-  # systemd-socket-activate hands the child only the variables named with -E.
-  SA_ENV=""
-  for v in $(env | sed -n 's/^\(\(PLAY_\|DAWN\)[A-Z_]*\)=.*/\1/p') PATH JAVA_HOME HOME TMPDIR; do
-    SA_ENV="$SA_ENV -E $v"
-  done
-  # shellcheck disable=SC2086  # SA_ENV is a list of words on purpose
+start_runner() { # socket, log
   python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
-    systemd-socket-activate -l "$SOCK" -a --inetd $SA_ENV "$NATIVE_BIN" serve >"$LOG" 2>&1 &
-  SRV=$!
-  # Every case below talks to the runner with curl; this makes the same
-  # command line reach the socket (the URL's host and port are then ignored).
-  curl() { command curl --unix-socket "$SOCK" "$@"; }
-else
-python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
-  "$DAWN_BIN" run "$ROOT/playground" >"$LOG" 2>&1 &
+    python3 -I -B "$ROOT/playground/test/inetd.py" "$1" "$NATIVE_BIN" serve >"$2" 2>&1 &
+}
+start_runner "$SOCK" "$LOG"
 SRV=$!
-fi
-# Guards keep a failed kill from turning into the script's exit status (dash:
-# set -e applies inside an EXIT trap). The log is kept on failure only. The
-# runner is outside the terminal's process group now, so ^C no longer reaches
-# it; the signal traps route through exit so the EXIT trap still kills it.
-# `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null; rm -rf "${WORK:?}" "${WORK:?}.cases"; rm -f "${WORK:?}.canary" "${WORK:?}.sock"; [ -n "$NATIVE_DIR" ] && rm -rf "$NATIVE_DIR"; [ -n "${SRV2:-}" ] && kill -TERM "-$SRV2" 2>/dev/null; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
-# Wait for /health against a deadline, not a count of tries. `dawn run`
-# compiles the runner before the socket opens, and the old 30 tries of 0.3 s
-# (9 s) were gone before that finished on a loaded machine: every check after
-# then failed against a closed port, and /health reported an empty build that
-# read like another runner's. A runner that never answers is still red, at
-# the deadline, with its own log rather than fifteen downstream failures; one
-# that dies is red as soon as neither its pid nor its process group is
-# left (the pid alone right after the fork: setsid may not have run yet).
-# PLAY_TEST_HEALTH_WAIT moves the deadline (seconds).
+# Every case below talks to the runner with curl; this makes the same command
+# line reach the socket. The URL's host is then only the Host header.
+URL=http://localhost
+curl() { command curl --abstract-unix-socket "$SOCK" "$@"; }
+# Wait for /health against a deadline, not a count of tries. A runner that
+# never answers is still red, at the deadline, with its own log rather than
+# fifteen downstream failures; one that dies is red as soon as neither its pid
+# nor its process group is left (the pid alone right after the fork: setsid
+# may not have run yet). PLAY_TEST_HEALTH_WAIT moves the deadline (seconds).
 HEALTH_WAIT=${PLAY_TEST_HEALTH_WAIT:-60}
 wait_started=$(date +%s)
 deadline=$((wait_started + HEALTH_WAIT))
 waited=""
-until curl -s --noproxy '*' --max-time 5 -o /dev/null "http://127.0.0.1:$PORT/health"; do
+until curl -s --noproxy '*' --max-time 5 -o /dev/null "$URL/health"; do
   if ! kill -0 "$SRV" 2>/dev/null && ! kill -0 "-$SRV" 2>/dev/null; then
     waited="exited before /health answered"; break
   fi
@@ -233,25 +193,6 @@ if [ -n "$waited" ]; then
 fi
 echo "runner answered /health after $(($(date +%s) - wait_started))s"
 
-sweep_ok=1
-if [ "$MODE" = native ]; then
-  # The per-request process must not sweep: it would delete the directories of
-  # the requests running in its siblings. Remove the leftovers by hand so the
-  # "nothing left behind" case at the end looks only at this run's requests.
-  chmod 0755 "$WORK/dawn-play-stale-locked/box/classes"
-  rm -rf "${WORK:?}/dawn-play-stale-ok" "${WORK:?}/dawn-play-stale-locked"
-  echo "  --  native mode: the startup sweep cases are the JVM server's and are skipped"
-else
-[ ! -e "$WORK/dawn-play-stale-ok" ] || { echo "FAIL: the startup sweep left a removable stale directory"; sweep_ok=0; }
-[ -e "$WORK/dawn-play-stale-locked" ] || { echo "FAIL: the sweep removed a directory the test made undeletable?"; sweep_ok=0; }
-grep -q "removed 1 stale request directories" "$LOG" || { echo "FAIL: the sweep did not log its count"; sweep_ok=0; }
-grep -q "cannot remove stale .*dawn-play-stale-locked" "$LOG" || { echo "FAIL: the sweep did not log the directory it could not remove"; sweep_ok=0; }
-chmod 0755 "$WORK/dawn-play-stale-locked/box/classes"
-rm -rf "$WORK/dawn-play-stale-locked"
-[ "$sweep_ok" = 1 ] || { tail -n 20 "$LOG"; exit 1; }
-echo "  ok  the startup sweep removes stale request directories and logs what it cannot"
-fi
-
 pass=0
 fail=0
 # Every request is bounded, so a runner that never answers is a red case and
@@ -260,7 +201,7 @@ REQ_MAX=$((PLAY_COMPILE_TIMEOUT + PLAY_TIMEOUT + 10))
 # The assertion sees the parsed body as `d` and the bytes as `raw`: a JSON
 # parser reads 0 and 0.0 as equal, so the integer fields are checked on `raw`.
 check() { # name, curl-data, python-assertion, [endpoint (default: run)]
-  body=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$2" "http://127.0.0.1:$PORT/${4:-run}" || true)
+  body=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$2" "$URL/${4:-run}" || true)
   if printf '%s' "$body" | python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); assert ($3), d" 2>/dev/null; then
     pass=$((pass + 1)); echo "  ok  $1"
   else
@@ -268,7 +209,7 @@ check() { # name, curl-data, python-assertion, [endpoint (default: run)]
   fi
 }
 
-health=$(curl -s --noproxy '*' --max-time 10 "http://127.0.0.1:$PORT/health" || true)
+health=$(curl -s --noproxy '*' --max-time 10 "$URL/health" || true)
 echo "health: $health"
 # The editor's toolbar shows this version; a release always has three parts.
 # `build` is the short build-manifest digest the runner's compiler prints last
@@ -425,7 +366,7 @@ ccheck() { # name, program file, target, python-assertion
   RESP_N=$((RESP_N + 1))
   out="$CASES/resp.$RESP_N"
   curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$(compile_body "$2" "$3")" \
-    "http://127.0.0.1:$PORT/compile" >"$out" || true
+    "$URL/compile" >"$out" || true
   if PREV="$PREV" python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); prev=json.load(open(os.environ['PREV'])) if os.environ['PREV'] else None; assert ($4), d" <"$out" 2>/dev/null; then
     pass=$((pass + 1)); echo "  ok  $1"
   else
@@ -442,22 +383,24 @@ SOUND='d["ok"] is True and d["phase"]=="compile-view" and d["gaps"]["count"]==0 
 ccheck "compile: the C text of a starter, no gap, its calls placed in it" "$CASES/starter.dawn" c \
   "$SOUND"' and d["target"]=="c" and d["cached"] is False and d["pane"]["kind"]=="c" and len(d["calls"])>=1 and any("prog__main" in l for l in d["pane"]["text"]) and any(o["marks"] for o in d["pane"]["outs"]) and re.fullmatch(r"b1:[0-9a-f]{12}", d["build"])'
 
-ccheck "compile: the same program again is a hit that differs only in its head" "$CASES/starter.dawn" c \
-  'd["cached"] is '"$CACHED_HIT"' and prev is not None and {k:v for k,v in d.items() if k not in ("cached","ms")}=={k:v for k,v in prev.items() if k not in ("cached","ms")}'
+# The runner keeps no answers (the process is the request), so a repeat is
+# compiled again and must answer the same bytes but for the timing.
+ccheck "compile: the same program again answers the same, uncached" "$CASES/starter.dawn" c \
+  'd["cached"] is False and prev is not None and {k:v for k,v in d.items() if k not in ("cached","ms")}=={k:v for k,v in prev.items() if k not in ("cached","ms")}'
 
-ccheck "compile: the JVM listing of it is the other half of the same build, already kept" "$CASES/starter.dawn" jvm \
-  "$SOUND"' and d["target"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["pane"]["kind"]=="jvm" and any(o["key"] for o in d["pane"]["outs"]) and any("invokestatic" in l for l in d["pane"]["text"]) and d["calls"]==prev["calls"]'
+ccheck "compile: the JVM listing of it is the other half of the same build" "$CASES/starter.dawn" jvm \
+  "$SOUND"' and d["target"]=="jvm" and d["cached"] is False and d["pane"]["kind"]=="jvm" and any(o["key"] for o in d["pane"]["outs"]) and any("invokestatic" in l for l in d["pane"]["text"]) and d["calls"]==prev["calls"]'
 
 ccheck "compile: names outside ASCII map with no gap (JVM)" "$CASES/odd.dawn" jvm \
   "$SOUND"' and any("größe" in l for l in d["pane"]["text"]) and d["cached"] is False'
 ccheck "compile: and so does the C text of them" "$CASES/odd.dawn" c \
-  "$SOUND"' and d["cached"] is '"$CACHED_HIT"' and len(d["calls"])>=3'
+  "$SOUND"' and d["cached"] is False and len(d["calls"])>=3'
 
 # The program that does not compile gets /check's diagnostics, word for word,
-# and the same for either target, the second from the cache.
+# and the same for either target.
 ccheck "compile: an error carries the diagnostics, without the work directory" "$CASES/broken.dawn" c \
   'not d["ok"] and d["phase"]=="compile" and "prog.dawn:1" in d["output"] and "undefined variable: nope" in d["output"] and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and "cached" not in d'
-checked=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$(python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1]).read()}))' "$CASES/broken.dawn")" "http://127.0.0.1:$PORT/check" || true)
+checked=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$(python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1]).read()}))' "$CASES/broken.dawn")" "$URL/check" || true)
 if printf '%s' "$checked" | CASE="$PREV" python3 -c "import os,sys,json; assert json.load(sys.stdin) == json.load(open(os.environ['CASE']))" 2>/dev/null; then
   pass=$((pass + 1)); echo "  ok  compile: the diagnostics are /check's, byte for byte"
 else
@@ -480,7 +423,7 @@ tile_ccheck() { # name, program file, extra request fields (JSON object), assert
   out="$CASES/resp.$RESP_N"
   curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST \
     --data "$(python3 -c 'import json,sys; d={"code": open(sys.argv[1], encoding="utf-8").read(), "target": "tile"}; d.update(json.loads(sys.argv[2])); print(json.dumps(d))' "$2" "$3")" \
-    "http://127.0.0.1:$PORT/compile" >"$out" || true
+    "$URL/compile" >"$out" || true
   if EXPECTED="$CASES/tile.expected" python3 -c "import os,sys,json,re; raw=sys.stdin.read(); d=json.loads(raw); expected=open(os.environ['EXPECTED'], encoding='utf-8').read(); assert ($4), d" <"$out" 2>/dev/null; then
     pass=$((pass + 1)); echo "  ok  $1"
   else
@@ -532,7 +475,7 @@ check "run: a program that does not import tileir is still the single file it wa
 ccheck "compile: the C text of a tileir program is its own module's, no gap, its calls placed in it" "$CASES/tile.dawn" c \
   "$SOUND"' and d["target"]=="c" and d["cached"] is False and d["pane"]["kind"]=="c" and d["calls_total"]>=4 and d["pane"]["total"]>1000 and d["pane"]["shown"]<200 and any("main__vadd" in l for l in d["pane"]["text"])'
 ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
-  "$SOUND"' and d["target"]=="jvm" and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["calls_total"]>=4 and any("invokestatic" in l for l in d["pane"]["text"])'
+  "$SOUND"' and d["target"]=="jvm" and d["pane"]["kind"]=="jvm" and d["cached"] is False and d["calls_total"]>=4 and any("invokestatic" in l for l in d["pane"]["text"])'
 # Its kernel is written with operators on tiles (`a * b` is a call of `Mul`'s
 # impl, its name the `*`) and a literal where a tile is expected (`0.0`, a
 # call of `from_float`): each of them is a call of the table with no gap. The
@@ -540,8 +483,8 @@ ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
 # its line count is still the whole text's (docs/playground-compile-design.md K8).
 ccheck "compile: the flash attention starter's C text pairs its operators, no gap" "$CASES/tile_attn.dawn" c \
   "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==32 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])==7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
-ccheck "compile: the other half of it is kept, and pairs the same calls" "$CASES/tile_attn.dawn" jvm \
-  "$SOUND"' and d["pane"]["kind"]=="jvm" and d["cached"] is '"$CACHED_HIT"' and d["calls"]==prev["calls"]'
+ccheck "compile: the JVM listing of it pairs the same calls" "$CASES/tile_attn.dawn" jvm \
+  "$SOUND"' and d["pane"]["kind"]=="jvm" and d["cached"] is False and d["calls"]==prev["calls"]'
 ccheck "compile: a dependency the visitor supplies is not honoured by the C view either" "$CASES/tile_smuggle.dawn" c \
   'd["ok"] is False and d["phase"]=="compile" and "json" in d["output"] and "pane" not in d'
 
@@ -556,7 +499,7 @@ ccheck "compile: a program inside both limits is not marked cut" "$CASES/starter
 
 # Refusals before anything runs.
 body_status() { # data, expected status
-  got=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o "$CASES/refusal" -w '%{http_code}' -X POST --data "$1" "http://127.0.0.1:$PORT/compile" || true)
+  got=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o "$CASES/refusal" -w '%{http_code}' -X POST --data "$1" "$URL/compile" || true)
   [ "$got" = "$2" ]
 }
 refuses() { # name, data, status, text the refusal must name
@@ -578,7 +521,7 @@ if body_status "$bigc" 413; then
 else
   fail=$((fail + 1)); echo "FAIL  compile: an oversized body is 413 (got $got)"
 fi
-code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/compile" || true)
+code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "$URL/compile" || true)
 [ "$code" = "405" ] && { pass=$((pass+1)); echo "  ok  compile: GET -> 405"; } || { fail=$((fail+1)); echo "FAIL  compile: GET -> $code"; }
 
 # /compile shares /check's two permits and its two-second patience. Two runs of
@@ -586,9 +529,9 @@ code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}
 # compile before it; a compile that arrives meanwhile is turned away at two
 # seconds. A /compile with a gate of its own would be let in and answer 200.
 SPIN='{"code":"fn s(n: Int) -> Unit !io = if n < 0 { () } else { s(n + 1) }\npub fn main() -> Unit !io = {\n  println(\"x\")\n  s(0)\n}"}'
-curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "http://127.0.0.1:$PORT/run" >/dev/null &
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "$URL/run" >/dev/null &
 SPIN1=$!
-curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "http://127.0.0.1:$PORT/run" >/dev/null &
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$SPIN" "$URL/run" >/dev/null &
 SPIN2=$!
 sleep 0.7
 unique=$(python3 -c 'import json; print(json.dumps({"code": "pub fn main() -> Unit !io = println(\"saturated\")", "target": "c"}))')
@@ -606,26 +549,24 @@ ccheck "compile: the permits come back" "$CASES/fresh.dawn" c 'd["ok"] is True a
 # diagnostics and a program's C view are the same bytes whichever compiler
 # answered (a second runner without dawnc is the reference); and the refusal
 # the fallback keys on is what the real binary says.
-if [ "$MODE" = native ]; then
-  echo "  --  native mode: the dawnc comparison against a second JVM runner is skipped"
-elif [ -n "$NATIVE_DIR" ]; then
+if [ -n "$NATIVE_DIR" ]; then
   calls() { wc -l <"$NATLOG" | tr -d ' '; }
-  post() { # port, endpoint, data
-    curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$3" "http://127.0.0.1:$1/$2" || true
+  post() { # socket, endpoint, data
+    command curl --abstract-unix-socket "$1" -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$3" "$URL/$2" || true
   }
   ok_case() { # name, condition-exit-status
     if [ "$2" = "0" ]; then pass=$((pass + 1)); echo "  ok  $1"; else fail=$((fail + 1)); echo "FAIL  $1"; fi
   }
 
   n0=$(calls)
-  body=$(post "$PORT" check '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}')
+  body=$(post "$SOCK" check '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}')
   st=0; printf '%s' "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is True, d' || st=1
   [ "$(calls)" -gt "$n0" ] && [ "$(tail -n 1 "$NATLOG")" = "check" ] || st=1
   ok_case "native check: a plain program is checked by dawnc" "$st"
 
   n0=$(calls)
   jcode='use java \"java.lang.System\"\npub fn main() -> Unit !io = println(System.getProperty(\"java.class.path\").expect(\"cp\"))'
-  body=$(post "$PORT" check "{\"code\":\"$jcode\"}")
+  body=$(post "$SOCK" check "{\"code\":\"$jcode\"}")
   st=0; printf '%s' "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is True, d' || st=1
   [ "$(calls)" -gt "$n0" ] || st=1
   ok_case "native check: a use java program is refused by dawnc and passes through the JVM compiler" "$st"
@@ -640,32 +581,31 @@ elif [ -n "$NATIVE_DIR" ]; then
   ok_case "dawnc refuses use java with status 1 and the sentence play/exec.dawn keys on" "$st"
 
   # The reference: the same runner with no dawnc, so every answer is the JVM's.
-  PORT2=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  SOCK2="$SOCK-2"
   LOG2=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test2.XXXXXX")
-  DAWNC_BIN=/nonexistent/dawnc PLAY_PORT=$PORT2 python3 -c 'import os, sys; os.setsid(); os.environ.pop("LANG", None); os.environ["LC_ALL"] = "POSIX"; os.execvp(sys.argv[1], sys.argv[1:])' \
-    "$DAWN_BIN" run "$ROOT/playground" >"$LOG2" 2>&1 &
+  DAWNC_BIN=/nonexistent/dawnc start_runner "$SOCK2" "$LOG2"
   SRV2=$!
   deadline2=$(($(date +%s) + HEALTH_WAIT))
-  until curl -s --noproxy '*' --max-time 5 -o /dev/null "http://127.0.0.1:$PORT2/health"; do
+  until command curl --abstract-unix-socket "$SOCK2" -s --noproxy '*' --max-time 5 -o /dev/null "$URL/health"; do
     [ "$(date +%s)" -ge "$deadline2" ] && { echo "FAIL: the reference runner did not answer /health"; tail -n 20 "$LOG2"; exit 1; }
     sleep 0.3
   done
-  grep -q 'no native dawnc' "$LOG2" && st=0 || st=1
-  ok_case "the runner without dawnc says so once at startup" "$st"
 
   bad='{"code":"type T = A | B\nfn f(t: T) -> Int = match t { A -> 1 }\npub fn main() -> Unit !io = println(nope + f(A))"}'
   n0=$(calls)
-  a=$(post "$PORT" check "$bad"); b=$(post "$PORT2" check "$bad")
+  a=$(post "$SOCK" check "$bad"); b=$(post "$SOCK2" check "$bad")
   st=0
   [ "$(calls)" -gt "$n0" ] || st=1
   [ "$a" = "$b" ] || st=1
   printf '%s' "$a" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["ok"] is False and "undefined variable: nope" in d["output"] and "non-exhaustive" in d["output"], d' || st=1
   [ "$st" = "0" ] || { echo "        dawnc: $a"; echo "        dawn:  $b"; }
   ok_case "native check: a broken program's /check JSON is byte-identical to the JVM compiler's" "$st"
+  grep -q 'no native dawnc' "$LOG2" && st=0 || st=1
+  ok_case "the runner without dawnc says so in its log" "$st"
 
   prog='{"code":"pub fn main() -> Unit !io = println(\"hi\")","target":"c"}'
   n0=$(calls)
-  a=$(post "$PORT" compile "$prog"); b=$(post "$PORT2" compile "$prog")
+  a=$(post "$SOCK" compile "$prog"); b=$(post "$SOCK2" compile "$prog")
   st=0
   [ "$(tail -n 1 "$NATLOG")" = "emitc" ] || st=1
   A="$a" B="$b" python3 -c '
@@ -690,12 +630,47 @@ check "missing code -> error" \
 
 # large body -> 413 (checked via status, not JSON body)
 big=$(python3 -c 'print("{\"code\":\"" + "/"*70000 + "\"}")')
-code=$(printf '%s' "$big" | curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' -X POST --data @- "http://127.0.0.1:$PORT/run" || true)
+code=$(printf '%s' "$big" | curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' -X POST --data @- "$URL/run" || true)
 [ "$code" = "413" ] && { pass=$((pass+1)); echo "  ok  oversized body -> 413"; } || { fail=$((fail+1)); echo "FAIL  oversized body -> $code"; }
 
 # GET -> 405
-code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/run" || true)
+code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "$URL/run" || true)
 [ "$code" = "405" ] && { pass=$((pass+1)); echo "  ok  GET -> 405"; } || { fail=$((fail+1)); echo "FAIL  GET -> $code"; }
+
+# The access log names each program by the SHA-256 of its `code` field, with
+# the toolchain that answered it, and never by its text: a program carrying a
+# marker is run, compiled for the C view and checked, and the marker must be
+# nowhere in the log while three lines carry its digest (ruling 4 of
+# 2026-10-19; the digests are what a later answer cache is decided on).
+MARK_CODE='pub fn main() -> Unit !io = println("k5-access-log-marker")'
+MARK_JSON=$(python3 -c 'import json,sys; print(json.dumps({"code": sys.argv[1]}))' "$MARK_CODE")
+MARK_C=$(python3 -c 'import json,sys; print(json.dumps({"code": sys.argv[1], "target": "c"}))' "$MARK_CODE")
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$MARK_JSON" "$URL/run" >/dev/null || true
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$MARK_C" "$URL/compile" >/dev/null || true
+curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$MARK_JSON" "$URL/check" >/dev/null || true
+curl -s --noproxy '*' --max-time 10 -o /dev/null "$URL/health" || true
+if MARK_CODE="$MARK_CODE" python3 - "$LOG" <<'PY'
+import hashlib, os, re, sys
+log = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+code = os.environ["MARK_CODE"]
+digest = hashlib.sha256(code.encode()).hexdigest()
+tc = os.environ["PLAY_TOOLCHAIN_ID"].replace(" ", "/")
+assert "k5-access-log-marker" not in log, "the log carries the program's text"
+for want in (f"200 POST /run toolchain={tc} src_sha256={digest}\n",
+             f"200 POST /compile toolchain={tc} src_sha256={digest} target=c\n",
+             f"200 POST /check toolchain={tc} src_sha256={digest}\n",
+             f"200 GET /health toolchain={tc}\n"):
+    assert want in log, (want, log[-2000:])
+# every access line carries the toolchain, and every POST to a route a digest or `-`
+lines = [l for l in log.splitlines() if re.match(r"^[0-9]{3} (GET|POST) /", l)]
+assert lines and all(" toolchain=" in l for l in lines), lines
+assert all(re.search(r" src_sha256=([0-9a-f]{64}|-)( |$)", l) for l in lines if re.match(r"^[0-9]{3} POST /(run|check|compile) ", l)), lines
+PY
+then
+  pass=$((pass + 1)); echo "  ok  the access log names each program by its digest and toolchain, never by its text"
+else
+  fail=$((fail + 1)); echo "FAIL  the access log names each program by its digest and toolchain, never by its text"
+fi
 
 # Every request above, including the ones that timed out, failed to compile
 # or had their output swapped, removed its own directory.

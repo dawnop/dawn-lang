@@ -207,26 +207,43 @@ c_p_no_user()        { mkrepo play; GOODNATIVE; deploy play -u DEPLOY_USER; refu
 c_p_native_missing() { mkrepo play; GOODNATIVE; rm "$work/dawnc"; deploy play; refused 'release-native.sh' "$NOSHIP"; }
 c_p_native_version() { mkrepo play; GOODNATIVE; mknative "$work/dawnc" 'dawnc 0.0.1 (native)' x; deploy play; refused 'native artifact says' "$NOSHIP"; }
 c_p_native_tail()    { mkrepo play; GOODNATIVE; mknative "$work/dawnc" 'dawnc 9.9.9 (native) b1:zzz' x; deploy play; refused 'native artifact says' "$NOSHIP"; }
-c_p_runner_missing() { mkrepo play; GOODNATIVE; rm "$work/dawn-play"; deploy play; refused 'DAWN_PLAY_NATIVE=0' "$NOSHIP"; }
+c_p_runner_missing() { mkrepo play; GOODNATIVE; rm "$work/dawn-play"; deploy play; refused 'build playground -o dawn-play-linux-x86_64' "$NOSHIP"; }
 c_p_runner_health()  { mkrepo play; GOODNATIVE; mknative "$work/dawn-play" x '{"ok":true,"version":"0.0.1"}'; deploy play; refused 'does not answer /health as release 9.9.9' "$NOSHIP"; }
 c_p_remote_cmds()    { mkrepo play; GOODNATIVE; deploy play SSH_FAIL='command -v'; refused 'server lacks a command' '^rsync'; }
 c_p_jdk()            { mkrepo play; GOODNATIVE; deploy play SSH_FAIL='-version'; refused 'install the pinned JDK' '^rsync'; }
+# The canary runs before the swap and a failing one stops the deploy there:
+# the call that swaps the binary in (and checks it through the socket, --live)
+# is never made, and the LSP gateway was still restarted before it.
 c_p_canary() {
   mkrepo play; GOODNATIVE; deploy play SSH_FAIL='canary-check'
-  refused 'native canary failed its check' 'NEVER_MATCHES_ZZZ' && grep -q 'systemctl restart dawn-play' "$LOG"
+  refused 'runner canary failed its check; the new binary was not swapped in' '--live' &&
+    grep -q 'systemctl restart dawn-play-lsp' "$LOG"
 }
-c_p_native_off() { mkrepo play; GOODNATIVE; rm "$work/dawn-play"; deploy play DAWN_PLAY_NATIVE=0; shipped; }
-c_p_green()      { mkrepo play; GOODNATIVE; deploy play; shipped && grep -q 'canary-check' "$LOG"; }
+# A swapped-in runner that fails through the socket fails the deploy.
+c_p_swap_check() {
+  mkrepo play; GOODNATIVE; deploy play SSH_FAIL='--live'
+  refused 'new runner is live and failed its check through the socket' 'NEVER_MATCHES_ZZZ'
+}
+c_p_green() { # the canary is asked before the swap, with the candidate and the live binary
+  mkrepo play; GOODNATIVE; deploy play; shipped || return 1
+  local c w
+  c="$(grep -nF -- '--candidate "$B/.dawn-play.next" --previous "$B/dawn-play"' "$LOG" | head -1 | cut -d: -f1)"
+  w="$(grep -nF -- 'mv "$B/.dawn-play.next" "$B/dawn-play"' "$LOG" | head -1 | cut -d: -f1)"
+  [ -n "$c" ] && [ -n "$w" ] && [ "$c" -lt "$w" ]
+}
+# The JVM runner's unit is never restarted or polled any more.
+c_p_no_jvm() { mkrepo play; GOODNATIVE; deploy play; shipped && ! grep -Eq 'restart dawn-play( |$)|127\.0\.0\.1:8087/health' "$LOG"; }
 
 # The routing line is read from the server, not assumed (#682). The stub prints
-# the /api/run proxy_pass target; the deploy must say what it is.
+# the /api/run proxy_pass target; the deploy must say what it is, and since K5
+# a host still routed to the JVM runner's port is refused before anything ships.
 c_p_route_jvm() {
   mkrepo play; GOODNATIVE; deploy play STUB_ROUTING=http://127.0.0.1:8087/run
-  shipped && grep -q 'nginx routes /api/run to the JVM runner' "$OUT" && ! grep -q 'native runner (' "$OUT"
+  refused 'this release has no JVM runner' '^rsync'
 }
 c_p_route_native() {
   mkrepo play; GOODNATIVE; deploy play STUB_ROUTING=http://unix:/run/dawn-play/http.sock:/run
-  shipped && grep -q 'nginx routes /api/run to the native runner' "$OUT" && ! grep -q 'JVM runner (' "$OUT"
+  shipped && grep -q "nginx routes /api/run to the runner's socket" "$OUT" && ! grep -q 'cannot tell' "$OUT"
 }
 c_p_route_unknown() {
   mkrepo play; GOODNATIVE; deploy play
@@ -235,11 +252,6 @@ c_p_route_unknown() {
 c_p_route_odd() {
   mkrepo play; GOODNATIVE; deploy play STUB_ROUTING=http://10.9.9.9:1/run
   shipped && grep -q 'unrecognised upstream' "$OUT"
-}
-c_p_route_native_off() { # the line is printed without a canary too
-  mkrepo play; GOODNATIVE; rm "$work/dawn-play"
-  deploy play DAWN_PLAY_NATIVE=0 STUB_ROUTING=http://unix:/run/dawn-play/http.sock:/run
-  shipped && grep -q 'to the native runner' "$OUT"
 }
 
 # --- the rollback copy -------------------------------------------------------
@@ -366,10 +378,16 @@ mutant_for() {
     c_p_runner_health) echo "*'\"ok\":true,\"version\":\"'\"\$VERSION\"'\"'*) ;;=>*) ;;" ;;
     c_p_remote_cmds) echo "if ! ssh \"\$HOST\" 'PATH=/usr=>if ! true \"\$HOST\" 'PATH=/usr" ;;
     c_p_jdk) echo "if ! ssh \"\$HOST\" \"'\$PLAY_JDK_REMOTE/bin/java'=>if ! true \"\$HOST\" \"'\$PLAY_JDK_REMOTE/bin/java'" ;;
-    c_p_canary) echo 'if ! ssh "$HOST" "$REMOTE_CANARY"; then=>if ! true "$HOST" "$REMOTE_CANARY"; then' ;;
-    # the old hard-coded claim: native and unknown must then fail
-    c_p_route_jvm|c_p_route_native|c_p_route_unknown|c_p_route_odd|c_p_route_native_off)
-      echo 'echo "$ROUTING_LINE"=>echo "nginx still routes to the JVM runner."' ;;
+    c_p_canary) echo 'if ! ssh "$HOST" "$CANARY_ENV $REMOTE_CANARY"; then=>if ! true "$HOST" "$CANARY_ENV $REMOTE_CANARY"; then' ;;
+    c_p_swap_check) echo 'if ! ssh "$HOST" "$CANARY_ENV $REMOTE_SWAP"; then=>if ! true "$HOST" "$CANARY_ENV $REMOTE_SWAP"; then' ;;
+    # the swap made before the canary: the order the case reads goes
+    c_p_green) printf '%s\n' 'echo "=== checking the new runner against the live one (canary) ==="=>ssh "$HOST" "$CANARY_ENV $REMOTE_SWAP"' ;;
+    c_p_no_jvm) echo 'sudo systemctl restart dawn-play-lsp=>sudo systemctl restart dawn-play dawn-play-lsp' ;;
+    # the JVM port is not recognised: it ships, with "cannot tell"
+    c_p_route_jvm) echo 'http://127.0.0.1:8087/*|http://localhost:8087/*)=>http://never.invalid/*)' ;;
+    # an assumed answer instead of the read: native, unknown and odd must then fail
+    c_p_route_native|c_p_route_unknown|c_p_route_odd)
+      echo 'case "$ROUTING_TARGETS" in=>ROUTING_TARGETS=http://127.0.0.1:8087/run; case "$ROUTING_TARGETS" in' ;;
     c_p_backup_first|c_s_backup_first)
       echo 'if ! ssh "$HOST" bash -s --=>if ! true "$HOST" bash -s --' ;;
     c_p_backup_closed)

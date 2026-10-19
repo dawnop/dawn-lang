@@ -1,15 +1,15 @@
-# The runner's four routes as functions of the request body, shared by the two
-# entry points: main.dawn (the long-lived `web` server) and play/serve.dawn (one
-# request per process, K2 of docs/playground-native-runner-design.md). A handler
-# returns a `Reply`, status and body text, and each entry point puts it on the
-# wire its own way, so the two cannot drift apart in what they answer.
+# The runner's four routes as functions of the request body. A handler
+# returns a `Reply`, status and body text, and play/serve.dawn puts it on the
+# wire. They were written as a module of their own when the runner had two
+# entries (the long-lived `web` server and one request per process) so that
+# the two could not drift apart in what they answered; the long-lived one is
+# gone (K5 of docs/playground-native-runner-design.md) and the split stays,
+# because it keeps the routes pure functions of the body and a `Host`.
 #
 # Why this module imports nothing from `web`: `web/types` sits on `use java`
-# (InputStream), and serve is built natively. Nor does anything below it:
-# the heavy part of a request is a `Job` handed to a `Host` (play/host), so the
-# in-process Semaphore and the answer cache the long-lived server uses stay in
-# play/jvmhost, and the flock gate serve uses is play/gate. Timing is the
-# `Clock` effect through play/exec.
+# (InputStream), and the runner is built natively. Nor does anything below it:
+# the heavy part of a request is a `Job` handed to a `Host` (play/host), whose
+# flock gate is play/gate. Timing is the `Clock` effect through play/exec.
 use std/bytes
 use std/str
 use std/io
@@ -27,20 +27,14 @@ fn raw(status: Int, _content_type: String, body: String) -> Reply = Reply { stat
 
 const MAX_BODY: Int = 65536
 pub const JSON_CT: String = "application/json; charset=utf-8"
-pub const MAX_CONCURRENT: Int = 2
 const QUEUE_WAIT_SECS: Int = 15
 # Editor diagnostics are advisory: don't queue behind runs, fail fast so the
 # client just keeps its previous squiggles and retries on the next pause.
 const CHECK_WAIT_SECS: Int = 2
 # The compile view is advisory in the same way, and shares the same two
-# permits: a second pool for it would double the compilers the host runs at
-# once, and nobody would be counting them.
+# permits (play/gate's slots): a second pool for it would double the compilers
+# the host runs at once, and nobody would be counting them.
 const COMPILE_WAIT_SECS: Int = CHECK_WAIT_SECS
-# At most this many answers, and this many characters of them, are kept
-# (play/cache.dawn). An answer is kept under one key a target, so a program the
-# visitor has looked at in both tabs is two entries.
-pub const CACHE_ENTRIES: Int = 128
-pub const CACHE_CHARS: Int = 33554432
 
 # JSON since the editor started showing the compiler version; deploy checks
 # only look at the status (curl -f).
@@ -216,9 +210,8 @@ fn mapped(host: Host, view: View, code: String, target: String, base: String, st
     }
   }
 
-## What /compile needs to know of the machine, asked of the toolchain. The
-## long-lived server asks once at start; serve asks per request, since its
-## process is the request (K3 bakes these in or keeps them in a file).
+## What /compile needs to know of the machine, asked of the toolchain, once
+## a request, since the process is the request.
 pub fn view_of(id: CompilerId, native: Bool, javap: String) -> View !io =
   View {
     toolchain: "${id.version} ${id.build} ${javap}",
