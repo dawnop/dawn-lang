@@ -191,10 +191,26 @@ MUTATIONS = {
     # What the step read of the carry: the surfaces its `use` lines name,
     # including what those surfaces grafted from their own imports, the
     # program-wide impl table, and the intern table for collisions.
-    "module-memo/ignore-reads": ((ENGINE, "  if not reads_hold(e, carry.exports, seen, fresh) { return None }\n", ""),),
+    "module-memo/ignore-reads": ((ENGINE, "  if not reads_hold(e, carry.exports, seen, fresh, named_base) { return None }\n", ""),),
     "module-memo/reexport-blind": ((ENGINE, SAME_SURFACE,
         "-> Bool =\n  ModExports { ..a, adt_infos: b.adt_infos, trait_infos: b.trait_infos, "
         "effect_infos: b.effect_infos } == b &&\n"),),
+    # A selective `use` of a surface that changed holds by the names it lists
+    # (docs/lsp-module-memo-design.md §十二): the names' entries, the effect
+    # operations they bring, their package-private standing, the grafted id
+    # tables everything unnamed goes through, a clean step, and the stored
+    # surface put back.
+    "module-memo/ignore-names": ((ENGINE, "    if not same_entry(before, now, n) { return false }\n", ""),),
+    "module-memo/effect-ops-blind": ((ENGINE,
+        "            if not same_entry(before, now, op) { return false }\n", ""),),
+    "module-memo/pkg-blind": ((ENGINE, "  list.contains(a.pkg_only, n) == list.contains(b.pkg_only, n)",
+                               "  list.contains(a.pkg_only, n) == list.contains(a.pkg_only, n)"),),
+    "module-memo/graft-blind": ((ENGINE, "  a.package == b.package &&\n",
+                                 "  a.package == b.package && true ||\n"),),
+    "module-memo/names-with-diags": ((ENGINE,
+        "  if len(e.step.diags) > 0 { return false }\n  match (r.names,", "  match (r.names,"),),
+    "module-memo/stale-selective-exports": ((ENGINE,
+        "cx: current_selective(ids_cx, e, carry, fresh)", "cx: ids_cx"),),
     "module-memo/ignore-impls": ((ENGINE,
         "  if not (impls_is == Some(e.pred) || same_rows(carry.impls, e.impls_in)) { return None }\n", ""),),
     "module-memo/drop-identities": ((ENGINE, "  Some(Kept { identities: ids, minted: Some(rows) })",

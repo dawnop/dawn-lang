@@ -314,3 +314,82 @@ LSP A/B（`09851075` 不带观察的服务端对本刀带观察的服务端）�
 
 测试：`driver/analyze`「comptime calls the functions of the modules before it」（两层链、impl 与默认体、限定常量、path dep 包含 lambda、被调方的重命名导入与同名常量、comptime 块）、
 「comptime still refuses another module's effectful function」；`contract/module_memo`「module memo folds a const again when a module its comptime reached changes」（c 的体、c 的常量、b 的体各改一次，a 重检、z 复用，逐项对冷）。
+
+## 十二、刀 3：选择式导入按点名的名字复用（2026-10-19）
+
+> 状态：**current**：分支 `lsp/name-reuse`。依据：裁决 `agent-handoff/ruling-lsp-accept-line-20261019.md`（刀 2 批准；L-ws 签名/函数体改动 p90 ≤ 300 ms，类型定义改动 p90 ≤ 1 s）、
+> 复测报告 `agent-handoff/lsp-sync-remeasure-report-20261019.md` 第三、四节（不健全模拟 (b) 797 → 255 ms，重检 42 → 4）、调研 `agent-handoff/research-lsp-accept-line-20261019.md` 第三节（150 个 `pub fn` 的模型）。
+> 裁决与调研里叫「刀 2」，是 LSP sync 这一轮的编号；在本文的刀序里它是第三刀。实测见 12.7。
+
+### 12.1 问题
+
+10.3 的判定以「面」为单位：被编辑模块重检后导出面与上一轮不等，就进 `fresh`，凡 `use` 了它的模块全部重检。
+2026-10-19 的 selfhost 工作区里 `check/types` 有 42 个导入者，**43 行 `use check/types` 全部是选择式** `{...}`；改 `eff_suffix` 的签名，真正点名它的只有 3 个（`check/checker`、`check/passes`、`lsp/lspinlay`）。
+其余 39 个的重检纯属浪费，而且随导入者数线性增长（调研 3.1：导入者总行数 08-01 到 10-19 从 35.0k 涨到 88.8k）。
+
+### 12.2 规则
+
+> 一行**选择式** `use p.{n1, ..., nk}` 读到的面，若 `p` 本轮重检后与上一轮的面不等，只要**上一轮该步骤没有诊断**，且新旧两个面在「公共部分」与「点名切片」上相同，就仍算没变。
+> 其余情况（整模块 `use p`、`use p as q`、有诊断的步骤、`p` 不是本轮重检的模块）照 10.3 原样判定。
+
+- **公共部分**（每个变了的面只比一次，记在 `named_base` 里）：`mod_path`、`class_name`、`src_path`、`package`，以及三张嫁接表 `adt_infos`、`trait_infos`、`effect_infos`，按值**且**按键序（键序见 2.3：导入方按这个顺序把它们插进自己的表）。
+- **点名切片**：对点名集合里的每个名字 `n`，八张名字表 `fns`、`types_by_name`、`aliases`、`alias_resolved`、`ctors`、`consts`、`traits_by_name`、`effects` 各自 `map.get(_, n)` 相等，且 `n ∈ pkg_only` 的真假相同。
+- **点名集合**：作者写下的导出名（`Name as Local` 取 `Name`，`pass_imports` 按它查表），外加：凡在新面里是效果的名字，补上该效果的全部操作名（`inject_selective` 用 `exp.fns[op]` 绑定操作，操作表取自 `effect_infos`，已在公共部分里比过）。
+
+为什么这样就够——`check_module_headers` 唯一读 `env` 的地方是 `pass_imports`，对一行选择式 `use` 它读：
+
+| 读了什么 | 在哪里 | 规则里谁管 |
+|---|---|---|
+| 三张嫁接表，整张、按键序插入 | `pass_imports` 的 graft 循环 | 公共部分 |
+| `exports_seen_by(e, package_of(cx))`：`package`、`pkg_only` | 包边界过滤 | 公共部分的 `package`；切片的 `pkg_only` 成员 |
+| 每个点名的八张名字表 | `inject_selective` | 点名切片 |
+| 类型带进来的构造器 | `adt_of(cx.adts, aid)`：嫁接后的表 | 公共部分（`adt_infos`） |
+| 效果带进来的操作 | `effect_of(cx, eid).ops` 与 `exp.fns[op]` | 公共部分（`effect_infos`）＋点名集合补操作名 |
+| 名字查不到时的 `all_names`、did-you-mean 池、`pkg_private` | `inject_selective` 的报错分支 | 只在出诊断时读：上一轮无诊断这一条 |
+| 整个面存进 `selective_exports` | `checker.selective_export_hint` | 只在「名字不在作用域」报错时读：同上；复用时还把它换成当前的面（12.4） |
+
+- **隐式使用**：运算符、`for..in`、`${...}`、trait 方法的点调用、`derive`、impl 一致性都不经名字（spec §10.3：「运算符与糖按 trait 找 impl、不经名字」），它们读的是 trait/ADT/效果的**嫁接表**与全程序的 **impl 表**。
+  前者在公共部分里整张比较，后者照 10.3 按行比较、与 `use` 无关。所以隐式使用的改动一律让导入方重检，与它点没点名无关。
+- **整模块导入**：`use p` 把整个面放进 `module_exports`，限定访问、`alias_export_hint`、LSP 的补全（`lspc`/`lspq` 读 `module_exports`）都按别名遍历整面，不按名字切，仍按整面判定。
+- **re-export**：Dawn 没有 re-export 语句（10.2）；间接可达的类型只经嫁接表流动，在公共部分里。别名链：`pub alias` 的导出值是声明方已解析的 `alias_resolved`，按名字比；它指向的类型 id 的内容在嫁接表里。
+- **有诊断的步骤退回整面**：理由与 10.4 第 4 条同构。报错分支读整面（did-you-mean 池按插入序取名、`all_names`、`selective_exports` 的 hint），点名切片管不到；selfhost 全仓无诊断，这一条不影响收益。
+- **`std_names`、impl 表、intern 表、comptime 的读**不变（10.3、10.4、第十一节）。comptime 的跨模块读本来就按「被读模块是否重检」判定，被编辑模块重检了，读过它的步骤照旧重检。
+
+### 12.3 归纳为什么仍然成立
+
+10.3 的归纳是「`InStep` 读到的就是上一轮该模块的面」。按名字复用之后，一个步骤可能跨过若干轮被复用，它当初真正读到的面与上一轮的面之间，只有「公共部分与点名切片相同」这一关系。
+这个关系是等价关系（逐项相等），每一轮复用都验证「上一轮的面 ≈ 本轮的面」，于是「当初读到的面 ≈ 本轮的面」。被复用模块自己的面原样放回 carry（10.5），所以它的下游仍按 10.3 判定。
+
+### 12.4 复用时补的一件事
+
+被按名字复用的步骤，`CheckedMod.cx.selective_exports[p]` 里存的是旧面。唯一的读者是报错分支（上一轮无诊断，不会走到），但它是 `Cx` 的字段，冷检会存当前的面。
+复用时把它换成 `exports_seen_by(当前面, package_of(cx))`；HAMT 替换已有键保留插入序号，表的顺序与冷检相同。代价每个按名复用的模块一次 `map.insert`。
+
+### 12.5 不覆盖：类型定义改动
+
+改 ADT（字段、构造器）、trait（方法签名、关联类型）、效果（操作列表）会改嫁接表，公共部分不等，**退回模块粒度**：所有选择式导入者照旧重检，与今天相同。
+裁决给这一类的线是 p90 ≤ 1 s，今天约 750 到 870 ms（复测报告表 1 的 (b) 量级），在线内。要细到「点名的类型」需要把嫁接表按 id 切片，并处理一个类型经别的类型字段间接可达的闭包，不在本刀。
+
+### 12.6 实现
+
+全部在 `driver/incremental.dawn`：
+- `Entry.reads` 的元素加一个 `names: Option[List[String]]`（选择式 `use` 的导出名，整模块为 `None`）。
+- 重检的模块面不等时，若公共部分相同，`named_base` 记下上一轮的面（路径 → 面）；公共部分不同则不记，等于退回 10.3。
+- `reads_hold` 的 `InStep` 分支：`seen` 且（不在 `fresh`，或步骤无诊断、`names` 是 `Some`、`named_base` 有该路径且点名切片相同）。
+- 复用分支按 12.4 换 `selective_exports`。
+
+### 12.7 实测
+
+（待回填）
+
+### 12.8 契约
+
+`contract/module_memo` 新增：点名者重检并报出新诊断、未点名者复用、效果操作经效果名被点、`pub(pkg)` 跨包可见性变化、选择式导入方经嫁接表读到的类型变化、有诊断的步骤退回整面；每条都逐项对冷，复用的模块另比 `selective_exports`。
+`module-memo.py` 的变异体（`mutate.py` 的 module-memo 组）加：`ignore-names`（点名切片恒等）、`graft-blind`（公共部分不比嫁接表）、`effect-ops-blind`（点名集合不补操作名）、`pkg-blind`（不比 `pkg_only` 成员）、`names-with-diags`（有诊断也按名字）、`stale-selective-exports`（复用不换旧面）。
+
+### 12.9 不做的（理由）
+
+- **L2（声明级复用）**：裁决第 4 条，现在不做。本刀之后它的边际收益只剩 30 到 70 ms（调研 4.1），压不破固定开销 F（约 142 ms）；重开条件见裁决。
+- **类型定义改动按名字切**：见 12.5。
+- **整模块导入按「限定访问用到的名字」切**：要从体里收集 `alias.name` 拼写（`import_use` 有现成遍历），但 `module_exports` 还被 hint 与 LSP 补全整面读取；selfhost 里 `check/types` 的导入者没有整模块导入，收益为零。
+- **有诊断的步骤也按名字**：报错分支读整面，见 12.2。

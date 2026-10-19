@@ -24,7 +24,7 @@ use driver/analyze.{
 }
 use driver/fsmem
 use std/memfs
-use compiler_plan/source.{SourceFile}
+use compiler_plan/source.{SourceFile, PkgR, FromPath}
 use std/str
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/checkdump
@@ -95,13 +95,14 @@ test "module memo reuses a step whose input and what it read are unchanged" {
       LoadResult { modules: [], diags: [] },
       # a body edit leaves a's exports as they were: b and c keep their steps
       LoadResult { modules: [body, b, c], diags: [] },
-      # a signature edit does not, and only c imports a
+      # a signature edit does not, and c imports a, but lists only `Box`,
+      # which is as it was: c keeps its step (§十二)
       LoadResult { modules: [signature, b, c], diags: [] },
       # nor does moving every declaration of a, as far as its exports go; the
       # positions it moved are the session's to put right
       LoadResult { modules: [moved, b, c], diags: [] }
     ]
-    let expected_hits = [2, 2, 1, 3, 0, 2, 1, 2]
+    let expected_hits = [2, 2, 1, 3, 0, 2, 2, 2]
     var i = 0
     for input in edits {
       let result = incremental.analyze(warm.session, input)
@@ -277,6 +278,177 @@ test "module memo checks an importer again when a surface changes only in what i
     assert result.stats.checked_modules == 3
     assert len(result.program.diags) > 0
     assert agrees_with_cold(result.program, input, std)
+  }))
+}
+
+## Each module's stored selective surfaces are the cold analysis's: a step
+## kept by the names it lists stored the surface it read, and the session puts
+## the current one back (docs/lsp-module-memo-design.md §12.4).
+fn selective_agrees(prog: Program, input: LoadResult, std: StdCtx) -> Bool !Fs !Env !io = {
+  let cold = analyze_program(input, std, ct_default(), jsig_refused())
+  if len(prog.modules) != len(cold.modules) { return false }
+  var i = 0
+  for cm in prog.modules {
+    let other = cold.modules[i]
+    if cm.cx.selective_exports != other.cx.selective_exports ||
+      map.keys(cm.cx.selective_exports) != map.keys(other.cx.selective_exports) { return false }
+    i = i + 1
+  }
+  true
+}
+
+test "module memo checks a selective importer again only when a name it lists changes" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let lib = source("lib", "pub fn named() -> Int = 1\npub fn unnamed() -> Int = 2\n")
+    let listed = source("listed", "use lib.{named}\npub fn f() -> Int = named()\n")
+    let other = source("other", "use lib.{unnamed}\npub fn g() -> Int = unnamed()\n")
+    let whole = source("whole", "use lib\npub fn h() -> Int = lib.named()\n")
+    let far = source("far", "use listed.{f}\npub fn k() -> Int = f()\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [lib, listed, other, whole, far], diags: [] })
+    assert len(warm.program.diags) == 0
+    # a name listed by `other` alone: `listed` keeps its step, and so does
+    # `far` behind it; a whole-module `use` reads every name
+    let unnamed = LoadResult { modules: [source("lib",
+      "pub fn named() -> Int = 1\npub fn unnamed(k: Int = 0) -> Int = 2 + k\n"),
+      listed, other, whole, far], diags: [] }
+    let kept = incremental.analyze(warm.session, unnamed)
+    assert kept.stats.reused_modules == 2
+    assert kept.stats.checked_modules == 3
+    assert len(kept.program.diags) == 0
+    assert agrees_with_cold(kept.program, unnamed, std)
+    assert selective_agrees(kept.program, unnamed, std)
+    # the name `listed` lists, changed so that its body no longer checks:
+    # `listed` is checked again and reports it, `other` keeps its step, and
+    # `far` reads `listed`, whose surface came out as it was
+    let named = LoadResult { modules: [source("lib",
+      "pub fn named() -> String = \"1\"\npub fn unnamed() -> Int = 2\n"),
+      listed, other, whole, far], diags: [] }
+    let broken = incremental.analyze(warm.session, named)
+    assert broken.stats.reused_modules == 2
+    assert broken.stats.checked_modules == 3
+    assert len(broken.program.diags) > 0
+    assert agrees_with_cold(broken.program, named, std)
+    assert selective_agrees(broken.program, named, std)
+  }))
+}
+
+test "module memo checks an importer again when an effect it lists changes an operation" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # `use lib.{Ask}` brings `ask` along without spelling it. The operation's
+    # signature lives under its own name in the surface; its type is also a
+    # field of the effect's evidence record, but a parameter's name is not
+    let lib = source("lib", "pub effect Ask { fn ask(k: Int) -> Int }\npub fn spare() -> Int = 0\n")
+    let user = source("user", "use lib.{Ask}\npub fn get() -> Int !Ask = ask(k: 2) + 1\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [lib, user], diags: [] })
+    assert len(warm.program.diags) == 0
+    let input = LoadResult { modules: [source("lib",
+      "pub effect Ask { fn ask(j: Int) -> Int }\npub fn spare() -> Int = 0\n"), user], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert result.stats.reused_modules == 0
+    assert result.stats.checked_modules == 2
+    assert len(result.program.diags) > 0
+    assert agrees_with_cold(result.program, input, std)
+    # and `spare`, which it does not list, leaves it be
+    let spare = LoadResult { modules: [source("lib",
+      "pub effect Ask { fn ask(k: Int) -> Int }\npub fn spare(k: Int = 0) -> Int = k\n"), user], diags: [] }
+    let kept = incremental.analyze(warm.session, spare)
+    assert kept.stats.reused_modules == 1
+    assert agrees_with_cold(kept.program, spare, std)
+  }))
+}
+
+test "module memo checks an importer again when a name it lists becomes package-private" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let web = PkgR { name: "web", root: "web", deps: map.empty(), java_deps: [], version: None, origin: FromPath }
+    let lib = LoadedModule { ..source("lib", "pub fn seam() -> Int = 1\npub fn spare() -> Int = 0\n"),
+      pkg: Some(web) }
+    let app = source("app", "use lib.{seam}\npub fn f() -> Int = seam()\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [lib, app], diags: [] })
+    assert len(warm.program.diags) == 0
+    # the signature is the same; the package boundary now takes the name away
+    let hidden = LoadedModule { ..source("lib", "pub(pkg) fn seam() -> Int = 1\npub fn spare() -> Int = 0\n"),
+      pkg: Some(web) }
+    let input = LoadResult { modules: [hidden, app], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert result.stats.checked_modules == 2
+    assert len(result.program.diags) > 0
+    assert agrees_with_cold(result.program, input, std)
+  }))
+}
+
+test "module memo checks a selective importer again when the types its names mention change" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # d lists only `make`, whose signature is the same before and after; the
+    # type it returns is in the tables a grafted from b
+    let b = source("b", "pub type Shape = { n: Int }\npub fn shape() -> Shape = Shape { n: 1 }\n")
+    let a = source("a", "use b.{Shape, shape}\npub fn make() -> Shape = shape()\n")
+    let d = source("d", "use a.{make}\npub fn size() -> Int = make().n\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [b, a, d], diags: [] })
+    assert len(warm.program.diags) == 0
+    let renamed = source("b", "pub type Shape = { m: Int }\npub fn shape() -> Shape = Shape { m: 1 }\n")
+    let input = LoadResult { modules: [renamed, a, d], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert result.stats.reused_modules == 0
+    assert result.stats.checked_modules == 3
+    assert len(result.program.diags) > 0
+    assert agrees_with_cold(result.program, input, std)
+  }))
+}
+
+test "module memo checks an importer again when what it uses without naming changes" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # `app` lists `mk` alone and still reads `Box`'s impls through `show`
+    # and its constructors through a field access; neither goes by a name
+    let text = "pub type Box = { n: Int } derive Show\npub fn mk(n: Int) -> Box = Box { n: n }\n"
+    let lib = source("lib", text ++ "pub fn spare() -> Int = 0\n")
+    let app = source("app", "use lib.{mk}\npub fn shown() -> String = show(mk(1))\npub fn n() -> Int = mk(2).n\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [lib, app], diags: [] })
+    assert len(warm.program.diags) == 0
+    let edits = [
+      # the derived impl goes
+      (source("lib", "pub type Box = { n: Int }\npub fn mk(n: Int) -> Box = Box { n: n }\npub fn spare() -> Int = 0\n"), 2),
+      # the type's field is renamed
+      (source("lib", "pub type Box = { m: Int } derive Show\npub fn mk(n: Int) -> Box = Box { m: n }\npub fn spare() -> Int = 0\n"), 2),
+      # a name it does not list, and nothing it uses implicitly
+      (source("lib", text ++ "pub fn spare(k: Int = 0) -> Int = k\n"), 1)
+    ]
+    for edit in edits {
+      let (edited, checked) = edit
+      let input = LoadResult { modules: [edited, app], diags: [] }
+      let result = incremental.analyze(warm.session, input)
+      assert result.stats.checked_modules == checked
+      assert agrees_with_cold(result.program, input, std)
+    }
+  }))
+}
+
+test "module memo judges a step with diagnostics by the whole surface it read" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # app calls a name its `use` does not list, and the diagnostic's hint
+    # points at the module that exports it: a read of the whole surface
+    let lib = source("lib", "pub fn named() -> Int = 1\npub fn unnamed() -> Int = 2\n")
+    let app = source("app", "use lib.{named}\npub fn f() -> Int = named() + unnamed()\n")
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10),
+      LoadResult { modules: [lib, app], diags: [] })
+    assert len(warm.program.diags) > 0
+    # the hint goes when `unnamed` stops being exported, and the declaration
+    # stays, so the intern table does not change and cannot be the reason
+    let input = LoadResult { modules: [source("lib", "pub fn named() -> Int = 1\nfn unnamed() -> Int = 2\n"), app], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert result.stats.checked_modules == 2
+    assert agrees_with_cold(result.program, input, std)
+    assert rendered_diags(result.program) != rendered_diags(warm.program)
   }))
 }
 

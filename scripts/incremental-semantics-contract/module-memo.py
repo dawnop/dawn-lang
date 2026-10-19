@@ -41,8 +41,8 @@ def check_cli():
         (['--shards', '0'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '-1'], 2, 'require --shards >= 1'),
         (['--shards', '2', '--shard', '2'], 2, 'require --shards >= 1'),
-        (['--shards', '20', '--shard', '19'], 2, 'selected shard has no engine mutants'),
-        (['--shards', '20', '--check-shards'], 2, 'every shard must contain engine mutants'),
+        (['--shards', '30', '--shard', '29'], 2, 'selected shard has no engine mutants'),
+        (['--shards', '30', '--check-shards'], 2, 'every shard must contain engine mutants'),
     ]
     for count in [1, 2, 3]:
         cases.append((['--shards', str(count), '--check-shards'], 0, 'unique mutants; disjoint shard sizes'))
