@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ a4c4eafb1d5d0346 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 8bd554ad0b0f3e1e -->
 
 # Dawn 教程
 
@@ -1442,6 +1442,9 @@ subdir = "packages/json"      # 包在归档里的位置
 
 不调用 Java 的程序在两边打印出相同的字节。这是验过的，不是指望：仓库让语料走两个后端，
 逐字节比对输出，而且 C 后端编得动编译器自己。
+
+`dawnc build`、`run` 和 `test` 让 `cc` 以 `-O2` 优化 C。如果你宁可少等编译、多等程序，就传 `-O0`（或 `-O1`）：
+大程序编得快好几倍、跑得慢一些，打印的内容不变。只有这三个级别；`dawnc` 不把别的参数转交给 `cc`。
 
 ### WebAssembly 与 reactor
 
