@@ -22,6 +22,12 @@ before it (so a token moved onto an earlier name, leaving a later one bare,
 is red), and a range's tokens must start inside the range. The legend must be the one initialize declared, and a document
 the server has no analysis for must answer with no tokens.
 
+Then the project's main is edited so it no longer parses (#788): semantic
+tokens, hover, definition, highlight, references and completion must each
+answer with a result, and the server must still answer afterwards. Its
+recovered `use helper.{..., Shape, ...}` names an id its own unchecked
+context never received, and every one of those requests used to panic on it.
+
 Usage:
   scripts/lsp-semantic-tokens.py [--server CMD...]   positive run (default ./bin/dawn lsp)
   scripts/lsp-semantic-tokens.py --dump              print the decoded tokens and exit
@@ -452,6 +458,10 @@ class Session:
         self.send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def request(self, method, params):
+        return self.request_msg(method, params).get("result")
+
+    def request_msg(self, method, params):
+        """The whole response to one request, `result` or `error`."""
         self.next_id += 1
         mine = self.next_id
         self.send({"jsonrpc": "2.0", "id": mine, "method": method, "params": params})
@@ -460,7 +470,7 @@ class Session:
             if msg is None:
                 raise RuntimeError("server closed while waiting for %s" % method)
             if msg.get("id") == mine and "method" not in msg:
-                return msg.get("result")
+                return msg
 
     def close(self):
         try:
@@ -591,6 +601,51 @@ def check_doc(s, uri, text, label, want, ranges, dump):
         placed(rlabel, text, rgot, lo, hi)
 
 
+# An edit that leaves the importing module unparseable (#788). Its own
+# analysis then checks nothing, so its context holds no imported types, while
+# its recovered `use helper.{..., Shape, ...}` still names the id helper's
+# surface carries. Every request that walks that line must answer, and the
+# server must still be there afterwards.
+BROKEN_TAIL = "\nfn broken() -> Int =\n"
+
+FAILED_PARSE_REQUESTS = [
+    ("semanticTokens/full", "textDocument/semanticTokens/full", None),
+    ("hover", "textDocument/hover", "Shape, Circle}"),
+    ("definition", "textDocument/definition", "Shape, Circle}"),
+    ("documentHighlight", "textDocument/documentHighlight", "Shape, Circle}"),
+    ("references", "textDocument/references", "Shape, Circle}"),
+    ("completion", "textDocument/completion", BROKEN_TAIL),
+]
+
+
+def after_parse_failure(s, uri):
+    text = MAIN + BROKEN_TAIL
+    s.notify("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                                        "contentChanges": [{"text": text}]})
+    for label, method, needle in FAILED_PARSE_REQUESTS:
+        name = "after a parse failure: " + label
+        params = {"textDocument": {"uri": uri}}
+        if needle is not None:
+            at = text.index(needle) + (len(needle) if needle == BROKEN_TAIL else 0)
+            params["position"] = utf16_position(text, at)
+        if method == "textDocument/references":
+            params["context"] = {"includeDeclaration": True}
+        try:
+            msg = s.request_msg(method, params)
+        except (RuntimeError, OSError) as e:
+            bad(name, str(e))
+            return
+        if "error" in msg or "result" not in msg:
+            bad(name, "want a result, got %r" % (msg,))
+        else:
+            ok(name)
+    try:
+        s.request_msg("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})
+        ok("after a parse failure: server still answers")
+    except (RuntimeError, OSError) as e:
+        bad("after a parse failure: server still answers", str(e))
+
+
 def contract(server, env, dump=False):
     work = tempfile.mkdtemp(prefix="lsp-semantic-tokens.")
     try:
@@ -629,6 +684,8 @@ def contract(server, env, dump=False):
         s = Session(server, src, env)
         try:
             check_doc(s, "file://" + main, MAIN, "PROJECT_TOKENS", PROJECT_TOKENS, [], dump)
+            if not dump:
+                after_parse_failure(s, "file://" + main)
         finally:
             s.close()
     finally:
@@ -648,6 +705,7 @@ MUTANTS = [
     ('drop-mutable', 'SINGLE_TOKENS'),
     ('range-unclipped', 'range inside norm'),
     ('columns-in-bytes', 'SINGLE_TOKENS'),
+    ('no-import-graft', 'after a parse failure: semanticTokens/full'),
 ]
 
 

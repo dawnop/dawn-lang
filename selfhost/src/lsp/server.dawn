@@ -38,7 +38,7 @@ use driver/stdlib.{
   StdCtx, load_std, load_chosen_std, cli_std_choice, std_choice, std_load_error_text, std_file_of
 }
 use check/checker.{exports_of, visible_bins}
-use check/cx.{ModExports, package_of, exports_seen_by}
+use check/cx.{ModExports, Cx, cx_new, package_of, exports_seen_by}
 use lsp/lspq.{
   QCx, Target, DocHome, DocHere, DocFile, DocStd, DocSite, DeclAt, ModuleDoc,
   find_target, typed_trees, inlay_hints, item_doc_site, member_name, sig_doc_site, decl_lo_named, resolutions
@@ -56,7 +56,7 @@ use front/lexer.{line_starts_of, view_of, SourceView, slice_cps}
 use front/diag.{utf16_len}
 use check/types.{Sig, builtins, sig_render, sig_render_parts, PkgRoot}
 use front/ast.{
-  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect
+  Module, Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect, module_uses
 }
 use front/token.{Diag, Note, mk_diag}
 use front/fmt
@@ -636,13 +636,67 @@ fn module_qcx(st: LspState, prog: Program, env: Map[String, ModExports], e: Chec
     seen = map.insert(seen, path, exports_seen_by(exp, viewer))
   }
   QCx {
-    entry: e,
+    entry: with_import_tables(e, seen),
     prog: prog,
     std: st.std,
     exports_env: seen,
     bins: visible_bins(st.bins, e.cx),
     typed: typed_trees(e.tm),
     cps: cps
+  }
+}
+
+## `e` with the id tables of every surface its `use` lines name laid under
+## its own, the graft pass_imports does for a module it checks (#788).
+##
+## A module whose parse failed is never checked: its context is the prelude's,
+## while its recovered tree still holds its `use` lines, and a query resolving
+## `use m.{T}` takes T's id from m's surface and looks it up in this module's
+## table. Without the graft that lookup panicked ("unknown adt id") on
+## semantic tokens, hover, definition, highlight, references and completion,
+## and the server was gone. Grafting here rather than at each lookup covers
+## every query at once: this is the one place a QCx is built.
+##
+## Only missing rows are added, so a checked module, which already holds every
+## row, is looked up and returned as it was: no allocation, and its tables'
+## order (which `map.keys` reads) does not move.
+fn with_import_tables(e: CheckedMod, env: Map[String, ModExports]) -> CheckedMod = {
+  var adts = e.cx.adts
+  var traits = e.cx.traits
+  var effs = e.cx.effect_infos
+  var added = false
+  for u in module_uses(e.m) {
+    match map.get(env, u.path) {
+      Some(exp) -> {
+        for pr in map.entries(exp.adt_infos) {
+          let (id, a) = pr
+          if not map.has(adts, id) {
+            adts = map.insert(adts, id, a)
+            added = true
+          }
+        }
+        for pr in map.entries(exp.trait_infos) {
+          let (id, t) = pr
+          if not map.has(traits, id) {
+            traits = map.insert(traits, id, t)
+            added = true
+          }
+        }
+        for pr in map.entries(exp.effect_infos) {
+          let (id, f) = pr
+          if not map.has(effs, id) {
+            effs = map.insert(effs, id, f)
+            added = true
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  if added {
+    CheckedMod { ..e, cx: Cx { ..e.cx, adts: adts, traits: traits, effect_infos: effs } }
+  } else {
+    e
   }
 }
 
@@ -4191,6 +4245,57 @@ test "a dot in a workspace member whose imported type it uses completes instead 
         let st = LspState { ..st0, workspaces: map.insert(st0.workspaces, identity.lookup_key, Ready(ws)) }
         let items = ai_items(handle_completion(st, d7_params(doc, "  p.", 4)))
         assert len(items) >= 0
+      })))
+}
+
+# #788, held below the analyzer: whatever the analyzer does with a module
+# whose parse failed, the query context must stand on its own when the entry's
+# tables were never filled. The entry here keeps its tree and typed tree and
+# gets the context `cx_new` gives a module nothing checked, which is what a
+# parse failure leaves; its `use lib.{Pt}` names an id only lib's surface has.
+test "a query context grafts the tables an unchecked entry's imports name" {
+  let root = memfs.BASE ++ "/graft-project"
+  let path = root ++ "/src/main.dawn"
+  let uri = "file://" ++ path
+  let text = "use lib.{Pt}\n\npub fn f(p: Pt) -> Int = p.x\n"
+  var files = fsmem.mem_std(memfs.BASE)
+  files = memfs.put(files, root ++ "/dawn.toml", "schema = 1\nname = \"graft_project\"\n")
+  files = memfs.put(files, root ++ "/src/lib.dawn", "pub type Pt = { x: Int }\n")
+  files = memfs.put(files, path, text)
+  let _ = memfs.with_fs(files, () => io.with_proc_real(() =>
+      envmem.with_env_table(memfs.BASE, [], () => {
+        let std = match load_std(fsmem.mem_std_dir(memfs.BASE)) {
+          Ok(s) -> s
+          Err(e) -> panic(std_load_error_text(e))
+        }
+        let plan = project_plan(source.SourceFile(path))
+        let identity = workspace_identity(plan)
+        let doc = Doc {
+          uri: uri, version: 1, path: Some(path), canonical_path: Some(path),
+          text: text, view: view_of(text), ls: line_starts_of(text),
+          analysis: WorkspaceMember(identity)
+        }
+        let base = def_probe_state(std)
+        let st = LspState { ..base, docs: map.insert(base.docs, uri, doc) }
+        let lease = jsig_refused_lease()
+        let empty = Workspace {
+          plan: plan, path_by_uri: map.insert(map.empty(), uri, path),
+          prog: None, entry_by_uri: map.empty(), lease: lease,
+          cache: incremental.new(std, ct_default(), lease.jsig, 128),
+          analysis_stats: None, parses: no_parses(), diag_by_uri: map.empty(),
+          refresh_problem: None, world: None
+        }
+        let ws = rebuild_workspace(st, empty)
+        let prog = ws.prog.expect("the project analyses")
+        let e = list.find(prog.modules, cm => str.ends_with(cm.path, "/src/main.dawn"))
+          .expect("main is in the program")
+        let unchecked = CheckedMod { ..e, cx: cx_new(Some(e.class_name), Some(e.path)) }
+        let qc = module_qcx(st, prog, program_exports(st, prog), unchecked, doc.view.cps)
+        let at = probe_offset(text, "Pt}", 0)
+        let rs = resolutions(qc, 0, len(text))
+        assert list.any(rs, r => r.lo == at)
+        let t = find_target(qc, at).expect("definition answers on the imported name")
+        assert t.lo == at
       })))
 }
 
