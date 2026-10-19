@@ -1,6 +1,6 @@
 # Playground 在线编译：改过的代码也能对照 C / JVM / Tile IR
 
-> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）K4（反代与部署说明）、K5（Tile IR 文本）与 K6（Tile IR 逐调用对照）与 K7（tileir 程序在每条路由上可解析、flash attention 样例）已实现，见第七节）。这是 `docs/explorer-page-design.md`
+> 状态：**proposed**（2026-10-07 起草，同日协调者已裁决八个开放问题，见第八节；K1（`packages/xmap`）、K2（runner 的 `POST /compile`）、K3（前端窗格，C 与 JVM）K4（反代与部署说明）、K5（Tile IR 文本）与 K6（Tile IR 逐调用对照）与 K7（tileir 程序在每条路由上可解析、flash attention 样例）、K8（C 与 JVM 窗格给张量运算符逐调用配对、C 原料只读用户模块）已实现，见第七节）。这是 `docs/explorer-page-design.md`
 > 第九节留的「下一步」：把 `--map` 接到 Playground，让浏览器里现改的代码也能和产物对照，形态向
 > Compiler Explorer 看齐。依赖：M3/M4（`__emitc --map`、`__emit --map`，`docs/source-span-map-design.md`
 > 第十二、十三节，已合）、M7（静态对照页，`site/explorer/record.py`，已合）。优先级：在线展示线 P1，
@@ -517,6 +517,7 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
   名字的跨度落在运算符上，不是标识符（`the call at 27:26 has its name at 27:68, which is no identifier`），xmap 因此不为它们画线。
   这是侧表与 xmap 之间既有的缺口，与暂存形态无关；Tile IR 窗格不受影响（25 个调用，0 缺口，因为配对来自 `tileir` 的记录）。
   其余 24 个调用正常点选。建议单列修：让编译器侧表给运算符调用一个运算符名的跨度，或让 xmap 把运算符调用当作无名调用跳过，二者都不属于这一刀。
+  （2026-10-19 K8 已修，两条建议都没采用：侧表本来就记了，缺的是 xmap 认运算符与字面量的名字；8 条里 1 条是字面量 `0.0`，不是运算符。）
 - 因此不需要「只送某些函数」之类的新机制；没有做的是下面「不做的」里的那几条。
 
 **样例。** `site/play-ui/samples/flash_attn.dawn` 是 `scripts/tile-golden/kernels.dawn` 的 `flash_attn`，与站点 GPU 页、explorer 页展示的同一个 kernel，
@@ -525,7 +526,7 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
   (1) 样例里的 `fn flash_attn` 与原件逐字相同；(2) 样例里每一行 `const` 都是原件里的一行；(3) 样例的 `.out` 与 `scripts/tile-golden/flash_attn.mlir` 逐字节相同。
   再加上既有的「运行并比对 `.out`」。golden 本身由 `scripts/tile-golden` 两后端逐字节钉住，所以 kernel 一动，golden 红或样例红，二者必有其一。
 - **doc-check 的样例检查：** 含 `use tileir/` 的样例改按项目运行（`src/main.dawn` 加与 runner 同样两条路径依赖的清单），`.out` 照旧逐字节比对。
-- **其他遍历样例目录的门：** `scripts/xmap-samples`（经 `site/explorer/record.py --samples`）只处理单文件样例，仍是 11 个、无缺口，tileir 样例由 `contract.sh` 的 `/compile` 用例与 doc-check 持有；
+- **其他遍历样例目录的门：** `scripts/xmap-samples`（经 `site/explorer/record.py --samples`）只处理单文件样例，仍是 11 个、无缺口（K8 起收下 tileir 样例，12 个），tileir 样例由 `contract.sh` 的 `/compile` 用例与 doc-check 持有；
   `scripts/std-prune-diff.sh` 把它当又一个单元比较裁剪前后的诊断，无需改；`scripts/play-live-check.py` 部署后会拿线上 `/run` 的输出与 `.out` 比，天然覆盖新路径（所以按 DEPLOY 的次序，runner 先于站点）。
 - **大小与耗时（本机 WSL2，冷请求）：** 源码 1,818 B（64 KiB 上限的 2.8%）；`/run` 输出 4,737 B，`/run` 墙钟 2.77 s（其中运行 143 ms，其余是编译 `tileir`），对比 hello 1.4 s；
   `/check` 2.55 s（hello 1.37 s）；tile 窗格 3.10 s，响应 8.6 KB；C 窗格 6.2 s、响应 41 KB，JVM 窗格同一次编译、响应 109 KB；
@@ -550,9 +551,9 @@ vadd 的 C 与 JVM 窗格（`SOUND`：无缺口、窗格只含用户模块）、
 - **无条件全走项目：** 见上，输出文案全变、单文件快路径要重验，换不来任何东西。
 - **在服务器（`dawnc lsp`）里加「无标题缓冲区的项目」旗标：** 要动 `lsp/server.dawn` 的文档生命周期（单文件与工作区两种文档之间的切换），要等发版，且改变 lsp-diff 的覆盖面；网关已经为每个缓冲区决定「子进程看到哪个 URI」，同一处决定够了（见上）。
 - **让编辑器的跳转定义进入 tileir 包的源文件：** 网关一次只暴露一个缓冲区，指向包文件的位置被丢弃，与现在对标准库的做法一致。
-- **修中缀运算符的缺口：** 属 xmap 与两个编译器侧表，见上；样例因此不进 `scripts/xmap-samples` 的「无缺口」门。
+- **修中缀运算符的缺口：** 属 xmap 与两个编译器侧表，见上；样例因此不进 `scripts/xmap-samples` 的「无缺口」门。（K8 已修，样例已进门。）
 - **把 `VIEW_RAW_LIMIT` 调大或让编译器只出用户模块的 C：** tileir 程序的 C 已占 6.0 MB / 8 MiB；一个用到更多 `tileir` 的程序可能越线并答 422「the C text is too large」。
-  这是真风险但还没有程序越线，调限额要同时看内存与 `read_capped_to` 的读入成本，等有越线的程序再裁。
+  这是真风险但还没有程序越线，调限额要同时看内存与 `read_capped_to` 的读入成本，等有越线的程序再裁。（K8：runner 只读用户模块的行，同一份 C 读成 124 KB，限额不动。）
 - **把样例做成多文件或分页：** 一个 kernel 加 `main` 不到 2 KB，没有理由。
 - **为 `/run` 或语言服务开放访客提供依赖：** 清单永远是 runner 的，这是 K5 的安全前提，没有松动。
 
@@ -614,6 +615,18 @@ vadd 的 C 与 JVM 窗格（`SOUND`：无缺口、窗格只含用户模块）、
 - **把运算符调用当无名调用跳过：** 等于承认缺口；Tile IR 窗格能点的调用，C 与 JVM 窗格却点不了。
 - **让编译器只为用户模块出 C（例如 `--map-module`）：** C 后端是整程序的，单出一个模块的 C 不是可编译的 C，且要改 CLI 输出与发版；runner 一侧只读需要的行就够了。
 - **调大 `VIEW_RAW_LIMIT`：** 只读用户模块之后不需要；它还管着 C 表、JVM 表与 javap 列表。
+
+**K8 落地记录（2026-10-19）。** 提交 `5ace0320`（xmap 认运算符与字面量）、`79788a63`（C 原料只读用户模块）、`df9ac3ca`（tileir 样例进零缺口门）。
+- **缺口前后：** flash attention 的 C 与 JVM 窗格 24 个调用、8 条缺口 → 32 个调用、0 条缺口（多出的 8 个是 `mul` ×3、`sub` ×2、`add`、`div`、`from_float`）；
+  11 个单文件样例的 `.xmap` 与窗格文本在新旧 xmap 下逐字节相同（同一份原料，`dawn run scripts/xmap-samples` 对拍）。
+- **只读用户模块：** 12 个样例的 C 文本合计 8,919,390 B，读入 227,044 B；flash attention 6,038,090 B → 123,702 B（88,619 行不变）。
+  读入方式与 runner 相同的 `sed` 摘行后，12 个样例的 `.xmap` 与窗格文本逐字节同整份读入。实现时发现一处：xmap 数总行数前去掉末尾换行（`chomp`），
+  末尾若被读成空行会少数十几行，所以末行总是保留（每份 C 文本以入口函数的 `}` 结尾）。
+- **测试与负控：** `xmap` 包测试 30 项（新增 1 项）；`dawn test playground` 198 项（新增 2 项：摘哪些行、摘行读入）；`playground/test/contract.sh` 56 项全过，
+  flash attention 的两项收紧为 `SOUND` 并断言 32 个调用。负控：xmap 换回 origin/main 的 `table.dawn`，`xmap-samples` 红在
+  「`flash_attn: the call at 27:26 has its name at 27:68, which is no identifier`」，合约恰好红那两项；把 `KEEP_SH` 的 `s/.*//` 去掉，摘行读入的单测红。
+- **墙钟：** `scripts/xmap-samples/run.sh` 本机负载 10～17 时 54.9 s → 69.4 s（多录一个 tileir 样例、多一个变异构建）。CI 上它在 docs job 里；
+  该 job 近期 main 上观测到 813 s（run 39023083466），已高于预算行的 800 s 计划值，本刀约再加 15～30 s，预算行未改，需要协调者重述。
 
 ## 八、已裁决（2026-10-07，协调者）
 
