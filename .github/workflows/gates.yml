@@ -369,6 +369,9 @@ name: gates
 # The same day it went up to 20,648s: contracts-2 (848s worst since 10-16,
 # a deviation of 127s) gave its RC parameter-mode step to the new
 # contracts-3 (contracts-2 880s -> 855s, contracts-3 180s, +155s).
+# The same day it went up to 20,788s: contracts-1 (623s worst against 540s)
+# gave its opaque twin and Inflate steps to contracts-3 rather than restate
+# to about 700s (contracts-1 540s -> 545s, contracts-3 180s -> 315s, +140s).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -392,7 +395,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 20648s (the most this file's `3x` claims may add up to)
+# push-total: 20788s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2206,8 +2209,18 @@ jobs:
     # steps (run 37761504402) in the main runs of 10-04 .. 10-08 (median
     # 434s). Restated to that plus a tenth, rounded up to 5s, 540s (485s
     # before), and the timeout to 3x that.
-    # budget: 3x 540s worst observed plus a tenth (run 37761504402)
-    timeout-minutes: 27
+    # 2026-10-19: the nightly audit (run 39236124290) found a 623s run of
+    # these steps (run 39024859369), and since 10-16 nearly every run took 550s
+    # to 578s. contracts-3 had been made the same day with one 107s step and
+    # its setup already paid, so the opaque twin (51s median, 68s worst) and
+    # Inflate (62s, 69s) steps moved there instead of this line being restated
+    # to about 700s. Replaying the 60 successful main pushes of 10-12T05:22Z ..
+    # 10-17T17:23Z without them: 398s median, 488s worst (run 39024859369),
+    # one deviation 56s; worst plus the deviation, rounded up to 5s, is 545s,
+    # and the timeout is 3x that. A planning value until three main runs of
+    # these steps exist.
+    # budget: 3x 545s planning value (488s replayed worst plus one deviation)
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2254,24 +2267,6 @@ jobs:
           ./bin/dawn __emit selfhost -o "$RUNNER_TEMP/gate-emit" > /dev/null
           ./scripts/adapter-callsites.py "$RUNNER_TEMP/gate-emit"
 
-      # Spec 2.7 promises an opaque type *is* its target at run time, and that
-      # promise is one a script can hold: run each case twice, once with
-      # `opaque type` replaced by `alias`, and require the output to match.
-      # Twelve functions were breaking it on 2026-07-27, two of them by
-      # answering wrongly rather than crashing -- and a comment describing the
-      # hazard sat thirty lines above one of them, so this is here because
-      # documentation demonstrably did not transfer.
-      # Both sides of every comparison capture stderr, so until the liveness
-      # checks landed a toolchain that failed identically on both printed `ok`
-      # for every case and exited 0 -- and one case had been dead that way since
-      # RD-06 removed the `list.head` it called. --self-check drives three
-      # broken toolchains through the script and requires each to be refused;
-      # it runs no real compilation, so it costs milliseconds.
-      - name: opaque twin (an opaque type behaves as its target)
-        run: |
-          ./scripts/opaque-twin/run.sh --self-check
-          ./scripts/opaque-twin/run.sh
-
       # Float rendering's only independent oracle. std/fmt.dawn says outright
       # that it does not re-test dtoa because this script pins it byte for
       # byte -- and until 2026-08-08 the script ran nowhere, so the claim
@@ -2284,11 +2279,6 @@ jobs:
       # wall, so there is no reason for a reduced push tier.
       - name: dtoa contract (Float rendering vs the JDK)
         run: ./scripts/dtoa-contract/run.sh
-
-      # Java compresses, Dawn decompresses. That direction is the point: a
-      # round trip through one implementation proves only self-consistency.
-      - name: Inflate contract
-        run: ./scripts/inflate-contract/run.sh
 
       # Case folding and classification are the two operations with a table
       # behind them rather than a derivation, so the backends cannot share an
@@ -2567,10 +2557,14 @@ jobs:
     # Replayed over the 17 contracts-2 runs named in that note: each run's
     # setup, checkout, pinned C compiler and toolchain steps plus its RC
     # parameter-mode step, 147s median, 158s worst (run 39049482407), one
-    # deviation 21s. Worst plus the deviation, rounded up to 5s, is 180s, and
-    # the timeout is 3x that. A planning value until three main runs exist.
-    # budget: 3x 180s planning value (158s replayed worst plus one deviation)
-    timeout-minutes: 9
+    # deviation 21s. Worst plus the deviation, rounded up to 5s, is 180s.
+    # The same day the opaque twin and Inflate steps came over from
+    # contracts-1 (the note above its budget line); adding each of those 17
+    # runs' contracts-1 times for the two steps: 261s median, 285s worst (run
+    # 39024859369), one deviation 30s, so 315s, and the timeout is 3x that.
+    # A planning value until three main runs exist.
+    # budget: 3x 315s planning value (285s replayed worst plus one deviation)
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2590,6 +2584,32 @@ jobs:
       # findings; read that file before touching them.
       - name: RC parameter-mode mutants
         run: ./scripts/rc-mode-contract/run.sh
+
+      # The two steps below were contracts-1's until 2026-10-19 (the note
+      # above that job's budget line); neither shares anything with the rest
+      # of it but the toolchain.
+      # Spec 2.7 promises an opaque type *is* its target at run time, and that
+      # promise is one a script can hold: run each case twice, once with
+      # `opaque type` replaced by `alias`, and require the output to match.
+      # Twelve functions were breaking it on 2026-07-27, two of them by
+      # answering wrongly rather than crashing -- and a comment describing the
+      # hazard sat thirty lines above one of them, so this is here because
+      # documentation demonstrably did not transfer.
+      # Both sides of every comparison capture stderr, so until the liveness
+      # checks landed a toolchain that failed identically on both printed `ok`
+      # for every case and exited 0 -- and one case had been dead that way since
+      # RD-06 removed the `list.head` it called. --self-check drives three
+      # broken toolchains through the script and requires each to be refused;
+      # it runs no real compilation, so it costs milliseconds.
+      - name: opaque twin (an opaque type behaves as its target)
+        run: |
+          ./scripts/opaque-twin/run.sh --self-check
+          ./scripts/opaque-twin/run.sh
+
+      # Java compresses, Dawn decompresses. That direction is the point: a
+      # round trip through one implementation proves only self-consistency.
+      - name: Inflate contract
+        run: ./scripts/inflate-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test
