@@ -556,6 +556,65 @@ vadd 的 C 与 JVM 窗格（`SOUND`：无缺口、窗格只含用户模块）、
 - **把样例做成多文件或分页：** 一个 kernel 加 `main` 不到 2 KB，没有理由。
 - **为 `/run` 或语言服务开放访客提供依赖：** 清单永远是 runner 的，这是 K5 的安全前提，没有松动。
 
+**K8：C 与 JVM 窗格给张量上的中缀运算符逐调用配对；C 原料只读用户模块（2026-10-19）。** K7 记下 flash attention 样例的 C 与 JVM 窗格有 8 条缺口，
+都是张量上的 `*`、`-`、`+`、`/`，xmap 因此不为它们画线，样例也因此进不了 `scripts/xmap-samples` 的「零缺口」门。
+
+**成因（实测，不是推断）。** 先查的前提是「侧表没有记运算符的源位置」，**这个前提不成立**：两个编译器都记了，而且记得一样。
+`dawn __emitc --map` 与 `dawn __emit --map` 对样例各有 8 行，`what` 是 `impl mul`、`impl sub`、`impl add`、`impl div` 与 `impl from_float`，
+`(lo, hi, nlo)` 两张表逐字相同，例如 C 表 `call 88393 88426 16 90 main 1180 1237 1222 impl mul`、JVM 表 `call 2608 0 610 607 main 1180 1237 1222 impl mul`。
+- 运算符在用户类型上走的是 **trait 方法派发**，不是 intrinsic：检查器把 `a * b` 路由到 `Mul` 的 impl（`tileir/dev` 给 `Tile` 实现了 `Mul`/`Sub`/`Add`/`Div`），
+  降成 `CCall(CImpl ..)`，带整条表达式的 site，名字起点是运算符记号。这正是 `docs/source-span-map-design.md` 第 113 行起写下的规则
+  （「运算符与 staged `for` 是书写的调用，只是不写成 `Apply`」；它的 oracle 只允许 `impl add/sub/mul/div/rem` 配 `Binary`、`impl neg` 配 `Unary`）。
+  `Int`/`Float` 上的运算符折成 `CBinary`，没有 site，所以 11 个单文件样例从没碰到过这种行。
+- 第 8 条不是运算符：27:63 的 `0.0` 是 `mma(.., 0.0)` 的第三个实参，期望类型是 `Tile[Float]`，字面量系统（`docs/literal-system-design.md` D4）把它降成
+  `FromFloat` 的 impl 调用，site 就是字面量本身（`nlo = lo`）。K7 的统计把它也算成了运算符。
+- 缺口出在 xmap：`table.table_from_maps` 用 `ident_at(src, nlo)` 取被调名，取不到标识符就记缺口
+  「`the call at 27:26 has its name at 27:68, which is no identifier`」。这条规则来自静态页（`explorer-page-design.md` 第六节第 2 条：
+  名字是 `nlo` 起的标识符），而侧表格式本来就只存名字起点、不存终点（`source-span-map-design.md` 第 65 行：「名字终点在源码里一个标识符扫描就能拿到」），
+  那时它面对的程序里每个带 site 的调用都以标识符开头。Tile IR 窗格不受影响，因为它的表来自 tileir 自己的记录，`table.spelled` 早已认运算符与 `lit`。
+
+**修法：在 xmap，不在编译器。** 侧表忠实地照它的规范写；缺的是读者对「名字不是标识符」的两种合法书写的认识。
+- `table_from_maps` 取不到标识符时，看这一行的 `what`（两张表须一致）：被调方法名是 `add`/`sub`/`mul`/`div`/`rem`/`neg` 且 `nlo` 处恰是对应的运算符记号
+  （`+ - * / % -`），名字是方法名、名字区间是那个记号；方法名是 `from_int`/`from_float` 且 `[nlo, hi)` 是一个数字字面量（可带前导 `-`，D6 的 `-0.0`），
+  名字是方法名、名字区间是整个字面量。别的情形照旧是那条缺口，文案不变（`xmap-samples` 的 `renamed` 负控靠它）。
+- 名字取方法名而不是记号本身：窗格页脚写 `mul · 27:26 → …`，与 Tile IR 窗格对同一个调用的叫法相同；`check_table` 的 `spelled` 因此补上 `rem` 与 `%`、
+  `from_int`/`from_float` 与字面量两条（与 `lit` 同理）。
+- 包版本 `xmap` 0.1.2 → 0.1.3，CHANGELOG 记一条。编译器与 emit 语料不动，所以没有 `Emit-Change`。
+
+**门禁。** `scripts/xmap-samples` 收下 tileir 样例：`record.py` 把含 `use tileir/` 的样例按 runner 的同一形态暂存（`src/main.dawn` 加两条路径依赖的清单，
+模块是 `main`、类是 `main.class`），`run.sh` 要求的程序数从 11 变成全部样例；再加一个负控：把 xmap 里认运算符的那一支删掉，flash attention 必须以
+「which is no identifier」被拒。选它而不只选合约，是因为它本来就是「样例零缺口」的严格门（`explore_strict`），不起 runner、不经沙箱，
+红的时候直接指到哪一条；合约里 flash attention 的 C 与 JVM 用例同时收紧为 `SOUND`（含 `gaps.count == 0`），守住 runner 这条路径。
+
+**6.0 MB 的构成，以及窗格要不要整份 C。** 实测（本机，`dawn __emitc --map`，按 C 表的 `fn` 行把每一行 C 归给它的模块）：
+
+| 部分 | flash attention | vadd |
+|---|---|---|
+| 整份 C 文本 | 6,038,091 B / 88,620 行 | 6,006,646 B / 88,096 行 |
+| `tileir` 包（`prog` 1.67 MB、`dev` 1.02 MB、`lower` 0.87 MB、`render` 0.83 MB） | 4,383,296 B（72.6%） | 4,383,296 B（73.0%） |
+| std（其中 `std/fmt` 0.80 MB：六个约 129 KB 的 `g_chunk` 表） | 1,085,799 B（18.0%） | 1,085,799 B（18.1%） |
+| 不属于任何 `fn` 的行（运行时、声明、类型、空行） | 533,654 B（8.8%） | 532,492 B（8.9%） |
+| 用户模块 `main` | 35,342 B / 593 行（0.6%） | 5,059 B / 86 行（0.1%） |
+| C 表 / JVM 表 | 633,506 B / 1.1 MB | 631,389 B / — |
+
+两条结论：(1) `tileir` 与 std 的份额是**固定成本**，与 kernel 无关（两个程序逐字节同为 4,383,296 B），因为 `traceN` 与 `render` 把整条录制、降低、
+打印管线都带进可达集；(2) 窗格**不需要**整份 C：`packages/xmap` 的 `c_pane` 只切用户模块各 `fn` 行的区间（第 3.2 节），整份文本只贡献一个总行数
+（`pane.total`），而 C 表头的 `text` 行本来就记着它。所以能做，就做：runner 先读 C 表，算出用户模块各函数的行区间，读 C 文本时只保留这些行，
+其余行读成空行（行号与总行数不变，xmap 与 view 一行不改），在 `CAP_SH` 的同一个受限读里做（仍是「只认普通文件、不跟链接、`head -c` 封顶」）。
+`VIEW_RAW_LIMIT` 不改，它从此量的是「用户模块的 C 加上八万多个换行」，不再是 `tileir` 的实现。C 表与 JVM 表仍整份读：它们是配对的输入，
+最大的 1.1 MB，离 8 MiB 远。
+
+**若不做，余量多少（给是否动上限的建议用）。** 8 MiB − 6.04 MB ≈ 2.35 MB。用户代码按 flash attention 的比例（35 KB C 对 1,818 B 源码，约 19×）
+要约 120 KB 源码才能吃完，超过源码上限 64 KiB；真正会越线的是 `tileir` 自己长大（固定成本占 73%，包每涨三成就越线）或用户程序多拉进 std 大模块。
+只读用户模块之后这条风险换成了「用户模块的 C 过 8 MiB」，源码上限内到不了。建议：**不动 `VIEW_RAW_LIMIT`**。
+
+**不做的（理由）。**
+- **改编译器侧表，给运算符一个「名字终点」或换一个名字起点：** 侧表的规范是只存起点（第二份真相），运算符的 `nlo` 是记号起点是成文规则，
+  oracle 按它配 `Binary`/`Unary`；改它要发版、要动 emit 语料与两个后端，而读者多认一种书写就够了。
+- **把运算符调用当无名调用跳过：** 等于承认缺口；Tile IR 窗格能点的调用，C 与 JVM 窗格却点不了。
+- **让编译器只为用户模块出 C（例如 `--map-module`）：** C 后端是整程序的，单出一个模块的 C 不是可编译的 C，且要改 CLI 输出与发版；runner 一侧只读需要的行就够了。
+- **调大 `VIEW_RAW_LIMIT`：** 只读用户模块之后不需要；它还管着 C 表、JVM 表与 javap 列表。
+
 ## 八、已裁决（2026-10-07，协调者）
 
 原先的八个开放问题全部有了裁决；二、三节的方案按它们修订。
