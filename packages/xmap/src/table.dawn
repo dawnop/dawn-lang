@@ -6,7 +6,11 @@
 # say, per call of the source, a span and a name span, and a call is in the
 # table when both say it, in the same words. A call one map has and the other
 # lacks is a gap and stays out, because a call with an account in one pane and
-# none in the other would draw a click that lights half a page. For a Tile IR
+# none in the other would draw a click that lights half a page. A call's name is
+# where its name span starts: an identifier for a call written `f(..)`, and for
+# the two written calls that are not (an operator on a type with an `Add` impl,
+# a number literal at a type with a `FromFloat` impl, both common in a tileir
+# kernel) the operator or the literal, read off what the row says it calls. For a Tile IR
 # kernel the table is the recording `site/gpu-map/flash_attn.map` keeps, which
 # is packages/tileir's account of the kernel's calls (the host maps cannot say
 # which calls the *kernel* made: it runs on the host, and its calls are
@@ -159,6 +163,66 @@ fn j_keys(src: Src, module: String, first: Int, last: Int, m: JMap) -> List[(Int
   list.unique(map(inside, r => key_of(r.lo, r.hi, r.nlo)))
 }
 
+# What the row of key `k` calls, as the map says it (`impl mul`, `direct m.f`),
+# when every row of `module` with that key says the same; "" otherwise.
+fn what_of(rows: List[String]) -> String = if len(rows) > 0 && list.all(rows, w => w == rows[0]) { rows[0] } else { "" }
+
+fn c_what(m: CMap, module: String, k: (Int, Int, Int)) -> List[String] =
+  map(filter(m.calls, r => r.module == module && key_of(r.lo, r.hi, r.nlo) == k), r => r.what)
+
+fn j_what(m: JMap, module: String, k: (Int, Int, Int)) -> List[String] =
+  map(filter(m.calls, r => r.module == module && key_of(r.lo, r.hi, r.nlo) == k), r => r.what)
+
+# The operator each arithmetic trait method is written as.
+fn op_of(method: String) -> String =
+  match method {
+    "add" -> "+"
+    "sub" -> "-"
+    "mul" -> "*"
+    "div" -> "/"
+    "rem" -> "%"
+    "neg" -> "-"
+    _ -> ""
+  }
+
+fn digit(c: String) -> Bool = str.contains("0123456789", c)
+
+# Whether `text` is a number as a literal is written: digits first (after a
+# `-` for the negative literal `-0.0`), then digits, `.`, `_`, an exponent or a
+# letter of a radix prefix, and no space.
+fn number_text(text: String) -> Bool = {
+  let body = if str.starts_with(text, "-") { str.drop(text, 1) } else { text }
+  len(body) > 0 && digit(str.take(body, 1)) && list.all(str.chars(body), ch => digit(ch) || str.contains("._eE+-xXoObBabcdefABCDEF", ch))
+}
+
+## The name and name span of a call whose name span starts at no identifier,
+## when what the row calls says how such a call is written. The compilers
+## record a written call that is not spelled `f(..)` in two shapes
+## (docs/source-span-map-design.md section 4, docs/literal-system-design.md
+## D4): an operator on a type with an `Add`..`Neg` impl, its name the operator
+## token (`a * b` is `impl mul`, its name at the `*`), and a number literal
+## at a type with a `FromInt`/`FromFloat` impl, its name the literal itself
+## (`0.0` where a tile is expected is `impl from_float`, `nlo` its start). The
+## name is the method's, as the Tile IR recording names the same call; the
+## format keeps only the start of a name, so its end is the token's.
+pub fn unspelled_name(src: Src, lo: Int, hi: Int, nlo: Int, what: String) -> Option[(String, Int)] = {
+  let words = str.split(what, " ")
+  # a trait method, however it was resolved; a `direct` call is spelled by
+  # the name of the function it calls
+  if len(words) != 2 || not list.contains(["impl", "default", "method"], words[0]) {
+    return None
+  }
+  let method = words[1]
+  let op = op_of(method)
+  if op != "" && text_between(src, nlo, nlo + len(op)) == op && lo <= nlo && nlo + len(op) <= hi {
+    return Some((method, nlo + len(op)))
+  }
+  if (method == "from_int" || method == "from_float") && nlo == lo && number_text(text_between(src, lo, hi)) {
+    return Some((method, hi))
+  }
+  None
+}
+
 fn by_key(a: (Int, Int, Int), b: (Int, Int, Int)) -> Int = {
   let (alo, ahi, anlo) = a
   let (blo, bhi, bnlo) = b
@@ -191,7 +255,16 @@ pub fn table_from_maps(src: Src, module: String, first: Int, last: Int, c: CMap,
         rows = rows ++ [Call { id: 0, parent: -1, name: name, lo: lo, hi: hi, nlo: nlo, nhi: nlo + len(name), lines: [] }]
       }
       None -> {
-        gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
+        let cw = what_of(c_what(c, module, k))
+        let named: Option[(String, Int)] = if cw != "" && cw == what_of(j_what(j, module, k)) { unspelled_name(src, lo, hi, nlo, cw) } else { None }
+        match named {
+          Some((name, nhi)) -> {
+            rows = rows ++ [Call { id: 0, parent: -1, name: name, lo: lo, hi: hi, nlo: nlo, nhi: nhi, lines: [] }]
+          }
+          None -> {
+            gaps = gaps ++ ["the call at ${pos(at(src, lo))} has its name at ${pos(at(src, nlo))}, which is no identifier"]
+          }
+        }
       }
     }
   }
@@ -213,10 +286,13 @@ pub fn spelled(name: String, text: String) -> Bool = {
   if name == "lit" && list.any(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"], d => str.starts_with(text, d)) {
     return true
   }
+  if (name == "from_int" || name == "from_float") && number_text(text) {
+    return true
+  }
   if list.contains(["carry", "get", "set"], name) {
     return text != ""
   }
-  let ops = [("add", "+"), ("idx_add", "+"), ("sub", "-"), ("idx_sub", "-"), ("mul", "*"), ("idx_mul", "*"), ("div", "/"), ("idx_div", "/"), ("idx_rem", "%"), ("neg", "-")]
+  let ops = [("add", "+"), ("idx_add", "+"), ("sub", "-"), ("idx_sub", "-"), ("mul", "*"), ("idx_mul", "*"), ("div", "/"), ("idx_div", "/"), ("rem", "%"), ("idx_rem", "%"), ("neg", "-")]
   list.any(ops, o => {
     let (stem, op) = o
     str.starts_with(name, stem) && text == op
@@ -337,4 +413,22 @@ test "a table is checked against the source it names" {
       assert str.contains(check_table(src, moved, 4, 9)[0], "the text at 5:4 is")
     }
   }
+}
+
+test "an operator or a literal that the maps record as a call is named by its method" {
+  let src = src_of("fn f(a, b) = a * b - -0.0 + c\n")
+  assert unspelled_name(src, 13, 18, 15, "impl mul") == Some(("mul", 16))
+  assert unspelled_name(src, 13, 25, 19, "impl sub") == Some(("sub", 20))
+  assert unspelled_name(src, 21, 25, 21, "impl from_float") == Some(("from_float", 25))
+  # the operator is not the one the method is written as, or not where the
+  # row says, or the literal is not a number: still no name
+  assert unspelled_name(src, 13, 18, 15, "impl add") == None
+  assert unspelled_name(src, 13, 18, 16, "impl mul") == None
+  assert unspelled_name(src, 13, 18, 13, "impl from_float") == None
+  assert unspelled_name(src, 13, 18, 15, "direct m.mul") == None
+  assert unspelled_name(src, 13, 18, 15, "default mul") == Some(("mul", 16))
+  assert spelled("from_float", "-0.0")
+  assert spelled("from_int", "3")
+  assert not spelled("from_int", "x")
+  assert spelled("rem", "%")
 }

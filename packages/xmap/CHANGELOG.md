@@ -1,5 +1,16 @@
 # xmap changelog
 
+## 0.1.3 (2026-10-19)
+
+A call the host maps record whose name span starts at no identifier is named
+when the row says how it is written: an operator on a type with an
+`Add`..`Neg` impl (`impl mul` with its name at the `*`) is named by its method
+with the operator as its name span, and a number literal at a type with a
+`FromInt`/`FromFloat` impl (`impl from_float`, its name the literal) by its
+method with the literal as its name span. Both maps must say the same `what`.
+Before, each was a gap: eight in the Playground's flash attention sample, none
+in a program without such calls, whose tables are unchanged.
+
 ## 0.1.2 (2026-10-08)
 
 A `lit` row is spelled by the bare number it was made from, so a Tile IR
