@@ -87,7 +87,7 @@ STDOUT_QUIET_S = 1.5
 # ---- the debounce experiment's numbers ------------------------------------
 #
 # EDITS keystrokes, KEYSTROKE_GAP_S apart, against a DEBOUNCE_MS window that
-# server.dawn currently sets to 150.
+# server.dawn currently sets to 50.
 #
 # The gap is the whole experiment, and it has to sit between two floors that
 # were measured (2026-08-05, ./bin/dawn lsp on this box) rather than guessed:
@@ -103,10 +103,11 @@ STDOUT_QUIET_S = 1.5
 #   gap < window       otherwise the real server is *supposed* to publish
 #                      every time and this asserts the wrong thing.
 #
-# 60 ms is 3x above the floor and 2.5x below the window, and it is also about
-# what a fast typist actually does.
+# 30 ms is 1.5x above the floor and 20 ms below the 50 ms window. It was 60 ms
+# against the old 150 ms window; a gap at or above the window would assert the
+# wrong thing (the third row).
 EDITS = 5
-KEYSTROKE_GAP_S = 0.06
+KEYSTROKE_GAP_S = 0.03
 
 # How long to let the coalesced analysis land after the last edit. The window
 # plus one analysis; 3s is ~10x the observed total.
