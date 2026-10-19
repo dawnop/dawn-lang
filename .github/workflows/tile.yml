@@ -61,8 +61,8 @@ name: tile
 # `dedupe` job below asks scripts/tile-verified.py whether this commit's git
 # tree (`git rev-parse HEAD^{tree}`) already has a green run of this
 # workflow, recorded as an artifact named `tile-verified-v1-<tree>` that
-# tile-shards-complete uploads once all eight shards and the union check are
-# green (kept 90 days). If it has, the eight shards and tile-shards-complete
+# tile-shards-complete uploads once all eleven shards and the union check are
+# green (kept 90 days). If it has, the eleven shards and tile-shards-complete
 # are skipped and the step summary names the run that verified it. Only a
 # push is deduplicated: pull_request, schedule and workflow_dispatch always
 # run every shard, so the whole set runs on the pull request and every day,
@@ -102,7 +102,7 @@ name: tile
 # nightly.yml's totals report counts a tile trigger only when the
 # shards all ran green, so a deduplicated push is not counted as one.
 #
-# path-total: 8485s (the most this file's `3x` claims may add up to)
+# path-total: 9435s (the most this file's `3x` claims may add up to)
 on:
   push:
     branches: [main]
@@ -178,10 +178,12 @@ env:
   TILE_VERIFIED_PREFIX: tile-verified-v1-
 
 jobs:
-  # EIGHT round-robin shards of one matrix (scripts/tile-golden/matrix.txt: the
-  # 203 kernels, then the 87 mutants, in run order), seven until 2026-10-10
-  # (#274; the last paragraph of the cost model below has why), eleven until
-  # 2026-09-11 and six until knife T17 (2026-10-02).
+  # ELEVEN shards of one matrix (scripts/tile-golden/matrix.txt: the 208
+  # kernels, then the 93 mutants, in run order), dealt by measured cost
+  # through scripts/mutant-coverage/plans/tile-golden.txt since 2026-10-19
+  # (the last paragraph of the cost model below has why); eight round-robin
+  # shards until then, seven until 2026-10-10 (#274), eleven until 2026-09-11
+  # and six until knife T17 (2026-10-02).
   # Sharding by kind was the plan written down at knife 7b and the phase
   # measurement retired it: neither half dominates, the kernel half grows
   # faster (~8s per new kernel against ~21s per new mutant), and a split by
@@ -334,6 +336,61 @@ jobs:
   # 6075s (+117s, 2%), and the critical path from 886s modelled (968s
   # observed) to 785s modelled, a hundred seconds shorter.
   #
+  # ELEVEN SHARDS, DEALT BY COST (2026-10-19, issue #274). The 10-19 budget
+  # restatement left tile-golden-1, -2, -3, -5, -6 and -8 at the 950s pole,
+  # and the 10-06 rule (worst plus one deviation) puts tile-golden-1 at
+  # 1055s. The target this time is lower than the pole: every shard's worst
+  # plus one deviation at or under 800s, so a shard has 150s left under the
+  # pole after its own noise is paid for.
+  #
+  # The model, from the job logs of the 34 green tile.yml runs of 10-12 ..
+  # 10-19 (272 shard jobs, main and pull requests). An item's time is read
+  # from the line that ends the item before it to its own last line. A job's speed is its median kernel time over the
+  # median job's: the kernels cost the same (matrix.txt), every shard carries
+  # about 26 of them, and an item never changed shard in that window, so a
+  # shard's item sum cannot tell a dear shard from a slow runner and the
+  # kernels can. Scaled to the median runner, a kernel is 12.7s (12.4 to
+  # 19.1s), a mutant 30.3s (12.5 to 36.7s), the matrix 5448s. The fixed part
+  # of a shard is 106s on the median job (93s on the fast type, 116s on the
+  # slow), and shard 1's is 16s more. The speeds are not two types but a
+  # spread: 0.62 to 1.12 of the median over the 64 main jobs.
+  #
+  # The replay: every one of those 64 main jobs (the runs the nightly audit
+  # reads) run again on each new shard, its own fixed part plus its own speed
+  # times the shard's work. A shard's estimate is the worst of the 64, which
+  # is worse than the worst of any one shard's eight, and its claim that
+  # worst plus the larger of a tenth and the deviation, rounded up to 5s. On
+  # today's eight round-robin shards the replay gives 876 to 906s against
+  # 835 to 898s observed, and claims of 995 to 1030s.
+  #
+  # Ten shards replay to claims of up to 845s, so ten do not meet the target
+  # whatever the deal. Eleven dealt round robin replay to 750 .. 815s: 93
+  # mutants do not divide by eleven, the shards with nine of them carry 40s
+  # more than the ones with eight, and the dearest is over. Eleven dealt by
+  # cost (longest first onto the lightest shard, shard 1 starting 16s
+  # behind: scripts/mutant-coverage/deal.py) carry 490 to 503s of work and
+  # replay to 765 .. 785s. Twelve would buy 55s more of margin for a twelfth
+  # fixed part and the same pole; the target does not ask for it.
+  #
+  # So the matrix order stops deciding the deal. Every shard passes `--plan`,
+  # which scripts/mutant-coverage/shard.sh reads (item -> shard, the costs
+  # beside it), and the plan lives outside scripts/tile-golden so dealing
+  # again does not move the GPU ledger's input digest. The coverage record
+  # and tile-shards-complete's union are unchanged: a plan that dropped an
+  # item would be refused there, as a wrong `--shard` is. A kernel added
+  # later and not yet in the plan runs on its round-robin shard and the run
+  # prints a NOTE saying how many did; re-deal with deal.py from the plan's
+  # own costs.
+  #
+  # What it costs: three more fixed parts, about 320 job-seconds a full run
+  # on the median runner (6351s modelled for the eight, 6685s for the eleven,
+  # +5%). The critical path goes from 906s modelled (898s observed) to 690s
+  # modelled for the worst runner, and from 810s to 614s on the median one.
+  # The claims are planning values until three runs of the eleven have been
+  # observed, then restated from them. They add up to 8525s against
+  # 7575s for the eight (six of them held at the pole), so the path total
+  # goes from 8485s to 9435s with dedupe's 910s.
+  #
   # The split cannot reach the verdicts. A kernel's four runs, its two goldens
   # and its assembly all happen inside one shard, and each mutant compares
   # against the recorded goldens on disk rather than against its own shard's
@@ -392,24 +449,20 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: 36 items (281 = 8 x 35 + 1, and the
-    # odd one lands here), the ledger gates and fetch-depth 0, which is 17s
-    # more fixed cost than the other shards pay. Modelled at 785s on the
-    # slower runner type; the claim is a tenth over that, rounded up to 5s.
-    # The note above has the arithmetic.
-    # 2026-10-19, the budget audit over the seven days to 10-19T21:38Z: 894s
-    # worst (run 39116199742) over the 8 runs whose steps digest is this
-    # job's, next worst 884s, median 845s. One deviation (158s, inflated by
-    # three fast-runner runs of 513 .. 657s) would make 1055s, past the pole,
-    # so the claim stops at the pole, 56s over the worst (865s before). It
-    # is at the pole now: the next growth reshards rather than restates.
-    # budget: 3x 950s worst observed, held at the run-pole (run 39116199742)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 19 kernels and 8 mutants
+    # plus shard 1's own 16s of fixed work (the ledger gates and fetch-depth 0),
+    # which the deal gives it as a head start; 611s on the median runner and
+    # 685s on the worst of the 64 main jobs replayed, one deviation 88s. The
+    # claim is that worst plus the deviation, rounded up to 5s, a planning value
+    # until three runs of the eleven are observed. The note above has the
+    # arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
         with:
           # shard 1 alone reads git: the GPU diff ledger's ancestry test needs
-          # the history. The other seven do not, and are not deepened.
+          # the history. The other ten do not, and are not deepened.
           fetch-depth: 0
 
       - uses: ./.github/actions/dawn-toolchain
@@ -431,10 +484,10 @@ jobs:
       - name: tileiras wheel cache refuses altered pins and bytes
         run: python3 scripts/tile-golden/install-contract.py
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 1 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 1 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 1/8
+        run: ./scripts/tile-golden/run.sh --shard 1/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -471,15 +524,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 755s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-15, issue #274: tile-golden-2 ran 845s (run 38324783467) over 13 runs of
-    # this shard's steps in the seven days to 10-15, one deviation 110s.
-    # Worst plus the deviation (955s) is over the 950s run pole, so the claim
-    # stops at the pole (835s before), and the timeout is 3x that.
-    # budget: 3x 950s worst observed (held at the run pole) (run 38324783467)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
+    # 614s on the median runner and 690s on the worst of the 64 main jobs
+    # replayed, one deviation 91s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 785s planning value: replayed worst plus one deviation
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -499,10 +550,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 2 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 2 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 2/8
+        run: ./scripts/tile-golden/run.sh --shard 2/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -516,15 +567,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 756s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-15, issue #274: tile-golden-3 ran 860s (run 38324783467) over 13 runs of
-    # this shard's steps in the seven days to 10-15, one deviation 120s.
-    # Worst plus the deviation (980s) is over the 950s run pole, so the claim
-    # stops at the pole (835s before), and the timeout is 3x that.
-    # budget: 3x 950s worst observed (held at the run pole) (run 38324783467)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
+    # 611s on the median runner and 686s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 780s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
 
@@ -544,10 +593,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 3 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 3 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 3/8
+        run: ./scripts/tile-golden/run.sh --shard 3/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -561,15 +610,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 755s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-15, issue #274: tile-golden-4 ran 839s (run 38399517017) over 13 runs of
-    # this shard's steps in the seven days to 10-15, one deviation 102s.
-    # Restated to worst plus the deviation, rounded up to 5s, 945s (835s before),
-    # and the timeout to 3x that.
-    # budget: 3x 945s worst observed plus one deviation (run 38399517017)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
+    # 607s on the median runner and 682s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
 
@@ -589,10 +636,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 4 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 4 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 4/8
+        run: ./scripts/tile-golden/run.sh --shard 4/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -606,15 +653,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 753s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-15, issue #274: tile-golden-5 ran 898s (run 38548374149) over 13 runs of
-    # this shard's steps in the seven days to 10-15, one deviation 119s.
-    # Worst plus the deviation (1017s) is over the 950s run pole, so the claim
-    # stops at the pole (830s before), and the timeout is 3x that.
-    # budget: 3x 950s worst observed (held at the run pole) (run 38548374149)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
+    # 609s on the median runner and 684s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
 
@@ -634,10 +679,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 5 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 5 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 5/8
+        run: ./scripts/tile-golden/run.sh --shard 5/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -651,15 +696,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 754s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-19, the budget audit over the seven days to 10-19T21:38Z: 835s
-    # worst (run 39021045649) over the 9 runs whose steps digest is this
-    # job's, median 653s. One deviation (111s) is more than a tenth: 950s
-    # (830s before), which is the pole.
-    # budget: 3x 950s worst observed plus a standard deviation (run 39021045649)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 20 kernels and 8 mutants;
+    # 609s on the median runner and 684s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
 
@@ -679,10 +722,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 6 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 6 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 6/8
+        run: ./scripts/tile-golden/run.sh --shard 6/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -696,15 +739,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 754s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-15, issue #274: tile-golden-7 ran 834s (run 38716903867) over 13 runs of
-    # this shard's steps in the seven days to 10-15, one deviation 95s.
-    # Restated to worst plus the deviation, rounded up to 5s, 930s (830s before),
-    # and the timeout to 3x that.
-    # budget: 3x 930s worst observed plus one deviation (run 38716903867)
-    timeout-minutes: 47
+    # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
+    # 607s on the median runner and 682s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
 
@@ -724,10 +765,10 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 7 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 7 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 7/8
+        run: ./scripts/tile-golden/run.sh --shard 7/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
@@ -741,15 +782,13 @@ jobs:
     needs: dedupe
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # 2026-10-10 (#274), eight shards: modelled at 763s on the slower runner
-    # type; the claim is a tenth over that, rounded up to 5s. The note
-    # above has the arithmetic.
-    # 2026-10-19, the budget audit over the seven days to 10-19T21:38Z: 843s
-    # worst (run 39116199742) over the 8 runs whose steps digest is this
-    # job's, median 804s. One deviation (102s) is more than a tenth: 950s
-    # (840s before), which is the pole.
-    # budget: 3x 950s worst observed plus a standard deviation (run 39116199742)
-    timeout-minutes: 48
+    # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
+    # 607s on the median runner and 682s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
 
@@ -769,15 +808,144 @@ jobs:
           "$bin" --version
           echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
 
-      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 8 of 8)
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 8 of 11)
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
-        run: ./scripts/tile-golden/run.sh --shard 8/8
+        run: ./scripts/tile-golden/run.sh --shard 8/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4
         with:
           name: mutant-coverage-tile-golden-8
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-9:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
+    # 607s on the median runner and 682s on the worst of the 64 main jobs
+    # replayed, one deviation 90s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 775s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 9 of 11)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 9/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-9
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-10:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    # 2026-10-19 (#274), eleven shards dealt by cost: 18 kernels and 9 mutants;
+    # 602s on the median runner and 676s on the worst of the 64 main jobs
+    # replayed, one deviation 89s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 770s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 10 of 11)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 10/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-10
+          path: ${{ runner.temp }}/mutant-coverage
+          if-no-files-found: error
+          retention-days: 1
+
+  tile-golden-11:
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    # 2026-10-19 (#274), eleven shards dealt by cost: 19 kernels and 8 mutants;
+    # 602s on the median runner and 676s on the worst of the 64 main jobs
+    # replayed, one deviation 89s. The claim is that worst plus the deviation,
+    # rounded up to 5s, a planning value until three runs of the eleven are
+    # observed. The note above has the arithmetic.
+    # budget: 3x 765s planning value: replayed worst plus one deviation
+    timeout-minutes: 39
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: restore the pinned tileiras wheels
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tileiras-wheels
+          key: tileiras-wheels-v1-${{ runner.os }}-${{ hashFiles('scripts/tile-golden/toolchain.txt') }}
+
+      - name: the pinned tileiras
+        run: |
+          bin="$(./scripts/tile-golden/install-tileiras.sh "$RUNNER_TEMP/tileiras" "$RUNNER_TEMP/tileiras-wheels")"
+          "$bin" --version
+          echo "TILEIRAS=$bin" >>"$GITHUB_ENV"
+
+      - name: tile IR goldens and tileiras (208 kernels and ninety-three mutants, both backends; shard 11 of 11)
+        env:
+          MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
+        run: ./scripts/tile-golden/run.sh --shard 11/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+
+      - name: record which items this shard ran
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-coverage-tile-golden-11
           path: ${{ runner.temp }}/mutant-coverage
           if-no-files-found: error
           retention-days: 1
@@ -809,7 +977,7 @@ jobs:
   # skipped with the shards when the dedupe job found this tree verified.
   #
   # Its last two steps write the verified-tree record the dedupe job reads,
-  # and only when all eight shards concluded success and the union held. The
+  # and only when all eleven shards concluded success and the union held. The
   # artifact's name is the whole key; the small JSON inside is for a person.
   tile-shards-complete:
     needs:
@@ -822,6 +990,9 @@ jobs:
       - tile-golden-6
       - tile-golden-7
       - tile-golden-8
+      - tile-golden-9
+      - tile-golden-10
+      - tile-golden-11
     if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # budget: floor (seconds-scale job: checkout, artifact download, two python runs)
@@ -850,7 +1021,10 @@ jobs:
           && needs.tile-golden-5.result == 'success'
           && needs.tile-golden-6.result == 'success'
           && needs.tile-golden-7.result == 'success'
-          && needs.tile-golden-8.result == 'success' }}
+          && needs.tile-golden-8.result == 'success'
+          && needs.tile-golden-9.result == 'success'
+          && needs.tile-golden-10.result == 'success'
+          && needs.tile-golden-11.result == 'success' }}
         run: |
           tree=$(git rev-parse 'HEAD^{tree}')
           echo "TILE_TREE=$tree" >> "$GITHUB_ENV"
