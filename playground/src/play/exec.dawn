@@ -102,8 +102,8 @@ pub fn ms_since(t: Instant) -> Int !io = elapsed_ns(t, tick()) / 1000000
 
 # A fresh random id in the uuid's dashed form. The kernel hands one out at
 # /proc/sys/kernel/random/uuid (every read a new one, 122 random bits, the
-# source `UUID.randomUUID` drew on); a host without it (macOS, where the
-# long-lived server is run for development) asks `uuidgen`.
+# source `UUID.randomUUID` drew on); a host without it (macOS) asks
+# `uuidgen`.
 pub fn uuid() -> String !io = {
   let kernel = with_fs_real(() => io.read_file("/proc/sys/kernel/random/uuid"))
   match kernel {
@@ -325,37 +325,6 @@ fn remove_tree(dir: String) -> Option[String] !io = {
       Some(if t == "" { "rm exited ${code}" } else { str.slice(t, 0, 500) })
     }
     Err(e) -> Some("rm did not run: ${e}")
-  }
-}
-
-# Remove request directories an earlier runner left behind (a crash, a kill, a
-# deploy mid-request, or a tree cleanup could not empty). Called once from
-# main before the server listens, so no request is in flight and nothing live
-# can be taken. Only under a configured work root: the TMPDIR fallback
-# is shared with other programs. Returns how many it removed.
-fn sweep_stale(root: String) -> Int !Fs !io = {
-  match io.list_dir(root) {
-    Err(_) -> 0
-    Ok(names) -> {
-      var n = 0
-      for name in names {
-        if str.starts_with(name, "dawn-play-") {
-          match remove_tree("${root}/${name}") {
-            None -> { n = n + 1 }
-            Some(why) -> io.eprintln("dawn-play: cannot remove stale ${root}/${name}: ${why}")
-          }
-        }
-      }
-      n
-    }
-  }
-}
-
-# The startup sweep over the configured work root, logging the count.
-pub fn sweep_work_root() -> Unit !io = {
-  if work_root() != "" {
-    let n = with_fs_real(() => sweep_stale(temp_root()))
-    io.eprintln("dawn-play: removed ${n} stale request directories from ${temp_root()}")
   }
 }
 
@@ -1284,15 +1253,4 @@ test "remove_tree says why a tree it cannot empty stays, and cleans one it can" 
   assert present(dir)
   sh_run(["chmod", "0755", "${dir}/box/classes"])
   assert remove_tree(dir) == None
-}
-
-test "sweep_stale removes dawn-play-* under the root, counts them, and leaves the rest" {
-  let root = "${temp_root()}/dawn-play-sweeptest-${uuid()}"
-  sh_run(["mkdir", "-p", "${root}/dawn-play-aaa/box/classes", "${root}/dawn-play-bbb", "${root}/keep"])
-  sh_run(["touch", "${root}/dawn-play-aaa/box/classes/A.class", "${root}/keep/f"])
-  let n = with_fs_real(() => sweep_stale(root))
-  assert n == 2
-  assert present("${root}/keep/f")
-  assert not present("${root}/dawn-play-aaa")
-  assert remove_tree(root) == None
 }

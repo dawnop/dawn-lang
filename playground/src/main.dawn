@@ -1,44 +1,31 @@
-# dawn-play: the Dawn Playground runner. Receives source over HTTP, compiles and
-# runs it inside a throwaway sandbox, streams back the output. The first real
-# server written in Dawn (spec §9 interop dogfood, M6 warm-up) — and the first
-# service on the `web` framework, which it doubles as the acceptance test for.
+# dawn-play, the Dawn Playground runner: one HTTP request per process
+# (docs/playground-native-runner-design.md). systemd accepts each connection
+# on dawn-play-native.socket and starts this binary with the connection as its
+# stdin and stdout; it reads the request, compiles and runs the program in a
+# throwaway sandbox unit, answers and exits.
+#
+# There is one entry. Until K5 this file was a long-lived server on the `web`
+# framework and the JVM, and the process-per-request entry lived in a project
+# of its own (playground/native) because a project has one main and this one
+# imported a framework that sits on `use java`. The long-lived server had no
+# traffic once nginx pointed at the socket, so it went, and with it the second
+# project: `dawnc build playground` makes the binary, and nothing this file
+# reaches may `use java`. The JVM is still what /run compiles and runs user
+# programs with and what the JVM view lists with javap; that is the
+# toolchain's business inside the sandbox, not the runner process's.
+#
+#   dawn-play serve        answer the one HTTP request on stdin, then exit
+#   dawn-play job <dir>    the child the flock gate starts (play/gate)
 use std/io
-use web/types.{Response, HttpError, raw}
-use web/router.{route_get, route_post}
-use web/server.{serve_app}
-use web/middleware.{with_logging}
-use play/routes.{Reply, JSON_CT, MAX_CONCURRENT, CACHE_ENTRIES, CACHE_CHARS, health, rpc, compile_rpc, view_of}
-use play/exec.{compiler_id, native_ready, javap_id, sweep_work_root}
-use play/jvmhost.{jvm_host}
-use play/config.{port}
+use std/io.{with_exit_real}
 use play/serve.{serve_one, serve_job}
 
-# The framework's Response is the Reply with the runner's one content type.
-fn wrap(r: Reply) -> Result[Response, HttpError] = Ok(raw(r.status, JSON_CT, r.body))
-
 pub fn main() -> Unit !io =
-  # `dawn run playground serve` is the process-per-request entry (play/serve.dawn):
-  # no sweep, since the sweep would delete the work dirs of requests running now
   match args() {
     ["serve", ..] -> serve_one()
     ["job", dir] -> serve_job(dir)
-    _ -> serve_forever()
+    _ -> {
+      io.eprintln("usage: dawn-play serve | dawn-play job <dir>")
+      with_exit_real(() => io.exit(2))
+    }
   }
-
-fn serve_forever() -> Unit !io = {
-  sweep_work_root()
-  let host = jvm_host(MAX_CONCURRENT, CACHE_ENTRIES, CACHE_CHARS)
-  let id = compiler_id()
-  let javap = javap_id()
-  let native = native_ready(id)
-  if javap == "" {
-    io.eprintln("dawn-play: javap is not available; POST /compile will answer 503 until it is installed (a JDK, not only a JRE)")
-  }
-  let view = view_of(id, native, javap)
-  serve_app(port(), [
-    route_get("/health", req => wrap(health(id))),
-    route_post("/run", req => wrap(rpc(req.body, host, false, native))),
-    route_post("/check", req => wrap(rpc(req.body, host, true, native))),
-    route_post("/compile", req => wrap(compile_rpc(req.body, host, view))),
-  ], [with_logging])
-}

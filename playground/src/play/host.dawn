@@ -1,24 +1,18 @@
 # What the routes ask of the machine they run on, as data and one record of
 # functions. A route turns a request into a `Job` (the heavy part: stage the
 # source, run the compilers, run the program) and hands it to a `Host`, which
-# decides where the job runs and under what limit. The two entries differ
-# exactly there, so the routes (play/routes) are written once:
+# decides where the job runs and under what limit, and whether an answer is
+# kept. The runner has one host today, play/gate's: a job runs in a child
+# process that holds a cross-process flock permit for as long as it runs, and
+# nothing is kept (the process is the request, so there is nowhere to keep it).
 #
-#   - main.dawn, the long-lived web server on the JVM, runs a job in the same
-#     process under an in-process permit and keeps a process-local answer cache
-#     (play/jvmhost, the only module that still needs `use java`);
-#   - serve, one process per request, runs a job in a child process that holds
-#     a cross-process flock permit for as long as it runs, and keeps no cache
-#     (play/gate). There is no process to hold a cache in, and the ruling on
-#     the native runner dropped it until the logs show repeated compiles worth
-#     a file cache.
-#
-# Why a record of functions and not an interface of two modules: the choice is
-# made once, at the entry, and the routes below it never learn which one they
-# got, which is what keeps `use java` out of everything the native entry
-# imports. The job is a closed set of cases and not a closure for the same
-# reason: a closure cannot cross into another process, a value can be written
-# to a file.
+# The record stayed when the second host, the long-lived JVM server's
+# in-process Semaphore and answer cache, was removed with that server (K5 of
+# docs/playground-native-runner-design.md). `keep_get` and `keep_put` are where
+# a file cache goes if the source digests in the access log show programs
+# coming back often enough to pay for one (ruling 4, 2026-10-19); until then
+# they are the no-ops below. The job is a closed set of cases and not a
+# closure because it crosses into another process as a file.
 use play/contract.{Outcome}
 use play/exec.{ViewRaw, TileRaw}
 

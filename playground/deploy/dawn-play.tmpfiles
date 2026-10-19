@@ -1,0 +1,15 @@
+# systemd-tmpfiles rule for the Playground runner's work root. Install once as
+# /etc/tmpfiles.d/dawn-play.conf (DEPLOY.md, one-time setup step 4).
+#
+# Every request makes a `dawn-play-*` directory under the work root and removes
+# it when it answers. A request that is killed first (the runner unit's
+# RuntimeMaxSec=60, an OOM kill, a reboot mid-request) leaves its directory
+# behind, and so does one whose sandbox left files the runner cannot delete.
+# The long-lived JVM runner swept them at every start, which every deploy
+# caused; the process-per-request runner cannot sweep (it would delete the
+# directories of requests running beside it), and the JVM runner is gone (K5
+# of docs/playground-native-runner-design.md). This removes, by age, what no
+# request can still be using: no request lives past 60 s, and an hour is far
+# past that. systemd-tmpfiles-clean.timer applies it daily; `e` cleans the
+# directory's contents and never creates or removes the directory itself.
+e /var/lib/dawn-play/work - - - 1h

@@ -19,14 +19,15 @@ the copies equal instead.
 What is asserted is what production answered on 2026-10-12 (recorded in
 playground/deploy/DEPLOY.md):
 
-- Every location that proxies to the runner (127.0.0.1:8087, or the unix
-  socket nginx-switch.sh native substitutes) carries, at location level,
+- Every location that proxies to the runner (its unix socket; the JVM
+  runner's loopback port is gone since K5 and no longer counts as one)
+  carries, at location level,
   exactly `Access-Control-Allow-Origin $play_cors always` and
   `Vary Origin always`, and an `if ($request_method = OPTIONS)` block holding
   exactly the five preflight headers below and `return 204`.
 - /api/lsp, the WebSocket gateway, carries no add_header at all: it checks
   Origin itself.
-- Every route the runner registers in playground/src/main.dawn has a
+- Every route the runner answers (`allowed` in playground/src/play/serve.dawn) has a
   `location = /api/<route>` here, so a new runner route cannot ship without
   an nginx location (and so without CORS).
 
@@ -40,7 +41,7 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 CONF = HERE / "nginx-play.conf"
-RUNNER_MAIN = HERE.parent / "src" / "main.dawn"
+RUNNER_MAIN = HERE.parent / "src" / "play" / "serve.dawn"
 
 SIMPLE = {
     ("Access-Control-Allow-Origin", "$play_cors", "always"),
@@ -51,7 +52,7 @@ PREFLIGHT = SIMPLE | {
     ("Access-Control-Allow-Headers", '"Content-Type"', "always"),
     ("Access-Control-Max-Age", "600", "always"),
 }
-RUNNER_UPSTREAM = re.compile(r"proxy_pass\s+http://(127\.0\.0\.1:8087|unix:[^:;]+:)/")
+RUNNER_UPSTREAM = re.compile(r"proxy_pass\s+http://unix:[^:;]+:/")
 GATEWAY = "/api/lsp"
 
 
@@ -85,8 +86,9 @@ def add_headers(body):
     ]
 
 
-def runner_routes(main_text):
-    return set(re.findall(r'route_(?:get|post)\("(/[^"]*)"', main_text))
+def runner_routes(serve_text):
+    """The paths of serve.dawn's `allowed`: `"/run" -> Some("POST")` lines."""
+    return set(re.findall(r'^\s*"(/[^"]*)" -> Some\("(?:GET|POST)"\)', serve_text, re.M))
 
 
 def check(conf_text, main_text):
@@ -134,6 +136,7 @@ def self_test():
     compile_at = conf.index("location = /api/compile")
     health_at = conf.index("location = /api/health")
     lsp_at = conf.index("location = /api/lsp")
+    run_at = conf.index("location = /api/run")
 
     def after(at, old, new):
         return conf[:at] + conf[at:].replace(old, new, 1)
@@ -152,11 +155,15 @@ def self_test():
         "CORS added to the gateway": after(
             lsp_at, "    limit_req zone=playlsp", acao + "    limit_req zone=playlsp"),
         "location for /api/health removed": conf[:health_at],
+        "/api/run sent back to the JVM runner's port": after(
+            run_at, "http://unix:/run/dawn-play/http.sock:/run;", "http://127.0.0.1:8087/run;"),
     }
     for name, mutant in mutants.items():
         assert mutant != conf, f"mutant did not apply: {name}"
         assert check(mutant, main), f"mutant passed: {name}"
-    new_route = main.replace('route_get("/health"', 'route_get("/version", req => x),\n    route_get("/health"', 1)
+    assert runner_routes(main) == {"/run", "/check", "/compile", "/health"}, runner_routes(main)
+    new_route = main.replace('    "/health" -> Some("GET")', '    "/version" -> Some("GET")\n    "/health" -> Some("GET")', 1)
+    assert new_route != main, "the new-route mutant did not apply"
     assert check(conf, new_route), "a new runner route without a location passed"
     print(f"nginx-cors-check self-test: shipped snippet passes, {len(mutants) + 1} mutants fail")
 

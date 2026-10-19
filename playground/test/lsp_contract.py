@@ -1103,7 +1103,7 @@ def deployment_contract():
     # The unit is present on the production host, so only the other branch can
     # be exercised here; pin the present one by text.
     for line in (
-        "sudo systemctl restart dawn-play dawn-play-lsp",
+        "sudo systemctl restart dawn-play-lsp",
         "sudo systemctl is-active --quiet dawn-play-lsp",
         "/usr/bin/python3 -I -B /opt/dawn/playground/deploy/lsp-smoke.py",
     ):
@@ -1114,16 +1114,15 @@ def deployment_contract():
     # up with the machine.
     deploy_doc = read_text(os.path.join(DEPLOY, "DEPLOY.md"))
     rollback = deploy_doc[deploy_doc.index("## Rollback"):]
-    assert "systemctl disable --now dawn-play dawn-play-lsp" in rollback, rollback
-    assert "systemctl stop dawn-play dawn-play-lsp" not in rollback, rollback
+    assert "systemctl disable --now dawn-play-native.socket dawn-play-lsp" in rollback, rollback
+    assert "systemctl stop dawn-play-native.socket dawn-play-lsp" not in rollback, rollback
     ok("deployment route, cgroup, sudo, rollback and native-artifact boundaries are pinned")
 
 
-def run_remote_restart(script, curl_failures=0, curl_hangs=0):
-    """Run the remote half with a missing LSP unit and controlled health."""
+def run_remote_restart(script):
+    """Run the remote half where the LSP unit was never installed."""
     with tempfile.TemporaryDirectory(prefix="dawn-lsp-restart-") as temp:
         log = os.path.join(temp, "commands")
-        curl_count = os.path.join(temp, "curl-count")
         stubs = os.path.join(temp, "bin")
         os.mkdir(stubs)
         for name, body in (
@@ -1139,22 +1138,7 @@ def run_remote_restart(script, curl_failures=0, curl_hangs=0):
             ),
             (
                 "curl",
-                'printf "%s\\n" "curl $*" >>"$LOG"\n'
-                'COUNT=0\n'
-                '[ ! -r "$CURL_COUNT" ] || read -r COUNT <"$CURL_COUNT"\n'
-                'COUNT=$((COUNT + 1))\n'
-                'printf "%s\\n" "$COUNT" >"$CURL_COUNT"\n'
-                # Exit 28 models curl enforcing --max-time on a server that
-                # accepts the connection but never returns HTTP. It is
-                # deliberately instant so the contract itself stays fast.
-                '[ "$COUNT" -gt "$CURL_HANGS" ] || exit 28\n'
-                'FAIL_LIMIT=$((CURL_HANGS + CURL_FAILURES))\n'
-                '[ "$COUNT" -gt "$FAIL_LIMIT" ] || exit 7\n'
-                'echo ok\n',
-            ),
-            (
-                "sleep",
-                'printf "%s\\n" "sleep $*" >>"$LOG"\nexit 0\n',
+                'printf "%s\\n" "curl $*" >>"$LOG"\nexit 7\n',
             ),
         ):
             path = os.path.join(stubs, name)
@@ -1163,87 +1147,31 @@ def run_remote_restart(script, curl_failures=0, curl_hangs=0):
             os.chmod(path, 0o755)
         result = subprocess.run(
             ["/bin/sh", "-c", script],
-            env={
-                "PATH": stubs + ":/usr/bin:/bin",
-                "LOG": log,
-                "CURL_COUNT": curl_count,
-                "CURL_FAILURES": str(curl_failures),
-                "CURL_HANGS": str(curl_hangs),
-            },
+            env={"PATH": stubs + ":/usr/bin:/bin", "LOG": log},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             timeout=3,
         )
         commands = read_text(log) if os.path.exists(log) else ""
-        count = int(read_text(curl_count)) if os.path.exists(curl_count) else 0
-    return result, commands, count
+    return result, commands
 
 
 def assert_remote_restart_behavior(script):
-    # The first failure models an accepted-but-silent server reaching curl's
-    # own deadline; the second is an ordinary connection failure.
-    result, commands, curl_count = run_remote_restart(
-        script, curl_hangs=1, curl_failures=1
-    )
+    """A host without the LSP unit gets a pointer to DEPLOY.md and no restart.
+
+    Nothing is restarted for the runner: it has no resident process (systemd
+    starts one per connection) and the binary swap is what changes it. Until
+    K5 this half also restarted the JVM runner and polled its /health on
+    127.0.0.1:8087; that is what must not come back.
+    """
+    result, commands = run_remote_restart(script)
     assert result.returncode == 0, (result.returncode, result.stdout)
     assert "DEPLOY.md step 6" in result.stdout, result.stdout
-    assert "sudo systemctl restart dawn-play\n" in commands, commands
-    assert "restart dawn-play dawn-play-lsp" not in commands, commands
-    assert "is-active" not in commands, commands
-    assert curl_count == 3, commands
-    assert commands.count("sleep 2\n") == 2, commands
-    curl_commands = [
-        line for line in commands.splitlines() if line.startswith("curl ")
-    ]
-    assert len(curl_commands) == 3, commands
-    for command in curl_commands:
-        # Substring matching has no right-hand delimiter: `--max-time 10`
-        # contains `--max-time 1`, so a tenfold budget used to read as green.
-        # Compare the flag's own argument instead.
-        argv = command.split()
-        for flag in ("--connect-timeout", "--max-time"):
-            assert flag in argv, command
-            assert argv[argv.index(flag) + 1] == "1", command
-        assert "http://127.0.0.1:8087/health" in command, command
-
-    # A health endpoint which keeps accepting connections without replying must
-    # fail at the retry bound. The controlled stub recovers on attempt 12 so an
-    # unbounded mutant terminates and can be observed without a real delay.
-    exhausted, exhausted_commands, exhausted_count = run_remote_restart(
-        script, curl_hangs=11
-    )
-    assert exhausted.returncode != 0, exhausted.stdout
-    assert "failed its health check after 10 attempts" in exhausted.stdout
-    assert exhausted_count == 10, exhausted_commands
-    assert exhausted_commands.count("sleep 2\n") == 9, exhausted_commands
-
-
-def search_one(pattern, text):
-    found = re.findall(pattern, text)
-    assert len(found) == 1, (pattern, found)
-    return found[0]
-
-
-def assert_health_budget(script):
-    """Multiply the restart's own numbers out and hold the stated ceiling.
-
-    Attempt count, curl's own deadline and the retry interval each read fine
-    on their own while the product they bound drifts: ten attempts at
-    `--max-time 10` is 118 seconds of deploy, not 28. The ceiling is a
-    function of all three, so compute it here and make the comment in
-    redeploy.sh state the same number.
-    """
-    attempts = int(search_one(r"HEALTH_ATTEMPTS=(\d+)\n", script))
-    budget = int(search_one(r"--max-time (\d+)\b", script))
-    connect = int(search_one(r"--connect-timeout (\d+)\b", script))
-    interval = int(search_one(r"\n\s*sleep (\d+)\n", script))
-    assert connect <= budget, (connect, budget)
-    # `attempts` requests of at most `budget` seconds each, with `attempts - 1`
-    # waits of `interval` between them.
-    total = attempts * budget + (attempts - 1) * interval
-    assert total == 28, (attempts, budget, interval, total)
-    assert f"check to {total} seconds" in script, script
+    assert "restart" not in commands, commands
+    assert "curl" not in commands, commands
+    assert "8087" not in script, script
+    assert "dawn-play-native" not in script, script
 
 
 def remote_restart_contract():
@@ -1253,52 +1181,34 @@ def remote_restart_contract():
     over ssh, on the far side, after the rsyncs have already landed. Under
     `set -e` an unconditional `restart dawn-play-lsp` turned "this host has not
     done DEPLOY.md step 6 yet" into a failed deploy. Stubs stand in for
-    systemctl, sudo, curl and sleep, so the branch runs here instead of only
-    on a host nobody has.
+    systemctl, sudo and curl, so the branch runs here instead of only on a host
+    nobody has.
     """
     redeploy = read_text(os.path.join(DEPLOY, "redeploy.sh"))
     start = redeploy.index("REMOTE_RESTART='") + len("REMOTE_RESTART='")
     script = redeploy[start:redeploy.index("'\n", start)]
     assert "systemctl cat dawn-play-lsp.service" in script, script
     assert_remote_restart_behavior(script)
-    assert_health_budget(script)
-    ok("remote restart retries transient health failures and fails at its bound")
+    ok("remote restart skips a host without the LSP unit and leaves the runner alone")
 
-    no_retry = mutate_once(script, "  HEALTH_ATTEMPTS=10", "  HEALTH_ATTEMPTS=1")
-    no_bound = mutate_once(script, "      exit 1", "      : # keep retrying")
-    no_curl_timeout = mutate_once(
-        script, " --connect-timeout 1 --max-time 1", ""
+    unconditional = mutate_once(
+        script, '    echo "      Install the systemd units first: DEPLOY.md step 6."\n',
+        '    echo "      Install the systemd units first: DEPLOY.md step 6."\n    sudo systemctl restart dawn-play-lsp\n',
     )
-    slow_curl = mutate_once(script, "--max-time 1 ", "--max-time 10 ")
-    slow_retry = mutate_once(script, "\n    sleep 2\n", "\n    sleep 20\n")
-    expect_contract_red(
-        "single health attempt", lambda: assert_remote_restart_behavior(no_retry)
-    )
-    expect_contract_red(
-        "unbounded health retry", lambda: assert_remote_restart_behavior(no_bound)
+    jvm_back = mutate_once(
+        script, "  set -e\n",
+        "  set -e\n  sudo systemctl restart dawn-play\n"
+        '  curl -fsS --max-time 1 http://127.0.0.1:8087/health || true\n',
     )
     expect_contract_red(
-        "curl without a total timeout",
-        lambda: assert_remote_restart_behavior(no_curl_timeout),
-    )
-    # A tenfold per-request budget is the mutant substring matching missed: it
-    # keeps every stubbed run green and only moves the ceiling.
-    expect_contract_red(
-        "tenfold per-request budget",
-        lambda: assert_remote_restart_behavior(slow_curl),
+        "LSP restart on a host without the unit",
+        lambda: assert_remote_restart_behavior(unconditional),
     )
     expect_contract_red(
-        "tenfold per-request budget against the stated ceiling",
-        lambda: assert_health_budget(slow_curl),
+        "the JVM runner restarted and polled again",
+        lambda: assert_remote_restart_behavior(jvm_back),
     )
-    expect_contract_red(
-        "tenfold retry interval", lambda: assert_health_budget(slow_retry)
-    )
-    expect_contract_red(
-        "single attempt against the stated ceiling",
-        lambda: assert_health_budget(no_retry),
-    )
-    ok("attempt-count, retry-bound, timeout and health-ceiling mutants turn red")
+    ok("unconditional-restart and JVM-runner-restart mutants turn red")
 
 
 COMMIT_GUARD_START = 'repo="$(cd "$(dirname "$0")/../.." && pwd)"'
@@ -1473,14 +1383,14 @@ def javap_deploy_contract():
     """
     redeploy = read_text(os.path.join(DEPLOY, "redeploy.sh"))
     doc = read_text(os.path.join(DEPLOY, "DEPLOY.md"))
-    unit = read_text(os.path.join(DEPLOY, "dawn-play.service"))
+    unit = read_text(os.path.join(DEPLOY, "dawn-play-native@.service"))
     install = read_text(os.path.join(DEPLOY, "install-jdk.sh"))
     wrapper = read_text(os.path.join(ROOT, "playground", "sandbox", "run-sandboxed.sh"))
 
     def holds(script, setup, service, helper, sandbox):
         assert 'PLAY_JDK_REMOTE="$REMOTE/graalvm-21"' in script, "the deploy does not name the isolated JDK"
         assert "Environment=PLAY_JDK=/opt/dawn/graalvm-21\n" in service, "the unit does not point PLAY_JDK at it"
-        assert "Environment=JAVA_HOME=/opt/dawn/graalvm-21\n" in service, "the runner itself is not on it"
+        assert "Environment=JAVA_HOME=" not in service, "the runner is not a JVM; only what it launches is"
         assert "\nSANDBOX_JAVA_HOME=/opt/dawn/graalvm-21\n" in sandbox, "the sandbox units are not on it"
         assert '--setenv="JAVA_HOME=$SANDBOX_JAVA_HOME"' in sandbox, "the sandbox does not pass it"
         assert 'TARGET="$REMOTE/graalvm-21"' in helper and "REMOTE=/opt/dawn\n" in helper, "the helper installs elsewhere"

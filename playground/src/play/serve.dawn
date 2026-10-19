@@ -1,16 +1,18 @@
 # `serve`: one HTTP request per process (K2 and K3 of
 # docs/playground-native-runner-design.md). systemd hands the process an
 # accepted connection as stdin and stdout; it reads one request with
-# play/http1, answers it through the same handlers the long-lived server uses
-# (play/routes), logs one line to stderr (journald's) and exits.
+# play/http1, answers it through play/routes, logs one line to stderr
+# (journald's) and exits. The line is the status, the method, the path, the
+# toolchain and the digest of the program (`access_fields` below), never the
+# program itself.
 #
 # Nothing on this path uses Java, so `dawnc build` makes it a native binary.
 # The heavy part of /run, /check and /compile is a job: the process writes it
 # to a file and runs `gate.sh` (play/gate), which takes one of two flock slots
 # and then starts this same binary as `job <dir>` holding the lock, so the
 # permit spans the compile and the run and goes back to the kernel when the job
-# ends, whatever ends it. Waiting for a slot and the 429 are the long-lived
-# server's: 15 s for /run, 2 s for /check and /compile.
+# ends, whatever ends it. Waiting for a slot and the 429 are what the
+# long-lived JVM server's were: 15 s for /run, 2 s for /check and /compile.
 #
 # What a request costs in children: /health none (the version is
 # PLAY_TOOLCHAIN_ID when the deploy sets it, else one probe of `dawn
@@ -20,12 +22,17 @@
 # Stdout carries the response and only that, so nothing on this path may
 # `println` (routes logs to stderr), and the job child's stdout is /dev/null.
 #
-# No startup sweep: the sweep deletes every request directory, including those
-# of requests running in sibling processes right now.
+# No sweep of the work root: it would delete the directories of requests
+# running in sibling processes right now. Leftovers of a killed request are
+# removed by age (deploy/dawn-play.tmpfiles).
 use std/io
+use std/bytes
+use std/str
+use sha2/sha256
 use play/http1.{read_request, respond, respond_reject, Request}
 use play/routes.{Reply, health, rpc, compile_rpc, view_of}
-use play/exec.{compiler_id, native_ready, tool_present}
+use play/contract.{parse_request, parse_compile_request}
+use play/exec.{CompilerId, compiler_id, native_ready, tool_present}
 use play/config.{javap_bin}
 use play/gate.{flock_host}
 use play/job.{job_main}
@@ -47,27 +54,81 @@ fn allowed(path: String) -> Option[String] =
     _ -> None
   }
 
-fn dispatch(req: Request) -> Reply !io =
+fn dispatch(req: Request, id: CompilerId) -> Reply !io =
   match allowed(req.path) {
     None -> Reply { status: 404, body: "{\"error\":\"Not Found\"}" }
     Some(m) ->
       if m != req.method {
         Reply { status: 405, body: "{\"error\":\"Method Not Allowed\"}" }
       } else if req.path == "/health" {
-        health(compiler_id())
+        health(id)
       } else {
         let host = flock_host()
         match req.path {
           "/run" -> rpc(req.body, host, false, false)
-          "/check" -> rpc(req.body, host, true, native_ready(compiler_id()))
+          "/check" -> rpc(req.body, host, true, native_ready(id))
           _ -> {
-            let id = compiler_id()
             let javap = if tool_present(javap_bin()) { "present" } else { "" }
             compile_rpc(req.body, host, view_of(id, native_ready(id), javap))
           }
         }
       }
   }
+
+# The access line's account of a request, after the status, method and path:
+# which toolchain answered and which program it was sent, as the program's
+# SHA-256 and never its text (ruling 4 of 2026-10-19: whether an answer cache
+# is worth having is decided by how often the same program comes back, and
+# the log had no way to tell). The digest is of the `code` field's UTF-8, the
+# part of a request a cache would key on with the toolchain; /compile adds the
+# target, the other part of that key. A body that names no program says `-`.
+# `toolchain=` is `<version>/<build>` as /health reports them, so a line is
+# one whitespace-separated record.
+fn access_fields(req: Request, id: CompilerId) -> String = {
+  let toolchain = if id.version == "" { "-" } else { "${id.version}/${id.build}" }
+  let program =
+    if req.method != "POST" || not routed(req.path) {
+      ""
+    } else {
+      match bytes.decode_utf8_checked(req.body) {
+        Err(_) -> " src_sha256=-"
+        Ok(text) ->
+          if req.path == "/compile" {
+            match parse_compile_request(text) {
+              Ok((code, target)) -> " src_sha256=${digest(code)} target=${target}"
+              Err(_) -> " src_sha256=-"
+            }
+          } else {
+            match parse_request(text) {
+              Ok(code) -> " src_sha256=${digest(code)}"
+              Err(_) -> " src_sha256=-"
+            }
+          }
+      }
+    }
+  " toolchain=${toolchain}${program}"
+}
+
+fn digest(code: String) -> String = sha256.hex(bytes.utf8(code))
+
+fn routed(path: String) -> Bool = match allowed(path) { None -> false, Some(_) -> true }
+
+test "the access fields name the program by its digest and never by its text" {
+  let id = CompilerId { version: "0.94.0", build: "b1:96af8ed9c5f2" }
+  let code = "secret-marker"
+  let body = bytes.utf8("{\"code\":\"secret-marker\"}")
+  let run = Request { method: "POST", path: "/run", query: "", headers: [], body: body }
+  let line = access_fields(run, id)
+  assert line == " toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=${digest(code)}"
+  assert digest(code) == "6c18de180764abc1fd49ffb69213b99c8519525409db100d52d29be7aad93404"
+  assert not str.contains(line, "secret-marker")
+  let compile = Request { method: "POST", path: "/compile", query: "", headers: [], body: bytes.utf8("{\"code\":\"x\",\"target\":\"c\"}") }
+  assert access_fields(compile, id) == " toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=${digest("x")} target=c"
+  let bad = Request { method: "POST", path: "/check", query: "", headers: [], body: bytes.utf8("not json") }
+  assert access_fields(bad, id) == " toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=-"
+  let health = Request { method: "GET", path: "/health", query: "", headers: [], body: bytes.utf8("") }
+  assert access_fields(health, CompilerId { version: "", build: "" }) == " toolchain=-"
+}
 
 ## `job <dir>`: the child `gate.sh` starts holding a slot (play/job).
 pub fn serve_job(dir: String) -> Unit !io = job_main(dir)
@@ -80,8 +141,9 @@ pub fn serve_one() -> Unit !io =
       respond_reject(r)
     }
     Ok(req) -> {
-      let reply = dispatch(req)
-      io.eprintln("${reply.status} ${req.method} ${req.path}")
+      let id = compiler_id()
+      let reply = dispatch(req, id)
+      io.eprintln("${reply.status} ${req.method} ${req.path}${access_fields(req, id)}")
       answer(reply)
     }
   }

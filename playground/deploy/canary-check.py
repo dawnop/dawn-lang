@@ -1,49 +1,70 @@
 #!/usr/bin/env python3
-"""The canary check for the native Playground runner (K4 of
-docs/playground-native-runner-design.md). redeploy.sh runs it on the server
-after both runners are installed; nginx is not pointed at the native one until
-it passes.
+"""The canary check for the Playground runner. redeploy.sh runs it on the
+server twice: before the new binary replaces the live one, and after.
 
-    canary-check.py [--jvm-url http://127.0.0.1:8087] [--socket /run/dawn-play/http.sock]
-                    [--health-requests 100] [--slow-requests 20]
+    canary-check.py --candidate BIN [--previous BIN] --unit UNIT --toolchain-id "V B"
+                    [--accept-diff] [--slow-requests 20] [--slow-spacing 1.0]
+                    [--inherit-env] [--set NAME=VALUE ...]
+    canary-check.py --live [--socket /run/dawn-play/http.sock] --toolchain-id "V B"
+                    [--health-requests 100]
     canary-check.py --self-test
 
-Two checks, both against the live units:
+Before the swap (the default mode) it holds the candidate, the binary this
+deploy ships, to the previous one, the binary that is live until the swap.
+Both are started the way the socket unit starts them, one process per
+request with the request on stdin and the answer on stdout, with the unit's
+`Environment=` lines (`--unit`), the toolchain id this deploy writes, the
+unit's working directory and the systemd default PATH. They run as the user
+that runs this script (redeploy.sh: dawn-play), so their jobs go through the
+real sudo wrapper, the real sandbox units and the live flock slots. Nothing is
+put behind the socket until this passes.
 
-1. Byte compare. The same requests go to the JVM runner (TCP) and to the native
-   one (unix socket, a fresh `dawn-play-native@` instance per connection), and
-   the status code and the body must be identical. Only the two fields that
-   differ by design are normalized: `ms`, a timing, and `cached`, which the
-   native runner (no cache, ruling 4) always reports false. The reason phrase
-   and the headers are the framework's own and are not compared, as in
-   playground/test/serve-compare.py, whose cases these are a subset of: the
-   ones that are quick and safe to send to a production sandbox (no program
-   that runs until its timeout, no 20000-line output).
+1. Expectations. Every case has an answer the candidate must give whatever
+   the previous one says: /health names the release and build being deployed,
+   hello prints hello, a compile error is a diagnostic with no server path in
+   it, the refusals have their statuses. And every request leaves one access
+   line on stderr that names the toolchain and, for a program, its SHA-256,
+   and never the program's text (ruling 4 of 2026-10-19).
+2. Byte compare. The previous runner and the candidate answer the same
+   requests with the same toolchain (redeploy.sh has synced it by then), so
+   any difference in status or body, `ms` aside, is the runner's own change.
+   That is a failure unless the deploy says it expects one (`--accept-diff`,
+   DAWN_PLAY_CANARY_ACCEPT_DIFF=1 in redeploy.sh); the differences are printed
+   either way.
+3. The latency gate, the two binaries interleaved so a slow moment of the host
+   hits both: on `/run` hello and `/check` hello, `--slow-requests` (20) each,
+   spaced out so the production sandbox is not loaded, the candidate's p95 is
+   at most SLOW_RATIO (1.15) x the previous one's + SLOW_SLACK_MS (100) ms.
+   These are the numbers the K4 gate held native to JVM with, measured on the
+   production host: /run is about 3.0 s and /check about 1.2 s, and 20
+   samples carry about 100 ms of noise at p95.
 
-2. The latency gate, with the real `Accept=yes` start-up cost included, every
-   request on a new connection, the two runners interleaved:
-   - `/run` hello and `/check` hello, `--slow-requests` (20) each, spaced out so
-     the production sandbox is not loaded: native p95 must be at most
-     SLOW_RATIO (1.15) x the JVM p95 + SLOW_SLACK_MS (100) ms.
-   - `/health`, `--health-requests` (100): native p95 at most HEALTH_CEILING_MS
-     (25) ms. An absolute ceiling, not a ratio.
-   Why these numbers: measured on the production host, native `/health` is
-   7.7 to 7.9 ms against 1.4 to 1.6 ms for the JVM runner (5x), and ~90% of
-   that is systemd starting a service instance per connection, a fixed cost.
-   Users never see a `/health`; they see `/run` (~3.0 s) and `/check`
-   (~1.2 s), where the same cost is 0.2% to 0.5% and the measured native/JVM
-   p95 ratios are 0.98 to 1.06 with about 100 ms of noise at 20 samples. So
-   the ratio gate sits on the endpoints users hit, and `/health` only guards
-   against a start-up regression to whole seconds (25 ms is 3x today's value).
+Without a previous binary (a first install) 2 and 3 are skipped and say so.
 
-Exit status 0 only when both hold. Standard library only, because it runs on the
-server under `python3 -I`; it needs to be able to open the unix socket, so run
-it as a user the socket admits (redeploy.sh uses the dawn-play user).
+Why the previous native runner and not the JVM runner any more: until K5 the
+canary compared the native runner with the JVM runner of the same commit, which
+checked that two entries of one tree answered alike. With one entry left the
+question is whether this deploy's runner answers like the one it replaces, and
+the one place both binaries and one toolchain exist side by side is the server
+mid-deploy. Comparing against the previous release's recorded answers instead
+was the other option and was not taken: a release that changes a diagnostic
+or the compile view (Emit-Change) would differ from a record for reasons that
+are not the runner's, and the live binary on the same toolchain does not.
+
+After the swap (`--live`) it asks the socket itself, so the real `Accept=yes`
+start-up is in the numbers: /health answers this release and build, its p95
+over `--health-requests` (100) new connections is at most HEALTH_CEILING_MS
+(25) ms (measured 7.7 to 7.9 ms on the production host, almost all of it
+systemd starting an instance per connection), and one /run hello prints hello.
+
+Exit status 0 only when everything holds. Standard library only, because it
+runs on the server under `python3 -I`.
 """
-import argparse, json, re, socket, sys, time
-from urllib.parse import urlsplit
+import argparse, json, os, re, shlex, socket, subprocess, sys, time
 
 HELLO = 'pub fn main() -> Unit !io = println("hello")\n'
+SYSTEMD_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SERVER_PATHS = ("/var/lib/dawn-play", "/opt/dawn", "dawn-play-")
 
 
 def j(code, **kw):
@@ -52,21 +73,49 @@ def j(code, **kw):
     return json.dumps(d).encode()
 
 
+def no_server_path(d):
+    text = json.dumps(d)
+    return not any(p in text for p in SERVER_PATHS)
+
+
+# name, method, path, body, the program's text (None: the body names none),
+# expectation on (status, parsed body, toolchain (version, build))
 CASES = [
-    ("health", "GET", "/health", None),
-    ("run ok", "POST", "/run", j(HELLO)),
-    ("run compile error", "POST", "/run", j("pub fn main() -> Unit !io = nope\n")),
-    ("run exit status", "POST", "/run", j('pub fn main() -> Unit !io = { println("x")\n panic("boom") }\n')),
-    ("check ok", "POST", "/check", j(HELLO)),
-    ("check error", "POST", "/check", j("pub fn main() -> Unit !io = nope\n")),
-    ("compile c", "POST", "/compile", j(HELLO, target="c")),
-    ("compile jvm", "POST", "/compile", j(HELLO, target="jvm")),
-    ("bad json", "POST", "/run", b"{nope"),
-    ("bad utf8", "POST", "/run", b'{"code":"\xff\xfe"}'),
-    ("oversize", "POST", "/run", j("x" * 70000)),
-    ("empty body", "POST", "/run", b""),
-    ("404", "GET", "/nope", None),
-    ("405", "GET", "/run", None),
+    ("health", "GET", "/health", None, None,
+     lambda st, d, tc: st == "200" and d.get("ok") is True and (d.get("version"), d.get("build")) == tc),
+    ("run ok", "POST", "/run", j(HELLO), HELLO,
+     lambda st, d, tc: st == "200" and d.get("ok") is True and d.get("phase") == "run"
+     and d.get("exit") == 0 and d.get("output") == "hello\n"),
+    ("run compile error", "POST", "/run", j("pub fn main() -> Unit !io = nope\n"), "pub fn main() -> Unit !io = nope\n",
+     lambda st, d, tc: st == "200" and d.get("ok") is False and d.get("phase") == "compile"
+     and "prog.dawn" in d.get("output", "") and no_server_path(d)),
+    ("run exit status", "POST", "/run", j('pub fn main() -> Unit !io = { println("x")\n panic("boom") }\n'),
+     'pub fn main() -> Unit !io = { println("x")\n panic("boom") }\n',
+     lambda st, d, tc: st == "200" and d.get("phase") == "run" and d.get("exit") == 1
+     and d.get("output", "").startswith("x\n") and "panic: boom" in d.get("output", "") and no_server_path(d)),
+    ("check ok", "POST", "/check", j(HELLO), HELLO,
+     lambda st, d, tc: st == "200" and d.get("ok") is True and d.get("phase") == "check"),
+    ("check error", "POST", "/check", j("pub fn main() -> Unit !io = nope\n"), "pub fn main() -> Unit !io = nope\n",
+     lambda st, d, tc: st == "200" and d.get("ok") is False and d.get("phase") == "compile"
+     and "prog.dawn" in d.get("output", "") and no_server_path(d)),
+    ("compile c", "POST", "/compile", j(HELLO, target="c"), HELLO,
+     lambda st, d, tc: st == "200" and d.get("ok") is True and d.get("phase") == "compile-view"
+     and d.get("target") == "c" and d.get("build") == tc[1] and no_server_path(d)),
+    ("compile jvm", "POST", "/compile", j(HELLO, target="jvm"), HELLO,
+     lambda st, d, tc: st == "200" and d.get("ok") is True and d.get("phase") == "compile-view"
+     and d.get("target") == "jvm" and d.get("build") == tc[1] and no_server_path(d)),
+    ("bad json", "POST", "/run", b"{nope", None,
+     lambda st, d, tc: st == "400" and d.get("phase") == "error"),
+    ("bad utf8", "POST", "/run", b'{"code":"\xff\xfe"}', None,
+     lambda st, d, tc: st == "400" and "UTF-8" in d.get("output", "")),
+    ("oversize", "POST", "/run", j("x" * 70000), None,
+     lambda st, d, tc: st == "413"),
+    ("empty body", "POST", "/run", b"", None,
+     lambda st, d, tc: st == "400" and d.get("phase") == "error"),
+    ("404", "GET", "/nope", None, None,
+     lambda st, d, tc: st == "404"),
+    ("405", "GET", "/run", None, None,
+     lambda st, d, tc: st == "405"),
 ]
 
 
@@ -77,42 +126,6 @@ def request_bytes(method, path, body):
     return head.encode() + b"\r\n" + (body or b"")
 
 
-def exchange(sock, data):
-    sock.sendall(data)
-    chunks = []
-    while True:
-        c = sock.recv(65536)
-        if not c:
-            break
-        chunks.append(c)
-    return b"".join(chunks)
-
-
-def over_tcp(url):
-    u = urlsplit(url)
-    host, port = u.hostname, u.port or 80
-
-    def go(method, path, body):
-        s = socket.create_connection((host, port), timeout=60)
-        try:
-            return exchange(s, request_bytes(method, path, body))
-        finally:
-            s.close()
-    return go
-
-
-def over_unix(path):
-    def go(method, path_, body):
-        s = socket.socket(socket.AF_UNIX)
-        s.settimeout(60)
-        s.connect(path)
-        try:
-            return exchange(s, request_bytes(method, path_, body))
-        finally:
-            s.close()
-    return go
-
-
 def split(resp):
     head, _, body = resp.partition(b"\r\n\r\n")
     status = head.split(b"\r\n")[0].decode("latin-1")
@@ -121,11 +134,16 @@ def split(resp):
     return code, body
 
 
+def parsed(body):
+    try:
+        d = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
 def normalize(body):
-    t = body.decode("utf-8", "replace")
-    t = re.sub(r'"ms":\d+', '"ms":0', t)
-    t = re.sub(r'"cached":(true|false),?', "", t)
-    return t
+    return re.sub(r'"ms":\d+', '"ms":0', body.decode("utf-8", "replace"))
 
 
 def p95(samples):
@@ -134,110 +152,247 @@ def p95(samples):
 
 
 # Thresholds. See the header for the measurements behind them.
-SLOW_RATIO = 1.15        # native p95 vs JVM p95 on /run and /check
+SLOW_RATIO = 1.15        # candidate p95 vs previous p95 on /run and /check
 SLOW_SLACK_MS = 100.0    # absolute allowance on top: p95 of 20 samples is noisy
-HEALTH_CEILING_MS = 25.0  # native /health p95, absolute (3x the measured 7.9 ms)
+HEALTH_CEILING_MS = 25.0  # /health p95 through the socket, absolute (3x the measured 7.9 ms)
 SLOW_REQUESTS = 20
 SLOW_SPACING_S = 1.0     # pause between request pairs on the slow endpoints
 
 
-def gate_ok(native_p95, jvm_p95, ratio=SLOW_RATIO, slack_ms=SLOW_SLACK_MS):
-    return native_p95 <= ratio * jvm_p95 + slack_ms
+def gate_ok(candidate_p95, previous_p95, ratio=SLOW_RATIO, slack_ms=SLOW_SLACK_MS):
+    return candidate_p95 <= ratio * previous_p95 + slack_ms
 
 
-def ceiling_ok(native_p95, ceiling_ms=HEALTH_CEILING_MS):
-    return native_p95 <= ceiling_ms
+def ceiling_ok(p95_ms, ceiling_ms=HEALTH_CEILING_MS):
+    return p95_ms <= ceiling_ms
+
+
+def unit_environment(text):
+    """The `Environment=` assignments of a unit file, in order, quotes as systemd reads them."""
+    env = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("Environment="):
+            continue
+        for word in shlex.split(line[len("Environment="):]):
+            name, eq, value = word.partition("=")
+            if eq:
+                env[name] = value
+    return env
+
+
+def unit_setting(text, key):
+    for line in text.splitlines():
+        if line.strip().startswith(key + "="):
+            return line.strip()[len(key) + 1:]
+    return ""
+
+
+def access_line_ok(stderr, method, path, status, toolchain, code):
+    """One line `<status> <method> <path> toolchain=<v>/<b>[ src_sha256=...]`, no program text."""
+    tc = f"{toolchain[0]}/{toolchain[1]}"
+    if code is not None and code.strip() and code.strip() in stderr:
+        return False
+    want = f"{status} {method} {path} toolchain={tc}"
+    for line in stderr.splitlines():
+        if line == want or line.startswith(want + " "):
+            rest = line[len(want):]
+            if method == "POST" and path in ("/run", "/check", "/compile"):
+                return re.fullmatch(r" src_sha256=([0-9a-f]{64}|-)( target=\w+)?", rest) is not None
+            return rest == ""
+        if re.match(r"^\d{3} \(unreadable request\)$", line) and status in ("413", "400"):
+            return True
+    return False
+
+
+def direct(binary, env, cwd):
+    def go(method, path, body):
+        r = subprocess.run([binary, "serve"], input=request_bytes(method, path, body),
+                           capture_output=True, env=env, cwd=cwd, timeout=120)
+        return r.stdout, r.stderr.decode("utf-8", "replace")
+    return go
+
+
+def over_unix(sock_path):
+    def go(method, path, body):
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(60)
+        s.connect(sock_path)
+        try:
+            s.sendall(request_bytes(method, path, body))
+            chunks = []
+            while True:
+                c = s.recv(65536)
+                if not c:
+                    break
+                chunks.append(c)
+            return b"".join(chunks), ""
+        finally:
+            s.close()
+    return go
 
 
 def timed(call, method, path, body):
     t0 = time.perf_counter()
-    code, _ = split(call(method, path, body))
+    code, _ = split(call(method, path, body)[0])
     ms = (time.perf_counter() - t0) * 1000
     if code != "200":
         raise RuntimeError(f"{path} answered {code}")
     return ms
 
 
-def sample(jvm, nat, method, path, body, n, spacing_s):
-    """n interleaved timings per runner, so a slow moment of the host hits both."""
-    jt, nt = [], []
-    for i in range(n):
-        jt.append(timed(jvm, method, path, body))
-        nt.append(timed(nat, method, path, body))
-        if spacing_s and i + 1 < n:
-            time.sleep(spacing_s)
-    return jt, nt
+def toolchain_of(tid):
+    words = tid.split()
+    if len(words) != 2:
+        raise SystemExit(f"--toolchain-id must be '<version> <build>', got {tid!r}")
+    return words[0], words[1]
+
+
+def pre_swap(a):
+    tc = toolchain_of(a.toolchain_id)
+    unit = open(a.unit, encoding="utf-8").read()
+    env = dict(os.environ) if a.inherit_env else {"PATH": SYSTEMD_PATH}
+    env.update(unit_environment(unit))
+    for kv in a.set:
+        name, _, value = kv.partition("=")
+        env[name] = value
+    env["PLAY_TOOLCHAIN_ID"] = a.toolchain_id
+    wd = unit_setting(unit, "WorkingDirectory")
+    cwd = wd if wd and os.path.isdir(wd) else None
+    cand = direct(a.candidate, env, cwd)
+    prev = direct(a.previous, env, cwd) if a.previous and os.access(a.previous, os.X_OK) else None
+    if prev is None:
+        print(f"note: no previous runner at {a.previous!r}; checking the candidate's own answers only")
+    bad = differ = 0
+    for name, m, p, b, code, expect in CASES:
+        out, err = cand(m, p, b)
+        st, body = split(out)
+        good = expect(st, parsed(body), tc)
+        logged = access_line_ok(err, m, p, st, tc, code)
+        print(f"  {'ok  ' if good and logged else 'FAIL'} {name}: candidate {st}"
+              + ("" if logged else " (access line: " + err.strip()[:200] + ")"))
+        if not good:
+            print("    candidate:", normalize(body)[:300])
+        bad += 0 if good and logged else 1
+        if prev is not None:
+            pst, pbody = split(prev(m, p, b)[0])
+            if (pst, normalize(pbody)) != (st, normalize(body)):
+                differ += 1
+                print(f"  {'note' if a.accept_diff else 'FAIL'} {name}: previous {pst} / candidate {st} differ")
+                print("    previous :", normalize(pbody)[:300])
+                print("    candidate:", normalize(body)[:300])
+    if prev is not None:
+        print(f"{len(CASES) - differ} of {len(CASES)} answers identical to the previous runner"
+              + (" (differences accepted)" if differ and a.accept_diff else ""))
+        if differ and not a.accept_diff:
+            bad += 1
+        n = a.slow_requests
+        for name, path in (("/run hello", "/run"), ("/check hello", "/check")):
+            pt, ct = [], []
+            for i in range(n):
+                pt.append(timed(prev, "POST", path, j(HELLO)))
+                ct.append(timed(cand, "POST", path, j(HELLO)))
+                if a.slow_spacing and i + 1 < n:
+                    time.sleep(a.slow_spacing)
+            pp, cp = p95(pt), p95(ct)
+            limit = SLOW_RATIO * pp + SLOW_SLACK_MS
+            ok = gate_ok(cp, pp)
+            print(f"{name} over {n} requests each: previous p95 {pp:.0f} ms, candidate p95 {cp:.0f} ms "
+                  f"(limit {SLOW_RATIO:g} x previous + {SLOW_SLACK_MS:g} = {limit:.0f} ms)")
+            print(f"  {'ok  ' if ok else 'FAIL'} candidate {path} p95 within the limit")
+            bad += 0 if ok else 1
+    return 1 if bad else 0
+
+
+def live(a):
+    tc = toolchain_of(a.toolchain_id)
+    call = over_unix(a.socket)
+    bad = 0
+    st, body = split(call("GET", "/health", None)[0])
+    d = parsed(body)
+    ok = st == "200" and d.get("ok") is True and (d.get("version"), d.get("build")) == tc
+    print(f"  {'ok  ' if ok else 'FAIL'} /health through {a.socket}: {st} {normalize(body)[:120]}")
+    bad += 0 if ok else 1
+    ts = [timed(call, "GET", "/health", None) for _ in range(a.health_requests)]
+    hp = p95(ts)
+    ok = ceiling_ok(hp)
+    print(f"/health over {a.health_requests} new connections: p95 {hp:.2f} ms (ceiling {HEALTH_CEILING_MS:g} ms)")
+    print(f"  {'ok  ' if ok else 'FAIL'} /health p95 <= {HEALTH_CEILING_MS:g} ms")
+    bad += 0 if ok else 1
+    st, body = split(call("POST", "/run", j(HELLO))[0])
+    d = parsed(body)
+    ok = st == "200" and d.get("ok") is True and d.get("output") == "hello\n"
+    print(f"  {'ok  ' if ok else 'FAIL'} /run hello through the socket: {st} {normalize(body)[:120]}")
+    bad += 0 if ok else 1
+    return 1 if bad else 0
 
 
 def self_test():
     assert p95(list(range(1, 101))) == 95
     assert p95([5]) == 5
     assert p95([3, 1, 2]) == 3
-    # ratio gate: limit = 1.15 x jvm + 100 ms
-    assert gate_ok(3194, 3257) and gate_ok(1349, 1267)  # measured: both pass
+    # ratio gate: limit = 1.15 x previous + 100 ms
+    assert gate_ok(3194, 3257) and gate_ok(1349, 1267)  # the K4 measurements: both pass
     assert gate_ok(1.15 * 1000 + 100, 1000) and not gate_ok(1.15 * 1000 + 100.5, 1000)
     assert gate_ok(100, 0) and not gate_ok(100.1, 0)
     assert not gate_ok(2000, 1267)  # a real regression fails
-    assert gate_ok(2.0, 1.0, 2.0, 0.0) and not gate_ok(2.01, 1.0, 2.0, 0.0)
-    # absolute ceiling: 25 ms
     assert ceiling_ok(7.9) and ceiling_ok(25.0) and not ceiling_ok(25.01)
-    a = b'{"ok":true,"ms":12,"cached":true,"x":1}'
-    b = b'{"ok":true,"ms":9,"cached":false,"x":1}'
-    assert normalize(a) == normalize(b)
+    assert normalize(b'{"ok":true,"ms":12,"x":1}') == normalize(b'{"ok":true,"ms":9,"x":1}')
     assert normalize(b'{"ok":true,"ms":1,"x":1}') != normalize(b'{"ok":true,"ms":1,"x":2}')
     assert split(b"HTTP/1.1 429 Too Many Requests\r\nA: b\r\n\r\nbody") == ("429", b"body")
     assert split(b"") == ("", b"")
+    unit = ('[Service]\nEnvironment=A=1\nEnvironment="B=two words" C=3\n'
+            '# Environment=D=commented\nWorkingDirectory=/opt/dawn\n')
+    assert unit_environment(unit) == {"A": "1", "B": "two words", "C": "3"}, unit_environment(unit)
+    assert unit_setting(unit, "WorkingDirectory") == "/opt/dawn"
+    tc = ("0.94.0", "b1:96af8ed9c5f2")
+    expect = {name: e for name, _, _, _, _, e in CASES}
+    assert expect["health"]("200", {"ok": True, "version": "0.94.0", "build": "b1:96af8ed9c5f2"}, tc)
+    assert not expect["health"]("200", {"ok": True, "version": "0.93.0", "build": "b1:96af8ed9c5f2"}, tc)
+    assert expect["run ok"]("200", {"ok": True, "phase": "run", "exit": 0, "output": "hello\n"}, tc)
+    assert not expect["run ok"]("200", {"ok": True, "phase": "run", "exit": 0, "output": "hi\n"}, tc)
+    leak = {"ok": False, "phase": "compile", "output": "/var/lib/dawn-play/work/dawn-play-1/prog.dawn:1"}
+    assert not expect["run compile error"]("200", leak, tc)
+    assert expect["404"]("404", {}, tc) and not expect["404"]("200", {}, tc)
+    digest = "6c18de180764abc1fd49ffb69213b99c8519525409db100d52d29be7aad93404"
+    line = f"200 POST /run toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256={digest}\n"
+    assert access_line_ok(line, "POST", "/run", "200", tc, "secret-marker")
+    assert not access_line_ok(line + "secret-marker\n", "POST", "/run", "200", tc, "secret-marker")
+    assert not access_line_ok("200 POST /run\n", "POST", "/run", "200", tc, "x")  # the K4 line
+    assert not access_line_ok(line.replace("0.94.0", "0.93.0"), "POST", "/run", "200", tc, "x")
+    assert access_line_ok("200 POST /compile toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=- \n".strip(),
+                          "POST", "/compile", "200", tc, None)
+    assert access_line_ok("200 GET /health toolchain=0.94.0/b1:96af8ed9c5f2\n", "GET", "/health", "200", tc, None)
+    assert access_line_ok("413 (unreadable request)\n", "POST", "/run", "413", tc, None)
     print("canary-check self-test ok")
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--jvm-url", default="http://127.0.0.1:8087")
+    ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--live", action="store_true")
+    ap.add_argument("--candidate")
+    ap.add_argument("--previous", default="")
+    ap.add_argument("--unit")
+    ap.add_argument("--toolchain-id")
+    ap.add_argument("--accept-diff", action="store_true")
+    ap.add_argument("--inherit-env", action="store_true")
+    ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--socket", default="/run/dawn-play/http.sock")
     ap.add_argument("--health-requests", type=int, default=100)
     ap.add_argument("--slow-requests", type=int, default=SLOW_REQUESTS)
     ap.add_argument("--slow-spacing", type=float, default=SLOW_SPACING_S)
-    ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
-
-    jvm, nat = over_tcp(a.jvm_url), over_unix(a.socket)
-    bad = 0
-    for name, m, p, b in CASES:
-        c1, b1 = split(jvm(m, p, b))
-        c2, b2 = split(nat(m, p, b))
-        same = c1 != "" and c1 == c2 and normalize(b1) == normalize(b2)
-        print(f"  {'ok  ' if same else 'FAIL'} {name}: jvm {c1} / native {c2}")
-        if not same:
-            bad += 1
-            print("    jvm   :", normalize(b1)[:300])
-            print("    native:", normalize(b2)[:300])
-    print(f"{len(CASES) - bad} of {len(CASES)} responses identical")
-
-    n = a.health_requests
-    jt, nt = sample(jvm, nat, "GET", "/health", None, n, 0)
-    jp, np_ = p95(jt), p95(nt)
-    ok = ceiling_ok(np_)
-    print(f"/health over {n} new connections each: jvm p95 {jp:.2f} ms, native p95 {np_:.2f} ms "
-          f"(ceiling {HEALTH_CEILING_MS:g} ms)")
-    print(f"  {'ok  ' if ok else 'FAIL'} native /health p95 <= {HEALTH_CEILING_MS:g} ms")
-    if not ok:
-        bad += 1
-
-    n = a.slow_requests
-    for name, path in (("/run hello", "/run"), ("/check hello", "/check")):
-        jt, nt = sample(jvm, nat, "POST", path, j(HELLO), n, a.slow_spacing)
-        jp, np_ = p95(jt), p95(nt)
-        limit = SLOW_RATIO * jp + SLOW_SLACK_MS
-        ok = gate_ok(np_, jp)
-        print(f"{name} over {n} new connections each: jvm p95 {jp:.0f} ms, native p95 {np_:.0f} ms "
-              f"(limit {SLOW_RATIO:g} x jvm + {SLOW_SLACK_MS:g} = {limit:.0f} ms)")
-        print(f"  {'ok  ' if ok else 'FAIL'} native {path} p95 within the limit")
-        if not ok:
-            bad += 1
-    return 1 if bad else 0
+    if not a.toolchain_id:
+        ap.error("--toolchain-id is required")
+    if a.live:
+        return live(a)
+    if not a.candidate or not a.unit:
+        ap.error("--candidate and --unit are required before the swap")
+    return pre_swap(a)
 
 
 if __name__ == "__main__":

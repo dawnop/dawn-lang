@@ -1,10 +1,10 @@
 # Playground runner 进程 native 化：套接字激活加一连接一进程（C 路）
 
-> 状态：**proposed**（2026-10-08 起草）。依据 `agent-handoff/research-native-services-20261007.md` 第 3.2 节 C 路，
+> 状态：**current**（2026-10-08 起草；K1–K4 于 10-08 至 10-09 落地，10-09 切流；K5 于 10-19 删去 JVM runner，见第七节第 5 条。B 路暂缓，见 `agent-handoff/ruling-runner-b-path-20261019.md`）。依据 `agent-handoff/research-native-services-20261007.md` 第 3.2 节 C 路，
 > 与协调者 10-08 裁决「runner A 路 #630 先合；C 路立设计稿并先测 `read_stdin` 64 KiB 与每请求启动成本；
 > B 路（`/run` 走 `dawnc build`）暂缓，等 C 路设计里的 cc 开销实测后合裁」。
 > 本稿建立在 PR #630（`/check` 与 `/compile` 的 C 视图改走 native `dawnc`，未合并时以其描述与 diff 为准）之上。
-> 本稿**没有实现任何东西**，只有第三节三组实测和一份刀序。
+> 起草时本稿只有第三节三组实测和一份刀序，各刀的落地记录写在第七节对应条目下。
 
 ## 一、要什么，不要什么
 
@@ -227,6 +227,8 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
 
 ### 6.2 回滚
 
+（K5 之后本节只是历史：JVM 单元已删，回滚改为恢复部署前的备份副本，见 `playground/deploy/DEPLOY.md` 的「Rollback copies」。）
+
 整个切换在 nginx 的 `proxy_pass` 一处。保留 `dawn-play.service`（JVM 版）已安装、`disable` 不删，回滚就是：
 `systemctl start dawn-play` + 把 nginx 四处 `proxy_pass` 改回 `127.0.0.1:8087` + `nginx -s reload`，秒级。二进制 runner 与 JVM runner 读同一套环境变量与同一个 `run-sandboxed.sh`，
 状态（缓存除外，缓存本就是进程内的）无迁移，所以回滚不丢数据。
@@ -296,7 +298,39 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
      跳过的只有 JVM 服务自己的三类：启动清扫、第二个无 dawnc 的 JVM runner 对拍、答案缓存命中（native 无缓存，`cached` 期望换成 False，其余字段仍须与上一条相等）。
      结果：native 模式 42 项全绿，JVM 模式 48 项全绿；另加一项覆盖 `canary-check.py --self-test` 与 nginx 变体的形状（四处换、不再剩 8087 的 `proxy_pass`、网关不动、三处超时）。
    - 留给真正部署的：见 `DEPLOY.md` 的「The native runner canary」一节。已知未验证的假设有三个：服务器 nginx 用户确为 `www-data`；部署用户有无密码 `sudo install` 与 `sudo -n -u dawn-play`；真 `Accept=yes` 的 p95。
-5. **K5：删 JVM runner 的启动路径**（保留 `dawn-play.service` 文件一个版本周期作回滚，再删）。
+5. **K5：删 JVM runner 的启动路径**（原计划保留 `dawn-play.service` 文件一个版本周期作回滚，再删；10-19 裁决直接删，理由是切流后 10 天它没有一个用户请求，只在部署时给金丝雀对拍，常驻 307 MB）。
+   **K5 落地记录（10-19，仅仓库侧，未部署）**：依据 `agent-handoff/ruling-runner-b-path-20261019.md` 第 1、4 条。
+   - 删掉的（只服务 JVM 入口）：`playground/src/main.dawn` 的长驻 `web` 服务入口与它的启动清扫，`play/jvmhost.dawn`（进程内 `Semaphore`）、`play/cache.dawn`（进程内答案缓存）、
+     `config.port()`（`PLAY_PORT`），`playground/dawn.toml` 的 `web` 依赖，`deploy/dawn-play.service`，`deploy/nginx-switch.sh`（只剩一种 upstream，没有可切的了）。
+     `playground/native` 这个项目也删了：它存在只是因为一个项目只有一个 main，而原来的 main 引了 `web`。现在 `playground/src/main.dawn` 就是 `serve`/`job` 入口，
+     构建命令从 `dawnc build playground/native` 变成 `dawnc build playground`，`dawnc test playground` 直接可跑（`test/native-tests.sh` 缩成一行）。
+   - 保留的：JVM 作为 `/run` 的编译与执行后端（沙箱单元里的 `dawn build` 与 `java -jar`）、JVM 视图的 `javap`、`PLAY_JDK` 与 `install-jdk.sh`、redeploy 的 GraalVM 检查。`Host` 记录的
+     `keep_get`/`keep_put` 也留着：裁决 4 要两周后按日志里的源码哈希重裁缓存，若做文件缓存，这就是它的位置。
+   - 日志（裁决 4）：每个请求的访问行在状态、方法、路径之后加 `toolchain=<version>/<build>`，`/run`、`/check`、`/compile` 再加 `src_sha256=<hex>`（`code` 字段 UTF-8 的 SHA-256），
+     `/compile` 再加 `target=`；请求体里没有程序时写 `src_sha256=-`。不记源码。样例：`200 POST /run toolchain=0.94.0/b1:96af8ed9c5f2 src_sha256=6c18de18…3404`。
+     哈希只在访问行里算一次（多解析一次 JSON，64 KiB 上限下是毫秒以内），路由不变，所以 play-ui 与响应字节不受影响。
+   - 金丝雀：从「native 对 JVM（同一提交两个入口）」改为「新二进制对线上二进制（同一工具链）」。部署先把新二进制传到 `bin/.dawn-play.next`，同步完工具链后，
+     由 `canary-check.py` 以 `dawn-play` 身份按套接字单元的方式（一请求一进程，请求走 stdin，环境取单元的 `Environment=` 加本次的工具链 id）把两个二进制各跑一遍：
+     新二进制必须满足每个用例自己的期望（版本、hello、无服务器路径、拒绝的状态码、访问行带哈希不带源码）；两边状态码与响应体逐字节相同（只归一 `ms`），
+     有意改变答案的部署用 `DAWN_PLAY_CANARY_ACCEPT_DIFF=1` 放行，差异照样打印；`/run` 与 `/check` hello 各 20 次交错，新 p95 ≤ 1.15 × 旧 p95 + 100 ms（沿用 K4 的阈值与实测依据）。
+     通过后才改名换上、按需装单元（套接字单元变了才重启套接字，重启会短暂关掉 nginx 正在用的监听），再经真套接字查 `/health` 版本、100 次 `/health` p95 ≤ 25 ms、一次 `/run` hello。
+     没选「与上一版录下的答案比」：发版若有 Emit-Change（报错文案、编译视图），录下的答案会因编译器而不是 runner 而不同；线上二进制配同一工具链，差异只能来自 runner 本身。
+     失败时新二进制没换上，线上仍是旧二进制，但工具链已是新的（与 K5 之前 JVM runner 先同步后重启的情形相同），脚本提示修了重部署或恢复备份副本。
+     墙钟：预计每次部署约 2 到 4 分钟（14 个用例两边各一次约 30 秒，40 对 hello 加间隔约 1.5 到 3 分钟，100 次 `/health` 约 1 秒）；本机 5 对的实测见报告。
+   - `redeploy.sh`：删 8087 健康检查与 JVM 重启（`REMOTE_RESTART` 只剩 LSP），删 `DAWN_PLAY_NATIVE=0`（runner 二进制必须有）。#682 的路由读取在 0ac66c31 已改为读真实配置；
+     本刀把它挪到发送任何东西之前，因为现在答案能拦部署：若 nginx 仍把 `/api/run` 交给 `127.0.0.1:8087`，部署拒绝（那台机得先切）；读不到或不认识的 upstream 仍只是提示。
+     不再同步 `playground/src` 与 `dawn.toml`（只有 JVM runner 启动时编译它们）。
+   - 工作目录清理：JVM runner 每次启动会清扫 `PLAY_WORK_ROOT` 里的 `dawn-play-*`，部署必然触发，于是 native 被杀请求留下的目录也顺带被清。K5 后没人清了，
+     native 进程又不能自己清（会删兄弟请求正在用的目录），所以加 `deploy/dawn-play.tmpfiles`（`e /var/lib/dawn-play/work - - - 1h`，`systemd-tmpfiles-clean.timer` 每日执行）。
+   - 测试：`contract.sh` 只剩 native 一种入口，默认用 JVM 工具链从本树构建 runner（`dawn __emitc playground` 加 `scripts/cc-units.sh`，本机约 8 s），
+     所以 CI 不需要 `dawnc`；这一步从 docs job 挪到 java-target-classpath job（与 deploy guards 同处）：本机在占住构建槽后交替计时，main 的 JVM 版 121 s、110 s，本版 181 s、148 s，
+     而 docs job 的预算已在 945 s，离 950 s 的单 job 上限只差 5 s，容不下差额；java-target-classpath 的预算由 400 s 改为 840 s，push-total 相应声明；一请求一进程的启动改由 `playground/test/inetd.py`（标准库，fork 加 dup2 加 exec，即 `systemd-socket-activate -a --inetd` 做的事），
+     因为集群门禁的容器里没有 `systemd-socket-activate`，第一次全套在那里红过；套接字用抽象命名空间的名字，因为外部门禁的 TMPDIR 本身就超过 unix 套接字路径的 107 字节上限，第二次全套在那里红过；`PLAY_TEST_NATIVE_BIN` 可指定外部构建的二进制。原来 native 模式跳过的「dawnc 与 JVM 编译器字节一致」几项改为与第二个关掉 dawnc 的 native runner 比。
+     删掉的用例只有 JVM 服务自己的：启动清扫、答案缓存命中（`cached` 期望一律为 false）。新增访问行用例。`nginx-cors-check.py` 改从 `serve.dawn` 的 `allowed` 读路由，
+     8087 不再算 runner upstream（加了对应变异体）。`serve-compare.py` 改为两个 native 二进制对拍。`lsp_contract.py` 的 8087 健康检查契约换成「不重启 runner、不碰 8087」及其变异体。
+     `scripts/deploy-guards/run.sh` 增删对应用例与变异体（金丝雀先于换上、换上后的套接字检查、不重启 JVM 单元、8087 路由拒绝）。
+   - 部署时的一次性动作写在 `playground/deploy/DEPLOY.md` 的「Retiring the JVM runner」：停用并删 `dawn-play.service`、清 `/tmp/selfhost-run*`、删服务器上的 `playground/src` 与 `dawn.toml`、装 tmpfiles 规则。
+     另：K5 之后不能用旧 tag 的 `redeploy.sh` 回滚（它会重启已不存在的 `dawn-play.service` 并在同步之后停下），回滚走备份副本。
 
 契约测试的做法：`playground/test/contract.sh` 现在起 `dawn run playground` 并用 curl 驱动。C 路不改它的 curl 部分，只加一个启动模式：
 `systemd-socket-activate -l <sock> -a --inetd <binary> serve`，curl 用 `--unix-socket`。这样同一份用例对两种入口各跑一遍，差异即缺陷。
@@ -324,4 +358,7 @@ GraalVM CE 21.0.2。绝对数偏慢，比值可信。生产机的数字没有测
 - **不为缓存先做持久化**：没有「重复编译确实是问题」的证据（4.2）。
 - **不用 `MaxConnections` 当并发闸**：超限是拒绝不是排队，且 `/health` 会占名额（4.1）。
 - **不加兼容层或双栈长期共存**：K4 的并行只是切换前的比对，K5 删旧入口，回滚靠保留的 JVM 单元文件而不是代码里的开关。
+- **K5 不保留 JVM 单元一个版本周期**：原刀序这样写，是为了回滚时 `systemctl start dawn-play` 加改 nginx 秒级切回。10 天无用户流量、常驻 307 MB，而回滚已有部署前的备份副本（含二进制），裁决直接删。
+- **K5 的金丝雀不与录下的答案比**：发版的 Emit-Change 会让录下的答案因编译器而不同；同一工具链下的线上二进制是唯一只差 runner 本身的参照（第七节第 5 条）。
+- **K5 不在 runner 里清扫工作目录**：一请求一进程没有「此刻无兄弟请求」的时刻，清扫会删别人的目录；按年龄清的 tmpfiles 规则不需要这个时刻。
 - **不把测量脚本入库**：一次性原型，依赖本机的 `systemd-socket-activate` 与进程布局；永久的覆盖是 K1 的 `dawn test` 与契约测试的 inetd 启动模式。

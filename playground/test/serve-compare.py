@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""Answers of the long-lived JVM runner and of the process-per-request native
-runner, compared byte for byte (K3 of docs/playground-native-runner-design.md),
-and the flock gate's behavior under load.
+"""Answers of two runner binaries compared byte for byte, and the flock gate's
+behavior under load (docs/playground-native-runner-design.md).
 
-    serve-compare.py <dawn-play binary> [--rounds N] [--gate] [--bench]
+    serve-compare.py <dawn-play binary> --previous <dawn-play binary> [--gate] [--bench]
 
-The JVM runner is `dawn run playground` on a local port; the native one is the
-binary behind `systemd-socket-activate -a --inetd` on a unix socket, so every
-request is a fresh process exactly as in production. Both run unsandboxed
-(PLAY_UNSAFE_LOCAL=1) against the same toolchain and work root layout.
+Each binary runs behind test/inetd.py (what `systemd-socket-activate -a
+--inetd` does) on a unix socket of its own, so every request is a fresh process exactly as in production. Both
+run unsandboxed (PLAY_UNSAFE_LOCAL=1) against the same toolchain and work root
+layout. It is the local, longer form of the deploy's canary
+(deploy/canary-check.py): it adds the cases that are not safe to send to a
+production sandbox (a program that runs until its timeout, 20000 lines of
+output, the Tile IR view), the gate's concurrency cases and a latency table.
 
-Only two JSON fields are normalized before comparing: `ms`, a timing, and
-`cached`, which the native runner (no cache) always reports false.
-Everything else, status line included, must be identical.
+Until K5 the reference was the long-lived JVM runner (`dawn run playground`);
+it is gone, and the reference is now the binary a change is measured against,
+typically one built from the commit before it:
+`git worktree add /tmp/base <base>` and `dawnc build /tmp/base/playground`.
 
-Environment: JAVA_HOME (as bin/dawn needs), PLAY_TEST_PORT (default 18097),
-PLAY_TEST_DAWNC (the native dawnc of this release).
+Only `ms`, a timing, is normalized before comparing. Everything else, status
+line included, must be identical.
+
+Environment: JAVA_HOME (as bin/dawn needs), PLAY_TEST_DAWNC (the native dawnc
+of this release).
 """
 import json, os, re, signal, socket, statistics, subprocess, sys, tempfile, threading, time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-PORT = int(os.environ.get("PLAY_TEST_PORT", "18097"))
 
 
 def http_bytes(method, path, body):
@@ -41,19 +46,11 @@ def exchange(sock, data):
     return b"".join(chunks)
 
 
-def tcp(method, path, body):
-    s = socket.create_connection(("127.0.0.1", PORT), timeout=120)
-    try:
-        return exchange(s, http_bytes(method, path, body))
-    finally:
-        s.close()
-
-
 def unix(sockpath):
     def go(method, path, body):
         s = socket.socket(socket.AF_UNIX)
         s.settimeout(120)
-        s.connect(sockpath)
+        s.connect(sockpath if "/" in sockpath else "\0" + sockpath)
         try:
             return exchange(s, http_bytes(method, path, body))
         finally:
@@ -69,9 +66,7 @@ def split(resp):
 
 def norm(body):
     t = body.decode("utf-8", "replace")
-    t = re.sub(r'"ms":\d+', '"ms":0', t)
-    t = re.sub(r'"cached":(true|false),?', "", t)
-    return t
+    return re.sub(r'"ms":\d+', '"ms":0', t)
 
 
 def j(code, **kw):
@@ -135,14 +130,13 @@ def rss_kb(pid):
 
 def main():
     binary = os.path.abspath(sys.argv[1])
+    if "--previous" not in sys.argv:
+        print("usage: serve-compare.py <dawn-play binary> --previous <dawn-play binary> [--gate] [--bench]")
+        return 2
+    previous = os.path.abspath(sys.argv[sys.argv.index("--previous") + 1])
     gate = "--gate" in sys.argv
     bench = "--bench" in sys.argv
     tmp = tempfile.mkdtemp(prefix="serve-compare.")
-    work = os.path.join(tmp, "work")
-    slots = os.path.join(tmp, "slots")
-    os.makedirs(work)
-    sockpath = os.path.join(tmp, "http.sock")
-    env = env_for(work, slots)
     procs = []
 
     def start(argv, e, **kw):
@@ -150,52 +144,46 @@ def main():
         procs.append(p)
         return p
 
-    try:
-        jvm_env = dict(env)
-        jvm_env["PLAY_PORT"] = str(PORT)
-        jvm_env["PLAY_WORK_ROOT"] = os.path.join(tmp, "jvmwork")
-        os.makedirs(jvm_env["PLAY_WORK_ROOT"])
-        start([os.path.join(ROOT, "bin", "dawn"), "run", os.path.join(ROOT, "playground")], jvm_env,
-              stdout=open(os.path.join(tmp, "jvm.log"), "w"), stderr=subprocess.STDOUT)
-        serve_env = dict(env)
-        serve_env["PLAY_TOOLCHAIN_ID"] = subprocess.run(
+    def runner(name, exe):
+        work = os.path.join(tmp, name + "-work")
+        os.makedirs(work)
+        env = env_for(work, os.path.join(tmp, name + "-slots"))
+        env["PLAY_TOOLCHAIN_ID"] = subprocess.run(
             [os.path.join(ROOT, "bin", "dawn"), "--version"], capture_output=True, text=True, env=env
         ).stdout.strip().split("\n")[-1].split(" ", 1)[1].replace(" (selfhost)", "")
-        # systemd-socket-activate hands the child only the variables named with -E
-        passed = [k for k in serve_env if k.startswith("PLAY_") or k in ("DAWN_BIN", "DAWNC_BIN", "PATH", "JAVA_HOME", "HOME", "TMPDIR")]
-        sa = ["systemd-socket-activate", "-l", sockpath, "-a", "--inetd"]
-        for k in passed:
-            sa += ["-E", k]
-        start(sa + [binary, "serve"], serve_env,
-              stdout=open(os.path.join(tmp, "sa.log"), "w"), stderr=subprocess.STDOUT)
+        sockpath = f"serve-compare-{os.getpid()}-{name}"  # abstract (inetd.py): no path length limit
+        inetd = [sys.executable, "-I", "-B", os.path.join(ROOT, "playground", "test", "inetd.py"), sockpath]
+        start(inetd + [exe, "serve"], env,
+              stdout=open(os.path.join(tmp, name + ".log"), "w"), stderr=subprocess.STDOUT)
+        call = unix(sockpath)
         for _ in range(240):
             try:
-                tcp("GET", "/health", None)
-                break
+                call("GET", "/health", None)
+                return call, sockpath
             except OSError:
-                time.sleep(0.5)
-        else:
-            print("FAIL: the JVM runner did not come up"); return 1
-        nat = unix(sockpath)
+                time.sleep(0.25)
+        raise RuntimeError(f"the {name} runner did not come up")
+
+    try:
+        ref, _ = runner("previous", previous)
+        nat, sockpath = runner("candidate", binary)
 
         bad = 0
         for name, m, p, b in CASES:
-            r1 = split(tcp(m, p, b))
+            r1 = split(ref(m, p, b))
             r2 = split(nat(m, p, b))
-            # the reason phrase is the framework's own wording; the code is the contract
-            same = r1[0].split(" ")[1] == r2[0].split(" ")[1] and norm(r1[2]) == norm(r2[2])
-            # the framework adds headers of its own; the status and the body are the contract
+            same = r1[0] == r2[0] and norm(r1[2]) == norm(r2[2])
             print(f"  {'ok  ' if same else 'FAIL'} {name}: {r1[0]} / {r2[0]}")
             if not same:
                 bad += 1
-                print("    jvm   :", norm(r1[2])[:300])
-                print("    native:", norm(r2[2])[:300])
+                print("    previous :", norm(r1[2])[:300])
+                print("    candidate:", norm(r2[2])[:300])
         print(f"{len(CASES) - bad} of {len(CASES)} responses identical")
 
         if gate:
             bad += gate_test(nat, tmp)
         if bench:
-            bench_test(nat, sockpath, tmp)
+            bench_test(ref, nat)
         return 1 if bad else 0
     finally:
         for p in procs:
@@ -282,13 +270,13 @@ def gate_test(nat, tmp):
     return bad
 
 
-def bench_test(nat, sockpath, tmp):
-    print("latency (ms), 100 requests each, a new connection every time:")
+def bench_test(ref, nat):
+    print("latency (ms), a new connection every time:")
     for name, call, m, p, b in [
-        ("native /health", nat, "GET", "/health", None),
-        ("jvm    /health", lambda *a: tcp(*a), "GET", "/health", None),
-        ("native /check ", nat, "POST", "/check", j(HELLO)),
-        ("jvm    /check ", lambda *a: tcp(*a), "POST", "/check", j(HELLO)),
+        ("candidate /health", nat, "GET", "/health", None),
+        ("previous  /health", ref, "GET", "/health", None),
+        ("candidate /check ", nat, "POST", "/check", j(HELLO)),
+        ("previous  /check ", ref, "POST", "/check", j(HELLO)),
     ]:
         n = 100 if "health" in name else 40
         ts = []

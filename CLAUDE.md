@@ -150,10 +150,10 @@ release）、`selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（�
 语言定义与理由写在 `scripts/emitchange.sh` 头部；`scripts/emitchange-selftest.sh` 是
 这个解析器自己的门禁。
 
-`playground/test/contract.sh` 是端到端合约测试（起 runner、驱 `/run` 与 `/check`，10 项）。
-端口默认向内核要一个空闲的（绑 `127.0.0.1:0`），同机并发跑两份互不干扰，退出时只杀自己起的进程组；
-要钉端口用 `PLAY_TEST_PORT=<port>`。别钉在低端口：WSL2 下 Windows 的 WinNAT 保留了大片低端口，
-bind 会报 "Address already in use"，而 `ss` 看着是空的。
+`playground/test/contract.sh` 是端到端合约测试（用 JVM 工具链从本树构建 native runner，
+经 `playground/test/inetd.py`（标准库写的 `systemd-socket-activate -a --inetd`）一请求一进程地起在 unix 套接字上，驱 `/run`、`/check`、`/compile` 与访问日志）。
+套接字用 Linux 抽象命名空间里按本次运行取的名字（没有路径，躲开 107 字节上限），同机并发跑两份互不干扰，退出时只杀自己起的进程组。
+（K5 之前起的是 JVM runner，占 TCP 端口，才有 `PLAY_TEST_PORT` 与 WSL2 低端口的坑；现在没有端口了。）
 
 ## 怎么加特性
 

@@ -20,10 +20,11 @@ by hand, with the server reachable.
    `openjdk-21-jdk-headless` would put `javap` in `/usr/bin` through
    alternatives and move the patch level of the JRE that every other JVM
    service on this host shares. This tree is on no PATH and registered with no
-   alternatives; only the runner and its sandbox units use it. It is outside
+   alternatives; only the sandbox units the runner starts use it (the runner
+   process itself is a native binary). It is outside
    `$HOME` because the sandbox units run with `ProtectHome=yes`; they see
    `/opt/dawn` through a read-only bind, and the runner passes absolute paths
-   (`PLAY_JDK` in `dawn-play.service`) while `run-sandboxed.sh` sets the units'
+   (`PLAY_JDK` in `dawn-play-native@.service`) while `run-sandboxed.sh` sets the units'
    `JAVA_HOME` to the same directory, so their empty environment and systemd's
    default PATH no longer decide which `java` runs. Whatever JRE the host has
    is left as it is. The bounded WebSocket gateway uses only Python's standard
@@ -53,24 +54,24 @@ by hand, with the server reachable.
 3. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
    ```
    /opt/dawn/bin/dawn                      # launcher (rsynced)
-   /opt/dawn/bin/dawnc                     # static native LSP server (rsynced)
+   /opt/dawn/bin/dawnc                     # static native compiler and LSP server (rsynced)
+   /opt/dawn/bin/dawn-play                 # the runner binary (rsynced beside it, renamed in after the canary)
    /opt/dawn/build/dawn-selfhost.jar       # compiler (rsynced)
-   /opt/dawn/playground/dawn.toml           # runner manifest — deps web/json (rsynced)
-   /opt/dawn/playground/src                 # runner sources (rsynced)
+   /opt/dawn/playground/toolchain.env       # PLAY_TOOLCHAIN_ID for the runner unit (written by redeploy.sh)
    /opt/dawn/playground/lsp_gateway.py      # loopback WebSocket bridge (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
-   /opt/dawn/packages/                       # path-deps the runner imports (rsynced)
+   /opt/dawn/packages/                       # tileir/tileref for the Tile IR view and the LSP's tile project (rsynced)
    /opt/dawn/playground/lsp-tile/            # project a tileir program is opened in by the LSP bridge (rsynced; deps are ../../packages)
    /opt/dawn/site/play-ui/samples/           # starter samples, read by lsp-measure (rsynced)
    /opt/dawn/scripts/repo.env                # the site origin the LSP gateway accepts (rsynced)
    /opt/dawn/scripts/repo_env.py             # its Python reader (rsynced)
    ```
-   The runner's `main.dawn` imports the `web`/`json` packages by path
-   (`playground/dawn.toml` → `../packages`), so `packages/` must sit beside
-   `playground/` — `redeploy.sh` syncs both. The Tile IR view (`POST /compile`
-   with `target: "tile"`) points a generated project at `packages/tileir` and
-   `packages/tileref` there too: `PLAY_PACKAGES` names the directory and
+   The runner's own sources are not on the server: the binary is built off
+   it (`dawnc build playground`). Until K5 the JVM runner compiled
+   `playground/src` at every start, which is why older layouts have it. The
+   Tile IR view (`POST /compile` with `target: "tile"`) points a generated
+   project at `packages/tileir` and `packages/tileref`: `PLAY_PACKAGES` names the directory and
    defaults to `/opt/dawn/packages`, which is where the sync puts it, so the
    unit file needs no new line. The runner checks both manifests exist at start
    and answers that target with 503 when they do not.
@@ -82,7 +83,11 @@ by hand, with the server reachable.
    sudo mkdir -p /var/lib/dawn-play/work
    sudo chown -R dawn-play:dawn-play /var/lib/dawn-play
    sudo chmod 0711 /var/lib/dawn-play /var/lib/dawn-play/work
+   sudo install -m 644 /opt/dawn/playground/deploy/dawn-play.tmpfiles /etc/tmpfiles.d/dawn-play.conf
    ```
+   The tmpfiles rule removes request directories older than an hour, the ones
+   a killed request left behind (no request lives past the runner unit's
+   `RuntimeMaxSec=60`); `systemd-tmpfiles-clean.timer` applies it daily.
 
 5. **Sandbox wrapper + sudoers** (the wrapper hardcodes every limit; sudoers
    whitelists only it, with any args — do NOT add a trailing `""`, that means
@@ -95,7 +100,11 @@ by hand, with the server reachable.
      /etc/sudoers.d/dawn-play
    ```
 
-6. **systemd units** — `dawn-play.service` owns `/run` and `/check`;
+6. **systemd units** — `dawn-play-native.socket` and the template
+   `dawn-play-native@.service` own `/run`, `/check`, `/compile` and
+   `/health`: systemd accepts each connection on `/run/dawn-play/http.sock`
+   and starts one runner process for it. `redeploy.sh` installs and enables
+   these two itself, after its canary has passed (see "The runner canary").
    `dawn-play-lsp.service` owns the loopback WebSocket gateway. Each accepted
    WebSocket owns one transient native LSP service, all held under the
    aggregate `dawn-play-lsp.slice` ceiling. `dawn-play-lsp.service` takes the
@@ -104,30 +113,33 @@ by hand, with the server reachable.
    installed from an older tree still names the origin itself and keeps
    working until it is reinstalled from this one:
    ```sh
-   install -m 644 /opt/dawn/playground/deploy/dawn-play.service \
-     /etc/systemd/system/dawn-play.service
    install -m 644 /opt/dawn/playground/deploy/dawn-play-lsp.service \
      /etc/systemd/system/dawn-play-lsp.service
    install -m 644 /opt/dawn/playground/deploy/dawn-play-lsp.slice \
      /etc/systemd/system/dawn-play-lsp.slice
    systemctl daemon-reload
-   systemctl enable --now dawn-play dawn-play-lsp
-   curl -s http://127.0.0.1:8087/health   # -> {"ok":true,"version":"<release>"}
+   systemctl enable --now dawn-play-lsp
+   sudo -u dawn-play curl -s --unix-socket /run/dawn-play/http.sock http://localhost/health
+                                           # -> {"ok":true,"version":"<release>","build":"b1:..."}
    systemctl is-active dawn-play-lsp       # -> active
    ```
 
 7. **Validate the sandbox** — run every item in `sandbox/SANDBOX.md`'s
-   malicious-sample checklist against `http://127.0.0.1:8087/run` **before**
-   exposing `/api/run` publicly (results from the first deploy are recorded
-   there).
+   malicious-sample checklist against the runner's socket
+   (`sudo -u dawn-play curl --unix-socket /run/dawn-play/http.sock http://localhost/run ...`)
+   **before** exposing `/api/run` publicly (results from the first deploy are
+   recorded there).
 
 8. **nginx**: add `nginx-play.conf`'s locations into the existing
    `server { server_name dawn-lang.dawnop.com; … }`, and all listed
    `limit_req_zone` / `limit_conn_zone` declarations into `http { … }`. Then
    `nginx -t && systemctl reload nginx`. The shipped snippet routes `/api/run`,
-   `/api/check` and `/api/compile` to the runner, each with its own zone
-   (`playrun`, `playcheck`, `playcompile`); a missing `/api/compile` location
-   answers 404 from the static site, not from the runner. The `playcompile`
+   `/api/check`, `/api/compile` and `/api/health` to the runner's unix socket,
+   the three POSTs each with its own zone (`playrun`, `playcheck`,
+   `playcompile`) and a 10 s `client_body_timeout`; a missing `/api/compile` location
+   answers 404 from the static site, not from the runner. The socket admits
+   the group `www-data` (`SocketGroup=` in the socket unit), which is nginx's
+   user on this host; where nginx runs as another user, change that line. The `playcompile`
    rate (30r/m, burst 6) is provisional until a week of access-log data.
    When the site page and the API are on different hosts (the live setup:
    the site calls a dedicated play host), also declare the
@@ -152,10 +164,15 @@ by hand, with the server reachable.
 ## Repeatable deploys
 
 ```sh
-./scripts/release-native.sh -o dawnc-linux-x86_64  # or reuse CI's artifact
-DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh  # sync jar/native/gateway, restart, health-check
+./scripts/release-native.sh -o dawnc-linux-x86_64  # or reuse the release asset
+./dawnc-linux-x86_64 build playground -o dawn-play-linux-x86_64
+DEPLOY_USER=<server login> DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh
 scripts/play-live-check.py         # then verify what is actually deployed
 ```
+
+`redeploy.sh` syncs the toolchain, the gateway and the runner binary,
+restarts the gateway, holds the new runner to the live one (the canary),
+swaps it in and checks it through the socket.
 
 The redeploy's LSP health check is an end-to-end smoke, not only a systemd
 status: `deploy/lsp-smoke.py` performs the WebSocket handshake, initializes the
@@ -163,12 +180,19 @@ real sandboxed native server, opens the fixed scratch buffer, waits for a
 diagnostics notification and completes the close handshake.
 
 `redeploy.sh` refuses to run unless `DAWN_DEPLOY_COMMIT` is the full sha of its own
-checkout's HEAD and tracked files are clean (before any build or ssh). It does
-**not** install the primary systemd units; when
-`dawn-play.service`, `dawn-play-lsp.service` or the slice changes, copy it to
-`/etc/systemd/system/`, `daemon-reload` and restart by hand. The one exception
-is the native canary pair (next section), which it installs itself. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` selects an already verified
-artifact outside the repository root.
+checkout's HEAD and tracked files are clean (before any build or ssh). It
+installs the runner's socket and service template itself, when they differ
+from the installed ones; it does **not** install `dawn-play-lsp.service` or the
+slice: when either changes, copy it to `/etc/systemd/system/`, `daemon-reload`
+and restart by hand. `DAWN_NATIVE_BIN=/path/to/dawnc-linux-x86_64` and
+`DAWN_PLAY_NATIVE_BIN=/path/to/dawn-play-linux-x86_64` select already built
+artifacts outside the repository root.
+
+Before it ships anything it also reads which upstream the live nginx gives
+`/api/run` (read-only, over its ssh session) and stops if that is still the
+JVM runner's `127.0.0.1:8087`: since K5 there is no JVM runner, and that host
+must be switched first ("Retiring the JVM runner" below). A config it cannot read, or an
+upstream it does not recognise, is reported and does not stop the deploy.
 
 Before first exposure, run the fresh-process resource matrix inside the final
 parent cgroup with the same release binary. It records ten processes per case,
@@ -210,79 +234,106 @@ of that — the old runner answered `/health` with `ok` the whole time.
 `/check` and the C view of `/compile` run `/opt/dawn/bin/dawnc` (`check` and
 `emitc`) inside the same sandbox unit as before; `/run` and the JVM view stay
 on the JVM compiler. Nothing new has to be configured: `dawnc` is the one
-`redeploy.sh` already ships, and the runner looks for it beside `DAWN_BIN`
-(`DAWNC_BIN` names another). At startup the runner asks `dawnc --version` and
-compares the release number with `dawn --version`; a missing `dawnc` or a
-different release is logged once (`journalctl -u dawn-play | grep dawnc`) and
-turns the native path off for the whole process, so the runner is then exactly
-the JVM-only runner. A program `dawnc` refuses (`use java`) is compiled again
+`redeploy.sh` already ships, and the unit names it (`DAWNC_BIN`). Each such
+request asks `dawnc --version` and compares the release number with the
+toolchain's; a missing `dawnc` or a different release is logged
+(`journalctl -u 'dawn-play-native@*' | grep dawnc`) and that request uses the
+JVM compiler only. A program `dawnc` refuses (`use java`) is compiled again
 by the JVM compiler within the same request. To switch the native path off,
 point `DAWNC_BIN` at a path that does not exist.
 
-## The native runner canary
+## The runner canary
 
-`dawn-play-native.socket` and `dawn-play-native@.service` run the native
-runner (`docs/playground-native-runner-design.md`): systemd accepts every
-connection on `/run/dawn-play/http.sock` (`Accept=yes`) and starts one
-`dawn-play serve` process for it, which answers one request and exits. The JVM
-runner stays the primary and keeps `127.0.0.1:8087`; nothing routes to the
-socket until nginx is pointed at it on purpose.
+`dawn-play-native.socket` and `dawn-play-native@.service` run the runner
+(`docs/playground-native-runner-design.md`): systemd accepts every connection
+on `/run/dawn-play/http.sock` (`Accept=yes`) and starts one `dawn-play serve`
+process for it, which answers one request and exits. Nothing is resident, so
+a deploy changes the runner by renaming a new binary over
+`/opt/dawn/bin/dawn-play`; the next connection starts the new one.
 
-One-time, before the first deploy that ships it: `www-data` (the group the socket
-admits) must exist, which it does where nginx runs as `www-data`; on a host
-where nginx runs as another user, change `SocketGroup=` in the socket unit.
+The binary is built off the server, next to the compiler (no C compiler on
+the server). Before it ships anything `redeploy.sh` asks the binary for
+`/health` with this tree's toolchain id (a binary of another release stops the
+deploy), and asks the server whether `timeout flock head chmod rm sh` exist on
+the default PATH (the runner runs them; a missing one would otherwise show as a
+failing `/run` behind a green `/health`).
 
-Per deploy, `redeploy.sh` (no C compiler on the server; the binary is built
-off it, next to the compiler):
+The new binary is synced to `/opt/dawn/bin/.dawn-play.next` and checked
+against the live one before it replaces it, by `canary-check.py` as
+`dawn-play`. Both binaries are started per request, the request on stdin, with
+the unit's environment and this deploy's toolchain id, on the toolchain the
+deploy has just synced, so their jobs go through the real sudo wrapper,
+sandbox units and flock slots:
 
-```sh
-./dawnc-linux-x86_64 build playground/native -o dawn-play-linux-x86_64
-DEPLOY_USER=<server login> DAWN_DEPLOY_COMMIT=$(git rev-parse HEAD) playground/deploy/redeploy.sh
-```
+- the candidate's own answers: `/health` names this release and build, hello
+  prints hello, a compile error is a diagnostic with no server path in it, the
+  refusals (bad JSON, bad UTF-8, oversize, empty body, 404, 405) have their
+  statuses; and each request leaves one access line naming the toolchain and,
+  for a program, its SHA-256, never its text;
+- the same status and body (`ms` aside) as the live runner for every case:
+  same toolchain, so a difference is the runner's own. A deploy whose runner
+  change is meant to change an answer sets `DAWN_PLAY_CANARY_ACCEPT_DIFF=1`;
+  the differences are printed either way;
+- the latency gate, the two interleaved: for `/run` hello and `/check` hello
+  (20 requests each, spaced out), the candidate's p95 is at most 1.15 times
+  the live one's plus 100 ms.
 
-Before it ships anything it asks the binary for `/health` with this tree's
-toolchain id (a binary of another release stops the deploy), and asks the
-server whether `timeout flock head chmod rm sh` exist on the default PATH (the
-runner runs them; a missing one would otherwise show as a failing `/run` behind
-a green `/health`). After the JVM runner is restarted and healthy it installs
-the two units, writes `/opt/dawn/playground/toolchain.env`
-(`PLAY_TOOLCHAIN_ID`, the unit's `EnvironmentFile`) and runs
-`canary-check.py` as `dawn-play`:
+It adds roughly 2 to 4 minutes to a deploy. A failing canary stops the deploy
+with the new binary not swapped in: the previous runner binary stays live, on
+the toolchain this deploy synced. Fix and redeploy, or restore the rollback
+copy.
 
-- the same requests go to both runners and the status and body (`ms` and
-  `cached` normalized) must be identical;
-- the latency gate, with the real `Accept=yes` start-up cost, on new
-  connections, the two runners interleaved: for `/run` hello and `/check`
-  hello (20 requests each, spaced out), native p95 is at most 1.15 times the
-  JVM p95 plus 100 ms; for `/health` (100 requests), native p95 is at most
-  25 ms. The production-host measurement behind this: `/health` is 7.7 to
-  7.9 ms native against 1.4 to 1.6 ms JVM, almost all of it systemd starting
-  one service instance per connection, while `/run` (about 3 s) and `/check`
-  (about 1.2 s) differ by 0.98 to 1.06 times at p95. The check adds roughly
-  3.5 to 7 minutes to a deploy.
+After it passes, `redeploy.sh` writes `toolchain.env`, renames the binary into
+place, installs the two units if they differ from the installed ones (and
+restarts the socket only when its own unit changed, since a restart closes the
+socket nginx sends every request to), and checks through the socket itself:
+`/health` answers this release and build, its p95 over 100 new connections is
+at most 25 ms (the real `Accept=yes` start-up; measured 7.7 to 7.9 ms on the
+production host), and `/run` hello prints hello.
 
-A failing check fails the deploy with the JVM runner already serving; do not
-switch nginx then. `DAWN_PLAY_NATIVE=0` ships the JVM runner alone.
+Until K5 the canary was a comparison of the native runner with the JVM
+runner of the same commit; with one runner left, the live binary is the
+reference (the design's K5 record says why not a recorded answer set).
 
 The socket is its own directory (`/run/dawn-play`), the flock slots another
 (`RuntimeDirectory=dawn-play-slots` in the service, `Preserve=yes`). They must
 not be one directory: a `RuntimeDirectory` is removed when its service stops,
 and with `Accept=yes` every request is a service that stops.
 
-Switching nginx is a decision, not a deploy step. `nginx-switch.sh native`
-prints `nginx-play.conf` with the four runner locations proxied to the unix
-socket (and `client_body_timeout 10s` on the three POSTs); `nginx-switch.sh jvm`
-prints the file as it is, which is what is live. Apply by hand, then
-`nginx -t && nginx -s reload`. Rolling back is the other direction; the JVM unit
-stays enabled throughout.
+Watch: `journalctl -u 'dawn-play-native@*'` (one access line per request on
+stderr: status, method, path, `toolchain=<version>/<build>` and, for `/run`,
+`/check` and `/compile`, `src_sha256=<hex>` of the program, plus the `429`
+waits of the flock gate) and `systemctl status dawn-play-native.socket`.
 
-redeploy.sh ends by reading, over its ssh session and read-only, which
-upstream the live nginx config gives `/api/run` and prints it (JVM, native, or
-"cannot tell" when the config is unreadable or the target is not one of the two).
+## Retiring the JVM runner (one time, the first deploy after K5)
 
-Watch while canarying: `journalctl -u 'dawn-play-native@*'` (one access line per
-request on stderr, and the `429` waits of the flock gate) and
-`systemctl status dawn-play-native.socket`.
+The JVM runner (`dawn-play.service` on `127.0.0.1:8087`) carried no traffic
+after nginx was pointed at the socket on 2026-10-09; it only answered the old
+canary. Its unit file is no longer in this tree and `redeploy.sh` no longer
+restarts it, so on the server, once, as root, after a deploy of this tree has
+passed:
+
+```sh
+# nginx must already send /api/* to the socket; redeploy.sh refuses otherwise
+nginx -T 2>/dev/null | grep -n 'proxy_pass http://127.0.0.1:8087'   # expect nothing
+systemctl disable --now dawn-play.service
+rm /etc/systemd/system/dawn-play.service
+systemctl daemon-reload
+systemctl reset-failed dawn-play.service 2>/dev/null || true
+ss -ltnp | grep ':8087 '                                            # expect nothing
+# leftovers of the JVM runner's start-up compile, owned by dawn-play
+find /tmp -maxdepth 1 -name 'selfhost-run*' -user dawn-play -exec rm -rf {} +
+# its sources, which only it compiled
+rm -rf /opt/dawn/playground/src /opt/dawn/playground/dawn.toml
+# age out request directories the JVM runner's start-up sweep used to remove
+install -m 644 /opt/dawn/playground/deploy/dawn-play.tmpfiles /etc/tmpfiles.d/dawn-play.conf
+systemd-tmpfiles --clean /etc/tmpfiles.d/dawn-play.conf
+```
+
+Do not roll back past K5 by running an older tag's `redeploy.sh`: it restarts
+`dawn-play.service`, which is gone, and stops there after its rsyncs. Restore
+a rollback copy instead (next section); it holds the runner binary, so it
+needs no JVM unit.
 
 ## Rollback copies and restoring one
 
@@ -311,12 +362,15 @@ B=/opt/dawn/.prev-0.88.0-20261014T101500Z-runner
 for d in bin build playground packages scripts site; do
   [ -d "$B/$d" ] && rsync -a --delete "$B/$d/" "/opt/dawn/$d/"
 done
-sudo systemctl restart dawn-play dawn-play-lsp
+sudo systemctl restart dawn-play-lsp
 ```
 
-The `--delete` makes each directory exactly what it was. Check the result
-with `curl http://127.0.0.1:8087/health`. If the native canary was installed,
-restart `dawn-play-native.socket` too. To restore the site:
+The `--delete` makes each directory exactly what it was. The runner needs no
+restart: the next connection starts the restored binary with the restored
+`toolchain.env`. Check the result with
+`sudo -u dawn-play curl -s --unix-socket /run/dawn-play/http.sock http://localhost/health`.
+A copy made before K5 also holds `playground/src` and `dawn.toml`; they are
+inert without the JVM runner. To restore the site:
 
 ```sh
 rsync -a --delete /opt/dawn/.prev-0.88.0-20261014T101500Z-site/dist/ /var/www/dawnlang/dist/
@@ -328,16 +382,16 @@ ten minutes for it to expire.
 ## Rollback without a copy
 
 ```sh
-systemctl disable --now dawn-play dawn-play-lsp
+systemctl disable --now dawn-play-native.socket dawn-play-lsp
 ```
 
 takes the dynamic endpoints down and keeps them down; the LSP service's
 `ExecStopPost` cleans up per-session transient services. To repeat that cleanup
 explicitly, run `sudo /opt/dawn/playground/sandbox/run-lsp-sandboxed.sh cleanup`.
 
-`disable`, not `stop` alone: step 6 installs both units with `enable --now`, so
-a `stop` lasts only until the next boot and the endpoint you rolled back comes
-up with the machine. Undo it with `systemctl enable --now dawn-play
+`disable`, not `stop` alone: both units are enabled, so a `stop` lasts only
+until the next boot and the endpoint you rolled back comes up with the
+machine. Undo it with `systemctl enable --now dawn-play-native.socket
 dawn-play-lsp`.
 
 nginx keeps serving the static site. Neither service has persistent state, so

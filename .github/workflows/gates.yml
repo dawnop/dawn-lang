@@ -395,7 +395,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 20933s (the most this file's `3x` claims may add up to)
+# push-total: 21373s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2654,8 +2654,21 @@ jobs:
     # whose steps digest is this job's (gate-observations --since
     # 2026-09-27T18:00Z). Restated to that plus a tenth, rounded up to
     # 5s, 400s (690s before), and the timeout to 3x that.
-    # budget: 3x 400s worst observed plus a tenth (run 36680145356)
-    timeout-minutes: 20
+    # 2026-10-19: the playground contract moved in from docs. K5 of
+    # docs/playground-native-runner-design.md made it run the
+    # process-per-request runner instead of the long-lived JVM server: it
+    # builds the runner first, and a repeat /compile compiles again where the
+    # JVM server answered from its cache. Timed locally inside a held build
+    # slot, alternating with origin/main's JVM contract on the same machine:
+    # 121s and 110s for the old one, 181s and 148s for this one. docs was
+    # already at 945s, under the 950s pole by 5s, so it had no room for the
+    # difference; this job, which runs the Playground deploy guards, had.
+    # 400s plus the worse run doubled for the runner, 362s, is 762s, plus a
+    # tenth, rounded up to 5s, 840s (400s before), and the timeout 3x that;
+    # docs keeps its figure until it is restated from observation. To be
+    # restated from the first observed runs.
+    # budget: 3x 840s planning value (361s worst observed on run 36680145356 plus 39s of margin as before, plus 362s for the playground contract, plus a tenth)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2685,6 +2698,14 @@ jobs:
       # About 4s on a laptop, inside this job's claim.
       - name: deploy guards (site and Playground redeploy scripts)
         run: ./scripts/deploy-guards/run.sh
+
+      # The playground runs a public endpoint that compiles and executes code
+      # strangers send it, and nothing here ever ran its contract test: the
+      # sandbox timeout, the 413 on oversized bodies, and the check that compile
+      # errors do not leak host paths were all trusted rather than exercised.
+      # It builds the native runner from this tree with the pinned CC above.
+      - name: playground contract
+        run: ./playground/test/contract.sh
 
       # PKG-04: the resolved [java-deps] closure must still match dawn.lock --
       # a moved transitive version or a mirror answering with different bytes
@@ -3504,12 +3525,9 @@ jobs:
       - name: the starter programs map with no gap
         run: ./scripts/xmap-samples/run.sh
 
-      # The playground runs a public endpoint that compiles and executes code
-      # strangers send it, and nothing here ever ran its contract test: the
-      # sandbox timeout, the 413 on oversized bodies, and the check that compile
-      # errors do not leak host paths were all trusted rather than exercised.
-      - name: playground contract
-        run: ./playground/test/contract.sh
+      # The playground contract ran here until 2026-10-19; it moved to
+      # java-target-classpath beside the deploy guards (that job's 2026-10-19
+      # note says why).
 
       # This one builds site/play-ui/dist, which is not tracked and which the
       # differential below reads. They stay in this order.

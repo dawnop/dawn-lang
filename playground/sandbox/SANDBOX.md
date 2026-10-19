@@ -233,11 +233,12 @@ left the directory behind.
 
 `cleanup` checks `rm -rf`'s exit status and logs a failure once per path to
 the runner's stderr (`dawn-play: cannot remove <path>: <why>`); it used to
-ignore it. At startup, before the server listens, the runner also sweeps
-`dawn-play-*` entries out of the configured work root and logs the count
-(`dawn-play: removed N stale request directories ...`), so a box an earlier
-runner could not remove does not stay for good. The sweep runs as the runner
-user and needs no sudo.
+ignore it. A directory a request could not remove, or one left by a request
+that was killed, is removed by age: `deploy/dawn-play.tmpfiles` (installed as
+`/etc/tmpfiles.d/dawn-play.conf`) cleans entries of the work root older than
+an hour. Until K5 the long-lived JVM runner swept `dawn-play-*` out of the work
+root at every start instead; the process-per-request runner has no start
+without siblings, so it cannot.
 
 ## Malicious-sample checklist (run on the server after wiring)
 
@@ -313,7 +314,7 @@ with:
   and answering 200 throughout, which is the whole point of capping here rather
   than trusting the host to have room.
 - **Timeout**: an infinite loop still comes back as `phase:"timeout"` (~11 s).
-- **Headroom**: two concurrent `/run`s (the `MAX_CONCURRENT=2` ceiling) moved
+- **Headroom**: two concurrent `/run`s (the two-slot ceiling, then `MAX_CONCURRENT=2`) moved
   available memory by ~150 MB, from 2297 MB to 2146 MB. Worst case for the
   whole Playground is bounded by construction at broker 1 GB + 2 × 512 MB.
 

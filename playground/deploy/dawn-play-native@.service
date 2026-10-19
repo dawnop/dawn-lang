@@ -2,14 +2,14 @@
 # (docs/playground-native-runner-design.md, K3 and K4). It reads one HTTP/1.1
 # request from stdin, answers on stdout and exits.
 #
-# Same posture as dawn-play.service, for the same reason: this process only
-# brokers. The untrusted code runs in the transient units
+# Same posture the JVM runner's unit had (removed in K5), for the same reason:
+# this process only brokers. The untrusted code runs in the transient units
 # `sudo run-sandboxed.sh` starts, which carry the full sandbox set, and sudo
 # needs setuid, so NoNewPrivileges and every option that implies it stay off
 # here (the dawn-play-lsp.service comment records the first-production failure
 # that taught it). There is no DynamicUser either: the work root belongs to
 # the dawn-play user and the sandbox's own DynamicUser traverses it by mode.
-# What is added over the JVM unit is the per-request ceiling, which the
+# What it added over the JVM unit is the per-request ceiling, which the
 # instance-per-connection shape makes meaningful.
 [Unit]
 Description=dawn-play native runner (one request)
@@ -36,7 +36,8 @@ Environment=DAWN_BIN=/opt/dawn/bin/dawn
 Environment=DAWNC_BIN=/opt/dawn/bin/dawnc
 Environment=PLAY_TIMEOUT=10
 Environment=PLAY_SANDBOX_SCRIPT=/opt/dawn/playground/sandbox/run-sandboxed.sh
-# per-request work dirs: not under /tmp, as in dawn-play.service
+# per-request work dirs: not under /tmp (the sandbox units have a private
+# /tmp); leftovers are removed by age (dawn-play.tmpfiles)
 Environment=PLAY_WORK_ROOT=/var/lib/dawn-play/work
 # The flock slot files, shared by every instance (see RuntimeDirectory below).
 Environment=PLAY_SLOT_DIR=/run/dawn-play-slots
