@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 21688s (the most this file's `3x` claims may add up to)
+# push-total: 22083s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1979,6 +1979,17 @@ jobs:
   # memo-2 reached 997s), and since its subjects are not indivisible the way
   # module-memo's shards are, it was sharded in two rather than re-dealt:
   # shard 0 stays in memo-2 and shard 1 is incremental-memo-4.
+  # 2026-10-19, later: module-memo.py went from 19 to 25 mutants (name-level
+  # reuse, docs/lsp-module-memo-design.md §十二), and on PR #793's run its
+  # three shards took 547s, 428s and 429s, about 54s a subject, which put
+  # memo-1 at 1017s, over the pole, and memo-3 at 895s. The mutants are
+  # dealt by index. Five shards of five came first, with shards 3 and 4 in
+  # incremental-memo-4; on the run of e4132156 that job took 966s, because
+  # its lsp-module-memo half took 358s there (227s the run before), and
+  # memo-2 had room (530s). So the script runs as six shards (shard 0: five
+  # mutants and the positive, the rest four each, about 56s a subject):
+  # memo-1 keeps shards 0 and 1 and takes shard 5, memo-3 keeps shard 2,
+  # memo-4 takes shard 3 and memo-2 shard 4.
   #
   # Each planning value is an estimate, not an observation: the sweep hint
   # sum times 0.56 plus 50s fixed overhead, the ratio this repository's
@@ -2015,6 +2026,11 @@ jobs:
     # job's steps in the seven days to 10-15, one deviation 104s. Restated to
     # worst plus the deviation, rounded up to 5s, 930s (820s before), and the
     # timeout to 3x that.
+    # 2026-10-19, PR #793: 1017s with three shards of 25 mutants, 666s with
+    # shards 0 and 1 of five (run of e4132156: 337s for six subjects, 285s
+    # for five). Shards 0, 1 and 5 of six are six, four and four subjects:
+    # 39s setup + 337s + 2 x 4 x 57s = 832s at that run's rates, under the
+    # claim, which is kept.
     # budget: 3x 930s worst observed plus one deviation (run 38560439143)
     timeout-minutes: 47
     steps:
@@ -2025,9 +2041,11 @@ jobs:
       - name: module memo shard CLI contract
         run: python3 scripts/incremental-semantics-contract/module-memo.py --self-test
       - name: module memo equivalence and execution counts, shard 0
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 0
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 0
       - name: module memo mutants shard 1
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 1
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 1
+      - name: module memo mutants shard 5
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 5
 
   incremental-memo-2:
     needs: [plan]
@@ -2066,8 +2084,14 @@ jobs:
     # (run 38576085599), one deviation 71s; worst plus the deviation, rounded
     # up to 5s, is 685s (935s before), and the timeout is 3x that. A planning
     # value until three main runs of these steps exist.
-    # budget: 3x 685s planning value (611s replayed worst plus one deviation)
-    timeout-minutes: 35
+    # 2026-10-19, PR #793: module-memo.py shard 4 of six (four mutants)
+    # joins this job, which took 567s and 530s on that PR's two runs. Planned
+    # from the worst of each step there: setup 41s + lsp-module-memo shard 0
+    # 357s + body-executor 119s + body-scheduler 47s + four subjects at 56s
+    # = 788s; a tenth over it, rounded up to 5s, is 870s (685s before), and
+    # the timeout is 3x that. A planning value until three main runs exist.
+    # budget: 3x 870s planning value (788s from the worst steps of two PR #793 runs plus a tenth)
+    timeout-minutes: 44
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2079,6 +2103,8 @@ jobs:
         run: python3 scripts/incremental-semantics-contract/body-executor.py
       - name: Full-product frozen body scheduler oracle
         run: python3 scripts/incremental-semantics-contract/body-scheduler.py
+      - name: module memo mutants shard 4
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 4
       - name: LSP harness self-tests
         run: |
           python3 scripts/incremental-semantics-contract/lsp-module-memo.py --self-test
@@ -2118,6 +2144,10 @@ jobs:
     # note above incremental-memo-1). Claim from the last 15 successful push
     # runs of ci.yml: the sum of each step's worst time, identity (334s), module-memo shard 2 (284s) and cold (74s),
     # plus 50s for toolchain and checkout, plus a tenth, rounded up to 5s.
+    # 2026-10-19, PR #793: 895s with shard 2 of three (429s, eight
+    # mutants), 745s with shard 2 of five (273s, five). Shard 2 of six holds
+    # four: about 38s + 353s + 4 x 56s + 75s = 690s, under the claim, which
+    # is kept.
     # budget: 3x 820s sum of per-step worst observed plus a tenth
     timeout-minutes: 41
     steps:
@@ -2128,7 +2158,7 @@ jobs:
       - name: declaration identity, minting and carry contracts
         run: python3 scripts/incremental-semantics-contract/identity.py
       - name: module memo mutants shard 2
-        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 3 --shard 2
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 2
       - name: frozen cold transition reference
         run: python3 scripts/incremental-semantics-contract/cold.py
 
@@ -2147,8 +2177,16 @@ jobs:
     # 38576085599), one deviation 48s. Worst plus the deviation (more than a
     # tenth), rounded up to 5s, is 480s, and the timeout is 3x that. A
     # planning value until three main runs of this job exist.
-    # budget: 3x 480s planning value (430s replayed worst plus one deviation)
-    timeout-minutes: 24
+    # 2026-10-19, PR #793: module-memo.py shard 3 of six (four mutants)
+    # moved here. With shards 3 and 4 of five this job took 966s on the run
+    # of e4132156, its lsp-module-memo half 358s there against 227s the run
+    # before. Planned from the worst of each step over those two runs:
+    # setup 42s + lsp-module-memo shard 1 358s + four subjects at 56s (a
+    # five-mutant shard took 279s and 280s) = 624s; a tenth over it,
+    # rounded up to 5s, is 690s (480s before), and the timeout is 3x that.
+    # A planning value until three main runs of these steps exist.
+    # budget: 3x 690s planning value (624s from the worst steps of two PR #793 runs plus a tenth)
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2156,6 +2194,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: LSP module memo, parse reuse and position resolver contracts, shard 1
         run: python3 scripts/incremental-semantics-contract/lsp-module-memo.py --shards 2 --shard 1
+      - name: module memo mutants shard 3
+        run: python3 scripts/incremental-semantics-contract/module-memo.py --shards 6 --shard 3
 
   # contracts until 2026-09-23, split in two again because it had passed the
   # pole: 966s (run 35632425163) over the 15 completed main runs of
