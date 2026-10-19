@@ -38,6 +38,7 @@
 # unit behind a killed `sudo`) keeps refilling. A file has no such reader.
 use std/str
 use std/bytes
+use std/list
 use std/io
 use std/io.{Fs, with_fs_real, with_proc_real, with_clock_real, with_env_real, Instant, now, now_wall_ns, elapsed_ns}
 use play/contract.{Outcome, Compiled, CompileError, Timeout, wants_tileir}
@@ -138,9 +139,40 @@ const CAP_SH: String = "[ -f \"$1\" ] && [ ! -L \"$1\" ] && exec head -c \"$2\" 
 # [`read_capped`] with the limit named: the compile view reads the compilers'
 # own files, which are far larger than any diagnostic (an 870 KB C text is
 # ordinary), under the limit that view states for them.
-fn read_capped_to(path: String, limit: Int, scratch: String) -> (String, Bool) !io = {
+fn read_capped_to(path: String, limit: Int, scratch: String) -> (String, Bool) !io =
+  read_capped_by(["sh", "-c", CAP_SH, "sh", path, "${limit + 1}"], limit, scratch)
+
+# [`CAP_SH`] with every line outside the runs `$3...` (sed addresses `a,bb`)
+# read as an empty one: the same refusals, the same `head -c` bound, applied
+# to what is kept. `LC_ALL=C` so that `.` matches any byte, whatever the C
+# text holds. The last line is always kept: a text's line count is read
+# without the newlines it ends with (packages/xmap's `chomp`), so emptying the
+# last line would take the empty lines before it out of the count too; every
+# C text ends with the closing brace of its entry point.
+const KEEP_SH: String = "p=\"$1\"; n=\"$2\"; shift 2; [ -f \"\$p\" ] && [ ! -L \"\$p\" ] && LC_ALL=C sed \"$@\" -e '\$b' -e 's/.*//' -- \"\$p\" | head -c \"\$n\""
+
+# [`read_capped_to`] keeping only lines `keep` (from 1, both ends included) and
+# the last line of the file, every other line empty, so line numbers and the
+# line count are the file's. No runs keeps the whole file.
+fn read_lines_capped(path: String, keep: List[(Int, Int)], limit: Int, scratch: String) -> (String, Bool) !io =
+  if len(keep) == 0 {
+    read_capped_to(path, limit, scratch)
+  } else {
+    read_capped_by(["sh", "-c", KEEP_SH, "sh", path, "${limit + 1}"] ++ sed_keeps(keep), limit, scratch)
+  }
+
+fn sed_keeps(keep: List[(Int, Int)]) -> List[String] = {
+  var out: List[String] = []
+  for r in keep {
+    let (a, b) = r
+    out = out ++ ["-e", "${a},${b}b"]
+  }
+  out
+}
+
+fn read_capped_by(argv: List[String], limit: Int, scratch: String) -> (String, Bool) !io = {
   let tmp = "${scratch}/cap-${uuid()}"
-  let status = run_cmd(["sh", "-c", CAP_SH, "sh", path, "${limit + 1}"], tmp, "/dev/null")
+  let status = run_cmd(argv, tmp, "/dev/null")
   let raw = match status {
     Ok(0) -> with_fs_real(() => io.read_bytes(tmp))
     _ -> Ok(bytes.utf8(""))
@@ -509,7 +541,10 @@ fn execute_staged(dir: String, box: String, input: String) -> Outcome !io =
 ## The most bytes of one raw file (the C text, either table, the listing) the
 ## view reads. The largest of the 11 starter programs is 871 KB, almost all of
 ## it the standard library's share of the C text; this is about ten times that.
-## A file past it answers "too large" and is never mapped.
+## A file past it answers "too large" and is never mapped. The C text is read
+## with only its own module's lines in it ([`kept_c_lines`]), so for it the
+## limit bounds the program's share and a newline a line of the rest: the
+## flash attention sample's 6.0 MB C text is read as 124 KB.
 const VIEW_RAW_LIMIT: Int = 8388608
 
 ## What the compilers and `javap` wrote for one program, as text, and how long
@@ -602,10 +637,66 @@ fn budget_left(started: Instant) -> Int !io = {
 
 # One of a compiler's files from the box: the text, or the reason it is not
 # usable (past the limit).
-fn raw_file(path: String, what: String, scratch: String) -> Result[String, ViewRaw] !io = {
-  let (text, cut) = read_capped_to(path, VIEW_RAW_LIMIT, scratch)
+fn raw_file(path: String, what: String, scratch: String) -> Result[String, ViewRaw] !io = raw_lines(path, [], what, scratch)
+
+# [`raw_file`] keeping only lines `keep` of it.
+fn raw_lines(path: String, keep: List[(Int, Int)], what: String, scratch: String) -> Result[String, ViewRaw] !io = {
+  let (text, cut) = read_lines_capped(path, keep, VIEW_RAW_LIMIT, scratch)
   if cut { Err(RawTooLarge(what)) } else { Ok(text) }
 }
+
+# Which lines of the C text the view needs: the functions of the user's module,
+# as the C map's `fn` rows place them (`fn <first> <last> <module> ...`), runs
+# that are at most a few lines apart made one. The C backend writes the whole
+# program, and the pane is cut out of it by exactly these rows
+# (packages/xmap's `c_pane`); everything else of the text counts only as lines.
+# For a tileir program that is most of it: of the flash attention sample's
+# 6.0 MB, 4.4 MB is the tileir package and 35 KB its own module
+# (docs/playground-compile-design.md K8), so the text is read with every other
+# line empty and VIEW_RAW_LIMIT bounds the program's own share, not the
+# package's. A map with no such row keeps the whole text, and the pairing says
+# what is wrong with it, as it did when the whole text was always read.
+pub fn kept_c_lines(cmap: String, module: String) -> List[(Int, Int)] = {
+  var runs: List[(Int, Int)] = []
+  for l in str.split(cmap, "\n") {
+    if str.starts_with(l, "fn\t") {
+      let w = str.split(l, "\t")
+      if len(w) >= 4 && w[3] == module {
+        match (parse_int(w[1]), parse_int(w[2])) {
+          (Some(a), Some(b)) -> {
+            runs = runs ++ [(a, b)]
+          }
+          _ -> ()
+        }
+      }
+    }
+  }
+  var merged: List[(Int, Int)] = []
+  for r in sort_by(runs, (x, y) => {
+    let (xa, _xb) = x
+    let (ya, _yb) = y
+    xa - ya
+  }) {
+    let (a, b) = r
+    let k = len(merged)
+    if k > 0 {
+      let (pa, pb) = merged[k - 1]
+      if a <= pb + KEEP_SLACK {
+        merged = list.take(merged, k - 1) ++ [(pa, if b > pb { b } else { pb })]
+      } else {
+        merged = merged ++ [(a, b)]
+      }
+    } else {
+      merged = [(a, b)]
+    }
+  }
+  merged
+}
+
+# How many lines between two of the module's functions are kept rather than
+# emptied, to keep the runs few: the separator and a declaration or two, which
+# nothing reads, so keeping them is harmless.
+const KEEP_SLACK: Int = 8
 
 # The two compilers read the same source and write apart, and they run one
 # after the other: the production host is small and also serves /run and
@@ -664,17 +755,17 @@ fn list_and_gather(dir: String, box: String, started: Instant, module: String) -
       if code != 0 {
         RawBroken("the listing tool failed: ${diagnostics(dir, box, "javap")}")
       } else {
-        gather(dir, box, started)
+        gather(dir, box, started, module)
       }
   }
 }
 
-fn gather(dir: String, box: String, started: Instant) -> ViewRaw !io =
-  match raw_file("${box}/out.c", "the C text", dir) {
+fn gather(dir: String, box: String, started: Instant, module: String) -> ViewRaw !io =
+  match raw_file("${box}/c.dawnmap", "the C map", dir) {
     Err(e) -> e
-    Ok(ctext) -> match raw_file("${box}/c.dawnmap", "the C map", dir) {
+    Ok(cmap) -> match raw_lines("${box}/out.c", kept_c_lines(cmap, module), "the C text", dir) {
       Err(e) -> e
-      Ok(cmap) -> match raw_file("${box}/jvm.dawnmap", "the JVM map", dir) {
+      Ok(ctext) -> match raw_file("${box}/jvm.dawnmap", "the JVM map", dir) {
         Err(e) -> e
         Ok(jmap) -> match raw_file("${dir}/javap.txt", "the JVM listing", dir) {
           Err(e) -> e
@@ -1057,6 +1148,34 @@ test "read_capped neither follows a link nor waits on a special file" {
   assert read_capped("${d}/fifo.txt", d) == ("", false)
   # and the link's target is still readable when asked for by its own name
   assert read_capped("${d}/secret.txt", d) == ("secret\n", false)
+}
+
+test "the C lines the view keeps are the module's functions, close runs made one" {
+  let cmap = "dawnmap\t1\tc\ntext\t100\nfn\t50\t60\tstd/x\tNf1:g\tg\nfn\t22\t30\tprog\tNf1:b\tb\n"
+    ++ "fn\t10\t20\tprog\tNf1:a\ta\nfn\t80\t90\tprog\tNf1:c\tc\ncall\t1\t2\t3\t4\tprog\t5\t6\t5\tdirect prog.a\n"
+  assert kept_c_lines(cmap, "prog") == [(10, 30), (80, 90)]
+  assert kept_c_lines(cmap, "main") == []
+  assert kept_c_lines("not a map", "prog") == []
+}
+
+test "a read that keeps some lines empties the rest and keeps the count" {
+  let dir = fresh_dir()
+  with d <- bracket(dir, cleanup)
+  with_fs_real(() => {
+    assert match io.write_file("${d}/c.txt", "a\nb é\nc\nd\ne\n") { Ok(_) -> true, Err(_) -> false }
+    assert match io.write_file("${d}/big.txt", str.repeat("x\n", 1000)) { Ok(_) -> true, Err(_) -> false }
+  })
+  assert read_lines_capped("${d}/c.txt", [(2, 3)], 100, d) == ("\nb é\nc\n\ne\n", false)
+  assert read_lines_capped("${d}/c.txt", [(1, 1)], 100, d) == ("a\n\n\n\ne\n", false)
+  assert read_lines_capped("${d}/c.txt", [], 100, d) == ("a\nb é\nc\nd\ne\n", false)
+  # the bound is on what is kept: 1,000 lines kept are past 100 bytes, the
+  # same 1,000 with 10 kept are not
+  let (_, cut) = read_lines_capped("${d}/big.txt", [(1, 1000)], 100, d)
+  assert cut
+  assert read_lines_capped("${d}/big.txt", [(1, 10)], 1100, d) == (str.repeat("x\n", 10) ++ str.repeat("\n", 989) ++ "x\n", false)
+  sh_run(["ln", "-s", "${d}/c.txt", "${d}/link.txt"])
+  assert read_lines_capped("${d}/link.txt", [(1, 2)], 100, d) == ("", false)
+  assert read_lines_capped("${d}/absent.txt", [(1, 2)], 100, d) == ("", false)
 }
 
 test "shown strips the box before the request directory, then marks a cut" {
