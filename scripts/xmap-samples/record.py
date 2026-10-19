@@ -43,19 +43,22 @@ DAWN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
 # online compile view (docs/playground-compile-design.md) has to map with no
 # gap.
 #
-# Only the programs that are one file. A sample that imports tileir is a project
-# on the Playground (playground/src/play/exec.dawn stages it with a manifest
-# naming the package), so it cannot be handed to a compiler as a single file
-# here; and its mapping is not gap-free, because the compilers' side tables
-# name an infix operator on tiles (`a * b`) by a span that is no identifier.
-# The cases that hold such a sample are playground/test/contract.sh's (its
-# /compile cases on the flash attention starter) and doc-check's (run, output
-# and the pin to scripts/tile-golden).
+# Every one of them. A sample that imports tileir is a project on the
+# Playground (playground/src/play/exec.dawn's `wants_tileir` and
+# `tile_manifest`): `src/main.dawn` beside a manifest whose only dependencies
+# are packages/tileir and packages/tileref, its module `main`. It is recorded
+# the same way here, so the maps are the ones the Playground pairs. Until
+# 2026-10-19 such a sample was left out, because xmap took the name of an
+# infix operator on tiles (`a * b`, recorded as `impl mul` with its name at
+# the `*`) for a gap (docs/playground-compile-design.md K8).
 SAMPLES = [
     {"name": p.stem, "source": f"site/play-ui/samples/{p.name}"}
     for p in sorted((ROOT / "site" / "play-ui" / "samples").glob("*.dawn"))
-    if "use tileir/" not in p.read_text(encoding="utf-8")
 ]
+
+# The text the Playground decides by, word for word (play/contract.dawn
+# `wants_tileir`).
+TILEIR_IMPORT = "use tileir/"
 
 
 def fail(msg):
@@ -90,6 +93,17 @@ def javap_binary():
 def target_of(prog, work):
     """The path `dawn __emitc/__emit` is given, and the module the code is in."""
     src = ROOT / prog["source"]
+    if TILEIR_IMPORT in src.read_text(encoding="utf-8"):
+        proj = work / "proj"
+        (proj / "src").mkdir(parents=True)
+        shutil.copy(src, proj / "src" / "main.dawn")
+        packages = ROOT / "packages"
+        (proj / "dawn.toml").write_text(
+            f'schema = 1\nname = "tile"\nversion = "0.0.0"\n\n[deps]\n'
+            f'tileir = "{packages}/tileir"\ntileref = "{packages}/tileref"\n',
+            encoding="utf-8",
+        )
+        return proj, "main"
     one = work / src.name
     shutil.copy(src, one)
     return one, src.stem
