@@ -366,6 +366,9 @@ name: gates
 # nor dealt under 700s by whole steps, so that step's subjects were sharded
 # in two and the second half is the new incremental-memo-4 (memo-2 935s ->
 # 685s, memo-4 480s, +230s; the note above incremental-memo-2's line).
+# The same day it went up to 20,648s: contracts-2 (848s worst since 10-16,
+# a deviation of 127s) gave its RC parameter-mode step to the new
+# contracts-3 (contracts-2 880s -> 855s, contracts-3 180s, +155s).
 # To add one, retire or slim something
 # first, or raise the line and say so: the push that raises it carries a
 # commit message line `Gate-Budget(push-total): <old>s -> <new>s <why>`,
@@ -389,7 +392,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 20493s (the most this file's `3x` claims may add up to)
+# push-total: 20648s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1853,7 +1856,7 @@ jobs:
   #                      Core IR 16, Array 11, adapter call sites 8, JSON 6,
   #                      Collection 5, table freight 5, builtin mirror 5,
   #                      Unicode 3, Path 2, Error model 2, intrinsic parity 0
-  #   contracts-2  346s  atomic write 84 (moved to compiler-weight-contract 2026-10-16), RC parameter-mode 71, source loop
+  #   contracts-2  346s  atomic write 84 (moved to compiler-weight-contract 2026-10-16), RC parameter-mode 71 (moved to contracts-3 2026-10-19), source loop
   #                      label 57, ctl-live 54, range bound 34, display
   #                      layering 24, RC contract 22
   #
@@ -2426,8 +2429,16 @@ jobs:
     # the pole. 934 - 84 = 850s projected, planning value 880s with a standard
     # deviation's worth of margin kept out of the claim until a run of the new
     # steps exists; timeout 3x that.
-    # budget: 3x 880s planning value (934s worst observed less the 84s atomic write step)
-    timeout-minutes: 44
+    # 2026-10-19: the 17 successful main pushes since (10-16T18:05Z ..
+    # 10-17T17:23Z) took 805s median and 848s worst (run 39049482407), one
+    # deviation 127s, so worst plus a deviation was already past the pole
+    # again. The RC parameter-mode step (90s median, 107s worst) leaves for
+    # contracts-3. Replaying those 17 runs without it: 703s median, 741s worst
+    # (run 39049482407), one deviation 111s; worst plus the deviation, rounded
+    # up to 5s, is 855s, and the timeout is 3x that. A planning value until
+    # three main runs of these steps exist.
+    # budget: 3x 855s planning value (741s replayed worst plus one deviation)
+    timeout-minutes: 43
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2496,17 +2507,6 @@ jobs:
       - name: ctl-live contract
         run: ./scripts/ctl-live-contract/run.sh
 
-      # The parameter-mode contract (core.CMode) under single-sided flips:
-      # a call-site table row without the callee's CParam.mode, and the
-      # mirror, each must be caught by rc_check / ASan / LSan, while the
-      # coherent flip -- the borrowed knife's semantics in miniature -- must
-      # run clean. It rides here for the atomic-write step's reason: it wants
-      # a JVM compile and a `cc` with sanitizers, and this job is not the
-      # critical path. The four known-red entries are the harness's findings;
-      # read that file before touching them.
-      - name: RC parameter-mode mutants
-        run: ./scripts/rc-mode-contract/run.sh
-
       # The borrowed views (selfhost/src/c/views.dawn): a local with no count of
       # its own, read out of a borrowed parameter. The saving is a dup and a drop
       # per projected child, and the risk is a view that outlives what it reads
@@ -2554,6 +2554,42 @@ jobs:
       # is a control neither may move.
       - name: display layering contract
         run: ./scripts/display-layering-contract/run.sh
+
+  # 2026-10-19: contracts-2 was back within a deviation of the pole (the note
+  # above its budget line), so its RC parameter-mode step moved here. Same
+  # family (`contracts`), so no gate moves family and the steps lock gains
+  # only this job's own `pinned-cc.sh`; the job exists for scheduling only,
+  # like the split at contracts-1.
+  contracts-3:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'contracts-3') }}
+    runs-on: ubuntu-latest
+    # Replayed over the 17 contracts-2 runs named in that note: each run's
+    # setup, checkout, pinned C compiler and toolchain steps plus its RC
+    # parameter-mode step, 147s median, 158s worst (run 39049482407), one
+    # deviation 21s. Worst plus the deviation, rounded up to 5s, is 180s, and
+    # the timeout is 3x that. A planning value until three main runs exist.
+    # budget: 3x 180s planning value (158s replayed worst plus one deviation)
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The parameter-mode contract (core.CMode) under single-sided flips:
+      # a call-site table row without the callee's CParam.mode, and the
+      # mirror, each must be caught by rc_check / ASan / LSan, while the
+      # coherent flip -- the borrowed knife's semantics in miniature -- must
+      # run clean. It wants a JVM compile and a `cc` with sanitizers, which is
+      # why it sat in contracts-2 (the atomic-write step's reason) until that
+      # job neared the pole. The four known-red entries are the harness's
+      # findings; read that file before touching them.
+      - name: RC parameter-mode mutants
+        run: ./scripts/rc-mode-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test

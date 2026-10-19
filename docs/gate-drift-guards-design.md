@@ -533,7 +533,7 @@ lsp-module-memo 一步就占 memo-2 的 772 s，**按整步重新发牌不可能
 
 1. `lsp-module-memo.py` 加 `--shards N --shard I`（不带旗标时行为不变）、`--check-shards`、`--self-test`；memo-2 跑 shard 0，新 job incremental-memo-4 跑 shard 1。
    正样本参与发牌而不是每片都跑：每片多一个对象就是多 80 s，而无正样本的那片仍然先套用全部锚点、每个负控必须编译、只认 owning 断言失败（与 module-memo.py 分片处的论证相同）。
-2. RC parameter-mode 从 contracts-2 挪到新 job contracts-3（同属 contracts 家族，steps.lock 不变）。contracts-1 是另一个候选，但它自己已经超声明，不能再收。
+2. RC parameter-mode 从 contracts-2 挪到新 job contracts-3（同属 contracts 家族，steps.lock 只多出新 job 自己那一步 `pinned-cc.sh`）。contracts-1 是另一个候选，但它自己已经超声明，不能再收。
 3. contracts-3 只有一步、约 160 s，起机开销已经付了，于是把 contracts-1 的 Inflate 与 opaque twin 两步也挪过去，让 contracts-1 回到声明之下而不必重述。
 
 声明按回放算：把同 60 次运行的步骤计时按新切法重新相加（lsp-module-memo 取一半），取最坏 + max(十分之一, 一个标准差)，进到 5 s，timeout 取 3 倍。都是规划值，三次 main 运行后按观测重述。
