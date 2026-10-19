@@ -98,16 +98,37 @@ fn name_at(r: Resolver, nlo: Int) -> Int = if nlo == NO_NAME { NO_NAME } else { 
 ## column counts code points from the line's start, the currency positions
 ## and line starts are both in, so it is the column the diagnostic arrow
 ## (`--> path:line:col`) prints for the same position.
+##
+## The line is one plus the count of starts in `(0, pos]`, and the line's
+## start is the greatest of them (0 when there is none). The table is
+## ascending (`lexer.line_starts_of`), so that count is a difference of two
+## upper bounds and the greatest is the entry just below the second one. It
+## used to be a scan of the whole table per position, which cost a module of
+## five thousand lines five thousand reads for every `panic`, `expect` and
+## `caller()` in it: 18.6% of the samples of an LSP signature edit
+## (docs/source-location-design.md 5.7). A leading start of 0, an empty
+## table, a position past the last start and a non-positive position all
+## answer as the scan did.
 fn line_col(line_starts: List[Int], pos: Int) -> (Int, Int) = {
-  var line = 1
-  var start = 0
-  for s in line_starts {
-    if s <= pos && s > 0 {
-      line = line + 1
-      if s > start { start = s }
-    }
+  # starts <= 0 are not line breaks; an ascending table has them first
+  var zeros = 0
+  while zeros < len(line_starts) && line_starts[zeros] <= 0 { zeros = zeros + 1 }
+  let upto = if pos > 0 { upper_bound(line_starts, zeros, pos) } else { zeros }
+  let start = if upto > zeros { line_starts[upto - 1] } else { 0 }
+  (1 + upto - zeros, pos - start + 1)
+}
+
+## The first index in `[from, len(xs))` whose entry is greater than `x`, on an
+## ascending `xs`: the count of entries `<= x` when every entry before `from`
+## is one of them.
+fn upper_bound(xs: List[Int], from: Int, x: Int) -> Int = {
+  var lo = from
+  var hi = len(xs)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if xs[mid] <= x { lo = mid + 1 } else { hi = mid }
   }
-  (line, pos - start + 1)
+  lo
 }
 
 ## The ` at <path>:<line>:<col>` suffix of a failure message. The checker
@@ -427,6 +448,41 @@ test "a column counts from its own line, and the first line starts at one" {
   assert line_col(starts, 39) == (1, 40)
   assert line_col(starts, 40) == (2, 1)
   assert line_col(starts, 104) == (3, 15)
+}
+
+test "line_col answers the edges the way a scan of the whole table does" {
+  # no table at all: everything is on the first line
+  assert line_col([], 0) == (1, 1)
+  assert line_col([], 7) == (1, 8)
+  # a file with no final newline: past the last start is still its line
+  assert line_col([0, 4], 4) == (2, 1)
+  assert line_col([0, 4], 9) == (2, 6)
+  # a position before the file, or at its start, is on line one
+  assert line_col([0, 4], -2) == (1, -1)
+  # a table without its leading 0 counts the same breaks
+  assert line_col([4, 9], 3) == (1, 4)
+  assert line_col([4, 9], 9) == (3, 1)
+  # the last line of a file that ends in a newline is an empty one
+  assert line_col([0, 4, 8], 8) == (3, 1)
+}
+
+test "line_col agrees with the linear scan at every position of several tables" {
+  let tables = [[], [0], [0, 1], [0, 1, 2, 3], [0, 5, 6, 20], [3, 8], [0, 0, 5, 5, 9], [-1, 0, 2]]
+  for t in tables {
+    var pos = -3
+    while pos < 25 {
+      var line = 1
+      var start = 0
+      for s in t {
+        if s <= pos && s > 0 {
+          line = line + 1
+          if s > start { start = s }
+        }
+      }
+      assert line_col(t, pos) == (line, pos - start + 1)
+      pos = pos + 1
+    }
+  }
 }
 
 test "an omitted caller() becomes its call's site, carried as one trailing argument" {
