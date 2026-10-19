@@ -143,6 +143,11 @@ def main():
     # stuck on FAIL. That is a property of the tree and not of the shard: it is
     # established once per run by shard 0, over the same commit, and a run
     # whose oracle is broken goes red there.
+    #
+    # 2026-10-19: gates.yml runs six shards, not three (25 mutants at about
+    # 56s each on a runner, see the note above incremental-memo-1). The
+    # argument is the same with six: shard 0 is two subjects longer than
+    # the others, and repeating the positive in each would add five.
     subjects = ([("positive", engine, originals[engine])] if args.shard == 0 else []) + selected
     with tempfile.TemporaryDirectory(prefix="dawn-module-memo-reference-") as temp:
         root = Path(temp)
