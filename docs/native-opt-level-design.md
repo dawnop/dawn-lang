@@ -1,6 +1,6 @@
 # dawnc 的优化级别开关（`-O0` / `-O1` / `-O2`）
 
-> 状态：**current**。设计先行，实现见 §八。
+> 状态：**current**。已落地（§八），实测见 §七。
 > 依据：`agent-handoff/ruling-runner-b-path-20261019.md` 第 2、3、5 条（B 路的硬伤是 flash_attn 在 `-O2` 下 cc 25–35 s，超沙箱 15 s；
 > 重开条件之一是「dawnc 有优化级别开关且 flash_attn 在沙箱内 `-O0/-O1` 低于 10 s」；派生一刀即本稿）；
 > `agent-handoff/research-runner-b-path-20261019.md` §3.2（flash_attn 的 cc 实测，`CC` 包一层追加 `-O0` 约 6.2 s、输出与 -O2 逐字节相同）。
@@ -9,13 +9,14 @@
 
 1. **CLI 形态：`dawnc build|run|test` 接受 `-O0`、`-O1`、`-O2` 三个单词形式的开关**，与 cc、ghc 的拼法相同。
    同一命令里出现多次时最后一个生效（cc、ghc 都是这样）。其它以 `-O` 开头的词（`-O3`、`-Os`、`-Ofast`、裸 `-O`）
-   一律报英文错误、退出 2：`unknown optimization level `-O3`; this backend knows: -O0, -O1, -O2`。不透传任意 cc 参数。
+   一律报英文错误、退出 2（文案见 §七的负控）。不透传任意 cc 参数。
 2. **默认值不变，三个子命令都是 `-O2`。** 没写开关的调用，cc 命令行与今天逐字节相同，所以发射的 C、二进制、
    native-fixpoint、所有门禁的输入都不动。
 3. **不进 `dawn.toml`。** 级别是一次调用的选择（Playground 要快编，发布要快跑），不是包的属性。
 4. **级别作用于这次构建的每一条 cc 命令**：native 那一条；wasm 的三条（C++ 垫片、异常 tag、主编译链接）。
    `-DDAWN_RT_INLINE_RC` 与级别正交，互不牵连。
-5. **dawnc 没有构建缓存，所以没有缓存键要改。** 将来 runner 的编译缓存（裁决 4）若对同一源码用不同级别，
+5. **实测（§七）**：flash_attn 的 `dawnc build` 在集群上 -O2 约 30 s、-O1 约 17 s、-O0 约 8 s，三种级别输出与 `.out` 逐字节相同。
+6. **dawnc 没有构建缓存，所以没有缓存键要改。** 将来 runner 的编译缓存（裁决 4）若对同一源码用不同级别，
    键里必须带级别；这条写进 runner 设计时再落。
 
 ## 二、为什么要有它
@@ -89,12 +90,44 @@ Dawn 的 native 后端从第一天就是 -O2，没有理由现在翻转；需要
 
 ## 七、实测
 
-（实现后填。测法：集群单机，同一台机器上串行；每个样例 × 级别 3 次 `dawnc build`，取墙钟；产物各跑 3 次取墙钟；
-产物 stdout 与 -O2 的 stdout 逐字节比较。）
+测法：集群单机（256 核，gcc 11.4.0，与生产机的 gcc 11.2 同代），用本分支 `11c4c9c4` 构建的 dawnc
+（`__emitc --split` 加 `scripts/cc-units.sh`，与 native-selfhost-tests 同配方），同一台机器上串行跑：
+每个样例 × 级别 `dawnc build` 3 次，产物各跑 3 次，产物 stdout 与 `site/play-ui/samples/*.out` 逐字节比较。
+脚本是一次性的，未入库；原始输出在报告 `agent-handoff/dawnc-opt-level-report-20261019.md`。
+flash_attn 是项目形态（`dawn.toml` 的 `[deps]` 指向本仓库 `packages/tileir`、`packages/tileref`）。
+
+`dawnc build` 墙钟（s，3 次）：
+
+| 样例（C 文本） | `emitc`（无 cc） | 默认 | `-O0` | `-O1` | `-O2` |
+|---|---|---|---|---|---|
+| hello（1.7 KB） | 0.42–0.43 | 1.42–1.43 | **0.68–0.69** | 1.03–1.04 | 1.42–1.44 |
+| shapes（847 KB） | 0.45 | 2.30–2.31 | **0.97–0.98** | 1.62–1.63 | 2.29–2.30 |
+| flash_attn（6.04 MB） | 2.78–3.39 | 29.7–29.9 | **8.01–8.07**；第二轮 8.42–8.48 | 17.1–17.2 | 30.9–31.6（第二轮） |
+
+- **cc 阶段（build 减 emitc）**：flash_attn -O2 约 27 s，-O1 约 14.4 s，-O0 约 5.2 s，-O0 比 -O2 快约 5 倍；shapes 1.85 → 0.52 s；hello 1.0 → 0.26 s。
+- **输出**：三个样例在四种配置下 stdout 全部与 `.out` 逐字节相同。
+- **默认即 -O2**：hello、shapes 的默认产物与显式 `-O2` 产物逐字节相同（`cmp`），说明不写开关时 cc 命令行没变。
+- **运行时间**：这三个样例都是毫秒级（flash_attn 3–4 ms 对 -O0 的 5–7 ms），量不出有意义的差别；
+  -O0 对计算密集程序的减速不在本稿测量范围内，开关的帮助文字只说「跑得慢一些」。
+- **产物大小**：-O0 反而更大（flash_attn 2.81 对 2.72 MB，shapes 268 对 186 KB），-O1 最小。
+- **负控**：`build -O3`、`-Os`、`-O`、`-Ofast`，`run -O9`，`test ... -O3` 均退出 2、stdout 为空、stderr 为一行
+  「error: unknown optimization level \`-O3\`; this backend knows: -O0, -O1, -O2」；`run -O0 hello.dawn -- -O3` 把 `-O3` 交给程序、正常运行。
+- **wasm**：集群与本机都没有带 wasi sysroot 的 clang 可用于这次测量，wasm 三条命令行的级别只由 `nmain.dawn` 的进程内测试钉住（见 §八）。
+
+对 B 路重开条件（「flash_attn 在沙箱内 -O0/-O1 低于 10 s」）的读法：-O1 的 17 s 不满足；-O0 在集群是 8.0–8.5 s。
+生产机 hello 的 cc 阶段是 1.23 s（调研 §3.1），集群是 1.0 s，按这个比例推生产机 -O0 约 9.5–10.5 s，**贴着线**。
+这是推论，不是沙箱内实测；要判重开，得在生产机沙箱里实测一次 `dawnc build -O0`。
 
 ## 八、落地记录
 
-（实现后填。）
+- 设计 `07ab9444`；实现 `11c4c9c4`（`selfhost/src/nmain.dawn`）。
+- `OptLevel = Opt0 | Opt1 | Opt2`，`opt_word` 认词（任何以 `-O` 开头的词都算，未知的报错），`take_opt_level` 给 build/test 做整条 argv 的预扫
+  （与 `ct_opts_of` 同形），`run` 在自己的解析器里只读 target 之前的词。`cc_build_with` 多一个 `level` 参数，四条 cc 命令里原来的 `"-O2"` 字面量换成同一个值。
+- 进程内测试：native 行与 wasm 三行在非默认级别下只差那一个 flag；`take_opt_level` 的取值、最后者胜、`-o` 不被误吃、未知值文案；
+  `run` 的 target 之后的 `-O` 归程序；四个子命令入口的拒绝（退出 2、stderr 一行、stdout 空、不问环境不起进程）。
+- 文档：`spec.md` §12.1（及 `spec.en.md`）、`tutorial.md` §19（及中文译本）、`dawnc` 的 usage 段。
+- 输出变化：只有 `dawnc` 的 usage 多三行；没有差分门的 label 覆盖 dawnc 的 usage，所以没有 `Emit-Change` 行
+  （集群全套门禁在实现提交上 36 个 job 全绿，prev-diff 与 prev-diff-native 没有未声明的字节差异）。
 
 ## 不做的（理由）
 
