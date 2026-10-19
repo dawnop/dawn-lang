@@ -1547,17 +1547,39 @@ fn append_diagnostic(
   map.insert(out0, uri, before ++ [value])
 }
 
-fn add_loc_diag(
+## `lds` rendered into `out0`, each under every open document of its file, or,
+## when no document holds that file, under the file's own URI against its text
+## on disk.
+##
+## A file no document holds is read and its line table built once per call,
+## not once per diagnostic (#789 R1). A parse failure in a widely imported
+## module floods its importers, nearly all of them unopened: 8017 diagnostics
+## over 43 files for check/types, 2970 of them in checker.dawn alone, and
+## re-reading and re-indexing the file for each was 91-95% of that sync
+## (28-31 s, profiled with JFR). The output is the same, byte for byte: the
+## open documents of a path are visited in the sorted-URI order the per-
+## diagnostic scan used, and an unreadable file still renders against "".
+fn add_loc_diags(
   st: LspState,
   path_by_uri: Map[String, String],
   out0: Map[String, List[Json]],
-  ld: LocDiag
+  lds: List[LocDiag]
 ) -> Map[String, List[Json]] !Fs !Env = {
   var out = out0
-  let target = canon_identity(ld.path)
-  var matched = false
+  var uris_of: Map[String, List[String]] = map.empty()
   for uri in sort(map.keys(path_by_uri)) {
-    if map.get(path_by_uri, uri).expect("workspace path") == target {
+    let path = map.get(path_by_uri, uri).expect("workspace path")
+    let before = match map.get(uris_of, path) {
+      Some(us) -> us
+      None -> []
+    }
+    uris_of = map.insert(uris_of, path, before ++ [uri])
+  }
+  var on_disk: Map[String, (SourceView, List[Int])] = map.empty()
+  for ld in lds {
+    let target = canon_identity(ld.path)
+    var matched = false
+    for uri in map.get(uris_of, target).unwrap_or([]) {
       match map.get(st.docs, uri) {
         Some(d) -> {
           out = append_diagnostic(out, uri,
@@ -1567,15 +1589,22 @@ fn add_loc_diag(
         None -> ()
       }
     }
-  }
-  if not matched {
-    let text = match io.read_file(target) {
-      Ok(found) -> found
-      Err(_) -> ""
+    if not matched {
+      let (view, ls) = match map.get(on_disk, target) {
+        Some(known) -> known
+        None -> {
+          let text = match io.read_file(target) {
+            Ok(found) -> found
+            Err(_) -> ""
+          }
+          let read = (view_of(text), line_starts_of(text))
+          on_disk = map.insert(on_disk, target, read)
+          read
+        }
+      }
+      let uri = path_to_uri(target)
+      out = append_diagnostic(out, uri, diagnostic_json(view, ls, uri, st.related_information, ld.d))
     }
-    let uri = path_to_uri(target)
-    out = append_diagnostic(out, uri,
-      diagnostic_json(view_of(text), line_starts_of(text), uri, st.related_information, ld.d))
   }
   out
 }
@@ -1590,9 +1619,7 @@ fn with_walk_diags(
   ws: Workspace,
   out0: Map[String, List[Json]]
 ) -> Map[String, List[Json]] !Fs !Env = {
-  var out = out0
-  for ld in workspace_walk_diags(ws.plan) { out = add_loc_diag(st, ws.path_by_uri, out, ld) }
-  out
+  add_loc_diags(st, ws.path_by_uri, out0, workspace_walk_diags(ws.plan))
 }
 
 fn diagnostics_of_program(
@@ -1600,11 +1627,9 @@ fn diagnostics_of_program(
   path_by_uri: Map[String, String],
   prog: Program
 ) -> Map[String, List[Json]] !Fs !Env = {
-  var out: Map[String, List[Json]] = map.empty()
   # Positions go out to the editor, so they are resolved against the program
   # being published rather than against whatever revision produced them.
-  for ld in rendered_diags(prog) { out = add_loc_diag(st, path_by_uri, out, ld) }
-  out
+  add_loc_diags(st, path_by_uri, map.empty(), rendered_diags(prog))
 }
 
 ## Every module under the project's source root, when the project has a
@@ -1751,7 +1776,7 @@ fn diagnostics_of_problem(
   problem: LocDiag
 ) -> Map[String, List[Json]] !Fs !Env = {
   let out: Map[String, List[Json]] = map.empty()
-  add_loc_diag(st, path_by_uri, out, problem)
+  add_loc_diags(st, path_by_uri, out, [problem])
 }
 
 fn workspace_inputs(
