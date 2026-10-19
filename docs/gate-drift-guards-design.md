@@ -498,3 +498,69 @@ nightly 的审计步多一次 tile.yml 读取，本机慢链路实测 1 分 40 �
 - **审计 tile.yml 的 PR 运行**：一周 tile 的 job 秒三分之二在 PR 上，但声明的口径一直是 main 上的运行（`--branch main`），改口径要另裁。
 - **在 tile.yml 头注里同步写一段**：改 tile.yml 会触发七片 tile 运行，而这一刀不动它的任何声明；头注留给刀 C 重述 claim 时一起改。
 
+
+## incremental-memo-2 拆片、contracts-2/-1 腾余量（2026-10-19，#274）
+
+### 起因
+
+nightly 的 budget-observations 连续红。10-19 那次（run 39236124290）点名的里有两条是结构性的，不是慢宿主：
+
+- incremental-memo-2：声明 935 s，最坏 997 s（run 38576085599）。按 10-06 的重述规则（最坏 + max(十分之一, 一个标准差)）要 1,115 s，越 950 s pole。
+- contracts-2：10-15 封顶在 pole，10-16 把 atomic write 挪走后声明 880 s（规划值）；此后 17 次运行最坏 848 s、中位 805 s，再长一步就又贴 pole。
+- 顺带：contracts-1 声明 540 s，10-16 起几乎每次 550 s 到 578 s，最坏 623 s（run 39024859369），也在红单上。
+
+builtin-type-3-3（989 s）、dependency-heap-contract（184 s）是单次慢宿主，约 10-21 出窗口，不动。
+
+### 数据（60 次成功 main push，10-12T05:22Z .. 10-17T17:23Z，Actions API 的 step 计时）
+
+| job | 步骤 | 中位 / 最坏（s） |
+|---|---|---|
+| incremental-memo-2 | lsp-module-memo | 632 / 772 |
+| | body-executor | 106 / 130 |
+| | body-scheduler | 42 / 51 |
+| | 起机 + checkout + 工具链 | 约 40 / 48 |
+| | 整个 job | 830 / 997（sd 115） |
+| contracts-2（无 atomic write 的 17 次） | RC parameter-mode | 90 / 107 |
+| | 整个 job | 805 / 848（sd 127） |
+| contracts-1 | Inflate / opaque twin | 62 / 69，51 / 68 |
+| | 整个 job | 511 / 623（sd 74） |
+
+lsp-module-memo 一步就占 memo-2 的 772 s，**按整步重新发牌不可能把哪一片压到 700 s 以下**（10-08 那次重新分配的前提「步骤不可分」对它不成立）。
+它的八个对象（正样本 + 七个负控）各是一次 `dawn check` 加一次 `dawn test`，日志里每个对象的 `OK:` 时间戳间隔在 65 s 到 97 s 之间、彼此相等（run 39053565925、38576085599 等五次），
+所以可以按 index 取模分两片，4 + 4。
+
+### 做法（三刀，各一个提交）
+
+1. `lsp-module-memo.py` 加 `--shards N --shard I`（不带旗标时行为不变）、`--check-shards`、`--self-test`；memo-2 跑 shard 0，新 job incremental-memo-4 跑 shard 1。
+   正样本参与发牌而不是每片都跑：每片多一个对象就是多 80 s，而无正样本的那片仍然先套用全部锚点、每个负控必须编译、只认 owning 断言失败（与 module-memo.py 分片处的论证相同）。
+2. RC parameter-mode 从 contracts-2 挪到新 job contracts-3（同属 contracts 家族，steps.lock 不变）。contracts-1 是另一个候选，但它自己已经超声明，不能再收。
+3. contracts-3 只有一步、约 160 s，起机开销已经付了，于是把 contracts-1 的 Inflate 与 opaque twin 两步也挪过去，让 contracts-1 回到声明之下而不必重述。
+
+声明按回放算：把同 60 次运行的步骤计时按新切法重新相加（lsp-module-memo 取一半），取最坏 + max(十分之一, 一个标准差)，进到 5 s，timeout 取 3 倍。都是规划值，三次 main 运行后按观测重述。
+
+| job | 回放中位 / 最坏 / sd | 声明 |
+|---|---|---|
+| incremental-memo-2 | 510 / 611 / 71 | 935 → 685 s |
+| incremental-memo-4（新） | 360 / 430 / 48 | 480 s |
+| contracts-2 | 703 / 741 / 111 | 880 → 855 s |
+| contracts-3（新，第 2 刀后） | 147 / 158 / 21 | 180 s |
+| contracts-3（第 3 刀后） | 261 / 285 / 30 | 315 s |
+| contracts-1 | 398 / 488 / 56 | 540 → 545 s |
+
+push-total 20,263 → 20,493（第 1 刀）→ 20,648（第 2 刀）→ 20,788 s（第 3 刀），共 +525 s，各刀提交里带 `Gate-Budget(push-total)` 行。
+其中两个新 job 的固定开销约 100 s，其余是旧声明里低于观测的部分被如实写出来（contracts-1 的 540 s 本来就低于 623 s 的观测）。
+
+### 墙钟
+
+- 单 job 关键路径：同 60 次运行回放，每次运行最长 job 的中位 862 s → 776 s（-86 s）；最长 job 原来 29 次是 contracts-2、26 次是 incremental-memo-2，回放后分散到 contracts-2（多为 atomic write 还在时的旧形状）、memo-3、docs、memo-1。
+  最大值 997 s → 989 s（剩下的是 builtin-type-3-3 那次慢宿主）。
+- job-seconds：每次 push 中位 15,796 → 15,886 s（+88 s，两个新 job 的起机与工具链），排队下限（÷20 并发）+4.4 s。
+- 运行跨度（创建到最后一个 job 结束）这 60 次中位 1,224 s，由排队与派发决定，上面两项都不直接等于它；PR 的实测见报告。
+
+### 不做的（理由）
+
+- **重述 memo-2 到 997 s 以上**：越 pole，静态检查当场拒。
+- **把 lsp-module-memo 单独放一个 job、不分片**：772 s + 48 s ≈ 820 s 最坏，声明 900 s 上下，离 pole 只有 50 s，下一次增长又回到这里。
+- **四个 memo job 整体重新发牌**（含分片后的两半，最优最大片约 764 s）：要改 memo-1、memo-3 的步骤，三条声明一起丢窗口，换来的最大片比现在的切法还大。
+- **memo-3 的 cold 一并挪进 memo-4**：memo-3 最坏 819 s 对声明 820 s，确实很紧，但它不在本单范围，留给下一次审计。
+- **RC parameter-mode 挪进 memo-4 省一个 job**：跨家族挪步骤，steps.lock 上看是 contracts 家族丢了一步，而且两类契约放一起没有道理。

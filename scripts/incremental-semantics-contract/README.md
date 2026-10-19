@@ -161,7 +161,10 @@ text changed」），第六个换掉 `tast_positions.symbols` 的 resolver：体
 自己声明量的，加不回声明起点，查询就指向错误的位置。它的 owning 判词原是跨修订
 definition 案例，随重放引擎删了，现在是 `lsp/server` 的「handler state cell answers at
 every spelling of it」，同一个 resolver 的同修订读者。工作区计数测试在共享server里，
-同时由 JVM/native selfhost 套件运行。原有 `scripts/lsp-workspace-contract/run.sh`
+同时由 JVM/native selfhost 套件运行。`lsp-module-memo.py --shards N --shard I` 把正样本
+与负控（正样本排第一，负控按 mutate.py 的顺序）按 index 取模分片，不带旗标时行为不变；
+CI 用两片（incremental-memo-2 跑 shard 0，incremental-memo-4 跑 shard 1，2026-10-19 拆），
+`--self-test` 与 `--check-shards` 不编译，只验旗标与分片覆盖。原有 `scripts/lsp-workspace-contract/run.sh`
 另行守18个协议案例和20个资源/工作区负控，不能只靠新计数测试替代它。
 
 
