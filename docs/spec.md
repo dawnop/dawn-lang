@@ -3697,6 +3697,11 @@ RFC 4648 section 4 的标准字母表，`Url*` 用 section 5 的 url/文件名�
 | `dawnc fmt` / `doc` / `add` / `lsp` | 与 `dawn` 的同名子命令输出**逐字节一致**（`scripts/native-cli-diff.sh` 把这四件钉在 JVM 的字节上） |
 | `dawnc version` | 版本号（自报 `(native)`，故不与 `dawn --version` 逐字相同） |
 
+`dawnc build`、`run`、`test` 接受 `-O0`、`-O1`、`-O2`，选 cc 编发射出的 C 的优化级别（默认 `-O2`，三者相同；
+同一命令里写多次时最后一个生效；`run` 只在 target 之前读它，target 之后的词归程序）。这只改 cc 的优化，
+不改发射的 C 与语言语义；其它以 `-O` 开头的词报 `unknown optimization level` 并退出 2，不透传任意 cc 参数。
+理由与实测见 [native-opt-level-design.md](native-opt-level-design.md)。
+
 两个 `lsp` 子命令共用同一份 stdio framing。头部从首字节到 `CRLF CRLF` 最多
 8192 bytes：终止符恰好落在第 8192 byte 合法，到达上限仍未完成则立即拒绝。body 最多
 67108864 bytes。每个非空 header 行必须是 `1*tchar ":" field-value`；`tchar` 是 ASCII

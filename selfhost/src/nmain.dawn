@@ -110,6 +110,9 @@ fn usage() -> String =
     "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
     "--comptime-fuel <n> (check/build/emitc/run/test) is the steps each constant may",
     "take to fold, 0 or more (default 100000000).",
+    "-O0, -O1 or -O2 (build/run/test) is the level cc optimizes the emitted C at",
+    "(default -O2). -O0 compiles a large program several times faster and the",
+    "result runs slower; what a program prints does not depend on the level.",
     "--std <dir> names the std to compile against. Without it, DAWN_STD names one if",
     "set and not empty, and otherwise the std compiled into this toolchain is used;",
     "the working directory is never searched. A directory with a modules.txt must",
@@ -238,7 +241,13 @@ fn print_doc(out: doc.DocOut) -> Unit !Exit !Console !io =
     }
   }
 
-type RunArgs = { std_flag: Option[String], opts: CtOpts, target: String, program_args: List[String] }
+type RunArgs = {
+  std_flag: Option[String],
+  opts: CtOpts,
+  level: OptLevel,
+  target: String,
+  program_args: List[String]
+}
 
 fn run_usage() -> String =
   "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
@@ -247,6 +256,7 @@ fn run_usage() -> String =
 fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
   var std_flag: Option[String] = None
   var fuel = DEFAULT_FUEL
+  var level = Opt2
   var target = ""
   var seen_target = false
   var program_args: List[String] = []
@@ -269,6 +279,9 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
         Err(e) -> { cli_error(e) }
       }
       i = i + 1
+    } else if opt_word(rest[i]) != None {
+      level = opt_level_or_die(rest[i])
+      i = i + 1
     } else if rest[i] == "--" {
       cli_error(run_usage())
       i = i + 1
@@ -287,7 +300,7 @@ fn parse_run_tail(rest: List[String]) -> RunArgs !Exit !Console !io = {
       i = i + 1
     }
   }
-  RunArgs { std_flag: std_flag, opts: ct_fuel(fuel), target: target, program_args: program_args }
+  RunArgs { std_flag: std_flag, opts: ct_fuel(fuel), level: level, target: target, program_args: program_args }
 }
 
 ## `--std <dir>`, `-o <out>`, `--build-info <file.c>`, `--split <dir>` and
@@ -380,6 +393,76 @@ fn parse_build_tail(
   }
   (std_flag, out, target, wasm, reactor)
 }
+
+## The level cc optimizes the emitted C at, the one cc setting a caller picks
+## (docs/native-opt-level-design.md). Three words and no pass-through: the
+## command line `cc_build_with` assembles is part of this backend's codegen,
+## and an arbitrary flag would leave "what this C compiles to" undefined. A
+## caller who wants some other flag has the CC wrapper, which was the only way
+## to get -O0 before this existed.
+##
+## -O2 is the default for build, run and test alike. A test build runs with
+## the flags a release does (#239/#275), and a `run` reports the speed the
+## built binary has.
+type OptLevel = Opt0 | Opt1 | Opt2
+
+fn opt_flag(level: OptLevel) -> String =
+  match level {
+    Opt0 -> "-O0"
+    Opt1 -> "-O1"
+    Opt2 -> "-O2"
+  }
+
+## `None` for a word that is not an -O flag at all, an error for one that is
+## but names a level this backend does not offer. Everything starting `-O`
+## counts, so `-O3` is refused by name rather than read as a second target.
+fn opt_word(word: String) -> Option[Result[OptLevel, String]] =
+  if word == "-O0" {
+    Some(Ok(Opt0))
+  } else if word == "-O1" {
+    Some(Ok(Opt1))
+  } else if word == "-O2" {
+    Some(Ok(Opt2))
+  } else if str.starts_with(word, "-O") {
+    Some(Err("unknown optimization level `" ++ word ++ "`; this backend knows: -O0, -O1, -O2"))
+  } else {
+    None
+  }
+
+fn opt_level_or_die(word: String) -> OptLevel !Exit !Console !io =
+  match opt_word(word) {
+    Some(Ok(level)) -> level
+    Some(Err(e)) -> {
+      cli_error(e)
+      Opt2
+    }
+    None -> Opt2
+  }
+
+## The -O words taken out of a compiling command's argv, last one winning as
+## in cc. A whole-argv pass like `ct_opts_of`, for build and test, which have
+## no program arguments; `run` reads them in its own parser, before the target.
+fn take_opt_level(rest: List[String]) -> Result[(OptLevel, List[String]), String] = {
+  var level = Opt2
+  var out: List[String] = []
+  for a in rest {
+    match opt_word(a) {
+      Some(Ok(l)) -> { level = l }
+      Some(Err(e)) -> return Err(e)
+      None -> { out = out ++ [a] }
+    }
+  }
+  Ok((level, out))
+}
+
+fn opt_level_of(rest: List[String]) -> (OptLevel, List[String]) !Exit !Console !io =
+  match take_opt_level(rest) {
+    Ok(found) -> found
+    Err(e) -> {
+      cli_error(e)
+      (Opt2, rest)
+    }
+  }
 
 ## `--comptime-fuel` taken out of a compiling command's argv, the way the JVM
 ## driver's `extract_ct_opts` takes it (both parse with `interp.take_ct_fuel`).
@@ -547,8 +630,13 @@ fn default_out(target: String) -> String = {
 ## leave the binary at `out`. The cc diagnostics stream to this process's
 ## stderr -- an empty err_path means "inherit", and cc failing is the user's
 ## compile error to read.
-fn cc_build(ctext: String, out: String, inline_rc: Bool) -> Unit !Fs !Proc !Env !Exit !Console !io =
-  cc_build_for(ctext, "", out, false, false, inline_rc)
+fn cc_build(
+  ctext: String,
+  out: String,
+  inline_rc: Bool,
+  level: OptLevel
+) -> Unit !Fs !Proc !Env !Exit !Console !io =
+  cc_build_for(ctext, "", out, false, false, inline_rc, level)
 
 ## The reactor's only export, appended to the emitted C.
 ##
@@ -664,9 +752,10 @@ fn cc_build_for(
   out: String,
   wasm: Bool,
   reactor: Bool,
-  inline_rc: Bool
+  inline_rc: Bool,
+  level: OptLevel
 ) -> Unit !Fs !Proc !Env !Exit !Console !io =
-  cc_build_with(cc_command(wasm), ctext, info, out, wasm, reactor, inline_rc)
+  cc_build_with(cc_command(wasm), ctext, info, out, wasm, reactor, inline_rc, level)
 
 ## Stage the C sources and drive `cc` over them.
 ##
@@ -686,8 +775,12 @@ fn cc_build_with(
   out: String,
   wasm: Bool,
   reactor: Bool,
-  inline_rc: Bool
+  inline_rc: Bool,
+  level: OptLevel
 ) -> Unit !Fs !Proc !Exit !Console !io = {
+  # every cc command of the build compiles at the one level asked for, the
+  # wasm row's shim and tag included
+  let opt = opt_flag(level)
   let work = match io.temp_dir("", "dawnc") {
     Ok(d) -> d
     Err(e) -> {
@@ -758,7 +851,7 @@ fn cc_build_with(
   # compile that names C++, which is the harder one to have.
   if wasm {
     let shim = [
-      cc, "--target=${triple}", "-x", "c++", "-std=c++14", "-O2",
+      cc, "--target=${triple}", "-x", "c++", "-std=c++14", opt,
       "-fno-rtti", "-fwasm-exceptions",
       "-c", "${work}/dawn_rt_wasi_eh.cc", "-o", "${work}/dawn_rt_wasi_eh.o"
     ]
@@ -776,7 +869,7 @@ fn cc_build_with(
       }
     }
     let tag = [
-      cc, "--target=${triple}", "-std=c11", "-O2",
+      cc, "--target=${triple}", "-std=c11", opt,
       "-c", "${work}/dawn_rt_wasi_tag.c", "-o", "${work}/dawn_rt_wasi_tag.o"
     ]
     match io.run(tag, "", "") {
@@ -809,7 +902,7 @@ fn cc_build_with(
   let model: List[String] = if reactor { ["-mexec-model=reactor"] } else { [] }
   let argv = if wasm {
     [
-      cc, "--target=${triple}", "-std=c11", "-O2", "-fwrapv", "-fwasm-exceptions",
+      cc, "--target=${triple}", "-std=c11", opt, "-fwrapv", "-fwasm-exceptions",
       "-fno-strict-aliasing", "-Wno-parentheses-equality"
     ] ++ model ++ [
       "-I", work,
@@ -822,7 +915,7 @@ fn cc_build_with(
     # code only, and the module's size is what a wasm build is read for.
     let rc: List[String] = if inline_rc { ["-DDAWN_RT_INLINE_RC"] } else { [] }
     [
-      cc, "-std=c11", "-O2", "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"
+      cc, "-std=c11", opt, "-fwrapv", "-fexceptions", "-fno-strict-aliasing", "-pthread"
     ] ++ rc ++ [
       "-Wno-parentheses-equality", "-I", work,
       "-o", out
@@ -955,7 +1048,8 @@ fn cmd_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   # would take it for the target and report a missing file (which is what it
   # did until 2026-08-26).
   if wants_help(rest0) { return console_print(subcommand_help("build")) }
-  let (opts, rest) = ct_opts_of(rest0)
+  let (opts, rest1) = ct_opts_of(rest0)
+  let (level, rest) = opt_level_of(rest1)
   let (std_flag, out0, target, wasm, reactor) = parse_build_tail(
     "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
     rest
@@ -968,7 +1062,7 @@ fn cmd_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     out0
   }
   let (text, unit, _) = emitted_with(std_flag, target, opts, true, false)
-  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor, inline_rc_enabled())
+  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor, inline_rc_enabled(), level)
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
@@ -984,7 +1078,8 @@ fn build_and_exec(
   bin_name: String,
   what: String,
   program_args: List[String],
-  inline_rc: Bool
+  inline_rc: Bool,
+  level: OptLevel
 ) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
@@ -994,7 +1089,7 @@ fn build_and_exec(
     }
   }
   let bin = work ++ "/" ++ bin_name
-  cc_build(ctext, bin, inline_rc)
+  cc_build(ctext, bin, inline_rc, level)
   # The scratch tree goes before the exit, not after it: `io.exit` has no stack
   # to unwind, so a release placed on the way out is a release that never runs.
   # A build that failed keeps its directory -- `cc_build` reports and exits from
@@ -1020,7 +1115,8 @@ fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "program",
     "program",
     run.program_args,
-    inline_rc_enabled()
+    inline_rc_enabled(),
+    run.level
   )
 }
 
@@ -1162,7 +1258,8 @@ fn cmd_doc(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
 ## (`ct_opts_of`). `--closure` is not: no subcommand of this driver takes it,
 ## and that gap is the driver's, not this subcommand's.
 fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
-  let (opts, rest) = ct_opts_of(rest0)
+  let (opts, rest1) = ct_opts_of(rest0)
+  let (level, rest) = opt_level_of(rest1)
   var std_flag: Option[String] = None
   var target = ""
   var std_tests = false
@@ -1248,7 +1345,7 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       ""
     }
   }
-  build_and_exec(ctext, "dawnc-test", "tests", "tests", [], false)
+  build_and_exec(ctext, "dawnc-test", "tests", "tests", [], false, level)
 }
 
 ## `dawnc version`, and `dawnc version -m <project-dir | binary>...`: the JVM
@@ -1575,7 +1672,7 @@ test "the native build is one command line, and this is every flag in it" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, false))
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, false, Opt2))
       }
     )
     # no probe: nothing here is cross-compiled, so nothing is asked
@@ -1629,7 +1726,7 @@ test "an inline-RC native build adds exactly one define, right after -pthread" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, true))
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, true, Opt2))
       }
     )
     let argv = procmem.call_argv(log, 0)
@@ -1639,6 +1736,63 @@ test "an inline-RC native build adds exactly one define, right after -pthread" {
     assert argv[7] == "-DDAWN_RT_INLINE_RC"
     assert argv[8] == "-Wno-parentheses-equality"
     assert argv[9] == "-I"
+  })
+}
+
+test "a native build at another level differs in exactly that one flag" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-level-")
+    with d <- bracket(dir, scrub)
+    let out = "${d}/prog"
+    let (_, log) = procmem.with_proc_table(
+      [procmem.exited(0)],
+      () => {
+        with handle Exit {
+          exit_now(c) resume k => panic("cc_build_with exited with ${c}")
+        }
+        io.with_console_real(() =>
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", "", out, false, false, false, Opt0))
+      }
+    )
+    let argv = procmem.call_argv(log, 0)
+    # the plain native row, same length, -O0 where -O2 was
+    assert len(argv) == 15
+    assert argv[1] == "-std=c11"
+    assert argv[2] == "-O0"
+    assert argv[3] == "-fwrapv"
+    assert not str.contains(join(argv, " "), "-O2")
+  })
+}
+
+test "a wasm build at another level carries it in all three compiles" {
+  io.with_fs_real(() => {
+    let dir = scratch("dawn-cc-wasm-level-")
+    with d <- bracket(dir, scrub)
+    let crt = "${d}/crt1.o"
+    let _ = io.write_file(crt, "")
+    let out = "${d}/prog.wasm"
+    let (_, log) = procmem.with_proc_table(
+      [
+        procmem.wrote(bytes.utf8("${crt}\n")),
+        procmem.exited(0),
+        procmem.exited(0),
+        procmem.exited(0)
+      ],
+      () => {
+        with handle Exit {
+          exit_now(c) resume k => panic("cc_build_with exited with ${c}")
+        }
+        io.with_console_real(() =>
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, false, false, Opt1))
+      }
+    )
+    assert len(log) == 4
+    assert procmem.call_argv(log, 1)[5] == "-O1"
+    assert procmem.call_argv(log, 2)[3] == "-O1"
+    assert procmem.call_argv(log, 3)[3] == "-O1"
+    for k in [1, 2, 3] {
+      assert not str.contains(join(procmem.call_argv(log, k), " "), "-O2")
+    }
   })
 }
 
@@ -1673,7 +1827,7 @@ test "a build with a manifest links one more C file, after the runtime" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-cc", "int main(void) { return 0; }\n", unit, out, false, false, false))
+            cc_build_with("fake-cc", "int main(void) { return 0; }\n", unit, out, false, false, false, Opt2))
       }
     )
     let argv = procmem.call_argv(log, 0)
@@ -1700,7 +1854,7 @@ test "a text cut into units compiles every unit in the one command, in order" {
         with handle Exit {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
-        io.with_console_real(() => cc_build_with("fake-cc", text, "", out, false, false, false))
+        io.with_console_real(() => cc_build_with("fake-cc", text, "", out, false, false, false, Opt2))
       }
     )
     # one process still: the units are separate inputs to one cc, not a
@@ -1749,7 +1903,7 @@ test "the wasm build is four command lines, and these are every flag in them" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, false, false))
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, false, false, Opt2))
       }
     )
     # the probe, the C++ shim, the exception tag, the compile-and-link
@@ -1847,7 +2001,7 @@ test "a reactor build is the same link plus one flag" {
           exit_now(c) resume k => panic("cc_build_with exited with ${c}")
         }
         io.with_console_real(() =>
-            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, true, false))
+            cc_build_with("fake-clang", "int main(void) { return 0; }\n", "", out, true, true, false, Opt2))
       }
     )
     assert len(log) == 4
@@ -1974,6 +2128,60 @@ test "every dawnc command that compiles takes --comptime-fuel, and none takes a 
     == (Some(2), "error: --comptime-fuel needs a number, 0 or more\n", "")
   assert cli_read(() => cmd_run(["--comptime-fuel", "-1", NO_SUCH]))
     == (Some(2), "error: --comptime-fuel needs a number, 0 or more\n", "")
+}
+
+## `take_opt_level` with the level spelled back as its flag, so a case reads
+## as the argv it stands for.
+fn taken_opt(argv: List[String]) -> Result[(String, List[String]), String] =
+  match take_opt_level(argv) {
+    Ok(found) -> {
+      let (level, rest) = found
+      Ok((opt_flag(level), rest))
+    }
+    Err(e) -> Err(e)
+  }
+
+test "build and test take -O0, -O1 or -O2 out of the argv, -O2 when none is given" {
+  assert taken_opt(["a.dawn"]) == Ok(("-O2", ["a.dawn"]))
+  assert taken_opt(["-O0", "a.dawn", "-o", "out"]) == Ok(("-O0", ["a.dawn", "-o", "out"]))
+  assert taken_opt(["a.dawn", "-O1"]) == Ok(("-O1", ["a.dawn"]))
+  # the last one wins, as it does in cc
+  assert taken_opt(["-O0", "-O2", "a.dawn", "-O1"]) == Ok(("-O1", ["a.dawn"]))
+  # lower case is the output flag and stays where it is
+  assert taken_opt(["-o", "O0", "a.dawn"]) == Ok(("-O2", ["-o", "O0", "a.dawn"]))
+  let known = "; this backend knows: -O0, -O1, -O2"
+  assert taken_opt(["-O3", "a.dawn"]) == Err("unknown optimization level `-O3`" ++ known)
+  assert taken_opt(["a.dawn", "-Os"]) == Err("unknown optimization level `-Os`" ++ known)
+  assert taken_opt(["-O", "a.dawn"]) == Err("unknown optimization level `-O`" ++ known)
+  assert taken_opt(["-O00"]) == Err("unknown optimization level `-O00`" ++ known)
+}
+
+test "run reads its -O level before the target and leaves the program's arguments alone" {
+  let (status, _) = consolemem.with_console_table(() =>
+      exitmem.with_exit_capture(() => {
+        let r = parse_run_tail(["-O0", "--std", "s", "a.dawn", "--", "-O3", "-O1"])
+        assert opt_flag(r.level) == "-O0"
+        assert r.target == "a.dawn"
+        assert r.program_args == ["-O3", "-O1"]
+        let d = parse_run_tail(["a.dawn"])
+        assert opt_flag(d.level) == "-O2"
+      }))
+  assert status == None
+}
+
+test "every dawnc command that builds refuses an -O level it does not offer" {
+  let known = "; this backend knows: -O0, -O1, -O2\n"
+  assert cli_read(() => cmd_build(["-O3", NO_SUCH]))
+    == (Some(2), "error: unknown optimization level `-O3`" ++ known, "")
+  assert cli_read(() => cmd_build(["--target", "wasm", NO_SUCH, "-Ofast"]))
+    == (Some(2), "error: unknown optimization level `-Ofast`" ++ known, "")
+  assert cli_read(() => cmd_test([NO_SUCH, "-Os"]))
+    == (Some(2), "error: unknown optimization level `-Os`" ++ known, "")
+  assert cli_read(() => cmd_run(["-O", NO_SUCH]))
+    == (Some(2), "error: unknown optimization level `-O`" ++ known, "")
+  # after the target a word is the program's or a mistake, never a level
+  assert cli_read(() => cmd_run([NO_SUCH, "-O0"]))
+    == (Some(2), "error: " ++ run_usage() ++ "\n", "")
 }
 
 test "`dawnc fmt` refuses an argv with no path and one that names nothing" {

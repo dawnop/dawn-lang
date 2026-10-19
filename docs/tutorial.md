@@ -1548,6 +1548,11 @@ A program that does not call Java prints the same bytes under both. That is chec
 rather than hoped for: the repository runs its corpora through both backends and compares
 the output byte for byte, and the C backend compiles the compiler itself.
 
+`dawnc build`, `run` and `test` have `cc` optimize the C at `-O2`. Pass `-O0` (or `-O1`)
+when you would rather wait less for the compile than for the program: a large program
+builds several times faster and runs slower, and what it prints stays the same. Those
+three levels are the only ones; `dawnc` does not pass other flags through to `cc`.
+
 ### WebAssembly, and reactors
 
 `dawnc` has one more target. `dawnc build --target wasm app -o app.wasm` compiles the

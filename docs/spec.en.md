@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ a912735fab253ebc -->
+<!-- doc-check: translation-of docs/spec.md @ 91d34925098d9097 -->
 
 # Dawn Language Specification
 
@@ -4706,6 +4706,13 @@ release; it needs neither a JVM nor this repository):
 | `dawnc test <target>` | Compiles the variant that includes the test blocks and runs it |
 | `dawnc fmt` / `doc` / `add` / `lsp` | Output is **byte-for-byte identical** to `dawn`'s subcommands of the same name (`scripts/native-cli-diff.sh` pins these four to the JVM's bytes) |
 | `dawnc version` | The version number (it reports `(native)` itself, so it is not literally identical to `dawn --version`) |
+
+`dawnc build`, `run` and `test` accept `-O0`, `-O1` and `-O2`, the level `cc` optimizes the emitted C at (default `-O2`,
+the same for all three; written more than once in a command, the last one wins; `run` reads it only before the target,
+since the words after the target belong to the program). It changes only cc's optimization, not the emitted C or the
+language's semantics; any other word beginning with `-O` is refused with `unknown optimization level` and exit 2, and
+arbitrary cc flags are not passed through. The reasoning and measurements are in
+[native-opt-level-design.md](native-opt-level-design.md).
 
 The two `lsp` subcommands share one stdio-framing implementation. A header, from its
 first byte through `CRLF CRLF`, is at most 8192 bytes: a terminator completed exactly on
