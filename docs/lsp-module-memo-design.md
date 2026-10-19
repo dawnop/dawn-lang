@@ -4,6 +4,7 @@
 > 数据来源是 laziness L0 报告（`agent-handoff/laziness-l0-report-20260927.md`，基线 `b184de6e`）与本文第六节的实测。
 > 上一篇是 [incremental-semantics-removal.md](incremental-semantics-removal.md)：拆掉体级重放之后，生产 LSP 只剩 legacy 前缀复用；本文把它换成一条规则。
 > 刀 2（2026-09-30，分支 `feat/lsp-memo-by-imports`）：行起点跟着解析复用，复用条件从「进入时整条 carry 相同」收窄为「这一步读到的那部分 carry 相同」，见第十节。
+> 刀 3（2026-10-19，分支 `lsp/name-reuse`）：选择式导入只在点名的名字（及嫁接表）变了时重检，签名改动的 sync 中位数 779 → 256 ms，见第十二节。
 
 ## 一、问题
 
@@ -380,7 +381,34 @@ LSP A/B（`09851075` 不带观察的服务端对本刀带观察的服务端）�
 
 ### 12.7 实测
 
-（待回填）
+本机 16 核 WSL2，服务端 `lsp-configured.py --mode Legacy`，`-Xss512m -Xmx2g -XX:+UseSerialGC`；基线是 `88cdec0e`（含 `line_col` 二分）的干净快照，本刀是同一基线上加本刀提交的快照。
+方法同复测报告第一节：打开 `main`、`front/ast`、`check/checker`、`check/types`、`driver/analyze`、`jvm/emit`，每轮 (a)(b)(c) 三次编辑、顺序轮转，didChange 后立即发 barrier（不含防抖），预热 3 轮、测 7 轮；
+负载守卫：每个会话与每轮开始前 1 分钟 loadavg 高于 4 就等，所有计入的行 loadavg 在 2.5 到 3.9 之间。
+
+**(a)(b)(c)**（不带观察的服务端，基线与本刀交错 6 遍，每格 n = 42）：
+
+| 编辑 | 基线中位数 / p90 | 本刀中位数 / p90 | 六遍中位数（本刀） |
+|---|---|---|---|
+| (a) `driver/analyze` 体内 | 68 / 158 ms | 103 / 121 ms | 103 113 104 101 106 101 |
+| (b) `check/types` 的 `eff_suffix` 签名 | 779 / 993 ms | **256 / 301 ms** | 235 301 264 239 238 253 |
+| (c) `front/ast` 体内 | 35 / 110 ms | 36 / 74 ms | 36 42 35 36 36 36 |
+
+带观察的服务端（4 遍）计数：(b) 复用/重检 61/42 → **99/4**（`check/types` 自己与 `check/checker`、`check/passes`、`lsp/lspinlay`），(a)(c) 都是 102/1 不变。
+(a) 的中位数变高不是本刀的代价：两种服务端的 (a) 都是双峰（约 60 与 100 到 180 ms），GC 日志里一次 young GC 约 50 ms；基线的 (b) 每次重检 42 个模块，垃圾多，GC 多落在 (b) 里，本刀的 (b) 轻，GC 更常落在其后的 (a) 里。
+去掉 (b)、只交替 (a)(c) 的对照（交错 4 遍，n = 28）里两者相同：(a) 87 对 91 ms，(c) 44 对 48 ms。本刀对体内编辑只多了每个复用模块遍历一次自己的 `use` 行（`current_selective`）。
+
+**`check/types` 全部 150 个 `pub fn`**（裁决的抽样口径，这里不抽样，逐个实测）：同一打开集合，对每个函数在参数表末尾加 `l1_probe: Int = 0` 再删掉，各 2 次（每个函数 4 个样本），取每个函数的中位数：
+
+| | 基线（每函数 2 个样本） | 本刀 |
+|---|---|---|
+| 中位数 / p75 / p90 / 最大 | 732 / 846 / 956 / 1391 ms | **183 / 223 / 266 / 472 ms** |
+| ≤150 / ≤200 / ≤300 的函数占比 | 0 / 0 / 0 | 41% / 61% / 94% |
+| 每次重检的模块数（中位 / 最大） | 42 / 42 | 3 / 22 |
+
+L-ws 签名改动线是 p90 ≤ 300 ms：本刀 p90 266 ms，在线内（全部 600 个样本的 p90 为 281 ms）。超过 300 的 9 个函数都被 `check/checker` 点名、点名者 5 到 21 个（`adt_of` 472 ms 重检 22 个，`eff_labels` 460 ms，`trait_of` 389 ms）。
+调研 3.2 的模型预测中位数 207、p90 284，实测略好，差在模型的固定项 F 是刀 1 之前的值。加参数让 4 个函数的调用方出了诊断（函数值的元数变了），它们照样计入。
+
+LSP A/B：基线不带观察的服务端对本刀带观察的服务端，`lsp-project-matrix.py --expect-counts --compare` 十个修订、`lsp-edit-matrix.py --functions 1000 --compare` 十个修订全部逐字相同（夹具里的导入者点名了被改的函数，计数不变）；`selfhost-lsp-diff.sh` 221 条消息与上一 release 相同。没有 LSP 可见的输出变化，不写 `Emit-Change`。
 
 ### 12.8 契约
 
