@@ -1210,21 +1210,27 @@ def attr_cases(good, bytecode, files, ledger):
          good.replace("rounding.approx              | 4 | 13.1 | implemented   | T4 ",
                       "rounding.approx              | 4 | 13.1 | implemented   | T14"),
          "knife 'T14' cannot be a planned one"),
-        # The anchor has moved with the table. It was a deferred row from
+        # The anchor has moved with the table twice. It was a deferred row from
         # knife T10 on (padding.neg_inf, then the atomic modes), and the last
-        # of those, `rmw.xchg`, became implemented with knife T17. What is
-        # left unimplemented is 13.4's `ptr_attr.none`, planned for T21, so
-        # the case puts it under a knife that HAS landed.
+        # of those, `rmw.xchg`, became implemented with knife T17; after that it
+        # was 13.4's `ptr_attr.none`, left unimplemented for a planned T21 until
+        # the row was found to be true of nothing (the writer emits the 0) and
+        # became implemented with the exemption `no-nonzero-consumer`. No row
+        # is unimplemented or deferred now, so both cases rewrite that row into
+        # the state under test.
         ("an unimplemented row under a knife that has landed",
-         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T21 ",
-                      "ptr_attr.none                | 0 | 13.4 | unimplemented | T8  "),
+         re.sub(r"^ptr_attr\.none .*$",
+                "ptr_attr.none                | 0 | 13.4 | unimplemented | T8  | 0 | -    | -",
+                good, count=1, flags=re.M),
          "so its knife is a planned one"),
-        # No row is deferred since knife T17, so this one makes the T21 row
-        # deferred and leaves its exemption column at `-`.
         ("a deferred row with no reason",
-         good.replace("ptr_attr.none                | 0 | 13.4 | unimplemented | T21 ",
-                      "ptr_attr.none                | 0 | 13.4 | deferred      | -   "),
+         re.sub(r"^ptr_attr\.none .*$",
+                "ptr_attr.none                | 0 | 13.4 | deferred      | -   | 0 | -    | -",
+                good, count=1, flags=re.M),
          "is deferred with no named reason"),
+        ("an implemented row below the bar with no reason",
+         good.replace("| no-nonzero-consumer", "| -", 1),
+         "ptr_attr.none stops at layer 1 and names no reason"),
         ("an empty ledger", "# nothing\n",
          "is a value of an attribute domain and has no row"),
     ]
