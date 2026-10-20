@@ -31,6 +31,7 @@ prints one line per family, `<family> <module> <cubin count>`, which run.sh
 reads.
 """
 import argparse
+import json
 import re
 import shutil
 import sys
@@ -68,7 +69,14 @@ FAMILIES = [
     ("hint", "hint_diff.dawn", "hint_order"),
     ("seq", "seq_diff.dawn", "seq_order"),
     ("scalar", "scalar_diff.dawn", "scalars"),
+    # architecture-gated kernels (fp8, fp4, scaled mma): the card decides which
+    # a cubin run can try, the interpreter has no card and tries all of them
+    ("arch", "arch_diff.dawn", "arch_kernels"),
 ]
+
+# families whose program takes `<kernel> <cubin>` pairs: the placeholder
+# arguments name the run.sh array's kernels, each with a cubin path
+NAMED = {"arch"}
 
 
 def run_sh_arrays():
@@ -89,9 +97,10 @@ def run_sh_arrays():
     return arrays
 
 
-def transform(src: str, n: int, path: str) -> str:
+def transform(src: str, n, path: str) -> str:
     out = src
-    for old, new in (("with_gpu_real(", "interp_gpu_real("), ("args()", f"placeholder_args({n})"),
+    placeholder = f"named_args({json.dumps(n)})" if isinstance(n, list) else f"placeholder_args({n})"
+    for old, new in (("with_gpu_real(", "interp_gpu_real("), ("args()", placeholder),
                      ("pub fn main() -> Unit !io", "pub fn family_main() -> Unit !io")):
         if old not in out:
             sys.exit(f"build.py: {path} has no `{old}`; the substitution it relies on is gone")
@@ -102,7 +111,8 @@ def transform(src: str, n: int, path: str) -> str:
         sys.exit(f"build.py: could not drop `with_gpu_real` from {path}'s std/gpu import")
     lines = out.split("\n")
     first_use = next(i for i, ln in enumerate(lines) if ln.startswith("use "))
-    lines.insert(first_use, "use glue.{interp_gpu_real, placeholder_args}")
+    helper = "named_args" if "named_args(" in out else "placeholder_args"
+    lines.insert(first_use, f"use glue.{{interp_gpu_real, {helper}}}")
     return "\n".join(lines)
 
 
@@ -139,7 +149,8 @@ def main():
         if n == 0:
             sys.exit(f"build.py: run.sh has no array `{count}` for family {fam}")
         mod = file[:-len(".dawn")]
-        (out / "src" / file).write_text(transform((DIFF / file).read_text(), n, str(DIFF / file)))
+        arg = arrays[count] if fam in NAMED else n
+        (out / "src" / file).write_text(transform((DIFF / file).read_text(), arg, str(DIFF / file)))
         mods.append((fam, mod, n))
     (out / "src" / "kernels.dawn").write_text(kernels_module())
     shutil.copy(HERE / "glue.dawn", out / "src" / "glue.dawn")
