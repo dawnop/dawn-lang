@@ -2,8 +2,8 @@
 
 > 改名说明（2026-10-12）：文中的 `Tensor[D]`（`std/gpu` 的宿主缓冲类型）今天叫 `DeviceBuffer[D]`；本文按当时的名字写成，不逐处改动。
 
-> 状态：**proposed**。2026-10-06 写成，范围与刀序可读；§9 的八个开放问题已于同日裁决并写入本文（改动处已同步），但整篇尚未经评审通过，动码前仍以各刀自己的验收为准。
-> 实现按两个 PR 切（§7）：A（F0 + U1，纯增量，不动 tile 输入摘要，PR #590）、B（其余全部：S2 + L3 + M + U2 + R，含 kernel 迁移、`neg_inf` 换 `-INFINITY`、`FP16`→`F16` 与唯一一次台账重录）。A 已落地，见 §7。
+> 状态：**current**（已全部落地，tileir 0.11.0，2026-10-07 发布）。2026-10-06 写成，§9 的八个开放问题已于同日裁决并写入本文（改动处已同步）。
+> 实现按两个 PR 切（§7）：A（F0 + U1，纯增量，不动 tile 输入摘要，PR #590）、B（其余全部：S2 + L3 + M + U2 + R，含 kernel 迁移、`neg_inf` 换 `-INFINITY`、`FP16`→`F16` 与唯一一次台账重录）。A 与 B 都已落地，与计划的差异见 §7.1；核实依据是 `packages/tileir/CHANGELOG.md` 的 0.11.0 条目。
 > 它不引入新的语言特性，只把四条各自已有裁决的改动排进同一个 tileir 版本，并回答「谁先谁后、哪些必须同 PR、
 > golden 靠什么证明没动」。四条的权威设计各在自己的文档：
 > [staged-for-design.md](staged-for-design.md)（`for` + `var`）、[arith-operator-traits-design.md](arith-operator-traits-design.md)
