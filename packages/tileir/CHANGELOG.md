@@ -7,6 +7,19 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## Unreleased: no code change, a new reader of `lower`
+
+`packages/tileinterp` 0.1.0 (`docs/tileinterp-design.md`) interprets the
+lowered table, and the read-only interface it needs was already public:
+`lower.lower(prog) -> Kernel` and the `Kernel`, `Instr`, `Ty`, `Elem` and
+`Ref` types with every constructor, plus `dev`'s `RedId`, `AssumePred`,
+`Padding` and `DYN_DIM`. Nothing was added or widened, so the version stays
+0.17.0 and the layer-2 input digest does not move. What changes is the
+contract around them: tileinterp matches `Instr` exhaustively, so a new
+variant no longer compiles until the interpreter answers it (or refuses it
+by name in `interp.unsupported_in`). A new opcode lands in three places from
+now on: `lower`, `bytecode` and the interpreter.
+
 ## 0.17.0 (2026-10-11)
 
 Breaking, in one place (`docs/tile-backend-design.md` section 6.36, knife

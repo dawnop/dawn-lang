@@ -1,0 +1,203 @@
+## Kernels recorded with packages/tileir and run through the interpreter,
+## each answer written down by hand. No function here is public.
+#
+# Why the expectations are numbers and not tileref calls: this package must
+# not depend on packages/tileref (its manifest says why), and the CI
+# comparison against tileref lives in scripts/tileinterp-diff. What these
+# tests pin is what that comparison cannot: that an unimplemented
+# instruction is REFUSED by name rather than skipped, and that the
+# undefined-behaviour checks fire.
+use std/list
+use std/map
+use std/str
+use std/dtype.{F64}
+use std/gpu.{Gpu, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, Buffer, encode_floats,
+  decode_floats, WideRefFn }
+use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, load_cell, store_cell, add, mul, tail_mask,
+  f_const, mma, sqrt, reduce_sum, scan_sum, d_range, idx_const, broadcast, DYN_DIM }
+use tileir/prog.{TileProg, trace_kernel, ByPtr, trace3, cells, In, Out}
+use interp.{interp_ref, interp_kernel, unsupported_in}
+use device.{with_gpu_interp, with_gpu_interp_log}
+use tileir/lower.{lower}
+
+const W: Int = 8
+
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
+  store_cell(out, add(load_cell(a), load_cell(b)))
+
+fn vadd_prog() -> TileProg = {
+  let g = cells([DYN_DIM], [W])
+  let (p, _e) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  p
+}
+
+# Ten lanes over two blocks of eight: the second block's last six lanes are
+# masked off, read the padding 0.5 and are not written.
+fn tail(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), W)
+  let m = tail_mask(blk, [W], 10)
+  let t = load(x, blk, [W], mask: Some(m), pad: Some(broadcast(f_const(F64, 0.5), [W])))
+  store(out, blk, mul(t, f_const(F64, 2.0)), mask: Some(m))
+}
+
+fn tail_prog() -> TileProg = trace_kernel("tail", [ByPtr("f64"), ByPtr("f64")], () => tail(param(F64, 0), param(F64, 1)))
+
+# The block's sum in lane 0 of its own block of `out`, the prefix sums in
+# the next block, and the square root of the sum in the third.
+fn folds(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let t = load(x, idx_const(0), [W])
+  store(out, idx_const(0), broadcast(reduce_sum(t), [W]))
+  store(out, idx_const(W), scan_sum(t))
+  store(out, idx_const(2 * W), broadcast(sqrt(reduce_sum(t)), [W]))
+}
+
+fn folds_prog() -> TileProg = trace_kernel("folds", [ByPtr("f64"), ByPtr("f64")], () => folds(param(F64, 0), param(F64, 1)))
+
+# A `for` that adds the four 8-lane chunks of `x`.
+fn chunks(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  var acc = load(x, idx_const(0), [W])
+  for k in d_range(1, 4) { acc = acc + load(x, tile_at(k, W), [W]) }
+  store(out, idx_const(0), acc)
+}
+
+fn chunks_prog() -> TileProg = trace_kernel("chunks", [ByPtr("f64"), ByPtr("f64")], () => chunks(param(F64, 0), param(F64, 1)))
+
+# A matrix product, which subset A does not interpret.
+fn product(a: Param[Float], c: Param[Float]) -> Unit !Dev = {
+  let t = load(a, idx_const(0), [W, W])
+  store(c, idx_const(0), mma(t, t, broadcast(f_const(F64, 0.0), [W, W])))
+}
+
+fn product_prog() -> TileProg = trace_kernel("product", [ByPtr("f64"), ByPtr("f64")], () => product(param(F64, 0), param(F64, 1)))
+
+# A store one block past where the kernel is told the buffer ends: on a
+# buffer of W the second block writes outside it.
+fn overrun(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let blk = tile_at(block_id(0), W)
+  store(out, blk, load(x, idx_const(0), [W]))
+}
+
+fn overrun_prog() -> TileProg = trace_kernel("overrun", [ByPtr("f64"), ByPtr("f64")], () => overrun(param(F64, 0), param(F64, 1)))
+
+# A masked load with no padding, stored without the mask: the masked lanes
+# are unspecified on the device, and storing them is using them.
+fn leak(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let m = tail_mask(idx_const(0), [W], 5)
+  store(out, idx_const(0), load(x, idx_const(0), [W], mask: Some(m)))
+}
+
+fn leak_prog() -> TileProg = trace_kernel("leak", [ByPtr("f64"), ByPtr("f64")], () => leak(param(F64, 0), param(F64, 1)))
+
+fn floats(n: Int, f: fn(Int) -> Float) -> List[Float] = list.map(range(0, n), f)
+
+# One launch of `name` (registered as `f`) on `bufs` under the fake device,
+# answering the last buffer or the refusal's kind and message.
+fn on_fake(name: String, f: WideRefFn, bufs: List[List[Float]]) -> Result[List[Float], ForeignError] =
+  with_gpu_fake(map.from([(name, (len(bufs), f))]), () => run(name, 1, bufs))
+
+fn run(name: String, grid: Int, bufs: List[List[Float]]) -> Result[List[Float], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for b in bufs {
+    let h = gpu_alloc("f64", len(b))?
+    gpu_copy_from_host(h, encode_floats("f64", b))?
+    hs = hs ++ [h]
+  }
+  gpu_launch(name, grid, 1, 1, list.map(hs, h => Buffer(h)))?
+  Ok(decode_floats("f64", gpu_copy_to_host(hs[len(hs) - 1])?))
+}
+
+test "vadd over three blocks, through interp_ref and the fake device" {
+  let xs = floats(3 * W, i => to_float(i) * 0.5)
+  let ys = floats(3 * W, i => 100.0 - to_float(i))
+  let r = with_gpu_fake(map.from([("vadd", (3, interp_ref(vadd_prog(), [3])))]),
+    () => run("vadd", 3, [xs, ys, floats(3 * W, _i => 0.0)]))
+  assert r == Ok(floats(3 * W, i => to_float(i) * 0.5 + 100.0 - to_float(i)))
+}
+
+test "the grid comes from each launch under with_gpu_interp, so one table serves every size" {
+  let progs = (name: String) => map.get(map.from([("vadd", vadd_prog())]), name)
+  let xs = floats(5 * W, i => to_float(i))
+  let (r, log) = with_gpu_fake(map.empty(), () => with_gpu_interp_log(progs, () => run("vadd", 5, [xs, xs, floats(5 * W, _i => 0.0)])))
+  assert r == Ok(floats(5 * W, i => 2.0 * to_float(i)))
+  assert log == ["vadd ok"]
+  # an unknown name is the fake device's refusal, not a crash
+  let none = with_gpu_fake(map.empty(), () => with_gpu_interp(progs, () => run("nope", 1, [xs])))
+  assert match none {
+    Err(e) -> e.kind == "gpu.no_kernel"
+    Ok(_) -> false
+  }
+}
+
+test "a masked tail reads the padding and leaves the lanes past the end as they were" {
+  let xs = floats(16, i => to_float(i + 1))
+  let out = floats(16, _i => 0.0 - 1.0)
+  let r = with_gpu_fake(map.from([("tail", (2, interp_ref(tail_prog(), [2])))]), () => run("tail", 2, [xs, out]))
+  assert r == Ok(floats(16, i => if i < 10 { 2.0 * to_float(i + 1) } else { 0.0 - 1.0 }))
+}
+
+test "a reduction, a scan and a correctly rounded square root" {
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let r = on_fake("folds", interp_ref(folds_prog(), [1]), [xs, floats(3 * W, _i => 0.0)])
+  let want = floats(W, _i => 36.0) ++ [1.0, 3.0, 6.0, 10.0, 15.0, 21.0, 28.0, 36.0] ++ floats(W, _i => 6.0)
+  assert r == Ok(want)
+}
+
+test "a for loop carries its accumulator" {
+  let xs = floats(4 * W, i => to_float(i))
+  let r = on_fake("chunks", interp_ref(chunks_prog(), [1]), [xs, floats(W, _i => 0.0)])
+  assert r == Ok(floats(W, j => to_float(4 * j + 48)))
+}
+
+test "an instruction outside subset A is refused by name before anything runs" {
+  let k = lower(product_prog())
+  assert match unsupported_in(k) {
+    Some(why) -> str.contains(why, "mmaf")
+    None -> false
+  }
+  match interp_kernel(k, [1], ["f64", "f64"], [floats(W * W, _i => 1.0), floats(W * W, _i => 0.0)], []) {
+    Err(e) -> {
+      assert e.kind == "interp.unsupported_op"
+      assert str.contains(e.message, "mmaf")
+    }
+    Ok(_) -> { assert false }
+  }
+  # every subset A kernel above is accepted by the same walk
+  assert list.all([vadd_prog(), tail_prog(), folds_prog(), chunks_prog()], p => unsupported_in(lower(p)) == None)
+}
+
+test "a store past the end of its buffer is undefined behaviour, refused" {
+  let k = lower(overrun_prog())
+  match interp_kernel(k, [2], ["f64", "f64"], [floats(W, _i => 1.0), floats(W, _i => 0.0)], []) {
+    Err(e) -> {
+      assert e.kind == "interp.ub"
+      assert str.contains(e.message, "store_ptr_tko")
+    }
+    Ok(_) -> { assert false }
+  }
+  # with the checks off the lanes outside the buffer are dropped
+  assert interp_kernel(k, [2], ["f64", "f64"], [floats(W, _i => 1.0), floats(W, _i => 0.0)], [], ub_checks: false)
+    == Ok([(1, floats(W, _i => 1.0))])
+}
+
+test "storing a lane a masked load left unspecified is undefined behaviour, refused" {
+  let k = lower(leak_prog())
+  match interp_kernel(k, [1], ["f64", "f64"], [floats(W, i => to_float(i)), floats(W, _i => 0.0)], []) {
+    Err(e) -> {
+      assert e.kind == "interp.ub"
+      assert str.contains(e.message, "undefined")
+    }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "a launch that does not fit the kernel is refused as such" {
+  let k = lower(vadd_prog())
+  match interp_kernel(k, [1], ["f64", "f64"], [floats(W, _i => 1.0), floats(W, _i => 0.0)], []) {
+    Err(e) -> { assert e.kind == "interp.bad_launch" }
+    Ok(_) -> { assert false }
+  }
+  match interp_kernel(k, [1], ["f64", "i32", "f64"], [floats(W, _i => 1.0), floats(W, _i => 1.0), floats(W, _i => 0.0)], []) {
+    Err(e) -> { assert e.kind == "interp.bad_launch" }
+    Ok(_) -> { assert false }
+  }
+}

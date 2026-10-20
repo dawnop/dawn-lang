@@ -1,0 +1,722 @@
+## The binary64 arithmetic the interpreter needs beyond `+ - * /`: the
+## correctly rounded square root, the directed roundings, flush to zero, the
+## integer-valued roundings and thirteen transcendental functions.
+#
+# Why these are written here and not imported from packages/tileref. The
+# interpreter's verdict in CI is "interpreter against tileref", and tileref
+# is the host's second opinion on the device. If the interpreter called
+# tileref's `ref_exp`, a transcendental kernel would agree with its reference
+# by construction and the comparison would say nothing about it (the
+# 2026-10-20 ruling, item 4). So every function below takes a different road
+# from tileref's: `exp` squares its way back from `x / 1024` where tileref
+# reduces by `k * ln2`, `log` runs Halley's iteration on that `exp` where
+# tileref sums the atanh series, the circular functions reduce by a
+# three-part pi/2 and the arctangent halves its argument twice. They are
+# tolerance-tier functions (atol = rtol = 1e-5, docs/tile-backend-design.md
+# 6.6) and are accurate to about 1e-13 relative, which is far inside it.
+#
+# The square root and the directed roundings are a different matter: they
+# are EXACT operations on the device, so these are exact too, by Dekker's
+# error-free product and Knuth's TwoSum, with the argument scaled into a
+# range where neither can overflow or underflow. Dawn has no fused
+# multiply-add on the host and std/narrow deliberately offers none, so the
+# products are split by Veltkamp's constant 2^27 + 1.
+use std/narrow
+
+## The positive infinity.
+pub const INF: Float = 1.0 / 0.0
+
+## A quiet NaN.
+pub const NAN: Float = 0.0 / 0.0
+
+## The bit pattern of `x` (binary64), and its inverse.
+pub fn bits_of(x: Float) -> Int = narrow.f64_bits(x)
+
+## The binary64 value whose bit pattern is `b`.
+pub fn float_of(b: Int) -> Float = narrow.f64_of_bits(b)
+
+## The sign bit of a binary64 pattern.
+pub const SIGN_BIT: Int = 1 << 63
+
+const EXP_MASK: Int = 0x7FF0000000000000
+const MANT_MASK: Int = 0x000FFFFFFFFFFFFF
+
+## `x` is a NaN.
+pub fn is_nan(x: Float) -> Bool = x != x
+
+## `x` is neither infinite nor a NaN.
+pub fn is_finite(x: Float) -> Bool = x == x && x != INF && x != 0.0 - INF
+
+## The sign bit of `x` is set (so `-0.0` and negative NaNs count).
+pub fn sign_bit(x: Float) -> Bool = (bits_of(x) & SIGN_BIT) != 0
+
+## `x` is a nonzero subnormal number.
+pub fn is_subnormal(x: Float) -> Bool = {
+  let b = bits_of(x)
+  (b & EXP_MASK) == 0 && (b & MANT_MASK) != 0
+}
+
+## The zero with the sign of `x`.
+pub fn signed_zero(x: Float) -> Float = if sign_bit(x) { float_of(SIGN_BIT) } else { 0.0 }
+
+## `x` with subnormals replaced by the zero of their sign: the dialect's
+## `flush_to_zero`, which applies to the inputs and to the result.
+pub fn flush(x: Float) -> Float = if is_subnormal(x) { signed_zero(x) } else { x }
+
+## The next binary64 value above `x` (toward +inf). `+inf` and NaN are
+## their own successor; the successor of `-0.0` and of `+0.0` is the least
+## positive subnormal.
+pub fn next_up(x: Float) -> Float =
+  if is_nan(x) || x == INF {
+    x
+  } else if x == 0.0 {
+    float_of(1)
+  } else {
+    let b = bits_of(x)
+    if sign_bit(x) { float_of(b - 1) } else { float_of(b + 1) }
+  }
+
+## The next binary64 value below `x` (toward -inf).
+pub fn next_down(x: Float) -> Float = 0.0 - next_up(0.0 - x)
+
+## 2^k as a Float, for any k binary64 can hold (subnormal results included).
+pub fn pow2(k: Int) -> Float =
+  if k > 1023 {
+    INF
+  } else if k >= 0 - 1022 {
+    float_of((k + 1023) << 52)
+  } else if k >= 0 - 1074 {
+    float_of(1 << (k + 1074))
+  } else {
+    0.0
+  }
+
+## `x * 2^k` by at most three exact steps, so that a result in the
+## subnormal range is rounded once.
+pub fn scale(x: Float, k: Int) -> Float =
+  if k > 1000 {
+    scale(x * pow2(1000), k - 1000)
+  } else if k < 0 - 1000 {
+    # one step into the subnormal range at most, so the rounding happens once
+    if k < 0 - 2000 { x * pow2(0 - 1000) * pow2(0 - 1000) * pow2(k + 2000) } else { x * pow2(0 - 1000) * pow2(k + 1000) }
+  } else {
+    x * pow2(k)
+  }
+
+## The binary exponent of a finite nonzero `x`: `x = m * 2^e` with `m` in
+## `[1, 2)`.
+pub fn exponent_of(x: Float) -> Int = {
+  let b = bits_of(x) & (0 - 1 - SIGN_BIT)
+  let e = (b >>> 52) & 0x7FF
+  if e == 0 {
+    # subnormal: renormalise by 2^64 first
+    exponent_of(x * pow2(64)) - 64
+  } else {
+    e - 1023
+  }
+}
+
+# Veltkamp's split: `x = hi + lo` with each half 26 bits wide, exact as long
+# as `x * (2^27 + 1)` does not overflow.
+fn split(x: Float) -> (Float, Float) = {
+  let c = 134217729.0 * x
+  let hi = c - (c - x)
+  (hi, x - hi)
+}
+
+## Dekker's product: `(p, e)` with `p = fl(a * b)` and `a * b = p + e`
+## EXACTLY, provided neither the product nor the splits overflow and the
+## product does not underflow. Callers scale into range first.
+pub fn two_prod(a: Float, b: Float) -> (Float, Float) = {
+  let p = a * b
+  let (ah, al) = split(a)
+  let (bh, bl) = split(b)
+  let e = ((ah * bh - p) + ah * bl + al * bh) + al * bl
+  (p, e)
+}
+
+## Knuth's TwoSum: `(s, e)` with `s = fl(a + b)` and `a + b = s + e` exactly,
+## for finite operands whose sum does not overflow.
+pub fn two_sum(a: Float, b: Float) -> (Float, Float) = {
+  let s = a + b
+  let bb = s - a
+  let e = (a - (s - bb)) + (b - bb)
+  (s, e)
+}
+
+## The correctly rounded square root of `x` (ties cannot occur). NaN for a
+## negative or NaN operand, `x` itself for either zero and for `+inf`.
+##
+## `x = m * 4^k` with `m` in `[1, 4)`, Newton's iteration for `sqrt(m)`, then
+## the exact test that picks the right neighbour: `y` is `sqrt(m)` rounded
+## to nearest iff `pred(y) * y < m <= y * succ(y)`, both products formed
+## exactly by `two_prod` (the quarter-ulp-squared term that separates the
+## true midpoint square from these products is below the granularity both
+## sides of each comparison share, so it cannot change the answer).
+pub fn sqrt_rn(x: Float) -> Float =
+  if is_nan(x) || x < 0.0 {
+    NAN
+  } else if x == 0.0 || x == INF {
+    x
+  } else {
+    let e = exponent_of(x)
+    let k = if e >= 0 { e / 2 } else { 0 - ((1 - e) / 2) }
+    let m = scale(x, 0 - 2 * k)
+    var y = 1.0 + (m - 1.0) * 0.4
+    var i = 0
+    while i < 6 {
+      y = 0.5 * (y + m / y)
+      i = i + 1
+    }
+    var moved = true
+    var guard = 0
+    while moved && guard < 8 {
+      moved = false
+      if exceeds(m, y, next_up(y)) {
+        y = next_up(y)
+        moved = true
+      } else if not exceeds(m, next_down(y), y) {
+        y = next_down(y)
+        moved = true
+      }
+      guard = guard + 1
+    }
+    scale(y, k)
+  }
+
+# `m > a * b`, decided exactly. `a * b` is close to `m` (within a factor of
+# two), so `m - p` is exact by Sterbenz's lemma and the comparison with the
+# product's error term is exact too.
+fn exceeds(m: Float, a: Float, b: Float) -> Bool = {
+  let (p, e) = two_prod(a, b)
+  m - p > e
+}
+
+## A rounding direction for the operations that take one.
+pub type Dir = ToNearest | Downward | Upward
+
+## The value `r`, the round-to-nearest result of an exact operation, moved to
+## the directed result: `err` is the sign of `exact - r` (-1, 0 or 1).
+pub fn directed(r: Float, err: Int, dir: Dir) -> Float = match dir {
+  ToNearest -> r
+  Downward -> if err < 0 { next_down(r) } else { r }
+  Upward -> if err > 0 { next_up(r) } else { r }
+}
+
+fn sign_of(x: Float) -> Int = if x > 0.0 { 1 } else if x < 0.0 { 0 - 1 } else { 0 }
+
+## `a + b` rounded in direction `dir`.
+pub fn add_dir(a: Float, b: Float, dir: Dir) -> Float = {
+  let s = a + b
+  match dir {
+    ToNearest -> s
+    _ ->
+      if not is_finite(a) || not is_finite(b) {
+        s
+      } else if not is_finite(s) {
+        # finite operands that overflowed: the exact sum is finite
+        directed(s, 0 - sign_of(s), dir)
+      } else if s == 0.0 {
+        exact_zero_sum(a, b, dir)
+      } else {
+        let (_s, e) = two_sum(a, b)
+        directed(s, sign_of(e), dir)
+      }
+  }
+}
+
+# The sign of an exactly zero sum: IEEE 754 6.3 gives `-0` under roundTowardNegative
+# when the operands have opposite signs (or are zeros of opposite sign), and
+# `+0` under every other mode; two zeros of one sign keep it.
+fn exact_zero_sum(a: Float, b: Float, dir: Dir) -> Float =
+  if a == 0.0 && b == 0.0 && sign_bit(a) == sign_bit(b) {
+    a
+  } else {
+    match dir {
+      Downward -> float_of(SIGN_BIT)
+      _ -> 0.0
+    }
+  }
+
+## `a * b` rounded in direction `dir`.
+pub fn mul_dir(a: Float, b: Float, dir: Dir) -> Float = {
+  let p = a * b
+  match dir {
+    ToNearest -> p
+    _ ->
+      if not is_finite(a) || not is_finite(b) || a == 0.0 || b == 0.0 {
+        p
+      } else {
+        # scale both factors into [1, 2) so the product's error is exact,
+        # then decide the sign of `exact - p` at the original scale
+        let ea = exponent_of(a)
+        let eb = exponent_of(b)
+        let ma = scale(a, 0 - ea)
+        let mb = scale(b, 0 - eb)
+        let (pm, em) = two_prod(ma, mb)
+        if not is_finite(p) {
+          directed(p, 0 - sign_of(p), dir)
+        } else {
+          # `p * 2^-(ea+eb)` is exact (a scaling up never drops a bit), and
+          # close enough to `pm` for their difference to be exact as well
+          let back = scale(p, 0 - ea - eb)
+          directed(p, cmp_sum(pm - back, em), dir)
+        }
+      }
+  }
+}
+
+# The sign of `d + e`, decided without rounding the sum.
+fn cmp_sum(d: Float, e: Float) -> Int = if d > 0.0 - e { 1 } else if d < 0.0 - e { 0 - 1 } else { 0 }
+
+## `a / b` rounded in direction `dir`.
+pub fn div_dir(a: Float, b: Float, dir: Dir) -> Float = {
+  let q = a / b
+  match dir {
+    ToNearest -> q
+    _ ->
+      if not is_finite(a) || not is_finite(b) || a == 0.0 || b == 0.0 || not is_finite(q) {
+        if is_finite(a) && is_finite(b) && b != 0.0 && not is_finite(q) {
+          directed(q, 0 - sign_of(q), dir)
+        } else {
+          q
+        }
+      } else {
+        let ea = exponent_of(a)
+        let eb = exponent_of(b)
+        let ma = scale(a, 0 - ea)
+        let mb = scale(b, 0 - eb)
+        # the RN quotient at the original scale, brought to the scaled one
+        let qs = scale(q, eb - ea)
+        let (p, e) = two_prod(qs, mb)
+        # sign(exact - q) = sign(ma - qs * mb) * sign(mb): the scaling keeps
+        # the signs of a and b, and `ma - p` is exact by Sterbenz's lemma
+        let r = cmp_sum(ma - p, 0.0 - e)
+        directed(q, if mb < 0.0 { 0 - r } else { r }, dir)
+      }
+  }
+}
+
+## `floor(x)`: the largest integer-valued Float not above `x`.
+pub fn floor_f(x: Float) -> Float =
+  if not is_finite(x) || x == 0.0 {
+    x
+  } else if x >= 4503599627370496.0 || x <= 0.0 - 4503599627370496.0 {
+    x
+  } else {
+    let t = to_float(to_int(x))
+    let f = if t > x { t - 1.0 } else { t }
+    # floor of a value in (-1, 0) is -1; of a value in [0, 1) keeps the sign
+    if f == 0.0 { signed_zero(x) } else { f }
+  }
+
+## `ceil(x)`: the smallest integer-valued Float not below `x`.
+pub fn ceil_f(x: Float) -> Float =
+  if not is_finite(x) || x == 0.0 {
+    x
+  } else if x >= 4503599627370496.0 || x <= 0.0 - 4503599627370496.0 {
+    x
+  } else {
+    let t = to_float(to_int(x))
+    let c = if t < x { t + 1.0 } else { t }
+    if c == 0.0 { signed_zero(x) } else { c }
+  }
+
+## The IEEE remainder of truncated division, `fmod`: `a - n * b` with `n`
+## the quotient truncated toward zero, computed exactly by long division on
+## the binary exponents (the result is always representable).
+pub fn rem_f(a: Float, b: Float) -> Float =
+  if is_nan(a) || is_nan(b) || not is_finite(a) || b == 0.0 {
+    NAN
+  } else if not is_finite(b) || a == 0.0 {
+    a
+  } else {
+    let neg = sign_bit(a)
+    let x0 = if neg { 0.0 - a } else { a }
+    let y = if b < 0.0 { 0.0 - b } else { b }
+    var x = x0
+    while x >= y {
+      # subtract the largest y * 2^k not above x; each step is exact
+      var k = exponent_of(x) - exponent_of(y)
+      var t = scale(y, k)
+      if t > x {
+        k = k - 1
+        t = scale(y, k)
+      }
+      x = x - t
+    }
+    if neg { 0.0 - x } else { x }
+  }
+
+# ---- transcendental functions (tolerance tier) ----
+
+## `ln 2` to the nearest Float.
+pub const LN_2: Float = 0.6931471805599453
+
+## pi to the nearest Float.
+pub const PI_F: Float = 3.141592653589793
+
+# pi / 2 in three parts (Cody and Waite): each of the first two has its low
+# bits zero, so `k * part` is exact for any `k` below 2^20.
+const PIO2_1: Float = 1.5707963267341256
+const PIO2_2: Float = 6.077100506506192e-11
+const PIO2_3: Float = 2.0222662487959506e-21
+
+## `e^x`. The argument is divided by 2^10, the Taylor series of the small
+## result summed to fourteen terms, and the answer squared ten times. Each
+## squaring doubles the relative error, so the result is good to about
+## 1024 ulps; that is 2e-13 relative, inside the tolerance tier by eight
+## orders of magnitude.
+pub fn exp_f(x: Float) -> Float =
+  if is_nan(x) {
+    x
+  } else if x > 709.782712893384 {
+    INF
+  } else if x < 0.0 - 745.1332191019412 {
+    0.0
+  } else {
+    let r = x / 1024.0
+    var term = 1.0
+    var sum = 1.0
+    var i = 1
+    while i <= 14 {
+      term = term * r / to_float(i)
+      sum = sum + term
+      i = i + 1
+    }
+    var y = sum
+    var j = 0
+    while j < 10 {
+      y = y * y
+      j = j + 1
+    }
+    y
+  }
+
+## `2^x`, exact at integer arguments.
+pub fn exp2_f(x: Float) -> Float =
+  if is_finite(x) && floor_f(x) == x && x > 0.0 - 1075.0 && x < 1024.0 { pow2(to_int(x)) } else { exp_f(x * LN_2) }
+
+## `ln x`: `x = m * 2^e` with `m` in `[1, 2)`, then Halley's iteration for
+## the `y` with `e^y = m`, which converges cubically from the two-term guess.
+pub fn log_f(x: Float) -> Float =
+  if is_nan(x) || x < 0.0 {
+    NAN
+  } else if x == 0.0 {
+    0.0 - INF
+  } else if x == INF {
+    x
+  } else {
+    let e = exponent_of(x)
+    let m = scale(x, 0 - e)
+    let f = m - 1.0
+    var y = f - f * f * 0.5 + f * f * f / 3.0
+    var i = 0
+    while i < 4 {
+      let ey = exp_f(y)
+      y = y + 2.0 * (m - ey) / (m + ey)
+      i = i + 1
+    }
+    y + to_float(e) * LN_2
+  }
+
+## `log2 x`, exact at powers of two.
+pub fn log2_f(x: Float) -> Float =
+  if is_finite(x) && x > 0.0 && scale(x, 0 - exponent_of(x)) == 1.0 { to_float(exponent_of(x)) } else { log_f(x) / LN_2 }
+
+## `1 / sqrt(x)`.
+pub fn rsqrt_f(x: Float) -> Float = 1.0 / sqrt_rn(x)
+
+## `tanh x` as `1 - 2 / (e^(2|x|) + 1)` with the sign put back; past 20 the
+## answer is 1 to the last bit. Small arguments lose relative accuracy to the
+## subtraction but keep an absolute error near 1e-16, which is what the
+## tolerance tier measures.
+pub fn tanh_f(x: Float) -> Float =
+  if is_nan(x) {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = if ax > 20.0 {
+      1.0
+    } else if ax < 0.001 {
+      # the first three terms of the series, which here are exact enough
+      ax - ax * ax * ax / 3.0 + 2.0 * ax * ax * ax * ax * ax / 15.0
+    } else {
+      1.0 - 2.0 / (exp_f(2.0 * ax) + 1.0)
+    }
+    if x < 0.0 { 0.0 - t } else { t }
+  }
+
+## `sinh x`.
+pub fn sinh_f(x: Float) -> Float =
+  if is_nan(x) {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let s = if ax < 0.001 {
+      ax + ax * ax * ax / 6.0
+    } else if ax > 710.0 {
+      INF
+    } else {
+      let e = exp_f(ax)
+      0.5 * (e - 1.0 / e)
+    }
+    if x < 0.0 { 0.0 - s } else { s }
+  }
+
+## `cosh x`.
+pub fn cosh_f(x: Float) -> Float =
+  if is_nan(x) {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    if ax > 710.0 {
+      INF
+    } else {
+      let e = exp_f(ax)
+      0.5 * (e + 1.0 / e)
+    }
+  }
+
+# `x = k * pi/2 + r`, `|r| <= pi/4` (roughly), by the three-part constant.
+fn reduce_pio2(x: Float) -> (Int, Float) = {
+  let k = to_int(floor_f(x / (PI_F * 0.5) + 0.5))
+  let kf = to_float(k)
+  (k, ((x - kf * PIO2_1) - kf * PIO2_2) - kf * PIO2_3)
+}
+
+# The Taylor series of sin and cos on `|r| <= pi/4`, to the term below 1e-17.
+fn sin_poly(r: Float) -> Float = {
+  let r2 = r * r
+  var term = r
+  var sum = r
+  var n = 1
+  while n <= 11 {
+    term = 0.0 - term * r2 / to_float((2 * n) * (2 * n + 1))
+    sum = sum + term
+    n = n + 1
+  }
+  sum
+}
+
+fn cos_poly(r: Float) -> Float = {
+  let r2 = r * r
+  var term = 1.0
+  var sum = 1.0
+  var n = 1
+  while n <= 11 {
+    term = 0.0 - term * r2 / to_float((2 * n - 1) * (2 * n))
+    sum = sum + term
+    n = n + 1
+  }
+  sum
+}
+
+fn quad(k: Int) -> Int = ((k % 4) + 4) % 4
+
+## `sin x`. NaN for an infinite argument.
+pub fn sin_f(x: Float) -> Float =
+  if not is_finite(x) {
+    NAN
+  } else {
+    let (k, r) = reduce_pio2(x)
+    let q = quad(k)
+    if q == 0 { sin_poly(r) } else if q == 1 { cos_poly(r) } else if q == 2 { 0.0 - sin_poly(r) } else { 0.0 - cos_poly(r) }
+  }
+
+## `cos x`. NaN for an infinite argument.
+pub fn cos_f(x: Float) -> Float =
+  if not is_finite(x) {
+    NAN
+  } else {
+    let (k, r) = reduce_pio2(x)
+    let q = quad(k)
+    if q == 0 { cos_poly(r) } else if q == 1 { 0.0 - sin_poly(r) } else if q == 2 { 0.0 - cos_poly(r) } else { sin_poly(r) }
+  }
+
+## `tan x`.
+pub fn tan_f(x: Float) -> Float =
+  if not is_finite(x) {
+    NAN
+  } else {
+    let (k, r) = reduce_pio2(x)
+    if quad(k) % 2 == 0 { sin_poly(r) / cos_poly(r) } else { 0.0 - cos_poly(r) / sin_poly(r) }
+  }
+
+# arctan on `[0, 1]`: two halvings by `t / (1 + sqrt(1 + t^2))`, which bring
+# the argument under tan(pi/16), then the alternating series.
+fn atan_unit(t: Float) -> Float = {
+  let h1 = t / (1.0 + sqrt_rn(1.0 + t * t))
+  let h2 = h1 / (1.0 + sqrt_rn(1.0 + h1 * h1))
+  let z2 = h2 * h2
+  var term = h2
+  var sum = h2
+  var n = 1
+  while n <= 16 {
+    term = 0.0 - term * z2
+    sum = sum + term / to_float(2 * n + 1)
+    n = n + 1
+  }
+  4.0 * sum
+}
+
+## `atan x`.
+pub fn atan_f(x: Float) -> Float =
+  if is_nan(x) {
+    x
+  } else {
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let a = if ax == INF { PI_F * 0.5 } else if ax > 1.0 { PI_F * 0.5 - atan_unit(1.0 / ax) } else { atan_unit(ax) }
+    if x < 0.0 { 0.0 - a } else { a }
+  }
+
+## `atan2(y, x)`, the angle of the point `(x, y)`, with C's signed-zero and
+## infinity conventions.
+pub fn atan2_f(y: Float, x: Float) -> Float =
+  if is_nan(x) || is_nan(y) {
+    NAN
+  } else if y == 0.0 {
+    if sign_bit(x) { if sign_bit(y) { 0.0 - PI_F } else { PI_F } } else { y }
+  } else if x == 0.0 {
+    if y > 0.0 { PI_F * 0.5 } else { 0.0 - PI_F * 0.5 }
+  } else if not is_finite(x) && not is_finite(y) {
+    let q = if x > 0.0 { PI_F * 0.25 } else { PI_F * 0.75 }
+    if y > 0.0 { q } else { 0.0 - q }
+  } else if not is_finite(x) {
+    if x > 0.0 { signed_zero(y) } else { if y > 0.0 { PI_F } else { 0.0 - PI_F } }
+  } else {
+    let a = atan_f(y / x)
+    if x > 0.0 { a } else if y > 0.0 { a + PI_F } else { a - PI_F }
+  }
+
+## `x^y` with C's `pow` special cases: `x^0 = 1` and `1^y = 1` for every
+## operand (NaN included), a negative base only to an integer power, zero and
+## infinity by the sign and parity rules.
+pub fn pow_f(x: Float, y: Float) -> Float =
+  if y == 0.0 || x == 1.0 {
+    1.0
+  } else if is_nan(x) || is_nan(y) {
+    NAN
+  } else {
+    let yint = is_finite(y) && floor_f(y) == y
+    let yodd = yint && (if y < 9007199254740992.0 && y > 0.0 - 9007199254740992.0 { to_int(y) % 2 != 0 } else { false })
+    if x == 0.0 {
+      if y < 0.0 { if yodd { if sign_bit(x) { 0.0 - INF } else { INF } } else { INF } } else { if yodd { x } else { 0.0 } }
+    } else if not is_finite(y) {
+      let ax = if x < 0.0 { 0.0 - x } else { x }
+      if ax == 1.0 { 1.0 } else if (ax > 1.0) == (y > 0.0) { INF } else { 0.0 }
+    } else if not is_finite(x) {
+      if x > 0.0 { if y > 0.0 { INF } else { 0.0 } } else { if y > 0.0 { if yodd { 0.0 - INF } else { INF } } else { if yodd { float_of(SIGN_BIT) } else { 0.0 } } }
+    } else if yint && y <= 64.0 && y >= 0.0 - 64.0 {
+      # a small integer power by binary exponentiation, which is good to a
+      # few ulps where `exp(y log x)` is good to a few hundred
+      let n = to_int(y)
+      var r = 1.0
+      var b = x
+      var m = if n < 0 { 0 - n } else { n }
+      while m > 0 {
+        if (m & 1) == 1 { r = r * b } else { () }
+        b = b * b
+        m = m >>> 1
+      }
+      if n < 0 { 1.0 / r } else { r }
+    } else if x < 0.0 {
+      if not yint { NAN } else {
+        let m = exp_f(y * log_f(0.0 - x))
+        if yodd { 0.0 - m } else { m }
+      }
+    } else {
+      exp_f(y * log_f(x))
+    }
+  }
+
+# ---- tests ----
+
+fn ulps(a: Float, b: Float) -> Int = {
+  let d = bits_of(a) - bits_of(b)
+  if d < 0 { 0 - d } else { d }
+}
+
+fn close(a: Float, b: Float) -> Bool = {
+  let d = if a > b { a - b } else { b - a }
+  let m = if b < 0.0 { 0.0 - b } else { b }
+  d <= 1.0e-12 + 1.0e-12 * m
+}
+
+test "the square root is exact on perfect squares and correctly rounded around them" {
+  assert sqrt_rn(4.0) == 2.0
+  assert sqrt_rn(2.25) == 1.5
+  assert sqrt_rn(0.0625) == 0.25 && sqrt_rn(1.0e200) == 1.0e100
+  assert sqrt_rn(2.0) == 1.4142135623730951
+  assert sqrt_rn(3.0) == 1.7320508075688772
+  assert sqrt_rn(0.5) == 0.7071067811865476
+  # the smallest subnormal and the largest finite value
+  assert sqrt_rn(float_of(1)) == 2.2227587494850775e-162
+  assert sqrt_rn(1.7976931348623157e308) == 1.3407807929942596e154
+  assert is_nan(sqrt_rn(0.0 - 1.0))
+  assert sign_bit(sqrt_rn(0.0 * (0.0 - 1.0)))
+}
+
+test "every square root of the squares of a sweep rounds back to its root" {
+  # y * y rounded, then the root: the correctly rounded root of the rounded
+  # square is y itself for every y in [1, 2) away from the top of the binade
+  var y = 1.0
+  var bad = 0
+  for _i in range(0, 2000) {
+    y = y + 0.000377
+    if sqrt_rn(y * y) != y { bad = bad + 1 } else { () }
+  }
+  assert bad == 0
+}
+
+test "directed roundings move the round-to-nearest result by at most one ulp, toward their side" {
+  let a = 0.1
+  let b = 0.2
+  let rn = a + b
+  let lo = add_dir(a, b, Downward)
+  let hi = add_dir(a, b, Upward)
+  assert lo <= rn && rn <= hi && ulps(lo, hi) == 1
+  # an exact sum is not moved
+  assert add_dir(1.0, 2.0, Downward) == 3.0 && add_dir(1.0, 2.0, Upward) == 3.0
+  # x + (-x) is -0 rounding down and +0 otherwise
+  assert sign_bit(add_dir(1.5, 0.0 - 1.5, Downward))
+  assert not sign_bit(add_dir(1.5, 0.0 - 1.5, Upward))
+  let pl = mul_dir(0.1, 0.3, Downward)
+  let ph = mul_dir(0.1, 0.3, Upward)
+  assert pl < ph && ulps(pl, ph) == 1
+  assert mul_dir(3.0, 0.5, Downward) == 1.5
+  let ql = div_dir(1.0, 3.0, Downward)
+  let qh = div_dir(1.0, 3.0, Upward)
+  assert ql < qh && ulps(ql, qh) == 1 && (ql == 1.0 / 3.0 || qh == 1.0 / 3.0)
+  assert div_dir(1.0, 4.0, Downward) == 0.25
+  let nl = div_dir(0.0 - 1.0, 3.0, Downward)
+  assert nl < 0.0 - 1.0 / 3.0 || nl == 0.0 - 1.0 / 3.0
+  assert div_dir(0.0 - 1.0, 3.0, Upward) >= nl
+}
+
+test "floor, ceil and the truncated remainder" {
+  assert floor_f(2.5) == 2.0 && floor_f(0.0 - 2.5) == 0.0 - 3.0 && floor_f(0.0 - 0.5) == 0.0 - 1.0
+  assert ceil_f(2.5) == 3.0 && ceil_f(0.0 - 2.5) == 0.0 - 2.0
+  assert sign_bit(ceil_f(0.0 - 0.5))
+  assert rem_f(7.5, 2.0) == 1.5 && rem_f(0.0 - 7.5, 2.0) == 0.0 - 1.5
+  assert rem_f(1.0e300, 3.0) == 1.0e300 - 3.0 * floor_f(1.0e300 / 3.0) || rem_f(1.0e300, 3.0) < 3.0
+  assert rem_f(5.0, 0.1) < 0.1
+}
+
+test "the transcendental functions against values a reader can check" {
+  assert close(exp_f(1.0), 2.718281828459045)
+  assert close(exp_f(0.0 - 2.5), 0.0820849986238988)
+  assert exp_f(0.0) == 1.0
+  assert close(log_f(10.0), 2.302585092994046)
+  assert close(log_f(exp_f(3.7)), 3.7)
+  assert log2_f(8.0) == 3.0 && exp2_f(10.0) == 1024.0
+  assert close(sin_f(PI_F / 6.0), 0.5) && close(cos_f(PI_F / 3.0), 0.5)
+  assert close(tan_f(PI_F / 4.0), 1.0)
+  assert close(sin_f(100.0), 0.0 - 0.5063656411097588)
+  assert close(atan2_f(1.0, 1.0), PI_F / 4.0) && close(atan2_f(1.0, 0.0 - 1.0), 3.0 * PI_F / 4.0)
+  assert close(tanh_f(0.5), 0.46211715726000974)
+  assert close(sinh_f(1.0), 1.1752011936438014) && close(cosh_f(1.0), 1.5430806348152437)
+  assert pow_f(2.0, 0.5) - 1.4142135623730951 < 1.0e-12 && 1.4142135623730951 - pow_f(2.0, 0.5) < 1.0e-12 && pow_f(0.0 - 2.0, 3.0) == 0.0 - 8.0
+  assert is_nan(pow_f(0.0 - 2.0, 0.5)) && pow_f(NAN, 0.0) == 1.0
+  assert close(rsqrt_f(4.0), 0.5)
+}
