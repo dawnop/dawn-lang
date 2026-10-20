@@ -11,14 +11,14 @@ use std/list
 use std/map
 use std/set
 use front/token.{Diag, mk_diag}
-use front/ast.{Module, Decl, DUseModule, module_uses}
+use front/ast.{Module, Decl, DUseModule, ParseMarks, module_uses}
 use compiler_plan/pkgfetch
 use compiler_plan/envmem
 use compiler_plan/procmem
 use compiler_plan/source
 use compiler_plan/source.{canon, canon_identity}
 use check/cx.{ModExports, Cx, cx_new}
-use check/checker.{check_module, check_module_headers, exports_of, exported_impl}
+use check/checker.{check_module, check_module_headers, check_module_bodies, ModuleHeaders, exports_of, exported_impl}
 use check/identity
 use check/identity.{Minted, EffectDecl}
 use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add, ct_world_empty}
@@ -49,6 +49,9 @@ pub type LoadedModule = {
   line_starts: List[Int],
   m: Module,
   pdiags: List[Diag],
+  # what the parser repaired in `m`, a function of `text` like `pdiags` is
+  # (docs/lsp-module-memo-design.md §十四)
+  marks: ParseMarks,
   pkg: Option[source.PkgR],
   # The path a source position baked into the program names (`at
   # src/main.dawn:4`), as opposed to `path`, which is how this run spelled
@@ -592,7 +595,7 @@ pub fn load_entries_over(
 ## are the text's too: on the selfhost workspace, recomputing them for every
 ## re-checked module was about 0.18 s of a 1 s edit that changed a widely
 ## imported signature (agent-handoff/research-laziness-l1-reeval-20260930.md).
-pub(pkg) type Parsed = { text: String, line_starts: List[Int], m: Module, pdiags: List[Diag] }
+pub(pkg) type Parsed = { text: String, line_starts: List[Int], m: Module, pdiags: List[Diag], marks: ParseMarks }
 
 ## The parses one load made, by canonical path, handed to the next load of
 ## the same workspace so that a file whose text has not changed is not parsed
@@ -675,8 +678,8 @@ fn parse_reusing(previous: ParseMemo, key: String, text: String) -> (Parsed, Boo
   }
 
 fn fresh_parse(text: String) -> Parsed = {
-  let (m, pdiags) = parser.parse_module(text)
-  Parsed { text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags }
+  let (m, pdiags, marks) = parser.parse_module_marked(text)
+  Parsed { text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, marks: marks }
 }
 
 ## The file whose module is the program's entry (spec §10.1, §10.5): the one
@@ -740,6 +743,7 @@ fn resolve(
             line_starts: parsed.line_starts,
             m: parsed.m,
             pdiags: parsed.pdiags,
+            marks: parsed.marks,
             pkg: None,
             site_path: tree_site(root_abs, mod_path),
             entry: entry == Some(c)
@@ -894,6 +898,7 @@ fn resolve(
                 line_starts: parsed.line_starts,
                 m: m2,
                 pdiags: pdiags2,
+                marks: parsed.marks,
                 pkg: dep_pkg,
                 # a package module's path already leads with the package's
                 # real name: `<package>/<path in package>`
@@ -1232,6 +1237,43 @@ pub(pkg) fn world_after(w: CtWorld, checked: CheckedMod, ran: Bool, is_std: Bool
     ct_world_add(w, checked.class_name, scope, checked.tm, checked.ct.consts, true)
   } else { w }
 
+## Whether the parser's marks line up with the tree and say nothing was
+## dropped. A table of the wrong length is not trusted: no declaration can
+## then be told from a damaged one, so the whole module falls back.
+fn intact_recovery(mf: LoadedModule) -> Bool =
+  not mf.marks.lost && len(mf.marks.damaged) == len(mf.m.decls)
+
+## Check a recovered module (docs/lsp-module-memo-design.md §十四): every header,
+## the body of every declaration the parser did not repair, and none of the
+## whole-module checks that need the complete text. What a repaired
+## declaration's header reports is dropped with the rest of what is reported
+## inside it, because both describe the parser's guess.
+fn check_recovered(cx: Cx, mf: LoadedModule, env: Map[String, ModExports]) -> (Cx, TModule) !io = {
+  let headers = check_module_headers(cx, mf.m, env)
+  var damaged: Set[String] = set.empty()
+  var spans: List[identity.Span] = []
+  for l in identity.located(mf.m) {
+    if mf.marks.damaged[l.entry.declaration] {
+      damaged = set.insert(damaged, identity.path_text(l.entry.key.path))
+      spans = spans ++ [l.span]
+    }
+  }
+  let (cx1, tm) = check_module_bodies(ModuleHeaders { ..headers, recovered: true, damaged: damaged })
+  let views = map.insert(map.empty(), mf.mod_path, identity.declaration_spans(mf.m))
+  var kept: List[Diag] = []
+  for d in cx1.diags {
+    let inside_owner = match d.owner {
+      Some(o) -> set.has(damaged, o.decl)
+      None -> false
+    }
+    let at = identity.absolute(views, d).lo
+    var inside = inside_owner
+    for sp in spans { if at >= sp.lo && at < sp.hi { inside = true } }
+    if not inside { kept = kept ++ [d] }
+  }
+  (Cx { ..cx1, diags: kept }, tm)
+}
+
 ## One exact transition of the original loop. Even a parse failure publishes
 ## its recovered exports and carry. Keep the full impl-table fold: local_impls
 ## alone is not a proven delta for prelude registration or std rechecking.
@@ -1304,7 +1346,19 @@ pub(pkg) fn analyze_module_step(
   var ct = empty_ctout()
   var check_runs = 0
   var comptime_runs = 0
-  if not parse_failed {
+  # The repair is trusted down to the declaration only while nothing was
+  # dropped: a declaration `sync_decl` threw away may have introduced names
+  # the rest of the file uses.
+  let recovered = parse_failed && intact_recovery(mf)
+  if recovered {
+    analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
+    let (cx1, tm1) = check_recovered(cx, mf, before.exports)
+    check_runs = 1
+    analysis_event(observer, mf.mod_path, AnalyzeCheck, false)
+    cx = cx1
+    tm = tm1
+    for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+  } else if not parse_failed {
     analysis_event(observer, mf.mod_path, AnalyzeCheck, true)
     let (cx1, tm1) = check_module(cx, mf.m, before.exports)
     check_runs = 1
@@ -1323,14 +1377,14 @@ pub(pkg) fn analyze_module_step(
     for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
   } else {
-    # A module that failed to parse still publishes the headers of what was
-    # recovered, so its importers see the surface they saw before rather
-    # than an empty one, and the impls it declares stay in the program's
-    # table (docs/lsp-module-memo-design.md §十三). Only the headers: a body
-    # checked against a recovered tree reports what recovery dropped. Their
-    # diagnostics go for the same reason -- a type the parser swallowed is
-    # "unknown" to a signature that names it -- so the file reports its
-    # parse errors and nothing else. It is a function of the text and the
+    # A module that lost a declaration to the parser still publishes the
+    # headers of what was recovered, so its importers see the surface they saw
+    # before rather than an empty one, and the impls it declares stay in the
+    # program's table (docs/lsp-module-memo-design.md §十三). Only the
+    # headers: a body checked against a tree that lost a declaration reports
+    # what recovery dropped. Their diagnostics go for the same reason -- a
+    # type the parser swallowed is "unknown" to a signature that names it --
+    # so the file reports its parse errors and nothing else. It is a function of the text and the
     # carry, the cold path runs it too, and so a session still agrees with a
     # cold analysis; no body ran, so it counts as no check.
     let headers = check_module_headers(cx, mf.m, before.exports)
@@ -1519,7 +1573,7 @@ pub(pkg) fn analyze_standalone(
   opts: CtOpts,
   js: Jsig
 ) -> Program !Fs !Env !io = {
-  let (m, pdiags) = parser.parse_module(text)
+  let (m, pdiags, marks) = parser.parse_module_marked(text)
   var diags: List[LocDiag] = []
   match entry_name_of(path) {
     Some(nm) -> {
@@ -1541,6 +1595,7 @@ pub(pkg) fn analyze_standalone(
     line_starts: lexer.line_starts_of(text),
     m: m,
     pdiags: pdiags,
+    marks: marks,
     pkg: None,
     # a buffer with no tree around it is named by its file name, the
     # single-file rule with the buffer's own directory as the root
@@ -2538,9 +2593,9 @@ test "module identity carry keeps exporting owners across header reorder" {
     let first = "pub type First = { value: Int }\npub fn first_of[T](x: T) -> T = x\n"
     let second = "pub type Second = { value: Int }\npub fn second_of[T](x: T) -> T = x\n"
     for text in [first ++ second, second ++ first] {
-      let (syntax, pd) = parser.parse_module(text)
+      let (syntax, pd, syntax_marks) = parser.parse_module_marked(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn", site_path: "library.dawn",
-        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, pkg: None, entry: false }
+        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, marks: syntax_marks, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let id = map.get(step.checked.cx.adts_by_name, "First").expect("provider ID")
@@ -2556,9 +2611,9 @@ test "module identity carry keeps exporting owners across header reorder" {
       ids = ids ++ [id]
       binders = binders ++ [binder]
       let consumer_text = "use library as dep\nfn consume(x: dep.First) -> dep.First = dep.first_of(x)\n"
-      let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
+      let (consumer_ast, consumer_pd, consumer_marks) = parser.parse_module_marked(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn", site_path: "consumer.dawn",
-        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
+        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, marks: consumer_marks, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       assert len(consumed.diags) == 0
       assert map.get(consumed.after.identities, id) != None
@@ -2572,9 +2627,9 @@ test "module identity carry keeps exporting owners across header reorder" {
     # The same slot under a renamed declaration is a different identity, so
     # its key is a different integer.
     let renamed_text = "pub type First = { value: Int }\npub fn renamed_of[T](x: T) -> T = x\n" ++ second
-    let (renamed_ast, renamed_pd) = parser.parse_module(renamed_text)
+    let (renamed_ast, renamed_pd, renamed_marks) = parser.parse_module_marked(renamed_text)
     let renamed_input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/library.dawn", site_path: "library.dawn",
-      text: renamed_text, line_starts: lexer.line_starts_of(renamed_text), m: renamed_ast, pdiags: renamed_pd, pkg: None, entry: false }
+      text: renamed_text, line_starts: lexer.line_starts_of(renamed_text), m: renamed_ast, pdiags: renamed_pd, marks: renamed_marks, pkg: None, entry: false }
     let renamed_step = analyze_module_step(renamed_input, initial, std, ct_default(), jsig_refused(), None)
     assert len(renamed_step.diags) == 0
     assert match map.get(renamed_step.checked.cx.fns, "renamed_of").expect("renamed generic").tparams[0] {
@@ -2604,9 +2659,9 @@ test "a consumer names a provider's effect without minting the provider's identi
     var effect_ids: List[Int] = []
     var binders: List[Int] = []
     for text in [asks ++ generic, generic ++ asks] {
-      let (syntax, pd) = parser.parse_module(text)
+      let (syntax, pd, syntax_marks) = parser.parse_module_marked(text)
       let input = LoadedModule { mod_path: "library", class_name: "library", path: "/provenance/effects.dawn", site_path: "effects.dawn",
-        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, pkg: None, entry: false }
+        text: text, line_starts: lexer.line_starts_of(text), m: syntax, pdiags: pd, marks: syntax_marks, pkg: None, entry: false }
       let step = analyze_module_step(input, initial, std, ct_default(), jsig_refused(), None)
       assert len(step.diags) == 0
       let effect_id = map.get(step.checked.cx.effects, "Ask").expect("provider effect")
@@ -2627,9 +2682,9 @@ test "a consumer names a provider's effect without minting the provider's identi
         "alias Callback = fn() -> Int !dep.Ask\n" ++
         "fn handled() -> Int = { with handle dep.Ask { ask() => 21 }\n consume() }\n" ++
         "fn relay[!f](g: fn() -> Int !f) -> Int !f = dep.twice(g)\n"
-      let (consumer_ast, consumer_pd) = parser.parse_module(consumer_text)
+      let (consumer_ast, consumer_pd, consumer_marks) = parser.parse_module_marked(consumer_text)
       let consumer = LoadedModule { mod_path: "consumer", class_name: "consumer", path: "/provenance/consumer.dawn", site_path: "consumer.dawn",
-        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, pkg: None, entry: false }
+        text: consumer_text, line_starts: lexer.line_starts_of(consumer_text), m: consumer_ast, pdiags: consumer_pd, marks: consumer_marks, pkg: None, entry: false }
       let consumed = analyze_module_step(consumer, step.after, std, ct_default(), jsig_refused(), None)
       # The effect the consumer resolved is the provider's declaration, by
       # value and by derivation: a second mint in the consumer's owner would

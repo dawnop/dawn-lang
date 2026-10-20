@@ -96,7 +96,7 @@ MUTATIONS = {
     # A module's diagnostics are prepended instead of appended.
     "cold/diagnostic-order": ((ANALYZE, "    diags = diags ++ step.diags\n", "    diags = step.diags ++ diags\n"),),
     # The checker never runs.
-    "cold/skip-check": ((ANALYZE, "  if not parse_failed {\n", "  if false {\n"),),
+    "cold/skip-check": ((ANALYZE, "  } else if not parse_failed {\n", "  } else if false {\n"),),
     # Comptime evaluation never runs.
     "cold/skip-comptime": ((ANALYZE, "    if len(cx.diags) == 0 {\n", "    if false {\n"),),
     # The std baseline's impls are not taken over.
@@ -113,6 +113,24 @@ MUTATIONS = {
                                           "check_module_headers(cx, mf.m, map.empty())"),),
     "cold/parse-failure-reports-headers": ((ANALYZE, PARSE_HEADERS, PARSE_HEADERS +
         "    for d in headers.cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }\n"),),
+    # A module that fails to parse without losing a declaration is checked
+    # past the declarations the parser repaired (docs/lsp-module-memo-design.md
+    # §十四): it checks the damaged bodies too, it takes every declaration
+    # for damaged, it trusts the repair when a declaration was dropped, it
+    # reports what its damaged declarations' headers say, or it forgets that it
+    # recovered at all.
+    "cold/recovered-checks-damaged": ((ANALYZE,
+        "      damaged = set.insert(damaged, identity.path_text(l.entry.key.path))\n",
+        "      damaged = damaged\n"),),
+    "cold/recovered-all-damaged": ((ANALYZE, "    if mf.marks.damaged[l.entry.declaration] {\n", "    if true {\n"),),
+    "cold/recovered-ignores-lost": ((ANALYZE,
+        "  not mf.marks.lost && len(mf.marks.damaged) == len(mf.m.decls)",
+        "  len(mf.marks.damaged) == len(mf.m.decls)"),),
+    "cold/recovered-keeps-damaged-diags": ((ANALYZE, "    if not inside { kept = kept ++ [d] }\n",
+                                            "    kept = kept ++ [d]\n"),),
+    "cold/recovered-flag-off": ((ANALYZE,
+        "ModuleHeaders { ..headers, recovered: true, damaged: damaged }",
+        "ModuleHeaders { ..headers, recovered: false, damaged: damaged }"),),
 
     # lsp-observe.py, a tool run by hand: not mutants but the probes of a
     # private LSP. It applies inputs always, prefix-stats only when the

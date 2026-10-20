@@ -3,6 +3,7 @@
 > 状态：**current**。2026-09-30，诊断批 P1，issue #190 #192 #193 #195（第 1 步），分支 `fix/diag-parser-recovery`。
 > 2026-10-20 追加 §5′（两段式重解析，#789 残差），分支 `front/two-pass-recovery`。
 > 2026-10-20 追加 §6（受损与丢失标记，解析错误线刀 1），分支 `front/damage-marks`。
+> 刀 2（检查器按这些标记检查未受损声明的函数体）记在 `docs/lsp-module-memo-design.md` §十四。
 > 裁决与其它语言实例见调研报告 `research-diagnostics-issues-20260930.md` §3 §5 §6 §7（不在仓内）；本文记做法、取舍与负控；四刀均已实现（提交见文末）。
 
 只动 `selfhost/src/front/parser.dawn` 与 `scripts/grammar-corpus/`。只改**无效输入**的诊断：

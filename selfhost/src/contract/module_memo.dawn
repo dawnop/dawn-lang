@@ -40,10 +40,10 @@ use jvm/jreflect.{jsig_real}
 use compiler_plan/envmem
 
 fn source(name: String, text: String) -> LoadedModule = {
-  let (m, pdiags) = parser.parse_module(text)
+  let (m, pdiags, marks) = parser.parse_module_marked(text)
   LoadedModule {
     mod_path: name, class_name: name, path: name ++ ".dawn", site_path: name ++ ".dawn",
-    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, pkg: None, entry: false
+    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, marks: marks, pkg: None, entry: false
   }
 }
 
@@ -740,20 +740,54 @@ test "module memo keeps the importers of a module that fails to parse on the hea
     let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
     assert len(warm.program.diags) == 0
     # A statement the parser cannot read inside the private helper: the file
-    # reports its parse errors and nothing else, the headers it recovered
-    # keep user's names and lib's impl where they were, and the session
-    # agrees with a cold analysis of the same broken text.
+    # reports its parse errors and nothing else (the helper is the one damaged
+    # declaration), the headers it recovered keep user's names and lib's impl
+    # where they were, and the session agrees with a cold analysis of the same
+    # broken text.
     let torn = source("lib", head ++ "fn helper() -> Int = {\n  let = 1\n  1\n}\n")
     assert len(torn.pdiags) > 0
     let input = LoadResult { modules: [base, torn, user, whole, far], diags: [] }
     let result = incremental.analyze(warm.session, input)
     assert len(result.program.diags) == len(torn.pdiags)
     assert diags_in(result.program, "lib.dawn") == len(torn.pdiags)
-    assert result.stats.checked_modules == 0
+    # lib is checked again, its recovered declarations with their bodies; the
+    # damaged helper is the only thing the parse error touched, so it adds
+    # nothing and its importers still keep their steps
+    assert result.stats.checked_modules == 1
     assert set.has(result.reused, "user")
     assert set.has(result.reused, "far")
     assert agrees_with_cold(result.program, input, std)
     # and once it parses again, everything converges on the cold result
+    let fixed = incremental.analyze(result.session, loaded)
+    assert len(fixed.program.diags) == 0
+    assert agrees_with_cold(fixed.program, loaded, std)
+  }))
+}
+
+test "module memo agrees with a cold analysis while a block is left open above a wrong declaration" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let user = source("user", "use lib.{value}\npub fn twice() -> Int = value() * 2\n")
+    let good = "pub fn value() -> Int = 1\nfn torn() !io = {\n  let xs = [1]\n  for x in xs {\n    println(\"v\")\n  }\n}\n" ++
+      "fn later() -> Int = 2\n"
+    let loaded = LoadResult { modules: [source("lib", good), user], diags: [] }
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
+    assert len(warm.program.diags) == 0
+    # the `}` that closes the `for` goes missing, and `later` is wrong: the
+    # block is closed before `later`, so the declaration after the tear is
+    # checked, and the session says what a cold analysis says
+    let open = "pub fn value() -> Int = 1\nfn torn() !io = {\n  let xs = [1]\n  for x in xs {\n    println(\"v\")\n}\n" ++
+      "fn later() -> Int = \"not an int\"\n"
+    let torn = source("lib", open)
+    assert len(torn.pdiags) > 0 && not torn.marks.lost
+    let input = LoadResult { modules: [torn, user], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert diags_in(result.program, "lib.dawn") == len(torn.pdiags) + 1
+    assert set.has(result.reused, "user")
+    assert agrees_with_cold(result.program, input, std)
+    # the same text again, from the session that analysed it
+    let again = incremental.analyze(result.session, input)
+    assert agrees_with_cold(again.program, input, std)
     let fixed = incremental.analyze(result.session, loaded)
     assert len(fixed.program.diags) == 0
     assert agrees_with_cold(fixed.program, loaded, std)

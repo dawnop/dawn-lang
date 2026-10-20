@@ -514,7 +514,14 @@ def main() -> int:
         and constructors_only(got.get(31), ("Only",))
         and all(item.get("label") not in ("exported_value", "LocalChoice")
                 for item in qualified_full_items + qualified_incomplete_items)
-        and completion_items(got.get(32)) == []
+        # `ordinary_member` is the buffer's one repaired declaration; since a
+        # parse failure no longer stops the checker below the headers
+        # (docs/lsp-module-memo-design.md §十四), `value.` completes Int's
+        # methods. What this owner holds is that no constructor of `q` or of
+        # the local type leaks into an ordinary member position.
+        and all(item.get("kind") != 20 for item in completion_items(got.get(32)))
+        and all(item.get("label") not in ("Only", "LocalLeft", "LocalRight")
+                for item in completion_items(got.get(32)))
     )
     range_completion_ok = range_upper_labels.count("outer") == 1
     scope_ok = (

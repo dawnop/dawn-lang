@@ -8,6 +8,7 @@
 
 use std/map
 use std/io
+use std/str
 use front/parser
 use front/lexer
 use driver/analyze.{
@@ -15,6 +16,7 @@ use driver/analyze.{
   AnalyzeModule, AnalyzeCheck, AnalyzeComptime,
   analyze_program, analyze_observed, analyze_module_step, initial_carry
 }
+use check/identity
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/checkdump
 use check/jsig.{jsig_refused}
@@ -29,10 +31,10 @@ fn std_context() -> StdCtx !Fs !Env !io =
   }
 
 fn source(name: String, text: String) -> LoadedModule = {
-  let (m, pdiags) = parser.parse_module(text)
+  let (m, pdiags, marks) = parser.parse_module_marked(text)
   LoadedModule {
     mod_path: name, class_name: name, path: name ++ ".dawn", site_path: name ++ ".dawn",
-    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, pkg: None, entry: false
+    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pdiags, marks: marks, pkg: None, entry: false
   }
 }
 
@@ -86,22 +88,36 @@ test "failed cold steps retain exports and only run the reachable phases" {
     assert events.toString().expect("trace") == "[module:true, module:false]"
 
     # what a failed parse recovered still publishes its headers: the type and
-    # the impl reach the carry, and no header diagnostic is reported, not
-    # even for the type nobody declares (docs/lsp-module-memo-design.md §十三)
+    # the impl reach the carry. The statement the parser skipped damages only
+    # `torn`; `later` is whole, so its signature is checked and the type nobody
+    # declares is reported (docs/lsp-module-memo-design.md §十四)
     let torn = source("torn",
       "pub type Box = { n: Int }\nimpl Show[Box] { fn show(b: Box) -> String = \"box\" }\n" ++
         "fn torn() -> Int = {\n  let = 1\n  1\n}\npub fn later() -> Missing = 1\n")
     assert len(torn.pdiags) > 0
+    assert torn.marks.damaged == [false, false, true, false] && not torn.marks.lost
     let recovered = analyze_module_step(torn, parsed.after, std, ct_default(), jsig_refused(), None)
-    assert recovered.check_runs == 0
+    assert recovered.check_runs == 1
     assert recovered.comptime_runs == 0
-    assert len(recovered.diags) == len(torn.pdiags)
-    assert len(recovered.checked.cx.diags) == 0
+    assert len(recovered.checked.cx.diags) > 0
+    assert len(recovered.diags) == len(torn.pdiags) + len(recovered.checked.cx.diags)
     let surface = map.get(recovered.after.exports, "torn").expect("torn's surface")
     assert map.has(surface.types_by_name, "Box")
     assert map.has(surface.fns, "later")
     assert len(map.keys(recovered.after.impls)) == len(map.keys(parsed.after.impls)) + 1
     assert recovered.after.identities == recovered.checked.cx.identities
+
+    # a dropped declaration is the other case: nothing is trusted below the
+    # headers, and not even those report
+    let dropped = source("dropped",
+      "pub type Box = { n: Int }\nfn broken( = 0\npub fn later() -> Missing = 1\n")
+    assert dropped.marks.lost
+    let fallback = analyze_module_step(dropped, parsed.after, std, ct_default(), jsig_refused(), None)
+    assert fallback.check_runs == 0
+    assert fallback.comptime_runs == 0
+    assert len(fallback.diags) == len(dropped.pdiags)
+    assert len(fallback.checked.cx.diags) == 0
+    assert map.has(fallback.after.exports, "dropped")
 
     let type_error = source("type_error", "pub fn broken() -> Int = false\n")
     let typed = analyze_module_step(type_error, parsed.after, std, ct_default(), jsig_refused(), None)
@@ -138,5 +154,81 @@ test "cold program diagnostics start with the current loader result" {
     let assembled = Program { modules: [step.checked], diags: [loader] ++ step.diags,
       decl_spans: step.after.decl_spans, ct_world: step.after.ct_world }
     assert checkdump.render(prog) == checkdump.render(assembled)
+  }))
+}
+
+## What the checker reports about a module beyond its parse errors, each as the
+## message and the source text it points at. The text rather than the offset,
+## so that two files that differ by a deleted declaration can be compared.
+fn findings(std: StdCtx, text: String) -> List[String] !Fs !Env !io = {
+  let mf = source("m", text)
+  let step = analyze_module_step(mf, initial_carry(std), std, ct_default(), jsig_refused(), None)
+  var out: List[String] = []
+  var seen = 0
+  for ld in step.diags {
+    if seen >= len(mf.pdiags) {
+      let at = identity.absolute(step.after.decl_spans, ld.d)
+      out = out ++ [ld.d.msg ++ " @ " ++ str.slice(text, at.lo, at.hi)]
+    }
+    seen = seen + 1
+  }
+  out
+}
+
+test "a recovered module reports what the file without its damaged declarations reports" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_context()
+    let whole = "fn later() -> Int = \"not an int\"\n\nfn also() -> Int = missing_name\n\nfn fine() -> Int = 1\n"
+
+    # an unclosed `{`: the second pass closes it before the next declaration,
+    # which is not damaged by the closer that sits at its first character
+    let unclosed = "fn torn() = {\n  let xs = [1, 2]\n  for x in xs {\n    x\n}\n\n" ++ whole
+    let u = source("m", unclosed)
+    assert u.marks.damaged == [true, false, false, false] && not u.marks.lost
+    let expected = findings(std, whole)
+    assert len(expected) == 2
+    assert findings(std, unclosed) == expected
+
+    # a statement the parser skipped
+    let statement = "fn torn() -> Int = {\n  let = 5\n  1\n}\n" ++ whole
+    let s = source("m", statement)
+    assert s.marks.damaged == [true, false, false, false] && not s.marks.lost
+    assert findings(std, statement) == expected
+
+    # stray text between declarations is dropped without losing one
+    let stray = "fn fine() -> Int = 1\nlet x = 1\nfn later() -> Int = \"not an int\"\n"
+    let t = source("m", stray)
+    assert len(t.pdiags) > 0 && not t.marks.lost && t.marks.damaged == [false, false]
+    let later_only = findings(std, "fn fine() -> Int = 1\nfn later() -> Int = \"not an int\"\n")
+    assert len(later_only) == 1
+    assert findings(std, stray) == later_only
+
+    # a declaration the parser dropped: bodies are not trusted at all
+    let dropped = "fn fine() -> Int = 1\nfn broken( = 0\nfn later() -> Int = \"not an int\"\n"
+    assert source("m", dropped).marks.lost
+    assert findings(std, dropped) == []
+  }))
+}
+
+test "a damaged declaration seals its callers and its imports off from the recovery" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_context()
+    # the damaged function infers a String; its caller wants an Int. Checked,
+    # the body would hand the caller that String; unchecked, the return type
+    # is the error type and the caller has nothing to report
+    let cascade = "fn torn() = {\n  let = 1\n  \"text\"\n}\nfn uses() -> Int = torn()\nfn later() -> Int = \"not an int\"\n"
+    let c = source("m", cascade)
+    assert c.marks.damaged == [true, false, false]
+    assert len(findings(std, cascade)) == 1
+    let step = analyze_module_step(c, initial_carry(std), std, ct_default(), jsig_refused(), None)
+    var names: List[String] = []
+    for f in step.checked.tm.fns { names = names ++ [f.name] }
+    assert names == ["uses", "later"]
+
+    # an import used only by a statement the parser skipped is not unused
+    let skipped = "use std/str\nfn torn() -> Int = {\n  let = str.len(\"x\")\n  1\n}\n"
+    assert findings(std, skipped) == []
+    let control = "use std/str\nfn torn() -> Int = {\n  let y = 0\n  1\n}\n"
+    assert len(findings(std, control)) == 1
   }))
 }

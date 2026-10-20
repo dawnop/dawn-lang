@@ -14,7 +14,12 @@
 # editor folds one expression against (docs/lsp-hover-design.md §C5.7), and
 # (2026-10-19) a module that fails to parse publishing the headers of what was
 # recovered, diagnostics dropped, which is a deliberate change of the surface
-# and impls a parse failure leaves (#789, docs/lsp-module-memo-design.md §十三).
+# and impls a parse failure leaves (#789, docs/lsp-module-memo-design.md §十三),
+# and (2026-10-20) a module that fails to parse without losing a declaration
+# checking the bodies of the declarations the parser did not repair, which is a
+# deliberate change of what such a file reports (docs/lsp-module-memo-design.md
+# §十四). That rule is spelled out again below rather than shared with the
+# driver, so that a mutation of the driver's copy shows.
 # Injected into a private subject, never linked into the production compiler.
 pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io = {
   var diags = loaded.diags
@@ -81,7 +86,31 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
     }
     var tm = empty_tmodule()
     var ct = empty_ctout()
-    if not parse_failed {
+    if parse_failed && not mf.marks.lost && len(mf.marks.damaged) == len(mf.m.decls) {
+      let headers = check_module_headers(cx, mf.m, exports)
+      var skipped_paths: Set[String] = set.empty()
+      var skipped_spans: List[identity.Span] = []
+      for located in identity.located(mf.m) {
+        if mf.marks.damaged[located.entry.declaration] {
+          skipped_paths = set.insert(skipped_paths, identity.path_text(located.entry.key.path))
+          skipped_spans = skipped_spans ++ [located.span]
+        }
+      }
+      let (cx1, tm1) = check_module_bodies(ModuleHeaders { ..headers, recovered: true, damaged: skipped_paths })
+      var kept: List[Diag] = []
+      for d in cx1.diags {
+        var inside = match d.owner {
+          Some(o) -> set.has(skipped_paths, o.decl)
+          None -> false
+        }
+        let start = identity.absolute(views, d).lo
+        for sp in skipped_spans { if start >= sp.lo && start < sp.hi { inside = true } }
+        if not inside { kept = kept ++ [d] }
+      }
+      cx = Cx { ..cx1, diags: kept }
+      tm = tm1
+      for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    } else if not parse_failed {
       let (cx1, tm1) = check_module(cx, mf.m, exports)
       cx = cx1
       tm = tm1
