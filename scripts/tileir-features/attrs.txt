@@ -328,6 +328,22 @@
 #       that disagrees with what follows it, a tag that is not the one the
 #       function table wants, and a flag bit in the wrong place, which is
 #       what scripts/tile-golden's four hint mutants hold.
+#   no-nonzero-consumer
+#       `ptr_attr` is the optional parameter 13.4 gave the pointer and tensor
+#       view types, and its domain has one value, `none` (0). The writer
+#       writes the parameter-presence bitfield as the varint 0 on every
+#       pointer type it emits (`ptr_param_bits`, behind `ptr_has_flags`),
+#       which is `ptr_attr.none` and is all the dialect lets a program say:
+#       the attribute has no other value for a kernel to ask for, so there is
+#       no second state for a device to answer differently from. Knife T18
+#       left the row `unimplemented` under a planned knife T21, which said
+#       the 0 was not written when it is (docs/tile-backend-design.md 6.18
+#       records the 0, and 6.20, 6.32 and 6.33 say "not done", meaning that
+#       no nonzero value is ever written). Layer 1 is every golden, which all carry a pointer type and
+#       all assemble, and scripts/tile-golden's `ptr-flags-unwritten` is the
+#       mutant: it stops writing the bitfield and `tileiras` refuses the
+#       stream. The value is held there and no further, because no kernel's
+#       answer depends on it.
 #
 # feature | code | since | status | knife | layer | evidence | exemption
 rounding.nearest_even        | 0 | 13.1 | implemented   | 3   | 3 | const:ROUND_NEAREST_EVEN,golden:vadd,device:vadd,mutant:addf-no-rounding                              | -
@@ -382,4 +398,4 @@ tag.SameElements             |  9 | 13.1 | implemented   | T6  | 1 | const:ATTR_
 tag.Bounded                  | 12 | 13.1 | implemented   | T6  | 1 | const:ATTR_BOUNDED,golden:assume_bounded,mutant:assume-bounded-bounds-swapped                         | assumption-not-arithmetic
 tag.Dictionary               | 10 | 13.1 | implemented   | T15 | 1 | const:ATTR_DICTIONARY,golden:hint_entry,golden:hint_memory,mutant:hint-dictionary-count-wrong         | hints-do-not-change-answers
 tag.OptimizationHints        | 11 | 13.1 | implemented   | T15 | 1 | const:ATTR_OPTIMIZATION_HINTS,golden:hint_entry,mutant:hint-tag-as-dictionary,mutant:hint-entry-flag-dropped,mutant:hint-flag-bit-misplaced | hints-do-not-change-answers
-ptr_attr.none                | 0 | 13.4 | unimplemented | T21 | 0 | -                                                                                                     | -
+ptr_attr.none                | 0 | 13.4 | implemented   | U2  | 1 | writer:ptr_param_bits,golden:vadd,mutant:ptr-flags-unwritten | no-nonzero-consumer
