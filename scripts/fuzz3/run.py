@@ -124,6 +124,7 @@ SANFLAGS = ["-std=c11", "-g", "-O0", "-fno-omit-frame-pointer", "-fwrapv", "-fex
             "-fno-strict-aliasing", "-pthread", "-fsanitize=address,undefined",
             "-fno-sanitize-recover=undefined"]
 SAN_ENV = {"ASAN_OPTIONS": "detect_leaks=1", "UBSAN_OPTIONS": "print_stacktrace=1"}
+LEGS = frozenset({"jvm", "emitc", "native", "san", "comptime"})
 SAN_REPORT = re.compile(r"ERROR: (Address|Leak)Sanitizer|runtime error:")
 RUN_TIMEOUT = 30
 COMPILE_TIMEOUT = 300
@@ -238,9 +239,12 @@ def run_cases(cmd, labels, env=None):
 
 
 class Batch:
-    def __init__(self, tc, seed, indices, work, no_never=False):
+    def __init__(self, tc, seed, indices, work, no_never=False, legs=None):
         self.tc, self.seed, self.indices, self.work = tc, seed, indices, work
         self.no_never = no_never
+        # which executors run: all of them here; reduce.py asks only for the
+        # ones its finding needs, since every leg is a compile
+        self.legs = LEGS if legs is None else legs
         work.mkdir(parents=True, exist_ok=True)
         self.findings = []
         self.stats = {"cases": len(indices), "died": 0, "comptime": 0}
@@ -253,22 +257,33 @@ class Batch:
     def compile_jvm(self, src, out):
         return self.tc.dawn("build", str(src), "-o", str(out))
 
+    def source(self, indices, comptime=False):
+        """The program holding these cases (reduce.py writes its own)."""
+        return gen.program(self.seed, indices, comptime=comptime, no_never=self.no_never)
+
+    def sub(self, indices, work):
+        """A batch of some of these cases, run on its own."""
+        return Batch(self.tc, self.seed, indices, work, self.no_never, self.legs)
+
     def run(self):
         src = self.work / "b.dawn"
-        src.write_text(gen.program(self.seed, self.indices, no_never=self.no_never))
+        src.write_text(self.source(self.indices))
         labels = list(self.indices)
         jar = self.work / "b.jar"
         c = self.work / "b.c"
-        rc, o, e = self.compile_jvm(src, jar)
-        if rc != 0:
-            return self.attribute("jvm-compile", classify_compile(o, e), o + e)
-        rc, o, e = self.load_jvm(jar)
-        if rc != 0:
-            return self.attribute("jvm-load", "crash", o + e)
-        rc, o, e = self.tc.dawn("__emitc", str(src), "-o", str(c))
-        if rc != 0:
-            return self.attribute("emitc", classify_compile(o, e), o + e)
-        self.three_way(labels, jar, c)
+        if "jvm" in self.legs:
+            rc, o, e = self.compile_jvm(src, jar)
+            if rc != 0:
+                return self.attribute("jvm-compile", classify_compile(o, e), o + e)
+            rc, o, e = self.load_jvm(jar)
+            if rc != 0:
+                return self.attribute("jvm-load", "crash", o + e)
+        if self.legs & {"emitc", "native", "san"}:
+            rc, o, e = self.tc.dawn("__emitc", str(src), "-o", str(c))
+            if rc != 0:
+                return self.attribute("emitc", classify_compile(o, e), o + e)
+        if "jvm" in self.legs:
+            self.three_way(labels, jar, c)
 
     def load_jvm(self, jar):
         """Load the main class and run no case: as many arguments as there are
@@ -298,7 +313,7 @@ class Batch:
 
         def fails(idx):
             src = one / "one.dawn"
-            src.write_text(gen.program(self.seed, idx, no_never=self.no_never))
+            src.write_text(self.source(idx))
             rc, o, e = self.stage(stage, src, one)
             return None if rc == 0 else (o + e)
 
@@ -325,7 +340,7 @@ class Batch:
             self.find(f"{stage}-crash" if cls != "rejected" else "rejected", -1, text)
             return
         if good:   # the rest of the batch still gets its three-way run
-            rest = Batch(self.tc, self.seed, good, self.work / "rest", self.no_never)
+            rest = self.sub(good, self.work / "rest")
             rest.run()
             self.findings += rest.findings
             for k in ("died", "comptime"):
@@ -334,14 +349,17 @@ class Batch:
     def three_way(self, labels, jar, c):
         tc = self.tc
         nbin, sbin = self.work / "b.bin", self.work / "b.san"
-        rc, o, e = sh([CC, *CFLAGS, *tc.wflags, "-I", str(tc.rt), str(c), str(tc.rt_o), "-lm", "-o", str(nbin)])
-        native_ok = rc == 0
-        if not native_ok:
-            self.find("cc", -1, e)
-        rc, o, e2 = sh([CC, *SANFLAGS, "-I", str(tc.rt), str(c), str(tc.rt_san), "-lm", "-o", str(sbin)])
-        san_ok = rc == 0
-        if not san_ok:
-            self.find("cc-san", -1, e2)
+        native_ok = san_ok = False
+        if "native" in self.legs:
+            rc, o, e = sh([CC, *CFLAGS, *tc.wflags, "-I", str(tc.rt), str(c), str(tc.rt_o), "-lm", "-o", str(nbin)])
+            native_ok = rc == 0
+            if not native_ok:
+                self.find("cc", -1, e)
+        if "san" in self.legs:
+            rc, o, e2 = sh([CC, *SANFLAGS, "-I", str(tc.rt), str(c), str(tc.rt_san), "-lm", "-o", str(sbin)])
+            san_ok = rc == 0
+            if not san_ok:
+                self.find("cc-san", -1, e2)
         jv = run_cases(["java", "-Xss512m", "-jar", str(jar)], labels)
         nv = run_cases([str(nbin)], labels) if native_ok else None
         sv = run_cases([str(sbin)], labels, SAN_ENV) if san_ok else None
@@ -353,6 +371,8 @@ class Batch:
                 continue
             if j["status"] != "ok":
                 self.stats["died"] += 1
+            elif "native" not in self.legs:
+                agreed.append(i)   # no native leg asked for: the JVM's answer is the one folded
             if nv is not None:
                 n = nv.get(i)
                 if n is None:
@@ -371,7 +391,7 @@ class Batch:
                                                   f"san {s['status']} {s['exit']} {s['out'][:5]}\n{s['errfull']}")
         if sv is not None and SAN_REPORT.search(sv.get("__err", "")):
             self.find("sanitizer", san_case(sv["__err"], -1), sv["__err"])
-        if agreed:
+        if agreed and "comptime" in self.legs:
             self.comptime(agreed, jv)
 
     def compare(self, i, an, a, bn, b):
@@ -386,7 +406,7 @@ class Batch:
 
     def comptime(self, agreed, jv):
         src = self.work / "k.dawn"
-        src.write_text(gen.program(self.seed, agreed, comptime=True, no_never=self.no_never))
+        src.write_text(self.source(agreed, comptime=True))
         jar = self.work / "k.jar"
         rc, o, e = self.compile_jvm(src, jar)
         if rc != 0:
