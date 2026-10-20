@@ -110,6 +110,7 @@ SAM 值边界修复方案：[sam-value-design.md](sam-value-design.md)。
 | [native-operand-snapshot-design.md](native-operand-snapshot-design.md) | current | #84 的操作数值快照：后续赋值不能改变前置值，借用引用沿用 RC 临时绑定清理。 |
 | [function-value-arity-design.md](function-value-arity-design.md) | current | #87 的函数值与效果操作参数上限；在检查期报告，保留宽参数直接调用。 |
 | [core-lint-design.md](core-lint-design.md) | current | Core/ABI 校验器两刀：刀 1 静态对账（intrinsic 三处分区含 comptime、JVM 运行时符号、FnN 上限从 `types.fn_interface_arities` 派生）；刀 2 `DAWN_CORE_LINT=1` 时 lowering 之后的 well-formedness（`ir/lint.dawn`，字典形状、证据行与槽、调用个数、配对、Never 规则下的绑定）。十二个历史缺陷的变异补丁各自变红，全语料与 selfhost 零误报；只在本机与 nightly 开。 |
+| [fuzz3-reduce-design.md](fuzz3-reduce-design.md) | current | bug 率对策 §7.3 刀 2：fuzz3 失败程序按读回的生成器语句树做层次 delta debugging，谓词保「同一种分歧」（kind 加归一化签名，exit 加两边退出码）；多个候选改名进一个程序批量编译，拒绝按诊断行号、崩溃按消息里的函数名记到候选上；产出 spike-native 语料与 `known-red.txt` 草稿（人审入库）；接在 nightly fuzz3 红之后，6 分钟预算。 |
 | [builtin-privileges-design.md](builtin-privileges-design.md) | current | 裁决 6：`Ord[Bool]`/`Ord[Bytes]`、`Unit` 进标量表、derive 表驱动、opaque 不继承 `Show`、`f[T](x)` 诊断。 |
 | [range-bound-order-design.md](range-bound-order-design.md) | current | SEM-18 的 range `for` 边界求值顺序、共享 Core 修复与 compiling mutant 契约。 |
 | [for-pattern-design.md](for-pattern-design.md) | current | SYN-13 的定稿：`for` 复用完整不可反驳 pattern、隐藏 loop locals、空 alternative 的 token recovery、限定 constructor completion、Core placement 与 28 条独立负控。 |
