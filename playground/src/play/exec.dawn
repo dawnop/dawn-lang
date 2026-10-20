@@ -780,9 +780,9 @@ pub fn view_raw(code: String, native: Bool) -> ViewRaw !io =
 # resolve). The packages are read from the same read-only bind as the compiler.
 
 ## The manifest of a Tile IR project: `packages` is the directory holding the
-## `tileir` and `tileref` packages. Fixed text but for that path.
+## `tileir`, `tileref` and `tileinterp` packages. Fixed text but for that path.
 pub fn tile_manifest(packages: String) -> String =
-  "schema = 1\nname = \"tile\"\nversion = \"0.0.0\"\n\n[deps]\ntileir = \"${packages}/tileir\"\ntileref = \"${packages}/tileref\"\n"
+  "schema = 1\nname = \"tile\"\nversion = \"0.0.0\"\n\n[deps]\ntileir = \"${packages}/tileir\"\ntileref = \"${packages}/tileref\"\ntileinterp = \"${packages}/tileinterp\"\n"
 
 fn file_names(files: List[(String, String)]) -> List[String] = map(files, f => {
   let (name, _) = f
@@ -798,11 +798,12 @@ test "only a program that imports tileir is staged as a project" {
   assert staged_input("use tileir/dev.{Dev}\n", "/b") == "/b"
 }
 
-test "the manifest names exactly two dependencies, both under the packages directory" {
+test "the manifest names exactly three dependencies, all under the packages directory" {
   let m = tile_manifest("/opt/dawn/packages")
   assert str.contains(m, "tileir = \"/opt/dawn/packages/tileir\"\n")
   assert str.contains(m, "tileref = \"/opt/dawn/packages/tileref\"\n")
-  assert len(str.split(m, " = \"/")) == 3
+  assert str.contains(m, "tileinterp = \"/opt/dawn/packages/tileinterp\"\n")
+  assert len(str.split(m, " = \"/")) == 4
 }
 
 ## Whether this machine has the packages the view imports; asked once at start.
@@ -810,7 +811,7 @@ test "the manifest names exactly two dependencies, both under the packages direc
 ## and says why, as it does for a missing `javap`.
 pub fn tile_ready() -> Bool !io = {
   let root = packages_root()
-  with_fs_real(() => io.exists("${root}/tileir/dawn.toml") && io.exists("${root}/tileref/dawn.toml"))
+  with_fs_real(() => io.exists("${root}/tileir/dawn.toml") && io.exists("${root}/tileref/dawn.toml") && io.exists("${root}/tileinterp/dawn.toml"))
 }
 
 ## What the Tile IR view's job came to. `TileMapped` is the visitor's kernel

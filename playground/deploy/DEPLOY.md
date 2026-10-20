@@ -65,7 +65,7 @@ by hand, with the server reachable.
    /opt/dawn/playground/lsp_gateway.py      # loopback WebSocket bridge (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
-   /opt/dawn/packages/                       # tileir/tileref for the Tile IR view and the LSP's tile project (rsynced)
+   /opt/dawn/packages/                       # tileir/tileref/tileinterp for the Tile IR view and the LSP's tile project (rsynced)
    /opt/dawn/playground/lsp-tile/            # project a tileir program is opened in by the LSP bridge (rsynced; deps are ../../packages)
    /opt/dawn/site/play-ui/samples/           # starter samples, read by lsp-measure (rsynced)
    /opt/dawn/scripts/repo.env                # the site origin the LSP gateway accepts (rsynced)
@@ -75,7 +75,7 @@ by hand, with the server reachable.
    it (`dawnc build playground`). Until K5 the JVM runner compiled
    `playground/src` at every start, which is why older layouts have it. The
    Tile IR view (`POST /compile` with `target: "tile"`) points a generated
-   project at `packages/tileir` and `packages/tileref`: `PLAY_PACKAGES` names the directory and
+   project at `packages/tileir`, `packages/tileref` and `packages/tileinterp`: `PLAY_PACKAGES` names the directory and
    defaults to `/opt/dawn/packages`, which is where the sync puts it, so the
    unit file needs no new line. The runner checks both manifests exist at start
    and answers that target with 503 when they do not.

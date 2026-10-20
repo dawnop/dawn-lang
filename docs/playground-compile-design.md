@@ -522,10 +522,12 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 
 **样例。** `site/play-ui/samples/flash_attn.dawn` 是 `scripts/tile-golden/kernels.dawn` 的 `flash_attn`，与站点 GPU 页、explorer 页展示的同一个 kernel，
 外加把它录下来所需的几行 `main`（原 `playground/test/tile_attn.dawn`，该文件因此删除：同一份内容不留两份）。
-- **钉住的方式（机器对账，不是约定）：** `scripts/doc-check.py` 的 `PINNED_SAMPLES` 声明样例、原件与 golden；检查三件事：
-  (1) 样例里的 `fn flash_attn` 与原件逐字相同；(2) 样例里每一行 `const` 都是原件里的一行；(3) 样例的 `.out` 与 `scripts/tile-golden/flash_attn.mlir` 逐字节相同。
-  再加上既有的「运行并比对 `.out`」。golden 本身由 `scripts/tile-golden` 两后端逐字节钉住，所以 kernel 一动，golden 红或样例红，二者必有其一。
-- **doc-check 的样例检查：** 含 `use tileir/` 的样例改按项目运行（`src/main.dawn` 加与 runner 同样两条路径依赖的清单），`.out` 照旧逐字节比对。
+- **钉住的方式（机器对账，不是约定）：** `scripts/doc-check.py` 的 `PINNED_SAMPLES` 声明样例与原件；检查两件事：
+  (1) 样例里的 `fn flash_attn` 与原件逐字相同；(2) 样例里每一行 `const` 都是原件里的一行。
+  再加上既有的「运行并比对 `.out`」。（2026-10-20 起不再要求 `.out` 等于 golden：样例改成记录、用 `packages/tileinterp` 在宿主上解释执行、
+  再与朴素 attention 比对并打印数值，不再打印 Tile IR 文本；Tile IR 窗格的文本来自 probe 的记录，与样例自己的输出无关。
+  golden 仍由 `scripts/tile-golden` 两后端逐字节钉住，kernel 一动，golden 红或样例的 `fn flash_attn` 比对红，二者必有其一。）
+- **doc-check 的样例检查：** 含 `use tileir/` 的样例改按项目运行（`src/main.dawn` 加与 runner 同样三条路径依赖 `tileir`、`tileref`、`tileinterp` 的清单），`.out` 照旧逐字节比对。
 - **其他遍历样例目录的门：** `scripts/xmap-samples`（经 `site/explorer/record.py --samples`）只处理单文件样例，仍是 11 个、无缺口（K8 起收下 tileir 样例，12 个），tileir 样例由 `contract.sh` 的 `/compile` 用例与 doc-check 持有；
   `scripts/std-prune-diff.sh` 把它当又一个单元比较裁剪前后的诊断，无需改；`scripts/play-live-check.py` 部署后会拿线上 `/run` 的输出与 `.out` 比，天然覆盖新路径（所以按 DEPLOY 的次序，runner 先于站点）。
 - **大小与耗时（本机 WSL2，冷请求）：** 源码 1,818 B（64 KiB 上限的 2.8%）；`/run` 输出 4,737 B，`/run` 墙钟 2.77 s（其中运行 143 ms，其余是编译 `tileir`），对比 hello 1.4 s；

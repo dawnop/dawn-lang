@@ -166,9 +166,9 @@ two units (`dawn build`, then `java -Xmx256m -jar`), the same 30 s and 10 s
 budgets, the same 64 KiB output read-back through files the runner opened.
 
 - The box holds `dawn.toml` and `src/main.dawn`. The runner writes the manifest
-  (two path dependencies, `tileir` and `tileref`, under `PLAY_PACKAGES`, default
+  (three path dependencies, `tileir`, `tileref` and `tileinterp`, under `PLAY_PACKAGES`, default
   `/opt/dawn/packages`); the request supplies only the program text and any
-  other field is ignored, so a program can reach those two packages and `std`
+  other field is ignored, so a program can reach those three packages and `std`
   and nothing else. `packages/` is inside the existing `BindReadOnlyPaths=/opt/dawn`,
   so the sandbox script is unchanged.
 - Where a project build writes: `dawn build <box> -o <box>/prog.jar` was run
