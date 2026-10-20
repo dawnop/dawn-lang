@@ -37,6 +37,11 @@
 # stored key, and the local comparison then still runs: a stale restore is
 # rebuilt, never used.
 #
+# Everything this file builds lives in one directory, so CI caches one path and a
+# program added to site/native-progs.txt needs no new cache step.
+site_native_dir=site/build/native
+site_native_progs=site/native-progs.txt
+
 # Messages go to stderr: stdout is the path, for `$(site_dawnc)`.
 
 # site_dawnc_stamp: what the self-built dawnc is keyed on (compiler source
@@ -52,7 +57,7 @@ site_dawnc() {
     printf '%s\n' "$DAWNC_BIN"
     return 0
   fi
-  local out=site/build stamp work
+  local out=$site_native_dir stamp work
   mkdir -p "$out"
   stamp="$(site_dawnc_stamp)"
   if [ ! -x "$out/dawnc" ] || [ "$(cat "$out/dawnc.stamp" 2>/dev/null)" != "$stamp" ]; then
@@ -110,15 +115,33 @@ site_prog_key() {
     sha256sum | cut -d' ' -f1
 }
 
-# site_prog <project-dir> <name>: prints the path of that project built once
-# with `dawnc build <project-dir> -o site/build/<name>` (the way the Playground
+# site_prog_dir <name>: the project directory site/native-progs.txt gives a name.
+site_prog_dir() {
+  awk -v n="$1" '$1 == n { print $2; found = 1 } END { exit !found }' "$site_native_progs" ||
+    { echo "error: $1 is not listed in $site_native_progs" >&2; return 1; }
+}
+
+# site_prog_keys: "<name> <key>" for every program in site/native-progs.txt.
+site_prog_keys() {
+  local name dir
+  while read -r name dir; do
+    case "$name" in ''|'#'*) continue ;; esac
+    printf '%s %s\n' "$name" "$(site_prog_key "$dir")" || return 1
+  done < "$site_native_progs"
+}
+
+# site_prog <name>: prints the path of that program (a project listed in
+# site/native-progs.txt) built once
+# with `dawnc build <project-dir> -o site/build/native/<name>` (the way the Playground
 # runner is built), so later runs execute the binary instead of paying the
 # emit-and-cc of `dawnc run` every time (22s for the generator, 9s for the
 # search probe; the programs themselves run in a fraction of that). Rebuilt when
 # site_prog_key differs from the key stored beside the binary, or the binary is
 # missing.
 site_prog() {
-  local proj="$1" out="site/build/$2" dawnc key
+  local name="$1" proj out dawnc key
+  proj="$(site_prog_dir "$name")" || return 1
+  out="$site_native_dir/$name"
   key="$(site_prog_key "$proj")" || return 1
   if [ ! -x "$out" ] || [ "$(cat "$out.key" 2>/dev/null)" != "$key" ]; then
     dawnc="$(site_dawnc)" || return 1

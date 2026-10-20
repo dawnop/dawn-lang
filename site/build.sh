@@ -140,7 +140,7 @@ rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
 # Native, and the only generator the shipped dist comes from (see the header).
-"$(site_prog site site_gen)"
+"$(site_prog site_gen)"
 
 # The search assets against their budgets (docs/site-search-design.md 13.7):
 # the index's gzip size, the largest text fragment's, and the worst first-query

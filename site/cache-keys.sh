@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-# Prints the three cache keys CI's actions/cache uses for the site's native
-# binaries, as `name=value` lines (append to $GITHUB_OUTPUT):
+# Prints the one cache key CI's actions/cache uses for the site's native
+# binaries, as a `native=<value>` line (append to $GITHUB_OUTPUT). The cache
+# holds the directory site/build/native: dawnc built from HEAD plus every
+# program in site/native-progs.txt (the generator, the search probe, and
+# whatever is listed there later).
 #
-#   dawnc   sha256 of site_dawnc_stamp: the compiler's source stamp + runtime/c
-#   gen     site_prog_key site                  (the generator)
-#   probe   site_prog_key site/search-budget    (the search budget probe)
-#
-# They come from the functions site/build.sh itself uses to decide whether its
-# local cache is current (site/dawnc.sh), so what CI restores and what the
-# script would accept are the same question asked once. A key that moves (any
-# compiler source, runtime/c, or any *.dawn/dawn.toml of the project or its path
-# dependencies) misses the cache and the script rebuilds; a hit is checked
-# against the script's own stored key again, so a restore can only save time.
-# Needs ./bin/dawn (the toolchain step comes first); builds nothing.
+# The key is a sha256 over the dawnc stamp (compiler source stamp + runtime/c)
+# and each program's site_prog_key, from the same functions site/build.sh uses to
+# decide whether its local copy is current (site/dawnc.sh), so what CI restores
+# and what the script would accept are the same question asked once. Any
+# change to a compiler source, runtime/c, or a *.dawn / dawn.toml of a program
+# or its path dependencies moves the key. On an exact miss the workflow restores
+# the newest older cache by prefix, and the script then keeps what its own
+# stored keys still match and rebuilds the rest; so a stale restore can only
+# save time. Needs ./bin/dawn (the toolchain step comes first); builds nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . site/dawnc.sh
-printf 'dawnc=%s\n' "$(site_dawnc_stamp | sha256sum | cut -d' ' -f1)"
-printf 'gen=%s\n' "$(site_prog_key site)"
-printf 'probe=%s\n' "$(site_prog_key site/search-budget)"
+printf 'native=%s\n' "$({ site_dawnc_stamp; site_prog_keys; } | sha256sum | cut -d' ' -f1)"

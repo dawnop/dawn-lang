@@ -3589,46 +3589,31 @@ jobs:
       # note says why).
 
       # The site's native binaries are the cold cost of the build below: dawnc
-      # from HEAD, the generator and the search probe, built once each with
-      # `dawnc build` (site/dawnc.sh). Most pushes touch none of what they are
-      # built from, so each is restored from actions/cache. The keys are not
-      # written here: site/cache-keys.sh prints them from the same functions
-      # site/build.sh uses to decide whether its local copy is current, so CI
-      # and the script cannot disagree about what "unchanged" means.
-      #   dawnc  the compiler's source stamp + the digest of runtime/c
-      #   gen    that stamp + every *.dawn and dawn.toml of site/ and of its
-      #          path dependencies (std is embedded in dawnc, so the stamp
-      #          covers it)
-      #   probe  the same over site/search-budget/
-      # Any change to any of those is a different key, so a miss and a rebuild;
-      # a restore is also checked against the key stored beside the binary, so
-      # a stale one can only cost time. Data the programs read when they run
-      # (docs/, examples/) is not in a key: the binaries read it every run.
-      # Bump the `v1` in the three keys to force every binary to be rebuilt.
-      - name: site native cache keys
+      # from HEAD and every program in site/native-progs.txt (the generator,
+      # the search probe), built once each with `dawnc build` (site/dawnc.sh).
+      # Most pushes touch none of what they are built from, so the directory
+      # that holds them, site/build/native, is restored from one actions/cache.
+      # The key is not written here: site/cache-keys.sh prints it from the same
+      # functions site/build.sh uses to decide whether its local copy is
+      # current, so CI and the script cannot disagree about what "unchanged"
+      # means. It covers the compiler's source stamp, runtime/c, and every
+      # *.dawn and dawn.toml of each listed program and of its path
+      # dependencies (std is embedded in dawnc, so the stamp covers it).
+      # Data the programs read when they run (docs/, examples/) is not in it:
+      # the binaries read that every run. Any change moves the key; on a miss
+      # the newest older cache is restored by prefix and the script rebuilds
+      # whatever its own stored key no longer matches, so a stale restore can
+      # only cost time. A program added to site/native-progs.txt is covered with
+      # no change here. Bump the `v2` in both places to force a full rebuild.
+      - name: site native cache key
         id: sitekeys
         run: ./site/cache-keys.sh | tee -a "${GITHUB_OUTPUT:-/dev/null}"
-      - name: cache the site's dawnc
+      - name: cache the site's native binaries
         uses: actions/cache@v4
         with:
-          path: |
-            site/build/dawnc
-            site/build/dawnc.stamp
-          key: site-native-v1-dawnc-${{ steps.sitekeys.outputs.dawnc }}
-      - name: cache the site generator
-        uses: actions/cache@v4
-        with:
-          path: |
-            site/build/site_gen
-            site/build/site_gen.key
-          key: site-native-v1-gen-${{ steps.sitekeys.outputs.gen }}
-      - name: cache the search budget probe
-        uses: actions/cache@v4
-        with:
-          path: |
-            site/build/search_budget_probe
-            site/build/search_budget_probe.key
-          key: site-native-v1-probe-${{ steps.sitekeys.outputs.probe }}
+          path: site/build/native
+          key: site-native-v2-${{ steps.sitekeys.outputs.native }}
+          restore-keys: site-native-v2-
 
       # This one builds site/play-ui/dist, which is not tracked and which the
       # differential below reads. They stay in this order.
