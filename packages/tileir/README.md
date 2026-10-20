@@ -82,8 +82,9 @@ and this code is that file's: CI compiles it and runs its tests.
 
 The same `run` takes `with_gpu_real(cubins, ..)` in place of `with_gpu_fake`,
 where `cubins` maps a kernel name to the cubin `tileiras` made from
-`encode(prog)`. Neither this package nor `std/gpu` runs `tileiras`, so there are
-three steps between the Dawn and the card, all of them in the example:
+`encode(prog)`. `std/gpu` does not run `tileiras`; the example does it by hand,
+in three steps between the Dawn and the card (`asm.assemble`, below, is the same
+encode-and-assemble in one call):
 
 ```bash
 dawnc build examples/projects/gpu_fake -o gpu_fake      # the C backend: the JVM has no device runtime
@@ -317,23 +318,65 @@ held to the shape the operation takes from its operands (after the rank-0
 and same-rank rules), as is the `k` of `mma`, `mma_scaled` and `mmai` and the format pair of
 `mma`. A mismatch panics
 while the kernel records, naming the operation by its depth-first number in
-`TileProg.ops` (`MakeToken(0)` is #0), for example:
-``tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>``.
+`TileProg.ops` (`MakeToken(0)` is #0) and, for the four float operators, as
+the kernel wrote it. When the operation is inside a region, the regions follow
+the reason, outermost first, for example:
+``tileir: kernel `vadd_half`: op #6 `+`: rhs is tile<128xf64>, declared tile<64xf64>``
+or ``... declared tile<4xf64> (inside the body of a `d_range`, inside the then branch of a `d_if`)``.
+There is no source line yet.
 [ERRORS.md](ERRORS.md) sorts these messages, the compiler's and the device's
 into four layers, with the fix for each.
 
-## Assembling with tileiras (#558)
+## Assembling with tileiras
 
-Neither this package nor `std/gpu` runs `tileiras`: you assemble the bytes
-and hand `with_gpu_real` the cubins. **With tileiras 13.4.92, pass
-`--opt-level 0` when assembling for sm_90, sm_100, sm_103, sm_107 or
-sm_110.** At the default level that assembler stores a wrong loop exit value
-for a loop that leaves through `break` with two carried values
+`asm.assemble(prog, gpu_name, tileiras)` is the whole step between a recorded
+program and a cubin. It encodes `prog`, writes a temporary `.tilebc`, asks
+`tileiras --version` which assembler it was given, runs it with the arguments
+for that version and target, reads the cubin back and removes the scratch
+directory. `tileiras` is the path of the executable (a bare name is looked up
+on `PATH`); this package does not install it. The shortest path from a kernel
+to a card:
+
+```dawn
+use std/io.{with_fs_real, with_proc_real}
+use std/gpu.{with_gpu_real}
+use tileir/prog.{trace3, cells, In, Out}
+use tileir/asm.{assemble, explain}
+
+let (prog, _entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)   # trace
+match with_fs_real(() => with_proc_real(() => assemble(prog, "sm_86", tileiras))) {  # encode + assemble
+  Ok(cubin) -> with_gpu_real(map.from([("vadd", cubin)]), () => run_vadd(xs, ys))     # launch
+  Err(e) -> println(explain(e))
+}
+```
+
+It returns `Result[Bytes, AssembleError]` and takes the `Fs` and `Proc`
+effects, so a test answers both without an assembler. The failures are told
+apart: `AssemblerNotFound` (nothing could start `tileiras`), `AssemblerFailed`
+(a non-zero exit, with the arguments and what it printed on stderr),
+`NoCubin` (a zero exit and no output), `UnknownVersion` (a `--version` with no
+`V<number>`) and `Scratch` (the host refused a temporary file). Nothing is
+cached; an assembly takes well under a second.
+
+Where to get `tileiras`: it is in the CUDA Toolkit 13.4 and later
+(`<toolkit>/bin/tileiras`), and on PyPI as `nvidia-cuda-tileiras`, which needs
+`nvidia-nvvm` and `nvidia-cuda-nvcc` of the same version beside it.
+`scripts/tile-golden/install-tileiras.sh <dir>` installs the version this
+repository pins from those wheels and prints the binary's path. It needs no
+GPU and no driver.
+
+### Why the arguments are not always the plain ones (#558)
+
+**With tileiras 13.4.92, `--opt-level 0` is needed when assembling for sm_90,
+sm_100, sm_103, sm_107 or sm_110.** At the default level that assembler stores
+a wrong loop exit value for a loop that leaves through `break` with two
+carried values
 ([#558](https://github.com/dawnop/dawn-lang/issues/558),
 [NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)). Other
-targets, and other tileiras versions, keep the default level. Ask `asm`
-rather than hard-coding this, so the workaround lifts when you move to a fixed
-tileiras:
+targets, and other tileiras versions, keep the default level. `assemble`
+applies this itself; a build script that runs `tileiras` on its own asks
+`asm` rather than hard-coding it, so the workaround lifts when you move to a
+fixed tileiras:
 
 ```dawn
 use tileir/asm.{tileiras_args, assembler_defect}

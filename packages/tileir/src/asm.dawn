@@ -1,11 +1,14 @@
 ## How to call `tileiras` on the bytes `bytecode.encode` writes, for one
 ## assembler version and one `--gpu-name`: [`tileiras_args`] answers the
 ## arguments, and [`assembler_defect`] says why they are not the plain ones.
+## [`assemble`] is the whole step in one call: a recorded program in, a cubin
+## out, with the right arguments and the failures told apart.
 ##
-## This package never runs `tileiras` and neither does `std/gpu`: a program
-## hands `with_gpu_real` cubins somebody else assembled. So this module is
-## where the knowledge of a broken assembler lives, for that somebody (a build
-## script, scripts/tile-gpu-diff) to ask.
+## `std/gpu` never runs `tileiras`: a program hands `with_gpu_real` cubins
+## somebody else assembled. [`assemble`] is that somebody for a program that
+## has a `tileiras` binary at a path it can name, and the two functions
+## beside it are for a build script that wants to run the assembler itself
+## (scripts/tile-gpu-diff does).
 #
 # Why a table keyed on the EXACT assembler version and the exact target, and
 # not a flag of the package. tileiras 13.4.92 writes wrong PTX for a loop that
@@ -25,7 +28,12 @@
 # the sm_90 and sm_100 ledgers. It costs device time (on sm_86, where it can
 # be measured as a pure cost, up to 4.5x for kernels that compute and 8x for
 # loop_until; 6.28), and only on the affected targets.
+use std/bytes
+use std/io.{Fs, Proc, temp_dir, write_bytes, read_bytes, read_file, write_file, copy_permissions, list_dir, delete, run, with_fs_real, with_proc_real}
 use std/list
+use std/str
+use bytecode.{encode}
+use prog.{TileProg, trace_kernel}
 
 # One known assembler defect: the `tileiras` version it was measured on, the
 # `--gpu-name` values whose code is wrong, the extra arguments that avoid it,
@@ -77,6 +85,143 @@ pub fn assembler_defect(tileiras: String, gpu_name: String) -> Option[String] =
     None -> None
   }
 
+## Why [`assemble`] gave no cubin. `AssemblerNotFound` is a `tileiras` path
+## nothing could start (missing, not executable), `AssemblerFailed` a run that
+## exited non-zero (`args` is what it was given, `stderr` what it printed),
+## `NoCubin` a run that exited zero and left no output file, and
+## `UnknownVersion` a `--version` whose text has no `V<number>` to key
+## [`tileiras_args`] on. `Scratch` is the host refusing the temporary
+## directory or a file in it.
+pub type AssembleError =
+  | AssemblerNotFound(path: String, detail: String)
+  | AssemblerFailed(args: List[String], status: Int, stderr: String)
+  | NoCubin(path: String)
+  | UnknownVersion(output: String)
+  | Scratch(detail: String)
+derive Show
+
+## One English sentence for an [`AssembleError`], for a build script's log.
+pub fn explain(e: AssembleError) -> String = match e {
+  AssemblerNotFound(path, detail) -> "could not run tileiras at `${path}`: ${detail}"
+  AssemblerFailed(args, status, stderr) ->
+    "tileiras ${join(args, " ")} exited with status ${status}: ${str.trim(stderr)}"
+  NoCubin(path) -> "tileiras exited with status 0 but wrote no cubin at `${path}`"
+  UnknownVersion(output) -> "`tileiras --version` printed no `V<version>`: ${str.trim(output)}"
+  Scratch(detail) -> "scratch files for tileiras: ${detail}"
+}
+
+# The version `tileiras --version` prints after the `V` of its
+# "release 13.4, V13.4.92" line, or None.
+fn version_of(output: String) -> Option[String] =
+  match str.rsplit_once(output, ", V") {
+    Some((_before, rest)) -> {
+      let line = match str.split_once(rest, "\n") {
+        Some((l, _more)) -> l
+        None -> rest
+      }
+      let v = str.trim(line)
+      if str.is_empty(v) { None } else { Some(v) }
+    }
+    None -> None
+  }
+
+# Run `tileiras argv`, stdout and stderr each into a file under `dir`: the
+# status and both texts, or the reason it could not start.
+fn run_in(dir: String, tag: String, tileiras: String, argv: List[String]) -> Result[(Int, String, String), AssembleError] !Fs !Proc = {
+  let out = "${dir}/${tag}.out"
+  let err = "${dir}/${tag}.err"
+  match run([tileiras] ++ argv, out, err) {
+    Err(e) -> Err(AssemblerNotFound(tileiras, e.message))
+    Ok(status) -> {
+      let text = match read_file(out) {
+        Ok(t) -> t
+        Err(_e) -> ""
+      }
+      let errs = match read_file(err) {
+        Ok(t) -> t
+        Err(_e) -> ""
+      }
+      Ok((status, text, errs))
+    }
+  }
+}
+
+fn assemble_in(dir: String, bc: Bytes, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc =
+  match run_in(dir, "version", tileiras, ["--version"]) {
+    Err(e) -> Err(e)
+    Ok((vstatus, vout, verr)) ->
+      if vstatus != 0 {
+        Err(AssemblerFailed(["--version"], vstatus, verr))
+      } else {
+        match version_of(vout) {
+          None -> Err(UnknownVersion(vout))
+          Some(version) -> {
+            let input = "${dir}/in.tilebc"
+            let output = "${dir}/out.cubin"
+            match write_bytes(input, bc) {
+              Err(e) -> Err(Scratch(e.message))
+              Ok(_u) -> {
+                let args = tileiras_args(version, gpu_name) ++ ["-o", output, input]
+                match run_in(dir, "asm", tileiras, args) {
+                  Err(e) -> Err(e)
+                  Ok((status, _o, errs)) ->
+                    if status != 0 {
+                      Err(AssemblerFailed(args, status, errs))
+                    } else {
+                      match read_bytes(output) {
+                        Ok(cubin) -> Ok(cubin)
+                        Err(_e) -> Err(NoCubin(output))
+                      }
+                    }
+                }
+              }
+            }
+          }
+        }
+      }
+  }
+
+# Best effort: the scratch directory is ours, and a failed delete must not
+# replace the answer the caller is waiting for.
+fn clean(dir: String) -> Unit !Fs = {
+  for f in ["version.out", "version.err", "asm.out", "asm.err", "in.tilebc", "out.cubin"] {
+    let _r = delete("${dir}/${f}")
+  }
+  let _d = delete(dir)
+  ()
+}
+
+## Assemble `prog` for `gpu_name` (e.g. `"sm_86"`) with the `tileiras`
+## executable at `tileiras` (a path, or a name found on PATH) and answer the
+## cubin. This is the step `encode` and the assembler make by hand: the
+## program is encoded, written to a temporary `.tilebc`, `tileiras --version`
+## says which assembler this is, [`tileiras_args`] picks the arguments for that
+## version and target, and the cubin is read back. The temporary directory is
+## removed whatever the outcome.
+##
+## An assembler that cannot be started, one that exits non-zero, one that
+## leaves no file and one whose version text cannot be read are four
+## different [`AssembleError`]s. A program the encoder refuses panics with its
+## message, before any file exists.
+##
+## It takes the file system and process effects rather than reaching for the
+## host, so a test answers both without an assembler; `with_fs_real` and
+## `with_proc_real` are the production handlers. Nothing is cached: an
+## assembly takes well under a second, and a cache keyed on the bytes would
+## also have to be keyed on the assembler's version, the target and the
+## arguments, which is a table this module already keeps once.
+pub fn assemble(prog: TileProg, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc = {
+  let bc = encode(prog)
+  match temp_dir("", "tileir-asm-") {
+    Err(e) -> Err(Scratch(e.message))
+    Ok(dir) -> {
+      let r = assemble_in(dir, bc, gpu_name, tileiras)
+      clean(dir)
+      r
+    }
+  }
+}
+
 test "13.4.92 on the sm_90 and sm_100 family assembles at --opt-level 0" {
   for g in ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"] {
     assert tileiras_args("13.4.92", g) == ["--gpu-name", g, "--opt-level", "0"]
@@ -105,4 +250,135 @@ test "the diagnostic names the assembler, the target and both issues" {
   assert assembler_defect("13.4.92", "sm_90") == Some(
     "tileiras 13.4.92 miscompiles a loop exit value for sm_90 at --opt-level 1 and above"
       ++ " (dawnop/dawn-lang#558, NVIDIA/cuda-tile#25); assemble with --opt-level 0 or with a tileiras that fixes it")
+}
+
+# ---- assemble, against a stand-in for tileiras
+#
+# The stand-in is a shell script that answers `--version` the way the real
+# one does and otherwise does what the case under test says. It is made
+# executable by copying `sh`'s mode onto it (`copy_permissions`), because
+# nothing in std can chmod. Nothing here needs a GPU or the real assembler;
+# the real one is run by scripts/tile-gpu-diff and by the PR's own hardware
+# check.
+
+fn fake_program() -> TileProg = trace_kernel("fake", [], () => ())
+
+fn made(r: Result[String, ForeignError]) -> String = match r {
+  Ok(p) -> p
+  Err(_e) -> ""
+}
+
+fn version_lines() -> String =
+  "echo \"tileiras: fake\"\necho \"Cuda compilation tools, release 13.4, V13.4.92\"\n"
+
+# A stand-in whose body (after the shebang) is `body`, in a fresh directory;
+# `f` gets its path, and the directory is removed afterwards.
+fn with_fake[T](body: String, f: fn(String) -> T !Fs !Proc) -> T !Fs !Proc = {
+  let d = made(temp_dir("", "tileir-fake-"))
+  let path = "${d}/tileiras"
+  let _w = write_file(path, "#!/bin/sh\n${body}")
+  let _p = copy_permissions("/bin/sh", path)
+  let r = f(path)
+  let _a = delete(path)
+  let _b = delete(d)
+  r
+}
+
+# The scratch directories assemble leaves behind in the temporary directory.
+fn leftovers() -> List[String] !Fs = {
+  let probe = made(temp_dir("", "tileir-probe-"))
+  let parent = match str.rsplit_once(probe, "/") {
+    Some((p, _name)) -> p
+    None -> "."
+  }
+  let _d = delete(probe)
+  match list_dir(parent) {
+    Ok(names) -> list.filter(names, n => str.starts_with(n, "tileir-asm-"))
+    Err(_e) -> []
+  }
+}
+
+test "assemble hands tileiras the program's bytes and the arguments tileiras_args picks, and answers the cubin" {
+  with_fs_real(() => with_proc_real(() => {
+    let script = version_lines() ++ "if [ \"\$1\" = \"--version\" ]; then exit 0; fi\n"
+      ++ "for a in \"\$@\"; do if [ \"\$prev\" = \"-o\" ]; then out=\"\$a\"; fi; prev=\"\$a\"; in=\"\$a\"; done\n"
+      ++ "{ echo \"args: \$*\"; cat \"\$in\"; } > \"\$out\"\n"
+    let before = leftovers()
+    let prog = fake_program()
+    let bc = encode(prog)
+    # 13.4.92 on sm_90 is the combination that gets --opt-level 0; on sm_86 it gets the plain arguments
+    for (gpu, want) in [("sm_90", "args: --gpu-name sm_90 --opt-level 0 -o "), ("sm_86", "args: --gpu-name sm_86 -o ")] {
+      match with_fake(script, path => assemble(prog, gpu, path)) {
+        Ok(cubin) -> {
+          assert str.starts_with(bytes.decode_utf8_lossy(cubin), want)
+          # the program's own bytes follow the one line the stand-in wrote
+          assert bytes.slice(cubin, len(cubin) - len(bc), len(cubin)) == bc
+        }
+        Err(e) -> { assert explain(e) == "" }
+      }
+    }
+    # and the scratch directory is gone
+    assert leftovers() == before
+  }))
+}
+
+test "assemble: a tileiras that cannot be started is AssemblerNotFound" {
+  with_fs_real(() => with_proc_real(() => {
+    let before = leftovers()
+    match assemble(fake_program(), "sm_86", "/nonexistent/dir/tileiras") {
+      Err(AssemblerNotFound(path, _detail)) -> { assert path == "/nonexistent/dir/tileiras" }
+      _ -> { assert false }
+    }
+    assert leftovers() == before
+  }))
+}
+
+test "assemble: a non-zero exit is AssemblerFailed with the arguments and stderr" {
+  with_fs_real(() => with_proc_real(() => {
+    let script = version_lines() ++ "if [ \"\$1\" = \"--version\" ]; then exit 0; fi\necho \"error: nope\" >&2\nexit 3\n"
+    let before = leftovers()
+    match with_fake(script, path => assemble(fake_program(), "sm_100", path)) {
+      Err(AssemblerFailed(args, status, stderr)) -> {
+        assert status == 3
+        assert str.trim(stderr) == "error: nope"
+        assert list.take(args, 4) == ["--gpu-name", "sm_100", "--opt-level", "0"]
+        assert args[4] == "-o"
+      }
+      _ -> { assert false }
+    }
+    assert leftovers() == before
+  }))
+}
+
+test "assemble: a zero exit that wrote no file is NoCubin" {
+  with_fs_real(() => with_proc_real(() => {
+    let script = version_lines() ++ "exit 0\n"
+    match with_fake(script, path => assemble(fake_program(), "sm_86", path)) {
+      Err(NoCubin(path)) -> { assert str.ends_with(path, "/out.cubin") }
+      _ -> { assert false }
+    }
+  }))
+}
+
+test "assemble: a --version with no V<number> is UnknownVersion, and a failing --version is AssemblerFailed" {
+  with_fs_real(() => with_proc_real(() => {
+    match with_fake("echo garbage\n", path => assemble(fake_program(), "sm_86", path)) {
+      Err(UnknownVersion(out)) -> { assert str.trim(out) == "garbage" }
+      _ -> { assert false }
+    }
+    match with_fake("echo oops >&2\nexit 2\n", path => assemble(fake_program(), "sm_86", path)) {
+      Err(AssemblerFailed(args, status, _stderr)) -> {
+        assert args == ["--version"]
+        assert status == 2
+      }
+      _ -> { assert false }
+    }
+  }))
+}
+
+test "explain says which assembler step failed" {
+  assert explain(AssemblerNotFound("/x/tileiras", "no such file")) == "could not run tileiras at `/x/tileiras`: no such file"
+  assert explain(AssemblerFailed(["--gpu-name", "sm_90"], 1, "bad\n")) == "tileiras --gpu-name sm_90 exited with status 1: bad"
+  assert version_of("a\nCuda compilation tools, release 13.4, V13.4.92\nBuild x\n") == Some("13.4.92")
+  assert version_of("nothing") == None
 }
