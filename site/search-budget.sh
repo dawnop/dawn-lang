@@ -29,6 +29,11 @@
 #   SEARCH_BUDGET_RUN=<file>     use that recorded run of the panel instead of
 #                                making one (site/build/search-budget.run is
 #                                what a run leaves); the self-test's use
+#   DAWNC_BIN=<file>             the native driver that runs the panel's code
+#                                (default: built from HEAD, site/dawnc.sh)
+#
+# The panel's code runs as a native program under `dawnc run`, like the site
+# generator in site/build.sh. Which dawnc, and why, is site/dawnc.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 dist="${1:-site/dist}"
@@ -114,7 +119,9 @@ if [ "${SEARCH_BUDGET_SKIP_QUERIES:-0}" != 1 ]; then
   out="${SEARCH_BUDGET_RUN:-site/build/search-budget.run}"
   if [ -z "${SEARCH_BUDGET_RUN:-}" ]; then
     mkdir -p "$(dirname "$out")"
-    DAWN_SEARCH_DIST="$dist" ./bin/dawn run site/search-budget > "$out"
+    . site/dawnc.sh
+    dawnc_bin="$(site_dawnc)"
+    DAWN_SEARCH_DIST="$dist" "$dawnc_bin" run site/search-budget > "$out"
   elif [ ! -s "$out" ]; then
     echo "error: SEARCH_BUDGET_RUN=$out is empty or missing; run site/build.sh first" >&2
     exit 2

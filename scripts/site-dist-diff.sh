@@ -3,6 +3,15 @@
 # same site/dist, byte for byte. site/README.md has called that a project
 # tradition since M5; this script is the first thing that enforces it.
 #
+# Which side is the reference changed on 2026-10-20 (native A1,
+# ruling-full-native item 1): site/build.sh now runs the generator with dawnc,
+# so the dist that ships is the native one and the JVM leg is the baseline it
+# is held against. The comparison is the same `diff -r`; what moved is what a
+# difference means. A mismatch is a defect in one of the two backends and is
+# reported as such, never repaired by changing the generator to suit the
+# native side: the generator is one program, and the day it needs a different
+# spelling per backend the tradition above is over.
+#
 # Two things were wrong with the way it used to be done by hand.
 #
 # 1. `dawn run site` twice with a `diff -r` between the runs reads the *working
@@ -47,11 +56,13 @@
 # with "toolchain moved" rather than being reported as a backend divergence.
 # That is the residual hole, named rather than papered over.
 #
-#   ./scripts/site-dist-diff.sh          # emits and builds the native generator
+#   ./scripts/site-dist-diff.sh          # native leg (dawnc) then the JVM baseline
+#   DAWNC_BIN=<file> ...                 # use that dawnc (site/dawnc.sh)
 #   KEEP=1 ./scripts/site-dist-diff.sh   # keep the work directory
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
+. site/dawnc.sh
 
 OUT=${TMPDIR:-/tmp}/site-dist-diff.$$
 mkdir -p "$OUT"
@@ -110,27 +121,26 @@ echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 # backends on the absolute Playground endpoint, and one who does not compares
 # them on the relative one. Either way they see the same value.
 
-# ---- leg 1: the JVM backend ----
+# ---- leg 1: the native backend, the dist that ships ----
+# Run from the snapshot, by the same `dawnc run site` site/build.sh uses, so the
+# program compiled here is the program the JVM leg runs below, whatever the
+# working tree is doing. dawnc is the toolchain, not an input: it is built from
+# the working tree (or DAWNC_BIN) before the fingerprint below is checked again,
+# and site/dawnc.sh reuses the one site/build.sh left when its stamp matches.
+echo "== native =="
+dawnc_bin="$(site_dawnc)" || { echo "FAIL: dawnc did not build"; exit 1; }
+case "$dawnc_bin" in /*) ;; *) dawnc_bin="$ROOT/$dawnc_bin" ;; esac
+(cd "$SNAP" && "$dawnc_bin" run site) > "$OUT/native.log" 2>&1 || {
+  echo "FAIL: the native generator did not finish"; tail -20 "$OUT/native.log"; exit 1
+}
+mv "$SNAP/site/dist" "$OUT/dist-native"
+
+# ---- leg 2: the JVM backend, the baseline ----
 echo "== JVM =="
 (cd "$SNAP" && "$ROOT/bin/dawn" run site) > "$OUT/jvm.log" 2>&1 || {
   echo "FAIL: the JVM generator did not finish"; tail -20 "$OUT/jvm.log"; exit 1
 }
 mv "$SNAP/site/dist" "$OUT/dist-jvm"
-
-# ---- leg 2: the C backend ----
-# Emitted from the snapshot too, so the program compiled here is the program
-# the JVM leg just ran, whatever the working tree is doing.
-echo "== native =="
-"$ROOT/bin/dawn" __emitc "$SNAP/site" -o "$OUT/site.c" > "$OUT/emitc.log" 2>&1 || {
-  echo "FAIL: the site generator does not emit to C"; tail -20 "$OUT/emitc.log"; exit 1
-}
-"${CC:-cc}" -std=c11 -Wno-parentheses-equality -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
-  -I "$ROOT/runtime/c" -o "$OUT/sitegen" "$OUT/site.c" \
-  "$ROOT/runtime/c/dawn_rt.c" -lm
-(cd "$SNAP" && "$OUT/sitegen") > "$OUT/native.log" 2>&1 || {
-  echo "FAIL: the native generator did not finish"; tail -20 "$OUT/native.log"; exit 1
-}
-mv "$SNAP/site/dist" "$OUT/dist-native"
 
 # ---- the toolchain has to have held still ----
 FP_AFTER=$(toolchain_fingerprint)
@@ -146,7 +156,7 @@ fi
 if diff -r "$OUT/dist-jvm" "$OUT/dist-native" > "$OUT/dist.diff" 2>&1; then
   echo "OK: $(find "$OUT/dist-jvm" -type f | wc -l) generated file(s) identical on both backends"
 else
-  echo "FAIL: site/dist differs between the JVM and C backends"
+  echo "FAIL: site/dist differs between the native generator and the JVM baseline"
   head -40 "$OUT/dist.diff"
   exit 1
 fi

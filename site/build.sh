@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Build the site into site/dist (run from anywhere).
+#
+# The generator (site/) and the search budget probe (site/search-budget/) run
+# as native programs under `dawnc run`, not on the JVM; the JVM is still what
+# `dawn doc` (the two documentation inputs below) and the cuTile call map's
+# `dawn parse` use. Where dawnc comes from, and why, is site/dawnc.sh. The
+# differential that holds the two backends to the same dist is
+# scripts/site-dist-diff.sh, with the native dist as the one that is shipped
+# and the JVM dist as the baseline it is held against.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. site/dawnc.sh
 
 mkdir -p site/build
 ./bin/dawn doc --stdlib > site/build/stdlib.json
@@ -26,6 +35,11 @@ if command -v npm >/dev/null 2>&1; then
 else
   echo "warning: npm not found — Playground editor bundle NOT rebuilt" >&2
 fi
+
+# The native driver: it runs the generator and the search probe at the end of
+# this script and builds the TEA reactors below. Resolved here, before the slow
+# steps that need it, so a checkout that cannot build it fails now.
+site_dawnc_bin="$(site_dawnc)"
 
 # The TEA applications, as wasm reactors: the two demos on tea.html, and the
 # search panel every page's header mounts. Built here for the same
@@ -68,23 +82,9 @@ fi
 if [ "$tea_ok" = 1 ]; then
   echo "=== building the TEA reactors ==="
   # `--target wasm --reactor` is the native driver's alone (selfhost/src/
-  # nmain.dawn); the JVM CLI has no wasm backend. Emitting and linking it costs
-  # ~35s, so it is cached beside the artifacts and keyed on what it was built
-  # from: the compiler's own recursive source stamp plus the C runtime the link
-  # pulls in. Either moves, it is rebuilt.
-  tea_dawnc="${DAWNC_BIN:-}"
-  if [ -z "$tea_dawnc" ]; then
-    tea_stamp="$(DAWN_PRINT_STAMP=1 ./bin/dawn)/$(
-      find runtime/c -type f | sort | xargs cat | sha256sum | cut -d' ' -f1)"
-    if [ ! -x "$tea_out/dawnc" ] || [ "$(cat "$tea_out/dawnc.stamp" 2>/dev/null)" != "$tea_stamp" ]; then
-      echo "  building the native driver from selfhost/src/nmain.dawn..."
-      # the units compile in parallel (scripts/cc-units.sh, docs/c-tu-split-design.md)
-      ./bin/dawn __emitc selfhost/src/nmain.dawn --split "$tea_work/nmain"
-      scripts/cc-units.sh -o "$tea_out/dawnc" "$tea_work/nmain"
-      printf '%s\n' "$tea_stamp" > "$tea_out/dawnc.stamp"
-    fi
-    tea_dawnc="$tea_out/dawnc"
-  fi
+  # nmain.dawn); the JVM CLI has no wasm backend. Emitting and linking dawnc
+  # costs ~35s, so site/dawnc.sh caches it beside the artifacts.
+  tea_dawnc="$site_dawnc_bin"
   # A reactor that will not build stops the demo, not the site: the generator
   # writes a placeholder, the demo page says it could not load, and every other
   # page is what it was. Same deal the Playground makes when its editor bundle
@@ -142,7 +142,8 @@ export DAWN_SITE_PLAY_ORIGIN="${DAWN_SITE_PLAY_ORIGIN:-}"
 rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
-./bin/dawn run site
+# Native, and the only generator the shipped dist comes from (see the header).
+"$site_dawnc_bin" run site
 
 # The search assets against their budgets (docs/site-search-design.md 13.7):
 # the index's gzip size, the largest text fragment's, and the worst first-query
