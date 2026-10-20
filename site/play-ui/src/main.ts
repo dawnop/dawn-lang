@@ -32,6 +32,7 @@ import { callMarks, pickCall, rangesOf, setCalls } from './call-marks'
 import { ComparePane } from './compile-view'
 import { sampleOfSearch, targetOfSearch, withView, type Target } from './compile-state'
 import { playEndpoints } from './endpoints'
+import { Splitter, applyBasis, defaultStore, type Axis, type Mode } from './panes'
 import { SAMPLES } from './samples'
 import './playground.css'
 
@@ -157,6 +158,7 @@ function mount(root: HTMLElement) {
   const editorHost = el('div', 'dp-editor')
 
   const outPanel = el('div', 'dp-outpanel')
+  outPanel.id = 'dp-output'
   outPanel.hidden = true
   const outHead = el('div', 'dp-outhead')
   const outTitle = el('span', 'dp-outtitle', 'Output')
@@ -217,11 +219,75 @@ function mount(root: HTMLElement) {
     calls: (cs) => view.dispatch({ effects: setCalls.of(rangesOf(view.state.doc, cs)) }),
     picked: (id) => view.dispatch({ effects: pickCall.of(id) }),
   })
-  work.append(editorHost, pane.root)
+  side.id = 'dp-samples'
 
-  main.append(bar, work, outPanel)
-  ide.append(side, main)
+  // ---- the borders between the panes (panes.ts) ----
+  // The breakpoint is playground.css's: under it the sample list is a strip
+  // over the editor (no border to drag) and the generated code sits under
+  // the editor (its border moves up and down).
+  const narrowQuery = window.matchMedia('(max-width: 44rem)')
+  const rem = (n: number) => n * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16)
+  const shown = (p: HTMLElement) => !p.hidden
+  const env = {
+    mode: (): Mode => (narrowQuery.matches ? 'narrow' : 'wide'),
+    store: defaultStore,
+    // CodeMirror watches its own size too; asking makes the relayout land in
+    // the same frame as the drag instead of the observer's next one
+    // (the editor does not exist yet while the borders are built)
+    resized: () => measureEditor(),
+  }
+  let measureEditor = () => {}
+  const splits = [
+    new Splitter({
+      name: 'side',
+      label: 'Resize the sample list',
+      pane: side,
+      container: ide,
+      after: false,
+      axis: (m) => (m === 'wide' ? 'x' : null),
+      min: () => rem(8),
+      restMin: () => rem(24),
+      apply: applyBasis,
+    }, env),
+    new Splitter({
+      name: 'view',
+      label: 'Resize the generated code',
+      pane: pane.root,
+      container: work,
+      after: true,
+      axis: (m) => (shown(pane.root) ? (m === 'wide' ? 'x' : 'y') : null),
+      min: (a: Axis) => rem(a === 'x' ? 14 : 6),
+      restMin: (a: Axis) => rem(a === 'x' ? 16 : 7),
+      apply: applyBasis,
+    }, env),
+    new Splitter({
+      name: 'out',
+      label: 'Resize the output',
+      pane: outPanel,
+      container: main,
+      after: true,
+      axis: () => (shown(outPanel) ? 'y' : null),
+      min: () => rem(4.5),
+      restMin: () => bar.offsetHeight + rem(7),
+      apply: applyBasis,
+    }, env),
+  ]
+  const [sideSplit, viewSplit, outSplit] = splits
+  const relayout = () => splits.forEach((s) => s.layout())
+  narrowQuery.addEventListener('change', relayout)
+  // the window, or the band above the IDE, changed size: re-clamp
+  new ResizeObserver(relayout).observe(ide)
+  // a pane shown or hidden takes its border with it
+  const watchHidden = new MutationObserver(relayout)
+  watchHidden.observe(pane.root, { attributes: true, attributeFilter: ['hidden'] })
+  watchHidden.observe(outPanel, { attributes: true, attributeFilter: ['hidden'] })
+
+  work.append(editorHost, viewSplit.el, pane.root)
+
+  main.append(bar, work, outSplit.el, outPanel)
+  ide.append(side, sideSplit.el, main)
   root.appendChild(ide)
+  relayout()
 
   // ---- current "file" state ----
   // A shared link opens as its own scratch file; otherwise the draft this
@@ -338,6 +404,7 @@ function mount(root: HTMLElement) {
     }),
     parent: editorHost,
   })
+  measureEditor = () => view.requestMeasure()
   lsp.start(initialCode)
   prefetchWhenOffline(lsp, loadBuiltins)
   refreshChrome()

@@ -622,6 +622,97 @@ body > .site-footer { display: none; }
 .dp-editor .dp-call-pick { color: var(--accent, #7c3aed); border-bottom-style: solid; }
 .dp-editor .dp-call-on { text-decoration: underline 2px var(--accent, #7c3aed); text-underline-offset: 3px; }
 
+/* ---- the borders between panes (panes.ts) ----
+   Eight pixels to grab, laid over the border they move rather than beside
+   it, so the layout is as wide as it was without them: the margins take the
+   width back. The grab area hangs over the pane after the border, never the
+   one before, because the pane before has its scrollbar on that edge (the
+   editor beside the generated code, the listing above the console) and a
+   border that covered it would steal the scrollbar's drags. The line it draws
+   on hover, focus and drag is the pane's own border, recoloured. */
+.dp-split[hidden] { display: none; }
+.dp-split {
+  flex: none;
+  position: relative;
+  z-index: 4;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+}
+.dp-split[data-axis='x'] { width: 8px; margin: 0 -7px 0 -1px; cursor: col-resize; }
+.dp-split[data-axis='y'] { height: 8px; margin: -1px 0 -7px; cursor: row-resize; }
+.dp-split::after {
+  content: '';
+  position: absolute;
+  background: transparent;
+}
+.dp-split[data-axis='x']::after { top: 0; bottom: 0; left: 0; width: 3px; }
+.dp-split[data-axis='y']::after { left: 0; right: 0; top: 0; height: 3px; }
+.dp-split:hover::after,
+.dp-split.dp-split-on::after { background: color-mix(in srgb, var(--accent, #7c3aed) 55%, transparent); }
+.dp-split:focus-visible::after { background: var(--accent, #7c3aed); }
+@media (prefers-reduced-motion: no-preference) {
+  /* a pointer crossing the border on its way somewhere does not flash it */
+  .dp-split::after { transition: background 0.12s 0.1s; }
+}
+/* a finger needs more than eight pixels */
+@media (pointer: coarse) {
+  .dp-split[data-axis='x'] { width: 20px; margin: 0 -19px 0 -1px; }
+  .dp-split[data-axis='y'] { height: 20px; margin: -1px 0 -19px; }
+}
+/* While a border is dragged: its cursor everywhere, and no text selected in
+   the editor or the listing the pointer passes over. */
+.dp-resizing, .dp-resizing * { user-select: none !important; -webkit-user-select: none !important; }
+.dp-resizing-x, .dp-resizing-x * { cursor: col-resize !important; }
+.dp-resizing-y, .dp-resizing-y * { cursor: row-resize !important; }
+
+/* ---- scrollbars ----
+   Every pane that scrolls draws the same scrollbar: the editor (whose
+   .cm-scroller had the browser's default, a wide bar with arrows), the
+   generated code (thin, from the site's `pre` rule), the console, the sample
+   list and the editor's tooltips. The colours are the site's: the thumb is
+   --faint at half strength, stronger under the pointer, on no track, so in
+   either theme it is the same grey the other code blocks use for their
+   lines, and it follows the theme with the tokens.
+
+   Two mechanisms, because the browsers do not agree. Firefox only knows
+   scrollbar-width/scrollbar-color. Chromium knows both, and the standard pair
+   wins there when it is set, so in an engine that has ::-webkit-scrollbar
+   (Chromium and Safari, which has no scrollbar-color) the pair is set back to
+   auto and the pseudo-elements draw the bar, the one way both engines take;
+   10px in them, Firefox's `thin` in Firefox. Only under a fine pointer: a
+   phone's browser draws overlay scrollbars that come and go, and a styled
+   bar there would be a permanent strip over the code. */
+.dp-ide {
+  --dp-thumb: color-mix(in srgb, var(--faint, #656d76) 45%, transparent);
+  --dp-thumb-hover: color-mix(in srgb, var(--faint, #656d76) 75%, transparent);
+}
+.dp-ide :is(.cm-scroller, .dp-view pre.xp-code, .dp-console, .dp-side, .dp-viewerr,
+  .dp-references, .cm-tooltip-autocomplete > ul, .cm-completionInfo) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--dp-thumb) transparent;
+}
+@supports selector(::-webkit-scrollbar) {
+@media (pointer: fine) {
+  .dp-ide :is(.cm-scroller, .dp-view pre.xp-code, .dp-console, .dp-side, .dp-viewerr,
+    .dp-references, .cm-tooltip-autocomplete > ul, .cm-completionInfo) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  .dp-ide ::-webkit-scrollbar { width: 10px; height: 10px; }
+  .dp-ide ::-webkit-scrollbar-track,
+  .dp-ide ::-webkit-scrollbar-corner { background: transparent; }
+  .dp-ide ::-webkit-scrollbar-thumb {
+    background: var(--dp-thumb);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 5px;
+  }
+  .dp-ide ::-webkit-scrollbar-thumb:hover { background-color: var(--dp-thumb-hover); }
+}
+}
+
 /* ---- narrow screens: sidebar becomes a horizontal file strip ---- */
 @media (max-width: 44rem) {
   .dp-ide { flex-direction: column; }
