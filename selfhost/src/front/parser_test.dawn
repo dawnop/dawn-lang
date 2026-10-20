@@ -12,7 +12,7 @@ use front/ast.{
   EListLit, ListElem, LeExpr, LeSpread, LeIf,
   OpAdd, OpMul,
   PLit, POr, PCtor, PQual, PTuple, PList,
-  SLetPat, SWhile,
+  SLetPat, SWhile, SLocalFn,
   DFn, DType, DConst, DUseModule, DImpl, DTest, example_spelling,
   TQual, TNamed, TFn, Vis, VisPrivate, VisPkg, VisPub, e_lo, e_hi
 }
@@ -2014,4 +2014,98 @@ test "an unclosed interpolation after `=` keeps the declarations after it" {
   var n = 0
   for d in ds { if d.msg == "interpolation cannot span lines" { n = n + 1 } }
   assert n == 1
+}
+
+## The names of a module's functions and tests, in order.
+fn decl_names(src: String) -> List[String] = {
+  let (m, _) = parse_module(src)
+  var names: List[String] = []
+  for d in m.decls {
+    match d {
+      DFn(f) -> { names = names ++ [f.name] }
+      DTest(name, _, _, _, _, _, _) -> { names = names ++ [name] }
+      _ -> { names = names ++ ["?"] }
+    }
+  }
+  names
+}
+
+test "an unclosed block is closed before the next column-0 declaration (#789)" {
+  # the `for` block takes the function's `}`, so the body used to run on to
+  # the end of the file, swallowing each later head with an error of its own
+  # and the private `fn` as a local function with none
+  let src = "pub fn a() -> List[Int] = {\n  var out: List[Int] = []\n  for x in xs {\n    out = out ++ [x]\n  \n  out\n}\n\n## Doc.\npub fn b() -> Int = 1\n\nfn c() -> Int = 2\n\ntest \"t\" {\n  assert c() == 2\n}\n"
+  let (_, ds) = parse_module(src)
+  assert decl_names(src) == ["a", "b", "c", "t"]
+  assert len(ds) == 1
+  assert ds[0].msg == "unclosed `{`"
+  assert Some(ds[0].lo) == str.index_of(src, "{\n    out")
+  assert len(ds[0].notes) == 2
+  assert ds[0].notes[1].msg == "expected `}` before this declaration"
+  assert Some(ds[0].notes[1].lo) == str.index_of(src, "pub fn b")
+}
+
+test "a private fn after an unclosed block is a declaration, not a local function (#789)" {
+  let src = "fn a() -> Int = {\n  if x {\n    1\n}\nfn b() -> Int = 2\n"
+  let (_, ds) = parse_module(src)
+  assert decl_names(src) == ["a", "b"]
+  assert len(ds) == 1
+  assert ds[0].msg == "unclosed `{`"
+  assert Some(ds[0].lo) == str.index_of(src, "{\n    1")
+}
+
+test "a column-0 local fn inside a block that closes stays local" {
+  # legal, if unformatted: the single-pass rule "a column-0 head ends the
+  # block" would read `inner` as a declaration and the `}` as stray, which is
+  # why the closers come from a second pass that only a broken parse takes
+  let src = "fn a() -> Int = {\n  let k = 1\nfn inner() -> Int = 2\n  inner() + k\n}\nfn b() -> Int = 3\n"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 0
+  assert decl_names(src) == ["a", "b"]
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EBlock(stmts, _, _, _) -> {
+          assert len(stmts) == 2
+          match stmts[1] {
+            SLocalFn(name, _, _, _, _, _, _, _, _) -> { assert name == "inner" }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  # in a broken file, a head that a closing pair straddles is not where the
+  # parse resumes either: `inner` stays local and `b` takes the closers
+  let broken = "fn a() -> Int = {\n  if x {\n    let f = {\nfn inner() -> Int = 2\n    }\n\nfn b() -> Int = 3\n"
+  let (_, bds) = parse_module(broken)
+  assert decl_names(broken) == ["a", "b"]
+  assert len(bds) == 1
+  assert bds[0].msg == "unclosed `{`"
+  assert bds[0].notes[0].msg == "expected `}` before this declaration"
+  assert Some(bds[0].notes[0].lo) == str.index_of(broken, "fn b")
+}
+
+test "the closers the second pass makes up are never named as source text" {
+  # a trailing `=` joins the next lines, so the expression meets the made-up
+  # `}` in front of `fn b`, and the report says where it stands instead
+  let src = "fn a() -> Int = {\n  let x =\n\nfn b() -> Int = 2\n"
+  let (_, ds) = parse_module(src)
+  assert decl_names(src) == ["a", "b"]
+  assert len(ds) == 2
+  assert ds[0].msg == "unclosed `{`"
+  assert ds[1].msg == "expected an expression, found the start of the next declaration"
+  assert Some(ds[1].lo) == str.index_of(src, "fn b")
+  for d in ds { assert not str.contains(d.msg, "found `}`") }
+}
+
+test "an opener after the last declaration head gets no made-up closer" {
+  # typing at the end of the file loses no declaration, so nothing changes
+  let src = "fn a() -> Int = 1\nfn b() -> Int = {\n  if x {\n    1\n"
+  let (_, ds) = parse_module(src)
+  assert decl_names(src) == ["a"]
+  assert len(ds) == 1
+  assert ds[0].msg == "unclosed `{`"
+  assert ds[0].notes[len(ds[0].notes) - 1].msg == "expected `}` before the end of the file"
 }
