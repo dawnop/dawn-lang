@@ -11,10 +11,10 @@ use ir/interp.{ct_default, ct_fuel}
 pub(pkg) type Comparison = { old: Program, current: Program }
 
 fn input(name: String, text: String) -> LoadedModule = {
-  let (m, pd) = parser.parse_module(text)
+  let (m, pd, marks) = parser.parse_module_marked(text)
   LoadedModule {
     mod_path: name, class_name: name, path: name ++ ".dawn", site_path: name ++ ".dawn",
-    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pd, pkg: None, entry: false
+    text: text, line_starts: lexer.line_starts_of(text), m: m, pdiags: pd, marks: marks, pkg: None, entry: false
   }
 }
 
@@ -53,6 +53,29 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
         "fn torn() -> Int = {\n  let = 1\n  1\n}\n" ++
         "pub fn later() -> Missing = 1\n" ++
         "pub const N: Int = 40 + 2\n")
+    # a module that fails to parse without losing a declaration is checked
+    # past the damaged ones: `torn` is damaged and infers a String that
+    # `uses` wants as an Int, a statement the parser skipped is the only use
+    # of the import, a signature names a type nobody declares in a damaged
+    # declaration, and `later` and `also` are whole and wrong
+    let recovered = input("recov",
+      "use middle.{Other}\n" ++
+        "fn torn() = {\n  let = Other { n: 1 }\n  \"text\"\n}\n" ++
+        "fn uses() -> Int = torn()\n" ++
+        "fn damaged_header(x: Gone) -> Int = {\n  let = 2\n  3\n}\n" ++
+        "fn later() -> Int = \"not an int\"\n" ++
+        "fn also() -> Int = missing_name\n" ++
+        "pub fn fine() -> Int = 1\n")
+    let recovered_user = input("recov_user", "use recov.{fine}\npub fn total() -> Int = fine() + 1\n")
+    # an unclosed block, and a declaration the parser dropped
+    let unclosed = input("unclosed",
+      "fn torn() = {\n  for x in [1] {\n    x\n}\n\nfn later() -> Int = \"not an int\"\n")
+    let dropped = input("dropped",
+      "use middle.{Other}\n" ++
+        "pub type Box = { n: Int }\nimpl Show[Box] { fn show(b: Box) -> String = \"box\" }\n" ++
+        "pub fn other(o: Other) -> Int = o.n\n" ++
+        "pub fn gone() -> Missing = 1\n" ++
+        "fn fine() -> Int = 1\nfn broken( = 0\nfn later() -> Int = \"not an int\"\n")
     let loader = LocDiag { path: "loader", d: broken.pdiags[0] }
     var results: List[Comparison] = []
     let cases: List[LoadResult] = [
@@ -62,7 +85,9 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
       LoadResult { modules: [middle, lib, consumer], diags: [] },
       LoadResult { modules: [middle, torn, consumer], diags: [] },
       LoadResult { modules: [lib], diags: [] },
-      LoadResult { modules: [], diags: [loader] }
+      LoadResult { modules: [], diags: [loader] },
+      LoadResult { modules: [middle, recovered, recovered_user], diags: [] },
+      LoadResult { modules: [middle, unclosed, dropped], diags: [] }
     ]
     for loaded in cases {
       for opts in [ct_default(), ct_fuel(0)] {

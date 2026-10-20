@@ -14732,12 +14732,21 @@ pub(pkg) fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx
 ## `[ImplHead(trait, subject), Named(MethodDecl, m)]`, a constant under
 ## `[Named(ConstDecl, c)]`. A consumer spells the path from the syntax it
 ## walks; nothing pairs a table with the syntax by index (ARC-07).
+##
+## `recovered` says the syntax is the parser's repair of a file that did not
+## parse, and `damaged` names (by `path_text`) every declaration and member the
+## repair touched: the scheduler leaves their bodies unchecked, and a function
+## among them that infers its return type keeps its placeholder signature, so
+## that `TyError` is what its callers see (docs/lsp-module-memo-design.md §十四).
+## A clean parse has neither.
 pub(pkg) type ModuleHeaders = {
   syntax: Module,
   cx: Cx,
   sigs: PathTable[Sig],
   impl_sigs: PathTable[Option[Sig]],
-  const_tys: PathTable[Option[Ty]]
+  const_tys: PathTable[Option[Ty]],
+  recovered: Bool,
+  damaged: Set[String]
 }
 
 pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]) -> ModuleHeaders !io = {
@@ -14782,7 +14791,8 @@ pub(pkg) fn check_module_headers(cx: Cx, m: Module, env: Map[String, ModExports]
   # add up to is not inside any of them, which is what lets a header product
   # be captured across the whole of it.
   cx1 = leave_decl_owner(Cx { ..cx1, record_ty_spans: false, ty_spans: no_spans })
-  ModuleHeaders { syntax: m, cx: cx1, sigs: sigs, impl_sigs: impl_sigs, const_tys: const_tys }
+  ModuleHeaders { syntax: m, cx: cx1, sigs: sigs, impl_sigs: impl_sigs, const_tys: const_tys,
+    recovered: false, damaged: set.empty() }
 }
 
 ## Keep checking order separate from emission order: bodies are checked in
@@ -15222,6 +15232,13 @@ fn report_cycles(cx: Cx, fnds: List[FnDecl], cyclic: List[Int]) -> Cx = {
   cx1
 }
 
+## Whether the scheduler leaves this declaration's body unchecked. The path is
+## the one `identity.located` files the declaration under; a duplicated name
+## shares its path, so an undamaged twin of a damaged declaration is skipped
+## too, which only ever hides a diagnostic.
+fn body_skipped(headers: ModuleHeaders, path: List[identity.Part]) -> Bool =
+  headers.recovered && set.has(headers.damaged, identity.path_text(path))
+
 pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executor: BodyExecutor[S]) -> (S, ModuleBodies) !io = {
   var state = initial
   let m = headers.syntax
@@ -15249,9 +15266,25 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   # module spent 1.02s above the floor on the rebuilds alone.
   var inferred: Map[Int, TFun] = map.empty()
   var pending: List[Int] = []
+  # A damaged function that infers its return type is never run, so nothing
+  # seals its signature: it is `settled` from the start, which is what lets a
+  # caller that used the placeholder (return type `TyError`, no effect) finish.
+  var settled: Set[String] = set.empty()
   var i = 0
   for d in fnds {
-    if sigs[i].inferring { pending = pending ++ [i] }
+    if sigs[i].inferring {
+      if body_skipped(headers, [identity.Named(identity.FunctionDecl, d.name)]) {
+        settled = set.insert(settled, d.name)
+        # The placeholder also assumes `!io` until a body is checked, which
+        # would make every pure caller report an effect it cannot see. A
+        # declared effect row is the author's and stays.
+        if len(d.effs) == 0 {
+          cx1 = write_signature(cx1, d.name, Sig { ..sigs[i], eff: EPure })
+        }
+      } else {
+        pending = pending ++ [i]
+      }
+    }
     i = i + 1
   }
   if len(pending) > 0 {
@@ -15262,7 +15295,6 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     # blocking the functions that depend on it. They are reported once every
     # component is done, in index order, which is the order the scan before
     # this reported every leftover function in.
-    var settled: Set[String] = set.empty()
     var cyclic: List[Int] = []
     var gi = 0
     for group in groups {
@@ -15290,13 +15322,13 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
     let (claimed, header) = identity.path_table_claim(headers.const_tys, const_seen, identity.path_text(path))
     const_seen = claimed
     match header {
-      Some(Some(declared)) -> {
+      Some(Some(declared)) -> if not body_skipped(headers, path) {
         let owner = enter_decl(cx1, view, path)
         let (next_state, cxe, tc) = executor.constant(state, owner.cx, d, declared, visible)
         state = next_state
         cx1 = left(owner, cxe)
         tconsts = tconsts ++ [TConst { ..tast_positions.constant(owner.resolver, tc), decl: owner.decl }]
-      }
+      } else { () }
       _ -> ()
     }
     visible = set.insert(visible, d.name)
@@ -15308,7 +15340,9 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   var tfuns: List[Option[TFun]] = []
   i = 0
   for d in fnds {
-    if not sigs[i].inferring {
+    if not sigs[i].inferring && body_skipped(headers, [identity.Named(identity.FunctionDecl, d.name)]) {
+      tfuns = tfuns ++ [no_tfun()]
+    } else if not sigs[i].inferring {
       let owner = enter_decl(cx1, view, [identity.Named(identity.FunctionDecl, d.name)])
       let (next_state, cxe, tf) = executor.function(state, owner.cx, d, sigs[i])
       state = next_state
@@ -15337,7 +15371,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
       let (claimed, header) = identity.path_table_claim(headers.impl_sigs, method_seen, identity.path_text(path))
       method_seen = claimed
       match header {
-        Some(Some(ms)) -> {
+        Some(Some(ms)) -> if not body_skipped(headers, path) {
           # registration refused any parameter defaults; strip them so the
           # refusal is not followed by the value's own diagnostics
           let owner = enter_decl(cx1, view, path)
@@ -15346,7 +15380,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
           cx1 = left(owner, cxe)
           impl_tfuns = impl_tfuns ++
             [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl, impl_of: imp_key }]
-        }
+        } else { () }
         _ -> ()
       }
     }
@@ -15359,7 +15393,8 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
         let tr = trait_of(cx1.traits, t)
         for me in td.methods {
           match me.body {
-            Some(b) -> {
+            Some(b) -> if not body_skipped(headers,
+              [identity.Named(identity.TraitDecl, td.name), identity.Named(identity.MethodDecl, me.name)]) {
               var msig: Option[Sig] = None
               for entry in tr.methods {
                 let (mname, ms2) = entry
@@ -15377,7 +15412,7 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
                 }
                 None -> ()
               }
-            }
+            } else { () }
             None -> ()
           }
         }
@@ -15390,11 +15425,13 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   let no_tests: List[TestView] = []
   let tests_to_check = if cx1.std_trusted { no_tests } else { all_tests }
   for t in tests_to_check {
-    let owner = enter_decl(cx1, view, [identity.Named(identity.TestDecl, t.name)])
-    let (next_state, cxe, tf) = executor.test_body(state, owner.cx, t.name, t.body)
-    state = next_state
-    cx1 = left(owner, cxe)
-    ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl }]
+    if not body_skipped(headers, [identity.Named(identity.TestDecl, t.name)]) {
+      let owner = enter_decl(cx1, view, [identity.Named(identity.TestDecl, t.name)])
+      let (next_state, cxe, tf) = executor.test_body(state, owner.cx, t.name, t.body)
+      state = next_state
+      cx1 = left(owner, cxe)
+      ttests = ttests ++ [TFun { ..tast_positions.function(owner.resolver, tf), decl: owner.decl }]
+    }
   }
   var fns_out: List[TFun] = []
   for sl in tfuns {
@@ -15406,7 +15443,9 @@ pub(pkg) fn execute_module_bodies[S](headers: ModuleHeaders, initial: S, executo
   # Last, because whether an import is unused is only decided for a module
   # every other check passed (docs/unused-imports-design.md §2). Here and not
   # in `check_module`, so every body executor reaches the same end.
-  if not cx1.std_trusted {
+  # A file that did not parse is not such a module: an import used only by a
+  # statement the parser skipped would be called unused, and that is an error.
+  if not cx1.std_trusted && not headers.recovered {
     cx1 = selfrec.report_self_recursion(cx1, fns_out, impl_tfuns)
     cx1 = import_use.report_unused_imports(cx1, m)
   }

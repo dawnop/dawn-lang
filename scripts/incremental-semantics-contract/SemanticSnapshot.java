@@ -20,7 +20,7 @@ public final class SemanticSnapshot {
         var at = java.util.Arrays.stream(reference.getMethods())
                 .filter(m -> m.getName().equals("sample_at")).findFirst().orElseThrow();
         long length = (Long) count.invoke(null, samples);
-        if (length != 15) throw new AssertionError("Expected 15 full-product pairs, got " + length);
+        if (length != 19) throw new AssertionError("Expected 19 full-product pairs, got " + length);
         for (int i = 0; i < length; i++) {
             Object pair = at.invoke(null, samples, (long) i);
             Object a = pair.getClass().getField("old").get(pair);
