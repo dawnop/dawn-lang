@@ -1656,8 +1656,8 @@ bind/oracle 四处同步;`types.dawn` 顺带给 dict 伪 id 起名 `DICT_ADT_ID`
 调研 §5 的 A1 段(生成器本身一处不差)。A2(`dawn doc` 换 native、`package-docs.sh`)与
 A3(`gpu-map/record.py` 的 `dawn parse`)**不在本刀,待办留在原处**。
 
-**改了什么。** `site/build.sh` 用 `dawnc run site` 出站,`site/search-budget.sh` 用
-`dawnc run site/search-budget` 跑面板探针;`scripts/site-dist-diff.sh` 反过来:native 先跑、
+**改了什么。** `site/build.sh` 用 `dawnc build site` 编出的二进制出站,`site/search-budget.sh` 用
+`dawnc build site/search-budget` 编出的二进制跑面板探针(两者各编一次,缓存在 `site/build/`);`scripts/site-dist-diff.sh` 反过来:native 先跑、
 产出为准,JVM 后跑、做对照基准,比较仍是同一份输入快照上的 `diff -r`。生产的
 `site/redeploy.sh` 经 `build.sh` 自动跟随,不需另改;部署机(本机)要有 `cc`。
 
@@ -1673,12 +1673,16 @@ tag 的编译器,生成器与它依赖的语言特性、运行时随 HEAD 走,�
 搜索探针两边输出逐字节相同(28 行)。负控:让 dawnc 往 `index.html` 多写一个字节,门禁红。
 没有碰生成器。
 
-**代价:墙钟变长,这是取舍的一部分。** 暖机后(dawnc 已缓存)`site/build.sh` 中位数 37.7s
-到 60.3s(+22.6s,+60%)。拆开看:`dawnc run site` 22.6s 对 JVM 6.6s,搜索探针 9.3s 对
-3.2s,差额是每次运行要把生成器编成 C 再交给 cc。`-O1` 只省 4s 与 2s(输出相同),不值得
-让站点构建偏离默认级别。想把这笔钱拿回来,要的是编译缓存或按内容摘要复用已编出的生成器,
-那是工具链的事,留给后续,不在 A1 内。冷机多付一次 dawnc 自建(约 37s)。
+**代价与纠正:第一版用 `dawnc run`,建站墙钟 +60%,所以不能留。** `dawnc run` 每次都把生成器
+发成 C 再交给 cc:暖机后 `site/build.sh` 中位数 37.7s 到 60.3s,生成器 22.6s 对 JVM 6.6s,
+探针 9.3s 对 3.2s。修法是和 Playground runner 一样用 `dawnc build` 各编一次,二进制缓存在
+`site/build/`,之后直接执行。缓存键(`site/dawnc.sh` 的 `site_prog`)= dawnc stamp(含
+runtime/c,std 嵌在 dawnc 里,所以也被它覆盖)+ 项目目录及其路径依赖(传递闭包)下全部
+`*.dawn` 与 `dawn.toml` 的内容摘要,正是 `dawnc build` 读的东西;运行期读的数据(docs/、
+examples/、资源)不进键,因为二进制每次运行都重新读。改一个生成器源文件下一次必重编且 dist
+随之变(负控:改 `site/src/html/page.dawn` 的 `<title>` 模板,重编并在页面里看到改动,还原后
+再重编)。修后暖机中位数 37.8s,与 JVM 的 37.7s 持平;冷机多付 dawnc 自建(约 37s)与两次
+`dawnc build`。
 
-**不做的。** 不改 `dawn doc`/`package-docs.sh`/`record.py`(A2、A3);不把 `-O1` 写进脚本;
-不为省墙钟缓存生成器二进制(生成器是输入的纯函数,缓存键要覆盖整棵站点源与 docs,
-得不偿失);不在 `redeploy.sh` 里单独加 dawnc 检查(`build.sh` 失败即停,已覆盖)。
+**不做的。** 不改 `dawn doc`/`package-docs.sh`/`record.py`(A2、A3);
+不在 `redeploy.sh` 里单独加 dawnc 检查(`build.sh` 失败即停,已覆盖)。

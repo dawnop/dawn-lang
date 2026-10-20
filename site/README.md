@@ -224,10 +224,12 @@ DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
 # 生成器与搜索预算探针都由原生驱动 dawnc 运行（2026-10-20 起；JVM 只剩 `dawn doc` 与
 # gpu-map 的 `dawn parse`）。dawnc 从当前提交自建，约 37s，按编译器自己的 source stamp +
 # runtime/c 缓存在 site/build/dawnc（见 site/dawnc.sh）；`DAWNC_BIN=<文件>` 可指定现成的。
-# 每次运行 dawnc 还要把生成器编成 C 再交给 cc，暖机后建站墙钟约 60s（此前 JVM 约 38s）。
+# 生成器与探针各用 `dawnc build` 编一次，缓存在 site/build/site_gen、search_budget_probe，
+# 键是 dawnc stamp + 项目及其路径依赖里全部 *.dawn/dawn.toml 的内容摘要（见 site_prog），
+# 源码不变则直接执行二进制；暖机后建站墙钟 37.8s，与 JVM 的 37.7s 持平。
 # 或手动：
 ./bin/dawn doc --stdlib > site/build/stdlib.json
-site/build/dawnc run site    # 生成 site/dist/（从仓库根运行）；./bin/dawn run site 是 JVM 基准
+site/build/dawnc run site    # 生成 site/dist/（从仓库根运行，每次重编约 22s）；./bin/dawn run site 是 JVM 基准
 ./bin/dawn test site   # 生成器测试
 
 # 首页那四段代码（hero + 三张特性卡）真的编译、真的跑，输出对着同名 .out 比：

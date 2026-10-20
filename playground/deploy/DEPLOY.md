@@ -243,8 +243,9 @@ runner having sat thirteen days behind the tree with each half self-consistent.
 
 **The site is built on the deploying machine, with a native generator.**
 `site/redeploy.sh` runs `site/build.sh`, which runs the site generator and the
-search budget probe with `dawnc` (built from the checked-out commit by
-`site/dawnc.sh`, cached under `site/build/`, or `DAWNC_BIN` if set), so the
+search budget probe as native binaries built with `dawnc build` (dawnc itself
+built from the checked-out commit by `site/dawnc.sh`, or `DAWNC_BIN` if set;
+all cached under `site/build/` and keyed on their sources), so the
 machine needs a C compiler (`cc`) beside the JDK and `clang-20`. The first build
 of a new commit pays about 40 seconds to compile `dawnc`; later builds of the
 same compiler sources reuse it. Nothing about the server changes: it still only

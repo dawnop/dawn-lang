@@ -53,3 +53,56 @@ site_dawnc() {
   fi
   printf '%s\n' "$out/dawnc"
 }
+
+# site_prog <project-dir> <name>: prints the path of that project built once
+# with `dawnc build <project-dir> -o site/build/<name>` (the way the Playground
+# runner is built), so later runs execute the binary instead of paying the
+# emit-and-cc of `dawnc run` every time (22s for the generator, 9s for the
+# search probe; the programs themselves run in a fraction of that).
+#
+# The cache key is a sha256 over exactly what `dawnc build` reads:
+#   - the dawnc stamp (compiler source + runtime/c), which also stands for std
+#     because std is embedded in the dawnc that compiles it (with DAWNC_BIN the
+#     binary's own hash stands in for it);
+#   - every `*.dawn` and `dawn.toml` under the project directory and under each
+#     path dependency, transitively (`[deps]` entries of the form
+#     `name = "relative/path"` are followed; these projects have no java-deps
+#     or vendored jars, and a dependency of another kind would have to be added
+#     here).
+# Not in the key, on purpose: data the program reads when it runs (docs/,
+# examples/, assets), which the binary reads on every run as `dawnc run` did.
+# A changed key, or a missing binary, rebuilds.
+site_prog() {
+  local proj="$1" name="$2" out="site/build/$2" dawnc stamp key
+  local seen=" " queue="$proj" dir toml dep files=""
+  dawnc="$(site_dawnc)" || return 1
+  if [ -f "$(dirname "$dawnc")/dawnc.stamp" ] && [ -z "${DAWNC_BIN:-}" ]; then
+    stamp="$(cat "$(dirname "$dawnc")/dawnc.stamp")"
+  else
+    stamp="bin:$(sha256sum "$dawnc" | cut -d' ' -f1)"
+  fi
+  while [ -n "$queue" ]; do
+    dir="${queue%%$'\n'*}"
+    if [ "$queue" = "$dir" ]; then queue=""; else queue="${queue#*$'\n'}"; fi
+    case "$seen" in *" $dir "*) continue ;; esac
+    seen="$seen$dir "
+    toml="$dir/dawn.toml"
+    [ -f "$toml" ] || { echo "error: $toml is missing" >&2; return 1; }
+    files="$files$(find "$dir" \( -name build -o -name dist -o -name node_modules \) -prune -o \
+      -type f \( -name '*.dawn' -o -name dawn.toml \) -print | sort)"$'\n'
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      dep="$(cd "$dir/$dep" 2>/dev/null && pwd -P)" || { echo "error: $toml: a dependency path does not exist" >&2; return 1; }
+      dep="${dep#"$(pwd -P)"/}"
+      queue="${queue:+$queue$'\n'}$dep"
+    done < <(awk '/^\[/ { in_deps = ($0 == "[deps]") }
+                  in_deps && /=[ ]*"[^"]*"/ { match($0, /"[^"]*"/); print substr($0, RSTART + 1, RLENGTH - 2) }' "$toml")
+  done
+  key="$({ printf 'stamp\t%s\n' "$stamp"; printf '%s' "$files" | grep -v '^$' | sort -u | xargs sha256sum; } | sha256sum | cut -d' ' -f1)"
+  if [ ! -x "$out" ] || [ "$(cat "$out.key" 2>/dev/null)" != "$key" ]; then
+    echo "  building $proj with dawnc build..." >&2
+    "$dawnc" build "$proj" -o "$out" >&2 || return 1
+    printf '%s\n' "$key" > "$out.key"
+  fi
+  printf '%s\n' "$out"
+}
