@@ -31,7 +31,7 @@ use std/mem
 use std/str
 use std/mem.{Mem, with_mem}
 use std/gpu.{WideRefFn}
-use tileir/prog.{TileProg, ByPtr, ByValue}
+use tileir/prog.{TileProg, ByPtr, ByValue, kparam_dtype, ftof_mode}
 use tileir/dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Padding, NoPadding, PadZero, PadNegZero,
   PadNan, PadPosInf, PadNegInf, DYN_DIM }
 use tileir/lower.{lower, Kernel, Instr, Ty, Ref, Token, Tile, TensorView, PartitionView, StridedView,
@@ -42,9 +42,12 @@ use tileir/lower.{lower, Kernel, Instr, Ty, Ref, Token, Tile, TensorView, Partit
   PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile,
   PrintTile, TokenOnlyTile, GetGlobalPtr, AllocaPtr, MakeTensorView, MakePartitionView, MakeStridedView,
   MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, Ret }
+use std/narrow.{Down, Up}
 use math.{INF, NAN, Downward, Upward, is_nan, sign_bit, flush, sqrt_rn, add_dir, mul_dir, div_dir,
   floor_f, ceil_f, rem_f, exp_f, exp2_f, log_f, log2_f, rsqrt_f, tanh_f, sin_f, cos_f, tan_f, sinh_f, cosh_f, atan2_f,
-  pow_f, SIGN_BIT, bits_of, float_of }
+  pow_f, SIGN_BIT, bits_of, float_of, odd_of }
+use formats.{is_float_format, is_unmodelled_float, float_width, mode_of, round_into, nearest, to_bits, of_bits, flush_in}
+use mma.{mma_float, mma_scaled, mma_int, fma_in}
 
 ## Why a launch failed: `kind` is one of `interp.unsupported_op` (an
 ## instruction or format this subset does not model, refused before
@@ -102,6 +105,7 @@ type Cx = {
   lens: List[Int],
   written: I64Buf,
   params: List[V],
+  dtypes: List[String],
   bid: List[Int],
   grid: List[Int],
   ub: Bool,
@@ -164,8 +168,9 @@ fn unsigned_of(w: Int, v: Int) -> Int = if w >= 64 { v } else { v & ((1 << w) - 
 
 # ---- the static walk ----
 
-# The formats a tile of this subset may hold.
-fn supported_elem(name: String) -> Bool = name == "f64" || int_width(name) > 0 || name == "ptr"
+# The formats a tile may hold: the integer widths, a pointer, and every float
+# format `formats` models (f8E5M3FNU is the one it does not).
+fn supported_elem(name: String) -> Bool = is_float_format(name) || int_width(name) > 0 || name == "ptr"
 
 fn ty_problem(t: Ty) -> Option[String] = match t {
   Token -> None
@@ -193,7 +198,8 @@ const INT_UN: List[String] = ["absi", "negi"]
 const INT_BIN: List[String] = ["addi", "subi", "muli", "divi", "remi", "maxi", "mini", "andi", "ori", "xori", "shli",
   "shri", "shru", "mulhii", "addi_nsw", "subi_nuw", "muli_nw"]
 
-const CASTS: List[String] = ["itof", "ftoi", "ftoi_sat", "exti", "extis", "trunci", "bitcast", "pack", "unpack"]
+const CASTS: List[String] = ["itof", "ftoi", "ftoi_sat", "exti", "extis", "trunci", "bitcast", "pack", "unpack", "ftof",
+  "ftof_zero", "ftof_neg_inf", "ftof_pos_inf", "ftof_away"]
 
 fn op_in(op: String, names: List[String]) -> Bool = list.any(names, n => n == op)
 
@@ -234,50 +240,56 @@ fn tys_of(i: Instr) -> List[Ty] = match i {
   GetIndexSpaceShape(_ds, _s, st, rt) -> [st, rt]
   LoadViewTile(_d, _t, _v, vt, _ix, itys, t, _ti, _ib) -> [vt, t] ++ itys
   StoreViewTile(_t, _v, vt, _val, valt, _ix, itys, _ti, _ib) -> [vt, valt] ++ itys
+  FloatFma(_d, t, _l, _r, _a) -> [t]
+  FloatMma(_d, t, lt, rt, _l, _r, _a) -> [t, lt, rt]
+  FloatMmaScaled(_d, t, lt, rt, st, rst, _l, _r, _a, _ls, _rs) -> [t, lt, rt, st, rst]
+  IntMma(_d, t, lt, rt, _l, _r, _a) -> [t, lt, rt]
   _ -> []
 }
 
 # The instruction's own refusal, if it is not one this subset models at
 # all, or if it is but with an operation name it does not.
 fn op_problem(i: Instr) -> Option[String] = match i {
-  FloatUn(_d, op, _t, _s) -> if op_in(op, FLOAT_UN) { None } else { Some("${op} (float operation not in subset A)") }
-  FloatBin(_d, op, _t, _l, _r) -> if op_in(op, FLOAT_BIN) { None } else { Some("${op} (float operation not in subset A)") }
+  FloatUn(_d, op, _t, _s) -> if op_in(op, FLOAT_UN) { None } else { Some("${op} (float operation not modelled)") }
+  FloatBin(_d, op, _t, _l, _r) -> if op_in(op, FLOAT_BIN) { None } else { Some("${op} (float operation not modelled)") }
   CmpFloat(_d, p, _t, _rt, _l, _r) -> if op_in(p, PREDS) { None } else { Some("cmpf ${p}") }
   CmpInt(_d, p, _t, _rt, _l, _r) -> if op_in(p, PREDS) { None } else { Some("cmpi ${p}") }
-  IntUn(_d, op, _t, _s) -> if op_in(op, INT_UN) { None } else { Some("${op} (integer operation not in subset A)") }
-  IntBin(_d, op, _t, _l, _r) -> if op_in(op, INT_BIN) { None } else { Some("${op} (integer operation not in subset A)") }
-  Cast(_d, op, _f, _t, _s) ->
-    if op_in(op, CASTS) {
-      None
-    } else if str.starts_with(op, "ftof") {
-      Some("${op} (a conversion between float formats needs a narrow one, I2)")
+  IntUn(_d, op, _t, _s) -> if op_in(op, INT_UN) { None } else { Some("${op} (integer operation not modelled)") }
+  IntBin(_d, op, _t, _l, _r) -> if op_in(op, INT_BIN) { None } else { Some("${op} (integer operation not modelled)") }
+  Cast(_d, op, f, t, _s) ->
+    if not op_in(op, CASTS) {
+      Some("${op} (conversion not modelled)")
+    } else if op == "ftof_pos_inf" && elem_name(t) == "f8E8M0FNU" {
+      # std/narrow has the `zero` rounding into this format and no other:
+      # `positive_inf` was never measured, so it is not guessed
+      Some("${op} into f8E8M0FNU (only the `zero` rounding is measured)")
     } else {
-      Some("${op} (conversion not in subset A)")
+      None
     }
   AtomicRMWPtr(_d, _t, _p, mode, _a, _m, _ti, _pt, _mt, _vt) -> Some("atomic_rmw_tko ${mode} (atomics are not interpreted: a sequential run is one legal schedule)")
   AtomicCASPtr(_d, _t, _p, _c, _v, _m, _ti, _pt, _mt, _vt) -> Some("atomic_cas_tko (atomics are not interpreted: a sequential run is one legal schedule)")
   AtomicRedViewTile(_t, _v, _vt, _val, _valt, _ix, _itys, mode, _sc, _ti) -> Some("atomic_red_view_tko ${mode} (atomics are not interpreted)")
-  FloatFma(_d, _t, _l, _r, _a) -> Some("fma (fused multiply-add is I2)")
-  FloatMma(_d, _t, _lt, _rt, _l, _r, _a) -> Some("mmaf (matrix product is I2)")
-  FloatMmaScaled(_d, _t, _lt, _rt, _st, _rst, _l, _r, _a, _ls, _rs) -> Some("mmaf_scaled (matrix product is I2)")
-  IntMma(_d, _t, _lt, _rt, _l, _r, _a) -> Some("mmai (matrix product is I2)")
-  PtrToIntTile(_d, _s, _f, _t) -> Some("ptr_to_int (the flat address model is not in subset A)")
-  IntToPtrTile(_d, _s, _f, _t) -> Some("int_to_ptr (the flat address model is not in subset A)")
-  PtrToPtrTile(_d, _s, _f, _t) -> Some("ptr_to_ptr (the flat address model is not in subset A)")
-  AssertTile(_c, _ct, _m) -> Some("assert (not in subset A)")
-  PrintTile(_t, _f, _a, _at, _ti) -> Some("print_tko (not in subset A)")
+  PtrToIntTile(_d, _s, _f, _t) -> Some("ptr_to_int (the flat address model is not interpreted)")
+  IntToPtrTile(_d, _s, _f, _t) -> Some("int_to_ptr (the flat address model is not interpreted)")
+  PtrToPtrTile(_d, _s, _f, _t) -> Some("ptr_to_ptr (the flat address model is not interpreted)")
+  AssertTile(_c, _ct, _m) -> Some("assert (not interpreted)")
+  PrintTile(_t, _f, _a, _at, _ti) -> Some("print_tko (not interpreted)")
   TokenOnlyTile(_t, op, _ti) -> Some("${op} (fences and PDL are not interpreted: a sequential run cannot check them)")
-  GetGlobalPtr(_d, sym, _t) -> Some("get_global @${sym} (module globals are not in subset A)")
-  AllocaPtr(_d, _n, _a, _s, _t) -> Some("alloca (not in subset A)")
-  MakeStridedView(_d, _s, _st, _t) -> Some("make_strided_view (not in subset A)")
-  MakeGatherScatterView(_d, _s, _st, _t) -> Some("make_gather_scatter_view (not in subset A)")
+  GetGlobalPtr(_d, sym, _t) -> Some("get_global @${sym} (module globals are not interpreted)")
+  AllocaPtr(_d, _n, _a, _s, _t) -> Some("alloca (not interpreted)")
+  MakeStridedView(_d, _s, _st, _t) -> Some("make_strided_view (not interpreted)")
+  MakeGatherScatterView(_d, _s, _st, _t) -> Some("make_gather_scatter_view (not interpreted)")
   GetIndexSpaceShape(_ds, _s, st, _rt) -> match st {
     PartitionView(_ts, _e, _sh, _str, _dm, _p) -> None
-    _ -> Some("get_index_space_shape of a strided or gather view (not in subset A)")
+    _ -> Some("get_index_space_shape of a strided or gather view (not interpreted)")
   }
   # Every other variant is modelled, and is named here rather than caught by
   # a wildcard: a variant tileir adds later does not compile until it is put
   # in one list or the other.
+  FloatFma(_d, _t, _l, _r, _a) -> None
+  FloatMma(_d, _t, _lt, _rt, _l, _r, _a) -> None
+  FloatMmaScaled(_d, _t, _lt, _rt, _st, _rst, _l, _r, _a, _ls, _rs) -> None
+  IntMma(_d, _t, _lt, _rt, _l, _r, _a) -> None
   MakeTok(_d) -> None
   BlockIds(_x, _y, _z) -> None
   ConstInt(_d, _t, _v) -> None
@@ -323,6 +335,10 @@ fn mnemonic(i: Instr) -> String = match i {
   IntUn(_d, op, _t, _s) -> op
   IntBin(_d, op, _t, _l, _r) -> op
   Cast(_d, op, _f, _t, _s) -> op
+  FloatFma(_d, _t, _l, _r, _a) -> "fma"
+  FloatMma(_d, _t, _lt, _rt, _l, _r, _a) -> "mmaf"
+  FloatMmaScaled(_d, _t, _lt, _rt, _st, _rst, _l, _r, _a, _ls, _rs) -> "mmaf_scaled"
+  IntMma(_d, _t, _lt, _rt, _l, _r, _a) -> "mmai"
   CmpFloat(_d, p, _t, _rt, _l, _r) -> "cmpf ${p}"
   CmpInt(_d, p, _t, _rt, _l, _r) -> "cmpi ${p}"
   _ -> {
@@ -352,7 +368,7 @@ fn body_problem(body: List[Instr]) -> Option[String] = {
     found = match op_problem(i) {
       Some(p) -> Some(p)
       None -> match list.find(list.map(tys_of(i), ty_problem), p => p != None) {
-        Some(p) -> Some("${mnemonic(i)} on ${unwrap_or(p, "?")} (narrow formats are I2)")
+        Some(p) -> Some("${mnemonic(i)} on ${unwrap_or(p, "?")} (${format_why(unwrap_or(p, "?"))})")
         None -> {
           let inner = list.map(regions(i), body_problem)
           match list.find(inner, p => p != None) {
@@ -367,6 +383,14 @@ fn body_problem(body: List[Instr]) -> Option[String] = {
   found
 }
 
+# Why a format is refused.
+fn format_why(name: String) -> String =
+  if is_unmodelled_float(name) {
+    "std/narrow has no rounding for it and what `ftof` does at its edges was never measured"
+  } else {
+    "a format the interpreter does not model"
+  }
+
 ## The first instruction or format of `k` this subset does not interpret,
 ## said as the refusal will say it, or `None` when every instruction and
 ## every format in it is modelled. The interpreter refuses a launch with
@@ -378,7 +402,7 @@ pub fn unsupported_in(k: Kernel) -> Option[String] = {
     ByValue(d) -> not supported_elem(d)
   })
   match params {
-    Some(p) -> Some("entry parameter ${show(p)} (narrow formats are I2)")
+    Some(p) -> Some("entry parameter ${show(p)} (${format_why(kparam_dtype(p))})")
     None -> body_problem(k.body)
   }
 }
@@ -509,11 +533,28 @@ fn check_addr(cx: Cx, buf: Int, off: Int, what: String) -> Unit =
 
 fn in_buf(cx: Cx, buf: Int, off: Int) -> Bool = off >= 0 && off < cx.lens[buf]
 
-fn read(cx: Cx, buf: Int, off: Int) -> Float !Mem = if in_buf(cx, buf, off) { mem.f64_at(cx.bufs[buf], off) } else { NAN }
+# A kernel may read a buffer as a format of the same width as the buffer's
+# own (an f32 kernel over an i32 buffer, view_padding's whole point): the
+# lane is the bit pattern, reinterpreted. Buffers hold Floats, so the
+# pattern goes through the codecs of `formats`.
+fn reinterpret(from: String, to: String, x: Float) -> Float = {
+  let bits = if is_float_format(from) { to_bits(from, x) } else { unsigned_of(int_width(from), to_int(x)) }
+  if is_float_format(to) { of_bits(to, bits) } else { to_float(wrap(int_width(to), bits)) }
+}
 
-fn write(cx: Cx, buf: Int, off: Int, x: Float) -> Unit !Mem =
+fn same_format(buf_dtype: String, elem: String) -> Bool = buf_dtype == elem || (elem == "i8" && buf_dtype == "u8")
+
+fn read(cx: Cx, buf: Int, off: Int, elem: String) -> Float !Mem =
   if in_buf(cx, buf, off) {
-    mem.f64_set(cx.bufs[buf], off, x)
+    let x = mem.f64_at(cx.bufs[buf], off)
+    if same_format(cx.dtypes[buf], elem) { x } else { reinterpret(cx.dtypes[buf], elem, x) }
+  } else {
+    NAN
+  }
+
+fn write(cx: Cx, buf: Int, off: Int, x: Float, elem: String) -> Unit !Mem =
+  if in_buf(cx, buf, off) {
+    mem.f64_set(cx.bufs[buf], off, if same_format(cx.dtypes[buf], elem) { x } else { reinterpret(elem, cx.dtypes[buf], x) })
     mem.set(cx.written, buf, 1)
   } else {
     ()
@@ -523,6 +564,11 @@ fn write(cx: Cx, buf: Int, off: Int, x: Float) -> Unit !Mem =
 fn from_raw(elem: String, shape: List[Int], raw: List[Float], u: List[Bool]) -> V =
   if elem == "f64" {
     VF(shape, raw, u)
+  } else if is_float_format(elem) {
+    # a buffer of a narrow format holds values of the format; rounding on
+    # the way in is a no-op for them and keeps a stray off-grid Float from
+    # becoming a lane that is not a value of its type
+    VF(shape, list.map(raw, x => nearest(elem, x)), u)
   } else {
     let w = int_width(elem)
     VI(shape, list.map(raw, x => if is_nan(x) { 0 } else { wrap(w, to_int(x)) }), u)
@@ -539,7 +585,7 @@ fn pad_value(p: Padding, elem: String) -> Float = match p {
   NoPadding -> NAN
   PadZero -> 0.0
   PadNegZero -> float_of(SIGN_BIT)
-  PadNan -> NAN
+  PadNan -> float_of(0x7FF8000000000000)
   PadPosInf -> INF
   PadNegInf -> 0.0 - INF
 }
@@ -657,6 +703,35 @@ fn float_bin(op: String, a: Float, b: Float) -> Float = match op {
   _ -> internal("float operation ${op} passed the static walk")
 }
 
+# `float_un` for a lane of format `fmt`: the binary64 answer, rounded into
+# the format (std/narrow's rounding, to nearest). For + - * / and square root
+# that is the correctly rounded result (Figueroa, formats.dawn); for the
+# transcendental functions it is a definition, which the tolerance tier
+# accepts for them on the device as well.
+fn float_un_in(fmt: String, op: String, x: Float) -> Float =
+  if fmt == "f64" { float_un(op, x) } else { nearest(fmt, float_un(op, x)) }
+
+# `float_bin` for a lane of format `fmt`. The directed variants round the
+# bracketing binary64 neighbours of the exact result into the format in the
+# direction (`math.add_dir` and friends give the neighbours exactly), the
+# flush variants flush at the format's own smallest normal.
+fn float_bin_in(fmt: String, op: String, a: Float, b: Float) -> Float =
+  if fmt == "f64" {
+    float_bin(op, a, b)
+  } else {
+    match op {
+      "addf_neg_inf" -> round_into(fmt, Down, add_dir(a, b, Downward))
+      "addf_pos_inf" -> round_into(fmt, Up, add_dir(a, b, Upward))
+      "mulf_neg_inf" -> round_into(fmt, Down, mul_dir(a, b, Downward))
+      "mulf_pos_inf" -> round_into(fmt, Up, mul_dir(a, b, Upward))
+      "divf_neg_inf" -> round_into(fmt, Down, div_dir(a, b, Downward))
+      "divf_pos_inf" -> round_into(fmt, Up, div_dir(a, b, Upward))
+      "addf_ftz" -> flush_in(fmt, nearest(fmt, flush_in(fmt, a) + flush_in(fmt, b)))
+      "mulf_ftz" -> flush_in(fmt, nearest(fmt, flush_in(fmt, a) * flush_in(fmt, b)))
+      _ -> nearest(fmt, float_bin(op, a, b))
+    }
+  }
+
 fn cmp_f(pred: String, a: Float, b: Float) -> Bool = {
   let unordered = is_nan(a) || is_nan(b)
   let plain = match pred {
@@ -752,47 +827,67 @@ fn ftoi(cx: Cx, w: Int, x: Float, sat: Bool) -> Int = {
   }
 }
 
+# The width in bits of a lane of `name`, float or integer.
+fn lane_width(name: String) -> Int = if is_float_format(name) { float_width(name) } else { int_width(name) }
+
+# A lane of `name` made from the unsigned `word` of its pattern.
+fn lane_from_word(name: String, word: Int) -> Int = wrap(int_width(name), word)
+
+# The patterns of the lanes of `v`, each as an unsigned number of `w` bits
+# (a binary64 lane keeps all 64, as the sign of an `Int`).
+fn words_of(fe: String, w: Int, v: V) -> (List[Int], List[Bool]) = match v {
+  VF(_s, xs, u) -> (list.map(xs, x => to_bits(fe, x)), u)
+  VI(_s, xs, u) -> (list.map(xs, x => unsigned_of(w, x)), u)
+  _ -> internal("pack of a value that is not a numeric tile")
+}
+
+# A tile of `shape` and format `name` from the unsigned patterns `ws`.
+fn tile_of_words(name: String, shape: List[Int], ws: List[Int], u: List[Bool]) -> V =
+  if is_float_format(name) {
+    VF(shape, list.map(ws, w => of_bits(name, w)), u)
+  } else {
+    VI(shape, list.map(ws, w => lane_from_word(name, w)), u)
+  }
+
 # `pack`: the bytes of a rank-1 tile, little endian, two 4-bit lanes to a
 # byte with the even lane in the low nibble.
 fn pack(from: String, v: V, n_out: Int) -> V = {
-  let w = if from == "f64" { 64 } else { int_width(from) }
-  let words = match v {
-    VF(_s, xs, _u) -> list.map(xs, x => bits_of(x))
-    VI(_s, xs, _u) -> list.map(xs, x => unsigned_of(w, x))
-    _ -> internal("pack of a value that is not a numeric tile")
-  }
-  let u = match v {
-    VF(_s, _xs, u) -> u
-    VI(_s, _xs, u) -> u
-    _ -> []
-  }
+  let w = lane_width(from)
+  let (words, u) = words_of(from, w, v)
+  let flags = (f: fn(Int) -> Bool) => if len(u) == 0 { no_flags() } else { list.map(range(0, n_out), f) }
   if w == 4 {
-    VI([n_out], list.map(range(0, n_out), k => wrap(8, words[2 * k] | (words[2 * k + 1] << 4))),
-      if len(u) == 0 { [] } else { list.map(range(0, n_out), k => u[2 * k] || u[2 * k + 1]) })
+    VI([n_out], list.map(range(0, n_out), k => wrap(8, words[2 * k] | (words[2 * k + 1] << 4))), flags(k => u[2 * k] || u[2 * k + 1]))
   } else {
     let per = w / 8
-    VI([n_out], list.map(range(0, n_out), k => wrap(8, (words[k / per] >>> (8 * (k % per))) & 0xFF)),
-      if len(u) == 0 { [] } else { list.map(range(0, n_out), k => u[k / per]) })
+    VI([n_out], list.map(range(0, n_out), k => wrap(8, (words[k / per] >>> (8 * (k % per))) & 0xFF)), flags(k => u[k / per]))
   }
 }
 
 fn unpack(to: String, v: V, n_out: Int) -> V = {
   let (bs, u) = ints_of(v, "unpack")
-  let w = if to == "f64" { 64 } else { int_width(to) }
+  let w = lane_width(to)
+  let flags = (f: fn(Int) -> Bool) => if len(u) == 0 { no_flags() } else { list.map(range(0, n_out), f) }
   if w == 4 {
-    VI([n_out], list.map(range(0, n_out), k => wrap(4, (unsigned_of(8, bs[k / 2]) >>> (4 * (k % 2))) & 0xF)),
-      if len(u) == 0 { [] } else { list.map(range(0, n_out), k => u[k / 2]) })
+    tile_of_words(to, [n_out], list.map(range(0, n_out), k => (unsigned_of(8, bs[k / 2]) >>> (4 * (k % 2))) & 0xF), flags(k => u[k / 2]))
   } else {
     let per = w / 8
     let word = (k: Int) => list.fold(range(0, per), 0, (a, j) => a | (unsigned_of(8, bs[k * per + j]) << (8 * j)))
-    let uu = if len(u) == 0 { no_flags() } else { list.map(range(0, n_out), k => list.any(range(0, per), j => u[k * per + j])) }
-    if to == "f64" {
-      VF([n_out], list.map(range(0, n_out), k => float_of(word(k))), uu)
-    } else {
-      VI([n_out], list.map(range(0, n_out), k => wrap(w, word(k))), uu)
-    }
+    tile_of_words(to, [n_out], list.map(range(0, n_out), word), flags(k => list.any(range(0, per), j => u[k * per + j])))
   }
 }
+
+# `itof` of the integer `x` into format `fmt`: one rounding. An integer past
+# 2^53 is not a binary64, so rounding it to binary64 first and then into a
+# narrower format would round twice; it is rounded to odd instead, with the
+# sign of what binary64 dropped (the same device as math.odd_of).
+fn itof_into(fmt: String, x: Int) -> Float =
+  if fmt == "f64" || (x > 0 - 9007199254740992 && x < 9007199254740992) {
+    nearest(fmt, to_float(x))
+  } else {
+    let hi = to_float(x)
+    let err = if hi >= 9223372036854775808.0 { 0.0 - 1.0 } else { to_float(x - to_int(hi)) }
+    nearest(fmt, odd_of(hi, err))
+  }
 
 fn cast(cx: Cx, op: String, from: Ty, to: Ty, v: V) -> V = {
   let fe = elem_name(from)
@@ -801,7 +896,12 @@ fn cast(cx: Cx, op: String, from: Ty, to: Ty, v: V) -> V = {
   match op {
     "itof" -> {
       let (xs, u) = ints_of(v, "itof")
-      VF(shape, list.map(xs, x => to_float(x)), u)
+      VF(shape, list.map(xs, x => itof_into(te, x)), u)
+    }
+    "ftof" | "ftof_zero" | "ftof_neg_inf" | "ftof_pos_inf" | "ftof_away" -> {
+      let (xs, u) = floats_of(v, op)
+      let mode = mode_of(ftof_mode(op, te))
+      VF(shape, list.map(xs, x => round_into(te, mode, x)), u)
     }
     "ftoi" | "ftoi_sat" -> {
       let (xs, u) = floats_of(v, op)
@@ -831,6 +931,16 @@ fn cast(cx: Cx, op: String, from: Ty, to: Ty, v: V) -> V = {
       } else if fe == "i64" && te == "f64" {
         let (xs, u) = ints_of(v, "bitcast")
         VF(shape, list.map(xs, x => float_of(x)), u)
+      } else if is_float_format(fe) && is_float_format(te) {
+        let (xs, u) = floats_of(v, "bitcast")
+        VF(shape, list.map(xs, x => of_bits(te, to_bits(fe, x))), u)
+      } else if is_float_format(fe) {
+        let (xs, u) = floats_of(v, "bitcast")
+        VI(shape, list.map(xs, x => lane_from_word(te, to_bits(fe, x))), u)
+      } else if is_float_format(te) {
+        let (xs, u) = ints_of(v, "bitcast")
+        let wf = int_width(fe)
+        VF(shape, list.map(xs, x => of_bits(te, unsigned_of(wf, x))), u)
       } else {
         reshaped(v, shape)
       }
@@ -840,19 +950,19 @@ fn cast(cx: Cx, op: String, from: Ty, to: Ty, v: V) -> V = {
   }
 }
 
-# `x^n` as the device's `fpowi` computes it over f64 (docs 6.19, measured on
-# sm_86): right-to-left binary exponentiation of `x` to `|n|`, every step a
-# rounded binary64 product, and the reciprocal of that for a negative `n`.
-fn fpowi(x: Float, n: Int) -> Float = {
+# `x^n` as the device's `fpowi` computes it (docs 6.19, measured on sm_86
+# over f64): right-to-left binary exponentiation of `x` to `|n|`, every step a
+# product rounded into the lane's format, and the reciprocal of that for a negative `n`.
+fn fpowi(fmt: String, x: Float, n: Int) -> Float = {
   var r = 1.0
   var b = x
   var m = if n < 0 { 0 - n } else { n }
   while m > 0 {
-    if (m & 1) == 1 { r = r * b } else { () }
-    b = b * b
+    if (m & 1) == 1 { r = nearest(fmt, r * b) } else { () }
+    b = nearest(fmt, b * b)
     m = m >>> 1
   }
-  if n < 0 { 1.0 / r } else { r }
+  if n < 0 { nearest(fmt, 1.0 / r) } else { r }
 }
 
 # An `assume` predicate, checked against the value it is attached to.
@@ -967,7 +1077,10 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
     let x = wrap(w, value)
     put(env, dst, VI(shape_of(t), list.map(range(0, n), _k => x), []))
   }
-  ConstFloat(dst, t, value) -> put(env, dst, VF(shape_of(t), list.map(range(0, lanes(shape_of(t))), _k => value), []))
+  ConstFloat(dst, t, value) -> {
+    let x = nearest(elem_name(t), value)
+    put(env, dst, VF(shape_of(t), list.map(range(0, lanes(shape_of(t))), _k => x), []))
+  }
   MulInt(dst, t, l, r) -> put(env, dst, int_elementwise(cx, "muli", t, get(env, cx, l), get(env, cx, r)))
   AddInt(dst, t, l, r) -> put(env, dst, int_elementwise(cx, "addi", t, get(env, cx, l), get(env, cx, r)))
   IntBin(dst, op, t, l, r) -> put(env, dst, int_elementwise(cx, op, t, get(env, cx, l), get(env, cx, r)))
@@ -1007,7 +1120,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
       if ms[k] != 0 {
         if und_at(pu, k) && cx.ub { ub_stop("load_ptr_tko: pointer lane ${k} is undefined") } else { () }
         check_addr(cx, bs[k], os[k], "load_ptr_tko lane ${k}")
-        read(cx, bs[k], os[k])
+        read(cx, bs[k], os[k], elem)
       } else {
         pads[k]
       }
@@ -1016,7 +1129,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
     let v = from_raw(elem, shape_of(vt), raw, if list.any(u, b => b) { u } else { [] })
     (map.insert(map.insert(env, dst, v), tok_out, VTok), Fell)
   }
-  StorePtr(tok_out, p, value, mask, _tin, _pt, _mt, _vt, _h) -> {
+  StorePtr(tok_out, p, value, mask, _tin, _pt, _mt, vt, _h) -> {
     let (bs, os, pu) = ptrs_of(get(env, cx, p))
     let n = len(os)
     let (ms, mu) = match mask {
@@ -1030,7 +1143,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
         if und_at(pu, k) && cx.ub { ub_stop("store_ptr_tko: pointer lane ${k} is undefined") } else { () }
         if und_at(vu, k) && cx.ub { ub_stop("store_ptr_tko: lane ${k} stores an undefined value") } else { () }
         check_addr(cx, bs[k], os[k], "store_ptr_tko lane ${k}")
-        write(cx, bs[k], os[k], raw[k])
+        write(cx, bs[k], os[k], raw[k], elem_name(vt))
       } else {
         ()
       }
@@ -1039,19 +1152,73 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
   }
   FloatUn(dst, op, t, s) -> {
     let (xs, u) = floats_of(get(env, cx, s), op)
-    put(env, dst, VF(shape_of(t), list.map(xs, x => float_un(op, x)), u))
+    let fmt = elem_name(t)
+    put(env, dst, VF(shape_of(t), list.map(xs, x => float_un_in(fmt, op, x)), u))
   }
   FloatBin(dst, op, t, l, r) -> {
     let (a, ua) = floats_of(get(env, cx, l), op)
     let (b, ub) = floats_of(get(env, cx, r), op)
     let n = len(a)
-    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => float_bin(op, a[k], b[k])), und2(ua, ub, n)))
+    let fmt = elem_name(t)
+    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => float_bin_in(fmt, op, a[k], b[k])), und2(ua, ub, n)))
+  }
+  FloatFma(dst, t, l, r, ac) -> {
+    let (a, ua) = floats_of(get(env, cx, l), "fma")
+    let (b, ub) = floats_of(get(env, cx, r), "fma")
+    let (c, uc) = floats_of(get(env, cx, ac), "fma")
+    let n = len(a)
+    let fmt = elem_name(t)
+    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => fma_in(fmt, a[k], b[k], c[k])), und3(ua, ub, uc, n)))
+  }
+  FloatMma(dst, t, lt, rt, l, r, ac) -> {
+    let ls = shape_of(lt)
+    let rs = shape_of(rt)
+    let (a, ua) = floats_of(get(env, cx, l), "mmaf")
+    let (b, ub) = floats_of(get(env, cx, r), "mmaf")
+    let (c, uc) = floats_of(get(env, cx, ac), "mmaf")
+    let m = ls[0]
+    let k = ls[1]
+    let n = rs[1]
+    put(env, dst, VF(shape_of(t), mma_float(elem_name(t), m, k, n, a, b, c), mma_und(m, k, n, ua, ub, uc)))
+  }
+  FloatMmaScaled(dst, t, lt, rt, st, _rst, l, r, ac, ls, rs) -> {
+    let lsh = shape_of(lt)
+    let rsh = shape_of(rt)
+    let ssh = shape_of(st)
+    let (a, ua) = floats_of(get(env, cx, l), "mmaf_scaled")
+    let (b, ub) = floats_of(get(env, cx, r), "mmaf_scaled")
+    let (c, uc) = floats_of(get(env, cx, ac), "mmaf_scaled")
+    let (sa, usa) = floats_of(get(env, cx, ls), "mmaf_scaled")
+    let (sb, usb) = floats_of(get(env, cx, rs), "mmaf_scaled")
+    let m = lsh[0]
+    let k = lsh[1]
+    let n = rsh[1]
+    let sk = ssh[1]
+    # a lane is undefined when any operand it reads is: its row of `a` and
+    # of the left scales, its column of `b` and of the right scales, and its
+    # accumulator element
+    let u1 = mma_und(m, k, n, ua, ub, uc)
+    let u2 = mma_und(m, sk, n, usa, usb, [])
+    let u = if len(u1) == 0 { u2 } else if len(u2) == 0 { u1 } else { list.map(range(0, m * n), i => u1[i] || u2[i]) }
+    put(env, dst, VF(shape_of(t), mma_scaled(m, k, n, k / sk, a, b, c, sa, sb), u))
+  }
+  IntMma(dst, t, lt, rt, l, r, ac) -> {
+    let ls = shape_of(lt)
+    let rs = shape_of(rt)
+    let (a, ua) = ints_of(get(env, cx, l), "mmai")
+    let (b, ub) = ints_of(get(env, cx, r), "mmai")
+    let (c, uc) = ints_of(get(env, cx, ac), "mmai")
+    let m = ls[0]
+    let k = ls[1]
+    let n = rs[1]
+    put(env, dst, VI(shape_of(t), mma_int(m, k, n, a, b, c), mma_und(m, k, n, ua, ub, uc)))
   }
   FloatPowI(dst, t, _et, base, ex) -> {
     let (a, ua) = floats_of(get(env, cx, base), "fpowi")
     let (e, ue) = ints_of(get(env, cx, ex), "fpowi")
     let n = len(a)
-    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => fpowi(a[k], e[k])), und2(ua, ue, n)))
+    let fmt = elem_name(t)
+    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => fpowi(fmt, a[k], e[k])), und2(ua, ue, n)))
   }
   CmpFloat(dst, pred, _t, rt, l, r) -> {
     let (a, ua) = floats_of(get(env, cx, l), "cmpf")
@@ -1173,7 +1340,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
         if coords_inside(p, tc) {
           let a = view_addr(p, tc)
           check_addr(cx, p.ten.buf, a, "load_view_tko lane ${k}")
-          read(cx, p.ten.buf, a)
+          read(cx, p.ten.buf, a, p.ten.elem)
         } else {
           pad
         }
@@ -1199,7 +1366,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
           if und_at(u, k) && cx.ub { ub_stop("store_view_tko: lane ${k} stores an undefined value") } else { () }
           let a = view_addr(p, tc)
           check_addr(cx, p.ten.buf, a, "store_view_tko lane ${k}")
-          write(cx, p.ten.buf, a, raw[k])
+          write(cx, p.ten.buf, a, raw[k], p.ten.elem)
         } else {
           ()
         }
@@ -1335,6 +1502,18 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
   _ -> internal("instruction ${mnemonic(i)} passed the static walk")
 }
 
+# The undefined flags of an `m` by `n` product of an `m` by `k` and a `k` by
+# `n` matrix onto an accumulator: a lane is undefined when its row of the
+# left, its column of the right or its accumulator element is.
+fn mma_und(m: Int, k: Int, n: Int, ua: List[Bool], ub: List[Bool], uc: List[Bool]) -> List[Bool] =
+  if len(ua) == 0 && len(ub) == 0 && len(uc) == 0 {
+    []
+  } else {
+    let row = list.map(range(0, m), i => list.any(range(0, k), p => und_at(ua, i * k + p)))
+    let col = list.map(range(0, n), j => list.any(range(0, k), p => und_at(ub, p * n + j)))
+    list.map(range(0, m * n), idx => row[idx / n] || col[idx % n] || und_at(uc, idx))
+  }
+
 fn ptrs_of(v: V) -> (List[Int], List[Int], List[Bool]) = match v {
   VP(_s, bs, os, u) -> (bs, os, u)
   _ -> internal("a memory operation on a value that is not a pointer tile")
@@ -1448,7 +1627,8 @@ fn grid3(grid: List[Int]) -> List[Int] = list.map(range(0, 3), k => if k < len(g
 
 # The buffer formats a parameter of format `d` may be handed: its own, and
 # `u8` for `i8` (the same bytes, read as signed by the kernel).
-fn buffer_fits(d: String, dt: String) -> Bool = d == dt || (d == "i8" && dt == "u8")
+fn buffer_fits(d: String, dt: String) -> Bool =
+  same_format(dt, d) || (lane_width(d) > 0 && lane_width(d) == lane_width(dt) && lane_width(d) >= 8)
 
 fn params_of(k: Kernel, dtypes: List[String], scalars: List[Float]) -> List[V] = {
   let n_buf = len(list.filter(k.params, p => match p {
@@ -1470,7 +1650,7 @@ fn params_of(k: Kernel, dtypes: List[String], scalars: List[Float]) -> List[V] =
     match p {
       ByPtr(d) -> {
         if not buffer_fits(d, dtypes[b]) {
-          bad_stop("`${k.name}` parameter ${len(out)} is a ${d} pointer and was handed a ${dtypes[b]} buffer; reading one format as another is not modelled")
+          bad_stop("`${k.name}` parameter ${len(out)} is a ${d} pointer and was handed a ${dtypes[b]} buffer; only formats of one width read as each other")
         } else {
           ()
         }
@@ -1479,7 +1659,7 @@ fn params_of(k: Kernel, dtypes: List[String], scalars: List[Float]) -> List[V] =
       }
       ByValue(d) -> {
         let x = scalars[s]
-        out = out ++ [if d == "f64" { VF([], [x], []) } else { VI([], [wrap(int_width(d), to_int(x))], []) }]
+        out = out ++ [if is_float_format(d) { VF([], [nearest(d, x)], []) } else { VI([], [wrap(int_width(d), to_int(x))], []) }]
         s = s + 1
       }
     }
@@ -1526,7 +1706,7 @@ fn run(k: Kernel, grid: List[Int], dtypes: List[String], ins: List[List[Float]],
   let bufs = list.map(ins, xs => mem.f64_from_list(xs))
   let written = mem.new(len(ins))
   let base = Cx { bufs: bufs, lens: list.map(ins, xs => len(xs)), written: written, params: params, bid: [0, 0, 0],
-    grid: grid, ub: ub }
+    grid: grid, ub: ub, dtypes: dtypes }
   for z in range(0, grid[2]) {
     for y in range(0, grid[1]) {
       for x in range(0, grid[0]) {

@@ -1,0 +1,163 @@
+## The float formats a tile may hold besides binary64: how a lane of each is
+## held, rounded, flushed and spelled in bits, all through std/narrow.
+#
+# Why a narrow lane is a Float on the format's grid and not a pattern. The
+# interpreter's float tiles are `List[Float]`, and a bf16 or f32 or f8 lane is
+# a Float that IS a value of the format (std/narrow's own invariant for its
+# opaque types). Every operation that produces a lane of format `f` ends in
+# `round_into(f, ..)`, which is std/narrow's rounding and no second
+# implementation, so the interpreter and `std/narrow` cannot disagree about
+# what a format's value is (docs/tileinterp-design.md 7.2). The patterns only
+# appear where the kernel asks for them: `bitcast`, `pack` and `unpack`.
+#
+# Why binary64 can carry the arithmetic of the narrower formats. Figueroa's
+# double-rounding theorem (std/narrow's header): for + - * / and square root,
+# rounding the binary64 result to a format of at most 26 significand bits
+# equals rounding the exact result once. The widest format here has 24 bits.
+# The directed roundings and the fused multiply-add are not covered by that
+# theorem, and `math.dawn` supplies what they need (error-free transformations
+# and rounding to odd).
+#
+# f8E5M3FNU is the one format std/narrow names and does not model: it has no
+# rounding function and no host value because what `ftof` does at its edges
+# was never measured (std/narrow says so at its declaration), so a kernel
+# that holds it is refused, not guessed at.
+use std/narrow
+use std/narrow.{Rounding, NearestEven, NearestAway, TowardZero, Down, Up}
+use math.{pow2, is_finite, signed_zero, flush}
+
+## Whether `name` is a float format the interpreter models.
+pub fn is_float_format(name: String) -> Bool = match name {
+  "f64" | "f32" | "tf32" | "bf16" | "f16" | "f8E5M2" | "f8E4M3FN" | "f4E2M1FN" | "f8E8M0FNU" -> true
+  _ -> false
+}
+
+## Whether `name` is a float format that exists and is not modelled.
+pub fn is_unmodelled_float(name: String) -> Bool = name == "f8E5M3FNU"
+
+## The width of a float format in bits.
+pub fn float_width(name: String) -> Int = match name {
+  "f64" -> 64
+  "f32" | "tf32" -> 32
+  "bf16" | "f16" -> 16
+  "f8E5M2" | "f8E4M3FN" | "f8E8M0FNU" -> 8
+  "f4E2M1FN" -> 4
+  _ -> 0
+}
+
+## The rounding a dialect attribute spells (`nearest_even`, `nearest_away`,
+## `zero`, `negative_inf`, `positive_inf`).
+pub fn mode_of(attr: String) -> Rounding = match attr {
+  "nearest_away" -> NearestAway
+  "zero" -> TowardZero
+  "negative_inf" -> Down
+  "positive_inf" -> Up
+  _ -> NearestEven
+}
+
+## `x` rounded into format `fmt` in direction `mode`. The fp8 and fp4 formats
+## take no direction (their `ftof` allows nearest-even only, and
+## `f8E8M0FNU`'s `zero` is the one function std/narrow has for it): the
+## direction is ignored there, because tileir refuses a pair that disagrees
+## before a kernel can be recorded.
+pub fn round_into(fmt: String, mode: Rounding, x: Float) -> Float = match fmt {
+  "f64" -> x
+  "f32" -> narrow.round_f32(x, mode)
+  "tf32" -> narrow.round_tf32(x, mode)
+  "bf16" -> narrow.round_binary(x, 8, -126, 127, mode)
+  "f16" -> narrow.round_binary(x, 11, -14, 15, mode)
+  "f8E5M2" -> narrow.round_f8e5m2(x)
+  "f8E4M3FN" -> narrow.round_f8e4m3fn(x)
+  "f4E2M1FN" -> narrow.round_f4e2m1(x)
+  "f8E8M0FNU" -> narrow.round_f8e8m0(x)
+  _ -> x
+}
+
+## `x` rounded into `fmt` to nearest, ties to even: what every plain
+## operation of the format does to its exact result.
+pub fn nearest(fmt: String, x: Float) -> Float = if fmt == "f64" { x } else { round_into(fmt, NearestEven, x) }
+
+# The exponent and significand field widths of the formats whose NaNs carry
+# a payload a bitcast must give back (binary16, bfloat16, binary32 and tf32).
+fn field_widths(fmt: String) -> Option[(Int, Int)] = match fmt {
+  "f32" | "tf32" -> Some((8, 23))
+  "bf16" -> Some((8, 7))
+  "f16" -> Some((5, 10))
+  _ -> None
+}
+
+# A NaN lane carries its payload in the top bits of the binary64 NaN it is,
+# so `bitcast` of a NaN pattern to a float and back is the pattern, which is
+# what the device does and what a Float cannot do through std/narrow's codecs
+# (they answer the canonical quiet NaN). The quiet bit is set when the payload
+# would otherwise vanish, so the pattern stays a NaN.
+fn nan_bits(x: Float, ebits: Int, mbits: Int) -> Int = {
+  let b = narrow.f64_bits(x)
+  let sign = (b >>> 63) & 1
+  let mant = (b & 0xFFFFFFFFFFFFF) >>> (52 - mbits)
+  let kept = if mant == 0 { 1 << (mbits - 1) } else { mant }
+  (sign << (ebits + mbits)) | (((1 << ebits) - 1) << mbits) | kept
+}
+
+fn nan_of_bits(b: Int, ebits: Int, mbits: Int) -> Float =
+  narrow.f64_of_bits((((b >>> (ebits + mbits)) & 1) << 63) | (0x7FF << 52) | ((b & ((1 << mbits) - 1)) << (52 - mbits)))
+
+fn mask_tf32(fmt: String, b: Int) -> Int = if fmt == "tf32" { b & 0xFFFFE000 } else { b }
+
+## The pattern of `x`, a value of `fmt`, in the low `float_width(fmt)` bits of
+## an `Int` (never negative, but for binary64's own sign bit).
+pub fn to_bits(fmt: String, x: Float) -> Int = match field_widths(fmt) {
+  Some((e, m)) -> if x != x { mask_tf32(fmt, nan_bits(x, e, m)) } else { plain_bits(fmt, x) }
+  None -> plain_bits(fmt, x)
+}
+
+fn plain_bits(fmt: String, x: Float) -> Int = match fmt {
+  "f64" -> narrow.f64_bits(x)
+  "f32" -> narrow.f32_bits(x)
+  "tf32" -> narrow.tf32_bits(x)
+  "bf16" -> narrow.bf16_bits(x)
+  "f16" -> narrow.f16_bits(x)
+  "f8E5M2" -> narrow.f8e5m2_bits(x)
+  "f8E4M3FN" -> narrow.f8e4m3fn_bits(x)
+  "f4E2M1FN" -> narrow.f4e2m1_bits(x)
+  "f8E8M0FNU" -> narrow.f8e8m0_bits(x)
+  _ -> 0
+}
+
+## The value of `fmt` whose pattern is the low bits of `b`; a NaN pattern
+## keeps its payload (see `nan_bits`).
+pub fn of_bits(fmt: String, b: Int) -> Float = match field_widths(fmt) {
+  Some((e, m)) -> {
+    let w = mask_tf32(fmt, b & ((1 << (e + m + 1)) - 1))
+    if ((w >>> m) & ((1 << e) - 1)) == (1 << e) - 1 && (w & ((1 << m) - 1)) != 0 { nan_of_bits(w, e, m) } else { plain_value(fmt, b) }
+  }
+  None -> plain_value(fmt, b)
+}
+
+fn plain_value(fmt: String, b: Int) -> Float = match fmt {
+  "f64" -> narrow.f64_of_bits(b)
+  "f32" -> narrow.f32_of_bits(b)
+  "tf32" -> narrow.tf32_of_bits(b)
+  "bf16" -> narrow.bf16_of_bits(b)
+  "f16" -> narrow.f16_of_bits(b)
+  "f8E5M2" -> narrow.f8e5m2_of_bits(b)
+  "f8E4M3FN" -> narrow.f8e4m3fn_of_bits(b)
+  "f4E2M1FN" -> narrow.f4e2m1_of_bits(b)
+  "f8E8M0FNU" -> narrow.f8e8m0_of_bits(b)
+  _ -> 0.0
+}
+
+## `x` with the subnormals of `fmt` replaced by the zero of their sign: the
+## dialect's `flush_to_zero`. A format with no subnormal range of its own
+## (the fp8 and fp4 ones, which the attribute never applies to) is left.
+pub fn flush_in(fmt: String, x: Float) -> Float = match fmt {
+  "f64" -> flush(x)
+  "f32" | "tf32" | "bf16" -> flush_below(x, -126)
+  "f16" -> flush_below(x, -14)
+  _ -> x
+}
+
+fn flush_below(x: Float, emin: Int) -> Float = {
+  let a = if x < 0.0 { 0.0 - x } else { x }
+  if a != 0.0 && is_finite(x) && a < pow2(emin) { signed_zero(x) } else { x }
+}
