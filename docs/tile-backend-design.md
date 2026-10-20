@@ -48,7 +48,7 @@ GPU 的机器上用假设备跑完并给出相同答案**。后半句是让宿�
 | 自动并行挖掘（把 `for` 变 tile 运算） | 分阶段路线下 kernel 体显式调用 tile 级操作，没有「从标量循环抬向量」这一步 |
 | 改 checker 的类型规则 | `opaque`（spec.md §2.7）、trait（spec.md §3.5）、`effect` 与 `with handle`（spec.md §6.5）三件现成机制拼出全部类型面，草案与刀 1 均只用它们。唯一例外是门禁脚本 `scripts/opaque-twin/run.sh` 多一种标记（§3.4），那不是 checker |
 | 动 Core、lowering、两个发射器 | 宿主侧新 intrinsic 只加表项与运行时函数（§4.4），发射器按契约不动（runtime-intrinsics-design.md §12.1）。`lower.dawn:1163` 的分组表要不要加组见 §4.4 |
-| CPU 解释器、Tile IR 模拟器 | 假设备答的是 `launch` 这一整个操作（宿主侧参考实现），不模拟 Tile IR 语义；Tile IR 层的正确性只由本机对拍保证（D4） |
+| ~~CPU 解释器、Tile IR 模拟器~~（**2026-10-20 推翻**） | 原理由是「假设备答的是 `launch` 这一整个操作，不模拟 Tile IR 语义；Tile IR 层的正确性只由本机对拍保证（D4）」。`packages/tileinterp`（[tileinterp-design.md](tileinterp-design.md)）在假设备里解释降级后的 `lower.Kernel`，接口不改。现在的非目标是「在设备之外再造一个权威」：解释器是第三个意见，设备仍是唯一权威 |
 | f32 / bf16 进 `Ty` | D3 已裁：`std/narrow` 的 opaque 方案覆盖 + − × ÷ √ |
 | 接 MLIR、在 CI 里构建 `cuda-tile` | §6.1；本机构建一次只作 round-trip 对拍工具 |
 | 多设备、流、异步 | `Gpu` 效果 v1 同步；`gpu_sync` 存在只为把「launch 返回不等于算完」写进契约 |
@@ -63,7 +63,7 @@ GPU 的机器上用假设备跑完并给出相同答案**。后半句是让宿�
 | D1 | 路线 | (a) 子集编译：Core 到 Tile IR 的发射器；(b) 分阶段：kernel 体是 `!Dev` 效果函数，记录 handler 在宿主运行期把一次执行变成 Tile 程序；(c) 混合：(b) 为主，第二里程碑再给同一个 kernel 体加编译期发射 | **(b)，(c) 记为期权而非承诺** | (b) 零编译器改动、零 Core 节点、零 checker 改动；「无 call 对字典传递」这堵墙留在宿主侧自然消失；草案已跑出 vadd 的 Tile IR 文本。代价是 kernel 内依赖 tile 值的控制流要走 `d_if` / `d_for` 而不是 Dawn 的 `if` / `for`（§5.2）。(a) 换来的只是 kernel 里能写原生 `if` / `for` / `+`，要付的是子集标注、第三份「机器的事」语义与那堵墙；(c) 的编译期发射器要等 (b) 稳定后才知道该吃什么形状 |
 | D2 | 第一里程碑范围 | (i) vadd f64 端到端：trace、文本、字节码、`tileiras`、3080 上跑、与假设备对拍；(ii) 只到文本 golden；(iii) 直接含 bf16 | **(i)** | (ii) 的绿没有信息量；(iii) 把类型层与设备层两个未知量绑在一刀里。(i) 是「每一层都被下一层校验过一次」的最小闭环 |
 | D3 | 窄浮点 opaque 进不进 std | (i) 现在进，独立模块 `std/narrow`，与 tile 解耦；(ii) 先只做 f64 tile，bf16 等第二里程碑；(iii) 不做 opaque，等 f32 进 `Ty` | **(i)，排在刀 1 之后、与 tile 并行**；tile 侧第一里程碑仍只用 f64 | 方案核实成立：`opaque type BF16 = Float` 过 checker，`round_binary` 纯 Dawn 实现对 174 个精确 oracle 用例（含溢出、次正规、tie）在 JVM 与 native 上逐位一致且 ASan 干净，opaque 换 alias 后测试照过（§3.2）。它有独立价值（CPU 上模拟量化），Emit-Change 面小。(iii) 是 5 到 10 人日的 checker 战役 |
-| D4 | 本机 GPU 作为 oracle 的纪律 | (i) 本地里程碑门 + 台账文件，CI 检查台账不落后于 tile 相关改动；(ii) 自托管 runner；(iii) 只信层 0 与层 1 | **(i)** | (ii) 把本机 WSL2 暴露给公开仓库的 PR 触发面；(iii) 与「门禁的绿要有信息量」正面冲突。(i) 的机器强制点见 §6.4。前提：本机驱动 560.94 低于 cuTile 硬要求的 r580，先升 Windows 侧驱动；本机也还没装 `nvidia-cuda-tileiras` |
+| D4 | 本机 GPU 作为 oracle 的纪律 | (i) 本地里程碑门 + 台账文件，CI 检查台账不落后于 tile 相关改动；(ii) 自托管 runner；(iii) 只信层 0 与层 1 | **(i)** | (ii) 把本机 WSL2 暴露给公开仓库的 PR 触发面；(iii) 与「门禁的绿要有信息量」正面冲突。(i) 的机器强制点见 §6.4。前提：本机驱动 560.94 低于 cuTile 硬要求的 r580，先升 Windows 侧驱动；本机也还没装 `nvidia-cuda-tileiras`。**2026-10-20 改写**：CI 到层 1 加解释器路径（`scripts/tileinterp-diff`，解释器对 tileref），设备执行仍只在台账机器上，设备是唯一权威 |
 
 ### 2.2 对三条设计前提的修正
 
@@ -5947,7 +5947,8 @@ tensor core 路径永远只是容差档。剩余风险：某代硬件上 bf16 `a
 kernel 记录出来的是一阶单态 SSA。换来的限制是 §5.2 的结构化控制流与递归上限。
 混合路线（刀 7）重新面对这堵墙。
 
-**墙三（无 CI 执行 oracle）**：处置 = D4。CI 只到层 1，执行只在本机，台账把「有人跑过」
+**墙三（无 CI 执行 oracle）**：处置 = D4。CI 到层 1 加解释器路径（2026-10-20 起，[tileinterp-design.md](tileinterp-design.md)：
+kernel 体第一次在 CI 里被执行，对 tileref 判词），设备执行只在台账机器上，台账把「有人跑过」
 变成机器可查的事实。剩余风险是一台机器、一种架构（sm_86）。前置：驱动升级，刀 4 实测它就是
 今天唯一拦着层 2 的东西（§6.4）。
 
