@@ -32,7 +32,7 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   var l: Tile[Float] = full([FA_BQ, 1], 0.0)
   var acc = zeros(o)
   for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * scalar(scale)
+    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
     ...
 ```
 
@@ -68,7 +68,8 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 1. **泛型合并**。把两个 kernel 合成一个 `[D, A]` 函数，代价是 GPU 页与 explorer 展示的 `flash_attn` 带泛型签名，
    且 f64 golden 的累加器初值多两个操作。收益是少一份重复，且 `flash_attn_gqa` 之后只写一份。
 2. **裸字面量进调用图**。让 `record.py` 与 `gpumap.dawn` 接受「没有源码调用的 `lit`」（表里那一行没有 span），
-   或者保留 `lit(0.0)` 的显式写法。
+   或者保留 `lit(0.0)` 的显式写法。**已做**（acb09e4b）：`record.py` 把裸数字配成可选的 `lit` 行，两个 kernel 的累加器初值改写成裸 `0.0`，
+   golden 逐字节不变。
 3. **键数作运行期标量**。要不要把 T12 的 `dims` 缓冲区迁成标量参数，并让 `flash_attn` 读它。
 4. **尺寸参数化**（P-A）要不要现在做，还是等 K3。
 5. **`exp2`**。要不要先在外部 runner上量一次再决定。
