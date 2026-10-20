@@ -54,6 +54,8 @@ use c/emitc
 use c/binfo
 use version.{VERSION}
 use front/fmt
+use front/parser
+use front/astdump
 use doc
 use pkg/add
 use pkg/cachecmd
@@ -1435,6 +1437,24 @@ pub fn main() -> Unit !io =
   io.with_fs_real(() => io.with_proc_real(() => io.with_env_real(() =>
       io.with_exit_real(() => io.with_console_real(() => dispatch())))))
 
+## `parse <file>...`: the AST dump, byte for byte what `dawn parse` prints.
+## The dump code lives in front/ and knows no backend; this is the same loop
+## as main.dawn's, so the two drivers cannot answer differently about a file
+## (scripts/native-cli-diff.sh holds them to it over every tracked .dawn file).
+## It exists so a consumer of the dump (site/gpu-map/record.py) needs no JVM.
+fn cmd_parse(files: List[String]) -> Unit !Fs !Console !io = {
+  for pth in files {
+    console_println("== " ++ pth ++ " ==")
+    match io.read_file(pth) {
+      Ok(text) -> {
+        let (m, diags) = parser.parse_module(text)
+        console_println(astdump.render_module(m, diags))
+      }
+      Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e.message)
+    }
+  }
+}
+
 fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
   match args() {
     [] -> fail_usage()
@@ -1468,6 +1488,8 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
           project: native_lsp_target_lease,
           ct: ct_lsp()
         })
+      } else if mode == "parse" {
+        cmd_parse(rest)
       } else if mode == "version" {
         cmd_version(rest)
       } else if mode == "--version" {
