@@ -17,6 +17,10 @@ python3 scripts/lsp-sync-bench/bench.py --jar build/dawn-selfhost.jar \
 # quicker: 30 functions spread over the module, scenarios (b) and (d) only
 python3 scripts/lsp-sync-bench/bench.py --jar build/dawn-selfhost.jar --sample 30 --scenarios bd
 
+# the same jar under two collectors, interleaved: compares JVM options, not code
+python3 scripts/lsp-sync-bench/bench.py --jar build/dawn-selfhost.jar \
+    --baseline build/dawn-selfhost.jar --baseline-jvm='-Xss512m -Xmx2g -XX:+UseSerialGC'
+
 # judge a saved report again, for instance against a changed line
 python3 scripts/lsp-sync-bench/bench.py --rejudge sync.json --line L-ws-sig=250
 
@@ -44,8 +48,14 @@ pending analysis is done:
 
 Two times per edit: `sync`, until the barrier answers (workspace convergence),
 and `edit`, until the edited file's `publishDiagnostics` arrives. The server
-publishes every file after the workspace converges, so today they differ by a
-few milliseconds.
+publishes an open file as soon as its module is analysed, so `edit` is the
+shorter of the two.
+
+Servers start with the options `bin/dawn lsp` uses (`JVM_OPTS`, held equal to
+the launcher's by `scripts/check-launcher-jvm-opts.py`); `--jvm` and
+`--baseline-jvm` replace them, each as one blank-separated string. After every
+recorded edit the server's resident set (`VmRSS`) is read, and at the end of
+each session its high-water mark (`VmHWM`), on Linux.
 
 Each scenario session warms up for `--warm` rounds (3) and records `--rounds`
 (7); `--passes` (6) fresh sessions give 42 samples per scenario. The sample
@@ -79,7 +89,9 @@ error (an anchor that no longer matches exactly once, a server that died),
 
 JSON (to `--out`, else stdout): the jars and their sha256, the configuration,
 the load range, per-server `results` (median, p90, min, max, n for `sync` and
-`edit`, plus the slowest sampled functions), `paired`, the judged `lines`,
+`edit`, plus the slowest sampled functions, and `rss`: the median and p90 of
+the resident set after recorded edits and the largest session high-water mark,
+in MiB), `paired`, the judged `lines`,
 `ok`, and every raw sample in `rows`. One summary line goes to stdout when
 `--out` is given, to stderr otherwise:
 

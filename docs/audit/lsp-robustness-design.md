@@ -611,6 +611,52 @@ launcher 的 `-Xss512m -Xmx2g -XX:+UseSerialGC`；基线是 origin/main `a0c6484
   G1 是 88 / 107 / 38 / 137 / 75。两者的 sync 也更低（ParallelGC (b) 198 / 216）。
   换 launcher 的收集器影响所有子命令与内存占用，不在本刀，另列为一刀（§四）。
 
+### 2.2.7 LSP 服务端按进程形态换收集器（2026-10-20）
+
+裁决：短命的编译类子命令保留 SerialGC（G1 的 young 膨胀推高 RSS，理由与实测见 `bin/dawn` 注释），
+常驻、对延迟敏感的 LSP 服务端换收集器；不改全局默认。候选 ParallelGC、G1（`MaxNewSize=256m`）、ZGC，
+判据按序：L-edit p90 ≤ 100 ms；稳态 RSS ≤ SerialGC 的 1.5 倍；墙钟。
+
+**入口**：
+
+| 入口 | 怎么起 | 是否受影响 |
+|---|---|---|
+| `bin/dawn lsp` | launcher 对子命令 `lsp` 用 `DAWN_LSP_JVM_OPTS`（ParallelGC），显式 `DAWN_JVM_OPTS` 仍压倒一切 | 改动落点 |
+| VS Code 扩展 | `editors/vscode/extension.js` 起 `dawn lsp`（`dawn.lspPath` 指向的 launcher） | 经 launcher 自动生效 |
+| Playground 生产 wss | `run-lsp-sandboxed.sh` 起静态 native `dawnc lsp`，没有 JVM | 不适用，native 靠 Perceus RC，没有收集器；`DEPLOY.md` 已注明，不碰生产 |
+| `scripts/lsp-sync-bench`、各 LSP 差分脚本 | 绕过 launcher 直接起 jar | 只有 bench 的 `JVM_OPTS` 须与 launcher 同步（已纳入检查）；差分脚本比的是文本转录，与收集器无关 |
+
+`main.dawn` 的 `child_java_cmd()` 只配置编译类子命令重新 exec 的 JVM，`lsp` 在进程内跑，不经过它，所以保持 SerialGC。
+
+**实测**（`scripts/lsp-sync-bench --baseline-jvm`，同一个 jar，两个收集器背靠背交错；jar 取 `31d65bad`，之后
+`selfhost/src` 只有版本号变；150 个抽样函数加场景 a 到 d；各 3 轮，负载守卫上限 4；edit p90 / 稳态 RSS 中位数，取 3 轮范围）：
+
+| 收集器 | (a) | (b) | (c) | (d) | 抽样 | 稳态 RSS MiB | 峰值 RSS MiB |
+|---|---|---|---|---|---|---|---|
+| SerialGC（9 次） | 165–223 | 189–280 | 102–159 | 193–255 | 139–151 | 2284–2349 | 2330–2365 |
+| ParallelGC | 80–102 | 87–110 | 36–42 | 84–111 | 76–89 | 1701–1778 | 2060–2076 |
+| G1 + MaxNewSize=256m | 80–113 | 94–120 | 28–36 | 88–104 | 80–99 | 2314–2372 | 2431–2464 |
+| ZGC | 99–134 | 103–148 | 30–42 | 99–261 | 92–94 | 2509–2561 | 2628–2716 |
+
+各候选的第一轮都在负载 2.3 到 4.8 下跑（G1、ZGC 因负载守卫分别等了 660 s、1520 s），p90 比后两轮高 10 到 20 ms；
+后两轮负载 1.2 到 3.6，ParallelGC 全场景 p90 在 ≤ 92 内（场景 (b) 87–90），G1 的 (b) 94–98 贴线。
+
+**选择**：ParallelGC。判据 1 上它与 G1 同为后两轮进线，但余量更大；判据 2 它是唯一比 SerialGC 小的（约 0.75 倍，
+SerialGC 会长到 `-Xmx2g`），G1 约 1.0 倍、ZGC 1.1 倍；判据 3 工作区收敛 (d) 的 sync 中位数最短
+（548–557 ms，G1 553–606，ZGC 661–813，SerialGC 789–990）。第一轮越线的 a 102、b 110、d 111 是负载造成的，
+不是收集器。
+
+**守卫**：`scripts/check-launcher-jvm-opts.py`（挂在 `scripts/bootstrap-guards/run.sh`，与 launcher 同属不依赖
+工作树构建的 bootstrap 门）。静态部分：launcher 的编译默认只含 SerialGC、LSP 默认只含 ParallelGC 且与编译默认
+只差收集器；`child_java_cmd()` 与 `selfhost-bench.py` 的编译选项与 launcher 一致；bench 的 `JVM_OPTS` 等于 launcher
+的 LSP 默认；launcher 里每一处 exec 工具链 jar 的行用对变量。动态部分：用假 `java` 驱动一份部署形态的 launcher，
+记下真正收到的选项（`dawn lsp`、`DAWN_JVM_OPTS` 为空串、`dawn check`、`dawn test lsp`、显式 `DAWN_JVM_OPTS` 各一例）。
+`--selftest` 造 10 个退化（LSP 默认改回 SerialGC、去掉 `-Xss`、`lsp` 分支永不命中、显式选项被覆盖、两处 exec 用错变量、
+重建用了 LSP 选项、`child_java_cmd()`/`selfhost-bench`/bench 漂移），每个都必须让检查变红。`mutate-launcher.py`
+里原有的一个变异体锚点随 exec 变量改名同步。
+
+**生产**：Playground 的 LSP 是 native，不受影响；本刀不碰生产。
+
 ### 2.3 缓存留到第二步
 
 `analyze_document` 每次重跑 lex/parse/module graph。缓存它们需要失效判定
@@ -769,3 +815,5 @@ lsp 转录只差 `messy` 段 formatting 回复的位置（`Emit-Change(lsp)`）�
 「到它为止的程序」交给 LSP，服务端当场发布这个文档的诊断，收敛后只补发内容变了的 URI。先发的就是最终的
 （论证与负控见 §2.2.6）。L-edit 中位数 (b) 242 → 67 ms、(d) 728 → 67 ms、抽样 159 → 87 ms；p90 仍被 SerialGC 的
 young GC 拖在 122–200 ms，ParallelGC 下全部进线，换收集器另列一刀。
+
+**2026-10-20 LSP 服务端换 ParallelGC**：按进程形态分开，编译仍 SerialGC，`dawn lsp` 用 ParallelGC；三候选实测、入口清单与守卫见 §2.2.7。

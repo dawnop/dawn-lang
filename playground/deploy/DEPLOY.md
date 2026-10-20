@@ -29,6 +29,10 @@ by hand, with the server reachable.
    default PATH no longer decide which `java` runs. Whatever JRE the host has
    is left as it is. The bounded WebSocket gateway uses only Python's standard
    library and the native `dawnc`, no JVM.
+   The language server the gateway starts is the same native `dawnc lsp`, so the
+   collector change for the JVM `dawn lsp` (ParallelGC, see
+   `docs/audit/lsp-robustness-design.md` section 2.2.7) does not apply here and
+   nothing needs to be deployed for it.
    ```sh
    sudo apt-get install -y python3
    ```
