@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# The interpreter against tileref (docs/tileinterp-design.md 3): every
+# layer-2 family of scripts/tile-gpu-diff, with packages/tileinterp in the
+# device's chair, judged by the corpus, reference and tier the GPU is judged
+# by. No GPU, no tileiras, no cubin: this is the half of layer 2 that CI can
+# run.
+#
+#   scripts/tileinterp-diff/run.sh             # run and judge (the CI gate)
+#   scripts/tileinterp-diff/run.sh --write     # run and rewrite covered.txt
+#   scripts/tileinterp-diff/run.sh --selftest  # the three negative controls
+#
+# The run: build.py copies the family programs into one project with the
+# device swapped (its header says how and why), `dawn build` compiles it once,
+# and one JVM a family runs it. verdicts.py reads the transcripts: every case
+# agrees or is blocked by a refusal the interpreter made before running
+# (`interp.unsupported_op`), and the kernels that ran in agreeing cases are
+# exactly covered.txt. expected-ub.txt names the two kernels whose corpus
+# reaches undefined behaviour on purpose.
+#
+# Why the families run on the JVM and not natively like scripts/tile-gpu-diff:
+# the device programs are native because the device runtime is; with the
+# interpreter there is no device, and one JVM build of 40,000 lines costs
+# seconds where a native build costs a C compile of all of them.
+#
+# --selftest applies each mutant of mutate.py to a copy of packages/tileinterp
+# and requires the check that names it to go red: `mulf-adds` the comparison,
+# `bounds-unchecked` the package's out-of-bounds test, `unsupported-skipped`
+# the package's refusal test and the comparison.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+cd "$root"
+
+mode=run
+case "${1:-}" in
+  "") ;;
+  --write) mode=write ;;
+  --selftest) mode=selftest ;;
+  *) echo "usage: run.sh [--write | --selftest]" >&2; exit 2 ;;
+esac
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/tileinterp-diff.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+
+# bin/dawn's own choice of JVM, so the jar runs on the JDK that built it.
+java_bin=java
+if [ -z "${JAVA_HOME:-}" ]; then
+  for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
+    if [ -x "$d/bin/java" ]; then JAVA_HOME="$d"; break; fi
+  done
+fi
+if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then java_bin="$JAVA_HOME/bin/java"; fi
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# build_jar <dir> <interp package>: the project and its jar under <dir>.
+build_jar() {
+  python3 "$here/build.py" --out "$1/proj" --interp "$2" > "$1/families.txt"
+  ./bin/dawn build "$1/proj" -o "$1/diff.jar" > "$1/build.log" 2>&1 ||
+    { cat "$1/build.log" >&2; fail "the interpreter-against-tileref program does not build"; }
+}
+
+# run_families <dir> [seconds]: one JVM a family, transcripts in <dir>/out. A
+# family program exits 1 on a `fail` verdict; verdicts.py is the judge either
+# way. The bound is for a kernel whose `loop` never exits, which is what a
+# wrong comparison inside one does (the mulf-adds mutant turns loop_until into
+# exactly that): the interpreter's own step limit is 2^24 iterations, which
+# is minutes of interpretation, so a family is cut off well before and its
+# transcript gets a verdict line no judge accepts.
+run_families() {
+  mkdir -p "$1/out"
+  local fam rc
+  while read -r fam _mod _n; do
+    rc=0
+    timeout -k 5 "${2:-120}" "$java_bin" -Xss512m -Xmx2g -jar "$1/diff.jar" "$fam" \
+      > "$1/out/$fam.out" 2> "$1/out/$fam.err" || rc=$?
+    if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      echo "  verdict timeout:${2:-120}s" | tee -a "$1/out/$fam.out" >> "$1/out/$fam.err"
+    fi
+  done < "$1/families.txt"
+}
+
+families_of() { cut -d' ' -f1 "$1/families.txt" | tr '\n' ' '; }
+
+# judge <dir> [extra verdicts.py args]
+judge() {
+  local d="$1"
+  shift
+  # shellcheck disable=SC2046
+  python3 "$here/verdicts.py" "$d/out" $(families_of "$d") --covered "$here/covered.txt" \
+    --expected-ub "$here/expected-ub.txt" "$@"
+}
+
+# A copy of packages/tileinterp under <dir>/tree with one mutant applied, its
+# tileir dependency pointed back at this tree.
+mutant_package() { # dir mutant
+  mkdir -p "$1/tree/packages"
+  cp -r "$root/packages/tileinterp" "$1/tree/packages/tileinterp"
+  sed -i "s|^tileir = .*|tileir = \"$root/packages/tileir\"|" "$1/tree/packages/tileinterp/dawn.toml"
+  python3 "$here/mutate.py" "$2" "$1/tree"
+}
+
+if [ "$mode" != selftest ]; then
+  start=$(date +%s)
+  build_jar "$work" "$root/packages/tileinterp"
+  built=$(date +%s)
+  run_families "$work"
+  ran=$(date +%s)
+  echo "tileinterp-diff: build $((built - start))s, families $((ran - built))s"
+  if [ "$mode" = write ]; then judge "$work" --write; else judge "$work"; fi
+  exit 0
+fi
+
+# ---- --selftest
+for m in mulf-adds bounds-unchecked unsupported-skipped; do
+  d="$work/$m"
+  mkdir -p "$d"
+  mutant_package "$d" "$m"
+  pkg="$d/tree/packages/tileinterp"
+  case "$m" in
+    mulf-adds)
+      build_jar "$d" "$pkg"
+      run_families "$d" 30
+      if judge "$d" > "$d/judge.out" 2>&1; then cat "$d/judge.out" >&2; fail "$m: the comparison stayed green"; fi
+      grep -q '^FAIL ' "$d/judge.out" || fail "$m: the comparison failed without naming a case"
+      echo "PASS  $m: the comparison went red ($(grep -c '^FAIL ' "$d/judge.out") finding(s), first: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
+      ;;
+    bounds-unchecked)
+      if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
+      grep -q '^FAIL  selftest :: a store past the end of its buffer is undefined behaviour, refused' "$d/test.out" ||
+        { cat "$d/test.out" >&2; fail "$m: the out-of-bounds test is not the one that failed"; }
+      echo "PASS  $m: the out-of-bounds test went red"
+      ;;
+    unsupported-skipped)
+      if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
+      grep -q '^FAIL  selftest :: an instruction outside subset A is refused by name before anything runs' "$d/test.out" ||
+        { cat "$d/test.out" >&2; fail "$m: the refusal test is not the one that failed"; }
+      build_jar "$d" "$pkg"
+      run_families "$d" 30
+      if judge "$d" > "$d/judge.out" 2>&1; then cat "$d/judge.out" >&2; fail "$m: the comparison stayed green"; fi
+      echo "PASS  $m: the refusal test and the comparison went red (first: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
+      ;;
+  esac
+done
+echo "tileinterp-diff: selftest ok"

@@ -102,7 +102,7 @@ name: tile
 # nightly.yml's totals report counts a tile trigger only when the
 # shards all ran green, so a deduplicated push is not counted as one.
 #
-# path-total: 9435s (the most this file's `3x` claims may add up to)
+# path-total: 9480s (the most this file's `3x` claims may add up to)
 on:
   push:
     branches: [main]
@@ -112,8 +112,10 @@ on:
     paths:
       - 'packages/tileir/**'
       - 'packages/tileref/**'
+      - 'packages/tileinterp/**'
       - 'scripts/tile-golden/**'
       - 'scripts/tile-gpu-diff/**'
+      - 'scripts/tileinterp-diff/**'
       - 'scripts/leetgpu-diff/**'
       - 'scripts/narrow-contract/**'
       - 'scripts/mutant-coverage/**'
@@ -134,12 +136,15 @@ on:
       # all seven shards once in the week of 09-26 (PR #384).
       - '!packages/tileir/**/*.md'
       - '!packages/tileref/**/*.md'
+      - '!packages/tileinterp/**/*.md'
   pull_request:
     paths:
       - 'packages/tileir/**'
       - 'packages/tileref/**'
+      - 'packages/tileinterp/**'
       - 'scripts/tile-golden/**'
       - 'scripts/tile-gpu-diff/**'
+      - 'scripts/tileinterp-diff/**'
       - 'scripts/leetgpu-diff/**'
       - 'scripts/narrow-contract/**'
       - 'scripts/mutant-coverage/**'
@@ -160,6 +165,7 @@ on:
       # all seven shards once in the week of 09-26 (PR #384).
       - '!packages/tileir/**/*.md'
       - '!packages/tileref/**/*.md'
+      - '!packages/tileinterp/**/*.md'
   schedule:
     # 05:20 UTC, twenty minutes behind nightly.yml so the two do not contend
     # for runners. GitHub's cron is best effort and drops runs at busy times,
@@ -916,8 +922,13 @@ jobs:
     # replayed, one deviation 89s. The claim is that worst plus the deviation,
     # rounded up to 5s, a planning value until three runs of the eleven are
     # observed. The note above has the arithmetic.
-    # budget: 3x 765s planning value: replayed worst plus one deviation
-    timeout-minutes: 39
+    #
+    # 2026-10-20 (tileinterp I1): plus the interpreter-against-tileref step
+    # below, 20s on the recording machine (build 5s, 24 families 15s) and
+    # charged at twice that for the slow runner plus a tenth, 45s, the
+    # dearest shard staying the 785s one. Shard 11 is the one with the most room.
+    # budget: 3x 810s planning value: replayed worst plus one deviation, plus 45s of interpreter run
+    timeout-minutes: 41
     steps:
       - uses: actions/checkout@v4
 
@@ -941,6 +952,14 @@ jobs:
         env:
           MUTANT_COVERAGE_DIR: ${{ runner.temp }}/mutant-coverage
         run: ./scripts/tile-golden/run.sh --shard 11/11 --plan scripts/mutant-coverage/plans/tile-golden.txt
+
+      # Layer 2 without a device (docs/tileinterp-design.md 3): every
+      # tile-gpu-diff family with packages/tileinterp in the device's chair,
+      # judged against packages/tileref by the same corpora and tiers, and the
+      # covered kernels held to scripts/tileinterp-diff/covered.txt. It needs
+      # no tileiras; it sits in this shard for the budget, not the toolchain.
+      - name: the interpreter against tileref (every layer-2 family, no GPU)
+        run: ./scripts/tileinterp-diff/run.sh
 
       - name: record which items this shard ran
         uses: actions/upload-artifact@v4

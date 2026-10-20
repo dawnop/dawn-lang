@@ -1,0 +1,45 @@
+# The one module scripts/tileinterp-diff/build.py adds to the layer-2
+# programs it copies: `interp_gpu_real` stands where each of them calls
+# std/gpu's `with_gpu_real`, and answers every launch by interpreting the
+# kernel (packages/tileinterp) instead of running a cubin.
+#
+# Why the device is swapped and nothing else is. The programs in
+# scripts/tile-gpu-diff already hold "the device" against packages/tileref
+# with a corpus and a tier per kernel; putting the interpreter in the
+# device's chair reuses all three unchanged, so the interpreter is judged by
+# the same ruler the GPU is (docs/tileinterp-design.md 3).
+#
+# Why each launch's kernels are printed, on both streams. A case's verdict
+# line says whether it agreed, not which kernels it ran; the `interp` line
+# printed right after each interpreted run says that, and verdicts.py
+# attributes the launches to the next `  verdict` line. It goes to standard
+# output and to standard error because one family (assert_diff) writes its
+# transcript to standard error, and within one stream the order is exact.
+use std/io
+use std/list
+use std/map
+use std/str
+use std/gpu.{Gpu, with_gpu_fake}
+use tileir/prog.{TileProg}
+use tileinterp/device.{with_gpu_interp_log}
+use kernels.{trace}
+
+## `n` paths a program's `read_cubin` can read: the cubins are never used.
+pub fn placeholder_args(n: Int) -> List[String] = list.map(range(0, n), _k => "/dev/null")
+
+fn lookup(names: Map[String, Bytes], name: String) -> Option[TileProg] =
+  if map.has(names, name) { Some(trace(name)) } else { None }
+
+## `with_gpu_real`'s shape, with every launch interpreted: the kernel is
+## recorded by name from scripts/tile-golden/kernels.dawn (only names the
+## program would have had a cubin for), memory is std/gpu's fake device.
+pub fn interp_gpu_real[T](cubins: Map[String, Bytes], body: fn() -> T !Gpu) -> T !io = {
+  let (answer, log) = with_gpu_fake(map.empty(), () => with_gpu_interp_log(name => lookup(cubins, name), body))
+  let line = "interp " ++ list.fold(log, "", (a, s) => {
+    let entry = str.replace(s, " ", "=")
+    if a == "" { entry } else { a ++ "," ++ entry }
+  })
+  io.println(line)
+  io.eprintln(line)
+  answer
+}

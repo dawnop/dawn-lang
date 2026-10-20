@@ -66,6 +66,7 @@ ADAPTERS = {
     "syntax-small-contract": (".",),
     "tea-reconciler-contract": (".",),
     "tile-golden": (".",),
+    "tileinterp-diff": (".",),
     "wasm-dom-contract": (".",),
 }
 EXCLUSIONS = {
