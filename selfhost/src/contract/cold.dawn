@@ -85,6 +85,24 @@ test "failed cold steps retain exports and only run the reachable phases" {
     assert parsed.after.identities == std.identities
     assert events.toString().expect("trace") == "[module:true, module:false]"
 
+    # what a failed parse recovered still publishes its headers: the type and
+    # the impl reach the carry, and no header diagnostic is reported, not
+    # even for the type nobody declares (docs/lsp-module-memo-design.md §十三)
+    let torn = source("torn",
+      "pub type Box = { n: Int }\nimpl Show[Box] { fn show(b: Box) -> String = \"box\" }\n" ++
+        "fn torn() -> Int = {\n  let = 1\n  1\n}\npub fn later() -> Missing = 1\n")
+    assert len(torn.pdiags) > 0
+    let recovered = analyze_module_step(torn, parsed.after, std, ct_default(), jsig_refused(), None)
+    assert recovered.check_runs == 0
+    assert recovered.comptime_runs == 0
+    assert len(recovered.diags) == len(torn.pdiags)
+    assert len(recovered.checked.cx.diags) == 0
+    let surface = map.get(recovered.after.exports, "torn").expect("torn's surface")
+    assert map.has(surface.types_by_name, "Box")
+    assert map.has(surface.fns, "later")
+    assert len(map.keys(recovered.after.impls)) == len(map.keys(parsed.after.impls)) + 1
+    assert recovered.after.identities == recovered.checked.cx.identities
+
     let type_error = source("type_error", "pub fn broken() -> Int = false\n")
     let typed = analyze_module_step(type_error, parsed.after, std, ct_default(), jsig_refused(), None)
     assert typed.check_runs == 1

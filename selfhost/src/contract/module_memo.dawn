@@ -26,6 +26,7 @@ use driver/fsmem
 use std/memfs
 use compiler_plan/source.{SourceFile, PkgR, FromPath}
 use std/str
+use std/set
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/checkdump
 use check/jsig.{jsig_refused}
@@ -708,5 +709,83 @@ test "module memo folds a const again when a module its comptime reached changes
       assert folded(result.program, "z", "Z") == Some(VInt(5))
       assert agrees_with_cold(result.program, input, std)
     }
+  }))
+}
+
+## How many of `prog`'s diagnostics sit in `path`.
+fn diags_in(prog: Program, path: String) -> Int = {
+  var n = 0
+  for ld in prog.diags {
+    if ld.path == path { n = n + 1 }
+  }
+  n
+}
+
+test "module memo keeps the importers of a module that fails to parse on the headers it recovered" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # lib grafts a type from base, declares a trait and an impl, and has a
+    # private helper; user lists names, whole imports all of lib, far does
+    # not import lib but comes after it, so it reads the impl table lib adds to
+    let base = source("base", "pub type Tag = { n: Int }\n")
+    let head = "use base.{Tag}\npub type Box = { n: Int }\npub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\npub fn wrap(t: Tag) -> Box = Box { n: t.n }\n" ++
+      "pub fn value() -> Int = 1\n"
+    let lib = source("lib", head ++ "fn helper() -> Int = {\n  let x = 1\n  x\n}\n")
+    let user = source("user", "use base.{Tag}\nuse lib.{Box, wrap}\npub fn make() -> Box = wrap(Tag { n: 1 })\n")
+    let whole = source("whole", "use lib\npub fn total() -> Int = lib.value()\n")
+    let far = source("far", "pub type Far = { n: Int }\npub fn far() -> Int = 3\n")
+    let loaded = LoadResult { modules: [base, lib, user, whole, far], diags: [] }
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
+    assert len(warm.program.diags) == 0
+    # A statement the parser cannot read inside the private helper: the file
+    # reports its parse errors and nothing else, the headers it recovered
+    # keep user's names and lib's impl where they were, and the session
+    # agrees with a cold analysis of the same broken text.
+    let torn = source("lib", head ++ "fn helper() -> Int = {\n  let = 1\n  1\n}\n")
+    assert len(torn.pdiags) > 0
+    let input = LoadResult { modules: [base, torn, user, whole, far], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert len(result.program.diags) == len(torn.pdiags)
+    assert diags_in(result.program, "lib.dawn") == len(torn.pdiags)
+    assert result.stats.checked_modules == 0
+    assert set.has(result.reused, "user")
+    assert set.has(result.reused, "far")
+    assert agrees_with_cold(result.program, input, std)
+    # and once it parses again, everything converges on the cold result
+    let fixed = incremental.analyze(result.session, loaded)
+    assert len(fixed.program.diags) == 0
+    assert agrees_with_cold(fixed.program, loaded, std)
+  }))
+}
+
+test "module memo checks the importer of a declaration a parse failure dropped and converges once it parses" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    # The parser drops a declaration it cannot read. Here that is a type a
+    # signature of the same file names, which a header check of the
+    # recovered tree calls unknown: an artifact of recovery, not reported.
+    # user lists the type, so it is checked again and reports it missing,
+    # as the cold path does.
+    let tail = "pub fn pair() -> Pair = Pair { a: 1, b: 2 }\npub fn value() -> Int = 1\n"
+    let lib = source("lib", "pub type Pair = { a: Int, b: Int }\n" ++ tail)
+    let user = source("user", "use lib.{Pair, pair}\npub fn first() -> Pair = pair()\npub fn a() -> Int = first().a\n")
+    let other = source("other", "use lib.{value}\npub fn twice() -> Int = value() * 2\n")
+    let loaded = LoadResult { modules: [lib, user, other], diags: [] }
+    let warm = incremental.analyze(incremental.new(std, ct_default(), jsig_refused(), 10), loaded)
+    assert len(warm.program.diags) == 0
+    let torn = source("lib", "pub type Pair = { a: Int, b: }\n" ++ tail)
+    assert len(torn.pdiags) > 0
+    let input = LoadResult { modules: [torn, user, other], diags: [] }
+    let result = incremental.analyze(warm.session, input)
+    assert diags_in(result.program, "lib.dawn") == len(torn.pdiags)
+    assert diags_in(result.program, "user.dawn") > 0
+    # other lists only `value`, but a type left lib's id tables, which every
+    # selective reader reads whole (§十二), so it is checked again: cleanly
+    assert diags_in(result.program, "other.dawn") == 0
+    assert agrees_with_cold(result.program, input, std)
+    let fixed = incremental.analyze(result.session, loaded)
+    assert len(fixed.program.diags) == 0
+    assert agrees_with_cold(fixed.program, loaded, std)
   }))
 }

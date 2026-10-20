@@ -11,7 +11,10 @@
 # functions and constants of the modules before it, which is a deliberate
 # change of what a const folds to (#416, docs/lsp-module-memo-design.md §十一),
 # and (2026-10-04) the program keeping the finished comptime world, which an
-# editor folds one expression against (docs/lsp-hover-design.md §C5.7).
+# editor folds one expression against (docs/lsp-hover-design.md §C5.7), and
+# (2026-10-19) a module that fails to parse publishing the headers of what was
+# recovered, diagnostics dropped, which is a deliberate change of the surface
+# and impls a parse failure leaves (#789, docs/lsp-module-memo-design.md §十三).
 # Injected into a private subject, never linked into the production compiler.
 pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !Fs !Env !io = {
   var diags = loaded.diags
@@ -91,6 +94,9 @@ pub(pkg) fn analyze_reference(loaded: LoadResult, std: StdCtx, opts: CtOpts, js:
       }
       for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
       for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    } else {
+      let headers = check_module_headers(cx, mf.m, exports)
+      cx = Cx { ..headers.cx, diags: [] }
     }
     interned = cx.identities
     # registration already rejected anything that collided with a key already

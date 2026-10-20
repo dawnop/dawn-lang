@@ -421,3 +421,72 @@ LSP A/B：基线不带观察的服务端对本刀带观察的服务端，`lsp-pr
 - **类型定义改动按名字切**：见 12.5。
 - **整模块导入按「限定访问用到的名字」切**：要从体里收集 `alias.name` 拼写（`import_use` 有现成遍历），但 `module_exports` 还被 hint 与 LSP 补全整面读取；selfhost 里 `check/types` 的导入者没有整模块导入，收益为零。
 - **有诊断的步骤也按名字**：报错分支读整面，见 12.2。
+
+## 十三、刀 4：解析失败的模块只做表头检查并发布导出面（#789 P3，2026-10-19）
+
+> 状态：**设计**（动码前写）。依据：根因报告 `agent-handoff/research-lsp-788-789-20261019.md` 第二节 2.3、裁决 `agent-handoff/ruling-lsp-parse-recovery-20261019.md` 第 3 条（顺序：第十二节 → 本节 → 解析器恢复）。
+> R1（#794，每个未打开的文件每次 publish 只读一次）之后，解析失败态的大头从诊断渲染挪回了「导入者对着空面重检」，本节处理这一半。
+
+### 13.1 问题
+
+`analyze_module_step` 在 `len(mf.pdiags) > 0` 时跳过整个检查：`cx` 停在 `cx_new`，`adts` 只有 prelude，没有 `pass_imports` 的嫁接，也没有本模块的 impl。
+于是这一步发布的导出面（`exports_of(cx, …)`）只剩 `all_names`，它声明的 impl 也从 carry 的 impl 表里消失。两个后果：
+
+- 每个导入者对着空面重检，报一串「private / undefined」（`dawn check` 也一样，见 13.5）；
+- impl 表变了，被编辑模块之后的**每个**模块都过不了 `kept()` 的 impl 行比较（10.3），导入与否都重检。
+
+R1 后的实测（#794 报告第二节，解析失败态 vs 合法态）：`check/types` 1.5 到 1.8 s 对 0.10 到 0.18 s，`front/ast` 0.8 到 1.1 s 对 0.04 到 0.09 s，`driver/analyze` 0.27 到 0.40 s 对 0.09 到 0.14 s，都超 #789 的 2 倍线。
+
+### 13.2 规则
+
+> 解析失败的模块，对**恢复出的 AST** 跑 `check_module_headers`（与合法模块同一个 `env`，即进入时 carry 的 `exports`），取它留下的 `Cx`，**丢掉其中全部诊断**；不检函数体，不跑 comptime。
+> 这一步照常发布导出面与 impl 表，被编辑文件只报解析诊断。
+
+- 写在 `analyze_module_step` 的 `if not parse_failed { … }` 的 else 分支里，冷路径（`dawn check`/`build`）与 LSP 的模块记忆都经这一个转移函数，所以「增量 = 冷」不变：表头检查是（恢复出的 AST，`env`）的函数，与编辑历史无关。裁决第 2 条否掉的「沿用上次成功的面」正是因为它破坏这一点。
+- `check_runs`、`comptime_runs` 仍为 0，观察事件仍只有 `module` 一对：表头检查不是一次检查（体没检），计数口径不变，`Stats.checked_modules` 继续只数完整检查。
+- `tm`、`ct` 仍是空的；`world_after` 只接纳跑过 comptime 的模块，失败模块不进 comptime 世界（与有类型错误的模块同一口径，见 `world_after` 的注释）。
+- 冻结参照循环（`scripts/incremental-semantics-contract/reference-loop.dawn.txt`）同步加同一个 else 分支，头部注释记一条 2026-10-19 的有意改动：它是冷路径语义的 oracle，语义改了它就得跟着改，否则 `cold.py` 与 `module-memo.py` 的正样本会红。
+
+**为什么丢掉表头诊断。** 恢复出的 AST 缺了被吞掉的声明：同步点（`parser.dawn` 的 `sync_decl`）丢掉出错的那个 decl，未闭合括号还会吞掉后半个文件。
+对这样的 AST，表头检查会把「被吞掉的类型」报成未知类型、把入口模块缺 `main` 报出来，这些都是恢复的伪影，不是作者写错了什么；issue 的验收也只要求被编辑文件报解析诊断。
+代价是真实的签名错误（例如写错了参数类型名）要等文件能解析了才出现，与今天相同，不更差。
+
+**为什么不检函数体。** 体对着恢复出的 AST 报的错同样掺着伪影；体检查是失败态 sync 里最贵的一段；导入者只读面，用不着体。
+
+### 13.3 效果（推演，13.6 实测回填）
+
+- 被丢掉的 decl 以外，面与上一轮相同：命中早截断（10.3 的 `same_surface`）或第十二节的按名复用，导入者照常复用。
+- impl 行回来了，非导入者不再因为 impl 表变化而重检。
+- 丢掉的 decl 若被点名，点名者重检并报诊断（这是真实结果：那个名字此刻确实不存在）；冷分析给同样的诊断。
+- 解析失败的入口模块也有嫁接过的 id 表，#788 在这条路径上不再出现。`lsp/server.dawn` 的 `with_import_tables`（#794 提交 1）保留，它的 selfhost 单测直接用 `cx_new` 拼上下文，不经分析器，本刀之后仍能把回退打红。本刀不碰 `lsp/server.dawn`。
+
+### 13.4 契约与变异体
+
+- `contract/module_memo`：
+  1. 暖机 `lib`（类型、trait、impl、`pub fn`、私有函数）、点名导入者 `user`、整模块导入者、与 `lib` 无关但排在其后的 `far`。
+  2. 把 `lib` 的私有函数体改成语句级解析失败：被编辑模块只报解析诊断；`user`、`far` 被复用（`checked_modules == 0`）；整个 Program 与冷分析逐项相同（`agrees_with_cold`）。
+  3. 改回合法文本：再与冷分析逐项相同（收敛），且 `lib` 的诊断为空。
+  4. 再加一条：丢掉的是被点名的 decl 时，点名者重检、报诊断，与冷分析相同；恢复后诊断消失。
+- `contract/cold` 的「failed cold steps」测试改断言：解析失败的步骤有嫁接过的上下文与本模块 impl，诊断只有解析诊断。
+- 冻结参照循环的样本（`reference-tests.dawn.txt`）加一个语句级解析失败、带 `use`、类型、trait、impl、const 与一个表头伪错的模块，及其导入者。
+- 变异体（`mutate.py` 的 cold 组，`cold.py` 跑；`analyze.dawn` 只归 cold 组改，`module-memo.py` 的引擎变异体只改 `incremental.dawn`/`checker.dawn`）：
+  - `parse-failure-unpublished`：else 分支不发布（回到空上下文）；
+  - `parse-failure-drops-impls`：表头检查留下的 impl 表换回进入时的（漏掉 impl 这类声明）；
+  - `parse-failure-skips-imports`：表头检查拿空 `env`（漏掉 `use` 这类声明的嫁接）；
+  - `parse-failure-reports-headers`：表头诊断也报出来。
+  每个都要先证明会红（`cold.py` 的冻结参照断言），并另外证明 `contract/module_memo` 的新用例也会红（手工负控，记在报告里）。
+
+### 13.5 冷输出
+
+`dawn check`/`build` 遇到解析错误时，导入者的「private / undefined」洪水消失，只剩真实错误。按 `selfhost-run-diff.sh`、`selfhost-prev-diff.sh`、`selfhost-lsp-diff.sh` 实跑的结果写 `Emit-Change(<label>)`。
+
+### 13.6 实测
+
+（落地后回填。）
+
+### 13.7 不做的（理由）
+
+- **沿用上次成功的面**：裁决第 2 条否决（诊断依赖编辑历史、改写「增量 = 冷」）。
+- **报出表头诊断**：伪影多于真错，见 13.2。
+- **未闭合 `{` / `[` 吞掉后半个文件的态**：表头检查只能发布恢复出来的 decl，后半个文件没恢复出来就救不了；留给下一刀解析器恢复（裁决第 1 条）。
+- **给表头检查单独的观察事件或计数**：它约是完整检查的零头，加事件会改 `contract/cold` 钉住的阶段序列与 `lsp-observe` 的口径，收益只在计时归因；需要时再加。

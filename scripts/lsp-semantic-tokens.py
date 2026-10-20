@@ -27,6 +27,11 @@ tokens, hover, definition, highlight, references and completion must each
 answer with a result, and the server must still answer afterwards. Its
 recovered `use helper.{..., Shape, ...}` names an id its own unchecked
 context never received, and every one of those requests used to panic on it.
+Since 2026-10-19 a module that fails to parse has its headers checked
+(docs/lsp-module-memo-design.md §十三), so its context does receive the id
+and these requests answer with or without the server's own graft; that graft
+(`with_import_tables`) is now owned by a selfhost test that builds an
+unchecked context directly, which the mutant below must turn red.
 
 Usage:
   scripts/lsp-semantic-tokens.py [--server CMD...]   positive run (default ./bin/dawn lsp)
@@ -36,7 +41,9 @@ Usage:
                                                      its owning case red
 
 A mutant is accepted as red only when its owning assertion is among the
-failures; a build failure is not a negative control and fails the run.
+failures; a build failure is not a negative control and fails the run. An
+owner spelled `test:<module> :: <name>` is a selfhost test instead, run with
+`dawn test` in the mutant's tree, which must report that test as failed.
 """
 import json
 import os
@@ -602,10 +609,11 @@ def check_doc(s, uri, text, label, want, ranges, dump):
 
 
 # An edit that leaves the importing module unparseable (#788). Its own
-# analysis then checks nothing, so its context holds no imported types, while
-# its recovered `use helper.{..., Shape, ...}` still names the id helper's
-# surface carries. Every request that walks that line must answer, and the
-# server must still be there afterwards.
+# analysis used to check nothing, so its context held no imported types, while
+# its recovered `use helper.{..., Shape, ...}` still named the id helper's
+# surface carries. Its headers are checked now (#789), but every request that
+# walks that line must still answer, and the server must still be there
+# afterwards.
 BROKEN_TAIL = "\nfn broken() -> Int =\n"
 
 FAILED_PARSE_REQUESTS = [
@@ -697,6 +705,10 @@ def contract(server, env, dump=False):
 # Each breaks one decision this contract exists for and must turn its owning
 # case red. The anchors are in lsp-semantic-tokens/mutate.py, where the
 # preflight proves them before any build; this is (mutant, owner).
+#
+# no-import-graft is owned by a selfhost test rather than by the parse
+# failure case above: since a failed parse checks its headers, that case's
+# context already holds what the graft adds, and the case stays green.
 
 MUTATE = os.path.join(ROOT, "scripts", "lsp-semantic-tokens", "mutate.py")
 
@@ -705,17 +717,39 @@ MUTANTS = [
     ('drop-mutable', 'SINGLE_TOKENS'),
     ('range-unclipped', 'range inside norm'),
     ('columns-in-bytes', 'SINGLE_TOKENS'),
-    ('no-import-graft', 'after a parse failure: semanticTokens/full'),
+    ('no-import-graft', "test:lsp/server :: a query context grafts the tables an unchecked entry's imports name"),
 ]
 
+TEST_OWNER = "test:"
 
-def build_mutant(dawn, work, name):
+
+def mutant_tree(work, name):
     d = os.path.join(work, name)
     os.makedirs(d)
     shutil.copytree(os.path.join(ROOT, "selfhost"), os.path.join(d, "selfhost"))
     os.symlink(os.path.join(ROOT, "packages"), os.path.join(d, "packages"))
     os.symlink(os.path.join(ROOT, "compiler-plan"), os.path.join(d, "compiler-plan"))
     subprocess.run([sys.executable, MUTATE, name, d], check=True)
+    return d
+
+
+def test_owner_red(dawn, work, name, owner):
+    """Run the owning selfhost test's module in the mutant's tree; True when
+    that very test is reported failed. A module that does not compile is
+    not a negative control."""
+    module, _, test = owner[len(TEST_OWNER):].partition(" :: ")
+    d = mutant_tree(work, name)
+    r = subprocess.run([dawn, "test", os.path.join(d, "selfhost", "src", module + ".dawn")],
+                       capture_output=True, text=True)
+    out = r.stdout + r.stderr
+    if "test(s)" not in out:
+        sys.stderr.write(out)
+        raise SystemExit("%s: mutant's tests did not run" % name)
+    return r.returncode != 0 and ("FAIL  %s :: %s" % (module, test)) in out
+
+
+def build_mutant(dawn, work, name):
+    d = mutant_tree(work, name)
     jar = os.path.join(d, "compiler.jar")
     r = subprocess.run([dawn, "build", os.path.join(d, "selfhost"), "-o", jar],
                        capture_output=True, text=True)
@@ -749,6 +783,12 @@ def main():
     work = tempfile.mkdtemp(prefix="lsp-semantic-tokens-mutants.")
     try:
         for name, owner in MUTANTS:
+            if owner.startswith(TEST_OWNER):
+                if not test_owner_red(dawn, work, name, owner):
+                    print("lsp-semantic-tokens: %s mutant left '%s' green" % (name, owner), file=sys.stderr)
+                    return 1
+                print("PASS  %s mutant turns '%s' red" % (name, owner))
+                continue
             cmd = build_mutant(dawn, work, name)
             print("PASS  %s mutant compiles" % name)
             del failures[:]

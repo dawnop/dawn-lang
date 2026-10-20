@@ -39,6 +39,20 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
       "use lib\nuse lib.{Box}\npub fn value() -> Int = lib.describe(Box { n: 3 })\n")
     let bad = input("bad", "pub fn bad() -> Int = false\n")
     let broken = input("broken", "pub fn (\n")
+    # a statement the parser cannot read, in a module that grafts a type, has
+    # a trait, an impl and a const, and a signature naming a type nobody
+    # declares: only the headers of what was recovered are published, and
+    # none of their diagnostics
+    let torn = input("lib",
+      "use middle.{Other}\n" ++
+        "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+        "pub type Box = { n: Int } derive Show\n" ++
+        "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n" ++
+        "pub fn describe[T: Sizey](x: T) -> Int = sizey(x)\n" ++
+        "pub fn other(o: Other) -> Int = o.n\n" ++
+        "fn torn() -> Int = {\n  let = 1\n  1\n}\n" ++
+        "pub fn later() -> Missing = 1\n" ++
+        "pub const N: Int = 40 + 2\n")
     let loader = LocDiag { path: "loader", d: broken.pdiags[0] }
     var results: List[Comparison] = []
     let cases: List[LoadResult] = [
@@ -46,6 +60,7 @@ pub(pkg) fn samples() -> List[Comparison] !io = {
       LoadResult { modules: [bad, lib, consumer], diags: [loader] },
       LoadResult { modules: [broken, lib, bad, consumer], diags: [] },
       LoadResult { modules: [middle, lib, consumer], diags: [] },
+      LoadResult { modules: [middle, torn, consumer], diags: [] },
       LoadResult { modules: [lib], diags: [] },
       LoadResult { modules: [], diags: [loader] }
     ]
