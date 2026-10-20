@@ -58,9 +58,9 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
-# bin/dawn's default DAWN_JVM_OPTS; the language server an editor starts
-# through the launcher runs with exactly these.
-JVM_OPTS = ["-Xss512m", "-Xmx2g", "-XX:+UseSerialGC"]
+# bin/dawn's DAWN_LSP_JVM_OPTS; the language server an editor starts through
+# the launcher runs with exactly these (scripts/check-launcher-jvm-opts.py).
+JVM_OPTS = ["-Xss512m", "-Xmx2g", "-XX:+UseParallelGC"]
 OPEN = ["main", "front/ast", "check/checker", "check/types", "driver/analyze", "jvm/emit"]
 TYPES = "check/types"
 PROBE_PARAM = "l1_probe: Int = 0"
@@ -308,13 +308,24 @@ class Server:
                 edit_ns, own = at - t0, True
         del self.frames[:]
         return {"sync_ms": round(sync_ns / 1e6, 2), "edit_ms": round(edit_ns / 1e6, 2),
-                "own_publish": own, "diags": diags}
+                "own_publish": own, "diags": diags, "rss_mb": self.memory("VmRSS")}
+
+    def memory(self, field: str) -> float | None:
+        """VmRSS or VmHWM of the server in MiB, or None off Linux."""
+        try:
+            for line in Path(f"/proc/{self.proc.pid}/status").read_text().splitlines():
+                if line.startswith(field + ":"):
+                    return round(int(line.split()[1]) / 1024, 1)
+        except OSError:
+            pass
+        return None
 
     def stderr_tail(self) -> str:
         self.err.seek(0)
         return "stderr: " + self.err.read().decode("utf-8", "replace")[-600:]
 
     def close(self) -> None:
+        self.peak_mb = self.memory("VmHWM")
         try:
             self.request("shutdown", None)
             self.notify("exit", None)
@@ -341,9 +352,11 @@ class Bench:
         self.rows: list[dict] = []
         self.opens: list[dict] = []
         self.waited = 0.0
-        self.sides = [("subject", args.jar, args.std)]
+        self.sides = [("subject", args.jar, args.std, args.jvm)]
         if args.baseline:
-            self.sides.append(("baseline", args.baseline, args.baseline_std))
+            self.sides.append(("baseline", args.baseline, args.baseline_std,
+                               args.baseline_jvm or args.jvm))
+        self.peaks: list[dict] = []
         self.limits = limits(args.line)
         self.log_file = args.log.open("a") if args.log else None
         # Fail on a moved anchor before any JVM starts.
@@ -377,9 +390,9 @@ class Bench:
     def start(self, phase: str, n: int) -> list[Server]:
         servers = []
         try:
-            for name, jar, std in self.sides:
+            for name, jar, std, jvm in self.sides:
                 self.guard()
-                s = Server(name, jar, std, self.args.root / "selfhost", self.args.jvm)
+                s = Server(name, jar, std, self.args.root / "selfhost", jvm)
                 servers.append(s)
                 ms = s.initialize(self.uris, self.texts)
                 self.opens.append({"server": name, "phase": phase, "session": n, "open_ms": round(ms, 1)})
@@ -420,8 +433,7 @@ class Bench:
                         self.log(f"pass {p} round {rnd - a.warm}: " + " ".join(
                             f"{r['server'][0]}{r['edit']}={r['sync_ms']:.0f}" for r in last))
             finally:
-                for s in servers:
-                    s.close()
+                self.close_all(servers, "scenarios", p)
 
     def sample(self) -> None:
         a = self.args
@@ -447,8 +459,24 @@ class Bench:
                     self.log(f"sample {idx + 1}/{len(self.fns)} {fn}: "
                              f"{statistics.median(mine):.0f} ms load {os.getloadavg()[0]:.1f}")
         finally:
-            for s in servers:
-                s.close()
+            self.close_all(servers, "sample", 0)
+
+    def close_all(self, servers: list[Server], phase: str, n: int) -> None:
+        for s in servers:
+            s.close()
+            self.peaks.append({"server": s.name, "phase": phase, "session": n,
+                               "peak_mb": s.peak_mb})
+
+    def memory(self, server: str) -> dict | None:
+        """Resident set: after every recorded edit (steady) and each session's high-water mark."""
+        rss = [r["rss_mb"] for r in self.rows if r["server"] == server
+               and r.get("rss_mb") is not None and not r.get("warm")]
+        peaks = [p["peak_mb"] for p in self.peaks if p["server"] == server and p["peak_mb"]]
+        if not rss:
+            return None
+        return {"steady_median_mb": round(statistics.median(rss), 1),
+                "steady_p90_mb": round(quantile(rss, 0.9), 1),
+                "peak_mb": max(peaks) if peaks else None}
 
     # ---------------------------------------------------------- reporting
 
@@ -485,8 +513,8 @@ class Bench:
         a = self.args
         groups = list(a.scenarios) + (["sample"] if self.fns else [])
         results = {}
-        for name, _, _ in self.sides:
-            results[name] = {}
+        for name, *_ in self.sides:
+            results[name] = {"rss": self.memory(name)}
             for g in groups:
                 results[name][g] = {m: summary(self.values(name, g, m)) for m in ("sync", "edit")}
             if self.fns:
@@ -504,8 +532,8 @@ class Bench:
             "started": self.started, "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "root": str(a.root), "head": git_head(a.root),
             "servers": {name: {"jar": str(jar), "sha256": sha256(jar),
-                               "std": str(std) if std else "embedded"}
-                        for name, jar, std in self.sides},
+                               "std": str(std) if std else "embedded", "jvm": jvm}
+                        for name, jar, std, jvm in self.sides},
             "config": {"scenarios": a.scenarios, "passes": a.passes, "warm": a.warm,
                        "rounds": a.rounds, "sample_fns": len(self.fns),
                        "sample_reps": a.sample_reps, "jvm": a.jvm, "open": OPEN,
@@ -513,7 +541,7 @@ class Bench:
             "load": {"min": min(loads), "median": statistics.median(loads), "max": max(loads),
                      "waited_s": self.waited} if loads else None,
             "edited_file_published": f"{own}/{len(self.rows)}",
-            "opens": self.opens, "results": results, "paired": paired, "lines": lines,
+            "opens": self.opens, "peaks": self.peaks, "results": results, "paired": paired, "lines": lines,
             "ok": all(x["ok"] for x in lines), "rows": self.rows,
         }
 
@@ -556,6 +584,8 @@ def one_line(rep: dict) -> str:
     """The human-readable summary: verdict, each group's median/p90, load."""
     parts = []
     for g, r in rep["results"]["subject"].items():
+        if g == "rss":
+            continue
         cell = f"{g} {r['sync']['median']:.0f}/{r['sync']['p90']:.0f}"
         if rep["paired"] and rep["paired"][g]["sync"]:
             cell += f" ({rep['paired'][g]['sync']['median_diff']:+.0f} vs baseline)"
@@ -564,7 +594,10 @@ def one_line(rep: dict) -> str:
            for x in rep["lines"] if not x["ok"]]
     load = rep["load"]
     verdict = "OK" if rep["ok"] else "OVER " + ", ".join(bad)
+    rss = rep["results"]["subject"].get("rss")
     return (f"lsp-sync-bench: {verdict}; sync median/p90 ms: " + ", ".join(parts)
+            + (f"; rss steady/peak MiB {rss['steady_median_mb']:.0f}/{rss['peak_mb'] or 0:.0f}"
+               if rss else "")
             + (f"; load {load['min']:.1f}-{load['max']:.1f}" if load else ""))
 
 
@@ -646,7 +679,14 @@ def parse(argv: list[str]):
     ap.add_argument("--load-poll", type=float, default=20.0)
     ap.add_argument("--load-timeout", type=float, default=3600.0,
                     help="give up (status 3) after this many seconds of pausing in total")
-    ap.add_argument("--jvm", nargs="+", default=JVM_OPTS, help="JVM options for every server")
+    # One string split on blanks, written --jvm='-Xss512m ...': argparse takes a
+    # list item that starts with '-' for the next option, so a list of JVM flags
+    # could never be passed at all.
+    ap.add_argument("--jvm", type=str.split, default=JVM_OPTS, metavar="'OPTS'",
+                    help="JVM options for the server under test, one blank-separated string")
+    ap.add_argument("--baseline-jvm", type=str.split, metavar="'OPTS'",
+                    help="JVM options for --baseline (default: --jvm); the same jar on both sides "
+                         "with two option sets compares collectors")
     ap.add_argument("--out", type=Path, help="JSON report (default: stdout)")
     ap.add_argument("--log", type=Path, help="also append progress lines here")
     ap.add_argument("--self-test", action="store_true", help="check the edit logic and anchors, no JVM")

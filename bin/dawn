@@ -116,7 +116,39 @@ fi
 # re-execs into, and scripts/selfhost-bench.py forks the release jar directly
 # without going through this script, so a flag missing there means the recorded
 # baseline measures a configuration nobody runs.
+# scripts/check-launcher-jvm-opts.py (bootstrap guards) holds the copies equal.
+DAWN_JVM_OPTS_GIVEN=${DAWN_JVM_OPTS:-}
 DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g -XX:+UseSerialGC}"
+
+# The language server's collector: ParallelGC, not the compile default. `dawn
+# lsp` lives as long as the editor and answers every keystroke, so what counts
+# is the pause that lands inside one edit's diagnostics, not the footprint of a
+# short process. Under SerialGC the analysis after an edit runs a ~65 ms young
+# collection roughly every 180 ms, which puts L-edit's p90 at 165-280 ms
+# against a 100 ms line (the median, 57-180 ms, was mostly inside it already).
+# Candidates were measured back to back against SerialGC with
+# scripts/lsp-sync-bench (same jar, scenarios a to d plus 150 sampled functions,
+# three rounds each, 2026-10-20; range over the rounds, edit p90 in ms; steady
+# RSS is the median over recorded edits in MiB, selfhost workspace, six files open):
+#   SerialGC (9 runs)    a 165-223  b 189-280  c 102-159  d 193-255  sample 139-151  RSS 2284-2349
+#   ParallelGC           a  80-102  b  87-110  c  36-42   d  84-111  sample  76-89   RSS 1701-1778
+#   G1, MaxNewSize=256m  a  80-113  b  94-120  c  28-36   d  88-104  sample  80-99   RSS 2314-2372
+#   ZGC                  a  99-134  b 103-148  c  30-42   d  99-261  sample  92-94   RSS 2509-2561
+# The ordering of the criteria: p90 first, then RSS within 1.5x of SerialGC,
+# then wall time. ParallelGC and G1 both reach the line in the two quiet rounds
+# (the loaded first round, load up to 4, put both just over); ParallelGC keeps
+# more margin on b (87-90 vs 94-98), has the shortest workspace sync (scenario d
+# median 548-557 ms vs 553-606), and its RSS is about 0.75x SerialGC's, since
+# SerialGC grows to the 2g ceiling. G1 is no smaller than SerialGC; ZGC is
+# slower and 1.1x larger. An explicit DAWN_JVM_OPTS still wins for every
+# subcommand, as it always did.
+DAWN_LSP_JVM_OPTS="-Xss512m -Xmx2g -XX:+UseParallelGC"
+DAWN_RUN_JVM_OPTS=$DAWN_JVM_OPTS
+if [ -z "$DAWN_JVM_OPTS_GIVEN" ]; then
+  case ${1:-} in
+  lsp) DAWN_RUN_JVM_OPTS=$DAWN_LSP_JVM_OPTS ;;
+  esac
+fi
 
 # deployed form: no sources, no seed resolver — run the shipped jar as-is
 if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
@@ -124,7 +156,7 @@ if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
     echo "error: $SJAR not found (deployments must ship build/dawn-selfhost.jar)" >&2
     exit 2
   fi
-  exec "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" "$@"
+  exec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"
 fi
 
 . "$ROOT/scripts/seedjar.sh"
@@ -1094,4 +1126,4 @@ if [ -n "${DAWN_PRINT_STAMP:-}" ]; then
   exit 0
 fi
 
-exec "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" "$@"
+exec "$JAVA" $DAWN_RUN_JVM_OPTS -jar "$SJAR" "$@"

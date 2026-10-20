@@ -68,6 +68,18 @@ else
   bad "the replay bootstrap can mix a seed with the checkout std"
 fi
 
+# The collector each process shape starts with: compiles keep SerialGC, `dawn
+# lsp` runs ParallelGC, and the three copies of the compile options plus the
+# LSP bench's copy of the server's agree. A server back on SerialGC answers the
+# same, only later, so nothing else here would notice. The self-test turns one
+# regression per assertion red.
+if python3 "$root/scripts/check-launcher-jvm-opts.py" &&
+    python3 "$root/scripts/check-launcher-jvm-opts.py" --selftest > "$work/jvm-opts-selftest.out"; then
+  ok "the launcher starts the language server and compiles with their own collectors"
+else
+  bad "the launcher's JVM options or their copies drifted"
+fi
+
 # ---------------------------------------------------------------------------
 # TOOL-16: the seed resolver is fail-closed.
 #
