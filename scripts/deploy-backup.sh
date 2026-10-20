@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Keep a rollback copy of what a deploy is about to replace.
 #
-#   deploy-backup.sh <backup-dir> <src-base> <tag> <version-spec> <src>...
+#   deploy-backup.sh <backup-dir> <src-base> <tag> <version-spec> <target> <src>...
+#   deploy-backup.sh --done <backup-dir> <tag>
 #
 # This file is not run from a checkout on the server: site/redeploy.sh and
 # playground/deploy/redeploy.sh feed it to `ssh <host> bash -s -- ...` on
@@ -26,25 +27,75 @@
 #    any failure exits non-zero and the deploy stops before it replaces
 #    anything. A disk too small to hold the copy twice over is a failure too:
 #    filling the disk under a running service is worse than not deploying.
+#  * A failed deploy that is run again does not take a second copy. Each copy
+#    leaves <backup-dir>/.deploy-pending-<tag> naming it and the deploy's
+#    <target> (the commit); the deploy clears it with --done once it has
+#    finished. If the marker is still there, names the same target and its
+#    copy still exists, the last run of this very deploy stopped part way, so
+#    what is live is a mix of old and new (v0.95.0's runner deploy: the new
+#    dawnc beside the old runner binary) and the copy that run took is still
+#    the state before the deploy began. That copy is kept as the rollback
+#    point and nothing new is taken. Before this, three failed runs took three
+#    copies and rotation removed the only clean ones (0.91 to 0.93) to keep
+#    two of the mixed state. A different target, or a marker naming a copy
+#    that is gone, takes a fresh copy as usual: reusing then could hand back a
+#    state older than what was last live.
 #
 # <version-spec> is cmd:<path> (run `<path> version`, take its second word, as
 # in "dawnc 0.89.0 (native) b1:...") or file:<path> (first line).
 set -euo pipefail
 
-if [ "$#" -lt 5 ]; then
-  echo "usage: deploy-backup.sh <backup-dir> <src-base> <tag> <version-spec> <src>..." >&2
+usage() {
+  echo "usage: deploy-backup.sh <backup-dir> <src-base> <tag> <version-spec> <target> <src>..." >&2
+  echo "       deploy-backup.sh --done <backup-dir> <tag>" >&2
+  exit 2
+}
+check_tag() {
+  case "$1" in
+    runner|site) ;;
+    *) echo "backup: unknown tag '$1'" >&2; exit 2 ;;
+  esac
+}
+
+# --- the deploy finished ------------------------------------------------------
+# What is live is now whole, so the next deploy must copy it, whatever target
+# the marker named.
+if [ "${1:-}" = --done ]; then
+  [ "$#" -eq 3 ] || usage
+  backup_dir=$2 tag=$3
+  check_tag "$tag"
+  [ -d "$backup_dir" ] || { echo "backup: $backup_dir is not a directory" >&2; exit 1; }
+  rm -f -- "$backup_dir/.deploy-pending-$tag"
+  echo "backup: deploy finished; the next one will copy what is live now"
+  exit 0
+fi
+
+[ "$#" -ge 6 ] || usage
+backup_dir=$1 src_base=$2 tag=$3 spec=$4 target=$5
+shift 5
+
+check_tag "$tag"
+if ! printf '%s' "$target" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$'; then
+  echo "backup: bad target '$target'" >&2
   exit 2
 fi
-backup_dir=$1 src_base=$2 tag=$3 spec=$4
-shift 4
-
-case "$tag" in
-  runner|site) ;;
-  *) echo "backup: unknown tag '$tag'" >&2; exit 2 ;;
-esac
 [ -d "$backup_dir" ] || { echo "backup: $backup_dir is not a directory" >&2; exit 1; }
 [ -d "$src_base" ] || { echo "backup: $src_base is not a directory" >&2; exit 1; }
 keep=3
+name_re="^\\.prev-[0-9A-Za-z._+]+-[0-9]{8}T[0-9]{6}Z-$tag\$"
+pending="$backup_dir/.deploy-pending-$tag"
+
+# --- a rerun of a deploy that stopped part way ---------------------------------
+if [ -f "$pending" ]; then
+  p_target=$(sed -n 's/^target=//p' "$pending" | head -n 1)
+  p_backup=$(sed -n 's/^backup=//p' "$pending" | head -n 1)
+  if [ "$p_target" = "$target" ] && printf '%s' "$p_backup" | grep -Eq "$name_re" &&
+      [ -d "$backup_dir/$p_backup" ]; then
+    echo "backup: keeping $backup_dir/$p_backup: the last run of this deploy ($target)"
+    echo "  did not finish, so what is live now is not a rollback point; no new copy"
+    exit 0
+  fi
+fi
 
 # --- what is live now -------------------------------------------------------
 version=unknown
@@ -85,7 +136,6 @@ stamp=${DEPLOY_BACKUP_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
 name=".prev-$version-$stamp-$tag"
 dest="$backup_dir/$name"
 partial="$dest.partial"
-name_re="^\\.prev-[0-9A-Za-z._+]+-[0-9]{8}T[0-9]{6}Z-$tag\$"
 printf '%s' "$name" | grep -Eq "$name_re" || { echo "backup: bad name $name" >&2; exit 1; }
 if [ -e "$dest" ] || [ -e "$partial" ]; then
   echo "backup: $name already exists" >&2
@@ -113,6 +163,14 @@ mkdir -- "$partial" || fail_partial
 (cd "$src_base" && cp -a --parents -- "${present[@]}" "$partial/") || fail_partial
 mv -- "$partial" "$dest" || fail_partial
 echo "backup: kept $dest ($version, ${need_kb} KB)"
+# Written whole and renamed, so a rerun never reads half a marker. A marker
+# that cannot be written stops the deploy: without it a failed run's rerun
+# would copy the mixed state again.
+if ! { printf 'target=%s\nbackup=%s\n' "$target" "$name" >"$pending.tmp" &&
+    mv -- "$pending.tmp" "$pending"; }; then
+  echo "backup: could not write $pending; nothing was deployed" >&2
+  exit 1
+fi
 
 # --- rotation ---------------------------------------------------------------
 # The newest $keep stay. Candidates are the exact-pattern children of

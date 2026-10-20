@@ -203,7 +203,10 @@ echo "=== syncing to $HOST:$REMOTE ==="
 # side (launcher, jar, runner sources, packages, scripts, samples) is copied to
 # $REMOTE/.prev-<live version>-<UTC stamp>-runner and the newest 3 are kept
 # (scripts/deploy-backup.sh, which has the reasons). It fails closed: if the
-# copy cannot be made the deploy stops here, before the first rsync.
+# copy cannot be made the deploy stops here, before the first rsync. A rerun
+# of this commit after a run that stopped part way keeps that run's copy
+# instead of copying the half-deployed tree; the --done call at the end is
+# what marks a run as finished.
 # DAWN_DEPLOY_NO_BACKUP=1 skips it, for a disk that cannot hold a copy.
 # DEPLOY.md, "Rollback", says how to restore one.
 if [ "${DAWN_DEPLOY_NO_BACKUP:-}" = 1 ]; then
@@ -211,7 +214,7 @@ if [ "${DAWN_DEPLOY_NO_BACKUP:-}" = 1 ]; then
 else
   echo "=== keeping a rollback copy on $HOST ==="
   # shellcheck disable=SC2029
-  if ! ssh "$HOST" bash -s -- "$REMOTE" "$REMOTE" runner "cmd:$REMOTE/bin/dawnc" \
+  if ! ssh "$HOST" bash -s -- "$REMOTE" "$REMOTE" runner "cmd:$REMOTE/bin/dawnc" "$want_commit" \
       bin build playground packages scripts site <scripts/deploy-backup.sh; then
     backup_failed
   fi
@@ -362,6 +365,14 @@ if ! ssh "$HOST" "$CANARY_ENV $REMOTE_SWAP"; then
   echo "  Read journalctl -u 'dawn-play-native@*' and systemctl status dawn-play-native.socket;" >&2
   echo "  restore the rollback copy if it does not recover (playground/deploy/DEPLOY.md, \"Rollback copies\")." >&2
   exit 1
+fi
+
+# Finished: the next deploy copies what is live now. Only a warning when it
+# fails, since the runner is already live; a rerun of this same commit would
+# then keep the older copy (DEPLOY.md, "Rollback copies").
+# shellcheck disable=SC2029
+if ! ssh "$HOST" bash -s -- --done "$REMOTE" runner <scripts/deploy-backup.sh; then
+  echo "warning: could not clear $REMOTE/.deploy-pending-runner; remove it by hand" >&2
 fi
 
 echo "=== done ==="
