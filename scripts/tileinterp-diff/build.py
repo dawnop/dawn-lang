@@ -44,7 +44,7 @@ HERE = Path(__file__).resolve().parent
 # family name, harness file, the run.sh array whose length is its cubin count
 # (or a literal count)
 FAMILIES = [
-    ("vadd", "vadd_diff.dawn", 2),
+    ("vadd", "vadd_diff.dawn", "usage"),
     ("mask", "mask_diff.dawn", "masked"),
     ("red", "red_diff.dawn", "reduced"),
     ("mm", "mm_diff.dawn", "twod"),
@@ -128,7 +128,14 @@ def main():
     arrays = run_sh_arrays()
     mods = []
     for fam, file, count in FAMILIES:
-        n = count if isinstance(count, int) else len(arrays.get(count, []))
+        if count == "usage":
+            # the cubin count is whatever the driver's own usage line names
+            # (vadd_diff grew a third when f32 buffers arrived; a literal here
+            # went stale and the family died on its argument check)
+            usage = re.search(r'usage: vadd_diff ([^"]*)"', (DIFF / file).read_text())
+            n = len(re.findall(r"<[^>]*\.cubin>", usage.group(1))) if usage else 0
+        else:
+            n = count if isinstance(count, int) else len(arrays.get(count, []))
         if n == 0:
             sys.exit(f"build.py: run.sh has no array `{count}` for family {fam}")
         mod = file[:-len(".dawn")]
