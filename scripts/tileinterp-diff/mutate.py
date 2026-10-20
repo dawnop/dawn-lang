@@ -11,10 +11,19 @@ names, and run.sh --selftest requires the named check to go red on it:
                        comparison must fail.
   bounds-unchecked     the out-of-bounds check is gone: the package test that
                        stores past the end of a buffer must fail.
-  unsupported-skipped  an instruction outside the subset (`mmaf`) passes the
-                       static walk and execution skips it silently: the
-                       package test that expects it refused by name must
-                       fail, and so must the comparison.
+  unsupported-skipped  an instruction the interpreter does not model (a
+                       fence) passes the static walk and execution skips it
+                       silently: the package test that expects it refused by
+                       name must fail, and so must the comparison.
+  mma-drops-term       the f64 matrix product leaves the last term of k out:
+                       the package test that checks every term must fail, and
+                       so must the comparison.
+  narrow-unrounded     a narrow-format result is not rounded into its format:
+                       the package test of the rounded sums must fail, and so
+                       must the comparison.
+  fma-two-roundings    `fma` rounds the product before the add, in binary64 and
+                       in the narrow formats: the package test of the fused
+                       cases must fail.
 
 Declared as a literal registry so mutation-anchor-preflight.py proves every
 anchor matches exactly once before any build, as it does for every mutate.py
@@ -25,6 +34,8 @@ from pathlib import Path
 import sys
 
 INTERP = "packages/tileinterp/src/interp.dawn"
+MMA = "packages/tileinterp/src/mma.dawn"
+FORMATS = "packages/tileinterp/src/formats.dawn"
 
 MUTATIONS = {
     "mulf-adds": ((
@@ -37,10 +48,29 @@ MUTATIONS = {
         'fn check_addr(cx: Cx, buf: Int, off: Int, what: String) -> Unit =\n  if off < 0 || off >= cx.lens[buf] {',
         'fn check_addr(cx: Cx, buf: Int, off: Int, what: String) -> Unit =\n  if false && (off < 0 || off >= cx.lens[buf]) {',
     ),),
+    "mma-drops-term": ((
+        MMA,
+        '      list.fold(range(0, k), acc[idx], (s, p) => fma_f64(r[p], c[p], s))',
+        '      list.fold(range(0, k - 1), acc[idx], (s, p) => fma_f64(r[p], c[p], s))',
+    ),),
+    "narrow-unrounded": ((
+        FORMATS,
+        'pub fn nearest(fmt: String, x: Float) -> Float = if fmt == "f64" { x } else { round_into(fmt, NearestEven, x) }',
+        'pub fn nearest(fmt: String, x: Float) -> Float = x',
+    ),),
+    "fma-two-roundings": ((
+        MMA,
+        '    fma_f64(a, b, c)\n  } else {',
+        '    a * b + c\n  } else {',
+    ), (
+        MMA,
+        '    if is_finite(p) && is_finite(c) { nearest(fmt, add_odd(p, c)) } else { nearest(fmt, p + c) }',
+        '    if is_finite(p) && is_finite(c) { nearest(fmt, add_odd(nearest(fmt, p), c)) } else { nearest(fmt, p + c) }',
+    )),
     "unsupported-skipped": ((
         INTERP,
-        '  FloatMma(_d, _t, _lt, _rt, _l, _r, _a) -> Some("mmaf (matrix product is I2)")',
-        '  FloatMma(_d, _t, _lt, _rt, _l, _r, _a) -> None',
+        '  TokenOnlyTile(_t, op, _ti) -> Some("${op} (fences and PDL are not interpreted: a sequential run cannot check them)")',
+        '  TokenOnlyTile(_t, op, _ti) -> None',
     ), (
         INTERP,
         '  _ -> internal("instruction ${mnemonic(i)} passed the static walk")',

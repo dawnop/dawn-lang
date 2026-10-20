@@ -22,10 +22,15 @@
 # interpreter there is no device, and one JVM build of 40,000 lines costs
 # seconds where a native build costs a C compile of all of them.
 #
+# scan.py recounts the golden kernels the interpreter can reach at all and is
+# run here so that a covered kernel outside that ceiling is red.
+#
 # --selftest applies each mutant of mutate.py to a copy of packages/tileinterp
 # and requires the check that names it to go red: `mulf-adds` the comparison,
 # `bounds-unchecked` the package's out-of-bounds test, `unsupported-skipped`
-# the package's refusal test and the comparison.
+# the package's refusal test and the comparison, `mma-drops-term` and
+# `narrow-unrounded` the package's product and rounding tests and the
+# comparison, `fma-two-roundings` the package's fused tests.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -109,11 +114,15 @@ if [ "$mode" != selftest ]; then
   ran=$(date +%s)
   echo "tileinterp-diff: build $((built - start))s, families $((ran - built))s"
   if [ "$mode" = write ]; then judge "$work" --write; else judge "$work"; fi
+  # the ceiling the covered set is measured against (scan.py's header): a
+  # covered kernel the scan says is out of reach by construction is a bug in
+  # one of the two
+  python3 "$here/scan.py" --check
   exit 0
 fi
 
 # ---- --selftest
-for m in mulf-adds bounds-unchecked unsupported-skipped; do
+for m in mulf-adds bounds-unchecked unsupported-skipped mma-drops-term narrow-unrounded fma-two-roundings; do
   d="$work/$m"
   mkdir -p "$d"
   mutant_package "$d" "$m"
@@ -134,12 +143,29 @@ for m in mulf-adds bounds-unchecked unsupported-skipped; do
       ;;
     unsupported-skipped)
       if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
-      grep -q '^FAIL  selftest :: an instruction outside subset A is refused by name before anything runs' "$d/test.out" ||
+      grep -q '^FAIL  selftest :: an instruction the interpreter does not model is refused by name before anything runs' "$d/test.out" ||
         { cat "$d/test.out" >&2; fail "$m: the refusal test is not the one that failed"; }
       build_jar "$d" "$pkg"
       run_families "$d" 30
       if judge "$d" > "$d/judge.out" 2>&1; then cat "$d/judge.out" >&2; fail "$m: the comparison stayed green"; fi
       echo "PASS  $m: the refusal test and the comparison went red (first: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
+      ;;
+    mma-drops-term | narrow-unrounded)
+      if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
+      want='a matrix product adds every term of k to the accumulator'
+      [ "$m" = narrow-unrounded ] && want='a narrow sum is rounded into its format after every operation'
+      grep -q "^FAIL  selftest :: $want" "$d/test.out" ||
+        { cat "$d/test.out" >&2; fail "$m: the test that names it is not one that failed"; }
+      build_jar "$d" "$pkg"
+      run_families "$d" 30
+      if judge "$d" > "$d/judge.out" 2>&1; then cat "$d/judge.out" >&2; fail "$m: the comparison stayed green"; fi
+      echo "PASS  $m: the package test and the comparison went red (first finding: $(grep -m1 '^FAIL ' "$d/judge.out" | cut -c1-160))"
+      ;;
+    fma-two-roundings)
+      if ./bin/dawn test "$pkg" > "$d/test.out" 2>&1; then fail "$m: the package tests stayed green"; fi
+      grep -q '^FAIL  selftest :: fma rounds once, in f64 and in f32' "$d/test.out" ||
+        { cat "$d/test.out" >&2; fail "$m: the fused test is not the one that failed"; }
+      echo "PASS  $m: the fused package tests went red ($(grep -c '^FAIL ' "$d/test.out") of them)"
       ;;
   esac
 done

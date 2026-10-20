@@ -74,6 +74,7 @@ def main():
                        if ln.strip() and not ln.startswith("#")}
     seen_ub = set()
     covered, refused, problems, launched = set(), {}, [], set()
+    exact_in, tol_in = set(), set()
     agreed = blocked = 0
     for fam in a.families:
         path = d / (fam + (".err" if fam in STDERR_FAMILIES else ".out"))
@@ -88,6 +89,7 @@ def main():
                 if bad:
                     problems.append(f"{fam}: a case agreed although {', '.join(bad)}")
                 covered |= {k for k, st in launches if st == "ok"}
+                (tol_in if verdict.startswith("close:") else exact_in).update(k for k, st in launches if st == "ok")
             elif verdict == EXCUSED and "interp.unsupported_op" in kinds:
                 blocked += 1
                 for k, st in launches:
@@ -112,6 +114,10 @@ def main():
     print(f"cases agreed={agreed} blocked={blocked}")
     print(f"ub-refused {len(seen_ub)}: {' '.join(sorted(seen_ub))}")
     print(f"covered {len(covered)}: {' '.join(sorted(covered))}")
+    # agreed bit for bit in every case, or only within the tolerance tier
+    # (the matrix products, the transcendental functions: docs 7.1)
+    tol_only = sorted(tol_in - exact_in)
+    print(f"tolerance-tier only {len(tol_only)}: {' '.join(tol_only)}")
     print(f"refused {len(refused)}: {' '.join(sorted(refused))}")
     if a.covered:
         cp = Path(a.covered)
