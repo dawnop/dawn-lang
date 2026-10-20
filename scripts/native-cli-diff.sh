@@ -509,6 +509,35 @@ printf 'pub fn main() -> Unit !io = println("hi")\n' > "$BADMF/src/main.dawn"
 pair "doc (compile errors)" doc "$OUT/broken.dawn"
 pair "doc (manifest diagnostics)" doc "$BADMF"
 
+# parse, against HEAD's JVM driver. `dawnc parse` is what site/gpu-map/record.py
+# reads, so the dump has to match `dawn parse` over every file the repository
+# tracks, including the grammar-corpus rejects whose dump ends in diagnostics.
+# The independent oracles guard against two drivers agreeing on nothing: the
+# corpus must contain files and the native dump must carry diagnostic lines.
+PARSE_FILES="$OUT/parse_files.txt"
+git ls-files -z '*.dawn' | tr '\0' '\n' > "$PARSE_FILES"
+PARSE_N=$(wc -l < "$PARSE_FILES")
+mapfile -t PARSE_ARGV < "$PARSE_FILES"
+pair "parse (every tracked .dawn file, $PARSE_N files)" parse "${PARSE_ARGV[@]}"
+if [ "$PARSE_N" -lt 500 ] ||
+  ! "$DAWNC" parse "${PARSE_ARGV[@]}" 2> /dev/null | grep -q -P '^!\t'
+then
+  echo "FAIL: the parse corpus is empty or holds no failing parse ($PARSE_N files)"
+  fail=1
+fi
+pair "parse (no argument)" parse
+# An unreadable file panics on both; the panic's text names its own source
+# position and the runtime's own io message, so only stdout and the exit code
+# are held equal here.
+./bin/dawn parse "$OUT/no_such_file.dawn" > "$OUT/j.out" 2> /dev/null && PAIR_J=0 || PAIR_J=$?
+"$DAWNC" parse "$OUT/no_such_file.dawn" > "$OUT/n.out" 2> /dev/null && PAIR_N=0 || PAIR_N=$?
+if [ "$PAIR_J" != 1 ] || [ "$PAIR_N" != 1 ] || ! cmp -s "$OUT/j.out" "$OUT/n.out"; then
+  echo "FAIL: parse (a file that is not there) exits jvm=$PAIR_J native=$PAIR_N, want 1 and equal stdout"
+  fail=1
+else
+  echo "OK   parse (a file that is not there) (exit 1)"
+fi
+
 # fmt's two refusals (#189). Both are in-place-write guards, so the pairing is
 # not only "same message" but "same file afterwards": the check below re-reads
 # the inputs, which both drivers have now been handed.

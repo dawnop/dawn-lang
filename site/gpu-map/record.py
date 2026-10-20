@@ -13,7 +13,7 @@ wrote. Two programs know half each, and neither half is guessed:
     inside a `d_range` or a `d_scan` closure is that region call's child) and
     `render.line_map` carries it to lines of the text. That needs the kernel
     to RUN, so it is a Dawn harness over a copy of kernels.dawn.
-  - Dawn's own parser knows where each call is: `dawn parse` gives every call
+  - Dawn's own parser knows where each call is: `dawnc parse` gives every call
     node its code point span and the span of its callee's name.
 
 The two are paired strictly, level by level of the tree: under each parent,
@@ -51,7 +51,9 @@ header, its terminator and its closing brace.
 
 from pathlib import Path
 import contextlib
+import hashlib
 import io
+import os
 import re
 import subprocess
 import sys
@@ -63,6 +65,8 @@ GOLDEN = ROOT / "scripts" / "tile-golden"
 DEV = ROOT / "packages" / "tileir" / "src" / "dev.dawn"
 NAME = "flash_attn"
 OUT = Path(__file__).resolve().parent / f"{NAME}.map"
+
+PROBE_SRC = "pub fn probe() -> Int = 1\n"
 
 CUT_AT = "# Trace `name` twice and answer the record, or panic if the two runs differ.\n"
 
@@ -108,6 +112,55 @@ pub fn main() -> Unit !io = {
 def fail(msg: str) -> None:
     print(f"site/gpu-map/record.py: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+# ---- the compiler: dawnc, no JVM ----
+
+_DAWNC = None
+
+
+def dawnc() -> str:
+    """The native driver this script runs the harness and the parser with.
+
+    One resolution for every site script (site/dawnc.sh): DAWNC_BIN if set,
+    otherwise the binary built from this tree and cached under site/build/.
+    Either way the binary is probed once, because a wrong one (the JVM
+    launcher, a stale file, something that is not a compiler at all) must stop
+    the build here with a name on it, not surface as a parse tree that is
+    quietly empty or shaped differently.
+    """
+    global _DAWNC
+    if _DAWNC is not None:
+        return _DAWNC
+    exe = os.environ.get("DAWNC_BIN", "")
+    if exe:
+        where = "DAWNC_BIN"
+    else:
+        where = "site/dawnc.sh"
+        r = subprocess.run(["bash", "-c", ". site/dawnc.sh && site_dawnc"],
+                           capture_output=True, text=True, cwd=ROOT)
+        if r.returncode != 0 or not r.stdout.strip():
+            fail("could not get a dawnc from site/dawnc.sh:\n" + (r.stderr or r.stdout)[-2000:])
+        exe = r.stdout.strip().splitlines()[-1]
+    path = Path(exe)
+    if not path.is_absolute():
+        path = ROOT / path
+    if not (path.is_file() and os.access(path, os.X_OK)):
+        fail(f"{where} names {exe}, which is not an executable file")
+    with tempfile.TemporaryDirectory(prefix="gpu-map-probe.") as work:
+        probe = Path(work) / "probe.dawn"
+        probe.write_text(PROBE_SRC, encoding="utf-8")
+        try:
+            r = subprocess.run([str(path), "parse", str(probe)],
+                               capture_output=True, text=True, cwd=ROOT, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            fail(f"{where} names {exe}, which does not run as `dawnc parse`: {e}")
+        want = f"== {probe} ==\nModule"
+        if r.returncode != 0 or not r.stdout.startswith(want) or "\n  Fn probe" not in r.stdout:
+            fail(f"{where} names {exe}, which is not a dawnc whose `parse` prints the AST "
+                 f"dump (exit {r.returncode}); got:\n" + (r.stdout or r.stderr)[:400])
+    _DAWNC = str(path)
+    return _DAWNC
 
 
 # ---- the run: tileir's tree of calls and the lines each wrote ----
@@ -168,18 +221,52 @@ def split_args(s: str) -> list:
     return out
 
 
+HARNESS_BIN = ROOT / "site" / "build" / "gpu-map-harness"
+
+
+def harness_key(main_src: str) -> str:
+    """What the built harness depends on: the compiler (std is embedded in it),
+    the harness text, and every package source it may import. All of packages/
+    rather than the transitive closure of tileir and tileref: a wider key only
+    costs a rebuild, a narrower one could serve a stale binary."""
+    h = hashlib.sha256()
+    h.update(hashlib.sha256(Path(dawnc()).read_bytes()).digest())
+    h.update(main_src.encode("utf-8"))
+    for f in sorted((ROOT / "packages").rglob("*")):
+        if f.is_file() and (f.suffix == ".dawn" or f.name == "dawn.toml") \
+                and "build" not in f.relative_to(ROOT).parts:
+            h.update(str(f.relative_to(ROOT)).encode("utf-8") + b"\0")
+            h.update(f.read_bytes())
+    return h.hexdigest()
+
+
 def run_harness(src: str) -> str:
-    with tempfile.TemporaryDirectory(prefix="gpu-map.") as work:
-        proj = Path(work)
-        (proj / "src").mkdir()
-        (proj / "src" / "main.dawn").write_text(harness_source(src), encoding="utf-8")
-        (proj / "dawn.toml").write_text(
-            "schema = 1\nname = \"gpu_map\"\n\n[deps]\n"
-            f"tileir = \"{ROOT / 'packages' / 'tileir'}\"\n"
-            f"tileref = \"{ROOT / 'packages' / 'tileref'}\"\n",
-            encoding="utf-8")
-        r = subprocess.run([str(ROOT / "bin" / "dawn"), "run", str(proj)],
-                           capture_output=True, text=True, cwd=ROOT)
+    # Built once and cached: `dawnc run` would emit C and run cc on every
+    # build (about 40 s here), and the harness only changes when kernels.dawn,
+    # a package or the compiler does.
+    main_src = harness_source(src)
+    key = harness_key(main_src)
+    keyfile = Path(str(HARNESS_BIN) + ".key")
+    stale = not HARNESS_BIN.exists() or not keyfile.exists() \
+        or keyfile.read_text(encoding="utf-8") != key
+    if stale:
+        HARNESS_BIN.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="gpu-map.") as work:
+            proj = Path(work)
+            (proj / "src").mkdir()
+            (proj / "src" / "main.dawn").write_text(main_src, encoding="utf-8")
+            (proj / "dawn.toml").write_text(
+                "schema = 1\nname = \"gpu_map\"\n\n[deps]\n"
+                f"tileir = \"{ROOT / 'packages' / 'tileir'}\"\n"
+                f"tileref = \"{ROOT / 'packages' / 'tileref'}\"\n",
+                encoding="utf-8")
+            keyfile.unlink(missing_ok=True)
+            r = subprocess.run([dawnc(), "build", str(proj), "-o", str(HARNESS_BIN)],
+                               capture_output=True, text=True, cwd=ROOT)
+        if r.returncode != 0:
+            fail("the harness did not build:\n" + (r.stderr or r.stdout)[-2000:])
+        keyfile.write_text(key, encoding="utf-8")
+    r = subprocess.run([str(HARNESS_BIN)], capture_output=True, text=True, cwd=ROOT)
     if r.returncode != 0:
         fail("the harness did not run:\n" + (r.stderr or r.stdout)[-2000:])
     return r.stdout
@@ -198,7 +285,7 @@ class Node:
 
 
 def parse_tree(dump: str, name: str) -> Node:
-    """The `Fn <name>` subtree of a `dawn parse` dump."""
+    """The `Fn <name>` subtree of a `dawnc parse` dump."""
     root, stack, inside = None, [], False
     for raw in dump.splitlines():
         body = raw.lstrip(" ")
@@ -217,7 +304,7 @@ def parse_tree(dump: str, name: str) -> Node:
             root = node
         stack.append(node)
     if root is None:
-        fail(f"`dawn parse` has no `Fn {name}` in kernels.dawn")
+        fail(f"`dawnc parse` has no `Fn {name}` in kernels.dawn")
     return root
 
 
@@ -465,10 +552,10 @@ def record() -> str:
     src = KERNELS.read_text(encoding="utf-8")
     dev = set(re.findall(r'called\("([a-z_0-9]+)"', DEV.read_text(encoding="utf-8")))
     ran = run_harness(src)
-    p = subprocess.run([str(ROOT / "bin" / "dawn"), "parse", str(KERNELS)],
+    p = subprocess.run([dawnc(), "parse", str(KERNELS)],
                        capture_output=True, text=True, cwd=ROOT)
     if p.returncode != 0:
-        fail("`dawn parse` failed:\n" + (p.stderr or p.stdout)[-2000:])
+        fail("`dawnc parse` failed:\n" + (p.stderr or p.stdout)[-2000:])
     fn = parse_tree(p.stdout, NAME)
     body = [k for k in fn.kids if k.kind == "Block"]
     if len(body) != 1:
