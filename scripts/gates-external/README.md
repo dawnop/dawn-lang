@@ -213,7 +213,7 @@ user, and close the world-writable temp directories, before the steps run.
 | `plan` (the #168 job) | `external-all` | not executed: an external run is the full set, so each gate job's condition on the plan's outputs is taken as satisfied. Only the exact wiring #168 wrote is accepted (the job naming itself); any other condition is refused |
 | `actions/checkout@v4` | `tree-worktree` | `git worktree add --detach <sha>` in a fresh directory per job. Full history and tags are present even where CI checks out at depth 1 |
 | `./.github/actions/dawn-toolchain` | `dawn-toolchain-local` | JDK 21 on `JAVA_HOME` and `PATH`; the seed cache copied in from the shared cache (seedjar.sh re-verifies it); `./bin/dawn --version` unless `build: 'false'`. The composite's `action.yml` is fingerprinted at the same commit and a changed composite is refused |
-| `actions/cache@v4` | `noop` | nothing saved; the restore half is the seed-cache copy above, and coursier's cache is the user's own |
+| `actions/cache@v4` | `noop` | nothing saved (a `key` may name an earlier step's output, checked and never evaluated: the docs job's site binaries are rebuilt cold here); the restore half is the seed-cache copy above, and coursier's cache is the user's own |
 | `actions/upload-artifact@v4` | `artifact-store-local` | copied to `<out>/artifacts/<name>`; `if-no-files-found: error` is honoured |
 | `actions/download-artifact@v4` | `artifact-fetch-local` | every artifact matching `pattern` copied to `<path>/<name>` |
 | `actions/setup-node@v4` | `node-host` | the host's `node` (the prefix's node 20 under `--prefix`), whose version is recorded in the bundle |

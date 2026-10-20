@@ -421,6 +421,14 @@ def parse(gates_text, action_text=None):
                     continue  # never forwarded: the local backend has no token
                 if key == "path":
                     _no_expr(f"{swhere} with.path", RUNNER_TEMP_EXPR.sub("", value))
+                elif uses == "actions/cache@v4" and key == "key":
+                    # A cache key may name an earlier step's output (the docs
+                    # job's site binaries are keyed by site/cache-keys.sh). The
+                    # step is a noop here, so the key is only checked to be one
+                    # of the admitted expression shapes, never evaluated.
+                    for expr in EXPR.findall(value):
+                        if not ENV_EXPR_STEPS.match(expr) or ENV_EXPR_STEPS.match(expr).group(1) not in step_ids:
+                            raise PlanError(f"{swhere} with.key: `{expr}` is not an earlier step's output")
                 else:
                     _no_expr(f"{swhere} with.{key}", value)
                 clean[key] = value

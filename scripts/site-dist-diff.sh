@@ -122,13 +122,12 @@ echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 # them on the relative one. Either way they see the same value.
 
 # ---- leg 1: the native backend, the dist that ships ----
-# Run from the snapshot, by the same `dawnc run site` site/build.sh uses, so the
-# program compiled here is the program the JVM leg runs below, whatever the
-# working tree is doing. dawnc is the toolchain, not an input: it is built from
-# the working tree (or DAWNC_BIN) before the fingerprint below is checked again,
-# and site/dawnc.sh reuses the one site/build.sh left when its stamp matches.
+# Run from the snapshot, with the same generator binary site/build.sh runs, so
+# the program run here is the program the JVM leg runs below, whatever the
+# working tree is doing. dawnc is the toolchain, not an input: if the binary has
+# to be built, dawnc is built from the working tree (or DAWNC_BIN) first, before
+# the fingerprint below is checked again.
 echo "== native =="
-dawnc_bin="$(site_dawnc)" || { echo "FAIL: dawnc did not build"; exit 1; }
 # The generator is built from the working tree's site/ (the bytes the snapshot
 # holds; the cache key is their content) and shared with site/build.sh's.
 gen_bin="$(site_prog site site_gen)" || { echo "FAIL: the site generator did not build"; exit 1; }

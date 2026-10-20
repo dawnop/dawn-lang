@@ -36,11 +36,6 @@ else
   echo "warning: npm not found — Playground editor bundle NOT rebuilt" >&2
 fi
 
-# The native driver: it runs the generator and the search probe at the end of
-# this script and builds the TEA reactors below. Resolved here, before the slow
-# steps that need it, so a checkout that cannot build it fails now.
-site_dawnc_bin="$(site_dawnc)"
-
 # The TEA applications, as wasm reactors: the two demos on tea.html, and the
 # search panel every page's header mounts. Built here for the same
 # reason play-ui is: scripts/site-dist-diff.sh runs the generator twice and
@@ -84,7 +79,9 @@ if [ "$tea_ok" = 1 ]; then
   # `--target wasm --reactor` is the native driver's alone (selfhost/src/
   # nmain.dawn); the JVM CLI has no wasm backend. Emitting and linking dawnc
   # costs ~35s, so site/dawnc.sh caches it beside the artifacts.
-  tea_dawnc="$site_dawnc_bin"
+  # Resolved only here and in site_prog, when something has to be built: with
+  # the generator binary current (a CI cache hit) dawnc itself is not needed.
+  tea_dawnc="$(site_dawnc)"
   # A reactor that will not build stops the demo, not the site: the generator
   # writes a placeholder, the demo page says it could not load, and every other
   # page is what it was. Same deal the Playground makes when its editor bundle
