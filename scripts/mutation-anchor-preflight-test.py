@@ -87,8 +87,8 @@ class PreflightTests(unittest.TestCase):
                                           "      let loaded = reusing.loaded\n",
                                           "      let loaded  = reusing.loaded\n")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-observe/prefix-stats", server,
-                                          "      let update = incremental.analyze(",
-                                          "      let update  = incremental.analyze(")
+                                          "      let (update, sent) = placed\n",
+                                          "      let (update, sent)  = placed\n")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-observe/inputs", 0)
 
     def test_lsp_configured_anchor_drift_is_caught(self):
@@ -99,8 +99,8 @@ class PreflightTests(unittest.TestCase):
         self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-configured/policy", server,
                                           "legacy_analysis_config())", "legacy_analysis_config() )")
         self.assert_registry_drift_is_red("incremental-semantics-contract", "lsp-configured/observe", server,
-                                          "      let prog = update.program\n      Workspace {",
-                                          "      let prog = update.program\n      Workspace  {")
+                                          "      let prog = update.program\n      (Workspace {",
+                                          "      let prog = update.program\n      (Workspace  {")
         self.assert_stale_registry_is_red("incremental-semantics-contract", "lsp-configured/policy", 0)
 
     def test_lsp_module_memo_anchor_drift_is_caught(self):

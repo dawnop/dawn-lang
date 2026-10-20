@@ -37,10 +37,10 @@ PASSES = "selfhost/src/check/passes.dawn"
 SERVER = "selfhost/src/lsp/server.dawn"
 
 # Anchors two groups quote, spelled once.
-WARM_ANALYZE = "incremental.analyze(ws0.cache, loaded)"
-COLD_ANALYZE = "incremental.analyze(incremental.evict(ws0.cache), loaded)"
+WARM_ANALYZE = "incremental.analyze_placing(ws0.cache, loaded,"
+COLD_ANALYZE = "incremental.analyze_placing(incremental.evict(ws0.cache), loaded,"
 LOADED = "      let loaded = reusing.loaded"
-PREFIX_ANALYZE = "      let update = " + WARM_ANALYZE
+PREFIX_ANALYZE = "      let (update, sent) = placed"
 SAME_INPUT = "-> Bool = LoadedModule { ..a, line_starts: b.line_starts } == b\n"
 SAME_SURFACE = "-> Bool =\n  a == b &&\n"
 CUTOFF = "              Some(before) -> if same_surface(own, before) {"
@@ -137,9 +137,9 @@ MUTATIONS = {
     "lsp-configured/policy": ((SERVER, "run_lsp_configured(std_flag, host, legacy_analysis_config())",
                                "run_lsp_configured(std_flag, host, "
                                "LspAnalysisConfig { mode: Legacy, max_modules: 128 })"),),
-    "lsp-configured/observe": ((SERVER, "      let prog = update.program\n      Workspace {",
+    "lsp-configured/observe": ((SERVER, "      let prog = update.program\n      (Workspace {",
                                 '      benchmark_analysis_stats("project", Some(update.stats))\n'
-                                "      let prog = update.program\n      Workspace {"),),
+                                "      let prog = update.program\n      (Workspace {"),),
 
     # lsp-module-memo.py: the owner of the analysis is what the server
     # commits and discards, and a load reuses only unchanged parses.

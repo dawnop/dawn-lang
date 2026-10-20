@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Eight assertions about the language server's *scheduling*, which every other
+"""Nine assertions about the language server's *scheduling*, which every other
 LSP gate is blind to.
 
 scripts/selfhost-lsp-diff.sh compares output bytes; a server that answers
@@ -21,6 +21,9 @@ undebounced numbers as the baseline the change had to hold.
             newer text; code actions read the text, not the analysis.
   order     an edit, a hover, an edit: the hover answers the text it was asked
             about, so both texts are analysed, in order.
+  edit-first in a two-module project, an edit to the imported module publishes
+            that module's diagnostics before its open importer's, and each
+            document once.
 
 They are reported separately and on purpose, because each is red for its own
 reason and none of them covers another. `liveness` is load-bearing rather than
@@ -37,6 +40,12 @@ split the same way. `cancel` and `coalesce` are red on a loop that analyses
 before every request it reads; `order` is the guard on the other side, red on a
 loop that lets a request jump the edit queued behind it, which would answer a
 hover or a rename against a text it was not asked about.
+
+`edit-first` is about when diagnostics go out (docs/audit/lsp-robustness-design.md
+§2.2.6): an open document is published the moment its module is analysed, not
+after the whole workspace. The importer's URI sorts first, so a server that
+publishes in URI order after converging is red, and so is one whose early
+publish disagreed with the converged list (the document goes out twice).
 
 Usage:  scripts/lsp-liveness.py [server command...]      (default ./bin/dawn lsp)
 
@@ -562,6 +571,71 @@ def exp_order(cmd, results):
                     None if ok else "        stdout: " + json.dumps(msgs)[:400]))
 
 
+# The `edit-first` project: `a_main` imports `b_lib` and sorts before it. The
+# edit gives `f` a second parameter, so the importer's diagnostics change too
+# (an arity error naming `f`), and `b_lib` itself is clean.
+EF_LIB_V0 = "pub fn f(n: Int) -> Int = n\n"
+EF_LIB_V1 = "pub fn f(n: Int, m: Int) -> Int = n + m\n"
+EF_MAIN = "use b_lib.{f}\n\npub fn main() -> Unit !io = println(to_string(f(1)))\n"
+
+
+def exp_edit_first(cmd, results):
+    """Open a_main and b_lib, then edit b_lib and ask an unknown request."""
+    root = tempfile.mkdtemp(prefix="dawn-lsp-edit-first-")
+    src = os.path.join(root, "src")
+    os.mkdir(src)
+    uris = {}
+    for name, text in (("a_main", EF_MAIN), ("b_lib", EF_LIB_V0)):
+        path = os.path.join(src, name + ".dawn")
+        with open(path, "w") as f:
+            f.write(text)
+        uris[name] = "file://" + path
+    def did_open(name, text):
+        return frame(json.dumps({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uris[name], "languageId": "dawn", "version": 0,
+                             "text": text}}}))
+    srv = Server(cmd)
+    try:
+        srv.send(frame('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}')
+                 + frame('{"jsonrpc":"2.0","method":"initialized","params":{}}')
+                 + did_open("a_main", EF_MAIN) + did_open("b_lib", EF_LIB_V0))
+        if srv.await_output(uris["b_lib"].encode(), STARTUP_LIMIT_S) is None or \
+                not srv.await_quiet(STDOUT_QUIET_S, STARTUP_LIMIT_S):
+            results.append(("edit-first", False, "the server never published the "
+                            "opened project and went quiet", head_of_stdout(srv)))
+            return
+        before = len(srv.stdout_bytes())
+        srv.send(frame(json.dumps({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uris["b_lib"], "version": 1},
+            "contentChanges": [{"text": EF_LIB_V1}]}}))
+                 + request(401, "dawn/livenessBarrier", "{}"))
+        srv.await_output(b'"id":401', BURST_SETTLE_S)
+        msgs = messages(srv.stdout_bytes()[before:])
+    finally:
+        srv.kill()
+        for name in ("a_main", "b_lib"):
+            try:
+                os.unlink(os.path.join(src, name + ".dawn"))
+            except OSError:
+                pass
+        for d in (src, root):
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
+    order = [("b_lib" if p.get("uri") == uris["b_lib"] else
+              "a_main" if p.get("uri") == uris["a_main"] else p.get("uri"))
+             for p in publishes(msgs)]
+    importer = [p for p in publishes(msgs) if p.get("uri") == uris["a_main"]]
+    names_f = bool(importer) and "`f`" in json.dumps(importer[-1])
+    ok = order == ["b_lib", "a_main"] and names_f
+    results.append(("edit-first", ok,
+                    "publishes after the edit: %s, the importer's %s `f` "
+                    "(want [b_lib, a_main] and naming it)"
+                    % (order, "naming" if names_f else "not naming"),
+                    None if ok else "        stdout: " + json.dumps(msgs)[:600]))
+
+
 def main():
     if not os.path.exists("/proc/self/stat"):
         print("lsp-liveness: needs /proc (Linux); the idle assertion has no "
@@ -580,8 +654,9 @@ def main():
     exp_cancel(cmd, results)
     exp_coalesce(cmd, results)
     exp_order(cmd, results)
+    exp_edit_first(cmd, results)
     for name, ok, why, detail in results:
-        print("%-9s %s -- %s" % (name + ":", "PASS" if ok else "FAIL", why))
+        print("%-10s %s -- %s" % (name + ":", "PASS" if ok else "FAIL", why))
         if detail:
             print(detail)
     bad = [n for n, ok, _, _ in results if not ok]
@@ -589,7 +664,7 @@ def main():
         print("lsp-liveness: FAILED (%s)" % ", ".join(bad))
         return 1
     print("lsp-liveness: OK (hangup, liveness, idle, debounce, freshness, "
-          "cancel, coalesce, order)")
+          "cancel, coalesce, order, edit-first)")
     return 0
 
 

@@ -516,6 +516,101 @@ pending，字节不变。
 name-reuse 与 #789 P3 正在改的函数和契约文件，而且模型预计 R1 之后它主要省 CPU、几乎不省延迟。
 等那两刀落地后再量一次，过阈值才做。所以 PR 写的是 `Refs #790`。
 
+### 2.2.6 先发打开文件的诊断（L-edit，2026-10-20）
+
+**问题**：裁决 `ruling-lsp-accept-line-20261019` 把 sync 分两层定线：被编辑文件自身的诊断
+（L-edit）p90 ≤ 100 ms，工作区收敛（L-ws）另算。`scripts/lsp-sync-bench/bench.py` 在
+origin/main 上量出 L-edit 全部场景越线，(b) `eff_suffix` 签名改动 p90 约 1.3 s，而且 edit 与
+sync 在 540 个样本里都差不到 1 ms：服务端等 `incremental.analyze` 把整个工作区算完，
+再由 `install_workspace` 按 URI 排序一次发完，被编辑文件从不先发。
+
+**gopls 的做法**（`gopls/internal/server/diagnostics.go` 的 `diagnoseSnapshot`，
+https://github.com/golang/tools/blob/master/gopls/internal/server/diagnostics.go ；用户文档
+https://tip.golang.org/gopls/features/diagnostics ）：`diagnosticsDelay` 非零时分两段。
+第一段 `diagnoseChangedFiles` 只对被改的**打开**文件所在的包做解析与类型检查（不跑 analyzer），
+立即以 `final=false` 发布；等 delay 之后第二段算整个工作区，以 `final=true` 发布。
+它允许第二段改写第一段：analyzer 的诊断只在第二段出现，所以同一文件可能发两版。
+它的 `publishFileDiagnosticsLocked` 只在内容摘要变了时才真的发，同内容不重发。
+
+**Dawn 的形状**：不分两段跑，在**同一次**分析里按模块完成的时刻发。
+
+- `driver/incremental.analyze_placing[S]`：和 `analyze` 同一个循环，多一个折叠回调
+  `fn(S, String, Program) -> S`。每个模块的步骤（复用或重检）放进 carry 之后，若它的模块路径
+  在调用方给的 `watch` 集合里，就把「这个模块此刻的 Program」交给回调：`modules` 是到它为止的，
+  `diags` 是 `loaded.diags` 加**它自己这一步**的诊断，`decl_spans` 是到它为止的。
+  `analyze` 就是 `watch` 为空的它，其它调用方不变。
+- `lsp/server.dawn`：didChange 与「加入已就绪工作区的 didOpen」重建时，`watch` = 本工作区所有
+  打开文档的模块路径。回调把这些文档的诊断按最终的同一条管线（`add_loc_diags` → 工作区 walk
+  诊断 → refresh 问题，再经 `diagnostics_for_uri` 把别的根的贡献按键序拼上）算出来，立即
+  `publishDiagnostics`，并记下发了什么。`install_workspace` 最后照旧对受影响的 URI 逐个算
+  最终诊断；**与已先发的那份相同就不再发**，不同就再发一次（兜底，见下）。
+- 依赖方（导入被编辑模块的其它打开文档）也是 `watch` 里的成员，各在自己的模块完成时发；
+  关闭的文件（只有带诊断或刚清空诊断的才会被发）等收敛后由 `install_workspace` 发。模块按依赖序
+  分析，被编辑模块总在导入它的模块之前完成，所以被编辑文件的 publish 先于依赖方到达。
+
+**正确性：先发的就是最终的**。一个打开文档 U（路径 P、模块 M）最终的诊断表是：
+
+1. `rendered_diags(prog)` 里路径为 P 的条目，按程序顺序。`prog.diags` = `loaded.diags` 接各模块
+   步骤的诊断，而 `analyze_module_step` 给每条步骤诊断的路径都是本模块文件（`mf.path`），
+   一个程序里不会有两个模块同一路径，所以路径为 P 的只有 `loaded.diags` 里的（分析开始前就定了）
+   和 M 自己那一步的。过滤保持相对顺序，所以「`loaded.diags` ++ M 的诊断」过滤到 P 与最终逐条同序。
+2. 位置换算 `identity.absolute(prog.decl_spans, d)` 按 `d.owner.module` 查表。M 的诊断只可能归属
+   M 或它之前的模块（模块成 DAG，后面的模块 M 看不见），这些表项在 M 完成时都已是最终值：
+   后面的模块只往表里**加**自己的键。
+3. 工作区 walk 诊断与 refresh 问题来自 plan，不随这次分析变。
+4. 别的工作区根对 U 的贡献在这次重建期间不变；`diagnostics_for_uri` 用把本工作区换成临时 slot 的
+   状态算，拼接顺序与最终一致。`version` 取同一个 `st.docs`。
+
+所以按论证不会二次发布。`install_workspace` 的「相同才跳过」只是兜底：若哪天有人让后面的模块
+往前面的文件报诊断，论证失效时客户端会收到第二版（最终值），而不是停在错的那版上。
+新的 liveness 断言 `edit-first` 同时检查每个 URI 在一次 sync 里只发一次，兜底若被触发会红。
+
+**与 #790 的取消、合并语义**：分析本身仍是同步的，中途不读 stdin，也就不存在「工作区那段被新改动
+取代」的半截分析（模块边界放弃仍是 §2.2.5 的条件刀 2）。下一轮 sync 照常整轮重发；已先发的不撤回，
+被下一轮覆盖，这正是 LSP 对 publishDiagnostics「后到者为准」的语义。冲突快照（同一路径两份文本）
+不分析，不先发。独立缓冲区本来就只发自己，不变。
+
+**不覆盖的路径**：didClose、manifest 刷新、首次激活工作区（`activate_workspace`）仍在收敛后统一发。
+前两者不在打字路径上；首次激活要冷算全部模块，打开文件也排在依赖之后，先发收益小，而它外面有
+`catch_panic` 兜着「装不上就关 lease」，先发一半再 panic 会让客户端看到一个没装上的工作区的诊断。
+
+**负控**（本机，`java -jar <变异体> lsp`）：
+
+| jar | `edit-first`（`lsp-liveness.py`） | 契约 `module memo shows a watched module's diagnostics as final once its step is placed` |
+|---|---|---|
+| 本刀 | PASS，`[b_lib, a_main]` | PASS |
+| origin/main（改前） | **FAIL** `[a_main, b_lib]` | （无此接口） |
+| `watch-none`（`analyze_placing` 里 `if false && set.has(watch, …)`） | **FAIL** `[a_main, b_lib]` | — |
+| `no-skip`（`install_workspace_after` 不比 `sent`，照发） | **FAIL** `[b_lib, a_main, a_main, b_lib]` | — |
+| `load-diags-only`（交给回调的 `diags` 去掉本步的） | **FAIL** `[b_lib, a_main, a_main]`（兜底重发） | **FAIL** |
+| `step-diags-only`（去掉 `loaded.diags`） | — | **FAIL** |
+| `no-spans`（交给回调的 `decl_spans` 换成空表） | — | **FAIL** |
+
+其余八条 liveness 断言在每把 jar 上都 PASS。`lsp-workspace-contract` 的四个变异体
+（`only-current-diagnostics`、`drop-diagnostics-version`、`unopened-version-zero`、`skip-empty-diagnostics`）
+与 `retry-unavailable-on-change` 跟着新的发布代码改了锚点，意图不变，本机 `run.sh` 全部「编得过、再打红」。
+lsp-diff 对真父提交（`EMITCHANGE_MODE=range`）逐字节相同：语料里没有「打开的导入者 URI 排在被编辑文件之前」的会话，
+不写 `Emit-Change`。
+
+**实测**（`scripts/lsp-sync-bench/bench.py --baseline`，两个服务端同时起、逐次交错，默认 6 遍 × 7 轮 + 150 个 `pub fn` 抽样，
+launcher 的 `-Xss512m -Xmx2g -XX:+UseSerialGC`；基线是 origin/main `a0c6484f`，本刀是 rebase 后的同一提交，load 1.47–3.85，守卫暂停 1080 s。rebase 前对 `c5fa9ed5` 的一轮同量级，见报告）。单位 ms，中位 / p90：
+
+| 场景 | 改前 edit | 本刀 edit | 改前 sync | 本刀 sync |
+|---|---|---|---|---|
+| (a) `driver/analyze` 体内 | 122 / 161 | **58 / 156** | 122 / 161 | 65 / 163 |
+| (b) `check/types.eff_suffix` 签名 | 242 / 271 | **67 / 179** | 242 / 272 | 243 / 265 |
+| (c) `front/ast` 体内 | 32 / 40 | **19 / 83** | 32 / 40 | 34 / 97 |
+| (d) `check/types` 加类型 | 728 / 1324 | **67 / 200** | 728 / 1324 | 715 / 1304 |
+| 抽样 150 个 `pub fn` | 159 / 268 | **87 / 122** | 159 / 268 | 156 / 252 |
+
+- 中位数全部进了 L-edit 的 100 ms；sync 配对差都在 ±3 ms，先发没有给工作区收敛加成本。
+- **p90 在 SerialGC 下仍越线（a 156、b 179、d 200、抽样 122）**。分布是双峰：(rebase 前那轮) (b) 42 个样本里 28 个在 60–83，
+  14 个在 126–188。GC 日志（`-Xlog:gc`，同一服务端单跑 (b)）：编辑期间每约 180 ms 一次 young GC，每次 58–71 ms，
+  落进约 60 ms 的 edit 窗口的概率正好是三分之一左右。`-Xmn768m` 加大年轻代只让每次停顿更长（a p90 218）。
+- 只换收集器、其余参数不变，同一 jar 单跑：ParallelGC edit p90 a 84、b 92、c 39、d 88、抽样 85，**全部在线内**；
+  G1 是 88 / 107 / 38 / 137 / 75。两者的 sync 也更低（ParallelGC (b) 198 / 216）。
+  换 launcher 的收集器影响所有子命令与内存占用，不在本刀，另列为一刀（§四）。
+
 ### 2.3 缓存留到第二步
 
 `analyze_document` 每次重跑 lex/parse/module graph。缓存它们需要失效判定
@@ -542,6 +637,15 @@ name-reuse 与 #789 P3 正在改的函数和契约文件，而且模型预计 R1
   而 W 类消息几乎不在打字路径上，没有收益。
 - **刀 2（模块边界放弃被取代的分析）放进同一刀**。它改 name-reuse 与 #789 P3 正在改的
   `incremental.analyze` 和契约文件；R1 之后模型预计它主要省 CPU，等那两刀落地后量过再定。
+- **照 gopls 分两段跑（先只检被改文件所在模块，再算工作区）**（§2.2.6）。Dawn 的模块按依赖序检查，
+  被编辑模块本来就在导入它的模块之前完成，在同一次分析里于它完成时发布即可，不必再跑一遍；
+  gopls 第一段不跑 analyzer，第二段会改写第一段，Dawn 这样做先发的就是最终的。
+- **先发时用「上一轮的依赖方诊断」填充没算到的文件**。那会发出一版注定要被覆盖的过期诊断，
+  正是任务要求避免的「先发一版、后发另一版」。
+- **只先发被编辑文件，不先发其它打开文件**（§2.2.6）。其它打开文件也是在自己的模块完成时就定了，
+  多发不多算，只是早到；限定成被编辑文件反而要多一条判断，还得区分 didOpen。
+- **本刀顺手把 launcher 的 `-XX:+UseSerialGC` 换成 ParallelGC**。实测它能让 L-edit 的 p90 全部进线（§2.2.6），
+  但 `bin/dawn` 的 JVM 参数管所有子命令（编译、测试、门禁），要量内存峰值与 CI 墙钟，单独一刀。
 - **保留手写 decoder 作为 fallback**。留着它就还得维护它。
   初稿这里的理由是「它的全部价值是『JDK 不在』——JDK 一定在，Dawn 跑在 JVM 上」，
   **那个前提已经被 [`../native-backend-plan.md`](../native-backend-plan.md) 的
@@ -586,6 +690,7 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 | 2d ✅ | `selfhost/src/lsp/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | **已完成**（2026-08-05）。`lsp-liveness.py` 增两条断言（`debounce` / `freshness`），各有自己的变异体；两个后端的 lsp 转录仍与 v0.50.0 **逐字节相同**。见 §2.2.4 |
 | 3 ✅ | `selfhost/src/lsp/server.dawn`：读循环排空、`$/cancelRequest` 回 `RequestCancelled`、按类调度（#790 刀 1） | **已完成**（2026-10-19）。`lsp-liveness.py` 增 `cancel`/`coalesce`/`order` 三条，各被变异体单独打红；VS Code 节奏下 check/types 每键补全 8.3 s → 0.87 s。见 §2.2.5 |
 | 4 ✅ | 实测 debounce 窗口，把 150ms 换成有出处的数字 | **已完成**（2026-10-19）：50 ms，出处与代价见 §七 末条 |
+| 5 ✅ | `driver/incremental.analyze_placing` + `lsp/server.dawn`：打开文件在自己的模块分析完时先发诊断（L-edit） | **已完成**（2026-10-20）。`lsp-liveness.py` 增 `edit-first`，`contract/module_memo` 增一条逐模块对终值的契约，各被变异体打红。见 §2.2.6 |
 
 无破坏性变更（LSP 是工具，不是语言表面）。2b/2c 动的是运行时契约与 intrinsic 表，
 但只加不改：`io_read_stdin` 的**可观察**语义（恰好 n 字节，短读即 EOF）不变，
@@ -659,3 +764,8 @@ RequestCancelled，formatting/codeAction/documentSymbol 从本版本文本直接
 没取消的语义请求仍按序只分析它前面的文本。设计、三条新断言与四个变异体、前后实测见 §2.2.5。
 lsp 转录只差 `messy` 段 formatting 回复的位置（`Emit-Change(lsp)`）。不回 ContentModified
 （LSP 3.17 明文不许因未处理消息里的改动发它）；模块边界放弃（刀 2）留作条件刀。
+
+**2026-10-20 step 5 落地（L-edit）**：`driver/incremental.analyze_placing` 在每个打开文档的模块放进 carry 时把
+「到它为止的程序」交给 LSP，服务端当场发布这个文档的诊断，收敛后只补发内容变了的 URI。先发的就是最终的
+（论证与负控见 §2.2.6）。L-edit 中位数 (b) 242 → 67 ms、(d) 728 → 67 ms、抽样 159 → 87 ms；p90 仍被 SerialGC 的
+young GC 拖在 122–200 ms，ParallelGC 下全部进线，换收集器另列一刀。

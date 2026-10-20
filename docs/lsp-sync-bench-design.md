@@ -23,9 +23,8 @@ scratchpad 里（`lsp_remeasure.py`、`sample.py`、`pool.py`、`spool.py`），
 - **sync**：从发出 `didChange` 到紧随其后的未知请求返回 MethodNotFound。服务端在回复前必须
   把待做的分析做完，所以 sync **不含防抖**，含整个工作区收敛（L-ws）。
 - **edit**：从发出 `didChange` 到被编辑文件的 `publishDiagnostics` 到达（L-edit）。
-  今天服务端在工作区收敛之后一次性发布所有 URI（`lsp/server.dawn` 的 `install_workspace`
-  → `publish_uris`），所以 edit 只比 sync 早几毫秒。口径照样分开量：哪天做了「先发被编辑
-  文件」（调研的丙 1），这一列自己就会变，脚本不用改。
+  2026-10-20 起服务端在被编辑模块分析完时就发布它（`docs/audit/lsp-robustness-design.md`
+  §2.2.6），此前是收敛后一次发完、edit 只比 sync 早几毫秒；脚本口径没变，这一列自己变了。
 - **场景**（与复测报告相同，另加 (d)）：
   - (a) `driver/analyze` 的 `seg_ok` 体首插一行 `let`，体内编辑；
   - (b) `check/types` 的 `eff_suffix` 参数表末尾加、删 `l1_probe: Int = 0`，签名改动；

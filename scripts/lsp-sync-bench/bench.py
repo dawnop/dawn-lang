@@ -20,10 +20,10 @@ Choices that are not obvious:
   Each didChange is followed by an unknown request; the server must finish the
   pending analysis before answering MethodNotFound, so `sync` excludes the
   debounce window and includes workspace convergence (L-ws). `edit` is when
-  the edited file's publishDiagnostics arrives (L-edit). Today the server
-  publishes every URI after the workspace converges, so the two are nearly
-  equal; they are kept apart so the column moves by itself when the edited
-  file is published first.
+  the edited file's publishDiagnostics arrives (L-edit). Until 2026-10-20 the
+  server published every URI after the workspace converged and the two were
+  nearly equal; it now publishes an open document when its module is analysed
+  (docs/audit/lsp-robustness-design.md §2.2.6), and the column moved by itself.
 - It has its own twenty-line LSP client instead of importing the workspace
   contract's: it needs the arrival time of every frame, and a measurement
   should not change because a contract harness changed.
