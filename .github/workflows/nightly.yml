@@ -758,6 +758,14 @@ jobs:
   # Red opens one issue per title; its verdict line is the set of finding
   # signatures, so a night that finds the same defects again is not a new
   # comment. The single-case programs go up as an artifact.
+  # A red run then reduces its findings (scripts/fuzz3/reduce.py, 7.3 cut 2)
+  # in what the 30 minutes leave: --minutes 6 is checked before each round,
+  # so the last round ends within about one round's cost past it, and the
+  # step's own 8 minutes stop a runaway. Worst case 40 s of toolchain, 19
+  # minutes of fuzzing with its in-flight batches, 8 of reducing: 28. The
+  # reduced programs and their corpus drafts go into the same artifact, and
+  # their table into the issue; the verdict stays the fuzzing's, so a night
+  # that reduces further is not a new comment either.
   fuzz3:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -777,6 +785,12 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # the reducer's tree, edits and stand-in predicates, constant ones
+      # included, which must reduce everything and nothing; a second, no
+      # compiler, so it runs on green nights too
+      - name: the reducer's self-test
+        run: python3 scripts/fuzz3/reduce.py --self-test
+
       - name: generated programs, JVM against native against comptime
         id: fuzz
         shell: bash
@@ -786,6 +800,17 @@ jobs:
             > fuzz3.txt 2>&1 || status=$?
           cat fuzz3.txt
           exit "${status:-0}"
+
+      # Never red by itself: the differential already is, and a reduction
+      # that fails leaves the unreduced programs, which is what there was.
+      - name: reduce the findings
+        if: failure() && steps.fuzz.outcome == 'failure'
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          python3 scripts/fuzz3/reduce.py --findings fuzz3-out --minutes 6 --jobs 4 \
+            > fuzz3-reduce.txt 2>&1 || echo "reduce.py exited $?" >> fuzz3-reduce.txt
+          cat fuzz3-reduce.txt
 
       - name: keep the failing programs
         if: failure() && steps.fuzz.outcome == 'failure'
@@ -814,5 +839,10 @@ jobs:
             echo
             cat fuzz3-out/report.md 2>/dev/null || tail -40 fuzz3.txt 2>/dev/null ||
               echo "(no output was captured)"
+            echo
+            echo "Reduced (scripts/fuzz3/reduce.py; the artifact holds reduced.dawn and the"
+            echo "spike-native drafts under reduced/):"
+            echo
+            cat fuzz3-out/reduced/summary.md 2>/dev/null || echo "(the reduction did not run to the end)"
           } > issue.md
           scripts/nightly-issue.sh "nightly: fuzz3 three-way differential is red" issue.md
