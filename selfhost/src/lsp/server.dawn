@@ -8,6 +8,9 @@
 # (LSP-04, docs/audit/lsp-robustness-design.md §2.2), and it reads every frame
 # already waiting before it acts on one, so no request makes it analyse a text
 # that a sync behind that request replaces (#790, the same document §六 step 3).
+# An edit publishes each open document the moment its module is analysed, not
+# after the whole workspace (§2.2.6): the edited file is never kept waiting on
+# its importers.
 
 use std/char
 use std/io
@@ -2047,15 +2050,82 @@ fn conflict_diagnostics(
 ## refresh's setup diagnostic over it: the snapshot's own map is recomputed on
 ## every rebuild, and the failure has to outlive edits until a refresh clears it.
 fn rebuild_workspace(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io = {
-  let ws = rebuild_snapshot(st, ws0)
+  let (ws, _) = rebuild_workspace_early(st, ws0, None)
+  ws
+}
+
+## `rebuild_workspace`, and when `key` names the slot `ws0` is filed under,
+## each open document's diagnostics published the moment its module is
+## placed rather than after the whole workspace converges
+## (docs/audit/lsp-robustness-design.md §2.2.6). Also returns what was sent,
+## by URI, for `install_workspace` to leave alone what it would only repeat.
+fn rebuild_workspace_early(
+  st: LspState,
+  ws0: Workspace,
+  key: Option[String]
+) -> (Workspace, Map[String, String]) !Fs !Env !io = {
+  let (ws, sent) = rebuild_snapshot(st, ws0, key)
   match ws.refresh_problem {
-    Some(problem) -> Workspace {
+    Some(problem) -> (Workspace {
       ..ws,
       diag_by_uri: merge_diagnostics(ws.diag_by_uri,
         diagnostics_of_problem(st, ws.path_by_uri, problem))
-    }
-    None -> ws
+    }, sent)
+    None -> (ws, sent)
   }
+}
+
+## Publish the open documents of module `mod_path` from `part`, the program
+## as far as that module (`incremental.analyze_placing`). Each list is built
+## the way the finished snapshot builds it: the document's own diagnostics,
+## then the workspace walk's and the failed refresh's for its file, all
+## through `add_loc_diags`, and every other root's contribution joined in key
+## order by `diagnostics_for_uri` over a state holding this provisional slot.
+## Only the load and this module's step can name this file, and the position
+## view of this module and the ones before it is final once it is placed, so
+## each list is the one the snapshot will give the document.
+fn publish_placed(
+  st: LspState,
+  ws0: Workspace,
+  key: Option[String],
+  entry_by_uri: Map[String, String],
+  walk: List[LocDiag],
+  sent0: Map[String, String],
+  mod_path: String,
+  part: Program
+) -> Map[String, String] !Fs !Env !io = {
+  let slot_key = match key {
+    Some(k) -> k
+    None -> return sent0
+  }
+  var sent = sent0
+  var uris: List[String] = []
+  var paths: Set[String] = set.empty()
+  for uri in sort(map.keys(entry_by_uri)) {
+    if map.get(entry_by_uri, uri) == Some(mod_path) {
+      uris = uris ++ [uri]
+      paths = set.insert(paths, map.get(ws0.path_by_uri, uri).expect("workspace path"))
+    }
+  }
+  var lds: List[LocDiag] = []
+  for ld in rendered_diags(part) ++ walk {
+    if set.has(paths, canon_identity(ld.path)) { lds = lds ++ [ld] }
+  }
+  match ws0.refresh_problem {
+    Some(problem) -> if set.has(paths, canon_identity(problem.path)) { lds = lds ++ [problem] }
+    None -> ()
+  }
+  let own = add_loc_diags(st, ws0.path_by_uri, map.empty(), lds)
+  let tmp = LspState {
+    ..st,
+    workspaces: map.insert(st.workspaces, slot_key, Ready(Workspace { ..ws0, diag_by_uri: own }))
+  }
+  for uri in uris {
+    let ds = diagnostics_for_uri(tmp, uri)
+    publish_one(tmp, uri, ds)
+    sent = map.insert(sent, uri, render(JArr(ds)))
+  }
+  sent
 }
 
 fn merge_diagnostics(
@@ -2073,13 +2143,18 @@ fn merge_diagnostics(
 
 ## Conflict detection happens before the overlay map can overwrite either live
 ## text, and discards the old program.
-fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
+fn rebuild_snapshot(
+  st: LspState,
+  ws0: Workspace,
+  key: Option[String]
+) -> (Workspace, Map[String, String]) !Fs !Env !io = {
+  let none_sent: Map[String, String] = map.empty()
   match workspace_inputs(st, ws0.plan, ws0.path_by_uri) {
     InputsConflict(paths) -> {
       let no_entries: Map[String, String] = map.empty()
       let no_prog: Option[Program] = None
       let no_world: Option[RefsWorld] = None
-      Workspace {
+      (Workspace {
         ..ws0,
         prog: no_prog,
         cache: incremental.evict(ws0.cache),
@@ -2087,14 +2162,23 @@ fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
         entry_by_uri: no_entries,
         diag_by_uri: conflict_diagnostics(st, ws0.path_by_uri, paths),
         world: no_world
-      }
+      }, none_sent)
     }
     InputsReady(overlay, entries, entry_by_uri) -> {
       let reusing = load_entries_reusing(ws0.plan, entries, overlay, ws0.parses)
       let loaded = reusing.loaded
-      let update = incremental.analyze(ws0.cache, loaded)
+      # one call either way, so that what the session reuses is the same
+      # whether or not anything is published early
+      let no_walk: List[LocDiag] = []
+      let (watch, walk) = match key {
+        Some(_) -> (set.from(map.values(entry_by_uri)), workspace_walk_diags(ws0.plan))
+        None -> (set.empty(), no_walk)
+      }
+      let placed = incremental.analyze_placing(ws0.cache, loaded, watch, none_sent,
+        (sent0, mod_path, part) => publish_placed(st, ws0, key, entry_by_uri, walk, sent0, mod_path, part))
+      let (update, sent) = placed
       let prog = update.program
-      Workspace {
+      (Workspace {
         ..ws0,
         prog: Some(prog),
         cache: update.session,
@@ -2108,9 +2192,10 @@ fn rebuild_snapshot(st: LspState, ws0: Workspace) -> Workspace !Fs !Env !io =
           Some(w) -> Some(RefsWorld { ..w, current: false })
           None -> None
         }
-      }
+      }, sent)
     }
   }
+}
 
 fn unavailable_workspace(
   st: LspState,
@@ -2221,17 +2306,19 @@ fn diagnostics_for_uri(st: LspState, uri: String) -> List[Json] !Fs !Env = {
 }
 
 fn publish_uris(st: LspState, uris: Set[String]) -> Unit !Fs !Env !io = {
-  for uri in sort(set.to_list(uris)) {
-    var fields: List[(String, Json)] = [
-      ("uri", JStr(uri)),
-      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
-    ]
-    match map.get(st.docs, uri) {
-      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
-      None -> ()
-    }
-    notify("textDocument/publishDiagnostics", jobj(fields))
+  for uri in sort(set.to_list(uris)) { publish_one(st, uri, diagnostics_for_uri(st, uri)) }
+}
+
+fn publish_one(st: LspState, uri: String, diagnostics: List[Json]) -> Unit !io = {
+  var fields: List[(String, Json)] = [
+    ("uri", JStr(uri)),
+    ("diagnostics", JArr(diagnostics))
+  ]
+  match map.get(st.docs, uri) {
+    Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+    None -> ()
   }
+  notify("textDocument/publishDiagnostics", jobj(fields))
 }
 
 fn install_workspace(
@@ -2240,12 +2327,31 @@ fn install_workspace(
   slot: WorkspaceSlot,
   affected0: Set[String]
 ) -> LspState !Fs !Env !io = {
+  let none_sent: Map[String, String] = map.empty()
+  install_workspace_after(st0, identity, slot, affected0, none_sent)
+}
+
+## `install_workspace` after `rebuild_workspace_early` already published some
+## documents: a URI whose final diagnostics are the ones `sent` records is not
+## sent them a second time. By §2.2.6 that is every URI in `sent`; one whose
+## list came out otherwise is published again, so the client always ends on
+## the snapshot's own diagnostics.
+fn install_workspace_after(
+  st0: LspState,
+  identity: WorkspaceIdentity,
+  slot: WorkspaceSlot,
+  affected0: Set[String],
+  sent: Map[String, String]
+) -> LspState !Fs !Env !io = {
   var affected = add_uris(affected0, set.to_list(slot_uris(slot)))
   let st = LspState {
     ..st0,
     workspaces: map.insert(st0.workspaces, identity.lookup_key, slot)
   }
-  publish_uris(st, affected)
+  for uri in sort(set.to_list(affected)) {
+    let ds = diagnostics_for_uri(st, uri)
+    if map.get(sent, uri) != Some(render(JArr(ds))) { publish_one(st, uri, ds) }
+  }
   st
 }
 
@@ -2337,12 +2443,17 @@ fn open_new_doc(st0: LspState, uri: String, text: String, version: Int) -> LspSt
             }
           }
           paths = map.insert(paths, uri, canonical_path)
-          let slot = match old {
-            Some(Ready(ws)) -> Ready(rebuild_workspace(st, Workspace { ..ws, path_by_uri: paths }))
-            Some(Unavailable(_)) -> activate_workspace(st, captured, paths)
-            None -> activate_workspace(st, captured, paths)
+          let none_sent: Map[String, String] = map.empty()
+          let (slot, sent) = match old {
+            Some(Ready(ws)) -> {
+              let (next, early) = rebuild_workspace_early(st, Workspace { ..ws, path_by_uri: paths },
+                Some(identity.lookup_key))
+              (Ready(next), early)
+            }
+            Some(Unavailable(_)) -> (activate_workspace(st, captured, paths), none_sent)
+            None -> (activate_workspace(st, captured, paths), none_sent)
           }
-          install_workspace(st, identity, slot, affected)
+          install_workspace_after(st, identity, slot, affected, sent)
         }
       }
     }
@@ -2381,12 +2492,16 @@ fn update_existing_doc(st0: LspState, old: Doc, text: String, version: Int) -> L
       var st = LspState { ..st0, docs: map.insert(st0.docs, old.uri, d) }
       let before = map.get(st.workspaces, identity.lookup_key).expect("workspace member identity")
       let affected = slot_uris(before)
-      let slot = match before {
-        Ready(ws) -> Ready(rebuild_workspace(st, ws))
-        Unavailable(ws) -> Unavailable(unavailable_workspace(
-          st, ws.plan, ws.path_by_uri, ws.problem))
+      let none_sent: Map[String, String] = map.empty()
+      let (slot, sent) = match before {
+        Ready(ws) -> {
+          let (next, early) = rebuild_workspace_early(st, ws, Some(identity.lookup_key))
+          (Ready(next), early)
+        }
+        Unavailable(ws) -> (Unavailable(unavailable_workspace(
+          st, ws.plan, ws.path_by_uri, ws.problem)), none_sent)
       }
-      install_workspace(st, identity, slot, affected)
+      install_workspace_after(st, identity, slot, affected, sent)
     }
   }
 

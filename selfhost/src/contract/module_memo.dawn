@@ -33,6 +33,7 @@ use check/jsig.{jsig_refused}
 use ir/interp.{ct_default}
 use ir/core.{CValue, VInt}
 use front/parser
+use front/token.{mk_diag}
 use check/identity
 use front/lexer
 use jvm/jreflect.{jsig_real}
@@ -787,5 +788,84 @@ test "module memo checks the importer of a declaration a parse failure dropped a
     let fixed = incremental.analyze(result.session, loaded)
     assert len(fixed.program.diags) == 0
     assert agrees_with_cold(fixed.program, loaded, std)
+  }))
+}
+
+## The rendered diagnostics of `prog` for one module's file, in its order.
+fn own_diags(prog: Program, path: String) -> List[LocDiag] = {
+  var out: List[LocDiag] = []
+  for ld in rendered_diags(prog) {
+    if ld.path == path { out = out ++ [ld] }
+  }
+  out
+}
+
+fn told_row(
+  rows: List[(String, List[LocDiag])],
+  mod_path: String,
+  part: Program
+) -> List[(String, List[LocDiag])] = rows ++ [(mod_path, own_diags(part, mod_path ++ ".dawn"))]
+
+## Analyze `input` telling about `watch`, and whether each module was told
+## about once, in load order, with exactly the diagnostics the finished
+## program renders for its file: what the language server publishes early is
+## what it would publish after the last module (docs/audit/lsp-robustness-design.md
+## §2.2.6).
+fn placed_agree(
+  session: incremental.Session,
+  input: LoadResult,
+  watch: Set[String]
+) -> (incremental.Update, Bool) !Fs !Env !io = {
+  let no_rows: List[(String, List[LocDiag])] = []
+  let (update, rows) = incremental.analyze_placing(session, input, watch, no_rows,
+    (r, m, part) => told_row(r, m, part))
+  var told: List[String] = []
+  var ok = true
+  for row in rows {
+    let (m, ds) = row
+    told = told ++ [m]
+    if ds != own_diags(update.program, m ++ ".dawn") { ok = false }
+  }
+  var want: List[String] = []
+  for lm in input.modules {
+    if set.has(watch, lm.mod_path) { want = want ++ [lm.mod_path] }
+  }
+  (update, ok && told == want)
+}
+
+test "module memo shows a watched module's diagnostics as final once its step is placed" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = std_ctx()
+    let lib_text = "pub fn ok() -> Int = 1\n\npub fn bad() -> Int = false\n"
+    let lib = source("lib", lib_text)
+    let mid = source("mid", "use lib\npub fn two() -> Int = lib.ok() + lib.ok(1)\n")
+    let app = source("app", "use mid\npub fn worse() -> Bool = mid.two()\n")
+    # the load's own diagnostics name a watched file and one no module has
+    let load = [
+      LocDiag { path: "mid.dawn", d: mk_diag("from the load", 0, 3, "") },
+      LocDiag { path: "other.dawn", d: mk_diag("elsewhere", 0, 1, "") }
+    ]
+    let watch = set.from(["lib", "mid", "app"])
+    let loaded = LoadResult { modules: [lib, mid, app], diags: load }
+    let (first, first_ok) = placed_agree(incremental.new(std, ct_default(), jsig_refused(), 10), loaded, watch)
+    assert first_ok
+    assert len(own_diags(first.program, "mid.dawn")) == 2
+    assert agrees_with_cold(first.program, loaded, std)
+    # lib's declarations move and its signature changes: lib and mid run
+    # again, and their views shift under the diagnostics of every module
+    let moved = source("lib", "# moved\n\n" ++ lib_text ++ "pub fn more() -> Int = 2\n")
+    let edits = [
+      LoadResult { modules: [moved, mid, app], diags: load },
+      LoadResult { modules: [lib, mid, app], diags: [] },
+      LoadResult { modules: [lib, mid, app], diags: load }
+    ]
+    for input in edits {
+      let (result, ok) = placed_agree(first.session, input, watch)
+      assert ok
+      assert agrees_with_cold(result.program, input, std)
+      # a module outside the watch is not told about
+      let (_, partial_ok) = placed_agree(first.session, input, set.from(["mid"]))
+      assert partial_ok
+    }
   }))
 }

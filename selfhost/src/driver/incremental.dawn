@@ -407,6 +407,26 @@ fn kept(
 }
 
 pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io = {
+  let (update, _) = analyze_placing(owner, loaded, set.empty(), (), (s, mod_path, part) => s)
+  update
+}
+
+## `analyze`, telling `placed` about each module of `watch` (by the loader's
+## module path) the moment its step is in the carry, reused or checked again.
+## The language server publishes an open document's diagnostics there rather
+## than after the last module (docs/audit/lsp-robustness-design.md §2.2.6).
+##
+## The program `placed` sees holds the modules up to this one and the position
+## view up to this one, both as the finished program will hold them: a later
+## module only adds its own entries. Its diagnostics are the load's and this
+## step's alone. Every other step's diagnostics name another module's file, so
+## for this module's file these are exactly the finished program's, in its order;
+## the rest would only be filtered out again.
+pub(pkg) fn analyze_placing[S](
+  owner: Session, loaded: LoadResult, watch: Set[String], s0: S,
+  placed: fn(S, String, Program) -> S !Fs !Env !io
+) -> (Update, S) !Fs !Env !io = {
+  var told = s0
   let session: State = owner
   var carry = session.baseline
   # Which of the previous analysis's tables the current impl and intern
@@ -554,8 +574,12 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
       retained = retained + 1
     }
     pred = Some(raw.mod_path)
+    if set.has(watch, raw.mod_path) {
+      told = placed(told, raw.mod_path, Program { modules: modules, diags: loaded.diags ++ step.diags,
+        decl_spans: carry.decl_spans, ct_world: carry.ct_world })
+    }
   }
-  Update {
+  let update = Update {
     session: State { ..session, memo: memo },
     program: Program { modules: modules, diags: diags, decl_spans: carry.decl_spans,
       ct_world: carry.ct_world },
@@ -565,4 +589,5 @@ pub(pkg) fn analyze(owner: Session, loaded: LoadResult) -> Update !Fs !Env !io =
     },
     reused: reused_paths
   }
+  (update, told)
 }

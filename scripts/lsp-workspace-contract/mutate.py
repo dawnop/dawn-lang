@@ -91,12 +91,16 @@ def mutate(name, server, main, analyze, plan_source):
         )
     elif name == "only-current-diagnostics":
         old = """      let affected = slot_uris(before)
-      let slot = match before {
-        Ready(ws) -> Ready(rebuild_workspace(st, ws))
-        Unavailable(ws) -> Unavailable(unavailable_workspace(
-          st, ws.plan, ws.path_by_uri, ws.problem))
+      let none_sent: Map[String, String] = map.empty()
+      let (slot, sent) = match before {
+        Ready(ws) -> {
+          let (next, early) = rebuild_workspace_early(st, ws, Some(identity.lookup_key))
+          (Ready(next), early)
+        }
+        Unavailable(ws) -> (Unavailable(unavailable_workspace(
+          st, ws.plan, ws.path_by_uri, ws.problem)), none_sent)
       }
-      install_workspace(st, identity, slot, affected)"""
+      install_workspace_after(st, identity, slot, affected, sent)"""
         new = """      let slot = match before {
         Ready(ws) -> Ready(rebuild_workspace(st, ws))
         Unavailable(ws) -> Unavailable(unavailable_workspace(
@@ -110,10 +114,19 @@ def mutate(name, server, main, analyze, plan_source):
       next"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "skip-empty-diagnostics":
-        old = """  for uri in sort(set.to_list(uris)) {
+        old = """  var fields: List[(String, Json)] = [
+    ("uri", JStr(uri)),
+    ("diagnostics", JArr(diagnostics))
+  ]
+  match map.get(st.docs, uri) {
+    Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+    None -> ()
+  }
+  notify("textDocument/publishDiagnostics", jobj(fields))"""
+        new = """  if len(diagnostics) > 0 {
     var fields: List[(String, Json)] = [
       ("uri", JStr(uri)),
-      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
+      ("diagnostics", JArr(diagnostics))
     ]
     match map.get(st.docs, uri) {
       Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
@@ -121,45 +134,31 @@ def mutate(name, server, main, analyze, plan_source):
     }
     notify("textDocument/publishDiagnostics", jobj(fields))
   }"""
-        new = """  for uri in sort(set.to_list(uris)) {
-    let values = diagnostics_for_uri(st, uri)
-    if len(values) > 0 {
-      var fields: List[(String, Json)] = [
-        ("uri", JStr(uri)),
-        ("diagnostics", JArr(values))
-      ]
-      match map.get(st.docs, uri) {
-        Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
-        None -> ()
-      }
-      notify("textDocument/publishDiagnostics", jobj(fields))
-    }
-  }"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "drop-diagnostics-version":
-        old = """    var fields: List[(String, Json)] = [
-      ("uri", JStr(uri)),
-      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
-    ]
-    match map.get(st.docs, uri) {
-      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
-      None -> ()
-    }
-    notify("textDocument/publishDiagnostics", jobj(fields))"""
-        new = """    notify("textDocument/publishDiagnostics", jobj([
-      ("uri", JStr(uri)),
-      ("diagnostics", JArr(diagnostics_for_uri(st, uri)))
-    ]))"""
+        old = """  var fields: List[(String, Json)] = [
+    ("uri", JStr(uri)),
+    ("diagnostics", JArr(diagnostics))
+  ]
+  match map.get(st.docs, uri) {
+    Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+    None -> ()
+  }
+  notify("textDocument/publishDiagnostics", jobj(fields))"""
+        new = """  notify("textDocument/publishDiagnostics", jobj([
+    ("uri", JStr(uri)),
+    ("diagnostics", JArr(diagnostics))
+  ]))"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "unopened-version-zero":
-        old = """    match map.get(st.docs, uri) {
-      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
-      None -> ()
-    }"""
-        new = """    match map.get(st.docs, uri) {
-      Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
-      None -> { fields = fields ++ [("version", JInt(0))] }
-    }"""
+        old = """  match map.get(st.docs, uri) {
+    Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+    None -> ()
+  }"""
+        new = """  match map.get(st.docs, uri) {
+    Some(d) -> { fields = fields ++ [("version", JInt(d.version))] }
+    None -> { fields = fields ++ [("version", JInt(0))] }
+  }"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "wrong-source-view":
         old = """        Some(d) -> {
@@ -294,19 +293,25 @@ def mutate(name, server, main, analyze, plan_source):
         new = """fn close_lease(lease: JsigLease) -> Unit !io = lease.close()"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "retry-unavailable-on-change":
-        old = """      let slot = match before {
-        Ready(ws) -> Ready(rebuild_workspace(st, ws))
-        Unavailable(ws) -> Unavailable(unavailable_workspace(
-          st, ws.plan, ws.path_by_uri, ws.problem))
+        old = """      let (slot, sent) = match before {
+        Ready(ws) -> {
+          let (next, early) = rebuild_workspace_early(st, ws, Some(identity.lookup_key))
+          (Ready(next), early)
+        }
+        Unavailable(ws) -> (Unavailable(unavailable_workspace(
+          st, ws.plan, ws.path_by_uri, ws.problem)), none_sent)
       }"""
         # `activate_workspace` closes a lease on failure, and that diagnostic is
         # `!Console`; this row is not. The mutation answers the effect where it
         # injects the call, so it stays one function wide.
         new = """      let snapshot = st
-      let slot = match before {
-        Ready(ws) -> Ready(rebuild_workspace(st, ws))
-        Unavailable(ws) -> io.with_console_real(() =>
-          activate_workspace(snapshot, ws.plan, ws.path_by_uri))
+      let (slot, sent) = match before {
+        Ready(ws) -> {
+          let (next, early) = rebuild_workspace_early(st, ws, Some(identity.lookup_key))
+          (Ready(next), early)
+        }
+        Unavailable(ws) -> (io.with_console_real(() =>
+          activate_workspace(snapshot, ws.plan, ws.path_by_uri)), none_sent)
       }"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "refresh-skips-replan":
