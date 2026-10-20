@@ -61,13 +61,13 @@ MUTATIONS = {
     ),),
     "shutdown-flushes": ((
         SERVER,
-        """            LgBeginShutdown -> {
-              pending = None
-              st = LspState { ..st, lifecycle: Shutdown }""",
-        """            LgBeginShutdown -> {
-              st = flush(st, pending)
-              pending = None
-              st = LspState { ..st, lifecycle: Shutdown }""",
+        """                LgBeginShutdown -> {
+                  pending = None
+                  st = LspState { ..st, lifecycle: Shutdown }""",
+        """                LgBeginShutdown -> {
+                  st = flush(st, pending)
+                  pending = None
+                  st = LspState { ..st, lifecycle: Shutdown }""",
     ),),
     "repeat-initialize": ((
         SERVER,

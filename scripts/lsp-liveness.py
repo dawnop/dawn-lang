@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Five assertions about the language server's *scheduling*, which every other
+"""Eight assertions about the language server's *scheduling*, which every other
 LSP gate is blind to.
 
 scripts/selfhost-lsp-diff.sh compares output bytes; a server that answers
@@ -15,6 +15,12 @@ undebounced numbers as the baseline the change had to hold.
   idle      over the silent window, the server's CPU time stays near zero.
   debounce  a burst of edits is analysed fewer times than it has edits.
   freshness the one analysis it does run is of the *newest* text.
+  cancel    a request the client cancelled while it still waited in the queue
+            is answered RequestCancelled, and does not get its text analysed.
+  coalesce  two edits with a code action after each are analysed once, as the
+            newer text; code actions read the text, not the analysis.
+  order     an edit, a hover, an edit: the hover answers the text it was asked
+            about, so both texts are analysed, in order.
 
 They are reported separately and on purpose, because each is red for its own
 reason and none of them covers another. `liveness` is load-bearing rather than
@@ -24,11 +30,20 @@ split the same way -- a loop that coalesced by keeping the *first* pending edit
 instead of the last would pass `debounce` and publish stale diagnostics
 forever.
 
+The last three are about the queue rather than time (#790,
+docs/audit/lsp-robustness-design.md §六 step 3): each writes its frames in one
+burst, so all of them are waiting when the server reads the first, and they
+split the same way. `cancel` and `coalesce` are red on a loop that analyses
+before every request it reads; `order` is the guard on the other side, red on a
+loop that lets a request jump the edit queued behind it, which would answer a
+hover or a rename against a text it was not asked about.
+
 Usage:  scripts/lsp-liveness.py [server command...]      (default ./bin/dawn lsp)
 
 Linux only: the idle assertion reads utime+stime from /proc/<pid>/stat, and
 there is no portable substitute. CI runs ubuntu-latest.
 """
+import json
 import os
 import subprocess
 import sys
@@ -404,6 +419,149 @@ def exp_debounce(cmd, results):
         srv.kill()
 
 
+# ---- the queue experiments (#790) ------------------------------------------
+#
+# How long to let a burst be answered: one or two analyses of a one-line file
+# and the replies, ~0.2s measured; the wait ends as soon as stdout has been
+# still for STDOUT_QUIET_S.
+BURST_SETTLE_S = 30.0
+
+# v1 of the `order` text has a function only it declares, and the hover asks
+# about it; v2 does not have it, so the hover's answer says which text it read.
+ORDER_V1 = "pub fn only_in_one() -> Int = 1\\npub fn main() -> Unit = zzz_1()\\n"
+
+
+def request(rid, method, params):
+    return frame('{"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}'
+                 % (rid, method, params))
+
+
+def text_document():
+    return '{"textDocument":{"uri":"%s"}' % DOC_URI
+
+
+def messages(data):
+    """The JSON messages in a stretch of server stdout, in order."""
+    out = []
+    while True:
+        head = data.find(b"\r\n\r\n")
+        if head < 0:
+            return out
+        length = None
+        for line in data[:head].split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":", 1)[1])
+        body = data[head + 4:head + 4 + (length or 0)]
+        if length is None or len(body) < length:
+            return out
+        out.append(json.loads(body))
+        data = data[head + 4 + length:]
+
+
+def publishes(msgs):
+    return [m["params"] for m in msgs
+            if m.get("method") == "textDocument/publishDiagnostics"]
+
+
+def reply(msgs, rid):
+    for m in msgs:
+        if m.get("id") == rid and "method" not in m:
+            return m
+    return None
+
+
+def burst(cmd, names, results, payload):
+    """Start a server, let it publish the opened document once and go quiet,
+    then write `payload` in one go. Returns the messages that answered it, or
+    None after recording every name in `names` as failed."""
+    srv = Server(cmd)
+    try:
+        srv.send(HANDSHAKE)
+        if srv.await_output(b"publishDiagnostics", STARTUP_LIMIT_S) is None or \
+                not srv.await_quiet(STDOUT_QUIET_S, STARTUP_LIMIT_S):
+            for name in names:
+                results.append((name, False, "the server never published the "
+                                "opened document and went quiet",
+                                head_of_stdout(srv)))
+            return None
+        before = len(srv.stdout_bytes())
+        srv.send(payload)
+        srv.await_output(b"publishDiagnostics", BURST_SETTLE_S)
+        srv.await_quiet(STDOUT_QUIET_S, BURST_SETTLE_S)
+        return messages(srv.stdout_bytes()[before:])
+    finally:
+        srv.kill()
+
+
+def versions(msgs):
+    return [p.get("version") for p in publishes(msgs)]
+
+
+def exp_cancel(cmd, results):
+    """didChange v1, semanticTokens K, $/cancelRequest K, didChange v2.
+
+    VS Code's order: it cancels a request the moment the content changes and
+    sends the change itself up to 250 ms later. A loop that analyses before
+    every request it reads analyses v1 for K, which nobody wants any more."""
+    rid = 101
+    msgs = burst(cmd, ["cancel"], results,
+                 did_change(1, edit_text(1))
+                 + request(rid, "textDocument/semanticTokens/full", text_document() + "}")
+                 + frame('{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":%d}}' % rid)
+                 + did_change(2, edit_text(2)))
+    if msgs is None:
+        return
+    got = reply(msgs, rid)
+    code = (got or {}).get("error", {}).get("code")
+    vs = versions(msgs)
+    ok = code == -32800 and vs == [2]
+    results.append(("cancel", ok,
+                    "the cancelled request got %s; versions published after "
+                    "the burst: %s (want error -32800 and [2])"
+                    % ("no reply" if got is None else
+                       "error %s" % code if code is not None else "a result", vs),
+                    None if ok else "        stdout: " + json.dumps(msgs)[:400]))
+
+
+def exp_coalesce(cmd, results):
+    """didChange v1, codeAction, didChange v2, codeAction: one analysis, of v2."""
+    action = ('{"textDocument":{"uri":"%s"},"range":{"start":{"line":0,"character":0},'
+              '"end":{"line":0,"character":0}},"context":{"diagnostics":[]}}' % DOC_URI)
+    msgs = burst(cmd, ["coalesce"], results,
+                 did_change(1, edit_text(1)) + request(201, "textDocument/codeAction", action)
+                 + did_change(2, edit_text(2)) + request(202, "textDocument/codeAction", action))
+    if msgs is None:
+        return
+    answered = [rid for rid in (201, 202) if "result" in (reply(msgs, rid) or {})]
+    pubs = publishes(msgs)
+    named = json.dumps(pubs[-1]) if pubs else ""
+    ok = answered == [201, 202] and len(pubs) == 1 and "zzz_2" in named
+    results.append(("coalesce", ok,
+                    "code actions answered: %s; %d analyses for 2 edits, the "
+                    "last naming %s (want both, 1, zzz_2)"
+                    % (answered, len(pubs),
+                       "zzz_2" if "zzz_2" in named else "zzz_1" if "zzz_1" in named else "neither"),
+                    None if ok else "        stdout: " + json.dumps(msgs)[:400]))
+
+
+def exp_order(cmd, results):
+    """didChange v1, hover on a name only v1 has, didChange v2."""
+    hover = text_document() + ',"position":{"line":0,"character":8}}'
+    msgs = burst(cmd, ["order"], results,
+                 did_change(1, ORDER_V1) + request(301, "textDocument/hover", hover)
+                 + did_change(2, edit_text(2)))
+    if msgs is None:
+        return
+    got = json.dumps((reply(msgs, 301) or {}).get("result"))
+    vs = versions(msgs)
+    ok = "only_in_one" in got and vs == [1, 2]
+    results.append(("order", ok,
+                    "the hover %s `only_in_one`; versions published: %s "
+                    "(want it named and [1, 2])"
+                    % ("names" if "only_in_one" in got else "does not name", vs),
+                    None if ok else "        stdout: " + json.dumps(msgs)[:400]))
+
+
 def main():
     if not os.path.exists("/proc/self/stat"):
         print("lsp-liveness: needs /proc (Linux); the idle assertion has no "
@@ -419,6 +577,9 @@ def main():
     exp_hangup(cmd, results)
     exp_idle(cmd, results)
     exp_debounce(cmd, results)
+    exp_cancel(cmd, results)
+    exp_coalesce(cmd, results)
+    exp_order(cmd, results)
     for name, ok, why, detail in results:
         print("%-9s %s -- %s" % (name + ":", "PASS" if ok else "FAIL", why))
         if detail:
@@ -427,7 +588,8 @@ def main():
     if bad:
         print("lsp-liveness: FAILED (%s)" % ", ".join(bad))
         return 1
-    print("lsp-liveness: OK (hangup, liveness, idle, debounce, freshness)")
+    print("lsp-liveness: OK (hangup, liveness, idle, debounce, freshness, "
+          "cancel, coalesce, order)")
     return 0
 
 

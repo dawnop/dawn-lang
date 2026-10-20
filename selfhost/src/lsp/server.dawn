@@ -5,7 +5,9 @@
 # share one root-scoped program, full live overlay and target Java lease;
 # standalone buffers keep private programs behind the same query seam. The read
 # loop debounces document syncs, so a burst of keystrokes is analysed once
-# (LSP-04, docs/audit/lsp-robustness-design.md §2.2).
+# (LSP-04, docs/audit/lsp-robustness-design.md §2.2), and it reads every frame
+# already waiting before it acts on one, so no request makes it analyse a text
+# that a sync behind that request replaces (#790, the same document §六 step 3).
 
 use std/char
 use std/io
@@ -948,75 +950,147 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
       None -> true
     }
     if take {
-      match read_message() {
-        Eof -> { serving = false }
-        Message(msg) -> {
-          let gate = lifecycle_gate(st.lifecycle, msg)
-          match gate {
-            LgActivate -> {
-              st = LspState { ..st, lifecycle: Running }
-              st = handle(st, msg)
-            }
-            LgDispatch ->
-              match update_of(msg) {
-                Some(u) -> {
-                  let (uri, text, version) = u
-                  match pending {
-                    Some(p0) -> {
-                      let (uri0, _, _) = p0
-                      if uri0 != uri { st = flush(st, pending) }
-                    }
-                    None -> ()
-                  }
-                  pending = Some((uri, text, version))
-                }
-                # Anything else may read the analysed program or write about it,
-                # so the deferred work has to have happened first. That is also
-                # why the deferral is not observable: every answer about a
-                # document passes this point.
-                None -> {
-                  st = flush(st, pending)
-                  pending = None
+      # Every frame that has already arrived is read before the first one is
+      # acted on, and again before each next one. The order of the messages
+      # does not change; what changes is that a request is handled knowing
+      # what waits behind it, so it never makes the server analyse a text a
+      # sync already in the queue replaces (#790). Nothing is read past an end
+      # of input or a framing failure: bytes after either are still never
+      # interpreted, and the frames before them are handled first.
+      var inbox: List[Frame] = [read_message()]
+      var at = 0
+      var reading = frame_continues(inbox[0])
+      # The ids (`request_key`) of requests still in `inbox` that a
+      # `$/cancelRequest` behind them names.
+      var cancelled: List[String] = []
+      # Whether the message just handled was a request answered without
+      # analysing what is pending.
+      var answered_unflushed = false
+      var working = true
+      while serving && working {
+        while reading && io.stdin_ready(0) {
+          let next = read_message()
+          cancelled = cancelled ++ cancel_target(inbox, at, next)
+          inbox = inbox ++ [next]
+          reading = frame_continues(next)
+        }
+        if at >= len(inbox) {
+          working = false
+          # A client that sends a request right after a sync has finished its
+          # burst: VS Code's language client holds a change for 250 ms and
+          # sends it ahead of any request, so its own delay has already been
+          # waited. Answering such a request without the analysis must not
+          # also add the debounce window to the diagnostics the analysis was
+          # always going to produce next.
+          if answered_unflushed {
+            st = flush(st, pending)
+            pending = None
+          }
+        } else {
+          let current = inbox[at]
+          at = at + 1
+          answered_unflushed = false
+          match current {
+            Eof -> { serving = false }
+            Message(msg) -> {
+              let gate = lifecycle_gate(st.lifecycle, msg)
+              match gate {
+                LgActivate -> {
+                  st = LspState { ..st, lifecycle: Running }
                   st = handle(st, msg)
                 }
+                LgDispatch -> {
+                  let key = request_key(msg)
+                  if key != "" && list.contains(cancelled, key) {
+                    # LSP 3.17 `$/cancelRequest`: a cancelled request still
+                    # gets a response, and RequestCancelled (-32800) is the
+                    # one for a cancel the server saw before starting it.
+                    cancelled = list.filter(cancelled, k => k != key)
+                    respond_error(get_or_null(msg, "id"), REQUEST_CANCELLED, "Request cancelled")
+                    answered_unflushed = true
+                  } else {
+                    match update_of(msg) {
+                      Some(u) -> {
+                        let (uri, text, version) = u
+                        match pending {
+                          Some(p0) -> {
+                            let (uri0, _, _) = p0
+                            if uri0 != uri { st = flush(st, pending) }
+                          }
+                          None -> ()
+                        }
+                        pending = Some((uri, text, version))
+                      }
+                      None ->
+                        match msg_class(ostr(msg, "method")) {
+                          # Answered from the text the client sent last, which
+                          # is what the request is about; the analysis of that
+                          # text still runs, later and once.
+                          TextOnly -> {
+                            if has_request_id(msg) {
+                              respond(get_or_null(msg, "id"), text_reply(st, pending, msg))
+                              answered_unflushed = true
+                            }
+                          }
+                          # Reads and writes nothing about a document.
+                          Inert -> {
+                            st = handle(st, msg)
+                            answered_unflushed = has_request_id(msg)
+                          }
+                          # Reads the analysed program or writes about it, so
+                          # the deferred work has to have happened first. Only
+                          # what came *before* this message is analysed: a sync
+                          # queued behind it waits its turn, which is what keeps
+                          # a hover or a rename answering the text it was asked
+                          # about.
+                          Analysed -> {
+                            st = flush(st, pending)
+                            pending = None
+                            st = handle(st, msg)
+                          }
+                        }
+                    }
+                  }
+                }
+                LgBeginShutdown -> {
+                  pending = None
+                  st = LspState { ..st, lifecycle: Shutdown }
+                  st = handle(st, msg)
+                  st = close_all_leases(st)
+                }
+                LgReject(code, message) -> {
+                  let id = match oget(msg, "id") {
+                    Some(value) -> value
+                    None -> JNull
+                  }
+                  respond_error(id, code, message)
+                }
+                LgIgnore -> ()
+                LgExit(code) -> {
+                  pending = None
+                  exit_status = Some(code)
+                  serving = false
+                }
               }
-            LgBeginShutdown -> {
-              pending = None
-              st = LspState { ..st, lifecycle: Shutdown }
-              st = handle(st, msg)
-              st = close_all_leases(st)
             }
-            LgReject(code, message) -> {
-              let id = match oget(msg, "id") {
-                Some(value) -> value
-                None -> JNull
-              }
-              respond_error(id, code, message)
-            }
-            LgIgnore -> ()
-            LgExit(code) -> {
+            # The declared body was read in full, so malformed JSON leaves the
+            # next frame boundary known and the session can continue.
+            Malformed(code, why) -> {
+              st = flush(st, pending)
               pending = None
-              exit_status = Some(code)
+              send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
+                ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
+            }
+            # A framing failure has no trustworthy resynchronisation point. Emit
+            # one fixed parse error and stop reading; bytes after the failure
+            # are deliberately never interpreted as another frame.
+            Fatal -> {
+              pending = None
+              send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
+                ("error", jobj([("code", JInt(-32700)), ("message", JStr("Parse error"))]))]))
               serving = false
             }
           }
-        }
-        # The declared body was read in full, so malformed JSON leaves the next
-        # frame boundary known and the session can continue.
-        Malformed(code, why) -> {
-          st = flush(st, pending)
-          pending = None
-          send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
-            ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
-        }
-        # A framing failure has no trustworthy resynchronisation point. Emit
-        # one fixed parse error and stop reading; bytes after the failure are
-        # deliberately never interpreted as another frame.
-        Fatal -> {
-          pending = None
-          send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
-            ("error", jobj([("code", JInt(-32700)), ("message", JStr("Parse error"))]))]))
-          serving = false
         }
       }
     } else {
@@ -1031,6 +1105,132 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
     Some(code) -> { let _ = io.exit(code) }
     None -> ()
   }
+}
+
+## LSP 3.17 RequestCancelled: "The client has canceled a request and a server
+## has detected the cancel."
+const REQUEST_CANCELLED: Int = -32800
+
+## What the read loop must do before handling a message that is not a document
+## sync (`update_of` takes those). The question is only whether the pending
+## text has to be analysed first.
+##
+## There is deliberately no class for "answer from the previous analysis and
+## mark it stale": LSP has no field that says a result may be stale. Nor does
+## the server answer ContentModified (-32801) because a later change is queued:
+## LSP 3.17 says "A server should NOT send this error code if it detects a
+## content change in its unprocessed messages ... If a client decides that a
+## result is not of any use anymore the client should cancel the request." An
+## outdated request is saved by the client's `$/cancelRequest`, which VS Code
+## sends the moment the content changes, ahead of the change itself.
+##
+## - `TextOnly`: formatting, code actions and document symbols read the
+##   document's text, not its analysis.
+## - `Inert`: `$/` notifications and requests, `initialized`, and a sync that
+##   carried no text; nothing about a document is read or written.
+## - `Analysed`: everything else, including a method this table does not name.
+##   A new handler is assumed to read the analysis, so it is right before it
+##   is fast. didClose, didSave and watched-file changes are here too: they
+##   change what the workspace is, and the publishes they cause stay in order.
+type MsgClass = TextOnly | Inert | Analysed
+
+fn msg_class(method: String) -> MsgClass =
+  if method == "textDocument/formatting" || method == "textDocument/codeAction" ||
+    method == "textDocument/documentSymbol" {
+    TextOnly
+  } else if str.starts_with(method, "$/") || method == "initialized" ||
+    method == "textDocument/didOpen" || method == "textDocument/didChange" {
+    Inert
+  } else {
+    Analysed
+  }
+
+test "the read loop analyses before exactly the messages that read the analysis" {
+  let rows = [
+    ("textDocument/formatting", TextOnly),
+    ("textDocument/codeAction", TextOnly),
+    ("textDocument/documentSymbol", TextOnly),
+    ("$/cancelRequest", Inert),
+    ("$/setTrace", Inert),
+    ("initialized", Inert),
+    ("textDocument/didOpen", Inert),
+    ("textDocument/didChange", Inert),
+    ("textDocument/didClose", Analysed),
+    ("textDocument/didSave", Analysed),
+    ("workspace/didChangeWatchedFiles", Analysed),
+    ("textDocument/completion", Analysed),
+    ("completionItem/resolve", Analysed),
+    ("textDocument/hover", Analysed),
+    ("textDocument/signatureHelp", Analysed),
+    ("textDocument/definition", Analysed),
+    ("textDocument/references", Analysed),
+    ("textDocument/documentHighlight", Analysed),
+    ("textDocument/prepareRename", Analysed),
+    ("textDocument/rename", Analysed),
+    ("textDocument/inlayHint", Analysed),
+    ("textDocument/semanticTokens/full", Analysed),
+    ("textDocument/semanticTokens/range", Analysed),
+    ("dawn/somethingNew", Analysed)
+  ]
+  for row in rows {
+    let (method, want) = row
+    assert msg_class(method) == want
+  }
+}
+
+## Whether reading may go on after `f`: not past an end of input, and not past
+## a framing failure, whose following bytes have no known frame boundary.
+fn frame_continues(f: Frame) -> Bool =
+  match f {
+    Eof -> false
+    Fatal -> false
+    _ -> true
+  }
+
+## A request's id as one comparable string, or "" for a message that is not a
+## request. A client may number its requests or name them, and `1` and `"1"`
+## are different ids.
+fn request_key(msg: Json) -> String =
+  match oget(msg, "id") {
+    Some(id) -> if ostr(msg, "method") == "" { "" } else { render(echo_id(id)) }
+    None -> ""
+  }
+
+## The request a just-read frame cancels, when it is a `$/cancelRequest` whose
+## target is still waiting in `inbox` at or after `at`. A target that is not
+## there was answered already, and the cancel has nothing left to do.
+fn cancel_target(inbox: List[Frame], at: Int, next: Frame) -> List[String] = {
+  let msg = match next {
+    Message(m) -> m
+    _ -> return []
+  }
+  if ostr(msg, "method") != "$/cancelRequest" { return [] }
+  let key = match oget(get_or_null(msg, "params"), "id") {
+    Some(id) -> render(echo_id(id))
+    None -> return []
+  }
+  var i = at
+  while i < len(inbox) {
+    match inbox[i] {
+      Message(m) -> if request_key(m) == key { return [key] }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  []
+}
+
+test "a cancel names a request only while that request still waits" {
+  let req = Message(jobj([("jsonrpc", JStr("2.0")), ("id", JInt(7)), ("method", JStr("textDocument/hover"))]))
+  let named = Message(jobj([("jsonrpc", JStr("2.0")), ("id", JStr("7")), ("method", JStr("textDocument/hover"))]))
+  let cancel = Message(jobj([("jsonrpc", JStr("2.0")), ("method", JStr("$/cancelRequest")),
+    ("params", jobj([("id", JNum(7.0))]))]))
+  assert cancel_target([req], 0, cancel) == ["7"]
+  # already handled
+  assert cancel_target([req], 1, cancel) == []
+  # a string id is a different id
+  assert cancel_target([named], 0, cancel) == []
+  assert cancel_target([req], 0, req) == []
 }
 
 ## How long standard input must stay quiet before a pending edit is analysed.
@@ -1051,6 +1251,11 @@ pub fn run_lsp_configured(std_flag: Option[String], host: LspLeaseHost,
 ## sends every keystroke: modelled on lsp/lspc, about 24% more server time per
 ## key at 50 than at 150. scripts/lsp-liveness.py's keystroke gap has to stay
 ## between 20 ms and this window.
+##
+## The window only waits on syncs. A request that reads the document's text
+## alone is answered at once from the pending text, a cancelled one at once
+## with RequestCancelled, and either way the analysis then runs without a
+## further window when nothing else is queued (#790, the read loop above).
 const DEBOUNCE_MS: Int = 50
 
 ## Run the analysis a document sync deferred, if there is one.
@@ -1462,12 +1667,10 @@ fn handle_fs(st0: LspState, msg: Json) -> LspState !Fs !Proc !Env !Console !io =
     st = st2
   } else if method == "textDocument/documentHighlight" {
     respond(id, handle_document_highlight(st, params))
-  } else if method == "textDocument/documentSymbol" {
-    respond(id, handle_symbols(st, params))
-  } else if method == "textDocument/formatting" {
-    respond(id, handle_formatting(st, params))
-  } else if method == "textDocument/codeAction" {
-    respond(id, handle_code_action(st, params))
+  } else if msg_class(method) == TextOnly {
+    # the read loop answers these itself, from a pending text when there is
+    # one; here nothing is pending
+    respond(id, text_reply(st, None, msg))
   } else if method == "textDocument/inlayHint" {
     respond(id, handle_inlay_hint(st, params))
   } else if method == "textDocument/semanticTokens/full" {
@@ -3939,32 +4142,81 @@ fn handle_semantic_tokens(st: LspState, params: Json, ranged: Bool) -> Json = {
   }
 }
 
-fn handle_symbols(st: LspState, params: Json) -> Json !io = {
-  match doc_of(st, params) {
-    Some(d) ->
-      match analysis_of(st, d) {
-        Some(analysis) ->
-          match doc_qcx(st, d, analysis) {
-            Some(qc) -> {
-              var out: List[Json] = []
-              for dc in qc.entry.m.decls {
-                match decl_symbol(qc, d, dc) {
-                  Some(j) -> { out = out ++ [j] }
-                  None -> ()
-                }
-              }
-              JArr(out)
-            }
-            None -> JArr([])
-          }
-        None -> JArr([])
-      }
-    None -> JArr([])
+## The text a text-only request reads, and the tables its positions need.
+type DocText = { text: String, view: SourceView, ls: List[Int] }
+
+## The newest text the client sent for `uri`: the pending one when the sync
+## waiting for analysis names this document, else the open document's. A
+## pending text has not reached `st.docs` yet, and must not without its
+## analysis: a query reads a `Doc`'s view against its analysed tree.
+fn text_now(st: LspState, pending: Option[(String, String, Int)], uri: String) -> Option[DocText] = {
+  match pending {
+    Some(p) -> {
+      let (puri, text, _) = p
+      if puri == uri { return Some(DocText { text: text, view: view_of(text), ls: line_starts_of(text) }) }
+    }
+    None -> ()
+  }
+  match map.get(st.docs, uri) {
+    Some(d) -> Some(DocText { text: d.text, view: d.view, ls: d.ls })
+    None -> None
   }
 }
 
+## A `TextOnly` request's answer, from the newest text and without analysing
+## it (#790).
+fn text_reply(st: LspState, pending: Option[(String, String, Int)], msg: Json) -> Json !io = {
+  let method = ostr(msg, "method")
+  let params = get_or_null(msg, "params")
+  let t = match text_now(st, pending, ostr(get_or_null(params, "textDocument"), "uri")) {
+    Some(found) -> found
+    None -> return JArr([])
+  }
+  if method == "textDocument/formatting" {
+    handle_formatting(t)
+  } else if method == "textDocument/codeAction" {
+    handle_code_action(t, params)
+  } else {
+    handle_symbols(st, t, params)
+  }
+}
+
+## The outline of `t`. While the analysis is of this same text, a function's
+## symbol carries its signature as `detail`; otherwise the declarations come
+## from parsing `t` and go without it, because the previous analysis's
+## signature of a same-named function may no longer be this one's.
+fn handle_symbols(st: LspState, t: DocText, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      if d.text == t.text {
+        return match analysis_of(st, d) {
+          Some(analysis) ->
+            match doc_qcx(st, d, analysis) {
+              Some(qc) -> decl_symbols(Some(qc), t, qc.entry.m.decls)
+              None -> JArr([])
+            }
+          None -> JArr([])
+        }
+      }
+    None -> ()
+  }
+  let (m, _) = source_parser.parse_module(t.text)
+  decl_symbols(None, t, m.decls)
+}
+
+fn decl_symbols(qc: Option[QCx], t: DocText, decls: List[Decl]) -> Json !io = {
+  var out: List[Json] = []
+  for dc in decls {
+    match decl_symbol(qc, t, dc) {
+      Some(j) -> { out = out ++ [j] }
+      None -> ()
+    }
+  }
+  JArr(out)
+}
+
 ## One top-level declaration as a DocumentSymbol (Function=12, Class=5).
-fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
+fn decl_symbol(analysed: Option[QCx], d: DocText, dc: Decl) -> Option[Json] !io = {
   let info: Option[(String, Bool, Int, Int, Int, Int)] = match dc {
     DFn(f) -> Some((f.name, true, f.lo, f.hi, f.nlo, f.nhi))
     DType(t) -> Some((t.name, false, t.lo, t.hi, t.nlo, t.nhi))
@@ -3992,14 +4244,18 @@ fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
     Some(k) -> {
       let (name, is_fn, lo, hi, nlo, nhi) = k
       var fields: List[(String, Json)] = [("name", JStr(name))]
-      if is_fn {
-        match map.get(qc.entry.cx.fns, name) {
-          Some(sig) -> {
-            fields = fields ++
-              [("detail", JStr(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)))]
+      match analysed {
+        Some(qc) ->
+          if is_fn {
+            match map.get(qc.entry.cx.fns, name) {
+              Some(sig) -> {
+                fields = fields ++
+                  [("detail", JStr(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)))]
+              }
+              None -> ()
+            }
           }
-          None -> ()
-        }
+        None -> ()
       }
       fields = fields ++ [
         ("kind", JInt(if is_fn { 12 } else { 5 })),
@@ -4012,31 +4268,26 @@ fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
   }
 }
 
-fn handle_formatting(st: LspState, params: Json) -> Json !io = {
-  match doc_of(st, params) {
-    Some(d) -> {
-      # No edits when the document does not lex. The formatter reprints tokens,
-      # and an unrecognized character produces none, so an edit built from a
-      # failed lex deletes what the lexer skipped -- which format-on-save would
-      # then apply to a file the user is in the middle of typing.
-      let formatted = match fmt.format(d.text) {
-        Ok(s) -> s
-        Err(_) -> return JArr([])
-      }
-      if formatted == d.text { return JArr([]) }
-      # replace the whole document
-      let lines = str.split(d.text, "\n")
-      let last = lines[len(lines) - 1]
-      JArr([jobj([
-        ("range", jobj([
-          ("start", jpos(0, 0)),
-          ("end", jpos(len(lines) - 1, utf16_len(last)))
-        ])),
-        ("newText", JStr(formatted))
-      ])])
-    }
-    None -> JArr([])
+fn handle_formatting(d: DocText) -> Json !io = {
+  # No edits when the document does not lex. The formatter reprints tokens,
+  # and an unrecognized character produces none, so an edit built from a
+  # failed lex deletes what the lexer skipped -- which format-on-save would
+  # then apply to a file the user is in the middle of typing.
+  let formatted = match fmt.format(d.text) {
+    Ok(s) -> s
+    Err(_) -> return JArr([])
   }
+  if formatted == d.text { return JArr([]) }
+  # replace the whole document
+  let lines = str.split(d.text, "\n")
+  let last = lines[len(lines) - 1]
+  JArr([jobj([
+    ("range", jobj([
+      ("start", jpos(0, 0)),
+      ("end", jpos(len(lines) - 1, utf16_len(last)))
+    ])),
+    ("newText", JStr(formatted))
+  ])])
 }
 
 # ---- code actions ----
@@ -4048,11 +4299,7 @@ fn handle_formatting(st: LspState, params: Json) -> Json !io = {
 ## none, gets no action. The edit is computed on the buffer as it is now, and
 ## a buffer that no longer has that import at that place gets nothing rather
 ## than a guess.
-fn handle_code_action(st: LspState, params: Json) -> Json = {
-  let d = match doc_of(st, params) {
-    Some(found) -> found
-    None -> return JArr([])
-  }
+fn handle_code_action(d: DocText, params: Json) -> Json = {
   let uri = ostr(get_or_null(params, "textDocument"), "uri")
   let given = match oget(get_or_null(params, "context"), "diagnostics") {
     Some(JArr(xs)) -> xs

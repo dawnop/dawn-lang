@@ -317,16 +317,16 @@ def mutate(name, server, main, analyze, plan_source):
             name,
         )
     elif name == "exit-bypasses-cleanup":
-        old = """            LgExit(code) -> {
-              pending = None
-              exit_status = Some(code)
-              serving = false
-            }"""
-        new = """            LgExit(code) -> {
-              pending = None
-              let _ = io.exit(code)
-              serving = false
-            }"""
+        old = """                LgExit(code) -> {
+                  pending = None
+                  exit_status = Some(code)
+                  serving = false
+                }"""
+        new = """                LgExit(code) -> {
+                  pending = None
+                  let _ = io.exit(code)
+                  serving = false
+                }"""
         server_text = replace_once(server_text, old, new, name)
     elif name == "external-owner-clears":
         old = """            st = LspState {
