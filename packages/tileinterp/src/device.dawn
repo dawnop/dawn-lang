@@ -1,0 +1,211 @@
+## A `Gpu` handler that answers `launch` by interpreting the kernel, at the
+## grid the launch names, and hands every other operation to the handler
+## outside it.
+#
+# Why a second entry point beside `interp.interp_ref`. The fake device does
+# not consult a launch's grid (std/gpu's `with_gpu_fake`), so a `WideRefFn`
+# has to be built for one grid in advance. That is right for a program that
+# knows its grid; it is wrong for one whose grid follows its data, such as
+# every program in scripts/tile-gpu-diff, which launches one kernel at
+# several sizes. This handler reads the grid off each `gpu_launch` instead.
+#
+# Why it forwards rather than keeping memory of its own. Allocation, copies,
+# module globals and `free` are std/gpu's fake device already, with its
+# refusals; an arm that performs the same effect reaches the handler outside
+# (spec 6, `with handle`), so this one keeps only the format of each handle
+# it saw allocated and leaves the bytes where they are. A launch reads its
+# buffers through the outer handler, interprets, and writes back through it,
+# rounding through std/gpu's own `encode_floats` the way the fake device's
+# write-back does, so the two meet a buffer in the same state.
+use std/list
+use std/map
+use std/narrow
+use std/bytes
+use std/gpu.{Gpu, LaunchArg, Buffer, Word, decode_floats, encode_floats, wrap_i32, gpu_alloc, gpu_copy_from_host,
+  gpu_copy_to_host, gpu_module_global, gpu_free, gpu_sync }
+use tileir/prog.{TileProg}
+use tileir/lower.{lower, Kernel}
+use interp.{interp_kernel}
+
+fn refusal(kind: String, message: String) -> ForeignError = ForeignError { kind: kind, message: message, cause: None }
+
+# A by-value argument as the fake device hands it to a reference: an i32 or
+# i64 as the integer it is, an f32 as the binary32 value its bits spell.
+fn word_value(dtype: String, bits: Int) -> Float = match dtype {
+  "f64" -> narrow.f64_of_bits(bits)
+  "f32" -> narrow.f32_of_bits(bits)
+  "i32" -> to_float(wrap_i32(bits))
+  _ -> to_float(bits)
+}
+
+# Whether an i64 survives the trip through `Float` the fake device's
+# references take (std/gpu refuses the launch otherwise, `gpu.fake_inexact`).
+fn fits_float(v: Int) -> Bool = {
+  let f = to_float(v)
+  f >= 0.0 - 9223372036854775808.0 && f < 9223372036854775808.0 && to_int(f) == v
+}
+
+# The buffers of a launch, each as its handle, its format and its contents,
+# read through the outer handler; or the refusal that stopped the reading.
+fn read_buffers(dts: Map[Int, String], kernel: String, args: List[LaunchArg]) -> Result[List[(Int, String, List[Float])], ForeignError] !Gpu = {
+  var out: List[(Int, String, List[Float])] = []
+  var failed: Option[ForeignError] = None
+  for a in args {
+    match a {
+      Buffer(h) -> if failed == None {
+        match map.get(dts, h) {
+          None -> {
+            failed = Some(refusal("gpu.no_such_buffer", "interpreter: no buffer with handle ${h}"))
+          }
+          Some(dt) -> match gpu_copy_to_host(h) {
+            Err(e) -> {
+              failed = Some(e)
+            }
+            Ok(raw) -> {
+              if dt == "i64" {
+                let words = bytes.unpack_ints(raw, 8, false)
+                match list.find(range(0, len(words)), i => not fits_float(words[i])) {
+                  Some(i) -> {
+                    failed = Some(refusal("gpu.fake_inexact",
+                      "interpreter: `${kernel}` argument ${len(out)} holds the i64 ${words[i]} at element ${i}, which a Float cannot hold exactly"))
+                  }
+                  None -> ()
+                }
+              } else {
+                ()
+              }
+              out = out ++ [(h, dt, decode_floats(dt, raw))]
+            }
+          }
+        }
+      } else {
+        ()
+      }
+      Word(_d, _b) -> ()
+    }
+  }
+  match failed {
+    Some(e) -> Err(e)
+    None -> Ok(out)
+  }
+}
+
+fn scalars_of(args: List[LaunchArg]) -> List[Float] =
+  list.fold(args, [], (acc, a) => match a {
+    Buffer(_h) -> acc
+    Word(d, b) -> acc ++ [word_value(d, b)]
+  })
+
+# One launch of `k`, interpreted: read, run, write back.
+fn launch_one(dts: Map[Int, String], k: Kernel, kernel: String, grid: List[Int], args: List[LaunchArg],
+  ub_checks: Bool) -> Result[Unit, ForeignError] !Gpu =
+  match read_buffers(dts, kernel, args) {
+    Err(e) -> Err(e)
+    Ok(bufs) -> {
+      let dtypes = list.map(bufs, b => {
+        let (_h, dt, _xs) = b
+        dt
+      })
+      let ins = list.map(bufs, b => {
+        let (_h, _dt, xs) = b
+        xs
+      })
+      match interp_kernel(k, grid, dtypes, ins, scalars_of(args), ub_checks) {
+        Err(e) -> Err(refusal(e.kind, "`${kernel}`: ${e.message}"))
+        Ok(writes) -> {
+          var failed: Option[ForeignError] = None
+          for w in writes {
+            let (pos, xs) = w
+            let (h, dt, _old) = bufs[pos]
+            match gpu_copy_from_host(h, encode_floats(dt, xs)) {
+              Ok(_) -> ()
+              Err(e) -> {
+                failed = Some(e)
+              }
+            }
+          }
+          match failed {
+            Some(e) -> Err(e)
+            None -> Ok(())
+          }
+        }
+      }
+    }
+  }
+
+## [`with_gpu_interp`], and beside its answer one line per launch in the
+## order they ran: the kernel's name, then `ok` or the kind of the refusal
+## (`interp.unsupported_op`, `interp.ub`, ...). scripts/tileinterp-diff reads
+## these to know which kernels a case actually interpreted.
+pub fn with_gpu_interp_log[T](progs: fn(String) -> Option[TileProg], body: fn() -> T !Gpu,
+  ub_checks: Bool = true) -> (T, List[String]) !Gpu = {
+  with handle Gpu {
+    var dts: Map[Int, String] = map.empty()
+    var kernels: Map[String, Kernel] = map.empty()
+    var log: List[String] = []
+    gpu_alloc(dtype, n) => match gpu_alloc(dtype, n) {
+      Ok(h) -> {
+        dts = map.insert(dts, h, dtype)
+        Ok(h)
+      }
+      Err(e) -> Err(e)
+    }
+    gpu_copy_from_host(h, data) => gpu_copy_from_host(h, data)
+    gpu_copy_to_host(h) => gpu_copy_to_host(h)
+    gpu_launch(kernel, gx, gy, gz, args) => {
+      let known = kernels
+      let found = match map.get(known, kernel) {
+        Some(k) -> Some(k)
+        None -> match progs(kernel) {
+          Some(p) -> {
+            let k = lower(p)
+            kernels = map.insert(kernels, kernel, k)
+            Some(k)
+          }
+          None -> None
+        }
+      }
+      match found {
+        None -> {
+          log = log ++ ["${kernel} gpu.no_kernel"]
+          Err(refusal("gpu.no_kernel", "interpreter: no kernel named `${kernel}`"))
+        }
+        Some(k) -> {
+          let r = launch_one(dts, k, kernel, [gx, gy, gz], args, ub_checks)
+          log = log ++ [match r {
+            Ok(_) -> "${kernel} ok"
+            Err(e) -> "${kernel} ${e.kind}"
+          }]
+          r
+        }
+      }
+    }
+    gpu_module_global(kernel, name, dtype) => match gpu_module_global(kernel, name, dtype) {
+      Ok(p) -> {
+        let (h, _n) = p
+        dts = map.insert(dts, h, dtype)
+        Ok(p)
+      }
+      Err(e) -> Err(e)
+    }
+    gpu_free(h) => gpu_free(h)
+    gpu_sync() => gpu_sync()
+  }
+  let answer = body()
+  (answer, log)
+}
+
+## Run `body` with every launch interpreted (`interp.interp_kernel`) at the
+## grid the launch names, the kernel found by name through `progs`. Every
+## other `Gpu` operation goes to the handler outside, which is normally
+## std/gpu's `with_gpu_fake`:
+##
+##     with_gpu_fake(map.empty(), () => with_gpu_interp(name => map.get(progs, name), body))
+##
+## A refused launch answers `Err` with the interpreter's kind and message,
+## and a name `progs` does not know answers `gpu.no_kernel`.
+pub fn with_gpu_interp[T](progs: fn(String) -> Option[TileProg], body: fn() -> T !Gpu,
+  ub_checks: Bool = true) -> T !Gpu = {
+  let (answer, _log) = with_gpu_interp_log(progs, body, ub_checks)
+  answer
+}

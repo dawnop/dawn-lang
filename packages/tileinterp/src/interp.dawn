@@ -1,0 +1,1553 @@
+## A host interpreter for the Tile IR kernels packages/tileir records: the
+## lowered instruction table (`lower.Kernel`) executed block by block over
+## buffers in host memory, as a `WideRefFn` the fake device can call.
+#
+# Why the LOWERED table and not the recording or the bytes
+# (docs/tileinterp-design.md 1): `lower.Kernel` is the one table the text
+# renderer and the bytecode writer both spell, so executing it executes what
+# leaves the package, the pointer ladders and `assume`s lowering adds
+# included, and a lowering bug is inside what this sees. Below it there is
+# only the byte encoding, which layer 1 (`tileiras`) already holds.
+#
+# Why everything unsupported is refused BEFORE anything runs. A kernel that
+# holds one instruction this subset does not model fails as a whole, with
+# `interp.unsupported_op` and the instruction's name, from one function
+# (`unsupported_in`) that walks the table once. Nothing during execution
+# raises that kind, so "the static walk accepted it" and "it ran without a
+# refusal" are one judgement, which is what lets scripts/tileinterp-diff
+# excuse a refused case without excusing a wrong one.
+#
+# Why undefined lanes are tracked rather than filled. A masked-off load lane
+# with no padding and an out-of-bounds view lane with no padding read
+# UNSPECIFIED values on the device. The interpreter carries a per-lane
+# "undefined" flag beside such values, propagates it through every
+# operation, and refuses the launch (`interp.ub`) the moment one reaches
+# memory, a branch, a loop bound or an index: computing with garbage and
+# dropping it is harmless on the device too, using it is not. Pallas's
+# interpret mode is the same design (`uninitialized_memory`, docs 2.4).
+use std/list
+use std/map
+use std/mem
+use std/str
+use std/mem.{Mem, with_mem}
+use std/gpu.{WideRefFn}
+use tileir/prog.{TileProg, ByPtr, ByValue}
+use tileir/dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Padding, NoPadding, PadZero, PadNegZero,
+  PadNan, PadPosInf, PadNegInf, DYN_DIM }
+use tileir/lower.{lower, Kernel, Instr, Ty, Ref, Token, Tile, TensorView, PartitionView, StridedView,
+  GatherScatterView, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape,
+  Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma,
+  FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop,
+  BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile,
+  PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile,
+  PrintTile, TokenOnlyTile, GetGlobalPtr, AllocaPtr, MakeTensorView, MakePartitionView, MakeStridedView,
+  MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, Ret }
+use math.{INF, NAN, Downward, Upward, is_nan, sign_bit, flush, sqrt_rn, add_dir, mul_dir, div_dir,
+  floor_f, ceil_f, rem_f, exp_f, exp2_f, log_f, log2_f, rsqrt_f, tanh_f, sin_f, cos_f, tan_f, sinh_f, cosh_f, atan2_f,
+  pow_f, SIGN_BIT, bits_of, float_of }
+
+## Why a launch failed: `kind` is one of `interp.unsupported_op` (an
+## instruction or format this subset does not model, refused before
+## anything ran), `interp.ub` (undefined behaviour the kernel reached:
+## an out-of-bounds access, a use of an undefined lane, a false `assume`,
+## an integer division by zero, a non-saturating `ftoi` of a value out of
+## range, a broken `inbounds` promise, a `loop` past the step limit),
+## `interp.bad_launch` (the launch does not fit the kernel: buffer or
+## scalar counts, a buffer whose format is not the parameter's) or
+## `interp.internal` (a defect of this package). `message` names the
+## instruction.
+pub type InterpError = { kind: String, message: String } derive Show
+
+## How many iterations one `loop` or `for` may run before the launch is
+## refused as `interp.ub`: a loop whose exit never comes does not fail on the
+## device, it runs until something kills it.
+pub const STEP_LIMIT: Int = 16777216
+
+# ---- values ----
+
+# A tensor view: the buffer, the element offset of its origin, its extent
+# and its strides (dynamic entries already filled in from their operands),
+# and the element format.
+type Ten = { buf: Int, base: Int, shape: List[Int], strides: List[Int], elem: String }
+
+# A partition view of a tensor view.
+type Part = { ten: Ten, tile: List[Int], dim_map: List[Int], padding: Padding }
+
+# A value. Tiles are row major; `und` is empty when every lane is defined,
+# and otherwise one flag a lane. Integer lanes are held wrapped to the
+# signed range of their width (an i1 lane is 0 or 1). A pointer lane is a
+# buffer number and an element offset into it.
+type V =
+  | VTok
+  | VF(shape: List[Int], xs: List[Float], und: List[Bool])
+  | VI(shape: List[Int], xs: List[Int], und: List[Bool])
+  | VP(shape: List[Int], bufs: List[Int], offs: List[Int], und: List[Bool])
+  | VTen(ten: Ten)
+  | VPart(part: Part)
+
+# What running a region did: fell off its end (only the top level does),
+# yielded, broke out of the enclosing loop, continued it, or returned from
+# the kernel.
+type Flow =
+  | Fell
+  | Yielded(vals: List[V])
+  | Broke(vals: List[V])
+  | Continued(vals: List[V])
+  | Returned
+
+# One launch's fixed context. `bufs` are the launch's buffers in host
+# memory; `written` has a nonzero entry for each buffer a store reached.
+type Cx = {
+  bufs: List[F64Buf],
+  lens: List[Int],
+  written: I64Buf,
+  params: List[V],
+  bid: List[Int],
+  grid: List[Int],
+  ub: Bool,
+}
+
+# ---- failure ----
+
+fn refuse_ub[T](what: String) -> T = panic("interp.ub: ${what}")
+
+# `refuse_ub` where the branch is a statement.
+fn ub_stop(what: String) -> Unit = refuse_ub(what)
+
+fn internal[T](what: String) -> T = panic("interp.internal: ${what}")
+
+fn bad_stop(what: String) -> Unit = panic("interp.bad_launch: ${what}")
+
+# ---- types ----
+
+# The element format a tile type names, `ptr` for a pointer tile.
+fn elem_name(t: Ty) -> String = match t {
+  Tile(_s, e) -> match e {
+    Num(n) -> n
+    PtrTo(_n) -> "ptr"
+  }
+  _ -> internal("`${show(t)}` is not a tile type")
+}
+
+fn shape_of(t: Ty) -> List[Int] = match t {
+  Tile(s, _e) -> s
+  _ -> internal("`${show(t)}` is not a tile type")
+}
+
+fn lanes(shape: List[Int]) -> Int = list.fold(shape, 1, (a, d) => a * d)
+
+## The bit width of an integer format, or 0 for any other name.
+pub fn int_width(name: String) -> Int = match name {
+  "i1" -> 1
+  "i4" -> 4
+  "i8" -> 8
+  "i16" -> 16
+  "i32" -> 32
+  "i64" -> 64
+  _ -> 0
+}
+
+## `v` wrapped into the signed range of `w` bits (an i1 is 0 or 1).
+pub fn wrap(w: Int, v: Int) -> Int =
+  if w >= 64 {
+    v
+  } else if w == 1 {
+    v & 1
+  } else {
+    let m = 1 << w
+    let low = v & (m - 1)
+    if low >= (m >> 1) { low - m } else { low }
+  }
+
+# `v`, a lane of a `w`-bit format, read as unsigned.
+fn unsigned_of(w: Int, v: Int) -> Int = if w >= 64 { v } else { v & ((1 << w) - 1) }
+
+# ---- the static walk ----
+
+# The formats a tile of this subset may hold.
+fn supported_elem(name: String) -> Bool = name == "f64" || int_width(name) > 0 || name == "ptr"
+
+fn ty_problem(t: Ty) -> Option[String] = match t {
+  Token -> None
+  Tile(_s, e) -> match e {
+    Num(n) -> if supported_elem(n) { None } else { Some(n) }
+    PtrTo(n) -> if supported_elem(n) { None } else { Some("ptr<${n}>") }
+  }
+  TensorView(e, _s, _st) -> ty_problem(Tile([], e))
+  PartitionView(_ts, e, _s, _st, _dm, _p) -> ty_problem(Tile([], e))
+  StridedView(_ts, _tr, e, _s, _st, _dm, _p) -> ty_problem(Tile([], e))
+  GatherScatterView(_ts, e, _s, _st, _sd, _p) -> ty_problem(Tile([], e))
+}
+
+const FLOAT_UN: List[String] = ["negf", "absf", "ceil", "floor", "sqrt", "sqrt_approx", "exp", "exp2", "log", "log2",
+  "rsqrt", "tanh", "sin", "cos", "tan", "sinh", "cosh"]
+
+const FLOAT_BIN: List[String] = ["addf", "subf", "mulf", "divf", "maxf", "minf", "maxf_nan", "minf_nan", "remf", "pow",
+  "atan2", "addf_neg_inf", "addf_pos_inf", "addf_ftz", "mulf_neg_inf", "mulf_pos_inf", "mulf_ftz", "divf_neg_inf",
+  "divf_pos_inf"]
+
+const PREDS: List[String] = ["eq", "ne", "lt", "le", "gt", "ge", "ueq", "une", "ult", "ule", "ugt", "uge"]
+
+const INT_UN: List[String] = ["absi", "negi"]
+
+const INT_BIN: List[String] = ["addi", "subi", "muli", "divi", "remi", "maxi", "mini", "andi", "ori", "xori", "shli",
+  "shri", "shru", "mulhii", "addi_nsw", "subi_nuw", "muli_nw"]
+
+const CASTS: List[String] = ["itof", "ftoi", "ftoi_sat", "exti", "extis", "trunci", "bitcast", "pack", "unpack"]
+
+fn op_in(op: String, names: List[String]) -> Bool = list.any(names, n => n == op)
+
+# The types an instruction states, for the format check.
+fn tys_of(i: Instr) -> List[Ty] = match i {
+  ConstInt(_d, t, _v) -> [t]
+  ConstFloat(_d, t, _v) -> [t]
+  MulInt(_d, t, _l, _r) -> [t]
+  AddInt(_d, t, _l, _r) -> [t]
+  Reshape(_d, _s, f, t) -> [f, t]
+  Broadcast(_d, _s, f, t) -> [f, t]
+  IotaTile(_d, t) -> [t]
+  Offset(_d, _p, _o, pt, ot) -> [pt, ot]
+  LoadPtr(_d, _t, _p, _m, _pd, _ti, pt, mt, vt, _h) -> [pt, mt, vt]
+  StorePtr(_t, _p, _v, _m, _ti, pt, mt, vt, _h) -> [pt, mt, vt]
+  FloatUn(_d, _op, t, _s) -> [t]
+  FloatBin(_d, _op, t, _l, _r) -> [t]
+  CmpFloat(_d, _p, t, rt, _l, _r) -> [t, rt]
+  CmpInt(_d, _p, t, rt, _l, _r) -> [t, rt]
+  IntUn(_d, _op, t, _s) -> [t]
+  IntBin(_d, _op, t, _l, _r) -> [t]
+  Cast(_d, _op, f, t, _s) -> [f, t]
+  SelectTile(_d, ct, t, _c, _l, _r) -> [ct, t]
+  ForLoop(_r, tys, _iv, _lo, _up, _st, _u, _in, _ca, _b) -> tys
+  WhileLoop(_r, tys, _in, _ca, _b) -> tys
+  ReduceTile(_r, tys, _dim, _ids, _ops, otys, _a, _b) -> tys ++ otys
+  ScanTile(_r, tys, _dim, _rev, _ids, _ops, otys, _a, _b) -> tys ++ otys
+  IfElse(_r, tys, _c, ct, _t, _f) -> tys ++ [ct]
+  ExtractTile(_d, _s, f, t, _ix) -> [f, t]
+  InsertTile(_d, _s, _de, sub, t, _ix) -> [sub, t]
+  FloatPowI(_d, t, et, _b, _e) -> [t, et]
+  CatTile(_d, _dim, _l, _r, lt, rt, t) -> [lt, rt, t]
+  PermuteTile(_d, _s, _p, f, t) -> [f, t]
+  AssumeTile(_d, _s, _p, t) -> [t]
+  MakeTensorView(_d, _b, bt, t, _ds, _dst, dt) -> [bt, t, dt]
+  MakePartitionView(_d, _s, st, t) -> [st, t]
+  GetTensorShape(_ds, _s, st, rt) -> [st, rt]
+  GetIndexSpaceShape(_ds, _s, st, rt) -> [st, rt]
+  LoadViewTile(_d, _t, _v, vt, _ix, itys, t, _ti, _ib) -> [vt, t] ++ itys
+  StoreViewTile(_t, _v, vt, _val, valt, _ix, itys, _ti, _ib) -> [vt, valt] ++ itys
+  _ -> []
+}
+
+# The instruction's own refusal, if it is not one this subset models at
+# all, or if it is but with an operation name it does not.
+fn op_problem(i: Instr) -> Option[String] = match i {
+  FloatUn(_d, op, _t, _s) -> if op_in(op, FLOAT_UN) { None } else { Some("${op} (float operation not in subset A)") }
+  FloatBin(_d, op, _t, _l, _r) -> if op_in(op, FLOAT_BIN) { None } else { Some("${op} (float operation not in subset A)") }
+  CmpFloat(_d, p, _t, _rt, _l, _r) -> if op_in(p, PREDS) { None } else { Some("cmpf ${p}") }
+  CmpInt(_d, p, _t, _rt, _l, _r) -> if op_in(p, PREDS) { None } else { Some("cmpi ${p}") }
+  IntUn(_d, op, _t, _s) -> if op_in(op, INT_UN) { None } else { Some("${op} (integer operation not in subset A)") }
+  IntBin(_d, op, _t, _l, _r) -> if op_in(op, INT_BIN) { None } else { Some("${op} (integer operation not in subset A)") }
+  Cast(_d, op, _f, _t, _s) ->
+    if op_in(op, CASTS) {
+      None
+    } else if str.starts_with(op, "ftof") {
+      Some("${op} (a conversion between float formats needs a narrow one, I2)")
+    } else {
+      Some("${op} (conversion not in subset A)")
+    }
+  AtomicRMWPtr(_d, _t, _p, mode, _a, _m, _ti, _pt, _mt, _vt) -> Some("atomic_rmw_tko ${mode} (atomics are not interpreted: a sequential run is one legal schedule)")
+  AtomicCASPtr(_d, _t, _p, _c, _v, _m, _ti, _pt, _mt, _vt) -> Some("atomic_cas_tko (atomics are not interpreted: a sequential run is one legal schedule)")
+  AtomicRedViewTile(_t, _v, _vt, _val, _valt, _ix, _itys, mode, _sc, _ti) -> Some("atomic_red_view_tko ${mode} (atomics are not interpreted)")
+  FloatFma(_d, _t, _l, _r, _a) -> Some("fma (fused multiply-add is I2)")
+  FloatMma(_d, _t, _lt, _rt, _l, _r, _a) -> Some("mmaf (matrix product is I2)")
+  FloatMmaScaled(_d, _t, _lt, _rt, _st, _rst, _l, _r, _a, _ls, _rs) -> Some("mmaf_scaled (matrix product is I2)")
+  IntMma(_d, _t, _lt, _rt, _l, _r, _a) -> Some("mmai (matrix product is I2)")
+  PtrToIntTile(_d, _s, _f, _t) -> Some("ptr_to_int (the flat address model is not in subset A)")
+  IntToPtrTile(_d, _s, _f, _t) -> Some("int_to_ptr (the flat address model is not in subset A)")
+  PtrToPtrTile(_d, _s, _f, _t) -> Some("ptr_to_ptr (the flat address model is not in subset A)")
+  AssertTile(_c, _ct, _m) -> Some("assert (not in subset A)")
+  PrintTile(_t, _f, _a, _at, _ti) -> Some("print_tko (not in subset A)")
+  TokenOnlyTile(_t, op, _ti) -> Some("${op} (fences and PDL are not interpreted: a sequential run cannot check them)")
+  GetGlobalPtr(_d, sym, _t) -> Some("get_global @${sym} (module globals are not in subset A)")
+  AllocaPtr(_d, _n, _a, _s, _t) -> Some("alloca (not in subset A)")
+  MakeStridedView(_d, _s, _st, _t) -> Some("make_strided_view (not in subset A)")
+  MakeGatherScatterView(_d, _s, _st, _t) -> Some("make_gather_scatter_view (not in subset A)")
+  GetIndexSpaceShape(_ds, _s, st, _rt) -> match st {
+    PartitionView(_ts, _e, _sh, _str, _dm, _p) -> None
+    _ -> Some("get_index_space_shape of a strided or gather view (not in subset A)")
+  }
+  # Every other variant is modelled, and is named here rather than caught by
+  # a wildcard: a variant tileir adds later does not compile until it is put
+  # in one list or the other.
+  MakeTok(_d) -> None
+  BlockIds(_x, _y, _z) -> None
+  ConstInt(_d, _t, _v) -> None
+  ConstFloat(_d, _t, _v) -> None
+  MulInt(_d, _t, _l, _r) -> None
+  AddInt(_d, _t, _l, _r) -> None
+  Reshape(_d, _s, _f, _t) -> None
+  Broadcast(_d, _s, _f, _t) -> None
+  IotaTile(_d, _t) -> None
+  Offset(_d, _p, _o, _pt, _ot) -> None
+  LoadPtr(_d, _t, _p, _m, _pd, _ti, _pt, _mt, _vt, _h) -> None
+  StorePtr(_t, _p, _v, _m, _ti, _pt, _mt, _vt, _h) -> None
+  SelectTile(_d, _ct, _t, _c, _l, _r) -> None
+  ForLoop(_r, _tys, _iv, _lo, _up, _st, _u, _in, _ca, _b) -> None
+  WhileLoop(_r, _tys, _in, _ca, _b) -> None
+  BreakVals(_v, _tys) -> None
+  Cont(_v, _tys) -> None
+  ReduceTile(_r, _tys, _dim, _ids, _ops, _otys, _a, _b) -> None
+  ScanTile(_r, _tys, _dim, _rev, _ids, _ops, _otys, _a, _b) -> None
+  IfElse(_r, _tys, _c, _ct, _t, _f) -> None
+  YieldVals(_v, _tys) -> None
+  ExtractTile(_d, _s, _f, _t, _ix) -> None
+  InsertTile(_d, _s, _de, _sub, _t, _ix) -> None
+  FloatPowI(_d, _t, _et, _b, _e) -> None
+  CatTile(_d, _dim, _l, _r, _lt, _rt, _t) -> None
+  PermuteTile(_d, _s, _p, _f, _t) -> None
+  BlockCounts(_x, _y, _z) -> None
+  JoinTokens(_d, _toks) -> None
+  AssumeTile(_d, _s, _p, _t) -> None
+  MakeTensorView(_d, _b, _bt, _t, _ds, _dst, _dt) -> None
+  MakePartitionView(_d, _s, _st, _t) -> None
+  GetTensorShape(_ds, _s, _st, _rt) -> None
+  LoadViewTile(_d, _t, _v, _vt, _ix, _itys, _ty, _ti, _ib) -> None
+  StoreViewTile(_t, _v, _vt, _val, _valt, _ix, _itys, _ti, _ib) -> None
+  Ret -> None
+}
+
+# The name a refusal gives an instruction: the operation it carries where it
+# carries one (`addf`, `ftof`, `cmpi lt`), the table's constructor otherwise.
+fn mnemonic(i: Instr) -> String = match i {
+  FloatUn(_d, op, _t, _s) -> op
+  FloatBin(_d, op, _t, _l, _r) -> op
+  IntUn(_d, op, _t, _s) -> op
+  IntBin(_d, op, _t, _l, _r) -> op
+  Cast(_d, op, _f, _t, _s) -> op
+  CmpFloat(_d, p, _t, _rt, _l, _r) -> "cmpf ${p}"
+  CmpInt(_d, p, _t, _rt, _l, _r) -> "cmpi ${p}"
+  _ -> {
+    let s = show(i)
+    match str.index_of(s, "(") {
+      Some(k) -> str.slice(s, 0, k)
+      None -> s
+    }
+  }
+}
+
+# The regions an instruction holds.
+fn regions(i: Instr) -> List[List[Instr]] = match i {
+  ForLoop(_r, _tys, _iv, _lo, _up, _st, _u, _in, _ca, b) -> [b]
+  WhileLoop(_r, _tys, _in, _ca, b) -> [b]
+  ReduceTile(_r, _tys, _dim, _ids, _ops, _otys, _a, b) -> [b]
+  ScanTile(_r, _tys, _dim, _rev, _ids, _ops, _otys, _a, b) -> [b]
+  IfElse(_r, _tys, _c, _ct, t, f) -> [t, f]
+  _ -> []
+}
+
+fn body_problem(body: List[Instr]) -> Option[String] = {
+  var found: Option[String] = None
+  var k = 0
+  while k < len(body) && found == None {
+    let i = body[k]
+    found = match op_problem(i) {
+      Some(p) -> Some(p)
+      None -> match list.find(list.map(tys_of(i), ty_problem), p => p != None) {
+        Some(p) -> Some("${mnemonic(i)} on ${unwrap_or(p, "?")} (narrow formats are I2)")
+        None -> {
+          let inner = list.map(regions(i), body_problem)
+          match list.find(inner, p => p != None) {
+            Some(p) -> p
+            None -> None
+          }
+        }
+      }
+    }
+    k = k + 1
+  }
+  found
+}
+
+## The first instruction or format of `k` this subset does not interpret,
+## said as the refusal will say it, or `None` when every instruction and
+## every format in it is modelled. The interpreter refuses a launch with
+## exactly this message and kind `interp.unsupported_op` before anything
+## runs, and raises that kind nowhere else.
+pub fn unsupported_in(k: Kernel) -> Option[String] = {
+  let params = list.find(k.params, p => match p {
+    ByPtr(d) -> not supported_elem(d)
+    ByValue(d) -> not supported_elem(d)
+  })
+  match params {
+    Some(p) -> Some("entry parameter ${show(p)} (narrow formats are I2)")
+    None -> body_problem(k.body)
+  }
+}
+
+# ---- reading values ----
+
+fn get(env: Map[Int, V], cx: Cx, r: Ref) -> V = match r {
+  Arg(p) -> cx.params[p]
+  Val(id) -> match map.get(env, id) {
+    Some(v) -> v
+    None -> internal("value %${id} is read before it is defined")
+  }
+}
+
+fn floats_of(v: V, what: String) -> (List[Float], List[Bool]) = match v {
+  VF(_s, xs, u) -> (xs, u)
+  _ -> internal("${what}: expected a float tile")
+}
+
+fn ints_of(v: V, what: String) -> (List[Int], List[Bool]) = match v {
+  VI(_s, xs, u) -> (xs, u)
+  _ -> internal("${what}: expected an integer tile")
+}
+
+fn no_flags() -> List[Bool] = []
+
+fn und_at(u: List[Bool], i: Int) -> Bool = len(u) > 0 && u[i]
+
+fn und2(a: List[Bool], b: List[Bool], n: Int) -> List[Bool] =
+  if len(a) == 0 && len(b) == 0 { [] } else { list.map(range(0, n), i => und_at(a, i) || und_at(b, i)) }
+
+fn und3(a: List[Bool], b: List[Bool], c: List[Bool], n: Int) -> List[Bool] = und2(und2(a, b, n), c, n)
+
+fn any_und(u: List[Bool]) -> Bool = list.any(u, b => b)
+
+# The rank-0 i32 a bound, an index or a count is, refused when undefined.
+fn scalar_int(cx: Cx, v: V, what: String) -> Int = match v {
+  VI(_s, xs, u) -> {
+    if cx.ub && any_und(u) { ub_stop("${what} is an undefined value") } else { () }
+    xs[0]
+  }
+  _ -> internal("${what}: expected an integer scalar")
+}
+
+# A value of the shape and kind `t` names, from per-lane builders.
+fn same_kind_select(c: List[Int], cu: List[Bool], a: V, b: V, shape: List[Int]) -> V = {
+  let n = lanes(shape)
+  let pick = (ua: List[Bool], ub: List[Bool]) =>
+    if len(ua) == 0 && len(ub) == 0 && len(cu) == 0 {
+      no_flags()
+    } else {
+      list.map(range(0, n), i => und_at(cu, i) || (if c[i] != 0 { und_at(ua, i) } else { und_at(ub, i) }))
+    }
+  match (a, b) {
+    (VF(_s, xa, ua), VF(_t, xb, ub)) -> VF(shape, list.map(range(0, n), i => if c[i] != 0 { xa[i] } else { xb[i] }), pick(ua, ub))
+    (VI(_s, xa, ua), VI(_t, xb, ub)) -> VI(shape, list.map(range(0, n), i => if c[i] != 0 { xa[i] } else { xb[i] }), pick(ua, ub))
+    (VP(_s, ba, oa, ua), VP(_t, bb, ob, ub)) ->
+      VP(shape, list.map(range(0, n), i => if c[i] != 0 { ba[i] } else { bb[i] }),
+        list.map(range(0, n), i => if c[i] != 0 { oa[i] } else { ob[i] }), pick(ua, ub))
+    _ -> internal("select over two tiles of different kinds")
+  }
+}
+
+# ---- shapes ----
+
+fn strides_of(shape: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  var acc = 1
+  var k = len(shape) - 1
+  while k >= 0 {
+    out = [acc] ++ out
+    acc = acc * shape[k]
+    k = k - 1
+  }
+  out
+}
+
+fn coords(flat: Int, shape: List[Int]) -> List[Int] = {
+  let st = strides_of(shape)
+  list.map(range(0, len(shape)), k => (flat / st[k]) % shape[k])
+}
+
+fn flat_of(c: List[Int], shape: List[Int]) -> Int = {
+  let st = strides_of(shape)
+  list.fold(range(0, len(shape)), 0, (a, k) => a + c[k] * st[k])
+}
+
+# For each lane of `to`, the lane of `from` a broadcast reads: `from` has the
+# same rank and a 1 wherever it is widened.
+fn broadcast_map(from: List[Int], to: List[Int]) -> List[Int] = {
+  let fs = strides_of(from)
+  let ts = strides_of(to)
+  list.map(range(0, lanes(to)), i =>
+      list.fold(range(0, len(to)), 0, (a, k) => if from[k] == 1 { a } else { a + ((i / ts[k]) % to[k]) * fs[k] }))
+}
+
+# `v` with its lanes gathered by `idx` (lane `i` of the answer is lane
+# `idx[i]` of `v`), shaped `shape`.
+fn gather_lanes(v: V, idx: List[Int], shape: List[Int]) -> V = {
+  let gu = (u: List[Bool]) => if len(u) == 0 { no_flags() } else { list.map(idx, j => u[j]) }
+  match v {
+    VF(_s, xs, u) -> VF(shape, list.map(idx, j => xs[j]), gu(u))
+    VI(_s, xs, u) -> VI(shape, list.map(idx, j => xs[j]), gu(u))
+    VP(_s, bs, os, u) -> VP(shape, list.map(idx, j => bs[j]), list.map(idx, j => os[j]), gu(u))
+    _ -> internal("a shape operation on a value that is not a tile")
+  }
+}
+
+fn reshaped(v: V, shape: List[Int]) -> V = match v {
+  VF(_s, xs, u) -> VF(shape, xs, u)
+  VI(_s, xs, u) -> VI(shape, xs, u)
+  VP(_s, bs, os, u) -> VP(shape, bs, os, u)
+  _ -> internal("reshape of a value that is not a tile")
+}
+
+# ---- memory ----
+
+fn check_addr(cx: Cx, buf: Int, off: Int, what: String) -> Unit =
+  if off < 0 || off >= cx.lens[buf] {
+    if cx.ub {
+      ub_stop("${what} reaches element ${off} of buffer ${buf}, which holds ${cx.lens[buf]}")
+    } else {
+      ()
+    }
+  } else {
+    ()
+  }
+
+fn in_buf(cx: Cx, buf: Int, off: Int) -> Bool = off >= 0 && off < cx.lens[buf]
+
+fn read(cx: Cx, buf: Int, off: Int) -> Float !Mem = if in_buf(cx, buf, off) { mem.f64_at(cx.bufs[buf], off) } else { NAN }
+
+fn write(cx: Cx, buf: Int, off: Int, x: Float) -> Unit !Mem =
+  if in_buf(cx, buf, off) {
+    mem.f64_set(cx.bufs[buf], off, x)
+    mem.set(cx.written, buf, 1)
+  } else {
+    ()
+  }
+
+# A tile of format `elem` from Floats a buffer holds and their flags.
+fn from_raw(elem: String, shape: List[Int], raw: List[Float], u: List[Bool]) -> V =
+  if elem == "f64" {
+    VF(shape, raw, u)
+  } else {
+    let w = int_width(elem)
+    VI(shape, list.map(raw, x => if is_nan(x) { 0 } else { wrap(w, to_int(x)) }), u)
+  }
+
+# The Floats a buffer stores for the lanes of `v`.
+fn to_raw(v: V) -> (List[Float], List[Bool]) = match v {
+  VF(_s, xs, u) -> (xs, u)
+  VI(_s, xs, u) -> (list.map(xs, x => to_float(x)), u)
+  _ -> internal("a store of a value that is not a numeric tile")
+}
+
+fn pad_value(p: Padding, elem: String) -> Float = match p {
+  NoPadding -> NAN
+  PadZero -> 0.0
+  PadNegZero -> float_of(SIGN_BIT)
+  PadNan -> NAN
+  PadPosInf -> INF
+  PadNegInf -> 0.0 - INF
+}
+
+# The tensor coordinates of lane `c` of the tile at `idx` of a partition view.
+fn view_coords(p: Part, idx: List[Int], c: List[Int]) -> List[Int] = {
+  let rank = len(p.ten.shape)
+  list.map(range(0, rank), d => match list.find(range(0, len(p.dim_map)), k => p.dim_map[k] == d) {
+    Some(k) -> idx[k] * p.tile[k] + c[k]
+    None -> 0
+  })
+}
+
+fn coords_inside(p: Part, t: List[Int]) -> Bool = list.all(range(0, len(t)), d => t[d] >= 0 && t[d] < p.ten.shape[d])
+
+fn view_addr(p: Part, t: List[Int]) -> Int = p.ten.base + list.fold(range(0, len(t)), 0, (a, d) => a + t[d] * p.ten.strides[d])
+
+# The `inbounds` promise of a view access, checked: index dimension `k` was
+# promised in bounds, so every lane must be inside tensor dimension
+# `dim_map[k]`.
+fn check_promise(cx: Cx, p: Part, idx: List[Int], inbounds: List[Bool], what: String) -> Unit =
+  if cx.ub {
+    for k in range(0, len(inbounds)) {
+      if inbounds[k] {
+        let d = p.dim_map[k]
+        let lo = idx[k] * p.tile[k]
+        if lo < 0 || lo + p.tile[k] > p.ten.shape[d] {
+          ub_stop("${what} promises index ${k} in bounds, and tile ${idx[k]} covers elements ${lo} to ${lo + p.tile[k] - 1} of an extent of ${p.ten.shape[d]}")
+        } else {
+          ()
+        }
+      } else {
+        ()
+      }
+    }
+  } else {
+    ()
+  }
+
+# ---- arithmetic ----
+
+fn neg_f(x: Float) -> Float = float_of(bits_of(x) ^ SIGN_BIT)
+
+fn abs_f(x: Float) -> Float = float_of(bits_of(x) & 0x7FFFFFFFFFFFFFFF)
+
+# IEEE 754-2019 maximumNumber with +0 above -0: the dialect's `maxf`
+# without `propagate_nan`; `propagate` makes it maximum (NaN if either is).
+fn max_f(a: Float, b: Float, propagate: Bool) -> Float =
+  if is_nan(a) && is_nan(b) {
+    NAN
+  } else if is_nan(a) || is_nan(b) {
+    if propagate { NAN } else if is_nan(a) { b } else { a }
+  } else if a == 0.0 && b == 0.0 {
+    if sign_bit(a) { b } else { a }
+  } else if a > b {
+    a
+  } else {
+    b
+  }
+
+fn min_f(a: Float, b: Float, propagate: Bool) -> Float =
+  if is_nan(a) && is_nan(b) {
+    NAN
+  } else if is_nan(a) || is_nan(b) {
+    if propagate { NAN } else if is_nan(a) { b } else { a }
+  } else if a == 0.0 && b == 0.0 {
+    if sign_bit(a) { a } else { b }
+  } else if a < b {
+    a
+  } else {
+    b
+  }
+
+fn float_un(op: String, x: Float) -> Float = match op {
+  "negf" -> neg_f(x)
+  "absf" -> abs_f(x)
+  "ceil" -> ceil_f(x)
+  "floor" -> floor_f(x)
+  "sqrt" -> sqrt_rn(x)
+  "sqrt_approx" -> sqrt_rn(x)
+  "exp" -> exp_f(x)
+  "exp2" -> exp2_f(x)
+  "log" -> log_f(x)
+  "log2" -> log2_f(x)
+  "rsqrt" -> rsqrt_f(x)
+  "tanh" -> tanh_f(x)
+  "sin" -> sin_f(x)
+  "cos" -> cos_f(x)
+  "tan" -> tan_f(x)
+  "sinh" -> sinh_f(x)
+  "cosh" -> cosh_f(x)
+  _ -> internal("float operation ${op} passed the static walk")
+}
+
+fn float_bin(op: String, a: Float, b: Float) -> Float = match op {
+  "addf" -> a + b
+  "subf" -> a - b
+  "mulf" -> a * b
+  "divf" -> a / b
+  "maxf" -> max_f(a, b, false)
+  "minf" -> min_f(a, b, false)
+  "maxf_nan" -> max_f(a, b, true)
+  "minf_nan" -> min_f(a, b, true)
+  "remf" -> rem_f(a, b)
+  "pow" -> pow_f(a, b)
+  "atan2" -> atan2_f(a, b)
+  "addf_neg_inf" -> add_dir(a, b, Downward)
+  "addf_pos_inf" -> add_dir(a, b, Upward)
+  "mulf_neg_inf" -> mul_dir(a, b, Downward)
+  "mulf_pos_inf" -> mul_dir(a, b, Upward)
+  "divf_neg_inf" -> div_dir(a, b, Downward)
+  "divf_pos_inf" -> div_dir(a, b, Upward)
+  "addf_ftz" -> flush(flush(a) + flush(b))
+  "mulf_ftz" -> flush(flush(a) * flush(b))
+  _ -> internal("float operation ${op} passed the static walk")
+}
+
+fn cmp_f(pred: String, a: Float, b: Float) -> Bool = {
+  let unordered = is_nan(a) || is_nan(b)
+  let plain = match pred {
+    "eq" | "ueq" -> a == b
+    "ne" | "une" -> a != b
+    "lt" | "ult" -> a < b
+    "le" | "ule" -> a <= b
+    "gt" | "ugt" -> a > b
+    _ -> a >= b
+  }
+  if unordered { op_in(pred, ["ueq", "une", "ult", "ule", "ugt", "uge"]) } else { plain }
+}
+
+fn cmp_i(pred: String, a: Int, b: Int) -> Bool = match pred {
+  "eq" -> a == b
+  "ne" -> a != b
+  "lt" -> a < b
+  "le" -> a <= b
+  "gt" -> a > b
+  _ -> a >= b
+}
+
+# The unsigned high half of the `w`-bit product of `a` and `b`.
+fn mulhi_u(w: Int, a: Int, b: Int) -> Int =
+  if w <= 32 {
+    (unsigned_of(w, a) * unsigned_of(w, b)) >>> w
+  } else {
+    # 64 by 64 into 128 bits through 32-bit limbs
+    let a_lo = a & 0xFFFFFFFF
+    let a_hi = a >>> 32
+    let b_lo = b & 0xFFFFFFFF
+    let b_hi = b >>> 32
+    let ll = a_lo * b_lo
+    let lh = a_lo * b_hi
+    let hl = a_hi * b_lo
+    let hh = a_hi * b_hi
+    let mid = (ll >>> 32) + (lh & 0xFFFFFFFF) + (hl & 0xFFFFFFFF)
+    hh + (lh >>> 32) + (hl >>> 32) + (mid >>> 32)
+  }
+
+fn int_bin(cx: Cx, op: String, w: Int, a: Int, b: Int) -> Int = match op {
+  "addi" -> wrap(w, a + b)
+  "subi" -> wrap(w, a - b)
+  "muli" -> wrap(w, a * b)
+  "addi_nsw" -> {
+    let r = a + b
+    if cx.ub && w < 64 && wrap(w, r) != r { ub_stop("addi with no_signed_wrap overflowed: ${a} + ${b}") } else { () }
+    wrap(w, r)
+  }
+  "subi_nuw" -> {
+    if cx.ub && unsigned_of(w, a) < unsigned_of(w, b) { ub_stop("subi with no_unsigned_wrap wrapped: ${a} - ${b}") } else { () }
+    wrap(w, a - b)
+  }
+  "muli_nw" -> {
+    let r = a * b
+    if cx.ub && w < 32 && wrap(w, r) != r { ub_stop("muli with no_wrap overflowed: ${a} * ${b}") } else { () }
+    if cx.ub && w == 32 && wrap(w, r) != r { ub_stop("muli with no_wrap overflowed: ${a} * ${b}") } else { () }
+    wrap(w, r)
+  }
+  "divi" -> if b == 0 { refuse_ub("divi by zero") } else { wrap(w, a / b) }
+  "remi" -> if b == 0 { refuse_ub("remi by zero") } else { wrap(w, a % b) }
+  "maxi" -> if a > b { a } else { b }
+  "mini" -> if a < b { a } else { b }
+  "andi" -> wrap(w, a & b)
+  "ori" -> wrap(w, a | b)
+  "xori" -> wrap(w, a ^ b)
+  "shli" -> if b < 0 || b >= w { shift_ub(cx, "shli", b, w) } else { wrap(w, a << b) }
+  "shri" -> if b < 0 || b >= w { shift_ub(cx, "shri", b, w) } else { wrap(w, a >> b) }
+  "shru" -> if b < 0 || b >= w { shift_ub(cx, "shru", b, w) } else { wrap(w, unsigned_of(w, a) >>> b) }
+  "mulhii" -> wrap(w, mulhi_u(w, a, b))
+  _ -> internal("integer operation ${op} passed the static walk")
+}
+
+fn shift_ub(cx: Cx, op: String, b: Int, w: Int) -> Int =
+  if cx.ub { refuse_ub("${op} by ${b}, outside 0 to ${w - 1}") } else { 0 }
+
+# A non-saturating `ftoi`'s lane: NaN, an infinity or a value outside the
+# target is undefined (refused); with the checks off, sm_86's measured
+# answer (the end of the range it left, the minimum for a NaN).
+fn ftoi(cx: Cx, w: Int, x: Float, sat: Bool) -> Int = {
+  let hi = if w >= 64 { 9223372036854775807 } else { (1 << (w - 1)) - 1 }
+  let lo = 0 - hi - 1
+  if is_nan(x) {
+    if sat { 0 } else if cx.ub { refuse_ub("ftoi of a NaN (undefined without `saturating`)") } else { lo }
+  } else {
+    let t = if x < 0.0 { ceil_f(x) } else { floor_f(x) }
+    if t > to_float(hi) || t < to_float(lo) {
+      if not sat && cx.ub { ub_stop("ftoi of ${x}, outside the i${w} range (undefined without `saturating`)") } else { () }
+      if t > 0.0 { hi } else { lo }
+    } else {
+      to_int(t)
+    }
+  }
+}
+
+# `pack`: the bytes of a rank-1 tile, little endian, two 4-bit lanes to a
+# byte with the even lane in the low nibble.
+fn pack(from: String, v: V, n_out: Int) -> V = {
+  let w = if from == "f64" { 64 } else { int_width(from) }
+  let words = match v {
+    VF(_s, xs, _u) -> list.map(xs, x => bits_of(x))
+    VI(_s, xs, _u) -> list.map(xs, x => unsigned_of(w, x))
+    _ -> internal("pack of a value that is not a numeric tile")
+  }
+  let u = match v {
+    VF(_s, _xs, u) -> u
+    VI(_s, _xs, u) -> u
+    _ -> []
+  }
+  if w == 4 {
+    VI([n_out], list.map(range(0, n_out), k => wrap(8, words[2 * k] | (words[2 * k + 1] << 4))),
+      if len(u) == 0 { [] } else { list.map(range(0, n_out), k => u[2 * k] || u[2 * k + 1]) })
+  } else {
+    let per = w / 8
+    VI([n_out], list.map(range(0, n_out), k => wrap(8, (words[k / per] >>> (8 * (k % per))) & 0xFF)),
+      if len(u) == 0 { [] } else { list.map(range(0, n_out), k => u[k / per]) })
+  }
+}
+
+fn unpack(to: String, v: V, n_out: Int) -> V = {
+  let (bs, u) = ints_of(v, "unpack")
+  let w = if to == "f64" { 64 } else { int_width(to) }
+  if w == 4 {
+    VI([n_out], list.map(range(0, n_out), k => wrap(4, (unsigned_of(8, bs[k / 2]) >>> (4 * (k % 2))) & 0xF)),
+      if len(u) == 0 { [] } else { list.map(range(0, n_out), k => u[k / 2]) })
+  } else {
+    let per = w / 8
+    let word = (k: Int) => list.fold(range(0, per), 0, (a, j) => a | (unsigned_of(8, bs[k * per + j]) << (8 * j)))
+    let uu = if len(u) == 0 { no_flags() } else { list.map(range(0, n_out), k => list.any(range(0, per), j => u[k * per + j])) }
+    if to == "f64" {
+      VF([n_out], list.map(range(0, n_out), k => float_of(word(k))), uu)
+    } else {
+      VI([n_out], list.map(range(0, n_out), k => wrap(w, word(k))), uu)
+    }
+  }
+}
+
+fn cast(cx: Cx, op: String, from: Ty, to: Ty, v: V) -> V = {
+  let fe = elem_name(from)
+  let te = elem_name(to)
+  let shape = shape_of(to)
+  match op {
+    "itof" -> {
+      let (xs, u) = ints_of(v, "itof")
+      VF(shape, list.map(xs, x => to_float(x)), u)
+    }
+    "ftoi" | "ftoi_sat" -> {
+      let (xs, u) = floats_of(v, op)
+      let w = int_width(te)
+      VI(shape, list.map(range(0, len(xs)), i =>
+          if und_at(u, i) { 0 } else { ftoi(cx, w, xs[i], op == "ftoi_sat") }), u)
+    }
+    "exti" -> {
+      let (xs, u) = ints_of(v, "exti")
+      let wf = int_width(fe)
+      VI(shape, list.map(xs, x => wrap(int_width(te), unsigned_of(wf, x))), u)
+    }
+    "extis" -> {
+      let (xs, u) = ints_of(v, "extis")
+      let wf = int_width(fe)
+      # an i1 lane is held as 0/1, so its sign extension is 0/-1
+      VI(shape, list.map(xs, x => wrap(int_width(te), if wf == 1 { 0 - x } else { x })), u)
+    }
+    "trunci" -> {
+      let (xs, u) = ints_of(v, "trunci")
+      VI(shape, list.map(xs, x => wrap(int_width(te), x)), u)
+    }
+    "bitcast" ->
+      if fe == "f64" && te == "i64" {
+        let (xs, u) = floats_of(v, "bitcast")
+        VI(shape, list.map(xs, x => bits_of(x)), u)
+      } else if fe == "i64" && te == "f64" {
+        let (xs, u) = ints_of(v, "bitcast")
+        VF(shape, list.map(xs, x => float_of(x)), u)
+      } else {
+        reshaped(v, shape)
+      }
+    "pack" -> pack(fe, v, lanes(shape))
+    "unpack" -> unpack(te, v, lanes(shape))
+    _ -> internal("conversion ${op} passed the static walk")
+  }
+}
+
+# `x^n` as the device's `fpowi` computes it over f64 (docs 6.19, measured on
+# sm_86): right-to-left binary exponentiation of `x` to `|n|`, every step a
+# rounded binary64 product, and the reciprocal of that for a negative `n`.
+fn fpowi(x: Float, n: Int) -> Float = {
+  var r = 1.0
+  var b = x
+  var m = if n < 0 { 0 - n } else { n }
+  while m > 0 {
+    if (m & 1) == 1 { r = r * b } else { () }
+    b = b * b
+    m = m >>> 1
+  }
+  if n < 0 { 1.0 / r } else { r }
+}
+
+# An `assume` predicate, checked against the value it is attached to.
+fn check_assume(cx: Cx, p: AssumePred, v: V) -> Unit =
+  if not cx.ub {
+    ()
+  } else {
+    match p {
+      DivBy(divisor, every, along) -> match v {
+        VP(_s, _bs, os, _u) -> {
+          # a buffer's base is taken to be 256-byte aligned; the claim is
+          # about the address, the element offset times the element size
+          # (the formats a pointer here may name are all 8 bytes or less,
+          # and the claim is checked on the offset in elements of 8 bytes
+          # at most, which is the conservative reading)
+          let _ok = (every, along)
+          match list.find(os, o => (o * 8) % divisor != 0 && (o * 4) % divisor != 0 && (o * 1) % divisor != 0) {
+            Some(o) -> ub_stop("assume div_by<${divisor}> on a pointer at element offset ${o}")
+            None -> ()
+          }
+        }
+        VI(_s, xs, _u) -> match (every, along) {
+          (Some(_e), Some(_a)) -> ()
+          _ -> match list.find(xs, x => x % divisor != 0) {
+            Some(x) -> ub_stop("assume div_by<${divisor}> on a lane holding ${x}")
+            None -> ()
+          }
+        }
+        _ -> ()
+      }
+      Bounded(lb, ub) -> match v {
+        VI(_s, xs, _u) -> {
+          match lb {
+            Some(l) -> match list.find(xs, x => x < l) {
+              Some(x) -> ub_stop("assume bounded<${l}, ..> on a lane holding ${x}")
+              None -> ()
+            }
+            None -> ()
+          }
+          match ub {
+            Some(h) -> match list.find(xs, x => x > h) {
+              Some(x) -> ub_stop("assume bounded<.., ${h}> on a lane holding ${x}")
+              None -> ()
+            }
+            None -> ()
+          }
+        }
+        _ -> ()
+      }
+      SameElements(groups) -> {
+        let shape = match v {
+          VI(s, _xs, _u) -> s
+          VF(s, _xs, _u) -> s
+          _ -> []
+        }
+        if len(shape) == len(groups) && len(shape) > 0 {
+          let n = lanes(shape)
+          let first = (i: Int) => {
+            let c = coords(i, shape)
+            flat_of(list.map(range(0, len(c)), k => (c[k] / groups[k]) * groups[k]), shape)
+          }
+          let differs = match v {
+            VI(_s, xs, _u) -> list.any(range(0, n), i => xs[i] != xs[first(i)])
+            VF(_s, xs, _u) -> list.any(range(0, n), i => bits_of(xs[i]) != bits_of(xs[first(i)]))
+            _ -> false
+          }
+          if differs { ub_stop("assume same_elements<${show(groups)}> on a tile whose groups differ") } else { () }
+        } else {
+          ()
+        }
+      }
+    }
+  }
+
+# ---- execution ----
+
+fn bind_all(env: Map[Int, V], ids: List[Int], vs: List[V]) -> Map[Int, V] =
+  list.fold(range(0, len(ids)), env, (e, k) => map.insert(e, ids[k], vs[k]))
+
+fn run_body(cx: Cx, env0: Map[Int, V], body: List[Instr]) -> (Map[Int, V], Flow) !Mem = {
+  var env = env0
+  var flow = Fell
+  var i = 0
+  while i < len(body) {
+    let (e2, f) = step(cx, env, body[i])
+    env = e2
+    match f {
+      Fell -> {
+        i = i + 1
+      }
+      _ -> {
+        flow = f
+        i = len(body)
+      }
+    }
+  }
+  (env, flow)
+}
+
+fn vals(env: Map[Int, V], cx: Cx, rs: List[Ref]) -> List[V] = list.map(rs, r => get(env, cx, r))
+
+fn put(env: Map[Int, V], id: Int, v: V) -> (Map[Int, V], Flow) = (map.insert(env, id, v), Fell)
+
+fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match i {
+  MakeTok(dst) -> put(env, dst, VTok)
+  JoinTokens(dst, _toks) -> put(env, dst, VTok)
+  BlockIds(x, y, z) -> (bind_all(env, [x, y, z], list.map(cx.bid, b => VI([], [b], []))), Fell)
+  BlockCounts(x, y, z) -> (bind_all(env, [x, y, z], list.map(cx.grid, g => VI([], [g], []))), Fell)
+  ConstInt(dst, t, value) -> {
+    let n = lanes(shape_of(t))
+    let w = int_width(elem_name(t))
+    let x = wrap(w, value)
+    put(env, dst, VI(shape_of(t), list.map(range(0, n), _k => x), []))
+  }
+  ConstFloat(dst, t, value) -> put(env, dst, VF(shape_of(t), list.map(range(0, lanes(shape_of(t))), _k => value), []))
+  MulInt(dst, t, l, r) -> put(env, dst, int_elementwise(cx, "muli", t, get(env, cx, l), get(env, cx, r)))
+  AddInt(dst, t, l, r) -> put(env, dst, int_elementwise(cx, "addi", t, get(env, cx, l), get(env, cx, r)))
+  IntBin(dst, op, t, l, r) -> put(env, dst, int_elementwise(cx, op, t, get(env, cx, l), get(env, cx, r)))
+  IntUn(dst, op, t, s) -> {
+    let (xs, u) = ints_of(get(env, cx, s), op)
+    let w = int_width(elem_name(t))
+    put(env, dst, VI(shape_of(t), list.map(xs, x => if op == "absi" { wrap(w, if x < 0 { 0 - x } else { x }) } else { wrap(w, 0 - x) }), u))
+  }
+  Reshape(dst, s, _f, t) -> put(env, dst, reshaped(get(env, cx, s), shape_of(t)))
+  Broadcast(dst, s, f, t) -> put(env, dst, gather_lanes(get(env, cx, s), broadcast_map(shape_of(f), shape_of(t)), shape_of(t)))
+  IotaTile(dst, t) -> put(env, dst, VI(shape_of(t), range(0, lanes(shape_of(t))), []))
+  Offset(dst, p, o, pt, _ot) -> match get(env, cx, p) {
+    VP(_s, bs, os, pu) -> {
+      let (ds, du) = ints_of(get(env, cx, o), "offset")
+      let n = len(os)
+      put(env, dst, VP(shape_of(pt), bs, list.map(range(0, n), k => os[k] + ds[k]), und2(pu, du, n)))
+    }
+    _ -> internal("offset of a value that is not a pointer tile")
+  }
+  LoadPtr(dst, tok_out, p, mask, pad, _tin, _pt, _mt, vt, _h) -> {
+    let (bs, os, pu) = ptrs_of(get(env, cx, p))
+    let n = len(os)
+    let (ms, mu) = match mask {
+      Some(m) -> ints_of(get(env, cx, m), "load mask")
+      None -> (list.map(range(0, n), _k => 1), [])
+    }
+    let elem = elem_name(vt)
+    let (pads, padu, has_pad) = match pad {
+      Some(pv) -> {
+        let (raw, u) = to_raw(get(env, cx, pv))
+        (raw, u, true)
+      }
+      None -> (list.map(range(0, n), _k => NAN), [], false)
+    }
+    let raw = list.map(range(0, n), k => {
+      if und_at(mu, k) && cx.ub { ub_stop("load_ptr_tko: mask lane ${k} is undefined") } else { () }
+      if ms[k] != 0 {
+        if und_at(pu, k) && cx.ub { ub_stop("load_ptr_tko: pointer lane ${k} is undefined") } else { () }
+        check_addr(cx, bs[k], os[k], "load_ptr_tko lane ${k}")
+        read(cx, bs[k], os[k])
+      } else {
+        pads[k]
+      }
+    })
+    let u = list.map(range(0, n), k => if ms[k] != 0 { false } else if has_pad { und_at(padu, k) } else { true })
+    let v = from_raw(elem, shape_of(vt), raw, if list.any(u, b => b) { u } else { [] })
+    (map.insert(map.insert(env, dst, v), tok_out, VTok), Fell)
+  }
+  StorePtr(tok_out, p, value, mask, _tin, _pt, _mt, _vt, _h) -> {
+    let (bs, os, pu) = ptrs_of(get(env, cx, p))
+    let n = len(os)
+    let (ms, mu) = match mask {
+      Some(m) -> ints_of(get(env, cx, m), "store mask")
+      None -> (list.map(range(0, n), _k => 1), [])
+    }
+    let (raw, vu) = to_raw(get(env, cx, value))
+    for k in range(0, n) {
+      if und_at(mu, k) && cx.ub { ub_stop("store_ptr_tko: mask lane ${k} is undefined") } else { () }
+      if ms[k] != 0 {
+        if und_at(pu, k) && cx.ub { ub_stop("store_ptr_tko: pointer lane ${k} is undefined") } else { () }
+        if und_at(vu, k) && cx.ub { ub_stop("store_ptr_tko: lane ${k} stores an undefined value") } else { () }
+        check_addr(cx, bs[k], os[k], "store_ptr_tko lane ${k}")
+        write(cx, bs[k], os[k], raw[k])
+      } else {
+        ()
+      }
+    }
+    put(env, tok_out, VTok)
+  }
+  FloatUn(dst, op, t, s) -> {
+    let (xs, u) = floats_of(get(env, cx, s), op)
+    put(env, dst, VF(shape_of(t), list.map(xs, x => float_un(op, x)), u))
+  }
+  FloatBin(dst, op, t, l, r) -> {
+    let (a, ua) = floats_of(get(env, cx, l), op)
+    let (b, ub) = floats_of(get(env, cx, r), op)
+    let n = len(a)
+    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => float_bin(op, a[k], b[k])), und2(ua, ub, n)))
+  }
+  FloatPowI(dst, t, _et, base, ex) -> {
+    let (a, ua) = floats_of(get(env, cx, base), "fpowi")
+    let (e, ue) = ints_of(get(env, cx, ex), "fpowi")
+    let n = len(a)
+    put(env, dst, VF(shape_of(t), list.map(range(0, n), k => fpowi(a[k], e[k])), und2(ua, ue, n)))
+  }
+  CmpFloat(dst, pred, _t, rt, l, r) -> {
+    let (a, ua) = floats_of(get(env, cx, l), "cmpf")
+    let (b, ub) = floats_of(get(env, cx, r), "cmpf")
+    let n = len(a)
+    put(env, dst, VI(shape_of(rt), list.map(range(0, n), k => if cmp_f(pred, a[k], b[k]) { 1 } else { 0 }), und2(ua, ub, n)))
+  }
+  CmpInt(dst, pred, _t, rt, l, r) -> {
+    let (a, ua) = ints_of(get(env, cx, l), "cmpi")
+    let (b, ub) = ints_of(get(env, cx, r), "cmpi")
+    let n = len(a)
+    put(env, dst, VI(shape_of(rt), list.map(range(0, n), k => if cmp_i(pred, a[k], b[k]) { 1 } else { 0 }), und2(ua, ub, n)))
+  }
+  Cast(dst, op, f, t, s) -> put(env, dst, cast(cx, op, f, t, get(env, cx, s)))
+  SelectTile(dst, _ct, t, c, l, r) -> {
+    let (cs, cu) = ints_of(get(env, cx, c), "select condition")
+    put(env, dst, same_kind_select(cs, cu, get(env, cx, l), get(env, cx, r), shape_of(t)))
+  }
+  ExtractTile(dst, s, f, t, ix) -> {
+    let idx = list.map(ix, r => scalar_int(cx, get(env, cx, r), "extract index"))
+    let fs = shape_of(f)
+    let ts = shape_of(t)
+    check_slices(cx, idx, ts, fs, "extract")
+    let src_idx = list.map(range(0, lanes(ts)), k => {
+      let c = coords(k, ts)
+      flat_of(list.map(range(0, len(c)), d => idx[d] * ts[d] + c[d]), fs)
+    })
+    put(env, dst, gather_lanes(get(env, cx, s), src_idx, ts))
+  }
+  InsertTile(dst, s, de, sub, t, ix) -> {
+    let idx = list.map(ix, r => scalar_int(cx, get(env, cx, r), "insert index"))
+    let ss = shape_of(sub)
+    let ts = shape_of(t)
+    check_slices(cx, idx, ss, ts, "insert")
+    let src = get(env, cx, s)
+    let dest = get(env, cx, de)
+    # lane k of the answer: the source's lane where k is inside the slice,
+    # the destination's elsewhere; built as a gather over the two tiles
+    # laid end to end
+    let n = lanes(ts)
+    let from = list.map(range(0, n), k => {
+      let c = coords(k, ts)
+      let inside = list.all(range(0, len(c)), d => c[d] >= idx[d] * ss[d] && c[d] < (idx[d] + 1) * ss[d])
+      if inside { flat_of(list.map(range(0, len(c)), d => c[d] - idx[d] * ss[d]), ss) } else { lanes(ss) + k }
+    })
+    put(env, dst, gather_lanes(concat_lanes(src, dest), from, ts))
+  }
+  CatTile(dst, dim, l, r, lt, rt, t) -> {
+    let ls = shape_of(lt)
+    let rs = shape_of(rt)
+    let ts = shape_of(t)
+    let from = list.map(range(0, lanes(ts)), k => {
+      let c = coords(k, ts)
+      if c[dim] < ls[dim] {
+        flat_of(c, ls)
+      } else {
+        lanes(ls) + flat_of(list.map(range(0, len(c)), d => if d == dim { c[d] - ls[dim] } else { c[d] }), rs)
+      }
+    })
+    put(env, dst, gather_lanes(concat_lanes(get(env, cx, l), get(env, cx, r)), from, ts))
+  }
+  PermuteTile(dst, s, perm, f, t) -> {
+    let fs = shape_of(f)
+    let ts = shape_of(t)
+    let from = list.map(range(0, lanes(ts)), k => {
+      let c = coords(k, ts)
+      # dimension k of the answer is dimension perm[k] of the source
+      let src = list.map(range(0, len(fs)), d => match list.find(range(0, len(perm)), j => perm[j] == d) {
+        Some(j) -> c[j]
+        None -> 0
+      })
+      flat_of(src, fs)
+    })
+    put(env, dst, gather_lanes(get(env, cx, s), from, ts))
+  }
+  AssumeTile(dst, s, pred, _t) -> {
+    let v = get(env, cx, s)
+    check_assume(cx, pred, v)
+    put(env, dst, v)
+  }
+  MakeTensorView(dst, base, _bt, t, dyn_shape, dyn_strides, _dt) -> match (get(env, cx, base), t) {
+    (VP(_s, bs, os, pu), TensorView(e, shape, strides)) -> {
+      if cx.ub && any_und(pu) { ub_stop("make_tensor_view: the base pointer is undefined") } else { () }
+      let ext = fill_dyn(cx, env, shape, dyn_shape, "make_tensor_view extent")
+      let st = fill_dyn(cx, env, strides, dyn_strides, "make_tensor_view stride")
+      let en = match e {
+        Num(nm) -> nm
+        PtrTo(_nm) -> "ptr"
+      }
+      put(env, dst, VTen(Ten { buf: bs[0], base: os[0], shape: ext, strides: st, elem: en }))
+    }
+    _ -> internal("make_tensor_view of a value that is not a scalar pointer")
+  }
+  MakePartitionView(dst, s, _st, t) -> match (get(env, cx, s), t) {
+    (VTen(ten), PartitionView(tile, _e, _sh, _str, dim_map, padding)) ->
+      put(env, dst, VPart(Part { ten: ten, tile: tile, dim_map: dim_map, padding: padding }))
+    _ -> internal("make_partition_view of a value that is not a tensor view")
+  }
+  GetTensorShape(dsts, s, _st, _rt) -> match get(env, cx, s) {
+    VTen(ten) -> (bind_all(env, dsts, list.map(ten.shape, d => VI([], [d], []))), Fell)
+    _ -> internal("get_tensor_shape of a value that is not a tensor view")
+  }
+  GetIndexSpaceShape(dsts, s, _st, _rt) -> match get(env, cx, s) {
+    VPart(p) -> (bind_all(env, dsts, list.map(range(0, len(p.tile)), k => {
+      let ext = p.ten.shape[p.dim_map[k]]
+      VI([], [(ext + p.tile[k] - 1) / p.tile[k]], [])
+    })), Fell)
+    _ -> internal("get_index_space_shape of a value that is not a partition view")
+  }
+  LoadViewTile(dst, tok_out, view, _vt, ix, _itys, t, _tin, inbounds) -> match get(env, cx, view) {
+    VPart(p) -> {
+      let idx = list.map(ix, r => scalar_int(cx, get(env, cx, r), "load_view_tko index"))
+      check_promise(cx, p, idx, inbounds, "load_view_tko")
+      let ts = shape_of(t)
+      let n = lanes(ts)
+      let pad = pad_value(p.padding, p.ten.elem)
+      let raw = list.map(range(0, n), k => {
+        let tc = view_coords(p, idx, coords(k, ts))
+        if coords_inside(p, tc) {
+          let a = view_addr(p, tc)
+          check_addr(cx, p.ten.buf, a, "load_view_tko lane ${k}")
+          read(cx, p.ten.buf, a)
+        } else {
+          pad
+        }
+      })
+      let undefined = match p.padding {
+        NoPadding -> list.map(range(0, n), k => not coords_inside(p, view_coords(p, idx, coords(k, ts))))
+        _ -> []
+      }
+      let v = from_raw(p.ten.elem, ts, raw, if any_und(undefined) { undefined } else { [] })
+      (map.insert(map.insert(env, dst, v), tok_out, VTok), Fell)
+    }
+    _ -> internal("load_view_tko of a value that is not a partition view")
+  }
+  StoreViewTile(tok_out, view, _vt, value, valt, ix, _itys, _tin, inbounds) -> match get(env, cx, view) {
+    VPart(p) -> {
+      let idx = list.map(ix, r => scalar_int(cx, get(env, cx, r), "store_view_tko index"))
+      check_promise(cx, p, idx, inbounds, "store_view_tko")
+      let ts = shape_of(valt)
+      let (raw, u) = to_raw(get(env, cx, value))
+      for k in range(0, lanes(ts)) {
+        let tc = view_coords(p, idx, coords(k, ts))
+        if coords_inside(p, tc) {
+          if und_at(u, k) && cx.ub { ub_stop("store_view_tko: lane ${k} stores an undefined value") } else { () }
+          let a = view_addr(p, tc)
+          check_addr(cx, p.ten.buf, a, "store_view_tko lane ${k}")
+          write(cx, p.ten.buf, a, raw[k])
+        } else {
+          ()
+        }
+      }
+      put(env, tok_out, VTok)
+    }
+    _ -> internal("store_view_tko of a value that is not a partition view")
+  }
+  ForLoop(results, _tys, iv, lo, up, st, unsigned, inits, carried, body) -> {
+    let lower_v = scalar_int(cx, get(env, cx, lo), "for lower bound")
+    let upper_v = scalar_int(cx, get(env, cx, up), "for upper bound")
+    let step_v = scalar_int(cx, get(env, cx, st), "for step")
+    var cur = vals(env, cx, inits)
+    var k = lower_v
+    var flow = Fell
+    var going = true
+    var count = 0
+    while going {
+      let more = if unsigned { unsigned_of(32, k) < unsigned_of(32, upper_v) } else { k < upper_v }
+      if not more {
+        going = false
+      } else {
+        count = count + 1
+        if count > STEP_LIMIT { ub_stop("for ran past ${STEP_LIMIT} iterations") } else { () }
+        let inner = bind_all(map.insert(env, iv, VI([], [k], [])), carried, cur)
+        let (_e, f) = run_body(cx, inner, body)
+        match f {
+          Continued(vs) -> {
+            cur = vs
+            k = wrap(32, k + step_v)
+          }
+          Returned -> {
+            flow = Returned
+            going = false
+          }
+          _ -> internal("a for body ended in something other than continue or return")
+        }
+      }
+    }
+    (bind_all(env, results, cur), flow)
+  }
+  WhileLoop(results, _tys, inits, carried, body) -> {
+    var cur = vals(env, cx, inits)
+    var flow = Fell
+    var going = true
+    var count = 0
+    while going {
+      count = count + 1
+      if count > STEP_LIMIT { ub_stop("loop ran past ${STEP_LIMIT} iterations") } else { () }
+      let (_e, f) = run_body(cx, bind_all(env, carried, cur), body)
+      match f {
+        Continued(vs) -> {
+          cur = vs
+        }
+        Broke(vs) -> {
+          cur = vs
+          going = false
+        }
+        Returned -> {
+          flow = Returned
+          going = false
+        }
+        _ -> internal("a loop body ended in something other than continue, break or return")
+      }
+    }
+    (bind_all(env, results, cur), flow)
+  }
+  IfElse(results, _tys, c, _ct, on_true, on_false) -> {
+    let b = scalar_int(cx, get(env, cx, c), "if condition")
+    let (_e, f) = run_body(cx, env, if b != 0 { on_true } else { on_false })
+    match f {
+      Yielded(vs) -> (bind_all(env, results, vs), Fell)
+      Fell -> (env, Fell)
+      _ -> (env, f)
+    }
+  }
+  YieldVals(values, _tys) -> (env, Yielded(vals(env, cx, values)))
+  BreakVals(values, _tys) -> (env, Broke(vals(env, cx, values)))
+  Cont(values, _tys) -> (env, Continued(vals(env, cx, values)))
+  Ret -> (env, Returned)
+  ReduceTile(results, _tys, dim, ids, operands, otys, args, body) -> {
+    let ops = vals(env, cx, operands)
+    let shape = shape_of(otys[0])
+    let out_shape = list.map(list.filter(range(0, len(shape)), k => k != dim), k => shape[k])
+    let n_out = lanes(out_shape)
+    let len_dim = shape[dim]
+    let st = strides_of(shape)
+    # the lane of operand flat index for output position o and step j
+    let src = (o: Int, j: Int) => {
+      let c = insert_at(coords(o, out_shape), dim, j)
+      list.fold(range(0, len(shape)), 0, (a, k) => a + c[k] * st[k])
+    }
+    let folded = list.map(range(0, n_out), o => {
+      var acc = list.map(ids, identity_of)
+      for j in range(0, len_dim) {
+        let lane = src(o, j)
+        acc = fold_step(cx, env, args, body, acc, list.map(ops, v => lane_of(v, lane)))
+      }
+      acc
+    })
+    let res = list.map(range(0, len(results)), r => assemble(out_shape, list.map(folded, a => a[r])))
+    (bind_all(env, results, res), Fell)
+  }
+  ScanTile(results, _tys, dim, reverse, ids, operands, otys, args, body) -> {
+    let ops = vals(env, cx, operands)
+    let shape = shape_of(otys[0])
+    let n = lanes(shape)
+    let st = strides_of(shape)
+    let len_dim = shape[dim]
+    # every lane's running value, computed line by line along `dim`
+    var out: Map[Int, List[V]] = map.empty()
+    for line in range(0, n / len_dim) {
+      # the first lane of this line: the line number spread over the other dimensions
+      let others = list.map(list.filter(range(0, len(shape)), k => k != dim), k => shape[k])
+      let c = insert_at(coords(line, others), dim, 0)
+      let start = list.fold(range(0, len(shape)), 0, (a, k) => a + c[k] * st[k])
+      var acc = list.map(ids, identity_of)
+      for j in range(0, len_dim) {
+        let jj = if reverse { len_dim - 1 - j } else { j }
+        let lane = start + jj * st[dim]
+        acc = fold_step(cx, env, args, body, acc, list.map(ops, v => lane_of(v, lane)))
+        out = map.insert(out, lane, acc)
+      }
+    }
+    let done = out
+    let res = list.map(range(0, len(results)), r =>
+        assemble(shape, list.map(range(0, n), k => match map.get(done, k) {
+          Some(a) -> a[r]
+          None -> internal("scan left lane ${k} unset")
+        })))
+    (bind_all(env, results, res), Fell)
+  }
+  _ -> internal("instruction ${mnemonic(i)} passed the static walk")
+}
+
+fn ptrs_of(v: V) -> (List[Int], List[Int], List[Bool]) = match v {
+  VP(_s, bs, os, u) -> (bs, os, u)
+  _ -> internal("a memory operation on a value that is not a pointer tile")
+}
+
+fn int_elementwise(cx: Cx, op: String, t: Ty, a: V, b: V) -> V = {
+  let (xa, ua) = ints_of(a, op)
+  let (xb, ub) = ints_of(b, op)
+  let w = int_width(elem_name(t))
+  let n = len(xa)
+  let u = und2(ua, ub, n)
+  # an undefined lane is computed as if defined, except where that would
+  # raise: its answer is undefined either way
+  VI(shape_of(t), list.map(range(0, n), k => if und_at(u, k) { 0 } else { int_bin(cx, op, w, xa[k], xb[k]) }), u)
+}
+
+# `oc` with `j` put in at position `dim`.
+fn insert_at(oc: List[Int], dim: Int, j: Int) -> List[Int] =
+  list.map(range(0, len(oc) + 1), k => if k < dim { oc[k] } else if k == dim { j } else { oc[k - 1] })
+
+fn concat_lanes(a: V, b: V) -> V = {
+  let cat_u = (ua: List[Bool], na: Int, ub: List[Bool], nb: Int) =>
+    if len(ua) == 0 && len(ub) == 0 { no_flags() } else { list.map(range(0, na), k => und_at(ua, k)) ++ list.map(range(0, nb), k => und_at(ub, k)) }
+  match (a, b) {
+    (VF(_s, xa, ua), VF(_t, xb, ub)) -> VF([len(xa) + len(xb)], xa ++ xb, cat_u(ua, len(xa), ub, len(xb)))
+    (VI(_s, xa, ua), VI(_t, xb, ub)) -> VI([len(xa) + len(xb)], xa ++ xb, cat_u(ua, len(xa), ub, len(xb)))
+    (VP(_s, ba, oa, ua), VP(_t, bb, ob, ub)) -> VP([len(oa) + len(ob)], ba ++ bb, oa ++ ob, cat_u(ua, len(oa), ub, len(ob)))
+    _ -> internal("a shape operation over two tiles of different kinds")
+  }
+}
+
+fn check_slices(cx: Cx, idx: List[Int], sub: List[Int], whole: List[Int], what: String) -> Unit =
+  if cx.ub {
+    match list.find(range(0, len(idx)), d => idx[d] < 0 || (idx[d] + 1) * sub[d] > whole[d]) {
+      Some(d) -> ub_stop("${what} slice ${idx[d]} of dimension ${d} is outside a ${whole[d]}-long dimension cut in ${sub[d]}")
+      None -> ()
+    }
+  } else {
+    ()
+  }
+
+fn fill_dyn(cx: Cx, env: Map[Int, V], dims: List[Int], dyn: List[Ref], what: String) -> List[Int] = {
+  var used = 0
+  var out: List[Int] = []
+  for d in dims {
+    if d == DYN_DIM {
+      out = out ++ [scalar_int(cx, get(env, cx, dyn[used]), what)]
+      used = used + 1
+    } else {
+      out = out ++ [d]
+    }
+  }
+  out
+}
+
+fn identity_of(id: RedId) -> V = match id {
+  IdF(_d, v) -> VF([], [v], [])
+  IdI(d, v) -> VI([], [wrap(int_width(d), v)], [])
+}
+
+fn lane_of(v: V, k: Int) -> V = match v {
+  VF(_s, xs, u) -> VF([], [xs[k]], if und_at(u, k) { [true] } else { [] })
+  VI(_s, xs, u) -> VI([], [xs[k]], if und_at(u, k) { [true] } else { [] })
+  _ -> internal("a reduction over a value that is not a numeric tile")
+}
+
+# One fold step: the region's arguments are each operand's accumulator then
+# its element, in operand order.
+fn fold_step(cx: Cx, env: Map[Int, V], args: List[Int], body: List[Instr], acc: List[V], elems: List[V]) -> List[V] !Mem = {
+  let k = len(acc)
+  let bound = list.fold(range(0, k), env, (e, j) => map.insert(map.insert(e, args[2 * j], acc[j]), args[2 * j + 1], elems[j]))
+  let (_e, f) = run_body(cx, bound, body)
+  match f {
+    Yielded(vs) -> vs
+    _ -> internal("a reduction body ended in something other than yield")
+  }
+}
+
+# A tile of `shape` from one rank-0 value a lane.
+fn assemble(shape: List[Int], lanes_v: List[V]) -> V = {
+  let has_und = list.any(lanes_v, v => match v {
+    VF(_s, _x, u) -> any_und(u)
+    VI(_s, _x, u) -> any_und(u)
+    _ -> false
+  })
+  let u: List[Bool] = if has_und {
+    list.map(lanes_v, v => match v {
+      VF(_s, _x, u) -> any_und(u)
+      VI(_s, _x, u) -> any_und(u)
+      _ -> false
+    })
+  } else {
+    []
+  }
+  match lanes_v[0] {
+    VF(_s, _x, _u) -> VF(shape, list.map(lanes_v, v => match v {
+      VF(_s2, x, _u2) -> x[0]
+      _ -> NAN
+    }), u)
+    VI(_s, _x, _u) -> VI(shape, list.map(lanes_v, v => match v {
+      VI(_s2, x, _u2) -> x[0]
+      _ -> 0
+    }), u)
+    _ -> internal("a reduction yielded a value that is not a numeric tile")
+  }
+}
+
+# ---- launches ----
+
+fn grid3(grid: List[Int]) -> List[Int] = list.map(range(0, 3), k => if k < len(grid) { grid[k] } else { 1 })
+
+# The buffer formats a parameter of format `d` may be handed: its own, and
+# `u8` for `i8` (the same bytes, read as signed by the kernel).
+fn buffer_fits(d: String, dt: String) -> Bool = d == dt || (d == "i8" && dt == "u8")
+
+fn params_of(k: Kernel, dtypes: List[String], scalars: List[Float]) -> List[V] = {
+  let n_buf = len(list.filter(k.params, p => match p {
+    ByPtr(_d) -> true
+    ByValue(_d) -> false
+  }))
+  let n_sc = len(k.params) - n_buf
+  if n_buf != len(dtypes) {
+    bad_stop("`${k.name}` takes ${n_buf} buffer(s) and was launched with ${len(dtypes)}")
+  } else if n_sc != len(scalars) {
+    bad_stop("`${k.name}` takes ${n_sc} scalar(s) and was launched with ${len(scalars)}")
+  } else {
+    ()
+  }
+  var b = 0
+  var s = 0
+  var out: List[V] = []
+  for p in k.params {
+    match p {
+      ByPtr(d) -> {
+        if not buffer_fits(d, dtypes[b]) {
+          bad_stop("`${k.name}` parameter ${len(out)} is a ${d} pointer and was handed a ${dtypes[b]} buffer; reading one format as another is not modelled")
+        } else {
+          ()
+        }
+        out = out ++ [VP([], [b], [0], [])]
+        b = b + 1
+      }
+      ByValue(d) -> {
+        let x = scalars[s]
+        out = out ++ [if d == "f64" { VF([], [x], []) } else { VI([], [wrap(int_width(d), to_int(x))], []) }]
+        s = s + 1
+      }
+    }
+  }
+  out
+}
+
+# A panic's message without the ` at <file>:<line>:<col>` the runtime adds,
+# which names this package's own line rather than anything in the kernel.
+fn without_site(message: String) -> String = match str.last_index_of(message, " at ") {
+  Some(k) -> if str.contains(str.drop(message, k), ".dawn:") { str.take(message, k) } else { message }
+  None -> message
+}
+
+# The error a panic message spells, split into its kind and the rest.
+fn error_of(message: String) -> InterpError = {
+  let kinds = ["interp.unsupported_op", "interp.ub", "interp.bad_launch", "interp.internal"]
+  match list.find(kinds, kd => str.starts_with(message, kd ++ ": ")) {
+    Some(kd) -> InterpError { kind: kd, message: unwrap_or(str.strip_prefix(without_site(message), kd ++ ": "), message) }
+    None -> InterpError { kind: "interp.internal", message: message }
+  }
+}
+
+## Run `k` over the grid `grid` (`[gx]`, `[gx, gy]` or `[gx, gy, gz]`, missing
+## axes 1) on the buffers `ins` of formats `dtypes` and the by-value
+## arguments `scalars`, in the conventions of std/gpu's `WideRefFn`. Blocks
+## run one after another, x fastest. The answer is each buffer a store
+## reached, by its position among the buffers, with its whole contents.
+## `ub_checks` (default on) refuses undefined behaviour the kernel reaches;
+## off, an undefined lane reads NaN or 0 and the run goes on.
+pub fn interp_kernel(k: Kernel, grid: List[Int], dtypes: List[String], ins: List[List[Float]],
+  scalars: List[Float], ub_checks: Bool = true) -> Result[List[(Int, List[Float])], InterpError] =
+  match unsupported_in(k) {
+    Some(why) -> Err(InterpError { kind: "interp.unsupported_op", message: why })
+    None -> match catch_panic(() => with_mem(() => run(k, grid3(grid), dtypes, ins, scalars, ub_checks))) {
+      Ok(w) -> Ok(w)
+      Err(e) -> Err(error_of(e.message))
+    }
+  }
+
+fn run(k: Kernel, grid: List[Int], dtypes: List[String], ins: List[List[Float]], scalars: List[Float],
+  ub: Bool) -> List[(Int, List[Float])] !Mem = {
+  let params = params_of(k, dtypes, scalars)
+  let bufs = list.map(ins, xs => mem.f64_from_list(xs))
+  let written = mem.new(len(ins))
+  let base = Cx { bufs: bufs, lens: list.map(ins, xs => len(xs)), written: written, params: params, bid: [0, 0, 0],
+    grid: grid, ub: ub }
+  for z in range(0, grid[2]) {
+    for y in range(0, grid[1]) {
+      for x in range(0, grid[0]) {
+        let (_env, _flow) = run_body(Cx { ..base, bid: [x, y, z] }, map.empty(), k.body)
+      }
+    }
+  }
+  let touched = list.filter(range(0, len(ins)), b => mem.at(written, b) != 0)
+  list.map(touched, b => (b, mem.f64_to_list(bufs[b])))
+}
+
+## `prog` as the fake device runs a kernel: std/gpu's `WideRefFn`, lowered
+## once here and interpreted over `grid` on every call. `with_gpu_fake` does
+## not consult a launch's grid, so the grid is fixed when the function is
+## made (`with_gpu_interp` in the `device` module reads it from each launch
+## instead). A refused launch panics with `<kind>: <message>`, kinds as
+## [`InterpError`] has them, because a `WideRefFn` has no error channel.
+pub fn interp_ref(prog: TileProg, grid: List[Int], ub_checks: Bool = true) -> WideRefFn = {
+  let k = lower(prog)
+  (dtypes, ins, scalars) => match interp_kernel(k, grid, dtypes, ins, scalars, ub_checks) {
+    Ok(w) -> w
+    Err(e) -> panic("${e.kind}: ${e.message}")
+  }
+}
