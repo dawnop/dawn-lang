@@ -9,6 +9,7 @@ import os
 import secrets
 import socket
 import struct
+import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -43,6 +44,15 @@ MAX_FRAME_BYTES = 262_144
 BUSY_ATTEMPTS = 5
 BUSY_RETRY_SECONDS = 2
 SMOKE_SECONDS = 30
+# `systemctl is-active` reports a Type=simple unit active once python3 is
+# exec'd, before asyncio.start_server() has bound the port; the v0.95.0 deploy
+# smoke hit that window and was refused. So a refused or timed-out connect is
+# retried with exponential backoff for this long; the override exists for the
+# contract test's bounded-failure case and is clamped to (0, 60].
+CONNECT_SECONDS = min(60.0, float(os.environ.get("PLAY_LSP_SMOKE_CONNECT_SECONDS", "10")))
+CONNECT_FIRST_BACKOFF = 0.1
+if not CONNECT_SECONDS > 0:
+    raise SystemExit("PLAY_LSP_SMOKE_CONNECT_SECONDS must be positive")
 
 if "\r" in ORIGIN or "\n" in ORIGIN:
     raise SystemExit("PLAY_LSP_SMOKE_ORIGIN must be one HTTP Origin")
@@ -132,7 +142,51 @@ class GatewayBusy(RuntimeError):
     """The bounded gateway has no free native-process slot yet."""
 
 
+def connect():
+    """Connect to the gateway, retrying only refusal and connect timeout.
+
+    Anything after the TCP connect (handshake, child, diagnostics) stays
+    fail-fast in smoke_once(). Retries are logged on stderr so the success
+    line on stdout is unchanged.
+    """
+    give_up = time.monotonic() + CONNECT_SECONDS
+    backoff = CONNECT_FIRST_BACKOFF
+    retries = 0
+    while True:
+        left = give_up - time.monotonic()
+        try:
+            stream = socket.create_connection(
+                (HOST, PORT), timeout=max(0.05, min(10, left))
+            )
+        except (ConnectionRefusedError, TimeoutError) as error:
+            left = give_up - time.monotonic()
+            if left <= 0:
+                raise RuntimeError(
+                    "gateway not accepting on %s:%d after %d connect retries "
+                    "in %gs: %s" % (HOST, PORT, retries, CONNECT_SECONDS, error)
+                ) from None
+            pause = min(backoff, left)
+            retries += 1
+            print(
+                "dawn-play-lsp smoke: connect retry %d in %.2fs (%s)"
+                % (retries, pause, type(error).__name__),
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(pause)
+            backoff *= 2
+            continue
+        if retries:
+            print(
+                "dawn-play-lsp smoke: connected after %d connect retries" % retries,
+                file=sys.stderr,
+                flush=True,
+            )
+        return stream
+
+
 def smoke_once():
+    stream = connect()
     deadline = time.monotonic() + SMOKE_SECONDS
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
     request = (
@@ -146,9 +200,7 @@ def smoke_once():
         "Sec-WebSocket-Protocol: %s\r\n\r\n"
     ) % (SITE_HOST, key, ORIGIN, PROTOCOL)
 
-    with socket.create_connection(
-        (HOST, PORT), timeout=min(10, remaining(deadline))
-    ) as stream:
+    with stream:
         stream.settimeout(remaining(deadline))
         stream.sendall(request.encode("ascii"))
         header = bytearray()
@@ -207,8 +259,9 @@ def smoke_once():
 
 def main():
     # A deploy smoke may race a browser reconnect after systemd becomes
-    # active.  Retry only the gateway's explicit busy response, for at most
-    # eight seconds; every protocol/native failure remains fail-fast.
+    # active.  Retry the gateway's explicit busy response for at most eight
+    # seconds, and (in connect()) a not-yet-listening port for CONNECT_SECONDS;
+    # every protocol/native failure remains fail-fast.
     for attempt in range(BUSY_ATTEMPTS):
         try:
             smoke_once()

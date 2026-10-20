@@ -1524,6 +1524,130 @@ def measurement_evidence_contract():
     ok("10x native measurement evidence is complete, bounded and public-safe")
 
 
+def gateway_environment(port, audit_path):
+    """The gateway's test environment: fake child, small limits, loopback."""
+    environment = os.environ.copy()
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PLAY_LSP_HOST": "127.0.0.1",
+        "PLAY_LSP_PORT": str(port),
+        "PLAY_LSP_ORIGINS": ORIGIN,
+        "PLAY_LSP_MAX_SESSIONS": "2",
+        "PLAY_LSP_SOURCE_BYTES": "64",
+        "PLAY_LSP_MESSAGE_BYTES": "4096",
+        "PLAY_LSP_IDLE_SECONDS": "15",
+        "PLAY_LSP_LIFETIME_SECONDS": "20",
+        "PLAY_LSP_SETUP_SECONDS": "1",
+        "PLAY_LSP_HANDSHAKE_SECONDS": "2",
+        "PLAY_LSP_PING_SECONDS": "10",
+        "PLAY_LSP_SHUTDOWN_SECONDS": "1",
+        "PLAY_LSP_UNSAFE_LOCAL": "1",
+        "PLAY_LSP_CHILD": "%s -B %s" % (
+            shlex.quote(sys.executable), shlex.quote(FAKE)
+        ),
+        "FAKE_LSP_AUDIT": audit_path,
+        "FAKE_LSP_OMIT_DIAGNOSTIC_VERSION": (
+            "1" if os.environ.get(
+                "PLAY_LSP_CONTRACT_OMIT_FAKE_VERSION"
+            ) == "1" else "0"
+        ),
+    })
+    return environment
+
+
+def smoke_environment_for(port, **extra):
+    environment = os.environ.copy()
+    environment.update({
+        "PLAY_LSP_SMOKE_PORT": str(port),
+        "PLAY_LSP_SMOKE_ORIGIN": ORIGIN,
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    environment.update(extra)
+    return environment
+
+
+def smoke_connect_race_contract():
+    """The deploy smoke survives a gateway that is not yet listening.
+
+    redeploy.sh runs the smoke right after `systemctl is-active`, which for a
+    Type=simple unit is true before asyncio.start_server() binds; the v0.95.0
+    deploy was refused in that window. Here the smoke starts first, against a
+    port nothing listens on, and the gateway is started only after the smoke
+    has logged its first refused connect, so the window is wider than in
+    production and deterministic. A smoke without the retry fails this.
+    """
+    port = free_port()
+    started = time.monotonic()
+    refused = subprocess.run(
+        [sys.executable, "-B", SMOKE],
+        cwd=ROOT,
+        env=smoke_environment_for(port, PLAY_LSP_SMOKE_CONNECT_SECONDS="1"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=10,
+    )
+    elapsed = time.monotonic() - started
+    assert (
+        refused.returncode != 0
+        and "connect retry 1 " in refused.stdout
+        and "gateway not accepting on 127.0.0.1:%d" % port in refused.stdout
+        and "smoke ok" not in refused.stdout
+        and elapsed < 5
+    ), (elapsed, refused.stdout)
+    ok("deployment smoke gives up on a closed port within its connect budget")
+
+    port = free_port()
+    with tempfile.TemporaryDirectory(prefix="dawn-lsp-race-") as temp:
+        smoke_path = os.path.join(temp, "smoke.out")
+        with open(smoke_path, "wb") as smoke_out:
+            smoke = subprocess.Popen(
+                [sys.executable, "-B", SMOKE],
+                cwd=ROOT,
+                env=smoke_environment_for(port),
+                stdout=smoke_out,
+                stderr=subprocess.STDOUT,
+            )
+        gateway = None
+        try:
+            def smoke_was_refused():
+                with open(smoke_path, encoding="utf-8", errors="replace") as out:
+                    text = out.read()
+                if smoke.poll() is not None:
+                    raise AssertionError("smoke exited before the gateway started: " + text)
+                return "connect retry 1 " in text
+
+            wait_until(smoke_was_refused)
+            with open(os.path.join(temp, "gateway.log"), "wb") as log:
+                gateway = subprocess.Popen(
+                    [sys.executable, "-B", GATEWAY],
+                    cwd=ROOT,
+                    env=gateway_environment(port, os.path.join(temp, "audit.jsonl")),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+            smoke.wait(timeout=20)
+            with open(smoke_path, encoding="utf-8", errors="replace") as out:
+                text = out.read()
+            assert (
+                smoke.returncode == 0
+                and "connected after " in text
+                and text.endswith("dawn-play-lsp smoke ok\n")
+            ), text
+        finally:
+            if smoke.poll() is None:
+                smoke.kill()
+                smoke.wait()
+            if gateway is not None:
+                gateway.terminate()
+                try:
+                    gateway.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    gateway.kill()
+                    gateway.wait()
+    ok("deployment smoke retries a gateway that is not yet listening")
+
+
 def main():
     deployment_contract()
     remote_restart_contract()
@@ -1531,36 +1655,12 @@ def main():
     native_version_guard_contract()
     measurement_evidence_contract()
     diagnostics_params_contract()
+    smoke_connect_race_contract()
     port = free_port()
     with tempfile.TemporaryDirectory(prefix="dawn-lsp-contract-") as temp:
         audit_path = os.path.join(temp, "audit.jsonl")
         log_path = os.path.join(temp, "gateway.log")
-        environment = os.environ.copy()
-        environment.update({
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PLAY_LSP_HOST": "127.0.0.1",
-            "PLAY_LSP_PORT": str(port),
-            "PLAY_LSP_ORIGINS": ORIGIN,
-            "PLAY_LSP_MAX_SESSIONS": "2",
-            "PLAY_LSP_SOURCE_BYTES": "64",
-            "PLAY_LSP_MESSAGE_BYTES": "4096",
-            "PLAY_LSP_IDLE_SECONDS": "15",
-            "PLAY_LSP_LIFETIME_SECONDS": "20",
-            "PLAY_LSP_SETUP_SECONDS": "1",
-            "PLAY_LSP_HANDSHAKE_SECONDS": "2",
-            "PLAY_LSP_PING_SECONDS": "10",
-            "PLAY_LSP_SHUTDOWN_SECONDS": "1",
-            "PLAY_LSP_UNSAFE_LOCAL": "1",
-            "PLAY_LSP_CHILD": "%s -B %s" % (
-                shlex.quote(sys.executable), shlex.quote(FAKE)
-            ),
-            "FAKE_LSP_AUDIT": audit_path,
-            "FAKE_LSP_OMIT_DIAGNOSTIC_VERSION": (
-                "1" if os.environ.get(
-                    "PLAY_LSP_CONTRACT_OMIT_FAKE_VERSION"
-                ) == "1" else "0"
-            ),
-        })
+        environment = gateway_environment(port, audit_path)
         with open(log_path, "wb") as log:
             gateway = subprocess.Popen(
                 [sys.executable, "-B", GATEWAY],
@@ -1611,12 +1711,7 @@ def main():
                 assert "child-start" not in stream_log.read()
             ok("Origin and dawn-lsp-v1 subprotocol are mandatory")
 
-            smoke_environment = os.environ.copy()
-            smoke_environment.update({
-                "PLAY_LSP_SMOKE_PORT": str(port),
-                "PLAY_LSP_SMOKE_ORIGIN": ORIGIN,
-                "PYTHONDONTWRITEBYTECODE": "1",
-            })
+            smoke_environment = smoke_environment_for(port)
             smoke = subprocess.run(
                 [sys.executable, "-B", SMOKE],
                 cwd=ROOT,
