@@ -103,6 +103,11 @@ PR 运行是子集，见下文协议段），否则拒绝这个 tag（此前的�
    也必须对出与 HEAD 相同的字节。第一阶段在没有工作树 `std/` 的隔离目录运行，
    让种子使用自己内嵌的发布 std；后续阶段才显式使用当前 std。发版前手动过一遍，
    不进 CI。CI 用离线假编译器固定这条配对规则，完整固定点仍由发版前手动重放验证。
+6. **发版前的 LSP 抽样**（裁决「LSP 增量 sync 的验收线」第 6 条，2026-10-19）：改 `VERSION`
+   之前，在本机空闲时跑一次 `python3 scripts/lsp-sync-bench/bench.py --jar build/dawn-selfhost.jar
+   --baseline .dawn/seeds/<当前种子 tag>/seed.jar --out <文件>`，把末行摘要贴进 release 提交的正文；
+   越线（退出状态 1）不拦发版，但要在 todo 里记一条。负载敏感，不进 CI，口径见
+   [lsp-sync-bench-design.md](lsp-sync-bench-design.md)。
 
 ### 链条表
 
