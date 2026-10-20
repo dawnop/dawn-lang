@@ -179,6 +179,22 @@ status: `deploy/lsp-smoke.py` performs the WebSocket handshake, initializes the
 real sandboxed native server, opens the fixed scratch buffer, waits for a
 diagnostics notification and completes the close handshake.
 
+`systemctl is-active dawn-play-lsp` does not mean the gateway is listening:
+the unit is `Type=simple`, so systemd calls it active as soon as `python3` is
+started, before `asyncio.start_server()` binds `127.0.0.1:8088`. The v0.95.0
+deploy ran the smoke in that window and failed with `ConnectionRefusedError`
+(systemd "Started" and the gateway's "listening" line in the same second); a
+second redeploy passed. The smoke therefore retries a refused or timed-out
+TCP connect with exponential backoff (0.1 s, doubling) for at most 10 s
+(`PLAY_LSP_SMOKE_CONNECT_SECONDS`), printing each retry and the final count on
+stderr; after the connect, every handshake, child or diagnostics failure is
+still fail-fast, and only an explicit HTTP 503 is retried as before. A gateway
+that never comes up fails the deploy after those 10 s with
+`gateway not accepting on 127.0.0.1:8088 after N connect retries`. This is a
+change to `lsp-smoke.py` only, which `redeploy.sh` ships with
+`playground/deploy/`: the unit file is unchanged, so no `daemon-reload` is
+needed for it.
+
 `redeploy.sh` refuses to run unless `DAWN_DEPLOY_COMMIT` is the full sha of its own
 checkout's HEAD and tracked files are clean (before any build or ssh). It
 installs the runner's socket and service template itself, when they differ
