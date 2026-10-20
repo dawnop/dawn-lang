@@ -22,6 +22,7 @@ use java "java.io.FileOutputStream"
 use types.{safe_rel, Request, Response, response_rep, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw, log_request, escape_field}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
+use java "java.net.ServerSocket"
 use java "java.io.InputStream"
 use java "java.io.OutputStream"
 use java "java.net.URI"
@@ -1124,15 +1125,40 @@ fn test_broken_stream() -> InputStream !io = {
 # The only client that will send `/a/../b` or a repeated header verbatim —
 # HttpClient and HttpURLConnection normalize dot segments away before the
 # bytes leave, which is exactly the behavior these tests must not inherit.
-fn raw_http(port: Int, request: String) -> String !io = {
-  let s = Socket.new("127.0.0.1", port)
-  let out = s.getOutputStream()!
-  out.write(bytes.utf8(request))
-  out.flush()
-  let resp = bytes.decode_utf8_lossy(s.getInputStream()!.readAllBytes()!)
-  s.close()
-  resp
-}
+# Bounded like `raw_http_within`: a server that accepts and never answers is a
+# red assertion naming the port, not a hung suite.
+fn raw_http(port: Int, request: String) -> String !io = raw_http_within(port, request, RAW_HTTP_MS)
+
+# Silence, in milliseconds, after which `raw_http` stops waiting.
+const RAW_HTTP_MS: Int = 20000
+
+# Test-only: the status-line check for raw responses. The test runner prints
+# the asserted expression and never its operands, so a bare
+# `assert str.starts_with(resp, ...)` that fails loses the response, and a
+# one-off failure cannot be told apart from a real one. On a mismatch this
+# panics with the port, the wanted prefix and the response as the client read
+# it: line breaks escaped, capped at RAW_SHOW_CAP characters, and an empty
+# response named as empty.
+fn expect_status(port: Int, resp: String, want: String) -> Unit =
+  if str.starts_with(resp, want) {
+    ()
+  } else {
+    panic("port ${to_string(port)}: wanted a response starting with `${want}`, got ${show_raw(resp)}")
+  }
+
+const RAW_SHOW_CAP: Int = 2000
+
+fn show_raw(resp: String) -> String =
+  if str.is_empty(resp) {
+    "<empty response>"
+  } else {
+    let esc = str.replace(str.replace(str.replace(resp, "\\", "\\\\"), "\r", "\\r"), "\n", "\\n")
+    if len(str.chars(esc)) > RAW_SHOW_CAP {
+      "`${str.take(esc, RAW_SHOW_CAP)}` (cut at ${to_string(RAW_SHOW_CAP)} characters)"
+    } else {
+      "`${esc}`"
+    }
+  }
 
 # Test-only: the feature release of the running JVM (21, 26, ...), for the one
 # test whose wire bytes depend on jdk.httpserver's version. The property is
@@ -1240,11 +1266,11 @@ test "a response the constructors refuse is a 500 inside the handler's isolation
   let port = srv.getAddress()!.getPort()
   # a final 100 used to reach the wire, and the client waited for ever
   let interim = raw_http(port, get_line("/interim"))
-  assert str.starts_with(interim, "HTTP/1.1 500")
+  expect_status(port, interim, "HTTP/1.1 500")
   assert str.contains(interim, "{\"error\":\"internal server error\"}")
   # a Transfer-Encoding next to the JDK's Content-length never goes out
   let te = raw_http(port, get_line("/te"))
-  assert str.starts_with(te, "HTTP/1.1 500")
+  expect_status(port, te, "HTTP/1.1 500")
   assert not str.contains(str.to_lower(te), "transfer-encoding")
   srv.stop(0)
 }
@@ -1303,8 +1329,9 @@ test "205 sends no body either: the one no-content status the JDK does not force
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   srv.createContext("/", ex => write_response(ex, text(205, "must not travel")))
   srv.start()
-  let resp = raw_http(srv.getAddress()!.getPort(), get_line("/"))
-  assert str.starts_with(resp, "HTTP/1.1 205")
+  let port = srv.getAddress()!.getPort()
+  let resp = raw_http(port, get_line("/"))
+  expect_status(port, resp, "HTTP/1.1 205")
   assert not str.contains(resp, "must not travel")
   assert not str.contains(str.to_lower(resp), "transfer-encoding")
   srv.stop(0)
@@ -1468,7 +1495,7 @@ test "a sized stream goes out with its exact Content-Length, and a short one end
   if jdk_feature() >= 23 {
     assert short == ""
   } else {
-    assert str.starts_with(short, "HTTP/1.1 200")
+    expect_status(port, short, "HTTP/1.1 200")
     assert str.contains(str.to_lower(short), "content-length: 10")
     assert str.ends_with(short, "\r\n\r\nabc")
   }
@@ -1573,14 +1600,14 @@ test "dot segments are 400 before routing, on routed and unrouted paths alike" {
   let port = srv.getAddress()!.getPort()
   # would normalize to the routed /b — refused instead, which proves the check
   # sits before routing (a normalizer would 200, plain routing would 404)
-  assert str.starts_with(raw_http(port, get_line("/a/../b")), "HTTP/1.1 400")
+  expect_status(port, raw_http(port, get_line("/a/../b")), "HTTP/1.1 400")
   # the encoded spelling is the classic normalization bypass
-  assert str.starts_with(raw_http(port, get_line("/%2e%2e/b")), "HTTP/1.1 400")
-  assert str.starts_with(raw_http(port, get_line("/a/./b")), "HTTP/1.1 400")
+  expect_status(port, raw_http(port, get_line("/%2e%2e/b")), "HTTP/1.1 400")
+  expect_status(port, raw_http(port, get_line("/a/./b")), "HTTP/1.1 400")
   # a path no route matches is still refused with 400, not 404
-  assert str.starts_with(raw_http(port, get_line("/zzz/../q")), "HTTP/1.1 400")
+  expect_status(port, raw_http(port, get_line("/zzz/../q")), "HTTP/1.1 400")
   # sanity: the clean path still routes
-  assert str.starts_with(raw_http(port, get_line("/b")), "HTTP/1.1 200")
+  expect_status(port, raw_http(port, get_line("/b")), "HTTP/1.1 200")
   srv.stop(0)
 }
 
@@ -1598,17 +1625,17 @@ test "the early 400 and 413 go through the middleware chain, so they carry CORS"
   # the response text is lowercased before the header check: jdk.httpserver
   # title-cases the names it writes, so `X-Stamped` goes out as `X-stamped`
   let dot = raw_http(port, get_line("/a/../b"))
-  assert str.starts_with(dot, "HTTP/1.1 400")
+  expect_status(port, dot, "HTTP/1.1 400")
   assert str.contains(str.to_lower(dot), "x-stamped: 1")
 
   let big = raw_http(port,
     "POST /p HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
-  assert str.starts_with(big, "HTTP/1.1 413")
+  expect_status(port, big, "HTTP/1.1 413")
   assert str.contains(str.to_lower(big), "x-stamped: 1")
 
   # and an ordinary answer is unchanged
   let ok = raw_http(port, get_line("/b"))
-  assert str.starts_with(ok, "HTTP/1.1 200")
+  expect_status(port, ok, "HTTP/1.1 200")
   assert str.contains(str.to_lower(ok), "x-stamped: 1")
   srv.stop(0)
 }
@@ -1621,8 +1648,9 @@ test "an early refusal on a no-cors route is not stamped" {
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   srv.createContext("/", ex => handle(routes, [stamping], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
-  let resp = raw_http(srv.getAddress()!.getPort(), get_line("/dav/../secret"))
-  assert str.starts_with(resp, "HTTP/1.1 400")
+  let port = srv.getAddress()!.getPort()
+  let resp = raw_http(port, get_line("/dav/../secret"))
+  expect_status(port, resp, "HTTP/1.1 400")
   assert not str.contains(str.to_lower(resp), "x-stamped")
   srv.stop(0)
 }
@@ -1632,9 +1660,10 @@ test "two Cookie headers both arrive: header() the first, headers_all both" {
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
-  let resp = raw_http(srv.getAddress()!.getPort(),
+  let port = srv.getAddress()!.getPort()
+  let resp = raw_http(port,
     "GET /c HTTP/1.1\r\nHost: t\r\nCookie: a=1\r\nCookie: b=2\r\nConnection: close\r\n\r\n")
-  assert str.starts_with(resp, "HTTP/1.1 200")
+  expect_status(port, resp, "HTTP/1.1 200")
   assert str.contains(resp, "a=1|a=1;b=2")
   srv.stop(0)
 }
@@ -1647,7 +1676,7 @@ test "a query parameter repeated on the wire arrives whole" {
   let port = srv.getAddress()!.getPort()
   # `?tag=a&tag=b` used to reach the handler as just "b"
   let resp = raw_http(port, get_line("/q?tag=a&tag=b"))
-  assert str.starts_with(resp, "HTTP/1.1 200")
+  expect_status(port, resp, "HTTP/1.1 200")
   assert str.contains(resp, "a|a;b")
   # a single value is unchanged, and query() still answers it
   assert str.contains(raw_http(port, get_line("/q?tag=only")), "only|only")
@@ -1737,8 +1766,9 @@ test "a panic is a 500 the application words: default, then configured" {
   let a = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   a.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   a.start()
-  let ra = raw_http(a.getAddress()!.getPort(), get_line("/boom"))
-  assert str.starts_with(ra, "HTTP/1.1 500")
+  let pa = a.getAddress()!.getPort()
+  let ra = raw_http(pa, get_line("/boom"))
+  expect_status(pa, ra, "HTTP/1.1 500")
   assert str.contains(ra, "{\"error\":\"internal server error\"}")
   a.stop(0)
   # configured: the bytes this framework used to emit unconditionally, which
@@ -1749,12 +1779,13 @@ test "a panic is a 500 the application words: default, then configured" {
   let b = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   b.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, fastapi, ex))
   b.start()
-  let rb = raw_http(b.getAddress()!.getPort(), get_line("/boom"))
-  assert str.starts_with(rb, "HTTP/1.1 500")
+  let pb = b.getAddress()!.getPort()
+  let rb = raw_http(pb, get_line("/boom"))
+  expect_status(pb, rb, "HTTP/1.1 500")
   assert str.contains(rb, "{\"detail\":\"服务器内部错误\"}")
   # a 404 the server renders itself takes the same key
-  let r404 = raw_http(b.getAddress()!.getPort(), get_line("/nope"))
-  assert str.starts_with(r404, "HTTP/1.1 404")
+  let r404 = raw_http(pb, get_line("/nope"))
+  expect_status(pb, r404, "HTTP/1.1 404")
   assert str.contains(r404, "\"detail\"")
   b.stop(0)
 }
@@ -1798,11 +1829,11 @@ test "an invalid UTF-8 body on a text route is a 400 naming the offset" {
   # 61 FF 62: 'a', an invalid byte, 'b' — one clean byte, so the offset is 1
   let bad = bytes.freeze(bytes.put(bytes.put(bytes.put(bytes.buf(), 0x61), 0xFF), 0x62))
   let refused = post_bytes(port, "/t", bad)
-  assert str.starts_with(refused, "HTTP/1.1 400")
+  expect_status(port, refused, "HTTP/1.1 400")
   assert str.contains(refused, "request body is not valid UTF-8 (offset 1)")
   # the same route under a valid body is untouched, byte-exact CJK included
   let ok = post_bytes(port, "/t", bytes.utf8("中文ok"))
-  assert str.starts_with(ok, "HTTP/1.1 200")
+  expect_status(port, ok, "HTTP/1.1 200")
   assert str.contains(ok, "中文ok")
   srv.stop(0)
 }
@@ -1931,17 +1962,17 @@ test "a stream-body route's body_limit is a 413 that leaves no temp file" {
   let before = spill_files()
   # exactly the ceiling reaches the handler, all of it on disk
   let ok = send_chunked(port, "PUT", "/up", "", "0123456789")
-  assert str.starts_with(ok, "HTTP/1.1 200")
+  expect_status(port, ok, "HTTP/1.1 200")
   assert str.contains(ok, "size=10")
   # one byte over with no Content-Length: counted during the spill
   let counted = send_chunked(port, "PUT", "/up", "", "0123456789A")
-  assert str.starts_with(counted, "HTTP/1.1 413")
+  expect_status(port, counted, "HTTP/1.1 413")
   assert str.contains(counted, "request body exceeds 10 bytes")
   assert str.contains(str.to_lower(counted), "x-stamped: 1")
   # far over, across several spill chunks
-  assert str.starts_with(send_chunked(port, "PUT", "/up", "", str.repeat("z", 20000)), "HTTP/1.1 413")
+  expect_status(port, send_chunked(port, "PUT", "/up", "", str.repeat("z", 20000)), "HTTP/1.1 413")
   # one byte over by Content-Length: refused before the temp file exists
-  assert str.starts_with(send_sized(port, "PUT", "/up", "", "0123456789A"), "HTTP/1.1 413")
+  expect_status(port, send_sized(port, "PUT", "/up", "", "0123456789A"), "HTTP/1.1 413")
   # a stream-body route with no ceiling of its own is unbounded, as before
   assert str.contains(send_chunked(port, "PUT", "/free", "", "0123456789A"), "size=11")
   srv.stop(0)
@@ -1963,25 +1994,25 @@ test "a guard's refusal is answered before the body is read, through the middlew
   # anonymous and over the route's ceiling: the guard's 401 wins over the 413,
   # which is only possible if the guard ran before anything counted the body
   let anon = send_sized(port, "PUT", "/dav/a.txt", "", "0123456789A")
-  assert str.starts_with(anon, "HTTP/1.1 401")
+  expect_status(port, anon, "HTTP/1.1 401")
   assert str.contains(str.to_lower(anon), "www-authenticate: bearer")
   assert str.contains(str.to_lower(anon), "x-stamped: 1")
   let anon_chunked = send_chunked(port, "PUT", "/dav/a.txt", "", str.repeat("z", 20000))
-  assert str.starts_with(anon_chunked, "HTTP/1.1 401")
+  expect_status(port, anon_chunked, "HTTP/1.1 401")
   # the guard sees the captures
   let locked = send_sized(port, "PUT", "/dav/locked", "Authorization: Bearer ok\r\n", "abc")
-  assert str.starts_with(locked, "HTTP/1.1 403")
+  expect_status(port, locked, "HTTP/1.1 403")
   # with credentials the body is spilled and the handler runs
   let ok = send_sized(port, "PUT", "/dav/a.txt", "Authorization: Bearer ok\r\n", "hello")
-  assert str.starts_with(ok, "HTTP/1.1 200")
+  expect_status(port, ok, "HTTP/1.1 200")
   assert str.contains(ok, "size=5")
   # an in-memory route: 401 rather than the 413 its five bytes would earn
   let mem = send_sized(port, "POST", "/p", "", "hello")
-  assert str.starts_with(mem, "HTTP/1.1 401")
+  expect_status(port, mem, "HTTP/1.1 401")
   assert str.contains(str.to_lower(mem), "x-stamped: 1")
   # a guard that panics is the application's 500, still through the chain
   let bug = send_sized(port, "POST", "/bug", "", "")
-  assert str.starts_with(bug, "HTTP/1.1 500")
+  expect_status(port, bug, "HTTP/1.1 500")
   assert str.contains(str.to_lower(bug), "x-stamped: 1")
   srv.stop(0)
   assert new_since(before, spill_files()) == []
@@ -2000,19 +2031,19 @@ test "an in-memory route's body_limit replaces max_body, in both directions" {
   srv.start()
   let port = srv.getAddress()!.getPort()
   # raised: twelve bytes are over the server's 8 and under the route's 16
-  assert str.starts_with(send_sized(port, "POST", "/raised", "", "twelve bytes"), "HTTP/1.1 200")
-  assert str.starts_with(send_sized(port, "POST", "/raised", "", str.repeat("r", 17)), "HTTP/1.1 413")
+  expect_status(port, send_sized(port, "POST", "/raised", "", "twelve bytes"), "HTTP/1.1 200")
+  expect_status(port, send_sized(port, "POST", "/raised", "", str.repeat("r", 17)), "HTTP/1.1 413")
   # lowered: five bytes are under the server's 8 and over the route's 4
   let low = send_sized(port, "POST", "/lowered", "", "hello")
-  assert str.starts_with(low, "HTTP/1.1 413")
+  expect_status(port, low, "HTTP/1.1 413")
   assert str.contains(low, "request body exceeds 4 bytes")
-  assert str.starts_with(send_chunked(port, "POST", "/lowered", "", "hello"), "HTTP/1.1 413")
-  assert str.starts_with(send_sized(port, "POST", "/lowered", "", "four"), "HTTP/1.1 200")
+  expect_status(port, send_chunked(port, "POST", "/lowered", "", "hello"), "HTTP/1.1 413")
+  expect_status(port, send_sized(port, "POST", "/lowered", "", "four"), "HTTP/1.1 200")
   # a raw-body route is unbounded unless it sets a ceiling
-  assert str.starts_with(send_sized(port, "POST", "/raw-capped", "", "hello"), "HTTP/1.1 413")
-  assert str.starts_with(send_sized(port, "POST", "/raw", "", "twelve bytes"), "HTTP/1.1 200")
+  expect_status(port, send_sized(port, "POST", "/raw-capped", "", "hello"), "HTTP/1.1 413")
+  expect_status(port, send_sized(port, "POST", "/raw", "", "twelve bytes"), "HTTP/1.1 200")
   # and a route with neither keeps the server's ceiling
-  assert str.starts_with(send_sized(port, "POST", "/plain", "", "twelve bytes"), "HTTP/1.1 413")
+  expect_status(port, send_sized(port, "POST", "/plain", "", "twelve bytes"), "HTTP/1.1 413")
   srv.stop(0)
 }
 
@@ -2039,21 +2070,21 @@ test "a custom ErrorFormat words all three 413 sites" {
   let before = spill_files()
   # in memory, refused on the declared length before anything is read
   let early = send_sized(port, "POST", "/mem", "", "hello")
-  assert str.starts_with(early, "HTTP/1.1 413")
+  expect_status(port, early, "HTTP/1.1 413")
   assert str.contains(early, "too big, limit 4")
   assert not str.contains(early, "request body exceeds")
   # in memory, no length declared, so the read itself finds the overrun
   let read = send_chunked(port, "POST", "/mem", "", "hello")
-  assert str.starts_with(read, "HTTP/1.1 413")
+  expect_status(port, read, "HTTP/1.1 413")
   assert str.contains(read, "too big, limit 4")
   # stream body, refused on Content-Length before the temp file exists
   let pre = send_sized(port, "PUT", "/up", "", "0123456789A")
-  assert str.starts_with(pre, "HTTP/1.1 413")
+  expect_status(port, pre, "HTTP/1.1 413")
   assert str.contains(pre, "too big, limit 10")
   assert not str.contains(pre, "request body exceeds")
   # stream body, no length declared, counted during the spill
   let counted = send_chunked(port, "PUT", "/up", "", "0123456789A")
-  assert str.starts_with(counted, "HTTP/1.1 413")
+  expect_status(port, counted, "HTTP/1.1 413")
   assert str.contains(counted, "too big, limit 10")
   assert not str.contains(counted, "request body exceeds")
   srv.stop(0)
@@ -2067,13 +2098,13 @@ test "a custom ErrorFormat words the 404, the 405 and the dot-segment 400" {
   srv.start()
   let port = srv.getAddress()!.getPort()
   let r404 = raw_http(port, get_line("/nope"))
-  assert str.starts_with(r404, "HTTP/1.1 404")
+  expect_status(port, r404, "HTTP/1.1 404")
   assert str.contains(r404, "{\"error\":\"no such page\"}")
   let r405 = send_sized(port, "POST", "/b", "", "")
-  assert str.starts_with(r405, "HTTP/1.1 405")
+  expect_status(port, r405, "HTTP/1.1 405")
   assert str.contains(r405, "{\"error\":\"wrong verb\"}")
   let r400 = raw_http(port, get_line("/a/../b"))
-  assert str.starts_with(r400, "HTTP/1.1 400")
+  expect_status(port, r400, "HTTP/1.1 400")
   assert str.contains(r400, "{\"error\":\"no dots\"}")
   srv.stop(0)
 }
@@ -2094,6 +2125,36 @@ fn raw_http_within(port: Int, request: String, ms: Int) -> String !io = {
   }
 }
 
+test "a status mismatch names the port and shows the response, silence included" {
+  # the negative control for expect_status: a listener that is never accepted
+  # from takes the request into its backlog and answers nothing
+  let silent = ServerSocket.new(0)
+  let port = silent.getLocalPort()
+  let resp = raw_http_within(port, get_line("/x"), 300)
+  match catch_panic(() => expect_status(port, resp, "HTTP/1.1 200")) {
+    Ok(_) -> { assert false }
+    Err(m) -> {
+      assert str.contains(m.message, "port ${to_string(port)}")
+      assert str.contains(m.message, "HTTP/1.1 200")
+      assert str.contains(m.message, "<no response>")
+    }
+  }
+  # empty and long responses, escaped and capped
+  match catch_panic(() => expect_status(7, "", "HTTP/1.1 200")) {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.contains(m.message, "port 7: ") && str.contains(m.message, "<empty response>") }
+  }
+  match catch_panic(() => expect_status(7, "HTTP/1.1 404\r\n" ++ str.repeat("z", 5000), "HTTP/1.1 200")) {
+    Ok(_) -> { assert false }
+    Err(m) -> {
+      assert str.contains(m.message, "HTTP/1.1 404\\r\\nzzz")
+      assert str.contains(m.message, "cut at 2000")
+      assert len(m.message) < 2300
+    }
+  }
+  silent.close()
+}
+
 # Test-only: a handler that ends in a JVM Error rather than a panic. An array
 # of Int.MAX elements is past the VM's limit whatever the heap, so this throws
 # OutOfMemoryError at once without using any memory.
@@ -2109,10 +2170,10 @@ test "a JVM Error in a handler still answers 500 and closes the exchange" {
   # catch_panic does not see an Error, so this request used to get nothing:
   # no response, and an exchange nobody closed
   let fatal = raw_http_within(port, get_line("/fatal"), 10000)
-  assert str.starts_with(fatal, "HTTP/1.1 500")
+  expect_status(port, fatal, "HTTP/1.1 500")
   assert str.contains(fatal, "{\"error\":\"internal server error\"}")
   # and the server goes on answering
-  assert str.starts_with(raw_http_within(port, get_line("/hello"), 10000), "HTTP/1.1 200")
+  expect_status(port, raw_http_within(port, get_line("/hello"), 10000), "HTTP/1.1 200")
   stop(h, 0)
 }
 
@@ -2140,7 +2201,7 @@ test "no header line reaches the wire that the handler did not write" {
   for (path, status) in [("/h", "500"), ("/r", "400"), ("/t", "500")] {
     let resp = raw_http_within(port, get_line(path), 10000)
     assert not str.contains(resp, "\r\nX-Injected")
-    assert str.starts_with(resp, "HTTP/1.1 " ++ status)
+    expect_status(port, resp, "HTTP/1.1 " ++ status)
   }
   srv.stop(0)
 }
