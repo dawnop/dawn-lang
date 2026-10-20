@@ -7,6 +7,30 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.18.0 (2026-10-20)
+
+Breaking, in one place (`docs/tile-backend-design.md` section 6.28, "the
+program is a third key"): `asm.tileiras_args` and `asm.assembler_defect` take
+the recorded program as a third argument, so a caller outside the package must
+pass it (`assemble` and `scripts/tile-gpu-diff` already do). No `Dev`
+operation was added and the 205 goldens are unchanged byte for byte.
+
+- `tileiras_args(version, gpu_name, prog)` gives `--opt-level 0` for
+  tileiras 13.4.92 on sm_90, sm_100, sm_103, sm_107 and sm_110 only when
+  `prog` has a `loop` that `break`s (#558); every other program keeps the
+  default `-O3`, as does every other target and version. Before this, every
+  program on those targets was assembled at `-O0`, which made the flash_attn
+  goldens 35x (bf16, sm_90) to 57x (bf16, sm_100) slower than their `-O3`
+  cubins and vadd 3x, for a defect none of them can trigger.
+- New `asm.has_break_loop(prog) -> Bool`: a `Loop` operation with a `Break`
+  anywhere in its body, at any nesting depth. It is wider than the four
+  conditions #558 minimised on purpose: which break loops the optimizer
+  breaks is its business, and a `for` never counts.
+- `assembler_defect(version, gpu_name, prog)` words the reason for the
+  program it is asked about.
+- The ledger line's `asm=` field now says what every kernel got, and a new
+  `o0=` field lists the kernels that were assembled at `--opt-level 0`.
+
 ## 0.17.1 (2026-10-20)
 
 Additive, so a patch in the 0.17 class (`docs/package-design.md` section 6.3,

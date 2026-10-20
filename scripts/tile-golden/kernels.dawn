@@ -38,6 +38,7 @@ use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, 
   Whole, FREE_AXIS, Scalar }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
+use tileir/asm.{tileiras_args}
 
 # f64 vector add over 128-wide tiles: the first milestone's kernel
 # (tile-backend-design 1), and the shape std/gpu's vadd_ref answers for.
@@ -6137,28 +6138,39 @@ pub fn main() -> Unit !io = match args() {
       Err(_e) -> panic("tile-golden: cannot write the bytecode to `${path}`")
     }
   }
-  _ -> panic("usage: kernels <vadd|vadd_producer|vadd_debug|foldif_debug|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
-      ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
-      ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
-      ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
-      ++ "|count_eq|subarray_sum|rainbow|int_ops"
-      ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
-      ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
-      ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
-      ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
-      ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
-      ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"
-      ++ "|dtype_i4|dtype_e2m1|pack_roundtrip|dtype_e5m3|mmaf_scaled_e5m3"
-      ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
-      ++ "|ols_gram|ols_elim|ols_beta"
-      ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
-      ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
-      ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep|token_fences"
-      ++ "|loop_count|loop_bound|loop_until|loop_none|loop_return"
-      ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
-      ++ "|attr_sat|attr_ftof|attr_xchg"
-      ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
-      ++ "|global_table|global_ctl|global_scratch|global_flags|global_syms"
-      ++ "|view_transpose|view_max_pool|view_conv2d|view_padding|view_pad_i32|view_inbounds|view_inbounds_off|view_inbounds_dim>"
-      ++ " [--bytecode <path>] | kernels --bytecode-version")
+  all -> if len(all) >= 3 && all[0] == "--asm-args" {
+    # `--asm-args <tileiras version> <gpu-name> <kernel>...`: one line per
+    # kernel, `<kernel> <comma-joined tileiras arguments>`, as packages/tileir's
+    # asm.tileiras_args answers for the kernel's recorded program (it looks at
+    # the program, since only a loop that breaks gets --opt-level 0). The
+    # ledger script (scripts/tile-gpu-diff) assembles every golden with these.
+    for k in list.drop(all, 3) {
+      println("${k} ${join(tileiras_args(all[1], all[2], trace(k)), ",")}")
+    }
+  } else {
+    panic("usage: kernels <vadd|vadd_producer|vadd_debug|foldif_debug|vadd_f32|vadd_bf16|sum|vadd_tail|copy|relu|leaky_relu|clip|elemops"
+        ++ "|reduce_sum|softmax|dot|mse|monte_carlo|rms_norm|silu|sigmoid|ppo_loss|dpo_loss|mathops|foldif|argmax"
+        ++ "|matmul|batched_matmul|transpose|layer_norm|batch_norm|group_norm|fused_rms_norm"
+        ++ "|transpose_tail|conv1d|conv2d|max_pool|interleave|rgb_gray|jacobi|depthwise_conv1d|gaussian_blur"
+        ++ "|count_eq|subarray_sum|rainbow|int_ops"
+        ++ "|sum_diff|reverse|invert|f16_ops|dot_f16|matmul_f16|batched_matmul_f16|matmul_i8"
+        ++ "|token_embed|sort_rank|merge_rank|scatter_perm"
+        ++ "|view_conv1d|view_token_embed|view_atomic|view_atomic_bf16|view_stride_pad|view_gather_pad"
+        ++ "|prefix_sum|max_subarray|seg_scan|compact|linrec|gae|ssm_scan"
+        ++ "|histogram|cas_swap|erf_sweep|geglu|trig_sweep|rope"
+        ++ "|dtype_i16|dtype_i64|dtype_tf32|dtype_e4m3|dtype_e5m2|dtype_e8m0"
+        ++ "|dtype_i4|dtype_e2m1|pack_roundtrip|dtype_e5m3|mmaf_scaled_e5m3"
+        ++ "|kv_scores|kv_context|attn_bwd_mmt|attn_bwd_ds|lin_attn_s|lin_attn_out"
+        ++ "|ols_gram|ols_elim|ols_beta"
+        ++ "|gpt_ln|gpt_qkv|gpt_scores|gpt_context|gpt_dense|gpt_fc|gpt_gelu|gpt_down"
+        ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
+        ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep|token_fences"
+        ++ "|loop_count|loop_bound|loop_until|loop_none|loop_return"
+        ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
+        ++ "|attr_sat|attr_ftof|attr_xchg"
+        ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
+        ++ "|global_table|global_ctl|global_scratch|global_flags|global_syms"
+        ++ "|view_transpose|view_max_pool|view_conv2d|view_padding|view_pad_i32|view_inbounds|view_inbounds_off|view_inbounds_dim>"
+        ++ " [--bytecode <path>] | kernels --bytecode-version")
+  }
 }

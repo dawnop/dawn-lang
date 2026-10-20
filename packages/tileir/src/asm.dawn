@@ -20,6 +20,17 @@
 # without anybody remembering to take the workaround out, and sm_86 under the
 # same 13.4.92 keeps its optimizer, since its PTX is correct.
 #
+# Why the program is a third key. The first form of this table lowered every
+# program on the affected targets to `--opt-level 0`, which cost a flash_attn
+# kernel 35x (bf16, sm_90) to 57x (sm_100) of its device time and a vadd 3x,
+# and none of those programs has a `loop` that `break`s. The defect needs one,
+# so [`has_break_loop`] asks the recorded program for that structure and only
+# a program that has it pays. The test is wider than the four conditions the
+# issue minimised (it counts any `break` loop, not just a two-carry one with a
+# `reduce` exit), because which of those loops the optimizer breaks is its
+# business and can change with a release; a `for` is a different operation
+# that never reaches the defective pass. 6.28 has the measurements.
+#
 # Why `--opt-level 0` and not the previous assembler. 13.3.36 assembles the
 # same kernels correctly, but it refuses bytecode 13.4, which is the only
 # version bytecode.dawn writes, and four goldens (attr_ftof, insert_tile,
@@ -33,7 +44,9 @@ use std/io.{Fs, Proc, temp_dir, write_bytes, read_bytes, read_file, write_file, 
 use std/list
 use std/str
 use bytecode.{encode}
-use prog.{TileProg, trace_kernel}
+use std/dtype.{F64}
+use prog.{TileProg, TileOp, For, Loop, Break, Reduce, Scan, If, trace_kernel, trace1, cells, Out}
+use dev.{d_loop, d_range, carry, get, set, f_const, broadcast, reduce_max, abs, gt, store_cell}
 
 # One known assembler defect: the `tileiras` version it was measured on, the
 # `--gpu-name` values whose code is wrong, the extra arguments that avoid it,
@@ -57,17 +70,54 @@ fn defects() -> List[Defect] = [
   }
 ]
 
-fn defect_for(tileiras: String, gpu_name: String) -> Option[Defect] =
-  list.find(defects(), d => d.tileiras == tileiras && list.contains(d.targets, gpu_name))
+fn defect_for(tileiras: String, gpu_name: String, prog: TileProg) -> Option[Defect] =
+  if has_break_loop(prog) {
+    list.find(defects(), d => d.tileiras == tileiras && list.contains(d.targets, gpu_name))
+  } else {
+    None
+  }
+
+## True when `prog` has a `loop` that can `break`: a `Loop` operation with a
+## `Break` anywhere inside its body, however deeply nested in `if`, `for`,
+## `reduce` or `scan` regions. This is the structural form of the shape that
+## trips #558, and it is deliberately wider than that issue's four conditions
+## (see 6.28): the optimizer's current behaviour decides which of these loops
+## miscompile, so every one of them is treated as suspect. A `for` loop never
+## counts, and neither does a program with no loop.
+pub fn has_break_loop(prog: TileProg) -> Bool = any_break_loop(prog.ops)
+
+fn any_break_loop(ops: List[TileOp]) -> Bool =
+  list.any(ops, op => match op {
+    Loop(_inits, _carried, _results, body) -> any_break(body) || any_break_loop(body)
+    For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> any_break_loop(body)
+    Reduce(_results, _dim, _shape, _identities, _operands, _args, body) -> any_break_loop(body)
+    Scan(_results, _dim, _reverse, _shape, _identities, _operands, _args, body) -> any_break_loop(body)
+    If(_results, _cond, on_true, on_false) -> any_break_loop(on_true) || any_break_loop(on_false)
+    _ -> false
+  })
+
+# Whether `ops` hold a `Break` at any depth.
+fn any_break(ops: List[TileOp]) -> Bool =
+  list.any(ops, op => match op {
+    Break(_values) -> true
+    Loop(_inits, _carried, _results, body) -> any_break(body)
+    For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> any_break(body)
+    Reduce(_results, _dim, _shape, _identities, _operands, _args, body) -> any_break(body)
+    Scan(_results, _dim, _reverse, _shape, _identities, _operands, _args, body) -> any_break(body)
+    If(_results, _cond, on_true, on_false) -> any_break(on_true) || any_break(on_false)
+    _ -> false
+  })
 
 ## The arguments to put before `-o <cubin> <bytecode>` when `tileiras`
 ## version `tileiras` (as `tileiras --version` prints it after `V`, e.g.
-## `"13.4.92"`) assembles for `gpu_name` (e.g. `"sm_90"`): `--gpu-name` and,
-## for a combination [`assembler_defect`] knows to be broken, the arguments
-## that avoid the defect. For tileiras 13.4.92 on sm_90, sm_100, sm_103,
-## sm_107 and sm_110 that is `--opt-level 0`.
-pub fn tileiras_args(tileiras: String, gpu_name: String) -> List[String] = {
-  let extra = match defect_for(tileiras, gpu_name) {
+## `"13.4.92"`) assembles `prog` for `gpu_name` (e.g. `"sm_90"`): `--gpu-name`
+## and, when the version and target are one [`assembler_defect`] knows AND
+## [`has_break_loop`] says `prog` has the shape that defect needs, the
+## arguments that avoid it. For tileiras 13.4.92 on sm_90, sm_100, sm_103,
+## sm_107 and sm_110 that is `--opt-level 0`, and only for a program with a
+## `loop` that `break`s: every other program keeps the default `-O3`.
+pub fn tileiras_args(tileiras: String, gpu_name: String, prog: TileProg) -> List[String] = {
+  let extra = match defect_for(tileiras, gpu_name, prog) {
     Some(d) -> d.args
     None -> []
   }
@@ -77,11 +127,11 @@ pub fn tileiras_args(tileiras: String, gpu_name: String) -> List[String] = {
 ## Why [`tileiras_args`] adds arguments for this combination, or `None` when
 ## it does not: one English sentence naming the assembler, the target, the
 ## defect and the issues that track it.
-pub fn assembler_defect(tileiras: String, gpu_name: String) -> Option[String] =
-  match defect_for(tileiras, gpu_name) {
+pub fn assembler_defect(tileiras: String, gpu_name: String, prog: TileProg) -> Option[String] =
+  match defect_for(tileiras, gpu_name, prog) {
     Some(d) -> Some(
-      "tileiras ${d.tileiras} miscompiles a loop exit value for ${gpu_name} at --opt-level 1 and above"
-        ++ " (${d.issue}); assemble with --opt-level 0 or with a tileiras that fixes it")
+      "tileiras ${d.tileiras} miscompiles the exit value of a loop that breaks for ${gpu_name} at --opt-level 1 and above"
+        ++ " (${d.issue}); assemble this program with --opt-level 0 or with a tileiras that fixes it")
     None -> None
   }
 
@@ -146,7 +196,7 @@ fn run_in(dir: String, tag: String, tileiras: String, argv: List[String]) -> Res
   }
 }
 
-fn assemble_in(dir: String, bc: Bytes, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc =
+fn assemble_in(dir: String, prog: TileProg, bc: Bytes, gpu_name: String, tileiras: String) -> Result[Bytes, AssembleError] !Fs !Proc =
   match run_in(dir, "version", tileiras, ["--version"]) {
     Err(e) -> Err(e)
     Ok((vstatus, vout, verr)) ->
@@ -161,7 +211,7 @@ fn assemble_in(dir: String, bc: Bytes, gpu_name: String, tileiras: String) -> Re
             match write_bytes(input, bc) {
               Err(e) -> Err(Scratch(e.message))
               Ok(_u) -> {
-                let args = tileiras_args(version, gpu_name) ++ ["-o", output, input]
+                let args = tileiras_args(version, gpu_name, prog) ++ ["-o", output, input]
                 match run_in(dir, "asm", tileiras, args) {
                   Err(e) -> Err(e)
                   Ok((status, _o, errs)) ->
@@ -215,17 +265,91 @@ pub fn assemble(prog: TileProg, gpu_name: String, tileiras: String) -> Result[By
   match temp_dir("", "tileir-asm-") {
     Err(e) -> Err(Scratch(e.message))
     Ok(dir) -> {
-      let r = assemble_in(dir, bc, gpu_name, tileiras)
+      let r = assemble_in(dir, prog, bc, gpu_name, tileiras)
       clean(dir)
       r
     }
   }
 }
 
-test "13.4.92 on the sm_90 and sm_100 family assembles at --opt-level 0" {
+# ---- the programs the criterion is held against
+#
+# `repro_558` is the shape of the minimised reproducer (dawnop/dawn-lang#558):
+# an f64 carried through a `loop` that `break`s once `0.2 > max|x - 0.25|`.
+# `for_only` and `flash_like` are what the 35x to 57x of 6.28 was paid on: a
+# `for` loop (a flash_attn kernel's shape) and a straight line (vadd's).
+
+fn repro_558() -> TileProg = {
+  let (p, _e) = trace1("repro_558", Out(F64, cells([1], [1])), o => {
+    let c = broadcast(f_const(F64, 0.25), [1])
+    let half = f_const(F64, 0.5)
+    let x = carry(broadcast(f_const(F64, 1.0), [1]))
+    d_loop {
+      let v = x.get()
+      let worst = reduce_max(abs(v - c))
+      x.set(half * (v + c))
+      gt(f_const(F64, 0.2), worst)
+    }
+    store_cell(o, x.get())
+  })
+  p
+}
+
+fn for_only() -> TileProg = {
+  let (p, _e) = trace1("for_only", Out(F64, cells([1], [1])), o => {
+    var acc = broadcast(f_const(F64, 0.0), [1])
+    for _j in d_range(0, 8) {
+      acc = acc + broadcast(f_const(F64, 1.0), [1])
+    }
+    store_cell(o, acc)
+  })
+  p
+}
+
+fn straight_line() -> TileProg = {
+  let (p, _e) = trace1("straight", Out(F64, cells([1], [1])), o => store_cell(o, broadcast(f_const(F64, 1.0), [1])))
+  p
+}
+
+# A `break` loop nested inside a `for`: found, since the scan looks at every depth.
+fn nested_break_loop() -> TileProg = {
+  let (p, _e) = trace1("nested", Out(F64, cells([1], [1])), o => {
+    var acc = broadcast(f_const(F64, 0.0), [1])
+    for _j in d_range(0, 2) {
+      let x = carry(broadcast(f_const(F64, 1.0), [1]))
+      d_loop {
+        let v = x.get()
+        x.set(v * f_const(F64, 0.5))
+        gt(f_const(F64, 0.2), reduce_max(v))
+      }
+      acc = acc + x.get()
+    }
+    store_cell(o, acc)
+  })
+  p
+}
+
+test "has_break_loop looks at the structure: a loop that breaks counts, a for or a straight line does not" {
+  assert has_break_loop(repro_558())
+  assert has_break_loop(nested_break_loop())
+  assert has_break_loop(for_only()) == false
+  assert has_break_loop(straight_line()) == false
+}
+
+test "13.4.92 on the sm_90 and sm_100 family assembles a loop that breaks at --opt-level 0" {
   for g in ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"] {
-    assert tileiras_args("13.4.92", g) == ["--gpu-name", g, "--opt-level", "0"]
-    assert assembler_defect("13.4.92", g) != None
+    assert tileiras_args("13.4.92", g, repro_558()) == ["--gpu-name", g, "--opt-level", "0"]
+    assert tileiras_args("13.4.92", g, nested_break_loop()) == ["--gpu-name", g, "--opt-level", "0"]
+    assert assembler_defect("13.4.92", g, repro_558()) != None
+  }
+}
+
+test "13.4.92 on the sm_90 and sm_100 family keeps the default level for a program with no loop that breaks" {
+  for g in ["sm_90", "sm_100", "sm_103", "sm_107", "sm_110"] {
+    for prog in [for_only(), straight_line()] {
+      assert tileiras_args("13.4.92", g, prog) == ["--gpu-name", g]
+      assert assembler_defect("13.4.92", g, prog) == None
+    }
   }
 }
 
@@ -233,23 +357,23 @@ test "13.4.92 on the targets it compiles correctly keeps the default level" {
   # sm_86 is this repository's ledger: the same 13.4.92 bytes give the right
   # answer there at the default level, so its cubins keep the optimizer.
   for g in ["sm_80", "sm_86", "sm_87", "sm_88", "sm_89", "sm_120", "sm_121"] {
-    assert tileiras_args("13.4.92", g) == ["--gpu-name", g]
-    assert assembler_defect("13.4.92", g) == None
+    assert tileiras_args("13.4.92", g, repro_558()) == ["--gpu-name", g]
+    assert assembler_defect("13.4.92", g, repro_558()) == None
   }
 }
 
 test "the workaround is keyed on the assembler version, so another tileiras gets the plain arguments" {
   # 13.3.36 is correct at every level on sm_90 and sm_100; a later fixed
   # release is a different string and lifts the workaround with no edit here.
-  assert tileiras_args("13.3.36", "sm_90") == ["--gpu-name", "sm_90"]
-  assert tileiras_args("13.4.93", "sm_100") == ["--gpu-name", "sm_100"]
-  assert assembler_defect("13.3.36", "sm_90") == None
+  assert tileiras_args("13.3.36", "sm_90", repro_558()) == ["--gpu-name", "sm_90"]
+  assert tileiras_args("13.4.93", "sm_100", repro_558()) == ["--gpu-name", "sm_100"]
+  assert assembler_defect("13.3.36", "sm_90", repro_558()) == None
 }
 
 test "the diagnostic names the assembler, the target and both issues" {
-  assert assembler_defect("13.4.92", "sm_90") == Some(
-    "tileiras 13.4.92 miscompiles a loop exit value for sm_90 at --opt-level 1 and above"
-      ++ " (dawnop/dawn-lang#558, NVIDIA/cuda-tile#25); assemble with --opt-level 0 or with a tileiras that fixes it")
+  assert assembler_defect("13.4.92", "sm_90", repro_558()) == Some(
+    "tileiras 13.4.92 miscompiles the exit value of a loop that breaks for sm_90 at --opt-level 1 and above"
+      ++ " (dawnop/dawn-lang#558, NVIDIA/cuda-tile#25); assemble this program with --opt-level 0 or with a tileiras that fixes it")
 }
 
 # ---- assemble, against a stand-in for tileiras
@@ -304,10 +428,13 @@ test "assemble hands tileiras the program's bytes and the arguments tileiras_arg
       ++ "for a in \"\$@\"; do if [ \"\$prev\" = \"-o\" ]; then out=\"\$a\"; fi; prev=\"\$a\"; in=\"\$a\"; done\n"
       ++ "{ echo \"args: \$*\"; cat \"\$in\"; } > \"\$out\"\n"
     let before = leftovers()
-    let prog = fake_program()
-    let bc = encode(prog)
-    # 13.4.92 on sm_90 is the combination that gets --opt-level 0; on sm_86 it gets the plain arguments
-    for (gpu, want) in [("sm_90", "args: --gpu-name sm_90 --opt-level 0 -o "), ("sm_86", "args: --gpu-name sm_86 -o ")] {
+    let plain = fake_program()
+    # 13.4.92 on sm_90 gets --opt-level 0 for a program with a loop that breaks, the plain arguments for one without; sm_86 never
+    for (prog, gpu, want) in [
+      (repro_558(), "sm_90", "args: --gpu-name sm_90 --opt-level 0 -o "),
+      (repro_558(), "sm_86", "args: --gpu-name sm_86 -o "),
+      (plain, "sm_90", "args: --gpu-name sm_90 -o ")] {
+      let bc = encode(prog)
       match with_fake(script, path => assemble(prog, gpu, path)) {
         Ok(cubin) -> {
           assert str.starts_with(bytes.decode_utf8_lossy(cubin), want)
@@ -337,7 +464,7 @@ test "assemble: a non-zero exit is AssemblerFailed with the arguments and stderr
   with_fs_real(() => with_proc_real(() => {
     let script = version_lines() ++ "if [ \"\$1\" = \"--version\" ]; then exit 0; fi\necho \"error: nope\" >&2\nexit 3\n"
     let before = leftovers()
-    match with_fake(script, path => assemble(fake_program(), "sm_100", path)) {
+    match with_fake(script, path => assemble(repro_558(), "sm_100", path)) {
       Err(AssemblerFailed(args, status, stderr)) -> {
         assert status == 3
         assert str.trim(stderr) == "error: nope"
