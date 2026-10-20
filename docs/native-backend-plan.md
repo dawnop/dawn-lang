@@ -1649,3 +1649,36 @@ bind/oracle 四处同步;`types.dawn` 顺带给 dict 伪 id 起名 `DICT_ADT_ID`
 `is_ref_ty` 对它答 false(belt)。语料补 `dict_capture.dawn`(sort/max/min_by,ASan 下绿)。
 教训又是 Perceus 那句:**pass 与 oracle 必须同一份定义**——这次 oracle(rc_check)
 先按旧定义报了假失衡,才把 pass 侧漏改的 bind 顶了出来。
+
+## 15. 站点构建改由 dawnc 运行生成器(native A1,2026-10-20)
+
+依据:`ruling-full-native-20261020` 第 1、8 条(范围只管运行时与站点构建,不管种子链),
+调研 §5 的 A1 段(生成器本身一处不差)。A2(`dawn doc` 换 native、`package-docs.sh`)与
+A3(`gpu-map/record.py` 的 `dawn parse`)**不在本刀,待办留在原处**。
+
+**改了什么。** `site/build.sh` 用 `dawnc run site` 出站,`site/search-budget.sh` 用
+`dawnc run site/search-budget` 跑面板探针;`scripts/site-dist-diff.sh` 反过来:native 先跑、
+产出为准,JVM 后跑、做对照基准,比较仍是同一份输入快照上的 `diff -r`。生产的
+`site/redeploy.sh` 经 `build.sh` 自动跟随,不需另改;部署机(本机)要有 `cc`。
+
+**dawnc 从哪来:`DAWNC_BIN`,否则从 HEAD 自建**(`site/dawnc.sh`,按 source stamp 加
+runtime/c 摘要缓存在 `site/build/`)。没选 release 的 `dawnc-linux-x86_64`:它是上一个
+tag 的编译器,生成器与它依赖的语言特性、运行时随 HEAD 走,拿旧编译器建新站,等于把
+种子协议要防的「HEAD 离了某个 release 就建不动」搬进站点;还要联网拉取,而部署机离线建站。
+「从 HEAD 自建 dawnc 是否还经过 JVM」(现在经 `bin/dawn __emitc`)是工具链问题,按裁决第 1
+条不在本刀。
+
+**验收线:逐字节一致,实测成立。** 完整 `site/build.sh` 产出的 dist 与改前(JVM)产出
+`diff -r` 为空;`site-dist-diff.sh` 在 1299 个输入文件的快照上比出 613 个产物文件两边一致;
+搜索探针两边输出逐字节相同(28 行)。负控:让 dawnc 往 `index.html` 多写一个字节,门禁红。
+没有碰生成器。
+
+**代价:墙钟变长,这是取舍的一部分。** 暖机后(dawnc 已缓存)`site/build.sh` 中位数 37.7s
+到 60.3s(+22.6s,+60%)。拆开看:`dawnc run site` 22.6s 对 JVM 6.6s,搜索探针 9.3s 对
+3.2s,差额是每次运行要把生成器编成 C 再交给 cc。`-O1` 只省 4s 与 2s(输出相同),不值得
+让站点构建偏离默认级别。想把这笔钱拿回来,要的是编译缓存或按内容摘要复用已编出的生成器,
+那是工具链的事,留给后续,不在 A1 内。冷机多付一次 dawnc 自建(约 37s)。
+
+**不做的。** 不改 `dawn doc`/`package-docs.sh`/`record.py`(A2、A3);不把 `-O1` 写进脚本;
+不为省墙钟缓存生成器二进制(生成器是输入的纯函数,缓存键要覆盖整棵站点源与 docs,
+得不偿失);不在 `redeploy.sh` 里单独加 dawnc 检查(`build.sh` 失败即停,已覆盖)。

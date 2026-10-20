@@ -10,6 +10,8 @@ Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`
 - 域名：`https://dawn-lang.dawnop.com`（与 GitHub 仓库名一致）
 - 验收：站点上线，且生成它的程序是 Dawn 写的；生成器 JVM 与 native 跑出的
   `dist/` **逐字节一致**——由 `scripts/site-dist-diff.sh` 管着（进了 CI）。
+  2026-10-20 起 `site/build.sh` 用 native（dawnc）出站，发布的是 native 产物，JVM 产物是
+  对照基准；两边不一致就是某个后端的缺陷，不改生成器去迁就。
   这一条曾经只是一句话：2026-08-05 之前没有任何东西跑它，而人手跑的 `diff -r`
   直接读工作树，分不清「两个后端不一致」和「两次构建之间输入被改了」——2026-08-04
   真把后者报成了前者。现在两个后端都跑在**同一份输入快照**上，工作树怎么动都进不来。
@@ -215,15 +217,17 @@ fetch 失败或版本不认识时面板照旧只搜标题，底栏照旧写「�
 ## 构建
 
 ```bash
-site/build.sh          # dawn doc --stdlib → play-ui → tea reactors → 清空 dist → dawn run site
+site/build.sh          # dawn doc --stdlib → play-ui → dawnc → tea reactors → 清空 dist → dawnc run site
 # 三个 wasm（demo 两个 + 搜索面板）要 clang 20+（带 wasm32 sysroot）。缺了就跳过并
 # warning，生成器写占位文件，页面自己报错，其余页面不受影响：
 DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
-# `--target wasm` 只在原生驱动里（selfhost/src/nmain.dawn），编一次约 37s，
-# 按编译器自己的 source stamp + runtime/c 缓存在 site/build/tea/dawnc。
+# 生成器与搜索预算探针都由原生驱动 dawnc 运行（2026-10-20 起；JVM 只剩 `dawn doc` 与
+# gpu-map 的 `dawn parse`）。dawnc 从当前提交自建，约 37s，按编译器自己的 source stamp +
+# runtime/c 缓存在 site/build/dawnc（见 site/dawnc.sh）；`DAWNC_BIN=<文件>` 可指定现成的。
+# 每次运行 dawnc 还要把生成器编成 C 再交给 cc，暖机后建站墙钟约 60s（此前 JVM 约 38s）。
 # 或手动：
 ./bin/dawn doc --stdlib > site/build/stdlib.json
-./bin/dawn run site    # 生成 site/dist/（从仓库根运行）
+site/build/dawnc run site    # 生成 site/dist/（从仓库根运行）；./bin/dawn run site 是 JVM 基准
 ./bin/dawn test site   # 生成器测试
 
 # 首页那四段代码（hero + 三张特性卡）真的编译、真的跑，输出对着同名 .out 比：
