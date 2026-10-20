@@ -46,7 +46,7 @@ DAWN = os.environ.get("DAWN_BIN", str(ROOT / "bin" / "dawn"))
 # Every one of them. A sample that imports tileir is a project on the
 # Playground (playground/src/play/exec.dawn's `wants_tileir` and
 # `tile_manifest`): `src/main.dawn` beside a manifest whose only dependencies
-# are packages/tileir and packages/tileref, its module `main`. It is recorded
+# are packages/tileir, packages/tileref and packages/tileinterp, its module `main`. It is recorded
 # the same way here, so the maps are the ones the Playground pairs. Until
 # 2026-10-19 such a sample was left out, because xmap took the name of an
 # infix operator on tiles (`a * b`, recorded as `impl mul` with its name at
@@ -100,7 +100,8 @@ def target_of(prog, work):
         packages = ROOT / "packages"
         (proj / "dawn.toml").write_text(
             f'schema = 1\nname = "tile"\nversion = "0.0.0"\n\n[deps]\n'
-            f'tileir = "{packages}/tileir"\ntileref = "{packages}/tileref"\n',
+            f'tileir = "{packages}/tileir"\ntileref = "{packages}/tileref"\n'
+            f'tileinterp = "{packages}/tileinterp"\n',
             encoding="utf-8",
         )
         return proj, "main"

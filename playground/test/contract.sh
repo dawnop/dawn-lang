@@ -416,7 +416,7 @@ ccheck "compile: the same error for the other target" "$CASES/broken.dawn" jvm \
 TILE_PROJ="$CASES/tileproj"
 mkdir -p "$TILE_PROJ/src"
 cp "$CASES/tile.dawn" "$TILE_PROJ/src/main.dawn"
-printf 'schema = 1\nname = "tp"\nversion = "0.0.0"\n\n[deps]\ntileir = "%s/packages/tileir"\ntileref = "%s/packages/tileref"\n' "$ROOT" "$ROOT" >"$TILE_PROJ/dawn.toml"
+printf 'schema = 1\nname = "tp"\nversion = "0.0.0"\n\n[deps]\ntileir = "%s/packages/tileir"\ntileref = "%s/packages/tileref"\ntileinterp = "%s/packages/tileinterp"\n' "$ROOT" "$ROOT" "$ROOT" >"$TILE_PROJ/dawn.toml"
 "$DAWN_BIN" run "$TILE_PROJ" >"$CASES/tile.expected" 2>/dev/null || true
 tile_ccheck() { # name, program file, extra request fields (JSON object), assertion
   RESP_N=$((RESP_N + 1))
@@ -433,7 +433,7 @@ tile_ccheck() { # name, program file, extra request fields (JSON object), assert
 tile_ccheck "compile: a tileir program's pane is the text dawn run prints, and its calls are paired with the source" "$CASES/tile.dawn" '{}' \
   'len(expected)>200 and d["ok"] is True and d["phase"]=="compile-view" and d["target"]=="tile" and d["cached"] is False and d["pane"]["kind"]=="tile" and "\n".join(d["pane"]["text"])+"\n"==expected and d["pane"]["shown"]==len(d["pane"]["text"]) and d["pane"]["truncated"] is False and "unmapped" not in d and [c["name"] for c in d["calls"]]==["store_cell","add","load_cell","load_cell"] and [c["parent"] for c in d["calls"]]==[-1,0,1,1] and len(d["pane"]["outs"])==4 and all(o["lines"] for o in d["pane"]["outs"]) and d["gaps"]["count"]==0 and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw and "explore_probe" not in raw and "@@tile" not in raw'
 TILE_EXPECTED="$CASES/tile.expected"
-ATTN_GOLDEN="$ROOT/scripts/tile-golden/flash_attn.mlir"
+ATTN_GOLDEN="$ROOT/site/play-ui/samples/flash_attn.out"
 export TILE_EXPECTED ATTN_GOLDEN
 ATTN_FIRST=$(grep -n '^fn flash_attn(' "$CASES/tile_attn.dawn" | cut -d: -f1)
 export ATTN_FIRST
@@ -460,7 +460,7 @@ run_data() { # program file, extra request fields (JSON object)
 }
 check "run: a tileir program runs and prints its Tile IR" "$(run_data "$CASES/tile.dawn" '{}')" \
   'd["ok"] is True and d["phase"]=="run" and d["exit"]==0 and d["truncated"] is False and d["output"]==open(os.environ["TILE_EXPECTED"], encoding="utf-8").read() and len(d["output"])>200 and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw'
-check "run: the flash attention starter prints the golden it is pinned to" "$(run_data "$CASES/tile_attn.dawn" '{}')" \
+check "run: the flash attention starter records, interprets and prints the answer its .out pins" "$(run_data "$CASES/tile_attn.dawn" '{}')" \
   'd["ok"] is True and d["phase"]=="run" and d["exit"]==0 and d["output"]==open(os.environ["ATTN_GOLDEN"], encoding="utf-8").read()'
 check "run: a tileir program with a compile error answers a diagnostic" "$(run_data "$CASES/tile_broken.dawn" '{}')" \
   'd["ok"] is False and d["phase"]=="compile" and "nope" in d["output"] and os.environ["PLAY_WORK_ROOT"] not in raw and "dawn-play-" not in raw'
@@ -481,8 +481,11 @@ ccheck "compile: and so is its JVM listing" "$CASES/tile.dawn" jvm \
 # call of `from_float`): each of them is a call of the table with no gap. The
 # C text is read with every line outside the program's own functions empty, so
 # its line count is still the whole text's (docs/playground-compile-design.md K8).
+# The starter's `main` interprets the kernel and checks it against plain attention,
+# which adds calls of its own to the table (62 in all, the kernel's 32 among them),
+# so the operator count is a floor: the kernel's seven are there, and no gap.
 ccheck "compile: the flash attention starter's C text pairs its operators, no gap" "$CASES/tile_attn.dawn" c \
-  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==32 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])==7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
+  "$SOUND"' and d["pane"]["kind"]=="c" and d["calls_total"]==62 and sum(c["name"] in ("mul","sub","add","div") for c in d["calls"])>=7 and any(c["name"]=="from_float" for c in d["calls"]) and d["pane"]["total"]>80000 and d["pane"]["shown"]>100 and any("main__flash_1attn" in l for l in d["pane"]["text"])'
 ccheck "compile: the JVM listing of it pairs the same calls" "$CASES/tile_attn.dawn" jvm \
   "$SOUND"' and d["pane"]["kind"]=="jvm" and d["cached"] is False and d["calls"]==prev["calls"]'
 ccheck "compile: a dependency the visitor supplies is not honoured by the C view either" "$CASES/tile_smuggle.dawn" c \

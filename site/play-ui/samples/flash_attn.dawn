@@ -1,22 +1,28 @@
-# Flash attention in tileir: the kernel of the GPU page, recorded and printed
-# as Tile IR. Run it for the text; open the Tile IR tab to click a call and
-# see the lines it wrote, or the C and JVM tabs for the program that records.
+# Flash attention in tileir: the kernel of the GPU page, recorded, then run
+# on the host by packages/tileinterp and checked against plain attention.
+# Run it for the numbers; open the Tile IR tab to click a call and see the
+# lines it wrote, or the C and JVM tabs for the program that records.
 #
-# The kernel is scripts/tile-golden's `flash_attn` verbatim, and the text this
-# prints is that directory's flash_attn.mlir byte for byte; doc-check holds
-# both, so a kernel that moves takes this sample red with it.
+# The kernel is scripts/tile-golden's `flash_attn` verbatim; doc-check holds
+# its text, so a kernel that moves takes this sample red with it. The
+# interpreter executes the lowered Tile IR block by block with no GPU: the
+# grid is two blocks of 32 query rows, and each block walks the keys in two
+# tiles, carrying the running maximum and sum of an online softmax.
 use std/dtype.{F64}
 use std/io
 use std/float.{INFINITY}
+use std/list
 use tileir/dev.{Dev, Param, Tile, load_cell, store_cell, load_at, full, zeros, mma, transpose, scalar, max, exp, reduce_max, reduce_sum, d_range}
 use tileir/prog.{trace5, cells, In, Out, Scalar, FREE_AXIS}
-use tileir/render.{render}
+use tileinterp/interp.{interp_ref}
+use tileinterp/math.{exp_f}
 
 const ATT_M: Int = 64
 const ATT_N: Int = 64
 const ATT_D: Int = 32
 const FA_BQ: Int = 32
 const FA_BK: Int = ATT_D
+const ATT_INV_SQRT_D: Float = 0.17677669529663687
 
 fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float]) -> Unit !Dev = {
   let tq = load_cell(q)
@@ -35,10 +41,46 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
   store_cell(o, acc / l)
 }
 
+# Small deterministic inputs: integers over eight, so every score is a short
+# binary fraction.
+fn wave(n: Int, salt: Int) -> List[Float] = list.map(range(0, n), i => to_float((i * 7 + salt * 13) % 11 - 5) / 8.0)
+
+# Attention the plain way, one query row at a time: all scores, then the
+# softmax over the whole row, then the weighted sum of the values.
+fn plain_row(q: List[Float], k: List[Float], v: List[Float], i: Int) -> List[Float] = {
+  let scores = list.map(range(0, ATT_N), j =>
+      list.fold(range(0, ATT_D), 0.0, (a, d) => a + q[i * ATT_D + d] * k[j * ATT_D + d]) * ATT_INV_SQRT_D)
+  let top = list.fold(scores, -INFINITY, (a, s) => if s > a { s } else { a })
+  let w = list.map(scores, s => exp_f(s - top))
+  let total = list.fold(w, 0.0, (a, x) => a + x)
+  list.map(range(0, ATT_D), d => list.fold(range(0, ATT_N), 0.0, (a, j) => a + w[j] * v[j * ATT_D + d]) / total)
+}
+
 pub fn main() -> Unit !io = {
   let kv = cells([ATT_N, ATT_D], [FA_BK, ATT_D], along: [FREE_AXIS, 1])
   let (prog, _e) = trace5("flash_attn",
     In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, kv), In(F64, kv),
     Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), flash_attn)
-  io.print(render(prog))
+  let q = wave(ATT_M * ATT_D, 1)
+  let k = wave(ATT_N * ATT_D, 2)
+  let v = wave(ATT_N * ATT_D, 3)
+  let blank = list.map(range(0, ATT_M * ATT_D), _i => 0.0)
+  # grid: one block per FA_BQ query rows
+  let run = interp_ref(prog, [ATT_M / FA_BQ])
+  let answers = run(["f64", "f64", "f64", "f64"], [q, k, v, blank], [ATT_INV_SQRT_D])
+  let (_buf, o) = answers[0]
+  io.println("flash_attn on the host: ${ATT_M} queries, ${ATT_N} keys, head size ${ATT_D}, ${ATT_M / FA_BQ} blocks")
+  var worst = 0.0
+  for i in range(0, ATT_M) {
+    let want = plain_row(q, k, v, i)
+    for d in range(0, ATT_D) {
+      let gap = o[i * ATT_D + d] - want[d]
+      worst = max_float(worst, if gap < 0.0 { 0.0 - gap } else { gap })
+    }
+  }
+  io.println("query 0, first four of ${ATT_D}: ${list.slice(o, 0, 4)}")
+  io.println("query ${ATT_M - 1}, first four of ${ATT_D}: ${list.slice(o, (ATT_M - 1) * ATT_D, (ATT_M - 1) * ATT_D + 4)}")
+  io.println("agrees with plain attention to 1e-12: ${worst < 1e-12}")
 }
+
+fn max_float(a: Float, b: Float) -> Float = if b > a { b } else { a }

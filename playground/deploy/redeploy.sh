@@ -247,8 +247,8 @@ ssh "$HOST" "chmod 755 '$REMOTE/bin/.dawn-play.next'"
 rsync -avz playground/README.md playground/lsp_gateway.py "$HOST:$REMOTE/playground/"
 rsync -avz --delete packages/ "$HOST:$REMOTE/packages/"
 # The project the language server opens a tileir program in (lsp_gateway.py):
-# its manifest names ../../packages/tileir and tileref, which is
-# $REMOTE/packages above, so the two must ship together.
+# its manifest names ../../packages/tileir, tileref and tileinterp, which are
+# $REMOTE/packages above, so the three must ship together.
 rsync -avz --delete playground/lsp-tile/ "$HOST:$REMOTE/playground/lsp-tile/"
 # The site origin the gateway accepts and the smoke sends, named once in
 # scripts/repo.env: dawn-play-lsp.service reads it as its EnvironmentFile, and

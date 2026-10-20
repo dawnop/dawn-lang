@@ -684,20 +684,22 @@ def run_example(cmd: list[str], **kw):
 # resolves in a project whose [deps] names the package, and that is what the
 # Playground runner stages for such a program too (playground/src/play/exec.dawn,
 # `tile_manifest`). So the check runs it the same way, as `src/main.dawn` of a
-# project with the same two path dependencies.
+# project with the same three path dependencies.
 TILEIR_USE = "use tileir/"
 
 # Samples that are a kernel the repository already pins elsewhere: the sample's
-# name, the file its kernel is copied from, the golden its output must equal
-# and the kernel's name. A sample of this kind is held to the original twice:
-# its `const` lines and its kernel function are the same text as the original's,
-# and what it prints is the golden, byte for byte. The golden is itself pinned
-# (scripts/tile-golden), so a kernel that moves takes the sample red with it
-# instead of leaving a copy nobody looks at.
+# name, the file its kernel is copied from and the kernel's name. A sample of
+# this kind is held to the original: its `const` lines and its kernel function
+# are the same text as the original's, so a kernel that moves takes the sample
+# red with it instead of leaving a copy nobody looks at. What the sample PRINTS
+# is not the golden any more (flash_attn used to print the Tile IR text and now
+# interprets the kernel and prints numbers): its answer is held by the sample's
+# own checks (it compares the interpreter with a plain host attention and prints
+# whether they agree) and by the .out every sample has, which this script runs
+# the program against.
 PINNED_SAMPLES = {
     "flash_attn": (
         "scripts/tile-golden/kernels.dawn",
-        "scripts/tile-golden/flash_attn.mlir",
         "flash_attn",
     ),
 }
@@ -706,7 +708,8 @@ PINNED_SAMPLES = {
 def tileir_manifest() -> str:
     return ('schema = 1\nname = "sample"\nversion = "0.0.0"\n\n[deps]\n'
             f'tileir = "{ROOT / "packages" / "tileir"}"\n'
-            f'tileref = "{ROOT / "packages" / "tileref"}"\n')
+            f'tileref = "{ROOT / "packages" / "tileref"}"\n'
+            f'tileinterp = "{ROOT / "packages" / "tileinterp"}"\n')
 
 
 def kernel_text(text: str, name: str) -> str:
@@ -724,7 +727,7 @@ def kernel_text(text: str, name: str) -> str:
 
 
 def check_pinned_sample(stem: str, sample: pathlib.Path, out: pathlib.Path) -> list[str]:
-    original, golden, kernel = PINNED_SAMPLES[stem]
+    original, kernel = PINNED_SAMPLES[stem]
     rel = sample.relative_to(ROOT)
     bad: list[str] = []
     orig = (ROOT / original).read_text(encoding="utf-8")
@@ -739,9 +742,6 @@ def check_pinned_sample(stem: str, sample: pathlib.Path, out: pathlib.Path) -> l
     for line in text.splitlines():
         if line.startswith("const ") and line not in original_lines:
             bad.append(f"{rel}: `{line}` is not a line of {original}")
-    if out.read_bytes() != (ROOT / golden).read_bytes():
-        bad.append(f"{out.relative_to(ROOT)}: is not {golden}, which is what "
-                   f"the kernel is pinned to print")
     return bad
 
 

@@ -158,8 +158,8 @@ def main():
     with open(os.path.join(ROOT, "playground", "lsp-tile", "dawn.toml"), encoding="utf-8") as stream:
         manifest = stream.read()
     deps = [line.split("=")[0].strip() for line in manifest.split("[deps]", 1)[1].split("\n") if "=" in line]
-    assert deps == ["tileir", "tileref"], deps
-    c.ok("the language service's project names the runner's two packages and no others")
+    assert deps == ["tileir", "tileref", "tileinterp"], deps
+    c.ok("the language service's project names the runner's three packages and no others")
 
     def flow(session):
         # a tileir program: no false errors, and hover knows a tileir name
