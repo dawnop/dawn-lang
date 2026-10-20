@@ -82,8 +82,10 @@ from 79 invocations to 33: 31m14s at 8 jobs with a 9.4 GiB peak, all passing
   需 JDK 21+ 的 `java/javac/jar`。
 
 旧循环来自 `58ebd4a5` 的 `analyze_program`，仅改函数名；它共享未改动的
-checker/stdlib helpers，不调用新 transition。13 组结果覆盖模块换序、恢复诊断、
-parse/check/comptime 失败、impl/ID 传递和 std 的 impls_before 特例。
+checker/stdlib helpers，不调用新 transition。15 组结果覆盖模块换序、恢复诊断、
+parse/check/comptime 失败、impl/ID 传递和 std 的 impls_before 特例；2026-10-19 加的两组是
+语句级解析失败的模块只发布恢复出的表头（#789，[docs/lsp-module-memo-design.md](../../docs/lsp-module-memo-design.md) §十三），
+冻结循环同步加了同一个 else 分支，四个 `parse-failure-*` 变异体只改新路径。
 
 比较器由 javac 独立编译，通过反射比较整个 Program（包括 AST/TAST、comptime、
 完整 Cx）。只排除 Cx 中同一 refusing oracle 的 jsig 能力；Array 比较逻辑长度内

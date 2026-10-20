@@ -48,6 +48,7 @@ PROJECTED = "return ProjectedEffect(i, parts[1])"
 DENSIFY = ("  dense_expr(dense_params(dense_params(dense_params(dense_params(d, f.captures),\n"
            "    f.params), f.dicts), f.evs), f.body)")
 MOVED = "      Some(next) -> { moved_syms = map.insert(moved_syms, next, s) }"
+PARSE_HEADERS = "    cx = Cx { ..headers.cx, diags: [] }\n"
 INTERN = "(Cx { ..cx, identities: map.insert(cx.identities, id, decl) }, id)"
 MINT = 'interned(cx, minted(cx.owner_class.unwrap_or(""), kind, name), lo, hi)'
 
@@ -100,6 +101,18 @@ MUTATIONS = {
     "cold/skip-comptime": ((ANALYZE, "    if len(cx.diags) == 0 {\n", "    if false {\n"),),
     # The std baseline's impls are not taken over.
     "cold/std-baseline": ((ANALYZE, "      Some(before) -> { base_impls = before }", "      Some(before) -> ()"),),
+    # A module that fails to parse publishes the headers of what was
+    # recovered and reports none of their diagnostics (#789,
+    # docs/lsp-module-memo-design.md §十三): it publishes nothing, it drops
+    # the impls it declares, it grafts nothing from its imports, or it
+    # reports the header diagnostics too.
+    "cold/parse-failure-unpublished": ((ANALYZE, PARSE_HEADERS, "    let _ = headers\n"),),
+    "cold/parse-failure-drops-impls": ((ANALYZE, PARSE_HEADERS,
+        "    cx = Cx { ..headers.cx, diags: [], impl_table: cx.impl_table }\n"),),
+    "cold/parse-failure-skips-imports": ((ANALYZE, "check_module_headers(cx, mf.m, before.exports)",
+                                          "check_module_headers(cx, mf.m, map.empty())"),),
+    "cold/parse-failure-reports-headers": ((ANALYZE, PARSE_HEADERS, PARSE_HEADERS +
+        "    for d in headers.cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }\n"),),
 
     # lsp-observe.py, a tool run by hand: not mutants but the probes of a
     # private LSP. It applies inputs always, prefix-stats only when the

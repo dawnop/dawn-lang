@@ -18,7 +18,7 @@ use compiler_plan/procmem
 use compiler_plan/source
 use compiler_plan/source.{canon, canon_identity}
 use check/cx.{ModExports, Cx, cx_new}
-use check/checker.{check_module, exports_of, exported_impl}
+use check/checker.{check_module, check_module_headers, exports_of, exported_impl}
 use check/identity
 use check/identity.{Minted, EffectDecl}
 use ir/interp.{eval_comptime_in, CtOut, CtOpts, ct_default, CtWorld, ConstScope, ct_world_add, ct_world_empty}
@@ -1322,6 +1322,19 @@ pub(pkg) fn analyze_module_step(
     }
     for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+  } else {
+    # A module that failed to parse still publishes the headers of what was
+    # recovered, so its importers see the surface they saw before rather
+    # than an empty one, and the impls it declares stay in the program's
+    # table (docs/lsp-module-memo-design.md §十三). Only the headers: a body
+    # checked against a recovered tree reports what recovery dropped. Their
+    # diagnostics go for the same reason -- a type the parser swallowed is
+    # "unknown" to a signature that names it -- so the file reports its
+    # parse errors and nothing else. It is a function of the text and the
+    # carry, the cold path runs it too, and so a session still agrees with a
+    # cold analysis; no body ran, so it counts as no check.
+    let headers = check_module_headers(cx, mf.m, before.exports)
+    cx = Cx { ..headers.cx, diags: [] }
   }
   var impls = before.impls
   # registration already rejected anything that collided with a key already
