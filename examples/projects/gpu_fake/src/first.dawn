@@ -1,0 +1,140 @@
+# The first kernel, end to end: written against `Dev`, recorded with `trace3`,
+# encoded to the bytecode `tileiras` assembles, launched through the entry
+# `trace3` answered, and checked against numbers written down by hand. This
+# is the program packages/tileir/README.md walks through, and the README's
+# code is this file's.
+#
+# It lives beside main.dawn rather than in a project of its own so that the
+# gallery, the site's strip and the recorded output of main.dawn stay as they
+# are: main hands its arguments here only when it is given some.
+#
+# Three ways to run it, each a different device behind the same `!Gpu` code:
+#
+#   dawn run examples/projects/gpu_fake -- fake
+#       the fake device. No GPU, no driver, no `tileiras`. The fake device
+#       does not run the kernel body: it looks the launch's name up in
+#       `reference_kernels()` and calls the host reference registered under
+#       "vadd", so this checks the host half (the entry, the cells, the
+#       grid, the buffers) and not the device code.
+#   dawn run examples/projects/gpu_fake -- emit vadd.tilebc
+#       writes the kernel's bytecode, for `tileiras` to assemble.
+#   <native build> real vadd.cubin
+#       the CUDA driver, with the cubin `tileiras` made. `with_gpu_real` has
+#       no device runtime on the JVM (`gpu.unsupported_backend`), so this
+#       one is built with the C backend. The README has the commands.
+#
+# The example-tests gate runs this file's tests, so CI compiles all of it and
+# runs the fake path; it has no GPU.
+
+use std/dtype.{F64}
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, free, sync, buffer_arg, launch_entry3, Entry3,
+  with_gpu_fake, with_gpu_real, reference_kernels }
+use std/io
+use std/io.{Exit}
+use std/list
+use std/map
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
+use tileir/prog.{TileProg, trace3, cells, In, Out}
+use tileir/bytecode.{encode}
+
+## The device side: an ordinary function whose only effect is `Dev`. It names
+## no shape and no offset; the parameters' cells (below) are the addressing.
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
+  store_cell(out, add(load_cell(a), load_cell(b)))
+
+## Record the kernel once. `g` says every parameter is 256 elements cut into
+## 128-wide cells, so the grid is the output's two cells and nothing here
+## states it; `entry` is what `launch_entry3` takes in place of a kernel name
+## and a block count. (An extent of `DYN_DIM` leaves the length to the launch,
+## which then names the grid: `launch_entry3(.., grid: [n / 128])`.)
+fn record() -> (TileProg, Entry3[Float, Float, Float]) = {
+  let g = cells([256], [128])
+  trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+}
+
+## The host side, whose only effect is `Gpu`: allocate, upload, launch with
+## the entry, wait, download, free. Which device this is, is the handler's
+## business, so the same function runs on the fake one and the real one.
+fn run(e: Entry3[Float, Float, Float], xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  copy_from_host(a, xs)?
+  copy_from_host(b, ys)?
+  launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(out))?
+  sync()?
+  let got = copy_to_host(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(got)
+}
+
+fn xs() -> List[Float] = list.map(range(0, 256), i => to_float(i))
+
+fn ys() -> List[Float] = list.map(range(0, 256), i => to_float(2 * i))
+
+## What `run` must answer: `x + 2x`, written without going through `add`.
+fn expected() -> List[Float] = list.map(range(0, 256), i => to_float(3 * i))
+
+fn show(r: Result[List[Float], ForeignError]) -> String = match r {
+  Ok(zs) -> if zs == expected() { "ok, 256 lanes agree with 3 * i" } else { "WRONG: ${zs}" }
+  Err(e) -> "refused: ${e.kind}: ${e.message}"
+}
+
+# `io.exit` answers `Unit`, and a function that returns Bytes needs some.
+fn bytes_of_nothing() -> Bytes = panic("unreachable: exit did not exit")
+
+fn read_cubin(path: String) -> Bytes !Exit !io = match io.with_fs_real(() => io.read_bytes(path)) {
+  Ok(b) -> b
+  Err(e) -> {
+    io.eprintln("gpu_fake: cannot read ${path}: ${e.message}")
+    io.exit(2)
+    bytes_of_nothing()
+  }
+}
+
+## What main does when it is given arguments: `fake`, `emit <out.tilebc>` or
+## `real <vadd.cubin>`.
+pub fn cli(argv: List[String]) -> Unit !io = io.with_exit_real(() => {
+  let (prog, e) = record()
+  if len(argv) == 2 && argv[0] == "emit" {
+    match io.with_fs_real(() => io.write_bytes(argv[1], encode(prog))) {
+      Ok(_) -> io.println("wrote ${argv[1]}")
+      Err(err) -> {
+        io.eprintln("gpu_fake: cannot write ${argv[1]}: ${err.message}")
+        io.exit(2)
+      }
+    }
+  } else if len(argv) == 2 && argv[0] == "real" {
+    let cubins = map.from([("vadd", read_cubin(argv[1]))])
+    io.println("real device: ${show(with_gpu_real(cubins, () => run(e, xs(), ys())))}")
+  } else if len(argv) == 1 && argv[0] == "fake" {
+    io.println("fake device: ${show(with_gpu_fake(reference_kernels(), () => run(e, xs(), ys())))}")
+  } else {
+    io.eprintln("usage: gpu_fake [fake | emit <out.tilebc> | real <vadd.cubin>]")
+    io.exit(2)
+  }
+})
+
+test "the kernel launched through its entry on the fake device adds the vectors" {
+  let (_p, e) = record()
+  assert with_gpu_fake(reference_kernels(), () => run(e, xs(), ys())) == Ok(expected())
+}
+
+test "the bytecode is a function of the body" {
+  let (p1, _e1) = record()
+  let (p2, _e2) = record()
+  assert encode(p1) == encode(p2)
+}
+
+test "a vector shorter than its cells reach is refused before the device is asked" {
+  let (_p, e) = record()
+  # 100 lanes in the inputs and the output: the cells reach 128.
+  let r = with_gpu_fake(reference_kernels(), () => run(e, list.take(xs(), 100), list.take(ys(), 100)))
+  match r {
+    Err(err) -> { assert err.kind == "gpu.short_tensor" }
+    Ok(_) -> { assert false }
+  }
+}

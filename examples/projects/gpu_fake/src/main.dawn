@@ -30,6 +30,9 @@
 # it stores to the buffer's format.
 #
 # Run: dawn run examples/projects/gpu_fake
+#
+# Given arguments it runs src/first.dawn instead, the README's first kernel
+# end to end (`fake`, `emit <out.tilebc>`, `real <vadd.cubin>`).
 
 use std/gpu
 use std/gpu.{Gpu, WideRefFn, last_out, with_gpu_fake, reference_kernels, alloc, copy_from_host, copy_to_host, launch, free,
@@ -39,6 +42,7 @@ use std/narrow.{F32, F8E4M3FN}
 use std/int/i32.{I32}
 use tileref/ref.{loop_count_ref, assert_pass_ref, global_table_ref, alloca_scratch_ref, shape_ops_ref,
   dtype_convert_ref }
+use first
 use std/io
 use std/list
 use std/map
@@ -541,6 +545,15 @@ fn vadd_line() -> String = match with_gpu_fake(reference_kernels(), () => run(le
 }
 
 pub fn main() -> Unit !io = {
+  let argv = args()
+  if len(argv) > 0 {
+    first.cli(argv)
+  } else {
+    gallery_main()
+  }
+}
+
+fn gallery_main() -> Unit !io = {
   io.print(vadd_text())
   io.println("vadd on the fake device: ${vadd_line()}")
   for row in gallery() {
