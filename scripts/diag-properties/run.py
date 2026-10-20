@@ -123,7 +123,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 # None of them has been triaged one by one; the judge for each is in
 # `run.py --known '' --only <file>`.
 KNOWN_KEYS = """\
-b near packages/tileir/src/lower.dawn
 b near scripts/spike-native/catch_kinds.dawn
 b near scripts/tile-gpu-diff/red_diff.dawn
 """

@@ -153,3 +153,25 @@ grammar-corpus 每个 issue ≥2 个 reject 用例，钉诊断序列；负控是
 | #192 | `Report a record literal in a header and parse it as one` | `braces_hold_fields` 恒假：两个 `header_record_literal_*` 红（箭头/臂、分隔符/尾块连带回来） |
 | #193 | `Name index assignment and a stray range instead of asking for a newline` | 两个新分支加 `false &&`：`assign_index_or_field`、`range_as_expression` 红（回到通用分隔符文案） |
 | #195 | `Report an unclosed delimiter at its opener` | 跳过重定位：三个 `unclosed_*` 红（回到 `found <eof>`，或 `[` 那条消失）；关掉缩进启发：两个缩进例红（改点名最内层未闭合者） |
+| #789 残差（§5′） | `Close blocks left open before the next declaration and parse again` | 去掉第二趟：parser_test 四条新测试与 `unclosed_brace_earlier_decl`、`unclosed_brace_swallowed_decls`、`unclosed_brace_typing_midway` 红；换成单趟规则（`block_body` 遇列 0 声明头即停）：「块里列 0 局部 `fn`」的合法程序报错，连带四个 reject 例红 |
+
+### §5′ 的实测（2026-10-20，本机，loadavg 守卫 ≤ 4）
+
+两把 jar：基线是 `890f9fcb`（含 P3），本刀是同一基点加本刀；工作区与打字态沿用 P3 报告（v0.94.0 源码，
+服务端参数 `-Xss512m -Xmx2g -XX:+UseSerialGC`），`replay.py` 逐态 barrier 计时：
+
+| 场景 | 合法态中位 | 解析失败态 中位 / p90 / 最大（基线） | 同（本刀） | 超合法态中位 2× 的态（基线 → 本刀） | 有导入者诊断的态 |
+|---|---|---|---|---|---|
+| T check/types | 170 / 147 | 326 / 427 / 1980 | **102 / 116 / 135** | 42 → **0** | 51 → 0 |
+| C front/ast | 59 / 44 | 48 / 182 / 1035 | **37 / 44 / 49** | 21 → **0** | 21 → 0 |
+| A driver/analyze | 81 / 82 | 73 / 81 / 87 | 76 / 82 / 93 | 0 → 0 | 0 |
+| L lsp/lspc | 61 / 61 | 56 / 64 / 136 | 55 / 65 / 137 | 1 → 1（同一个态，不是未闭合类） | 0 |
+
+72 个残差态（T 第 39–89、C 第 40–60）在本刀下全部解析出与参照合法态相同的 decl 数（T 283、C 71），
+被编辑文件的解析诊断从 212–213 / 104–105 条降到 1–2 条。合法态用 `scripts/lsp-sync-bench/bench.py --baseline`
+背靠背交替：四个场景与 150 个函数的采样，本刀相对基线的中位差 −4 到 +1 ms，合法态没有变慢。
+全仓 1074 个被跟踪的 `.dawn` 用两把 jar 的 `__parse` 逐字节对比：979 个干净解析的文件 0 差异；
+95 个有诊断的文件里只有 3 个 `unclosed_brace_*` reject 例变了（另 92 个逐字节相同）。
+`scripts/diag-properties/run.py`（夜跑，一 token 变异）默认范围在本刀下 0 新增、1 条陈旧：
+`b near packages/tileir/src/lower.dawn` 是删掉第 552 行的 `}` 后第一条诊断落在第 580 行（被吞的 `type` 处），
+第二趟之后诊断回到开括号附近，按棘轮规矩从 `KNOWN_KEYS` 删掉该行（基线 jar 同一命令仍能复现它）。
