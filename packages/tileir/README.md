@@ -9,18 +9,108 @@ and a format is a value type with a witness of the same name: `Float` and
 `F64`, `Int` and `I64`, `Bool` and `I1` (`std/dtype`), `BF16`, `F16` and `F32`
 (`std/narrow`), `I32` (`std/int/i32`).
 
+## A kernel, end to end
+
+One kernel, from `trace3` to an assertion on the answer, with nothing but the
+fake device under it. The device side is `vadd`; `record` runs it once and
+answers the program and the entry a launch takes; `run` is the host side, whose
+only effect is `Gpu`, so the same function runs on any device:
+
 ```dawn
 use std/dtype.{F64}
-use tileir/dev.{Dev, Param, load_cell, store_cell, add, DYN_DIM}
-use tileir/prog.{trace3, cells, In, Out}
-use tileir/render.{render}
-use tileir/bytecode.{encode}
+use std/gpu.{Gpu, alloc, copy_from_host, copy_to_host, free, sync, buffer_arg, launch_entry3, Entry3,
+  with_gpu_fake, reference_kernels }
+use std/list
+use tileir/dev.{Dev, Param, load_cell, store_cell, add}
+use tileir/prog.{TileProg, trace3, cells, In, Out}
 
 fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, add(load_cell(a), load_cell(b)))
 
-let g = cells([DYN_DIM], [128])     # 128-wide cells, as many as the grid has
-let (prog, entry) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+fn record() -> (TileProg, Entry3[Float, Float, Float]) = {
+  let g = cells([256], [128])
+  trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+}
+
+fn run(e: Entry3[Float, Float, Float], xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a = alloc(F64, n)?
+  let b = alloc(F64, n)?
+  let out = alloc(F64, n)?
+  copy_from_host(a, xs)?
+  copy_from_host(b, ys)?
+  launch_entry3(e, buffer_arg(a), buffer_arg(b), buffer_arg(out))?
+  sync()?
+  let got = copy_to_host(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(got)
+}
+
+fn xs() -> List[Float] = list.map(range(0, 256), i => to_float(i))
+
+fn ys() -> List[Float] = list.map(range(0, 256), i => to_float(2 * i))
+
+fn expected() -> List[Float] = list.map(range(0, 256), i => to_float(3 * i))
+
+test "the kernel launched through its entry on the fake device adds the vectors" {
+  let (_p, e) = record()
+  assert with_gpu_fake(reference_kernels(), () => run(e, xs(), ys())) == Ok(expected())
+}
+```
+
+`g` says every parameter is 256 elements cut into 128-wide cells, so the grid is
+the two cells of the output and nothing states it; `entry` is what
+`launch_entry3` takes in place of a kernel name and a block count, and the
+formats of the arguments are in its type. An extent of `DYN_DIM` leaves the
+length to the launch, which then names the grid (`launch_entry3(.., grid: [n / 128])`).
+`launch_entryN` refuses, before any device is asked, an `Out` or `Shared`
+argument that aliases another argument, a grid that disagrees with the cells
+and a tensor shorter than its cells reach.
+
+The fake device never runs a kernel body. It looks the launch's name up in a map
+and calls the host reference registered there (`reference_kernels()` has `vadd`),
+so this test checks the host half (the entry, the cells, the grid, the buffers)
+and the reference against numbers written by hand, not the device code. That is
+the job of the real device, next. The whole program, with the command line that
+drives it, is
+[`examples/projects/gpu_fake/src/first.dawn`](../../examples/projects/gpu_fake/src/first.dawn),
+and this code is that file's: CI compiles it and runs its tests.
+
+### On a GPU
+
+The same `run` takes `with_gpu_real(cubins, ..)` in place of `with_gpu_fake`,
+where `cubins` maps a kernel name to the cubin `tileiras` made from
+`encode(prog)`. Neither this package nor `std/gpu` runs `tileiras`, so there are
+three steps between the Dawn and the card, all of them in the example:
+
+```bash
+dawnc build examples/projects/gpu_fake -o gpu_fake      # the C backend: the JVM has no device runtime
+./gpu_fake fake                                         # the test above, as a program: no GPU needed
+./gpu_fake emit vadd.tilebc                             # encode(prog), written to a file
+tileiras --gpu-name sm_86 -o vadd.cubin vadd.tilebc     # your card's architecture, and see below
+./gpu_fake real vadd.cubin                              # with_gpu_real, through the CUDA driver
+```
+
+The last line prints `real device: ok, 256 lanes agree with 3 * i` when the card
+computed the sum itself. On the JVM (`dawn run`) `with_gpu_real` answers every
+operation with `gpu.unsupported_backend`, and on a machine with no NVIDIA driver
+with `gpu.no_driver`; the fake device has neither limit. The flags to give
+`tileiras` depend on its version and the target (see "Assembling with tileiras" below),
+and `tileir/asm.tileiras_args` answers them. This path was run on an sm_86 card
+with tileiras 13.4.92.
+
+### The Tile IR itself
+
+`render` prints the program as `cuda_tile` text and `encode` writes the bytecode
+the assembler reads:
+
+```dawn
+use tileir/render.{render}
+use tileir/bytecode.{encode}
+
+let (prog, entry) = record()
 let text = render(prog)     # cuda_tile text
 let bytes = encode(prog)    # bytecode for tileiras
 ```
@@ -106,7 +196,9 @@ let (prog, entry) = trace3("matmul",
   a float constant with no format, which takes the format of the
   element-wise operation it meets (`mul(s, lit(0.5))`; write it after a
   typed operand, since the checker finds the format left to right); a
-  place that needs a format of its own refuses it and asks for `f_const`.
+  place that needs a format of its own refuses it and asks for `f_const`. A
+  bare float literal where a tile is expected, like the `0.0` of `mma`
+  below, is a `lit`.
 - An operand of an element-wise operation widens on its own in two cases: a
   rank-0 tile widens to any shape, and a tile of the operation's rank widens
   along its dimensions of length 1, so `sub(s, reduce_max(s, keepdims:
@@ -121,8 +213,8 @@ let (prog, entry) = trace3("matmul",
 - `mma(a, b, acc)` is the matrix product `a * b + acc`. `a` and `b` share
   a format and `acc` may have another, from the dialect's table: f8E4M3FN,
   f8E5M2 and f16 operands into f16 or f32, bf16, tf32 and f32 into f32,
-  f64 into f64. A `lit(0.0)` accumulator takes the accumulator's format, so
-  it needs one from the context: `let s: Tile[F32] = mma(a, b, lit(0.0))`.
+  f64 into f64. A literal `0.0` accumulator takes the accumulator's format, so
+  it needs one from the context: `let s: Tile[F32] = mma(a, b, 0.0)`.
   `mma_scaled` is the block-scaled product and `mmai` the i8 one.
 - `t.to(BF16)` converts a float tile, rounding to nearest even (a tile
   already in that format is answered unchanged); `float_to_float` takes the
@@ -158,7 +250,8 @@ A value that changes as a loop goes is a `var`, which a `for` over a
 with a tile of the same format and shape, and after the loop it holds what the
 last iteration assigned. A `var` starts from a tile with a shape (`zeros(p)`,
 `full`, a `broadcast`), not from a rank-0 constant or a `lit`. This is
-FlashAttention with bf16 inputs and f32 accumulation:
+FlashAttention with bf16 inputs and f32 accumulation (`scale` is a
+`Scalar(F32)` parameter, read with `scalar(scale)`):
 
 ```dawn
 use std/float.{INFINITY}
@@ -168,7 +261,7 @@ var m: Tile[F32] = full([BQ, 1], f32(-INFINITY))
 var l: Tile[F32] = full([BQ, 1], 0.0)
 var acc: Tile[F32] = full([BQ, D], 0.0)
 for j in d_range(0, N / BK) {
-  let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), lit(0.0)) * lit(scale)
+  let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
   let m_new = max(m, reduce_max(s, keepdims: true))
   let p = exp(s - m_new)
   let alpha = exp(m - m_new)
@@ -176,7 +269,7 @@ for j in d_range(0, N / BK) {
   acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
   m = m_new
 }
-store_cell(o, (acc / l).to(F64))   # o: Param[Float]
+store_cell(o, (acc / l).to(F64))   # o: Param[Float], scale: Param[F32]
 ```
 
 `carry`, `get` and `set` remain for the loops a `for` cannot write: `d_loop`'s
