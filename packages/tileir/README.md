@@ -123,7 +123,7 @@ let bytes = encode(prog)    # bytecode for tileiras
 | `lower` | `lower(prog)`, the linear instruction table |
 | `render` | `render(prog)`, the `cuda_tile` text; `line_map` |
 | `bytecode` | `encode(prog)`; `bytecode_version()` is `"13.4"` |
-| `asm` | `tileiras_args(version, gpu_name)`, `assembler_defect(version, gpu_name)`: how to call `tileiras` (see below) |
+| `asm` | `assemble`, `tileiras_args(version, gpu_name, prog)`, `assembler_defect(version, gpu_name, prog)`, `has_break_loop(prog)`: how to call `tileiras` (see below) |
 
 The full public surface is what `./bin/dawn doc packages/tileir` prints.
 [OPERATIONS.md](OPERATIONS.md) says which `cuda_tile` operation each function
@@ -367,27 +367,32 @@ GPU and no driver.
 
 ### Why the arguments are not always the plain ones (#558)
 
-**With tileiras 13.4.92, `--opt-level 0` is needed when assembling for sm_90,
-sm_100, sm_103, sm_107 or sm_110.** At the default level that assembler stores
-a wrong loop exit value for a loop that leaves through `break` with two
-carried values
+**With tileiras 13.4.92, a program that has a `loop` which `break`s needs
+`--opt-level 0` when it is assembled for sm_90, sm_100, sm_103, sm_107 or
+sm_110.** At the default level that assembler stores a wrong loop exit value
+for a loop that leaves through `break` with two carried values
 ([#558](https://github.com/dawnop/dawn-lang/issues/558),
-[NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)). Other
-targets, and other tileiras versions, keep the default level. `assemble`
-applies this itself; a build script that runs `tileiras` on its own asks
-`asm` rather than hard-coding it, so the workaround lifts when you move to a
-fixed tileiras:
+[NVIDIA/cuda-tile#25](https://github.com/NVIDIA/cuda-tile/issues/25)). Any
+other program, other targets and other tileiras versions keep the default
+level, which is what makes a `for`-loop kernel such as flash attention fast.
+`assemble` applies this itself; a build script that runs `tileiras` on its own
+asks `asm` rather than hard-coding it, so the workaround lifts when you move
+to a fixed tileiras:
 
 ```dawn
-use tileir/asm.{tileiras_args, assembler_defect}
+use tileir/asm.{tileiras_args, assembler_defect, has_break_loop}
 
-let args = tileiras_args("13.4.92", "sm_90")   # ["--gpu-name", "sm_90", "--opt-level", "0"]
-let why = assembler_defect("13.4.92", "sm_90") # Some("tileiras 13.4.92 miscompiles ...")
+let args = tileiras_args("13.4.92", "sm_90", prog)   # a loop that breaks: ["--gpu-name", "sm_90", "--opt-level", "0"]
+                                                     # any other program: ["--gpu-name", "sm_90"]
+let why = assembler_defect("13.4.92", "sm_90", prog) # Some("tileiras 13.4.92 miscompiles ...") or None
 # then: tileiras <args> -o kernel.cubin kernel.tilebc
 ```
 
-`-O0` costs device time: measured on sm_86, up to 4.5x for kernels that
-compute and 8x for a small loop (§6.28).
+`has_break_loop` looks for a `loop` with a `break` at any depth, which is
+wider than the four conditions the issue minimised, on purpose. `-O0` costs
+device time: measured on sm_86, up to 4.5x for kernels that compute and 8x
+for a small loop (§6.28); on sm_90 and sm_100 a flash-attention kernel took 35x
+to 57x of its `-O3` time (bf16), which is why only the programs at risk pay.
 
 ## Writing your own `Dev` handler
 

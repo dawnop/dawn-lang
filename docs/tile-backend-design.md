@@ -5267,6 +5267,54 @@ block id 当格子下标」。这件事在 Tile IR 里没有属性，全在 kern
 - 改写 golden 绕开触发形状（去掉第二携带值、不用 `reduce` 判出口）：同上，依赖优化器内部，而且用户的 kernel 不会跟着改。
 - 在 `std/gpu` 里替用户调用 `tileiras`：Dawn 至今不运行汇编器，加进去是另一件事；这里只在 `with_gpu_real` 文档加一句指向 `asm`。
 - 拿 13.4.92 的 `-O0` 当所有目标的默认：sm_86 等目标没有缺陷，白付 1.3 到 8 倍。
+
+**收窄（tileir 0.18.0，P1）：程序是第三把钥匙。** 上面 B 路的「受影响族一律 `-O0`」落地后，2026-10-20 用锁频、CUDA events、
+交错 5 轮在 sm_90 与 sm_100 上测了同一份字节码的 `-O0` 与 `-O3`（调研报告 `research-gpu-cutile-timing-20261020.md`），
+`-O0` 的代价比 sm_86 上量的 1.3 到 8 倍大得多：bf16 flash_attn 慢 35 倍（sm_90）到 57 倍（sm_100），f64 版慢 9 到 11 倍，
+vadd 慢 3 倍。而这三个 kernel 用的是 `for`，没有 `loop`，也没有 `break`，在 `-O3` 下两张卡的结果都与 torch 的 f64 参考一致
+（f64 最大误差 3e-16，bf16 1.1e-4）。也就是说，绕道的代价全落在不可能触发缺陷的程序上。
+
+**判据。** 程序里含有一个带 `break` 的 `loop`，才退回 `--opt-level 0`；别的程序在 13.4.92 的 sm_90 / sm_100 族上也用默认级别。
+具体是 `asm.has_break_loop(prog)`：`TileProg.ops` 里有一个 `Loop` 操作，它的 body 在任意深度含有 `Break`（`if`、`for`、`reduce`、
+`scan` 的区域里都算）。只有 `for`、或者没有循环的程序不命中；`Loop` 里嵌 `for`、`for` 里嵌带 `break` 的 `Loop` 都命中。
+`tileiras_args` 与 `assembler_defect` 因此多收一个 `prog` 参数（破坏性，tileir 0.17.1 到 0.18.0）；`assemble` 与
+`scripts/tile-gpu-diff` 同步。表的键从「汇编器版本 × gpu-name」变成「汇编器版本 × gpu-name × 程序是否有带 `break` 的 `loop`」，
+版本串一变仍然整体解除。
+
+**比 #558 的四个条件宽，宁宽勿窄。** issue 缩出的触发条件是四个缺一不可的：经 `loop` 携带、`break` 时取本轮初值的 f64 值；另一个
+独立携带值在循环后被存；退出条件形如 `const > reduce_max(|x - c|)`；目标属于 sm_90 或 sm_100 族。判据只留「带 `break` 的 `loop`」
+一条。理由有三：这四条描述的是优化器当前恰好出错的形状，6.28 的缩减表里差一个 op 就从错变对，换一个 tileiras 小版本它还会变，
+照条件逐条判是在替一个未公开的优化器画边界；漏判的代价是静默算错，多判的代价只是这一个 kernel 慢，两者不对称；上游
+NVIDIA/cuda-tile#25 没有说明根因，不能证明别的 `break` 形状安全。这也是上面「不做的」里「只对含 `loop` 的 kernel 降级」那条
+的修订：那条的理由（按程序形状猜不可靠）对「猜」的粒度仍然成立，所以这里取最粗的结构判据，而不是复刻四个条件；它没有被推翻
+的部分是「按目标整族降级才是可证明的边界」，目标维度仍按整族。
+
+**在哪一层判。** 在 `TileProg`（记录出的程序，`lower` 之前）上按结构判，不按文本判，不在渲染出的 Tile IR 或字节码上做字符串匹配。
+`lower.Kernel` 里与之对应的是 `WhileLoop` 内的 `BreakVals`，而 `WhileLoop` 只由 `Loop` 操作 lower 出来
+（`lower_loop`，`lower.dawn`），一对一，所以两层答案相同；选 `TileProg` 是因为 `assemble` 手里本来就是它，不必为了问一个布尔
+再 lower 一遍，`tile-gpu-diff` 的 kernels 模式也是在记录出的程序上问。
+
+**cuTile 的对照。** cuTile 1.7 对所有目标一律 `-O3`（`_compile.py` 的 `compile_cubin`，`_compiler_options.py` 的默认 `opt_level = 3`），
+没有任何按程序分级的逻辑，所以它遇到这类 `loop` 会在 sm_90 与 sm_100 上算错，自己并不知道。Dawn 的做法是它的超集：带 `break`
+的 `loop` 保住正确，其余与 cuTile 同级。
+
+**回归。** `asm` 的测试钉住：#558 复现形状的程序（`repro_558`，f64 经 `loop` 携带、`break` 于 `0.2 > max|x - 0.25|`）与嵌在
+`for` 里的带 `break` 的 `loop` 在 13.4.92 的五个目标上带 `--opt-level 0` 并有原因；只含 `for` 的程序与直线程序同样的五个目标
+不带；其余目标、13.3.36、假想的 13.4.93 不带；原因文案逐字（句子改为「miscompiles the exit value of a loop that breaks」）。
+`assemble` 的桩测试也分开：同一个 sm_90，复现程序拿到 `-O0`，没有循环的程序拿到默认参数。**负控**：把判据改成「从不 `-O0`」
+（`defect_for` 里加 `false &&`），四条 asm 测试变红，集群上 #558 复现算出第一步的值（红）；见下面的集群表。
+
+**不做的（理由）：**
+
+- 判据照 #558 的四个条件写（`reduce` 出口、两个携带值、f64）：条件是优化器当前的形状，漏一个就静默错；宽判据的代价只是少数
+  含 `break` 循环的 kernel 慢，且 golden 里只有四个（loop_count、loop_until、loop_none、loop_return）。
+- 把判据放在 `lower.Kernel` 或字节码上：与 `TileProg` 一对一，没有信息增益，反而多一次 lower。
+- 对每个 kernel 先在 `-O3` 下编译、再在设备上跑一遍自检以决定降不降级：Dawn 不替用户运行设备代码，`assemble` 也不该有这个副作用。
+- 受影响族整族换回 `-O0` 以外的级别（`-O1`、`-O2`）：缩减表里 `-O1` 起就错，`-O0` 是唯一实测全对的级别。
+- 把 `tileiras_args(version, gpu_name)` 的老签名留成兼容别名：没有外部消费者，仓里的调用方（`assemble`、`tile-gpu-diff`、
+  README 与 `std/gpu` 的文档）一并改，不留迁移层。
+- 为 vadd、flash_attn 单独开白名单：白名单要人记得维护，结构判据不用。
+
 ### 6.29 tileir 0.8.2：下标除法、同秩广播、`lit`（K1）
 
 任务单 `tile-surface-k1k2-20261006.md`（agent-handoff），裁决 `ruling-tile-surface-09-20261006.md`，调研

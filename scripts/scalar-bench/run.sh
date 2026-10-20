@@ -34,9 +34,11 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cc_bin="${CC:-cc}"
 
-# The asm arguments are packages/tileir's: --opt-level 0 on sm_90 and sm_100.
+# The asm arguments are packages/tileir's asm.tileiras_args. None of these
+# kernels has a loop that breaks, so on every target they are the plain ones
+# (--opt-level 0 only goes to a program with such a loop, #558), and the
+# default level is what this bench should time.
 asm=(--gpu-name "$gpu_name")
-case "$gpu_name" in sm_90|sm_100) asm+=(--opt-level 0) ;; esac
 
 mkdir -p "$work/k/src" "$work/b/src"
 cp "$here/kernels.dawn" "$work/k/src/main.dawn"
