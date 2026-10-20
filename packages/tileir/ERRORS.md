@@ -48,7 +48,7 @@ number (`MakeToken` is `#0`, then in the order recorded) and its dialect name.
 Real messages:
 
 ```
-tileir: kernel `shapes_differ`: op #6 `addf`: rhs is tile<64xf64>, declared tile<128xf64> at tileir/prog.dawn:339:3
+tileir: kernel `shapes_differ`: op #6 `+`: rhs is tile<64xf64>, declared tile<128xf64> at tileir/prog.dawn:339:3
 tileir: kernel `write_in`: op #10 `store_cell`: parameter 0 is an In, and nothing writes an In at tileir/prog.dawn:339:3
 tileir: kernel `not_pow2`: every tile dimension is a power of two, got 100 in [100] at tileir/prog.dawn:339:3
 tileir: kernel `pointer_store`: op #5 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared at tileir/prog.dawn:339:3
