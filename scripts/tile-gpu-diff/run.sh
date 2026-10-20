@@ -23,7 +23,7 @@
 # The run:
 #
 #   assemble  scripts/tile-golden's recorded bytecode goldens (vadd,
-#             vadd_bf16 and the six boundary kernels) through the pinned
+#             vadd_bf16, vadd_f32 and the rest named below) through the pinned
 #             tileiras into cubins for toolchain.txt's gpu-name. install-tileiras.sh
 #             installs the pin under $TILEIRAS_DIR (default
 #             ~/.cache/dawn-tileiras) unless $TILEIRAS names a binary.
@@ -33,8 +33,9 @@
 #   jvm       vadd_diff.dawn on the JVM stops at the first operation with
 #             `gpu.unsupported_backend`: the JVM has no device runtime and
 #             says so by construction rather than by a LinkageError.
-#   native    vadd_diff.dawn built natively runs four f64 and three bf16
-#             input sets, mask_diff.dawn the six boundary kernels of
+#   native    vadd_diff.dawn built natively runs four f64, three bf16 and
+#             three f32 input sets (the f32 ones through vadd_f32, the
+#             first f32 buffers a device here was handed), mask_diff.dawn the six boundary kernels of
 #             knife 7a (each with an output buffer longer than its answer, so
 #             that what the mask keeps is compared too), red_diff.dawn the
 #             thirteen reduction and transcendental kernels of knife 7b,
@@ -172,6 +173,13 @@
 #                      every driver; the device never sees the difference
 #                      between a truncated and a rounded operand as such,
 #                      only the fake device does.
+#     f32-pack-truncates
+#                      the same mistake in the f32 packer: narrow.f32_bits
+#                      truncates the Float instead of rounding it -> every
+#                      f32 set's round trip differs (each carries Floats off
+#                      the binary32 grid), the f64 and bf16 sets do not,
+#                      verdict `fail`. Required on every driver, for
+#                      pack-truncates' reason.
 #     mask-all-true    the package's lowering answers an all-true mask
 #                      instead of the comparison -> layers 0 and 1 move but
 #                      stay legal (an all-true mask is a mask), and on the
@@ -1179,7 +1187,7 @@ arch_skipped_list="$(IFS=,; printf '%s' "${arch_skipped[*]-}")"
 arch_probe="ran=$arch_ran_list skipped=$arch_skipped_list@$gpu_name"
 echo "      arch: ${#arch_ran[@]} of ${#arch_kernels[@]} architecture-gated kernels are at or above $gpu_name ($arch_probe)"
 
-for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
+for k in vadd vadd_bf16 vadd_f32 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@]}" "${integers[@]}" \
   "${wide[@]}" "${gathered[@]}" "${scanned[@]}" "${atomic[@]}" "${erfs[@]}" "${trigs[@]}" \
   "${shaped[@]}" "${dtypes[@]}" "${loops[@]}" "${attrs[@]}" "${globals_[@]}" "${syms_[@]}" "${allocas[@]}" \
   "${hints[@]}" "${views[@]}" "${inbounds_ks[@]}" "${dyns[@]}" "${scalars[@]}" "${gsviews[@]}" "${dbg[@]}" "${dbg_alone[@]}" \
@@ -1187,7 +1195,7 @@ for k in vadd vadd_bf16 "${masked[@]}" "${reduced[@]}" "${twod[@]}" "${strided[@
   assemble_golden "$k" "$golden/$k.tilebc" "$work/$k.cubin"
   echo "PASS  assemble: $k.tilebc -> cubin ($(wc -c < "$work/$k.cubin") bytes, tileiras V$want_tileiras, $gpu_name)"
 done
-cubins=("$work/vadd.cubin" "$work/vadd_bf16.cubin")
+cubins=("$work/vadd.cubin" "$work/vadd_bf16.cubin" "$work/vadd_f32.cubin")
 masked_cubins=()
 for k in "${masked[@]}"; do masked_cubins+=("$work/$k.cubin"); done
 reduced_cubins=()
@@ -1328,7 +1336,7 @@ cat "$work/clean.out"
 verdict="$(verdict_of "$work/clean.out")"
 case "$verdict" in
   pass) [ "$rc" = 0 ] || fail "verdict pass with exit $rc"
-        echo "PASS  native: vadd and vadd_bf16 on the GPU are bit-identical to the fake device in every set" ;;
+        echo "PASS  native: vadd, vadd_bf16 and vadd_f32 on the GPU are bit-identical to the fake device in every set" ;;
   blocked:*) [ "$rc" = 0 ] || fail "verdict $verdict with exit $rc"
         echo "BLOCKED  native: the driver refused before a result could be compared: $verdict" ;;
   fail) cat "$work/clean.err" >&2; fail "the device answered and disagreed with the fake device (see the transcript above)" ;;
@@ -2803,6 +2811,14 @@ std_pt="$(mutant_std pack-truncates \
   '  "bf16" -> x => narrow.bf16_bits(narrow.round_bf16(x))' \
   '  "bf16" -> x => narrow.bf16_bits(x)')"
 roundtrip_mutant_checks pack-truncates "$std_pt" bf16 3
+
+# 2b. f32-pack-truncates: pack-truncates for the f32 packer. Every f32 set
+#     carries Floats off the binary32 grid, so every f32 round trip differs
+#     from what the format holds; the f64 and bf16 sets are untouched.
+std_ft="$(mutant_std f32-pack-truncates \
+  '  "f32" -> x => narrow.f32_bits(narrow.round_f32(x))' \
+  '  "f32" -> x => narrow.f32_bits(x)')"
+roundtrip_mutant_checks f32-pack-truncates "$std_ft" f32 3
 
 # 3. grid-zero: the real handler launches over zero tile blocks. Where the
 #    clean run passed, the driver must refuse the launch and the verdict must

@@ -1,4 +1,4 @@
-# A GPU program on a machine with no GPU: nine kernels, two sides, one
+# A GPU program on a machine with no GPU: ten kernels, two sides, one
 # handler that is a table in host memory.
 #
 # The last line of the gallery is not a kernel at all: it is the host asking
@@ -6,7 +6,7 @@
 # operation that names something inside a module rather than a buffer the
 # program allocated.
 #
-# The device side is nine ordinary Dawn functions whose only effect is
+# The device side is ten ordinary Dawn functions whose only effect is
 # `!Dev`, each the smallest shape that shows one thing the dialect can do
 # and each named for the knife that added it (docs/tile-backend-design.md
 # 7). Running one computes nothing: `packages/tileir`'s recording handler
@@ -33,7 +33,7 @@
 
 use std/gpu
 use std/gpu.{Gpu, WideRefFn, last_out, with_gpu_fake, reference_kernels, alloc, copy_from_host, copy_to_host, launch, free,
-  sync, vadd_ref, buffer_arg, erase }
+  sync, vadd_ref, buffer_arg, erase, DeviceBuffer }
 use std/dtype.{F64}
 use std/narrow.{F32, F8E4M3FN}
 use std/int/i32.{I32}
@@ -80,6 +80,17 @@ fn vadd_hinted(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev
   let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", [hint_latency(4)])])
   let tb = load(b, blk, [WIDTH])
   store(out, blk, add(ta, tb), hints: [for_arch("sm_86", [hint_latency(7)])])
+}
+
+## `vadd` over binary32 buffers: the same body, a different format in the
+## signature. The device's `addf` on an f32 tile rounds the exact sum to
+## nearest, ties to even, which is what the fake device's `vadd_ref` does
+## after adding the two values in a Float (where the sum of two binary32
+## values is exact).
+fn vadd_f32(a: Param[F32], b: Param[F32], out: Param[F32]) -> Unit !Dev = {
+  let ta = load_cell(a)
+  let tb = load_cell(b)
+  store_cell(out, add(ta, tb))
 }
 
 # One Collatz step per lane, saturating at 1: a lane that has reached 1 stays
@@ -235,6 +246,12 @@ fn vadd_prog() -> TileProg = {
 
 fn vadd_text() -> String = vadd_prog().render()
 
+fn vadd_f32_text() -> String = {
+  let g = cells([DYN_DIM], [WIDTH])
+  let (p, _e) = trace3("vadd_f32", In(F32, g), In(F32, g), Out(F32, g), vadd_f32)
+  p.render()
+}
+
 fn vadd_hinted_text() -> String =
   trace_kernel("vadd_hinted", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
     () => vadd_hinted(param(F64, 0), param(F64, 1), param(F64, 2))).render()
@@ -285,6 +302,25 @@ fn run(xs: List[Float], ys: List[Float]) -> Result[List[Float], ForeignError] !G
   copy_from_host(a, xs)?
   copy_from_host(b, ys)?
   launch("vadd", blocks(n), [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
+  sync()?
+  let got = copy_to_host(out)?
+  free(a)?
+  free(b)?
+  free(out)?
+  Ok(got)
+}
+
+## `run` over binary32 buffers. The values are `F32`s, already on the
+## binary32 grid, so `copy_from_host` writes them as they are and
+## `copy_to_host` reads back exactly what the device holds.
+fn run_f32(xs: List[F32], ys: List[F32]) -> Result[List[F32], ForeignError] !Gpu = {
+  let n = len(xs)
+  let a: DeviceBuffer[F32] = alloc(F32, n)?
+  let b = alloc(F32, n)?
+  let out = alloc(F32, n)?
+  copy_from_host(a, xs)?
+  copy_from_host(b, ys)?
+  launch("vadd_f32", blocks(n), [erase(buffer_arg(a)), erase(buffer_arg(b)), erase(buffer_arg(out))])?
   sync()?
   let got = copy_to_host(out)?
   free(a)?
@@ -377,6 +413,24 @@ fn zeros(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
 fn left() -> List[Float] = [1.0, 2.0, 3.0, 4.0]
 
 fn right() -> List[Float] = [10.0, 20.0, 30.0, 40.0]
+
+## Sums that binary32 cannot hold exactly: 1 + 2^-24 is halfway between
+## two binary32 values and rounds to the even one, 1; 1 + 3 * 2^-24 rounds
+## up to 1 + 2^-22; the largest finite value doubled overflows to infinity;
+## the smallest normal minus the smallest subnormal is the largest
+## subnormal, exactly.
+fn f32_left() -> List[F32] =
+  list.map([1.0, 1.0, 3.4028234663852886e38, 1.1754943508222875e-38], x => narrow.f32(x))
+
+fn f32_right() -> List[F32] =
+  list.map([5.9604644775390625e-8, 1.7881393432617188e-7, 3.4028234663852886e38, -1.401298464324817e-45],
+    x => narrow.f32(x))
+
+fn vadd_f32_answer() -> Result[List[Float], ForeignError] =
+  match with_gpu_fake(devices(), () => run_f32(f32_left(), f32_right())) {
+    Ok(zs) -> Ok(list.map(zs, z => narrow.to_f64(z)))
+    Err(e) -> Err(e)
+  }
 
 fn vadd_hinted_answer() -> Result[List[Float], ForeignError] =
   on_fake("vadd_hinted", 1, [("f64", left()), ("f64", right()), ("f64", zeros(4))])
@@ -478,6 +532,7 @@ fn gallery() -> List[(String, String)] = [
   ("T7  table     two globals nobody uploaded", table_answer().shown()),
   ("T10 scratch   alloca, written and read back", scratch_answer().shown()),
   ("T15 hinted    vadd with optimization_hints", vadd_hinted_answer().shown()),
+  ("F32 vadd_f32  vadd over binary32 buffers", vadd_f32_answer().shown()),
   ("TG  symbols   a module global the host looks up", symbols_line())]
 
 fn vadd_line() -> String = match with_gpu_fake(reference_kernels(), () => run(left(), right())) {
@@ -505,6 +560,13 @@ test "the kernel renders as one Tile IR entry" {
   assert str.contains(text, "cuda_tile.module @m")
   assert str.contains(text, "entry @vadd")
   assert str.contains(text, "tile<128xf64>")
+}
+
+test "F32: the binary32 kernel is vadd with f32 tiles" {
+  let text = vadd_f32_text()
+  assert str.contains(text, "entry @vadd_f32")
+  assert str.contains(text, "tile<128xf32>")
+  assert str.contains(text, "f64") == false
 }
 
 test "T15: the hints are on the first load and the store, and nowhere else" {
@@ -561,6 +623,10 @@ test "T2: the three shape operations spell their shapes" {
 test "the same program on the fake device adds the vectors" {
   assert with_gpu_fake(reference_kernels(), () => run(left(), right())) ==
     Ok([11.0, 22.0, 33.0, 44.0])
+}
+
+test "F32: an f32 buffer goes up, is added and comes back, every sum rounded once to binary32" {
+  assert vadd_f32_answer() == Ok([1.0, 1.0000002384185791, 1.0 / 0.0, 1.1754942106924411e-38])
 }
 
 test "T15: a hint does not change the answer" {
