@@ -1880,7 +1880,7 @@ pub fn main() -> Unit !io = {
 ```output
 recorded
 tileir: kernel `k`: op #5 `store_cell`: parameter 0 is an In, and nothing writes an In
-tileir: kernel `k`: op #6 `addf`: rhs is tile<64xf64>, declared tile<128xf64>
+tileir: kernel `k`: op #6 `+`: rhs is tile<64xf64>, declared tile<128xf64>
 tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared
 ```
 
@@ -2077,7 +2077,7 @@ pub fn main() -> Unit !io = {
 ```
 ```output
 recorded
-tileir: kernel `row_softmax`: op #9 `subf`: rhs is tile<32xf64>, declared tile<32x64xf64>
+tileir: kernel `row_softmax`: op #9 `-`: rhs is tile<32xf64>, declared tile<32x64xf64>
 ```
 
 `reduce_max(s, keepdims: true)` reduces the last dimension (`dim: -1` is the default) and
@@ -2086,7 +2086,7 @@ keeps it with length 1: a `[32, 1]` tile, one maximum per row. Where it meets th
 an operand of an element-wise operation widens along its dimensions of length 1 when it
 has the operation's rank, and a rank-0 tile widens to any shape. The second kernel drops
 `keepdims`, so the maximum is a `[32]` tile, of another rank, and it is refused at the
-subtraction; the refusal names `subf`, the Tile IR operation `sub` records.
+subtraction; the refusal names `-`, the operator the kernel wrote.
 `broadcast(t, shape)` is the explicit spelling, for a place that is not an element-wise
 operation. A loop's starting value is usually `full(shape, value)`, a tile of that shape
 in the format it is checked against: `var m: Tile[F32] = full([32, 1], 0.0)`.

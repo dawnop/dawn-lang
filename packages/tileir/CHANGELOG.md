@@ -7,6 +7,36 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.17.1 (2026-10-20)
+
+Additive, so a patch in the 0.17 class (`docs/package-design.md` section 6.3,
+"0.x and compatibility classes"): nothing a caller or a handler already
+compiles against moved, and no `Dev` operation was added. The 205 goldens and
+the three ledgers are unchanged byte for byte.
+
+- `asm.assemble(prog, gpu_name, tileiras) -> Result[Bytes, AssembleError]`
+  with `!Fs !Proc`: encodes the program, writes a temporary `.tilebc`, asks
+  `tileiras --version` which assembler it is, runs it with
+  `tileiras_args(version, gpu_name)` and reads the cubin back, removing the
+  scratch directory whatever happens. `tileiras` is a path (or a name on
+  PATH): installing the assembler is not this package's business. The four
+  ways it can fail are four `AssembleError` constructors
+  (`AssemblerNotFound`, `AssemblerFailed` with the arguments and stderr,
+  `NoCubin`, `UnknownVersion`) plus `Scratch` for the host refusing a
+  temporary file, and `asm.explain` words each as one sentence. No cache: an
+  assembly is well under a second and a cache would have to be keyed on the
+  assembler version, the target and the arguments as well as the bytes.
+  `assemble` takes `!Fs` as well as `!Proc`, because
+  it writes and reads files through `Fs`; a test answers both.
+- A recording refusal names the four float operators the way the kernel
+  wrote them (`+`, `-`, `*`, `/`, not `addf`, `subf`, `mulf`, `divf`) and,
+  when the refused operation is inside a region, says which regions after the
+  reason: ``(inside the body of a `d_range`, inside the then branch of a
+  `d_if`)``. The text before the reason is unchanged except for the operator
+  spelling, so a fragment match on `kernel`, `op #k` and the reason still
+  holds. There is still no source line: nothing reads a Dawn position at
+  record time before the `at` default reaches this package.
+
 ## Unreleased: no code change, a new reader of `lower`
 
 `packages/tileinterp` 0.1.0 (`docs/tileinterp-design.md`) interprets the

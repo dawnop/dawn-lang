@@ -1070,8 +1070,46 @@ fn op_number(frames: List[Frame], ops: List[TileOp]) -> Int = {
 # operation's dialect name. The message has no source position because a
 # Dawn panic carries none on either backend (measured, 6.21); the number is
 # the cheapest way back to the kernel body.
+#
+# Two things come from the call path (knife C of the 2026-10-20 batch). The
+# four float operators are named as the user wrote them (`+`, not `addf`),
+# and a refusal inside a region says which regions it is in, outermost first,
+# AFTER the reason: the golden mutants match on the text up to the reason, and
+# a note that came before it would break every one of them. Source lines are
+# not here: nothing reads a Dawn position at record time until the `at`
+# default reaches this package.
 fn refuse_at(name: String, frames: List[Frame], ops: List[TileOp], op: String, what: String) -> Never =
-  refuse(name, "op #${op_number(frames, ops)} `${op}`: ${what}")
+  refuse(name, "op #${op_number(frames, ops)} `${operator_name(op)}`: ${what}${region_note(frames)}")
+
+# The spelling the kernel's author used for an operation whose dialect name
+# has a plainer one. Only the four operators the `Add`, `Sub`, `Mul` and
+# `Div` impls on a tile spell; `add(a, b)` is the same operation as `a + b`.
+fn operator_name(op: String) -> String = match op {
+  "addf" -> "+"
+  "subf" -> "-"
+  "mulf" -> "*"
+  "divf" -> "/"
+  _ -> op
+}
+
+# What opened the region a frame stands for, as the kernel wrote it.
+fn region_phrase(f: Frame) -> String = match f {
+  LoopFrame(_outer, _iv, _lower, _upper, _step, _unsigned, _inits, _carried) -> "the body of a `d_range`"
+  WhileFrame(_outer, _inits, _carried) -> "the body of a `d_loop`"
+  ReduceFrame(_outer, _dim, _shape, _identities, _operands, _args) -> "the combiner of a `d_reduce`"
+  ScanFrame(_outer, _dim, _reverse, _shape, _identities, _operands, _args) -> "the combiner of a `d_scan`"
+  ThenFrame(_outer, _cond) -> "the then branch of a `d_if`"
+  ElseFrame(_outer, _cond, _on_true) -> "the else branch of a `d_if`"
+}
+
+# ` (inside X, inside Y)` for the open regions, outermost first; empty at the
+# top level of the kernel.
+fn region_note(frames: List[Frame]) -> String =
+  if len(frames) == 0 {
+    ""
+  } else {
+    " (inside ${join(list.map(frames, region_phrase), ", inside ")})"
+  }
 
 fn tile_text(dtype: String, shape: List[Int]) -> String =
   if len(shape) == 0 {
@@ -5423,7 +5461,7 @@ test "knife C1: an element-wise operation whose operands disagree in shape is re
   let r = catch_panic(() => trace_kernel("vadd_half", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => vadd_half(param(F64, 0), param(F64, 1), param(F64, 2))))
   match r {
     Ok(_) -> { assert false }
-    Err(e) -> { assert str.starts_with(e.message, "tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>") }
+    Err(e) -> { assert str.starts_with(e.message, "tileir: kernel `vadd_half`: op #6 `+`: rhs is tile<128xf64>, declared tile<64xf64>") }
   }
 }
 
@@ -5447,8 +5485,37 @@ test "knife C1: op #k is the operation's position in the recorded program read d
     Ok(_) -> { assert false }
     # #0 the token, #1 #2 the two index constants, #3 the load, #4 the
     # For, #5 the load in its body, #6 the mulf
-    Err(e) -> { assert str.starts_with(e.message, "tileir: kernel `in_loop`: op #6 `mulf`: rhs is tile<8xf64>, declared tile<4xf64>") }
+    Err(e) -> { assert str.starts_with(e.message, "tileir: kernel `in_loop`: op #6 `*`: rhs is tile<8xf64>, declared tile<4xf64>") }
   }
+}
+
+test "a refusal names the operator as the kernel wrote it and the regions it is in, after the reason" {
+  # the note comes right after the reason (the panic appends its own library
+  # position after that), so a recording that dropped it, or put it before
+  # the reason where the golden mutants' fragments would stop matching, is a
+  # different string
+  let one = refusal(() => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let one = idx_const(1)
+    let acc = carry(load(x, zero, [8]))
+    for _i in d_range(zero, one, step: By(one)) { acc.set(mul(load(x, zero, [4]), acc.get())) }
+  })
+  assert str.starts_with(one, "tileir: kernel `raw`: op #6 `*`: rhs is tile<8xf64>, declared tile<4xf64> (inside the body of a `d_range`)")
+  let nested = refusal(() => {
+    let x = param(F64, 0)
+    let zero = idx_const(0)
+    let one = idx_const(1)
+    let acc = carry(load(x, zero, [8]))
+    let small = load(x, zero, [4])
+    for i in d_range(zero, one, step: By(one)) {
+      d_if(idx_eq(i, zero), () => acc.set(sub(small, acc.get())), () => ())
+    }
+  })
+  assert str.starts_with(nested, "tileir: kernel `raw`: op #")
+  assert str.contains(nested, "`-`: rhs is tile<8xf64>, declared tile<4xf64> (inside the body of a `d_range`, inside the then branch of a `d_if`)")
+  # at the top of the kernel there is no note
+  assert str.contains(refusal(raw_dtype_mismatch), "(inside") == false
 }
 
 # Below the typed surface, where the format is a string: a body that issues
@@ -5461,7 +5528,7 @@ fn raw_dtype_mismatch() -> Unit !Dev = {
 }
 
 test "knife C1: an operand whose element format is not the one the operation declares is refused" {
-  assert str.starts_with(refusal(raw_dtype_mismatch), "tileir: kernel `raw`: op #2 `addf`: lhs is tile<8xf64>, declared tile<8xf32>")
+  assert str.starts_with(refusal(raw_dtype_mismatch), "tileir: kernel `raw`: op #2 `+`: lhs is tile<8xf64>, declared tile<8xf32>")
   # a select's condition is an i1 tile of the select's shape
   let sel = refusal(() => {
     let x = param(F64, 0)
@@ -5523,7 +5590,7 @@ fn shapes_noted() -> Unit !Dev = {
 }
 
 test "knife C1': a tile read through a view has the view's tile as its row, and an operand of the wrong shape is refused" {
-  assert str.starts_with(refusal(view_read_half), "tileir: kernel `raw`: op #5 `addf`: lhs is tile<8xf64>, declared tile<4xf64>")
+  assert str.starts_with(refusal(view_read_half), "tileir: kernel `raw`: op #5 `+`: lhs is tile<8xf64>, declared tile<4xf64>")
   # the same through a gather load
   let g = refusal(() => {
     let tv = t_tensor_view(0, "f64", t_idx_const(0), [64, 4], [4, 1], [], [])
@@ -5532,7 +5599,7 @@ test "knife C1': a tile read through a view has the view's tile as its row, and 
     let _s = t_binaryf("mulf", "f64", [8], t, t)
     ()
   })
-  assert str.contains(g, "`mulf`: lhs is tile<8x4xf64>, declared tile<8xf64>")
+  assert str.contains(g, "`*`: lhs is tile<8x4xf64>, declared tile<8xf64>")
   # a view is not a tile, whatever its row says
   let v = refusal(() => {
     let zero = t_idx_const(0)
@@ -5541,7 +5608,7 @@ test "knife C1': a tile read through a view has the view's tile as its row, and 
     let _s = t_binaryf("addf", "f64", [8], pv, tv)
     ()
   })
-  assert str.starts_with(v, "tileir: kernel `raw`: op #4 `addf`: lhs is a partition view, not a tile")
+  assert str.starts_with(v, "tileir: kernel `raw`: op #4 `+`: lhs is a partition view, not a tile")
 }
 
 test "knife C1': t_shape_of answers each handle's row, a view's as Held says, and refuses a token by number" {
@@ -5564,7 +5631,7 @@ test "knife C1': t_shape_of answers each handle's row, a view's as Held says, an
     note_shape(t_tok_get())
     t_call_exit()
   })
-  assert str.starts_with(inside, "tileir: kernel `raw`: op #1 `addf`: handle 0 has no recorded shape: it is a token, or no operation answered it")
+  assert str.starts_with(inside, "tileir: kernel `raw`: op #1 `+`: handle 0 has no recorded shape: it is a token, or no operation answered it")
 }
 
 test "knife C1': an mma whose operands disagree on K is refused, by the right-hand side the left one's K does not match" {
@@ -5957,13 +6024,13 @@ test "0.8.2: a kept dimension widens as broadcast would; a dropped one and a ran
   assert str.starts_with(marked(() => trace2("rows", In(F64, g), Out(F64, g), (x, o) => {
     let t = load_cell(x)
     store_cell(o, sub(t, reshape(reduce_max(t, keepdims: true), [32])))
-  })), "tileir: kernel `rows`: op #11 `subf`: rhs is tile<32xf64>, declared tile<32x64xf64>")
+  })), "tileir: kernel `rows`: op #11 `-`: rhs is tile<32xf64>, declared tile<32x64xf64>")
   assert str.starts_with(marked(() => trace_kernel("fmt", [ByPtr("f64")], () => {
     let x = t_constf("f64", [8], 1.0)
     let y = t_constf("f32", [], 2.0)
     let _z = t_binaryf("addf", "f64", [8], x, y)
     ()
-  })), "tileir: kernel `fmt`: op #3 `addf`: rhs is tile<f32>, declared tile<8xf64>")
+  })), "tileir: kernel `fmt`: op #3 `+`: rhs is tile<f32>, declared tile<8xf64>")
 }
 
 # flash attention's row statistics in the textbook shape.
