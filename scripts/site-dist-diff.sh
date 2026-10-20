@@ -130,7 +130,7 @@ echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 echo "== native =="
 # The generator is built from the working tree's site/ (the bytes the snapshot
 # holds; the cache key is their content) and shared with site/build.sh's.
-gen_bin="$(site_prog site site_gen)" || { echo "FAIL: the site generator did not build"; exit 1; }
+gen_bin="$(site_prog site_gen)" || { echo "FAIL: the site generator did not build"; exit 1; }
 case "$gen_bin" in /*) ;; *) gen_bin="$ROOT/$gen_bin" ;; esac
 (cd "$SNAP" && "$gen_bin") > "$OUT/native.log" 2>&1 || {
   echo "FAIL: the native generator did not finish"; tail -20 "$OUT/native.log"; exit 1

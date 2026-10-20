@@ -1685,13 +1685,16 @@ examples/、资源)不进键,因为二进制每次运行都重新读。改一个
 `dawnc build`。
 
 **CI:冷机成本用 actions/cache 摊掉,不抬 pole。** docs job 在干净 runner 上要自建 dawnc、编生成器与
-探针,`site builds` 步骤从 39s 涨到约 150s。三个二进制(dawnc、生成器、探针)各用一份
-`actions/cache`,键由 `site/cache-keys.sh` 打印,它调用的就是 `build.sh` 判断本地缓存是否仍然有效
-的那两个函数(`site_dawnc_stamp`、`site_prog_key`),所以 CI 与脚本对「没变」只有一个定义;
-命中后脚本仍会拿恢复出来的二进制旁边存的键再比一次,陈旧的缓存只会浪费时间、不会被用。
-失效规则:编译器源或 runtime/c 变 → 三个键全变;`site/` 或其路径依赖或 `site/search-budget/`
-下任一 `*.dawn`、`dawn.toml` 变 → 对应的键变;`docs/`、`examples/` 这类运行期数据不在键里。
-把工作流里三处 `v1` 改成 `v2` 即强制全部重编。dawnc 只在真要重编时才构建。外部门禁规划器
+探针,`site builds` 步骤从 39s 涨到约 150s。这些二进制都放在 `site/build/native/` 一个目录里,
+CI 对这个目录只有一份 `actions/cache`;目录里有 dawnc 和 `site/native-progs.txt` 列出的每个程序
+(现在是生成器与探针;后续 A3 的 gpu-map 夹具再加一行即可,工作流不用动)。键由
+`site/cache-keys.sh` 打印:dawnc stamp(编译器源 + runtime/c)加每个程序的 `site_prog_key`,
+调用的就是 `build.sh` 判断本地缓存是否仍然有效的那几个函数,所以 CI 与脚本对「没变」只有一个定义。
+精确未命中时,工作流按前缀恢复最近一份旧缓存,脚本再按每个二进制旁存的键逐个核对,没变的留着、
+变了的重编,所以陈旧的缓存只会浪费时间、不会被用。
+失效规则:编译器源或 runtime/c 变 → 整个键变且 dawnc 重编、程序随 stamp 一并重编;某个程序或其路径依赖
+下任一 `*.dawn`、`dawn.toml` 变 → 键变、只重编该程序;`docs/`、`examples/` 这类运行期数据不在键里。
+把工作流里两处 `v2` 改大即强制全部重编。dawnc 只在真要重编某个程序时才构建。外部门禁规划器
 (`gatesplan.py`)原先拒绝 cache 键里的任何表达式,现在只放行对前面某一步输出的引用(仍是 noop、
 不求值),引用不存在的步骤会被拒。
 

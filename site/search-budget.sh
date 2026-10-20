@@ -120,7 +120,7 @@ if [ "${SEARCH_BUDGET_SKIP_QUERIES:-0}" != 1 ]; then
   if [ -z "${SEARCH_BUDGET_RUN:-}" ]; then
     mkdir -p "$(dirname "$out")"
     . site/dawnc.sh
-    probe_bin="$(site_prog site/search-budget search_budget_probe)"
+    probe_bin="$(site_prog search_budget_probe)"
     DAWN_SEARCH_DIST="$dist" "$probe_bin" > "$out"
   elif [ ! -s "$out" ]; then
     echo "error: SEARCH_BUDGET_RUN=$out is empty or missing; run site/build.sh first" >&2
