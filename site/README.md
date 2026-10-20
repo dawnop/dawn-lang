@@ -227,6 +227,8 @@ DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
 # 生成器与探针各用 `dawnc build` 编一次，缓存在 site/build/site_gen、search_budget_probe，
 # 键是 dawnc stamp + 项目及其路径依赖里全部 *.dawn/dawn.toml 的内容摘要（见 site_prog），
 # 源码不变则直接执行二进制；暖机后建站墙钟 37.8s，与 JVM 的 37.7s 持平。
+# CI 里这三个二进制（dawnc、site_gen、search_budget_probe）各走一份 actions/cache，键由
+# site/cache-keys.sh 用同一批函数算出，规则见 docs/native-backend-plan.md §15。
 # 或手动：
 ./bin/dawn doc --stdlib > site/build/stdlib.json
 site/build/dawnc run site    # 生成 site/dist/（从仓库根运行，每次重编约 22s）；./bin/dawn run site 是 JVM 基准
