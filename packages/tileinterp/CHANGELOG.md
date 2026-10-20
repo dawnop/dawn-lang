@@ -3,6 +3,26 @@
 Newest first. A 0.x minor is its own compatibility class
 (`docs/package-design.md` §6.3).
 
+## 0.2.0 (2026-10-20)
+
+Knife I2 (`docs/tileinterp-design.md` 7). Reads nothing new from
+`packages/tileir`.
+
+- Narrow float formats: f32, tf32, bf16, f16, f8E5M2, f8E4M3FN, f4E2M1FN and
+  f8E8M0FNU lanes, rounded with `std/narrow` after every operation; `ftof`
+  with its five roundings, `itof` into them, `bitcast`, `pack` and `unpack`
+  over them (NaN payloads survive a bitcast). A kernel may read a buffer as a
+  format of the same width (an f32 kernel over an i32 buffer).
+- `fma`: one rounding, in binary64 (Boldo and Melquiond) and in the narrow
+  formats.
+- `mmaf`, `mmaf_scaled` and `mmai`. The accumulation order and rounding are a
+  documented model, not a measurement of any device (design 7.1).
+- Still refused by name: atomics, fences and PDL, strided and gather views,
+  globals, `alloca`, `assert`, `print_tko`, pointer casts, f8E5M3FNU.
+- `scripts/tileinterp-diff` covers 175 of 208 golden kernels (106 before),
+  with the architecture-gated family added: the interpreter has no card to
+  gate on.
+
 ## 0.1.0 (2026-10-20)
 
 First release (`docs/tileinterp-design.md`, knife I1 of the 2026-10-20

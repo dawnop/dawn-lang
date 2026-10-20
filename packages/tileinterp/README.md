@@ -45,28 +45,40 @@ When the grid follows the data, `device.with_gpu_interp(progs, body)` reads
 it off every launch instead: install it inside `with_gpu_fake` (which keeps
 the buffers) and give it a lookup from kernel name to `TileProg`.
 
-## What it interprets (subset A)
+## What it interprets
 
-f64 and the integer formats (`i1`, `i4`, `i8`, `i16`, `i32`, `i64`):
-element-wise arithmetic and comparisons, `select`, the shape operations
-(`reshape`, `broadcast`, `extract`, `insert`, `cat`, `permute`, `iota`),
-reductions and scans (left fold), `for`, `loop` and `if` with `break`,
-`continue` and `return`, tensor and partition views with their five padding
-values, pointer loads and stores with mask and padding, `assume`, the
-conversions between those formats, `pack` / `unpack`, `fpowi`, and the
-transcendental functions. Add, subtract, multiply, divide, square root and
-the directed roundings are exact; the transcendental functions are written
-here (not taken from packages/tileref, which is what CI holds this package
-against) and are good to about 1e-13 relative, the tolerance tier's side of
-docs/tile-backend-design.md 6.6.
+The integer formats (`i1`, `i4`, `i8`, `i16`, `i32`, `i64`) and every float
+format `std/narrow` models: f64, f32, tf32, bf16, f16, f8E5M2, f8E4M3FN,
+f4E2M1FN and f8E8M0FNU. Element-wise arithmetic and comparisons, `select`,
+the shape operations (`reshape`, `broadcast`, `extract`, `insert`, `cat`,
+`permute`, `iota`), reductions and scans (left fold), `for`, `loop` and `if`
+with `break`, `continue` and `return`, tensor and partition views with their
+five padding values, pointer loads and stores with mask and padding, `assume`,
+the conversions between those formats (`ftof` with its five roundings,
+`itof`, `ftoi`, `bitcast`, `pack` / `unpack`), `fpowi`, the transcendental
+functions, `fma` and the matrix products `mmaf`, `mmaf_scaled` and `mmai`.
+
+A float lane of a narrow format is a Float that is a value of the format, and
+every operation ends by rounding into the format with `std/narrow`'s own
+functions, so the interpreter and `std/narrow` cannot disagree about a
+format. Add, subtract, multiply, divide, square root, the directed roundings
+and `fma` are exact (one rounding of the exact result); the transcendental
+functions are written here (not taken from packages/tileref, which is what CI
+holds this package against) and are good to about 1e-13 relative, the
+tolerance tier's side of docs/tile-backend-design.md 6.6.
+
+A matrix product promises a product and nothing about how the sum over `k` is
+grouped, so the interpreter's accumulation is a model: a binary64 accumulator
+takes one fused step per `k`, ascending; a narrower one sums the exact
+products in binary64 and rounds once at the end. Comparisons against it are
+tolerance-tier ones (docs/tileinterp-design.md 7.1).
 
 Everything else is refused before anything runs, with
-`interp.unsupported_op` and the instruction's name: the matrix products,
-`fma` and the narrow float formats (bf16, f16, f32, tf32, fp8, fp4) come next
-(I2); atomics, fences and PDL, strided and gather views, module globals,
-`alloca`, `assert`, `print_tko` and the pointer casts are not planned,
-because a sequential run gives one legal answer where a device has several
-and could not check the rest.
+`interp.unsupported_op` and the instruction's name: atomics, fences and PDL,
+strided and gather views, module globals, `alloca`, `assert`, `print_tko`, the
+pointer casts and the one format `std/narrow` does not model (f8E5M3FNU) are
+not planned, because a sequential run gives one legal answer where a device
+has several and could not check the rest.
 
 ## Undefined behaviour
 

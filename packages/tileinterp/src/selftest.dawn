@@ -11,10 +11,11 @@ use std/list
 use std/map
 use std/str
 use std/dtype.{F64}
+use std/narrow.{F32, BF16, F16}
 use std/gpu.{Gpu, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, Buffer, encode_floats,
   decode_floats, WideRefFn }
 use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, load_cell, store_cell, add, mul, tail_mask,
-  f_const, mma, sqrt, reduce_sum, scan_sum, d_range, idx_const, broadcast, DYN_DIM }
+  f_const, mma, fma, float_to_float, sqrt, reduce_sum, scan_sum, d_range, idx_const, broadcast, memory_fence_alias, DYN_DIM }
 use tileir/prog.{TileProg, trace_kernel, ByPtr, trace3, cells, In, Out}
 use interp.{interp_ref, interp_kernel, unsupported_in}
 use device.{with_gpu_interp, with_gpu_interp_log}
@@ -62,13 +63,65 @@ fn chunks(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
 
 fn chunks_prog() -> TileProg = trace_kernel("chunks", [ByPtr("f64"), ByPtr("f64")], () => chunks(param(F64, 0), param(F64, 1)))
 
-# A matrix product, which subset A does not interpret.
-fn product(a: Param[Float], c: Param[Float]) -> Unit !Dev = {
-  let t = load(a, idx_const(0), [W, W])
-  store(c, idx_const(0), mma(t, t, broadcast(f_const(F64, 0.0), [W, W])))
+# A copy with a fence in the middle, which is refused by name: fences are not
+# interpreted (a sequential run cannot check them).
+fn fenced(a: Param[Float], c: Param[Float]) -> Unit !Dev = {
+  store(c, idx_const(0), load(a, idx_const(0), [W]))
+  memory_fence_alias()
 }
 
-fn product_prog() -> TileProg = trace_kernel("product", [ByPtr("f64"), ByPtr("f64")], () => product(param(F64, 0), param(F64, 1)))
+fn fenced_prog() -> TileProg = trace_kernel("fenced", [ByPtr("f64"), ByPtr("f64")], () => fenced(param(F64, 0), param(F64, 1)))
+
+# `c = c + a * b` over W by W tiles, f64.
+fn product(a: Param[Float], b: Param[Float], c: Param[Float]) -> Unit !Dev = {
+  let ta = load(a, idx_const(0), [W, W])
+  let tb = load(b, idx_const(0), [W, W])
+  store(c, idx_const(0), mma(ta, tb, load(c, idx_const(0), [W, W])))
+}
+
+fn product_prog() -> TileProg =
+  trace_kernel("product", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")], () => product(param(F64, 0), param(F64, 1), param(F64, 2)))
+
+# The same with bfloat16 operands and an f32 accumulator.
+fn product_bf16(a: Param[BF16], b: Param[BF16], c: Param[F32]) -> Unit !Dev = {
+  let ta = load(a, idx_const(0), [W, W])
+  let tb = load(b, idx_const(0), [W, W])
+  store(c, idx_const(0), mma(ta, tb, load(c, idx_const(0), [W, W])))
+}
+
+fn product_bf16_prog() -> TileProg =
+  trace_kernel("product_bf16", [ByPtr("bf16"), ByPtr("bf16"), ByPtr("f32")], () => product_bf16(param(BF16, 0), param(BF16, 1), param(F32, 2)))
+
+# `out = a * b + c` over W lanes in f64 and in f32.
+fn fused64(a: Param[Float], b: Param[Float], c: Param[Float], out: Param[Float]) -> Unit !Dev =
+  store(out, idx_const(0), fma(load(a, idx_const(0), [W]), load(b, idx_const(0), [W]), load(c, idx_const(0), [W])))
+
+fn fused64_prog() -> TileProg =
+  trace_kernel("fused64", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
+    () => fused64(param(F64, 0), param(F64, 1), param(F64, 2), param(F64, 3)))
+
+fn fused32(a: Param[F32], b: Param[F32], c: Param[F32], out: Param[F32]) -> Unit !Dev =
+  store(out, idx_const(0), fma(load(a, idx_const(0), [W]), load(b, idx_const(0), [W]), load(c, idx_const(0), [W])))
+
+fn fused32_prog() -> TileProg =
+  trace_kernel("fused32", [ByPtr("f32"), ByPtr("f32"), ByPtr("f32"), ByPtr("f32")],
+    () => fused32(param(F32, 0), param(F32, 1), param(F32, 2), param(F32, 3)))
+
+# bfloat16 and f16 sums: `a + b` with both operands in the format, widened to
+# f64 before it is stored. The widening is the point: a narrow buffer's
+# upload and download round to the format themselves, so a sum stored in a
+# narrow buffer would look rounded whether or not the interpreter rounded it.
+fn sum_bf16(a: Param[BF16], b: Param[BF16], out: Param[Float]) -> Unit !Dev =
+  store(out, idx_const(0), float_to_float(load(a, idx_const(0), [W]) + load(b, idx_const(0), [W]), F64))
+
+fn sum_bf16_prog() -> TileProg =
+  trace_kernel("sum_bf16", [ByPtr("bf16"), ByPtr("bf16"), ByPtr("f64")], () => sum_bf16(param(BF16, 0), param(BF16, 1), param(F64, 2)))
+
+fn sum_f16(a: Param[F16], b: Param[F16], out: Param[Float]) -> Unit !Dev =
+  store(out, idx_const(0), float_to_float(load(a, idx_const(0), [W]) + load(b, idx_const(0), [W]), F64))
+
+fn sum_f16_prog() -> TileProg =
+  trace_kernel("sum_f16", [ByPtr("f16"), ByPtr("f16"), ByPtr("f64")], () => sum_f16(param(F16, 0), param(F16, 1), param(F64, 2)))
 
 # A store one block past where the kernel is told the buffer ends: on a
 # buffer of W the second block writes outside it.
@@ -148,21 +201,98 @@ test "a for loop carries its accumulator" {
   assert r == Ok(floats(W, j => to_float(4 * j + 48)))
 }
 
-test "an instruction outside subset A is refused by name before anything runs" {
-  let k = lower(product_prog())
+test "an instruction the interpreter does not model is refused by name before anything runs" {
+  let k = lower(fenced_prog())
   assert match unsupported_in(k) {
-    Some(why) -> str.contains(why, "mmaf")
+    Some(why) -> str.contains(why, "memory_fence")
     None -> false
   }
-  match interp_kernel(k, [1], ["f64", "f64"], [floats(W * W, _i => 1.0), floats(W * W, _i => 0.0)], []) {
+  match interp_kernel(k, [1], ["f64", "f64"], [floats(W, _i => 1.0), floats(W, _i => 0.0)], []) {
     Err(e) -> {
       assert e.kind == "interp.unsupported_op"
-      assert str.contains(e.message, "mmaf")
+      assert str.contains(e.message, "memory_fence")
     }
     Ok(_) -> { assert false }
   }
-  # every subset A kernel above is accepted by the same walk
-  assert list.all([vadd_prog(), tail_prog(), folds_prog(), chunks_prog()], p => unsupported_in(lower(p)) == None)
+  # every kernel above that the interpreter models is accepted by the same walk
+  assert list.all([vadd_prog(), tail_prog(), folds_prog(), chunks_prog(), product_prog(), product_bf16_prog(), fused64_prog(),
+    fused32_prog(), sum_bf16_prog(), sum_f16_prog()], p => unsupported_in(lower(p)) == None)
+}
+
+# One launch on typed buffers: `dtypes` names each buffer's format, `bufs`
+# holds Floats that are values of it. Answers the last buffer.
+fn run_typed(name: String, kernel: WideRefFn, dtypes: List[String], bufs: List[List[Float]]) -> Result[List[Float], ForeignError] =
+  with_gpu_fake(map.from([(name, (len(bufs), kernel))]), () => run_dt(name, dtypes, bufs))
+
+fn run_dt(name: String, dtypes: List[String], bufs: List[List[Float]]) -> Result[List[Float], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for k in range(0, len(bufs)) {
+    let h = gpu_alloc(dtypes[k], len(bufs[k]))?
+    gpu_copy_from_host(h, encode_floats(dtypes[k], bufs[k]))?
+    hs = hs ++ [h]
+  }
+  gpu_launch(name, 1, 1, 1, list.map(hs, h => Buffer(h)))?
+  Ok(decode_floats(dtypes[len(dtypes) - 1], gpu_copy_to_host(hs[len(hs) - 1])?))
+}
+
+# The matrices of the product tests: small integers, so every product and
+# every partial sum is exact and the expectation is plain integer arithmetic.
+fn left(i: Int, k: Int) -> Float = to_float(i + k + 1)
+
+fn right(k: Int, j: Int) -> Float = to_float((k * j) % 5 - 2)
+
+fn acc0(i: Int, j: Int) -> Float = to_float(i - j) * 0.5
+
+test "a matrix product adds every term of k to the accumulator" {
+  let a = floats(W * W, x => left(x / W, x % W))
+  let b = floats(W * W, x => right(x / W, x % W))
+  let c = floats(W * W, x => acc0(x / W, x % W))
+  let want = floats(W * W, x => {
+    let i = x / W
+    let j = x % W
+    acc0(i, j) + to_float(list.fold(range(0, W), 0, (s, k) => s + (i + k + 1) * ((k * j) % 5 - 2)))
+  })
+  assert run_typed("product", interp_ref(product_prog(), [1]), ["f64", "f64", "f64"], [a, b, c]) == Ok(want)
+}
+
+test "a bfloat16 product accumulates wide and rounds into f32 once" {
+  # a row of one 1 and seven 2^-25 against ones: the exact sum is 1 + 7 * 2^-25,
+  # which rounds to 1 + 2^-22 once; rounding after every term would lose each
+  # 2^-25 (a quarter of an f32 ulp at 1) and answer exactly 1
+  let tiny = 1.0 / 33554432.0
+  let a = floats(W * W, x => if x % W == 0 { 1.0 } else { tiny })
+  let b = floats(W * W, _x => 1.0)
+  let c = floats(W * W, _x => 0.0)
+  let want = floats(W * W, _x => 1.0 + 1.0 / 4194304.0)
+  assert run_typed("product_bf16", interp_ref(product_bf16_prog(), [1]), ["bf16", "bf16", "f32"], [a, b, c]) == Ok(want)
+}
+
+test "fma rounds once, in f64 and in f32" {
+  # f64: (1 + 2^-27)^2 - (1 + 2^-26) is 2^-54 exactly; a rounded product loses it
+  let e = 1.0 + 1.0 / 134217728.0
+  let r64 = run_typed("fused64", interp_ref(fused64_prog(), [1]), ["f64", "f64", "f64", "f64"],
+    [floats(W, _i => e), floats(W, _i => e), floats(W, _i => 0.0 - (1.0 + 1.0 / 67108864.0)), floats(W, _i => 0.0)])
+  assert r64 == Ok(floats(W, _i => 1.0 / 18014398509481984.0))
+  # f32: (1 + 2^-12)^2 is 1 + 2^-11 + 2^-24, a tie in f32 that a rounded
+  # product sends to 1 + 2^-11 and so cancels to zero
+  let f = 1.0 + 1.0 / 4096.0
+  let r32 = run_typed("fused32", interp_ref(fused32_prog(), [1]), ["f32", "f32", "f32", "f32"],
+    [floats(W, _i => f), floats(W, _i => f), floats(W, _i => 0.0 - (1.0 + 1.0 / 2048.0)), floats(W, _i => 0.0)])
+  assert r32 == Ok(floats(W, _i => 1.0 / 16777216.0))
+}
+
+test "a narrow sum is rounded into its format after every operation" {
+  # 1 + 3 * 2^-9 sits 0.00586 above 1; bfloat16 steps by 2^-7 near 1, and the
+  # nearest step is 1 + 2^-7. Unrounded it would come back as 1.005859375.
+  let step = 3.0 / 512.0
+  let r = run_typed("sum_bf16", interp_ref(sum_bf16_prog(), [1]), ["bf16", "bf16", "f64"],
+    [floats(W, _i => 1.0), floats(W, _i => step), floats(W, _i => 0.0)])
+  assert r == Ok(floats(W, _i => 1.0078125))
+  # binary16 near 2048 steps by 2: 2048 + 1.5 rounds to 2050, and 65504 + 32
+  # is 65536, past the overflow midpoint 65520, so it is infinity
+  let r16 = run_typed("sum_f16", interp_ref(sum_f16_prog(), [1]), ["f16", "f16", "f64"],
+    [floats(W, i => if i == 0 { 2048.0 } else { 65504.0 }), floats(W, i => if i == 0 { 1.5 } else { 32.0 }), floats(W, _i => 0.0)])
+  assert r16 == Ok([2050.0] ++ floats(W - 1, _i => 1.0 / 0.0))
 }
 
 test "a store past the end of its buffer is undefined behaviour, refused" {

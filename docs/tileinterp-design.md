@@ -1,8 +1,10 @@
-# tileinterp：Tile IR 宿主解释器（子集 A）
+# tileinterp：Tile IR 宿主解释器
 
-> 状态：**current** —— 2026-10-20 裁决（`ruling-tileir-interp-20261020`）的第一刀 I1。
-> 新包 `packages/tileinterp` 解释 `packages/tileir` 降级后的 `lower.Kernel`，子集 A
-> （f64 与整数）。I2 加 mma 与窄格式，另起一篇或回填本篇。
+> 状态：**current** —— 2026-10-20 裁决（`ruling-tileir-interp-20261020`）的 I1 与 I2。
+> 新包 `packages/tileinterp` 解释 `packages/tileir` 降级后的 `lower.Kernel`。
+> I1 是子集 A（f64 与整数，§1 到 §6）；I2（§7）加 `fma`、矩阵乘（`mmaf`、`mmaf_scaled`、`mmai`）
+> 与 `std/narrow` 的窄格式，flash_attn 与 flash_attn_bf16 在覆盖内，Playground 的 flash_attn 样例真跑。
+> 下文 §1 到 §6 写的是 I1 时的状态；与 §7 冲突处以 §7 为准（§2.2 的值表、§2.6 的拒绝名单、§5 的覆盖数、§6 末条）。
 
 ## 0. 一句话
 
@@ -208,4 +210,136 @@ gates.yml 现有的 `package-tests.sh`（自动发现，3 s）。
   块间写不相交今天由记录期的 `d_fork2` 检查与 `Out` 格子承担。
 - **C 档其余**（strided / gather view、`int_to_ptr` 一族、全局、`alloca`、`assert`/`print`）：裁决
   不排 C。它们在本刀明确拒绝（`interp.unsupported_op`），不静默跳过。
-- **mma 与窄格式**：I2。
+- **mma 与窄格式**：I2 已做，见 §7。
+
+## 7. I2：fma、矩阵乘与窄格式
+
+2026-10-20，本机，基线 origin/main `93b09760` 加修复 PR #810（`build.py` 把 vadd 家族的 cubin 个数写死成 2，
+#808 加 vadd_f32 后成了 3，tile-golden-11 的解释器一步没有判词行；现在个数取自驱动自己的 usage 行）。
+
+### 7.1 矩阵乘的累加顺序与精度
+
+**事实先行**：`mmaf` 只承诺乘积，不承诺沿 k 的和怎么分组、怎么舍入；sm_86 上 f64 的 `mmaf` 根本不走张量核，
+`tileiras --remarks=tensorcore` 报 `Instruction = FMA`（tileref 的 matmul 一节写过）。张量核上的和也不是 IEEE 序列：
+一块乘积按最大指数对齐，丢掉的低位截断，不在步间规范化（Fasi 等，"Numerical behavior of NVIDIA tensor cores"，
+PeerJ Computer Science 2021，<https://peerj.com/articles/cs-330/>）。所以解释器的累加顺序**是一个模型，不是对设备的测量**，
+和 tileref、和真机的比对因此**永远是容差档**（tile-backend-design 6.5）。
+
+模型（`packages/tileinterp/src/mma.dawn` 头注释同文）：
+
+| 累加器 | 做法 | 理由 |
+|---|---|---|
+| f64（操作数 f64） | 从累加器操作数出发，k 升序，每步一次 `fma`（单次舍入） | 设备在 sm_86 上就是 FMA 指令；fused 比 tileref 的「先乘后加」少一次舍入，是更接近设备的读法 |
+| 更窄（f32、f16） | 操作数乘积在 binary64 里精确（操作数至多 24 位有效数），在 binary64 里求和，**最后一次**舍入进累加器格式 | 逐步舍入进 f32 会多出 k 次没有任何文档支持的舍入；张量核的内部误差与 binary64 同量级，远小于 f32 |
+| `mmaf_scaled` | 因子 `(a * sa) * (b * sb)` 全部精确（尺度是 2 的幂），宽累加，最后舍入进 f32 | 同上；公式是 Ops.td 的 `MmaFScaledOp` |
+| `mmai` | i8 乘积在 i32 上回绕求和 | 整数加法对 2^32 取模满足结合律，顺序不是模型，是精确的 |
+
+**逐位一致与否**（实测，`run.sh` 的 `miss` 列是误差占容差的比例）：
+
+- 与 tileref：`matmul` 等整数值语料（每个乘积和部分和都是整数，f64 上精确）**逐位**一致；`batched_matmul` 的 `miss` 为 8.0e-11
+  （最后一位的差：解释器 fused，tileref 乘后加）；`layer_norm` 3.1e-11、`group_norm` 3.3e-11、`attn_*` 序列 2e-9 量级。
+- 与真机：流程相同、判词相同（设备也只在容差档比）。真机侧的数是台账上的，不在本刀重录（§7.6）。
+  flash_bf16 在 `tolerance_of` 里有自己的 `atol = 2^-16 * max|v|`（seq_diff.dawn 的推导：设备对 tileref 实测约 1.8e-8 绝对、
+  约占界的 1e-3）。解释器对 tileref 实测 `miss = 1.2e-3`（占同一个界），**与设备同一个量级**；那条「忘了把 p 收窄到 bf16」的
+  对照在解释器上同样红（`miss = 28.5`）。
+- **容差的出处**：`atol = rtol = 1e-5` 是 leetgpu 的判分容差（tile-backend-design 6.6），flash_bf16 的 `2^-16 * max|v|` 是上面那段推导。
+  解释器没有自己的容差，用的就是量设备的那把尺子。
+
+### 7.2 窄格式在解释器里的表示与舍入时机
+
+- **表示**：窄格式的一个 lane 是**一个落在该格式网格上的 Float**（`std/narrow` 自己的不变量）。f32、tf32、bf16、f16、f8E5M2、
+  f8E4M3FN、f4E2M1FN、f8E8M0FNU 全部如此；位型只在 `bitcast`、`pack`、`unpack` 要它时才出现。
+- **舍入只走 `std/narrow`**：`formats.round_into(格式, 方向, x)` 逐格式转给 `round_f32 / round_tf32 / round_binary / round_f8e5m2 /
+  round_f8e4m3fn / round_f4e2m1 / round_f8e8m0`，**没有第二份实现**，所以解释器与 `std/narrow` 对「一个格式的值是什么」不会有分歧。
+- **时机**：每一个产出该格式 lane 的运算，结果立刻舍入进格式——`addf subf mulf divf sqrt`、`maxf` 之外的一元与二元运算、`fma`、
+  `ConstFloat`、`itof`、`ftof`、`fpowi` 的每一步乘法。读入口也舍一次（缓冲区里本来就在网格上，是空操作，挡住游离的 off-grid Float）。
+  加减乘除与平方根「在 binary64 里算再舍入」是正确舍入（Figueroa 双舍入定理，std/narrow 头注释：宽格式至少 2p+2 位，最宽的 f32 要 50，binary64 有 53）。
+  超越函数没有这个保证，是「binary64 里算再舍入」的**定义**，在容差档。
+- **定向舍入**（`addf_neg_inf` 等）与 `flush_to_zero`：定向的用 `math.add_dir / mul_dir / div_dir` 给出精确结果在 binary64 里的上下两个邻居，
+  再各自按方向舍入进格式（格式网格是 binary64 网格的子集，所以 floor 的 floor 还是 floor）；`flush` 在格式自己的最小正规数处冲（f32、tf32、bf16 是 2^-126，f16 是 2^-14）。
+- **转换**：`ftof` 的五种舍入由 `prog.ftof_mode` 给出（和 lowering 写进文本的是同一个函数），`f8E8M0FNU` 的 `positive_inf` 没有实测，**拒绝**；
+  `itof` 到窄格式：超过 2^53 的整数先舍进 binary64 再舍进窄格式会舍两次，所以走 round-to-odd。
+- **`bitcast` 保 NaN 载荷**：`std/narrow` 的位型函数对 NaN 答规范 NaN，而设备的 `bitcast` 不动位型。`int_ops` 的语料里有 NaN 型的 i32，
+  先实测为 4/1024 个 lane 不同；`formats.to_bits / of_bits` 对 f32、tf32、bf16、f16 的 NaN 用 binary64 NaN 的高位带载荷，往返恒等。
+  填充值 `PadNan` 是正的静默 NaN（`0x7FF8...`，设备写出 `0x7FC00000`），不是宿主 `0.0/0.0` 带的符号。
+- **同宽重解释**：kernel 可以把缓冲区读成同宽的另一种格式（`view_padding` 是 f32 的 kernel 读 i32 缓冲区），lane 就是位型，
+  过 `formats` 的编解码；宽度不同仍是 `interp.bad_launch`。
+- **f8E5M3FNU 拒绝**：`std/narrow` 没有它的舍入函数，也没有宿主值，边缘行为没人测过（std/narrow 的声明处自己这么说）。
+  含它的 kernel（`dtype_e5m3`、`mmaf_scaled_e5m3`）整个拒绝，`interp.unsupported_op`，带原因。
+
+### 7.3 fma 是单次舍入
+
+- **binary64**：Boldo 与 Melquiond 的 round-to-odd 仿真（"Emulation of FMA and correctly rounded sums: proved algorithms using rounding to odd"，
+  IEEE Trans. Computers 57(4) 2008）：精确乘积 `uh + ul`（Dekker）、`c + uh` 得 `th + tl`（TwoSum）、`v = RO(tl + ul)`、结果 `RN(th + v)`。
+  测试：`(2^30+1)(2^30+3) - 2^60` 融合给 `2^32+3`，先舍乘积给 `2^32`（`math :: fma_f64 rounds the exact a * b + c once`）。
+  适用范围 |a|、|b| < 2^500、|c| < 2^1000、|a*b| 在 2^-900 与 2^900 之间；之外、以及无穷与 NaN，退化为 `a*b + c`
+  （特殊值上精确，极端指数上是两次舍入）。语料里没有 kernel 落在范围外。
+- **窄格式**：操作数至多 24 位，乘积在 binary64 里精确；`c` 用 round-to-odd 加上，再舍进格式；对至多 51 位有效数的目标格式，
+  先 round-to-odd 再舍入等于对精确值舍入一次。测试：f32 的 `(1+2^-12)^2 - (1+2^-11)` 是 `2^-24`，先舍乘积会得 0。
+
+### 7.4 覆盖（更正计数之后）
+
+调研与 I1 的 127/185 来自 `scan_golden.py` 的正则 bug（`\b` 在 `128xf32` 里不成立）。新的计数脚本是
+`scripts/tileinterp-diff/scan.py`：按 `tile<..>` 与 `ptr<..>` 的角括号和 `x` 分隔读元素类型，按指令名认「按构造拒绝」的算子，
+自带一个钉住旧 bug 的自测。208 个 golden 的账：
+
+| 去向 | 数 |
+|---|---|
+| 按构造拒绝（原子 7，栅栏与 PDL 1，alloca 2，全局 4，指针转换 2，assert 2，print 1，只靠 strided 视图 2，gather 视图 2，f8E5M3FNU 2；`view_atomic*` 同时算原子） | 25 |
+| 上限（其余） | **183** |
+| 　其中实际覆盖（某个同意的 case 里解释器跑过） | **175**（I1 是 106） |
+| 　其中语料故意踩 UB（`attr_overflow`、`attr_sat`） | 2 |
+| 　其中没有层 2 程序（`carry_extent idx_softmax sum vadd_debug vadd_producer foldif_debug`，没有 tileref 参考） | 6 |
+
+裁决写的 185 是调研的数；用更正后的脚本这个上限是 183。**flash_attn 与 flash_attn_bf16 在覆盖内**，对 tileref 的判词都是 `close:tolerance`。
+**`differ` 为 0。** 新进来的 69 个：矩阵乘与注意力一族（`mmaf`）、f32 的 `attr_*`、`vadd_bf16`、`vadd_f32`、`dtype_tf32`、`f16_ops`、
+fma 的 6 个，以及架构门控的 `dtype_e4m3 dtype_e5m2 dtype_e8m0 dtype_e2m1 mmaf_scaled_e4m3`：这五个设备要 sm_89 以上才有 cubin，
+解释器没有「卡」可挑，所以 `build.py` 把 `arch_diff` 家族也编进来（占位参数改成 `<kernel> <cubin>` 对）。
+
+**按容差比对的 kernel（67 个只在容差档上同意，逐个列在 `run.sh` 的 `tolerance-tier only` 行）及理由**（31+5+14+3+2+12 = 67）：
+
+| 理由 | 数 | kernel |
+|---|---|---|
+| 含矩阵乘，累加顺序是模型（7.1） | 31 | `attn_alibi attn_bwd_mmt attn_causal attn_context attn_scores attn_sinks attn_window batched_matmul gpt_context gpt_dense gpt_down gpt_fc gpt_qkv gpt_scores gqa_context gqa_scores llama_down llama_ffn llama_out llama_qkv llama_scores lora_base lora_hidden lora_out matpow_step mha_context mha_scores swiglu_down swiglu_proj xattn_context xattn_scores` |
+| 含矩阵乘，且含超越函数 | 5 | `attn_decay flash_attn flash_attn_bf16 lin_attn_out lin_attn_s` |
+| 含超越函数（`exp log tanh sin cos rsqrt` 等）：不复用 tileref，两边各算各的，只承诺容差 | 14 | `attn_softmax cce_row dpo_loss gpt_gelu grpo_row llama_rms mathops ppo_loss sigmoid silu softmax swiglu_act swiglu_half trig_sweep` |
+| 含超越函数与 `fma`（`fma` 本身是单次舍入，但后面接超越函数） | 3 | `erf_sweep geglu ssm_scan` |
+| 含 `fma`，递推链上的最后一位随两侧公式写法而变 | 2 | `gae linrec` |
+| 语料声明的档就是容差：设备的归约树顺序不指定，解释器与 tileref 都左折叠，差是 kernel 与参考公式写法不同带来的最后几位（`miss` 不超过 3.3e-11，多数是 0） | 12 | `attn_bwd_ds batch_norm cce_mean fused_rms_norm gpt_ln group_norm grpo_adv kv_context kv_scores layer_norm llama_rope seg_scan` |
+
+`erf_sweep` 的 `miss = 1.2e-2` 与 `geglu` 的 `3.6e-2` 是这个表里最大的两个，来自 kernel 自己的有理逼近对 tileref 精确 `erf` 的差，
+设备上同样存在（erf_diff 的头注释），不是解释器的差；其余全部小于 6e-8。
+
+### 7.5 Playground：flash_attn 真跑
+
+样例 `site/play-ui/samples/flash_attn.dawn` 变成「记录 → `interp_ref` 在宿主上解释执行 → 与朴素 attention 比对 → 打印」：输出前两个 query 行的前四个值，
+和一行「与朴素 attention 在 1e-12 内一致：true」。kernel 与 `const` 行仍与 `scripts/tile-golden/kernels.dawn` 逐字相同（doc-check 的 `PINNED_SAMPLES`
+不再要求 `.out` 等于 golden，因为它不再打印 Tile IR 文本；Tile IR 窗格的文本来自 probe 的记录，与样例输出无关）。runner 的项目清单加第三个依赖
+`tileinterp`（`tile_manifest`、`tile_ready`、lsp-tile、合约测试同步）。**部署随下次发版**：站点与 runner 同提交（记忆里的老教训）。
+
+**runner 沙箱语义下的耗时**（`dawn build` 编项目，再 `java -Xmx256m -jar`，与 `exec.dawn` 的 `RUN_HEAP` 一致；本机 WSL2，未套 bwrap）：
+构建 2.6 s（编译预算 30 s），运行 0.25 到 0.26 s 三次（运行预算 10 s）。远在预算内，不动超时。
+
+### 7.6 负控、墙钟、台账
+
+- 负控（`run.sh --selftest`，本机约 3 分钟，不进 CI）：`mma-drops-term`（f64 乘积漏最后一项）→ 包测试「a matrix product adds every term of k」与对拍双红；
+  `narrow-unrounded`（窄格式结果不舍入）→ 包测试「a narrow sum is rounded into its format」与对拍双红（第一条是 `f16_ops`）；
+  `fma-two-roundings`（先舍乘积再加，binary64 与窄格式两处）→ 包测试「fma rounds once, in f64 and in f32」红。fma 的对拍不红：
+  语料里 fma 的 kernel 全在容差档，两次舍入的差落在容差之内，所以它的负控落在包测试上，这是原因，不是遗漏。
+  原有的三个仍红；`unsupported-skipped` 的靶子从 `mmaf`（现在支持）换成栅栏。
+- CI 墙钟：本机实测 `run.sh` 由 I1 的约 20 s（构建 5 s，24 个家族 15 s）升到约 42 s（构建 5 s，25 个家族 37 s；多出的是矩阵乘、窄格式与架构门控家族）。
+  按 I1 同一条规则（慢 runner 两倍加一成）计 95 s，tile-golden-11 的声明 810 s → 860 s，`path-total` 9480 s → 9530 s，timeout 41 → 43 min，
+  提交信息带 `Gate-Budget(path-total)`。仍挂在同一片，不新开片；声明后 shard 11 为 860 s，低于 950 s 的极点。
+- 台账：`packages/tileir` 与 `std` 本刀**零改动**（`git diff origin/main -- packages/tileir std` 为空），层 2 输入摘要不动，
+  sm_86、sm_90、sm_100 三本台账**不重录**（同 I1）。
+
+### 7.7 不做的（理由）
+
+- **原子、栅栏、PDL、竞争检测、网格顺序随机化**（裁决第 1 条的 C）：顺序执行只给出一种合法调度，做出来容易让用户误以为测过并发。仍然 `interp.unsupported_op`。
+- **alloca、全局量、指针转换、strided 与 gather 视图、assert、print_tko**：同属 C 档，裁决不排。
+- **f8E5M3FNU**：`std/narrow` 没有舍入函数也没有宿主值，边缘行为未实测；在这个库补它之前解释器不替它猜。`ftof_pos_inf` 到 `f8E8M0FNU` 同理。
+- **模拟张量核的内部对齐与截断**：Fasi 等量出了 V100/A100/H100 各自的行为，但那是各代各型号的细节，且 `mmaf` 不承诺它；模型选「宽累加一次舍入」，
+  在容差档上与设备同量级（7.1），再往细里做是把一个型号的实现当成语义。
+- **fma 的极端指数范围单次舍入**：Boldo–Melquiond 需要乘积不下溢、不溢出；范围外要先缩放，会引入新的双舍入点。语料没有落在范围外的 kernel，退化为两次舍入并在 7.3 写明。
+- **把 fma 的对拍做成逐位**：语料里的 fma kernel 都含超越函数或扫描，本来就是容差档；逐位要新写语料，那是 tile-gpu-diff 的事，不在解释器这刀。
+- **在本机重录三本台账**：tileir 与 std 没动，摘要没变，重录是空转（同 I1 的判断）。

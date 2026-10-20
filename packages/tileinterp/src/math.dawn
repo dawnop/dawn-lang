@@ -144,6 +144,55 @@ pub fn two_sum(a: Float, b: Float) -> (Float, Float) = {
   (s, e)
 }
 
+## The ROUND-TO-ODD value of the exact sum `s + e`, where `s = fl(x + y)` and
+## `e` is the error TwoSum reports: `s` itself when the sum was exact or its
+## significand is already odd, otherwise the neighbour of `s` on the side of
+## `e`, whose significand is odd. Rounding that value to nearest, or in any
+## direction, at a format with at most 51 significand bits gives what
+## rounding the EXACT sum once would (Boldo and Melquiond, "Emulation of FMA
+## and correctly rounded sums: proved algorithms using rounding to odd",
+## IEEE Trans. Computers 2008). It is the one device that lets binary64
+## stand in for a wider format in the fused operations below.
+pub fn odd_of(s: Float, e: Float) -> Float =
+  if e == 0.0 || not is_finite(s) || (bits_of(s) & 1) == 1 {
+    s
+  } else if e > 0.0 {
+    next_up(s)
+  } else {
+    next_down(s)
+  }
+
+## `x + y` rounded to odd (see [`odd_of`]); `x` and `y` finite.
+pub fn add_odd(x: Float, y: Float) -> Float = {
+  let (s, e) = two_sum(x, y)
+  odd_of(s, e)
+}
+
+## `a * b + c` with ONE rounding to nearest, for binary64 operands: the
+## fused multiply-add the dialect's `fma` performs. Boldo and Melquiond's
+## algorithm: the exact product as `uh + ul` (Dekker), the sum `c + uh` as
+## `th + tl` (TwoSum), `v = RO(tl + ul)`, and `RN(th + v)`. It needs the
+## product where Dekker's split cannot overflow and `ul` cannot underflow
+## (|a| and |b| below 2^500, |c| below 2^1000, |a * b| between 2^-900 and
+## 2^900). Outside that range, and for an infinity, a NaN or a zero product,
+## it answers `a * b + c`: exact where an operand is special, two roundings
+## in the extreme-range case (docs/tileinterp-design.md 7.3).
+pub fn fma_f64(a: Float, b: Float, c: Float) -> Float = {
+  let p = a * b
+  let ap = if p < 0.0 { 0.0 - p } else { p }
+  let aa = if a < 0.0 { 0.0 - a } else { a }
+  let ab = if b < 0.0 { 0.0 - b } else { b }
+  let ac = if c < 0.0 { 0.0 - c } else { c }
+  if not is_finite(p) || not is_finite(c) || ac > pow2(1000) || p == 0.0 || ap < pow2(0 - 900) || ap > pow2(900) || aa > pow2(500) || ab > pow2(500) {
+    p + c
+  } else {
+    let (uh, ul) = two_prod(a, b)
+    let (th, tl) = two_sum(c, uh)
+    let v = add_odd(tl, ul)
+    th + v
+  }
+}
+
 ## The correctly rounded square root of `x` (ties cannot occur). NaN for a
 ## negative or NaN operand, `x` itself for either zero and for `+inf`.
 ##
@@ -641,6 +690,27 @@ fn close(a: Float, b: Float) -> Bool = {
   let d = if a > b { a - b } else { b - a }
   let m = if b < 0.0 { 0.0 - b } else { b }
   d <= 1.0e-12 + 1.0e-12 * m
+}
+
+test "fma_f64 rounds the exact a * b + c once" {
+  # (2^30 + 1)(2^30 + 3) = 2^60 + 2^32 + 3 needs 61 bits; with c = -2^60 the
+  # fused answer is 2^32 + 3 exactly, and a product rounded first gives 2^32
+  assert fma_f64(1073741825.0, 1073741827.0, 0.0 - 1152921504606846976.0) == 4294967299.0
+  assert 1073741825.0 * 1073741827.0 + (0.0 - 1152921504606846976.0) == 4294967296.0
+  # a zero product keeps c, an infinity propagates
+  assert fma_f64(0.0, 5.0, 3.0) == 3.0
+  assert fma_f64(2.0, 3.0, 1.0 / 0.0) == 1.0 / 0.0
+  assert is_nan(fma_f64(0.0, 1.0 / 0.0, 1.0))
+  assert fma_f64(3.0, 4.0, 0.0 - 12.0) == 0.0
+}
+
+test "round to odd keeps the sticky bit that lets binary64 stand in for a narrower format" {
+  # 1 + 2^-60 is not a binary64; its round-to-odd value is the next one up, whose last bit is set
+  let (s, e) = two_sum(1.0, 8.673617379884035e-19)
+  assert s == 1.0
+  assert odd_of(s, e) == 1.0 + 2.220446049250313e-16
+  # an exact sum is its own round-to-odd
+  assert add_odd(1.0, 0.5) == 1.5
 }
 
 test "the square root is exact on perfect squares and correctly rounded around them" {
