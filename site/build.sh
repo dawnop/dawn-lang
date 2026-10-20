@@ -2,7 +2,7 @@
 # Build the site into site/dist (run from anywhere).
 #
 # The generator (site/) and the search budget probe (site/search-budget/) run
-# as native programs under `dawnc run`, not on the JVM; the JVM is still what
+# as native binaries (`dawnc build`, cached by site_prog in site/dawnc.sh), not on the JVM; the JVM is still what
 # `dawn doc` (the two documentation inputs below) and the cuTile call map's
 # `dawn parse` use. Where dawnc comes from, and why, is site/dawnc.sh. The
 # differential that holds the two backends to the same dist is
@@ -143,7 +143,7 @@ rm -rf site/dist
 # gen_assets vendors site/play-ui/dist/playground.{js,css}, site/build/tea/
 # *.wasm and packages/tea-dom/js/*.mjs into dist/assets
 # Native, and the only generator the shipped dist comes from (see the header).
-"$site_dawnc_bin" run site
+"$(site_prog site site_gen)"
 
 # The search assets against their budgets (docs/site-search-design.md 13.7):
 # the index's gzip size, the largest text fragment's, and the worst first-query

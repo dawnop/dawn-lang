@@ -129,8 +129,11 @@ echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
 # and site/dawnc.sh reuses the one site/build.sh left when its stamp matches.
 echo "== native =="
 dawnc_bin="$(site_dawnc)" || { echo "FAIL: dawnc did not build"; exit 1; }
-case "$dawnc_bin" in /*) ;; *) dawnc_bin="$ROOT/$dawnc_bin" ;; esac
-(cd "$SNAP" && "$dawnc_bin" run site) > "$OUT/native.log" 2>&1 || {
+# The generator is built from the working tree's site/ (the bytes the snapshot
+# holds; the cache key is their content) and shared with site/build.sh's.
+gen_bin="$(site_prog site site_gen)" || { echo "FAIL: the site generator did not build"; exit 1; }
+case "$gen_bin" in /*) ;; *) gen_bin="$ROOT/$gen_bin" ;; esac
+(cd "$SNAP" && "$gen_bin") > "$OUT/native.log" 2>&1 || {
   echo "FAIL: the native generator did not finish"; tail -20 "$OUT/native.log"; exit 1
 }
 mv "$SNAP/site/dist" "$OUT/dist-native"

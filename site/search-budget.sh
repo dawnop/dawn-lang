@@ -32,7 +32,7 @@
 #   DAWNC_BIN=<file>             the native driver that runs the panel's code
 #                                (default: built from HEAD, site/dawnc.sh)
 #
-# The panel's code runs as a native program under `dawnc run`, like the site
+# The panel's code runs as a native binary built once by site_prog, like the site
 # generator in site/build.sh. Which dawnc, and why, is site/dawnc.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -120,8 +120,8 @@ if [ "${SEARCH_BUDGET_SKIP_QUERIES:-0}" != 1 ]; then
   if [ -z "${SEARCH_BUDGET_RUN:-}" ]; then
     mkdir -p "$(dirname "$out")"
     . site/dawnc.sh
-    dawnc_bin="$(site_dawnc)"
-    DAWN_SEARCH_DIST="$dist" "$dawnc_bin" run site/search-budget > "$out"
+    probe_bin="$(site_prog site/search-budget search_budget_probe)"
+    DAWN_SEARCH_DIST="$dist" "$probe_bin" > "$out"
   elif [ ! -s "$out" ]; then
     echo "error: SEARCH_BUDGET_RUN=$out is empty or missing; run site/build.sh first" >&2
     exit 2
