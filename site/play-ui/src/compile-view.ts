@@ -52,7 +52,7 @@ export interface PaneHost {
   code(): string
   // the open tab changed (null: closed), for the URL and the toolbar
   opened(target: Target | null): void
-  // the calls of the listing now shown, for the source's underlines
+  // the calls of the listing now shown, for the source's marks
   calls(calls: XCall[]): void
   // a call is picked (null: none), for the source's span
   picked(id: number | null): void
@@ -229,7 +229,7 @@ export class ComparePane {
       this.draw(a)
       if (!this.stale) {
         // the calls of every tab are the same table, but the source's
-        // underlines are only right for the code this listing is of
+        // marks are only right for the code this listing is of
         this.host.calls(a.model ? a.model.view.calls : [])
         this.reapply()
         this.say(this.pickText())
