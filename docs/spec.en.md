@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 91d34925098d9097 -->
+<!-- doc-check: translation-of docs/spec.md @ 84820d173441c0ff -->
 
 # Dawn Language Specification
 
@@ -5091,17 +5091,22 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
 - In type position write the value type; in value position write the format's name. For
   `std/narrow` and the fixed-width integers the two are spelled alike (`Tile[BF16]`,
   `alloc(BF16, n)`); for the three builtins they are `Float`/`F64`, `Int`/`I64`, `Bool`/`I1`.
-- The formats a buffer can be allocated in are exactly the 12 `element_bytes` knows: `f64`,
-  `i64`, `i32`, `tf32`, `bf16`, `f16`, `i16`, `i8`, `u8`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`.
-  Both handlers answer `gpu.unsupported_dtype` for the rest, `F32` included: it can be written
-  in a type but not allocated. `I4`, `F4E2M1FN` and `F8E5M3FNU` are tile formats only, and no buffer of
-  any of them exists.
+- The formats a buffer can be allocated in are exactly the 13 `element_bytes` knows: `f64`,
+  `i64`, `f32`, `i32`, `tf32`, `bf16`, `f16`, `i16`, `i8`, `u8`, `f8E4M3FN`, `f8E5M2`, `f8E8M0FNU`.
+  Both handlers answer `gpu.unsupported_dtype` for the rest. `I4`, `F4E2M1FN` and `F8E5M3FNU` are
+  tile formats only, and no buffer of any of them exists.
+  An `f32` buffer holds four bytes an element, the IEEE binary32 pattern; an `F32` value is
+  already rounded to binary32, to nearest with ties to even, when it is made (`narrow.f32`,
+  `FromFloat`), so the transfer itself rounds nothing, and subnormals, infinities and signed
+  zeros round-trip as they are; a NaN comes back a NaN, with no promise about its payload or
+  sign.
 - Values go in and out as `List[T]`, where `T` is the buffer's element type:
   `copy_from_host(b: DeviceBuffer[T], xs: List[T])` and `copy_to_host(b: DeviceBuffer[T]) -> Result[List[T], _]` need
   `T: HasDtype + DeviceBits`. `copy_from_host` writes each element as the format's bit pattern,
   little-endian, and nothing is rounded on the way in (the value is already the format's: a
   `BF16` is a bfloat16, and an `Int` crosses whole); `copy_to_host` answers exactly what the buffer
-  holds. That makes every format lossless, an `i64` beyond ±2^53 and a NaN's payload included.
+  holds. That makes every format lossless, an `i64` beyond ±2^53 and an `f64` NaN's payload included
+  (a NaN of a narrower float format comes back a NaN, with no promise about its payload).
   `DeviceBits` is implemented by the formats a buffer can hold; `Bool`, `I4`, `F4E2M1FN` and `F8E5M3FNU` have
   a format and no buffer, so uploading a `DeviceBuffer[Bool]` is a type error. On the effect, the
   data crosses as `Bytes` (`gpu_copy_from_host(handle, data: Bytes)`, `gpu_copy_to_host(handle) ->

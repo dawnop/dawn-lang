@@ -81,10 +81,14 @@
 # implemented row below layer 2 carries a named exemption and every one at
 # layer 2 or 3 carries none. Three kinds of exemption appear:
 #
-#   no host channel     std/gpu's `element_bytes` does not move the format,
-#                       so no buffer of it can be allocated and no device
-#                       can be handed one. f32 is the only case: it is a
-#                       tile type here, never a buffer type
+#   no host channel     RETIRED by the f32 buffer knife (2026-10-20), and no
+#                       row carries it any more. It meant std/gpu's
+#                       `element_bytes` did not move the format, so no
+#                       buffer of it could be allocated and no device handed
+#                       one; f32 was the only case. `element_bytes` now
+#                       answers 4 for f32 and scripts/tile-gpu-diff's
+#                       vadd_diff runs vadd_f32 over f32 buffers, which is
+#                       the row's device evidence
 #   architecture        RETIRED by knife TA, and no row carries it any
 #                       more. It was the four narrow formats f8E4M3FN,
 #                       f8E5M2, f8E8M0FNU and f4E2M1FN: `tileiras` refuses
@@ -131,7 +135,7 @@ i32                |  3 | 13.1 | implemented   | 3   | 2 | golden:int_ops,device
 i64                |  4 | 13.1 | implemented   | T3  | 3 | golden:dtype_i64,device:dtype_i64,mutant:i64-payload-four-bytes      | -
 f16                |  5 | 13.1 | implemented   | 11  | 2 | golden:f16_ops,device:f16_ops                                        | -
 bf16               |  6 | 13.1 | implemented   | 1   | 3 | golden:vadd_bf16,device:vadd_bf16,mutant:bf16-tag-as-i16             | -
-f32                |  7 | 13.1 | implemented   | 2   | 1 | golden:vadd_f32                                                      | no host channel
+f32                |  7 | 13.1 | implemented   | 2   | 2 | golden:vadd_f32,device:vadd_f32                                      | -
 tf32               |  8 | 13.1 | implemented   | T3  | 3 | golden:dtype_tf32,device:dtype_tf32,mutant:tf32-tag-as-f32           | -
 f64                |  9 | 13.1 | implemented   | 2   | 3 | golden:vadd,device:vadd,mutant:f64-tag-as-i64                        | -
 f8E4M3FN           | 10 | 13.1 | implemented   | T3  | 3 | golden:dtype_e4m3,device@sm90:dtype_e4m3,mutant:e4m3-tag-as-i8       | -

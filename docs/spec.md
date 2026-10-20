@@ -3989,15 +3989,17 @@ pub fn with_gpu_real[T, !e](kernels: Map[String, Bytes], body: fn() -> T !Gpu !e
   所以 `DeviceBuffer[U32]` 在 `alloc` 处是类型错误。
 - 类型位置写值类型，值位置写格式名。对 `std/narrow` 与定宽整数两者同名（`Tile[BF16]`、
   `alloc(BF16, n)`）；对三个内建类型分别是 `Float`/`F64`、`Int`/`I64`、`Bool`/`I1`。
-- 能分配成缓冲的格式恰好是 `element_bytes` 认识的 12 个：`f64`、`i64`、`i32`、`tf32`、`bf16`、
+- 能分配成缓冲的格式恰好是 `element_bytes` 认识的 13 个：`f64`、`i64`、`f32`、`i32`、`tf32`、`bf16`、
   `f16`、`i16`、`i8`、`u8`、`f8E4M3FN`、`f8E5M2`、`f8E8M0FNU`。其余格式两个 handler 都答
-  `gpu.unsupported_dtype`，包括 `F32`：它可以写进类型，不能分配。`I4`、`F4E2M1FN`、`F8E5M3FNU` 只是 tile
-  的格式，没有这种缓冲。
+  `gpu.unsupported_dtype`。`I4`、`F4E2M1FN`、`F8E5M3FNU` 只是 tile 的格式，没有这种缓冲。
+  `f32` 缓冲每个元素 4 字节，是 IEEE binary32 的位型；`F32` 的值在构造时（`narrow.f32`、`FromFloat`）
+  已按就近偶数舍入到 binary32，所以传输本身不舍入，非规格数、无穷与带符号的零原样往返；NaN 回来仍是 NaN，
+  不承诺保留载荷与符号。
 - 值以 `List[T]` 进出，`T` 是缓冲的元素类型：`copy_from_host(b: DeviceBuffer[T], xs: List[T])` 与
   `copy_to_host(b: DeviceBuffer[T]) -> Result[List[T], _]` 要求 `T: HasDtype + DeviceBits`。`copy_from_host` 把每个元素
   写成格式的位型（小端），上传时不舍入（值在 `T` 里已经是格式的值：`BF16` 就是 bfloat16，`Int`
-  整个过去）；`copy_to_host` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 NaN 的
-  载荷也在内。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN`、`F8E5M3FNU` 有格式没有缓冲，
+  整个过去）；`copy_to_host` 精确答出缓冲持有的值。所以每种格式都无损，超出 ±2^53 的 `i64` 与 `f64` 的
+  NaN 载荷也在内（更窄的浮点格式的 NaN 回来仍是 NaN，载荷不承诺）。`DeviceBits` 由能成缓冲的格式实现；`Bool`、`I4`、`F4E2M1FN`、`F8E5M3FNU` 有格式没有缓冲，
   上传 `DeviceBuffer[Bool]` 是类型错误。在效果上数据以 `Bytes` 过界（`gpu_copy_from_host(handle, data: Bytes)`、
   `gpu_copy_to_host(handle) -> Result[Bytes, _]`），第 `i` 个元素占 `[i * w, (i + 1) * w)` 字节，`w` 是格式的宽度，
   小端。`encode_floats(dtype, xs: List[Float])` 与 `decode_floats(dtype, bytes)` 是同一编码按格式名对 `Float` 的视图，

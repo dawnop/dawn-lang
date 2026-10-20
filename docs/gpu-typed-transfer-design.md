@@ -2,7 +2,7 @@
 
 > 改名说明（2026-10-12）：文中的 `Tensor[D]`（`std/gpu` 的宿主缓冲类型）今天叫 `DeviceBuffer[D]`；本文按当时的名字写成，不逐处改动。
 
-> 状态：**current**。2026-10-08 写成，U3b1（e5b3c847）、U3c（63e65a9e）已落地，U3d 并入 bulk-array-bytes-design（K5，448d0c01）；`upload`/`download` 在代码里最终命名为 `copy_from_host`/`copy_to_host`。基线 `origin/main` = c7c81203，种子 v0.85.0，`packages/tileir` 0.12.0。
+> 状态：**current**。2026-10-08 写成，U3b1（e5b3c847）、U3c（63e65a9e）已落地，U3d 并入 bulk-array-bytes-design（K5，448d0c01）；`upload`/`download` 在代码里最终命名为 `copy_from_host`/`copy_to_host`。基线 `origin/main` = c7c81203，种子 v0.85.0，`packages/tileir` 0.12.0。2026-10-20 追加 §10、§11：f32 缓冲（`element_bytes` 补 f32，两设备两后端都通）。
 > 这是 `dtype-unify-design.md`（PR #634，分支 `gpu/dtype-u0`，尚未合入 main，所以这里不做链接）§6 的 U3a：把那篇留下的 U3 开放问题 1、2、4 答完，并给出 U3b 起的刀序。
 > 调研报告：维护者工作区 `research-gpu-typed-transfer-20261008.md`（含网页出处）；格式统一的前置调研是
 > `research-format-types-unify-report-20261006`。本文引的外部事实以报告为准，本文只留结论与链接。
@@ -273,3 +273,64 @@ U3c 与「改 CI 必报墙钟」：本文不改 workflows，不新增 gate；`st
 9. **主机端字节序可配置 / 大端支持**：没有大端 CUDA 主机；用静态断言让大端编不过，比做一个从未测过的转换路径诚实（§3.1）。
 10. **在本文里决定 U3d**：没有 native 数字不立项（§3.5）。
 11. **让 `upload` 接受 `U16 U32 U64`**：方言没有无符号整数 tile 类型，`HasDtype` 与 `DeviceBits` 都不 impl 它们才是诚实的（dtype-unify §9 第 5 条）。
+
+## 10. 追加（2026-10-20）：f32 缓冲
+
+### 10.1 为什么现在补
+
+U3 落地时 `element_bytes` 认 12 个格式，唯独没有 `f32`：`F32` 有 `HasDtype`、有 `DeviceBits`（`narrow.f32_bits` / `f32_of_bits`），
+算术与运算符齐全，`ScalarDtype` 也收它（按值传标量），可两个 handler 都在分配处答 `gpu.unsupported_dtype`。`std/gpu.dawn` 头注释的原话是
+「f32 four bytes; neither handler moves it, so a `DeviceBuffer[F32]` can be typed but not allocated」。这是刀 11 时代留下的缺口，没有任何裁决说不做
+（GPU 下一批裁决第 1 条：派）。后果是 kernel 里算好的 f32 只能 `ftof` 加宽成 f64 再存（`flash_attn_bf16`、`attr_*` 一族、`view_*` 一族用 i32 缓冲装 f32 位型），
+而 f32 恰是 GPU 上最常用的存储格式。
+
+### 10.2 语义
+
+- **`element_bytes("f32") = Some(4)`**，`element_bits("f32") = Some(32)`。两个 handler 只认这一张表，所以假设备与真机同时放行，拒绝文案里的格式清单同步加上 `f32`。
+- **线格式**：与其他格式一样，第 `i` 个元素占 `[4i, 4i + 4)` 字节，IEEE binary32 位型，小端。运行时只拷字节、不认格式，所以 `dawn_rt.c` 一行不动；
+  JVM 上 `with_gpu_real` 照旧在第一个碰设备的操作答 `gpu.unsupported_backend`，假设备在两个后端行为相同（它是纯 Dawn）。
+- **类型化传输**（`copy_from_host` / `copy_to_host`，`T = F32`）：`F32` 的值在**构造时**已经在 binary32 网格上（`narrow.f32(x)`、`FromFloat`、`F32` 运算都经
+  `round_f32`），`DeviceBits[F32]` 只取位型，传输**不舍入**；下载用 `f32_of_bits`，binary32 到 binary64 是精确加宽。所以非规格数（最小 `2^-149`、最大 `2^-126 - 2^-149`）、
+  正负无穷、`-0.0` 逐位往返。
+- **NaN**：回来仍是 NaN，**不承诺载荷与符号**。`f32_bits` 对任何 NaN 写规范的 `0x7FC00000`；设备写出的 `0xFFC00123` 读回宿主是一个 NaN，再上传就成了 `0x7FC00000`。
+  这与 bulk K4 的 f32 族相同（bulk-array-bytes-design §3 第 3 条：「NaN 载荷不承诺保留」），也与 bf16、f16 今天的行为相同；只有 f64 经原始位型 intrinsic 保载荷。
+  spec §12.6 原句「每种格式都无损……NaN 的载荷也在内」对窄格式本来就说多了，本刀把它收窄成「`f64` 的 NaN 载荷也在内，更窄的浮点格式的 NaN 只保证仍是 NaN」。
+- **宿主 `Float` 到 f32 的舍入**：就近偶数（`round_f32` 的默认模式 `NearestEven`，即 `round_binary(x, 24, -126, 127)`），与 bulk K4 的 f32 族
+  （C 的 `(float)d`、JVM 的 `D2F`，都是 IEEE 就近偶数）一致。边界：`1 + 2^-24` 落在中点，取偶得 `1`；`1 + 3·2^-24` 取偶得 `1 + 2^-22`；
+  `2^-150` 是零与最小非规格数的中点，取偶得 `0`，`3·2^-150` 得 `2^-148`；最大有限值加半个 ulp（`2^103`）得 `+inf`，加四分之一个 ulp 退回最大有限值。
+  这个舍入只发生在两个地方：构造 `F32` 时，和按名字分派的 `encode_floats("f32", ..)`（编码器臂是 `f32_bits(round_f32(x))`，与 bf16/tf32 的臂同形；
+  `f32_bits` 本身对网格外的值截断，所以舍入必须写在臂里，否则上传的数与假设备持有的数不同）。
+- **假设备的参考通道**：launch 边界把 f32 缓冲 `decode_floats` 成 `Float`（精确），参考实现算完写回时 `encode_floats` 按就近偶数舍回 binary32。
+  `vadd_ref` 对 f32 输出就是 `round_to("f32", a + b)`；两个 binary32 的和在 binary64 里精确，所以这是**一次**舍入，等于设备 `addf rounding<nearest_even>` 的结果。
+  `reference_kernels()` 补一项 `vadd_f32`，与 `vadd_bf16` 并列。
+
+### 10.3 其他实现怎么做
+
+- **cuTile Python**：数组只能由宿主分配，以 DLPack 或 CUDA Array Interface 对象（CuPy 数组、PyTorch 张量）传给 kernel；`cuda.tile.float32` 是
+  「IEEE 754 single-precision (32-bit) binary floating-point」（[cuTile Python 数据模型](https://docs.nvidia.com/cuda/cutile-python/data.html)）。
+  宿主一侧的 f64 到 f32 转换不归 cuTile 管，由数组库做（NumPy/CuPy 的 `astype(float32)` 是 C 的类型转换，就近偶数）。传输是数组库的按字节拷贝。
+- **cutile-rs**：`api::copy_host_vec_to_device::<T>(&Arc<Vec<T>>)` 把宿主 `Vec<T>` 拷成设备 `Tensor<T>`，`tensor.to_host_vec()` 拷回；示例里 `T` 就是 Rust 的 `f32`；
+  格式之间的转换是另一个显式操作 `api::convert::<From, To>`，按字节重解释是 `reinterpret`（[cuTile Rust host API](https://nvidia.github.io/cuda-rust/cutile/latest/reference/host-api.html)）。
+  宿主值本来就是 `f32`，从 `f64` 得到它要写 `x as f32`，Rust 规定这一转换取最近值、平局取偶
+  （[Rust Reference: numeric cast](https://doc.rust-lang.org/reference/expressions/operator-expr.html#numeric-cast)）。
+- **对照**：两家都是「宿主值已是该格式，传输按字节」，与 Dawn 的 `List[F32]` 加 `DeviceBits` 同构；Dawn 的差别只在 `F32` 是 opaque 的 `Float`，
+  舍入写在类型的构造点上而不是数组库里。
+
+### 10.4 测试与门
+
+- `std/gpu` 内联测试四条：f32 往返（六类边界值与 `0.1` 的位型逐个钉住，加小端字节 `0000803f`）、NaN 往返仍是 NaN、就近偶数的三种中点与上溢下溢边界（typed 与按名字两条路）、假设备 f32 `vadd`；
+  原来拿 `F32` 当「不支持格式」的两处拒绝测试改用 `I4`（真正没有缓冲的格式）。
+- `examples/projects/gpu_fake` 加 `vadd_f32` kernel：记录出 `tile<128xf32>`，宿主用 `DeviceBuffer[F32]` 端到端跑假设备，gallery 多一行（example-main-contract 与 site 输出同步）。
+- 层 2：`scripts/tile-gpu-diff/vadd_diff.dawn` 加三组 f32 语料跑已有的 `vadd_f32` golden（64 宽 cell，grid = n / 64）：边界值一组、随机 `Float` 一组、65536 个随机 binary32 位型一组；
+  加 `f32-pack-truncates` 变异体（编码器臂去掉 `round_f32`，三组 f32 的 round trip 全红，f64、bf16 不动）。`types.txt` 的 f32 行由层 1 加
+  `no host channel` 豁免升到层 2（`device:vadd_f32`），该豁免退役；`check.py` 里用到这一行的两条自测换到 `f8E5M3FNU` 行与 `vadd_producer`。
+- 负控：`element_bytes` 把 f32 写成 8，std 测试 5 条红（字节断言、宽度断言、NaN 测试的下标越界等）；编码器臂截断，按名字通道的舍入断言红。
+
+## 11. 不做的（理由）（f32 追加）
+
+1. **f32 的 NaN 载荷保真**：要把 `f32_bits` / `f32_of_bits` 的 NaN 分支改成经 `float_to_bits` 搬载荷，会动到 `narrow` 的公开函数与所有经它的路径（tf32 也用它），
+   而 bulk K4 已裁「f32 NaN 载荷不承诺」，设备的规范 NaN 本来也没有消费者。保持与 bf16、f16 一致。
+2. **`flash_attn_bf16` 改存 f32**：一个 PR 一个主题，裁决把它排成 A2，另起一刀（改 golden、seq_diff 容差说明与台账）。
+3. **`attr_*` / `view_*` 一族改用 f32 缓冲**：它们用 f64 或 i32 缓冲装 f32 是当时的变通，但 golden 与台账逐位钉着，改了只换表示不加覆盖；有需要时随各自的刀改。
+4. **给 `vadd_f32` 另录一个 128 宽的 golden**：已有的 64 宽 golden 就是为「load 读参数的格式」录的，层 2 直接用它，grid 按宽度算即可，不为对齐另造 kernel。
+5. **f32 的批量 intrinsic 特化**：宽度 4 的 `pack_ints` 已经是一条运行时循环（bulk K5），f32 与 i32、tf32 同宽同路，没有单独的数字说它慢。
