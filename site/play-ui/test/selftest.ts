@@ -54,6 +54,7 @@ import {
 } from '../src/lsp'
 import { playEndpoints } from '../src/endpoints'
 import { compileViewTests } from './compile-selftest'
+import { panesTests } from './panes-selftest'
 
 let fails = 0
 function expect(name: string, got: unknown, want: unknown) {
@@ -1113,6 +1114,7 @@ blackholeClient.stop()
 
 fails += compileViewTests(expect)
 fails += sanitizeTests(expect)
+fails += panesTests(expect)
 
 console.log(fails === 0 ? 'ALL PASS' : `${fails} FAILURES`)
 process.exit(fails === 0 ? 0 : 1)
