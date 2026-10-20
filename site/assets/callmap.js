@@ -7,12 +7,12 @@
    The page is complete without it. The source and the three listings are all
    in the markup, one under another, and every line already says which calls
    own it (`data-o`, the innermost first) and whose instruction it is
-   (`data-i`); this only lets a reader point. Picking a call underlines its
+   (`data-i`); this only lets a reader point. Picking a call tints its
    whole span in the source and marks, in every listing, the lines it wrote
    itself (an accent edge and number) and, fainter, the lines the calls inside
-   it wrote. In C the columns it holds are underlined, in the bytecode the
+   it wrote. In C the columns it holds are tinted, in the bytecode the
    instruction that implements it is bold. Picking a line of a listing picks
-   the innermost call that owns it. Nothing moves and nothing is filled.
+   the innermost call that owns it. Nothing moves.
 
    A figure may have no tabs: its listings are then all shown at once (the GPU
    page's call map is a source and one listing side by side), a pick scrolls

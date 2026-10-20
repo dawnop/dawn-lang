@@ -2,7 +2,7 @@
 // which lines the calls inside it own, which instruction is its own, who a
 // clicked line belongs to, where the arrow keys go, and what the status line
 // says. The Playground's compile pane (compile-view.ts) draws these answers
-// and the editor (call-marks.ts) underlines the spans; neither decides
+// and the editor (call-marks.ts) marks the spans; neither decides
 // anything, so every rule here is testable in node (test/selftest.ts).
 //
 // Why this is a second copy of site/assets/explorer.js's rules and not the

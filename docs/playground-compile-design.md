@@ -376,7 +376,7 @@ HTML 由 `site/src/gen/explorer.dawn`（677 行 Dawn）生成。Playground 的 b
 
 **K3 落地记录（2026-10-07）。**
 - **实现：** `site/play-ui/src/` 新增四个模块。`explorer-core.ts`（线上格式的校验 `readView`、拥有关系 `Model`、点击与方向键的去向、状态行文字，纯函数）、
-  `compile-state.ts`（`/compile` 各种回答的含义、`?view=` 读写、自动重编的暂停与恢复，纯函数）、`call-marks.ts`（编辑器一侧：调用名的虚线、选中调用的整段下划线，
+  `compile-state.ts`（`/compile` 各种回答的含义、`?view=` 读写、自动重编的暂停与恢复，纯函数）、`call-marks.ts`（编辑器一侧：调用名的虚线、选中调用的整段下划线（2026-10-20 起改为底色，见 `gpu-page-newapi-design.md` 第八节），
   区间放在编辑器状态里随编辑映射）、`compile-view.ts`（窗格的 DOM 与请求）。`main.ts` 只接线；`endpoints.ts` 多一个 `compile`。
 - **与第五节的两处不同（请裁决是否认）：** (1) 5.1 写的是窗格与输出面板「共用一个标签条」。实做为工具栏的 `C / JVM` 开关加一个独立窗格，Run 的控制台不动：
   控制台是一次运行的结果，窗格是随输入重算的、要指着看的东西，放进同一个条里两边的状态（空闲、编译中、过期）会互相踩。`Tile IR` 标签没有占位，K5 再加。

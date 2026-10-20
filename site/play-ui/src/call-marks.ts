@@ -1,12 +1,12 @@
 // The editor's half of the explorer: the calls the compile pane can follow,
-// drawn in the source, and the picked call's whole span underlined.
+// drawn in the source, and the picked call's whole span tinted.
 //
 // Why the ranges live in editor state and not in the pane's model. They are
 // positions in a document the reader keeps typing in, so they are mapped
 // through every change (a call whose text is deleted drops out, one that
 // is typed beside keeps its place) by the same machinery that moves the
 // squiggles. The pane's listing cannot follow an edit, so it goes stale when
-// the text changes (compile-view.ts says so), but the underline under the call
+// the text changes (compile-view.ts says so), but the tint on the call
 // the reader has just picked is still on that call.
 //
 // A call's name is the thing to pick (a dashed underline, as on the static
