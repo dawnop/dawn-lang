@@ -3588,6 +3588,48 @@ jobs:
       # java-target-classpath beside the deploy guards (that job's 2026-10-19
       # note says why).
 
+      # The site's native binaries are the cold cost of the build below: dawnc
+      # from HEAD, the generator and the search probe, built once each with
+      # `dawnc build` (site/dawnc.sh). Most pushes touch none of what they are
+      # built from, so each is restored from actions/cache. The keys are not
+      # written here: site/cache-keys.sh prints them from the same functions
+      # site/build.sh uses to decide whether its local copy is current, so CI
+      # and the script cannot disagree about what "unchanged" means.
+      #   dawnc  the compiler's source stamp + the digest of runtime/c
+      #   gen    that stamp + every *.dawn and dawn.toml of site/ and of its
+      #          path dependencies (std is embedded in dawnc, so the stamp
+      #          covers it)
+      #   probe  the same over site/search-budget/
+      # Any change to any of those is a different key, so a miss and a rebuild;
+      # a restore is also checked against the key stored beside the binary, so
+      # a stale one can only cost time. Data the programs read when they run
+      # (docs/, examples/) is not in a key: the binaries read it every run.
+      # Bump the `v1` in the three keys to force every binary to be rebuilt.
+      - name: site native cache keys
+        id: sitekeys
+        run: ./site/cache-keys.sh | tee -a "${GITHUB_OUTPUT:-/dev/null}"
+      - name: cache the site's dawnc
+        uses: actions/cache@v4
+        with:
+          path: |
+            site/build/dawnc
+            site/build/dawnc.stamp
+          key: site-native-v1-dawnc-${{ steps.sitekeys.outputs.dawnc }}
+      - name: cache the site generator
+        uses: actions/cache@v4
+        with:
+          path: |
+            site/build/site_gen
+            site/build/site_gen.key
+          key: site-native-v1-gen-${{ steps.sitekeys.outputs.gen }}
+      - name: cache the search budget probe
+        uses: actions/cache@v4
+        with:
+          path: |
+            site/build/search_budget_probe
+            site/build/search_budget_probe.key
+          key: site-native-v1-probe-${{ steps.sitekeys.outputs.probe }}
+
       # This one builds site/play-ui/dist, which is not tracked and which the
       # differential below reads. They stay in this order.
       - name: site builds end-to-end (incl. the Playground editor bundle)
