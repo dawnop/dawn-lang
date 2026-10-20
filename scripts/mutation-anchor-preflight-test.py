@@ -192,8 +192,8 @@ class PreflightTests(unittest.TestCase):
                                           "const ABNORMAL_EXIT_STATUS: Int = 1",
                                           "const ABNORMAL_EXIT_STATUS: Int = 2")
         self.assert_registry_drift_is_red("lsp-lifecycle-contract", "shutdown-flushes", server,
-                                          "            LgBeginShutdown -> {\n              pending = None\n",
-                                          "            LgBeginShutdown -> {\n              pending = none\n")
+                                          "                LgBeginShutdown -> {\n                  pending = None\n",
+                                          "                LgBeginShutdown -> {\n                  pending = none\n")
         self.assert_stale_registry_is_red("lsp-lifecycle-contract", "repeat-initialize", 0)
 
     def test_project_plan_anchor_drift_is_caught(self):

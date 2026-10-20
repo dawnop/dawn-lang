@@ -398,6 +398,124 @@ debounce:  FAIL / freshness: FAIL
 抓住它的是 `lsp-liveness.py`（五条里红四条）与 `selfhost-lsp-diff.sh`，**不是**
 `classfile-verify`。
 
+### 2.2.5 排空、取消、按类调度（§六 step 3，#790，2026-10-19）
+
+**问题**：§2.2.4 的「其它任何东西先 flush」让推迟不可观测，代价是读循环一次只读一帧。
+VS Code 每次停顿都同时发出 didChange 和 codeAction，一次长分析期间管道里会排起
+`[change v_a, codeAction, change v_b, codeAction, …]`，每个 codeAction 都把一个
+**已被身后 sync 取代**的版本送去全量分析；`$/cancelRequest` 也走 flush 分支，
+取消本身就会逼出一次分析。
+
+**形状**（`selfhost/src/lsp/server.dawn` 的 `run_lsp_configured`）：
+
+```
+loop:
+  take = if 有 pending { io.stdin_ready(50) } else { true }
+  if take:
+    inbox = [读一帧]
+    循环：
+      while 未读到 Eof/Fatal && io.stdin_ready(0): 读一帧进 inbox
+          （读到 $/cancelRequest 时，若目标请求还在 inbox 里未处理，记进 cancelled）
+      inbox 空了 → 若刚处理的是「没 flush 就答了的请求」，立刻 flush；退出
+      取队头 m：
+        已取消的请求        → 回 RequestCancelled（-32800），不 flush
+        sync（带文本）      → 进 pending（同 uri 覆盖，异 uri 先 flush）
+        TextOnly            → 用「本版本文本」直接答，不 flush
+        Inert               → 照旧 handle，不 flush
+        Analysed            → flush，再 handle
+  else: flush
+```
+
+- **消息分类**（`msg_class`，表驱动单测钉住每个方法）：
+  - `TextOnly`：formatting、codeAction、documentSymbol。前两个本来只读文本；
+    documentSymbol 在分析恰好是同一文本时照旧带 `detail`（签名），否则解析本版本文本、
+    省略 `detail`。不拿上一次分析按名字去配：那个签名可能已经不是这个函数的了。
+  - `Inert`：`$/` 开头的通知与请求、`initialized`、不带文本的 didOpen/didChange。
+  - `Analysed`：其余全部，**包括表里没列的方法**。新加的 handler 默认被当成读分析的，
+    先对、再快。didClose/didSave/watched files 也在这里：它们改工作区，publish 序列保持原样
+    （lsp-diff 的 `messy` 段就是 didOpen → formatting → didClose）。
+- **「本版本文本」**（`text_now`）：pending 是同一 uri 就用 pending 的文本（现算 view 与行表），
+  否则用 `st.docs` 里的。pending 的文本**不写进 `Doc`**：QCx 拿 `d.view` 配分析出的 AST，
+  先改 `Doc` 不分析就错位了。
+- **按序语义不变**：没取消的 `Analysed` 请求只分析它前面的东西，身后排着的 sync 等它答完。
+  两个 sync 之间夹着这样的请求就不合并，hover、rename 按它被问到的那个文本作答。
+- **为什么答完 TextOnly 后立刻 flush**：客户端在 sync 后紧跟请求，说明这一阵改动已经发完
+  （VS Code 的 250 ms Delayer 已经替我们等过了）。不这样做，VS Code 节奏下停手延迟会多出
+  一个防抖窗口；P0 的「请求即 flush」正是靠这一点拿到 D=0（调研模型 K1 去掉这条时
+  A 467 → 517–543 ms）。
+- **规范边界**（LSP 3.17）：
+  - `$/cancelRequest`：被取消的请求仍要回复，`RequestCancelled = -32800` 是「服务端看到了取消」时的码。
+  - `ContentModified = -32801` 的注释原文：「A server should NOT send this error code if it
+    detects a content change in its unprocessed messages ... If a client decides that a result
+    is not of any use anymore the client should cancel the request.」所以队列里有后续改动
+    **不是**服务端自己放弃的理由，过期的语义请求只能靠客户端取消来省。VS Code 在内容变化的
+    瞬间发取消，比被 250 ms 推迟的 didChange 早到，排空正好吃到这个结构。
+  - `$/` 开头的通知可以忽略，`$/` 请求回 MethodNotFound：都不 flush。
+  - 只有「正在执行」的分析被作废时才轮得到 ContentModified，那是条件刀 2 的事（下文）。
+- **排空的边界**：读到 Eof 或 Fatal 就不再读；它们之前的帧照常处理，Fatal 之后的字节仍然
+  从不解释（`lsp-framing.py` 28 项照绿）。`exit` 让 `serving = false`，inbox 里剩下的帧不再处理。
+  每读一帧多一次 `stdin_ready(0)`，调研实测 JVM 0.67–0.76 µs/次、C 0.18–0.45 µs/次。
+- **semanticTokens 不是 TextOnly**：`lsptok.dawn` 的 token 全部来自名字解析
+  （`walked_resolutions`），没有「词法部分」。issue 原文那句不准，PR 正文已更正。
+
+#### 三条新断言与它们的变异体（`scripts/lsp-liveness.py`）
+
+三条都是「一次写入多帧」（gap 0）：这里测的是队列，不是时间。
+
+| 断言 | 写入 | 要求 |
+|---|---|---|
+| `cancel` | didChange v1、semanticTokens K、`$/cancelRequest` K、didChange v2 | K 回 -32800；之后只 publish 一次，version 2 |
+| `coalesce` | didChange v1、codeAction、didChange v2、codeAction | 两个 codeAction 都有 result；只 publish 一次，诊断点名 `zzz_2` |
+| `order`（护栏） | didChange v1（含 `only_in_one`）、hover 在 `only_in_one` 上、didChange v2 | hover 点名 `only_in_one`；version 1、2 各 publish 一次 |
+
+变异体（本机实测，`java -jar <变异体> lsp`，日志在任务 scratchpad）：
+
+| jar | `cancel` | `coalesce` | `order` |
+|---|---|---|---|
+| 刀 1 | PASS | PASS | PASS |
+| origin/main（改前） | **FAIL** 取消的请求拿到 result，publish `[1, 2]` | **FAIL** 2 次分析 | PASS |
+| `no-drain`（`stdin_ready(0)` 前加 `false &&`，只读一帧） | **FAIL** 同上 | **FAIL** 2 次分析 | PASS |
+| `no-cancel`（`cancel_target` 恒回 `[]`） | **FAIL** 同上 | PASS | PASS |
+| `jump-queue`（Analysed 分支 flush 前把 inbox 里同 uri 的后续 sync 提成 pending） | PASS | PASS | **FAIL** hover 不点名 `only_in_one`，publish `[2, 2]` |
+| `text-flushes`（TextOnly 分支先 flush） | PASS | **FAIL** 2 次分析 | PASS |
+
+每条断言至少被一个变异体单独打红；`hangup/liveness/idle/debounce/freshness` 在全部六把 jar 上都是 PASS。`order` 在今天的服务端上是绿的，它防的是「合并过头」。
+
+#### VS Code 节奏回放（前后背靠背）
+
+工具是防抖调研的 `debounce_bench.py` 加两种客户端模式：`vscode-c`（Delayer 250 + codeAction
++ semanticTokens，并在每次内容变化时立刻对未答请求发 `$/cancelRequest`），`vscode-qs`（同上去掉
+semanticTokens，每个单词字符后 10 ms 先 flush 再发 completion，照抄调研模型的 vscode-qs）。
+两把 jar 都是同一棵源码树加计时探针（flush 前后打 `System.nanoTime`），服务端
+`-Xss512m -Xmx2g -XX:+UseSerialGC`，D=50，同一键序列背靠背，每格热身 1 遍、记录 3 遍，
+每遍开始前 loadavg ≤ 4（实测 0.22–1.09）。延迟 = 一行最后一键到该版本诊断发布（含客户端
+250 ms Delayer）；「过期」= 开始分析时更新的版本已经发到服务端的那些分析。
+
+| 场景 | 改前：延迟中位 / 最大 | 刀 1：延迟中位 / 最大 | 分析次数（3 遍） | 过期分析 | 回 -32800 |
+|---|---|---|---|---|---|
+| A driver/analyze，vscode-c | 433 / 888 ms | 442 / 465 ms | 35,31,33 → 35,31,33 | 0 → 0 | 0 → 1–3 |
+| A，vscode-qs | 426 / 949 ms | 433 / 479 ms | 46,46,48 → 46,46,48 | 0 → 0 | 0 → 0–1 |
+| T check/types，vscode-c | 863 / 2099 ms | 809 / 1670 ms | 46,55,45 → 38,47,43 | 2–27 → 0 | 0 → 13–25 |
+| T，vscode-qs | **8303 / 10362 ms** | **866 / 1808 ms** | 74,78,82 → 49,52,55 | 70–77 → 0 | 0 → 44–50 |
+
+读法：A 持平（调研模型 R1 之后 0.47 → 0.49 s），中位差 7–9 ms 在遍间噪声内，最大值反而收紧
+（改前那两遍 888/949 ms 是一次过期分析挡在最后一版前面）。T 在每键补全节奏下 8.3 s → 0.87 s，
+与模型的 12.3 s → 0.64 s 同一量级；过期分析从每遍 70 多次降到 0。T 第一行的 1.3–2.1 s 两边都有，
+是那一行的单次分析本身慢（解析失败态的导入者重检，#789 P3），不是调度。
+原始数据：任务 scratchpad 的 `runs/*/rows.json` 与 `bench.log`。
+
+#### lsp-diff
+
+`selfhost-lsp-diff.sh` 只差一处：`messy` 段 formatting（id 161）的回复从 publish 之后挪到
+publish 之前（2 行）。提交带 `Emit-Change(lsp)`。documentSymbol 到达时没有
+pending，字节不变。
+
+#### 刀 2 是条件刀
+
+在模块边界放弃被取代的分析（`driver/incremental.analyze` 加 poll）**不在这一刀**：它要改
+name-reuse 与 #789 P3 正在改的函数和契约文件，而且模型预计 R1 之后它主要省 CPU、几乎不省延迟。
+等那两刀落地后再量一次，过阈值才做。所以 PR 写的是 `Refs #790`。
+
 ### 2.3 缓存留到第二步
 
 `analyze_document` 每次重跑 lex/parse/module graph。缓存它们需要失效判定
@@ -418,6 +536,12 @@ debounce:  FAIL / freshness: FAIL
 
 ## 四、不做的（记录理由）
 
+- **服务端自己回 ContentModified 作废排在改动前面的请求**（clangd 对不发取消的客户端这么做）。
+  LSP 3.17 在 `ContentModified` 的注释里明文不许因未处理消息里的改动发它；VS Code 本来就发取消。
+- **didClose 与前面同 uri 的 didOpen 合并成什么都不做**。会改 publish 序列（lsp-diff 的 `messy`），
+  而 W 类消息几乎不在打字路径上，没有收益。
+- **刀 2（模块边界放弃被取代的分析）放进同一刀**。它改 name-reuse 与 #789 P3 正在改的
+  `incremental.analyze` 和契约文件；R1 之后模型预计它主要省 CPU，等那两刀落地后量过再定。
 - **保留手写 decoder 作为 fallback**。留着它就还得维护它。
   初稿这里的理由是「它的全部价值是『JDK 不在』——JDK 一定在，Dawn 跑在 JVM 上」，
   **那个前提已经被 [`../native-backend-plan.md`](../native-backend-plan.md) 的
@@ -460,7 +584,7 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 | 2b ✅ | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | **已完成**（2026-08-05）。变异体：换回 `fread` 后，6 字节输入读掉 5 字节，就绪查询答 `false`，而第 6 字节确实还在（下一次读拿得到）——正是设计预言的那一格 |
 | 2c ✅ | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io` | **已完成**（2026-08-05）。落地点的实际清单与逐点变异体见 §2.2.1 末；9 处里 1 处是错的、另有 4 处漏记。`intrinsic-parity.py` 不覆盖它 |
 | 2d ✅ | `selfhost/src/lsp/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | **已完成**（2026-08-05）。`lsp-liveness.py` 增两条断言（`debounce` / `freshness`），各有自己的变异体；两个后端的 lsp 转录仍与 v0.50.0 **逐字节相同**。见 §2.2.4 |
-| 3 | `selfhost/src/lsp/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
+| 3 ✅ | `selfhost/src/lsp/server.dawn`：读循环排空、`$/cancelRequest` 回 `RequestCancelled`、按类调度（#790 刀 1） | **已完成**（2026-10-19）。`lsp-liveness.py` 增 `cancel`/`coalesce`/`order` 三条，各被变异体单独打红；VS Code 节奏下 check/types 每键补全 8.3 s → 0.87 s。见 §2.2.5 |
 | 4 ✅ | 实测 debounce 窗口，把 150ms 换成有出处的数字 | **已完成**（2026-10-19）：50 ms，出处与代价见 §七 末条 |
 
 无破坏性变更（LSP 是工具，不是语言表面）。2b/2c 动的是运行时契约与 intrinsic 表，
@@ -529,3 +653,9 @@ Playground 两种客户端各跑一遍，服务端 `-Xss512m -Xmx2g -XX:+UseSeri
 20 ms 下限与窗口之间，60 ms 已越过 50 ms 窗口。诊断延迟的大头不在防抖：解析失败态
 的崩溃（#788）与重渲染（#789 R1）同一 PR 修掉；非 sync 消息强制分析过期态（#790）
 另案。不做自适应防抖（clangd 式）：没有取消机制前，自适应只是在错的地方调参。
+
+**2026-10-19 step 3 落地（#790 刀 1）**：读循环先排空已到达的帧再处理，客户端取消的请求回
+RequestCancelled，formatting/codeAction/documentSymbol 从本版本文本直接答，`$/` 消息不再 flush；
+没取消的语义请求仍按序只分析它前面的文本。设计、三条新断言与四个变异体、前后实测见 §2.2.5。
+lsp 转录只差 `messy` 段 formatting 回复的位置（`Emit-Change(lsp)`）。不回 ContentModified
+（LSP 3.17 明文不许因未处理消息里的改动发它）；模块边界放弃（刀 2）留作条件刀。
