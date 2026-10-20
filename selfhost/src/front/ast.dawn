@@ -659,6 +659,17 @@ pub type Decl =
 
 pub type Module = { decls: List[Decl] }
 
+## What the parser had to repair, beside the tree rather than in it so that no
+## consumer of `Module` changes (docs/parser-recovery-design.md §6).
+##
+## `damaged[i]` belongs to `Module.decls[i]`: a recovery action ran while that
+## declaration was being read, so its tree is the parser's guess and not what
+## the author wrote. `lost` says a declaration was dropped outright, so any
+## name it would have introduced is missing from the tree. The parser records
+## both at the moment it recovers; nothing here is inferred from positions
+## afterwards. A parse with no diagnostics has no damage and loses nothing.
+pub type ParseMarks = { damaged: List[Bool], lost: Bool }
+
 # ---- span accessors ----
 
 pub fn e_lo(e: Expr) -> Int =

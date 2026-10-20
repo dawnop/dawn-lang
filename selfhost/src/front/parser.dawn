@@ -45,7 +45,7 @@ use front/ast.{
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
-  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module, ExampleOf, example_spelling,
+  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module, ParseMarks, ExampleOf, example_spelling,
   Vis, VisPrivate, VisPkg, VisPub,
   e_lo, e_hi, t_hi, pat_lo, pat_hi
 }
@@ -66,7 +66,13 @@ use front/effect_name
 type P = { toks: List[Token], cps: Option[List[Char]] }
 
 ## Scan position plus the diagnostics accumulated so far (the Kotlin sink).
-type St = { pos: Int, diags: List[Diag] }
+##
+## `repairs` counts the recoveries that went on to a tree (a resynced
+## statement or arm, a comma made up, a literal accepted after a complaint).
+## Each recovery adds one at the moment it acts, and `parse_decls` compares the
+## count before and after a declaration, so a declaration's damage is what its
+## own parse did and not a guess from where diagnostics fall (§6).
+type St = { pos: Int, diags: List[Diag], repairs: Int }
 
 alias PR[T] = Result[(St, T), (St, Diag)]
 
@@ -218,13 +224,26 @@ pub fn parse_module(text: String) -> (Module, List[Diag]) = {
 ## that refuses a revision with any diagnostic has therefore also refused
 ## every revision whose token stream is not clean.
 pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List[Token]) = {
+  let (m, ds, cps, toks, _) = parse_marked(text)
+  (m, ds, cps, toks)
+}
+
+## `parse_module` plus what the parser had to repair (`ParseMarks`): the same
+## tree and diagnostics, with a damaged flag for each declaration and a flag
+## for a dropped one (docs/parser-recovery-design.md §6).
+pub fn parse_module_marked(text: String) -> (Module, List[Diag], ParseMarks) = {
+  let (m, ds, _, _, marks) = parse_marked(text)
+  (m, ds, marks)
+}
+
+fn parse_marked(text: String) -> (Module, List[Diag], List[Char], List[Token], ParseMarks) = {
   let (cps, toks, lexds) = lex_cps(text)
   let p = P { toks: toks, cps: Some(cps) }
-  let (decls, ds) = parse_decls(p, lexds)
+  let (decls, ds, marks) = parse_decls(p, lexds)
   # A clean parse has nothing to relocate, so it never pays for the scan, and
   # it never takes the second pass: that pass exists only for a parse that ran
   # off the end of the file inside a bracket.
-  if len(ds) == 0 { return (Module { decls: number_examples(decls) }, ds, cps, toks) }
+  if len(ds) == 0 { return (Module { decls: number_examples(decls) }, ds, cps, toks, marks) }
   let scan = scan_delims(toks, cps)
   let none: List[Closing] = []
   let (plan, pairs) = match scan {
@@ -235,40 +254,99 @@ pub fn parse_module_lexed(text: String) -> (Module, List[Diag], List[Char], List
     }
   }
   if len(plan) == 0 {
-    return (Module { decls: number_examples(decls) }, note_cut_openers(toks, cps, place_unclosed(toks, cps, scan, ds)), cps, toks)
+    return (Module { decls: number_examples(decls) }, note_cut_openers(toks, cps, place_unclosed(toks, cps, scan, ds)), cps, toks, marks)
   }
   # The second pass (docs/parser-recovery-design.md §5'): close each block
   # left open before the next column-0 declaration head and parse again. The
   # tokens handed back are the first pass's, so the closers it made up appear
-  # in no output text.
+  # in no output text. The marks are the second pass's, like the tree they
+  # describe: a declaration that swallowed a made-up closer is damaged there.
   let ptoks = with_closers(toks, plan)
-  let (decls2, ds2) = parse_decls(P { toks: ptoks, cps: Some(cps) }, lexds)
+  let (decls2, ds2, marks2) = parse_decls(P { toks: ptoks, cps: Some(cps) }, lexds)
   let placed = if len(ds2) == 0 { ds2 } else { place_unclosed(ptoks, cps, scan_delims(ptoks, cps), ds2) }
   let mine = list.map(plan, c => closing_diag(toks, cps, pairs, c))
-  (Module { decls: number_examples(decls2) }, note_cut_openers(ptoks, cps, merge_diags(placed, mine)), cps, toks)
+  (Module { decls: number_examples(decls2) }, note_cut_openers(ptoks, cps, merge_diags(placed, mine)), cps, toks, marks2)
 }
 
 ## One pass over a token stream: every top-level declaration, with broken ones
-## reported and skipped, after the diagnostics the lexer left.
-fn parse_decls(p: P, lexds: List[Diag]) -> (List[Decl], List[Diag]) = {
-  var st = St { pos: 0, diags: lexds }
+## reported and skipped, after the diagnostics the lexer left. The marks are
+## taken here, as each declaration is read or given up (§6).
+fn parse_decls(p: P, lexds: List[Diag]) -> (List[Decl], List[Diag], ParseMarks) = {
+  var st = St { pos: 0, diags: lexds, repairs: 0 }
   var decls: List[Decl] = []
+  var damaged: List[Bool] = []
+  var lost = false
   st = skip_nl(p, st)
   while not at_kind(p, st, EOF) {
     match top_decl(p, st) {
       Ok(r) -> {
         let (st2, d) = r
         decls = decls ++ [d]
+        damaged = damaged ++ [decl_damaged(p, st, st2, lexds)]
         st = st2
       }
       Err(fe) -> {
         let (st2, d) = fe
-        st = sync_decl(p, st, St { ..st2, diags: st2.diags ++ [d] })
+        let resumed = sync_decl(p, st, St { ..st2, diags: st2.diags ++ [d] })
+        if drops_decl(p, st, resumed) { lost = true }
+        st = resumed
       }
     }
     st = skip_nl(p, st)
   }
-  (decls, st.diags)
+  (decls, st.diags, ParseMarks { damaged: damaged, lost: lost })
+}
+
+## Whether reading the declaration that spans tokens `[from.pos, to.pos)`
+## involved a repair. Three things count, each one an event the parser or the
+## lexer recorded while it happened: a statement, arm or list recovery bumped
+## `repairs`; the second pass's made-up closer was consumed by this very
+## declaration (the token is looked at, not where it sits); the lexer reported
+## a stray or broken character inside the declaration's own lines, which the
+## token stream no longer shows.
+fn decl_damaged(p: P, from: St, to: St, lexds: List[Diag]) -> Bool =
+  to.repairs > from.repairs || consumed_made_up_closer(p, from.pos, to.pos) ||
+  lexed_with_repair(p, lexds, from.pos, to.pos)
+
+## A zero-width closer is one `with_closers` made up; no source token is empty.
+fn consumed_made_up_closer(p: P, from: Int, to: Int) -> Bool = {
+  var k = from
+  while k < to {
+    let t = p.toks[k]
+    if t.lo == t.hi && is_closer(t.kind) { return true }
+    k = k + 1
+  }
+  false
+}
+
+## The lexer repairs by dropping or replacing text, so it leaves no token to
+## look at; its report is the only trace. A report belongs to the declaration
+## whose lines hold it: from its first token to the line end that closes it.
+fn lexed_with_repair(p: P, lexds: List[Diag], from: Int, to: Int) -> Bool = {
+  if len(lexds) == 0 || to <= from { return false }
+  let lo = p.toks[from].lo
+  let hi = if to < len(p.toks) && p.toks[to].kind == NEWLINE { p.toks[to].lo } else { p.toks[to - 1].hi }
+  for d in lexds {
+    if d.lo >= lo && d.lo < hi { return true }
+  }
+  false
+}
+
+## Whether giving up on the declaration that began at `start` and resuming at
+## `resumed` dropped one. Its own head counts, since a head that failed is a
+## declaration the tree lacks; so does any head in the stretch skipped over.
+## Stray text that is no head drops nothing (`top_decl_error`).
+fn drops_decl(p: P, start: St, resumed: St) -> Bool = {
+  match classify_top_decl(p, start) {
+    Some(_) -> return true
+    None -> ()
+  }
+  var k = start.pos + 1
+  while k < resumed.pos {
+    if starts_top_decl(p, St { ..start, pos: k }) { return true }
+    k = k + 1
+  }
+  false
 }
 
 # ---- unclosed delimiters (#195) ----
@@ -362,7 +440,7 @@ fn closings(p: P, sc: DelimScan) -> List[Closing] = {
   if len(sc.stack) == 0 { return out }
   for h in sc.heads {
     let n = len(h.open)
-    if n > done && is_prefix(h.open, sc.stack) && starts_top_decl(p, St { pos: h.at, diags: [] }) {
+    if n > done && is_prefix(h.open, sc.stack) && starts_top_decl(p, St { pos: h.at, diags: [], repairs: 0 }) {
       out = out ++ [Closing { at: h.at, openers: list.slice(sc.stack, done, n) }]
       done = n
     }
@@ -2986,7 +3064,7 @@ fn header_record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     Ok(r) -> {
       let (st2, e) = r
       let d = pd_h("a record literal here needs parentheses", name.lo, e_hi(e), hint)
-      Ok((St { ..st2, diags: insert_diag(st2.diags, before, d) }, e))
+      Ok((St { ..st2, repairs: st2.repairs + 1, diags: insert_diag(st2.diags, before, d) }, e))
     }
     Err(fe) -> {
       let (st2, d0) = fe
@@ -3013,7 +3091,7 @@ fn starts_next_item(k: TokKind) -> Bool =
 ## The item after it is parsed normally, so later errors in the same
 ## declaration are still found, and the literal still ends at its own closer.
 fn missing_comma(p: P, st: St, close: String, items: String) -> St =
-  St { ..st, diags: st.diags ++ [perr_h(p, st,
+  St { ..st, repairs: st.repairs + 1, diags: st.diags ++ [perr_h(p, st,
     "expected `,` or " ++ close ++ ", found " ++ found_tok(cur(p, st)),
     "a comma is missing between two " ++ items)] }
 
@@ -3117,14 +3195,16 @@ fn starts_field(p: P, st: St) -> Bool = {
 fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
   var parts: List[StrPart] = []
   var diags = st.diags
+  var repairs = st.repairs
   for sg in t.segs {
     match sg {
       SText(v) -> { parts = parts ++ [SPText(v)] }
       SCode(src, o) -> {
         let (subtoks, lexds) = lex_at(src, o)
         diags = diags ++ lexds
+        if len(lexds) > 0 { repairs = repairs + 1 }
         let subp = P { toks: subtoks, cps: None }
-        let sst = St { pos: 0, diags: diags }
+        let sst = St { pos: 0, diags: diags, repairs: repairs }
         match expression(subp, sst, false) {
           Err(fe) -> {
             let (fst, d) = fe
@@ -3138,13 +3218,14 @@ fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
                 perr(subp, sst3, "trailing content in interpolation")))
             }
             diags = sst3.diags
+            repairs = sst3.repairs
             parts = parts ++ [SPInterp(e)]
           }
         }
       }
     }
   }
-  Ok((St { ..st, diags: diags }, EStr(parts, t.lo, t.hi)))
+  Ok((St { ..st, diags: diags, repairs: repairs }, EStr(parts, t.lo, t.hi)))
 }
 
 ## `( name [: type] , ... )`, the parameter list both lambda spellings share.
@@ -3804,7 +3885,7 @@ fn assign_target_error(p: P, st: St, target: Expr) -> Diag = {
 ## is the enclosing block's. A scan that runs into EOF falls back to the old
 ## rule, so one really unclosed `{` does not swallow the rest of the file.
 fn sync_stmt(p: P, start: St, failed: St) -> St = {
-  var s = St { pos: start.pos, diags: failed.diags }
+  var s = St { pos: start.pos, diags: failed.diags, repairs: failed.repairs + 1 }
   var parens = 0
   var brackets = 0
   var braces = 0
@@ -3847,7 +3928,7 @@ fn sync_line(p: P, st: St) -> St = {
 ## separate arms outside every nested delimiter; an unmatched top-level `}` is
 ## the current match's close and must stop recovery before a later declaration.
 fn sync_arm(p: P, start: St, failed: St) -> St = {
-  var s = St { pos: start.pos, diags: failed.diags }
+  var s = St { pos: start.pos, diags: failed.diags, repairs: failed.repairs + 1 }
   var parens = 0
   var brackets = 0
   var braces = 0

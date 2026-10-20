@@ -103,6 +103,31 @@ for f in "$here"/reject/*.dawn; do
   fi
 done
 
+# The parser's repair marks (docs/parser-recovery-design.md section 6): a file
+# that parses cleanly was never repaired, and a rejected one was repaired or
+# lost something. `__marks` prints one line per file, so one call covers each
+# directory.
+marks_clean='damaged=	lost=false'
+shopt -s nullglob
+acc=("$here"/accept/*.dawn)
+rej=("$here"/reject/*.dawn)
+shopt -u nullglob
+if [ "${#acc[@]}" -gt 0 ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *"$marks_clean") ;;
+      *) echo "FAIL accept ${line%%	*} carries a repair mark: ${line#*	}" >&2; fail=1 ;;
+    esac
+  done < <(./bin/dawn __marks "${acc[@]}" 2>&1)
+fi
+if [ "${#rej[@]}" -gt 0 ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *"$marks_clean") echo "FAIL reject ${line%%	*} carries no repair mark" >&2; fail=1 ;;
+    esac
+  done < <(./bin/dawn __marks "${rej[@]}" 2>&1)
+fi
+
 if [ "$fail" != 0 ]; then
   echo "FAIL: grammar corpus" >&2
   exit 1

@@ -2,6 +2,7 @@
 
 > 状态：**current**。2026-09-30，诊断批 P1，issue #190 #192 #193 #195（第 1 步），分支 `fix/diag-parser-recovery`。
 > 2026-10-20 追加 §5′（两段式重解析，#789 残差），分支 `front/two-pass-recovery`。
+> 2026-10-20 追加 §6（受损与丢失标记，解析错误线刀 1），分支 `front/damage-marks`。
 > 裁决与其它语言实例见调研报告 `research-diagnostics-issues-20260930.md` §3 §5 §6 §7（不在仓内）；本文记做法、取舍与负控；四刀均已实现（提交见文末）。
 
 只动 `selfhost/src/front/parser.dawn` 与 `scripts/grammar-corpus/`。只改**无效输入**的诊断：
@@ -124,6 +125,64 @@ LSP 打字回放里，这一类是 #789 在 P3（#799）之后的全部残差：
 **代价**：干净的解析一分不付；有诊断但不进第二趟的多一次配对预扫（§5 本来就扫，现在并成一次）。
 进第二趟的多一次整文件解析（不重新 lex），实测见文末「落地」。
 
+## 6. 受损与丢失标记（解析错误线刀 1，2026-10-20）
+
+动机：裁决 `ruling-parse-error-bodies-20261020` 采 B，解析出错的模块只检查**未受损**声明的函数体。
+判断「哪些声明受损」不能靠位置：§5′ 补的闭括号是零宽 token，`lo = hi =` 下一个声明头的起点，
+「声明的 span 触到恢复位置就算受损」会把紧跟其后的那个完好声明误判成受损。所以由解析器在恢复动作发生的那一刻
+记到当前声明上，本刀只产出标记，**不改 `analyze` 检查什么**（那是刀 2）。
+
+**定义**
+
+- **受损（damaged）**：声明的范围内发生过恢复，因而它的树是解析器的猜测而不是作者写的。包括
+  - 第二趟补的合成闭括号被这个声明消费了（§5′）；
+  - 语句级同步（`sync_stmt`）、match 臂同步（`sync_arm`）；
+  - 表达式级恢复：就地补的逗号（`missing_comma`）、报错后照记录字面量解析的头部字面量（`header_record_lit`）、
+    字符串插值里 lexer 报了错；
+  - lexer 丢弃或替换了声明所在行里的字符（stray 字符、坏字面量），token 流里已看不出，只剩它的报告。
+- **丢失（lost）**：`sync_decl` 放弃的那段源码里本来有声明头，即树里缺了一个本该有的声明，它引入的名字不在了。
+  放弃点自己的头（失败的那个声明）也算；落在顶层的杂散文本（`top_decl_error`，不是声明头）不算。
+  `lost` 是模块级一个布尔，丢了的声明没有树，无处可挂声明级标记。
+
+**记在哪里**：`ast.dawn` 的旁表 `ParseMarks = { damaged: List[Bool], lost: Bool }`，`damaged[i]` 对应 `Module.decls[i]`。
+旁表不放进 `Module`：`Module { decls }` 在 checker 测试与 `apply_rewrites` 里被构造二十来处，
+放进去要动所有消费者，而本刀的要求是合法程序的其它字段一概不变。`parse_module_marked` 返回它，
+`parse_module` / `parse_module_lexed` 的签名不变。`astdump` 不输出标记，所以 `__parse` 的字节不变，不需要 `Emit-Change`。
+
+**机制**（都是恢复动作发生时记下的事件，不是事后比对位置）
+
+- 解析状态 `St` 多一个计数 `repairs`：`sync_stmt`、`sync_arm`、`missing_comma`、`header_record_lit` 成功分支、
+  插值里 lexer 有报告时各加一。`parse_decls` 读完一个声明后比较它开始前后的计数，不同就受损。
+  计数随状态流动，被丢弃的试探分支的状态连同计数一起丢弃。
+- 合成闭括号：看这个声明**消费的 token** 里有没有零宽闭括号（`lo == hi` 且是闭括号，源码里没有空 token）。
+  它是看 token 的身份，不是看它在哪里，所以紧跟其后的声明头不受牵连。标记取第二趟的，和第二趟的树配套。
+- lexer 的恢复：lexer 丢字符，没有 token 可看，只能用它的报告。报告归属于其位置落在声明首 token 到收尾换行之间的那个声明。
+  这是唯一用到位置的一条，因为 lexer 报告的 span 是真实源码、边界没有零宽歧义。
+- 丢失：`parse_decls` 在 `Err` 分支调用 `sync_decl` 之后，检查放弃的起点是不是声明头（`classify_top_decl`），
+  以及被跳过的 token 里有没有 `starts_top_decl`。
+
+**合法程序**：没有诊断就没有恢复动作，计数不动、没有合成 token、lexer 没报告，标记按构造全是不受损、不丢失；
+`parse_module_marked` 的测试与全仓扫描（含 grammar-corpus 的 accept）实测印证。
+
+**别人怎么做的**
+
+- rustc：解析器恢复出的块带标记，类型检查不拿恢复出的块的类型去和期望类型比较，不报级联类型错
+  （rust-lang/rust#46732 *Do not emit type errors on recovered blocks*，https://github.com/rust-lang/rust/pull/46732 ；
+  解析错误可恢复、继续后续阶段见 #56220）。标记来自解析器的恢复动作，粒度是被恢复的那一块，与本节一致；
+  Dawn 的粒度放大到声明，因为声明是 checker 的检查单位。
+- rust-analyzer：`full_diagnostics` 把语法诊断和语义诊断无条件拼接，推断里用 `TyKind::Error` 吸收，`has_errors` 记一个标记
+  （`crates/ide-diagnostics/src/lib.rs`、`crates/hir-ty/src/infer.rs`）。它没有按声明打受损标记，靠缺失节点的错误类型传播压级联；
+  Dawn 没有缺失节点那一套，所以采用 rustc 的「标记先行」做法。
+
+### 不做的（理由）
+
+- **按位置判受损**（声明的 span 触到恢复位置就算）：零宽合成闭括号会把下一个声明误判成受损；测试 `the declaration right after a made-up closer is not damaged by it` 与负控锁住这条。
+- **把标记放进 `Module` 或 `Decl`**：要改所有构造点与消费者，而本刀不该动其它字段；旁表够用，刀 2 的 `analyze` 按下标取。
+- **`astdump` 输出标记**：会改 `__parse` 的输出，要写 `Emit-Change`，而标记已有 `__marks` 和单测观察。
+- **在本刀改 `analyze` 的检查范围**：刀 2。
+- **记录恢复的种类或位置**：刀 2 只需要布尔；种类留给有人要的时候再加。
+- **`lost` 做成按声明**：丢了的声明没有树，无处可挂；刀 2 只需要「模块里丢过声明」这一位。
+
 ## 验证
 
 grammar-corpus 每个 issue ≥2 个 reject 用例，钉诊断序列；负控是把对应的恢复分支去掉，用例须红。
@@ -154,6 +213,7 @@ grammar-corpus 每个 issue ≥2 个 reject 用例，钉诊断序列；负控是
 | #193 | `Name index assignment and a stray range instead of asking for a newline` | 两个新分支加 `false &&`：`assign_index_or_field`、`range_as_expression` 红（回到通用分隔符文案） |
 | #195 | `Report an unclosed delimiter at its opener` | 跳过重定位：三个 `unclosed_*` 红（回到 `found <eof>`，或 `[` 那条消失）；关掉缩进启发：两个缩进例红（改点名最内层未闭合者） |
 | #789 残差（§5′） | `Close blocks left open before the next declaration and parse again` | 去掉第二趟：parser_test 四条新测试与 `unclosed_brace_earlier_decl`、`unclosed_brace_swallowed_decls`、`unclosed_brace_typing_midway` 红；换成单趟规则（`block_body` 遇列 0 声明头即停）：「块里列 0 局部 `fn`」的合法程序报错，连带四个 reject 例红 |
+| 解析错误线刀 1（§6） | `Mark each declaration the parser repaired and whether one was dropped` | 改成按位置判（声明 span 触到恢复位置即受损）：`the declaration right after a made-up closer is not damaged by it` 等红；`repairs` 不再递增：语句、臂、逗号三条红 |
 
 ### §5′ 的实测（2026-10-20，本机，loadavg 守卫 ≤ 4）
 

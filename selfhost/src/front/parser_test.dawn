@@ -5,7 +5,7 @@
 
 use std/str
 use std/list
-use front/parser.{parse_module}
+use front/parser.{parse_module, parse_module_marked}
 use front/astdump.{render_module}
 use front/ast.{
   Expr, EInt, EVar, EApply, EMethod, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
@@ -2108,4 +2108,132 @@ test "an opener after the last declaration head gets no made-up closer" {
   assert len(ds) == 1
   assert ds[0].msg == "unclosed `{`"
   assert ds[0].notes[len(ds[0].notes) - 1].msg == "expected `}` before the end of the file"
+}
+
+# ---- damage marks (docs/parser-recovery-design.md §6) ----
+
+## The names of the declarations the parse kept, the damaged flags beside them
+## and the lost flag, for a source.
+fn marks_of(src: String) -> (List[String], List[Bool], Bool) = {
+  let (_, _, marks) = parse_module_marked(src)
+  (decl_names(src), marks.damaged, marks.lost)
+}
+
+test "a block closed by the second pass is damaged and its neighbours are not (#789)" {
+  let src = "pub fn a() -> List[Int] = {\n  var out: List[Int] = []\n  for x in xs {\n    out = out ++ [x]\n  \n  out\n}\n\n## Doc.\npub fn b() -> Int = 1\n\nfn c() -> Int = 2\n\ntest \"t\" {\n  assert c() == 2\n}\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b", "c", "t"]
+  assert damaged == [true, false, false, false]
+  assert not lost
+}
+
+test "the declaration right after a made-up closer is not damaged by it" {
+  # the closer is zero-width and sits exactly where `fn b` begins, so a mark
+  # read off positions (does the span reach the recovery point?) would flag
+  # `b` too; the mark is set by the declaration that consumed the closer
+  let src = "fn a() -> Int = {\n  if x {\n    1\n}\nfn b() -> Int = 2\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b"]
+  assert damaged == [true, false]
+  assert not lost
+}
+
+test "two blocks left open damage two declarations and spare the one between" {
+  let src = "fn a() -> Int = {\n  if x {\n    1\nfn b() -> Int = 2\n\nfn c() -> Int = {\n  if y {\n    3\nfn d() -> Int = 4\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b", "c", "d"]
+  assert damaged == [true, false, true, false]
+  assert not lost
+}
+
+test "an opener after the last declaration head damages nothing it did not touch" {
+  # no recovery point, so no closer is made up and the tail is dropped whole
+  let src = "fn a() -> Int = 1\nfn b() -> Int = {\n  if x {\n    1\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a"]
+  assert damaged == [false]
+  assert lost
+}
+
+test "a statement that is resynced damages only its own declaration" {
+  let src = "fn a() -> Int = 1\n\nfn b() -> Int = {\n  let = 5\n  3\n}\n\nfn c() -> Int = 2\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b", "c"]
+  assert damaged == [false, true, false]
+  assert not lost
+}
+
+test "a match arm that is resynced damages its declaration" {
+  let src = "fn a(x: Int) -> Int = match x {\n  0 -> 1\n  ) -> 2\n  _ -> 3\n}\n\nfn b() -> Int = 2\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b"]
+  assert damaged == [true, false]
+  assert not lost
+}
+
+test "a comma made up between two items damages its declaration" {
+  let src = "fn a() -> Int = f(1 2)\n\nfn b() -> Int = 2\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b"]
+  assert damaged == [true, false]
+  assert not lost
+}
+
+test "a character the lexer dropped damages the declaration whose line held it" {
+  let src = "fn a() -> Int = 1\nfn b() -> Int = 2 @\nfn c() -> Int = 3\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "b", "c"]
+  assert damaged == [false, true, false]
+  assert not lost
+}
+
+test "a declaration skipped by the declaration resync marks the module lost" {
+  let src = "fn a() -> Int = 1\nfn broken( = 0\nfn c() -> Int = 3\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "c"]
+  assert damaged == [false, false]
+  assert lost
+}
+
+test "a public head that fails is lost, and the declarations around it are sound" {
+  let src = "fn a() -> Int = 1\n\npub 5\n\nfn c() -> Int = 3\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "c"]
+  assert damaged == [false, false]
+  assert lost
+}
+
+test "stray text at the top level drops no declaration" {
+  let src = "fn a() -> Int = 1\nlet x = 1\nfn c() -> Int = 3\n"
+  let (names, damaged, lost) = marks_of(src)
+  assert names == ["a", "c"]
+  assert damaged == [false, false]
+  assert not lost
+}
+
+test "a parse with no diagnostics is never damaged and never loses anything" {
+  let sources = [
+    "",
+    "fn a() -> Int = 1\n",
+    "fn a() -> Int = {\n  let k = 1\nfn inner() -> Int = 2\n  inner() + k\n}\nfn b() -> Int = 3\n",
+    "type T = | A | B\n\nfn f(t: T) -> Int = match t {\n  A -> 1\n  B -> 2\n}\n\ntest \"t\" {\n  assert f(A) == 1\n}\n",
+    "fn a() -> String = \"x ${1 + 2} y\"\n"
+  ]
+  for src in sources {
+    let (_, ds, marks) = parse_module_marked(src)
+    assert len(ds) == 0
+    assert not marks.lost
+    for d in marks.damaged { assert not d }
+  }
+}
+
+test "marks run beside the declarations, one for each" {
+  for src in [
+    "fn a() -> Int = {\n  if x {\n    1\nfn b() -> Int = 2\n",
+    "fn a() -> Int = 1\nfn broken( = 0\nfn c() -> Int = 3\n",
+    "fn a() -> Int = {\n  let = 5\n  3\n}\n"
+  ] {
+    let (m, _, marks) = parse_module_marked(src)
+    assert len(marks.damaged) == len(m.decls)
+  }
 }

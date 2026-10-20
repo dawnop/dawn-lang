@@ -2664,6 +2664,24 @@ fn dispatch() -> Unit !Fs !Proc !Env !Exit !Console !io = {
             Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e.message)
           }
         }
+      } else if mode == "__marks" {
+        # what the parser repaired, one line per file: the damaged declaration
+        # indexes and whether one was dropped (docs/parser-recovery-design.md §6)
+        for pth in rest {
+          match io.read_file(pth) {
+            Ok(text) -> {
+              let (_, _, marks) = parser.parse_module_marked(text)
+              var hit: List[String] = []
+              var i = 0
+              for d in marks.damaged {
+                if d { hit = hit ++ [to_string(i)] }
+                i = i + 1
+              }
+              console_println(pth ++ "\tdamaged=" ++ join(hit, ",") ++ "\tlost=" ++ to_string(marks.lost))
+            }
+            Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e.message)
+          }
+        }
       } else if mode == "version" {
         run_version(rest)
       } else if mode == "--version" || mode == "-V" {
