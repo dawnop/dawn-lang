@@ -1,0 +1,140 @@
+# Where an error comes from
+
+A kernel meets four checkers on its way to a GPU, and each speaks differently.
+Knowing which one spoke is most of the fix.
+
+| Layer | When it runs | What it looks like | The usual fix |
+|---|---|---|---|
+| **type check** | `dawn check`, `dawn run`, the editor; before anything executes | a compiler error with a source position | change the type: the format, the effect or the argument is wrong |
+| **record** | while `trace1` to `trace5` or `trace_kernel` runs your kernel body once | a panic `tileir: kernel `name`: op #N `op`: ...` | the kernel asks for something the shapes or roles cannot give; change the call it names |
+| **emit** | `render`, `encode`, `lower`, then `tileiras` | a panic `tileir: ...` with no kernel name, or `tileiras` refusing the bytes | usually a view or a region whose parts disagree; occasionally a defect in the assembler |
+| **device** | the host program, on the fake device or a real one | an `Err(ForeignError)` whose `kind` is `gpu.*` or `cuda.*` | the host call, the launch geometry or the machine; the kind says which |
+
+The order is also the order of cost. A mistake the type checker can see never
+reaches the recorder, and one the recorder can see never reaches `tileiras`,
+whose verifier answers in terms of the bytecode and not of your Dawn.
+
+## Type check
+
+The format of a buffer is in its type, so a kernel, its entry and the host
+buffers it is launched over are held to one another by the compiler. Real
+messages, from a file that gets each wrong:
+
+```
+error: `no_effect` uses the effect `Dev`, but its signature does not declare !Dev
+error: argument type mismatch: expected fn(Param[F32], Param[Float], Param[Float]) -> Unit !Dev, got fn(Param[Float], Param[Float], Param[Float]) -> Unit !Dev
+error: argument type mismatch: expected DeviceBuffer[Float], got DeviceBuffer[F32]
+```
+
+The second is `trace3("vadd", In(F32, g), In(F64, g), Out(F64, g), vadd)` with
+a `vadd` written over `Param[Float]`: the marker says f32 and the kernel says
+f64. The third is a `DeviceBuffer[F32]` handed to a `launch_entry3` whose entry
+was recorded over f64 parameters. Mixing two formats in one element-wise
+operation (`add(load_cell(a), load_cell(b))` over a `Param[Float]` and a
+`Param[F32]`) is the same error, at the call.
+
+| Fragment of the message | Layer | Cause | Fix |
+|---|---|---|---|
+| `its signature does not declare` | type check | a function calls `load_cell`, `add` or any other `Dev` function without `!Dev` in its signature | add `!Dev`; a kernel body is a function whose only effect is `Dev` |
+| `argument type mismatch` | type check | a format, a role or an arity differs between a marker, the kernel's `Param[..]` and a host `DeviceBuffer[..]` | make the three agree; the message prints both types |
+
+## Record
+
+`trace1` to `trace5` run the kernel body once under a handler that writes every
+operation down, and that handler holds each operation to the shapes and
+formats of its operands, to the role of each parameter and to the cells that
+cut it. A refusal is a panic that names the kernel and, for an operation, its
+number (`MakeToken` is `#0`, then in the order recorded) and its dialect name.
+Real messages:
+
+```
+tileir: kernel `shapes_differ`: op #6 `addf`: rhs is tile<64xf64>, declared tile<128xf64> at tileir/prog.dawn:339:3
+tileir: kernel `write_in`: op #10 `store_cell`: parameter 0 is an In, and nothing writes an In at tileir/prog.dawn:339:3
+tileir: kernel `not_pow2`: every tile dimension is a power of two, got 100 in [100] at tileir/prog.dawn:339:3
+tileir: kernel `pointer_store`: op #5 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared at tileir/prog.dawn:339:3
+```
+
+The trailing position is the library's own line (the `panic` inside
+`refuse`), not a line of your kernel: a Dawn panic carries the position of its
+raise. The kernel name says which function, the operation name which call in
+it; `op #N` counts operations, so a run of `load`s and `add`s is a few numbers
+long and the one named is the one to look at. The recorder has no codes, only
+messages, and they are free text, so the rows below are keyed by a fragment of
+the message and not by a code.
+
+| Fragment of the message | Layer | Cause | Fix |
+|---|---|---|---|
+| `, declared ` | record | an element-wise operation, a product or a store met an operand whose format or shape is not the one the operation (or the first operand) fixed | line the shapes up with `broadcast`, `reshape` or a `keepdims` reduction, or fix the load that made the odd one |
+| `nothing writes an In` | record | a store into a parameter whose marker is `In` | make the marker `Out` (written one cell per block) or `Shared` (the escape hatch for atomics and scatters) |
+| `which is written through its cells alone` | record | `store`, `scatter`, an atomic or `store_view` into an `Out` | write the cell with `store_cell` or `store_sub`, or mark the parameter `Shared` |
+| `every tile dimension is a power of two` | record | a tile, a cell or a view with a dimension that is not 1, 2, 4, 8, ... | cut the tensor into power-of-two tiles and let the tail be padding or a mask |
+| `loops nest deeper than` | record | a body that recurses through `d_range` or `d_loop` unrolls forever | make the recursion a loop; the bound is `MAX_LOOP_DEPTH` |
+
+## Emit
+
+`render` and `encode` first lower the record (`lower`), then print it as
+`cuda_tile` text or write it as bytecode. This layer checks what only the
+whole record can show: that a view's parts agree with the tensor under it,
+that a region ends in the right terminator, that a format has an encoding.
+Its panics have no kernel name, because by now the program is a value and not
+a running kernel. A real one, from a partition view whose `dim_map` names a
+dimension the tensor does not have, which the recorder accepts:
+
+```
+tileir: dim_map sends a tile dimension to tensor view dimension 3, which is outside 0 to 0 at tileir/lower.dawn:549:16
+```
+
+| Fragment of the message | Layer | Cause | Fix |
+|---|---|---|---|
+| `dim_map sends a tile dimension to tensor view dimension` | emit | a `partition_view` or `strided_view` maps a tile dimension to a dimension the tensor view does not have | give the view the dimensions of the tensor, or fix the map |
+| `expected tensor_view rank and tile rank to match` | emit | a `partition_view` whose tile has more or fewer dimensions than the tensor view under it | cut the tile with the tensor's rank |
+| `load_view promises inbounds over a view with padding` | emit | `inbounds: [true]` on a view that has a padding value, which `tileiras` refuses without saying why | drop the promise, or cut the view with `NoPadding` |
+
+Past the emitter is `tileiras`, which reads the bytecode and answers in the
+dialect's terms. Its verifier refuses a program the recorder let through (a
+format an architecture does not have, say) and it prints the dialect's own
+sentence. Handed bytes that are not Tile IR at all, it says
+`error: input does not correspond to Tile IR bytecode` and exits 3. A cubin
+that assembles and computes the wrong thing is not an error at any layer; the
+one such case this package knows is a defect of one assembler version on some
+targets, which `asm.assembler_defect` names (see
+"Assembling with tileiras" in [README.md](README.md)).
+
+## Device
+
+The host side is `std/gpu`: every operation answers `Result[_, ForeignError]`,
+and the `kind` is one of the rows below. Most are raised **above the effect**,
+before any handler is asked, so the fake and the real device refuse them in
+the same words; the rest are a handler's. A `cuda.*` kind is the CUDA driver's
+own `CUresult` name, passed through unchanged (`cuda.CUDA_ERROR_NOT_FOUND`
+for a global a module does not export).
+
+A real one, from launching an entry whose Out cells make two blocks with a
+grid of three:
+
+```
+gpu.grid_mismatch: gpu.launch_entry: kernel `vadd`: the Out cells make 2 block(s) along axis 0 and the launch asks for 3
+```
+
+| Kind | Layer | Raised by, and why | Fix |
+|---|---|---|---|
+| `gpu.bad_length` | device | above the effect: `alloc` of a buffer with fewer than one element | allocate at least one element |
+| `gpu.length_mismatch` | device | above the effect: `copy_from_host` of a list whose length is not the buffer's; also a raw upload of the wrong number of bytes | upload exactly as many elements as the buffer holds |
+| `gpu.unsupported_dtype` | device | a handler at `alloc`, or above the effect when a typed copy names a format that is not a buffer format: the device does not move that format (the message lists the ones it does) | use a listed format, or convert on the host |
+| `gpu.bad_grid` | device | above the effect: a grid axis below one or above CUDA's limit, more than three axes, or a launch with a dynamic Out extent that did not name its grid | pass `grid:` with the block counts; check the limits |
+| `gpu.grid_mismatch` | device | above the effect: the grid passed, or an In's cells, disagree with the Out cells that fix the grid | drop `grid:` when the Out cells fix it, or make the cells agree |
+| `gpu.bad_entry` | device | above the effect: an entry whose cells are malformed, or an argument of the wrong kind (a `scalar_arg` where the kernel reads a buffer) | record the kernel with `traceN` and pass what its markers say |
+| `gpu.aliased_argument` | device | above the effect: an `Out` or `Shared` argument is the same buffer as another argument | allocate a buffer for the output |
+| `gpu.short_tensor` | device | above the effect: a buffer holds fewer elements than its cells reach | allocate (or upload) the full extent |
+| `gpu.no_such_buffer` | device | a handler: a handle that was never issued or was freed | do not use a buffer after `free` |
+| `gpu.no_kernel` | device | a handler: no kernel of that name (the fake device has the map it was given, the real one the cubins) | register the kernel under the name you launch |
+| `gpu.no_arguments` | device | a handler: a launch with no buffers | pass the kernel's arguments |
+| `gpu.bad_arity` | device | the fake device: the reference registered for the kernel wants another number of buffers | launch with the buffers the reference takes |
+| `gpu.bad_write_back` | device | the fake device: the reference writes back to an argument position the launch does not have | register the reference with a position the launch has |
+| `gpu.fake_inexact` | device | the fake device: an i64 buffer holds a value a `Float` cannot carry exactly, and the reference sees Floats | keep the values within 2^53, or test on a real device |
+| `gpu.no_module_symbol` | device | the fake device: the kernel's module exports no global of that name (a `private` global is not exported) | declare the global public, or look up another name |
+| `gpu.bad_global_dtype` | device | a handler: the global was already looked up as another format | read one global in one format |
+| `gpu.bad_global_size` | device | the real device: the global's byte size is not a whole number of elements of the format asked for | ask for the format it was declared with |
+| `gpu.no_driver` | device | the real device: there is no `libcuda` to load | run on a machine with an NVIDIA driver, or use the fake device |
+| `gpu.unsupported_backend` | device | any operation of the real device on a backend with no device runtime: the JVM, and WebAssembly | build with the C backend (`dawnc build`) |
+| `cuda.CUDA_ERROR_NOT_FOUND` | device | the driver, unchanged. One example of a family: `cuda.` followed by the `CUresult` name, for everything the driver refuses; this one is a global a module does not export | read the CUDA driver documentation for the name |

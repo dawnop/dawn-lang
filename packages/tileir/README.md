@@ -125,6 +125,9 @@ let bytes = encode(prog)    # bytecode for tileiras
 | `asm` | `tileiras_args(version, gpu_name)`, `assembler_defect(version, gpu_name)`: how to call `tileiras` (see below) |
 
 The full public surface is what `./bin/dawn doc packages/tileir` prints.
+[OPERATIONS.md](OPERATIONS.md) says which `cuda_tile` operation each function
+records, and [ERRORS.md](ERRORS.md) which of four layers an error comes from,
+what it looks like and how to fix it. Both are checked against the source.
 
 ## Parameters and cells
 
@@ -316,6 +319,8 @@ and same-rank rules), as is the `k` of `mma`, `mma_scaled` and `mmai` and the fo
 while the kernel records, naming the operation by its depth-first number in
 `TileProg.ops` (`MakeToken(0)` is #0), for example:
 ``tileir: kernel `vadd_half`: op #6 `addf`: rhs is tile<128xf64>, declared tile<64xf64>``.
+[ERRORS.md](ERRORS.md) sorts these messages, the compiler's and the device's
+into four layers, with the fix for each.
 
 ## Assembling with tileiras (#558)
 

@@ -31,12 +31,18 @@ it, so the completeness of the 105 rows is pinned another way: the frozen
 codes are 0x00 to 0x7A with two frozen gaps, and the set of codes here has
 to be exactly that. A dropped row leaves a hole, and a hole is red.
 
+Beside the ledgers it runs scripts/tileir-docs/check.py (and its self-test
+under --self-test): the function-to-operation table, the error table and the
+README's first example of packages/tileir, which are text files held to the
+same source in the same way.
+
 What it does not check: that an opcode is emitted CORRECTLY. That is what
 the layers themselves are for, and the evidence column names them.
 """
 
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -1237,9 +1243,21 @@ TABLES = (
 )
 
 
+DOCS_CHECK = ROOT / "scripts" / "tileir-docs" / "check.py"
+
+
+def docs_check(extra):
+    """The reference tables of packages/tileir (OPERATIONS.md, ERRORS.md and the
+    README's first example) are held to the source by their own script. It runs
+    from here, and not as a step of its own, so that the one CI step that reads
+    these text files has one command and the job that carries it keeps the
+    `run:` text its budget line was observed under."""
+    return subprocess.run([sys.executable, str(DOCS_CHECK), *extra]).returncode
+
+
 def main(argv):
     if argv[1:] == ["--self-test"]:
-        return self_test()
+        return self_test() or docs_check(["--self-test"])
     if argv[1:]:
         print(__doc__, file=sys.stderr)
         return 2
@@ -1260,7 +1278,7 @@ def main(argv):
         kinds = " ".join(f"{s}={counts[s]}" for s in STATUSES if counts[s])
         print(f"PASS  tileir {table.name}: {sum(counts.values())} {table.unit}(s): "
               f"{kinds}; {hist}")
-    return 0
+    return docs_check([])
 
 
 if __name__ == "__main__":
