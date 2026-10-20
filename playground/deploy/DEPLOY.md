@@ -363,6 +363,27 @@ artifact (`bin/dawnc version`, or the `.dawn-version` marker in the site
 tree) and is `unknown` when it cannot be read. The newest 3 of each kind are
 kept; older ones are removed by exact name, nothing else is touched.
 
+A failed deploy that you run again does not take another copy. Each copy
+leaves `.deploy-pending-<runner|site>` beside it, naming the copy and the
+deploy's commit (`DAWN_DEPLOY_COMMIT`), and the deploy removes that marker
+only once it has finished (for the runner, after the swapped-in binary passed
+its check; for the site, after the rsync). A rerun that finds the marker for
+the same commit, with its copy still there, keeps that copy and copies
+nothing: what is live then is part old release, part new, and the copy from
+the first attempt is still the exact state before the deploy began. This is
+why: on v0.95.0 the runner deploy failed three times, each attempt copied the
+tree it found, and rotation removed the 0.91.0, 0.92.0 and 0.93.0 copies to
+keep two of the half-deployed state (labelled 0.95.0, because the first
+attempt had already replaced `bin/dawnc`), leaving one clean rollback point.
+Of the alternatives, counting distinct versions instead of runs would still
+have kept the mislabelled half-deployed copies and dropped clean ones, and
+marking them partial afterwards needs the same "did it finish" signal this
+marker already is. A different commit, or a marker whose copy is gone, takes
+a fresh copy as usual. If the closing step cannot remove the marker the
+deploy prints a warning; remove it by hand
+(`rm /opt/dawn/.deploy-pending-runner`), or a later rerun of that same commit
+would keep the older copy instead of copying the finished one.
+
 The copy fails closed: if it cannot be made (no room, a copy error), the
 deploy stops before the first rsync and nothing on the server has changed.
 `DAWN_DEPLOY_NO_BACKUP=1` skips it and prints a warning; use it only when the

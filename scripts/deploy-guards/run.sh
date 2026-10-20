@@ -270,13 +270,35 @@ c_p_backup_first()  { mkrepo play; GOODNATIVE; deploy play; shipped && backup_be
 c_p_backup_closed() { mkrepo play; GOODNATIVE; deploy play SSH_FAIL='bash -s --'; refused 'could not make a rollback copy' '^rsync'; }
 c_p_backup_escape() {
   mkrepo play; GOODNATIVE; deploy play DAWN_DEPLOY_NO_BACKUP=1 SSH_FAIL='bash -s --'
-  shipped && ! grep -q 'bash -s --' "$LOG" && grep -q 'deploying without a rollback copy' "$ERR"
+  shipped && ! grep -qE 'bash -s -- [^-]' "$LOG" && grep -q 'deploying without a rollback copy' "$ERR"
 }
 c_s_backup_first()  { mkrepo site; deploy site; shipped && backup_before_rsync site; }
 c_s_backup_closed() { mkrepo site; deploy site SSH_FAIL='bash -s --'; refused 'could not make a rollback copy' '^rsync'; }
 c_s_backup_escape() {
   mkrepo site; deploy site DAWN_DEPLOY_NO_BACKUP=1 SSH_FAIL='bash -s --'
-  shipped && ! grep -q 'bash -s --' "$LOG" && grep -q 'deploying without a rollback copy' "$ERR"
+  shipped && ! grep -qE 'bash -s -- [^-]' "$LOG" && grep -q 'deploying without a rollback copy' "$ERR"
+}
+# A finished deploy says so (--done), after what it ships is live: the swap
+# check for the runner, the rsync for the site. A deploy that stops before
+# that must not, or its rerun would copy the half-deployed tree.
+DONECALL='^ssh .*bash -s -- --done '
+c_p_done_last() {
+  mkrepo play; GOODNATIVE; deploy play; shipped || return 1
+  local d w
+  d="$(grep -nE -- "$DONECALL/opt/dawn runner\$" "$LOG" | head -1 | cut -d: -f1)"
+  w="$(grep -nF -- '--live' "$LOG" | tail -1 | cut -d: -f1)"
+  [ -n "$d" ] && [ -n "$w" ] && [ "$d" -gt "$w" ]
+}
+c_p_no_done_on_fail() {
+  mkrepo play; GOODNATIVE; deploy play SSH_FAIL='canary-check'
+  refused 'runner canary failed its check' "$DONECALL"
+}
+c_s_done_last() {
+  mkrepo site; deploy site; shipped || return 1
+  local d r
+  d="$(grep -nE -- "$DONECALL/opt/dawn site\$" "$LOG" | head -1 | cut -d: -f1)"
+  r="$(grep -n '^rsync' "$LOG" | tail -1 | cut -d: -f1)"
+  [ -n "$d" ] && [ -n "$r" ] && [ "$d" -gt "$r" ]
 }
 # The site's live version is read from a marker the deploy ships in the tree.
 c_s_backup_marker() { mkrepo site; deploy site; shipped && [ "$(cat "$R/site/dist/.dawn-version")" = 9.9.9 ]; }
@@ -295,7 +317,12 @@ bk_setup() {
 bk() {
   local tag="$1" spec="$2"; shift 2
   env -i PATH="${BK_PATH:-/usr/bin:/bin}" HOME="$work/home" LIVE_VER="${LIVE_VER:-}" \
-    DEPLOY_BACKUP_STAMP="${STAMP:-}" bash "$R/scripts/deploy-backup.sh" "$B" "$S" "$tag" "$spec" "$@" \
+    DEPLOY_BACKUP_STAMP="${STAMP:-}" bash "$R/scripts/deploy-backup.sh" "$B" "$S" "$tag" "$spec" \
+    "${TARGET:-t0}" "$@" >"$OUT" 2>"$ERR"
+  RC=$?
+}
+bk_done() { # bk_done <tag>: the deploy finished
+  env -i PATH=/usr/bin:/bin HOME="$work/home" bash "$R/scripts/deploy-backup.sh" --done "$B" "$1" \
     >"$OUT" 2>"$ERR"
   RC=$?
 }
@@ -303,7 +330,9 @@ bk_dirs() { (cd "$B" && ls -A | sort); }
 c_b_keeps() {
   mkrepo backup; bk_setup
   STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" bin playground missing_dir
-  [ "$RC" -eq 0 ] && [ "$(bk_dirs)" = ".prev-1.2.3-20260101T000001Z-runner" ] &&
+  [ "$RC" -eq 0 ] && [ "$(bk_dirs)" = ".deploy-pending-runner
+.prev-1.2.3-20260101T000001Z-runner" ] &&
+    grep -qx 'backup=.prev-1.2.3-20260101T000001Z-runner' "$B/.deploy-pending-runner" &&
     [ -x "$B/.prev-1.2.3-20260101T000001Z-runner/bin/dawnc" ] &&
     [ "$(cat "$B/.prev-1.2.3-20260101T000001Z-runner/playground/main.dawn")" = src ]
 }
@@ -329,10 +358,11 @@ c_b_rotate() {
   local i=0 v
   for v in 0.9.0 0.10.0 0.11.0 0.12.0 0.8.0; do
     i=$((i + 1))
-    LIVE_VER=$v STAMP="2026010${i}T000000Z" bk runner "cmd:$S/bin/dawnc" playground || return 1
+    TARGET="c$i" LIVE_VER=$v STAMP="2026010${i}T000000Z" bk runner "cmd:$S/bin/dawnc" playground || return 1
     [ "$RC" -eq 0 ] || return 1
   done
-  [ "$(bk_dirs)" = ".prev-0.1.0-20250101T000000Z-runner.partial
+  [ "$(bk_dirs)" = ".deploy-pending-runner
+.prev-0.1.0-20250101T000000Z-runner.partial
 .prev-0.1.0-20250101T000000Z-site
 .prev-0.11.0-20260103T000000Z-runner
 .prev-0.12.0-20260104T000000Z-runner
@@ -345,9 +375,68 @@ c_b_fail_closed() {
   mkrepo backup; bk_setup
   STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" playground || true
   mkdir "$work/cpfail"; printf '#!/bin/sh\nexit 1\n' >"$work/cpfail/cp"; chmod +x "$work/cpfail/cp"
-  BK_PATH="$work/cpfail:/usr/bin:/bin" STAMP=20260102T000001Z bk runner "cmd:$S/bin/dawnc" playground
+  BK_PATH="$work/cpfail:/usr/bin:/bin" TARGET=t1 STAMP=20260102T000001Z bk runner "cmd:$S/bin/dawnc" playground
   [ "$RC" -ne 0 ] && grep -q 'nothing was deployed' "$ERR" &&
-    [ "$(bk_dirs)" = ".prev-1.2.3-20260101T000001Z-runner" ]
+    [ "$(bk_dirs)" = ".deploy-pending-runner
+.prev-1.2.3-20260101T000001Z-runner" ]
+}
+# v0.95.0: three finished deploys (0.91 to 0.93), then one deploy (c95) that
+# fails part way three times, each run leaving more of the new release live.
+# Only the first run copies; the two copies before it stay, and what that
+# copy holds is the tree as it was before the deploy began.
+rerun_three() {
+  mkrepo backup; bk_setup
+  local i=0 v
+  for v in 0.91.0 0.92.0 0.93.0; do
+    i=$((i + 1))
+    TARGET="c$i" LIVE_VER=$v STAMP="2026100${i}T000000Z" bk runner "cmd:$S/bin/dawnc" bin playground
+    [ "$RC" -eq 0 ] || return 1
+    bk_done runner; [ "$RC" -eq 0 ] || return 1
+  done
+  TARGET=c95 LIVE_VER=0.94.0 STAMP=20261020T050941Z bk runner "cmd:$S/bin/dawnc" bin playground
+  [ "$RC" -eq 0 ] || return 1
+  echo half >"$S/playground/main.dawn"
+  TARGET=c95 LIVE_VER=0.95.0 STAMP=20261020T052101Z bk runner "cmd:$S/bin/dawnc" bin playground
+  [ "$RC" -eq 0 ] || return 1
+  TARGET=c95 LIVE_VER=0.95.0 STAMP=20261020T052213Z bk runner "cmd:$S/bin/dawnc" bin playground
+  [ "$RC" -eq 0 ] || return 1
+}
+c_b_rerun_keeps() {
+  rerun_three || return 1
+  [ "$(bk_dirs)" = ".deploy-pending-runner
+.prev-0.92.0-20261002T000000Z-runner
+.prev-0.93.0-20261003T000000Z-runner
+.prev-0.94.0-20261020T050941Z-runner" ] || { echo "  left: $(bk_dirs | tr '\n' ' ')" >&2; return 1; }
+  [ "$(cat "$B/.prev-0.94.0-20261020T050941Z-runner/playground/main.dawn")" = src ]
+}
+# Then the deploy finishes: the next run of it copies what is live and
+# rotation drops the oldest, as before.
+c_b_done_rotates() {
+  rerun_three || return 1
+  bk_done runner; [ "$RC" -eq 0 ] || return 1
+  TARGET=c95 LIVE_VER=0.95.0 STAMP=20261020T060000Z bk runner "cmd:$S/bin/dawnc" bin playground
+  [ "$RC" -eq 0 ] || return 1
+  [ "$(bk_dirs)" = ".deploy-pending-runner
+.prev-0.93.0-20261003T000000Z-runner
+.prev-0.94.0-20261020T050941Z-runner
+.prev-0.95.0-20261020T060000Z-runner" ] || { echo "  left: $(bk_dirs | tr '\n' ' ')" >&2; return 1; }
+  [ "$(cat "$B/.prev-0.95.0-20261020T060000Z-runner/playground/main.dawn")" = half ]
+}
+# A different deploy after an unfinished one, or a marker whose copy is gone,
+# takes a fresh copy: reusing would hand back something older than live.
+c_b_other_target() {
+  mkrepo backup; bk_setup
+  TARGET=a STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" playground; [ "$RC" -eq 0 ] || return 1
+  TARGET=b STAMP=20260102T000001Z bk runner "cmd:$S/bin/dawnc" playground
+  [ "$RC" -eq 0 ] && [ -d "$B/.prev-1.2.3-20260102T000001Z-runner" ] &&
+    grep -qx 'target=b' "$B/.deploy-pending-runner"
+}
+c_b_pending_gone() {
+  mkrepo backup; bk_setup
+  TARGET=a STAMP=20260101T000001Z bk runner "cmd:$S/bin/dawnc" playground; [ "$RC" -eq 0 ] || return 1
+  rm -rf -- "${B:?}/.prev-1.2.3-20260101T000001Z-runner"
+  TARGET=a STAMP=20260102T000001Z bk runner "cmd:$S/bin/dawnc" playground
+  [ "$RC" -eq 0 ] && [ -d "$B/.prev-1.2.3-20260102T000001Z-runner" ]
 }
 c_b_bad_source() {
   mkrepo backup; bk_setup
@@ -413,6 +502,15 @@ sed -n' ;;
     c_b_rotate_order) echo "printf '%s %s\\n' \"\$ts\" \"\$n\"=>printf '%s %s\\n' \"\$n\" \"\$n\"" ;;
     c_b_fail_closed) echo '"${present[@]}" "$partial/") || fail_partial=>"${present[@]}" "$partial/") || true' ;;
     c_b_bad_source) echo "''|/*|*..*) echo=>__never__) echo" ;;
+    c_b_rerun_keeps) echo 'if [ -f "$pending" ]; then=>if false; then' ;;
+    c_b_done_rotates) echo 'rm -f -- "$backup_dir/.deploy-pending-$tag"=>:' ;;
+    c_b_other_target) echo 'if [ "$p_target" = "$target" ] &&=>if' ;;
+    c_b_pending_gone) printf '%s\n' ' &&
+      [ -d "$backup_dir/$p_backup" ]; then=>; then' ;;
+    c_p_done_last) echo 'if ! ssh "$HOST" bash -s -- --done=>if ! true "$HOST" bash -s -- --done' ;;
+    c_s_done_last) echo 'if ! ssh "$HOST" bash -s -- --done=>if ! true "$HOST" bash -s -- --done' ;;
+    # finished declared before the canary: a failing canary run has said so
+    c_p_no_done_on_fail) printf '%s\n' 'echo "=== checking the new runner against the live one (canary) ==="=>ssh "$HOST" bash -s -- --done "$REMOTE" runner </dev/null' ;;
     *) echo - ;;
   esac
 }

@@ -123,7 +123,8 @@ done
 # copied to $BACKUP_DIR/.prev-<live version>-<UTC stamp>-site, newest 3 kept
 # (scripts/deploy-backup.sh). The live version is read from the marker this
 # script ships in the tree (.dawn-version, written below), so the first deploy
-# after the marker was introduced is labelled `unknown`. Fails closed;
+# after the marker was introduced is labelled `unknown`. Fails closed; a rerun
+# of a run that stopped before its --done below keeps that run's copy.
 # DAWN_DEPLOY_NO_BACKUP=1 skips it. DEPLOY.md, "Rollback", says how to restore.
 SITE_BASE=/var/www/dawnlang
 BACKUP_DIR="${DAWN_BACKUP_DIR:-/opt/dawn}"
@@ -133,7 +134,7 @@ else
   echo "=== keeping a rollback copy on $HOST ==="
   # shellcheck disable=SC2029
   if ! ssh "$HOST" bash -s -- "$BACKUP_DIR" "$SITE_BASE" site "file:$SITE_BASE/dist/.dawn-version" \
-      dist <scripts/deploy-backup.sh; then
+      "$want_commit" dist <scripts/deploy-backup.sh; then
     echo "error: could not make a rollback copy; nothing was deployed." >&2
     echo "  Free some space, or set DAWN_DEPLOY_NO_BACKUP=1 to deploy without one." >&2
     exit 1
@@ -143,6 +144,12 @@ sed -n 's/^pub const VERSION: String = "\(.*\)"$/\1/p' selfhost/src/version.dawn
 
 echo "=== deploying to ${site_origin#https://} ==="
 rsync -avz --delete site/dist/ "$HOST:$SITE_BASE/dist/"
+# The tree is live: the next deploy copies it (a failed purge below does not
+# change that).
+# shellcheck disable=SC2029
+if ! ssh "$HOST" bash -s -- --done "$BACKUP_DIR" site <scripts/deploy-backup.sh; then
+  echo "warning: could not clear $BACKUP_DIR/.deploy-pending-site; remove it by hand" >&2
+fi
 
 # The pages sit behind a CDN that caches HTML for ten minutes
 # (docs/site-cdn-design.md), so without a purge a deploy is invisible for up
