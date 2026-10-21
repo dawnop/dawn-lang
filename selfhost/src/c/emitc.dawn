@@ -36,6 +36,7 @@ use ir/reach
 use c/views
 use c/quiet
 use ir/coresites
+use c/cwalk
 use ir/reach.{TableUse, Live, LIST_MOD, LIST_FROM_ARRAY, LIST_TO_ARRAY, LIST_CONCAT}
 use embed/unicode_case
 use embed/rtsrc
@@ -46,7 +47,7 @@ use ir/core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, mode_owned, callee_mode_key, impl_mode_name,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
-  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup, CSteal, CReset, CReuse, CUpdate,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CExtern, CForeign, CDup, CSteal, CReset, CReuse, CUpdate,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CConstRef, CComptime,
@@ -968,6 +969,12 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       let (st1, v) = emit_call(st, callee, args, ty)
       (note_call(st1, len(st.out), callee, s, v), v)
     }
+    CExtern(sym, args, _, _, site) -> {
+      let borrowed = list.map(args, _a => false)
+      let (st1, cargs) = emit_ordered(st, args, borrowed)
+      let v = "DAWN_EXTERN(" ++ sym ++ ")(" ++ join(cargs, ", ") ++ ")"
+      (if st.mapping { noted(st1, len(st.out), "extern c " ++ sym, site, v) } else { st1 }, v)
+    }
     CIntrinsic(name, args, ty, s) -> {
       let (st1, v) = emit_intrinsic(st, name, args, ty)
       (note_intrinsic(st1, len(st.out), name, s, v), v)
@@ -1118,10 +1125,10 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
       # refusing it here is the design (llvm-backend-research.md 9). The
       # native `dawnc` never gets here, since it checks with the refusing
       # oracle; `dawn __emitc` checks with the reflecting one and does. So
-      # this is a user-facing refusal, and it names no alternative FFI: there
-      # is none (C FFI is not scheduled, docs/native-driver-plan.md D7).
+      # this is a user-facing refusal. A portable package binds a C stub
+      # through an extern function instead (docs/ffi-extern-design.md).
       panic("emitc: `use java` is JVM-only and the C backend (native and wasm) cannot " ++
-          "compile it; build this program for the JVM or remove its `use java` imports " ++
+          "compile it; build for the JVM or wrap a C stub in an extern function " ++
           "(docs/spec.md §12.3)")
   }
 
@@ -1666,6 +1673,7 @@ fn emit_alloc_row(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String
 fn inline_raises(e: CExpr) -> Bool =
   match e {
     CCall(_, _, _, _) -> true
+    CExtern(_, _, _, _, _) -> true
     CIntrinsic(_, _, _, _) -> true
     CBinary(op, l, r, ty) ->
       if op == CAnd || op == COr {
@@ -2052,6 +2060,13 @@ fn erased_from(e: CExpr) -> Ty =
     CDup(inner, _) | CSteal(inner, _) -> erased_from(inner)
     _ -> cex_ty(e)
   }
+
+# Bytes is erased inside generated code but the public stub signature is
+# concrete; declaring it as void* would disagree with a stub's definition.
+fn extern_c_type(t: Ty) -> String = match t {
+  TyBytes -> "dawn_bytes*"
+  _ -> c_type(t)
+}
 
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   # an intrinsic borrows its arguments except at the owned positions the
@@ -2851,6 +2866,31 @@ fn emit_units(
   }
   let tables = st.out
   st = CSt { ..st, out: [] }
+
+  # The public macro is shared with stubs through dawn_rt.h; including the
+  # FFI header here would poison the RC operations generated code requires.
+  var extern_seen: Set[String] = set.empty()
+  for u in units {
+    for f in u.m.fns {
+      if not f.is_test && fn_kept(live, f) {
+        let empty: List[String] = []
+        let decls = cwalk.fold_expr(f.body, empty, (acc, e) => match e {
+          CExtern(sym, args, _, ty, _) -> {
+            let ps = list.map(args, a => extern_c_type(cex_ty(a)))
+            acc ++ ["extern " ++ extern_c_type(ty) ++ " DAWN_EXTERN(" ++ sym ++ ")(" ++
+                (if len(ps) == 0 { "void" } else { join(ps, ", ") }) ++ ");"]
+          }
+          _ -> acc
+        }, (acc, _s) => acc)
+        for decl in decls {
+          if not set.has(extern_seen, decl) {
+            st = line(st, decl)
+            extern_seen = set.insert(extern_seen, decl)
+          }
+        }
+      }
+    }
+  }
 
   # C needs declarations before use; Dawn does not order top-level functions
   for u in units {

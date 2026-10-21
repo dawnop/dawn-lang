@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 7dd733d833896cff -->
+<!-- doc-check: translation-of docs/spec.md @ 554167695cf8c67b -->
 
 # Dawn Language Specification
 
@@ -159,12 +159,14 @@ true false not
 ```
 
 Keywords cannot be used as identifiers. `panic` and `todo` are built-in functions, not keywords.
-There are twelve further **contextual keywords**. Each has a special meaning in exactly one
+There are fourteen further **contextual keywords**. Each has a special meaning in exactly one
 syntactic position and remains an ordinary identifier everywhere else (`let in = 1` and a field
 named `test` are both legal):
 
 | Word | Its one syntactic position |
 |---|---|
+| `extern` | the `extern c "sym"` prefix in a function body (§9.1) |
+| `c` | after `extern`, followed by a string, binding a package C stub (§9.1) |
 | `java` | `use java "a.B"`: after `use`, followed by a class-name string (§9.1) |
 | `test` | at the head of a top-level declaration: `test "name" { … }` (§3.4) |
 | `assert` | at the start of a statement, followed by an expression (§3.4); in `assert = 1` and `assert.x` it is a name |
@@ -3497,6 +3499,31 @@ fn build() -> String !io = {
   **generic methods** of a nested class still return an opaque `Object` after erasure
   (§9.2) — `HttpResponse.body()` for instance returns `Object`, and a string body is
   bridged back with `String.valueOf(...)`.
+
+#### 9.1.1 Package C stubs: `extern c`
+
+An ordinary top-level function may use `extern c "sym"` as its entire body,
+optionally followed by `else expression` as its JVM fallback:
+
+```dawn
+fn native_add(x: Int) -> Int !io = extern c "native_add" else x + 1
+```
+
+An extern must be private or `pub(pkg)` and declare exactly `!io`. All parameters
+are borrowed and the return value is owned; there is no `owned` parameter syntax.
+Boundary types are `Int`, `Float`, `Bool`, `String`, `Bytes`, and recursive
+`Option[T]` and `Result[T, ForeignError]`. `Unit` is allowed only as a return value
+or a payload. A short symbol matches `[a-z][a-z0-9]*(_[a-z0-9]+)*`;
+`DAWN_EXTERN(sym)` places it in the `dawn_x_<sym>` namespace, so it cannot bind libc directly.
+The fallback is checked against the same signature and cannot call Java. The JVM
+compiles the fallback or rejects the declaration when none exists; native and
+wasm call the C stub. The compile-time interpreter refuses extern evaluation.
+The syntax is restricted to a whole top-level function body, excluding methods,
+nested functions, closures and local expressions.
+
+F1 emits C that tests can link directly with a stub. The package manifest's
+`[native] sources` and automatic compilation and staging belong to F2. See the
+[extern design](ffi-extern-design.md) for the full contract.
 
 ### 9.2 Type mapping
 

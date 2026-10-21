@@ -51,7 +51,7 @@ use ir/core.{
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit,
-  CReturn, CBreak, CContinue, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, update_values,
+  CReturn, CBreak, CContinue, CExtern, extern_operands, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CAnd, COr,
   cex_ty
@@ -346,6 +346,7 @@ fn children(e: CExpr) -> List[CExpr] =
     }
     CListLit(elems, _) -> elems
     CReturn(v) -> opt_list(v)
+    CExtern(_, args, fb, _, _) -> extern_operands(args, fb)
     CForeign(j, _, _) -> opt_list(j.target) ++ j.args ++ sam_ev_exprs(j)
     CDictApply(_, args, _) -> args
     CDictArg(d, _, _, _, _) -> [d]
@@ -412,6 +413,7 @@ fn node_site(e: CExpr) -> CSite =
   match e {
     CCall(_, _, _, s) -> s
     CIntrinsic(_, _, _, s) -> s
+    CExtern(_, _, _, _, s) -> s
     CForeign(_, _, s) -> s
     _ -> CNoSite
   }

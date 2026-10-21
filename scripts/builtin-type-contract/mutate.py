@@ -244,10 +244,10 @@ MUTATIONS = {
     ),
     "allow-never-fallthrough": ((
         CHECKER,
-        '''  let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
+        '''  let (cx2, bt, bx) = check_function_expr(cx1, d, s, psyms, Some(s.ret))
   cx1 = cx2
   if not assignable(cx1, bt, s.ret) {''',
-        '''  let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
+        '''  let (cx2, bt, bx) = check_function_expr(cx1, d, s, psyms, Some(s.ret))
   cx1 = cx2
   if d.name != "body_contract" && not assignable(cx1, bt, s.ret) {''',
     ),),

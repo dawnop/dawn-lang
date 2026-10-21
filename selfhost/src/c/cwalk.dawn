@@ -27,7 +27,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate,
+  CContinue, CExtern, extern_operands, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CImpl, CDefault, CInt, CFloat, CBool, CStr, CUnit
 }
@@ -80,6 +80,7 @@ fn fold_kids[A](e: CExpr, acc: A, fe: fn(A, CExpr) -> A, fs: fn(A, CStmt) -> A) 
       }
       fold_list(args, a, fe, fs)
     }
+    CExtern(_, args, fb, _, _) -> fold_list(extern_operands(args, fb), acc, fe, fs)
     CIntrinsic(_, args, _, _) -> fold_list(args, acc, fe, fs)
     CCtor(_, _, args, _) -> fold_list(args, acc, fe, fs)
     CUpdate(base, _, _, fields, _) -> {
@@ -146,6 +147,7 @@ pub fn map_kids(e: CExpr, f: fn(CExpr) -> CExpr) -> CExpr =
       }
       CCall(c1, list.map(args, f), ty, site)
     }
+    CExtern(sym, args, fb, ty, site) -> CExtern(sym, list.map(args, f), map_opt(fb, f), ty, site)
     CIntrinsic(name, args, ty, site) -> CIntrinsic(name, list.map(args, f), ty, site)
     CCtor(adt, ci, args, ty) -> CCtor(adt, ci, list.map(args, f), ty)
     CUpdate(base, adt, ci, fields, ty) -> {

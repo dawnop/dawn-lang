@@ -1,6 +1,6 @@
 # C extern：`fn f(..) = extern c "sym" else ..` 与公开头 `dawn_ffi.h`
 
-> 状态：**current**（F0：设计稿与头文件已落地；F1 起的语法、Core 节点、清单与门禁是本文规定、尚未实现的部分，
+> 状态：**current**（F0：设计稿与头文件已落地；F1 的语法、检查、Core 与后端已实现；清单和构建链路仍待 F2，完整门禁扩展待 F4，
 > 每刀落地后在末尾「落地记录」补哈希）。2026-10-21。依据：维护者工作区的
 > `ruling-ffi-extern-surface-20261020.md`（14 条裁决与刀序）、`research-ffi-extern-surface-20261020.md`（三种语法对照、
 > sqlite 桩的 ASan 实测、§8 待裁点）、`ruling-ffi-llvm-concurrency-20261004.md` 第 1 条、
@@ -55,7 +55,7 @@ extern_body = "extern" "c" STRING [ "else" expr ]
 
 - `extern`、`c` 是**上下文词**，只在函数体开头（`=` 之后、换行跳过之后）的这个位置特殊：下一个词是 `extern` 且再下一个词是
   `c` 且其后是字符串字面量，才走 extern 分支。其余位置它们仍是普通标识符（全仓 `.dawn` 里 `extern` 作为标识符出现 0 次，
-  仍不做成硬关键字，免得夺走将来的名字）。判法与 `opaque`/`ctl` 一样是一个 token 的前瞻（`parser.dawn` 的 `is_word`）。
+  仍不做成硬关键字，免得夺走将来的名字）。判法与 `opaque`/`ctl` 一样由 `is_word` 做有界前瞻（`parser.dawn` 的 `is_word`）。
 - 签名、效果行、可见性、文档注释全部沿用 `FnDecl`，**`FnDecl` 一个字段不加**。函数体位置多一种表达式节点
   `EExtern(sym, fallback: Option[Expr])`。
 - `else` 后是一个表达式，与 `if ... else` 的排版同形；没有 `else` 即没有回退体。
@@ -68,8 +68,8 @@ extern_body = "extern" "c" STRING [ "else" expr ]
 
 ### fmt
 
-- 一行放得下：`fn f(..) -> T !io = extern c "sym" else expr`。
-- 放不下：在 `=` 后换行，缩进一级写 `extern c "sym"`，`else expr` 另起一行与之同缩进；`else` 后的表达式照表达式的断行规则。
+- 沿用 formatter 保留作者换行的规则，不引入通用行宽折行。一行形式为 `fn f(..) -> T !io = extern c "sym" else expr`。
+- 多行形式在 `=` 后换行，缩进一级写 `extern c "sym"`，`else expr` 另起一行与之同缩进；`else` 后的表达式照表达式的缩进规则。
 - `fmt --check` 的幂等性与「本仓全过 --check 只证自洽」的局限同其他语法一样，由 F1 的 fmt 语料钉住（`dawn-fmt-indent-model`
   是词法级启发式，新语法要在语料里各形状都有一例，而不是指望启发式碰巧对）。
 
@@ -79,7 +79,7 @@ extern_body = "extern" "c" STRING [ "else" expr ]
 额外的只有三处：
 
 - 悬停：函数签名下多一行 `extern c "sym"`，有回退体时再注明「fallback on the JVM backend」。
-- 语义 token：`extern`、`c` 着关键字色，字符串着字符串色（`scripts/lsp-semantic-tokens.py` 加用例）。
+- 词法着色：TextMate 的上下文规则给 `extern`、`c` 关键字色，字符串保留字符串色。LSP 继续只发送已解析的名字，回退体内参数、调用等走既有语义 token 与引用路径，不扩大协议载荷。
 - 不提供「跳到 C 定义」：checker 不读 C 文件（见第四节「边界」）。
 
 `editors/vscode` 的 TextMate 语法加上下文词；`scope-contract.js` 从 `parser.dawn` 的 `is_word(...)` 判定点读词表，
@@ -157,7 +157,7 @@ C 字符串字面量。这原本只是「给 C 库接缝的方便」，现在升
 传过去（`dawn_str *` 被当作 `char *` 读，第一个字段是 RC 头）。这不只是 UB，还绕过「C 只能来自包自带桩」这条供应链约束。
 
 规则：发射端把 `extern c "sq_prepare"` 写成对 **`dawn_x_sq_prepare`** 的调用，桩用 `DAWN_EXTERN(sq_prepare)` 定义，
-宏展开成同一个名字（`dawn_ffi.h`，前缀与展开只有这一处定义，发射器与桩不会各写一遍）。libc 里没有 `dawn_x_*`，
+宏展开成同一个名字（`dawn_rt.h` 定义、`dawn_ffi.h` 包含，前缀与展开只有这一处定义，发射器与桩不会各写一遍）。libc 里没有 `dawn_x_*`，
 所以**只能绑定包自带桩里的符号，不能绑定任意 libc 符号**。
 
 同一个程序里两个包定义同名符号，驱动在调 cc 之前就能按声明查重给出 Dawn 层面的错误（见 F2），而不是让链接器报
@@ -192,9 +192,9 @@ comptime 解释器（`interp`）见到 `CExtern` 一律拒绝，同 std-only 的
 
 ### 发射
 
-emitc 对每个被调用的符号发一次原型 `extern <ret> dawn_x_<sym>(<args>);`，调用点是一次普通 C 调用，参数借用，返回值当作 owned
+emitc 对每个被调用的符号发一次原型 `extern <ret> DAWN_EXTERN(<sym>)(<args>);`，调用点是一次普通 C 调用，参数借用，返回值当作 owned
 交给 rc 遍历（与 intrinsic 的约定一致，没有 owned 参数位）。native 后端拒绝 `use java` 的老规矩不变。
-`dawnc emitc` 只出 `.c`，要把包的 C 源列出来一并提示，否则手动 cc 的用户会遇到未定义符号。
+F2 的 `dawnc emitc` 只出 `.c`，要把包的 C 源列出来一并提示，否则手动 cc 的用户会遇到未定义符号。
 
 ### 边界
 
@@ -364,3 +364,5 @@ dawnop-site 过渡期（裁决 11，不属于这四刀）：引入 `effect Db`�
 ## 落地记录
 
 - F0：`runtime/c/dawn_ffi.h`、`scripts/ffi-header-contract/`、`DAWN_MASK_*` 挪进 `dawn_rt.h`、本文。提交哈希待 PR 合并后回填。
+
+- F1（本提交）：`EExtern`、边界检查、`XExtern`/`CExtern`、后端选臂、借用 RC、C 原型与调用、JVM 回退及拒绝、grammar/fmt/LSP 契约。`DAWN_EXTERN` 定义移至两种翻译单元共享的 `dawn_rt.h`，避免发射代码包含 FFI 的 poison 围栏；公开头的安装仍留 F2。

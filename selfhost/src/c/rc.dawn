@@ -36,7 +36,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
+  CContinue, CExtern, extern_operands, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, CUpdField, update_as_ctor, update_keeps,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit,
   CMode, COwned, mode_owned, mode_key, callee_mode_key,
@@ -262,6 +262,7 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
       }
       fv_list(args, a1)
     }
+    CExtern(_, args, fb, _, _) -> fv_list(extern_operands(args, fb), acc)
     CIntrinsic(_, args, _, _) -> fv_list(args, acc)
     CCtor(_, _, args, _) -> fv_list(args, acc)
     CUpdate(base, adt, ci, fields, ty) -> fv_expr(update_as_ctor(base, adt, ci, fields, ty), acc)
@@ -441,6 +442,7 @@ fn falls_through(e: CExpr) -> Bool = {
       }
       head && all_fall_through(args)
     }
+    CExtern(_, args, _, _, _) -> all_fall_through(args)
     CIntrinsic(_, args, _, _) -> all_fall_through(args)
     CCtor(_, _, args, _) -> all_fall_through(args)
     CUpdate(base, adt, ci, fields, ty) -> falls_through(update_as_ctor(base, adt, ci, fields, ty))
@@ -521,6 +523,7 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
       }
       hit || jumps_list(args, lid, brk, cont)
     }
+    CExtern(_, args, _, _, _) -> jumps_list(args, lid, brk, cont)
     CIntrinsic(_, args, _, _) -> jumps_list(args, lid, brk, cont)
     CCtor(_, _, args, _) -> jumps_list(args, lid, brk, cont)
     CUpdate(base, adt, ci, fields, ty) ->
@@ -635,6 +638,7 @@ fn leaves(e: CExpr, inner: List[Int]) -> Bool =
       }
       hit || leaves_list(args, inner)
     }
+    CExtern(_, args, _, _, _) -> leaves_list(args, inner)
     CIntrinsic(_, args, _, _) -> leaves_list(args, inner)
     CCtor(_, _, args, _) -> leaves_list(args, inner)
     CUpdate(base, adt, ci, fields, ty) -> leaves(update_as_ctor(base, adt, ci, fields, ty), inner)
@@ -1318,6 +1322,10 @@ fn lift_spread_expr(st: SpreadLift, e: CExpr) -> (SpreadLift, CExpr) =
       let (st2, as1) = lift_spread_list(st1, args)
       (st2, CCall(c1, as1, ty, site))
     }
+    CExtern(sym, args, fb, ty, site) -> {
+      let (st1, as1) = lift_spread_list(st, args)
+      (st1, CExtern(sym, as1, fb, ty, site))
+    }
     CIntrinsic(name, args, ty, site) -> {
       let (st1, as1) = lift_spread_list(st, args)
       (st1, CIntrinsic(name, as1, ty, site))
@@ -1502,6 +1510,7 @@ fn assigns_spread_expr(e: CExpr, sym: Int) -> Bool =
       }
       in_callee || assigns_spread_list(args, sym)
     }
+    CExtern(_, args, _, _, _) -> assigns_spread_list(args, sym)
     CIntrinsic(_, args, _, _) -> assigns_spread_list(args, sym)
     CCtor(_, _, args, _) -> assigns_spread_list(args, sym)
     CUpdate(base, adt, ci, fields, ty) ->
@@ -1761,6 +1770,11 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
 
     # Runtime primitives borrow, and dup whatever they decide to keep --
     # except the argument positions the reuse analysis flipped to owned.
+    CExtern(sym, args, _, ity, site) -> {
+      let borrowed: List[Int] = []
+      let (st1, lets, args1, temps) = intr_args(st, args, borrowed, after)
+      wrap(st1, lets, CExtern(sym, args1, None, ity, site), ity, temps)
+    }
     CIntrinsic(name, args, ity, site) -> {
       let (st1, lets, args1, temps) = intr_args(st, args, intr_owned_args(name), after)
       let call = CIntrinsic(name, args1, ity, site)
@@ -2808,6 +2822,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
         }
       }
     }
+    CExtern(_, args, _, _, _) -> chk_list(c, args, false)
     CIntrinsic(name, args, _, _) -> {
       let owned = intr_owned_args(name)
       var c1 = c

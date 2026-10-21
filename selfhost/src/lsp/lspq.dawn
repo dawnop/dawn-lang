@@ -24,7 +24,7 @@ use front/ast.{
   EInt, EChar, EFloat, EStr, EVar, EApply, EMethod, ELambda,
   ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf,
-  EComptime, EBinary, EUnary, EIf, EMatch,
+  EExtern, EComptime, EBinary, EUnary, EIf, EMatch,
   EBlock, EHandle, OpNeg,
   PBind, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
@@ -38,7 +38,7 @@ use check/tast.{
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XUnit,
   TListElem, TLEExpr, TLESpread, TLEIf, TModule, TConst,
-  XInt, UNeg, XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XFloat, WitRef, WForward, WConcrete, WApply,
+  XInt, UNeg, XExtern, XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XFloat, WitRef, WForward, WConcrete, WApply,
   TPWild, TPBind, TPLit, TPOr, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
   x_lo, x_hi, tex_ty
@@ -1407,8 +1407,30 @@ fn method_path(head: List[identity.Part], name: String) -> List[identity.Part] =
 
 fn show_ty(qc: QCx, t: Ty) -> String = ty_show(qc.entry.cx.adts, t)
 
-fn render_sig(qc: QCx, s: Sig) -> String =
-  sig_render(qc.entry.cx.adts, qc.entry.cx.traits, s)
+fn render_sig(qc: QCx, s: Sig) -> String = {
+  var text = sig_render(qc.entry.cx.adts, qc.entry.cx.traits, s)
+  let module = match s.owner {
+    Some(owner) -> match holder_by_class(qc, owner) {
+      Some(h) -> Some(h.m)
+      None -> None
+    }
+    None -> Some(qc.entry.m)
+  }
+  match module {
+    Some(m) -> { for d in m.decls { match d {
+      DFn(f) -> if f.name == s.name { match f.body {
+        EExtern(sym, fallback, _, _) -> {
+          text = text ++ "\nextern c \"" ++ sym ++ "\""
+          if fallback != None { text = text ++ "\nfallback on the JVM backend" }
+        }
+        _ -> ()
+      } }
+      _ -> ()
+    } } }
+    None -> ()
+  }
+  text
+}
 
 fn render_ctor(qc: QCx, c: CtorI) -> String = ctor_render(qc.entry.cx.adts, c)
 
@@ -3156,6 +3178,30 @@ fn note_span(q: Q, pe: Expr, te: Option[TExpr]) -> Q =
     None -> q
   }
 
+# Separate these body visitors to keep walk_e within the method-size gate.
+# Neither a fallback nor a comptime body's value replaces its inner names.
+fn walk_extern(qc: QCx, q: Q, fallback: Option[Expr], te: Option[TExpr]) -> Q =
+  match fallback {
+    Some(body) -> {
+      let tb: Option[TExpr] = match te {
+        Some(XExtern(_, _, fb, _, _, _)) -> fb
+        _ -> None
+      }
+      walk_e(qc, q, body, tb)
+    }
+    None -> q
+  }
+
+fn walk_comptime(qc: QCx, q: Q, pe: Expr, body: Expr, te: Option[TExpr]) -> Q =
+  match te {
+    Some(XComptime(tb, lo, hi, ty)) -> {
+      # Offer the whole block first, then let its inner names win locally.
+      let q1 = offer(q, e_lo(pe), e_hi(pe), comptime_text(qc, lo, hi, ty), None, None)
+      walk_e(qc, q1, body, Some(tb))
+    }
+    _ -> walk_e(qc, q, body, None)
+  }
+
 fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
   var q = q0
   q = note_span(q, pe, te)
@@ -3394,16 +3440,8 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
       }
     }
-    EComptime(body, _, _) ->
-      match te {
-        Some(XComptime(tb, lo, hi, ty)) -> {
-          # the whole block, so anywhere in it no inner node claims answers
-          # with the block's value -- the `comptime` keyword above all
-          q = offer(q, e_lo(pe), e_hi(pe), comptime_text(qc, lo, hi, ty), None, None)
-          q = walk_e(qc, q, body, Some(tb))
-        }
-        _ -> { q = walk_e(qc, q, body, None) }
-      }
+    EExtern(_, fallback, _, _) -> { q = walk_extern(qc, q, fallback, te) }
+    EComptime(body, _, _) -> { q = walk_comptime(qc, q, pe, body, te) }
     EPropagate(operand, _, hi) ->
       match te {
         Some(XPropagate(t, _, _, _)) -> {
@@ -4683,6 +4721,16 @@ fn collect_e(
           SPText(_) -> ()
         }
       }
+    }
+    EExtern(_, fallback, _, _) -> match fallback {
+      Some(body) -> {
+        let tb: Option[TExpr] = match te {
+          Some(XExtern(_, _, fb, _, _, _)) -> fb
+          _ -> None
+        }
+        acc = collect_e(qc, acc, body, tb, before)
+      }
+      None -> ()
     }
     EComptime(body, _, _) -> {
       let tb: Option[TExpr] = match te {

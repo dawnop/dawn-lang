@@ -44,7 +44,7 @@ use ir/core.{
   CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
-  CContinue, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, update_as_ctor,
+  CContinue, CExtern, extern_operands, CForeign, CDup, CSteal, CReset, CReuse, sam_ev_exprs, CUpdate, update_as_ctor,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDynamic, CDirect, CMethod, CInt, CFloat, CBool, CStr, CUnit,
   CSlotFn, CSlotDefault,
@@ -123,6 +123,7 @@ fn clo_expr(e: CExpr, acc: Set[(String, String)]) -> Set[(String, String)] =
       }
       clo_list(args, a1)
     }
+    CExtern(_, args, fb, _, _) -> clo_list(extern_operands(args, fb), acc)
     CIntrinsic(_, args, _, _) -> clo_list(args, acc)
     CCtor(_, _, args, _) -> clo_list(args, acc)
     CUpdate(base, adt, ci, fields, ty) -> clo_expr(update_as_ctor(base, adt, ci, fields, ty), acc)
@@ -386,6 +387,11 @@ fn dm_expr(d: Dm, e: CExpr, k: Bool) -> Dm =
       }
     }
 
+    CExtern(_, args, _, _, _) -> {
+      var d1 = d
+      for a in args { d1 = dm_read(d1, a) }
+      d1
+    }
     CIntrinsic(name, args, _, _) -> {
       # runtime primitives borrow, except the reuse-analysis positions
       let owned = intr_owned_args(name)

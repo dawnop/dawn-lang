@@ -1,0 +1,37 @@
+# Select the implementation before a backend analyses reachability or RC.
+# An extern is only a complete top-level function body: selecting here keeps
+# fallback-only references out of native analysis and requires every JVM
+# declaration to have an implementation even when no caller reaches it.
+use std/list
+use ir/core.{CModule, CFun, CExtern}
+use ir/lower.{LMod}
+
+fn select_fn(f: CFun, native: Bool) -> CFun = match f.body {
+  CExtern(sym, args, fallback, ty, site) ->
+    if native {
+      CFun { ..f, body: CExtern(sym, args, None, ty, site) }
+    } else {
+      match fallback {
+        Some(body) -> CFun { ..f, body: body }
+        None -> panic("extern function `" ++ f.name ++ "` has no fallback body and the JVM backend has no C")
+      }
+    }
+  _ -> f
+}
+
+## Select every production function before a backend analyses the module.
+pub fn select_module(m: CModule, native: Bool) -> CModule =
+  CModule { ..m, fns: list.map(m.fns, f => select_fn(f, native)) }
+
+fn select_pair(p: (CFun, List[CFun]), native: Bool) -> (CFun, List[CFun]) = {
+  let (f, lifted) = p
+  (select_fn(f, native), list.map(lifted, g => select_fn(g, native)))
+}
+
+## Preserve the JVM pairing tables while selecting their function bodies.
+pub fn select_lowered(lm: LMod, native: Bool) -> LMod = LMod {
+  ..lm,
+  m: select_module(lm.m, native),
+  fns: list.map(lm.fns, p => select_pair(p, native)),
+  tests: list.map(lm.tests, p => select_pair(p, native))
+}
