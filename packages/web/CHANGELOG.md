@@ -1,10 +1,56 @@
 # web changelog
 
 Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
-`web6`, the v2-in-name rule); consumers keep `use web/...` through a
+`web7`, the v2-in-name rule); consumers keep `use web/...` through a
 `web = ...` alias. Design background: `docs/web5-design.md`,
-`docs/std-defaults-design.md` and `docs/audit/web-api-v2-design.md` (in
-Chinese).
+`docs/std-defaults-design.md`, `docs/audit/web-api-v2-design.md` and
+`docs/web-core-split-design.md` (in Chinese).
+
+## 7.0.0 (2026-10-20)
+
+The package is pure Dawn now: the JVM server moved to its own package,
+`web-jvm` (manifest name `web_jvm`, starting at 1.0.0), and a response body that
+streams no longer carries a Java type. The native compiler checks, documents
+and tests `web` as a whole package. The package is `web7`; keep `use web/...`
+through the `web = ...` alias as before.
+
+Breaking, and how to migrate:
+
+- **`web/server` is gone; its server is `web_jvm/server`, in a new package.**
+  `start`, `join`, `stop`, `serve_app`, `serve_app_with`, `ServerConfig`,
+  `ServerHandle` and `handle_port` have the same signatures there. Add
+  `web_jvm = "<path or url>/web-jvm"` to `[deps]` beside `web`, and change
+  `use web/server.{...}` to `use web_jvm/server.{...}`. The two packages must be
+  the same checkout or release.
+- **`parse_form`, `form_value` and `form_all` moved to `web/wire`.** Change the
+  import. `parse_form` is a pure function now, so it has no `!io` row.
+- **`DEFAULT_MAX_BODY` moved to `web/types`**, since every server starts from it.
+- **`streaming` takes a `BodySource`, not an `InputStream`**, and the
+  `ResponseBody` variant is `Stream(source: BodySource, length: Option[Int])`.
+  A `BodySource` is `{ read: fn(Int) -> Bytes !io, close: fn() -> Unit !io }`:
+  `read(n)` returns at most `n` bytes and an empty `Bytes` at the end, and the
+  server calls `close` exactly once, read or not. For an `InputStream`, pass
+  `web_jvm/server.input_source(stream)`:
+  `streaming(200, "video/mp4", input_source(stream), length: Some(n))`.
+  `input_source` hands the server what the stream has ready, as the old pump
+  did, rather than waiting to fill a chunk.
+- **A `ResponseBody` and a `Response` have no `==`.** A stream holds
+  functions, and a function has no equality, so `response_body(r) == Text("x")`
+  is now a type error. Match on the body instead.
+- **Percent decoding is the standard library's, not `URLDecoder`'s.** A
+  malformed escape still leaves the whole component as written, and a byte
+  sequence that is not UTF-8 still becomes U+FFFD. One difference: the JDK
+  decoder accepted a sign in an escape, so `%+1` decoded to byte 1; it is now
+  malformed, as RFC 3986 has it.
+
+Added to the public surface, because a server in another package needs them
+(web5 had kept them package-private while the server lived inside): `Dispatch`
+with `dispatch_segs`, `validate_routes`, `route_meta` in `web/router`;
+`raw_segs`, `decode_path_seg`, `has_dot_segment`, `parse_query`, `multimap`,
+`join_with` in `web/wire`; `log_request` in `web/types`. They are for authors
+of servers; `Response` stays opaque and a server reads one through
+`response_status`, `response_content_type`, `response_headers` and
+`response_body`.
 
 ## 6.2.1 (2026-10-05)
 

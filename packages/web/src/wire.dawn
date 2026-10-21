@@ -1,0 +1,270 @@
+# What a request's path, query and form mean, with no server in sight: how a
+# raw path splits into routing segments, how a segment or a component is
+# percent-decoded, which paths are refused for a dot segment, and how a query
+# string or a form body folds into a multimap. These used to sit in the
+# server module beside the JDK calls, and two of them (the decoders) were a
+# `java.net.URLDecoder` call each, which is the only reason the package could
+# not be checked, documented or tested by the native compiler. They are plain
+# functions of a String now, so every server this package grows (the JVM one in
+# web_jvm/server, a single-exchange one later) reads a request the same way by
+# calling the same code, which is the point of keeping them in one place.
+use std/str
+use std/bytes
+use std/map
+
+# Percent-decode one application/x-www-form-urlencoded component: '+' is a
+# space, %XX is a byte, and the resulting byte sequence is UTF-8.
+#
+# Decoding has to happen *after* splitting on '&' and '=', never before. The old
+# code took `URI.getQuery()`, which is already decoded, and split that — so a
+# value containing an encoded ampersand (`a=1%262`) arrived as `a=1&2` and split
+# into two parameters. Anything that let a client forge a parameter boundary
+# this way is a parameter-smuggling bug, not just a decoding nicety.
+#
+# A truncated or non-hex escape (`%A`, `%ZZ`) is not worth failing a request
+# over, so the raw component stands in, as it did when `java.net.URLDecoder`
+# did this. Two things differ from that decoder and are on purpose: it
+# accepted a sign in the escape (`%+1` came out as byte 1), and this takes
+# hex digits only; and it needed `!io` (a JDK call that can throw, caught by
+# `catch_fault`), which this does not, so `parse_form` and the query helpers
+# are pure now. The decoding itself is the standard library's lossy UTF-8:
+# a byte sequence that is not UTF-8 becomes U+FFFD, as it did.
+fn pct_decode(s: String) -> String = pct_decode_with(s, true)
+
+fn hex_digit(c: Int) -> Int =
+  if c >= 48 && c <= 57 {
+    c - 48
+  } else if c >= 65 && c <= 70 {
+    c - 55
+  } else if c >= 97 && c <= 102 {
+    c - 87
+  } else {
+    -1
+  }
+
+# Both decodings in one pass over the UTF-8 bytes of `s`: a literal non-ASCII
+# character contributes its own bytes and an escape contributes one, so the
+# whole result is decoded once at the end, which is what lets `%E4%B8%AD`
+# and a literal U+4E2D mean the same thing. `plus_is_space` is the only
+# difference between a form component and a path segment.
+fn pct_decode_with(s: String, plus_is_space: Bool) -> String = {
+  if not str.contains(s, "%") && not (plus_is_space && str.contains(s, "+")) {
+    return s
+  }
+  let src = bytes.utf8(s)
+  let n = len(src)
+  var out = bytes.buf()
+  var i = 0
+  while i < n {
+    let c = bytes.at(src, i)
+    if c == 37 {
+      if i + 2 >= n { return s }
+      let hi = hex_digit(bytes.at(src, i + 1))
+      let lo = hex_digit(bytes.at(src, i + 2))
+      if hi < 0 || lo < 0 { return s }
+      out = bytes.put(out, hi * 16 + lo)
+      i = i + 3
+    } else if c == 43 && plus_is_space {
+      out = bytes.put(out, 32)
+      i = i + 1
+    } else {
+      out = bytes.put(out, c)
+      i = i + 1
+    }
+  }
+  bytes.decode_utf8_lossy(bytes.freeze(out))
+}
+
+# ---- raw-path routing (WEB-03) ----
+
+## Split a raw request path into routing segments: the leading empty piece
+## (absolute paths start with "/") and one trailing empty piece (a trailing
+## slash is tolerated, as the router always has) are dropped, but *interior*
+## empty segments (/a//b) are kept — merging them would be path rewriting,
+## which belongs to the application, not the framework. See the package README
+## for the full policy table.
+pub fn raw_segs(raw_path: String) -> List[String] = {
+  let parts = str.split(raw_path, "/")
+  let n = len(parts)
+  let lo = if n > 0 && parts[0] == "" { 1 } else { 0 }
+  let hi = if n > lo && parts[n - 1] == "" { n - 1 } else { n }
+  map(range(lo, hi), i => parts[i])
+}
+
+## Percent-decode one *path* segment. Path semantics, not form semantics: a
+## '+' in a path is a literal plus. A malformed escape leaves the segment as
+## written, the same policy as pct_decode above.
+pub fn decode_path_seg(s: String) -> String = pct_decode_with(s, false)
+
+fn is_dot_seg(s: String) -> Bool = s == "." || s == ".."
+
+## True when any raw segment is "." or ".." in either spelling — as written or
+## after decoding (%2e%2e decodes to "..", the classic normalization bypass).
+## `handle` refuses such a path with 400 *before* dispatch, so the check covers
+## every request, 404 paths included: this framework never normalizes a path,
+## it rejects the ones that would need it.
+pub fn has_dot_segment(raw_path: String) -> Bool = {
+  for s in raw_segs(raw_path) {
+    if is_dot_seg(s) || is_dot_seg(decode_path_seg(s)) { return true }
+  }
+  false
+}
+
+## "a=1&b=x" -> [("a","1"),("b","x")], over the *raw* (still encoded) string.
+## A value may itself contain '=', so only the first one splits — and since the
+## split happens first, an encoded '=' in a value stays part of that value.
+## A server's plumbing: the query multimap and `parse_form` are the readings
+## of it a handler uses.
+pub fn parse_query(q: String) -> List[(String, String)] =
+  map(filter(str.split(q, "&"), pair => pair != ""), pair => {
+    let parts = str.split(pair, "=")
+    (pct_decode(parts[0]), pct_decode(join_with(tail(parts), "=")))
+  })
+
+## Fold decoded key/value pairs into a multimap, keeping every value of a
+## repeated name in wire order. `map.from` collapses a repeat onto its last
+## value, which is what the query map and the form map both used to do. A form is
+## the place it bites hardest, since a set of checkboxes with one name is how
+## HTML has always submitted a multi-select.
+pub fn multimap(ps: List[(String, String)]) -> Map[String, List[String]] =
+  fold(ps, map.empty(), (acc, p) => {
+    let (k, v) = p
+    match map.get(acc, k) {
+      Some(vs) -> map.insert(acc, k, vs ++ [v])
+      None -> map.insert(acc, k, [v])
+    }
+  })
+
+# Parse an application/x-www-form-urlencoded body into a multimap. Same grammar
+# and the same decoding as a query string. This used to replace '+' with a space
+# and stop there, so every percent escape in a form field reached the handler
+# still encoded (`%40` for '@' in an email, and so on).
+## An `application/x-www-form-urlencoded` body as a multimap: every value of a
+## repeated name survives in wire order, the same shape `Request.query` and
+## `Request.headers` have. The argument is the body's UTF-8 view — a handler
+## gets it with `body_text(req)?`. Read one value with `form_value`, all of
+## them with `form_all`. It used to be `Map[String, String]`, where a
+## multi-select (the reason HTML forms repeat a name at all) silently kept only
+## its last option.
+pub fn parse_form(body: String) -> Map[String, List[String]] =
+  multimap(parse_query(body))
+
+## One form field, or None when absent. Of a repeated name this is the *first*
+## value, matching `web/types.query` and `web/types.header`.
+pub fn form_value(form: Map[String, List[String]], name: String) -> Option[String] =
+  match map.get(form, name) {
+    Some(vs) -> get(vs, 0)
+    None -> None
+  }
+
+## Every value of a repeated form field, in wire order; [] when absent.
+pub fn form_all(form: Map[String, List[String]], name: String) -> List[String] =
+  match map.get(form, name) {
+    Some(vs) -> vs
+    None -> []
+  }
+
+pub(pkg) fn tail(xs: List[String]) -> List[String] =
+  map(range(1, len(xs)), i => xs[i])
+
+## The prelude's join, reimplemented: web_jvm/server's public `join(handle)`
+## shadows the builtin module-wide (there is no qualified spelling for a prelude
+## name), so that module's own string-joining goes through this.
+pub fn join_with(xs: List[String], sep: String) -> String =
+  if len(xs) == 0 {
+    ""
+  } else {
+    fold(tail(xs), xs[0], (acc, s) => acc ++ sep ++ s)
+  }
+
+test "query strings parse, including empty and embedded =" {
+  assert parse_query("a=1&b=x") == [("a", "1"), ("b", "x")]
+  assert parse_query("") == []
+  assert parse_query("k=a=b") == [("k", "a=b")]
+  assert parse_query("flag") == [("flag", "")]
+}
+
+test "an encoded separator stays inside its value" {
+  # the smuggling case: decoding before splitting turned this into two params
+  assert parse_query("a=1%262") == [("a", "1&2")]
+  assert parse_query("a=x%3Dy") == [("a", "x=y")]
+  # keys are decoded too, and were not before
+  assert parse_query("a%20b=c") == [("a b", "c")]
+  # '+' is a space on both sides
+  assert parse_query("a+b=c+d") == [("a b", "c d")]
+  # UTF-8 percent escapes decode as bytes, not as characters
+  assert parse_query("q=%E4%B8%AD%E6%96%87") == [("q", "\u{4e2d}\u{6587}")]
+  # a truncated escape is not worth a 400; the component stands as written
+  assert parse_query("a=%A") == [("a", "%A")]
+}
+
+test "form bodies parse, with + as space and %XX decoded" {
+  let f = parse_form("username=admin&password=a+b+c")
+  assert form_value(f, "username") == Some("admin")
+  assert form_value(f, "password") == Some("a b c")
+  # percent escapes used to reach the handler still encoded
+  let g = parse_form("email=a%40b.com&note=1%262")
+  assert form_value(g, "email") == Some("a@b.com")
+  assert form_value(g, "note") == Some("1&2")
+  assert form_value(g, "missing") == None
+}
+
+test "a repeated form field keeps every value, in wire order" {
+  # a multi-select posts one name several times; map.from kept only "c"
+  let f = parse_form("tag=a&tag=b&name=x&tag=c")
+  assert form_all(f, "tag") == ["a", "b", "c"]
+  assert form_value(f, "tag") == Some("a")
+  assert form_all(f, "name") == ["x"]
+  assert form_all(f, "missing") == []
+  # an empty value is a value: `tag=&tag=b` is two of them
+  assert form_all(parse_form("tag=&tag=b"), "tag") == ["", "b"]
+}
+
+test "raw path split: interior empties stay, lead and one trailing drop" {
+  assert raw_segs("/a//b") == ["a", "", "b"]
+  assert raw_segs("/a/b/") == ["a", "b"]
+  assert raw_segs("/health") == ["health"]
+  assert raw_segs("/") == []
+}
+
+test "path segments decode individually, with path (not form) semantics" {
+  assert decode_path_seg("a%2Fb") == "a/b"
+  assert decode_path_seg("%E4%B8%AD%E6%96%87") == "中文"
+  # '+' is a literal plus in a path, not a space
+  assert decode_path_seg("c++") == "c++"
+  # a malformed escape leaves the segment as written
+  assert decode_path_seg("%zz") == "%zz"
+}
+
+test "dot segment detection covers raw and encoded spellings" {
+  assert has_dot_segment("/a/../b")
+  assert has_dot_segment("/a/./b")
+  assert has_dot_segment("/%2e%2e/b")
+  assert has_dot_segment("/a/%2E")
+  assert not has_dot_segment("/a/b")
+  # dots inside a segment are data, not navigation
+  assert not has_dot_segment("/a..b/c")
+  assert not has_dot_segment("/...")
+}
+
+test "percent decoding takes hex digits only, and a bad escape leaves the component whole" {
+  assert pct_decode("a%2Bb") == "a+b"
+  assert pct_decode("%e4%b8%ad") == "\u{4e2d}"
+  # a sign is not a hex digit (the JDK decoder let `%+1` through as byte 1)
+  assert pct_decode("%+1") == "%+1"
+  assert pct_decode("%-1") == "%-1"
+  # truncated at the end, and one bad escape spoils only its own component
+  assert pct_decode("abc%") == "abc%"
+  assert pct_decode("abc%4") == "abc%4"
+  assert pct_decode("%41%zz") == "%41%zz"
+  # a literal non-ASCII character and an escape of the same bytes agree
+  assert pct_decode("\u{4e2d}%E6%96%87") == "\u{4e2d}\u{6587}"
+  # bytes that are not UTF-8 become U+FFFD, as they always did
+  assert pct_decode("%FF") == "\u{fffd}"
+  assert pct_decode("") == ""
+}
+
+test "a path segment keeps its plus and decodes its escapes" {
+  assert decode_path_seg("a+b%20c") == "a+b c"
+  assert decode_path_seg("%2B") == "+"
+}

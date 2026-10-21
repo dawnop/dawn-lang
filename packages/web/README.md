@@ -1,11 +1,11 @@
 # packages/web
 
-A small HTTP/1.1 framework over `jdk.httpserver`: routes are data, handlers are `fn(Request) -> Result[Response, HttpError] !io`, middleware are handler transformers.
+A small HTTP/1.1 framework: routes are data, handlers are `fn(Request) -> Result[Response, HttpError] !io`, middleware are handler transformers. The package is pure Dawn; the JVM server is the separate package [`web-jvm`](../web-jvm), on `jdk.httpserver`.
 
 ```dawn
 use web/types.{Request, Response, HttpError, text, param}
 use web/router.{route_get}
-use web/server.{serve_app}
+use web_jvm/server.{serve_app}
 use web/middleware.{with_logging}
 
 fn hello(req: Request) -> Result[Response, HttpError] !io = {
@@ -18,6 +18,20 @@ pub fn main() -> Unit !io =
 ```
 
 TLS is terminated in front of it (nginx or similar).
+
+## Modules
+
+| module | what it holds |
+|---|---|
+| `web/types` | `Request`, `Response` and its constructors, `HttpError`, `ErrorFormat`, `BodySource`, `DEFAULT_MAX_BODY` |
+| `web/router` | routes, `route_get` and friends, `tagged`, `body_limit`, `guarded`, and the dispatch a server runs (`dispatch_segs`, `validate_routes`, `Dispatch`) |
+| `web/middleware` | `with_logging`, `with_cors`, `with_body_limit` |
+| `web/wire` | `parse_form`, `form_value`, `form_all`, and the path and query rules every server shares |
+
+None of it names a Java type, so `dawnc check packages/web` and `dawnc doc
+packages/web` work as they do for any pure package. A program that serves on
+the JVM also depends on `web-jvm` and imports `web_jvm/server`; a library of
+handlers and routes depends on `web` alone.
 
 ## Paths
 
@@ -115,17 +129,21 @@ let r = try_redirect(302, "/files/caf%C3%A9")?
 let d = attachment("text/plain", "\u{4e2d}\u{6587}.txt", body)
 ```
 
-`streaming(status, content_type, stream)` is chunked. With
-`length: Some(n)` it sends `Content-Length: n` instead, and a stream that ends
-short is logged and the connection is closed before `n`, so the client can
-tell.
+`streaming(status, content_type, source)` takes a `BodySource`, two functions:
+`read(n)` returns at most `n` bytes and an empty `Bytes` at the end, and
+`close()` releases the upstream. The server closes every source it is given,
+read or not. On the JVM, `web_jvm/server.input_source(stream)` makes one from
+an `InputStream`. The body is chunked. With `length: Some(n)` it sends
+`Content-Length: n` instead, and a stream that ends short is logged and the
+connection is closed before `n`, so the client can tell. A `ResponseBody` holds
+functions when it is a stream, so it has no `==`; compare with a `match`.
 
 An `HttpError` whose status is outside `200..599` is answered as the neutral
 `500`, keeping its headers.
 
 ## Server
 
-`start(cfg, routes, middleware)` binds and answers a `ServerHandle`: `join`
+In `web_jvm/server` (package `web-jvm`). `start(cfg, routes, middleware)` binds and answers a `ServerHandle`: `join`
 waits on it, `stop` ends it, `handle_port` reads the bound port (for
 `port: 0`). `serve_app(port, routes, middleware)` and `serve_app_with(cfg,
 routes, middleware)` start and join in one call. `start` refuses a route

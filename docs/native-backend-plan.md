@@ -1708,14 +1708,14 @@ CI 对这个目录只有一份 `actions/cache`;目录里有 dawnc 和 `site/nati
 **改了什么。** `site/build.sh` 的 `stdlib.json` 与 `site/package-docs.sh` 的各包文档改用 `dawnc doc`
 (dawnc 即 §15 缓存里的那个,没有新缓存、没有新程序)。选哪个驱动由包的内容机器判断,不维护名单:
 包自己或任一路径依赖(传递)含 `use java` 行的走 `./bin/dawn doc`,其余走 dawnc。目前含 `use java`
-的只有 `packages/web`,脚本为它打印一行说明;一个包新增或删掉最后一处 `use java`,驱动自己跟着换。
+的只有 `packages/web-jvm`(web 7 起 `packages/web` 纯 Dawn),脚本为它打印一行说明;一个包新增或删掉最后一处 `use java`,驱动自己跟着换。
 `scripts/site-dist-diff.sh` 在两条腿之后另做一步:全部文档由 JVM 驱动重生成(`DAWN_DOC_BACKEND=jvm`),
 与快照里 native 写的 `stdlib.json` 和各包 JSON 逐字节比,差一个字节即红。
 
-**web 的例外与退出条件。** `packages/web` 本刀留在 JVM。备选「给 native doc 加一个不解析 Java 签名的
-模式」没做:那是为一个过渡态在编译器里加分支,B1(ruling 第 4 条,web 的 Java 拆进独立模块)之后就成了
-死代码;等 B1 什么也不浪费。**退出条件:B1 合入后删掉 `package-docs.sh` 里的 `has_java` 与 JVM 分支,
-web 随其余包一起走 dawnc。**
+**web 的例外已退出(B1a)。** `packages/web` 的 Java 拆进了独立包 `packages/web-jvm`(web 7,见
+[web-core-split-design.md](web-core-split-design.md)),web 本身纯 Dawn,按机器判据自动走 dawnc,
+native 与 JVM 文档逐字节一致已实测;`web-jvm` 含 `use java`,仍走 JVM 驱动,所以 `has_java` 与
+JVM 分支保留,不再是过渡态。备选「给 native doc 加一个不解析 Java 签名的模式」始终没做。
 
 **不做的。** 不改 `doc` 本身(native 一侧零改动);不动 `selfhost-param-diff.sh`、`api-snapshot.py`
 这些自己调 `dawn doc` 的门(它们的对象是 JVM 驱动与上一 release,不是站点建站路径)。

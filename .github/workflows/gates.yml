@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22348s (the most this file's `3x` claims may add up to)
+# push-total: 22353s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3763,7 +3763,10 @@ jobs:
     # inline reference counting of c2b6aa23: the 682s run (38097489191) is 10
     # hours older than it, and the 600s-and-over runs have a median of 607s
     # before it and 634s after (+27s, against the +17s it measured).
-    # budget: 3x 785s worst observed plus one deviation (run 38634588917)
+    # 2026-10-20: scripts/native-web-core.sh joins this job (dawnc check and doc
+    # of packages/web whole, with two controls): 1.4s measured locally, charged
+    # at 5s. Planning value: 785 + 5 = 790s. The push total moves by 5s.
+    # budget: 3x 790s worst observed plus one deviation and the web check (run 38634588917)
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -3800,6 +3803,16 @@ jobs:
       # a tag would publish, not one built beside it with the same recipe.
       - name: driver subcommands on the native backend
         run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
+
+      # packages/web is pure Dawn since 7.0 and the JDK server is the separate
+      # packages/web-jvm, so the native binary checks and documents the whole
+      # package as a directory target. Nothing else reads that fact: a `use java`
+      # added to a web module in a PR whose JVM tests pass would make the package
+      # JVM-only again with every other gate green. The script holds it with two
+      # negative controls (a use java in router.dawn, the JVM server module copied
+      # into web/src). 1.4s locally, charged at 5s below.
+      - name: packages/web checks and documents natively as a whole
+        run: ./scripts/native-web-core.sh dawnc-linux-x86_64
 
       # `check`, `emitc`, `build`, `run` and a program's `test` load only the
       # std modules the program reaches (docs/check-std-prune-design.md). This

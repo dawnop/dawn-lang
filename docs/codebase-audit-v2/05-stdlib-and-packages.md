@@ -249,7 +249,7 @@
 
 ## LIB-10 — P1 — CORS headers 不覆盖 error response
 
-<!-- audit-anchor: absent packages/web/src/server.dawn | bodyless_request -->
+<!-- audit-anchor: absent packages/web-jvm/src/server.dawn | bodyless_request -->
 
 > **后续处置（2026-08-11 登记，实现更早）：已修。** `79448da` 让 dot-segment 400 与
 > body-limit 413 这两条早退拒绝也走 middleware 链：`bodyless_request` 从请求行与 header
@@ -348,7 +348,7 @@
 
 ## LIB-15 — P2 — `ServerHandle` 不拥有自己创建的 executor（已修）
 
-<!-- audit-anchor: absent packages/web/src/server.dawn | executor: ExecutorService -->
+<!-- audit-anchor: absent packages/web-jvm/src/server.dawn | executor: ExecutorService -->
 
 > **后续处置（2026-08-11 登记，实现更早）：已修。** `aed3107` 把 `start` 创建的
 > virtual-thread executor 存进 `ServerHandle`，`stop` 经 `release_handle` 固定顺序释放：
@@ -452,7 +452,7 @@
 
 ## LIB-18 — P2 — streaming response 吞掉所有 fault 与 panic（已修）
 
-<!-- audit-anchor: present packages/web/src/server.dawn | let _ = catch_panic -->
+<!-- audit-anchor: present packages/web-jvm/src/server.dawn | let _ = catch_panic -->
 
 > **当前静态候选（未验证，不改严重度）：** streaming 分支把 `transferTo` 放进
 > `catch_panic` 后丢弃整个结果，且 `ResponseBody.Stream` 不携带 expected length：

@@ -16,7 +16,7 @@ use std/str
 use std/bytes
 use std/list
 use std/map
-use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error, response_status, response_headers, response_body, log_request}
+use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error, response_status, response_headers, response_body, same_body, log_request}
 
 ## One access-log line per request: method, path, status, wall time. The
 ## path is the raw one, still percent-encoded, so a request cannot write a
@@ -59,7 +59,7 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 # (client_max_body_size) instead — they opt out with the "raw-body" tag.
 #
 # This is a per-application budget layered under the server's own ceiling
-# (server.DEFAULT_MAX_BODY), which is what actually bounds the allocation; by
+# (types.DEFAULT_MAX_BODY), which is what actually bounds the allocation; by
 # the time a middleware runs, the body has been read. Keeping it is still worth
 # it — an app may want a limit far below the server's — but it is a policy
 # check, not a memory guard, and the comment used to imply otherwise.
@@ -79,7 +79,7 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 ## the handler sees them. `limit` must be positive; anything else panics when
 ## the middleware is built. Routes tagged "raw-body" opt out, since an upload
 ## is bounded in front, by nginx. A policy check, not a memory guard: the
-## server's own ceiling (`server.DEFAULT_MAX_BODY`) bounds the allocation.
+## server's own ceiling (`types.DEFAULT_MAX_BODY`) bounds the allocation.
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
   if limit > 0 {
     req =>
@@ -263,7 +263,7 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
   match app(req_of("OPTIONS", map.empty())) {
     Ok(r) -> {
       assert response_status(r) == 200
-      assert response_body(r) == Text("ok")
+      assert same_body(response_body(r), Text("ok"))
     }
     Err(_) -> { assert false }
   }
@@ -273,7 +273,7 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
   match app(req_of("OPTIONS", map.from([("origin", ["https://a.example"])]))) {
     Ok(r) -> {
       assert response_status(r) == 200
-      assert response_body(r) == Text("ok")
+      assert same_body(response_body(r), Text("ok"))
       assert list.find(response_headers(r), h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
     }
     Err(_) -> { assert false }
