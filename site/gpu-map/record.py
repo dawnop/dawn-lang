@@ -72,6 +72,9 @@ EDITS = [
      "use tileir/prog.{TileProg, trace_calls, op_count, erase, ", 1),
     ("use tileir/bytecode.{encode, bytecode_version}\n", "", 1),
     ("use std/io.{with_fs_real, write_bytes}\n", "", 1),
+    # the `--asm-args` mode of main (scripts/tile-gpu-diff) needs it; the cut
+    # below removes that main
+    ("use tileir/asm.{tileiras_args}\n", "", 1),
 ]
 
 MAIN = '''
