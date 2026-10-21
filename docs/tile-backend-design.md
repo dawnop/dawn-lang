@@ -6174,6 +6174,117 @@ ms，中位 / p90，每格 200 个样本；误差是与 f64 参考的最大绝�
 - 为 `exp`（自然底）加 `ftz`：方言里 `exp` 没有这个属性（它的字段是 `rounding_mode`），调研的 A/B 也是换底加 ftz 一起省的。
 - 在录制期按元素宽度拒绝 `ftz`：与 `add`、`mul` 一致，拒绝留给汇编器；单独为 `exp2` 加一条会让同一属性有两种拒绝时机。
 
+### 6.41 调用者位置：拒绝报文指到用户写下调用的那一行（刀 M5，tileir 0.21.0）
+
+**起因。** 记录期的拒绝是一个 Dawn `panic`，而 `panic` 带的是**抛出它的那一行**：L2（`59207892`）之后，这条位置在 tileir 里永远是
+`tileir/prog.dawn:339:3`（`refuse` 里的 `panic`），对用户没有信息。刀 C（#812）只补了运算符名与区域路径，注释里写明「哪个公开调用」留给本刀。
+调研 `research-caller-location-20261020`（§0）纠正了两条过期前提：语言机制早在 v0.85.0（L4，`611dd421`）就落地了（`at: Loc = caller()`，spec §3.1/§8.4，
+[caller-location-design.md](caller-location-design.md)），不需要另开语言线；缺的只是 tileir 采用它（裁决 `ruling-source-span-map-20261003` 刀序 M5 行早已裁过）。
+本刀就是 M5，裁决见 `ruling-gpu-next-batch-20261020`「修订（调用位置）」第 1 到 3 条：B0 加操作数溯源（B0+E），B1 不做。
+
+**一、哪个位置进报文：只取 kernel 自己写的那一层。**
+
+一个 kernel 的一次公开调用到 panic 之间隔着好几层库代码（`trace5` → `record_calls` → kernel 体 → `dev.dawn` 的公开函数 → 私有 helper → 效果操作 → handler 的臂 → `refuse`）。
+用户要找的只有「kernel 体里发出那个调用的一行」。不需要逐跳转发 `at`：M1 已经能分辨 kernel 自己的调用与库替自己发的调用（§6.23「判定规则只有一条」：调用标记出现在 body 顶层
+或直接在一对体标记里才算 kernel 的）。所以：
+
+- 约 191 个 `dev.dawn` 公开函数（含 `d_range`、`d_loop`；有 `called(..)` 包装的全部）末尾加 `at: Loc = caller()`，`called(name, at, body)` 把它交给效果操作
+  `t_call_enter(name, at)`。库内调用（`tile_at` 里的 `idx_mul`）带的是 `tileir/dev.dawn:…` 的 `Loc`，但 handler 只为 kernel 层的调用立一行（`kernel_side`），所以那个位置**从不被读**。
+- `Call` 加字段 `at: Option[Loc]`。`Ctx`（见下）每次调用标记变化时重算「最近的位置」：最内层、有位置的、仍开着的 kernel 级调用的 `at`；一个都没有就回落到 `trace_kernel` / `trace1` 到 `trace5` 自己的调用点
+  （这几个入口也加了 `at: Loc = caller()`，放在 `hints` 之后，与 `std-defaults-design` 3 的「默认值放 body 之后」一致）。
+- **运算符没有自己的位置。** `+ - * /`、`var` 的开/取/写、裸浮点字面量都经 trait 方法进来，trait 方法不收 `caller()` 默认（passes.dawn 的「trait methods do not take parameter defaults」，
+  B1 的主题）。所以 `t_call_enter` 的 `at` 是 `Option[Loc]`：公开函数给 `Some`，运算符一路给 `None`（`called_bare`）。函数与运算符共用同一份录制：`add` 与 `tile_add` 各调一个
+  `called(..)`，`idx_add` 等十来个函数拆出私有的 `*_rec` 给运算符直接用，**调用名与 op 序列不变**，所以站点的调用图与所有 golden 都不动。
+  用户不能只靠 `Loc` 默认值拿到「运算符那一行」，这是 B1 的缺口，下面「不做的」里记。
+- `for` 是 trait 方法（`StagedIter`），拿不到调用位置，但 `d_range(..)` 是普通顶层函数：它加 `at: Loc = caller()`，**存进 `DRange` 记录**，`staged_for` 读 `r.at` 交给 `called("d_range", r.at, ..)`。
+  `for` 区域的位置就是写下 `d_range(` 的那一行。
+- `d_loop` 的 `at` 放在 `body` **之前**：`d_loop { .. }` 的尾随块填最后一个形参，`caller()` 默认放在后面会吃掉块。这是唯一一个 `caller()` 默认在前的函数（Dawn 允许默认形参在必填形参之前，实测）。
+- `store_sub` 的形参 `at: List[Int]`（分片号）与新的 `at` 重名，改名为 `piece`。
+
+**二、逐 op 位置表放在哪里：`Call` 侧表，不进 `TileProg`。**
+
+位置属于「调用」，不属于「指令」：一个调用发出零到许多条指令，一个运算符一条也没有位置。`trace_calls` 已经把 kernel 的调用做成侧表（`ops_from`/`ops_to` 指回 `op #k`），位置就放在这张表的 `at`
+字段里；报文里的 `op #k` 保持不变（golden 变异体、站点与测试都在用，它是与位置无关的稳定编号）。`TileProg` 一个字节不变：
+
+- `TileProg` 的文本与字节若依赖「调用写在哪一行」，同一个 kernel 挪一行就换一份 golden，「同一个 body 追踪两次得同一个程序」之外又多了「挪一行也得同一个程序」，这条不变量会被位置撞坏；
+- 所以 golden（209 个 `.mlir`、`.tilebc`）逐字节不变，台账的输入摘要变了（tileir 源码在里面）但每个 kernel 的输出摘要不变。
+- 降低、编码期的拒绝（`lower.dawn`、`bytecode.dawn` 的 `panic`，约 70 处）此时只剩 `TileProg`，没有侧表，**本刀不碰**（见「不做的」）。
+
+**三、拒绝报文的形状。** 后缀不再是库内位置，而是用户位置；原因之后依次是操作数来源、区域路径（各带位置）：
+
+```
+<原因> (<角色> comes from `<调用>` at <file>:<line>:<col>) (inside the body of a `d_range` at <file>:<line>:<col>, inside the then branch of a `d_if` at ...) at <file>:<line>:<col>
+```
+
+- 实现：`refuse(name, what)` 的 `name` 从 `String` 改为 `Ctx { kernel, at, regions, calls, spans }`（148 处 `refuse(name, ..)` 与 111 处 `refuse_at(name, frames, ops, ..)` 的调用形状**一个字符没动**，只改了 56 个 helper 的形参类型）。handler 里
+  `name` 是一个 `var`，`t_call_enter`/`t_call_exit`/`t_body_enter`/`t_body_exit`/`t_trial_end` 后用 `ctx_now` 重算，所以每个臂里的 `refuse(name, ..)` 自动带当时的位置。`refuse` 用 `panic(msg, at: name.at)` 显式传位置，库内位置不再出现。
+- 原因在前、说明在后，仍然是为了 tile-golden 变异体：它们按「`kernel … op #k … 原因`」的子串匹配，说明放前面会全断。新增的两段都放在原因之后，所以前缀比对继续通过。
+- **操作数溯源。** `spans[k]` 记每个已结束的 kernel 级调用铸出的句柄区间 `[from, to)`（`t_call_enter` 记起点，`t_call_exit` 补终点，随 `Snap` 一起被 trial 恢复）。拒绝一个操作数（`check_operand`、`check_k`、`check_format`、`tile_row`）时，
+  找「最内层、区间含这个句柄、且已结束」的调用，报它的名字与位置：`rhs comes from `mma` at src/main.dawn:27:24`；来源是运算符则报 `rhs comes from the `+` operator`（没有位置）。
+  还开着的调用不认领句柄，所以循环的归纳变量（`d_range` 自己铸的）没有来源，不报。查找只在拒绝时发生（线性扫侧表），记录路径上没有额外成本。
+- 区域位置：`t_body_enter` 的标记之前紧邻的那个 `Row` 就是打开这个区域的调用，它的 `at` 就是 `for` 所在的行。区域数与 `frames` 数对得上才附位置；对不上（库自己开的区域，如 `reduce_max` 的合并体）只给原来的文字，不猜。
+- 运算符的拒绝以「最近的已知位置」结尾（外层区域的位置，否则 `trace` 调用点），原因后的来源说明才是找错行的线索。这是已知的限制，不是缺陷：B1 之前运算符没有自己的行。
+
+**样例（改前、改后，同一份 kernel，`bin/dawn run` 的实测输出）。**
+
+普通公开函数（`add` 里 rhs 形状不对）：
+
+```
+tileir: kernel `plain`: op #8 `+`: rhs is tile<2x2xf64>, declared tile<8x8xf64> at tileir/prog.dawn:339:3
+tileir: kernel `plain`: op #8 `+`: rhs is tile<2x2xf64>, declared tile<8x8xf64> (rhs comes from `full` at src/main.dawn:9:34) at src/main.dawn:9:27
+```
+
+`for` 区域（上界不是 rank-0；循环体里的 `*`）：
+
+```
+tileir: kernel `bound`: op #9 `d_range`: upper bound is tile<8xi32>, and it must be the rank-0 tile<i32> at tileir/prog.dawn:339:3
+tileir: kernel `bound`: op #9 `d_range`: upper bound is tile<8xi32>, and it must be the rank-0 tile<i32> at src/main.dawn:37:13
+tileir: kernel `range`: op #11 `*`: rhs is tile<2x2xf64>, declared tile<8x8xf64> (inside the body of a `d_range`) at tileir/prog.dawn:339:3
+tileir: kernel `range`: op #11 `*`: rhs is tile<2x2xf64>, declared tile<8x8xf64> (rhs comes from `full` at src/main.dawn:30:23) (inside the body of a `d_range` at src/main.dawn:29:12) at src/main.dawn:29:12
+```
+
+运算符（`a + b`，两个操作数形状不同）：
+
+```
+tileir: kernel `op`: op #7 `+`: rhs is tile<2x2xf64>, declared tile<8x8xf64> at tileir/prog.dawn:339:3
+tileir: kernel `op`: op #7 `+`: rhs is tile<2x2xf64>, declared tile<8x8xf64> (rhs comes from `full` at src/main.dawn:23:11) at src/main.dawn:45:14
+```
+
+最后一条的结尾 `src/main.dawn:45:14` 是 `trace2(` 的调用点：`a + b` 没有自己的行，外层又没有区域，回落到入口。要找的行由前面的 `rhs comes from `full` at src/main.dawn:23:11` 给出。
+
+**四、版本与迁移。** tileir 0.20.0 到 0.21.0（0.x 升 minor，是另一个兼容类）。公开面变化：
+
+- 约 191 个公开函数多一个 `at: Loc = caller()` 形参：**把这些函数当函数值用的调用方**要补一个 `Loc`（类型多一个形参），直接调用不受影响。
+- `Dev` 的 `t_call_enter` 改签名：`(name: String, at: Option[Loc])`。包外自写的 handler 要改（仓内唯二的 handler 都在 tileir 里）。
+- `Call` 加字段 `at: Option[Loc]`；`DRange` 加字段 `at: Loc`；`d_loop` 的形参顺序变成 `(at, body)`；`store_sub` 的 `at` 改名 `piece`；`trace_kernel`、`trace_calls`、`trace1` 到 `trace5` 末尾多一个 `at`。
+- 仓内调用方：`d_loop` 的位置实参（本仓全是尾随块写法，一处不改）、tileir 自己的测试；站点 `gpu-map/record.py` 读 `called("<名>"` 的正则不受影响（`called_bare` 不匹配，且其名字都是公开函数名），`flash_attn.map` 重录前后一致。没有兼容层。
+- CHANGELOG 0.17 里「There is no way to read a Dawn source position at run time」与 `prog.dawn` 里 `refuse_at`、`DebugInfo` 上两处「panic 不带位置」的旧注释同刀更正（前者对记录 handler 本身曾成立，对公开函数不成立）。
+
+**五、测试与负控。**
+
+- 新增四项测试（tileir 包 262 项变 266 项）：普通公开函数的拒绝、`for` 区域（上界拒绝指到 `d_range` 的行，区域内拒绝带区域位置）、运算符溯源（来源是 `mma`、来源是运算符）、侧表的 `at`（公开调用 `Some(行)`、运算符 `None`）。
+  行号用「紧挨在闭包上方的 `loc.here()`」取，所以测试体里加行只在两者之间才动期望；路径用 `loc.path(loc.here())`，因为 `tileinterp` 等依赖者把 tileir 的测试也跑一遍，路径是 `tileir/prog.dawn` 而不是 `src/prog.dawn`。
+  每项都断言报文里**不含** `dev.dawn` 的路径（库内位置不泄漏）。刀 C 的区域说明测试同步改写（来源说明现在夹在原因与区域之间）。
+- 负控：把 handler 的 `t_call_enter` 改成不过滤、为每个调用（含库内调用）都立行（`kernel_side(marks)` 换成 `true`，即取最内层调用的位置），`dawn test packages/tileir` 变红，6 项失败，其中本刀的 `M5: a refusal from a public call ends in the line the kernel called it on` 与
+  `M5: the side table keeps where the kernel wrote each call, and none for an operator` 都红，另外 4 项是 `render` 里既有的「侧表只有 kernel 自己的调用」的测试。已还原。
+- `tile-golden` 的拒绝用例按前缀比对，变异体全部照旧；`mutation-anchor-preflight`（689 项）、`anchor-guard` 通过。
+
+**六、台账与门禁。** 见本刀报告 `gpu-m5-report-20261020.md`：golden 209 个字节不变，三本台账各重录一行（输入摘要变、输出摘要不变），全套门禁走集群。
+
+**不做的（理由）：**
+
+- **B1：让 trait 方法与 effect operation 收 `caller()` 默认。现在不做。** 运算符、`for`、裸字面量这三类在本刀里用退路（`d_range` 存位置、操作数溯源）。理由：内建算术 trait 加 `at` 要迁 82 个 impl（std/int 七个模块各 6、`std/narrow` 18、tileir 10），
+  还要压热路径（每个用户类型上的 `+` 多传一个常量串，`std/int` 的循环要实测），目前只有一个消费者（tileir）。**重开条件（二选一）：** 第二个库需要给 trait 方法报调用位置，或 M5 实测溯源报文不够用。
+  方案的依据与代价见 `research-caller-location-20261020.md` §四（B1 行）：语言 3 到 4 个写者日，至少两期一发布（编译器与 std 同提交，推进种子之后 tileir 才能改 impl）。
+- **`TileProg` 带逐 op 位置表。** 位置若进 `TileProg` 的相等性，手写构造的程序、golden 与「追踪两次得同一个程序」都被挪行撞坏；位置只放侧表。代价：降低与编码期的拒绝（`lower.dawn`、`bytecode.dawn`）与 Debug 段（T14b 的 `locs`）
+  仍只有 `op #k` 与 `.mlir` 的行，没有 Dawn 的行。要补，是另一刀（`DebugInfo.locs` 可以由侧表填，`tileiras --lineinfo` 的 `.debug_line` 就能指回 `.dawn`；`Loc` 只有起点没有区间，`DIFile` 要逐文件登记）。
+- **用 `caller()` 整块替换站点的静态 span 配对。** 方法链 `f(x).g()` 两次调用的 `Loc` 完全相同（都是接收者的起点，spec §8.4），`load_at(k, [j]).transpose()` 两个调用分不开；所以 `site/gpu-map/record.py` 与
+  `playground/src/play/tilemap.dawn` 的配对原样保留（调研 §2.3、裁决第 3 条）。
+- **逐跳转发 `at`。** 库内部嵌套不需要：handler 取「当前打开的 kernel 级调用」，库内调用的位置被过滤掉。用户自己的 helper 想报两层位置，自己声明 `at` 并转发（caller-location-design §3.4，刻意的显式）。
+- **兼容层**（旧签名的 `t_call_enter`、不带 `at` 的 `d_loop`）：没有外部消费者，破坏性改动直接迁调用方。
+- **记录期开销的实测断言。** 本刀没有测每个调用多传一个常量串的开销，设计也不依赖它（记录是宿主一次性的、与设备无关）；`caller()` 的常量不分配（caller-location-design §3.1）。
+- **web 的 header 拒绝采用 `at`**：阻塞已解除（种子是 v0.95.2），但它不是 tileir，进 todo、排低。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 6f465b44c062bc65 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 67e9252d44eca7e1 -->
 
 # Dawn 教程
 
@@ -1752,7 +1752,7 @@ pub fn main() -> Unit !io = {
 ```output
 recorded
 tileir: kernel `k`: op #5 `store_cell`: parameter 0 is an In, and nothing writes an In
-tileir: kernel `k`: op #6 `+`: rhs is tile<64xf64>, declared tile<128xf64>
+tileir: kernel `k`: op #6 `+`: rhs is tile<64xf64>, declared tile<128xf64> (rhs comes from `broadcast` at src/main.dawn:13:37)
 tileir: kernel `k`: op #8 `store`: parameter 1 is an Out, which is written through its cells alone (store_cell, store_sub); a parameter written any other way is a Shared
 ```
 
@@ -1932,14 +1932,14 @@ pub fn main() -> Unit !io = {
 ```
 ```output
 recorded
-tileir: kernel `row_softmax`: op #9 `-`: rhs is tile<32xf64>, declared tile<32x64xf64>
+tileir: kernel `row_softmax`: op #9 `-`: rhs is tile<32xf64>, declared tile<32x64xf64> (rhs comes from `reduce_max` at src/main.dawn:15:22)
 ```
 
 `reduce_max(s, keepdims: true)` 归约最后一维（默认 `dim: -1`），并把这一维留成长度 1：得到
 `[32, 1]` 的 tile，每行一个最大值。它在 `sub` 里遇到 `[32, 64]` 的 tile，长度为 1 的那一维加宽到 64。
 规则就这一条：逐元素操作的操作数与操作同阶时，沿长度为 1 的维加宽；0 阶 tile 加宽到任何形状。
 第二个 kernel 去掉了 `keepdims`，最大值成了 `[32]`，阶不同，在减法处被拒；拒绝里写的是 `-`，
-即内核里写的那个运算符。`broadcast(t, shape)` 是显式写法，用在不是逐元素操作的地方。
+即内核里写的那个运算符，还有做出那个放不进去的 tile 的 `reduce_max` 所在的行。`broadcast(t, shape)` 是显式写法，用在不是逐元素操作的地方。
 循环的初值通常写 `full(shape, value)`：这个形状的 tile，格式取它被检查时期望的那个：
 `var m: Tile[F32] = full([32, 1], 0.0)`。
 

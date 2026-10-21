@@ -7,6 +7,48 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.21.0 (2026-10-21)
+
+Breaking, in one place (`docs/tile-backend-design.md` section 6.41, "caller
+position", tileir M5): a refusal now ends in the line of your own source that
+wrote the call, not in a line of this package. Every public function of
+`tileir/dev` gained a last parameter `at: Loc = caller()` (spec 8.4), the
+recording keeps the one of each call the kernel wrote, and the panic is raised
+with it. The 209 goldens are unchanged byte for byte: a `TileProg` keeps no
+position, the side table `trace_calls` answers does.
+
+Public surface:
+
+- About 190 functions of `tileir/dev` take `at: Loc = caller()` as their last
+  parameter. A call is unchanged; a caller that stored one of them as a
+  first-class function value needs a `Loc` argument. `d_loop` takes it FIRST
+  (`d_loop(at, body)`) so that `d_loop { .. }` still hands the block to `body`.
+  `store_sub`'s `at: List[Int]` (the piece number) is renamed `piece`.
+- `Dev.t_call_enter(name: String)` is now `t_call_enter(name: String, at:
+  Option[Loc])`. A handler written outside the package must answer the new
+  arity. `at` is `None` for what a kernel writes without a call: `+ - * /`, a
+  `var`, a bare float literal, because a trait method takes no `caller()`
+  default.
+- `Call` gains `at: Option[Loc]`, `DRange` gains `at: Loc` (`for` is a trait
+  method, so the range is where the loop's position is still known), and
+  `trace_kernel`, `trace_calls` and `trace1` to `trace5` take a last `at: Loc =
+  caller()`, the position a refusal falls back to when no call of the kernel
+  has one.
+
+What a refusal says (all after the reason, so the goldens' mutants, which
+match the text up to the reason, still match):
+
+- It ends in `at <file>:<line>:<col>` of the nearest call the kernel wrote.
+- An operand it names says where it was made: `(rhs comes from `mma` at
+  src/main.dawn:27:24)`, or `(rhs comes from the `+` operator)`.
+- A region it is inside names the call that opened it: `(inside the body of a
+  `d_range` at src/main.dawn:26:12)`.
+
+Not done, on purpose: an operator has no line of its own (that needs trait
+methods to take `caller()`, which was not done: one consumer, 82 impls to
+migrate), and refusals raised while lowering or encoding a finished `TileProg`
+still name only `op #k`.
+
 ## 0.19.0 (2026-10-21)
 
 Breaking, in one place (`docs/tile-backend-design.md` section 6.39, "hints on
@@ -155,7 +197,8 @@ the 205 existing `.mlir` and `.tilebc` goldens are unchanged on both backends.
   cubin's `.debug_line`.
 - `render.text_debug(prog, dir, file)` builds a `DebugInfo` whose locations are
   the lines and columns of `prog`'s own `.mlir` text saved as `dir/file`.
-  There is no way to read a Dawn source position at run time, so a caller
+  The recording handler had no Dawn source position to offer then (0.21.0
+  gives it one, in `Call.at`, but a `TileProg` still keeps none), so a caller
   with a better source (a line from a call map) builds the record itself.
 - `lower.instr_count(body)` is the number of instructions a body is, regions
   included.
