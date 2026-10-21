@@ -231,6 +231,28 @@ c_p_green() { # the canary is asked before the swap, with the candidate and the 
   w="$(grep -nF -- 'mv "$B/.dawn-play.next" "$B/dawn-play"' "$LOG" | head -1 | cut -d: -f1)"
   [ -n "$c" ] && [ -n "$w" ] && [ "$c" -lt "$w" ]
 }
+# The sample answers are made after the canary and before the swap, by the
+# binary that is about to go live; a sample without an answer stops the deploy
+# before the swap, and the check through the socket asks the store for the
+# hello sample. A store made after the swap would leave the first requests of
+# the new runner uncached, and one that failed quietly would ship the
+# regression it exists to prevent.
+c_p_warm_order() {
+  mkrepo play; GOODNATIVE; deploy play; shipped || return 1
+  local c w s
+  c="$(grep -nF -- '--candidate "$B/.dawn-play.next" --previous "$B/dawn-play"' "$LOG" | head -1 | cut -d: -f1)"
+  w="$(grep -nF -- 'canary-check.py" --warm' "$LOG" | head -1 | cut -d: -f1)"
+  s="$(grep -nF -- 'mv "$B/.dawn-play.next" "$B/dawn-play"' "$LOG" | head -1 | cut -d: -f1)"
+  [ -n "$c" ] && [ -n "$w" ] && [ -n "$s" ] && [ "$c" -lt "$w" ] && [ "$w" -lt "$s" ]
+}
+c_p_warm_fails() {
+  mkrepo play; GOODNATIVE; deploy play SSH_FAIL='--warm'
+  refused 'sample answers could not be warmed; the new binary was not swapped in' '--live'
+}
+c_p_live_store() {
+  mkrepo play; GOODNATIVE; deploy play; shipped &&
+    grep -qF -- '--live --toolchain-id "$TOOLCHAIN_ID" --samples /opt/dawn/site/play-ui/samples' "$LOG"
+}
 # The JVM runner's unit is never restarted or polled any more.
 c_p_no_jvm() { mkrepo play; GOODNATIVE; deploy play; shipped && ! grep -Eq 'restart dawn-play( |$)|127\.0\.0\.1:8087/health' "$LOG"; }
 
@@ -471,6 +493,9 @@ mutant_for() {
     c_p_swap_check) echo 'if ! ssh "$HOST" "$CANARY_ENV $REMOTE_SWAP"; then=>if ! true "$HOST" "$CANARY_ENV $REMOTE_SWAP"; then' ;;
     # the swap made before the canary: the order the case reads goes
     c_p_green) printf '%s\n' 'echo "=== checking the new runner against the live one (canary) ==="=>ssh "$HOST" "$CANARY_ENV $REMOTE_SWAP"' ;;
+    c_p_warm_order) printf '%s\n' 'echo "=== warming the sample answers with the new runner ==="=>ssh "$HOST" "$CANARY_ENV $REMOTE_SWAP"' ;;
+    c_p_warm_fails) echo 'if ! ssh "$HOST" "$CANARY_ENV $REMOTE_WARM"; then=>if ! true "$HOST" "$CANARY_ENV $REMOTE_WARM"; then' ;;
+    c_p_live_store) echo ' --toolchain-id "$TOOLCHAIN_ID" --samples /opt/dawn/site/play-ui/samples=> --toolchain-id "$TOOLCHAIN_ID"' ;;
     c_p_no_jvm) echo 'sudo systemctl restart dawn-play-lsp=>sudo systemctl restart dawn-play dawn-play-lsp' ;;
     # the JVM port is not recognised: it ships, with "cannot tell"
     c_p_route_jvm) echo 'http://127.0.0.1:8087/*|http://localhost:8087/*)=>http://never.invalid/*)' ;;

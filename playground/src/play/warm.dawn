@@ -1,0 +1,116 @@
+# `dawn-play warm <samples dir> <out dir>`: the deploy's half of the sample
+# answer store (play/answers, docs/playground-native-runner-design.md 4.4). It
+# sends every sample in the directory through the runner's own routes with a
+# host that reads nothing and writes each answer to the out directory, so an
+# answer in the store is by construction what a request for that program gets
+# from this binary on this toolchain, made by the same sandbox, flock gate and
+# renderers, not by a second implementation of them.
+#
+# What it asks for, per sample: /run, and /compile for target c (which keeps
+# the JVM listing too, one job makes both), and for a program that imports
+# tileir also target tile, which is the page's entry from the GPU page. It
+# runs before the new runner is swapped in (deploy/redeploy.sh) and as the
+# user the runner runs as, so the jobs go through the real sandbox.
+#
+# It fails closed. A sample whose answer is not kept (a compile error, a
+# timeout, a busy gate that never freed) makes the exit status 1, so the deploy
+# stops with the old runner live: a sample page that quietly takes seven
+# seconds again is the regression this exists to prevent, and nobody would
+# see it in a green deploy. A busy gate is waited out, since a deploy runs
+# while the live runner serves visitors.
+use std/io
+use std/io.{with_fs_real, with_exit_real}
+use std/bytes
+use std/str
+use std/map
+use std/list
+use json/value.{JStr, JObj}
+use json/render.{render}
+use play/answers.{write_answer, has_answer}
+use play/contract.{wants_tileir}
+use play/exec.{CompilerId, compiler_id, run_cmd}
+use play/gate.{recording_host}
+use play/host.{Host}
+use play/routes.{Reply, rpc, compile_rpc, view_here}
+use play/view.{cache_key}
+
+const BUSY_TRIES: Int = 40
+
+fn request(code: String, target: String) -> Bytes = {
+  let fields = if target == "" { [("code", JStr(code))] } else { [("code", JStr(code)), ("target", JStr(target))] }
+  bytes.utf8(render(JObj(map.from(fields))))
+}
+
+# Ask until the gate is free: a 429 is the host saying "busy", not an answer.
+fn until_answered(ask: fn() -> Reply !io) -> Reply !io = {
+  var r = ask()
+  var tries = 1
+  while r.status == 429 && tries < BUSY_TRIES {
+    r = ask()
+    tries = tries + 1
+  }
+  r
+}
+
+fn fail(msg: String) -> Unit !io = {
+  io.eprintln("warm: ${msg}")
+  with_exit_real(() => io.exit(1))
+}
+
+# One sample's answers; the names of the answers that did not get kept.
+fn warm_sample(host: Host, id: CompilerId, out: String, name: String, code: String) -> List[String] !io = {
+  let view = view_here(id)
+  let run_key = "${cache_key("${id.version} ${id.build}", code)}/run"
+  let base = cache_key(view.toolchain, code)
+  let r = until_answered(() => rpc(request(code, ""), host, false, false, "${id.version} ${id.build}"))
+  io.eprintln("warm: ${name} run ${r.status}")
+  let c = until_answered(() => compile_rpc(request(code, "c"), host, view))
+  io.eprintln("warm: ${name} compile c ${c.status}")
+  var wanted = [("run", run_key), ("c", "${base}/c"), ("jvm", "${base}/jvm")]
+  if wants_tileir(code) {
+    let t = until_answered(() => compile_rpc(request(code, "tile"), host, view))
+    io.eprintln("warm: ${name} compile tile ${t.status}")
+    wanted = wanted ++ [("tile", "${base}/tile")]
+  }
+  var missing: List[String] = []
+  for (what, key) in wanted {
+    if not has_answer(out, key) {
+      missing = missing ++ ["${name} ${what}"]
+    }
+  }
+  missing
+}
+
+pub fn warm_main(samples: String, out: String) -> Unit !io = {
+  if out == "" || out == "/" {
+    fail("refusing to use '${out}' as the out directory")
+  }
+  # a fresh directory: answers of an earlier run must not outlive this one
+  match run_cmd(["sh", "-c", "rm -rf \"$1\" && mkdir -p \"$1\"", "sh", out], "/dev/null", "") {
+    Ok(0) -> ()
+    _ -> fail("cannot prepare ${out}")
+  }
+  let names = match with_fs_real(() => io.list_dir(samples)) {
+    Ok(ns) -> list.filter(ns, (n) => str.ends_with(n, ".dawn"))
+    Err(e) -> {
+      fail("cannot list ${samples}: ${e}")
+      []
+    }
+  }
+  if len(names) == 0 {
+    fail("no samples in ${samples}")
+  }
+  let id = compiler_id()
+  let host = recording_host((key, line) => write_answer(out, key, line))
+  var missing: List[String] = []
+  for n in names {
+    match with_fs_real(() => io.read_bytes("${samples}/${n}")) {
+      Err(e) -> { missing = missing ++ ["${n} unreadable: ${e}"] }
+      Ok(b) -> { missing = missing ++ warm_sample(host, id, out, n, bytes.decode_utf8_lossy(b)) }
+    }
+  }
+  if len(missing) > 0 {
+    fail("no answer was kept for: ${join(missing, ", ")}")
+  }
+  io.eprintln("warm: ${len(names)} samples, every answer kept in ${out}")
+}

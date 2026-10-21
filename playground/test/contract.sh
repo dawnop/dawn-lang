@@ -120,12 +120,18 @@ fi
 # runner's TMPDIR alone can be longer (it was, on the first external run).
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/dawn-play-work.XXXXXX")
 export PLAY_WORK_ROOT="$WORK"
+# The sample answer store the runner reads (play/answers): empty until the
+# store cases below fill it with the runner's own `warm`, so every earlier case
+# is a request with no store to find.
+ANSWERS="$WORK.answers"
+mkdir -p "$ANSWERS"
+export PLAY_ANSWERS="$ANSWERS"
 SOCK="dawn-play-test-$$-${WORK##*.}"
 LOG=$(mktemp "${TMPDIR:-/tmp}/dawn-play-test.XXXXXX")
 # Guards keep a failed kill from turning into the script's exit status (dash:
 # set -e applies inside an EXIT trap). The log is kept on failure only.
 # `kill -TERM -PGID`, not `kill -- -PGID`: dash's builtin rejects the latter.
-trap 'kill -TERM "-$SRV" 2>/dev/null || true; rm -rf "${WORK:?}" "${WORK:?}.cases" "${WORK:?}.bin"; rm -f "${WORK:?}.canary"; { [ -z "$NATIVE_DIR" ] || rm -rf "$NATIVE_DIR"; }; { [ -z "${SRV2:-}" ] || kill -TERM "-$SRV2" 2>/dev/null || true; }; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
+trap 'kill -TERM "-$SRV" 2>/dev/null || true; rm -rf "${WORK:?}" "${WORK:?}.cases" "${WORK:?}.bin" "${WORK:?}.answers" "${WORK:?}.samples" "${WORK:?}.badsamples"; rm -f "${WORK:?}.canary"; { [ -z "$NATIVE_DIR" ] || rm -rf "$NATIVE_DIR"; }; { [ -z "${SRV2:-}" ] || kill -TERM "-$SRV2" 2>/dev/null || true; }; [ "${fail:-1}" = "0" ] && rm -f "$LOG" || echo "runner log: $LOG"; true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
@@ -639,6 +645,81 @@ code=$(printf '%s' "$big" | curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/
 # GET -> 405
 code=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -o /dev/null -w '%{http_code}' "$URL/run" || true)
 [ "$code" = "405" ] && { pass=$((pass+1)); echo "  ok  GET -> 405"; } || { fail=$((fail+1)); echo "FAIL  GET -> $code"; }
+
+# ---- the sample answer store (docs/playground-native-runner-design.md 4.4)
+#
+# A sample's answer is made at deploy time by `dawn-play warm` and read by the
+# serving runner. The program below is the one "sample": its answer is taken
+# live first (the store is empty), then the warm-up fills the store, then the
+# same request is a hit. A hit and the live answer must be the same bytes but
+# for `ms` and the `"cached":true` member a hit adds. The negative controls are
+# the point of the cases after it: one byte more is a miss, another toolchain
+# id is a miss, and a sample that gets no answer fails the warm-up.
+SAMPLES="$WORK.samples"
+mkdir -p "$SAMPLES"
+printf 'pub fn main() -> Unit !io = println("answer-store-sample")\n' >"$SAMPLES/store.dawn"
+STORE_RUN=$(python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1], encoding="utf-8").read()}))' "$SAMPLES/store.dawn")
+STORE_RUN_PLUS=$(python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1], encoding="utf-8").read() + " "}))' "$SAMPLES/store.dawn")
+STORE_C=$(python3 -c 'import json,sys; print(json.dumps({"code": open(sys.argv[1], encoding="utf-8").read(), "target": "c"}))' "$SAMPLES/store.dawn")
+live_run=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$STORE_RUN" "$URL/run" || true)
+live_c=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$STORE_C" "$URL/compile" || true)
+st=0
+[ -z "$(ls -A "$ANSWERS")" ] || st=1
+LIVE="$live_run" python3 -c 'import os,json; d=json.loads(os.environ["LIVE"]); assert d["ok"] is True and d["output"]=="answer-store-sample\n" and "cached" not in d, d' || st=1
+LIVE="$live_c" python3 -c 'import os,json; d=json.loads(os.environ["LIVE"]); assert d["ok"] is True and d["cached"] is False, d' || st=1
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: with no answers kept, a sample is compiled and run"; else fail=$((fail + 1)); echo "FAIL  store: with no answers kept, a sample is compiled and run"; fi
+
+if "$NATIVE_BIN" warm "$SAMPLES" "$ANSWERS" >"$WORK.warm.log" 2>&1; then st=0; else st=1; fi
+# one program: its run, and the C and JVM views of one compile
+[ "$(ls -A "$ANSWERS" | wc -l)" -eq 3 ] || st=1
+[ "$st" = "0" ] || cat "$WORK.warm.log"
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: warm keeps the run and both compile views of a sample"; else fail=$((fail + 1)); echo "FAIL  store: warm keeps the run and both compile views of a sample"; fi
+rm -f "$WORK.warm.log"
+
+hit_run=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$STORE_RUN" "$URL/run" || true)
+st=0
+LIVE="$live_run" HIT="$hit_run" python3 -c '
+import os,re
+live, hit = os.environ["LIVE"], os.environ["HIT"]
+norm = lambda t: re.sub(r"\"ms\":[0-9]+", "\"ms\":0", t)
+assert hit.endswith(",\"cached\":true}"), hit
+assert norm(hit[:-len(",\"cached\":true}")] + "}") == norm(live), (live, hit)' || st=1
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a hit on /run is the live answer plus cached:true, byte for byte"; else fail=$((fail + 1)); echo "FAIL  store: a hit on /run is the live answer plus cached:true, byte for byte"; echo "        live: $live_run"; echo "        hit:  $hit_run"; fi
+
+hit_c=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$STORE_C" "$URL/compile" || true)
+st=0
+LIVE="$live_c" HIT="$hit_c" python3 -c '
+import os,json
+def drop(t):
+    d=json.loads(t); d.pop("ms",None); c=d.pop("cached"); return d, c
+(a, ca), (b, cb) = drop(os.environ["LIVE"]), drop(os.environ["HIT"])
+assert ca is False and cb is True and a == b and a["ok"] is True, (ca, cb)' || st=1
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a hit on /compile is the live view with cached:true"; else fail=$((fail + 1)); echo "FAIL  store: a hit on /compile is the live view with cached:true"; fi
+
+# Negative controls: the program with one more byte, and the same program under
+# another toolchain id, are not in the store, so they compile and run for real.
+miss_run=$(curl -s --noproxy '*' --max-time "$REQ_MAX" -X POST --data "$STORE_RUN_PLUS" "$URL/run" || true)
+st=0
+MISS="$miss_run" python3 -c 'import os,json; d=json.loads(os.environ["MISS"]); assert d["ok"] is True and d["output"]=="answer-store-sample\n" and "cached" not in d, d' || st=1
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: one more byte in the source is a miss"; else fail=$((fail + 1)); echo "FAIL  store: one more byte in the source is a miss"; echo "        $miss_run"; fi
+
+other_tc=$(printf 'POST /run HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: %s\r\n\r\n%s' "${#STORE_RUN}" "$STORE_RUN" |
+  PLAY_TOOLCHAIN_ID="0.0.0 b1:000000000000" "$NATIVE_BIN" serve 2>/dev/null | python3 -c 'import sys; print(sys.stdin.buffer.read().split(b"\r\n\r\n", 1)[1].decode())')
+st=0
+MISS="$other_tc" python3 -c 'import os,json; d=json.loads(os.environ["MISS"]); assert d["ok"] is True and d["output"]=="answer-store-sample\n" and "cached" not in d, d' || st=1
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: another toolchain id is a miss"; else fail=$((fail + 1)); echo "FAIL  store: another toolchain id is a miss"; echo "        $other_tc"; fi
+
+# A sample that does not compile gets no answer, and the warm-up says so by
+# failing: a deploy must stop there rather than ship a sample page that is slow.
+BAD="$WORK.badsamples"
+mkdir -p "$BAD"
+printf 'pub fn main() -> Unit !io = println(nope)\n' >"$BAD/broken.dawn"
+st=0
+if "$NATIVE_BIN" warm "$BAD" "$WORK.badsamples/out" >"$WORK.warm.log" 2>&1; then st=1; fi
+grep -q 'no answer was kept for: broken.dawn run' "$WORK.warm.log" || st=1
+[ "$st" = "0" ] || cat "$WORK.warm.log"
+rm -f "$WORK.warm.log"
+if [ "$st" = "0" ]; then pass=$((pass + 1)); echo "  ok  store: a sample that gets no answer fails the warm-up"; else fail=$((fail + 1)); echo "FAIL  store: a sample that gets no answer fails the warm-up"; fi
 
 # The access log names each program by the SHA-256 of its `code` field, with
 # the toolchain that answered it, and never by its text: a program carrying a

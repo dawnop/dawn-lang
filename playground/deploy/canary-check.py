@@ -5,8 +5,10 @@ server twice: before the new binary replaces the live one, and after.
     canary-check.py --candidate BIN [--previous BIN] --unit UNIT --toolchain-id "V B"
                     [--accept-diff] [--slow-requests 20] [--slow-spacing 1.0]
                     [--inherit-env] [--set NAME=VALUE ...]
+    canary-check.py --warm --candidate BIN --unit UNIT --toolchain-id "V B"
+                    --samples DIR --stage DIR
     canary-check.py --live [--socket /run/dawn-play/http.sock] --toolchain-id "V B"
-                    [--health-requests 100]
+                    [--health-requests 100] [--samples DIR]
     canary-check.py --self-test
 
 Before the swap (the default mode) it holds the candidate, the binary this
@@ -51,11 +53,25 @@ was the other option and was not taken: a release that changes a diagnostic
 or the compile view (Emit-Change) would differ from a record for reasons that
 are not the runner's, and the live binary on the same toolchain does not.
 
+Before the swap it also warms the sample answers (`--warm`): the candidate's
+`warm` subcommand (play/warm.dawn) sends every sample through its own routes
+into a staging directory, with the same environment, and the deploy then
+installs that directory as the answer store the runner's unit names
+(PLAY_ANSWERS, docs/playground-native-runner-design.md 4.4). The canary above
+runs with the store switched off (`PLAY_ANSWERS=`), so a store left by the
+last deploy can never turn the candidate's live answers into hits that the
+previous runner, which has no store, would be compared against.
+
 After the swap (`--live`) it asks the socket itself, so the real `Accept=yes`
 start-up is in the numbers: /health answers this release and build, its p95
 over `--health-requests` (100) new connections is at most HEALTH_CEILING_MS
 (25) ms (measured 7.7 to 7.9 ms on the production host, almost all of it
-systemd starting an instance per connection), and one /run hello prints hello.
+systemd starting an instance per connection), and one /run hello prints hello. With `--samples DIR` it also holds the store
+to its two promises through the socket: the hello sample, sent as it is on
+disk, is answered from the store (`"cached":true`) with the output its `.out`
+file records, and the same sample with one more byte at the end is not (the
+program really compiles and runs, and the answer does not say it came from
+the store).
 
 Exit status 0 only when everything holds. Standard library only, because it
 runs on the server under `python3 -I`.
@@ -248,8 +264,9 @@ def toolchain_of(tid):
     return words[0], words[1]
 
 
-def pre_swap(a):
-    tc = toolchain_of(a.toolchain_id)
+def candidate_env(a):
+    """The environment and working directory a request process of the unit gets,
+    with the answer store switched off (see the header)."""
     unit = open(a.unit, encoding="utf-8").read()
     env = dict(os.environ) if a.inherit_env else {"PATH": SYSTEMD_PATH}
     env.update(unit_environment(unit))
@@ -257,8 +274,26 @@ def pre_swap(a):
         name, _, value = kv.partition("=")
         env[name] = value
     env["PLAY_TOOLCHAIN_ID"] = a.toolchain_id
+    env["PLAY_ANSWERS"] = ""
     wd = unit_setting(unit, "WorkingDirectory")
-    cwd = wd if wd and os.path.isdir(wd) else None
+    return env, (wd if wd and os.path.isdir(wd) else None)
+
+
+def warm(a):
+    """Run the candidate's `warm` over the samples into the staging directory."""
+    toolchain_of(a.toolchain_id)
+    if not a.candidate or not a.unit or not a.samples or not a.stage:
+        raise SystemExit("--warm needs --candidate, --unit, --samples and --stage")
+    env, cwd = candidate_env(a)
+    r = subprocess.run([a.candidate, "warm", a.samples, a.stage], env=env, cwd=cwd, timeout=1800)
+    kept = len(os.listdir(a.stage)) if os.path.isdir(a.stage) else 0
+    print(f"warm: exit {r.returncode}, {kept} answers in {a.stage}")
+    return 0 if r.returncode == 0 and kept > 0 else 1
+
+
+def pre_swap(a):
+    tc = toolchain_of(a.toolchain_id)
+    env, cwd = candidate_env(a)
     cand = direct(a.candidate, env, cwd)
     prev = direct(a.previous, env, cwd) if a.previous and os.access(a.previous, os.X_OK) else None
     if prev is None:
@@ -324,7 +359,32 @@ def live(a):
     ok = st == "200" and d.get("ok") is True and d.get("output") == "hello\n"
     print(f"  {'ok  ' if ok else 'FAIL'} /run hello through the socket: {st} {normalize(body)[:120]}")
     bad += 0 if ok else 1
+    if a.samples:
+        bad += live_store(call, a.samples)
     return 1 if bad else 0
+
+
+def live_store(call, samples):
+    """The sample answer store, through the socket: a hit is the recorded
+    answer marked cached, one more byte is a real compile and run."""
+    bad = 0
+    code = open(os.path.join(samples, "hello.dawn"), encoding="utf-8").read()
+    want = open(os.path.join(samples, "hello.out"), encoding="utf-8").read()
+    t0 = time.perf_counter()
+    st, body = split(call("POST", "/run", j(code))[0])
+    ms = (time.perf_counter() - t0) * 1000
+    d = parsed(body)
+    ok = st == "200" and d.get("ok") is True and d.get("output") == want and d.get("cached") is True
+    print(f"  {'ok  ' if ok else 'FAIL'} /run of the hello sample is answered from the store: {st} cached={d.get('cached')} {ms:.0f} ms")
+    bad += 0 if ok else 1
+    t0 = time.perf_counter()
+    st, body = split(call("POST", "/run", j(code + "\n"))[0])
+    ms = (time.perf_counter() - t0) * 1000
+    d = parsed(body)
+    ok = st == "200" and d.get("ok") is True and d.get("output") == want and not d.get("cached")
+    print(f"  {'ok  ' if ok else 'FAIL'} /run of the sample plus one byte is compiled, not served from the store: {st} {ms:.0f} ms")
+    bad += 0 if ok else 1
+    return bad
 
 
 def self_test():
@@ -364,6 +424,14 @@ def self_test():
                           "POST", "/compile", "200", tc, None)
     assert access_line_ok("200 GET /health toolchain=0.94.0/b1:96af8ed9c5f2\n", "GET", "/health", "200", tc, None)
     assert access_line_ok("413 (unreadable request)\n", "POST", "/run", "413", tc, None)
+    # the candidate's environment never carries a store, whatever the unit says
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".service") as f:
+        f.write("[Service]\nEnvironment=PLAY_ANSWERS=/opt/dawn/playground/answers\nEnvironment=PLAY_JDK=/x\n")
+        f.flush()
+        args = argparse.Namespace(unit=f.name, inherit_env=False, set=[], toolchain_id="0.94.0 b1:96af8ed9c5f2")
+        env, _ = candidate_env(args)
+    assert env["PLAY_ANSWERS"] == "" and env["PLAY_JDK"] == "/x" and env["PLAY_TOOLCHAIN_ID"] == args.toolchain_id, env
     print("canary-check self-test ok")
     return 0
 
@@ -379,6 +447,9 @@ def main():
     ap.add_argument("--accept-diff", action="store_true")
     ap.add_argument("--inherit-env", action="store_true")
     ap.add_argument("--set", action="append", default=[])
+    ap.add_argument("--warm", action="store_true")
+    ap.add_argument("--samples", default="")
+    ap.add_argument("--stage", default="")
     ap.add_argument("--socket", default="/run/dawn-play/http.sock")
     ap.add_argument("--health-requests", type=int, default=100)
     ap.add_argument("--slow-requests", type=int, default=SLOW_REQUESTS)
@@ -390,6 +461,8 @@ def main():
         ap.error("--toolchain-id is required")
     if a.live:
         return live(a)
+    if a.warm:
+        return warm(a)
     if not a.candidate or not a.unit:
         ap.error("--candidate and --unit are required before the swap")
     return pre_swap(a)
