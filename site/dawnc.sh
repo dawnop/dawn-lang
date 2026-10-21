@@ -84,6 +84,7 @@ site_dawnc() {
 #     `name = "relative/path"` are followed; these projects have no java-deps
 #     or vendored jars, and a dependency of another kind would have to be added
 #     here).
+#   - the files named by <project>/inputs.txt, when it exists.
 # Not in the key, on purpose: data the program reads when it runs (docs/,
 # examples/, assets), which the binary reads on every run as `dawnc run` did.
 site_prog_key() {
@@ -111,7 +112,14 @@ site_prog_key() {
     done < <(awk '/^\[/ { in_deps = ($0 == "[deps]") }
                   in_deps && /=[ ]*"[^"]*"/ { match($0, /"[^"]*"/); print substr($0, RSTART + 1, RLENGTH - 2) }' "$toml")
   done
-  { printf 'stamp\t%s\n' "$stamp"; printf '%s' "$files" | grep -v '^$' | sort -u | xargs sha256sum; } |
+  # Files outside the project that it is generated from (site/gpu-map/harness):
+  # `inputs.txt` beside its dawn.toml lists them, one repo-relative path a line.
+  local extra=""
+  if [ -f "$proj/inputs.txt" ]; then
+    extra="$(grep -v '^[[:space:]]*\(#\|$\)' "$proj/inputs.txt" | sort -u | xargs sha256sum)" || return 1
+  fi
+  { printf 'stamp\t%s\n' "$stamp"; printf '%s' "$files" | grep -v '^$' | sort -u | xargs sha256sum
+    printf '%s\n' "$extra"; } |
     sha256sum | cut -d' ' -f1
 }
 
