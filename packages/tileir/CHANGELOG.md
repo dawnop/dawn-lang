@@ -7,6 +7,12 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.22.0
+
+- Add `prog.check_config(arch, bq, hints, at:)` to reject measured row-tile performance cliffs before recording.
+- Add `div(..., approx: true)` for approximate f32 division, including `ftz: true`.
+- Preserve the buffer base alignment before a `tensor_view` element offset so aligned views can use TMA.
+
 ## 0.21.0 (2026-10-21)
 
 Breaking, in one place (`docs/tile-backend-design.md` section 6.41, "caller

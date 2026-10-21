@@ -35,7 +35,7 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
   blocks_of }
 use tileir/prog.{TileProg, Cells, trace_kernel, ByPtr, ByValue, trace1, trace2, trace3, trace4, trace5, cells, In, Out, Shared,
-  Whole, FREE_AXIS, Scalar }
+  Whole, FREE_AXIS, Scalar, check_config }
 use tileir/render.{render, text_debug}
 use tileir/bytecode.{encode, bytecode_version}
 use tileir/asm.{tileiras_args}
@@ -2172,20 +2172,58 @@ fn attn_context(p: Param[Float], v: Param[Float], o: Param[Float]) -> Unit !Dev 
 # scale of Triton's tutorial kernel (`sm_scale`) and cutile-rs's `qk_scale`
 # are launch arguments. ATT_INV_SQRT_D is what the tests launch it with.
 const FA_BQ: Int = 32
-const FA_BK: Int = ATT_D
+const FA_BK: Int = 16
 
-fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float]) -> Unit !Dev = {
+# The policy lives beside the kernels, not in tileir. Zero hints mean
+# absent in the IR. Evidence is a row of flash-config/ledger.json; times
+# are the P4-b selection measurements, before approximate division.
+type FaShape = { n: Int, d: Int, bh: Int }
+
+fn fa_shape() -> FaShape = FaShape { n: ATT_N, d: ATT_D, bh: 1 }
+
+type FaCfg = { bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float }
+
+fn fa_config(bq: Int, bk: Int, occ: Int, cga: Int, evidence: String, median: Float, baseline: Float) -> FaCfg =
+  FaCfg { bq: bq, bk: bk, occ: occ, cga: cga, evidence: evidence, median: median, baseline: baseline }
+
+fn fa_cfg(arch: String, d: Int) -> FaCfg = match (arch, d) {
+  ("sm_90", 64) -> fa_config(64, 128, 2, 0, "bf90d64", 0.1520, 0.2534)
+  ("sm_90", 128) -> fa_config(64, 64, 2, 0, "bf90d128", 0.5491, 0.7217)
+  ("sm_100", 64) -> fa_config(256, 64, 2, 2, "bf100d64", 0.1956, 0.3553)
+  ("sm_100", 128) -> fa_config(256, 128, 0, 2, "bf100d128", 0.1341, 0.2742)
+  _ -> fa_config(64, 64, 0, 0, "bfdefault", 0.2534, 0.2534)
+}
+
+fn fa64_cfg(arch: String, _d: Int) -> FaCfg = match (arch, _d) {
+  ("sm_90", _) -> fa_config(32, 16, 0, 0, "f6490", 14.12, 93.87)
+  ("sm_100", _) -> fa_config(32, 16, 0, 0, "f64100", 14.96, 79.11)
+  _ -> fa_config(32, 16, 0, 0, "f64default", 14.12, 93.87)
+}
+
+fn fa_opt(n: Int) -> Option[Int] = if n == 0 { None } else { Some(n) }
+
+fn fa_entry(c: FaCfg) -> EntryHints = entry_hints(occupancy: fa_opt(c.occ), num_cta_in_cga: fa_opt(c.cga))
+
+fn fa_hints(arch: String, c: FaCfg) -> ByArch[EntryHints] =
+  if c.occ == 0 && c.cga == 0 { [] } else { [for_arch(arch, fa_entry(c))] }
+
+# Heads share the flat launch grid; no workload class enters fa_cfg.
+fn fa_kv_index(j: Idx, bh: Int, s: Int, c: FaCfg) -> Idx !Dev =
+  if bh == 1 { j } else { (block_id(0) / idx_const(s / c.bq)) * idx_const(s / c.bk) + j }
+
+fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float], scale: Param[Float],
+  cfg: FaCfg = fa64_cfg("default", ATT_D), shape: FaShape = fa_shape()) -> Unit !Dev = {
   let tq = load_cell(q)
-  var m: Tile[Float] = full([FA_BQ, 1], -INFINITY)
-  var l: Tile[Float] = full([FA_BQ, 1], 0.0)
+  var m: Tile[Float] = full([cfg.bq, 1], -INFINITY)
+  var l: Tile[Float] = full([cfg.bq, 1], 0.0)
   var acc = zeros(o)
-  for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[Float] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
+  for j in d_range(0, shape.n / cfg.bk) {
+    let s: Tile[Float] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp(s - m_new)
     let alpha = exp(m - m_new)
     l = l * alpha + reduce_sum(p, keepdims: true)
-    acc = mma(p, load_at(v, [j]), acc * alpha)
+    acc = mma(p, load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
   store_cell(o, acc / l)
@@ -2217,22 +2255,49 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 # here for the reason it is in those kernels: a probability below 2^-126 is
 # far below one f32 ulp of the row sum `l`, which holds the row maximum's own
 # term, 1, so flushing it cannot move `l` or the weighted sum.
-fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float], scale: Param[F32]) -> Unit !Dev = {
+fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float], scale: Param[F32],
+  cfg: FaCfg = fa_cfg("default", ATT_D), shape: FaShape = fa_shape()) -> Unit !Dev = {
   let tq = load_cell(q)
-  var m: Tile[F32] = full([FA_BQ, 1], f32(-INFINITY))
-  var l: Tile[F32] = full([FA_BQ, 1], 0.0)
-  var acc: Tile[F32] = full([FA_BQ, ATT_D], 0.0)
-  for j in d_range(0, ATT_N / FA_BK) {
-    let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
+  var m: Tile[F32] = full([cfg.bq, 1], f32(-INFINITY))
+  var l: Tile[F32] = full([cfg.bq, 1], 0.0)
+  var acc: Tile[F32] = full([cfg.bq, shape.d], 0.0)
+  for j in d_range(0, shape.n / cfg.bk) {
+    let s: Tile[F32] = mma(tq, load_at(k, [fa_kv_index(j, shape.bh, shape.n, cfg)]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
     let p = exp2(s - m_new, ftz: true)
     let alpha = exp2(m - m_new, ftz: true)
     l = l * alpha + reduce_sum(p, keepdims: true)
-    acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
+    acc = mma(p.to(BF16), load_at(v, [fa_kv_index(j, shape.bh, shape.n, cfg)]), acc * alpha)
     m = m_new
   }
-  store_cell(o, (acc / l).to(F64))
+  store_cell(o, div(acc, l, approx: true, ftz: true).to(F64))
 }
+
+# Config -> kernel. Every captured value is fixed before recording.
+fn fa_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[Float], Param[Float], Param[Float], Param[Float], Param[Float]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn(q, k, v, o, scale, c, FaShape { n: n, d: d, bh: bh })
+
+fn fa_bf16_kernel(c: FaCfg, n: Int, d: Int, bh: Int) -> fn(Param[BF16], Param[BF16], Param[BF16], Param[Float], Param[F32]) -> Unit !Dev =
+  (q, k, v, o, scale) => flash_attn_bf16(q, k, v, o, scale, c, FaShape { n: n, d: d, bh: bh })
+
+fn fa_record(arch: String, d: Int, n: Int, bh: Int, bf16: Bool, cfg: Option[FaCfg] = None, at: Loc = caller()) -> TileProg = {
+  let c = match cfg { Some(c) -> c
+    None -> if bf16 { fa_cfg(arch, d) } else { fa64_cfg(arch, d) } }
+  check_config(arch, c.bq, fa_entry(c), at: at)
+  let q = cells([bh * n, d], [c.bq, d])
+  let kv = cells([bh * n, d], [c.bk, d], along: [FREE_AXIS, 1])
+  if bf16 {
+    let (p, _e) = trace5("flash_attn_bf16", In(BF16, q), In(BF16, kv), In(BF16, kv), Out(F64, q), Scalar(F32),
+      fa_bf16_kernel(c, n, d, bh), hints: fa_hints(arch, c))
+    p
+  } else {
+    let (p, _e) = trace5("flash_attn", In(F64, q), In(F64, kv), In(F64, kv), Out(F64, q), Scalar(F64),
+      fa_kernel(c, n, d, bh), hints: fa_hints(arch, c))
+    p
+  }
+}
+
+fn fa_named(name: String, arch: String, d: Int) -> TileProg = TileProg { ..fa_record(arch, d, 256, 1, true), name: name }
 
 # ---- tileir 0.8.2: index division, same-rank broadcasting, `lit` ----
 
@@ -5455,13 +5520,19 @@ fn trace(name: String) -> TileProg = match name {
   "flash_attn" -> {
     let (p, _e) = trace5("flash_attn",
       In(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(F64, fa_kv()), In(F64, fa_kv()),
-      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), flash_attn)
+      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F64), fa_kernel(fa64_cfg("default", ATT_D), ATT_N, ATT_D, 1))
     p
   }
+  "flash_bf16_sm90_d64" -> fa_named("flash_bf16_sm90_d64", "sm_90", 64)
+  "flash_bf16_sm90_d128" -> fa_named("flash_bf16_sm90_d128", "sm_90", 128)
+  "flash_bf16_sm100_d64" -> fa_named("flash_bf16_sm100_d64", "sm_100", 64)
+  "flash_bf16_sm100_d128" -> fa_named("flash_bf16_sm100_d128", "sm_100", 128)
   "flash_attn_bf16" -> {
     let (p, _e) = trace5("flash_attn_bf16",
-      In(BF16, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), In(BF16, fa_kv()), In(BF16, fa_kv()),
-      Out(F64, cells([ATT_M, ATT_D], [FA_BQ, ATT_D])), Scalar(F32), flash_attn_bf16)
+      In(BF16, cells([ATT_M, ATT_D], [64, ATT_D])),
+      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along: [FREE_AXIS, 1])),
+      In(BF16, cells([ATT_N, ATT_D], [64, ATT_D], along: [FREE_AXIS, 1])),
+      Out(F64, cells([ATT_M, ATT_D], [64, ATT_D])), Scalar(F32), fa_bf16_kernel(fa_cfg("default", ATT_D), ATT_N, ATT_D, 1))
     p
   }
   "idx_softmax" -> {

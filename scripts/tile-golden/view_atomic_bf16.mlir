@@ -43,11 +43,12 @@ cuda_tile.module @m {
       %45 = addi %43, %44 : tile<i32>
       yield %45 : tile<i32>
     }
-    %46 = offset %arg1, %1 : tile<ptr<bf16>>, tile<i32> -> tile<ptr<bf16>>
-    %47 = make_tensor_view %46, shape = [16], strides = [1] : tensor_view<16xbf16, strides=[1]>
-    %48 = make_strided_view %47 : strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>
-    %49 = itof %42 signed rounding<nearest_even> : tile<16xi32> -> tile<16xbf16>
-    %50 = atomic_red_view_tko relaxed device %48[%1], addf, %49 token=%0 : tile<16xbf16>, strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %46 = assume div_by<16>, %arg1 : tile<ptr<bf16>>
+    %47 = offset %46, %1 : tile<ptr<bf16>>, tile<i32> -> tile<ptr<bf16>>
+    %48 = make_tensor_view %47, shape = [16], strides = [1] : tensor_view<16xbf16, strides=[1]>
+    %49 = make_strided_view %48 : strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>
+    %50 = itof %42 signed rounding<nearest_even> : tile<16xi32> -> tile<16xbf16>
+    %51 = atomic_red_view_tko relaxed device %49[%1], addf, %50 token=%0 : tile<16xbf16>, strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

@@ -700,7 +700,7 @@ TILEIR_USE = "use tileir/"
 PINNED_SAMPLES = {
     "flash_attn": (
         "scripts/tile-golden/kernels.dawn",
-        ["flash_attn"],
+        ["flash_attn", "fa_shape", "fa_config", "fa64_cfg", "fa_kv_index", "fa_kernel"],
     ),
     # The two cards of the GPU page that are not golden kernels. `refused` is
     # two kernels packages/tileir's tests record and hold the refusal of;

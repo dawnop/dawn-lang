@@ -1511,8 +1511,14 @@ pub fn mul[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Boo
 })
 
 ## The element-wise quotient `a / b`. `rounding` and `ftz` as for `add`.
-pub fn div[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false, at: Loc = caller()) -> Tile[D] !Dev = called("div", at, () => {
-  binary(float_op("divf", rounding, ftz), a, b)
+## `approx` selects the architecture's approximate f32 division; it cannot
+## be combined with a directed rounding mode. Use a tolerance reference.
+pub fn div[D](a: Tile[D], b: Tile[D], rounding: Rounding = NearestEven, ftz: Bool = false, approx: Bool = false, at: Loc = caller()) -> Tile[D] !Dev = called("div", at, () => {
+  if approx && rounding != NearestEven {
+    panic("tileir: approximate division cannot use a directed rounding mode", at: at)
+  } else { () }
+  let op = if approx { "divf_approx" ++ (if ftz { "_ftz" } else { "" }) } else { float_op("divf", rounding, ftz) }
+  binary(op, a, b)
 })
 
 ## The element-wise larger of `a` and `b`. Without `propagate_nan` (the

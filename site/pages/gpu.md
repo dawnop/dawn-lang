@@ -314,3 +314,44 @@ golden kernels
 ## chip-gpus
 
 GPUs on record
+
+
+## perf-title
+
+Flash attention timings
+
+## perf-body
+
+Offline configurations selected by `(arch, d)`, measured with CUDA events in one process and stream over five interleaved rounds. Times are median / p90 in milliseconds. The baseline is 64×64 with no entry hints; bf16 uses f32 accumulation and f64 output, and f64 uses 32×16 after tuning. cuTile uses its upstream bf16 attention sample with the fastest of four measured configurations; SDPA uses the row's bf16 or f64 format. cuTile outputs bf16; Dawn outputs f64. The f64 rows have no equivalent cuTile sample. The [configuration ledger](https://github.com/dawnop/dawn-lang/blob/main/scripts/flash-config/ledger.json) retains the selection evidence, including the unselected sm_100 d64 single head candidate. Configurations are fixed before recording; there is no runtime search.
+
+## perf-format
+
+Format
+
+## perf-workload
+
+Workload
+
+## perf-tools
+
+Tileiras / optimization
+
+## perf-config
+
+Configuration
+
+## perf-before
+
+Before
+
+## perf-after
+
+After
+
+## perf-cutile
+
+cuTile 1.7.0
+
+## perf-sdpa
+
+torch SDPA

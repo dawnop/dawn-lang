@@ -4712,8 +4712,8 @@ attr_pkg_mutant directed-rounding-as-nearest-even bytecode.dawn \
 #     so this is the whole of the attribute, the file is the same length,
 #     and attr_ftz's subnormal sums and products stop being flushed.
 attr_pkg_mutant ftz-bit-dropped bytecode.dawn \
-  '  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ' \
-  '  "addf_ftz" | "mulf_ftz" -> 0' \
+  '  "addf_ftz" | "mulf_ftz" | "divf_approx_ftz" -> FLOAT_FLAG_FTZ' \
+  '  "addf_ftz" | "mulf_ftz" | "divf_approx_ftz" -> 0' \
   attr_ftz probe:attr_ftz:add=0
 
 # 35a. exp2-ftz-bit-dropped (knife P3): the same bit on `exp2`, which has

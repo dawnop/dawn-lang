@@ -410,10 +410,35 @@ fn walk_apply(n: Node, dev: List[String], env0: Env, src: String) -> Result[(Lis
 
 ## The call that records the visitor's kernel and what the walk needs of it:
 ## its markers' count, its span, the spans of its arguments and the kernel
-## function it names last.
+## function selected by its final argument.
 pub type Trace = { arity: Int, lo: Int, hi: Int, args: List[(Int, Int)], kernel: String }
 
-fn find_traces(n: Node, out: List[Trace]) -> List[Trace] = {
+# A configuration factory is transparent only when its sole expression is
+# a lambda forwarding the trace parameters unchanged to one named kernel.
+# The runtime pairing still has to account for every recorded call.
+fn trace_kernel(root: Node, value: Node, arity: Int) -> Option[String] = {
+  if value.kind == "Var" { return Some(second_word(value.text)) }
+  if value.kind != "Apply" || len(value.kids) == 0 || value.kids[0].kind != "Var" { return None }
+  match kernel_fn(root, second_word(value.kids[0].text)) {
+    None -> None
+    Some(factory) -> match fn_body(factory) {
+      None -> None
+      Some(lambda) -> {
+        let params = filter(lambda.kids, p => p.kind == "LParam")
+        let rest = filter(lambda.kids, p => p.kind != "LParam")
+        if lambda.kind != "Lambda" || len(params) != arity || len(rest) != 1 { return None }
+        let call = rest[0]
+        if call.kind != "Apply" || len(call.kids) < arity + 1 || call.kids[0].kind != "Var" { return None }
+        let forwarded = list.take(list.drop(call.kids, 1), arity)
+        if list.any(forwarded, p => p.kind != "Var") || map(forwarded, p => second_word(p.text)) != map(params, p => second_word(p.text)) {
+          None
+        } else { Some(second_word(call.kids[0].text)) }
+      }
+    }
+  }
+}
+
+fn find_traces(root: Node, n: Node, out: List[Trace]) -> List[Trace] = {
   var found = out
   if n.kind == "Apply" && len(n.kids) > 0 && n.kids[0].kind == "Var" {
     let callee = second_word(n.kids[0].text)
@@ -422,15 +447,18 @@ fn find_traces(n: Node, out: List[Trace]) -> List[Trace] = {
       Some(k) -> {
         let args = list.drop(n.kids, 1)
         let last = args[len(args) - 1]
-        if len(args) == k + 2 && not list.any(args, a => a.kind == "Arg") && last.kind == "Var" {
-          found = found ++ [Trace { arity: k, lo: n.lo, hi: n.hi, args: map(args, a => (a.lo, a.hi)), kernel: second_word(last.text) }]
+        if len(args) == k + 2 && not list.any(args, a => a.kind == "Arg") {
+          match trace_kernel(root, last, k) {
+            None -> ()
+            Some(kernel) -> { found = found ++ [Trace { arity: k, lo: n.lo, hi: n.hi, args: map(args, a => (a.lo, a.hi)), kernel: kernel }] }
+          }
         }
       }
       None -> ()
     }
   }
   for k in n.kids {
-    found = find_traces(k, found)
+    found = find_traces(root, k, found)
   }
   found
 }
@@ -454,12 +482,13 @@ pub type Plan = { program: String, kernel: String, first: Int, last: Int, calls:
 ## functions the recording sees (`called("<name>"` marks of dev.dawn), or why
 ## the program is not mapped. The program must record exactly one kernel, with
 ## `trace1` to `trace5` called plainly (positional arguments, no hints), and
-## the kernel must be a function of the same file.
+## the kernel must be a function of the same file, directly or through a
+## factory whose lambda forwards its parameters unchanged.
 pub fn plan(code: String, dump: String, dev: List[String]) -> Result[Plan, String] =
   match parse_dump(dump) {
     Err(e) -> Err(e)
     Ok(root) -> {
-      let traces = find_traces(root, [])
+      let traces = find_traces(root, root, [])
       if len(traces) == 0 {
         Err("the program does not record a kernel with a plain `trace1` to `trace5` call")
       } else if len(traces) > 1 {
@@ -749,6 +778,24 @@ fn failed[T](r: Result[T, String]) -> Bool =
   }
 
 fn dev() -> List[String] = ["load_cell", "store_cell", "add", "full", "lit"]
+
+fn test_node(text: String, kids: List[Node]) -> Node =
+  Node { kind: first_word(text), text: text, lo: 0, hi: 0, kids: kids }
+
+test "a factory maps only a lambda forwarding the kernel parameters in order" {
+  let params = map(["a", "b", "out"], n => test_node("LParam ${n}", []))
+  let vars = map(["a", "b", "out"], n => test_node("Var ${n}", []))
+  let call = test_node("Apply", [test_node("Var vadd", [])] ++ vars ++ [test_node("Var cfg", [])])
+  let root = (body: Node) => test_node("Module", [test_node("Fn configured", [test_node("Lambda", params ++ [body])])])
+  let value = test_node("Apply", [test_node("Var configured", []), test_node("Int 128", [])])
+  assert trace_kernel(root(call), value, 3) == Some("vadd")
+  assert trace_kernel(root(call), value, 2) == None
+  let swapped = Node { ..call, kids: [call.kids[0], vars[1], vars[0], vars[2]] }
+  assert trace_kernel(root(swapped), value, 3) == None
+  assert trace_kernel(root(test_node("If", [call])), value, 3) == None
+  let unknown = Node { ..value, kids: [test_node("Var missing", [])] }
+  assert trace_kernel(root(call), unknown, 3) == None
+}
 
 test "the plan of a kernel names it, its lines, its calls in evaluation order, and wraps its trace call" {
   match plan(VADD_CODE, VADD_DUMP, dev()) {

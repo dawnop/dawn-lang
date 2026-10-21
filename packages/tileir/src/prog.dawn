@@ -481,7 +481,7 @@ fn check_unary(name: Ctx, op: String) -> Unit =
 fn check_binary(name: Ctx, op: String) -> Unit =
   if one_of(["addf", "subf", "mulf", "divf", "maxf", "minf", "pow", "atan2", "remf",
     "addf_neg_inf", "addf_pos_inf", "addf_ftz", "mulf_neg_inf", "mulf_pos_inf", "mulf_ftz",
-    "divf_neg_inf", "divf_pos_inf", "maxf_nan", "minf_nan"], op) {
+    "divf_neg_inf", "divf_pos_inf", "divf_approx", "divf_approx_ftz", "maxf_nan", "minf_nan"], op) {
     ()
   } else {
     refuse(name, "`${op}` is not a binary float operation")
@@ -1593,6 +1593,22 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
       None -> overlap(a, b)
     })
   })
+}
+
+## Validate a row tile and its entry hints before recording a configured
+## kernel. These two shapes hit measured tileiras performance cliffs.
+## The architecture is the offline compilation target, not a device query.
+pub fn check_config(arch: String, bq: Int, hints: EntryHints, at: Loc = caller()) -> Unit = {
+  let _wire = wire_entry([for_arch(arch, hints)])
+  let cga = match hints.num_cta_in_cga { Some(n) -> n
+    None -> 1 }
+  if bq <= 0 { panic("tileir: configuration bq must be positive, got ${bq}", at: at) } else { () }
+  if cga == 2 && bq < 128 {
+    panic("tileir: configuration for `${arch}`: cga=2 requires bq >= 128, got ${bq}", at: at)
+  } else { () }
+  if arch == "sm_90" && bq == 256 && cga != 2 {
+    panic("tileir: configuration sm_90 bq=256 requires cga=2", at: at)
+  } else { () }
 }
 
 ## Run `body` once under a handler that records what it issues, and answer
@@ -2907,6 +2923,9 @@ fn record_calls(entry: Ctx, params: List[KParam], roles: List[Access], geoms: Li
       t_binaryf(op, dtype, shape, a0, b0) => {
         check_shape(name, shape)
         check_binary(name, op)
+        if (op == "divf_approx" || op == "divf_approx_ftz") && dtype != "f32" {
+          refuse(name, "approximate division requires f32, got ${dtype}")
+        } else { () }
         let (g, ws) = widen_all(name, frames, grown(next, ops, held, spreads, pending), [a0, b0], [dtype, dtype], shape)
         next = g.next
         ops = g.ops
@@ -7458,4 +7477,27 @@ test "K4.2: a Scalar has no cells, is never loaded, and only the four scalar for
   assert str.contains(loaded, "parameter 0 is a f32 passed by value, and a load reads memory through a pointer")
   let small = marked(() => trace2("c", Scalar(F16), Out(F16, g), (_s, o) => store_cell(o, zeros(o))))
   assert str.starts_with(small, "tileir: kernel `c`: parameter 0 is passed by value as f16; a scalar parameter is i32, i64, f32 or f64")
+}
+
+test "P4: configuration cliffs are refused at the caller before recording" {
+  let file = loc.path(loc.here())
+  let line = loc.line(loc.here())
+  let r = marked(() => check_config("sm_100", 64, entry_hints(num_cta_in_cga: Some(2))))
+  assert str.contains(r, "cga=2 requires bq >= 128")
+  assert str.contains(r, " at ${file}:${line + 1}:")
+  let s = marked(() => check_config("sm_90", 256, entry_hints()))
+  assert str.contains(s, "sm_90 bq=256 requires cga=2")
+  check_config("sm_100", 128, entry_hints(num_cta_in_cga: Some(2)))
+  check_config("sm_90", 256, entry_hints(num_cta_in_cga: Some(2)))
+  check_config("sm_90", 64, entry_hints(occupancy: Some(2)))
+}
+
+test "P4: approximate division is f32 only and cannot promise directed rounding" {
+  let f64 = refusal(() => { let _x = div(f_const(F64, 1.0), f_const(F64, 3.0), approx: true) })
+  assert str.contains(f64, "approximate division requires f32")
+  let directed = refusal(() => { let _x = div(f_const(F32, 1.0), f_const(F32, 3.0), approx: true, rounding: Down) })
+  assert str.contains(directed, "approximate division cannot use a directed rounding mode")
+  let p = trace_kernel("approx", [], () => { let _x = div(f_const(F32, 1.0), f_const(F32, 3.0), approx: true, ftz: true) })
+  assert count_ops(p.ops, op => match op { BinaryF(_d, "divf_approx_ftz", "f32", _s, _a, _b) -> true
+    _ -> false }) == 1
 }

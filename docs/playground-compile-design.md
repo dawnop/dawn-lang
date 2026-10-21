@@ -455,6 +455,7 @@ K6 补的是 C / JVM 窗格早有的那一半：点源码里的一次调用，Ti
 - **覆盖：** 校验语料是 `scripts/tile-golden/kernels.dawn` 的 `flash_attn`（分阶段 `for`、`var` 携带、运算符、`lit`、方法调用、命名参数全有）：
   整段原样放进一个用户式程序，得到 25 个调用、`gaps.count == 0`，调用名的多重集与 `flash_attn.map` 去掉 `carry/get/set` 之后的 25 行相同（合约里钉成用例）。
   不支持、于是降级的写法：主体里 `if/match/while` 包着调用、绑定后再调用的闭包、用户自己的有效果辅助函数、同文件里多于一处 `traceN`、带 `hints:` 的 `traceN`、kernel 不在同一文件里。
+  P4-c 的配置工厂可以作为最后一个参数：只跟随同文件中主体恰为一个闭包的工厂，闭包主体必须直接调用同文件 kernel，前 N 个参数按原顺序转交闭包的 N 个参数；剩余参数是配置。条件工厂、重排参数或闭包中另作计算仍降级。配对继续逐项核验实际录制，不能因为找到了工厂就跳过调用或空隙检查。
 
 **请求与响应。** 请求不变：`POST /compile {"code", "target":"tile"}`，没有新字段。响应在 K5 的基础上分两种：
 - 配对成功：与 C / JVM 同形，`src{first,last}`、`calls_total`、`calls_truncated`、`calls[{id,parent,name,from,to,nfrom,nto}]`、

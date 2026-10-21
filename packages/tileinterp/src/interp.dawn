@@ -189,7 +189,7 @@ const FLOAT_UN: List[String] = ["negf", "absf", "ceil", "floor", "sqrt", "sqrt_a
 
 const FLOAT_BIN: List[String] = ["addf", "subf", "mulf", "divf", "maxf", "minf", "maxf_nan", "minf_nan", "remf", "pow",
   "atan2", "addf_neg_inf", "addf_pos_inf", "addf_ftz", "mulf_neg_inf", "mulf_pos_inf", "mulf_ftz", "divf_neg_inf",
-  "divf_pos_inf"]
+  "divf_pos_inf", "divf_approx", "divf_approx_ftz"]
 
 const PREDS: List[String] = ["eq", "ne", "lt", "le", "gt", "ge", "ueq", "une", "ult", "ule", "ugt", "uge"]
 
@@ -684,7 +684,7 @@ fn float_bin(op: String, a: Float, b: Float) -> Float = match op {
   "addf" -> a + b
   "subf" -> a - b
   "mulf" -> a * b
-  "divf" -> a / b
+  "divf" | "divf_approx" | "divf_approx_ftz" -> a / b
   "maxf" -> max_f(a, b, false)
   "minf" -> min_f(a, b, false)
   "maxf_nan" -> max_f(a, b, true)
@@ -734,6 +734,7 @@ fn float_bin_in(fmt: String, op: String, a: Float, b: Float) -> Float =
       "mulf_pos_inf" -> round_into(fmt, Up, mul_dir(a, b, Upward))
       "divf_neg_inf" -> round_into(fmt, Down, div_dir(a, b, Downward))
       "divf_pos_inf" -> round_into(fmt, Up, div_dir(a, b, Upward))
+      "divf_approx_ftz" -> flush_in(fmt, nearest(fmt, flush_in(fmt, a) / flush_in(fmt, b)))
       "addf_ftz" -> flush_in(fmt, nearest(fmt, flush_in(fmt, a) + flush_in(fmt, b)))
       "mulf_ftz" -> flush_in(fmt, nearest(fmt, flush_in(fmt, a) * flush_in(fmt, b)))
       _ -> nearest(fmt, float_bin(op, a, b))
@@ -1738,4 +1739,12 @@ pub fn interp_ref(prog: TileProg, grid: List[Int], ub_checks: Bool = true) -> Wi
     Ok(w) -> w
     Err(e) -> panic("${e.kind}: ${e.message}")
   }
+}
+
+test "approximate division uses a correctly rounded reference and flushes both ends when requested" {
+  assert float_bin_in("f32", "divf_approx", 1.0, 3.0) == nearest("f32", 1.0 / 3.0)
+  let tiny = 1.0e-40
+  assert float_bin_in("f32", "divf_approx_ftz", tiny, 1.0) == 0.0
+  assert float_bin_in("f32", "divf_approx_ftz", 1.0e-30, 1.0e10) == 0.0
+  assert float_bin_in("f32", "divf_approx_ftz", 1.0, 4.0) == 0.25
 }

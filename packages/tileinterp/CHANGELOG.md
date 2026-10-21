@@ -3,6 +3,12 @@
 Newest first. A 0.x minor is its own compatibility class
 (`docs/package-design.md` §6.3).
 
+## 0.2.2 (2026-10-21)
+
+Models approximate f32 division with correctly rounded division as its tolerance
+reference, flushing inputs and output when `ftz` is set. Tensor view base
+alignment does not change the interpreter's addressing or numerical results.
+
 ## 0.2.1 (2026-10-21)
 
 Models `exp2_ftz` (tileir 0.20.0): the input is flushed at the format's own

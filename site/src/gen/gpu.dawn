@@ -733,6 +733,7 @@ pub type Facts = {
   mutants: List[Mutant],
   cards: List[ApiCard],
   shows: List[ShowCard],
+  timings: List[List[String]],
 }
 
 ## The kernel the page draws, and where both halves live.
@@ -771,6 +772,7 @@ pub fn load_facts() -> Facts !Fs = {
     mutants: muts,
     cards: api_cards(src),
     shows: show_cards(must_read(refused_file()), must_read(host_file())),
+    timings: flash_timings(),
   }
 }
 
@@ -1309,13 +1311,30 @@ ${join(map(f.ledgers, row), "\n")}
 <p class="gpu-note">${line(c, "ledger-tiers", mu)}</p>"""
 }
 
+# Timing rows are recorded measurements, not constants in page copy. Each
+# names the card, target, toolchain and full configuration it measured.
+fn flash_timings() -> List[List[String]] !Fs = {
+  let rows = map(filter(str.split(must_read("site/gpu-map/flash-perf.tsv"), "\n"),
+    l => l != "" && not str.starts_with(l, "#")), l => str.split(l, "\t"))
+  if len(rows) == 0 || list.any(rows, r => len(r) != 9) { panic("invalid flash timing table") } else { () }
+  rows
+}
+
+fn timing_table(c: Copy, mu: fn(String) -> String, f: Facts) -> String = {
+  let headers = ["th-gpu", "perf-format", "perf-workload", "perf-tools", "perf-config", "perf-before", "perf-after", "perf-cutile", "perf-sdpa"]
+  "<div class=\"table-wrap\"><table><thead><tr>"
+    ++ join(map(headers, k => "<th>${line(c, k, mu)}</th>"), "") ++ "</tr></thead><tbody>"
+    ++ join(map(f.timings, r => "<tr>" ++ join(map(r, v => "<td>${escape_html(v)}</td>"), "") ++ "</tr>"), "\n")
+    ++ "</tbody></table></div>"
+}
+
 ## The page's sections, in order: each heading's id and the copy key its
 ## `<key>-title` and `<key>-body` are under. The page writes its headings from
 ## this list and gen/search indexes them from it, so a section renamed or
 ## moved here moves in both, and a fragment the search names is one the page
 ## carries.
 pub fn prose_sections() -> List[(String, String)] =
-  [("layers", "layers"), ("api", "api"), ("kernel", "kernel"), ("coverage", "coverage"), ("gates", "gates"),
+  [("layers", "layers"), ("api", "api"), ("kernel", "kernel"), ("performance", "perf"), ("coverage", "coverage"), ("gates", "gates"),
     ("ledgers", "ledger")]
 
 ## The copy file of one language.
@@ -1377,6 +1396,7 @@ fn gpu_page_with(a: Assets, js: String, ex_js: String, lang: Lang, f: Facts, doc
     ++ prose(c, mu, "layers") ++ "\n" ++ layers(c, mu) ++ "\n"
     ++ prose(c, mu, "api") ++ "\n" ++ api_section(c, mu, root, lang, f) ++ "\n"
     ++ prose(c, mu, "kernel") ++ "\n" ++ map_figure(c, mu, root, lang, f) ++ "\n"
+    ++ prose(c, mu, "performance") ++ "\n" ++ timing_table(c, mu, f) ++ "\n"
     ++ prose(c, mu, "coverage") ++ "\n" ++ figures(c, mu, f) ++ "\n"
     ++ prose(c, mu, "gates") ++ "\n" ++ gates(c, mu, f) ++ "\n"
     ++ prose(c, mu, "ledgers") ++ "\n" ++ ledger_table(c, mu, f) ++ "\n</main>"

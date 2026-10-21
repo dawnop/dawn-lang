@@ -1165,8 +1165,14 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     let e = PtrTo(dtype)
     let pt = Tile([], e)
     let b = ref_of(l0, base, "tensor view base")
-    let (l1, o) = fresh(l0)
-    let l2 = emit(l1, Offset(o, Arg(param), b, pt, Tile([], Num("i32"))))
+    # DeviceBuffer has no sub-views and cuMemAlloc aligns every buffer to
+    # 256 bytes. Claim 16 on the PARAMETER, as CellViewOf does, before the
+    # element offset: an arbitrary offset need not preserve alignment.
+    let (la, a) = fresh(l0)
+    let none: Option[Int] = None
+    let lb = emit(la, AssumeTile(a, Arg(param), DivBy(16, none, none), pt))
+    let (l1, o) = fresh(lb)
+    let l2 = emit(l1, Offset(o, Val(a), b, pt, Tile([], Num("i32"))))
     let tv = TensorView(Num(dtype), shape, strides)
     # `MakeTensorViewOp::verify`'s last two rules, which need a TYPE and so
     # are here rather than in the recorder: every dynamic operand is a
@@ -2127,4 +2133,14 @@ test "a loop whose carried lists disagree, or whose body does not end in continu
     Ok(_) -> { assert false }
     Err(e) -> { assert str.contains(e.message, "a loop body ends in something other than continue") }
   }
+}
+
+test "P4: a tensor view claims buffer alignment before an arbitrary element offset" {
+  let k = lower(TileProg { name: "view", params: [ByPtr("f64")], hints: [], globals: [], producer: None, debug: None,
+    ops: [MakeToken(0), BlockId(1, 0), TensorViewOf(2, 0, "f64", 1, [16], [1], [], [])] })
+  let pt = Tile([], PtrTo("f64"))
+  let none: Option[Int] = None
+  assert k.body[2] == AssumeTile(4, Arg(0), DivBy(16, none, none), pt)
+  assert k.body[3] == Offset(5, Val(4), Val(1), pt, Tile([], Num("i32")))
+  assert k.body[4] == MakeTensorView(6, Val(5), pt, TensorView(Num("f64"), [16], [1]), [], [], Tile([], Num("i32")))
 }

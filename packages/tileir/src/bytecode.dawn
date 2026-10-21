@@ -808,7 +808,7 @@ fn float_op(op: String) -> Int = match op {
   "addf" | "addf_neg_inf" | "addf_pos_inf" | "addf_ftz" -> OP_ADDF
   "subf" -> OP_SUBF
   "mulf" | "mulf_neg_inf" | "mulf_pos_inf" | "mulf_ftz" -> OP_MULF
-  "divf" | "divf_neg_inf" | "divf_pos_inf" -> OP_DIVF
+  "divf" | "divf_neg_inf" | "divf_pos_inf" | "divf_approx" | "divf_approx_ftz" -> OP_DIVF
   "maxf" | "maxf_nan" -> OP_MAXF
   "minf" | "minf_nan" -> OP_MINF
   "pow" -> OP_FPOWF
@@ -840,6 +840,7 @@ fn float_op(op: String) -> Int = match op {
 # `verifyIEEERoundingModes` (CudaTile.cpp) accepts them on an f64 tile as
 # readily as on an f32 one, unlike `approx`.
 fn float_rounding(op: String) -> Option[Int] = match op {
+  "divf_approx" | "divf_approx_ftz" -> Some(ROUND_APPROX)
   "addf" | "subf" | "mulf" | "divf" | "addf_ftz" | "mulf_ftz" -> Some(ROUND_NEAREST_EVEN)
   "addf_neg_inf" | "mulf_neg_inf" | "divf_neg_inf" -> Some(ROUND_NEGATIVE_INF)
   "addf_pos_inf" | "mulf_pos_inf" | "divf_pos_inf" -> Some(ROUND_POSITIVE_INF)
@@ -852,7 +853,7 @@ fn float_rounding(op: String) -> Option[Int] = match op {
 # `float_op_has_flags` below; this table says what goes in it when there
 # is one.
 fn float_flags(op: String) -> Int = match op {
-  "addf_ftz" | "mulf_ftz" -> FLOAT_FLAG_FTZ
+  "addf_ftz" | "mulf_ftz" | "divf_approx_ftz" -> FLOAT_FLAG_FTZ
   "exp2_ftz" -> FLOAT_FLAG_FTZ
   "maxf_nan" | "minf_nan" -> MINMAX_FLAG_PROPAGATE_NAN
   _ -> 0
@@ -3673,4 +3674,13 @@ test "the same location is one attribute: two instructions at one place share an
   let d = DebugInfo { dir: "d", file: "f", line: 3, col: 4, locs: [(5, 6), (5, 6)] }
   let (_w, content) = debug_section(w0, d, "k", 2)
   assert str.contains(hex(content), "0400000000000000" ++ "0500000000000000" ++ "0500000000000000")
+}
+
+test "P4: approximate division writes the approximate rounding enum and independent ftz bit" {
+  assert float_op("divf_approx") == OP_DIVF
+  assert float_op("divf_approx_ftz") == OP_DIVF
+  assert float_rounding("divf_approx") == Some(4)
+  assert float_rounding("divf_approx_ftz") == Some(4)
+  assert float_flags("divf_approx") == 0
+  assert float_flags("divf_approx_ftz") == FLOAT_FLAG_FTZ
 }
