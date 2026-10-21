@@ -20,15 +20,22 @@ use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, 
 
 ## One access-log line per request: method, path, status, wall time. The
 ## path is the raw one, still percent-encoded, so a request cannot write a
-## line break into the log.
-pub fn with_logging(next: Handler) -> Handler =
+## line break into the log. The line goes to stdout.
+pub fn with_logging(next: Handler) -> Handler = logged(next, line => println(line))
+
+## `with_logging`, with the line on stderr. A program that serves through
+## `web/exchange.serve_exchange` over stdin and stdout has its response on
+## stdout, and a log line there would be bytes of the response.
+pub fn with_logging_to_stderr(next: Handler) -> Handler = logged(next, line => io.eprintln(line))
+
+fn logged(next: Handler, emit: fn(String) -> Unit !io) -> Handler =
   req => {
     let (out, ms) = io.with_clock_real(() => timed(next, req))
     let status = match out {
       Ok(r) -> response_status(r)
       Err(e) -> e.status
     }
-    println(access_line(req, status, ms))
+    emit(access_line(req, status, ms))
     out
   }
 
