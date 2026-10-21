@@ -926,6 +926,15 @@ dawn_unit dawn_io_copy_permissions(dawn_str *src, dawn_str *dst); /* lstat + chm
 bool dawn_io_is_symlink(dawn_str *path); /* false for absent or invalid paths */
 dawn_str *dawn_io_real_path(dawn_str *path); /* realpath(3); faults when absent */
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
+dawn_unit dawn_io_write_stdout(const dawn_bytes *b); /* stdio-buffered, like print; no flush */
+dawn_unit dawn_io_flush_stdout(void);
+dawn_unit dawn_io_append_bytes(dawn_str *path, const dawn_bytes *content); /* O_APPEND, creates, faults */
+/* up to n bytes from off; short or empty at end of file; negative off/n panics */
+dawn_bytes *dawn_io_read_range(dawn_str *path, int64_t off, int64_t n);
+int64_t dawn_io_file_size(dawn_str *path); /* regular files only; else faults */
+int64_t dawn_io_disk_total(dawn_str *path); /* statvfs f_blocks * f_frsize */
+int64_t dawn_io_disk_free(dawn_str *path);  /* statvfs f_bavail * f_frsize */
+dawn_unit dawn_io_sleep_ns(int64_t ns); /* nanosleep, resumed after EINTR; ns <= 0 returns */
 /* At least one byte readable now; end of input is not readiness. Both stdin
  * readers above go straight to read(2) so this can ask the kernel and be
  * believed -- see the note above dawn_io_read_line. */

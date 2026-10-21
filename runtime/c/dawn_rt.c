@@ -19,6 +19,7 @@
 #include <sys/ioctl.h>
 #ifndef __wasi__
 #include <sys/random.h>
+#include <sys/statvfs.h>
 #endif
 #include <sys/stat.h>
 #include <time.h>
@@ -1666,6 +1667,24 @@ dawn_unit dawn_io_eprint(dawn_str *s) {
 dawn_unit dawn_io_eprintln(dawn_str *s) {
   dawn_io_eprint(s);
   fputc('\n', stderr);
+  return DAWN_UNIT;
+}
+
+/* Raw bytes on stdout, for a response that is not text (an HTTP exchange's
+ * wire, an image). They go through the same stdio buffer `print` uses, so a
+ * program mixing the two keeps its order; no newline is inspected, so nothing
+ * flushes here -- `dawn_io_flush_stdout` is the one that does, and the normal
+ * end of the process (exit flushes stdio) is the last. A write error is not
+ * reported, as for `print` (the SIGPIPE note in dawn_rt_init). */
+dawn_unit dawn_io_write_stdout(const dawn_bytes *b) {
+  if (b->len > 0) {
+    fwrite(b->p, 1, (size_t)b->len, stdout);
+  }
+  return DAWN_UNIT;
+}
+
+dawn_unit dawn_io_flush_stdout(void) {
+  fflush(stdout);
   return DAWN_UNIT;
 }
 
@@ -5091,6 +5110,158 @@ dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content) {
   return DAWN_UNIT;
 }
 
+/* Open `p` for the io_* primitives below: close-on-exec, so a child that
+ * io_run spawns does not inherit a descriptor a primitive is still using. */
+#ifdef O_CLOEXEC
+#define DAWN_O_CLOEXEC O_CLOEXEC
+#else
+#define DAWN_O_CLOEXEC 0
+#endif
+
+/* Append `content` to a file, creating it (and its parent directories, as
+ * io_write_bytes does) when missing. O_APPEND makes every write(2) land at the
+ * end of the file whatever another writer did in between, so two appenders
+ * interleave whole calls and never overwrite each other (docs/io-prims-design.md).
+ * One open per call is the price of having no handle type; a 512 MiB body in
+ * 64 KiB pieces is 8192 opens, which measures as noise next to the writes. A
+ * short write or EINTR is retried; any other failure faults, with the bytes
+ * that did land staying where they are (an append has no rollback). */
+dawn_unit dawn_io_append_bytes(dawn_str *path, const dawn_bytes *content) {
+  char *p = dawn_cpath(path);
+  dawn_mkparents(p);
+  int fd = open(p, O_WRONLY | O_CREAT | O_APPEND | DAWN_O_CLOEXEC, 0666);
+  free(p);
+  if (fd < 0) {
+    dawn_fault(DAWN_LIT("io_append_bytes: cannot open file"));
+  }
+  size_t done = 0;
+  size_t want = content->len > 0 ? (size_t)content->len : 0;
+  while (done < want) {
+    ssize_t step = write(fd, content->p + done, want - done);
+    if (step < 0) {
+      if (errno == EINTR) continue;
+      close(fd);
+      dawn_fault(DAWN_LIT("io_append_bytes: write failed"));
+    }
+    done += (size_t)step;
+  }
+  if (close(fd) != 0) {
+    dawn_fault(DAWN_LIT("io_append_bytes: write failed"));
+  }
+  return DAWN_UNIT;
+}
+
+/* Up to `n` bytes of a file starting at byte `off`: fewer when the file ends
+ * first, none when `off` is at or past the end (a read past the end is not an
+ * error, which is what an HTTP Range answer wants to ask the file size for
+ * once and then not worry). A negative `off` or `n` is the caller's bug, a
+ * panic with the JVM's wording; a range that, after clamping to the file,
+ * still needs more than 2^31 - 1 bytes is refused the same way on both
+ * backends because a JVM array cannot hold it. A file that shrinks under the
+ * read faults instead of answering a short range that looks like the end. */
+dawn_bytes *dawn_io_read_range(dawn_str *path, int64_t off, int64_t n) {
+  if (off < 0 || n < 0) {
+    dawn_panic(DAWN_LIT("read_range: off and n must not be negative"));
+  }
+  char *p = dawn_cpath(path);
+  int fd = open(p, O_RDONLY | DAWN_O_CLOEXEC);
+  free(p);
+  if (fd < 0) {
+    dawn_fault(DAWN_LIT("io_read_range: cannot open file"));
+  }
+  struct stat st;
+  if (fstat(fd, &st) != 0 || S_ISDIR(st.st_mode)) {
+    close(fd);
+    dawn_fault(DAWN_LIT("io_read_range: not a readable file"));
+  }
+  int64_t size = (int64_t)st.st_size;
+  int64_t avail = size > off ? size - off : 0;
+  int64_t want = n < avail ? n : avail;
+  if (want > 2147483647) {
+    close(fd);
+    dawn_panic(DAWN_LIT("read_range: the range is too large"));
+  }
+  unsigned char *buf = (unsigned char *)dawn_alloc(want > 0 ? (size_t)want : 1);
+  int64_t got = 0;
+  while (got < want) {
+    ssize_t step = pread(fd, buf + got, (size_t)(want - got), (off_t)(off + got));
+    if (step < 0) {
+      if (errno == EINTR) continue;
+      free(buf);
+      close(fd);
+      dawn_fault(DAWN_LIT("io_read_range: read failed"));
+    }
+    if (step == 0) {
+      free(buf);
+      close(fd);
+      dawn_fault(DAWN_LIT("io_read_range: the file shrank during the read"));
+    }
+    got += (int64_t)step;
+  }
+  close(fd);
+  return dawn_bytes_of(buf, want);
+}
+
+/* The size in bytes of a regular file, links followed. A directory, a device
+ * and a missing path all fault (std/io turns each into an `Err`): a "size" for
+ * a directory is whatever the filesystem keeps in its inode, and the JVM's
+ * Files.size would answer it where this must not. */
+int64_t dawn_io_file_size(dawn_str *path) {
+  char *p = dawn_cpath(path);
+  struct stat st;
+  int rc = stat(p, &st);
+  free(p);
+  if (rc != 0) {
+    dawn_fault(DAWN_LIT("io_file_size: cannot stat the path"));
+  }
+  if (!S_ISREG(st.st_mode)) {
+    dawn_fault(DAWN_LIT("io_file_size: not a regular file"));
+  }
+  return (int64_t)st.st_size;
+}
+
+/* The two numbers of statvfs(3) a monitor wants: f_blocks * f_frsize and
+ * f_bavail * f_frsize, which are what the JDK's getTotalSpace and
+ * getUsableSpace read too (bavail, the space an unprivileged process can use,
+ * not bfree). Two primitives instead of one answering a pair, because a
+ * primitive returns one scalar and the pair would cost a tuple that std then
+ * takes apart; the two calls are two statvfs(3), and the figure is a gauge. */
+#ifdef __wasi__
+int64_t dawn_io_disk_total(dawn_str *path) {
+  (void)path;
+  dawn_fault(DAWN_LIT("io_disk_total: no statvfs on wasi"));
+  return 0;
+}
+
+int64_t dawn_io_disk_free(dawn_str *path) {
+  (void)path;
+  dawn_fault(DAWN_LIT("io_disk_free: no statvfs on wasi"));
+  return 0;
+}
+#else
+int64_t dawn_io_disk_total(dawn_str *path) {
+  char *p = dawn_cpath(path);
+  struct statvfs sv;
+  int rc = statvfs(p, &sv);
+  free(p);
+  if (rc != 0) {
+    dawn_fault(DAWN_LIT("io_disk_total: cannot statvfs the path"));
+  }
+  return (int64_t)sv.f_blocks * (int64_t)sv.f_frsize;
+}
+
+int64_t dawn_io_disk_free(dawn_str *path) {
+  char *p = dawn_cpath(path);
+  struct statvfs sv;
+  int rc = statvfs(p, &sv);
+  free(p);
+  if (rc != 0) {
+    dawn_fault(DAWN_LIT("io_disk_free: cannot statvfs the path"));
+  }
+  return (int64_t)sv.f_bavail * (int64_t)sv.f_frsize;
+}
+#endif
+
 /* remove(3) takes both files and empty directories, matching
  * Files.deleteIfExists without recursing. ENOENT is the sole false result;
  * every other errno is a fault for std/io's catch_fault barrier. */
@@ -5359,6 +5530,26 @@ int64_t dawn_io_clock_mono_ns(void) {
   return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
 }
 
+/* Block for `ns` nanoseconds, at least; zero and negative return at once.
+ * nanosleep(2) reports the time left when a signal cuts it short, and the
+ * loop sleeps that much again, so the only way out early is the deadline: the
+ * JVM's Thread.sleep has the same contract. The request is split into seconds
+ * and nanoseconds by division, never by a float. On wasi the call is
+ * poll_oneoff on the monotonic clock, which blocks the instance, and a host
+ * that refuses it ends the wait early (the browser shim answers NOSYS). */
+dawn_unit dawn_io_sleep_ns(int64_t ns) {
+  if (ns <= 0) return DAWN_UNIT;
+  struct timespec req;
+  req.tv_sec = (time_t)(ns / 1000000000);
+  req.tv_nsec = (long)(ns % 1000000000);
+  struct timespec rem;
+  while (nanosleep(&req, &rem) != 0) {
+    if (errno != EINTR) break;
+    req = rem;
+  }
+  return DAWN_UNIT;
+}
+
 /* `n` bytes from the host's CSPRNG (docs/random-effect-design.md).
  *
  * getrandom(2) with no flags: it blocks until the pool is initialised, which
@@ -5514,6 +5705,11 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
     dawn_drop(argv);
     dawn_nul_fault();
   }
+  /* The child inherits stdout (an empty out_path), and what this process has
+   * written to it must reach the descriptor first, or the child's output
+   * overtakes bytes the program wrote before the call. The JVM side flushes
+   * System.out here for the same reason (docs/io-prims-design.md). */
+  fflush(stdout);
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
   for (int64_t i = 0; i < n; i++) {
     args[i] = dawn_cpath((dawn_str *)dawn_array_get(argv, i));
