@@ -208,7 +208,7 @@ fn collect_java_coords(
 
 # Compute the project and source root together so no consumer has to rediscover
 # the nearest `src` ancestor independently.
-fn source_roots(target: SourceTarget) -> (String, String) !Env =
+pub fn source_roots(target: SourceTarget) -> (String, String) !Env =
   match target {
     ProjectDirectory(dir) -> (dir, dir ++ "/src")
     SourceFile(file) -> {
@@ -851,6 +851,9 @@ fn resolve_src_deps(
                   "  and a `[deps]` key is this manifest's spelling, not a new name;\n" ++
                   "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
               ) }]
+            } else if dm.native_sources != [] && io.is_symlink(ddir ++ "/src") {
+              diags = diags ++ [LocDiag { path: mf_path, d: diag(
+                "symbolic link in native package tree: " ++ ddir ++ "/src", 0, 0, "") }]
             } else if not io.is_dir(ddir ++ "/src") {
               diags = diags ++ [LocDiag { path: mf_path, d: diag(
                 "package `" ++ dm.name ++ "` has no src/ folder (expected " ++

@@ -40,6 +40,7 @@ ADAPTERS = {
     "export-surface-contract": (".",),
     "ffi-header-contract": (".",),
     "ffi-extern-contract": (".",),
+    "ffi-sources-contract": (".",),
     "for-pattern-contract": ("selfhost",),
     "incremental-semantics-contract": (".",),
     "inflate-contract": (".",),

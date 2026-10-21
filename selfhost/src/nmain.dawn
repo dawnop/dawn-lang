@@ -50,6 +50,9 @@ use driver/fmtwrite
 use check/identity
 use check/tast.{TModule}
 use c/cdriver
+use c/natives
+use compiler_plan/nativeplan
+use compiler_plan/nativeplan.{NativePackage}
 use c/emitc
 use c/binfo
 use version.{VERSION}
@@ -571,15 +574,6 @@ fn analyzed_loaded(std: StdCtx, loaded: LoadResult, opts: CtOpts) -> Program !Fs
   prog
 }
 
-fn emitted(
-  std_flag: Option[String],
-  target: String,
-  opts: CtOpts
-) -> String !Fs !Proc !Env !Exit !Console !io = {
-  let (text, _, _) = emitted_with(std_flag, target, opts, false, false)
-  text
-}
-
 ## The emitted C and, when `with_info`, the C unit that embeds the program's
 ## build manifest (c/binfo); `""` in its place otherwise. A product that is
 ## kept (`build`, `emitc --build-info`) carries a manifest; one that is run
@@ -590,8 +584,9 @@ fn emitted_with(
   opts: CtOpts,
   with_info: Bool,
   with_map: Bool
-) -> (String, String, String) !Fs !Proc !Env !Exit !Console !io = {
+) -> (String, String, String, List[NativePackage]) !Fs !Proc !Env !Exit !Console !io = {
   let (std, loaded, prog) = analyzed_for(std_flag, target, opts)
+  let packages = native_packages(target, loaded, prog)
   # `--map` takes the mapped entry, which builds the text the same way and
   # also says where each call landed (docs/source-span-map-design.md section 12)
   let emitted = if with_map { cdriver.c_text_mapped(std, prog) } else {
@@ -608,12 +603,12 @@ fn emitted_with(
       ("", "")
     }
   }
-  if not with_info { return (text, "", dmap) }
+  if not with_info { return (text, "", dmap, packages) }
   match binfo.unit_for(VERSION, target, loaded) {
-    Ok(u) -> (text, u, dmap)
+    Ok(u) -> (text, u, dmap, packages)
     Err(e) -> {
       cli_error(e)
-      (text, "", dmap)
+      (text, "", dmap, packages)
     }
   }
 }
@@ -628,17 +623,16 @@ fn default_out(target: String) -> String = {
   if stem == "" { "a.out" } else { stem }
 }
 
-## Write the C and the embedded runtime into a scratch directory, run cc, and
-## leave the binary at `out`. The cc diagnostics stream to this process's
-## stderr -- an empty err_path means "inherit", and cc failing is the user's
-## compile error to read.
-fn cc_build(
-  ctext: String,
-  out: String,
-  inline_rc: Bool,
-  level: OptLevel
-) -> Unit !Fs !Proc !Env !Exit !Console !io =
-  cc_build_for(ctext, "", out, false, false, inline_rc, level)
+## Validate ownership and freeze the set of loaded package roots before any
+## C compiler invocation. The checker only sees the Dawn declarations.
+fn native_packages(target: String, loaded: LoadResult, prog: Program) -> List[NativePackage] !Fs !Env !Exit !Console !io =
+  match natives.collect(target, loaded, prog) {
+    Ok(packages) -> packages
+    Err(e) -> {
+      cli_error(e)
+      []
+    }
+  }
 
 ## The reactor's only export, appended to the emitted C.
 ##
@@ -755,9 +749,10 @@ fn cc_build_for(
   wasm: Bool,
   reactor: Bool,
   inline_rc: Bool,
-  level: OptLevel
+  level: OptLevel,
+  packages: List[NativePackage]
 ) -> Unit !Fs !Proc !Env !Exit !Console !io =
-  cc_build_with(cc_command(wasm), ctext, info, out, wasm, reactor, inline_rc, level)
+  cc_build_packages(cc_command(wasm), ctext, info, out, wasm, reactor, inline_rc, level, packages)
 
 ## Stage the C sources and drive `cc` over them.
 ##
@@ -771,14 +766,14 @@ fn cc_build_for(
 ## It is one more C file in the link row, after the runtime, and not a part of
 ## `main.c`: see c/binfo for why the manifest stays out of the emitted C.
 fn cc_build_with(
-  cc: String,
-  ctext: String,
-  info: String,
-  out: String,
-  wasm: Bool,
-  reactor: Bool,
-  inline_rc: Bool,
-  level: OptLevel
+  cc: String, ctext: String, info: String, out: String, wasm: Bool,
+  reactor: Bool, inline_rc: Bool, level: OptLevel
+) -> Unit !Fs !Proc !Exit !Console !io =
+  cc_build_packages(cc, ctext, info, out, wasm, reactor, inline_rc, level, [])
+
+fn cc_build_packages(
+  cc: String, ctext: String, info: String, out: String, wasm: Bool,
+  reactor: Bool, inline_rc: Bool, level: OptLevel, packages: List[NativePackage]
 ) -> Unit !Fs !Proc !Exit !Console !io = {
   # every cc command of the build compiles at the one level asked for, the
   # wasm row's shim and tag included
@@ -814,7 +809,7 @@ fn cc_build_with(
     }
     if str.ends_with(name, ".c") { sources = sources ++ ["${work}/${name}"] }
   }
-  for f in ["dawn_rt.c", "dawn_rt.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
+  for f in ["dawn_rt.c", "dawn_rt.h", "dawn_ffi.h", "dawn_rt_wasi_eh.cc", "dawn_rt_wasi_tag.c"] {
     match cdriver.runtime_source(f) {
       Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
       None -> panic("embedded runtime is missing ${f}")
@@ -923,12 +918,19 @@ fn cc_build_with(
       "-o", out
     ] ++ sources ++ ["${work}/dawn_rt.c"] ++ info_files ++ ["-lm"]
   }
+  let objects = compile_native_packages(packages, work, argv)
+  # Keep package objects before libraries, including on archive-based WASI.
+  var linked: List[String] = []
+  for arg in argv {
+    if arg == "-lm" { linked = linked ++ objects }
+    linked = linked ++ [arg]
+  }
   # cc is done with the staging directory the moment it succeeds, and nothing
   # else ever removed it: 125 of them, a megabyte each (the emitted C plus the
   # embedded runtime), had accumulated in /tmp here. A cc that *failed* keeps
   # its directory on purpose -- the C it choked on is the only thing left to
   # look at, and the error names an exit code, not a file.
-  match io.run(argv, "", "") {
+  match io.run(linked, "", "") {
     Ok(0) -> pkgfetch.delete_tree(work)
     Ok(code) -> {
       if wasm { console_eprintln(wasm_toolchain_hint()) }
@@ -939,6 +941,44 @@ fn cc_build_with(
       cli_error("cannot run " ++ cc ++ ": " ++ e.message)
     }
   }
+}
+
+## A stub sees its package's headers before host system headers. Every TU
+## takes the exact target/optimization/RC flags from the main compile row.
+fn compile_native_packages(
+  packages: List[NativePackage], work: String, argv: List[String]
+) -> List[String] !Fs !Proc !Exit !Console !io = {
+  var flags: List[String] = []
+  for arg in argv {
+    if arg == "-o" { break }
+    flags = flags ++ [arg]
+  }
+  var objects: List[String] = []
+  var pi = 0
+  for pkg in packages {
+    let destination = work ++ "/native/" ++ to_string(pi)
+    let files = match nativeplan.stage(pkg, destination) {
+      Ok(fs) -> fs
+      Err(e) -> {
+        cli_error(e)
+        []
+      }
+    }
+    var si = 0
+    for path in files {
+      let obj = destination ++ "/stub" ++ to_string(si) ++ ".o"
+      let command = flags ++ ["-I", destination ++ "/src", "-c", path, "-o", obj]
+      match io.run(command, "", "") {
+        Ok(0) -> ()
+        Ok(code) -> { cli_error("native source compilation failed: " ++ path ++ " (exit code " ++ to_string(code) ++ ")") }
+        Err(e) -> { cli_error("cannot compile native source: " ++ e.message) }
+      }
+      objects = objects ++ [obj]
+      si = si + 1
+    }
+    pi = pi + 1
+  }
+  objects
 }
 
 fn cmd_check(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
@@ -1011,7 +1051,8 @@ fn cmd_emitc(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
     "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
     rest
   )
-  let (text, unit, dmap) = emitted_with(std_flag, target, opts, info_out != "", map_out != "")
+  let (text, unit, dmap, packages) = emitted_with(std_flag, target, opts, info_out != "", map_out != "")
+  for hint in natives.hints(packages) { console_eprintln(hint) }
   if info_out != "" {
     match io.write_file(info_out, unit) {
       Ok(_) -> ()
@@ -1063,8 +1104,8 @@ fn cmd_build(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   } else {
     out0
   }
-  let (text, unit, _) = emitted_with(std_flag, target, opts, true, false)
-  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor, inline_rc_enabled(), level)
+  let (text, unit, _, packages) = emitted_with(std_flag, target, opts, true, false)
+  cc_build_for(reactor_wrapped(text, reactor), unit, out, wasm, reactor, inline_rc_enabled(), level, packages)
 }
 
 ## Build `ctext` into a scratch directory and become it: the process ends with
@@ -1080,6 +1121,7 @@ fn build_and_exec(
   bin_name: String,
   what: String,
   program_args: List[String],
+  packages: List[NativePackage],
   inline_rc: Bool,
   level: OptLevel
 ) -> Unit !Fs !Proc !Env !Exit !Console !io = {
@@ -1091,10 +1133,10 @@ fn build_and_exec(
     }
   }
   let bin = work ++ "/" ++ bin_name
-  cc_build(ctext, bin, inline_rc, level)
+  cc_build_for(ctext, "", bin, false, false, inline_rc, level, packages)
   # The scratch tree goes before the exit, not after it: `io.exit` has no stack
   # to unwind, so a release placed on the way out is a release that never runs.
-  # A build that failed keeps its directory -- `cc_build` reports and exits from
+  # A build that failed keeps its directory -- `cc_build_for` reports and exits from
   # inside, and the emitted C is the only thing left to look at.
   match io.run([bin] ++ program_args, "", "") {
     Ok(code) -> {
@@ -1111,12 +1153,14 @@ fn build_and_exec(
 
 fn cmd_run(rest: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   let run = parse_run_tail(rest)
+  let (text, _, _, packages) = emitted_with(run.std_flag, run.target, run.opts, false, false)
   build_and_exec(
-    emitted(run.std_flag, run.target, run.opts),
+    text,
     "dawnc-run",
     "program",
     "program",
     run.program_args,
+    packages,
     inline_rc_enabled(),
     run.level
   )
@@ -1302,11 +1346,12 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
   )
   let no_spans: Map[String, identity.DeclSpans] = map.empty()
   let empty_prog = Program { modules: [], diags: [], decl_spans: no_spans, ct_world: ct_world_empty() }
-  let (std, prog) = if std_tests {
-    (load_or_die(std_flag), empty_prog)
+  let (std, prog, packages) = if std_tests {
+    let empty_packages: List[NativePackage] = []
+    (load_or_die(std_flag), empty_prog, empty_packages)
   } else {
-    let (sc, _, pg) = analyzed_for(std_flag, target, opts)
-    (sc, pg)
+    let (sc, loaded, pg) = analyzed_for(std_flag, target, opts)
+    (sc, pg, native_packages(target, loaded, pg))
   }
   # the modules whose test blocks are being run: the target's, or std's own
   # under --stdlib
@@ -1347,7 +1392,7 @@ fn cmd_test(rest0: List[String]) -> Unit !Fs !Proc !Env !Exit !Console !io = {
       ""
     }
   }
-  build_and_exec(ctext, "dawnc-test", "tests", "tests", [], false, level)
+  build_and_exec(ctext, "dawnc-test", "tests", "tests", [], packages, false, level)
 }
 
 ## `dawnc version`, and `dawnc version -m <project-dir | binary>...`: the JVM

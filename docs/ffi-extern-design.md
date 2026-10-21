@@ -1,6 +1,6 @@
 # C extern：`fn f(..) = extern c "sym" else ..` 与公开头 `dawn_ffi.h`
 
-> 状态：**current**（F0：设计稿与头文件已落地；F1 的语法、检查、Core 与后端已实现；清单和构建链路仍待 F2，完整门禁扩展待 F4，
+> 状态：**current**（F0：设计稿与头文件已落地；F1 的语法、检查、Core 与后端已实现；F2 的清单和构建链路已实现，完整门禁扩展待 F4，
 > 每刀落地后在末尾「落地记录」补哈希）。2026-10-21。依据：维护者工作区的
 > `ruling-ffi-extern-surface-20261020.md`（14 条裁决与刀序）、`research-ffi-extern-surface-20261020.md`（三种语法对照、
 > sqlite 桩的 ASan 实测、§8 待裁点）、`ruling-ffi-llvm-concurrency-20261004.md` 第 1 条、
@@ -199,7 +199,8 @@ F2 的 `dawnc emitc` 只出 `.c`，要把包的 C 源列出来一并提示，否
 ### 边界
 
 checker 不打开任何 `.c` 文件，不解析 C。`[native] sources` 的内容只在**驱动**阶段读：符号查重与「缺桩」诊断用一次词法扫描
-（找 `DAWN_EXTERN ( <ident> )`，不剔除注释与字符串），它只会漏报不会误拒，漏报的由 cc 的链接错误兜底。
+（识别 `DAWN_EXTERN ( <ident> )` 的定义，跳过注释与字符串），并对能辨认的公开 ABI 签名做一致性检查。
+它不展开预处理器、宏或 typedef，不是 C 安全验证；复杂声明可能漏报，条件编译中的定义可能被计入，最终由 cc/link 兜底。
 
 ## 五、C 源声明与构建（裁决 2、14）
 
@@ -214,7 +215,8 @@ sources = ["src/sqlite_stub.c"]
   （`manifestv.dawn` 的 `unknown table`），天然带最低版本门槛，不另设版本字段。
 - 路径相对包根，必须在 `src/` 下、以 `.c` 结尾、无 `..`、非绝对、不重复，文件必须存在（Dawn 层面的错误，不是 cc 的）。
   放在 `src/` 下是因为 `s1:` 源码摘要覆盖 `src_root` 下所有普通文件、`d1:` 树哈希覆盖整棵树：C 文件改一个字节，
-  url 依赖的锁与 build-info 不用改任何东西就会变。模块加载只认 `.dawn`，`.c` 混在 `src/` 里不影响模块图。
+  url 依赖的锁与 build-info 不用改任何东西就会变。native/wasm 驱动在读取桩之前，对实际加载的 URL 归档
+  各重验一次 `d1:`，也覆盖已存在的热缓存；否则 resolver 的热命中捷径会漏掉缓存中的 C/头文件修改。模块加载只认 `.dawn`，`.c` 混在 `src/` 里不影响模块图。
 - 依赖包的 `[native]` 同样生效（path、url、传递依赖一视同仁）。没有 `[native]` 的包里写了 extern，native 构建在驱动阶段报
   「extern needs the package to list its C sources under [native]」；单文件程序没有清单，同理。JVM 构建不关心。
 - 不支持 `-l`、编译旗标、构建脚本：链接行要能从清单静态读出（供应链判据）。外部库一律在桩里 `dlopen`。
@@ -230,14 +232,20 @@ sources = ["src/sqlite_stub.c"]
 1. `scripts/gen-rtsrc.py` 的 `FILES` 加 `"dawn_ffi.h"`，生成物 `selfhost/src/embed/rtsrc.dawn` 带上它；
 2. `cdriver.dawn` 的嵌入新鲜度检查与 `nmain.dawn` 的暂存循环（现在是 `["dawn_rt.c", "dawn_rt.h", ...]`）各加一项，
    于是构建时它与 `dawn_rt.h` 一起被写进暂存目录，`-I $work` 已在 cc 命令行上；
-3. 包的桩被拷进同一个暂存目录，追加到 cc 命令的 sources 里，native 与 wasm 两条命令都加。
+3. 每个实际加载的包将自己的 `src/` 树独立暂存到 `native/<序号>/src/`，保留本地头文件和子目录，
+   不扁平化；只把清单列出的 `.c` 追加到 native 与 wasm 两条 cc 命令。包内 include 以各自的源目录解析，
+   不把不同包的头放进共享搜索路径。`src/` 和其下的符号链接均拒绝，与 `s1:`/`d1:` 的输入约束一致。包根的规范路径用于去重，`src/` 自身不允许是链接。
+   根包先收集，依赖按已加载模块的依赖顺序收集，同一包根只取一次；只声明但未加载的依赖不编译。
+   `build`、`run`、`test` 使用同一份计划；`emitc` 在 stderr 提示各包源文件和头目录，供手动编译使用。
+   两个 Dawn 声明若使用同一个符号，须有相同的 C ABI 签名；声明还须在自己的包找到桩。
 
 **这三步放在 F2，不在 F0**：F0 的头只被契约直接以 `-I runtime/c` 使用，没有任何桩能进到 native 构建，提前嵌入只会让每个
 native 二进制多带一份没人读的头，并且让 F0 碰编译器源码。F0 因此是纯增量（新增一个头、一个契约，外加把两条掩码宏从
 `dawn_rt.c` 挪进 `dawn_rt.h`）。
 
-`-DDAWN_RT_INLINE_RC` 必须到达程序的每个翻译单元（`dawn_rt.h` 的注释：混着编会链接失败，那是大声出错的方式）。桩进同一条
-cc 命令就自动继承；契约的 `inline` 构建就是在证明桩在两种定义下都对。
+`-DDAWN_RT_INLINE_RC` 必须到达程序的每个翻译单元（`dawn_rt.h` 的注释：混着编会链接失败，那是大声出错的方式）。
+驱动从主编译行提取共同的目标、优化与 RC 选项，逐个编译桩并只给该包加入自己的 `src/` include 目录，然后把对象一起链接。
+契约用 plain、inline RC、ASan/UBSan/LSan 与 wasm 的真实编译行证明这些选项都到达每个桩。
 
 ## 六、`dawn_ffi.h` 的 API（裁决 5、8）
 
@@ -365,4 +373,8 @@ dawnop-site 过渡期（裁决 11，不属于这四刀）：引入 `effect Db`�
 
 - F0：`runtime/c/dawn_ffi.h`、`scripts/ffi-header-contract/`、`DAWN_MASK_*` 挪进 `dawn_rt.h`、本文。提交哈希待 PR 合并后回填。
 
-- F1（本提交）：`EExtern`、边界检查、`XExtern`/`CExtern`、后端选臂、借用 RC、C 原型与调用、JVM 回退及拒绝、grammar/fmt/LSP 契约。`DAWN_EXTERN` 定义移至两种翻译单元共享的 `dawn_rt.h`，避免发射代码包含 FFI 的 poison 围栏；公开头的安装仍留 F2。
+- F1（95fd4a96）：`EExtern`、边界检查、`XExtern`/`CExtern`、后端选臂、借用 RC、C 原型与调用、JVM 回退及拒绝、grammar/fmt/LSP 契约。`DAWN_EXTERN` 定义移至两种翻译单元共享的 `dawn_rt.h`，避免发射代码包含 FFI 的 poison 围栏；公开头的安装仍留 F2。
+
+- F2（本提交）：`[native] sources` 的清单验证与 Planner 测试、按加载图收集、每包完整 `src/` 暂存、共享目标选项、
+  `dawn_ffi.h` 嵌入及新鲜度检查、包符号归属与可识别 ABI 签名检查、`emitc` 提示、C/头文件摘要负控。
+  契约为 `scripts/ffi-sources-contract/run.sh`，同一 F1 transcript 在 path、url+subdir、native、wasm、JVM 上验收。

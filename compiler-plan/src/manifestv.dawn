@@ -5,6 +5,7 @@
 # `[deps.<aname>]` url tables with url + version + hash.
 
 use std/str
+use std/list
 use toml.{TomlDoc, TVal, TStr, TInt, TBool, TArr, parse, table_full, table_names, header_span}
 use diagnostic.{Diag, diag}
 
@@ -143,7 +144,8 @@ pub type ManifestV = {
   name: String,
   version: Option[SemV],
   java_deps: List[MCoord],
-  deps: List[VDep]
+  deps: List[VDep],
+  native_sources: List[String]
 }
 
 ## The only schema this toolchain understands.
@@ -377,6 +379,39 @@ fn distinct(names: List[String]) -> List[String] = {
   out
 }
 
+## Native sources are explicit package inputs, never host paths or compiler flags.
+fn parse_native(doc: TomlDoc) -> (List[String], List[Diag]) = {
+  var sources: List[String] = []
+  var errors: List[Diag] = []
+  for (key, lo, hi, value) in table_full(doc, Some("native")) {
+    if key != "sources" {
+      errors = errors ++ [diag("unknown key `" ++ key ++ "` in `[native]`", lo, hi,
+        "only `sources` is supported")]
+      continue
+    }
+    let (vlo, vhi) = val_span(value)
+    match value {
+      TArr(values, _, _) -> {
+        for path in values {
+          var bad = not str.starts_with(path, "src/") || not str.ends_with(path, ".c") ||
+            str.contains(path, "\\") || str.contains(path, ":")
+          for part in str.split(path, "/") {
+            if part == ".." || part == "." || part == "" { bad = true }
+          }
+          if bad {
+            errors = errors ++ [diag("invalid native source `" ++ path ++ "`", vlo, vhi,
+              "use a relative .c path under src/ without .. or empty segments")]
+          } else if list.contains(sources, path) {
+            errors = errors ++ [diag("duplicate native source `" ++ path ++ "`", vlo, vhi, "")]
+          } else { sources = sources ++ [path] }
+        }
+      }
+      _ -> { errors = errors ++ [diag("native sources must be an array of strings", vlo, vhi, "")] }
+    }
+  }
+  (sources, errors)
+}
+
 ## Validate a parsed document (the Kotlin Manifest.validate): the manifest, or
 ## every rule violation in the Kotlin order. `dir` is the project directory —
 ## path deps resolve against it and the name hint derives from it.
@@ -481,7 +516,7 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
   }
 
   for t in distinct(table_names(doc)) {
-    let known = t == "java-deps" || t == "deps" || str.starts_with(t, "deps.")
+    let known = t == "java-deps" || t == "deps" || t == "native" || str.starts_with(t, "deps.")
     if not known {
       let (hlo, hhi) = header_span(doc, t).unwrap_or((0, 1))
       errs = errs ++ [diag("unknown table `[" ++ t ++ "]` in dawn.toml", hlo, hhi,
@@ -489,6 +524,9 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
           " has `[java-deps]`, `[deps]` and `[deps.<alias>]`")]
     }
   }
+
+  let (native_sources, native_errors) = parse_native(doc)
+  errs = errs ++ native_errors
 
   # Validate local path entries and url tables separately, then stable-merge
   # them by their absolute declaration spans before returning ManifestV.
@@ -600,7 +638,8 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
     name: name,
     version: version,
     java_deps: jdeps,
-    deps: deps_in_source_order(deps)
+    deps: deps_in_source_order(deps),
+    native_sources: native_sources
   }), errs)
 }
 
@@ -801,4 +840,24 @@ test "a subdir is a relative path inside the archive" {
   assert bad_subdir("a/../b")
   assert bad_subdir("a//b")
   assert not bad_subdir("packages/web")
+}
+
+test "native sources preserve manifest order and accept only the closed table" {
+  let prefix = "schema = 1\nname = \"stub\"\n[native]\n"
+  let good = validate("/p", prefix ++ "sources = [\"src/z/stub.c\", \"src/a/stub.c\"]\n")
+  let accepted = match good { Ok(v) -> v, Err(_) -> panic("native manifest") }
+  assert accepted.native_sources == ["src/z/stub.c", "src/a/stub.c"]
+  for bad in ["/src/a.c", "src/../a.c", "a.c", "src/a.cc", "src//a.c", "src/./a.c", "C:/src/a.c"] {
+    assert match validate("/p", prefix ++ "sources = [\"" ++ bad ++ "\"]\n") { Err(_) -> true, Ok(_) -> false }
+  }
+  assert match validate("/p", prefix ++ "sources = [\"src/a.c\", \"src/a.c\"]\n") { Err(_) -> true, Ok(_) -> false }
+  assert match validate("/p", prefix ++ "sources = [1]\n") { Err(_) -> true, Ok(_) -> false }
+  assert match validate("/p", prefix ++ "sources = \"src/a.c\"\n") { Err(_) -> true, Ok(_) -> false }
+  for key in ["url", "hash", "cflags", "libs", "script"] {
+    let result = validate("/p", prefix ++ key ++ " = []\n")
+    match result {
+      Err(ds) -> { assert ds[0].msg == "unknown key `" ++ key ++ "` in `[native]`" }
+      Ok(_) -> { assert false }
+    }
+  }
 }

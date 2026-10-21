@@ -1,0 +1,249 @@
+# Native package ownership belongs to the driver, after Dawn checking and
+# before cc. This lexical C scan is deliberately smaller than a C parser:
+# unknown declarators and preprocessor expansions remain cc/link's job.
+use std/io
+use std/io.{Fs, Env}
+use std/str
+use std/list
+use compiler_plan/source
+use compiler_plan/pkgfetch
+use compiler_plan/nativeplan
+use compiler_plan/nativeplan.{NativePackage}
+use driver/analyze.{LoadResult, Program}
+use check/tast.{XExtern, tex_ty as check_type}
+use c/emitc
+
+## Retain punctuation but ignore comments and literals, which cannot define
+## a stub. Preprocessor branches are not evaluated by this lexical scan.
+fn tokens(text: String) -> List[String] = {
+  let chars = str.chars(text)
+  var out: List[String] = []
+  var word = ""
+  var i = 0
+  while i < len(chars) {
+    let c = chars[i]
+    let next = if i + 1 < len(chars) { chars[i + 1] } else { "" }
+    if c == "/" && (next == "/" || next == "*") {
+      if word != "" {
+        out = out ++ [word]
+        word = ""
+      }
+      let block = next == "*"
+      i = i + 2
+      while i < len(chars) {
+        if not block && chars[i] == "\n" { break }
+        if block && chars[i] == "*" && i + 1 < len(chars) && chars[i + 1] == "/" {
+          i = i + 2
+          break
+        }
+        i = i + 1
+      }
+    } else if c == "\"" || c == "'" {
+      if word != "" {
+        out = out ++ [word]
+        word = ""
+      }
+      let quote = c
+      i = i + 1
+      while i < len(chars) {
+        if chars[i] == "\\" { i = i + 2 } else if chars[i] == quote {
+          i = i + 1
+          break
+        } else { i = i + 1 }
+      }
+    } else if str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", c) {
+      word = word ++ c
+      i = i + 1
+    } else {
+      if word != "" {
+        out = out ++ [word]
+        word = ""
+      }
+      if not str.contains(" \t\r\n", c) { out = out ++ [c] }
+      i = i + 1
+    }
+  }
+  if word != "" { out = out ++ [word] }
+  out
+}
+
+fn abi_type(ts: List[String]) -> Option[String] = {
+  if ts == [] { return None }
+  let base = ts[0]
+  if not list.contains(["int64_t", "double", "bool", "dawn_unit", "dawn_str", "dawn_bytes", "dawn_adt", "void"], base) {
+    return None
+  }
+  var result = base
+  var i = 1
+  while i < len(ts) && ts[i] == "*" {
+    result = result ++ "*"
+    i = i + 1
+  }
+  # One trailing identifier is the optional parameter name.
+  if i < len(ts) && i + 1 != len(ts) { return None }
+  Some(result)
+}
+
+fn c_signature(ts: List[String], macro: Int, end: Int) -> Option[String] = {
+  var start = macro - 1
+  while start >= 0 && ts[start] == "*" { start = start - 1 }
+  if start < 0 { return None }
+  let ret = match abi_type(list.take(list.drop(ts, start), macro - start)) {
+    Some(t) -> t
+    None -> return None
+  }
+  var params: List[String] = []
+  var part: List[String] = []
+  for t in list.take(list.drop(ts, macro + 5), end - macro - 5) {
+    if t == "," {
+      match abi_type(part) {
+        Some(p) -> { params = params ++ [p] }
+        None -> return None
+      }
+      part = []
+    } else { part = part ++ [t] }
+  }
+  if part != [] {
+    match abi_type(part) {
+      Some(p) -> if p != "void" { params = params ++ [p] }
+      None -> return None
+    }
+  }
+  Some(ret ++ "(" ++ join(params, ",") ++ ")")
+}
+
+## Each result is a definition, not a prototype or a call. An unrecognised
+## signature is still a candidate definition, with comparison deferred to cc.
+fn definitions(text: String) -> List[(String, Option[String])] = {
+  let ts = tokens(text)
+  var out: List[(String, Option[String])] = []
+  var i = 1
+  while i + 5 < len(ts) {
+    if ts[i] == "DAWN_EXTERN" && ts[i + 1] == "(" && ts[i + 3] == ")" && ts[i + 4] == "(" {
+      var end = i + 5
+      while end < len(ts) && ts[end] != ")" && ts[end] != "{" && ts[end] != ";" { end = end + 1 }
+      if end + 1 < len(ts) && ts[end] == ")" && ts[end + 1] == "{" {
+        out = out ++ [(ts[i + 2], c_signature(ts, i, end))]
+      }
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn directory(root: String) -> String = str.strip_suffix(root, "/src").unwrap_or(root)
+
+## Root first, followed by packages in the loader's dependency order. A
+## package's canonical root deduplicates diamonds and aliases; unused
+## manifest dependencies never enter the loaded module graph.
+pub(pkg) fn collect(target: String, loaded: LoadResult, prog: Program) -> Result[List[NativePackage], String] !Fs !Env = {
+  let kind = if io.is_dir(target) { source.ProjectDirectory(target) } else { source.SourceFile(target) }
+  let (root, _) = source.source_roots(kind)
+  var dirs = [source.canon_identity(root)]
+  var verified: List[String] = []
+  for m in loaded.modules {
+    match m.pkg {
+      Some(pkg) -> {
+        # The resolver trusts a warm source cache. Native compilation reads C
+        # and headers from it, so verify the entire locked archive first.
+        match pkg.origin {
+          source.FromUrl(hash, _) -> {
+            if not list.contains(verified, hash) {
+              let entry = pkgfetch.cache_dir(pkgfetch.cache_root(), hash)
+              match pkgfetch.verify_cached(entry, hash) {
+                Ok(_) -> ()
+                Err(e) -> return Err(e)
+              }
+              verified = verified ++ [hash]
+            }
+          }
+          _ -> ()
+        }
+        let dir = directory(pkg.root)
+        if not list.contains(dirs, dir) { dirs = dirs ++ [dir] }
+      }
+      None -> ()
+    }
+  }
+  var packages: List[NativePackage] = []
+  var defs: List[(String, String, Option[String])] = []
+  for dir in dirs {
+    let pkg = match nativeplan.load(dir) {
+      Ok(p) -> p
+      Err(e) -> return Err(e)
+    }
+    packages = packages ++ [pkg]
+    for path in pkg.sources {
+      let text = match io.read_file(dir ++ "/" ++ path) {
+        Ok(t) -> t
+        Err(e) -> return Err("cannot read native source " ++ path ++ ": " ++ e.message)
+      }
+      for (sym, sig) in definitions(text) {
+        for (other, owner, _) in defs {
+          if other == sym && owner != pkg.name {
+            return Err("duplicate native symbol `" ++ sym ++ "` in packages `" ++ owner ++ "` and `" ++ pkg.name ++ "`")
+          }
+        }
+        defs = defs ++ [(sym, pkg.name, sig)]
+      }
+    }
+  }
+  var declarations: List[(String, String)] = []
+  for cm in prog.modules {
+    var owner = packages[0].name
+    for lm in loaded.modules {
+      if lm.mod_path == cm.mod_path {
+        match lm.pkg { Some(pkg) -> { owner = pkg.name }, None -> () }
+      }
+    }
+    for f in cm.tm.fns {
+      match f.body {
+        XExtern(sym, args, _, _, _, ty) -> {
+          let params = list.map(args, a => emitc.extern_c_type(check_type(a)))
+          let signature = emitc.extern_c_type(ty) ++ "(" ++ join(params, ",") ++ ")"
+          for (other, sig) in declarations {
+            if other == sym && sig != signature { return Err("inconsistent native signature for `" ++ sym ++ "`") }
+          }
+          declarations = declarations ++ [(sym, signature)]
+          var found = false
+          for (other, pkg, sig) in defs {
+            if other == sym && pkg == owner {
+              found = true
+              match sig {
+                Some(s) -> if s != signature { return Err("inconsistent native signature for `" ++ sym ++ "`: Dawn " ++ signature ++ ", C " ++ s) }
+                None -> ()
+              }
+            }
+          }
+          if not found {
+            return Err("extern `" ++ sym ++ "` needs the package to list its C sources under [native] and define DAWN_EXTERN(" ++ sym ++ ") in package `" ++ owner ++ "`")
+          }
+        }
+        _ -> ()
+      }
+    }
+  }
+  Ok(packages)
+}
+
+## Manual emitc keeps stdout entirely C; source and include guidance is stderr.
+pub fn hints(packages: List[NativePackage]) -> List[String] = {
+  var out: List[String] = []
+  for pkg in packages {
+    if pkg.sources != [] {
+      out = out ++ ["note: native package `" ++ pkg.name ++ "` headers: " ++ pkg.directory ++ "/src"]
+      for path in pkg.sources { out = out ++ ["note: native source: " ++ pkg.directory ++ "/" ++ path] }
+    }
+  }
+  out
+}
+
+test "native definition scanning ignores comments literals and prototypes" {
+  let defs = definitions("// int64_t DAWN_EXTERN(fake)(void) {}\n" ++
+      "char *s = \"DAWN_EXTERN(fake)(void) {}\";\n" ++
+      "int64_t DAWN_EXTERN(proto)(void);\n" ++
+      "dawn_str *DAWN_EXTERN(text)(dawn_str *s) { return s; }\n")
+  assert defs == [("text", Some("dawn_str*(dawn_str*)"))]
+  assert definitions("dawn_unit DAWN_EXTERN(done)(void) { return DAWN_UNIT; }") ==
+    [("done", Some("dawn_unit()"))]
+}

@@ -626,3 +626,21 @@ test "a product's rows drop only the java rows, in order" {
     UrlDepRow("u", "1.0.0", "s1:cc", "d1:dd", "")
   ]
 }
+
+test "native C and header bytes change s1 b1 and reject the url d1 lock" {
+  var st = memfs.empty(memfs.BASE)
+  st = lib_tree(st, "/p/lib", "pub fn tag() -> Int = 1\n")
+  st = memfs.put(st, "/p/lib/src/stub.c", "a")
+  st = memfs.put(st, "/p/lib/src/local.h", "a")
+  let before = digest_in(st, "lib", "/p/lib")
+  let (locked, _) = memfs.with_fs(st, () => pkgfetch.tree_hash("/p/lib"))
+  let hash = match locked { Ok(h) -> h, Err(e) -> panic(e) }
+  for path in ["/p/lib/src/stub.c", "/p/lib/src/local.h"] {
+    let changed = memfs.put(st, path, "b")
+    let after = digest_in(changed, "lib", "/p/lib")
+    assert before != after
+    assert manifest_digest(before) != manifest_digest(after)
+    let (verified, _) = memfs.with_fs(changed, () => pkgfetch.verify_cached("/p/lib", hash))
+    assert match verified { Err(_) -> true, Ok(_) -> false }
+  }
+}

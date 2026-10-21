@@ -1,0 +1,97 @@
+# Keep native inputs in the same closed src/ tree that s1 and d1 digest.
+# Planning validates paths before any C compiler runs; staging preserves each
+# package's include namespace and copies bytes rather than decoding headers.
+use std/io
+use std/io.{Fs}
+use std/str
+use std/list
+use std/memfs
+use manifestv
+use pkgfetch
+
+pub type NativePackage = { name: String, directory: String, sources: List[String], files: List[String] }
+
+## Only the driver's loaded package roots reach this function. No directory
+## of unrelated packages is searched, and an unlisted .c remains an include.
+pub fn load(directory: String) -> Result[NativePackage, String] !Fs = {
+  let manifest = directory ++ "/dawn.toml"
+  let text = match io.read_file(manifest) {
+    Ok(t) -> t
+    Err(_) -> return Ok(NativePackage { name: "(unnamed)", directory: directory, sources: [], files: [] })
+  }
+  let m = match manifestv.validate(directory, text) {
+    Ok(v) -> v
+    Err(ds) -> return Err(manifest ++ ": " ++ ds[0].msg)
+  }
+  if m.native_sources == [] {
+    return Ok(NativePackage { name: m.name, directory: directory, sources: [], files: [] })
+  }
+  let root = directory ++ "/src"
+  if io.is_symlink(root) { return Err("symbolic link in native package tree: " ++ root) }
+  let files = match pkgfetch.collect_files(root, "") {
+    Ok(fs) -> fs
+    Err(e) -> return Err(e)
+  }
+  for path in m.native_sources {
+    let rel = str.drop(path, 4)
+    if not list.contains(files, rel) || io.is_dir(directory ++ "/" ++ path) {
+      return Err("native source does not exist: " ++ directory ++ "/" ++ path)
+    }
+  }
+  Ok(NativePackage { name: m.name, directory: directory, sources: m.native_sources, files: files })
+}
+
+## Return source paths in manifest order after preserving the complete src tree.
+pub fn stage(pkg: NativePackage, destination: String) -> Result[List[String], String] !Fs = {
+  for rel in pkg.files {
+    let path = destination ++ "/src/" ++ rel
+    let parent = match str.last_index_of(path, "/") {
+      Some(i) -> str.take(path, i)
+      None -> destination
+    }
+    match io.mkdirs(parent) {
+      Ok(_) -> ()
+      Err(e) -> return Err("cannot stage native headers: " ++ e.message)
+    }
+    let data = match io.read_bytes(pkg.directory ++ "/src/" ++ rel) {
+      Ok(b) -> b
+      Err(e) -> return Err("cannot read native input: " ++ e.message)
+    }
+    match io.write_bytes(path, data) {
+      Ok(_) -> ()
+      Err(e) -> return Err("cannot stage native input: " ++ e.message)
+    }
+  }
+  Ok(list.map(pkg.sources, path => destination ++ "/" ++ path))
+}
+
+test "native planning refuses missing files and links before C compilation" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/p/dawn.toml", "schema = 1\nname = \"p\"\n[native]\nsources = [\"src/a.c\"]\n")
+  st = memfs.put(st, "/p/src/main.dawn", "")
+  let (missing, _) = memfs.with_fs(st, () => load("/p"))
+  assert missing == Err("native source does not exist: /p/src/a.c")
+  st = memfs.put(st, "/p/src/a.c", "#include \"deep/api.h\"\n")
+  st = memfs.link(st, "/p/src/deep/api.h", "/outside/api.h")
+  st = memfs.put(st, "/p/src/deep/api.h", "")
+  let (linked, _) = memfs.with_fs(st, () => load("/p"))
+  assert match linked { Err(_) -> true, Ok(_) -> false }
+}
+
+test "native staging preserves directories and compiles only listed sources" {
+  var st = memfs.empty(memfs.BASE)
+  st = memfs.put(st, "/p/dawn.toml", "schema = 1\nname = \"p\"\n[native]\nsources = [\"src/b/stub.c\", \"src/a/stub.c\"]\n")
+  st = memfs.put(st, "/p/src/a/stub.c", "a")
+  st = memfs.put(st, "/p/src/b/stub.c", "b")
+  st = memfs.put(st, "/p/src/a/api.h", "one")
+  st = memfs.put(st, "/p/src/b/api.h", "two")
+  st = memfs.put(st, "/p/src/unlisted.c", "#error unlisted\n")
+  let (result, written) = memfs.with_fs(st, () => {
+    let pkg = match load("/p") { Ok(p) -> p, Err(e) -> panic(e) }
+    stage(pkg, "/work/native/0")
+  })
+  assert result == Ok(["/work/native/0/src/b/stub.c", "/work/native/0/src/a/stub.c"])
+  let (headers, _) = memfs.with_fs(written, () =>
+      (io.read_file("/work/native/0/src/a/api.h"), io.read_file("/work/native/0/src/b/api.h")))
+  assert headers == (Ok("one"), Ok("two"))
+}
