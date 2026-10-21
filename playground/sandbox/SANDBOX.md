@@ -56,7 +56,7 @@ output exhausted the runner's heap.)
 | Privilege          | `NoNewPrivileges`, `CapabilityBoundingSet=` (empty) |
 | Syscalls           | `SystemCallFilter=@system-service` minus privileged |
 | Memory             | `MemoryMax=512M`, `MemorySwapMax=0`                 |
-| Compiler heap      | `DAWN_JVM_OPTS=-Xss512m -Xmx256m` via `--setenv`    |
+| Compiler JVM       | `DAWN_JVM_OPTS=-Xss512m -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1` via `--setenv` |
 | Run-phase heap     | `java -Xmx256m` on the runner's argv (`play/exec.dawn`) |
 | Disk, per file     | `LimitFSIZE=32M` (stdout included; writes past it fail) |
 | Fork bomb          | `TasksMax=64` (the JVM itself needs a few dozen)    |
@@ -96,6 +96,14 @@ exports reaches either phase. Two consequences that are easy to get wrong:
   and the kernel SIGKILLs it — contained, but as an opaque kill rather than a
   diagnostic. At `-Xmx256m` it stays inside and reports an `OutOfMemoryError`
   the runner can render.
+- **The compiler runs on SerialGC and C1 only** (`-XX:+UseSerialGC
+  -XX:TieredStopAtLevel=1`, R1 of the latency ruling of 2026-10-21). Naming
+  `DAWN_JVM_OPTS` replaces the launcher's defaults, so before this the
+  compiler here ran on G1 with C2. A playground compile is 1 to 7 s, where C2
+  is not paid back; measured on a 2-core pin, hello 1.45 s to 0.87 s,
+  flash_attn 3.39 s to 2.01 s, peak RSS 435 MB to 300 MB. The cost: a program
+  whose `comptime` runs ten seconds or more is slower under C1 and reaches the
+  30 s compile budget sooner. The run-phase `java` is not affected.
 
 Measured 2026-10-07 on the dev box (WSL2, other jobs running, so orders and
 not promises): `/run` and `/check` of the 11 starter programs through a fresh
