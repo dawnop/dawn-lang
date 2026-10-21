@@ -1,0 +1,102 @@
+# The streaming programs of the io-primitives contract (docs/io-prims-design.md),
+# one binary with a mode as its first argument, so that the JVM jar and the
+# native binary the harness measures are the same source.
+#
+#   append <path>      stdin to <path> in 64 KiB blocks, one append_bytes each
+#   slurp <path>       stdin into memory whole, then one write_bytes (the thing
+#                      the append mode exists to avoid; the harness measures it
+#                      as the control that shows its memory check can go red)
+#   range <path>       <path> to stdout in 64 KiB blocks, each a read_range
+#                      followed by a write_stdout, the last one flushed
+#   ready              write "ready", flush, block on one byte of stdin, echo it
+#                      and end WITHOUT a flush (the end of the process has to
+#                      deliver it)
+#
+# Every mode prints nothing but its own bytes on stdout, so the harness can
+# hash what comes out.
+use std/io.{Fs, with_fs_real, with_exit_real, exit, eprintln, append_bytes, write_bytes, read_range, file_size, read_stdin, write_stdout, flush_stdout}
+use std/bytes
+
+const BLOCK: Int = 65536
+
+fn fail(msg: String) -> Unit !io = {
+  eprintln(msg)
+  with_exit_real(() => exit(2))
+}
+
+fn append_mode(path: String) -> Unit !(Fs | io) = {
+  var total = 0
+  var more = true
+  while more {
+    let b = read_stdin(BLOCK)
+    if len(b) == 0 {
+      more = false
+    } else {
+      match append_bytes(path, b) {
+        Ok(_) -> { total = total + len(b) }
+        Err(e) -> {
+          fail("append failed: ${e.message}")
+          more = false
+        }
+      }
+    }
+  }
+  println("${total}")
+}
+
+fn slurp_mode(path: String) -> Unit !(Fs | io) = {
+  var buf = bytes.buf()
+  var more = true
+  while more {
+    let b = read_stdin(BLOCK)
+    if len(b) == 0 {
+      more = false
+    } else {
+      buf = bytes.put_bytes(buf, b)
+    }
+  }
+  let all = bytes.freeze(buf)
+  let _ = write_bytes(path, all)
+  println("${len(all)}")
+}
+
+fn range_mode(path: String) -> Unit !(Fs | io) = {
+  match file_size(path) {
+    Err(e) -> fail("size failed: ${e.message}")
+    Ok(size) -> {
+      var off = 0
+      while off < size {
+        match read_range(path, off, BLOCK) {
+          Err(e) -> {
+            fail("range failed: ${e.message}")
+            off = size
+          }
+          Ok(b) -> {
+            write_stdout(b)
+            off = off + len(b)
+          }
+        }
+      }
+      flush_stdout()
+    }
+  }
+}
+
+fn ready_mode() -> Unit !io = {
+  write_stdout(bytes.utf8("ready\n"))
+  flush_stdout()
+  let b = read_stdin(1)
+  write_stdout(b)
+  write_stdout(bytes.utf8("\n"))
+}
+
+pub fn main() -> Unit !io = {
+  let a = args()
+  match a {
+    ["append", path] -> with_fs_real(() => append_mode(path))
+    ["slurp", path] -> with_fs_real(() => slurp_mode(path))
+    ["range", path] -> with_fs_real(() => range_mode(path))
+    ["ready"] -> ready_mode()
+    _ -> fail("usage: streams (append|slurp|range) <path> | ready")
+  }
+}

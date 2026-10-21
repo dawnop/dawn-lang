@@ -68,6 +68,7 @@ ADAPTERS = {
     "tile-golden": (".",),
     "tileinterp-diff": (".",),
     "wasm-dom-contract": (".",),
+    "io-prims-contract": (".",),
     "web-exchange-contract": (".",),
 }
 EXCLUSIONS = {
