@@ -93,8 +93,11 @@ typedef union {
  * are one block -- `p` points at the trailing `data`. A literal is a static
  * the emitter (or `dawn_str_lit`) writes with an immortal header and `p`
  * aimed at the C string literal, so literals cost no copy and no count
- * traffic. Not NUL-terminated: `len` is authoritative and embedded NULs
- * survive.
+ * traffic. `len` is authoritative and embedded NULs survive, but the byte at
+ * `p[len]` is always a NUL: every constructor writes one, and a literal points
+ * at a C string literal. That is an ABI guarantee, not a convenience, because
+ * dawn_ffi.h hands `p` to C libraries as a C string (after refusing a string
+ * with an embedded NUL), so a new constructor that skips it is a bug.
  *
  * This was a two-word value (`{p, len}`, buffer leaked by contract) until the
  * strings-join-the-ledger change: by count strings are 0.1% of allocations
@@ -274,6 +277,14 @@ static inline dawn_adt *dawn_adt0(int32_t tag) {
  * `_e` barriers build it, so the order is written down here for the same
  * reason the four tags above are. */
 #define DAWN_TAG_FOREIGN_ERROR 0
+
+/* The pointer masks of those constructors: bit i set when slot i holds a heap
+ * reference the drop must recurse into. `Some`, `Ok`, `Err` and the like carry
+ * one erased field; `ForeignError` carries three references. Written here, not
+ * in dawn_rt.c, because dawn_ffi.h builds these values for the C stubs of
+ * packages and must agree with the runtime on them from one definition. */
+#define DAWN_MASK_ONE_BOXED UINT64_C(1)
+#define DAWN_MASK_THREE_BOXED UINT64_C(7)
 
 dawn_adt *dawn_some(void *boxed);
 dawn_adt *dawn_none(void);
