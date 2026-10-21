@@ -8,6 +8,31 @@
 # generator only reads files already on disk). A package without a manifest
 # is not a package and is skipped, the way gen/packages.package_dirs skips it.
 #
+# Which driver writes each document (native A2, 2026-10-20):
+#
+#   dawnc doc          every package whose source, and the source of every
+#                      path dependency, has no `use java`. The native driver
+#                      writes the same bytes the JVM one does
+#                      (scripts/site-dist-diff.sh compares them), so the site
+#                      no longer needs a JVM for these documents.
+#   ./bin/dawn doc     a package with a `use java`. The native driver cannot
+#                      compile Java, and `doc` checks the whole package, so it
+#                      would reject the package rather than document it.
+#                      Today that is packages/web alone. The test is the
+#                      package's text, not a list kept here: a package that
+#                      gains a `use java` moves to the JVM by itself, one that
+#                      loses its last one moves to dawnc by itself.
+#                      EXIT CONDITION: this exception goes away when B1
+#                      (ruling-full-native 2026-10-20, item 4) moves web's Java
+#                      into its own module. A native `doc` mode that skips Java
+#                      signatures was the alternative and was not built: it
+#                      would be a branch in the compiler for a transitional
+#                      state, dead code the day B1 lands. When B1 merges,
+#                      delete has_java and the JVM branch below.
+#
+# DAWN_DOC_BACKEND=jvm sends every package to the JVM driver: the baseline the
+# differential in scripts/site-dist-diff.sh holds the native documents to.
+#
 # Four at a time: ten packages one after another took 16.9s here on a built
 # toolchain, four at a time 8.4s, and a CI runner has four cores. Every run
 # writes its own file, so the order they finish in changes nothing.
@@ -28,19 +53,65 @@ set -euo pipefail
 export DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g -XX:+UseSerialGC} -XX:-UsePerfData"
 out="${1:?usage: site/package-docs.sh <out-dir>}"
 mkdir -p "$out"
+. site/dawnc.sh
 
-# Warm the toolchain once, serially, before the parallel section. The launcher
-# itself is safe to start concurrently on a cold checkout (the seed cache and the
-# rebuild are lock-serialised in bin/dawn and scripts/seedjar.sh), but without
-# this the four launchers below would all sit behind that one lock and the first
-# `dawn doc` would absorb the whole toolchain build. Kept as a latency choice and
-# a second line of defence, not as the fix: it used to be the only thing keeping
-# four racing launchers from leaving an empty <pkg>.json behind.
-./bin/dawn --version > /dev/null
+# has_java <package-dir>: 0 when the package or a path dependency of it
+# (transitively) has a `use java` line. Same `[deps]` reading as
+# site_prog_key in site/dawnc.sh.
+has_java() {
+  local seen=" " queue="$1" dir dep
+  while [ -n "$queue" ]; do
+    dir="${queue%%$'\n'*}"
+    if [ "$queue" = "$dir" ]; then queue=""; else queue="${queue#*$'\n'}"; fi
+    case "$seen" in *" $dir "*) continue ;; esac
+    seen="$seen$dir "
+    if grep -rqE '^[[:space:]]*use[[:space:]]+java\b' --include='*.dawn' "$dir"; then return 0; fi
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      dep="$(cd "$dir/$dep" && pwd -P)" || { echo "site/package-docs.sh: $dir/dawn.toml has a dependency path that does not exist" >&2; exit 1; }
+      dep="${dep#"$(pwd -P)"/}"
+      queue="${queue:+$queue$'\n'}$dep"
+    done < <(awk '/^\[/ { in_deps = ($0 == "[deps]") }
+                  in_deps && /=[ ]*"[^"]*"/ { match($0, /"[^"]*"/); print substr($0, RSTART + 1, RLENGTH - 2) }' "$dir/dawn.toml")
+  done
+  return 1
+}
+
+# Sort the packages by driver first, so the toolchain that is not needed is not
+# started at all (a site build with no java package never starts a JVM here).
+jobs_list=""
+need_jvm=0
 for pkg in packages/*/; do
   pkg="${pkg%/}"
-  if [ -f "$pkg/dawn.toml" ]; then printf '%s\0' "${pkg#packages/}"; fi
-done | xargs -0 -P 4 -I{} sh -c './bin/dawn doc "packages/$1" > "$2/$1.json"' sh {} "$out"
+  [ -f "$pkg/dawn.toml" ] || continue
+  name="${pkg#packages/}"
+  if [ "${DAWN_DOC_BACKEND:-}" != jvm ] && ! has_java "$pkg"; then
+    jobs_list="$jobs_list"$'n\t'"$name"$'\n'
+  else
+    need_jvm=1
+    jobs_list="$jobs_list"$'j\t'"$name"$'\n'
+    if [ "${DAWN_DOC_BACKEND:-}" != jvm ]; then
+      echo "site/package-docs.sh: $name has a use java: documented by the JVM driver (until B1)" >&2
+    fi
+  fi
+done
+export DOC_OUT="$out"
+if printf '%s' "$jobs_list" | grep -q '^n'; then
+  DOC_DAWNC="$(site_dawnc)"
+  case "$DOC_DAWNC" in /*) ;; *) DOC_DAWNC="$PWD/$DOC_DAWNC" ;; esac
+  export DOC_DAWNC
+fi
+# Warm the JVM toolchain once, serially, before the parallel section. The
+# launcher itself is safe to start concurrently on a cold checkout (the seed
+# cache and the rebuild are lock-serialised in bin/dawn and scripts/seedjar.sh),
+# but without this the launchers below would all sit behind that one lock and the
+# first `dawn doc` would absorb the whole toolchain build. A latency choice and a
+# second line of defence, not the fix: it used to be the only thing keeping four
+# racing launchers from leaving an empty <pkg>.json behind.
+if [ "$need_jvm" = 1 ]; then ./bin/dawn --version > /dev/null; fi
+printf '%s' "$jobs_list" | tr '\n\t' '\0\0' | xargs -0 -n 2 -P 4 sh -c '
+  if [ "$1" = n ]; then "$DOC_DAWNC" doc "packages/$2" > "$DOC_OUT/$2.json"
+  else ./bin/dawn doc "packages/$2" > "$DOC_OUT/$2.json"; fi' sh
 
 # A document that is empty or not JSON stops here, naming the file and what it starts
 # with. `dawn doc` writes the document to stdout, so anything else the JVM or

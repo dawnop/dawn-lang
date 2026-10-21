@@ -217,12 +217,12 @@ fetch 失败或版本不认识时面板照旧只搜标题，底栏照旧写「�
 ## 构建
 
 ```bash
-site/build.sh          # dawn doc --stdlib → play-ui → dawnc → tea reactors → 清空 dist → dawnc run site
+site/build.sh          # dawnc doc --stdlib → play-ui → dawnc → tea reactors → 清空 dist → dawnc run site
 # 三个 wasm（demo 两个 + 搜索面板）要 clang 20+（带 wasm32 sysroot）。缺了就跳过并
 # warning，生成器写占位文件，页面自己报错，其余页面不受影响：
 DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
-# 生成器与搜索预算探针都由原生驱动 dawnc 运行（2026-10-20 起；JVM 只剩 `dawn doc` 与
-# gpu-map 的 `dawn parse`）。dawnc 从当前提交自建，约 37s，按编译器自己的 source stamp +
+# 生成器与搜索预算探针都由原生驱动 dawnc 运行（2026-10-20 起；`dawn doc` 也换成了
+# `dawnc doc`，只有含 `use java` 的包，目前是 packages/web，仍走 JVM，等 B1）。dawnc 从当前提交自建，约 37s，按编译器自己的 source stamp +
 # runtime/c 缓存在 site/build/native/dawnc（见 site/dawnc.sh）；`DAWNC_BIN=<文件>` 可指定现成的。
 # 生成器与探针各用 `dawnc build` 编一次，缓存在 site/build/native/（site/native-progs.txt 列出的程序），
 # 键是 dawnc stamp + 项目及其路径依赖里全部 *.dawn/dawn.toml 的内容摘要（见 site_prog），
@@ -230,7 +230,7 @@ DAWN_WASM_CC=/usr/bin/clang-20 site/build.sh
 # CI 里 site/build/native 整个目录走一份 actions/cache，键由
 # site/cache-keys.sh 用同一批函数算出，规则见 docs/native-backend-plan.md §15。
 # 或手动：
-./bin/dawn doc --stdlib > site/build/stdlib.json
+site/build/native/dawnc doc --stdlib > site/build/stdlib.json
 site/build/native/dawnc run site    # 生成 site/dist/（从仓库根运行，每次重编约 22s）；./bin/dawn run site 是 JVM 基准
 ./bin/dawn test site   # 生成器测试
 

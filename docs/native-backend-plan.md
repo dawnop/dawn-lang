@@ -1653,7 +1653,7 @@ bind/oracle 四处同步;`types.dawn` 顺带给 dict 伪 id 起名 `DICT_ADT_ID`
 ## 15. 站点构建改由 dawnc 运行生成器(native A1,2026-10-20)
 
 依据:`ruling-full-native-20261020` 第 1、8 条(范围只管运行时与站点构建,不管种子链),
-调研 §5 的 A1 段(生成器本身一处不差)。A2(`dawn doc` 换 native、`package-docs.sh`)与
+调研 §5 的 A1 段(生成器本身一处不差)。A2(`dawn doc` 换 native、`package-docs.sh`)见 §16;
 A3(`gpu-map/record.py` 的 `dawn parse`)**不在本刀,待办留在原处**。
 
 **改了什么。** `site/build.sh` 用 `dawnc build site` 编出的二进制出站,`site/search-budget.sh` 用
@@ -1700,3 +1700,22 @@ CI 对这个目录只有一份 `actions/cache`;目录里有 dawnc 和 `site/nati
 
 **不做的。** 不改 `dawn doc`/`package-docs.sh`/`record.py`(A2、A3);
 不在 `redeploy.sh` 里单独加 dawnc 检查(`build.sh` 失败即停,已覆盖)。
+
+## 16. 站点的文档输入改由 dawnc doc 生成(native A2,2026-10-20)
+
+依据同 §15,调研 §5 的 A2 段(`doc --stdlib` 换 native 已证明逐字节一致;`packages/web` 卡住)。
+
+**改了什么。** `site/build.sh` 的 `stdlib.json` 与 `site/package-docs.sh` 的各包文档改用 `dawnc doc`
+(dawnc 即 §15 缓存里的那个,没有新缓存、没有新程序)。选哪个驱动由包的内容机器判断,不维护名单:
+包自己或任一路径依赖(传递)含 `use java` 行的走 `./bin/dawn doc`,其余走 dawnc。目前含 `use java`
+的只有 `packages/web`,脚本为它打印一行说明;一个包新增或删掉最后一处 `use java`,驱动自己跟着换。
+`scripts/site-dist-diff.sh` 在两条腿之后另做一步:全部文档由 JVM 驱动重生成(`DAWN_DOC_BACKEND=jvm`),
+与快照里 native 写的 `stdlib.json` 和各包 JSON 逐字节比,差一个字节即红。
+
+**web 的例外与退出条件。** `packages/web` 本刀留在 JVM。备选「给 native doc 加一个不解析 Java 签名的
+模式」没做:那是为一个过渡态在编译器里加分支,B1(ruling 第 4 条,web 的 Java 拆进独立模块)之后就成了
+死代码;等 B1 什么也不浪费。**退出条件:B1 合入后删掉 `package-docs.sh` 里的 `has_java` 与 JVM 分支,
+web 随其余包一起走 dawnc。**
+
+**不做的。** 不改 `doc` 本身(native 一侧零改动);不动 `selfhost-param-diff.sh`、`api-snapshot.py`
+这些自己调 `dawn doc` 的门(它们的对象是 JVM 驱动与上一 release,不是站点建站路径)。

@@ -104,8 +104,11 @@ tar -cf - --exclude='site/dist' --exclude='site/play-ui/node_modules' \
 # (site/build.sh makes them).
 # Regenerating them into the snapshot keeps the run self-contained and keeps this
 # script from writing anything into the working tree.
+# These are the documents the shipped site is built from, so they are written the
+# way site/build.sh writes them (dawnc doc, native A2); the JVM driver's are
+# written beside them after the two legs and held to them byte for byte.
 mkdir -p "$SNAP/site/build"
-./bin/dawn doc --stdlib > "$SNAP/site/build/stdlib.json"
+"$(site_dawnc)" doc --stdlib > "$SNAP/site/build/stdlib.json"
 site/package-docs.sh "$SNAP/site/build/packages"
 
 echo "snapshot: $(find "$SNAP" -type f | wc -l) input file(s)"
@@ -144,6 +147,23 @@ echo "== JVM =="
 }
 mv "$SNAP/site/dist" "$OUT/dist-jvm"
 
+# ---- the documentation inputs: dawnc doc against `dawn doc` ----
+# After the legs, so a native doc difference is reported next to the dist
+# difference it causes rather than instead of it. The snapshot holds what the
+# shipped site reads (native, except packages with a `use java`, which
+# site/package-docs.sh sends to the JVM either way); the baseline here is every
+# document from the JVM driver. Only these two paths are compared: the
+# snapshot's site/build also carries whatever the working tree had cached there.
+echo "== documentation: dawnc doc vs dawn doc =="
+mkdir -p "$OUT/docs-jvm/packages"
+./bin/dawn doc --stdlib > "$OUT/docs-jvm/stdlib.json"
+DAWN_DOC_BACKEND=jvm site/package-docs.sh "$OUT/docs-jvm/packages" 2> "$OUT/docs-jvm.log" || {
+  echo "FAIL: the JVM documentation baseline did not finish"; tail -20 "$OUT/docs-jvm.log"; exit 1
+}
+docs_rc=0
+{ diff "$OUT/docs-jvm/stdlib.json" "$SNAP/site/build/stdlib.json" &&
+  diff -r "$OUT/docs-jvm/packages" "$SNAP/site/build/packages"; } > "$OUT/docs.diff" 2>&1 || docs_rc=1
+
 # ---- the toolchain has to have held still ----
 FP_AFTER=$(toolchain_fingerprint)
 if [ "$FP_BEFORE" != "$FP_AFTER" ]; then
@@ -155,6 +175,12 @@ if [ "$FP_BEFORE" != "$FP_AFTER" ]; then
 fi
 
 # ---- the comparison ----
+if [ "$docs_rc" != 0 ]; then
+  echo "FAIL: the documents differ between dawnc doc and the JVM dawn doc"
+  head -40 "$OUT/docs.diff"
+  exit 1
+fi
+echo "OK: stdlib.json and $(find "$OUT/docs-jvm/packages" -type f | wc -l) package documents identical on both drivers"
 if diff -r "$OUT/dist-jvm" "$OUT/dist-native" > "$OUT/dist.diff" 2>&1; then
   echo "OK: $(find "$OUT/dist-jvm" -type f | wc -l) generated file(s) identical on both backends"
 else
