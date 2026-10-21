@@ -60,3 +60,171 @@ test "cleanup preserves the primary error" {
     Ok(_) -> { assert false }
   }
 }
+
+fn sq_bind_count(db: Int, stmt: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_bind_count" else Err(unsupported())
+
+fn sq_bind_int(db: Int, stmt: Int, index: Int, value: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_bind_int" else Err(unsupported())
+
+fn sq_bind_float(db: Int, stmt: Int, index: Int, value: Float) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_bind_float" else Err(unsupported())
+
+fn sq_bind_null(db: Int, stmt: Int, index: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_bind_null" else Err(unsupported())
+
+fn sq_bind_text(db: Int, stmt: Int, index: Int, value: String) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_bind_text" else Err(unsupported())
+
+fn sq_step(db: Int, stmt: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_step" else Err(unsupported())
+
+fn sq_column_count(db: Int, stmt: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_column_count" else Err(unsupported())
+
+fn sq_column_type(db: Int, stmt: Int, index: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_column_type" else Err(unsupported())
+
+fn sq_column_int(db: Int, stmt: Int, index: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_column_int" else Err(unsupported())
+
+fn sq_column_float(db: Int, stmt: Int, index: Int) -> Result[Float, ForeignError] !io =
+  extern c "sqlite_column_float" else Err(unsupported())
+
+fn sq_column_text(db: Int, stmt: Int, index: Int) -> Result[String, ForeignError] !io =
+  extern c "sqlite_column_text" else Err(unsupported())
+
+fn sq_column_name(db: Int, stmt: Int, index: Int) -> Result[String, ForeignError] !io =
+  extern c "sqlite_column_name" else Err(unsupported())
+
+fn sq_changes(db: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_changes" else Err(unsupported())
+
+fn sq_last_id(db: Int) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_last_id" else Err(unsupported())
+
+fn sq_autocommit(db: Int) -> Result[Bool, ForeignError] !io =
+  extern c "sqlite_autocommit" else Err(unsupported())
+
+fn sq_busy_timeout(db: Int, ms: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_busy_timeout" else Err(unsupported())
+
+## Bind parameters; Text preserves its byte length, including embedded NUL.
+pub type Value = Integer(value: Int) | Real(value: Float) | Text(value: String) | Null
+## Requested SQLite conversion for each output column; NULL takes precedence.
+pub type Col = ColInt | ColFloat | ColText
+## Copied labels and rows, valid after the statement and connection close.
+pub type Rows = { names: List[String], rows: List[List[Value]] }
+## Begin a deferred or immediate transaction. Nested transactions are refused.
+pub type TxMode = Deferred | Immediate
+
+fn error(kind: String, message: String) -> ForeignError =
+  ForeignError { kind: "sqlite." ++ kind, message: message, cause: None }
+
+fn bind_args(db: Db, stmt: Stmt, args: List[Value]) -> Result[Unit, ForeignError] !io = {
+  let count = sq_bind_count(db, stmt)?
+  if count != len(args) { return Err(error("parameter_count", "binding count differs from SQL parameters")) }
+  var index = 1
+  for value in args {
+    match value {
+      Integer(n) -> sq_bind_int(db, stmt, index, n)?
+      Real(n) -> sq_bind_float(db, stmt, index, n)?
+      Text(text) -> sq_bind_text(db, stmt, index, text)?
+      Null -> sq_bind_null(db, stmt, index)?
+    }
+    index = index + 1
+  }
+  Ok(())
+}
+
+fn cell(db: Db, stmt: Stmt, index: Int, col: Col) -> Result[Value, ForeignError] !io = {
+  let kind = sq_column_type(db, stmt, index)?
+  if kind == 5 { return Ok(Null) }
+  match col {
+    ColInt -> Ok(Integer(sq_column_int(db, stmt, index)?))
+    ColFloat -> Ok(Real(sq_column_float(db, stmt, index)?))
+    ColText -> Ok(Text(sq_column_text(db, stmt, index)?))
+  }
+}
+
+## Bind exactly one statement and materialize every row using cols conversions.
+## Labels are available even for an empty result and duplicate labels are retained.
+pub fn query(db: Db, sql: String, args: List[Value], cols: List[Col]) -> Result[Rows, ForeignError] !io = {
+  with stmt <- with_stmt(db, sql)
+  bind_args(db, stmt, args)?
+  let count = sq_column_count(db, stmt)?
+  check_columns(count, len(cols))?
+  var names: List[String] = []
+  var index = 0
+  while index < count {
+    names = names ++ [sq_column_name(db, stmt, index)?]
+    index = index + 1
+  }
+  var rows: List[List[Value]] = []
+  var step = sq_step(db, stmt)?
+  while step == 100 {
+    var row: List[Value] = []
+    var col_index = 0
+    for col in cols {
+      row = row ++ [cell(db, stmt, col_index, col)?]
+      col_index = col_index + 1
+    }
+    rows = rows ++ [row]
+    step = sq_step(db, stmt)?
+  }
+  Ok(Rows { names: names, rows: rows })
+}
+
+## Execute one statement and discard any returned rows. DDL and transaction
+## statements use this entry; it makes no affected-row-count promise.
+pub fn execute(db: Db, sql: String, args: List[Value]) -> Result[Unit, ForeignError] !io = {
+  with stmt <- with_stmt(db, sql)
+  bind_args(db, stmt, args)?
+  var step = sq_step(db, stmt)?
+  while step == 100 { step = sq_step(db, stmt)? }
+  Ok(())
+}
+
+## Execute DML and read sqlite3_changes (C int range). DDL retains the previous
+## DML count in SQLite; use execute for DDL, PRAGMA and transaction statements.
+pub fn execute_changes(db: Db, sql: String, args: List[Value]) -> Result[Int, ForeignError] !io = {
+  execute(db, sql, args)?
+  sq_changes(db)
+}
+
+## The most recent inserted rowid on this connection, as a signed 64-bit Int.
+pub fn last_id(db: Db) -> Result[Int, ForeignError] !io = sq_last_id(db)
+
+## Set the lock wait in milliseconds, in the range 0 through 2147483647.
+pub fn busy_timeout(db: Db, ms: Int) -> Result[Unit, ForeignError] !io = sq_busy_timeout(db, ms)
+
+## Read SQLite's current autocommit state, including automatic rollbacks.
+pub fn in_transaction(db: Db) -> Result[Bool, ForeignError] !io = {
+  let auto = sq_autocommit(db)?
+  Ok(not auto)
+}
+
+fn rollback(db: Db) -> Result[Unit, ForeignError] !io = {
+  if in_transaction(db)? { execute(db, "ROLLBACK", []) } else { Ok(()) }
+}
+
+## Reject nesting, begin, run body, and commit on Ok. Err, panic and failed
+## commits roll back; a cleanup error is appended without replacing the cause.
+pub fn with_tx[T, !e](db: Db, mode: TxMode, body: fn() -> Result[T, ForeignError] !e !io) -> Result[T, ForeignError] !e !io = {
+  if in_transaction(db)? { return Err(error("nested_transaction", "transaction already active")) }
+  execute(db, match mode { Deferred -> "BEGIN"
+    Immediate -> "BEGIN IMMEDIATE" }, [])?
+  with held <- bracket(db, connection => { let _ = rollback(connection)
+    () })
+  let result = body()
+  match result {
+    Err(e) -> finish(Err(e), rollback(held))
+    Ok(value) -> match execute(held, "COMMIT", []) {
+      Ok(_) -> Ok(value)
+      Err(e) -> finish(Err(e), rollback(held))
+    }
+  }
+}
+
+fn check_columns(actual: Int, expected: Int) -> Result[Unit, ForeignError] =
+  if actual == expected { Ok(()) } else { Err(error("column_count", "conversion count differs from result columns")) }
