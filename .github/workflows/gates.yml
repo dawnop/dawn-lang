@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22443s (the most this file's `3x` claims may add up to)
+# push-total: 22503s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2622,8 +2622,12 @@ jobs:
     # runs' contracts-1 times for the two steps: 261s median, 285s worst (run
     # 39024859369), one deviation 30s, so 315s, and the timeout is 3x that.
     # A planning value until three main runs exist.
-    # budget: 3x 315s planning value (285s replayed worst plus one deviation)
-    timeout-minutes: 16
+    # 2026-10-21: scripts/io-prims-contract/run.sh joins this job (the io
+    # primitives on both backends, with six negative controls): 30s measured
+    # locally, charged at 60s for a runner about twice as slow. Planning value:
+    # 315 + 60 = 375s, and the timeout is 3x that. The push total moves by 60s.
+    # budget: 3x 375s planning value (285s replayed worst plus one deviation, plus the io primitives contract)
+    timeout-minutes: 19
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2669,6 +2673,19 @@ jobs:
       # round trip through one implementation proves only self-consistency.
       - name: Inflate contract
         run: ./scripts/inflate-contract/run.sh
+
+      # The io batch (stdout bytes with a flush, append, range read, file size,
+      # disk space, sleep): eight primitives the JVM runtime and the C runtime
+      # implement apart. One probe through std/io holds both, and the native
+      # build under ASan, LSan and UBSan, to a hand-written expected.txt; a
+      # 256 MiB body is appended and a 256 MiB file streamed in 64 KiB blocks
+      # with the bytes hashed and the peak resident set bounded; and six
+      # negative controls (no flush, append truncates, range off by one, the
+      # last two again one layer up where the JVM sees them, and the program
+      # that holds the whole body) must each turn it red.
+      # 30s measured locally on a loaded 16-core machine, charged at 60s.
+      - name: io primitives contract
+        run: ./scripts/io-prims-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test

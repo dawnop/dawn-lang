@@ -190,6 +190,9 @@ native 差。
 
 ## web 的跟进
 
+> 这一节随种子推进后的下一刀落地：`packages/web` 在 prev-diff 里被上一个 release 的编译器按它自带的 std 检查，今天的 std 新名字它认不得；
+> 同理 web 中间件里两个用 handler 假 `Clock` 的测试暂时离开该文件，随下一个种子回来。
+
 - `web/exchange.stdio_transport()`：读取 `read_stdin(n)`（忽略位置），写取 `write_stdout` 加
   `flush_stdout`，每次写后 flush，流式体的每一块立刻到对端。进 `web` 的公开面；契约的 native 主程序
   改用它，仍然 78/78。
