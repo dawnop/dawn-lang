@@ -197,6 +197,47 @@ fn mem_write(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, Forei
   }, Ok(()))
 }
 
+## Append to a file, creating it (and its directories) when absent, as the
+## host's append does. A directory in the way is an `Err`.
+fn mem_append(st: MemFs, p: String, content: Bytes) -> (MemFs, Result[Unit, ForeignError]) = {
+  let k = key(st, p)
+  match map.get(st.files, k) {
+    Some(old) -> mem_write(st, p, bytes.freeze(bytes.put_bytes(bytes.put_bytes(bytes.buf(), old), content)))
+    None -> mem_write(st, p, content)
+  }
+}
+
+## The bytes of a range, as the host answers one: short or empty at the end of
+## the file, a missing file or a directory an `Err`, a negative offset or count
+## a panic with the host's wording.
+fn mem_range(st: MemFs, p: String, off: Int, n: Int) -> Result[Bytes, ForeignError] = {
+  if off < 0 || n < 0 {
+    panic("read_range: off and n must not be negative")
+  }
+  match mem_read(st, p) {
+    Err(e) -> Err(e)
+    Ok(all) -> {
+      let size = len(all)
+      let from = if off > size { size } else { off }
+      let to = if n > size - from { size } else { from + n }
+      Ok(bytes.slice(all, from, to))
+    }
+  }
+}
+
+fn mem_size(st: MemFs, p: String) -> Result[Int, ForeignError] = {
+  let k = key(st, p)
+  match map.get(st.files, k) {
+    Some(b) -> Ok(len(b))
+    None ->
+      if is_dir_key(st, k) {
+        Err(ferr("not_a_file", "not a regular file", k))
+      } else {
+        Err(ferr("not_found", "no such file", k))
+      }
+  }
+}
+
 fn mem_delete(st: MemFs, p: String) -> (MemFs, Result[Bool, ForeignError]) = {
   let k = key(st, p)
   if map.has(st.files, k) {
@@ -433,6 +474,16 @@ pub fn with_fs[T, !e](seed: MemFs, body: fn() -> T !io.Fs !e) -> (T, MemFs) !e =
       }
     fs_list_names(path) => mem_list(st, path)
     fs_real_path(path) => mem_real(st, path)
+    fs_append_bytes(path, content) => {
+      let (next, r) = mem_append(st, path, content)
+      st = next
+      r
+    }
+    fs_read_range(path, off, n) => mem_range(st, path, off, n)
+    fs_size(path) => mem_size(st, path)
+    # a table has no disk: the volume a path lives on is not a thing it models
+    fs_disk_total(path) => Err(ferr("no_disk", "an in-memory table has no disk", key(st, path)))
+    fs_disk_free(path) => Err(ferr("no_disk", "an in-memory table has no disk", key(st, path)))
   }
   let out = body()
   (out, st)
@@ -669,5 +720,45 @@ test "a missing component, a file used as a directory, and a dangling link are a
     assert kind_of(io.fs_real_path("/f/dangle")) == "memfs.not_found"
     # a link onto something already there is not made
     assert link(seed, "/f/file", "/f") == seed
+  })
+}
+
+test "an append creates, extends, and refuses a directory" {
+  let seed = put(empty(BASE), "/a/log", "ab")
+  let (_, table) = with_fs(seed, () => {
+    assert io.fs_append_bytes("/a/log", bytes.utf8("cd")) == Ok(())
+    assert io.fs_append_bytes("/a/new/deeper", bytes.utf8("x")) == Ok(())
+    assert io.fs_append_bytes("/a/new/deeper", bytes.utf8("")) == Ok(())
+    assert kind_of(io.fs_append_bytes("/a", bytes.utf8("x"))) == "memfs.is_a_directory"
+    assert io.fs_read_bytes("/a/log") == Ok(bytes.utf8("abcd"))
+  })
+  assert text(table, "/a/log") == Some("abcd")
+  assert text(table, "/a/new/deeper") == Some("x")
+}
+
+test "a range read is short or empty at the end, and refuses what is not a file" {
+  let seed = put(empty(BASE), "/r/f", "0123456789")
+  let (_, _) = with_fs(seed, () => {
+    assert io.fs_read_range("/r/f", 2, 3) == Ok(bytes.utf8("234"))
+    assert io.fs_read_range("/r/f", 7, 100) == Ok(bytes.utf8("789"))
+    assert io.fs_read_range("/r/f", 10, 5) == Ok(bytes.utf8(""))
+    assert io.fs_read_range("/r/f", 50, 5) == Ok(bytes.utf8(""))
+    assert io.fs_read_range("/r/f", 4, 9223372036854775807) == Ok(bytes.utf8("456789"))
+    assert kind_of(io.fs_read_range("/r/nope", 0, 1)) == "memfs.not_found"
+    match catch_panic(() => kind_of(io.fs_read_range("/r/f", -1, 1))) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e.message, "must not be negative") }
+    }
+  })
+}
+
+test "a size is a file's length, and a table has no disk" {
+  let seed = put(empty(BASE), "/s/f", "12345")
+  let (_, _) = with_fs(seed, () => {
+    assert io.fs_size("/s/f") == Ok(5)
+    assert kind_of(io.fs_size("/s")) == "memfs.not_a_file"
+    assert kind_of(io.fs_size("/s/nope")) == "memfs.not_found"
+    assert kind_of(io.fs_disk_total("/s")) == "memfs.no_disk"
+    assert kind_of(io.fs_disk_free("/s")) == "memfs.no_disk"
   })
 }

@@ -127,7 +127,7 @@ pub fn instant_at_ns(ns: Int) -> Instant
   的东西（「the six real wrappers nest」）。代价是只想冻结墙钟的测试也要写一条
   `clock_mono() => instant_at_ns(0)`，因为每个操作恰好一臂（spec §6.5）。
 - **操作集合一次定对。** 同一条「恰好一臂」规则让往已发布效果里加操作成为对所有用户 handler 的破坏性
-  变更；backend-dawn 今天就有 11 个安装点在答它自己的 `Clock`。所以 `Clock` 只放两个读数。
+  变更；backend-dawn 今天就有 11 个安装点在答它自己的 `Clock`。所以 `Clock` 只放两个读数。（2026-10-21：第三个操作 `clock_sleep_ns` 加入，这条代价照付，见「不做的」里的 sleep 一条。）
 - **公开函数的行写 `!Clock`，生产 handler 体行写 `!e`。** 与 `Env` 的 `cwd() -> String !Env`、
   `with_env_real` 同形。新效果没有旧调用者，没有五族那种「先 `!io` 一个 release」的过渡；selfhost
   内的消费者要等种子推进到含本声明的 release（docs/bootstrap.md 特性纪律 4）。`selfhost-prev-diff.sh`
@@ -174,12 +174,12 @@ pub fn instant_at_ns(ns: Int) -> Instant
 
 ## 不做的（理由）
 
-- **sleep**：仓内零消费者（全仓 `.dawn` 只有 `scripts/spike-native/ctl_vthread.dawn` 一个探针），
-  tea-term 要的是读数不是睡眠；浏览器宿主没有阻塞睡眠，一次 reactor 调用必须答一条消息。放进
-  `Clock` 会因「恰好一臂」逼每个只想冻结时间的假 handler 多写一臂，日后再加又是破坏性变更。
-  将来出现不能用 `use java` 的消费者（native/wasm 上的重试退避、限速）时，以独立效果（暂名
-  `Timer`）落地，届时一起裁「假钟如何同时答 now 与 sleep」：handler 局部格子每次安装私有
-  （spec §6.5），两个 handler 共享不了一格虚拟时间。
+- **sleep（2026-10-21 起不再属于这一条）**：当时仓内零消费者，所以没放进 `Clock`，并预留「出现不能用
+  `use java` 的消费者时以独立效果落地」。消费者出现了（dawnop-site 监控页 `cpu_window` 的
+  `Thread.sleep`，native 化要它），裁决第 6 条把它放进 `Clock`，作为第三个操作 `clock_sleep_ns`
+  （[io-prims-design.md](io-prims-design.md)）。上面担心的那条「两个 handler 共享不了一格虚拟时间」
+  恰是不另立效果的理由：假钟的 `clock_sleep_ns` 与 `clock_mono` 在同一个 handler 里，才能共用一个
+  格子，等待推进假时间。「浏览器宿主没有阻塞睡眠」仍然成立：wasi 上提前返回。
 - **`CLOCK_BOOTTIME`**：计挂起时间，语义上更好，但 JVM `nanoTime` 是 `CLOCK_MONOTONIC`，两后端
   对拍优先。
 - **毫秒**：丢精度，见「单位」；要毫秒的调用方除以 1_000_000 即可（向零取整，spec §4.3）。
