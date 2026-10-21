@@ -184,7 +184,7 @@ fn ty_problem(t: Ty) -> Option[String] = match t {
   GatherScatterView(_ts, e, _s, _st, _sd, _p) -> ty_problem(Tile([], e))
 }
 
-const FLOAT_UN: List[String] = ["negf", "absf", "ceil", "floor", "sqrt", "sqrt_approx", "exp", "exp2", "log", "log2",
+const FLOAT_UN: List[String] = ["negf", "absf", "ceil", "floor", "sqrt", "sqrt_approx", "exp", "exp2", "exp2_ftz", "log", "log2",
   "rsqrt", "tanh", "sin", "cos", "tan", "sinh", "cosh"]
 
 const FLOAT_BIN: List[String] = ["addf", "subf", "mulf", "divf", "maxf", "minf", "maxf_nan", "minf_nan", "remf", "pow",
@@ -709,7 +709,15 @@ fn float_bin(op: String, a: Float, b: Float) -> Float = match op {
 # transcendental functions it is a definition, which the tolerance tier
 # accepts for them on the device as well.
 fn float_un_in(fmt: String, op: String, x: Float) -> Float =
-  if fmt == "f64" { float_un(op, x) } else { nearest(fmt, float_un(op, x)) }
+  if op == "exp2_ftz" {
+    # flushed at the format's own smallest normal on the way in and on the
+    # way out, as the binary flush variants are (`float_bin_in`)
+    flush_in(fmt, nearest(fmt, exp2_f(flush_in(fmt, x))))
+  } else if fmt == "f64" {
+    float_un(op, x)
+  } else {
+    nearest(fmt, float_un(op, x))
+  }
 
 # `float_bin` for a lane of format `fmt`. The directed variants round the
 # bracketing binary64 neighbours of the exact result into the format in the

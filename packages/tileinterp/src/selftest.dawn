@@ -15,7 +15,7 @@ use std/narrow.{F32, BF16, F16}
 use std/gpu.{Gpu, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, Buffer, encode_floats,
   decode_floats, WideRefFn }
 use tileir/dev.{Dev, Param, param, block_id, tile_at, load, store, load_cell, store_cell, add, mul, tail_mask,
-  f_const, mma, fma, float_to_float, sqrt, reduce_sum, scan_sum, d_range, idx_const, broadcast, memory_fence_alias, DYN_DIM }
+  f_const, mma, fma, float_to_float, sqrt, exp2, reduce_sum, scan_sum, d_range, idx_const, broadcast, memory_fence_alias, DYN_DIM }
 use tileir/prog.{TileProg, trace_kernel, ByPtr, trace3, cells, In, Out}
 use interp.{interp_ref, interp_kernel, unsupported_in}
 use device.{with_gpu_interp, with_gpu_interp_log}
@@ -106,6 +106,18 @@ fn fused32(a: Param[F32], b: Param[F32], c: Param[F32], out: Param[F32]) -> Unit
 fn fused32_prog() -> TileProg =
   trace_kernel("fused32", [ByPtr("f32"), ByPtr("f32"), ByPtr("f32"), ByPtr("f32")],
     () => fused32(param(F32, 0), param(F32, 1), param(F32, 2), param(F32, 3)))
+
+# `2^x` of one f32 tile, plain and with `flush_to_zero`, both widened to f64
+# to be stored (the f32 attribute is refused on anything but an f32 tile, and
+# std/gpu moves no f32 buffer, as scripts/tile-golden's attr kernels say).
+fn exp2_pair(x: Param[F32], out: Param[Float]) -> Unit !Dev = {
+  let t = load(x, idx_const(0), [W])
+  store(out, idx_const(0), float_to_float(exp2(t), F64))
+  store(out, idx_const(W), float_to_float(exp2(t, ftz: true), F64))
+}
+
+fn exp2_pair_prog() -> TileProg =
+  trace_kernel("exp2_pair", [ByPtr("f32"), ByPtr("f64")], () => exp2_pair(param(F32, 0), param(F64, 1)))
 
 # bfloat16 and f16 sums: `a + b` with both operands in the format, widened to
 # f64 before it is stored. The widening is the point: a narrow buffer's
@@ -224,7 +236,7 @@ test "an instruction the interpreter does not model is refused by name before an
   }
   # every kernel above that the interpreter models is accepted by the same walk
   assert list.all([vadd_prog(), tail_prog(), folds_prog(), chunks_prog(), product_prog(), product_bf16_prog(), fused64_prog(),
-    fused32_prog(), sum_bf16_prog(), sum_f16_prog()], p => unsupported_in(lower(p)) == None)
+    fused32_prog(), sum_bf16_prog(), sum_f16_prog(), exp2_pair_prog()], p => unsupported_in(lower(p)) == None)
 }
 
 # One launch on typed buffers: `dtypes` names each buffer's format, `bufs`
@@ -288,6 +300,23 @@ test "fma rounds once, in f64 and in f32" {
     [floats(W, _i => f), floats(W, _i => f), floats(W, _i => 0.0 - (1.0 + 1.0 / 2048.0)), floats(W, _i => 0.0)])
   assert r32 == Ok(floats(W, _i => 1.0 / 16777216.0))
 }
+
+test "exp2 with flush_to_zero flushes a subnormal result to zero and leaves every normal one alone" {
+  # lanes: 2^-130 and 2^-149 are subnormal results, 2^-126 is the smallest
+  # normal one (its own exponent), -200 underflows to zero either way, the
+  # smallest subnormal as an INPUT gives 1 either way, 10 gives 1024
+  let tiny = 1.401298464324817e-45
+  let xs = [0.0 - 130.0, 0.0 - 149.0, 0.0 - 126.0, 0.0 - 200.0, tiny, 10.0, 0.0, 0.0 - 1.0]
+  let plain = [pow2_int(0 - 130), pow2_int(0 - 149), pow2_int(0 - 126), 0.0, 1.0, 1024.0, 1.0, 0.5]
+  let flushed = [0.0, 0.0, pow2_int(0 - 126), 0.0, 1.0, 1024.0, 1.0, 0.5]
+  let r = run_typed("exp2_pair", interp_ref(exp2_pair_prog(), [1]), ["f32", "f64"], [xs, floats(2 * W, _i => 0.0)])
+  assert r == Ok(plain ++ flushed)
+}
+
+# 2^n for a negative or positive integer n, by repeated halving or doubling:
+# exact in binary64 for every n a binary32 test needs.
+fn pow2_int(n: Int) -> Float =
+  list.fold(range(0, if n < 0 { 0 - n } else { n }), 1.0, (a, _i) => if n < 0 { a / 2.0 } else { a * 2.0 })
 
 test "a narrow sum is rounded into its format after every operation" {
   # 1 + 3 * 2^-9 sits 0.00586 above 1; bfloat16 steps by 2^-7 near 1, and the

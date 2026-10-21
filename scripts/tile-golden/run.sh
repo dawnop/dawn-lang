@@ -541,7 +541,7 @@ kernels=(
   dtype_e5m2 dtype_e8m0 dtype_i4 dtype_e2m1
   pack_roundtrip
   loop_count loop_bound loop_until loop_none
-  attr_round attr_nan attr_ftz attr_approx
+  attr_round attr_nan attr_ftz attr_approx attr_exp2
   attr_overflow attr_memsem attr_addf attr_ucmp
   assert_pass assert_fail print_tile assume_divby
   assume_same assume_bounded

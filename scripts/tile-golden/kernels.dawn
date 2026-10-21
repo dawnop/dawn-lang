@@ -2206,6 +2206,17 @@ fn flash_attn(q: Param[Float], k: Param[Float], v: Param[Float], o: Param[Float]
 # a row of the dialect's `mmaf` table, bf16 into bf16 is not. Tolerance
 # tier, and not the f64 kernels' tolerance: see scripts/tile-gpu-diff's
 # seq_diff for the bound and what it is derived from.
+#
+# The exponentials are base 2 with `flush_to_zero` (knife P3), the way
+# Triton's tutorial, FlashAttention 2 and 3 and cuTile's own attention
+# sample write them: the launch's `scale` is `log2(e) / sqrt(d)`, so the
+# scores are already in base 2 and `exp2(s - m)` is `exp(scale' * q k^T - m')`
+# with nothing in front of the one `ex2` instruction. Plain `exp` is a
+# seven instruction sequence on this device; `exp2` with `ftz` is the
+# instruction (measured, docs/tile-backend-design.md 6.39). Flushing is safe
+# here for the reason it is in those kernels: a probability below 2^-126 is
+# far below one f32 ulp of the row sum `l`, which holds the row maximum's own
+# term, 1, so flushing it cannot move `l` or the weighted sum.
 fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Float], scale: Param[F32]) -> Unit !Dev = {
   let tq = load_cell(q)
   var m: Tile[F32] = full([FA_BQ, 1], f32(-INFINITY))
@@ -2214,8 +2225,8 @@ fn flash_attn_bf16(q: Param[BF16], k: Param[BF16], v: Param[BF16], o: Param[Floa
   for j in d_range(0, ATT_N / FA_BK) {
     let s: Tile[F32] = mma(tq, load_at(k, [j]).transpose(), 0.0) * scalar(scale)
     let m_new = max(m, reduce_max(s, keepdims: true))
-    let p = exp(s - m_new)
-    let alpha = exp(m - m_new)
+    let p = exp2(s - m_new, ftz: true)
+    let alpha = exp2(m - m_new, ftz: true)
     l = l * alpha + reduce_sum(p, keepdims: true)
     acc = mma(p.to(BF16), load_at(v, [j]), acc * alpha)
     m = m_new
@@ -3737,6 +3748,7 @@ const ATTR_ROUND_SEGS: Int = 6
 const ATTR_NAN_SEGS: Int = 16
 const ATTR_FTZ_SEGS: Int = 4
 const ATTR_APPROX_SEGS: Int = 2
+const ATTR_EXP2_SEGS: Int = 2
 const ATTR_OVERFLOW_SEGS: Int = 3
 const ATTR_MEMSEM_SEGS: Int = 3
 
@@ -3822,6 +3834,21 @@ fn attr_approx(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let a = float_to_float(load_cell(x), F32)
   store_sub(out, [0], float_to_float(sqrt(a), F64))
   store_sub(out, [1], float_to_float(sqrt_approx(a), F64))
+}
+
+# `2^x` beside `2^x` with `flush_to_zero` (knife P3). Both segments are the
+# same lanes under the two attribute values, and the corpus is what gives
+# the attribute something to flush: results below 2^-126 (the f32 smallest
+# normal), which plain `exp2` answers as a subnormal and the flushed one as
+# zero, next to results that are normal under both. Tolerance tier, like
+# every transcendental kernel: the device's `ex2` is an approximation, so
+# the two segments are compared to the host reference at the tolerance and
+# what says the attribute reached the device is the COUNT of lanes on which
+# the pair differs, which attr_diff prints and run.sh holds above zero.
+fn attr_exp2(x: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let a = float_to_float(load_cell(x), F32)
+  store_sub(out, [0], float_to_float(exp2(a), F64))
+  store_sub(out, [1], float_to_float(exp2(a, ftz: true), F64))
 }
 
 # The three integer overflow assumptions, one per segment. The corpus does
@@ -5859,6 +5886,11 @@ fn trace(name: String) -> TileProg = match name {
       In(F64, run_of(ATTR_TILE)), Out(F64, run_of(ATTR_APPROX_SEGS * ATTR_TILE)), attr_approx)
     p
   }
+  "attr_exp2" -> {
+    let (p, _e) = trace2("attr_exp2",
+      In(F64, run_of(ATTR_TILE)), Out(F64, run_of(ATTR_EXP2_SEGS * ATTR_TILE)), attr_exp2)
+    p
+  }
   "attr_overflow" -> {
     let (p, _e) = trace3("attr_overflow",
       In(I32, run_of(ATTR_TILE)), In(I32, run_of(ATTR_TILE)), Out(I32, attr_segs(ATTR_OVERFLOW_SEGS, 4)), attr_overflow)
@@ -6189,7 +6221,7 @@ pub fn main() -> Unit !io = match args() {
         ++ "|llama_rms|llama_qkv|llama_rope|llama_scores|llama_out|llama_ffn|llama_down"
         ++ "|trig_sweep|rope|shape_ops|grid_stride|token_join|ptr_roundtrip|ptr_recast|insert_tile|powi_sweep|token_fences"
         ++ "|loop_count|loop_bound|loop_until|loop_none|loop_return"
-        ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
+        ++ "|attr_round|attr_nan|attr_ftz|attr_approx|attr_exp2|attr_overflow|attr_memsem|attr_addf|attr_ucmp"
         ++ "|attr_sat|attr_ftof|attr_xchg"
         ++ "|assert_pass|assert_fail|print_tile|assume_divby|assume_same|assume_bounded"
         ++ "|global_table|global_ctl|global_scratch|global_flags|global_syms"

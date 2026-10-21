@@ -185,6 +185,7 @@ fn cmp_ordering(pred: String) -> String =
 # the suffix said.
 fn float_spelling(op: String) -> String = match op {
   "addf_neg_inf" | "addf_pos_inf" | "addf_ftz" -> "addf"
+  "exp2_ftz" -> "exp2"
   "mulf_neg_inf" | "mulf_pos_inf" | "mulf_ftz" -> "mulf"
   "divf_neg_inf" | "divf_pos_inf" -> "divf"
   "maxf_nan" -> "maxf"
@@ -200,7 +201,7 @@ fn float_spelling(op: String) -> String = match op {
 # The unit attributes a float operation prints after its operands, as the
 # `oilist` in Ops.td spells them. Nothing before knife T4 set one.
 fn float_units(op: String) -> String = match op {
-  "addf_ftz" | "mulf_ftz" -> " flush_to_zero"
+  "addf_ftz" | "mulf_ftz" | "exp2_ftz" -> " flush_to_zero"
   "maxf_nan" | "minf_nan" -> " propagate_nan"
   _ -> ""
 }
@@ -238,8 +239,8 @@ fn rounding(op: String) -> String = match op {
 # takes one too but the only mode an f64 tile accepts is `full`, which is
 # its default and which the dialect's own printer leaves out (its examples
 # spell the default `tanh %in : tile<4xf32>`); `exp`'s field does not exist
-# before bytecode 13.3 at all. `exp2` and `rsqrt` take `flush_to_zero`,
-# which is never set here and so is never printed.
+# before bytecode 13.3 at all. `exp2` and `rsqrt` take `flush_to_zero`, which
+# is a unit attribute and is printed by `float_units` (`exp2_ftz` sets it).
 fn un_rounding(op: String) -> String = match op {
   "sqrt" -> " rounding<nearest_even>"
   "sqrt_approx" -> " rounding<approx>"
@@ -1137,7 +1138,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   # sqrt prints its rounding mode; tanh's only f64 mode is `full`, which is
   # its default and which the dialect's own printer leaves out; exp has no
   # such field at all before bytecode 13.3; exp2 and rsqrt take
-  # flush_to_zero, which is never set here
+  # flush_to_zero, which only `exp2_ftz` sets
   let p = TileProg {
     producer: None,
     debug: None,
@@ -1158,7 +1159,8 @@ test "the transcendentals spell the modifiers they carry and no others" {
       UnaryF(10, "tanh", "f64", [8], 4),
       UnaryF(11, "floor", "f64", [8], 4),
       UnaryF(12, "ceil", "f64", [8], 4),
-      BinaryF(13, "pow", "f64", [8], 4, 4)
+      BinaryF(13, "pow", "f64", [8], 4, 4),
+      UnaryF(14, "exp2_ftz", "f32", [8], 4)
     ]
   }
   let text = render(p)
@@ -1170,6 +1172,7 @@ test "the transcendentals spell the modifiers they carry and no others" {
   assert str.contains(text, "\n    %20 = floor %13 : tile<8xf64>\n")
   assert str.contains(text, "\n    %21 = ceil %13 : tile<8xf64>\n")
   assert str.contains(text, "\n    %22 = fpowf %13, %13 : tile<8xf64>\n")
+  assert str.contains(text, "\n    %23 = exp2 %13 flush_to_zero : tile<8xf32>\n")
 }
 
 test "assert, assume and print_tko spell the dialect's own assembly, predicate prefix dropped and format string escaped" {

@@ -3,6 +3,12 @@
 Newest first. A 0.x minor is its own compatibility class
 (`docs/package-design.md` §6.3).
 
+## 0.2.1 (2026-10-21)
+
+Models `exp2_ftz` (tileir 0.19.0): the input is flushed at the format's own
+smallest normal, `2^x` is rounded into the format, and a subnormal result is
+flushed, the way `addf_ftz` and `mulf_ftz` already are.
+
 ## 0.2.0 (2026-10-20)
 
 Knife I2 (`docs/tileinterp-design.md` 7). Reads nothing new from
