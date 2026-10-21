@@ -1,0 +1,165 @@
+# The application the web exchange contract serves, on both servers. Every route
+# here exists to put one rule of the single-exchange adapter on the wire:
+#
+#   /hello, /empty, /nocontent  framing: sized, empty, a status with no body
+#   /q, /u/{name}, /files/...   query multimap, percent decoding, tail captures
+#   /echo, /small               body ceilings (the server's, and a route's own)
+#   /guarded                    a guard that refuses before the body is read
+#   /spill, /spill-small        a "stream-body" route and its own ceiling
+#   /stream-*                   streaming bodies: unknown length (chunked), an
+#                               exact length, one that runs short, one that runs
+#                               over its stated length, one on a no-body status
+#   /boom                       a panicking handler
+#
+# and a middleware that stamps every answer, refusals included, so that the
+# order "a refusal goes through the chain" is visible in the bytes.
+#
+# A streaming source needs state and a closure cannot mutate what it captures,
+# so the source keeps its position in a temp file: crude, and the same on both
+# servers, which is the only thing this file needs.
+use std/bytes
+use std/io.{with_fs_real, with_env_real, getenv, temp_file, read_file, write_file, delete}
+use web/types.{Request, Response, HttpError, Handler, Middleware, BodySource, http_error, text, binary, streaming, header, headers_all, query, query_all, param, param_segs, with_header, default_errors, ErrorFormat}
+use web/wire.{join_with}
+use web/router.{Route, route_get, route_post, route_put, tagged, body_limit, guarded}
+
+## The server-side body ceiling both servers run with, small enough that a
+## fixture can cross it.
+pub const MAX_BODY: Int = 64
+
+pub fn errors() -> ErrorFormat = default_errors()
+
+fn hello(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "hello"))
+
+fn empty(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, ""))
+
+fn nocontent(_req: Request) -> Result[Response, HttpError] !io = Ok(text(204, "this body is never sent"))
+
+fn boom(_req: Request) -> Result[Response, HttpError] !io = panic("boom")
+
+fn echo_query(req: Request) -> Result[Response, HttpError] !io =
+  Ok(text(200, "a=${join_with(query_all(req, "a"), ",")} first=${unwrap_or(query(req, "a"), "-")} path=${req.path} raw=${req.raw_path} xs=${join_with(headers_all(req, "x-multi"), "|")}"))
+
+fn echo_name(req: Request) -> Result[Response, HttpError] !io = {
+  let name = param(req, "name")?
+  Ok(text(200, "name=${name}"))
+}
+
+fn echo_rest(req: Request) -> Result[Response, HttpError] !io =
+  Ok(text(200, "rest=${join_with(param_segs(req, "rest"), "/")}"))
+
+fn echo_body(req: Request) -> Result[Response, HttpError] !io =
+  Ok(binary(200, "application/octet-stream", req.body))
+
+fn granted(req: Request) -> Result[Response, HttpError] !io =
+  Ok(text(200, "granted ${len(req.body)}"))
+
+fn need_token(req: Request) -> Result[Unit, HttpError] !io =
+  if header(req, "x-token") != Some("ok") {
+    Err(HttpError { ..http_error(401, "unauthorized"), headers: [("WWW-Authenticate", "Token")] })
+  } else {
+    Ok(())
+  }
+
+fn spilled(req: Request) -> Result[Response, HttpError] !io =
+  match req.body_file {
+    None -> Ok(text(500, "no spill file"))
+    Some(p) ->
+      with_fs_real(() => match read_file(p) {
+        Ok(s) -> Ok(text(200, "spilled ${len(bytes.utf8(s))} bytes, body held ${len(req.body)}"))
+        Err(m) -> Ok(text(500, "unreadable: ${m.message}"))
+      })
+  }
+
+# ---- streaming sources ----
+
+fn piece(i: Int) -> Bytes =
+  match i {
+    0 -> bytes.utf8("alpha-")
+    1 -> bytes.utf8("beta-")
+    2 -> bytes.freeze(bytes.put(bytes.put(bytes.put(bytes.buf(), 0), 255), 10))
+    3 -> bytes.utf8("omega")
+    _ -> bytes.utf8("")
+  }
+
+# alpha- (6) + beta- (5) + three binary bytes + omega (5)
+const STREAM_LEN: Int = 19
+
+fn state_dir() -> String !io = with_env_real(() => unwrap_or(getenv("TMPDIR"), "/tmp"))
+
+fn next_piece(path: String) -> Bytes !io =
+  with_fs_real(() => {
+    let i = match read_file(path) {
+      Ok(s) -> unwrap_or(parse_int(s), 0)
+      Err(_) -> 0
+    }
+    let p = piece(i)
+    if len(p) > 0 {
+      let _ = write_file(path, to_string(i + 1))
+      ()
+    }
+    p
+  })
+
+fn drop_state(path: String) -> Unit !io =
+  with_fs_real(() => {
+    let _ = delete(path)
+    ()
+  })
+
+fn make_source() -> BodySource !io = {
+  let dir = state_dir()
+  let path = with_fs_real(() => match temp_file(dir, "contract-stream-") {
+    Ok(p) -> p
+    Err(_) -> "/nonexistent/contract-stream"
+  })
+  BodySource { read: _n => next_piece(path), close: () => drop_state(path) }
+}
+
+fn stream_chunked(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(streaming(200, "application/octet-stream", make_source()))
+
+fn stream_sized(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(streaming(200, "application/octet-stream", make_source(), length: Some(STREAM_LEN)))
+
+fn stream_short(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(streaming(200, "application/octet-stream", make_source(), length: Some(STREAM_LEN + 7)))
+
+fn stream_long(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(streaming(200, "application/octet-stream", make_source(), length: Some(STREAM_LEN - 4)))
+
+fn stream_no_content(_req: Request) -> Result[Response, HttpError] !io =
+  Ok(streaming(204, "application/octet-stream", make_source(), length: Some(STREAM_LEN)))
+
+## The route table both servers serve.
+pub fn routes() -> List[Route] = [
+  route_get("/hello", hello),
+  route_get("/empty", empty),
+  route_get("/nocontent", nocontent),
+  route_get("/boom", boom),
+  route_get("/q", echo_query),
+  route_get("/u/{name}", echo_name),
+  route_get("/files/{rest*}", echo_rest),
+  route_post("/echo", echo_body),
+  body_limit(route_post("/small", echo_body), 16),
+  guarded(route_post("/guarded", granted), need_token),
+  tagged(route_put("/spill", spilled), ["stream-body"]),
+  body_limit(tagged(route_put("/spill-small", spilled), ["stream-body"]), 16),
+  route_get("/stream-chunked", stream_chunked),
+  route_get("/stream-sized", stream_sized),
+  route_get("/stream-short", stream_short),
+  route_get("/stream-long", stream_long),
+  route_get("/stream-204", stream_no_content),
+]
+
+# Stamps both branches, as with_cors does: an answer the chain never saw has no
+# stamp, so a refusal made outside it would show.
+fn stamping(next: Handler) -> Handler =
+  req =>
+  match next(req) {
+    Ok(r) -> Ok(with_header(r, "X-Stamped", "1"))
+    Err(e) -> Err(HttpError { ..e, headers: e.headers ++ [("X-Stamped", "1")] })
+  }
+
+## The middleware both servers run, outermost first.
+pub fn middleware() -> List[Middleware] = [stamping]
