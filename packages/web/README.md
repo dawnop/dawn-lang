@@ -25,8 +25,9 @@ TLS is terminated in front of it (nginx or similar).
 |---|---|
 | `web/types` | `Request`, `Response` and its constructors, `HttpError`, `ErrorFormat`, `BodySource`, `DEFAULT_MAX_BODY` |
 | `web/router` | routes, `route_get` and friends, `tagged`, `body_limit`, `guarded`, and the dispatch a server runs (`dispatch_segs`, `validate_routes`, `Dispatch`) |
-| `web/middleware` | `with_logging`, `with_cors`, `with_body_limit` |
+| `web/middleware` | `with_logging`, `with_logging_to_stderr`, `with_cors`, `with_body_limit` |
 | `web/wire` | `parse_form`, `form_value`, `form_all`, and the path and query rules every server shares |
+| `web/exchange` | `serve_exchange`: one HTTP/1.1 request in, one response out, over a `Transport`; and the decisions every server makes after the parse |
 
 None of it names a Java type, so `dawnc check packages/web` and `dawnc doc
 packages/web` work as they do for any pure package. A program that serves on
@@ -152,6 +153,33 @@ pattern, a route an earlier one shadows) and a `max_body` that is not
 positive, before it binds. A handler that panics, or fails with a JVM
 `Error`, gets a `500` if nothing was sent yet, and the exchange is always
 closed.
+
+## One request per process
+
+`web/exchange.serve_exchange(cfg, routes, middleware, transport)` is the server
+for a process that is handed one connection as stdin and stdout (systemd
+`Accept=yes`, inetd): it reads one request, answers it with `Connection:
+close`, and returns. It is pure Dawn, so it builds natively, and it answers
+every request the way `web_jvm/server` does: the same dispatch, dot-segment
+refusal, guards before the body, body ceilings, chunked request bodies,
+middleware order, error shape and response framing. A contract
+(`scripts/web-exchange-contract`) sends the same raw requests to both and
+compares the responses byte for byte.
+
+```dawn
+use web/exchange.{Transport, serve_exchange, exchange_config}
+use web/middleware.{with_logging_to_stderr}
+
+pub fn main() -> Unit !io =
+  serve_exchange(exchange_config(), routes, [with_logging_to_stderr], my_transport)
+```
+
+A `Transport` is `read(pos, n)` (up to `n` bytes of the request from offset
+`pos`; a real stream ignores `pos`; empty at the end) and `write(bytes)`.
+stdout is the wire, so the application must not print to it: use
+`with_logging_to_stderr`. There is no keep-alive, no HTTP/2 and no `Date`
+header; the proxy in front supplies what it needs. The process drains unread
+request bytes itself before it exits.
 
 ## CORS
 

@@ -32,7 +32,8 @@ use java "java.io.File"
 use java "java.io.FileOutputStream"
 use web/types.{safe_rel, Request, Response, response_status, response_content_type, response_headers, response_body, ResponseBody, BodySource, DEFAULT_MAX_BODY, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, default_errors, error_response, streaming, text, binary, header, headers_all, query, query_all, param, param_segs, body_text, with_header, try_redirect, raw, log_request, escape_field}
 use web/wire.{raw_segs, decode_path_seg, has_dot_segment, parse_query, multimap, join_with}
-use web/router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
+use web/exchange.{meta_has_tag, meta_of, guard_of, run_guard, body_ceiling, run_dispatch, serve_through, Withheld, Sized, Chunked, framing, drop_body, Pumped, Truncated, TransferFailed, PumpPanicked, pump_with, pump_report}
+use web/router.{Route, dispatch_segs, validate_routes, route_get, route_post, route_put, tagged, body_limit, guarded}
 use java "java.net.Socket"
 use java "java.net.ServerSocket"
 use java "java.io.InputStream"
@@ -53,14 +54,6 @@ use java "java.lang.System"
 use java "java.lang.Long"
 use java "java.lang.Thread"
 use java "java.lang.Throwable"
-
-## Close an upstream source, swallowing a close failure (non-fatal — the
-## response is already committed, or was never sent). Called after pumping a
-## streaming body so the client connection frees.
-fn close_source(s: BodySource) -> Unit !io = {
-  let _ = catch_fault(() => s.close())
-  ()
-}
 
 # The pump's read size: the chunk `transferTo` moved, which is also the
 # `SPILL_CHUNK` of the request side.
@@ -186,12 +179,12 @@ fn declared_length(ex: HttpExchange) -> Int !io =
 fn read_body(fmt: ErrorFormat, ex: HttpExchange, limit: Option[Int]) -> Result[Bytes, HttpError] !io = {
   let stream = ex.getRequestBody()!
   match limit {
-    None -> Ok(stream.readAllBytes()!)
+    None -> read_chunk(() => stream.readAllBytes()!)
     Some(n) ->
       if declared_length(ex) > n {
         Err(http_error(413, fmt.body_too_large(n)))
       } else {
-        let raw = stream.readNBytes(n + 1)!
+        let raw = read_chunk(() => stream.readNBytes(n + 1)!)?
         if len(raw) > n {
           Err(http_error(413, fmt.body_too_large(n)))
         } else {
@@ -201,95 +194,38 @@ fn read_body(fmt: ErrorFormat, ex: HttpExchange, limit: Option[Int]) -> Result[B
   }
 }
 
+# A read of the request body that the JDK's stream refuses: a chunk size that is
+# not hex, a chunk cut short, a body that ends before its Content-Length. That
+# is the client's malformed request and is answered as one, the 400
+# web/exchange gives the same failures in the same words, not the 500 it was
+# while the exception went up as a panic. (A client that hangs up mid-body
+# lands here too; the answer goes nowhere, which is harmless.)
+fn read_chunk(read: fn() -> Bytes !io) -> Result[Bytes, HttpError] !io =
+  match catch_fault(read) {
+    Ok(b) -> Ok(b)
+    Err(_) -> Err(http_error(400, "malformed request body"))
+  }
+
 # The length write_response hands to sendResponseHeaders, in jdk.httpserver's
 # convention: n > 0 is an exact Content-Length, 0 selects chunked transfer
-# encoding, -1 means no body at all. The body kind picks the framing
-# (WEB-06/07): Text is its UTF-8 byte count, Binary its byte length, a Stream
-# its stated length, and only a Stream whose length is unknown up front stays
-# chunked. An empty body of any kind maps to -1, because 0 would mean chunked;
-# the JDK then emits Content-Length: 0 itself.
-#
-# Four status classes never carry content no matter what the handler built:
-# 1xx informational (RFC 9110 §15.2), 204 No Content (§15.3.5), 205 Reset
-# Content (§15.3.6, "MUST NOT generate a response with content") and 304 Not
-# Modified (§15.4.5). This used to name only 204 and 304, which left the other
-# two to jdk.httpserver — and it covers three of the four: `sendResponseHeaders`
-# forces 1xx, 204 and 304 to no body, logging a WARNING each time it has to, but
-# it does **not** cover 205, which it treats as an ordinary status and will
-# happily give an entity. So 205 is the one class where this line is what keeps
-# the response compliant; for 1xx it saves a warning, a body written for
-# nothing, and a streaming body read to EOF instead of dropped.
+# encoding, -1 means no body at all. What the framing *is* is web/exchange's
+# `framing` (the same decision the single-exchange adapter writes from): Text is
+# its UTF-8 byte count, Binary its byte length, a Stream its stated length, only
+# a Stream whose length is unknown up front is chunked, and 1xx, 204, 205 and
+# 304 carry no body whatever the handler built. This is only the translation to
+# the JDK's numbers. An empty body maps to -1, because 0 would mean chunked
+# here; the JDK then emits Content-Length: 0 itself. 205 is the one of the four
+# status classes `sendResponseHeaders` does not cover on its own (it forces 1xx,
+# 204 and 304 to no body and treats 205 as ordinary), so for 205 the framing is
+# what keeps the response compliant.
 fn body_length(status: Int, body: ResponseBody) -> Int =
-  if (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304 {
-    -1
-  } else {
-    match body {
-      Empty -> -1
-      Text(s) -> exact_length(len(bytes.utf8(s)))
-      Binary(b) -> exact_length(len(b))
-      Stream(_, Some(n)) -> exact_length(n)
-      Stream(_, None) -> 0
-    }
+  match framing(status, body) {
+    Withheld -> -1
+    Sized(n) -> exact_length(n)
+    Chunked -> 0
   }
 
 fn exact_length(n: Int) -> Int = if n == 0 { -1 } else { n }
-
-## Close a streaming body that is never pumped (HEAD, 1xx/204/205/304): the
-## upstream connection must free even though no bytes move. The other kinds hold
-## no resource.
-fn drop_body(body: ResponseBody) -> Unit !io =
-  match body {
-    Stream(s, _) -> close_source(s)
-    _ -> ()
-  }
-
-# How pumping a streaming body ended. The point of the type is that a failed
-# transfer and a panicking program are told apart, and both are told apart from
-# a clean EOF. A stream of stated length adds the fourth: a clean EOF before
-# the length, which without a length to compare against is indistinguishable
-# from a complete transfer (the LIB-18 truncation candidate). More than the
-# stated length never gets here as a count: the JDK's fixed-length stream
-# refuses the write, and that is a TransferFailed.
-type PumpOutcome =
-  | Pumped
-  | Truncated(sent: Int, expected: Int)
-  | TransferFailed(message: String)
-  | PumpPanicked(message: String)
-
-# Pump an upstream stream and say how it ended, with the pumping step passed in
-# so a test can drive every outcome without a socket (the `spill_with`
-# arrangement above, for the same reason). The step returns how many bytes it
-# moved (`copy_source`'s count), which is what `expected` is compared against.
-#
-# The two barriers are nested rather than unioned. `catch_fault` catches
-# java.lang.Exception and lets a Dawn panic through (spec §9.8), `catch_panic`
-# catches both, so the inner one takes an IO failure and the outer one takes a
-# panic: which barrier accepted a failure is the backend-independent way to
-# classify it, and the only one. `ForeignError` carries no is_panic bit and its
-# `kind` is a backend's own name for the failure, so nothing here matches a
-# string.
-#
-# The single union barrier this replaced discarded its Result outright, so an
-# upstream IO failure, a client hanging up mid-download and a bug in this
-# program were all the same silent nothing.
-#
-# The bracket is inside the outer barrier so that the upstream stream closes on
-# every one of the three ways out, before the outcome is read.
-fn pump_with(s: BodySource, expected: Option[Int], pump: fn(BodySource) -> Int !io) -> PumpOutcome !io = {
-  let pumped = catch_panic(() => {
-    with up <- bracket(s, close_source)
-    catch_fault(() => pump(up))
-  })
-  match pumped {
-    Ok(Ok(sent)) ->
-      match expected {
-        Some(n) -> if sent < n { Truncated(sent, n) } else { Pumped }
-        None -> Pumped
-      }
-    Ok(Err(e)) -> TransferFailed(e.message)
-    Err(m) -> PumpPanicked(m.message)
-  }
-}
 
 # Pump the upstream stream to the socket and log anything but a clean EOF.
 #
@@ -313,11 +249,9 @@ fn pump_with(s: BodySource, expected: Option[Int], pump: fn(BodySource) -> Int !
 # therefore logs *after* its own `GET /x -> 200` line. That is the shape of the
 # pipeline, not a lost message.
 fn pump_stream(s: BodySource, expected: Option[Int], out: OutputStream) -> Unit !io =
-  match pump_with(s, expected, up => copy_source(up, out)) {
-    Pumped -> ()
-    Truncated(sent, n) -> println("stream body: upstream ended after ${sent} of ${n} bytes")
-    TransferFailed(m) -> println("stream body: transfer failed after commit: ${m}")
-    PumpPanicked(m) -> println("stream body panicked: ${m}")
+  match pump_report(pump_with(s, expected, up => copy_source(up, out))) {
+    Some(line) -> println(line)
+    None -> ()
   }
 
 # Write a response. The body kind decides the framing (see body_length). A
@@ -417,9 +351,6 @@ fn string_values(it: Iterator, acc: List[String]) -> List[String] !io =
     acc
   }
 
-fn rev[T](xs: List[T]) -> List[T] =
-  map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
-
 # Everything a Request holds that comes off the request line and the headers,
 # which is everything except the body. Reading it cannot fail and cannot leave
 # anything on disk, which is what makes it usable on the paths where the body is
@@ -450,34 +381,10 @@ fn bodyless_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = 
   }
 }
 
-# The route's guard, if it has one, as the server calls it: on the bodyless
-# Request with the matched captures filled in, since a check on a path-shaped
-# route (WebDAV's `/dav/{rest*}`) is usually a check on the path.
-fn guard_of(d: Dispatch) -> Option[Guard] =
-  match d {
-    Found(route, params) ->
-      match route.guard {
-        Some(g) -> Some((rq: Request) => g(Request { ..rq, params: params }))
-        None -> None
-      }
-    NoPath -> None
-    WrongMethod -> None
-  }
-
-# Run the guard. A guard that panics is a bug, answered the way a panicking
-# handler is: the application's own 500 wording, and the reason in the log.
-fn run_guard(guard: Option[Guard], req: Request, fmt: ErrorFormat) -> Result[Unit, HttpError] !io =
-  match guard {
-    None -> Ok(())
-    Some(g) ->
-      match catch_panic(() => g(req)) {
-        Ok(r) -> r
-        Err(m) -> {
-          println("route guard panicked: ${m.message}")
-          Err(http_error(500, fmt.internal_message))
-        }
-      }
-  }
+# The line sink the shared decisions of web/exchange write to: stdout, as every
+# other line this server logs. The single-exchange adapter passes stderr, since
+# stdout is its wire.
+fn log_line(line: String) -> Unit !io = println(line)
 
 fn build_request(
   ex: HttpExchange,
@@ -497,7 +404,7 @@ fn build_request(
     Some(m) -> m.body_limit
     None -> None
   }
-  let limit: Option[Int] = if meta_has_tag(meta, "raw-body") { own } else { Some(unwrap_or(own, max_body)) }
+  let limit: Option[Int] = body_ceiling(meta, max_body)
   # Every other field is read off the exchange *before* the spill, on purpose:
   # the spill is the only step that leaves something on disk, so once it has
   # succeeded nothing between it and the returned Request may fail. All that is
@@ -508,7 +415,7 @@ fn build_request(
   # The guard goes first, before anything reads the body or makes a file. A
   # check that lives in the handler runs after both, which on a "stream-body"
   # route meant an anonymous PUT was written to disk in full before its 401.
-  run_guard(guard, base, errors)?
+  run_guard(guard, base, errors, log_line)?
   let body = if streaming { bytes.utf8("") } else { read_body(errors, ex, limit)? }
   let bf: Option[String] = if streaming { Some(spill_body(errors, ex, own)?) } else { None }
   Ok(Request { ..base, body: body, body_file: bf })
@@ -591,7 +498,7 @@ fn copy_bounded(fmt: ErrorFormat, stream: InputStream, out: FileOutputStream, li
   var total = 0
   var more = true
   while more {
-    let chunk = stream.readNBytes(SPILL_CHUNK)!
+    let chunk = read_chunk(() => stream.readNBytes(SPILL_CHUNK)!)?
     let k = len(chunk)
     if k == 0 {
       more = false
@@ -637,59 +544,6 @@ fn drop_body_file(req: Request) -> Unit !io =
     Some(p) -> delete_quietly(p)
     None -> ()
   }
-
-fn meta_has_tag(meta: Option[RouteMeta], tag: String) -> Bool =
-  match meta {
-    Some(m) -> list.find(m.tags, t => t == tag) != None
-    None -> false
-  }
-
-# Execute an already-computed dispatch decision, itself shaped like a handler so
-# middleware can wrap it — a logging middleware sees 404s and 405s too. The
-# matched route's captures are injected as a fresh Request (records are immutable).
-# The 404 and 405 are worded by the application's ErrorFormat like every other
-# refusal the framework decides on its own.
-fn run_dispatch(errors: ErrorFormat, d: Dispatch, req: Request) -> Result[Response, HttpError] !io =
-  match d {
-    NoPath -> Err(http_error(404, errors.not_found))
-    WrongMethod -> Err(http_error(405, errors.method_not_allowed))
-    Found(route, params) -> {
-      route.handler(Request { ..req, params: params })
-    }
-  }
-
-# The metadata middleware get for the matched route. Unmatched (404) and
-# wrong-method (405) requests carry no route, hence no tags.
-fn meta_of(d: Dispatch) -> Option[RouteMeta] =
-  match d {
-    Found(route, _) -> Some(route_meta(route))
-    NoPath -> None
-    WrongMethod -> None
-  }
-
-# Compose the middleware and run `core` under them, rendering whatever comes
-# back. First middleware in the list is outermost: [a, b] runs a(b(core)).
-#
-# Every answer this server gives goes through here, which is the point: a
-# response the middleware never saw is a response with no access-log line and no
-# Access-Control-* headers, and a browser will not let the page read a
-# cross-origin error it cannot see the headers of.
-fn serve_through(
-  middleware: List[Middleware],
-  errors: ErrorFormat,
-  req: Request,
-  core: Handler,
-) -> Response !io = {
-  let app = fold(rev(middleware), core, (h, m) => m(h))
-  match catch_panic(() => app(req)) {
-    Ok(Ok(r)) -> r
-    Ok(Err(e)) -> error_response(e, fmt: errors)
-    Err(m) -> {
-      println("request panicked: ${m.message}")
-      error_response(http_error(500, errors.internal_message), fmt: errors)
-    }
-  }
-}
 
 fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, errors: ErrorFormat, ex: HttpExchange) -> Unit !io = {
   # The outermost layer, so it holds on every way out: `finish_exchange`
@@ -752,7 +606,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
         }
       }
     match attempt {
-      Err(e) -> serve_through(middleware, errors, bodyless_request(ex, meta), _rq => Err(e))
+      Err(e) -> serve_through(middleware, errors, bodyless_request(ex, meta), _rq => Err(e), log_line)
       Ok(req) -> {
         # the temp body file lives exactly as long as this branch, and the
         # bracket is what makes that true on every way out — including the ones
@@ -762,7 +616,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
         # and this taking it; build_request itself deletes the file on every
         # path where it fails.
         with held <- bracket(req, drop_body_file)
-        serve_through(middleware, errors, held, (rq: Request) => run_dispatch(errors, d, rq))
+        serve_through(middleware, errors, held, (rq: Request) => run_dispatch(errors, d, rq), log_line)
       }
     }
   })
@@ -1966,6 +1820,28 @@ test "a custom ErrorFormat words all three 413 sites" {
   expect_status(port, counted, "HTTP/1.1 413")
   assert str.contains(counted, "too big, limit 10")
   assert not str.contains(counted, "request body exceeds")
+  srv.stop(0)
+  assert new_since(before, spill_files()) == []
+}
+
+test "a request body the JDK cannot read is a 400, in memory and spilled, and a spill leaves no file" {
+  # It used to be a 500: the stream's exception went up as a panic. A chunk size
+  # that is not hex and a body that ends before its Content-Length are the
+  # client's malformed request, answered as web/exchange answers them, in the
+  # same words (scripts/web-exchange-contract holds the two to that).
+  let routes = [route_post("/mem", echo_body_text), tagged(route_put("/up", spilled_size), ["stream-body"])]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  let before = spill_files()
+  let bad_chunk = "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\nzz\r\nhello\r\n0\r\n\r\n"
+  let mem = raw_http(port, "POST /mem HTTP/1.1\r\nHost: t\r\n" ++ bad_chunk)
+  expect_status(port, mem, "HTTP/1.1 400")
+  assert str.contains(mem, "{\"error\":\"malformed request body\"}")
+  let up = raw_http(port, "PUT /up HTTP/1.1\r\nHost: t\r\n" ++ bad_chunk)
+  expect_status(port, up, "HTTP/1.1 400")
+  assert str.contains(up, "{\"error\":\"malformed request body\"}")
   srv.stop(0)
   assert new_since(before, spill_files()) == []
 }

@@ -1,0 +1,1279 @@
+# One HTTP/1.1 exchange, in pure Dawn: the bytes of one request come in through
+# a `Transport`, the app runs, the bytes of its response go out through the same
+# `Transport`, and the function returns. It is the second server this package
+# has, after web_jvm/server (jdk.httpserver), and the one the native backend can
+# build: no `use java`, no socket, no thread. A process that is handed one
+# accepted connection as stdin and stdout (systemd `Accept=yes`, inetd, CGI's
+# cousin) serves its request with `serve_exchange` and exits.
+#
+# Why it lives in `web` and not in a package of its own: it needs nothing but
+# std (bytes, str, a temp file for a spilled body), so `web` stays checkable,
+# documentable and testable by the native compiler as one package, which is
+# what native-web-core.sh holds. The JDK server cannot share the *parser*,
+# because jdk.httpserver parses the wire before any Dawn runs; what the two
+# servers can and do share is every decision made after the parse: dispatch and
+# the dot-segment refusal, the guard before the body, the body ceiling, the
+# middleware chain, what a panic answers, the framing of a response and how the
+# pump of a streaming body ends. Those are the pub functions at the top of this
+# file (`serve_through`, `body_ceiling`, `framing`, `pump_with` and the rest),
+# and web_jvm/server calls the same ones, so the two cannot drift on them.
+# docs/web-core-split-design.md section 9 has the semantics list and the
+# contract that holds the two to byte equality.
+#
+# The shape, three facts:
+#   * One request per call and `Connection: close` on every response. There is
+#     no keep-alive and no pipelining, so there is no read buffer to carry from
+#     one request to the next, and the head is read one byte at a time up to
+#     CRLFCRLF so that nothing past it has been taken from the stream. A bigger
+#     read would block on a stream that gives exactly what was asked for
+#     (std/io.read_stdin), and one request per process does not pay for it.
+#   * The transport takes a position. `read(pos, n)` is "up to n bytes of the
+#     request from offset pos"; a real stream ignores pos and gives its next
+#     bytes, a test indexes a Bytes with it. A closure cannot mutate what it
+#     captures, so a fake transport has no other way to be stateful, and
+#     the position is what lets every parser below be a function of its input.
+#   * stdout is the wire. Anything this module reports goes to stderr (a guard
+#     that panicked, a stream that ended short), and so should the application:
+#     `middleware.with_logging` prints to stdout, which on this transport is the
+#     response, so a program that serves through `serve_exchange` installs
+#     `with_logging_to_stderr` instead.
+#
+# Not here, and why, in the design doc: keep-alive, HTTP/2, TLS, and a `Date`
+# header (the proxy in front adds one when the upstream sends none).
+use std/str
+use std/bytes
+use std/list
+use std/map
+use std/io.{eprintln, with_fs_real, with_env_real, getenv, temp_file, write_bytes, delete, Deleted, NotFound}
+use types.{Request, Response, response_status, response_content_type, response_headers, response_body, ResponseBody, BodySource, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Guard, Middleware, RouteMeta, http_error, error_response, default_errors, log_request, escape_field, DEFAULT_MAX_BODY}
+use wire.{raw_segs, decode_path_seg, has_dot_segment, parse_query, multimap}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes}
+
+# The head (request line and header lines) may not exceed this many bytes, and
+# may carry this many header lines. They bound memory, not policy: the process
+# is reached through a proxy that has its own, smaller limits.
+const MAX_HEAD: Int = 16384
+const MAX_HEADERS: Int = 200
+# A chunk-size line, extensions included, and the whole trailer section.
+const MAX_CHUNK_LINE: Int = 1024
+const MAX_TRAILER: Int = 8192
+# How much one read asks for, on the request side and on a streaming response.
+const READ_CHUNK: Int = 8192
+
+# ---- the decisions both servers make ----
+
+## `rev` of the prelude, which a server module cannot name when it defines its
+## own `join`; the middleware list is applied innermost first.
+fn rev[T](xs: List[T]) -> List[T] =
+  map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
+
+## True when the matched route carries `tag` (`None`, a 404 or a 405, carries
+## none).
+pub fn meta_has_tag(meta: Option[RouteMeta], tag: String) -> Bool =
+  match meta {
+    Some(m) -> list.find(m.tags, t => t == tag) != None
+    None -> false
+  }
+
+## The metadata middleware get for a dispatch decision. Unmatched (404) and
+## wrong-method (405) requests carry no route, hence no tags.
+pub fn meta_of(d: Dispatch) -> Option[RouteMeta] =
+  match d {
+    Found(route, _) -> Some(route_meta(route))
+    NoPath -> None
+    WrongMethod -> None
+  }
+
+## The matched route's guard, if it has one, as a server calls it: on the
+## bodyless Request with the captures filled in, since a check on a path-shaped
+## route (WebDAV's `/dav/{rest*}`) is usually a check on the path.
+pub fn guard_of(d: Dispatch) -> Option[Guard] =
+  match d {
+    Found(route, params) ->
+      match route.guard {
+        Some(g) -> Some((rq: Request) => g(Request { ..rq, params: params }))
+        None -> None
+      }
+    NoPath -> None
+    WrongMethod -> None
+  }
+
+## Run the guard. A guard that panics is a bug, answered the way a panicking
+## handler is: the application's own 500 wording, and the reason to `log`.
+pub fn run_guard(guard: Option[Guard], req: Request, fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[Unit, HttpError] !io =
+  match guard {
+    None -> Ok(())
+    Some(g) ->
+      match catch_panic(() => g(req)) {
+        Ok(r) -> r
+        Err(m) -> {
+          log("route guard panicked: ${m.message}")
+          Err(http_error(500, fmt.internal_message))
+        }
+      }
+  }
+
+## The ceiling on a request body held in memory: the route's `body_limit` when
+## it has one, else the server's `max_body`, except that a route tagged
+## "raw-body" (bounded by a proxy in front) has none unless it sets one. `None`
+## is no ceiling, a type rather than a number doing a switch's job.
+pub fn body_ceiling(meta: Option[RouteMeta], max_body: Int) -> Option[Int] = {
+  let own: Option[Int] = match meta {
+    Some(m) -> m.body_limit
+    None -> None
+  }
+  if meta_has_tag(meta, "raw-body") { own } else { Some(unwrap_or(own, max_body)) }
+}
+
+## Execute an already-computed dispatch decision, shaped like a handler so
+## middleware can wrap it: a logging middleware sees 404s and 405s too. The
+## matched route's captures are injected as a fresh Request.
+pub fn run_dispatch(errors: ErrorFormat, d: Dispatch, req: Request) -> Result[Response, HttpError] !io =
+  match d {
+    NoPath -> Err(http_error(404, errors.not_found))
+    WrongMethod -> Err(http_error(405, errors.method_not_allowed))
+    Found(route, params) -> route.handler(Request { ..req, params: params })
+  }
+
+## Compose the middleware and run `core` under them, rendering whatever comes
+## back. First middleware in the list is outermost: [a, b] runs a(b(core)).
+## Every answer a server gives goes through here, which is the point: a
+## response the middleware never saw has no access-log line and no
+## Access-Control-* headers, and a browser will not let the page read a
+## cross-origin error it cannot see the headers of.
+pub fn serve_through(
+  middleware: List[Middleware],
+  errors: ErrorFormat,
+  req: Request,
+  core: Handler,
+  log: fn(String) -> Unit !io,
+) -> Response !io = {
+  let app = fold(rev(middleware), core, (h, m) => m(h))
+  match catch_panic(() => app(req)) {
+    Ok(Ok(r)) -> r
+    Ok(Err(e)) -> error_response(e, fmt: errors)
+    Err(m) -> {
+      log("request panicked: ${m.message}")
+      error_response(http_error(500, errors.internal_message), fmt: errors)
+    }
+  }
+}
+
+## How a response is framed on the wire, decided from its status and body and
+## the same for every server: `Withheld` is no body and no length header,
+## `Sized(n)` an exact Content-Length (an empty body is `Sized(0)`), `Chunked` a
+## stream whose length is not known up front. Four status classes never carry
+## content whatever the handler built: 1xx (RFC 9110 15.2), 204 (15.3.5), 205
+## (15.3.6, "MUST NOT generate a response with content") and 304 (15.4.5).
+pub type Framing =
+  | Withheld
+  | Sized(length: Int)
+  | Chunked
+
+## The framing of a response with this status and body (see `Framing`).
+pub fn framing(status: Int, body: ResponseBody) -> Framing =
+  if (status >= 100 && status < 200) || status == 204 || status == 205 || status == 304 {
+    Withheld
+  } else {
+    match body {
+      Empty -> Sized(0)
+      Text(s) -> Sized(len(bytes.utf8(s)))
+      Binary(b) -> Sized(len(b))
+      Stream(_, Some(n)) -> Sized(n)
+      Stream(_, None) -> Chunked
+    }
+  }
+
+## Close a streaming body that is never pumped (HEAD, a status with no body):
+## the upstream must free even though no bytes move. The other kinds hold no
+## resource.
+pub fn drop_body(body: ResponseBody) -> Unit !io =
+  match body {
+    Stream(s, _) -> close_source(s)
+    _ -> ()
+  }
+
+## Close an upstream source, swallowing a close failure: the response is
+## already committed, or was never sent.
+pub fn close_source(s: BodySource) -> Unit !io = {
+  let _ = catch_fault(() => s.close())
+  ()
+}
+
+## How pumping a streaming body ended. A failed transfer and a panicking
+## program are told apart, and both from a clean EOF; a stream of stated length
+## adds the fourth, a clean EOF before the length. More than the stated length
+## is a `TransferFailed` or a `PumpPanicked`, not a count.
+pub type PumpOutcome =
+  | Pumped
+  | Truncated(sent: Int, expected: Int)
+  | TransferFailed(message: String)
+  | PumpPanicked(message: String)
+
+## Pump an upstream and say how it ended, with the pumping step passed in so a
+## test can drive every outcome without a socket. `pump` returns how many bytes
+## it moved, which `expected` is compared against. The barriers are nested:
+## `catch_fault` takes an IO failure and `catch_panic`, outside it, a panic, so
+## which barrier accepted a failure is the backend-independent way to classify
+## it. The upstream closes on all three ways out, before the outcome is read.
+pub fn pump_with(s: BodySource, expected: Option[Int], pump: fn(BodySource) -> Int !io) -> PumpOutcome !io = {
+  let pumped = catch_panic(() => {
+    with up <- bracket(s, close_source)
+    catch_fault(() => pump(up))
+  })
+  match pumped {
+    Ok(Ok(sent)) ->
+      match expected {
+        Some(n) -> if sent < n { Truncated(sent, n) } else { Pumped }
+        None -> Pumped
+      }
+    Ok(Err(e)) -> TransferFailed(e.message)
+    Err(m) -> PumpPanicked(m.message)
+  }
+}
+
+## The log line for a pump that did not end cleanly; `None` for one that did.
+## The wording does not say "client disconnected": a client hanging up and an
+## upstream read failing are the same failure from here, and naming one would
+## be a guess printed as a fact. What can be said is that the transfer stopped
+## after the response was committed.
+pub fn pump_report(outcome: PumpOutcome) -> Option[String] =
+  match outcome {
+    Pumped -> None
+    Truncated(sent, n) -> Some("stream body: upstream ended after ${sent} of ${n} bytes")
+    TransferFailed(m) -> Some("stream body: transfer failed after commit: ${m}")
+    PumpPanicked(m) -> Some("stream body panicked: ${m}")
+  }
+
+# ---- the transport and the config ----
+
+## What an exchange talks through. `read(pos, n)` returns up to `n` bytes of the
+## request starting at offset `pos` and an empty `Bytes` once the request has
+## ended: a stream gives its next bytes and ignores `pos`, a test indexes a
+## `Bytes` with it. `write(b)` appends to the response. The process owning the
+## stream does whatever must follow (flush, drain the unread rest of a refused
+## body so the close does not turn into a reset).
+pub type Transport = {
+  read: fn(Int, Int) -> Bytes !io,
+  write: fn(Bytes) -> Unit !io,
+}
+
+## What an exchange is configured with: the in-memory body ceiling a request
+## gets (a positive byte count; routes that need more carry the "raw-body" or
+## "stream-body" tag) and the wording of the errors the framework renders
+## itself (`default_errors()` is the neutral one). The listening side of
+## web_jvm/server's config (`host`, `port`) has no counterpart: nothing here
+## listens.
+pub type ExchangeConfig = { max_body: Int, errors: ErrorFormat }
+
+## The neutral configuration: `DEFAULT_MAX_BODY` and `default_errors()`.
+pub fn exchange_config() -> ExchangeConfig =
+  ExchangeConfig { max_body: DEFAULT_MAX_BODY, errors: default_errors() }
+
+# ---- parsing the head ----
+
+type Head = {
+  method: String,
+  raw_path: String,
+  raw_query: Option[String],
+  http10: Bool,
+  headers: Map[String, List[String]],
+}
+
+fn bad(message: String) -> HttpError = http_error(400, message)
+
+# Every way a request body can be malformed (a chunk size that is not hex, a
+# chunk not followed by CRLF, a bare LF, a body that ends before its declared
+# length, a trailer section with no end) is this one 400, and the JVM server
+# answers the same words for the same failures (its reads raise, and
+# web_jvm/server turns that into this). The words are not an ErrorFormat field:
+# adding one would break every record literal of that public type.
+fn bad_body() -> HttpError = bad("malformed request body")
+
+fn is_digit_byte(c: Int) -> Bool = c >= 48 && c <= 57
+
+fn all_digits(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var ok = len(b) > 0
+  var i = 0
+  while i < len(b) {
+    if not is_digit_byte(bytes.at(b, i)) { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+# A method or a header name is an RFC 9110 token; anything else (spaces,
+# controls) would be a request-smuggling vector once a second parser looks.
+fn is_token(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var ok = len(b) > 0
+  var i = 0
+  while i < len(b) {
+    let c = bytes.at(b, i)
+    let alnum = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    let punct = c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
+    if not (alnum || punct) { ok = false }
+    i = i + 1
+  }
+  ok
+}
+
+fn has_ctl(s: String) -> Bool = {
+  let b = bytes.utf8(s)
+  var found = false
+  var i = 0
+  while i < len(b) {
+    let c = bytes.at(b, i)
+    if (c < 32 && c != 9) || c == 127 { found = true }
+    i = i + 1
+  }
+  found
+}
+
+# Where the scan for CRLFCRLF stands after one more byte: how many bytes of
+# "\r\n\r\n" are matched at the end of what has been seen (4 means done).
+fn scan_step(state: Int, c: Int) -> Int =
+  if c == 13 && (state == 0 || state == 2) {
+    state + 1
+  } else if c == 10 && (state == 1 || state == 3) {
+    state + 1
+  } else if c == 13 {
+    1
+  } else {
+    0
+  }
+
+# The head as the bytes up to and including the blank line. `Ok(None)` is a
+# peer that connected and sent nothing, which is answered with nothing; a head
+# cut off partway is a 400, one over MAX_HEAD a 431.
+fn read_head(t: Transport) -> Result[Option[Bytes], HttpError] !io = {
+  var buf = bytes.buf()
+  var state = 0
+  var n = 0
+  while state < 4 {
+    if n >= MAX_HEAD {
+      return Err(http_error(431, "request head exceeds ${MAX_HEAD} bytes"))
+    }
+    let b = t.read(n, 1)
+    if len(b) == 0 {
+      if n == 0 { return Ok(None) }
+      return Err(bad("request ended before the end of the head"))
+    }
+    let c = bytes.at(b, 0)
+    buf = bytes.put(buf, c)
+    state = scan_step(state, c)
+    n = n + 1
+  }
+  Ok(Some(bytes.freeze(buf)))
+}
+
+fn parse_header_line(line: String) -> Result[(String, String), HttpError] =
+  if str.starts_with(line, " ") || str.starts_with(line, "\t") {
+    Err(bad("obsolete header line folding is not supported"))
+  } else {
+    match str.split_once(line, ":") {
+      None -> Err(bad("malformed header line"))
+      Some((name, value)) ->
+        if not is_token(name) {
+          Err(bad("malformed header name"))
+        } else if has_ctl(value) {
+          Err(bad("control character in header value"))
+        } else {
+          Ok((str.to_lower(name), str.trim(value)))
+        }
+    }
+  }
+
+# Header lines into a lowercase-keyed multimap, every value of a repeated name
+# kept in wire order (the same shape the JVM server builds, WEB-04).
+fn parse_headers(lines: List[String]) -> Result[Map[String, List[String]], HttpError] = {
+  var out: Map[String, List[String]] = map.empty()
+  for line in lines {
+    let (k, v) = parse_header_line(line)?
+    out = match map.get(out, k) {
+      Some(vs) -> map.insert(out, k, vs ++ [v])
+      None -> map.insert(out, k, [v])
+    }
+  }
+  Ok(out)
+}
+
+fn split_at_first(s: String, sep: String) -> (String, Option[String]) =
+  match str.split_once(s, sep) {
+    Some((a, b)) -> (a, Some(b))
+    None -> (s, None)
+  }
+
+# The characters java.net.URI refuses in a request target, which is what the
+# JDK server answers with a 400 before any Dawn runs: a `%` not followed by two
+# hex digits, and ASCII `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}`, `[`,
+# `]` and DEL. The adapter refuses the same set, so a target one server serves
+# the other serves, and a malformed escape never reaches a decoder that would
+# have to guess.
+fn target_ok(t: String) -> Bool = {
+  let b = bytes.utf8(t)
+  var ok = true
+  var i = 0
+  while i < len(b) {
+    let c = bytes.at(b, i)
+    if c == 37 {
+      if i + 2 >= len(b) {
+        ok = false
+      } else if hex_value(bytes.at(b, i + 1)) < 0 || hex_value(bytes.at(b, i + 2)) < 0 {
+        ok = false
+      }
+    } else if c == 34 || c == 60 || c == 62 || c == 92 || c == 94 || c == 96 || c == 123 || c == 124 || c == 125 || c == 91 || c == 93 || c == 127 {
+      ok = false
+    }
+    i = i + 1
+  }
+  ok
+}
+
+fn parse_request_line(line: String) -> Result[(String, String, Option[String], Bool), HttpError] =
+  match str.split(line, " ") {
+    [method, target, version] ->
+      if not is_token(method) || not str.starts_with(target, "/") || has_ctl(target) {
+        Err(bad("malformed request line"))
+      } else if not target_ok(target) {
+        Err(bad("malformed request target"))
+      } else if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        if str.starts_with(version, "HTTP/") {
+          Err(http_error(505, "only HTTP/1.0 and HTTP/1.1 are supported"))
+        } else {
+          Err(bad("malformed request line"))
+        }
+      } else {
+        # a fragment is the client's business and never part of the target
+        let (no_frag, _) = split_at_first(target, "#")
+        let (path, query) = split_at_first(no_frag, "?")
+        Ok((method, path, query, version == "HTTP/1.0"))
+      }
+    _ -> Err(bad("malformed request line"))
+  }
+
+# Parse a head: the request line and header lines, as the bytes up to and
+# including the blank line. Bytes are read as ISO-8859-1, so a non-ASCII byte is
+# carried through as one character instead of being rejected here.
+fn parse_head(raw: Bytes) -> Result[Head, HttpError] = {
+  let text = bytes.decode_latin1(raw)
+  if not str.ends_with(text, "\r\n\r\n") {
+    return Err(bad("request head is not terminated"))
+  }
+  let lines = str.split(str.take(text, len(text) - 4), "\r\n")
+  if list.any(lines, l => str.contains(l, "\n") || str.contains(l, "\r")) {
+    return Err(bad("bare CR or LF in request head"))
+  }
+  match lines {
+    [] -> Err(bad("empty request"))
+    [first, ..rest] -> {
+      if len(rest) > MAX_HEADERS {
+        return Err(http_error(431, "too many header lines"))
+      }
+      let (method, raw_path, raw_query, http10) = parse_request_line(first)?
+      let headers = parse_headers(rest)?
+      Ok(Head { method: method, raw_path: raw_path, raw_query: raw_query, http10: http10, headers: headers })
+    }
+  }
+}
+
+# ---- the request body ----
+
+type BodyKind =
+  | NoBody
+  | Counted(length: Int)
+  | ChunkedBody
+
+fn values_of(h: Head, name: String) -> List[String] =
+  match map.get(h.headers, name) {
+    Some(vs) -> vs
+    None -> []
+  }
+
+# How the body is framed, from the headers alone. No framing header means no
+# body. A repeated or signed or non-numeric Content-Length is a 400 (two
+# parsers disagreeing about which one wins is how requests get smuggled), and so
+# is a Content-Length next to Transfer-Encoding; a coding other than exactly
+# `chunked` is a 501.
+fn body_kind(h: Head) -> Result[BodyKind, HttpError] = {
+  let te = values_of(h, "transfer-encoding")
+  let cl = values_of(h, "content-length")
+  if len(te) > 0 && len(cl) > 0 {
+    Err(bad("Content-Length together with Transfer-Encoding"))
+  } else if len(te) > 0 {
+    match te {
+      [v] -> if str.to_lower(v) == "chunked" { Ok(ChunkedBody) } else { Err(http_error(501, "unsupported transfer coding")) }
+      _ -> Err(http_error(501, "unsupported transfer coding"))
+    }
+  } else {
+    match cl {
+      [] -> Ok(NoBody)
+      [v] ->
+        if not all_digits(v) || len(v) > 18 {
+          Err(bad("invalid Content-Length"))
+        } else {
+          match parse_int(v) {
+            Some(n) -> Ok(Counted(n))
+            None -> Err(bad("invalid Content-Length"))
+          }
+        }
+      _ -> Err(bad("duplicate Content-Length"))
+    }
+  }
+}
+
+# Exactly `n` bytes from `pos`, asked for in READ_CHUNK pieces so that a
+# stream giving "at most" and one giving "exactly" both work; an early end is a
+# 400.
+fn read_exact(t: Transport, pos: Int, n: Int) -> Result[Bytes, HttpError] !io = {
+  var buf = bytes.buf()
+  var got = 0
+  while got < n {
+    let want = if n - got < READ_CHUNK { n - got } else { READ_CHUNK }
+    let piece = t.read(pos + got, want)
+    if len(piece) == 0 {
+      return Err(bad_body())
+    }
+    buf = bytes.put_bytes(buf, piece)
+    got = got + len(piece)
+  }
+  Ok(bytes.freeze(buf))
+}
+
+# One line of the chunked framing, without its CRLF, read a byte at a time. The
+# caller advances by `len(line) + 2`.
+fn read_crlf_line(t: Transport, pos: Int, max: Int) -> Result[String, HttpError] !io = {
+  var buf = bytes.buf()
+  var n = 0
+  var prev = 0
+  while true {
+    if n > max + 2 {
+      return Err(bad_body())
+    }
+    let b = t.read(pos + n, 1)
+    if len(b) == 0 {
+      return Err(bad_body())
+    }
+    let c = bytes.at(b, 0)
+    n = n + 1
+    if c == 10 {
+      if prev != 13 {
+        return Err(bad_body())
+      }
+      let raw = bytes.freeze(buf)
+      return Ok(bytes.decode_latin1(bytes.slice(raw, 0, len(raw) - 1)))
+    }
+    buf = bytes.put(buf, c)
+    prev = c
+  }
+  Ok("")
+}
+
+fn hex_value(c: Int) -> Int =
+  if c >= 48 && c <= 57 {
+    c - 48
+  } else if c >= 65 && c <= 70 {
+    c - 55
+  } else if c >= 97 && c <= 102 {
+    c - 87
+  } else {
+    -1
+  }
+
+# The size on a chunk-size line: 1 to 15 hex digits, optionally followed by
+# `;extensions`, which are read and ignored. Fifteen digits cannot overflow.
+fn chunk_size(line: String) -> Result[Int, HttpError] = {
+  let (digits, _) = split_at_first(line, ";")
+  let b = bytes.utf8(str.trim(digits))
+  if len(b) == 0 || len(b) > 15 {
+    return Err(bad_body())
+  }
+  var n = 0
+  var i = 0
+  while i < len(b) {
+    let v = hex_value(bytes.at(b, i))
+    if v < 0 {
+      return Err(bad_body())
+    }
+    n = n * 16 + v
+    i = i + 1
+  }
+  Ok(n)
+}
+
+# The trailer section after the last chunk, read to its blank line and dropped:
+# trailers are never handed to the application.
+fn skip_trailers(t: Transport, pos0: Int) -> Result[Unit, HttpError] !io = {
+  var pos = pos0
+  var spent = 0
+  while true {
+    let line = read_crlf_line(t, pos, MAX_TRAILER)?
+    pos = pos + len(line) + 2
+    spent = spent + len(line) + 2
+    if line == "" { return Ok(()) }
+    if spent > MAX_TRAILER {
+      return Err(bad_body())
+    }
+  }
+  Ok(())
+}
+
+# Decode a chunked body from `pos0`. `limit` is the ceiling in bytes: a chunk
+# that would carry the total past it is a 413 before that chunk is read, which
+# is the same bound readNBytes(limit + 1) gives the JVM server. Every malformed
+# frame, a chunk cut short, a missing CRLF after the data, a size that is not
+# hex, is a 400 and nothing of the body is kept.
+fn read_chunked(t: Transport, pos0: Int, limit: Option[Int], fmt: ErrorFormat) -> Result[Bytes, HttpError] !io = {
+  var pos = pos0
+  var buf = bytes.buf()
+  var total = 0
+  while true {
+    let line = read_crlf_line(t, pos, MAX_CHUNK_LINE)?
+    pos = pos + len(line) + 2
+    let size = chunk_size(line)?
+    if size == 0 {
+      skip_trailers(t, pos)?
+      return Ok(bytes.freeze(buf))
+    }
+    match limit {
+      Some(m) -> if total + size > m { return Err(http_error(413, fmt.body_too_large(m))) }
+      None -> ()
+    }
+    let data = read_exact(t, pos, size)?
+    pos = pos + size
+    let crlf = t.read(pos, 2)
+    if crlf != bytes.utf8("\r\n") {
+      return Err(bad_body())
+    }
+    pos = pos + 2
+    total = total + size
+    buf = bytes.put_bytes(buf, data)
+  }
+  Ok(bytes.freeze(buf))
+}
+
+# The whole body under `limit`. A declared length over the ceiling is refused
+# before a byte is read, which is the point of refusing early; a chunked body
+# has no declared length and is stopped as it crosses the ceiling.
+fn read_body(t: Transport, pos: Int, kind: BodyKind, limit: Option[Int], fmt: ErrorFormat) -> Result[Bytes, HttpError] !io =
+  match kind {
+    NoBody -> Ok(bytes.utf8(""))
+    Counted(n) ->
+      match limit {
+        Some(m) -> if n > m { Err(http_error(413, fmt.body_too_large(m))) } else { read_exact(t, pos, n) }
+        None -> read_exact(t, pos, n)
+      }
+    ChunkedBody -> read_chunked(t, pos, limit, fmt)
+  }
+
+# A "stream-body" route gets its body as a file and an empty `body`. The JVM
+# server streams it to disk in chunks; there is no append in std/io yet, so this
+# reads it under the route's ceiling and writes the file once. The handler sees
+# the same Request either way; the difference is memory, which a process serving
+# one request pays once. A chunked append is the byte-stdout and append
+# primitives batch (docs/web-core-split-design.md section 9).
+fn spill_body(body: Bytes, fmt: ErrorFormat, log: fn(String) -> Unit !io) -> Result[String, HttpError] !io = {
+  let dir = with_env_real(() => unwrap_or(getenv("TMPDIR"), "/tmp"))
+  with_fs_real(() => match temp_file(dir, "dawn-put-") {
+    Err(m) -> {
+      log("request body spill failed: ${m.message}")
+      Err(http_error(500, fmt.internal_message))
+    }
+    Ok(path) ->
+      match write_bytes(path, body) {
+        Ok(_) -> Ok(path)
+        Err(m) -> {
+          log("request body spill failed: ${m.message}")
+          delete_quietly(path, log)
+          Err(http_error(500, fmt.internal_message))
+        }
+      }
+  })
+}
+
+fn delete_quietly(path: String, log: fn(String) -> Unit !io) -> Unit !io =
+  with_fs_real(() => match delete(path) {
+    Ok(Deleted) -> ()
+    Ok(NotFound) -> log("temp body file was already absent: ${path}")
+    Err(m) -> log("temp body file not deleted: ${path} (${m.message})")
+  })
+
+fn drop_body_file(req: Request, log: fn(String) -> Unit !io) -> Unit !io =
+  match req.body_file {
+    Some(p) -> delete_quietly(p, log)
+    None -> ()
+  }
+
+# ---- building the request ----
+
+# Everything a Request holds that comes off the request line and the headers,
+# which is everything except the body. Reading it cannot fail and leaves nothing
+# on disk, which is what makes it usable on the paths where the body is
+# deliberately never read.
+fn bodyless_request(h: Head, meta: Option[RouteMeta]) -> Request = {
+  let no_params: Map[String, List[String]] = map.empty()
+  let no_query: Map[String, List[String]] = map.empty()
+  # the split into parameters sees the encoded form, or a client could put an
+  # encoded '&' in a value and forge a parameter
+  let q = match h.raw_query {
+    Some(s) -> multimap(parse_query(s))
+    None -> no_query
+  }
+  Request {
+    method: h.method,
+    path: decode_path_seg(h.raw_path),
+    raw_path: h.raw_path,
+    params: no_params,
+    query: q,
+    headers: h.headers,
+    body: bytes.utf8(""),
+    body_file: None,
+    route: meta,
+  }
+}
+
+# The guard goes first, before anything reads the body or makes a file: a check
+# that lives in the handler runs after both, which on a "stream-body" route
+# meant an anonymous PUT was written to disk in full before its 401.
+fn build_request(
+  t: Transport,
+  body_pos: Int,
+  h: Head,
+  kind: BodyKind,
+  d: Dispatch,
+  max_body: Int,
+  errors: ErrorFormat,
+  log: fn(String) -> Unit !io,
+) -> Result[Request, HttpError] !io = {
+  let meta = meta_of(d)
+  let base = bodyless_request(h, meta)
+  run_guard(guard_of(d), base, errors, log)?
+  if meta_has_tag(meta, "stream-body") {
+    let own: Option[Int] = match meta {
+      Some(m) -> m.body_limit
+      None -> None
+    }
+    let body = read_body(t, body_pos, kind, own, errors)?
+    let path = spill_body(body, errors, log)?
+    Ok(Request { ..base, body_file: Some(path) })
+  } else {
+    let body = read_body(t, body_pos, kind, body_ceiling(meta, max_body), errors)?
+    Ok(Request { ..base, body: body })
+  }
+}
+
+# ---- writing the response ----
+
+fn reason(status: Int) -> String =
+  match status {
+    100 -> "Continue"
+    101 -> "Switching Protocols"
+    200 -> "OK"
+    201 -> "Created"
+    202 -> "Accepted"
+    203 -> "Non-Authoritative Information"
+    204 -> "No Content"
+    205 -> "Reset Content"
+    206 -> "Partial Content"
+    207 -> "Multi-Status"
+    300 -> "Multiple Choices"
+    301 -> "Moved Permanently"
+    302 -> "Found"
+    303 -> "See Other"
+    304 -> "Not Modified"
+    305 -> "Use Proxy"
+    307 -> "Temporary Redirect"
+    308 -> "Permanent Redirect"
+    400 -> "Bad Request"
+    401 -> "Unauthorized"
+    402 -> "Payment Required"
+    403 -> "Forbidden"
+    404 -> "Not Found"
+    405 -> "Method Not Allowed"
+    406 -> "Not Acceptable"
+    407 -> "Proxy Authentication Required"
+    408 -> "Request Timeout"
+    409 -> "Conflict"
+    410 -> "Gone"
+    411 -> "Length Required"
+    412 -> "Precondition Failed"
+    413 -> "Request Entity Too Large"
+    414 -> "Request-URI Too Long"
+    415 -> "Unsupported Media Type"
+    416 -> "Requested Range Not Satisfiable"
+    417 -> "Expectation Failed"
+    422 -> "Unprocessable Entity"
+    423 -> "Locked"
+    424 -> "Failed Dependency"
+    429 -> "Too Many Requests"
+    431 -> "Request Header Fields Too Large"
+    500 -> "Internal Server Error"
+    501 -> "Not Implemented"
+    502 -> "Bad Gateway"
+    503 -> "Service Unavailable"
+    504 -> "Gateway Timeout"
+    505 -> "HTTP Version Not Supported"
+    507 -> "Insufficient Storage"
+    _ -> ""
+  }
+
+# The status line and headers of a response. A HEAD request gets the status and
+# headers its GET produced, the exact Content-Length when it is known and
+# positive, and no body (RFC 9110 9.3.2). `Connection: close` is always sent:
+# one process, one request. A chunked body to an HTTP/1.0 client has no framing
+# at all and ends with the connection, as 1.0 has it.
+fn head_bytes(status: Int, content_type: String, extra: List[(String, String)], fr: Framing, head_only: Bool, http10: Bool) -> Bytes = {
+  var text = "HTTP/1.1 ${status} ${reason(status)}\r\nContent-Type: ${content_type}\r\n"
+  for h in extra {
+    let (k, v) = h
+    text = text ++ k ++ ": " ++ v ++ "\r\n"
+  }
+  text = text ++ match fr {
+    Withheld -> ""
+    Sized(n) -> if head_only && n == 0 { "" } else { "Content-Length: ${n}\r\n" }
+    Chunked -> if head_only || http10 { "" } else { "Transfer-Encoding: chunked\r\n" }
+  }
+  bytes.utf8(text ++ "Connection: close\r\n\r\n")
+}
+
+fn hex_of(n: Int) -> String = {
+  let digit = str.slice("0123456789abcdef", n % 16, n % 16 + 1)
+  if n < 16 { digit } else { hex_of(n / 16) ++ digit }
+}
+
+fn chunk_frame(piece: Bytes) -> Bytes =
+  bytes.freeze(bytes.put_bytes(bytes.put_bytes(bytes.put_bytes(bytes.buf(), bytes.utf8(hex_of(len(piece)) ++ "\r\n")), piece), bytes.utf8("\r\n")))
+
+# Move a source to the wire a piece at a time and say how many bytes moved,
+# stopping at the first empty read. `limit` is a stated length: a piece that
+# would carry the total past it is not written, and the pump panics, which
+# `pump_with` classifies (the JDK's fixed-length stream refuses the write the
+# same way). `framed` wraps each piece as a chunk.
+fn copy_to_wire(t: Transport, src: BodySource, limit: Option[Int], framed: Bool) -> Int !io = {
+  var total = 0
+  var more = true
+  while more {
+    let piece = src.read(READ_CHUNK)
+    if len(piece) == 0 {
+      more = false
+    } else {
+      match limit {
+        Some(n) -> if total + len(piece) > n { panic("stream is longer than its stated length ${n}") }
+        None -> ()
+      }
+      t.write(if framed { chunk_frame(piece) } else { piece })
+      total = total + len(piece)
+    }
+  }
+  total
+}
+
+# Write a response. The body kind decides the framing (see `framing`). A
+# streaming body that fails after the head is out cannot be reported to the
+# client, the status being spent: the connection ends short, which is the
+# signal, and a chunked body is left without its terminating chunk so that the
+# client sees it was cut. What happened goes to `log`.
+fn write_response(t: Transport, method: String, http10: Bool, response: Response, log: fn(String) -> Unit !io) -> Unit !io = {
+  let status = response_status(response)
+  let body = response_body(response)
+  let fr = framing(status, body)
+  let head_only = method == "HEAD"
+  t.write(head_bytes(status, response_content_type(response), response_headers(response), fr, head_only, http10))
+  if head_only {
+    drop_body(body)
+  } else {
+    match fr {
+      Withheld -> drop_body(body)
+      Sized(n) ->
+        match body {
+          Empty -> ()
+          Text(s) -> if n > 0 { t.write(bytes.utf8(s)) }
+          Binary(b) -> if n > 0 { t.write(b) }
+          Stream(s, _) -> report_pump(pump_with(s, Some(n), up => copy_to_wire(t, up, Some(n), false)), log)
+        }
+      Chunked ->
+        match body {
+          Stream(s, _) -> {
+            let framed = not http10
+            let outcome = pump_with(s, None, up => copy_to_wire(t, up, None, framed))
+            match outcome {
+              Pumped -> if framed { t.write(bytes.utf8("0\r\n\r\n")) }
+              _ -> ()
+            }
+            report_pump(outcome, log)
+          }
+          _ -> ()
+        }
+    }
+  }
+}
+
+fn report_pump(outcome: PumpOutcome, log: fn(String) -> Unit !io) -> Unit !io =
+  match pump_report(outcome) {
+    Some(m) -> log(m)
+    None -> ()
+  }
+
+# A refusal made before there is a Request to give the middleware: the head did
+# not parse, or its framing is unusable. The JDK server has the same case and
+# answers it itself, before any Dawn runs; the answer here is the framework's
+# own JSON error in the application's wording.
+fn refuse(t: Transport, e: HttpError, errors: ErrorFormat, log: fn(String) -> Unit !io) -> Unit !io =
+  write_response(t, "GET", false, error_response(e, fmt: errors), log)
+
+# ---- the exchange ----
+
+fn stderr_log(line: String) -> Unit !io = eprintln(line)
+
+## Serve one request over `t` and return. Everything a server does for a request
+## happens here, in the order web_jvm/server does it: dispatch on the raw path
+## split on "/" first and each segment decoded alone (WEB-03); the dot-segment
+## 400 after dispatch, so it carries the matched route's tags; the route's
+## guard before the body is read; the body under its ceiling, a 413 before it is
+## read when the declared length is already over, a chunked body decoded and
+## stopped as it crosses; the middleware chain around the handler, around every
+## refusal too. A handler panic is a 500 in the application's wording and a line
+## on stderr.
+##
+## A head that does not parse is answered before any of that, without
+## middleware (there is no Request yet). A peer that sent nothing is answered
+## with nothing. A broken route table or a non-positive `max_body` panics, as
+## `web_jvm/server.start` does.
+pub fn serve_exchange(cfg: ExchangeConfig, routes: List[Route], middleware: List[Middleware], t: Transport) -> Unit !io = {
+  match validate_routes(routes) {
+    Err(e) -> panic("route table: " ++ e)
+    Ok(_) -> ()
+  }
+  if cfg.max_body <= 0 {
+    panic("server config: max_body must be a positive byte count, got ${cfg.max_body}")
+  }
+  let errors = cfg.errors
+  match read_head(t) {
+    Err(e) -> refuse(t, e, errors, stderr_log)
+    Ok(None) -> ()
+    Ok(Some(raw)) ->
+      match parse_head(raw) {
+        Err(e) -> refuse(t, e, errors, stderr_log)
+        Ok(h) ->
+          match body_kind(h) {
+            Err(e) -> refuse(t, e, errors, stderr_log)
+            Ok(kind) -> serve_request(cfg, routes, middleware, t, len(raw), h, kind)
+          }
+      }
+  }
+}
+
+fn serve_request(cfg: ExchangeConfig, routes: List[Route], middleware: List[Middleware], t: Transport, body_pos: Int, h: Head, kind: BodyKind) -> Unit !io = {
+  let errors = cfg.errors
+  let log = stderr_log
+  # a handler panic is isolated to this request: catch_panic turns it into a
+  # 500 instead of an exit with the response unwritten
+  let outcome = catch_panic(() => {
+    let d = dispatch_segs(routes, h.method, map(raw_segs(h.raw_path), s => decode_path_seg(s)))
+    let meta = meta_of(d)
+    # a dot segment is refused on every route, paths nothing would match
+    # included; dispatch has run but no handler has, the decision is only read
+    # for its tags
+    let attempt: Result[Request, HttpError] =
+      if has_dot_segment(h.raw_path) {
+        log("${log_request(h.method, h.raw_path)} -> 400 (dot segment)")
+        Err(http_error(400, errors.dot_segment))
+      } else {
+        match build_request(t, body_pos, h, kind, d, cfg.max_body, errors, log) {
+          Err(e) -> {
+            log("${log_request(h.method, h.raw_path)} -> ${e.status} (${escape_field(e.message)})")
+            Err(e)
+          }
+          Ok(req) -> Ok(req)
+        }
+      }
+    match attempt {
+      Err(e) -> serve_through(middleware, errors, bodyless_request(h, meta), _rq => Err(e), log)
+      Ok(req) -> {
+        # the temp body file lives exactly as long as this branch
+        with held <- bracket(req, r => drop_body_file(r, log))
+        serve_through(middleware, errors, held, (rq: Request) => run_dispatch(errors, d, rq), log)
+      }
+    }
+  })
+  let response = match outcome {
+    Ok(r) -> r
+    Err(m) -> {
+      log("request panicked: ${m.message}")
+      error_response(http_error(500, errors.internal_message), fmt: errors)
+    }
+  }
+  write_response(t, h.method, h.http10, response, log)
+}
+
+# ---- tests ----
+#
+# The parsers and the framing are functions of their input, so they are tested
+# on strings. The whole exchange, a socket's worth of it, is the contract in
+# scripts/web-exchange-contract, which runs both servers on the same bytes.
+
+# A fake transport: `read(pos, n)` is the slice of `data` at `pos`, which is what
+# the position parameter is for.
+fn from_bytes(data: Bytes) -> fn(Int, Int) -> Bytes !io =
+  (pos, n) => bytes.slice(data, pos, pos + n)
+
+fn fake(s: String) -> Transport =
+  Transport { read: from_bytes(bytes.utf8(s)), write: _b => () }
+
+fn head_of(s: String) -> Result[Head, HttpError] = parse_head(bytes.utf8(s))
+
+fn head_status(s: String) -> Int =
+  match head_of(s) {
+    Ok(_) -> 0
+    Err(e) -> e.status
+  }
+
+test "a head parses into method, path, query and a lowercase multimap" {
+  match head_of("GET /a/b?x=1&y=2 HTTP/1.1\r\nHost: h\r\nX-Multi: one\r\nx-multi:  two \r\n\r\n") {
+    Err(_) -> { assert false }
+    Ok(h) -> {
+      assert h.method == "GET"
+      assert h.raw_path == "/a/b"
+      assert h.raw_query == Some("x=1&y=2")
+      assert not h.http10
+      assert map.get(h.headers, "x-multi") == Some(["one", "two"])
+      assert map.get(h.headers, "host") == Some(["h"])
+    }
+  }
+}
+
+test "a fragment never reaches the path, an empty query is still a query" {
+  match head_of("GET /a?q#frag HTTP/1.0\r\n\r\n") {
+    Err(_) -> { assert false }
+    Ok(h) -> {
+      assert h.raw_path == "/a"
+      assert h.raw_query == Some("q")
+      assert h.http10
+    }
+  }
+  match head_of("GET /a? HTTP/1.1\r\n\r\n") {
+    Err(_) -> { assert false }
+    Ok(h) -> { assert h.raw_query == Some("") }
+  }
+}
+
+test "a head that is not HTTP is a 400, an unknown version a 505" {
+  assert head_status("BLAH\r\n\r\n") == 400
+  assert head_status("GET /a\r\n\r\n") == 400
+  assert head_status("GET a HTTP/1.1\r\n\r\n") == 400
+  assert head_status("GET /a HTTP/1.1\r\n folded: x\r\n\r\n") == 400
+  assert head_status("GET /a HTTP/1.1\r\nbad name: x\r\n\r\n") == 400
+  assert head_status("GET /a HTTP/1.1\r\nno colon\r\n\r\n") == 400
+  assert head_status("GET /a HTTP/1.1\r\nx: a\u{1}b\r\n\r\n") == 400
+  assert head_status("GET /a HTTP/1.1\rX: y\r\n\r\n") == 400
+  assert head_status("GET /a HTTP/2.0\r\n\r\n") == 505
+  assert head_status("GET /a HTTP/1.1\r\n\r\n") == 0
+}
+
+test "a target java.net.URI would refuse is refused" {
+  assert target_ok("/a/b%20c?x=%E4%B8%AD")
+  assert not target_ok("/a%zz")
+  assert not target_ok("/a%4")
+  assert not target_ok("/a%")
+  assert not target_ok("/a%+1")
+  assert not target_ok("/a|b")
+  assert not target_ok("/a[b")
+  assert not target_ok("/a\\b")
+  assert not target_ok("/a\"b")
+  assert target_ok("/a;b,c$&+=@:!*()'~")
+  assert target_ok("/caf\u{e9}")
+}
+
+fn kind_of(s: String) -> Result[BodyKind, HttpError] =
+  match head_of("POST /a HTTP/1.1\r\n" ++ s ++ "\r\n") {
+    Ok(h) -> body_kind(h)
+    Err(e) -> Err(e)
+  }
+
+fn kind_status(s: String) -> Int =
+  match kind_of(s) {
+    Ok(_) -> 0
+    Err(e) -> e.status
+  }
+
+test "the body framing comes from the headers alone" {
+  assert kind_of("") == Ok(NoBody)
+  assert kind_of("Content-Length: 5\r\n") == Ok(Counted(5))
+  assert kind_of("Content-Length: 0\r\n") == Ok(Counted(0))
+  assert kind_of("Transfer-Encoding: chunked\r\n") == Ok(ChunkedBody)
+  assert kind_of("Transfer-Encoding: Chunked\r\n") == Ok(ChunkedBody)
+}
+
+test "ambiguous or unusable framing is refused, not guessed at" {
+  assert kind_status("Content-Length: -1\r\n") == 400
+  assert kind_status("Content-Length: +5\r\n") == 400
+  assert kind_status("Content-Length: 5x\r\n") == 400
+  assert kind_status("Content-Length: 1234567890123456789\r\n") == 400
+  assert kind_status("Content-Length: 5\r\nContent-Length: 5\r\n") == 400
+  assert kind_status("Content-Length: 5\r\nTransfer-Encoding: chunked\r\n") == 400
+  assert kind_status("Transfer-Encoding: gzip\r\n") == 501
+  assert kind_status("Transfer-Encoding: gzip, chunked\r\n") == 501
+}
+
+fn decode(s: String, limit: Option[Int]) -> Result[Bytes, HttpError] !io =
+  read_chunked(fake(s), 0, limit, default_errors())
+
+fn decode_status(s: String, limit: Option[Int]) -> Int !io =
+  match decode(s, limit) {
+    Ok(_) -> 0
+    Err(e) -> e.status
+  }
+
+test "a chunked body decodes, extensions and trailers read and dropped" {
+  assert decode("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", None) == Ok(bytes.utf8("hello world"))
+  assert decode("0\r\n\r\n", None) == Ok(bytes.utf8(""))
+  assert decode("3;name=v\r\nabc\r\n0\r\n\r\n", None) == Ok(bytes.utf8("abc"))
+  assert decode("3\r\nabc\r\n0\r\nX-T: 1\r\nY: 2\r\n\r\n", None) == Ok(bytes.utf8("abc"))
+  assert decode("A\r\n0123456789\r\n0\r\n\r\n", None) == Ok(bytes.utf8("0123456789"))
+  assert decode("a\r\n0123456789\r\n0\r\n\r\n", None) == Ok(bytes.utf8("0123456789"))
+}
+
+test "a chunked body is stopped at the ceiling, before the chunk that crosses it" {
+  assert decode_status("5\r\nhello\r\n0\r\n\r\n", Some(5)) == 0
+  assert decode_status("5\r\nhello\r\n0\r\n\r\n", Some(4)) == 413
+  assert decode_status("3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n", Some(5)) == 413
+  # a chunk that claims more than the ceiling is refused without being read
+  assert decode_status("ffff\r\nx", Some(10)) == 413
+}
+
+test "every malformed chunk frame is the same 400" {
+  let bodies = [
+    "zz\r\nhello\r\n0\r\n\r\n",
+    "\r\nhello\r\n0\r\n\r\n",
+    "5\r\nhelloXX0\r\n\r\n",
+    "a\r\nabc",
+    "5\r\nhello\r\n",
+    "5\nhello\r\n0\r\n\r\n",
+    "fffffffffffffffff\r\nx\r\n0\r\n\r\n",
+    "-1\r\nx\r\n0\r\n\r\n",
+    "5\r\nhello\r\n0\r\nX: 1",
+  ]
+  for b in bodies {
+    match decode(b, None) {
+      Ok(_) -> { assert false }
+      Err(e) -> {
+        assert e.status == 400
+        assert e.message == "malformed request body"
+      }
+    }
+  }
+}
+
+test "a counted body is read to its length, in pieces if the stream gives them" {
+  let t = fake("hello world")
+  assert read_exact(t, 0, 5) == Ok(bytes.utf8("hello"))
+  assert read_exact(t, 6, 5) == Ok(bytes.utf8("world"))
+  match read_exact(t, 6, 50) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.status == 400 }
+  }
+  # a stream that hands out one byte at a time is the same body
+  let slow = Transport { read: (pos, _n) => bytes.slice(bytes.utf8("hello world"), pos, pos + 1), write: _b => () }
+  assert read_exact(slow, 0, 11) == Ok(bytes.utf8("hello world"))
+}
+
+test "the head is read up to the blank line and not a byte past it" {
+  let raw = "GET /a HTTP/1.1\r\nHost: h\r\n\r\nBODY"
+  match read_head(fake(raw)) {
+    Ok(Some(b)) -> { assert b == bytes.utf8("GET /a HTTP/1.1\r\nHost: h\r\n\r\n") }
+    _ -> { assert false }
+  }
+  # a peer that sent nothing is not an error; one that stopped partway is
+  assert read_head(fake("")) == Ok(None)
+  match read_head(fake("GET /a HTT")) {
+    Err(e) -> { assert e.status == 400 }
+    _ -> { assert false }
+  }
+  match read_head(fake(str.repeat("x", 20000))) {
+    Err(e) -> { assert e.status == 431 }
+    _ -> { assert false }
+  }
+}
+
+fn src() -> BodySource = BodySource { read: _n => bytes.utf8(""), close: () => () }
+
+test "framing: exact for text and bytes, chunked only for a stream of unknown length" {
+  assert framing(200, Empty) == Sized(0)
+  assert framing(200, Text("hello")) == Sized(5)
+  assert framing(200, Text("\u{4e2d}\u{6587}")) == Sized(6)
+  assert framing(200, Binary(bytes.utf8("abcd"))) == Sized(4)
+  assert framing(200, Stream(src(), Some(7))) == Sized(7)
+  assert framing(200, Stream(src(), None)) == Chunked
+}
+
+test "framing: 1xx, 204, 205 and 304 carry no body whatever the handler built" {
+  for status in [100, 101, 199, 204, 205, 304] {
+    assert framing(status, Text("hello")) == Withheld
+    assert framing(status, Stream(src(), None)) == Withheld
+    assert framing(status, Stream(src(), Some(5))) == Withheld
+  }
+  for status in [200, 203, 206, 303, 305] {
+    assert framing(status, Text("hello")) == Sized(5)
+  }
+}
+
+fn text_of(b: Bytes) -> String = bytes.decode_latin1(b)
+
+test "a response head: status line, type, extras, framing header, Connection: close" {
+  let extra = [("X-A", "1"), ("X-A", "2")]
+  assert text_of(head_bytes(200, "text/plain", extra, Sized(5), false, false)) ==
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-A: 1\r\nX-A: 2\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+  assert text_of(head_bytes(200, "a/b", [], Sized(0), false, false)) ==
+    "HTTP/1.1 200 OK\r\nContent-Type: a/b\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+  assert text_of(head_bytes(204, "a/b", [], Withheld, false, false)) ==
+    "HTTP/1.1 204 No Content\r\nContent-Type: a/b\r\nConnection: close\r\n\r\n"
+  assert text_of(head_bytes(200, "a/b", [], Chunked, false, false)) ==
+    "HTTP/1.1 200 OK\r\nContent-Type: a/b\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+}
+
+test "a HEAD response keeps the length it would have had, and an unknown or empty one has none" {
+  assert str.contains(text_of(head_bytes(200, "a/b", [], Sized(5), true, false)), "Content-Length: 5\r\n")
+  assert not str.contains(text_of(head_bytes(200, "a/b", [], Sized(0), true, false)), "Content-Length")
+  assert not str.contains(text_of(head_bytes(200, "a/b", [], Chunked, true, false)), "Transfer-Encoding")
+}
+
+test "a chunked body to an HTTP/1.0 client has no framing and ends with the connection" {
+  assert not str.contains(text_of(head_bytes(200, "a/b", [], Chunked, false, true)), "Transfer-Encoding")
+}
+
+test "a chunk on the wire is its size in hex, the bytes, CRLF" {
+  assert text_of(chunk_frame(bytes.utf8("hello"))) == "5\r\nhello\r\n"
+  assert text_of(chunk_frame(bytes.utf8(str.repeat("x", 26)))) == "1a\r\n" ++ str.repeat("x", 26) ++ "\r\n"
+  assert hex_of(0) == "0"
+  assert hex_of(255) == "ff"
+  assert hex_of(4096) == "1000"
+}
+
+fn panicking_source() -> BodySource =
+  BodySource { read: _n => panic("source bug"), close: () => () }
+
+test "a pump ends clean, short, or as a panic, and each says so" {
+  assert pump_with(src(), None, _up => 3) == Pumped
+  assert pump_with(src(), Some(3), _up => 3) == Pumped
+  assert pump_with(src(), Some(10), _up => 3) == Truncated(3, 10)
+  match pump_with(panicking_source(), None, up => len(up.read(10))) {
+    PumpPanicked(m) -> { assert str.starts_with(m, "source bug") }
+    _ -> { assert false }
+  }
+  assert pump_report(Pumped) == None
+  assert pump_report(Truncated(3, 10)) == Some("stream body: upstream ended after 3 of 10 bytes")
+}
+
+test "the body ceiling is the route's, else the server's, and a raw-body route has none of its own" {
+  let plain = Some(RouteMeta { method: "POST", pattern: "/a", tags: [], body_limit: None })
+  let own = Some(RouteMeta { method: "POST", pattern: "/a", tags: [], body_limit: Some(7) })
+  let raw = Some(RouteMeta { method: "POST", pattern: "/a", tags: ["raw-body"], body_limit: None })
+  let raw_own = Some(RouteMeta { method: "POST", pattern: "/a", tags: ["raw-body"], body_limit: Some(7) })
+  assert body_ceiling(None, 100) == Some(100)
+  assert body_ceiling(plain, 100) == Some(100)
+  assert body_ceiling(own, 100) == Some(7)
+  assert body_ceiling(own, 5) == Some(7)
+  assert body_ceiling(raw, 100) == None
+  assert body_ceiling(raw_own, 100) == Some(7)
+}

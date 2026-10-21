@@ -6,6 +6,36 @@ Newest first. From 2.0.0 the manifest name carries the major (`web2` ...
 `docs/std-defaults-design.md`, `docs/audit/web-api-v2-design.md` and
 `docs/web-core-split-design.md` (in Chinese).
 
+## 7.1.0 (2026-10-21)
+
+Added, nothing removed or changed for a caller of 7.0:
+
+- **`web/exchange`: a server that serves one request.** `serve_exchange(cfg,
+  routes, middleware, transport)` reads one HTTP/1.1 request through a
+  `Transport` (`read(pos, n)` and `write(bytes)`, no backend named), runs the
+  application and writes the response, `Connection: close`, and returns. It is
+  pure Dawn, so the native compiler builds it: a process handed one accepted
+  connection as stdin and stdout serves its request with it and exits. It
+  decodes `Content-Length` and chunked request bodies (extensions read, trailers
+  dropped), answers a malformed body with a 400, applies the body ceilings
+  (`ExchangeConfig.max_body`, a route's `body_limit`, the `raw-body` and
+  `stream-body` tags), runs a route's guard before the body is read, refuses a
+  dot segment, frames the response (exact length, chunked for a stream of unknown
+  length, no body for 1xx, 204, 205, 304 and for HEAD) and writes a streaming
+  body piece by piece. `exchange_config()` is the neutral configuration.
+  docs/web-core-split-design.md section 9 has the semantics list and the
+  contract that holds it byte for byte to `web_jvm/server`.
+- **`with_logging_to_stderr`**, `with_logging` with the line on stderr. On a
+  single-exchange transport stdout is the response, so a log line there is bytes
+  of it.
+- **The decisions a server makes after the parse are public** because both
+  servers now call the same ones: `meta_of`, `meta_has_tag`, `guard_of`,
+  `run_guard`, `body_ceiling`, `run_dispatch` and `serve_through` (dispatch, the
+  guard, the body ceiling, the middleware chain and what a panic answers), and
+  `framing` with `Framing` (`Withheld`, `Sized`, `Chunked`), `drop_body`,
+  `close_source`, `pump_with`, `PumpOutcome` and `pump_report` (response framing
+  and how a streaming body ends). They are for authors of servers.
+
 ## 7.0.0 (2026-10-20)
 
 The package is pure Dawn now: the JVM server moved to its own package,

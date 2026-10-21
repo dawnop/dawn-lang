@@ -35,3 +35,7 @@ web_jvm = "../packages/web-jvm"
 `start` refuses a route table it cannot dispatch and a `max_body` that is not positive, before it binds. A handler that panics, or fails with a JVM `Error`, gets a `500` if nothing was sent yet, and the exchange is always closed. Everything else (requests, responses, routing, guards, body ceilings, CORS, error wording) is documented in `packages/web`.
 
 This package starts at 1.0.0 with the server API `web` 6 had in `web/server`; see `packages/web/CHANGELOG.md`, 7.0.0, for the migration.
+
+## 1.1.0
+
+A request body the JDK's stream cannot read (a chunk size that is not hex, a chunk cut short, a body that ends before its `Content-Length`) is answered `400` with `{"error":"malformed request body"}`. It was a `500`: the exception went up as a panic. A temp file for a spilled body is still removed. The same failures get the same answer from `web/exchange` (the single-exchange server of `packages/web`), and `scripts/web-exchange-contract` holds the two servers to the same bytes. The server now calls the shared decisions that `web` 7.1 made public (`serve_through`, `body_ceiling`, `framing`, `pump_with` and the rest) instead of keeping its own copies. Needs `web` 7.1.
