@@ -1,0 +1,62 @@
+## Scoped SQLite resources. Values are copied across the ABI; RC never closes
+## a database. A captured connection is checked again on every native call.
+# Keep statement tokens private and make normal cleanup failures observable.
+
+## A connection valid only inside its with_db callback.
+pub opaque type Db = Int
+opaque type Stmt = Int
+
+fn unsupported() -> ForeignError = ForeignError {
+  kind: "sqlite.unsupported_backend", message: "SQLite requires Linux native", cause: None
+}
+fn sq_open(path: String, uri: Bool) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_open" else Err(unsupported())
+fn sq_close(db: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_close" else Err(unsupported())
+fn sq_release_db(db: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_release_db" else Err(unsupported())
+fn sq_prepare(db: Int, sql: String) -> Result[Int, ForeignError] !io =
+  extern c "sqlite_prepare" else Err(unsupported())
+fn sq_finalize(db: Int, stmt: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_finalize" else Err(unsupported())
+fn sq_release_stmt(db: Int, stmt: Int) -> Result[Unit, ForeignError] !io =
+  extern c "sqlite_release_stmt" else Err(unsupported())
+
+fn finish[T](result: Result[T, ForeignError], cleanup: Result[Unit, ForeignError]) -> Result[T, ForeignError] =
+  match (result, cleanup) {
+    (Ok(value), Ok(_)) -> Ok(value)
+    (Err(error), Ok(_)) -> Err(error)
+    (Ok(_), Err(error)) -> Err(error)
+    (Err(error), Err(clean)) -> Err(ForeignError {
+      kind: error.kind, message: error.message ++ "; cleanup: " ++ clean.kind ++ ": " ++ clean.message,
+      cause: error.cause
+    })
+  }
+
+## Open a path (or, with uri=true, a SQLite URI), run body, and always close.
+pub fn with_db[T, !e](path: String, body: fn(Db) -> Result[T, ForeignError] !e !io, uri: Bool = false) -> Result[T, ForeignError] !e !io = {
+  let db = sq_open(path, uri)?
+  with held <- bracket(db, token => { let _ = sq_release_db(token)
+    () })
+  let result = body(held)
+  finish(result, sq_close(held))
+}
+
+fn with_stmt[T, !e](db: Db, sql: String, body: fn(Stmt) -> Result[T, ForeignError] !e !io) -> Result[T, ForeignError] !e !io = {
+  let stmt = sq_prepare(db, sql)?
+  with held <- bracket(stmt, token => { let _ = sq_release_stmt(db, token)
+    () })
+  let result = body(held)
+  finish(result, sq_finalize(db, held))
+}
+
+test "cleanup preserves the primary error" {
+  let primary = ForeignError { kind: "primary", message: "body", cause: None }
+  let clean = ForeignError { kind: "cleanup", message: "close", cause: None }
+  let result: Result[Int, ForeignError] = finish(Err(primary), Err(clean))
+  match result {
+    Err(error) -> { assert error.kind == "primary"
+      assert error.message == "body; cleanup: cleanup: close" }
+    Ok(_) -> { assert false }
+  }
+}

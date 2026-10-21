@@ -355,8 +355,7 @@ dawnop-site 过渡期（裁决 11，不属于这四刀）：引入 `effect Db`�
 - **任意 libc 符号**：`dawn_x_` 前缀就是为了让 extern 只能绑包自带桩里的符号。要用 libc 的函数，在桩里包一层，包一层的那份 C
   就是被评审与摘要覆盖的东西。
 - **SQL 函数 `load_extension()`**：SQLite 文档的警告是，只应用 `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION` 打开 C 接口，保持 SQL
-  函数关闭，防止 SQL 注入拿到加载扩展的能力。包只用 `sqlite3_db_config` 加 `sqlite3_load_extension`，且只在 `open` 选项
-  显式要求时才打开。
+  函数关闭，防止 SQL 注入拿到加载扩展的能力。包只用 `sqlite3_db_config` 加 `sqlite3_load_extension`，且只在显式调用 `load_extension` 的区间打开 C 入口，返回前关闭。
 - **`use c` 拼写**：撞编译器自己的 `c/` 目录模块，且形状是「声明函数」而不是「引入命名空间」。
 - **纯 extern、具名效果的 extern**：前者复活已删的 `unsafe_pure`，后者 C 侧没有证据向量。
 - **通用 C ABI（指针、结构体、可变参数）与头文件导入**：Perceus 下只有对着运行时写的桩守得住令牌纪律。
@@ -378,3 +377,27 @@ dawnop-site 过渡期（裁决 11，不属于这四刀）：引入 `effect Db`�
 - F2（本提交）：`[native] sources` 的清单验证与 Planner 测试、按加载图收集、每包完整 `src/` 暂存、共享目标选项、
   `dawn_ffi.h` 嵌入及新鲜度检查、包符号归属与可识别 ABI 签名检查、`emitc` 提示、C/头文件摘要负控。
   契约为 `scripts/ffi-sources-contract/run.sh`，同一 F1 transcript 在 path、url+subdir、native、wasm、JVM 上验收。
+
+
+### F3 包的具体约定
+
+`sqlite/sqlite` 的公开面采用调研 §2.2：`Db`、`Value`、`Col`、`Rows`、`TxMode`，
+以及 `with_db`、`query`、`execute`、`execute_changes`、`last_id`、`busy_timeout`、
+`in_transaction`、`with_tx`、`load_extension`。`with_db` 默认普通路径，可显式允许 URI；
+Stmt 不公开。仅支持 Linux/glibc ≥2.34 的动态链接 native，JVM 和 WASI 的每个入口返回
+`sqlite.unsupported_backend`。生产桩只 dlopen 系统 `libsqlite3.so.0`，测试引擎不进入包。
+
+句柄为不复用的正整数 token，表记录种类、父连接及语句状态；释放时删除节点，空表不保留
+SQLite 资源的全局根。每次语句调用同时验证父连接，重复 finalize 与陈旧 token 返回
+`sqlite.invalid_handle`。Dawn RC 只管理复制出的值，bracket 管 SQLite 生命周期；正常
+返回检查 close/finalize，已有 Err 保留原 kind 并附清理错误，panic 由 bracket 收尾。
+事务先读真实 autocommit，拒绝嵌套；body Err、panic 和 commit Err 都回滚，已经自动
+回滚时不再发无效 rollback。没有保存点或自动重试。
+
+参数按 1 起算、列按 0 起算，数量和 C int 范围先校验。query 在 step 前复制列名，
+每行先判 NULL，再按 Col 转换并立即复制文本；非法 UTF-8 返回 `sqlite.invalid_utf8`。
+prepare 拒绝空 SQL 和多条有效语句，允许末尾空白和注释。execute 消费单条语句；
+execute_changes 仅供 DML，沿用 sqlite3_changes 的 int 范围及 DDL 保留前值的语义。
+
+不做的沿用本设计及 F3 调研 §7.3：生产 vendor、C flags/链接库/构建脚本、静态 simple、
+WASI 持久化、借用列视图、自动终结器、语句池、BLOB 流、回调及连接池均不增加。
