@@ -3,7 +3,7 @@
 Scoped SQLite connections and materialized queries through the C extern ABI.
 The native package loads the system `libsqlite3.so.0` using
 `RTLD_NOW | RTLD_LOCAL`. It supports Linux with glibc 2.34 or newer and dynamic
-linking. SQLite 3.35 or newer is required. Missing libraries and symbols return
+linking. SQLite 3.35.5 or newer is required. Missing libraries and symbols return
 `sqlite.no_library` and `sqlite.no_symbol`; loading never calls a missing symbol.
 JVM and WASI operations return `sqlite.unsupported_backend`.
 
@@ -40,8 +40,8 @@ DML count in SQLite; use `execute` for DDL, PRAGMA and transaction statements.
 `with_tx(db, Deferred | Immediate, body)` rejects nesting. It commits `Ok` and
 rolls back `Err`, panic and failed commits. `in_transaction` reads SQLite's real
 autocommit flag, including automatic rollbacks. Cleanup errors append to a
-primary error's message and preserve its kind. During panic, cleanup is best
-effort and the original panic propagates. There are no automatic savepoints.
+primary error's message and preserve its kind. During panic, cleanup failures are reported to stderr and the original panic
+propagates (a fault writing the diagnostic is contained). There are no automatic savepoints.
 
 `load_extension(db, path, entry)` loads an explicitly trusted library using only
 `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION` and the C API, then disables C loading.
@@ -55,3 +55,10 @@ Recoverable errors use `ForeignError.kind`: `sqlite.no_library`, `no_symbol`,
 `invalid_utf8`, `busy`, `locked`, `readonly`, `cant_open`, `constraint`,
 `no_memory`, `extension`, `nested_transaction`, and generic `error`, all with
 the `sqlite.` prefix. SQLite messages are copied before cleanup.
+
+
+Run `scripts/sqlite-contract/run.sh --native` for engine, ownership, transaction
+and FTS checks, and `--backends` for all JVM/WASI refusals and downstream package
+consumers. Test assets and SHA256 digests live in `fixtures.lock.json`; missing
+assets fail the run. Sanitizer engines are cached by source digest, compiler
+identity, target, macros and sanitizer options; a cold cache builds them once.

@@ -140,6 +140,8 @@ def job_env(prefix, *, tmpdir=None, runner_temp=None, inherit_host=False):
         # wasm-target's wasi-sdk step copies this instead of downloading it
         # and checks the same pinned sha256 (the adjust:wasi-sdk-tarball row).
         "WASI_SDK_TARBALL": str(prefix / "inputs" / "downloads" / archive_name(download("wasi-sdk"))),
+        # Test fixtures use the same verified archives as networked CI.
+        "DAWN_TEST_DOWNLOADS": str(prefix / "inputs" / "downloads"),
         # site/build.sh's `npm install` resolves from the input pack's cache
         # and never from the registry (the adjust:npm-offline-cache row).
         "npm_config_cache": str(prefix / "cache" / "npm"),

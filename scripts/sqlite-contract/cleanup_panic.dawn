@@ -1,0 +1,16 @@
+# A cleanup failure must be reported without replacing the original panic.
+use std/str
+fn cleanup_panic() -> Unit = panic("cleanup-original-panic")
+fn close_inside_transaction(db: Db) -> Result[Unit, ForeignError] !io = with_tx(db, Immediate, () => {
+  sq_close(db)?
+  cleanup_panic()
+  Ok(())
+})
+fn closing_scope() -> Result[Unit, ForeignError] !io = with_db(":memory:", close_inside_transaction)
+pub fn main() -> Unit !io = {
+  match catch_panic(() => closing_scope()) {
+    Err(e) -> if not str.starts_with(e.message, "cleanup-original-panic") { panic("original panic lost") }
+    Ok(_) -> panic("expected panic")
+  }
+  println("cleanup panic preserved")
+}

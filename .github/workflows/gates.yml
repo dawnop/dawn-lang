@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22953s (the most this file's `3x` claims may add up to)
+# push-total: 23413s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -1166,7 +1166,7 @@ jobs:
     # (run 36245872151). Restated to that plus a tenth, rounded up to 5s,
     # 780s (680s before), and the timeout to 3x that.
     # budget: 3x 780s worst observed plus a tenth (run 36245872151)
-    timeout-minutes: 39
+    timeout-minutes: 41
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dawn-toolchain
@@ -2631,8 +2631,13 @@ jobs:
     # negative controls; only cc, no JVM): 11s measured locally, charged at 30s.
     # Planning value: 375 + 30 = 405s, and the timeout is 3x that. The push
     # total moves by 30s.
-    # budget: 3x 405s planning value (285s replayed worst plus one deviation, plus the io primitives and ffi header contracts)
-    timeout-minutes: 21
+    # 2026-10-21: SQLite adds real Dawn package builds, 25 native mutants,
+    # two pinned engine versions, plain/inline RC, sanitizer and simple FTS.
+    # Warm remaining-case probe: 54.1s; cold engine compiles: 58.2s total.
+    # Reserve 420s for the complete cold contract on a slower CI runner;
+    # the actual new step and affected job are recorded in the F3 handoff.
+    # budget: 3x 825s planning value (405s prior contracts plus 420s for cold SQLite)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2701,6 +2706,11 @@ jobs:
       # byte, and dawn_fault left reachable. 11s measured locally, charged at 30s.
       - name: ffi header contract
         run: ./scripts/ffi-header-contract/run.sh
+
+      # F3 uses instrumented test-only SQLite, reuses each compiled engine for
+      # both RC modes and all mutants, and runs real simple tokenizer queries.
+      - name: SQLite native values, lifetimes, transactions and simple FTS
+        run: ./scripts/sqlite-contract/run.sh --native
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test
@@ -3146,8 +3156,10 @@ jobs:
     # the WASI pin. Its native, sanitizer, JVM, URL and collection-mutant
     # legs measured 61.0s locally and are charged at 200s with doubled
     # rounded headroom.
-    # budget: 3x 780s planning value (580s previous claim plus 200s for package C sources)
-    timeout-minutes: 39
+    # F3 adds every SQLite JVM/WASI refusal and path/URL package consumers:
+    # 12.3s locally; reserve 40s with the existing driver and pinned SDK.
+    # budget: 3x 820s planning value (780s previous claim plus 40s for SQLite backend checks)
+    timeout-minutes: 41
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -3253,6 +3265,11 @@ jobs:
       # inputs to the same F1 value transcript on all three backends.
       - name: Package C sources, headers and locked inputs
         run: ./scripts/ffi-sources-contract/run.sh
+
+      # Intentional backend differences get explicit refusals, not a broad
+      # differential waiver; every package entry executes on both targets.
+      - name: SQLite JVM and WASI unsupported operations and package consumers
+        run: ./scripts/sqlite-contract/run.sh --backends
 
   # scripts/tile-golden's eleven shards were here until 2026-09-11. They are
   # .github/workflows/tile.yml now, eight shards (seven until 2026-10-10, six until knife T17) behind a `paths:` trigger and

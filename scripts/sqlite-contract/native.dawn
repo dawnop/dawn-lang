@@ -1,0 +1,213 @@
+# Exercise the actual package's private statements and public scoped API.
+# Mutants must fail for these named observations or a sanitizer diagnosis.
+use std/str
+
+fn check(condition: Bool, label: String) -> Unit = if not condition { panic(label) }
+fn demand[T](result: Result[T, ForeignError]) -> T = match result {
+  Ok(value) -> value
+  Err(e) -> panic(e.kind ++ ": " ++ e.message)
+}
+fn demand_error[T](result: Result[T, ForeignError], kind: String, label: String) -> Unit = match result {
+  Err(e) -> check(e.kind == kind, label ++ ": " ++ e.kind)
+  Ok(_) -> panic(label ++ ": accepted")
+}
+fn check_value(actual: Value, expected: Value, label: String) -> Unit = {
+  let same = match (actual, expected) {
+    (Integer(a), Integer(b)) -> a == b
+    (Real(a), Real(b)) -> a == b
+    (Text(a), Text(b)) -> a == b
+    (Null, Null) -> true
+    _ -> false
+  }
+  check(same, label)
+}
+fn empty_result() -> Result[Unit, ForeignError] = Ok(())
+fn scalar(db: Db, sql: String) -> Int !io = {
+  let rows = demand(query(db, sql, [], [ColInt]))
+  match rows.rows[0][0] { Integer(n) -> n
+    _ -> panic("scalar-type") }
+}
+
+fn exercise_values(db: Db) -> Unit !io = {
+  let values = [Integer(9223372036854775807), Integer(-9223372036854775807 - 1), Real(1.25), Text("中国"), Text(""), Text("a\u{0}b"), Null]
+  let rows = demand(query(db, "select ? as a, ? as a, ?, ?, ?, ?, ?", values, [ColInt, ColInt, ColFloat, ColText, ColText, ColText, ColInt]))
+  check(rows.names[0] == "a" && rows.names[1] == "a", "labels")
+  var i = 0
+  for value in values { check_value(rows.rows[0][i], value, "value-" ++ show(i))
+    i = i + 1 }
+  let nulls = demand(query(db, "select NULL,NULL,NULL", [], [ColInt, ColFloat, ColText]))
+  for value in nulls.rows[0] { check_value(value, Null, "null-before-conversion") }
+  let empty = demand(query(db, "select 1 as named where 0", [], [ColInt]))
+  check(len(empty.rows) == 0 && empty.names[0] == "named", "empty-label")
+  demand_error(query(db, "select ?", [], [ColInt]), "sqlite.parameter_count", "bind-count")
+  demand_error(query(db, "select 1", [], []), "sqlite.column_count", "column-count")
+  demand_error(query(db, "select cast(x'ff' as text)", [], [ColText]), "sqlite.invalid_utf8", "utf8")
+  demand_error(execute(db, " -- nothing", []), "sqlite.empty_sql", "empty-sql")
+  demand_error(execute(db, "select 1; select 2", []), "sqlite.multiple_statements", "two-statements")
+  demand(execute(db, "select ';'; -- suffix\n /* comment */", []))
+  demand_error(execute(db, "select 1\u{0};select 2", []), "sqlite.embedded_nul", "nul-sql")
+  demand_error(sq_open("truncated\u{0}suffix", false), "sqlite.embedded_nul", "nul-path")
+  check(not io.with_fs_real(() => io.exists("truncated")), "nul-path-created-truncated-target")
+  demand_error(load_extension(db, "missing\u{0}suffix", None), "sqlite.embedded_nul", "nul-extension-path")
+  demand_error(load_extension(db, "missing", Some("entry\u{0}suffix")), "sqlite.embedded_nul", "nul-entry")
+  demand_error(load_extension(db, "missing", Some("")), "sqlite.extension", "empty-entry")
+  demand_error(load_extension(db, "missing", None), "sqlite.extension", "missing-extension")
+  demand_error(busy_timeout(db, -1), "sqlite.range", "negative-timeout")
+  demand_error(busy_timeout(db, 2147483648), "sqlite.range", "wide-timeout")
+  demand(busy_timeout(db, 0))
+  demand(execute(db, "create table t(id integer primary key, value text unique)", []))
+  check(demand(execute_changes(db, "insert into t values(1,'one')", [])) == 1, "changes")
+  check(demand(last_id(db)) == 1, "last-id")
+  demand(execute(db, "create table ddl(x)", []))
+  check(demand(sq_changes(db)) == 1, "ddl-retains-count")
+  demand_error(execute(db, "insert into t values(1,'again')", []), "sqlite.constraint", "step-constraint")
+  demand_error(execute(db, "select * from missing_table", []), "sqlite.error", "prepare-error")
+}
+
+fn exercise_handles() -> Unit !io = {
+  let temporary = demand(sq_open("", false))
+  demand(sq_close(temporary))
+  let db = demand(sq_open(":memory:", false))
+  let other = demand(sq_open(":memory:", false))
+  let stmt = demand(sq_prepare(db, "select ? union all select 'second'"))
+  demand_error(sq_column_text(db, stmt, 0), "sqlite.statement_state", "column-before-row")
+  demand_error(sq_bind_text(other, stmt, 1, "bad"), "sqlite.invalid_handle", "parent-handle")
+  demand_error(sq_bind_int(db, stmt, 2147483648, 1), "sqlite.range", "wide-bind")
+  demand_error(sq_bind_int(db, stmt, 0, 1), "sqlite.range", "zero-bind")
+  # The temporary must die between bind and step, unlike a literal or a held let.
+  demand(sq_bind_text(db, stmt, 1, str.repeat("中国x", 4096)))
+  check(demand(sq_step(db, stmt)) == 100, "step-row")
+  demand_error(sq_column_int(db, stmt, -1), "sqlite.range", "negative-column")
+  demand_error(sq_column_name(db, stmt, 2147483648), "sqlite.range", "wide-column")
+  demand_error(sq_bind_null(db, stmt, 1), "sqlite.statement_state", "bind-after-step")
+  let copied = demand(sq_column_text(db, stmt, 0))
+  check(demand(sq_step(db, stmt)) == 100, "step-second")
+  check(demand(sq_step(db, stmt)) == 101, "step-done")
+  demand_error(sq_step(db, stmt), "sqlite.statement_state", "step-after-done")
+  demand(sq_finalize(db, stmt))
+  demand_error(sq_finalize(db, stmt), "sqlite.invalid_handle", "double-finalize")
+  demand_error(sq_step(db, stmt), "sqlite.invalid_handle", "stale-statement")
+  let newer = demand(sq_prepare(db, "select 2"))
+  check(newer != stmt, "token-not-reused")
+  demand_error(sq_step(db, stmt), "sqlite.invalid_handle", "stale-reallocated")
+  # Close owns unfinished children, invalidating every token before returning.
+  demand(sq_close(db))
+  demand_error(sq_step(db, newer), "sqlite.invalid_handle", "closed-parent")
+  demand_error(sq_close(db), "sqlite.invalid_handle", "double-close")
+  demand(sq_close(other))
+  let fresh = demand(sq_open(":memory:", false))
+  check(fresh != db, "db-token-not-reused")
+  demand_error(sq_autocommit(db), "sqlite.invalid_handle", "stale-db")
+  demand(sq_close(fresh))
+  check(copied == str.repeat("中国x", 4096), "copied-after-step-close")
+}
+
+fn transaction_panic() -> Unit = panic("transaction-body-panic")
+fn scope_body_panic() -> Unit = panic("scope-body-panic")
+fn tx_panic(db: Db) -> Result[Unit, ForeignError] !io = with_tx(db, Immediate, () => {
+  execute(db, "insert into t values(4,'panic')", [])?
+  transaction_panic()
+  Ok(())
+})
+fn tx_error(db: Db) -> Result[Unit, ForeignError] !io = with_tx(db, Immediate, () => {
+  execute(db, "insert into t values(3,'error')", [])?
+  Err(error("body", "transaction-body-error"))
+})
+fn tx_commit_error(db: Db) -> Result[Unit, ForeignError] !io = with_tx(db, Deferred, () =>
+  execute(db, "insert into child values(999)", []))
+fn exercise_transactions(db: Db) -> Unit !io = {
+  demand(with_tx(db, Immediate, () => execute(db, "insert into t values(2,'commit')", [])))
+  check(not demand(in_transaction(db)), "committed-autocommit")
+  demand_error(tx_error(db), "sqlite.body", "tx-body-error")
+  check(not demand(in_transaction(db)), "error-rollback")
+  check(scalar(db, "select count(*) from t where id=3") == 0, "error-data-rollback")
+  match catch_panic(() => tx_panic(db)) {
+    Err(e) -> check(str.starts_with(e.message, "transaction-body-panic"), "panic-preserved")
+    Ok(_) -> panic("panic-not-caught")
+  }
+  check(not demand(in_transaction(db)), "panic-rollback")
+  check(scalar(db, "select count(*) from t where id=4") == 0, "panic-data-rollback")
+  demand(execute(db, "BEGIN IMMEDIATE", []))
+  demand(execute(db, "insert into t values(5,'outer')", []))
+  demand_error(with_tx(db, Deferred, () => empty_result()), "sqlite.nested_transaction", "nested")
+  check(demand(in_transaction(db)), "nested-keeps-outer")
+  demand(execute(db, "COMMIT", []))
+  check(scalar(db, "select count(*) from t where id=5") == 1, "outer-keeps-write")
+  demand(execute(db, "BEGIN", []))
+  demand_error(execute(db, "insert or rollback into t values(1,'auto')", []), "sqlite.constraint", "automatic-rollback")
+  check(not demand(in_transaction(db)), "real-autocommit")
+  exercise_commit_failure(db)
+}
+
+fn exercise_commit_failure(db: Db) -> Unit !io = {
+  demand(execute(db, "PRAGMA foreign_keys=ON", []))
+  demand(execute(db, "create table parent(id primary key)", []))
+  demand(execute(db, "create table child(id references parent(id) deferrable initially deferred)", []))
+  demand_error(tx_commit_error(db), "sqlite.constraint", "commit-error")
+  check(not demand(in_transaction(db)), "commit-error-rollback")
+  check(scalar(db, "select count(*) from child") == 0, "commit-error-data")
+}
+
+fn scope_panic() -> Result[Unit, ForeignError] !io = with_db(":memory:", db => {
+  with stmt <- with_stmt(db, "select 1")
+  let _ = sq_step(db, stmt)?
+  scope_body_panic()
+  Ok(())
+})
+fn exercise_scopes() -> Unit !io = {
+  match catch_panic(() => scope_panic()) {
+    Err(e) -> check(str.starts_with(e.message, "scope-body-panic"), "scope-panic-preserved")
+    Ok(_) -> panic("scope-panic-not-caught")
+  }
+  let captured: Db = demand(with_db(":memory:", db => Ok(db)))
+  demand_error(busy_timeout(captured, 0), "sqlite.invalid_handle", "escaped-db")
+  let escaped: Result[Unit, ForeignError] = with_db(":memory:", db =>
+    execute(db, "select ?", []))
+  demand_error(escaped, "sqlite.parameter_count", "scope-early-error")
+}
+
+fn exercise_file(path: String) -> Unit !io = {
+  let result: Result[Unit, ForeignError] = with_db(path, db => {
+    let wal = query(db, "PRAGMA journal_mode=wal", [], [ColText])?
+    check_value(wal.rows[0][0], Text("wal"), "wal-mode")
+    execute(db, "create table locks(x)", [])?
+    execute(db, "BEGIN IMMEDIATE", [])?
+    let blocked: Result[Unit, ForeignError] = with_db(path, second => {
+      busy_timeout(second, 1)?
+      demand_error(execute(second, "insert into locks values(1)", []), "sqlite.busy", "busy-result")
+      Ok(())
+    })
+    blocked?
+    execute(db, "COMMIT", [])
+  })
+  demand(result)
+  let readonly: Result[Unit, ForeignError] = with_db("file:" ++ path ++ "?mode=ro", db => {
+    demand_error(execute(db, "insert into locks values(1)", []), "sqlite.readonly", "readonly-result")
+    Ok(())
+  }, uri: true)
+  demand(readonly)
+  demand_error(sq_open(path ++ "/not-a-directory", false), "sqlite.cant_open", "cant-open-result")
+  let shared: Result[Unit, ForeignError] = with_db("file:sqlite_shared?mode=memory&cache=shared", db => {
+    execute(db, "create table shared(x)", [])?
+    let second: Result[Unit, ForeignError] = with_db("file:sqlite_shared?mode=memory&cache=shared", other => {
+      check(scalar(other, "select count(*) from shared") == 0, "shared-uri")
+      Ok(())
+    }, uri: true)
+    second
+  }, uri: true)
+  demand(shared)
+}
+
+pub fn main() -> Unit !io = {
+  exercise_handles()
+  exercise_scopes()
+  exercise_file(test_path())
+  let result: Result[Unit, ForeignError] = with_db(":memory:", db => {
+    exercise_values(db)
+    exercise_transactions(db)
+    exercise_fts(db, simple_path(), probe_path())
+    Ok(())
+  })
+  demand(result)
+  println("sqlite native: OK")
+}

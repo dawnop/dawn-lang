@@ -2,6 +2,8 @@
 ## a database. A captured connection is checked again on every native call.
 # Keep statement tokens private and make normal cleanup failures observable.
 
+use std/io
+
 ## A connection valid only inside its with_db callback.
 pub opaque type Db = Int
 opaque type Stmt = Int
@@ -36,16 +38,14 @@ fn finish[T](result: Result[T, ForeignError], cleanup: Result[Unit, ForeignError
 ## Open a path (or, with uri=true, a SQLite URI), run body, and always close.
 pub fn with_db[T, !e](path: String, body: fn(Db) -> Result[T, ForeignError] !e !io, uri: Bool = false) -> Result[T, ForeignError] !e !io = {
   let db = sq_open(path, uri)?
-  with held <- bracket(db, token => { let _ = sq_release_db(token)
-    () })
+  with held <- bracket(db, token => report_cleanup(sq_release_db(token)))
   let result = body(held)
   finish(result, sq_close(held))
 }
 
 fn with_stmt[T, !e](db: Db, sql: String, body: fn(Stmt) -> Result[T, ForeignError] !e !io) -> Result[T, ForeignError] !e !io = {
   let stmt = sq_prepare(db, sql)?
-  with held <- bracket(stmt, token => { let _ = sq_release_stmt(db, token)
-    () })
+  with held <- bracket(stmt, token => report_cleanup(sq_release_stmt(db, token)))
   let result = body(held)
   finish(result, sq_finalize(db, held))
 }
@@ -214,8 +214,7 @@ pub fn with_tx[T, !e](db: Db, mode: TxMode, body: fn() -> Result[T, ForeignError
   if in_transaction(db)? { return Err(error("nested_transaction", "transaction already active")) }
   execute(db, match mode { Deferred -> "BEGIN"
     Immediate -> "BEGIN IMMEDIATE" }, [])?
-  with held <- bracket(db, connection => { let _ = rollback(connection)
-    () })
+  with held <- bracket(db, connection => report_cleanup(rollback(connection)))
   let result = body()
   match result {
     Err(e) -> finish(Err(e), rollback(held))
@@ -236,3 +235,11 @@ fn sq_load_extension(db: Int, path: String, entry: Option[String]) -> Result[Uni
 ## load_extension remains disabled throughout, and C loading closes on return.
 pub fn load_extension(db: Db, path: String, entry: Option[String]) -> Result[Unit, ForeignError] !io =
   sq_load_extension(db, path, entry)
+
+# Normal cleanup is checked by finish. Unwind cleanup preserves the panic and
+# reports its own failure, swallowing only a fault writing that diagnostic.
+fn report_cleanup(result: Result[Unit, ForeignError]) -> Unit !io = match result {
+  Ok(_) -> ()
+  Err(e) -> { let _ = catch_fault(() => io.eprintln("sqlite cleanup: " ++ e.kind ++ ": " ++ e.message))
+    () }
+}

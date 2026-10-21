@@ -1,6 +1,6 @@
 # C extern：`fn f(..) = extern c "sym" else ..` 与公开头 `dawn_ffi.h`
 
-> 状态：**current**（F0：设计稿与头文件已落地；F1 的语法、检查、Core 与后端已实现；F2 的清单和构建链路已实现，完整门禁扩展待 F4，
+> 状态：**current**（F0：设计稿与头文件已落地；F1 的语法、检查、Core 与后端已实现；F2 的清单和构建链路、F3 的 sqlite 包与目标明确的契约已实现，完整语法门禁扩展待 F4，
 > 每刀落地后在末尾「落地记录」补哈希）。2026-10-21。依据：维护者工作区的
 > `ruling-ffi-extern-surface-20261020.md`（14 条裁决与刀序）、`research-ffi-extern-surface-20261020.md`（三种语法对照、
 > sqlite 桩的 ASan 实测、§8 待裁点）、`ruling-ffi-llvm-concurrency-20261004.md` 第 1 条、
@@ -377,6 +377,13 @@ dawnop-site 过渡期（裁决 11，不属于这四刀）：引入 `effect Db`�
 - F2（本提交）：`[native] sources` 的清单验证与 Planner 测试、按加载图收集、每包完整 `src/` 暂存、共享目标选项、
   `dawn_ffi.h` 嵌入及新鲜度检查、包符号归属与可识别 ABI 签名检查、`emitc` 提示、C/头文件摘要负控。
   契约为 `scripts/ffi-sources-contract/run.sh`，同一 F1 transcript 在 path、url+subdir、native、wasm、JVM 上验收。
+
+- F3（本 PR）：`packages/sqlite` 的 Linux/glibc ≥2.34 loader、非复用 token、
+  物化查询和 bracket 事务；SQLite 下限 3.35.5，当前夹具 3.54.1；固定 libsimple
+  v0.7.1 的中文、拼音、排序及三个触发器；C 入口开启期间仍拒绝 SQL 加载。
+  `scripts/sqlite-contract` 先运行逐条负控，再验收 plain/inline RC 与完整插桩引擎，
+  JVM/WASI 每个入口实跑 unsupported；门禁分别接 contracts-3 和 wasm-target。
+  panic 清理错误写 stderr 并保留原 panic，正常清理错误返回 Result。
 
 
 ### F3 包的具体约定
