@@ -36,12 +36,17 @@ def archive(key, cache):
     return path
 
 
-def prepare(cache, work):
-    with zipfile.ZipFile(archive("sqlite", cache)) as z:
+def prepare_engine(cache, work, key):
+    work.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive(key, cache)) as z:
         for name in ["sqlite3.c", "sqlite3.h", "sqlite3ext.h"]:
             member = next(n for n in z.namelist() if n.endswith("/" + name))
             (work / name).write_bytes(z.read(member))
-    assert digest(work / "sqlite3.c") == LOCK["sqlite"]["source_sha256"], "SQLite source digest"
+    assert digest(work / "sqlite3.c") == LOCK[key]["source_sha256"], "SQLite source digest"
+
+
+def prepare(cache, work):
+    prepare_engine(cache, work, "sqlite")
     with zipfile.ZipFile(archive("simple", cache)) as z:
         member = next(n for n in z.namelist() if n.endswith("/libsimple.so") or n == "libsimple.so")
         (work / "libsimple.so").write_bytes(z.read(member))

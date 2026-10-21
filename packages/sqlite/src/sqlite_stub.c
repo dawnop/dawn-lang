@@ -37,9 +37,9 @@ static dawn_adt *load_api(void) {
 } while (0)
   RESOLVE(open_v2); RESOLVE(close); RESOLVE(prepare_v2); RESOLVE(finalize);
   RESOLVE(errmsg); RESOLVE(extended_errcode); RESOLVE(libversion_number);
-  if (api.libversion_number() < 3035000) {
+  if (api.libversion_number() < 3035005) {
     dlclose(lib); memset(&api, 0, sizeof(api));
-    loader_kind = "sqlite.version"; loader_message = "SQLite 3.35 or newer is required";
+    loader_kind = "sqlite.version"; loader_message = "SQLite 3.35.5 or newer is required";
     return dawn_ffi_err(loader_kind, loader_message);
   }
   RESOLVE(bind_parameter_count); RESOLVE(bind_int64); RESOLVE(bind_double);
@@ -116,7 +116,9 @@ static dawn_adt *close_handle(int64_t token, bool quiet) {
   }
   int rc = api.close(h->ptr.db);
   if (rc) { if (!error) error = failure(h->ptr.db, rc); }
-  else forget(h);
+  /* Retire the token even on a close error; never hide unreleased C resources
+   * behind a permanent global root. The caller observes the cleanup failure. */
+  forget(h);
   return error ? error : unit();
 }
 static dawn_adt *finalize_handle(int64_t db, int64_t token, bool quiet) {

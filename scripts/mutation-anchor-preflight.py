@@ -41,6 +41,7 @@ ADAPTERS = {
     "ffi-header-contract": (".",),
     "ffi-extern-contract": (".",),
     "ffi-sources-contract": (".",),
+    "sqlite-contract": (".",),
     "for-pattern-contract": ("selfhost",),
     "incremental-semantics-contract": (".",),
     "inflate-contract": (".",),

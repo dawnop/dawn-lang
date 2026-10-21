@@ -328,7 +328,7 @@ def package_item(url, sha256):
 
 def pinned_archives(lock):
     """Every archive the lock pins, as download items: {name: item}."""
-    items = list(lock["downloads"]) + list(lock.get("wheels", []))
+    items = list(lock["downloads"]) + list(lock.get("wheels", [])) + list(lock.get("fixture_archives", []))
     for entry in lock.get("conda_toolchains", []):
         items += [package_item(p["url"], p["sha256"]) for p in entry["packages"]]
     return {item["name"]: item for item in items}
@@ -485,7 +485,12 @@ def build(args):
     # every download row of conda_items by its own lock and would fail on a
     # package it has never heard of.
     lock = prefix_mod.load_lock()
-    extra = {"conda_items": []}
+    extra = {"conda_items": [], "fixture_items": []}
+    # Separate rows let older branches verify the shared pack with their own lock.
+    # Fixtures are archives only, never installed as production toolchains.
+    for item in lock.get("fixture_archives", []):
+        archive, seconds = fetch(item, prefix, log)
+        extra["fixture_items"].append(download_row(item, archive, seconds, prefix))
     conda_items = extra["conda_items"]
     for item in lock.get("wheels", []):
         archive, seconds = fetch(item, prefix, log)
@@ -605,7 +610,7 @@ def conda_rows(manifest):
     """MANIFEST's rows outside `items`: conda_items and each manifest_key the
     lock's conda toolchains name (a key the MANIFEST lacks gives no rows, and
     verify then reports that toolchain missing)."""
-    keys = ["conda_items"] + [entry["manifest_key"] for entry in
+    keys = ["conda_items", "fixture_items"] + [entry["manifest_key"] for entry in
                               prefix_mod.load_lock().get("conda_toolchains", [])
                               if entry.get("manifest_key", "conda_items") != "conda_items"]
     return [row for key in dict.fromkeys(keys) for row in manifest.get(key, [])]
@@ -876,6 +881,13 @@ def lockcheck_problems(repo, lock):
                 f"pins {entry['lockfile_sha256']} for {entry['name']}. Re-pin it: set "
                 f"lockfile_sha256 of {entry['name']} to {got}, then rebuild the pack "
                 f"(inputs.py build) so its npm cache is filled from the new lockfile")
+    fixture_lock = repo / "scripts/sqlite-contract/fixtures.lock.json"
+    if fixture_lock.exists():
+        fixtures = json.loads(fixture_lock.read_text())
+        expected = [{k: v for k, v in item.items() if k != "source_sha256"}
+                    for item in fixtures.values()]
+        if lock.get("fixture_archives", []) != expected:
+            problems.append("fixture_archives differs from the SQLite contract fixture lock")
     return problems
 
 
@@ -891,6 +903,11 @@ def lockcheck_selftest():
     bad["npm_caches"][0]["lockfile_sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
     if not lockcheck_problems(repo, bad):
         print("inputs lockcheck selftest: RED, a wrong digest was accepted")
+        return 1
+    bad_fixtures = json.loads(json.dumps(lock))
+    bad_fixtures["fixture_archives"] = []
+    if not lockcheck_problems(repo, bad_fixtures):
+        print("inputs lockcheck selftest: RED, missing fixture archives were accepted")
         return 1
     # the mode control: a 0600 file must be reported, and repaired by make_world_readable
     with tempfile.TemporaryDirectory() as tmp:
