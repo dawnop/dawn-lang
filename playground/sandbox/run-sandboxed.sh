@@ -83,7 +83,19 @@ esac
 # against 542 MB at 2g -- the second already over this unit's ceiling.
 # -Xss is left alone: stack is reserved address space, not resident pages, and
 # shrinking it would fail deeply nested programs the parser handles today.
-SANDBOX_JVM_OPTS="-Xss512m -Xmx256m"
+#
+# -XX:+UseSerialGC -XX:TieredStopAtLevel=1 (R1 of the latency ruling of
+# 2026-10-21). Naming DAWN_JVM_OPTS replaces bin/dawn's own defaults wholesale,
+# so until now the compiler here ran on G1 with both JIT tiers, which is the
+# configuration for a long compile. A playground compile is 1 to 7 seconds,
+# the range where C2's compile cost is not earned back and a parallel collector
+# is a second set of threads on a unit capped at two cores. Measured on a
+# 2-core pin, hello 1.45 s to 0.87 s, flash_attn 3.39 s to 2.01 s, peak RSS
+# 435 MB to 300 MB. The price: a program whose comptime runs for ten seconds
+# or more is slower under C1 and reaches the 30 s compile budget sooner
+# (SANDBOX.md). The run phase is a separate `java` the runner starts and is
+# not touched.
+SANDBOX_JVM_OPTS="-Xss512m -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1"
 
 # The JDK the unit's `bin/dawn` launches the compiler on. The unit's PATH is
 # systemd's default, where `java` is whatever the OS packages (the JRE other
