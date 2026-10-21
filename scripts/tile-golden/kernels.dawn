@@ -28,8 +28,8 @@ use tileir/dev.{Dev, Param, Tile, Idx, param, block_id, tile_at, load, store, ro
   memory_fence_alias, gdc_wait, gdc_launch_dependents, ptrs,
   ptr_offset, ptr_to_int, int_to_ptr, ptr_to_ptr, load_ptrs, store_ptrs, i64_const, add_i64, d_global, Visibility,
   global_ptrs, alloca_ptrs, mma_scaled, addi, subi, muli, shli, shri, consti, sqrt_approx, eq_u, ne_u, lt_u, le_u,
-  gt_u, ge_u, atomic_rmw, Hints, for_arch, hint_num_cta_in_cga, hint_num_worker_warps_per_cta, hint_occupancy,
-  hint_latency, tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
+  gt_u, ge_u, atomic_rmw, ByArch, EntryHints, entry_hints, ptr_hints, view_hints, for_arch,
+  tensor_view, partition_view, load_view, store_view, tensor_view_dyn, tensor_dim, index_space_dim,
   idx_of, Dyn, strided_view, gather_scatter_view, load_gather, atomic_red_view, At, Rows, NoPadding, PadZero,
   PadNegZero, PadNan, PadPosInf, PadNegInf, Padding, broadcast, reshape, idx_as_tile, le_i, atomic_cas, atomic_add, load_cell, load_at,
   store_cell, store_sub, zeros, reduce_sum, reduce_max, d_range, By, DYN_DIM, idx_lt, extent_of,
@@ -4205,9 +4205,9 @@ fn zeros_tile(n: Int) -> List[Float] = list.map(range(0, n), _i => 0.0)
 # `vadd` with hints on the ENTRY: one architecture-specific entry for this
 # machine's sm_86 and one `default`, the fallback the dialect reads when the
 # compilation target has no entry of its own.
-fn hint_entry_hints() -> Hints = [
-  for_arch("default", [hint_occupancy(4)]),
-  for_arch("sm_86", [hint_num_cta_in_cga(1), hint_num_worker_warps_per_cta(8), hint_occupancy(2)])]
+fn hint_entry_hints() -> ByArch[EntryHints] = [
+  for_arch("default", entry_hints(occupancy: Some(4))),
+  for_arch("sm_86", entry_hints(num_cta_in_cga: Some(1), num_worker_warps_per_cta: Some(8), occupancy: Some(2)))]
 
 fn hint_entry(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
   store_cell(out, load_cell(a) + load_cell(b))
@@ -4217,9 +4217,27 @@ fn hint_entry(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev 
 # one key `load_ptr_tko` and `store_ptr_tko` accept.
 fn hint_memory(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), 128)
-  let ta = load(a, blk, [128], hints: [for_arch("sm_86", [hint_latency(4)])])
+  let ta = load(a, blk, [128], hints: [for_arch("sm_86", ptr_hints(latency: Some(4)))])
   let tb = load(b, blk, [128])
-  store(out, blk, ta + tb, hints: [for_arch("sm_86", [hint_latency(7)])])
+  store(out, blk, ta + tb, hints: [for_arch("sm_86", ptr_hints(latency: Some(7)))])
+}
+
+# `vadd` with hints on a VIEW read and a VIEW write (knife P4-a): the same
+# body again, through the cells `hint_entry` uses. The first load carries two
+# architecture entries, one with both keys the view operations take
+# (`allow_tma` is the dialect's one boolean and is written with the type `i1`,
+# `latency` an `i64`) and a `default` with `latency` alone; the second load
+# carries none, so the flag bit is set and clear in one kernel as it is in
+# `hint_memory`; the store carries an entry for an architecture this machine
+# is not (sm_90), which the assembler reads and has no use for here. The
+# values are the dialect's legal ones, and they are CHECKED when the kernel is
+# recorded now (`wire_view`), which `hint_memory`'s never were.
+fn hint_view(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let ta = load_cell(a, hints: [
+    for_arch("default", view_hints(latency: Some(9))),
+    for_arch("sm_86", view_hints(allow_tma: Some(true), latency: Some(3)))])
+  let tb = load_cell(b)
+  store_cell(out, ta + tb, hints: [for_arch("sm_90", view_hints(allow_tma: Some(false)))])
 }
 
 # ---- knife T10: `alloca` (0x71) ----
@@ -6038,6 +6056,11 @@ fn trace(name: String) -> TileProg = match name {
   }
   "view_pad_i32" -> {
     let (p, _e) = trace2("view_pad_i32", In(I32, Whole), Out(I32, cells([VP_OUT], [VP_TILE])), view_pad_i32)
+    p
+  }
+  "hint_view" -> {
+    let (p, _e) = trace3("hint_view",
+      In(F64, run_of(128)), In(F64, run_of(128)), Out(F64, run_of(128)), hint_view)
     p
   }
   "hint_memory" -> {

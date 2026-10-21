@@ -276,6 +276,21 @@ MUTATIONS = {
         'const FLAG_HAS_HINTS: Int = 0x04',
         'const FLAG_HAS_HINTS: Int = 0x00',
     ),),
+    "hint-view-flag-bit-misplaced": ((
+        BYTECODE,
+        'const VIEW_FLAG_HINTS: Int = 2',
+        'const VIEW_FLAG_HINTS: Int = 1',
+    ),),
+    "hint-view-after-inbounds": ((
+        BYTECODE,
+        '    let w4 = emit(emit_ref(inbounds(emit_hints(w3, hints), flags), view), len(indices))',
+        '    let w4 = emit(emit_ref(emit_hints(inbounds(w3, flags), hints), view), len(indices))',
+    ),),
+    "hint-view-store-flag-dropped": ((
+        BYTECODE,
+        'OP_STORE_VIEW_TKO), 1), tk), hints_flag(hints, VIEW_FLAG_HINTS) | VIEW_FLAG_TOKEN)',
+        'OP_STORE_VIEW_TKO), 1), tk), VIEW_FLAG_TOKEN)',
+    ),),
     "exp-rounding-unwritten": ((
         BYTECODE,
         ('  } else if op == "exp" && exp_has_rounding() {\n'

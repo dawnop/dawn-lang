@@ -69,6 +69,7 @@ the message and not by a code.
 | `which is written through its cells alone` | record | `store`, `scatter`, an atomic or `store_view` into an `Out` | write the cell with `store_cell` or `store_sub`, or mark the parameter `Shared` |
 | `every tile dimension is a power of two` | record | a tile, a cell or a view with a dimension that is not 1, 2, 4, 8, ... | cut the tensor into power-of-two tiles and let the tail be padding or a mask |
 | `loops nest deeper than` | record | a body that recurses through `d_range` or `d_loop` unrolls forever | make the recursion a loop; the bound is `MAX_LOOP_DEPTH` |
+| `but the dialect takes` | record | an `optimization hint` value outside the dialect's range (`latency` 1 to 10, `occupancy` 1 to 32, `num_worker_warps_per_cta` 4 or 8, `num_cta_in_cga` a power of two to 16 and 1 on sm_80 to sm_89), or an architecture that is not `default` or `sm_` and a number, or one given twice; `tileiras` accepts every one of these in silence and ignores it | change the value to the one the message names; the check is here because the assembler's own is off by default |
 
 ## Emit
 

@@ -1400,7 +1400,7 @@ fn put_hints(w0: W, out0: bytes.Buf, hints: Hints) -> (W, bytes.Buf) = {
     for h in under {
       let (key, value) = h
       let (w2, ki) = str_of(w, key)
-      let (w3, ti) = num_ty(w2, "i64")
+      let (w3, ti) = num_ty(w2, if key == "allow_tma" { "i1" } else { "i64" })
       w = w3
       out = put_varint(put_varint(put_varint(put_varint(out, ki), ATTR_INTEGER), ti), value)
     }
@@ -1918,26 +1918,28 @@ fn encode_instr(w0: W, i: Instr) -> W = match i {
     emit_ref(emit_op(w0, OP_MAKE_STRIDED_VIEW, t), src)
   MakeGatherScatterView(_dst, src, _src_ty, t) ->
     emit_ref(emit_op(w0, OP_MAKE_GATHER_SCATTER_VIEW, t), src)
-  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_tys, t, tok_in, flags) -> {
+  LoadViewTile(_dst, _tok_out, view, _view_ty, indices, _idx_tys, t, tok_in, flags, hints) -> {
     # results: the count (2, written because `index` is variadic), the tile
-    # and the token; flags: the token bit, and neither `memory_scope` nor
-    # `optimization_hints`; then the required `memory_ordering_semantics`
-    # inline; then the operands: the view with no count, the indices with
-    # one, and the token because its bit is set.
+    # and the token; flags: the token bit, the hints bit when there are
+    # hints, and never `memory_scope`; then the required
+    # `memory_ordering_semantics` inline, then the hints (the attributes
+    # go in the operation's declaration order: ordering, scope, hints,
+    # inbounds), then `inbounds`; then the operands: the view with no
+    # count, the indices with one, and the token because its bit is set.
     let (w1, ti) = ty(w0, t)
     let (w2, tk) = ty(w1, Token)
     let w3 = emit(emit(emit(emit(emit(emit(w2, OP_LOAD_VIEW_TKO), 2), ti), tk),
-      VIEW_FLAG_TOKEN), ORDER_WEAK)
-    let w4 = emit(emit_ref(inbounds(w3, flags), view), len(indices))
+      hints_flag(hints, VIEW_FLAG_HINTS) | VIEW_FLAG_TOKEN), ORDER_WEAK)
+    let w4 = emit(emit_ref(inbounds(emit_hints(w3, hints), flags), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
-  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, tok_in, flags) -> {
+  StoreViewTile(_tok_out, view, _view_ty, value, _val_ty, indices, _idx_tys, tok_in, flags, hints) -> {
     # The same, with one result and the tile operand FIRST: the dialect's
     # argument order is `tile`, `view`, `index`, `token`, which is the
     # reverse of how the assembly reads for the first two.
     let (w1, tk) = ty(w0, Token)
-    let w2 = emit(emit(emit(emit(w1, OP_STORE_VIEW_TKO), 1), tk), VIEW_FLAG_TOKEN)
-    let w3 = inbounds(emit(w2, ORDER_WEAK), flags)
+    let w2 = emit(emit(emit(emit(w1, OP_STORE_VIEW_TKO), 1), tk), hints_flag(hints, VIEW_FLAG_HINTS) | VIEW_FLAG_TOKEN)
+    let w3 = inbounds(emit_hints(emit(w2, ORDER_WEAK), hints), flags)
     let w4 = emit(emit_ref(emit_ref(w3, value), view), len(indices))
     emit_ref(list.fold(indices, w4, emit_ref), tok_in)
   }
@@ -3464,12 +3466,12 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
   # and no padding operand: a view says what an out-of-bounds lane reads in
   # its TYPE.
   let ld = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
-    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3), [false, false]))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3), [false, false], []))
   assert hex(bytes.freeze(ld.body))
     == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "020000" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
   # one dimension promised in bounds and the other not: a byte an element
   let ld1 = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)],
-    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3), [true, false]))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], tile, Val(3), [true, false], []))
   assert hex(bytes.freeze(ld1.body))
     == "3e" ++ "02" ++ "01" ++ "02" ++ "04" ++ "00" ++ "020100" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
   assert VIEW_FLAG_TOKEN == 4
@@ -3478,13 +3480,41 @@ test "load_view_tko is two results and one index count, and store_view_tko puts 
   # the dialect's `arguments` order, which is the reverse of how the
   # assembly reads the two.
   let st = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
-    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3), [false, false]))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3), [false, false], []))
   assert hex(bytes.freeze(st.body))
     == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "020000" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
   let st1 = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)],
-    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3), [true, true]))
+    [Tile([], Num("i32")), Tile([], Num("i32"))], Val(3), [true, true], []))
   assert hex(bytes.freeze(st1.body))
     == "66" ++ "01" ++ "00" ++ "04" ++ "00" ++ "020101" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+}
+
+test "knife P4-a: a view read's hints set bit 1 and sit between the ordering and the inbounds array, a write's the same, and allow_tma is an i1" {
+  let w0 = W { strs: table(), types: table(), consts: table(), body: bytes.buf(), index: map.from([(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]), nvals: 5 }
+  let tile = Tile([2, 2], Num("f64"))
+  let v = PartitionView([2, 2], Num("f64"), [8, 4], [4, 1], [0, 1], PadZero)
+  let idx = [Tile([], Num("i32")), Tile([], Num("i32"))]
+  # flags 6 (hints and token), the weak ordering, the hints (outer count, the
+  # architecture's string, the Dictionary tag and its count, then per key its
+  # string and a self-contained integer: tag 1, the TYPE index, the number;
+  # `allow_tma` is type index 3, the `i1` registered after the read's own
+  # three, and `latency` is type index 4, an `i64`), then the inbounds array,
+  # then the operands exactly as without hints.
+  let ld = encode_instr(w0, LoadViewTile(9, 10, Val(0), v, [Val(1), Val(2)], idx, tile, Val(3), [false, false],
+    [("sm_86", [("allow_tma", 1), ("latency", 3)])]))
+  assert VIEW_FLAG_HINTS == 2
+  assert hex(bytes.freeze(ld.body))
+    == "3e" ++ "02" ++ "01" ++ "02" ++ "06" ++ "00"
+    ++ "01" ++ "00" ++ "0a" ++ "02" ++ "01" ++ "01" ++ "03" ++ "01" ++ "02" ++ "01" ++ "04" ++ "03"
+    ++ "020000" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
+  # a write: the flags are 6 too and the hints come after the ordering, ahead of
+  # the inbounds array; the value, view, indices and token follow
+  let st = encode_instr(w0, StoreViewTile(9, Val(0), v, Val(4), tile, [Val(1), Val(2)], idx, Val(3), [false, false],
+    [("sm_90", [("latency", 5)])]))
+  assert hex(bytes.freeze(st.body))
+    == "66" ++ "01" ++ "00" ++ "06" ++ "00"
+    ++ "01" ++ "00" ++ "0a" ++ "01" ++ "01" ++ "01" ++ "01" ++ "05"
+    ++ "020000" ++ "04" ++ "00" ++ "02" ++ "01" ++ "02" ++ "03"
 }
 
 test "the Global section is a count and six varints a record at 13.3, unaligned, and it comes before Func" {
