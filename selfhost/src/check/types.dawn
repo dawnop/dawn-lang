@@ -4025,6 +4025,34 @@ pub fn builtins() -> Map[String, Sig] = {
     # test can answer it, and comptime refuses it: a secret read at compile
     # time would be baked into the artifact.
     eff1(bsig("io_random_bytes", [TyInt], ["n"], TyBytes), EIo),
+    # The io batch of docs/io-prims-design.md: what a process that answers one
+    # request on stdin and stdout, or serves a file by range, needs and std
+    # did not have. All eight are std-only and comptime refuses them.
+    #
+    # Raw bytes on stdout through the buffer `print` uses, so the two keep one
+    # order; the flush is its own primitive because a response that must reach
+    # the peer before the process waits on anything cannot rely on the
+    # backend's buffering (64 KiB on native, `PrintStream` on the JVM).
+    eff1(bsig("io_write_stdout", [TyBytes], ["b"], TyUnit), EIo),
+    eff1(bsig("io_flush_stdout", [], [], TyUnit), EIo),
+    # Append to a file, creating it and its parent directories like
+    # `io_write_bytes`; failure faults for std/io to turn into an `Err`. The
+    # append is atomic per call on POSIX (`O_APPEND`), which is what lets a
+    # body arrive piece by piece without ever being whole in memory.
+    eff1(bsig("io_append_bytes", [TyString, TyBytes], ["path", "content"], TyUnit), EIo),
+    # Up to `n` bytes of a file from byte `off`: short or empty at its end, a
+    # negative `off` or `n` a panic, a missing or unreadable file a fault.
+    eff1(bsig("io_read_range", [TyString, TyInt, TyInt], ["path", "off", "n"], TyBytes), EIo),
+    # The size of a regular file in bytes. A directory or a device is a fault,
+    # not whatever number the filesystem keeps for it.
+    eff1(bsig("io_file_size", [TyString], ["path"], TyInt), EIo),
+    # statvfs(3): f_blocks * f_frsize and f_bavail * f_frsize of the filesystem
+    # holding `path`, which is what the JDK's `getTotalSpace` and
+    # `getUsableSpace` read too. One scalar each, so there is no pair type.
+    eff1(bsig("io_disk_total", [TyString], ["path"], TyInt), EIo),
+    eff1(bsig("io_disk_free", [TyString], ["path"], TyInt), EIo),
+    # Block for at least `ns` nanoseconds; zero and negative return at once.
+    eff1(bsig("io_sleep_ns", [TyInt], ["ns"], TyUnit), EIo),
     # Spawn `argv[0]` (found on PATH), wait, and answer its exit status.
     #
     # Both streams go to files rather than back through a pipe, and that is
@@ -4281,7 +4309,8 @@ pub fn intrinsics() -> Map[String, Intr] = {
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
     "delete", "rename", "temp_dir", "temp_file", "copy_permissions", "is_symlink", "real_path",
     "read_stdin", "stdin_ready", "clock_wall_ns", "clock_mono_ns",
-    "random_bytes"]
+    "random_bytes", "write_stdout", "flush_stdout", "append_bytes", "read_range", "file_size",
+    "disk_total", "disk_free", "sleep_ns"]
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_${op}", RtIo)
   }
@@ -5180,7 +5209,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 138
+  assert map_size2(bs) == 146
 }
 
 test "the reclaim's failure is a value, under the one name left" {
