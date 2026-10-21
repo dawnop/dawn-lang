@@ -1,0 +1,51 @@
+# Two kernels the recorder refuses, before any GPU or any launch is asked.
+# Recording is where a kernel is checked: the operator that is wrong is named
+# by its number in the recorded program and by the way it was written.
+#
+# Both kernels are packages/tileir's own test kernels (src/prog.dawn); doc-check
+# holds their text, and the tests there hold the messages printed below. The
+# first writes into a parameter marked `In`. The second adds a 64-lane tile to
+# a 128-lane one.
+use std/dtype.{F64}
+use std/io
+use std/str
+use tileir/dev.{Dev, Param, param, tile_at, block_id, load, store, add}
+use tileir/prog.{trace2, trace_kernel, cells, In, Out, ByPtr}
+
+fn into_first_store(x: Param[Float], y: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 8)
+  store(x, base, load(y, base, [8]))
+}
+
+fn vadd_half(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
+  let base = tile_at(block_id(0), 128)
+  let ta = load(a, base, [64])
+  let tb = load(b, base, [128])
+  store(out, base, add(ta, tb))
+}
+
+# What a refusal says, up to the library position the panic appends after it.
+fn reason(m: String) -> String = match str.split_once(m, " at ") {
+  Some((head, _)) -> head
+  None -> m
+}
+
+fn show(what: String, message: Option[String]) -> Unit !io = match message {
+  Some(m) -> io.println("${what}: refused\n  ${reason(m)}")
+  None -> io.println("${what}: recorded")
+}
+
+pub fn main() -> Unit !io = {
+  let g = cells([64], [8])
+  let a = catch_panic(() => trace2("store_into_in", In(F64, g), Out(F64, g), into_first_store))
+  show("write into an In", match a {
+    Ok(_) -> None
+    Err(e) -> Some(e.message)
+  })
+  let b = catch_panic(() => trace_kernel("vadd_half", [ByPtr("f64"), ByPtr("f64"), ByPtr("f64")],
+    () => vadd_half(param(F64, 0), param(F64, 1), param(F64, 2))))
+  show("add tiles of two shapes", match b {
+    Ok(_) -> None
+    Err(e) -> Some(e.message)
+  })
+}

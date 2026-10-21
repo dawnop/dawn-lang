@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ 6a2b105c12e569d7 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 316d1d08d9bc7583 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -97,6 +97,26 @@ kernel 在参数标记上一次说清它读哪里、写哪里，凡是能从操�
 ## api-keepdims-go
 
 在图里看 ↓
+
+## show-refused-title
+
+录制时被拒
+
+## show-refused
+
+kernel 在录制时就被检查：函数体只跑一遍，某个运算的形状或角色撑不起来，就是一次 panic，里面写着 kernel 名、运算的编号和照写法显示的运算符。它发生在 `tileiras` 之前、任何设备之前，指出的是运算符，不是你源码里的某一行。
+
+## show-host-title
+
+在宿主上运行，不需要 GPU
+
+## show-host
+
+单用假设备时，一次 launch 只会去调注册在 kernel 名下的宿主参考实现。`with_gpu_interp` 改为按每次 launch 给出的 grid 去运行录下来的 Tile IR，所以同一段宿主程序在没有显卡的机器上也能从 trace 走到结果。结果出自解释器，由 CI 对着宿主参考实现把关，不是由 GPU 把关。
+
+## show-open
+
+在 Playground 中运行
 
 ## api-occupancy
 
