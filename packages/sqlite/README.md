@@ -42,3 +42,16 @@ rolls back `Err`, panic and failed commits. `in_transaction` reads SQLite's real
 autocommit flag, including automatic rollbacks. Cleanup errors append to a
 primary error's message and preserve its kind. During panic, cleanup is best
 effort and the original panic propagates. There are no automatic savepoints.
+
+`load_extension(db, path, entry)` loads an explicitly trusted library using only
+`SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION` and the C API, then disables C loading.
+The SQL function stays disabled before, during and after loading. The caller
+provides libsimple as a deployment dependency; no extension is bundled. Tests
+pin libsimple v0.7.1 and its archive SHA256 independently of production.
+
+Recoverable errors use `ForeignError.kind`: `sqlite.no_library`, `no_symbol`,
+`version`, `invalid_handle`, `embedded_nul`, `range`, `statement_state`,
+`empty_sql`, `multiple_statements`, `parameter_count`, `column_count`,
+`invalid_utf8`, `busy`, `locked`, `readonly`, `cant_open`, `constraint`,
+`no_memory`, `extension`, `nested_transaction`, and generic `error`, all with
+the `sqlite.` prefix. SQLite messages are copied before cleanup.

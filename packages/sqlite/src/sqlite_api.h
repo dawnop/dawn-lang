@@ -29,5 +29,8 @@ struct sqlite_api {
   int64_t (*last_insert_rowid)(sqlite3 *);
   int (*get_autocommit)(sqlite3 *);
   int (*busy_timeout)(sqlite3 *, int);
+  int (*db_config)(sqlite3 *, int, ...);
+  int (*load_extension)(sqlite3 *, const char *, const char *, char **);
+  void (*free)(void *);
 };
 #endif

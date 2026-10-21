@@ -47,6 +47,7 @@ static dawn_adt *load_api(void) {
   RESOLVE(column_type); RESOLVE(column_int64); RESOLVE(column_double);
   RESOLVE(column_text); RESOLVE(column_bytes); RESOLVE(column_name); RESOLVE(changes);
   RESOLVE(last_insert_rowid); RESOLVE(get_autocommit); RESOLVE(busy_timeout);
+  RESOLVE(db_config); RESOLVE(load_extension); RESOLVE(free);
   library = lib;
   return NULL;
 }
@@ -389,5 +390,28 @@ dawn_adt *DAWN_EXTERN(sqlite_busy_timeout)(int64_t db, int64_t ms) {
   if (ms < 0 || ms > INT_MAX) return range_error();
   int rc = api.busy_timeout(d->ptr.db, (int)ms);
   return rc ? failure(d->ptr.db, rc) : unit();
+#endif
+}
+
+
+dawn_adt *DAWN_EXTERN(sqlite_load_extension)(int64_t db, dawn_str *path, dawn_adt *entry) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *d = find_handle(db, 1); if (!d) return invalid();
+  const char *file = dawn_ffi_cstr(path), *symbol = NULL;
+  if (dawn_ffi_is_some(entry)) symbol = dawn_ffi_cstr((dawn_str *)dawn_ffi_payload(entry));
+  if (!file || (dawn_ffi_is_some(entry) && !symbol))
+    return dawn_ffi_err("sqlite.embedded_nul", "NUL in extension path or entry");
+  /* db_config enables ONLY the C API, never the SQL load_extension function. */
+  int rc = api.db_config(d->ptr.db, 1005, 1, NULL);
+  if (rc) return failure(d->ptr.db, rc);
+  char *message = NULL;
+  rc = api.load_extension(d->ptr.db, file, symbol, &message);
+  dawn_adt *error = rc ? dawn_ffi_err("sqlite.extension", message ? message : api.errmsg(d->ptr.db)) : NULL;
+  if (message) api.free(message);
+  int disabled = api.db_config(d->ptr.db, 1005, 0, NULL);
+  if (error) return error; /* Preserve the load failure after closing the C gate. */
+  return disabled ? failure(d->ptr.db, disabled) : unit();
 #endif
 }

@@ -1,0 +1,31 @@
+# Real simple queries must exercise the tokenizer and all content triggers.
+# This fixture is appended to the package module so it can share test helpers.
+fn exercise_fts(db: Db, extension: String, probe: String) -> Unit !io = {
+  demand_error(execute(db, "select load_extension('missing')", []), "sqlite.error", "sql-before")
+  demand(load_extension(db, probe, None))
+  demand(load_extension(db, extension, None))
+  demand_error(execute(db, "select load_extension('missing')", []), "sqlite.error", "sql-after")
+  demand(execute(db, "create table articles(id integer primary key, title text, body text, published integer)", []))
+  demand(execute(db, "create virtual table article_fts using fts5(title, body, content='articles', content_rowid='id', tokenize='simple')", []))
+  demand(execute(db, "create trigger article_ai after insert on articles begin insert into article_fts(rowid,title,body) values(new.id,new.title,new.body); end", []))
+  demand(execute(db, "create trigger article_ad after delete on articles begin insert into article_fts(article_fts,rowid,title,body) values('delete',old.id,old.title,old.body); end", []))
+  demand(execute(db, "create trigger article_au after update on articles begin insert into article_fts(article_fts,rowid,title,body) values('delete',old.id,old.title,old.body); insert into article_fts(rowid,title,body) values(new.id,new.title,new.body); end", []))
+  demand(execute(db, "insert into articles values(1,'中国','hello',1)", []))
+  demand(execute(db, "insert into articles values(2,'hello','中国',1)", []))
+  demand(execute(db, "insert into articles values(3,'中国','hello',0)", []))
+  let sql = "select a.id from article_fts join articles a on a.id=article_fts.rowid where article_fts match simple_query(?) and a.published=1 order by bm25(article_fts,10.0,1.0),a.id limit ? offset ?"
+  let chinese = demand(query(db, sql, [Text("中国"), Integer(10), Integer(0)], [ColInt]))
+  check_value(chinese.rows[0][0], Integer(1), "fts-ranking-title")
+  check_value(chinese.rows[1][0], Integer(2), "fts-ranking-body")
+  let pinyin = demand(query(db, sql, [Text("zhongguo"), Integer(1), Integer(1)], [ColInt]))
+  check_value(pinyin.rows[0][0], Integer(2), "fts-pinyin-page")
+  let terms = demand(query(db, sql, [Text("中国 hello"), Integer(10), Integer(0)], [ColInt]))
+  check(len(terms.rows) == 2, "fts-two-terms")
+  demand(execute(db, "update articles set title='日本',body='bye' where id=1", []))
+  let updated = demand(query(db, sql, [Text("中国"), Integer(10), Integer(0)], [ColInt]))
+  check(len(updated.rows) == 1, "fts-update-trigger")
+  check_value(updated.rows[0][0], Integer(2), "fts-update-content")
+  demand(execute(db, "delete from articles where id=2", []))
+  let deleted = demand(query(db, sql, [Text("中国"), Integer(10), Integer(0)], [ColInt]))
+  check(len(deleted.rows) == 0, "fts-delete-trigger")
+}
