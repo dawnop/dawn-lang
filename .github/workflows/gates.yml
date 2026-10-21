@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22753s (the most this file's `3x` claims may add up to)
+# push-total: 22953s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3142,8 +3142,12 @@ jobs:
     # local native/wasm/JVM and sanitizer legs plus four compiler mutants
     # measured 78.3s; charged at 200s with doubled rounded headroom. No setup step is
     # added. Planning value: 380 + 200 = 580s; timeout remains 3x the claim.
-    # budget: 3x 580s planning value (380s previous claim plus 200s for C extern)
-    timeout-minutes: 29
+    # F2 adds the package C-source contract, reusing this driver's build and
+    # the WASI pin. Its native, sanitizer, JVM, URL and collection-mutant
+    # legs measured 61.0s locally and are charged at 200s with doubled
+    # rounded headroom.
+    # budget: 3x 780s planning value (580s previous claim plus 200s for package C sources)
+    timeout-minutes: 39
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -3244,6 +3248,11 @@ jobs:
       # driver. Every refusal and both ownership faults must be observable.
       - name: C extern syntax, boundaries and backends
         run: ./scripts/ffi-extern-contract/run.sh
+
+      # F2 holds the real loaded package graph, isolated headers and locked
+      # inputs to the same F1 value transcript on all three backends.
+      - name: Package C sources, headers and locked inputs
+        run: ./scripts/ffi-sources-contract/run.sh
 
   # scripts/tile-golden's eleven shards were here until 2026-09-11. They are
   # .github/workflows/tile.yml now, eight shards (seven until 2026-10-10, six until knife T17) behind a `paths:` trigger and
