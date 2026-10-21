@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22523s (the most this file's `3x` claims may add up to)
+# push-total: 22553s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -2626,8 +2626,13 @@ jobs:
     # primitives on both backends, with six negative controls): 30s measured
     # locally, charged at 60s for a runner about twice as slow. Planning value:
     # 315 + 60 = 375s, and the timeout is 3x that. The push total moves by 60s.
-    # budget: 3x 375s planning value (285s replayed worst plus one deviation, plus the io primitives contract)
-    timeout-minutes: 19
+    # 2026-10-21: scripts/ffi-header-contract/run.sh joins this job (the C
+    # extern header against the real runtime in three builds, with five
+    # negative controls; only cc, no JVM): 11s measured locally, charged at 30s.
+    # Planning value: 375 + 30 = 405s, and the timeout is 3x that. The push
+    # total moves by 30s.
+    # budget: 3x 405s planning value (285s replayed worst plus one deviation, plus the io primitives and ffi header contracts)
+    timeout-minutes: 21
     steps:
       - uses: actions/checkout@v4
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
@@ -2686,6 +2691,16 @@ jobs:
       # 30s measured locally on a loaded 16-core machine, charged at 60s.
       - name: io primitives contract
         run: ./scripts/io-prims-contract/run.sh
+
+      # The public header of the C extern surface (docs/ffi-extern-design.md):
+      # a stub that includes dawn_ffi.h and nothing else, called the way
+      # emitted code will call it, linked with the real runtime in plain,
+      # inline-RC and ASan/LSan/UBSan builds. Five controls must turn it red:
+      # an ABI number that moved, an embedded NUL truncated instead of refused,
+      # a ForeignError that hides references from the drop, bytes cut at a zero
+      # byte, and dawn_fault left reachable. 11s measured locally, charged at 30s.
+      - name: ffi header contract
+        run: ./scripts/ffi-header-contract/run.sh
 
   # Slice C's classpath contract owns a fixture-only Maven repository and
   # private caches, so it cannot share dependency state with the broad test
