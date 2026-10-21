@@ -1,0 +1,36 @@
+# These wrappers exercise borrowed inputs and owned C results without a
+# manifest; the contract links its stub directly until F2 owns that path.
+use std/bytes
+
+fn fallback_int(x: Int) -> Int = x + 11
+fn add(x: Int) -> Int !io = extern c "f1_add" else fallback_int(x)
+fn text(s: String) -> String !io = extern c "f1_text" else s
+fn blob(b: Bytes) -> Bytes !io = extern c "f1_blob" else b
+pub(pkg) fn result(r: Result[String, ForeignError]) -> Result[String, ForeignError] !io =
+  extern c "f1_result"
+  else r
+fn optional(s: Option[String]) -> Option[String] !io = extern c "f1_option" else s
+fn number(x: Float) -> Float !io = extern c "f1_float" else x + 0.5
+fn flag(x: Bool) -> Bool !io = extern c "f1_bool" else not x
+fn done() -> Unit !io = extern c "f1_unit" else ()
+
+pub fn main() -> Unit !io = {
+  println(show(add(31)))
+  let s = "borrow-" ++ show(add(1))
+  println(text(s))
+  println(s)
+  let b = bytes.utf8("a\u{0}b" ++ show(add(2)))
+  println(bytes.to_hex(blob(b)))
+  println(bytes.to_hex(b))
+  let r: Result[String, ForeignError] = Ok("result-" ++ show(add(3)))
+  println(show(result(r)))
+  println(show(r))
+  let e: Result[String, ForeignError] = Err(ForeignError { kind: "f1.error", message: "refused", cause: None })
+  println(show(result(e)))
+  println(show(e))
+  println(show(optional(Some("option-" ++ show(add(4))))))
+  println(show(optional(None)))
+  println(show(number(1.0)))
+  println(show(flag(false)))
+  done()
+}

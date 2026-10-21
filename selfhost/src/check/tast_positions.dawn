@@ -45,7 +45,7 @@ use check/tast.{
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue,
   XCallDyn, XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef,
   XCtorValue, XField, XListLit, XTupleLit, XPropagate, XUnwrap, XIndex,
-  XReturn, XBreak, XContinue, XComptime, XBinary, XUnary,
+  XReturn, XBreak, XContinue, XExtern, XComptime, XBinary, XUnary,
   XIf, XMatch, XBlock, XError,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor, BAdd,
   x_lo, x_hi
@@ -340,6 +340,11 @@ pub fn expr(r: Resolver, e: TExpr) -> TExpr =
     XReturn(v, lo, hi) -> XReturn(opt_expr(r, v), at(r, lo), at(r, hi))
     XBreak(lo, hi) -> XBreak(at(r, lo), at(r, hi))
     XContinue(lo, hi) -> XContinue(at(r, lo), at(r, hi))
+    XExtern(sym, args, fallback, lo, hi, ty) ->
+      XExtern(sym, list.map(args, a => expr(r, a)), match fallback {
+        Some(body) -> Some(expr(r, body))
+        None -> None
+      }, at(r, lo), at(r, hi), ty)
     XComptime(body, lo, hi, ty) -> XComptime(expr(r, body), at(r, lo), at(r, hi), ty)
     XBinary(op, left, right, wit, olo, ohi, lo, hi, ty) ->
       XBinary(op, expr(r, left), expr(r, right), wit,

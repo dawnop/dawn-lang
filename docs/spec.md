@@ -123,11 +123,13 @@ trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十二个，
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有十四个，
 它们只在各自唯一的语法位置有特殊含义，在别处仍是普通标识符（`let in = 1`、字段名 `test` 都合法）：
 
 | 词 | 唯一的语法位置 |
 |---|---|
+| `extern` | 函数体的 `extern c "sym"` 前缀（§9.1） |
+| `c` | `extern` 后且下一个 token 是字符串，绑定包自带 C 桩（§9.1） |
 | `java` | `use java "a.B"`：`use` 之后且后面跟类名字符串（§9.1） |
 | `test` | 顶层声明首：`test "名字" { … }`（§3.4） |
 | `assert` | 语句首且后面跟一个表达式（§3.4）；`assert = 1`、`assert.x` 里是名字 |
@@ -2783,6 +2785,23 @@ fn build() -> String !io = {
   `.` 逐个换成 `$` 重试，故任意嵌套深度都能用点号书写；绑定名取最后一段
   （`BodyHandlers`）。嵌套类的**泛型方法**仍按擦除返回不透明 `Object`（§9.2）——
   如 `HttpResponse.body()` 返回 `Object`，取字符串体用 `String.valueOf(...)` 桥回。
+
+#### 9.1.1 包自带 C 桩：`extern c`
+
+普通顶层函数可把整个函数体写成 `extern c "sym"`，也可接 `else 表达式` 作为 JVM 回退体：
+
+```dawn
+fn native_add(x: Int) -> Int !io = extern c "native_add" else x + 1
+```
+
+extern 只许私有或 `pub(pkg)`，效果行必须显式且恰为 `!io`。参数一律借用，返回值 owned；没有 `owned` 参数拼写。
+边界类型限 `Int`、`Float`、`Bool`、`String`、`Bytes` 以及递归的 `Option[T]`、`Result[T, ForeignError]`；`Unit` 只许返回或载荷。
+符号短名满足 `[a-z][a-z0-9]*(_[a-z0-9]+)*`，发射时由 `DAWN_EXTERN(sym)` 隔离为 `dawn_x_<sym>`，不会直连 libc。
+回退体按同一签名检查，不许 Java 调用。JVM 编译回退体，没有回退体则编译期拒绝；native 与 wasm 调 C 桩。
+解释器拒绝求值 extern。此语法只许整个顶层函数体，不能出现在方法、嵌套函数、闭包或局部表达式中。
+
+F1 的 `.c` 发射可由测试直接链接桩；包清单的 `[native] sources` 与自动编译暂存属 F2。完整契约见
+[extern 设计](ffi-extern-design.md)。
 
 ### 9.2 类型映射
 

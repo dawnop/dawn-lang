@@ -18,6 +18,7 @@ use ir/interp.{CtOut, ct_default}
 use driver/stdlib.{StdCtx, load_std, std_load_error_text}
 use driver/analyze.{CheckedMod, Program, analyze_program, load_target}
 use check/jsig.{jsig_refused}
+use ir/externs
 use ir/lower
 use ir/lint
 use c/rc
@@ -405,7 +406,7 @@ fn build_units(
   var found: List[lint.Violation] = []
   for sm in std.mods {
     let (cls, cx, tm, ct) = sm
-    let lm = lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests)
+    let lm = externs.select_lowered(lower.lower_module_full(cls, tm, traits, impl_table, adts, prog_fns, std_tests), true)
     if linting { found = found ++ lint.check_module(cls, tm, lm) }
     let core = if std_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [
@@ -413,8 +414,8 @@ fn build_units(
     ]
   }
   for cm in prog.modules {
-    let lm = lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns,
-      with_tests)
+    let lm = externs.select_lowered(lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns,
+      with_tests), true)
     if linting { found = found ++ lint.check_module(cm.class_name, cm.tm, lm) }
     let core = if with_tests { named_tests(lower.emitted_core(lm)) } else { lm.m }
     pre = pre ++ [

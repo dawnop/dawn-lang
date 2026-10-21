@@ -51,11 +51,11 @@ use check/types.{
 use ir/core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
   VClosure, VDict, VCursor,
-  CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key, ty_key_inst,
+  CNoSite, CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key, ty_key_inst,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CUpdate, update_values,
-  CReturn, CBreak, CContinue, CForeign, CDup, CSteal, CReset, CReuse, CDictRef, CDictApply, CDictArg, CJava,
+  CReturn, CBreak, CContinue, CExtern, CForeign, CDup, CSteal, CReset, CReuse, CDictRef, CDictApply, CDictArg, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CCallee, CUpdField, CUnOp, CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CAnd, COr,
@@ -1920,6 +1920,7 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CReturn(v) -> ceval_return(icx, st, env, v)
     CBreak(id) -> Err((st, env, KBreak(id)))
     CContinue(id) -> Err((st, env, KContinue(id)))
+    CExtern(sym, _, _, _, _) -> cerr(st, env, "a C extern cannot be evaluated at compile time: `" ++ sym ++ "` is io")
     CForeign(j, _, _) -> eval_java(st, env, j)
     # A dictionary is a value here, the same three ways Core builds one: a
     # statically registered singleton, a construction from its parts', and a
@@ -3407,4 +3408,13 @@ test "`show` is the nested rendering and `to_string` is not" {
   # literal "<value>" the merged arm used to fold in
   assert show_value(VList([VInt(1)])) == None
   assert show_value(VUnit) == None
+}
+
+test "comptime refuses a C extern even when it has a fallback" {
+  let env: Env = map.empty()
+  let e = CExtern("f", [], Some(CInt(1)), TyInt, CNoSite)
+  match ceval(probe_icx(), fresh_st(1000), env, e) {
+    Err((_, _, KErr(f))) -> { assert f.msg == "a C extern cannot be evaluated at compile time: `f` is io" }
+    _ -> { assert false }
+  }
 }

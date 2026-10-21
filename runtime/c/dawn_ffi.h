@@ -66,9 +66,9 @@
  * `extern c "sq_open"` as `dawn_x_sq_open`, and the stub defines it with
  * `DAWN_EXTERN(sq_open)`. libc has no `dawn_x_*`, so an extern cannot bind
  * `system` or `dlopen`: only a symbol the package's own stub wrote can be
- * reached. The prefix and the expansion are one definition here so the
- * emitter and the stubs cannot disagree about it. */
-#define DAWN_EXTERN(sym) dawn_x_##sym
+ * reached. The included dawn_rt.h defines this macro once so generated
+ * code can share it without including this header's poison fence. */
+/* The macro lives in dawn_rt.h so emitted code shares this definition. */
 
 /* ---- reading arguments ---------------------------------------------------
  *

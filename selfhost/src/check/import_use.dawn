@@ -28,7 +28,7 @@ use front/ast.{
   Module, Decl, DFn, DEffect, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest,
   FnDecl, Param, LambdaParam, TypeParamDecl, TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, EffArg,
   Expr, EVar, EApply, EMethod, ELambda, ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate,
-  EUnwrap, EIndex, EReturn, EStr, EComptime, EBinary, EUnary, EIf, EMatch, EBlock,
+  EUnwrap, EIndex, EReturn, EStr, EExtern, EComptime, EBinary, EUnary, EIf, EMatch, EBlock,
   EHandle, SPInterp, LeExpr, LeSpread, LeIf, Arg, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, Pattern, PLit, PBind, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList, PatArg,
   ImportName, import_local
@@ -203,6 +203,10 @@ fn walk_expr(w: Walk, bound: Set[String], e: Expr) -> Walk =
         }
       }
       o
+    }
+    EExtern(_, fallback, _, _) -> match fallback {
+      Some(body) -> walk_expr(w, bound, body)
+      None -> w
     }
     EComptime(body, _, _) -> walk_expr(w, bound, body)
     EBinary(_, l, r, _, _, _, _) -> walk_expr(walk_expr(w, bound, l), bound, r)

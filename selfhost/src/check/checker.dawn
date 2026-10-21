@@ -27,16 +27,16 @@ use front/ast.{
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, ERecord, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   ListElem, LeExpr, LeSpread, LeIf, le_lo, le_hi,
-  EComptime, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
+  EExtern, EComptime, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, LambdaParam, ConstView,
   EHandle, HandlerArm, HandlerCell, module_effects,
-  VisPkg, vis_exported
+  VisPub, VisPkg, vis_exported
 }
 use check/tast.{
   NO_NAME, TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
-  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
+  XExtern, XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
@@ -67,7 +67,7 @@ use check/types.{
   is_numeric, is_errorish, ty_char, peel_opaque,
   prelude_traits, bounds_of,
   prelude_trait_ids,
-  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
+  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, foreign_error_ty,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
   NEG_ID, is_arith_trait, arith_trait_name, opaque_inherits, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
   STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID,
@@ -3819,6 +3819,10 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
       }
       o
     }
+    EExtern(_, fallback, _, _) -> match fallback {
+      Some(body) -> name_refs(body, out, sc)
+      None -> out
+    }
     EComptime(body, _, _) -> name_refs(body, out, sc)
     # every part of `with handle E { .. }` is ordinary code the function runs:
     # the state cells' initializers (evaluated at the installation, in the
@@ -5454,6 +5458,10 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EBlock(stmts, tail, lo, hi) -> check_block(cx, stmts, tail, expected, lo, hi)
     EHandle(name, cells, arms, rest, nlo, nhi, lo, hi) ->
       check_handle(cx, name, cells, arms, rest, nlo, nhi, lo, hi, expected)
+    EExtern(_, _, lo, hi) -> {
+      let cx1 = cerr(cx, "`extern` can only be the whole body of a top-level function", lo, hi)
+      (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+    }
     EComptime(body, lo, hi) -> check_comptime(cx, body, expected, lo, hi)
     # the three constructor constructs are three nodes: a bare head here, a
     # record literal, and an EApply over a bare head, which reaches
@@ -7466,6 +7474,10 @@ fn cell_occurrences(e: Expr, name: String) -> Int =
         Some(x) -> cell_occurrences(x, name)
         None -> 0
       }
+    EExtern(_, fallback, _, _) -> match fallback {
+      Some(body) -> cell_occurrences(body, name)
+      None -> 0
+    }
     EComptime(body, _, _) -> cell_occurrences(body, name)
     EBinary(_, l, r, _, _, _, _) -> cell_occurrences(l, name) + cell_occurrences(r, name)
     EUnary(_, operand, _, _) -> cell_occurrences(operand, name)
@@ -14450,6 +14462,150 @@ fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TDefault]
   (cx1, out)
 }
 
+## An extern's spelling is a short stub name, never a linker name. The
+## emitter and public header put it behind DAWN_EXTERN; rejecting doubled
+## underscores keeps compiler-generated symbols in a disjoint namespace.
+fn extern_symbol_ok(sym: String) -> Bool = {
+  let cs = code_points(sym)
+  if len(cs) == 0 { return false }
+  if cs[0] < 'a' || cs[0] > 'z' { return false }
+  var underscore = false
+  for c in cs {
+    if c == '_' {
+      if underscore { return false }
+      underscore = true
+    } else {
+      if not ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) { return false }
+      underscore = false
+    }
+  }
+  not underscore
+}
+
+fn extern_type_ok(t: Ty, parameter: Bool) -> Bool =
+  match t {
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
+    TyUnit -> not parameter
+    TyAdt(aid, [inner]) -> aid == OPTION_ID && extern_type_ok(inner, false)
+    TyAdt(aid, [inner, err]) -> aid == RESULT_ID && err == foreign_error_ty() && extern_type_ok(inner, false)
+    _ -> false
+  }
+
+## Only the ordinary top-level prologue calls this entry; every nested
+## expression goes through check_expr and receives the placement diagnostic.
+fn check_function_expr(cx: Cx, d: FnDecl, s: Sig, psyms: List[Int], expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
+  match d.body {
+    EExtern(sym, fallback, lo, hi) -> {
+      var cx1 = cx
+      let top_level = match cx.owner {
+        Some(owner) -> owner.decl == identity.path_text([identity.Named(identity.FunctionDecl, d.name)])
+        # White-box checking can omit declaration identities. Its registered
+        # impl spans still distinguish a method from an ordinary function.
+        None -> s.trait_id == None && impl_method_trait(cx, d.name, d.nlo, d.nhi) == None
+      }
+      if not top_level { return check_expr(cx, d.body, expected) }
+      if d.vis == VisPub {
+        cx1 = cerr(cx1, "an extern function cannot be `pub`: wrap it in a Dawn function", d.nlo, d.nhi)
+      }
+      if d.effs != ["io"] || s.eff != EIo {
+        cx1 = cerr(cx1, "an extern function must declare exactly `!io`", d.nlo, d.nhi)
+      }
+      if not extern_symbol_ok(sym) {
+        cx1 = cerr(cx1, "invalid C extern symbol: use a lowercase stub name with single underscores", lo, hi)
+      }
+      var args: List[TExpr] = []
+      var i = 0
+      for p in d.params {
+        let pt = s.param_tys[i]
+        if not extern_type_ok(pt, true) {
+          cx1 = cerr(cx1, "type " ++ ty_show(cx1.adts, pt) ++ " cannot cross a C extern", p.lo, p.hi)
+        }
+        args = args ++ [XLocal(psyms[i], p.name, owner_off(cx, p.lo), owner_off(cx, p.hi), pt)]
+        i = i + 1
+      }
+      var ret = s.ret
+      var fb: Option[TExpr] = None
+      match fallback {
+        Some(body) -> {
+          let (next, bt, bx) = check_expr(cx1, body, expected)
+          cx1 = next
+          if expected == None { ret = bt }
+          if not assignable(cx1, bt, ret) {
+            cx1 = cerr(cx1, "extern fallback has type " ++ ty_show(cx1.adts, bt) ++
+                " but the function returns " ++ ty_show(cx1.adts, ret), e_lo(body), e_hi(body))
+          }
+          if extern_has_java(bx) {
+            cx1 = cerr(cx1, "an extern fallback must be portable Dawn and cannot use Java", e_lo(body), e_hi(body))
+          }
+          fb = Some(bx)
+        }
+        None -> ()
+      }
+      if not extern_type_ok(ret, false) {
+        cx1 = cerr(cx1, "type " ++ ty_show(cx1.adts, ret) ++ " cannot cross a C extern", d.nlo, d.nhi)
+      }
+      cx1 = record_effect(cx1, EIo, lo, hi, "extern c " ++ sym)
+      (cx1, ret, XExtern(sym, args, fb, owner_off(cx, lo), owner_off(cx, hi), ret))
+    }
+    _ -> check_expr(cx, d.body, expected)
+  }
+
+fn extern_any_java(xs: List[TExpr]) -> Bool = {
+  for x in xs { if extern_has_java(x) { return true } }
+  false
+}
+
+fn extern_opt_java(x: Option[TExpr]) -> Bool = match x {
+  Some(e) -> extern_has_java(e)
+  None -> false
+}
+
+fn extern_stmt_java(s: TStmt) -> Bool = match s {
+  TSLet(_, _, e, ..) | TSLetPat(_, e, ..) | TSAssign(_, _, e, ..) | TSExpr(e, ..) -> extern_has_java(e)
+  TSLocalFn(_, _, _, _, body, _, _, _) -> extern_has_java(body)
+  TSAssert(e, _, ..) -> extern_has_java(e)
+  TSWhile(c, body, ..) -> extern_has_java(c) || extern_has_java(body)
+  TSFor(_, _, iter, to, _, body, ..) -> extern_any_java([iter, body]) || extern_opt_java(to)
+}
+
+fn extern_has_java(e: TExpr) -> Bool = match e {
+  XJava(..) -> true
+  XCallDyn(_, _, args, evs, ..) | XCallBuiltin(_, args, _, evs, ..) -> extern_any_java(args ++ evs)
+  XCallFn(_, _, args, _, evs, ..) -> extern_any_java(args ++ evs)
+  XApply(target, args, evs, ..) -> extern_any_java([target] ++ args ++ evs)
+  XLambda(_, _, body, ..) | XComptime(body, ..) -> extern_has_java(body)
+  XCtor(_, _, args, _, spread, ..) -> extern_any_java(args) || extern_opt_java(spread)
+  XField(x, ..) | XPropagate(x, ..) | XUnwrap(x, ..) | XUnary(_, x, ..) -> extern_has_java(x)
+  XTupleLit(xs, ..) -> extern_any_java(xs)
+  XIndex(x, y, ..) | XBinary(_, x, y, ..) -> extern_any_java([x, y])
+  XReturn(x, ..) -> extern_opt_java(x)
+  XIf(c, t, el, ..) -> extern_any_java([c, t]) || extern_opt_java(el)
+  XMatch(x, arms, ..) -> {
+    if extern_has_java(x) { return true }
+    for a in arms { if extern_has_java(a.body) || extern_opt_java(a.guard) { return true } }
+    false
+  }
+  XBlock(ss, tail, ..) -> {
+    for st in ss { if extern_stmt_java(st) { return true } }
+    extern_opt_java(tail)
+  }
+  XStr(parts, ..) -> {
+    for p in parts { match p {
+      TSPInterp(x, _) -> if extern_has_java(x) { return true }
+      _ -> ()
+    } }
+    false
+  }
+  XListLit(els, ..) -> {
+    for el in els { match el {
+      TLEExpr(x) | TLESpread(x) -> if extern_has_java(x) { return true }
+      TLEIf(arms) -> { for a in arms { if extern_any_java([a.cond, a.body]) { return true } } }
+    } }
+    false
+  }
+  _ -> false
+}
+
 ## Check one annotated function body against its signature (the Kotlin checkFn).
 pub(pkg) fn check_fn(cx: Cx, d: FnDecl, s: Sig) -> (Cx, TFun) !io = {
   let (cx0, dtxs) = check_param_defaults(cx, d, s)
@@ -14483,7 +14639,7 @@ pub(pkg) fn check_fn_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[TDefault]
   let entry = function_entry(cx, d, s)
   var cx1 = entry.cx
   let psyms = entry.parameters
-  let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
+  let (cx2, bt, bx) = check_function_expr(cx1, d, s, psyms, Some(s.ret))
   cx1 = cx2
   if not assignable(cx1, bt, s.ret) {
     let return_text = ty_show(cx1.adts, s.ret)
@@ -14533,7 +14689,7 @@ pub(pkg) fn check_fn_inferred_body(cx: Cx, d: FnDecl, s: Sig, dtxs: List[Option[
     psyms = psyms ++ [sid]
     i = i + 1
   }
-  let (cx2, bt, bx) = check_expr(cx1, d.body, no_expected())
+  let (cx2, bt, bx) = check_function_expr(cx1, d, s, psyms, no_expected())
   cx1 = cx2
   var final_eff = EPure
   if len(d.effs) == 0 {
@@ -18173,4 +18329,33 @@ test "an effect variable still forwards, in either argument order" {
   # the variable settles at !io through f, and run_pure cannot take that
   assert variance_diags(ap ++ "fn t() -> Int !io = ap(run_pure, loud)\n") == 1
   assert variance_diags(ap ++ "fn t() -> Int !io = ap2(loud, run_pure)\n") == 1
+}
+
+test "C extern visibility is a compiler boundary" {
+  assert msgs_of("pub fn f(x: Int) -> Int !io = extern c \"f\" else x\n") ==
+    ["an extern function cannot be `pub`: wrap it in a Dawn function"]
+  assert msgs_of("pub(pkg) fn f(x: Int) -> Int !io = extern c \"f\" else x\n") == []
+}
+
+test "C extern effects are explicit io and boundary types are closed" {
+  assert list.contains(msgs_of("fn f() -> Int = extern c \"f\" else 1\n"),
+    "an extern function must declare exactly `!io`")
+  assert msgs_of("fn f(x: List[Int]) -> Int !io = extern c \"f\" else 1\n") ==
+    ["type List[Int] cannot cross a C extern"]
+  assert msgs_of("fn f(x: Unit) -> Int !io = extern c \"f\" else 1\n") ==
+    ["type Unit cannot cross a C extern"]
+}
+
+test "C extern symbols cannot enter the compiler namespace" {
+  assert msgs_of("fn f() -> Int !io = extern c \"a__b\" else 1\n") ==
+    ["invalid C extern symbol: use a lowercase stub name with single underscores"]
+  for s in ["", "_x", "X", "x_", "x-y", "x\nq"] { assert not extern_symbol_ok(s) }
+  for s in ["f", "sq_prepare", "x1_2"] { assert extern_symbol_ok(s) }
+}
+
+test "C extern placement excludes nested functions and impl methods" {
+  let msg = "`extern` can only be the whole body of a top-level function"
+  assert list.contains(msgs_of("fn f() -> Int !io = { extern c \"f\" else 1 }\n"), msg)
+  assert list.contains(msgs_of("fn f() -> Int !io = { fn g() -> Int !io = extern c \"g\" else 1\ng() }\n"), msg)
+  assert list.contains(msgs_of("trait T[A] { fn f(a: A) -> Int !io }\nimpl T[Int] { fn f(a: Int) -> Int !io = extern c \"f\" else a }\n"), msg)
 }

@@ -40,7 +40,7 @@ use front/ast.{
   Arg, pos_arg, trail_arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, ERecord, EFieldAcc, EListLit, ETupleLit, EPropagate,
   ListElem, LeExpr, LeSpread, LeIf, ListIfArm,
-  EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime,
+  EUnwrap, EIndex, EReturn, EBreak, EContinue, EExtern, EComptime,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm, HandlerCell,
   PatArg, Pattern, PLit, PBind, PWild, POr, PCtor, PRecord, PQual, PQualRecord, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
@@ -1561,6 +1561,28 @@ fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
   }))
 }
 
+# The full three-token prefix keeps both contextual words usable as names.
+# Parse it in expression position too so the checker owns the placement
+# diagnostic, including incomplete programs opened in the editor.
+fn extern_body(p: P, st: St) -> PR[Expr] = {
+  let start = cur(p, st)
+  let symbol = p.toks[st.pos + 2]
+  let (st1, sx) = str_lit(p, adv1(p, adv1(p, adv1(p, st))), symbol)?
+  var sym = ""
+  match sx {
+    EStr([SPText(v)], _, _) -> { sym = v }
+    EStr([], _, _) -> ()
+    _ -> return Err((st1, pd("an extern symbol must be a plain string literal", symbol.lo, symbol.hi)))
+  }
+  let look = skip_nl(p, st1)
+  if at_kind(p, look, ELSE) {
+    let (st2, body) = expression(p, skip_nl(p, adv1(p, look)), false)?
+    Ok((st2, EExtern(sym, Some(body), start.lo, e_hi(body))))
+  } else {
+    Ok((st1, EExtern(sym, None, start.lo, symbol.hi)))
+  }
+}
+
 # ---- fn declarations ----
 
 fn fn_decl(p: P, st: St, vis: Vis, in_impl: Bool) -> PR[FnDecl] = {
@@ -2966,7 +2988,9 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   } else if k == IDENT {
     # `x => e`: one token of lookahead past a name. Nothing else in the grammar
     # puts `=>` after a bare identifier, so no backtracking is needed.
-    if starts_with_stmt(p, st) {
+    if is_word(p, st, 0, "extern") && is_word(p, st, 1, "c") && kind_ahead(p, st, 2) == STRING {
+      extern_body(p, st)
+    } else if starts_with_stmt(p, st) {
       # `with` is a statement, not an expression: it needs a rest-of-block to
       # turn into a closure, and only a block has one (spec §4.10).
       Err((st, perr_h(p, st, "`with` is a statement and needs an enclosing block",

@@ -46,7 +46,7 @@ use check/tast.{
   XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XEvRead, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
-  XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  XExtern, XComptime, XBinary, XUnary, XIf, XMatch, XBlock, XError,
   TListElem, TLEExpr, TLESpread, TLEIf, TListIfArm,
   TSPText, TSPInterp,
   BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
@@ -61,7 +61,7 @@ use ir/core.{
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
-  CForeign, CJava, CTagOf, CDup, CSteal, CReset, CReuse, CComptime, CConstRef, CUpdate, CUpdField, update_values,
+  CExtern, extern_operands, CForeign, CJava, CTagOf, CDup, CSteal, CReset, CReuse, CComptime, CConstRef, CUpdate, CUpdField, update_values,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
@@ -3617,6 +3617,8 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       let raw = ev_slot(st, key)
       (st, adapt_out(raw, cex_ty(raw), ty))
     }
+    XExtern(sym, args, fallback, lo, hi, ty) ->
+      lower_extern(st, sym, args, fallback, ty, site_at(st, lo, hi, lo))
     XComptime(body, lo, hi, ty) -> if st.ct_inline { lower_expr(st, body) } else { (st, CComptime(lo, hi, ty)) }
     XError(_, _) -> panic("lower: XError reached lowering")
     XStr(parts, _, _) -> lower_str(st, parts)
@@ -3935,6 +3937,20 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XJava(call, lo, hi, nlo, ty) -> lower_java(st, call, ty, site_at(st, lo, hi, nlo))
   }
+}
+
+# Keep the expression dispatcher under HotSpot's HugeMethodLimit. Selecting
+# an implementation belongs to the backend; lowering still preserves both.
+fn lower_extern(st: LSt, sym: String, args: List[TExpr], fallback: Option[TExpr], ty: Ty, site: CSite) -> (LSt, CExpr) = {
+  let (st1, as1) = lower_all(st, args)
+  let (st2, fb) = match fallback {
+    Some(body) -> {
+      let (next, value) = lower_expr(st1, body)
+      (next, Some(value))
+    }
+    None -> (st1, None)
+  }
+  (st2, CExtern(sym, as1, fb, ty, site))
 }
 
 ## `use java`: the receiver and the arguments lower like any other
@@ -5523,6 +5539,7 @@ fn dense_expr(d: Dense, e: CExpr) -> Dense =
     CReturn(v) -> dense_opt(d, v)
     CBreak(_) -> d
     CContinue(_) -> d
+    CExtern(_, args, fallback, _, _) -> dense_all(d, extern_operands(args, fallback))
     CForeign(j, _, _) -> dense_java(d, j)
     CInt(_) -> d
     CFloat(_) -> d
@@ -5628,6 +5645,7 @@ fn moved_expr(d: Dense, e: CExpr) -> CExpr =
     CReturn(v) -> CReturn(moved_opt(d, v))
     CBreak(l) -> CBreak(l)
     CContinue(l) -> CContinue(l)
+    CExtern(sym, args, fallback, ty, site) -> CExtern(sym, moved_all(d, args), moved_opt(d, fallback), ty, site)
     CForeign(j, ty, site) -> CForeign(moved_java(d, j), ty, site)
     CInt(v) -> CInt(v)
     CFloat(v) -> CFloat(v)

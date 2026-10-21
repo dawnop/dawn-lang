@@ -744,11 +744,13 @@ fn reflow(cps: List[Char], toks: List[Token], marks: Marks, barrow: Set[Int]) ->
       if top < d || else_if { hdrs = hdrs ++ [IfAt { depth: d, at: line_indent }] }
     }
     if t.kind == ELSE { else_leads = line_first.lo == t.lo }
-    if t.kind == IF || t.kind == ELSE {
+    let extern_start = t.kind == IDENT && t.text == "extern" && i + 2 < len(toks) &&
+      toks[i + 1].kind == IDENT && toks[i + 1].text == "c" && toks[i + 2].kind == STRING
+    if t.kind == IF || t.kind == ELSE || extern_start {
       let d = len(openers)
       while len(ifs) > 0 && ifs[len(ifs) - 1].depth > d { ifs = list.take(ifs, len(ifs) - 1) }
       let seen = len(ifs) > 0 && ifs[len(ifs) - 1].depth == d
-      if t.kind == IF {
+      if t.kind == IF || extern_start {
         # an `else if` that starts its line stays in its chain: the next `else`
         # lines up with the first `if`, not with the line this one was wrapped
         # to. After a `}` on the same line it is a new `if` on that line.
@@ -1912,4 +1914,13 @@ test "folding is idempotent and indentation does not change the result" {
   assert fmt_of(str.replace(src, "    Some", "Some")) == once
   let deep = in_body("  let r = xs.map(f).filter(" ++ str.repeat("g", 100) ++ ").len()")
   assert fmt_of(fmt_of(deep)) == fmt_of(deep)
+}
+
+test "extern fallback aligns with its extern and preserves authored breaks" {
+  let src = "fn f(x:Int)->Int !io =\nextern c \"f\"\nelse {\nx\n}\n"
+  let want = "fn f(x: Int) -> Int !io =\n  extern c \"f\"\n  else {\n    x\n  }\n"
+  assert format(src) == Ok(want)
+  assert format(want) == Ok(want)
+  let one = "fn f(x: Int) -> Int !io = extern c \"f\" else x\n"
+  assert format(one) == Ok(one)
 }

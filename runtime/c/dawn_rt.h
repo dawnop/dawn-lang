@@ -8,6 +8,10 @@
 #ifndef DAWN_RT_H
 #define DAWN_RT_H
 
+/* Shared by generated calls and public stubs; generated code must not
+ * include dawn_ffi.h's poison fence over the runtime RC operations. */
+#define DAWN_EXTERN(sym) dawn_x_##sym
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
