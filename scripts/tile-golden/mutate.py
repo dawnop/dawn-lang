@@ -64,8 +64,8 @@ MUTATIONS = {
     ),),
     "loop-token-not-carried": ((
         PROG,
-        ('        tok = last(results)\n'),
-        ('        ()\n'),
+        ('            tok = if drop { last(inits) } else { last(results) }\n'),
+        ('            ()\n'),
     ),),
     "region-stack-pop": ((
         PROG,

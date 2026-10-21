@@ -7,6 +7,16 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.18.1 (2026-10-20)
+
+No API change; the recorded program changes (section 6.38, tileir P2). A load
+through a parameter the kernel declared `In` reads the entry token and leaves
+the token chain where it was, and a loop that moved no token no longer carries
+one. `Shared` reads and writes, `Out` writes, and everything recorded by
+`trace_kernel` (which knows no roles) keep the chain they had. 192 goldens
+change; the flash_attn kernels lose the token their loop carried, which is
+what let tileiras prefetch across iterations.
+
 ## 0.18.0 (2026-10-20)
 
 Breaking, in one place (`docs/tile-backend-design.md` section 6.28, "the

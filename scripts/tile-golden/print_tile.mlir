@@ -14,7 +14,7 @@ cuda_tile.module @m {
       %16 = maxi %14, %15 signed : tile<i32>
       yield %16 : tile<i32>
     }
-    %17 = print_tko "print_tile sum=%d max=%d\n", %9, %13 token=%8 : tile<i32>, tile<i32> -> token
+    %17 = print_tko "print_tile sum=%d max=%d\n", %9, %13 token=%0 : tile<i32>, tile<i32> -> token
     %18 = assume div_by<16>, %arg1 : tile<ptr<i32>>
     %19 = make_tensor_view %18, shape = [384], strides = [1] : tensor_view<384xi32, strides=[1]>
     %20 = make_partition_view %19 : partition_view<tile=(128), padding_value = zero, tensor_view<384xi32, strides=[1]>, dim_map=[0]>

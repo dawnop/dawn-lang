@@ -574,8 +574,10 @@ parser 的 round-trip，这一点没变。
   自刀 3 起隔着一张共用的线性指令表（§5.3）。
   记录里的句柄是 trace 编号（从 1 起，0 是入口 token），渲染时按出现顺序重编，
   因为指针梯子的中间名在记录里没有。
-- **token 链线性**：handler 里一个 `tok` 状态格，每个内存操作消费上一个、产生下一个，
-  `MakeToken(0)` 是链头。
+- **token 链按参数角色串**（刀 5 起「一律线性」，P2 更正，见 6.38）：handler 里一个 `tok` 状态格，
+  `MakeToken(0)` 是链头。`In` 参数上的 load 挂在入口 token（0）上，不消费也不推进 `tok`；
+  其余内存操作（`Shared` 的读写、`Out` 的写、没有参数可指的 alloca 与 global，以及不带角色的
+  `trace_kernel` 的一切访问）仍是每个消费上一个、产生下一个。
 - **记录 handler 在效果之上做两项校验并 `panic`**：`param(d, pos)` 必须与 `trace_kernel`
   的 `params` 表一致（位置在范围内、格式相同），tile 宽度必须是 2 的幂。前者是刀 2
   负控「`load` 的 dtype 写死 f64」变红的位置：f32 kernel 的入口说 f32、load 说 f64，
@@ -5940,6 +5942,82 @@ T14a、T14b 之后，`tileirdisasm` 在 run.sh 里只读了三个东西（Produc
 - 在渲染器里把浮点改成 17 位有效数字：`0.3275911` 与 `0.32759110000000002` 是同一个 f64，差异在两个打印机的 shortest-round-trip 习惯，不是精度丢失；按位模式比较就够了。
 - `-g` 版全文对拍：`-g` 的判词仍是 T14b 的位置表；`-g` 版多出的 `loc(#locN)` 与尾部属性表不是 `.mlir` 里的东西。
 - 用 `cuda-tile-opt` / `cuda-tile-translate` 当规范打印机（cuda-tile 的 round-trip 测试就是这么做的）：本机和 CI 都没有这两个二进制，也不在钉住的工具链里。
+
+### 6.38 `In` 参数上的 load 不推进 token 链（tileir 0.18.1，P2）
+
+**起因。** 第 5.1 节原先写的是「token 链线性：每个内存操作消费上一个、产生下一个」，`t_load` 与 `t_load_view` 两臂都是
+`tok = 本次 load 的 token`。flash 循环体里因此是 `load K(token=%a) -> %b`、`load V(token=%b) -> %c`、`continue …, %c`：下一轮 K 的 load
+要等本轮 V 的 load，tileiras 没法跨迭代预取，循环也要把 token 当作最后一个携带值。2026-10-20 的测时（P1 之后，`-O3`）只删这两行
+`tok = …`，Dawn 的 flash_attn 就与 cuTile 移植版等速。线性链对只读数据是白串：load 不改任何字节，两个 load 谁先谁后不影响结果。
+
+**规则。**
+
+| 参数角色 | load | store 与原子 | token |
+|---|---|---|---|
+| `In` | 挂在入口 token（`MakeToken(0)`）上，不推进 `tok` | 记录期拒绝（C2） | 链外 |
+| `Out` | 无（只写） | 按程序序串链；块与块的格子不相交（GPU 裁决第 8 条，D-7） | 链内 |
+| `Shared` | 按程序序串链 | 按程序序串链 | 链内 |
+| 无角色（`trace_kernel`）、alloca、global、`int_to_ptr` 得到的地址 | 按程序序串链 | 按程序序串链 | 链内 |
+
+- `In` 由记录 handler 里的 `roles` 判（`unordered_read`）；`t_load` 用参数号，`t_load_view` 用视图句柄在 `aims` 里指向的参数（视图的视图、
+  cell 视图都沿 `follow` 保留这个指向）。指向不明（`None`，或 `NO_PARAM`）一律退回串链，宁串勿漏。
+- 循环不再无条件携带 token：`t_loop_end`、`t_while_end` 看循环体结束时 `tok` 是否仍是循环入口给的那个携带句柄，且体内没有任何操作
+  以它为 token 输入（`tok_used`，递归进嵌套区域）；是则这个槽整个去掉，循环后的 `tok` 取循环前的 `tok`。体内只要有一次推进
+  （`Shared` 的读写、`Out` 的写、`print`、栅栏），槽照旧携带。
+- 入口 token 在循环体与 `if` 区域内部被引用是合法的：它在函数顶层定义，支配所有区域。
+
+**出处与取舍。**
+
+- cuTile Python 1.7（`NVIDIA/cutile-python@ac24cea2`，`src/cuda/tile/_passes/token_order.py`）按数组别名集合做数据流分析，只读的数组不排序；
+  dump 出的移植版 IR 里三个 load 都挂在 `%0 = make_token` 上，循环不携带 token。
+- cutile-rs（`NVlabs/cutile-rs`）只有 `&mut` 视图上的访问串成 token 链，共享借用的读不串。
+- Dawn 的参数角色已经在类型上区分（`In`、`Out`、`Shared`，C2），所以不需要 cuTile 那样的别名分析：`In` 在契约上只读（写它在记录期被拒），
+  `Out` 只写且块间不相交，只有 `Shared` 与没有参数可指的地址才需要程序序。这条规则等价于 cuTile 的分析在 Dawn 的类型系统里的闭式。
+
+**golden 的变化，逐类。** 192 个 `.mlir` 与 `.tilebc`（208 个里没有 `In` 的、或 load 来自 `Shared` 的不变）按 tile-golden 规矩重录，另有
+`vadd_debug.disasm`、`foldif_debug.disasm` 两个反汇编，以及 `disasm-norm.py` 里一条规则的反例（`view-token-equals-space` 的 vadd 反例原本改
+`token=%18`，现在 vadd 里没有这个句柄，改成 `token=%0` 换成 `%12`）。变化只有两类：
+
+1. 每条 `In` 的 load 的 token 操作数变成 `%0`（532 条 load 里 499 条），紧随其后的 store 或 load 也随之改读它原来所依的那个 token
+   （vadd 的 store 读 `%0` 而不是 load 的结果 token）。
+2. 循环头的 `iter_values` 与结果类型去掉 token：42 个携带 token 的循环头里 39 个去掉（37 个 golden），剩下 3 个是
+   grid_stride、scalar_loop、loop_return，它们循环里有 store 或 `Shared` 读。flash_attn 与 flash_attn_bf16 的循环不再携带 token。
+
+其余字节没有变：句柄按出现顺序重编，所以去掉的 token 之后的编号整体前移，这是第二类里行数不变而编号变了的原因。
+
+**tileref 与 tileinterp。** `tileinterp-diff` 对拍 175 个 kernel 覆盖、17 个拒绝，结论 pass，与改前相同，`covered.txt` 没有变：两者都不读 token
+的顺序（设备按程序序执行，解释器逐块串行），所以这一刀改的是给编译器的依赖信息，不是语义。
+
+**测试与负控。** `prog` 里四条新测试：`In` 的 load 读入口 token 且不推进、`Shared` 读写仍按程序序、只读 `In` 的 `for` 不携带 token 且循环内的
+load 读入口 token、读 `Shared` 的 `for` 仍携带 token。三条旧断言改了说法：循环里没有推进时携带 1 个值而不是 2 个；`trace3` 与
+`trace_kernel` 的记录除 `In` 的 token 操作数外相同。**负控**：让 `unordered_read` 把 `Sharing` 也算上（`Shared` 的 load 不推进 token），
+`prog` 里 7 条测试变红（四条新的、`trace3` 那条、`Shared` 全收的那条 D-7 与 K4.2）。`loop-token-not-carried` 变异体的锚点随循环尾部改写，
+sum 的循环已经不携带 token，所以它的预期文案从「循环体定义的句柄在循环后不可见」改为「没有更早的操作定义过这个句柄」；
+携带的那一支由单元测试守，没有再补一个 `Shared` 读写的 golden kernel（每个新 golden 要进六个登记表与三本台账，代价大于单元测试）。
+
+**测时（锁频，同进程同流，改前改后各一个 cubin 交错 5 轮，CUDA events，S = 16384、D = 64、64 × 64 块，ms，中位 / p90）。**
+改前是 origin/main（P1 之后，`-O3`）汇编的 cubin（与 P1 报告的 `-O3` cubin 逐字节相同），改后是本刀。
+
+| kernel | 卡 | 改前 | 改后 | 倍数 | 最大绝对误差（改前与改后相同） |
+|---|---|---|---|---|---|
+| flash_attn_bf16 | sm_90（H200，锁 1980 MHz） | 0.381 / 0.383 | 0.304 / 0.305 | 1.25 | 1.07e-4 |
+| flash_attn_bf16 | sm_100（B200，锁 1845 MHz） | 0.378 / 0.380 | 0.238 / 0.239 | 1.59 | 1.15e-4 |
+| flash_attn（f64） | sm_90 | 124.3 / 124.5 | 93.8 / 93.9 | 1.33 | 3.1e-16 |
+| flash_attn（f64） | sm_100 | 84.7 / 85.5 | 79.5 / 79.9 | 1.07 | 1.7e-16 |
+
+倍数与调研的预计一致（bf16 1.25 与 1.59，f64 1.31 与 1.06）。sm_100 的 f64 只快 7%：tileiras 13.4.92 在这两张卡上没有把 f64 `mmaf` 下到 DMMA，用的是标量 DFMA，
+循环体的时间大概率主要花在这上面而不是装载等待；这一点没有逐项拆开量，只作为推测记在这里。
+
+**不做的（理由）：**
+
+- 照 cuTile 做完整的别名集合数据流分析：Dawn 的角色在类型上已经分开，规则是闭式，不需要分析，也没有别名可分析（`In` 与 `Out` 不重叠
+  是契约，不是推断）。
+- 把 `Out` 的 store 也挂到入口 token 上：`Out` 里同一个块可能写同一个格子两次，两次写要有序；块间不相交只保证不同块互不干扰，不保证块内。
+- gather、`load_ptrs`、原子在 `In` 上也去链：本刀只动 `t_load` 与 `t_load_view`（任务单：其它内存操作不变）。经 `Whole` 参数的指针路 load
+  在 `kernels.dawn` 里仍然走 `t_load`，所以 grid_stride 的 load 也已经脱链；gather 与 `LoadAt` 单独是后面的事。
+- 去掉循环里 token 槽时做一次全程序的 token 活性分析：`tok_used` 看循环体这一层足够，嵌套循环里内层若推进了 token，外层的 `tok` 就已经不是
+  入口句柄。
+- 为 `trace_kernel`（无角色）也去链：它不知道哪个参数是只读，去链会静默放过真正的读写序，所以保持串链。
 
 ## 7. 刀序
 

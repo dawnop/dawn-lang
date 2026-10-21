@@ -66,12 +66,14 @@
 #                            -> the text is untouched, the bytes are the same
 #                            length and differ, and tileiras refuses them:
 #                            addf wants a float tile
-#     loop-token-not-carried the handler no longer continues from the loop's
-#                            token result after the loop, so the store after
-#                            sum's loop names the token of a load inside it
-#                            -> sum is refused when lowered (a loop body's
-#                            value is not visible after the loop), nothing
-#                            rendered; vadd, which has no loop, is untouched
+#     loop-token-not-carried the handler no longer resets the token after a
+#                            loop (the one a loop that moves no token
+#                            drops, or the loop's own result for one that
+#                            does), so the store after sum's loop names
+#                            the carried token the loop no longer has
+#                            -> sum is refused when lowered (no earlier
+#                            operation defined it), nothing rendered; vadd,
+#                            which has no loop, is untouched
 #     region-stack-pop       the handler pops the region stack the wrong way
 #                            round: what the loop body issued stays outside
 #                            and what came before it goes inside -> sum is
@@ -1483,16 +1485,17 @@ if run_item f64-tag-as-i64; then
     "'cuda_tile.addf' op operand #0 must be tile of f16 or bf16 or f32 or f64 values, but got '!cuda_tile.tile<128xi64>'"
 fi
 
-# 6. The handler stops carrying the token out of a loop: after `t_loop_end`
-#    the token cell keeps the body's last token instead of taking the loop's
-#    token result. sum's store after the loop then names a load token from
-#    inside it, and the lowering, which closes a body's names when the loop
-#    ends, refuses it by name. Nothing is rendered; the text golden never
-#    sees a file.
+# 6. The handler stops resetting the token after a loop: after `t_loop_end`
+#    the token cell keeps the body's carried token instead of taking the
+#    loop's result (or, for a loop that moved no token and so does not carry
+#    one, the token that entered it). sum reads an In, so its loop carries
+#    nothing since P2 and the store after it names the carried handle the
+#    loop no longer has; the lowering refuses it by name. Nothing is
+#    rendered; the text golden never sees a file.
 if run_item loop-token-not-carried; then
   mutant_project loop-token-not-carried prog.dawn
   refused_mutant_checks loop-token-not-carried sum \
-    'tileir: `store token` refers to handle 15, which a loop body defined and which is not visible after the loop'
+    'tileir: `store token` refers to handle 13, which no earlier operation defined'
 fi
 
 # 7. The handler pops the region stack the wrong way round: the operations
@@ -1507,17 +1510,18 @@ if run_item region-stack-pop; then
 fi
 
 # 8. The writer forgets the reader's rule that a block's value indices roll
-#    back before the loop's own results are numbered. sum's results take the
-#    indices after its body instead of the body's first two, and everything
-#    after the loop shifts with them; the file is the same length (every
-#    index is one varint byte either way), the text is untouched, and the
-#    reader stops at the first operand past the values it has: 24 where it
-#    knows 22 (tileir 0.8.0's sum, which reads its chunks through a cell
-#    view and stores through one; 13.4.92 measured).
+#    back before the loop's own results are numbered. sum's result takes the
+#    index after its body instead of the body's first, and everything after
+#    the loop shifts with it; the file is the same length (every index is one
+#    varint byte either way), the text is untouched, and the reader stops at
+#    the first operand past the values it has: 22 where it knows 21 (tileir
+#    0.18.1's sum, which reads its chunks through a cell view and stores
+#    through one, and whose loop carries only the accumulator, since the
+#    reads are of an In; 13.4.92 measured).
 if run_item for-results-not-rolled-back; then
   mutant_project for-results-not-rolled-back bytecode.dawn
   writer_mutant_checks for-results-not-rolled-back sum same-size \
-    "operand index 24 out of bounds (size=22) for operand 0"
+    "operand index 22 out of bounds (size=21) for operand 0"
 fi
 
 # 9. The renderer forgets addf's rounding attribute. Every kernel with an
@@ -1796,19 +1800,20 @@ fi
 if run_item loop-carried-not-rolled-back; then
   mutant_project loop-carried-not-rolled-back bytecode.dawn
   writer_mutant_checks loop-carried-not-rolled-back loop_count same-size \
-    "operand index 33 out of bounds (size=15) for operand 0"
+    "operand index 32 out of bounds (size=14) for operand 0"
 fi
 
 # 28. `break` with no operands. The loop's results are the values the break
 #     hands back, so dropping them is not a stream error but a TYPE error,
-#     and the verifier prints both sides. The three operand indices (two
-#     tiles and the token) come out of the Func section. Until tileir 0.8.0
+#     and the verifier prints both sides. The two operand indices (the two
+#     tiles; the loop carries no token since tileir 0.18.1, its body only
+#     reads an In) come out of the Func section. Until tileir 0.8.0
 #     the alignment padding after it took them back and the file kept its
 #     length; since the batch's PR-3 loop_count's sections fall so that the
 #     file loses eight bytes, so the claim is held on the Func section.
 if run_item break-values-missing; then
   mutant_project break-values-missing bytecode.dawn
-  writer_mutant_checks break-values-missing loop_count func-three-short \
+  writer_mutant_checks break-values-missing loop_count func-two-short \
     "'cuda_tile.break' op operand types must correspond to the parent loop result types"
 fi
 

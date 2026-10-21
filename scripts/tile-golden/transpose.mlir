@@ -29,7 +29,7 @@ cuda_tile.module @m {
     %35 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %36 = broadcast %35 : tile<1x1xptr<f64>> -> tile<32x32xptr<f64>>
     %37 = offset %36, %34 : tile<32x32xptr<f64>>, tile<32x32xi32> -> tile<32x32xptr<f64>>
-    %38 = store_ptr_tko weak %37, %16 token=%17 : tile<32x32xptr<f64>>, tile<32x32xf64> -> token
+    %38 = store_ptr_tko weak %37, %16 token=%0 : tile<32x32xptr<f64>>, tile<32x32xf64> -> token
     return
   }
 }

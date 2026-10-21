@@ -36,7 +36,7 @@ cuda_tile.module @m {
     %40, %41, %42 = get_tile_block_id : tile<i32>
     %43 = constant <i32: 2> : tile<i32>
     %44 = muli %37, %43 : tile<i32>
-    %45 = store_view_tko weak %28, %36[%44, %41] token=%22 : tile<16x8xf64>, partition_view<tile=(16x8), padding_value = zero, tensor_view<?x8xf64, strides=[8, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %45 = store_view_tko weak %28, %36[%44, %41] token=%0 : tile<16x8xf64>, partition_view<tile=(16x8), padding_value = zero, tensor_view<?x8xf64, strides=[8, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     %46 = constant <i32: 0> : tile<i32>
     %47 = constant <i32: 1> : tile<i32>
     %48 = insert %25, %21[%46, %47] : tile<8x4xf64>, tile<16x8xf64>

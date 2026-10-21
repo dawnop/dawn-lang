@@ -202,7 +202,7 @@ def r_strides(lines):
     return [re.sub(r"strides=\[([0-9, ?]*)\]", lambda m: "strides=[" + m.group(1).replace(", ", ",") + "]", l) for l in lines]
 
 
-@RULE("view-token-equals-space", "M", ("vadd", "M", r"token=%18", "token=%13"))
+@RULE("view-token-equals-space", "M", ("vadd", "M", r"token=%0", "token=%12"))
 def r_view_token(lines):
     return [re.sub(r" token=%", " token = %", l) if op_of(l) in ("load_view_tko", "store_view_tko", "atomic_red_view_tko") else l for l in lines]
 
@@ -253,7 +253,7 @@ def r_fp8(lines):
     return [l.replace("fnv8E5M3FNU", "f8E5M3FNU") for l in lines]
 
 
-@RULE("loop-result-parens", "M", ("loop_count", "M", r"-> \(tile<128xi32>, tile<128xi32>, token\) \{", "-> (tile<128xi32>, tile<128xi64>, token) {"))
+@RULE("loop-result-parens", "M", ("loop_count", "M", r"-> \(tile<128xi32>, tile<128xi32>\) \{", "-> (tile<128xi32>, tile<128xi64>) {"))
 def r_loop_parens(lines):
     def f(l):
         if op_of(l) == "loop":

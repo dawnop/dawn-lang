@@ -33,7 +33,7 @@ cuda_tile.module @m {
     %31 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %32 = broadcast %31 : tile<1x1xptr<f64>> -> tile<32x32xptr<f64>>
     %33 = offset %32, %30 : tile<32x32xptr<f64>>, tile<32x32xi32> -> tile<32x32xptr<f64>>
-    %34, %35 = load_ptr_tko weak %33 token=%18 : tile<32x32xptr<f64>> -> tile<32x32xf64>, token
+    %34, %35 = load_ptr_tko weak %33 token=%0 : tile<32x32xptr<f64>> -> tile<32x32xf64>, token
     %36 = cmpf less_than ordered %34, %17 : tile<32x32xf64> -> tile<32x32xi1>
     %37 = constant <f64: 1.0> : tile<32x32xf64>
     %38 = constant <f64: 0.0> : tile<32x32xf64>
@@ -57,21 +57,21 @@ cuda_tile.module @m {
     %56 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %57 = broadcast %56 : tile<1xptr<f64>> -> tile<32xptr<f64>>
     %58 = offset %57, %53 : tile<32xptr<f64>>, tile<32xi32> -> tile<32xptr<f64>>
-    %59, %60 = load_ptr_tko weak %58 token=%35 : tile<32xptr<f64>> -> tile<32xf64>, token
+    %59, %60 = load_ptr_tko weak %58 token=%0 : tile<32xptr<f64>> -> tile<32xf64>, token
     %61 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %62 = broadcast %61 : tile<1xptr<f64>> -> tile<32xptr<f64>>
     %63 = offset %62, %55 : tile<32xptr<f64>>, tile<32xi32> -> tile<32xptr<f64>>
-    %64 = store_ptr_tko weak %63, %59 token=%60 : tile<32xptr<f64>>, tile<32xf64> -> token
+    %64 = store_ptr_tko weak %63, %59 token=%0 : tile<32xptr<f64>>, tile<32xf64> -> token
     %65 = ftoi %46 signed rounding<nearest_int_to_zero> : tile<32xf64> -> tile<32xi32>
     %66 = addi %53, %65 : tile<32xi32>
     %67 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %68 = broadcast %67 : tile<1xptr<f64>> -> tile<32xptr<f64>>
     %69 = offset %68, %53 : tile<32xptr<f64>>, tile<32xi32> -> tile<32xptr<f64>>
-    %70, %71 = load_ptr_tko weak %69 token=%64 : tile<32xptr<f64>> -> tile<32xf64>, token
+    %70, %71 = load_ptr_tko weak %69 token=%0 : tile<32xptr<f64>> -> tile<32xf64>, token
     %72 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %73 = broadcast %72 : tile<1xptr<f64>> -> tile<32xptr<f64>>
     %74 = offset %73, %66 : tile<32xptr<f64>>, tile<32xi32> -> tile<32xptr<f64>>
-    %75 = store_ptr_tko weak %74, %70 token=%71 : tile<32xptr<f64>>, tile<32xf64> -> token
+    %75 = store_ptr_tko weak %74, %70 token=%64 : tile<32xptr<f64>>, tile<32xf64> -> token
     return
   }
 }

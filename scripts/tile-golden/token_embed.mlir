@@ -48,7 +48,7 @@ cuda_tile.module @m {
     %48 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %49 = broadcast %48 : tile<1x1xptr<f64>> -> tile<8x16xptr<f64>>
     %50 = offset %49, %46 : tile<8x16xptr<f64>>, tile<8x16xi32> -> tile<8x16xptr<f64>>
-    %51, %52 = load_ptr_tko weak %50, %28, %47 token=%22 : tile<8x16xptr<f64>>, tile<8x16xi1>, tile<8x16xf64> -> tile<8x16xf64>, token
+    %51, %52 = load_ptr_tko weak %50, %28, %47 token=%0 : tile<8x16xptr<f64>>, tile<8x16xi1>, tile<8x16xf64> -> tile<8x16xf64>, token
     %53, %54, %55 = get_num_tile_blocks : tile<i32>
     %56 = constant <i32: 8> : tile<i32>
     %57 = muli %53, %56 : tile<i32>

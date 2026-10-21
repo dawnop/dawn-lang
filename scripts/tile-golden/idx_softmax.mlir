@@ -15,7 +15,7 @@ cuda_tile.module @m {
     %14 = make_partition_view %13 : partition_view<tile=(16x64), padding_value = zero, tensor_view<128x64xf64, strides=[64, 1]>, dim_map=[0, 1]>
     %15, %16, %17 = get_tile_block_id : tile<i32>
     %18, %19 = load_view_tko weak %14[%8, %16] token=%0 : partition_view<tile=(16x64), padding_value = zero, tensor_view<128x64xf64, strides=[64, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<16x64xf64>, token
-    %20, %21 = load_view_tko weak %14[%11, %16] token=%19 : partition_view<tile=(16x64), padding_value = zero, tensor_view<128x64xf64, strides=[64, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<16x64xf64>, token
+    %20, %21 = load_view_tko weak %14[%11, %16] token=%0 : partition_view<tile=(16x64), padding_value = zero, tensor_view<128x64xf64, strides=[64, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<16x64xf64>, token
     %22 = addf %18, %20 rounding<nearest_even> : tile<16x64xf64>
     %23 = reduce %22 dim=1 identities=[-Infinity : f64] : tile<16x64xf64> -> tile<16xf64> (%24: tile<f64>, %25: tile<f64>) {
       %26 = maxf %24, %25 : tile<f64>
@@ -38,7 +38,7 @@ cuda_tile.module @m {
     %41 = make_tensor_view %40, shape = [64, 64], strides = [64, 1] : tensor_view<64x64xf64, strides=[64, 1]>
     %42 = make_partition_view %41 : partition_view<tile=(16x64), padding_value = zero, tensor_view<64x64xf64, strides=[64, 1]>, dim_map=[0, 1]>
     %43, %44, %45 = get_tile_block_id : tile<i32>
-    %46 = store_view_tko weak %39, %42[%43, %16] token=%21 : tile<16x64xf64>, partition_view<tile=(16x64), padding_value = zero, tensor_view<64x64xf64, strides=[64, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %46 = store_view_tko weak %39, %42[%43, %16] token=%0 : tile<16x64xf64>, partition_view<tile=(16x64), padding_value = zero, tensor_view<64x64xf64, strides=[64, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

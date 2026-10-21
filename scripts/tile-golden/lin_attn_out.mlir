@@ -31,13 +31,13 @@ cuda_tile.module @m {
     %33 = reshape %arg2 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %34 = broadcast %33 : tile<1x1xptr<f64>> -> tile<32x32xptr<f64>>
     %35 = offset %34, %32 : tile<32x32xptr<f64>>, tile<32x32xi32> -> tile<32x32xptr<f64>>
-    %36, %37 = load_ptr_tko weak %35 token=%11 : tile<32x32xptr<f64>> -> tile<32x32xf64>, token
+    %36, %37 = load_ptr_tko weak %35 token=%0 : tile<32x32xptr<f64>> -> tile<32x32xf64>, token
     %38 = constant <i32: 0> : tile<i32>
     %39 = constant <i32: 0> : tile<i32>
     %40 = assume div_by<16>, %arg1 : tile<ptr<f64>>
     %41 = make_tensor_view %40, shape = [32, 32], strides = [32, 1] : tensor_view<32x32xf64, strides=[32, 1]>
     %42 = make_partition_view %41 : partition_view<tile=(32x32), padding_value = zero, tensor_view<32x32xf64, strides=[32, 1]>, dim_map=[0, 1]>
-    %43, %44 = load_view_tko weak %42[%38, %39] token=%37 : partition_view<tile=(32x32), padding_value = zero, tensor_view<32x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<32x32xf64>, token
+    %43, %44 = load_view_tko weak %42[%38, %39] token=%0 : partition_view<tile=(32x32), padding_value = zero, tensor_view<32x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<32x32xf64>, token
     %45 = constant <f64: 0.0> : tile<32x32xf64>
     %46 = mmaf %17, %43, %45 : tile<32x32xf64>, tile<32x32xf64>, tile<32x32xf64>
     %47 = mmaf %17, %36, %45 : tile<32x32xf64>, tile<32x32xf64>, tile<32x32xf64>
@@ -45,7 +45,7 @@ cuda_tile.module @m {
     %49 = assume div_by<16>, %arg3 : tile<ptr<f64>>
     %50 = make_tensor_view %49, shape = [64, 32], strides = [32, 1] : tensor_view<64x32xf64, strides=[32, 1]>
     %51 = make_partition_view %50 : partition_view<tile=(32x32), padding_value = zero, tensor_view<64x32xf64, strides=[32, 1]>, dim_map=[0, 1]>
-    %52 = store_view_tko weak %48, %51[%4, %8] token=%44 : tile<32x32xf64>, partition_view<tile=(32x32), padding_value = zero, tensor_view<64x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> token
+    %52 = store_view_tko weak %48, %51[%4, %8] token=%0 : tile<32x32xf64>, partition_view<tile=(32x32), padding_value = zero, tensor_view<64x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> token
     return
   }
 }

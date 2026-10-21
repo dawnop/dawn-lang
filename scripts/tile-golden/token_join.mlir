@@ -21,18 +21,18 @@ cuda_tile.module @m {
     %21 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %22 = broadcast %21 : tile<1xptr<f64>> -> tile<64xptr<f64>>
     %23 = offset %22, %20 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
-    %24, %25 = load_ptr_tko weak %23 token=%16 : tile<64xptr<f64>> -> tile<64xf64>, token
+    %24, %25 = load_ptr_tko weak %23 token=%0 : tile<64xptr<f64>> -> tile<64xf64>, token
     %26 = addf %15, %15 rounding<nearest_even> : tile<64xf64>
     %27 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %28 = broadcast %27 : tile<1xptr<f64>> -> tile<64xptr<f64>>
     %29 = offset %28, %11 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
-    %30 = store_ptr_tko weak %29, %26 token=%25 : tile<64xptr<f64>>, tile<64xf64> -> token
+    %30 = store_ptr_tko weak %29, %26 token=%0 : tile<64xptr<f64>>, tile<64xf64> -> token
     %31 = constant <f64: 3.0> : tile<64xf64>
     %32 = mulf %24, %31 rounding<nearest_even> : tile<64xf64>
     %33 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %34 = broadcast %33 : tile<1xptr<f64>> -> tile<64xptr<f64>>
     %35 = offset %34, %20 : tile<64xptr<f64>>, tile<64xi32> -> tile<64xptr<f64>>
-    %36 = store_ptr_tko weak %35, %32 token=%25 : tile<64xptr<f64>>, tile<64xf64> -> token
+    %36 = store_ptr_tko weak %35, %32 token=%0 : tile<64xptr<f64>>, tile<64xf64> -> token
     %37 = join_tokens %30, %36 : token
     %38 = reshape %5 : tile<i32> -> tile<1xi32>
     %39 = broadcast %38 : tile<1xi32> -> tile<128xi32>

@@ -18,13 +18,13 @@ cuda_tile.module @m {
       %21 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
       %22 = broadcast %21 : tile<1xptr<f64>> -> tile<128xptr<f64>>
       %23 = offset %22, %20 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-      %24, %25 = load_ptr_tko weak %23 token=%12 : tile<128xptr<f64>> -> tile<128xf64>, token
+      %24, %25 = load_ptr_tko weak %23 token=%0 : tile<128xptr<f64>> -> tile<128xf64>, token
       %26 = constant <f64: 2.0> : tile<128xf64>
       %27 = mulf %24, %26 rounding<nearest_even> : tile<128xf64>
       %28 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
       %29 = broadcast %28 : tile<1xptr<f64>> -> tile<128xptr<f64>>
       %30 = offset %29, %20 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-      %31 = store_ptr_tko weak %30, %27 token=%25 : tile<128xptr<f64>>, tile<128xf64> -> token
+      %31 = store_ptr_tko weak %30, %27 token=%12 : tile<128xptr<f64>>, tile<128xf64> -> token
       continue %31 : token
     }
     return

@@ -8,10 +8,10 @@ cuda_tile.module @m {
     %5, %6 = load_ptr_tko weak %4 token=%0 : tile<ptr<i32>> -> tile<i32>, token
     %7 = constant <i32: 1> : tile<i32>
     %8 = offset %arg0, %7 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %9, %10 = load_ptr_tko weak %8 token=%6 : tile<ptr<i32>> -> tile<i32>, token
+    %9, %10 = load_ptr_tko weak %8 token=%0 : tile<ptr<i32>> -> tile<i32>, token
     %11 = constant <i32: 2> : tile<i32>
     %12 = offset %arg0, %11 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %13, %14 = load_ptr_tko weak %12 token=%10 : tile<ptr<i32>> -> tile<i32>, token
+    %13, %14 = load_ptr_tko weak %12 token=%0 : tile<ptr<i32>> -> tile<i32>, token
     %15 = offset %arg1, %1 : tile<ptr<f64>>, tile<i32> -> tile<ptr<f64>>
     %16 = make_tensor_view %15, shape = [%5, %9], strides = [%9, %13] : tile<i32> -> tensor_view<?x?xf64, strides=[?, ?]>
     %17, %18 = get_tensor_shape %16 : tensor_view<?x?xf64, strides=[?, ?]> -> tile<i32>
@@ -30,12 +30,12 @@ cuda_tile.module @m {
     %34 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %35 = broadcast %34 : tile<1xptr<f64>> -> tile<32xptr<f64>>
     %36 = offset %35, %29 : tile<32xptr<f64>>, tile<32xi32> -> tile<32xptr<f64>>
-    %37, %38 = load_ptr_tko weak %36, %32, %33 token=%14 : tile<32xptr<f64>>, tile<32xi1>, tile<32xf64> -> tile<32xf64>, token
+    %37, %38 = load_ptr_tko weak %36, %32, %33 token=%0 : tile<32xptr<f64>>, tile<32xi1>, tile<32xf64> -> tile<32xf64>, token
     %39 = addf %37, %37 rounding<nearest_even> : tile<32xf64>
     %40 = reshape %arg2 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %41 = broadcast %40 : tile<1xptr<f64>> -> tile<32xptr<f64>>
     %42 = offset %41, %29 : tile<32xptr<f64>>, tile<32xi32> -> tile<32xptr<f64>>
-    %43 = store_ptr_tko weak %42, %39, %32 token=%38 : tile<32xptr<f64>>, tile<32xf64>, tile<32xi1> -> token
+    %43 = store_ptr_tko weak %42, %39, %32 token=%0 : tile<32xptr<f64>>, tile<32xf64>, tile<32xi1> -> token
     %44 = reshape %17 : tile<i32> -> tile<1xi32>
     %45 = broadcast %44 : tile<1xi32> -> tile<1xi32>
     %46 = reshape %1 : tile<i32> -> tile<1xi32>

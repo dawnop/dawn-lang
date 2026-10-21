@@ -1800,6 +1800,25 @@ pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
   (prog, entry5(name, args[0], args[1], args[2], args[3], args[4]))
 }
 
+# Whether a read of what `aim` points at is ordered by nothing: the target is
+# a parameter the kernel was declared to only read (an `In`). Such a read
+# hangs off the entry token and leaves the chain where it was; a `Shared`
+# parameter, an `Out`, memory no parameter addresses (an alloca, a global),
+# and a recorder that knows no roles (`trace_kernel`) all keep the chain,
+# because only a role says nothing writes the bytes during the kernel.
+fn unordered_read(roles: List[Access], aim: Option[Int]) -> Bool = match aim {
+  Some(p) -> p >= 0 && p < len(roles) && roles[p] == Reading
+  None -> false
+}
+
+# Whether any operation of a region body, at any depth, is ordered after
+# token handle `t`. A loop whose carried token nothing in the body used and
+# that comes out unchanged does not need to carry it.
+fn tok_used(body: List[TileOp], t: Int) -> Bool = list.any(flat(body), o => match tok_step(o) {
+  Some((_out, before)) -> list.contains(before, t)
+  None -> false
+})
+
 # `aims` after handle `to` was made from `from` (an offset, a recast, a view
 # of a view): it aims where `from` does, or nowhere the recording followed.
 fn follow(aims: Map[Int, Int], from: Int, to: Int) -> Map[Int, Int] = match map.get(aims, from) {
@@ -2557,8 +2576,12 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         let d = next
         let t = next + 1
         next = mint(name, next, 2)
-        ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, tok, hints)]
-        tok = t
+        if unordered_read(roles, Some(param)) {
+          ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, 0, hints)]
+        } else {
+          ops = ops ++ [Load(d, t, param, dtype, base, shape, strides, mask, pad, tok, hints)]
+          tok = t
+        }
         d
       }
       t_store(param, dtype, base0, shape, strides, v0, mask0, hints) => {
@@ -3064,15 +3087,21 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
             }
             check_same_rows(name, frames, ops, held, writer(marks, calls, "for"), "carried value", carried, outs)
             let (outer, inner) = (saved, ops)
+            # a body that never moved the token (only reads of an In, which
+            # hang off the entry token) has no use for the slot: the loop
+            # does not carry it and the token after is the one before
+            let drop = tok == last(carried) && not tok_used(inner, tok)
+            let kept_inits = if drop { but_last(inits) } else { inits }
+            let kept_carried = if drop { but_last(carried) } else { carried }
             let base = next
-            next = mint(name, next, len(inits))
-            let results = list.map(range(0, len(inits)), k => base + k)
-            let body = inner ++ [Continue(outs ++ [tok])]
-            held = copy_held(held, inits, results)
+            next = mint(name, next, len(kept_inits))
+            let results = list.map(range(0, len(kept_inits)), k => base + k)
+            let body = inner ++ [Continue(if drop { outs } else { outs ++ [tok] })]
+            held = copy_held(held, kept_inits, results)
             frames = list.take(frames, len(frames) - 1)
-            ops = outer ++ [For(iv, lower, upper, step, unsigned, inits, carried, results, body)]
-            tok = last(results)
-            but_last(results)
+            ops = outer ++ [For(iv, lower, upper, step, unsigned, kept_inits, kept_carried, results, body)]
+            tok = if drop { last(inits) } else { last(results) }
+            if drop { results } else { but_last(results) }
           }
           _ -> refuse(name, "loop_end closes a region that is not a loop")
         }
@@ -3126,19 +3155,22 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
             # would stop being unique
             let inner = ops
             let outer = saved
+            let drop = tok == last(carried) && not tok_used(inner, tok)
+            let kept_inits = if drop { but_last(inits) } else { inits }
+            let kept_carried = if drop { but_last(carried) } else { carried }
             let base = next
-            next = mint(name, next, len(inits))
-            let results = list.map(range(0, len(inits)), k => base + k)
+            next = mint(name, next, len(kept_inits))
+            let results = list.map(range(0, len(kept_inits)), k => base + k)
             # the exit: break with what entered this iteration (the token as
             # it stands now), or fall through to the continue below
-            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])
-            let body = inner ++ [exit, Continue(outs ++ [tok])]
-            held = copy_held(held, inits, results)
+            let exit = If([], cond, [Break(if drop { but_last(carried) } else { but_last(carried) ++ [tok] })], [Yield([])])
+            let body = inner ++ [exit, Continue(if drop { outs } else { outs ++ [tok] })]
+            held = copy_held(held, kept_inits, results)
             frames = list.take(frames, len(frames) - 1)
-            ops = outer ++ [Loop(inits, carried, results, body)]
-            let after_loop = last(results)
+            ops = outer ++ [Loop(kept_inits, kept_carried, results, body)]
+            let after_loop = if drop { last(inits) } else { last(results) }
             tok = after_loop
-            but_last(results)
+            if drop { results } else { but_last(results) }
           }
           _ -> refuse(name, "while_end closes a region that is not a loop")
         }
@@ -3979,8 +4011,12 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         let d = next
         let tv = next + 1
         next = mint(name, next, 2)
-        ops = ops ++ [LoadView(d, tv, dtype, view, indices, tok, inbounds)]
-        tok = tv
+        if unordered_read(roles, map.get(aims, view)) {
+          ops = ops ++ [LoadView(d, tv, dtype, view, indices, 0, inbounds)]
+        } else {
+          ops = ops ++ [LoadView(d, tv, dtype, view, indices, tok, inbounds)]
+          tok = tv
+        }
         d
       }
       t_store_view(dtype, view, indices0, value0, inbounds) => {
@@ -4638,15 +4674,17 @@ test "a loop records a Loop whose body ends in the exit if and a continue, and t
   let p = trace_kernel("spin", [ByPtr("f64"), ByPtr("f64")], () => spin(param(F64, 0), param(F64, 1)))
   match p.ops[len(p.ops) - 2] {
     Loop(inits, carried, results, body) -> {
-      # the token rides as the last carried value, as a `for`'s does
-      assert len(inits) == 2 && len(carried) == 2 && len(results) == 2
+      # trace_kernel knows no roles, so the loads before the loop chain; the
+      # body moves no token, so the loop does not carry one (a `for` that
+      # moved it would carry it as its last value)
+      assert len(inits) == 1 && len(carried) == 1 && len(results) == 1
       # the exit is an `if` with NO results: one branch breaks and the
       # other yields nothing, so the operation defines nothing
       match body[len(body) - 2] {
         If(rs, _cond, on_true, on_false) -> {
           assert rs == []
-          # what the break hands back is what ENTERED this iteration,
-          # token included: nothing in this body moves the token
+          # what the break hands back is what ENTERED this iteration:
+          # nothing in this body moves the token, so there is none
           assert on_true == [Break(carried)]
           assert on_false == [Yield([])]
         }
@@ -4654,7 +4692,7 @@ test "a loop records a Loop whose body ends in the exit if and a continue, and t
       }
       # and the continue hands the next iteration what the body computed
       match body[len(body) - 1] {
-        Continue(values) -> { assert len(values) == 2 && values != carried }
+        Continue(values) -> { assert len(values) == 1 && values != carried }
         _ -> { assert false }
       }
     }
@@ -5739,12 +5777,101 @@ fn marked[T](f: fn() -> T) -> String = match catch_panic(f) {
   Err(e) -> e.message
 }
 
+# A load or a store through a parameter: the two operations whose token
+# operand the roles decide.
+fn is_mem(o: TileOp) -> Bool = match o {
+  Load(_d, _t, _p, _dt, _b, _s, _st, _m, _pd, _ti, _h) -> true
+  Store(_t, _p, _dt, _b, _s, _st, _v, _m, _ti, _h) -> true
+  _ -> false
+}
+
+# [token answered, token read] of every Load, then of every Store, at any depth.
+fn load_toks(ops: List[TileOp]) -> List[List[Int]] = {
+  let none: List[List[Int]] = []
+  list.fold(flat(ops), none, (acc, o) => match o {
+    Load(_d, t, _p, _dt, _b, _s, _st, _m, _pd, ti, _h) -> acc ++ [[t, ti]]
+    _ -> acc
+  })
+}
+
+fn store_toks(ops: List[TileOp]) -> List[List[Int]] = {
+  let none: List[List[Int]] = []
+  list.fold(flat(ops), none, (acc, o) => match o {
+    Store(t, _p, _dt, _b, _s, _st, _v, _m, ti, _h) -> acc ++ [[t, ti]]
+    _ -> acc
+  })
+}
+
+fn first_for(ops: List[TileOp]) -> Option[TileOp] = list.find(flat(ops), o => match o {
+  For(_iv, _lo, _up, _step, _un, _inits, _carried, _results, _body) -> true
+  _ -> false
+})
+
+# Reads parameter 0, writes parameter 1, reads parameter 1 back and writes it
+# again: nothing but the roles says which of these are ordered.
+fn read_write_read(x: Param[Float], y: Param[Float]) -> Unit !Dev = {
+  let b = block_id(0)
+  let base = tile_at(b, 8)
+  let t = load(x, base, [8])
+  store(y, base, t)
+  let u = load(y, base, [8])
+  store(y, base, add(t, u))
+}
+
+test "P2: an In's loads hang off the entry token and leave the chain where it was; a Shared's read and write follow program order" {
+  let (p, _e) = trace2("rwr", In(F64, Whole), Shared(F64), read_write_read)
+  let st = store_toks(p.ops)
+  let ld = load_toks(p.ops)
+  # the In's load reads the entry token, and the first store still does
+  assert ld[0][1] == 0
+  assert st[0][1] == 0
+  # the Shared's load comes after the first store, and the second store after that load
+  assert ld[1][1] == st[0][0]
+  assert st[1][1] == ld[1][0]
+}
+
+test "P2: a Shared's load is ordered when the other parameter is a Shared too" {
+  let (p, _e) = trace2("rwr", Shared(F64), Shared(F64), read_write_read)
+  let st = store_toks(p.ops)
+  let ld = load_toks(p.ops)
+  assert ld[0][1] == 0 && st[0][1] == ld[0][0]
+  assert ld[1][1] == st[0][0]
+}
+
+test "P2: a loop that only reads an In carries no token, and the reads inside it hang off the entry token" {
+  let (p, _e) = trace2("sum", In(F64, Whole), Shared(F64), (x, o) => sum(x, o, 4))
+  match first_for(p.ops) {
+    Some(For(_iv, _lo, _up, _step, _un, inits, carried, results, _body)) -> {
+      assert len(inits) == 1 && len(carried) == 1 && len(results) == 1
+    }
+    _ -> { assert false }
+  }
+  assert list.map(load_toks(p.ops), t => t[1]) == [0, 0]
+  assert store_toks(p.ops)[0][1] == 0
+}
+
+test "P2: a loop that reads a Shared still carries the token" {
+  let (p, _e) = trace2("sum", Shared(F64), Shared(F64), (x, o) => sum(x, o, 4))
+  match first_for(p.ops) {
+    Some(For(_iv, _lo, _up, _step, _un, inits, carried, results, _body)) -> {
+      assert len(inits) == 2 && len(carried) == 2 && len(results) == 2
+    }
+    _ -> { assert false }
+  }
+  let lt = load_toks(p.ops)
+  # the in-loop load reads the loop's carried token, not the entry one
+  assert lt[1][1] != 0 && lt[1][1] != lt[0][0]
+}
+
 test "knife C2: trace3 records the program trace_kernel records for the same body, the formats from the markers" {
   let g = cells([1024], [128])
   let (p, _e) = trace3("vadd", In(F64, g), In(F64, g), Shared(F64), vadd)
-  assert p == trace_vadd()
+  assert p.params == trace_vadd().params && len(p.ops) == len(trace_vadd().ops)
+  # an In's loads hang off the entry token (see "an In's loads ..." below),
+  # which is the one place this record and trace_kernel's differ
+  assert list.filter(p.ops, o => not is_mem(o)) == list.filter(trace_vadd().ops, o => not is_mem(o))
   let (q, _e2) = trace3("vadd", In(F64, Whole), Shared(F64), Shared(F64), vadd)
-  assert q == trace_vadd()
+  assert q.params == trace_vadd().params && len(q.ops) == len(trace_vadd().ops)
   let (s, _e3) = trace2("scale_f32", In(F32, Whole), Shared(F32), scale_f32)
   assert s.params == [ByPtr("f32"), ByPtr("f32")]
 }
@@ -6942,8 +7069,8 @@ fn run_scale(scale: Float) -> Result[List[Float], ForeignError] !Gpu = {
 test "K4.2: a Scalar marker records a by-value parameter, and its entry takes a scalar where the kernel does" {
   let (p, _e) = trace3("scale_by", In(F32, Whole), Scalar(F32), Shared(F32), scale_by)
   assert p.params == [ByPtr("f32"), ByValue("f32"), ByPtr("f32")]
-  # the markers put nothing into the program: it is the one trace_kernel records
-  assert p == trace_scale_by()
+  # the markers put nothing into the program but the In's token operands
+  assert len(p.ops) == len(trace_scale_by().ops)
   # one entry, two scales, two answers, on the fake device
   let table = map.from([("scale_by", (2, last_out_with(scale_ref)))])
   assert with_gpu_fake(table, () => run_scale(2.0)) == Ok([2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0])
