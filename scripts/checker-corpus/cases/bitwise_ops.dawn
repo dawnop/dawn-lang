@@ -1,0 +1,37 @@
+# Rejections must happen at the operator or bound, before any runtime path.
+opaque type Handle = Int
+type Bits = { value: Int }
+type Other = { value: Int }
+effect Log { fn note() -> Unit }
+impl BitAnd[Bits] {
+  effect BitAnd = !Log
+  fn bit_and(a: Bits, b: Bits) -> Bits !Log = { note()
+    a }
+}
+impl BitNot[Bits] { fn bit_not(a: Bits) -> Bits = a }
+impl Shl[Bits] {
+  type ShlAmount = Int
+  fn shl(a: Bits, n: Int) -> Bits = a
+}
+fn conjunction[T: BitAnd](a: T, b: T) -> T !T.BitAnd = a & b
+fn move[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = a << n
+fn no_bound[T](a: T, b: T) -> T = a ^ b
+fn no_shift_bound[T](a: T, n: Int) -> T = a << n
+fn opaque_direct(a: Handle) -> Handle = a | a
+fn opaque_generic(a: Handle) -> Handle = conjunction(a, a)
+fn opaque_shift(a: Handle) -> Handle = move(a, 1)
+fn floating(a: Float) -> Float = a & a
+fn floating_shift(a: Float) -> Float = a >>> 1
+fn floating_not(a: Float) -> Float = ~a
+fn mixed(a: Bits, b: Other) -> Bits !Log = a & b
+fn missing_effect(a: Bits) -> Bits = a & a
+fn missing_projection[T: Shl](a: T, n: T.ShlAmount) -> T = a << n
+fn wrong_amount(a: Bits, n: Bits) -> Bits = a << n
+fn distinct[T: Shl + Shr](a: T, n: T.ShlAmount) -> T !T.Shr = a >> n
+fn reverse_shift(a: Bits) -> Bits = 1 << a
+fn independent(a: Bits) -> Bits = not a
+fn no_unary_context() -> Bits = ~0
+fn not_injected(a: Bits) -> Bits = shl(a, 1)
+fn tuple_bits(a: (Int, Int)) -> (Int, Int) = a & a
+fn tuple_not(a: (Int, Int)) -> (Int, Int) = ~a
+fn no_float_yield(a: Float) -> Int = 9007199254740993 & a

@@ -2758,6 +2758,29 @@ pub const STAGED_VAR_ID: Int = 16
 ## nothing in the prelude.
 pub const LEN_ID: Int = 17
 
+## Bitwise operators preserve Int's native path; these dictionaries serve
+## generic code. A shift chooses one count type through its own Amount
+## member, independently of its subject (docs/bitwise-operator-traits-design.md).
+pub const BIT_AND_ID: Int = 18
+pub const BIT_OR_ID: Int = 19
+pub const BIT_XOR_ID: Int = 20
+pub const SHL_ID: Int = 21
+pub const SHR_ID: Int = 22
+pub const USHR_ID: Int = 23
+pub const BIT_NOT_ID: Int = 24
+
+pub fn bitwise_trait_ids() -> List[Int] =
+  [BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID]
+
+pub fn is_bitwise_trait(tid: Int) -> Bool = tid >= BIT_AND_ID && tid <= BIT_NOT_ID
+
+pub fn is_shift_trait(tid: Int) -> Bool = tid >= SHL_ID && tid <= USHR_ID
+
+pub fn bitwise_trait_name(tid: Int) -> String =
+  ["BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Ushr", "BitNot"][tid - BIT_AND_ID]
+
+pub fn shift_amount_name(tid: Int) -> String = ["ShlAmount", "ShrAmount", "UshrAmount"][tid - SHL_ID]
+
 ## One prelude trait `derive` can mint an impl of.
 pub type Derivable = { name: String, trait_id: Int, adjective: String }
 
@@ -3094,7 +3117,14 @@ pub fn prelude_traits() -> Traits = {
     (NEG_ID, arith_trait(NEG_ID, "Neg", "neg", -28, 1)),
     (FROM_INT_ID, lit_trait(FROM_INT_ID, "FromInt", "from_int", TyInt, -29)),
     (FROM_FLOAT_ID, lit_trait(FROM_FLOAT_ID, "FromFloat", "from_float", TyFloat, -30)),
-    (STAGED_ITER_ID, staged_iter_trait()), (STAGED_VAR_ID, staged_var_trait())])
+    (STAGED_ITER_ID, staged_iter_trait()), (STAGED_VAR_ID, staged_var_trait()),
+    (BIT_AND_ID, bitwise_trait(BIT_AND_ID, "BitAnd", "bit_and", -41, 2)),
+    (BIT_OR_ID, bitwise_trait(BIT_OR_ID, "BitOr", "bit_or", -42, 2)),
+    (BIT_XOR_ID, bitwise_trait(BIT_XOR_ID, "BitXor", "bit_xor", -43, 2)),
+    (SHL_ID, bitwise_trait(SHL_ID, "Shl", "shl", -44, 2)),
+    (SHR_ID, bitwise_trait(SHR_ID, "Shr", "shr", -45, 2)),
+    (USHR_ID, bitwise_trait(USHR_ID, "Ushr", "ushr", -46, 2)),
+    (BIT_NOT_ID, bitwise_trait(BIT_NOT_ID, "BitNot", "bit_not", -47, 1))])
 }
 
 ## `trait StagedIter[R] { type Item  effect StagedIter = !()
@@ -3204,13 +3234,32 @@ fn arith_trait(tid: Int, name: String, m: String, tvid: Int, arity: Int) -> Trai
   }
 }
 
+## The count projection stays erased in a trait slot and reduces through
+## the selected impl at concrete calls. No projection is put in a binding.
+fn bitwise_trait(tid: Int, name: String, method: String, tvid: Int, arity: Int) -> TraitI = {
+  let tv = TyVar("T", tvid)
+  let shift = is_shift_trait(tid)
+  let rhs = if shift { TyAssoc(tv, tid, shift_amount_name(tid)) } else { tv }
+  let ps = if arity == 1 { [tv] } else { [tv, rhs] }
+  let ns = if arity == 1 { ["a"] } else if shift { ["a", "n"] } else { ["a", "b"] }
+  let sig = Sig { ..prelude_method(tid, tv, method, ps, ns, tv), eff: EffAssoc("T", tvid, tid, name) }
+  TraitI {
+    ..prelude_trait(tid, name, tv, method, sig),
+    assoc: if shift { [shift_amount_name(tid)] } else { [] },
+    eff_assoc: [name],
+    eff_defaults: [(name, EPure)],
+    injects: false
+  }
+}
+
 ## The prelude trait ids, in id order. Everything that needs to know "which
 ## traits does the prelude bring" reads this -- the seeding loop, the
 ## redefinition guard, LSP completion -- so the set lives in one place instead
 ## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
 pub fn prelude_trait_ids() -> List[Int] =
   [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID,
-    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID, STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID]
+    REM_ID, NEG_ID, FROM_INT_ID, FROM_FLOAT_ID, STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID,
+    BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -3424,6 +3473,13 @@ pub fn prelude_impls() -> List[ImplI] = {
     for t in [TyInt, TyFloat] {
       out = out ++ [ImplI { ..prelude_impl(tid, t), eff_bindings: [(nm, EPure)] }]
     }
+  }
+  # Each primitive shift binds its count explicitly, just as a source impl
+  # must. The binding and witness live in the same impl table.
+  for tid in bitwise_trait_ids() {
+    let bindings: List[(String, Ty)] = if is_shift_trait(tid) { [(shift_amount_name(tid), TyInt)] } else { [] }
+    out = out ++ [ImplI { ..prelude_impl(tid, TyInt), assoc_bindings: bindings,
+      eff_bindings: [(bitwise_trait_name(tid), EPure)] }]
   }
   # FromInt at Int and Float, FromFloat at Float, and no FromFloat[Int]: a
   # float literal never becomes an integer. Like the arithmetic ones, only a
@@ -5001,7 +5057,7 @@ test "prelude shapes" {
   # each trait over its own list -- one table per question, which is the point
   # (the arithmetic traits: Int and Float for each of the six)
   assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
-    len(hash_scalars()) + len(show_scalars()) + 5 + 2 * len(arith_trait_ids()) + 3
+    len(hash_scalars()) + len(show_scalars()) + 5 + 2 * len(arith_trait_ids()) + 3 + len(bitwise_trait_ids())
   # the literal traits: not injected, one pure-by-default effect member each
   for tid in [FROM_INT_ID, FROM_FLOAT_ID] {
     let tr = trait_of(traits, tid)
@@ -5392,3 +5448,21 @@ test "ForeignError is a prelude record whose fields every backend can answer" {
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = len(m)
+
+test "bitwise prelude slots keep count projections and their own effect evidence" {
+  let traits = prelude_traits()
+  for tid in bitwise_trait_ids() {
+    let tr = trait_of(traits, tid)
+    assert not tr.injects
+    assert not opaque_inherits(tid)
+    assert tr.eff_assoc == [tr.name]
+    assert tr.eff_defaults == [(tr.name, EPure)]
+    let (_, ms) = tr.methods[0]
+    assert len(eff_assocs(sig_abi_eff(ms.sig))) == 1
+    assert ms.sig.ret == tr.tvar
+    if is_shift_trait(tid) {
+      assert ms.sig.param_tys == [tr.tvar, TyAssoc(tr.tvar, tid, shift_amount_name(tid))]
+      assert tr.assoc == [shift_amount_name(tid)]
+    }
+  }
+}

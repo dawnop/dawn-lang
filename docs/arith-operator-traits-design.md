@@ -51,7 +51,7 @@ trait Neg[T] { effect Neg = !()  fn neg(a: T) -> T !T.Neg }         # 一元 -
 | `< <= > >=` | 不动 | 仍桥 `Ord`、答 `Bool`。tile 的逐元素比较答 `Tile[Bool]`，让 `<` 答 tile 会破 `if a < b`、`sort`、`[T: Ord]` |
 | `==` `!=` | 不动 | 答 `Bool`，与 `Map` 键、`match` 字面量深度耦合 |
 | `++` | 不动 | 封闭在 `String/Bytes/List`，有 `cat_list` 的单元素改写；没有消费者在等 |
-| `& \| ^ << >> >>> ~` | 不动 | 仅 `Int`；按位 trait 另立设计 |
+| `& \| ^ << >> >>> ~` | 不动 | 本文不含；见 [按位 trait 设计](bitwise-operator-traits-design.md) |
 | `&& \|\| not` | 不动 | 短路与 `Bool` |
 
 ### D3 原生快路：Int/Float 不解见证、不建字典、字节不变
@@ -271,7 +271,7 @@ TAST 变成 `XCallFn` 时操作数以 `None` 遍历，操作数里的名字在�
 3. **右锚回填**（左推不出时以右类型重查左）：双向求解的第一步，诊断会重复一遍。字面量原子的让步不是回填，见字面量设计。
 4. **`<` 答 tile、`==` 可重定义返回类型**：`Bool` 是 `if`/`sort`/`Map` 的前提。
 5. **`++` 进 trait**：无消费者在等，`cat_list` 改写要保。将来 `Append` 同形另立项。
-6. **按位运算进 trait**：仅 `Int`，另立设计。
+6. **按位运算进 trait**：独立于算术设计，见 [按位 trait 设计](bitwise-operator-traits-design.md)。
 7. **`Num`/`Zero`/`One`**：D10。
 8. **opaque 继承 / `deriving newtype` 式自动继承算术**：D4，句柄与舍入不变量会被静默打破。
 9. **条件 impl 把算术转发给类型参数**（`impl[T: Add] Add[Pair[T]]` 用 `p.a + q.a`）：要让 impl 的效果绑定接受 impl 参数的投影

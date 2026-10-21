@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 554167695cf8c67b -->
+<!-- doc-check: translation-of docs/spec.md @ 961d0691c99bdae0 -->
 
 # Dawn Language Specification
 
@@ -1011,21 +1011,21 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   (callable directly, by UFCS, or in a pipeline).
 - **Injection is a per-trait property**: whether a trait's method names occupy the function
   namespace is decided by that trait. Today a `trait` declaration always injects, and the six
-  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the twelve whose method name the
+  built-in traits `Ord`/`Eq`/`Hash`/`Show`/`Iter`/`Len` inject too; **the nineteen whose method name the
   language consumes on the user's behalf do not**, and their method names appear only in impl
   bodies, in documentation and in error messages: `Index` (consumed by `[]`, §4.8), `Display`
   (consumed by `to_string` and `${...}`, §4.3), the six arithmetic traits
   `Add`/`Sub`/`Mul`/`Div`/`Rem`/`Neg` (consumed by the operators, §4.3), `FromInt`/`FromFloat`
   (consumed by numeric literals, §1.5) and `StagedIter`/`StagedVar` (consumed by the staged
-  `for`, §4.7).
-- **Eighteen built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
+  `for`, §4.7), and the seven bitwise and shift traits below.
+- **Twenty-five built-in traits**: `Ord` (`cmp`, behind ordering beyond `<`/`<=`), `Eq` (`eq`, behind
   `==`/`!=`), `Hash` (`hash`), `Show` (`show`, the **nested** rendering, and the bound
   `to_string` asks for), `Iter` (behind `for..in`, §4.7), `Len` (`len`, the number of elements a
   container holds), `Index` (behind `[]`, §4.8),
   `Display` (`display`, the **top-level** rendering, behind `to_string` and `${...}`, §4.3),
   the six arithmetic traits behind `+ - * / %` and unary `-` (see their entry below),
   `FromInt`/`FromFloat` behind numeric literals (the entry after that), and
-  `StagedIter`/`StagedVar` behind the staged `for` (the entry after that).
+  `StagedIter`/`StagedVar` behind the staged `for`, and the seven bitwise and shift traits.
   The impls for the scalars ship with the language;
   `derive Ord` / `derive Show` cast an ordinary impl, and on a generic type a conditional impl;
   `Display` cannot be derived (the reason is under `Display` below).
@@ -1116,6 +1116,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
   implements both writes `!T.StagedIter` and `!T.StagedVar` without ambiguity. The language
   provides no impl of either for any type. Both names are taken in trait and effect
   position from now on as well.
+- **`BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`/`Ushr`/`BitNot`** (§4.3) implement
+  `& | ^ << >> >>> ~`, always returning the subject type. The first three are homogeneous
+  binary operations; `BitNot` is unary. Each shift has its own associated count type:
+  `ShlAmount`, `ShrAmount`, or `UshrAmount`:
+  `trait Shl[T] { type ShlAmount  effect Shl = !()  fn shl(a: T, n: T.ShlAmount) -> T !T.Shl }`.
+  The methods `bit_and`, `bit_or`, `bit_xor`, `shl`, `shr`, `ushr`, `bit_not` are not injected.
+  Each trait has an associated effect with the same name, pure by default; generic forwarding
+  writes `!T.Shl`, for example. Conditional impl effect bindings still must be ground.
+  The language provides the seven impls only for Int, binding each Amount to Int. Opaque types
+  inherit none of them and need explicit impls in their declaring module. Amounts from different
+  bounds are distinct; no associated-type equality constraint is provided. All seven trait
+  names also reserve effect declaration positions.
 - **Coherence**: at most one impl per "trait × type" across the whole program; the **orphan
   rule**: an impl can only be written in the module that declares the trait or the subject type.
   Impls take effect globally, no `use` needed.
@@ -1391,14 +1403,14 @@ From lowest to highest:
 | 2 | `\|\|` | left | logical or, short-circuiting |
 | 3 | `&&` | left | logical and, short-circuiting |
 | 4 | `== != < <= > >=` | non-associative | comparison; chained comparison is a syntax error |
-| 5 | `\|` | left | bitwise or; `Int` only |
-| 6 | `^` | left | bitwise xor; `Int` only |
-| 7 | `&` | left | bitwise and; `Int` only |
-| 8 | `<< >> >>>` | left | shifts; `Int` only. `>>` is arithmetic (sign-filling), `>>>` logical (zero-filling) |
+| 5 | `\|` | left | bitwise or; native on `Int`, otherwise `BitOr` |
+| 6 | `^` | left | bitwise xor; native on `Int`, otherwise `BitXor` |
+| 7 | `&` | left | bitwise and; native on `Int`, otherwise `BitAnd` |
+| 8 | `<< >> >>>` | left | shifts; native on `Int`, otherwise `Shl`/`Shr`/`Ushr` with their respective Amount |
 | 9 | `++` | right | `String`/`List` concatenation |
 | 10 | `+ -` | left | both sides the same type; native on `Int`/`Float`, through `Add`/`Sub` on other types (§3.5) |
 | 11 | `* / %` | left | both sides the same type; native on `Int`/`Float`, through `Mul`/`Div`/`Rem` otherwise; `Int` division by zero panics |
-| 12 | `not`, unary `-`, `~` | prefix | unary `-` goes through `Neg` past `Int`/`Float`; `~` is bitwise complement, `Int` only |
+| 12 | `not`, unary `-`, `~` | prefix | unary `-` goes through `Neg` past `Int`/`Float`; `~` uses independent `BitNot` past `Int` |
 | 13 | `? . () []` call | postfix | `?` see §8.1; `()` has been a **general postfix** since 2026-07-30 (see below) |
 
 - **A call is a general postfix (SYN-02)**: any postfix expression followed on the same line
@@ -1482,9 +1494,21 @@ From lowest to highest:
   **declaration order** and the C backend left argument order to C (gcc goes right to left)
   — both are fixed to this rule, pinned by the two-backend differential
   (`scripts/spike-native/named_args.dawn`, `eval_order.dawn`).
-- Bitwise `& ^ \|` and the shifts **act on `Int` only** (there is no `Float` bit pattern);
-  they bind **tighter than comparison**, so `a & b == c` is `(a & b) == c`, without the
-  C-family trap. A shift count takes its low 6 bits (as JVM `LSHL` does).
+- Bitwise `& ^ \|` and shifts keep concrete Int operations native, without impl lookup;
+  generic instantiation at Int uses dictionary slots. Other subjects select the matching
+  witness from the left operand. Homogeneous bitwise operators expect the left type on the
+  right; shifts first reduce the selected impl's Amount, then check the count at that type.
+  Missing impls precede count mismatches; a wrong count diagnostic names the required Amount.
+  An outer library-type expectation may reach the left operand; Int/Float expectations stop
+  there. Shifts never infer the left operand from the count. Homogeneous bitwise operations
+  allow integer literals to yield to a typed operand, without Float mixed yielding.
+  `~` checks its operand independently, so `let x: UserBits = ~0` still produces Int first.
+  Operands evaluate once each in written order, with no short-circuiting. `~` is independent
+  of `not` and `Neg`. These operators bind **tighter than comparison**, so `a & b == c` is
+  `(a & b) == c`. Int counts take their low six bits, including negative counts; `<<` wraps,
+  `>>` copies the sign, and `>>>` fills with zero. Official finite-width integers use
+  `k = n & (w - 1)`; laws of arbitrary user impls remain the author's responsibility.
+  The std integer and device library impls follow later seed and library migrations.
 
 **Numeric edge semantics** (all of them **guaranteed** — after selfhosting the two
 implementations are cross-checked against this, "happens to agree" is not allowed):
@@ -1572,7 +1596,7 @@ implementations are cross-checked against this, "happens to agree" is not allowe
   `t * lit(2.0)`). **The exception: when exactly one side is a numeric literal, the other side is
   checked first and the literal is typed at its type** (§1.5; `0.5 * s` means `s * 0.5`, and with
   `r: Float` both `r * 2` and `2 * r` hold). This holds for arithmetic, comparison and `==`/`!=`;
-  bitwise operators and shifts take `Int` alone and are not covered. When both sides are literals,
+  homogeneous bitwise operators allow only integer literal yielding; shifts do not yield. When both sides are literals,
   the whole operation's expected type reaches them only when it is a type that takes literals
   through `FromInt`/`FromFloat` (`let b: U8 = 200 + 100`). **A `Float` expectation does not pass
   through an operator**: in `let f: Float = 1 / 2` the `1 / 2` is still the `Int` `0` and a type
@@ -4702,7 +4726,7 @@ default rounding, nearest even; `%` is the exact truncating remainder) and `From
 - **Bitwise** operations are named functions: `and`, `or`, `xor`, `complement` (`not` is a
   keyword), `shl`, `shr`, `rotl`, `rotr`. A signed `shr` copies the sign bit in, an unsigned
   one zeros; a shift or rotation count is taken modulo w (as `Int`'s shifts take the low six
-  bits). Operator forms wait for bitwise traits of their own.
+  bits). This step supplies compiler traits only; std operator impls follow after seed advancement. The named functions remain until that migration.
 
 Implementation strategy: wrap Java thinly wherever a thin wrapper will do (`String` simply
 is `java.lang.String`), while the persistent `List`/`Map`/`Set` are **pure Dawn source**

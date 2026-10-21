@@ -35,6 +35,7 @@ use check/types.{
   OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   DISPLAY_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID, NEG_ID, is_arith_trait,
   FROM_INT_ID, FROM_FLOAT_ID, is_lit_trait, LEN_ID,
+  BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID, is_bitwise_trait, is_shift_trait,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, is_show_scalar, Impls, impl_at, has_impl_at,
   is_ground, expandable, sub_goals
 }
@@ -1836,6 +1837,13 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
   if tid == DIV_ID { return (st, CBinary(CDiv, args[0], args[1], subject)) }
   if tid == REM_ID { return (st, CBinary(CMod, args[0], args[1], subject)) }
   if tid == NEG_ID { return (st, CUnary(CNeg, args[0], subject)) }
+  if tid == BIT_AND_ID { return (st, CBinary(CBand, args[0], args[1], subject)) }
+  if tid == BIT_OR_ID { return (st, CBinary(CBor, args[0], args[1], subject)) }
+  if tid == BIT_XOR_ID { return (st, CBinary(CBxor, args[0], args[1], subject)) }
+  if tid == SHL_ID { return (st, CBinary(CShl, args[0], args[1], subject)) }
+  if tid == SHR_ID { return (st, CBinary(CShr, args[0], args[1], subject)) }
+  if tid == USHR_ID { return (st, CBinary(CUshr, args[0], args[1], subject)) }
+  if tid == BIT_NOT_ID { return (st, CUnary(CBnot, args[0], subject)) }
   # A literal reached through a dictionary (`[T: FromInt]` at Int or Float).
   # FromInt[Int] and FromFloat[Float] are the identity; FromInt[Float] is the
   # conversion, held to the exactness the checker asks of a literal it types
@@ -1874,7 +1882,9 @@ fn exact_to_float(st0: LSt, n: CExpr) -> (LSt, CExpr) = {
 ## RHS is verbatim (`Item = T`, the impl's own parameter) -- right for a real
 ## callee's ABI, wrong for a relation spelled out at the instantiated subject.
 fn prim_param_ty(tid: Int, subject: Ty, i: Int) -> Ty =
-  if tid == INDEX_ID && i == 1 {
+  if is_shift_trait(tid) && i == 1 {
+    TyInt
+  } else if tid == INDEX_ID && i == 1 {
     index_idx_ty(subject)
   } else if tid == FROM_INT_ID {
     # the subject is only the result; the parameter is the host type
@@ -1894,7 +1904,7 @@ fn prim_ret_ty(tid: Int, subject: Ty) -> Ty =
     TyString
   } else if tid == INDEX_ID {
     index_item_ty(subject)
-  } else if is_arith_trait(tid) || is_lit_trait(tid) {
+  } else if is_arith_trait(tid) || is_lit_trait(tid) || is_bitwise_trait(tid) {
     subject
   } else {
     panic("lower: no primitive relation for trait ${to_string(tid)}")
