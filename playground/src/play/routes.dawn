@@ -15,8 +15,9 @@ use std/bytes
 use std/str
 use std/io
 use std/io.{Instant}
-use play/contract.{parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
-use play/exec.{CompilerId, tile_ready, tick, ms_since, TileRaw, TileMapped, TilePlain}
+use play/contract.{Compiled, parse_request, parse_compile_request, wants_tileir, render_outcome, render_check, render_error, render_health}
+use play/exec.{CompilerId, tile_ready, native_ready, tool_present, tick, ms_since, TileRaw, TileMapped, TilePlain}
+use play/config.{javap_bin}
 use play/view.{build_view, respond, cache_key, Viewed, Mapped, Done, tile_view, tile_mapped, Tiled, TileShown, TileFailed}
 use play/host.{Host, JobResult, JRun, JCheck, JView, JTile, JOutcome, JViewRaw, JTileRaw, JBroken}
 
@@ -46,7 +47,7 @@ pub fn health(id: CompilerId) -> Reply =
 # executor and queue patience. The wire format predates the framework, so
 # errors are rendered into the contract's own JSON shapes (via raw), not the
 # framework's Err branch.
-pub fn rpc(body: Bytes, host: Host, check_only: Bool, native: Bool) -> Reply !io =
+pub fn rpc(body: Bytes, host: Host, check_only: Bool, native: Bool, toolchain: String) -> Reply !io =
   # bytes, not code points: str.len counts characters, so a program written in
   # CJK got up to three times the stated budget
   if len(body) > MAX_BODY {
@@ -58,20 +59,40 @@ pub fn rpc(body: Bytes, host: Host, check_only: Bool, native: Bool) -> Reply !io
       Err(e) -> raw(400, JSON_CT, render_error("request body is not valid UTF-8 (offset ${e.offset})"))
       Ok(source) -> match parse_request(source) {
         Err(msg) -> raw(400, JSON_CT, render_error(msg))
-        Ok(code) -> {
-          let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
-          # The host holds a permit across the job only and releases it however
-          # the job ends, then we render outside the permit. None = saturated.
-          match host.call(wait, if check_only { JCheck(code, native) } else { JRun(code) }) {
-            Some(JOutcome(outcome)) ->
-              raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) })
-            Some(other) -> failed(other)
-            None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
+        Ok(code) ->
+          if check_only {
+            run_job(host, code, true, native, "")
+          } else {
+            # A sample answer the deploy computed (play/answers), or the job.
+            let key = "${cache_key(toolchain, code)}/run"
+            match host.keep_get(key) {
+              Some(line) -> serve_kept("", "run", tick(), line)
+              None -> run_job(host, code, false, native, key)
+            }
           }
-        }
       }
     }
   }
+
+# The host holds a permit across the job only and releases it however the job
+# ends, then we render outside the permit. None = saturated. A /run answer is
+# offered to the host's answer store (`key`, empty for /check) only when the
+# program ran: a compile error or a timeout is not an answer worth keeping.
+fn run_job(host: Host, code: String, check_only: Bool, native: Bool, key: String) -> Reply !io = {
+  let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
+  match host.call(wait, if check_only { JCheck(code, native) } else { JRun(code) }) {
+    Some(JOutcome(outcome)) -> {
+      let body = if check_only { render_check(outcome) } else { render_outcome(outcome) }
+      match outcome {
+        Compiled(_, _, _, _) -> if key != "" { host.keep_put(key, kept_line(200, "R", body)) }
+        _ -> ()
+      }
+      raw(200, JSON_CT, body)
+    }
+    Some(other) -> failed(other)
+    None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
+  }
+}
 
 # A job that came back as something its route did not ask for, or did not come
 # back: the runner's own fault, so a 500.
@@ -84,24 +105,37 @@ fn failed(r: JobResult) -> Reply =
 # What /compile needs to know of the machine it runs on, asked once at start.
 pub type View = { toolchain: String, build: String, javap: Bool, tile: Bool, native: Bool }
 
-# The view's cache lines: "<status>:<kind>:" and then the text. A kind is `S`,
-# the program's part of a success answer (the head is written per request), or
-# `F`, an answer that is complete as kept.
+# The answer store's lines: "<status>:<kind>:" and then the text. A kind is `S`,
+# the program's part of a success answer (the head is written per request),
+# `F`, an answer that is complete as kept, or `R`, a /run answer that is
+# complete as kept and goes out with `"cached":true` added as its last member
+# (a live /run answer has no such member, so a hit and a live answer differ in
+# that member, and in `ms` as any two runs do, and in nothing else).
 fn kept_line(status: Int, kind: String, text: String) -> String = "${status}:${kind}:${text}"
 
-fn serve_kept(view: View, target: String, started: Instant, line: String) -> Reply !io =
+fn serve_kept(build: String, target: String, started: Instant, line: String) -> Reply !io =
   match str.split_once(line, ":") {
     None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
     Some((status, rest)) -> match str.split_once(rest, ":") {
       None -> raw(500, JSON_CT, render_error("the compile view's cache holds a line it cannot read"))
       Some((kind, text)) ->
         if kind == "S" {
-          raw(200, JSON_CT, respond(target, view.build, true, ms_since(started), text))
+          raw(200, JSON_CT, respond(target, build, true, ms_since(started), text))
+        } else if kind == "R" {
+          raw(200, JSON_CT, mark_cached(text))
         } else {
           raw(parse_int(status).unwrap_or(500), JSON_CT, text)
         }
     }
   }
+
+# A rendered JSON object with `"cached":true` as its last member.
+fn mark_cached(body: String) -> String = str.take(body, len(body) - 1) ++ ",\"cached\":true}"
+
+test "a kept /run answer gains cached as its last member and nothing else" {
+  let live = "{\"ok\":true,\"phase\":\"run\",\"exit\":0,\"output\":\"hi\\n\",\"truncated\":false,\"ms\":7}"
+  assert mark_cached(live) == "{\"ok\":true,\"phase\":\"run\",\"exit\":0,\"output\":\"hi\\n\",\"truncated\":false,\"ms\":7,\"cached\":true}"
+}
 
 # The refusal when the machine cannot make the view at all: the JVM listing is
 # `javap`'s, which only a JDK has, and the call table needs that listing for
@@ -152,7 +186,7 @@ fn tile_ir(host: Host, view: View, code: String) -> Reply !io =
     let started = tick()
     let key = "${cache_key(view.toolchain, code)}/tile"
     match host.keep_get(key) {
-      Some(line) -> serve_kept(view, "tile", started, line)
+      Some(line) -> serve_kept(view.build, "tile", started, line)
       None ->
         match host.call(COMPILE_WAIT_SECS, JTile(code)) {
           None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
@@ -180,7 +214,7 @@ fn compile_view(host: Host, view: View, code: String, target: String) -> Reply !
   let started = tick()
   let base = cache_key(view.toolchain, code)
   match host.keep_get("${base}/${target}") {
-    Some(line) -> serve_kept(view, target, started, line)
+    Some(line) -> serve_kept(view.build, target, started, line)
     None ->
       match host.call(COMPILE_WAIT_SECS, JView(code, view.native)) {
         None -> raw(429, JSON_CT, render_error("server busy, try again shortly"))
@@ -210,6 +244,13 @@ fn mapped(host: Host, view: View, code: String, target: String, base: String, st
       raw(status, JSON_CT, body)
     }
   }
+
+## The view of the machine this process runs on, the one /compile answers
+## with: the same text the runner's request and the deploy's warm-up key on.
+pub fn view_here(id: CompilerId) -> View !io = {
+  let javap = if tool_present(javap_bin()) { "present" } else { "" }
+  view_of(id, native_ready(id), javap)
+}
 
 ## What /compile needs to know of the machine, asked of the toolchain, once
 ## a request, since the process is the request.

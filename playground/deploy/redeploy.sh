@@ -314,6 +314,36 @@ REMOTE_CANARY='
     --candidate "$B/.dawn-play.next" --previous "$B/dawn-play" \
     --unit "$D/dawn-play-native@.service" --toolchain-id "$TOOLCHAIN_ID" $ACCEPT
 '
+# The sample answers (play/answers, docs/playground-native-runner-design.md
+# 4.4), made before the swap and by the binary that is about to go live: its
+# `warm` subcommand sends every sample in the tree just synced through its own
+# routes, as dawn-play so that the jobs go through the real sandbox, into a
+# staging directory under the work root. The staged files are then copied into
+# a directory the deploy user owns and swapped in for the live one; the runner
+# (user dawn-play) can read it and, being the only other writer and not
+# writing in a serving process, never changes it. It runs after the canary, so
+# the canary's byte compare sees a runner with no store, and before the swap,
+# so that the first request the new binary answers already finds its samples.
+# A sample that does not get an answer stops the deploy here with the previous
+# binary live: see play/warm.dawn for why that is a failure and not a warning.
+# shellcheck disable=SC2016  # the remote shell's variables
+REMOTE_WARM='
+  set -e
+  D=/opt/dawn/playground/deploy
+  B=/opt/dawn/bin
+  P=/opt/dawn/playground
+  STAGE=/var/lib/dawn-play/work/answers-stage
+  sudo -n -u dawn-play /usr/bin/python3 -I -B "$D/canary-check.py" --warm \
+    --candidate "$B/.dawn-play.next" --unit "$D/dawn-play-native@.service" --toolchain-id "$TOOLCHAIN_ID" \
+    --samples /opt/dawn/site/play-ui/samples --stage "$STAGE"
+  rm -rf /opt/dawn/playground/answers.next /opt/dawn/playground/answers.old
+  mkdir -m 755 /opt/dawn/playground/answers.next
+  cp "$STAGE"/* /opt/dawn/playground/answers.next/
+  chmod 644 /opt/dawn/playground/answers.next/*
+  if [ -d /opt/dawn/playground/answers ]; then mv /opt/dawn/playground/answers /opt/dawn/playground/answers.old; fi
+  mv /opt/dawn/playground/answers.next /opt/dawn/playground/answers
+  rm -rf /opt/dawn/playground/answers.old
+'
 # The swap, and the check through the socket after it. The toolchain id the
 # units read (their EnvironmentFile) and the binary are each renamed into
 # place; the two units are installed only when they differ from what is
@@ -322,7 +352,8 @@ REMOTE_CANARY='
 # sends every request to. Then /health and /run through the socket itself, as
 # dawn-play, who may connect: this release and build, a /health p95 at most
 # 25 ms over 100 new connections (the real Accept=yes start-up), hello prints
-# hello.
+# hello, and the hello sample out of the answer store (a copy with one more
+# byte compiled instead).
 # shellcheck disable=SC2016  # the remote shell's variables
 REMOTE_SWAP='
   set -e
@@ -347,7 +378,7 @@ REMOTE_SWAP='
     sudo systemctl restart dawn-play-native.socket
   fi
   sudo systemctl is-active --quiet dawn-play-native.socket
-  sudo -n -u dawn-play /usr/bin/python3 -I -B "$D/canary-check.py" --live --toolchain-id "$TOOLCHAIN_ID"
+  sudo -n -u dawn-play /usr/bin/python3 -I -B "$D/canary-check.py" --live --toolchain-id "$TOOLCHAIN_ID" --samples /opt/dawn/site/play-ui/samples
 '
 CANARY_ENV="TOOLCHAIN_ID='$PLAY_TOOLCHAIN_ID'; ACCEPT_DIFF='${DAWN_PLAY_CANARY_ACCEPT_DIFF:-}';"
 echo "=== checking the new runner against the live one (canary) ==="
@@ -356,6 +387,13 @@ if ! ssh "$HOST" "$CANARY_ENV $REMOTE_CANARY"; then
   echo "error: the runner canary failed its check; the new binary was not swapped in." >&2
   echo "  The previous runner binary is still live, on the toolchain this deploy synced." >&2
   echo "  Fix and redeploy, or restore the rollback copy (playground/deploy/DEPLOY.md, \"Rollback copies\")." >&2
+  exit 1
+fi
+echo "=== warming the sample answers with the new runner ==="
+# shellcheck disable=SC2029
+if ! ssh "$HOST" "$CANARY_ENV $REMOTE_WARM"; then
+  echo "error: the sample answers could not be warmed; the new binary was not swapped in." >&2
+  echo "  The previous runner binary is still live. Read the warm: lines above for the sample that got no answer." >&2
   exit 1
 fi
 echo "=== swapping the runner in and checking it through the socket ==="

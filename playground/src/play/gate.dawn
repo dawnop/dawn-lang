@@ -27,7 +27,8 @@ use std/io
 use std/io.{with_fs_real}
 use play/config.{slot_dir}
 use play/exec.{temp_root, run_cmd, uuid, cleanup}
-use play/host.{Host, Job, JobResult, JBroken, no_keep_get, no_keep_put}
+use play/host.{Host, Job, JobResult, JBroken, no_keep_put}
+use play/answers.{read_answer}
 use play/job.{encode_job, decode_result}
 
 ## The number of slots, the number of compilers the host runs at once.
@@ -87,10 +88,19 @@ fn through_gate(wait_secs: Int, job: Job) -> Option[JobResult] !io = {
   }
 }
 
-## The host of the process-per-request entry: jobs through the flock slots, and
-## no answer cache.
+## The host of the process-per-request entry: jobs through the flock slots, the
+## deploy's sample answers read when there are any (play/answers), and nothing
+## written: a serving process keeps no answer of its own.
 pub fn flock_host() -> Host =
-  Host { call: through_gate, keep_get: no_keep_get, keep_put: no_keep_put }
+  Host { call: through_gate, keep_get: read_answer, keep_put: no_keep_put }
+
+## The same gate with the store the other way round, for the deploy's warm-up
+## (play/warm): nothing is read, so every request runs for real, and every
+## answer is handed to `keep`.
+pub fn recording_host(keep: fn(String, String) -> Unit !io) -> Host =
+  Host { call: through_gate, keep_get: no_answer, keep_put: keep }
+
+fn no_answer(_key: String) -> Option[String] = None
 
 # Test-only: run the gate script for `true` while slot 0 is held by an outer
 # shell (a separate open of the file, which is what a second process is), with

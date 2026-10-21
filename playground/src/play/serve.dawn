@@ -30,10 +30,9 @@ use std/bytes
 use std/str
 use sha2/sha256
 use play/http1.{read_request, respond, respond_reject, Request}
-use play/routes.{Reply, health, rpc, compile_rpc, view_of}
+use play/routes.{Reply, health, rpc, compile_rpc, view_here}
 use play/contract.{parse_request, parse_compile_request}
-use play/exec.{CompilerId, compiler_id, native_ready, tool_present}
-use play/config.{javap_bin}
+use play/exec.{CompilerId, compiler_id, native_ready}
 use play/gate.{flock_host}
 use play/job.{job_main}
 
@@ -65,12 +64,9 @@ fn dispatch(req: Request, id: CompilerId) -> Reply !io =
       } else {
         let host = flock_host()
         match req.path {
-          "/run" -> rpc(req.body, host, false, false)
-          "/check" -> rpc(req.body, host, true, native_ready(id))
-          _ -> {
-            let javap = if tool_present(javap_bin()) { "present" } else { "" }
-            compile_rpc(req.body, host, view_of(id, native_ready(id), javap))
-          }
+          "/run" -> rpc(req.body, host, false, false, "${id.version} ${id.build}")
+          "/check" -> rpc(req.body, host, true, native_ready(id), "")
+          _ -> compile_rpc(req.body, host, view_here(id))
         }
       }
   }

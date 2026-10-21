@@ -4,14 +4,17 @@
 # decides where the job runs and under what limit, and whether an answer is
 # kept. The runner has one host today, play/gate's: a job runs in a child
 # process that holds a cross-process flock permit for as long as it runs, and
-# nothing is kept (the process is the request, so there is nowhere to keep it).
+# no answer is written by a request (the process is the request, so there is
+# nowhere to keep one); the deploy's sample answers are read.
 #
 # The record stayed when the second host, the long-lived JVM server's
 # in-process Semaphore and answer cache, was removed with that server (K5 of
-# docs/playground-native-runner-design.md). `keep_get` and `keep_put` are where
-# a file cache goes if the source digests in the access log show programs
-# coming back often enough to pay for one (ruling 4, 2026-10-19); until then
-# they are the no-ops below. The job is a closed set of cases and not a
+# docs/playground-native-runner-design.md). `keep_get` and `keep_put` are the
+# answer store (play/answers): a serving process reads the answers a deploy
+# computed for the samples and writes none (R2, 2026-10-21); a general cache
+# written by requests would go behind the same two functions if the source
+# digests in the access log ever showed programs coming back often enough to
+# pay for one (ruling 4, 2026-10-19). The job is a closed set of cases and not a
 # closure because it crosses into another process as a file.
 use play/contract.{Outcome}
 use play/exec.{ViewRaw, TileRaw}
@@ -33,14 +36,14 @@ pub type JobResult =
 
 ## `call(wait_secs, job)` runs the job once a permit is free, waiting up to
 ## `wait_secs` for one; None means the machine stayed saturated and the route
-## answers 429. `keep_get` and `keep_put` are the answer cache.
+## answers 429. `keep_get` and `keep_put` are the answer store.
 pub type Host = {
   call: fn(Int, Job) -> Option[JobResult] !io,
   keep_get: fn(String) -> Option[String] !io,
   keep_put: fn(String, String) -> Unit !io,
 }
 
-## The cache of a host that keeps none.
+## The store of a host that keeps none.
 pub fn no_keep_get(_key: String) -> Option[String] = None
 
 pub fn no_keep_put(_key: String, _text: String) -> Unit = ()

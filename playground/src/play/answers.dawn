@@ -1,0 +1,65 @@
+# The sample answer store: what a deploy computed with this toolchain, kept as
+# files, and the only part of the runner that reads them. Why it exists:
+# docs/playground-native-runner-design.md, section 4.4 (R2 of the latency ruling
+# of 2026-10-21). The short version is that a sample the page offers is a
+# program known when the deploy runs, so its answer can be made then, once,
+# and a request for that exact program costs a file read instead of a seven
+# second compile.
+#
+# Why this is not the cache section 4.2 cut. That one was written by requests:
+# keys of unknown number, eviction, several processes writing one directory,
+# and a hit rate only a log could show. This one is written only by `warm`
+# (play/warm), before the new runner is live, into a directory the runner's
+# unit names; a serving process never has a store to write to (its `keep_put`
+# is a no-op). So there is nothing to evict, nothing to race and nothing a
+# visitor can poison, and a miss is the request it always was.
+#
+# The key is made by the routes, not here: the toolchain id (version and
+# build, plus `javap` presence for the compile view), the form the program
+# compiles in, the endpoint and target, and the program's SHA-256, all hashed
+# (play/view.cache_key). A new toolchain therefore asks for names no old file
+# has, and the deploy replaces the whole directory besides. A file is named by
+# its key with `/` written as `.`; nothing a visitor sends reaches a file name,
+# because the name is a hash and one of four fixed words.
+use std/bytes
+use std/str
+use std/io
+use std/io.{with_fs_real}
+use play/config.{answers_dir}
+
+fn file_name(key: String) -> String = str.replace(key, "/", ".")
+
+## The kept line for `key`, or None: no store configured, no such file, or a
+## file that is not UTF-8.
+pub fn read_answer(key: String) -> Option[String] !io = {
+  let dir = answers_dir()
+  if dir == "" {
+    None
+  } else {
+    match with_fs_real(() => io.read_bytes("${dir}/${file_name(key)}")) {
+      Err(_) -> None
+      Ok(b) -> match bytes.decode_utf8_checked(b) {
+        Ok(text) -> Some(text)
+        Err(_) -> None
+      }
+    }
+  }
+}
+
+## Keep a line under `key` in `dir`. Only `warm` calls this. A failure is not
+## swallowed: a warm-up that cannot write its answers must not look finished.
+pub fn write_answer(dir: String, key: String, line: String) -> Unit !io =
+  match with_fs_real(() => io.write_bytes("${dir}/${file_name(key)}", bytes.utf8(line))) {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot keep an answer: ${e}")
+  }
+
+test "a key becomes a file name without a slash" {
+  assert file_name("ab12/run") == "ab12.run"
+  assert file_name("ab12/c") == "ab12.c"
+}
+
+## Whether `dir` holds an answer under `key`: the warm-up's check that what it
+## asked for was kept.
+pub fn has_answer(dir: String, key: String) -> Bool !io =
+  with_fs_real(() => io.exists("${dir}/${file_name(key)}"))

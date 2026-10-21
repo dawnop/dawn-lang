@@ -62,6 +62,7 @@ by hand, with the server reachable.
    /opt/dawn/bin/dawn-play                 # the runner binary (rsynced beside it, renamed in after the canary)
    /opt/dawn/build/dawn-selfhost.jar       # compiler (rsynced)
    /opt/dawn/playground/toolchain.env       # PLAY_TOOLCHAIN_ID for the runner unit (written by redeploy.sh)
+   /opt/dawn/playground/answers/            # the sample answers for this toolchain, read-only for the runner (made by redeploy.sh, see "Sample answers")
    /opt/dawn/playground/lsp_gateway.py      # loopback WebSocket bridge (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    /opt/dawn/playground/deploy/             # systemd/nginx source snippets (rsynced)
@@ -312,6 +313,38 @@ It adds roughly 2 to 4 minutes to a deploy. A failing canary stops the deploy
 with the new binary not swapped in: the previous runner binary stays live, on
 the toolchain this deploy synced. Fix and redeploy, or restore the rollback
 copy.
+
+### Sample answers
+
+A sample the page offers (`site/play-ui/samples/*.dawn`) is a program known at
+deploy time, so its answer is computed then and the runner only reads it
+(docs/playground-native-runner-design.md 4.4). After the canary passes and
+before the swap, `redeploy.sh` runs the new binary's `warm` pass as
+`dawn-play` (`canary-check.py --warm`, which gives it the unit's environment
+and this deploy's toolchain id): it sends every sample's `/run`, its `/compile`
+c and jvm views, and for a program that imports tileir its tile view, through
+the runner's own routes, sandbox and flock slots, into
+`/var/lib/dawn-play/work/answers-stage`. The deploy user copies that into
+`/opt/dawn/playground/answers.next` and renames it over `answers`; the unit's
+`PLAY_ANSWERS=/opt/dawn/playground/answers` is how the runner finds it. About
+14 samples take a few minutes, a busy gate is waited out, and any sample that
+gets no answer (it does not compile, it times out) stops the deploy before the
+swap with the previous runner live.
+
+The key is the toolchain id, the endpoint and target and the SHA-256 of the
+source, so a new toolchain never reads an old answer and a sample that has
+been edited by one byte is compiled as usual. A hit carries `"cached":true`.
+Nothing is written while serving. To look: `ls /opt/dawn/playground/answers`
+(a deploy leaves roughly three files per plain sample, one more for a tileir
+one), and for a request, the access line's `src_sha256` against the sample.
+To switch the store off without a deploy, unset `PLAY_ANSWERS` in the unit
+(or `rm -rf` the directory): every request is then compiled, as before.
+
+The canary itself runs with `PLAY_ANSWERS=` empty, so that its byte compare
+against the live runner, which has no store, is of two live answers. After the
+swap `canary-check.py --live --samples` asks through the socket for the hello
+sample as it is on disk (it must come back `cached` with the output of its
+`.out` file) and for the same sample with one more byte (it must not).
 
 After it passes, `redeploy.sh` writes `toolchain.env`, renames the binary into
 place, installs the two units if they differ from the installed ones (and
