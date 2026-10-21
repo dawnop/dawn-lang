@@ -46,50 +46,59 @@ cuda_tile.module @m {
     %46 = constant <i32: 3> : tile<16xi32>
     %47 = subi %42, %46 : tile<16xi32>
     %48 = constant <i32: 0> : tile<i32>
-    %49 = offset %arg1, %48 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %50 = make_tensor_view %49, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %51 = make_partition_view %50 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %52 = atomic_red_view_tko relaxed device %51[%48], add, %42 token=%26 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %53 = constant <i32: 0> : tile<i32>
-    %54 = offset %arg3, %53 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %55 = make_tensor_view %54, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %56 = make_partition_view %55 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %57 = atomic_red_view_tko relaxed device %56[%53], and, %47 token=%52 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %58 = constant <i32: 0> : tile<i32>
-    %59 = offset %arg4, %58 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %60 = make_tensor_view %59, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %61 = make_partition_view %60 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %62 = atomic_red_view_tko relaxed device %61[%58], or, %47 token=%57 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %63 = constant <i32: 0> : tile<i32>
-    %64 = offset %arg5, %63 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %65 = make_tensor_view %64, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %66 = make_partition_view %65 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %67 = atomic_red_view_tko relaxed device %66[%63], xor, %47 token=%62 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %68 = constant <i32: 0> : tile<i32>
-    %69 = offset %arg6, %68 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %70 = make_tensor_view %69, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %71 = make_partition_view %70 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %72 = atomic_red_view_tko relaxed device %71[%68], max, %47 token=%67 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %73 = constant <i32: 0> : tile<i32>
-    %74 = offset %arg7, %73 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %49 = assume div_by<16>, %arg1 : tile<ptr<i32>>
+    %50 = offset %49, %48 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %51 = make_tensor_view %50, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %52 = make_partition_view %51 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %53 = atomic_red_view_tko relaxed device %52[%48], add, %42 token=%26 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %54 = constant <i32: 0> : tile<i32>
+    %55 = assume div_by<16>, %arg3 : tile<ptr<i32>>
+    %56 = offset %55, %54 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %57 = make_tensor_view %56, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %58 = make_partition_view %57 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %59 = atomic_red_view_tko relaxed device %58[%54], and, %47 token=%53 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %60 = constant <i32: 0> : tile<i32>
+    %61 = assume div_by<16>, %arg4 : tile<ptr<i32>>
+    %62 = offset %61, %60 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %63 = make_tensor_view %62, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %64 = make_partition_view %63 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %65 = atomic_red_view_tko relaxed device %64[%60], or, %47 token=%59 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %66 = constant <i32: 0> : tile<i32>
+    %67 = assume div_by<16>, %arg5 : tile<ptr<i32>>
+    %68 = offset %67, %66 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %69 = make_tensor_view %68, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %70 = make_partition_view %69 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %71 = atomic_red_view_tko relaxed device %70[%66], xor, %47 token=%65 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %72 = constant <i32: 0> : tile<i32>
+    %73 = assume div_by<16>, %arg6 : tile<ptr<i32>>
+    %74 = offset %73, %72 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
     %75 = make_tensor_view %74, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
     %76 = make_partition_view %75 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %77 = atomic_red_view_tko relaxed device %76[%73], min, %47 token=%72 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %77 = atomic_red_view_tko relaxed device %76[%72], max, %47 token=%71 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     %78 = constant <i32: 0> : tile<i32>
-    %79 = offset %arg8, %78 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %80 = make_tensor_view %79, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %81 = make_partition_view %80 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %82 = atomic_red_view_tko relaxed device %81[%78], umax, %47 token=%77 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %83 = constant <i32: 0> : tile<i32>
-    %84 = offset %arg9, %83 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
-    %85 = make_tensor_view %84, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
-    %86 = make_partition_view %85 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
-    %87 = atomic_red_view_tko relaxed device %86[%83], umin, %47 token=%82 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
-    %88 = offset %arg2, %1 : tile<ptr<f64>>, tile<i32> -> tile<ptr<f64>>
-    %89 = make_tensor_view %88, shape = [16], strides = [1] : tensor_view<16xf64, strides=[1]>
-    %90 = make_strided_view %89 : strided_view<tile=(16), traversal_strides=[16], tensor_view<16xf64, strides=[1]>, dim_map=[0]>
-    %91 = itof %42 signed rounding<nearest_even> : tile<16xi32> -> tile<16xf64>
-    %92 = atomic_red_view_tko relaxed device %90[%1], addf, %91 token=%87 : tile<16xf64>, strided_view<tile=(16), traversal_strides=[16], tensor_view<16xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %79 = assume div_by<16>, %arg7 : tile<ptr<i32>>
+    %80 = offset %79, %78 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %81 = make_tensor_view %80, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %82 = make_partition_view %81 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %83 = atomic_red_view_tko relaxed device %82[%78], min, %47 token=%77 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %84 = constant <i32: 0> : tile<i32>
+    %85 = assume div_by<16>, %arg8 : tile<ptr<i32>>
+    %86 = offset %85, %84 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %87 = make_tensor_view %86, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %88 = make_partition_view %87 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %89 = atomic_red_view_tko relaxed device %88[%84], umax, %47 token=%83 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %90 = constant <i32: 0> : tile<i32>
+    %91 = assume div_by<16>, %arg9 : tile<ptr<i32>>
+    %92 = offset %91, %90 : tile<ptr<i32>>, tile<i32> -> tile<ptr<i32>>
+    %93 = make_tensor_view %92, shape = [16], strides = [1] : tensor_view<16xi32, strides=[1]>
+    %94 = make_partition_view %93 : partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>
+    %95 = atomic_red_view_tko relaxed device %94[%90], umin, %47 token=%89 : tile<16xi32>, partition_view<tile=(16), tensor_view<16xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %96 = assume div_by<16>, %arg2 : tile<ptr<f64>>
+    %97 = offset %96, %1 : tile<ptr<f64>>, tile<i32> -> tile<ptr<f64>>
+    %98 = make_tensor_view %97, shape = [16], strides = [1] : tensor_view<16xf64, strides=[1]>
+    %99 = make_strided_view %98 : strided_view<tile=(16), traversal_strides=[16], tensor_view<16xf64, strides=[1]>, dim_map=[0]>
+    %100 = itof %42 signed rounding<nearest_even> : tile<16xi32> -> tile<16xf64>
+    %101 = atomic_red_view_tko relaxed device %99[%1], addf, %100 token=%95 : tile<16xf64>, strided_view<tile=(16), traversal_strides=[16], tensor_view<16xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

@@ -554,6 +554,7 @@ kernels=(
   insert_tile powi_sweep loop_return attr_sat attr_ftof attr_xchg token_fences
   view_inbounds view_inbounds_off view_inbounds_dim
   flash_attn idx_softmax carry_extent flash_attn_bf16
+  flash_bf16_sm90_d64 flash_bf16_sm90_d128 flash_bf16_sm100_d64 flash_bf16_sm100_d128
   scalar_scale scalar_len scalar_loop scalar_wide
   dtype_e5m3 mmaf_scaled_e5m3
   vadd_producer vadd_debug foldif_debug)
@@ -978,8 +979,9 @@ check_global_syms_symbols() { # cubin
 # between.
 kernel_arch() { # kernel
   case "$1" in
-    dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
+    flash_bf16_sm100_d64|flash_bf16_sm100_d128|dtype_e4m3|dtype_e5m2|dtype_e8m0|dtype_e2m1|mmaf_scaled_e4m3) echo sm_100 ;;
     dtype_e5m3|mmaf_scaled_e5m3) echo sm_107 ;;
+    flash_bf16_sm90_d64|flash_bf16_sm90_d128) echo sm_90 ;;
     view_atomic_bf16) echo sm_89 ;;
     *) echo "$gpu_name" ;;
   esac
@@ -2559,10 +2561,11 @@ fi
 #     byte an index. view_transpose has one load and one store over two
 #     indices, so its Func section is six bytes short, and the reader takes
 #     the view for the count and the operand stream is lost.
+#     The base-alignment assumption adds two SSA values before the view.
 if run_item view-inbounds-unwritten; then
   mutant_project view-inbounds-unwritten bytecode.dawn
   writer_mutant_checks view-inbounds-unwritten view_transpose func-six-short \
-    "error at offset 56: operand index 16 out of bounds (size=16) for index segment, element 1"
+    "error at offset 68: operand index 18 out of bounds (size=18) for token segment, element 0"
 fi
 
 # 69. The header says 13.3 while the body is written in the 13.4 shapes:

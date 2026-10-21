@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/gpu.md @ a85ef11835e2eeb6 -->
+<!-- doc-check: translation-of site/pages/gpu.md @ 9d49c78401e86372 -->
 
 # cuTile 后端页文案 —— 中文译本
 
@@ -309,3 +309,44 @@ tileiras
 ## chip-gpus
 
 块 GPU 有记录
+
+
+## perf-title
+
+Flash attention 测时
+
+## perf-body
+
+按 `(arch, d)` 离线选配置，在同一进程、同一流内用 CUDA events 交错测五轮。时间为毫秒，中位数 / p90。基线是 64×64、无 entry hint；bf16 用 f32 累加、f64 输出，f64 调优后用 32×16。cuTile 是上游 bf16 attention 样例四个实测配置的最快格；SDPA 采用所在行的 bf16 或 f64 格式。cuTile 输出 bf16，Dawn 输出 f64。f64 行没有对应的 cuTile 样例。[配置台账](https://github.com/dawnop/dawn-lang/blob/main/scripts/flash-config/ledger.json) 保留选表证据，包括未入表的 sm_100 d64 单头候选。配置在录制前固定，不做运行期搜索。
+
+## perf-format
+
+格式
+
+## perf-workload
+
+负载
+
+## perf-tools
+
+tileiras / 优化级别
+
+## perf-config
+
+配置
+
+## perf-before
+
+改前
+
+## perf-after
+
+改后
+
+## perf-cutile
+
+cuTile 1.7.0
+
+## perf-sdpa
+
+torch SDPA

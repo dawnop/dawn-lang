@@ -1258,7 +1258,8 @@ def docs_check(extra):
     from here, and not as a step of its own, so that the one CI step that reads
     these text files has one command and the job that carries it keeps the
     `run:` text its budget line was observed under."""
-    return subprocess.run([sys.executable, str(DOCS_CHECK), *extra]).returncode
+    return (subprocess.run([sys.executable, str(DOCS_CHECK), *extra]).returncode or
+            subprocess.run([sys.executable, str(ROOT / "scripts/flash-config/check.py"), *extra]).returncode)
 
 
 def main(argv):
