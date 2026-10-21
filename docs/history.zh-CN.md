@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/history.md @ 46fdf5330498989b -->
+<!-- doc-check: translation-of docs/history.md @ 41f91e2743c5080e -->
 
 # 历史
 
@@ -176,6 +176,11 @@
 - **2026-10-06。** std 有了定宽整数 `I8` 到 `I32`、`U8` 到 `U64`，每种一个模块：`Int` 上的不透明类型，算术与 `Int`
   同样回绕，字面量在编译期检查范围，按位运算是具名函数。编译器仍然只拥有 `Int` 与 `Float`；实测 `U32` 版 sha256
   与掩码 `Int` 写法相差不到 1%（已在 main，尚未发版）。（[literal-system-design.md](literal-system-design.md)）
+
+- **2026-10-21，尚未发版。** 按位运算符新增 `BitAnd`、`BitOr`、`BitXor`、`Shl`、
+  `Shr`、`Ushr`、`BitNot`，移位各有独立 Amount，七个 trait 各带关联效果。
+  七个名字从此占用 trait 与 effect 声明位置。Int 保留原生快路，std 整数与 GPU 迁移留待后续。
+  （[设计](bitwise-operator-traits-design.md)）
 
 从 2026-07-17 的 v0.1.0 到 2026-10-01 的 v0.81.0，共 83 个 release tag。
 

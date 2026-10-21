@@ -7389,3 +7389,64 @@ test "rename is refused in a document with no analysis (§R3.1)" {
     }
   }))
 }
+
+test "bitwise operators retain operand navigation rename and evaluated values" {
+  io.with_fs_real(() => io.with_env_real(() => {
+    let std = match load_std("std") {
+      Ok(sc) -> sc
+      Err(e) -> panic("std: ${std_load_error_text(e)}")
+    }
+    let text = join([
+      "type Bits = { value: Int }",
+      "effect BitLog { fn note_bit() -> Unit }",
+      "type LoggedBits = { value: Int }",
+      "impl BitOr[LoggedBits] { effect BitOr = !BitLog",
+      "  fn bit_or(a: LoggedBits, b: LoggedBits) -> LoggedBits !BitLog = a }",
+      "fn logged() -> LoggedBits !BitLog = LoggedBits { value: 77 } | LoggedBits { value: 1 }",
+      "impl BitAnd[Bits] { fn bit_and(a: Bits, b: Bits) -> Bits = a }",
+      "impl BitOr[Bits] { fn bit_or(a: Bits, b: Bits) -> Bits = a }",
+      "impl BitXor[Bits] { fn bit_xor(a: Bits, b: Bits) -> Bits = a }",
+      "impl BitNot[Bits] { fn bit_not(a: Bits) -> Bits = a }",
+      "impl Shl[Bits] { type ShlAmount = Int",
+      "  fn shl(a: Bits, n: Int) -> Bits = Bits { value: a.value << n } }",
+      "impl Shr[Bits] { type ShrAmount = Int",
+      "  fn shr(a: Bits, n: Int) -> Bits = a }",
+      "impl Ushr[Bits] { type UshrAmount = Int",
+      "  fn ushr(a: Bits, n: Int) -> Bits = a }",
+      "fn all(a: Bits, b: Bits, n: Int) -> Bits = (a & b | a ^ ~b) << n >> n >>> n",
+      "fn move[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = a << n",
+      "const FOLDED: Bits = comptime { Bits { value: 3 } << 2 }",
+      "fn folded() -> Int = (Bits { value: 3 } << 2).value",
+      ""
+    ], "\n")
+    let (st, d) = untitled_state(std, "untitled:bitwise", text)
+    let analysis = analysis_of(st, d).expect("the bitwise probe has an analysis")
+    let qc = doc_qcx(st, d, analysis).expect("the bitwise probe has a QCx")
+    for pair in [("a & b", 2, "bit_and"), ("b | a", 2, "bit_or"),
+      ("a ^ ~b", 2, "bit_xor"), ("~b)", 0, "bit_not"),
+      ("<< n >>", 0, "shl"), (">> n >>>", 0, "shr"), (">>> n", 0, "ushr")] {
+      let (needle, skip, method) = pair
+      let target = def_probe_at(st, d, text, needle, skip)
+      let (lo, hi) = def_probe_span(target, "the bitwise impl")
+      assert str.slice(text, lo, hi) == method
+      assert str.contains(target.hover, "via impl")
+    }
+    let uses = occurrences(qc, probe_offset(text, "a & b", 0), true)
+    assert len(uses) == 3
+    assert def_probe_at(st, d, text, "a & b", 0).hover == "let a: Bits"
+    assert str.contains(def_probe_at(st, d, text, "a << n", 2).hover, "bound Shl[T]")
+    match handle_rename(st, rename_params(d, "a & b", 0, "input")) {
+      (Ok(r), _) -> {
+        let edits = match oget(get_or_null(r, "changes"), d.uri) {
+          Some(JArr(es)) -> es
+          _ -> panic("no bitwise operand rename edits")
+        }
+        assert len(edits) == 3
+        for e in edits { assert ostr(e, "newText") == "input" }
+      }
+      (Err(why), _) -> panic("bitwise operand rename refused: ${why}")
+    }
+    assert str.contains(eval_probe_at(st, d, text, "3 } << 2).value", 4), "value: 12")
+    assert not str.contains(eval_probe_at(st, d, text, "77 } | LoggedBits", 5), " = ")
+  }))
+}

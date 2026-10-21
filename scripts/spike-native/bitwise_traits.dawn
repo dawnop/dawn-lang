@@ -1,0 +1,122 @@
+# The independent expectations exercise primitive slots, heterogeneous Amount
+# ABIs, captured dictionaries and evidence, and a qualified handle impl.
+
+effect Log { fn note(s: String) -> Unit }
+effect Dev { fn bias() -> Int }
+
+opaque type Word = Int
+fn word(x: Int) -> Word = x & 255
+fn raw(x: Word) -> Int = x
+impl FromInt[Word] { fn from_int(n: Int) -> Word = word(n) }
+impl BitAnd[Word] { fn bit_and(a: Word, b: Word) -> Word = word(raw(a) & raw(b)) }
+impl BitOr[Word] { fn bit_or(a: Word, b: Word) -> Word = word(raw(a) | raw(b)) }
+impl BitXor[Word] { fn bit_xor(a: Word, b: Word) -> Word = word(raw(a) ^ raw(b)) }
+impl BitNot[Word] { fn bit_not(a: Word) -> Word = word(~raw(a)) }
+impl Shl[Word] {
+  type ShlAmount = Int
+  fn shl(a: Word, n: Int) -> Word = word(raw(a) << (n & 7))
+}
+impl Shr[Word] {
+  type ShrAmount = Int
+  fn shr(a: Word, n: Int) -> Word = word(raw(a) >>> (n & 7))
+}
+impl Ushr[Word] {
+  type UshrAmount = Int
+  fn ushr(a: Word, n: Int) -> Word = word(raw(a) >>> (n & 7))
+}
+
+fn conjunction[T: BitAnd](a: T, b: T) -> T !T.BitAnd = a & b
+fn disjunction[T: BitOr](a: T, b: T) -> T !T.BitOr = a | b
+fn exclusive[T: BitXor](a: T, b: T) -> T !T.BitXor = a ^ b
+fn complement[T: BitNot](a: T) -> T !T.BitNot = ~a
+fn move[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = a << n
+fn earlier[T: Shl](n: T.ShlAmount, a: T) -> T !T.Shl = a << n
+fn right[T: Shr](a: T, n: T.ShrAmount) -> T !T.Shr = a >> n
+fn logical[T: Ushr](a: T, n: T.UshrAmount) -> T !T.Ushr = a >>> n
+fn captured[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = {
+  let f = () => move(a, n)
+  f()
+}
+
+type Count = { value: Int }
+type Register = { value: Int }
+impl FromInt[Register] { fn from_int(n: Int) -> Register = Register { value: n } }
+impl BitAnd[Register] {
+  fn bit_and(a: Register, b: Register) -> Register = Register { value: a.value & b.value }
+}
+impl BitOr[Register] {
+  fn bit_or(a: Register, b: Register) -> Register = Register { value: a.value | b.value }
+}
+impl BitXor[Register] {
+  fn bit_xor(a: Register, b: Register) -> Register = Register { value: a.value ^ b.value }
+}
+impl Shl[Register] {
+  type ShlAmount = Count
+  fn shl(a: Register, n: Count) -> Register = Register { value: a.value << n.value }
+}
+
+type Traced = { value: Int }
+impl BitAnd[Traced] {
+  effect BitAnd = !Log
+  fn bit_and(a: Traced, b: Traced) -> Traced !Log = {
+    note("and")
+    Traced { value: a.value & b.value }
+  }
+}
+fn operand(label: String, value: Int) -> Traced !Log = {
+  note(label)
+  Traced { value: value }
+}
+fn captured_and[T: BitAnd](a: T, b: T) -> T !T.BitAnd = {
+  let f = () => a & b
+  f()
+}
+
+# Qualification stays a proper subgoal; the associated binding contains
+# impl parameters, and the effect is ground, so termination is unchanged.
+trait ShiftDtype[D] { fn shift_dtype(d: D) -> Int }
+type Format = { tag: Int }
+impl ShiftDtype[Format] { fn shift_dtype(d: Format) -> Int = d.tag }
+opaque type Handle[D] = Int
+impl[D: ShiftDtype] Shl[Handle[D]] {
+  type ShlAmount = Handle[D]
+  effect Shl = !Dev
+  fn shl(a: Handle[D], n: Handle[D]) -> Handle[D] !Dev = {
+    let x: Int = a
+    let k: Int = n
+    x << (k + bias())
+  }
+}
+fn handle[D](d: D, x: Int) -> Handle[D] = x
+fn handle_raw[D](x: Handle[D]) -> Int = x
+fn qualified[D: ShiftDtype](d: D) -> Int !Dev = {
+  let a = handle(d, shift_dtype(d))
+  let n = handle(d, 2)
+  handle_raw(captured(a, n))
+}
+
+const FOLDED: Word = comptime {
+  let a = word(3)
+  move(a, 2)
+}
+
+pub fn main() -> Unit !io = {
+  println("${conjunction(12, 10)} ${disjunction(12, 10)} ${exclusive(12, 10)} ${complement(12)}")
+  println("${move(3, 2)} ${right(-8, 1)} ${logical(-1, 63)} ${captured(1, 64)}")
+  let named = move(n: 2, a: 3)
+  let reordered = earlier(3, 3)
+  println("${named} ${reordered}")
+  let a = word(240)
+  let b = word(15)
+  println("${raw(conjunction(a, b))} ${raw(disjunction(a, b))} ${raw(exclusive(a, b))} ${raw(complement(a))}")
+  println("${raw(move(a, -1))} ${raw(right(a, 8))} ${raw(logical(a, 9))} ${raw(FOLDED)}")
+  let reg = Register { value: 240 }
+  println("${(reg & 15).value} ${(15 | reg).value} ${(15 ^ reg).value}")
+  println(to_string(captured(Register { value: 3 }, Count { value: 2 }).value))
+  with handle Log { note(s) => println(s) }
+  let traced = operand("left", 12) & operand("right", 10)
+  println(to_string(traced.value))
+  println(to_string(captured_and(traced, Traced { value: 3 }).value))
+  with handle Dev { bias() => 1 }
+  println(to_string(qualified(Format { tag: 3 })))
+}

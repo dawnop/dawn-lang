@@ -69,7 +69,8 @@ use check/types.{
   prelude_trait_ids,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, foreign_error_ty,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID, ADD_ID, SUB_ID, MUL_ID, DIV_ID, REM_ID,
-  NEG_ID, is_arith_trait, arith_trait_name, opaque_inherits, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
+  NEG_ID, BIT_AND_ID, BIT_OR_ID, BIT_XOR_ID, SHL_ID, SHR_ID, USHR_ID, BIT_NOT_ID,
+  is_bitwise_trait, bitwise_trait_name, is_shift_trait, shift_amount_name, is_arith_trait, arith_trait_name, opaque_inherits, CHAR_OPAQUE_ID, FROM_INT_ID, FROM_FLOAT_ID,
   STAGED_ITER_ID, STAGED_VAR_ID, LEN_ID,
   head_of, impl_at, has_impl_at,
   is_ord_scalar, ord_scalar_names, public_builtin_type_names, is_ground, expandable, type_args_of, sub_goals,
@@ -4853,6 +4854,7 @@ pub(pkg) fn resolve_witness(
         if opaque_inherits(trait_id) {
           return resolve_witness(cx, trait_id, tgt, lo, hi, requirer)
         }
+        if is_bitwise_trait(trait_id) { return (bitwise_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
         if is_arith_trait(trait_id) { return (arith_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
         # The literal traits fall through to the generic miss below, whose hint
         # says how a literal becomes the type (see `literal_opaque`); a bare
@@ -4951,6 +4953,7 @@ pub(pkg) fn resolve_witness(
           }
           # the generic hints below name the module declaring the trait, and
           # an operator's trait is the prelude's
+          if is_bitwise_trait(trait_id) { return (bitwise_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
           if is_arith_trait(trait_id) { return (arith_no_impl(cx, trait_id, t, lo, hi), no_wit()) }
           let ts = ty_show(cx.adts, t)
           let scalar_order = trait_id == ORD_ID && not is_adt(t)
@@ -5732,10 +5735,13 @@ fn check_binary_expr(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: 
   # where a Tile[A] is expected); Int and Float expectations stop here
   # (docs/arith-operator-traits-design.md D7, ruling 2026-10-06).
   let lexp: Option[Ty] = match expected {
-    Some(et) -> if is_arith_op(op) && arith_routed(cx, et) { Some(et) } else { None }
+    Some(et) -> if (is_arith_op(op) && arith_routed(cx, et)) || (is_bitwise_op(op) && bitwise_routed(cx, et)) { Some(et) } else { None }
     None -> None
   }
   let (left_cx, lt, lx) = check_expr(cx, left, lexp)
+  if is_bitwise_op(op) && bitwise_routed(left_cx, lt) {
+    return check_bitwise_trait(left_cx, bitwise_tid(op), lt, lx, Some(right), olo, ohi, lo, hi)
+  }
   let arith = is_arith_op(op)
   if arith && arith_routed(left_cx, lt) {
     return check_arith_trait(left_cx, arith_tid(op), lt, lx, Some(right), olo, ohi, lo, hi)
@@ -5755,10 +5761,10 @@ fn check_binary_expr(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: 
 }
 
 ## The operators a literal operand yields to the other side for: arithmetic,
-## comparison and equality. Bitwise operators and shifts take Int alone, so
-## there is nothing to yield to.
+## comparison, equality and homogeneous bitwise operations. A shift count
+## belongs to Amount and never anchors the subject.
 fn op_takes_lit_yield(op: BinOp) -> Bool =
-  is_arith_op(op) || op == OpEq || op == OpNeq || op == OpLt || op == OpLe || op == OpGt ||
+  is_arith_op(op) || is_same_bitwise_op(op) || op == OpEq || op == OpNeq || op == OpLt || op == OpLe || op == OpGt ||
   op == OpGe
 
 ## Two literals, and nothing on either side to yield to. The node's own
@@ -5774,14 +5780,14 @@ fn op_takes_lit_yield(op: BinOp) -> Bool =
 fn both_lit_expectation(cx: Cx, op: BinOp, left: Expr, right: Expr, expected: Option[Ty]) -> Option[Ty] = {
   match expected {
     Some(t) ->
-      if is_arith_op(op) &&
+      if (is_arith_op(op) || is_same_bitwise_op(op)) &&
         (lit_target(cx, t, is_float_atom(left)) == LitViaTrait ||
             lit_target(cx, t, is_float_atom(right)) == LitViaTrait) {
         return Some(t)
       }
     None -> ()
   }
-  if is_float_atom(left) != is_float_atom(right) { Some(TyFloat) } else { None }
+  if not is_same_bitwise_op(op) && is_float_atom(left) != is_float_atom(right) { Some(TyFloat) } else { None }
 }
 
 ## `1 / 2` where a Float was expected: the expectation stops at the operator,
@@ -5839,10 +5845,14 @@ fn float_spelling(e: Expr) -> Option[String] =
 fn check_binary_lit_left(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, ohi: Int,
   lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
   let (cx1, rt, rx) = check_expr(cx, right, no_expected())
-  let lexp: Option[Ty] = if is_errorish(rt) || not is_concrete(cx1, rt) { None } else { Some(rt) }
+  let lexp: Option[Ty] = if is_errorish(rt) || not is_concrete(cx1, rt) ||
+    (is_same_bitwise_op(op) && rt == TyFloat) { None } else { Some(rt) }
   let (cx2, lt, lx) = check_expr(cx1, left, lexp)
   if is_arith_op(op) && lit_mismatch(cx2, lt, rt) && arith_has_impl(cx2, arith_tid(op), rt) {
     return lit_mismatch_err(cx2, lt, rt, left, lt, rt, lo, hi)
+  }
+  if is_bitwise_op(op) && bitwise_routed(cx2, lt) {
+    return bitwise_checked(cx2, bitwise_tid(op), lt, lx, rt, rx, olo, ohi, lo, hi)
   }
   if is_arith_op(op) && arith_routed(cx2, lt) {
     return arith_call(cx2, arith_tid(op), lt, lx, Some((rt, rx)), olo, ohi, lo, hi)
@@ -5857,6 +5867,9 @@ fn check_binary_lit_left(cx: Cx, op: BinOp, left: Expr, right: Expr, olo: Int, o
 fn check_binary_after_left(cx: Cx, op: BinOp, left: Expr, right: Expr, lt: Ty, lx: TExpr,
   rexp: Option[Ty], olo: Int, ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
   let (cx2, rt, rx) = check_expr(cx, right, rexp)
+  if is_bitwise_op(op) && bitwise_routed(cx2, lt) {
+    return bitwise_checked(cx2, bitwise_tid(op), lt, lx, rt, rx, olo, ohi, lo, hi)
+  }
   if is_arith_op(op) && arith_routed(cx2, lt) {
     return arith_call(cx2, arith_tid(op), lt, lx, Some((rt, rx)), olo, ohi, lo, hi)
   }
@@ -6145,11 +6158,126 @@ fn lit_via_trait(cx: Cx, tid: Int, t: Ty, arg: TExpr, lo: Int, hi: Int) -> (Cx, 
 ## refuses goes to `Neg`, located at the `-` itself.
 fn check_unary_expr(cx: Cx, op: UnOp, operand: Expr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
   let (cx1, t, tx) = check_expr(cx, operand, no_expected())
+  if op == OpBnot && bitwise_routed(cx1, t) {
+    return check_bitwise_trait(cx1, BIT_NOT_ID, t, tx, None, lo, lo + 1, lo, hi)
+  }
   if op == OpNeg && arith_routed(cx1, t) {
     check_arith_trait(cx1, NEG_ID, t, tx, None, lo, lo + 1, lo, hi)
   } else {
     check_unary(cx1, op, t, tx, e_lo(operand), e_hi(operand), lo, hi)
   }
+}
+
+fn is_same_bitwise_op(op: BinOp) -> Bool = op == OpBand || op == OpBor || op == OpBxor
+
+fn is_bitwise_op(op: BinOp) -> Bool =
+  is_same_bitwise_op(op) || op == OpShl || op == OpShr || op == OpUshr
+
+fn bitwise_tid(op: BinOp) -> Int =
+  match op {
+    OpBand -> BIT_AND_ID
+    OpBor -> BIT_OR_ID
+    OpBxor -> BIT_XOR_ID
+    OpShl -> SHL_ID
+    OpShr -> SHR_ID
+    _ -> USHR_ID
+  }
+
+fn bitwise_spelling(tid: Int) -> String =
+  ["&", "|", "^", "<<", ">>", ">>>", "~"][tid - BIT_AND_ID]
+
+## Only concrete Int stays native. Float has a head but no bitwise impl;
+## inference variables and errors keep the existing recovery path.
+fn bitwise_routed(cx: Cx, t: Ty) -> Bool =
+  if t == TyInt || is_errorish(t) {
+    false
+  } else {
+    match t {
+      TyVar(_, _) -> is_concrete(cx, t)
+      _ -> head_of(t) != None
+    }
+  }
+
+## Select the witness before checking the count: a shift's right operand is
+## the selected impl's Amount, which need not resemble its subject at all.
+fn check_bitwise_trait(cx: Cx, tid: Int, lt: Ty, lx: TExpr, right: Option[Expr],
+  olo: Int, ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  let (cx1, w) = resolve_witness(cx, tid, lt, olo, ohi, "`" ++ bitwise_spelling(tid) ++ "`")
+  let wr = match w {
+    Some(wr) -> wr
+    None -> return (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+  match right {
+    Some(r) -> {
+      let want = bitwise_rhs(cx1, tid, lt)
+      let (cx2, rt, rx) = check_expr(cx1, r, Some(want))
+      bitwise_finish(cx2, tid, lt, [lx, rx], Some(rt), wr, olo, ohi, lo, hi)
+    }
+    None -> bitwise_finish(cx1, tid, lt, [lx], None, wr, olo, ohi, lo, hi)
+  }
+}
+
+## The literal-yield paths have already checked both operands, but choose
+## exactly the same witness and evidence as the ordinary left-first path.
+fn bitwise_checked(cx: Cx, tid: Int, lt: Ty, lx: TExpr, rt: Ty, rx: TExpr,
+  olo: Int, ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  let (cx1, w) = resolve_witness(cx, tid, lt, olo, ohi, "`" ++ bitwise_spelling(tid) ++ "`")
+  match w {
+    Some(wr) -> bitwise_finish(cx1, tid, lt, [lx, rx], Some(rt), wr, olo, ohi, lo, hi)
+    None -> (cx1, TyError, XError(owner_off(cx, lo), owner_off(cx, hi)))
+  }
+}
+
+fn bitwise_rhs(cx: Cx, tid: Int, subject: Ty) -> Ty =
+  if is_shift_trait(tid) {
+    reduce_assoc(cx, TyAssoc(subject, tid, shift_amount_name(tid)))
+  } else {
+    subject
+  }
+
+fn bitwise_finish(cx: Cx, tid: Int, lt: Ty, args: List[TExpr], rhs: Option[Ty], wr: WitRef,
+  olo: Int, ohi: Int, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  let err = XError(owner_off(cx, lo), owner_off(cx, hi))
+  match rhs {
+    Some(rt) -> {
+      if is_errorish(rt) { return (cx, TyError, err) }
+      let want = bitwise_rhs(cx, tid, lt)
+      if rt != want {
+        let message = if is_shift_trait(tid) {
+          "`" ++ bitwise_spelling(tid) ++ "` requires `" ++ shift_amount_name(tid) ++ "` = " ++
+            ty_show(cx.adts, want) ++ ", got " ++ ty_show(cx.adts, rt)
+        } else {
+          "both sides must have the same type: " ++ ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt)
+        }
+        return (cerr_h(cx, message, olo, ohi, "there are no implicit conversions"), TyError, err)
+      }
+    }
+    None -> ()
+  }
+  let tr = trait_of(cx.traits, tid)
+  let (mn, ms) = tr.methods[0]
+  let vid = match tr.tvar { TyVar(_, id) -> id
+    _ -> -1 }
+  let m: Map[Int, Ty] = map.from([(vid, lt)])
+  let em: Map[Int, Eff] = map.empty()
+  let callee_eff = reduce_eff(cx, ms.sig.eff, m)
+  let (cx1, evs, unanswered, vinsts, adropped) = named_evidence_args(cx, ms.sig, m, em, olo, ohi)
+  let charged = eff_union([callee_eff] ++ vinsts)
+  let cx2 = record_effect(cx1, eff_drop_assocs(eff_drop(charged, unanswered), adropped), olo, ohi, mn)
+  (cx2, lt, XCallFn(ms.sig.owner, emitted_fn_name(ms.sig, mn), args, [wr], evs, Some(tid),
+    owner_off(cx, lo), owner_off(cx, hi), owner_off(cx, olo), lt))
+}
+
+fn bitwise_no_impl(cx: Cx, tid: Int, t: Ty, lo: Int, hi: Int) -> Cx = {
+  let name = bitwise_trait_name(tid)
+  let hint = match t {
+    TyOpaque(..) -> "an opaque type does not inherit its target's bitwise operations; write `" ++
+      impl_shape(cx, name, t) ++ "` in the module declaring it"
+    _ -> "Int has an impl; a type of your own gets `" ++ bitwise_spelling(tid) ++ "` from `impl " ++
+      name ++ "[T]` in its module"
+  }
+  cerr_h(cx, "`" ++ bitwise_spelling(tid) ++ "` needs a `" ++ name ++ "` impl for `" ++
+      ty_show(cx.adts, t) ++ "`", lo, hi, hint)
 }
 
 fn is_arith_op(op: BinOp) -> Bool = op == OpAdd || op == OpSub || op == OpMul || op == OpDiv || op == OpMod
@@ -10394,7 +10522,7 @@ fn infer_call_args(
   # moving the literals into the second round left four calls in the
   # compiler itself and `apply(1, ident)` with nothing to infer from.
   while true {
-    let k = first_pending_lit(args, at_slots)
+    let k = first_ready_lit(cx1, s, args, pidx, at_slots, m, em)
     if k < 0 { break }
     let (cxa, m1, em1, at, ax) = infer_call_arg(cx1, s, args[k], k, pidx, pre0, m, em)
     cx1 = cxa
@@ -10485,8 +10613,38 @@ fn lit_waits(cx: Cx, s: Sig, a: Expr, i: Int, pidx: List[Int], m: Map[Int, Ty],
     false
   } else {
     let substd = reduce_instantiated(cx, subst(s.param_tys[pidx[i]], m, em), m)
-    not is_concrete(cx, substd)
+    match substd {
+      TyAssoc(subject, _, _) -> not is_concrete(cx, subject)
+      _ -> not is_concrete(cx, substd)
+    }
   }
+
+## A count written before its subject (`move(n: 2, a: 3)`) cannot settle a
+## projection. Let a non-projection literal bind the subject first; among
+## ready literals the existing Float-first order is unchanged. If every
+## literal is dependent, the ordinary fallback reports the inference error.
+fn first_ready_lit(cx: Cx, s: Sig, args: List[Expr], pidx: List[Int], slots: List[Option[Ty]],
+  m: Map[Int, Ty], em: Map[Int, Eff]) -> Int = {
+  var int_k = -1
+  var j = 0
+  for a in args {
+    let pending = match slots[j] { None -> true
+      Some(_) -> false }
+    if pending && is_lit_atom(a) && pidx[j] >= 0 {
+      let want = reduce_instantiated(cx, subst(s.param_tys[pidx[j]], m, em), m)
+      let ready = match want {
+        TyAssoc(subject, _, _) -> is_concrete(cx, subject)
+        _ -> true
+      }
+      if ready {
+        if is_float_atom(a) { return j }
+        if int_k < 0 { int_k = j }
+      }
+    }
+    j = j + 1
+  }
+  if int_k >= 0 { int_k } else { first_pending_lit(args, slots) }
+}
 
 ## The next waiting literal: a Float one before any Int one, so that of two
 ## literals left for one type parameter the larger kind decides it
@@ -18358,4 +18516,45 @@ test "C extern placement excludes nested functions and impl methods" {
   assert list.contains(msgs_of("fn f() -> Int !io = { extern c \"f\" else 1 }\n"), msg)
   assert list.contains(msgs_of("fn f() -> Int !io = { fn g() -> Int !io = extern c \"g\" else 1\ng() }\n"), msg)
   assert list.contains(msgs_of("trait T[A] { fn f(a: A) -> Int !io }\nimpl T[Int] { fn f(a: Int) -> Int !io = extern c \"f\" else a }\n"), msg)
+}
+
+test "bitwise Int operators keep native TAST and Amount reduces before a count is checked" {
+  let env: Map[String, ModExports] = map.empty()
+  for op in ["&", "|", "^", "<<", ">>", ">>>"] {
+    let src = "fn native(a: Int, b: Int) -> Int = a " ++ op ++ " b\n"
+    let (m, pd) = parser.parse_module(src)
+    assert len(pd) == 0
+    let (cx, tm) = check_module(seed_prelude(test_cx()), m, env)
+    assert len(cx.diags) == 0
+    assert match arith_body(tm, "native") {
+      XBinary(_, XLocal(..), XLocal(..), None, ..) -> true
+      _ -> false
+    }
+  }
+  let src = "type Bits = { value: Int }\n" ++
+    "impl Shl[Bits] {\n  type ShlAmount = Int\n" ++
+    "  fn shl(a: Bits, n: Int) -> Bits = a\n}\n" ++
+    "fn shifted(a: Bits) -> Bits = a << 2\n" ++
+    "fn move[T: Shl](a: T, n: T.ShlAmount) -> T !T.Shl = a << n\n" ++
+    "fn literal() -> Int = move(3, 2)\n" ++
+    "fn named() -> Int = {\n  let x = move(n: 2, a: 3)\n  x\n}\n" ++
+    "fn earlier[T: Shl](n: T.ShlAmount, a: T) -> T !T.Shl = a << n\n" ++
+    "fn reordered() -> Int = {\n  let x = earlier(2, 3)\n  x\n}\n" ++
+    "fn inverted(a: Int) -> Int = ~a\n"
+  let (m, pd) = parser.parse_module(src)
+  assert len(pd) == 0
+  let (cx, tm) = check_module(seed_prelude(test_cx()), m, env)
+  assert len(cx.diags) == 0
+  assert match arith_body(tm, "shifted") {
+    XCallFn(_, "shl", [XLocal(..), XInt(2, ..)], [_], _, Some(tid), ..) -> tid == SHL_ID
+    _ -> false
+  }
+  assert match arith_body(tm, "move") {
+    XCallFn(_, "shl", [XLocal(..), XLocal(..)], [WForward(_)], [_], Some(tid), ..) -> tid == SHL_ID
+    _ -> false
+  }
+  assert match arith_body(tm, "inverted") {
+    XUnary(UBnot, XLocal(..), ..) -> true
+    _ -> false
+  }
 }

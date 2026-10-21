@@ -49,7 +49,8 @@ use check/tast.{
 }
 use check/types.{
   Ty, Eff, TyVar, TyAssoc, TyAdt, TyOpaque, TyList, TyMap, TySet, TyTuple, TyFn,
-  TyUnit, TyNever, EPure, EffVar, EUnion, eff_labels, eff_base, eff_vars
+  TyUnit, TyNever, EPure, EffVar, EUnion, eff_labels, eff_base, eff_vars,
+  impl_at, trait_of, reduce_eff_via_bindings
 }
 use check/cx.{is_const_serializable}
 use front/lexer.{slice_cps}
@@ -295,6 +296,28 @@ fn call_refusal(row: Eff, args: List[TExpr], what: String) -> Option[String] = {
   None
 }
 
+## A concrete trait call costs its impl's effect, not the declaration's
+## still-rigid projection. Read the binding from the witness's selected impl;
+## a forwarded witness remains open and is refused by `wits_refusal`.
+fn trait_call_row(qc: QCx, row: Eff, trait_id: Option[Int], wits: List[WitRef]) -> Eff = {
+  let tid = match trait_id { Some(t) -> t
+    None -> return row }
+  let subject = match get(wits, 0) {
+    Some(WConcrete(_, s)) -> s
+    Some(WApply(_, s, _)) -> s
+    _ -> return row
+  }
+  match impl_at(qc.entry.cx.impl_table, tid, subject) {
+    None -> row
+    Some(im) -> {
+      let tr = trait_of(qc.entry.cx.traits, tid)
+      let vid = match tr.tvar { TyVar(_, id) -> id
+        _ -> -1 }
+      reduce_eff_via_bindings(row, vid, tid, im.eff_bindings)
+    }
+  }
+}
+
 # ---- closedness: binding sites inside the span ----
 
 ## A local is the expression's own when it is bound inside it: a `let`, a
@@ -417,7 +440,7 @@ fn refusal_e(qc: QCx, lo: Int, hi: Int, e: TExpr, in_fn: Bool, in_loop: Bool) ->
         Some(s) -> s.eff
         None -> EPure
       }
-      or_else(call_refusal(row, args, name), () =>
+      or_else(call_refusal(trait_call_row(qc, row, trait_id, wits), args, name), () =>
           or_else(wits_refusal(wits), () => all_refusal(qc, lo, hi, args, in_fn, in_loop)))
     }
     XLambda(_, _, body, ..) -> refusal_e(qc, lo, hi, body, true, false)

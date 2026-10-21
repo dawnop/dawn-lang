@@ -206,6 +206,12 @@ links to; dates are commit dates in UTC+8, and `git log` holds the commits behin
   masked-`Int` form (on main, not yet released).
   ([literal-system-design.md](literal-system-design.md))
 
+- **2026-10-21, not yet released.** Bitwise operator traits add `BitAnd`, `BitOr`,
+  `BitXor`, `Shl`, `Shr`, `Ushr`, and `BitNot`, with one associated count type per
+  shift and an associated effect per trait. These names are now reserved for traits
+  and effects. Int keeps its native path; std integer and GPU migrations follow later.
+  ([Design](bitwise-operator-traits-design.md))
+
 From v0.1.0 on 2026-07-17 to v0.81.0 on 2026-10-01 there have been 83 release tags.
 
 ## Decisions that were reversed
