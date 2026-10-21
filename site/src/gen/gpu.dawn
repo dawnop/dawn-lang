@@ -367,6 +367,69 @@ pub fn api_cards(src: String) -> List[ApiCard] =
     ApiCard { key: "out", kernel: "matmul", cuts: [cut_def(src, "matmul"), cut_arm(src, "matmul")] },
     ApiCard { key: "shared", kernel: "histogram", cuts: [cut_def(src, "histogram"), cut_arm(src, "histogram")] }]
 
+## A test of a package, from `test "<title>" {` to the `}` that closes it.
+pub fn cut_test(src: String, title: String) -> Cut = {
+  let lines = str.split(src, "\n")
+  let head = "test \"${title}\" {"
+  var first = 0
+  var last = 0
+  var i = 0
+  for l in lines {
+    i = i + 1
+    if first == 0 {
+      if l == head {
+        first = i
+      }
+    } else if last == 0 && l == "}" {
+      last = i
+    }
+  }
+  if first == 0 || last == 0 {
+    panic("no test `${head}` closed by `}` to cut")
+  }
+  Cut { first: first, last: last, text: join(list.take(list.drop(lines, first - 1), last - first + 1), "\n") }
+}
+
+## One piece of code of a card that is cut from a package's source: the file
+## it is in, the cut, and the comment lines printed under it (what the piece
+## does, which the page states and a test checks against the same file).
+pub type Piece = { file: String, cut: Cut, after: List[String] }
+
+## A card of what a kernel does once it is recorded: the copy key its title
+## and sentence are under (`show-<key>-title`, `show-<key>`), the Playground
+## sample that runs the same code, and its pieces.
+pub type ShowCard = { key: String, sample: String, pieces: List[Piece] }
+
+fn refused_file() -> String = "packages/tileir/src/prog.dawn"
+
+fn host_file() -> String = "packages/tileinterp/src/selftest.dawn"
+
+## The call that records each refused kernel, as the test that holds its
+## message writes it, and the message up to the library position the panic
+## appends. The page prints these strings, and a test below finds each in the
+## file, so a message that is reworded, or a refusal that stops being the one
+## printed, turns this page red instead of leaving a quotation nobody checked.
+pub fn refused_calls() -> List[(String, String)] =
+  [("trace2(\"w\", In(F64, g), Out(F64, g), into_first_store)", "tileir: kernel `w`: op #5 `store`: parameter 0 is an In, and nothing writes an In"),
+    ("trace_kernel(\"vadd_half\", ", "tileir: kernel `vadd_half`: op #6 `+`: rhs is tile<128xf64>, declared tile<64xf64>")]
+
+## The title of the interpreter's own test that launches a kernel from its
+## recording to its answer; the card cuts it.
+pub fn host_test_title() -> String = "a kernel recorded once launches from its recording to its answer on the host"
+
+pub fn show_cards(refused_src: String, host_src: String) -> List[ShowCard] = {
+  let calls = refused_calls()
+  let refused = (name: String, i: Int) => {
+    let (call, msg) = calls[i]
+    let shown = if str.ends_with(call, ", ") { "${call}..)" } else { call }
+    Piece { file: refused_file(), cut: cut_def(refused_src, name), after: ["# ${shown} refuses:", "# ${msg}"] }
+  }
+  let host = (name: String) => Piece { file: host_file(), cut: cut_def(host_src, name), after: [] }
+  [ShowCard { key: "refused", sample: "refused", pieces: [refused("into_first_store", 0), refused("vadd_half", 1)] },
+    ShowCard { key: "host", sample: "host_launch", pieces: [host("vadd"), host("vadd_prog"), host("run"),
+      Piece { file: host_file(), cut: cut_test(host_src, host_test_title()), after: [] }] }]
+}
+
 ## The calls of flash_attn the keepdims card points at: each named reduction
 ## whose line keeps its dimension.
 pub fn keepdims_calls(m: KernelMap) -> List[MCall] =
@@ -669,6 +732,7 @@ pub type Facts = {
   bytes: Int,
   mutants: List[Mutant],
   cards: List[ApiCard],
+  shows: List[ShowCard],
 }
 
 ## The kernel the page draws, and where both halves live.
@@ -706,6 +770,7 @@ pub fn load_facts() -> Facts !Fs = {
     bytes: size,
     mutants: muts,
     cards: api_cards(src),
+    shows: show_cards(must_read(refused_file()), must_read(host_file())),
   }
 }
 
@@ -825,6 +890,29 @@ fn keepdims_card(c: Copy, mu: fn(String) -> String, m: KernelMap) -> String = {
     ++ """<pre class="gpu-card-src gpu-picks"><code>${join(rows, "")}</code></pre></article>"""
 }
 
+## One card of what a recorded kernel does next: the same shell as an API
+## card, its pieces cut from the packages' own files, a comment under a piece
+## where it says what the piece prints, and, besides the links to the lines,
+## one to the Playground sample that runs it.
+fn show_card(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, card: ShowCard) -> String = {
+  let piece_code = (k: Piece) =>
+    code_lines(dedent(k.cut.text)) ++ join(map(k.after, l => """<span class="gpu-l">${highlight_dawn(l)}</span>"""), "")
+  let code = join(map(card.pieces, piece_code), `<span class="gpu-l"> </span>`)
+  let links = map(card.pieces, k =>
+      """<a href="${gh(k.file)}#L${k.cut.first}-L${k.cut.last}"><code>${escape_html(basename(k.file))}:${span_text(k.cut)}</code></a>""")
+    ++ ["""<a href="${root}/${lang_path(lang, "playground.html")}?sample=${card.sample}">${escape_html(plain(c, "show-open"))}</a>"""]
+  """<article class="gpu-card gpu-card-show"><header><h3>${line(c, "show-${card.key}-title", mu)}</h3>"""
+    ++ """<code class="gpu-card-k">${escape_html(card.sample)}</code></header>"""
+    ++ """<p>${line(c, "show-${card.key}", mu)}</p>"""
+    ++ """<pre class="gpu-card-src"><code>${code}</code></pre>"""
+    ++ """<p class="gpu-card-from">${join(links, " · ")}</p></article>"""
+}
+
+fn basename(path: String) -> String = match str.rsplit_once(path, "/") {
+  Some((_d, f)) -> f
+  None -> path
+}
+
 ## The tutorial chapter that teaches writing a kernel, as its page from the
 ## site root in the default layout (`tutorial/20.html`), or None while the
 ## tutorial has no such chapter: the first `##` chapter whose title names
@@ -864,6 +952,7 @@ fn api_section(c: Copy, mu: fn(String) -> String, root: String, lang: Lang, f: F
   learn ++ """<div class="gpu-cards">
 ${join(map(f.cards, k => api_card(c, mu, k)), "\n")}
 ${keepdims_card(c, mu, f.flash)}
+${join(map(f.shows, k => show_card(c, mu, root, lang, k)), "\n")}
 </div>
 <p class="gpu-note">${line(c, "api-occupancy", mu)} <a href="${readme}#occupancy">${p("api-measured")}</a></p>
 <p class="gpu-note gpu-api-more"><a href="${root}/packages/tileir.html">${p("api-surface")}</a> · <a href="${changes}">${p("api-changes")}</a></p>"""
@@ -1944,6 +2033,45 @@ test "the cards are golden kernels and the arms that trace them" {
   })
 }
 
+## The two cards that are not golden kernels print nothing a package's own
+## tests do not hold. The refusals are quoted, and each quotation is a string
+## of packages/tileir's tests (the kernel's call, the message); every piece is
+## the text of a function or a test of the file the card links to, at the lines
+## it links to; the Playground sample that runs each is there to be run.
+test "the show cards quote what the packages' tests hold, and cut their own files" {
+  with_fs_real(() => {
+    let f = load_facts()
+    let prog = must_read("packages/tileir/src/prog.dawn")
+    let interp = must_read("packages/tileinterp/src/selftest.dawn")
+    assert map(f.shows, k => k.key) == ["refused", "host"]
+    for (call, msg) in refused_calls() {
+      assert str.contains(prog, call)
+      assert str.contains(prog, msg)
+    }
+    for card in f.shows {
+      for k in card.pieces {
+        let src = if k.file == "packages/tileir/src/prog.dawn" { prog } else { interp }
+        let ls = list.take(list.drop(str.split(src, "\n"), k.cut.first - 1), k.cut.last - k.cut.first + 1)
+        assert join(ls, "\n") == k.cut.text
+      }
+      assert str.contains(must_read("site/play-ui/samples/${card.sample}.dawn"), "pub fn main()")
+    }
+    # the refused kernels are the functions the messages name
+    assert map(f.shows[0].pieces, k => str.take(k.cut.text, 18)) == ["fn into_first_stor", "fn vadd_half(a: Pa"]
+    # the host card ends on the test that launches, and the test uses the interpreter's handler
+    let last = f.shows[1].pieces[3].cut.text
+    assert str.starts_with(last, "test \"${host_test_title()}\"")
+    assert str.contains(last, "with_gpu_interp(")
+    for lang in [En, Zh] {
+      let p = gpu_page(plain_assets(), "gpu.js", lang, f, [])
+      assert str.contains(p, "sample=refused\"")
+      assert str.contains(p, "sample=host_launch\"")
+      assert str.contains(p, "prog.dawn:")
+      assert str.contains(p, "selftest.dawn:")
+    }
+  })
+}
+
 ## The keepdims card is flash_attn's two reductions that keep their
 ## dimension, every one of them, each a link to its own row of the map and
 ## naming the call that row's picker picks.
@@ -1962,7 +2090,7 @@ test "the keepdims card points at flash_attn's reductions, on lines the map has"
         assert str.contains(p, """<span class="xc """)
         assert str.contains(p, """" data-c="${k.id}" """)
       }
-      assert len(str.split(p, `<article class="gpu-card`)) == len(f.cards) + 2
+      assert len(str.split(p, `<article class="gpu-card`)) == len(f.cards) + len(f.shows) + 2
     }
   })
 }

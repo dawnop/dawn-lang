@@ -700,7 +700,20 @@ TILEIR_USE = "use tileir/"
 PINNED_SAMPLES = {
     "flash_attn": (
         "scripts/tile-golden/kernels.dawn",
-        "flash_attn",
+        ["flash_attn"],
+    ),
+    # The two cards of the GPU page that are not golden kernels. `refused` is
+    # two kernels packages/tileir's tests record and hold the refusal of;
+    # `host_launch` is a kernel packages/tileinterp's test launches on the
+    # host. What they print is held by the sample's `.out`, which this script
+    # runs the program against, and by those tests' own assertions.
+    "refused": (
+        "packages/tileir/src/prog.dawn",
+        ["into_first_store", "vadd_half"],
+    ),
+    "host_launch": (
+        "packages/tileinterp/src/selftest.dawn",
+        ["vadd", "vadd_prog", "run"],
     ),
 }
 
@@ -713,31 +726,42 @@ def tileir_manifest() -> str:
 
 
 def kernel_text(text: str, name: str) -> str:
-    """`fn <name>(` up to the first line that is a lone closing brace."""
+    """`fn <name>(` to its end: the first lone closing brace when the head
+    opens one, otherwise the last indented line of its body."""
     out: list[str] = []
     on = False
+    braced = False
     for line in text.splitlines():
         if not on and line.startswith(f"fn {name}("):
             on = True
-        if on:
+            braced = line.rstrip().endswith("{")
             out.append(line)
-            if line == "}":
+            continue
+        if on:
+            if braced:
+                out.append(line)
+                if line == "}":
+                    return "\n".join(out)
+            elif line.startswith("  "):
+                out.append(line)
+            else:
                 return "\n".join(out)
-    return ""
+    return "\n".join(out) if on and not braced else ""
 
 
 def check_pinned_sample(stem: str, sample: pathlib.Path, out: pathlib.Path) -> list[str]:
-    original, kernel = PINNED_SAMPLES[stem]
+    original, kernels = PINNED_SAMPLES[stem]
     rel = sample.relative_to(ROOT)
     bad: list[str] = []
     orig = (ROOT / original).read_text(encoding="utf-8")
     text = sample.read_text(encoding="utf-8")
-    want = kernel_text(orig, kernel)
-    if not want:
-        bad.append(f"{rel}: {original} has no `fn {kernel}(` to hold the sample to")
-    elif want not in text:
-        bad.append(f"{rel}: its `fn {kernel}` is not the text of the one in "
-                   f"{original}; the sample is a copy that must not drift")
+    for kernel in kernels:
+        want = kernel_text(orig, kernel)
+        if not want:
+            bad.append(f"{rel}: {original} has no `fn {kernel}(` to hold the sample to")
+        elif want not in text:
+            bad.append(f"{rel}: its `fn {kernel}` is not the text of the one in "
+                       f"{original}; the sample is a copy that must not drift")
     original_lines = set(orig.splitlines())
     for line in text.splitlines():
         if line.startswith("const ") and line not in original_lines:

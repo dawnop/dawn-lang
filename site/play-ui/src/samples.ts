@@ -27,6 +27,8 @@ import effects from '../samples/effects.dawn?raw'
 import barriers from '../samples/barriers.dawn?raw'
 import comptime from '../samples/comptime.dawn?raw'
 import flash_attn from '../samples/flash_attn.dawn?raw'
+import refused from '../samples/refused.dawn?raw'
+import host_launch from '../samples/host_launch.dawn?raw'
 
 export interface Sample {
   label: string
@@ -50,4 +52,6 @@ export const SAMPLES: Sample[] = [
   { label: 'Result + bracket', file: 'barriers.dawn', code: barriers },
   { label: 'comptime', file: 'comptime.dawn', code: comptime },
   { label: 'flash attention (Tile IR)', file: 'flash_attn.dawn', code: flash_attn },
+  { label: 'kernels refused (Tile IR)', file: 'refused.dawn', code: refused },
+  { label: 'host launch (Tile IR)', file: 'host_launch.dawn', code: host_launch },
 ]

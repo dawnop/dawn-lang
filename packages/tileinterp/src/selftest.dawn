@@ -181,6 +181,14 @@ test "the grid comes from each launch under with_gpu_interp, so one table serves
   }
 }
 
+test "a kernel recorded once launches from its recording to its answer on the host" {
+  let progs = (name: String) => map.get(map.from([("vadd", vadd_prog())]), name)
+  let xs = floats(3 * W, i => to_float(i) * 0.5)
+  let ys = floats(3 * W, i => 100.0 - to_float(i))
+  let r = with_gpu_fake(map.empty(), () => with_gpu_interp(progs, () => run("vadd", 3, [xs, ys, floats(3 * W, _i => 0.0)])))
+  assert r == Ok(floats(3 * W, i => 100.0 - to_float(i) * 0.5))
+}
+
 test "a masked tail reads the padding and leaves the lanes past the end as they were" {
   let xs = floats(16, i => to_float(i + 1))
   let out = floats(16, _i => 0.0 - 1.0)

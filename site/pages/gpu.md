@@ -103,6 +103,26 @@ Reductions that keep their dimension
 
 see it in the map ↓
 
+## show-refused-title
+
+Refused while recording
+
+## show-refused
+
+A kernel is checked when it is recorded: the body runs once, and an operation its shapes or roles cannot support is a panic that names the kernel, the operation's number and the operator as written. It comes before `tileiras` and before any device, and it names the operator, not a line of your source.
+
+## show-host-title
+
+Run on the host, with no GPU
+
+## show-host
+
+The fake device alone calls a host reference registered under the kernel's name. `with_gpu_interp` runs the recorded Tile IR instead, at the grid each launch names, so one host program goes from trace to numbers on a machine with no card. The numbers are the interpreter's, held to the host references in CI and not to a GPU.
+
+## show-open
+
+Run it in the Playground
+
 ## api-occupancy
 
 On `sm_86`, a 128 by 128 f16 matrix product wants `hint_occupancy(2)`, which fits two blocks on each SM instead of one.

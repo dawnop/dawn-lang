@@ -1,0 +1,67 @@
+# A kernel from trace to answer with no GPU: recorded once, then launched
+# through the host-side `Gpu` effect, where packages/tileinterp interprets the
+# Tile IR it recorded (the fake device alone would call a hand-written
+# reference registered under the kernel's name, and never run the kernel).
+#
+# The kernel, its recording and `run` are packages/tileinterp's own test
+# (src/selftest.dawn); doc-check holds the kernel's text and the constant
+# beside it. The launch names its grid, here 3 blocks of 8 lanes, and the
+# interpreter reads it off the launch.
+use std/dtype.{F64}
+use std/gpu.{Gpu, Buffer, with_gpu_fake, gpu_alloc, gpu_copy_from_host, gpu_copy_to_host, gpu_launch, encode_floats, decode_floats}
+use std/io
+use std/list
+use std/map
+use tileir/dev.{Dev, Param, load_cell, store_cell, add, DYN_DIM}
+use tileir/prog.{TileProg, trace3, cells, In, Out}
+use tileinterp/device.{with_gpu_interp}
+
+const W: Int = 8
+
+fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev =
+  store_cell(out, add(load_cell(a), load_cell(b)))
+
+fn vadd_prog() -> TileProg = {
+  let g = cells([DYN_DIM], [W])
+  let (p, _e) = trace3("vadd", In(F64, g), In(F64, g), Out(F64, g), vadd)
+  p
+}
+
+fn floats(n: Int, f: fn(Int) -> Float) -> List[Float] = list.map(range(0, n), f)
+
+# The host half: allocate three buffers, fill two, launch by name at a grid,
+# read the third back. Which device answers is the handler's business.
+fn run(name: String, grid: Int, bufs: List[List[Float]]) -> Result[List[Float], ForeignError] !Gpu = {
+  var hs: List[Int] = []
+  for b in bufs {
+    let h = gpu_alloc("f64", len(b))?
+    gpu_copy_from_host(h, encode_floats("f64", b))?
+    hs = hs ++ [h]
+  }
+  gpu_launch(name, grid, 1, 1, list.map(hs, h => Buffer(h)))?
+  Ok(decode_floats("f64", gpu_copy_to_host(hs[len(hs) - 1])?))
+}
+
+pub fn main() -> Unit !io = {
+  let progs = (name: String) => map.get(map.from([("vadd", vadd_prog())]), name)
+  let blocks = 3
+  let n = blocks * W
+  let xs = floats(n, i => to_float(i) * 0.5)
+  let ys = floats(n, i => 100.0 - to_float(i))
+  let zs = floats(n, _i => 0.0)
+  let r = with_gpu_fake(map.empty(), () => with_gpu_interp(progs, () => run("vadd", blocks, [xs, ys, zs])))
+  match r {
+    Ok(out) -> {
+      io.println("vadd on the host: ${blocks} blocks of ${W} lanes")
+      io.println("first four: ${list.take(out, 4)}")
+      io.println("last four: ${list.drop(out, n - 4)}")
+      io.println("every lane is x + y: ${out == floats(n, i => to_float(i) * 0.5 + 100.0 - to_float(i))}")
+    }
+    Err(e) -> io.println("refused: ${e.kind}: ${e.message}")
+  }
+  # A launch the program table does not know is the device's refusal, not a crash.
+  match with_gpu_fake(map.empty(), () => with_gpu_interp(progs, () => run("nope", 1, [xs]))) {
+    Ok(_) -> io.println("unknown kernel: ran")
+    Err(e) -> io.println("unknown kernel: ${e.kind}")
+  }
+}
