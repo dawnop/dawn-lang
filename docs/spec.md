@@ -3603,6 +3603,14 @@ RFC 4648 section 4 的标准字母表，`Url*` 用 section 5 的 url/文件名�
 - `io.read_stdin(n)` 回恰好 `n` 字节，只在输入结束时变短。`n` 是调用方肯收的上限而不是要
   预先分配的大小：很大的 `n` 遇短输入回已有的那些字节，`n <= 0` 回空 `Bytes`。JVM 上单次
   至多回 `2^31 - 1` 字节（一个字节数组的上限）
+- `io.write_stdout(b)` 把原始字节写到标准输出，与 `print`、`println` 共用一个缓冲，文本与字节保持写入顺序。
+  写是缓冲的；`io.flush_stdout()` 返回后此前写的字节都已交给描述符。进程正常结束（`main` 返回、`exit`）
+  与 `io.run` 起子进程之前都会 flush，所以继承 stdout 的子进程不会抢在先前写的字节前面
+- `io.append_bytes(path, content)` 在文件末尾追加（缺文件与缺父目录就创建，同 `write_bytes`），一次调用内原子；
+  `io.read_range(path, off, n)` 回从字节 `off` 起至多 `n` 字节，文件先到头就变短，`off` 在末尾或之后就回空
+  （不是错误）；负的 `off` 或 `n` 是 panic。`io.file_size(path)` 只认常规文件，目录、设备与不存在都是 `Err`；
+  `io.disk_space(path)` 回 `statvfs` 的 `total` 与 `available`（非特权进程可用的字节）。四者都经 `Fs`
+- `io.sleep_ns(ns)` 经 `Clock`：至少睡 `ns` 纳秒，`ns <= 0` 立即返回，被信号打断则补足剩余时间
 - 标准输出被关（`prog | head -1` 里 `head` 先退）**不结束程序**：两个后端都把写失败吞掉，
   程序照常跑完、退出码不受影响。JVM 上这是 `PrintStream` 的行为（异常只记进
   `checkError`）；native 运行时处理掉 SIGPIPE，写失败只置 stdio 的错误标志。由程序起的子

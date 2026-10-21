@@ -102,6 +102,53 @@ pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !Fs = fs_read_byt
 pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !Fs =
   fs_write_bytes(path, content)
 
+## Append bytes to a file, creating it and any missing parent directories when
+## it is not there. Each call is one atomic append (`O_APPEND` on the host), so
+## a body can be written to disk piece by piece without ever being whole in
+## memory, and two writers' calls interleave whole and never overwrite each
+## other. A refusal is an `Err`; the bytes that landed before it stay.
+pub fn append_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !Fs =
+  fs_append_bytes(path, content)
+
+## Up to `n` bytes of a file starting at byte `off`. The answer is shorter than
+## `n` when the file ends first and empty when `off` is at or past the end: a
+## range past the end is not an error, because the caller that cares asks
+## [`file_size`] first. A missing path, a directory or an unreadable file is an
+## `Err`.
+##
+## A negative `off` or `n` is a panic (the caller's bug, not the host's
+## failure), and so is a range that needs more than 2^31 - 1 bytes after it is
+## clamped to the file: read big files in blocks.
+pub fn read_range(path: String, off: Int, n: Int) -> Result[Bytes, ForeignError] !Fs = {
+  if off < 0 || n < 0 {
+    panic("read_range: off and n must not be negative")
+  }
+  fs_read_range(path, off, n)
+}
+
+## The size in bytes of a regular file, links followed. A missing path, a
+## directory or a device is an `Err`: a directory has no size worth reporting.
+pub fn file_size(path: String) -> Result[Int, ForeignError] !Fs = fs_size(path)
+
+## The capacity of the filesystem holding a path, in bytes.
+pub type DiskSpace = { total: Int, available: Int }
+
+## `total` and `available` bytes of the filesystem holding `path`, as
+## `statvfs(3)` reports them: `available` is what an unprivileged process can
+## still use, which is less than the free blocks when the filesystem keeps a
+## reserve. A path that does not exist is an `Err`. The two figures are read
+## by two calls, so on a filesystem that is changing they are a gauge and not
+## a snapshot.
+pub fn disk_space(path: String) -> Result[DiskSpace, ForeignError] !Fs =
+  match fs_disk_total(path) {
+    Err(e) -> Err(e)
+    Ok(total) ->
+      match fs_disk_free(path) {
+        Err(e) -> Err(e)
+        Ok(free) -> Ok(DiskSpace { total: total, available: free })
+      }
+  }
+
 ## The two normal outcomes of deleting a path. Host failures are not outcomes:
 ## they stay in [`delete`]'s `Err` branch.
 pub type DeleteOutcome = Deleted | NotFound
@@ -354,6 +401,25 @@ fn abandon(tmp: String, e: ForeignError) -> Result[Unit, ForeignError] !Fs = {
 ## buffered; pick one.
 pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
 
+## Write raw bytes to standard output, through the same buffer [`print`] uses,
+## so text and bytes keep the order they were written in. The write is
+## **buffered**: nothing promises the peer has the bytes until [`flush_stdout`]
+## returns, and the end of the process (a normal return from `main`, [`exit`])
+## flushes whatever is left. [`run`] flushes before it starts a child that
+## shares stdout, so the child's output cannot overtake bytes written before
+## the call. A write error (a closed pipe) is not reported, as for [`print`].
+##
+## Like [`read_stdin`] this is not part of [`Console`]: a handler that wants to
+## assert on bytes written has nothing to ask a terminal, and adding
+## operations to a published effect breaks every handler written for it.
+pub fn write_stdout(b: Bytes) -> Unit !io = io_write_stdout(b)
+
+## Push everything written to standard output so far to the file descriptor. A
+## response that has to reach its peer before the process waits on anything
+## else (a streamed body, a reply followed by a blocking read) is not safe
+## without it on the native backend, where stdout is block-buffered.
+pub fn flush_stdout() -> Unit !io = io_flush_stdout()
+
 ## Whether at least one byte of standard input can be read right now, waiting
 ## up to `timeout_ms` for one to arrive.
 ##
@@ -440,7 +506,7 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 # a finished outcome, so `delete`'s spelling checks and its `DeleteOutcome`,
 # `list_dir`'s sort and its `io.not_a_directory`, and the whole staging
 # protocol of `atomic_write_file` stay the code under test when a fake
-# answers. That is also why there are fifteen operations and not sixteen:
+# answers. That is also why there are twenty operations and not twenty-one:
 # `atomic_write_file` is composed of the others and has no primitive of its own.
 #
 # No operation declares effects of its own (spec §6.5): what an arm does is
@@ -478,6 +544,11 @@ pub effect Fs {
   fn fs_copy_permissions(src: String, dst: String) -> Result[Unit, ForeignError]
   fn fs_list_names(path: String) -> Result[List[String], ForeignError]
   fn fs_real_path(path: String) -> Result[String, ForeignError]
+  fn fs_append_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError]
+  fn fs_read_range(path: String, off: Int, n: Int) -> Result[Bytes, ForeignError]
+  fn fs_size(path: String) -> Result[Int, ForeignError]
+  fn fs_disk_total(path: String) -> Result[Int, ForeignError]
+  fn fs_disk_free(path: String) -> Result[Int, ForeignError]
 }
 
 ## Run `body` against the real file system. Every arm is the host primitive
@@ -504,6 +575,11 @@ pub fn with_fs_real[T, !e](body: fn() -> T !Fs !e) -> T !io = {
     fs_copy_permissions(src, dst) => catch_fault(() => io_copy_permissions(src, dst))
     fs_list_names(path) => catch_fault(() => io_list_names(path))
     fs_real_path(path) => catch_fault(() => io_real_path(path))
+    fs_append_bytes(path, content) => catch_fault(() => io_append_bytes(path, content))
+    fs_read_range(path, off, n) => catch_fault(() => io_read_range(path, off, n))
+    fs_size(path) => catch_fault(() => io_file_size(path))
+    fs_disk_total(path) => catch_fault(() => io_disk_total(path))
+    fs_disk_free(path) => catch_fault(() => io_disk_free(path))
   }
   body()
 }
@@ -827,12 +903,16 @@ pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {
 # the epoch are a meaningful number on their own (a token's expiry, a signed
 # request's timestamp), and wrapping them would buy one unwrap per use.
 #
-# Two operations, and the set is meant to be final. Every declared operation
-# has exactly one arm in a handler (spec §6.5), so an operation added later
-# breaks every handler written against this one. That is why sleep is not
-# here: nothing in either tree asks for it, a browser host cannot block, and a
-# fake that only wants to freeze time would have to answer it anyway. If it
-# comes, it comes as an effect of its own.
+# Three operations. The first two are the readings, and the set of readings is
+# meant to be final. Every declared operation has exactly one arm in a handler
+# (spec §6.5), so an operation added later breaks every handler written against
+# this one; sleep was left out for that reason until something asked for it,
+# and then went into this effect and not an effect of its own
+# (docs/io-prims-design.md): a program that waits is a program that reads the
+# time, a test that fakes the clock wants to fake the wait with it (a fake
+# `clock_sleep_ns` that advances the fake `clock_mono` is the whole point), and
+# a second effect would put one more row on every signature that sleeps for
+# nothing a handler could do with the two apart.
 #
 # `instant_at_ns` is for the fakes. `Instant` is opaque, so outside this module
 # an arm answering `clock_mono` has no other way to make one; the hole that
@@ -859,6 +939,7 @@ pub fn with_console_real[T, !e](body: fn() -> T !Console !e) -> T !io = {
 pub effect Clock {
   fn clock_wall_ns() -> Int
   fn clock_mono() -> Instant
+  fn clock_sleep_ns(ns: Int) -> Unit
 }
 
 ## A reading of the monotonic clock. The distance to another reading is the
@@ -876,6 +957,7 @@ pub fn with_clock_real[T, !e](body: fn() -> T !Clock !e) -> T !io = {
   with handle Clock {
     clock_wall_ns() => io_clock_wall_ns()
     clock_mono() => io_clock_mono_ns()
+    clock_sleep_ns(ns) => io_sleep_ns(ns)
   }
   body()
 }
@@ -887,6 +969,14 @@ pub fn now_wall_ns() -> Int !Clock = clock_wall_ns()
 
 ## The current point on the monotonic clock, as the [`Clock`] handler answers.
 pub fn now() -> Instant !Clock = clock_mono()
+
+## Block for at least `ns` nanoseconds. Zero and negative return at once. The
+## wait is on the monotonic clock's time, never shorter than asked (a signal
+## that cuts the host call short is resumed), and may be longer by whatever
+## the scheduler adds. A handler answers it as it likes: a test's fake can
+## advance its own clock and return, so code that waits is tested without
+## waiting.
+pub fn sleep_ns(ns: Int) -> Unit !Clock = clock_sleep_ns(ns)
 
 ## Nanoseconds from `start` to `stop`, and 0 when `stop` is the earlier one.
 ##
@@ -1406,6 +1496,11 @@ test "a handler over a table answers Fs without a host" {
     fs_copy_permissions(_src, _dst) => Ok(())
     fs_list_names(path) => if path == "/virt" { Ok(["b", "a"]) } else { Err(absent(path)) }
     fs_real_path(path) => if path == "/virt/a.txt" { Ok(path) } else { Err(absent(path)) }
+    fs_append_bytes(path, _content) => Err(absent(path))
+    fs_read_range(path, _off, _n) => Err(absent(path))
+    fs_size(path) => if path == "/virt/a.txt" { Ok(5) } else { Err(absent(path)) }
+    fs_disk_total(_path) => Ok(1000)
+    fs_disk_free(_path) => Ok(400)
   }
   assert fs_is_dir("/virt")
   assert not fs_is_dir("/virt/a.txt")
@@ -1713,6 +1808,7 @@ test "a handler over a table answers Clock without a host" {
       reads = reads + 1
       instant_at_ns(reads * 1_000_000)
     }
+    clock_sleep_ns(_ns) => ()
   }
   assert now_wall_ns() == 1_759_622_400_000_000_000
   let a = now()
@@ -1822,4 +1918,201 @@ test "the seven real wrappers nest, and the order is the body rows' doing" {
         assert bytes_len(random_bytes(4)) == 4
         console_println("std/io: all seven real handlers are installed")
       })))))))
+}
+
+# ---- the io batch: append, range reads, size, disk space, sleep, stdout bytes ----
+#
+# The two backends' answers to these are held to one transcript by
+# scripts/io-prims-contract (expected.txt, the JVM and the native backend side
+# by side, with controls that break each primitive); the tests here are the
+# ones a `dawn test --stdlib` run on either backend can make on its own.
+
+test "append_bytes creates the file and its parents, then extends it" {
+  with_fs_real(() => {
+    let d = match temp_dir("", "dawn-std-append-") {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    assert d != ""
+    let f = d ++ "/a/b/log.bin"
+    assert append_bytes(f, bytes_utf8("one,")) == Ok(())
+    assert append_bytes(f, bytes_utf8("")) == Ok(())
+    assert append_bytes(f, bytes_utf8("two")) == Ok(())
+    assert read_bytes(f) == Ok(bytes_utf8("one,two"))
+    # a file written by write_bytes is extended, not replaced
+    assert write_bytes(d ++ "/w", bytes_utf8("ab")) == Ok(())
+    assert append_bytes(d ++ "/w", bytes_utf8("cd")) == Ok(())
+    assert read_bytes(d ++ "/w") == Ok(bytes_utf8("abcd"))
+    # a directory is not a file to append to, and a file is not a directory
+    match append_bytes(d, bytes_utf8("x")) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match append_bytes(d ++ "/w/inside", bytes_utf8("x")) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    assert delete(f) == Ok(Deleted)
+    assert delete(d ++ "/w") == Ok(Deleted)
+    assert delete(d ++ "/a/b") == Ok(Deleted)
+    assert delete(d ++ "/a") == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
+}
+
+test "read_range answers the bytes asked for, short or empty at the end" {
+  with_fs_real(() => {
+    let d = match temp_dir("", "dawn-std-range-") {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    let f = d ++ "/r"
+    assert write_bytes(f, bytes_utf8("0123456789")) == Ok(())
+    assert read_range(f, 2, 3) == Ok(bytes_utf8("234"))
+    assert read_range(f, 0, 10) == Ok(bytes_utf8("0123456789"))
+    assert read_range(f, 7, 100) == Ok(bytes_utf8("789"))
+    assert read_range(f, 10, 5) == Ok(bytes_utf8(""))
+    assert read_range(f, 99, 5) == Ok(bytes_utf8(""))
+    assert read_range(f, 3, 0) == Ok(bytes_utf8(""))
+    assert read_range(f, 4, 9223372036854775807) == Ok(bytes_utf8("456789"))
+    match read_range(d ++ "/missing", 0, 1) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match read_range(d, 0, 1) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    # a negative offset or count is the caller's bug, a panic, and the
+    # handler never hears of it
+    match catch_panic(() => read_range(f, -1, 1)) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e.message, "must not be negative") }
+    }
+    match catch_panic(() => read_range(f, 0, -1)) {
+      Ok(_) -> { assert false }
+      Err(e) -> { assert str.contains(e.message, "must not be negative") }
+    }
+    assert delete(f) == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
+}
+
+test "file_size is a regular file's length, and an Err for anything else" {
+  with_fs_real(() => {
+    let d = match temp_dir("", "dawn-std-size-") {
+      Ok(p) -> p
+      Err(_) -> ""
+    }
+    assert write_bytes(d ++ "/five", bytes_utf8("12345")) == Ok(())
+    assert write_bytes(d ++ "/none", bytes_utf8("")) == Ok(())
+    assert file_size(d ++ "/five") == Ok(5)
+    assert file_size(d ++ "/none") == Ok(0)
+    assert append_bytes(d ++ "/five", bytes_utf8("67")) == Ok(())
+    assert file_size(d ++ "/five") == Ok(7)
+    match file_size(d) {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    match file_size(d ++ "/missing") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+    assert delete(d ++ "/five") == Ok(Deleted)
+    assert delete(d ++ "/none") == Ok(Deleted)
+    assert delete(d) == Ok(Deleted)
+  })
+}
+
+test "disk_space answers a capacity that is possible, and an Err for a missing path" {
+  with_fs_real(() => {
+    match disk_space(".") {
+      Ok(s) -> {
+        assert s.total > 0
+        assert s.available >= 0
+        assert s.available <= s.total
+      }
+      Err(_) -> { assert false }
+    }
+    match disk_space("/dawn-no-such-directory-anywhere") {
+      Ok(_) -> { assert false }
+      Err(_) -> ()
+    }
+  })
+}
+
+test "sleep_ns waits at least as long as asked and returns at once for zero" {
+  with_clock_real(() => {
+    let t0 = now()
+    sleep_ns(0)
+    sleep_ns(-1)
+    assert elapsed_ns(t0, now()) < 50_000_000
+    let t1 = now()
+    sleep_ns(20_000_000)
+    let slept = elapsed_ns(t1, now())
+    assert slept >= 20_000_000
+    assert slept < 2_000_000_000
+  })
+}
+
+test "a fake Clock answers sleep by moving its own time" {
+  # What the fake is for: code that waits is tested without waiting. The sleep
+  # advances the fake monotonic clock and nothing else.
+  with handle Clock {
+    var ticks: Int = 0
+    clock_wall_ns() => 0
+    clock_mono() => instant_at_ns(ticks)
+    clock_sleep_ns(ns) => {
+      ticks = ticks + ns
+    }
+  }
+  let a = now()
+  sleep_ns(5_000_000)
+  sleep_ns(250)
+  assert elapsed_ns(a, now()) == 5_000_250
+}
+
+test "a handler over a table answers the io batch of Fs without a host" {
+  with handle Fs {
+    var blobs: List[(String, Bytes)] = []
+    fs_is_dir(_path) => false
+    fs_exists(_path) => false
+    fs_is_symlink(_path) => false
+    fs_mkdirs(_path) => Ok(())
+    fs_read_file(_path) => Ok("")
+    fs_write_file(_path, _content) => Ok(())
+    fs_read_bytes(_path) => Ok(bytes_utf8(""))
+    fs_write_bytes(_path, _content) => Ok(())
+    fs_delete(_path) => Ok(false)
+    fs_rename(_src, _dst) => Ok(())
+    fs_temp_dir(parent, prefix) => Ok(parent ++ "/" ++ prefix)
+    fs_temp_file(parent, prefix) => Ok(parent ++ "/" ++ prefix)
+    fs_copy_permissions(_src, _dst) => Ok(())
+    fs_list_names(_path) => Ok([])
+    fs_real_path(path) => Ok(path)
+    fs_append_bytes(path, content) => {
+      blobs = blobs ++ [(path, content)]
+      Ok(())
+    }
+    fs_read_range(_path, off, n) => Ok(bytes_slice(bytes_utf8("0123456789"), off, off + n))
+    fs_size(_path) => Ok(10)
+    fs_disk_total(_path) => Ok(1000)
+    fs_disk_free(_path) => Ok(250)
+  }
+  assert append_bytes("/virt/a", bytes_utf8("x")) == Ok(())
+  assert append_bytes("/virt/a", bytes_utf8("y")) == Ok(())
+  # the table saw both appends, in order, and no host was involved
+  assert blobs == [("/virt/a", bytes_utf8("x")), ("/virt/a", bytes_utf8("y"))]
+  assert read_range("/virt/a", 2, 3) == Ok(bytes_utf8("234"))
+  assert file_size("/virt/a") == Ok(10)
+  assert disk_space("/virt") == Ok(DiskSpace { total: 1000, available: 250 })
+}
+
+test "write_stdout and flush_stdout take bytes without a sound on an empty write" {
+  # Nothing is written, so the transcript the two backends are compared on
+  # stays the same bytes; what reaches a descriptor is held by
+  # scripts/io-prims-contract.
+  write_stdout(bytes_utf8(""))
+  flush_stdout()
+  flush_stdout()
 }

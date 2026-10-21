@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 84820d173441c0ff -->
+<!-- doc-check: translation-of docs/spec.md @ 7dd733d833896cff -->
 
 # Dawn Language Specification
 
@@ -4583,6 +4583,21 @@ behaviours are:
   the caller will take, not a size to allocate up front: a huge `n` on a short input returns
   the bytes there are, and `n <= 0` returns empty `Bytes`. On the JVM one call returns at
   most `2^31 - 1` bytes (the most a byte array holds)
+- `io.write_stdout(b)` writes raw bytes to standard output through the buffer `print` and
+  `println` use, so text and bytes keep the order they were written in. The write is buffered;
+  after `io.flush_stdout()` returns, every byte written so far has been handed to the
+  descriptor. The process flushes when it ends normally (`main` returns, `exit`) and before
+  `io.run` starts a child, so a child that inherits stdout cannot overtake bytes written
+  before it
+- `io.append_bytes(path, content)` appends to the end of a file (a missing file and missing
+  parent directories are created, as `write_bytes` does), atomically within one call;
+  `io.read_range(path, off, n)` returns at most `n` bytes from byte `off`, shorter when the
+  file ends first and empty when `off` is at or past the end (not an error); a negative `off`
+  or `n` is a panic. `io.file_size(path)` accepts regular files only: a directory, a device
+  and a missing path are an `Err`; `io.disk_space(path)` returns `statvfs`'s `total` and
+  `available` (bytes an unprivileged process may use). All four go through `Fs`
+- `io.sleep_ns(ns)` goes through `Clock`: it sleeps at least `ns` nanoseconds, returns at
+  once for `ns <= 0`, and resumes the remainder when a signal interrupts it
 - A closed standard output (`head` exiting first in `prog | head -1`) **does not end the
   program**: both backends swallow the failed write, the program runs to its end, and its
   exit code is unaffected. On the JVM this is `PrintStream`'s behaviour (the exception only
