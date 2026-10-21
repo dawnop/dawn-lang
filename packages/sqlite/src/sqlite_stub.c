@@ -42,7 +42,11 @@ static dawn_adt *load_api(void) {
     loader_kind = "sqlite.version"; loader_message = "SQLite 3.35 or newer is required";
     return dawn_ffi_err(loader_kind, loader_message);
   }
-  /* F3b and F3c resolve their complete capability table before publishing it. */
+  RESOLVE(bind_parameter_count); RESOLVE(bind_int64); RESOLVE(bind_double);
+  RESOLVE(bind_text); RESOLVE(bind_null); RESOLVE(step); RESOLVE(column_count);
+  RESOLVE(column_type); RESOLVE(column_int64); RESOLVE(column_double);
+  RESOLVE(column_text); RESOLVE(column_bytes); RESOLVE(column_name); RESOLVE(changes);
+  RESOLVE(last_insert_rowid); RESOLVE(get_autocommit); RESOLVE(busy_timeout);
   library = lib;
   return NULL;
 }
@@ -193,5 +197,197 @@ dawn_adt *DAWN_EXTERN(sqlite_release_stmt)(int64_t db, int64_t stmt) {
   return unsupported();
 #else
   return finalize_handle(db, stmt, true);
+#endif
+}
+
+#ifndef __wasi__
+static dawn_adt *range_error(void) { return dawn_ffi_err("sqlite.range", "index, size or timeout outside C int range"); }
+static dawn_adt *state_error(void) { return dawn_ffi_err("sqlite.statement_state", "operation invalid in this statement state"); }
+#define BIND_CHECK struct handle *d = find_handle(db, 1); \
+  if (s->state != 0) return state_error(); \
+  if (index < 1 || index > api.bind_parameter_count(s->ptr.stmt)) return range_error()
+#define COLUMN_CHECK if (s->state != 1) return state_error(); \
+  if (index < 0 || index >= api.column_count(s->ptr.stmt)) return range_error()
+
+/* Reject overlong encodings, surrogates, truncation and values above U+10FFFF.
+ * SQLite permits arbitrary TEXT bytes; Dawn String requires valid UTF-8. */
+static bool valid_utf8(const unsigned char *p, int n) {
+  for (int i = 0; i < n;) {
+    unsigned c = p[i++], v, count, minimum;
+    if (c < 0x80) continue;
+    if (c >= 0xc2 && c <= 0xdf) { v = c & 31; count = 1; minimum = 0x80; }
+    else if (c >= 0xe0 && c <= 0xef) { v = c & 15; count = 2; minimum = 0x800; }
+    else if (c >= 0xf0 && c <= 0xf4) { v = c & 7; count = 3; minimum = 0x10000; }
+    else return false;
+    if ((unsigned)(n - i) < count) return false;
+    while (count--) { c = p[i++]; if ((c & 0xc0) != 0x80) return false; v = (v << 6) | (c & 63); }
+    if (v < minimum || v > 0x10ffff || (v >= 0xd800 && v <= 0xdfff)) return false;
+  }
+  return true;
+}
+#endif
+
+dawn_adt *DAWN_EXTERN(sqlite_bind_count)(int64_t db, int64_t stmt) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  return integer(api.bind_parameter_count(s->ptr.stmt));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_bind_int)(int64_t db, int64_t stmt, int64_t index, int64_t value) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  BIND_CHECK; int rc = api.bind_int64(s->ptr.stmt, (int)index, value); return rc ? failure(d->ptr.db, rc) : unit();
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_bind_float)(int64_t db, int64_t stmt, int64_t index, double value) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  BIND_CHECK; int rc = api.bind_double(s->ptr.stmt, (int)index, value); return rc ? failure(d->ptr.db, rc) : unit();
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_bind_null)(int64_t db, int64_t stmt, int64_t index) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  BIND_CHECK; int rc = api.bind_null(s->ptr.stmt, (int)index); return rc ? failure(d->ptr.db, rc) : unit();
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_bind_text)(int64_t db, int64_t stmt, int64_t index, dawn_str *value) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  BIND_CHECK;
+  if (dawn_ffi_str_len(value) > INT_MAX) return range_error();
+  /* Arguments are borrowed: TRANSIENT copies before Dawn can release value.
+   * STATIC would retain a dangling pointer after this call. Length preserves NUL. */
+  int rc = api.bind_text(s->ptr.stmt, (int)index, dawn_ffi_str_data(value),
+                         (int)dawn_ffi_str_len(value), (void (*)(void *))-1);
+  return rc ? failure(d->ptr.db, rc) : unit();
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_step)(int64_t db, int64_t stmt) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  if (s->state > 1) return state_error();
+  int rc = api.step(s->ptr.stmt);
+  s->state = rc == 100 ? 1 : rc == 101 ? 2 : 3;
+  return rc == 100 || rc == 101 ? integer(rc) : failure(find_handle(db, 1)->ptr.db, rc);
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_column_count)(int64_t db, int64_t stmt) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  return integer(api.column_count(s->ptr.stmt));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_column_type)(int64_t db, int64_t stmt, int64_t index) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  COLUMN_CHECK; return integer(api.column_type(s->ptr.stmt, (int)index));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_column_int)(int64_t db, int64_t stmt, int64_t index) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  COLUMN_CHECK; return integer(api.column_int64(s->ptr.stmt, (int)index));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_column_float)(int64_t db, int64_t stmt, int64_t index) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  COLUMN_CHECK; return dawn_ffi_ok(dawn_ffi_box_float(api.column_double(s->ptr.stmt, (int)index)));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_column_text)(int64_t db, int64_t stmt, int64_t index) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  COLUMN_CHECK;
+  const unsigned char *text = api.column_text(s->ptr.stmt, (int)index);
+  int size = api.column_bytes(s->ptr.stmt, (int)index);
+  if (!text) return failure(find_handle(db, 1)->ptr.db, 7);
+  if (!valid_utf8(text, size)) return dawn_ffi_err("sqlite.invalid_utf8", "column is not valid UTF-8");
+  /* Copy now: the next conversion, step or finalize can invalidate text. */
+  return dawn_ffi_ok(dawn_ffi_str_copy((const char *)text, size));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_column_name)(int64_t db, int64_t stmt, int64_t index) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *s = statement(db, stmt); if (!s) return invalid();
+  if (index < 0 || index >= api.column_count(s->ptr.stmt)) return range_error();
+  const char *name = api.column_name(s->ptr.stmt, (int)index);
+  if (!name) return failure(find_handle(db, 1)->ptr.db, 7);
+  if (!valid_utf8((const unsigned char *)name, (int)strlen(name))) return dawn_ffi_err("sqlite.invalid_utf8", "column name is not valid UTF-8");
+  return dawn_ffi_ok(dawn_ffi_str_from_cstr(name));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_changes)(int64_t db) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *d = find_handle(db, 1); if (!d) return invalid();
+  return integer(api.changes(d->ptr.db));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_last_id)(int64_t db) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *d = find_handle(db, 1); if (!d) return invalid();
+  return integer(api.last_insert_rowid(d->ptr.db));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_autocommit)(int64_t db) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *d = find_handle(db, 1); if (!d) return invalid();
+  return dawn_ffi_ok(dawn_ffi_box_bool(api.get_autocommit(d->ptr.db) != 0));
+#endif
+}
+
+dawn_adt *DAWN_EXTERN(sqlite_busy_timeout)(int64_t db, int64_t ms) {
+#ifdef __wasi__
+  return unsupported();
+#else
+  struct handle *d = find_handle(db, 1); if (!d) return invalid();
+  if (ms < 0 || ms > INT_MAX) return range_error();
+  int rc = api.busy_timeout(d->ptr.db, (int)ms);
+  return rc ? failure(d->ptr.db, rc) : unit();
 #endif
 }

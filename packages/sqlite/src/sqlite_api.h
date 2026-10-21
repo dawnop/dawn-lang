@@ -12,5 +12,22 @@ struct sqlite_api {
   const char *(*errmsg)(sqlite3 *);
   int (*extended_errcode)(sqlite3 *);
   int (*libversion_number)(void);
+  int (*bind_parameter_count)(sqlite3_stmt *);
+  int (*bind_int64)(sqlite3_stmt *, int, int64_t);
+  int (*bind_double)(sqlite3_stmt *, int, double);
+  int (*bind_text)(sqlite3_stmt *, int, const char *, int, void (*)(void *));
+  int (*bind_null)(sqlite3_stmt *, int);
+  int (*step)(sqlite3_stmt *);
+  int (*column_count)(sqlite3_stmt *);
+  int (*column_type)(sqlite3_stmt *, int);
+  int64_t (*column_int64)(sqlite3_stmt *, int);
+  double (*column_double)(sqlite3_stmt *, int);
+  const unsigned char *(*column_text)(sqlite3_stmt *, int);
+  int (*column_bytes)(sqlite3_stmt *, int);
+  const char *(*column_name)(sqlite3_stmt *, int);
+  int (*changes)(sqlite3 *);
+  int64_t (*last_insert_rowid)(sqlite3 *);
+  int (*get_autocommit)(sqlite3 *);
+  int (*busy_timeout)(sqlite3 *, int);
 };
 #endif
