@@ -4896,8 +4896,8 @@ loop_pkg_mutant() { # name, module, old, new, red-kernels...
 #     first iteration, returns before the break is tested and is the one
 #     block that does not move).
 loop_pkg_mutant loop-break-condition-inverted prog.dawn \
-  '            let exit = If([], cond, [Break(but_last(carried) ++ [tok])], [Yield([])])' \
-  '            let exit = If([], cond, [Yield([])], [Break(but_last(carried) ++ [tok])])' \
+  '            let exit = If([], cond, [Break(if drop { but_last(carried) } else { but_last(carried) ++ [tok] })], [Yield([])])' \
+  '            let exit = If([], cond, [Yield([])], [Break(if drop { but_last(carried) } else { but_last(carried) ++ [tok] })])' \
   loop_count loop_until loop_none loop_return
 
 # 40a. loop-return-dropped (knife T17): the handler writes the early exit's

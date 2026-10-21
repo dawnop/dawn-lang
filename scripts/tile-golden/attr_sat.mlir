@@ -28,7 +28,7 @@ cuda_tile.module @m {
     %32 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
     %33 = broadcast %32 : tile<1xptr<i32>> -> tile<128xptr<i32>>
     %34 = offset %33, %31 : tile<128xptr<i32>>, tile<128xi32> -> tile<128xptr<i32>>
-    %35 = store_ptr_tko weak %34, %27 token=%20 : tile<128xptr<i32>>, tile<128xi32> -> token
+    %35 = store_ptr_tko weak %34, %27 token=%0 : tile<128xptr<i32>>, tile<128xi32> -> token
     %36 = constant <i32: 128> : tile<i32>
     %37 = addi %7, %36 : tile<i32>
     %38 = ftoi %19 signed rounding<nearest_int_to_zero> : tile<128xf64> -> tile<128xi32>

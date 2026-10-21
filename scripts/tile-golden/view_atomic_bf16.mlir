@@ -47,7 +47,7 @@ cuda_tile.module @m {
     %47 = make_tensor_view %46, shape = [16], strides = [1] : tensor_view<16xbf16, strides=[1]>
     %48 = make_strided_view %47 : strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>
     %49 = itof %42 signed rounding<nearest_even> : tile<16xi32> -> tile<16xbf16>
-    %50 = atomic_red_view_tko relaxed device %48[%1], addf, %49 token=%26 : tile<16xbf16>, strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %50 = atomic_red_view_tko relaxed device %48[%1], addf, %49 token=%0 : tile<16xbf16>, strided_view<tile=(16), traversal_strides=[16], tensor_view<16xbf16, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

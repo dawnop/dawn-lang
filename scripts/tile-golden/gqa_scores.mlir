@@ -29,7 +29,7 @@ cuda_tile.module @m {
     %31 = make_partition_view %30 : partition_view<tile=(64x32), padding_value = zero, tensor_view<128x32xf64, strides=[32, 1]>, dim_map=[0, 1]>
     %32, %33, %34 = get_tile_block_id : tile<i32>
     %35, %36, %37 = get_tile_block_id : tile<i32>
-    %38, %39 = load_view_tko weak %31[%34, %36] token=%28 : partition_view<tile=(64x32), padding_value = zero, tensor_view<128x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<64x32xf64>, token
+    %38, %39 = load_view_tko weak %31[%34, %36] token=%0 : partition_view<tile=(64x32), padding_value = zero, tensor_view<128x32xf64, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<64x32xf64>, token
     %40 = permute %38 [1, 0] : tile<64x32xf64> -> tile<32x64xf64>
     %41 = constant <f64: 0.0> : tile<64x64xf64>
     %42 = mmaf %27, %40, %41 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
@@ -40,7 +40,7 @@ cuda_tile.module @m {
     %47 = make_tensor_view %46, shape = [2, 128, 64], strides = [8192, 64, 1] : tensor_view<2x128x64xf64, strides=[8192, 64, 1]>
     %48 = make_partition_view %47 : partition_view<tile=(1x64x64), padding_value = zero, tensor_view<2x128x64xf64, strides=[8192, 64, 1]>, dim_map=[0, 1, 2]>
     %49, %50, %51 = get_tile_block_id : tile<i32>
-    %52 = store_view_tko weak %45, %48[%34, %49, %36] token=%39 : tile<1x64x64xf64>, partition_view<tile=(1x64x64), padding_value = zero, tensor_view<2x128x64xf64, strides=[8192, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> token
+    %52 = store_view_tko weak %45, %48[%34, %49, %36] token=%0 : tile<1x64x64xf64>, partition_view<tile=(1x64x64), padding_value = zero, tensor_view<2x128x64xf64, strides=[8192, 64, 1]>, dim_map=[0, 1, 2]>, tile<i32> -> token
     return
   }
 }

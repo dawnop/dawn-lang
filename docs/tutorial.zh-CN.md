@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ db38b8657511d566 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 6f465b44c062bc65 -->
 
 # Dawn 教程
 
@@ -1627,12 +1627,12 @@ cuda_tile.module @m {
     %9 = assume div_by<16>, %arg1 : tile<ptr<f64>>
     %10 = make_tensor_view %9, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
     %11 = make_partition_view %10 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
-    %12, %13 = load_view_tko weak %11[%4] token=%8 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %12, %13 = load_view_tko weak %11[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
     %14 = addf %7, %12 rounding<nearest_even> : tile<128xf64>
     %15 = assume div_by<16>, %arg2 : tile<ptr<f64>>
     %16 = make_tensor_view %15, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
     %17 = make_partition_view %16 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
-    %18 = store_view_tko weak %14, %17[%4] token=%13 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %18 = store_view_tko weak %14, %17[%4] token=%0 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }
@@ -1866,9 +1866,9 @@ pub fn main() -> Unit !io = {
 }
 ```
 ```output
-%5, %6 = for %7 in (%2 to %3, step %4) : tile<i32> iter_values(%8 = %1, %9 = %0) -> (tile<64x64xf64>, token) {
-%26 = mmaf %16, %24, %8 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
-continue %26, %25 : tile<64x64xf64>, token
+%5 = for %6 in (%2 to %3, step %4) : tile<i32> iter_values(%7 = %1) -> (tile<64x64xf64>) {
+%24 = mmaf %14, %22, %7 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
+continue %24 : tile<64x64xf64>
 ```
 
 `along` 说格子的每一维跟网格的哪个轴走。`a` 的第 0 维（行）跟网格轴 0，第 1 维（沿 K）不跟任何
@@ -1885,7 +1885,9 @@ kernel 体就是 bf16 tile 相乘、累加进 f32，tensor core 本来就该这�
 
 循环体和 kernel 体一样在宿主上跑，记录里是一个 `for` 区域，八趟由设备去跑。循环带着体里 `set`
 过的东西；记录器先把体当试跑记一遍、再整遍扔掉，由此得知：`acc` 被 `set` 过，所以 `for` 带着它
-（体里的 `%8`，循环后的 `%5`）。这个区域在累加器旁边还带着第二个值，token。内存操作的先后由记录器串起来的 token 链决定，不由程序文本的先后决定。
+（体里的 `%7`，循环后的 `%5`）。循环不带别的值。内存操作的先后由记录器串起来的 token 链决定，不由程序文本的先后决定，
+但读 `In` 参数不在这条链里：它挂在入口 token 上（体里的 `token=%0`），所以只读 `In` 的循环不带 token，下一趟的 load 可以提前开始。
+写内存、或读 `Shared` 参数的循环，才在累加器旁边带着第二个值，token。
 
 ### 按行归约：keepdims
 

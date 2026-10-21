@@ -37,13 +37,13 @@ cuda_tile.module @m {
     %37 = reshape %arg2 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %38 = broadcast %37 : tile<1x1xptr<f64>> -> tile<64x32xptr<f64>>
     %39 = offset %38, %36 : tile<64x32xptr<f64>>, tile<64x32xi32> -> tile<64x32xptr<f64>>
-    %40, %41 = load_ptr_tko weak %39 token=%22 : tile<64x32xptr<f64>> -> tile<64x32xf64>, token
+    %40, %41 = load_ptr_tko weak %39 token=%0 : tile<64x32xptr<f64>> -> tile<64x32xf64>, token
     %42 = assume div_by<16>, %arg1 : tile<ptr<i8>>
     %43 = make_tensor_view %42, shape = [512, 32], strides = [32, 1] : tensor_view<512x32xi8, strides=[32, 1]>
     %44 = make_partition_view %43 : partition_view<tile=(64x32), padding_value = zero, tensor_view<512x32xi8, strides=[32, 1]>, dim_map=[0, 1]>
     %45, %46, %47 = get_tile_block_id : tile<i32>
     %48, %49, %50 = get_tile_block_id : tile<i32>
-    %51, %52 = load_view_tko weak %44[%45, %49] token=%41 : partition_view<tile=(64x32), padding_value = zero, tensor_view<512x32xi8, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<64x32xi8>, token
+    %51, %52 = load_view_tko weak %44[%45, %49] token=%0 : partition_view<tile=(64x32), padding_value = zero, tensor_view<512x32xi8, strides=[32, 1]>, dim_map=[0, 1]>, tile<i32> -> tile<64x32xi8>, token
     %53 = exti %51 unsigned : tile<64x32xi8> -> tile<64x32xi32>
     %54 = constant <i32: 128> : tile<64x32xi32>
     %55 = xori %53, %54 : tile<64x32xi32>
@@ -61,7 +61,7 @@ cuda_tile.module @m {
     %67 = assume div_by<16>, %arg3 : tile<ptr<f64>>
     %68 = make_tensor_view %67, shape = [512], strides = [1] : tensor_view<512xf64, strides=[1]>
     %69 = make_partition_view %68 : partition_view<tile=(64), padding_value = zero, tensor_view<512xf64, strides=[1]>, dim_map=[0]>
-    %70 = store_view_tko weak %66, %69[%45] token=%52 : tile<64xf64>, partition_view<tile=(64), padding_value = zero, tensor_view<512xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %70 = store_view_tko weak %66, %69[%45] token=%0 : tile<64xf64>, partition_view<tile=(64), padding_value = zero, tensor_view<512xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

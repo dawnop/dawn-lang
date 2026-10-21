@@ -13,7 +13,7 @@ cuda_tile.module @m {
     %13 = assume div_by<16>, %arg0 : tile<ptr<f64>>
     %14 = make_tensor_view %13, shape = [64], strides = [1] : tensor_view<64xf64, strides=[1]>
     %15 = make_partition_view %14 : partition_view<tile=(64), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>
-    %16, %17 = load_view_tko weak %15[%1] token=%6 : partition_view<tile=(64), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<64xf64>, token
+    %16, %17 = load_view_tko weak %15[%1] token=%0 : partition_view<tile=(64), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<64xf64>, token
     %18 = constant <f64: 0.0> : tile<64xf64>
     %19 = select %12, %16, %18 : tile<64xi1>, tile<64xf64>
     %20 = reduce %19 dim=0 identities=[0.0 : f64] : tile<64xf64> -> tile<f64> (%21: tile<f64>, %22: tile<f64>) {
@@ -23,7 +23,7 @@ cuda_tile.module @m {
     %24 = assume div_by<16>, %arg1 : tile<ptr<f64>>
     %25 = make_tensor_view %24, shape = [64], strides = [1] : tensor_view<64xf64, strides=[1]>
     %26 = make_partition_view %25 : partition_view<tile=(64), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>
-    %27, %28 = load_view_tko weak %26[%1] token=%17 : partition_view<tile=(64), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<64xf64>, token
+    %27, %28 = load_view_tko weak %26[%1] token=%0 : partition_view<tile=(64), padding_value = zero, tensor_view<64xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<64xf64>, token
     %29 = select %12, %27, %18 : tile<64xi1>, tile<64xf64>
     %30 = reduce %29 dim=0 identities=[0.0 : f64] : tile<64xf64> -> tile<f64> (%31: tile<f64>, %32: tile<f64>) {
       %33 = addf %31, %32 rounding<nearest_even> : tile<f64>
@@ -44,7 +44,7 @@ cuda_tile.module @m {
     %46 = make_tensor_view %45, shape = [4], strides = [1] : tensor_view<4xf64, strides=[1]>
     %47 = make_partition_view %46 : partition_view<tile=(1), padding_value = zero, tensor_view<4xf64, strides=[1]>, dim_map=[0]>
     %48, %49, %50 = get_tile_block_id : tile<i32>
-    %51, %52 = load_view_tko weak %47[%48] token=%28 : partition_view<tile=(1), padding_value = zero, tensor_view<4xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<1xf64>, token
+    %51, %52 = load_view_tko weak %47[%48] token=%0 : partition_view<tile=(1), padding_value = zero, tensor_view<4xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<1xf64>, token
     %53 = reshape %41 : tile<i1> -> tile<1xi1>
     %54 = broadcast %53 : tile<1xi1> -> tile<1xi1>
     %55 = reshape %44 : tile<f64> -> tile<1xf64>

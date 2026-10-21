@@ -21,7 +21,7 @@ cuda_tile.module @m {
     %25 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
     %26 = broadcast %25 : tile<1xptr<i32>> -> tile<128xptr<i32>>
     %27 = offset %26, %24 : tile<128xptr<i32>>, tile<128xi32> -> tile<128xptr<i32>>
-    %28, %29 = atomic_rmw_tko acquire tl_blk %27, add, %19 token=%20 : tile<128xptr<i32>>, tile<128xi32> -> tile<128xi32>, token
+    %28, %29 = atomic_rmw_tko acquire tl_blk %27, add, %19 token=%0 : tile<128xptr<i32>>, tile<128xi32> -> tile<128xi32>, token
     %30 = constant <i32: 128> : tile<128xi32>
     %31 = addi %24, %30 : tile<128xi32>
     %32 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>

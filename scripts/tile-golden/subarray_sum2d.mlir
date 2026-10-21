@@ -38,7 +38,7 @@ cuda_tile.module @m {
     %36, %37, %38 = get_tile_block_id : tile<i32>
     %39 = reshape %29 : tile<i32> -> tile<1xi32>
     %40 = broadcast %39 : tile<1xi32> -> tile<1xi32>
-    %41 = store_view_tko weak %40, %35[%36] token=%28 : tile<1xi32>, partition_view<tile=(1), padding_value = zero, tensor_view<1xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %41 = store_view_tko weak %40, %35[%36] token=%0 : tile<1xi32>, partition_view<tile=(1), padding_value = zero, tensor_view<1xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }

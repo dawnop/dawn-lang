@@ -35,7 +35,7 @@ cuda_tile.module @m {
     %35 = reshape %arg1 : tile<ptr<i32>> -> tile<1xptr<i32>>
     %36 = broadcast %35 : tile<1xptr<i32>> -> tile<1xptr<i32>>
     %37 = offset %36, %32 : tile<1xptr<i32>>, tile<1xi32> -> tile<1xptr<i32>>
-    %38, %39 = load_ptr_tko weak %37 token=%14 : tile<1xptr<i32>> -> tile<1xi32>, token
+    %38, %39 = load_ptr_tko weak %37 token=%0 : tile<1xptr<i32>> -> tile<1xi32>, token
     %40 = addi %34, %38 : tile<1xi32>
     %41 = reshape %arg0 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %42 = broadcast %41 : tile<1xptr<f64>> -> tile<1xptr<f64>>

@@ -1745,12 +1745,12 @@ cuda_tile.module @m {
     %9 = assume div_by<16>, %arg1 : tile<ptr<f64>>
     %10 = make_tensor_view %9, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
     %11 = make_partition_view %10 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
-    %12, %13 = load_view_tko weak %11[%4] token=%8 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
+    %12, %13 = load_view_tko weak %11[%4] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
     %14 = addf %7, %12 rounding<nearest_even> : tile<128xf64>
     %15 = assume div_by<16>, %arg2 : tile<ptr<f64>>
     %16 = make_tensor_view %15, shape = [256], strides = [1] : tensor_view<256xf64, strides=[1]>
     %17 = make_partition_view %16 : partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>
-    %18 = store_view_tko weak %14, %17[%4] token=%13 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %18 = store_view_tko weak %14, %17[%4] token=%0 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<256xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     return
   }
 }
@@ -2003,9 +2003,9 @@ pub fn main() -> Unit !io = {
 }
 ```
 ```output
-%5, %6 = for %7 in (%2 to %3, step %4) : tile<i32> iter_values(%8 = %1, %9 = %0) -> (tile<64x64xf64>, token) {
-%26 = mmaf %16, %24, %8 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
-continue %26, %25 : tile<64x64xf64>, token
+%5 = for %6 in (%2 to %3, step %4) : tile<i32> iter_values(%7 = %1) -> (tile<64x64xf64>) {
+%24 = mmaf %14, %22, %7 : tile<64x32xf64>, tile<32x64xf64>, tile<64x64xf64>
+continue %24 : tile<64x64xf64>
 ```
 
 `along` says which grid axis each dimension of a cell follows. Dimension 0 of `a` (its
@@ -2029,9 +2029,13 @@ dimensions of a matrix.
 The loop's body ran on the host, like the kernel's, and the record holds one `for`
 region; the device runs its eight trips. The loop carries what its body sets, and the
 recorder finds that out by recording the body once as a trial and throwing the trial
-away: `acc` is set, so the `for` carries it (`%8` in the body, `%5` after the loop). The
-region carries a second value beside the accumulator, the token. Memory operations are ordered by a token chain the recorder threads through
-them, not by the order of the program text.
+away: `acc` is set, so the `for` carries it (`%7` in the body, `%5` after the loop). The
+loop carries nothing else. Memory operations are ordered by a token chain the recorder
+threads through them, not by the order of the program text, but a read of an `In`
+parameter is not in that chain: it hangs off the entry token (`token=%0` in the body), so
+a loop that only reads `In` parameters carries no token, and the next trip's loads are
+free to start early. A loop that stores, or reads a `Shared` parameter, carries the token
+as a second value beside the accumulator.
 
 ### Reductions over rows: keepdims
 

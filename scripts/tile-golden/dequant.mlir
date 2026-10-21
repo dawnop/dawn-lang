@@ -41,7 +41,7 @@ cuda_tile.module @m {
     %43 = reshape %arg1 : tile<ptr<f64>> -> tile<1x1xptr<f64>>
     %44 = broadcast %43 : tile<1x1xptr<f64>> -> tile<64x64xptr<f64>>
     %45 = offset %44, %31 : tile<64x64xptr<f64>>, tile<64x64xi32> -> tile<64x64xptr<f64>>
-    %46, %47 = load_ptr_tko weak %45 token=%42 : tile<64x64xptr<f64>> -> tile<64x64xf64>, token
+    %46, %47 = load_ptr_tko weak %45 token=%0 : tile<64x64xptr<f64>> -> tile<64x64xf64>, token
     %48 = mulf %41, %46 rounding<nearest_even> : tile<64x64xf64>
     %49 = assume div_by<16>, %arg2 : tile<ptr<f64>>
     %50 = make_tensor_view %49, shape = [64, 64], strides = [64, 1] : tensor_view<64x64xf64, strides=[64, 1]>

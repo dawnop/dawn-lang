@@ -28,7 +28,7 @@ cuda_tile.module @m {
     %24 = make_partition_view %23 : partition_view<tile=(128), padding_value = zero, tensor_view<128xf64, strides=[1]>, dim_map=[0]>
     %25, %26, %27 = get_tile_block_id : tile<i32>
     %28, %29 = load_view_tko weak %24[%25] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<128xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xf64>, token
-    %30, %31 = load_ptr_tko weak %13 token=%29 : tile<128xptr<f64>> -> tile<128xf64>, token
+    %30, %31 = load_ptr_tko weak %13 token=%0 : tile<128xptr<f64>> -> tile<128xf64>, token
     %32 = addf %30, %28 rounding<nearest_even> : tile<128xf64>
     %33 = assume div_by<16>, %arg1 : tile<ptr<f64>>
     %34 = make_tensor_view %33, shape = [384], strides = [1] : tensor_view<384xf64, strides=[1]>

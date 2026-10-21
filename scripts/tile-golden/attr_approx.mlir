@@ -20,7 +20,7 @@ cuda_tile.module @m {
     %24 = make_partition_view %23 : partition_view<tile=(128), padding_value = zero, tensor_view<?xf64, strides=[1]>, dim_map=[0]>
     %25 = constant <i32: 2> : tile<i32>
     %26 = muli %9, %25 : tile<i32>
-    %27 = store_view_tko weak %16, %24[%26] token=%13 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<?xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
+    %27 = store_view_tko weak %16, %24[%26] token=%0 : tile<128xf64>, partition_view<tile=(128), padding_value = zero, tensor_view<?xf64, strides=[1]>, dim_map=[0]>, tile<i32> -> token
     %28 = sqrt %14 rounding<approx> : tile<128xf32>
     %29 = ftof %28 rounding<nearest_even> : tile<128xf32> -> tile<128xf64>
     %30 = constant <i32: 2> : tile<i32>

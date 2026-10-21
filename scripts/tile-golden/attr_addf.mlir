@@ -20,7 +20,7 @@ cuda_tile.module @m {
     %24 = reshape %arg1 : tile<ptr<f64>> -> tile<1xptr<f64>>
     %25 = broadcast %24 : tile<1xptr<f64>> -> tile<128xptr<f64>>
     %26 = offset %25, %10 : tile<128xptr<f64>>, tile<128xi32> -> tile<128xptr<f64>>
-    %27, %28 = atomic_rmw_tko relaxed device %26, addf, %22 token=%23 : tile<128xptr<f64>>, tile<128xf64> -> tile<128xf64>, token
+    %27, %28 = atomic_rmw_tko relaxed device %26, addf, %22 token=%0 : tile<128xptr<f64>>, tile<128xf64> -> tile<128xf64>, token
     return
   }
 }

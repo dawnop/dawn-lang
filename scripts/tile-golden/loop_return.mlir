@@ -10,7 +10,7 @@ cuda_tile.module @m {
     %9, %10, %11 = get_tile_block_id : tile<i32>
     %12, %13 = load_view_tko weak %8[%9] token=%0 : partition_view<tile=(128), padding_value = zero, tensor_view<?xi32, strides=[1]>, dim_map=[0]>, tile<i32> -> tile<128xi32>, token
     %14 = constant <i32: 0> : tile<128xi32>
-    %15, %16, %17 = loop iter_values(%18 = %12, %19 = %14, %20 = %13) : tile<128xi32>, tile<128xi32>, token -> (tile<128xi32>, tile<128xi32>, token) {
+    %15, %16, %17 = loop iter_values(%18 = %12, %19 = %14, %20 = %0) : tile<128xi32>, tile<128xi32>, token -> (tile<128xi32>, tile<128xi32>, token) {
       %21 = constant <i32: 1> : tile<128xi32>
       %22 = addi %19, %21 : tile<128xi32>
       %23, %24, %25 = get_num_tile_blocks : tile<i32>
