@@ -402,7 +402,7 @@ name: gates
 # those figures since 09-15 (827s, 742s, 937s).
 #
 # run-pole: 950s (the worst figure any job's budget line may claim)
-# push-total: 22083s (the most this file's `3x` claims may add up to)
+# push-total: 22348s (the most this file's `3x` claims may add up to)
 on:
   workflow_call:
     # Passed by ci.yml. Inside a called workflow the github context is the
@@ -3550,19 +3550,22 @@ jobs:
     # 654s (hit). Both are to be restated from the first observed main runs;
     # if a miss lands above the pole the site steps move to a job of their own
     # rather than the pole rising.
-    # budget: 3x 945s worst observed (822s on run 38781614231, plus 15s for xmap-samples' tileir sample, plus one standard deviation, 104s)
-    timeout-minutes: 48
+    # 2026-10-20, the site steps left for the `site` job below (#817). The
+    # 2026-10-20 note above is why: a cache miss put this job's worst case at
+    # 935s against the 950s pole, and the call map's harness adds its own cold
+    # build to that, so the pole would have been crossed or raised. What
+    # remains here is doc-check, the public-declaration check, site tests and
+    # the starter-program mapping: 484s on the first run of the new shape (run
+    # 39530548188). The 822s worst observed before the split included the site
+    # steps, 100s on main (`site builds` 39s, `search budget gate negative
+    # controls` 8s, the editor selftests 3s, `site dist, JVM vs native` 50s).
+    # Restated as that worst less those steps, 722s, plus one standard
+    # deviation, 104s, 826s, rounded up to 5s, 830s (945s before); 3x that is
+    # 2490s, 42 minutes. To be restated from the first observed main runs.
+    # budget: 3x 830s worst observed before the split less the site steps (822s on run 38781614231, less 100s, plus one standard deviation, 104s)
+    timeout-minutes: 42
     steps:
       - uses: actions/checkout@v4
-
-      # site/build.sh builds the Playground editor bundle, so CI needs npm.
-      # This job is the only one that builds the site, so it is the only one
-      # that sets up node.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 'lts/*'
-          cache: npm
-          cache-dependency-path: site/play-ui/package-lock.json
 
       # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
       - name: the pinned C compiler
@@ -3601,6 +3604,47 @@ jobs:
       # The playground contract ran here until 2026-10-19; it moved to
       # java-target-classpath beside the deploy guards (that job's 2026-10-19
       # note says why).
+
+  # The site: the generator, the cuTile call map, the search gate, the editor
+  # bundle and the JVM-vs-native differential. These steps were the docs job's
+  # until 2026-10-20 (the generator and the call map's harness became native
+  # binaries, whose cold build the docs job's worst case could not absorb under
+  # the pole; see the note on that job). They share nothing with doc-check but
+  # the toolchain, so the two run in parallel. Anything that builds or checks
+  # the site belongs here: a step added after the differential sees site/dist
+  # and site/play-ui/dist.
+  site:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.all == 'true' || contains(fromJSON(needs.plan.outputs.jobs), 'site') }}
+    runs-on: ubuntu-latest
+    # Measured on GitHub runs of this job (#817, run 39530548188 on a cache
+    # miss: dawnc, the generator, the search probe and the call map's harness
+    # are all built): 332s, of which `site builds` 204s, `site dist, JVM vs
+    # native` 58s, the toolchain 40s, search budget controls 10s. The hit
+    # figure is in the commit message and the report of that PR. The planning
+    # value is the miss plus a seventh for runner spread, rounded up to 5s,
+    # 380s, and the timeout 3x that; to be restated from the first observed
+    # main runs. The docs job above paid for it: 945s to 830s.
+    # budget: 3x 380s the cache-miss run, 332s (run 39530548188), plus a seventh
+    timeout-minutes: 19
+    steps:
+      - uses: actions/checkout@v4
+
+      # site/build.sh builds the Playground editor bundle, so CI needs npm.
+      # This job is the only one that builds the site, so it is the only one
+      # that sets up node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: npm
+          cache-dependency-path: site/play-ui/package-lock.json
+
+      # CC = the pinned clang (scripts/pinned-cc.sh; first noted at native-diff-1)
+      - name: the pinned C compiler
+        run: ./scripts/pinned-cc.sh
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The site's native binaries are the cold cost of the build below: dawnc
       # from HEAD and every program in site/native-progs.txt (the generator,
