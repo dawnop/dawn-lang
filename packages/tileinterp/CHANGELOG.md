@@ -5,7 +5,7 @@ Newest first. A 0.x minor is its own compatibility class
 
 ## 0.2.1 (2026-10-21)
 
-Models `exp2_ftz` (tileir 0.19.0): the input is flushed at the format's own
+Models `exp2_ftz` (tileir 0.20.0): the input is flushed at the format's own
 smallest normal, `2^x` is rounded into the format, and a subnormal result is
 flushed, the way `addf_ftz` and `mulf_ftz` already are.
 

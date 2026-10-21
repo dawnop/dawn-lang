@@ -6094,6 +6094,72 @@ pub fn for_arch[H](arch: String, hints: H) -> (String, H)
 - 兼容层（保留 `hint_*` 旧名、或接受 `(String, Int)` 二元组）：没有外部消费者，破坏性改动直接迁调用方。
 - 运行期 autotune、第一轮网格含 warps、运算顺序算调优面：同报告 §六，不重述。
 
+### 6.40 f32 `exp2` 的 `flush_to_zero`，bf16 flash 改用它（tileir 0.20.0，P3）
+
+**起因。** `research-gpu-cutile-timing`（2026-10-20）：Dawn 写出的 `exp` 被 tileiras 展开成 libdevice 风格的七条指令；换成 `exp2`（`log2(e)` 预乘进
+scale）只省 4% 到 6%，因为不带 `flush_to_zero` 的 `exp2` 会在 `MUFU.EX2` 前后补次正规数的处理（`FSETP x < -126`、带谓词的 `FMUL 0.5`、之后带谓词的
+平方）；带 `flush_to_zero` 才只剩一条 `MUFU.EX2`。cuTile 官方 attention 样例写的就是 `exp2(qk * qk_scale' - m, flush_to_zero=True)`，Triton 教程
+与 FlashAttention 2、3 也把 `log2(e)` 折进 scale 再用 `exp2`。Dawn 的 `exp2` 当时没有这个选项，所以写不出。
+
+**形状：具名参数，还是选项记录。**
+
+| 方案 | 写法 | 取舍 |
+|---|---|---|
+| A. 具名参数 | `exp2(x, ftz: true)` | 与刀 K2 已定的 `add(a, b, ftz: true)`、`mul`、`sub`、`div` 同一形状；cuTile Python 是关键字参数 `flush_to_zero=`；一次 grep `ftz: true` 找到所有用处 |
+| B. 选项记录 | `exp2(x, Exp2Opts { ftz: true })` | 为一个字段新增一个类型与一条构造；全仓没有先例；以后 `rsqrt` 等再加属性时要么共用一个记录（字段不全适用）要么每个操作一个记录 |
+
+选 A。K2 的四条理由（`docs/std-defaults-design.md` 7.2，`dev.dawn` 里「the attributes of float arithmetic」一节）原样适用：具名参数比后缀名好 grep，
+操作支持的取值不一致由汇编器拒绝（不是由名字表达），组合没有名字，方言把它们建模成带默认值的属性、cuTile 建模成带默认值的关键字参数。
+记录里的操作名沿用 T4 的后缀写法（`exp2_ftz`），所以录制 handler、渲染器与写器读的是同一套名字，表面只多一个参数。
+
+**语义。** `flush_to_zero` 是单位属性，在 flags 字里是第 0 位（`exp2` 的唯一可选字段，所以与 `addf` 同位）。方言的措辞是「把次正规的输入与结果冲成同号零」，
+所以两头都冲：输入 `x` 若是次正规（|x| < 2^-126）按 0 算，结果若是次正规（`x` 在 [-149, -126) 一带）答 +0。对 `2^x` 这个函数，输入冲零不可观测
+（`2^0 = 2^subnormal = 1`，差在 f32 之下），可观测的只有结果冲零：`x = -130` 时不带属性答 2^-130（次正规），带属性答 0。
+`attr_exp2` 的语料因此放：次正规结果（-130、-149、-140.5、-126.5）、恰为最小正规数的 -126、次正规输入（答 1）、两个普通值。
+
+- 渲染成 `exp2 %x flush_to_zero : tile<..xf32>`，字节是 `exp2` 的 opcode 加 flags 字 `1`（不带属性时是 `0`）；反汇编对拍确认这一位（`tileirdisasm` 读回的就是
+  `flush_to_zero`）。
+- tileinterp：`flush_in(fmt, nearest(fmt, 2^flush_in(fmt, x)))`，与 `addf_ftz`、`mulf_ftz` 的冲法一致（先舍入进格式、再按格式自己的最小正规数冲）。
+- tileref：`ref_exp2_ftz(x) = f32_flush(round_f32(ref_exp2(f32_flush(round_f32(x)))))`；`flash_attn_ref` 加 `base2: Bool`，为真时 `scale` 是
+  已乘 `log2(e)` 的发射标量、指数是 `ref_exp2_ftz`。
+
+**为什么只对 f32 开放。** 汇编器只在 f32 上接受：`'cuda_tile.exp2' op flush_to_zero modifier only supported for f32 data type, but got: 'f64'`
+（本刀实测，tileiras 13.4.92；与 `addf`、`mulf` 的同一条 `verifyFtz`）。f64 不需要它：f64 的 `exp` 与 `exp2` 在设备上都是软件序列，差别在噪声内
+（调研实测 ±0.6%），所以 f64 的 `flash_attn` 不改，GPU 页、站点 map 与 Playground 的样例展示的正是 f64 的 `flash_attn`，因此这三处没有变化
+（`flash_attn_bf16` 没有出现在它们任何一处）。参数本身对任意宽度都能写（`D` 是泛型），拒绝发生在汇编器，与 K2 对 `ftz` 的处理一致。
+
+**flash_attn_bf16 的改法。** kernel 里 `exp(s - m_new)` 与 `exp(m - m_new)` 改成 `exp2(.., ftz: true)`；发射标量由 `1/sqrt(d)` 改成 `log2(e)/sqrt(d)`
+（seq_diff 里 `narrow.f32(ATT_INV_SQRT_D * LOG2_E)`）。冲零在这里是安全的：低于 2^-126 的概率远低于行和 `l`（含最大值自己那一项 1）的一个 f32 ulp，
+冲掉它既不动 `l` 也不动加权和。与 A2（改存 f32 输出）不合刀，输出仍是 f64。
+
+**golden 的变化。** 新增 `attr_exp2`（`.mlir`、`.tilebc`，进 matrix、plan、`attrs.txt` 的 `unit.flush_to_zero` 行、tileinterp 的 `covered.txt`）。
+`flash_attn_bf16.mlir` 与 `.tilebc` 重录：只有两行，`%44 = exp %43` 与 `%46 = exp %45` 变成 `exp2 .. flush_to_zero`，`.tilebc` 同长（808 字节）。
+其余 golden 没有变化（`tile-golden` 全套重录后 `git status` 里只有这两个与新增的两个）。
+
+**设备核对。** `attr_exp2` 是容差档（设备的 `ex2` 是近似，次正规答案与它冲成的零之差在容差以内），所以结论由 probe 给：两段在多少条车道上不同
+（`lanes`）、其中不带属性那一段是非零次正规而带属性那一段恰为零的有多少（`flushed`）；run.sh 把两个数都钉在零以上，变异体 `exp2-ftz-bit-dropped`
+（写器把 `exp2_ftz` 的 flags 位写成 0）把两个数都压到零。flash_bf16 序列的容差与受控对照（`flash_bf16_unrounded`）不变，两者的参考都改读 `base2`。
+
+**测时与误差。** @@TIMING@@
+
+**测试与负控。**
+
+- `dev`：`k2_surface` 多两项（`exp2(t, ftz: true)` 与 `ftz: false`），记录名分别是 `exp2_ftz` 与 `exp2`；`render`、`bytecode`（flags 位、opcode `0x18`）各一条断言。
+- tileinterp 自测一条（`exp2_pair`：次正规结果冲零、最小正规数保留、下溢为零、次正规输入答 1）；tileref 在 `attr_exp2_ref`、`ref_exp2_ftz`、
+  `flash_attn_ref(base2: true)` 上各有断言。
+- 负控（先证明会红）：tileinterp 去掉结果那一冲，`selftest` 的 `exp2 with flush_to_zero ...` 红；tileref 去掉结果那一冲，`attribute references` 那条红
+  （`e2[128] == 0.0`）。`tileinterp-diff` 对拍 pass、零不一致，覆盖 176 个 kernel（比改前多 `attr_exp2`）。注意 `attr_exp2` 与 `flash_attn_bf16` 都在容差档，
+  去掉冲零后两边的差在容差以内，`tileinterp-diff` 自己分不出，所以这条负控由上面两处的精确断言承担。
+
+**不做的（理由）：**
+
+- f64 的 `exp2` 不加：汇编器拒绝，实测也无差别。
+- 全局 fast-math 开关：属性是操作的一部分，要在使用点写出来、能 grep；一个全局开关会让同一份 kernel 源码在不同配置下答案不同，而这里的取舍（冲掉
+  低于 2^-126 的概率）只对 softmax 这一类用法成立。
+- `rsqrt` 的 `ftz`：方言里它也有这个属性，但没有 kernel 用、也没有测时，没有出处就不加（表面是一个参数，真要用时再加，不是迁移）。
+- 为 `exp`（自然底）加 `ftz`：方言里 `exp` 没有这个属性（它的字段是 `rounding_mode`），调研的 A/B 也是换底加 ftz 一起省的。
+- 在录制期按元素宽度拒绝 `ftz`：与 `add`、`mul` 一致，拒绝留给汇编器；单独为 `exp2` 加一条会让同一属性有两种拒绝时机。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`
