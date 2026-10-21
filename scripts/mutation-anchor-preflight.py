@@ -38,6 +38,7 @@ ADAPTERS = {
     "dependency-heap-contract": ("selfhost/src/main.dawn",),
     "display-layering-contract": (".",),
     "export-surface-contract": (".",),
+    "ffi-header-contract": (".",),
     "for-pattern-contract": ("selfhost",),
     "incremental-semantics-contract": (".",),
     "inflate-contract": (".",),

@@ -950,8 +950,8 @@ dawn_str *dawn_str_new(int64_t len) {
   dawn_hdr_init(&s->h, DAWN_K_STR);
   s->len = len;
   s->p = (const char *)(s + 1);
-  /* not part of the value (len is authoritative); a convenience for the seams
-   * that hand `p` to the C library */
+  /* not part of the value (len is authoritative), but an ABI promise: the
+   * seams that hand `p` to a C library, dawn_ffi.h's dawn_ffi_cstr first */
   ((char *)(s + 1))[len] = '\0';
   return s;
 }
@@ -1597,9 +1597,6 @@ void dawn_drop(void *p) {
   }
   dawn_ws_free(&s);
 }
-
-/* The prelude's own constructors: one erased field, so bit 0 of the mask. */
-#define DAWN_MASK_ONE_BOXED UINT64_C(1)
 
 dawn_adt *dawn_some(void *boxed) {
   dawn_adt *a = dawn_adt_new(DAWN_TAG_SOME, 1, DAWN_MASK_ONE_BOXED);
@@ -2437,8 +2434,6 @@ void dawn_fault(dawn_str *msg) { dawn_raise(msg, false); }
  * reference becomes the record's, no copy -- which is also why every caller
  * must have moved the payload out of `dawn_inflight` first: this consumes
  * it. */
-#define DAWN_MASK_THREE_BOXED UINT64_C(7)
-
 static dawn_adt *dawn_foreign_error(dawn_failure f) {
   dawn_adt *a = dawn_adt_new(DAWN_TAG_FOREIGN_ERROR, 3, DAWN_MASK_THREE_BOXED);
   a->fields[0].p = dawn_str_copy(f.kind, (int64_t)strlen(f.kind));
