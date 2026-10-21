@@ -49,7 +49,7 @@ use std/map
 use std/narrow
 use std/str
 use tileir/dev.{Dev, Param, Tile, param, block_id, tile_at, load, store, add, load_cell, store_cell,
-  for_arch, hint_latency, d_loop, carry, get, set, d_reduce, broadcast, DYN_DIM,
+  for_arch, ptr_hints, d_loop, carry, get, set, d_reduce, broadcast, DYN_DIM,
   i_const, add_i, mul_i, div_i, rem_i, lt_i, le_i, max_i, eq_i, select, idx_const, idx_add,
   d_assert, d_print, d_global, global_ptrs, lanes,
   ptr_offset, load_ptrs, store_ptrs, alloca_ptrs,
@@ -81,9 +81,9 @@ fn vadd(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
 ## states of the flag bit in one kernel.
 fn vadd_hinted(a: Param[Float], b: Param[Float], out: Param[Float]) -> Unit !Dev = {
   let blk = tile_at(block_id(0), WIDTH)
-  let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", [hint_latency(4)])])
+  let ta = load(a, blk, [WIDTH], hints: [for_arch("sm_86", ptr_hints(latency: Some(4)))])
   let tb = load(b, blk, [WIDTH])
-  store(out, blk, add(ta, tb), hints: [for_arch("sm_86", [hint_latency(7)])])
+  store(out, blk, add(ta, tb), hints: [for_arch("sm_86", ptr_hints(latency: Some(7)))])
 }
 
 ## `vadd` over binary32 buffers: the same body, a different format in the

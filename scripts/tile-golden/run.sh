@@ -546,7 +546,7 @@ kernels=(
   assert_pass assert_fail print_tile assume_divby
   assume_same assume_bounded
   global_table global_ctl global_scratch global_flags global_syms
-  hint_entry hint_memory
+  hint_entry hint_memory hint_view
   alloca_scratch alloca_two alloca_ctl mmaf_scaled_e4m3
   view_transpose view_max_pool view_conv2d view_padding view_pad_i32
   view_dyn_transpose view_tensor_shape view_index_space
@@ -637,6 +637,9 @@ mutants=(
   hint-tag-as-dictionary
   hint-flag-bit-misplaced
   hint-entry-flag-dropped
+  hint-view-flag-bit-misplaced
+  hint-view-after-inbounds
+  hint-view-store-flag-dropped
   exp-rounding-unwritten
   mmaf-flags-unwritten
   header-minor-still-2
@@ -2153,6 +2156,53 @@ if run_item hint-entry-flag-dropped; then
   mutant_project hint-entry-flag-dropped bytecode.dawn
   writer_mutant_checks hint-entry-flag-dropped hint_entry same-size \
     "error at offset 11: failed to get result type 3 for BreakOp"
+fi
+
+# 43a-43c. The VIEW side of the same family (knife P4-a). `load_view_tko` and
+#     `store_view_tko` take `optimization_hints` too, and they are the
+#     operations the flash and matmul kernels read through, so three of the
+#     four seams above are held again for them. All three are `hint_view`,
+#     whose first load, second load and store carry hints, none and hints, so
+#     both states of the flag bit are in one kernel. Each is the same length
+#     as the golden (bytes moved, none added) and each is refused by tileiras
+#     for a reason of its own; the hint CONTENT is still not checked by
+#     anything outside this repository.
+#
+#     43a  the view's hints flagged on bit 0, `memory_scope`'s, as 42 does for
+#          a pointer load. The view's bits are assigned the same way (scope
+#          0, hints 1, token 2) and one for the other loses the stream.
+#     43b  the hints written AFTER the `inbounds` array. The attributes go in
+#          the operation's declaration order (ordering, scope, hints,
+#          inbounds), the flag says only THAT hints follow and nothing says
+#          where, so the reader takes the hints' outer count for the first
+#          byte of the array.
+#     43c  the STORE's hints bit not set while its hints are still written
+#          (the load's twin of 43's entry mutant): a body longer than its
+#          flags promise.
+#
+#     The fourth seam, `allow_tma` written with the type `i64` instead of
+#     `i1`, is NOT here, and that is measured: tileiras accepts it (exit 0 and
+#     a cubin on sm_86), because it reads a hint's value as
+#     an integer whatever its type and checks nothing about it. Only the
+#     bytes golden (hint_view.tilebc, 387 bytes against 379) sees that
+#     mutant, which is layer 0's job and why hint_view is a golden at all.
+
+if run_item hint-view-flag-bit-misplaced; then
+  mutant_project hint-view-flag-bit-misplaced bytecode.dawn
+  writer_mutant_checks hint-view-flag-bit-misplaced hint_view same-size \
+    "failed to get result type 0 for AbsIOp"
+fi
+
+if run_item hint-view-after-inbounds; then
+  mutant_project hint-view-after-inbounds bytecode.dawn
+  writer_mutant_checks hint-view-after-inbounds hint_view same-size \
+    "failed to parse optional attribute 'optimization_hints'"
+fi
+
+if run_item hint-view-store-flag-dropped; then
+  mutant_project hint-view-store-flag-dropped bytecode.dawn
+  writer_mutant_checks hint-view-store-flag-dropped hint_view same-size \
+    "failed to get referenced type for TypeAttr"
 fi
 
 # 44. `exp` stops writing the `rounding_mode` it must carry from 13.3 on.

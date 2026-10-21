@@ -6019,6 +6019,81 @@ sum 的循环已经不携带 token，所以它的预期文案从「循环体定�
   入口句柄。
 - 为 `trace_kernel`（无角色）也去链：它不知道哪个参数是只读，去链会静默放过真正的读写序，所以保持串链。
 
+### 6.39 视图读写的 hints：类型化的三类记录（刀 P4-a，tileir 0.19.0）
+
+依据：`research-gpu-p4-tuning-20261021.md` §二、§三与裁决 `ruling-gpu-p4-tuning-20261021.md` 第 2 条（P4-a）。本刀只补「能写」：tileir 不放任何调优表（「某 kernel 在某卡上用多大块」属于 kernel 旁边的 Dawn 源码和入库台账，是 P4-c 的事）。破坏性改动，直接迁调用方，不留兼容层。
+
+**一、五个键的出处与归属。** 方言源码 `AttrDefs.td`（tag v13.4.1）的 `HintKey` 一共五个键，每个键带 `validForOps`：
+
+| 键 | 取值 | 挂在哪 | 架构限制 | Dawn 里的位置 |
+|---|---|---|---|---|
+| `num_cta_in_cga` | 2 的幂，1 到 16 | `entry` | Ampere 与 Ada（sm_80 到 sm_89）只能是 1 | `EntryHints` |
+| `occupancy` | 1 到 32 | `entry` | 无 | `EntryHints` |
+| `num_worker_warps_per_cta` | 2 的幂，4 到 8，即只取 4 或 8 | `entry` | 无 | `EntryHints` |
+| `latency` | 1 到 10 | `load_view_tko`、`store_view_tko`、`load_ptr_tko`、`store_ptr_tko` | 无 | `PtrHints`、`ViewHints` |
+| `allow_tma` | 布尔 | 只有 `load_view_tko`、`store_view_tko` | 无 | `ViewHints` |
+
+挂在哪由操作决定，所以类型也按操作种类拆开：一个指针 `load` 拿不到 `allow_tma`，一个 entry 写不出 `latency`，类型里就没有那个字段，「写错键」在类型检查就红，不必等到录制。以前 `Hint = (String, Int)` 是二元组，T15 当时的理由是「合法性由操作决定」，这一条恰好是把那条规则写进类型。`dev.dawn` 里 `hint_num_worker_warps_per_cta` 的注释写「不超过 32 的 2 的幂」是错的，方言是 `pow2_range 4..8`，cuTile 1.6 的校验器也只收 4 或 8，注释一并删掉。
+
+**二、类型化记录的形状。**
+
+```
+pub alias ByArch[H] = List[(String, H)]            # 架构名（"sm_86" 或 "default"）到该架构的记录
+pub type EntryHints = { num_cta_in_cga: Option[Int], num_worker_warps_per_cta: Option[Int], occupancy: Option[Int] }
+pub type PtrHints   = { latency: Option[Int] }
+pub type ViewHints  = { allow_tma: Option[Bool], latency: Option[Int] }
+pub fn entry_hints(..) / ptr_hints(..) / view_hints(..)   # 全部是带 None 默认值的具名参数构造器
+pub fn for_arch[H](arch: String, hints: H) -> (String, H)
+```
+
+`hints:` 的接收者：`trace_kernel`、`trace_calls`、`trace1` 到 `trace5` 收 `ByArch[EntryHints]`；`load`、`store` 收 `ByArch[PtrHints]`；`load_cell`、`load_at`、`store_cell`、`store_sub`、`load_view`、`store_view`、`load_gather`、`store_gather` 收 `ByArch[ViewHints]`。写法：`load_cell(a, hints: [for_arch("sm_86", view_hints(latency: Some(3)))])`。`for_arch` 沿用旧名，改成对记录泛型。
+
+录制之后，记录经 `wire_entry` / `wire_ptr` / `wire_view` 变回线上形状 `Hints = List[(String, List[(String, Int)])]`（`allow_tma` 是 0 或 1），后面的 `lower`、`render`、`bytecode` 只认这一种。键在每个架构下按键名排序（`allow_tma` 在 `latency` 前，`num_cta_in_cga` 在 `num_worker_warps_per_cta` 前、`occupancy` 在后），这正是方言打印字典的次序，也让现有 `hint_entry` 的字节不变。所有键都是 `None` 的架构不写出（空字典是「有属性、零条目」，与没有这个属性不是一回事）。
+
+**三、范围校验。** 方言自己的校验在 `-Wunsupported-hints` 后面，默认关（§6.10 实测：错的键名、错的架构名、`latency=904` 都被静默收下，然后什么也不做）。所以校验只能在这里做，在录制时、在 `Dev` 句柄看到操作之前：
+
+- `latency` 1 到 10；`occupancy` 1 到 32；`num_worker_warps_per_cta` 只取 4 或 8；`num_cta_in_cga` 是 2 的幂且不超过 16，在 `sm_80` 到 `sm_89` 上只能是 1；
+- 架构名只能是 `default`，或 `sm_` 后接至少一位数字；同一个架构只能出现一次（方言的 `sm_xx` 项整个盖住 `default`，不是逐键合并，写两遍只会让人以为是合并）。已知架构名表不抄进来：它随每个 tileiras 版本增长，抄了就是下一张会烂的表；形式正确而方言不认的名字等于没写，与方言自己对它的处理一致；
+- 越界一律 `panic("tileir: optimization hint ...")`，文案点名键、值、架构与范围，例如 ``optimization hint `latency` is 11 for `sm_86`, but the dialect takes 1 to 10``。入口的 hints 在 `record_calls` 一开头检查，早于 kernel 体运行。
+
+**四、字节与文本。** 视图读写的 hints 落在 `load_view_tko` / `store_view_tko` 的 `optimization_hints`：
+
+- flags 的第 1 位（`VIEW_FLAG_HINTS = 2`，T11 起就在，此前没人置位）。位序是「按版本、再按声明序，属性在前、操作数在后」：`memory_scope` 0、`optimization_hints` 1、`token` 2。
+- 属性写入次序是操作的声明序（`BytecodeGen.cpp` 的 `generateAttributeSerialization` 按 `op.getAttributes()`；`Ops.td`：`memory_ordering_semantics`、`memory_scope`、`optimization_hints`、`inbounds`），所以字节里的次序是：flags、内存序、**hints**、`inbounds` 数组、再是操作数。与指针 load 同样不带标签 11，位 1 自己就是宣告。
+- 文本里是 `token=%t optimization_hints=<..> inbounds=[..]`，次序取自方言的 `printViewTkoOptionals`。
+- `allow_tma` 是方言唯一的布尔，写成自包含的 IntegerAttr（标签 1），类型索引指向 **`i1`**（`put_hints` 按键名选 `i1` 或 `i64`），值 0 或 1；方言的 C++ 写入器里 `BoolAttr` 命中的是 `IntegerAttr` 那一支。文本里是 `allow_tma = true`。独立读者验证：`tileirdisasm` 把 `hint_view.tilebc` 读回成 `optimization_hints = <default = {latency = 9}, sm_86 = {allow_tma = true, latency = 3}>`，布尔按布尔印出。
+
+**五、验收。**
+
+- 现有 golden 字节不变：208 个 kernel 的 `.mlir` 与 `.tilebc` 一个字节都没动（`git status` 里 `scripts/tile-golden` 下只多出 `hint_view` 两个新文件）；`hint_entry` 与 `hint_memory` 只改了源码里的写法。
+- 新增 golden `hint_view`（209 个）：`vadd` 的体，走 `load_cell` / `store_cell`。第一个读带两个架构项（`default` 只有 `latency = 9`，`sm_86` 带 `allow_tma = true` 与 `latency = 3`），第二个读不带，写带一个别的架构（`sm_90`）的 `allow_tma = false`，所以位 1 的置位与不置位在一个 kernel 里，而且 `sm_86` 之外的架构项也走过汇编器。tileiras 汇编通过（387 字节，cubin 6880 字节，sm_86），反汇编读回与 `.mlir` 规范化后相等。
+- 层 1 变异体，照 T15 补视图一侧，三个，都是同长、被 tileiras 拒绝：
+
+  | 变异体 | 做了什么 | tileiras 的话 |
+  |---|---|---|
+  | `hint-view-flag-bit-misplaced` | 视图的 hints 位挪到第 0 位（`memory_scope` 的） | `failed to get result type 0 for AbsIOp` |
+  | `hint-view-after-inbounds` | hints 写在 `inbounds` 数组之后 | `failed to parse optional attribute 'optimization_hints'` |
+  | `hint-view-store-flag-dropped` | 写的 hints 位不置而 hints 仍写出 | `failed to get referenced type for TypeAttr` |
+
+  第四个缝（`allow_tma` 的类型写成 `i64`）**不能**在层 1 红：实测 tileiras 照收（退出码 0），因为它把 hint 的值当整数读而不检查（与 §6.10 一致）。只有字节 golden 看得见它（`hint_view.tilebc` 387 字节，变异后 379），这就是 `hint_view` 要做成 golden 的原因之一。它因此不进变异体表。
+- 单元测试 258 项（原 251）：录制的 hints 形状、四个范围的边界与越界、架构名与重复、空记录；字节与文本各一项。
+- 负控，去掉校验则测试变红（各改一处 `dev.dawn`，跑 `dawn test packages/tileir`，再改回）：范围判断改成恒真，两项红（延迟与入口范围）；架构名判断改成恒真，一项红；`sm_8x` 的 CGA 规则关掉，一项红；`num_worker_warps_per_cta` 判断改成恒真，一项红。
+
+**六、台账与墙钟。** tile 输入摘要变了（`scripts/tile-golden`、`packages/tileir` 都在摘要里），三本台账（sm_86 本机，sm_90 与 sm_100 集群）各重录一行。CI：tile.yml 的 tile-golden 分片多 1 个 kernel（约 12.5 秒）和 3 个变异体（各约 13 秒），按 `deal.py` 重新分了 11 片，最重一片 503 秒到 508 秒，整体多出约 52 秒，不碰其他声明值。
+
+**七、迁移。** `hint_num_cta_in_cga`、`hint_num_worker_warps_per_cta`、`hint_occupancy`、`hint_latency` 删除；`Hints` 参数改为按操作种类的 `ByArch[..]`。调用方：`scripts/tile-golden/kernels.dawn`、`examples/projects/gpu_fake`、两处 tileir 自己的测试，站点 gpu 页里一句 `hint_occupancy(2)` 的文字。`Dev` 的 `t_load_view` 与 `t_store_view` 末尾多一个 `hints` 参数（线上形状），包外自写的 handler 要补，所以是 0.19.0。`LoadView`、`StoreView`、`LoadViewTile`、`StoreViewTile` 各多一个字段，`tileinterp` 的模式匹配同步改了（它忽略 hints：hint 不改答案）。
+
+**不做的（理由）：**
+
+- 在 tileir 里放每架构的默认配置表：裁决 2 已定，知识带版本，必须跟着测量走，不该进一个编码器包。
+- 抄一份已知架构名表来校验架构名：它随 tileiras 版本增长，抄了就是下一张会烂的表；形式校验够抓拼写错误。
+- 把校验放进 `-Wunsupported-hints`（让 tileiras 自己报错）：那是汇编器的开关，不在本仓可控的路径上，也不在 `assemble` 的参数里，而且报错在汇编之后，离写错的那一行太远。
+- 给 `atomic_red_view` 加 hints：方言的 `atomic_red_view_tko` 根本不带 `optimization_hints`（`ATOMIC_RED_FLAG_TOKEN` 是它唯一的可选字段）。
+- 把 `hint_view` 并进 layer 2 的 hint 族（`hint_diff` 的 3 个 kernel 与 `vadd` 对照）：族里的判词是「带 hint 的 kernel 与不带的答案逐字节相同」，那是方言的承诺，T15 已在 entry 与指针路上问过设备；视图一侧本刀只到层 1，设备一侧留到 P4-b 的消融（那里会在 sm_90 与 sm_100 上真带 `allow_tma` 跑）。这是一处未经设备核对的空白，记在这里。
+- `allow_tma` 与 `latency` 对 cubin 的影响：本刀不测，归 P4-b（sm_86 没有 TMA，`allow_tma` 在这台机器上只能证明字节对，不能证明起作用）。
+- 兼容层（保留 `hint_*` 旧名、或接受 `(String, Int)` 二元组）：没有外部消费者，破坏性改动直接迁调用方。
+- 运行期 autotune、第一轮网格含 warps、运算顺序算调优面：同报告 §六，不重述。
+
 ## 7. 刀序
 
 种子轮通则：新 std 模块与新包都不被 `selfhost/src` 使用，预期零轮（`prev-diff.sh:62-64`

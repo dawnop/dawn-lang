@@ -238,8 +238,8 @@ fn tys_of(i: Instr) -> List[Ty] = match i {
   MakePartitionView(_d, _s, st, t) -> [st, t]
   GetTensorShape(_ds, _s, st, rt) -> [st, rt]
   GetIndexSpaceShape(_ds, _s, st, rt) -> [st, rt]
-  LoadViewTile(_d, _t, _v, vt, _ix, itys, t, _ti, _ib) -> [vt, t] ++ itys
-  StoreViewTile(_t, _v, vt, _val, valt, _ix, itys, _ti, _ib) -> [vt, valt] ++ itys
+  LoadViewTile(_d, _t, _v, vt, _ix, itys, t, _ti, _ib, _h) -> [vt, t] ++ itys
+  StoreViewTile(_t, _v, vt, _val, valt, _ix, itys, _ti, _ib, _h) -> [vt, valt] ++ itys
   FloatFma(_d, t, _l, _r, _a) -> [t]
   FloatMma(_d, t, lt, rt, _l, _r, _a) -> [t, lt, rt]
   FloatMmaScaled(_d, t, lt, rt, st, rst, _l, _r, _a, _ls, _rs) -> [t, lt, rt, st, rst]
@@ -322,8 +322,8 @@ fn op_problem(i: Instr) -> Option[String] = match i {
   MakeTensorView(_d, _b, _bt, _t, _ds, _dst, _dt) -> None
   MakePartitionView(_d, _s, _st, _t) -> None
   GetTensorShape(_ds, _s, _st, _rt) -> None
-  LoadViewTile(_d, _t, _v, _vt, _ix, _itys, _ty, _ti, _ib) -> None
-  StoreViewTile(_t, _v, _vt, _val, _valt, _ix, _itys, _ti, _ib) -> None
+  LoadViewTile(_d, _t, _v, _vt, _ix, _itys, _ty, _ti, _ib, _h) -> None
+  StoreViewTile(_t, _v, _vt, _val, _valt, _ix, _itys, _ti, _ib, _h) -> None
   Ret -> None
 }
 
@@ -1328,7 +1328,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
     })), Fell)
     _ -> internal("get_index_space_shape of a value that is not a partition view")
   }
-  LoadViewTile(dst, tok_out, view, _vt, ix, _itys, t, _tin, inbounds) -> match get(env, cx, view) {
+  LoadViewTile(dst, tok_out, view, _vt, ix, _itys, t, _tin, inbounds, _hints) -> match get(env, cx, view) {
     VPart(p) -> {
       let idx = list.map(ix, r => scalar_int(cx, get(env, cx, r), "load_view_tko index"))
       check_promise(cx, p, idx, inbounds, "load_view_tko")
@@ -1354,7 +1354,7 @@ fn step(cx: Cx, env: Map[Int, V], i: Instr) -> (Map[Int, V], Flow) !Mem = match 
     }
     _ -> internal("load_view_tko of a value that is not a partition view")
   }
-  StoreViewTile(tok_out, view, _vt, value, valt, ix, _itys, _tin, inbounds) -> match get(env, cx, view) {
+  StoreViewTile(tok_out, view, _vt, value, valt, ix, _itys, _tin, inbounds, _hints) -> match get(env, cx, view) {
     VPart(p) -> {
       let idx = list.map(ix, r => scalar_int(cx, get(env, cx, r), "store_view_tko index"))
       check_promise(cx, p, idx, inbounds, "store_view_tko")

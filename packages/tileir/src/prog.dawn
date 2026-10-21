@@ -30,7 +30,7 @@ use dev.{Dev, Param, Tile, Idx, neg, addi, Hints, RedId, IdF, IdI, AssumePred, D
   tensor_view, partition_view, load_view, store_view, NoPadding, PadNegInf, extract, insert, powi, d_return_if,
   float_to_float, sub, add_i, d_fork2, select, lt, arange, mma, full, to, transpose, permute_tile, rounding_name, Overflow, Padding, PadZero, padding_name,
   padding_is_special, is_float_dtype, DYN_DIM, idx_of, exp, div, load_cell, load_at, store_cell, store_sub, zeros, fill,
-  retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, for_arch, hint_latency, lit, idx_div,
+  retile, reduce_sum, reduce_max, reduce_min, scan_sum, broadcast, reshape, tail_mask, ByArch, EntryHints, PtrHints, ViewHints, wire_entry, wire_ptr, wire_view, for_arch, entry_hints, ptr_hints, view_hints, lit, idx_div,
   idx_rem, idx_sub, extent_of, blocks_of, scalar, idx_as_tile }
 use std/narrow.{F32, F16, BF16, Rounding, bf16}
 
@@ -207,9 +207,9 @@ pub type TileOp =
   | PartitionViewOf(dst: Int, dtype: String, view: Int, tile_shape: List[Int], dim_map: List[Int],
     padding: Padding)
   | LoadView(dst: Int, tok_out: Int, dtype: String, view: Int, indices: List[Int], tok_in: Int,
-    inbounds: List[Bool])
+    inbounds: List[Bool], hints: Hints)
   | StoreView(tok_out: Int, dtype: String, view: Int, indices: List[Int], value: Int, tok_in: Int,
-    inbounds: List[Bool])
+    inbounds: List[Bool], hints: Hints)
   | TensorShapeOf(dst: Int, view: Int, dim: Int)
   | IndexSpaceShapeOf(dst: Int, view: Int, dim: Int)
   | CellViewOf(dst: Int, param: Int, dtype: String, align: Int, shape: List[Int], strides: List[Int],
@@ -1331,7 +1331,7 @@ fn writes_of(defs: Map[Int, TileOp], op: TileOp) -> List[Write] = match op {
   Scatter(_t, param, _dtype, _i, _s, _v, _m, _ti) -> [AnyOf(param)]
   AtomicRMW(_d, _t, param, _dtype, _mode, _i, _s, _v, _m, _ti) -> [AnyOf(param)]
   AtomicCAS(_d, _t, param, _dtype, _i, _s, _c, _v, _m, _ti) -> [AnyOf(param)]
-  StoreView(_t, _dtype, view, _ix, _v, _ti, _ib) -> [named(view_param(defs, view))]
+  StoreView(_t, _dtype, view, _ix, _v, _ti, _ib, _h) -> [named(view_param(defs, view))]
   AtomicRedViewOf(_t, _dtype, view, _ix, _mode, _scope, _v, _ti) -> [named(view_param(defs, view))]
   For(_iv, _lower, _upper, _step, _unsigned, _inits, _carried, _results, body) -> writes_in(defs, body)
   Loop(_inits, _carried, _results, body) -> writes_in(defs, body)
@@ -1385,8 +1385,8 @@ fn tok_step(op: TileOp) -> Option[(Int, List[Int])] = match op {
   Print(t, _f, _dt, _s, _a, ti) -> Some((t, [ti]))
   TokenOnly(t, _op, ti) -> Some((t, [ti]))
   AtomicRedViewOf(t, _dt, _v, _ix, _mode, _scope, _val, ti) -> Some((t, [ti]))
-  LoadView(_d, t, _dt, _v, _ix, ti, _ib) -> Some((t, [ti]))
-  StoreView(t, _dt, _v, _ix, _val, ti, _ib) -> Some((t, [ti]))
+  LoadView(_d, t, _dt, _v, _ix, ti, _ib, _h) -> Some((t, [ti]))
+  StoreView(t, _dt, _v, _ix, _val, ti, _ib, _h) -> Some((t, [ti]))
   JoinToks(t, toks) -> Some((t, toks))
   For(_iv, _lower, _upper, _step, _unsigned, inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
   Loop(inits, _carried, results, _body) -> Some((last(results), [last(inits)]))
@@ -1507,7 +1507,8 @@ fn first_overlap(wi: List[Write], wj: List[Write]) -> Option[String] = {
 ## before it had a default still read the same (knife K2 folded
 ## `trace_kernel_hinted` into it; docs/std-defaults-design.md 3 says why the
 ## defaults go after the body).
-pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: Hints = []) -> TileProg = {
+pub fn trace_kernel(name: String, params: List[KParam], body: fn() -> Unit !Dev,
+  hints: ByArch[EntryHints] = []) -> TileProg = {
   let (prog, _calls) = trace_calls(name, params, body, hints: hints)
   prog
 }
@@ -1737,7 +1738,7 @@ fn entry_args(name: String, sigs: List[Sig]) -> List[EntryArg] = {
   }
 }
 
-fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: Hints) -> TileProg = {
+fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: ByArch[EntryHints]) -> TileProg = {
   let (prog, _calls) = record_calls(name, list.map(sigs, kparam_of), list.map(sigs, s => s.access),
     list.map(sigs, s => s.g), body, hints)
   prog
@@ -1751,7 +1752,7 @@ fn record_sigs(name: String, sigs: List[Sig], body: fn() -> Unit !Dev, hints: Hi
 ## runs; a write into an `In` parameter is refused while it records. The
 ## program is the one `trace_kernel` records for the same body.
 pub fn trace1[A](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
-  hints: Hints = []) -> (TileProg, Entry1[A]) = {
+  hints: ByArch[EntryHints] = []) -> (TileProg, Entry1[A]) = {
   let args = entry_args(name, [sig_of(a)])
   let prog = record_sigs(name, [sig_of(a)], () => body(param(marker(a), 0)), hints)
   (prog, entry1(name, args[0]))
@@ -1759,7 +1760,7 @@ pub fn trace1[A](name: String, a: Arg[A], body: fn(Param[A]) -> Unit !Dev,
 
 ## [`trace1`] for two parameters.
 pub fn trace2[A, B](name: String, a: Arg[A], b: Arg[B],
-  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry2[A, B]) = {
+  body: fn(Param[A], Param[B]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry2[A, B]) = {
   let sigs = [sig_of(a), sig_of(b)]
   let args = entry_args(name, sigs)
   let prog = record_sigs(name, sigs, () => body(param(marker(a), 0), param(marker(b), 1)), hints)
@@ -1768,7 +1769,7 @@ pub fn trace2[A, B](name: String, a: Arg[A], b: Arg[B],
 
 ## [`trace1`] for three parameters.
 pub fn trace3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
-  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: Hints = []) -> (TileProg, Entry3[A, B, C]) = {
+  body: fn(Param[A], Param[B], Param[C]) -> Unit !Dev, hints: ByArch[EntryHints] = []) -> (TileProg, Entry3[A, B, C]) = {
   let sigs = [sig_of(a), sig_of(b), sig_of(c)]
   let args = entry_args(name, sigs)
   let prog = record_sigs(name, sigs,
@@ -1779,7 +1780,7 @@ pub fn trace3[A, B, C](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
 ## [`trace1`] for four parameters.
 pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
   d: Arg[E], body: fn(Param[A], Param[B], Param[C], Param[E]) -> Unit !Dev,
-  hints: Hints = []) -> (TileProg, Entry4[A, B, C, E]) = {
+  hints: ByArch[EntryHints] = []) -> (TileProg, Entry4[A, B, C, E]) = {
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d)]
   let args = entry_args(name, sigs)
   let prog = record_sigs(name, sigs,
@@ -1791,7 +1792,7 @@ pub fn trace4[A, B, C, E](name: String, a: Arg[A], b: Arg[B], c: Arg[C],
 pub fn trace5[A, B, C, E, F](name: String, a: Arg[A], b: Arg[B],
   c: Arg[C], d: Arg[E], e: Arg[F],
   body: fn(Param[A], Param[B], Param[C], Param[E], Param[F]) -> Unit !Dev,
-  hints: Hints = []) -> (TileProg, Entry5[A, B, C, E, F]) = {
+  hints: ByArch[EntryHints] = []) -> (TileProg, Entry5[A, B, C, E, F]) = {
   let sigs = [sig_of(a), sig_of(b), sig_of(c), sig_of(d), sig_of(e)]
   let args = entry_args(name, sigs)
   let prog = record_sigs(name, sigs,
@@ -2465,7 +2466,7 @@ fn kernel_side(marks: List[Mark]) -> Bool =
 ## the program is the one they answer: the body then reads its parameters
 ## with `param(d, k)` in the markers' formats. What the site's call map of a
 ## kernel recorded with cells runs.
-pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: Hints = [],
+pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, hints: ByArch[EntryHints] = [],
   markers: List[Marker] = []) -> (TileProg, List[Call]) =
   if len(markers) == 0 {
     record_calls(name, params, [], [], body, hints)
@@ -2486,7 +2487,9 @@ pub fn trace_calls(name: String, params: List[KParam], body: fn() -> Unit !Dev, 
 # no roles and refuse nothing on their account and have no cells to read,
 # and one per parameter for `trace1` to `trace5`.
 fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: List[Cells],
-  body: fn() -> Unit !Dev, hints: Hints) -> (TileProg, List[Call]) = {
+  body: fn() -> Unit !Dev, entry_hints: ByArch[EntryHints]) -> (TileProg, List[Call]) = {
+  # the entry's hints are checked before the body runs, like the shapes of its parameters
+  let hints = wire_entry(entry_hints)
   check_by_value(name, params)
   let (globals, ops, calls) = {
     with handle Dev {
@@ -3984,7 +3987,7 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         tok = tv
         ()
       }
-      t_load_view(dtype, view, indices0, inbounds) => {
+      t_load_view(dtype, view, indices0, inbounds, hints) => {
         let (g, indices) = settle_all(name, frames, grown(next, ops, held, spreads, pending), indices0)
         next = g.next
         ops = g.ops
@@ -4012,14 +4015,14 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         let tv = next + 1
         next = mint(name, next, 2)
         if unordered_read(roles, map.get(aims, view)) {
-          ops = ops ++ [LoadView(d, tv, dtype, view, indices, 0, inbounds)]
+          ops = ops ++ [LoadView(d, tv, dtype, view, indices, 0, inbounds, hints)]
         } else {
-          ops = ops ++ [LoadView(d, tv, dtype, view, indices, tok, inbounds)]
+          ops = ops ++ [LoadView(d, tv, dtype, view, indices, tok, inbounds, hints)]
           tok = tv
         }
         d
       }
-      t_store_view(dtype, view, indices0, value0, inbounds) => {
+      t_store_view(dtype, view, indices0, value0, inbounds, hints) => {
         let open = frames
         if list.any(open, is_pure_region) {
           refuse(name, "a store inside a reduce, scan or if region has no memory order")
@@ -4047,7 +4050,7 @@ fn record_calls(name: String, params: List[KParam], roles: List[Access], geoms: 
         spreads = g.spreads
         let tv = next
         next = mint(name, next, 1)
-        ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok, inbounds)]
+        ops = ops ++ [StoreView(tv, dtype, view, indices, value, tok, inbounds, hints)]
         tok = tv
         ()
       }
@@ -4446,8 +4449,8 @@ pub fn defined(op: TileOp) -> List[Int] = match op {
   StridedViewOf(dst, _dtype, _view, _tile_shape, _traversal, _dim_map, _padding) -> [dst]
   GatherViewOf(dst, _dtype, _view, _tile_shape, _sparse_dim, _padding) -> [dst]
   AtomicRedViewOf(tok_out, _dtype, _view, _indices, _mode, _scope, _value, _tok_in) -> [tok_out]
-  LoadView(dst, tok_out, _dtype, _view, _indices, _tok_in, _inbounds) -> [dst, tok_out]
-  StoreView(tok_out, _dtype, _view, _indices, _value, _tok_in, _inbounds) -> [tok_out]
+  LoadView(dst, tok_out, _dtype, _view, _indices, _tok_in, _inbounds, _hints) -> [dst, tok_out]
+  StoreView(tok_out, _dtype, _view, _indices, _value, _tok_in, _inbounds, _hints) -> [tok_out]
   TensorShapeOf(dst, _view, _dim) -> [dst]
   IndexSpaceShapeOf(dst, _view, _dim) -> [dst]
   CellViewOf(dst, _param, _dtype, _align, _shape, _strides, _dyn_shape, _dyn_strides) -> [dst]
@@ -5595,7 +5598,7 @@ fn view_read_half() -> Unit !Dev = {
   let x = t_idx_const(0)
   let tv = t_tensor_view(0, "f64", x, [64], [1], [], [])
   let v = t_partition_view("f64", tv, [8], [0], NoPadding)
-  let t = t_load_view("f64", v, [x], [])
+  let t = t_load_view("f64", v, [x], [], [])
   let _s = t_binaryf("addf", "f64", [4], t, t)
   ()
 }
@@ -5617,8 +5620,8 @@ fn shapes_noted() -> Unit !Dev = {
   let tv = t_tensor_view(0, "f64", zero, [DYN_DIM, 4], [4, 1], [zero], [])
   let g = t_gather_view("f64", tv, [8, 4], 0, NoPadding)
   let pv = t_strided_view("f64", tv, [2, 4], [1, 4], [0, 1], PadZero)
-  let rows = t_load_view("f64", g, [t_iota(8), zero], [])
-  let cell = t_load_view("f64", pv, [zero, zero], [])
+  let rows = t_load_view("f64", g, [t_iota(8), zero], [], [])
+  let cell = t_load_view("f64", pv, [zero, zero], [], [])
   note_shape(tv)
   note_shape(g)
   note_shape(pv)
@@ -5633,7 +5636,7 @@ test "knife C1': a tile read through a view has the view's tile as its row, and 
   let g = refusal(() => {
     let tv = t_tensor_view(0, "f64", t_idx_const(0), [64, 4], [4, 1], [], [])
     let gv = t_gather_view("f64", tv, [8, 4], 0, NoPadding)
-    let t = t_load_view("f64", gv, [t_iota(8), t_idx_const(0)], [])
+    let t = t_load_view("f64", gv, [t_iota(8), t_idx_const(0)], [], [])
     let _s = t_binaryf("mulf", "f64", [8], t, t)
     ()
   })
@@ -6278,7 +6281,7 @@ test "PR-1: load_at names the cells of the dimensions that follow no axis, zeros
     _ -> false
   })) == 1
   assert len(ops_where(p.ops, o => match o {
-    LoadView(_d, _t, "f16", _v, ix, _ti, _ib) -> len(ix) == 2
+    LoadView(_d, _t, "f16", _v, ix, _ti, _ib, _h) -> len(ix) == 2
     _ -> false
   })) == 2
   # m, k and n are the operands' own
@@ -6547,7 +6550,7 @@ test "D-4: a rank-0 value stored into a cell fills it, and store_sub writes one 
   # the In's cells and the Out's pieces are both [8, 16]: two views
   assert len(parts) == 2
   assert len(ops_where(q.ops, o => match o {
-    StoreView(_t, "f64", _v, ix, _val, _ti, _ib) -> len(ix) == 2
+    StoreView(_t, "f64", _v, ix, _val, _ti, _ib, _h) -> len(ix) == 2
     _ -> false
   })) == 4
   assert len(ops_where(q.ops, o => match o {
@@ -6632,7 +6635,7 @@ test "knife C2: the entry trace3 answers runs on the fake device, and a launch i
 fn combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let b = block_id(0)
   let m = tail_mask(b, [128], 1000)
-  let h = [for_arch("sm_86", [hint_latency(2)])]
+  let h = [for_arch("sm_86", ptr_hints(latency: Some(2)))]
   let t = load(a, b, [128], strides: Some([2]), hints: h)
   let u = load(a, b, [128], mask: Some(m))
   store(o, b, add(t, u), strides: Some([3]), mask: Some(m), hints: h)
@@ -6690,6 +6693,140 @@ fn pad_no_mask() -> Unit !Dev = {
 test "PR-2: a pad with no mask is refused when the kernel is recorded, naming the load" {
   let r = refusal(pad_no_mask)
   assert str.contains(r, "`load`: a pad with no mask is never read: every lane of the load is")
+}
+
+# ---- knife P4-a: hints on view reads and writes, typed and checked when recorded
+#
+# The dialect checks none of these (the validators are behind
+# `-Wunsupported-hints`), so the only place a wrong value can be caught is
+# here. The first test says what a legal record becomes on the wire; the
+# second says every illegal one is a refusal that names the key, the value and
+# the dialect's range, and that the edges of each range are accepted, so a
+# validator moved one place either way is red.
+
+fn view_hinted(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
+  let t = load_cell(a, hints: [
+    for_arch("default", view_hints(latency: Some(9))),
+    for_arch("sm_86", view_hints(allow_tma: Some(true), latency: Some(3)))])
+  let u = load_cell(a)
+  store_cell(o, add(t, u), hints: [for_arch("sm_90", view_hints(allow_tma: Some(false)))])
+}
+
+test "knife P4-a: a view read and a view write record their hints, allow_tma before latency, and a read with none records none" {
+  let (p, _e) = trace2("view_hinted", In(F64, one_cell_of(128)), Out(F64, one_cell_of(128)), view_hinted)
+  let loads = ops_where(p.ops, o => match o {
+    LoadView(_d, _t, _dt, _v, _ix, _ti, _ib, _h) -> true
+    _ -> false
+  })
+  let stores = ops_where(p.ops, o => match o {
+    StoreView(_t, _dt, _v, _ix, _val, _ti, _ib, _h) -> true
+    _ -> false
+  })
+  assert len(loads) == 2
+  assert len(stores) == 1
+  match loads[0] {
+    LoadView(_d, _t, _dt, _v, _ix, _ti, _ib, hints) -> {
+      assert hints == [("default", [("latency", 9)]), ("sm_86", [("allow_tma", 1), ("latency", 3)])]
+    }
+    _ -> { assert false }
+  }
+  match loads[1] {
+    LoadView(_d, _t, _dt, _v, _ix, _ti, _ib, hints) -> { assert hints == [] }
+    _ -> { assert false }
+  }
+  match stores[0] {
+    StoreView(_t, _dt, _v, _ix, _val, _ti, _ib, hints) -> { assert hints == [("sm_90", [("allow_tma", 0)])] }
+    _ -> { assert false }
+  }
+}
+
+fn one_cell_of(n: Int) -> Cells = cells([n], [n])
+
+fn view_hint_probe(h: ByArch[ViewHints]) -> String =
+  match catch_panic(() => trace2("probe", In(F64, one_cell_of(128)), Out(F64, one_cell_of(128)),
+    (x, o) => store_cell(o, load_cell(x, hints: h)))) {
+    Ok(_) -> "accepted"
+    Err(e) -> e.message
+  }
+
+fn ptr_hint_probe(h: ByArch[PtrHints]) -> String =
+  refusal(() => {
+    let _t = load(param(F64, 0), block_id(0), [128], hints: h)
+    ()
+  })
+
+fn entry_hint_probe(h: ByArch[EntryHints]) -> String =
+  match catch_panic(() => trace_kernel("probe", [ByPtr("f64")], () => (), hints: h)) {
+    Ok(_) -> "accepted"
+    Err(e) -> e.message
+  }
+
+test "knife P4-a: a latency outside 1 to 10 is refused on a view read, a view write and a pointer load, and 1 and 10 are accepted" {
+  for bad in [0, 11, 0 - 1, 904] {
+    let v = view_hint_probe([for_arch("sm_86", view_hints(latency: Some(bad)))])
+    assert str.contains(v, "optimization hint `latency` is ${bad} for `sm_86`, but the dialect takes 1 to 10")
+    let q = ptr_hint_probe([for_arch("sm_86", ptr_hints(latency: Some(bad)))])
+    assert str.contains(q, "optimization hint `latency` is ${bad} for `sm_86`, but the dialect takes 1 to 10")
+  }
+  let w = match catch_panic(() => trace2("probe", In(F64, one_cell_of(128)), Out(F64, one_cell_of(128)),
+    (x, o) => store_cell(o, load_cell(x), hints: [for_arch("default", view_hints(latency: Some(11)))]))) {
+    Ok(_) -> "accepted"
+    Err(e) -> e.message
+  }
+  assert str.contains(w, "optimization hint `latency` is 11 for `default`, but the dialect takes 1 to 10")
+  for good in [1, 10] {
+    assert view_hint_probe([for_arch("sm_86", view_hints(latency: Some(good)))]) == "accepted"
+    assert ptr_hint_probe([for_arch("sm_86", ptr_hints(latency: Some(good)))]) == "accepted"
+  }
+}
+
+test "knife P4-a: an entry's occupancy, worker warps and CTAs in a CGA are held to the dialect's ranges" {
+  for bad in [0, 33] {
+    assert str.contains(entry_hint_probe([for_arch("sm_90", entry_hints(occupancy: Some(bad)))]),
+      "optimization hint `occupancy` is ${bad} for `sm_90`, but the dialect takes 1 to 32")
+  }
+  for bad in [0, 1, 2, 6, 16, 32] {
+    assert str.contains(entry_hint_probe([for_arch("sm_90", entry_hints(num_worker_warps_per_cta: Some(bad)))]),
+      "optimization hint `num_worker_warps_per_cta` is ${bad} for `sm_90`, but the dialect takes 4 or 8")
+  }
+  for bad in [0, 3, 6, 32] {
+    assert str.contains(entry_hint_probe([for_arch("default", entry_hints(num_cta_in_cga: Some(bad)))]),
+      "optimization hint `num_cta_in_cga` is ${bad} for `default`, but the dialect takes a power of two from 1 to 16")
+  }
+  # Ampere and Ada take exactly one CTA per CGA
+  assert str.contains(entry_hint_probe([for_arch("sm_86", entry_hints(num_cta_in_cga: Some(2)))]),
+    "optimization hint `num_cta_in_cga` is 2 for `sm_86`, but the dialect takes 1 on sm_80 to sm_89")
+  assert entry_hint_probe([for_arch("sm_86", entry_hints(num_cta_in_cga: Some(1)))]) == "accepted"
+  assert entry_hint_probe([for_arch("sm_90", entry_hints(num_cta_in_cga: Some(16)))]) == "accepted"
+  for good in [1, 32] {
+    assert entry_hint_probe([for_arch("sm_100", entry_hints(occupancy: Some(good)))]) == "accepted"
+  }
+  for good in [4, 8] {
+    assert entry_hint_probe([for_arch("sm_100", entry_hints(num_worker_warps_per_cta: Some(good)))]) == "accepted"
+  }
+  for good in [1, 2, 4, 8, 16] {
+    assert entry_hint_probe([for_arch("sm_100", entry_hints(num_cta_in_cga: Some(good)))]) == "accepted"
+  }
+}
+
+test "knife P4-a: an architecture that is not default or sm_ and a number, and one given twice, are refused" {
+  for bad in ["sm86", "sm_", "sm_8x", "SM_86", "", "defaults"] {
+    assert str.contains(entry_hint_probe([for_arch(bad, entry_hints(occupancy: Some(2)))]),
+      "optimization hint architecture `${bad}` is neither `default` nor an `sm_` name such as `sm_86`")
+    assert str.contains(view_hint_probe([for_arch(bad, view_hints(latency: Some(2)))]), "architecture `${bad}`")
+  }
+  assert str.contains(entry_hint_probe([for_arch("sm_90", entry_hints(occupancy: Some(2))), for_arch("sm_90", entry_hints(occupancy: Some(4)))]),
+    "optimization hint architecture `sm_90` appears twice; give each architecture one entry")
+}
+
+test "knife P4-a: an architecture with no key set is not written, and no hints at all is the empty list" {
+  assert wire_entry([]) == []
+  assert wire_entry([for_arch("sm_90", entry_hints())]) == []
+  assert wire_ptr([for_arch("sm_90", ptr_hints())]) == []
+  assert wire_view([for_arch("sm_90", view_hints())]) == []
+  assert wire_entry([for_arch("default", entry_hints(occupancy: Some(4))),
+    for_arch("sm_86", entry_hints(num_cta_in_cga: Some(1), num_worker_warps_per_cta: Some(8), occupancy: Some(2)))])
+    == [("default", [("occupancy", 4)]), ("sm_86", [("num_cta_in_cga", 1), ("num_worker_warps_per_cta", 8), ("occupancy", 2)])]
 }
 
 test "PR-3: a rank-0 pad is widened to the load's shape, as one constant made where the load is" {

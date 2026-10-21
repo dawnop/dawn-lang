@@ -342,10 +342,13 @@ Pure functions with no operation of their own: they build the attribute values t
 | Function | Operation | Also |
 |---|---|---|
 | `for_arch` | - | - |
-| `hint_num_cta_in_cga` | - | - |
-| `hint_num_worker_warps_per_cta` | - | - |
-| `hint_occupancy` | - | - |
-| `hint_latency` | - | - |
+| `entry_hints` | - | - |
+| `ptr_hints` | - | - |
+| `view_hints` | - | - |
+| `wire_entry` | - | - |
+| `wire_ptr` | - | - |
+| `wire_view` | - | - |
+| `hints_note` | - | - |
 | `rounding_name` | - | - |
 | `overflow_name` | - | - |
 | `padding_name` | - | - |

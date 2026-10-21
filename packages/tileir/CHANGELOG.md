@@ -7,6 +7,42 @@ Section numbers refer to
 [`docs/tile-backend-design.md`](../../docs/tile-backend-design.md) (in
 Chinese).
 
+## 0.19.0 (2026-10-21)
+
+Breaking, in one place (`docs/tile-backend-design.md` section 6.39, "hints on
+view reads and writes"): the four `hint_*` constructors and the untyped
+`Hints` argument are gone, and every `hints:` parameter now takes a typed
+record per architecture. `Dev` gained no operation, but `t_load_view` and
+`t_store_view` take the operation's hints as a last argument, so a handler
+written outside the package must answer the new arity. The 208 goldens are
+unchanged byte for byte against 0.18.1; `hint_view` is the 209th.
+
+- View reads and writes take `hints:`: `load_view`, `store_view`,
+  `load_cell`, `load_at`, `store_cell`, `store_sub`, `load_gather` and
+  `store_gather`, as `view_hints(allow_tma: .., latency: ..)` per
+  architecture. They lower to `optimization_hints` on `load_view_tko` and
+  `store_view_tko`, between the memory ordering and the `inbounds` array, with
+  bit 1 of the flags. `allow_tma` is the dialect's one boolean and is written
+  as an `i1` integer.
+- Hints are three records by what carries them: `entry_hints(num_cta_in_cga:
+  .., num_worker_warps_per_cta: .., occupancy: ..)` for the entry (the
+  `hints:` of `trace_kernel` and `trace1` to `trace5`), `ptr_hints(latency:
+  ..)` for a pointer `load` and `store`, `view_hints(..)` as above. A pointer
+  access has no `allow_tma` and an entry has no `latency`: the type has no
+  field for it. `for_arch(arch, record)` is generic over them, and
+  `ByArch[H]` is the list a `hints:` takes.
+- A value outside the dialect's range is refused when the kernel is recorded,
+  in English, naming the key, the value, the architecture and the range
+  (`tileiras` checks none of it unless `-Wunsupported-hints` is on, which it
+  is not): `latency` 1 to 10, `occupancy` 1 to 32, `num_worker_warps_per_cta`
+  4 or 8, `num_cta_in_cga` a power of two to 16 and exactly 1 on sm_80 to
+  sm_89; an architecture that is not `default` or `sm_` and a number, or one
+  given twice, is refused too. An architecture with no key set is not written.
+- `hint_num_cta_in_cga`, `hint_num_worker_warps_per_cta`, `hint_occupancy` and
+  `hint_latency` are removed (migrate to the records above). The comment that
+  said `num_worker_warps_per_cta` takes powers of two up to 32 was wrong: the
+  dialect's range is 4 to 8.
+
 ## 0.18.1 (2026-10-20)
 
 No API change; the recorded program changes (section 6.38, tileir P2). A load

@@ -307,9 +307,9 @@ pub type Instr =
   | GetTensorShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
   | GetIndexSpaceShape(dsts: List[Int], src: Ref, src_ty: Ty, res_ty: Ty)
   | LoadViewTile(dst: Int, tok_out: Int, view: Ref, view_ty: Ty, indices: List[Ref],
-    idx_tys: List[Ty], ty: Ty, tok_in: Ref, inbounds: List[Bool])
+    idx_tys: List[Ty], ty: Ty, tok_in: Ref, inbounds: List[Bool], hints: Hints)
   | StoreViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty, indices: List[Ref],
-    idx_tys: List[Ty], tok_in: Ref, inbounds: List[Bool])
+    idx_tys: List[Ty], tok_in: Ref, inbounds: List[Bool], hints: Hints)
   | AtomicRedViewTile(tok_out: Int, view: Ref, view_ty: Ty, value: Ref, val_ty: Ty,
     indices: List[Ref], idx_tys: List[Ty], mode: String, scope: String, tok_in: Ref)
   | Ret
@@ -1314,7 +1314,7 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
       _ -> panic("tileir: make_gather_scatter_view names handle ${view}, which is not a tensor view")
     }
   }
-  LoadView(dst, tok_out, dtype, view, indices, tok_in, inbounds) -> {
+  LoadView(dst, tok_out, dtype, view, indices, tok_in, inbounds, hints) -> {
     let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "load_view")
     let tile = view_tile_of(vt)
     let flags = inbounds_of(inbounds, len(idx), "load_view")
@@ -1322,15 +1322,15 @@ fn lower_one(l0: L, op: TileOp) -> L = match op {
     let (l2, d) = define(l1, dst, tile)
     let (l3, tv) = define(l2, tok_out, Token)
     emit(l3, LoadViewTile(d, tv, src, vt, idx, idx_tys, tile,
-      ref_of(l0, tok_in, "load token"), flags))
+      ref_of(l0, tok_in, "load token"), flags, hints))
   }
-  StoreView(tok_out, dtype, view, indices, value, tok_in, inbounds) -> {
+  StoreView(tok_out, dtype, view, indices, value, tok_in, inbounds, hints) -> {
     let (l1, vt, src, idx, idx_tys) = view_operands(l0, dtype, view, indices, "store_view")
     let val = ref_of(l1, value, "store value")
     let tile = view_tile_of(vt)
     let (l2, tv) = define(l1, tok_out, Token)
     emit(l2, StoreViewTile(tv, src, vt, val, tile, idx, idx_tys,
-      ref_of(l0, tok_in, "store token"), inbounds_of(inbounds, len(idx), "store_view")))
+      ref_of(l0, tok_in, "store token"), inbounds_of(inbounds, len(idx), "store_view"), hints))
   }
   AtomicRedViewOf(tok_out, dtype, view, indices, mode, scope, value, tok_in) -> {
     # `AtomicRedViewTkoOp::verify`: the view is a TileView and not a
@@ -1653,8 +1653,8 @@ pub fn defines(i: Instr) -> List[Int] = match i {
   MakeGatherScatterView(dst, _src, _src_ty, _ty) -> [dst]
   GetTensorShape(dsts, _src, _src_ty, _res_ty) -> dsts
   GetIndexSpaceShape(dsts, _src, _src_ty, _res_ty) -> dsts
-  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_tys, _ty, _tok_in, _ib) -> [dst, tok_out]
-  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _tok_in, _ib) -> [tok_out]
+  LoadViewTile(dst, tok_out, _view, _view_ty, _indices, _idx_tys, _ty, _tok_in, _ib, _hints) -> [dst, tok_out]
+  StoreViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _tok_in, _ib, _hints) -> [tok_out]
   AtomicRedViewTile(tok_out, _view, _view_ty, _value, _val_ty, _indices, _idx_tys, _mode, _scope,
     _tok_in) -> [tok_out]
   Ret -> []

@@ -20,7 +20,7 @@ use std/dtype.{F64}
 use dev.{RedId, IdF, IdI, AssumePred, DivBy, SameElements, Bounded, Hints, Padding, NoPadding, padding_name, DYN_DIM,
   Dev, Param, param, block_id, tile_at, load, store, add, idx_const, carry, get, set, d_global, global_ptrs, load_ptrs, t_block_id,
   t_body_enter, t_body_exit, d_scan, d_reduce, d_if, d_fork2, d_range, By, d_loop, max, f_const, lt, gt, d_assert, broadcast, mul,
-  load_cell, store_cell, tail_mask, for_arch, hint_latency, tensor_view, partition_view, load_view, store_view }
+  load_cell, store_cell, tail_mask, for_arch, ptr_hints, tensor_view, partition_view, load_view, store_view }
 use prog.{TileProg, ByPtr, ByValue, TileOp, Call, trace_kernel, trace_calls, trace3, In, Out, cells, op_count, ftof_mode, Global, GetGlobal, MakeToken, TokenOnly, BlockId, Load, Store, Return, Convert, AtomicRMW, AtomicCAS, ConstF, ConstI, Lanes, UnaryF, BinaryF, BinaryI, CmpI, IdxConst, IdxAdd, IdxMul, For, Loop, Break, Continue, Spread, Reduce, If, Yield, Extract, Cat, Permute, NumBlocks, JoinToks, MakePtrs, PtrAdd, PtrInt, IntPtr, PtrCast, LoadAt, DebugInfo}
 use lower.{kparam_ty, Kernel, Instr, instr_count, Owner, Ty, Elem, Ref, lower, lower_spans, rank0_of, Token, Tile, Num, PtrTo, Arg, Val, MakeTok, BlockIds, ConstInt, ConstFloat, MulInt, AddInt, Reshape, Broadcast, IotaTile, Offset, LoadPtr, StorePtr, AtomicRMWPtr, AtomicCASPtr, FloatUn, FloatBin, FloatFma, FloatMma, FloatMmaScaled, IntMma, CmpFloat, CmpInt, IntUn, IntBin, Cast, SelectTile, ForLoop, WhileLoop, BreakVals, Cont, ReduceTile, ScanTile, IfElse, YieldVals, ExtractTile, InsertTile, FloatPowI, CatTile, PermuteTile, BlockCounts, JoinTokens, PtrToIntTile, IntToPtrTile, PtrToPtrTile, AssertTile, AssumeTile, PrintTile, TokenOnlyTile, GetGlobalPtr, TensorView, PartitionView, StridedView, GatherScatterView, MakeTensorView, MakePartitionView, MakeStridedView, MakeGatherScatterView, GetTensorShape, GetIndexSpaceShape, LoadViewTile, StoreViewTile, AtomicRedViewTile, AllocaPtr, Ret}
 
@@ -152,7 +152,8 @@ fn opt_ty(r: Option[Ref], t: Ty) -> String = match r {
 fn hint_dict(hints: List[(String, Int)]) -> String =
   commas(list.map(hints, h => {
     let (key, value) = h
-    "${key} = ${value}"
+    # `allow_tma` is the dictionary's one boolean and prints as one
+    if key == "allow_tma" { "${key} = ${value != 0}" } else { "${key} = ${value}" }
   }))
 
 fn hints_attr(hints: Hints) -> String = if len(hints) == 0 { "" } else {
@@ -499,12 +500,12 @@ fn line(i: Instr) -> String = match i {
   MakeStridedView(dst, src, _src_ty, t) -> "${v(dst)} = make_strided_view ${name(src)} : ${ty(t)}"
   MakeGatherScatterView(dst, src, _src_ty, t) ->
     "${v(dst)} = make_gather_scatter_view ${name(src)} : ${ty(t)}"
-  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_tys, t, tok_in, inbounds) ->
+  LoadViewTile(dst, tok_out, view, view_ty, indices, idx_tys, t, tok_in, inbounds, hints) ->
     "${v(dst)}, ${v(tok_out)} = load_view_tko weak ${name(view)}[${commas(list.map(indices, name))}]"
-    ++ " token=${name(tok_in)}${inbounds_attr(inbounds)} : ${ty(view_ty)}${index_types(idx_tys)} -> ${ty(t)}, token"
-  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_tys, tok_in, inbounds) ->
+    ++ " token=${name(tok_in)}${hints_attr(hints)}${inbounds_attr(inbounds)} : ${ty(view_ty)}${index_types(idx_tys)} -> ${ty(t)}, token"
+  StoreViewTile(tok_out, view, view_ty, value, val_ty, indices, idx_tys, tok_in, inbounds, hints) ->
     "${v(tok_out)} = store_view_tko weak ${name(value)}, ${name(view)}"
-    ++ "[${commas(list.map(indices, name))}] token=${name(tok_in)}${inbounds_attr(inbounds)}"
+    ++ "[${commas(list.map(indices, name))}] token=${name(tok_in)}${hints_attr(hints)}${inbounds_attr(inbounds)}"
     ++ " : ${ty(val_ty)}, ${ty(view_ty)}${index_types(idx_tys)} -> token"
   # The value type comes FIRST here, as it does on a store: the dialect's
   # printer puts it there so that its own parser can find the end of the
@@ -1455,17 +1456,17 @@ test "a strided view spells its traversal, a gather/scatter view its sparse dime
   let rows = Tile([8], Num("i32"))
   let idx = Tile([], Num("i32"))
   let tile = Tile([8, 16], Num("f64"))
-  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, false]))
+  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, false], []))
     == "%9, %10 = load_view_tko weak %0[%1, %2] token=%3 : " ++ ty(gv)
     ++ ", tile<8xi32>, tile<i32> -> tile<8x16xf64>, token"
-  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [false, false]))
+  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [false, false], []))
     == "%9 = store_view_tko weak %4, %0[%1, %2] token=%3 : tile<8x16xf64>, " ++ ty(gv)
     ++ ", tile<8xi32>, tile<i32> -> token"
   # a promise prints after the token, an all-false array not at all
-  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, true]))
+  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, true], []))
     == "%9, %10 = load_view_tko weak %0[%1, %2] token=%3 inbounds=[false, true] : " ++ ty(gv)
     ++ ", tile<8xi32>, tile<i32> -> tile<8x16xf64>, token"
-  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [true, true]))
+  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [true, true], []))
     == "%9 = store_view_tko weak %4, %0[%1, %2] token=%3 inbounds=[true, true] : tile<8x16xf64>, " ++ ty(gv)
     ++ ", tile<8xi32>, tile<i32> -> token"
 }
@@ -1862,7 +1863,7 @@ test "PR-2: every cell view, an In's and an Out's, claims 16-byte alignment on t
 fn merged_combos(a: Param[Float], o: Param[Float]) -> Unit !Dev = {
   let b = tile_at(block_id(0), 128)
   let m = tail_mask(b, [128], 1000)
-  let h = [for_arch("sm_86", [hint_latency(2)])]
+  let h = [for_arch("sm_86", ptr_hints(latency: Some(2)))]
   let t = load(a, b, [128], strides: Some([1]), hints: h)
   let u = load(a, b, [128], mask: Some(m))
   store(o, b, add(t, u), strides: Some([1]), mask: Some(m), hints: h)
@@ -1902,6 +1903,24 @@ test "knife T18: a promise prints after the token, and no promise prints nothing
   assert str.contains(promised, " inbounds=[true, true] : tile<16x16xf64>, partition_view")
   assert not str.contains(promised_text(NoPadding, [], []), "inbounds")
   assert not str.contains(promised_text(NoPadding, [false, false], []), "inbounds")
+}
+
+test "knife P4-a: a view's hints print between the token and the promise, and allow_tma prints as a boolean" {
+  let pv = PartitionView([8, 16], Num("f64"), [100, 60], [60, 1], [0, 1], NoPadding)
+  let gv = pv
+  let rows = Tile([8], Num("i32"))
+  let idx = Tile([], Num("i32"))
+  let tile = Tile([8, 16], Num("f64"))
+  let hs = [("default", [("latency", 9)]), ("sm_86", [("allow_tma", 1), ("latency", 3)])]
+  assert line(LoadViewTile(9, 10, Val(0), gv, [Val(1), Val(2)], [rows, idx], tile, Val(3), [false, true], hs))
+    == "%9, %10 = load_view_tko weak %0[%1, %2] token=%3"
+    ++ " optimization_hints=<default = {latency = 9}, sm_86 = {allow_tma = true, latency = 3}>"
+    ++ " inbounds=[false, true] : " ++ ty(gv)
+    ++ ", tile<8xi32>, tile<i32> -> tile<8x16xf64>, token"
+  assert line(StoreViewTile(9, Val(0), gv, Val(4), tile, [Val(1), Val(2)], [rows, idx], Val(3), [false, false],
+    [("sm_90", [("allow_tma", 0)])]))
+    == "%9 = store_view_tko weak %4, %0[%1, %2] token=%3 optimization_hints=<sm_90 = {allow_tma = false}>"
+    ++ " : tile<8x16xf64>, " ++ ty(gv) ++ ", tile<8xi32>, tile<i32> -> token"
 }
 
 test "knife T18: a promise of the wrong length, and one over a padded view, are refused by name" {

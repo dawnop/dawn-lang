@@ -307,9 +307,29 @@ Nesting is capped at `MAX_LOOP_DEPTH` (16) and one recording at
 
 A 128 by 128 f16 matrix product on sm_86 holds one block per SM by default
 (65568 bytes of shared memory) and is slower than the pointer path it
-replaces; with `hint_occupancy(2)` it fits two (49184 bytes) and is faster.
-Give such a kernel `hints: [for_arch("sm_86", [hint_occupancy(2)])]`. The
+replaces; with `occupancy: Some(2)` it fits two (49184 bytes) and is faster.
+Give such a kernel
+`hints: [for_arch("sm_86", entry_hints(occupancy: Some(2)))]`. The
 measurement is in §6.26 of the design document.
+
+## Hints
+
+A hint is advice the assembler may take or leave: it never changes what a
+kernel computes, only the code it makes. `hints:` takes one entry per
+architecture (`for_arch("sm_86", ..)`, or `"default"`), and the record under
+it depends on what carries the hint:
+
+| Carried by | Record | Keys |
+|---|---|---|
+| the entry (`trace_kernel`, `trace1` to `trace5`) | `entry_hints(..)` | `num_cta_in_cga`, `num_worker_warps_per_cta`, `occupancy` |
+| `load`, `store` | `ptr_hints(..)` | `latency` |
+| `load_cell`, `load_at`, `store_cell`, `store_sub`, `load_view`, `store_view`, `load_gather`, `store_gather` | `view_hints(..)` | `allow_tma`, `latency` |
+
+`tileiras` checks none of the values (its own check is off by default), so a
+value outside the dialect's range is refused when the kernel is recorded:
+`latency` 1 to 10, `occupancy` 1 to 32, `num_worker_warps_per_cta` 4 or 8,
+`num_cta_in_cga` a power of two to 16 and 1 on sm_80 to sm_89. An
+architecture must be `default` or `sm_` and a number, and appear once.
 
 ## What the recorder refuses
 
